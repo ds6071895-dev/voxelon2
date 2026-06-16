@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WARZONE</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+    #app { width: 100%; height: 100%; position: relative; }
+    canvas.game { display: block; image-rendering: pixelated; }
+
+    .mc-font {
+      font-family: 'Lucida Console', Monaco, monospace;
+      font-weight: bold;
+      color: #fff;
+      text-shadow: 2px 2px 0 #3f3f3f;
+      letter-spacing: 0.5px;
+    }
+
+    /* Crosshair: vanilla-style plus with difference blending */
+    #crosshair {
+      position: absolute; left: 50%; top: 50%;
+      width: 22px; height: 22px;
+      transform: translate(-50%, -50%);
+      mix-blend-mode: difference;
+      pointer-events: none;
+      z-index: 10;
+    }
+    #crosshair::before, #crosshair::after {
+      content: ''; position: absolute; background: #ddd;
+    }
+    #crosshair::before { left: 9px; top: 0; width: 4px; height: 22px; }
+    #crosshair::after  { left: 0; top: 9px; width: 22px; height: 4px; }
+
+    /* Hotbar */
+    #hotbar {
+      position: absolute; bottom: 8px; left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      background: rgba(0,0,0,0.55);
+      border: 2px solid #000;
+      outline: 2px solid rgba(255,255,255,0.25);
+      z-index: 10;
+      pointer-events: none;
+    }
+    .slot {
+      width: 48px; height: 48px;
+      border: 2px solid #8b8b8b;
+      border-right-color: #555; border-bottom-color: #555;
+      display: flex; align-items: center; justify-content: center;
+      position: relative;
+    }
+    .slot.selected::after {
+      content: ''; position: absolute; inset: -4px;
+      border: 4px solid #fff;
+      outline: 2px solid #000;
+      z-index: 2;
+    }
+    .slot canvas { width: 36px; height: 36px; image-rendering: pixelated; }
+    .slot .count {
+      position: absolute; right: 2px; bottom: 0;
+      font-size: 14px; pointer-events: none; z-index: 3;
+    }
+
+    /* Inventory panel */
+    #inventory {
+      position: absolute; left: 50%; top: 50%;
+      transform: translate(-50%, -50%);
+      display: none; flex-direction: column; gap: 6px;
+      background: #c6c6c6;
+      border: 3px solid;
+      border-color: #fff #555 #555 #fff;
+      padding: 10px 12px 12px;
+      z-index: 25;
+    }
+    .inv-title { color: #3f3f3f; text-shadow: none; font-size: 15px; }
+    .inv-grid {
+      display: grid; grid-template-columns: repeat(9, 48px);
+    }
+    .inv-hotbar { margin-top: 10px; }
+    .inv-slot {
+      background: #8b8b8b;
+      border-color: #373737 #fff #fff #373737;
+      cursor: pointer;
+    }
+    #cursor-stack {
+      position: absolute; display: none; pointer-events: none; z-index: 40;
+      width: 32px; height: 32px;
+    }
+    #cursor-stack canvas { width: 32px; height: 32px; image-rendering: pixelated; }
+    #cursor-stack .count {
+      position: absolute; right: -4px; bottom: -4px; font-size: 14px;
+    }
+    #tooltip {
+      position: absolute; display: none; pointer-events: none; z-index: 41;
+      background: rgba(16, 0, 16, 0.94);
+      border: 2px solid #25015a;
+      padding: 4px 8px; font-size: 14px;
+    }
+
+    /* Crafting / furnace top sections */
+    .inv-top { min-height: 52px; display: flex; justify-content: center; }
+    .craft-row { display: flex; align-items: center; gap: 14px; }
+    .craft-arrow {
+      width: 44px; height: 14px; background: #8b8b8b;
+      border: 2px solid #555;
+    }
+    .craft-arrow div { height: 100%; width: 0%; background: #fff; }
+    .flame {
+      width: 14px; height: 14px; background: #555;
+      display: flex; align-items: flex-end;
+    }
+    .flame div { width: 100%; height: 0%; background: #ff9010; }
+    .result-slot { margin-left: 4px; }
+    .durbar {
+      position: absolute; left: 6px; bottom: 4px; height: 3px;
+      display: none; z-index: 3; background: #5fe552;
+    }
+
+    /* Survival HUD */
+    #status {
+      position: absolute; bottom: 62px; left: 50%;
+      transform: translateX(-50%);
+      width: 444px; z-index: 10; pointer-events: none;
+    }
+    #status canvas { image-rendering: pixelated; }
+    #hearts { position: absolute; left: 0; bottom: 0; }
+    #energybar { position: absolute; right: 0; bottom: 0; }
+    #bubbles { position: absolute; right: 0; bottom: 22px; }
+
+    #damage-flash {
+      position: absolute; inset: 0; background: #f00;
+      opacity: 0; pointer-events: none; z-index: 15;
+    }
+
+    #death {
+      position: absolute; inset: 0; background: rgba(120, 0, 0, 0.55);
+      display: none; flex-direction: column; align-items: center;
+      justify-content: center; gap: 26px; z-index: 50;
+    }
+    #death h1 { font-size: 44px; }
+    #death button {
+      font-family: inherit; font-size: 18px; font-weight: bold;
+      padding: 10px 36px; cursor: pointer;
+      background: #8b8b8b; color: #fff; text-shadow: 2px 2px 0 #3f3f3f;
+      border: 3px solid; border-color: #fff #555 #555 #fff;
+    }
+
+    /* Debug overlay (F3) */
+    #debug {
+      position: absolute; top: 4px; left: 4px;
+      font-size: 14px; line-height: 19px;
+      display: none; z-index: 10; pointer-events: none;
+      white-space: pre;
+    }
+    #debug .line { background: rgba(80,80,80,0.45); padding: 0 4px; display: inline-block; }
+
+    /* Title / pause menu over the live panorama */
+    #overlay {
+      position: absolute; inset: 0;
+      background: linear-gradient(rgba(8,8,14,0.25), rgba(8,8,14,0.55));
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 22px; z-index: 20;
+    }
+    #overlay.hidden { display: none; }
+    #title {
+      font-size: 84px; letter-spacing: 10px; margin-bottom: 4px;
+      color: #e6e6e6; text-shadow: 5px 5px 0 #1f1f1f, 0 0 18px rgba(0,0,0,0.6);
+    }
+    #title .accent { color: #c0392b; } /* the WAR in WARZONE */
+    #overlay .subtitle {
+      font-size: 15px; color: #c8c8c8; text-shadow: 2px 2px 0 #2a2a2a;
+      margin-top: -10px; letter-spacing: 2px;
+    }
+    /* Vanilla-style button (same bevel as the death screen). */
+    .mc-btn {
+      font-family: inherit; font-size: 20px; font-weight: bold;
+      padding: 12px 64px; cursor: pointer;
+      background: #6b6b6b; color: #fff; text-shadow: 2px 2px 0 #3f3f3f;
+      border: 3px solid; border-color: #fff #555 #555 #fff;
+    }
+    .mc-btn:hover { background: #7c8b9c; }
+    #overlay .controls {
+      font-size: 13px; color: #aaa; text-shadow: 1px 1px 0 #2a2a2a;
+      text-align: center; line-height: 1.6;
+    }
+
+    #loading {
+      position: absolute; inset: 0; background: #0e0e0e;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 16px;
+      z-index: 30;
+    }
+    #loading.hidden { display: none; }
+    #loadbar { width: 320px; height: 8px; border: 2px solid #fff; }
+    #loadbar div { height: 100%; width: 0%; background: #5fbf3f; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="crosshair"></div>
+    <div id="hotbar"></div>
+    <div id="status">
+      <canvas id="hearts" width="202" height="20"></canvas>
+      <canvas id="energybar" width="202" height="20"></canvas>
+      <canvas id="bubbles" width="202" height="20"></canvas>
+    </div>
+    <div id="damage-flash"></div>
+    <div id="death">
+      <h1 class="mc-font">You died!</h1>
+      <button id="respawn" class="mc-font">Respawn</button>
+    </div>
+    <div id="debug" class="mc-font"></div>
+    <div id="overlay" class="hidden">
+      <h1 id="title" class="mc-font"><span class="accent">WAR</span>ZONE</h1>
+      <p class="subtitle mc-font">a voxel survival sandbox</p>
+      <button id="play-btn" class="mc-btn">Play</button>
+      <p class="controls mc-font">
+        WASD move &nbsp; Space jump &nbsp; Shift sneak &nbsp; Ctrl/double-W sprint (energy)<br/>
+        Left click break / attack &nbsp; Right click place &nbsp; 1-9 / scroll hotbar &nbsp; E inventory &nbsp; F3 debug
+      </p>
+    </div>
+    <div id="loading">
+      <h1 class="mc-font">Generating world...</h1>
+      <div id="loadbar"><div></div></div>
+    </div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
