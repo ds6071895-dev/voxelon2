@@ -192,7 +192,7 @@ export class HUD {
   updateDebug(info: DebugInfo): void {
     if (!this.debugVisible) return;
     const lines = [
-      `WARZONE (three.js)`,
+      `VOXELON (three.js)`,
       `${info.fps} fps`,
       ``,
       `XYZ: ${info.x.toFixed(3)} / ${info.y.toFixed(5)} / ${info.z.toFixed(3)}`,

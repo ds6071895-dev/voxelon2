@@ -1,5 +1,5 @@
 {
-  "name": "warzone",
+  "name": "voxelon",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -7,13 +7,17 @@
     "dev": "vite --host",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "server": "esbuild server/server.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/server.cjs --external:ws --log-level=error && node node_modules/.tmp/server.cjs",
     "smoke": "esbuild scripts/smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/smoke.cjs --log-level=error && node node_modules/.tmp/smoke.cjs"
   },
   "dependencies": {
-    "three": "^0.165.0"
+    "three": "^0.165.0",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
+    "@types/node": "^20.19.42",
     "@types/three": "^0.165.0",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.4.5",
     "vite": "^5.2.0"
   }

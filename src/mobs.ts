@@ -12,7 +12,7 @@ import type { Player } from './player';
 import type { Atlas } from './textures';
 import type { World } from './world';
 
-// WARZONE: hostile mobs only — passive animals were removed.
+// VOXELON: hostile mobs only — passive animals were removed.
 export type MobType = 'zombie' | 'creeper';
 
 const GRAVITY = 32;

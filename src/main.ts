@@ -11,8 +11,11 @@ import { InventoryUI } from './inventory_ui';
 import { dropFor, ItemStack, ITEMS } from './items';
 import { ItemEntities } from './itementity';
 import { Mobs } from './mobs';
+import { NetClient } from './net/client';
+import { MELEE_RANGE } from './net/protocol';
 import { Particles } from './particles';
 import { Player, MAX_AIR } from './player';
+import { RemotePlayers } from './remoteplayers';
 import { Sky, WATER_FOG_COLOR } from './sky';
 import { Survival } from './survival';
 import { createAtlas, createCrackTextures } from './textures';
@@ -80,6 +83,32 @@ const particles = new Particles(scene);
 const mobs = new Mobs(scene, world, atlas, itemEntities, particles);
 const audio = new GameAudio();
 mobs.onSound = (name, pos) => audio.mob(name, pos.clone());
+const net = new NetClient();
+const remotePlayers = new RemotePlayers(scene, net);
+
+// Multiplayer HUD: connection/roster line + a small kill feed (top-right).
+const netinfoEl = document.createElement('div');
+netinfoEl.className = 'mc-font';
+netinfoEl.style.cssText =
+  'position:absolute;top:6px;right:8px;font-size:14px;z-index:10;' +
+  'pointer-events:none;text-align:right;';
+app.appendChild(netinfoEl);
+const killfeedEl = document.createElement('div');
+killfeedEl.style.cssText =
+  'position:absolute;top:28px;right:8px;z-index:10;pointer-events:none;text-align:right;';
+app.appendChild(killfeedEl);
+function refreshNetInfo(): void {
+  netinfoEl.textContent = net.connected
+    ? `${net.username}   ${net.remotes.size + 1} online` : '';
+}
+function showKill(killer: string, victim: string): void {
+  const line = document.createElement('div');
+  line.className = 'mc-font';
+  line.style.cssText = 'font-size:13px;text-shadow:1px 1px 0 #000;';
+  line.textContent = killer ? `${killer}  »  ${victim}` : `${victim} died`;
+  killfeedEl.appendChild(line);
+  window.setTimeout(() => line.remove(), 5000);
+}
 
 // Broken blocks (including popped plants/torches) drop item entities;
 // broken furnaces spill their contents.
@@ -141,22 +170,63 @@ document.addEventListener('keydown', (e) => {
 const deathEl = document.getElementById('death')!;
 let deathShown = false;
 document.getElementById('respawn')!.addEventListener('click', () => {
-  player.respawn(spawn);
-  lastHealth = 20;
-  deathShown = false;
-  deathEl.style.display = 'none';
   audio.resume();
-  input.lock();
+  if (net.connected) {
+    net.sendRespawn(); // server replies with onRespawned
+  } else {
+    player.respawn(spawn);
+    lastHealth = 20;
+    deathShown = false;
+    deathEl.style.display = 'none';
+    input.lock();
+  }
 });
 
 function checkDeath(): void {
   if (!player.dead || deathShown) return;
   deathShown = true;
   invUI.hide();
-  spillAtPlayer(inventory.spillAll()); // vanilla: your items drop where you died
+  // Solo only: spilling items on death is offline behaviour.
+  if (!net.connected) spillAtPlayer(inventory.spillAll());
   deathEl.style.display = 'flex';
   document.exitPointerLock();
 }
+
+// --- Multiplayer wiring (callbacks fire async, after the world is set up) ---
+net.onWelcome = (me) => {
+  // Adopt the server-assigned spawn so we line up with the server's record.
+  player.pos.set(me.x, me.y, me.z);
+  player.vel.set(0, 0, 0);
+  player.health = me.health;
+  player.dead = false;
+  lastHealth = me.health;
+  player.damageSink = (a) => net.sendSelfHurt(a); // server owns health in MP
+  survival.enableRegen = false;                   // server runs regen
+  refreshNetInfo();
+};
+net.onEdit = (x, y, z, b) => world.applyRemoteEdit(x, y, z, b);
+net.onHurt = (health, dead, k) => {
+  player.setHealthFromServer(health, dead);
+  player.vel.x += k[0] * 6; player.vel.y += k[1] * 6; player.vel.z += k[2] * 6;
+  // lastHealth is left alone so the frame loop plays the hurt sound.
+};
+net.onRespawned = (x, y, z, h) => {
+  player.respawn({ x, y, z });
+  player.health = h;
+  lastHealth = h;
+  deathShown = false;
+  deathEl.style.display = 'none';
+  if (worldReady) input.lock();
+};
+net.onKillfeed = showKill;
+net.onRoster = refreshNetInfo;
+net.onDisconnect = () => {
+  player.damageSink = undefined;
+  survival.enableRegen = true;
+  refreshNetInfo();
+};
+interaction.onEdit = (x, y, z, b) => net.sendEdit(x, y, z, b);
+net.connect();
 
 let worldReady = false;
 const clock = new THREE.Clock();
@@ -259,17 +329,28 @@ function frame(): void {
     player.update(dt, input, world);
     updateCamera();
 
-    // Combat: a mob under the crosshair takes priority over mining.
+    // Combat priority: another player > mob > mining the block behind them.
     const lookDir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-    const mobInSights = mobs.rayHit(player.eyePosition, lookDir, 3.5);
-    if (input.leftClicked && mobInSights) {
+    const eye = player.eyePosition;
+    const remoteTarget = remotePlayers.rayHit(eye, lookDir, MELEE_RANGE);
+    const mobInSights = remoteTarget < 0 ? mobs.rayHit(eye, lookDir, 3.5) : null;
+    if (input.leftClicked && remoteTarget >= 0) {
+      net.sendAttack(remoteTarget); // server validates + applies PvP damage
+      const tool = inventory.selectedStack
+        ? ITEMS[inventory.selectedStack.id]?.tool : undefined;
+      if (tool) inventory.damageSelected(2);
+      held.swing();
+    } else if (input.leftClicked && mobInSights) {
       const heldStack = inventory.selectedStack;
       const tool = heldStack ? ITEMS[heldStack.id]?.tool : undefined;
-      mobs.attack(player.eyePosition, lookDir, tool?.damage ?? 1, player);
+      mobs.attack(eye, lookDir, tool?.damage ?? 1, player);
       if (tool) inventory.damageSelected(2); // attacking wears a tool by 2
       held.swing();
     }
-    interaction.update(dt, input, camera, mobInSights !== null);
+    interaction.update(dt, input, camera, remoteTarget >= 0 || mobInSights !== null);
+
+    // Stream our transform to the server (throttled inside sendXform).
+    net.sendXform(dt, player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch);
 
     // Footsteps.
     const moveSpeed = Math.hypot(player.vel.x, player.vel.z);
@@ -309,6 +390,7 @@ function frame(): void {
   updateAtmosphere();
   itemEntities.update(dt, player, inventory, sky.sunIntensity);
   particles.update(dt, activeCamera);
+  remotePlayers.update(dt); // interpolate + animate other players
 
   // State-driven sounds.
   audio.updateListener(activeCamera);

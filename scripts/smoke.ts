@@ -1,7 +1,7 @@
-// Headless smoke tests for WARZONE: terrain/biomes/mountains, ores, caves,
+// Headless smoke tests for VOXELON: terrain/biomes/mountains, ores, caves,
 // lighting, meshing, raycast, player physics + energy, survival regen,
 // crafting/tools, furnace, items/inventory, item entities, hostile mobs,
-// and the WARZONE-specific changes. Run: npm run smoke
+// and the VOXELON-specific changes. Run: npm run smoke
 
 import * as THREE from 'three';
 import { materialOf } from '../src/audio';
@@ -21,6 +21,9 @@ import { raycastBlocks } from '../src/interact';
 import { Player } from '../src/player';
 import { daylight } from '../src/sky';
 import { Survival } from '../src/survival';
+import { GameServer } from '../src/net/server_core';
+import { MELEE_DAMAGE } from '../src/net/protocol';
+import { mulberry32 } from '../src/noise';
 import { Terrain, SEA_LEVEL } from '../src/terrain';
 import { World } from '../src/world';
 import type { Atlas } from '../src/textures';
@@ -81,7 +84,7 @@ check('daylight: noon full, midnight moonlit floor, dawn between',
   daylight(0.25) === 1 && daylight(0.75) === 0.22 &&
   daylight(0) > 0.22 && daylight(0) < 1);
 
-// --- Drop table (WARZONE: no apples/food) -----------------------------------------
+// --- Drop table (VOXELON: no apples/food) -----------------------------------------
 {
   check('stone->cobble, grass->dirt',
     dropFor(Block.Stone, 0.5)?.id === Block.Cobblestone &&
@@ -144,7 +147,7 @@ check('daylight: noon full, midnight moonlit floor, dawn between',
     matchGrid(g({ 0: Block.OakPlanks, 1: Block.OakPlanks, 3: Item.Stick, 4: Block.OakPlanks, 6: Item.Stick }))?.id === Item.WoodenAxe);
   check('iron tools craft from ingots',
     matchGrid(g({ 0: Item.IronIngot, 1: Item.IronIngot, 2: Item.IronIngot, 4: Item.Stick, 7: Item.Stick }))?.id === Item.IronPickaxe);
-  // No swords in WARZONE: the classic sword pattern yields nothing.
+  // No swords in VOXELON: the classic sword pattern yields nothing.
   check('sword recipe removed',
     matchGrid(g({ 1: Block.OakPlanks, 4: Block.OakPlanks, 7: Item.Stick })) === null);
 
@@ -671,6 +674,109 @@ check('materialOf maps blocks to sound classes',
 check('furnace smelts ore/sand/log but not removed foods',
   SMELT[Block.IronOre] === Item.IronIngot && SMELT[Block.Sand] === Block.Glass &&
   SMELT[Block.OakLog] === Item.Charcoal);
+
+// --- Multiplayer server core (pure, no sockets) -----------------------------------
+{
+  const g = new GameServer(1337, mulberry32(123));
+  const outA = g.addPlayer(1);
+  const wA = outA.find((o) => o.to === 1)!.msg;
+  check('addPlayer welcomes with seed + self in roster',
+    wA.t === 'welcome' && wA.seed === 1337 && wA.players.length === 1 &&
+    wA.id === 1 && typeof wA.username === 'string',
+    wA.t === 'welcome' ? `user=${wA.username}` : '');
+  check('join is broadcast to others',
+    outA.some((o) => o.to === 'others' && o.msg.t === 'join'));
+
+  // Unique usernames across many joins.
+  for (let id = 2; id <= 8; id++) g.addPlayer(id);
+  const names = g.snapshot().length;
+  const usernames = new Set(
+    (g.addPlayer(99).find((o) => o.to === 99)!.msg as { players: { username: string }[] })
+      .players.map((p) => p.username)
+  );
+  check('usernames are unique across players',
+    usernames.size === 9 && names === 8, `${usernames.size} unique`);
+
+  // Position two players adjacent and test server-validated melee.
+  const fresh = new GameServer(1337, mulberry32(7));
+  fresh.addPlayer(1); fresh.addPlayer(2);
+  fresh.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: Math.PI, pitch: 0 });
+  fresh.handle(2, { t: 'xform', x: 0, y: 70, z: 2, yaw: 0, pitch: 0 });
+  const atk = fresh.handle(1, { t: 'attack', target: 2 });
+  const hurt = atk.find((o) => o.to === 2)?.msg;
+  check('valid melee hit applies server damage + knockback',
+    !!hurt && hurt.t === 'hurt' && hurt.health === 20 - MELEE_DAMAGE,
+    hurt && hurt.t === 'hurt' ? `hp=${hurt.health}` : 'no hurt');
+
+  // Out of range -> rejected.
+  fresh.handle(2, { t: 'xform', x: 0, y: 70, z: 30, yaw: 0, pitch: 0 });
+  check('out-of-range attack is rejected',
+    fresh.handle(1, { t: 'attack', target: 2 }).length === 0);
+
+  // Edit in range broadcasts; far edit rejected.
+  fresh.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: 0, pitch: 0 });
+  check('in-range edit broadcasts to all',
+    fresh.handle(1, { t: 'edit', x: 1, y: 70, z: 0, block: 3 })
+      .some((o) => o.to === 'all' && o.msg.t === 'edit'));
+  check('far edit is rejected',
+    fresh.handle(1, { t: 'edit', x: 99, y: 70, z: 99, block: 3 }).length === 0);
+
+  // selfhurt + regen.
+  const r = new GameServer(1337, mulberry32(9));
+  r.addPlayer(1);
+  r.handle(1, { t: 'selfhurt', amount: 10 });
+  check('selfhurt reduces server health',
+    r.snapshot()[0].health === 10);
+  for (let i = 0; i < 10; i++) r.tickRegen(1); // past cooldown, several heals
+  check('server regenerates health over time', r.snapshot()[0].health > 10,
+    `hp=${r.snapshot()[0].health}`);
+
+  // Death + respawn.
+  const d = new GameServer(1337, mulberry32(11));
+  d.addPlayer(1);
+  const lethal = d.handle(1, { t: 'selfhurt', amount: 100 });
+  check('lethal damage marks dead + broadcasts killfeed',
+    d.snapshot()[0].dead === true &&
+    lethal.some((o) => o.to === 'all' && o.msg.t === 'killfeed'));
+  const resp = d.handle(1, { t: 'respawn' });
+  check('respawn restores full health',
+    resp.some((o) => o.msg.t === 'respawned') && d.snapshot()[0].health === 20 &&
+    !d.snapshot()[0].dead);
+
+  // Leave broadcasts.
+  check('removePlayer broadcasts leave',
+    d.removePlayer(1).some((o) => o.msg.t === 'leave'));
+}
+
+// --- Server input hardening (review fixes) ----------------------------------------
+{
+  const s = new GameServer(1337, mulberry32(5));
+  s.addPlayer(1);
+  s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: 0, pitch: 0 });
+  check('edit rejects an invalid block id',
+    s.handle(1, { t: 'edit', x: 1, y: 70, z: 0, block: 99999 }).length === 0);
+  check('edit rejects non-finite coords',
+    s.handle(1, { t: 'edit', x: NaN, y: 70, z: 0, block: 3 }).length === 0);
+  check('non-finite xform is ignored (cannot poison range checks)', (() => {
+    s.handle(1, { t: 'xform', x: NaN, y: NaN, z: NaN, yaw: 0, pitch: 0 });
+    // Position stayed finite at origin, so a far edit is still rejected.
+    return s.handle(1, { t: 'edit', x: 5000, y: 70, z: 5000, block: 3 }).length === 0;
+  })());
+  s.handle(1, { t: 'selfhurt', amount: 100 });
+  check('a dead player cannot edit blocks',
+    s.handle(1, { t: 'edit', x: 1, y: 70, z: 0, block: 3 }).length === 0);
+}
+
+// --- Persistent edit overlay (survives unload/regen; MP welcome replay) ------------
+{
+  const fx = Math.floor(spawn.x) + 2000, fz = Math.floor(spawn.z) + 2000, fy = 150;
+  world.applyRemoteEdit(fx, fy, fz, Block.Stone); // chunk not loaded yet
+  let guard = 0;
+  while (!world.update(fx + 0.5, fz + 0.5, 8000) && guard++ < 200) { /* stream */ }
+  check('edit to an unloaded chunk is applied when that chunk generates',
+    world.getBlock(fx, fy, fz) === Block.Stone);
+  world.update(spawn.x, spawn.z, 8000); // restore streaming around spawn
+}
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);

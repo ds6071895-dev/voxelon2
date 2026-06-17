@@ -22,7 +22,7 @@ const EYE_SNEAKING = 1.27;
 const MOUSE_SENSITIVITY = 0.0022;
 const EPS = 0.001;
 
-// Energy/stamina (WARZONE): a full bar lasts ~30s of sprinting and refills
+// Energy/stamina (VOXELON): a full bar lasts ~30s of sprinting and refills
 // from empty in ~4s; once drained you must recover to 25% before sprinting.
 const ENERGY_DRAIN = 1 / 30;
 const ENERGY_REFILL = 1 / 4;
@@ -53,6 +53,9 @@ export class Player {
   /** Drives the red flash + camera tilt; decays to 0. */
   damageFlash = 0;
   dead = false;
+  /** In multiplayer, damage is routed here (to the server) instead of being
+   *  applied locally — the server owns health. */
+  damageSink?: (amount: number) => void;
   private eye = EYE_STANDING;
 
   constructor(spawn: { x: number; y: number; z: number }) {
@@ -60,12 +63,21 @@ export class Player {
   }
 
   damage(amount: number): void {
-    if (this.dead || this.hurtTimer > 0 || amount <= 0) return;
+    if (this.dead || amount <= 0) return;
+    if (this.damageSink) { this.damageSink(amount); return; } // server-owned
+    if (this.hurtTimer > 0) return;
     this.health = Math.max(0, this.health - amount);
     this.hurtTimer = 0.5;
     this.damageFlash = 0.45;
     this.regenCooldown = DAMAGE_REGEN_DELAY;
     if (this.health <= 0) this.dead = true;
+  }
+
+  /** Authoritative health update from the server (multiplayer). */
+  setHealthFromServer(health: number, dead: boolean): void {
+    if (health < this.health) { this.damageFlash = 0.45; this.hurtTimer = 0.3; }
+    this.health = health;
+    this.dead = dead;
   }
 
   respawn(spawn: { x: number; y: number; z: number }): void {

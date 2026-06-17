@@ -63,6 +63,8 @@ export class Interaction {
   onBlockSound?: (
     kind: 'break' | 'place', blockId: number, x: number, y: number, z: number
   ) => void;
+  /** Local block edit (break = block 0); main broadcasts it to the server. */
+  onEdit?: (x: number, y: number, z: number, block: number) => void;
   private readonly world: World;
   private readonly player: Player;
   private readonly inventory: Inventory;
@@ -171,6 +173,7 @@ export class Interaction {
     if (this.breakProgress >= breakTime) {
       this.onBlockSound?.('break', id, t.x, t.y, t.z);
       this.world.setBlock(t.x, t.y, t.z, Block.Air, harvest);
+      this.onEdit?.(t.x, t.y, t.z, 0);
       if (info.hardness > 0 && held && ITEMS[held.id]?.tool) {
         this.inventory.damageSelected(1); // mining wears a tool by 1
       }
@@ -226,6 +229,7 @@ export class Interaction {
     if (BLOCKS[blockId].solid && this.player.intersectsBlock(px, py, pz)) return;
 
     this.world.setBlock(px, py, pz, blockId);
+    this.onEdit?.(px, py, pz, blockId);
     this.onBlockSound?.('place', blockId, px, py, pz);
     this.inventory.consumeSelected(1);
     this.placeCooldown = PLACE_REPEAT;

@@ -10,7 +10,7 @@ export const enum Item {
   IronIngot = 102,
   Redstone = 108,
   Diamond = 109,
-  // M5: tools (vanilla stats) + smelting products. (No swords in WARZONE.)
+  // M5: tools (vanilla stats) + smelting products. (No swords in VOXELON.)
   WoodenPickaxe = 110,
   WoodenAxe = 111,
   WoodenShovel = 112,

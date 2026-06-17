@@ -19,6 +19,8 @@ const DROWN_INTERVAL = 1;    // -2 HP per second with no air
 const AIR_REFILL_RATE = 4;   // bubbles return quickly out of water
 
 export class Survival {
+  /** Disabled in multiplayer — the server owns regeneration there. */
+  enableRegen = true;
   private regenTimer = 0;
   private drownTimer = 0;
 
@@ -30,7 +32,7 @@ export class Survival {
     p.regenCooldown = Math.max(0, p.regenCooldown - dt);
 
     // Passive regeneration once the post-damage cooldown has elapsed.
-    if (p.regenCooldown <= 0 && p.health < 20) {
+    if (this.enableRegen && p.regenCooldown <= 0 && p.health < 20) {
       this.regenTimer += dt;
       if (this.regenTimer >= REGEN_INTERVAL) {
         this.regenTimer = 0;

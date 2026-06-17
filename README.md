@@ -1,20 +1,30 @@
-# WARZONE (Three.js + TypeScript)
+# VOXELON (Three.js + TypeScript)
 
-A from-scratch, browser-based voxel survival game built on Three.js — no game
-engine, no voxel libraries, no Mojang assets (every texture is drawn
-procedurally at startup in the classic 16×16 pixel-art style). Minecraft-style
-sandbox survival with a stamina/energy system instead of hunger.
+A from-scratch, browser-based **multiplayer** voxel arena built on Three.js —
+no game engine, no voxel libraries, no Mojang assets (every texture, mob and
+avatar is drawn procedurally). Minecraft-style sandbox with a stamina/energy
+system instead of hunger, hostile mobs, and server-authoritative PvP.
 
 ## Run it
 
+Single-player works with no server. For multiplayer, run the server and the
+client side by side:
+
 ```bash
 npm install
-npm run dev
+npm run server   # terminal 1 — VOXELON server on ws://localhost:8080
+npm run dev      # terminal 2 — client on http://localhost:5173
 ```
 
-Open the printed URL (default `http://localhost:5173`) in a desktop browser
-and press **Play** on the title screen (a live orbiting panorama of the
-world). Append `?seed=12345` to the URL for a different world.
+Open the printed URL in a desktop browser and press **Play**. With the server
+running you join the shared world (you'll get an auto-assigned `WordWordNN`
+username and a skin); open a second tab to see another player. **If no server
+is reachable the client falls back to offline single-player** after a short
+timeout — so the game always runs. Append `?seed=12345` for a different
+offline world (multiplayer uses a fixed shared seed).
+
+To play over the internet, host `npm run server` on a reachable machine
+(VPS / Fly.io / Render, etc.) and point the client's host at it.
 
 Other scripts: `npm run build` (typecheck + production bundle),
 `npm run smoke` (headless engine tests: terrain, meshing, raycast, physics,
@@ -59,7 +69,7 @@ energy, mobs — 84 checks).
   from a continuous colormap that blends across borders. Cross-shaped
   plants: tall grass, dandelions, poppies, dead bushes.
 - **Caves and ores (M2):** spaghetti caves (intersecting 3D noise tubes —
-  WARZONE removed the large open "cheese" caverns), surface ravines, and
+  VOXELON removed the large open "cheese" caverns), surface ravines, and
   ore veins with vanilla depth rules — coal anywhere, iron below y=72, gold
   below y=32, **redstone and diamond below y=16** (dig down to Y≤16 to find
   diamond).
@@ -81,14 +91,14 @@ energy, mobs — 84 checks).
 - **Crafting and tools (M5):** 2×2 personal grid, craftable 3×3 crafting
   table, shaped (offset + mirrored) and shapeless recipes: planks, sticks,
   table, torches, furnace, and wood/stone/iron pickaxe/axe/shovel (no
-  swords in WARZONE — fists and the axe do combat damage). Vanilla tool
+  swords in VOXELON — fists and the axe do combat damage). Vanilla tool
   stats (speed 2/4/6, durability 59/131/250). The furnace is a real block
   entity — input/fuel/output, flame + progress arrows, lit-block light —
   smelting iron/gold ingots, glass, stone, and charcoal. Harvest rules:
   stone needs a pickaxe, iron ore needs stone tier, diamond/gold/redstone
   need iron; wrong/no tool takes `hardness × 5` and drops nothing; tools
   wear out and break.
-- **Survival + energy (M6, reworked for WARZONE):** 20 HP with slow passive
+- **Survival + energy (M6, reworked for VOXELON):** 20 HP with slow passive
   regeneration that pauses for a few seconds after taking damage. Hunger is
   replaced by a blue **energy/stamina** bar that only sprinting consumes —
   a full bar lasts ~30s and refills in ~4s, and once drained you must
@@ -96,7 +106,7 @@ energy, mobs — 84 checks).
   drowning with a 10-bubble air bar. Vanilla HUD: hearts + energy bar over
   the hotbar, bubbles when submerged, red damage flash with camera tilt, and
   a death screen — items spill where you died, respawn at world spawn.
-- **Mobs (M7) — hostile only:** WARZONE removed passive animals. Boxy
+- **Mobs (M7) — hostile only:** VOXELON removed passive animals. Boxy
   zombies and creepers built from atlas skin tiles, with swinging-limb walk
   cycles and heads that gaze at you. Zombies chase within 16 blocks, melee,
   and burn in daylight; creepers stalk silently, hiss, swell, and detonate a
@@ -111,6 +121,17 @@ energy, mobs — 84 checks).
   sounds are positional through WebAudio panners with distance falloff.
 - **UI:** plus crosshair (difference blending), 9-slot hotbar with isometric
   block icons and white selection outline, item-name popup, F3 overlay.
+- **Multiplayer (authoritative-lite):** a Node + WebSocket server
+  (`npm run server`) reuses the same deterministic terrain code, so clients
+  generate the world locally from a fixed shared seed and only **block edits
+  + player state** sync — keeping bandwidth tiny. The server owns the edit
+  log, every player's health, username assignment (unique `WordWordNN`), and
+  **PvP**: melee hits are validated server-side (range + facing) and damage
+  is server-applied, so hits and damage can't be faked. Clients predict their
+  own movement and send transforms ~20 Hz; remote players render as boxy
+  humanoid avatars with per-username procedural skins, name tags, and
+  interpolation. Death/respawn and a kill feed are server-driven. The client
+  degrades to offline single-player if no server is reachable.
 
 ## Architecture
 
@@ -164,6 +185,12 @@ src/
                (face-targeted, blocked inside the player), pick block
   sky.ts       square sun, tileable blocky cloud texture anchored to world
   hud.ts       hotbar (isometric icons drawn from the atlas), debug overlay
+  net/protocol.ts    wire message types + shared constants + username/skin
+  net/server_core.ts pure authoritative GameServer (testable, no sockets)
+  net/client.ts      browser WebSocket client + offline fallback
+  remoteplayers.ts   humanoid avatars: skins, name tags, interpolation, rayHit
+server/
+  server.ts    ws transport shell wiring sockets to the GameServer
 ```
 
 Rendering notes: AO/face shade/tint live in vertex colors; (sky, block)
@@ -189,15 +216,21 @@ fix it and are deferred until it matters.
 
 The base game shipped eight milestones (biomes, caves/ores, lighting +
 day/night, items/inventory, crafting/tools, survival, mobs, sound). The
-**WARZONE** revision then: rebranded the game; added a live title-screen
+**VOXELON** revision then: rebranded the game; added a live title-screen
 panorama with a Play button; added Mountains / Snowy Mountains with
 biome-aware terrain height; removed passive animals (hostile mobs only),
 swords, the large "cheese" caverns, and the hunger/food system; replaced
 hunger with a sprint **energy** bar and slow passive health regen; and fixed
 climbing out of water onto a ledge and the first-person held-block render.
 
-Verified headless via `npm run smoke` (84 checks, stable across repeated
-runs) plus `npx tsc` and a production `npm run build`.
+The latest revision adds **multiplayer** (authoritative-lite server, synced
+block edits, remote avatars with procedural skins + name tags, unique
+usernames, and server-validated PvP with death/respawn and a kill feed), with
+an offline fallback when no server is running.
+
+Verified headless via `npm run smoke` (96 checks incl. server-core logic,
+stable across repeated runs), a live two-client socket test (join, snapshot,
+edit broadcast, leave), `npx tsc`, and a production `npm run build`.
 
 Known simplifications: furnaces and the crafting table show one face on all
 sides (no block-orientation metadata yet); no shift-click routing into open

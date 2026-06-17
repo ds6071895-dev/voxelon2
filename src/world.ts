@@ -59,6 +59,22 @@ export class World {
   readonly sunUniform = { value: 1 };
   /** Probability a broken block drops items (explosions lower it). */
   dropChance = 1;
+  /** When true, setBlock skips the onBlockBroken hook (remote edits). */
+  private suppressBreakEvent = false;
+  /**
+   * Persistent record of every block changed from natural terrain, keyed by
+   * chunk -> (local index -> block id). Re-applied whenever a chunk is
+   * (re)generated, so edits survive chunk unload/regen — and so a remote edit
+   * to a not-yet-loaded chunk is honoured once that chunk streams in.
+   */
+  private readonly editOverlay = new Map<string, Map<number, number>>();
+
+  private recordEdit(wx: number, wy: number, wz: number, id: number): void {
+    const ck = Chunk.key(wx >> 4, wz >> 4);
+    let m = this.editOverlay.get(ck);
+    if (!m) { m = new Map(); this.editOverlay.set(ck, m); }
+    m.set(((((wx & 15) << 4) | (wz & 15)) << 8) | (wy & 255), id);
+  }
   /** When set, remeshes are collected and deduplicated until endBatch(). */
   private batch: Set<Chunk> | null = null;
   /** Fired when a block becomes air (drop spawning hooks in here).
@@ -105,6 +121,13 @@ export class World {
     if (!chunk) {
       chunk = new Chunk(cx, cz);
       this.terrain.fill(chunk);
+      // Re-apply any persisted edits for this chunk on top of fresh terrain.
+      const ov = this.editOverlay.get(key);
+      if (ov) {
+        for (const [idx, bid] of ov) {
+          chunk.set((idx >> 12) & 15, idx & 255, (idx >> 8) & 15, bid);
+        }
+      }
       this.chunks.set(key, chunk);
     }
     return chunk;
@@ -121,13 +144,17 @@ export class World {
     wx: number, wy: number, wz: number, id: number, harvested = true
   ): void {
     if (wy < 0 || wy >= 256) return;
+    // Persist the edit first, so it is honoured even if the chunk is not
+    // loaded yet (remote edits) and survives a later unload/regen.
+    this.recordEdit(wx, wy, wz, id);
     const cx = wx >> 4, cz = wz >> 4;
     const chunk = this.chunks.get(Chunk.key(cx, cz));
     if (!chunk) return;
     const lx = wx & 15, lz = wz & 15;
     const oldId = chunk.get(lx, wy, lz);
     chunk.set(lx, wy, lz, id);
-    if (id === Block.Air && oldId !== Block.Air && oldId !== Block.Water) {
+    if (!this.suppressBreakEvent && id === Block.Air &&
+      oldId !== Block.Air && oldId !== Block.Water) {
       this.onBlockBroken?.(wx, wy, wz, oldId, harvested);
     }
 
@@ -181,6 +208,14 @@ export class World {
       const chunk = cache[dcz * 3 + dcx];
       return chunk ? chunk.get(wx & 15, wy, wz & 15) : Block.Air;
     };
+  }
+
+  /** Apply another player's block edit: updates + remeshes, but does NOT
+   *  fire onBlockBroken (no drops, no re-broadcast). */
+  applyRemoteEdit(wx: number, wy: number, wz: number, id: number): void {
+    this.suppressBreakEvent = true;
+    this.setBlock(wx, wy, wz, id);
+    this.suppressBreakEvent = false;
   }
 
   /** Collect remeshes for a bulk edit (e.g. an explosion). */
