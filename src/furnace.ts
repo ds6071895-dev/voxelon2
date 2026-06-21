@@ -12,6 +12,7 @@ export const COOK_TIME = 10; // seconds per item, vanilla
 export const SMELT: Record<number, number> = {
   [Block.IronOre]: Item.IronIngot,
   [Block.GoldOre]: Item.GoldIngot,
+  [Block.TitaniumOre]: Item.TitaniumIngot,
   [Block.Sand]: Block.Glass,
   [Block.Cobblestone]: Block.Stone,
   [Block.OakLog]: Item.Charcoal,

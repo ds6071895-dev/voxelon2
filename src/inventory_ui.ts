@@ -7,10 +7,13 @@ import { craftResult, consumeCraft } from './crafting';
 import { COOK_TIME, FUEL, SMELT, FurnaceState } from './furnace';
 import { renderItemIcon } from './icons';
 import type { Inventory } from './inventory';
-import { HOTBAR_SIZE, INV_SIZE, CRAFT_START } from './inventory';
-import { ITEMS, ItemStack } from './items';
+import {
+  HOTBAR_SIZE, INV_SIZE, CRAFT_START, CHEST_START, CHEST_SIZE,
+  ARMOR_START, ARMOR_SIZE,
+} from './inventory';
+import { ArmorSlot, ITEMS, ItemStack } from './items';
 
-export type ContainerMode = 'inventory' | 'table' | 'furnace';
+export type ContainerMode = 'inventory' | 'table' | 'furnace' | 'chest';
 
 interface SlotView {
   el: HTMLDivElement;
@@ -28,6 +31,10 @@ export class InventoryUI {
   mode: ContainerMode = 'inventory';
   /** Crafted/stashed items that did not fit anywhere (main spills them). */
   onOverflow?: (stacks: ItemStack[]) => void;
+  /** Fired when the panel closes (main persists/syncs an open chest here). */
+  onClose?: () => void;
+  private chestCells: number[] = [];
+  private armorCells: number[] = [];
 
   private readonly inventory: Inventory;
   private readonly atlasCanvas: HTMLCanvasElement;
@@ -146,7 +153,16 @@ export class InventoryUI {
       e.preventDefault();
       if (e.button === 0 && e.shiftKey) this.inventory.shiftClick(index);
       else if (e.button === 0) this.inventory.leftClick(index);
-      else if (e.button === 2) this.inventory.rightClick(index);
+      else if (e.button === 2) {
+        // Right-click an armor item (empty cursor) to auto-equip it; otherwise
+        // the usual take-half/place-one split.
+        const s = this.inventory.slots[index];
+        if (!this.inventory.cursor && s && ITEMS[s.id]?.armor && index < ARMOR_START) {
+          this.inventory.tryEquipArmor(index);
+        } else {
+          this.inventory.rightClick(index);
+        }
+      }
     });
     this.hookTooltip(view, () => this.inventory.slots[index]);
     this.invSlots.set(index, view);
@@ -175,7 +191,7 @@ export class InventoryUI {
 
   // --- mode layouts ----------------------------------------------------------
 
-  private buildCraftingTop(size: 2 | 3): void {
+  private buildCraftingTop(size: 2 | 3, parent: HTMLElement = this.topEl): void {
     this.craftCells = [];
     const wrap = document.createElement('div');
     wrap.className = 'craft-row';
@@ -203,7 +219,48 @@ export class InventoryUI {
     this.hookTooltip(result, () => craftResult(this.inventory));
     this.resultView = result;
     wrap.appendChild(result.el);
-    this.topEl.appendChild(wrap);
+    parent.appendChild(wrap);
+  }
+
+  /** Inventory mode: a 4-slot armor column beside the 2x2 crafting grid. */
+  private buildInventoryTop(): void {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:44px;align-items:center;';
+    const col = document.createElement('div');
+    col.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
+    const SLOTS: ArmorSlot[] = ['helmet', 'chestplate', 'leggings', 'boots'];
+    for (let i = 0; i < ARMOR_SIZE; i++) {
+      const index = ARMOR_START + i;
+      col.appendChild(this.makeArmorSlot(SLOTS[i], index).el);
+      this.armorCells.push(index);
+    }
+    row.appendChild(col);
+    this.buildCraftingTop(2, row);
+    this.topEl.appendChild(row);
+  }
+
+  /** Armor slot: holds only the matching piece; click to equip/unequip. */
+  private makeArmorSlot(slot: ArmorSlot, index: number): SlotView {
+    const view = this.makeSlotView();
+    view.el.classList.add('armor-slot');
+    view.el.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const inv = this.inventory;
+      if (e.button === 0 && e.shiftKey) { inv.shiftClick(index); return; }
+      if (e.button !== 0) return;
+      const cur = inv.cursor;
+      if (!cur) {
+        if (inv.slots[index]) { inv.cursor = inv.slots[index]; inv.slots[index] = null; inv.version++; }
+      } else if (ITEMS[cur.id]?.armor?.slot === slot) {
+        const prev = inv.slots[index];
+        inv.slots[index] = cur;
+        inv.cursor = prev; // swap out whatever was worn (null if empty)
+        inv.version++;
+      }
+    });
+    this.hookTooltip(view, () => this.inventory.slots[index]);
+    this.invSlots.set(index, view);
+    return view;
   }
 
   private buildFurnaceTop(state: FurnaceState): void {
@@ -367,7 +424,11 @@ export class InventoryUI {
   show(mode: ContainerMode, furnace?: FurnaceState): void {
     // Rebuild the top section for the requested mode.
     for (const { index } of this.craftCells) this.invSlots.delete(index);
+    for (const idx of this.chestCells) this.invSlots.delete(idx);
+    for (const idx of this.armorCells) this.invSlots.delete(idx);
     this.craftCells = [];
+    this.chestCells = [];
+    this.armorCells = [];
     this.resultView = null;
     this.furnaceViews = null;
     this.furnace = furnace ?? null;
@@ -376,13 +437,30 @@ export class InventoryUI {
     if (mode === 'furnace' && furnace) {
       this.titleEl.textContent = 'Furnace';
       this.buildFurnaceTop(furnace);
+    } else if (mode === 'chest') {
+      this.titleEl.textContent = 'Chest';
+      this.buildChestTop();
+    } else if (mode === 'table') {
+      this.titleEl.textContent = 'Crafting';
+      this.buildCraftingTop(3);
     } else {
-      this.titleEl.textContent = mode === 'table' ? 'Crafting' : 'Inventory';
-      this.buildCraftingTop(mode === 'table' ? 3 : 2);
+      this.titleEl.textContent = 'Inventory';
+      this.buildInventoryTop();
     }
     this.open = true;
     this.panel.style.display = 'flex';
     this.renderedVersion = -1;
+  }
+
+  private buildChestTop(): void {
+    const grid = document.createElement('div');
+    grid.className = 'inv-grid';
+    for (let i = 0; i < CHEST_SIZE; i++) {
+      const index = CHEST_START + i;
+      grid.appendChild(this.makeIndexedSlot(index).el);
+      this.chestCells.push(index);
+    }
+    this.topEl.appendChild(grid);
   }
 
   hide(): void {
@@ -393,6 +471,7 @@ export class InventoryUI {
     this.panel.style.display = 'none';
     this.cursorEl.style.display = 'none';
     this.tooltip.style.display = 'none';
+    this.onClose?.();
   }
 
   /** Redraw on inventory changes; furnace bars refresh every frame. */

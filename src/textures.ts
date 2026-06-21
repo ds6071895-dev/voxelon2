@@ -608,6 +608,37 @@ function paintCreeperFace(p: Painter, seed: number): void {
   for (const [x, y] of [[6, 8], [9, 8]]) p.set(x, y, dark);
 }
 
+const CHEST_WOOD: RGBA = [156, 110, 58, 255];
+const CHEST_FRAME: RGBA = [96, 64, 32, 255];
+const CHEST_LATCH: RGBA = [70, 64, 58, 255];
+
+function paintChestTop(p: Painter, seed: number): void {
+  p.fill((x, y) => {
+    const border = x === 0 || y === 0 || x === 15 || y === 15;
+    const f = speckle(seed, x, y >> 1, 0.08);
+    return shade(border ? CHEST_FRAME : CHEST_WOOD, f);
+  });
+}
+
+function paintChestFace(front: boolean) {
+  return (p: Painter, seed: number): void => {
+    p.fill((x, y) => {
+      const border = x === 0 || y === 0 || x === 15 || y === 15;
+      const lidLine = y === 5; // seam between lid and body
+      let c = border ? CHEST_FRAME : CHEST_WOOD;
+      if (lidLine) c = CHEST_FRAME;
+      return shade(c, speckle(seed, x, y >> 1, 0.08));
+    });
+    if (front) {
+      // metal latch in the centre, straddling the lid seam.
+      for (let y = 4; y <= 8; y++) {
+        for (let x = 7; x <= 9; x++) p.set(x, y, CHEST_LATCH);
+      }
+      p.set(8, 9, [40, 36, 32, 255]); // keyhole
+    }
+  };
+}
+
 function paintCharcoal(p: Painter, seed: number): void {
   for (let y = 4; y <= 12; y++) {
     for (let x = 4; x <= 12; x++) {
@@ -632,6 +663,100 @@ function paintOre(spotColor: RGBA, spotColor2: RGBA) {
       }
     }
   };
+}
+
+// --- Armor + guns (parked features) ----------------------------------------
+
+const ARMOR_IRON: RGBA = [200, 200, 205, 255];
+const ARMOR_DIAMOND: RGBA = [120, 222, 224, 255];
+const ARMOR_TITAN: RGBA = [180, 196, 220, 255];
+
+function paintArmorPiece(slot: 'helmet' | 'chestplate' | 'leggings' | 'boots', base: RGBA) {
+  return (p: Painter, seed: number): void => {
+    const put = (x: number, y: number, f = 1) =>
+      p.set(x, y, shade(base, f * (0.84 + hash2(seed, x, y) * 0.24)));
+    const region = (rows: [number, number, number][]) => {
+      for (const [y, x0, x1] of rows) for (let x = x0; x <= x1; x++) put(x, y);
+    };
+    const clear = (rows: [number, number, number][]) => {
+      for (const [y, x0, x1] of rows) for (let x = x0; x <= x1; x++) p.set(x, y, [0, 0, 0, 0]);
+    };
+    if (slot === 'helmet') {
+      region([[3, 5, 10], [4, 4, 11], [5, 3, 12], [6, 3, 12], [7, 3, 12], [8, 3, 12], [9, 4, 11]]);
+      clear([[6, 5, 10], [7, 5, 10], [8, 6, 9]]); // visor opening
+    } else if (slot === 'chestplate') {
+      region([
+        [3, 4, 5], [3, 10, 11],
+        [4, 3, 12], [5, 3, 12], [6, 3, 12], [7, 3, 12],
+        [8, 4, 11], [9, 4, 11], [10, 5, 10], [11, 5, 10], [12, 5, 10],
+      ]);
+    } else if (slot === 'leggings') {
+      region([
+        [3, 4, 11], [4, 4, 11], [5, 4, 11],
+        [6, 4, 6], [6, 9, 11], [7, 4, 6], [7, 9, 11], [8, 4, 6], [8, 9, 11],
+        [9, 4, 6], [9, 9, 11], [10, 4, 6], [10, 9, 11], [11, 5, 6], [11, 9, 10],
+      ]);
+    } else {
+      region([
+        [9, 3, 6], [9, 9, 12], [10, 3, 6], [10, 9, 12],
+        [11, 2, 7], [11, 9, 13], [12, 2, 7], [12, 9, 13],
+      ]);
+    }
+  };
+}
+
+const GUN_METAL: RGBA = [78, 82, 92, 255];
+const GUN_DARK: RGBA = [38, 40, 46, 255];
+const GUN_GRIP: RGBA = [66, 48, 36, 255];
+
+function paintPistol(p: Painter, seed: number): void {
+  const m = (x: number, y: number, c: RGBA) => p.set(x, y, shade(c, 0.9 + hash2(seed, x, y) * 0.2));
+  for (let x = 3; x <= 11; x++) { m(x, 6, GUN_METAL); m(x, 7, GUN_DARK); } // slide + barrel
+  m(11, 6, [20, 20, 24, 255]); // muzzle
+  for (let y = 8; y <= 12; y++) { m(5, y, GUN_GRIP); m(6, y, GUN_GRIP); }  // grip
+  m(7, 8, GUN_METAL); m(4, 8, GUN_METAL);                                  // trigger area
+}
+
+function paintRifle(p: Painter, seed: number): void {
+  const m = (x: number, y: number, c: RGBA) => p.set(x, y, shade(c, 0.9 + hash2(seed, x, y) * 0.2));
+  for (let x = 1; x <= 14; x++) m(x, 6, GUN_METAL);                        // long barrel
+  for (let x = 2; x <= 9; x++) m(x, 7, GUN_DARK);                          // receiver
+  m(14, 6, [20, 20, 24, 255]);
+  for (let y = 7; y <= 11; y++) m(2, y, GUN_GRIP);                          // stock/grip
+  m(3, 11, GUN_GRIP); m(4, 11, GUN_GRIP);
+  for (let y = 8; y <= 11; y++) m(7, y, GUN_DARK);                          // magazine
+  m(6, 9, GUN_DARK); m(8, 9, GUN_DARK);
+}
+
+function paintRocketLauncher(p: Painter, seed: number): void {
+  const m = (x: number, y: number, c: RGBA) => p.set(x, y, shade(c, 0.9 + hash2(seed, x, y) * 0.2));
+  for (let y = 5; y <= 8; y++) for (let x = 1; x <= 14; x++) m(x, y, y < 7 ? GUN_METAL : GUN_DARK); // tube
+  for (let y = 5; y <= 8; y++) m(1, y, [20, 20, 24, 255]);                  // back vent
+  for (let y = 5; y <= 8; y++) m(14, y, [24, 24, 28, 255]);                 // muzzle
+  for (let y = 9; y <= 12; y++) m(6, y, GUN_GRIP);                          // grip
+  m(10, 4, GUN_DARK); m(11, 4, GUN_DARK);                                   // sight
+}
+
+function paintBullet(p: Painter, seed: number): void {
+  const brass: RGBA = [206, 170, 70, 255], tip: RGBA = [150, 120, 60, 255];
+  for (let y = 5; y <= 11; y++) {
+    for (let x = 6; x <= 9; x++) {
+      const c = y <= 6 ? tip : brass;
+      p.set(x, y, shade(c, 0.85 + hash2(seed, x, y) * 0.3));
+    }
+  }
+  p.set(7, 4, tip); p.set(8, 4, tip);          // pointed tip
+  for (let x = 6; x <= 9; x++) p.set(x, 11, [120, 96, 50, 255]); // rim
+}
+
+function paintRocket(p: Painter, seed: number): void {
+  const body: RGBA = [180, 60, 50, 255], nose: RGBA = [220, 220, 220, 255];
+  for (let y = 6; y <= 12; y++) for (let x = 6; x <= 9; x++)
+    p.set(x, y, shade(body, 0.85 + hash2(seed, x, y) * 0.3));
+  p.set(7, 4, nose); p.set(8, 4, nose);
+  p.set(6, 5, nose); p.set(7, 5, nose); p.set(8, 5, nose); p.set(9, 5, nose);
+  for (const [x, y] of [[5, 12], [10, 12], [5, 13], [10, 13]]) p.set(x, y, [90, 90, 96, 255]); // fins
+  p.set(7, 14, [255, 200, 90, 255]); p.set(8, 14, [255, 160, 60, 255]);     // exhaust
 }
 
 const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
@@ -728,6 +853,28 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.ZombiePants]: paintSkin([55, 65, 130, 255]),
   [Tile.CreeperSkin]: paintSkin([88, 168, 80, 255], 0.22, [120, 200, 100, 255]),
   [Tile.CreeperFace]: paintCreeperFace,
+  [Tile.ChestTop]: paintChestTop,
+  [Tile.ChestSide]: paintChestFace(false),
+  [Tile.ChestFront]: paintChestFace(true),
+  [Tile.TitaniumOre]: paintOre([198, 210, 228, 255], [150, 166, 192, 255]),
+  [Tile.TitaniumIngot]: paintIngot([196, 210, 230, 255]),
+  [Tile.ArmorHelmetIron]: paintArmorPiece('helmet', ARMOR_IRON),
+  [Tile.ArmorChestIron]: paintArmorPiece('chestplate', ARMOR_IRON),
+  [Tile.ArmorLegsIron]: paintArmorPiece('leggings', ARMOR_IRON),
+  [Tile.ArmorBootsIron]: paintArmorPiece('boots', ARMOR_IRON),
+  [Tile.ArmorHelmetDiamond]: paintArmorPiece('helmet', ARMOR_DIAMOND),
+  [Tile.ArmorChestDiamond]: paintArmorPiece('chestplate', ARMOR_DIAMOND),
+  [Tile.ArmorLegsDiamond]: paintArmorPiece('leggings', ARMOR_DIAMOND),
+  [Tile.ArmorBootsDiamond]: paintArmorPiece('boots', ARMOR_DIAMOND),
+  [Tile.ArmorHelmetTitanium]: paintArmorPiece('helmet', ARMOR_TITAN),
+  [Tile.ArmorChestTitanium]: paintArmorPiece('chestplate', ARMOR_TITAN),
+  [Tile.ArmorLegsTitanium]: paintArmorPiece('leggings', ARMOR_TITAN),
+  [Tile.ArmorBootsTitanium]: paintArmorPiece('boots', ARMOR_TITAN),
+  [Tile.Pistol]: paintPistol,
+  [Tile.Rifle]: paintRifle,
+  [Tile.RocketLauncher]: paintRocketLauncher,
+  [Tile.Bullet]: paintBullet,
+  [Tile.Rocket]: paintRocket,
 };
 
 export function createAtlas(seed = 1337): Atlas {

@@ -10,8 +10,11 @@ import { Block, BLOCKS, isSolid } from '../src/blocks';
 import { Chunk } from '../src/chunk';
 import { matchGrid, craftResult, consumeCraft } from '../src/crafting';
 import { Furnaces, SMELT } from '../src/furnace';
-import { Inventory, CRAFT_START } from '../src/inventory';
-import { dropFor, Item, ItemStack, miningStats } from '../src/items';
+import { Inventory, CRAFT_START, ARMOR_START } from '../src/inventory';
+import {
+  dropFor, Item, ItemStack, ITEMS, miningStats, armorPointsOf, armorLevel,
+  ARMOR_MAX_LEVEL,
+} from '../src/items';
 import { ItemEntities, itemGeometry } from '../src/itementity';
 import { computeLight } from '../src/light';
 import { buildChunkGeometry, TintSampler } from '../src/mesher';
@@ -22,7 +25,7 @@ import { Player } from '../src/player';
 import { daylight } from '../src/sky';
 import { Survival } from '../src/survival';
 import { GameServer } from '../src/net/server_core';
-import { MELEE_DAMAGE } from '../src/net/protocol';
+import { MELEE_DAMAGE, mitigate, RANGED_MAX_RANGE } from '../src/net/protocol';
 import { mulberry32 } from '../src/noise';
 import { Terrain, SEA_LEVEL } from '../src/terrain';
 import { World } from '../src/world';
@@ -767,6 +770,94 @@ check('furnace smelts ore/sand/log but not removed foods',
     s.handle(1, { t: 'edit', x: 1, y: 70, z: 0, block: 3 }).length === 0);
 }
 
+// --- Networked item entities (drop / pickup) --------------------------------------
+{
+  const s = new GameServer(1337, mulberry32(31));
+  s.addPlayer(1);
+  s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: 0, pitch: 0 });
+  const dropOut = s.handle(1, { t: 'drop', items: [{ id: Block.Stone, count: 3 }], x: 0, y: 70, z: 0 });
+  const spawnMsg = dropOut.find((o) => o.msg.t === 'itemspawn')?.msg as
+    Extract<typeof dropOut[number]['msg'], { t: 'itemspawn' }> | undefined;
+  check('drop spawns a broadcast item entity',
+    !!spawnMsg && spawnMsg.item.item === Block.Stone && spawnMsg.item.count === 3);
+  const eid = spawnMsg!.item.eid;
+  check('welcome includes existing item entities', (() => {
+    s.addPlayer(2);
+    const w = s.addPlayer(3).find((o) => o.to === 3)!.msg as { items: unknown[] };
+    return w.items.length >= 1;
+  })());
+  // Out of range: move far, pickup rejected.
+  s.handle(1, { t: 'xform', x: 100, y: 70, z: 100, yaw: 0, pitch: 0 });
+  check('out-of-range pickup is rejected',
+    s.handle(1, { t: 'pickup', eid }).length === 0);
+  // In range: pickup grants the item + broadcasts removal.
+  s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: 0, pitch: 0 });
+  const pick = s.handle(1, { t: 'pickup', eid });
+  check('in-range pickup grants item + broadcasts removal',
+    pick.some((o) => o.to === 1 && o.msg.t === 'gotitem') &&
+    pick.some((o) => o.msg.t === 'itemremove'));
+  check('a picked-up item is gone (no double pickup)',
+    s.handle(1, { t: 'pickup', eid }).length === 0);
+  // Dead players can't pick up.
+  const d2 = new GameServer(1337, mulberry32(32));
+  d2.addPlayer(1);
+  d2.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: 0, pitch: 0 });
+  const e2 = (d2.handle(1, { t: 'drop', items: [{ id: Block.Dirt, count: 1 }], x: 0, y: 70, z: 0 })
+    .find((o) => o.msg.t === 'itemspawn')!.msg as { item: { eid: number } }).item.eid;
+  d2.handle(1, { t: 'selfhurt', amount: 100 }); // now dead
+  check('dead players cannot pick up items',
+    d2.handle(1, { t: 'pickup', eid: e2 }).length === 0);
+}
+
+// --- Chests (server-stored, synced) ------------------------------------------------
+{
+  const s = new GameServer(1337, mulberry32(33));
+  s.addPlayer(1);
+  s.addPlayer(2);
+  // A chest only exists once placed (an edit recording Block.Chest); the server
+  // only stores contents for a real chest block.
+  s.handle(1, { t: 'xform', x: 5.5, y: 64.5, z: 5.5, yaw: 0, pitch: 0 });
+  s.handle(1, { t: 'edit', x: 5, y: 64, z: 5, block: Block.Chest });
+  const open1 = s.handle(1, { t: 'chestOpen', x: 5, y: 64, z: 5 });
+  const chestMsg = open1.find((o) => o.to === 1)?.msg as
+    { t: string; slots: unknown[] } | undefined;
+  check('opening an empty chest returns 27 empty slots',
+    !!chestMsg && chestMsg.t === 'chest' && chestMsg.slots.length === 27 &&
+    chestMsg.slots.every((c) => c === null));
+  const slots = new Array(27).fill(null);
+  slots[0] = { id: Block.Stone, count: 10 };
+  const setOut = s.handle(1, { t: 'chestSet', x: 5, y: 64, z: 5, slots });
+  check('chestSet broadcasts the contents to other viewers',
+    setOut.some((o) => o.to === 'others' && o.msg.t === 'chest'));
+  const open2 = s.handle(2, { t: 'chestOpen', x: 5, y: 64, z: 5 });
+  const seen = open2.find((o) => o.to === 2)!.msg as { slots: ({ id: number; count: number } | null)[] };
+  check('a second player sees the stored chest contents',
+    seen.slots[0]?.id === Block.Stone && seen.slots[0]?.count === 10);
+
+  // Player 2 breaks the chest WITHOUT ever editing it: the server spills the
+  // real stored contents (not the breaker's empty cache) and clears storage.
+  s.handle(2, { t: 'xform', x: 5.5, y: 64.5, z: 5.5, yaw: 0, pitch: 0 });
+  const broke = s.handle(2, { t: 'edit', x: 5, y: 64, z: 5, block: Block.Air });
+  const spill = broke.find((o) => o.msg.t === 'itemspawn')?.msg as
+    Extract<typeof broke[number]['msg'], { t: 'itemspawn' }> | undefined;
+  check('breaking a chest spills its stored contents to everyone',
+    !!spill && spill.item.item === Block.Stone && spill.item.count === 10);
+  const reopen = s.handle(1, { t: 'chestOpen', x: 5, y: 64, z: 5 });
+  const after = reopen.find((o) => o.to === 1)!.msg as { slots: unknown[] };
+  check('a broken chest is cleared server-side',
+    after.slots.length === 27 && after.slots.every((c) => c === null));
+
+  // A chestSet aimed at a non-chest position is rejected (no phantom storage),
+  // so a stale write to a broken/empty location can't resurrect contents.
+  const ghost = new Array(27).fill(null);
+  ghost[0] = { id: Block.Stone, count: 5 };
+  check('chestSet to a non-chest position is rejected',
+    s.handle(1, { t: 'chestSet', x: 5, y: 64, z: 5, slots: ghost }).length === 0);
+  const verify = s.handle(1, { t: 'chestOpen', x: 5, y: 64, z: 5 })
+    .find((o) => o.to === 1)!.msg as { slots: unknown[] };
+  check('a rejected chestSet stored nothing', verify.slots.every((c) => c === null));
+}
+
 // --- Persistent edit overlay (survives unload/regen; MP welcome replay) ------------
 {
   const fx = Math.floor(spawn.x) + 2000, fz = Math.floor(spawn.z) + 2000, fy = 150;
@@ -776,6 +867,163 @@ check('furnace smelts ore/sand/log but not removed foods',
   check('edit to an unloaded chunk is applied when that chunk generates',
     world.getBlock(fx, fy, fz) === Block.Stone);
   world.update(spawn.x, spawn.z, 8000); // restore streaming around spawn
+}
+
+// --- Armor: mitigation, leveling, equip, recipes, titanium ore ---------------------
+{
+  check('armor mitigation: 0 points = full damage', mitigate(10, 0) === 10);
+  check('armor mitigation: 5 points blocks 20%', mitigate(10, 5) === 8);
+  check('armor mitigation: 20 points blocks 80%', mitigate(10, 20) === 2);
+  check('armor mitigation is capped at 20 points', mitigate(10, 40) === mitigate(10, 20));
+  check('armor mitigation never goes negative', mitigate(1, 20) === 0);
+
+  const piece: ItemStack = { id: Item.IronChestplate, count: 1 };
+  const base = armorPointsOf(piece);
+  check('fresh armor is level 0 with base points', armorLevel(piece) === 0 && base === 6);
+  piece.xp = 60;
+  check('armor levels up with XP (more defense)',
+    armorLevel(piece) === 1 && armorPointsOf(piece) > base);
+  piece.xp = 1_000_000;
+  check('armor level is capped', armorLevel(piece) === ARMOR_MAX_LEVEL);
+
+  const inv = new Inventory();
+  inv.slots[0] = { id: Item.DiamondHelmet, count: 1 };
+  check('equip moves armor into its slot',
+    inv.tryEquipArmor(0) && inv.slots[ARMOR_START]?.id === Item.DiamondHelmet && inv.slots[0] === null);
+  check('worn armor contributes defense points',
+    inv.armorPoints() === armorPointsOf({ id: Item.DiamondHelmet, count: 1 }));
+  inv.slots[1] = { id: Item.TitaniumBoots, count: 1 };
+  inv.tryEquipArmor(1);
+  check('boots equip into the boots slot (index 3)',
+    inv.slots[ARMOR_START + 3]?.id === Item.TitaniumBoots);
+  inv.slots[2] = { id: Block.Stone, count: 1 };
+  check('non-armor cannot be equipped', !inv.tryEquipArmor(2) && inv.slots[2]?.id === Block.Stone);
+  inv.addArmorXp(60);
+  check('taking hits levels worn armor', (inv.slots[ARMOR_START]?.xp ?? 0) >= 60);
+
+  // Recipes (matchGrid takes 9 row-major cells).
+  const cellGrid = (rows: (number | null)[][]): (ItemStack | null)[] => {
+    const out: (ItemStack | null)[] = [];
+    for (let y = 0; y < 3; y++) for (let x = 0; x < 3; x++) {
+      const id = rows[y]?.[x] ?? null;
+      out.push(id === null ? null : { id, count: 1 });
+    }
+    return out;
+  };
+  const I = Item.IronIngot, D = Item.Diamond, T = Item.TitaniumIngot;
+  check('iron helmet recipe',
+    matchGrid(cellGrid([[I, I, I], [I, null, I]]))?.id === Item.IronHelmet);
+  check('diamond chestplate recipe',
+    matchGrid(cellGrid([[D, null, D], [D, D, D], [D, D, D]]))?.id === Item.DiamondChestplate);
+  check('titanium leggings recipe',
+    matchGrid(cellGrid([[T, T, T], [T, null, T], [T, null, T]]))?.id === Item.TitaniumLeggings);
+  check('iron boots recipe',
+    matchGrid(cellGrid([[I, null, I], [I, null, I]]))?.id === Item.IronBoots);
+
+  check('titanium ore smelts to a titanium ingot', SMELT[Block.TitaniumOre] === Item.TitaniumIngot);
+
+  // Titanium ore generates only deep under mountains: find the tallest column
+  // near origin, then confirm it appears in that mountain's chunk cluster.
+  let bestH = 0, bcx = 0, bcz = 0;
+  for (let cx = -64; cx <= 64; cx++) {
+    for (let cz = -64; cz <= 64; cz++) {
+      const h = terrain.height(cx * 16 + 8, cz * 16 + 8);
+      if (h > bestH) { bestH = h; bcx = cx; bcz = cz; }
+    }
+  }
+  let titanium = 0;
+  for (let dx = -2; dx <= 2; dx++) {
+    for (let dz = -2; dz <= 2; dz++) {
+      const c = new Chunk(bcx + dx, bcz + dz);
+      terrain.fill(c);
+      for (let x = 0; x < 16; x++)
+        for (let y = 0; y < 30; y++)
+          for (let z = 0; z < 16; z++)
+            if (c.get(x, y, z) === Block.TitaniumOre) titanium++;
+    }
+  }
+  check('titanium ore generates deep under mountains', titanium > 0,
+    `peak height ${bestH}, found ${titanium}`);
+}
+
+// --- Guns: recipes + ammo helpers + server-validated ranged PvP --------------------
+{
+  const cellGrid = (rows: (number | null)[][]): (ItemStack | null)[] => {
+    const out: (ItemStack | null)[] = [];
+    for (let y = 0; y < 3; y++) for (let x = 0; x < 3; x++) {
+      const id = rows[y]?.[x] ?? null;
+      out.push(id === null ? null : { id, count: 1 });
+    }
+    return out;
+  };
+  const I = Item.IronIngot, R = Item.Redstone;
+  check('pistol recipe', matchGrid(cellGrid([[I, I, null], [null, R, null]]))?.id === Item.Pistol);
+  check('rifle recipe', matchGrid(cellGrid([[I, I, I], [null, R, I]]))?.id === Item.Rifle);
+  check('rocket launcher recipe',
+    matchGrid(cellGrid([[I, I, I], [I, R, I], [I, I, I]]))?.id === Item.RocketLauncher);
+  const bulletR = matchGrid(cellGrid([[I, R, null]]));
+  check('bullet recipe yields a stack', bulletR?.id === Item.Bullet && bulletR.count === 8);
+  const rocketR = matchGrid(cellGrid([[null, I, null], [I, R, I], [null, Item.Coal, null]]));
+  check('rocket recipe yields two', rocketR?.id === Item.Rocket && rocketR.count === 2);
+  check('guns carry a magazine size', (ITEMS[Item.Rifle].gun?.mag ?? 0) === 30);
+
+  // Ammo reserve helpers (drive the magazine reload).
+  const inv = new Inventory();
+  inv.slots[0] = { id: Item.Bullet, count: 30 };
+  inv.slots[9] = { id: Item.Bullet, count: 20 };
+  check('countItem sums ammo across storage', inv.countItem(Item.Bullet) === 50);
+  check('removeItem draws the requested ammo',
+    inv.removeItem(Item.Bullet, 40) === 40 && inv.countItem(Item.Bullet) === 10);
+  check('removeItem is clamped to what is available',
+    inv.removeItem(Item.Bullet, 999) === 10 && inv.countItem(Item.Bullet) === 0);
+
+  // Server-validated ranged PvP (guns route hits through rangedAttack).
+  const s = new GameServer(1337, mulberry32(42));
+  s.addPlayer(1); s.addPlayer(2);
+  const hp = (id: number) => s.snapshot().find((p) => p.id === id)!.health;
+  s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: Math.PI, pitch: 0 }); // faces +z
+  s.handle(2, { t: 'xform', x: 0, y: 70, z: 20, yaw: 0, pitch: 0 });
+  const hit = s.handle(1, { t: 'rangedAttack', target: 2, amount: 8 });
+  check('ranged hit in range + facing applies damage',
+    hit.some((o) => o.to === 2 && o.msg.t === 'hurt') && hp(2) === 12);
+  check('a ranged self-attack is rejected',
+    s.handle(1, { t: 'rangedAttack', target: 1, amount: 8 }).length === 0);
+  s.handle(2, { t: 'xform', x: 0, y: 70, z: RANGED_MAX_RANGE + 50, yaw: 0, pitch: 0 });
+  check('ranged hit beyond max range is rejected',
+    s.handle(1, { t: 'rangedAttack', target: 2, amount: 8 }).length === 0);
+  s.handle(2, { t: 'xform', x: 0, y: 70, z: 20, yaw: 0, pitch: 0 });
+  s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: 0, pitch: 0 }); // now faces -z, away
+  check('ranged hit while facing away is rejected',
+    s.handle(1, { t: 'rangedAttack', target: 2, amount: 8 }).length === 0);
+  // Armor mitigates ranged PvP too; damage is clamped and can kill.
+  s.handle(2, { t: 'armor', points: 20 });
+  s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: Math.PI, pitch: 0 });
+  s.handle(1, { t: 'rangedAttack', target: 2, amount: 10 }); // mitigate(10,20)=2
+  check('ranged PvP is armor-mitigated server-side', hp(2) === 10); // 12 - 2
+  s.handle(2, { t: 'armor', points: 0 });
+  const kill = s.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 }); // clamped, lethal
+  check('ranged damage is clamped but can still kill',
+    kill.some((o) => o.msg.t === 'killfeed') && hp(2) === 0);
+}
+
+// --- Item metadata survives closing the UI (no XP/durability/ammo wipe) ------------
+{
+  const inv = new Inventory();
+  inv.cursor = { id: Item.DiamondHelmet, count: 1, xp: 180 };
+  inv.stashOpenSlots();
+  const helm = inv.slots.slice(0, 36).find((s) => s?.id === Item.DiamondHelmet);
+  check('closing with armor on the cursor keeps its XP/level',
+    helm?.xp === 180 && armorLevel(helm!) === 3);
+
+  inv.cursor = { id: Item.IronPickaxe, count: 1, damage: 200 };
+  inv.stashOpenSlots();
+  check('stashing a worn tool keeps its durability damage (no free repair)',
+    inv.slots.slice(0, 36).find((s) => s?.id === Item.IronPickaxe)?.damage === 200);
+
+  inv.cursor = { id: Item.Rifle, count: 1, loaded: 7 };
+  inv.stashOpenSlots();
+  check('stashing a partly-loaded gun keeps its magazine (no free reload)',
+    inv.slots.slice(0, 36).find((s) => s?.id === Item.Rifle)?.loaded === 7);
 }
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} FAILURES`);

@@ -28,7 +28,7 @@ To play over the internet, host `npm run server` on a reachable machine
 
 Other scripts: `npm run build` (typecheck + production bundle),
 `npm run smoke` (headless engine tests: terrain, meshing, raycast, physics,
-energy, mobs — 84 checks).
+energy, mobs, armor/guns, and authoritative server-core logic — 151 checks).
 
 ## Controls
 
@@ -38,13 +38,19 @@ energy, mobs — 84 checks).
 | Space | Jump / swim up; at a water's edge, hold to climb onto the ledge |
 | Shift | Sneak (slower, won't fall off edges) |
 | Ctrl or double-tap W | Sprint — drains the blue **energy** bar (recharges when you stop) |
-| Left click (hold) | Break block (tool-aware speed) / attack mob in crosshair |
-| Right click | Place block / open crafting table or furnace |
+| Left click (hold) | Break block (tool-aware speed) / attack mob or player; **fire** when a gun is held |
+| Right click | Place block / open crafting table, furnace, or chest; **equip** an armor item in the inventory |
+| R | Reload the held gun (pulls ammo from your inventory into its magazine) |
 | Middle click | Select targeted block's hotbar slot |
 | 1–9 / scroll | Select hotbar slot |
-| E | Open/close inventory (click, right-click split, shift-click) |
+| E | Open/close inventory (click, right-click split, shift-click; armor column at left) |
 | F3 | Debug overlay (FPS, coordinates, facing, target, clock) |
-| Esc | Close container / pause (returns to the title menu) |
+| Esc | Close container / open pause menu (the world keeps running) |
+
+The world is **never paused** — opening your inventory, a chest, or the pause
+menu does not stop mobs, other players, or damage, so you stay vulnerable
+while a menu is up (multiplayer-style). The orbiting panorama is only the
+initial title screen; pausing in-game freezes your view over the live world.
 
 ## Vanilla fidelity
 
@@ -132,6 +138,32 @@ energy, mobs — 84 checks).
   humanoid avatars with per-username procedural skins, name tags, and
   interpolation. Death/respawn and a kill feed are server-driven. The client
   degrades to offline single-player if no server is reachable.
+- **Networked drops + chests:** dropped items are server-owned entities —
+  block breaks and **death (drop everything where you fall)** spawn items
+  everyone sees, and pickup is server-validated by range (you can't pick up
+  while dead, and two players can't grab the same stack). Chests are 27-slot
+  storage blocks whose contents the server stores per position and syncs to
+  whoever's viewing; breaking one spills its contents to everyone. (Inventory
+  and chest contents are client-trusted — consistent with the client-side
+  inventory — while world edits, health, PvP, and item entities are
+  authoritative.)
+- **Armor (M10–M11):** craft iron / diamond / **titanium** sets (helmet,
+  chestplate, leggings, boots) — titanium is a new end-game ore that spawns
+  only deep under mountains and smelts to titanium ingots. Four equip slots in
+  the inventory (right-click an armor item to auto-equip); a vanilla-style armor
+  bar over the hearts. Each point blocks 4% of incoming damage (capped at 80%),
+  and every worn piece **levels up with XP as you take hits**, gaining extra
+  defense over time. In multiplayer the server is authoritative: it clamps your
+  synced armor value and mitigates all damage (PvP, mobs, falls) server-side, so
+  armor can't be faked.
+- **Guns (M12):** a **Pistol** (semi), **Rifle** (full-auto) and **Rocket
+  Launcher**, all iron-and-redstone crafts firing **bullets** / **rockets** from
+  a magazine you reload with R. Client-simulated projectiles sub-step their
+  flight so fast rounds can't tunnel; bullets are point hits, rockets reuse the
+  creeper blast on impact. Mob hits resolve locally; **PvP hits are reported to
+  the server, which validates range + facing and applies armor-mitigated damage
+  + knockback** (it can't verify line-of-sight, matching the authoritative-lite
+  model). An ammo counter shows magazine / reserve.
 
 ## Architecture
 
@@ -186,9 +218,14 @@ src/
   sky.ts       square sun, tileable blocky cloud texture anchored to world
   hud.ts       hotbar (isometric icons drawn from the atlas), debug overlay
   net/protocol.ts    wire message types + shared constants + username/skin
-  net/server_core.ts pure authoritative GameServer (testable, no sockets)
+  net/server_core.ts pure authoritative GameServer (players, edits, health,
+                     PvP, item entities, chest storage — testable, no sockets)
   net/client.ts      browser WebSocket client + offline fallback
   remoteplayers.ts   humanoid avatars: skins, name tags, interpolation, rayHit
+  netitems.ts        renders server-owned dropped items + range pickup requests
+  chests.ts          chest contents (offline local / MP server-synced)
+  projectiles.ts     bullet/rocket simulation: sub-stepped travel, point hits
+                     vs blocks/mobs/players, rocket detonation (reuses explosion)
 server/
   server.ts    ws transport shell wiring sockets to the GameServer
 ```
@@ -223,18 +260,44 @@ swords, the large "cheese" caverns, and the hunger/food system; replaced
 hunger with a sprint **energy** bar and slow passive health regen; and fixed
 climbing out of water onto a ledge and the first-person held-block render.
 
-The latest revision adds **multiplayer** (authoritative-lite server, synced
-block edits, remote avatars with procedural skins + name tags, unique
-usernames, and server-validated PvP with death/respawn and a kill feed), with
-an offline fallback when no server is running.
+A revision added **multiplayer** (authoritative-lite server, synced block
+edits, remote avatars with procedural skins + name tags, unique usernames, and
+server-validated PvP with death/respawn and a kill feed), with an offline
+fallback when no server is running.
 
-Verified headless via `npm run smoke` (96 checks incl. server-core logic,
-stable across repeated runs), a live two-client socket test (join, snapshot,
-edit broadcast, leave), `npx tsc`, and a production `npm run build`.
+The latest revision tightened the multiplayer feel: it split the title screen
+from an Esc **pause menu** and made the simulation **never pause** — mobs,
+other players and damage keep running while a menu is open, so you take PvP
+knockback with your inventory up; added **chests** (27-slot storage whose
+contents the server stores per position and syncs to viewers, spilling to
+everyone when broken); made **dropped items server-owned entities** so block
+breaks and **death (drop your whole inventory where you fall)** are visible to
+all and pickup is server-validated by range and liveness (no picking up while
+dead, no two players grabbing one stack); and locked multiplayer to a fixed
+shared seed (the `?seed` override now only affects offline worlds).
+
+The newest revision adds the parked combat content: **armor** (iron / diamond /
+titanium sets with a new mountain-only titanium ore, four equip slots, a
+vanilla armor bar, server-authoritative 4%-per-point mitigation, and per-piece
+XP leveling) and **guns** (pistol / rifle / rocket launcher with magazines + R
+reload, sub-stepped client projectiles, local mob hits, and server-validated
+range + facing PvP).
+
+Verified headless via `npm run smoke` (151 checks incl. server-core logic for
+edits, PvP, item entities, chests, armor mitigation and ranged PvP, stable
+across repeated runs), a live two-client socket test (join, snapshot, edit
+broadcast, drop/pickup, chest open/set, and server-authoritative chest break
+spilling its contents to both players, leave), `npx tsc`, and a production
+`npm run build`.
 
 Known simplifications: furnaces and the crafting table show one face on all
 sides (no block-orientation metadata yet); no shift-click routing into open
 furnace slots; mobs don't path around obstacles (they step/jump up one block
 and otherwise push straight ahead); the held first-person item uses normal
-depth testing, so pressing flush against a wall can clip it; no
-saving/loading, redstone, Nether, or multiplayer.
+depth testing, so pressing flush against a wall can clip it; inventory, chest
+and armor contents are client-trusted (the server clamps your armor value,
+owns edits/health/PvP/item-entities, and validates ranged hits by range +
+facing but can't verify line-of-sight); rocket and creeper explosions modify
+terrain locally only (not synced in multiplayer), and a rocket damages another
+player only on a direct hit (no networked splash); and no world saving/loading,
+redstone, or Nether.

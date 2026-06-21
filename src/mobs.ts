@@ -286,6 +286,33 @@ export class Mobs {
     return true;
   }
 
+  /** First mob whose AABB contains the point (projectile point-collision). */
+  private mobAtPoint(p: THREE.Vector3): Mob | null {
+    for (const mob of this.list) {
+      const { halfW, height } = mob.def;
+      if (p.x >= mob.pos.x - halfW && p.x <= mob.pos.x + halfW &&
+        p.y >= mob.pos.y && p.y <= mob.pos.y + height &&
+        p.z >= mob.pos.z - halfW && p.z <= mob.pos.z + halfW) return mob;
+    }
+    return null;
+  }
+
+  /** Projectile hit: damage + knock the mob at `p` (knock along `dir`).
+   *  Returns true when a mob was hit. */
+  shootPoint(p: THREE.Vector3, damage: number, dir: THREE.Vector3): boolean {
+    const mob = this.mobAtPoint(p);
+    if (!mob) return false;
+    mob.health -= damage;
+    mob.hurtTime = 0.5;
+    mob.vel.x += dir.x * 5;
+    mob.vel.z += dir.z * 5;
+    mob.vel.y += 3;
+    if (!mob.def.hostile) { mob.state = 'flee'; mob.stateTime = 4; }
+    this.onSound?.('mobHurt', mob.pos);
+    if (mob.health <= 0) this.kill(mob);
+    return true;
+  }
+
   private kill(mob: Mob): void {
     for (const drop of mob.def.drops(Math.random)) {
       this.items.spawn(

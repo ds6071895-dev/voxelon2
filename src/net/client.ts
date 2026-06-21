@@ -3,8 +3,9 @@
 // exposes send helpers + event callbacks. Fails gracefully to offline mode so
 // the game is fully playable with no server running.
 
+import type { ItemStack } from '../items';
 import {
-  ClientMsg, PlayerInfo, SERVER_PORT, ServerMsg, TRANSFORM_HZ,
+  ClientMsg, ItemEntityInfo, PlayerInfo, SERVER_PORT, ServerMsg, TRANSFORM_HZ,
 } from './protocol';
 
 export interface Remote {
@@ -20,6 +21,8 @@ export class NetClient {
   myId = -1;
   username = '';
   readonly remotes = new Map<number, Remote>();
+  /** Server-owned dropped items, keyed by entity id (for the renderer). */
+  readonly netItems = new Map<number, ItemEntityInfo>();
 
   /** Fired once the server welcome arrives (multiplayer is now live). */
   onWelcome?: (info: PlayerInfo) => void;
@@ -33,6 +36,10 @@ export class NetClient {
   onRoster?: () => void;
   /** Connection lost after having been live. */
   onDisconnect?: () => void;
+  /** A pickup we requested was granted — add it to the local inventory. */
+  onGotItem?: (item: number, count: number) => void;
+  /** Authoritative chest contents (open reply or live update from a peer). */
+  onChest?: (x: number, y: number, z: number, slots: (ItemStack | null)[]) => void;
 
   private ws: WebSocket | null = null;
   private xformAcc = 0;
@@ -68,6 +75,7 @@ export class NetClient {
       if (this.connected) {
         this.connected = false;
         this.remotes.clear();
+        this.netItems.clear();
         this.onDisconnect?.();
         this.onRoster?.();
       } else {
@@ -90,6 +98,8 @@ export class NetClient {
           const [x, y, z] = k.split(',').map(Number);
           this.onEdit?.(x, y, z, b);
         }
+        this.netItems.clear();
+        for (const it of msg.items) this.netItems.set(it.eid, it);
         const me = msg.players.find((p) => p.id === this.myId);
         if (me) this.onWelcome?.(me);
         this.onRoster?.();
@@ -127,6 +137,18 @@ export class NetClient {
         break;
       case 'killfeed':
         this.onKillfeed?.(msg.killer, msg.victim);
+        break;
+      case 'itemspawn':
+        this.netItems.set(msg.item.eid, msg.item);
+        break;
+      case 'itemremove':
+        this.netItems.delete(msg.eid);
+        break;
+      case 'gotitem':
+        this.onGotItem?.(msg.item, msg.count);
+        break;
+      case 'chest':
+        this.onChest?.(msg.x, msg.y, msg.z, msg.slots);
         break;
     }
   }
@@ -168,6 +190,24 @@ export class NetClient {
   }
   sendRespawn(): void {
     if (this.connected) this.raw({ t: 'respawn' });
+  }
+  sendDrop(items: { id: number; count: number }[], x: number, y: number, z: number): void {
+    if (this.connected && items.length) this.raw({ t: 'drop', items, x, y, z });
+  }
+  sendPickup(eid: number): void {
+    if (this.connected) this.raw({ t: 'pickup', eid });
+  }
+  sendChestOpen(x: number, y: number, z: number): void {
+    if (this.connected) this.raw({ t: 'chestOpen', x, y, z });
+  }
+  sendChestSet(x: number, y: number, z: number, slots: (ItemStack | null)[]): void {
+    if (this.connected) this.raw({ t: 'chestSet', x, y, z, slots });
+  }
+  sendArmor(points: number): void {
+    if (this.connected) this.raw({ t: 'armor', points });
+  }
+  sendRangedAttack(target: number, amount: number): void {
+    if (this.connected) this.raw({ t: 'rangedAttack', target, amount });
   }
 }
 

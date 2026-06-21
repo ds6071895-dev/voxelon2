@@ -156,6 +156,19 @@ export class RemotePlayers {
     }
   }
 
+  /** Id of a living avatar whose body contains the point, else -1 (projectile
+   *  point-collision; uses the same AABB as the ray test). */
+  avatarAtPoint(p: THREE.Vector3): number {
+    for (const [id, av] of this.avatars) {
+      const r = this.net.remotes.get(id);
+      if (!r || r.dead) continue;
+      if (p.x >= av.dx - 0.35 && p.x <= av.dx + 0.35 &&
+        p.y >= av.dy && p.y <= av.dy + 1.95 &&
+        p.z >= av.dz - 0.35 && p.z <= av.dz + 0.35) return id;
+    }
+    return -1;
+  }
+
   /** Nearest living avatar hit by the ray within maxDist, else -1. */
   rayHit(origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number): number {
     let best = -1, bestT = maxDist;

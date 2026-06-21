@@ -27,6 +27,9 @@ const P = Block.OakPlanks;
 const S = Item.Stick;
 const C = Block.Cobblestone;
 const I = Item.IronIngot;
+const D = Item.Diamond;
+const T = Item.TitaniumIngot;
+const R = Item.Redstone;
 
 function shaped(pattern: (Ingredient | null)[][], id: number, count = 1): Recipe {
   return { kind: 'shaped', pattern, result: { id, count } };
@@ -45,15 +48,39 @@ function tools(material: Ingredient, ids: [number, number, number]): Recipe[] {
   ];
 }
 
+/** Vanilla armor shapes for one material: helmet, chestplate, leggings, boots. */
+function armorSet(m: Ingredient, ids: [number, number, number, number]): Recipe[] {
+  const [helmet, chest, legs, boots] = ids;
+  return [
+    shaped([[m, m, m], [m, null, m]], helmet),
+    shaped([[m, null, m], [m, m, m], [m, m, m]], chest),
+    shaped([[m, m, m], [m, null, m], [m, null, m]], legs),
+    shaped([[m, null, m], [m, null, m]], boots),
+  ];
+}
+
 export const RECIPES: Recipe[] = [
   shapeless([ANY_LOG], Block.OakPlanks, 4),
   shaped([[P], [P]], Item.Stick, 4),
   shaped([[P, P], [P, P]], Block.CraftingTable),
   shaped([[C, C, C], [C, null, C], [C, C, C]], Block.Furnace),
+  shaped([[P, P, P], [P, null, P], [P, P, P]], Block.Chest),
   shaped([[ANY_COAL], [S]], Block.Torch, 4),
   ...tools(P, [Item.WoodenPickaxe, Item.WoodenAxe, Item.WoodenShovel]),
   ...tools(C, [Item.StonePickaxe, Item.StoneAxe, Item.StoneShovel]),
   ...tools(I, [Item.IronPickaxe, Item.IronAxe, Item.IronShovel]),
+
+  // Armor (M10): iron / diamond / titanium sets.
+  ...armorSet(I, [Item.IronHelmet, Item.IronChestplate, Item.IronLeggings, Item.IronBoots]),
+  ...armorSet(D, [Item.DiamondHelmet, Item.DiamondChestplate, Item.DiamondLeggings, Item.DiamondBoots]),
+  ...armorSet(T, [Item.TitaniumHelmet, Item.TitaniumChestplate, Item.TitaniumLeggings, Item.TitaniumBoots]),
+
+  // Guns + ammo (M12): iron frames bound with redstone.
+  shaped([[I, I, null], [null, R, null]], Item.Pistol),
+  shaped([[I, I, I], [null, R, I]], Item.Rifle),
+  shaped([[I, I, I], [I, R, I], [I, I, I]], Item.RocketLauncher),
+  shapeless([I, R], Item.Bullet, 8),
+  shaped([[null, I, null], [I, R, I], [null, ANY_COAL, null]], Item.Rocket, 2),
 ];
 
 function matches(ing: Ingredient, id: number | undefined): boolean {

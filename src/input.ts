@@ -1,5 +1,18 @@
 // Keyboard / mouse / pointer-lock input.
 
+/** The movement/look fields the player reads. A frozen instance (all
+ *  false/0) lets physics keep running with no control while a menu is open. */
+export interface PlayerInput {
+  mouseDX: number; mouseDY: number;
+  forward: boolean; back: boolean; left: boolean; right: boolean;
+  jump: boolean; sneak: boolean; sprintKey: boolean; sprintHeld: boolean;
+}
+
+export const FROZEN_INPUT: PlayerInput = {
+  mouseDX: 0, mouseDY: 0, forward: false, back: false, left: false,
+  right: false, jump: false, sneak: false, sprintKey: false, sprintHeld: false,
+};
+
 export class Input {
   private keys = new Set<string>();
   mouseDX = 0;
@@ -13,6 +26,7 @@ export class Input {
   hotbarKey = -1; // 0-8 when a number key was pressed this frame
   debugToggled = false;
   inventoryToggled = false;
+  reloadPressed = false; // R pressed this frame (gun reload)
   locked = false;
   sprintHeld = false; // via double-tap W, persists until W released
 
@@ -31,6 +45,7 @@ export class Input {
       if (e.repeat) return;
       this.keys.add(e.code);
       if (e.code === 'KeyE') this.inventoryToggled = true;
+      if (e.code === 'KeyR') this.reloadPressed = true;
       if (e.code === 'KeyW') {
         const now = performance.now();
         if (now - this.lastWDown < 250) this.sprintHeld = true;
@@ -102,5 +117,6 @@ export class Input {
     this.rightClicked = false;
     this.debugToggled = false;
     this.inventoryToggled = false;
+    this.reloadPressed = false;
   }
 }

@@ -17,6 +17,10 @@ const ENERGY_MASK = [
 const BUBBLE_MASK = [
   '0011100', '0111110', '0110110', '0111110', '0011100', '0000000',
 ];
+// A chestplate-ish shield for one armor segment (2 defense points each).
+const ARMOR_MASK = [
+  '0111110', '1111111', '1111111', '1111111', '0111110', '0011100',
+];
 
 function drawIcon(
   ctx: CanvasRenderingContext2D, x: number, mask: string[],
@@ -42,6 +46,8 @@ export interface StatusInfo {
   air: number;
   maxAir: number;
   underwater: boolean;
+  /** Effective worn-armor defense points (0..20); the bar hides at 0. */
+  armor: number;
 }
 
 export interface DebugInfo {
@@ -140,7 +146,7 @@ export class HUD {
   /** Hearts (left), blue energy bar (right), bubbles when submerged. */
   updateStatus(s: StatusInfo): void {
     const key = `${s.health}|${Math.round(s.energy * 40)}|${s.exhausted}|` +
-      `${Math.ceil(s.air)}|${s.underwater}`;
+      `${Math.ceil(s.air)}|${s.underwater}|${Math.round(s.armor * 2)}`;
     if (key === this.lastStatus) return;
     this.lastStatus = key;
 
@@ -180,6 +186,21 @@ export class HUD {
             ? (px === 2 && py === 1 ? '#ffffff' : '#4d9be8')
             : null
         );
+      }
+    }
+
+    // Armor: 10 shields above the hearts, each worth 2 defense points (vanilla).
+    const armor = (document.getElementById('armor') as HTMLCanvasElement)
+      .getContext('2d')!;
+    armor.clearRect(0, 0, 202, 20);
+    if (s.armor > 0) {
+      for (let i = 0; i < 10; i++) {
+        const v = s.armor - i * 2;
+        drawIcon(armor, i * 20, ARMOR_MASK, (px) => {
+          if (v >= 2) return px % 6 === 1 ? '#e8eef5' : '#a9b6c6';
+          if (v >= 1) return px < 3 ? '#a9b6c6' : '#2b2f36';
+          return '#2b2f36';
+        });
       }
     }
   }

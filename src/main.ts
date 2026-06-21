@@ -4,16 +4,19 @@ import { Block, BLOCKS } from './blocks';
 import { Furnaces } from './furnace';
 import { HeldItemView } from './held';
 import { HUD } from './hud';
-import { Input } from './input';
+import { Input, FROZEN_INPUT } from './input';
 import { Interaction } from './interact';
 import { Inventory } from './inventory';
 import { InventoryUI } from './inventory_ui';
-import { dropFor, ItemStack, ITEMS } from './items';
+import { dropFor, GunInfo, ItemStack, ITEMS } from './items';
 import { ItemEntities } from './itementity';
+import { Chests } from './chests';
 import { Mobs } from './mobs';
 import { NetClient } from './net/client';
-import { MELEE_RANGE } from './net/protocol';
+import { MELEE_RANGE, WORLD_SEED } from './net/protocol';
+import { NetItems } from './netitems';
 import { Particles } from './particles';
+import { Projectiles } from './projectiles';
 import { Player, MAX_AIR } from './player';
 import { RemotePlayers } from './remoteplayers';
 import { Sky, WATER_FOG_COLOR } from './sky';
@@ -37,8 +40,21 @@ crosshair.style.display = 'none'; // HUD hidden until the player is in-game
 hotbarEl.style.display = 'none';
 statusEl.style.display = 'none';
 
-const seedParam = new URLSearchParams(location.search).get('seed');
-const seed = seedParam ? Number(seedParam) | 0 : 1337;
+const LOADING_TIPS = [
+  'Diamonds hide below Y 16 — dig deep and bring torches.',
+  'Sprinting drains your energy bar; let it recharge before a chase.',
+  'Creepers hiss before they detonate — back off or take cover.',
+  'Press E for your inventory — the world keeps running while it is open.',
+  'Right-click a crafting table or furnace to use it.',
+  'Other players can see and grab whatever you drop — guard your loot.',
+  'Zombies burn in daylight; the night belongs to them.',
+];
+(document.getElementById('loadtip') as HTMLElement).textContent =
+  LOADING_TIPS[Math.floor(Math.random() * LOADING_TIPS.length)];
+
+// The world always uses the shared seed so clients never desync from the
+// server (the ?seed override was removed).
+const seed = WORLD_SEED;
 
 const renderer = new THREE.WebGLRenderer({ antialias: false });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -85,6 +101,13 @@ const audio = new GameAudio();
 mobs.onSound = (name, pos) => audio.mob(name, pos.clone());
 const net = new NetClient();
 const remotePlayers = new RemotePlayers(scene, net);
+const netItems = new NetItems(scene, net, atlas);
+const projectiles = new Projectiles(scene, world, mobs, remotePlayers, net, player, particles);
+const chests = new Chests();
+chests.net = net;
+let openChest: { x: number; y: number; z: number } | null = null;
+let lastChestVersion = -1;   // last version pushed/loaded — gates the live sync
+let chestBaseVersion = -1;   // version as of the last load FROM the server
 
 // Multiplayer HUD: connection/roster line + a small kill feed (top-right).
 const netinfoEl = document.createElement('div');
@@ -110,18 +133,35 @@ function showKill(killer: string, victim: string): void {
   window.setTimeout(() => line.remove(), 5000);
 }
 
-// Broken blocks (including popped plants/torches) drop item entities;
-// broken furnaces spill their contents.
+// Drop routing: in multiplayer drops are server-owned (everyone sees them);
+// offline they are local item entities.
+function spawnDrop(x: number, y: number, z: number, id: number, count: number): void {
+  if (net.connected) net.sendDrop([{ id, count }], x, y, z);
+  else itemEntities.spawn(x, y, z, id, count);
+}
+function spillStacks(stacks: ItemStack[], x: number, y: number, z: number): void {
+  if (!stacks.length) return;
+  if (net.connected) net.sendDrop(stacks.map((s) => ({ id: s.id, count: s.count })), x, y, z);
+  else for (const s of stacks) itemEntities.spawn(x, y, z, s.id, s.count);
+}
+
+// Broken blocks drop items; furnaces and chests spill their contents.
 world.onBlockBroken = (x, y, z, oldId, harvested) => {
   const drop = dropFor(oldId, Math.random(), harvested);
   // dropChance < 1 during explosions, so blasted blocks mostly vanish.
   if (drop && Math.random() < world.dropChance) {
-    itemEntities.spawn(x + 0.5, y + 0.3, z + 0.5, drop.id, drop.count);
+    spawnDrop(x + 0.5, y + 0.3, z + 0.5, drop.id, drop.count);
   }
   if (oldId === Block.Furnace || oldId === Block.FurnaceLit) {
-    for (const s of furnaces.remove(x, y, z)) {
-      itemEntities.spawn(x + 0.5, y + 0.3, z + 0.5, s.id, s.count);
-    }
+    spillStacks(furnaces.remove(x, y, z), x + 0.5, y + 0.3, z + 0.5);
+  }
+  if (oldId === Block.Chest) {
+    // Clear our local cache either way. Offline we spill the contents here;
+    // online the server spills the authoritative stored contents on the edit,
+    // so the client must not (its cache may be empty/stale — that would lose or
+    // wipe items, especially for a chest this player never opened).
+    const dropped = chests.remove(x, y, z);
+    if (!net.connected) spillStacks(dropped, x + 0.5, y + 0.3, z + 0.5);
   }
 };
 interaction.onAction = () => held.swing();
@@ -131,15 +171,42 @@ interaction.onBlockSound = (kind, blockId, x, y, z) => {
   else audio.place(materialOf(blockId), pos);
 };
 interaction.onOpenContainer = (kind, x, y, z) => {
-  invUI.show(kind, kind === 'furnace' ? furnaces.get(x, y, z) : undefined);
+  if (kind === 'chest') {
+    openChest = { x, y, z };
+    inventory.loadChest(chests.open(x, y, z));
+    lastChestVersion = chestBaseVersion = inventory.version;
+    invUI.show('chest');
+  } else {
+    invUI.show(kind, kind === 'furnace' ? furnaces.get(x, y, z) : undefined);
+  }
   document.exitPointerLock();
 };
-const spillAtPlayer = (stacks: ItemStack[]) => {
-  for (const s of stacks) {
-    itemEntities.spawn(player.pos.x, player.pos.y + 1, player.pos.z, s.id, s.count);
+invUI.onClose = () => {
+  if (openChest) {
+    chests.sync(openChest.x, openChest.y, openChest.z, inventory.saveChest());
+    openChest = null;
   }
 };
+const spillAtPlayer = (stacks: ItemStack[]) =>
+  spillStacks(stacks, player.pos.x, player.pos.y + 1, player.pos.z);
 invUI.onOverflow = spillAtPlayer;
+
+// The chest we're viewing was removed by someone else (MP). Salvage the items
+// we were arranging in it back to us and close WITHOUT re-pushing to the now
+// empty location: clearing openChest first makes onClose + the live sync no-ops,
+// and the server already cleared its copy on the removal edit.
+function forceCloseChest(): void {
+  const salvaged = inventory.saveChest(); // clears the chest region, chestOpen=false
+  openChest = null;
+  if (invUI.open) invUI.hide();
+  const overflow: ItemStack[] = [];
+  for (const s of salvaged) {
+    if (!s) continue;
+    const left = inventory.add(s.id, s.count);
+    if (left > 0) overflow.push({ ...s, count: left });
+  }
+  if (overflow.length) spillAtPlayer(overflow);
+}
 
 window.addEventListener('resize', () => {
   const aspect = window.innerWidth / window.innerHeight;
@@ -150,20 +217,46 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
+// Screen state: 'title' shows the orbiting panorama + Play; 'paused' shows
+// the pause menu over the frozen first-person view; 'playing' is locked.
+const pauseEl = document.getElementById('pause')!;
+type Screen = 'title' | 'playing' | 'paused';
+let screen: Screen = 'title';
+
+function enterPlaying(): void {
+  screen = 'playing';
+  overlay.classList.add('hidden');
+  pauseEl.style.display = 'none';
+}
+function enterPause(): void {
+  screen = 'paused';
+  pauseEl.style.display = 'flex';
+}
+function enterTitle(): void {
+  screen = 'title';
+  overlay.classList.remove('hidden');
+  pauseEl.style.display = 'none';
+}
+
 document.getElementById('play-btn')!.addEventListener('click', () => {
   audio.resume();
   input.lock();
 });
+document.getElementById('resume-btn')!.addEventListener('click', () => input.lock());
+document.getElementById('quit-btn')!.addEventListener('click', () => enterTitle());
+
 document.addEventListener('pointerlockchange', () => {
-  if (worldReady && !invUI.open && !player.dead) {
-    overlay.classList.toggle('hidden', input.locked);
+  if (!worldReady) return;
+  if (input.locked) {
+    enterPlaying(); // entered or returned to the game
+  } else if (!player.dead && !invUI.open && screen === 'playing') {
+    enterPause(); // Esc / lost focus while playing -> pause, not the title
   }
 });
 document.addEventListener('keydown', (e) => {
-  if (e.code === 'Escape' && invUI.open) {
-    invUI.hide();
-    input.lock();
-  }
+  if (e.code !== 'Escape') return;
+  if (invUI.open) { invUI.hide(); input.lock(); }
+  else if (screen === 'paused' && !player.dead) input.lock(); // Esc resumes from pause
 });
 
 // Death and respawn.
@@ -185,9 +278,15 @@ document.getElementById('respawn')!.addEventListener('click', () => {
 function checkDeath(): void {
   if (!player.dead || deathShown) return;
   deathShown = true;
-  invUI.hide();
-  // Solo only: spilling items on death is offline behaviour.
-  if (!net.connected) spillAtPlayer(inventory.spillAll());
+  invUI.hide(); // closes (and saves) an open chest BEFORE we spill the inventory
+  // Drop everything where we died — networked so others can grab it (MP) or
+  // local item entities (offline). We can't pick anything up while dead.
+  spillAtPlayer(inventory.spillAll());
+  // We can die while the pause menu is up (the sim never pauses). Normalize to
+  // 'playing' and drop the pause menu so the death screen is the only overlay
+  // and the Esc handler has no 'paused' branch to re-lock the pointer over it.
+  screen = 'playing';
+  pauseEl.style.display = 'none';
   deathEl.style.display = 'flex';
   document.exitPointerLock();
 }
@@ -204,7 +303,14 @@ net.onWelcome = (me) => {
   survival.enableRegen = false;                   // server runs regen
   refreshNetInfo();
 };
-net.onEdit = (x, y, z, b) => world.applyRemoteEdit(x, y, z, b);
+net.onEdit = (x, y, z, b) => {
+  world.applyRemoteEdit(x, y, z, b);
+  // If someone removed/replaced the chest block we have open, stop viewing it.
+  if (openChest && openChest.x === x && openChest.y === y && openChest.z === z
+    && b !== Block.Chest) {
+    forceCloseChest();
+  }
+};
 net.onHurt = (health, dead, k) => {
   player.setHealthFromServer(health, dead);
   player.vel.x += k[0] * 6; player.vel.y += k[1] * 6; player.vel.z += k[2] * 6;
@@ -220,6 +326,27 @@ net.onRespawned = (x, y, z, h) => {
 };
 net.onKillfeed = showKill;
 net.onRoster = refreshNetInfo;
+net.onGotItem = (id, count) => {
+  // The server grants the whole stack on a valid pickup; if it doesn't all fit,
+  // re-drop the remainder as a server item entity so it isn't destroyed (the
+  // offline path likewise leaves the leftover on the ground). After a partial
+  // add the inventory has no room left, so the re-drop won't be re-requested.
+  const left = inventory.add(id, count);
+  if (left > 0) net.sendDrop([{ id, count: left }], player.pos.x, player.pos.y, player.pos.z);
+};
+net.onChest = (x, y, z, slots) => {
+  chests.store(x, y, z, slots);
+  // If we have this chest open, adopt the authoritative contents — but ONLY if
+  // we haven't edited the chest region since our last load. Otherwise this could
+  // be a stale open-reply (or another viewer's update) arriving after we placed
+  // an item, which would clobber it (item loss). Our pending edits win and are
+  // pushed by the live sync; last-writer-wins on close.
+  if (openChest && openChest.x === x && openChest.y === y && openChest.z === z
+    && inventory.version === chestBaseVersion) {
+    inventory.loadChest(slots);
+    lastChestVersion = chestBaseVersion = inventory.version;
+  }
+};
 net.onDisconnect = () => {
   player.damageSink = undefined;
   survival.enableRegen = true;
@@ -233,7 +360,38 @@ const clock = new THREE.Clock();
 let fps = 0, frames = 0, fpsTime = 0;
 // Sound state
 let lastHealth = 20;
+let lastSentArmor = -1; // last armor-points value pushed to the server
 let lastInWater = false;
+
+// Gun state.
+const ammoEl = document.getElementById('ammo')!;
+const RELOAD_TIME = 1.1;
+let fireCooldown = 0;
+let reloadTimer = 0;
+let reloadingStack: ItemStack | null = null;
+
+function tryFire(stack: ItemStack, gun: GunInfo): void {
+  const loaded = stack.loaded ?? gun.mag;
+  if (loaded <= 0) { reloadGun(); return; } // firing on empty starts a reload
+  stack.loaded = loaded - 1;
+  inventory.version++; // refresh the ammo counter
+  fireCooldown = gun.cooldown;
+  const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  projectiles.fire(player.eyePosition, dir, gun);
+  held.swing();
+  audio.gun(player.eyePosition);
+}
+
+function reloadGun(): void {
+  if (reloadTimer > 0) return;
+  const stack = inventory.selectedStack;
+  const gun = stack ? ITEMS[stack.id]?.gun : undefined;
+  if (!stack || !gun) return;
+  const loaded = stack.loaded ?? gun.mag;
+  if (loaded >= gun.mag || inventory.countItem(gun.ammo) <= 0) return;
+  reloadTimer = RELOAD_TIME;
+  reloadingStack = stack;
+}
 let stepAccum = 0;
 let ambienceTimer = 20;
 
@@ -321,64 +479,110 @@ function frame(): void {
 
   if (input.inventoryToggled) toggleInventory();
 
-  if (input.locked && !player.dead) {
-    if (input.debugToggled) hud.toggleDebug();
-    if (input.hotbarKey >= 0) inventory.select(input.hotbarKey);
-    if (input.wheelDelta !== 0) inventory.select(inventory.selected + input.wheelDelta);
-
-    player.update(dt, input, world);
-    updateCamera();
-
-    // Combat priority: another player > mob > mining the block behind them.
-    const lookDir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-    const eye = player.eyePosition;
-    const remoteTarget = remotePlayers.rayHit(eye, lookDir, MELEE_RANGE);
-    const mobInSights = remoteTarget < 0 ? mobs.rayHit(eye, lookDir, 3.5) : null;
-    if (input.leftClicked && remoteTarget >= 0) {
-      net.sendAttack(remoteTarget); // server validates + applies PvP damage
-      const tool = inventory.selectedStack
-        ? ITEMS[inventory.selectedStack.id]?.tool : undefined;
-      if (tool) inventory.damageSelected(2);
-      held.swing();
-    } else if (input.leftClicked && mobInSights) {
-      const heldStack = inventory.selectedStack;
-      const tool = heldStack ? ITEMS[heldStack.id]?.tool : undefined;
-      mobs.attack(eye, lookDir, tool?.damage ?? 1, player);
-      if (tool) inventory.damageSelected(2); // attacking wears a tool by 2
-      held.swing();
-    }
-    interaction.update(dt, input, camera, remoteTarget >= 0 || mobInSights !== null);
-
-    // Stream our transform to the server (throttled inside sendXform).
-    net.sendXform(dt, player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch);
-
-    // Footsteps.
-    const moveSpeed = Math.hypot(player.vel.x, player.vel.z);
-    if (player.onGround && moveSpeed > 0.8) {
-      stepAccum += moveSpeed * dt;
-      if (stepAccum > 2.1) {
-        stepAccum = 0;
-        const under = world.getBlock(
-          Math.floor(player.pos.x),
-          Math.floor(player.pos.y - 0.5),
-          Math.floor(player.pos.z)
-        );
-        audio.step(materialOf(under));
+  // Gun timers tick regardless of menu state (so a reload finishes even if you
+  // open a menu); the reload pulls ammo into the magazine when it completes.
+  if (fireCooldown > 0) fireCooldown = Math.max(0, fireCooldown - dt);
+  if (reloadTimer > 0) {
+    reloadTimer -= dt;
+    if (reloadTimer <= 0) {
+      const rs = reloadingStack;
+      const gun = rs ? ITEMS[rs.id]?.gun : undefined;
+      if (rs && gun && rs === inventory.selectedStack) {
+        const loaded = rs.loaded ?? gun.mag;
+        rs.loaded = loaded + inventory.removeItem(gun.ammo, gun.mag - loaded);
+        inventory.version++;
       }
+      reloadingStack = null;
     }
   }
 
-  if (input.locked || invUI.open) {
+  // Direct control only while actively playing (pointer locked, no UI, alive).
+  const controlling = input.locked && !player.dead && !invUI.open;
+
+  // Keep worn-armor mitigation current before any damage can land this frame:
+  // offline the player mitigates locally; in MP the server mitigates from this
+  // synced value (clamped server-side).
+  const armorPts = inventory.armorPoints();
+  player.armorPoints = armorPts;
+  if (net.connected && armorPts !== lastSentArmor) {
+    lastSentArmor = armorPts;
+    net.sendArmor(armorPts);
+  }
+
+  // In-world simulation runs whenever we're NOT on the title screen — even
+  // with a menu open the world keeps ticking and you stay vulnerable; only
+  // direct input is suspended (frozen input keeps gravity + PvP knockback).
+  if (screen !== 'title') {
+    if (controlling) {
+      if (input.debugToggled) hud.toggleDebug();
+      if (input.hotbarKey >= 0) inventory.select(input.hotbarKey);
+      if (input.wheelDelta !== 0) inventory.select(inventory.selected + input.wheelDelta);
+    }
+
+    player.update(dt, controlling ? input : FROZEN_INPUT, world);
+    updateCamera();
+
+    if (controlling) {
+      const lookDir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+      const eye = player.eyePosition;
+      const heldStack = inventory.selectedStack;
+      const heldGun = heldStack ? ITEMS[heldStack.id]?.gun : undefined;
+
+      if (heldGun) {
+        // Guns suppress melee + mining: fire on click (semi) / hold (auto).
+        if (input.reloadPressed) reloadGun();
+        const wantFire = heldGun.auto ? input.leftDown : input.leftClicked;
+        if (wantFire && fireCooldown <= 0 && reloadTimer <= 0) tryFire(heldStack!, heldGun);
+        interaction.update(dt, input, camera, true);
+      } else {
+        // Combat priority: another player > mob > mining the block behind them.
+        const remoteTarget = remotePlayers.rayHit(eye, lookDir, MELEE_RANGE);
+        const mobInSights = remoteTarget < 0 ? mobs.rayHit(eye, lookDir, 3.5) : null;
+        if (input.leftClicked && remoteTarget >= 0) {
+          net.sendAttack(remoteTarget); // server validates + applies PvP damage
+          const tool = heldStack ? ITEMS[heldStack.id]?.tool : undefined;
+          if (tool) inventory.damageSelected(2);
+          held.swing();
+        } else if (input.leftClicked && mobInSights) {
+          const tool = heldStack ? ITEMS[heldStack.id]?.tool : undefined;
+          mobs.attack(eye, lookDir, tool?.damage ?? 1, player);
+          if (tool) inventory.damageSelected(2);
+          held.swing();
+        }
+        interaction.update(dt, input, camera, remoteTarget >= 0 || mobInSights !== null);
+      }
+
+      // Footsteps.
+      const moveSpeed = Math.hypot(player.vel.x, player.vel.z);
+      if (player.onGround && moveSpeed > 0.8) {
+        stepAccum += moveSpeed * dt;
+        if (stepAccum > 2.1) {
+          stepAccum = 0;
+          const under = world.getBlock(
+            Math.floor(player.pos.x), Math.floor(player.pos.y - 0.5),
+            Math.floor(player.pos.z)
+          );
+          audio.step(materialOf(under));
+        }
+      }
+    }
+
+    // Stream our transform even while paused/in a menu, so others still see
+    // us (e.g. being knocked around). Throttled + connection-gated inside.
+    net.sendXform(dt, player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch);
+
+    // Simulation never pauses: mobs hunt you and survival ticks in menus too.
     survival.update(dt, player);
     mobs.update(dt, player, sky.sunIntensity);
   }
+
   checkDeath();
   furnaces.update(dt);
 
-  // When the title/pause menu is up, render the slowly-orbiting panorama.
-  const inMenu = !input.locked && !invUI.open && !player.dead;
+  // The orbiting panorama is only for the title screen; pause/inventory keep
+  // the frozen first-person view.
   let activeCamera: THREE.Camera = camera;
-  if (inMenu) {
+  if (screen === 'title') {
     panoramaYaw += dt * 0.06;
     panorama.position.set(spawn.x + 0.5, spawn.y + 14, spawn.z + 0.5);
     panorama.rotation.set(-0.18, panoramaYaw, 0);
@@ -391,10 +595,18 @@ function frame(): void {
   itemEntities.update(dt, player, inventory, sky.sunIntensity);
   particles.update(dt, activeCamera);
   remotePlayers.update(dt); // interpolate + animate other players
+  if (screen !== 'title') {
+    netItems.update(dt, player, inventory, sky.sunIntensity);
+    projectiles.update(dt); // in-flight rounds keep travelling even in a menu
+  }
 
   // State-driven sounds.
   audio.updateListener(activeCamera);
-  if (player.health < lastHealth && !player.dead) audio.hurt();
+  if (player.health < lastHealth) {
+    if (!player.dead) audio.hurt();
+    // Taking a hit levels your worn armor (more for harder hits).
+    inventory.addArmorXp(2 + (lastHealth - player.health));
+  }
   lastHealth = player.health;
   if (player.inWater && !lastInWater && Math.abs(player.vel.y) > 1) audio.splash();
   lastInWater = player.inWater;
@@ -405,16 +617,28 @@ function frame(): void {
       Math.floor(player.pos.x), Math.floor(player.pos.y + 1), Math.floor(player.pos.z)
     )) audio.caveAmbience();
   }
-  // Hide the held item (a child of the player camera) while the panorama
-  // menu is up, so it doesn't float over the title/pause screen.
-  held.setItem(inMenu ? null : inventory.selectedStack?.id ?? null);
-  held.update(dt, input.locked && input.leftDown, sky.sunIntensity);
+  // Held item shows only during active play.
+  held.setItem(controlling ? inventory.selectedStack?.id ?? null : null);
+  held.update(dt, controlling && input.leftDown, sky.sunIntensity);
 
-  // Gameplay HUD chrome shows only during active play (not menu/inventory/death).
-  const hudDisplay = input.locked ? '' : 'none';
+  // Gameplay HUD chrome shows only during active play.
+  const hudDisplay = controlling ? '' : 'none';
   crosshair.style.display = hudDisplay;
-  hotbarEl.style.display = input.locked ? 'flex' : 'none';
+  hotbarEl.style.display = controlling ? 'flex' : 'none';
   statusEl.style.display = hudDisplay;
+
+  // Ammo counter: "loaded / reserve" while a gun is held (RELOADING during one).
+  const gunStack = controlling ? inventory.selectedStack : null;
+  const gunInfo = gunStack ? ITEMS[gunStack.id]?.gun : undefined;
+  if (gunInfo) {
+    const loaded = gunStack!.loaded ?? gunInfo.mag;
+    ammoEl.textContent = reloadTimer > 0
+      ? 'RELOADING…'
+      : `${loaded} / ${inventory.countItem(gunInfo.ammo)}`;
+    ammoEl.style.display = 'block';
+  } else {
+    ammoEl.style.display = 'none';
+  }
   hud.update();
   hud.updateStatus({
     health: player.health,
@@ -423,9 +647,16 @@ function frame(): void {
     air: player.air,
     maxAir: MAX_AIR,
     underwater: player.eyeUnderwater,
+    armor: armorPts,
   });
   (document.getElementById('damage-flash') as HTMLDivElement).style.opacity =
     String(Math.min(0.35, player.damageFlash));
+
+  // Push live chest edits to the server while a chest is open (version-gated).
+  if (openChest && inventory.version !== lastChestVersion) {
+    lastChestVersion = inventory.version;
+    chests.sync(openChest.x, openChest.y, openChest.z, inventory.readChest());
+  }
   invUI.update();
 
   if (hud.debugVisible) {

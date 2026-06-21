@@ -43,6 +43,10 @@ export const enum Block {
   FurnaceLit = 35,
   // M7: mob drops
   Wool = 36,
+  // Storage
+  Chest = 37,
+  // Armor material ore (deep in mountains)
+  TitaniumOre = 38,
 }
 
 export const enum Tile {
@@ -131,6 +135,29 @@ export const enum Tile {
   ZombiePants = 79,
   CreeperSkin = 80,
   CreeperFace = 81,
+  ChestTop = 82,
+  ChestSide = 83,
+  ChestFront = 84,
+  // Armor + guns (parked features)
+  TitaniumOre = 85,
+  TitaniumIngot = 86,
+  ArmorHelmetIron = 87,
+  ArmorChestIron = 88,
+  ArmorLegsIron = 89,
+  ArmorBootsIron = 90,
+  ArmorHelmetDiamond = 91,
+  ArmorChestDiamond = 92,
+  ArmorLegsDiamond = 93,
+  ArmorBootsDiamond = 94,
+  ArmorHelmetTitanium = 95,
+  ArmorChestTitanium = 96,
+  ArmorLegsTitanium = 97,
+  ArmorBootsTitanium = 98,
+  Pistol = 99,
+  Rifle = 100,
+  RocketLauncher = 101,
+  Bullet = 102,
+  Rocket = 103,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel';
@@ -313,6 +340,7 @@ export const BLOCKS: Record<number, BlockInfo> = {
   [Block.GoldOre]: def({ name: 'Gold Ore', hardness: 3.0, top: Tile.GoldOre }),
   [Block.RedstoneOre]: def({ name: 'Redstone Ore', hardness: 3.0, top: Tile.RedstoneOre }),
   [Block.DiamondOre]: def({ name: 'Diamond Ore', hardness: 3.0, top: Tile.DiamondOre }),
+  [Block.TitaniumOre]: def({ name: 'Titanium Ore', hardness: 4.5, top: Tile.TitaniumOre }),
 
   [Block.CraftingTable]: def({
     name: 'Crafting Table', hardness: 2.5,
@@ -327,13 +355,17 @@ export const BLOCKS: Record<number, BlockInfo> = {
     top: Tile.FurnaceSide, side: Tile.FurnaceFrontLit,
   }),
   [Block.Wool]: def({ name: 'Wool', hardness: 0.8, top: Tile.Wool }),
+  [Block.Chest]: def({
+    name: 'Chest', hardness: 2.5,
+    top: Tile.ChestTop, bottom: Tile.ChestTop, side: Tile.ChestSide,
+  }),
 };
 
 // Vanilla tool effectiveness and harvest tiers (wood 0, stone 1, iron 2).
 const PICKAXE_TIERS: [Block, number][] = [
   [Block.Stone, 0], [Block.Cobblestone, 0], [Block.Sandstone, 0],
   [Block.CoalOre, 0], [Block.IronOre, 1], [Block.GoldOre, 2],
-  [Block.RedstoneOre, 2], [Block.DiamondOre, 2],
+  [Block.RedstoneOre, 2], [Block.DiamondOre, 2], [Block.TitaniumOre, 2],
   [Block.Furnace, 0], [Block.FurnaceLit, 0],
 ];
 for (const [b, tier] of PICKAXE_TIERS) {
@@ -343,7 +375,7 @@ for (const [b, tier] of PICKAXE_TIERS) {
 }
 for (const b of [
   Block.OakLog, Block.BirchLog, Block.SpruceLog, Block.OakPlanks,
-  Block.CraftingTable,
+  Block.CraftingTable, Block.Chest,
 ]) BLOCKS[b].tool = 'axe';
 for (const b of [
   Block.Dirt, Block.Grass, Block.SnowyGrass, Block.Sand,

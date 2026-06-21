@@ -1,13 +1,19 @@
 // Inventory: 36 slots (0-8 hotbar, 9-35 main), a cursor stack for the UI,
 // vanilla click semantics. Pure logic — the DOM lives in inventory_ui.ts.
 
-import { ITEMS, ItemStack } from './items';
+import { ARMOR_SLOT_INDEX, armorPointsOf, ITEMS, ItemStack } from './items';
 
 export const HOTBAR_SIZE = 9;
 export const INV_SIZE = 36;
 /** Slots 36-44 are the 3x3 crafting cells (2x2 mode exposes 4 of them). */
 export const CRAFT_START = 36;
 export const CRAFT_SIZE = 9;
+/** Slots 45-71 mirror the currently-open chest's 27 contents. */
+export const CHEST_START = 45;
+export const CHEST_SIZE = 27;
+/** Slots 72-75 are the worn armor: helmet, chestplate, leggings, boots. */
+export const ARMOR_START = 72;
+export const ARMOR_SIZE = 4;
 
 function maxStack(id: number): number {
   return ITEMS[id]?.maxStack ?? 64;
@@ -15,7 +21,9 @@ function maxStack(id: number): number {
 
 export class Inventory {
   readonly slots: (ItemStack | null)[] =
-    new Array(INV_SIZE + CRAFT_SIZE).fill(null);
+    new Array(INV_SIZE + CRAFT_SIZE + CHEST_SIZE + ARMOR_SIZE).fill(null);
+  /** True while a chest UI is open (routes shift-clicks to/from the chest). */
+  chestOpen = false;
   /** Selected hotbar slot 0-8. */
   selected = 0;
   /** Stack held on the mouse cursor while the inventory UI is open. */
@@ -32,8 +40,11 @@ export class Inventory {
     this.version++;
   }
 
-  /** Insert a stack (hotbar first), returns the count that did not fit. */
-  add(id: number, count: number): number {
+  /** Insert a stack (hotbar first), returns the count that did not fit. When a
+   *  `meta` template is given, its per-item fields (xp/damage/loaded) are kept
+   *  on any new stack created — so re-storing a leveled armor piece, a worn
+   *  tool, or a partly-loaded gun preserves that state. */
+  add(id: number, count: number, meta?: ItemStack): number {
     let left = count;
     // merge into existing stacks
     for (let i = 0; i < INV_SIZE && left > 0; i++) {
@@ -48,7 +59,7 @@ export class Inventory {
     for (let i = 0; i < INV_SIZE && left > 0; i++) {
       if (!this.slots[i]) {
         const take = Math.min(left, maxStack(id));
-        this.slots[i] = { id, count: take };
+        this.slots[i] = meta ? { ...meta, id, count: take } : { id, count: take };
         left -= take;
       }
     }
@@ -70,6 +81,31 @@ export class Inventory {
     s.count -= n;
     if (s.count <= 0) this.slots[this.selected] = null;
     this.version++;
+  }
+
+  /** Total count of an item id across storage slots (hotbar + main). */
+  countItem(id: number): number {
+    let n = 0;
+    for (let i = 0; i < INV_SIZE; i++) {
+      const s = this.slots[i];
+      if (s && s.id === id) n += s.count;
+    }
+    return n;
+  }
+
+  /** Remove up to `n` of an item from storage; returns how many were removed. */
+  removeItem(id: number, n: number): number {
+    let need = n;
+    for (let i = 0; i < INV_SIZE && need > 0; i++) {
+      const s = this.slots[i];
+      if (!s || s.id !== id) continue;
+      const take = Math.min(need, s.count);
+      s.count -= take;
+      need -= take;
+      if (s.count <= 0) this.slots[i] = null;
+    }
+    if (need < n) this.version++;
+    return n - need;
   }
 
   /** Find the hotbar slot holding an item id (-1 if none). */
@@ -132,15 +168,18 @@ export class Inventory {
     this.version++;
   }
 
-  /** Shift-click: hotbar <-> main; crafting cells -> anywhere. */
+  /** Shift-click: chest <-> inventory when a chest is open; otherwise
+   *  crafting -> storage, hotbar <-> main. */
   shiftClick(i: number): void {
     const slot = this.slots[i];
     if (!slot) return;
-    const [from, to] = i >= CRAFT_START
-      ? [i, [0, INV_SIZE]] as const
-      : i < HOTBAR_SIZE
-        ? [i, [HOTBAR_SIZE, INV_SIZE]] as const
-        : [i, [0, HOTBAR_SIZE]] as const;
+    let to: readonly [number, number];
+    if (i >= CHEST_START) to = [0, INV_SIZE];                 // chest -> inventory
+    else if (this.chestOpen) to = [CHEST_START, CHEST_START + CHEST_SIZE]; // -> chest
+    else if (i >= CRAFT_START) to = [0, INV_SIZE];            // crafting -> storage
+    else if (i < HOTBAR_SIZE) to = [HOTBAR_SIZE, INV_SIZE];   // hotbar -> main
+    else to = [0, HOTBAR_SIZE];                               // main -> hotbar
+    const from = i;
     let left = slot.count;
     for (let j = to[0]; j < to[1] && left > 0; j++) {
       const t = this.slots[j];
@@ -167,7 +206,7 @@ export class Inventory {
     const overflow: ItemStack[] = [];
     const stash = (s: ItemStack | null) => {
       if (!s) return;
-      const left = this.add(s.id, s.count);
+      const left = this.add(s.id, s.count, s); // keep xp/damage/loaded metadata
       if (left > 0) overflow.push({ ...s, count: left });
     };
     stash(this.cursor);
@@ -201,5 +240,67 @@ export class Inventory {
     this.cursor = null;
     this.version++;
     return out;
+  }
+
+  /** Mirror a chest's 27 contents into the chest slot region (opening it). */
+  loadChest(contents: (ItemStack | null)[]): void {
+    for (let i = 0; i < CHEST_SIZE; i++) {
+      const s = contents[i];
+      this.slots[CHEST_START + i] = s ? { ...s } : null;
+    }
+    this.chestOpen = true;
+    this.version++;
+  }
+
+  /** Snapshot the chest region without clearing it (for live sync). */
+  readChest(): (ItemStack | null)[] {
+    const out: (ItemStack | null)[] = [];
+    for (let i = 0; i < CHEST_SIZE; i++) {
+      const s = this.slots[CHEST_START + i];
+      out.push(s ? { ...s } : null);
+    }
+    return out;
+  }
+
+  /** Take the chest contents back out and close it (UI closing). */
+  saveChest(): (ItemStack | null)[] {
+    const out = this.readChest();
+    for (let i = 0; i < CHEST_SIZE; i++) this.slots[CHEST_START + i] = null;
+    this.chestOpen = false;
+    this.version++;
+    return out;
+  }
+
+  /** Equip the armor item at slot `i` into its matching armor slot (swapping
+   *  out whatever was worn). No-op for non-armor or armor-region slots. */
+  tryEquipArmor(i: number): boolean {
+    const s = this.slots[i];
+    const a = s ? ITEMS[s.id]?.armor : undefined;
+    if (!s || !a || i >= ARMOR_START) return false;
+    const dest = ARMOR_START + ARMOR_SLOT_INDEX[a.slot];
+    this.slots[i] = this.slots[dest]; // the old piece (or null) goes where this was
+    this.slots[dest] = s;
+    this.version++;
+    return true;
+  }
+
+  /** Total effective defense points from worn armor (base + per-piece level). */
+  armorPoints(): number {
+    let total = 0;
+    for (let i = ARMOR_START; i < ARMOR_START + ARMOR_SIZE; i++) {
+      const s = this.slots[i];
+      if (s) total += armorPointsOf(s);
+    }
+    return total;
+  }
+
+  /** Grant XP to every worn piece (called when the player takes a hit). */
+  addArmorXp(amount: number): void {
+    let changed = false;
+    for (let i = ARMOR_START; i < ARMOR_START + ARMOR_SIZE; i++) {
+      const s = this.slots[i];
+      if (s && ITEMS[s.id]?.armor) { s.xp = (s.xp ?? 0) + amount; changed = true; }
+    }
+    if (changed) this.version++;
   }
 }

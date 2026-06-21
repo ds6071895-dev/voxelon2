@@ -182,6 +182,12 @@ export class GameAudio {
     this.tone({ type: 'sine', from: 90, to: 30, dur: 0.8, gain: 0.6, pos });
   }
 
+  /** Gunshot crack: a sharp high noise burst over a short low thump. */
+  gun(pos?: THREE.Vector3): void {
+    this.noise({ freq: 2000, dur: 0.08, gain: 0.5, slideTo: 500, type: 'highpass', q: 0.8, pos });
+    this.tone({ type: 'square', from: 200, to: 60, dur: 0.06, gain: 0.18, pos });
+  }
+
   caveAmbience(): void {
     // eerie detuned pad
     const base = 110 + Math.random() * 80;

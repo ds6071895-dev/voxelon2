@@ -4,7 +4,8 @@
 
 import * as THREE from 'three';
 import { Block, isSolid } from './blocks';
-import type { Input } from './input';
+import type { PlayerInput } from './input';
+import { mitigate } from './net/protocol';
 import type { World } from './world';
 
 export const MAX_AIR = 15; // seconds of breath = vanilla's 10 bubbles
@@ -56,6 +57,9 @@ export class Player {
   /** In multiplayer, damage is routed here (to the server) instead of being
    *  applied locally — the server owns health. */
   damageSink?: (amount: number) => void;
+  /** Total worn-armor defense points (kept in sync by main each frame); used
+   *  for offline mitigation. In MP the server mitigates from its synced copy. */
+  armorPoints = 0;
   private eye = EYE_STANDING;
 
   constructor(spawn: { x: number; y: number; z: number }) {
@@ -64,12 +68,16 @@ export class Player {
 
   damage(amount: number): void {
     if (this.dead || amount <= 0) return;
-    if (this.damageSink) { this.damageSink(amount); return; } // server-owned
+    // In MP the server owns health AND armor mitigation: send the RAW amount so
+    // it isn't reduced twice. Offline, mitigate here with our worn armor.
+    if (this.damageSink) { this.damageSink(amount); return; }
     if (this.hurtTimer > 0) return;
-    this.health = Math.max(0, this.health - amount);
+    const dealt = mitigate(amount, this.armorPoints);
     this.hurtTimer = 0.5;
     this.damageFlash = 0.45;
     this.regenCooldown = DAMAGE_REGEN_DELAY;
+    if (dealt <= 0) return; // fully absorbed: i-frames + flash, no health loss
+    this.health = Math.max(0, this.health - dealt);
     if (this.health <= 0) this.dead = true;
   }
 
@@ -98,7 +106,7 @@ export class Player {
     return new THREE.Vector3(this.pos.x, this.pos.y + this.eye, this.pos.z);
   }
 
-  update(dt: number, input: Input, world: World): void {
+  update(dt: number, input: PlayerInput, world: World): void {
     if (this.dead) return;
     this.hurtTimer = Math.max(0, this.hurtTimer - dt);
     this.damageFlash = Math.max(0, this.damageFlash - dt);

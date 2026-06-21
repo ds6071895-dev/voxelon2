@@ -57,8 +57,10 @@ export class Interaction {
   target: RayHit | null = null;
   /** Fired on successful break/place (held-item swing hooks in). */
   onAction?: () => void;
-  /** Fired when right-clicking a crafting table or furnace. */
-  onOpenContainer?: (kind: 'table' | 'furnace', x: number, y: number, z: number) => void;
+  /** Fired when right-clicking a crafting table, furnace, or chest. */
+  onOpenContainer?: (
+    kind: 'table' | 'furnace' | 'chest', x: number, y: number, z: number
+  ) => void;
   /** Block dig/place sounds. */
   onBlockSound?: (
     kind: 'break' | 'place', blockId: number, x: number, y: number, z: number
@@ -141,6 +143,7 @@ export class Interaction {
     const id = this.world.getBlock(this.target.x, this.target.y, this.target.z);
     const kind = id === Block.CraftingTable ? 'table'
       : id === Block.Furnace || id === Block.FurnaceLit ? 'furnace'
+      : id === Block.Chest ? 'chest'
       : null;
     if (!kind) return false;
     this.onOpenContainer?.(kind, this.target.x, this.target.y, this.target.z);

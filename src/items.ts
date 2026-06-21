@@ -22,6 +22,26 @@ export const enum Item {
   IronShovel = 120,
   Charcoal = 122,
   GoldIngot = 123,
+  // Armor (helmet/chestplate/leggings/boots × iron/diamond/titanium).
+  TitaniumIngot = 124,
+  IronHelmet = 125,
+  IronChestplate = 126,
+  IronLeggings = 127,
+  IronBoots = 128,
+  DiamondHelmet = 129,
+  DiamondChestplate = 130,
+  DiamondLeggings = 131,
+  DiamondBoots = 132,
+  TitaniumHelmet = 133,
+  TitaniumChestplate = 134,
+  TitaniumLeggings = 135,
+  TitaniumBoots = 136,
+  // Guns + ammo.
+  Pistol = 137,
+  Rifle = 138,
+  RocketLauncher = 139,
+  Bullet = 140,
+  Rocket = 141,
 }
 
 export interface ToolInfo {
@@ -35,6 +55,40 @@ export interface ToolInfo {
   damage: number;
 }
 
+export type ArmorSlot = 'helmet' | 'chestplate' | 'leggings' | 'boots';
+/** Equip-slot index per armor slot (matches Inventory's ARMOR region order). */
+export const ARMOR_SLOT_INDEX: Record<ArmorSlot, number> = {
+  helmet: 0, chestplate: 1, leggings: 2, boots: 3,
+};
+
+export interface ArmorInfo {
+  slot: ArmorSlot;
+  /** Base defense points (vanilla-ish; each point blocks 4% of damage). */
+  points: number;
+  /** Material tier (iron 0, diamond 1, titanium 2) for display/sorting. */
+  tier: number;
+  durability: number;
+}
+
+export interface GunInfo {
+  /** Damage per projectile hit (mobs + PvP). */
+  damage: number;
+  /** Item id consumed per shot (drawn from the magazine, refilled on reload). */
+  ammo: number;
+  /** Magazine capacity (rounds before a reload is needed). */
+  mag: number;
+  /** Seconds between shots. */
+  cooldown: number;
+  /** Held-button auto-fire (true) vs one shot per click (false). */
+  auto: boolean;
+  /** Projectile speed (blocks/s). */
+  speed: number;
+  /** Max projectile travel (blocks) before it despawns. */
+  range: number;
+  /** Rockets fly slower and detonate on impact instead of a point hit. */
+  rocket?: boolean;
+}
+
 export interface ItemInfo {
   name: string;
   kind: 'block' | 'item';
@@ -44,6 +98,8 @@ export interface ItemInfo {
   sprite?: Tile;
   maxStack: number;
   tool?: ToolInfo;
+  armor?: ArmorInfo;
+  gun?: GunInfo;
 }
 
 export interface ItemStack {
@@ -51,6 +107,27 @@ export interface ItemStack {
   count: number;
   /** Accumulated tool damage (tools only). */
   damage?: number;
+  /** Accumulated armor XP (armor only); drives the per-piece level. */
+  xp?: number;
+  /** Rounds currently in a gun's magazine (guns only; undefined = full). */
+  loaded?: number;
+}
+
+// Per-piece armor leveling: wearing a piece through hits levels it up, adding
+// a small defense bonus on top of its base points (client-trusted progression).
+export const ARMOR_MAX_LEVEL = 10;
+const ARMOR_XP_PER_LEVEL = 60;
+const ARMOR_POINTS_PER_LEVEL = 0.3;
+
+export function armorLevel(stack: ItemStack): number {
+  return Math.min(ARMOR_MAX_LEVEL, Math.floor(Math.max(0, stack.xp ?? 0) / ARMOR_XP_PER_LEVEL));
+}
+
+/** Effective defense points for a worn piece (base + level bonus). */
+export function armorPointsOf(stack: ItemStack): number {
+  const a = ITEMS[stack.id]?.armor;
+  if (!a) return 0;
+  return a.points + armorLevel(stack) * ARMOR_POINTS_PER_LEVEL;
 }
 
 function blockItem(block: Block): ItemInfo {
@@ -58,6 +135,12 @@ function blockItem(block: Block): ItemInfo {
 }
 function pureItem(name: string, sprite: Tile): ItemInfo {
   return { name, kind: 'item', sprite, maxStack: 64 };
+}
+function armorItem(name: string, sprite: Tile, armor: ArmorInfo): ItemInfo {
+  return { name, kind: 'item', sprite, maxStack: 1, armor };
+}
+function gunItem(name: string, sprite: Tile, gun: GunInfo): ItemInfo {
+  return { name, kind: 'item', sprite, maxStack: 1, gun };
 }
 
 const TOOL_TIERS = [
@@ -102,6 +185,8 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Block.Torch]: blockItem(Block.Torch),
   [Block.CraftingTable]: blockItem(Block.CraftingTable),
   [Block.Furnace]: blockItem(Block.Furnace),
+  [Block.Chest]: blockItem(Block.Chest),
+  [Block.TitaniumOre]: blockItem(Block.TitaniumOre),
 
   [Item.Stick]: pureItem('Stick', Tile.Stick),
   [Item.Coal]: pureItem('Coal', Tile.CoalItem),
@@ -120,6 +205,44 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Item.IronShovel]: toolItem(2, 'shovel', Tile.IronShovel),
   [Item.Charcoal]: pureItem('Charcoal', Tile.Charcoal),
   [Item.GoldIngot]: pureItem('Gold Ingot', Tile.GoldIngot),
+  [Item.TitaniumIngot]: pureItem('Titanium Ingot', Tile.TitaniumIngot),
+
+  // Armor — base points roughly track vanilla (iron 15, diamond ~17, titanium
+  // ~21 total), with per-piece XP leveling adding up to +3 each over time.
+  [Item.IronHelmet]: armorItem('Iron Helmet', Tile.ArmorHelmetIron,
+    { slot: 'helmet', points: 2, tier: 0, durability: 165 }),
+  [Item.IronChestplate]: armorItem('Iron Chestplate', Tile.ArmorChestIron,
+    { slot: 'chestplate', points: 6, tier: 0, durability: 240 }),
+  [Item.IronLeggings]: armorItem('Iron Leggings', Tile.ArmorLegsIron,
+    { slot: 'leggings', points: 5, tier: 0, durability: 225 }),
+  [Item.IronBoots]: armorItem('Iron Boots', Tile.ArmorBootsIron,
+    { slot: 'boots', points: 2, tier: 0, durability: 195 }),
+  [Item.DiamondHelmet]: armorItem('Diamond Helmet', Tile.ArmorHelmetDiamond,
+    { slot: 'helmet', points: 3, tier: 1, durability: 363 }),
+  [Item.DiamondChestplate]: armorItem('Diamond Chestplate', Tile.ArmorChestDiamond,
+    { slot: 'chestplate', points: 7, tier: 1, durability: 528 }),
+  [Item.DiamondLeggings]: armorItem('Diamond Leggings', Tile.ArmorLegsDiamond,
+    { slot: 'leggings', points: 6, tier: 1, durability: 495 }),
+  [Item.DiamondBoots]: armorItem('Diamond Boots', Tile.ArmorBootsDiamond,
+    { slot: 'boots', points: 3, tier: 1, durability: 429 }),
+  [Item.TitaniumHelmet]: armorItem('Titanium Helmet', Tile.ArmorHelmetTitanium,
+    { slot: 'helmet', points: 3, tier: 2, durability: 555 }),
+  [Item.TitaniumChestplate]: armorItem('Titanium Chestplate', Tile.ArmorChestTitanium,
+    { slot: 'chestplate', points: 8, tier: 2, durability: 800 }),
+  [Item.TitaniumLeggings]: armorItem('Titanium Leggings', Tile.ArmorLegsTitanium,
+    { slot: 'leggings', points: 6, tier: 2, durability: 750 }),
+  [Item.TitaniumBoots]: armorItem('Titanium Boots', Tile.ArmorBootsTitanium,
+    { slot: 'boots', points: 3, tier: 2, durability: 650 }),
+
+  // Guns — pistol (semi), rifle (auto), rocket launcher (explosive).
+  [Item.Pistol]: gunItem('Pistol', Tile.Pistol,
+    { damage: 5, ammo: Item.Bullet, mag: 12, cooldown: 0.32, auto: false, speed: 80, range: 48 }),
+  [Item.Rifle]: gunItem('Rifle', Tile.Rifle,
+    { damage: 4, ammo: Item.Bullet, mag: 30, cooldown: 0.11, auto: true, speed: 100, range: 64 }),
+  [Item.RocketLauncher]: gunItem('Rocket Launcher', Tile.RocketLauncher,
+    { damage: 18, ammo: Item.Rocket, mag: 1, cooldown: 1.1, auto: false, speed: 28, range: 80, rocket: true }),
+  [Item.Bullet]: pureItem('Bullet', Tile.Bullet),
+  [Item.Rocket]: pureItem('Rocket', Tile.Rocket),
 };
 
 /**
