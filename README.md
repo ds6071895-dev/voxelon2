@@ -37,9 +37,9 @@ energy, mobs, armor/guns, and authoritative server-core logic — 151 checks).
 | WASD / mouse | Move / look |
 | Space | Jump / swim up; at a water's edge, hold to climb onto the ledge |
 | Shift | Sneak (slower, won't fall off edges) |
-| Ctrl or double-tap W | Sprint — drains the blue **energy** bar (recharges when you stop) |
-| Left click (hold) | Break block (tool-aware speed) / attack mob or player; **fire** when a gun is held |
-| Right click | Place block / open crafting table, furnace, or chest; **equip** an armor item in the inventory |
+| Q or double-tap W | Sprint — drains the blue **energy** bar (recharges when you stop) |
+| Left click (hold) | Break block (tool-aware speed) / attack mob or player / **sabotage** a machine (HP damage); **fire** when a gun is held |
+| Right click | Place block / open crafting table, furnace, chest, or a **machine** (Autominer / Oil Derrick); **equip** an armor item in the inventory |
 | R | Reload the held gun (pulls ammo from your inventory into its magazine) |
 | Middle click | Select targeted block's hotbar slot |
 | 1–9 / scroll | Select hotbar slot |
@@ -164,6 +164,32 @@ initial title screen; pausing in-game freezes your view over the live world.
   the server, which validates range + facing and applies armor-mitigated damage
   + knockback** (it can't verify line-of-sight, matching the authoritative-lite
   model). An ammo counter shows magazine / reserve.
+- **Automation (M13):** a resource economy. **Cobalt Ore** (a deep, rare ore,
+  rarer than iron, smelts to a **Cobalt Ingot**) and an **oil field** layer
+  (low-frequency richness, far denser under deserts and oceans, surfaced as rare
+  **Oil Shale** seeps). Two machines run under the never-pausing sim as
+  **multi-block, animated structures**: the **Autominer** (a 2-tall rig with a
+  spinning drill) drills the column beneath it, banking ore at a rate
+  proportional to the local ore richness through a level-gated **ore filter**
+  (basic stone/coal/iron → +gold/redstone at L10 → +diamond/titanium at L30);
+  the **Oil Derrick** (a 3-tall lattice tower with a rocking pumpjack) pumps
+  **Oil Barrels** from the oil field (useless on dry ground). Each occupies a
+  real footprint (solid frame cells you can't walk through). Right-click any
+  cell to open a UI with an HP bar, owner, storage fill, live rate, the
+  ore-filter checklist, **~100 levels** of two upgrade axes (**production**
+  rate+tiers, **storage** cap) with **geometric** costs that pull in cobalt the
+  machine can't self-produce (so it can't bankroll its own grind), plus
+  **Collect** and **Claim** buttons. Machines are **contested**: anyone nearby
+  can collect, upgrade, claim, or **sabotage** them — left-clicking a machine
+  deals HP damage instead of mining, and destroying one spills its stored loot
+  *and* drops the machine block to the raider. The simulation is a pure,
+  unit-tested module (`machines.ts`) fed by `Terrain.oreRichness` /
+  `oilRichness`, so yields need no loaded chunk: the **server owns** every
+  machine (created on the placement edit, ticked in its 1 Hz loop, spilled on
+  destroy, collected via the dup-safe item-grant path, range+liveness gated) and
+  **offline single-player runs the identical module locally** (the client
+  predicts the fill bar and reconciles on open/collect in multiplayer). Oil
+  Barrels are the intended fuel currency for a later warfare layer.
 
 ## Architecture
 
@@ -283,16 +309,26 @@ XP leveling) and **guns** (pistol / rifle / rocket launcher with magazines + R
 reload, sub-stepped client projectiles, local mob hits, and server-validated
 range + facing PvP).
 
-Verified headless via `npm run smoke` (151 checks incl. server-core logic for
-edits, PvP, item entities, chests, armor mitigation and ranged PvP, stable
-across repeated runs), a live two-client socket test (join, snapshot, edit
-broadcast, drop/pickup, chest open/set, and server-authoritative chest break
-spilling its contents to both players, leave), `npx tsc`, and a production
-`npm run build`.
+The latest revision adds the **automation economy** (M13): Cobalt ore, an oil
+field, and the server-authoritative **Autominer** / **Oil Derrick** machines —
+contested **multi-block, animated structures** with HP/sabotage, ownership/
+claiming, a level-gated ore filter, and ~100 levels of geometric-cost
+production/storage upgrades, all driven by a pure, unit-tested yield module
+mirrored offline — the economic base for the planned warfare layer (missiles,
+turrets, drones consuming stored oil/ore).
+
+Verified headless via `npm run smoke` (211 checks incl. server-core logic for
+edits, PvP, item entities, chests, armor mitigation and ranged PvP, the cobalt/
+oil/machine sim, machine HP/sabotage/claim, multi-block footprint teardown, and
+server↔offline machine parity, stable across repeated runs), a live two-client
+socket test (join, snapshot, edit broadcast, drop/pickup, chest open/set, and
+server-authoritative chest break spilling its contents to both players, leave),
+`npx tsc`, and a production `npm run build`.
 
 Known simplifications: furnaces and the crafting table show one face on all
-sides (no block-orientation metadata yet); no shift-click routing into open
-furnace slots; mobs don't path around obstacles (they step/jump up one block
+sides (no block-orientation metadata yet); machine upgrade cost is paid
+client-side (matching the inventory trust model), and machine animated models
+are unlit (always full-bright); no shift-click routing into open furnace slots; mobs don't path around obstacles (they step/jump up one block
 and otherwise push straight ahead); the held first-person item uses normal
 depth testing, so pressing flush against a wall can clip it; inventory, chest
 and armor contents are client-trusted (the server clamps your armor value,

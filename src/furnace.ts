@@ -13,6 +13,7 @@ export const SMELT: Record<number, number> = {
   [Block.IronOre]: Item.IronIngot,
   [Block.GoldOre]: Item.GoldIngot,
   [Block.TitaniumOre]: Item.TitaniumIngot,
+  [Block.CobaltOre]: Item.CobaltIngot,
   [Block.Sand]: Block.Glass,
   [Block.Cobblestone]: Block.Stone,
   [Block.OakLog]: Item.Charcoal,

@@ -26,6 +26,15 @@ const ORES: [Block, number, number, number, number, number][] = [
   [Block.GoldOre, 4, 4, 32, 4, 6],
   [Block.RedstoneOre, 6, 4, 16, 4, 8],
   [Block.DiamondOre, 2, 4, 16, 4, 7],
+  // Cobalt: a deep, rare ore (rarer than iron — fewer, smaller veins) in its
+  // own low Y band, feeding the oil-derrick crafting chain.
+  [Block.CobaltOre, 3, 4, 30, 3, 6],
+];
+
+/** Filter ores an Autominer can be configured to drill (matches its UI). */
+export const AUTOMINER_ORES: Block[] = [
+  Block.Stone, Block.CoalOre, Block.IronOre, Block.GoldOre,
+  Block.RedstoneOre, Block.DiamondOre, Block.TitaniumOre,
 ];
 
 export class Terrain {
@@ -36,6 +45,8 @@ export class Terrain {
   private readonly ravine: Noise2D;
   private readonly caves1: Noise3D;
   private readonly caves2: Noise3D;
+  private readonly oreField: Noise2D;
+  private readonly oilField: Noise2D;
 
   constructor(seed: number) {
     this.seed = seed;
@@ -45,6 +56,49 @@ export class Terrain {
     this.ravine = new Noise2D(seed ^ 0xaa11);
     this.caves1 = new Noise3D(seed ^ 0xcafe);
     this.caves2 = new Noise3D(seed ^ 0xbeef);
+    this.oreField = new Noise2D(seed ^ 0x0fe0);
+    this.oilField = new Noise2D(seed ^ 0x011a);
+  }
+
+  /**
+   * Per-column ore richness in [0,1] for each Autominer-filterable ore. A pure
+   * function of position (no chunk needed), so machine yield is deterministic,
+   * unit-testable, and works even where nothing is loaded. Stone is everywhere;
+   * rarer ores have lower bases; titanium only appears under mountains (mirroring
+   * generation). The spatial noise makes *where* you place a machine matter.
+   */
+  oreRichness(x: number, z: number): Record<number, number> {
+    const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
+    const n1 = 0.5 + 0.5 * this.oreField.fbm(x * 0.010, z * 0.010, 3);
+    const n2 = 0.5 + 0.5 * this.oreField.fbm(x * 0.013 + 50, z * 0.013 - 50, 3);
+    const m = this.biomes.mountainFactor(x, z);
+    return {
+      [Block.Stone]: 1,
+      [Block.CoalOre]: clamp01(0.45 + 0.45 * n1),
+      [Block.IronOre]: clamp01(0.32 + 0.45 * n2),
+      [Block.GoldOre]: clamp01(0.10 + 0.40 * n1 * n2),
+      [Block.RedstoneOre]: clamp01(0.14 + 0.40 * n2),
+      [Block.DiamondOre]: clamp01(0.04 + 0.30 * n1 * n1),
+      [Block.TitaniumOre]: m > 0 ? clamp01(0.08 + 0.55 * m) : 0,
+    };
+  }
+
+  /**
+   * Per-column oil-field richness in [0,1]: a low-frequency noise, much denser
+   * under desert and ocean floors and near-zero on ordinary land — so an Oil
+   * Derrick is useless on dry ground and lucrative over a field. Pure (chunk
+   * independent) for the same reasons as oreRichness.
+   */
+  oilRichness(x: number, z: number): number {
+    const base = 0.5 + 0.5 * this.oilField.fbm(x * 0.0026, z * 0.0026, 3);
+    const h = this.height(x, z);
+    const biome = this.biomeWithWater(x, z, h);
+    const factor = biome === Biome.Ocean ? 1.0
+      : biome === Biome.Desert ? 0.9
+      : biome === Biome.Beach ? 0.4
+      : 0.12;
+    const r = base * factor;
+    return r < 0 ? 0 : r > 1 ? 1 : r;
   }
 
   /** Surface height at world (x, z). Pure function, safe across chunks. */
@@ -194,6 +248,7 @@ export class Terrain {
         }
 
         this.decorate(chunk, lx, lz, wx, wz, h, biome);
+        this.oilSeep(chunk, lx, lz, wx, wz, h, biome);
       }
     }
 
@@ -228,6 +283,25 @@ export class Terrain {
     } else if (r < pGrass + 0.006) {
       chunk.set(lx, h + 1, lz,
         hash2(this.seed ^ 0xf1, wx, wz) < 0.6 ? Block.Dandelion : Block.Poppy);
+    }
+  }
+
+  /** Rare visual oil seeps: convert a few stone blocks under rich desert/ocean
+   *  columns to Oil Shale, a "there's oil here" cue. Stone-only so it never
+   *  disturbs surface/biome material counts. */
+  private oilSeep(
+    chunk: Chunk, lx: number, lz: number, wx: number, wz: number,
+    h: number, biome: Biome
+  ): void {
+    if (biome !== Biome.Desert && biome !== Biome.Ocean) return;
+    if (this.oilRichness(wx, wz) < 0.7) return;
+    if (hash2(this.seed ^ 0x011a, wx, wz) > 0.06) return;
+    let placed = 0;
+    for (let y = h - 1; y >= 2 && placed < 3; y--) {
+      if (chunk.get(lx, y, lz) === Block.Stone) {
+        chunk.set(lx, y, lz, Block.OilShale);
+        placed++;
+      }
     }
   }
 

@@ -7,13 +7,19 @@ import { HUD } from './hud';
 import { Input, FROZEN_INPUT } from './input';
 import { Interaction } from './interact';
 import { Inventory } from './inventory';
-import { InventoryUI } from './inventory_ui';
-import { dropFor, GunInfo, ItemStack, ITEMS } from './items';
+import { InventoryUI, MachineUIContext } from './inventory_ui';
+import { dropFor, GunInfo, Item, ItemStack, ITEMS } from './items';
+import {
+  Machines, MachineType, allowedFilterMask, applyUpgrade, claimMachine,
+  collectMachine, currentRate, damageMachine, machineHeight, machineTypeForBlock,
+  sanitizeState, setFilter, upgradeCost,
+} from './machines';
 import { ItemEntities } from './itementity';
 import { Chests } from './chests';
 import { Mobs } from './mobs';
 import { NetClient } from './net/client';
 import { MELEE_RANGE, WORLD_SEED } from './net/protocol';
+import { MachineModels } from './machinemodels';
 import { NetItems } from './netitems';
 import { Particles } from './particles';
 import { Projectiles } from './projectiles';
@@ -86,6 +92,20 @@ const spawn = world.terrain.findSpawn();
 const player = new Player(spawn);
 const input = new Input(renderer.domElement);
 const inventory = new Inventory();
+
+// TEMPORARY starter kit (for testing the automation + combat layers): every
+// player spawns with all three guns + ammo, both machines, and some upgrade
+// materials. Remove this block to restore the empty-inventory survival start.
+for (const [id, n] of [
+  [Item.Pistol, 1], [Item.Rifle, 1], [Item.RocketLauncher, 1],
+  [Item.Bullet, 64], [Item.Rocket, 16],
+  [Block.Autominer, 8], [Block.OilDerrick, 8],
+  // materials to craft/upgrade machines on the spot
+  [Item.IronIngot, 64], [Item.Redstone, 64], [Item.Diamond, 32],
+  [Item.CobaltIngot, 32], [Item.IronPickaxe, 1],
+] as [number, number][]) {
+  inventory.add(id, n);
+}
 const interaction = new Interaction(scene, world, player, cracks, inventory);
 const sky = new Sky(scene, seed);
 const hud = new HUD(atlas.canvas, inventory);
@@ -105,6 +125,9 @@ const netItems = new NetItems(scene, net, atlas);
 const projectiles = new Projectiles(scene, world, mobs, remotePlayers, net, player, particles);
 const chests = new Chests();
 chests.net = net;
+const machines = new Machines(world.terrain);
+const machineModels = new MachineModels(scene, machines);
+let openMachine: { x: number; y: number; z: number } | null = null;
 let openChest: { x: number; y: number; z: number } | null = null;
 let lastChestVersion = -1;   // last version pushed/loaded — gates the live sync
 let chestBaseVersion = -1;   // version as of the last load FROM the server
@@ -163,6 +186,19 @@ world.onBlockBroken = (x, y, z, oldId, harvested) => {
     const dropped = chests.remove(x, y, z);
     if (!net.connected) spillStacks(dropped, x + 0.5, y + 0.3, z + 0.5);
   }
+  if (oldId === Block.Autominer || oldId === Block.OilDerrick) {
+    // Same authority split as chests: offline we spill the local machine's
+    // stored output; online the server spills its authoritative copy on the
+    // edit, so we only drop the local entity here. (Normal play sabotages
+    // machines; this covers explosions/other breaks of the anchor.)
+    const type = oldId === Block.OilDerrick ? MachineType.OilDerrick : MachineType.Autominer;
+    const stored = machines.remove(x, y, z);
+    if (!net.connected) spillStacks(recordToStacks(stored), x + 0.5, y + 0.3, z + 0.5);
+    for (let k = 1; k < machineHeight(type); k++) world.applyRemoteEdit(x, y + k, z, Block.Air);
+    if (openMachine && openMachine.x === x && openMachine.y === y && openMachine.z === z) {
+      forceCloseMachine();
+    }
+  }
 };
 interaction.onAction = () => held.swing();
 interaction.onBlockSound = (kind, blockId, x, y, z) => {
@@ -176,16 +212,147 @@ interaction.onOpenContainer = (kind, x, y, z) => {
     inventory.loadChest(chests.open(x, y, z));
     lastChestVersion = chestBaseVersion = inventory.version;
     invUI.show('chest');
+  } else if (kind === 'machine') {
+    // Right-clicking any footprint cell opens the machine at its anchor.
+    const a = resolveMachineAnchor(x, y, z);
+    if (!a) return;
+    const type = machineTypeForBlock(world.getBlock(a.x, a.y, a.z));
+    if (type === null) return;
+    openMachine = { x: a.x, y: a.y, z: a.z };
+    machines.place(a.x, a.y, a.z, type); // ensure a local entity exists to predict
+    if (net.connected) net.sendMachineOpen(a.x, a.y, a.z); // adopt authoritative state
+    invUI.show('machine', undefined, machineCtxFor(a.x, a.y, a.z));
   } else {
     invUI.show(kind, kind === 'furnace' ? furnaces.get(x, y, z) : undefined);
   }
   document.exitPointerLock();
+};
+
+// --- Machine UI plumbing ----------------------------------------------------
+function recordToStacks(rec: Record<number, number>): ItemStack[] {
+  const out: ItemStack[] = [];
+  for (const [idStr, n] of Object.entries(rec)) {
+    const id = Number(idStr);
+    let r = Math.floor(n);
+    while (r > 0) { const c = Math.min(64, r); out.push({ id, count: c }); r -= c; }
+  }
+  return out;
+}
+function canAffordCost(cost: Record<number, number>): boolean {
+  for (const [idStr, n] of Object.entries(cost)) {
+    if (inventory.countItem(Number(idStr)) < n) return false;
+  }
+  return true;
+}
+function payCost(cost: Record<number, number>): void {
+  for (const [idStr, n] of Object.entries(cost)) inventory.removeItem(Number(idStr), n);
+}
+function grantRecord(rec: Record<number, number>): void {
+  for (const [idStr, n] of Object.entries(rec)) {
+    const id = Number(idStr);
+    const left = inventory.add(id, n);
+    if (left > 0) spillAtPlayer([{ id, count: left }]);
+  }
+}
+function machineCtxFor(x: number, y: number, z: number): MachineUIContext {
+  const here = () => machines.get(x, y, z) ?? null;
+  return {
+    state: here,
+    rate: () => {
+      const s = here();
+      return s ? currentRate(s, machines.context(x, z, s.type)) : 0;
+    },
+    toggleFilter: (i) => {
+      const s = here();
+      if (!s || s.type !== MachineType.Autominer) return;
+      if (!(allowedFilterMask(s.level) & (1 << i))) return; // gated: ignore
+      setFilter(s, (s.filter ^ (1 << i)) >>> 0); // local prediction
+      if (net.connected) net.sendMachineConfig(x, y, z, s.filter);
+    },
+    upgrade: (axis) => {
+      const s = here();
+      if (!s) return;
+      const cost = upgradeCost(s, axis);
+      if (!cost || !canAffordCost(cost)) return;
+      payCost(cost);              // payment is client-side (trust model)
+      applyUpgrade(s, axis);      // local prediction; server also applies + caps
+      if (net.connected) net.sendMachineUpgrade(x, y, z, axis);
+    },
+    collect: () => {
+      const s = here();
+      if (!s) return;
+      if (net.connected) {
+        net.sendMachineCollect(x, y, z); // server grants (gotitem) + sends state
+      } else {
+        grantRecord(collectMachine(s));
+      }
+    },
+    canAfford: (axis) => {
+      const s = here();
+      const cost = s ? upgradeCost(s, axis) : null;
+      return !!cost && canAffordCost(cost);
+    },
+    claim: () => {
+      const s = here();
+      if (!s) return;
+      claimMachine(s, net.connected ? net.username : 'You'); // local predict
+      if (net.connected) net.sendMachineClaim(x, y, z);
+    },
+    myName: () => (net.connected ? net.username : 'You'),
+  };
+}
+function forceCloseMachine(): void {
+  openMachine = null;
+  if (invUI.open && invUI.mode === 'machine') invUI.hide();
+}
+// Resolve a footprint cell (anchor or MachinePart) to the anchor block below.
+function resolveMachineAnchor(x: number, y: number, z: number): { x: number; y: number; z: number } | null {
+  for (let cy = y, i = 0; i < 8; cy--, i++) {
+    const id = world.getBlock(x, cy, z);
+    if (machineTypeForBlock(id) !== null) return { x, y: cy, z };
+    if (id !== Block.MachinePart) return null;
+  }
+  return null;
+}
+
+// Offline destroy: spill loot + drop the machine block once, then silently
+// clear the whole footprint (applyRemoteEdit suppresses the break hook so we
+// don't double-drop), and close the UI if we were viewing it.
+function destroyMachineLocal(ax: number, ay: number, az: number): void {
+  const s = machines.get(ax, ay, az);
+  if (!s) return;
+  const type = s.type;
+  const stored = machines.remove(ax, ay, az);
+  spillStacks(recordToStacks(stored), ax + 0.5, ay + 0.3, az + 0.5);
+  spawnDrop(ax + 0.5, ay + 0.3, az + 0.5,
+    type === MachineType.OilDerrick ? Block.OilDerrick : Block.Autominer, 1);
+  for (let k = 0; k < machineHeight(type); k++) world.applyRemoteEdit(ax, ay + k, az, Block.Air);
+  if (openMachine && openMachine.x === ax && openMachine.y === ay && openMachine.z === az) {
+    forceCloseMachine();
+  }
+}
+
+// Sabotage: a left-click on a machine block damages its HP; at 0 it's destroyed
+// (server-authoritative in MP; local offline) and drops its loot + block.
+interaction.onSabotage = (x, y, z) => {
+  const a = resolveMachineAnchor(x, y, z);
+  if (!a) return;
+  const held = inventory.selectedStack;
+  const tool = held ? ITEMS[held.id]?.tool : undefined;
+  const dmg = (tool?.damage ?? 1) + 3; // fists chip away; tools hit harder
+  if (net.connected) {
+    net.sendMachineHit(a.x, a.y, a.z, dmg);
+  } else {
+    const s = machines.get(a.x, a.y, a.z);
+    if (s && damageMachine(s, dmg)) destroyMachineLocal(a.x, a.y, a.z);
+  }
 };
 invUI.onClose = () => {
   if (openChest) {
     chests.sync(openChest.x, openChest.y, openChest.z, inventory.saveChest());
     openChest = null;
   }
+  openMachine = null; // machine actions sync immediately; nothing to flush
 };
 const spillAtPlayer = (stacks: ItemStack[]) =>
   spillStacks(stacks, player.pos.x, player.pos.y + 1, player.pos.z);
@@ -310,6 +477,16 @@ net.onEdit = (x, y, z, b) => {
     && b !== Block.Chest) {
     forceCloseChest();
   }
+  // Keep local machine prediction in step with remote placements/removals.
+  const mt = machineTypeForBlock(b);
+  if (mt !== null) {
+    machines.place(x, y, z, mt);
+  } else if (machines.has(x, y, z)) {
+    machines.remove(x, y, z); // server already spilled the authoritative copy
+    if (openMachine && openMachine.x === x && openMachine.y === y && openMachine.z === z) {
+      forceCloseMachine();
+    }
+  }
 };
 net.onHurt = (health, dead, k) => {
   player.setHealthFromServer(health, dead);
@@ -347,12 +524,23 @@ net.onChest = (x, y, z, slots) => {
     lastChestVersion = chestBaseVersion = inventory.version;
   }
 };
+net.onMachine = (x, y, z, state) => {
+  // Adopt the server's authoritative machine state (open reply / config /
+  // upgrade / collect echo), replacing our local prediction.
+  const s = sanitizeState(state);
+  if (s) machines.set(x, y, z, s);
+};
 net.onDisconnect = () => {
   player.damageSink = undefined;
   survival.enableRegen = true;
   refreshNetInfo();
 };
-interaction.onEdit = (x, y, z, b) => net.sendEdit(x, y, z, b);
+interaction.onEdit = (x, y, z, b) => {
+  // Placing a machine block creates its local entity (prediction offline + MP).
+  const mt = machineTypeForBlock(b);
+  if (mt !== null) machines.place(x, y, z, mt);
+  net.sendEdit(x, y, z, b);
+};
 net.connect();
 
 let worldReady = false;
@@ -574,6 +762,11 @@ function frame(): void {
     // Simulation never pauses: mobs hunt you and survival ticks in menus too.
     survival.update(dt, player);
     mobs.update(dt, player, sky.sunIntensity);
+    // Machines run under the same never-pausing sim. Offline this is the
+    // authoritative tick; in multiplayer it's a local prediction for the fill
+    // bar (the server is authoritative and reconciles on open/collect).
+    machines.update(dt);
+    machineModels.update(dt); // animate drills/pumpjacks
   }
 
   checkDeath();

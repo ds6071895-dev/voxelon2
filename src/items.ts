@@ -42,6 +42,9 @@ export const enum Item {
   RocketLauncher = 139,
   Bullet = 140,
   Rocket = 141,
+  // Automation layer (M13)
+  CobaltIngot = 142,
+  OilBarrel = 143,
 }
 
 export interface ToolInfo {
@@ -187,6 +190,14 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Block.Furnace]: blockItem(Block.Furnace),
   [Block.Chest]: blockItem(Block.Chest),
   [Block.TitaniumOre]: blockItem(Block.TitaniumOre),
+
+  // Automation (M13): machine blocks + the new resources.
+  [Block.CobaltOre]: blockItem(Block.CobaltOre),
+  [Block.OilShale]: blockItem(Block.OilShale),
+  [Block.Autominer]: blockItem(Block.Autominer),
+  [Block.OilDerrick]: blockItem(Block.OilDerrick),
+  [Item.CobaltIngot]: pureItem('Cobalt Ingot', Tile.CobaltIngot),
+  [Item.OilBarrel]: pureItem('Oil Barrel', Tile.OilBarrel),
 
   [Item.Stick]: pureItem('Stick', Tile.Stick),
   [Item.Coal]: pureItem('Coal', Tile.CoalItem),

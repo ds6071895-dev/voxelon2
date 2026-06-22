@@ -3,6 +3,7 @@
 // the Node server, so it must stay free of DOM and Node APIs.
 
 import type { ItemStack } from '../items';
+import type { MachineState, UpgradeAxis } from '../machines';
 
 export const SERVER_PORT = 8080;
 export const SNAPSHOT_HZ = 15;     // server -> clients transform broadcasts
@@ -60,7 +61,14 @@ export type ClientMsg =
   | { t: 'chestOpen'; x: number; y: number; z: number }
   | { t: 'chestSet'; x: number; y: number; z: number; slots: (ItemStack | null)[] }
   | { t: 'armor'; points: number }            // worn-armor defense, server mitigates
-  | { t: 'rangedAttack'; target: number; amount: number }; // gun/projectile PvP hit
+  | { t: 'rangedAttack'; target: number; amount: number } // gun/projectile PvP hit
+  // Automation machines (block-entities; placement is a normal edit).
+  | { t: 'machineOpen'; x: number; y: number; z: number }
+  | { t: 'machineConfig'; x: number; y: number; z: number; filter: number }
+  | { t: 'machineUpgrade'; x: number; y: number; z: number; axis: UpgradeAxis }
+  | { t: 'machineCollect'; x: number; y: number; z: number }
+  | { t: 'machineHit'; x: number; y: number; z: number; amount: number } // sabotage/raid
+  | { t: 'machineClaim'; x: number; y: number; z: number };
 
 // --- server -> client -------------------------------------------------------
 export type ServerMsg =
@@ -77,9 +85,11 @@ export type ServerMsg =
   | { t: 'respawned'; x: number; y: number; z: number; health: number }
   | { t: 'killfeed'; killer: string; victim: string }
   | { t: 'itemspawn'; item: ItemEntityInfo }
+  | { t: 'itemsmove'; items: { eid: number; x: number; y: number; z: number }[] }
   | { t: 'itemremove'; eid: number }
   | { t: 'gotitem'; item: number; count: number }
-  | { t: 'chest'; x: number; y: number; z: number; slots: (ItemStack | null)[] };
+  | { t: 'chest'; x: number; y: number; z: number; slots: (ItemStack | null)[] }
+  | { t: 'machine'; x: number; y: number; z: number; state: MachineState };
 
 const ADJECTIVES = [
   'Brave', 'Swift', 'Iron', 'Shadow', 'Crimson', 'Frost', 'Rapid', 'Silent',

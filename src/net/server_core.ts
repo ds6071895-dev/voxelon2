@@ -6,6 +6,11 @@
 
 import { BLOCKS, Block } from '../blocks';
 import { ITEMS, ItemStack } from '../items';
+import {
+  MachineState, MachineType, applyUpgrade, claimMachine, collectMachine,
+  damageMachine, machineHeight, machineTypeForBlock, newMachine, setFilter,
+  tickMachine,
+} from '../machines';
 import { Terrain } from '../terrain';
 import {
   ClientMsg, MELEE_DAMAGE, MELEE_RANGE, EDIT_RANGE, CHEST_SLOTS, PICKUP_RANGE,
@@ -45,7 +50,10 @@ export class GameServer {
   private readonly players = new Map<number, ServerPlayer>();
   private readonly edits = new Map<string, number>();
   private readonly chests = new Map<string, (ItemStack | null)[]>();
+  private readonly machines = new Map<string, MachineState>();
   private readonly items = new Map<number, ItemEntityInfo>();
+  /** Per-item fall state (server-owned gravity so drops settle to the ground). */
+  private readonly itemPhys = new Map<number, { vy: number; resting: boolean }>();
   private nextEid = 1;
 
   constructor(seed = WORLD_SEED, rng: () => number = Math.random) {
@@ -158,9 +166,219 @@ export class GameServer {
           msg: { t: 'chest', x: msg.x, y: msg.y, z: msg.z, slots },
         }];
       }
+      case 'machineOpen': {
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        const s = this.ensureMachine(msg.x, msg.y, msg.z);
+        if (!s) return [];
+        return [{ to: id, msg: { t: 'machine', x: msg.x, y: msg.y, z: msg.z, state: s } }];
+      }
+      case 'machineConfig': {
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        const s = this.ensureMachine(msg.x, msg.y, msg.z);
+        if (!s || s.type !== MachineType.Autominer) return [];
+        setFilter(s, msg.filter);
+        // All viewers refresh (server doesn't track who has it open).
+        return [{ to: 'all', msg: { t: 'machine', x: msg.x, y: msg.y, z: msg.z, state: s } }];
+      }
+      case 'machineUpgrade': {
+        // Fail-closed on an unknown axis (rather than defaulting to production).
+        if (msg.axis !== 'production' && msg.axis !== 'storage') return [];
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        const s = this.ensureMachine(msg.x, msg.y, msg.z);
+        if (!s) return [];
+        // Cost is paid client-side (authoritative-lite); the server just bumps
+        // and caps the level so it can never exceed the max.
+        applyUpgrade(s, msg.axis);
+        return [{ to: 'all', msg: { t: 'machine', x: msg.x, y: msg.y, z: msg.z, state: s } }];
+      }
+      case 'machineCollect': {
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        const s = this.ensureMachine(msg.x, msg.y, msg.z);
+        if (!s) return [];
+        const taken = collectMachine(s);
+        const out: Outbound[] = [];
+        // Grant via the same dup-safe path as item pickups (leftover that won't
+        // fit is re-dropped by the client), then refresh viewers.
+        for (const [idStr, count] of Object.entries(taken)) {
+          const itemId = Number(idStr);
+          if (!ITEMS[itemId] || !fin(count) || count <= 0) continue;
+          out.push({ to: id, msg: { t: 'gotitem', item: itemId, count: Math.floor(count) } });
+        }
+        out.push({ to: 'all', msg: { t: 'machine', x: msg.x, y: msg.y, z: msg.z, state: s } });
+        return out;
+      }
+      case 'machineHit': {
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        const s = this.ensureMachine(msg.x, msg.y, msg.z);
+        if (!s) return [];
+        const dmg = fin(msg.amount) ? Math.max(0, Math.min(1000, msg.amount)) : 0;
+        if (damageMachine(s, dmg)) {
+          const key = `${Math.floor(msg.x)},${Math.floor(msg.y)},${Math.floor(msg.z)}`;
+          return this.destroyMachine(key, Math.floor(msg.x), Math.floor(msg.y), Math.floor(msg.z));
+        }
+        // Survived: broadcast the new HP so every viewer's bar updates.
+        return [{ to: 'all', msg: { t: 'machine', x: msg.x, y: msg.y, z: msg.z, state: s } }];
+      }
+      case 'machineClaim': {
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        const s = this.ensureMachine(msg.x, msg.y, msg.z);
+        if (!s) return [];
+        claimMachine(s, p.username);
+        return [{ to: 'all', msg: { t: 'machine', x: msg.x, y: msg.y, z: msg.z, state: s } }];
+      }
       default:
         return [];
     }
+  }
+
+  /** Raid-destroy a machine: spill its stored output AND drop the machine block
+   *  itself as loot, delete the entity, and clear its whole footprint (anchor +
+   *  part cells) for everyone. */
+  private destroyMachine(key: string, x: number, y: number, z: number): Outbound[] {
+    const s = this.machines.get(key);
+    const out = this.spillMachine(key, x, y, z); // spills stored + deletes entity
+    const type = s ? s.type : MachineType.Autominer;
+    if (s) {
+      const blockId = type === MachineType.OilDerrick ? Block.OilDerrick : Block.Autominer;
+      out.push(this.spawnItem(blockId, 1,
+        x + 0.5 + (this.rng() - 0.5), y + 0.3, z + 0.5 + (this.rng() - 0.5)));
+    }
+    out.push(...this.clearFootprint(x, y, z, type, true));
+    return out;
+  }
+
+  /** Set the machine's footprint cells (anchor + parts above) to air and
+   *  broadcast the edits. `includeAnchor=false` leaves the anchor for the caller
+   *  to broadcast (used when an edit already removes the anchor cell). */
+  private clearFootprint(
+    x: number, y: number, z: number, type: MachineType, includeAnchor: boolean
+  ): Outbound[] {
+    const out: Outbound[] = [];
+    const h = machineHeight(type);
+    for (let k = includeAnchor ? 0 : 1; k < h; k++) {
+      const cy = y + k;
+      const ck = `${x},${cy},${z}`;
+      const cur = this.edits.get(ck);
+      // Only clear the anchor (k=0) or genuine part cells, never unrelated blocks.
+      if (k === 0 || cur === Block.MachinePart) {
+        this.edits.set(ck, Block.Air);
+        out.push({ to: 'all', msg: { t: 'edit', x, y: cy, z, block: Block.Air } });
+      }
+    }
+    return out;
+  }
+
+  /** Gate machine interaction: the player must be alive and within edit range
+   *  of the machine (fail-closed on NaN). Mirrors handleEdit/handlePickup so a
+   *  client can't drain or reconfigure a machine it isn't standing next to —
+   *  machines mint resources, so remote draining would be real theft. */
+  private nearMachine(p: ServerPlayer, x: number, y: number, z: number): boolean {
+    if (p.dead || !fin(p.x, p.y, p.z, x, y, z)) return false;
+    const dx = Math.floor(x) + 0.5 - p.x;
+    const dy = Math.floor(y) + 0.5 - p.y;
+    const dz = Math.floor(z) + 0.5 - p.z;
+    return dx * dx + dy * dy + dz * dz <= EDIT_RANGE * EDIT_RANGE;
+  }
+
+  /** The machine at a position, but only if the edit log still records a
+   *  machine block there (fail-closed against stale/forged ops). Creates the
+   *  entity lazily if the block exists but no state was tracked yet. */
+  private ensureMachine(x: number, y: number, z: number): MachineState | undefined {
+    if (!fin(x, y, z)) return undefined;
+    const key = `${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`;
+    const type = machineTypeForBlock(this.edits.get(key) ?? -1);
+    if (type === null) return undefined;
+    let s = this.machines.get(key);
+    if (!s) { s = newMachine(type); this.machines.set(key, s); }
+    return s;
+  }
+
+  /** Spill a broken machine's stored output as item entities, then drop it. */
+  private spillMachine(key: string, x: number, y: number, z: number): Outbound[] {
+    const s = this.machines.get(key);
+    this.machines.delete(key);
+    if (!s) return [];
+    const out: Outbound[] = [];
+    let entities = 0;
+    for (const [idStr, count] of Object.entries(s.stored)) {
+      const item = Number(idStr);
+      if (!ITEMS[item] || !fin(count) || count <= 0) continue;
+      let remaining = Math.floor(count);
+      while (remaining > 0 && entities < 64) { // cap entities per break
+        const c = Math.min(64, remaining);
+        remaining -= c;
+        entities++;
+        out.push(this.spawnItem(item, c,
+          x + 0.5 + (this.rng() - 0.5), y + 0.3, z + 0.5 + (this.rng() - 0.5)));
+      }
+    }
+    return out;
+  }
+
+  /** Tick every placed machine using its column's terrain richness. Call from
+   *  the per-second server loop alongside tickRegen. */
+  tickMachines(dt: number): void {
+    if (!fin(dt) || dt <= 0) return;
+    for (const [key, s] of this.machines) {
+      const parts = key.split(',');
+      const x = Number(parts[0]), z = Number(parts[2]);
+      const ctx = s.type === MachineType.Autominer
+        ? { ore: this.terrain.oreRichness(x, z) }
+        : { oil: this.terrain.oilRichness(x, z) };
+      tickMachine(s, ctx, dt);
+    }
+  }
+
+  /** Create a server-owned item entity (registered for gravity) and return the
+   *  itemspawn broadcast for it. */
+  private spawnItem(item: number, count: number, x: number, y: number, z: number): Outbound {
+    const eid = this.nextEid++;
+    const info: ItemEntityInfo = { eid, item, count: Math.min(64, Math.floor(count)), x, y, z };
+    this.items.set(eid, info);
+    this.itemPhys.set(eid, { vy: 0, resting: false });
+    return { to: 'all', msg: { t: 'itemspawn', item: info } };
+  }
+
+  /** Is the cell solid from the server's view (player edits win; otherwise the
+   *  natural terrain surface). Ignores caves on purpose — that makes items rest
+   *  where they land rather than sink through unknown cavities. */
+  private serverSolid(x: number, y: number, z: number): boolean {
+    if (y < 0) return true;
+    const e = this.edits.get(`${x},${y},${z}`);
+    if (e !== undefined) return e !== Block.Air && (BLOCKS[e]?.solid ?? false);
+    return y <= this.terrain.height(x, z);
+  }
+
+  /** Advance dropped-item gravity; returns the items whose position changed
+   *  (for a periodic broadcast). Items settle onto the ground and then idle. */
+  tickItems(dt: number): { eid: number; x: number; y: number; z: number }[] {
+    if (!fin(dt) || dt <= 0) return [];
+    const moved: { eid: number; x: number; y: number; z: number }[] = [];
+    for (const info of this.items.values()) {
+      const st = this.itemPhys.get(info.eid);
+      if (!st || st.resting) continue;
+      st.vy = Math.min(40, st.vy + 18 * dt); // gravity, terminal-velocity capped
+      const fx = Math.floor(info.x), fz = Math.floor(info.z);
+      // Sub-step the descent so a fast fall can't tunnel a thin floor.
+      let y = info.y;
+      const fall = st.vy * dt;
+      const steps = Math.max(1, Math.ceil(fall / 0.5));
+      const stepY = fall / steps;
+      for (let s = 0; s < steps; s++) {
+        const ny = y - stepY;
+        if (this.serverSolid(fx, Math.floor(ny), fz)) {
+          y = Math.floor(ny) + 1;
+          st.vy = 0; st.resting = true;
+          break;
+        }
+        y = ny;
+      }
+      if (y !== info.y || st.resting) {
+        info.y = y;
+        moved.push({ eid: info.eid, x: info.x, y: info.y, z: info.z });
+      }
+    }
+    return moved;
   }
 
   private handleDrop(
@@ -174,13 +392,7 @@ export class GameServer {
     for (const it of items) {
       if (n++ >= 64) break; // sanity cap per request
       if (!it || !ITEMS[it.id] || !fin(it.count) || it.count <= 0) continue;
-      const eid = this.nextEid++;
-      const info: ItemEntityInfo = {
-        eid, item: it.id, count: Math.min(64, Math.floor(it.count)),
-        x: x + (this.rng() - 0.5), y, z: z + (this.rng() - 0.5),
-      };
-      this.items.set(eid, info);
-      out.push({ to: 'all', msg: { t: 'itemspawn', item: info } });
+      out.push(this.spawnItem(it.id, it.count, x + (this.rng() - 0.5), y, z + (this.rng() - 0.5)));
     }
     return out;
   }
@@ -191,6 +403,7 @@ export class GameServer {
     const dx = item.x - p.x, dy = item.y - p.y, dz = item.z - p.z;
     if (!(dx * dx + dy * dy + dz * dz <= PICKUP_RANGE * PICKUP_RANGE)) return [];
     this.items.delete(eid);
+    this.itemPhys.delete(eid);
     return [
       { to: p.id, msg: { t: 'gotitem', item: item.item, count: item.count } },
       { to: 'all', msg: { t: 'itemremove', eid } },
@@ -211,14 +424,31 @@ export class GameServer {
     const d2 = dx * dx + dy * dy + dz * dz;
     if (!(d2 <= EDIT_RANGE * EDIT_RANGE)) return []; // fail-closed (NaN -> reject)
     const key = `${x},${y},${z}`;
+    const prev = this.edits.get(key);
     const out: Outbound[] = [];
     // Server-authoritative chest break: if this edit removes a chest, spill its
     // stored contents as item entities everyone sees and clear the storage —
     // independent of whether the breaking client ever opened (cached) it.
-    if (this.edits.get(key) === Block.Chest && block !== Block.Chest) {
+    if (prev === Block.Chest && block !== Block.Chest) {
       out.push(...this.spillChest(key, x, y, z));
     }
+    // Same for machines: removing/replacing the anchor spills its stored output
+    // and clears the rest of the footprint (the breaker bypasses no validation —
+    // this is the same authoritative break path as chests). Normal play never
+    // hits this (machines are sabotaged, not edited); it covers explosions and
+    // hacked direct edits so no orphan part cells are left behind.
+    const prevType = machineTypeForBlock(prev ?? -1);
+    if (prevType !== null && block !== prev) {
+      out.push(...this.spillMachine(key, x, y, z));
+      out.push(...this.clearFootprint(x, y, z, prevType, false));
+    }
     this.edits.set(key, block);
+    // Placing a machine block creates its server entity, which then ticks even
+    // with no chunk loaded and no one viewing it.
+    const placed = machineTypeForBlock(block);
+    if (placed !== null && !this.machines.has(key)) {
+      this.machines.set(key, newMachine(placed));
+    }
     out.push({ to: 'all', msg: { t: 'edit', x, y, z, block } });
     return out;
   }
@@ -231,13 +461,8 @@ export class GameServer {
     const out: Outbound[] = [];
     for (const s of contents) {
       if (!s || !ITEMS[s.id] || !fin(s.count) || s.count <= 0) continue;
-      const eid = this.nextEid++;
-      const info: ItemEntityInfo = {
-        eid, item: s.id, count: Math.min(64, Math.floor(s.count)),
-        x: x + 0.5 + (this.rng() - 0.5), y: y + 0.3, z: z + 0.5 + (this.rng() - 0.5),
-      };
-      this.items.set(eid, info);
-      out.push({ to: 'all', msg: { t: 'itemspawn', item: info } });
+      out.push(this.spawnItem(s.id, s.count,
+        x + 0.5 + (this.rng() - 0.5), y + 0.3, z + 0.5 + (this.rng() - 0.5)));
     }
     return out;
   }

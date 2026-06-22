@@ -72,8 +72,14 @@ setInterval(() => {
   const dt = (now - last) / 1000;
   last = now;
   game.tickRegen(dt);
+  game.tickMachines(dt);
+  const moved = game.tickItems(dt);
   const snap: ServerMsg = { t: 'snapshot', players: game.snapshot() };
   for (const cid of sockets.keys()) send(cid, snap);
+  if (moved.length) {
+    const mv: ServerMsg = { t: 'itemsmove', items: moved };
+    for (const cid of sockets.keys()) send(cid, mv);
+  }
 }, 1000 / SNAPSHOT_HZ);
 
 console.log(`VOXELON server listening on ws://localhost:${port} (seed ${game.seed})`);

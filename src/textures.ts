@@ -39,6 +39,20 @@ function shade(base: RGBA, f: number): RGBA {
   return [base[0] * f, base[1] * f, base[2] * f, base[3]];
 }
 
+/** Wrap a painter so its art is mirrored on the X axis (left<->right). */
+function flipX(fn: (p: Painter, seed: number) => void) {
+  return (p: Painter, seed: number): void => {
+    const tmp = new Painter();
+    fn(tmp, seed);
+    for (let y = 0; y < TILE_PX; y++) {
+      for (let x = 0; x < TILE_PX; x++) {
+        const i = (y * TILE_PX + (TILE_PX - 1 - x)) * 4;
+        p.set(x, y, [tmp.data[i], tmp.data[i + 1], tmp.data[i + 2], tmp.data[i + 3]]);
+      }
+    }
+  };
+}
+
 /** Per-pixel brightness jitter with 2x2 clumping, like vanilla's speckle. */
 function speckle(seed: number, x: number, y: number, amount: number): number {
   const coarse = hash2(seed, x >> 1, y >> 1);
@@ -401,12 +415,28 @@ function paintMeat(raw: boolean, fat: boolean) {
 }
 
 function paintRedstoneDust(p: Painter, seed: number): void {
-  for (let i = 0; i < 40; i++) {
-    const x = 3 + Math.floor(hash2(seed, i, 0) * 10);
-    const y = 7 + Math.floor(hash2(seed, i, 1) * 7);
-    const d = Math.abs(x - 8) + Math.abs(y - 11);
-    if (d > 6) continue;
-    p.set(x, y, shade([220, 30, 20, 255], 0.7 + hash2(seed, x, y) * 0.6));
+  const base: RGBA = [196, 26, 18, 255];
+  // A rounded heap of powder: lit toward the top, darker and granular at the
+  // base, with a few bright glints — reads as a pile of red dust.
+  for (let y = 3; y <= 13; y++) {
+    for (let x = 3; x <= 12; x++) {
+      const dx = (x - 7.5) / 5.2;
+      const dy = (y - 9) / 5.2;
+      if (dx * dx + dy * dy > 1) continue;
+      const grad = 1.1 - (y - 3) * 0.04;                 // top-lit gradient
+      let f = grad * (0.78 + hash2(seed ^ 0x3, x, y) * 0.38);
+      if (hash2(seed ^ 0x7, x, y) > 0.85) f *= 0.55;     // dark grains
+      p.set(x, y, shade(base, Math.min(1.25, f)));
+    }
+  }
+  for (const [gx, gy] of [[6, 6], [9, 7], [7, 9], [10, 10], [5, 8]]) {
+    p.set(gx, gy, [255, 116, 92, 255]);                  // glints
+  }
+  // a couple of stray specks for a powdery feel
+  for (let i = 0; i < 5; i++) {
+    const x = 2 + Math.floor(hash2(seed ^ 0x21, i, 0) * 12);
+    const y = 11 + Math.floor(hash2(seed ^ 0x22, i, 1) * 3);
+    p.set(x, y, shade(base, 0.6 + hash2(seed, x, y) * 0.3));
   }
 }
 
@@ -759,6 +789,119 @@ function paintRocket(p: Painter, seed: number): void {
   p.set(7, 14, [255, 200, 90, 255]); p.set(8, 14, [255, 160, 60, 255]);     // exhaust
 }
 
+// --- Automation (M13): cobalt, oil, machine blocks ------------------------
+
+const COBALT_SPOT: RGBA = [86, 112, 196, 255];
+const COBALT_SPOT2: RGBA = [54, 74, 140, 255];
+const MACHINE_METAL: RGBA = [120, 124, 132, 255];
+const MACHINE_FRAME: RGBA = [66, 68, 76, 255];
+const MACHINE_DARK: RGBA = [40, 40, 46, 255];
+
+function paintOilShale(p: Painter, seed: number): void {
+  p.fill((x, y) => shade([54, 52, 58, 255], speckle(seed, x, y, 0.14)));
+  // black tar streaks
+  for (let i = 0; i < 26; i++) {
+    const x = Math.floor(hash2(seed ^ 0x5, i, 0) * 16);
+    const y = Math.floor(hash2(seed ^ 0x6, i, 1) * 16);
+    p.set(x, y, [20, 18, 24, 255]);
+    if (hash2(seed ^ 7, i, 2) > 0.6) p.set(x, (y + 1) & 15, [14, 12, 16, 255]);
+  }
+  p.set(4, 4, [92, 98, 122, 255]); // faint oily sheen
+  p.set(5, 4, [80, 86, 110, 255]);
+}
+
+function paintOilBarrel(p: Painter, seed: number): void {
+  const body: RGBA = [60, 70, 82, 255];
+  const band: RGBA = [40, 48, 58, 255];
+  const lid: RGBA = [92, 102, 114, 255];
+  for (let y = 2; y <= 14; y++) {
+    for (let x = 4; x <= 11; x++) {
+      let c = body;
+      if (y === 2 || y === 14) c = lid;
+      else if (y === 6 || y === 10) c = band; // ribs
+      const edge = x === 4 || x === 11;
+      p.set(x, y, shade(c, (edge ? 0.7 : 1) * (0.85 + hash2(seed, x, y) * 0.2)));
+    }
+  }
+  p.set(7, 8, [28, 26, 22, 255]); // oil label smudge
+  p.set(8, 8, [28, 26, 22, 255]);
+  p.set(8, 9, [22, 20, 16, 255]);
+  p.set(5, 2, [156, 166, 176, 255]); // top highlight
+}
+
+function paintMachineFrame(p: Painter, seed: number, base: RGBA): void {
+  p.fill((x, y) =>
+    shade(base, (0.82 + hash2(seed, x >> 2, y >> 2) * 0.22) * speckle(seed ^ 11, x, y, 0.06)));
+  for (let i = 0; i < 16; i++) {
+    p.set(i, 0, MACHINE_FRAME); p.set(i, 15, MACHINE_FRAME);
+    p.set(0, i, MACHINE_FRAME); p.set(15, i, MACHINE_FRAME);
+  }
+  for (const [x, y] of [[2, 2], [13, 2], [2, 13], [13, 13]]) p.set(x, y, MACHINE_DARK);
+}
+
+function paintAutominerSide(p: Painter, seed: number): void {
+  paintMachineFrame(p, seed, MACHINE_METAL);
+  // hazard stripe band
+  for (let x = 1; x <= 14; x++) {
+    const c: RGBA = ((x + 1) >> 1) % 2 ? [230, 196, 40, 255] : [40, 40, 44, 255];
+    p.set(x, 2, c); p.set(x, 3, c);
+  }
+  // central drill bit pointing down
+  const bit: RGBA = [184, 188, 194, 255];
+  for (let y = 6; y <= 11; y++) {
+    const w = 11 - y;
+    for (let x = 7 - w; x <= 8 + w; x++) p.set(x, y, shade(bit, 0.78 + hash2(seed, x, y) * 0.3));
+  }
+  p.set(7, 12, [150, 154, 160, 255]); p.set(8, 12, [150, 154, 160, 255]);
+}
+
+function paintAutominerTop(p: Painter, seed: number): void {
+  paintMachineFrame(p, seed, [110, 114, 122, 255]);
+  // central bore hole
+  for (let a = 0; a < 16; a++) {
+    const ang = (a / 16) * Math.PI * 2;
+    p.set(Math.round(7.5 + 3 * Math.cos(ang)), Math.round(7.5 + 3 * Math.sin(ang)), MACHINE_DARK);
+  }
+  for (let y = 6; y <= 9; y++) for (let x = 6; x <= 9; x++) p.set(x, y, [24, 24, 28, 255]);
+}
+
+function paintOilDerrickSide(p: Painter, seed: number): void {
+  paintMachineFrame(p, seed, [96, 100, 108, 255]);
+  const beam: RGBA = [40, 40, 44, 255];
+  // A-frame derrick legs that taper toward the top
+  for (let y = 2; y <= 13; y++) {
+    const inset = Math.floor((13 - y) / 3);
+    p.set(3 + inset, y, beam); p.set(12 - inset, y, beam);
+  }
+  for (const yy of [4, 7, 10]) for (let x = 4; x <= 11; x++) p.set(x, yy, beam); // braces
+  for (let x = 5; x <= 10; x++) p.set(x, 13, [24, 22, 20, 255]); // oil pool at base
+}
+
+function paintOilDerrickTop(p: Painter, seed: number): void {
+  paintMachineFrame(p, seed, [96, 100, 108, 255]);
+  // red wellhead valve wheel
+  const red: RGBA = [180, 60, 50, 255];
+  for (let a = 0; a < 16; a++) {
+    const ang = (a / 16) * Math.PI * 2;
+    p.set(Math.round(7.5 + 3 * Math.cos(ang)), Math.round(7.5 + 3 * Math.sin(ang)), red);
+  }
+  for (let y = 7; y <= 8; y++) for (let x = 7; x <= 8; x++) p.set(x, y, MACHINE_FRAME);
+}
+
+function paintMachinePart(p: Painter, seed: number): void {
+  // Industrial girder lattice with cutout gaps so it reads as an open frame.
+  p.fill(() => [0, 0, 0, 0]);
+  const beam: RGBA = [88, 92, 102, 255];
+  for (let i = 0; i < 16; i++) {
+    p.set(2, i, shade(beam, 0.9 + hash2(seed, 2, i) * 0.2));
+    p.set(13, i, shade(beam, 0.9 + hash2(seed, 13, i) * 0.2));
+    p.set(i, 2, shade(beam, 0.9 + hash2(seed, i, 2) * 0.2));
+    p.set(i, 13, shade(beam, 0.9 + hash2(seed, i, 13) * 0.2));
+  }
+  for (let i = 0; i < 16; i++) { p.set(i, i, shade(beam, 0.75)); p.set(15 - i, i, shade(beam, 0.75)); }
+  for (const [x, y] of [[2, 2], [13, 2], [2, 13], [13, 13]]) p.set(x, y, [40, 42, 48, 255]);
+}
+
 const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.GrassTop]: paintGrassTop,
   [Tile.GrassSide]: paintGrassSide,
@@ -870,11 +1013,21 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.ArmorChestTitanium]: paintArmorPiece('chestplate', ARMOR_TITAN),
   [Tile.ArmorLegsTitanium]: paintArmorPiece('leggings', ARMOR_TITAN),
   [Tile.ArmorBootsTitanium]: paintArmorPiece('boots', ARMOR_TITAN),
-  [Tile.Pistol]: paintPistol,
-  [Tile.Rifle]: paintRifle,
-  [Tile.RocketLauncher]: paintRocketLauncher,
+  [Tile.Pistol]: flipX(paintPistol),
+  [Tile.Rifle]: flipX(paintRifle),
+  [Tile.RocketLauncher]: flipX(paintRocketLauncher),
   [Tile.Bullet]: paintBullet,
   [Tile.Rocket]: paintRocket,
+  // Automation (M13)
+  [Tile.CobaltOre]: paintOre(COBALT_SPOT, COBALT_SPOT2),
+  [Tile.CobaltIngot]: paintIngot([130, 150, 210, 255]),
+  [Tile.OilBarrel]: paintOilBarrel,
+  [Tile.OilShale]: paintOilShale,
+  [Tile.AutominerSide]: paintAutominerSide,
+  [Tile.AutominerTop]: paintAutominerTop,
+  [Tile.OilDerrickSide]: paintOilDerrickSide,
+  [Tile.OilDerrickTop]: paintOilDerrickTop,
+  [Tile.MachinePart]: paintMachinePart,
 };
 
 export function createAtlas(seed = 1337): Atlas {

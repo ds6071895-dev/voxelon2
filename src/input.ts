@@ -104,7 +104,7 @@ export class Input {
   get right(): boolean { return this.down('KeyD'); }
   get jump(): boolean { return this.down('Space'); }
   get sneak(): boolean { return this.down('ShiftLeft') || this.down('ShiftRight'); }
-  get sprintKey(): boolean { return this.down('ControlLeft') || this.down('ControlRight'); }
+  get sprintKey(): boolean { return this.down('KeyQ'); }
 
   /** Consume per-frame deltas/edges; call once at the end of each frame. */
   endFrame(): void {

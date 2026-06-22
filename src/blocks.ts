@@ -47,6 +47,12 @@ export const enum Block {
   Chest = 37,
   // Armor material ore (deep in mountains)
   TitaniumOre = 38,
+  // Automation layer (M13)
+  CobaltOre = 39,    // deep, rare ore -> cobalt ingot (oil-derrick crafting)
+  OilShale = 40,     // visual oil-field seep block
+  Autominer = 41,    // block-entity: drills the column beneath it
+  OilDerrick = 42,   // block-entity: pumps oil from the local oil field
+  MachinePart = 43,  // structural cell of a machine's multi-block footprint
 }
 
 export const enum Tile {
@@ -158,6 +164,16 @@ export const enum Tile {
   RocketLauncher = 101,
   Bullet = 102,
   Rocket = 103,
+  // Automation layer (M13)
+  CobaltOre = 104,
+  CobaltIngot = 105,
+  OilBarrel = 106,
+  OilShale = 107,
+  AutominerSide = 108,
+  AutominerTop = 109,
+  OilDerrickSide = 110,
+  OilDerrickTop = 111,
+  MachinePart = 112,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel';
@@ -359,6 +375,25 @@ export const BLOCKS: Record<number, BlockInfo> = {
     name: 'Chest', hardness: 2.5,
     top: Tile.ChestTop, bottom: Tile.ChestTop, side: Tile.ChestSide,
   }),
+
+  // --- Automation (M13) ---
+  [Block.CobaltOre]: def({ name: 'Cobalt Ore', hardness: 3.5, top: Tile.CobaltOre }),
+  [Block.OilShale]: def({ name: 'Oil Shale', hardness: 1.6, top: Tile.OilShale }),
+  [Block.Autominer]: def({
+    name: 'Autominer', hardness: 3.5,
+    top: Tile.AutominerTop, bottom: Tile.AutominerTop, side: Tile.AutominerSide,
+  }),
+  [Block.OilDerrick]: def({
+    name: 'Oil Derrick', hardness: 3.5,
+    top: Tile.OilDerrickTop, bottom: Tile.AutominerTop, side: Tile.OilDerrickSide,
+  }),
+  // Structural footprint cell of a machine (the tower/rig body). Solid so you
+  // can't walk through a machine; a lattice cutout texture so it reads as a
+  // frame. Not minable/placeable on its own — it lives and dies with its anchor.
+  [Block.MachinePart]: def({
+    name: 'Machine Frame', hardness: 3.5,
+    top: Tile.MachinePart, opaque: false, occludes: false,
+  }),
 };
 
 // Vanilla tool effectiveness and harvest tiers (wood 0, stone 1, iron 2).
@@ -366,7 +401,10 @@ const PICKAXE_TIERS: [Block, number][] = [
   [Block.Stone, 0], [Block.Cobblestone, 0], [Block.Sandstone, 0],
   [Block.CoalOre, 0], [Block.IronOre, 1], [Block.GoldOre, 2],
   [Block.RedstoneOre, 2], [Block.DiamondOre, 2], [Block.TitaniumOre, 2],
+  [Block.CobaltOre, 2], // cobalt needs an iron pickaxe, like gold/diamond
+  [Block.OilShale, 0],
   [Block.Furnace, 0], [Block.FurnaceLit, 0],
+  [Block.Autominer, 0], [Block.OilDerrick, 0],
 ];
 for (const [b, tier] of PICKAXE_TIERS) {
   BLOCKS[b].tool = 'pickaxe';

@@ -8,11 +8,17 @@ import {
 import type { Input } from './input';
 import type { Inventory } from './inventory';
 import { ITEMS, miningStats } from './items';
+import { machineHeight, machineTypeForBlock } from './machines';
 import type { Player } from './player';
 import type { World } from './world';
 
 export const REACH = 4.5;
 const PLACE_REPEAT = 0.25; // vanilla holds place every 4 ticks
+
+/** Machine blocks (and their footprint parts) are sabotaged, not mined. */
+export function isMachineBlock(id: number): boolean {
+  return id === Block.Autominer || id === Block.OilDerrick || id === Block.MachinePart;
+}
 
 export interface RayHit {
   x: number; y: number; z: number;
@@ -57,10 +63,12 @@ export class Interaction {
   target: RayHit | null = null;
   /** Fired on successful break/place (held-item swing hooks in). */
   onAction?: () => void;
-  /** Fired when right-clicking a crafting table, furnace, or chest. */
+  /** Fired when right-clicking a crafting table, furnace, chest, or machine. */
   onOpenContainer?: (
-    kind: 'table' | 'furnace' | 'chest', x: number, y: number, z: number
+    kind: 'table' | 'furnace' | 'chest' | 'machine', x: number, y: number, z: number
   ) => void;
+  /** Fired on left-click against a machine block: sabotage (HP damage), not mining. */
+  onSabotage?: (x: number, y: number, z: number) => void;
   /** Block dig/place sounds. */
   onBlockSound?: (
     kind: 'break' | 'place', blockId: number, x: number, y: number, z: number
@@ -126,8 +134,20 @@ export class Interaction {
     }
 
     const opened = this.tryOpenContainer(input);
-    this.updateBreaking(dt, input, suppressMining);
-    if (!opened) this.updatePlacing(dt, input);
+    const targetId = this.target
+      ? this.world.getBlock(this.target.x, this.target.y, this.target.z) : Block.Air;
+    if (isMachineBlock(targetId)) {
+      // Machines aren't mined: a left-click is a sabotage hit (HP damage).
+      if (input.leftClicked && !suppressMining && !opened) {
+        this.onSabotage?.(this.target!.x, this.target!.y, this.target!.z);
+        this.onAction?.();
+      }
+      this.breakKey = ''; this.breakProgress = 0; this.crackMesh.visible = false;
+      if (!opened) this.updatePlacing(dt, input);
+    } else {
+      this.updateBreaking(dt, input, suppressMining);
+      if (!opened) this.updatePlacing(dt, input);
+    }
 
     // Middle-click pick block: select the matching hotbar slot.
     if (input.middleClicked && this.target) {
@@ -144,6 +164,7 @@ export class Interaction {
     const kind = id === Block.CraftingTable ? 'table'
       : id === Block.Furnace || id === Block.FurnaceLit ? 'furnace'
       : id === Block.Chest ? 'chest'
+      : isMachineBlock(id) ? 'machine' // anchor or a footprint part -> open the machine
       : null;
     if (!kind) return false;
     this.onOpenContainer?.(kind, this.target.x, this.target.y, this.target.z);
@@ -215,6 +236,30 @@ export class Interaction {
     const existing = this.world.getBlock(px, py, pz);
     if (!isReplaceable(existing)) return;
     if (py < 0 || py >= 256) return;
+
+    // Machines occupy a vertical footprint (anchor at base + part cells above).
+    // Validate the whole column is clear before committing the structure.
+    const mType = machineTypeForBlock(blockId);
+    if (mType !== null) {
+      const h = machineHeight(mType);
+      for (let k = 0; k < h; k++) {
+        const cy = py + k;
+        if (cy < 0 || cy >= 256) return;
+        if (!isReplaceable(this.world.getBlock(px, cy, pz))) return;
+        if (this.player.intersectsBlock(px, cy, pz)) return;
+      }
+      this.world.setBlock(px, py, pz, blockId); // anchor (holds the entity state)
+      this.onEdit?.(px, py, pz, blockId);
+      for (let k = 1; k < h; k++) {
+        this.world.setBlock(px, py + k, pz, Block.MachinePart);
+        this.onEdit?.(px, py + k, pz, Block.MachinePart);
+      }
+      this.onBlockSound?.('place', blockId, px, py, pz);
+      this.inventory.consumeSelected(1);
+      this.placeCooldown = PLACE_REPEAT;
+      this.onAction?.();
+      return;
+    }
 
     if (blockId === Block.Torch) {
       // Torches orient to the clicked face and need a solid support block;

@@ -4,6 +4,7 @@
 // the game is fully playable with no server running.
 
 import type { ItemStack } from '../items';
+import type { MachineState, UpgradeAxis } from '../machines';
 import {
   ClientMsg, ItemEntityInfo, PlayerInfo, SERVER_PORT, ServerMsg, TRANSFORM_HZ,
 } from './protocol';
@@ -40,6 +41,8 @@ export class NetClient {
   onGotItem?: (item: number, count: number) => void;
   /** Authoritative chest contents (open reply or live update from a peer). */
   onChest?: (x: number, y: number, z: number, slots: (ItemStack | null)[]) => void;
+  /** Authoritative machine state (open reply / config / upgrade / collect). */
+  onMachine?: (x: number, y: number, z: number, state: MachineState) => void;
 
   private ws: WebSocket | null = null;
   private xformAcc = 0;
@@ -141,6 +144,12 @@ export class NetClient {
       case 'itemspawn':
         this.netItems.set(msg.item.eid, msg.item);
         break;
+      case 'itemsmove':
+        for (const m of msg.items) {
+          const it = this.netItems.get(m.eid);
+          if (it) { it.x = m.x; it.y = m.y; it.z = m.z; }
+        }
+        break;
       case 'itemremove':
         this.netItems.delete(msg.eid);
         break;
@@ -149,6 +158,9 @@ export class NetClient {
         break;
       case 'chest':
         this.onChest?.(msg.x, msg.y, msg.z, msg.slots);
+        break;
+      case 'machine':
+        this.onMachine?.(msg.x, msg.y, msg.z, msg.state);
         break;
     }
   }
@@ -205,6 +217,24 @@ export class NetClient {
   }
   sendArmor(points: number): void {
     if (this.connected) this.raw({ t: 'armor', points });
+  }
+  sendMachineOpen(x: number, y: number, z: number): void {
+    if (this.connected) this.raw({ t: 'machineOpen', x, y, z });
+  }
+  sendMachineConfig(x: number, y: number, z: number, filter: number): void {
+    if (this.connected) this.raw({ t: 'machineConfig', x, y, z, filter });
+  }
+  sendMachineUpgrade(x: number, y: number, z: number, axis: UpgradeAxis): void {
+    if (this.connected) this.raw({ t: 'machineUpgrade', x, y, z, axis });
+  }
+  sendMachineCollect(x: number, y: number, z: number): void {
+    if (this.connected) this.raw({ t: 'machineCollect', x, y, z });
+  }
+  sendMachineHit(x: number, y: number, z: number, amount: number): void {
+    if (this.connected) this.raw({ t: 'machineHit', x, y, z, amount });
+  }
+  sendMachineClaim(x: number, y: number, z: number): void {
+    if (this.connected) this.raw({ t: 'machineClaim', x, y, z });
   }
   sendRangedAttack(target: number, amount: number): void {
     if (this.connected) this.raw({ t: 'rangedAttack', target, amount });

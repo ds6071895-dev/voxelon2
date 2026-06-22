@@ -26,8 +26,16 @@ import { daylight } from '../src/sky';
 import { Survival } from '../src/survival';
 import { GameServer } from '../src/net/server_core';
 import { MELEE_DAMAGE, mitigate, RANGED_MAX_RANGE } from '../src/net/protocol';
+import {
+  Machines, MachineType, MAX_LEVEL, allowedFilterMask, applyUpgrade,
+  autominerRates, claimMachine, collectMachine, currentRate, damageMachine,
+  derrickRate, filterTierMax, machineHeight, machineMaxHp, machineTypeForBlock,
+  newMachine, productionRate, sanitizeState, setFilter, storageCap, tickMachine,
+  totalStored, upgradeCost,
+} from '../src/machines';
 import { mulberry32 } from '../src/noise';
-import { Terrain, SEA_LEVEL } from '../src/terrain';
+import { AUTOMINER_ORES, Terrain, SEA_LEVEL } from '../src/terrain';
+import { Biome } from '../src/biomes';
 import { World } from '../src/world';
 import type { Atlas } from '../src/textures';
 
@@ -1024,6 +1032,418 @@ check('furnace smelts ore/sand/log but not removed foods',
   inv.stashOpenSlots();
   check('stashing a partly-loaded gun keeps its magazine (no free reload)',
     inv.slots.slice(0, 36).find((s) => s?.id === Item.Rifle)?.loaded === 7);
+}
+
+// --- Automation (M13): cobalt ore, oil field, machine sim --------------------
+{
+  // Cobalt: generates in a deep band, rarer than iron.
+  let cobalt = 0, iron = 0, cobaltDepthViolations = 0;
+  for (let cx = 0; cx < 4; cx++) {
+    for (let cz = 0; cz < 4; cz++) {
+      const c = new Chunk(cx, cz);
+      terrain.fill(c);
+      for (let x = 0; x < 16; x++)
+        for (let z = 0; z < 16; z++)
+          for (let y = 0; y < 130; y++) {
+            const id = c.get(x, y, z);
+            if (id === Block.CobaltOre) { cobalt++; if (y > 30) cobaltDepthViolations++; }
+            else if (id === Block.IronOre) iron++;
+          }
+    }
+  }
+  check('cobalt ore generates', cobalt > 0, `count=${cobalt}`);
+  check('cobalt stays in its deep band (y<=30)', cobaltDepthViolations === 0);
+  check('cobalt is rarer than iron', cobalt < iron, `cobalt=${cobalt} iron=${iron}`);
+  check('cobalt smelts to a cobalt ingot', SMELT[Block.CobaltOre] === Item.CobaltIngot);
+  check('cobalt needs an iron pickaxe (tier 2)',
+    BLOCKS[Block.CobaltOre].minTier === 2 && BLOCKS[Block.CobaltOre].requiresTool);
+
+  // Oil-field sampling: pure, bounded, and far denser under desert/ocean.
+  check('oilRichness is deterministic + bounded', (() => {
+    for (let i = 0; i < 2000; i++) {
+      const x = i * 53 - 40000, z = i * 91 - 60000;
+      const a = terrain.oilRichness(x, z), b = terrain.oilRichness(x, z);
+      if (a !== b || a < 0 || a > 1 || !Number.isFinite(a)) return false;
+    }
+    return true;
+  })());
+  {
+    let wetSum = 0, wetN = 0, drySum = 0, dryN = 0, shale = 0;
+    for (let cx = -80; cx <= 80; cx++) {
+      for (let cz = -80; cz <= 80; cz++) {
+        const x = cx * 16 + 8, z = cz * 16 + 8;
+        const h = terrain.height(x, z);
+        const b = terrain.biomeWithWater(x, z, h);
+        const r = terrain.oilRichness(x, z);
+        if (b === Biome.Ocean || b === Biome.Desert) { wetSum += r; wetN++; }
+        else if (b === Biome.Plains || b === Biome.Forest) { drySum += r; dryN++; }
+      }
+    }
+    const wet = wetN ? wetSum / wetN : 0, dry = dryN ? drySum / dryN : 0;
+    check('oil is far richer under desert/ocean than dry land',
+      wetN > 0 && dryN > 0 && wet > dry * 2, `wet=${wet.toFixed(3)} dry=${dry.toFixed(3)}`);
+    // Oil shale seeps generate somewhere in a desert/ocean span.
+    for (let cx = -40; cx <= 40 && shale < 1; cx++) {
+      for (let cz = -40; cz <= 40 && shale < 1; cz++) {
+        const c = new Chunk(cx, cz);
+        terrain.fill(c);
+        for (let i = 0; i < c.data.length; i++) if (c.data[i] === Block.OilShale) { shale++; break; }
+      }
+    }
+    check('oil shale seeps generate in the world', shale > 0);
+  }
+
+  // Pure yield function: rate proportional to richness, filter gating, levels.
+  {
+    const rich = {
+      [Block.Stone]: 1, [Block.CoalOre]: 0.5, [Block.IronOre]: 0.4,
+      [Block.GoldOre]: 0.9, [Block.RedstoneOre]: 0.9, [Block.DiamondOre]: 0.9,
+      [Block.TitaniumOre]: 0.9,
+    };
+    const m = newMachine(MachineType.Autominer);
+    const r1 = autominerRates(m, rich);
+    check('autominer rate is proportional to richness',
+      Math.abs(r1[Block.Stone] - productionRate(1) * 1) < 1e-9 &&
+      Math.abs(r1[Block.CoalOre] - productionRate(1) * 0.5) < 1e-9);
+    check('level 1 filter gates out gold/redstone/diamond/titanium',
+      r1[Block.GoldOre] === undefined && r1[Block.DiamondOre] === undefined &&
+      r1[Block.TitaniumOre] === undefined);
+    // Enabling an ungated ore is rejected (masked to the level tier).
+    setFilter(m, 0b1111111);
+    check('filter cannot enable an ore above the machine level',
+      !(m.filter & (1 << AUTOMINER_ORES.indexOf(Block.DiamondOre))) &&
+      autominerRates(m, rich)[Block.DiamondOre] === undefined);
+    // Production upgrades raise the rate; filter tiers unlock at milestones.
+    const base = productionRate(1);
+    m.level = 10; setFilter(m, 0b1111111);
+    check('mid tier (L10) unlocks gold/redstone but not diamond',
+      productionRate(m.level) > base && filterTierMax(m.level) === 4 &&
+      autominerRates(m, rich)[Block.GoldOre] > 0 &&
+      autominerRates(m, rich)[Block.DiamondOre] === undefined);
+    m.level = 30; setFilter(m, 0b1111111);
+    check('high tier (L30) unlocks diamond + titanium',
+      autominerRates(m, rich)[Block.DiamondOre] > 0 &&
+      autominerRates(m, rich)[Block.TitaniumOre] > 0);
+    check('upgrade cost grows with level (geometric)',
+      (upgradeCost(newMachine(MachineType.Autominer), 'production')![Item.IronIngot]) <
+      (upgradeCost({ ...newMachine(MachineType.Autominer), level: 30 }, 'production')![Item.IronIngot]));
+    m.level = MAX_LEVEL;
+    check('production maxes out at MAX_LEVEL',
+      !applyUpgrade(m, 'production') && m.level === MAX_LEVEL && MAX_LEVEL >= 100);
+  }
+
+  // Tick + storage cap (never overflows), then collect clears it.
+  {
+    const m = newMachine(MachineType.Autominer);
+    const cap = storageCap(m);
+    tickMachine(m, { ore: { [Block.Stone]: 1 } }, 1e9); // absurd dt
+    check('storage is capped (no overflow)', totalStored(m) === cap, `${totalStored(m)}/${cap}`);
+    check('storage upgrade raises the cap', (() => {
+      const before = storageCap(m);
+      applyUpgrade(m, 'storage');
+      return storageCap(m) > before;
+    })());
+    const taken = collectMachine(m);
+    check('collect returns the stored output and empties the machine',
+      (taken[Block.Cobblestone] ?? 0) === cap && totalStored(m) === 0);
+  }
+
+  // Oil derrick: dead on dry ground, productive over a field.
+  {
+    const d = newMachine(MachineType.OilDerrick);
+    check('derrick yields nothing below the oil threshold', derrickRate(d, 0.1) === 0);
+    check('derrick rate scales with oil richness',
+      Math.abs(derrickRate(d, 0.8) - productionRate(1) * 0.8) < 1e-9);
+    tickMachine(d, { oil: 0.8 }, 100);
+    check('derrick banks oil barrels', (d.stored[Item.OilBarrel] ?? 0) > 0);
+    tickMachine(d, { oil: 0.0 }, 100);
+    const held = d.stored[Item.OilBarrel] ?? 0;
+    tickMachine(d, { oil: 0.0 }, 100);
+    check('derrick is idle on dry ground', (d.stored[Item.OilBarrel] ?? 0) === held);
+  }
+
+  // NaN/garbage richness never corrupts a machine.
+  {
+    const m = newMachine(MachineType.Autominer);
+    tickMachine(m, { ore: { [Block.Stone]: NaN } }, 1);
+    tickMachine(m, { ore: { [Block.Stone]: 1 } }, NaN);
+    check('NaN richness / dt never banks bad items',
+      totalStored(m) === 0 && Number.isFinite(totalStored(m)));
+  }
+
+  check('block->machine-type mapping', machineTypeForBlock(Block.Autominer) === MachineType.Autominer &&
+    machineTypeForBlock(Block.OilDerrick) === MachineType.OilDerrick &&
+    machineTypeForBlock(Block.Stone) === null);
+
+  // HP / ownership / sabotage (pure).
+  {
+    const m = newMachine(MachineType.Autominer);
+    check('new machine starts at full HP, unclaimed',
+      m.hp === machineMaxHp(m) && m.owner === '');
+    check('damageMachine reduces HP, not destroyed above 0',
+      damageMachine(m, 10) === false && m.hp === machineMaxHp(m) - 10);
+    check('damageMachine destroys at 0 HP', damageMachine(m, 9999) === true && m.hp === 0);
+    const lvl = newMachine(MachineType.Autominer);
+    const hp1 = machineMaxHp(lvl);
+    lvl.level = 50;
+    check('max HP scales with production level', machineMaxHp(lvl) > hp1);
+    const heal = newMachine(MachineType.Autominer);
+    heal.hp = 5;
+    applyUpgrade(heal, 'production');
+    check('a production upgrade repairs to the new max HP', heal.hp === machineMaxHp(heal));
+    claimMachine(m, 'BraveYak42');
+    check('claimMachine sets the owner', m.owner === 'BraveYak42');
+    const carried = sanitizeState({
+      type: MachineType.Autominer, level: 5, storageLevel: 1, filter: 0b111,
+      stored: {}, owner: 'FrostWolf12', hp: 7,
+    })!;
+    check('sanitizeState carries owner + clamps hp',
+      carried.owner === 'FrostWolf12' && carried.hp === 7 &&
+      sanitizeState({ type: MachineType.OilDerrick, hp: 99999 })!.hp <= machineMaxHp(newMachine(MachineType.OilDerrick)));
+  }
+}
+
+// --- Server sabotage: hit -> HP drops -> destroy spills loot + machine block --
+{
+  const s = new GameServer(1337, mulberry32(99));
+  s.addPlayer(1);
+  s.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+  s.handle(1, { t: 'edit', x: 1, y: 70, z: 0, block: Block.Autominer });
+  for (let i = 0; i < 300; i++) s.tickMachines(1); // build up some loot to raid
+
+  // A non-lethal hit lowers HP and broadcasts the new state.
+  const hit = s.handle(1, { t: 'machineHit', x: 1, y: 70, z: 0, amount: 10 });
+  const hm = hit.find((o) => o.msg.t === 'machine')?.msg as
+    Extract<typeof hit[number]['msg'], { t: 'machine' }> | undefined;
+  check('a machine hit lowers HP and broadcasts state',
+    !!hm && hm.state.hp === machineMaxHp(hm.state) - 10);
+
+  // Claim records the attacker's username.
+  const claimed = s.handle(1, { t: 'machineClaim', x: 1, y: 70, z: 0 });
+  const cm = claimed.find((o) => o.msg.t === 'machine')!.msg as
+    Extract<typeof claimed[number]['msg'], { t: 'machine' }>;
+  check('a machine can be claimed (owner recorded)', cm.state.owner.length > 0);
+
+  // A lethal hit destroys it: spills stored loot + the machine block, clears it.
+  const kill = s.handle(1, { t: 'machineHit', x: 1, y: 70, z: 0, amount: 9999 });
+  const spills = kill.filter((o) => o.msg.t === 'itemspawn');
+  const droppedMachine = spills.some((o) =>
+    (o.msg as { item: { item: number } }).item.item === Block.Autominer);
+  check('destroying a machine spills loot AND drops the machine block',
+    spills.length >= 1 && droppedMachine);
+  check('destroying a machine clears the world block (edit air)',
+    kill.some((o) => o.msg.t === 'edit' && (o.msg as { block: number }).block === Block.Air));
+  check('a destroyed machine is gone server-side',
+    s.handle(1, { t: 'machineOpen', x: 1, y: 70, z: 0 }).length === 0);
+
+  // Out-of-range / dead players can't sabotage.
+  s.handle(1, { t: 'edit', x: 1, y: 70, z: 0, block: Block.OilDerrick });
+  s.handle(1, { t: 'xform', x: 600, y: 70, z: 600, yaw: 0, pitch: 0 });
+  check('out-of-range sabotage is rejected',
+    s.handle(1, { t: 'machineHit', x: 1, y: 70, z: 0, amount: 9999 }).length === 0);
+  s.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+  s.handle(1, { t: 'selfhurt', amount: 100 });
+  check('a dead player cannot sabotage a machine',
+    s.handle(1, { t: 'machineHit', x: 1, y: 70, z: 0, amount: 9999 }).length === 0);
+}
+
+// --- Multi-block footprint: placement column + footprint clears on destroy ----
+{
+  check('footprint heights (anchor + parts)',
+    machineHeight(MachineType.Autominer) === 2 && machineHeight(MachineType.OilDerrick) === 3);
+
+  const s = new GameServer(1337, mulberry32(102));
+  s.addPlayer(1);
+  s.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+  // Client places the footprint as anchor + part cell(s); the anchor edit
+  // creates the entity, the part edit just records the structural block.
+  s.handle(1, { t: 'edit', x: 1, y: 70, z: 0, block: Block.Autominer });
+  s.handle(1, { t: 'edit', x: 1, y: 71, z: 0, block: Block.MachinePart });
+  for (let i = 0; i < 50; i++) s.tickMachines(1);
+
+  const kill = s.handle(1, { t: 'machineHit', x: 1, y: 70, z: 0, amount: 9999 });
+  const airAt = new Set(kill.filter((o) => o.msg.t === 'edit' &&
+    (o.msg as { block: number }).block === Block.Air)
+    .map((o) => { const m = o.msg as { x: number; y: number; z: number }; return `${m.x},${m.y},${m.z}`; }));
+  check('destroying a machine clears its whole footprint (anchor + part)',
+    airAt.has('1,70,0') && airAt.has('1,71,0'));
+
+  // A direct edit removing the anchor also tidies the part cell (no orphans).
+  s.handle(1, { t: 'edit', x: 2, y: 70, z: 0, block: Block.OilDerrick });
+  s.handle(1, { t: 'edit', x: 2, y: 71, z: 0, block: Block.MachinePart });
+  s.handle(1, { t: 'edit', x: 2, y: 72, z: 0, block: Block.MachinePart });
+  const broke = s.handle(1, { t: 'edit', x: 2, y: 70, z: 0, block: Block.Air });
+  const airAt2 = new Set(broke.filter((o) => o.msg.t === 'edit' &&
+    (o.msg as { block: number }).block === Block.Air)
+    .map((o) => { const m = o.msg as { x: number; y: number; z: number }; return `${m.x},${m.y},${m.z}`; }));
+  check('removing a machine anchor clears its part cells',
+    airAt2.has('2,71,0') && airAt2.has('2,72,0'));
+}
+
+// --- Server-owned dropped items fall under gravity and settle on the ground ---
+{
+  // Find a dry land column so the item rests on a real surface.
+  let cx = 8, cz = 8;
+  for (let i = 0; i < 4000; i++) {
+    if (terrain.height(8 + i, 8) >= SEA_LEVEL + 2) { cx = 8 + i; cz = 8; break; }
+  }
+  const surface = terrain.height(cx, cz);
+  const s = new GameServer(1337, mulberry32(61));
+  s.addPlayer(1);
+  s.handle(1, { t: 'xform', x: cx + 0.5, y: surface + 40, z: cz + 0.5, yaw: 0, pitch: 0 });
+  const drop = s.handle(1, { t: 'drop', items: [{ id: Block.Stone, count: 1 }], x: cx + 0.5, y: surface + 40, z: cz + 0.5 });
+  // The itemspawn carries the live info object (server mutates it as it falls).
+  const info = (drop.find((o) => o.msg.t === 'itemspawn')!.msg as { item: { x: number; y: number; z: number } }).item;
+  const startY = info.y;
+  let everMoved = false;
+  for (let i = 0; i < 400; i++) if (s.tickItems(1 / 15).length) everMoved = true;
+  const col = `${Math.floor(info.x)},${Math.floor(info.z)}`;
+  check('server drops fall under gravity', everMoved && info.y < startY - 1);
+  check('a falling drop settles on the ground surface',
+    Math.abs(info.y - (terrain.height(Math.floor(info.x), Math.floor(info.z)) + 1)) < 1e-9,
+    `y=${info.y} surface=${terrain.height(Math.floor(info.x), Math.floor(info.z))} col=${col}`);
+  // Once resting, it no longer reports movement (no needless broadcasts).
+  check('a rested drop stops moving', s.tickItems(1 / 15).length === 0);
+}
+
+// --- Server machine lifecycle (place -> tick -> upgrade -> collect -> break) --
+{
+  const s = new GameServer(1337, mulberry32(77));
+  s.addPlayer(1);
+  s.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+  const px = 1, py = 70, pz = 0;
+  const place = s.handle(1, { t: 'edit', x: px, y: py, z: pz, block: Block.Autominer });
+  check('placing an autominer is a normal broadcast edit',
+    place.some((o) => o.to === 'all' && o.msg.t === 'edit'));
+
+  const open = (id = 1) => {
+    const out = s.handle(id, { t: 'machineOpen', x: px, y: py, z: pz });
+    return out.find((o) => o.msg.t === 'machine')?.msg as
+      Extract<typeof out[number]['msg'], { t: 'machine' }> | undefined;
+  };
+  check('opening a placed machine returns its state',
+    open()?.state.type === MachineType.Autominer);
+
+  for (let i = 0; i < 200; i++) s.tickMachines(1);
+  const ticked = open();
+  check('server machine accumulates output while ticking',
+    !!ticked && totalStored(ticked.state) > 0);
+
+  // Upgrade changes rate + cap (server bumps + caps the level).
+  const beforeCap = storageCap(ticked!.state);
+  s.handle(1, { t: 'machineUpgrade', x: px, y: py, z: pz, axis: 'production' });
+  const up = s.handle(1, { t: 'machineUpgrade', x: px, y: py, z: pz, axis: 'storage' });
+  const upState = up.find((o) => o.msg.t === 'machine')!.msg as
+    Extract<typeof up[number]['msg'], { t: 'machine' }>;
+  check('upgrade raises production level + storage cap',
+    upState.state.level === 2 && storageCap(upState.state) > beforeCap);
+
+  // Filter set to "everything" is masked to the level tier (rejects ungated).
+  s.handle(1, { t: 'machineConfig', x: px, y: py, z: pz, filter: 0b1111111 });
+  const cfg = open()!.state;
+  check('server masks ungated ores out of the filter',
+    !(cfg.filter & (1 << AUTOMINER_ORES.indexOf(Block.DiamondOre))));
+
+  // Collect grants the stored output (dup-safe gotitem path) + empties it.
+  const before = totalStored(open()!.state);
+  const collect = s.handle(1, { t: 'machineCollect', x: px, y: py, z: pz });
+  const granted = collect.filter((o) => o.msg.t === 'gotitem')
+    .reduce((n, o) => n + (o.msg as { count: number }).count, 0);
+  check('collect grants the whole stored output to the collector',
+    before > 0 && granted === before);
+  check('collected machine is emptied', totalStored(open()!.state) === 0);
+
+  // Break spills the (refilled) stored output as item entities, server-side.
+  for (let i = 0; i < 200; i++) s.tickMachines(1);
+  const broke = s.handle(1, { t: 'edit', x: px, y: py, z: pz, block: Block.Air });
+  check('breaking a machine spills its stored output',
+    broke.some((o) => o.msg.t === 'itemspawn'));
+  check('a broken machine no longer exists server-side',
+    s.handle(1, { t: 'machineOpen', x: px, y: py, z: pz }).length === 0);
+
+  // A machine op on a non-machine position is fail-closed.
+  check('machine ops on a non-machine block are rejected',
+    s.handle(1, { t: 'machineCollect', x: 40, y: 70, z: 40 }).length === 0);
+
+  // sanitizeState defends against forged/garbage state.
+  check('sanitizeState rejects junk + clamps levels',
+    sanitizeState(null) === null &&
+    sanitizeState({ type: MachineType.Autominer, level: 999, storageLevel: -5, filter: NaN })!.level === MAX_LEVEL &&
+    sanitizeState({ type: MachineType.Autominer, level: 999, storageLevel: -5, filter: NaN })!.storageLevel === 1);
+}
+
+// --- Offline / server parity: identical pure module, identical result --------
+{
+  const terr = new Terrain(1337);
+  const local = new Machines(terr);
+  local.place(1, 70, 0, MachineType.Autominer);
+  for (let i = 0; i < 60; i++) local.update(1);
+  const sLocal = local.get(1, 70, 0)!;
+
+  const srv = new GameServer(1337, mulberry32(3));
+  srv.addPlayer(1);
+  srv.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+  srv.handle(1, { t: 'edit', x: 1, y: 70, z: 0, block: Block.Autominer });
+  for (let i = 0; i < 60; i++) srv.tickMachines(1);
+  const sSrv = (srv.handle(1, { t: 'machineOpen', x: 1, y: 70, z: 0 })
+    .find((o) => o.msg.t === 'machine')!.msg as { state: { stored: Record<number, number> } }).state;
+
+  const keys = new Set([...Object.keys(sLocal.stored), ...Object.keys(sSrv.stored)]);
+  let parity = totalStored(sLocal) > 0;
+  for (const k of keys) if ((sLocal.stored[Number(k)] ?? 0) !== (sSrv.stored[Number(k)] ?? 0)) parity = false;
+  check('offline Machines and server produce identical output (parity)',
+    parity, `local=${totalStored(sLocal)} srv=${totalStored(sSrv)}`);
+
+  // currentRate readout is finite + positive over rich ground.
+  check('currentRate readout is finite and positive',
+    Number.isFinite(currentRate(sLocal, local.context(1, 0, MachineType.Autominer))) &&
+    currentRate(sLocal, local.context(1, 0, MachineType.Autominer)) > 0);
+
+  // place() is type-aware: a different machine type replaces a stale state.
+  local.place(1, 70, 0, MachineType.OilDerrick);
+  check('Machines.place replaces a stale state of a different type',
+    local.get(1, 70, 0)!.type === MachineType.OilDerrick &&
+    totalStored(local.get(1, 70, 0)!) === 0);
+}
+
+// --- Machine hardening: proximity, dead, axis, aggregate cap -----------------
+{
+  const s = new GameServer(1337, mulberry32(88));
+  s.addPlayer(1);
+  s.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+  s.handle(1, { t: 'edit', x: 1, y: 70, z: 0, block: Block.Autominer });
+  for (let i = 0; i < 100; i++) s.tickMachines(1);
+
+  // Far away -> all machine ops fail-closed.
+  s.handle(1, { t: 'xform', x: 500, y: 70, z: 500, yaw: 0, pitch: 0 });
+  check('machine collect from out of range is rejected',
+    s.handle(1, { t: 'machineCollect', x: 1, y: 70, z: 0 }).length === 0);
+  check('machine open from out of range is rejected',
+    s.handle(1, { t: 'machineOpen', x: 1, y: 70, z: 0 }).length === 0);
+
+  // Back in range: an unknown upgrade axis is rejected (not defaulted).
+  s.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+  check('unknown machineUpgrade axis is rejected', (() => {
+    const before = (s.handle(1, { t: 'machineOpen', x: 1, y: 70, z: 0 })
+      .find((o) => o.msg.t === 'machine')!.msg as { state: { level: number } }).state.level;
+    const out = s.handle(1, { t: 'machineUpgrade', x: 1, y: 70, z: 0, axis: 'junk' as never });
+    const after = (s.handle(1, { t: 'machineOpen', x: 1, y: 70, z: 0 })
+      .find((o) => o.msg.t === 'machine')!.msg as { state: { level: number } }).state.level;
+    return out.length === 0 && before === after;
+  })());
+
+  // Dead players can't loot/operate a machine.
+  s.handle(1, { t: 'selfhurt', amount: 100 });
+  check('a dead player cannot collect a machine',
+    s.handle(1, { t: 'machineCollect', x: 1, y: 70, z: 0 }).length === 0);
+
+  // sanitizeState enforces the AGGREGATE cap, not just per-item.
+  const bloated = sanitizeState({
+    type: MachineType.Autominer, level: 1, storageLevel: 1, filter: 0b111,
+    stored: { [Block.Cobblestone]: 700, [Item.Coal]: 700, [Block.IronOre]: 700 },
+  })!;
+  check('sanitizeState trims stored to the aggregate storage cap',
+    totalStored(bloated) === storageCap(bloated), `${totalStored(bloated)}/${storageCap(bloated)}`);
 }
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} FAILURES`);

@@ -30,6 +30,8 @@ const I = Item.IronIngot;
 const D = Item.Diamond;
 const T = Item.TitaniumIngot;
 const R = Item.Redstone;
+const Cb = Item.CobaltIngot;
+const Pk = Item.IronPickaxe; // a "pickaxe core" gives the autominer a tiered feel
 
 function shaped(pattern: (Ingredient | null)[][], id: number, count = 1): Recipe {
   return { kind: 'shaped', pattern, result: { id, count } };
@@ -81,6 +83,12 @@ export const RECIPES: Recipe[] = [
   shaped([[I, I, I], [I, R, I], [I, I, I]], Item.RocketLauncher),
   shapeless([I, R], Item.Bullet, 8),
   shaped([[null, I, null], [I, R, I], [null, ANY_COAL, null]], Item.Rocket, 2),
+
+  // Automation (M13): machines built around an iron frame.
+  // Autominer = iron + redstone wrapped around a pickaxe core.
+  shaped([[I, I, I], [R, Pk, R], [I, I, I]], Block.Autominer),
+  // Oil Derrick = iron + cobalt ingots + redstone.
+  shaped([[Cb, I, Cb], [I, R, I], [I, I, I]], Block.OilDerrick),
 ];
 
 function matches(ing: Ingredient, id: number | undefined): boolean {

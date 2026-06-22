@@ -3,6 +3,7 @@
 // Click semantics delegate to the pure Inventory class; furnace slots talk
 // to the FurnaceState directly through the shared cursor.
 
+import { BLOCKS } from './blocks';
 import { craftResult, consumeCraft } from './crafting';
 import { COOK_TIME, FUEL, SMELT, FurnaceState } from './furnace';
 import { renderItemIcon } from './icons';
@@ -12,8 +13,30 @@ import {
   ARMOR_START, ARMOR_SIZE,
 } from './inventory';
 import { ArmorSlot, ITEMS, ItemStack } from './items';
+import {
+  MachineState, MachineType, UpgradeAxis, MAX_LEVEL, MAX_STORAGE_LEVEL,
+  allowedFilterMask, machineMaxHp, storageCap, totalStored, upgradeCost,
+} from './machines';
+import { AUTOMINER_ORES } from './terrain';
 
-export type ContainerMode = 'inventory' | 'table' | 'furnace' | 'chest';
+export type ContainerMode = 'inventory' | 'table' | 'furnace' | 'chest' | 'machine';
+
+/** Callbacks the host (main.ts) wires so the machine panel can route actions to
+ *  the local sim (offline) or the server (multiplayer). */
+export interface MachineUIContext {
+  /** Live, authoritative-ish state to render (predicted in MP). */
+  state(): MachineState | null;
+  /** Current production rate in items/sec, for the readout. */
+  rate(): number;
+  toggleFilter(index: number): void;
+  upgrade(axis: UpgradeAxis): void;
+  collect(): void;
+  canAfford(axis: UpgradeAxis): boolean;
+  /** Claim ownership of the machine (sets owner to the local player). */
+  claim(): void;
+  /** The local player's display name (to compare against the owner). */
+  myName(): string;
+}
 
 interface SlotView {
   el: HTMLDivElement;
@@ -24,6 +47,11 @@ interface SlotView {
 
 function maxStack(id: number): number {
   return ITEMS[id]?.maxStack ?? 64;
+}
+
+/** Short ore name for a filter chip (e.g. "Cobblestone"->"Stone" left as-is). */
+function oreLabel(block: number): string {
+  return (BLOCKS[block]?.name ?? '?').replace(' Ore', '').replace(' Block', '');
 }
 
 export class InventoryUI {
@@ -48,6 +76,21 @@ export class InventoryUI {
   private furnaceViews: {
     input: SlotView; fuel: SlotView; output: SlotView;
     flame: HTMLDivElement; arrow: HTMLDivElement;
+  } | null = null;
+  private machineCtx: MachineUIContext | null = null;
+  private machineViews: {
+    levels: HTMLDivElement;
+    owner: HTMLDivElement;
+    hpBar: HTMLDivElement;
+    hpText: HTMLSpanElement;
+    fillBar: HTMLDivElement;
+    fillText: HTMLSpanElement;
+    rate: HTMLDivElement;
+    filters: { index: number; el: HTMLDivElement }[];
+    prodBtn: HTMLButtonElement;
+    storageBtn: HTMLButtonElement;
+    collectBtn: HTMLButtonElement;
+    claimBtn: HTMLButtonElement;
   } | null = null;
   private readonly cursorEl: HTMLDivElement;
   private readonly cursorIcon: HTMLCanvasElement;
@@ -387,6 +430,194 @@ export class InventoryUI {
     return view;
   }
 
+  // --- machine panel ---------------------------------------------------------
+
+  private buildMachineTop(ctx: MachineUIContext): void {
+    const state = ctx.state();
+    const wrap = document.createElement('div');
+    wrap.style.cssText =
+      'display:flex;flex-direction:column;gap:8px;width:340px;align-items:stretch;';
+
+    const levels = document.createElement('div');
+    levels.className = 'mc-font';
+    levels.style.cssText = 'font-size:13px;text-align:center;';
+    wrap.appendChild(levels);
+
+    const owner = document.createElement('div');
+    owner.className = 'mc-font';
+    owner.style.cssText = 'font-size:11px;text-align:center;color:#d8c;';
+    wrap.appendChild(owner);
+
+    // Health bar (sabotage/raid).
+    const hpOuter = document.createElement('div');
+    hpOuter.style.cssText =
+      'position:relative;height:14px;background:#1c1c1c;border:2px solid #000;';
+    const hpBar = document.createElement('div');
+    hpBar.style.cssText = 'height:100%;width:100%;background:#cc4444;';
+    const hpText = document.createElement('span');
+    hpText.className = 'mc-font';
+    hpText.style.cssText =
+      'position:absolute;inset:0;display:flex;align-items:center;' +
+      'justify-content:center;font-size:10px;text-shadow:1px 1px 0 #000;';
+    hpOuter.appendChild(hpBar);
+    hpOuter.appendChild(hpText);
+    wrap.appendChild(hpOuter);
+
+    // Storage fill bar.
+    const barOuter = document.createElement('div');
+    barOuter.style.cssText =
+      'position:relative;height:18px;background:#1c1c1c;border:2px solid #000;';
+    const fillBar = document.createElement('div');
+    fillBar.style.cssText = 'height:100%;width:0;background:#4ea3e0;transition:width .1s;';
+    const fillText = document.createElement('span');
+    fillText.className = 'mc-font';
+    fillText.style.cssText =
+      'position:absolute;inset:0;display:flex;align-items:center;' +
+      'justify-content:center;font-size:11px;text-shadow:1px 1px 0 #000;';
+    barOuter.appendChild(fillBar);
+    barOuter.appendChild(fillText);
+    wrap.appendChild(barOuter);
+
+    const rate = document.createElement('div');
+    rate.className = 'mc-font';
+    rate.style.cssText = 'font-size:12px;text-align:center;color:#bdf;';
+    wrap.appendChild(rate);
+
+    // Ore filter checklist (autominer only).
+    const filters: { index: number; el: HTMLDivElement }[] = [];
+    if (state && state.type === MachineType.Autominer) {
+      const grid = document.createElement('div');
+      grid.style.cssText =
+        'display:grid;grid-template-columns:repeat(4,1fr);gap:3px;';
+      for (let i = 0; i < AUTOMINER_ORES.length; i++) {
+        const chip = document.createElement('div');
+        chip.className = 'mc-font';
+        chip.style.cssText =
+          'font-size:10px;text-align:center;padding:3px 2px;border:1px solid #000;' +
+          'cursor:pointer;user-select:none;';
+        chip.textContent = oreLabel(AUTOMINER_ORES[i]);
+        chip.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          ctx.toggleFilter(i);
+        });
+        grid.appendChild(chip);
+        filters.push({ index: i, el: chip });
+      }
+      wrap.appendChild(grid);
+    }
+
+    // Upgrade + collect buttons.
+    const btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex;gap:6px;';
+    const mkBtn = (): HTMLButtonElement => {
+      const b = document.createElement('button');
+      b.className = 'mc-font';
+      b.style.cssText =
+        'flex:1;font-size:10px;padding:5px 3px;cursor:pointer;border:2px solid #000;' +
+        'background:#6a6a6a;color:#fff;';
+      b.addEventListener('contextmenu', (e) => e.preventDefault());
+      return b;
+    };
+    const prodBtn = mkBtn();
+    prodBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.upgrade('production'); });
+    const storageBtn = mkBtn();
+    storageBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.upgrade('storage'); });
+    btnRow.appendChild(prodBtn);
+    btnRow.appendChild(storageBtn);
+    wrap.appendChild(btnRow);
+
+    const bottomRow = document.createElement('div');
+    bottomRow.style.cssText = 'display:flex;gap:6px;';
+    const collectBtn = mkBtn();
+    collectBtn.style.background = '#3b7a3b';
+    collectBtn.textContent = 'Collect';
+    collectBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.collect(); });
+    const claimBtn = mkBtn();
+    claimBtn.style.background = '#3b5a7a';
+    claimBtn.textContent = 'Claim';
+    claimBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.claim(); });
+    bottomRow.appendChild(collectBtn);
+    bottomRow.appendChild(claimBtn);
+    wrap.appendChild(bottomRow);
+
+    this.machineViews = {
+      levels, owner, hpBar, hpText, fillBar, fillText, rate, filters,
+      prodBtn, storageBtn, collectBtn, claimBtn,
+    };
+    this.topEl.appendChild(wrap);
+  }
+
+  private refreshMachine(): void {
+    const ctx = this.machineCtx;
+    const v = this.machineViews;
+    if (!ctx || !v) return;
+    const state = ctx.state();
+    if (!state) return;
+
+    v.levels.textContent =
+      `${state.type === MachineType.Autominer ? 'Autominer' : 'Oil Derrick'}` +
+      `  ·  Prod Lv ${state.level}/${MAX_LEVEL}  ·  Storage Lv ${state.storageLevel}/${MAX_STORAGE_LEVEL}`;
+
+    const mine = state.owner && state.owner === ctx.myName();
+    v.owner.textContent = state.owner ? `Owner: ${state.owner}${mine ? ' (you)' : ''}` : 'Unclaimed';
+    v.claimBtn.disabled = !!mine;
+    v.claimBtn.style.opacity = mine ? '0.5' : '1';
+    v.claimBtn.textContent = mine ? 'Owned' : 'Claim';
+
+    const maxHp = machineMaxHp(state);
+    const hpFrac = maxHp > 0 ? Math.max(0, Math.min(1, state.hp / maxHp)) : 0;
+    v.hpBar.style.width = `${Math.round(hpFrac * 100)}%`;
+    v.hpBar.style.background = hpFrac > 0.5 ? '#4caf50' : hpFrac > 0.25 ? '#e0a14e' : '#cc4444';
+    v.hpText.textContent = `HP ${Math.ceil(state.hp)} / ${maxHp}`;
+
+    const cap = storageCap(state);
+    const stored = totalStored(state);
+    const frac = cap > 0 ? Math.min(1, stored / cap) : 0;
+    v.fillBar.style.width = `${Math.round(frac * 100)}%`;
+    v.fillBar.style.background = frac > 0.92 ? '#e0a14e' : '#4ea3e0';
+    v.fillText.textContent = `${stored} / ${cap}`;
+    v.rate.textContent = `Rate: ${ctx.rate().toFixed(2)} /s`;
+
+    const mask = allowedFilterMask(state.level);
+    for (const { index, el } of v.filters) {
+      const gated = !(mask & (1 << index));
+      const on = !!(state.filter & (1 << index));
+      el.style.opacity = gated ? '0.35' : '1';
+      el.style.cursor = gated ? 'not-allowed' : 'pointer';
+      el.style.background = gated ? '#333' : on ? '#3b7a3b' : '#555';
+      el.style.color = on && !gated ? '#fff' : '#ccc';
+    }
+
+    this.setUpgradeBtn(v.prodBtn, ctx, state, 'production',
+      state.level >= MAX_LEVEL);
+    this.setUpgradeBtn(v.storageBtn, ctx, state, 'storage',
+      state.storageLevel >= MAX_STORAGE_LEVEL);
+    v.collectBtn.disabled = stored <= 0;
+    v.collectBtn.style.opacity = stored <= 0 ? '0.5' : '1';
+  }
+
+  private setUpgradeBtn(
+    btn: HTMLButtonElement, ctx: MachineUIContext, state: MachineState,
+    axis: UpgradeAxis, maxed: boolean
+  ): void {
+    const label = axis === 'production' ? 'Production' : 'Storage';
+    if (maxed) {
+      btn.textContent = `${label}: MAX`;
+      btn.disabled = true;
+      btn.style.opacity = '0.5';
+      return;
+    }
+    const cost = upgradeCost(state, axis);
+    const costStr = cost
+      ? Object.entries(cost).map(([id, n]) => `${n} ${ITEMS[Number(id)]?.name ?? '?'}`).join(', ')
+      : '';
+    btn.textContent = `▲ ${label}\n${costStr}`;
+    btn.style.whiteSpace = 'pre-line';
+    const afford = ctx.canAfford(axis);
+    btn.disabled = !afford;
+    btn.style.opacity = afford ? '1' : '0.5';
+  }
+
   // --- crafting result -------------------------------------------------------
 
   private craftOnce(): void {
@@ -421,7 +652,7 @@ export class InventoryUI {
 
   // --- open/close/update -----------------------------------------------------
 
-  show(mode: ContainerMode, furnace?: FurnaceState): void {
+  show(mode: ContainerMode, furnace?: FurnaceState, machineCtx?: MachineUIContext): void {
     // Rebuild the top section for the requested mode.
     for (const { index } of this.craftCells) this.invSlots.delete(index);
     for (const idx of this.chestCells) this.invSlots.delete(idx);
@@ -432,9 +663,16 @@ export class InventoryUI {
     this.resultView = null;
     this.furnaceViews = null;
     this.furnace = furnace ?? null;
+    this.machineViews = null;
+    this.machineCtx = machineCtx ?? null;
     this.topEl.innerHTML = '';
     this.mode = mode;
-    if (mode === 'furnace' && furnace) {
+    if (mode === 'machine' && machineCtx) {
+      const s = machineCtx.state();
+      this.titleEl.textContent =
+        s && s.type === MachineType.OilDerrick ? 'Oil Derrick' : 'Autominer';
+      this.buildMachineTop(machineCtx);
+    } else if (mode === 'furnace' && furnace) {
       this.titleEl.textContent = 'Furnace';
       this.buildFurnaceTop(furnace);
     } else if (mode === 'chest') {
@@ -488,6 +726,9 @@ export class InventoryUI {
       this.furnaceViews!.arrow.style.width =
         `${Math.round((s.cookTime / COOK_TIME) * 100)}%`;
     }
+
+    // Machine panel refreshes every frame (live fill bar + rate, like furnace).
+    if (this.mode === 'machine') this.refreshMachine();
 
     if (this.inventory.version === this.renderedVersion) return;
     this.renderedVersion = this.inventory.version;
