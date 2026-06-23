@@ -133,6 +133,14 @@ export class World {
     return chunk;
   }
 
+  /** The player-placed block recorded at a cell (0/undefined = natural terrain
+   *  there). Used by ship capture to flood-fill only built blocks. */
+  getEditedBlock(wx: number, wy: number, wz: number): number | undefined {
+    const m = this.editOverlay.get(Chunk.key(wx >> 4, wz >> 4));
+    if (!m) return undefined;
+    return m.get(((((wx & 15) << 4) | (wz & 15)) << 8) | (wy & 255));
+  }
+
   getBlock(wx: number, wy: number, wz: number): number {
     if (wy < 0 || wy >= 256) return Block.Air;
     const chunk = this.chunks.get(Chunk.key(wx >> 4, wz >> 4));

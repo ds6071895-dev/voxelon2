@@ -21,9 +21,12 @@ interface ShapelessRecipe {
 }
 export type Recipe = ShapedRecipe | ShapelessRecipe;
 
-const ANY_LOG = [Block.OakLog, Block.BirchLog, Block.SpruceLog];
 const ANY_COAL = [Item.Coal, Item.Charcoal];
-const P = Block.OakPlanks;
+const OAK = Block.OakPlanks, BIRCH = Block.BirchPlanks, SPRUCE = Block.SprucePlanks;
+// Generic recipes accept ANY plank type (vanilla behaviour); slab/stairs are
+// per-wood so each wood yields its own matching pieces.
+const ANY_PLANKS = [OAK, BIRCH, SPRUCE];
+const P = ANY_PLANKS;
 const S = Item.Stick;
 const C = Block.Cobblestone;
 const I = Item.IronIngot;
@@ -61,8 +64,19 @@ function armorSet(m: Ingredient, ids: [number, number, number, number]): Recipe[
   ];
 }
 
+/** Slab (6) + stairs (4) recipes for one wood from its specific plank block. */
+function woodCraft(planks: number, slab: number, stairs: number): Recipe[] {
+  return [
+    shaped([[planks, planks, planks]], slab, 6),
+    shaped([[planks, null, null], [planks, planks, null], [planks, planks, planks]], stairs, 4),
+  ];
+}
+
 export const RECIPES: Recipe[] = [
-  shapeless([ANY_LOG], Block.OakPlanks, 4),
+  // Each log type yields its own planks now.
+  shapeless([Block.OakLog], OAK, 4),
+  shapeless([Block.BirchLog], BIRCH, 4),
+  shapeless([Block.SpruceLog], SPRUCE, 4),
   shaped([[P], [P]], Item.Stick, 4),
   shaped([[P, P], [P, P]], Block.CraftingTable),
   shaped([[C, C, C], [C, null, C], [C, C, C]], Block.Furnace),
@@ -89,6 +103,21 @@ export const RECIPES: Recipe[] = [
   shaped([[I, I, I], [R, Pk, R], [I, I, I]], Block.Autominer),
   // Oil Derrick = iron + cobalt ingots + redstone.
   shaped([[Cb, I, Cb], [I, R, I], [I, I, I]], Block.OilDerrick),
+
+  // Warfare (M14): ships + turrets + cannonball ammo.
+  // Ship Helm = a planks wheel around a redstone core on a cobalt hub.
+  shaped([[P, R, P], [R, Cb, R], [P, R, P]], Block.ShipHelm),
+  // Cannon = an iron barrel reinforced with cobalt over a planks carriage.
+  shaped([[I, I, Cb], [I, R, I], [P, P, P]], Block.Cannon),
+  // Turret = a cannon-grade barrel on an iron+redstone auto-mount.
+  shaped([[I, Cb, I], [R, I, R], [I, I, I]], Block.Turret),
+  // Cannonball = iron shell packed with coal/charcoal powder.
+  shaped([[null, I, null], [I, ANY_COAL, I], [null, I, null]], Item.Cannonball, 4),
+
+  // Building set (M15): per-wood slabs + stairs.
+  ...woodCraft(OAK, Block.OakSlab, Block.OakStairsN),
+  ...woodCraft(BIRCH, Block.BirchSlab, Block.BirchStairsN),
+  ...woodCraft(SPRUCE, Block.SpruceSlab, Block.SpruceStairsN),
 ];
 
 function matches(ing: Ingredient, id: number | undefined): boolean {

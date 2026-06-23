@@ -3,13 +3,15 @@
 
 import * as THREE from 'three';
 import {
-  Block, BLOCKS, isReplaceable, isSolid, torchForFace, torchSupport,
+  Block, BLOCKS, isReplaceable, isSolid, orientStairsForYaw, stairsBaseOf,
+  torchForFace, torchSupport,
 } from './blocks';
 import type { Input } from './input';
 import type { Inventory } from './inventory';
 import { ITEMS, miningStats } from './items';
 import { machineHeight, machineTypeForBlock } from './machines';
 import type { Player } from './player';
+import { isHullBlock } from './ships';
 import type { World } from './world';
 
 export const REACH = 4.5;
@@ -18,6 +20,16 @@ const PLACE_REPEAT = 0.25; // vanilla holds place every 4 ticks
 /** Machine blocks (and their footprint parts) are sabotaged, not mined. */
 export function isMachineBlock(id: number): boolean {
   return id === Block.Autominer || id === Block.OilDerrick || id === Block.MachinePart;
+}
+
+/** Turrets are block-entities too: sabotaged (HP), not mined. */
+export function isTurretBlock(id: number): boolean {
+  return id === Block.Turret;
+}
+
+/** Any sabotage-target block-entity (machine or turret). */
+export function isEntityBlock(id: number): boolean {
+  return isMachineBlock(id) || isTurretBlock(id);
 }
 
 export interface RayHit {
@@ -63,12 +75,14 @@ export class Interaction {
   target: RayHit | null = null;
   /** Fired on successful break/place (held-item swing hooks in). */
   onAction?: () => void;
-  /** Fired when right-clicking a crafting table, furnace, chest, or machine. */
+  /** Fired when right-clicking a crafting table, furnace, chest, machine, or turret. */
   onOpenContainer?: (
-    kind: 'table' | 'furnace' | 'chest' | 'machine', x: number, y: number, z: number
+    kind: 'table' | 'furnace' | 'chest' | 'machine' | 'turret', x: number, y: number, z: number
   ) => void;
-  /** Fired on left-click against a machine block: sabotage (HP damage), not mining. */
+  /** Fired on left-click against a machine/turret block: sabotage (HP), not mining. */
   onSabotage?: (x: number, y: number, z: number) => void;
+  /** Fired on right-click of a (not-yet-launched) Ship Helm: capture + launch. */
+  onUseHelm?: (x: number, y: number, z: number) => void;
   /** Block dig/place sounds. */
   onBlockSound?: (
     kind: 'break' | 'place', blockId: number, x: number, y: number, z: number
@@ -136,23 +150,25 @@ export class Interaction {
     const opened = this.tryOpenContainer(input);
     const targetId = this.target
       ? this.world.getBlock(this.target.x, this.target.y, this.target.z) : Block.Air;
-    if (isMachineBlock(targetId)) {
+    if (isEntityBlock(targetId)) {
       // Machines aren't mined: a left-click is a sabotage hit (HP damage).
       if (input.leftClicked && !suppressMining && !opened) {
         this.onSabotage?.(this.target!.x, this.target!.y, this.target!.z);
         this.onAction?.();
       }
       this.breakKey = ''; this.breakProgress = 0; this.crackMesh.visible = false;
-      if (!opened) this.updatePlacing(dt, input);
+      if (!opened) this.updatePlacing(dt, input, origin, dir);
     } else {
       this.updateBreaking(dt, input, suppressMining);
-      if (!opened) this.updatePlacing(dt, input);
+      if (!opened) this.updatePlacing(dt, input, origin, dir);
     }
 
     // Middle-click pick block: select the matching hotbar slot.
     if (input.middleClicked && this.target) {
       let id = this.world.getBlock(this.target.x, this.target.y, this.target.z);
       if (torchSupport(id)) id = Block.Torch; // wall torches -> torch item
+      const sb = stairsBaseOf(id);
+      if (sb >= 0) id = sb; // any stairs facing -> the (N) stairs item
       const slot = this.inventory.findInHotbar(id);
       if (slot >= 0) this.inventory.select(slot);
     }
@@ -161,9 +177,15 @@ export class Interaction {
   private tryOpenContainer(input: Input): boolean {
     if (!input.rightClicked || !this.target || this.player.sneaking) return false;
     const id = this.world.getBlock(this.target.x, this.target.y, this.target.z);
+    // A helm in the world (not yet launched) captures + launches its hull.
+    if (id === Block.ShipHelm) {
+      this.onUseHelm?.(this.target.x, this.target.y, this.target.z);
+      return true;
+    }
     const kind = id === Block.CraftingTable ? 'table'
       : id === Block.Furnace || id === Block.FurnaceLit ? 'furnace'
       : id === Block.Chest ? 'chest'
+      : isTurretBlock(id) ? 'turret'
       : isMachineBlock(id) ? 'machine' // anchor or a footprint part -> open the machine
       : null;
     if (!kind) return false;
@@ -214,17 +236,28 @@ export class Interaction {
     this.crackMesh.visible = true;
   }
 
-  private updatePlacing(dt: number, input: Input): void {
+  private updatePlacing(
+    dt: number, input: Input, origin: THREE.Vector3, dir: THREE.Vector3
+  ): void {
     this.placeCooldown -= dt;
     const wantPlace =
       input.rightClicked || (input.rightDown && this.placeCooldown <= 0);
-    if (!wantPlace || !this.target) return;
+    if (!wantPlace) return;
 
     // Survival: place what's in the selected hotbar stack, then consume it.
     const stack = this.inventory.selectedStack;
     const info = stack ? ITEMS[stack.id] : null;
     if (!stack || !info || info.kind !== 'block') return;
     let blockId: number = info.block!;
+
+    // A Ship Helm aimed at open water lands on the water surface (so a hull can
+    // be built floating). Takes priority over any solid block behind the water.
+    if (blockId === Block.ShipHelm && this.tryPlaceHelmOnWater(origin, dir)) return;
+    if (!this.target) return;
+    // Stairs orient to the player's look direction (the tall step faces that way).
+    if (stairsBaseOf(blockId) >= 0) {
+      blockId = orientStairsForYaw(stairsBaseOf(blockId), this.player.yaw);
+    }
 
     // Clicking a replaceable plant (tall grass, dead bush) places into it,
     // like vanilla; otherwise place against the targeted face.
@@ -236,6 +269,12 @@ export class Interaction {
     const existing = this.world.getBlock(px, py, pz);
     if (!isReplaceable(existing)) return;
     if (py < 0 || py >= 256) return;
+
+    // Ship-build rule: a solid block may EXTEND a helm-rooted hull, but must not
+    // BRIDGE it to terrain or other structures — rejected if the placement cell
+    // would touch both a helm-connected hull block and a foreign solid block.
+    if (blockId !== Block.ShipHelm && (BLOCKS[blockId]?.solid ?? false) &&
+        this.shipBuildBlocked(px, py, pz)) return;
 
     // Machines occupy a vertical footprint (anchor at base + part cells above).
     // Validate the whole column is clear before committing the structure.
@@ -282,5 +321,77 @@ export class Interaction {
     this.inventory.consumeSelected(1);
     this.placeCooldown = PLACE_REPEAT;
     this.onAction?.();
+  }
+
+  /** Place a Ship Helm on the water surface the player is aiming at (the air
+   *  cell on top of the topmost water in that column). Returns true on success. */
+  private tryPlaceHelmOnWater(origin: THREE.Vector3, dir: THREE.Vector3): boolean {
+    const d = dir.clone().normalize();
+    let hitWater: { x: number; z: number; y: number } | null = null;
+    for (let t = 0; t <= REACH; t += 0.1) {
+      const x = Math.floor(origin.x + d.x * t);
+      const y = Math.floor(origin.y + d.y * t);
+      const z = Math.floor(origin.z + d.z * t);
+      const id = this.world.getBlock(x, y, z);
+      if (isSolid(id)) return false;          // hit land before any water
+      if (id === Block.Water) { hitWater = { x, y, z }; break; }
+    }
+    if (!hitWater) return false;
+    // Climb to the water surface, then sit on top of it.
+    let sy = hitWater.y;
+    while (this.world.getBlock(hitWater.x, sy + 1, hitWater.z) === Block.Water) sy++;
+    const py = sy + 1;
+    if (py < 0 || py >= 256) return false;
+    if (this.world.getBlock(hitWater.x, py, hitWater.z) !== Block.Air) return false;
+    if (this.player.intersectsBlock(hitWater.x, py, hitWater.z)) return false;
+    this.world.setBlock(hitWater.x, py, hitWater.z, Block.ShipHelm);
+    this.onEdit?.(hitWater.x, py, hitWater.z, Block.ShipHelm);
+    this.onBlockSound?.('place', Block.ShipHelm, hitWater.x, py, hitWater.z);
+    this.inventory.consumeSelected(1);
+    this.placeCooldown = PLACE_REPEAT;
+    this.onAction?.();
+    return true;
+  }
+
+  /** True if placing a solid block at (px,py,pz) would touch BOTH a helm-rooted
+   *  hull block and a foreign solid (terrain/other) — i.e. illegally bridge the
+   *  ship to the world. Pure ship-building gate; normal land building (no hull
+   *  neighbour) is never blocked. */
+  private shipBuildBlocked(px: number, py: number, pz: number): boolean {
+    const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+    let touchesShip = false, touchesForeign = false;
+    for (const [dx, dy, dz] of dirs) {
+      const nx = px + dx, ny = py + dy, nz = pz + dz;
+      const nb = this.world.getBlock(nx, ny, nz);
+      if (nb === Block.Air || nb === Block.Water) continue;
+      if (isHullBlock(nb) && this.connectsToHelm(nx, ny, nz)) touchesShip = true;
+      else touchesForeign = true;
+    }
+    return touchesShip && touchesForeign;
+  }
+
+  /** BFS over PLACED hull blocks from a cell; true if it reaches a Ship Helm. */
+  private connectsToHelm(sx: number, sy: number, sz: number): boolean {
+    const start = this.world.getEditedBlock(sx, sy, sz);
+    if (start === undefined || !isHullBlock(start)) return false;
+    const seen = new Set<string>([`${sx},${sy},${sz}`]);
+    const queue: [number, number, number][] = [[sx, sy, sz]];
+    const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+    let n = 0;
+    while (queue.length) {
+      const [x, y, z] = queue.shift()!;
+      const id = this.world.getEditedBlock(x, y, z);
+      if (id === undefined) continue;
+      if (id === Block.ShipHelm) return true;
+      if (!isHullBlock(id)) continue;
+      if (++n > 512) return false; // cap (matches the launch flood-fill bound)
+      for (const [dx, dy, dz] of dirs) {
+        const k = `${x + dx},${y + dy},${z + dz}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        queue.push([x + dx, y + dy, z + dz]);
+      }
+    }
+    return false;
   }
 }

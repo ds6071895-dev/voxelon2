@@ -151,6 +151,27 @@ function paintPlanks(p: Painter, seed: number): void {
   });
 }
 
+// Birch + spruce planks reuse the oak plank pattern with their own wood tones.
+const BIRCH_PLANKS: RGBA = [216, 198, 150, 255];
+const SPRUCE_PLANKS: RGBA = [110, 80, 48, 255];
+function paintPlanksColored(p: Painter, seed: number, base: RGBA): void {
+  p.fill((x, y) => {
+    const row = Math.floor(y / 4);
+    let f = 0.95 + hash2(seed, 0, row) * 0.1;
+    f *= speckle(seed ^ row, x, y >> 1, 0.08);
+    if (y % 4 === 3) f *= 0.6;
+    const seamX = (row % 2 === 0) ? 7 : 12;
+    if (x === seamX && y % 4 !== 3) f *= 0.65;
+    return shade(base, f);
+  });
+}
+function paintBirchPlanks(p: Painter, seed: number): void {
+  paintPlanksColored(p, seed, BIRCH_PLANKS);
+}
+function paintSprucePlanks(p: Painter, seed: number): void {
+  paintPlanksColored(p, seed, SPRUCE_PLANKS);
+}
+
 function paintLeaves(p: Painter, seed: number): void {
   // Grayscale; tinted by the biome foliage color at mesh time.
   p.fill((x, y) => {
@@ -902,6 +923,91 @@ function paintMachinePart(p: Painter, seed: number): void {
   for (const [x, y] of [[2, 2], [13, 2], [2, 13], [13, 13]]) p.set(x, y, [40, 42, 48, 255]);
 }
 
+// --- Warfare (M14) -----------------------------------------------------------
+function paintShipHelmSide(p: Painter, seed: number): void {
+  // A wooden ship's wheel mounted on a planks face.
+  paintPlanks(p, seed);
+  const rim: RGBA = [120, 86, 44, 255];
+  const spoke: RGBA = [150, 110, 60, 255];
+  for (let a = 0; a < 24; a++) {
+    const ang = (a / 24) * Math.PI * 2;
+    p.set(Math.round(7.5 + 5 * Math.cos(ang)), Math.round(7.5 + 5 * Math.sin(ang)), rim);
+    p.set(Math.round(7.5 + 6 * Math.cos(ang)), Math.round(7.5 + 6 * Math.sin(ang)), shade(rim, 0.7));
+  }
+  for (let a = 0; a < 8; a++) {
+    const ang = (a / 8) * Math.PI * 2;
+    for (let r = 0; r <= 6; r++) {
+      p.set(Math.round(7.5 + r * Math.cos(ang)), Math.round(7.5 + r * Math.sin(ang)), spoke);
+    }
+  }
+  p.set(7, 7, [60, 44, 24, 255]); p.set(8, 8, [60, 44, 24, 255]); // hub
+}
+
+function paintShipHelmTop(p: Painter, seed: number): void {
+  paintPlanks(p, seed);
+  const brass: RGBA = [196, 150, 64, 255];
+  for (let y = 6; y <= 9; y++) for (let x = 6; x <= 9; x++) p.set(x, y, shade(brass, 0.8 + hash2(seed, x, y) * 0.3));
+  for (let i = 4; i <= 11; i++) { p.set(i, 7, brass); p.set(i, 8, brass); }
+}
+
+function paintCannonSide(p: Painter, seed: number): void {
+  paintMachineFrame(p, seed, [70, 72, 80, 255]);
+  // A dark barrel running left->right with a muzzle ring at the right.
+  const barrel: RGBA = [44, 46, 52, 255];
+  for (let y = 6; y <= 9; y++) for (let x = 2; x <= 13; x++) {
+    p.set(x, y, shade(barrel, 0.85 + hash2(seed, x, y) * 0.25));
+  }
+  for (let y = 5; y <= 10; y++) { p.set(12, y, [24, 24, 28, 255]); p.set(13, y, [16, 16, 18, 255]); }
+  for (let x = 3; x <= 9; x++) p.set(x, 11, [96, 70, 38, 255]); // wood carriage
+}
+
+function paintCannonTop(p: Painter, seed: number): void {
+  paintMachineFrame(p, seed, [80, 82, 90, 255]);
+  for (let a = 0; a < 16; a++) {
+    const ang = (a / 16) * Math.PI * 2;
+    p.set(Math.round(7.5 + 3 * Math.cos(ang)), Math.round(7.5 + 3 * Math.sin(ang)), [40, 40, 46, 255]);
+  }
+  for (let y = 6; y <= 9; y++) for (let x = 6; x <= 9; x++) p.set(x, y, [18, 18, 20, 255]); // bore
+}
+
+function paintTurretSide(p: Painter, seed: number): void {
+  paintMachineFrame(p, seed, [92, 96, 104, 255]);
+  // hazard band + a forward gun port
+  for (let x = 1; x <= 14; x++) {
+    const c: RGBA = ((x + 1) >> 1) % 2 ? [210, 60, 50, 255] : [40, 40, 44, 255];
+    p.set(x, 2, c); p.set(x, 3, c);
+  }
+  const barrel: RGBA = [48, 50, 56, 255];
+  for (let y = 7; y <= 9; y++) for (let x = 6; x <= 13; x++) p.set(x, y, shade(barrel, 0.85 + hash2(seed, x, y) * 0.25));
+  for (let y = 6; y <= 10; y++) p.set(13, y, [20, 20, 22, 255]); // muzzle
+}
+
+function paintTurretTop(p: Painter, seed: number): void {
+  paintMachineFrame(p, seed, [104, 108, 116, 255]);
+  // a rotating cap with a barrel slot pointing one way
+  for (let a = 0; a < 16; a++) {
+    const ang = (a / 16) * Math.PI * 2;
+    p.set(Math.round(7.5 + 4 * Math.cos(ang)), Math.round(7.5 + 4 * Math.sin(ang)), [56, 58, 64, 255]);
+  }
+  for (let x = 7; x <= 14; x++) { p.set(x, 7, [30, 30, 34, 255]); p.set(x, 8, [30, 30, 34, 255]); }
+  p.set(7, 7, [200, 64, 52, 255]); p.set(8, 8, [200, 64, 52, 255]); // targeting dot
+}
+
+function paintCannonball(p: Painter, seed: number): void {
+  const iron: RGBA = [70, 74, 82, 255];
+  for (let y = 3; y <= 13; y++) {
+    for (let x = 3; x <= 13; x++) {
+      const dx = x - 8, dy = y - 8;
+      const d = Math.hypot(dx, dy);
+      if (d > 5.2) continue;
+      let f = 1 - d * 0.06;
+      if (dx < -1 && dy < -1 && d < 4) f += 0.35; // highlight
+      p.set(x, y, shade(iron, f * (0.9 + hash2(seed, x, y) * 0.1)));
+    }
+  }
+  p.set(5, 5, [150, 156, 166, 255]); p.set(6, 5, [130, 136, 146, 255]); // glint
+}
+
 const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.GrassTop]: paintGrassTop,
   [Tile.GrassSide]: paintGrassSide,
@@ -1028,6 +1134,15 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.OilDerrickSide]: paintOilDerrickSide,
   [Tile.OilDerrickTop]: paintOilDerrickTop,
   [Tile.MachinePart]: paintMachinePart,
+  [Tile.ShipHelmSide]: paintShipHelmSide,
+  [Tile.ShipHelmTop]: paintShipHelmTop,
+  [Tile.CannonSide]: flipX(paintCannonSide),
+  [Tile.CannonTop]: paintCannonTop,
+  [Tile.TurretSide]: flipX(paintTurretSide),
+  [Tile.TurretTop]: paintTurretTop,
+  [Tile.Cannonball]: paintCannonball,
+  [Tile.BirchPlanks]: paintBirchPlanks,
+  [Tile.SprucePlanks]: paintSprucePlanks,
 };
 
 export function createAtlas(seed = 1337): Atlas {

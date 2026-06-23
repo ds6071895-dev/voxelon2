@@ -1,7 +1,7 @@
 // Item registry. Placeable blocks share their Block id; pure items start at
 // 100. Includes the vanilla drop table used when blocks break.
 
-import { Block, BLOCKS, BlockInfo, Tile, ToolKind } from './blocks';
+import { Block, BLOCKS, BlockInfo, stairsBaseOf, Tile, ToolKind } from './blocks';
 
 export const enum Item {
   // Blocks are items with id === Block id (wall torch variants are not items).
@@ -45,6 +45,8 @@ export const enum Item {
   // Automation layer (M13)
   CobaltIngot = 142,
   OilBarrel = 143,
+  // Warfare layer (M14)
+  Cannonball = 144, // ammo for ship cannons + turrets (craft: iron + coal)
 }
 
 export interface ToolInfo {
@@ -199,6 +201,23 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Item.CobaltIngot]: pureItem('Cobalt Ingot', Tile.CobaltIngot),
   [Item.OilBarrel]: pureItem('Oil Barrel', Tile.OilBarrel),
 
+  // Warfare (M14): ship/turret blocks + cannonball ammo.
+  [Block.ShipHelm]: blockItem(Block.ShipHelm),
+  [Block.Cannon]: blockItem(Block.Cannon),
+  [Block.Turret]: blockItem(Block.Turret),
+  [Item.Cannonball]: pureItem('Cannonball', Tile.Cannonball),
+
+  // Building set (M15): per-wood planks + slabs + stairs (only the N-facing
+  // stair id is an item; placement orients it, like wall torches).
+  [Block.BirchPlanks]: blockItem(Block.BirchPlanks),
+  [Block.SprucePlanks]: blockItem(Block.SprucePlanks),
+  [Block.OakSlab]: blockItem(Block.OakSlab),
+  [Block.BirchSlab]: blockItem(Block.BirchSlab),
+  [Block.SpruceSlab]: blockItem(Block.SpruceSlab),
+  [Block.OakStairsN]: blockItem(Block.OakStairsN),
+  [Block.BirchStairsN]: blockItem(Block.BirchStairsN),
+  [Block.SpruceStairsN]: blockItem(Block.SpruceStairsN),
+
   [Item.Stick]: pureItem('Stick', Tile.Stick),
   [Item.Coal]: pureItem('Coal', Tile.CoalItem),
   [Item.IronIngot]: pureItem('Iron Ingot', Tile.IronIngot),
@@ -319,8 +338,12 @@ export function dropFor(
     case Block.Water:
     case Block.Air:
       return null;
-    default:
+    default: {
+      // Stairs drop the (N-facing) stairs item regardless of placed orientation.
+      const sb = stairsBaseOf(block);
+      if (sb >= 0) return { id: sb, count: 1 };
       // Everything else drops itself if it is registered as an item.
       return ITEMS[block] ? { id: block, count: 1 } : null;
+    }
   }
 }

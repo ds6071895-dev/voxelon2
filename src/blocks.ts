@@ -53,6 +53,20 @@ export const enum Block {
   Autominer = 41,    // block-entity: drills the column beneath it
   OilDerrick = 42,   // block-entity: pumps oil from the local oil field
   MachinePart = 43,  // structural cell of a machine's multi-block footprint
+  // Warfare layer (M14): ships + turrets
+  ShipHelm = 44,     // control block; interact to capture/launch a hull
+  Cannon = 45,       // ship weapon block (fires cannonballs while sailing)
+  Turret = 46,       // auto-targeting defensive block-entity (sabotage to raid)
+  // Decorative building set (M15): per-wood planks + slabs + stairs (stairs use
+  // 4 consecutive ids for N/E/S/W facing, like wall torches).
+  BirchPlanks = 47,
+  SprucePlanks = 48,
+  OakSlab = 49,
+  BirchSlab = 50,
+  SpruceSlab = 51,
+  OakStairsN = 52, OakStairsE = 53, OakStairsS = 54, OakStairsW = 55,
+  BirchStairsN = 56, BirchStairsE = 57, BirchStairsS = 58, BirchStairsW = 59,
+  SpruceStairsN = 60, SpruceStairsE = 61, SpruceStairsS = 62, SpruceStairsW = 63,
 }
 
 export const enum Tile {
@@ -174,11 +188,22 @@ export const enum Tile {
   OilDerrickSide = 110,
   OilDerrickTop = 111,
   MachinePart = 112,
+  // Warfare layer (M14)
+  ShipHelmSide = 113,
+  ShipHelmTop = 114,
+  CannonSide = 115,
+  CannonTop = 116,
+  TurretSide = 117,
+  TurretTop = 118,
+  Cannonball = 119,
+  // Building set (M15)
+  BirchPlanks = 120,
+  SprucePlanks = 121,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel';
 
-export type BlockShape = 'cube' | 'cross' | 'torch';
+export type BlockShape = 'cube' | 'cross' | 'torch' | 'slab' | 'stairs';
 export type TintKind = 'grass' | 'foliage' | null;
 
 export interface BlockInfo {
@@ -209,6 +234,8 @@ export interface BlockInfo {
   top: Tile;
   bottom: Tile;
   side: Tile;
+  /** Stairs facing (0=N/-Z, 1=E/+X, 2=S/+Z, 3=W/-X); the tall step is on that side. */
+  facing: number;
 }
 
 interface Partial {
@@ -224,6 +251,7 @@ interface Partial {
   tint?: TintKind;
   replaceable?: boolean;
   emission?: number;
+  facing?: number;
 }
 
 function def(p: Partial): BlockInfo {
@@ -243,7 +271,45 @@ function def(p: Partial): BlockInfo {
     top: p.top,
     bottom: p.bottom ?? p.top,
     side: p.side ?? p.top,
+    facing: p.facing ?? 0,
   };
+}
+
+/** Slab + 4 stairs (N/E/S/W) definitions for one wood, keyed at the given ids
+ *  (slabId, then stairsBase..stairsBase+3). Slabs/stairs are solid (collide as a
+ *  full cube — a known simplification) but render partial + don't fully occlude. */
+function woodSet(
+  name: string, tile: Tile, slabId: number, stairsBase: number
+): Record<number, BlockInfo> {
+  const out: Record<number, BlockInfo> = {
+    [slabId]: def({
+      name: `${name} Slab`, hardness: 2.0, top: tile, shape: 'slab',
+      opaque: false, occludes: false,
+    }),
+  };
+  for (let f = 0; f < 4; f++) {
+    out[stairsBase + f] = def({
+      name: `${name} Stairs`, hardness: 2.0, top: tile, shape: 'stairs', facing: f,
+      opaque: false, occludes: false,
+    });
+  }
+  return out;
+}
+
+/** Stairs base id for any stairs variant (or -1). Stairs occupy 4 consecutive
+ *  ids per wood: base+0=N, +1=E, +2=S, +3=W. */
+export function stairsBaseOf(id: number): number {
+  for (const b of [Block.OakStairsN, Block.BirchStairsN, Block.SpruceStairsN]) {
+    if (id >= b && id <= b + 3) return b;
+  }
+  return -1;
+}
+
+/** Orient a stairs base id to face the player's cardinal look direction. */
+export function orientStairsForYaw(base: number, yaw: number): number {
+  const dx = -Math.sin(yaw), dz = -Math.cos(yaw);
+  const f = Math.abs(dx) > Math.abs(dz) ? (dx > 0 ? 1 : 3) : (dz > 0 ? 2 : 0);
+  return base + f;
 }
 
 function plant(name: string, tile: Tile, tint: TintKind, replaceable: boolean): BlockInfo {
@@ -394,6 +460,31 @@ export const BLOCKS: Record<number, BlockInfo> = {
     name: 'Machine Frame', hardness: 3.5,
     top: Tile.MachinePart, opaque: false, occludes: false,
   }),
+
+  // --- Warfare (M14) ---
+  // Ship blocks are ordinary placeable blocks you build a hull from, then
+  // capture by interacting the helm. They mine normally before launch.
+  [Block.ShipHelm]: def({
+    name: 'Ship Helm', hardness: 3.0,
+    top: Tile.ShipHelmTop, bottom: Tile.Planks, side: Tile.ShipHelmSide,
+  }),
+  [Block.Cannon]: def({
+    name: 'Cannon', hardness: 3.5,
+    top: Tile.CannonTop, bottom: Tile.AutominerTop, side: Tile.CannonSide,
+  }),
+  // Turret is a block-entity (like a machine): placed as a normal edit but
+  // sabotaged (HP), not mined, and tracked server-side. Single block footprint.
+  [Block.Turret]: def({
+    name: 'Turret', hardness: 4.0,
+    top: Tile.TurretTop, bottom: Tile.AutominerTop, side: Tile.TurretSide,
+  }),
+
+  // --- Building set (M15): per-wood planks + slabs + stairs ---
+  [Block.BirchPlanks]: def({ name: 'Birch Planks', hardness: 2.0, top: Tile.BirchPlanks }),
+  [Block.SprucePlanks]: def({ name: 'Spruce Planks', hardness: 2.0, top: Tile.SprucePlanks }),
+  ...woodSet('Oak', Tile.Planks, Block.OakSlab, Block.OakStairsN),
+  ...woodSet('Birch', Tile.BirchPlanks, Block.BirchSlab, Block.BirchStairsN),
+  ...woodSet('Spruce', Tile.SprucePlanks, Block.SpruceSlab, Block.SpruceStairsN),
 };
 
 // Vanilla tool effectiveness and harvest tiers (wood 0, stone 1, iron 2).
@@ -405,6 +496,7 @@ const PICKAXE_TIERS: [Block, number][] = [
   [Block.OilShale, 0],
   [Block.Furnace, 0], [Block.FurnaceLit, 0],
   [Block.Autominer, 0], [Block.OilDerrick, 0],
+  [Block.Cannon, 1], [Block.Turret, 1], // metal war machines need a stone+ pick
 ];
 for (const [b, tier] of PICKAXE_TIERS) {
   BLOCKS[b].tool = 'pickaxe';
@@ -413,8 +505,11 @@ for (const [b, tier] of PICKAXE_TIERS) {
 }
 for (const b of [
   Block.OakLog, Block.BirchLog, Block.SpruceLog, Block.OakPlanks,
-  Block.CraftingTable, Block.Chest,
+  Block.BirchPlanks, Block.SprucePlanks,
+  Block.CraftingTable, Block.Chest, Block.ShipHelm,
 ]) BLOCKS[b].tool = 'axe';
+// All slabs + stairs are wood: axe-mineable like planks.
+for (let b = Block.OakSlab; b <= Block.SpruceStairsW; b++) BLOCKS[b].tool = 'axe';
 for (const b of [
   Block.Dirt, Block.Grass, Block.SnowyGrass, Block.Sand,
 ]) BLOCKS[b].tool = 'shovel';

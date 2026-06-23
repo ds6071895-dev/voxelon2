@@ -11,13 +11,31 @@ import {
   damageMachine, machineHeight, machineTypeForBlock, newMachine, setFilter,
   tickMachine,
 } from '../machines';
+import { Item } from '../items';
+import {
+  ShipState, applyShipUpgrade, blockWorldPos, cannonCount, damageShip,
+  floodFillHull, newShip, shipFireInterval, tickShip,
+} from '../ships';
+import {
+  TurretState, applyTurretUpgrade, claimTurret, damageTurret, newTurret,
+  turretArmed, turretConsumeShot, turretDamage, turretLoad, turretRange,
+} from '../turrets';
+import {
+  ControlNode, deriveControlNodes, resolveNode, topScores,
+  TERRITORY_TARGET_SCORE,
+} from '../territory';
 import { Terrain } from '../terrain';
 import {
   ClientMsg, MELEE_DAMAGE, MELEE_RANGE, EDIT_RANGE, CHEST_SLOTS, PICKUP_RANGE,
-  ARMOR_POINT_CAP, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE, mitigate,
-  ItemEntityInfo, PlayerInfo, PlayerSnapshot, ServerMsg, WORLD_SEED,
-  makeUsername, skinSeed,
+  ARMOR_POINT_CAP, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE, SHIP_HIT_MAX_DAMAGE,
+  mitigate, ItemEntityInfo, PlayerInfo, PlayerSnapshot, ServerMsg, ShipTransform,
+  WORLD_SEED, makeUsername, skinSeed,
 } from './protocol';
+
+const BOARD_RANGE = 6;          // how close a player must be to pilot/dock/upgrade a ship
+const SHIP_BLAST_RADIUS = 7;    // ship-destruction explosion radius (player damage)
+const TERRITORY_BROADCAST = 0.5; // seconds between scoreboard broadcasts
+const WIN_HOLD = 10;            // seconds the winner is shown before a round reset
 
 /** All arguments are finite numbers (rejects NaN/Infinity/non-numbers). */
 function fin(...ns: number[]): boolean {
@@ -51,6 +69,17 @@ export class GameServer {
   private readonly edits = new Map<string, number>();
   private readonly chests = new Map<string, (ItemStack | null)[]>();
   private readonly machines = new Map<string, MachineState>();
+  // Warfare layer (M14).
+  private readonly ships = new Map<number, ShipState>();
+  private readonly shipInput = new Map<number, { thrust: number; turn: number; age: number }>();
+  private nextShipId = 1;
+  private readonly turrets = new Map<string, TurretState>();
+  private territoryNodes: ControlNode[] | null = null;
+  private readonly scores = new Map<string, number>();
+  private roundTime = 0;
+  private winner = '';
+  private winHoldTimer = 0;
+  private territoryAccum = 0;
   private readonly items = new Map<number, ItemEntityInfo>();
   /** Per-item fall state (server-owned gravity so drops settle to the ground). */
   private readonly itemPhys = new Map<number, { vy: number; resting: boolean }>();
@@ -99,6 +128,11 @@ export class GameServer {
       players: [...this.players.values()].map(toInfo),
       edits: [...this.edits.entries()],
       items: [...this.items.values()],
+      ships: [...this.ships.values()],
+      turrets: [...this.turrets.entries()].map(([k, state]) => {
+        const [x, y, z] = k.split(',').map(Number);
+        return { x, y, z, state };
+      }),
     };
     return [
       { to: id, msg: welcome },
@@ -225,6 +259,87 @@ export class GameServer {
         if (!s) return [];
         claimMachine(s, p.username);
         return [{ to: 'all', msg: { t: 'machine', x: msg.x, y: msg.y, z: msg.z, state: s } }];
+      }
+      // --- Ships ---
+      case 'shipLaunch':
+        return this.handleShipLaunch(p, msg.x, msg.y, msg.z);
+      case 'shipSteer': {
+        const ship = this.ships.get(msg.id);
+        if (!ship || !this.nearShip(p, ship)) return [];
+        if (!fin(msg.thrust, msg.turn)) return [];
+        this.shipInput.set(ship.id, { thrust: msg.thrust, turn: msg.turn, age: 0 });
+        return [];
+      }
+      case 'shipFire': {
+        // Anti-spam gate only: the cannonball projectile + its hit are
+        // client-simulated and validated via shipHit/rangedAttack (trust model).
+        const ship = this.ships.get(msg.id);
+        if (!ship || !this.nearShip(p, ship) || cannonCount(ship) < 1) return [];
+        if (ship.fireCooldown > 0) return [];
+        ship.fireCooldown = shipFireInterval(ship.level);
+        return [];
+      }
+      case 'shipHit': {
+        const ship = this.ships.get(msg.id);
+        if (!ship || p.dead || !fin(ship.x, ship.y, ship.z, p.x, p.y, p.z, msg.amount)) return [];
+        const dist = Math.hypot(ship.x - p.x, ship.y - p.y, ship.z - p.z);
+        if (!(dist <= RANGED_MAX_RANGE)) return []; // fail-closed (NaN -> reject)
+        const dmg = Math.max(0, Math.min(SHIP_HIT_MAX_DAMAGE, msg.amount));
+        if (dmg <= 0) return [];
+        if (damageShip(ship, dmg)) return this.destroyShip(ship);
+        return [{ to: 'all', msg: { t: 'shipTransforms', ships: [shipTransform(ship)] } }];
+      }
+      case 'shipDock': {
+        const ship = this.ships.get(msg.id);
+        if (!ship || !this.nearShip(p, ship)) return [];
+        return this.dockShip(ship);
+      }
+      case 'shipUpgrade': {
+        const ship = this.ships.get(msg.id);
+        if (!ship || !this.nearShip(p, ship)) return [];
+        if (msg.axis !== 'speed' && msg.axis !== 'hull' && msg.axis !== 'cannon') return [];
+        applyShipUpgrade(ship, msg.axis); // cost paid client-side; server caps
+        return [{ to: 'all', msg: { t: 'shipState', ship } }];
+      }
+      // --- Turrets ---
+      case 'turretOpen': {
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        const s = this.ensureTurret(msg.x, msg.y, msg.z);
+        if (!s) return [];
+        return [{ to: id, msg: { t: 'turret', x: msg.x, y: msg.y, z: msg.z, state: s } }];
+      }
+      case 'turretUpgrade': {
+        if (msg.axis !== 'range' && msg.axis !== 'damage' && msg.axis !== 'rate') return [];
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        const s = this.ensureTurret(msg.x, msg.y, msg.z);
+        if (!s) return [];
+        applyTurretUpgrade(s, msg.axis);
+        return [{ to: 'all', msg: { t: 'turret', x: msg.x, y: msg.y, z: msg.z, state: s } }];
+      }
+      case 'turretClaim': {
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        const s = this.ensureTurret(msg.x, msg.y, msg.z);
+        if (!s) return [];
+        claimTurret(s, p.username);
+        return [{ to: 'all', msg: { t: 'turret', x: msg.x, y: msg.y, z: msg.z, state: s } }];
+      }
+      case 'turretLoad': {
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        const s = this.ensureTurret(msg.x, msg.y, msg.z);
+        if (!s) return [];
+        if (!fin(msg.count) || (msg.item !== Item.Cannonball && msg.item !== Item.OilBarrel)) return [];
+        turretLoad(s, msg.item, msg.count); // client only sends what its predicted room allows
+        return [{ to: 'all', msg: { t: 'turret', x: msg.x, y: msg.y, z: msg.z, state: s } }];
+      }
+      case 'turretHit': {
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        const s = this.ensureTurret(msg.x, msg.y, msg.z);
+        if (!s) return [];
+        const dmg = fin(msg.amount) ? Math.max(0, Math.min(1000, msg.amount)) : 0;
+        if (damageTurret(s, dmg)) {
+          return this.destroyTurret(Math.floor(msg.x), Math.floor(msg.y), Math.floor(msg.z));
+        }
+        return [{ to: 'all', msg: { t: 'turret', x: msg.x, y: msg.y, z: msg.z, state: s } }];
       }
       default:
         return [];
@@ -442,12 +557,25 @@ export class GameServer {
       out.push(...this.spillMachine(key, x, y, z));
       out.push(...this.clearFootprint(x, y, z, prevType, false));
     }
+    // Turrets are single-block entities: removing/replacing one spills its
+    // loaded ammo and deletes the entity (the block drop comes from the normal
+    // break path, like machines).
+    if (prev === Block.Turret && block !== Block.Turret) {
+      const ts = this.turrets.get(key);
+      this.turrets.delete(key);
+      if (ts && ts.ammo > 0) {
+        out.push(this.spawnItem(Item.Cannonball, Math.min(64, ts.ammo), x + 0.5, y + 0.3, z + 0.5));
+      }
+    }
     this.edits.set(key, block);
     // Placing a machine block creates its server entity, which then ticks even
     // with no chunk loaded and no one viewing it.
     const placed = machineTypeForBlock(block);
     if (placed !== null && !this.machines.has(key)) {
       this.machines.set(key, newMachine(placed));
+    }
+    if (block === Block.Turret && !this.turrets.has(key)) {
+      this.turrets.set(key, newTurret());
     }
     out.push({ to: 'all', msg: { t: 'edit', x, y, z, block } });
     return out;
@@ -573,6 +701,229 @@ export class GameServer {
     }
   }
 
+  // --- Ships -----------------------------------------------------------------
+
+  private playerByName(name: string): ServerPlayer | undefined {
+    if (!name) return undefined;
+    for (const p of this.players.values()) if (p.username === name) return p;
+    return undefined;
+  }
+
+  /** Alive + within boarding range of a ship's origin (steer/dock/upgrade gate). */
+  private nearShip(p: ServerPlayer, ship: ShipState): boolean {
+    if (p.dead || !fin(p.x, p.z, ship.x, ship.z)) return false;
+    const dx = ship.x - p.x, dz = ship.z - p.z;
+    return dx * dx + dz * dz <= BOARD_RANGE * BOARD_RANGE;
+  }
+
+  /** Flood-fill the hull from a helm, lift it out of the world, and create the
+   *  ship. Rejected (no-op) if the helm isn't placed/near, or the hull is too
+   *  small/large (floodFillHull is size-capped, so this can't be abused). */
+  private handleShipLaunch(p: ServerPlayer, x: number, y: number, z: number): Outbound[] {
+    if (!this.nearMachine(p, x, y, z)) return []; // alive + in range (reuses the gate)
+    x = Math.floor(x); y = Math.floor(y); z = Math.floor(z);
+    const capturableAt = (cx: number, cy: number, cz: number) =>
+      this.edits.get(`${cx},${cy},${cz}`) ?? 0; // only player-placed cells; 0 = natural/air
+    const blocks = floodFillHull(x, y, z, capturableAt);
+    if (!blocks) return [];
+    const ship = newShip(this.nextShipId++, p.username,
+      { x: x + 0.5, y: y + 0.5, z: z + 0.5 }, 0, blocks);
+    this.ships.set(ship.id, ship);
+    const out: Outbound[] = [];
+    // Remove the captured blocks from the world (everyone sees them lift off).
+    for (const b of blocks) {
+      const cx = x + b.dx, cy = y + b.dy, cz = z + b.dz;
+      this.edits.set(`${cx},${cy},${cz}`, Block.Air);
+      out.push({ to: 'all', msg: { t: 'edit', x: cx, y: cy, z: cz, block: Block.Air } });
+    }
+    out.push({ to: 'all', msg: { t: 'shipState', ship } });
+    return out;
+  }
+
+  /** Ship HP hit 0: explode (damage nearby players), spill the hull + cargo as
+   *  loot entities, and remove the ship for everyone. */
+  private destroyShip(ship: ShipState): Outbound[] {
+    this.ships.delete(ship.id);
+    this.shipInput.delete(ship.id);
+    const out: Outbound[] = [];
+    // Server-authoritative blast damage to nearby players (linear falloff).
+    for (const target of this.players.values()) {
+      if (target.dead) continue;
+      const d = Math.hypot(target.x - ship.x, target.y - ship.y, target.z - ship.z);
+      const f = 1 - d / SHIP_BLAST_RADIUS;
+      if (f <= 0) continue;
+      const horiz = Math.hypot(target.x - ship.x, target.z - ship.z) || 1;
+      out.push(...this.applyDamage(target, Math.round(28 * f), -1, {
+        x: (target.x - ship.x) / horiz, y: 0.6, z: (target.z - ship.z) / horiz,
+      }));
+    }
+    // Spill the hull blocks as loot (capped), at the ship's position.
+    let entities = 0;
+    for (const b of ship.blocks) {
+      if (entities >= 80) break;
+      if (!ITEMS[b.id]) continue;
+      entities++;
+      out.push(this.spawnItem(b.id, 1,
+        ship.x + (this.rng() - 0.5) * 2, ship.y + 0.5, ship.z + (this.rng() - 0.5) * 2));
+    }
+    out.push({ to: 'all', msg: { t: 'shipRemove', id: ship.id } });
+    return out;
+  }
+
+  /** Re-place the captured hull into the world at the ship's current transform
+   *  and delete the ship (dock / break down). */
+  private dockShip(ship: ShipState): Outbound[] {
+    const out: Outbound[] = [];
+    for (const b of ship.blocks) {
+      const w = blockWorldPos(ship, b);
+      const cx = Math.round(w.x - 0.5), cy = Math.round(w.y - 0.5), cz = Math.round(w.z - 0.5);
+      if (cy < 0 || cy >= 256) continue;
+      this.edits.set(`${cx},${cy},${cz}`, b.id);
+      out.push({ to: 'all', msg: { t: 'edit', x: cx, y: cy, z: cz, block: b.id } });
+    }
+    this.ships.delete(ship.id);
+    this.shipInput.delete(ship.id);
+    out.push({ to: 'all', msg: { t: 'shipRemove', id: ship.id } });
+    return out;
+  }
+
+  /** Advance every ship; returns the transforms to broadcast (like tickItems). */
+  tickShips(dt: number): ShipTransform[] {
+    if (!fin(dt) || dt <= 0) return [];
+    const out: ShipTransform[] = [];
+    const height = (x: number, z: number) => this.terrain.height(x, z);
+    for (const ship of this.ships.values()) {
+      const inp = this.shipInput.get(ship.id);
+      let steer = { thrust: 0, turn: 0 };
+      if (inp) {
+        inp.age += dt;
+        if (inp.age <= 0.6) steer = inp; // input expires if the driver goes quiet
+      }
+      tickShip(ship, steer, dt, height);
+      ship.fireCooldown = Math.max(0, ship.fireCooldown - dt);
+      out.push(shipTransform(ship));
+    }
+    return out;
+  }
+
+  // --- Turrets ---------------------------------------------------------------
+
+  private ensureTurret(x: number, y: number, z: number): TurretState | undefined {
+    if (!fin(x, y, z)) return undefined;
+    const key = `${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`;
+    if (this.edits.get(key) !== Block.Turret) return undefined;
+    let s = this.turrets.get(key);
+    if (!s) { s = newTurret(); this.turrets.set(key, s); }
+    return s;
+  }
+
+  /** Raid-destroy a turret: spill loaded ammo + drop the block, clear the cell. */
+  private destroyTurret(x: number, y: number, z: number): Outbound[] {
+    const key = `${x},${y},${z}`;
+    const s = this.turrets.get(key);
+    this.turrets.delete(key);
+    const out: Outbound[] = [];
+    if (s) {
+      if (s.ammo > 0) out.push(this.spawnItem(Item.Cannonball, Math.min(64, s.ammo),
+        x + 0.5, y + 0.3, z + 0.5));
+      out.push(this.spawnItem(Block.Turret, 1,
+        x + 0.5 + (this.rng() - 0.5), y + 0.3, z + 0.5 + (this.rng() - 0.5)));
+    }
+    this.edits.set(key, Block.Air);
+    out.push({ to: 'all', msg: { t: 'edit', x, y, z, block: Block.Air } });
+    return out;
+  }
+
+  /** Tick every turret: cooldown, acquire the nearest enemy (non-owner) player
+   *  in range, consume a shot, and apply a server-validated hit. Returns the
+   *  fire visuals + damage + state updates to broadcast. */
+  tickTurrets(dt: number): Outbound[] {
+    if (!fin(dt) || dt <= 0) return [];
+    const out: Outbound[] = [];
+    for (const [key, s] of this.turrets) {
+      s.cooldown = Math.max(0, s.cooldown - dt);
+      if (!s.owner || !turretArmed(s)) continue; // unclaimed/empty turrets are inert
+      const [tx, ty, tz] = key.split(',').map(Number);
+      const cx = tx + 0.5, cy = ty + 0.5, cz = tz + 0.5;
+      const range = turretRange(s.level);
+      let best: ServerPlayer | null = null;
+      let bestD2 = range * range;
+      for (const p of this.players.values()) {
+        if (p.dead || p.username === s.owner) continue;
+        const dx = p.x - cx, dy = p.y - cy, dz = p.z - cz;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 <= bestD2) { bestD2 = d2; best = p; }
+      }
+      if (!best) continue;
+      s.facingYaw = Math.atan2(best.x - cx, best.z - cz); // aim heading toward the target
+      turretConsumeShot(s);
+      const owner = this.playerByName(s.owner);
+      const horiz = Math.hypot(best.x - cx, best.z - cz) || 1;
+      out.push(...this.applyDamage(best, Math.round(turretDamage(s.level)),
+        owner ? owner.id : -1, { x: (best.x - cx) / horiz, y: 0.3, z: (best.z - cz) / horiz }));
+      out.push({ to: 'all', msg: { t: 'turretFire', x: tx, y: ty, z: tz,
+        tx: best.x, ty: best.y + 0.9, tz: best.z } });
+      // Refresh viewers' ammo/facing display.
+      out.push({ to: 'all', msg: { t: 'turret', x: tx, y: ty, z: tz, state: s } });
+    }
+    return out;
+  }
+
+  // --- Territory objective ---------------------------------------------------
+
+  private nodes(): ControlNode[] {
+    if (!this.territoryNodes) {
+      this.territoryNodes = deriveControlNodes((x, z) => this.terrain.oilRichness(x, z));
+    }
+    return this.territoryNodes;
+  }
+
+  /** Accrue score for controlled nodes, check the win condition, and emit a
+   *  periodic scoreboard broadcast. Round-based (resets after a win). */
+  tickTerritory(dt: number): Outbound[] {
+    if (!fin(dt) || dt <= 0) return [];
+    const presence = [...this.players.values()].map((p) => ({
+      name: p.username, x: p.x, z: p.z, dead: p.dead,
+    }));
+    if (!this.winner) {
+      this.roundTime += dt;
+      for (const node of this.nodes()) {
+        const st = resolveNode(node, presence);
+        if (st.controller) {
+          this.scores.set(st.controller, (this.scores.get(st.controller) ?? 0) + dt);
+          if ((this.scores.get(st.controller) ?? 0) >= TERRITORY_TARGET_SCORE) {
+            this.winner = st.controller;
+          }
+        }
+      }
+    } else {
+      this.winHoldTimer += dt;
+      if (this.winHoldTimer >= WIN_HOLD) {
+        this.scores.clear();
+        this.roundTime = 0;
+        this.winner = '';
+        this.winHoldTimer = 0;
+      }
+    }
+    this.territoryAccum += dt;
+    if (this.territoryAccum < TERRITORY_BROADCAST) return [];
+    this.territoryAccum = 0;
+    return [{ to: 'all', msg: this.territorySnapshot() }];
+  }
+
+  territorySnapshot(): ServerMsg {
+    const presence = [...this.players.values()].map((p) => ({
+      name: p.username, x: p.x, z: p.z, dead: p.dead,
+    }));
+    return {
+      t: 'territory',
+      nodes: this.nodes().map((n) => resolveNode(n, presence)),
+      scores: topScores(this.scores),
+      roundTime: this.roundTime,
+      winner: this.winner,
+    };
+  }
+
   /** Transform+health for every player (the periodic broadcast). */
   snapshot(): PlayerSnapshot[] {
     return [...this.players.values()].map((p) => ({
@@ -580,6 +931,10 @@ export class GameServer {
       health: p.health, dead: p.dead,
     }));
   }
+}
+
+function shipTransform(ship: ShipState): ShipTransform {
+  return { id: ship.id, x: ship.x, y: ship.y, z: ship.z, yaw: ship.yaw, hp: ship.hp };
 }
 
 function toInfo(p: ServerPlayer): PlayerInfo {

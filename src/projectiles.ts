@@ -13,10 +13,12 @@ import type { NetClient } from './net/client';
 import type { Particles } from './particles';
 import type { Player } from './player';
 import type { RemotePlayers } from './remoteplayers';
+import { blockAtWorld, ShipState } from './ships';
 import type { World } from './world';
 
 const STEP = 0.2;          // collision sub-step (blocks)
 const SPAWN_OFFSET = 0.6;  // start ahead of the eye so it can't hit the shooter
+const SHIP_HIT_MIN = 1.5;  // don't let a round hit the ship it was fired from
 
 interface Projectile {
   mesh: THREE.Mesh;
@@ -25,6 +27,8 @@ interface Projectile {
   gun: GunInfo;
   traveled: number;
   alive: boolean;
+  /** Ship the shooter was aboard (immune until SHIP_HIT_MIN of travel). */
+  fromShip: number;
 }
 
 export class Projectiles {
@@ -33,6 +37,9 @@ export class Projectiles {
   private readonly rocketGeo = new THREE.BoxGeometry(0.16, 0.16, 0.42);
   private readonly bulletMat = new THREE.MeshBasicMaterial({ color: 0xffe27a });
   private readonly rocketMat = new THREE.MeshBasicMaterial({ color: 0xcc4434 });
+
+  /** Live ships to test projectile hits against (set by main). */
+  shipsProvider: () => ShipState[] = () => [];
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -44,7 +51,7 @@ export class Projectiles {
     private readonly particles: Particles,
   ) {}
 
-  fire(origin: THREE.Vector3, dir: THREE.Vector3, gun: GunInfo): void {
+  fire(origin: THREE.Vector3, dir: THREE.Vector3, gun: GunInfo, fromShip = -1): void {
     const d = dir.clone().normalize();
     const rocket = gun.rocket === true;
     const mesh = new THREE.Mesh(
@@ -55,7 +62,7 @@ export class Projectiles {
     mesh.position.copy(pos);
     if (rocket) mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), d);
     this.scene.add(mesh);
-    this.list.push({ mesh, pos, dir: d, gun, traveled: 0, alive: true });
+    this.list.push({ mesh, pos, dir: d, gun, traveled: 0, alive: true, fromShip });
   }
 
   update(dt: number): void {
@@ -92,6 +99,22 @@ export class Projectiles {
     if (this.mobs.shootPoint(p.pos, p.gun.damage, p.dir)) {
       this.despawn(p, true);
       return;
+    }
+    // Ships (server-validated like ranged PvP): a round that strikes a hull
+    // block reports a ship hit. Immune to the shooter's own ship until it has
+    // cleared the muzzle.
+    if (p.traveled >= SHIP_HIT_MIN) {
+      for (const ship of this.shipsProvider()) {
+        if (ship.id === p.fromShip) continue;
+        // Cheap reject before the per-block scan (hulls are well under 48 wide).
+        const sdx = ship.x - p.pos.x, sdz = ship.z - p.pos.z;
+        if (sdx * sdx + sdz * sdz > 48 * 48) continue;
+        if (blockAtWorld(ship, p.pos.x, p.pos.y, p.pos.z) !== 0) {
+          this.net.sendShipHit(ship.id, p.gun.damage);
+          this.despawn(p, true);
+          return;
+        }
+      }
     }
     // Block.
     if (isSolid(this.world.getBlock(

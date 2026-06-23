@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { materialOf } from '../src/audio';
 import { Biome, BIOME_NAMES } from '../src/biomes';
-import { Block, BLOCKS, isSolid } from '../src/blocks';
+import { Block, BLOCKS, isSolid, orientStairsForYaw, stairsBaseOf } from '../src/blocks';
 import { Chunk } from '../src/chunk';
 import { matchGrid, craftResult, consumeCraft } from '../src/crafting';
 import { Furnaces, SMELT } from '../src/furnace';
@@ -17,7 +17,7 @@ import {
 } from '../src/items';
 import { ItemEntities, itemGeometry } from '../src/itementity';
 import { computeLight } from '../src/light';
-import { buildChunkGeometry, TintSampler } from '../src/mesher';
+import { buildChunkGeometry, stairBoxes, TintSampler } from '../src/mesher';
 import { Mobs, MOB_DEFS } from '../src/mobs';
 import { Particles } from '../src/particles';
 import { raycastBlocks } from '../src/interact';
@@ -33,6 +33,20 @@ import {
   newMachine, productionRate, sanitizeState, setFilter, storageCap, tickMachine,
   totalStored, upgradeCost,
 } from '../src/machines';
+import {
+  Ships, applyShipUpgrade, blockAtWorld, blockWorldPos, cannonCount, damageShip,
+  deckHeightAt, floodFillHull, hullRadius, isHullBlock, newShip, sanitizeShipState,
+  shipMaxHp, shipSpeed, shipUpgradeCost, tickShip, worldToLocalOffset,
+  MAX_SHIP_BLOCKS, SHIP_MAX_LEVEL,
+} from '../src/ships';
+import {
+  applyTurretUpgrade, claimTurret, damageTurret, newTurret, sanitizeTurretState,
+  turretArmed, turretDamage, turretLoad, turretRange, turretUpgradeCost,
+  TURRET_MAX_LEVEL,
+} from '../src/turrets';
+import {
+  deriveControlNodes, resolveNode, topScores, TERRITORY_TARGET_SCORE, MAX_NODES,
+} from '../src/territory';
 import { mulberry32 } from '../src/noise';
 import { AUTOMINER_ORES, Terrain, SEA_LEVEL } from '../src/terrain';
 import { Biome } from '../src/biomes';
@@ -143,7 +157,7 @@ check('daylight: noon full, midnight moonlit floor, dawn between',
     for (const [i, id] of Object.entries(cells)) out[Number(i)] = { id, count: 1 };
     return out;
   };
-  check('log -> 4 planks', matchGrid(g({ 4: Block.BirchLog }))?.id === Block.OakPlanks);
+  check('log -> 4 planks (per-wood)', matchGrid(g({ 4: Block.BirchLog }))?.id === Block.BirchPlanks);
   check('planks -> sticks', matchGrid(g({ 1: Block.OakPlanks, 4: Block.OakPlanks }))?.id === Item.Stick);
   check('2x2 planks -> table',
     matchGrid(g({ 4: Block.OakPlanks, 5: Block.OakPlanks, 7: Block.OakPlanks, 8: Block.OakPlanks }))?.id === Block.CraftingTable);
@@ -1444,6 +1458,324 @@ check('furnace smelts ore/sand/log but not removed foods',
   })!;
   check('sanitizeState trims stored to the aggregate storage cap',
     totalStored(bloated) === storageCap(bloated), `${totalStored(bloated)}/${storageCap(bloated)}`);
+}
+
+// --- Ships: capture, physics, combat, upgrades, validation ------------------
+{
+  // Flood-fill a small connected hull: helm + a 3-block deck.
+  const grid: Record<string, number> = {
+    '0,70,0': Block.ShipHelm,
+    '1,70,0': Block.OakPlanks,
+    '2,70,0': Block.OakPlanks,
+    '1,70,1': Block.Cannon,
+  };
+  const cap = (x: number, y: number, z: number) => grid[`${x},${y},${z}`] ?? 0;
+  const hull = floodFillHull(0, 70, 0, cap);
+  check('floodFillHull captures the connected hull from the helm',
+    !!hull && hull.length === 4);
+  check('floodFillHull rejects a non-helm start',
+    floodFillHull(1, 70, 0, cap) === null);
+  check('isHullBlock excludes water/air/entities + containers',
+    isHullBlock(Block.OakPlanks) && !isHullBlock(Block.Water) &&
+    !isHullBlock(Block.Turret) && !isHullBlock(Block.Chest));
+
+  // Oversize hull -> rejected (cap enforced).
+  const big: Record<string, number> = { '0,70,0': Block.ShipHelm };
+  for (let i = 1; i <= MAX_SHIP_BLOCKS + 5; i++) big[`${i},70,0`] = Block.OakPlanks;
+  check('floodFillHull rejects an oversize hull',
+    floodFillHull(0, 70, 0, (x, y, z) => big[`${x},${y},${z}`] ?? 0) === null);
+
+  const ship = newShip(1, 'Cap', { x: 0.5, y: 70.5, z: 0.5 }, 0, hull!);
+  check('cannonCount counts cannon blocks', cannonCount(ship) === 1);
+  check('hullRadius is positive', hullRadius(hull!) >= 2);
+
+  // blockWorldPos: the helm sits at the origin; a +x deck block is +x at yaw 0.
+  const helmW = blockWorldPos(ship, hull!.find((b) => b.dx === 0 && b.dz === 0)!);
+  check('helm block sits at the ship origin',
+    Math.abs(helmW.x - 0.5) < 1e-6 && Math.abs(helmW.z - 0.5) < 1e-6);
+  const deckW = blockWorldPos(ship, { dx: 2, dy: 0, dz: 0, id: Block.OakPlanks });
+  check('deck offset rotates with yaw (yaw 0 keeps +x)',
+    Math.abs(deckW.x - 2.5) < 1e-6 && Math.abs(deckW.z - 0.5) < 1e-6);
+
+  // Physics: sails forward over open water, stops at a shoreline.
+  const water = () => 0;                 // everywhere below sea level
+  const sail = newShip(2, 'Cap', { x: 100.5, y: 64, z: 100.5 }, 0, hull!);
+  for (let i = 0; i < 30; i++) tickShip(sail, { thrust: 1, turn: 0 }, 0.1, water);
+  check('ship sails forward over water', sail.z < 100.5 - 1); // yaw 0 faces -Z
+
+  const land = (x: number, z: number) => (z < 95 ? 100 : 0); // wall of land north
+  const blocked = newShip(3, 'Cap', { x: 100.5, y: 64, z: 100.5 }, 0, hull!);
+  for (let i = 0; i < 80; i++) tickShip(blocked, { thrust: 1, turn: 0 }, 0.1, land);
+  // It sailed north a bit but halted at the shore — never crossing into land.
+  check('ship stops at a shoreline (water-only)',
+    blocked.z > 95 && blocked.z < 100.5);
+
+  // Combat: damage + destruction threshold.
+  check('shipMaxHp grows with the hull axis',
+    shipMaxHp({ hull: 5 }) > shipMaxHp({ hull: 1 }));
+  const dmgShip = newShip(4, 'Cap', { x: 0, y: 64, z: 0 }, 0, hull!);
+  check('damageShip returns true only at 0 hp',
+    !damageShip(dmgShip, dmgShip.maxHp - 1) && damageShip(dmgShip, 5));
+
+  // Upgrades cap at SHIP_MAX_LEVEL; speed scales.
+  const up = newShip(5, 'Cap', { x: 0, y: 64, z: 0 }, 0, hull!);
+  for (let i = 0; i < SHIP_MAX_LEVEL + 4; i++) applyShipUpgrade(up, 'speed');
+  check('ship speed upgrade caps at SHIP_MAX_LEVEL', up.level.speed === SHIP_MAX_LEVEL);
+  check('shipSpeed increases with level', shipSpeed({ speed: 10 }) > shipSpeed({ speed: 1 }));
+  check('shipUpgradeCost is null at max', shipUpgradeCost(up, 'speed') === null);
+
+  // Rider/collision helpers: deck height + world-point hit test, incl. rotated.
+  const helmShip = newShip(7, 'Cap', { x: 10.5, y: 64, z: 20.5 }, 0, hull!);
+  check('deckHeightAt finds the deck over a hull column + null off it',
+    deckHeightAt(helmShip, 10.5, 20.5) !== null &&
+    deckHeightAt(helmShip, 50, 50) === null);
+  check('blockAtWorld detects a hull block at its world position', (() => {
+    const w = blockWorldPos(helmShip, { dx: 1, dy: 0, dz: 0, id: Block.OakPlanks });
+    return blockAtWorld(helmShip, w.x, w.y, w.z) === Block.OakPlanks &&
+      blockAtWorld(helmShip, w.x + 5, w.y, w.z) === 0;
+  })());
+  // Rotate 90° and confirm the collision model rotates with it.
+  helmShip.yaw = Math.PI / 2;
+  check('blockAtWorld tracks the hull under rotation', (() => {
+    const w = blockWorldPos(helmShip, { dx: 2, dy: 0, dz: 0, id: Block.OakPlanks });
+    const loc = worldToLocalOffset(helmShip, w.x, w.z);
+    return Math.abs(Math.round(loc.lx) - 2) < 1e-6 && Math.abs(Math.round(loc.lz)) < 1e-6 &&
+      blockAtWorld(helmShip, w.x, w.y, w.z) === Block.OakPlanks;
+  })());
+
+  // sanitize rejects junk + clamps.
+  check('sanitizeShipState rejects non-objects', sanitizeShipState(null) === null &&
+    sanitizeShipState({ id: NaN }) === null);
+  const san = sanitizeShipState({
+    id: 9, owner: 'x'.repeat(100), x: 1, y: 2, z: 3, yaw: 0,
+    hp: 999999, level: { speed: 999, hull: -5, cannon: 2 },
+    blocks: [{ dx: 0, dy: 0, dz: 0, id: Block.ShipHelm }, { dx: 1, dy: 0, dz: 0, id: Block.OakPlanks }],
+  })!;
+  check('sanitizeShipState clamps level + hp + owner',
+    san.level.speed === SHIP_MAX_LEVEL && san.level.hull === 1 &&
+    san.hp <= san.maxHp && san.owner.length <= 24);
+}
+
+// --- Ships via the authoritative server -------------------------------------
+{
+  const s = new GameServer(1337, mulberry32(11));
+  s.addPlayer(1);
+  s.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+  // Build a tiny hull next to the player via edits (server records them).
+  s.handle(1, { t: 'edit', x: 0, y: 70, z: 0, block: Block.ShipHelm });
+  s.handle(1, { t: 'edit', x: 1, y: 70, z: 0, block: Block.Cannon });
+  const launch = s.handle(1, { t: 'shipLaunch', x: 0, y: 70, z: 0 });
+  const stateMsg = launch.find((o) => o.msg.t === 'shipState');
+  check('shipLaunch creates a ship + lifts its blocks out of the world',
+    !!stateMsg && launch.filter((o) => o.msg.t === 'edit'
+      && (o.msg as { block: number }).block === Block.Air).length === 2);
+  const shipId = (stateMsg!.msg as { ship: { id: number } }).ship.id;
+
+  // A second player far away can't steer/dock it (fail-closed).
+  s.addPlayer(2);
+  s.handle(2, { t: 'xform', x: 500, y: 70, z: 500, yaw: 0, pitch: 0 });
+  check('a far player cannot steer a ship',
+    s.handle(2, { t: 'shipSteer', id: shipId, thrust: 1, turn: 0 }).length === 0);
+
+  // A gun hit from out of range is rejected; in range it chips HP.
+  check('ship hit beyond ranged range is rejected',
+    s.handle(2, { t: 'shipHit', id: shipId, amount: 20 }).length === 0);
+  s.handle(2, { t: 'xform', x: 2, y: 70, z: 0, yaw: 0, pitch: 0 });
+  const chip = s.handle(2, { t: 'shipHit', id: shipId, amount: 20 });
+  check('an in-range ship hit broadcasts a transform (hp update)',
+    chip.some((o) => o.msg.t === 'shipTransforms'));
+
+  // Dock restores the hull to the world + removes the ship (no item dup/loss).
+  {
+    const d = new GameServer(1337, mulberry32(44));
+    d.addPlayer(1);
+    d.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+    d.handle(1, { t: 'edit', x: 0, y: 70, z: 0, block: Block.ShipHelm });
+    d.handle(1, { t: 'edit', x: 1, y: 70, z: 0, block: Block.Cannon });
+    const lid = (d.handle(1, { t: 'shipLaunch', x: 0, y: 70, z: 0 })
+      .find((o) => o.msg.t === 'shipState')!.msg as { ship: { id: number } }).ship.id;
+    const dock = d.handle(1, { t: 'shipDock', id: lid });
+    const placed = dock.filter((o) => o.msg.t === 'edit' &&
+      (o.msg as { block: number }).block !== Block.Air);
+    check('docking restores the hull blocks + removes the ship',
+      dock.some((o) => o.msg.t === 'shipRemove') && placed.length === 2);
+  }
+
+  // Destroy it: a single hit is damage-capped (no one-shot), so it takes a few.
+  let destroyOut: ReturnType<typeof s.handle> = [];
+  for (let i = 0; i < 12; i++) {
+    const o = s.handle(2, { t: 'shipHit', id: shipId, amount: 60 });
+    if (o.some((m) => m.msg.t === 'shipRemove')) { destroyOut = o; break; }
+  }
+  check('destroying a ship spills loot + removes it',
+    destroyOut.some((o) => o.msg.t === 'shipRemove') &&
+    destroyOut.some((o) => o.msg.t === 'itemspawn'));
+  check('a destroyed ship no longer exists',
+    s.handle(2, { t: 'shipHit', id: shipId, amount: 10 }).length === 0);
+}
+
+// --- Turrets ----------------------------------------------------------------
+{
+  check('turretRange + turretDamage scale with level',
+    turretRange({ range: 5 }) > turretRange({ range: 1 }) &&
+    turretDamage({ damage: 5 }) > turretDamage({ damage: 1 }));
+
+  const s = new GameServer(1337, mulberry32(22));
+  s.addPlayer(1); // owner
+  s.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+  s.handle(1, { t: 'edit', x: 1, y: 70, z: 0, block: Block.Turret });
+  check('turretOpen in range returns state',
+    s.handle(1, { t: 'turretOpen', x: 1, y: 70, z: 0 }).some((o) => o.msg.t === 'turret'));
+  s.handle(1, { t: 'turretClaim', x: 1, y: 70, z: 0 });
+  s.handle(1, { t: 'turretLoad', x: 1, y: 70, z: 0, item: Item.Cannonball, count: 50 });
+  s.handle(1, { t: 'turretLoad', x: 1, y: 70, z: 0, item: Item.OilBarrel, count: 20 });
+
+  // No enemy yet -> inert.
+  check('a turret with no enemy in range does not fire',
+    s.tickTurrets(2).every((o) => o.msg.t !== 'turretFire'));
+
+  // Enemy walks into range -> turret fires + damages them.
+  s.addPlayer(2);
+  s.handle(2, { t: 'xform', x: 4, y: 70, z: 0, yaw: 0, pitch: 0 });
+  const fired = s.tickTurrets(2);
+  check('a claimed, loaded turret fires at a non-owner in range',
+    fired.some((o) => o.msg.t === 'turretFire') &&
+    fired.some((o) => o.msg.t === 'hurt'));
+
+  // It never targets its owner.
+  s.handle(2, { t: 'xform', x: 500, y: 70, z: 500, yaw: 0, pitch: 0 }); // enemy leaves
+  check('a turret never fires on its owner',
+    s.tickTurrets(2).every((o) => o.msg.t !== 'turretFire'));
+
+  // Sabotage to destruction: clears the block + drops loot.
+  s.handle(1, { t: 'xform', x: 1.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+  const dead = s.handle(1, { t: 'turretHit', x: 1, y: 70, z: 0, amount: 100000 });
+  check('sabotaging a turret to 0 hp clears it + drops loot',
+    dead.some((o) => o.msg.t === 'edit' && (o.msg as { block: number }).block === Block.Air) &&
+    dead.some((o) => o.msg.t === 'itemspawn'));
+
+  // Upgrades cap; sanitize clamps.
+  const t = newTurret('me');
+  for (let i = 0; i < TURRET_MAX_LEVEL + 4; i++) applyTurretUpgrade(t, 'damage');
+  check('turret upgrade caps at TURRET_MAX_LEVEL', t.level.damage === TURRET_MAX_LEVEL);
+  check('turretUpgradeCost is null at max', turretUpgradeCost(t, 'damage') === null);
+  const loadT = newTurret();
+  check('turretLoad caps + reports accepted',
+    turretLoad(loadT, Item.Cannonball, 99999) > 0 && loadT.ammo <= 256);
+  const sanT = sanitizeTurretState({ owner: 'y'.repeat(100), hp: 1e9,
+    level: { range: 999, damage: -3, rate: 2 }, ammo: 1e9, fuel: 1e9 })!;
+  check('sanitizeTurretState clamps level/ammo/fuel/owner',
+    sanT.level.range === TURRET_MAX_LEVEL && sanT.level.damage === 1 &&
+    sanT.ammo <= 256 && sanT.fuel <= 64 && sanT.owner.length <= 24);
+  check('unclaimed turret is not armed for firing',
+    !turretArmed(newTurret()));
+}
+
+// --- Territory objective ----------------------------------------------------
+{
+  const terrain = new Terrain(1337);
+  const nodes = deriveControlNodes((x, z) => terrain.oilRichness(x, z));
+  check('control nodes are derived deterministically + bounded',
+    nodes.length > 0 && nodes.length <= MAX_NODES &&
+    nodes.every((n) => n.radius > 0 && Number.isFinite(n.x) && Number.isFinite(n.z)));
+  const nodes2 = deriveControlNodes((x, z) => terrain.oilRichness(x, z));
+  check('node derivation is stable across calls',
+    JSON.stringify(nodes) === JSON.stringify(nodes2));
+
+  const node = { id: 0, x: 0, z: 0, radius: 10, richness: 1 };
+  check('a lone player controls a node',
+    resolveNode(node, [{ name: 'A', x: 1, z: 1, dead: false }]).controller === 'A');
+  check('two players contest a node (no controller)', (() => {
+    const r = resolveNode(node, [
+      { name: 'A', x: 1, z: 1, dead: false }, { name: 'B', x: -1, z: -1, dead: false }]);
+    return r.controller === '' && r.contested;
+  })());
+  check('a player outside the radius does not control',
+    resolveNode(node, [{ name: 'A', x: 50, z: 50, dead: false }]).controller === '');
+
+  check('topScores sorts descending', (() => {
+    const m = new Map([['A', 5], ['B', 30], ['C', 12]]);
+    const top = topScores(m);
+    return top[0].name === 'B' && top[1].name === 'C' && top[2].name === 'A';
+  })());
+
+  // Server accrues score for a controlled node and declares a winner.
+  const s = new GameServer(1337, mulberry32(33));
+  s.addPlayer(1);
+  const snap0 = s.territorySnapshot() as { t: 'territory'; nodes: { x: number; z: number }[] };
+  const target = snap0.nodes[0];
+  s.handle(1, { t: 'xform', x: target.x, y: 70, z: target.z, yaw: 0, pitch: 0 });
+  let won = '';
+  for (let i = 0; i < TERRITORY_TARGET_SCORE + 20 && !won; i++) {
+    s.tickTerritory(1);
+    const snap = s.territorySnapshot() as { t: 'territory'; winner: string };
+    won = snap.winner;
+  }
+  check('controlling a node accrues score to a round win', won !== '');
+  check('territory snapshot has the expected shape', (() => {
+    const snap = s.territorySnapshot() as {
+      t: 'territory'; nodes: unknown[]; scores: unknown[]; roundTime: number;
+    };
+    return snap.t === 'territory' && Array.isArray(snap.nodes) &&
+      Array.isArray(snap.scores) && Number.isFinite(snap.roundTime);
+  })());
+}
+
+// --- Building set (M15): per-wood planks + slabs + stairs --------------------
+{
+  const g = (cells: Record<number, number>): (ItemStack | null)[] => {
+    const out: (ItemStack | null)[] = new Array(9).fill(null);
+    for (const [i, id] of Object.entries(cells)) out[Number(i)] = { id, count: 1 };
+    return out;
+  };
+  // Each log makes its own planks now.
+  check('oak/birch/spruce logs make their own planks',
+    matchGrid(g({ 4: Block.OakLog }))?.id === Block.OakPlanks &&
+    matchGrid(g({ 4: Block.BirchLog }))?.id === Block.BirchPlanks &&
+    matchGrid(g({ 4: Block.SpruceLog }))?.id === Block.SprucePlanks);
+  // A plank row crafts 6 slabs; the stair shape crafts 4 stairs (N variant).
+  check('3 planks in a row -> 6 slabs', (() => {
+    const r = matchGrid(g({ 0: Block.OakPlanks, 1: Block.OakPlanks, 2: Block.OakPlanks }));
+    return r?.id === Block.OakSlab && r?.count === 6;
+  })());
+  check('stair pattern -> 4 stairs (N variant item)', (() => {
+    const r = matchGrid(g({
+      0: Block.SprucePlanks, 3: Block.SprucePlanks, 4: Block.SprucePlanks,
+      6: Block.SprucePlanks, 7: Block.SprucePlanks, 8: Block.SprucePlanks,
+    }));
+    return r?.id === Block.SpruceStairsN && r?.count === 4;
+  })());
+  // Generic recipes still accept any plank (sticks from birch planks).
+  check('sticks craft from any plank type',
+    matchGrid(g({ 1: Block.BirchPlanks, 4: Block.BirchPlanks }))?.id === Item.Stick);
+
+  // Stair orientation + drop mapping.
+  check('orientStairsForYaw picks a facing in the wood block range', (() => {
+    const id = orientStairsForYaw(Block.OakStairsN, 0); // facing -Z (north)
+    return id >= Block.OakStairsN && id <= Block.OakStairsW &&
+      stairsBaseOf(id) === Block.OakStairsN;
+  })());
+  check('every stairs facing drops the N stairs item',
+    dropFor(Block.BirchStairsE, 0.5)?.id === Block.BirchStairsN &&
+    dropFor(Block.BirchStairsW, 0.5)?.id === Block.BirchStairsN);
+  check('slabs + planks drop themselves',
+    dropFor(Block.OakSlab, 0.5)?.id === Block.OakSlab &&
+    dropFor(Block.SprucePlanks, 0.5)?.id === Block.SprucePlanks);
+
+  // Slab/stairs blocks are solid + non-opaque + axe-mineable.
+  check('slabs/stairs are solid, non-opaque, axe-tool', (() => {
+    const slab = BLOCKS[Block.OakSlab], st = BLOCKS[Block.BirchStairsS];
+    return slab.solid && !slab.opaque && slab.tool === 'axe' &&
+      st.solid && !st.opaque && st.shape === 'stairs' && st.facing === 2;
+  })());
+
+  // stairBoxes returns a bottom slab + a top quarter on the facing side.
+  check('stairBoxes geometry is a bottom slab + top quarter', (() => {
+    const boxes = stairBoxes(0); // N (-z): top at z 0..0.5
+    return boxes.length === 2 &&
+      boxes[0][1][1] === 0.5 &&            // bottom box is half-height
+      boxes[1][0][1] === 0.5 && boxes[1][1][2] === 0.5; // top quarter, back half
+  })());
 }
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} FAILURES`);

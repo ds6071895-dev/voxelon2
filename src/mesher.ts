@@ -76,6 +76,34 @@ const FACES: FaceDef[] = [
 
 const AO_CURVE = [0.45, 0.65, 0.82, 1.0];
 
+/** Tile UV (fraction 0..1) for a corner on face f of a sub-box, so partial-extent
+ *  boxes (slabs/stairs) sample the matching window of the tile. Face order
+ *  matches FACES: 0=-x 1=+x 2=-y 3=+y 4=-z 5=+z. */
+export function subFaceUV(f: number, lx: number, ly: number, lz: number): [number, number] {
+  switch (f) {
+    case 0: return [lz, ly];          // -x
+    case 1: return [1 - lz, ly];      // +x
+    case 2: return [lx, 1 - lz];      // -y
+    case 3: return [1 - lx, lz];      // +y
+    case 4: return [1 - lx, ly];      // -z
+    default: return [lx, ly];         // +z
+  }
+}
+
+type Box = [[number, number, number], [number, number, number]];
+/** The sub-boxes that make up a stairs block facing dir (0=N 1=E 2=S 3=W): a
+ *  bottom slab plus a top quarter on the `facing` side (the tall step). */
+export function stairBoxes(facing: number): Box[] {
+  const bottom: Box = [[0, 0, 0], [1, 0.5, 1]];
+  const top: Box =
+    facing === 1 ? [[0.5, 0.5, 0], [1, 1, 1]]      // E (+x)
+    : facing === 2 ? [[0, 0.5, 0.5], [1, 1, 1]]    // S (+z)
+    : facing === 3 ? [[0, 0.5, 0], [0.5, 1, 1]]    // W (-x)
+    : [[0, 0.5, 0], [1, 1, 0.5]];                  // N (-z)
+  return [bottom, top];
+}
+export const SLAB_BOX: Box = [[0, 0, 0], [1, 0.5, 1]];
+
 export type BlockSampler = (wx: number, wy: number, wz: number) => number;
 export type TintSampler = (wx: number, wz: number) => ColumnTints;
 
@@ -176,6 +204,35 @@ class GeoBuffer {
     }
   }
 
+  /** An axis-aligned sub-box (slabs/stairs) with per-face tile sub-rect UVs +
+   *  directional shading (no AO). The box min/max are in [0,1] cell-local space,
+   *  so a half-height box samples the matching half of the tile. */
+  subBox(
+    bx: number, by: number, bz: number,
+    min: [number, number, number], max: [number, number, number],
+    uvRect: [number, number, number, number], tint: Tint,
+    skyL: number, blockL: number
+  ): void {
+    const [u0, v0, u1, v1] = uvRect;
+    for (let f = 0; f < FACES.length; f++) {
+      const face = FACES[f];
+      const base = this.positions.length / 3;
+      for (let i = 0; i < 4; i++) {
+        const c = face.corners[i].pos;
+        const lx = c[0] ? max[0] : min[0];
+        const ly = c[1] ? max[1] : min[1];
+        const lz = c[2] ? max[2] : min[2];
+        this.positions.push(bx + lx, by + ly, bz + lz);
+        const b = face.shade;
+        this.colors.push(b * tint[0], b * tint[1], b * tint[2]);
+        const [fu, fv] = subFaceUV(f, lx, ly, lz);
+        this.uvs.push(u0 + (u1 - u0) * fu, v0 + (v1 - v0) * fv);
+        this.lights.push(skyL / 15, blockL / 15);
+      }
+      this.indices.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
+    }
+  }
+
   build(): THREE.BufferGeometry | null {
     if (this.indices.length === 0) return null;
     const geo = new THREE.BufferGeometry();
@@ -243,6 +300,16 @@ export function buildChunkGeometry(
             atlas.uvRect(info.side),
             light.sky(wx, y, wz), light.block(wx, y, wz)
           );
+          continue;
+        }
+
+        if (info.shape === 'slab' || info.shape === 'stairs') {
+          const uvRect = atlas.uvRect(info.side);
+          const skyL = light.sky(wx, y, wz), blockL = light.block(wx, y, wz);
+          const boxes = info.shape === 'slab' ? [SLAB_BOX] : stairBoxes(info.facing);
+          for (const [mn, mx] of boxes) {
+            opaque.subBox(x, y, z, mn, mx, uvRect, WHITE, skyL, blockL);
+          }
           continue;
         }
 

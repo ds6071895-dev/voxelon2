@@ -74,11 +74,18 @@ setInterval(() => {
   game.tickRegen(dt);
   game.tickMachines(dt);
   const moved = game.tickItems(dt);
+  const shipXf = game.tickShips(dt);
+  dispatch(game.tickTurrets(dt));
+  dispatch(game.tickTerritory(dt));
   const snap: ServerMsg = { t: 'snapshot', players: game.snapshot() };
   for (const cid of sockets.keys()) send(cid, snap);
   if (moved.length) {
     const mv: ServerMsg = { t: 'itemsmove', items: moved };
     for (const cid of sockets.keys()) send(cid, mv);
+  }
+  if (shipXf.length) {
+    const sx: ServerMsg = { t: 'shipTransforms', ships: shipXf };
+    for (const cid of sockets.keys()) send(cid, sx);
   }
 }, 1000 / SNAPSHOT_HZ);
 

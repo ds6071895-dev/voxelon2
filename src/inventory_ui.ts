@@ -12,14 +12,42 @@ import {
   HOTBAR_SIZE, INV_SIZE, CRAFT_START, CHEST_START, CHEST_SIZE,
   ARMOR_START, ARMOR_SIZE,
 } from './inventory';
-import { ArmorSlot, ITEMS, ItemStack } from './items';
+import { ArmorSlot, Item, ITEMS, ItemStack } from './items';
 import {
   MachineState, MachineType, UpgradeAxis, MAX_LEVEL, MAX_STORAGE_LEVEL,
   allowedFilterMask, machineMaxHp, storageCap, totalStored, upgradeCost,
 } from './machines';
+import {
+  ShipState, ShipAxis, SHIP_MAX_LEVEL, cannonCount, shipUpgradeCost,
+} from './ships';
+import {
+  TurretState, TurretAxis, TURRET_MAX_LEVEL, TURRET_AMMO_CAP, TURRET_FUEL_CAP,
+  turretDamage, turretInterval, turretRange, turretUpgradeCost,
+} from './turrets';
 import { AUTOMINER_ORES } from './terrain';
 
-export type ContainerMode = 'inventory' | 'table' | 'furnace' | 'chest' | 'machine';
+export type ContainerMode =
+  | 'inventory' | 'table' | 'furnace' | 'chest' | 'machine' | 'ship' | 'turret';
+
+/** Callbacks the host wires so the ship-helm panel can route to server/offline. */
+export interface ShipUIContext {
+  state(): ShipState | null;
+  upgrade(axis: ShipAxis): void;
+  canAfford(axis: ShipAxis): boolean;
+  dock(): void;
+}
+
+/** Callbacks for the turret panel (upgrade / claim / load ammo + fuel). */
+export interface TurretUIContext {
+  state(): TurretState | null;
+  upgrade(axis: TurretAxis): void;
+  canAfford(axis: TurretAxis): boolean;
+  claim(): void;
+  /** Deposit as much of a held item (Cannonball or OilBarrel) as fits. */
+  load(item: number): void;
+  canLoad(item: number): boolean;
+  myName(): string;
+}
 
 /** Callbacks the host (main.ts) wires so the machine panel can route actions to
  *  the local sim (offline) or the server (multiplayer). */
@@ -91,6 +119,19 @@ export class InventoryUI {
     storageBtn: HTMLButtonElement;
     collectBtn: HTMLButtonElement;
     claimBtn: HTMLButtonElement;
+  } | null = null;
+  private shipCtx: ShipUIContext | null = null;
+  private shipViews: {
+    info: HTMLDivElement; hpBar: HTMLDivElement; hpText: HTMLSpanElement;
+    speedBtn: HTMLButtonElement; hullBtn: HTMLButtonElement; cannonBtn: HTMLButtonElement;
+    dockBtn: HTMLButtonElement;
+  } | null = null;
+  private turretCtx: TurretUIContext | null = null;
+  private turretViews: {
+    info: HTMLDivElement; owner: HTMLDivElement; hpBar: HTMLDivElement; hpText: HTMLSpanElement;
+    ammo: HTMLDivElement;
+    rangeBtn: HTMLButtonElement; damageBtn: HTMLButtonElement; rateBtn: HTMLButtonElement;
+    loadAmmoBtn: HTMLButtonElement; loadFuelBtn: HTMLButtonElement; claimBtn: HTMLButtonElement;
   } | null = null;
   private readonly cursorEl: HTMLDivElement;
   private readonly cursorIcon: HTMLCanvasElement;
@@ -618,6 +659,199 @@ export class InventoryUI {
     btn.style.opacity = afford ? '1' : '0.5';
   }
 
+  // --- ship helm panel -------------------------------------------------------
+
+  private warBtn(): HTMLButtonElement {
+    const b = document.createElement('button');
+    b.className = 'mc-font';
+    b.style.cssText =
+      'flex:1;font-size:10px;padding:5px 3px;cursor:pointer;border:2px solid #000;' +
+      'background:#6a6a6a;color:#fff;white-space:pre-line;';
+    b.addEventListener('contextmenu', (e) => e.preventDefault());
+    return b;
+  }
+
+  private buildShipTop(ctx: ShipUIContext): void {
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'display:flex;flex-direction:column;gap:8px;width:340px;';
+    const info = document.createElement('div');
+    info.className = 'mc-font';
+    info.style.cssText = 'font-size:12px;text-align:center;';
+    wrap.appendChild(info);
+
+    const hpOuter = document.createElement('div');
+    hpOuter.style.cssText = 'position:relative;height:14px;background:#1c1c1c;border:2px solid #000;';
+    const hpBar = document.createElement('div');
+    hpBar.style.cssText = 'height:100%;width:100%;background:#cc4444;';
+    const hpText = document.createElement('span');
+    hpText.className = 'mc-font';
+    hpText.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;' +
+      'justify-content:center;font-size:10px;text-shadow:1px 1px 0 #000;';
+    hpOuter.appendChild(hpBar); hpOuter.appendChild(hpText);
+    wrap.appendChild(hpOuter);
+
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:6px;';
+    const speedBtn = this.warBtn();
+    speedBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.upgrade('speed'); });
+    const hullBtn = this.warBtn();
+    hullBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.upgrade('hull'); });
+    const cannonBtn = this.warBtn();
+    cannonBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.upgrade('cannon'); });
+    row.append(speedBtn, hullBtn, cannonBtn);
+    wrap.appendChild(row);
+
+    const dockBtn = this.warBtn();
+    dockBtn.style.background = '#7a5a3b';
+    dockBtn.textContent = 'Dock / Break Down';
+    dockBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.dock(); });
+    wrap.appendChild(dockBtn);
+
+    const tip = document.createElement('div');
+    tip.className = 'mc-font';
+    tip.style.cssText = 'font-size:10px;text-align:center;color:#9ab;';
+    tip.textContent = 'Stand at the helm to sail (WASD). Left-click fires cannons.';
+    wrap.appendChild(tip);
+
+    this.shipViews = { info, hpBar, hpText, speedBtn, hullBtn, cannonBtn, dockBtn };
+    this.topEl.appendChild(wrap);
+  }
+
+  private refreshShip(): void {
+    const ctx = this.shipCtx, v = this.shipViews;
+    if (!ctx || !v) return;
+    const s = ctx.state();
+    if (!s) return;
+    v.info.textContent =
+      `Ship  ·  ${s.blocks.length} blocks  ·  ${cannonCount(s)} cannon(s)  ·  ` +
+      `Spd ${s.level.speed} / Hull ${s.level.hull} / Cannon ${s.level.cannon}`;
+    const frac = s.maxHp > 0 ? Math.max(0, Math.min(1, s.hp / s.maxHp)) : 0;
+    v.hpBar.style.width = `${Math.round(frac * 100)}%`;
+    v.hpBar.style.background = frac > 0.5 ? '#4caf50' : frac > 0.25 ? '#e0a14e' : '#cc4444';
+    v.hpText.textContent = `Hull ${Math.ceil(s.hp)} / ${s.maxHp}`;
+    this.setShipBtn(v.speedBtn, ctx, s, 'speed', 'Speed');
+    this.setShipBtn(v.hullBtn, ctx, s, 'hull', 'Hull');
+    this.setShipBtn(v.cannonBtn, ctx, s, 'cannon', 'Cannon');
+  }
+
+  private setShipBtn(
+    btn: HTMLButtonElement, ctx: ShipUIContext, s: ShipState, axis: ShipAxis, label: string
+  ): void {
+    if (s.level[axis] >= SHIP_MAX_LEVEL) {
+      btn.textContent = `${label}: MAX`; btn.disabled = true; btn.style.opacity = '0.5'; return;
+    }
+    const cost = shipUpgradeCost(s, axis);
+    const costStr = cost
+      ? Object.entries(cost).map(([id, n]) => `${n} ${ITEMS[Number(id)]?.name ?? '?'}`).join(', ') : '';
+    btn.textContent = `▲ ${label} ${s.level[axis]}\n${costStr}`;
+    const afford = ctx.canAfford(axis);
+    btn.disabled = !afford; btn.style.opacity = afford ? '1' : '0.5';
+  }
+
+  // --- turret panel ----------------------------------------------------------
+
+  private buildTurretTop(ctx: TurretUIContext): void {
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'display:flex;flex-direction:column;gap:8px;width:340px;';
+    const info = document.createElement('div');
+    info.className = 'mc-font';
+    info.style.cssText = 'font-size:12px;text-align:center;';
+    const owner = document.createElement('div');
+    owner.className = 'mc-font';
+    owner.style.cssText = 'font-size:11px;text-align:center;color:#d8c;';
+    wrap.append(info, owner);
+
+    const hpOuter = document.createElement('div');
+    hpOuter.style.cssText = 'position:relative;height:14px;background:#1c1c1c;border:2px solid #000;';
+    const hpBar = document.createElement('div');
+    hpBar.style.cssText = 'height:100%;width:100%;background:#cc4444;';
+    const hpText = document.createElement('span');
+    hpText.className = 'mc-font';
+    hpText.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;' +
+      'justify-content:center;font-size:10px;text-shadow:1px 1px 0 #000;';
+    hpOuter.appendChild(hpBar); hpOuter.appendChild(hpText);
+    wrap.appendChild(hpOuter);
+
+    const ammo = document.createElement('div');
+    ammo.className = 'mc-font';
+    ammo.style.cssText = 'font-size:11px;text-align:center;color:#bdf;';
+    wrap.appendChild(ammo);
+
+    const upRow = document.createElement('div');
+    upRow.style.cssText = 'display:flex;gap:6px;';
+    const rangeBtn = this.warBtn();
+    rangeBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.upgrade('range'); });
+    const damageBtn = this.warBtn();
+    damageBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.upgrade('damage'); });
+    const rateBtn = this.warBtn();
+    rateBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.upgrade('rate'); });
+    upRow.append(rangeBtn, damageBtn, rateBtn);
+    wrap.appendChild(upRow);
+
+    const loadRow = document.createElement('div');
+    loadRow.style.cssText = 'display:flex;gap:6px;';
+    const loadAmmoBtn = this.warBtn();
+    loadAmmoBtn.style.background = '#3b7a3b';
+    loadAmmoBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.load(Item.Cannonball); });
+    const loadFuelBtn = this.warBtn();
+    loadFuelBtn.style.background = '#7a6a3b';
+    loadFuelBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.load(Item.OilBarrel); });
+    const claimBtn = this.warBtn();
+    claimBtn.style.background = '#3b5a7a';
+    claimBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.claim(); });
+    loadRow.append(loadAmmoBtn, loadFuelBtn, claimBtn);
+    wrap.appendChild(loadRow);
+
+    this.turretViews = {
+      info, owner, hpBar, hpText, ammo,
+      rangeBtn, damageBtn, rateBtn, loadAmmoBtn, loadFuelBtn, claimBtn,
+    };
+    this.topEl.appendChild(wrap);
+  }
+
+  private refreshTurret(): void {
+    const ctx = this.turretCtx, v = this.turretViews;
+    if (!ctx || !v) return;
+    const s = ctx.state();
+    if (!s) return;
+    v.info.textContent =
+      `Turret  ·  Rng ${turretRange(s.level).toFixed(0)}  ·  ` +
+      `Dmg ${turretDamage(s.level).toFixed(0)}  ·  ${(1 / turretInterval(s.level)).toFixed(1)}/s`;
+    const mine = s.owner && s.owner === ctx.myName();
+    v.owner.textContent = s.owner ? `Owner: ${s.owner}${mine ? ' (you)' : ''}` : 'Unclaimed (inert)';
+    v.claimBtn.disabled = !!mine;
+    v.claimBtn.style.opacity = mine ? '0.5' : '1';
+    v.claimBtn.textContent = mine ? 'Owned' : 'Claim';
+    const frac = s.maxHp > 0 ? Math.max(0, Math.min(1, s.hp / s.maxHp)) : 0;
+    v.hpBar.style.width = `${Math.round(frac * 100)}%`;
+    v.hpBar.style.background = frac > 0.5 ? '#4caf50' : frac > 0.25 ? '#e0a14e' : '#cc4444';
+    v.hpText.textContent = `HP ${Math.ceil(s.hp)} / ${s.maxHp}`;
+    v.ammo.textContent = `Ammo ${s.ammo} / ${TURRET_AMMO_CAP}   ·   Oil ${s.fuel.toFixed(1)} / ${TURRET_FUEL_CAP}`;
+    this.setTurretBtn(v.rangeBtn, ctx, s, 'range', 'Range');
+    this.setTurretBtn(v.damageBtn, ctx, s, 'damage', 'Damage');
+    this.setTurretBtn(v.rateBtn, ctx, s, 'rate', 'Rate');
+    const canA = ctx.canLoad(Item.Cannonball);
+    v.loadAmmoBtn.textContent = 'Load Ammo';
+    v.loadAmmoBtn.disabled = !canA; v.loadAmmoBtn.style.opacity = canA ? '1' : '0.5';
+    const canF = ctx.canLoad(Item.OilBarrel);
+    v.loadFuelBtn.textContent = 'Load Oil';
+    v.loadFuelBtn.disabled = !canF; v.loadFuelBtn.style.opacity = canF ? '1' : '0.5';
+  }
+
+  private setTurretBtn(
+    btn: HTMLButtonElement, ctx: TurretUIContext, s: TurretState, axis: TurretAxis, label: string
+  ): void {
+    if (s.level[axis] >= TURRET_MAX_LEVEL) {
+      btn.textContent = `${label}: MAX`; btn.disabled = true; btn.style.opacity = '0.5'; return;
+    }
+    const cost = turretUpgradeCost(s, axis);
+    const costStr = cost
+      ? Object.entries(cost).map(([id, n]) => `${n} ${ITEMS[Number(id)]?.name ?? '?'}`).join(', ') : '';
+    btn.textContent = `▲ ${label} ${s.level[axis]}\n${costStr}`;
+    const afford = ctx.canAfford(axis);
+    btn.disabled = !afford; btn.style.opacity = afford ? '1' : '0.5';
+  }
+
   // --- crafting result -------------------------------------------------------
 
   private craftOnce(): void {
@@ -652,7 +886,10 @@ export class InventoryUI {
 
   // --- open/close/update -----------------------------------------------------
 
-  show(mode: ContainerMode, furnace?: FurnaceState, machineCtx?: MachineUIContext): void {
+  show(
+    mode: ContainerMode, furnace?: FurnaceState, machineCtx?: MachineUIContext,
+    shipCtx?: ShipUIContext, turretCtx?: TurretUIContext,
+  ): void {
     // Rebuild the top section for the requested mode.
     for (const { index } of this.craftCells) this.invSlots.delete(index);
     for (const idx of this.chestCells) this.invSlots.delete(idx);
@@ -665,9 +902,19 @@ export class InventoryUI {
     this.furnace = furnace ?? null;
     this.machineViews = null;
     this.machineCtx = machineCtx ?? null;
+    this.shipViews = null;
+    this.shipCtx = shipCtx ?? null;
+    this.turretViews = null;
+    this.turretCtx = turretCtx ?? null;
     this.topEl.innerHTML = '';
     this.mode = mode;
-    if (mode === 'machine' && machineCtx) {
+    if (mode === 'ship' && shipCtx) {
+      this.titleEl.textContent = 'Ship Helm';
+      this.buildShipTop(shipCtx);
+    } else if (mode === 'turret' && turretCtx) {
+      this.titleEl.textContent = 'Turret';
+      this.buildTurretTop(turretCtx);
+    } else if (mode === 'machine' && machineCtx) {
       const s = machineCtx.state();
       this.titleEl.textContent =
         s && s.type === MachineType.OilDerrick ? 'Oil Derrick' : 'Autominer';
@@ -729,6 +976,8 @@ export class InventoryUI {
 
     // Machine panel refreshes every frame (live fill bar + rate, like furnace).
     if (this.mode === 'machine') this.refreshMachine();
+    if (this.mode === 'ship') this.refreshShip();
+    if (this.mode === 'turret') this.refreshTurret();
 
     if (this.inventory.version === this.renderedVersion) return;
     this.renderedVersion = this.inventory.version;

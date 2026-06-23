@@ -4,6 +4,9 @@
 
 import type { ItemStack } from '../items';
 import type { MachineState, UpgradeAxis } from '../machines';
+import type { ShipState, ShipAxis } from '../ships';
+import type { TurretState, TurretAxis } from '../turrets';
+import type { NodeStatus, ScoreEntry } from '../territory';
 
 export const SERVER_PORT = 8080;
 export const SNAPSHOT_HZ = 15;     // server -> clients transform broadcasts
@@ -39,6 +42,12 @@ export const CHEST_SLOTS = 27;
 export const ARMOR_POINT_CAP = 20;  // 20 points = the max 80% reduction
 export const RANGED_MAX_RANGE = 80; // server cap on a validated gun hit distance
 export const RANGED_MAX_DAMAGE = 30;
+export const SHIP_HIT_MAX_DAMAGE = 60;  // server cap on a reported ship-cannon/gun hit
+
+/** Periodic compact ship transform (folded into a broadcast, like itemsmove). */
+export interface ShipTransform {
+  id: number; x: number; y: number; z: number; yaw: number; hp: number;
+}
 
 /** Vanilla-ish armor: each point blocks 4% of incoming damage, capped at 80%.
  *  Used by BOTH the offline client and the authoritative server so mitigation
@@ -68,13 +77,27 @@ export type ClientMsg =
   | { t: 'machineUpgrade'; x: number; y: number; z: number; axis: UpgradeAxis }
   | { t: 'machineCollect'; x: number; y: number; z: number }
   | { t: 'machineHit'; x: number; y: number; z: number; amount: number } // sabotage/raid
-  | { t: 'machineClaim'; x: number; y: number; z: number };
+  | { t: 'machineClaim'; x: number; y: number; z: number }
+  // Ships (warfare M14): captured-block vehicles.
+  | { t: 'shipLaunch'; x: number; y: number; z: number }  // helm world pos
+  | { t: 'shipSteer'; id: number; thrust: number; turn: number }
+  | { t: 'shipFire'; id: number; dx: number; dy: number; dz: number } // aim dir
+  | { t: 'shipDock'; id: number }
+  | { t: 'shipUpgrade'; id: number; axis: ShipAxis }
+  | { t: 'shipHit'; id: number; amount: number }          // gun/other chips a ship
+  // Turrets (warfare M14): block-entities (placement is a normal edit).
+  | { t: 'turretOpen'; x: number; y: number; z: number }
+  | { t: 'turretUpgrade'; x: number; y: number; z: number; axis: TurretAxis }
+  | { t: 'turretClaim'; x: number; y: number; z: number }
+  | { t: 'turretHit'; x: number; y: number; z: number; amount: number } // sabotage
+  | { t: 'turretLoad'; x: number; y: number; z: number; item: number; count: number };
 
 // --- server -> client -------------------------------------------------------
 export type ServerMsg =
   | {
       t: 'welcome'; id: number; seed: number; username: string;
       players: PlayerInfo[]; edits: [string, number][]; items: ItemEntityInfo[];
+      ships: ShipState[]; turrets: { x: number; y: number; z: number; state: TurretState }[];
     }
   | { t: 'join'; player: PlayerInfo }
   | { t: 'leave'; id: number }
@@ -89,7 +112,19 @@ export type ServerMsg =
   | { t: 'itemremove'; eid: number }
   | { t: 'gotitem'; item: number; count: number }
   | { t: 'chest'; x: number; y: number; z: number; slots: (ItemStack | null)[] }
-  | { t: 'machine'; x: number; y: number; z: number; state: MachineState };
+  | { t: 'machine'; x: number; y: number; z: number; state: MachineState }
+  // Ships.
+  | { t: 'shipState'; ship: ShipState }                 // full (launch/upgrade/board)
+  | { t: 'shipTransforms'; ships: ShipTransform[] }      // periodic broadcast
+  | { t: 'shipRemove'; id: number }
+  // Turrets.
+  | { t: 'turret'; x: number; y: number; z: number; state: TurretState }
+  | { t: 'turretFire'; x: number; y: number; z: number; tx: number; ty: number; tz: number }
+  // Territory objective: live scoreboard + node ownership + round state.
+  | {
+      t: 'territory'; nodes: NodeStatus[]; scores: ScoreEntry[];
+      roundTime: number; winner: string;
+    };
 
 const ADJECTIVES = [
   'Brave', 'Swift', 'Iron', 'Shadow', 'Crimson', 'Frost', 'Rapid', 'Silent',
