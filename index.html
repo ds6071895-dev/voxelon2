@@ -224,6 +224,9 @@
     #auth input:focus { border-color: #6fd0ff; }
     #auth-row { display: flex; gap: 8px; }
     #auth-row .mc-btn { flex: 1; min-width: 0; }
+    #auth-user-row { display: flex; gap: 8px; align-items: stretch; }
+    #auth-user-row #auth-user { flex: 1; min-width: 0; }
+    #roll-btn { flex: 0 0 auto; padding: 8px 12px; font-size: 16px; }
     #auth-err { color: #ff8a7a; font-size: 12px; min-height: 14px; text-shadow: none; }
     #auth-status { color: #9fb4cc; font-size: 12px; min-height: 14px; text-shadow: none; }
     #overlay .controls {
@@ -285,7 +288,10 @@
       <h1 id="title" class="mc-font"><span class="accent">VOXEL</span>ON</h1>
       <p class="subtitle mc-font">a multiplayer voxel arena</p>
       <div id="auth">
-        <input id="auth-user" class="mc-font" placeholder="username" maxlength="16" autocomplete="username" />
+        <div id="auth-user-row">
+          <input id="auth-user" class="mc-font" placeholder="username" maxlength="16" autocomplete="username" />
+          <button id="roll-btn" class="mc-btn" type="button" title="Roll a random username">🎲</button>
+        </div>
         <input id="auth-pass" class="mc-font" type="password" placeholder="password" autocomplete="current-password" />
         <div id="auth-row">
           <button id="login-btn" class="mc-btn">Log In</button>

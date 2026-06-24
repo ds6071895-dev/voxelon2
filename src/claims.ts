@@ -224,6 +224,20 @@ export class Claims {
     for (const c of this.byId.values()) tickClaim(c, dt);
   }
 
+  /** Restore a saved set of claims (server boot from disk). Re-indexes every
+   *  claim and advances nextId past the highest id so new Cores can't collide. */
+  load(claims: ClaimState[]): void {
+    this.clear();
+    let max = 0;
+    for (const c of claims) {
+      const s = sanitizeClaim(c);
+      if (!s) continue;
+      this.set(s);
+      if (s.id > max) max = s.id;
+    }
+    this.nextId = max + 1;
+  }
+
   /** Drop all claims (e.g. leaving a server, whose claims we no longer mirror). */
   clear(): void {
     this.byId.clear();

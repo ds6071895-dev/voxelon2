@@ -32,7 +32,7 @@ const BIOME_COLOR: Record<number, string> = {
   [Biome.Ashlands]: '#3a3640',
 };
 
-interface Waypoint { x: number; z: number; color: number; }
+interface Waypoint { x: number; z: number; color: number; name: string; show: boolean; }
 
 /** Live game state the map reads each frame it's open. */
 export interface MapContext {
@@ -52,14 +52,28 @@ export class WorldMap {
   private waypoints: Waypoint[] = [];
   private readonly markerGroup = new THREE.Group();
   private readonly markerGeo = new THREE.BoxGeometry(1.2, 30, 1.2);
+  // In-world MC-mod-style screen markers (one DOM badge per shown waypoint).
+  private readonly beaconLayer: HTMLDivElement;
+  private readonly beaconEls: HTMLDivElement[] = [];
+  private readonly _v = new THREE.Vector3();
+  private readonly _camPos = new THREE.Vector3();
+  private readonly _camFwd = new THREE.Vector3();
 
   constructor(
     private readonly scene: THREE.Scene,
+    private readonly camera: THREE.Camera,
     private readonly terrain: Terrain,
     private readonly claims: Claims,
     private readonly mapCtx: MapContext,
   ) {
     this.scene.add(this.markerGroup);
+
+    // Full-screen, click-through overlay that hosts the floating waypoint badges.
+    this.beaconLayer = document.createElement('div');
+    this.beaconLayer.style.cssText =
+      'position:absolute;inset:0;pointer-events:none;z-index:15;overflow:hidden;';
+    document.getElementById('app')!.appendChild(this.beaconLayer);
+
     this.loadWaypoints();
 
     const app = document.getElementById('app')!;
@@ -89,13 +103,16 @@ export class WorldMap {
     const hint = document.createElement('div');
     hint.className = 'mc-font';
     hint.style.cssText = 'font-size:11px;color:#8da0c0;text-shadow:none;';
-    hint.textContent = 'Left-click: add waypoint  ·  Right-click a marker: remove  ·  M / Esc: close';
+    hint.textContent = 'Left-click: add named waypoint  ·  Right-click a marker: remove  ·  M / Esc: close';
     panel.append(title, row, hint);
     this.el.appendChild(panel);
     app.appendChild(this.el);
 
     this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     this.canvas.addEventListener('mousedown', (e) => this.onClick(e));
+    // Legend hosts the per-waypoint list; clicks there toggle world-visibility
+    // or delete (event-delegated so we don't rebind on every redraw).
+    this.legend.addEventListener('click', (e) => this.onLegendClick(e));
   }
 
   toggle(): void { this.open ? this.hide() : this.show(); }
@@ -209,7 +226,37 @@ export class WorldMap {
     lines.push(`<span style="color:#8da0c0">Unclaimed: ${(100 - total / this.landChunks * 100).toFixed(1)}%</span>`);
     lines.push('');
     lines.push(`<b>WAYPOINTS</b> (${this.waypoints.length})`);
+    const p = this.mapCtx.player();
+    this.waypoints.forEach((w, i) => {
+      const dist = Math.round(Math.hypot(w.x - p.x, w.z - p.z));
+      const eye = w.show ? '👁' : '–';
+      lines.push(
+        `<span style="color:${this.rgba(w.color, 1)}">■</span> ` +
+        `${this.escape(w.name)} <span style="color:#8da0c0">${dist}m</span> ` +
+        `<a data-eye="${i}" title="Show in world" ` +
+        `style="cursor:pointer;text-decoration:none">${eye}</a> ` +
+        `<a data-del="${i}" title="Delete" style="cursor:pointer;color:#ff8a7a">✕</a>`);
+    });
+    if (!this.waypoints.length) lines.push('<span style="color:#8da0c0">none yet — click the map</span>');
     this.legend.innerHTML = lines.join('<br>');
+  }
+
+  private escape(s: string): string {
+    return s.replace(/[&<>"]/g, (c) =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] ?? c));
+  }
+
+  private onLegendClick(e: MouseEvent): void {
+    const t = e.target as HTMLElement;
+    const eye = t.getAttribute('data-eye');
+    const del = t.getAttribute('data-del');
+    if (eye !== null) {
+      const i = Number(eye);
+      if (this.waypoints[i]) { this.waypoints[i].show = !this.waypoints[i].show; this.saveWaypoints(); this.draw(); }
+    } else if (del !== null) {
+      const i = Number(del);
+      if (this.waypoints[i]) { this.waypoints.splice(i, 1); this.saveWaypoints(); this.draw(); }
+    }
   }
 
   private nodesInWindow(): NodeStatus[] {
@@ -234,27 +281,98 @@ export class WorldMap {
       return;
     }
     if (e.button !== 0) return;
-    this.waypoints.push({ x: wx, z: wz, color: factionColor(this.mapCtx.faction()) });
+    const def = `WP ${this.waypoints.length + 1}`;
+    const name = (prompt('Waypoint name:', def) ?? def).trim().slice(0, 24) || def;
+    this.waypoints.push({ x: wx, z: wz, color: factionColor(this.mapCtx.faction()), name, show: true });
     this.saveWaypoints();
     this.draw();
   }
 
-  /** Keep the in-world waypoint beacons in sync with the list. */
+  /** Keep the in-world waypoint pillars in sync with the list (only the ones the
+   *  player has chosen to show in-world get a 3D beacon). */
   private syncMarkers(): void {
-    while (this.markerGroup.children.length > this.waypoints.length) {
+    const shown = this.waypoints.filter((w) => w.show);
+    while (this.markerGroup.children.length > shown.length) {
       const m = this.markerGroup.children.pop() as THREE.Mesh;
       (m.material as THREE.Material).dispose();
     }
-    while (this.markerGroup.children.length < this.waypoints.length) {
+    while (this.markerGroup.children.length < shown.length) {
       this.markerGroup.add(new THREE.Mesh(this.markerGeo,
-        new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.5, depthWrite: false })));
+        new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.35, depthWrite: false })));
     }
-    this.waypoints.forEach((w, i) => {
+    shown.forEach((w, i) => {
       const m = this.markerGroup.children[i] as THREE.Mesh;
       const gy = this.terrain.height(Math.round(w.x), Math.round(w.z));
       m.position.set(w.x + 0.5, gy + 15, w.z + 0.5);
       (m.material as THREE.MeshBasicMaterial).color.setHex(w.color);
     });
+  }
+
+  /** Project shown waypoints to floating on-screen badges (square + name +
+   *  distance), MC-waypoint-mod style: clamped to the screen edge so a marker
+   *  in any direction stays visible, pointing where to walk. Call each rendered
+   *  frame while playing; pass the canvas size. */
+  renderBeacons(width: number, height: number): void {
+    const shown = this.open ? [] : this.waypoints.filter((w) => w.show);
+    // Grow/shrink the pool of badge elements to match.
+    while (this.beaconEls.length > shown.length) {
+      this.beaconLayer.removeChild(this.beaconEls.pop()!);
+    }
+    while (this.beaconEls.length < shown.length) {
+      const el = document.createElement('div');
+      el.className = 'mc-font';
+      el.style.cssText =
+        'position:absolute;transform:translate(-50%,-50%);text-align:center;' +
+        'text-shadow:0 1px 2px #000;font-size:11px;color:#fff;white-space:nowrap;' +
+        'line-height:1.3;will-change:left,top;';
+      this.beaconLayer.appendChild(el);
+      this.beaconEls.push(el);
+    }
+    if (!shown.length) return;
+
+    const cam = this.camera;
+    cam.getWorldPosition(this._camPos);
+    cam.getWorldDirection(this._camFwd);
+    const p = this.mapCtx.player();
+    const margin = 26;
+
+    shown.forEach((w, i) => {
+      const el = this.beaconEls[i];
+      const gy = this.terrain.height(Math.round(w.x), Math.round(w.z)) + 2;
+      this._v.set(w.x + 0.5, gy, w.z + 0.5);
+      const front =
+        (this._v.x - this._camPos.x) * this._camFwd.x +
+        (this._v.y - this._camPos.y) * this._camFwd.y +
+        (this._v.z - this._camPos.z) * this._camFwd.z > 0;
+      const ndc = this._v.project(cam); // mutates _v into NDC space
+      let sx: number, sy: number;
+      if (front) {
+        sx = (ndc.x * 0.5 + 0.5) * width;
+        sy = (-ndc.y * 0.5 + 0.5) * height;
+      } else {
+        // Behind the camera: NDC is mirrored — push to the opposite edge so the
+        // badge still indicates the bearing.
+        sx = ndc.x < 0 ? width - margin : margin;
+        sy = height - margin;
+      }
+      sx = Math.max(margin, Math.min(width - margin, sx));
+      sy = Math.max(margin, Math.min(height - margin, sy));
+      const dist = Math.round(Math.hypot(w.x - p.x, w.z - p.z));
+      const col = this.rgba(w.color, 1);
+      el.style.display = '';
+      el.style.left = `${sx}px`;
+      el.style.top = `${sy}px`;
+      el.style.opacity = dist > 600 ? '0.6' : '0.95';
+      el.innerHTML =
+        `<div style="width:9px;height:9px;margin:0 auto 2px;background:${col};` +
+        `border:1px solid #000;transform:rotate(45deg)"></div>` +
+        `${this.escape(w.name)}<br><span style="color:#cfe0ff">${dist}m</span>`;
+    });
+  }
+
+  /** Hide all floating badges (used on the title screen). */
+  hideBeacons(): void {
+    for (const el of this.beaconEls) el.style.display = 'none';
   }
 
   private rgba(hex: number, a: number): string {
@@ -264,8 +382,14 @@ export class WorldMap {
   private loadWaypoints(): void {
     try {
       const raw = localStorage.getItem('voxelon.waypoints');
-      if (raw) this.waypoints = JSON.parse(raw).filter((w: Waypoint) =>
-        Number.isFinite(w.x) && Number.isFinite(w.z));
+      if (raw) this.waypoints = (JSON.parse(raw) as Partial<Waypoint>[])
+        .filter((w) => Number.isFinite(w.x) && Number.isFinite(w.z))
+        .map((w, i) => ({
+          x: w.x as number, z: w.z as number,
+          color: Number.isFinite(w.color) ? (w.color as number) : 0xffffff,
+          name: typeof w.name === 'string' && w.name ? w.name : `WP ${i + 1}`,
+          show: w.show !== false, // default ON (older saved points had no flag)
+        }));
     } catch { /* ignore */ }
     this.syncMarkers();
   }

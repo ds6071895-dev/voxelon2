@@ -34,6 +34,8 @@ export class NetClient {
 
   /** Fired once the server welcome arrives (multiplayer is now live). */
   onWelcome?: (info: PlayerInfo) => void;
+  /** Saved per-account state to restore (inventory/hotbar), if the account has any. */
+  onRestoreState?: (state: Record<string, unknown>) => void;
   /** A block edit from another player (apply without re-broadcasting). */
   onEdit?: (x: number, y: number, z: number, block: number) => void;
   /** Server-authoritative health change for the local player. */
@@ -135,6 +137,9 @@ export class NetClient {
         for (const tr of msg.turrets) this.onTurret?.(tr.x, tr.y, tr.z, tr.state);
         for (const cl of msg.claims) this.onClaim?.(cl);
         const me = msg.players.find((p) => p.id === this.myId);
+        // Restore saved inventory BEFORE onWelcome (which adopts the server
+        // position) so the comeback loadout/inventory is in place from frame one.
+        if (msg.state) this.onRestoreState?.(msg.state);
         if (me) this.onWelcome?.(me);
         this.onRoster?.();
         break;
@@ -271,6 +276,10 @@ export class NetClient {
   }
   sendSelfHurt(amount: number): void {
     if (this.connected) this.raw({ t: 'selfhurt', amount });
+  }
+  /** Push owned state (inventory/hotbar) for the server to persist to the account. */
+  sendSaveState(data: Record<string, unknown>): void {
+    if (this.connected) this.raw({ t: 'saveState', data });
   }
   sendRespawn(): void {
     if (this.connected) this.raw({ t: 'respawn' });

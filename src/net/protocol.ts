@@ -102,7 +102,11 @@ export type ClientMsg =
   // Raiding (M19): a weapon hit drains an enemy claim's shield. Once the shield
   // is down, breaking a stored container inside the claim raids it (handled on
   // the normal `edit` path, server-side).
-  | { t: 'claimHit'; x: number; y: number; z: number; amount: number };
+  | { t: 'claimHit'; x: number; y: number; z: number; amount: number }
+  // Persistence: the client periodically pushes its owned state (inventory +
+  // hotbar + position) for the server to store against the account and restore
+  // on next login. Opaque blob — the server treats it as data, not authority.
+  | { t: 'saveState'; data: Record<string, unknown> };
 
 // --- server -> client -------------------------------------------------------
 export type ServerMsg =
@@ -113,6 +117,8 @@ export type ServerMsg =
       players: PlayerInfo[]; edits: [string, number][]; items: ItemEntityInfo[];
       ships: ShipState[]; turrets: { x: number; y: number; z: number; state: TurretState }[];
       claims: ClaimState[];
+      /** Saved per-account state to restore (inventory/hotbar); undefined for new accounts. */
+      state?: Record<string, unknown>;
     }
   | { t: 'join'; player: PlayerInfo }
   | { t: 'leave'; id: number }

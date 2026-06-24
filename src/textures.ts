@@ -821,6 +821,62 @@ function paintRocketLauncher(p: Painter, seed: number): void {
   outlineSprite(p);
 }
 
+function paintShotgun(p: Painter, seed: number): void {
+  const j = (c: RGBA, x: number, y: number): RGBA => shade(c, 0.9 + hash2(seed, x, y) * 0.18);
+  const wood: RGBA = [120, 78, 40, 255], woodHi: RGBA = [150, 102, 56, 255];
+  // Double stacked barrels (the shotgun's tell).
+  for (let x = 3; x <= 13; x++) { p.set(x, 5, j(GUN_METAL_HI, x, 5)); p.set(x, 6, j(GUN_METAL, x, 6)); }
+  for (let x = 3; x <= 13; x++) { p.set(x, 7, j(GUN_METAL, x, 7)); p.set(x, 8, j(GUN_DARK, x, 8)); }
+  p.set(13, 5, [12, 12, 16, 255]); p.set(13, 7, [12, 12, 16, 255]); // twin bores
+  // Wooden fore-grip + stock.
+  for (let y = 9; y <= 11; y++) { p.set(5, y, j(woodHi, 5, y)); p.set(6, y, j(wood, 6, y)); }
+  p.set(3, 9, j(woodHi, 3, 9)); p.set(2, 9, j(wood, 2, 9)); p.set(3, 10, j(wood, 3, 10));
+  p.set(8, 9, j(GUN_DARK, 8, 9)); // trigger
+  outlineSprite(p);
+}
+
+function paintSMG(p: Painter, seed: number): void {
+  const j = (c: RGBA, x: number, y: number): RGBA => shade(c, 0.9 + hash2(seed, x, y) * 0.18);
+  // Short stubby barrel + boxy receiver.
+  for (let x = 7; x <= 13; x++) { p.set(x, 6, j(GUN_METAL_HI, x, 6)); p.set(x, 7, j(GUN_METAL, x, 7)); }
+  p.set(13, 6, [12, 12, 16, 255]); // muzzle
+  for (let y = 6; y <= 9; y++) for (let x = 4; x <= 7; x++) p.set(x, y, j(GUN_DARK, x, y));
+  p.set(9, 5, j(GUN_DARK, 9, 5)); p.set(10, 5, j(GUN_DARK, 10, 5)); // top rail
+  // Long straight magazine + grip.
+  for (let y = 9; y <= 13; y++) { p.set(6, y, j(GUN_GRIP, 6, y)); p.set(7, y, j(GUN_GRIP_HI, 7, y)); }
+  outlineSprite(p);
+}
+
+function paintSniper(p: Painter, seed: number): void {
+  const j = (c: RGBA, x: number, y: number): RGBA => shade(c, 0.9 + hash2(seed, x, y) * 0.18);
+  // Very long thin barrel.
+  for (let x = 1; x <= 14; x++) { p.set(x, 7, j(GUN_METAL_HI, x, 7)); p.set(x, 8, j(GUN_METAL, x, 8)); }
+  p.set(14, 7, [12, 12, 16, 255]); // muzzle
+  // Scope (the sniper's tell): a barrel + lens up top.
+  for (let x = 6; x <= 10; x++) p.set(x, 5, j(GUN_DARK, x, 5));
+  p.set(6, 5, [40, 120, 180, 255]); p.set(10, 5, [12, 12, 16, 255]); // lens / objective
+  p.set(7, 6, j(GUN_DARK, 7, 6)); p.set(9, 6, j(GUN_DARK, 9, 6)); // scope mounts
+  // Stock + grip.
+  p.set(1, 8, j(GUN_GRIP_HI, 1, 8)); p.set(2, 8, j(GUN_GRIP, 2, 8)); p.set(1, 9, j(GUN_GRIP, 1, 9));
+  for (let y = 9; y <= 12; y++) { p.set(7, y, j(GUN_GRIP, 7, y)); p.set(8, y, j(GUN_DARK, 8, y)); }
+  outlineSprite(p);
+}
+
+function paintBurstRifle(p: Painter, seed: number): void {
+  const j = (c: RGBA, x: number, y: number): RGBA => shade(c, 0.9 + hash2(seed, x, y) * 0.18);
+  // Boxy carbine barrel.
+  for (let x = 3; x <= 13; x++) { p.set(x, 6, j(GUN_METAL_HI, x, 6)); p.set(x, 7, j(GUN_METAL, x, 7)); }
+  p.set(13, 6, [12, 12, 16, 255]); // muzzle
+  // Carry handle / sight block on top (visual cue distinct from the auto rifle).
+  for (let x = 5; x <= 9; x++) p.set(x, 5, j(GUN_DARK, x, 5));
+  for (let x = 3; x <= 11; x++) p.set(x, 8, j(GUN_DARK, x, 8)); // receiver
+  // Stock + angled magazine.
+  p.set(3, 9, j(GUN_GRIP_HI, 3, 9)); p.set(2, 9, j(GUN_GRIP, 2, 9));
+  for (let y = 9; y <= 12; y++) { p.set(7, y, j(GUN_DARK, 7, y)); p.set(8, y, j(GUN_DARK, 8, y)); }
+  p.set(9, 11, j(GUN_DARK, 9, 11)); p.set(9, 12, j(GUN_DARK, 9, 12)); // mag curve
+  outlineSprite(p);
+}
+
 function paintBullet(p: Painter, seed: number): void {
   const brass: RGBA = [214, 176, 72, 255], brassHi: RGBA = [240, 208, 120, 255];
   const tip: RGBA = [156, 126, 64, 255];
@@ -1233,6 +1289,10 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.Pistol]: flipX(paintPistol),
   [Tile.Rifle]: flipX(paintRifle),
   [Tile.RocketLauncher]: flipX(paintRocketLauncher),
+  [Tile.Shotgun]: flipX(paintShotgun),
+  [Tile.SMG]: flipX(paintSMG),
+  [Tile.Sniper]: flipX(paintSniper),
+  [Tile.BurstRifle]: flipX(paintBurstRifle),
   [Tile.Bullet]: paintBullet,
   [Tile.Rocket]: paintRocket,
   // Automation (M13)

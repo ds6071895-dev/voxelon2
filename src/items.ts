@@ -49,6 +49,11 @@ export const enum Item {
   OilBarrel = 143,
   // Warfare layer (M14)
   Cannonball = 144, // ammo for ship cannons + turrets (craft: iron + coal)
+  // Arcade guns (distinct roles): close-range, spray, pinpoint, burst.
+  Shotgun = 145,
+  SMG = 146,
+  Sniper = 147,
+  BurstRifle = 148,
 }
 
 export interface ToolInfo {
@@ -94,6 +99,12 @@ export interface GunInfo {
   range: number;
   /** Rockets fly slower and detonate on impact instead of a point hit. */
   rocket?: boolean;
+  /** Projectiles launched per trigger pull (shotgun spread). Default 1. */
+  pellets?: number;
+  /** Half-angle (radians) of random cone spread applied to each projectile. */
+  spread?: number;
+  /** Rounds auto-fired in a quick burst per trigger pull (burst rifle). Default 1. */
+  burst?: number;
 }
 
 export interface ItemInfo {
@@ -279,6 +290,25 @@ export const ITEMS: Record<number, ItemInfo> = {
     { damage: 4, ammo: Item.Bullet, mag: 30, cooldown: 0.11, auto: true, speed: 100, range: 64 }),
   [Item.RocketLauncher]: gunItem('Rocket Launcher', Tile.RocketLauncher,
     { damage: 18, ammo: Item.Rocket, mag: 1, cooldown: 1.1, auto: false, speed: 28, range: 80, rocket: true }),
+  // Shotgun — point-blank bruiser: a wide pellet spray that shreds up close and
+  // fizzles at range. Slow pump, small mag.
+  [Item.Shotgun]: gunItem('Shotgun', Tile.Shotgun,
+    { damage: 3, ammo: Item.Bullet, mag: 6, cooldown: 0.7, auto: false, speed: 70, range: 22,
+      pellets: 7, spread: 0.13 }),
+  // SMG — spray-and-pray: blistering auto fire, low per-hit damage, big mag,
+  // a touch of bloom and short reach.
+  [Item.SMG]: gunItem('SMG', Tile.SMG,
+    { damage: 3, ammo: Item.Bullet, mag: 35, cooldown: 0.07, auto: true, speed: 95, range: 38,
+      spread: 0.035 }),
+  // Sniper — pinpoint hitscan-feel: huge damage, dead-accurate, long reach, but
+  // a long recovery between shots and a tiny mag.
+  [Item.Sniper]: gunItem('Sniper', Tile.Sniper,
+    { damage: 24, ammo: Item.Bullet, mag: 5, cooldown: 1.35, auto: false, speed: 150, range: 80 }),
+  // Burst Rifle — disciplined 3-round bursts; rewards aim with a quick clustered
+  // hit then a beat of downtime.
+  [Item.BurstRifle]: gunItem('Burst Rifle', Tile.BurstRifle,
+    { damage: 5, ammo: Item.Bullet, mag: 24, cooldown: 0.5, auto: false, speed: 115, range: 58,
+      burst: 3 }),
   [Item.Bullet]: pureItem('Bullet', Tile.Bullet),
   [Item.Rocket]: pureItem('Rocket', Tile.Rocket),
 };

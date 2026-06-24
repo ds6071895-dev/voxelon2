@@ -218,6 +218,12 @@ export const enum Tile {
   Terracotta = 125,
   Basalt = 126,
   Lava = 127,
+
+  // Arcade guns (M-guns)
+  Shotgun = 128,
+  SMG = 129,
+  Sniper = 130,
+  BurstRifle = 131,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel';

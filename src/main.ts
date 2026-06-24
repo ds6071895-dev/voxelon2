@@ -20,7 +20,7 @@ import { ItemEntities } from './itementity';
 import { Chests } from './chests';
 import { Mobs } from './mobs';
 import { NetClient } from './net/client';
-import { MELEE_RANGE, WORLD_SEED } from './net/protocol';
+import { MELEE_RANGE, WORLD_SEED, makeUsername } from './net/protocol';
 import { MachineModels } from './machinemodels';
 import { NetItems } from './netitems';
 import { Particles } from './particles';
@@ -118,15 +118,33 @@ const player = new Player(spawn);
 const input = new Input(renderer.domElement);
 const inventory = new Inventory();
 
-// TEMPORARY starter kit (for testing the automation + warfare layers): every
-// player spawns with all guns + ammo, machines, ship/turret parts, and upgrade
-// materials. Gated behind a flag — set ?kit=0 (or flip the default) to restore
-// the empty-inventory survival start for a "finished" game.
-const GIVE_STARTER_KIT =
-  new URLSearchParams(location.search).get('kit') !== '0';
-if (GIVE_STARTER_KIT) for (const [id, n] of [
+// Basic starter kit — a modest comeback loadout granted on first spawn and
+// re-claimable after death (see grantStarterKit). Just enough to dig, build a
+// little, and defend yourself; NOT a head-start on the war economy.
+const BASIC_KIT: [number, number][] = [
+  [Item.WoodenPickaxe, 1],
+  [Item.WoodenAxe, 1],
+  [Item.Pistol, 1],
+  [Item.Bullet, 24],
+  [Block.Torch, 8],
+  [Block.OakPlanks, 16],
+];
+/** Top up the inventory to the basic-kit amounts. Top-up (not blind add) is the
+ *  anti-farm: you can't drop-and-reclaim to stockpile — you only ever receive
+ *  the shortfall below the kit quantity, so a full pouch grants nothing. */
+function grantStarterKit(): void {
+  for (const [id, n] of BASIC_KIT) {
+    const have = inventory.countItem(id);
+    if (have < n) inventory.add(id, n - have);
+  }
+}
+grantStarterKit();
+// Debug loadout (testing the automation + warfare layers): ?kit=full grants all
+// guns, machines, ship/turret parts and upgrade materials.
+if (new URLSearchParams(location.search).get('kit') === 'full') for (const [id, n] of [
   [Item.Pistol, 1], [Item.Rifle, 1], [Item.RocketLauncher, 1],
-  [Item.Bullet, 64], [Item.Rocket, 16],
+  [Item.Shotgun, 1], [Item.SMG, 1], [Item.Sniper, 1], [Item.BurstRifle, 1],
+  [Item.Bullet, 256], [Item.Rocket, 16],
   [Block.Autominer, 8], [Block.OilDerrick, 8],
   // warfare kit: ship parts, turrets, cannon ammo
   [Block.ShipHelm, 4], [Block.Cannon, 16], [Block.Turret, 8],
@@ -183,7 +201,7 @@ const shieldGroup = new THREE.Group();
 scene.add(shieldGroup);
 const shieldMeshes = new Map<number, THREE.LineSegments>();
 // World map (M key): biome base + faction claims + oil nodes + waypoints.
-const worldMap = new WorldMap(scene, world.terrain, claims, {
+const worldMap = new WorldMap(scene, camera, world.terrain, claims, {
   player: () => ({ x: player.pos.x, z: player.pos.z, yaw: player.yaw }),
   faction: () => localFaction,
   nodes: () => territoryNodes,
@@ -689,6 +707,7 @@ function attemptAuth(mode: 'login' | 'register', retries = 12): void {
     if (mode === 'register') saveLocalAccounts();
     localFaction = res.account.faction;
     onAuthSuccess(res.account.username);
+    if (mode === 'login') restoreOfflineInventory(); // bring back saved single-player stuff
   } else if (retries > 0) {
     // Still resolving whether a server is reachable — try again shortly.
     authStatus.textContent = 'Connecting…';
@@ -698,6 +717,18 @@ function attemptAuth(mode: 'login' | 'register', retries = 12): void {
     authErr.textContent = 'Could not reach the server. Try again.';
   }
 }
+
+// "Roll" a fresh random username. Avoids names we already know about locally
+// (best-effort; the server enforces final uniqueness at register time).
+const rollBtn = document.getElementById('roll-btn')!;
+function rollUsername(): void {
+  let name = makeUsername(Math.random);
+  for (let i = 0; i < 20 && localAccounts.has(name); i++) name = makeUsername(Math.random);
+  authUser.value = name;
+  authErr.textContent = '';
+  authStatus.textContent = 'Rolled a name — roll again or pick a password.';
+}
+rollBtn.addEventListener('click', rollUsername);
 
 net.onAuthErr = (error) => { authStatus.textContent = ''; authErr.textContent = error; };
 document.getElementById('login-btn')!.addEventListener('click', () => attemptAuth('login'));
@@ -739,6 +770,8 @@ document.getElementById('respawn')!.addEventListener('click', () => {
     lastHealth = 20;
     deathShown = false;
     deathEl.style.display = 'none';
+    grantStarterKit(); // re-claim the basic loadout after death (offline)
+    pushStateSave();
     input.lock();
   }
 });
@@ -750,6 +783,7 @@ function checkDeath(): void {
   // Drop everything where we died — networked so others can grab it (MP) or
   // local item entities (offline). We can't pick anything up while dead.
   spillAtPlayer(inventory.spillAll());
+  pushStateSave(); // persist the now-empty inventory so a reconnect can't dupe it
   // We can die while the pause menu is up (the sim never pauses). Normalize to
   // 'playing' and drop the pause menu so the death screen is the only overlay
   // and the Esc handler has no 'paused' branch to re-lock the pointer over it.
@@ -758,6 +792,31 @@ function checkDeath(): void {
   deathEl.style.display = 'flex';
   document.exitPointerLock();
 }
+
+// --- Persistence: server-stored inventory + position (MP) and localStorage
+// (offline). The server is the system of record online; offline we mirror to
+// localStorage keyed by the local account so single-player also persists.
+function pushStateSave(): void {
+  if (net.connected) net.sendSaveState(inventory.serialize() as unknown as Record<string, unknown>);
+  else if (authedName) {
+    try {
+      localStorage.setItem(`voxelon.inv.${authedName.toLowerCase()}`,
+        JSON.stringify(inventory.serialize()));
+    } catch { /* ignore */ }
+  }
+}
+net.onRestoreState = (state) => inventory.restore(state);
+// Offline: restore the saved inventory for the just-authed local account.
+function restoreOfflineInventory(): void {
+  if (net.connected || !authedName) return;
+  try {
+    const raw = localStorage.getItem(`voxelon.inv.${authedName.toLowerCase()}`);
+    if (raw) inventory.restore(JSON.parse(raw));
+  } catch { /* ignore */ }
+}
+// Periodic autosave + a final flush when the tab closes.
+setInterval(pushStateSave, 15000);
+window.addEventListener('beforeunload', pushStateSave);
 
 // --- Multiplayer wiring (callbacks fire async, after the world is set up) ---
 net.onWelcome = (me) => {
@@ -803,6 +862,8 @@ net.onRespawned = (x, y, z, h) => {
   lastHealth = h;
   deathShown = false;
   deathEl.style.display = 'none';
+  grantStarterKit(); // re-claim the basic loadout after death (MP)
+  pushStateSave();
   if (worldReady) input.lock();
 };
 net.onKillfeed = showKill;
@@ -950,17 +1011,56 @@ const RELOAD_TIME = 1.1;
 let fireCooldown = 0;
 let reloadTimer = 0;
 let reloadingStack: ItemStack | null = null;
+// Burst-fire scheduler (burst rifle): rounds left + interval timer for the gun
+// that pulled the trigger.
+const BURST_INTERVAL = 0.06;
+let burstRemaining = 0;
+let burstTimer = 0;
+let burstStack: ItemStack | null = null;
+let burstGun: GunInfo | null = null;
 
-function tryFire(stack: ItemStack, gun: GunInfo): void {
+/** Jitter an aim direction within a cone of the given half-angle (radians). */
+function spreadDir(dir: THREE.Vector3, spread: number): THREE.Vector3 {
+  if (spread <= 0) return dir.clone();
+  const up = Math.abs(dir.y) < 0.99 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+  const right = new THREE.Vector3().crossVectors(dir, up).normalize();
+  const realUp = new THREE.Vector3().crossVectors(right, dir).normalize();
+  const ang = Math.random() * Math.PI * 2;
+  const mag = Math.tan(spread) * Math.sqrt(Math.random());
+  return dir.clone()
+    .addScaledVector(right, Math.cos(ang) * mag)
+    .addScaledVector(realUp, Math.sin(ang) * mag)
+    .normalize();
+}
+
+/** Fire one round (consuming one from the magazine), spawning its pellet(s).
+ *  Returns false if the magazine was empty. */
+function fireVolley(stack: ItemStack, gun: GunInfo): boolean {
   const loaded = stack.loaded ?? gun.mag;
-  if (loaded <= 0) { reloadGun(); return; } // firing on empty starts a reload
+  if (loaded <= 0) return false;
   stack.loaded = loaded - 1;
   inventory.version++; // refresh the ammo counter
-  fireCooldown = gun.cooldown;
-  const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-  projectiles.fire(player.eyePosition, dir, gun);
+  const base = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  const pellets = Math.max(1, gun.pellets ?? 1);
+  const spread = gun.spread ?? 0;
+  for (let i = 0; i < pellets; i++) {
+    projectiles.fire(player.eyePosition, spreadDir(base, spread), gun);
+  }
   held.swing();
   audio.gun(player.eyePosition);
+  return true;
+}
+
+function tryFire(stack: ItemStack, gun: GunInfo): void {
+  fireCooldown = gun.cooldown;
+  if (!fireVolley(stack, gun)) { fireCooldown = 0; reloadGun(); return; } // empty -> reload
+  const burst = Math.max(1, gun.burst ?? 1);
+  if (burst > 1) {
+    burstRemaining = burst - 1;
+    burstTimer = BURST_INTERVAL;
+    burstStack = stack;
+    burstGun = gun;
+  }
 }
 
 function reloadGun(): void {
@@ -1353,6 +1453,19 @@ function frame(): void {
   // open a menu); the reload pulls ammo into the magazine when it completes.
   if (fireCooldown > 0) fireCooldown = Math.max(0, fireCooldown - dt);
   if (cannonCooldown > 0) cannonCooldown = Math.max(0, cannonCooldown - dt);
+  // Continue an in-flight burst (burst rifle) — cancelled if the gun is swapped.
+  if (burstRemaining > 0 && burstGun && burstStack) {
+    if (burstStack !== inventory.selectedStack || player.dead) {
+      burstRemaining = 0; burstStack = null; burstGun = null;
+    } else {
+      burstTimer -= dt;
+      while (burstRemaining > 0 && burstTimer <= 0) {
+        if (!fireVolley(burstStack, burstGun)) { burstRemaining = 0; break; }
+        burstRemaining--; burstTimer += BURST_INTERVAL;
+      }
+      if (burstRemaining <= 0) { burstStack = null; burstGun = null; }
+    }
+  }
   if (reloadTimer > 0) {
     reloadTimer -= dt;
     if (reloadTimer <= 0) {
@@ -1603,6 +1716,9 @@ function frame(): void {
 
   input.endFrame();
   renderer.render(scene, activeCamera);
+  // Floating waypoint badges (skip the title panorama — wrong camera + covered).
+  if (screen !== 'title') worldMap.renderBeacons(window.innerWidth, window.innerHeight);
+  else worldMap.hideBeacons();
 }
 
 updateCamera();

@@ -97,6 +97,14 @@ export const RECIPES: Recipe[] = [
   shaped([[I, I, I], [I, R, I], [I, I, I]], Item.RocketLauncher),
   shapeless([I, R], Item.Bullet, 8),
   shaped([[null, I, null], [I, R, I], [null, ANY_COAL, null]], Item.Rocket, 2),
+  // Arcade guns (distinct roles). Shotgun = iron barrels on a planks stock.
+  shaped([[I, I, I], [P, R, null]], Item.Shotgun),
+  // SMG = compact iron + redstone over a cobalt receiver.
+  shaped([[I, I, R], [Cb, R, null]], Item.SMG),
+  // Sniper = long iron barrel + a diamond scope, cobalt-braced.
+  shaped([[I, I, I], [null, R, D], [Cb, null, null]], Item.Sniper),
+  // Burst Rifle = iron carbine with a cobalt fire-group.
+  shaped([[I, I, I], [Cb, R, R]], Item.BurstRifle),
 
   // Automation (M13): machines built around an iron frame.
   // Autominer = iron + redstone wrapped around a pickaxe core.

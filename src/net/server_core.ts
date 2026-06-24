@@ -9,16 +9,17 @@ import { ITEMS, ItemStack } from '../items';
 import {
   MachineState, MachineType, applyUpgrade, claimMachine, collectMachine,
   damageMachine, machineHeight, machineTypeForBlock, newMachine, setFilter,
-  tickMachine,
+  tickMachine, sanitizeState as sanitizeMachineState,
 } from '../machines';
 import { Item } from '../items';
 import {
   ShipState, applyShipUpgrade, blockWorldPos, cannonCount, damageShip,
-  floodFillHull, newShip, shipFireInterval, tickShip,
+  floodFillHull, newShip, shipFireInterval, tickShip, sanitizeShipState,
 } from '../ships';
 import {
   TurretState, applyTurretUpgrade, claimTurret, damageTurret, newTurret,
   turretArmed, turretConsumeShot, turretDamage, turretLoad, turretRange,
+  sanitizeTurretState,
 } from '../turrets';
 import {
   ControlNode, deriveControlNodes, resolveNode, topScores,
@@ -26,7 +27,7 @@ import {
 } from '../territory';
 import { FACTIONS, balancedFaction, factionName, sameFaction } from '../teams';
 import {
-  Claims, OIL_CAP, claimProtected, damageShield, feedOil, shieldUp,
+  Claims, ClaimState, OIL_CAP, claimProtected, damageShield, feedOil, shieldUp,
 } from '../claims';
 import { Terrain } from '../terrain';
 import {
@@ -57,6 +58,8 @@ interface ServerPlayer extends PlayerInfo {
   regenTimer: number;
   /** Worn-armor defense points the client reports (clamped 0..cap). */
   armorPoints: number;
+  /** Last client-pushed persistable blob (inventory/hotbar) for saveState. */
+  savedClientData?: Record<string, unknown>;
 }
 
 /** One message the transport should deliver. `to` is a client id, or a
@@ -140,15 +143,22 @@ export class GameServer {
   /** Register a player; returns the welcome (to them) + join (to others). With
    *  mandatory accounts the shell passes the authenticated account's username +
    *  faction; without them (legacy/tests) it auto-assigns both. */
-  addPlayer(id: number, account?: { username?: string; faction?: number }): Outbound[] {
+  addPlayer(id: number, account?: { username?: string; faction?: number; data?: Record<string, unknown> }): Outbound[] {
     const username = account?.username && !this.usernameOnline(account.username)
       ? account.username : this.uniqueUsername();
     const faction = account?.faction !== undefined && FACTIONS.some((f) => f.id === account.faction)
       ? account.faction : this.assignFaction();
-    const s = this.spawn();
+    // Restore the saved position if the account carries one (and it's finite +
+    // above bedrock); otherwise drop in at a fresh scatter spawn.
+    const saved = account?.data;
+    const sx = saved?.x, sy = saved?.y, sz = saved?.z, syaw = saved?.yaw;
+    const hasPos = fin(sx as number, sy as number, sz as number) && (sy as number) > 0;
+    const s = hasPos
+      ? { x: sx as number, y: sy as number, z: sz as number }
+      : this.spawn();
     const player: ServerPlayer = {
       id, username, skin: skinSeed(username), faction,
-      x: s.x, y: s.y, z: s.z, yaw: 0, pitch: 0,
+      x: s.x, y: s.y, z: s.z, yaw: fin(syaw as number) ? syaw as number : 0, pitch: 0,
       health: MAX_HEALTH, dead: false, regenCooldown: 0, regenTimer: 0,
       armorPoints: 0,
     };
@@ -164,6 +174,7 @@ export class GameServer {
         return { x, y, z, state };
       }),
       claims: this.claims.list(),
+      state: saved, // opaque per-account blob (inventory/hotbar) for the client to restore
     };
     return [
       { to: id, msg: welcome },
@@ -198,6 +209,11 @@ export class GameServer {
         return this.applyDamage(p, Math.max(0, Math.min(40, msg.amount)), id);
       case 'respawn':
         return this.handleRespawn(p);
+      case 'saveState':
+        // Stash the client-owned blob (inventory/hotbar). Position is added from
+        // the authoritative record at capture time. The shell persists to disk.
+        if (msg.data && typeof msg.data === 'object') p.savedClientData = msg.data;
+        return [];
       case 'drop':
         return this.handleDrop(p, msg.items, msg.x, msg.y, msg.z);
       case 'pickup':
@@ -1087,6 +1103,97 @@ export class GameServer {
     return [{ to: 'all', msg: { t: 'claims', claims } }];
   }
 
+  /** Build the persistable per-account blob for a player: their last client-
+   *  pushed inventory/hotbar plus the server-authoritative position. Returns
+   *  null if the player isn't online. */
+  capturePlayerState(id: number): { username: string; data: Record<string, unknown> } | null {
+    const p = this.players.get(id);
+    if (!p) return null;
+    const data: Record<string, unknown> = { ...(p.savedClientData ?? {}) };
+    data.x = p.x; data.y = p.y; data.z = p.z; data.yaw = p.yaw;
+    return { username: p.username, data };
+  }
+
+  // --- Persistence ----------------------------------------------------------
+  // The whole authoritative world (player-made changes) serialized to a plain
+  // JSON-able object the shell writes to disk and reloads on boot. Territory
+  // node control is intentionally NOT saved — it re-resolves from live player
+  // presence each tick — and dropped item entities are ephemeral.
+
+  serialize(): WorldSave {
+    return {
+      v: 1,
+      seed: this.seed,
+      worldTime: this.worldTime,
+      nextShipId: this.nextShipId,
+      edits: [...this.edits.entries()],
+      chests: [...this.chests.entries()],
+      machines: [...this.machines.entries()],
+      ships: [...this.ships.values()],
+      turrets: [...this.turrets.entries()],
+      claims: this.claims.list(),
+    };
+  }
+
+  /** Restore a saved world (server boot). Fail-closed per record: a malformed
+   *  entry is skipped, never crashes the load. Returns true if anything loaded. */
+  restore(save: unknown): boolean {
+    if (!save || typeof save !== 'object') return false;
+    const s = save as Partial<WorldSave>;
+    if (s.seed !== undefined && s.seed !== this.seed) {
+      // A save from a different seed describes a different world — refuse it so
+      // we don't smear edits across mismatched terrain.
+      return false;
+    }
+    if (Number.isFinite(s.worldTime)) this.worldTime = s.worldTime as number;
+
+    if (Array.isArray(s.edits)) {
+      for (const e of s.edits) {
+        if (!Array.isArray(e) || e.length !== 2) continue;
+        const [k, b] = e as [unknown, unknown];
+        if (validBlockKey(k) && Number.isInteger(b) && (b as number) >= 0 && (b as number) <= 255) {
+          this.edits.set(k as string, b as number);
+        }
+      }
+    }
+    if (Array.isArray(s.chests)) {
+      for (const e of s.chests) {
+        if (!Array.isArray(e) || e.length !== 2) continue;
+        const [k, slots] = e as [unknown, unknown];
+        if (validBlockKey(k) && Array.isArray(slots)) {
+          this.chests.set(k as string, sanitizeSlots(slots));
+        }
+      }
+    }
+    if (Array.isArray(s.machines)) {
+      for (const e of s.machines) {
+        if (!Array.isArray(e) || e.length !== 2) continue;
+        const [k, raw] = e as [unknown, unknown];
+        const st = sanitizeMachineState(raw);
+        if (validBlockKey(k) && st) this.machines.set(k as string, st);
+      }
+    }
+    if (Array.isArray(s.ships)) {
+      let maxId = this.nextShipId - 1;
+      for (const raw of s.ships) {
+        const st = sanitizeShipState(raw);
+        if (st) { this.ships.set(st.id, st); if (st.id > maxId) maxId = st.id; }
+      }
+      this.nextShipId = Math.max(this.nextShipId,
+        Number.isInteger(s.nextShipId) ? (s.nextShipId as number) : 0, maxId + 1);
+    }
+    if (Array.isArray(s.turrets)) {
+      for (const e of s.turrets) {
+        if (!Array.isArray(e) || e.length !== 2) continue;
+        const [k, raw] = e as [unknown, unknown];
+        const st = sanitizeTurretState(raw);
+        if (validBlockKey(k) && st) this.turrets.set(k as string, st);
+      }
+    }
+    if (Array.isArray(s.claims)) this.claims.load(s.claims as ClaimState[]);
+    return true;
+  }
+
   /** Transform+health for every player (the periodic broadcast). */
   snapshot(): PlayerSnapshot[] {
     return [...this.players.values()].map((p) => ({
@@ -1106,4 +1213,42 @@ function toInfo(p: ServerPlayer): PlayerInfo {
     x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
     health: p.health, dead: p.dead,
   };
+}
+
+/** On-disk world snapshot (see GameServer.serialize/restore). */
+export interface WorldSave {
+  v: number;
+  seed: number;
+  worldTime: number;
+  nextShipId: number;
+  edits: [string, number][];
+  chests: [string, (ItemStack | null)[]][];
+  machines: [string, MachineState][];
+  ships: ShipState[];
+  turrets: [string, TurretState][];
+  claims: ClaimState[];
+}
+
+/** A "x,y,z" integer block-coordinate key (the map keys we persist). */
+function validBlockKey(k: unknown): k is string {
+  return typeof k === 'string' && /^-?\d+,-?\d+,-?\d+$/.test(k);
+}
+
+/** Fail-closed validation of a chest's slot array loaded from disk. */
+function sanitizeSlots(raw: unknown[]): (ItemStack | null)[] {
+  const out: (ItemStack | null)[] = [];
+  for (let i = 0; i < Math.min(raw.length, CHEST_SLOTS); i++) {
+    const s = raw[i] as Partial<ItemStack> | null;
+    if (s && Number.isInteger(s.id) && Number.isFinite(s.count) && (s.count as number) > 0 && ITEMS[s.id as number]) {
+      const stack: ItemStack = { id: s.id as number, count: Math.floor(s.count as number) };
+      if (Number.isFinite(s.loaded)) stack.loaded = Math.max(0, Math.floor(s.loaded as number));
+      if (Number.isFinite(s.damage)) stack.damage = Math.max(0, s.damage as number);
+      if (Number.isFinite(s.xp)) stack.xp = Math.max(0, s.xp as number);
+      out.push(stack);
+    } else {
+      out.push(null);
+    }
+  }
+  while (out.length < CHEST_SLOTS) out.push(null);
+  return out;
 }

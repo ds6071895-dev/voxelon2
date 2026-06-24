@@ -303,4 +303,50 @@ export class Inventory {
     }
     if (changed) this.version++;
   }
+
+  // --- Persistence (server-stored per-account state) -------------------------
+  // Only the carried items (hotbar + main), the worn armor, and the selected
+  // hotbar slot persist; the crafting grid and chest-mirror slots are transient.
+
+  serialize(): { slots: (ItemStack | null)[]; armor: (ItemStack | null)[]; selected: number } {
+    return {
+      slots: this.slots.slice(0, INV_SIZE),
+      armor: this.slots.slice(ARMOR_START, ARMOR_START + ARMOR_SIZE),
+      selected: this.selected,
+    };
+  }
+
+  /** Replace the carried items + worn armor from a saved blob. Fail-closed per
+   *  slot (a malformed entry becomes empty), so a corrupt save can't crash or
+   *  inject impossible items. */
+  restore(data: unknown): void {
+    if (!data || typeof data !== 'object') return;
+    const d = data as { slots?: unknown; armor?: unknown; selected?: unknown };
+    if (Array.isArray(d.slots)) {
+      for (let i = 0; i < INV_SIZE; i++) this.slots[i] = sanitizeStack(d.slots[i]);
+    }
+    if (Array.isArray(d.armor)) {
+      for (let i = 0; i < ARMOR_SIZE; i++) this.slots[ARMOR_START + i] = sanitizeStack(d.armor[i]);
+    }
+    if (Number.isInteger(d.selected)) {
+      this.selected = ((d.selected as number % HOTBAR_SIZE) + HOTBAR_SIZE) % HOTBAR_SIZE;
+    }
+    this.version++;
+  }
+}
+
+/** Validate one saved slot into a real ItemStack (or null). */
+function sanitizeStack(raw: unknown): ItemStack | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const s = raw as Partial<ItemStack>;
+  if (!Number.isInteger(s.id) || !ITEMS[s.id as number]) return null;
+  if (!Number.isFinite(s.count) || (s.count as number) <= 0) return null;
+  const stack: ItemStack = {
+    id: s.id as number,
+    count: Math.min(Math.floor(s.count as number), maxStack(s.id as number)),
+  };
+  if (Number.isFinite(s.loaded)) stack.loaded = Math.max(0, Math.floor(s.loaded as number));
+  if (Number.isFinite(s.damage)) stack.damage = Math.max(0, s.damage as number);
+  if (Number.isFinite(s.xp)) stack.xp = Math.max(0, s.xp as number);
+  return stack;
 }

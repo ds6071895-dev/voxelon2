@@ -31,7 +31,7 @@ import { Player } from '../src/player';
 import { daylight } from '../src/sky';
 import { Survival } from '../src/survival';
 import { GameServer } from '../src/net/server_core';
-import { MELEE_DAMAGE, mitigate, RANGED_MAX_RANGE } from '../src/net/protocol';
+import { MELEE_DAMAGE, mitigate, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE } from '../src/net/protocol';
 import {
   Machines, MachineType, MAX_LEVEL, allowedFilterMask, applyUpgrade,
   autominerRates, claimMachine, collectMachine, currentRate, damageMachine,
@@ -1104,6 +1104,22 @@ check('furnace smelts ore/sand/log but not removed foods',
   check('rocket recipe yields two', rocketR?.id === Item.Rocket && rocketR.count === 2);
   check('guns carry a magazine size', (ITEMS[Item.Rifle].gun?.mag ?? 0) === 30);
 
+  // Arcade guns: distinct roles + craftable, and within the server damage cap.
+  const Cb = Item.CobaltIngot, D = Item.Diamond, P = Block.OakPlanks;
+  check('shotgun recipe', matchGrid(cellGrid([[I, I, I], [P, R, null]]))?.id === Item.Shotgun);
+  check('smg recipe', matchGrid(cellGrid([[I, I, R], [Cb, R, null]]))?.id === Item.SMG);
+  check('sniper recipe', matchGrid(cellGrid([[I, I, I], [null, R, D], [Cb, null, null]]))?.id === Item.Sniper);
+  check('burst rifle recipe', matchGrid(cellGrid([[I, I, I], [Cb, R, R]]))?.id === Item.BurstRifle);
+  check('shotgun sprays multiple pellets', (ITEMS[Item.Shotgun].gun?.pellets ?? 0) >= 5);
+  check('smg is full-auto', ITEMS[Item.SMG].gun?.auto === true);
+  check('burst rifle fires a 3-round burst', (ITEMS[Item.BurstRifle].gun?.burst ?? 0) === 3);
+  check('sniper hits hard but stays under the server damage cap',
+    (ITEMS[Item.Sniper].gun?.damage ?? 0) > 18 &&
+    (ITEMS[Item.Sniper].gun?.damage ?? 99) <= RANGED_MAX_DAMAGE);
+  check('every gun draws from a real ammo reserve',
+    [Item.Shotgun, Item.SMG, Item.Sniper, Item.BurstRifle].every(
+      (g) => (ITEMS[g].gun?.ammo ?? 0) === Item.Bullet && (ITEMS[g].gun?.mag ?? 0) > 0));
+
   // Ammo reserve helpers (drive the magazine reload).
   const inv = new Inventory();
   inv.slots[0] = { id: Item.Bullet, count: 30 };
@@ -1991,6 +2007,64 @@ check('furnace smelts ore/sand/log but not removed foods',
   check('accounts survive a JSON round-trip + still authenticate',
     reloaded.size === accs.size && reloaded.login('Alice', 'hunter2', hash).ok &&
     reloaded.get('Alice')!.faction === accs.get('Alice')!.faction);
+}
+
+// --- World + per-account persistence ----------------------------------------
+{
+  // World serialize -> restore round-trips player-made changes through disk.
+  const a = new GameServer(1337, mulberry32(77));
+  a.addPlayer(1);
+  a.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: 0, pitch: 0 });
+  a.handle(1, { t: 'edit', x: 1, y: 69, z: 1, block: Block.Cobblestone });
+  const saveBlob = JSON.parse(JSON.stringify(a.serialize())); // through "disk"
+  check('serialize captures the seed + a placed edit',
+    saveBlob.seed === 1337 &&
+    saveBlob.edits.some((e: [string, number]) => e[0] === '1,69,1' && e[1] === Block.Cobblestone));
+
+  const b = new GameServer(1337, mulberry32(78));
+  check('restore loads a saved world', b.restore(saveBlob) === true);
+  const wB = b.addPlayer(5).find((o) => o.to === 5)!.msg;
+  check('a restored edit shows up in the next welcome',
+    wB.t === 'welcome' &&
+    wB.edits.some((e) => e[0] === '1,69,1' && e[1] === Block.Cobblestone));
+  check('restore refuses a save from a different seed',
+    new GameServer(999, mulberry32(1)).restore({ ...saveBlob, seed: 1337 }) === false ||
+    new GameServer(1337, mulberry32(1)).restore({ ...saveBlob, seed: 4242 }) === false);
+  check('restore fail-closes on garbage', new GameServer(1337, mulberry32(1)).restore(null) === false);
+
+  // Per-account state: position + inventory round-trip through addPlayer/capture.
+  const c = new GameServer(1337, mulberry32(79));
+  const savedData = { x: 12.5, y: 71, z: -4.5, yaw: 1.5, slots: [{ id: Item.Bullet, count: 30 }] };
+  const wc = c.addPlayer(2, { username: 'Saver', faction: 0, data: savedData }).find((o) => o.to === 2)!.msg;
+  check('a returning account spawns at its saved position',
+    wc.t === 'welcome' && wc.players[0].x === 12.5 && wc.players[0].z === -4.5);
+  check('the saved inventory blob rides along in the welcome state',
+    wc.t === 'welcome' && !!wc.state &&
+    (wc.state.slots as { id: number }[])[0].id === Item.Bullet);
+  c.handle(2, { t: 'saveState', data: { slots: [{ id: Item.Rocket, count: 3 }] } });
+  c.handle(2, { t: 'xform', x: 50, y: 72, z: 50, yaw: 0, pitch: 0 });
+  const cap = c.capturePlayerState(2);
+  check('capturePlayerState merges the latest blob with authoritative position',
+    !!cap && cap.username === 'Saver' &&
+    (cap!.data.slots as { id: number }[])[0].id === Item.Rocket &&
+    cap!.data.x === 50 && cap!.data.z === 50);
+
+  // Inventory serialize/restore (the client-owned half of the blob).
+  const inv = new Inventory();
+  inv.slots[0] = { id: Item.Sniper, count: 1, loaded: 3 };
+  inv.slots[5] = { id: Block.Cobblestone, count: 40 };
+  inv.slots[ARMOR_START] = { id: Item.IronHelmet, count: 1, xp: 120 };
+  inv.selected = 5;
+  const blob = JSON.parse(JSON.stringify(inv.serialize()));
+  const inv2 = new Inventory();
+  inv2.restore(blob);
+  check('inventory restore round-trips carried items, magazine, armor + selection',
+    inv2.slots[0]?.id === Item.Sniper && inv2.slots[0]?.loaded === 3 &&
+    inv2.slots[5]?.count === 40 && inv2.slots[ARMOR_START]?.id === Item.IronHelmet &&
+    inv2.slots[ARMOR_START]?.xp === 120 && inv2.selected === 5);
+  inv2.restore({ slots: [{ id: 99999, count: 5 }, { id: Item.Bullet, count: -3 }] });
+  check('inventory restore fail-closes on impossible items',
+    inv2.slots[0] === null && inv2.slots[1] === null);
 }
 
 // --- Land claims + oil shield (M18) + raiding (M19) --------------------------
