@@ -8,7 +8,8 @@
 
 import * as THREE from 'three';
 import { BLOCKS, isOpaque, Tile } from './blocks';
-import { SLAB_BOX, stairBoxes, subFaceUV } from './mesher';
+import { subFaceUV } from './mesher';
+import { renderBoxes } from './shapes';
 import type { ShipState } from './ships';
 import type { Atlas } from './textures';
 
@@ -55,7 +56,7 @@ function buildShipGeometry(ship: ShipState, atlas: Atlas): THREE.BufferGeometry 
     // Slabs/stairs render as partial sub-boxes (same shapes as the world mesher).
     if (info.shape === 'slab' || info.shape === 'stairs') {
       const [u0, v0, u1, v1] = atlas.uvRect(info.side);
-      const boxes = info.shape === 'slab' ? [SLAB_BOX] : stairBoxes(info.facing);
+      const boxes = renderBoxes(b.id);
       for (const [mn, mx] of boxes) {
         for (let f = 0; f < FACES.length; f++) {
           const face = FACES[f];

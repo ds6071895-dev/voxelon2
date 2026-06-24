@@ -14,6 +14,9 @@ export enum Biome {
   Snowy = 6,
   Mountains = 7,
   SnowyMountains = 8,
+  // Terrain overhaul (M21): two signature biomes that change the silhouette.
+  Mesa = 9,       // banded badlands cliffs (red sand + terracotta)
+  Ashlands = 10,  // volcanic basalt flats with surface lava
 }
 
 export const BIOME_NAMES: Record<Biome, string> = {
@@ -26,6 +29,8 @@ export const BIOME_NAMES: Record<Biome, string> = {
   [Biome.Snowy]: 'Snowy Plains',
   [Biome.Mountains]: 'Mountains',
   [Biome.SnowyMountains]: 'Snowy Mountains',
+  [Biome.Mesa]: 'Mesa',
+  [Biome.Ashlands]: 'Ashlands',
 };
 
 export type Tint = readonly [number, number, number];
@@ -67,11 +72,18 @@ export class Biomes {
   private readonly temp: Noise2D;
   private readonly humid: Noise2D;
   private readonly relief: Noise2D;
+  private readonly ashField: Noise2D;
 
   constructor(seed: number) {
     this.temp = new Noise2D(seed ^ 0x7e47);
     this.humid = new Noise2D(seed ^ 0x40d1);
     this.relief = new Noise2D(seed ^ 0x3033);
+    this.ashField = new Noise2D(seed ^ 0x1a57); // volcanic-zone mask
+  }
+
+  /** Volcanic-zone strength in [0,1] (bounded ashlands regions). */
+  ashFactor(x: number, z: number): number {
+    return 0.5 + 0.5 * this.ashField.fbm(x * 0.0015, z * 0.0015, 3);
   }
 
   /** Temperature and humidity in [0, 1]. */
@@ -96,8 +108,13 @@ export class Biomes {
 
   /** Flat-land biome at a column (Ocean/Beach/Mountains decided in terrain). */
   biomeAt(x: number, z: number): Biome {
+    // Volcanic ashlands form rare, bounded zones (a dedicated mask), overriding
+    // the climate biome on hot-enough ground so they read as a distinct region.
     const [t, m] = this.climate(x, z);
+    if (t > 0.4 && this.ashFactor(x, z) > 0.74) return Biome.Ashlands;
     if (t < 0.32) return Biome.Snowy;
+    // Mesa/badlands: the very hottest, driest land (a slice drier than desert).
+    if (t > 0.7 && m < 0.24) return Biome.Mesa;
     if (t > 0.68 && m < 0.5) return Biome.Desert;
     if (m > 0.7) return Biome.BirchForest;
     if (m > 0.52) return Biome.Forest;

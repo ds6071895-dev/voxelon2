@@ -3,8 +3,8 @@
 
 import * as THREE from 'three';
 import {
-  Block, BLOCKS, isReplaceable, isSolid, orientStairsForYaw, stairsBaseOf,
-  torchForFace, torchSupport,
+  Block, BLOCKS, isReplaceable, isSlab, isSolid, isTopSlab, orientStairsForYaw,
+  slabBottomId, slabPlacement, stairsBaseOf, torchForFace, torchSupport,
 } from './blocks';
 import type { Input } from './input';
 import type { Inventory } from './inventory';
@@ -35,6 +35,8 @@ export function isEntityBlock(id: number): boolean {
 export interface RayHit {
   x: number; y: number; z: number;
   nx: number; ny: number; nz: number;
+  /** World hit point on the targeted face (used to pick top vs bottom slab). */
+  hx: number; hy: number; hz: number;
 }
 
 export function raycastBlocks(
@@ -56,6 +58,8 @@ export function raycastBlocks(
   let nx = 0, ny = 0, nz = 0;
 
   for (let i = 0; i < 256; i++) {
+    // `t` is the ray parameter at which it crosses into the cell evaluated below
+    // (origin + dir*t is the entry point on that cell's face).
     const t = Math.min(tMaxX, tMaxY, tMaxZ);
     if (t > maxDist) return null;
     if (tMaxX <= tMaxY && tMaxX <= tMaxZ) {
@@ -66,7 +70,12 @@ export function raycastBlocks(
       z += stepZ; tMaxZ += tDeltaZ; nx = 0; ny = 0; nz = -stepZ;
     }
     const id = world.getBlock(x, y, z);
-    if (id !== Block.Air && id !== Block.Water) return { x, y, z, nx, ny, nz };
+    if (id !== Block.Air && id !== Block.Water) {
+      return {
+        x, y, z, nx, ny, nz,
+        hx: origin.x + dir.x * t, hy: origin.y + dir.y * t, hz: origin.z + dir.z * t,
+      };
+    }
   }
   return null;
 }
@@ -77,7 +86,8 @@ export class Interaction {
   onAction?: () => void;
   /** Fired when right-clicking a crafting table, furnace, chest, machine, or turret. */
   onOpenContainer?: (
-    kind: 'table' | 'furnace' | 'chest' | 'machine' | 'turret', x: number, y: number, z: number
+    kind: 'table' | 'furnace' | 'chest' | 'machine' | 'turret' | 'claim',
+    x: number, y: number, z: number
   ) => void;
   /** Fired on left-click against a machine/turret block: sabotage (HP), not mining. */
   onSabotage?: (x: number, y: number, z: number) => void;
@@ -89,6 +99,9 @@ export class Interaction {
   ) => void;
   /** Local block edit (break = block 0); main broadcasts it to the server. */
   onEdit?: (x: number, y: number, z: number, block: number) => void;
+  /** Veto an edit at a cell (e.g. an enemy faction's shielded claim). Returning
+   *  false blocks the break/place so the client doesn't mispredict it. */
+  canEdit?: (x: number, y: number, z: number) => boolean;
   private readonly world: World;
   private readonly player: Player;
   private readonly inventory: Inventory;
@@ -169,6 +182,7 @@ export class Interaction {
       if (torchSupport(id)) id = Block.Torch; // wall torches -> torch item
       const sb = stairsBaseOf(id);
       if (sb >= 0) id = sb; // any stairs facing -> the (N) stairs item
+      if (isTopSlab(id)) id = slabBottomId(id); // top slab -> bottom slab item
       const slot = this.inventory.findInHotbar(id);
       if (slot >= 0) this.inventory.select(slot);
     }
@@ -185,6 +199,7 @@ export class Interaction {
     const kind = id === Block.CraftingTable ? 'table'
       : id === Block.Furnace || id === Block.FurnaceLit ? 'furnace'
       : id === Block.Chest ? 'chest'
+      : id === Block.Core ? 'claim'
       : isTurretBlock(id) ? 'turret'
       : isMachineBlock(id) ? 'machine' // anchor or a footprint part -> open the machine
       : null;
@@ -210,6 +225,12 @@ export class Interaction {
     const info = BLOCKS[id];
     if (!info || info.hardness < 0) { // bedrock
       this.crackMesh.visible = false;
+      return;
+    }
+    // Enemy faction's shielded claim: can't break inside it (mirrors the server).
+    if (this.canEdit && !this.canEdit(t.x, t.y, t.z)) {
+      this.crackMesh.visible = false;
+      this.breakProgress = 0;
       return;
     }
     const held = this.inventory.selectedStack;
@@ -258,6 +279,10 @@ export class Interaction {
     if (stairsBaseOf(blockId) >= 0) {
       blockId = orientStairsForYaw(stairsBaseOf(blockId), this.player.yaw);
     }
+    // Slabs pick top vs bottom half from the aimed face + hit height (vanilla).
+    if (isSlab(blockId)) {
+      blockId = slabPlacement(blockId, this.target.ny, this.target.hy - this.target.y);
+    }
 
     // Clicking a replaceable plant (tall grass, dead bush) places into it,
     // like vanilla; otherwise place against the targeted face.
@@ -269,6 +294,8 @@ export class Interaction {
     const existing = this.world.getBlock(px, py, pz);
     if (!isReplaceable(existing)) return;
     if (py < 0 || py >= 256) return;
+    // Can't build inside an enemy faction's shielded claim (mirrors the server).
+    if (this.canEdit && !this.canEdit(px, py, pz)) return;
 
     // Ship-build rule: a solid block may EXTEND a helm-rooted hull, but must not
     // BRIDGE it to terrain or other structures — rejected if the placement cell
@@ -313,7 +340,7 @@ export class Interaction {
       blockId = oriented;
     }
 
-    if (BLOCKS[blockId].solid && this.player.intersectsBlock(px, py, pz)) return;
+    if (BLOCKS[blockId].solid && this.player.intersectsBlock(px, py, pz, blockId)) return;
 
     this.world.setBlock(px, py, pz, blockId);
     this.onEdit?.(px, py, pz, blockId);

@@ -22,8 +22,12 @@ import {
 } from '../turrets';
 import {
   ControlNode, deriveControlNodes, resolveNode, topScores,
-  TERRITORY_TARGET_SCORE,
+  NODE_OIL_RATE,
 } from '../territory';
+import { FACTIONS, balancedFaction, factionName, sameFaction } from '../teams';
+import {
+  Claims, OIL_CAP, claimProtected, damageShield, feedOil, shieldUp,
+} from '../claims';
 import { Terrain } from '../terrain';
 import {
   ClientMsg, MELEE_DAMAGE, MELEE_RANGE, EDIT_RANGE, CHEST_SLOTS, PICKUP_RANGE,
@@ -35,7 +39,9 @@ import {
 const BOARD_RANGE = 6;          // how close a player must be to pilot/dock/upgrade a ship
 const SHIP_BLAST_RADIUS = 7;    // ship-destruction explosion radius (player damage)
 const TERRITORY_BROADCAST = 0.5; // seconds between scoreboard broadcasts
-const WIN_HOLD = 10;            // seconds the winner is shown before a round reset
+const CLAIM_BROADCAST = 1;      // seconds between bulk claim-state refreshes
+const CLAIM_HIT_MAX = 200;      // server cap on a single reported shield hit
+export const RAID_STEAL_FRAC = 0.5; // fraction of a stored container a raid takes
 
 /** All arguments are finite numbers (rejects NaN/Infinity/non-numbers). */
 function fin(...ns: number[]): boolean {
@@ -78,8 +84,11 @@ export class GameServer {
   private readonly scores = new Map<string, number>();
   private roundTime = 0;
   private winner = '';
-  private winHoldTimer = 0;
   private territoryAccum = 0;
+  // Land claims (M18).
+  private readonly claims = new Claims();
+  private worldTime = 0;        // seconds since boot (grace-period clock)
+  private claimAccum = 0;
   private readonly items = new Map<number, ItemEntityInfo>();
   /** Per-item fall state (server-owned gravity so drops settle to the ground). */
   private readonly itemPhys = new Map<number, { vy: number; resting: boolean }>();
@@ -93,6 +102,22 @@ export class GameServer {
 
   get playerCount(): number {
     return this.players.size;
+  }
+
+  /** Auto-balance a joining player into the lowest-population faction. */
+  private assignFaction(): number {
+    const counts: Record<number, number> = {};
+    for (const f of FACTIONS) counts[f.id] = 0;
+    for (const p of this.players.values()) {
+      if (counts[p.faction] !== undefined) counts[p.faction]++;
+    }
+    return balancedFaction(counts);
+  }
+
+  /** Is an account already connected under this username? */
+  usernameOnline(username: string): boolean {
+    for (const p of this.players.values()) if (p.username === username) return true;
+    return false;
   }
 
   private uniqueUsername(): string {
@@ -112,12 +137,17 @@ export class GameServer {
     return { x: x + 0.5, y: this.terrain.height(x, z) + 1, z: z + 0.5 };
   }
 
-  /** Register a player; returns the welcome (to them) + join (to others). */
-  addPlayer(id: number): Outbound[] {
-    const username = this.uniqueUsername();
+  /** Register a player; returns the welcome (to them) + join (to others). With
+   *  mandatory accounts the shell passes the authenticated account's username +
+   *  faction; without them (legacy/tests) it auto-assigns both. */
+  addPlayer(id: number, account?: { username?: string; faction?: number }): Outbound[] {
+    const username = account?.username && !this.usernameOnline(account.username)
+      ? account.username : this.uniqueUsername();
+    const faction = account?.faction !== undefined && FACTIONS.some((f) => f.id === account.faction)
+      ? account.faction : this.assignFaction();
     const s = this.spawn();
     const player: ServerPlayer = {
-      id, username, skin: skinSeed(username),
+      id, username, skin: skinSeed(username), faction,
       x: s.x, y: s.y, z: s.z, yaw: 0, pitch: 0,
       health: MAX_HEALTH, dead: false, regenCooldown: 0, regenTimer: 0,
       armorPoints: 0,
@@ -133,6 +163,7 @@ export class GameServer {
         const [x, y, z] = k.split(',').map(Number);
         return { x, y, z, state };
       }),
+      claims: this.claims.list(),
     };
     return [
       { to: id, msg: welcome },
@@ -179,12 +210,14 @@ export class GameServer {
       case 'rangedAttack':
         return this.handleRanged(p, msg.target, msg.amount);
       case 'chestOpen': {
+        if (this.enemyShielded(p, msg.x, msg.z)) return []; // can't peek a shielded chest
         const slots = this.chests.get(`${msg.x},${msg.y},${msg.z}`)
           ?? new Array(CHEST_SLOTS).fill(null);
         return [{ to: id, msg: { t: 'chest', x: msg.x, y: msg.y, z: msg.z, slots } }];
       }
       case 'chestSet': {
         if (!Array.isArray(msg.slots)) return [];
+        if (this.enemyShielded(p, msg.x, msg.z)) return []; // can't write a shielded chest
         // Only an actual chest block can hold contents. This fail-closes a
         // stale/late write (e.g. from a client whose chest was just broken by
         // someone else) so it cannot resurrect or fork contents at a now-empty
@@ -202,12 +235,14 @@ export class GameServer {
       }
       case 'machineOpen': {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
         const s = this.ensureMachine(msg.x, msg.y, msg.z);
         if (!s) return [];
         return [{ to: id, msg: { t: 'machine', x: msg.x, y: msg.y, z: msg.z, state: s } }];
       }
       case 'machineConfig': {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
         const s = this.ensureMachine(msg.x, msg.y, msg.z);
         if (!s || s.type !== MachineType.Autominer) return [];
         setFilter(s, msg.filter);
@@ -218,6 +253,7 @@ export class GameServer {
         // Fail-closed on an unknown axis (rather than defaulting to production).
         if (msg.axis !== 'production' && msg.axis !== 'storage') return [];
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
         const s = this.ensureMachine(msg.x, msg.y, msg.z);
         if (!s) return [];
         // Cost is paid client-side (authoritative-lite); the server just bumps
@@ -227,6 +263,7 @@ export class GameServer {
       }
       case 'machineCollect': {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
         const s = this.ensureMachine(msg.x, msg.y, msg.z);
         if (!s) return [];
         const taken = collectMachine(s);
@@ -243,6 +280,7 @@ export class GameServer {
       }
       case 'machineHit': {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
         const s = this.ensureMachine(msg.x, msg.y, msg.z);
         if (!s) return [];
         const dmg = fin(msg.amount) ? Math.max(0, Math.min(1000, msg.amount)) : 0;
@@ -255,6 +293,7 @@ export class GameServer {
       }
       case 'machineClaim': {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
         const s = this.ensureMachine(msg.x, msg.y, msg.z);
         if (!s) return [];
         claimMachine(s, p.username);
@@ -282,6 +321,7 @@ export class GameServer {
       case 'shipHit': {
         const ship = this.ships.get(msg.id);
         if (!ship || p.dead || !fin(ship.x, ship.y, ship.z, p.x, p.y, p.z, msg.amount)) return [];
+        if (sameFaction(p.faction, ship.faction)) return []; // can't shell your own faction's ship
         const dist = Math.hypot(ship.x - p.x, ship.y - p.y, ship.z - p.z);
         if (!(dist <= RANGED_MAX_RANGE)) return []; // fail-closed (NaN -> reject)
         const dmg = Math.max(0, Math.min(SHIP_HIT_MAX_DAMAGE, msg.amount));
@@ -304,6 +344,7 @@ export class GameServer {
       // --- Turrets ---
       case 'turretOpen': {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
         const s = this.ensureTurret(msg.x, msg.y, msg.z);
         if (!s) return [];
         return [{ to: id, msg: { t: 'turret', x: msg.x, y: msg.y, z: msg.z, state: s } }];
@@ -311,6 +352,7 @@ export class GameServer {
       case 'turretUpgrade': {
         if (msg.axis !== 'range' && msg.axis !== 'damage' && msg.axis !== 'rate') return [];
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
         const s = this.ensureTurret(msg.x, msg.y, msg.z);
         if (!s) return [];
         applyTurretUpgrade(s, msg.axis);
@@ -318,13 +360,15 @@ export class GameServer {
       }
       case 'turretClaim': {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
         const s = this.ensureTurret(msg.x, msg.y, msg.z);
         if (!s) return [];
-        claimTurret(s, p.username);
+        claimTurret(s, p.username, p.faction);
         return [{ to: 'all', msg: { t: 'turret', x: msg.x, y: msg.y, z: msg.z, state: s } }];
       }
       case 'turretLoad': {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
         const s = this.ensureTurret(msg.x, msg.y, msg.z);
         if (!s) return [];
         if (!fin(msg.count) || (msg.item !== Item.Cannonball && msg.item !== Item.OilBarrel)) return [];
@@ -333,6 +377,7 @@ export class GameServer {
       }
       case 'turretHit': {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
         const s = this.ensureTurret(msg.x, msg.y, msg.z);
         if (!s) return [];
         const dmg = fin(msg.amount) ? Math.max(0, Math.min(1000, msg.amount)) : 0;
@@ -341,6 +386,26 @@ export class GameServer {
         }
         return [{ to: 'all', msg: { t: 'turret', x: msg.x, y: msg.y, z: msg.z, state: s } }];
       }
+      // --- Land claims (M18 / M19) ---
+      case 'claimOpen': {
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
+        const c = this.claims.coreAt(msg.x, msg.y, msg.z);
+        if (!c) return [];
+        return [{ to: p.id, msg: { t: 'claim', claim: c } }];
+      }
+      case 'claimFeed': {
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
+        const c = this.claims.coreAt(msg.x, msg.y, msg.z);
+        // Only the owning faction may fuel their Core.
+        if (!c || !sameFaction(p.faction, c.faction)) return [];
+        if (!fin(msg.count) || msg.count <= 0) return [];
+        feedOil(c, Math.floor(msg.count)); // client only sends what its room allowed
+        return [{ to: 'all', msg: { t: 'claim', claim: c } }];
+      }
+      case 'claimHit':
+        return this.handleClaimHit(p, msg.x, msg.y, msg.z, msg.amount);
       default:
         return [];
     }
@@ -541,11 +606,38 @@ export class GameServer {
     const key = `${x},${y},${z}`;
     const prev = this.edits.get(key);
     const out: Outbound[] = [];
+    // --- Land-claim protection (M18) + raiding (M19) ---
+    const claim = this.claims.at(x, z);
+    const enemyClaim = claim !== undefined && !sameFaction(p.faction, claim.faction);
+    if (enemyClaim) {
+      // Enemies can NEVER break the Core — claims persist through raids.
+      if (prev === Block.Core) return [];
+      // While the shield holds (or during grace), enemies can't touch the claim.
+      if (claimProtected(claim!, this.worldTime)) return [];
+    }
+    // A breached claim: an enemy's break of a stored container raids it.
+    const raiding = enemyClaim && claim !== undefined &&
+      !claimProtected(claim, this.worldTime);
+
+    // Placing a Core claims a 3×3-chunk footprint for the placer's faction.
+    // Rejected (no-op) if it would overlap an existing claim.
+    if (block === Block.Core && prev !== Block.Core) {
+      const created = this.claims.create(p.faction, x, y, z, this.worldTime);
+      if (!created) return [];
+      out.push({ to: 'all', msg: { t: 'claim', claim: created } });
+    }
+    // The owning faction breaking its own Core dissolves the claim.
+    if (prev === Block.Core && block !== Block.Core) {
+      const c = this.claims.coreAt(x, y, z);
+      if (c) { this.claims.remove(c.id); out.push({ to: 'all', msg: { t: 'claimRemove', id: c.id } }); }
+    }
     // Server-authoritative chest break: if this edit removes a chest, spill its
     // stored contents as item entities everyone sees and clear the storage —
-    // independent of whether the breaking client ever opened (cached) it.
+    // independent of whether the breaking client ever opened (cached) it. Inside
+    // a breached enemy claim the break is a RAID: a capped share goes to the
+    // raider, the rest spills to the world (dup-safe — contents leave once).
     if (prev === Block.Chest && block !== Block.Chest) {
-      out.push(...this.spillChest(key, x, y, z));
+      out.push(...(raiding ? this.raidChest(key, x, y, z, p) : this.spillChest(key, x, y, z)));
     }
     // Same for machines: removing/replacing the anchor spills its stored output
     // and clears the rest of the footprint (the breaker bypasses no validation —
@@ -595,11 +687,31 @@ export class GameServer {
     return out;
   }
 
+  /** Raid a chest in a breached claim: a capped fraction of EACH stack goes
+   *  straight to the raider (dup-safe gotitem path), the remainder spills to the
+   *  world. Storage is cleared exactly once, so nothing is duplicated or lost. */
+  private raidChest(key: string, x: number, y: number, z: number, raider: ServerPlayer): Outbound[] {
+    const contents = this.chests.get(key);
+    this.chests.delete(key);
+    if (!contents) return [];
+    const out: Outbound[] = [];
+    for (const s of contents) {
+      if (!s || !ITEMS[s.id] || !fin(s.count) || s.count <= 0) continue;
+      const stolen = Math.floor(s.count * RAID_STEAL_FRAC);
+      if (stolen > 0) out.push({ to: raider.id, msg: { t: 'gotitem', item: s.id, count: stolen } });
+      const rest = s.count - stolen;
+      if (rest > 0) out.push(this.spawnItem(s.id, rest,
+        x + 0.5 + (this.rng() - 0.5), y + 0.3, z + 0.5 + (this.rng() - 0.5)));
+    }
+    return out;
+  }
+
   private handleAttack(attacker: ServerPlayer, targetId: number): Outbound[] {
     const target = this.players.get(targetId);
     if (!target || target.dead || attacker.dead || target.id === attacker.id) {
       return [];
     }
+    if (sameFaction(attacker.faction, target.faction)) return []; // no friendly fire
     if (!fin(attacker.x, attacker.y, attacker.z, attacker.yaw,
       target.x, target.y, target.z)) return [];
     const dx = target.x - attacker.x, dy = target.y - attacker.y,
@@ -626,6 +738,7 @@ export class GameServer {
   private handleRanged(attacker: ServerPlayer, targetId: number, amount: number): Outbound[] {
     const target = this.players.get(targetId);
     if (!target || target.dead || attacker.dead || target.id === attacker.id) return [];
+    if (sameFaction(attacker.faction, target.faction)) return []; // no friendly fire
     if (!fin(attacker.x, attacker.y, attacker.z, attacker.yaw,
       target.x, target.y, target.z, amount)) return [];
     const dx = target.x - attacker.x, dy = target.y - attacker.y, dz = target.z - attacker.z;
@@ -727,7 +840,7 @@ export class GameServer {
     const blocks = floodFillHull(x, y, z, capturableAt);
     if (!blocks) return [];
     const ship = newShip(this.nextShipId++, p.username,
-      { x: x + 0.5, y: y + 0.5, z: z + 0.5 }, 0, blocks);
+      { x: x + 0.5, y: y + 0.5, z: z + 0.5 }, 0, blocks, p.faction);
     this.ships.set(ship.id, ship);
     const out: Outbound[] = [];
     // Remove the captured blocks from the world (everyone sees them lift off).
@@ -747,8 +860,9 @@ export class GameServer {
     this.shipInput.delete(ship.id);
     const out: Outbound[] = [];
     // Server-authoritative blast damage to nearby players (linear falloff).
+    // Friendly fire is off: the ship's own faction is unharmed by its wreck.
     for (const target of this.players.values()) {
-      if (target.dead) continue;
+      if (target.dead || sameFaction(target.faction, ship.faction)) continue;
       const d = Math.hypot(target.x - ship.x, target.y - ship.y, target.z - ship.z);
       const f = 1 - d / SHIP_BLAST_RADIUS;
       if (f <= 0) continue;
@@ -849,7 +963,8 @@ export class GameServer {
       let best: ServerPlayer | null = null;
       let bestD2 = range * range;
       for (const p of this.players.values()) {
-        if (p.dead || p.username === s.owner) continue;
+        // Skip the dead, the owner, and anyone in the turret's own faction.
+        if (p.dead || p.username === s.owner || sameFaction(p.faction, s.faction)) continue;
         const dx = p.x - cx, dy = p.y - cy, dz = p.z - cz;
         const d2 = dx * dx + dy * dy + dz * dz;
         if (d2 <= bestD2) { bestD2 = d2; best = p; }
@@ -878,43 +993,43 @@ export class GameServer {
     return this.territoryNodes;
   }
 
-  /** Accrue score for controlled nodes, check the win condition, and emit a
-   *  periodic scoreboard broadcast. Round-based (resets after a win). */
+  /** Resolve node control, accrue faction dominance, DISTRIBUTE oil income to
+   *  each controlling faction's claims (the M20 loop: territory fuels shields),
+   *  check the win, and emit a periodic broadcast. Round-based (resets on win). */
   tickTerritory(dt: number): Outbound[] {
     if (!fin(dt) || dt <= 0) return [];
-    const presence = [...this.players.values()].map((p) => ({
-      name: p.username, x: p.x, z: p.z, dead: p.dead,
-    }));
-    if (!this.winner) {
-      this.roundTime += dt;
-      for (const node of this.nodes()) {
-        const st = resolveNode(node, presence);
-        if (st.controller) {
-          this.scores.set(st.controller, (this.scores.get(st.controller) ?? 0) + dt);
-          if ((this.scores.get(st.controller) ?? 0) >= TERRITORY_TARGET_SCORE) {
-            this.winner = st.controller;
-          }
-        }
-      }
-    } else {
-      this.winHoldTimer += dt;
-      if (this.winHoldTimer >= WIN_HOLD) {
-        this.scores.clear();
-        this.roundTime = 0;
-        this.winner = '';
-        this.winHoldTimer = 0;
-      }
+    const presence = this.territoryPresence();
+    // Count controlled nodes per faction (drives both dominance + oil income).
+    const nodesByFaction = new Map<number, number>();
+    for (const node of this.nodes()) {
+      const st = resolveNode(node, presence);
+      if (st.faction >= 0) nodesByFaction.set(st.faction, (nodesByFaction.get(st.faction) ?? 0) + 1);
     }
+    // Oil income: each of a faction's claims is topped up by its node count.
+    // (No more abstract "first to N" race — controlling nodes simply fuels your
+    // shields; map % of land is the real standings now.)
+    for (const claim of this.claims.list()) {
+      const n = nodesByFaction.get(claim.faction) ?? 0;
+      if (n > 0) claim.oil = Math.min(OIL_CAP, claim.oil + n * NODE_OIL_RATE * dt);
+    }
+    // Live "standings" = how many oil nodes each faction currently holds.
+    this.scores.clear();
+    for (const [faction, count] of nodesByFaction) this.scores.set(factionName(faction), count);
     this.territoryAccum += dt;
     if (this.territoryAccum < TERRITORY_BROADCAST) return [];
     this.territoryAccum = 0;
     return [{ to: 'all', msg: this.territorySnapshot() }];
   }
 
-  territorySnapshot(): ServerMsg {
-    const presence = [...this.players.values()].map((p) => ({
-      name: p.username, x: p.x, z: p.z, dead: p.dead,
+  /** Live presence (faction + position) for node resolution. */
+  private territoryPresence(): { faction: number; x: number; z: number; dead: boolean }[] {
+    return [...this.players.values()].map((p) => ({
+      faction: p.faction, x: p.x, z: p.z, dead: p.dead,
     }));
+  }
+
+  territorySnapshot(): ServerMsg {
+    const presence = this.territoryPresence();
     return {
       t: 'territory',
       nodes: this.nodes().map((n) => resolveNode(n, presence)),
@@ -922,6 +1037,54 @@ export class GameServer {
       roundTime: this.roundTime,
       winner: this.winner,
     };
+  }
+
+  // --- Land claims (M18 / M19) -----------------------------------------------
+
+  /** True if an enemy of the claim covering (x,z) is currently blocked by its
+   *  shield/grace (used to gate machine/turret/chest ops + edits). Own-faction
+   *  members are never blocked; a breached (down + ungraced) claim is open. */
+  private enemyShielded(p: ServerPlayer, x: number, z: number): boolean {
+    const c = this.claims.at(x, z);
+    return c !== undefined && !sameFaction(p.faction, c.faction) &&
+      claimProtected(c, this.worldTime);
+  }
+
+  /** A weapon hit drains an enemy claim's shield (M19 breaching). The client
+   *  reports the hit (like shipHit); the server caps it, requires the attacker
+   *  be near + enemy, and emits a breach event when the shield first drops. */
+  private handleClaimHit(p: ServerPlayer, x: number, y: number, z: number, amount: number): Outbound[] {
+    const c = this.claims.coreAt(x, y, z);
+    if (!c || p.dead || !fin(p.x, p.y, p.z, amount)) return [];
+    if (sameFaction(p.faction, c.faction)) return []; // can't shell your own shield
+    const dx = c.coreX + 0.5 - p.x, dy = c.coreY + 0.5 - p.y, dz = c.coreZ + 0.5 - p.z;
+    if (!(dx * dx + dy * dy + dz * dz <= RANGED_MAX_RANGE * RANGED_MAX_RANGE)) return [];
+    const wasUp = shieldUp(c);
+    const dmg = Math.max(0, Math.min(CLAIM_HIT_MAX, amount));
+    if (dmg <= 0) return [];
+    const downed = damageShield(c, dmg);
+    const out: Outbound[] = [{ to: 'all', msg: { t: 'claim', claim: c } }];
+    if (downed && wasUp) {
+      // The shield just cracked: announce the breach to everyone.
+      out.push({ to: 'all', msg: { t: 'breach', attacker: p.username, faction: p.faction, victim: c.faction } });
+      out.push({ to: 'all', msg: {
+        t: 'killfeed', killer: factionName(p.faction), victim: `${factionName(c.faction)}'s claim` } });
+    }
+    return out;
+  }
+
+  /** Advance every claim (regen vs oil drain + bleed) and broadcast a periodic
+   *  bulk refresh. The worldTime clock here also drives the grace period. */
+  tickClaims(dt: number): Outbound[] {
+    if (!fin(dt) || dt <= 0) return [];
+    this.worldTime += dt;
+    this.claims.tick(dt);
+    this.claimAccum += dt;
+    if (this.claimAccum < CLAIM_BROADCAST) return [];
+    this.claimAccum = 0;
+    const claims = this.claims.list();
+    if (!claims.length) return [];
+    return [{ to: 'all', msg: { t: 'claims', claims } }];
   }
 
   /** Transform+health for every player (the periodic broadcast). */
@@ -939,7 +1102,7 @@ function shipTransform(ship: ShipState): ShipTransform {
 
 function toInfo(p: ServerPlayer): PlayerInfo {
   return {
-    id: p.id, username: p.username, skin: p.skin,
+    id: p.id, username: p.username, skin: p.skin, faction: p.faction,
     x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
     health: p.health, dead: p.dead,
   };

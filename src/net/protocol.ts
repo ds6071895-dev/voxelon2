@@ -7,6 +7,7 @@ import type { MachineState, UpgradeAxis } from '../machines';
 import type { ShipState, ShipAxis } from '../ships';
 import type { TurretState, TurretAxis } from '../turrets';
 import type { NodeStatus, ScoreEntry } from '../territory';
+import type { ClaimState } from '../claims';
 
 export const SERVER_PORT = 8080;
 export const SNAPSHOT_HZ = 15;     // server -> clients transform broadcasts
@@ -29,6 +30,7 @@ export interface PlayerSnapshot {
 export interface PlayerInfo extends PlayerSnapshot {
   username: string;
   skin: number; // seed for deterministic avatar colors
+  faction: number; // preset team id (teams.ts); NO_FACTION when neutral/offline
 }
 
 /** A dropped item entity owned by the server. */
@@ -60,6 +62,9 @@ export function mitigate(amount: number, armorPoints: number): number {
 // --- client -> server -------------------------------------------------------
 export type ClientMsg =
   | { t: 'hello' }
+  // Mandatory accounts: a socket must authenticate before it spawns a player.
+  | { t: 'register'; username: string; password: string }
+  | { t: 'login'; username: string; password: string }
   | { t: 'xform'; x: number; y: number; z: number; yaw: number; pitch: number }
   | { t: 'edit'; x: number; y: number; z: number; block: number }
   | { t: 'attack'; target: number }
@@ -90,14 +95,24 @@ export type ClientMsg =
   | { t: 'turretUpgrade'; x: number; y: number; z: number; axis: TurretAxis }
   | { t: 'turretClaim'; x: number; y: number; z: number }
   | { t: 'turretHit'; x: number; y: number; z: number; amount: number } // sabotage
-  | { t: 'turretLoad'; x: number; y: number; z: number; item: number; count: number };
+  | { t: 'turretLoad'; x: number; y: number; z: number; item: number; count: number }
+  // Land claims (M18): Core placement is a normal edit; these manage the claim.
+  | { t: 'claimOpen'; x: number; y: number; z: number }
+  | { t: 'claimFeed'; x: number; y: number; z: number; count: number } // feed oil barrels
+  // Raiding (M19): a weapon hit drains an enemy claim's shield. Once the shield
+  // is down, breaking a stored container inside the claim raids it (handled on
+  // the normal `edit` path, server-side).
+  | { t: 'claimHit'; x: number; y: number; z: number; amount: number };
 
 // --- server -> client -------------------------------------------------------
 export type ServerMsg =
+  // Auth: a rejected login/register (success is signalled by the `welcome`).
+  | { t: 'authErr'; error: string }
   | {
       t: 'welcome'; id: number; seed: number; username: string;
       players: PlayerInfo[]; edits: [string, number][]; items: ItemEntityInfo[];
       ships: ShipState[]; turrets: { x: number; y: number; z: number; state: TurretState }[];
+      claims: ClaimState[];
     }
   | { t: 'join'; player: PlayerInfo }
   | { t: 'leave'; id: number }
@@ -124,7 +139,14 @@ export type ServerMsg =
   | {
       t: 'territory'; nodes: NodeStatus[]; scores: ScoreEntry[];
       roundTime: number; winner: string;
-    };
+    }
+  // Land claims (M18): one claim's authoritative state, a periodic bulk refresh,
+  // and removals (Core broken / overlap).
+  | { t: 'claim'; claim: ClaimState }
+  | { t: 'claims'; claims: ClaimState[] }
+  | { t: 'claimRemove'; id: number }
+  // Raid feed (M19): "RED breached BLUE's claim".
+  | { t: 'breach'; attacker: string; faction: number; victim: number };
 
 const ADJECTIVES = [
   'Brave', 'Swift', 'Iron', 'Shadow', 'Crimson', 'Frost', 'Rapid', 'Silent',

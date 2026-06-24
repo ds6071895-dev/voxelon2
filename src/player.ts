@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { Block, isSolid } from './blocks';
 import type { PlayerInput } from './input';
 import { mitigate } from './net/protocol';
+import { collisionBoxes, FULL_BOX } from './shapes';
 import type { World } from './world';
 
 export const MAX_AIR = 15; // seconds of breath = vanilla's 10 bubbles
@@ -18,6 +19,9 @@ const JUMP_VELOCITY = Math.sqrt(2 * GRAVITY * 1.25); // exactly 1.25 blocks
 const TERMINAL_VELOCITY = 78;
 const HALF_WIDTH = 0.3;
 const HEIGHT = 1.8;
+// Vanilla-style auto-step: walk straight up obstacles whose top is within this
+// height (slabs, single stairs) when there's headroom, without jumping.
+const STEP_HEIGHT = 0.6;
 const EYE_STANDING = 1.62;
 const EYE_SNEAKING = 1.27;
 const MOUSE_SENSITIVITY = 0.0022;
@@ -228,14 +232,53 @@ export class Player {
   ): void {
     if (this.sneaking && wasOnGround && amount !== 0) {
       const saved = axis === 0 ? this.pos.x : this.pos.z;
-      this.moveAxis(world, axis, amount);
+      const savedY = this.pos.y;
+      this.moveHorizontal(world, axis, amount, wasOnGround);
       if (!this.hasSupport(world)) {
         if (axis === 0) { this.pos.x = saved; this.vel.x = 0; }
         else { this.pos.z = saved; this.vel.z = 0; }
+        this.pos.y = savedY; // also undo any auto-step that ran with the move
       }
       return;
     }
+    this.moveHorizontal(world, axis, amount, wasOnGround);
+  }
+
+  /** Horizontal move with vanilla auto-step: if a move is blocked by an obstacle
+   *  whose top is within STEP_HEIGHT of the feet AND there's headroom for the
+   *  full player height above it, climb onto it instead of stopping. */
+  private moveHorizontal(
+    world: World, axis: 0 | 2, amount: number, wasOnGround: boolean
+  ): void {
+    const startX = this.pos.x, startY = this.pos.y, startZ = this.pos.z;
+    const v0 = axis === 0 ? this.vel.x : this.vel.z;
     this.moveAxis(world, axis, amount);
+    const achieved = axis === 0 ? this.pos.x - startX : this.pos.z - startZ;
+    // Only step while grounded and only when the move was actually blocked.
+    if (!wasOnGround || Math.abs(achieved) >= Math.abs(amount) - EPS) return;
+
+    // Keep the un-stepped (flat) result as the fallback.
+    const flatX = this.pos.x, flatY = this.pos.y, flatZ = this.pos.z;
+
+    // Lift up to STEP_HEIGHT (a ceiling can cut this short), redo the move, then
+    // settle back down so the feet rest on whatever we stepped onto.
+    this.pos.set(startX, startY, startZ);
+    this.moveAxis(world, 1, STEP_HEIGHT);
+    if (this.pos.y - startY < STEP_HEIGHT - EPS) {
+      this.pos.set(flatX, flatY, flatZ); // no headroom to step
+      return;
+    }
+    this.moveAxis(world, axis, amount);
+    this.moveAxis(world, 1, -STEP_HEIGHT);
+
+    const stepped = axis === 0 ? this.pos.x - startX : this.pos.z - startZ;
+    const flat = axis === 0 ? flatX - startX : flatZ - startZ;
+    if (Math.abs(stepped) > Math.abs(flat) + EPS) {
+      // Stepped further than the flat move: keep it + restore horizontal speed.
+      if (axis === 0) this.vel.x = v0; else this.vel.z = v0;
+    } else {
+      this.pos.set(flatX, flatY, flatZ);
+    }
   }
 
   /** A solid block one step ahead at foot level with two *air* (not water)
@@ -267,49 +310,77 @@ export class Player {
 
   private moveAxis(world: World, axis: 0 | 1 | 2, amount: number): void {
     if (amount === 0) return;
+    // Sub-step so a fast move (terminal-velocity fall, knockback) can't tunnel
+    // through a thin floor/wall between samples.
+    const steps = Math.ceil(Math.abs(amount) / 0.5);
+    const slice = amount / steps;
+    for (let i = 0; i < steps; i++) {
+      if (this.resolveAxis(world, axis, slice)) break; // clamped: no more travel
+    }
+  }
+
+  /** Move the player `amount` along one axis, then resolve against the partial
+   *  collision boxes (shapes.ts) of every overlapping cell — clamping to the
+   *  strongest correction across all boxes. Returns true if a box clamped it. */
+  private resolveAxis(world: World, axis: 0 | 1 | 2, amount: number): boolean {
     const p = this.pos;
     if (axis === 0) p.x += amount;
     else if (axis === 1) p.y += amount;
     else p.z += amount;
 
-    const x0 = Math.floor(p.x - HALF_WIDTH);
-    const x1 = Math.floor(p.x + HALF_WIDTH);
-    const y0 = Math.floor(p.y);
-    const y1 = Math.floor(p.y + HEIGHT);
-    const z0 = Math.floor(p.z - HALF_WIDTH);
-    const z1 = Math.floor(p.z + HALF_WIDTH);
+    const minX = p.x - HALF_WIDTH, maxX = p.x + HALF_WIDTH;
+    const minY = p.y, maxY = p.y + HEIGHT;
+    const minZ = p.z - HALF_WIDTH, maxZ = p.z + HALF_WIDTH;
+    const x0 = Math.floor(minX), x1 = Math.floor(maxX);
+    const y0 = Math.floor(minY), y1 = Math.floor(maxY);
+    const z0 = Math.floor(minZ), z1 = Math.floor(maxZ);
 
+    let best: number | null = null; // resolved coordinate along `axis`
     for (let x = x0; x <= x1; x++) {
       for (let y = y0; y <= y1; y++) {
         for (let z = z0; z <= z1; z++) {
-          if (!isSolid(world.getBlock(x, y, z))) continue;
-          if (axis === 0) {
-            p.x = amount > 0 ? x - HALF_WIDTH - EPS : x + 1 + HALF_WIDTH + EPS;
-            this.vel.x = 0;
-          } else if (axis === 1) {
-            if (amount > 0) {
-              p.y = y - HEIGHT - EPS;
-            } else {
-              p.y = y + 1 + EPS;
-              this.onGround = true;
-            }
-            this.vel.y = 0;
-          } else {
-            p.z = amount > 0 ? z - HALF_WIDTH - EPS : z + 1 + HALF_WIDTH + EPS;
-            this.vel.z = 0;
+          const boxes = collisionBoxes(world.getBlock(x, y, z));
+          for (let b = 0; b < boxes.length; b++) {
+            const [mn, mx] = boxes[b];
+            const bx0 = x + mn[0], bx1 = x + mx[0];
+            const by0 = y + mn[1], by1 = y + mx[1];
+            const bz0 = z + mn[2], bz1 = z + mx[2];
+            // Genuine overlap (penetration) on all three axes?
+            if (maxX <= bx0 || minX >= bx1) continue;
+            if (maxY <= by0 || minY >= by1) continue;
+            if (maxZ <= bz0 || minZ >= bz1) continue;
+            let c: number;
+            if (axis === 0) c = amount > 0 ? bx0 - HALF_WIDTH - EPS : bx1 + HALF_WIDTH + EPS;
+            else if (axis === 1) c = amount > 0 ? by0 - HEIGHT - EPS : by1 + EPS;
+            else c = amount > 0 ? bz0 - HALF_WIDTH - EPS : bz1 + HALF_WIDTH + EPS;
+            if (best === null || (amount > 0 ? c < best : c > best)) best = c;
           }
-          return; // position clamped; no further blocks can overlap this axis
         }
       }
     }
+
+    if (best === null) return false;
+    if (axis === 0) { p.x = best; this.vel.x = 0; }
+    else if (axis === 1) {
+      p.y = best; this.vel.y = 0;
+      if (amount < 0) this.onGround = true; // a box top supported the feet
+    } else { p.z = best; this.vel.z = 0; }
+    return true;
   }
 
-  /** AABB overlap test used to forbid placing a block inside the player. */
-  intersectsBlock(bx: number, by: number, bz: number): boolean {
-    return (
-      bx + 1 > this.pos.x - HALF_WIDTH && bx < this.pos.x + HALF_WIDTH &&
-      by + 1 > this.pos.y && by < this.pos.y + HEIGHT &&
-      bz + 1 > this.pos.z - HALF_WIDTH && bz < this.pos.z + HALF_WIDTH
-    );
+  /** AABB overlap test used to forbid placing a block inside the player. With an
+   *  `id` it tests that block's real shape (so a slab clear of the body is OK);
+   *  without one it falls back to a full cube (machine footprint / torch checks). */
+  intersectsBlock(bx: number, by: number, bz: number, id?: number): boolean {
+    const boxes = id === undefined ? [FULL_BOX] : collisionBoxes(id);
+    for (let i = 0; i < boxes.length; i++) {
+      const [mn, mx] = boxes[i];
+      if (
+        bx + mx[0] > this.pos.x - HALF_WIDTH && bx + mn[0] < this.pos.x + HALF_WIDTH &&
+        by + mx[1] > this.pos.y && by + mn[1] < this.pos.y + HEIGHT &&
+        bz + mx[2] > this.pos.z - HALF_WIDTH && bz + mn[2] < this.pos.z + HALF_WIDTH
+      ) return true;
+    }
+    return false;
   }
 }

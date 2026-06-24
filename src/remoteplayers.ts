@@ -6,6 +6,7 @@
 import * as THREE from 'three';
 import type { NetClient, Remote } from './net/client';
 import { mulberry32 } from './noise';
+import { factionColor, isFaction } from './teams';
 
 const FACE_SHADE = [0.6, 0.6, 1.0, 0.5, 0.8, 0.8]; // +x -x +y -y +z -z
 
@@ -65,7 +66,12 @@ export class RemotePlayers {
   private build(remote: Remote): Avatar {
     const rng = mulberry32(remote.info.skin);
     const skin = new THREE.Color().setHSL(0.06 + rng() * 0.06, 0.5, 0.45 + rng() * 0.2);
-    const shirt = new THREE.Color().setHSL(rng(), 0.6, 0.5);
+    // Team identity reads at a glance: the shirt is the faction color (a
+    // per-skin random shirt only for neutral/unassigned players), and the
+    // nameplate carries the same color.
+    const faction = remote.info.faction;
+    const team = new THREE.Color(factionColor(faction));
+    const shirt = isFaction(faction) ? team : new THREE.Color().setHSL(rng(), 0.6, 0.5);
     const pants = new THREE.Color().setHSL(rng(), 0.5, 0.35);
     const mat = new THREE.MeshBasicMaterial({ vertexColors: true });
 
@@ -90,7 +96,7 @@ export class RemotePlayers {
     const ra = limb(mat, 0.2, 0.7, 0.2, shirt, 0.35, 1.45, 0);
     group.add(ll, rl, la, ra);
 
-    const { tex, sprite } = this.makeNameTag(remote.info.username);
+    const { tex, sprite } = this.makeNameTag(remote.info.username, team, isFaction(faction));
     sprite.position.y = 2.25;
     group.add(sprite);
 
@@ -102,12 +108,19 @@ export class RemotePlayers {
     };
   }
 
-  private makeNameTag(name: string): { tex: THREE.CanvasTexture; sprite: THREE.Sprite } {
+  private makeNameTag(
+    name: string, team: THREE.Color, factioned: boolean
+  ): { tex: THREE.CanvasTexture; sprite: THREE.Sprite } {
     const canvas = document.createElement('canvas');
     canvas.width = 256; canvas.height = 64;
     const ctx = canvas.getContext('2d')!;
     ctx.fillStyle = 'rgba(0,0,0,0.5)';
     ctx.fillRect(0, 14, 256, 36);
+    // A faction-colored underline ties the nameplate to the team color.
+    if (factioned) {
+      ctx.fillStyle = `rgb(${team.r * 255 | 0},${team.g * 255 | 0},${team.b * 255 | 0})`;
+      ctx.fillRect(0, 47, 256, 3);
+    }
     ctx.font = 'bold 26px Lucida Console, monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';

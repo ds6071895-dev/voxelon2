@@ -8,6 +8,7 @@ import type { MachineState, UpgradeAxis } from '../machines';
 import type { ShipState, ShipAxis } from '../ships';
 import type { TurretState, TurretAxis } from '../turrets';
 import type { NodeStatus, ScoreEntry } from '../territory';
+import type { ClaimState } from '../claims';
 import {
   ClientMsg, ItemEntityInfo, PlayerInfo, SERVER_PORT, ServerMsg, ShipTransform,
   TRANSFORM_HZ,
@@ -23,6 +24,8 @@ export interface Remote {
 export class NetClient {
   connected = false;
   offline = false;
+  /** The socket is open + reachable (server is up), but not yet authenticated. */
+  socketOpen = false;
   myId = -1;
   username = '';
   readonly remotes = new Map<number, Remote>();
@@ -58,6 +61,13 @@ export class NetClient {
   onTurretFire?: (x: number, y: number, z: number, tx: number, ty: number, tz: number) => void;
   /** Live territory scoreboard + node ownership + round state. */
   onTerritory?: (nodes: NodeStatus[], scores: ScoreEntry[], roundTime: number, winner: string) => void;
+  /** Authoritative claim state (open reply / feed / breach / periodic refresh). */
+  onClaim?: (claim: ClaimState) => void;
+  onClaimRemove?: (id: number) => void;
+  /** A faction breached an enemy claim (HUD/killfeed event). */
+  onBreach?: (attacker: string, faction: number, victim: number) => void;
+  /** A register/login was rejected (the login screen shows the error). */
+  onAuthErr?: (error: string) => void;
 
   private ws: WebSocket | null = null;
   private xformAcc = 0;
@@ -73,23 +83,26 @@ export class NetClient {
       return;
     }
     this.ws = ws;
+    // Offline is decided by whether the socket OPENS (server reachable), NOT by
+    // whether `welcome` arrives — with mandatory login the welcome only comes
+    // after the player authenticates, which can be long after this timeout.
     const timer = setTimeout(() => {
-      if (!this.connected) { this.offline = true; this.close(); }
+      if (!this.socketOpen) { this.offline = true; this.close(); }
     }, timeoutMs);
 
-    ws.onopen = () => this.raw({ t: 'hello' });
+    ws.onopen = () => { this.socketOpen = true; clearTimeout(timer); };
     ws.onmessage = (e) => {
-      clearTimeout(timer);
       let msg: ServerMsg;
       try { msg = JSON.parse(e.data as string) as ServerMsg; } catch { return; }
       this.handle(msg);
     };
     ws.onerror = () => {
       clearTimeout(timer);
-      if (!this.connected) this.offline = true;
+      if (!this.socketOpen) this.offline = true;
     };
     ws.onclose = () => {
       clearTimeout(timer);
+      this.socketOpen = false;
       if (this.connected) {
         this.connected = false;
         this.remotes.clear();
@@ -120,6 +133,7 @@ export class NetClient {
         for (const it of msg.items) this.netItems.set(it.eid, it);
         for (const ship of msg.ships) this.onShipState?.(ship);
         for (const tr of msg.turrets) this.onTurret?.(tr.x, tr.y, tr.z, tr.state);
+        for (const cl of msg.claims) this.onClaim?.(cl);
         const me = msg.players.find((p) => p.id === this.myId);
         if (me) this.onWelcome?.(me);
         this.onRoster?.();
@@ -197,6 +211,21 @@ export class NetClient {
       case 'territory':
         this.onTerritory?.(msg.nodes, msg.scores, msg.roundTime, msg.winner);
         break;
+      case 'claim':
+        this.onClaim?.(msg.claim);
+        break;
+      case 'claims':
+        for (const cl of msg.claims) this.onClaim?.(cl);
+        break;
+      case 'claimRemove':
+        this.onClaimRemove?.(msg.id);
+        break;
+      case 'breach':
+        this.onBreach?.(msg.attacker, msg.faction, msg.victim);
+        break;
+      case 'authErr':
+        this.onAuthErr?.(msg.error);
+        break;
     }
   }
 
@@ -224,6 +253,14 @@ export class NetClient {
     // TRANSFORM_HZ; clamp to avoid a burst after a long stall.
     this.xformAcc = Math.min(this.xformAcc - interval, interval);
     this.raw({ t: 'xform', x, y, z, yaw, pitch });
+  }
+
+  /** Send register/login over the open socket (before `welcome`/connected). */
+  sendRegister(username: string, password: string): void {
+    this.raw({ t: 'register', username, password });
+  }
+  sendLogin(username: string, password: string): void {
+    this.raw({ t: 'login', username, password });
   }
 
   sendEdit(x: number, y: number, z: number, block: number): void {
@@ -308,6 +345,16 @@ export class NetClient {
   }
   sendTurretHit(x: number, y: number, z: number, amount: number): void {
     if (this.connected) this.raw({ t: 'turretHit', x, y, z, amount });
+  }
+  // Land claims.
+  sendClaimOpen(x: number, y: number, z: number): void {
+    if (this.connected) this.raw({ t: 'claimOpen', x, y, z });
+  }
+  sendClaimFeed(x: number, y: number, z: number, count: number): void {
+    if (this.connected) this.raw({ t: 'claimFeed', x, y, z, count });
+  }
+  sendClaimHit(x: number, y: number, z: number, amount: number): void {
+    if (this.connected) this.raw({ t: 'claimHit', x, y, z, amount });
   }
 }
 

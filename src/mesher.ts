@@ -6,6 +6,7 @@ import type { ColumnTints, Tint } from './biomes';
 import { Block, BLOCKS, isOpaque, occludesAO, Tile, torchSupport } from './blocks';
 import { Chunk, CHUNK_X, CHUNK_Z } from './chunk';
 import type { LightField } from './light';
+import { renderBoxes } from './shapes';
 import type { Atlas } from './textures';
 
 const WHITE: Tint = [1, 1, 1];
@@ -89,20 +90,6 @@ export function subFaceUV(f: number, lx: number, ly: number, lz: number): [numbe
     default: return [lx, ly];         // +z
   }
 }
-
-type Box = [[number, number, number], [number, number, number]];
-/** The sub-boxes that make up a stairs block facing dir (0=N 1=E 2=S 3=W): a
- *  bottom slab plus a top quarter on the `facing` side (the tall step). */
-export function stairBoxes(facing: number): Box[] {
-  const bottom: Box = [[0, 0, 0], [1, 0.5, 1]];
-  const top: Box =
-    facing === 1 ? [[0.5, 0.5, 0], [1, 1, 1]]      // E (+x)
-    : facing === 2 ? [[0, 0.5, 0.5], [1, 1, 1]]    // S (+z)
-    : facing === 3 ? [[0, 0.5, 0], [0.5, 1, 1]]    // W (-x)
-    : [[0, 0.5, 0], [1, 1, 0.5]];                  // N (-z)
-  return [bottom, top];
-}
-export const SLAB_BOX: Box = [[0, 0, 0], [1, 0.5, 1]];
 
 export type BlockSampler = (wx: number, wy: number, wz: number) => number;
 export type TintSampler = (wx: number, wz: number) => ColumnTints;
@@ -306,7 +293,7 @@ export function buildChunkGeometry(
         if (info.shape === 'slab' || info.shape === 'stairs') {
           const uvRect = atlas.uvRect(info.side);
           const skyL = light.sky(wx, y, wz), blockL = light.block(wx, y, wz);
-          const boxes = info.shape === 'slab' ? [SLAB_BOX] : stairBoxes(info.facing);
+          const boxes = renderBoxes(id);
           for (const [mn, mx] of boxes) {
             opaque.subBox(x, y, z, mn, mx, uvRect, WHITE, skyL, blockL);
           }

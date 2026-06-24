@@ -114,6 +114,10 @@ export const RECIPES: Recipe[] = [
   // Cannonball = iron shell packed with coal/charcoal powder.
   shaped([[null, I, null], [I, ANY_COAL, I], [null, I, null]], Item.Cannonball, 4),
 
+  // Factions (M18): the claim Core — a diamond+titanium reactor caged in iron,
+  // an expensive end-game build that anchors a faction's protected land.
+  shaped([[T, D, T], [Cb, D, Cb], [I, I, I]], Block.Core),
+
   // Building set (M15): per-wood slabs + stairs.
   ...woodCraft(OAK, Block.OakSlab, Block.OakStairsN),
   ...woodCraft(BIRCH, Block.BirchSlab, Block.BirchStairsN),

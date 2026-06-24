@@ -25,9 +25,23 @@ import {
   turretDamage, turretInterval, turretRange, turretUpgradeCost,
 } from './turrets';
 import { AUTOMINER_ORES } from './terrain';
+import {
+  ClaimState, MAX_SHIELD_HP, OIL_CAP, OIL_PER_BARREL, shieldUp,
+} from './claims';
+import { factionColor, factionName } from './teams';
 
 export type ContainerMode =
-  | 'inventory' | 'table' | 'furnace' | 'chest' | 'machine' | 'ship' | 'turret';
+  | 'inventory' | 'table' | 'furnace' | 'chest' | 'machine' | 'ship' | 'turret'
+  | 'claim';
+
+/** Callbacks for the faction-Core (claim) panel: feed oil + read shield state. */
+export interface ClaimUIContext {
+  state(): ClaimState | null;
+  /** Feed as many held OilBarrels into the Core as fit. */
+  feed(): void;
+  canFeed(): boolean;
+  mine(): boolean; // is this the local player's faction's claim?
+}
 
 /** Callbacks the host wires so the ship-helm panel can route to server/offline. */
 export interface ShipUIContext {
@@ -132,6 +146,13 @@ export class InventoryUI {
     ammo: HTMLDivElement;
     rangeBtn: HTMLButtonElement; damageBtn: HTMLButtonElement; rateBtn: HTMLButtonElement;
     loadAmmoBtn: HTMLButtonElement; loadFuelBtn: HTMLButtonElement; claimBtn: HTMLButtonElement;
+  } | null = null;
+  private claimCtx: ClaimUIContext | null = null;
+  private claimViews: {
+    info: HTMLDivElement; status: HTMLDivElement;
+    shieldBar: HTMLDivElement; shieldText: HTMLSpanElement;
+    oilBar: HTMLDivElement; oilText: HTMLSpanElement;
+    feedBtn: HTMLButtonElement;
   } | null = null;
   private readonly cursorEl: HTMLDivElement;
   private readonly cursorIcon: HTMLCanvasElement;
@@ -499,7 +520,7 @@ export class InventoryUI {
     hpText.className = 'mc-font';
     hpText.style.cssText =
       'position:absolute;inset:0;display:flex;align-items:center;' +
-      'justify-content:center;font-size:10px;text-shadow:1px 1px 0 #000;';
+      'justify-content:center;font-size:10px;text-shadow:none;';
     hpOuter.appendChild(hpBar);
     hpOuter.appendChild(hpText);
     wrap.appendChild(hpOuter);
@@ -514,7 +535,7 @@ export class InventoryUI {
     fillText.className = 'mc-font';
     fillText.style.cssText =
       'position:absolute;inset:0;display:flex;align-items:center;' +
-      'justify-content:center;font-size:11px;text-shadow:1px 1px 0 #000;';
+      'justify-content:center;font-size:11px;text-shadow:none;';
     barOuter.appendChild(fillBar);
     barOuter.appendChild(fillText);
     wrap.appendChild(barOuter);
@@ -663,10 +684,7 @@ export class InventoryUI {
 
   private warBtn(): HTMLButtonElement {
     const b = document.createElement('button');
-    b.className = 'mc-font';
-    b.style.cssText =
-      'flex:1;font-size:10px;padding:5px 3px;cursor:pointer;border:2px solid #000;' +
-      'background:#6a6a6a;color:#fff;white-space:pre-line;';
+    b.className = 'mc-font war-btn';
     b.addEventListener('contextmenu', (e) => e.preventDefault());
     return b;
   }
@@ -686,7 +704,7 @@ export class InventoryUI {
     const hpText = document.createElement('span');
     hpText.className = 'mc-font';
     hpText.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;' +
-      'justify-content:center;font-size:10px;text-shadow:1px 1px 0 #000;';
+      'justify-content:center;font-size:10px;text-shadow:none;';
     hpOuter.appendChild(hpBar); hpOuter.appendChild(hpText);
     wrap.appendChild(hpOuter);
 
@@ -768,7 +786,7 @@ export class InventoryUI {
     const hpText = document.createElement('span');
     hpText.className = 'mc-font';
     hpText.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;' +
-      'justify-content:center;font-size:10px;text-shadow:1px 1px 0 #000;';
+      'justify-content:center;font-size:10px;text-shadow:none;';
     hpOuter.appendChild(hpBar); hpOuter.appendChild(hpText);
     wrap.appendChild(hpOuter);
 
@@ -852,6 +870,73 @@ export class InventoryUI {
     btn.disabled = !afford; btn.style.opacity = afford ? '1' : '0.5';
   }
 
+  // --- faction Core (claim) panel --------------------------------------------
+
+  private buildClaimTop(ctx: ClaimUIContext): void {
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'display:flex;flex-direction:column;gap:8px;width:340px;';
+    const info = document.createElement('div');
+    info.className = 'mc-font';
+    info.style.cssText = 'font-size:12px;text-align:center;';
+    const status = document.createElement('div');
+    status.className = 'mc-font';
+    status.style.cssText = 'font-size:11px;text-align:center;';
+    wrap.append(info, status);
+
+    const shieldOuter = document.createElement('div');
+    shieldOuter.style.cssText = 'position:relative;height:16px;background:#1c1c1c;border:2px solid #000;';
+    const shieldBar = document.createElement('div');
+    shieldBar.style.cssText = 'height:100%;width:100%;background:#56c8f0;transition:width .2s;';
+    const shieldText = document.createElement('span');
+    shieldText.className = 'mc-font';
+    shieldText.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;' +
+      'justify-content:center;font-size:10px;text-shadow:none;';
+    shieldOuter.append(shieldBar, shieldText);
+    wrap.appendChild(shieldOuter);
+
+    const oilOuter = document.createElement('div');
+    oilOuter.style.cssText = 'position:relative;height:14px;background:#1c1c1c;border:2px solid #000;';
+    const oilBar = document.createElement('div');
+    oilBar.style.cssText = 'height:100%;width:0%;background:#7a6a3b;transition:width .2s;';
+    const oilText = document.createElement('span');
+    oilText.className = 'mc-font';
+    oilText.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;' +
+      'justify-content:center;font-size:10px;text-shadow:none;';
+    oilOuter.append(oilBar, oilText);
+    wrap.appendChild(oilOuter);
+
+    const feedBtn = this.warBtn();
+    feedBtn.style.background = '#7a6a3b';
+    feedBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.feed(); });
+    wrap.appendChild(feedBtn);
+
+    this.claimViews = { info, status, shieldBar, shieldText, oilBar, oilText, feedBtn };
+    this.topEl.appendChild(wrap);
+  }
+
+  private refreshClaim(): void {
+    const ctx = this.claimCtx, v = this.claimViews;
+    if (!ctx || !v) return;
+    const c = ctx.state();
+    if (!c) return;
+    const col = `#${(factionColor(c.faction) & 0xffffff).toString(16).padStart(6, '0')}`;
+    v.info.innerHTML = `<span style="color:${col}">■</span> ${factionName(c.faction)} Core`;
+    const up = shieldUp(c);
+    v.status.textContent = up ? 'Shield ONLINE' : 'Shield DOWN — raidable';
+    v.status.style.color = up ? '#7fd1f0' : '#e06a6a';
+    const sf = Math.max(0, Math.min(1, c.shieldHp / MAX_SHIELD_HP));
+    v.shieldBar.style.width = `${Math.round(sf * 100)}%`;
+    v.shieldBar.style.background = sf > 0.4 ? '#56c8f0' : sf > 0.15 ? '#e0a14e' : '#cc4444';
+    v.shieldText.textContent = `Shield ${Math.ceil(c.shieldHp)} / ${MAX_SHIELD_HP}`;
+    const of = Math.max(0, Math.min(1, c.oil / OIL_CAP));
+    v.oilBar.style.width = `${Math.round(of * 100)}%`;
+    v.oilText.textContent = `Oil ${Math.floor(c.oil)} / ${OIL_CAP}  (${OIL_PER_BARREL}/barrel)`;
+    const canFeed = ctx.mine() && ctx.canFeed();
+    v.feedBtn.textContent = ctx.mine() ? 'Feed Oil Barrels' : "Enemy claim";
+    v.feedBtn.disabled = !canFeed;
+    v.feedBtn.style.opacity = canFeed ? '1' : '0.5';
+  }
+
   // --- crafting result -------------------------------------------------------
 
   private craftOnce(): void {
@@ -888,7 +973,7 @@ export class InventoryUI {
 
   show(
     mode: ContainerMode, furnace?: FurnaceState, machineCtx?: MachineUIContext,
-    shipCtx?: ShipUIContext, turretCtx?: TurretUIContext,
+    shipCtx?: ShipUIContext, turretCtx?: TurretUIContext, claimCtx?: ClaimUIContext,
   ): void {
     // Rebuild the top section for the requested mode.
     for (const { index } of this.craftCells) this.invSlots.delete(index);
@@ -906,9 +991,14 @@ export class InventoryUI {
     this.shipCtx = shipCtx ?? null;
     this.turretViews = null;
     this.turretCtx = turretCtx ?? null;
+    this.claimViews = null;
+    this.claimCtx = claimCtx ?? null;
     this.topEl.innerHTML = '';
     this.mode = mode;
-    if (mode === 'ship' && shipCtx) {
+    if (mode === 'claim' && claimCtx) {
+      this.titleEl.textContent = 'Faction Core';
+      this.buildClaimTop(claimCtx);
+    } else if (mode === 'ship' && shipCtx) {
       this.titleEl.textContent = 'Ship Helm';
       this.buildShipTop(shipCtx);
     } else if (mode === 'turret' && turretCtx) {
@@ -978,6 +1068,7 @@ export class InventoryUI {
     if (this.mode === 'machine') this.refreshMachine();
     if (this.mode === 'ship') this.refreshShip();
     if (this.mode === 'turret') this.refreshTurret();
+    if (this.mode === 'claim') this.refreshClaim();
 
     if (this.inventory.version === this.renderedVersion) return;
     this.renderedVersion = this.inventory.version;

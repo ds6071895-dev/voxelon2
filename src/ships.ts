@@ -10,6 +10,7 @@
 
 import { Block, BLOCKS } from './blocks';
 import { Item } from './items';
+import { collisionBoxes } from './shapes';
 import { SEA_LEVEL } from './terrain';
 
 export const MAX_SHIP_BLOCKS = 400;   // flood-fill cap (reject oversize hulls)
@@ -41,6 +42,8 @@ export interface ShipBlock {
 export interface ShipState {
   id: number;
   owner: string;
+  /** Owning faction id (teams.ts); friendly fire is off within it. */
+  faction: number;
   /** World position of the ship origin (the helm cell centre at launch). */
   x: number; y: number; z: number;
   yaw: number;
@@ -140,12 +143,12 @@ export function hullRadius(blocks: ShipBlock[]): number {
 
 export function newShip(
   id: number, owner: string, origin: { x: number; y: number; z: number },
-  yaw: number, blocks: ShipBlock[],
+  yaw: number, blocks: ShipBlock[], faction = -1,
 ): ShipState {
   const level = { speed: 1, hull: 1, cannon: 1 };
   const maxHp = shipMaxHp(level);
   return {
-    id, owner: owner.slice(0, MAX_OWNER_LEN),
+    id, owner: owner.slice(0, MAX_OWNER_LEN), faction,
     x: origin.x, y: origin.y, z: origin.z, yaw,
     vx: 0, vz: 0, vyaw: 0,
     hp: maxHp, maxHp, blocks, level, fireCooldown: 0,
@@ -183,17 +186,26 @@ export function worldToLocalOffset(
 }
 
 /** Top surface Y of the hull column under a world (x,z), or null if that column
- *  isn't part of the ship. Used for standing/riding on a deck. */
+ *  isn't part of the ship. Uses each block's real collision shape, so a slab or
+ *  stairs deck stands riders at the actual surface (a bottom slab is half a
+ *  block lower than a full block). Block centres sit at integer dy, so a cell's
+ *  [0,1]-local box top `mx[1]` maps to a world surface of dy + (mx[1] - 0.5). */
 export function deckHeightAt(
   state: ShipState, wx: number, wz: number,
 ): number | null {
   const { lx, lz } = worldToLocalOffset(state, wx, wz);
   const bx = Math.round(lx), bz = Math.round(lz);
-  let topDy: number | null = null;
+  let surface: number | null = null;
   for (const b of state.blocks) {
-    if (b.dx === bx && b.dz === bz && (topDy === null || b.dy > topDy)) topDy = b.dy;
+    if (b.dx !== bx || b.dz !== bz) continue;
+    const boxes = collisionBoxes(b.id);
+    if (boxes.length === 0) continue; // non-solid (shouldn't happen for hull)
+    let top = 0;
+    for (let i = 0; i < boxes.length; i++) top = Math.max(top, boxes[i][1][1]);
+    const s = state.y + b.dy + (top - 0.5);
+    if (surface === null || s > surface) surface = s;
   }
-  return topDy === null ? null : state.y + topDy + 0.5;
+  return surface;
 }
 
 /** The hull block id occupied by a world point, or 0 if none (cannon/gun hit
@@ -334,6 +346,7 @@ export function sanitizeShipState(raw: unknown): ShipState | null {
   return {
     id: Math.floor(Number(r.id)),
     owner: typeof r.owner === 'string' ? r.owner.slice(0, MAX_OWNER_LEN) : '',
+    faction: Number.isFinite(r.faction) ? Math.floor(Number(r.faction)) : -1,
     x: Number(r.x), y: Number(r.y), z: Number(r.z), yaw: Number(r.yaw),
     vx: Number.isFinite(r.vx) ? Number(r.vx) : 0,
     vz: Number.isFinite(r.vz) ? Number(r.vz) : 0,

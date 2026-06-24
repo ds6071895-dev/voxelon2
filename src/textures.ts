@@ -756,58 +756,102 @@ function paintArmorPiece(slot: 'helmet' | 'chestplate' | 'leggings' | 'boots', b
   };
 }
 
-const GUN_METAL: RGBA = [78, 82, 92, 255];
-const GUN_DARK: RGBA = [38, 40, 46, 255];
-const GUN_GRIP: RGBA = [66, 48, 36, 255];
+const GUN_METAL: RGBA = [104, 110, 124, 255];
+const GUN_METAL_HI: RGBA = [150, 158, 176, 255];
+const GUN_DARK: RGBA = [44, 46, 54, 255];
+const GUN_GRIP: RGBA = [78, 54, 36, 255];
+const GUN_GRIP_HI: RGBA = [106, 76, 50, 255];
+const GUN_EDGE: RGBA = [16, 16, 20, 255];
+
+/** Wrap a 1px dark outline around all opaque art — small item sprites read far
+ *  better with a silhouette than as loose floating pixels. */
+function outlineSprite(p: Painter, edge: RGBA = GUN_EDGE): void {
+  const src = p.data.slice();
+  const op = (x: number, y: number): boolean =>
+    x >= 0 && y >= 0 && x < TILE_PX && y < TILE_PX && src[(y * TILE_PX + x) * 4 + 3] > 0;
+  for (let y = 0; y < TILE_PX; y++) {
+    for (let x = 0; x < TILE_PX; x++) {
+      if (src[(y * TILE_PX + x) * 4 + 3] > 0) continue;
+      if (op(x - 1, y) || op(x + 1, y) || op(x, y - 1) || op(x, y + 1)) p.set(x, y, edge);
+    }
+  }
+}
 
 function paintPistol(p: Painter, seed: number): void {
-  const m = (x: number, y: number, c: RGBA) => p.set(x, y, shade(c, 0.9 + hash2(seed, x, y) * 0.2));
-  for (let x = 3; x <= 11; x++) { m(x, 6, GUN_METAL); m(x, 7, GUN_DARK); } // slide + barrel
-  m(11, 6, [20, 20, 24, 255]); // muzzle
-  for (let y = 8; y <= 12; y++) { m(5, y, GUN_GRIP); m(6, y, GUN_GRIP); }  // grip
-  m(7, 8, GUN_METAL); m(4, 8, GUN_METAL);                                  // trigger area
+  const j = (c: RGBA, x: number, y: number): RGBA => shade(c, 0.9 + hash2(seed, x, y) * 0.18);
+  // Slide + barrel: 3px tall with a bright top edge for a metallic read.
+  for (let x = 4; x <= 12; x++) {
+    p.set(x, 5, j(GUN_METAL_HI, x, 5));
+    p.set(x, 6, j(GUN_METAL, x, 6));
+    p.set(x, 7, j(GUN_METAL, x, 7));
+  }
+  p.set(12, 6, [12, 12, 16, 255]); // muzzle bore
+  // Frame + trigger guard.
+  p.set(6, 8, j(GUN_METAL, 6, 8)); p.set(7, 8, j(GUN_METAL, 7, 8)); p.set(8, 8, j(GUN_DARK, 8, 8));
+  p.set(8, 9, j(GUN_DARK, 8, 9)); // trigger
+  // Grip.
+  for (let y = 8; y <= 12; y++) { p.set(5, y, j(GUN_GRIP_HI, 5, y)); p.set(6, y, j(GUN_GRIP, 6, y)); }
+  outlineSprite(p);
 }
 
 function paintRifle(p: Painter, seed: number): void {
-  const m = (x: number, y: number, c: RGBA) => p.set(x, y, shade(c, 0.9 + hash2(seed, x, y) * 0.2));
-  for (let x = 1; x <= 14; x++) m(x, 6, GUN_METAL);                        // long barrel
-  for (let x = 2; x <= 9; x++) m(x, 7, GUN_DARK);                          // receiver
-  m(14, 6, [20, 20, 24, 255]);
-  for (let y = 7; y <= 11; y++) m(2, y, GUN_GRIP);                          // stock/grip
-  m(3, 11, GUN_GRIP); m(4, 11, GUN_GRIP);
-  for (let y = 8; y <= 11; y++) m(7, y, GUN_DARK);                          // magazine
-  m(6, 9, GUN_DARK); m(8, 9, GUN_DARK);
+  const j = (c: RGBA, x: number, y: number): RGBA => shade(c, 0.9 + hash2(seed, x, y) * 0.18);
+  // Long barrel.
+  for (let x = 2; x <= 14; x++) { p.set(x, 6, j(GUN_METAL_HI, x, 6)); p.set(x, 7, j(GUN_METAL, x, 7)); }
+  p.set(14, 6, [12, 12, 16, 255]); // muzzle
+  // Receiver.
+  for (let x = 4; x <= 10; x++) p.set(x, 8, j(GUN_DARK, x, 8));
+  // Stock (rear).
+  p.set(2, 8, j(GUN_GRIP_HI, 2, 8)); p.set(3, 8, j(GUN_GRIP, 3, 8)); p.set(2, 9, j(GUN_GRIP, 2, 9));
+  // Pistol grip + curved magazine.
+  p.set(6, 9, j(GUN_GRIP, 6, 9)); p.set(6, 10, j(GUN_GRIP, 6, 10));
+  for (let y = 9; y <= 12; y++) { p.set(8, y, j(GUN_DARK, 8, y)); p.set(9, y, j(GUN_DARK, 9, y)); }
+  outlineSprite(p);
 }
 
 function paintRocketLauncher(p: Painter, seed: number): void {
-  const m = (x: number, y: number, c: RGBA) => p.set(x, y, shade(c, 0.9 + hash2(seed, x, y) * 0.2));
-  for (let y = 5; y <= 8; y++) for (let x = 1; x <= 14; x++) m(x, y, y < 7 ? GUN_METAL : GUN_DARK); // tube
-  for (let y = 5; y <= 8; y++) m(1, y, [20, 20, 24, 255]);                  // back vent
-  for (let y = 5; y <= 8; y++) m(14, y, [24, 24, 28, 255]);                 // muzzle
-  for (let y = 9; y <= 12; y++) m(6, y, GUN_GRIP);                          // grip
-  m(10, 4, GUN_DARK); m(11, 4, GUN_DARK);                                   // sight
+  const j = (c: RGBA, x: number, y: number): RGBA => shade(c, 0.9 + hash2(seed, x, y) * 0.18);
+  // Thick launch tube.
+  for (let y = 5; y <= 8; y++)
+    for (let x = 2; x <= 14; x++)
+      p.set(x, y, j(y === 5 ? GUN_METAL_HI : y < 8 ? GUN_METAL : GUN_DARK, x, y));
+  for (let y = 5; y <= 8; y++) { p.set(2, y, [12, 12, 16, 255]); p.set(14, y, GUN_DARK); } // vent/muzzle
+  p.set(9, 4, GUN_DARK); p.set(10, 4, GUN_DARK);                          // sight
+  for (let y = 9; y <= 12; y++) { p.set(6, y, j(GUN_GRIP_HI, 6, y)); p.set(7, y, j(GUN_GRIP, 7, y)); } // grip
+  outlineSprite(p);
 }
 
 function paintBullet(p: Painter, seed: number): void {
-  const brass: RGBA = [206, 170, 70, 255], tip: RGBA = [150, 120, 60, 255];
-  for (let y = 5; y <= 11; y++) {
-    for (let x = 6; x <= 9; x++) {
-      const c = y <= 6 ? tip : brass;
-      p.set(x, y, shade(c, 0.85 + hash2(seed, x, y) * 0.3));
-    }
-  }
-  p.set(7, 4, tip); p.set(8, 4, tip);          // pointed tip
-  for (let x = 6; x <= 9; x++) p.set(x, 11, [120, 96, 50, 255]); // rim
+  const brass: RGBA = [214, 176, 72, 255], brassHi: RGBA = [240, 208, 120, 255];
+  const tip: RGBA = [156, 126, 64, 255];
+  // Tapered tip.
+  p.set(7, 4, tip); p.set(8, 4, tip);
+  for (let x = 6; x <= 9; x++) p.set(x, 5, tip);
+  for (let x = 6; x <= 9; x++) p.set(x, 6, shade(tip, 1.12));
+  // Brass casing with a highlight column.
+  for (let y = 7; y <= 12; y++)
+    for (let x = 6; x <= 9; x++)
+      p.set(x, y, shade(x === 6 ? brassHi : brass, 0.9 + hash2(seed, x, y) * 0.16));
+  for (let x = 6; x <= 9; x++) p.set(x, 12, [120, 96, 50, 255]); // base rim
+  outlineSprite(p);
 }
 
 function paintRocket(p: Painter, seed: number): void {
-  const body: RGBA = [180, 60, 50, 255], nose: RGBA = [220, 220, 220, 255];
-  for (let y = 6; y <= 12; y++) for (let x = 6; x <= 9; x++)
-    p.set(x, y, shade(body, 0.85 + hash2(seed, x, y) * 0.3));
+  const body: RGBA = [196, 66, 54, 255], bodyHi: RGBA = [228, 104, 92, 255];
+  const nose: RGBA = [230, 230, 234, 255], fin: RGBA = [96, 96, 104, 255];
+  // Nose cone.
   p.set(7, 4, nose); p.set(8, 4, nose);
-  p.set(6, 5, nose); p.set(7, 5, nose); p.set(8, 5, nose); p.set(9, 5, nose);
-  for (const [x, y] of [[5, 12], [10, 12], [5, 13], [10, 13]]) p.set(x, y, [90, 90, 96, 255]); // fins
-  p.set(7, 14, [255, 200, 90, 255]); p.set(8, 14, [255, 160, 60, 255]);     // exhaust
+  for (let x = 6; x <= 9; x++) p.set(x, 5, nose);
+  // Body with a highlight column + a white band.
+  for (let y = 6; y <= 12; y++)
+    for (let x = 6; x <= 9; x++)
+      p.set(x, y, shade(x === 6 ? bodyHi : body, 0.9 + hash2(seed, x, y) * 0.16));
+  for (let x = 6; x <= 9; x++) p.set(x, 9, shade(nose, 0.95)); // band
+  // Fins + exhaust flame.
+  p.set(5, 11, fin); p.set(10, 11, fin); p.set(5, 12, fin); p.set(10, 12, fin);
+  p.set(7, 13, [255, 200, 90, 255]); p.set(8, 13, [255, 160, 60, 255]);
+  p.set(7, 14, [255, 150, 40, 255]); p.set(8, 14, [255, 120, 30, 255]);
+  outlineSprite(p);
 }
 
 // --- Automation (M13): cobalt, oil, machine blocks ------------------------
@@ -1008,6 +1052,73 @@ function paintCannonball(p: Painter, seed: number): void {
   p.set(5, 5, [150, 156, 166, 255]); p.set(6, 5, [130, 136, 146, 255]); // glint
 }
 
+function paintRedSand(p: Painter, seed: number): void {
+  p.fill((x, y) => shade([196, 98, 54, 255], speckle(seed, x, y, 0.1)));
+}
+
+function paintTerracotta(p: Painter, seed: number): void {
+  // Horizontal mineral bands (badlands strata).
+  const bands: RGBA[] = [
+    [176, 96, 60, 255], [150, 78, 52, 255], [200, 132, 70, 255],
+    [120, 70, 56, 255], [188, 110, 64, 255], [158, 88, 58, 255],
+  ];
+  p.fill((x, y) => {
+    const band = bands[(y >> 1) % bands.length];
+    return shade(band, 0.92 + speckle(seed, x, y, 0.06) * 0.08);
+  });
+}
+
+function paintBasalt(p: Painter, seed: number): void {
+  // Dark volcanic rock with faint vertical columnar cracks.
+  p.fill((x, y) => {
+    const col = x % 5 === 0 ? 0.7 : 1;
+    return shade([54, 52, 58, 255], col * (0.85 + speckle(seed, x, y, 0.12) * 0.25));
+  });
+}
+
+function paintLava(p: Painter, seed: number): void {
+  // Glowing molten rock with a darker crust crackle.
+  p.fill((x, y) => {
+    const n = hash2(seed, x >> 1, y >> 1);
+    const crust = hash2(seed ^ 7, Math.floor(x / 3), Math.floor(y / 3)) < 0.25;
+    const base: RGBA = crust ? [120, 36, 12, 255] : [240, 130, 30, 255];
+    return shade(base, 0.85 + n * 0.3);
+  });
+  for (let i = 0; i < 10; i++) {
+    const x = Math.floor(hash2(seed ^ 0x9, i, 1) * 16);
+    const y = Math.floor(hash2(seed ^ 0x9, i, 2) * 16);
+    p.set(x, y, [255, 224, 120, 255]); // bright flecks
+  }
+}
+
+function paintCoreSide(p: Painter, seed: number): void {
+  paintMachineFrame(p, seed, [58, 62, 78, 255]);
+  // a glowing energy core ring with a bright cyan center
+  const glow: RGBA = [86, 220, 240, 255];
+  for (let a = 0; a < 24; a++) {
+    const ang = (a / 24) * Math.PI * 2;
+    p.set(Math.round(7.5 + 4.2 * Math.cos(ang)), Math.round(7.5 + 4.2 * Math.sin(ang)), glow);
+  }
+  for (let y = 6; y <= 9; y++) {
+    for (let x = 6; x <= 9; x++) {
+      const d = Math.hypot(x - 7.5, y - 7.5);
+      p.set(x, y, shade([150, 240, 255, 255], 1 - d * 0.12));
+    }
+  }
+}
+
+function paintCoreTop(p: Painter, seed: number): void {
+  paintMachineFrame(p, seed, [66, 70, 88, 255]);
+  const glow: RGBA = [110, 232, 248, 255];
+  for (let y = 4; y <= 11; y++) {
+    for (let x = 4; x <= 11; x++) {
+      const d = Math.hypot(x - 7.5, y - 7.5);
+      if (d > 3.6) continue;
+      p.set(x, y, shade(glow, 1 - d * 0.16 + hash2(seed, x, y) * 0.08));
+    }
+  }
+}
+
 const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.GrassTop]: paintGrassTop,
   [Tile.GrassSide]: paintGrassSide,
@@ -1143,6 +1254,12 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.Cannonball]: paintCannonball,
   [Tile.BirchPlanks]: paintBirchPlanks,
   [Tile.SprucePlanks]: paintSprucePlanks,
+  [Tile.CoreSide]: paintCoreSide,
+  [Tile.CoreTop]: paintCoreTop,
+  [Tile.RedSand]: paintRedSand,
+  [Tile.Terracotta]: paintTerracotta,
+  [Tile.Basalt]: paintBasalt,
+  [Tile.Lava]: paintLava,
 };
 
 export function createAtlas(seed = 1337): Atlas {

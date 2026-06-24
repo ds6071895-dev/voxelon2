@@ -40,6 +40,9 @@ export class Projectiles {
 
   /** Live ships to test projectile hits against (set by main). */
   shipsProvider: () => ShipState[] = () => [];
+  /** Report a block impact so the host can drain an enemy faction's claim
+   *  shield if the round struck inside it (M19 breaching). Set by main. */
+  claimSink?: (x: number, y: number, z: number, damage: number) => void;
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -120,6 +123,7 @@ export class Projectiles {
     if (isSolid(this.world.getBlock(
       Math.floor(p.pos.x), Math.floor(p.pos.y), Math.floor(p.pos.z)
     ))) {
+      this.claimSink?.(Math.floor(p.pos.x), Math.floor(p.pos.y), Math.floor(p.pos.z), p.gun.damage);
       this.despawn(p, true);
     }
   }

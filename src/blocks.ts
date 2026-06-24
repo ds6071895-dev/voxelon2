@@ -67,6 +67,17 @@ export const enum Block {
   OakStairsN = 52, OakStairsE = 53, OakStairsS = 54, OakStairsW = 55,
   BirchStairsN = 56, BirchStairsE = 57, BirchStairsS = 58, BirchStairsW = 59,
   SpruceStairsN = 60, SpruceStairsE = 61, SpruceStairsS = 62, SpruceStairsW = 63,
+  // Top slabs (placed in a cell's UPPER half). The ITEM is always the bottom
+  // slab id; the top variant is chosen at placement time, like wall torches.
+  OakSlabTop = 64, BirchSlabTop = 65, SpruceSlabTop = 66,
+  // Factions layer (M18): the claim Core. Placing one claims a 3×3-chunk
+  // footprint for the placer's faction and raises an oil-fuelled shield.
+  Core = 67,
+  // Terrain overhaul (M21): mesa/badlands + volcanic ashlands signature blocks.
+  RedSand = 68,
+  Terracotta = 69,   // banded badlands rock
+  Basalt = 70,       // volcanic ashlands ground
+  Lava = 71,         // surface lava (liquid hazard, like water but burns)
 }
 
 export const enum Tile {
@@ -199,6 +210,14 @@ export const enum Tile {
   // Building set (M15)
   BirchPlanks = 120,
   SprucePlanks = 121,
+  // Factions layer (M18): claim Core
+  CoreSide = 122,
+  CoreTop = 123,
+  // Terrain overhaul (M21)
+  RedSand = 124,
+  Terracotta = 125,
+  Basalt = 126,
+  Lava = 127,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel';
@@ -275,17 +294,20 @@ function def(p: Partial): BlockInfo {
   };
 }
 
-/** Slab + 4 stairs (N/E/S/W) definitions for one wood, keyed at the given ids
- *  (slabId, then stairsBase..stairsBase+3). Slabs/stairs are solid (collide as a
- *  full cube — a known simplification) but render partial + don't fully occlude. */
+/** Slab (bottom + top variants) + 4 stairs (N/E/S/W) for one wood, keyed at the
+ *  given ids (bottom slabId, stairsBase..stairsBase+3, topSlabId). Slabs/stairs
+ *  collide via their true partial shape (see shapes.ts) and render partial +
+ *  don't fully occlude. */
 function woodSet(
-  name: string, tile: Tile, slabId: number, stairsBase: number
+  name: string, tile: Tile, slabId: number, stairsBase: number, topSlabId: number
 ): Record<number, BlockInfo> {
+  const slab = (): BlockInfo => def({
+    name: `${name} Slab`, hardness: 2.0, top: tile, shape: 'slab',
+    opaque: false, occludes: false,
+  });
   const out: Record<number, BlockInfo> = {
-    [slabId]: def({
-      name: `${name} Slab`, hardness: 2.0, top: tile, shape: 'slab',
-      opaque: false, occludes: false,
-    }),
+    [slabId]: slab(),
+    [topSlabId]: slab(),
   };
   for (let f = 0; f < 4; f++) {
     out[stairsBase + f] = def({
@@ -310,6 +332,43 @@ export function orientStairsForYaw(base: number, yaw: number): number {
   const dx = -Math.sin(yaw), dz = -Math.cos(yaw);
   const f = Math.abs(dx) > Math.abs(dz) ? (dx > 0 ? 1 : 3) : (dz > 0 ? 2 : 0);
   return base + f;
+}
+
+/** True for any slab (bottom or top variant). */
+export function isSlab(id: number): boolean {
+  return BLOCKS[id]?.shape === 'slab';
+}
+/** True only for the upper-half (top) slab variants. */
+export function isTopSlab(id: number): boolean {
+  return id === Block.OakSlabTop || id === Block.BirchSlabTop ||
+    id === Block.SpruceSlabTop;
+}
+/** The bottom-slab (item) id for any slab variant, or -1 if not a slab. */
+export function slabBottomId(id: number): number {
+  switch (id) {
+    case Block.OakSlab: case Block.OakSlabTop: return Block.OakSlab;
+    case Block.BirchSlab: case Block.BirchSlabTop: return Block.BirchSlab;
+    case Block.SpruceSlab: case Block.SpruceSlabTop: return Block.SpruceSlab;
+    default: return -1;
+  }
+}
+/** The top-slab id paired with a bottom-slab id, or -1 if not a bottom slab. */
+export function slabTopId(id: number): number {
+  switch (id) {
+    case Block.OakSlab: return Block.OakSlabTop;
+    case Block.BirchSlab: return Block.BirchSlabTop;
+    case Block.SpruceSlab: return Block.SpruceSlabTop;
+    default: return -1;
+  }
+}
+
+/** Vanilla-like slab placement: pick the bottom or top variant of `bottomId`
+ *  from the clicked face normal `ny` and the fractional hit height in the cell
+ *  (`hitFracY` in [0,1)). Top face -> bottom slab; bottom face -> top slab;
+ *  side face -> bottom for the lower half, top for the upper half. */
+export function slabPlacement(bottomId: number, ny: number, hitFracY: number): number {
+  const useTop = ny > 0 ? false : ny < 0 ? true : hitFracY >= 0.5;
+  return useTop ? slabTopId(bottomId) : bottomId;
 }
 
 function plant(name: string, tile: Tile, tint: TintKind, replaceable: boolean): BlockInfo {
@@ -479,12 +538,27 @@ export const BLOCKS: Record<number, BlockInfo> = {
     top: Tile.TurretTop, bottom: Tile.AutominerTop, side: Tile.TurretSide,
   }),
 
+  // --- Terrain overhaul (M21): mesa + volcanic ashlands ---
+  [Block.RedSand]: def({ name: 'Red Sand', hardness: 0.5, top: Tile.RedSand }),
+  [Block.Terracotta]: def({ name: 'Terracotta', hardness: 1.25, top: Tile.Terracotta }),
+  [Block.Basalt]: def({ name: 'Basalt', hardness: 1.25, top: Tile.Basalt }),
+  [Block.Lava]: def({
+    name: 'Lava', hardness: -1, top: Tile.Lava, emission: 15,
+    solid: false, opaque: false, occludes: false,
+  }),
+
+  // --- Factions (M18): claim Core (block-entity, like a machine) ---
+  [Block.Core]: def({
+    name: 'Faction Core', hardness: 5.0, emission: 6,
+    top: Tile.CoreTop, bottom: Tile.AutominerTop, side: Tile.CoreSide,
+  }),
+
   // --- Building set (M15): per-wood planks + slabs + stairs ---
   [Block.BirchPlanks]: def({ name: 'Birch Planks', hardness: 2.0, top: Tile.BirchPlanks }),
   [Block.SprucePlanks]: def({ name: 'Spruce Planks', hardness: 2.0, top: Tile.SprucePlanks }),
-  ...woodSet('Oak', Tile.Planks, Block.OakSlab, Block.OakStairsN),
-  ...woodSet('Birch', Tile.BirchPlanks, Block.BirchSlab, Block.BirchStairsN),
-  ...woodSet('Spruce', Tile.SprucePlanks, Block.SpruceSlab, Block.SpruceStairsN),
+  ...woodSet('Oak', Tile.Planks, Block.OakSlab, Block.OakStairsN, Block.OakSlabTop),
+  ...woodSet('Birch', Tile.BirchPlanks, Block.BirchSlab, Block.BirchStairsN, Block.BirchSlabTop),
+  ...woodSet('Spruce', Tile.SprucePlanks, Block.SpruceSlab, Block.SpruceStairsN, Block.SpruceSlabTop),
 };
 
 // Vanilla tool effectiveness and harvest tiers (wood 0, stone 1, iron 2).
@@ -497,6 +571,7 @@ const PICKAXE_TIERS: [Block, number][] = [
   [Block.Furnace, 0], [Block.FurnaceLit, 0],
   [Block.Autominer, 0], [Block.OilDerrick, 0],
   [Block.Cannon, 1], [Block.Turret, 1], // metal war machines need a stone+ pick
+  [Block.Core, 1], // the claim Core is pickaxe-mineable (owner-only, server-gated)
 ];
 for (const [b, tier] of PICKAXE_TIERS) {
   BLOCKS[b].tool = 'pickaxe';
@@ -508,11 +583,12 @@ for (const b of [
   Block.BirchPlanks, Block.SprucePlanks,
   Block.CraftingTable, Block.Chest, Block.ShipHelm,
 ]) BLOCKS[b].tool = 'axe';
-// All slabs + stairs are wood: axe-mineable like planks.
-for (let b = Block.OakSlab; b <= Block.SpruceStairsW; b++) BLOCKS[b].tool = 'axe';
+// All slabs (bottom + top) + stairs are wood: axe-mineable like planks.
+for (let b = Block.OakSlab; b <= Block.SpruceSlabTop; b++) BLOCKS[b].tool = 'axe';
 for (const b of [
-  Block.Dirt, Block.Grass, Block.SnowyGrass, Block.Sand,
+  Block.Dirt, Block.Grass, Block.SnowyGrass, Block.Sand, Block.RedSand,
 ]) BLOCKS[b].tool = 'shovel';
+for (const b of [Block.Terracotta, Block.Basalt]) BLOCKS[b].tool = 'pickaxe';
 
 export function isSolid(id: number): boolean {
   return id !== Block.Air && (BLOCKS[id]?.solid ?? false);

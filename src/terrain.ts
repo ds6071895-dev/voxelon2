@@ -45,6 +45,7 @@ export class Terrain {
   private readonly ravine: Noise2D;
   private readonly caves1: Noise3D;
   private readonly caves2: Noise3D;
+  private readonly caverns: Noise3D;
   private readonly oreField: Noise2D;
   private readonly oilField: Noise2D;
 
@@ -56,6 +57,7 @@ export class Terrain {
     this.ravine = new Noise2D(seed ^ 0xaa11);
     this.caves1 = new Noise3D(seed ^ 0xcafe);
     this.caves2 = new Noise3D(seed ^ 0xbeef);
+    this.caverns = new Noise3D(seed ^ 0x0caf);
     this.oreField = new Noise2D(seed ^ 0x0fe0);
     this.oilField = new Noise2D(seed ^ 0x011a);
   }
@@ -103,9 +105,16 @@ export class Terrain {
 
   /** Surface height at world (x, z). Pure function, safe across chunks. */
   height(x: number, z: number): number {
-    const base = this.continental.fbm(x * 0.004, z * 0.004, 4) * 24;
+    // Wider continental swing (×30 vs 24) so lows dip below sea level over more
+    // area — bigger ocean basins with room for ships to sail and fight.
+    const base = this.continental.fbm(x * 0.004, z * 0.004, 4) * 30;
     const detail = this.hills.fbm(x * 0.02, z * 0.02, 2) * 5;
     let h = 63 + base + detail;
+    // Deepen sub-sea-level basins so oceans are genuinely deep (floored so they
+    // don't bottom out into the bedrock band).
+    if (h < SEA_LEVEL) {
+      h = Math.max(SEA_LEVEL - 30, SEA_LEVEL - ((SEA_LEVEL - h) * 1.7 + 4));
+    }
     // Mountains rise smoothly via the (smooth) mountain factor, so there are
     // no cliffs at biome borders. A ridged term makes the peaks jagged.
     const m = this.biomes.mountainFactor(x, z);
@@ -132,13 +141,19 @@ export class Terrain {
     return this.biomes.biomeAt(x, z);
   }
 
-  /** Ravine carve depth below the surface at this column (0 = no ravine). */
-  private ravineDepth(x: number, z: number): number {
+  /** Ravine carve depth below the surface at this column (0 = no ravine).
+   *  Ravines are rare showpieces: the trigger band is ~3× tighter than before
+   *  AND gated on a low-freq mask, so canyons appear only in occasional regions
+   *  rather than threading the whole world. Public so determinism/rarity is
+   *  unit-testable. */
+  ravineDepth(x: number, z: number): number {
+    const mask = this.ravine.noise(x * 0.0012 + 500, z * 0.0012 - 500);
+    if (mask < 0.25) return 0; // only inside the occasional "ravine country" regions
     const rv = this.ravine.noise(x * 0.006, z * 0.006);
-    const band = 0.018;
+    const band = 0.006;
     if (Math.abs(rv) >= band) return 0;
     const f = 1 - Math.abs(rv) / band;
-    return Math.floor(12 + f * 28);
+    return Math.floor(14 + f * 34);
   }
 
   private treeAt(x: number, z: number): Tree | null {
@@ -205,6 +220,11 @@ export class Terrain {
           biome === Biome.SnowyMountains;
         const snowy = biome === Biome.Snowy || biome === Biome.SnowyMountains;
         const bareRock = mountain && h >= ROCK_LINE && h < SNOW_LINE;
+        const mesa = biome === Biome.Mesa;
+        const ashen = biome === Biome.Ashlands;
+        // Scattered surface lava pools across the ashlands (a PvP hazard).
+        const lavaPool = ashen && h > SEA_LEVEL &&
+          hash2(this.seed ^ 0x1a7a, wx, wz) < 0.05;
 
         // Ravines cut open canyons on dry land.
         const rd = h > SEA_LEVEL + 2 ? this.ravineDepth(wx, wz) : 0;
@@ -215,15 +235,24 @@ export class Terrain {
           if (y === 0 || (y < 3 && hash2(this.seed ^ 0xbed, wx * 256 + y, wz) < 0.5)) {
             id = Block.Bedrock;
           } else if (y === h) {
-            id = sandy ? Block.Sand
+            id = lavaPool ? Block.Lava
+              : ashen ? Block.Basalt
+              : mesa ? Block.RedSand
+              : sandy ? Block.Sand
               : h >= SNOW_LINE ? Block.SnowyGrass    // snow cap
               : bareRock ? Block.Stone               // exposed rock
               : snowy ? Block.SnowyGrass
               : Block.Grass;
           } else if (y >= h - 3) {
-            id = sandy ? Block.Sand
+            id = ashen ? Block.Basalt
+              : mesa ? Block.Terracotta
+              : sandy ? Block.Sand
               : bareRock || h >= SNOW_LINE ? Block.Stone // rocky mountainside
               : Block.Dirt;
+          } else if (mesa && y >= h - 9) {
+            id = Block.Terracotta;                   // banded badlands rock
+          } else if (ashen && y >= h - 7) {
+            id = Block.Basalt;
           } else if (biome === Biome.Desert && y >= h - 7) {
             id = Block.Sandstone;
           } else {
@@ -233,10 +262,14 @@ export class Terrain {
           if (id !== Block.Bedrock && y >= ravineFloor) continue; // ravine
 
           if (id !== Block.Bedrock && y > 4 && y < h - 3) {
-            // Spaghetti caves: intersection of two 3D noise tubes.
-            const n1 = this.caves1.noise(wx * 0.045, y * 0.07, wz * 0.045);
-            const n2 = this.caves2.noise(wx * 0.045, y * 0.07, wz * 0.045);
-            if (Math.abs(n1) < 0.09 && Math.abs(n2) < 0.09) continue;
+            // Layered caves: two connected worm-tunnel networks (union, so they
+            // join up) PLUS occasional large CAVERNS — a low-freq 3D blob in a
+            // deep band — so spelunking actually opens into rooms.
+            const t1 = this.caves1.noise(wx * 0.022, y * 0.05, wz * 0.022);
+            const t2 = this.caves2.noise(wx * 0.022 + 30, y * 0.05 - 30, wz * 0.022 + 30);
+            if (Math.abs(t1) < 0.026 || Math.abs(t2) < 0.026) continue; // tunnels
+            if (y > 8 && y < 40 &&
+                this.caverns.noise(wx * 0.016, y * 0.03, wz * 0.016) > 0.66) continue; // caverns
           }
 
           chunk.set(lx, y, lz, id);

@@ -1,7 +1,9 @@
 // Item registry. Placeable blocks share their Block id; pure items start at
 // 100. Includes the vanilla drop table used when blocks break.
 
-import { Block, BLOCKS, BlockInfo, stairsBaseOf, Tile, ToolKind } from './blocks';
+import {
+  Block, BLOCKS, BlockInfo, isTopSlab, slabBottomId, stairsBaseOf, Tile, ToolKind,
+} from './blocks';
 
 export const enum Item {
   // Blocks are items with id === Block id (wall torch variants are not items).
@@ -206,6 +208,12 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Block.Cannon]: blockItem(Block.Cannon),
   [Block.Turret]: blockItem(Block.Turret),
   [Item.Cannonball]: pureItem('Cannonball', Tile.Cannonball),
+  // Factions (M18): claim Core block.
+  [Block.Core]: blockItem(Block.Core),
+  // Terrain (M21): mesa + ashlands materials (Lava is a liquid, like Water).
+  [Block.RedSand]: blockItem(Block.RedSand),
+  [Block.Terracotta]: blockItem(Block.Terracotta),
+  [Block.Basalt]: blockItem(Block.Basalt),
 
   // Building set (M15): per-wood planks + slabs + stairs (only the N-facing
   // stair id is an item; placement orients it, like wall torches).
@@ -342,6 +350,8 @@ export function dropFor(
       // Stairs drop the (N-facing) stairs item regardless of placed orientation.
       const sb = stairsBaseOf(block);
       if (sb >= 0) return { id: sb, count: 1 };
+      // Top slabs aren't a separate item: they drop the bottom slab (item form).
+      if (isTopSlab(block)) return { id: slabBottomId(block), count: 1 };
       // Everything else drops itself if it is registered as an item.
       return ITEMS[block] ? { id: block, count: 1 } : null;
     }

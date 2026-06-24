@@ -26,6 +26,7 @@ export class Input {
   hotbarKey = -1; // 0-8 when a number key was pressed this frame
   debugToggled = false;
   inventoryToggled = false;
+  mapToggled = false; // M pressed this frame (world map)
   reloadPressed = false; // R pressed this frame (gun reload)
   locked = false;
   sprintHeld = false; // via double-tap W, persists until W released
@@ -45,6 +46,7 @@ export class Input {
       if (e.repeat) return;
       this.keys.add(e.code);
       if (e.code === 'KeyE') this.inventoryToggled = true;
+      if (e.code === 'KeyM') this.mapToggled = true;
       if (e.code === 'KeyR') this.reloadPressed = true;
       if (e.code === 'KeyW') {
         const now = performance.now();
@@ -117,6 +119,7 @@ export class Input {
     this.rightClicked = false;
     this.debugToggled = false;
     this.inventoryToggled = false;
+    this.mapToggled = false;
     this.reloadPressed = false;
   }
 }

@@ -14,7 +14,9 @@
       font-family: 'Lucida Console', Monaco, monospace;
       font-weight: bold;
       color: #fff;
-      text-shadow: 2px 2px 0 #3f3f3f;
+      /* Soft legibility shadow for text floating over the 3D scene (no chunky
+         pixel drop-shadow). Panels on solid backgrounds override to none. */
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
       letter-spacing: 0.5px;
     }
 
@@ -75,6 +77,21 @@
       z-index: 25;
     }
     .inv-title { color: #3f3f3f; text-shadow: none; font-size: 15px; }
+    /* Warfare panels (machine / turret / ship / faction Core): consistent modern
+       chrome — flat bevel buttons with a subtle hover, no chunky text shadows. */
+    .war-btn {
+      flex: 1; font-size: 10px; padding: 6px 4px; cursor: pointer;
+      border: 2px solid; border-color: #fff #555 #555 #fff;
+      background: #6b6b6b; color: #fff; text-shadow: none;
+      white-space: pre-line; transition: background 0.12s;
+    }
+    .war-btn:hover:enabled { background: #7c8b9c; }
+    .war-btn:disabled { cursor: default; }
+    .war-bar { position: relative; border: 2px solid #2a2a2a; background: #1c1c1c; }
+    .war-bar span {
+      position: absolute; inset: 0; display: flex; align-items: center;
+      justify-content: center; font-size: 10px; text-shadow: none; color: #fff;
+    }
     .inv-grid {
       display: grid; grid-template-columns: repeat(9, 48px);
     }
@@ -132,7 +149,7 @@
     #ammo {
       position: absolute; bottom: 96px; left: 50%; transform: translateX(-50%);
       z-index: 10; pointer-events: none; font-size: 18px; display: none;
-      text-shadow: 2px 2px 0 #000; color: #fff;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6); color: #fff;
     }
 
     #damage-flash {
@@ -149,7 +166,7 @@
     #death button {
       font-family: inherit; font-size: 18px; font-weight: bold;
       padding: 10px 36px; cursor: pointer;
-      background: #8b8b8b; color: #fff; text-shadow: 2px 2px 0 #3f3f3f;
+      background: #8b8b8b; color: #fff; text-shadow: none;
       border: 3px solid; border-color: #fff #555 #555 #fff;
     }
 
@@ -181,23 +198,36 @@
     #overlay.hidden { display: none; }
     #title {
       font-size: 84px; letter-spacing: 10px; margin-bottom: 4px;
-      color: #e6e6e6; text-shadow: 5px 5px 0 #1f1f1f, 0 0 18px rgba(0,0,0,0.6);
+      color: #e6e6e6; text-shadow: 0 2px 6px rgba(0, 0, 0, 0.55);
     }
     #title .accent { color: #c0392b; } /* the VOXEL in VOXELON */
     #overlay .subtitle {
-      font-size: 15px; color: #c8c8c8; text-shadow: 2px 2px 0 #2a2a2a;
+      font-size: 15px; color: #c8c8c8; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
       margin-top: -10px; letter-spacing: 2px;
     }
     /* Vanilla-style button (same bevel as the death screen). */
     .mc-btn {
       font-family: inherit; font-size: 20px; font-weight: bold;
       padding: 12px 64px; cursor: pointer;
-      background: #6b6b6b; color: #fff; text-shadow: 2px 2px 0 #3f3f3f;
+      background: #6b6b6b; color: #fff; text-shadow: none;
       border: 3px solid; border-color: #fff #555 #555 #fff;
+      transition: background 0.12s;
     }
     .mc-btn:hover { background: #7c8b9c; }
+    /* Login / register form on the title overlay */
+    #auth { display: flex; flex-direction: column; gap: 8px; width: 260px; margin: 8px 0 4px; }
+    #auth input {
+      font-size: 14px; padding: 8px 10px; color: #eee; background: #0f1420;
+      border: 2px solid; border-color: #2a3550 #4a5775 #4a5775 #2a3550; text-shadow: none;
+      outline: none;
+    }
+    #auth input:focus { border-color: #6fd0ff; }
+    #auth-row { display: flex; gap: 8px; }
+    #auth-row .mc-btn { flex: 1; min-width: 0; }
+    #auth-err { color: #ff8a7a; font-size: 12px; min-height: 14px; text-shadow: none; }
+    #auth-status { color: #9fb4cc; font-size: 12px; min-height: 14px; text-shadow: none; }
     #overlay .controls {
-      font-size: 13px; color: #aaa; text-shadow: 1px 1px 0 #2a2a2a;
+      font-size: 13px; color: #aaa; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
       text-align: center; line-height: 1.6;
     }
 
@@ -211,10 +241,10 @@
     #loading.hidden { display: none; }
     #loading .logo {
       font-size: 64px; letter-spacing: 8px; color: #e6e6e6;
-      text-shadow: 4px 4px 0 #1f1f1f, 0 0 22px rgba(0,0,0,0.6);
+      text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
     }
     #loading .logo .accent { color: #4db8ff; }
-    #loading .status { font-size: 16px; color: #9fb4cc; text-shadow: 2px 2px 0 #1a1a1a; }
+    #loading .status { font-size: 16px; color: #9fb4cc; text-shadow: none; }
     #loadbar {
       width: 360px; height: 12px; border: 2px solid #2a3a52;
       background: #0b0f17; overflow: hidden;
@@ -254,7 +284,17 @@
     <div id="overlay" class="hidden">
       <h1 id="title" class="mc-font"><span class="accent">VOXEL</span>ON</h1>
       <p class="subtitle mc-font">a multiplayer voxel arena</p>
-      <button id="play-btn" class="mc-btn">Play</button>
+      <div id="auth">
+        <input id="auth-user" class="mc-font" placeholder="username" maxlength="16" autocomplete="username" />
+        <input id="auth-pass" class="mc-font" type="password" placeholder="password" autocomplete="current-password" />
+        <div id="auth-row">
+          <button id="login-btn" class="mc-btn">Log In</button>
+          <button id="register-btn" class="mc-btn">Register</button>
+        </div>
+        <div id="auth-err" class="mc-font"></div>
+        <div id="auth-status" class="mc-font"></div>
+      </div>
+      <button id="play-btn" class="mc-btn" style="display:none">Play</button>
       <p class="controls mc-font">
         WASD move &nbsp; Space jump &nbsp; Shift sneak &nbsp; Ctrl/double-W sprint (energy)<br/>
         Left click break / attack &nbsp; Right click place &nbsp; 1-9 / scroll hotbar &nbsp; E inventory &nbsp; F3 debug

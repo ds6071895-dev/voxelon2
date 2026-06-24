@@ -27,6 +27,34 @@ function tileSource(
   return off;
 }
 
+/** Draw a slab/stairs item icon: the wood tile clipped to the block's side
+ *  profile (a bottom band for slabs; an L step for stairs), with a lighter
+ *  "sawn" top edge and a dark outline so the shape reads at hotbar size. */
+function drawShapeIcon(
+  ctx: CanvasRenderingContext2D, atlasCanvas: HTMLCanvasElement,
+  tile: number, stairs: boolean
+): void {
+  const src = tileSource(atlasCanvas, tile, null);
+  // Rects in the 32x32 icon making up the profile (x, y, w, h).
+  const rects: [number, number, number, number][] = stairs
+    ? [[4, 16, 24, 12], [16, 6, 12, 10]] // bottom step (full) + upper-right step
+    : [[4, 17, 24, 11]];                 // single half-height slab band
+  ctx.save();
+  ctx.beginPath();
+  for (const [rx, ry, rw, rh] of rects) ctx.rect(rx, ry, rw, rh);
+  ctx.clip();
+  ctx.drawImage(src, 4, 4, 24, 24); // plank texture, clipped to the profile
+  ctx.restore();
+  // Lighter sawn edge along each step's top, then a dark outline per rect.
+  for (const [rx, ry, rw] of rects) {
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.22)';
+    ctx.fillRect(rx, ry, rw, 2);
+  }
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.55)';
+  ctx.lineWidth = 1;
+  for (const [rx, ry, rw, rh] of rects) ctx.strokeRect(rx + 0.5, ry + 0.5, rw - 1, rh - 1);
+}
+
 /** Draw an item's icon into a 32x32 canvas. */
 export function renderItemIcon(
   icon: HTMLCanvasElement, atlasCanvas: HTMLCanvasElement, itemId: number
@@ -39,6 +67,14 @@ export function renderItemIcon(
   if (!info) return;
 
   const block = info.kind === 'block' ? BLOCKS[info.block!] : null;
+
+  // Slabs/stairs: draw the wood texture clipped to the block's profile so the
+  // hotbar icon actually reads as a slab/stair instead of a full plank square.
+  if (block && (block.shape === 'slab' || block.shape === 'stairs')) {
+    drawShapeIcon(ctx, atlasCanvas, block.side, block.shape === 'stairs');
+    return;
+  }
+
   if (!block || block.shape !== 'cube') {
     // Flat sprite (pure items, plants, torches).
     const tile: Tile = block ? block.side : info.sprite ?? Tile.Stone;

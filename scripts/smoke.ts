@@ -6,7 +6,10 @@
 import * as THREE from 'three';
 import { materialOf } from '../src/audio';
 import { Biome, BIOME_NAMES } from '../src/biomes';
-import { Block, BLOCKS, isSolid, orientStairsForYaw, stairsBaseOf } from '../src/blocks';
+import {
+  Block, BLOCKS, isSlab, isTopSlab, isSolid, orientStairsForYaw, slabBottomId,
+  slabPlacement, slabTopId, stairsBaseOf,
+} from '../src/blocks';
 import { Chunk } from '../src/chunk';
 import { matchGrid, craftResult, consumeCraft } from '../src/crafting';
 import { Furnaces, SMELT } from '../src/furnace';
@@ -17,7 +20,10 @@ import {
 } from '../src/items';
 import { ItemEntities, itemGeometry } from '../src/itementity';
 import { computeLight } from '../src/light';
-import { buildChunkGeometry, stairBoxes, TintSampler } from '../src/mesher';
+import { buildChunkGeometry, TintSampler } from '../src/mesher';
+import {
+  collisionBoxes, FULL_BOX, SLAB_BOTTOM, SLAB_TOP, stairBoxes,
+} from '../src/shapes';
 import { Mobs, MOB_DEFS } from '../src/mobs';
 import { Particles } from '../src/particles';
 import { raycastBlocks } from '../src/interact';
@@ -45,8 +51,18 @@ import {
   TURRET_MAX_LEVEL,
 } from '../src/turrets';
 import {
-  deriveControlNodes, resolveNode, topScores, TERRITORY_TARGET_SCORE, MAX_NODES,
+  deriveControlNodes, resolveNode, topScores, MAX_NODES,
 } from '../src/territory';
+import {
+  FACTIONS, NO_FACTION, balancedFaction, factionColor, factionName, isFaction,
+  sameFaction,
+} from '../src/teams';
+import { Accounts, validUsername } from '../src/net/accounts';
+import {
+  Claims, GRACE_PERIOD, MAX_SHIELD_HP, OIL_PER_BARREL, chunkOf, claimChunkKeys,
+  claimProtected, damageShield, feedOil, inGrace, newClaim, sanitizeClaim,
+  shieldUp, tickClaim,
+} from '../src/claims';
 import { mulberry32 } from '../src/noise';
 import { AUTOMINER_ORES, Terrain, SEA_LEVEL } from '../src/terrain';
 import { Biome } from '../src/biomes';
@@ -335,7 +351,7 @@ const mtn = scanBiome(Biome.SnowyMountains) ?? scanBiome(Biome.Mountains);
 check('mountain biome has stone surface and/or snow caps',
   (n(mtn, Block.Stone) > 5000) && (n(mtn, Block.SnowyGrass) > 0 || n(mtn, Block.Grass) > 0));
 
-// --- Ores + caves (no cheese caverns; spaghetti still carve) -----------------------
+// --- Ores + caves (layered tunnels + caverns carve real air) -----------------------
 {
   const all = new Map<number, number>();
   let air = 0, total = 0, depthViolations = 0;
@@ -361,7 +377,101 @@ check('mountain biome has stone surface and/or snow caps',
     a(Block.CoalOre) > 0 && a(Block.IronOre) > 0 && a(Block.GoldOre) > 0 &&
     a(Block.RedstoneOre) > 0 && a(Block.DiamondOre) > 0);
   check('ore depth ranges respected', depthViolations === 0);
-  check('spaghetti caves still carve air', air / total > 0.01, `${(air / total * 100).toFixed(1)}%`);
+  check('layered caves carve meaningful air', air / total > 0.02 && air / total < 0.6,
+    `${(air / total * 100).toFixed(1)}%`);
+}
+
+// --- Terrain overhaul (M21): rare ravines, caverns, big oceans, new biomes ----
+{
+  const t = new Terrain(1337);
+  // Ravines are now rare: sample a wide grid of columns; the hit rate is low.
+  let ravineHits = 0, samples = 0;
+  for (let x = -2000; x <= 2000; x += 13) {
+    for (let z = -2000; z <= 2000; z += 13) {
+      samples++;
+      if (t.ravineDepth(x, z) > 0) ravineHits++;
+    }
+  }
+  const ravineRate = ravineHits / samples;
+  check('ravines are rare showpieces (low hit rate)', ravineRate < 0.03,
+    `${(ravineRate * 100).toFixed(2)}%`);
+  check('ravineDepth is deterministic', t.ravineDepth(123, 456) === t.ravineDepth(123, 456));
+
+  // Caverns: a large CONTIGUOUS air pocket appears underground. Flood-fill air in
+  // a multi-chunk subsurface volume and assert the biggest room is big.
+  {
+    const W = 48, H = 48, D = 48, y0 = 6;
+    const solid = new Uint8Array(W * H * D);
+    for (let cx = 0; cx < 3; cx++) for (let cz = 0; cz < 3; cz++) {
+      const c = new Chunk(cx, cz);
+      t.fill(c);
+      for (let lx = 0; lx < 16; lx++) for (let lz = 0; lz < 16; lz++) {
+        for (let y = 0; y < H; y++) {
+          const gx = cx * 16 + lx, gz = cz * 16 + lz;
+          // 1 = air (carved/open below the surface), 0 = anything else.
+          solid[(gx) + W * (y + H * gz)] = c.get(lx, y0 + y, lz) === Block.Air ? 1 : 0;
+        }
+      }
+    }
+    const idx = (x: number, y: number, z: number) => x + W * (y + H * z);
+    const seen = new Uint8Array(W * H * D);
+    let biggest = 0;
+    for (let i = 0; i < solid.length; i++) {
+      if (!solid[i] || seen[i]) continue;
+      let size = 0; const stack = [i];
+      seen[i] = 1;
+      while (stack.length) {
+        const k = stack.pop()!; size++;
+        const x = k % W, y = Math.floor(k / W) % H, z = Math.floor(k / (W * H));
+        const nb: [number, number, number][] = [
+          [x + 1, y, z], [x - 1, y, z], [x, y + 1, z], [x, y - 1, z], [x, y, z + 1], [x, y, z - 1]];
+        for (const [nx, ny, nz] of nb) {
+          if (nx < 0 || nx >= W || ny < 0 || ny >= H || nz < 0 || nz >= D) continue;
+          const ni = idx(nx, ny, nz);
+          if (solid[ni] && !seen[ni]) { seen[ni] = 1; stack.push(ni); }
+        }
+      }
+      biggest = Math.max(biggest, size);
+    }
+    check('caverns exist (a large contiguous air room is carved)', biggest > 250, `max room ${biggest}`);
+  }
+
+  // Oceans are bigger: ocean-column fraction over a wide sample is substantial.
+  let ocean = 0, cols = 0;
+  for (let x = -1600; x <= 1600; x += 23) {
+    for (let z = -1600; z <= 1600; z += 23) {
+      cols++;
+      if (t.biomeWithWater(x, z, t.height(x, z)) === Biome.Ocean) ocean++;
+    }
+  }
+  check('oceans are big (ocean fraction is substantial)', ocean / cols > 0.3,
+    `${(ocean / cols * 100).toFixed(1)}%`);
+  check('findSpawn still lands on dry land', t.findSpawn().y > SEA_LEVEL);
+
+  // New signature biomes generate their blocks. Find a home chunk for each.
+  const findHome = (b: Biome): [number, number] | null => {
+    for (let cx = -240; cx <= 240; cx++) for (let cz = -240; cz <= 240; cz++) {
+      const x = cx * 16 + 8, z = cz * 16 + 8;
+      if (t.biomeWithWater(x, z, t.height(x, z)) === b) return [cx, cz];
+    }
+    return null;
+  };
+  const biomeBlocks = (home: [number, number] | null): Map<number, number> => {
+    const m = new Map<number, number>();
+    if (!home) return m;
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+      const c = new Chunk(home[0] + dx, home[1] + dz);
+      t.fill(c);
+      for (let i = 0; i < c.data.length; i++) if (c.data[i]) m.set(c.data[i], (m.get(c.data[i]) ?? 0) + 1);
+    }
+    return m;
+  };
+  const mesa = biomeBlocks(findHome(Biome.Mesa));
+  check('mesa generates red sand + terracotta bands',
+    (mesa.get(Block.RedSand) ?? 0) > 100 && (mesa.get(Block.Terracotta) ?? 0) > 100);
+  const ash = biomeBlocks(findHome(Biome.Ashlands));
+  check('ashlands generate basalt + surface lava',
+    (ash.get(Block.Basalt) ?? 0) > 100 && (ash.get(Block.Lava) ?? 0) > 0);
 }
 
 // determinism
@@ -468,6 +578,10 @@ check('materialOf maps blocks to sound classes',
 
 // --- Item entities ----------------------------------------------------------------
 {
+  // ItemEntities.spawn scatters drops with Math.random; seed it so the merge +
+  // magnet assertions below are deterministic (no spurious flakes).
+  const origRandom = Math.random;
+  Math.random = mulberry32(0xa17e);
   let px = spawn.x, pz = spawn.z;
   outer: for (let dx = 0; dx < 16; dx++)
     for (let dz = 0; dz < 16; dz++) {
@@ -489,6 +603,7 @@ check('materialOf maps blocks to sound classes',
   for (let i = 0; i < 80; i++) ents.update(0.05, near, inv, 1);
   check('drops magnet to player and get picked up',
     ents.count === 0 && inv.slots[0]?.id === Block.Dirt && inv.slots[0]?.count === 5);
+  Math.random = origRandom;
 }
 
 // --- Mobs (hostile only): models, physics, AI, combat, explosion ------------------
@@ -1683,15 +1798,20 @@ check('furnace smelts ore/sand/log but not removed foods',
     JSON.stringify(nodes) === JSON.stringify(nodes2));
 
   const node = { id: 0, x: 0, z: 0, radius: 10, richness: 1 };
-  check('a lone player controls a node',
-    resolveNode(node, [{ name: 'A', x: 1, z: 1, dead: false }]).controller === 'A');
-  check('two players contest a node (no controller)', (() => {
+  check('a single faction present controls a node',
+    resolveNode(node, [{ faction: 0, x: 1, z: 1, dead: false }]).faction === 0);
+  check('two members of one faction still control (team play)', (() => {
     const r = resolveNode(node, [
-      { name: 'A', x: 1, z: 1, dead: false }, { name: 'B', x: -1, z: -1, dead: false }]);
-    return r.controller === '' && r.contested;
+      { faction: 1, x: 1, z: 1, dead: false }, { faction: 1, x: -1, z: -1, dead: false }]);
+    return r.faction === 1 && !r.contested;
+  })());
+  check('two factions contest a node (no controller)', (() => {
+    const r = resolveNode(node, [
+      { faction: 0, x: 1, z: 1, dead: false }, { faction: 1, x: -1, z: -1, dead: false }]);
+    return r.faction === -1 && r.controller === '' && r.contested;
   })());
   check('a player outside the radius does not control',
-    resolveNode(node, [{ name: 'A', x: 50, z: 50, dead: false }]).controller === '');
+    resolveNode(node, [{ faction: 0, x: 50, z: 50, dead: false }]).faction === -1);
 
   check('topScores sorts descending', (() => {
     const m = new Map([['A', 5], ['B', 30], ['C', 12]]);
@@ -1699,19 +1819,19 @@ check('furnace smelts ore/sand/log but not removed foods',
     return top[0].name === 'B' && top[1].name === 'C' && top[2].name === 'A';
   })());
 
-  // Server accrues score for a controlled node and declares a winner.
+  // Standings = current oil-node holdings per faction (no more round/win race).
   const s = new GameServer(1337, mulberry32(33));
-  s.addPlayer(1);
+  s.addPlayer(1); // faction 0
   const snap0 = s.territorySnapshot() as { t: 'territory'; nodes: { x: number; z: number }[] };
   const target = snap0.nodes[0];
   s.handle(1, { t: 'xform', x: target.x, y: 70, z: target.z, yaw: 0, pitch: 0 });
-  let won = '';
-  for (let i = 0; i < TERRITORY_TARGET_SCORE + 20 && !won; i++) {
-    s.tickTerritory(1);
-    const snap = s.territorySnapshot() as { t: 'territory'; winner: string };
-    won = snap.winner;
-  }
-  check('controlling a node accrues score to a round win', won !== '');
+  s.tickTerritory(1);
+  const standings = s.territorySnapshot() as {
+    t: 'territory'; scores: { name: string; score: number }[]; winner: string;
+  };
+  check('controlling a node shows up as faction node-holdings (no win race)',
+    standings.winner === '' &&
+    (standings.scores.find((e) => e.name === factionName(0))?.score ?? 0) >= 1);
   check('territory snapshot has the expected shape', (() => {
     const snap = s.territorySnapshot() as {
       t: 'territory'; nodes: unknown[]; scores: unknown[]; roundTime: number;
@@ -1719,6 +1839,260 @@ check('furnace smelts ore/sand/log but not removed foods',
     return snap.t === 'territory' && Array.isArray(snap.nodes) &&
       Array.isArray(snap.scores) && Number.isFinite(snap.roundTime);
   })());
+
+  // --- M20: territory accrues OIL INCOME to the controlling faction's claims ---
+  {
+    const g = new GameServer(1337, mulberry32(91));
+    g.addPlayer(1); // faction 0
+    const snap = g.territorySnapshot() as { t: 'territory'; nodes: { x: number; z: number }[] };
+    const target = snap.nodes[0];
+    // Place a Core (claim) for faction 0 well away from the node.
+    g.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+    const cm = g.handle(1, { t: 'edit', x: 0, y: 70, z: 0, block: Block.Core })
+      .find((o) => o.msg.t === 'claim')!.msg as { claim: { id: number; oil: number } };
+    check('a fresh claim starts with no oil', cm.claim.oil === 0);
+    // Stand on the node so faction 0 controls it; income should fill the claim.
+    g.handle(1, { t: 'xform', x: target.x, y: 70, z: target.z, yaw: 0, pitch: 0 });
+    for (let i = 0; i < 5; i++) g.tickTerritory(1);
+    const fueled = (g.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 }),
+      g.handle(1, { t: 'claimOpen', x: 0, y: 70, z: 0 })
+        .find((o) => o.msg.t === 'claim')!.msg as { claim: { oil: number } }).claim.oil;
+    check('controlling a node accrues oil to the faction claim', fueled > 0);
+    // Leave the node: income stops (oil no longer climbs from territory).
+    g.handle(1, { t: 'xform', x: 9000, y: 70, z: 9000, yaw: 0, pitch: 0 });
+    for (let i = 0; i < 3; i++) g.tickTerritory(1);
+    const after = (g.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 }),
+      g.handle(1, { t: 'claimOpen', x: 0, y: 70, z: 0 })
+        .find((o) => o.msg.t === 'claim')!.msg as { claim: { oil: number } }).claim.oil;
+    check('losing all nodes drops territory oil income to zero',
+      Math.abs(after - fueled) < 1e-6);
+    // Standings readout = live node holdings, keyed by faction name: it shows the
+    // faction while it holds a node, and empties once it controls none.
+    g.handle(1, { t: 'xform', x: target.x, y: 70, z: target.z, yaw: 0, pitch: 0 });
+    g.tickTerritory(1);
+    const onNode = g.territorySnapshot() as { t: 'territory'; scores: { name: string; score: number }[] };
+    check('the standings readout tracks node control by faction',
+      (onNode.scores.find((e) => e.name === factionName(0))?.score ?? 0) >= 1);
+    g.handle(1, { t: 'xform', x: 9000, y: 70, z: 9000, yaw: 0, pitch: 0 });
+    g.tickTerritory(1);
+    const offNode = g.territorySnapshot() as { t: 'territory'; scores: unknown[] };
+    check('standings empty when a faction holds no nodes', offNode.scores.length === 0);
+  }
+}
+
+// --- Factions (M17): auto-balance + friendly fire off ------------------------
+{
+  // Pure team helpers.
+  check('three preset factions with distinct colors + names',
+    FACTIONS.length === 3 &&
+    new Set(FACTIONS.map((f) => f.color)).size === 3 &&
+    new Set(FACTIONS.map((f) => f.name)).size === 3);
+  check('sameFaction only matches a shared, real faction',
+    sameFaction(0, 0) && !sameFaction(0, 1) &&
+    !sameFaction(NO_FACTION, NO_FACTION) && !isFaction(NO_FACTION));
+  check('balancedFaction picks the lowest-population team',
+    balancedFaction({ 0: 3, 1: 1, 2: 2 }) === 1 &&
+    balancedFaction({ 0: 0, 1: 0, 2: 0 }) === 0);
+  check('factionName/factionColor fall back to neutral',
+    factionName(NO_FACTION) === 'Neutral' && factionColor(NO_FACTION) === 0x9a9a9a);
+
+  // Server auto-balances joins evenly across the three factions.
+  const factionOf = (out: ReturnType<GameServer['addPlayer']>): number => {
+    const w = out.find((o) => o.msg.t === 'welcome')!.msg as { players: { faction: number }[] };
+    return w.players[w.players.length - 1].faction;
+  };
+  const s = new GameServer(1337, mulberry32(7));
+  const facs: number[] = [];
+  for (let i = 1; i <= 6; i++) facs.push(factionOf(s.addPlayer(i)));
+  const counts = [0, 0, 0];
+  for (const f of facs) counts[f]++;
+  check('auto-balance spreads 6 joins evenly across 3 factions',
+    counts[0] === 2 && counts[1] === 2 && counts[2] === 2);
+  // Joins 1 & 4 land in the same faction; 1 & 2 are enemies.
+  check('the same-faction / cross-faction pairs are as expected',
+    facs[0] === facs[3] && facs[0] !== facs[1]);
+
+  // Position three players together: 1 (ally of 4) attacks 4 then 2.
+  s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: -Math.PI / 2, pitch: 0 });
+  s.handle(2, { t: 'xform', x: 2, y: 70, z: 0, yaw: 0, pitch: 0 });
+  s.handle(4, { t: 'xform', x: 2, y: 70, z: 0, yaw: 0, pitch: 0 });
+  check('same-faction melee is rejected',
+    !s.handle(1, { t: 'attack', target: 4 }).some((o) => o.msg.t === 'hurt'));
+  check('cross-faction melee applies',
+    s.handle(1, { t: 'attack', target: 2 }).some((o) => o.msg.t === 'hurt'));
+  check('same-faction ranged is rejected',
+    !s.handle(1, { t: 'rangedAttack', target: 4, amount: 10 }).some((o) => o.msg.t === 'hurt'));
+  check('cross-faction ranged applies',
+    s.handle(1, { t: 'rangedAttack', target: 2, amount: 10 }).some((o) => o.msg.t === 'hurt'));
+
+  // Ship: launched by player 1 (faction A). Ally 4 can't shell it; enemy 2 can.
+  s.handle(1, { t: 'edit', x: 0, y: 70, z: 0, block: Block.ShipHelm });
+  s.handle(1, { t: 'edit', x: 1, y: 70, z: 0, block: Block.Cannon });
+  const sid = (s.handle(1, { t: 'shipLaunch', x: 0, y: 70, z: 0 })
+    .find((o) => o.msg.t === 'shipState')!.msg as { ship: { id: number; faction: number } }).ship;
+  check('a launched ship carries its owner faction', sid.faction === facs[0]);
+  s.handle(4, { t: 'xform', x: 2, y: 70, z: 0, yaw: 0, pitch: 0 });
+  s.handle(2, { t: 'xform', x: 2, y: 70, z: 0, yaw: 0, pitch: 0 });
+  check('same-faction ship hit is rejected',
+    s.handle(4, { t: 'shipHit', id: sid.id, amount: 20 }).length === 0);
+  check('cross-faction ship hit applies',
+    s.handle(2, { t: 'shipHit', id: sid.id, amount: 20 }).some((o) => o.msg.t === 'shipTransforms'));
+
+  // Turret claimed by player 1 (faction A): ignores ally 4, fires on enemy 2.
+  s.handle(1, { t: 'xform', x: 40, y: 70, z: 40, yaw: 0, pitch: 0 });
+  s.handle(1, { t: 'edit', x: 41, y: 70, z: 40, block: Block.Turret });
+  s.handle(1, { t: 'turretClaim', x: 41, y: 70, z: 40 });
+  s.handle(1, { t: 'turretLoad', x: 41, y: 70, z: 40, item: Item.Cannonball, count: 50 });
+  s.handle(1, { t: 'turretLoad', x: 41, y: 70, z: 40, item: Item.OilBarrel, count: 20 });
+  s.handle(4, { t: 'xform', x: 44, y: 70, z: 40, yaw: 0, pitch: 0 }); // ally in range
+  s.handle(2, { t: 'xform', x: 500, y: 70, z: 500, yaw: 0, pitch: 0 });
+  check('a turret never fires on a same-faction player',
+    s.tickTurrets(2).every((o) => o.msg.t !== 'turretFire'));
+  s.handle(2, { t: 'xform', x: 44, y: 70, z: 40, yaw: 0, pitch: 0 }); // enemy in range
+  s.handle(4, { t: 'xform', x: 500, y: 70, z: 500, yaw: 0, pitch: 0 });
+  check('a turret fires on a cross-faction player',
+    s.tickTurrets(2).some((o) => o.msg.t === 'turretFire'));
+}
+
+// --- Accounts: login / register foundation -----------------------------------
+{
+  // A fake deterministic hasher (the real shell uses Node scrypt).
+  const hash: (p: string, s: string) => string = (p, s) => `${s}:${p}`;
+  check('username validation enforces 3–16 word chars',
+    validUsername('Ace_99') && !validUsername('ab') && !validUsername('has space') &&
+    !validUsername('waytoolongusername123'));
+
+  const accs = new Accounts();
+  const r1 = accs.register('Alice', 'hunter2', hash, 'saltA');
+  check('register creates an account with a faction',
+    r1.ok && !!r1.account && FACTIONS.some((f) => f.id === r1.account!.faction));
+  check('register rejects a short password',
+    !accs.register('Bob', 'xy', hash, 's').ok);
+  check('register rejects a duplicate (case-insensitive) name',
+    !accs.register('alice', 'whatever', hash, 's').ok);
+
+  // Faction auto-balance spreads registrations across the 3 teams.
+  for (const n of ['Bob', 'Cara', 'Dan', 'Eve', 'Fin']) accs.register(n, 'password', hash, 's');
+  const counts = [0, 0, 0];
+  for (const a of accs.list()) counts[a.faction]++;
+  check('registrations auto-balance across factions (max-min <= 1)',
+    Math.max(...counts) - Math.min(...counts) <= 1);
+
+  // Login verifies the password; wrong password + unknown user are rejected.
+  check('login succeeds with the right password',
+    accs.login('Alice', 'hunter2', hash).ok);
+  check('login fails with a wrong password', !accs.login('Alice', 'nope', hash).ok);
+  check('login fails for an unknown user', !accs.login('Ghost', 'x', hash).ok);
+  check('the stored hash is never the raw password',
+    accs.get('Alice')!.hash !== 'hunter2');
+
+  // Serialize -> reload round-trips (the shell persists this to disk).
+  const reloaded = new Accounts(JSON.parse(JSON.stringify(accs.toJSON())));
+  check('accounts survive a JSON round-trip + still authenticate',
+    reloaded.size === accs.size && reloaded.login('Alice', 'hunter2', hash).ok &&
+    reloaded.get('Alice')!.faction === accs.get('Alice')!.faction);
+}
+
+// --- Land claims + oil shield (M18) + raiding (M19) --------------------------
+{
+  // Pure claim helpers.
+  check('chunkOf + claimChunkKeys cover a 3×3 footprint',
+    chunkOf(20, -5).cx === 1 && chunkOf(20, -5).cz === -1 &&
+    claimChunkKeys(0, 0).length === 9);
+  const c0 = newClaim(1, 0, 0, 70, 0, 0);
+  check('a fresh claim has a full shield + grace',
+    c0.shieldHp === MAX_SHIELD_HP && shieldUp(c0) && inGrace(c0, 0) &&
+    claimProtected(c0, 0));
+  check('grace expires after GRACE_PERIOD', !inGrace(c0, GRACE_PERIOD + 1));
+
+  // Regen only while oil>0 (and drains oil); no oil -> passive decay to 0.
+  const fueled = newClaim(2, 0, 0, 70, 0, 0);
+  fueled.shieldHp = 500; fueled.oil = 100;
+  const oilBefore = fueled.oil;
+  tickClaim(fueled, 1);
+  check('a fuelled below-max shield regenerates and drains oil',
+    fueled.shieldHp > 500 && fueled.oil < oilBefore);
+  const dry = newClaim(3, 0, 0, 70, 0, 0);
+  dry.shieldHp = 500; dry.oil = 0;
+  tickClaim(dry, 1);
+  check('an unfuelled shield decays (no regen)', dry.shieldHp < 500);
+  // Run it dry: with no oil it eventually drops to 0 (raidable).
+  for (let i = 0; i < 400; i++) tickClaim(dry, 1);
+  check('an unfuelled shield decays all the way to raidable',
+    dry.shieldHp === 0 && !shieldUp(dry));
+
+  check('feedOil tops the buffer in barrel units',
+    feedOil(newClaim(4, 0, 0, 70, 0, 0), 3) === 3 &&
+    (() => { const c = newClaim(5, 0, 0, 70, 0, 0); feedOil(c, 2); return c.oil === 2 * OIL_PER_BARREL; })());
+  check('damageShield drives the shield down + reports it',
+    (() => { const c = newClaim(6, 0, 0, 70, 0, 0); return !damageShield(c, 10) && damageShield(c, MAX_SHIELD_HP); })());
+  check('sanitizeClaim clamps oil/shield + rejects junk',
+    sanitizeClaim(null) === null &&
+    (() => { const c = sanitizeClaim({ id: 1, faction: 0, coreX: 0, coreY: 1, coreZ: 0, oil: 1e9, shieldHp: 1e9 })!;
+      return c.oil <= 4000 && c.shieldHp <= MAX_SHIELD_HP; })());
+
+  // Claims manager: overlap rejection + chunk lookup.
+  const mgr = new Claims();
+  check('placing a Core claims a 3×3 footprint + indexes it',
+    !!mgr.create(0, 0, 70, 0, 0) && !!mgr.at(20, 0) && !!mgr.at(-10, -10) && !mgr.at(40, 0));
+  check('an overlapping claim is rejected, a distant one allowed',
+    mgr.create(1, 10, 70, 10, 0) === null && !!mgr.create(1, 200, 70, 200, 0));
+
+  // --- Server: place, protect, breach, raid (the demonstrable loop) ---
+  const s = new GameServer(1337, mulberry32(7)); // joins -> 1:fA, 2:fB, ...
+  s.addPlayer(1); s.addPlayer(2);
+  s.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+  const placeOut = s.handle(1, { t: 'edit', x: 0, y: 70, z: 0, block: Block.Core });
+  const claimMsg = placeOut.find((o) => o.msg.t === 'claim');
+  check('placing a Core broadcasts a claim for the placer faction',
+    !!claimMsg && (claimMsg!.msg as { claim: { faction: number } }).claim.faction === 0);
+
+  // Enemy (player 2) cannot edit inside the up/graced claim; owner can.
+  s.handle(2, { t: 'xform', x: 2.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+  check('an enemy edit inside an up shield is rejected',
+    s.handle(2, { t: 'edit', x: 2, y: 70, z: 0, block: Block.Stone }).length === 0);
+  check('a faction member edit inside the claim is allowed',
+    s.handle(1, { t: 'edit', x: 2, y: 71, z: 0, block: Block.Stone })
+      .some((o) => o.msg.t === 'edit'));
+  check('an enemy can never break the Core itself',
+    s.handle(2, { t: 'edit', x: 0, y: 70, z: 0, block: Block.Air }).length === 0);
+
+  // Grace alone blocks raids even with the shield knocked to 0.
+  for (let i = 0; i < 20; i++) s.handle(2, { t: 'claimHit', x: 0, y: 70, z: 0, amount: 200 });
+  check('grace blocks a raid even with the shield at 0',
+    s.handle(2, { t: 'edit', x: 2, y: 70, z: 0, block: Block.Air }).length === 0);
+
+  // Past grace + drained shield -> the claim is raidable.
+  s.tickClaims(GRACE_PERIOD + 400); // expire grace; with no oil the shield bleeds to 0
+  check('after grace + fuel-starvation the claim is breached',
+    s.handle(2, { t: 'edit', x: 3, y: 70, z: 0, block: Block.Stone }).some((o) => o.msg.t === 'edit'));
+
+  // Raid a stored chest: a capped fraction goes to the raider, the rest spills.
+  s.handle(1, { t: 'edit', x: 1, y: 70, z: 0, block: Block.Chest });
+  s.handle(1, { t: 'chestSet', x: 1, y: 70, z: 0, slots: [{ id: Item.IronIngot, count: 10 }] });
+  s.handle(2, { t: 'xform', x: 1.6, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+  const raid = s.handle(2, { t: 'edit', x: 1, y: 70, z: 0, block: Block.Air });
+  const got = raid.find((o) => o.msg.t === 'gotitem' && o.to === 2);
+  const spill = raid.find((o) => o.msg.t === 'itemspawn');
+  check('raiding a chest gives the raider exactly the capped fraction',
+    !!got && (got!.msg as { count: number }).count === 5 &&
+    !!spill && (spill!.msg as { item: { count: number } }).item.count === 5);
+
+  // A fuelled shield out-paces a lone attacker (bursts with reload gaps that let
+  // regen resume) but falls to sustained multi-source fire (regen never clears).
+  const lone = newClaim(10, 0, 0, 70, 0, 0); lone.oil = 2000;
+  for (let i = 0; i < 80; i++) { if (i % 6 === 0) damageShield(lone, 30); tickClaim(lone, 1); }
+  check('a fuelled shield holds vs a single attacker', lone.shieldHp > 800);
+  const swarm = newClaim(11, 0, 0, 70, 0, 0); swarm.oil = 2000;
+  for (let i = 0; i < 120; i++) { damageShield(swarm, 12); tickClaim(swarm, 1); }
+  check('a fuelled shield falls to sustained multi-hit fire', swarm.shieldHp === 0);
+
+  // The Core survives a raid: the claim still exists + can be re-fuelled.
+  s.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+  const fed = s.handle(1, { t: 'claimFeed', x: 0, y: 70, z: 0, count: 5 });
+  check('the Core persists through a raid and can be re-fuelled',
+    fed.some((o) => o.msg.t === 'claim' &&
+      (o.msg as { claim: { oil: number } }).claim.oil > 0));
 }
 
 // --- Building set (M15): per-wood planks + slabs + stairs --------------------
@@ -1776,6 +2150,161 @@ check('furnace smelts ore/sand/log but not removed foods',
       boxes[0][1][1] === 0.5 &&            // bottom box is half-height
       boxes[1][0][1] === 0.5 && boxes[1][1][2] === 0.5; // top quarter, back half
   })());
+}
+
+// --- Partial (shape-aware) collision + auto-step + top slabs (M16) -----------
+{
+  // collisionBoxes: the single source of truth for both render + physics shapes.
+  check('collisionBoxes: full cube -> one full box', (() => {
+    const b = collisionBoxes(Block.Stone);
+    return b.length === 1 && b[0][0][1] === 0 && b[0][1][1] === 1;
+  })());
+  check('collisionBoxes: bottom slab -> lower half', (() => {
+    const b = collisionBoxes(Block.OakSlab);
+    return b.length === 1 && b[0][0][1] === 0 && b[0][1][1] === 0.5;
+  })());
+  check('collisionBoxes: top slab -> upper half', (() => {
+    const b = collisionBoxes(Block.OakSlabTop);
+    return b.length === 1 && b[0][0][1] === 0.5 && b[0][1][1] === 1;
+  })());
+  check('collisionBoxes: stairs -> two boxes (bottom slab + top quarter)',
+    collisionBoxes(Block.OakStairsN).length === 2);
+  check('collisionBoxes: non-solid (water/plant/torch) -> none',
+    collisionBoxes(Block.Water).length === 0 &&
+    collisionBoxes(Block.TallGrass).length === 0 &&
+    collisionBoxes(Block.Torch).length === 0 &&
+    collisionBoxes(Block.Air).length === 0);
+  // Render boxes pick the right half + match the shared constants.
+  check('SLAB_BOTTOM/SLAB_TOP/FULL_BOX match the slab halves',
+    SLAB_BOTTOM[1][1] === 0.5 && SLAB_TOP[0][1] === 0.5 && FULL_BOX[1][1] === 1);
+
+  // Top-slab block + helper wiring.
+  check('slab helpers pair bottom <-> top per wood',
+    isSlab(Block.OakSlab) && isSlab(Block.OakSlabTop) && !isSlab(Block.Stone) &&
+    isTopSlab(Block.OakSlabTop) && !isTopSlab(Block.OakSlab) &&
+    slabTopId(Block.BirchSlab) === Block.BirchSlabTop &&
+    slabBottomId(Block.BirchSlabTop) === Block.BirchSlab &&
+    slabBottomId(Block.SpruceSlab) === Block.SpruceSlab);
+  check('top slabs stay <= 255 (Uint8 chunk data)', Block.SpruceSlabTop <= 255);
+
+  // Placement mapping: top face / lower half -> bottom; bottom face / upper -> top.
+  check('slabPlacement: top face -> bottom slab',
+    slabPlacement(Block.OakSlab, 1, 0.9) === Block.OakSlab);
+  check('slabPlacement: bottom face -> top slab',
+    slabPlacement(Block.OakSlab, -1, 0.1) === Block.OakSlabTop);
+  check('slabPlacement: side face lower half -> bottom, upper half -> top',
+    slabPlacement(Block.OakSlab, 0, 0.2) === Block.OakSlab &&
+    slabPlacement(Block.OakSlab, 0, 0.8) === Block.OakSlabTop);
+  // The item stays the bottom slab: top slabs drop + pick-block to the bottom id.
+  check('top slab drops the bottom-slab item',
+    dropFor(Block.OakSlabTop, 0.5)?.id === Block.OakSlab &&
+    dropFor(Block.SpruceSlabTop, 0.5)?.id === Block.SpruceSlab);
+
+  // raycast now reports the world hit point (needed for top/bottom on side faces).
+  {
+    const origin = new THREE.Vector3(spawn.x, spawn.y + 1.62, spawn.z);
+    const down = raycastBlocks(world, origin, new THREE.Vector3(0, -1, 0), 4.5);
+    check('raycast reports a finite hit point on the targeted face',
+      !!down && Number.isFinite(down.hx) && Number.isFinite(down.hy) &&
+      Math.abs(down.hx - origin.x) < 1e-6 && down.hy <= origin.y + 1e-6);
+  }
+
+  // --- Player physics on partial shapes (headless, like the energy tests) ---
+  const cx = Math.floor(spawn.x) + 5, cz = Math.floor(spawn.z) + 5, base = 235;
+  const idle = { ...IDLE_INPUT } as never;
+  const walk = { ...IDLE_INPUT, forward: true } as never;
+  const clearRegion = () => {
+    for (let dx = -2; dx <= 2; dx++)
+      for (let dz = -2; dz <= 2; dz++)
+        for (let dy = 0; dy <= 6; dy++)
+          world.setBlock(cx + dx, base + dy, cz + dz, Block.Air);
+  };
+  const restOn = (id: number): Player => {
+    clearRegion();
+    world.setBlock(cx, base, cz, id);
+    const p = new Player({ x: cx + 0.5, y: base + 3, z: cz + 0.5 });
+    for (let i = 0; i < 240; i++) p.update(1 / 60, idle, world);
+    return p;
+  };
+  const onBottom = restOn(Block.OakSlab);
+  check('player falling onto a bottom slab rests at base+0.5',
+    onBottom.onGround && Math.abs(onBottom.pos.y - (base + 0.5)) < 0.02,
+    `y=${onBottom.pos.y.toFixed(3)}`);
+  const onTop = restOn(Block.OakSlabTop);
+  check('player falling onto a top slab rests at base+1',
+    onTop.onGround && Math.abs(onTop.pos.y - (base + 1)) < 0.02,
+    `y=${onTop.pos.y.toFixed(3)}`);
+  const onCube = restOn(Block.Stone);
+  check('player falling onto a full block rests at base+1',
+    onCube.onGround && Math.abs(onCube.pos.y - (base + 1)) < 0.02,
+    `y=${onCube.pos.y.toFixed(3)}`);
+
+  // Auto-step: walk into a slab/stair step on a floor and climb it without
+  // jumping. A tall wall just past the step stops the walker from striding off
+  // the small test platform after climbing.
+  const stepUp = (stepId: number): Player => {
+    clearRegion();
+    for (let dx = -2; dx <= 2; dx++)
+      for (let dz = -2; dz <= 2; dz++) world.setBlock(cx + dx, base, cz + dz, Block.Stone);
+    world.setBlock(cx + 1, base + 1, cz, stepId); // 0.5-high step in front (+x)
+    world.setBlock(cx + 2, base + 1, cz, Block.Stone); // tall wall to halt the walk
+    world.setBlock(cx + 2, base + 2, cz, Block.Stone);
+    const p = new Player({ x: cx + 0.5, y: base + 1, z: cz + 0.5 });
+    p.yaw = -Math.PI / 2; // face +x
+    for (let i = 0; i < 5; i++) p.update(1 / 60, idle, world); // settle
+    for (let i = 0; i < 150; i++) p.update(1 / 60, walk, world);
+    return p;
+  };
+  const slabStep = stepUp(Block.OakSlab);
+  check('player auto-steps up onto a bottom slab while walking',
+    slabStep.onGround && slabStep.pos.y > base + 1.4 && slabStep.pos.x > cx + 1.0,
+    `y=${slabStep.pos.y.toFixed(2)} x=${slabStep.pos.x.toFixed(2)}`);
+  const stairStep = stepUp(Block.OakStairsE); // tall step on +x: low side faces the player
+  check('player auto-steps up onto a stair while walking',
+    stairStep.onGround && stairStep.pos.y > base + 1.4 && stairStep.pos.x > cx + 1.0,
+    `y=${stairStep.pos.y.toFixed(2)} x=${stairStep.pos.x.toFixed(2)}`);
+
+  // A full 1-block wall (no step room) must still block — no climbing.
+  {
+    clearRegion();
+    for (let dx = -2; dx <= 2; dx++)
+      for (let dz = -2; dz <= 2; dz++) world.setBlock(cx + dx, base, cz + dz, Block.Stone);
+    world.setBlock(cx + 1, base + 1, cz, Block.Stone); // full-cube wall
+    const p = new Player({ x: cx + 0.5, y: base + 1, z: cz + 0.5 });
+    p.yaw = -Math.PI / 2;
+    for (let i = 0; i < 5; i++) p.update(1 / 60, idle, world);
+    for (let i = 0; i < 150; i++) p.update(1 / 60, walk, world);
+    check('player cannot auto-step through a full 1-block wall',
+      p.pos.x < cx + 0.72 && Math.abs(p.pos.y - (base + 1)) < 0.05,
+      `x=${p.pos.x.toFixed(2)} y=${p.pos.y.toFixed(2)}`);
+    clearRegion();
+  }
+
+  // intersectsBlock is shape-aware: a bottom slab you stand on is clear, but a
+  // full cube or a top slab in the same cell overlaps the body.
+  {
+    const p = new Player({ x: cx + 0.5, y: base + 0.5, z: cz + 0.5 });
+    check('intersectsBlock: shape-aware allows a slab at the feet, blocks a cube',
+      !p.intersectsBlock(cx, base, cz, Block.OakSlab) &&
+      p.intersectsBlock(cx, base, cz, Block.Stone) &&
+      p.intersectsBlock(cx, base, cz, Block.OakSlabTop) &&
+      p.intersectsBlock(cx, base, cz)); // no id -> full cube fallback
+  }
+
+  // Ship deck height: a bottom-slab-topped column stands a rider half a block
+  // lower than a full-block deck.
+  {
+    const helm = { dx: 0, dy: 0, dz: 0, id: Block.ShipHelm };
+    const full = newShip(90, 'Cap', { x: 0, y: 64, z: 0 }, 0,
+      [helm, { dx: 1, dy: 0, dz: 0, id: Block.OakPlanks }]);
+    const slab = newShip(91, 'Cap', { x: 0, y: 64, z: 0 }, 0,
+      [helm, { dx: 1, dy: 0, dz: 0, id: Block.OakSlab }]);
+    const topf = deckHeightAt(full, 1, 0)!;
+    const tops = deckHeightAt(slab, 1, 0)!;
+    check('deckHeightAt: bottom-slab deck is half a block below a full-block deck',
+      Math.abs(topf - 64.5) < 1e-6 && Math.abs(tops - 64.0) < 1e-6,
+      `full=${topf} slab=${tops}`);
+  }
 }
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} FAILURES`);

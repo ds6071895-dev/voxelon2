@@ -7,7 +7,9 @@ import { HUD } from './hud';
 import { Input, FROZEN_INPUT } from './input';
 import { Interaction } from './interact';
 import { Inventory } from './inventory';
-import { InventoryUI, MachineUIContext, ShipUIContext, TurretUIContext } from './inventory_ui';
+import {
+  InventoryUI, MachineUIContext, ShipUIContext, TurretUIContext, ClaimUIContext,
+} from './inventory_ui';
 import { dropFor, GunInfo, Item, ItemStack, ITEMS } from './items';
 import {
   Machines, MachineType, allowedFilterMask, applyUpgrade, claimMachine,
@@ -37,9 +39,17 @@ import {
 } from './turrets';
 import { TurretModels } from './turretmodels';
 import {
-  NodeStatus, ScoreEntry, TERRITORY_TARGET_SCORE, deriveControlNodes,
+  NodeStatus, ScoreEntry, NODE_OIL_RATE,
+  deriveControlNodes, resolveNode,
 } from './territory';
 import { RemotePlayers } from './remoteplayers';
+import { WorldMap } from './worldmap';
+import { Accounts, Account } from './net/accounts';
+import { FACTIONS, NO_FACTION, factionColor, factionName, sameFaction } from './teams';
+import {
+  Claims, OIL_CAP, OIL_PER_BARREL, MAX_SHIELD_HP, claimProtected, damageShield,
+  feedOil, shieldUp,
+} from './claims';
 import { Sky, WATER_FOG_COLOR } from './sky';
 import { Survival } from './survival';
 import { createAtlas, createCrackTextures } from './textures';
@@ -159,6 +169,25 @@ const shipTargets = new Map<number, { x: number; y: number; z: number; yaw: numb
 const turretStates = new Map<string, TurretState>();
 const turretModels = new TurretModels(scene, turretStates);
 projectiles.shipsProvider = () => ships.list(); // bullets/cannonballs chip hull HP
+// A round that lands inside an enemy faction's claim drains its shield (M19).
+projectiles.claimSink = (x, y, z, damage) => {
+  const c = claims.at(x, z);
+  if (!c || sameFaction(localFaction, c.faction)) return;
+  if (net.connected) net.sendClaimHit(c.coreX, c.coreY, c.coreZ, damage);
+  else damageShield(c, damage); // offline parity (no enemy claims in SP)
+};
+// --- Factions (M18): land claims + oil shields ---
+const claims = new Claims();
+let openClaim: { x: number; y: number; z: number } | null = null;
+const shieldGroup = new THREE.Group();
+scene.add(shieldGroup);
+const shieldMeshes = new Map<number, THREE.LineSegments>();
+// World map (M key): biome base + faction claims + oil nodes + waypoints.
+const worldMap = new WorldMap(scene, world.terrain, claims, {
+  player: () => ({ x: player.pos.x, z: player.pos.z, yaw: player.yaw }),
+  faction: () => localFaction,
+  nodes: () => territoryNodes,
+});
 let pilotingShipId: number | null = null;
 let ridingShipId: number | null = null;
 let localShipId = 1; // offline ship ids (no server to assign them)
@@ -172,8 +201,6 @@ let lastSneak = false;      // sneak rising-edge (Shift docks while piloting)
 // Territory HUD state.
 let territoryNodes: NodeStatus[] = [];
 let territoryScores: ScoreEntry[] = [];
-let territoryRoundTime = 0;
-let territoryWinner = '';
 let openMachine: { x: number; y: number; z: number } | null = null;
 let openChest: { x: number; y: number; z: number } | null = null;
 let lastChestVersion = -1;   // last version pushed/loaded — gates the live sync
@@ -190,6 +217,23 @@ const killfeedEl = document.createElement('div');
 killfeedEl.style.cssText =
   'position:absolute;top:28px;right:8px;z-index:10;pointer-events:none;text-align:right;';
 app.appendChild(killfeedEl);
+
+// World-map button (also bound to the M key). Clickable whenever the pointer
+// isn't locked (menus); during locked FPS play the M key opens it.
+const mapBtn = document.createElement('button');
+mapBtn.className = 'mc-font';
+mapBtn.textContent = '🗺 Map (M)';
+mapBtn.style.cssText =
+  'position:absolute;bottom:8px;right:8px;z-index:12;font-size:12px;padding:6px 10px;' +
+  'cursor:pointer;border:2px solid;border-color:#fff #555 #555 #fff;background:#6b6b6b;' +
+  'color:#fff;text-shadow:none;';
+mapBtn.addEventListener('click', () => {
+  if (player.dead) return;
+  if (worldMap.open) { worldMap.hide(); input.lock(); return; }
+  if (invUI.open) invUI.hide();
+  worldMap.show(); // pointer is already unlocked when a DOM button is clickable
+});
+app.appendChild(mapBtn);
 
 // Territory objective HUD: a standings panel (top-left) + a win banner.
 const territoryEl = document.createElement('div');
@@ -209,9 +253,29 @@ const beaconGroup = new THREE.Group();
 scene.add(beaconGroup);
 const beaconMeshes = new Map<number, THREE.Mesh>();
 const beaconGeo = new THREE.BoxGeometry(2, 40, 2);
+// The local player's faction: server-assigned in MP (onWelcome), or a single
+// local faction offline so shields/ownership/colors still work in single-player.
+let localFaction = FACTIONS[0].id;
+// Authentication state (mandatory login). Declared early so refreshNetInfo can
+// read it; the form + flow are wired further down.
+let authed = false;
+let authedName = '';
+// Local grace/shield clock for the offline claim sim (advanced in the frame loop).
+let worldTimeLocal = 0;
+function factionCss(id: number): string {
+  const c = factionColor(id);
+  return `#${(c & 0xffffff).toString(16).padStart(6, '0')}`;
+}
 function refreshNetInfo(): void {
-  netinfoEl.textContent = net.connected
-    ? `${net.username}   ${net.remotes.size + 1} online` : '';
+  const badge = localFaction === NO_FACTION ? '' :
+    `<span style="color:${factionCss(localFaction)}">■ ${factionName(localFaction)}</span>  `;
+  if (net.connected) {
+    netinfoEl.innerHTML = `${badge}${net.username}   ${net.remotes.size + 1} online`;
+  } else if (authed) {
+    netinfoEl.innerHTML = `${badge}${authedName}   (offline)`;
+  } else {
+    netinfoEl.innerHTML = '';
+  }
 }
 function showKill(killer: string, victim: string): void {
   const line = document.createElement('div');
@@ -294,6 +358,11 @@ interaction.onOpenContainer = (kind, x, y, z) => {
     if (!turretStates.has(key)) turretStates.set(key, newTurret()); // local predict
     if (net.connected) net.sendTurretOpen(x, y, z);
     invUI.show('turret', undefined, undefined, undefined, turretCtxFor(x, y, z));
+  } else if (kind === 'claim') {
+    if (!claims.coreAt(x, y, z)) return; // no claim here (e.g. an orphan Core)
+    openClaim = { x, y, z };
+    if (net.connected) net.sendClaimOpen(x, y, z);
+    invUI.show('claim', undefined, undefined, undefined, undefined, claimCtxFor(x, y, z));
   } else {
     invUI.show(kind, kind === 'furnace' ? furnaces.get(x, y, z) : undefined);
   }
@@ -376,6 +445,62 @@ function machineCtxFor(x: number, y: number, z: number): MachineUIContext {
 function forceCloseMachine(): void {
   openMachine = null;
   if (invUI.open && invUI.mode === 'machine') invUI.hide();
+}
+function forceCloseClaim(): void {
+  openClaim = null;
+  if (invUI.open && invUI.mode === 'claim') invUI.hide();
+}
+// Faction-colored wireframe shield dome over a claim's 3×3-chunk footprint.
+const SHIELD_EDGES = new THREE.EdgesGeometry(new THREE.BoxGeometry(48, 80, 48));
+function removeShieldDome(id: number): void {
+  const m = shieldMeshes.get(id);
+  if (!m) return;
+  shieldGroup.remove(m);
+  (m.material as THREE.Material).dispose(); // geometry is shared — never dispose it
+  shieldMeshes.delete(id);
+}
+function updateShieldDomes(_dt: number): void {
+  const live = new Set<number>();
+  for (const c of claims.list()) {
+    live.add(c.id);
+    let mesh = shieldMeshes.get(c.id);
+    if (!mesh) {
+      mesh = new THREE.LineSegments(SHIELD_EDGES,
+        new THREE.LineBasicMaterial({ transparent: true, depthWrite: false }));
+      shieldGroup.add(mesh);
+      shieldMeshes.set(c.id, mesh);
+    }
+    mesh.position.set(c.cx * 16 + 8, c.coreY + 30, c.cz * 16 + 8);
+    const mat = mesh.material as THREE.LineBasicMaterial;
+    mat.color.setHex(factionColor(c.faction));
+    mesh.visible = shieldUp(c);
+    const frac = Math.max(0, Math.min(1, c.shieldHp / MAX_SHIELD_HP));
+    const flick = frac < 0.25 ? 0.35 + 0.5 * Math.abs(Math.sin(worldTimeLocal * 8)) : 1;
+    mat.opacity = (0.16 + 0.34 * frac) * flick;
+  }
+  for (const id of [...shieldMeshes.keys()]) if (!live.has(id)) removeShieldDome(id);
+}
+function claimCtxFor(x: number, y: number, z: number): ClaimUIContext {
+  const here = () => claims.coreAt(x, y, z) ?? null;
+  const mine = () => { const c = here(); return !!c && sameFaction(localFaction, c.faction); };
+  return {
+    state: here,
+    mine,
+    canFeed: () => mine() && inventory.countItem(Item.OilBarrel) > 0,
+    feed: () => {
+      const c = here();
+      if (!c || !mine()) return;
+      const have = inventory.countItem(Item.OilBarrel);
+      if (have <= 0) return;
+      // Feed as many barrels as the buffer has room for.
+      const room = Math.floor((OIL_CAP - c.oil) / OIL_PER_BARREL);
+      const n = Math.min(have, room);
+      if (n <= 0) return;
+      inventory.removeItem(Item.OilBarrel, n);
+      if (net.connected) net.sendClaimFeed(x, y, z, n);
+      else feedOil(c, n); // offline: apply locally
+    },
+  };
 }
 // Resolve a footprint cell (anchor or MachinePart) to the anchor block below.
 function resolveMachineAnchor(x: number, y: number, z: number): { x: number; y: number; z: number } | null {
@@ -507,7 +632,80 @@ function enterTitle(): void {
   pauseEl.style.display = 'none';
 }
 
-document.getElementById('play-btn')!.addEventListener('click', () => {
+// --- Login / register (mandatory accounts) ---------------------------------
+// Online: the server verifies against its account store (scrypt). Offline SP:
+// a LOCAL account store in localStorage (the same pure Accounts module + a sync
+// hash) gates play so there's a login for everything. Play is hidden until authed.
+const authEl = document.getElementById('auth')!;
+const authUser = document.getElementById('auth-user') as HTMLInputElement;
+const authPass = document.getElementById('auth-pass') as HTMLInputElement;
+const authErr = document.getElementById('auth-err')!;
+const authStatus = document.getElementById('auth-status')!;
+const playBtn = document.getElementById('play-btn')!;
+
+/** Non-cryptographic salted hash for OFFLINE local accounts (identity gate only;
+ *  real security is the server's scrypt). FNV-1a over salt+password. */
+function localHash(pass: string, salt: string): string {
+  let h = 2166136261 >>> 0;
+  const s = `${salt} ${pass}`;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0).toString(16);
+}
+function loadLocalAccounts(): Account[] {
+  try { return JSON.parse(localStorage.getItem('voxelon.accounts') || '[]'); } catch { return []; }
+}
+const localAccounts = new Accounts(loadLocalAccounts());
+function saveLocalAccounts(): void {
+  try { localStorage.setItem('voxelon.accounts', JSON.stringify(localAccounts.toJSON())); } catch { /* ignore */ }
+}
+
+function onAuthSuccess(username: string): void {
+  authed = true;
+  authedName = username;
+  authEl.style.display = 'none';
+  playBtn.style.display = '';
+  authErr.textContent = '';
+  authStatus.textContent = '';
+  refreshNetInfo();
+}
+
+function attemptAuth(mode: 'login' | 'register', retries = 12): void {
+  if (authed) return;
+  const username = authUser.value.trim();
+  const password = authPass.value;
+  authErr.textContent = '';
+  if (net.socketOpen) {
+    // Online: the server is the authority.
+    authStatus.textContent = mode === 'register' ? 'Registering…' : 'Logging in…';
+    if (mode === 'register') net.sendRegister(username, password);
+    else net.sendLogin(username, password);
+  } else if (net.offline) {
+    // Offline single-player: verify against the local account store.
+    const res = mode === 'register'
+      ? localAccounts.register(username, password, localHash,
+          `${Math.floor(Math.random() * 1e9).toString(16)}${Date.now().toString(16)}`)
+      : localAccounts.login(username, password, localHash);
+    if (!res.ok || !res.account) { authErr.textContent = res.error ?? 'Failed'; return; }
+    if (mode === 'register') saveLocalAccounts();
+    localFaction = res.account.faction;
+    onAuthSuccess(res.account.username);
+  } else if (retries > 0) {
+    // Still resolving whether a server is reachable — try again shortly.
+    authStatus.textContent = 'Connecting…';
+    setTimeout(() => attemptAuth(mode, retries - 1), 350);
+  } else {
+    authStatus.textContent = '';
+    authErr.textContent = 'Could not reach the server. Try again.';
+  }
+}
+
+net.onAuthErr = (error) => { authStatus.textContent = ''; authErr.textContent = error; };
+document.getElementById('login-btn')!.addEventListener('click', () => attemptAuth('login'));
+document.getElementById('register-btn')!.addEventListener('click', () => attemptAuth('register'));
+authPass.addEventListener('keydown', (e) => { if (e.key === 'Enter') attemptAuth('login'); });
+
+playBtn.addEventListener('click', () => {
+  if (!authed) return;
   audio.resume();
   input.lock();
 });
@@ -518,13 +716,14 @@ document.addEventListener('pointerlockchange', () => {
   if (!worldReady) return;
   if (input.locked) {
     enterPlaying(); // entered or returned to the game
-  } else if (!player.dead && !invUI.open && screen === 'playing') {
+  } else if (!player.dead && !invUI.open && !worldMap.open && screen === 'playing') {
     enterPause(); // Esc / lost focus while playing -> pause, not the title
   }
 });
 document.addEventListener('keydown', (e) => {
   if (e.code !== 'Escape') return;
-  if (invUI.open) { invUI.hide(); input.lock(); }
+  if (worldMap.open) { worldMap.hide(); input.lock(); }
+  else if (invUI.open) { invUI.hide(); input.lock(); }
   else if (screen === 'paused' && !player.dead) input.lock(); // Esc resumes from pause
 });
 
@@ -562,7 +761,10 @@ function checkDeath(): void {
 
 // --- Multiplayer wiring (callbacks fire async, after the world is set up) ---
 net.onWelcome = (me) => {
+  // The welcome IS the online auth success signal — reveal Play, hide the form.
+  onAuthSuccess(me.username);
   // Adopt the server-assigned spawn so we line up with the server's record.
+  localFaction = me.faction;
   player.pos.set(me.x, me.y, me.z);
   player.vel.set(0, 0, 0);
   player.health = me.health;
@@ -673,11 +875,20 @@ net.onTurretFire = (x, y, z, tx, ty, tz) => {
   particles.poof(tx, ty, tz);
   audio.gun(new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
 };
-net.onTerritory = (nodes, scores, roundTime, winner) => {
+net.onTerritory = (nodes, scores) => {
   territoryNodes = nodes;
   territoryScores = scores;
-  territoryRoundTime = roundTime;
-  territoryWinner = winner;
+};
+net.onClaim = (claim) => {
+  claims.set(claim); // adopt authoritative state (re-indexes its chunks)
+};
+net.onClaimRemove = (id) => {
+  claims.remove(id);
+  removeShieldDome(id);
+  if (openClaim) { const c = claims.coreAt(openClaim.x, openClaim.y, openClaim.z); if (!c) forceCloseClaim(); }
+};
+net.onBreach = (attacker, faction, victim) => {
+  showKill(`${factionName(faction)} breached`, `${factionName(victim)}'s claim`);
 };
 net.onDisconnect = () => {
   player.damageSink = undefined;
@@ -693,13 +904,34 @@ net.onDisconnect = () => {
   openShip = null;
   territoryNodes = [];
   territoryScores = [];
+  claims.clear();
+  for (const id of [...shieldMeshes.keys()]) removeShieldDome(id);
+  forceCloseClaim();
   refreshNetInfo();
 };
 interaction.onEdit = (x, y, z, b) => {
   // Placing a machine block creates its local entity (prediction offline + MP).
   const mt = machineTypeForBlock(b);
   if (mt !== null) machines.place(x, y, z, mt);
+  // Faction Core: offline we own the claim sim (server owns it in MP). Placing
+  // a Core claims a 3×3 footprint; breaking one (owner) dissolves its claim.
+  if (!net.connected) {
+    if (b === Block.Core) claims.create(localFaction, x, y, z, worldTimeLocal);
+    else if (b === Block.Air) {
+      const c = claims.coreAt(x, y, z);
+      if (c) { claims.remove(c.id); removeShieldDome(c.id); }
+    }
+  }
   net.sendEdit(x, y, z, b);
+};
+// Block edits inside an enemy faction's protected claim (mirrors the server so
+// the client never mispredicts a break/place it isn't allowed to make).
+interaction.canEdit = (x, y, z) => {
+  const c = claims.at(x, z);
+  if (!c || sameFaction(localFaction, c.faction)) return true;
+  // Enemies can never touch the Core block; otherwise blocked while protected.
+  if (Math.floor(x) === c.coreX && Math.floor(y) === c.coreY && Math.floor(z) === c.coreZ) return false;
+  return !claimProtected(c, worldTimeLocal);
 };
 net.connect();
 
@@ -710,6 +942,7 @@ let fps = 0, frames = 0, fpsTime = 0;
 let lastHealth = 20;
 let lastSentArmor = -1; // last armor-points value pushed to the server
 let lastInWater = false;
+let lavaTimer = 0; // throttles lava burn damage
 
 // Gun state.
 const ammoEl = document.getElementById('ammo')!;
@@ -784,6 +1017,18 @@ function updateAtmosphere(): void {
     fog.far = FOG_FAR;
   }
   (scene.background as THREE.Color).copy(fog.color);
+}
+
+function toggleMap(): void {
+  if (player.dead) return;
+  if (worldMap.open) {
+    worldMap.hide();
+    input.lock();
+  } else if (input.locked) {
+    if (invUI.open) invUI.hide();
+    worldMap.show();
+    document.exitPointerLock();
+  }
 }
 
 function toggleInventory(): void {
@@ -1003,62 +1248,46 @@ function snapToDeck(ship: ShipState): void {
   }
 }
 
-// Offline territory: derive nodes + accrue local score so single-player still
-// has a live objective + HUD (in MP the server is authoritative).
+// Offline territory: derive nodes + resolve control so single-player still has a
+// live objective + HUD (in MP the server is authoritative). No score race — oil
+// nodes are pure income that fuels claims.
 const localNodes = deriveControlNodes((x, z) => world.terrain.oilRichness(x, z));
-const localScores = new Map<string, number>();
-let localRoundTime = 0;
-let localWinner = '';
-let localWinHold = 0;
 function updateTerritoryOffline(dt: number): void {
-  const presence = [{ name: 'You', x: player.pos.x, z: player.pos.z, dead: player.dead }];
-  if (!localWinner) {
-    localRoundTime += dt;
-    for (const node of localNodes) {
-      const present = presence.filter((p) => !p.dead &&
-        Math.hypot(p.x - node.x, p.z - node.z) <= node.radius);
-      if (present.length === 1) {
-        localScores.set('You', (localScores.get('You') ?? 0) + dt);
-        if ((localScores.get('You') ?? 0) >= TERRITORY_TARGET_SCORE) localWinner = 'You';
-      }
-    }
-  } else {
-    localWinHold += dt;
-    if (localWinHold >= 10) { localScores.clear(); localRoundTime = 0; localWinner = ''; localWinHold = 0; }
-  }
+  const presence = [{ faction: localFaction, x: player.pos.x, z: player.pos.z, dead: player.dead }];
+  const nodesByFaction = new Map<number, number>();
   territoryNodes = localNodes.map((n) => {
-    const inside = Math.hypot(player.pos.x - n.x, player.pos.z - n.z) <= n.radius && !player.dead;
-    return { id: n.id, x: n.x, z: n.z, radius: n.radius,
-      controller: inside ? 'You' : '', contested: false };
+    const st = resolveNode(n, presence);
+    if (st.faction >= 0) nodesByFaction.set(st.faction, (nodesByFaction.get(st.faction) ?? 0) + 1);
+    return st;
   });
-  territoryScores = [...localScores.entries()].map(([name, score]) => ({ name, score: Math.floor(score) }));
-  territoryRoundTime = localRoundTime;
-  territoryWinner = localWinner;
+  // Oil income tops up the local faction's claims (offline parity with M20).
+  for (const c of claims.list()) {
+    const cnt = nodesByFaction.get(c.faction) ?? 0;
+    if (cnt > 0) c.oil = Math.min(OIL_CAP, c.oil + cnt * NODE_OIL_RATE * dt);
+  }
+  // Standings = live node holdings per faction.
+  territoryScores = [...nodesByFaction.entries()]
+    .map(([f, cnt]) => ({ name: factionName(f), score: cnt }));
 }
 
-const myName = () => (net.connected ? net.username : 'You');
+const myFactionName = () => factionName(localFaction);
 function updateTerritoryHud(): void {
   if (!territoryNodes.length) { territoryEl.style.display = 'none'; winBannerEl.style.display = 'none'; return; }
+  winBannerEl.style.display = 'none'; // no win banner anymore
   territoryEl.style.display = 'block';
-  const held = territoryNodes.filter((n) => n.controller === myName()).length;
+  // Per-faction node count drives the oil-income readout (nodes × rate).
+  const held = territoryNodes.filter((n) => n.faction === localFaction).length;
   const contested = territoryNodes.filter((n) => n.contested).length;
-  const mins = Math.floor(territoryRoundTime / 60), secs = Math.floor(territoryRoundTime % 60);
-  const clock = `${mins}:${String(secs).padStart(2, '0')}`;
-  const lines = [`◆ OIL FIELDS — first to ${TERRITORY_TARGET_SCORE}  (${clock})`];
-  lines.push(`You hold ${held}/${territoryNodes.length}` + (contested ? `  ·  ${contested} contested` : ''));
+  const lines = ['◆ OIL FIELDS — control nodes to fuel your shields'];
+  lines.push(`Your faction holds ${held}/${territoryNodes.length}` +
+    `  ·  +${(held * NODE_OIL_RATE).toFixed(0)} oil/s` +
+    (contested ? `  ·  ${contested} contested` : ''));
   for (const s of territoryScores.slice(0, 5)) {
-    const me = s.name === myName();
-    lines.push(`${me ? '▶ ' : '  '}${s.name}: ${s.score}`);
+    const me = s.name === myFactionName();
+    lines.push(`${me ? '▶ ' : '  '}${s.name}: ${s.score} node${s.score === 1 ? '' : 's'}`);
   }
   territoryEl.innerHTML = lines.map((l, i) =>
     `<div style="color:${i === 0 ? '#ffd84a' : '#fff'}">${l}</div>`).join('');
-  if (territoryWinner) {
-    winBannerEl.style.display = 'block';
-    winBannerEl.textContent = territoryWinner === myName()
-      ? '★ YOU WON THE ROUND ★' : `${territoryWinner} won the round`;
-  } else {
-    winBannerEl.style.display = 'none';
-  }
 }
 
 function updateTerritoryBeacons(): void {
@@ -1075,8 +1304,8 @@ function updateTerritoryBeacons(): void {
       beaconGroup.add(m);
       beaconMeshes.set(n.id, m);
     }
-    const mine = n.controller === myName();
-    const color = n.contested ? 0xffd84a : n.controller ? (mine ? 0x4caf50 : 0xcc4444) : 0x8090a0;
+    // Beacon tinted by the controlling faction (gold if contested, grey if open).
+    const color = n.contested ? 0xffd84a : n.faction >= 0 ? factionColor(n.faction) : 0x8090a0;
     (m.material as THREE.MeshBasicMaterial).color.setHex(color);
   }
   for (const [id, m] of beaconMeshes) {
@@ -1117,6 +1346,8 @@ function frame(): void {
   }
 
   if (input.inventoryToggled) toggleInventory();
+  if (input.mapToggled) toggleMap();
+  worldMap.update();
 
   // Gun timers tick regardless of menu state (so a reload finishes even if you
   // open a menu); the reload pulls ammo into the magazine when it completes.
@@ -1245,6 +1476,16 @@ function frame(): void {
     // Simulation never pauses: mobs hunt you and survival ticks in menus too.
     survival.update(dt, player);
     mobs.update(dt, player, sky.sunIntensity);
+    // Volcanic lava is a hazard: standing in it burns you (the M21 ashlands
+    // doubles as a PvP hazard). Damage routes through the server in MP.
+    lavaTimer = Math.max(0, lavaTimer - dt);
+    if (!player.dead) {
+      const inLava = world.getBlock(Math.floor(player.pos.x),
+        Math.floor(player.pos.y + 0.2), Math.floor(player.pos.z)) === Block.Lava ||
+        world.getBlock(Math.floor(player.pos.x),
+          Math.floor(player.pos.y + 1.0), Math.floor(player.pos.z)) === Block.Lava;
+      if (inLava && lavaTimer <= 0) { player.damage(6); lavaTimer = 0.5; }
+    }
     // Machines run under the same never-pausing sim. Offline this is the
     // authoritative tick; in multiplayer it's a local prediction for the fill
     // bar (the server is authoritative and reconciles on open/collect).
@@ -1256,6 +1497,11 @@ function frame(): void {
     if (!net.connected) updateTerritoryOffline(dt);
     updateTerritoryHud();
     updateTerritoryBeacons();
+    // Land claims: advance the grace/shield clock; offline this is the
+    // authoritative claim sim (MP the server ticks + reconciles via 'claims').
+    worldTimeLocal += dt;
+    if (!net.connected) claims.tick(dt);
+    updateShieldDomes(dt);
   }
 
   checkDeath();

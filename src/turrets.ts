@@ -32,6 +32,8 @@ export type TurretAxis = 'range' | 'damage' | 'rate';
 
 export interface TurretState {
   owner: string;
+  /** Owning faction id (teams.ts); the turret never targets its own faction. */
+  faction: number;
   hp: number; maxHp: number;
   level: { range: number; damage: number; rate: number };
   ammo: number;    // loaded cannonballs
@@ -60,11 +62,11 @@ export function turretInterval(level: { rate: number }): number {
 }
 export function turretFuelPerShot(): number { return FUEL_PER_SHOT; }
 
-export function newTurret(owner = ''): TurretState {
+export function newTurret(owner = '', faction = -1): TurretState {
   const level = { range: 1, damage: 1, rate: 1 };
   const maxHp = turretMaxHp(level);
   return {
-    owner: owner.slice(0, MAX_OWNER_LEN),
+    owner: owner.slice(0, MAX_OWNER_LEN), faction,
     hp: maxHp, maxHp, level, ammo: 0, fuel: 0, cooldown: 0, facingYaw: 0,
   };
 }
@@ -80,8 +82,9 @@ export function damageTurret(state: TurretState, amount: number): boolean {
   return state.hp <= 0;
 }
 
-export function claimTurret(state: TurretState, owner: string): void {
+export function claimTurret(state: TurretState, owner: string, faction = -1): void {
   state.owner = (owner ?? '').slice(0, MAX_OWNER_LEN);
+  state.faction = faction;
 }
 
 /** Can the turret fire right now (loaded + fuelled + off cooldown)? */
@@ -152,6 +155,7 @@ export function sanitizeTurretState(raw: unknown): TurretState | null {
   const fuel = Number.isFinite(r.fuel) ? Math.max(0, Math.min(TURRET_FUEL_CAP, Number(r.fuel))) : 0;
   return {
     owner: typeof r.owner === 'string' ? r.owner.slice(0, MAX_OWNER_LEN) : '',
+    faction: Number.isFinite(r.faction) ? Math.floor(Number(r.faction)) : -1,
     hp, maxHp, level, ammo, fuel,
     cooldown: 0,
     facingYaw: Number.isFinite(r.facingYaw) ? Number(r.facingYaw) : 0,
