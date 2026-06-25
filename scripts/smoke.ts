@@ -31,7 +31,7 @@ import { Player } from '../src/player';
 import { daylight } from '../src/sky';
 import { Survival } from '../src/survival';
 import { GameServer } from '../src/net/server_core';
-import { MELEE_DAMAGE, mitigate, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE } from '../src/net/protocol';
+import { mitigate, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE, WORLD_HALF } from '../src/net/protocol';
 import {
   Machines, MachineType, MAX_LEVEL, allowedFilterMask, applyUpgrade,
   autominerRates, claimMachine, collectMachine, currentRate, damageMachine,
@@ -842,16 +842,10 @@ check('furnace smelts ore/sand/log but not removed foods',
   fresh.addPlayer(1); fresh.addPlayer(2);
   fresh.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: Math.PI, pitch: 0 });
   fresh.handle(2, { t: 'xform', x: 0, y: 70, z: 2, yaw: 0, pitch: 0 });
+  // Melee PvP is DISABLED — fists/tools never damage players (guns-only PvP).
   const atk = fresh.handle(1, { t: 'attack', target: 2 });
-  const hurt = atk.find((o) => o.to === 2)?.msg;
-  check('valid melee hit applies server damage + knockback',
-    !!hurt && hurt.t === 'hurt' && hurt.health === 20 - MELEE_DAMAGE,
-    hurt && hurt.t === 'hurt' ? `hp=${hurt.health}` : 'no hurt');
-
-  // Out of range -> rejected.
+  check('melee PvP is disabled (an attack deals no damage)', atk.length === 0);
   fresh.handle(2, { t: 'xform', x: 0, y: 70, z: 30, yaw: 0, pitch: 0 });
-  check('out-of-range attack is rejected',
-    fresh.handle(1, { t: 'attack', target: 2 }).length === 0);
 
   // Edit in range broadcasts; far edit rejected.
   fresh.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: 0, pitch: 0 });
@@ -1932,10 +1926,9 @@ check('furnace smelts ore/sand/log but not removed foods',
   s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: -Math.PI / 2, pitch: 0 });
   s.handle(2, { t: 'xform', x: 2, y: 70, z: 0, yaw: 0, pitch: 0 });
   s.handle(4, { t: 'xform', x: 2, y: 70, z: 0, yaw: 0, pitch: 0 });
-  check('same-faction melee is rejected',
-    !s.handle(1, { t: 'attack', target: 4 }).some((o) => o.msg.t === 'hurt'));
-  check('cross-faction melee applies',
-    s.handle(1, { t: 'attack', target: 2 }).some((o) => o.msg.t === 'hurt'));
+  check('melee never damages players (disabled for all factions)',
+    !s.handle(1, { t: 'attack', target: 4 }).some((o) => o.msg.t === 'hurt') &&
+    !s.handle(1, { t: 'attack', target: 2 }).some((o) => o.msg.t === 'hurt'));
   check('same-faction ranged is rejected',
     !s.handle(1, { t: 'rangedAttack', target: 4, amount: 10 }).some((o) => o.msg.t === 'hurt'));
   check('cross-faction ranged applies',
@@ -2065,6 +2058,87 @@ check('furnace smelts ore/sand/log but not removed foods',
   inv2.restore({ slots: [{ id: 99999, count: 5 }, { id: Item.Bullet, count: -3 }] });
   check('inventory restore fail-closes on impossible items',
     inv2.slots[0] === null && inv2.slots[1] === null);
+}
+
+// --- Admin (server-console) operations --------------------------------------
+{
+  const g = new GameServer(1337, mulberry32(321));
+  g.addPlayer(1, { username: 'Admin1', faction: 0 });
+  g.addPlayer(2, { username: 'Victim2', faction: 1 });
+  // Lookup by name (case-insensitive) + roster.
+  check('playerIdByName resolves online players (case-insensitive)',
+    g.playerIdByName('admin1') === 1 && g.playerIdByName('nope') === undefined);
+  check('playerList reports id/username/faction/mode',
+    g.playerList().length === 2 && g.playerList()[0].mode === 'survival');
+
+  // give → a gotitem to that player only.
+  const give = g.adminGive(1, Item.Diamond, 5);
+  check('adminGive sends the items to just that player',
+    give.length === 1 && give[0].to === 1 && give[0].msg.t === 'gotitem' &&
+    give[0].msg.item === Item.Diamond && give[0].msg.count === 5);
+  check('adminGive rejects an unknown item id', g.adminGive(1, 999999, 5).length === 0);
+
+  // gamemode → broadcast + the player's welcome now carries the new mode.
+  const gm = g.adminSetMode(2, 'creative');
+  check('adminSetMode broadcasts the gamemode + notices the target',
+    gm.some((o) => o.to === 'all' && o.msg.t === 'gamemode' && o.msg.mode === 'creative') &&
+    gm.some((o) => o.to === 2 && o.msg.t === 'notice'));
+  const wj = g.addPlayer(9).find((o) => o.to === 9)!.msg;
+  check('a creative player shows mode=creative in the next welcome roster',
+    wj.t === 'welcome' && wj.players.find((p) => p.id === 2)!.mode === 'creative');
+
+  // Creative/spectator are server-side invulnerable.
+  g.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: Math.PI, pitch: 0 });
+  g.handle(2, { t: 'xform', x: 0, y: 70, z: 1.2, yaw: 0, pitch: 0 });
+  check('a creative player takes no melee damage',
+    g.handle(1, { t: 'attack', target: 2 }).every((o) => o.msg.t !== 'hurt'));
+
+  // Spectators can't mutate the world (edit dropped) but can still move.
+  g.adminSetMode(2, 'spectator');
+  const before = (g.addPlayer(10).find((o) => o.to === 10)!.msg as { edits: unknown[] }).edits.length;
+  g.handle(2, { t: 'edit', x: 0, y: 69, z: 1, block: Block.Cobblestone });
+  const after = (g.addPlayer(11).find((o) => o.to === 11)!.msg as { edits: unknown[] }).edits.length;
+  check('a spectator edit is rejected (no new world edit)', before === after);
+
+  // teleport snaps the player + tells them.
+  const tp = g.adminTeleport(1, 100, 80, -50);
+  check('adminTeleport moves the player + sends a teleport msg',
+    tp.length === 1 && tp[0].to === 1 && tp[0].msg.t === 'teleport' && tp[0].msg.x === 100);
+  check('teleport updated the authoritative position',
+    g.snapshot().find((s) => s.id === 1)!.x === 100);
+
+  // Mode persists through the saved-state blob (capture → re-add).
+  const cap = g.capturePlayerState(2);
+  check('capturePlayerState carries the gamemode', cap!.data.mode === 'spectator');
+  const g2 = new GameServer(1337, mulberry32(322));
+  const w2 = g2.addPlayer(1, { username: 'Victim2', faction: 1, data: cap!.data }).find((o) => o.to === 1)!.msg;
+  check('a returning player keeps their admin-set gamemode',
+    w2.t === 'welcome' && w2.players[0].mode === 'spectator');
+}
+
+// --- World border + random dry spawn ----------------------------------------
+{
+  const g = new GameServer(1337, mulberry32(404));
+  // Every random spawn lands on dry land inside the border, never in ocean/air.
+  let allDry = true, allInBorder = true;
+  for (let i = 0; i < 40; i++) {
+    const w = g.addPlayer(100 + i).find((o) => o.to === 100 + i)!.msg;
+    if (w.t !== 'welcome') continue;
+    const me = w.players.find((p) => p.id === 100 + i)!;
+    if (Math.abs(me.x) > WORLD_HALF || Math.abs(me.z) > WORLD_HALF) allInBorder = false;
+    // Spawn y should sit just above solid ground (height+1), i.e. above sea.
+    if (me.y < 64) allDry = false;
+  }
+  check('random spawns all land inside the world border', allInBorder);
+  check('random spawns are on dry land (above sea level)', allDry);
+
+  // A transform beyond the border is clamped to it (server-authoritative).
+  const g2 = new GameServer(1337, mulberry32(405));
+  g2.addPlayer(1);
+  g2.handle(1, { t: 'xform', x: 99999, y: 70, z: -99999, yaw: 0, pitch: 0 });
+  const s = g2.snapshot().find((p) => p.id === 1)!;
+  check('out-of-border movement is clamped to ±WORLD_HALF',
+    s.x === WORLD_HALF && s.z === -WORLD_HALF);
 }
 
 // --- Land claims + oil shield (M18) + raiding (M19) --------------------------

@@ -99,6 +99,8 @@ function oreLabel(block: number): string {
 export class InventoryUI {
   open = false;
   mode: ContainerMode = 'inventory';
+  /** Creative gamemode: the inventory screen shows an all-items palette. */
+  creative = false;
   /** Crafted/stashed items that did not fit anywhere (main spills them). */
   onOverflow?: (stacks: ItemStack[]) => void;
   /** Fired when the panel closes (main persists/syncs an open chest here). */
@@ -342,6 +344,37 @@ export class InventoryUI {
     row.appendChild(col);
     this.buildCraftingTop(2, row);
     this.topEl.appendChild(row);
+  }
+
+  /** Creative mode: a scrollable palette of every item — click to grab a full
+   *  stack (Shift-click for a single). Replaces the crafting grid in creative. */
+  private buildCreativeTop(): void {
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'display:flex;flex-direction:column;gap:5px;align-items:center;';
+    const label = document.createElement('div');
+    label.className = 'mc-font';
+    label.style.cssText = 'font-size:12px;color:#cfe0ff;text-shadow:none;';
+    label.textContent = 'Creative — click any item for a stack (Shift = one)';
+    const grid = document.createElement('div');
+    grid.style.cssText =
+      'display:flex;flex-wrap:wrap;gap:2px;width:536px;max-height:256px;' +
+      'overflow-y:auto;padding:5px;background:#0d111b;' +
+      'border:2px solid;border-color:#2a3550 #4a5775 #4a5775 #2a3550;';
+    const ids = Object.keys(ITEMS).map(Number).filter((id) => ITEMS[id]).sort((a, b) => a - b);
+    for (const id of ids) {
+      const view = this.makeSlotView();
+      renderItemIcon(view.icon, this.atlasCanvas, id);
+      this.hookTooltip(view, () => ({ id, count: 1 }));
+      view.el.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return; // left-click only
+        this.inventory.add(id, e.shiftKey ? 1 : (ITEMS[id].maxStack ?? 64));
+        this.inventory.version++;
+      });
+      grid.appendChild(view.el);
+    }
+    wrap.appendChild(label);
+    wrap.appendChild(grid);
+    this.topEl.appendChild(wrap);
   }
 
   /** Armor slot: holds only the matching piece; click to equip/unequip. */
@@ -1018,6 +1051,9 @@ export class InventoryUI {
     } else if (mode === 'table') {
       this.titleEl.textContent = 'Crafting';
       this.buildCraftingTop(3);
+    } else if (this.creative) {
+      this.titleEl.textContent = 'Creative Inventory';
+      this.buildCreativeTop();
     } else {
       this.titleEl.textContent = 'Inventory';
       this.buildInventoryTop();

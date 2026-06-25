@@ -10,7 +10,7 @@ import type { TurretState, TurretAxis } from '../turrets';
 import type { NodeStatus, ScoreEntry } from '../territory';
 import type { ClaimState } from '../claims';
 import {
-  ClientMsg, ItemEntityInfo, PlayerInfo, SERVER_PORT, ServerMsg, ShipTransform,
+  ClientMsg, GameMode, ItemEntityInfo, PlayerInfo, SERVER_PORT, ServerMsg, ShipTransform,
   TRANSFORM_HZ,
 } from './protocol';
 
@@ -42,6 +42,12 @@ export class NetClient {
   onHurt?: (health: number, dead: boolean, k: [number, number, number]) => void;
   onRespawned?: (x: number, y: number, z: number, health: number) => void;
   onKillfeed?: (killer: string, victim: string) => void;
+  /** The LOCAL player's gamemode changed (admin command). */
+  onGamemode?: (mode: GameMode) => void;
+  /** The server teleported the local player (admin command). */
+  onTeleport?: (x: number, y: number, z: number) => void;
+  /** A server notice to surface to the local player (admin feedback). */
+  onNotice?: (text: string) => void;
   /** Roster changed (join/leave/welcome) — refresh player count UI. */
   onRoster?: () => void;
   /** Connection lost after having been live. */
@@ -164,6 +170,18 @@ export class NetClient {
             r.health = s.health; r.dead = s.dead;
           }
         }
+        break;
+      case 'gamemode': {
+        const r = this.remotes.get(msg.id);
+        if (r) r.info.mode = msg.mode;          // keep remote rendering in step
+        if (msg.id === this.myId) this.onGamemode?.(msg.mode);
+        break;
+      }
+      case 'teleport':
+        this.onTeleport?.(msg.x, msg.y, msg.z);
+        break;
+      case 'notice':
+        this.onNotice?.(msg.text);
         break;
       case 'edit':
         this.onEdit?.(msg.x, msg.y, msg.z, msg.block);

@@ -389,7 +389,7 @@ function torchDefs(): Record<number, BlockInfo> {
   const torch = () => def({
     name: 'Torch', hardness: 0, top: Tile.Torch,
     solid: false, opaque: false, occludes: false,
-    shape: 'torch', emission: 14,
+    shape: 'torch', emission: 15, // max block light (brighter, fuller reach)
   });
   return {
     [Block.Torch]: torch(),

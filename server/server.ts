@@ -6,9 +6,11 @@ import { WebSocketServer, WebSocket } from 'ws';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { ClientMsg, SERVER_PORT, SNAPSHOT_HZ, ServerMsg } from '../src/net/protocol';
+import * as readline from 'readline';
+import { ClientMsg, GameMode, SERVER_PORT, SNAPSHOT_HZ, ServerMsg } from '../src/net/protocol';
 import { GameServer, Outbound, WorldSave } from '../src/net/server_core';
 import { Accounts, Account } from '../src/net/accounts';
+import { ITEMS, Item } from '../src/items';
 
 const port = Number(process.env.PORT) || SERVER_PORT;
 const sockets = new Map<number, WebSocket>();
@@ -212,4 +214,112 @@ function shutdown(): void {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
+// --- Admin console ----------------------------------------------------------
+// Commands typed into the terminal running the server (the operator is trusted,
+// so there's no in-game auth). Type `help` for the list.
+
+const MODE_ALIASES: Record<string, GameMode> = {
+  s: 'survival', survival: 'survival', '0': 'survival',
+  c: 'creative', creative: 'creative', '1': 'creative',
+  sp: 'spectator', spec: 'spectator', spectator: 'spectator', '3': 'spectator',
+};
+
+// Item name -> id, built once from ITEMS (normalized: lowercased, no spaces).
+const ITEM_BY_NAME = new Map<string, number>();
+for (const key of Object.keys(ITEMS)) {
+  const id = Number(key);
+  const norm = ITEMS[id].name.toLowerCase().replace(/[^a-z0-9]/g, '');
+  ITEM_BY_NAME.set(norm, id);
+}
+// Also accept the Item enum keys (e.g. "RocketLauncher", "OilBarrel").
+for (const k of Object.keys(Item)) {
+  const id = (Item as Record<string, number>)[k];
+  if (typeof id === 'number') ITEM_BY_NAME.set(k.toLowerCase(), id);
+}
+/** Resolve a `give` item token: a numeric id, an enum key, or an item name. */
+function resolveItem(token: string): number | null {
+  if (/^\d+$/.test(token)) {
+    const id = Number(token);
+    return ITEMS[id] ? id : null;
+  }
+  const id = ITEM_BY_NAME.get(token.toLowerCase().replace(/[^a-z0-9]/g, ''));
+  return id !== undefined ? id : null;
+}
+
+/** Resolve a player token to an online id, logging if not found. */
+function resolvePlayer(token: string): number | null {
+  const pid = game.playerIdByName(token);
+  if (pid === undefined) { console.log(`no online player named "${token}"`); return null; }
+  return pid;
+}
+
+const HELP = [
+  'Commands:',
+  '  list                          - list online players',
+  '  give <player> <item> [count]  - give items (item = name or id)',
+  '  gamemode <mode> <player>      - survival | creative | spectator (s/c/sp)',
+  '  tp <player> <x> <y> <z>       - teleport a player',
+  '  save                          - force-save the world + accounts',
+  '  stop                          - save and shut down',
+  '  help                          - this list',
+].join('\n');
+
+function runCommand(line: string): void {
+  const parts = line.trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return;
+  const cmd = parts[0].toLowerCase();
+  try {
+    switch (cmd) {
+      case 'help': case '?': console.log(HELP); break;
+      case 'list': case 'players': {
+        const list = game.playerList();
+        console.log(`${list.length} online:`);
+        for (const p of list) console.log(`  [${p.id}] ${p.username} (faction ${p.faction}, ${p.mode})`);
+        break;
+      }
+      case 'give': {
+        if (parts.length < 3) { console.log('usage: give <player> <item> [count]'); break; }
+        const pid = resolvePlayer(parts[1]); if (pid === null) break;
+        const item = resolveItem(parts[2]);
+        if (item === null) { console.log(`unknown item "${parts[2]}"`); break; }
+        const count = parts[3] ? Math.max(1, Math.floor(Number(parts[3]))) : 1;
+        if (!Number.isFinite(count)) { console.log('count must be a number'); break; }
+        dispatch(game.adminGive(pid, item, count));
+        console.log(`gave ${count}x ${ITEMS[item].name} to ${parts[1]}`);
+        break;
+      }
+      case 'gamemode': case 'gm': {
+        if (parts.length < 3) { console.log('usage: gamemode <mode> <player>  (order-independent)'); break; }
+        // Accept the mode + player in EITHER order (so `gm Alice creative` and
+        // `gm creative Alice` both work).
+        const a = parts[1].toLowerCase(), b = parts[2].toLowerCase();
+        const mode = MODE_ALIASES[a] ?? MODE_ALIASES[b];
+        const who = MODE_ALIASES[a] ? parts[2] : parts[1];
+        if (!mode) { console.log('mode must be survival | creative | spectator'); break; }
+        const pid = resolvePlayer(who); if (pid === null) break;
+        dispatch(game.adminSetMode(pid, mode));
+        console.log(`${who} -> ${mode}`);
+        break;
+      }
+      case 'tp': {
+        if (parts.length < 5) { console.log('usage: tp <player> <x> <y> <z>'); break; }
+        const pid = resolvePlayer(parts[1]); if (pid === null) break;
+        const [x, y, z] = [Number(parts[2]), Number(parts[3]), Number(parts[4])];
+        if (![x, y, z].every(Number.isFinite)) { console.log('x y z must be numbers'); break; }
+        dispatch(game.adminTeleport(pid, x, y, z));
+        console.log(`teleported ${parts[1]} to ${x} ${y} ${z}`);
+        break;
+      }
+      case 'save': for (const id of authed.keys()) persistPlayer(id); saveWorld(); saveAccounts(); console.log('saved'); break;
+      case 'stop': shutdown(); break;
+      default: console.log(`unknown command "${cmd}" — type help`);
+    }
+  } catch (e) { console.error('command error', e); }
+}
+
+const rl = readline.createInterface({ input: process.stdin, prompt: '> ' });
+rl.on('line', (line) => { runCommand(line); rl.prompt(); });
+
 console.log(`VOXELON server listening on ws://localhost:${port} (seed ${game.seed})`);
+console.log('admin console ready — type `help` for commands');
+rl.prompt();

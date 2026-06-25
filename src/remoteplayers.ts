@@ -155,7 +155,7 @@ export class RemotePlayers {
       av.dyaw += wrap(r.tyaw - av.dyaw) * t;
       av.group.position.set(av.dx, av.dy, av.dz);
       av.group.rotation.y = av.dyaw;
-      av.group.visible = !r.dead;
+      av.group.visible = !r.dead && r.info.mode !== 'spectator'; // ghost = hidden
 
       // Walk animation from horizontal movement.
       const speed = Math.hypot(av.dx - av.lastX, av.dz - av.lastZ) / Math.max(dt, 1e-3);

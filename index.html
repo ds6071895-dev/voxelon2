@@ -222,13 +222,20 @@
       outline: none;
     }
     #auth input:focus { border-color: #6fd0ff; }
-    #auth-row { display: flex; gap: 8px; }
-    #auth-row .mc-btn { flex: 1; min-width: 0; }
+    #auth input[readonly] { color: #cfe0ff; cursor: default; }
+    /* Auth buttons are compact + centered (the big 64px padding is for Play). */
+    #auth .mc-btn {
+      font-size: 18px; padding: 10px 12px; text-align: center;
+      display: flex; align-items: center; justify-content: center;
+    }
+    #submit-btn { width: 100%; }
     #auth-user-row { display: flex; gap: 8px; align-items: stretch; }
     #auth-user-row #auth-user { flex: 1; min-width: 0; }
-    #roll-btn { flex: 0 0 auto; padding: 8px 12px; font-size: 16px; }
-    #auth-err { color: #ff8a7a; font-size: 12px; min-height: 14px; text-shadow: none; }
-    #auth-status { color: #9fb4cc; font-size: 12px; min-height: 14px; text-shadow: none; }
+    #roll-btn { flex: 0 0 auto; padding: 10px 14px; font-size: 18px; }
+    #auth-toggle { font-size: 12px; color: #9fb4cc; text-shadow: none; text-align: center; }
+    #toggle-link { color: #6fd0ff; cursor: pointer; text-decoration: underline; }
+    #auth-err { color: #ff8a7a; font-size: 12px; min-height: 14px; text-shadow: none; text-align: center; }
+    #auth-status { color: #9fb4cc; font-size: 12px; min-height: 14px; text-shadow: none; text-align: center; }
     #overlay .controls {
       font-size: 13px; color: #aaa; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
       text-align: center; line-height: 1.6;
@@ -289,14 +296,12 @@
       <p class="subtitle mc-font">a multiplayer voxel arena</p>
       <div id="auth">
         <div id="auth-user-row">
-          <input id="auth-user" class="mc-font" placeholder="username" maxlength="16" autocomplete="username" />
-          <button id="roll-btn" class="mc-btn" type="button" title="Roll a random username">🎲</button>
+          <input id="auth-user" class="mc-font" placeholder="username" maxlength="16" autocomplete="username" readonly />
+          <button id="roll-btn" class="mc-btn" type="button" title="Roll a new random username">🎲</button>
         </div>
         <input id="auth-pass" class="mc-font" type="password" placeholder="password" autocomplete="current-password" />
-        <div id="auth-row">
-          <button id="login-btn" class="mc-btn">Log In</button>
-          <button id="register-btn" class="mc-btn">Register</button>
-        </div>
+        <button id="submit-btn" class="mc-btn">Register</button>
+        <div id="auth-toggle" class="mc-font">Already have an account? <a id="toggle-link">Log in</a></div>
         <div id="auth-err" class="mc-font"></div>
         <div id="auth-status" class="mc-font"></div>
       </div>

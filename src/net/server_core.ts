@@ -31,10 +31,10 @@ import {
 } from '../claims';
 import { Terrain } from '../terrain';
 import {
-  ClientMsg, MELEE_DAMAGE, MELEE_RANGE, EDIT_RANGE, CHEST_SLOTS, PICKUP_RANGE,
+  ClientMsg, EDIT_RANGE, CHEST_SLOTS, PICKUP_RANGE,
   ARMOR_POINT_CAP, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE, SHIP_HIT_MAX_DAMAGE,
   mitigate, ItemEntityInfo, PlayerInfo, PlayerSnapshot, ServerMsg, ShipTransform,
-  WORLD_SEED, makeUsername, skinSeed,
+  WORLD_SEED, WORLD_HALF, makeUsername, skinSeed, GameMode,
 } from './protocol';
 
 const BOARD_RANGE = 6;          // how close a player must be to pilot/dock/upgrade a ship
@@ -61,6 +61,17 @@ interface ServerPlayer extends PlayerInfo {
   /** Last client-pushed persistable blob (inventory/hotbar) for saveState. */
   savedClientData?: Record<string, unknown>;
 }
+
+const GAME_MODES: GameMode[] = ['survival', 'creative', 'spectator'];
+
+/** Client messages a spectator may NOT send (world edits + combat + economy). */
+const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
+  'edit', 'attack', 'rangedAttack', 'selfhurt', 'drop', 'pickup', 'chestSet',
+  'machineConfig', 'machineUpgrade', 'machineCollect', 'machineHit', 'machineClaim',
+  'shipLaunch', 'shipSteer', 'shipFire', 'shipDock', 'shipUpgrade', 'shipHit',
+  'turretUpgrade', 'turretClaim', 'turretHit', 'turretLoad',
+  'claimFeed', 'claimHit',
+]);
 
 /** One message the transport should deliver. `to` is a client id, or a
  *  fan-out target. */
@@ -133,11 +144,9 @@ export class GameServer {
   }
 
   private spawn(): { x: number; y: number; z: number } {
-    const base = this.terrain.findSpawn();
-    // Scatter players a little so they don't stack on the exact spawn column.
-    const x = Math.round(base.x + (this.rng() - 0.5) * 16);
-    const z = Math.round(base.z + (this.rng() - 0.5) * 16);
-    return { x: x + 0.5, y: this.terrain.height(x, z) + 1, z: z + 0.5 };
+    // A random dry-land spot somewhere in the world border (not ocean/air).
+    const s = this.terrain.randomDrySpawn(this.rng, WORLD_HALF);
+    return { x: s.x, y: s.y, z: s.z };
   }
 
   /** Register a player; returns the welcome (to them) + join (to others). With
@@ -156,8 +165,10 @@ export class GameServer {
     const s = hasPos
       ? { x: sx as number, y: sy as number, z: sz as number }
       : this.spawn();
+    const savedMode = typeof saved?.mode === 'string' && GAME_MODES.includes(saved.mode as GameMode)
+      ? saved.mode as GameMode : 'survival';
     const player: ServerPlayer = {
-      id, username, skin: skinSeed(username), faction,
+      id, username, skin: skinSeed(username), faction, mode: savedMode,
       x: s.x, y: s.y, z: s.z, yaw: fin(syaw as number) ? syaw as number : 0, pitch: 0,
       health: MAX_HEALTH, dead: false, regenCooldown: 0, regenTimer: 0,
       armorPoints: 0,
@@ -191,12 +202,18 @@ export class GameServer {
   handle(id: number, msg: ClientMsg): Outbound[] {
     const p = this.players.get(id);
     if (!p) return [];
+    // Spectators are non-interacting ghosts: drop any world-mutating / combat
+    // message. They may still move (xform), persist (saveState), and respawn.
+    if (p.mode === 'spectator' && SPECTATOR_BLOCKED.has(msg.t)) return [];
     switch (msg.t) {
       case 'xform': {
         // Reject non-finite transforms so they can't poison distance/facing
         // math elsewhere (range/hit checks must never fail open).
         if (!p.dead && fin(msg.x, msg.y, msg.z, msg.yaw, msg.pitch)) {
-          p.x = msg.x; p.y = msg.y; p.z = msg.z;
+          // Clamp into the world border (authoritative: a client can't roam past it).
+          p.x = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, msg.x));
+          p.z = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, msg.z));
+          p.y = msg.y;
           p.yaw = msg.yaw; p.pitch = msg.pitch;
         }
         return [];
@@ -723,28 +740,10 @@ export class GameServer {
   }
 
   private handleAttack(attacker: ServerPlayer, targetId: number): Outbound[] {
-    const target = this.players.get(targetId);
-    if (!target || target.dead || attacker.dead || target.id === attacker.id) {
-      return [];
-    }
-    if (sameFaction(attacker.faction, target.faction)) return []; // no friendly fire
-    if (!fin(attacker.x, attacker.y, attacker.z, attacker.yaw,
-      target.x, target.y, target.z)) return [];
-    const dx = target.x - attacker.x, dy = target.y - attacker.y,
-      dz = target.z - attacker.z;
-    const dist = Math.hypot(dx, dy, dz);
-    if (!(dist <= MELEE_RANGE) || dist < 1e-3) return []; // fail-closed
-    // Attacker must roughly face the target — except a directly-stacked
-    // target (no horizontal separation) is always considered in front.
-    const horiz = Math.hypot(dx, dz);
-    if (horiz > 0.2) {
-      const fwd = { x: -Math.sin(attacker.yaw), z: -Math.cos(attacker.yaw) };
-      if ((fwd.x * dx + fwd.z * dz) / horiz < 0.35) return [];
-    }
-    const knock = horiz > 1e-3
-      ? { x: dx / horiz, y: 0.45, z: dz / horiz }
-      : { x: 0, y: 0.6, z: 0 };
-    return this.applyDamage(target, MELEE_DAMAGE, attacker.id, knock);
+    // Melee PvP is disabled — players can only be damaged by guns/explosions,
+    // not by fists or ordinary tools. Fail-closed against hacked clients.
+    void attacker; void targetId;
+    return [];
   }
 
   /** Gun/projectile PvP: the client raycasts the hit and reports it; the server
@@ -777,6 +776,7 @@ export class GameServer {
     knock?: { x: number; y: number; z: number }
   ): Outbound[] {
     if (p.dead || amount <= 0) return [];
+    if (p.mode !== 'survival') return []; // creative/spectator are invulnerable
     amount = mitigate(amount, p.armorPoints); // server-authoritative armor reduction
     if (amount <= 0) return []; // fully absorbed
     p.health = Math.max(0, p.health - amount);
@@ -1103,6 +1103,54 @@ export class GameServer {
     return [{ to: 'all', msg: { t: 'claims', claims } }];
   }
 
+  // --- Admin (server-console) operations ------------------------------------
+  // Issued from the trusted server console (no in-game auth). The shell parses
+  // a typed command line and calls these; each returns Outbound[] to dispatch.
+
+  /** Online player id by (case-insensitive) username, or undefined. */
+  playerIdByName(name: string): number | undefined {
+    const lc = String(name).toLowerCase();
+    for (const p of this.players.values()) if (p.username.toLowerCase() === lc) return p.id;
+    return undefined;
+  }
+
+  /** Roster for console display. */
+  playerList(): { id: number; username: string; faction: number; mode: GameMode }[] {
+    return [...this.players.values()].map((p) =>
+      ({ id: p.id, username: p.username, faction: p.faction, mode: p.mode }));
+  }
+
+  /** Grant items to an online player (console `give`); same dup-safe gotitem
+   *  path as a pickup, so it stacks into their inventory client-side. */
+  adminGive(id: number, item: number, count: number): Outbound[] {
+    const p = this.players.get(id);
+    if (!p || !ITEMS[item] || !Number.isFinite(count) || count <= 0) return [];
+    return [{ to: id, msg: { t: 'gotitem', item, count: Math.floor(count) } }];
+  }
+
+  /** Set a player's gamemode (console `gamemode`). Broadcast so every client
+   *  updates rendering (spectators render hidden) and the target applies its
+   *  own fly/noclip locally. */
+  adminSetMode(id: number, mode: GameMode): Outbound[] {
+    const p = this.players.get(id);
+    if (!p) return [];
+    p.mode = mode;
+    // Don't strand an admin "dead" in creative/spectator — heal + revive.
+    if (mode !== 'survival') { p.health = MAX_HEALTH; p.dead = false; }
+    return [
+      { to: 'all', msg: { t: 'gamemode', id, mode } },
+      { to: id, msg: { t: 'notice', text: `Gamemode set to ${mode}` } },
+    ];
+  }
+
+  /** Teleport a player to an absolute position (console `tp`). */
+  adminTeleport(id: number, x: number, y: number, z: number): Outbound[] {
+    const p = this.players.get(id);
+    if (!p || !fin(x, y, z)) return [];
+    p.x = x; p.y = y; p.z = z;
+    return [{ to: id, msg: { t: 'teleport', x, y, z } }];
+  }
+
   /** Build the persistable per-account blob for a player: their last client-
    *  pushed inventory/hotbar plus the server-authoritative position. Returns
    *  null if the player isn't online. */
@@ -1110,7 +1158,7 @@ export class GameServer {
     const p = this.players.get(id);
     if (!p) return null;
     const data: Record<string, unknown> = { ...(p.savedClientData ?? {}) };
-    data.x = p.x; data.y = p.y; data.z = p.z; data.yaw = p.yaw;
+    data.x = p.x; data.y = p.y; data.z = p.z; data.yaw = p.yaw; data.mode = p.mode;
     return { username: p.username, data };
   }
 
@@ -1209,7 +1257,7 @@ function shipTransform(ship: ShipState): ShipTransform {
 
 function toInfo(p: ServerPlayer): PlayerInfo {
   return {
-    id: p.id, username: p.username, skin: p.skin, faction: p.faction,
+    id: p.id, username: p.username, skin: p.skin, faction: p.faction, mode: p.mode,
     x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
     health: p.health, dead: p.dead,
   };

@@ -20,7 +20,7 @@ import { ItemEntities } from './itementity';
 import { Chests } from './chests';
 import { Mobs } from './mobs';
 import { NetClient } from './net/client';
-import { MELEE_RANGE, WORLD_SEED, makeUsername } from './net/protocol';
+import { WORLD_SEED, WORLD_HALF, makeUsername, GameMode } from './net/protocol';
 import { MachineModels } from './machinemodels';
 import { NetItems } from './netitems';
 import { Particles } from './particles';
@@ -54,6 +54,7 @@ import { Sky, WATER_FOG_COLOR } from './sky';
 import { Survival } from './survival';
 import { createAtlas, createCrackTextures } from './textures';
 import { World, RENDER_DISTANCE } from './world';
+import { Panorama } from './panorama';
 
 const FOG_NEAR = RENDER_DISTANCE * 16 - 38;
 const FOG_FAR = RENDER_DISTANCE * 16 - 6;
@@ -63,7 +64,6 @@ const SPRINT_FOV = 80.5;
 const app = document.getElementById('app')!;
 const overlay = document.getElementById('overlay')!;
 const loading = document.getElementById('loading')!;
-const loadbar = document.querySelector('#loadbar div') as HTMLDivElement;
 const crosshair = document.getElementById('crosshair')!;
 const hotbarEl = document.getElementById('hotbar')!;
 const statusEl = document.getElementById('status')!;
@@ -74,7 +74,7 @@ statusEl.style.display = 'none';
 const LOADING_TIPS = [
   'Diamonds hide below Y 16 — dig deep and bring torches.',
   'Sprinting drains your energy bar; let it recharge before a chase.',
-  'Creepers hiss before they detonate — back off or take cover.',
+  'Guns are the only way to damage other players — melee just fights mobs.',
   'Press E for your inventory — the world keeps running while it is open.',
   'Right-click a crafting table or furnace to use it.',
   'Other players can see and grab whatever you drop — guard your loot.',
@@ -103,17 +103,11 @@ const camera = new THREE.PerspectiveCamera(
 camera.rotation.order = 'YXZ';
 scene.add(camera); // so the held-item view (a camera child) renders
 
-// Title-screen panorama camera: slowly orbits an elevated point over spawn.
-const panorama = new THREE.PerspectiveCamera(
-  75, window.innerWidth / window.innerHeight, 0.08, 2000
-);
-panorama.rotation.order = 'YXZ';
-let panoramaYaw = 0;
-
 const atlas = createAtlas(seed);
 const cracks = createCrackTextures();
 const world = new World(scene, atlas, seed);
-const spawn = world.terrain.findSpawn();
+// Offline single-player gets a random dry spawn too (MP uses the server's).
+const spawn = world.terrain.randomDrySpawn(Math.random, WORLD_HALF);
 const player = new Player(spawn);
 const input = new Input(renderer.domElement);
 const inventory = new Inventory();
@@ -159,6 +153,28 @@ if (new URLSearchParams(location.search).get('kit') === 'full') for (const [id, 
   inventory.add(id, n);
 }
 const interaction = new Interaction(scene, world, player, cracks, inventory);
+// Fixed "fake" title-screen panorama (its own world + seed; same every launch).
+const panoramaView = new Panorama(atlas);
+
+// Visual world border: four translucent cyan walls at ±WORLD_HALF so players
+// can see the edge of the 1000×1000 play area (movement is clamped to it).
+(() => {
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0x5ad0ff, transparent: true, opacity: 0.42,
+    side: THREE.DoubleSide, depthWrite: false,
+  });
+  const H = 160, B = WORLD_HALF;
+  const geoNS = new THREE.PlaneGeometry(B * 2, H);
+  for (const [z, ry] of [[-B, 0], [B, 0]] as [number, number][]) {
+    const w = new THREE.Mesh(geoNS, mat);
+    w.position.set(0, H / 2, z); w.rotation.y = ry; scene.add(w);
+  }
+  for (const x of [-B, B]) {
+    const w = new THREE.Mesh(geoNS, mat);
+    w.position.set(x, H / 2, 0); w.rotation.y = Math.PI / 2; scene.add(w);
+  }
+})();
+
 const sky = new Sky(scene, seed);
 const hud = new HUD(atlas.canvas, inventory);
 const invUI = new InventoryUI(inventory, atlas.canvas);
@@ -274,10 +290,23 @@ const beaconGeo = new THREE.BoxGeometry(2, 40, 2);
 // The local player's faction: server-assigned in MP (onWelcome), or a single
 // local faction offline so shields/ownership/colors still work in single-player.
 let localFaction = FACTIONS[0].id;
+// Local gamemode (admin-set via the server console). Drives flight/noclip/
+// invulnerability + the creative build conveniences.
+let localMode: GameMode = 'survival';
 // Authentication state (mandatory login). Declared early so refreshNetInfo can
 // read it; the form + flow are wired further down.
 let authed = false;
 let authedName = '';
+
+/** Apply a gamemode to the local player (flight/noclip/creative build). */
+function applyLocalMode(mode: GameMode): void {
+  localMode = mode;
+  player.flying = mode !== 'survival';   // creative + spectator fly
+  player.noclip = mode === 'spectator';  // only spectators pass through blocks
+  interaction.creative = mode === 'creative';
+  invUI.creative = mode === 'creative';  // inventory screen shows the all-items palette
+  refreshNetInfo();
+}
 // Local grace/shield clock for the offline claim sim (advanced in the frame loop).
 let worldTimeLocal = 0;
 function factionCss(id: number): string {
@@ -287,8 +316,10 @@ function factionCss(id: number): string {
 function refreshNetInfo(): void {
   const badge = localFaction === NO_FACTION ? '' :
     `<span style="color:${factionCss(localFaction)}">■ ${factionName(localFaction)}</span>  `;
+  const modeBadge = localMode === 'survival' ? '' :
+    `<span style="color:#ffe27a">[${localMode.toUpperCase()}]</span>  `;
   if (net.connected) {
-    netinfoEl.innerHTML = `${badge}${net.username}   ${net.remotes.size + 1} online`;
+    netinfoEl.innerHTML = `${modeBadge}${badge}${net.username}   ${net.remotes.size + 1} online`;
   } else if (authed) {
     netinfoEl.innerHTML = `${badge}${authedName}   (offline)`;
   } else {
@@ -302,6 +333,15 @@ function showKill(killer: string, victim: string): void {
   line.textContent = killer ? `${killer}  »  ${victim}` : `${victim} died`;
   killfeedEl.appendChild(line);
   window.setTimeout(() => line.remove(), 5000);
+}
+/** Transient on-screen notice (admin feedback: gamemode/teleport/etc). */
+function showNotice(text: string): void {
+  const line = document.createElement('div');
+  line.className = 'mc-font';
+  line.style.cssText = 'font-size:14px;color:#ffe27a;text-shadow:1px 1px 0 #000;';
+  line.textContent = text;
+  killfeedEl.appendChild(line);
+  window.setTimeout(() => line.remove(), 4000);
 }
 
 // Drop routing: in multiplayer drops are server-owned (everyone sees them);
@@ -624,8 +664,7 @@ window.addEventListener('resize', () => {
   const aspect = window.innerWidth / window.innerHeight;
   camera.aspect = aspect;
   camera.updateProjectionMatrix();
-  panorama.aspect = aspect;
-  panorama.updateProjectionMatrix();
+  panoramaView.resize(aspect);
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
@@ -730,14 +769,53 @@ function rollUsername(): void {
 }
 rollBtn.addEventListener('click', rollUsername);
 
+// Two auth modes. REGISTER forces a randomly-rolled username (the field is
+// read-only + a 🎲 roller); LOGIN lets you type your existing name back in.
+const submitBtn = document.getElementById('submit-btn')!;
+const authToggle = document.getElementById('auth-toggle')!;
+let authMode: 'register' | 'login' = 'register';
+function setAuthMode(mode: 'register' | 'login'): void {
+  authMode = mode;
+  authErr.textContent = '';
+  authStatus.textContent = '';
+  if (mode === 'register') {
+    submitBtn.textContent = 'Register';
+    authUser.readOnly = true;          // names are random-only on register
+    rollBtn.style.display = '';
+    authToggle.innerHTML = 'Already have an account? <a id="toggle-link">Log in</a>';
+    if (!authUser.value) rollUsername();
+  } else {
+    submitBtn.textContent = 'Log In';
+    authUser.readOnly = false;         // type your existing name to log in
+    authUser.value = '';
+    rollBtn.style.display = 'none';
+    authToggle.innerHTML = 'Need an account? <a id="toggle-link">Register</a>';
+    authUser.focus();
+  }
+  // The link is replaced via innerHTML above, so rebind it each time.
+  document.getElementById('toggle-link')!
+    .addEventListener('click', () => setAuthMode(mode === 'register' ? 'login' : 'register'));
+}
+
 net.onAuthErr = (error) => { authStatus.textContent = ''; authErr.textContent = error; };
-document.getElementById('login-btn')!.addEventListener('click', () => attemptAuth('login'));
-document.getElementById('register-btn')!.addEventListener('click', () => attemptAuth('register'));
-authPass.addEventListener('keydown', (e) => { if (e.key === 'Enter') attemptAuth('login'); });
+submitBtn.addEventListener('click', () => attemptAuth(authMode));
+authPass.addEventListener('keydown', (e) => { if (e.key === 'Enter') attemptAuth(authMode); });
+setAuthMode('register'); // default: roll a random name, ready to register
 
 playBtn.addEventListener('click', () => {
   if (!authed) return;
   audio.resume();
+  // World usually finished streaming during the title; if not, wait briefly
+  // (still no full-screen loading screen) before dropping in.
+  if (!worldReady) {
+    playBtn.textContent = 'Preparing…';
+    const wait = (): void => {
+      if (worldReady) { playBtn.textContent = 'Play'; input.lock(); }
+      else setTimeout(wait, 100);
+    };
+    wait();
+    return;
+  }
   input.lock();
 });
 document.getElementById('resume-btn')!.addEventListener('click', () => input.lock());
@@ -831,6 +909,7 @@ net.onWelcome = (me) => {
   lastHealth = me.health;
   player.damageSink = (a) => net.sendSelfHurt(a); // server owns health in MP
   survival.enableRegen = false;                   // server runs regen
+  applyLocalMode(me.mode);                         // restore admin-set gamemode
   refreshNetInfo();
 };
 net.onEdit = (x, y, z, b) => {
@@ -868,6 +947,14 @@ net.onRespawned = (x, y, z, h) => {
 };
 net.onKillfeed = showKill;
 net.onRoster = refreshNetInfo;
+// Admin gamemode/teleport/notice (driven from the server console).
+net.onGamemode = (mode) => { applyLocalMode(mode); showNotice(`Gamemode: ${mode}`); };
+net.onTeleport = (x, y, z) => {
+  player.pos.set(x, y, z);
+  player.vel.set(0, 0, 0);
+  player.fallDistance = 0;
+};
+net.onNotice = (text) => showNotice(text);
 net.onGotItem = (id, count) => {
   // The server grants the whole stack on a valid pickup; if it doesn't all fit,
   // re-drop the remainder as a server item entity so it isn't destroyed (the
@@ -1075,6 +1162,7 @@ function reloadGun(): void {
 }
 let stepAccum = 0;
 let ambienceTimer = 20;
+let torchTime = 0; // flame-flicker clock for the held-torch light
 
 function facingString(): string {
   const dx = -Math.sin(player.yaw), dz = -Math.cos(player.yaw);
@@ -1429,19 +1517,19 @@ function frame(): void {
     fpsTime = 0;
   }
 
-  if (!worldReady) {
-    // Generate the spawn area with a fat time budget, then unlock the game.
-    const done = world.update(spawn.x, spawn.z, 40);
-    loadbar.style.width = `${Math.round(world.progress(spawn.x, spawn.z) * 100)}%`;
-    if (done) {
-      worldReady = true;
-      loading.classList.add('hidden');
-      overlay.classList.remove('hidden');
-      updateCamera();
-    }
-    sky.update(dt, camera);
-    updateAtmosphere();
-    renderer.render(scene, camera);
+  // The spawn area streams in quietly in the background (no loading screen) —
+  // generously while we're still on the title, lightly once you're in.
+  if (!worldReady && world.update(spawn.x, spawn.z, screen === 'title' ? 20 : 6)) {
+    worldReady = true;
+  }
+
+  // Title screen: render the fixed "fake" panorama (its own world) and skip the
+  // gameplay sim entirely. The gameplay world keeps generating above.
+  if (screen === 'title') {
+    panoramaView.update(dt);
+    panoramaView.render(renderer);
+    worldMap.hideBeacons();
+    input.endFrame();
     return;
   }
 
@@ -1493,10 +1581,10 @@ function frame(): void {
     net.sendArmor(armorPts);
   }
 
-  // In-world simulation runs whenever we're NOT on the title screen — even
-  // with a menu open the world keeps ticking and you stay vulnerable; only
+  // In-world simulation (we've already returned early on the title screen) —
+  // even with a menu open the world keeps ticking and you stay vulnerable; only
   // direct input is suspended (frozen input keeps gravity + PvP knockback).
-  if (screen !== 'title') {
+  {
     if (controlling) {
       if (input.debugToggled) hud.toggleDebug();
       if (input.hotbarKey >= 0) inventory.select(input.hotbarKey);
@@ -1529,10 +1617,29 @@ function frame(): void {
           sprintKey: false, sprintHeld: false }
       : (controlling ? input : FROZEN_INPUT);
     player.update(dt, moveInput, world);
+    // World border: keep the player inside the 1000×1000 play area (the server
+    // clamps authoritatively too).
+    player.pos.x = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, player.pos.x));
+    player.pos.z = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, player.pos.z));
     if (aboard) snapToDeck(aboard);
     updateCamera();
 
-    if (controlling) {
+    // Held-torch dynamic light: holding a torch lights the world around you
+    // (a moving point light in the chunk shader, with a gentle flame flicker).
+    if (inventory.selectedStack?.id === Block.Torch) {
+      torchTime += dt;
+      // Strong, fully-lit near field (>1 so it saturates after the shader clamp)
+      // with a gentle flame flicker.
+      const flicker = 1.12 + Math.sin(torchTime * 11) * 0.06 + Math.sin(torchTime * 27) * 0.04;
+      const e = player.eyePosition;
+      world.setHeldLight(e.x, e.y, e.z, flicker);
+    } else {
+      world.setHeldLight(0, 0, 0, 0);
+    }
+
+    // Spectators float freely but never mine/place/fight (the server rejects it
+    // anyway; gating here avoids client mispredicts).
+    if (controlling && localMode !== 'spectator') {
       const lookDir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
       const eye = player.eyePosition;
       const heldStack = inventory.selectedStack;
@@ -1550,21 +1657,16 @@ function frame(): void {
         if (wantFire && fireCooldown <= 0 && reloadTimer <= 0) tryFire(heldStack!, heldGun);
         interaction.update(dt, input, camera, true);
       } else {
-        // Combat priority: another player > mob > mining the block behind them.
-        const remoteTarget = remotePlayers.rayHit(eye, lookDir, MELEE_RANGE);
-        const mobInSights = remoteTarget < 0 ? mobs.rayHit(eye, lookDir, 3.5) : null;
-        if (input.leftClicked && remoteTarget >= 0) {
-          net.sendAttack(remoteTarget); // server validates + applies PvP damage
-          const tool = heldStack ? ITEMS[heldStack.id]?.tool : undefined;
-          if (tool) inventory.damageSelected(2);
-          held.swing();
-        } else if (input.leftClicked && mobInSights) {
+        // Melee no longer hits players — PvP is guns-only now. Left-click still
+        // fights MOBS, otherwise mines the block. Priority: mob > mine.
+        const mobInSights = mobs.rayHit(eye, lookDir, 3.5);
+        if (input.leftClicked && mobInSights) {
           const tool = heldStack ? ITEMS[heldStack.id]?.tool : undefined;
           mobs.attack(eye, lookDir, tool?.damage ?? 1, player);
           if (tool) inventory.damageSelected(2);
           held.swing();
         }
-        interaction.update(dt, input, camera, remoteTarget >= 0 || mobInSights !== null);
+        interaction.update(dt, input, camera, mobInSights !== null);
       }
 
       // Footsteps.
@@ -1620,15 +1722,8 @@ function frame(): void {
   checkDeath();
   furnaces.update(dt);
 
-  // The orbiting panorama is only for the title screen; pause/inventory keep
-  // the frozen first-person view.
-  let activeCamera: THREE.Camera = camera;
-  if (screen === 'title') {
-    panoramaYaw += dt * 0.06;
-    panorama.position.set(spawn.x + 0.5, spawn.y + 14, spawn.z + 0.5);
-    panorama.rotation.set(-0.18, panoramaYaw, 0);
-    activeCamera = panorama;
-  }
+  // Past this point we're always in-game (title returns early above).
+  const activeCamera: THREE.Camera = camera;
 
   world.update(player.pos.x, player.pos.z, 6);
   sky.update(dt, activeCamera);
@@ -1636,7 +1731,7 @@ function frame(): void {
   itemEntities.update(dt, player, inventory, sky.sunIntensity);
   particles.update(dt, activeCamera);
   remotePlayers.update(dt); // interpolate + animate other players
-  if (screen !== 'title') {
+  {
     netItems.update(dt, player, inventory, sky.sunIntensity);
     projectiles.update(dt); // in-flight rounds keep travelling even in a menu
   }
@@ -1717,9 +1812,12 @@ function frame(): void {
   input.endFrame();
   renderer.render(scene, activeCamera);
   // Floating waypoint badges (skip the title panorama — wrong camera + covered).
-  if (screen !== 'title') worldMap.renderBeacons(window.innerWidth, window.innerHeight);
-  else worldMap.hideBeacons();
+  worldMap.renderBeacons(window.innerWidth, window.innerHeight);
 }
 
+// No loading screen: show the title (with its panorama) immediately; the
+// gameplay world streams in behind it while you read the menu / log in.
+loading.classList.add('hidden');
+overlay.classList.remove('hidden');
 updateCamera();
 frame();

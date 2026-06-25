@@ -112,6 +112,8 @@ export class Interaction {
   private breakKey = '';
   private breakProgress = 0;
   private placeCooldown = 0;
+  /** Creative gamemode: instant break + placed blocks aren't consumed. */
+  creative = false;
 
   constructor(
     scene: THREE.Scene, world: World, player: Player,
@@ -234,14 +236,15 @@ export class Interaction {
       return;
     }
     const held = this.inventory.selectedStack;
-    const { time: breakTime, harvest } = miningStats(info, held);
+    const { time: rawTime, harvest } = miningStats(info, held);
+    const breakTime = this.creative ? 0 : rawTime; // creative breaks instantly
     this.breakProgress += dt;
 
     if (this.breakProgress >= breakTime) {
       this.onBlockSound?.('break', id, t.x, t.y, t.z);
       this.world.setBlock(t.x, t.y, t.z, Block.Air, harvest);
       this.onEdit?.(t.x, t.y, t.z, 0);
-      if (info.hardness > 0 && held && ITEMS[held.id]?.tool) {
+      if (!this.creative && info.hardness > 0 && held && ITEMS[held.id]?.tool) {
         this.inventory.damageSelected(1); // mining wears a tool by 1
       }
       this.breakKey = '';
@@ -321,7 +324,7 @@ export class Interaction {
         this.onEdit?.(px, py + k, pz, Block.MachinePart);
       }
       this.onBlockSound?.('place', blockId, px, py, pz);
-      this.inventory.consumeSelected(1);
+      if (!this.creative) this.inventory.consumeSelected(1);
       this.placeCooldown = PLACE_REPEAT;
       this.onAction?.();
       return;
@@ -345,7 +348,7 @@ export class Interaction {
     this.world.setBlock(px, py, pz, blockId);
     this.onEdit?.(px, py, pz, blockId);
     this.onBlockSound?.('place', blockId, px, py, pz);
-    this.inventory.consumeSelected(1);
+    if (!this.creative) this.inventory.consumeSelected(1);
     this.placeCooldown = PLACE_REPEAT;
     this.onAction?.();
   }
@@ -374,7 +377,7 @@ export class Interaction {
     this.world.setBlock(hitWater.x, py, hitWater.z, Block.ShipHelm);
     this.onEdit?.(hitWater.x, py, hitWater.z, Block.ShipHelm);
     this.onBlockSound?.('place', Block.ShipHelm, hitWater.x, py, hitWater.z);
-    this.inventory.consumeSelected(1);
+    if (!this.creative) this.inventory.consumeSelected(1);
     this.placeCooldown = PLACE_REPEAT;
     this.onAction?.();
     return true;

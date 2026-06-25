@@ -33,6 +33,9 @@ const ENERGY_DRAIN = 1 / 30;
 const ENERGY_REFILL = 1 / 4;
 const ENERGY_SPRINT_THRESHOLD = 0.25;
 const DAMAGE_REGEN_DELAY = 3; // seconds after a hit before health regen resumes
+// Admin/gamemode flight (creative + spectator).
+const FLY_SPEED_MULT = 2.4;   // horizontal speed multiplier while flying
+const FLY_V_SPEED = 9;        // vertical rise/descend speed (blocks/s)
 
 export class Player {
   readonly pos = new THREE.Vector3(); // feet, centre of the box
@@ -64,6 +67,10 @@ export class Player {
   /** Total worn-armor defense points (kept in sync by main each frame); used
    *  for offline mitigation. In MP the server mitigates from its synced copy. */
   armorPoints = 0;
+  /** Admin/gamemode flight: no gravity, jump/sneak rise/descend (creative+spectator). */
+  flying = false;
+  /** Admin/gamemode noclip: move through blocks, ignore collision (spectator). */
+  noclip = false;
   private eye = EYE_STANDING;
 
   constructor(spawn: { x: number; y: number; z: number }) {
@@ -158,15 +165,24 @@ export class Player {
       : this.sprinting ? SPRINT_SPEED
       : WALK_SPEED;
     if (this.inWater) speed *= 0.45;
+    if (this.flying) speed = (this.sprinting ? SPRINT_SPEED : WALK_SPEED) * FLY_SPEED_MULT;
 
-    // Approach target velocity; much weaker control while airborne.
-    const accel = this.onGround || this.inWater ? 14 : 3;
+    // Approach target velocity; much weaker control while airborne (but full
+    // authority while flying).
+    const accel = this.flying || this.onGround || this.inWater ? 14 : 3;
     const t = Math.min(1, accel * dt);
     this.vel.x += (dirX * speed - this.vel.x) * t;
     this.vel.z += (dirZ * speed - this.vel.z) * t;
 
     // Vertical.
-    if (this.inWater) {
+    if (this.flying) {
+      // Free vertical control: jump rises, sneak descends, no gravity/fall.
+      let vy = 0;
+      if (input.jump) vy += 1;
+      if (input.sneak) vy -= 1;
+      this.vel.y = vy * FLY_V_SPEED;
+      this.fallDistance = 0;
+    } else if (this.inWater) {
       this.vel.y -= GRAVITY * 0.4 * dt;
       this.vel.y *= 1 - 2.5 * dt; // drag
       if (input.jump) this.vel.y += 24 * dt;
@@ -207,18 +223,25 @@ export class Player {
       this.fallDistance += -this.vel.y * dt;
     }
 
-    // Integrate with collisions, one axis at a time (y first).
-    const wasOnGround = this.onGround;
-    this.onGround = false;
-    this.moveAxis(world, 1, this.vel.y * dt);
-    this.moveAxisSneakAware(world, 0, this.vel.x * dt, wasOnGround);
-    this.moveAxisSneakAware(world, 2, this.vel.z * dt, wasOnGround);
-
-    // Landing: vanilla fall damage = blocks fallen minus 3.
-    if (this.onGround && this.fallDistance > 0) {
-      const dmg = Math.ceil(this.fallDistance - 3.2);
-      if (dmg > 0) this.damage(dmg);
+    // Integrate. Noclip (spectator) moves straight through the world; otherwise
+    // resolve collisions one axis at a time (y first).
+    if (this.noclip) {
+      this.pos.addScaledVector(this.vel, dt);
+      this.onGround = false;
       this.fallDistance = 0;
+    } else {
+      const wasOnGround = this.onGround;
+      this.onGround = false;
+      this.moveAxis(world, 1, this.vel.y * dt);
+      this.moveAxisSneakAware(world, 0, this.vel.x * dt, wasOnGround);
+      this.moveAxisSneakAware(world, 2, this.vel.z * dt, wasOnGround);
+
+      // Landing: vanilla fall damage = blocks fallen minus 3.
+      if (this.onGround && this.fallDistance > 0) {
+        const dmg = Math.ceil(this.fallDistance - 3.2);
+        if (dmg > 0) this.damage(dmg);
+        this.fallDistance = 0;
+      }
     }
 
     // Smooth eye height (sneak transition).

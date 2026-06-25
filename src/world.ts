@@ -17,30 +17,44 @@ export const RENDER_DISTANCE = 8; // chunks
  * through the vanilla 0.8^(15-level) brightness curve.
  */
 function applyLightShader(
-  mat: THREE.Material, sunUniform: { value: number }
+  mat: THREE.Material,
+  sunUniform: { value: number },
+  torchUniform: { value: THREE.Vector4 }
 ): void {
   mat.customProgramCacheKey = () => 'voxel-light';
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uSunLight = sunUniform;
+    // uTorch: a moving point light carried by the player (xyz = world position,
+    // w = intensity 0..1). Lets a held torch light the world without remeshing.
+    shader.uniforms.uTorch = torchUniform;
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
-        '#include <common>\nattribute vec2 skyblock;\nvarying vec2 vSkyBlock;'
+        '#include <common>\nattribute vec2 skyblock;\nvarying vec2 vSkyBlock;\nvarying vec3 vWorldPos;'
       )
       .replace(
         '#include <begin_vertex>',
-        '#include <begin_vertex>\nvSkyBlock = skyblock;'
+        '#include <begin_vertex>\nvSkyBlock = skyblock;\n' +
+        'vWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;'
       );
     shader.fragmentShader = shader.fragmentShader
       .replace(
         '#include <common>',
-        '#include <common>\nuniform float uSunLight;\nvarying vec2 vSkyBlock;'
+        '#include <common>\nuniform float uSunLight;\nuniform vec4 uTorch;\n' +
+        'varying vec2 vSkyBlock;\nvarying vec3 vWorldPos;'
       )
       .replace(
         '#include <color_fragment>',
         '#include <color_fragment>\n' +
         'float voxelLight = max(vSkyBlock.y, vSkyBlock.x * uSunLight);\n' +
-        'diffuseColor.rgb *= pow(0.8, 15.0 * (1.0 - voxelLight));'
+        '// Held-torch point light: bright near field, gentle falloff to ~16 blocks.\n' +
+        'float td = distance(vWorldPos, uTorch.xyz);\n' +
+        'float fall = clamp(1.0 - td / 16.0, 0.0, 1.0);\n' +
+        'float torch = uTorch.w * (0.45 * fall + 0.55 * fall * fall);\n' +
+        'voxelLight = min(1.0, max(voxelLight, torch));\n' +
+        'diffuseColor.rgb *= pow(0.8, 15.0 * (1.0 - voxelLight));\n' +
+        '// Warm the torch-lit pixels (firelight tint).\n' +
+        'diffuseColor.rgb *= mix(vec3(1.0), vec3(1.15, 1.05, 0.85), clamp(torch, 0.0, 1.0));'
       );
   };
 }
@@ -57,6 +71,8 @@ export class World {
 
   /** Day-night sunlight factor shared with the chunk shaders. */
   readonly sunUniform = { value: 1 };
+  /** Held-torch point light shared with the chunk shaders (xyz pos, w intensity). */
+  readonly torchUniform = { value: new THREE.Vector4(0, 0, 0, 0) };
   /** Probability a broken block drops items (explosions lower it). */
   dropChance = 1;
   /** When true, setBlock skips the onBlockBroken hook (remote edits). */
@@ -100,8 +116,8 @@ export class World {
       opacity: 0.8,
       depthWrite: false,
     });
-    applyLightShader(this.opaqueMat, this.sunUniform);
-    applyLightShader(this.waterMat, this.sunUniform);
+    applyLightShader(this.opaqueMat, this.sunUniform, this.torchUniform);
+    applyLightShader(this.waterMat, this.sunUniform, this.torchUniform);
 
     const r = RENDER_DISTANCE + 1;
     for (let dx = -r; dx <= r; dx++)
@@ -113,6 +129,12 @@ export class World {
 
   getChunk(cx: number, cz: number): Chunk | undefined {
     return this.chunks.get(Chunk.key(cx, cz));
+  }
+
+  /** Drive the held-torch point light (xyz = world position, intensity 0..1).
+   *  Intensity 0 turns it off. */
+  setHeldLight(x: number, y: number, z: number, intensity: number): void {
+    this.torchUniform.value.set(x, y, z, intensity);
   }
 
   private ensureData(cx: number, cz: number): Chunk {
@@ -363,7 +385,7 @@ export class World {
    * Returns true if every chunk in render distance is meshed (used by the
    * loading screen).
    */
-  update(px: number, pz: number, budgetMs: number): boolean {
+  update(px: number, pz: number, budgetMs: number, maxDist = RENDER_DISTANCE): boolean {
     const start = performance.now();
     const pcx = Math.floor(px) >> 4;
     const pcz = Math.floor(pz) >> 4;
@@ -371,7 +393,7 @@ export class World {
 
     for (const [dx, dz] of this.spiral) {
       const dist = Math.max(Math.abs(dx), Math.abs(dz));
-      if (dist > RENDER_DISTANCE) continue;
+      if (dist > maxDist) continue;
       const cx = pcx + dx, cz = pcz + dz;
       const chunk = this.getChunk(cx, cz);
       if (chunk && chunk.opaqueMesh && !chunk.dirty) continue;
@@ -390,7 +412,7 @@ export class World {
     for (const chunk of this.chunks.values()) {
       if (
         Math.max(Math.abs(chunk.cx - pcx), Math.abs(chunk.cz - pcz)) >
-        RENDER_DISTANCE + 2
+        maxDist + 2
       ) {
         this.disposeMeshes(chunk);
         this.chunks.delete(Chunk.key(chunk.cx, chunk.cz));

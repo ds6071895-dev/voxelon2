@@ -458,6 +458,21 @@ export class Terrain {
     }
   }
 
+  /** A random dry land spawn within ±half of origin: solid ground above sea
+   *  level (never ocean/beach water, never floating). Falls back to findSpawn
+   *  if the rng is unlucky. */
+  randomDrySpawn(rng: () => number, half: number): { x: number; z: number; y: number } {
+    const margin = half - 24; // keep clear of the world border
+    for (let i = 0; i < 256; i++) {
+      const x = Math.round((rng() * 2 - 1) * margin);
+      const z = Math.round((rng() * 2 - 1) * margin);
+      if (this.height(x, z) >= SEA_LEVEL + 2) {
+        return { x: x + 0.5, z: z + 0.5, y: this.height(x, z) + 1 };
+      }
+    }
+    return this.findSpawn();
+  }
+
   /** Find a dry spawn column near the origin (square-spiral search). */
   findSpawn(): { x: number; z: number; y: number } {
     const dry = (x: number, z: number) => this.height(x, z) >= SEA_LEVEL + 2;

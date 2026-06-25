@@ -13,6 +13,8 @@ export const SERVER_PORT = 8080;
 export const SNAPSHOT_HZ = 15;     // server -> clients transform broadcasts
 export const TRANSFORM_HZ = 20;    // client -> server transform sends
 export const WORLD_SEED = 1337;    // fixed shared seed (clients + server)
+export const WORLD_BORDER = 1000;  // square play area side length (centred on origin)
+export const WORLD_HALF = WORLD_BORDER / 2; // movement clamps to [-HALF, +HALF]
 export const MELEE_DAMAGE = 4;     // server-applied fist damage
 export const MELEE_RANGE = 4.5;
 export const EDIT_RANGE = 7;       // max distance a player may edit a block
@@ -26,11 +28,15 @@ export interface PlayerSnapshot {
   dead: boolean;
 }
 
+/** Gamemode, set by a server-console admin command. */
+export type GameMode = 'survival' | 'creative' | 'spectator';
+
 /** Full info about a player (sent on join / welcome). */
 export interface PlayerInfo extends PlayerSnapshot {
   username: string;
   skin: number; // seed for deterministic avatar colors
   faction: number; // preset team id (teams.ts); NO_FACTION when neutral/offline
+  mode: GameMode; // gamemode (survival default; admin-set creative/spectator)
 }
 
 /** A dropped item entity owned by the server. */
@@ -152,7 +158,12 @@ export type ServerMsg =
   | { t: 'claims'; claims: ClaimState[] }
   | { t: 'claimRemove'; id: number }
   // Raid feed (M19): "RED breached BLUE's claim".
-  | { t: 'breach'; attacker: string; faction: number; victim: number };
+  | { t: 'breach'; attacker: string; faction: number; victim: number }
+  // Admin (server console): a player's gamemode changed; teleport snaps a player.
+  | { t: 'gamemode'; id: number; mode: GameMode }
+  | { t: 'teleport'; x: number; y: number; z: number }
+  // Admin notice shown to a player (e.g. "You are now in creative mode").
+  | { t: 'notice'; text: string };
 
 const ADJECTIVES = [
   'Brave', 'Swift', 'Iron', 'Shadow', 'Crimson', 'Frost', 'Rapid', 'Silent',

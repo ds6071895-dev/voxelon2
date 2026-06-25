@@ -240,9 +240,9 @@ export class Mobs {
       this.world.approxBlockLight(x, y, z) < 8 &&
       (sun < 0.5 || !this.world.hasSkyAccess(x, y, z))
     ) {
-      this.spawnAt(
-        Math.random() < 0.7 ? 'zombie' : 'creeper', x + 0.5, y, z + 0.5
-      );
+      // Creepers removed from the spawn pool — only zombies spawn now. (The
+      // explosion helper they shared still powers rocket blasts.)
+      this.spawnAt('zombie', x + 0.5, y, z + 0.5);
     }
   }
 

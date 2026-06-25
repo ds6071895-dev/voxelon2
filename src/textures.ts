@@ -533,8 +533,8 @@ function paintToolSprite(
   return (p: Painter, seed: number): void => {
     const mat = (x: number, y: number, f = 1) =>
       p.set(x, y, shade(material, f * (0.9 + hash2(seed, x, y) * 0.2)));
-    const stick = (x: number, y: number) =>
-      p.set(x, y, shade(STICK_COLOR, 0.85 + hash2(seed, x, y) * 0.3));
+    const stick = (x: number, y: number, f = 1) =>
+      p.set(x, y, shade(STICK_COLOR, f * (0.85 + hash2(seed, x, y) * 0.3)));
 
     if (type === 'sword') {
       for (let i = 0; i < 9; i++) {
@@ -546,30 +546,48 @@ function paintToolSprite(
       p.set(5, 11, [70, 50, 30, 255]);
       p.set(3, 11, [70, 50, 30, 255]);
       stick(2, 13); stick(3, 12); stick(2, 12);
+      outlineSprite(p);
       return;
     }
-    // diagonal handle for pickaxe/axe/shovel
-    for (let i = 0; i < 8; i++) {
-      stick(3 + i, 12 - i);
-      if (i < 7) stick(4 + i, 12 - i);
+    // Wooden handle: a 2px diagonal running bottom-left -> upper-right, with a
+    // darker lower edge for a bit of round.
+    for (let i = 0; i < 9; i++) {
+      const x = 3 + i, y = 13 - i;
+      stick(x, y);
+      stick(x + 1, y, 0.78);
     }
+    // `m` paints a metal head pixel with directional shading: upper-left bright
+    // (highlight), lower-right dim (shadow), so the head reads as a solid tool.
+    const m = (x: number, y: number) => mat(x, y, 1.06 - (x + y) * 0.018);
     if (type === 'pickaxe') {
-      const arc = [
-        [5, 4], [6, 3], [7, 2], [8, 2], [9, 2], [10, 2],
-        [11, 3], [12, 4], [13, 5], [13, 6],
-      ];
-      for (const [x, y] of arc) { mat(x, y); mat(x, y + 1, 0.75); }
+      // A wide arched head bridging two drooping tips over the handle top.
+      for (const x of [8, 9, 10, 11, 12]) m(x, 3);       // crown bar
+      m(7, 4); m(13, 4);                                  // shoulders
+      m(6, 5); m(14, 5);                                  // tips
+      m(10, 4); m(11, 5);                                 // join down to handle
     } else if (type === 'axe') {
+      // A bit-blade hanging off the left of the handle top; left column is the
+      // bright cutting edge.
       for (const [x, y] of [
-        [8, 1], [9, 1], [10, 2], [11, 3], [7, 2], [8, 2], [9, 2],
-        [8, 3], [9, 3], [10, 3], [9, 4], [10, 4],
-      ]) mat(x, y, 0.9 + (x % 2) * 0.1);
+        [9, 2], [10, 2],
+        [7, 3], [8, 3], [9, 3], [10, 3],
+        [6, 4], [7, 4], [8, 4], [9, 4], [10, 4],
+        [6, 5], [7, 5], [8, 5], [9, 5], [10, 5],
+        [7, 6], [8, 6], [9, 6], [10, 6],
+        [9, 7], [10, 7],
+      ] as [number, number][]) m(x, y);
+      for (const y of [4, 5]) mat(6, y, 1.25); // bright cutting edge
     } else { // shovel
+      // A rounded spade scoop centred over the handle top.
       for (const [x, y] of [
-        [11, 2], [12, 2], [13, 2], [11, 3], [12, 3], [13, 3],
-        [11, 4], [12, 4], [13, 4], [12, 5], [13, 5], [12, 1],
-      ]) mat(x, y, 0.9);
+        [9, 2], [10, 2],
+        [8, 3], [9, 3], [10, 3], [11, 3],
+        [8, 4], [9, 4], [10, 4], [11, 4],
+        [8, 5], [9, 5], [10, 5], [11, 5],
+        [9, 6], [10, 6],
+      ] as [number, number][]) m(x, y);
     }
+    outlineSprite(p); // crisp dark edge around handle + head
   };
 }
 
