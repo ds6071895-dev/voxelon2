@@ -458,15 +458,32 @@ export class Terrain {
     }
   }
 
-  /** A random dry land spawn within ±half of origin: solid ground above sea
-   *  level (never ocean/beach water, never floating). Falls back to findSpawn
-   *  if the rng is unlucky. */
+  /** A column is safe to stand on at spawn: solid ground comfortably above sea
+   *  level, NOT carved open by a ravine (which would leave you in mid-air), NOT
+   *  a water/beach biome, NOT ashlands (surface lava), and surrounded by dry
+   *  land so you don't land on a lone spike at the water's edge. */
+  private safeSpawnColumn(x: number, z: number): boolean {
+    const h = this.height(x, z);
+    if (h < SEA_LEVEL + 3) return false;            // would be at/near water
+    if (this.ravineDepth(x, z) > 0) return false;   // surface carved -> air/fall
+    const biome = this.biomeWithWater(x, z, h);
+    if (biome === Biome.Ocean || biome === Biome.Beach || biome === Biome.Ashlands) return false;
+    // Neighbours must also be dry land (no spawning on a 1-wide pillar in water).
+    for (const [dx, dz] of [[2, 0], [-2, 0], [0, 2], [0, -2]] as [number, number][]) {
+      if (this.height(x + dx, z + dz) < SEA_LEVEL + 1) return false;
+    }
+    return true;
+  }
+
+  /** A random spawn within ±half of origin that is guaranteed solid dry ground
+   *  (never in water, never floating in air). Falls back to findSpawn if the rng
+   *  is unlucky. The +1 on y places the feet exactly on top of the surface. */
   randomDrySpawn(rng: () => number, half: number): { x: number; z: number; y: number } {
     const margin = half - 24; // keep clear of the world border
-    for (let i = 0; i < 256; i++) {
+    for (let i = 0; i < 512; i++) {
       const x = Math.round((rng() * 2 - 1) * margin);
       const z = Math.round((rng() * 2 - 1) * margin);
-      if (this.height(x, z) >= SEA_LEVEL + 2) {
+      if (this.safeSpawnColumn(x, z)) {
         return { x: x + 0.5, z: z + 0.5, y: this.height(x, z) + 1 };
       }
     }
@@ -475,7 +492,7 @@ export class Terrain {
 
   /** Find a dry spawn column near the origin (square-spiral search). */
   findSpawn(): { x: number; z: number; y: number } {
-    const dry = (x: number, z: number) => this.height(x, z) >= SEA_LEVEL + 2;
+    const dry = (x: number, z: number) => this.safeSpawnColumn(x, z);
     const at = (x: number, z: number) => ({
       x: x + 0.5, z: z + 0.5, y: this.height(x, z) + 1,
     });

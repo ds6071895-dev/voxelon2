@@ -1114,6 +1114,75 @@ check('furnace smelts ore/sand/log but not removed foods',
     [Item.Shotgun, Item.SMG, Item.Sniper, Item.BurstRifle].every(
       (g) => (ITEMS[g].gun?.ammo ?? 0) === Item.Bullet && (ITEMS[g].gun?.mag ?? 0) > 0));
 
+  // Gun aim-down-sights: scoped guns define a zoom (sniper most); the shotgun
+  // is a hip-fire brawler with no scope.
+  check('scoped guns define an ADS zoom; the sniper zooms most',
+    (ITEMS[Item.Sniper].gun?.zoom ?? 1) >= 4 &&
+    (ITEMS[Item.Sniper].gun?.zoom ?? 0) > (ITEMS[Item.Rifle].gun?.zoom ?? 0) &&
+    (ITEMS[Item.Rifle].gun?.zoom ?? 0) > 1);
+  check('the shotgun is a hip-fire brawler (no ADS zoom)',
+    ITEMS[Item.Shotgun].gun?.zoom === undefined);
+
+  // Glider: equips into the chestplate slot, grants no defense, early-game craft.
+  {
+    const gInv = new Inventory();
+    gInv.add(Item.Glider, 1);
+    const equipped = gInv.tryEquipArmor(0);
+    check('glider equips into the chestplate slot',
+      equipped && gInv.chestplateStack?.id === Item.Glider);
+    check('a worn glider grants no armor defense', gInv.armorPoints() === 0);
+    check('glider craft is cheap (sticks + planks)',
+      matchGrid(cellGrid([[Item.Stick, Item.Stick, Item.Stick],
+        [Block.OakPlanks, null, Block.OakPlanks]]))?.id === Item.Glider);
+  }
+
+  // Glide flight: a mid-air jump deploys the worn glider; you then travel fast
+  // and sink gently, and a second jump stows it.
+  {
+    const flat = { ...IDLE_INPUT } as never;
+    const jump = { ...IDLE_INPUT, jump: true } as never;
+    const gp = new Player({ x: spawn.x, y: spawn.y + 45, z: spawn.z });
+    gp.gliderEquipped = true; gp.yaw = 0; gp.pitch = 0;
+    gp.update(1 / 60, jump, world); // rising-edge jump in mid-air -> deploy
+    const deployed = gp.gliding;
+    const y0 = gp.pos.y, z0 = gp.pos.z;
+    for (let i = 0; i < 60; i++) gp.update(1 / 60, flat, world);
+    const sink = y0 - gp.pos.y, travel = Math.abs(gp.pos.z - z0);
+    check('glider: mid-air jump deploys it; fast travel + gentle descent',
+      deployed && gp.gliding && travel > 8 && sink < 7,
+      `deployed=${deployed} travel=${travel.toFixed(1)} sink=${sink.toFixed(1)}`);
+    gp.update(1 / 60, jump, world); // jump again -> stow
+    check('glider: a second mid-air jump stops gliding', !gp.gliding);
+  }
+
+  // Spawn safety: random spawns are always solid dry ground (never air/water).
+  {
+    let allDry = true, detail = '';
+    for (let sd = 1; sd <= 40; sd++) {
+      const terr = new Terrain(0x51b0 + sd * 131);
+      const sp = terr.randomDrySpawn(mulberry32(sd * 7 + 3), 500);
+      const hx = Math.floor(sp.x), hz = Math.floor(sp.z);
+      const h = terr.height(hx, hz);
+      if (!(sp.y > SEA_LEVEL && sp.y === h + 1 && terr.ravineDepth(hx, hz) === 0)) {
+        allDry = false; detail = `seed ${sd}: y=${sp.y} h=${h}`; break;
+      }
+    }
+    check('random spawns are solid dry ground (never air, never water)', allDry, detail);
+
+    const terr = new Terrain(0xc0ffee);
+    const sp = terr.randomDrySpawn(mulberry32(123), 500);
+    const ch = new Chunk(Math.floor(sp.x) >> 4, Math.floor(sp.z) >> 4);
+    terr.fill(ch);
+    const lx = ((Math.floor(sp.x) % 16) + 16) % 16;
+    const lz = ((Math.floor(sp.z) % 16) + 16) % 16;
+    const below = ch.get(lx, Math.floor(sp.y) - 1, lz);
+    const feet = ch.get(lx, Math.floor(sp.y), lz);
+    const head = ch.get(lx, Math.floor(sp.y) + 1, lz);
+    check('spawn column: solid block underfoot, clear air at feet + head',
+      isSolid(below) && feet === Block.Air && head === Block.Air,
+      `below=${below} feet=${feet} head=${head}`);
+  }
+
   // Ammo reserve helpers (drive the magazine reload).
   const inv = new Inventory();
   inv.slots[0] = { id: Item.Bullet, count: 30 };

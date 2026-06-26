@@ -182,10 +182,26 @@ export class GameAudio {
     this.tone({ type: 'sine', from: 90, to: 30, dur: 0.8, gain: 0.6, pos });
   }
 
-  /** Gunshot crack: a sharp high noise burst over a short low thump. */
+  /** Gunshot: a soft body "thump" + a brief click — deliberately low on harsh
+   *  high frequencies so rapid fire isn't piercing/painful to listen to. */
   gun(pos?: THREE.Vector3): void {
-    this.noise({ freq: 2000, dur: 0.08, gain: 0.5, slideTo: 500, type: 'highpass', q: 0.8, pos });
-    this.tone({ type: 'square', from: 200, to: 60, dur: 0.06, gain: 0.18, pos });
+    // Low-passed body (the punch), sliding down — no shrill hiss.
+    this.noise({ freq: 820, dur: 0.07, gain: 0.3, slideTo: 180, type: 'lowpass', q: 0.7, pos });
+    // A short, gentle mid click for definition (bandpass, low gain).
+    this.noise({ freq: 1500, dur: 0.025, gain: 0.1, type: 'bandpass', q: 1, pos });
+    // Soft triangle thump (much smoother than the old square wave).
+    this.tone({ type: 'triangle', from: 170, to: 55, dur: 0.07, gain: 0.15, pos });
+  }
+
+  /** Glider deploy: an airy upward whoosh as the wings catch. */
+  glide(): void {
+    this.noise({ freq: 500, dur: 0.55, gain: 0.22, slideTo: 1700, type: 'bandpass', q: 0.6 });
+  }
+
+  /** Glider breaks: a short snap + falling whoosh. */
+  gliderBreak(): void {
+    this.noise({ freq: 2200, dur: 0.07, gain: 0.28, slideTo: 600, type: 'bandpass', q: 0.9 });
+    this.tone({ type: 'triangle', from: 320, to: 90, dur: 0.18, gain: 0.16 });
   }
 
   caveAmbience(): void {

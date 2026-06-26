@@ -146,7 +146,8 @@ export class Interaction {
   }
 
   update(
-    dt: number, input: Input, camera: THREE.Camera, suppressMining = false
+    dt: number, input: Input, camera: THREE.Camera,
+    suppressMining = false, suppressUse = false
   ): void {
     const origin = this.player.eyePosition;
     const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
@@ -162,7 +163,9 @@ export class Interaction {
       this.highlight.visible = false;
     }
 
-    const opened = this.tryOpenContainer(input);
+    // suppressUse (e.g. aiming a gun down sights) blocks right-click placing AND
+    // container/helm use, so right-click is free to mean "zoom" instead.
+    const opened = suppressUse ? false : this.tryOpenContainer(input);
     const targetId = this.target
       ? this.world.getBlock(this.target.x, this.target.y, this.target.z) : Block.Air;
     if (isEntityBlock(targetId)) {
@@ -172,10 +175,10 @@ export class Interaction {
         this.onAction?.();
       }
       this.breakKey = ''; this.breakProgress = 0; this.crackMesh.visible = false;
-      if (!opened) this.updatePlacing(dt, input, origin, dir);
+      if (!opened && !suppressUse) this.updatePlacing(dt, input, origin, dir);
     } else {
       this.updateBreaking(dt, input, suppressMining);
-      if (!opened) this.updatePlacing(dt, input, origin, dir);
+      if (!opened && !suppressUse) this.updatePlacing(dt, input, origin, dir);
     }
 
     // Middle-click pick block: select the matching hotbar slot.

@@ -280,9 +280,10 @@ export class InventoryUI {
     if (stack) {
       renderItemIcon(view.icon, this.atlasCanvas, stack.id);
       view.count.textContent = stack.count > 1 ? String(stack.count) : '';
-      const tool = ITEMS[stack.id]?.tool;
-      if (tool && stack.damage) {
-        const frac = 1 - stack.damage / tool.durability;
+      // Tools and gliders show a durability bar as they wear down.
+      const durMax = ITEMS[stack.id]?.tool?.durability ?? ITEMS[stack.id]?.glider?.durability;
+      if (durMax && stack.damage) {
+        const frac = 1 - stack.damage / durMax;
         view.dur.style.display = 'block';
         view.dur.style.width = `${Math.max(2, Math.round(frac * 32))}px`;
         view.dur.style.background = frac > 0.5 ? '#5fe552' : frac > 0.25 ? '#e5c452' : '#e55252';

@@ -23,14 +23,18 @@ export class Panorama {
   private readonly cy: number;
   private yaw = 0;
 
-  constructor(atlas: Atlas) {
-    this.scene.fog = new THREE.Fog(0x9fc4e8, 40, 150);
+  constructor(atlas: Atlas, aspect = 1) {
+    // A sky-blue background + matching fog so the horizon reads as a real sky
+    // (without this the scene clears to black behind the distant chunks).
+    this.scene.background = new THREE.Color(0x78a7ff);
+    this.scene.fog = new THREE.Fog(0x9fc4e8, 60, 220);
     this.world = new World(this.scene, atlas, PANO_SEED);
     this.sky = new Sky(this.scene, PANO_SEED);
     this.camera.rotation.order = 'YXZ';
     // A deterministic scenic spot (fixed seed -> same every time).
     const s = this.world.terrain.randomDrySpawn(mulberry32(PANO_SEED), 200);
     this.cx = s.x; this.cz = s.z; this.cy = s.y + 14;
+    this.resize(aspect); // match the viewport up front so it isn't stretched
   }
 
   resize(aspect: number): void {
@@ -45,6 +49,10 @@ export class Panorama {
     this.camera.position.set(this.cx, this.cy, this.cz);
     this.camera.rotation.set(-0.14, this.yaw, 0);
     this.sky.update(dt, this.camera);
+    this.world.sunUniform.value = this.sky.sunIntensity;
+    // Track the live sky colour so the background + fog blend into the horizon.
+    (this.scene.background as THREE.Color).copy(this.sky.skyColor);
+    (this.scene.fog as THREE.Fog).color.copy(this.sky.skyColor);
   }
 
   render(renderer: THREE.WebGLRenderer): void {

@@ -36,6 +36,15 @@ const DAMAGE_REGEN_DELAY = 3; // seconds after a hit before health regen resumes
 // Admin/gamemode flight (creative + spectator).
 const FLY_SPEED_MULT = 2.4;   // horizontal speed multiplier while flying
 const FLY_V_SPEED = 9;        // vertical rise/descend speed (blocks/s)
+// Glider (chestplate-slot wings): a fast, forgiving directional descent. The
+// look direction steers; diving trades altitude for speed, leveling out cruises
+// fast with a small constant sink ("fun and easy" transport from high places).
+const GLIDE_BASE_SPEED = 13;   // cruise speed looking level (≈3× walking)
+const GLIDE_DIVE_GAIN = 16;    // extra speed gained nose-down
+const GLIDE_MIN_SPEED = 6;
+const GLIDE_MAX_SPEED = 32;
+const GLIDE_SINK = 2.2;        // baseline downward drift (blocks/s)
+const GLIDE_MIN_CLEARANCE = 3; // air blocks below required to deploy
 
 export class Player {
   readonly pos = new THREE.Vector3(); // feet, centre of the box
@@ -71,6 +80,14 @@ export class Player {
   flying = false;
   /** Admin/gamemode noclip: move through blocks, ignore collision (spectator). */
   noclip = false;
+  /** Mouse-look sensitivity multiplier (1 = normal). Lowered while a gun is
+   *  scoped (aim-down-sights) so high-zoom aiming is steady. */
+  lookScale = 1;
+  /** A glider is worn in the chestplate slot (set by main from the inventory). */
+  gliderEquipped = false;
+  /** Currently gliding (wings deployed). */
+  gliding = false;
+  private prevJump = false;
   private eye = EYE_STANDING;
 
   constructor(spawn: { x: number; y: number; z: number }) {
@@ -111,6 +128,8 @@ export class Player {
     this.hurtTimer = 0;
     this.damageFlash = 0;
     this.dead = false;
+    this.gliding = false;
+    this.prevJump = false;
   }
 
   get eyePosition(): THREE.Vector3 {
@@ -123,9 +142,9 @@ export class Player {
     this.damageFlash = Math.max(0, this.damageFlash - dt);
     // regenCooldown is ticked by Survival.update (runs while paused/inventory).
 
-    // Mouse look.
-    this.yaw -= input.mouseDX * MOUSE_SENSITIVITY;
-    this.pitch -= input.mouseDY * MOUSE_SENSITIVITY;
+    // Mouse look (lookScale < 1 while scoped for steady aim-down-sights).
+    this.yaw -= input.mouseDX * MOUSE_SENSITIVITY * this.lookScale;
+    this.pitch -= input.mouseDY * MOUSE_SENSITIVITY * this.lookScale;
     const maxPitch = Math.PI / 2 - 0.001;
     this.pitch = Math.max(-maxPitch, Math.min(maxPitch, this.pitch));
 
@@ -148,6 +167,21 @@ export class Player {
       world.getBlock(Math.floor(eyeP.x), Math.floor(eyeP.y), Math.floor(eyeP.z)) ===
       Block.Water;
 
+    // Glider: jump in mid-air (with clearance below) to deploy; jump again, or
+    // touch ground/water, to stow. Rising-edge on jump so a held Space doesn't
+    // immediately re-toggle.
+    const jumpEdge = input.jump && !this.prevJump;
+    this.prevJump = input.jump;
+    if (this.gliding) {
+      if (this.onGround || this.inWater || this.flying ||
+          !this.gliderEquipped || jumpEdge) {
+        this.gliding = false;
+      }
+    } else if (jumpEdge && this.gliderEquipped && !this.onGround && !this.inWater &&
+        !this.flying && this.groundClearance(world) > GLIDE_MIN_CLEARANCE) {
+      this.gliding = true;
+    }
+
     // Wish direction in the horizontal plane, relative to yaw.
     let fwd = 0, strafe = 0;
     if (input.forward) fwd += 1;
@@ -161,45 +195,51 @@ export class Player {
     const dirX = -sin * fwd + cos * strafe;
     const dirZ = -cos * fwd - sin * strafe;
 
-    let speed = this.sneaking ? SNEAK_SPEED
-      : this.sprinting ? SPRINT_SPEED
-      : WALK_SPEED;
-    if (this.inWater) speed *= 0.45;
-    if (this.flying) speed = (this.sprinting ? SPRINT_SPEED : WALK_SPEED) * FLY_SPEED_MULT;
-
-    // Approach target velocity; much weaker control while airborne (but full
-    // authority while flying).
-    const accel = this.flying || this.onGround || this.inWater ? 14 : 3;
-    const t = Math.min(1, accel * dt);
-    this.vel.x += (dirX * speed - this.vel.x) * t;
-    this.vel.z += (dirZ * speed - this.vel.z) * t;
-
-    // Vertical.
-    if (this.flying) {
-      // Free vertical control: jump rises, sneak descends, no gravity/fall.
-      let vy = 0;
-      if (input.jump) vy += 1;
-      if (input.sneak) vy -= 1;
-      this.vel.y = vy * FLY_V_SPEED;
-      this.fallDistance = 0;
-    } else if (this.inWater) {
-      this.vel.y -= GRAVITY * 0.4 * dt;
-      this.vel.y *= 1 - 2.5 * dt; // drag
-      if (input.jump) this.vel.y += 24 * dt;
-      this.vel.y = Math.max(-6, Math.min(4.5, this.vel.y));
-      // Climbing out: at the water's edge, holding jump while pushing into a
-      // 1-block ledge gives an upward hop that beats the buoyancy clamp, so
-      // you mount the block instead of bobbing against it (like vanilla).
-      if (input.jump && len > 0 && this.ledgeAhead(world, dirX, dirZ)) {
-        this.vel.y = 5.5;
-      }
+    if (this.gliding) {
+      // Wings deployed: the look direction sets the whole velocity (collisions
+      // still resolve at integration). WASD is ignored — you fly where you aim.
+      this.applyGlide();
     } else {
-      if (input.jump && this.onGround) {
-        this.vel.y = JUMP_VELOCITY;
-        this.onGround = false;
+      let speed = this.sneaking ? SNEAK_SPEED
+        : this.sprinting ? SPRINT_SPEED
+        : WALK_SPEED;
+      if (this.inWater) speed *= 0.45;
+      if (this.flying) speed = (this.sprinting ? SPRINT_SPEED : WALK_SPEED) * FLY_SPEED_MULT;
+
+      // Approach target velocity; much weaker control while airborne (but full
+      // authority while flying).
+      const accel = this.flying || this.onGround || this.inWater ? 14 : 3;
+      const t = Math.min(1, accel * dt);
+      this.vel.x += (dirX * speed - this.vel.x) * t;
+      this.vel.z += (dirZ * speed - this.vel.z) * t;
+
+      // Vertical.
+      if (this.flying) {
+        // Free vertical control: jump rises, sneak descends, no gravity/fall.
+        let vy = 0;
+        if (input.jump) vy += 1;
+        if (input.sneak) vy -= 1;
+        this.vel.y = vy * FLY_V_SPEED;
+        this.fallDistance = 0;
+      } else if (this.inWater) {
+        this.vel.y -= GRAVITY * 0.4 * dt;
+        this.vel.y *= 1 - 2.5 * dt; // drag
+        if (input.jump) this.vel.y += 24 * dt;
+        this.vel.y = Math.max(-6, Math.min(4.5, this.vel.y));
+        // Climbing out: at the water's edge, holding jump while pushing into a
+        // 1-block ledge gives an upward hop that beats the buoyancy clamp, so
+        // you mount the block instead of bobbing against it (like vanilla).
+        if (input.jump && len > 0 && this.ledgeAhead(world, dirX, dirZ)) {
+          this.vel.y = 5.5;
+        }
+      } else {
+        if (input.jump && this.onGround) {
+          this.vel.y = JUMP_VELOCITY;
+          this.onGround = false;
+        }
+        this.vel.y -= GRAVITY * dt;
+        if (this.vel.y < -TERMINAL_VELOCITY) this.vel.y = -TERMINAL_VELOCITY;
       }
-      this.vel.y -= GRAVITY * dt;
-      if (this.vel.y < -TERMINAL_VELOCITY) this.vel.y = -TERMINAL_VELOCITY;
     }
 
     // Energy: sprinting drains it; otherwise it refills. Hitting 0 forces a
@@ -317,6 +357,33 @@ export class Player {
       world.getBlock(bx, fy + 1, bz) === Block.Air &&
       world.getBlock(bx, fy + 2, bz) === Block.Air
     );
+  }
+
+  /** Glider velocity from the look direction: dive to go fast, level out to
+   *  cruise with a gentle sink. Sets vel directly (integration still collides). */
+  private applyGlide(): void {
+    const cosP = Math.cos(this.pitch), sinP = Math.sin(this.pitch);
+    const fx = -Math.sin(this.yaw) * cosP;
+    const fy = sinP;                       // <0 looking down, >0 looking up
+    const fz = -Math.cos(this.yaw) * cosP;
+    const dive = -fy;                      // +1 nose straight down
+    const speed = Math.max(GLIDE_MIN_SPEED,
+      Math.min(GLIDE_MAX_SPEED, GLIDE_BASE_SPEED + dive * GLIDE_DIVE_GAIN));
+    this.vel.x = fx * speed;
+    this.vel.z = fz * speed;
+    this.vel.y = fy * speed * 0.7 - GLIDE_SINK;
+    this.fallDistance = 0; // gliding lands softly (no fall damage)
+  }
+
+  /** Distance (in blocks) to the first solid block straight below the feet,
+   *  capped at 96. Used to require real clearance before deploying the glider. */
+  private groundClearance(world: World): number {
+    const x = Math.floor(this.pos.x), z = Math.floor(this.pos.z);
+    const fy = Math.floor(this.pos.y);
+    for (let d = 1; d <= 96; d++) {
+      if (isSolid(world.getBlock(x, fy - d, z))) return d;
+    }
+    return 96;
   }
 
   private hasSupport(world: World): boolean {

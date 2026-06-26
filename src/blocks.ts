@@ -224,6 +224,8 @@ export const enum Tile {
   SMG = 129,
   Sniper = 130,
   BurstRifle = 131,
+  // Glider (early-game chestplate-slot wings)
+  Glider = 132,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel';

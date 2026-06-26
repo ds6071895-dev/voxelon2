@@ -54,6 +54,8 @@ export const enum Item {
   SMG = 146,
   Sniper = 147,
   BurstRifle = 148,
+  // Glider: an early-game chestplate-slot item for fast descent travel.
+  Glider = 149,
 }
 
 export interface ToolInfo {
@@ -82,6 +84,12 @@ export interface ArmorInfo {
   durability: number;
 }
 
+/** A glider equips into the chestplate slot (like an elytra). It has no defense;
+ *  `durability` is the number of seconds of gliding before it wears out. */
+export interface GliderInfo {
+  durability: number;
+}
+
 export interface GunInfo {
   /** Damage per projectile hit (mobs + PvP). */
   damage: number;
@@ -105,6 +113,9 @@ export interface GunInfo {
   spread?: number;
   /** Rounds auto-fired in a quick burst per trigger pull (burst rifle). Default 1. */
   burst?: number;
+  /** Aim-down-sights magnification when right-click is held (FOV divides by this).
+   *  Bigger = more zoom (sniper scopes most). Omitted/1 = no zoom. */
+  zoom?: number;
 }
 
 export interface ItemInfo {
@@ -118,6 +129,7 @@ export interface ItemInfo {
   tool?: ToolInfo;
   armor?: ArmorInfo;
   gun?: GunInfo;
+  glider?: GliderInfo;
 }
 
 export interface ItemStack {
@@ -143,6 +155,7 @@ export function armorLevel(stack: ItemStack): number {
 
 /** Effective defense points for a worn piece (base + level bonus). */
 export function armorPointsOf(stack: ItemStack): number {
+  if (ITEMS[stack.id]?.glider) return 0; // a glider sits in the chest slot but is not armor
   const a = ITEMS[stack.id]?.armor;
   if (!a) return 0;
   return a.points + armorLevel(stack) * ARMOR_POINTS_PER_LEVEL;
@@ -159,6 +172,14 @@ function armorItem(name: string, sprite: Tile, armor: ArmorInfo): ItemInfo {
 }
 function gunItem(name: string, sprite: Tile, gun: GunInfo): ItemInfo {
   return { name, kind: 'item', sprite, maxStack: 1, gun };
+}
+function gliderItem(name: string, sprite: Tile, glider: GliderInfo): ItemInfo {
+  // A 0-defense "chestplate" so the existing armor-slot equip/swap plumbing
+  // (inventory + UI) handles it with no special cases; `glider` drives flight.
+  return {
+    name, kind: 'item', sprite, maxStack: 1, glider,
+    armor: { slot: 'chestplate', points: 0, tier: 0, durability: glider.durability },
+  };
 }
 
 const TOOL_TIERS = [
@@ -283,34 +304,44 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Item.TitaniumBoots]: armorItem('Titanium Boots', Tile.ArmorBootsTitanium,
     { slot: 'boots', points: 3, tier: 2, durability: 650 }),
 
-  // Guns — pistol (semi), rifle (auto), rocket launcher (explosive).
+  // Guns — pistol (semi), rifle (auto), rocket launcher (explosive). `zoom` is
+  // the aim-down-sights magnification (hold right-click); scoped guns zoom more.
   [Item.Pistol]: gunItem('Pistol', Tile.Pistol,
-    { damage: 5, ammo: Item.Bullet, mag: 12, cooldown: 0.32, auto: false, speed: 80, range: 48 }),
+    { damage: 5, ammo: Item.Bullet, mag: 12, cooldown: 0.32, auto: false, speed: 80, range: 48,
+      zoom: 1.15 }),
   [Item.Rifle]: gunItem('Rifle', Tile.Rifle,
-    { damage: 4, ammo: Item.Bullet, mag: 30, cooldown: 0.11, auto: true, speed: 100, range: 64 }),
+    { damage: 4, ammo: Item.Bullet, mag: 30, cooldown: 0.11, auto: true, speed: 100, range: 64,
+      zoom: 1.35 }),
   [Item.RocketLauncher]: gunItem('Rocket Launcher', Tile.RocketLauncher,
-    { damage: 18, ammo: Item.Rocket, mag: 1, cooldown: 1.1, auto: false, speed: 28, range: 80, rocket: true }),
+    { damage: 18, ammo: Item.Rocket, mag: 1, cooldown: 1.1, auto: false, speed: 28, range: 80,
+      rocket: true, zoom: 1.25 }),
   // Shotgun — point-blank bruiser: a wide pellet spray that shreds up close and
-  // fizzles at range. Slow pump, small mag.
+  // fizzles at range. Slow pump, small mag. No scope (it's a hip-fire brawler).
   [Item.Shotgun]: gunItem('Shotgun', Tile.Shotgun,
     { damage: 3, ammo: Item.Bullet, mag: 6, cooldown: 0.7, auto: false, speed: 70, range: 22,
       pellets: 7, spread: 0.13 }),
   // SMG — spray-and-pray: blistering auto fire, low per-hit damage, big mag,
-  // a touch of bloom and short reach.
+  // a touch of bloom and short reach. A small ADS zoom to tighten sprays.
   [Item.SMG]: gunItem('SMG', Tile.SMG,
     { damage: 3, ammo: Item.Bullet, mag: 35, cooldown: 0.07, auto: true, speed: 95, range: 38,
-      spread: 0.035 }),
+      spread: 0.035, zoom: 1.2 }),
   // Sniper — pinpoint hitscan-feel: huge damage, dead-accurate, long reach, but
-  // a long recovery between shots and a tiny mag.
+  // a long recovery between shots and a tiny mag. A big scope zoom.
   [Item.Sniper]: gunItem('Sniper', Tile.Sniper,
-    { damage: 24, ammo: Item.Bullet, mag: 5, cooldown: 1.35, auto: false, speed: 150, range: 80 }),
+    { damage: 24, ammo: Item.Bullet, mag: 5, cooldown: 1.35, auto: false, speed: 150, range: 80,
+      zoom: 4 }),
   // Burst Rifle — disciplined 3-round bursts; rewards aim with a quick clustered
-  // hit then a beat of downtime.
+  // hit then a beat of downtime. A medium marksman zoom.
   [Item.BurstRifle]: gunItem('Burst Rifle', Tile.BurstRifle,
     { damage: 5, ammo: Item.Bullet, mag: 24, cooldown: 0.5, auto: false, speed: 115, range: 58,
-      burst: 3 }),
+      burst: 3, zoom: 1.8 }),
   [Item.Bullet]: pureItem('Bullet', Tile.Bullet),
   [Item.Rocket]: pureItem('Rocket', Tile.Rocket),
+
+  // Glider — early-game wings worn in the chestplate slot. Jump in mid-air to
+  // deploy (it slows your fall and rockets you forward); easy to craft, easy to
+  // break (wears out with use).
+  [Item.Glider]: gliderItem('Glider', Tile.Glider, { durability: 22 }),
 };
 
 /**

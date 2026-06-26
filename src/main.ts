@@ -63,25 +63,12 @@ const SPRINT_FOV = 80.5;
 
 const app = document.getElementById('app')!;
 const overlay = document.getElementById('overlay')!;
-const loading = document.getElementById('loading')!;
 const crosshair = document.getElementById('crosshair')!;
 const hotbarEl = document.getElementById('hotbar')!;
 const statusEl = document.getElementById('status')!;
 crosshair.style.display = 'none'; // HUD hidden until the player is in-game
 hotbarEl.style.display = 'none';
 statusEl.style.display = 'none';
-
-const LOADING_TIPS = [
-  'Diamonds hide below Y 16 — dig deep and bring torches.',
-  'Sprinting drains your energy bar; let it recharge before a chase.',
-  'Guns are the only way to damage other players — melee just fights mobs.',
-  'Press E for your inventory — the world keeps running while it is open.',
-  'Right-click a crafting table or furnace to use it.',
-  'Other players can see and grab whatever you drop — guard your loot.',
-  'Zombies burn in daylight; the night belongs to them.',
-];
-(document.getElementById('loadtip') as HTMLElement).textContent =
-  LOADING_TIPS[Math.floor(Math.random() * LOADING_TIPS.length)];
 
 // The world always uses the shared seed so clients never desync from the
 // server (the ?seed override was removed).
@@ -154,7 +141,7 @@ if (new URLSearchParams(location.search).get('kit') === 'full') for (const [id, 
 }
 const interaction = new Interaction(scene, world, player, cracks, inventory);
 // Fixed "fake" title-screen panorama (its own world + seed; same every launch).
-const panoramaView = new Panorama(atlas);
+const panoramaView = new Panorama(atlas, window.innerWidth / window.innerHeight);
 
 // Visual world border: four translucent cyan walls at ±WORLD_HALF so players
 // can see the edge of the 1000×1000 play area (movement is clamped to it).
@@ -1097,6 +1084,9 @@ const ammoEl = document.getElementById('ammo')!;
 const RELOAD_TIME = 1.1;
 let fireCooldown = 0;
 let reloadTimer = 0;
+// Aim-down-sights magnification (1 = hip fire). Set each frame from the held
+// gun's `zoom` while right-click is held; drives camera FOV + look sensitivity.
+let aimZoom = 1;
 let reloadingStack: ItemStack | null = null;
 // Burst-fire scheduler (burst rifle): rounds left + interval timer for the gun
 // that pulled the trigger.
@@ -1133,7 +1123,7 @@ function fireVolley(stack: ItemStack, gun: GunInfo): boolean {
   for (let i = 0; i < pellets; i++) {
     projectiles.fire(player.eyePosition, spreadDir(base, spread), gun);
   }
-  held.swing();
+  held.recoil();
   audio.gun(player.eyePosition);
   return true;
 }
@@ -1163,6 +1153,7 @@ function reloadGun(): void {
 let stepAccum = 0;
 let ambienceTimer = 20;
 let torchTime = 0; // flame-flicker clock for the held-torch light
+let wasGliding = false; // edge-detect glider deploy for the whoosh/notice
 
 function facingString(): string {
   const dx = -Math.sin(player.yaw), dz = -Math.cos(player.yaw);
@@ -1185,9 +1176,12 @@ function updateCamera(): void {
   // Brief roll tilt while the damage flash decays, like vanilla's hurt cam.
   camera.rotation.set(player.pitch, player.yaw, player.damageFlash * 0.18);
 
-  const targetFov = player.sprinting ? SPRINT_FOV : FOV;
+  // Aim-down-sights divides the FOV (zoom) and steadies the look.
+  const base = player.sprinting ? SPRINT_FOV : FOV;
+  const targetFov = base / aimZoom;
+  player.lookScale = aimZoom > 1 ? Math.max(0.3, 1 / aimZoom) : 1;
   if (Math.abs(camera.fov - targetFov) > 0.01) {
-    camera.fov += (targetFov - camera.fov) * 0.25;
+    camera.fov += (targetFov - camera.fov) * 0.3;
     camera.updateProjectionMatrix();
   }
 }
@@ -1366,7 +1360,7 @@ function fireCannon(ship: ShipState, dir: THREE.Vector3): void {
   };
   projectiles.fire(player.eyePosition, dir, cannonGun, ship.id);
   if (net.connected) net.sendShipFire(ship.id, dir.x, dir.y, dir.z);
-  held.swing();
+  held.recoil();
   audio.gun(player.eyePosition);
 }
 
@@ -1616,12 +1610,25 @@ function frame(): void {
           left: false, right: false, jump: false, sneak: false,
           sprintKey: false, sprintHeld: false }
       : (controlling ? input : FROZEN_INPUT);
+    // A glider worn in the chestplate slot enables mid-air deploy (player.update
+    // reads this; jump while falling to start gliding).
+    const wornChest = inventory.chestplateStack;
+    player.gliderEquipped = !!wornChest && wornChest.id === Item.Glider;
     player.update(dt, moveInput, world);
     // World border: keep the player inside the 1000×1000 play area (the server
     // clamps authoritatively too).
     player.pos.x = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, player.pos.x));
     player.pos.z = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, player.pos.z));
     if (aboard) snapToDeck(aboard);
+
+    // Gun aim-down-sights: hold right-click with a gun to zoom (per-gun amount).
+    {
+      const hs = inventory.selectedStack;
+      const g = hs ? ITEMS[hs.id]?.gun : undefined;
+      const aiming = controlling && localMode !== 'spectator' &&
+        pilotingShipId === null && !!g?.zoom && input.rightDown;
+      aimZoom = aiming ? g!.zoom! : 1;
+    }
     updateCamera();
 
     // Held-torch dynamic light: holding a torch lights the world around you
@@ -1635,6 +1642,30 @@ function frame(): void {
       world.setHeldLight(e.x, e.y, e.z, flicker);
     } else {
       world.setHeldLight(0, 0, 0, 0);
+    }
+
+    // Glider: whoosh + hint on deploy, and wear the worn glider down while
+    // flying — it snaps when worn out (easy to break, by design).
+    if (player.gliding && !wasGliding) {
+      audio.glide();
+      showNotice('Gliding! Look to steer · jump to stop');
+    }
+    wasGliding = player.gliding;
+    if (player.gliding) {
+      const g = inventory.chestplateStack;
+      if (g && g.id === Item.Glider) {
+        g.damage = (g.damage ?? 0) + dt;
+        inventory.version++;
+        if (g.damage >= (ITEMS[Item.Glider].glider?.durability ?? 1)) {
+          inventory.clearChestplate();
+          player.gliding = false;
+          player.gliderEquipped = false;
+          audio.gliderBreak();
+          showNotice('Your glider broke!');
+        }
+      } else {
+        player.gliding = false;
+      }
     }
 
     // Spectators float freely but never mine/place/fight (the server rejects it
@@ -1651,11 +1682,12 @@ function frame(): void {
         if (ship && input.leftClicked) fireCannon(ship, lookDir);
         interaction.update(dt, input, camera, true);
       } else if (heldGun) {
-        // Guns suppress melee + mining: fire on click (semi) / hold (auto).
+        // Guns suppress melee + mining (and block use, so right-click aims down
+        // sights instead of placing/opening): fire on click (semi) / hold (auto).
         if (input.reloadPressed) reloadGun();
         const wantFire = heldGun.auto ? input.leftDown : input.leftClicked;
         if (wantFire && fireCooldown <= 0 && reloadTimer <= 0) tryFire(heldStack!, heldGun);
-        interaction.update(dt, input, camera, true);
+        interaction.update(dt, input, camera, true, true);
       } else {
         // Melee no longer hits players — PvP is guns-only now. Left-click still
         // fights MOBS, otherwise mines the block. Priority: mob > mine.
@@ -1815,9 +1847,8 @@ function frame(): void {
   worldMap.renderBeacons(window.innerWidth, window.innerHeight);
 }
 
-// No loading screen: show the title (with its panorama) immediately; the
-// gameplay world streams in behind it while you read the menu / log in.
-loading.classList.add('hidden');
+// No loading screen at all: show the title (with its panorama) immediately;
+// the gameplay world streams in behind it while you read the menu / log in.
 overlay.classList.remove('hidden');
 updateCamera();
 frame();

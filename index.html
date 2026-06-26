@@ -241,32 +241,6 @@
       text-align: center; line-height: 1.6;
     }
 
-    #loading {
-      position: absolute; inset: 0;
-      background: radial-gradient(circle at 50% 34%, #1a2740, #06080e 72%);
-      display: flex; flex-direction: column;
-      align-items: center; justify-content: center; gap: 14px;
-      z-index: 30;
-    }
-    #loading.hidden { display: none; }
-    #loading .logo {
-      font-size: 64px; letter-spacing: 8px; color: #e6e6e6;
-      text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
-    }
-    #loading .logo .accent { color: #4db8ff; }
-    #loading .status { font-size: 16px; color: #9fb4cc; text-shadow: none; }
-    #loadbar {
-      width: 360px; height: 12px; border: 2px solid #2a3a52;
-      background: #0b0f17; overflow: hidden;
-    }
-    #loadbar div {
-      height: 100%; width: 0%; transition: width 0.15s;
-      background: linear-gradient(90deg, #2e7bd6, #6fd0ff);
-    }
-    #loading .tip {
-      font-size: 13px; color: #6b819b; max-width: 360px;
-      text-align: center; margin-top: 12px; min-height: 32px;
-    }
   </style>
 </head>
 <body>
@@ -310,12 +284,6 @@
         WASD move &nbsp; Space jump &nbsp; Shift sneak &nbsp; Ctrl/double-W sprint (energy)<br/>
         Left click break / attack &nbsp; Right click place &nbsp; 1-9 / scroll hotbar &nbsp; E inventory &nbsp; F3 debug
       </p>
-    </div>
-    <div id="loading">
-      <h1 class="logo mc-font"><span class="accent">VOXEL</span>ON</h1>
-      <p class="status mc-font">Generating world…</p>
-      <div id="loadbar"><div></div></div>
-      <p class="tip mc-font" id="loadtip"></p>
     </div>
   </div>
   <script type="module" src="/src/main.ts"></script>

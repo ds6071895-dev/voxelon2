@@ -126,6 +126,10 @@ export const RECIPES: Recipe[] = [
   // an expensive end-game build that anchors a faction's protected land.
   shaped([[T, D, T], [Cb, D, Cb], [I, I, I]], Block.Core),
 
+  // Glider: an early-game pair of wings — stick struts over plank membranes.
+  // Cheap on purpose (worn in the chest slot, wears out fast).
+  shaped([[S, S, S], [P, null, P]], Item.Glider),
+
   // Building set (M15): per-wood slabs + stairs.
   ...woodCraft(OAK, Block.OakSlab, Block.OakStairsN),
   ...woodCraft(BIRCH, Block.BirchSlab, Block.BirchStairsN),

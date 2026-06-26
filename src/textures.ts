@@ -928,6 +928,33 @@ function paintRocket(p: Painter, seed: number): void {
   outlineSprite(p);
 }
 
+function paintGlider(p: Painter, seed: number): void {
+  const mem: RGBA = [152, 172, 150, 255];
+  const memHi: RGBA = [196, 212, 192, 255];
+  const strut: RGBA = [84, 100, 88, 255];
+  const spine: RGBA = [70, 80, 72, 255];
+  // Right-wing horizontal span per row (mirrored to the left wing). A swept,
+  // elytra-like pair of wings flaring out from a central harness.
+  const span: Record<number, [number, number]> = {
+    3: [9, 10], 4: [9, 11], 5: [9, 12], 6: [9, 13], 7: [8, 14],
+    8: [8, 14], 9: [9, 14], 10: [10, 13], 11: [11, 13], 12: [12, 13],
+  };
+  for (const yStr of Object.keys(span)) {
+    const y = Number(yStr);
+    const [a, b] = span[y];
+    for (let x = a; x <= b; x++) {
+      const base = x === a ? memHi : x === b ? strut : mem; // bright leading edge
+      const jit = 0.92 + hash2(seed, x, y) * 0.12;
+      p.set(x, y, shade(base, jit));          // right wing
+      p.set(15 - x, y, shade(base, jit));     // mirrored left wing
+    }
+  }
+  // Central harness/spine.
+  for (let y = 3; y <= 12; y++) { p.set(7, y, spine); p.set(8, y, spine); }
+  p.set(7, 4, shade(strut, 1.1)); p.set(8, 4, shade(strut, 1.1));
+  outlineSprite(p);
+}
+
 // --- Automation (M13): cobalt, oil, machine blocks ------------------------
 
 const COBALT_SPOT: RGBA = [86, 112, 196, 255];
@@ -1313,6 +1340,7 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.BurstRifle]: flipX(paintBurstRifle),
   [Tile.Bullet]: paintBullet,
   [Tile.Rocket]: paintRocket,
+  [Tile.Glider]: paintGlider,
   // Automation (M13)
   [Tile.CobaltOre]: paintOre(COBALT_SPOT, COBALT_SPOT2),
   [Tile.CobaltIngot]: paintIngot([130, 150, 210, 255]),

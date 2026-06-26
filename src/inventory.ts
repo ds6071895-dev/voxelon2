@@ -35,6 +35,17 @@ export class Inventory {
     return this.slots[this.selected];
   }
 
+  /** The item worn in the chestplate armor slot (chestplate or glider), if any. */
+  get chestplateStack(): ItemStack | null {
+    return this.slots[ARMOR_START + ARMOR_SLOT_INDEX.chestplate];
+  }
+
+  /** Remove the worn chestplate-slot item (e.g. a glider that wore out). */
+  clearChestplate(): void {
+    this.slots[ARMOR_START + ARMOR_SLOT_INDEX.chestplate] = null;
+    this.version++;
+  }
+
   select(slot: number): void {
     this.selected = ((slot % HOTBAR_SIZE) + HOTBAR_SIZE) % HOTBAR_SIZE;
     this.version++;
