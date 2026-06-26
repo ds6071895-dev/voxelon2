@@ -299,10 +299,6 @@ export class NetClient {
   sendSaveState(data: Record<string, unknown>): void {
     if (this.connected) this.raw({ t: 'saveState', data });
   }
-  /** Enter (on=true) / leave (on=false) the free-for-all arena. */
-  sendArena(on: boolean): void {
-    if (this.connected) this.raw({ t: 'arena', on });
-  }
   sendRespawn(): void {
     if (this.connected) this.raw({ t: 'respawn' });
   }

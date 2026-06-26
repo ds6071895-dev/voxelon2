@@ -9,6 +9,7 @@ import { mulberry32 } from './noise';
 import { factionColor, isFaction } from './teams';
 
 const FACE_SHADE = [0.6, 0.6, 1.0, 0.5, 0.8, 0.8]; // +x -x +y -y +z -z
+const REMOTE_MAX_HEALTH = 20; // mirrors the server's MAX_HEALTH
 
 interface Avatar {
   group: THREE.Group;
@@ -16,9 +17,27 @@ interface Avatar {
   material: THREE.MeshBasicMaterial;
   nameTex: THREE.CanvasTexture;
   sprite: THREE.Sprite;
+  healthCanvas: HTMLCanvasElement;
+  healthTex: THREE.CanvasTexture;
+  healthSprite: THREE.Sprite;
+  lastHealth: number; // last value drawn into the health bar (-1 = never)
   dx: number; dy: number; dz: number; dyaw: number;
   walkPhase: number;
   lastX: number; lastZ: number;
+}
+
+/** Draw a name-plate health bar (green->yellow->red) at the given 0..1 fill. */
+function drawHealthBar(canvas: HTMLCanvasElement, frac: number): void {
+  const ctx = canvas.getContext('2d')!;
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, w, h);                    // black frame
+  ctx.fillStyle = '#3a1414';
+  ctx.fillRect(2, 2, w - 4, h - 4);            // empty (dark red) track
+  const f = Math.max(0, Math.min(1, frac));
+  ctx.fillStyle = f > 0.5 ? '#46d13a' : f > 0.25 ? '#e0c23a' : '#e0463a';
+  ctx.fillRect(2, 2, Math.round((w - 4) * f), h - 4);
 }
 
 function shadedBox(
@@ -57,6 +76,9 @@ export class RemotePlayers {
   private readonly scene: THREE.Scene;
   private readonly net: NetClient;
   private readonly avatars = new Map<number, Avatar>();
+  /** Id of the player the local crosshair is currently over (-1 = none); only
+   *  this avatar shows its health bar. Set each frame by main via setHovered. */
+  private hovered = -1;
 
   constructor(scene: THREE.Scene, net: NetClient) {
     this.scene = scene;
@@ -100,12 +122,32 @@ export class RemotePlayers {
     sprite.position.y = 2.25;
     group.add(sprite);
 
+    // Health bar, shown above the name only while the local crosshair is over
+    // this player (toggled in update via setHovered).
+    const healthCanvas = document.createElement('canvas');
+    healthCanvas.width = 120; healthCanvas.height = 16;
+    const healthTex = new THREE.CanvasTexture(healthCanvas);
+    const healthSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: healthTex, transparent: true, depthTest: false,
+    }));
+    healthSprite.scale.set(1.1, 0.16, 1);
+    healthSprite.position.y = 2.6;
+    healthSprite.renderOrder = 51;
+    healthSprite.visible = false;
+    group.add(healthSprite);
+
     this.scene.add(group);
     return {
       group, parts: [ll, rl, la, ra], material: mat, nameTex: tex, sprite,
+      healthCanvas, healthTex, healthSprite, lastHealth: -1,
       dx: remote.tx, dy: remote.ty, dz: remote.tz, dyaw: remote.tyaw,
       walkPhase: 0, lastX: remote.tx, lastZ: remote.tz,
     };
+  }
+
+  /** Mark which avatar the local crosshair is over (-1 = none). */
+  setHovered(id: number): void {
+    this.hovered = id;
   }
 
   private makeNameTag(
@@ -156,6 +198,16 @@ export class RemotePlayers {
       av.group.position.set(av.dx, av.dy, av.dz);
       av.group.rotation.y = av.dyaw;
       av.group.visible = !r.dead && r.info.mode !== 'spectator'; // ghost = hidden
+
+      // Health bar: visible only for the crosshair-targeted living avatar; the
+      // canvas is redrawn only when the displayed health actually changes.
+      const showHealth = id === this.hovered && av.group.visible;
+      av.healthSprite.visible = showHealth;
+      if (showHealth && av.lastHealth !== r.health) {
+        drawHealthBar(av.healthCanvas, r.health / REMOTE_MAX_HEALTH);
+        av.healthTex.needsUpdate = true;
+        av.lastHealth = r.health;
+      }
 
       // Walk animation from horizontal movement.
       const speed = Math.hypot(av.dx - av.lastX, av.dz - av.lastZ) / Math.max(dt, 1e-3);
@@ -208,6 +260,8 @@ export class RemotePlayers {
     av.material.dispose();
     av.nameTex.dispose();
     (av.sprite.material as THREE.SpriteMaterial).dispose();
+    av.healthTex.dispose();
+    (av.healthSprite.material as THREE.SpriteMaterial).dispose();
   }
 }
 

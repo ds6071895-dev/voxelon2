@@ -212,14 +212,8 @@ export class Mobs {
     return mob;
   }
 
-  /** Living hostile mob count (public so the arena can top up its bots). */
-  hostileCount(): number {
+  private hostileCount(): number {
     return this.list.filter((m) => m.def.hostile).length;
-  }
-
-  /** Remove every mob (used when leaving the offline arena). */
-  clearAll(): void {
-    for (const m of [...this.list]) this.remove(m);
   }
 
   private trySpawns(player: Player, sun: number): void {
