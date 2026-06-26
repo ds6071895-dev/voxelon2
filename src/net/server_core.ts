@@ -34,7 +34,7 @@ import {
   ClientMsg, EDIT_RANGE, CHEST_SLOTS, PICKUP_RANGE,
   ARMOR_POINT_CAP, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE, SHIP_HIT_MAX_DAMAGE,
   mitigate, ItemEntityInfo, PlayerInfo, PlayerSnapshot, ServerMsg, ShipTransform,
-  WORLD_SEED, WORLD_HALF, makeUsername, skinSeed, GameMode,
+  WORLD_SEED, WORLD_HALF, makeUsername, skinSeed, GameMode, arenaSpawn,
 } from './protocol';
 
 const BOARD_RANGE = 6;          // how close a player must be to pilot/dock/upgrade a ship
@@ -60,6 +60,10 @@ interface ServerPlayer extends PlayerInfo {
   armorPoints: number;
   /** Last client-pushed persistable blob (inventory/hotbar) for saveState. */
   savedClientData?: Record<string, unknown>;
+  /** In the free-for-all arena (friendly-fire on; respawns at the arena). */
+  arena?: boolean;
+  /** Pre-arena world position, persisted instead of the arena spot. */
+  civPos?: { x: number; y: number; z: number };
 }
 
 const GAME_MODES: GameMode[] = ['survival', 'creative', 'spectator'];
@@ -229,8 +233,11 @@ export class GameServer {
       case 'saveState':
         // Stash the client-owned blob (inventory/hotbar). Position is added from
         // the authoritative record at capture time. The shell persists to disk.
-        if (msg.data && typeof msg.data === 'object') p.savedClientData = msg.data;
+        // Ignored in the arena so a temporary kit never overwrites the real loadout.
+        if (!p.arena && msg.data && typeof msg.data === 'object') p.savedClientData = msg.data;
         return [];
+      case 'arena':
+        return this.handleArena(p, msg.on);
       case 'drop':
         return this.handleDrop(p, msg.items, msg.x, msg.y, msg.z);
       case 'pickup':
@@ -753,7 +760,11 @@ export class GameServer {
   private handleRanged(attacker: ServerPlayer, targetId: number, amount: number): Outbound[] {
     const target = this.players.get(targetId);
     if (!target || target.dead || attacker.dead || target.id === attacker.id) return [];
-    if (sameFaction(attacker.faction, target.faction)) return []; // no friendly fire
+    // An arena player and a civilian can never damage each other (separate space).
+    if (!!attacker.arena !== !!target.arena) return [];
+    // Free-for-all inside the arena (both in it); otherwise faction friendly-fire is off.
+    const ffa = !!attacker.arena && !!target.arena;
+    if (!ffa && sameFaction(attacker.faction, target.faction)) return []; // no friendly fire
     if (!fin(attacker.x, attacker.y, attacker.z, attacker.yaw,
       target.x, target.y, target.z, amount)) return [];
     const dx = target.x - attacker.x, dy = target.y - attacker.y, dz = target.z - attacker.z;
@@ -806,13 +817,35 @@ export class GameServer {
 
   private handleRespawn(p: ServerPlayer): Outbound[] {
     if (!p.dead) return [];
-    const s = this.spawn();
+    // Arena players respawn back on the arena platform; everyone else scatters.
+    const s = p.arena ? arenaSpawn(this.rng) : this.spawn();
     p.x = s.x; p.y = s.y; p.z = s.z;
     p.health = MAX_HEALTH; p.dead = false;
     p.regenCooldown = 0; p.regenTimer = 0;
     return [{
       to: p.id, msg: { t: 'respawned', x: s.x, y: s.y, z: s.z, health: MAX_HEALTH },
     }];
+  }
+
+  /** Enter/leave the free-for-all arena: teleport + flag the player. Entering
+   *  stashes their pre-arena position so persistence saves *that*, not the
+   *  arena spot (so a reconnect drops them back in civilisation). */
+  private handleArena(p: ServerPlayer, on: boolean): Outbound[] {
+    if (on === !!p.arena) return [];
+    if (on) {
+      p.civPos = { x: p.x, y: p.y, z: p.z };
+      p.arena = true;
+      const s = arenaSpawn(this.rng);
+      p.x = s.x; p.y = s.y; p.z = s.z;
+      p.health = MAX_HEALTH; p.dead = false; p.regenCooldown = 0; p.regenTimer = 0;
+      return [{ to: p.id, msg: { t: 'teleport', x: s.x, y: s.y, z: s.z } },
+        { to: p.id, msg: { t: 'notice', text: 'Entered the Arena — free-for-all!' } }];
+    }
+    p.arena = false;
+    const s = p.civPos ?? this.spawn();
+    p.civPos = undefined;
+    p.x = s.x; p.y = s.y; p.z = s.z;
+    return [{ to: p.id, msg: { t: 'teleport', x: s.x, y: s.y, z: s.z } }];
   }
 
   /** Advance regen; call ~ once per second worth of accumulated dt. */
@@ -1158,7 +1191,10 @@ export class GameServer {
     const p = this.players.get(id);
     if (!p) return null;
     const data: Record<string, unknown> = { ...(p.savedClientData ?? {}) };
-    data.x = p.x; data.y = p.y; data.z = p.z; data.yaw = p.yaw; data.mode = p.mode;
+    // While in the arena, persist the pre-arena (civilisation) position so a
+    // reconnect drops the player back where they were, not on the platform.
+    const pos = p.arena && p.civPos ? p.civPos : p;
+    data.x = pos.x; data.y = pos.y; data.z = pos.z; data.yaw = p.yaw; data.mode = p.mode;
     return { username: p.username, data };
   }
 

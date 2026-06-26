@@ -236,10 +236,6 @@
     #toggle-link { color: #6fd0ff; cursor: pointer; text-decoration: underline; }
     #auth-err { color: #ff8a7a; font-size: 12px; min-height: 14px; text-shadow: none; text-align: center; }
     #auth-status { color: #9fb4cc; font-size: 12px; min-height: 14px; text-shadow: none; text-align: center; }
-    #overlay .controls {
-      font-size: 13px; color: #aaa; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
-      text-align: center; line-height: 1.6;
-    }
 
   </style>
 </head>
@@ -279,11 +275,11 @@
         <div id="auth-err" class="mc-font"></div>
         <div id="auth-status" class="mc-font"></div>
       </div>
-      <button id="play-btn" class="mc-btn" style="display:none">Play</button>
-      <p class="controls mc-font">
-        WASD move &nbsp; Space jump &nbsp; Shift sneak &nbsp; Ctrl/double-W sprint (energy)<br/>
-        Left click break / attack &nbsp; Right click place &nbsp; 1-9 / scroll hotbar &nbsp; E inventory &nbsp; F3 debug
-      </p>
+      <div id="menu-btns" style="display:none; flex-direction:column; gap:12px; align-items:center;">
+        <button id="play-btn" class="mc-btn">Civilization</button>
+        <button id="arena-btn" class="mc-btn">Arena</button>
+        <button id="controls-btn" class="mc-btn">Controls</button>
+      </div>
     </div>
   </div>
   <script type="module" src="/src/main.ts"></script>

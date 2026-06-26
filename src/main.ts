@@ -6,7 +6,7 @@ import { HeldItemView } from './held';
 import { HUD } from './hud';
 import { Input, FROZEN_INPUT } from './input';
 import { Interaction } from './interact';
-import { Inventory } from './inventory';
+import { Inventory, INV_SIZE } from './inventory';
 import {
   InventoryUI, MachineUIContext, ShipUIContext, TurretUIContext, ClaimUIContext,
 } from './inventory_ui';
@@ -20,7 +20,10 @@ import { ItemEntities } from './itementity';
 import { Chests } from './chests';
 import { Mobs } from './mobs';
 import { NetClient } from './net/client';
-import { WORLD_SEED, WORLD_HALF, makeUsername, GameMode } from './net/protocol';
+import {
+  WORLD_SEED, WORLD_HALF, makeUsername, GameMode,
+  ARENA_CENTER_X, ARENA_CENTER_Z, ARENA_FLOOR_Y, arenaSpawn,
+} from './net/protocol';
 import { MachineModels } from './machinemodels';
 import { NetItems } from './netitems';
 import { Particles } from './particles';
@@ -686,6 +689,9 @@ const authPass = document.getElementById('auth-pass') as HTMLInputElement;
 const authErr = document.getElementById('auth-err')!;
 const authStatus = document.getElementById('auth-status')!;
 const playBtn = document.getElementById('play-btn')!;
+const arenaBtn = document.getElementById('arena-btn')!;
+const controlsBtn = document.getElementById('controls-btn')!;
+const menuBtns = document.getElementById('menu-btns')!;
 
 /** Non-cryptographic salted hash for OFFLINE local accounts (identity gate only;
  *  real security is the server's scrypt). FNV-1a over salt+password. */
@@ -707,7 +713,7 @@ function onAuthSuccess(username: string): void {
   authed = true;
   authedName = username;
   authEl.style.display = 'none';
-  playBtn.style.display = '';
+  menuBtns.style.display = 'flex'; // Civilization / Arena / Controls appear once logged in
   authErr.textContent = '';
   authStatus.textContent = '';
   refreshNetInfo();
@@ -797,7 +803,7 @@ playBtn.addEventListener('click', () => {
   if (!worldReady) {
     playBtn.textContent = 'Preparing…';
     const wait = (): void => {
-      if (worldReady) { playBtn.textContent = 'Play'; input.lock(); }
+      if (worldReady) { playBtn.textContent = 'Civilization'; input.lock(); }
       else setTimeout(wait, 100);
     };
     wait();
@@ -805,8 +811,178 @@ playBtn.addEventListener('click', () => {
   }
   input.lock();
 });
+
+// --- Arena: a flat free-for-all platform you drop into with a chosen kit ------
+interface Kit { name: string; desc: string; items: [number, number][] }
+const KITS: Record<string, Kit> = {
+  rifleman: { name: 'Rifleman', desc: 'Rifle + iron armor',
+    items: [[Item.Rifle, 1], [Item.Bullet, 150], [Item.IronHelmet, 1], [Item.IronChestplate, 1]] },
+  brawler: { name: 'Brawler', desc: 'Shotgun, up close',
+    items: [[Item.Shotgun, 1], [Item.Bullet, 60], [Item.IronChestplate, 1], [Item.IronLeggings, 1]] },
+  marksman: { name: 'Marksman', desc: 'Sniper + pistol',
+    items: [[Item.Sniper, 1], [Item.Bullet, 40], [Item.Pistol, 1], [Item.IronHelmet, 1]] },
+  heavy: { name: 'Heavy', desc: 'Rockets + SMG',
+    items: [[Item.RocketLauncher, 1], [Item.Rocket, 12], [Item.SMG, 1], [Item.Bullet, 160], [Item.DiamondChestplate, 1]] },
+};
+const DEFAULT_KIT = 'rifleman';
+let currentKit = DEFAULT_KIT;
+let arenaActive = false;
+let savedCivState: ReturnType<Inventory['serialize']> | null = null;
+let savedCivPos: { x: number; y: number; z: number } | null = null;
+let arenaBotTimer = 0;
+
+function grantKit(kitId: string): void {
+  const kit = KITS[kitId] ?? KITS[DEFAULT_KIT];
+  for (const [id, n] of kit.items) inventory.add(id, n);
+  // Auto-equip any armor the kit includes (helmet/chest/legs/boots).
+  for (let i = 0; i < INV_SIZE; i++) {
+    const s = inventory.slots[i];
+    if (s && ITEMS[s.id]?.armor) inventory.tryEquipArmor(i);
+  }
+}
+
+/** Offline only: keep a handful of zombie opponents on the platform to fight. */
+function spawnArenaBots(target = 6): void {
+  if (net.connected) return;
+  let guard = 0;
+  while (mobs.hostileCount() < target && guard++ < target) {
+    const sp = arenaSpawn(Math.random);
+    mobs.spawnAt('zombie', sp.x, ARENA_FLOOR_Y + 1, sp.z);
+  }
+}
+
+function enterArena(): void {
+  if (!authed) return;
+  audio.resume();
+  kitPanel.style.display = 'none';
+  controlsPanel.style.display = 'none';
+  // Snapshot the civilisation loadout + position once, to restore on leave.
+  if (!arenaActive) {
+    savedCivState = inventory.serialize();
+    savedCivPos = { x: player.pos.x, y: player.pos.y, z: player.pos.z };
+  }
+  arenaActive = true;
+  inventory.clearCarried();
+  grantKit(currentKit);
+  // Build the platform chunks then drop onto it.
+  world.forceLoad(ARENA_CENTER_X, ARENA_CENTER_Z, 2);
+  player.respawn(arenaSpawn(Math.random));
+  lastHealth = 20;
+  deathShown = false;
+  deathEl.style.display = 'none';
+  worldReady = true; // arena chunks are loaded; allow the pointer-lock -> playing
+  if (net.connected) net.sendArena(true); // server FFA + authoritative teleport
+  else { mobs.clearAll(); spawnArenaBots(); }
+  enterPlaying();
+  input.lock();
+}
+
+function leaveArena(): void {
+  if (!arenaActive) return;
+  arenaActive = false;
+  if (net.connected) net.sendArena(false); // server teleports back to civ position
+  else mobs.clearAll();
+  inventory.clearCarried();
+  if (savedCivState) inventory.restore(savedCivState);
+  if (savedCivPos) {
+    world.forceLoad(savedCivPos.x, savedCivPos.z, 2); // ground exists before we land
+    player.pos.set(savedCivPos.x, savedCivPos.y, savedCivPos.z);
+    player.vel.set(0, 0, 0); player.fallDistance = 0;
+  }
+  savedCivState = null; savedCivPos = null;
+}
+
+// Kit chooser panel (Arena button).
+const kitPanel = (() => {
+  const panel = document.createElement('div');
+  panel.style.cssText = 'position:absolute;inset:0;display:none;flex-direction:column;' +
+    'align-items:center;justify-content:center;gap:18px;background:rgba(8,8,14,0.86);z-index:24;';
+  const h = document.createElement('h2');
+  h.className = 'mc-font';
+  h.textContent = 'ARENA — choose your kit';
+  h.style.cssText = 'font-size:30px;letter-spacing:3px;color:#ffd84a;';
+  panel.appendChild(h);
+  const sub = document.createElement('div');
+  sub.className = 'mc-font';
+  sub.style.cssText = 'font-size:13px;color:#9fb4cc;margin-top:-8px;';
+  sub.textContent = 'Flat 50×50 free-for-all. Pick a loadout to drop in.';
+  panel.appendChild(sub);
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:14px;flex-wrap:wrap;justify-content:center;max-width:760px;';
+  for (const id of Object.keys(KITS)) {
+    const k = KITS[id];
+    const card = document.createElement('button');
+    card.className = 'mc-btn';
+    card.style.cssText = 'display:flex;flex-direction:column;gap:6px;width:168px;padding:16px 10px;text-align:center;';
+    card.innerHTML = `<span style="font-size:18px">${k.name}</span>` +
+      `<span style="font-size:12px;color:#cfe0ff">${k.desc}</span>`;
+    card.addEventListener('click', () => { currentKit = id; enterArena(); });
+    row.appendChild(card);
+  }
+  panel.appendChild(row);
+  const back = document.createElement('button');
+  back.className = 'mc-btn';
+  back.textContent = 'Back';
+  back.style.cssText = 'font-size:16px;padding:8px 24px;';
+  back.addEventListener('click', () => { panel.style.display = 'none'; });
+  panel.appendChild(back);
+  app.appendChild(panel);
+  return panel;
+})();
+
+// Controls / keybindings panel (Controls button).
+const controlsPanel = (() => {
+  const panel = document.createElement('div');
+  panel.style.cssText = 'position:absolute;inset:0;display:none;flex-direction:column;' +
+    'align-items:center;justify-content:center;gap:14px;background:rgba(8,8,14,0.9);z-index:24;';
+  const h = document.createElement('h2');
+  h.className = 'mc-font';
+  h.textContent = 'CONTROLS';
+  h.style.cssText = 'font-size:30px;letter-spacing:4px;';
+  panel.appendChild(h);
+  const list = document.createElement('div');
+  list.className = 'mc-font';
+  list.style.cssText = 'display:grid;grid-template-columns:auto auto;gap:6px 32px;font-size:15px;';
+  const binds: [string, string][] = [
+    ['Move', 'W A S D'], ['Jump', 'Space'], ['Sneak', 'Shift'],
+    ['Sprint', 'Ctrl / double-tap W'], ['Break / attack mob', 'Left click'],
+    ['Place / use', 'Right click'], ['Aim down sights (guns)', 'Hold right click'],
+    ['Reload gun', 'R'], ['Deploy glider (in mid-air)', 'Jump'],
+    ['Hotbar slot', '1 – 9 / scroll'], ['Inventory', 'E'], ['World map', 'M'],
+    ['Debug overlay', 'F3'], ['Pause / back', 'Esc'],
+  ];
+  for (const [action, key] of binds) {
+    const a = document.createElement('div'); a.textContent = action; a.style.color = '#cfe0ff';
+    const k = document.createElement('div'); k.textContent = key;
+    k.style.color = '#fff'; k.style.textAlign = 'right';
+    list.append(a, k);
+  }
+  panel.appendChild(list);
+  const back = document.createElement('button');
+  back.className = 'mc-btn';
+  back.textContent = 'Back';
+  back.style.cssText = 'font-size:16px;padding:8px 24px;margin-top:6px;';
+  back.addEventListener('click', () => { panel.style.display = 'none'; });
+  panel.appendChild(back);
+  app.appendChild(panel);
+  return panel;
+})();
+
+arenaBtn.addEventListener('click', () => {
+  if (!authed) return;
+  controlsPanel.style.display = 'none';
+  kitPanel.style.display = 'flex';
+});
+controlsBtn.addEventListener('click', () => {
+  kitPanel.style.display = 'none';
+  controlsPanel.style.display = controlsPanel.style.display === 'flex' ? 'none' : 'flex';
+});
+
 document.getElementById('resume-btn')!.addEventListener('click', () => input.lock());
-document.getElementById('quit-btn')!.addEventListener('click', () => enterTitle());
+document.getElementById('quit-btn')!.addEventListener('click', () => {
+  if (arenaActive) leaveArena();
+  enterTitle();
+});
 
 document.addEventListener('pointerlockchange', () => {
   if (!worldReady) return;
@@ -829,7 +1005,17 @@ let deathShown = false;
 document.getElementById('respawn')!.addEventListener('click', () => {
   audio.resume();
   if (net.connected) {
-    net.sendRespawn(); // server replies with onRespawned
+    net.sendRespawn(); // server replies with onRespawned (arena-aware server-side)
+  } else if (arenaActive) {
+    // Offline arena: respawn on the platform with a fresh kit + top up the bots.
+    player.respawn(arenaSpawn(Math.random));
+    lastHealth = 20;
+    deathShown = false;
+    deathEl.style.display = 'none';
+    inventory.clearCarried();
+    grantKit(currentKit);
+    spawnArenaBots();
+    input.lock();
   } else {
     player.respawn(spawn);
     lastHealth = 20;
@@ -862,6 +1048,7 @@ function checkDeath(): void {
 // (offline). The server is the system of record online; offline we mirror to
 // localStorage keyed by the local account so single-player also persists.
 function pushStateSave(): void {
+  if (arenaActive) return; // never persist a temporary arena kit over the real loadout
   if (net.connected) net.sendSaveState(inventory.serialize() as unknown as Record<string, unknown>);
   else if (authedName) {
     try {
@@ -928,8 +1115,12 @@ net.onRespawned = (x, y, z, h) => {
   lastHealth = h;
   deathShown = false;
   deathEl.style.display = 'none';
-  grantStarterKit(); // re-claim the basic loadout after death (MP)
-  pushStateSave();
+  if (arenaActive) {
+    inventory.clearCarried(); grantKit(currentKit); // fresh arena loadout
+  } else {
+    grantStarterKit(); // re-claim the basic loadout after death (MP)
+    pushStateSave();
+  }
   if (worldReady) input.lock();
 };
 net.onKillfeed = showKill;
@@ -1741,9 +1932,19 @@ function frame(): void {
     // Warfare: render ships/turrets, run the territory objective + its HUD.
     shipModels.update(ships.list());
     turretModels.update(dt);
-    if (!net.connected) updateTerritoryOffline(dt);
-    updateTerritoryHud();
-    updateTerritoryBeacons();
+    // The arena is a self-contained battleground — skip the territory objective
+    // there, and keep a few bot opponents alive when playing it offline.
+    if (arenaActive) {
+      territoryEl.style.display = 'none';
+      if (!net.connected) {
+        arenaBotTimer -= dt;
+        if (arenaBotTimer <= 0) { arenaBotTimer = 4; spawnArenaBots(); }
+      }
+    } else {
+      if (!net.connected) updateTerritoryOffline(dt);
+      updateTerritoryHud();
+      updateTerritoryBeacons();
+    }
     // Land claims: advance the grace/shield clock; offline this is the
     // authoritative claim sim (MP the server ticks + reconciles via 'claims').
     worldTimeLocal += dt;
@@ -1794,6 +1995,8 @@ function frame(): void {
   crosshair.style.display = hudDisplay;
   hotbarEl.style.display = controlling ? 'flex' : 'none';
   statusEl.style.display = hudDisplay;
+  // The world map is meaningless in the arena — hide its button there.
+  mapBtn.style.display = arenaActive ? 'none' : '';
 
   // Ammo counter: "loaded / reserve" while a gun is held (RELOADING during one).
   const gunStack = controlling ? inventory.selectedStack : null;

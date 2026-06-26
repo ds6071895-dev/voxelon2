@@ -11,7 +11,11 @@ import type { Atlas } from './textures';
 import { World } from './world';
 
 const PANO_SEED = 0x5ca1ab1e;   // fixed -> identical panorama every launch
-const PANO_DIST = 4;            // chunk render radius (small: it's just scenery)
+const PANO_DIST = 9;            // chunk render radius (enough that fog hides the edge)
+// Fog tuned to the render edge so distant chunks fade into the sky instead of
+// popping out of existence at the cutoff.
+const PANO_FOG_NEAR = PANO_DIST * 16 - 70;
+const PANO_FOG_FAR = PANO_DIST * 16 - 12;
 
 export class Panorama {
   readonly scene = new THREE.Scene();
@@ -27,7 +31,7 @@ export class Panorama {
     // A sky-blue background + matching fog so the horizon reads as a real sky
     // (without this the scene clears to black behind the distant chunks).
     this.scene.background = new THREE.Color(0x78a7ff);
-    this.scene.fog = new THREE.Fog(0x9fc4e8, 60, 220);
+    this.scene.fog = new THREE.Fog(0x9fc4e8, PANO_FOG_NEAR, PANO_FOG_FAR);
     this.world = new World(this.scene, atlas, PANO_SEED);
     this.sky = new Sky(this.scene, PANO_SEED);
     this.camera.rotation.order = 'YXZ';

@@ -6,6 +6,10 @@ import { Biome, Biomes, ColumnTints } from './biomes';
 import { Block } from './blocks';
 import { Chunk, CHUNK_X, CHUNK_Z } from './chunk';
 import { Noise2D, Noise3D, hash2, mulberry32 } from './noise';
+import {
+  ARENA_FLOOR_Y, ARENA_MAX_X, ARENA_MAX_Z, ARENA_MIN_X, ARENA_MIN_Z,
+  ARENA_WALL_HEIGHT, inArenaXZ,
+} from './net/protocol';
 
 export const SEA_LEVEL = 63;
 const TREE_MARGIN = 3; // trees up to 3 blocks outside a chunk can reach into it
@@ -157,6 +161,7 @@ export class Terrain {
   }
 
   private treeAt(x: number, z: number): Tree | null {
+    if (inArenaXZ(x, z)) return null; // no trees on the arena platform
     const h = this.height(x, z);
     if (h <= SEA_LEVEL + 1 || h > 118) return null;
     // No trees on bare mountain rock. Surfaces render as bare Stone for any
@@ -212,6 +217,8 @@ export class Terrain {
     for (let lx = 0; lx < CHUNK_X; lx++) {
       for (let lz = 0; lz < CHUNK_Z; lz++) {
         const wx = ox + lx, wz = oz + lz;
+        // The arena is a flat floating platform (not procedural terrain).
+        if (inArenaXZ(wx, wz)) { this.fillArenaColumn(chunk, lx, lz, wx, wz); continue; }
         const h = this.height(wx, wz);
         const biome = this.biomeWithWater(wx, wz, h);
         const sandy = biome === Biome.Beach || biome === Biome.Ocean ||
@@ -287,6 +294,21 @@ export class Terrain {
 
     this.placeOres(chunk);
     this.plantTrees(chunk, ox, oz);
+  }
+
+  /** One column of the floating arena platform: a 2-thick stone floor, with
+   *  cobblestone perimeter walls (the arena's border). Everything else is air,
+   *  so the platform floats — a clean, flat 50×50 battleground. */
+  private fillArenaColumn(chunk: Chunk, lx: number, lz: number, wx: number, wz: number): void {
+    chunk.set(lx, ARENA_FLOOR_Y - 1, lz, Block.Stone);
+    chunk.set(lx, ARENA_FLOOR_Y, lz, Block.Stone);
+    const edge = wx === ARENA_MIN_X || wx === ARENA_MAX_X - 1 ||
+      wz === ARENA_MIN_Z || wz === ARENA_MAX_Z - 1;
+    if (edge) {
+      for (let h = 1; h <= ARENA_WALL_HEIGHT; h++) {
+        chunk.set(lx, ARENA_FLOOR_Y + h, lz, Block.Cobblestone);
+      }
+    }
   }
 
   /** Column-local features: cacti, dead bushes, tall grass, flowers. */
@@ -463,6 +485,7 @@ export class Terrain {
    *  a water/beach biome, NOT ashlands (surface lava), and surrounded by dry
    *  land so you don't land on a lone spike at the water's edge. */
   private safeSpawnColumn(x: number, z: number): boolean {
+    if (inArenaXZ(x, z)) return false;              // never spawn civ players in the arena
     const h = this.height(x, z);
     if (h < SEA_LEVEL + 3) return false;            // would be at/near water
     if (this.ravineDepth(x, z) > 0) return false;   // surface carved -> air/fall

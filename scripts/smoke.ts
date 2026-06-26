@@ -31,7 +31,10 @@ import { Player } from '../src/player';
 import { daylight } from '../src/sky';
 import { Survival } from '../src/survival';
 import { GameServer } from '../src/net/server_core';
-import { mitigate, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE, WORLD_HALF } from '../src/net/protocol';
+import {
+  mitigate, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE, WORLD_HALF, WORLD_SEED,
+  ARENA_CENTER_X, ARENA_CENTER_Z, ARENA_FLOOR_Y, ARENA_MAX_X, arenaSpawn, inArenaXZ,
+} from '../src/net/protocol';
 import {
   Machines, MachineType, MAX_LEVEL, allowedFilterMask, applyUpgrade,
   autominerRates, claimMachine, collectMachine, currentRate, damageMachine,
@@ -1220,6 +1223,71 @@ check('furnace smelts ore/sand/log but not removed foods',
   const kill = s.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 }); // clamped, lethal
   check('ranged damage is clamped but can still kill',
     kill.some((o) => o.msg.t === 'killfeed') && hp(2) === 0);
+}
+
+// --- Arena: flat platform terrain + free-for-all server rules ----------------
+{
+  // The arena is a fixed flat platform region (seed-independent).
+  const terr = new Terrain(WORLD_SEED);
+  const ccx = ARENA_CENTER_X >> 4, ccz = ARENA_CENTER_Z >> 4;
+  const ch = new Chunk(ccx, ccz);
+  terr.fill(ch);
+  const lx = ARENA_CENTER_X - ccx * 16, lz = ARENA_CENTER_Z - ccz * 16;
+  check('arena platform: solid floor, open air above, void below',
+    isSolid(ch.get(lx, ARENA_FLOOR_Y, lz)) &&
+    ch.get(lx, ARENA_FLOOR_Y + 3, lz) === Block.Air &&
+    ch.get(lx, ARENA_FLOOR_Y - 4, lz) === Block.Air);
+
+  // A perimeter column (max-X edge) carries the border wall.
+  const ex = ARENA_MAX_X - 1, ecx = ex >> 4;
+  const ech = new Chunk(ecx, ccz);
+  terr.fill(ech);
+  check('arena has a perimeter border wall',
+    ech.get(ex - ecx * 16, ARENA_FLOOR_Y + 1, lz) === Block.Cobblestone);
+
+  check('arenaSpawn lands inside the footprint, on the floor', (() => {
+    for (let i = 0; i < 20; i++) {
+      const sp = arenaSpawn(mulberry32(i + 1));
+      if (!inArenaXZ(sp.x, sp.z) || sp.y !== ARENA_FLOOR_Y + 1) return false;
+    }
+    return true;
+  })());
+
+  // FFA: same-faction players can't hurt each other in civilisation, but CAN in
+  // the arena; and an arena player and a civilian can never trade damage.
+  const a = new GameServer(WORLD_SEED, mulberry32(9));
+  a.addPlayer(1, { faction: FACTIONS[0].id, username: 'Aa' });
+  a.addPlayer(2, { faction: FACTIONS[0].id, username: 'Bb' });
+  const ahp = (id: number) => a.snapshot().find((p) => p.id === id)!.health;
+  const face = () => {
+    a.handle(1, { t: 'xform', x: ARENA_CENTER_X, y: ARENA_FLOOR_Y + 1, z: ARENA_CENTER_Z, yaw: Math.PI, pitch: 0 });
+    a.handle(2, { t: 'xform', x: ARENA_CENTER_X, y: ARENA_FLOOR_Y + 1, z: ARENA_CENTER_Z + 8, yaw: 0, pitch: 0 });
+  };
+  face();
+  const civ0 = ahp(2);
+  a.handle(1, { t: 'rangedAttack', target: 2, amount: 8 });
+  check('same-faction friendly fire is OFF in civilisation', ahp(2) === civ0);
+
+  a.handle(1, { t: 'arena', on: true });
+  a.handle(2, { t: 'arena', on: true });
+  face();
+  const ffa0 = ahp(2);
+  a.handle(1, { t: 'rangedAttack', target: 2, amount: 8 });
+  check('arena is free-for-all: same-faction arena players CAN kill each other', ahp(2) < ffa0);
+
+  a.handle(2, { t: 'arena', on: false }); // player 2 returns to civilisation
+  face();
+  const split0 = ahp(2);
+  a.handle(1, { t: 'rangedAttack', target: 2, amount: 8 });
+  check('an arena player cannot damage a civilian (separate space)', ahp(2) === split0);
+
+  // Entering the arena teleports the player onto the platform.
+  const tp = a.handle(1, { t: 'arena', on: false }); // toggle back to known state then in
+  void tp;
+  const inMsgs = a.handle(1, { t: 'arena', on: true });
+  const tpMsg = inMsgs.find((o) => o.msg.t === 'teleport');
+  check('entering the arena teleports the player onto the platform',
+    !!tpMsg && tpMsg.msg.t === 'teleport' && inArenaXZ(tpMsg.msg.x, tpMsg.msg.z));
 }
 
 // --- Item metadata survives closing the UI (no XP/durability/ammo wipe) ------------

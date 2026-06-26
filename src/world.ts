@@ -131,6 +131,16 @@ export class World {
     return this.chunks.get(Chunk.key(cx, cz));
   }
 
+  /** Force-generate chunk DATA (not meshes) around a world point so getBlock /
+   *  collision work immediately — e.g. before teleporting onto the arena. The
+   *  meshes catch up via the next update() near the new position. */
+  forceLoad(wx: number, wz: number, rChunks = 2): void {
+    const ccx = wx >> 4, ccz = wz >> 4;
+    for (let dx = -rChunks; dx <= rChunks; dx++) {
+      for (let dz = -rChunks; dz <= rChunks; dz++) this.ensureData(ccx + dx, ccz + dz);
+    }
+  }
+
   /** Drive the held-torch point light (xyz = world position, intensity 0..1).
    *  Intensity 0 turns it off. */
   setHeldLight(x: number, y: number, z: number, intensity: number): void {

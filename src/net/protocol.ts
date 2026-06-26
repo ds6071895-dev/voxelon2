@@ -15,6 +15,33 @@ export const TRANSFORM_HZ = 20;    // client -> server transform sends
 export const WORLD_SEED = 1337;    // fixed shared seed (clients + server)
 export const WORLD_BORDER = 1000;  // square play area side length (centred on origin)
 export const WORLD_HALF = WORLD_BORDER / 2; // movement clamps to [-HALF, +HALF]
+
+// --- Arena: a flat, walled free-for-all platform (kit PvP). A fixed region of
+// the shared world (so client + server agree), generated as a floating stone
+// platform far from normal spawn. Friendly-fire is ON between arena players.
+export const ARENA_SIZE = 50;                         // 50x50 footprint
+export const ARENA_CENTER_X = 400;                    // inside the world border
+export const ARENA_CENTER_Z = -400;
+export const ARENA_FLOOR_Y = 140;                     // floating platform height
+export const ARENA_WALL_HEIGHT = 6;                   // border wall height
+export const ARENA_MIN_X = ARENA_CENTER_X - ARENA_SIZE / 2; // inclusive
+export const ARENA_MAX_X = ARENA_CENTER_X + ARENA_SIZE / 2; // exclusive
+export const ARENA_MIN_Z = ARENA_CENTER_Z - ARENA_SIZE / 2;
+export const ARENA_MAX_Z = ARENA_CENTER_Z + ARENA_SIZE / 2;
+
+/** Is a world (x, z) inside the arena footprint? */
+export function inArenaXZ(x: number, z: number): boolean {
+  return x >= ARENA_MIN_X && x < ARENA_MAX_X && z >= ARENA_MIN_Z && z < ARENA_MAX_Z;
+}
+/** A spawn point on the arena floor, scattered a little to avoid stacking. */
+export function arenaSpawn(rng: () => number): { x: number; y: number; z: number } {
+  const m = ARENA_SIZE / 2 - 4;
+  return {
+    x: ARENA_CENTER_X + Math.round((rng() * 2 - 1) * m) + 0.5,
+    y: ARENA_FLOOR_Y + 1,
+    z: ARENA_CENTER_Z + Math.round((rng() * 2 - 1) * m) + 0.5,
+  };
+}
 export const MELEE_DAMAGE = 4;     // server-applied fist damage
 export const MELEE_RANGE = 4.5;
 export const EDIT_RANGE = 7;       // max distance a player may edit a block
@@ -112,7 +139,11 @@ export type ClientMsg =
   // Persistence: the client periodically pushes its owned state (inventory +
   // hotbar + position) for the server to store against the account and restore
   // on next login. Opaque blob — the server treats it as data, not authority.
-  | { t: 'saveState'; data: Record<string, unknown> };
+  | { t: 'saveState'; data: Record<string, unknown> }
+  // Arena: enter (on=true) / leave (on=false) the free-for-all platform. The
+  // server teleports the player + flags them so arena-vs-arena ignores friendly
+  // fire, and persists their pre-arena position (not the arena spot).
+  | { t: 'arena'; on: boolean };
 
 // --- server -> client -------------------------------------------------------
 export type ServerMsg =
