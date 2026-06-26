@@ -51,12 +51,14 @@ import {
   TURRET_MAX_LEVEL,
 } from '../src/turrets';
 import {
-  deriveControlNodes, resolveNode, topScores, MAX_NODES,
-} from '../src/territory';
-import {
   FACTIONS, NO_FACTION, balancedFaction, factionColor, factionName, isFaction,
-  sameFaction,
+  sameFaction, forcedFaction, resolveJoinFaction,
 } from '../src/teams';
+import {
+  GRID, REGION_COUNT, FACTION_A, FACTION_B, Regions, regionOf, regionIndex,
+  regionCenter, regionCounts, neighbors4, initialOwners, capitalOf, capitalFaction,
+  connectedRegions, canCapture, capitalCapturable, DISCONNECT_SECONDS,
+} from '../src/regions';
 import { Accounts, validUsername } from '../src/net/accounts';
 import {
   Claims, GRACE_PERIOD, MAX_SHIELD_HP, OIL_PER_BARREL, chunkOf, claimChunkKeys,
@@ -1865,117 +1867,41 @@ check('furnace smelts ore/sand/log but not removed foods',
     !turretArmed(newTurret()));
 }
 
-// --- Territory objective ----------------------------------------------------
-{
-  const terrain = new Terrain(1337);
-  const nodes = deriveControlNodes((x, z) => terrain.oilRichness(x, z));
-  check('control nodes are derived deterministically + bounded',
-    nodes.length > 0 && nodes.length <= MAX_NODES &&
-    nodes.every((n) => n.radius > 0 && Number.isFinite(n.x) && Number.isFinite(n.z)));
-  const nodes2 = deriveControlNodes((x, z) => terrain.oilRichness(x, z));
-  check('node derivation is stable across calls',
-    JSON.stringify(nodes) === JSON.stringify(nodes2));
-
-  const node = { id: 0, x: 0, z: 0, radius: 10, richness: 1 };
-  check('a single faction present controls a node',
-    resolveNode(node, [{ faction: 0, x: 1, z: 1, dead: false }]).faction === 0);
-  check('two members of one faction still control (team play)', (() => {
-    const r = resolveNode(node, [
-      { faction: 1, x: 1, z: 1, dead: false }, { faction: 1, x: -1, z: -1, dead: false }]);
-    return r.faction === 1 && !r.contested;
-  })());
-  check('two factions contest a node (no controller)', (() => {
-    const r = resolveNode(node, [
-      { faction: 0, x: 1, z: 1, dead: false }, { faction: 1, x: -1, z: -1, dead: false }]);
-    return r.faction === -1 && r.controller === '' && r.contested;
-  })());
-  check('a player outside the radius does not control',
-    resolveNode(node, [{ faction: 0, x: 50, z: 50, dead: false }]).faction === -1);
-
-  check('topScores sorts descending', (() => {
-    const m = new Map([['A', 5], ['B', 30], ['C', 12]]);
-    const top = topScores(m);
-    return top[0].name === 'B' && top[1].name === 'C' && top[2].name === 'A';
-  })());
-
-  // Standings = current oil-node holdings per faction (no more round/win race).
-  const s = new GameServer(1337, mulberry32(33));
-  s.addPlayer(1); // faction 0
-  const snap0 = s.territorySnapshot() as { t: 'territory'; nodes: { x: number; z: number }[] };
-  const target = snap0.nodes[0];
-  s.handle(1, { t: 'xform', x: target.x, y: 70, z: target.z, yaw: 0, pitch: 0 });
-  s.tickTerritory(1);
-  const standings = s.territorySnapshot() as {
-    t: 'territory'; scores: { name: string; score: number }[]; winner: string;
-  };
-  check('controlling a node shows up as faction node-holdings (no win race)',
-    standings.winner === '' &&
-    (standings.scores.find((e) => e.name === factionName(0))?.score ?? 0) >= 1);
-  check('territory snapshot has the expected shape', (() => {
-    const snap = s.territorySnapshot() as {
-      t: 'territory'; nodes: unknown[]; scores: unknown[]; roundTime: number;
-    };
-    return snap.t === 'territory' && Array.isArray(snap.nodes) &&
-      Array.isArray(snap.scores) && Number.isFinite(snap.roundTime);
-  })());
-
-  // --- M20: territory accrues OIL INCOME to the controlling faction's claims ---
-  {
-    const g = new GameServer(1337, mulberry32(91));
-    g.addPlayer(1); // faction 0
-    const snap = g.territorySnapshot() as { t: 'territory'; nodes: { x: number; z: number }[] };
-    const target = snap.nodes[0];
-    // Place a Core (claim) for faction 0 well away from the node.
-    g.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
-    const cm = g.handle(1, { t: 'edit', x: 0, y: 70, z: 0, block: Block.Core })
-      .find((o) => o.msg.t === 'claim')!.msg as { claim: { id: number; oil: number } };
-    check('a fresh claim starts with no oil', cm.claim.oil === 0);
-    // Stand on the node so faction 0 controls it; income should fill the claim.
-    g.handle(1, { t: 'xform', x: target.x, y: 70, z: target.z, yaw: 0, pitch: 0 });
-    for (let i = 0; i < 5; i++) g.tickTerritory(1);
-    const fueled = (g.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 }),
-      g.handle(1, { t: 'claimOpen', x: 0, y: 70, z: 0 })
-        .find((o) => o.msg.t === 'claim')!.msg as { claim: { oil: number } }).claim.oil;
-    check('controlling a node accrues oil to the faction claim', fueled > 0);
-    // Leave the node: income stops (oil no longer climbs from territory).
-    g.handle(1, { t: 'xform', x: 9000, y: 70, z: 9000, yaw: 0, pitch: 0 });
-    for (let i = 0; i < 3; i++) g.tickTerritory(1);
-    const after = (g.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 }),
-      g.handle(1, { t: 'claimOpen', x: 0, y: 70, z: 0 })
-        .find((o) => o.msg.t === 'claim')!.msg as { claim: { oil: number } }).claim.oil;
-    check('losing all nodes drops territory oil income to zero',
-      Math.abs(after - fueled) < 1e-6);
-    // Standings readout = live node holdings, keyed by faction name: it shows the
-    // faction while it holds a node, and empties once it controls none.
-    g.handle(1, { t: 'xform', x: target.x, y: 70, z: target.z, yaw: 0, pitch: 0 });
-    g.tickTerritory(1);
-    const onNode = g.territorySnapshot() as { t: 'territory'; scores: { name: string; score: number }[] };
-    check('the standings readout tracks node control by faction',
-      (onNode.scores.find((e) => e.name === factionName(0))?.score ?? 0) >= 1);
-    g.handle(1, { t: 'xform', x: 9000, y: 70, z: 9000, yaw: 0, pitch: 0 });
-    g.tickTerritory(1);
-    const offNode = g.territorySnapshot() as { t: 'territory'; scores: unknown[] };
-    check('standings empty when a faction holds no nodes', offNode.scores.length === 0);
-  }
-}
 
 // --- Factions (M17): auto-balance + friendly fire off ------------------------
 {
   // Pure team helpers.
-  check('three preset factions with distinct colors + names',
-    FACTIONS.length === 3 &&
-    new Set(FACTIONS.map((f) => f.color)).size === 3 &&
-    new Set(FACTIONS.map((f) => f.name)).size === 3);
+  check('exactly two preset factions with distinct colors + names',
+    FACTIONS.length === 2 &&
+    new Set(FACTIONS.map((f) => f.color)).size === 2 &&
+    new Set(FACTIONS.map((f) => f.name)).size === 2);
   check('sameFaction only matches a shared, real faction',
     sameFaction(0, 0) && !sameFaction(0, 1) &&
     !sameFaction(NO_FACTION, NO_FACTION) && !isFaction(NO_FACTION));
   check('balancedFaction picks the lowest-population team',
-    balancedFaction({ 0: 3, 1: 1, 2: 2 }) === 1 &&
-    balancedFaction({ 0: 0, 1: 0, 2: 0 }) === 0);
+    balancedFaction({ 0: 3, 1: 1 }) === 1 &&
+    balancedFaction({ 0: 0, 1: 0 }) === 0);
   check('factionName/factionColor fall back to neutral',
     factionName(NO_FACTION) === 'Neutral' && factionColor(NO_FACTION) === 0x9a9a9a);
 
-  // Server auto-balances joins evenly across the three factions.
+  // Faction PICK gate: balanced -> free pick honoured; >20% imbalance -> forced
+  // onto the weaker side; ties / no pick -> balanced default.
+  check('forcedFaction is null while teams are within 20%',
+    forcedFaction({ 0: 5, 1: 5 }) === null &&
+    forcedFaction({ 0: 6, 1: 5 }) === null);   // 6 is NOT > 5*1.2
+  check('forcedFaction returns the weaker side past 20%',
+    forcedFaction({ 0: 7, 1: 5 }) === 1 &&      // 7 > 5*1.2
+    forcedFaction({ 0: 0, 1: 3 }) === 0);
+  check('resolveJoinFaction honours a valid pick when balanced',
+    resolveJoinFaction({ 0: 5, 1: 5 }, 1) === 1 &&
+    resolveJoinFaction({ 0: 5, 1: 5 }, 0) === 0);
+  check('resolveJoinFaction overrides the pick when imbalanced',
+    resolveJoinFaction({ 0: 7, 1: 5 }, 0) === 1);
+  check('resolveJoinFaction falls back to balanced on no/invalid pick',
+    resolveJoinFaction({ 0: 3, 1: 1 }) === 1 &&
+    resolveJoinFaction({ 0: 1, 1: 1 }, 99) === 0);
+
+  // Server auto-balances joins evenly across the two factions.
   const factionOf = (out: ReturnType<GameServer['addPlayer']>): number => {
     const w = out.find((o) => o.msg.t === 'welcome')!.msg as { players: { faction: number }[] };
     return w.players[w.players.length - 1].faction;
@@ -1983,53 +1909,255 @@ check('furnace smelts ore/sand/log but not removed foods',
   const s = new GameServer(1337, mulberry32(7));
   const facs: number[] = [];
   for (let i = 1; i <= 6; i++) facs.push(factionOf(s.addPlayer(i)));
-  const counts = [0, 0, 0];
+  const counts = [0, 0];
   for (const f of facs) counts[f]++;
-  check('auto-balance spreads 6 joins evenly across 3 factions',
-    counts[0] === 2 && counts[1] === 2 && counts[2] === 2);
-  // Joins 1 & 4 land in the same faction; 1 & 2 are enemies.
+  check('auto-balance spreads 6 joins evenly across 2 factions',
+    counts[0] === 3 && counts[1] === 3);
+  // With two sides, odd/even joins alternate: 1 & 3 are allies; 1 & 2 enemies.
   check('the same-faction / cross-faction pairs are as expected',
-    facs[0] === facs[3] && facs[0] !== facs[1]);
+    facs[0] === facs[2] && facs[0] !== facs[1]);
 
-  // Position three players together: 1 (ally of 4) attacks 4 then 2.
+  // Position three players together: 1 (ally of 3) attacks 3 then 2.
   s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: -Math.PI / 2, pitch: 0 });
   s.handle(2, { t: 'xform', x: 2, y: 70, z: 0, yaw: 0, pitch: 0 });
-  s.handle(4, { t: 'xform', x: 2, y: 70, z: 0, yaw: 0, pitch: 0 });
+  s.handle(3, { t: 'xform', x: 2, y: 70, z: 0, yaw: 0, pitch: 0 });
   check('melee never damages players (disabled for all factions)',
-    !s.handle(1, { t: 'attack', target: 4 }).some((o) => o.msg.t === 'hurt') &&
+    !s.handle(1, { t: 'attack', target: 3 }).some((o) => o.msg.t === 'hurt') &&
     !s.handle(1, { t: 'attack', target: 2 }).some((o) => o.msg.t === 'hurt'));
   check('same-faction ranged is rejected',
-    !s.handle(1, { t: 'rangedAttack', target: 4, amount: 10 }).some((o) => o.msg.t === 'hurt'));
+    !s.handle(1, { t: 'rangedAttack', target: 3, amount: 10 }).some((o) => o.msg.t === 'hurt'));
   check('cross-faction ranged applies',
     s.handle(1, { t: 'rangedAttack', target: 2, amount: 10 }).some((o) => o.msg.t === 'hurt'));
 
-  // Ship: launched by player 1 (faction A). Ally 4 can't shell it; enemy 2 can.
+  // Ship: launched by player 1 (faction A). Ally 3 can't shell it; enemy 2 can.
   s.handle(1, { t: 'edit', x: 0, y: 70, z: 0, block: Block.ShipHelm });
   s.handle(1, { t: 'edit', x: 1, y: 70, z: 0, block: Block.Cannon });
   const sid = (s.handle(1, { t: 'shipLaunch', x: 0, y: 70, z: 0 })
     .find((o) => o.msg.t === 'shipState')!.msg as { ship: { id: number; faction: number } }).ship;
   check('a launched ship carries its owner faction', sid.faction === facs[0]);
-  s.handle(4, { t: 'xform', x: 2, y: 70, z: 0, yaw: 0, pitch: 0 });
+  s.handle(3, { t: 'xform', x: 2, y: 70, z: 0, yaw: 0, pitch: 0 });
   s.handle(2, { t: 'xform', x: 2, y: 70, z: 0, yaw: 0, pitch: 0 });
   check('same-faction ship hit is rejected',
-    s.handle(4, { t: 'shipHit', id: sid.id, amount: 20 }).length === 0);
+    s.handle(3, { t: 'shipHit', id: sid.id, amount: 20 }).length === 0);
   check('cross-faction ship hit applies',
     s.handle(2, { t: 'shipHit', id: sid.id, amount: 20 }).some((o) => o.msg.t === 'shipTransforms'));
 
-  // Turret claimed by player 1 (faction A): ignores ally 4, fires on enemy 2.
+  // Turret claimed by player 1 (faction A): ignores ally 3, fires on enemy 2.
   s.handle(1, { t: 'xform', x: 40, y: 70, z: 40, yaw: 0, pitch: 0 });
   s.handle(1, { t: 'edit', x: 41, y: 70, z: 40, block: Block.Turret });
   s.handle(1, { t: 'turretClaim', x: 41, y: 70, z: 40 });
   s.handle(1, { t: 'turretLoad', x: 41, y: 70, z: 40, item: Item.Cannonball, count: 50 });
   s.handle(1, { t: 'turretLoad', x: 41, y: 70, z: 40, item: Item.OilBarrel, count: 20 });
-  s.handle(4, { t: 'xform', x: 44, y: 70, z: 40, yaw: 0, pitch: 0 }); // ally in range
+  s.handle(3, { t: 'xform', x: 44, y: 70, z: 40, yaw: 0, pitch: 0 }); // ally in range
   s.handle(2, { t: 'xform', x: 500, y: 70, z: 500, yaw: 0, pitch: 0 });
   check('a turret never fires on a same-faction player',
     s.tickTurrets(2).every((o) => o.msg.t !== 'turretFire'));
   s.handle(2, { t: 'xform', x: 44, y: 70, z: 40, yaw: 0, pitch: 0 }); // enemy in range
-  s.handle(4, { t: 'xform', x: 500, y: 70, z: 500, yaw: 0, pitch: 0 });
+  s.handle(3, { t: 'xform', x: 500, y: 70, z: 500, yaw: 0, pitch: 0 });
   check('a turret fires on a cross-faction player',
     s.tickTurrets(2).some((o) => o.msg.t === 'turretFire'));
+}
+
+// --- Region board (Phase 1): grid + 50/50 + capitals + adjacency -------------
+{
+  // Coordinate round-trip: a region's centre maps back to that region.
+  let centreOk = true;
+  for (let i = 0; i < REGION_COUNT; i++) {
+    const c = regionCenter(i);
+    if (regionOf(c.x, c.z) !== i) { centreOk = false; break; }
+  }
+  check('regionCenter maps back to its own region for all regions', centreOk);
+  check('the grid is GRID×GRID regions', REGION_COUNT === GRID * GRID);
+  check('out-of-board coords clamp into the board (no negative/oob index)',
+    regionOf(-99999, -99999) === 0 &&
+    regionOf(99999, 99999) === REGION_COUNT - 1);
+
+  // Neighbour counts: a corner has 2, an edge 3, an interior region 4.
+  const corner = regionIndex(0, 0);
+  const edge = regionIndex(0, 2);
+  const interior = regionIndex(2, 2);
+  check('neighbors4 gives 2/3/4 for corner/edge/interior',
+    neighbors4(corner).length === 2 && neighbors4(edge).length === 3 &&
+    neighbors4(interior).length === 4);
+
+  // 50/50 opening: left half faction A, right half faction B; no neutrals.
+  const owners = initialOwners();
+  const oc = regionCounts(owners);
+  check('the opening board splits 50/50 with no neutrals',
+    oc[FACTION_A] === REGION_COUNT / 2 && oc[FACTION_B] === REGION_COUNT / 2);
+
+  // Capitals sit on opposite far edges, each owned by its faction at start.
+  check('capitals are on opposite far edges, owned at start',
+    capitalOf(FACTION_A) !== capitalOf(FACTION_B) &&
+    owners[capitalOf(FACTION_A)] === FACTION_A &&
+    owners[capitalOf(FACTION_B)] === FACTION_B &&
+    capitalFaction(capitalOf(FACTION_A)) === FACTION_A);
+
+  // Connectivity: at the opening, every owned region is supplied by its capital.
+  check('all opening regions connect to their capital',
+    connectedRegions(owners, FACTION_A).size === REGION_COUNT / 2 &&
+    connectedRegions(owners, FACTION_B).size === REGION_COUNT / 2);
+
+  // Adjacency capture: A may take a frontline region touching its land, but NOT
+  // leapfrog to a region deep in B's half.
+  const frontA = regionIndex(GRID / 2, 2);      // B-owned, touches A's col 2
+  const deepB = regionIndex(GRID - 1, 0);       // B-owned, far from A
+  check('a faction may capture a region adjacent to its own land',
+    canCapture(owners, FACTION_A, frontA));
+  check('a faction may NOT leapfrog to a non-adjacent enemy region',
+    !canCapture(owners, FACTION_A, deepB));
+  check('a faction cannot "capture" land it already owns',
+    !canCapture(owners, FACTION_A, regionIndex(0, 0)));
+
+  // Capital is only capturable as a last stand: not while the defender holds
+  // other land, yes once everything else is gone.
+  check('a capital is not capturable while its faction holds other land',
+    !capitalCapturable(owners, FACTION_B));
+  const stripped = owners.slice();
+  for (let i = 0; i < REGION_COUNT; i++) if (stripped[i] === FACTION_B && i !== capitalOf(FACTION_B)) stripped[i] = FACTION_A;
+  check('a capital becomes capturable once its faction holds only the capital',
+    capitalCapturable(stripped, FACTION_B));
+
+  // Region store: ownership get/set + serialize round-trip + fail-closed restore.
+  const reg = new Regions();
+  check('a fresh Regions store is the 50/50 opening board',
+    reg.ownerAt(capitalOf(FACTION_A)) === FACTION_A && reg.counts()[FACTION_B] === REGION_COUNT / 2);
+  check('setOwner reports + applies a real change only',
+    reg.setOwner(frontA, FACTION_A) === true && reg.ownerAt(frontA) === FACTION_A &&
+    reg.setOwner(frontA, FACTION_A) === false);
+  const reg2 = new Regions();
+  reg2.restore(reg.serialize());
+  check('a region board survives a serialize round-trip',
+    reg2.ownerAt(frontA) === FACTION_A);
+  const reg3 = new Regions();
+  reg3.restore({ owners: [1, 2, 3] as unknown as number[] }); // wrong length -> opening board
+  check('restore fail-closes to the opening board on a bad owner array',
+    reg3.counts()[FACTION_A] === REGION_COUNT / 2);
+}
+
+// --- Region capture (Phase 2): control points + tug-of-war + win -------------
+{
+  const at = (f: number, i: number) => {
+    const c = regionCenter(i);
+    return { faction: f, x: c.x, z: c.z, dead: false };
+  };
+  const frontA = regionIndex(GRID / 2, 2);   // B-owned, on the front, adjacent to A
+  const deepB = regionIndex(GRID - 1, 0);     // B-owned, far from A
+
+  // A lone eligible attacker standing on the control point flips the region.
+  const reg = new Regions();
+  let flipped = false;
+  for (let t = 0; t < 20 && !flipped; t++) {
+    if (reg.tick([at(FACTION_A, frontA)], 1).captured.some((e) => e.region === frontA)) flipped = true;
+  }
+  check('a lone attacker captures an adjacent enemy region', flipped && reg.ownerAt(frontA) === FACTION_A);
+
+  // ...but cannot capture a non-adjacent enemy region (no leapfrog), even camped.
+  const reg2 = new Regions();
+  for (let t = 0; t < 20; t++) reg2.tick([at(FACTION_A, deepB)], 1);
+  check('a non-adjacent enemy region cannot be captured while camped', reg2.ownerAt(deepB) === FACTION_B);
+
+  // Equal defenders hold the region (tug-of-war: ties go to the defender).
+  const reg3 = new Regions();
+  for (let t = 0; t < 20; t++) reg3.tick([at(FACTION_A, frontA), at(FACTION_B, frontA)], 1);
+  check('equal defenders hold the region (defender wins ties)', reg3.ownerAt(frontA) === FACTION_B);
+
+  // A neutral region contested by BOTH factions flips to neither.
+  const reg4 = new Regions();
+  reg4.setOwner(frontA, NO_FACTION);
+  for (let t = 0; t < 20; t++) reg4.tick([at(FACTION_A, frontA), at(FACTION_B, frontA)], 1);
+  check('a region contested by both factions flips to neither', reg4.ownerAt(frontA) === NO_FACTION);
+
+  // A region cut off from its capital drifts neutral after the decay window.
+  const reg5 = new Regions();
+  const iso = regionIndex(GRID - 1, GRID - 1); // A pocket deep in B territory
+  reg5.setOwner(iso, FACTION_A);
+  let neutralized = false;
+  for (let t = 0; t < DISCONNECT_SECONDS + 2 && !neutralized; t++) {
+    if (reg5.tick([], 1).neutralized.includes(iso)) neutralized = true;
+  }
+  check('a region cut off from its capital drifts neutral', neutralized && reg5.ownerAt(iso) === NO_FACTION);
+
+  // Taking the LAST enemy capital wins the war (instant win).
+  const reg6 = new Regions();
+  const capB = capitalOf(FACTION_B);
+  for (let i = 0; i < REGION_COUNT; i++) if (i !== capB) reg6.setOwner(i, FACTION_A);
+  let winner = NO_FACTION;
+  for (let t = 0; t < 40 && winner === NO_FACTION; t++) {
+    const r = reg6.tick([at(FACTION_A, capB)], 1);
+    if (r.winner !== NO_FACTION) winner = r.winner;
+  }
+  check('taking the last enemy capital wins the war', winner === FACTION_A);
+
+  // Capture meters survive a server->client sync round-trip.
+  const reg7 = new Regions();
+  reg7.tick([at(FACTION_A, frontA)], 3); // partial fill
+  const meters = reg7.meters();
+  const reg8 = new Regions();
+  reg8.setMeters(meters);
+  const m2 = reg8.meters();
+  check('capture meters survive a setMeters round-trip',
+    m2.faction[frontA] === FACTION_A && meters.progress[frontA] > 0 &&
+    Math.abs(m2.progress[frontA] - meters.progress[frontA]) < 0.05);
+
+  // Server wiring: a player standing on a frontline control point captures it.
+  const srv = new GameServer(1337, mulberry32(3));
+  srv.addPlayer(1); // first join -> faction A
+  const wc = regionCenter(frontA);
+  srv.handle(1, { t: 'xform', x: wc.x, y: 70, z: wc.z, yaw: 0, pitch: 0 });
+  let srvCap = false;
+  for (let t = 0; t < 25 && !srvCap; t++) {
+    if (srv.tickRegions(1).some((o) => o.msg.t === 'regionCapture')) srvCap = true;
+  }
+  check('the server captures a region from live player presence', srvCap);
+  // The welcome carries the opening region board.
+  const w = srv.addPlayer(2).find((o) => o.msg.t === 'welcome')!.msg as { regions: number[] };
+  check('the welcome carries the region board', Array.isArray(w.regions) && w.regions.length === REGION_COUNT);
+}
+
+// --- Bases & shields rework (Phase 3): owned-territory + region raids ---------
+{
+  const g = new GameServer(1337, mulberry32(13));
+  g.addPlayer(1); // faction A (0)
+  g.addPlayer(2); // faction B (1)
+  // A owns a left-half region; B owns a right-half one.
+  const aReg = regionIndex(1, 1), ac = regionCenter(aReg);
+  // B's base sits on the FRONTLINE (col 3) so A can actually capture that region.
+  const bReg = regionIndex(GRID / 2, 1), bc = regionCenter(bReg);
+
+  // A founds a base inside its own region.
+  g.handle(1, { t: 'xform', x: ac.x, y: 70, z: ac.z, yaw: 0, pitch: 0 });
+  const founded = g.handle(1, { t: 'edit', x: Math.floor(ac.x), y: 69, z: Math.floor(ac.z), block: Block.Core });
+  check('a base Core in owned territory founds a claim', founded.some((o) => o.msg.t === 'claim'));
+
+  // A cannot found a base in enemy/neutral territory — rejected with a notice.
+  g.handle(1, { t: 'xform', x: bc.x, y: 70, z: bc.z, yaw: 0, pitch: 0 });
+  const denied = g.handle(1, { t: 'edit', x: Math.floor(bc.x), y: 69, z: Math.floor(bc.z), block: Block.Core });
+  check('a base Core outside owned territory is rejected with a notice',
+    !denied.some((o) => o.msg.t === 'claim') && denied.some((o) => o.msg.t === 'notice'));
+
+  // B founds a base in its OWN region, with a stored block inside the claim.
+  g.handle(2, { t: 'xform', x: bc.x, y: 70, z: bc.z, yaw: 0, pitch: 0 });
+  const bBase = g.handle(2, { t: 'edit', x: Math.floor(bc.x), y: 69, z: Math.floor(bc.z), block: Block.Core });
+  check('B founds a base in its own region', bBase.some((o) => o.msg.t === 'claim'));
+  const lootX = Math.floor(bc.x) + 1, lootY = 69, lootZ = Math.floor(bc.z);
+  g.handle(2, { t: 'edit', x: lootX, y: lootY, z: lootZ, block: Block.Stone });
+  g.handle(2, { t: 'xform', x: 0, y: 70, z: 0, yaw: 0, pitch: 0 }); // leave so B doesn't defend
+
+  // While the shield is up AND A doesn't own the region, A can't touch the base.
+  g.handle(1, { t: 'xform', x: bc.x, y: 70, z: bc.z, yaw: 0, pitch: 0 });
+  const beforeCapture = g.handle(1, { t: 'edit', x: lootX, y: lootY, z: lootZ, block: Block.Air });
+  check('a shielded enemy base is safe from a faction that does not own the region',
+    beforeCapture.length === 0);
+
+  // A captures the region; now owning it opens the base to a raid (shield up).
+  let captured = false;
+  for (let t = 0; t < 30 && !captured; t++) {
+    if (g.tickRegions(1).some((o) => o.msg.t === 'regionCapture')) captured = true;
+  }
+  const raided = g.handle(1, { t: 'edit', x: lootX, y: lootY, z: lootZ, block: Block.Air });
+  check('owning the region opens an enemy base to a raid even with the shield up',
+    captured && raided.some((o) => o.msg.t === 'edit'));
 }
 
 // --- Accounts: login / register foundation -----------------------------------
@@ -2049,12 +2177,22 @@ check('furnace smelts ore/sand/log but not removed foods',
   check('register rejects a duplicate (case-insensitive) name',
     !accs.register('alice', 'whatever', hash, 's').ok);
 
-  // Faction auto-balance spreads registrations across the 3 teams.
+  // With no pick, registrations auto-balance across the 2 teams.
   for (const n of ['Bob', 'Cara', 'Dan', 'Eve', 'Fin']) accs.register(n, 'password', hash, 's');
-  const counts = [0, 0, 0];
+  const counts = [0, 0];
   for (const a of accs.list()) counts[a.faction]++;
   check('registrations auto-balance across factions (max-min <= 1)',
     Math.max(...counts) - Math.min(...counts) <= 1);
+
+  // A registration PICK is honoured while the teams are balanced. (The >20%
+  // imbalance override is unit-tested above on resolveJoinFaction; register
+  // self-balances so the store rarely reaches imbalance on its own.) Seed one
+  // account per side first so the store is balanced and non-empty, then pick.
+  const accs2 = new Accounts();
+  accs2.register('Seed0', 'password', hash, 's', 0);
+  accs2.register('Seed1', 'password', hash, 's', 1);
+  check('a picked faction is honoured at register time when balanced',
+    accs2.register('PickB', 'password', hash, 's', 1).account!.faction === 1);
 
   // Login verifies the password; wrong password + unknown user are rejected.
   check('login succeeds with the right password',
@@ -2258,6 +2396,7 @@ check('furnace smelts ore/sand/log but not removed foods',
   // --- Server: place, protect, breach, raid (the demonstrable loop) ---
   const s = new GameServer(1337, mulberry32(7)); // joins -> 1:fA, 2:fB, ...
   s.addPlayer(1); s.addPlayer(2);
+  s.setRegionOwner(0, 0, 0); // Phase 3: faction 0 owns this region so it can base here
   s.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
   const placeOut = s.handle(1, { t: 'edit', x: 0, y: 70, z: 0, block: Block.Core });
   const claimMsg = placeOut.find((o) => o.msg.t === 'claim');

@@ -21,14 +21,15 @@ import {
   turretArmed, turretConsumeShot, turretDamage, turretLoad, turretRange,
   sanitizeTurretState,
 } from '../turrets';
+import { FACTIONS, NO_FACTION, balancedFaction, factionName, sameFaction } from '../teams';
 import {
-  ControlNode, deriveControlNodes, resolveNode, topScores,
-  NODE_OIL_RATE,
-} from '../territory';
-import { FACTIONS, balancedFaction, factionName, sameFaction } from '../teams';
-import {
-  Claims, ClaimState, OIL_CAP, claimProtected, damageShield, feedOil, shieldUp,
+  Claims, ClaimState, claimProtected, damageShield, feedOil, shieldUp,
 } from '../claims';
+import { Regions, RegionsSave, regionOf } from '../regions';
+import {
+  SeasonState, newSeason, sanitizeSeason, seasonTimeLeft, seasonExpired,
+  tickSeasonClock, advanceSeason, deadlineWinner,
+} from '../season';
 import { Terrain } from '../terrain';
 import {
   ClientMsg, EDIT_RANGE, CHEST_SLOTS, PICKUP_RANGE,
@@ -39,7 +40,8 @@ import {
 
 const BOARD_RANGE = 6;          // how close a player must be to pilot/dock/upgrade a ship
 const SHIP_BLAST_RADIUS = 7;    // ship-destruction explosion radius (player damage)
-const TERRITORY_BROADCAST = 0.5; // seconds between scoreboard broadcasts
+const REGION_BROADCAST = 1;      // seconds between region-board broadcasts
+const SEASON_BROADCAST = 2;      // seconds between season-clock broadcasts
 const CLAIM_BROADCAST = 1;      // seconds between bulk claim-state refreshes
 const CLAIM_HIT_MAX = 200;      // server cap on a single reported shield hit
 export const RAID_STEAL_FRAC = 0.5; // fraction of a stored container a raid takes
@@ -94,13 +96,17 @@ export class GameServer {
   private readonly shipInput = new Map<number, { thrust: number; turn: number; age: number }>();
   private nextShipId = 1;
   private readonly turrets = new Map<string, TurretState>();
-  private territoryNodes: ControlNode[] | null = null;
-  private readonly scores = new Map<string, number>();
-  private roundTime = 0;
-  private winner = '';
-  private territoryAccum = 0;
   // Land claims (M18).
   private readonly claims = new Claims();
+  // Region board — the 50/50 war frontline (Phase 1).
+  private readonly regions = new Regions();
+  private regionAccum = 0;
+  // Seasons (Phase 5): month-long war cycles with reset + a "Seasons Won" badge.
+  private season = newSeason();
+  private seasonAccum = 0;
+  /** Set by the shell to persist "Seasons Won" badges to all winning accounts
+   *  (the pure server can't reach the on-disk account store itself). */
+  onSeasonEnd?: (winnerFaction: number, seasonNumber: number) => void;
   private worldTime = 0;        // seconds since boot (grace-period clock)
   private claimAccum = 0;
   private readonly items = new Map<number, ItemEntityInfo>();
@@ -152,7 +158,7 @@ export class GameServer {
   /** Register a player; returns the welcome (to them) + join (to others). With
    *  mandatory accounts the shell passes the authenticated account's username +
    *  faction; without them (legacy/tests) it auto-assigns both. */
-  addPlayer(id: number, account?: { username?: string; faction?: number; data?: Record<string, unknown> }): Outbound[] {
+  addPlayer(id: number, account?: { username?: string; faction?: number; seasonsWon?: number; data?: Record<string, unknown> }): Outbound[] {
     const username = account?.username && !this.usernameOnline(account.username)
       ? account.username : this.uniqueUsername();
     const faction = account?.faction !== undefined && FACTIONS.some((f) => f.id === account.faction)
@@ -169,6 +175,7 @@ export class GameServer {
       ? saved.mode as GameMode : 'survival';
     const player: ServerPlayer = {
       id, username, skin: skinSeed(username), faction, mode: savedMode,
+      seasonsWon: Number.isFinite(account?.seasonsWon) ? Math.max(0, Math.floor(account!.seasonsWon!)) : 0,
       x: s.x, y: s.y, z: s.z, yaw: fin(syaw as number) ? syaw as number : 0, pitch: 0,
       health: MAX_HEALTH, dead: false, regenCooldown: 0, regenTimer: 0,
       armorPoints: 0,
@@ -185,6 +192,8 @@ export class GameServer {
         return { x, y, z, state };
       }),
       claims: this.claims.list(),
+      regions: this.regions.ownerList(),
+      season: { number: this.season.number, timeLeft: seasonTimeLeft(this.season) },
       state: saved, // opaque per-account blob (inventory/hotbar) for the client to restore
     };
     return [
@@ -639,22 +648,30 @@ export class GameServer {
     const key = `${x},${y},${z}`;
     const prev = this.edits.get(key);
     const out: Outbound[] = [];
-    // --- Land-claim protection (M18) + raiding (M19) ---
+    // --- Bases (Phase 3) = land claims (M18) + raiding (M19) ---
     const claim = this.claims.at(x, z);
     const enemyClaim = claim !== undefined && !sameFaction(p.faction, claim.faction);
+    // A base is also raidable by whoever OWNS the region it sits in (Phase 3) —
+    // not only by breaching the shield. Holding the territory opens the base.
+    const ownsRegion = sameFaction(this.regions.ownerOf(x, z), p.faction);
     if (enemyClaim) {
       // Enemies can NEVER break the Core — claims persist through raids.
       if (prev === Block.Core) return [];
-      // While the shield holds (or during grace), enemies can't touch the claim.
-      if (claimProtected(claim!, this.worldTime)) return [];
+      // While the shield holds (or during grace), enemies can't touch the claim —
+      // UNLESS they own the region the base is in, which opens it to a raid.
+      if (claimProtected(claim!, this.worldTime) && !ownsRegion) return [];
     }
-    // A breached claim: an enemy's break of a stored container raids it.
+    // A breached (or region-captured) claim: an enemy's break of a stored
+    // container raids it.
     const raiding = enemyClaim && claim !== undefined &&
-      !claimProtected(claim, this.worldTime);
+      (!claimProtected(claim, this.worldTime) || ownsRegion);
 
-    // Placing a Core claims a 3×3-chunk footprint for the placer's faction.
-    // Rejected (no-op) if it would overlap an existing claim.
+    // Placing a Core founds a BASE (Phase 3): only inside a region your faction
+    // owns, and rejected (no-op) if it would overlap an existing claim.
     if (block === Block.Core && prev !== Block.Core) {
+      if (!ownsRegion) {
+        return [{ to: p.id, msg: { t: 'notice', text: 'You can only build a base in territory your faction controls!' } }];
+      }
       const created = this.claims.create(p.faction, x, y, z, this.worldTime);
       if (!created) return [];
       out.push({ to: 'all', msg: { t: 'claim', claim: created } });
@@ -1000,59 +1017,101 @@ export class GameServer {
     return out;
   }
 
-  // --- Territory objective ---------------------------------------------------
+  // --- Region board + capture (Phase 1/2) ------------------------------------
 
-  private nodes(): ControlNode[] {
-    if (!this.territoryNodes) {
-      this.territoryNodes = deriveControlNodes((x, z) => this.terrain.oilRichness(x, z));
-    }
-    return this.territoryNodes;
-  }
-
-  /** Resolve node control, accrue faction dominance, DISTRIBUTE oil income to
-   *  each controlling faction's claims (the M20 loop: territory fuels shields),
-   *  check the win, and emit a periodic broadcast. Round-based (resets on win). */
-  tickTerritory(dt: number): Outbound[] {
-    if (!fin(dt) || dt <= 0) return [];
-    const presence = this.territoryPresence();
-    // Count controlled nodes per faction (drives both dominance + oil income).
-    const nodesByFaction = new Map<number, number>();
-    for (const node of this.nodes()) {
-      const st = resolveNode(node, presence);
-      if (st.faction >= 0) nodesByFaction.set(st.faction, (nodesByFaction.get(st.faction) ?? 0) + 1);
-    }
-    // Oil income: each of a faction's claims is topped up by its node count.
-    // (No more abstract "first to N" race — controlling nodes simply fuels your
-    // shields; map % of land is the real standings now.)
-    for (const claim of this.claims.list()) {
-      const n = nodesByFaction.get(claim.faction) ?? 0;
-      if (n > 0) claim.oil = Math.min(OIL_CAP, claim.oil + n * NODE_OIL_RATE * dt);
-    }
-    // Live "standings" = how many oil nodes each faction currently holds.
-    this.scores.clear();
-    for (const [faction, count] of nodesByFaction) this.scores.set(factionName(faction), count);
-    this.territoryAccum += dt;
-    if (this.territoryAccum < TERRITORY_BROADCAST) return [];
-    this.territoryAccum = 0;
-    return [{ to: 'all', msg: this.territorySnapshot() }];
-  }
-
-  /** Live presence (faction + position) for node resolution. */
-  private territoryPresence(): { faction: number; x: number; z: number; dead: boolean }[] {
+  /** Live presence (faction + position) for region capture resolution. */
+  private regionPresence(): { faction: number; x: number; z: number; dead: boolean }[] {
     return [...this.players.values()].map((p) => ({
       faction: p.faction, x: p.x, z: p.z, dead: p.dead,
     }));
   }
 
-  territorySnapshot(): ServerMsg {
-    const presence = this.territoryPresence();
-    return {
-      t: 'territory',
-      nodes: this.nodes().map((n) => resolveNode(n, presence)),
-      scores: topScores(this.scores),
-      roundTime: this.roundTime,
-      winner: this.winner,
-    };
+  /** Force a region's owner (admin / season setup / tests) and broadcast the
+   *  updated board. World coords pick the region. */
+  setRegionOwner(x: number, z: number, faction: number): Outbound[] {
+    if (!this.regions.setOwner(regionOf(x, z), faction)) return [];
+    return [{ to: 'all', msg: this.regionsSnapshot() }];
+  }
+
+  /** Full region board + capture meters (the war map). */
+  regionsSnapshot(): ServerMsg {
+    const m = this.regions.meters();
+    return { t: 'regions', owners: this.regions.ownerList(), capFaction: m.faction, capProgress: m.progress };
+  }
+
+  /** Advance capture meters from live player presence, emit capture/win banners,
+   *  and periodically re-broadcast the board so clients stay in sync. */
+  tickRegions(dt: number): Outbound[] {
+    if (!fin(dt) || dt <= 0) return [];
+    const out: Outbound[] = [];
+    const res = this.regions.tick(this.regionPresence(), dt);
+    for (const ev of res.captured) {
+      out.push({ to: 'all', msg: { t: 'regionCapture', region: ev.region, faction: ev.faction, from: ev.from } });
+    }
+    if (res.winner !== NO_FACTION) {
+      out.push({ to: 'all', msg: { t: 'regionWin', faction: res.winner } });
+      // Capturing the enemy capital wins the SEASON instantly (Phase 5).
+      out.push(...this.endSeason(res.winner));
+    }
+    // Any capture/neutralize changed ownership -> push an immediate refresh so
+    // the HUD/banner and board never disagree; otherwise refresh on the timer.
+    this.regionAccum += dt;
+    if (res.captured.length || res.neutralized.length || res.winner !== NO_FACTION ||
+        this.regionAccum >= REGION_BROADCAST) {
+      this.regionAccum = 0;
+      out.push({ to: 'all', msg: this.regionsSnapshot() });
+    }
+    return out;
+  }
+
+  // --- Seasons (Phase 5) -----------------------------------------------------
+
+  /** Live season state for the HUD (number + seconds left). */
+  seasonSnapshot(): ServerMsg {
+    return { t: 'season', number: this.season.number, timeLeft: seasonTimeLeft(this.season) };
+  }
+
+  /** Advance the season clock; at the deadline the faction holding the most
+   *  regions wins (a tie is a stalemate — no winner, fresh season either way).
+   *  Periodically broadcasts the clock for the HUD. */
+  tickSeason(dt: number): Outbound[] {
+    if (!fin(dt) || dt <= 0) return [];
+    tickSeasonClock(this.season, dt);
+    const out: Outbound[] = [];
+    if (seasonExpired(this.season)) {
+      out.push(...this.endSeason(deadlineWinner(this.regions.counts())));
+      return out;
+    }
+    this.seasonAccum += dt;
+    if (this.seasonAccum >= SEASON_BROADCAST) {
+      this.seasonAccum = 0;
+      out.push({ to: 'all', msg: this.seasonSnapshot() });
+    }
+    return out;
+  }
+
+  /**
+   * End the current season and start the next: announce the winner (NO_FACTION =
+   * stalemate), award the "Seasons Won" badge via the shell callback, then RESET
+   * the war — the board back to 50/50 and every base (claim) cleared. Player
+   * inventories/accounts are untouched (kept across seasons).
+   */
+  endSeason(winner: number): Outbound[] {
+    const out: Outbound[] = [];
+    const ended = this.season.number;
+    this.onSeasonEnd?.(winner, ended); // shell persists badges to winning accounts
+    // Clear every base; tell clients to drop each claim (domes + indexes).
+    for (const c of this.claims.list()) out.push({ to: 'all', msg: { t: 'claimRemove', id: c.id } });
+    this.claims.clear();
+    // Reset the board + start the next season.
+    this.regions.reset();
+    advanceSeason(this.season);
+    this.seasonAccum = 0;
+    this.regionAccum = 0;
+    out.push({ to: 'all', msg: { t: 'seasonEnd', winner, number: ended } });
+    out.push({ to: 'all', msg: this.regionsSnapshot() });
+    out.push({ to: 'all', msg: this.seasonSnapshot() });
+    return out;
   }
 
   // --- Land claims (M18 / M19) -----------------------------------------------
@@ -1062,8 +1121,10 @@ export class GameServer {
    *  members are never blocked; a breached (down + ungraced) claim is open. */
   private enemyShielded(p: ServerPlayer, x: number, z: number): boolean {
     const c = this.claims.at(x, z);
+    // Owning the region the base sits in opens it (Phase 3), so a region-holder
+    // is never "shielded out" of an enemy base there.
     return c !== undefined && !sameFaction(p.faction, c.faction) &&
-      claimProtected(c, this.worldTime);
+      claimProtected(c, this.worldTime) && !sameFaction(this.regions.ownerOf(x, z), p.faction);
   }
 
   /** A weapon hit drains an enemy claim's shield (M19 breaching). The client
@@ -1180,6 +1241,8 @@ export class GameServer {
       ships: [...this.ships.values()],
       turrets: [...this.turrets.entries()],
       claims: this.claims.list(),
+      regions: this.regions.serialize(),
+      season: this.season,
     };
   }
 
@@ -1239,6 +1302,8 @@ export class GameServer {
       }
     }
     if (Array.isArray(s.claims)) this.claims.load(s.claims as ClaimState[]);
+    this.regions.restore(s.regions);
+    this.season = sanitizeSeason(s.season);
     return true;
   }
 
@@ -1258,6 +1323,7 @@ function shipTransform(ship: ShipState): ShipTransform {
 function toInfo(p: ServerPlayer): PlayerInfo {
   return {
     id: p.id, username: p.username, skin: p.skin, faction: p.faction, mode: p.mode,
+    seasonsWon: p.seasonsWon,
     x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
     health: p.health, dead: p.dead,
   };
@@ -1275,6 +1341,8 @@ export interface WorldSave {
   ships: ShipState[];
   turrets: [string, TurretState][];
   claims: ClaimState[];
+  regions?: RegionsSave;
+  season?: SeasonState;
 }
 
 /** A "x,y,z" integer block-coordinate key (the map keys we persist). */

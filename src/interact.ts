@@ -102,6 +102,9 @@ export class Interaction {
   /** Veto an edit at a cell (e.g. an enemy faction's shielded claim). Returning
    *  false blocks the break/place so the client doesn't mispredict it. */
   canEdit?: (x: number, y: number, z: number) => boolean;
+  /** Veto a PLACEMENT of a specific block (e.g. a base Core only inside owned
+   *  territory). Returning false cancels the place so it isn't mispredicted. */
+  canPlace?: (x: number, y: number, z: number, block: number) => boolean;
   private readonly world: World;
   private readonly player: Player;
   private readonly inventory: Inventory;
@@ -302,6 +305,8 @@ export class Interaction {
     if (py < 0 || py >= 256) return;
     // Can't build inside an enemy faction's shielded claim (mirrors the server).
     if (this.canEdit && !this.canEdit(px, py, pz)) return;
+    // Block-specific placement veto (e.g. a base Core needs owned territory).
+    if (this.canPlace && !this.canPlace(px, py, pz, blockId)) return;
 
     // Ship-build rule: a solid block may EXTEND a helm-rooted hull, but must not
     // BRIDGE it to terrain or other structures — rejected if the placement cell

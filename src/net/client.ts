@@ -7,7 +7,6 @@ import type { ItemStack } from '../items';
 import type { MachineState, UpgradeAxis } from '../machines';
 import type { ShipState, ShipAxis } from '../ships';
 import type { TurretState, TurretAxis } from '../turrets';
-import type { NodeStatus, ScoreEntry } from '../territory';
 import type { ClaimState } from '../claims';
 import {
   ClientMsg, GameMode, ItemEntityInfo, PlayerInfo, SERVER_PORT, ServerMsg, ShipTransform,
@@ -67,11 +66,21 @@ export class NetClient {
   onTurret?: (x: number, y: number, z: number, state: TurretState) => void;
   /** A turret fired (render a tracer + aim the barrel). */
   onTurretFire?: (x: number, y: number, z: number, tx: number, ty: number, tz: number) => void;
-  /** Live territory scoreboard + node ownership + round state. */
-  onTerritory?: (nodes: NodeStatus[], scores: ScoreEntry[], roundTime: number, winner: string) => void;
   /** Authoritative claim state (open reply / feed / breach / periodic refresh). */
   onClaim?: (claim: ClaimState) => void;
   onClaimRemove?: (id: number) => void;
+  /** Region board changed (owner faction id per region index). */
+  onRegions?: (owners: number[]) => void;
+  /** Capture meters refreshed (per-region filling faction + 0..1 fraction). */
+  onRegionMeters?: (capFaction: number[], capProgress: number[]) => void;
+  /** A region flipped owners ("WE CAPTURED X!" banner). */
+  onRegionCapture?: (region: number, faction: number, from: number) => void;
+  /** A faction took an enemy capital — instant win. */
+  onRegionWin?: (faction: number) => void;
+  /** Season clock update (number + seconds left). */
+  onSeason?: (number: number, timeLeft: number) => void;
+  /** A season ended (winner faction, or NO_FACTION for a stalemate). */
+  onSeasonEnd?: (winner: number, number: number) => void;
   /** A faction breached an enemy claim (HUD/killfeed event). */
   onBreach?: (attacker: string, faction: number, victim: number) => void;
   /** A register/login was rejected (the login screen shows the error). */
@@ -142,6 +151,8 @@ export class NetClient {
         for (const ship of msg.ships) this.onShipState?.(ship);
         for (const tr of msg.turrets) this.onTurret?.(tr.x, tr.y, tr.z, tr.state);
         for (const cl of msg.claims) this.onClaim?.(cl);
+        this.onRegions?.(msg.regions);
+        this.onSeason?.(msg.season.number, msg.season.timeLeft);
         const me = msg.players.find((p) => p.id === this.myId);
         // Restore saved inventory BEFORE onWelcome (which adopts the server
         // position) so the comeback loadout/inventory is in place from frame one.
@@ -231,8 +242,21 @@ export class NetClient {
       case 'turretFire':
         this.onTurretFire?.(msg.x, msg.y, msg.z, msg.tx, msg.ty, msg.tz);
         break;
-      case 'territory':
-        this.onTerritory?.(msg.nodes, msg.scores, msg.roundTime, msg.winner);
+      case 'regions':
+        this.onRegions?.(msg.owners);
+        this.onRegionMeters?.(msg.capFaction, msg.capProgress);
+        break;
+      case 'regionCapture':
+        this.onRegionCapture?.(msg.region, msg.faction, msg.from);
+        break;
+      case 'regionWin':
+        this.onRegionWin?.(msg.faction);
+        break;
+      case 'season':
+        this.onSeason?.(msg.number, msg.timeLeft);
+        break;
+      case 'seasonEnd':
+        this.onSeasonEnd?.(msg.winner, msg.number);
         break;
       case 'claim':
         this.onClaim?.(msg.claim);
@@ -279,8 +303,8 @@ export class NetClient {
   }
 
   /** Send register/login over the open socket (before `welcome`/connected). */
-  sendRegister(username: string, password: string): void {
-    this.raw({ t: 'register', username, password });
+  sendRegister(username: string, password: string, faction?: number): void {
+    this.raw({ t: 'register', username, password, faction });
   }
   sendLogin(username: string, password: string): void {
     this.raw({ t: 'login', username, password });

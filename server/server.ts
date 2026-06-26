@@ -57,6 +57,15 @@ const game = new GameServer(savedWorld && Number.isFinite(savedWorld.seed) ? sav
 if (savedWorld && game.restore(savedWorld)) {
   console.log(`restored world from ${WORLD_FILE}`);
 }
+// When a season ends, persist the "Seasons Won" badge to every winning account
+// (including offline members) and notify whoever's online (Phase 5).
+game.onSeasonEnd = (winner, season) => {
+  if (winner < 0) { console.log(`season ${season} ended in a stalemate`); return; }
+  const won = accounts.awardSeasonWin(winner);
+  saveAccounts();
+  worldDirty = true;
+  console.log(`season ${season} won by faction ${winner}; awarded ${won.length} badge(s)`);
+};
 let worldDirty = false;
 function saveWorld(): void {
   try {
@@ -79,7 +88,7 @@ function persistPlayer(id: number): void {
 function handleAuth(id: number, msg: ClientMsg & { t: 'register' | 'login' }): void {
   const { username, password } = msg;
   const res = msg.t === 'register'
-    ? accounts.register(username, password, hasher, randomSalt())
+    ? accounts.register(username, password, hasher, randomSalt(), msg.faction)
     : accounts.login(username, password, hasher);
   if (msg.t === 'register' && res.ok) saveAccounts();
   if (!res.ok || !res.account) {
@@ -92,7 +101,8 @@ function handleAuth(id: number, msg: ClientMsg & { t: 'register' | 'login' }): v
   }
   authed.set(id, res.account.username);
   dispatch(game.addPlayer(id, {
-    username: res.account.username, faction: res.account.faction, data: res.account.data,
+    username: res.account.username, faction: res.account.faction,
+    seasonsWon: res.account.seasonsWon, data: res.account.data,
   }));
   console.log(`+ ${res.account.username} authed (${game.playerCount} online)`);
 }
@@ -176,7 +186,8 @@ setInterval(() => {
   const moved = game.tickItems(dt);
   const shipXf = game.tickShips(dt);
   dispatch(game.tickTurrets(dt));
-  dispatch(game.tickTerritory(dt));
+  dispatch(game.tickRegions(dt));
+  dispatch(game.tickSeason(dt));
   dispatch(game.tickClaims(dt));
   const snap: ServerMsg = { t: 'snapshot', players: game.snapshot() };
   for (const cid of sockets.keys()) send(cid, snap);

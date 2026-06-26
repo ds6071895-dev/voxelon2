@@ -1,6 +1,6 @@
 // World map overlay (M key): a top-down 1000×1000 view of the world centred on
 // origin. A biome-colored base (sampled from the deterministic Terrain, cached)
-// with a faction-colored CLAIM overlay, oil-node markers, the player's position
+// with a faction-colored region board + CLAIM overlay, the player's position
 // + heading, and click-to-drop WAYPOINTS (shown here AND as in-world beacons,
 // persisted in localStorage). A legend shows each faction's % of claimed land.
 
@@ -8,9 +8,11 @@ import * as THREE from 'three';
 import { Biome } from './biomes';
 import { CHUNK_X, CHUNK_Z } from './chunk';
 import { Claims, claimChunkKeys } from './claims';
-import { FACTIONS, factionColor, factionName } from './teams';
+import { FACTIONS, NO_FACTION, factionColor, factionName } from './teams';
+import {
+  REGION_COUNT, capitalFaction, isCapital, regionBounds, regionCenter,
+} from './regions';
 import { Terrain } from './terrain';
-import type { NodeStatus } from './territory';
 
 const MAP_SPAN = 1000;     // world units shown (centred on origin: -500..500)
 const HALF = MAP_SPAN / 2;
@@ -38,7 +40,10 @@ interface Waypoint { x: number; z: number; color: number; name: string; show: bo
 export interface MapContext {
   player(): { x: number; z: number; yaw: number };
   faction(): number;
-  nodes(): NodeStatus[];
+  /** Region board: owner faction id per region index (Phase 1). */
+  regions(): number[];
+  /** Per-region capture meters (Phase 2): filling faction + 0..1 fraction. */
+  captureMeters(): { faction: number[]; progress: number[] };
 }
 
 export class WorldMap {
@@ -161,6 +166,41 @@ export class WorldMap {
     const ctx = this.ctx;
     ctx.drawImage(this.base!, 0, 0);
 
+    // Region board: faction-tinted grid of territories with a capital star on
+    // each home region (Phase 1). Drawn first so claims/nodes sit on top.
+    const owners = this.mapCtx.regions();
+    const meters = this.mapCtx.captureMeters();
+    const regionByFaction: Record<number, number> = {};
+    for (let i = 0; i < REGION_COUNT && i < owners.length; i++) {
+      const owner = owners[i];
+      const b = regionBounds(i);
+      const x = this.cx(b.minX), y = this.cy(b.minZ);
+      const w = (b.maxX - b.minX) * SCALE, h = (b.maxZ - b.minZ) * SCALE;
+      if (owner !== NO_FACTION) {
+        ctx.fillStyle = this.rgba(factionColor(owner), 0.22);
+        ctx.fillRect(x, y, w, h);
+        regionByFaction[owner] = (regionByFaction[owner] ?? 0) + 1;
+      }
+      ctx.strokeStyle = 'rgba(10,14,22,0.5)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x, y, w, h);
+      // Capture meter: a small filling bar at the region's foot in the attacker's
+      // color, plus a pulsing attacker-colored border so the front pops.
+      const capF = meters.faction?.[i] ?? NO_FACTION;
+      const frac = Math.max(0, Math.min(1, meters.progress?.[i] ?? 0));
+      if (capF !== NO_FACTION && frac > 0.001) {
+        const bw = w - 8, bx = x + 4, by = y + h - 8;
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillRect(bx, by, bw, 5);
+        ctx.fillStyle = this.rgba(factionColor(capF), 1);
+        ctx.fillRect(bx, by, bw * frac, 5);
+        ctx.strokeStyle = this.rgba(factionColor(capF), 0.9);
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
+      }
+      if (isCapital(i)) this.drawCapital(regionCenter(i), capitalFaction(i));
+    }
+
     // Claim overlays (faction-colored translucent footprints).
     const claimedByFaction: Record<number, number> = {};
     for (const claim of this.claims.list()) {
@@ -173,16 +213,6 @@ export class WorldMap {
       ctx.lineWidth = 1.5;
       ctx.strokeRect(this.cx(x0), this.cy(z0), w * SCALE, h * SCALE);
       claimedByFaction[claim.faction] = (claimedByFaction[claim.faction] ?? 0) + claimChunkKeys(claim.cx, claim.cz).length;
-    }
-
-    // Oil-node markers (ringed circle tinted by controlling faction).
-    for (const n of this.nodesInWindow()) {
-      const px = this.cx(n.x), py = this.cy(n.z);
-      ctx.beginPath();
-      ctx.arc(px, py, 5, 0, Math.PI * 2);
-      ctx.fillStyle = n.contested ? '#ffd84a' : n.faction >= 0 ? this.rgba(factionColor(n.faction), 1) : '#9fb0c4';
-      ctx.fill();
-      ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
     }
 
     // Waypoints.
@@ -207,13 +237,50 @@ export class WorldMap {
     ctx.closePath(); ctx.fill(); ctx.stroke();
     ctx.restore();
 
-    this.drawLegend(claimedByFaction);
+    this.drawLegend(claimedByFaction, regionByFaction);
     this.syncMarkers();
   }
 
-  private drawLegend(claimedByFaction: Record<number, number>): void {
+  /** A capital marker: a faction-colored star at the home region centre. */
+  private drawCapital(c: { x: number; z: number }, faction: number): void {
+    const ctx = this.ctx;
+    const px = this.cx(c.x), py = this.cy(c.z);
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.fillStyle = this.rgba(factionColor(faction), 1);
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let k = 0; k < 5; k++) {
+      const a = -Math.PI / 2 + (k * 2 * Math.PI) / 5;
+      const a2 = a + Math.PI / 5;
+      ctx.lineTo(Math.cos(a) * 9, Math.sin(a) * 9);
+      ctx.lineTo(Math.cos(a2) * 4, Math.sin(a2) * 4);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  private drawLegend(
+    claimedByFaction: Record<number, number>,
+    regionByFaction: Record<number, number>,
+  ): void {
     const me = this.mapCtx.faction();
-    const lines = ['<b>LAND CONTROL</b>'];
+    const lines = ['<b>WAR MAP — REGIONS</b>'];
+    for (const f of FACTIONS) {
+      const regions = regionByFaction[f.id] ?? 0;
+      const pct = (regions / REGION_COUNT) * 100;
+      const mine = f.id === me ? ' ◀ you' : '';
+      lines.push(
+        `<span style="color:${this.rgba(f.color, 1)}">■</span> ${factionName(f.id)}: ` +
+        `${regions} <span style="color:#8da0c0">(${pct.toFixed(0)}%)</span>${mine}`);
+    }
+    const neutral = REGION_COUNT - Object.values(regionByFaction).reduce((a, b) => a + b, 0);
+    if (neutral > 0) lines.push(`<span style="color:#8da0c0">Neutral: ${neutral}</span>`);
+    lines.push('');
+    lines.push('<b>YOUR BASES</b>');
     for (const f of FACTIONS) {
       const chunks = claimedByFaction[f.id] ?? 0;
       const pct = (chunks / this.landChunks) * 100;
@@ -222,8 +289,6 @@ export class WorldMap {
         `<span style="color:${this.rgba(f.color, 1)}">■</span> ${factionName(f.id)}: ` +
         `${pct.toFixed(1)}%${mine}`);
     }
-    const total = Object.values(claimedByFaction).reduce((a, b) => a + b, 0);
-    lines.push(`<span style="color:#8da0c0">Unclaimed: ${(100 - total / this.landChunks * 100).toFixed(1)}%</span>`);
     lines.push('');
     lines.push(`<b>WAYPOINTS</b> (${this.waypoints.length})`);
     const p = this.mapCtx.player();
@@ -257,11 +322,6 @@ export class WorldMap {
       const i = Number(del);
       if (this.waypoints[i]) { this.waypoints.splice(i, 1); this.saveWaypoints(); this.draw(); }
     }
-  }
-
-  private nodesInWindow(): NodeStatus[] {
-    return this.mapCtx.nodes().filter((n) =>
-      Math.abs(n.x) <= HALF && Math.abs(n.z) <= HALF);
   }
 
   // --- waypoints ---

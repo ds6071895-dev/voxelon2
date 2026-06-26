@@ -2,16 +2,19 @@
 // agnostic: password HASHING is INJECTED (the ws shell supplies Node's built-in
 // scrypt; tests supply a fake), so this is headlessly unit-testable and carries
 // no Node/DOM deps. The shell persists/loads records via fs as JSON. Each
-// account is permanently bound to a faction (auto-balanced at registration),
-// and over later phases carries the player's saved state (position/inventory).
+// account is bound to a faction at registration (the player's pick, unless a
+// >20% imbalance forces the weaker side), and carries the player's saved state
+// (position/inventory).
 
-import { FACTIONS, balancedFaction } from '../teams';
+import { FACTIONS, resolveJoinFaction } from '../teams';
 
 export interface Account {
   username: string;
   salt: string;
   hash: string;
   faction: number;
+  /** Permanent "Seasons Won" badge rank, kept across seasons (Phase 5). */
+  seasonsWon?: number;
   /** Saved player state, restored on login (position/health/armor/inventory). */
   data?: Record<string, unknown>;
 }
@@ -41,6 +44,7 @@ export class Accounts {
         this.byName.set(a.username.toLowerCase(), {
           username: a.username, salt: a.salt, hash: a.hash,
           faction: Number.isFinite(a.faction) ? a.faction : 0,
+          seasonsWon: Number.isFinite(a.seasonsWon) ? Math.max(0, Math.floor(a.seasonsWon as number)) : 0,
           data: a.data,
         });
       }
@@ -56,20 +60,22 @@ export class Accounts {
   list(): Account[] { return [...this.byName.values()]; }
   get size(): number { return this.byName.size; }
 
-  /** Lowest-population faction across ALL registered accounts (so teams stay
+  /** Member count per faction across ALL registered accounts (so teams stay
    *  balanced over the whole playerbase, not just who's currently online). */
-  private nextFaction(): number {
+  private factionCounts(): Record<number, number> {
     const counts: Record<number, number> = {};
     for (const f of FACTIONS) counts[f.id] = 0;
     for (const a of this.byName.values()) {
       if (counts[a.faction] !== undefined) counts[a.faction]++;
     }
-    return balancedFaction(counts);
+    return counts;
   }
 
   /** Register a new account. `salt` is supplied by the caller (the shell uses a
-   *  cryptographic random; tests a fixed value). Fail-closed on bad input/dup. */
-  register(name: string, pass: string, hash: Hasher, salt: string): AuthResult {
+   *  cryptographic random; tests a fixed value). `desired` is the side the
+   *  player PICKED; it's honoured only while the teams are balanced — a >20%
+   *  imbalance forces the weaker side. Fail-closed on bad input/dup. */
+  register(name: string, pass: string, hash: Hasher, salt: string, desired?: number): AuthResult {
     if (!validUsername(name)) {
       return { ok: false, error: 'Username must be 3–16 letters, numbers or _' };
     }
@@ -78,7 +84,9 @@ export class Accounts {
     }
     if (this.has(name)) return { ok: false, error: 'That username is taken' };
     const account: Account = {
-      username: name, salt, hash: hash(pass, salt), faction: this.nextFaction(),
+      username: name, salt, hash: hash(pass, salt),
+      faction: resolveJoinFaction(this.factionCounts(), desired),
+      seasonsWon: 0,
     };
     this.byName.set(name.toLowerCase(), account);
     return { ok: true, account };
@@ -97,6 +105,19 @@ export class Accounts {
   setData(name: string, data: Record<string, unknown>): void {
     const a = this.get(name);
     if (a) a.data = data;
+  }
+
+  /** Award a "Seasons Won" badge to every account on a faction (Phase 5 reset).
+   *  Returns the usernames awarded (so the shell can notify online players). */
+  awardSeasonWin(faction: number): string[] {
+    const won: string[] = [];
+    for (const a of this.byName.values()) {
+      if (a.faction === faction) {
+        a.seasonsWon = (a.seasonsWon ?? 0) + 1;
+        won.push(a.username);
+      }
+    }
+    return won;
   }
 
   /** Serializable snapshot for the shell to write to disk. */

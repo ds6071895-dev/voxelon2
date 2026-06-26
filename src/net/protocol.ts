@@ -6,7 +6,6 @@ import type { ItemStack } from '../items';
 import type { MachineState, UpgradeAxis } from '../machines';
 import type { ShipState, ShipAxis } from '../ships';
 import type { TurretState, TurretAxis } from '../turrets';
-import type { NodeStatus, ScoreEntry } from '../territory';
 import type { ClaimState } from '../claims';
 
 export const SERVER_PORT = 8080;
@@ -37,6 +36,7 @@ export interface PlayerInfo extends PlayerSnapshot {
   skin: number; // seed for deterministic avatar colors
   faction: number; // preset team id (teams.ts); NO_FACTION when neutral/offline
   mode: GameMode; // gamemode (survival default; admin-set creative/spectator)
+  seasonsWon: number; // permanent "Seasons Won" badge rank (Phase 5)
 }
 
 /** A dropped item entity owned by the server. */
@@ -69,7 +69,7 @@ export function mitigate(amount: number, armorPoints: number): number {
 export type ClientMsg =
   | { t: 'hello' }
   // Mandatory accounts: a socket must authenticate before it spawns a player.
-  | { t: 'register'; username: string; password: string }
+  | { t: 'register'; username: string; password: string; faction?: number } // faction = picked side
   | { t: 'login'; username: string; password: string }
   | { t: 'xform'; x: number; y: number; z: number; yaw: number; pitch: number }
   | { t: 'edit'; x: number; y: number; z: number; block: number }
@@ -123,6 +123,10 @@ export type ServerMsg =
       players: PlayerInfo[]; edits: [string, number][]; items: ItemEntityInfo[];
       ships: ShipState[]; turrets: { x: number; y: number; z: number; state: TurretState }[];
       claims: ClaimState[];
+      /** Region board: owner faction id per region index (teams/regions modules). */
+      regions: number[];
+      /** Current season number + seconds left before the deadline (Phase 5). */
+      season: { number: number; timeLeft: number };
       /** Saved per-account state to restore (inventory/hotbar); undefined for new accounts. */
       state?: Record<string, unknown>;
     }
@@ -147,11 +151,18 @@ export type ServerMsg =
   // Turrets.
   | { t: 'turret'; x: number; y: number; z: number; state: TurretState }
   | { t: 'turretFire'; x: number; y: number; z: number; tx: number; ty: number; tz: number }
-  // Territory objective: live scoreboard + node ownership + round state.
-  | {
-      t: 'territory'; nodes: NodeStatus[]; scores: ScoreEntry[];
-      roundTime: number; winner: string;
-    }
+  // Region board (Phase 1/2): owner faction id per region + capture meters
+  // (which faction is filling each region's control point + fill fraction 0..1).
+  | { t: 'regions'; owners: number[]; capFaction: number[]; capProgress: number[] }
+  // A region flipped owners (Phase 2) — drives the "WE CAPTURED X!" banner.
+  | { t: 'regionCapture'; region: number; faction: number; from: number }
+  // A faction took an enemy CAPITAL = instant win (Phase 2; Phase 5 = full season).
+  | { t: 'regionWin'; faction: number }
+  // Season clock (Phase 5): number + seconds left (periodic HUD broadcast).
+  | { t: 'season'; number: number; timeLeft: number }
+  // A season ended — winner faction (NO_FACTION = stalemate) + the season that
+  // just finished. Clients clear bases + flash a banner; the board is reset.
+  | { t: 'seasonEnd'; winner: number; number: number }
   // Land claims (M18): one claim's authoritative state, a periodic bulk refresh,
   // and removals (Core broken / overlap).
   | { t: 'claim'; claim: ClaimState }

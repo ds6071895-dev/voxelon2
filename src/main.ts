@@ -38,18 +38,22 @@ import {
   TURRET_FUEL_CAP,
 } from './turrets';
 import { TurretModels } from './turretmodels';
-import {
-  NodeStatus, ScoreEntry, NODE_OIL_RATE,
-  deriveControlNodes, resolveNode,
-} from './territory';
 import { RemotePlayers } from './remoteplayers';
 import { WorldMap } from './worldmap';
 import { Accounts, Account } from './net/accounts';
-import { FACTIONS, NO_FACTION, factionColor, factionName, sameFaction } from './teams';
+import { FACTIONS, NO_FACTION, factionColor, factionName, forcedFaction, sameFaction } from './teams';
 import {
   Claims, OIL_CAP, OIL_PER_BARREL, MAX_SHIELD_HP, claimProtected, damageShield,
   feedOil, shieldUp,
 } from './claims';
+import {
+  Regions, CaptureMeters, REGION_COUNT, regionOf, regionCenter, capitalFaction,
+  isCapital, CONTROL_RADIUS,
+} from './regions';
+import {
+  newSeason, tickSeasonClock, seasonTimeLeft, seasonExpired, deadlineWinner,
+  advanceSeason,
+} from './season';
 import { Sky, WATER_FOG_COLOR } from './sky';
 import { Survival } from './survival';
 import { createAtlas, createCrackTextures } from './textures';
@@ -203,11 +207,24 @@ let openClaim: { x: number; y: number; z: number } | null = null;
 const shieldGroup = new THREE.Group();
 scene.add(shieldGroup);
 const shieldMeshes = new Map<number, THREE.LineSegments>();
-// World map (M key): biome base + faction claims + oil nodes + waypoints.
+// Region board (Phase 1/2): owner faction id per region + capture meters.
+// Server-authoritative in MP (net.onRegions); offline the local Regions sim is
+// authoritative (identical pure module), driven by the local player's presence.
+const localRegions = new Regions();
+let regionOwners: number[] = localRegions.ownerList();
+let regionMeters: CaptureMeters = localRegions.meters();
+// Seasons (Phase 5): server-authoritative in MP (net.onSeason); offline the
+// local season clock is authoritative. The badge count is shown in the HUD.
+const localSeason = newSeason();
+let seasonNumber = localSeason.number;
+let seasonLeft = seasonTimeLeft(localSeason);
+let localSeasonsWon = 0;
+// World map (M key): region board + claims + capture meters + waypoints.
 const worldMap = new WorldMap(scene, camera, world.terrain, claims, {
   player: () => ({ x: player.pos.x, z: player.pos.z, yaw: player.yaw }),
   faction: () => localFaction,
-  nodes: () => territoryNodes,
+  regions: () => regionOwners,
+  captureMeters: () => regionMeters,
 });
 let pilotingShipId: number | null = null;
 let ridingShipId: number | null = null;
@@ -219,9 +236,6 @@ let openTurret: { x: number; y: number; z: number } | null = null;
 let shipSteerAcc = 0;       // throttle for shipSteer sends
 let cannonCooldown = 0;     // local cannon fire-rate gate
 let lastSneak = false;      // sneak rising-edge (Shift docks while piloting)
-// Territory HUD state.
-let territoryNodes: NodeStatus[] = [];
-let territoryScores: ScoreEntry[] = [];
 let openMachine: { x: number; y: number; z: number } | null = null;
 let openChest: { x: number; y: number; z: number } | null = null;
 let lastChestVersion = -1;   // last version pushed/loaded — gates the live sync
@@ -256,24 +270,44 @@ mapBtn.addEventListener('click', () => {
 });
 app.appendChild(mapBtn);
 
-// Territory objective HUD: a standings panel (top-left) + a win banner.
-const territoryEl = document.createElement('div');
-territoryEl.className = 'mc-font';
-territoryEl.style.cssText =
-  'position:absolute;top:6px;left:8px;font-size:12px;z-index:10;pointer-events:none;' +
-  'text-shadow:1px 1px 0 #000;line-height:1.5;display:none;';
-app.appendChild(territoryEl);
-const winBannerEl = document.createElement('div');
-winBannerEl.className = 'mc-font';
-winBannerEl.style.cssText =
-  'position:absolute;top:18%;left:50%;transform:translateX(-50%);font-size:26px;z-index:11;' +
-  'pointer-events:none;text-shadow:2px 2px 0 #000;color:#ffd84a;display:none;text-align:center;';
-app.appendChild(winBannerEl);
-// 3D node beacons (a tall translucent pillar per control point).
-const beaconGroup = new THREE.Group();
-scene.add(beaconGroup);
-const beaconMeshes = new Map<number, THREE.Mesh>();
-const beaconGeo = new THREE.BoxGeometry(2, 40, 2);
+// War HUD (Phase 2): a top-centre region tug bar (Crimson vs Azure region
+// counts), a capture-meter bar shown while you stand on a contested control
+// point, and a big capture/win banner that flashes on major events.
+const regionWarEl = document.createElement('div');
+regionWarEl.className = 'mc-font';
+regionWarEl.style.cssText =
+  'position:absolute;top:6px;left:50%;transform:translateX(-50%);z-index:10;' +
+  'pointer-events:none;text-align:center;font-size:13px;text-shadow:1px 1px 0 #000;' +
+  'width:340px;display:none;';
+app.appendChild(regionWarEl);
+const seasonEl = document.createElement('div');
+seasonEl.className = 'mc-font';
+seasonEl.style.cssText =
+  'position:absolute;top:38px;left:50%;transform:translateX(-50%);z-index:10;' +
+  'pointer-events:none;text-align:center;font-size:11px;color:#cfe0ff;' +
+  'text-shadow:1px 1px 0 #000;width:340px;display:none;';
+app.appendChild(seasonEl);
+const captureBarEl = document.createElement('div');
+captureBarEl.className = 'mc-font';
+captureBarEl.style.cssText =
+  'position:absolute;top:64px;left:50%;transform:translateX(-50%);z-index:10;' +
+  'pointer-events:none;text-align:center;font-size:14px;text-shadow:1px 1px 0 #000;' +
+  'width:300px;display:none;';
+app.appendChild(captureBarEl);
+const regionBannerEl = document.createElement('div');
+regionBannerEl.className = 'mc-font';
+regionBannerEl.style.cssText =
+  'position:absolute;top:26%;left:50%;transform:translateX(-50%);font-size:34px;z-index:12;' +
+  'pointer-events:none;text-shadow:3px 3px 0 #000;text-align:center;display:none;' +
+  'letter-spacing:1px;white-space:nowrap;';
+app.appendChild(regionBannerEl);
+let regionBannerTimer = 0;
+function showRegionBanner(text: string, color: string): void {
+  regionBannerEl.textContent = text;
+  regionBannerEl.style.color = color;
+  regionBannerEl.style.display = 'block';
+  regionBannerTimer = 3.2;
+}
 // The local player's faction: server-assigned in MP (onWelcome), or a single
 // local faction offline so shields/ownership/colors still work in single-player.
 let localFaction = FACTIONS[0].id;
@@ -305,10 +339,12 @@ function refreshNetInfo(): void {
     `<span style="color:${factionCss(localFaction)}">■ ${factionName(localFaction)}</span>  `;
   const modeBadge = localMode === 'survival' ? '' :
     `<span style="color:#ffe27a">[${localMode.toUpperCase()}]</span>  `;
+  // Permanent "Seasons Won" badge (Phase 5): a gold star + count.
+  const wonBadge = localSeasonsWon > 0 ? `<span style="color:#ffd84a">★${localSeasonsWon}</span>  ` : '';
   if (net.connected) {
-    netinfoEl.innerHTML = `${modeBadge}${badge}${net.username}   ${net.remotes.size + 1} online`;
+    netinfoEl.innerHTML = `${wonBadge}${modeBadge}${badge}${net.username}   ${net.remotes.size + 1} online`;
   } else if (authed) {
-    netinfoEl.innerHTML = `${badge}${authedName}   (offline)`;
+    netinfoEl.innerHTML = `${wonBadge}${badge}${authedName}   (offline)`;
   } else {
     netinfoEl.innerHTML = '';
   }
@@ -503,6 +539,12 @@ function removeShieldDome(id: number): void {
   shieldGroup.remove(m);
   (m.material as THREE.Material).dispose(); // geometry is shared — never dispose it
   shieldMeshes.delete(id);
+}
+/** Drop every base (claim + its dome). Used on a season reset + disconnect. */
+function clearAllBases(): void {
+  for (const id of [...shieldMeshes.keys()]) removeShieldDome(id);
+  claims.clear();
+  forceCloseClaim();
 }
 function updateShieldDomes(_dt: number): void {
   const live = new Set<number>();
@@ -705,6 +747,52 @@ function saveLocalAccounts(): void {
   try { localStorage.setItem('voxelon.accounts', JSON.stringify(localAccounts.toJSON())); } catch { /* ignore */ }
 }
 
+// --- Faction picker (register only) ----------------------------------------
+// On first registration the player PICKS a side. Offline we know the local
+// account counts, so we enforce the >20% imbalance rule right here (the chosen
+// button is forced to the weaker side). Online the server is the authority: we
+// send the pick and `welcome` reports the side we actually landed on (which may
+// be overridden if a side was full). LOUD faction colors so the choice pops.
+const factionPickEl = document.getElementById('faction-pick')!;
+const factionPickBtns = document.getElementById('faction-pick-btns')!;
+const factionPickNote = document.getElementById('faction-pick-note')!;
+let chosenFaction = FACTIONS[0].id;
+const factionOptEls = new Map<number, HTMLElement>();
+for (const f of FACTIONS) {
+  const el = document.createElement('div');
+  el.className = 'faction-opt mc-font';
+  el.style.color = factionCss(f.id);
+  el.textContent = f.name;
+  el.addEventListener('click', () => {
+    if (el.classList.contains('forced-off')) return;
+    chosenFaction = f.id;
+    refreshFactionPicker();
+  });
+  factionPickBtns.appendChild(el);
+  factionOptEls.set(f.id, el);
+}
+/** Offline-only imbalance gate: returns the side the player is forced onto, or
+ *  null when they may pick freely. (Online, the server decides.) */
+function offlineForced(): number | null {
+  if (net.socketOpen) return null; // server enforces online
+  const counts: Record<number, number> = {};
+  for (const f of FACTIONS) counts[f.id] = 0;
+  for (const a of localAccounts.list()) if (counts[a.faction] !== undefined) counts[a.faction]++;
+  return forcedFaction(counts);
+}
+function refreshFactionPicker(): void {
+  const forced = offlineForced();
+  if (forced !== null) chosenFaction = forced;
+  for (const f of FACTIONS) {
+    const el = factionOptEls.get(f.id)!;
+    el.classList.toggle('selected', f.id === chosenFaction);
+    el.classList.toggle('forced-off', forced !== null && f.id !== forced);
+  }
+  factionPickNote.textContent = forced !== null
+    ? `${factionName(forced)} needs reinforcements — you're assigned there to keep it fair.`
+    : 'Teams may rebalance you if a side fills up.';
+}
+
 function onAuthSuccess(username: string): void {
   authed = true;
   authedName = username;
@@ -723,13 +811,13 @@ function attemptAuth(mode: 'login' | 'register', retries = 12): void {
   if (net.socketOpen) {
     // Online: the server is the authority.
     authStatus.textContent = mode === 'register' ? 'Registering…' : 'Logging in…';
-    if (mode === 'register') net.sendRegister(username, password);
+    if (mode === 'register') net.sendRegister(username, password, chosenFaction);
     else net.sendLogin(username, password);
   } else if (net.offline) {
     // Offline single-player: verify against the local account store.
     const res = mode === 'register'
       ? localAccounts.register(username, password, localHash,
-          `${Math.floor(Math.random() * 1e9).toString(16)}${Date.now().toString(16)}`)
+          `${Math.floor(Math.random() * 1e9).toString(16)}${Date.now().toString(16)}`, chosenFaction)
       : localAccounts.login(username, password, localHash);
     if (!res.ok || !res.account) { authErr.textContent = res.error ?? 'Failed'; return; }
     if (mode === 'register') saveLocalAccounts();
@@ -771,6 +859,8 @@ function setAuthMode(mode: 'register' | 'login'): void {
     submitBtn.textContent = 'Register';
     authUser.readOnly = true;          // names are random-only on register
     rollBtn.style.display = '';
+    factionPickEl.style.display = 'flex'; // pick a side when registering
+    refreshFactionPicker();
     authToggle.innerHTML = 'Already have an account? <a id="toggle-link">Log in</a>';
     if (!authUser.value) rollUsername();
   } else {
@@ -778,6 +868,7 @@ function setAuthMode(mode: 'register' | 'login'): void {
     authUser.readOnly = false;         // type your existing name to log in
     authUser.value = '';
     rollBtn.style.display = 'none';
+    factionPickEl.style.display = 'none'; // existing accounts keep their side
     authToggle.innerHTML = 'Need an account? <a id="toggle-link">Register</a>';
     authUser.focus();
   }
@@ -934,6 +1025,7 @@ net.onWelcome = (me) => {
   onAuthSuccess(me.username);
   // Adopt the server-assigned spawn so we line up with the server's record.
   localFaction = me.faction;
+  localSeasonsWon = me.seasonsWon ?? 0; // authoritative badge from the account
   player.pos.set(me.x, me.y, me.z);
   player.vel.set(0, 0, 0);
   player.health = me.health;
@@ -1055,9 +1147,28 @@ net.onTurretFire = (x, y, z, tx, ty, tz) => {
   particles.poof(tx, ty, tz);
   audio.gun(new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
 };
-net.onTerritory = (nodes, scores) => {
-  territoryNodes = nodes;
-  territoryScores = scores;
+net.onRegions = (owners) => {
+  if (Array.isArray(owners) && owners.length) regionOwners = owners;
+};
+net.onRegionMeters = (capFaction, capProgress) => {
+  regionMeters = { faction: capFaction, progress: capProgress };
+};
+net.onRegionCapture = (region, faction, from) => {
+  announceCapture(region, faction, from);
+};
+net.onRegionWin = (faction) => {
+  showRegionBanner(`${factionName(faction).toUpperCase()} WINS THE WAR!`, factionCss(faction));
+  showKill('★ SEASON WON ★', factionName(faction));
+};
+net.onSeason = (number, timeLeft) => { seasonNumber = number; seasonLeft = timeLeft; };
+net.onSeasonEnd = (winner, number) => {
+  // The server already reset the board + cleared bases authoritatively; mirror it
+  // locally (drop claim domes) and flash the result. The winning side's badge is
+  // refreshed on the next welcome, but bump it now for instant feedback.
+  clearAllBases();
+  if (winner === localFaction && winner >= 0) localSeasonsWon++;
+  announceSeasonEnd(winner, number);
+  refreshNetInfo();
 };
 net.onClaim = (claim) => {
   claims.set(claim); // adopt authoritative state (re-indexes its chunks)
@@ -1074,7 +1185,7 @@ net.onDisconnect = () => {
   player.damageSink = undefined;
   survival.enableRegen = true;
   // Drop all server-owned warfare state so its meshes/markers don't linger
-  // (shipModels/turretModels/beacons reconcile to the now-empty sets).
+  // (shipModels/turretModels reconcile to the now-empty sets).
   ships.clear();
   shipTargets.clear();
   shipDelta.clear();
@@ -1082,8 +1193,6 @@ net.onDisconnect = () => {
   pilotingShipId = null;
   ridingShipId = null;
   openShip = null;
-  territoryNodes = [];
-  territoryScores = [];
   claims.clear();
   for (const id of [...shieldMeshes.keys()]) removeShieldDome(id);
   forceCloseClaim();
@@ -1093,8 +1202,9 @@ interaction.onEdit = (x, y, z, b) => {
   // Placing a machine block creates its local entity (prediction offline + MP).
   const mt = machineTypeForBlock(b);
   if (mt !== null) machines.place(x, y, z, mt);
-  // Faction Core: offline we own the claim sim (server owns it in MP). Placing
-  // a Core claims a 3×3 footprint; breaking one (owner) dissolves its claim.
+  // Base Core: offline we own the claim sim (server owns it in MP). Placing a
+  // Core founds a base (3×3 footprint) — only in owned territory (Phase 3);
+  // breaking one (owner) dissolves its claim.
   if (!net.connected) {
     if (b === Block.Core) claims.create(localFaction, x, y, z, worldTimeLocal);
     else if (b === Block.Air) {
@@ -1104,14 +1214,25 @@ interaction.onEdit = (x, y, z, b) => {
   }
   net.sendEdit(x, y, z, b);
 };
+// A base Core may only be placed in a region your faction controls (Phase 3) —
+// mirrors the server so the client never mispredicts an illegal base, online or
+// off. Other blocks are unrestricted here.
+interaction.canPlace = (x, _y, z, block) => {
+  if (block !== Block.Core) return true;
+  if (sameFaction(regionOwners[regionOf(x, z)] ?? NO_FACTION, localFaction)) return true;
+  showNotice('You can only build a base in territory your faction controls!');
+  return false;
+};
 // Block edits inside an enemy faction's protected claim (mirrors the server so
 // the client never mispredicts a break/place it isn't allowed to make).
 interaction.canEdit = (x, y, z) => {
   const c = claims.at(x, z);
   if (!c || sameFaction(localFaction, c.faction)) return true;
-  // Enemies can never touch the Core block; otherwise blocked while protected.
+  // Enemies can never touch the Core block; otherwise blocked while protected —
+  // UNLESS your faction owns the region the base sits in, which opens it (Phase 3).
   if (Math.floor(x) === c.coreX && Math.floor(y) === c.coreY && Math.floor(z) === c.coreZ) return false;
-  return !claimProtected(c, worldTimeLocal);
+  const ownsRegion = sameFaction(regionOwners[regionOf(x, z)] ?? NO_FACTION, localFaction);
+  return ownsRegion || !claimProtected(c, worldTimeLocal);
 };
 net.connect();
 
@@ -1475,73 +1596,132 @@ function snapToDeck(ship: ShipState): void {
   }
 }
 
-// Offline territory: derive nodes + resolve control so single-player still has a
-// live objective + HUD (in MP the server is authoritative). No score race — oil
-// nodes are pure income that fuels claims.
-const localNodes = deriveControlNodes((x, z) => world.terrain.oilRichness(x, z));
-function updateTerritoryOffline(dt: number): void {
+// --- Region war (Phase 2): capture HUD + offline sim -------------------------
+
+/** Friendly region label: a column letter + row number (e.g. "C4"), or CAPITAL. */
+function regionLabel(i: number): string {
+  if (isCapital(i)) return capitalFaction(i) === localFaction ? 'OUR CAPITAL' : 'ENEMY CAPITAL';
+  const col = i % 6, row = Math.floor(i / 6);
+  return `${String.fromCharCode(65 + col)}${row + 1}`;
+}
+
+/** Flash a banner + killfeed line for a region flip (loud + visual for kids). */
+function announceCapture(region: number, faction: number, from: number): void {
+  const label = regionLabel(region);
+  if (faction === localFaction) showRegionBanner(`WE CAPTURED ${label}!`, factionCss(faction));
+  else if (from === localFaction) showRegionBanner(`WE LOST ${label}!`, '#ff6a5a');
+  showKill(`${factionName(faction)} took`, label);
+}
+
+/** Offline single-player: the local Regions sim IS authoritative (same pure
+ *  module the server runs), driven by the local player's presence. */
+function updateRegionsOffline(dt: number): void {
   const presence = [{ faction: localFaction, x: player.pos.x, z: player.pos.z, dead: player.dead }];
-  const nodesByFaction = new Map<number, number>();
-  territoryNodes = localNodes.map((n) => {
-    const st = resolveNode(n, presence);
-    if (st.faction >= 0) nodesByFaction.set(st.faction, (nodesByFaction.get(st.faction) ?? 0) + 1);
-    return st;
-  });
-  // Oil income tops up the local faction's claims (offline parity with M20).
-  for (const c of claims.list()) {
-    const cnt = nodesByFaction.get(c.faction) ?? 0;
-    if (cnt > 0) c.oil = Math.min(OIL_CAP, c.oil + cnt * NODE_OIL_RATE * dt);
+  const res = localRegions.tick(presence, dt);
+  for (const ev of res.captured) announceCapture(ev.region, ev.faction, ev.from);
+  if (res.winner >= 0) {
+    // Taking the enemy capital wins the season instantly (Phase 5).
+    endLocalSeason(res.winner);
+    return;
   }
-  // Standings = live node holdings per faction.
-  territoryScores = [...nodesByFaction.entries()]
-    .map(([f, cnt]) => ({ name: factionName(f), score: cnt }));
+  regionOwners = localRegions.ownerList();
+  regionMeters = localRegions.meters();
 }
 
-const myFactionName = () => factionName(localFaction);
-function updateTerritoryHud(): void {
-  if (!territoryNodes.length) { territoryEl.style.display = 'none'; winBannerEl.style.display = 'none'; return; }
-  winBannerEl.style.display = 'none'; // no win banner anymore
-  territoryEl.style.display = 'block';
-  // Per-faction node count drives the oil-income readout (nodes × rate).
-  const held = territoryNodes.filter((n) => n.faction === localFaction).length;
-  const contested = territoryNodes.filter((n) => n.contested).length;
-  const lines = ['◆ OIL FIELDS — control nodes to fuel your shields'];
-  lines.push(`Your faction holds ${held}/${territoryNodes.length}` +
-    `  ·  +${(held * NODE_OIL_RATE).toFixed(0)} oil/s` +
-    (contested ? `  ·  ${contested} contested` : ''));
-  for (const s of territoryScores.slice(0, 5)) {
-    const me = s.name === myFactionName();
-    lines.push(`${me ? '▶ ' : '  '}${s.name}: ${s.score} node${s.score === 1 ? '' : 's'}`);
+/** The always-on War HUD: a region tug bar + the control-point status of the
+ *  region you're standing on (capturing / defending / neutral). */
+function updateRegionWarHud(): void {
+  const a = FACTIONS[0], b = FACTIONS[1];
+  let ca = 0, cb = 0;
+  for (let i = 0; i < regionOwners.length; i++) {
+    if (regionOwners[i] === a.id) ca++; else if (regionOwners[i] === b.id) cb++;
   }
-  territoryEl.innerHTML = lines.map((l, i) =>
-    `<div style="color:${i === 0 ? '#ffd84a' : '#fff'}">${l}</div>`).join('');
+  regionWarEl.style.display = 'block';
+  const aPct = (ca / Math.max(1, ca + cb)) * 100;
+  regionWarEl.innerHTML =
+    `<div style="margin-bottom:2px">⚔ <span style="color:${factionCss(a.id)}">${a.name} ${ca}</span>` +
+    ` &nbsp;·&nbsp; <span style="color:${factionCss(b.id)}">${cb} ${b.name}</span></div>` +
+    `<div style="height:9px;background:${factionCss(b.id)};border:1px solid #000;overflow:hidden">` +
+    `<div style="height:100%;width:${aPct.toFixed(1)}%;background:${factionCss(a.id)}"></div></div>`;
+
+  // Control-point status of the region under the player.
+  const ri = regionOf(player.pos.x, player.pos.z);
+  const c = regionCenter(ri);
+  const onPoint = Math.hypot(player.pos.x - c.x, player.pos.z - c.z) <= CONTROL_RADIUS;
+  if (!onPoint || ri >= REGION_COUNT) { captureBarEl.style.display = 'none'; return; }
+  captureBarEl.style.display = 'block';
+  const owner = regionOwners[ri];
+  const capF = regionMeters.faction[ri] ?? NO_FACTION;
+  const frac = Math.max(0, Math.min(1, regionMeters.progress[ri] ?? 0));
+  if (capF !== NO_FACTION && frac > 0.001) {
+    const label = capF === localFaction
+      ? `CAPTURING ${regionLabel(ri)}`
+      : owner === localFaction ? `DEFEND ${regionLabel(ri)}!` : `${factionName(capF)} TAKING ${regionLabel(ri)}`;
+    captureBarEl.innerHTML =
+      `<div style="color:${factionCss(capF)}">${label}</div>` +
+      `<div style="height:13px;background:rgba(0,0,0,0.6);border:1px solid #000">` +
+      `<div style="height:100%;width:${(frac * 100).toFixed(0)}%;background:${factionCss(capF)}"></div></div>`;
+  } else {
+    const who = owner === NO_FACTION ? 'Neutral' : factionName(owner) + (owner === localFaction ? ' (ours)' : '');
+    const col = owner === NO_FACTION ? '#9fb0c4' : factionCss(owner);
+    captureBarEl.innerHTML = `<div style="color:${col}">${isCapital(ri) ? '★ ' : ''}${regionLabel(ri)} — ${who}</div>`;
+  }
 }
 
-function updateTerritoryBeacons(): void {
-  const seen = new Set<number>();
-  for (const n of territoryNodes) {
-    seen.add(n.id);
-    let m = beaconMeshes.get(n.id);
-    if (!m) {
-      m = new THREE.Mesh(beaconGeo, new THREE.MeshBasicMaterial({
-        transparent: true, opacity: 0.22, depthWrite: false,
-      }));
-      const gy = world.terrain.height(Math.round(n.x), Math.round(n.z));
-      m.position.set(n.x, gy + 20, n.z);
-      beaconGroup.add(m);
-      beaconMeshes.set(n.id, m);
-    }
-    // Beacon tinted by the controlling faction (gold if contested, grey if open).
-    const color = n.contested ? 0xffd84a : n.faction >= 0 ? factionColor(n.faction) : 0x8090a0;
-    (m.material as THREE.MeshBasicMaterial).color.setHex(color);
+// --- Seasons (Phase 5) -------------------------------------------------------
+
+/** Human-readable "Xd Yh" / "Ym Zs" countdown for the season clock. */
+function formatSeasonLeft(secs: number): string {
+  const s = Math.max(0, Math.floor(secs));
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h left`;
+  if (h > 0) return `${h}h ${m}m left`;
+  return `${m}m ${s % 60}s left`;
+}
+
+function updateSeasonHud(): void {
+  seasonEl.style.display = 'block';
+  seasonEl.innerHTML = `Season ${seasonNumber} · ${formatSeasonLeft(seasonLeft)}`;
+}
+
+/** Flash the season result + clear the old war (banner is loud for kids). */
+function announceSeasonEnd(winner: number, number: number): void {
+  if (winner >= 0) {
+    showRegionBanner(`SEASON ${number}: ${factionName(winner).toUpperCase()} WINS! ★`, factionCss(winner));
+    showKill(`★ Season ${number} won by`, factionName(winner));
+  } else {
+    showRegionBanner(`SEASON ${number}: STALEMATE — FRESH WAR!`, '#cfe0ff');
   }
-  for (const [id, m] of beaconMeshes) {
-    if (!seen.has(id)) {
-      beaconGroup.remove(m);
-      (m.material as THREE.MeshBasicMaterial).dispose();
-      beaconMeshes.delete(id);
-    }
+}
+
+/** Offline single-player: the local season clock is authoritative. Advance it,
+ *  end the season at the deadline (most regions wins), and keep the HUD synced. */
+function updateSeasonOffline(dt: number): void {
+  tickSeasonClock(localSeason, dt);
+  seasonNumber = localSeason.number;
+  seasonLeft = seasonTimeLeft(localSeason);
+  if (seasonExpired(localSeason)) endLocalSeason(deadlineWinner(localRegions.counts()));
+}
+
+/** Reset the war offline: award the local badge, clear bases, reset the board,
+ *  and start the next season. */
+function endLocalSeason(winner: number): void {
+  const ended = localSeason.number;
+  if (winner === localFaction && winner >= 0) {
+    localSeasonsWon++;
+    localAccounts.awardSeasonWin(winner);
+    saveLocalAccounts();
+    refreshNetInfo();
   }
+  clearAllBases();
+  localRegions.reset();
+  regionOwners = localRegions.ownerList();
+  regionMeters = localRegions.meters();
+  advanceSeason(localSeason);
+  seasonNumber = localSeason.number;
+  seasonLeft = seasonTimeLeft(localSeason);
+  announceSeasonEnd(winner, ended);
 }
 
 function frame(): void {
@@ -1783,12 +1963,20 @@ function frame(): void {
     // bar (the server is authoritative and reconciles on open/collect).
     machines.update(dt);
     machineModels.update(dt); // animate drills/pumpjacks
-    // Warfare: render ships/turrets, run the territory objective + its HUD.
+    // Warfare: render ships/turrets, run the region war + its HUD.
     shipModels.update(ships.list());
     turretModels.update(dt);
-    if (!net.connected) updateTerritoryOffline(dt);
-    updateTerritoryHud();
-    updateTerritoryBeacons();
+    // Region war (Phase 2): offline the local sim is authoritative; the War HUD
+    // reads the latest board + meters (server-fed online, local sim offline).
+    if (!net.connected) updateRegionsOffline(dt);
+    updateRegionWarHud();
+    // Seasons (Phase 5): offline the local clock is authoritative.
+    if (!net.connected) updateSeasonOffline(dt);
+    updateSeasonHud();
+    if (regionBannerTimer > 0) {
+      regionBannerTimer -= dt;
+      if (regionBannerTimer <= 0) regionBannerEl.style.display = 'none';
+    }
     // Land claims: advance the grace/shield clock; offline this is the
     // authoritative claim sim (MP the server ticks + reconciles via 'claims').
     worldTimeLocal += dt;
