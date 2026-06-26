@@ -54,6 +54,10 @@ import {
   newSeason, tickSeasonClock, seasonTimeLeft, seasonExpired, deadlineWinner,
   advanceSeason,
 } from './season';
+import {
+  Politics, FactionPolitics, MAX_TAX, SHIELD_REFILL_COST, SHIELD_REFILL_OIL,
+  SUPPLY_CRATE_COST, FACTION_BUFF_COST,
+} from './politics';
 import { Sky, WATER_FOG_COLOR } from './sky';
 import { Survival } from './survival';
 import { createAtlas, createCrackTextures } from './textures';
@@ -219,6 +223,11 @@ const localSeason = newSeason();
 let seasonNumber = localSeason.number;
 let seasonLeft = seasonTimeLeft(localSeason);
 let localSeasonsWon = 0;
+// Politics (Phase 6): server-authoritative in MP (net.onPolitics); offline the
+// local Politics is authoritative (and the solo player is auto-elected Commander).
+const localPolitics = new Politics();
+let factionPolitics: FactionPolitics[] = localPolitics.serialize();
+let politicsOpen = false;
 // World map (M key): region board + claims + capture meters + waypoints.
 const worldMap = new WorldMap(scene, camera, world.terrain, claims, {
   player: () => ({ x: player.pos.x, z: player.pos.z, yaw: player.yaw }),
@@ -287,6 +296,13 @@ seasonEl.style.cssText =
   'pointer-events:none;text-align:center;font-size:11px;color:#cfe0ff;' +
   'text-shadow:1px 1px 0 #000;width:340px;display:none;';
 app.appendChild(seasonEl);
+const rallyEl = document.createElement('div');
+rallyEl.className = 'mc-font';
+rallyEl.style.cssText =
+  'position:absolute;top:54px;left:50%;transform:translateX(-50%);z-index:10;' +
+  'pointer-events:none;text-align:center;font-size:11px;color:#ffd84a;' +
+  'text-shadow:1px 1px 0 #000;width:340px;display:none;';
+app.appendChild(rallyEl);
 const captureBarEl = document.createElement('div');
 captureBarEl.className = 'mc-font';
 captureBarEl.style.cssText =
@@ -948,14 +964,21 @@ document.addEventListener('pointerlockchange', () => {
   if (!worldReady) return;
   if (input.locked) {
     enterPlaying(); // entered or returned to the game
-  } else if (!player.dead && !invUI.open && !worldMap.open && screen === 'playing') {
+  } else if (!player.dead && !invUI.open && !worldMap.open && !politicsOpen && screen === 'playing') {
     enterPause(); // Esc / lost focus while playing -> pause, not the title
   }
 });
 document.addEventListener('keydown', (e) => {
+  // 'G' toggles the faction-government panel during play (ignored while typing).
+  if ((e.code === 'KeyG') && screen === 'playing' && !invUI.open && !worldMap.open &&
+      !(document.activeElement instanceof HTMLInputElement)) {
+    togglePolitics();
+    return;
+  }
   if (e.code !== 'Escape') return;
   if (worldMap.open) { worldMap.hide(); input.lock(); }
   else if (invUI.open) { invUI.hide(); input.lock(); }
+  else if (politicsOpen) { hidePolitics(); input.lock(); }
   else if (screen === 'paused' && !player.dead) input.lock(); // Esc resumes from pause
 });
 
@@ -1161,6 +1184,17 @@ net.onRegionWin = (faction) => {
   showKill('★ SEASON WON ★', factionName(faction));
 };
 net.onSeason = (number, timeLeft) => { seasonNumber = number; seasonLeft = timeLeft; };
+net.onPolitics = (factions) => {
+  if (Array.isArray(factions) && factions.length) factionPolitics = factions;
+  if (politicsOpen) renderPolitics();
+  updateRallyHud();
+};
+net.onCommanderElected = (faction, commander) => {
+  showKill('⚑ Commander', `${factionName(faction)}: ${commander}`);
+  if (faction === localFaction && commander === authedName) {
+    showRegionBanner('YOU ARE THE COMMANDER! ⚑', factionCss(faction));
+  }
+};
 net.onSeasonEnd = (winner, number) => {
   // The server already reset the board + cleared bases authoritatively; mirror it
   // locally (drop claim domes) and flash the result. The winning side's badge is
@@ -1718,10 +1752,261 @@ function endLocalSeason(winner: number): void {
   localRegions.reset();
   regionOwners = localRegions.ownerList();
   regionMeters = localRegions.meters();
+  localPolitics.reset(worldTimeLocal); // a new season dissolves the government (Phase 6)
+  factionPolitics = localPolitics.serialize();
   advanceSeason(localSeason);
   seasonNumber = localSeason.number;
   seasonLeft = seasonTimeLeft(localSeason);
   announceSeasonEnd(winner, ended);
+}
+
+// --- Politics panel (Phase 6): faction government UI -------------------------
+const politicsEl = document.createElement('div');
+politicsEl.style.cssText =
+  'position:absolute;inset:0;display:none;z-index:30;align-items:center;' +
+  'justify-content:center;background:rgba(6,8,14,0.8);';
+const politicsPanel = document.createElement('div');
+politicsPanel.className = 'mc-font';
+politicsPanel.style.cssText =
+  'background:#11141c;border:2px solid #2a3550;padding:16px 18px;width:440px;max-height:86vh;' +
+  'overflow:auto;color:#dfe6f2;text-shadow:none;font-size:13px;line-height:1.6;';
+politicsEl.appendChild(politicsPanel);
+app.appendChild(politicsEl);
+
+const politicsBtn = document.createElement('button');
+politicsBtn.className = 'mc-font';
+politicsBtn.textContent = '⚑ Faction (G)';
+politicsBtn.style.cssText =
+  'position:absolute;bottom:8px;right:120px;z-index:12;font-size:12px;padding:6px 10px;' +
+  'cursor:pointer;border:2px solid;border-color:#fff #555 #555 #fff;background:#6b6b6b;' +
+  'color:#fff;text-shadow:none;';
+politicsBtn.addEventListener('click', () => {
+  if (player.dead) return;
+  if (politicsOpen) { hidePolitics(); input.lock(); return; }
+  if (invUI.open) invUI.hide();
+  if (worldMap.open) worldMap.hide();
+  showPolitics();
+});
+app.appendChild(politicsBtn);
+
+function myPolitics(): FactionPolitics | undefined {
+  return factionPolitics.find((p) => p.faction === localFaction);
+}
+function iAmLeader(): boolean {
+  const p = myPolitics();
+  return !!p && (p.commander === authedName || p.officers.includes(authedName));
+}
+function iAmCommander(): boolean { return myPolitics()?.commander === authedName; }
+
+/** Offline single-player: the local Politics is authoritative; make the solo
+ *  player their faction's Commander so the toolset is usable. */
+function ensureOfflineCommander(): void {
+  if (net.connected || !authedName) return;
+  const p = localPolitics.get(localFaction);
+  if (p && !p.commander) {
+    localPolitics.nominate(localFaction, authedName, '');
+    localPolitics.tally(localFaction, worldTimeLocal);
+    factionPolitics = localPolitics.serialize();
+  }
+}
+/** Run an offline politics mutation, then resync + re-render. */
+function politicsOffline(fn: (now: number) => void): void {
+  fn(worldTimeLocal);
+  factionPolitics = localPolitics.serialize();
+  renderPolitics();
+  updateRallyHud();
+}
+
+function togglePolitics(): void { politicsOpen ? hidePolitics() : showPolitics(); }
+function showPolitics(): void {
+  ensureOfflineCommander();
+  politicsOpen = true;
+  politicsEl.style.display = 'flex';
+  if (input.locked) document.exitPointerLock();
+  renderPolitics();
+}
+function hidePolitics(): void { politicsOpen = false; politicsEl.style.display = 'none'; }
+
+function fmtTime(secs: number): string {
+  const s = Math.max(0, Math.floor(secs));
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600);
+  return d > 0 ? `${d}d ${h}h` : `${h}h ${Math.floor((s % 3600) / 60)}m`;
+}
+
+/** The rally HUD line (visible to all members when a rally is set). */
+function updateRallyHud(): void {
+  const p = myPolitics();
+  if (!p || p.rally < 0) { rallyEl.style.display = 'none'; return; }
+  rallyEl.style.display = 'block';
+  const here = regionOf(player.pos.x, player.pos.z) === p.rally;
+  rallyEl.innerHTML = `⚑ RALLY: ${regionLabel(p.rally)}${here ? ' — FIGHT HERE (+buff)!' : ''}`;
+}
+
+function renderPolitics(): void {
+  const p = myPolitics();
+  if (!p) { politicsPanel.innerHTML = 'No faction.'; return; }
+  const leader = iAmLeader(), commander = iAmCommander();
+  const col = factionCss(localFaction);
+  const esc = (s: string): string => s.replace(/[&<>"]/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] ?? c));
+  const rows: string[] = [];
+  rows.push(`<div style="font-size:16px;color:${col};letter-spacing:1px;margin-bottom:6px">` +
+    `⚑ ${factionName(localFaction).toUpperCase()} GOVERNMENT</div>`);
+  rows.push(`Commander: <b style="color:${col}">${p.commander ? esc(p.commander) : '— vacant —'}</b>` +
+    (commander ? ' (you)' : ''));
+  rows.push(`Officers: ${p.officers.length ? p.officers.map(esc).join(', ') : 'none'}`);
+  rows.push(`Treasury: <b style="color:#ffd84a">${Math.floor(p.treasury)} oil</b>  ·  Tax: ${Math.round(p.taxRate * 100)}%`);
+  rows.push(`Rally: ${p.rally >= 0 ? regionLabel(p.rally) : 'none'}  ·  Election in ${fmtTime(p.electionEndsAt - worldTimeLocal)}`);
+  rows.push('<hr style="border-color:#2a3550">');
+
+  // Election: candidates + voting + self-nominate.
+  rows.push('<b>ELECTION</b>');
+  if (p.candidates.length) {
+    for (const c of p.candidates) {
+      const votes = Object.values(p.votes).filter((v) => v === c.user).length;
+      rows.push(`<div>${esc(c.user)}${c.party ? ` <span style="color:#9fb4cc">[${esc(c.party)}]</span>` : ''} · ${votes} vote(s) ` +
+        `<button data-act="vote" data-arg="${esc(c.user)}" class="pbtn">Vote</button></div>`);
+    }
+  } else rows.push('<div style="color:#9fb4cc">No candidates yet.</div>');
+  rows.push(`<div style="margin:4px 0"><input id="party-in" placeholder="party name (optional)" maxlength="18" ` +
+    `style="width:160px;background:#0c0f16;border:1px solid #2a3550;color:#dfe6f2;padding:4px"/> ` +
+    `<button data-act="nominate" class="pbtn">Nominate me</button></div>`);
+  rows.push('<hr style="border-color:#2a3550">');
+
+  // Anyone may donate oil barrels to the chest.
+  rows.push(`<button data-act="donate" class="pbtn">Donate oil barrels</button> ` +
+    `<button data-act="recall" class="pbtn">Vote to recall (${p.recalls.length})</button>`);
+
+  // Leader powers.
+  if (leader) {
+    rows.push('<hr style="border-color:#2a3550"><b>COMMAND</b>');
+    rows.push(`<div><button data-act="rally" class="pbtn">Rally HERE (${regionLabel(regionOf(player.pos.x, player.pos.z))})</button> ` +
+      `<button data-act="clearRally" class="pbtn">Clear rally</button></div>`);
+    rows.push(`<div style="margin-top:4px">Spend treasury: ` +
+      `<button data-act="spend" data-arg="shield" class="pbtn">Refill shield (${SHIELD_REFILL_COST})</button> ` +
+      `<button data-act="spend" data-arg="crate" class="pbtn">Supply crate (${SUPPLY_CRATE_COST})</button> ` +
+      `<button data-act="spend" data-arg="buff" class="pbtn">War buff (${FACTION_BUFF_COST})</button></div>`);
+    if (commander) {
+      rows.push(`<div style="margin-top:4px">Tax: ` +
+        [0, 0.1, 0.25].map((r) => `<button data-act="tax" data-arg="${r}" class="pbtn">${Math.round(r * 100)}%</button>`).join(' ') +
+        (MAX_TAX ? '' : '') + `</div>`);
+      // Appoint officers from online same-faction players.
+      const mates = [...net.remotes.values()]
+        .filter((r) => r.info.faction === localFaction && !p.officers.includes(r.info.username) && r.info.username !== p.commander);
+      if (mates.length) {
+        rows.push('<div style="margin-top:4px">Appoint Officer: ' +
+          mates.map((r) => `<button data-act="officer" data-arg="${esc(r.info.username)}" class="pbtn">${esc(r.info.username)}</button>`).join(' ') + '</div>');
+      }
+      if (p.officers.length) {
+        rows.push('<div style="margin-top:4px">Dismiss: ' +
+          p.officers.map((o) => `<button data-act="dismiss" data-arg="${esc(o)}" class="pbtn">${esc(o)} ✕</button>`).join(' ') + '</div>');
+      }
+    }
+  }
+
+  // Decision log.
+  if (p.log.length) {
+    rows.push('<hr style="border-color:#2a3550"><b>LOG</b>');
+    for (const e of p.log.slice(-6)) rows.push(`<div style="color:#9fb4cc;font-size:11px">${esc(e.by)}: ${esc(e.text)}</div>`);
+  }
+  rows.push('<div style="margin-top:8px"><button data-act="close" class="pbtn">Close (G)</button></div>');
+  politicsPanel.innerHTML = rows.join('');
+  for (const b of Array.from(politicsPanel.querySelectorAll('.pbtn'))) {
+    (b as HTMLElement).style.cssText =
+      'margin:2px;padding:3px 7px;cursor:pointer;border:1px solid #3a4666;background:#1c2335;color:#dfe6f2;font-size:11px;';
+  }
+}
+
+politicsPanel.addEventListener('click', (e) => {
+  const t = (e.target as HTMLElement).closest('.pbtn') as HTMLElement | null;
+  if (!t) return;
+  const act = t.getAttribute('data-act'), arg = t.getAttribute('data-arg') ?? '';
+  const here = regionOf(player.pos.x, player.pos.z);
+  const online = net.connected;
+  switch (act) {
+    case 'close': hidePolitics(); input.lock(); break;
+    case 'nominate': {
+      const party = (document.getElementById('party-in') as HTMLInputElement | null)?.value ?? '';
+      if (online) net.sendNominate(party);
+      else politicsOffline((now) => { localPolitics.nominate(localFaction, authedName, party); localPolitics.tally(localFaction, now); });
+      break;
+    }
+    case 'vote':
+      if (online) net.sendVote(arg);
+      else politicsOffline(() => localPolitics.vote(localFaction, authedName, arg));
+      break;
+    case 'rally':
+      if (online) net.sendSetRally(here);
+      else politicsOffline((now) => localPolitics.setRally(localFaction, authedName, here, now));
+      break;
+    case 'clearRally':
+      if (online) net.sendSetRally(-1);
+      else politicsOffline((now) => localPolitics.setRally(localFaction, authedName, -1, now));
+      break;
+    case 'tax':
+      if (online) net.sendSetTax(Number(arg));
+      else politicsOffline((now) => localPolitics.setTax(localFaction, authedName, Number(arg), now));
+      break;
+    case 'officer':
+      if (online) net.sendAppointOfficer(arg);
+      else politicsOffline((now) => localPolitics.appointOfficer(localFaction, authedName, arg, now));
+      break;
+    case 'dismiss':
+      if (online) net.sendDismissOfficer(arg);
+      else politicsOffline((now) => localPolitics.dismissOfficer(localFaction, authedName, arg, now));
+      break;
+    case 'recall':
+      if (online) net.sendRecall();
+      else politicsOffline((now) => localPolitics.recall(localFaction, authedName, 1, now));
+      break;
+    case 'donate': {
+      const have = inventory.countItem(Item.OilBarrel);
+      if (have <= 0) { showNotice('No oil barrels to donate.'); break; }
+      inventory.removeItem(Item.OilBarrel, have);
+      const oil = have * OIL_PER_BARREL;
+      if (online) net.sendDonate(oil);
+      else politicsOffline((now) => localPolitics.donate(localFaction, oil, authedName, now));
+      showNotice(`Donated ${have} oil barrel(s) to the war chest.`);
+      break;
+    }
+    case 'spend':
+      doCommanderSpend(arg as 'shield' | 'crate' | 'buff');
+      break;
+  }
+  if (online) showNotice('Sent.'); // server reconciles via the next politics broadcast
+});
+
+function doCommanderSpend(kind: 'shield' | 'crate' | 'buff'): void {
+  if (net.connected) {
+    if (kind === 'shield') {
+      const c = claims.at(player.pos.x, player.pos.z);
+      if (!c || !sameFaction(c.faction, localFaction)) { showNotice('Stand in your own base to refill its shield.'); return; }
+      net.sendCommanderSpend('shield', c.coreX, c.coreY, c.coreZ);
+    } else {
+      net.sendCommanderSpend(kind, player.pos.x, player.pos.y, player.pos.z);
+    }
+    return;
+  }
+  // Offline: apply the effect locally.
+  politicsOffline((now) => {
+    if (kind === 'shield') {
+      const c = claims.at(player.pos.x, player.pos.z);
+      if (!c || !sameFaction(c.faction, localFaction)) { showNotice('Stand in your own base to refill its shield.'); return; }
+      if (localPolitics.spendShieldRefill(localFaction, authedName, now)) c.oil = Math.min(OIL_CAP, c.oil + SHIELD_REFILL_OIL);
+    } else if (kind === 'crate') {
+      if (localPolitics.spendSupplyCrate(localFaction, authedName, now)) {
+        inventory.add(Item.Cannonball, 24); inventory.add(Item.OilBarrel, 10);
+      }
+    } else if (kind === 'buff') {
+      localPolitics.spendFactionBuff(localFaction, authedName, now);
+    }
+  });
+}
+
+/** Offline: advance the local government clock so elections still resolve. */
+function updatePoliticsOffline(): void {
+  localPolitics.tick(worldTimeLocal);
+  factionPolitics = localPolitics.serialize();
 }
 
 function frame(): void {
@@ -1973,6 +2258,9 @@ function frame(): void {
     // Seasons (Phase 5): offline the local clock is authoritative.
     if (!net.connected) updateSeasonOffline(dt);
     updateSeasonHud();
+    // Politics (Phase 6): offline advance the government clock; rally HUD always.
+    if (!net.connected) updatePoliticsOffline();
+    updateRallyHud();
     if (regionBannerTimer > 0) {
       regionBannerTimer -= dt;
       if (regionBannerTimer <= 0) regionBannerEl.style.display = 'none';

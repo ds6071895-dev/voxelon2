@@ -8,6 +8,7 @@ import type { MachineState, UpgradeAxis } from '../machines';
 import type { ShipState, ShipAxis } from '../ships';
 import type { TurretState, TurretAxis } from '../turrets';
 import type { ClaimState } from '../claims';
+import type { FactionPolitics } from '../politics';
 import {
   ClientMsg, GameMode, ItemEntityInfo, PlayerInfo, SERVER_PORT, ServerMsg, ShipTransform,
   TRANSFORM_HZ,
@@ -81,6 +82,10 @@ export class NetClient {
   onSeason?: (number: number, timeLeft: number) => void;
   /** A season ended (winner faction, or NO_FACTION for a stalemate). */
   onSeasonEnd?: (winner: number, number: number) => void;
+  /** Faction government state changed (Phase 6). */
+  onPolitics?: (factions: FactionPolitics[]) => void;
+  /** A faction elected a new Commander. */
+  onCommanderElected?: (faction: number, commander: string) => void;
   /** A faction breached an enemy claim (HUD/killfeed event). */
   onBreach?: (attacker: string, faction: number, victim: number) => void;
   /** A register/login was rejected (the login screen shows the error). */
@@ -153,6 +158,7 @@ export class NetClient {
         for (const cl of msg.claims) this.onClaim?.(cl);
         this.onRegions?.(msg.regions);
         this.onSeason?.(msg.season.number, msg.season.timeLeft);
+        this.onPolitics?.(msg.politics);
         const me = msg.players.find((p) => p.id === this.myId);
         // Restore saved inventory BEFORE onWelcome (which adopts the server
         // position) so the comeback loadout/inventory is in place from frame one.
@@ -257,6 +263,12 @@ export class NetClient {
         break;
       case 'seasonEnd':
         this.onSeasonEnd?.(msg.winner, msg.number);
+        break;
+      case 'politics':
+        this.onPolitics?.(msg.factions);
+        break;
+      case 'commanderElected':
+        this.onCommanderElected?.(msg.faction, msg.commander);
         break;
       case 'claim':
         this.onClaim?.(msg.claim);
@@ -407,6 +419,19 @@ export class NetClient {
   sendClaimHit(x: number, y: number, z: number, amount: number): void {
     if (this.connected) this.raw({ t: 'claimHit', x, y, z, amount });
   }
+
+  // Politics (Phase 6).
+  sendNominate(party: string): void { if (this.connected) this.raw({ t: 'nominate', party }); }
+  sendVote(candidate: string): void { if (this.connected) this.raw({ t: 'vote', candidate }); }
+  sendSetRally(region: number): void { if (this.connected) this.raw({ t: 'setRally', region }); }
+  sendAppointOfficer(user: string): void { if (this.connected) this.raw({ t: 'appointOfficer', user }); }
+  sendDismissOfficer(user: string): void { if (this.connected) this.raw({ t: 'dismissOfficer', user }); }
+  sendSetTax(rate: number): void { if (this.connected) this.raw({ t: 'setTax', rate }); }
+  sendDonate(amount: number): void { if (this.connected) this.raw({ t: 'donate', amount }); }
+  sendCommanderSpend(kind: 'shield' | 'crate' | 'buff', x: number, y: number, z: number): void {
+    if (this.connected) this.raw({ t: 'commanderSpend', kind, x, y, z });
+  }
+  sendRecall(): void { if (this.connected) this.raw({ t: 'recall' }); }
 }
 
 function toRemote(p: PlayerInfo): Remote {

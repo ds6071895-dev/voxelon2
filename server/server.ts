@@ -189,6 +189,7 @@ setInterval(() => {
   dispatch(game.tickRegions(dt));
   dispatch(game.tickSeason(dt));
   dispatch(game.tickClaims(dt));
+  dispatch(game.tickPolitics(dt));
   const snap: ServerMsg = { t: 'snapshot', players: game.snapshot() };
   for (const cid of sockets.keys()) send(cid, snap);
   if (moved.length) {

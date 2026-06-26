@@ -59,6 +59,10 @@ import {
   regionCenter, regionCounts, neighbors4, initialOwners, capitalOf, capitalFaction,
   connectedRegions, canCapture, capitalCapturable, DISCONNECT_SECONDS,
 } from '../src/regions';
+import {
+  SEASON_LENGTH, newSeason, seasonTimeLeft, seasonExpired, tickSeasonClock,
+  advanceSeason, deadlineWinner, sanitizeSeason,
+} from '../src/season';
 import { Accounts, validUsername } from '../src/net/accounts';
 import {
   Claims, GRACE_PERIOD, MAX_SHIELD_HP, OIL_PER_BARREL, chunkOf, claimChunkKeys,
@@ -2158,6 +2162,83 @@ check('furnace smelts ore/sand/log but not removed foods',
   const raided = g.handle(1, { t: 'edit', x: lootX, y: lootY, z: lootZ, block: Block.Air });
   check('owning the region opens an enemy base to a raid even with the shield up',
     captured && raided.some((o) => o.msg.t === 'edit'));
+}
+
+// --- Seasons (Phase 5): clock + deadline/instant win + reset + badge ----------
+{
+  const hash: (p: string, s: string) => string = (p, s) => `${s}:${p}`;
+
+  // Pure season clock.
+  const s = newSeason();
+  check('a fresh season starts at #1 with the full clock',
+    s.number === 1 && seasonTimeLeft(s) === SEASON_LENGTH && !seasonExpired(s));
+  tickSeasonClock(s, SEASON_LENGTH + 5);
+  check('the season clock expires past the deadline',
+    seasonExpired(s) && seasonTimeLeft(s) === 0);
+  advanceSeason(s);
+  check('advanceSeason bumps the number + resets the clock', s.number === 2 && s.elapsed === 0);
+  check('sanitizeSeason fail-closes junk to season #1',
+    sanitizeSeason(null).number === 1 && sanitizeSeason({ number: -3, elapsed: -9 }).number === 1);
+  check('deadlineWinner is the region leader, stalemate on a tie',
+    deadlineWinner({ 0: 19, 1: 17 }) === FACTION_A &&
+    deadlineWinner({ 0: 18, 1: 18 }) === NO_FACTION &&
+    deadlineWinner({ 0: 0, 1: 0 }) === NO_FACTION);
+
+  // Accounts: the "Seasons Won" badge goes to exactly the winning faction.
+  const accs = new Accounts();
+  for (const n of ['Acc1', 'Acc2', 'Acc3', 'Acc4']) accs.register(n, 'password', hash, 'sa');
+  const f0 = accs.list().filter((a) => a.faction === FACTION_A);
+  const f1 = accs.list().filter((a) => a.faction === FACTION_B);
+  const awarded = accs.awardSeasonWin(FACTION_A);
+  check('awardSeasonWin badges exactly the winning faction',
+    awarded.length === f0.length && f0.length > 0 &&
+    f0.every((a) => a.seasonsWon === 1) && f1.every((a) => (a.seasonsWon ?? 0) === 0));
+
+  // Welcome carries the season clock + the player's badge.
+  const gw = new GameServer(1337, mulberry32(4));
+  const wel = gw.addPlayer(1, { username: 'Zed', faction: 0, seasonsWon: 3 })
+    .find((o) => o.msg.t === 'welcome')!.msg as
+      { season: { number: number; timeLeft: number }; players: { seasonsWon: number }[] };
+  check('the welcome carries the season clock + the player badge',
+    wel.season.number === 1 && wel.season.timeLeft > 0 && wel.players[0].seasonsWon === 3);
+
+  // Server deadline: the region leader wins, a seasonEnd fires, board resets 50/50.
+  const gd = new GameServer(1337, mulberry32(7));
+  let dWinner = -2, dNum = 0;
+  gd.onSeasonEnd = (w, n) => { dWinner = w; dNum = n; };
+  const tilt = regionCenter(regionIndex(GRID - 2, 1)); // flip one B region to A
+  gd.setRegionOwner(tilt.x, tilt.z, FACTION_A);
+  const de = gd.tickSeason(SEASON_LENGTH + 1);
+  const boardAfter = de.find((o) => o.msg.t === 'regions')!.msg as { owners: number[] };
+  check('the season ends at the deadline → winner + reset to 50/50',
+    de.some((o) => o.msg.t === 'seasonEnd') && dWinner === FACTION_A && dNum === 1 &&
+    boardAfter.owners.filter((o) => o === FACTION_A).length === REGION_COUNT / 2);
+
+  // Instant win: taking the enemy capital ends the season immediately + clears bases.
+  const gi = new GameServer(1337, mulberry32(9));
+  gi.addPlayer(1); // faction A
+  let iWinner = -2;
+  gi.onSeasonEnd = (w) => { iWinner = w; };
+  const capB = capitalOf(FACTION_B);
+  for (let i = 0; i < REGION_COUNT; i++) {
+    if (i !== capB) { const c = regionCenter(i); gi.setRegionOwner(c.x, c.z, FACTION_A); }
+  }
+  const cc = regionCenter(capB);
+  gi.handle(1, { t: 'xform', x: cc.x, y: 70, z: cc.z, yaw: 0, pitch: 0 });
+  let instantEnd = false;
+  for (let t = 0; t < 40 && !instantEnd; t++) {
+    if (gi.tickRegions(1).some((o) => o.msg.t === 'seasonEnd')) instantEnd = true;
+  }
+  check('taking the enemy capital ends the season instantly', instantEnd && iWinner === FACTION_A);
+
+  // A season survives a serialize round-trip.
+  const gp = new GameServer(1337, mulberry32(2));
+  gp.tickSeason(12345);
+  const reloaded = new GameServer(1337, mulberry32(2));
+  reloaded.restore(JSON.parse(JSON.stringify(gp.serialize())));
+  const rs = reloaded.seasonSnapshot() as { number: number; timeLeft: number };
+  check('the season clock survives a serialize round-trip',
+    Math.abs(rs.timeLeft - (SEASON_LENGTH - 12345)) < 1);
 }
 
 // --- Accounts: login / register foundation -----------------------------------

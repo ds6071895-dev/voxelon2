@@ -7,6 +7,7 @@ import type { MachineState, UpgradeAxis } from '../machines';
 import type { ShipState, ShipAxis } from '../ships';
 import type { TurretState, TurretAxis } from '../turrets';
 import type { ClaimState } from '../claims';
+import type { FactionPolitics } from '../politics';
 
 export const SERVER_PORT = 8080;
 export const SNAPSHOT_HZ = 15;     // server -> clients transform broadcasts
@@ -109,6 +110,17 @@ export type ClientMsg =
   // is down, breaking a stored container inside the claim raids it (handled on
   // the normal `edit` path, server-side).
   | { t: 'claimHit'; x: number; y: number; z: number; amount: number }
+  // Politics (Phase 6): faction government actions. The server validates faction
+  // membership + leadership; `by` is always the sender (never spoofable here).
+  | { t: 'nominate'; party: string }                 // self-nominate for Commander
+  | { t: 'vote'; candidate: string }                 // vote for a candidate
+  | { t: 'setRally'; region: number }                // leader: mark/clear rally region
+  | { t: 'appointOfficer'; user: string }            // commander: appoint an officer
+  | { t: 'dismissOfficer'; user: string }            // commander: dismiss an officer
+  | { t: 'setTax'; rate: number }                    // commander: 0..0.25 oil tax
+  | { t: 'donate'; amount: number }                  // donate oil to the treasury
+  | { t: 'commanderSpend'; kind: 'shield' | 'crate' | 'buff'; x: number; y: number; z: number }
+  | { t: 'recall' }                                  // vote to recall the Commander
   // Persistence: the client periodically pushes its owned state (inventory +
   // hotbar + position) for the server to store against the account and restore
   // on next login. Opaque blob — the server treats it as data, not authority.
@@ -127,6 +139,8 @@ export type ServerMsg =
       regions: number[];
       /** Current season number + seconds left before the deadline (Phase 5). */
       season: { number: number; timeLeft: number };
+      /** Per-faction government state (Phase 6). */
+      politics: FactionPolitics[];
       /** Saved per-account state to restore (inventory/hotbar); undefined for new accounts. */
       state?: Record<string, unknown>;
     }
@@ -160,6 +174,10 @@ export type ServerMsg =
   | { t: 'regionWin'; faction: number }
   // Season clock (Phase 5): number + seconds left (periodic HUD broadcast).
   | { t: 'season'; number: number; timeLeft: number }
+  // Politics (Phase 6): full per-faction government state (commander/officers/
+  // rally/treasury/tax/candidates/votes/log) + a notice for elected commanders.
+  | { t: 'politics'; factions: FactionPolitics[] }
+  | { t: 'commanderElected'; faction: number; commander: string }
   // A season ended — winner faction (NO_FACTION = stalemate) + the season that
   // just finished. Clients clear bases + flash a banner; the board is reset.
   | { t: 'seasonEnd'; winner: number; number: number }
