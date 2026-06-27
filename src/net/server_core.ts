@@ -28,7 +28,7 @@ import {
 import {
   Claims, ClaimState, OIL_CAP, claimProtected, damageShield, feedOil, shieldUp,
 } from '../claims';
-import { Regions, RegionsSave, regionOf } from '../regions';
+import { Regions, RegionsSave, regionOf, regionBounds, capitalOf, REGION_COUNT } from '../regions';
 import {
   SeasonState, newSeason, sanitizeSeason, seasonTimeLeft, seasonExpired,
   tickSeasonClock, advanceSeason, deadlineWinner,
@@ -170,8 +170,23 @@ export class GameServer {
     return makeUsername(this.rng) + Math.floor(this.rng() * 1000);
   }
 
-  private spawn(): { x: number; y: number; z: number } {
-    // A random dry-land spot somewhere in the world border (not ocean/air).
+  private spawn(faction?: number): { x: number; y: number; z: number } {
+    // Faction-aware: drop inside a region your faction controls (prefer the home
+    // capital), never in enemy/neutral land. Falls back to any dry spot.
+    if (faction !== undefined && isFaction(faction)) {
+      const cap = capitalOf(faction);
+      let pick = this.regions.ownerAt(cap) === faction ? cap : -1;
+      if (pick < 0) {
+        const owned: number[] = [];
+        for (let i = 0; i < REGION_COUNT; i++) if (this.regions.ownerAt(i) === faction) owned.push(i);
+        if (owned.length) pick = owned[Math.floor(this.rng() * owned.length)];
+      }
+      if (pick >= 0) {
+        const b = regionBounds(pick);
+        const s = this.terrain.drySpawnInBounds(this.rng, b.minX + 6, b.maxX - 6, b.minZ + 6, b.maxZ - 6);
+        return { x: s.x, y: s.y, z: s.z };
+      }
+    }
     const s = this.terrain.randomDrySpawn(this.rng, WORLD_HALF);
     return { x: s.x, y: s.y, z: s.z };
   }
@@ -195,7 +210,7 @@ export class GameServer {
     const hasPos = fin(sx as number, sy as number, sz as number) && (sy as number) > 0;
     const s = hasPos
       ? { x: sx as number, y: sy as number, z: sz as number }
-      : this.spawn();
+      : this.spawn(faction);
     const savedMode = typeof saved?.mode === 'string' && GAME_MODES.includes(saved.mode as GameMode)
       ? saved.mode as GameMode : 'survival';
     const player: ServerPlayer = {
@@ -875,7 +890,7 @@ export class GameServer {
 
   private handleRespawn(p: ServerPlayer): Outbound[] {
     if (!p.dead) return [];
-    const s = this.spawn();
+    const s = this.spawn(p.faction);
     p.x = s.x; p.y = s.y; p.z = s.z;
     p.health = MAX_HEALTH; p.dead = false;
     p.regenCooldown = 0; p.regenTimer = 0;

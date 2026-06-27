@@ -5,12 +5,15 @@ import { Furnaces } from './furnace';
 import { HeldItemView } from './held';
 import { HUD } from './hud';
 import { Input, FROZEN_INPUT } from './input';
-import { Interaction } from './interact';
+import { Interaction, raycastBlocks } from './interact';
 import { Inventory } from './inventory';
 import {
   InventoryUI, MachineUIContext, ShipUIContext, TurretUIContext, ClaimUIContext,
 } from './inventory_ui';
 import { dropFor, GunInfo, Item, ItemStack, ITEMS } from './items';
+import { RECIPES, Recipe } from './crafting';
+import { renderItemIcon } from './icons';
+import { itemDescription } from './itemdesc';
 import {
   Machines, MachineType, allowedFilterMask, applyUpgrade, claimMachine,
   collectMachine, currentRate, damageMachine, machineHeight, machineTypeForBlock,
@@ -42,16 +45,15 @@ import { RemotePlayers } from './remoteplayers';
 import { WorldMap } from './worldmap';
 import { Accounts, Account } from './net/accounts';
 import {
-  FACTIONS, NO_FACTION, factionColor, factionName, forcedFaction, sameFaction,
-  otherFaction, canSwitchFaction, switchesRemaining,
+  FACTIONS, NO_FACTION, factionColor, factionName, sameFaction, otherFaction,
 } from './teams';
 import {
   Claims, OIL_CAP, OIL_PER_BARREL, MAX_SHIELD_HP, claimProtected, damageShield,
   feedOil, shieldUp,
 } from './claims';
 import {
-  Regions, CaptureMeters, REGION_COUNT, regionOf, regionCenter, capitalFaction,
-  isCapital, CONTROL_RADIUS,
+  Regions, CaptureMeters, REGION_COUNT, regionOf, regionCenter, regionBounds,
+  capitalFaction, capitalOf, isCapital, CONTROL_RADIUS,
 } from './regions';
 import {
   newSeason, tickSeasonClock, seasonTimeLeft, seasonExpired, deadlineWinner,
@@ -176,6 +178,11 @@ const panoramaView = new Panorama(atlas, window.innerWidth / window.innerHeight)
 
 const sky = new Sky(scene, seed);
 const hud = new HUD(atlas.canvas, inventory);
+// Gadget cooldown sweep on the hotbar (ender-pearl style).
+hud.cooldownOf = (id) => {
+  const d = gadgetOf(id);
+  return d ? Math.min(1, gadgetCd.remaining(id, worldTimeLocal) / d.cooldown) : 0;
+};
 const invUI = new InventoryUI(inventory, atlas.canvas);
 const itemEntities = new ItemEntities(scene, world, atlas);
 const held = new HeldItemView(camera, atlas);
@@ -236,6 +243,7 @@ let politicsOpen = false;
 // active spy disguises on remote players (id -> seconds of local time left).
 const gadgetCd = new GadgetCooldowns();
 const disguises = new Map<number, { realFaction: number; left: number }>();
+let jumpImmuneUntil = 0; // suppress fall damage briefly after a Jump Boost
 // World map (M key): region board + claims + capture meters + waypoints.
 const worldMap = new WorldMap(scene, camera, world.terrain, claims, {
   player: () => ({ x: player.pos.x, z: player.pos.z, yaw: player.yaw }),
@@ -277,8 +285,8 @@ mapBtn.className = 'mc-font';
 mapBtn.textContent = '🗺 Map (M)';
 mapBtn.style.cssText =
   'position:absolute;bottom:8px;right:8px;z-index:12;font-size:12px;padding:6px 10px;' +
-  'cursor:pointer;border:2px solid;border-color:#fff #555 #555 #fff;background:#6b6b6b;' +
-  'color:#fff;text-shadow:none;';
+  'width:118px;box-sizing:border-box;text-align:center;cursor:pointer;border:2px solid;' +
+  'border-color:#fff #555 #555 #fff;background:#6b6b6b;color:#fff;text-shadow:none;';
 mapBtn.addEventListener('click', () => {
   if (player.dead) return;
   if (worldMap.open) { worldMap.hide(); input.lock(); return; }
@@ -771,50 +779,13 @@ function saveLocalAccounts(): void {
   try { localStorage.setItem('voxelon.accounts', JSON.stringify(localAccounts.toJSON())); } catch { /* ignore */ }
 }
 
-// --- Faction picker (register only) ----------------------------------------
-// On first registration the player PICKS a side. Offline we know the local
-// account counts, so we enforce the >20% imbalance rule right here (the chosen
-// button is forced to the weaker side). Online the server is the authority: we
-// send the pick and `welcome` reports the side we actually landed on (which may
-// be overridden if a side was full). LOUD faction colors so the choice pops.
-const factionPickEl = document.getElementById('faction-pick')!;
-const factionPickBtns = document.getElementById('faction-pick-btns')!;
-const factionPickNote = document.getElementById('faction-pick-note')!;
-let chosenFaction = FACTIONS[0].id;
-const factionOptEls = new Map<number, HTMLElement>();
-for (const f of FACTIONS) {
-  const el = document.createElement('div');
-  el.className = 'faction-opt mc-font';
-  el.style.color = factionCss(f.id);
-  el.textContent = f.name;
-  el.addEventListener('click', () => {
-    if (el.classList.contains('forced-off')) return;
-    chosenFaction = f.id;
-    refreshFactionPicker();
-  });
-  factionPickBtns.appendChild(el);
-  factionOptEls.set(f.id, el);
-}
-/** Offline-only imbalance gate: returns the side the player is forced onto, or
- *  null when they may pick freely. (Online, the server decides.) */
-function offlineForced(): number | null {
-  if (net.socketOpen) return null; // server enforces online
-  const counts: Record<number, number> = {};
-  for (const f of FACTIONS) counts[f.id] = 0;
-  for (const a of localAccounts.list()) if (counts[a.faction] !== undefined) counts[a.faction]++;
-  return forcedFaction(counts);
-}
-function refreshFactionPicker(): void {
-  const forced = offlineForced();
-  if (forced !== null) chosenFaction = forced;
-  for (const f of FACTIONS) {
-    const el = factionOptEls.get(f.id)!;
-    el.classList.toggle('selected', f.id === chosenFaction);
-    el.classList.toggle('forced-off', forced !== null && f.id !== forced);
-  }
-  factionPickNote.textContent = forced !== null
-    ? `${factionName(forced)} needs reinforcements — you're assigned there to keep it fair.`
-    : 'Teams may rebalance you if a side fills up.';
+// Registration auto-assigns the balanced (50/50) side — no picking. We flag a
+// fresh registration so the assigned side is announced once the faction is known
+// (immediately offline; on `welcome` online).
+let justRegistered = false;
+function announceSide(faction: number): void {
+  showRegionBanner(`YOU FIGHT FOR ${factionName(faction).toUpperCase()}!`, factionCss(faction));
+  showNotice(`⚔ You joined the ${factionName(faction)} — keeping the war 50/50.`);
 }
 
 function onAuthSuccess(username: string): void {
@@ -833,20 +804,22 @@ function attemptAuth(mode: 'login' | 'register', retries = 12): void {
   const password = authPass.value;
   authErr.textContent = '';
   if (net.socketOpen) {
-    // Online: the server is the authority.
+    // Online: the server is the authority. No side pick — the server balances.
     authStatus.textContent = mode === 'register' ? 'Registering…' : 'Logging in…';
-    if (mode === 'register') net.sendRegister(username, password, chosenFaction);
+    if (mode === 'register') { justRegistered = true; net.sendRegister(username, password); }
     else net.sendLogin(username, password);
   } else if (net.offline) {
     // Offline single-player: verify against the local account store.
     const res = mode === 'register'
       ? localAccounts.register(username, password, localHash,
-          `${Math.floor(Math.random() * 1e9).toString(16)}${Date.now().toString(16)}`, chosenFaction)
+          `${Math.floor(Math.random() * 1e9).toString(16)}${Date.now().toString(16)}`)
       : localAccounts.login(username, password, localHash);
     if (!res.ok || !res.account) { authErr.textContent = res.error ?? 'Failed'; return; }
     if (mode === 'register') saveLocalAccounts();
     localFaction = res.account.faction;
     onAuthSuccess(res.account.username);
+    spawnInOwnTerritory(); // never drop into enemy land (offline)
+    if (mode === 'register') announceSide(localFaction);
     if (mode === 'login') restoreOfflineInventory(); // bring back saved single-player stuff
   } else if (retries > 0) {
     // Still resolving whether a server is reachable — try again shortly.
@@ -883,8 +856,6 @@ function setAuthMode(mode: 'register' | 'login'): void {
     submitBtn.textContent = 'Register';
     authUser.readOnly = true;          // names are random-only on register
     rollBtn.style.display = '';
-    factionPickEl.style.display = 'flex'; // pick a side when registering
-    refreshFactionPicker();
     authToggle.innerHTML = 'Already have an account? <a id="toggle-link">Log in</a>';
     if (!authUser.value) rollUsername();
   } else {
@@ -892,7 +863,6 @@ function setAuthMode(mode: 'register' | 'login'): void {
     authUser.readOnly = false;         // type your existing name to log in
     authUser.value = '';
     rollBtn.style.display = 'none';
-    factionPickEl.style.display = 'none'; // existing accounts keep their side
     authToggle.innerHTML = 'Need an account? <a id="toggle-link">Register</a>';
     authUser.focus();
   }
@@ -976,6 +946,16 @@ document.addEventListener('pointerlockchange', () => {
     enterPause(); // Esc / lost focus while playing -> pause, not the title
   }
 });
+// Safety net: re-engage pointer lock by clicking the world when we're in-game
+// but unlocked (e.g. a menu just closed but the browser blocked an immediate
+// re-lock — "requestPointerLock too soon after exit"). This guarantees you can
+// always get movement back after closing the Faction/Map panels.
+renderer.domElement.addEventListener('mousedown', () => {
+  if (screen === 'playing' && !input.locked && !player.dead &&
+      !invUI.open && !worldMap.open && !politicsOpen) {
+    input.lock();
+  }
+});
 document.addEventListener('keydown', (e) => {
   // 'G' toggles the faction-government panel during play (ignored while typing).
   if ((e.code === 'KeyG') && screen === 'playing' && !invUI.open && !worldMap.open &&
@@ -984,9 +964,10 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (e.code !== 'Escape') return;
-  if (worldMap.open) { worldMap.hide(); input.lock(); }
+  if (guideOpen) { hideGuide(); }
+  else if (worldMap.open) { worldMap.hide(); input.lock(); }
   else if (invUI.open) { invUI.hide(); input.lock(); }
-  else if (politicsOpen) { hidePolitics(); input.lock(); }
+  else if (politicsOpen) { hidePolitics(); }
   else if (screen === 'paused' && !player.dead) input.lock(); // Esc resumes from pause
 });
 
@@ -998,7 +979,8 @@ document.getElementById('respawn')!.addEventListener('click', () => {
   if (net.connected) {
     net.sendRespawn(); // server replies with onRespawned
   } else {
-    player.respawn(spawn);
+    spawnInOwnTerritory(); // respawn in our own land, never enemy territory
+    player.respawn({ x: player.pos.x, y: player.pos.y, z: player.pos.z });
     lastHealth = 20;
     deathShown = false;
     deathEl.style.display = 'none';
@@ -1057,6 +1039,7 @@ net.onWelcome = (me) => {
   // Adopt the server-assigned spawn so we line up with the server's record.
   localFaction = me.faction;
   localSeasonsWon = me.seasonsWon ?? 0; // authoritative badge from the account
+  if (justRegistered) { justRegistered = false; announceSide(localFaction); }
   player.pos.set(me.x, me.y, me.z);
   player.vel.set(0, 0, 0);
   player.health = me.health;
@@ -1796,21 +1779,26 @@ politicsEl.style.cssText =
 const politicsPanel = document.createElement('div');
 politicsPanel.className = 'mc-font';
 politicsPanel.style.cssText =
-  'background:#11141c;border:2px solid #2a3550;padding:16px 18px;width:440px;max-height:86vh;' +
-  'overflow:auto;color:#dfe6f2;text-shadow:none;font-size:13px;line-height:1.6;';
+  'background:linear-gradient(#161a26,#10131c);border:2px solid #34406a;border-radius:10px;' +
+  'box-shadow:0 10px 40px rgba(0,0,0,0.6);padding:0 0 14px;width:460px;max-height:88vh;' +
+  'overflow:auto;color:#e7edf7;text-shadow:none;font-size:13px;line-height:1.55;';
 politicsEl.appendChild(politicsPanel);
 app.appendChild(politicsEl);
+// Click the dim backdrop (outside the panel) to close.
+politicsEl.addEventListener('mousedown', (e) => { if (e.target === politicsEl) hidePolitics(); });
 
 const politicsBtn = document.createElement('button');
 politicsBtn.className = 'mc-font';
 politicsBtn.textContent = '⚑ Faction (G)';
+// Stacked directly above the Map button, same footprint, so the two read as a
+// matched pair (fixed width keeps them identical regardless of label length).
 politicsBtn.style.cssText =
-  'position:absolute;bottom:8px;right:120px;z-index:12;font-size:12px;padding:6px 10px;' +
-  'cursor:pointer;border:2px solid;border-color:#fff #555 #555 #fff;background:#6b6b6b;' +
-  'color:#fff;text-shadow:none;';
+  'position:absolute;bottom:38px;right:8px;z-index:12;font-size:12px;padding:6px 10px;' +
+  'width:118px;box-sizing:border-box;text-align:center;cursor:pointer;border:2px solid;' +
+  'border-color:#fff #555 #555 #fff;background:#6b6b6b;color:#fff;text-shadow:none;';
 politicsBtn.addEventListener('click', () => {
   if (player.dead) return;
-  if (politicsOpen) { hidePolitics(); input.lock(); return; }
+  if (politicsOpen) { hidePolitics(); return; }
   if (invUI.open) invUI.hide();
   if (worldMap.open) worldMap.hide();
   showPolitics();
@@ -1853,7 +1841,13 @@ function showPolitics(): void {
   if (input.locked) document.exitPointerLock();
   renderPolitics();
 }
-function hidePolitics(): void { politicsOpen = false; politicsEl.style.display = 'none'; }
+function hidePolitics(): void {
+  politicsOpen = false;
+  politicsEl.style.display = 'none';
+  // Try to grab the pointer back; if the browser blocks an immediate re-lock,
+  // the world-click safety net restores movement on the next click.
+  if (screen === 'playing' && !player.dead) input.lock();
+}
 
 function fmtTime(secs: number): string {
   const s = Math.max(0, Math.floor(secs));
@@ -1877,86 +1871,112 @@ function renderPolitics(): void {
   const col = factionCss(localFaction);
   const esc = (s: string): string => s.replace(/[&<>"]/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] ?? c));
+  const section = (title: string, body: string): string =>
+    `<div style="padding:10px 16px;border-top:1px solid #232a40">` +
+    `<div style="font-size:11px;letter-spacing:2px;color:#7f8db0;margin-bottom:6px">${title}</div>${body}</div>`;
+  const stat = (label: string, value: string): string =>
+    `<div style="display:flex;justify-content:space-between;gap:10px;padding:2px 0">` +
+    `<span style="color:#8f9ec0">${label}</span><span>${value}</span></div>`;
   const rows: string[] = [];
-  rows.push(`<div style="font-size:16px;color:${col};letter-spacing:1px;margin-bottom:6px">` +
-    `⚑ ${factionName(localFaction).toUpperCase()} GOVERNMENT</div>`);
-  rows.push(`Commander: <b style="color:${col}">${p.commander ? esc(p.commander) : '— vacant —'}</b>` +
-    (commander ? ' (you)' : ''));
-  rows.push(`Officers: ${p.officers.length ? p.officers.map(esc).join(', ') : 'none'}`);
-  rows.push(`Treasury: <b style="color:#ffd84a">${Math.floor(p.treasury)} oil</b>  ·  Tax: ${Math.round(p.taxRate * 100)}%`);
-  rows.push(`Rally: ${p.rally >= 0 ? regionLabel(p.rally) : 'none'}  ·  Election in ${fmtTime(p.electionEndsAt - worldTimeLocal)}`);
-  rows.push('<hr style="border-color:#2a3550">');
 
-  // Election: candidates + voting + self-nominate.
-  rows.push('<b>ELECTION</b>');
+  // Header: faction emblem + name + close ✕, on a faction-tinted bar.
+  rows.push(
+    `<div style="display:flex;align-items:center;gap:10px;padding:12px 16px;` +
+    `background:linear-gradient(90deg,${col}33,transparent);border-bottom:1px solid #232a40;` +
+    `border-radius:8px 8px 0 0">` +
+    `<div style="width:26px;height:26px;border-radius:6px;background:${col};display:flex;` +
+    `align-items:center;justify-content:center;color:#0a0c12;font-size:16px">⚑</div>` +
+    `<div style="flex:1"><div style="font-size:15px;color:${col};letter-spacing:1px">` +
+    `${factionName(localFaction).toUpperCase()}</div>` +
+    `<div style="font-size:10px;color:#7f8db0">FACTION GOVERNMENT · Season ${seasonNumber}</div></div>` +
+    `<button data-act="close" class="pbtn-x">✕</button></div>`);
+
+  // Overview stats.
+  rows.push(section('OVERVIEW',
+    stat('Commander', p.commander ? `<b style="color:${col}">${esc(p.commander)}</b>${commander ? ' (you)' : ''}` : '<i style="color:#7f8db0">vacant</i>') +
+    stat('Officers', p.officers.length ? esc(p.officers.join(', ')) : '<span style="color:#7f8db0">none</span>') +
+    stat('War chest', `<b style="color:#ffd84a">${Math.floor(p.treasury)} oil</b>`) +
+    stat('Oil tax', `${Math.round(p.taxRate * 100)}%`) +
+    stat('Rally point', p.rally >= 0 ? `<b style="color:${col}">${regionLabel(p.rally)}</b>` : '<span style="color:#7f8db0">none</span>') +
+    stat('Next election', fmtTime(Math.max(0, p.electionEndsAt - worldTimeLocal)))));
+
+  // Election.
+  let elBody = '';
   if (p.candidates.length) {
     for (const c of p.candidates) {
       const votes = Object.values(p.votes).filter((v) => v === c.user).length;
-      rows.push(`<div>${esc(c.user)}${c.party ? ` <span style="color:#9fb4cc">[${esc(c.party)}]</span>` : ''} · ${votes} vote(s) ` +
-        `<button data-act="vote" data-arg="${esc(c.user)}" class="pbtn">Vote</button></div>`);
+      const meVoted = p.votes[authedName] === c.user;
+      elBody += `<div style="display:flex;align-items:center;gap:8px;padding:3px 0">` +
+        `<span style="flex:1">${esc(c.user)}${c.party ? ` <span style="color:#8f9ec0">[${esc(c.party)}]</span>` : ''}</span>` +
+        `<span style="color:#ffd84a;min-width:48px;text-align:right">${votes} vote${votes === 1 ? '' : 's'}</span>` +
+        `<button data-act="vote" data-arg="${esc(c.user)}" class="pbtn"${meVoted ? ' data-on="1"' : ''}>${meVoted ? '✓ Voted' : 'Vote'}</button></div>`;
     }
-  } else rows.push('<div style="color:#9fb4cc">No candidates yet.</div>');
-  rows.push(`<div style="margin:4px 0"><input id="party-in" placeholder="party name (optional)" maxlength="18" ` +
-    `style="width:160px;background:#0c0f16;border:1px solid #2a3550;color:#dfe6f2;padding:4px"/> ` +
-    `<button data-act="nominate" class="pbtn">Nominate me</button></div>`);
-  rows.push('<hr style="border-color:#2a3550">');
+  } else elBody += `<div style="color:#7f8db0">No candidates yet — be the first to run.</div>`;
+  elBody += `<div style="display:flex;gap:6px;margin-top:8px"><input id="party-in" placeholder="party name (optional)" maxlength="18" ` +
+    `style="flex:1;background:#0c0f18;border:1px solid #2a3550;border-radius:4px;color:#e7edf7;padding:5px 7px"/>` +
+    `<button data-act="nominate" class="pbtn">Run for Commander</button></div>`;
+  rows.push(section('ELECTION', elBody));
 
-  // Anyone may donate oil barrels to the chest.
-  rows.push(`<button data-act="donate" class="pbtn">Donate oil barrels</button> ` +
-    `<button data-act="recall" class="pbtn">Vote to recall (${p.recalls.length})</button>`);
-  // Secret defection (Phase 7): no announcement, forfeits this season's badge.
-  rows.push(`<div style="margin-top:6px;color:#ff8a7a"><button data-act="defect" class="pbtn">` +
-    `🤫 Defect to ${factionName(otherFaction(localFaction))} (secret)</button> ` +
-    `<span style="font-size:10px;color:#9fb4cc">no badge this season · max 2/season · locked final week</span></div>`);
+  // Everyone's actions.
+  rows.push(section('YOUR ACTIONS',
+    `<button data-act="donate" class="pbtn">Donate oil barrels</button> ` +
+    `<button data-act="recall" class="pbtn">Recall vote (${p.recalls.length})</button>`));
 
-  // Leader powers.
+  // Leader command powers.
   if (leader) {
-    rows.push('<hr style="border-color:#2a3550"><b>COMMAND</b>');
-    rows.push(`<div><button data-act="rally" class="pbtn">Rally HERE (${regionLabel(regionOf(player.pos.x, player.pos.z))})</button> ` +
-      `<button data-act="clearRally" class="pbtn">Clear rally</button></div>`);
-    rows.push(`<div style="margin-top:4px">Spend treasury: ` +
-      `<button data-act="spend" data-arg="shield" class="pbtn">Refill shield (${SHIELD_REFILL_COST})</button> ` +
-      `<button data-act="spend" data-arg="crate" class="pbtn">Supply crate (${SUPPLY_CRATE_COST})</button> ` +
-      `<button data-act="spend" data-arg="buff" class="pbtn">War buff (${FACTION_BUFF_COST})</button></div>`);
+    const hereLabel = regionLabel(regionOf(player.pos.x, player.pos.z));
+    let cmd = `<div style="margin-bottom:8px"><button data-act="rally" class="pbtn">Rally here (${hereLabel})</button> ` +
+      `<button data-act="clearRally" class="pbtn">Clear rally</button></div>`;
+    cmd += `<div style="color:#8f9ec0;margin-bottom:3px">Spend the war chest</div><div style="margin-bottom:8px">` +
+      `<button data-act="spend" data-arg="shield" class="pbtn">🛡 Refill shield · ${SHIELD_REFILL_COST}</button> ` +
+      `<button data-act="spend" data-arg="crate" class="pbtn">📦 Supply crate · ${SUPPLY_CRATE_COST}</button> ` +
+      `<button data-act="spend" data-arg="buff" class="pbtn">⚔ War buff · ${FACTION_BUFF_COST}</button></div>`;
     if (commander) {
-      rows.push(`<div style="margin-top:4px">Tax: ` +
-        [0, 0.1, 0.25].map((r) => `<button data-act="tax" data-arg="${r}" class="pbtn">${Math.round(r * 100)}%</button>`).join(' ') +
-        (MAX_TAX ? '' : '') + `</div>`);
-      // Appoint officers from online same-faction players.
+      cmd += `<div style="color:#8f9ec0;margin-bottom:3px">Oil tax (max ${Math.round(MAX_TAX * 100)}%)</div><div style="margin-bottom:8px">` +
+        [0, 0.1, 0.25].map((r) => `<button data-act="tax" data-arg="${r}" class="pbtn"${Math.abs(p.taxRate - r) < 0.001 ? ' data-on="1"' : ''}>${Math.round(r * 100)}%</button>`).join(' ') + `</div>`;
       const mates = [...net.remotes.values()]
         .filter((r) => r.info.faction === localFaction && !p.officers.includes(r.info.username) && r.info.username !== p.commander);
       if (mates.length) {
-        rows.push('<div style="margin-top:4px">Appoint Officer: ' +
-          mates.map((r) => `<button data-act="officer" data-arg="${esc(r.info.username)}" class="pbtn">${esc(r.info.username)}</button>`).join(' ') + '</div>');
+        cmd += `<div style="color:#8f9ec0;margin-bottom:3px">Appoint officer</div><div style="margin-bottom:8px">` +
+          mates.map((r) => `<button data-act="officer" data-arg="${esc(r.info.username)}" class="pbtn">+ ${esc(r.info.username)}</button>`).join(' ') + `</div>`;
       }
       if (p.officers.length) {
-        rows.push('<div style="margin-top:4px">Dismiss: ' +
-          p.officers.map((o) => `<button data-act="dismiss" data-arg="${esc(o)}" class="pbtn">${esc(o)} ✕</button>`).join(' ') + '</div>');
+        cmd += `<div style="color:#8f9ec0;margin-bottom:3px">Dismiss officer</div><div>` +
+          p.officers.map((o) => `<button data-act="dismiss" data-arg="${esc(o)}" class="pbtn">${esc(o)} ✕</button>`).join(' ') + `</div>`;
       }
     }
+    rows.push(section('⚑ COMMAND', cmd));
   }
 
   // Decision log.
   if (p.log.length) {
-    rows.push('<hr style="border-color:#2a3550"><b>LOG</b>');
-    for (const e of p.log.slice(-6)) rows.push(`<div style="color:#9fb4cc;font-size:11px">${esc(e.by)}: ${esc(e.text)}</div>`);
+    rows.push(section('LOG',
+      p.log.slice(-6).reverse().map((e) =>
+        `<div style="color:#8f9ec0;font-size:11px">› ${esc(e.by)}: ${esc(e.text)}</div>`).join('')));
   }
-  rows.push('<div style="margin-top:8px"><button data-act="close" class="pbtn">Close (G)</button></div>');
+
+  rows.push(`<div style="padding:12px 16px 0;text-align:center;color:#5f6b88;font-size:10px">Press G or Esc to close</div>`);
   politicsPanel.innerHTML = rows.join('');
   for (const b of Array.from(politicsPanel.querySelectorAll('.pbtn'))) {
+    const on = (b as HTMLElement).getAttribute('data-on') === '1';
     (b as HTMLElement).style.cssText =
-      'margin:2px;padding:3px 7px;cursor:pointer;border:1px solid #3a4666;background:#1c2335;color:#dfe6f2;font-size:11px;';
+      `margin:2px;padding:5px 9px;cursor:pointer;border:1px solid ${on ? col : '#3a4666'};border-radius:5px;` +
+      `background:${on ? col + '33' : '#1c2335'};color:${on ? '#fff' : '#cdd6ee'};font-size:11px;`;
   }
+  const x = politicsPanel.querySelector('.pbtn-x') as HTMLElement | null;
+  if (x) x.style.cssText =
+    'width:26px;height:26px;cursor:pointer;border:1px solid #3a4666;border-radius:5px;' +
+    'background:#1c2335;color:#cdd6ee;font-size:13px;line-height:1';
 }
 
 politicsPanel.addEventListener('click', (e) => {
-  const t = (e.target as HTMLElement).closest('.pbtn') as HTMLElement | null;
+  const t = (e.target as HTMLElement).closest('.pbtn, .pbtn-x') as HTMLElement | null;
   if (!t) return;
   const act = t.getAttribute('data-act'), arg = t.getAttribute('data-arg') ?? '';
   const here = regionOf(player.pos.x, player.pos.z);
   const online = net.connected;
   switch (act) {
-    case 'close': hidePolitics(); input.lock(); break;
+    case 'close': hidePolitics(); break;
     case 'nominate': {
       const party = (document.getElementById('party-in') as HTMLInputElement | null)?.value ?? '';
       if (online) net.sendNominate(party);
@@ -2004,38 +2024,9 @@ politicsPanel.addEventListener('click', (e) => {
     case 'spend':
       doCommanderSpend(arg as 'shield' | 'crate' | 'buff');
       return; // doCommanderSpend handles its own notices
-    case 'defect':
-      doSwitchFaction();
-      return; // private/secret notice handled within
   }
   if (online) showNotice('Sent.'); // server reconciles via the next politics broadcast
 });
-
-/** Secret faction switch (Phase 7). Online the server validates; offline the
- *  local account + Politics are updated directly. No announcement either way. */
-function doSwitchFaction(): void {
-  const target = otherFaction(localFaction);
-  if (!confirm(`Secretly defect to ${factionName(target)}?\n\nYou forfeit this season's "Seasons Won" badge and lose any command role. Max 2 switches per season; locked in the final week.`)) return;
-  if (net.connected) { net.sendSwitchFaction(target); return; }
-  // Offline: validate + apply against the local account.
-  const acc = localAccounts.get(authedName);
-  const st = { switchesUsed: acc?.switchesUsed ?? 0, switchSeason: acc?.switchSeason ?? 0 };
-  if (!canSwitchFaction(st, localSeason.number, localFaction, target, seasonTimeLeft(localSeason))) {
-    showNotice('You can\'t switch sides right now (limit reached or final week).');
-    return;
-  }
-  const used = (st.switchSeason !== localSeason.number ? 0 : st.switchesUsed) + 1;
-  localPolitics.removeMember(localFaction, authedName, worldTimeLocal);
-  localAccounts.applySwitch(authedName, target, used, localSeason.number, localSeason.number);
-  saveLocalAccounts();
-  localFaction = target;
-  factionPolitics = localPolitics.serialize();
-  refreshNetInfo();
-  renderPolitics();
-  updateRallyHud();
-  const left = switchesRemaining({ switchesUsed: used, switchSeason: localSeason.number }, localSeason.number);
-  showNotice(`🤫 You secretly joined ${factionName(target)}. Switches left: ${left}.`);
-}
 
 function doCommanderSpend(kind: 'shield' | 'crate' | 'buff'): void {
   if (net.connected) {
@@ -2070,6 +2061,21 @@ function updatePoliticsOffline(): void {
   factionPolitics = localPolitics.serialize();
 }
 
+/** Drop the (offline) player into a region their faction controls — never enemy
+ *  land. Mirrors the server's faction-aware spawn. */
+function spawnInOwnTerritory(): void {
+  if (net.connected) return; // online: the server places us
+  let pick = localRegions.ownerAt(capitalOf(localFaction)) === localFaction ? capitalOf(localFaction) : -1;
+  if (pick < 0) {
+    for (let i = 0; i < REGION_COUNT; i++) if (localRegions.ownerAt(i) === localFaction) { pick = i; break; }
+  }
+  const s = pick >= 0
+    ? (() => { const b = regionBounds(pick); return world.terrain.drySpawnInBounds(Math.random, b.minX + 6, b.maxX - 6, b.minZ + 6, b.maxZ - 6); })()
+    : world.terrain.randomDrySpawn(Math.random, WORLD_HALF);
+  player.pos.set(s.x, s.y, s.z);
+  player.vel.set(0, 0, 0);
+}
+
 // --- Gadgets (Phase 8): use mechanics + visual effects -----------------------
 
 /** Play a gadget's visual effect at a point (everyone sees these via gadgetFx). */
@@ -2091,6 +2097,68 @@ function gadgetTargetPoint(): { x: number; y: number; z: number } {
   const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
   const eye = player.eyePosition;
   return { x: eye.x + dir.x * 14, y: eye.y + dir.y * 14, z: eye.z + dir.z * 14 };
+}
+
+// Thrown-item visuals: a small spinning cube that arcs from your hand to the
+// detonation point, then fires its on-land effect. (frag/oil/smoke get tossed.)
+const THROW_GEO = new THREE.BoxGeometry(0.28, 0.28, 0.28);
+const THROW_GRAVITY = 26;
+interface ThrownItem {
+  mesh: THREE.Mesh; pos: THREE.Vector3; vel: THREE.Vector3; life: number;
+  onLand: (p: THREE.Vector3) => void;
+}
+const thrownItems: ThrownItem[] = [];
+function tossItem(color: number, to: THREE.Vector3, onLand: (p: THREE.Vector3) => void): void {
+  const from = player.eyePosition.clone();
+  const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  from.addScaledVector(dir, 0.6); // start just past the hand
+  const mesh = new THREE.Mesh(THROW_GEO, new THREE.MeshBasicMaterial({ color }));
+  mesh.position.copy(from);
+  scene.add(mesh);
+  const t = Math.max(0.35, from.distanceTo(to) / 18);
+  const vel = new THREE.Vector3(
+    (to.x - from.x) / t, (to.y - from.y) / t + 0.5 * THROW_GRAVITY * t, (to.z - from.z) / t);
+  thrownItems.push({ mesh, pos: from, vel, life: t + 0.5, onLand });
+}
+function updateThrownItems(dt: number): void {
+  for (let i = thrownItems.length - 1; i >= 0; i--) {
+    const it = thrownItems[i];
+    it.vel.y -= THROW_GRAVITY * dt;
+    it.pos.addScaledVector(it.vel, dt);
+    it.mesh.position.copy(it.pos);
+    it.mesh.rotation.x += dt * 9; it.mesh.rotation.z += dt * 7;
+    it.life -= dt;
+    const solid = BLOCKS[world.getBlock(Math.floor(it.pos.x), Math.floor(it.pos.y), Math.floor(it.pos.z))]?.solid ?? false;
+    if (it.life <= 0 || solid) {
+      it.onLand(it.pos.clone());
+      scene.remove(it.mesh);
+      (it.mesh.material as THREE.Material).dispose();
+      thrownItems.splice(i, 1);
+    }
+  }
+}
+const THROW_COLOR: Record<string, number> = { frag: 0x6a9a5a, oil: 0x2a2630, smoke: 0x9aa2ae };
+
+// Held-gadget tooltip: shows the gadget name + description above the hotbar so
+// players know what a toy does and how to use it.
+const gadgetTipEl = document.createElement('div');
+gadgetTipEl.className = 'mc-font';
+gadgetTipEl.style.cssText =
+  'position:absolute;bottom:96px;left:50%;transform:translateX(-50%);z-index:10;' +
+  'pointer-events:none;text-align:center;max-width:460px;display:none;' +
+  'background:rgba(8,10,16,0.78);border:1px solid #34406a;border-radius:6px;padding:5px 10px;';
+app.appendChild(gadgetTipEl);
+function updateHeldGadgetTip(): void {
+  const stack = inventory.selectedStack;
+  const def = stack ? gadgetOf(stack.id) : undefined;
+  if (!def || invUI.open || worldMap.open || politicsOpen || player.dead) {
+    gadgetTipEl.style.display = 'none'; return;
+  }
+  gadgetTipEl.style.display = 'block';
+  gadgetTipEl.innerHTML =
+    `<div style="color:#ffd84a;font-size:13px">${def.name}</div>` +
+    `<div style="color:#cdd6ee;font-size:11px;text-shadow:none">${def.desc}</div>` +
+    `<div style="color:#7f8db0;font-size:10px;text-shadow:none">left-click to use</div>`;
 }
 
 /** Deploy a 3-wide × 2-tall blast wall a couple of blocks ahead (cover gadget). */
@@ -2128,25 +2196,40 @@ function useGadget(def: GadgetDef): void {
       gadgetCd.use(def.item, worldTimeLocal);
       if (def.oilCost) inventory.removeItem(Item.OilBarrel, def.oilCost);
       consume();
-      if (net.connected) net.sendGadgetUse(def.item, tgt.x, tgt.y, tgt.z);
-      gadgetFxAt(def.kind, tgt.x, tgt.y, tgt.z);
-      // Block/mob blast is local-only (player AoE is server-authoritative).
-      if (def.kind !== 'smoke') mobs.explode(new THREE.Vector3(tgt.x, tgt.y, tgt.z), player);
+      // Toss the item through the air; the blast/fx fire when it lands.
+      const kind = def.kind, item = def.item;
+      tossItem(THROW_COLOR[kind] ?? 0x888888, new THREE.Vector3(tgt.x, tgt.y, tgt.z), (land) => {
+        if (net.connected) net.sendGadgetUse(item, land.x, land.y, land.z);
+        gadgetFxAt(kind, land.x, land.y, land.z);
+        if (kind !== 'smoke') mobs.explode(land, player); // local block/mob blast
+      });
       break;
     }
     case 'grapple': {
-      const t = interaction.target;
-      if (!t) { showNotice('Aim at a surface to grapple.'); return; }
-      const to = new THREE.Vector3(t.x + 0.5, t.y + 0.5, t.z + 0.5).sub(player.pos);
+      // Long raycast (the grapple reaches much farther than your edit range).
+      const eye = player.eyePosition;
+      const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+      const hit = raycastBlocks(world, eye, dir, def.radius ?? 40);
+      if (!hit) { showNotice('No surface in range to grapple.'); return; }
+      const to = new THREE.Vector3(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5).sub(player.pos);
       const len = to.length();
-      if (len > (def.radius ?? 40)) { showNotice('Grapple target too far.'); return; }
       gadgetCd.use(def.item, worldTimeLocal);
       to.normalize();
-      const power = Math.min(24, 7 + len * 0.9);
+      const power = Math.min(26, 8 + len * 0.9);
       player.vel.x = to.x * power;
-      player.vel.y = Math.max(to.y * power, 7); // always a little lift
+      player.vel.y = Math.max(to.y * power, 8); // always a little lift
       player.vel.z = to.z * power;
-      particles.poof(t.x + 0.5, t.y + 0.5, t.z + 0.5);
+      player.fallDistance = 0;
+      particles.poof(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
+      break;
+    }
+    case 'jump': {
+      gadgetCd.use(def.item, worldTimeLocal); consume();
+      player.vel.y = 36; // ~20-block vertical launch (gravity 32)
+      player.fallDistance = 0;
+      jumpImmuneUntil = worldTimeLocal + 7; // no fall damage from this leap
+      particles.burst(player.pos.x, player.pos.y, player.pos.z, 18, 0x9affb0, 4, 0.6);
+      showNotice('🚀 BOOOOING! One-use jump boost!');
       break;
     }
     case 'cover':
@@ -2209,6 +2292,147 @@ function tickDisguises(dt: number): void {
     }
   }
 }
+
+// --- Crafting Guide (recipe book) -------------------------------------------
+let guideOpen = false;
+const guideEl = document.createElement('div');
+guideEl.style.cssText =
+  'position:absolute;inset:0;display:none;z-index:40;align-items:center;' +
+  'justify-content:center;background:rgba(6,8,14,0.86);';
+const guidePanel = document.createElement('div');
+guidePanel.className = 'mc-font';
+guidePanel.style.cssText =
+  'background:linear-gradient(#161a26,#10131c);border:2px solid #34406a;border-radius:10px;' +
+  'box-shadow:0 10px 40px rgba(0,0,0,0.6);width:560px;max-height:88vh;overflow:auto;' +
+  'color:#e7edf7;text-shadow:none;font-size:13px;';
+guideEl.appendChild(guidePanel);
+app.appendChild(guideEl);
+guideEl.addEventListener('mousedown', (e) => { if (e.target === guideEl) hideGuide(); });
+
+const guideBtn = document.createElement('button');
+guideBtn.className = 'mc-font';
+guideBtn.textContent = '📖 Crafting Guide';
+guideBtn.style.cssText =
+  'position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:25;display:none;' +
+  'font-size:13px;padding:7px 14px;cursor:pointer;border:2px solid;border-color:#fff #555 #555 #fff;' +
+  'background:#6b6b6b;color:#fff;text-shadow:none;';
+guideBtn.addEventListener('click', showGuide);
+app.appendChild(guideBtn);
+
+function showGuide(): void { guideOpen = true; guideEl.style.display = 'flex'; }
+function hideGuide(): void { guideOpen = false; guideEl.style.display = 'none'; }
+
+/** Small pixelated icon canvas for an item id. */
+function guideIcon(id: number, px: number): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = 32; c.height = 32;
+  c.style.cssText = `width:${px}px;height:${px}px;image-rendering:pixelated`;
+  renderItemIcon(c, atlas.canvas, id);
+  return c;
+}
+
+const GUIDE_SECTIONS = [
+  'Combat', 'Gadgets & Toys', 'War & Factions', 'Automation',
+  'Tools, Armor & Travel', 'Building', 'Materials',
+];
+const COMBAT_IDS = new Set<number>([
+  Item.Pistol, Item.Rifle, Item.RocketLauncher, Item.Shotgun, Item.SMG,
+  Item.Sniper, Item.BurstRifle, Item.Bullet, Item.Rocket,
+]);
+const WAR_IDS = new Set<number>([
+  Block.Core, Block.Turret, Block.ShipHelm, Block.Cannon, Item.Cannonball,
+]);
+function guideCategory(id: number): string {
+  if (gadgetOf(id)) return 'Gadgets & Toys';
+  if (COMBAT_IDS.has(id)) return 'Combat';
+  if (WAR_IDS.has(id)) return 'War & Factions';
+  if (id === Block.Autominer || id === Block.OilDerrick) return 'Automation';
+  const info = ITEMS[id];
+  if (info?.tool || info?.armor || info?.glider) return 'Tools, Armor & Travel';
+  if (info?.kind === 'block') return 'Building';
+  return 'Materials';
+}
+
+/** Render a recipe's ingredient grid (3×3 for shaped, a row for shapeless). */
+function recipeGrid(r: Recipe): HTMLElement {
+  const wrap = document.createElement('div');
+  const first = (ing: number | number[]): number => Array.isArray(ing) ? ing[0] : ing;
+  if (r.kind === 'shaped') {
+    const cols = Math.max(...r.pattern.map((row) => row.length));
+    wrap.style.cssText = `display:grid;grid-template-columns:repeat(${cols},22px);gap:2px`;
+    for (const row of r.pattern) {
+      for (let c = 0; c < cols; c++) {
+        const cell = document.createElement('div');
+        cell.style.cssText = 'width:22px;height:22px;background:#0c0f18;border:1px solid #2a3550;border-radius:3px;display:flex;align-items:center;justify-content:center';
+        const ing = row[c];
+        if (ing !== null && ing !== undefined) cell.appendChild(guideIcon(first(ing), 18));
+        wrap.appendChild(cell);
+      }
+    }
+  } else {
+    wrap.style.cssText = 'display:flex;gap:2px;flex-wrap:wrap';
+    for (const ing of r.items) {
+      const cell = document.createElement('div');
+      cell.style.cssText = 'width:22px;height:22px;background:#0c0f18;border:1px solid #2a3550;border-radius:3px;display:flex;align-items:center;justify-content:center';
+      cell.appendChild(guideIcon(first(ing), 18));
+      wrap.appendChild(cell);
+    }
+  }
+  return wrap;
+}
+
+function buildGuide(): void {
+  guidePanel.replaceChildren();
+  const header = document.createElement('div');
+  header.style.cssText =
+    'position:sticky;top:0;background:#10131c;display:flex;align-items:center;gap:10px;' +
+    'padding:12px 16px;border-bottom:1px solid #232a40;z-index:1';
+  header.innerHTML = `<div style="flex:1;font-size:15px;color:#ffd84a;letter-spacing:1px">📖 CRAFTING GUIDE</div>`;
+  const close = document.createElement('button');
+  close.textContent = '✕';
+  close.style.cssText = 'width:26px;height:26px;cursor:pointer;border:1px solid #3a4666;border-radius:5px;background:#1c2335;color:#cdd6ee;font-size:13px';
+  close.addEventListener('click', hideGuide);
+  header.appendChild(close);
+  guidePanel.appendChild(header);
+
+  // Group recipes by category, keeping one entry per result item.
+  const byCat = new Map<string, Recipe[]>();
+  const seen = new Set<number>();
+  for (const r of RECIPES) {
+    if (seen.has(r.result.id)) continue;
+    seen.add(r.result.id);
+    const cat = guideCategory(r.result.id);
+    if (!byCat.has(cat)) byCat.set(cat, []);
+    byCat.get(cat)!.push(r);
+  }
+
+  for (const cat of GUIDE_SECTIONS) {
+    const recipes = byCat.get(cat);
+    if (!recipes?.length) continue;
+    const h = document.createElement('div');
+    h.textContent = cat.toUpperCase();
+    h.style.cssText = 'padding:10px 16px 4px;font-size:11px;letter-spacing:2px;color:#7f8db0;border-top:1px solid #232a40';
+    guidePanel.appendChild(h);
+    for (const r of recipes) {
+      const id = r.result.id, info = ITEMS[id];
+      const card = document.createElement('div');
+      card.style.cssText = 'display:flex;align-items:center;gap:12px;padding:8px 16px;border-bottom:1px solid #1a2032';
+      const icon = guideIcon(id, 38);
+      icon.style.flex = '0 0 auto';
+      const mid = document.createElement('div');
+      mid.style.cssText = 'flex:1;min-width:0';
+      const desc = itemDescription(id);
+      mid.innerHTML =
+        `<div style="color:#e7edf7">${info?.name ?? id}${r.result.count > 1 ? ` <span style="color:#7f8db0">×${r.result.count}</span>` : ''}</div>` +
+        (desc ? `<div style="color:#8f9ec0;font-size:11px">${desc}</div>` : '');
+      const grid = recipeGrid(r);
+      grid.style.flex = '0 0 auto';
+      card.append(icon, mid, grid);
+      guidePanel.appendChild(card);
+    }
+  }
+}
+buildGuide();
 
 function frame(): void {
   requestAnimationFrame(frame);
@@ -2468,6 +2692,13 @@ function frame(): void {
     if (!net.connected) updatePoliticsOffline();
     updateRallyHud();
     tickDisguises(dt); // Phase 8: expire spy disguises on remote avatars
+    updateThrownItems(dt); // animate tossed grenades/bombs
+    // Jump Boost: zero fall distance while the immunity window is active.
+    if (jumpImmuneUntil > 0) {
+      player.fallDistance = 0;
+      if (worldTimeLocal >= jumpImmuneUntil || (player.onGround && player.vel.y <= 0)) jumpImmuneUntil = 0;
+    }
+    updateHeldGadgetTip();
     if (regionBannerTimer > 0) {
       regionBannerTimer -= dt;
       if (regionBannerTimer <= 0) regionBannerEl.style.display = 'none';
@@ -2543,6 +2774,10 @@ function frame(): void {
     ammoEl.style.display = 'none';
   }
   hud.update();
+  hud.updateCooldowns();
+  // The Crafting Guide button shows whenever a crafting table is open.
+  guideBtn.style.display = (invUI.open && invUI.mode === 'table' && !guideOpen) ? 'block' : 'none';
+  if (guideOpen && !(invUI.open && invUI.mode === 'table')) hideGuide();
   hud.updateStatus({
     health: player.health,
     energy: player.energy,

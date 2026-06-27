@@ -1284,6 +1284,15 @@ function paintSpyDisguise(p: Painter, seed: number): void {
   for (let x = 5; x <= 10; x++) p.set(x, 7, [20, 20, 26, 255]); // mask band
   p.set(6, 7, [220, 220, 230, 255]); p.set(9, 7, [220, 220, 230, 255]); // eye holes
 }
+function paintJumpBoost(p: Painter, seed: number): void {
+  paintGadgetBody(p, seed, [60, 120, 70, 255], [90, 170, 100, 255]);
+  // a coiled spring + up-arrows
+  const steel: RGBA = [200, 206, 214, 255];
+  for (let y = 6; y <= 12; y += 2) for (let x = 5; x <= 10; x++) p.set(x, y, steel);
+  for (let x = 5; x <= 10; x++) p.set(x, 13, [120, 124, 130, 255]); // base plate
+  p.set(7, 4, [230, 240, 180, 255]); p.set(8, 4, [230, 240, 180, 255]); // up tip
+  p.set(6, 5, [230, 240, 180, 255]); p.set(9, 5, [230, 240, 180, 255]);
+}
 
 const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.GrassTop]: paintGrassTop,
@@ -1441,6 +1450,7 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.WarHorn]: paintWarHorn,
   [Tile.OilBomb]: paintOilBomb,
   [Tile.SpyDisguise]: paintSpyDisguise,
+  [Tile.JumpBoost]: paintJumpBoost,
 };
 
 export function createAtlas(seed = 1337): Atlas {

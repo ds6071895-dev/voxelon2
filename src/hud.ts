@@ -65,6 +65,9 @@ export class HUD {
   private readonly slots: HTMLDivElement[] = [];
   private readonly icons: HTMLCanvasElement[] = [];
   private readonly counts: HTMLSpanElement[] = [];
+  private readonly cooldowns: HTMLDivElement[] = [];
+  /** Returns 0..1 of an item's cooldown remaining (1 = just used). */
+  cooldownOf?: (itemId: number) => number;
   private readonly debugEl: HTMLElement;
   private readonly nameEl: HTMLDivElement;
   private nameTimer: number | undefined;
@@ -86,12 +89,21 @@ export class HUD {
       icon.height = 32;
       const count = document.createElement('span');
       count.className = 'count mc-font';
+      // Cooldown sweep overlay (ender-pearl style: a dark band that shrinks from
+      // full to empty as the cooldown elapses).
+      const cd = document.createElement('div');
+      cd.style.cssText =
+        'position:absolute;left:0;right:0;bottom:0;height:0;pointer-events:none;' +
+        'background:rgba(10,14,22,0.6);';
+      slot.style.position = 'relative';
       slot.appendChild(icon);
       slot.appendChild(count);
+      slot.appendChild(cd);
       hotbar.appendChild(slot);
       this.slots.push(slot);
       this.icons.push(icon);
       this.counts.push(count);
+      this.cooldowns.push(cd);
     }
 
     // Item name popup above the hotbar, like vanilla.
@@ -112,6 +124,16 @@ export class HUD {
     const selectionChanged = this.inventory.selected !== this.lastSelected;
     this.refresh();
     if (selectionChanged) this.showName();
+  }
+
+  /** Refresh the per-slot cooldown sweep (call every frame; cheap). */
+  updateCooldowns(): void {
+    if (!this.cooldownOf) return;
+    for (let i = 0; i < HOTBAR_SIZE; i++) {
+      const stack = this.inventory.slots[i];
+      const frac = stack ? Math.max(0, Math.min(1, this.cooldownOf(stack.id))) : 0;
+      this.cooldowns[i].style.height = `${frac * 100}%`;
+    }
   }
 
   private refresh(): void {

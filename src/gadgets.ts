@@ -17,12 +17,18 @@ export type GadgetKind =
   | 'smoke'     // thrown smoke screen — cosmetic vision cloud
   | 'horn'      // war horn — a Commander/Officer triggers a faction combat buff
   | 'oil'       // oil bomb — a bigger AoE that spends oil
-  | 'disguise'; // spy disguise — look like the enemy faction for a while
+  | 'disguise'  // spy disguise — look like the enemy faction for a while
+  | 'jump';     // jump boost — a single-use, ~20-block vertical launch
+
+/** Throwable gadget kinds get an in-air tossed item + a detonation point. */
+export const THROWN_KINDS = new Set<GadgetKind>(['frag', 'oil', 'smoke']);
 
 export interface GadgetDef {
   item: number;
   tile: number;
   name: string;
+  /** One-line description shown under the name + in the crafting guide. */
+  desc: string;
   kind: GadgetKind;
   /** Seconds between uses (per gadget id). */
   cooldown: number;
@@ -43,39 +49,53 @@ export interface GadgetDef {
 export const GADGETS: Record<number, GadgetDef> = {
   [Item.Grenade]: {
     item: Item.Grenade, tile: Tile.Grenade, name: 'Frag Grenade', kind: 'frag',
+    desc: 'Throw it — explodes for area damage on enemies. Left-click to toss.',
     cooldown: 1.2, maxStack: 16, consumed: true, radius: 5, damage: 22, fuse: 1.4,
   },
   [Item.C4]: {
     item: Item.C4, tile: Tile.C4, name: 'C4 Charge', kind: 'c4',
+    desc: 'Plant on an ENEMY base, then it detonates — smashes their shield.',
     cooldown: 2, maxStack: 8, consumed: true, radius: 3, damage: 200, fuse: 3,
   },
   [Item.GrapplingHook]: {
     item: Item.GrapplingHook, tile: Tile.GrapplingHook, name: 'Grappling Hook', kind: 'grapple',
+    desc: 'Aim at a block and yank yourself to it. Reusable. Great for cliffs.',
     cooldown: 2.5, maxStack: 1, consumed: false, radius: 40,
   },
   [Item.DeployCover]: {
     item: Item.DeployCover, tile: Tile.DeployCover, name: 'Deployable Cover', kind: 'cover',
+    desc: 'Drops an instant blast wall in front of you for cover.',
     cooldown: 4, maxStack: 8, consumed: true, radius: 2,
   },
   [Item.SentryKit]: {
     item: Item.SentryKit, tile: Tile.SentryKit, name: 'Sentry Kit', kind: 'sentry',
+    desc: 'Deploys an auto-targeting turret. Load it with cannonballs + oil.',
     cooldown: 5, maxStack: 4, consumed: true,
   },
   [Item.SmokeGrenade]: {
     item: Item.SmokeGrenade, tile: Tile.SmokeGrenade, name: 'Smoke Grenade', kind: 'smoke',
+    desc: 'Throw it for a vision-blocking smoke screen. No damage — pure cover.',
     cooldown: 2, maxStack: 16, consumed: true, radius: 6, fuse: 0.8, duration: 9,
   },
   [Item.WarHorn]: {
     item: Item.WarHorn, tile: Tile.WarHorn, name: 'War Horn', kind: 'horn',
+    desc: 'Commanders/Officers only: rally the faction with a combat buff.',
     cooldown: 60, maxStack: 1, consumed: false, duration: 25,
   },
   [Item.OilBomb]: {
     item: Item.OilBomb, tile: Tile.OilBomb, name: 'Oil Bomb', kind: 'oil',
+    desc: 'A big oil-fuelled blast (spends 1 oil barrel). Wider than a grenade.',
     cooldown: 6, maxStack: 8, consumed: true, radius: 7, damage: 30, fuse: 1.6, oilCost: 1,
   },
   [Item.SpyDisguise]: {
     item: Item.SpyDisguise, tile: Tile.SpyDisguise, name: 'Spy Disguise', kind: 'disguise',
+    desc: 'Look like the enemy to other players for a while — infiltrate + spy.',
     cooldown: 30, maxStack: 1, consumed: false, duration: 45,
+  },
+  [Item.JumpBoost]: {
+    item: Item.JumpBoost, tile: Tile.JumpBoost, name: 'Jump Boost', kind: 'jump',
+    desc: 'ONE USE: left-click to launch ~20 blocks straight up. No fall damage.',
+    cooldown: 0.5, maxStack: 8, consumed: true,
   },
 };
 

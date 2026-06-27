@@ -71,6 +71,7 @@ import {
 import {
   GADGETS, isGadget, gadgetOf, GadgetCooldowns, falloffDamage,
 } from '../src/gadgets';
+import { itemDescription } from '../src/itemdesc';
 import { Accounts, validUsername } from '../src/net/accounts';
 import {
   Claims, GRACE_PERIOD, MAX_SHIELD_HP, OIL_PER_BARREL, chunkOf, claimChunkKeys,
@@ -2416,12 +2417,13 @@ check('furnace smelts ore/sand/log but not removed foods',
 
 // --- Gadgets (Phase 8): registry, cooldowns, AoE, server effects -------------
 {
-  // Registry: nine gadgets, each with sane params.
+  // Registry: ten gadgets, each with sane params + a description.
   const ids = Object.keys(GADGETS).map(Number);
-  check('all nine gadgets are registered with valid params',
-    ids.length === 9 && ids.every((id) => {
+  check('all gadgets are registered with valid params + descriptions',
+    ids.length === 10 && ids.every((id) => {
       const d = GADGETS[id];
-      return isGadget(id) && gadgetOf(id) === d && d.item === id && d.cooldown > 0 && d.maxStack > 0;
+      return isGadget(id) && gadgetOf(id) === d && d.item === id && d.cooldown > 0 &&
+        d.maxStack > 0 && typeof d.desc === 'string' && d.desc.length > 0;
     }));
 
   // AoE falloff: full at the centre, linear, zero at/after the radius.
@@ -2486,6 +2488,25 @@ check('furnace smelts ore/sand/log but not removed foods',
   check('spy disguise broadcasts to OTHERS as the enemy faction',
     dis.some((o) => o.msg.t === 'disguised' && o.to === 'others' &&
       (o.msg as { faction: number }).faction === 1));
+
+  // Item descriptions: gadgets pull from the registry; war items from the map.
+  check('itemDescription serves gadget + static blurbs, blank otherwise',
+    itemDescription(Item.Grenade) === GADGETS[Item.Grenade].desc &&
+    itemDescription(Item.RocketLauncher).length > 0 &&
+    itemDescription(Item.Stick) === '');
+}
+
+// --- Faction-aware spawn: never drop into enemy/neutral territory ------------
+{
+  const opening = initialOwners();
+  for (const seed of [50, 51, 52, 7, 99]) {
+    const g = new GameServer(1337, mulberry32(seed));
+    const w = g.addPlayer(1).find((o) => o.msg.t === 'welcome')!.msg as
+      { players: { id: number; faction: number; x: number; z: number }[] };
+    const me = w.players[w.players.length - 1];
+    check(`a player (seed ${seed}) spawns inside their own faction territory`,
+      opening[regionOf(me.x, me.z)] === me.faction);
+  }
 }
 
 // --- Accounts: login / register foundation -----------------------------------

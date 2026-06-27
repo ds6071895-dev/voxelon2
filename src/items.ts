@@ -66,6 +66,7 @@ export const enum Item {
   WarHorn = 156,
   OilBomb = 157,
   SpyDisguise = 158,
+  JumpBoost = 159,
 }
 
 export interface ToolInfo {
@@ -366,6 +367,7 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Item.WarHorn]: gadgetItem('War Horn', Tile.WarHorn, 1),
   [Item.OilBomb]: gadgetItem('Oil Bomb', Tile.OilBomb, 8),
   [Item.SpyDisguise]: gadgetItem('Spy Disguise', Tile.SpyDisguise, 1),
+  [Item.JumpBoost]: gadgetItem('Jump Boost', Tile.JumpBoost, 8),
 };
 
 /**

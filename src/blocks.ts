@@ -236,6 +236,7 @@ export const enum Tile {
   WarHorn = 139,
   OilBomb = 140,
   SpyDisguise = 141,
+  JumpBoost = 142,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel';

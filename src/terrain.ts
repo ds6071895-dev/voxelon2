@@ -490,6 +490,25 @@ export class Terrain {
     return this.findSpawn();
   }
 
+  /** A dry spawn column inside a rectangular world-coord region (faction-aware
+   *  spawns, Phase: you only drop in your own territory). Random tries first,
+   *  then a coarse grid scan, then the global findSpawn as a last resort. */
+  drySpawnInBounds(
+    rng: () => number, minX: number, maxX: number, minZ: number, maxZ: number,
+  ): { x: number; z: number; y: number } {
+    for (let i = 0; i < 400; i++) {
+      const x = Math.round(minX + rng() * (maxX - minX));
+      const z = Math.round(minZ + rng() * (maxZ - minZ));
+      if (this.safeSpawnColumn(x, z)) return { x: x + 0.5, z: z + 0.5, y: this.height(x, z) + 1 };
+    }
+    for (let x = Math.ceil(minX); x <= maxX; x += 3) {
+      for (let z = Math.ceil(minZ); z <= maxZ; z += 3) {
+        if (this.safeSpawnColumn(x, z)) return { x: x + 0.5, z: z + 0.5, y: this.height(x, z) + 1 };
+      }
+    }
+    return this.findSpawn();
+  }
+
   /** Find a dry spawn column near the origin (square-spiral search). */
   findSpawn(): { x: number; z: number; y: number } {
     const dry = (x: number, z: number) => this.safeSpawnColumn(x, z);
