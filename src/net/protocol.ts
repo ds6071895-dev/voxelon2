@@ -91,6 +91,10 @@ export type ClientMsg =
   | { t: 'machineCollect'; x: number; y: number; z: number }
   | { t: 'machineHit'; x: number; y: number; z: number; amount: number } // sabotage/raid
   | { t: 'machineClaim'; x: number; y: number; z: number }
+  // Relocate a placed machine (you can't break it, only MOVE it): the server
+  // clears the old footprint and rebuilds it at the target, preserving level/
+  // storage/filter/stored/owner. Both ends must be within reach of the player.
+  | { t: 'machineMove'; x: number; y: number; z: number; tx: number; ty: number; tz: number }
   // Ships (warfare M14): captured-block vehicles.
   | { t: 'shipLaunch'; x: number; y: number; z: number }  // helm world pos
   | { t: 'shipSteer'; id: number; thrust: number; turn: number }
@@ -130,6 +134,9 @@ export type ClientMsg =
   // item id; the server derives the effect kind + params. (frag/oil/smoke use the
   // detonation point; horn/disguise ignore it; other kinds are client-handled.)
   | { t: 'gadgetUse'; item: number; x: number; y: number; z: number }
+  // Personal respawn point: right-clicking a Respawn Beacon sets the player's
+  // spawn to that block. The server validates the block + range and remembers it.
+  | { t: 'setSpawn'; x: number; y: number; z: number }
   // Persistence: the client periodically pushes its owned state (inventory +
   // hotbar + position) for the server to store against the account and restore
   // on next login. Opaque blob — the server treats it as data, not authority.

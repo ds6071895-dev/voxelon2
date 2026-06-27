@@ -24,18 +24,21 @@ export const MAX_LEVEL = 100;         // production levels (hundreds-deep grind)
 export const MAX_STORAGE_LEVEL = 100; // storage capacity levels
 const STORAGE_BASE = 96;              // items of capacity per storage level
 
-// Production is deliberately SLOW and scales linearly with level, while upgrade
-// cost grows GEOMETRICALLY (see upgradeCost) — so a machine can never bankroll
-// its own upgrades from its output, and reaching high levels is a long grind.
-const BASE_RATE = 0.03;               // extractions/sec per unit richness, per level
-const COST_GROWTH = 1.15;             // geometric per-level cost multiplier
+// Production scales linearly with level; upgrade cost grows GEOMETRICALLY (see
+// upgradeCost). The curve was eased (faster base yield, gentler growth, cobalt
+// gate pushed later) so the early-to-mid grind isn't punishing — but a maxed rig
+// still can't fully bankroll its own upgrades (cobalt/diamond it can't produce).
+const BASE_RATE = 0.05;               // extractions/sec per unit richness, per level
+const COST_GROWTH = 1.11;             // geometric per-level cost multiplier
 const FILTER_MID_LEVEL = 10;          // unlocks gold + redstone
 const FILTER_HIGH_LEVEL = 30;         // unlocks diamond + titanium
 
-// Machines are destructible (sabotage/raid). HP grows a little with production
-// level so a maxed rig is tougher to take down.
-const MACHINE_BASE_HP = 80;
-const MACHINE_HP_PER_LEVEL = 2;
+// Machines are deliberately TANKY: they can't be destroyed by bullets (guns hit
+// players only) and shrug off melee sabotage for hundreds of hits — the only
+// practical way to take one down is an EXPLOSIVE (a grenade detonates it
+// outright, see GameServer.handleGadget). HP scales up with production level.
+const MACHINE_BASE_HP = 4000;
+const MACHINE_HP_PER_LEVEL = 40;
 const MAX_OWNER_LEN = 24;
 
 // Oil below this richness yields nothing — a derrick is dead on dry ground.
@@ -253,14 +256,14 @@ export function upgradeCost(
       [Item.IronIngot]: pow(6, L - 1),
       [Item.Redstone]: pow(4, L - 1),
     };
-    if (L >= 8) cost[Item.CobaltIngot] = pow(2, L - 8);
-    if (L >= 20) cost[Item.Diamond] = pow(1, L - 20);
+    if (L >= 12) cost[Item.CobaltIngot] = pow(2, L - 12);
+    if (L >= 30) cost[Item.Diamond] = pow(1, L - 30);
     return cost;
   }
   if (state.storageLevel >= MAX_STORAGE_LEVEL) return null;
   const L = state.storageLevel;
   const cost: Record<number, number> = { [Item.IronIngot]: pow(4, L - 1) };
-  if (L >= 10) cost[Item.CobaltIngot] = pow(2, L - 10);
+  if (L >= 15) cost[Item.CobaltIngot] = pow(2, L - 15);
   return cost;
 }
 

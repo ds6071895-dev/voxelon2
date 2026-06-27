@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { GameAudio, materialOf } from './audio';
-import { Block, BLOCKS } from './blocks';
+import { Block, BLOCKS, isReplaceable } from './blocks';
 import { Furnaces } from './furnace';
 import { HeldItemView } from './held';
 import { HUD } from './hud';
@@ -16,7 +16,7 @@ import { renderItemIcon } from './icons';
 import { itemDescription } from './itemdesc';
 import {
   Machines, MachineType, allowedFilterMask, applyUpgrade, claimMachine,
-  collectMachine, currentRate, damageMachine, machineHeight, machineTypeForBlock,
+  collectMachine, currentRate, machineHeight, machineTypeForBlock,
   sanitizeState, setFilter, upgradeCost,
 } from './machines';
 import { ItemEntities } from './itementity';
@@ -552,8 +552,53 @@ function machineCtxFor(x: number, y: number, z: number): MachineUIContext {
       claimMachine(s, net.connected ? net.username : 'You'); // local predict
       if (net.connected) net.sendMachineClaim(x, y, z);
     },
+    move: () => {
+      if (!here()) return;
+      const fromX = x, fromY = y, fromZ = z;
+      forceCloseMachine();
+      if (invUI.open && invUI.mode === 'machine') invUI.hide();
+      if (worldReady) input.lock();
+      showNotice('✋ Right-click where to move the machine.');
+      interaction.armedMove = (px, py, pz) => moveMachine(fromX, fromY, fromZ, px, py, pz);
+    },
     myName: () => (net.connected ? net.username : 'You'),
   };
+}
+
+/** Relocate a placed machine to a new anchor cell. You can't break a machine,
+ *  only MOVE it — so this preserves its level/storage/filter/stored output.
+ *  Online the server does the authoritative move + echoes the edits; offline we
+ *  carry the local MachineState object across to the new footprint. */
+function moveMachine(
+  fromX: number, fromY: number, fromZ: number, px: number, py: number, pz: number
+): void {
+  const s = machines.get(fromX, fromY, fromZ);
+  if (!s) return;
+  const type = s.type;
+  const h = machineHeight(type);
+  // Validate the destination column is clear (cells being vacated count as free).
+  for (let k = 0; k < h; k++) {
+    const cy = py + k;
+    const vacating = px === fromX && pz === fromZ && cy >= fromY && cy < fromY + h;
+    if (cy < 0 || cy >= 256 || (!vacating && !isReplaceable(world.getBlock(px, cy, pz)))) {
+      showNotice('No room to move it there.');
+      return;
+    }
+  }
+  if (net.connected) {
+    net.sendMachineMove(fromX, fromY, fromZ, px, py, pz); // server echoes edits + state
+    audio.place(materialOf(Block.Autominer), new THREE.Vector3(px + 0.5, py + 0.5, pz + 0.5));
+    return;
+  }
+  // Offline: move the footprint + the live state object locally.
+  const blockId = type === MachineType.OilDerrick ? Block.OilDerrick : Block.Autominer;
+  for (let k = 0; k < h; k++) world.applyRemoteEdit(fromX, fromY + k, fromZ, Block.Air);
+  machines.remove(fromX, fromY, fromZ); // deletes the map entry; `s` keeps the data
+  world.setBlock(px, py, pz, blockId);
+  for (let k = 1; k < h; k++) world.setBlock(px, py + k, pz, Block.MachinePart);
+  machines.set(px, py, pz, s);
+  audio.place(materialOf(blockId), new THREE.Vector3(px + 0.5, py + 0.5, pz + 0.5));
+  showNotice('Machine moved!');
 }
 function forceCloseMachine(): void {
   openMachine = null;
@@ -634,6 +679,17 @@ function resolveMachineAnchor(x: number, y: number, z: number): { x: number; y: 
 // Offline destroy: spill loot + drop the machine block once, then silently
 // clear the whole footprint (applyRemoteEdit suppresses the break hook so we
 // don't double-drop), and close the UI if we were viewing it.
+/** Demolish every placed machine whose anchor is within `radius` of a blast
+ *  (offline only; the server does this authoritatively online). */
+function destroyMachinesNear(center: THREE.Vector3, radius: number): void {
+  const r = radius + 1.5;
+  for (const m of machines.list()) {
+    if (Math.hypot(m.x + 0.5 - center.x, m.y + 0.5 - center.y, m.z + 0.5 - center.z) <= r) {
+      destroyMachineLocal(m.x, m.y, m.z);
+    }
+  }
+}
+
 function destroyMachineLocal(ax: number, ay: number, az: number): void {
   const s = machines.get(ax, ay, az);
   if (!s) return;
@@ -648,8 +704,9 @@ function destroyMachineLocal(ax: number, ay: number, az: number): void {
   }
 }
 
-// Sabotage: a left-click on a machine block damages its HP; at 0 it's destroyed
-// (server-authoritative in MP; local offline) and drops its loot + block.
+// Sabotage: left-click damages turret HP. Machines are explosive-only (a left
+// click just reminds the player); the hint is throttled so it doesn't spam.
+let lastSabotageHint = -10;
 interaction.onSabotage = (x, y, z) => {
   const held = inventory.selectedStack;
   const tool = held ? ITEMS[held.id]?.tool : undefined;
@@ -676,11 +733,11 @@ interaction.onSabotage = (x, y, z) => {
   }
   const a = resolveMachineAnchor(x, y, z);
   if (!a) return;
-  if (net.connected) {
-    net.sendMachineHit(a.x, a.y, a.z, dmg);
-  } else {
-    const s = machines.get(a.x, a.y, a.z);
-    if (s && damageMachine(s, dmg)) destroyMachineLocal(a.x, a.y, a.z);
+  // Machines are immune to bullets + melee — the ONLY way to take one down is an
+  // explosive (a grenade detonates it). Tell the player instead of chipping HP.
+  if (worldTimeLocal - lastSabotageHint > 1.2) {
+    lastSabotageHint = worldTimeLocal;
+    showNotice('💥 Machines only break to explosives — use a grenade!');
   }
 };
 // Right-click a placed (not-yet-launched) Ship Helm to capture + launch its hull.
@@ -690,6 +747,17 @@ interaction.onUseHelm = (hx, hy, hz) => {
     return;
   }
   launchShipLocal(hx, hy, hz);
+};
+// Right-click a Respawn Beacon to set your personal respawn point there.
+interaction.onSetSpawn = (x, y, z) => {
+  if (net.connected) {
+    net.sendSetSpawn(x, y, z); // server validates the block + range, replies notice
+  } else {
+    localSpawn = { x, y, z };
+    showNotice('✅ Respawn point set!');
+  }
+  particles.burst(x + 0.5, y + 1.1, z + 0.5, 18, 0x88ff99, 2.4, 0.9);
+  audio.place(materialOf(Block.RespawnBeacon), new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
 };
 invUI.onClose = () => {
   if (openChest) {
@@ -2063,8 +2131,19 @@ function updatePoliticsOffline(): void {
 
 /** Drop the (offline) player into a region their faction controls — never enemy
  *  land. Mirrors the server's faction-aware spawn. */
+// Personal respawn point set via a Respawn Beacon (offline; online the server
+// tracks it). Cleared if the beacon block is gone when we try to use it.
+let localSpawn: { x: number; y: number; z: number } | null = null;
+
 function spawnInOwnTerritory(): void {
   if (net.connected) return; // online: the server places us
+  // A personal Respawn Beacon (still standing) overrides the faction spawn.
+  if (localSpawn && world.getBlock(localSpawn.x, localSpawn.y, localSpawn.z) === Block.RespawnBeacon) {
+    player.pos.set(localSpawn.x + 0.5, localSpawn.y + 1, localSpawn.z + 0.5);
+    player.vel.set(0, 0, 0);
+    return;
+  }
+  localSpawn = null; // beacon gone — forget the stale point
   let pick = localRegions.ownerAt(capitalOf(localFaction)) === localFaction ? capitalOf(localFaction) : -1;
   if (pick < 0) {
     for (let i = 0; i < REGION_COUNT; i++) if (localRegions.ownerAt(i) === localFaction) { pick = i; break; }
@@ -2198,10 +2277,16 @@ function useGadget(def: GadgetDef): void {
       consume();
       // Toss the item through the air; the blast/fx fire when it lands.
       const kind = def.kind, item = def.item;
+      const blastR = def.radius ?? 4;
       tossItem(THROW_COLOR[kind] ?? 0x888888, new THREE.Vector3(tgt.x, tgt.y, tgt.z), (land) => {
         if (net.connected) net.sendGadgetUse(item, land.x, land.y, land.z);
         gadgetFxAt(kind, land.x, land.y, land.z);
-        if (kind !== 'smoke') mobs.explode(land, player); // local block/mob blast
+        if (kind !== 'smoke') {
+          mobs.explode(land, player); // local block/mob blast
+          // Machines are immune to bullets/melee but DEMOLISHED by an explosive.
+          // Online the server does this; offline we blow them up locally.
+          if (!net.connected) destroyMachinesNear(land, blastR);
+        }
       });
       break;
     }
@@ -2628,6 +2713,15 @@ function frame(): void {
         const wantFire = heldGun.auto ? input.leftDown : input.leftClicked;
         if (wantFire && fireCooldown <= 0 && reloadTimer <= 0) tryFire(heldStack!, heldGun);
         interaction.update(dt, input, camera, true, true);
+      } else if (input.rightClicked &&
+          heldStack && ITEMS[heldStack.id]?.armor?.slot === 'chestplate') {
+        // Right-click a chestplate-slot item straight from the hotbar to equip it
+        // into the chest slot — and SWAP: a glider swaps with a worn chestplate
+        // (and vice-versa), since equip() puts the displaced item back in-hand.
+        inventory.tryEquipArmor(inventory.selected);
+        showNotice(heldStack.id === Item.Glider ? 'Glider equipped!' : 'Chestplate equipped!');
+        pushStateSave();
+        interaction.update(dt, input, camera, true, true); // suppress mine + use
       } else {
         // Melee no longer hits players — PvP is guns-only now. Left-click still
         // fights MOBS, otherwise mines the block. Priority: mob > mine.

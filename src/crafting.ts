@@ -126,6 +126,10 @@ export const RECIPES: Recipe[] = [
   // an expensive end-game build that anchors a faction's protected land.
   shaped([[T, D, T], [Cb, D, Cb], [I, I, I]], Block.Core),
 
+  // Respawn Beacon: a cheap personal spawn block (a redstone-lit stone plinth).
+  // Right-click to set your spawn; easily broken so it's a soft, contestable point.
+  shaped([[C, R, C], [C, I, C], [C, C, C]], Block.RespawnBeacon),
+
   // Glider: an early-game pair of wings — stick struts over plank membranes.
   // Cheap on purpose (worn in the chest slot, wears out fast).
   shaped([[S, S, S], [P, null, P]], Item.Glider),

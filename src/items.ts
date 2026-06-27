@@ -257,6 +257,8 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Item.Cannonball]: pureItem('Cannonball', Tile.Cannonball),
   // Factions (M18): claim Core block.
   [Block.Core]: blockItem(Block.Core),
+  // Personal respawn point block (right-click to set spawn).
+  [Block.RespawnBeacon]: blockItem(Block.RespawnBeacon),
   // Terrain (M21): mesa + ashlands materials (Lava is a liquid, like Water).
   [Block.RedSand]: blockItem(Block.RedSand),
   [Block.Terracotta]: blockItem(Block.Terracotta),

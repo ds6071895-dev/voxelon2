@@ -17,16 +17,21 @@ const CLOUD_TEX = 64;     // texels per repeat
 const CLOUD_PLANE = 4096; // world units
 const CLOUD_REPEAT = 4;   // -> one cloud cell = 16 blocks, like vanilla
 
+/** Moonlit-night skylight floor. Higher than vanilla so the world stays
+ *  PLAYABLE at night (you can still see) while reading clearly as night —
+ *  the sky itself, stars and fog still go dark (those track `s`, not this). */
+export const NIGHT_FLOOR = 0.36;
+
 /**
  * Sunlight factor for a time of day in [0,1) (0 = sunrise, 0.25 = noon,
- * 0.5 = sunset, 0.75 = midnight). Clamped to 0.22 so moonlit nights keep
- * vanilla's faint skylight. Pure, for tests.
+ * 0.5 = sunset, 0.75 = midnight). Clamped to NIGHT_FLOOR so moonlit nights
+ * keep a comfortable, visible skylight. Pure, for tests.
  */
 export function daylight(tod: number): number {
   const sunHeight = Math.sin(tod * Math.PI * 2);
   const t = Math.min(1, Math.max(0, (sunHeight + 0.08) / 0.3));
   const s = t * t * (3 - 2 * t);
-  return 0.22 + 0.78 * s;
+  return NIGHT_FLOOR + (1 - NIGHT_FLOOR) * s;
 }
 
 export class Sky {
@@ -133,8 +138,10 @@ export class Sky {
     this.sunIntensity = daylight(tod);
 
     // Sky/fog color: night <-> day, blended toward orange near the horizon
-    // crossings (sunrise/sunset).
-    const s = (this.sunIntensity - 0.22) / 0.78;
+    // crossings (sunrise/sunset). `s` normalizes daylight back to 0..1 so the
+    // sky/stars still go fully dark at night even though the block-light floor
+    // (NIGHT_FLOOR) is raised for playability.
+    const s = (this.sunIntensity - NIGHT_FLOOR) / (1 - NIGHT_FLOOR);
     this.skyColor.copy(NIGHT_SKY).lerp(DAY_SKY, s);
     const sunsetAmount =
       Math.max(0, 1 - Math.abs(sunHeight) / 0.22) * (sunHeight > -0.15 ? 1 : 0);

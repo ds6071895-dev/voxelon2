@@ -137,8 +137,8 @@ const terrain = new Terrain(1337);
 
 // --- Day/night curve --------------------------------------------------------------
 check('daylight: noon full, midnight moonlit floor, dawn between',
-  daylight(0.25) === 1 && daylight(0.75) === 0.22 &&
-  daylight(0) > 0.22 && daylight(0) < 1);
+  daylight(0.25) === 1 && daylight(0.75) === 0.36 &&
+  daylight(0) > 0.36 && daylight(0) < 1);
 
 // --- Drop table (VOXELON: no apples/food) -----------------------------------------
 {
@@ -1447,8 +1447,9 @@ check('furnace smelts ore/sand/log but not removed foods',
     Extract<typeof claimed[number]['msg'], { t: 'machine' }>;
   check('a machine can be claimed (owner recorded)', cm.state.owner.length > 0);
 
-  // A lethal hit destroys it: spills stored loot + the machine block, clears it.
-  const kill = s.handle(1, { t: 'machineHit', x: 1, y: 70, z: 0, amount: 9999 });
+  // Machines are explosive-only: a grenade demolishes it — spilling stored loot +
+  // the machine block and clearing the world cell (same destroyMachine plumbing).
+  const kill = s.handle(1, { t: 'gadgetUse', item: Item.Grenade, x: 1, y: 70, z: 0 });
   const spills = kill.filter((o) => o.msg.t === 'itemspawn');
   const droppedMachine = spills.some((o) =>
     (o.msg as { item: { item: number } }).item.item === Block.Autominer);
@@ -1470,6 +1471,70 @@ check('furnace smelts ore/sand/log but not removed foods',
     s.handle(1, { t: 'machineHit', x: 1, y: 70, z: 0, amount: 9999 }).length === 0);
 }
 
+// --- Machine MOVE: relocate keeps upgrade state + clears the old footprint -----
+{
+  const s = new GameServer(1337, mulberry32(120));
+  s.addPlayer(1);
+  s.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+  s.handle(1, { t: 'edit', x: 1, y: 70, z: 0, block: Block.Autominer });
+  s.handle(1, { t: 'edit', x: 1, y: 71, z: 0, block: Block.MachinePart });
+  s.handle(1, { t: 'machineUpgrade', x: 1, y: 70, z: 0, axis: 'production' }); // -> level 2
+  const moved = s.handle(1, { t: 'machineMove', x: 1, y: 70, z: 0, tx: 2, ty: 70, tz: 0 });
+  const ns = moved.find((o) => o.msg.t === 'machine')?.msg as
+    Extract<typeof moved[number]['msg'], { t: 'machine' }> | undefined;
+  check('moving a machine carries its upgraded level to the new anchor',
+    !!ns && ns.x === 2 && ns.state.level === 2);
+  check('moving a machine clears the old footprint (anchor + part -> air)',
+    moved.some((o) => o.msg.t === 'edit' && o.msg.x === 1 && o.msg.y === 70 &&
+      (o.msg as { block: number }).block === Block.Air) &&
+    moved.some((o) => o.msg.t === 'edit' && o.msg.x === 1 && o.msg.y === 71 &&
+      (o.msg as { block: number }).block === Block.Air));
+  check('the moved machine opens at its new anchor, not the old one',
+    s.handle(1, { t: 'machineOpen', x: 2, y: 70, z: 0 }).length > 0 &&
+    s.handle(1, { t: 'machineOpen', x: 1, y: 70, z: 0 }).length === 0);
+  check('moving a machine out of reach is rejected',
+    s.handle(1, { t: 'machineMove', x: 2, y: 70, z: 0, tx: 500, ty: 70, tz: 500 }).length === 0);
+}
+
+// --- Machines are explosive-only: tanky vs melee/bullets, demolished by a grenade
+{
+  check('machines are extremely tanky (thousands of HP)',
+    machineMaxHp(newMachine(MachineType.Autominer)) >= 1000);
+  const s = new GameServer(1337, mulberry32(121));
+  s.addPlayer(1, { username: 'Boom', faction: 0 });
+  s.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+  s.handle(1, { t: 'edit', x: 1, y: 70, z: 0, block: Block.Autominer });
+  const boom = s.handle(1, { t: 'gadgetUse', item: Item.Grenade, x: 1, y: 70, z: 0 });
+  check('a grenade demolishes a machine (drops the block) and clears it',
+    boom.some((o) => o.msg.t === 'itemspawn' &&
+      (o.msg as { item: { item: number } }).item.item === Block.Autominer) &&
+    s.handle(1, { t: 'machineOpen', x: 1, y: 70, z: 0 }).length === 0);
+}
+
+// --- Respawn Beacon: right-click sets a personal spawn the respawn honors ------
+{
+  const s = new GameServer(1337, mulberry32(122));
+  s.addPlayer(1, { username: 'Homer', faction: 0 });
+  s.handle(1, { t: 'xform', x: 10.5, y: 70, z: 10.5, yaw: 0, pitch: 0 });
+  s.handle(1, { t: 'edit', x: 10, y: 70, z: 11, block: Block.RespawnBeacon });
+  check('setting spawn on a Respawn Beacon returns a notice',
+    s.handle(1, { t: 'setSpawn', x: 10, y: 70, z: 11 }).some((o) => o.msg.t === 'notice'));
+  s.handle(1, { t: 'selfhurt', amount: 100 });
+  const re = s.handle(1, { t: 'respawn' });
+  const rs = re.find((o) => o.msg.t === 'respawned')?.msg as
+    Extract<typeof re[number]['msg'], { t: 'respawned' }> | undefined;
+  check('respawn honors the Respawn Beacon (on top of it)',
+    !!rs && Math.floor(rs.x) === 10 && rs.y === 71 && Math.floor(rs.z) === 11);
+  // Break the beacon -> respawn falls back (no longer pinned to the old point).
+  s.handle(1, { t: 'edit', x: 10, y: 70, z: 11, block: Block.Air });
+  s.handle(1, { t: 'selfhurt', amount: 100 });
+  const re2 = s.handle(1, { t: 'respawn' });
+  const rs2 = re2.find((o) => o.msg.t === 'respawned')?.msg as
+    Extract<typeof re2[number]['msg'], { t: 'respawned' }> | undefined;
+  check('respawn falls back to faction spawn when the beacon is gone',
+    !!rs2 && !(rs2.y === 71 && Math.floor(rs2.x) === 10 && Math.floor(rs2.z) === 11));
+}
+
 // --- Multi-block footprint: placement column + footprint clears on destroy ----
 {
   check('footprint heights (anchor + parts)',
@@ -1484,7 +1549,7 @@ check('furnace smelts ore/sand/log but not removed foods',
   s.handle(1, { t: 'edit', x: 1, y: 71, z: 0, block: Block.MachinePart });
   for (let i = 0; i < 50; i++) s.tickMachines(1);
 
-  const kill = s.handle(1, { t: 'machineHit', x: 1, y: 70, z: 0, amount: 9999 });
+  const kill = s.handle(1, { t: 'gadgetUse', item: Item.Grenade, x: 1, y: 70, z: 0 });
   const airAt = new Set(kill.filter((o) => o.msg.t === 'edit' &&
     (o.msg as { block: number }).block === Block.Air)
     .map((o) => { const m = o.msg as { x: number; y: number; z: number }; return `${m.x},${m.y},${m.z}`; }));

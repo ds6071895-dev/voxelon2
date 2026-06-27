@@ -1220,6 +1220,30 @@ function paintCoreTop(p: Painter, seed: number): void {
   }
 }
 
+// Respawn Beacon: a stone plinth with a glowing green spawn rune (green so it
+// reads clearly apart from the cyan faction Core).
+function paintRespawnBeaconSide(p: Painter, seed: number): void {
+  paintMachineFrame(p, seed, [60, 70, 60, 255]);
+  const glow: RGBA = [120, 255, 150, 255];
+  // an upward arrow rune = "you respawn here"
+  for (let y = 4; y <= 11; y++) p.set(7, y, glow), p.set(8, y, glow);
+  for (let k = 0; k < 4; k++) {
+    p.set(5 + k, 7 - k, glow); p.set(10 - k, 7 - k, glow);
+  }
+}
+
+function paintRespawnBeaconTop(p: Painter, seed: number): void {
+  paintMachineFrame(p, seed, [70, 82, 70, 255]);
+  const glow: RGBA = [140, 255, 165, 255];
+  for (let y = 4; y <= 11; y++) {
+    for (let x = 4; x <= 11; x++) {
+      const d = Math.hypot(x - 7.5, y - 7.5);
+      if (d > 3.6) continue;
+      p.set(x, y, shade(glow, 1 - d * 0.16 + hash2(seed, x, y) * 0.08));
+    }
+  }
+}
+
 // --- Gadget sprites (Phase 8): a shared device-icon base + per-gadget motifs ---
 const GADGET_OUTLINE: RGBA = [18, 20, 26, 255];
 /** A rounded device body in `base`, dark-outlined, with a top cap in `accent`. */
@@ -1436,6 +1460,8 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.SprucePlanks]: paintSprucePlanks,
   [Tile.CoreSide]: paintCoreSide,
   [Tile.CoreTop]: paintCoreTop,
+  [Tile.RespawnBeaconSide]: paintRespawnBeaconSide,
+  [Tile.RespawnBeaconTop]: paintRespawnBeaconTop,
   [Tile.RedSand]: paintRedSand,
   [Tile.Terracotta]: paintTerracotta,
   [Tile.Basalt]: paintBasalt,

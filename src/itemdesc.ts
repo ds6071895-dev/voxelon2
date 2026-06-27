@@ -28,7 +28,9 @@ const DESCRIPTIONS: Record<number, string> = {
   [Item.OilBarrel]: 'Oil: feeds base shields, the treasury and oil bombs.',
   [Item.CobaltIngot]: 'A war-grade metal smelted from cobalt ore.',
   // Travel.
-  [Item.Glider]: 'Wear it in the chest slot; jump in mid-air to glide.',
+  [Item.Glider]: 'Wear it in the chest slot (right-click to equip); jump in mid-air to glide.',
+  // Respawn point.
+  [Block.RespawnBeacon]: 'Right-click to set your respawn point. Cheap + easily broken.',
 };
 
 /** A short description for an item, or '' if none. Gadgets win automatically. */

@@ -76,6 +76,9 @@ export interface MachineUIContext {
   canAfford(axis: UpgradeAxis): boolean;
   /** Claim ownership of the machine (sets owner to the local player). */
   claim(): void;
+  /** Arm "move mode": close the panel and let the player right-click a new spot
+   *  to relocate the machine (it can't be broken, only moved). */
+  move(): void;
   /** The local player's display name (to compare against the owner). */
   myName(): string;
 }
@@ -135,6 +138,7 @@ export class InventoryUI {
     storageBtn: HTMLButtonElement;
     collectBtn: HTMLButtonElement;
     claimBtn: HTMLButtonElement;
+    moveBtn: HTMLButtonElement;
   } | null = null;
   private shipCtx: ShipUIContext | null = null;
   private shipViews: {
@@ -636,9 +640,17 @@ export class InventoryUI {
     bottomRow.appendChild(claimBtn);
     wrap.appendChild(bottomRow);
 
+    // Move: machines can't be broken — only relocated. Arms a right-click to
+    // re-place the whole rig (keeping its level/storage/filter/stored).
+    const moveBtn = mkBtn();
+    moveBtn.style.background = '#7a5a3b';
+    moveBtn.textContent = '✋ Move (right-click a new spot)';
+    moveBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.move(); });
+    wrap.appendChild(moveBtn);
+
     this.machineViews = {
       levels, owner, hpBar, hpText, fillBar, fillText, rate, filters,
-      prodBtn, storageBtn, collectBtn, claimBtn,
+      prodBtn, storageBtn, collectBtn, claimBtn, moveBtn,
     };
     this.topEl.appendChild(wrap);
   }

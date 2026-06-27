@@ -73,6 +73,9 @@ interface ServerPlayer extends PlayerInfo {
   forfeitSeason: number;
   /** Per-gadget cooldown tracker (Phase 8; server-authoritative anti-spam). */
   gadgetCd: GadgetCooldowns;
+  /** Personal respawn point set via a Respawn Beacon (right-click). undefined =
+   *  use the default faction spawn. Persisted with the account. */
+  spawnX?: number; spawnY?: number; spawnZ?: number;
   /** Last client-pushed persistable blob (inventory/hotbar) for saveState. */
   savedClientData?: Record<string, unknown>;
 }
@@ -83,6 +86,7 @@ const GAME_MODES: GameMode[] = ['survival', 'creative', 'spectator'];
 const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
   'edit', 'attack', 'rangedAttack', 'selfhurt', 'drop', 'pickup', 'chestSet',
   'machineConfig', 'machineUpgrade', 'machineCollect', 'machineHit', 'machineClaim',
+  'machineMove', 'setSpawn',
   'shipLaunch', 'shipSteer', 'shipFire', 'shipDock', 'shipUpgrade', 'shipHit',
   'turretUpgrade', 'turretClaim', 'turretHit', 'turretLoad',
   'claimFeed', 'claimHit',
@@ -224,6 +228,12 @@ export class GameServer {
       forfeitSeason: Number.isFinite(account?.forfeitSeason) ? Math.floor(account!.forfeitSeason!) : 0,
       gadgetCd: new GadgetCooldowns(),
     };
+    // Restore a saved personal respawn point if the account carries one.
+    if (fin(saved?.spawnX as number, saved?.spawnY as number, saved?.spawnZ as number)) {
+      player.spawnX = saved!.spawnX as number;
+      player.spawnY = saved!.spawnY as number;
+      player.spawnZ = saved!.spawnZ as number;
+    }
     this.players.set(id, player);
     const welcome: ServerMsg = {
       t: 'welcome', id, seed: this.seed, username,
@@ -404,6 +414,23 @@ export class GameServer {
         claimMachine(s, p.username);
         return [{ to: 'all', msg: { t: 'machine', x: msg.x, y: msg.y, z: msg.z, state: s } }];
       }
+      case 'machineMove': {
+        if (!fin(msg.x, msg.y, msg.z, msg.tx, msg.ty, msg.tz)) return [];
+        // Must be within reach of BOTH the machine and the destination.
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        if (!this.nearMachine(p, msg.tx, msg.ty, msg.tz)) return [];
+        // Enemy-claim protection on either end blocks the move (no shield theft).
+        if (this.enemyShielded(p, msg.x, msg.z) || this.enemyShielded(p, msg.tx, msg.tz)) return [];
+        return this.moveMachine(msg.x, msg.y, msg.z, msg.tx, msg.ty, msg.tz);
+      }
+      case 'setSpawn': {
+        if (!fin(msg.x, msg.y, msg.z)) return [];
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return []; // in-reach gate
+        const bx = Math.floor(msg.x), by = Math.floor(msg.y), bz = Math.floor(msg.z);
+        if (this.edits.get(`${bx},${by},${bz}`) !== Block.RespawnBeacon) return [];
+        p.spawnX = bx; p.spawnY = by; p.spawnZ = bz;
+        return [{ to: p.id, msg: { t: 'notice', text: 'Respawn point set!' } }];
+      }
       // --- Ships ---
       case 'shipLaunch':
         return this.handleShipLaunch(p, msg.x, msg.y, msg.z);
@@ -529,6 +556,42 @@ export class GameServer {
         x + 0.5 + (this.rng() - 0.5), y + 0.3, z + 0.5 + (this.rng() - 0.5)));
     }
     out.push(...this.clearFootprint(x, y, z, type, true));
+    return out;
+  }
+
+  /** Relocate a machine: clear its old footprint, rebuild it at the target, and
+   *  carry over the full MachineState (level/storage/filter/stored/owner/hp). You
+   *  can't break a machine — only move it — so nothing is dropped or destroyed. */
+  private moveMachine(
+    fx: number, fy: number, fz: number, tx: number, ty: number, tz: number
+  ): Outbound[] {
+    fx = Math.floor(fx); fy = Math.floor(fy); fz = Math.floor(fz);
+    tx = Math.floor(tx); ty = Math.floor(ty); tz = Math.floor(tz);
+    const fromKey = `${fx},${fy},${fz}`, toKey = `${tx},${ty},${tz}`;
+    if (fromKey === toKey) return [];
+    const type = machineTypeForBlock(this.edits.get(fromKey) ?? -1);
+    if (type === null) return [];
+    const state = this.machines.get(fromKey);
+    if (!state) return [];
+    // Refuse to clobber another machine at the destination anchor.
+    if (machineTypeForBlock(this.edits.get(toKey) ?? -1) !== null) return [];
+    const h = machineHeight(type);
+    if (ty < 0 || ty + h > 256) return [];
+    const blockId = type === MachineType.OilDerrick ? Block.OilDerrick : Block.Autominer;
+
+    const out: Outbound[] = [];
+    // Vacate the old footprint (anchor + parts) for everyone.
+    this.machines.delete(fromKey);
+    out.push(...this.clearFootprint(fx, fy, fz, type, true));
+    // Rebuild at the destination and carry the state over.
+    this.machines.set(toKey, state);
+    this.edits.set(toKey, blockId);
+    out.push({ to: 'all', msg: { t: 'edit', x: tx, y: ty, z: tz, block: blockId } });
+    for (let k = 1; k < h; k++) {
+      this.edits.set(`${tx},${ty + k},${tz}`, Block.MachinePart);
+      out.push({ to: 'all', msg: { t: 'edit', x: tx, y: ty + k, z: tz, block: Block.MachinePart } });
+    }
+    out.push({ to: 'all', msg: { t: 'machine', x: tx, y: ty, z: tz, state } });
     return out;
   }
 
@@ -888,9 +951,23 @@ export class GameServer {
     return out;
   }
 
+  /** Where a player respawns: their personal Respawn Beacon if it's set AND the
+   *  beacon block still exists there; otherwise the default faction spawn. */
+  private respawnPoint(p: ServerPlayer): { x: number; y: number; z: number } {
+    if (fin(p.spawnX as number, p.spawnY as number, p.spawnZ as number)) {
+      const bx = Math.floor(p.spawnX!), by = Math.floor(p.spawnY!), bz = Math.floor(p.spawnZ!);
+      if (this.edits.get(`${bx},${by},${bz}`) === Block.RespawnBeacon) {
+        return { x: bx + 0.5, y: by + 1, z: bz + 0.5 }; // stand on top of the beacon
+      }
+      // Beacon gone (broken/raided): forget the stale point and fall back.
+      p.spawnX = p.spawnY = p.spawnZ = undefined;
+    }
+    return this.spawn(p.faction);
+  }
+
   private handleRespawn(p: ServerPlayer): Outbound[] {
     if (!p.dead) return [];
-    const s = this.spawn(p.faction);
+    const s = this.respawnPoint(p);
     p.x = s.x; p.y = s.y; p.z = s.z;
     p.health = MAX_HEALTH; p.dead = false;
     p.regenCooldown = 0; p.regenTimer = 0;
@@ -1339,6 +1416,17 @@ export class GameServer {
               { x: (t.x - x) || 0.01, y: 0.4, z: (t.z - z) || 0 }));
           }
         }
+        if (def.kind !== 'smoke') {
+          // Machines shrug off bullets + melee but are DEMOLISHED by an explosive:
+          // any machine caught in the blast is destroyed outright (HP-independent).
+          const blastR = (def.radius ?? 4) + 1.5;
+          for (const key of [...this.machines.keys()]) {
+            const [mx, my, mz] = key.split(',').map(Number);
+            if (Math.hypot(mx + 0.5 - x, my + 0.5 - y, mz + 0.5 - z) <= blastR) {
+              out.push(...this.destroyMachine(key, mx, my, mz));
+            }
+          }
+        }
         return out;
       }
       case 'horn': {
@@ -1474,6 +1562,10 @@ export class GameServer {
     if (!p) return null;
     const data: Record<string, unknown> = { ...(p.savedClientData ?? {}) };
     data.x = p.x; data.y = p.y; data.z = p.z; data.yaw = p.yaw; data.mode = p.mode;
+    // Persist the personal respawn point so it survives a reconnect.
+    if (fin(p.spawnX as number, p.spawnY as number, p.spawnZ as number)) {
+      data.spawnX = p.spawnX; data.spawnY = p.spawnY; data.spawnZ = p.spawnZ;
+    }
     return { username: p.username, data };
   }
 

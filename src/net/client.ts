@@ -386,6 +386,12 @@ export class NetClient {
   sendMachineClaim(x: number, y: number, z: number): void {
     if (this.connected) this.raw({ t: 'machineClaim', x, y, z });
   }
+  sendMachineMove(x: number, y: number, z: number, tx: number, ty: number, tz: number): void {
+    if (this.connected) this.raw({ t: 'machineMove', x, y, z, tx, ty, tz });
+  }
+  sendSetSpawn(x: number, y: number, z: number): void {
+    if (this.connected) this.raw({ t: 'setSpawn', x, y, z });
+  }
   sendRangedAttack(target: number, amount: number): void {
     if (this.connected) this.raw({ t: 'rangedAttack', target, amount });
   }

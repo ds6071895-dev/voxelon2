@@ -78,6 +78,9 @@ export const enum Block {
   Terracotta = 69,   // banded badlands rock
   Basalt = 70,       // volcanic ashlands ground
   Lava = 71,         // surface lava (liquid hazard, like water but burns)
+  // Respawn Beacon: a cheap personal spawn block. Mined normally (easily broken,
+  // not a tanky block-entity); RIGHT-CLICK to set your respawn point here.
+  RespawnBeacon = 72,
 }
 
 export const enum Tile {
@@ -237,6 +240,9 @@ export const enum Tile {
   OilBomb = 140,
   SpyDisguise = 141,
   JumpBoost = 142,
+  // Respawn Beacon (personal spawn point block)
+  RespawnBeaconSide = 143,
+  RespawnBeaconTop = 144,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel';
@@ -570,6 +576,13 @@ export const BLOCKS: Record<number, BlockInfo> = {
   [Block.Core]: def({
     name: 'Faction Core', hardness: 5.0, emission: 6,
     top: Tile.CoreTop, bottom: Tile.AutominerTop, side: Tile.CoreSide,
+  }),
+
+  // --- Respawn Beacon: a cheap personal spawn block. Easily broken (low
+  // hardness, plain mining — NOT a tanky block-entity). Right-click sets spawn. ---
+  [Block.RespawnBeacon]: def({
+    name: 'Respawn Beacon', hardness: 1.0, emission: 9,
+    top: Tile.RespawnBeaconTop, bottom: Tile.AutominerTop, side: Tile.RespawnBeaconSide,
   }),
 
   // --- Building set (M15): per-wood planks + slabs + stairs ---

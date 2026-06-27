@@ -93,6 +93,12 @@ export class Interaction {
   onSabotage?: (x: number, y: number, z: number) => void;
   /** Fired on right-click of a (not-yet-launched) Ship Helm: capture + launch. */
   onUseHelm?: (x: number, y: number, z: number) => void;
+  /** Fired on right-click of a Respawn Beacon: set the player's spawn point. */
+  onSetSpawn?: (x: number, y: number, z: number) => void;
+  /** When set ("Move machine" armed), the NEXT right-click consumes itself and
+   *  calls this with the placement cell (against the aimed face) instead of
+   *  placing/opening — so a machine can be relocated without breaking it. */
+  armedMove: ((px: number, py: number, pz: number) => void) | null = null;
   /** Block dig/place sounds. */
   onBlockSound?: (
     kind: 'break' | 'place', blockId: number, x: number, y: number, z: number
@@ -166,6 +172,20 @@ export class Interaction {
       this.highlight.visible = false;
     }
 
+    // "Move machine" armed: the next right-click drops the machine at the cell
+    // against the aimed face (no placing/opening), then disarms.
+    if (this.armedMove && input.rightClicked && this.target && !suppressUse) {
+      const tId = this.world.getBlock(this.target.x, this.target.y, this.target.z);
+      const into = BLOCKS[tId]?.replaceable ?? false;
+      const px = this.target.x + (into ? 0 : this.target.nx);
+      const py = this.target.y + (into ? 0 : this.target.ny);
+      const pz = this.target.z + (into ? 0 : this.target.nz);
+      const cb = this.armedMove;
+      this.armedMove = null;
+      cb(px, py, pz);
+      return;
+    }
+
     // suppressUse (e.g. aiming a gun down sights) blocks right-click placing AND
     // container/helm use, so right-click is free to mean "zoom" instead.
     const opened = suppressUse ? false : this.tryOpenContainer(input);
@@ -202,6 +222,11 @@ export class Interaction {
     // A helm in the world (not yet launched) captures + launches its hull.
     if (id === Block.ShipHelm) {
       this.onUseHelm?.(this.target.x, this.target.y, this.target.z);
+      return true;
+    }
+    // A Respawn Beacon: set the player's personal spawn point here.
+    if (id === Block.RespawnBeacon) {
+      this.onSetSpawn?.(this.target.x, this.target.y, this.target.z);
       return true;
     }
     const kind = id === Block.CraftingTable ? 'table'
