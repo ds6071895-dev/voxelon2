@@ -1220,6 +1220,71 @@ function paintCoreTop(p: Painter, seed: number): void {
   }
 }
 
+// --- Gadget sprites (Phase 8): a shared device-icon base + per-gadget motifs ---
+const GADGET_OUTLINE: RGBA = [18, 20, 26, 255];
+/** A rounded device body in `base`, dark-outlined, with a top cap in `accent`. */
+function paintGadgetBody(p: Painter, seed: number, base: RGBA, accent: RGBA): void {
+  for (let y = 3; y <= 13; y++) {
+    for (let x = 4; x <= 11; x++) {
+      const corner = (x <= 4 || x >= 11) && (y <= 3 || y >= 13);
+      if (corner) continue;
+      const edge = x === 4 || x === 11 || y === 3 || y === 13;
+      p.set(x, y, edge ? GADGET_OUTLINE : shade(base, 0.82 + hash2(seed, x, y) * 0.26));
+    }
+  }
+  for (let x = 5; x <= 10; x++) { p.set(x, 4, shade(accent, 0.95)); p.set(x, 5, shade(accent, 0.8)); }
+  p.set(6, 7, shade(base, 1.3)); // highlight
+}
+function paintGrenade(p: Painter, seed: number): void {
+  paintGadgetBody(p, seed, [70, 96, 64, 255], [120, 150, 110, 255]);
+  p.set(7, 2, [150, 150, 60, 255]); p.set(8, 2, [150, 150, 60, 255]); // pin ring
+  for (let y = 7; y <= 12; y += 2) for (let x = 5; x <= 10; x += 2) p.set(x, y, [40, 56, 36, 255]); // frag grid
+}
+function paintC4(p: Painter, seed: number): void {
+  paintGadgetBody(p, seed, [196, 176, 120, 255], [150, 130, 90, 255]);
+  for (let x = 5; x <= 10; x++) p.set(x, 9, [180, 60, 60, 255]); // red wire
+  p.set(11, 6, [40, 40, 44, 255]); p.set(12, 6, [40, 40, 44, 255]); // detonator
+  p.set(8, 11, [220, 70, 70, 255]); // arm light
+}
+function paintGrapplingHook(p: Painter, seed: number): void {
+  paintGadgetBody(p, seed, [120, 96, 60, 255], [150, 124, 80, 255]);
+  // a steel hook
+  const steel: RGBA = [180, 188, 198, 255];
+  for (let y = 4; y <= 9; y++) p.set(7, y, steel);
+  p.set(6, 9, steel); p.set(8, 9, steel); p.set(5, 8, steel); p.set(9, 8, steel);
+}
+function paintDeployCover(p: Painter, seed: number): void {
+  paintGadgetBody(p, seed, [96, 100, 108, 255], [70, 74, 82, 255]);
+  for (let x = 5; x <= 10; x++) { p.set(x, 6, [200, 170, 40, 255]); p.set(x, 7, x % 2 ? [40, 40, 44, 255] : [200, 170, 40, 255]); } // hazard band
+}
+function paintSentryKit(p: Painter, seed: number): void {
+  paintGadgetBody(p, seed, [80, 88, 100, 255], [60, 66, 78, 255]);
+  const barrel: RGBA = [40, 44, 50, 255];
+  for (let x = 6; x <= 12; x++) p.set(x, 8, barrel); // gun barrel
+  p.set(7, 7, [220, 90, 70, 255]); // eye
+}
+function paintSmokeGrenade(p: Painter, seed: number): void {
+  paintGadgetBody(p, seed, [90, 98, 110, 255], [150, 158, 168, 255]);
+  for (let y = 8; y <= 12; y++) for (let x = 5; x <= 10; x++) if (hash2(seed ^ 3, x, y) > 0.5) p.set(x, y, [170, 176, 186, 255]); // puffs
+}
+function paintWarHorn(p: Painter, seed: number): void {
+  paintGadgetBody(p, seed, [40, 44, 56, 255], [70, 76, 92, 255]);
+  const gold: RGBA = [220, 180, 70, 255];
+  for (let x = 5; x <= 11; x++) p.set(x, 8, shade(gold, 0.9 + (x - 5) * 0.03)); // horn body
+  p.set(11, 7, gold); p.set(11, 9, gold); p.set(12, 6, gold); p.set(12, 10, gold); // bell
+}
+function paintOilBomb(p: Painter, seed: number): void {
+  paintGadgetBody(p, seed, [34, 32, 40, 255], [60, 56, 46, 255]);
+  p.set(7, 2, [60, 50, 40, 255]); p.set(8, 2, [60, 50, 40, 255]); // cap
+  for (let y = 8; y <= 12; y++) for (let x = 5; x <= 10; x++) if (hash2(seed ^ 7, x, y) > 0.6) p.set(x, y, [80, 70, 30, 255]); // oily sheen
+  p.set(6, 6, [120, 110, 60, 255]);
+}
+function paintSpyDisguise(p: Painter, seed: number): void {
+  paintGadgetBody(p, seed, [60, 56, 70, 255], [90, 84, 104, 255]);
+  for (let x = 5; x <= 10; x++) p.set(x, 7, [20, 20, 26, 255]); // mask band
+  p.set(6, 7, [220, 220, 230, 255]); p.set(9, 7, [220, 220, 230, 255]); // eye holes
+}
+
 const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.GrassTop]: paintGrassTop,
   [Tile.GrassSide]: paintGrassSide,
@@ -1366,6 +1431,16 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.Terracotta]: paintTerracotta,
   [Tile.Basalt]: paintBasalt,
   [Tile.Lava]: paintLava,
+  // Gadgets (Phase 8)
+  [Tile.Grenade]: paintGrenade,
+  [Tile.C4]: paintC4,
+  [Tile.GrapplingHook]: paintGrapplingHook,
+  [Tile.DeployCover]: paintDeployCover,
+  [Tile.SentryKit]: paintSentryKit,
+  [Tile.SmokeGrenade]: paintSmokeGrenade,
+  [Tile.WarHorn]: paintWarHorn,
+  [Tile.OilBomb]: paintOilBomb,
+  [Tile.SpyDisguise]: paintSpyDisguise,
 };
 
 export function createAtlas(seed = 1337): Atlas {

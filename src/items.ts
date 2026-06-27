@@ -56,6 +56,16 @@ export const enum Item {
   BurstRifle = 148,
   // Glider: an early-game chestplate-slot item for fast descent travel.
   Glider = 149,
+  // Gadgets (Phase 8): nine war toys.
+  Grenade = 150,
+  C4 = 151,
+  GrapplingHook = 152,
+  DeployCover = 153,
+  SentryKit = 154,
+  SmokeGrenade = 155,
+  WarHorn = 156,
+  OilBomb = 157,
+  SpyDisguise = 158,
 }
 
 export interface ToolInfo {
@@ -166,6 +176,10 @@ function blockItem(block: Block): ItemInfo {
 }
 function pureItem(name: string, sprite: Tile): ItemInfo {
   return { name, kind: 'item', sprite, maxStack: 64 };
+}
+/** A gadget item (Phase 8): a pure item with a gadget-specific stack ceiling. */
+function gadgetItem(name: string, sprite: Tile, maxStack: number): ItemInfo {
+  return { name, kind: 'item', sprite, maxStack };
 }
 function armorItem(name: string, sprite: Tile, armor: ArmorInfo): ItemInfo {
   return { name, kind: 'item', sprite, maxStack: 1, armor };
@@ -342,6 +356,16 @@ export const ITEMS: Record<number, ItemInfo> = {
   // deploy (it slows your fall and rockets you forward); easy to craft, easy to
   // break (wears out with use).
   [Item.Glider]: gliderItem('Glider', Tile.Glider, { durability: 22 }),
+  // Gadgets (Phase 8): pure items; behaviour + cooldown/stack live in gadgets.ts.
+  [Item.Grenade]: gadgetItem('Frag Grenade', Tile.Grenade, 16),
+  [Item.C4]: gadgetItem('C4 Charge', Tile.C4, 8),
+  [Item.GrapplingHook]: gadgetItem('Grappling Hook', Tile.GrapplingHook, 1),
+  [Item.DeployCover]: gadgetItem('Deployable Cover', Tile.DeployCover, 8),
+  [Item.SentryKit]: gadgetItem('Sentry Kit', Tile.SentryKit, 4),
+  [Item.SmokeGrenade]: gadgetItem('Smoke Grenade', Tile.SmokeGrenade, 16),
+  [Item.WarHorn]: gadgetItem('War Horn', Tile.WarHorn, 1),
+  [Item.OilBomb]: gadgetItem('Oil Bomb', Tile.OilBomb, 8),
+  [Item.SpyDisguise]: gadgetItem('Spy Disguise', Tile.SpyDisguise, 1),
 };
 
 /**

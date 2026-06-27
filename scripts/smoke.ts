@@ -53,6 +53,7 @@ import {
 import {
   FACTIONS, NO_FACTION, balancedFaction, factionColor, factionName, isFaction,
   sameFaction, forcedFaction, resolveJoinFaction,
+  MAX_SWITCHES_PER_SEASON, canSwitchFaction, switchesRemaining, otherFaction,
 } from '../src/teams';
 import {
   GRID, REGION_COUNT, FACTION_A, FACTION_B, Regions, regionOf, regionIndex,
@@ -63,6 +64,13 @@ import {
   SEASON_LENGTH, newSeason, seasonTimeLeft, seasonExpired, tickSeasonClock,
   advanceSeason, deadlineWinner, sanitizeSeason,
 } from '../src/season';
+import {
+  Politics, ELECTION_PERIOD, MAX_TAX, RALLY_DAMAGE_MULT, FACTION_BUFF_COST,
+  FACTION_BUFF_DURATION,
+} from '../src/politics';
+import {
+  GADGETS, isGadget, gadgetOf, GadgetCooldowns, falloffDamage,
+} from '../src/gadgets';
 import { Accounts, validUsername } from '../src/net/accounts';
 import {
   Claims, GRACE_PERIOD, MAX_SHIELD_HP, OIL_PER_BARREL, chunkOf, claimChunkKeys,
@@ -2239,6 +2247,245 @@ check('furnace smelts ore/sand/log but not removed foods',
   const rs = reloaded.seasonSnapshot() as { number: number; timeLeft: number };
   check('the season clock survives a serialize round-trip',
     Math.abs(rs.timeLeft - (SEASON_LENGTH - 12345)) < 1);
+}
+
+// --- Politics (Phase 6): elections, treasury, rally buff, recall --------------
+{
+  const FA = FACTION_A;
+
+  // Election: nominate + vote → the most-voted candidate becomes Commander.
+  const pol = new Politics(0);
+  pol.nominate(FA, 'Alice', 'Reds');
+  pol.nominate(FA, 'Bob', '');
+  pol.vote(FA, 'v1', 'Alice'); pol.vote(FA, 'v2', 'Alice'); pol.vote(FA, 'v3', 'Bob');
+  check('nominate + vote + tally elects the most-voted candidate',
+    pol.tally(FA, 100) === 'Alice' && pol.get(FA)!.commander === 'Alice');
+  const rev = new Politics(0);
+  rev.nominate(FA, 'A', ''); rev.nominate(FA, 'B', '');
+  rev.vote(FA, 'voter', 'A'); rev.vote(FA, 'voter', 'B'); // one vote per voter (replaces)
+  check('a voter has a single vote (re-vote replaces)', rev.tally(FA, 0) === 'B');
+
+  // Leadership powers + treasury.
+  const p2 = new Politics(0);
+  p2.nominate(FA, 'Cmd', ''); p2.vote(FA, 'x', 'Cmd'); p2.tally(FA, 0);
+  check('only the Commander sets the tax, clamped to MAX_TAX',
+    !p2.setTax(FA, 'NotCmd', 0.1, 0) && p2.setTax(FA, 'Cmd', 0.5, 0) && p2.get(FA)!.taxRate === MAX_TAX);
+  check('taxProduction diverts the cut to the treasury (production only)',
+    p2.taxProduction(FA, 100) === Math.floor(100 * MAX_TAX) &&
+    p2.get(FA)!.treasury === Math.floor(100 * MAX_TAX));
+  check('officers (max 2) can set rally but not tax',
+    p2.appointOfficer(FA, 'Cmd', 'Off1', 0) && p2.appointOfficer(FA, 'Cmd', 'Off2', 0) &&
+    !p2.appointOfficer(FA, 'Cmd', 'Off3', 0) &&            // capped at 2
+    p2.setRally(FA, 'Off1', 5, 0) && p2.get(FA)!.rally === 5 &&
+    !p2.setTax(FA, 'Off1', 0.1, 0));                       // officer can't tax
+  check('a treasury spend deducts, needs funds, and is logged', (() => {
+    p2.donate(FA, 2000, 'donor', 0);
+    const before = p2.get(FA)!.treasury;
+    const ok = p2.spendFactionBuff(FA, 'Cmd', 10);
+    return ok && p2.get(FA)!.treasury === before - FACTION_BUFF_COST &&
+      p2.get(FA)!.log.some((e) => /buff/i.test(e.text));
+  })());
+  check('a faction war buff lifts the combat multiplier for its window',
+    p2.combatMultiplier(FA, 999, 10) === RALLY_DAMAGE_MULT &&
+    p2.combatMultiplier(FA, 999, 10 + FACTION_BUFF_DURATION + 1) === 1);
+  check('the rally buff applies only inside the rally region',
+    p2.combatMultiplier(FA, 5, 1e12) === RALLY_DAMAGE_MULT &&
+    p2.combatMultiplier(FA, 0, 1e12) === 1);
+
+  // Recall: a supermajority of members removes the Commander early.
+  const rc = new Politics(0);
+  rc.nominate(FA, 'King', ''); rc.vote(FA, 'a', 'King'); rc.tally(FA, 0);
+  check('a supermajority recall removes the Commander',
+    !rc.recall(FA, 'v1', 3, 0) && rc.recall(FA, 'v2', 3, 0) && rc.get(FA)!.commander === '');
+
+  // Weekly auto-tally at the deadline.
+  const el = new Politics(0);
+  el.nominate(FA, 'Win', ''); el.vote(FA, 'a', 'Win');
+  check('elections auto-tally at the weekly deadline',
+    el.tick(ELECTION_PERIOD - 10).length === 0 &&
+    el.tick(ELECTION_PERIOD + 10).some((e) => e.faction === FA && e.commander === 'Win'));
+
+  // Serialize round-trip.
+  const sa = new Politics(0);
+  sa.nominate(FA, 'Z', ''); sa.vote(FA, 'q', 'Z'); sa.tally(FA, 0);
+  sa.donate(FA, 500, 'q', 0); sa.setTax(FA, 'Z', 0.2, 0);
+  const sb = new Politics(0); sb.restore(sa.serialize(), 0);
+  check('politics survive a serialize round-trip',
+    sb.get(FA)!.commander === 'Z' && sb.get(FA)!.treasury === 500 &&
+    Math.abs(sb.get(FA)!.taxRate - 0.2) < 1e-9);
+
+  // Server integration: a Commander's rally buff boosts ranged damage in-region.
+  const hitHealth = (rally: boolean): number => {
+    const g = new GameServer(1337, mulberry32(31));
+    g.addPlayer(1, { username: 'Cmd', faction: 0 });
+    g.addPlayer(2, { username: 'Foe', faction: 1 });
+    const reg = regionIndex(1, 1), c = regionCenter(reg);
+    if (rally) {
+      g.handle(1, { t: 'nominate', party: '' });
+      g.handle(1, { t: 'vote', candidate: 'Cmd' });
+      g.tickClaims(ELECTION_PERIOD + 1); // advance worldTime
+      g.tickPolitics(1);                  // auto-elect Cmd
+      g.handle(1, { t: 'xform', x: c.x, y: 70, z: c.z, yaw: -Math.PI / 2, pitch: 0 });
+      g.handle(1, { t: 'setRally', region: reg });
+    }
+    g.handle(1, { t: 'xform', x: c.x, y: 70, z: c.z, yaw: -Math.PI / 2, pitch: 0 });
+    g.handle(2, { t: 'xform', x: c.x + 2, y: 70, z: c.z, yaw: 0, pitch: 0 });
+    const hurt = g.handle(1, { t: 'rangedAttack', target: 2, amount: 8 })
+      .find((o) => o.msg.t === 'hurt')!.msg as { health: number };
+    return hurt.health;
+  };
+  check('a Commander rally buff increases ranged damage in the rally region',
+    hitHealth(true) < hitHealth(false));
+
+  // Server auth: a non-leader's command is a no-op (no politics broadcast).
+  const ga = new GameServer(1337, mulberry32(8));
+  ga.addPlayer(1, { username: 'Nobody', faction: 0 });
+  check('a non-leader cannot set the tax (server rejects)',
+    ga.handle(1, { t: 'setTax', rate: 0.2 }).length === 0);
+}
+
+// --- Secret faction switching / betrayals (Phase 7) --------------------------
+{
+  const hash: (p: string, s: string) => string = (p, s) => `${s}:${p}`;
+
+  // Pure switch rules.
+  check('switchesRemaining is a full budget on a new season + decrements within one',
+    switchesRemaining({ switchesUsed: 0, switchSeason: 0 }, 5) === MAX_SWITCHES_PER_SEASON &&
+    switchesRemaining({ switchesUsed: 1, switchSeason: 5 }, 5) === MAX_SWITCHES_PER_SEASON - 1 &&
+    switchesRemaining({ switchesUsed: 2, switchSeason: 5 }, 5) === 0);
+  check('canSwitchFaction enforces side/limit/final-week rules',
+    canSwitchFaction({ switchesUsed: 0, switchSeason: 1 }, 1, 0, 1, SEASON_LENGTH) &&
+    !canSwitchFaction({ switchesUsed: 0, switchSeason: 1 }, 1, 0, 0, SEASON_LENGTH) && // same side
+    !canSwitchFaction({ switchesUsed: 2, switchSeason: 1 }, 1, 0, 1, SEASON_LENGTH) && // exhausted
+    !canSwitchFaction({ switchesUsed: 0, switchSeason: 1 }, 1, 0, 1, 3600));           // final week
+  check('otherFaction flips between the two sides',
+    otherFaction(FACTION_A) === FACTION_B && otherFaction(FACTION_B) === FACTION_A);
+
+  // removeMember strips a defector's government roles.
+  const pm = new Politics(0);
+  pm.nominate(FACTION_A, 'Boss', ''); pm.vote(FACTION_A, 'a', 'Boss'); pm.tally(FACTION_A, 0);
+  pm.appointOfficer(FACTION_A, 'Boss', 'Off', 0);
+  pm.removeMember(FACTION_A, 'Boss', 0);
+  check('removeMember vacates a defecting Commander seat', pm.get(FACTION_A)!.commander === '');
+  const pm2 = new Politics(0);
+  pm2.nominate(FACTION_A, 'C', ''); pm2.vote(FACTION_A, 'a', 'C'); pm2.tally(FACTION_A, 0);
+  pm2.appointOfficer(FACTION_A, 'C', 'Off', 0);
+  pm2.removeMember(FACTION_A, 'Off', 0);
+  check('removeMember strips a defecting Officer', !pm2.get(FACTION_A)!.officers.includes('Off'));
+
+  // Badge forfeiture: a defector who switched this season earns no "Won" badge.
+  const accs = new Accounts();
+  accs.register('Loyal', 'password', hash, 's');
+  accs.register('Traitor', 'password', hash, 's');
+  accs.applySwitch('Loyal', 0, 0, 1, 0);   // on faction 0, never forfeited
+  accs.applySwitch('Traitor', 0, 1, 1, 1); // on faction 0, forfeited in season 1
+  const won = accs.awardSeasonWin(0, 1);
+  check('a defector forfeits this season\'s badge; the loyal member keeps theirs',
+    won.includes('Loyal') && !won.includes('Traitor') &&
+    accs.get('Loyal')!.seasonsWon === 1 && (accs.get('Traitor')!.seasonsWon ?? 0) === 0);
+
+  // Server: a secret switch is private (no public announcement) + flips combat.
+  const g = new GameServer(1337, mulberry32(15));
+  g.addPlayer(1, { username: 'Spy', faction: 0 });
+  g.addPlayer(2, { username: 'Ally', faction: 0 });
+  let cbFaction = -9, cbForfeit = -9;
+  g.onFactionSwitch = (_u, f, _used, _ssn, fseason) => { cbFaction = f; cbForfeit = fseason; };
+  const sw = g.handle(1, { t: 'switchFaction', faction: 1 });
+  check('a secret switch confirms privately with NO public announcement',
+    sw.some((o) => o.msg.t === 'factionSwitched' && o.to === 1) &&
+    !sw.some((o) => o.msg.t === 'join'));
+  check('a switch persists the new faction + forfeit season via the callback',
+    cbFaction === 1 && cbForfeit === 1);
+  g.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: -Math.PI / 2, pitch: 0 });
+  g.handle(2, { t: 'xform', x: 2, y: 70, z: 0, yaw: 0, pitch: 0 });
+  check('after defecting, the spy can damage a former teammate (combat flips)',
+    g.handle(1, { t: 'rangedAttack', target: 2, amount: 8 }).some((o) => o.msg.t === 'hurt'));
+  g.handle(1, { t: 'switchFaction', faction: 0 }); // 2nd switch
+  const third = g.handle(1, { t: 'switchFaction', faction: 1 }); // 3rd -> denied
+  check('switching is capped at 2 per season',
+    third.some((o) => o.msg.t === 'notice') && !third.some((o) => o.msg.t === 'factionSwitched'));
+
+  // Final-week lock.
+  const gl = new GameServer(1337, mulberry32(16));
+  gl.addPlayer(1, { username: 'Late', faction: 0 });
+  gl.tickSeason(SEASON_LENGTH - 3 * 24 * 3600); // 3 days left -> inside the lock
+  const lk = gl.handle(1, { t: 'switchFaction', faction: 1 });
+  check('switching is locked in the final week',
+    lk.some((o) => o.msg.t === 'notice') && !lk.some((o) => o.msg.t === 'factionSwitched'));
+}
+
+// --- Gadgets (Phase 8): registry, cooldowns, AoE, server effects -------------
+{
+  // Registry: nine gadgets, each with sane params.
+  const ids = Object.keys(GADGETS).map(Number);
+  check('all nine gadgets are registered with valid params',
+    ids.length === 9 && ids.every((id) => {
+      const d = GADGETS[id];
+      return isGadget(id) && gadgetOf(id) === d && d.item === id && d.cooldown > 0 && d.maxStack > 0;
+    }));
+
+  // AoE falloff: full at the centre, linear, zero at/after the radius.
+  check('falloffDamage is full at the centre, linear, zero past the radius',
+    falloffDamage(20, 0, 5) === 20 && falloffDamage(20, 2.5, 5) === 10 &&
+    falloffDamage(20, 5, 5) === 0 && falloffDamage(20, 9, 5) === 0);
+
+  // Per-gadget cooldown gating.
+  const cd = new GadgetCooldowns();
+  const gid = Item.Grenade, secs = GADGETS[gid].cooldown;
+  check('GadgetCooldowns gates re-use until the cooldown elapses',
+    cd.ready(gid, 0) && cd.use(gid, 0) && !cd.ready(gid, 0.1) && !cd.use(gid, 0.1) &&
+    cd.ready(gid, secs + 0.1));
+
+  // Server: a frag damages enemies in the blast, spares allies, plays an fx.
+  const g = new GameServer(1337, mulberry32(41));
+  g.addPlayer(1, { username: 'Thrower', faction: 0 });
+  g.addPlayer(2, { username: 'Victim', faction: 1 });
+  g.addPlayer(3, { username: 'Mate', faction: 0 });
+  g.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: 0, pitch: 0 });
+  g.handle(2, { t: 'xform', x: 2, y: 70, z: 0, yaw: 0, pitch: 0 }); // 1 from detonation
+  g.handle(3, { t: 'xform', x: 1, y: 70, z: 0, yaw: 0, pitch: 0 }); // at detonation (ally)
+  const blast = g.handle(1, { t: 'gadgetUse', item: Item.Grenade, x: 1, y: 70, z: 0 });
+  check('a frag grenade damages enemies in the blast but spares allies + plays fx',
+    blast.some((o) => o.msg.t === 'gadgetFx') &&
+    blast.some((o) => o.msg.t === 'hurt' && o.to === 2) &&
+    !blast.some((o) => o.msg.t === 'hurt' && o.to === 3));
+  check('a gadget on cooldown is rejected (server-authoritative)',
+    g.handle(1, { t: 'gadgetUse', item: Item.Grenade, x: 1, y: 70, z: 0 }).length === 0);
+  check('a gadget detonated out of range is rejected',
+    g.handle(1, { t: 'gadgetUse', item: Item.Grenade, x: 9000, y: 70, z: 9000 }).length === 0);
+
+  // Smoke is cosmetic only — an fx, never damage.
+  const gs = new GameServer(1337, mulberry32(42));
+  gs.addPlayer(1, { username: 'S', faction: 0 });
+  gs.addPlayer(2, { username: 'E', faction: 1 });
+  gs.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: 0, pitch: 0 });
+  gs.handle(2, { t: 'xform', x: 1, y: 70, z: 0, yaw: 0, pitch: 0 });
+  const smoke = gs.handle(1, { t: 'gadgetUse', item: Item.SmokeGrenade, x: 0, y: 70, z: 0 });
+  check('smoke is cosmetic — fx only, no damage',
+    smoke.some((o) => o.msg.t === 'gadgetFx') && !smoke.some((o) => o.msg.t === 'hurt'));
+
+  // War Horn: leader-only, activates the faction combat buff.
+  const gh = new GameServer(1337, mulberry32(43));
+  gh.addPlayer(1, { username: 'Cmd', faction: 0 });
+  check('a non-leader cannot sound the War Horn',
+    gh.handle(1, { t: 'gadgetUse', item: Item.WarHorn, x: 0, y: 70, z: 0 }).length === 0);
+  gh.handle(1, { t: 'nominate', party: '' });
+  gh.handle(1, { t: 'vote', candidate: 'Cmd' });
+  gh.tickClaims(ELECTION_PERIOD + 1);
+  gh.tickPolitics(1);
+  const horn = gh.handle(1, { t: 'gadgetUse', item: Item.WarHorn, x: 0, y: 70, z: 0 });
+  const hpol = horn.find((o) => o.msg.t === 'politics')?.msg as { factions: { faction: number; buffUntil: number }[] } | undefined;
+  check('a leader War Horn activates the faction combat buff',
+    !!hpol && (hpol.factions.find((f) => f.faction === 0)?.buffUntil ?? 0) > 0);
+
+  // Spy disguise: broadcasts to OTHERS as the enemy faction.
+  const gd = new GameServer(1337, mulberry32(44));
+  gd.addPlayer(1, { username: 'Spy', faction: 0 });
+  gd.addPlayer(2, { username: 'Mark', faction: 1 });
+  const dis = gd.handle(1, { t: 'gadgetUse', item: Item.SpyDisguise, x: 0, y: 70, z: 0 });
+  check('spy disguise broadcasts to OTHERS as the enemy faction',
+    dis.some((o) => o.msg.t === 'disguised' && o.to === 'others' &&
+      (o.msg as { faction: number }).faction === 1));
 }
 
 // --- Accounts: login / register foundation -----------------------------------

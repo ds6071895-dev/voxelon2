@@ -248,6 +248,13 @@ export class RemotePlayers {
     return best;
   }
 
+  /** Force one avatar to rebuild on the next update (e.g. a spy disguise changed
+   *  their displayed faction). */
+  invalidate(id: number): void {
+    const av = this.avatars.get(id);
+    if (av) { this.dispose(av); this.avatars.delete(id); }
+  }
+
   private dispose(av: Avatar): void {
     this.scene.remove(av.group);
     av.group.traverse((o) => {

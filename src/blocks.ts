@@ -226,6 +226,16 @@ export const enum Tile {
   BurstRifle = 131,
   // Glider (early-game chestplate-slot wings)
   Glider = 132,
+  // Gadgets (Phase 8): nine war toys.
+  Grenade = 133,
+  C4 = 134,
+  GrapplingHook = 135,
+  DeployCover = 136,
+  SentryKit = 137,
+  SmokeGrenade = 138,
+  WarHorn = 139,
+  OilBomb = 140,
+  SpyDisguise = 141,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel';

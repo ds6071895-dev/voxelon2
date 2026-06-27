@@ -101,3 +101,36 @@ export function resolveJoinFaction(counts: Record<number, number>, desired?: num
   if (desired !== undefined && isFaction(desired)) return desired;
   return balancedFaction(counts);
 }
+
+// --- Secret faction switching / betrayals (Phase 7) --------------------------
+export const MAX_SWITCHES_PER_SEASON = 2;
+/** Switching is locked in the final week of a season (no last-minute flips). */
+export const SWITCH_LOCK_SECONDS = 7 * 24 * 3600;
+
+/** Per-account switch budget (resets each season). */
+export interface SwitchState { switchesUsed: number; switchSeason: number; }
+
+/** Switches a player has left this season (a full budget once the season ticks
+ *  over to a new number). */
+export function switchesRemaining(s: SwitchState, currentSeason: number): number {
+  if (s.switchSeason !== currentSeason) return MAX_SWITCHES_PER_SEASON;
+  return Math.max(0, MAX_SWITCHES_PER_SEASON - Math.max(0, s.switchesUsed));
+}
+
+/**
+ * May a player defect to `target` right now? Must be a different real faction,
+ * outside the final-week lock, with switches left this season. Pure rule shared
+ * by the server and the offline client.
+ */
+export function canSwitchFaction(
+  s: SwitchState, currentSeason: number, current: number, target: number, seasonTimeLeft: number,
+): boolean {
+  if (!isFaction(target) || target === current) return false;
+  if (seasonTimeLeft <= SWITCH_LOCK_SECONDS) return false; // final-week lock
+  return switchesRemaining(s, currentSeason) > 0;
+}
+
+/** The other faction in a two-faction war (for the "defect" button). */
+export function otherFaction(faction: number): number {
+  return faction === FACTIONS[0].id ? FACTIONS[1].id : FACTIONS[0].id;
+}

@@ -130,6 +130,17 @@ export const RECIPES: Recipe[] = [
   // Cheap on purpose (worn in the chest slot, wears out fast).
   shaped([[S, S, S], [P, null, P]], Item.Glider),
 
+  // Gadgets (Phase 8): nine war toys, built from common war materials.
+  shaped([[null, I, null], [I, ANY_COAL, I], [null, R, null]], Item.Grenade, 2),
+  shaped([[R, R, R], [R, Cb, R], [I, I, I]], Item.C4),
+  shaped([[null, I, I], [I, S, null], [S, null, null]], Item.GrapplingHook),
+  shaped([[I, I, I], [P, P, P]], Item.DeployCover, 2),
+  shaped([[I, Cb, I], [R, I, R]], Item.SentryKit),
+  shaped([[null, I, null], [ANY_COAL, R, ANY_COAL]], Item.SmokeGrenade, 2),
+  shaped([[null, null, T], [null, I, I], [I, null, null]], Item.WarHorn),
+  shaped([[null, I, null], [I, Item.OilBarrel, I], [null, R, null]], Item.OilBomb),
+  shaped([[null, R, null], [I, Cb, I]], Item.SpyDisguise),
+
   // Building set (M15): per-wood slabs + stairs.
   ...woodCraft(OAK, Block.OakSlab, Block.OakStairsN),
   ...woodCraft(BIRCH, Block.BirchSlab, Block.BirchStairsN),

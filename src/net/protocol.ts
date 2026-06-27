@@ -8,6 +8,7 @@ import type { ShipState, ShipAxis } from '../ships';
 import type { TurretState, TurretAxis } from '../turrets';
 import type { ClaimState } from '../claims';
 import type { FactionPolitics } from '../politics';
+import type { GadgetKind } from '../gadgets';
 
 export const SERVER_PORT = 8080;
 export const SNAPSHOT_HZ = 15;     // server -> clients transform broadcasts
@@ -121,6 +122,14 @@ export type ClientMsg =
   | { t: 'donate'; amount: number }                  // donate oil to the treasury
   | { t: 'commanderSpend'; kind: 'shield' | 'crate' | 'buff'; x: number; y: number; z: number }
   | { t: 'recall' }                                  // vote to recall the Commander
+  // Secret faction switch (Phase 7): defect to the other side. NO public
+  // announcement — others keep seeing your old colors (a spy), but the server
+  // treats you as your new faction. Max 2/season, locked in the final week.
+  | { t: 'switchFaction'; faction: number }
+  // Gadgets (Phase 8): server-authoritative gadget effects. `item` is the gadget
+  // item id; the server derives the effect kind + params. (frag/oil/smoke use the
+  // detonation point; horn/disguise ignore it; other kinds are client-handled.)
+  | { t: 'gadgetUse'; item: number; x: number; y: number; z: number }
   // Persistence: the client periodically pushes its owned state (inventory +
   // hotbar + position) for the server to store against the account and restore
   // on next login. Opaque blob — the server treats it as data, not authority.
@@ -178,6 +187,13 @@ export type ServerMsg =
   // rally/treasury/tax/candidates/votes/log) + a notice for elected commanders.
   | { t: 'politics'; factions: FactionPolitics[] }
   | { t: 'commanderElected'; faction: number; commander: string }
+  // Private confirmation of a secret faction switch (only to the defector).
+  | { t: 'factionSwitched'; faction: number; remaining: number }
+  // Gadget visual effect to play everywhere (frag/oil blast, smoke cloud).
+  | { t: 'gadgetFx'; kind: GadgetKind; x: number; y: number; z: number }
+  // Spy disguise (Phase 8): render player `id` as `faction` until `until`
+  // (server worldTime). Broadcast to OTHERS; the spy sees themselves normally.
+  | { t: 'disguised'; id: number; faction: number; until: number }
   // A season ended — winner faction (NO_FACTION = stalemate) + the season that
   // just finished. Clients clear bases + flash a banner; the board is reset.
   | { t: 'seasonEnd'; winner: number; number: number }

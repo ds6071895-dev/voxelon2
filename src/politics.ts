@@ -243,6 +243,16 @@ export class Politics {
     return false;
   }
 
+  /** Trigger a faction combat buff for `seconds` (the War Horn gadget — free but
+   *  long-cooldown + leader-only; the buff stacks with the rally region). */
+  triggerBuff(faction: number, seconds: number, now: number, by: string): boolean {
+    const p = this.byFaction.get(faction);
+    if (!p || !Number.isFinite(seconds) || seconds <= 0) return false;
+    p.buffUntil = Math.max(p.buffUntil, now + seconds);
+    this.push(p, by, 'sounded the War Horn — combat buff!', now);
+    return true;
+  }
+
   /** Combat multiplier for a member of `faction` fighting at `region`: the rally
    *  buff (in the rally region) and/or an active faction-wide buff stack to a
    *  single bonus. 1.0 = no buff. */
@@ -287,6 +297,20 @@ export class Politics {
           }))
         : [];
     }
+  }
+
+  /** Strip a departing member from a faction's government (Phase 7 defection):
+   *  drops their command/officer role, candidacy, vote, and recall vote so a
+   *  defector can't keep powers over a faction they've left. */
+  removeMember(faction: number, user: string, now: number): void {
+    const p = this.byFaction.get(faction);
+    if (!p || !user) return;
+    if (p.commander === user) { p.commander = ''; this.push(p, 'system', `${user} left — Commander seat vacated`, now); }
+    p.officers = p.officers.filter((o) => o !== user);
+    p.candidates = p.candidates.filter((c) => c.user !== user);
+    delete p.votes[user];
+    for (const k of Object.keys(p.votes)) if (p.votes[k] === user) delete p.votes[k];
+    p.recalls = p.recalls.filter((r) => r !== user);
   }
 
   /** Clear all politics for a new season (Phase 5 reset hands off to this). */

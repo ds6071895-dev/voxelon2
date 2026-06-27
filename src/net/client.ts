@@ -86,6 +86,12 @@ export class NetClient {
   onPolitics?: (factions: FactionPolitics[]) => void;
   /** A faction elected a new Commander. */
   onCommanderElected?: (faction: number, commander: string) => void;
+  /** Private confirmation of YOUR secret faction switch (Phase 7). */
+  onFactionSwitched?: (faction: number, remaining: number) => void;
+  /** Play a gadget visual effect (frag/oil blast, smoke cloud) at a point. */
+  onGadgetFx?: (kind: string, x: number, y: number, z: number) => void;
+  /** A player is disguised as `faction` until `until` (server worldTime). */
+  onDisguised?: (id: number, faction: number, until: number) => void;
   /** A faction breached an enemy claim (HUD/killfeed event). */
   onBreach?: (attacker: string, faction: number, victim: number) => void;
   /** A register/login was rejected (the login screen shows the error). */
@@ -270,6 +276,15 @@ export class NetClient {
       case 'commanderElected':
         this.onCommanderElected?.(msg.faction, msg.commander);
         break;
+      case 'factionSwitched':
+        this.onFactionSwitched?.(msg.faction, msg.remaining);
+        break;
+      case 'gadgetFx':
+        this.onGadgetFx?.(msg.kind, msg.x, msg.y, msg.z);
+        break;
+      case 'disguised':
+        this.onDisguised?.(msg.id, msg.faction, msg.until);
+        break;
       case 'claim':
         this.onClaim?.(msg.claim);
         break;
@@ -432,6 +447,10 @@ export class NetClient {
     if (this.connected) this.raw({ t: 'commanderSpend', kind, x, y, z });
   }
   sendRecall(): void { if (this.connected) this.raw({ t: 'recall' }); }
+  sendSwitchFaction(faction: number): void { if (this.connected) this.raw({ t: 'switchFaction', faction }); }
+  sendGadgetUse(item: number, x: number, y: number, z: number): void {
+    if (this.connected) this.raw({ t: 'gadgetUse', item, x, y, z });
+  }
 }
 
 function toRemote(p: PlayerInfo): Remote {

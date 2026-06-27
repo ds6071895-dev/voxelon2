@@ -61,10 +61,16 @@ if (savedWorld && game.restore(savedWorld)) {
 // (including offline members) and notify whoever's online (Phase 5).
 game.onSeasonEnd = (winner, season) => {
   if (winner < 0) { console.log(`season ${season} ended in a stalemate`); return; }
-  const won = accounts.awardSeasonWin(winner);
+  const won = accounts.awardSeasonWin(winner, season); // defectors this season are skipped
   saveAccounts();
   worldDirty = true;
   console.log(`season ${season} won by faction ${winner}; awarded ${won.length} badge(s)`);
+};
+// Persist a secret faction switch to the account (new side + switch counters).
+game.onFactionSwitch = (username, faction, switchesUsed, switchSeason, forfeitSeason) => {
+  accounts.applySwitch(username, faction, switchesUsed, switchSeason, forfeitSeason);
+  saveAccounts();
+  worldDirty = true;
 };
 let worldDirty = false;
 function saveWorld(): void {
@@ -102,7 +108,9 @@ function handleAuth(id: number, msg: ClientMsg & { t: 'register' | 'login' }): v
   authed.set(id, res.account.username);
   dispatch(game.addPlayer(id, {
     username: res.account.username, faction: res.account.faction,
-    seasonsWon: res.account.seasonsWon, data: res.account.data,
+    seasonsWon: res.account.seasonsWon, switchesUsed: res.account.switchesUsed,
+    switchSeason: res.account.switchSeason, forfeitSeason: res.account.forfeitSeason,
+    data: res.account.data,
   }));
   console.log(`+ ${res.account.username} authed (${game.playerCount} online)`);
 }

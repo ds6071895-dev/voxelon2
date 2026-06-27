@@ -21,7 +21,10 @@ import {
   turretArmed, turretConsumeShot, turretDamage, turretLoad, turretRange,
   sanitizeTurretState,
 } from '../turrets';
-import { FACTIONS, NO_FACTION, balancedFaction, factionName, isFaction, sameFaction } from '../teams';
+import {
+  FACTIONS, NO_FACTION, balancedFaction, factionName, isFaction, sameFaction,
+  canSwitchFaction, switchesRemaining,
+} from '../teams';
 import {
   Claims, ClaimState, OIL_CAP, claimProtected, damageShield, feedOil, shieldUp,
 } from '../claims';
@@ -31,6 +34,7 @@ import {
   tickSeasonClock, advanceSeason, deadlineWinner,
 } from '../season';
 import { Politics, FactionPolitics, SHIELD_REFILL_OIL } from '../politics';
+import { GadgetCooldowns, gadgetOf, falloffDamage } from '../gadgets';
 import { Terrain } from '../terrain';
 import {
   ClientMsg, EDIT_RANGE, CHEST_SLOTS, PICKUP_RANGE,
@@ -62,6 +66,13 @@ interface ServerPlayer extends PlayerInfo {
   regenTimer: number;
   /** Worn-armor defense points the client reports (clamped 0..cap). */
   armorPoints: number;
+  /** Secret-switch bookkeeping (Phase 7): defections used this season + which
+   *  season they were counted in, and the season a defection forfeited a badge. */
+  switchesUsed: number;
+  switchSeason: number;
+  forfeitSeason: number;
+  /** Per-gadget cooldown tracker (Phase 8; server-authoritative anti-spam). */
+  gadgetCd: GadgetCooldowns;
   /** Last client-pushed persistable blob (inventory/hotbar) for saveState. */
   savedClientData?: Record<string, unknown>;
 }
@@ -76,7 +87,7 @@ const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
   'turretUpgrade', 'turretClaim', 'turretHit', 'turretLoad',
   'claimFeed', 'claimHit',
   'nominate', 'vote', 'setRally', 'appointOfficer', 'dismissOfficer',
-  'setTax', 'donate', 'commanderSpend', 'recall',
+  'setTax', 'donate', 'commanderSpend', 'recall', 'gadgetUse',
 ]);
 
 /** One message the transport should deliver. `to` is a client id, or a
@@ -114,6 +125,9 @@ export class GameServer {
   /** Set by the shell to persist "Seasons Won" badges to all winning accounts
    *  (the pure server can't reach the on-disk account store itself). */
   onSeasonEnd?: (winnerFaction: number, seasonNumber: number) => void;
+  /** Set by the shell to persist a secret faction switch to the account (new
+   *  faction + switch counters + the forfeited season). */
+  onFactionSwitch?: (username: string, faction: number, switchesUsed: number, switchSeason: number, forfeitSeason: number) => void;
   private worldTime = 0;        // seconds since boot (grace-period clock)
   private claimAccum = 0;
   private readonly items = new Map<number, ItemEntityInfo>();
@@ -165,7 +179,11 @@ export class GameServer {
   /** Register a player; returns the welcome (to them) + join (to others). With
    *  mandatory accounts the shell passes the authenticated account's username +
    *  faction; without them (legacy/tests) it auto-assigns both. */
-  addPlayer(id: number, account?: { username?: string; faction?: number; seasonsWon?: number; data?: Record<string, unknown> }): Outbound[] {
+  addPlayer(id: number, account?: {
+    username?: string; faction?: number; seasonsWon?: number;
+    switchesUsed?: number; switchSeason?: number; forfeitSeason?: number;
+    data?: Record<string, unknown>;
+  }): Outbound[] {
     const username = account?.username && !this.usernameOnline(account.username)
       ? account.username : this.uniqueUsername();
     const faction = account?.faction !== undefined && FACTIONS.some((f) => f.id === account.faction)
@@ -186,6 +204,10 @@ export class GameServer {
       x: s.x, y: s.y, z: s.z, yaw: fin(syaw as number) ? syaw as number : 0, pitch: 0,
       health: MAX_HEALTH, dead: false, regenCooldown: 0, regenTimer: 0,
       armorPoints: 0,
+      switchesUsed: Number.isFinite(account?.switchesUsed) ? Math.max(0, Math.floor(account!.switchesUsed!)) : 0,
+      switchSeason: Number.isFinite(account?.switchSeason) ? Math.floor(account!.switchSeason!) : 0,
+      forfeitSeason: Number.isFinite(account?.forfeitSeason) ? Math.floor(account!.forfeitSeason!) : 0,
+      gadgetCd: new GadgetCooldowns(),
     };
     this.players.set(id, player);
     const welcome: ServerMsg = {
@@ -247,6 +269,10 @@ export class GameServer {
       case 'appointOfficer': case 'dismissOfficer': case 'setTax':
       case 'donate': case 'commanderSpend': case 'recall':
         return this.handlePolitics(p, msg);
+      case 'switchFaction':
+        return this.handleSwitch(p, msg.faction);
+      case 'gadgetUse':
+        return this.handleGadget(p, msg.item, msg.x, msg.y, msg.z);
       case 'saveState':
         // Stash the client-owned blob (inventory/hotbar). Position is added from
         // the authoritative record at capture time. The shell persists to disk.
@@ -1235,6 +1261,96 @@ export class GameServer {
       out.push({ to: 'all', msg: this.politicsSnapshot() });
     }
     return out;
+  }
+
+  // --- Secret faction switching (Phase 7) ------------------------------------
+
+  /**
+   * Defect to the other faction. SECRET: there is NO broadcast — other clients
+   * keep seeing the old colors (the defector is effectively a spy), while the
+   * server immediately treats them as the new faction for combat/ownership. The
+   * defector forfeits this season's "Seasons Won" badge and loses any command
+   * role in the faction they left. Max 2 switches/season, locked the final week.
+   */
+  private handleSwitch(p: ServerPlayer, target: number): Outbound[] {
+    const cur = p.faction, season = this.season.number;
+    const st = { switchesUsed: p.switchesUsed, switchSeason: p.switchSeason };
+    if (!canSwitchFaction(st, season, cur, target, seasonTimeLeft(this.season))) {
+      return [{ to: p.id, msg: { t: 'notice', text: 'You can\'t switch sides right now (limit reached or final week).' } }];
+    }
+    if (p.switchSeason !== season) { p.switchesUsed = 0; p.switchSeason = season; }
+    p.switchesUsed++;
+    // Strip any government role in the faction being abandoned, then switch.
+    this.politics.removeMember(cur, p.username, this.worldTime);
+    p.faction = target;
+    p.forfeitSeason = season; // no badge this season — loyalty stays meaningful
+    this.onFactionSwitch?.(p.username, target, p.switchesUsed, p.switchSeason, p.forfeitSeason);
+    // Private confirmation ONLY (no public announcement); old faction's
+    // government may have changed (commander vacated) -> refresh it for all.
+    const remaining = switchesRemaining({ switchesUsed: p.switchesUsed, switchSeason: p.switchSeason }, season);
+    return [
+      { to: p.id, msg: { t: 'factionSwitched', faction: target, remaining } },
+      { to: 'all', msg: this.politicsSnapshot() },
+    ];
+  }
+
+  // --- Gadgets (Phase 8): server-authoritative effects -----------------------
+
+  /**
+   * Apply a gadget's authoritative effect: AoE damage (frag/oil bomb), a
+   * cosmetic broadcast (smoke), a faction buff (war horn — leader only), or a
+   * spy disguise. Cooldown + range are server-validated so a hacked client can't
+   * spam or blast from across the map. Other gadgets (C4/grapple/cover/sentry)
+   * route through existing paths (claimHit / edits) and never reach here.
+   */
+  private handleGadget(p: ServerPlayer, item: number, x: number, y: number, z: number): Outbound[] {
+    const def = gadgetOf(item);
+    if (!def || p.dead) return [];
+    const now = this.worldTime;
+    switch (def.kind) {
+      case 'frag': case 'oil': case 'smoke': {
+        if (!fin(x, y, z)) return [];
+        // The detonation must be within throw range of the thrower.
+        if (Math.hypot(x - p.x, y - p.y, z - p.z) > RANGED_MAX_RANGE) return [];
+        if (!p.gadgetCd.use(item, now)) return []; // cooldown
+        const out: Outbound[] = [{ to: 'all', msg: { t: 'gadgetFx', kind: def.kind, x, y, z } }];
+        if (def.kind !== 'smoke' && def.damage && def.radius) {
+          // AoE damage to living enemies in radius (friendly fire stays off).
+          for (const t of this.players.values()) {
+            if (t.dead || t.id === p.id || sameFaction(t.faction, p.faction)) continue;
+            const d = Math.hypot(t.x - x, t.y - y, t.z - z);
+            const dmg = falloffDamage(def.damage, d, def.radius);
+            if (dmg > 0) out.push(...this.applyDamage(t, dmg, p.id,
+              { x: (t.x - x) || 0.01, y: 0.4, z: (t.z - z) || 0 }));
+          }
+        }
+        return out;
+      }
+      case 'horn': {
+        // War Horn: only a Commander/Officer may rally the faction.
+        if (!this.politics.isLeader(p.faction, p.username)) return [];
+        if (!p.gadgetCd.use(item, now)) return [];
+        this.politics.triggerBuff(p.faction, def.duration ?? 20, now, p.username);
+        return [
+          { to: 'all', msg: { t: 'gadgetFx', kind: 'horn', x: p.x, y: p.y, z: p.z } },
+          { to: 'all', msg: this.politicsSnapshot() },
+        ];
+      }
+      case 'disguise': {
+        if (!p.gadgetCd.use(item, now)) return [];
+        const until = now + (def.duration ?? 30);
+        // Disguise as the OTHER faction; broadcast to everyone else only.
+        const faction = this.otherFactionId(p.faction);
+        return [{ to: 'others', from: p.id, msg: { t: 'disguised', id: p.id, faction, until } }];
+      }
+      default:
+        return []; // client-handled gadget kind
+    }
+  }
+
+  /** The opposing faction id (two-faction war). */
+  private otherFactionId(faction: number): number {
+    return faction === FACTIONS[0].id ? FACTIONS[1].id : FACTIONS[0].id;
   }
 
   // --- Land claims (M18 / M19) -----------------------------------------------

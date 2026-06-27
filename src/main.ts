@@ -41,7 +41,10 @@ import { TurretModels } from './turretmodels';
 import { RemotePlayers } from './remoteplayers';
 import { WorldMap } from './worldmap';
 import { Accounts, Account } from './net/accounts';
-import { FACTIONS, NO_FACTION, factionColor, factionName, forcedFaction, sameFaction } from './teams';
+import {
+  FACTIONS, NO_FACTION, factionColor, factionName, forcedFaction, sameFaction,
+  otherFaction, canSwitchFaction, switchesRemaining,
+} from './teams';
 import {
   Claims, OIL_CAP, OIL_PER_BARREL, MAX_SHIELD_HP, claimProtected, damageShield,
   feedOil, shieldUp,
@@ -58,6 +61,7 @@ import {
   Politics, FactionPolitics, MAX_TAX, SHIELD_REFILL_COST, SHIELD_REFILL_OIL,
   SUPPLY_CRATE_COST, FACTION_BUFF_COST,
 } from './politics';
+import { GadgetCooldowns, GadgetDef, gadgetOf } from './gadgets';
 import { Sky, WATER_FOG_COLOR } from './sky';
 import { Survival } from './survival';
 import { createAtlas, createCrackTextures } from './textures';
@@ -228,6 +232,10 @@ let localSeasonsWon = 0;
 const localPolitics = new Politics();
 let factionPolitics: FactionPolitics[] = localPolitics.serialize();
 let politicsOpen = false;
+// Gadgets (Phase 8): a local cooldown gate (the server enforces its own) +
+// active spy disguises on remote players (id -> seconds of local time left).
+const gadgetCd = new GadgetCooldowns();
+const disguises = new Map<number, { realFaction: number; left: number }>();
 // World map (M key): region board + claims + capture meters + waypoints.
 const worldMap = new WorldMap(scene, camera, world.terrain, claims, {
   player: () => ({ x: player.pos.x, z: player.pos.z, yaw: player.yaw }),
@@ -1195,6 +1203,26 @@ net.onCommanderElected = (faction, commander) => {
     showRegionBanner('YOU ARE THE COMMANDER! ⚑', factionCss(faction));
   }
 };
+net.onGadgetFx = (kind, x, y, z) => gadgetFxAt(kind, x, y, z);
+net.onDisguised = (id, faction) => {
+  // A remote player is disguised: re-skin their avatar to the shown faction for
+  // the disguise window, remembering their real faction to restore afterward.
+  const r = net.remotes.get(id);
+  if (!r) return;
+  if (!disguises.has(id)) disguises.set(id, { realFaction: r.info.faction, left: 0 });
+  disguises.get(id)!.left = 45; // SpyDisguise duration (local-clock seconds)
+  r.info.faction = faction;
+  remotePlayers.invalidate(id); // rebuild avatar in the disguised colors
+};
+net.onFactionSwitched = (faction, remaining) => {
+  // Secret: no banner, just a private notice. Your nameplate stays the OLD color
+  // to everyone else (a spy) — only the server knows your true side.
+  localFaction = faction;
+  refreshNetInfo();
+  if (politicsOpen) renderPolitics();
+  updateRallyHud();
+  showNotice(`🤫 You secretly joined ${factionName(faction)}. Switches left: ${remaining}.`);
+};
 net.onSeasonEnd = (winner, number) => {
   // The server already reset the board + cleared bases authoritatively; mirror it
   // locally (drop claim domes) and flash the result. The winning side's badge is
@@ -1876,6 +1904,10 @@ function renderPolitics(): void {
   // Anyone may donate oil barrels to the chest.
   rows.push(`<button data-act="donate" class="pbtn">Donate oil barrels</button> ` +
     `<button data-act="recall" class="pbtn">Vote to recall (${p.recalls.length})</button>`);
+  // Secret defection (Phase 7): no announcement, forfeits this season's badge.
+  rows.push(`<div style="margin-top:6px;color:#ff8a7a"><button data-act="defect" class="pbtn">` +
+    `🤫 Defect to ${factionName(otherFaction(localFaction))} (secret)</button> ` +
+    `<span style="font-size:10px;color:#9fb4cc">no badge this season · max 2/season · locked final week</span></div>`);
 
   // Leader powers.
   if (leader) {
@@ -1971,10 +2003,39 @@ politicsPanel.addEventListener('click', (e) => {
     }
     case 'spend':
       doCommanderSpend(arg as 'shield' | 'crate' | 'buff');
-      break;
+      return; // doCommanderSpend handles its own notices
+    case 'defect':
+      doSwitchFaction();
+      return; // private/secret notice handled within
   }
   if (online) showNotice('Sent.'); // server reconciles via the next politics broadcast
 });
+
+/** Secret faction switch (Phase 7). Online the server validates; offline the
+ *  local account + Politics are updated directly. No announcement either way. */
+function doSwitchFaction(): void {
+  const target = otherFaction(localFaction);
+  if (!confirm(`Secretly defect to ${factionName(target)}?\n\nYou forfeit this season's "Seasons Won" badge and lose any command role. Max 2 switches per season; locked in the final week.`)) return;
+  if (net.connected) { net.sendSwitchFaction(target); return; }
+  // Offline: validate + apply against the local account.
+  const acc = localAccounts.get(authedName);
+  const st = { switchesUsed: acc?.switchesUsed ?? 0, switchSeason: acc?.switchSeason ?? 0 };
+  if (!canSwitchFaction(st, localSeason.number, localFaction, target, seasonTimeLeft(localSeason))) {
+    showNotice('You can\'t switch sides right now (limit reached or final week).');
+    return;
+  }
+  const used = (st.switchSeason !== localSeason.number ? 0 : st.switchesUsed) + 1;
+  localPolitics.removeMember(localFaction, authedName, worldTimeLocal);
+  localAccounts.applySwitch(authedName, target, used, localSeason.number, localSeason.number);
+  saveLocalAccounts();
+  localFaction = target;
+  factionPolitics = localPolitics.serialize();
+  refreshNetInfo();
+  renderPolitics();
+  updateRallyHud();
+  const left = switchesRemaining({ switchesUsed: used, switchSeason: localSeason.number }, localSeason.number);
+  showNotice(`🤫 You secretly joined ${factionName(target)}. Switches left: ${left}.`);
+}
 
 function doCommanderSpend(kind: 'shield' | 'crate' | 'buff'): void {
   if (net.connected) {
@@ -2007,6 +2068,146 @@ function doCommanderSpend(kind: 'shield' | 'crate' | 'buff'): void {
 function updatePoliticsOffline(): void {
   localPolitics.tick(worldTimeLocal);
   factionPolitics = localPolitics.serialize();
+}
+
+// --- Gadgets (Phase 8): use mechanics + visual effects -----------------------
+
+/** Play a gadget's visual effect at a point (everyone sees these via gadgetFx). */
+function gadgetFxAt(kind: string, x: number, y: number, z: number): void {
+  if (kind === 'smoke') {
+    particles.burst(x, y + 0.5, z, 48, 0xb8c0cc, 2.4, 4.5); // big slow gray cloud
+  } else if (kind === 'horn') {
+    particles.burst(x, y + 1.4, z, 18, 0xffd84a, 3, 0.9);
+  } else {
+    particles.explosion(x, y, z); // frag / oil bomb
+  }
+}
+
+/** Detonation point for a thrown gadget: the block you're aiming at, else a
+ *  point a short way down your look ray. */
+function gadgetTargetPoint(): { x: number; y: number; z: number } {
+  const t = interaction.target;
+  if (t) return { x: t.x + 0.5, y: t.y + 0.5, z: t.z + 0.5 };
+  const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  const eye = player.eyePosition;
+  return { x: eye.x + dir.x * 14, y: eye.y + dir.y * 14, z: eye.z + dir.z * 14 };
+}
+
+/** Deploy a 3-wide × 2-tall blast wall a couple of blocks ahead (cover gadget). */
+function deployCover(): void {
+  const yaw = player.yaw;
+  // Nearest cardinal forward + its perpendicular (so the wall faces you).
+  const fx = Math.abs(Math.sin(yaw)) > Math.abs(Math.cos(yaw)) ? -Math.sign(Math.sin(yaw)) : 0;
+  const fz = fx === 0 ? -Math.sign(Math.cos(yaw)) : 0;
+  const px = fz, pz = fx; // perpendicular
+  const baseX = Math.floor(player.pos.x) + fx * 2;
+  const baseY = Math.floor(player.pos.y);
+  const baseZ = Math.floor(player.pos.z) + fz * 2;
+  for (let w = -1; w <= 1; w++) {
+    for (let h = 0; h <= 1; h++) {
+      const x = baseX + px * w, y = baseY + h, z = baseZ + pz * w;
+      if (world.getBlock(x, y, z) !== Block.Air) continue;
+      world.setBlock(x, y, z, Block.Cobblestone);
+      net.sendEdit(x, y, z, Block.Cobblestone);
+    }
+  }
+}
+
+function useGadget(def: GadgetDef): void {
+  if (!gadgetCd.ready(def.item, worldTimeLocal)) {
+    showNotice(`${def.name}: ${gadgetCd.remaining(def.item, worldTimeLocal).toFixed(1)}s left`);
+    return;
+  }
+  const consume = (): void => { if (def.consumed) inventory.consumeSelected(1); };
+  switch (def.kind) {
+    case 'frag': case 'oil': case 'smoke': {
+      if (def.oilCost && inventory.countItem(Item.OilBarrel) < def.oilCost) {
+        showNotice('Oil Bomb needs an oil barrel.'); return;
+      }
+      const tgt = gadgetTargetPoint();
+      gadgetCd.use(def.item, worldTimeLocal);
+      if (def.oilCost) inventory.removeItem(Item.OilBarrel, def.oilCost);
+      consume();
+      if (net.connected) net.sendGadgetUse(def.item, tgt.x, tgt.y, tgt.z);
+      gadgetFxAt(def.kind, tgt.x, tgt.y, tgt.z);
+      // Block/mob blast is local-only (player AoE is server-authoritative).
+      if (def.kind !== 'smoke') mobs.explode(new THREE.Vector3(tgt.x, tgt.y, tgt.z), player);
+      break;
+    }
+    case 'grapple': {
+      const t = interaction.target;
+      if (!t) { showNotice('Aim at a surface to grapple.'); return; }
+      const to = new THREE.Vector3(t.x + 0.5, t.y + 0.5, t.z + 0.5).sub(player.pos);
+      const len = to.length();
+      if (len > (def.radius ?? 40)) { showNotice('Grapple target too far.'); return; }
+      gadgetCd.use(def.item, worldTimeLocal);
+      to.normalize();
+      const power = Math.min(24, 7 + len * 0.9);
+      player.vel.x = to.x * power;
+      player.vel.y = Math.max(to.y * power, 7); // always a little lift
+      player.vel.z = to.z * power;
+      particles.poof(t.x + 0.5, t.y + 0.5, t.z + 0.5);
+      break;
+    }
+    case 'cover':
+      gadgetCd.use(def.item, worldTimeLocal); consume(); deployCover();
+      showNotice('🧱 Cover deployed!');
+      break;
+    case 'sentry': {
+      const t = interaction.target;
+      if (!t) { showNotice('Aim at the ground to deploy a sentry.'); return; }
+      const x = t.x, y = t.y + 1, z = t.z;
+      if (world.getBlock(x, y, z) !== Block.Air) { showNotice('No room for a sentry there.'); return; }
+      gadgetCd.use(def.item, worldTimeLocal); consume();
+      world.setBlock(x, y, z, Block.Turret);
+      net.sendEdit(x, y, z, Block.Turret);
+      if (net.connected) net.sendTurretClaim(x, y, z);
+      showNotice('🔫 Sentry deployed — load it with cannonballs + oil.');
+      break;
+    }
+    case 'horn': {
+      if (!iAmLeader()) { showNotice('Only a Commander/Officer can sound the War Horn.'); return; }
+      gadgetCd.use(def.item, worldTimeLocal);
+      if (net.connected) net.sendGadgetUse(def.item, player.pos.x, player.pos.y, player.pos.z);
+      else politicsOffline((now) => { localPolitics.triggerBuff(localFaction, def.duration ?? 20, now, authedName); });
+      gadgetFxAt('horn', player.pos.x, player.pos.y, player.pos.z);
+      showNotice('📯 War Horn! Faction combat buff active.');
+      break;
+    }
+    case 'disguise': {
+      gadgetCd.use(def.item, worldTimeLocal);
+      if (net.connected) net.sendGadgetUse(def.item, player.pos.x, player.pos.y, player.pos.z);
+      showNotice(`🕵 Disguised as ${factionName(otherFaction(localFaction))} for ${def.duration ?? 30}s (to others).`);
+      break;
+    }
+    case 'c4': {
+      const t = interaction.target;
+      const c = t ? claims.at(t.x, t.z) : undefined;
+      if (!t || !c || sameFaction(c.faction, localFaction)) { showNotice('Plant C4 on an ENEMY base.'); return; }
+      gadgetCd.use(def.item, worldTimeLocal); consume();
+      const bx = t.x + 0.5, by = t.y + 0.5, bz = t.z + 0.5;
+      const cx = c.coreX, cy = c.coreY, cz = c.coreZ, dmg = def.damage ?? 200;
+      showNotice(`💣 C4 planted — ${def.fuse ?? 3}s to breach!`);
+      window.setTimeout(() => {
+        particles.explosion(bx, by, bz);
+        if (net.connected) net.sendClaimHit(cx, cy, cz, dmg);
+        else { const cl = claims.coreAt(cx, cy, cz); if (cl) damageShield(cl, dmg); }
+      }, (def.fuse ?? 3) * 1000);
+      break;
+    }
+  }
+}
+
+/** Fade out spy disguises on a local clock; restore each avatar's real colors. */
+function tickDisguises(dt: number): void {
+  for (const [id, d] of disguises) {
+    d.left -= dt;
+    if (d.left <= 0) {
+      const r = net.remotes.get(id);
+      if (r) { r.info.faction = d.realFaction; remotePlayers.invalidate(id); }
+      disguises.delete(id);
+    }
+  }
 }
 
 function frame(): void {
@@ -2185,12 +2386,17 @@ function frame(): void {
       const eye = player.eyePosition;
       const heldStack = inventory.selectedStack;
       const heldGun = heldStack ? ITEMS[heldStack.id]?.gun : undefined;
+      const heldGadget = heldStack && !heldGun ? gadgetOf(heldStack.id) : undefined;
 
       if (piloting) {
         // At the helm: left-click fires cannons; mining/melee suppressed.
         const ship = ships.get(pilotingShipId!);
         if (ship && input.leftClicked) fireCannon(ship, lookDir);
         interaction.update(dt, input, camera, true);
+      } else if (heldGadget) {
+        // Gadgets: left-click uses the toy (suppresses mining + block use).
+        if (input.leftClicked) useGadget(heldGadget);
+        interaction.update(dt, input, camera, true, true);
       } else if (heldGun) {
         // Guns suppress melee + mining (and block use, so right-click aims down
         // sights instead of placing/opening): fire on click (semi) / hold (auto).
@@ -2261,6 +2467,7 @@ function frame(): void {
     // Politics (Phase 6): offline advance the government clock; rally HUD always.
     if (!net.connected) updatePoliticsOffline();
     updateRallyHud();
+    tickDisguises(dt); // Phase 8: expire spy disguises on remote avatars
     if (regionBannerTimer > 0) {
       regionBannerTimer -= dt;
       if (regionBannerTimer <= 0) regionBannerEl.style.display = 'none';

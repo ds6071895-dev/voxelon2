@@ -15,6 +15,11 @@ export interface Account {
   faction: number;
   /** Permanent "Seasons Won" badge rank, kept across seasons (Phase 5). */
   seasonsWon?: number;
+  /** Secret-switch bookkeeping (Phase 7). */
+  switchesUsed?: number;
+  switchSeason?: number;
+  /** The season a defection forfeited the "Won" badge in (0 = none). */
+  forfeitSeason?: number;
   /** Saved player state, restored on login (position/health/armor/inventory). */
   data?: Record<string, unknown>;
 }
@@ -45,6 +50,9 @@ export class Accounts {
           username: a.username, salt: a.salt, hash: a.hash,
           faction: Number.isFinite(a.faction) ? a.faction : 0,
           seasonsWon: Number.isFinite(a.seasonsWon) ? Math.max(0, Math.floor(a.seasonsWon as number)) : 0,
+          switchesUsed: Number.isFinite(a.switchesUsed) ? Math.max(0, Math.floor(a.switchesUsed as number)) : 0,
+          switchSeason: Number.isFinite(a.switchSeason) ? Math.floor(a.switchSeason as number) : 0,
+          forfeitSeason: Number.isFinite(a.forfeitSeason) ? Math.floor(a.forfeitSeason as number) : 0,
           data: a.data,
         });
       }
@@ -107,17 +115,28 @@ export class Accounts {
     if (a) a.data = data;
   }
 
-  /** Award a "Seasons Won" badge to every account on a faction (Phase 5 reset).
+  /** Award a "Seasons Won" badge to every account on a faction (Phase 5 reset),
+   *  EXCEPT defectors who switched during `season` (Phase 7 — loyalty matters).
    *  Returns the usernames awarded (so the shell can notify online players). */
-  awardSeasonWin(faction: number): string[] {
+  awardSeasonWin(faction: number, season = 0): string[] {
     const won: string[] = [];
     for (const a of this.byName.values()) {
-      if (a.faction === faction) {
+      if (a.faction === faction && a.forfeitSeason !== season) {
         a.seasonsWon = (a.seasonsWon ?? 0) + 1;
         won.push(a.username);
       }
     }
     return won;
+  }
+
+  /** Persist a secret faction switch to the account (Phase 7). */
+  applySwitch(name: string, faction: number, switchesUsed: number, switchSeason: number, forfeitSeason: number): void {
+    const a = this.get(name);
+    if (!a) return;
+    a.faction = faction;
+    a.switchesUsed = switchesUsed;
+    a.switchSeason = switchSeason;
+    a.forfeitSeason = forfeitSeason;
   }
 
   /** Serializable snapshot for the shell to write to disk. */
