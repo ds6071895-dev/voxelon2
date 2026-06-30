@@ -26,6 +26,7 @@ export interface PlayerSnapshot {
   yaw: number; pitch: number;
   health: number;
   dead: boolean;
+  gliding?: boolean;
 }
 
 /** Gamemode, set by a server-console admin command. */
@@ -81,7 +82,7 @@ export type ClientMsg =
   // Mandatory accounts: a socket must authenticate before it spawns a player.
   | { t: 'register'; username: string; password: string; faction?: number } // faction = picked side
   | { t: 'login'; username: string; password: string }
-  | { t: 'xform'; x: number; y: number; z: number; yaw: number; pitch: number }
+  | { t: 'xform'; x: number; y: number; z: number; yaw: number; pitch: number; gliding?: boolean }
   | { t: 'edit'; x: number; y: number; z: number; block: number }
   | { t: 'attack'; target: number }
   | { t: 'selfhurt'; amount: number }   // fall/drown damage, applied by server

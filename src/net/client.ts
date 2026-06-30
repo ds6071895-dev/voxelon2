@@ -18,6 +18,7 @@ export interface Remote {
   tx: number; ty: number; tz: number; tyaw: number; tpitch: number;
   health: number;
   dead: boolean;
+  gliding: boolean;
 }
 
 /** Resolve the WebSocket URL. When the page is served by the game server itself
@@ -206,6 +207,7 @@ export class NetClient {
             r.tx = s.x; r.ty = s.y; r.tz = s.z;
             r.tyaw = s.yaw; r.tpitch = s.pitch;
             r.health = s.health; r.dead = s.dead;
+            r.gliding = s.gliding === true;
           }
         }
         break;
@@ -332,7 +334,7 @@ export class NetClient {
 
   /** Throttled transform send (call every frame with dt). */
   sendXform(
-    dt: number, x: number, y: number, z: number, yaw: number, pitch: number
+    dt: number, x: number, y: number, z: number, yaw: number, pitch: number, gliding = false
   ): void {
     if (!this.connected) return;
     const interval = 1 / TRANSFORM_HZ;
@@ -341,7 +343,7 @@ export class NetClient {
     // Subtract the interval (don't zero) so the long-run rate matches
     // TRANSFORM_HZ; clamp to avoid a burst after a long stall.
     this.xformAcc = Math.min(this.xformAcc - interval, interval);
-    this.raw({ t: 'xform', x, y, z, yaw, pitch });
+    this.raw({ t: 'xform', x, y, z, yaw, pitch, gliding });
   }
 
   /** Send register/login over the open socket (before `welcome`/connected). */
@@ -465,6 +467,6 @@ export class NetClient {
 function toRemote(p: PlayerInfo): Remote {
   return {
     info: p, tx: p.x, ty: p.y, tz: p.z, tyaw: p.yaw, tpitch: p.pitch,
-    health: p.health, dead: p.dead,
+    health: p.health, dead: p.dead, gliding: p.gliding === true,
   };
 }

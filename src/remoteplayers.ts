@@ -98,6 +98,7 @@ export class RemotePlayers {
     const mat = new THREE.MeshBasicMaterial({ vertexColors: true });
 
     const group = new THREE.Group();
+    group.rotation.order = 'YXZ';
     // body + head (fixed); legs + arms (swinging).
     const body = new THREE.Mesh(shadedBox(0.5, 0.7, 0.26, shirt), mat);
     body.position.y = 1.15;
@@ -209,15 +210,25 @@ export class RemotePlayers {
         av.lastHealth = r.health;
       }
 
-      // Walk animation from horizontal movement.
-      const speed = Math.hypot(av.dx - av.lastX, av.dz - av.lastZ) / Math.max(dt, 1e-3);
-      av.lastX = av.dx; av.lastZ = av.dz;
-      av.walkPhase += Math.min(speed, 6) * dt * 2.2;
-      const swing = Math.sin(av.walkPhase) * Math.min(1, speed / 4) * 0.7;
-      av.parts[0].rotation.x = swing;   // legs + arms counter-swing
-      av.parts[1].rotation.x = -swing;
-      av.parts[2].rotation.x = -swing;
-      av.parts[3].rotation.x = swing;
+      // Walk or glider flying animation.
+      if (r.gliding) {
+        av.group.rotation.x = 1.05; // tilt body forward 60 degrees
+        av.parts[0].rotation.x = 0;   // legs straight
+        av.parts[1].rotation.x = 0;
+        av.parts[2].rotation.x = 1.2; // arms back like wings
+        av.parts[3].rotation.x = 1.2;
+      } else {
+        av.group.rotation.x = 0;
+        // Walk animation from horizontal movement.
+        const speed = Math.hypot(av.dx - av.lastX, av.dz - av.lastZ) / Math.max(dt, 1e-3);
+        av.lastX = av.dx; av.lastZ = av.dz;
+        av.walkPhase += Math.min(speed, 6) * dt * 2.2;
+        const swing = Math.sin(av.walkPhase) * Math.min(1, speed / 4) * 0.7;
+        av.parts[0].rotation.x = swing;   // legs + arms counter-swing
+        av.parts[1].rotation.x = -swing;
+        av.parts[2].rotation.x = -swing;
+        av.parts[3].rotation.x = swing;
+      }
     }
   }
 

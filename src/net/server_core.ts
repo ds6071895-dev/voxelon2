@@ -284,6 +284,7 @@ export class GameServer {
           p.z = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, msg.z));
           p.y = msg.y;
           p.yaw = msg.yaw; p.pitch = msg.pitch;
+          p.gliding = msg.gliding === true;
         }
         return [];
       }
@@ -1642,6 +1643,7 @@ export class GameServer {
     return [...this.players.values()].map((p) => ({
       id: p.id, x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
       health: p.health, dead: p.dead,
+      gliding: p.gliding,
     }));
   }
 }
@@ -1656,6 +1658,7 @@ function toInfo(p: ServerPlayer): PlayerInfo {
     seasonsWon: p.seasonsWon,
     x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
     health: p.health, dead: p.dead,
+    gliding: p.gliding,
   };
 }
 

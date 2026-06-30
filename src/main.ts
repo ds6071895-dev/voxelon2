@@ -2677,7 +2677,7 @@ function frame(): void {
 
     // Stream our transform even while paused/in a menu, so others still see
     // us (e.g. being knocked around). Throttled + connection-gated inside.
-    net.sendXform(dt, player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch);
+    net.sendXform(dt, player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch, player.gliding);
 
     // Simulation never pauses: mobs hunt you and survival ticks in menus too.
     survival.update(dt, player);
