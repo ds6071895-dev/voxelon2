@@ -506,6 +506,17 @@ function spillStacks(stacks: ItemStack[], x: number, y: number, z: number): void
   if (net.connected) net.sendDrop(stacks.map((s) => ({ id: s.id, count: s.count })), x, y, z);
   else for (const s of stacks) itemEntities.spawn(x, y, z, s.id, s.count);
 }
+function dropCurrentItem(entireStack = false): void {
+  const stack = inventory.selectedStack;
+  if (!stack) return;
+  const count = entireStack ? stack.count : 1;
+  const d = new THREE.Vector3(-Math.sin(player.yaw), 0.3, -Math.cos(player.yaw)).normalize();
+  const dropPos = player.pos.clone().addScaledVector(d, 1.0);
+  dropPos.y += 1.2;
+  spawnDrop(dropPos.x, dropPos.y, dropPos.z, stack.id, count);
+  inventory.consumeSelected(count);
+  pushStateSave();
+}
 
 // Broken blocks drop items; furnaces and chests spill their contents.
 world.onBlockBroken = (x, y, z, oldId, harvested) => {
@@ -1081,7 +1092,7 @@ const controlsPanel = (() => {
     ['Move', 'W A S D'], ['Jump', 'Space'], ['Sneak', 'Shift'],
     ['Sprint', 'Ctrl / double-tap W'], ['Break / attack mob', 'Left click'],
     ['Place / use', 'Right click'], ['Aim down sights (guns)', 'Hold right click'],
-    ['Reload gun', 'R'], ['Deploy glider (in mid-air)', 'Jump'],
+    ['Reload gun', 'R'], ['Drop item', 'Q (Ctrl+Q = stack)'], ['Deploy glider (in mid-air)', 'Jump'],
     ['Hotbar slot', '1 – 9 / scroll'], ['Inventory', 'E'], ['World map', 'M'],
     ['Debug overlay', 'F3'], ['Pause / back', 'Esc'],
   ];
@@ -2515,6 +2526,7 @@ function frame(): void {
       if (input.debugToggled) hud.toggleDebug();
       if (input.hotbarKey >= 0) inventory.select(input.hotbarKey);
       if (input.wheelDelta !== 0) inventory.select(inventory.selected + input.wheelDelta);
+      if (input.dropPressed) dropCurrentItem(input.down('ControlLeft') || input.down('ControlRight'));
     }
 
     // Ships move first; then carry the local rider; then run player physics so

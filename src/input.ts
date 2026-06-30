@@ -28,6 +28,7 @@ export class Input {
   inventoryToggled = false;
   mapToggled = false; // M pressed this frame (world map)
   reloadPressed = false; // R pressed this frame (gun reload)
+  dropPressed = false;   // Q pressed this frame (item drop)
   locked = false;
   sprintHeld = false; // via double-tap W, persists until W released
 
@@ -48,6 +49,7 @@ export class Input {
       if (e.code === 'KeyE') this.inventoryToggled = true;
       if (e.code === 'KeyM') this.mapToggled = true;
       if (e.code === 'KeyR') this.reloadPressed = true;
+      if (e.code === 'KeyQ') this.dropPressed = true;
       if (e.code === 'KeyW') {
         const now = performance.now();
         if (now - this.lastWDown < 250) this.sprintHeld = true;
@@ -106,7 +108,7 @@ export class Input {
   get right(): boolean { return this.down('KeyD'); }
   get jump(): boolean { return this.down('Space'); }
   get sneak(): boolean { return this.down('ShiftLeft') || this.down('ShiftRight'); }
-  get sprintKey(): boolean { return this.down('KeyQ'); }
+  get sprintKey(): boolean { return this.down('ControlLeft') || this.down('ControlRight'); }
 
   /** Consume per-frame deltas/edges; call once at the end of each frame. */
   endFrame(): void {
@@ -121,5 +123,6 @@ export class Input {
     this.inventoryToggled = false;
     this.mapToggled = false;
     this.reloadPressed = false;
+    this.dropPressed = false;
   }
 }
