@@ -22,18 +22,21 @@ import {
   sanitizeTurretState,
 } from '../turrets';
 import {
-  FACTIONS, NO_FACTION, balancedFaction, factionName, isFaction, sameFaction,
+  FACTIONS, balancedFaction, factionName, isFaction, sameFaction,
   canSwitchFaction, switchesRemaining,
 } from '../teams';
 import {
-  Claims, ClaimState, OIL_CAP, claimProtected, damageShield, feedOil, shieldUp,
+  Claims, ClaimState, claimProtected, damageShield, feedOil, shieldUp,
 } from '../claims';
 import { Regions, RegionsSave, regionOf, regionBounds, capitalOf, REGION_COUNT } from '../regions';
+import { Flags } from '../flags';
 import {
   SeasonState, newSeason, sanitizeSeason, seasonTimeLeft, seasonExpired,
   tickSeasonClock, advanceSeason, deadlineWinner,
 } from '../season';
-import { Politics, FactionPolitics, SHIELD_REFILL_OIL } from '../politics';
+import {
+  WarState, newWar, warActive, warSnapshot, scheduleWar, sanitizeWar, DEFAULT_WAR_DURATION,
+} from '../war';
 import { GadgetCooldowns, gadgetOf, falloffDamage } from '../gadgets';
 import { Terrain } from '../terrain';
 import {
@@ -45,9 +48,9 @@ import {
 
 const BOARD_RANGE = 6;          // how close a player must be to pilot/dock/upgrade a ship
 const SHIP_BLAST_RADIUS = 7;    // ship-destruction explosion radius (player damage)
-const REGION_BROADCAST = 1;      // seconds between region-board broadcasts
 const SEASON_BROADCAST = 2;      // seconds between season-clock broadcasts
-const POLITICS_BROADCAST = 3;    // seconds between government-state broadcasts
+const WAR_BROADCAST = 2;         // seconds between war-clock broadcasts
+const FLAG_BROADCAST = 2;        // seconds between war-flag countdown broadcasts
 const CLAIM_BROADCAST = 1;      // seconds between bulk claim-state refreshes
 const CLAIM_HIT_MAX = 200;      // server cap on a single reported shield hit
 export const RAID_STEAL_FRAC = 0.5; // fraction of a stored container a raid takes
@@ -89,9 +92,7 @@ const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
   'machineMove', 'setSpawn',
   'shipLaunch', 'shipSteer', 'shipFire', 'shipDock', 'shipUpgrade', 'shipHit',
   'turretUpgrade', 'turretClaim', 'turretHit', 'turretLoad',
-  'claimFeed', 'claimHit',
-  'nominate', 'vote', 'setRally', 'appointOfficer', 'dismissOfficer',
-  'setTax', 'donate', 'commanderSpend', 'recall', 'gadgetUse',
+  'claimFeed', 'claimHit', 'gadgetUse',
 ]);
 
 /** One message the transport should deliver. `to` is a client id, or a
@@ -119,13 +120,16 @@ export class GameServer {
   private readonly claims = new Claims();
   // Region board — the 50/50 war frontline (Phase 1).
   private readonly regions = new Regions();
-  private regionAccum = 0;
+  // War flags — land is claimed by planting a flag on a kill (see flags.ts).
+  private readonly flags = new Flags();
+  private flagAccum = 0;
+  // War windows: capture is only open during a scheduled war (admin-controlled).
+  private war: WarState = newWar();
+  private warAccum = 0;
+  private warWasActive = false;
   // Seasons (Phase 5): month-long war cycles with reset + a "Seasons Won" badge.
   private season = newSeason();
   private seasonAccum = 0;
-  // Politics (Phase 6): per-faction government (commander/treasury/rally/tax).
-  private readonly politics = new Politics();
-  private politicsAccum = 0;
   /** Set by the shell to persist "Seasons Won" badges to all winning accounts
    *  (the pure server can't reach the on-disk account store itself). */
   onSeasonEnd?: (winnerFaction: number, seasonNumber: number) => void;
@@ -248,7 +252,8 @@ export class GameServer {
       claims: this.claims.list(),
       regions: this.regions.ownerList(),
       season: { number: this.season.number, timeLeft: seasonTimeLeft(this.season) },
-      politics: this.politics.serialize(),
+      war: warSnapshot(this.war, this.worldTime),
+      flags: (this.flagsSnapshot() as Extract<ServerMsg, { t: 'flags' }>).flags,
       state: saved, // opaque per-account blob (inventory/hotbar) for the client to restore
     };
     return [
@@ -290,10 +295,6 @@ export class GameServer {
         return this.applyDamage(p, Math.max(0, Math.min(40, msg.amount)), id);
       case 'respawn':
         return this.handleRespawn(p);
-      case 'nominate': case 'vote': case 'setRally':
-      case 'appointOfficer': case 'dismissOfficer': case 'setTax':
-      case 'donate': case 'commanderSpend': case 'recall':
-        return this.handlePolitics(p, msg);
       case 'switchFaction':
         return this.handleSwitch(p, msg.faction);
       case 'gadgetUse':
@@ -373,16 +374,6 @@ export class GameServer {
         if (!s) return [];
         const taken = collectMachine(s);
         const out: Outbound[] = [];
-        // Faction TAX (Phase 6): the Commander's 0–25% cut of oil PRODUCTION is
-        // diverted to the war chest as the player collects it (never stockpiles).
-        const oil = taken[Item.OilBarrel];
-        if (isFaction(p.faction) && fin(oil) && oil > 0) {
-          const cut = this.politics.taxProduction(p.faction, oil);
-          if (cut > 0) {
-            taken[Item.OilBarrel] = oil - cut;
-            out.push({ to: 'all', msg: this.politicsSnapshot() });
-          }
-        }
         // Grant via the same dup-safe path as item pickups (leftover that won't
         // fit is re-dropped by the client), then refresh viewers.
         for (const [idStr, count] of Object.entries(taken)) {
@@ -907,11 +898,7 @@ export class GameServer {
       const fwd = { x: -Math.sin(attacker.yaw), z: -Math.cos(attacker.yaw) };
       if ((fwd.x * dx + fwd.z * dz) / horiz < 0.2) return []; // not facing target
     }
-    // Rally/faction-buff (Phase 6): a member fighting in their rally region (or
-    // under a bought war buff) hits harder. The multiplier is server-decided
-    // (politics state), so it may exceed the anti-cheat base cap.
-    const mult = this.politics.combatMultiplier(attacker.faction, regionOf(attacker.x, attacker.z), this.worldTime);
-    const dmg = Math.round(Math.max(0, Math.min(RANGED_MAX_DAMAGE, amount)) * mult);
+    const dmg = Math.round(Math.max(0, Math.min(RANGED_MAX_DAMAGE, amount)));
     const knock = horiz > 1e-3
       ? { x: dx / horiz, y: 0.3, z: dz / horiz }
       : { x: 0, y: 0.4, z: 0 };
@@ -947,6 +934,15 @@ export class GameServer {
           victim: p.username,
         },
       });
+      // Killing an enemy DURING A WAR plants a flag at the kill spot — if it
+      // survives the timer (no enemy defuses it), this region flips to the
+      // killer's faction. One flag per faction at a time (flags.ts enforces it).
+      if (killer && killer !== p && isFaction(killer.faction) && killer.faction !== p.faction &&
+          this.isWarActive()) {
+        const owner = this.regions.ownerAt(regionOf(p.x, p.z));
+        const flag = this.flags.plant(killer.faction, p.x, p.y, p.z, owner, this.worldTime);
+        if (flag) out.push({ to: 'all', msg: this.flagsSnapshot() });
+      }
     }
     return out;
   }
@@ -1183,27 +1179,68 @@ export class GameServer {
     return { t: 'regions', owners: this.regions.ownerList(), capFaction: m.faction, capProgress: m.progress };
   }
 
-  /** Advance capture meters from live player presence, emit capture/win banners,
-   *  and periodically re-broadcast the board so clients stay in sync. */
+  /** Is a war on right now (capture open)? */
+  isWarActive(): boolean { return warActive(this.war, this.worldTime); }
+
+  /** Clock-relative war state for the HUD/wire. */
+  warSnapshotMsg(): ServerMsg {
+    const w = warSnapshot(this.war, this.worldTime);
+    return { t: 'war', active: w.active, timeLeft: w.timeLeft, nextIn: w.nextIn };
+  }
+
+  /** War-window bookkeeping only: broadcast the clock periodically + on every
+   *  peace<->war transition. Land is actually claimed by FLAGS (see tickFlags);
+   *  when a war ends any planted flags are dropped so none linger into peace. */
   tickRegions(dt: number): Outbound[] {
     if (!fin(dt) || dt <= 0) return [];
     const out: Outbound[] = [];
-    const res = this.regions.tick(this.regionPresence(), dt);
-    for (const ev of res.captured) {
-      out.push({ to: 'all', msg: { t: 'regionCapture', region: ev.region, faction: ev.faction, from: ev.from } });
+    const active = this.isWarActive();
+    this.warAccum += dt;
+    if (active !== this.warWasActive) {
+      this.warWasActive = active;
+      this.warAccum = 0;
+      if (!active && this.flags.list().length) { this.flags.clear(); out.push({ to: 'all', msg: this.flagsSnapshot() }); }
+      out.push({ to: 'all', msg: this.warSnapshotMsg() });
+    } else if (this.warAccum >= WAR_BROADCAST) {
+      this.warAccum = 0;
+      out.push({ to: 'all', msg: this.warSnapshotMsg() });
     }
-    if (res.winner !== NO_FACTION) {
-      out.push({ to: 'all', msg: { t: 'regionWin', faction: res.winner } });
-      // Capturing the enemy capital wins the SEASON instantly (Phase 5).
-      out.push(...this.endSeason(res.winner));
+    return out;
+  }
+
+  /** Live war flags + their countdowns for the wire. */
+  flagsSnapshot(): ServerMsg {
+    const now = this.worldTime;
+    return {
+      t: 'flags',
+      flags: this.flags.list().map((f) => ({
+        faction: f.faction, x: f.x, y: f.y, z: f.z, region: f.region,
+        secondsLeft: Math.max(0, Math.round(f.expiresAt - now)),
+      })),
+    };
+  }
+
+  /** Advance war flags: an enemy reaching a flag defuses it; a flag that outlasts
+   *  its timer flips its WHOLE region to the planting faction. Broadcasts the
+   *  countdown periodically + immediately whenever a flag claims/defuses. */
+  tickFlags(dt: number): Outbound[] {
+    if (!fin(dt) || dt <= 0) return [];
+    const out: Outbound[] = [];
+    if (!this.isWarActive()) return out; // flags only resolve during a war
+    const res = this.flags.tick(this.regionPresence(), this.worldTime);
+    let boardChanged = false;
+    for (const flag of res.claimed) {
+      const from = this.regions.ownerAt(flag.region);
+      if (this.regions.setOwner(flag.region, flag.faction)) {
+        boardChanged = true;
+        out.push({ to: 'all', msg: { t: 'regionCapture', region: flag.region, faction: flag.faction, from } });
+      }
     }
-    // Any capture/neutralize changed ownership -> push an immediate refresh so
-    // the HUD/banner and board never disagree; otherwise refresh on the timer.
-    this.regionAccum += dt;
-    if (res.captured.length || res.neutralized.length || res.winner !== NO_FACTION ||
-        this.regionAccum >= REGION_BROADCAST) {
-      this.regionAccum = 0;
-      out.push({ to: 'all', msg: this.regionsSnapshot() });
+    if (boardChanged) out.push({ to: 'all', msg: this.regionsSnapshot() });
+    this.flagAccum += dt;
+    if (res.claimed.length || res.defused.length || this.flagAccum >= FLAG_BROADCAST) {
+      this.flagAccum = 0;
+      out.push({ to: 'all', msg: this.flagsSnapshot() });
     }
     return out;
   }
@@ -1247,111 +1284,16 @@ export class GameServer {
     // Clear every base; tell clients to drop each claim (domes + indexes).
     for (const c of this.claims.list()) out.push({ to: 'all', msg: { t: 'claimRemove', id: c.id } });
     this.claims.clear();
-    // Reset the board + start the next season.
+    // Reset the board + drop any flags + start the next season.
     this.regions.reset();
+    this.flags.clear();
     advanceSeason(this.season);
     this.seasonAccum = 0;
-    this.regionAccum = 0;
-    // A new season also dissolves every faction government (Phase 6).
-    this.politics.reset(this.worldTime);
+    this.flagAccum = 0;
     out.push({ to: 'all', msg: { t: 'seasonEnd', winner, number: ended } });
     out.push({ to: 'all', msg: this.regionsSnapshot() });
     out.push({ to: 'all', msg: this.seasonSnapshot() });
-    out.push({ to: 'all', msg: this.politicsSnapshot() });
-    return out;
-  }
-
-  // --- Politics (Phase 6) ----------------------------------------------------
-
-  politicsSnapshot(): ServerMsg {
-    return { t: 'politics', factions: this.politics.serialize() };
-  }
-
-  /** Count online members of a faction (drives the recall supermajority). */
-  private onlineFactionCount(faction: number): number {
-    let n = 0;
-    for (const pl of this.players.values()) if (pl.faction === faction) n++;
-    return n;
-  }
-
-  /** All faction-government actions. Validates real faction membership; the
-   *  Politics module enforces leadership/affordability. Most actions just
-   *  re-broadcast the government; spends also apply a world effect. */
-  private handlePolitics(p: ServerPlayer, msg: ClientMsg): Outbound[] {
-    if (!isFaction(p.faction)) return [];
-    const f = p.faction, now = this.worldTime;
-    const broadcast = (): Outbound[] => [{ to: 'all', msg: this.politicsSnapshot() }];
-    switch (msg.t) {
-      case 'nominate':
-        return this.politics.nominate(f, p.username, msg.party) ? broadcast() : [];
-      case 'vote':
-        return this.politics.vote(f, p.username, msg.candidate) ? broadcast() : [];
-      case 'setRally':
-        return this.politics.setRally(f, p.username, msg.region, now) ? broadcast() : [];
-      case 'appointOfficer': {
-        // Only a real, online same-faction member can be made an officer.
-        const target = [...this.players.values()].find((q) => q.username === msg.user && q.faction === f);
-        if (!target) return [];
-        return this.politics.appointOfficer(f, p.username, msg.user, now) ? broadcast() : [];
-      }
-      case 'dismissOfficer':
-        return this.politics.dismissOfficer(f, p.username, msg.user, now) ? broadcast() : [];
-      case 'setTax':
-        return this.politics.setTax(f, p.username, msg.rate, now) ? broadcast() : [];
-      case 'donate': {
-        const amt = Math.max(0, Math.min(2000, Math.floor(msg.amount)));
-        return this.politics.donate(f, amt, p.username, now) > 0 ? broadcast() : [];
-      }
-      case 'recall':
-        this.politics.recall(f, p.username, this.onlineFactionCount(f), now);
-        return broadcast();
-      case 'commanderSpend':
-        return this.handleCommanderSpend(p, msg);
-      default:
-        return [];
-    }
-  }
-
-  /** A Commander/Officer treasury spend: refill a base shield, drop a supply
-   *  crate, or buy a temporary faction-wide combat buff. */
-  private handleCommanderSpend(p: ServerPlayer, msg: ClientMsg & { t: 'commanderSpend' }): Outbound[] {
-    const f = p.faction, now = this.worldTime;
-    const out: Outbound[] = [];
-    if (msg.kind === 'shield') {
-      // Refill the targeted base's oil — must be your faction's claim.
-      const claim = fin(msg.x, msg.y, msg.z) ? this.claims.at(msg.x, msg.z) : undefined;
-      if (!claim || !sameFaction(claim.faction, f)) return [];
-      if (!this.politics.spendShieldRefill(f, p.username, now)) return [];
-      claim.oil = Math.min(OIL_CAP, claim.oil + SHIELD_REFILL_OIL);
-      out.push({ to: 'all', msg: { t: 'claim', claim } });
-    } else if (msg.kind === 'crate') {
-      if (!this.politics.spendSupplyCrate(f, p.username, now)) return [];
-      // Drop a front-line resupply at the spender's feet.
-      const x = p.x, y = p.y + 0.5, z = p.z;
-      out.push(this.spawnItem(Item.Cannonball, 24, x, y, z));
-      out.push(this.spawnItem(Item.OilBarrel, 10, x + 0.3, y, z));
-    } else if (msg.kind === 'buff') {
-      if (!this.politics.spendFactionBuff(f, p.username, now)) return [];
-    } else {
-      return [];
-    }
-    out.push({ to: 'all', msg: this.politicsSnapshot() });
-    return out;
-  }
-
-  /** Advance election clocks; announce any auto-elected Commanders + periodic
-   *  government broadcast (treasury/clock/buff changes). */
-  tickPolitics(dt: number): Outbound[] {
-    if (!fin(dt) || dt <= 0) return [];
-    const out: Outbound[] = [];
-    for (const e of this.politics.tick(this.worldTime)) {
-      if (e.commander) out.push({ to: 'all', msg: { t: 'commanderElected', faction: e.faction, commander: e.commander } });
-    }
-    this.politicsAccum += dt;
-    if (this.politicsAccum >= POLITICS_BROADCAST) {
-      this.politicsAccum = 0;
-      out.push({ to: 'all', msg: this.politicsSnapshot() });
-    }
+    out.push({ to: 'all', msg: this.flagsSnapshot() });
     return out;
   }
 
@@ -1361,8 +1303,8 @@ export class GameServer {
    * Defect to the other faction. SECRET: there is NO broadcast — other clients
    * keep seeing the old colors (the defector is effectively a spy), while the
    * server immediately treats them as the new faction for combat/ownership. The
-   * defector forfeits this season's "Seasons Won" badge and loses any command
-   * role in the faction they left. Max 2 switches/season, locked the final week.
+   * defector forfeits this season's "Seasons Won" badge. Max 2 switches/season,
+   * locked the final week.
    */
   private handleSwitch(p: ServerPlayer, target: number): Outbound[] {
     const cur = p.faction, season = this.season.number;
@@ -1372,17 +1314,13 @@ export class GameServer {
     }
     if (p.switchSeason !== season) { p.switchesUsed = 0; p.switchSeason = season; }
     p.switchesUsed++;
-    // Strip any government role in the faction being abandoned, then switch.
-    this.politics.removeMember(cur, p.username, this.worldTime);
     p.faction = target;
     p.forfeitSeason = season; // no badge this season — loyalty stays meaningful
     this.onFactionSwitch?.(p.username, target, p.switchesUsed, p.switchSeason, p.forfeitSeason);
-    // Private confirmation ONLY (no public announcement); old faction's
-    // government may have changed (commander vacated) -> refresh it for all.
+    // Private confirmation ONLY (no public announcement).
     const remaining = switchesRemaining({ switchesUsed: p.switchesUsed, switchSeason: p.switchSeason }, season);
     return [
       { to: p.id, msg: { t: 'factionSwitched', faction: target, remaining } },
-      { to: 'all', msg: this.politicsSnapshot() },
     ];
   }
 
@@ -1390,8 +1328,8 @@ export class GameServer {
 
   /**
    * Apply a gadget's authoritative effect: AoE damage (frag/oil bomb), a
-   * cosmetic broadcast (smoke), a faction buff (war horn — leader only), or a
-   * spy disguise. Cooldown + range are server-validated so a hacked client can't
+   * cosmetic broadcast (smoke / war horn), or a spy disguise. Cooldown + range
+   * are server-validated so a hacked client can't
    * spam or blast from across the map. Other gadgets (C4/grapple/cover/sentry)
    * route through existing paths (claimHit / edits) and never reach here.
    */
@@ -1430,14 +1368,9 @@ export class GameServer {
         return out;
       }
       case 'horn': {
-        // War Horn: only a Commander/Officer may rally the faction.
-        if (!this.politics.isLeader(p.faction, p.username)) return [];
+        // War Horn: a cosmetic rallying blast anyone can sound.
         if (!p.gadgetCd.use(item, now)) return [];
-        this.politics.triggerBuff(p.faction, def.duration ?? 20, now, p.username);
-        return [
-          { to: 'all', msg: { t: 'gadgetFx', kind: 'horn', x: p.x, y: p.y, z: p.z } },
-          { to: 'all', msg: this.politicsSnapshot() },
-        ];
+        return [{ to: 'all', msg: { t: 'gadgetFx', kind: 'horn', x: p.x, y: p.y, z: p.z } }];
       }
       case 'disguise': {
         if (!p.gadgetCd.use(item, now)) return [];
@@ -1554,6 +1487,52 @@ export class GameServer {
     return [{ to: id, msg: { t: 'teleport', x, y, z } }];
   }
 
+  // --- War scheduling (admin console) ---------------------------------------
+  // Capture (gaining land on the war map) is only open during a war. These set
+  // the war window in worldTime seconds and broadcast the new clock to everyone.
+
+  /** Schedule a war to begin `delaySec` from now, lasting `durationSec`. */
+  adminScheduleWar(delaySec: number, durationSec: number): Outbound[] {
+    const dur = fin(durationSec) && durationSec > 0 ? durationSec : DEFAULT_WAR_DURATION;
+    this.war = scheduleWar(fin(delaySec) ? delaySec : 0, dur, this.worldTime);
+    this.warWasActive = this.isWarActive();
+    this.warAccum = 0;
+    const out: Outbound[] = [{ to: 'all', msg: this.warSnapshotMsg() }];
+    // A fresh war resets any stale meters so the front starts clean.
+    this.regions.clearMeters();
+    out.push({ to: 'all', msg: this.regionsSnapshot() });
+    const banner = delaySec <= 0
+      ? '⚔️ WAR! Capture the regions now!'
+      : `⚔️ A war is scheduled — get ready!`;
+    out.push({ to: 'all', msg: { t: 'notice', text: banner } });
+    return out;
+  }
+
+  /** Start a war right now for `durationSec` (console `war start`). */
+  adminStartWar(durationSec: number): Outbound[] { return this.adminScheduleWar(0, durationSec); }
+
+  /** Cancel the current/scheduled war back to peacetime. */
+  adminCancelWar(): Outbound[] {
+    this.war = newWar();
+    this.warWasActive = false;
+    this.warAccum = 0;
+    this.regions.clearMeters();
+    return [
+      { to: 'all', msg: this.warSnapshotMsg() },
+      { to: 'all', msg: this.regionsSnapshot() },
+      { to: 'all', msg: { t: 'notice', text: '🕊️ The war is over — peacetime.' } },
+    ];
+  }
+
+  /** One-line war status for the console. */
+  warStatusText(): string {
+    const w = warSnapshot(this.war, this.worldTime);
+    const mmss = (s: number) => `${Math.floor(s / 60)}m ${Math.floor(s % 60)}s`;
+    if (w.active) return `WAR ACTIVE — ${mmss(w.timeLeft)} left`;
+    if (w.nextIn > 0) return `peacetime — next war in ${mmss(w.nextIn)}`;
+    return 'peacetime — no war scheduled';
+  }
+
   /** Build the persistable per-account blob for a player: their last client-
    *  pushed inventory/hotbar plus the server-authoritative position. Returns
    *  null if the player isn't online. */
@@ -1589,7 +1568,8 @@ export class GameServer {
       claims: this.claims.list(),
       regions: this.regions.serialize(),
       season: this.season,
-      politics: this.politics.serialize(),
+      war: this.war,
+      flags: this.flags.serialize(),
     };
   }
 
@@ -1651,7 +1631,9 @@ export class GameServer {
     if (Array.isArray(s.claims)) this.claims.load(s.claims as ClaimState[]);
     this.regions.restore(s.regions);
     this.season = sanitizeSeason(s.season);
-    this.politics.restore(s.politics, this.worldTime);
+    this.war = sanitizeWar(s.war);
+    this.warWasActive = this.isWarActive();
+    this.flags.restore(s.flags);
     return true;
   }
 
@@ -1691,7 +1673,8 @@ export interface WorldSave {
   claims: ClaimState[];
   regions?: RegionsSave;
   season?: SeasonState;
-  politics?: FactionPolitics[];
+  war?: WarState;
+  flags?: import('../flags').Flag[];
 }
 
 /** A "x,y,z" integer block-coordinate key (the map keys we persist). */

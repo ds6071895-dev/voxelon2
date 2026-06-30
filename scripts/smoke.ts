@@ -65,9 +65,9 @@ import {
   advanceSeason, deadlineWinner, sanitizeSeason,
 } from '../src/season';
 import {
-  Politics, ELECTION_PERIOD, MAX_TAX, RALLY_DAMAGE_MULT, FACTION_BUFF_COST,
-  FACTION_BUFF_DURATION,
-} from '../src/politics';
+  newWar, warActive, warPending, warTimeLeft, warStartsIn, scheduleWar,
+  warSnapshot, sanitizeWar,
+} from '../src/war';
 import {
   GADGETS, isGadget, gadgetOf, GadgetCooldowns, falloffDamage,
 } from '../src/gadgets';
@@ -2178,18 +2178,25 @@ check('furnace smelts ore/sand/log but not removed foods',
     m2.faction[frontA] === FACTION_A && meters.progress[frontA] > 0 &&
     Math.abs(m2.progress[frontA] - meters.progress[frontA]) < 0.05);
 
-  // Server wiring: a player standing on a frontline control point captures it.
+  // Server wiring: killing an enemy plants a flag that captures the region if it survives.
   const srv = new GameServer(1337, mulberry32(3));
-  srv.addPlayer(1); // first join -> faction A
+  srv.addPlayer(1, { username: 'A', faction: FACTION_A });
+  srv.addPlayer(2, { username: 'B', faction: FACTION_B });
+  srv.adminStartWar(600); // capture only happens during a war
   const wc = regionCenter(frontA);
-  srv.handle(1, { t: 'xform', x: wc.x, y: 70, z: wc.z, yaw: 0, pitch: 0 });
+  srv.handle(1, { t: 'xform', x: wc.x, y: 70, z: wc.z, yaw: Math.PI, pitch: 0 });
+  srv.handle(2, { t: 'xform', x: wc.x, y: 70, z: wc.z + 2, yaw: 0, pitch: 0 });
+  srv.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 }); // kill B to plant flag
   let srvCap = false;
-  for (let t = 0; t < 25 && !srvCap; t++) {
-    if (srv.tickRegions(1).some((o) => o.msg.t === 'regionCapture')) srvCap = true;
+  for (let t = 0; t < 125 && !srvCap; t++) {
+    srv.tickClaims(1);
+    const out = srv.tickFlags(1);
+    srv.tickRegions(1);
+    if (out.some((o) => o.msg.t === 'regionCapture')) srvCap = true;
   }
   check('the server captures a region from live player presence', srvCap);
   // The welcome carries the opening region board.
-  const w = srv.addPlayer(2).find((o) => o.msg.t === 'welcome')!.msg as { regions: number[] };
+  const w = srv.addPlayer(3).find((o) => o.msg.t === 'welcome')!.msg as { regions: number[] };
   check('the welcome carries the region board', Array.isArray(w.regions) && w.regions.length === REGION_COUNT);
 }
 
@@ -2223,15 +2230,21 @@ check('furnace smelts ore/sand/log but not removed foods',
   g.handle(2, { t: 'xform', x: 0, y: 70, z: 0, yaw: 0, pitch: 0 }); // leave so B doesn't defend
 
   // While the shield is up AND A doesn't own the region, A can't touch the base.
-  g.handle(1, { t: 'xform', x: bc.x, y: 70, z: bc.z, yaw: 0, pitch: 0 });
+  g.handle(1, { t: 'xform', x: bc.x, y: 70, z: bc.z, yaw: Math.PI, pitch: 0 });
   const beforeCapture = g.handle(1, { t: 'edit', x: lootX, y: lootY, z: lootZ, block: Block.Air });
   check('a shielded enemy base is safe from a faction that does not own the region',
     beforeCapture.length === 0);
 
   // A captures the region; now owning it opens the base to a raid (shield up).
+  g.handle(2, { t: 'xform', x: bc.x, y: 70, z: bc.z + 2, yaw: 0, pitch: 0 }); // move B back to base region
+  g.adminStartWar(600); // capture only happens during a war
+  g.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 }); // kill B to plant flag
   let captured = false;
-  for (let t = 0; t < 30 && !captured; t++) {
-    if (g.tickRegions(1).some((o) => o.msg.t === 'regionCapture')) captured = true;
+  for (let t = 0; t < 125 && !captured; t++) {
+    g.tickClaims(1);
+    const out = g.tickFlags(1);
+    g.tickRegions(1);
+    if (out.some((o) => o.msg.t === 'regionCapture')) captured = true;
   }
   const raided = g.handle(1, { t: 'edit', x: lootX, y: lootY, z: lootZ, block: Block.Air });
   check('owning the region opens an enemy base to a raid even with the shield up',
@@ -2288,9 +2301,10 @@ check('furnace smelts ore/sand/log but not removed foods',
     de.some((o) => o.msg.t === 'seasonEnd') && dWinner === FACTION_A && dNum === 1 &&
     boardAfter.owners.filter((o) => o === FACTION_A).length === REGION_COUNT / 2);
 
-  // Instant win: taking the enemy capital ends the season immediately + clears bases.
+  // Capturing the enemy capital no longer ends the season instantly (no instant knockout).
   const gi = new GameServer(1337, mulberry32(9));
-  gi.addPlayer(1); // faction A
+  gi.addPlayer(1, { username: 'A', faction: FACTION_A });
+  gi.addPlayer(2, { username: 'B', faction: FACTION_B });
   let iWinner = -2;
   gi.onSeasonEnd = (w) => { iWinner = w; };
   const capB = capitalOf(FACTION_B);
@@ -2298,12 +2312,20 @@ check('furnace smelts ore/sand/log but not removed foods',
     if (i !== capB) { const c = regionCenter(i); gi.setRegionOwner(c.x, c.z, FACTION_A); }
   }
   const cc = regionCenter(capB);
-  gi.handle(1, { t: 'xform', x: cc.x, y: 70, z: cc.z, yaw: 0, pitch: 0 });
+  gi.handle(1, { t: 'xform', x: cc.x, y: 70, z: cc.z, yaw: Math.PI, pitch: 0 });
+  gi.handle(2, { t: 'xform', x: cc.x, y: 70, z: cc.z + 2, yaw: 0, pitch: 0 });
+  gi.adminStartWar(600); // capture only happens during a war
+  gi.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 }); // kill B to plant flag
   let instantEnd = false;
-  for (let t = 0; t < 40 && !instantEnd; t++) {
-    if (gi.tickRegions(1).some((o) => o.msg.t === 'seasonEnd')) instantEnd = true;
+  for (let t = 0; t < 125 && !instantEnd; t++) {
+    gi.tickClaims(1);
+    const out = gi.tickFlags(1);
+    const outReg = gi.tickRegions(1);
+    if (out.some((o) => o.msg.t === 'seasonEnd') || outReg.some((o) => o.msg.t === 'seasonEnd')) {
+      instantEnd = true;
+    }
   }
-  check('taking the enemy capital ends the season instantly', instantEnd && iWinner === FACTION_A);
+  check('taking the enemy capital does not end the season instantly', !instantEnd && iWinner === -2);
 
   // A season survives a serialize round-trip.
   const gp = new GameServer(1337, mulberry32(2));
@@ -2315,99 +2337,63 @@ check('furnace smelts ore/sand/log but not removed foods',
     Math.abs(rs.timeLeft - (SEASON_LENGTH - 12345)) < 1);
 }
 
-// --- Politics (Phase 6): elections, treasury, rally buff, recall --------------
+// --- War windows: pure schedule maths + capture only during a war ------------
 {
-  const FA = FACTION_A;
+  // Pure helpers: a fresh state is perpetual peace.
+  check('newWar is peacetime (not active, not pending)',
+    !warActive(newWar(), 0) && !warPending(newWar(), 0));
+  // Scheduled-in-the-future war: pending now, active after it starts, over after.
+  const w = scheduleWar(60, 120, 1000); // starts at 1060, ends at 1180
+  check('scheduleWar sets the right window', w.start === 1060 && w.end === 1180);
+  check('a future war is pending (not yet active)',
+    warPending(w, 1000) && !warActive(w, 1000) && warStartsIn(w, 1000) === 60);
+  check('a war is active inside its window',
+    warActive(w, 1100) && warTimeLeft(w, 1100) === 80 && !warPending(w, 1100));
+  check('a war is over after its end', !warActive(w, 1200) && warStartsIn(w, 1200) === 0);
+  const snap = warSnapshot(w, 1100);
+  check('warSnapshot is clock-relative', snap.active && snap.timeLeft === 80 && snap.nextIn === 0);
+  check('sanitizeWar fail-closes junk to peace',
+    sanitizeWar(null).start === 0 && sanitizeWar({ start: -1, end: 5 }).start === 0);
 
-  // Election: nominate + vote → the most-voted candidate becomes Commander.
-  const pol = new Politics(0);
-  pol.nominate(FA, 'Alice', 'Reds');
-  pol.nominate(FA, 'Bob', '');
-  pol.vote(FA, 'v1', 'Alice'); pol.vote(FA, 'v2', 'Alice'); pol.vote(FA, 'v3', 'Bob');
-  check('nominate + vote + tally elects the most-voted candidate',
-    pol.tally(FA, 100) === 'Alice' && pol.get(FA)!.commander === 'Alice');
-  const rev = new Politics(0);
-  rev.nominate(FA, 'A', ''); rev.nominate(FA, 'B', '');
-  rev.vote(FA, 'voter', 'A'); rev.vote(FA, 'voter', 'B'); // one vote per voter (replaces)
-  check('a voter has a single vote (re-vote replaces)', rev.tally(FA, 0) === 'B');
+  // Server gating: capturing land is LOCKED in peacetime, OPEN during a war.
+  const s = new GameServer(1337, mulberry32(200));
+  s.addPlayer(1, { username: 'A', faction: FACTION_A });
+  s.addPlayer(2, { username: 'B', faction: FACTION_B });
+  const tgt = regionIndex(GRID / 2, 0); // first enemy (B) region on the frontline
+  const c = regionCenter(tgt);
+  s.handle(1, { t: 'xform', x: c.x, y: 70, z: c.z, yaw: Math.PI, pitch: 0 });
+  s.handle(2, { t: 'xform', x: c.x, y: 70, z: c.z + 2, yaw: 0, pitch: 0 });
+  const ownerOf = (i: number): number =>
+    (s.regionsSnapshot() as unknown as { owners: number[] }).owners[i];
 
-  // Leadership powers + treasury.
-  const p2 = new Politics(0);
-  p2.nominate(FA, 'Cmd', ''); p2.vote(FA, 'x', 'Cmd'); p2.tally(FA, 0);
-  check('only the Commander sets the tax, clamped to MAX_TAX',
-    !p2.setTax(FA, 'NotCmd', 0.1, 0) && p2.setTax(FA, 'Cmd', 0.5, 0) && p2.get(FA)!.taxRate === MAX_TAX);
-  check('taxProduction diverts the cut to the treasury (production only)',
-    p2.taxProduction(FA, 100) === Math.floor(100 * MAX_TAX) &&
-    p2.get(FA)!.treasury === Math.floor(100 * MAX_TAX));
-  check('officers (max 2) can set rally but not tax',
-    p2.appointOfficer(FA, 'Cmd', 'Off1', 0) && p2.appointOfficer(FA, 'Cmd', 'Off2', 0) &&
-    !p2.appointOfficer(FA, 'Cmd', 'Off3', 0) &&            // capped at 2
-    p2.setRally(FA, 'Off1', 5, 0) && p2.get(FA)!.rally === 5 &&
-    !p2.setTax(FA, 'Off1', 0.1, 0));                       // officer can't tax
-  check('a treasury spend deducts, needs funds, and is logged', (() => {
-    p2.donate(FA, 2000, 'donor', 0);
-    const before = p2.get(FA)!.treasury;
-    const ok = p2.spendFactionBuff(FA, 'Cmd', 10);
-    return ok && p2.get(FA)!.treasury === before - FACTION_BUFF_COST &&
-      p2.get(FA)!.log.some((e) => /buff/i.test(e.text));
-  })());
-  check('a faction war buff lifts the combat multiplier for its window',
-    p2.combatMultiplier(FA, 999, 10) === RALLY_DAMAGE_MULT &&
-    p2.combatMultiplier(FA, 999, 10 + FACTION_BUFF_DURATION + 1) === 1);
-  check('the rally buff applies only inside the rally region',
-    p2.combatMultiplier(FA, 5, 1e12) === RALLY_DAMAGE_MULT &&
-    p2.combatMultiplier(FA, 0, 1e12) === 1);
+  check('no war scheduled => peacetime', s.isWarActive() === false);
+  s.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 }); // kill B in peace
+  for (let i = 0; i < 125; i++) {
+    s.tickClaims(1);
+    s.tickFlags(1);
+    s.tickRegions(1);
+  }
+  check('capture is LOCKED in peacetime (region not flipped)', ownerOf(tgt) === FACTION_B);
 
-  // Recall: a supermajority of members removes the Commander early.
-  const rc = new Politics(0);
-  rc.nominate(FA, 'King', ''); rc.vote(FA, 'a', 'King'); rc.tally(FA, 0);
-  check('a supermajority recall removes the Commander',
-    !rc.recall(FA, 'v1', 3, 0) && rc.recall(FA, 'v2', 3, 0) && rc.get(FA)!.commander === '');
+  // Respawn B so we can kill B again.
+  s.handle(2, { t: 'respawn' });
+  s.handle(2, { t: 'xform', x: c.x, y: 70, z: c.z + 2, yaw: 0, pitch: 0 });
 
-  // Weekly auto-tally at the deadline.
-  const el = new Politics(0);
-  el.nominate(FA, 'Win', ''); el.vote(FA, 'a', 'Win');
-  check('elections auto-tally at the weekly deadline',
-    el.tick(ELECTION_PERIOD - 10).length === 0 &&
-    el.tick(ELECTION_PERIOD + 10).some((e) => e.faction === FA && e.commander === 'Win'));
+  s.adminStartWar(600);
+  check('admin can start a war (capture opens)', s.isWarActive() === true);
+  s.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 }); // kill B in war
+  let capOk = false;
+  for (let i = 0; i < 125; i++) {
+    s.tickClaims(1);
+    const out = s.tickFlags(1);
+    s.tickRegions(1);
+    if (out.some((o) => o.msg.t === 'regionCapture')) capOk = true;
+  }
+  check('capture works during a war (region flips to the attacker)',
+    capOk && ownerOf(tgt) === FACTION_A);
 
-  // Serialize round-trip.
-  const sa = new Politics(0);
-  sa.nominate(FA, 'Z', ''); sa.vote(FA, 'q', 'Z'); sa.tally(FA, 0);
-  sa.donate(FA, 500, 'q', 0); sa.setTax(FA, 'Z', 0.2, 0);
-  const sb = new Politics(0); sb.restore(sa.serialize(), 0);
-  check('politics survive a serialize round-trip',
-    sb.get(FA)!.commander === 'Z' && sb.get(FA)!.treasury === 500 &&
-    Math.abs(sb.get(FA)!.taxRate - 0.2) < 1e-9);
-
-  // Server integration: a Commander's rally buff boosts ranged damage in-region.
-  const hitHealth = (rally: boolean): number => {
-    const g = new GameServer(1337, mulberry32(31));
-    g.addPlayer(1, { username: 'Cmd', faction: 0 });
-    g.addPlayer(2, { username: 'Foe', faction: 1 });
-    const reg = regionIndex(1, 1), c = regionCenter(reg);
-    if (rally) {
-      g.handle(1, { t: 'nominate', party: '' });
-      g.handle(1, { t: 'vote', candidate: 'Cmd' });
-      g.tickClaims(ELECTION_PERIOD + 1); // advance worldTime
-      g.tickPolitics(1);                  // auto-elect Cmd
-      g.handle(1, { t: 'xform', x: c.x, y: 70, z: c.z, yaw: -Math.PI / 2, pitch: 0 });
-      g.handle(1, { t: 'setRally', region: reg });
-    }
-    g.handle(1, { t: 'xform', x: c.x, y: 70, z: c.z, yaw: -Math.PI / 2, pitch: 0 });
-    g.handle(2, { t: 'xform', x: c.x + 2, y: 70, z: c.z, yaw: 0, pitch: 0 });
-    const hurt = g.handle(1, { t: 'rangedAttack', target: 2, amount: 8 })
-      .find((o) => o.msg.t === 'hurt')!.msg as { health: number };
-    return hurt.health;
-  };
-  check('a Commander rally buff increases ranged damage in the rally region',
-    hitHealth(true) < hitHealth(false));
-
-  // Server auth: a non-leader's command is a no-op (no politics broadcast).
-  const ga = new GameServer(1337, mulberry32(8));
-  ga.addPlayer(1, { username: 'Nobody', faction: 0 });
-  check('a non-leader cannot set the tax (server rejects)',
-    ga.handle(1, { t: 'setTax', rate: 0.2 }).length === 0);
+  s.adminCancelWar();
+  check('admin can cancel a war (back to peacetime)', s.isWarActive() === false);
 }
 
 // --- Secret faction switching / betrayals (Phase 7) --------------------------
@@ -2426,18 +2412,6 @@ check('furnace smelts ore/sand/log but not removed foods',
     !canSwitchFaction({ switchesUsed: 0, switchSeason: 1 }, 1, 0, 1, 3600));           // final week
   check('otherFaction flips between the two sides',
     otherFaction(FACTION_A) === FACTION_B && otherFaction(FACTION_B) === FACTION_A);
-
-  // removeMember strips a defector's government roles.
-  const pm = new Politics(0);
-  pm.nominate(FACTION_A, 'Boss', ''); pm.vote(FACTION_A, 'a', 'Boss'); pm.tally(FACTION_A, 0);
-  pm.appointOfficer(FACTION_A, 'Boss', 'Off', 0);
-  pm.removeMember(FACTION_A, 'Boss', 0);
-  check('removeMember vacates a defecting Commander seat', pm.get(FACTION_A)!.commander === '');
-  const pm2 = new Politics(0);
-  pm2.nominate(FACTION_A, 'C', ''); pm2.vote(FACTION_A, 'a', 'C'); pm2.tally(FACTION_A, 0);
-  pm2.appointOfficer(FACTION_A, 'C', 'Off', 0);
-  pm2.removeMember(FACTION_A, 'Off', 0);
-  check('removeMember strips a defecting Officer', !pm2.get(FACTION_A)!.officers.includes('Off'));
 
   // Badge forfeiture: a defector who switched this season earns no "Won" badge.
   const accs = new Accounts();
@@ -2531,19 +2505,14 @@ check('furnace smelts ore/sand/log but not removed foods',
   check('smoke is cosmetic — fx only, no damage',
     smoke.some((o) => o.msg.t === 'gadgetFx') && !smoke.some((o) => o.msg.t === 'hurt'));
 
-  // War Horn: leader-only, activates the faction combat buff.
+  // War Horn: a cosmetic rallying blast anyone can sound (fx only, no damage).
   const gh = new GameServer(1337, mulberry32(43));
-  gh.addPlayer(1, { username: 'Cmd', faction: 0 });
-  check('a non-leader cannot sound the War Horn',
-    gh.handle(1, { t: 'gadgetUse', item: Item.WarHorn, x: 0, y: 70, z: 0 }).length === 0);
-  gh.handle(1, { t: 'nominate', party: '' });
-  gh.handle(1, { t: 'vote', candidate: 'Cmd' });
-  gh.tickClaims(ELECTION_PERIOD + 1);
-  gh.tickPolitics(1);
+  gh.addPlayer(1, { username: 'Horn', faction: 0 });
   const horn = gh.handle(1, { t: 'gadgetUse', item: Item.WarHorn, x: 0, y: 70, z: 0 });
-  const hpol = horn.find((o) => o.msg.t === 'politics')?.msg as { factions: { faction: number; buffUntil: number }[] } | undefined;
-  check('a leader War Horn activates the faction combat buff',
-    !!hpol && (hpol.factions.find((f) => f.faction === 0)?.buffUntil ?? 0) > 0);
+  check('a War Horn plays a cosmetic fx for anyone, no damage',
+    horn.some((o) => o.msg.t === 'gadgetFx') && !horn.some((o) => o.msg.t === 'hurt'));
+  check('a War Horn on cooldown is rejected',
+    gh.handle(1, { t: 'gadgetUse', item: Item.WarHorn, x: 0, y: 70, z: 0 }).length === 0);
 
   // Spy disguise: broadcasts to OTHERS as the enemy faction.
   const gd = new GameServer(1337, mulberry32(44));

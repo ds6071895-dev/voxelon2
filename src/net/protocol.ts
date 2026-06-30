@@ -7,7 +7,6 @@ import type { MachineState, UpgradeAxis } from '../machines';
 import type { ShipState, ShipAxis } from '../ships';
 import type { TurretState, TurretAxis } from '../turrets';
 import type { ClaimState } from '../claims';
-import type { FactionPolitics } from '../politics';
 import type { GadgetKind } from '../gadgets';
 
 export const SERVER_PORT = 8080;
@@ -45,6 +44,15 @@ export interface PlayerInfo extends PlayerSnapshot {
 export interface ItemEntityInfo {
   eid: number; item: number; count: number;
   x: number; y: number; z: number;
+}
+
+/** A war flag on the wire: position, owning faction, the region it claims, and a
+ *  live countdown (seconds left before it flips the region). */
+export interface FlagInfo {
+  faction: number;
+  x: number; y: number; z: number;
+  region: number;
+  secondsLeft: number;
 }
 
 export const PICKUP_RANGE = 2.0; // server-validated pickup distance
@@ -115,17 +123,6 @@ export type ClientMsg =
   // is down, breaking a stored container inside the claim raids it (handled on
   // the normal `edit` path, server-side).
   | { t: 'claimHit'; x: number; y: number; z: number; amount: number }
-  // Politics (Phase 6): faction government actions. The server validates faction
-  // membership + leadership; `by` is always the sender (never spoofable here).
-  | { t: 'nominate'; party: string }                 // self-nominate for Commander
-  | { t: 'vote'; candidate: string }                 // vote for a candidate
-  | { t: 'setRally'; region: number }                // leader: mark/clear rally region
-  | { t: 'appointOfficer'; user: string }            // commander: appoint an officer
-  | { t: 'dismissOfficer'; user: string }            // commander: dismiss an officer
-  | { t: 'setTax'; rate: number }                    // commander: 0..0.25 oil tax
-  | { t: 'donate'; amount: number }                  // donate oil to the treasury
-  | { t: 'commanderSpend'; kind: 'shield' | 'crate' | 'buff'; x: number; y: number; z: number }
-  | { t: 'recall' }                                  // vote to recall the Commander
   // Secret faction switch (Phase 7): defect to the other side. NO public
   // announcement — others keep seeing your old colors (a spy), but the server
   // treats you as your new faction. Max 2/season, locked in the final week.
@@ -155,8 +152,11 @@ export type ServerMsg =
       regions: number[];
       /** Current season number + seconds left before the deadline (Phase 5). */
       season: { number: number; timeLeft: number };
-      /** Per-faction government state (Phase 6). */
-      politics: FactionPolitics[];
+      /** War window: capture is only open while `active`; else a countdown to the
+       *  next scheduled war (`nextIn`), or all-zero for peacetime. */
+      war: { active: boolean; timeLeft: number; nextIn: number };
+      /** Active war flags (land-claim markers) with live countdowns. */
+      flags: FlagInfo[];
       /** Saved per-account state to restore (inventory/hotbar); undefined for new accounts. */
       state?: Record<string, unknown>;
     }
@@ -190,10 +190,12 @@ export type ServerMsg =
   | { t: 'regionWin'; faction: number }
   // Season clock (Phase 5): number + seconds left (periodic HUD broadcast).
   | { t: 'season'; number: number; timeLeft: number }
-  // Politics (Phase 6): full per-faction government state (commander/officers/
-  // rally/treasury/tax/candidates/votes/log) + a notice for elected commanders.
-  | { t: 'politics'; factions: FactionPolitics[] }
-  | { t: 'commanderElected'; faction: number; commander: string }
+  // War window: whether capture is open now + seconds left (active) / seconds
+  // until the next scheduled war (pending). Admin-scheduled from the console.
+  | { t: 'war'; active: boolean; timeLeft: number; nextIn: number }
+  // War flags (the land-claim mechanic): every active flag with its live
+  // countdown. Shown to EVERYONE as a waypoint; if it survives, its region flips.
+  | { t: 'flags'; flags: FlagInfo[] }
   // Private confirmation of a secret faction switch (only to the defector).
   | { t: 'factionSwitched'; faction: number; remaining: number }
   // Gadget visual effect to play everywhere (frag/oil blast, smoke cloud).

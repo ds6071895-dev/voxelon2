@@ -23,7 +23,7 @@ import { ItemEntities } from './itementity';
 import { Chests } from './chests';
 import { Mobs } from './mobs';
 import { NetClient } from './net/client';
-import { WORLD_SEED, WORLD_HALF, makeUsername, GameMode } from './net/protocol';
+import { WORLD_SEED, WORLD_HALF, makeUsername, GameMode, FlagInfo } from './net/protocol';
 import { MachineModels } from './machinemodels';
 import { NetItems } from './netitems';
 import { Particles } from './particles';
@@ -43,6 +43,7 @@ import {
 import { TurretModels } from './turretmodels';
 import { RemotePlayers } from './remoteplayers';
 import { WorldMap } from './worldmap';
+import { Minimap } from './minimap';
 import { Accounts, Account } from './net/accounts';
 import {
   FACTIONS, NO_FACTION, factionColor, factionName, sameFaction, otherFaction,
@@ -59,10 +60,6 @@ import {
   newSeason, tickSeasonClock, seasonTimeLeft, seasonExpired, deadlineWinner,
   advanceSeason,
 } from './season';
-import {
-  Politics, FactionPolitics, MAX_TAX, SHIELD_REFILL_COST, SHIELD_REFILL_OIL,
-  SUPPLY_CRATE_COST, FACTION_BUFF_COST,
-} from './politics';
 import { GadgetCooldowns, GadgetDef, gadgetOf } from './gadgets';
 import { Sky, WATER_FOG_COLOR } from './sky';
 import { Survival } from './survival';
@@ -234,16 +231,69 @@ const localSeason = newSeason();
 let seasonNumber = localSeason.number;
 let seasonLeft = seasonTimeLeft(localSeason);
 let localSeasonsWon = 0;
-// Politics (Phase 6): server-authoritative in MP (net.onPolitics); offline the
-// local Politics is authoritative (and the solo player is auto-elected Commander).
-const localPolitics = new Politics();
-let factionPolitics: FactionPolitics[] = localPolitics.serialize();
-let politicsOpen = false;
+// War windows (admin-scheduled in MP): capture is only open while `warActiveNow`.
+// Offline single-player is always "at war" (free-play skirmish). The HUD counts
+// these down locally between the server's periodic broadcasts.
+let warActiveNow = false;
+let warLeft = 0;   // seconds left in the active war
+let warNextIn = 0; // seconds until the next scheduled war (peacetime)
 // Gadgets (Phase 8): a local cooldown gate (the server enforces its own) +
 // active spy disguises on remote players (id -> seconds of local time left).
 const gadgetCd = new GadgetCooldowns();
 const disguises = new Map<number, { realFaction: number; left: number }>();
 let jumpImmuneUntil = 0; // suppress fall damage briefly after a Jump Boost
+// Grappling hook: once fired, a string flies to the anchored block and reels the
+// player the ENTIRE way (a sustained per-frame pull, not a one-shot nudge).
+let grappleActive = false;
+let grappleTime = 0;            // safety-timeout clock
+const grappleAnchor = new THREE.Vector3();
+const grapplePrev = new THREE.Vector3(); // last-frame pos to detect "stuck on a wall"
+const grappleRope = new THREE.Line(
+  new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+  new THREE.LineBasicMaterial({ color: 0xf2efe6 }),
+);
+grappleRope.visible = false;
+grappleRope.frustumCulled = false;
+scene.add(grappleRope);
+/** Reel the player toward the anchored block each frame until they arrive, hit a
+ *  wall, or time out. Runs BEFORE player.update so the velocity it sets is what
+ *  the physics step integrates. */
+function updateGrapple(dt: number): void {
+  if (!grappleActive) return;
+  if (player.dead || pilotingShipId !== null) { endGrapple(); return; }
+  grappleTime += dt;
+  // Pull from roughly chest height toward the anchor.
+  const tx = grappleAnchor.x - player.pos.x;
+  const ty = grappleAnchor.y - (player.pos.y + 0.9);
+  const tz = grappleAnchor.z - player.pos.z;
+  const dist = Math.hypot(tx, ty, tz) || 1;
+  // Update the rope visual (hand/eye -> anchor).
+  const eye = player.eyePosition;
+  const pos = grappleRope.geometry.attributes.position as THREE.BufferAttribute;
+  pos.setXYZ(0, eye.x, eye.y - 0.2, eye.z);
+  pos.setXYZ(1, grappleAnchor.x, grappleAnchor.y, grappleAnchor.z);
+  pos.needsUpdate = true;
+  // Arrived or timed out -> release.
+  if (dist < 2.0 || grappleTime > 3.5) { endGrapple(); return; }
+  // Stuck against a wall (no progress) -> release; we're as close as we'll get.
+  const moved = Math.hypot(
+    player.pos.x - grapplePrev.x, player.pos.y - grapplePrev.y, player.pos.z - grapplePrev.z);
+  if (grappleTime > 0.3 && moved < 0.03) { endGrapple(); return; }
+  grapplePrev.copy(player.pos);
+  // Constant strong reel (overwrites gravity each frame so it pulls the WHOLE way).
+  const speed = 28;
+  player.vel.x = (tx / dist) * speed;
+  player.vel.y = (ty / dist) * speed;
+  player.vel.z = (tz / dist) * speed;
+  player.fallDistance = 0;
+}
+function endGrapple(): void {
+  if (!grappleActive) return;
+  grappleActive = false;
+  grappleRope.visible = false;
+  player.vel.multiplyScalar(0.3);     // bleed reel speed so you don't overshoot
+  jumpImmuneUntil = worldTimeLocal + 2; // no fall damage right after release
+}
 // World map (M key): region board + claims + capture meters + waypoints.
 const worldMap = new WorldMap(scene, camera, world.terrain, claims, {
   player: () => ({ x: player.pos.x, z: player.pos.z, yaw: player.yaw }),
@@ -251,6 +301,51 @@ const worldMap = new WorldMap(scene, camera, world.terrain, claims, {
   regions: () => regionOwners,
   captureMeters: () => regionMeters,
 });
+// Circular HUD radar (top-left): live terrain + waypoints + capitals + faction tint.
+const minimap = new Minimap(app, world.terrain);
+// War flags (the land-claim markers). Server-driven; shown to everyone as a
+// waypoint + an in-world flag. `flagsSetAt` lets the countdown tick smoothly
+// between the server's periodic broadcasts.
+let activeFlags: FlagInfo[] = [];
+let flagsSetAt = 0;
+const flagGroup = new THREE.Group();
+scene.add(flagGroup);
+const flagPoleGeo = new THREE.CylinderGeometry(0.12, 0.12, 6, 6);
+const flagClothGeo = new THREE.PlaneGeometry(2.2, 1.2);
+/** Seconds left before a flag claims its land (smoothly counted down locally). */
+function flagSecondsLeft(f: FlagInfo): number {
+  return Math.max(0, Math.round(f.secondsLeft - (worldTimeLocal - flagsSetAt)));
+}
+/** Rebuild the in-world flag posts (a pole + a colored pennant) to match the
+ *  active flag list. Cheap (at most a couple of flags). */
+function rebuildFlagMeshes(): void {
+  while (flagGroup.children.length) {
+    const m = flagGroup.children.pop() as THREE.Mesh;
+    (m.material as THREE.Material).dispose();
+  }
+  for (const f of activeFlags) {
+    const gy = world.terrain.height(Math.round(f.x), Math.round(f.z));
+    const col = factionColor(f.faction);
+    const pole = new THREE.Mesh(flagPoleGeo, new THREE.MeshBasicMaterial({ color: 0x6b4a2a }));
+    pole.position.set(f.x + 0.5, gy + 3, f.z + 0.5);
+    flagGroup.add(pole);
+    const cloth = new THREE.Mesh(flagClothGeo,
+      new THREE.MeshBasicMaterial({ color: col, side: THREE.DoubleSide }));
+    cloth.position.set(f.x + 0.5 + 1.1, gy + 5, f.z + 0.5);
+    flagGroup.add(cloth);
+  }
+}
+/** Flag markers (with countdown labels) for the map beacons + minimap. */
+function flagMarkers(): { x: number; z: number; color: number; name: string }[] {
+  return activeFlags.map((f) => {
+    const s = flagSecondsLeft(f);
+    const mm = Math.floor(s / 60), ss = s % 60;
+    return {
+      x: f.x, z: f.z, color: factionColor(f.faction),
+      name: `🚩 ${factionName(f.faction)} ${mm}:${ss < 10 ? '0' : ''}${ss}`,
+    };
+  });
+}
 let pilotingShipId: number | null = null;
 let ridingShipId: number | null = null;
 let localShipId = 1; // offline ship ids (no server to assign them)
@@ -312,13 +407,14 @@ seasonEl.style.cssText =
   'pointer-events:none;text-align:center;font-size:11px;color:#cfe0ff;' +
   'text-shadow:1px 1px 0 #000;width:340px;display:none;';
 app.appendChild(seasonEl);
-const rallyEl = document.createElement('div');
-rallyEl.className = 'mc-font';
-rallyEl.style.cssText =
-  'position:absolute;top:54px;left:50%;transform:translateX(-50%);z-index:10;' +
-  'pointer-events:none;text-align:center;font-size:11px;color:#ffd84a;' +
+// War clock: capture is only open during a war (admin-scheduled in MP).
+const warEl = document.createElement('div');
+warEl.className = 'mc-font';
+warEl.style.cssText =
+  'position:absolute;top:56px;left:50%;transform:translateX(-50%);z-index:10;' +
+  'pointer-events:none;text-align:center;font-size:13px;' +
   'text-shadow:1px 1px 0 #000;width:340px;display:none;';
-app.appendChild(rallyEl);
+app.appendChild(warEl);
 const captureBarEl = document.createElement('div');
 captureBarEl.className = 'mc-font';
 captureBarEl.style.cssText =
@@ -952,14 +1048,21 @@ playBtn.addEventListener('click', () => {
   if (!worldReady) {
     playBtn.textContent = 'Preparing…';
     const wait = (): void => {
-      if (worldReady) { playBtn.textContent = 'Play'; input.lock(); }
+      if (worldReady) { playBtn.textContent = 'Play'; beginPlay(); }
       else setTimeout(wait, 100);
     };
     wait();
     return;
   }
-  input.lock();
+  beginPlay();
 });
+
+// First drop-in shows a tiny tutorial (once, tracked in localStorage); after
+// that — or on Skip/Play! — we lock the pointer and enter the game.
+function beginPlay(): void {
+  if (!tutorialSeen) { tutorial.show(); return; }
+  input.lock();
+}
 
 // Controls / keybindings panel (Controls button).
 const controlsPanel = (() => {
@@ -1003,6 +1106,77 @@ controlsBtn.addEventListener('click', () => {
   controlsPanel.style.display = controlsPanel.style.display === 'flex' ? 'none' : 'flex';
 });
 
+// --- First-play tutorial: 3 tiny cards, shown ONCE on the first Play ----------
+let tutorialSeen = false;
+try { tutorialSeen = localStorage.getItem('voxelon.tutorialSeen') === '1'; } catch { /* ignore */ }
+
+const tutorial = (() => {
+  const steps: { title: string; lines: string[] }[] = [
+    { title: '⛏️ MOVE & BUILD', lines: [
+      'WASD to move · Space to jump',
+      'Left-click mines blocks · Right-click places & uses them',
+    ] },
+    { title: '🎒 CRAFT', lines: [
+      'Press E for your inventory + crafting',
+      'Build a Crafting Table, open it, and hit 📖 Guide for every recipe',
+    ] },
+    { title: '⚔️ WAR', lines: [
+      "You're auto-assigned to a faction — fight for it!",
+      'Stand in an enemy region to capture it · M = map',
+    ] },
+  ];
+  let i = 0;
+  const panel = document.createElement('div');
+  panel.style.cssText = 'position:absolute;inset:0;display:none;flex-direction:column;' +
+    'align-items:center;justify-content:center;gap:16px;background:rgba(8,8,14,0.92);z-index:26;';
+  const card = document.createElement('div');
+  card.className = 'mc-font';
+  card.style.cssText = 'background:#15182b;border:2px solid #3a4790;border-radius:10px;' +
+    'padding:22px 26px;max-width:440px;text-align:center;';
+  const title = document.createElement('div');
+  title.style.cssText = 'font-size:24px;letter-spacing:2px;color:#ffd84a;margin-bottom:12px;';
+  const body = document.createElement('div');
+  body.style.cssText = 'font-size:15px;color:#cfe0ff;line-height:1.7;text-shadow:none;';
+  const dots = document.createElement('div');
+  dots.style.cssText = 'font-size:14px;color:#7f8db0;margin-top:14px;letter-spacing:3px;';
+  card.append(title, body, dots);
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:12px;';
+  const skip = document.createElement('button');
+  skip.className = 'mc-btn'; skip.textContent = 'Skip';
+  skip.style.cssText = 'font-size:15px;padding:7px 20px;';
+  const next = document.createElement('button');
+  next.className = 'mc-btn';
+  next.style.cssText = 'font-size:15px;padding:7px 26px;';
+  row.append(skip, next);
+  panel.append(card, row);
+  app.appendChild(panel);
+
+  function render(): void {
+    const s = steps[i];
+    title.textContent = s.title;
+    body.innerHTML = s.lines.map((l) => `<div>${l}</div>`).join('');
+    dots.textContent = steps.map((_, k) => (k === i ? '●' : '○')).join(' ');
+    next.textContent = i === steps.length - 1 ? 'Play!' : 'Next ▶';
+  }
+  function finish(): void {
+    panel.style.display = 'none';
+    tutorialSeen = true;
+    try { localStorage.setItem('voxelon.tutorialSeen', '1'); } catch { /* ignore */ }
+    if (worldReady) input.lock();
+  }
+  skip.addEventListener('click', finish);
+  next.addEventListener('click', () => {
+    if (i >= steps.length - 1) finish();
+    else { i++; render(); }
+  });
+  return {
+    get open(): boolean { return panel.style.display === 'flex'; },
+    show(): void { i = 0; render(); panel.style.display = 'flex'; },
+    finish,
+  };
+})();
+
 document.getElementById('resume-btn')!.addEventListener('click', () => input.lock());
 document.getElementById('quit-btn')!.addEventListener('click', () => enterTitle());
 
@@ -1010,32 +1184,26 @@ document.addEventListener('pointerlockchange', () => {
   if (!worldReady) return;
   if (input.locked) {
     enterPlaying(); // entered or returned to the game
-  } else if (!player.dead && !invUI.open && !worldMap.open && !politicsOpen && screen === 'playing') {
+  } else if (!player.dead && !invUI.open && !worldMap.open && screen === 'playing') {
     enterPause(); // Esc / lost focus while playing -> pause, not the title
   }
 });
 // Safety net: re-engage pointer lock by clicking the world when we're in-game
 // but unlocked (e.g. a menu just closed but the browser blocked an immediate
 // re-lock — "requestPointerLock too soon after exit"). This guarantees you can
-// always get movement back after closing the Faction/Map panels.
+// always get movement back after closing the Map panel.
 renderer.domElement.addEventListener('mousedown', () => {
   if (screen === 'playing' && !input.locked && !player.dead &&
-      !invUI.open && !worldMap.open && !politicsOpen) {
+      !invUI.open && !worldMap.open) {
     input.lock();
   }
 });
 document.addEventListener('keydown', (e) => {
-  // 'G' toggles the faction-government panel during play (ignored while typing).
-  if ((e.code === 'KeyG') && screen === 'playing' && !invUI.open && !worldMap.open &&
-      !(document.activeElement instanceof HTMLInputElement)) {
-    togglePolitics();
-    return;
-  }
   if (e.code !== 'Escape') return;
-  if (guideOpen) { hideGuide(); }
+  if (tutorial.open) { tutorial.finish(); }
+  else if (guideOpen) { hideGuide(); }
   else if (worldMap.open) { worldMap.hide(); input.lock(); }
   else if (invUI.open) { invUI.hide(); input.lock(); }
-  else if (politicsOpen) { hidePolitics(); }
   else if (screen === 'paused' && !player.dead) input.lock(); // Esc resumes from pause
 });
 
@@ -1243,16 +1411,23 @@ net.onRegionWin = (faction) => {
   showKill('★ SEASON WON ★', factionName(faction));
 };
 net.onSeason = (number, timeLeft) => { seasonNumber = number; seasonLeft = timeLeft; };
-net.onPolitics = (factions) => {
-  if (Array.isArray(factions) && factions.length) factionPolitics = factions;
-  if (politicsOpen) renderPolitics();
-  updateRallyHud();
+net.onWar = (active, timeLeft, nextIn) => {
+  const wasActive = warActiveNow;
+  warActiveNow = active; warLeft = timeLeft; warNextIn = nextIn;
+  if (active && !wasActive) showRegionBanner('⚔️ WAR! CAPTURE THE REGIONS!', '#ff5a5a');
+  else if (!active && wasActive) showRegionBanner('🕊️ PEACETIME — CAPTURE LOCKED', '#9fd0ff');
 };
-net.onCommanderElected = (faction, commander) => {
-  showKill('⚑ Commander', `${factionName(faction)}: ${commander}`);
-  if (faction === localFaction && commander === authedName) {
-    showRegionBanner('YOU ARE THE COMMANDER! ⚑', factionCss(faction));
+net.onFlags = (flags) => {
+  // Announce a flag that's newly aimed at land you care about (plant feedback).
+  const known = new Set(activeFlags.map((f) => `${f.faction}:${f.region}`));
+  for (const f of flags) {
+    if (known.has(`${f.faction}:${f.region}`)) continue;
+    if (f.faction === localFaction) showRegionBanner('🚩 FLAG PLANTED — HOLD IT!', factionCss(f.faction));
+    else showRegionBanner('🚩 ENEMY FLAG — GO DEFEND!', factionCss(f.faction));
   }
+  activeFlags = flags;
+  flagsSetAt = worldTimeLocal;
+  rebuildFlagMeshes();
 };
 net.onGadgetFx = (kind, x, y, z) => gadgetFxAt(kind, x, y, z);
 net.onDisguised = (id, faction) => {
@@ -1270,8 +1445,6 @@ net.onFactionSwitched = (faction, remaining) => {
   // to everyone else (a spy) — only the server knows your true side.
   localFaction = faction;
   refreshNetInfo();
-  if (politicsOpen) renderPolitics();
-  updateRallyHud();
   showNotice(`🤫 You secretly joined ${factionName(faction)}. Switches left: ${remaining}.`);
 };
 net.onSeasonEnd = (winner, number) => {
@@ -1763,6 +1936,11 @@ function updateRegionWarHud(): void {
   const onPoint = Math.hypot(player.pos.x - c.x, player.pos.z - c.z) <= CONTROL_RADIUS;
   if (!onPoint || ri >= REGION_COUNT) { captureBarEl.style.display = 'none'; return; }
   captureBarEl.style.display = 'block';
+  // Online peacetime: capture is locked — say so instead of showing a meter.
+  if (net.connected && !warActiveNow) {
+    captureBarEl.innerHTML = '<div style="color:#9fd0ff">🕊️ Capture locked — wait for the war</div>';
+    return;
+  }
   const owner = regionOwners[ri];
   const capF = regionMeters.faction[ri] ?? NO_FACTION;
   const frac = Math.max(0, Math.min(1, regionMeters.progress[ri] ?? 0));
@@ -1798,6 +1976,34 @@ function updateSeasonHud(): void {
   seasonEl.innerHTML = `Season ${seasonNumber} · ${formatSeasonLeft(seasonLeft)}`;
 }
 
+/** mm:ss (or h:mm:ss) clock for the war timer. */
+function formatClock(secs: number): string {
+  const s = Math.max(0, Math.floor(secs));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return h > 0 ? `${h}:${pad(m)}:${pad(ss)}` : `${m}:${pad(ss)}`;
+}
+
+/** The war clock: shows whether capture is open + a live countdown. Offline is a
+ *  perpetual free-play skirmish; online it reflects the admin-scheduled war. */
+function updateWarHud(dt: number): void {
+  warEl.style.display = 'block';
+  if (!net.connected) {
+    warEl.innerHTML = '<span style="color:#ffb86a">⚔️ Skirmish — capture open</span>';
+    return;
+  }
+  // Count down locally between the server's periodic broadcasts.
+  if (warActiveNow) warLeft = Math.max(0, warLeft - dt);
+  else if (warNextIn > 0) warNextIn = Math.max(0, warNextIn - dt);
+  if (warActiveNow) {
+    warEl.innerHTML = `<span style="color:#ff6a6a">⚔️ WAR · ${formatClock(warLeft)} left</span>`;
+  } else if (warNextIn > 0) {
+    warEl.innerHTML = `<span style="color:#9fd0ff">🕊️ Next war in ${formatClock(warNextIn)}</span>`;
+  } else {
+    warEl.innerHTML = '<span style="color:#9fb0c4">🕊️ Peacetime — capture locked</span>';
+  }
+}
+
 /** Flash the season result + clear the old war (banner is loud for kids). */
 function announceSeasonEnd(winner: number, number: number): void {
   if (winner >= 0) {
@@ -1831,303 +2037,12 @@ function endLocalSeason(winner: number): void {
   localRegions.reset();
   regionOwners = localRegions.ownerList();
   regionMeters = localRegions.meters();
-  localPolitics.reset(worldTimeLocal); // a new season dissolves the government (Phase 6)
-  factionPolitics = localPolitics.serialize();
   advanceSeason(localSeason);
   seasonNumber = localSeason.number;
   seasonLeft = seasonTimeLeft(localSeason);
   announceSeasonEnd(winner, ended);
 }
 
-// --- Politics panel (Phase 6): faction government UI -------------------------
-const politicsEl = document.createElement('div');
-politicsEl.style.cssText =
-  'position:absolute;inset:0;display:none;z-index:30;align-items:center;' +
-  'justify-content:center;background:rgba(6,8,14,0.8);';
-const politicsPanel = document.createElement('div');
-politicsPanel.className = 'mc-font';
-politicsPanel.style.cssText =
-  'background:linear-gradient(#161a26,#10131c);border:2px solid #34406a;border-radius:10px;' +
-  'box-shadow:0 10px 40px rgba(0,0,0,0.6);padding:0 0 14px;width:460px;max-height:88vh;' +
-  'overflow:auto;color:#e7edf7;text-shadow:none;font-size:13px;line-height:1.55;';
-politicsEl.appendChild(politicsPanel);
-app.appendChild(politicsEl);
-// Click the dim backdrop (outside the panel) to close.
-politicsEl.addEventListener('mousedown', (e) => { if (e.target === politicsEl) hidePolitics(); });
-
-const politicsBtn = document.createElement('button');
-politicsBtn.className = 'mc-font';
-politicsBtn.textContent = '⚑ Faction (G)';
-// Stacked directly above the Map button, same footprint, so the two read as a
-// matched pair (fixed width keeps them identical regardless of label length).
-politicsBtn.style.cssText =
-  'position:absolute;bottom:38px;right:8px;z-index:12;font-size:12px;padding:6px 10px;' +
-  'width:118px;box-sizing:border-box;text-align:center;cursor:pointer;border:2px solid;' +
-  'border-color:#fff #555 #555 #fff;background:#6b6b6b;color:#fff;text-shadow:none;';
-politicsBtn.addEventListener('click', () => {
-  if (player.dead) return;
-  if (politicsOpen) { hidePolitics(); return; }
-  if (invUI.open) invUI.hide();
-  if (worldMap.open) worldMap.hide();
-  showPolitics();
-});
-app.appendChild(politicsBtn);
-
-function myPolitics(): FactionPolitics | undefined {
-  return factionPolitics.find((p) => p.faction === localFaction);
-}
-function iAmLeader(): boolean {
-  const p = myPolitics();
-  return !!p && (p.commander === authedName || p.officers.includes(authedName));
-}
-function iAmCommander(): boolean { return myPolitics()?.commander === authedName; }
-
-/** Offline single-player: the local Politics is authoritative; make the solo
- *  player their faction's Commander so the toolset is usable. */
-function ensureOfflineCommander(): void {
-  if (net.connected || !authedName) return;
-  const p = localPolitics.get(localFaction);
-  if (p && !p.commander) {
-    localPolitics.nominate(localFaction, authedName, '');
-    localPolitics.tally(localFaction, worldTimeLocal);
-    factionPolitics = localPolitics.serialize();
-  }
-}
-/** Run an offline politics mutation, then resync + re-render. */
-function politicsOffline(fn: (now: number) => void): void {
-  fn(worldTimeLocal);
-  factionPolitics = localPolitics.serialize();
-  renderPolitics();
-  updateRallyHud();
-}
-
-function togglePolitics(): void { politicsOpen ? hidePolitics() : showPolitics(); }
-function showPolitics(): void {
-  ensureOfflineCommander();
-  politicsOpen = true;
-  politicsEl.style.display = 'flex';
-  if (input.locked) document.exitPointerLock();
-  renderPolitics();
-}
-function hidePolitics(): void {
-  politicsOpen = false;
-  politicsEl.style.display = 'none';
-  // Try to grab the pointer back; if the browser blocks an immediate re-lock,
-  // the world-click safety net restores movement on the next click.
-  if (screen === 'playing' && !player.dead) input.lock();
-}
-
-function fmtTime(secs: number): string {
-  const s = Math.max(0, Math.floor(secs));
-  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600);
-  return d > 0 ? `${d}d ${h}h` : `${h}h ${Math.floor((s % 3600) / 60)}m`;
-}
-
-/** The rally HUD line (visible to all members when a rally is set). */
-function updateRallyHud(): void {
-  const p = myPolitics();
-  if (!p || p.rally < 0) { rallyEl.style.display = 'none'; return; }
-  rallyEl.style.display = 'block';
-  const here = regionOf(player.pos.x, player.pos.z) === p.rally;
-  rallyEl.innerHTML = `⚑ RALLY: ${regionLabel(p.rally)}${here ? ' — FIGHT HERE (+buff)!' : ''}`;
-}
-
-function renderPolitics(): void {
-  const p = myPolitics();
-  if (!p) { politicsPanel.innerHTML = 'No faction.'; return; }
-  const leader = iAmLeader(), commander = iAmCommander();
-  const col = factionCss(localFaction);
-  const esc = (s: string): string => s.replace(/[&<>"]/g, (c) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] ?? c));
-  const section = (title: string, body: string): string =>
-    `<div style="padding:10px 16px;border-top:1px solid #232a40">` +
-    `<div style="font-size:11px;letter-spacing:2px;color:#7f8db0;margin-bottom:6px">${title}</div>${body}</div>`;
-  const stat = (label: string, value: string): string =>
-    `<div style="display:flex;justify-content:space-between;gap:10px;padding:2px 0">` +
-    `<span style="color:#8f9ec0">${label}</span><span>${value}</span></div>`;
-  const rows: string[] = [];
-
-  // Header: faction emblem + name + close ✕, on a faction-tinted bar.
-  rows.push(
-    `<div style="display:flex;align-items:center;gap:10px;padding:12px 16px;` +
-    `background:linear-gradient(90deg,${col}33,transparent);border-bottom:1px solid #232a40;` +
-    `border-radius:8px 8px 0 0">` +
-    `<div style="width:26px;height:26px;border-radius:6px;background:${col};display:flex;` +
-    `align-items:center;justify-content:center;color:#0a0c12;font-size:16px">⚑</div>` +
-    `<div style="flex:1"><div style="font-size:15px;color:${col};letter-spacing:1px">` +
-    `${factionName(localFaction).toUpperCase()}</div>` +
-    `<div style="font-size:10px;color:#7f8db0">FACTION GOVERNMENT · Season ${seasonNumber}</div></div>` +
-    `<button data-act="close" class="pbtn-x">✕</button></div>`);
-
-  // Overview stats.
-  rows.push(section('OVERVIEW',
-    stat('Commander', p.commander ? `<b style="color:${col}">${esc(p.commander)}</b>${commander ? ' (you)' : ''}` : '<i style="color:#7f8db0">vacant</i>') +
-    stat('Officers', p.officers.length ? esc(p.officers.join(', ')) : '<span style="color:#7f8db0">none</span>') +
-    stat('War chest', `<b style="color:#ffd84a">${Math.floor(p.treasury)} oil</b>`) +
-    stat('Oil tax', `${Math.round(p.taxRate * 100)}%`) +
-    stat('Rally point', p.rally >= 0 ? `<b style="color:${col}">${regionLabel(p.rally)}</b>` : '<span style="color:#7f8db0">none</span>') +
-    stat('Next election', fmtTime(Math.max(0, p.electionEndsAt - worldTimeLocal)))));
-
-  // Election.
-  let elBody = '';
-  if (p.candidates.length) {
-    for (const c of p.candidates) {
-      const votes = Object.values(p.votes).filter((v) => v === c.user).length;
-      const meVoted = p.votes[authedName] === c.user;
-      elBody += `<div style="display:flex;align-items:center;gap:8px;padding:3px 0">` +
-        `<span style="flex:1">${esc(c.user)}${c.party ? ` <span style="color:#8f9ec0">[${esc(c.party)}]</span>` : ''}</span>` +
-        `<span style="color:#ffd84a;min-width:48px;text-align:right">${votes} vote${votes === 1 ? '' : 's'}</span>` +
-        `<button data-act="vote" data-arg="${esc(c.user)}" class="pbtn"${meVoted ? ' data-on="1"' : ''}>${meVoted ? '✓ Voted' : 'Vote'}</button></div>`;
-    }
-  } else elBody += `<div style="color:#7f8db0">No candidates yet — be the first to run.</div>`;
-  elBody += `<div style="display:flex;gap:6px;margin-top:8px"><input id="party-in" placeholder="party name (optional)" maxlength="18" ` +
-    `style="flex:1;background:#0c0f18;border:1px solid #2a3550;border-radius:4px;color:#e7edf7;padding:5px 7px"/>` +
-    `<button data-act="nominate" class="pbtn">Run for Commander</button></div>`;
-  rows.push(section('ELECTION', elBody));
-
-  // Everyone's actions.
-  rows.push(section('YOUR ACTIONS',
-    `<button data-act="donate" class="pbtn">Donate oil barrels</button> ` +
-    `<button data-act="recall" class="pbtn">Recall vote (${p.recalls.length})</button>`));
-
-  // Leader command powers.
-  if (leader) {
-    const hereLabel = regionLabel(regionOf(player.pos.x, player.pos.z));
-    let cmd = `<div style="margin-bottom:8px"><button data-act="rally" class="pbtn">Rally here (${hereLabel})</button> ` +
-      `<button data-act="clearRally" class="pbtn">Clear rally</button></div>`;
-    cmd += `<div style="color:#8f9ec0;margin-bottom:3px">Spend the war chest</div><div style="margin-bottom:8px">` +
-      `<button data-act="spend" data-arg="shield" class="pbtn">🛡 Refill shield · ${SHIELD_REFILL_COST}</button> ` +
-      `<button data-act="spend" data-arg="crate" class="pbtn">📦 Supply crate · ${SUPPLY_CRATE_COST}</button> ` +
-      `<button data-act="spend" data-arg="buff" class="pbtn">⚔ War buff · ${FACTION_BUFF_COST}</button></div>`;
-    if (commander) {
-      cmd += `<div style="color:#8f9ec0;margin-bottom:3px">Oil tax (max ${Math.round(MAX_TAX * 100)}%)</div><div style="margin-bottom:8px">` +
-        [0, 0.1, 0.25].map((r) => `<button data-act="tax" data-arg="${r}" class="pbtn"${Math.abs(p.taxRate - r) < 0.001 ? ' data-on="1"' : ''}>${Math.round(r * 100)}%</button>`).join(' ') + `</div>`;
-      const mates = [...net.remotes.values()]
-        .filter((r) => r.info.faction === localFaction && !p.officers.includes(r.info.username) && r.info.username !== p.commander);
-      if (mates.length) {
-        cmd += `<div style="color:#8f9ec0;margin-bottom:3px">Appoint officer</div><div style="margin-bottom:8px">` +
-          mates.map((r) => `<button data-act="officer" data-arg="${esc(r.info.username)}" class="pbtn">+ ${esc(r.info.username)}</button>`).join(' ') + `</div>`;
-      }
-      if (p.officers.length) {
-        cmd += `<div style="color:#8f9ec0;margin-bottom:3px">Dismiss officer</div><div>` +
-          p.officers.map((o) => `<button data-act="dismiss" data-arg="${esc(o)}" class="pbtn">${esc(o)} ✕</button>`).join(' ') + `</div>`;
-      }
-    }
-    rows.push(section('⚑ COMMAND', cmd));
-  }
-
-  // Decision log.
-  if (p.log.length) {
-    rows.push(section('LOG',
-      p.log.slice(-6).reverse().map((e) =>
-        `<div style="color:#8f9ec0;font-size:11px">› ${esc(e.by)}: ${esc(e.text)}</div>`).join('')));
-  }
-
-  rows.push(`<div style="padding:12px 16px 0;text-align:center;color:#5f6b88;font-size:10px">Press G or Esc to close</div>`);
-  politicsPanel.innerHTML = rows.join('');
-  for (const b of Array.from(politicsPanel.querySelectorAll('.pbtn'))) {
-    const on = (b as HTMLElement).getAttribute('data-on') === '1';
-    (b as HTMLElement).style.cssText =
-      `margin:2px;padding:5px 9px;cursor:pointer;border:1px solid ${on ? col : '#3a4666'};border-radius:5px;` +
-      `background:${on ? col + '33' : '#1c2335'};color:${on ? '#fff' : '#cdd6ee'};font-size:11px;`;
-  }
-  const x = politicsPanel.querySelector('.pbtn-x') as HTMLElement | null;
-  if (x) x.style.cssText =
-    'width:26px;height:26px;cursor:pointer;border:1px solid #3a4666;border-radius:5px;' +
-    'background:#1c2335;color:#cdd6ee;font-size:13px;line-height:1';
-}
-
-politicsPanel.addEventListener('click', (e) => {
-  const t = (e.target as HTMLElement).closest('.pbtn, .pbtn-x') as HTMLElement | null;
-  if (!t) return;
-  const act = t.getAttribute('data-act'), arg = t.getAttribute('data-arg') ?? '';
-  const here = regionOf(player.pos.x, player.pos.z);
-  const online = net.connected;
-  switch (act) {
-    case 'close': hidePolitics(); break;
-    case 'nominate': {
-      const party = (document.getElementById('party-in') as HTMLInputElement | null)?.value ?? '';
-      if (online) net.sendNominate(party);
-      else politicsOffline((now) => { localPolitics.nominate(localFaction, authedName, party); localPolitics.tally(localFaction, now); });
-      break;
-    }
-    case 'vote':
-      if (online) net.sendVote(arg);
-      else politicsOffline(() => localPolitics.vote(localFaction, authedName, arg));
-      break;
-    case 'rally':
-      if (online) net.sendSetRally(here);
-      else politicsOffline((now) => localPolitics.setRally(localFaction, authedName, here, now));
-      break;
-    case 'clearRally':
-      if (online) net.sendSetRally(-1);
-      else politicsOffline((now) => localPolitics.setRally(localFaction, authedName, -1, now));
-      break;
-    case 'tax':
-      if (online) net.sendSetTax(Number(arg));
-      else politicsOffline((now) => localPolitics.setTax(localFaction, authedName, Number(arg), now));
-      break;
-    case 'officer':
-      if (online) net.sendAppointOfficer(arg);
-      else politicsOffline((now) => localPolitics.appointOfficer(localFaction, authedName, arg, now));
-      break;
-    case 'dismiss':
-      if (online) net.sendDismissOfficer(arg);
-      else politicsOffline((now) => localPolitics.dismissOfficer(localFaction, authedName, arg, now));
-      break;
-    case 'recall':
-      if (online) net.sendRecall();
-      else politicsOffline((now) => localPolitics.recall(localFaction, authedName, 1, now));
-      break;
-    case 'donate': {
-      const have = inventory.countItem(Item.OilBarrel);
-      if (have <= 0) { showNotice('No oil barrels to donate.'); break; }
-      inventory.removeItem(Item.OilBarrel, have);
-      const oil = have * OIL_PER_BARREL;
-      if (online) net.sendDonate(oil);
-      else politicsOffline((now) => localPolitics.donate(localFaction, oil, authedName, now));
-      showNotice(`Donated ${have} oil barrel(s) to the war chest.`);
-      break;
-    }
-    case 'spend':
-      doCommanderSpend(arg as 'shield' | 'crate' | 'buff');
-      return; // doCommanderSpend handles its own notices
-  }
-  if (online) showNotice('Sent.'); // server reconciles via the next politics broadcast
-});
-
-function doCommanderSpend(kind: 'shield' | 'crate' | 'buff'): void {
-  if (net.connected) {
-    if (kind === 'shield') {
-      const c = claims.at(player.pos.x, player.pos.z);
-      if (!c || !sameFaction(c.faction, localFaction)) { showNotice('Stand in your own base to refill its shield.'); return; }
-      net.sendCommanderSpend('shield', c.coreX, c.coreY, c.coreZ);
-    } else {
-      net.sendCommanderSpend(kind, player.pos.x, player.pos.y, player.pos.z);
-    }
-    return;
-  }
-  // Offline: apply the effect locally.
-  politicsOffline((now) => {
-    if (kind === 'shield') {
-      const c = claims.at(player.pos.x, player.pos.z);
-      if (!c || !sameFaction(c.faction, localFaction)) { showNotice('Stand in your own base to refill its shield.'); return; }
-      if (localPolitics.spendShieldRefill(localFaction, authedName, now)) c.oil = Math.min(OIL_CAP, c.oil + SHIELD_REFILL_OIL);
-    } else if (kind === 'crate') {
-      if (localPolitics.spendSupplyCrate(localFaction, authedName, now)) {
-        inventory.add(Item.Cannonball, 24); inventory.add(Item.OilBarrel, 10);
-      }
-    } else if (kind === 'buff') {
-      localPolitics.spendFactionBuff(localFaction, authedName, now);
-    }
-  });
-}
-
-/** Offline: advance the local government clock so elections still resolve. */
-function updatePoliticsOffline(): void {
-  localPolitics.tick(worldTimeLocal);
-  factionPolitics = localPolitics.serialize();
-}
 
 /** Drop the (offline) player into a region their faction controls — never enemy
  *  land. Mirrors the server's faction-aware spawn. */
@@ -2230,7 +2145,7 @@ app.appendChild(gadgetTipEl);
 function updateHeldGadgetTip(): void {
   const stack = inventory.selectedStack;
   const def = stack ? gadgetOf(stack.id) : undefined;
-  if (!def || invUI.open || worldMap.open || politicsOpen || player.dead) {
+  if (!def || invUI.open || worldMap.open || player.dead) {
     gadgetTipEl.style.display = 'none'; return;
   }
   gadgetTipEl.style.display = 'block';
@@ -2296,15 +2211,14 @@ function useGadget(def: GadgetDef): void {
       const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
       const hit = raycastBlocks(world, eye, dir, def.radius ?? 40);
       if (!hit) { showNotice('No surface in range to grapple.'); return; }
-      const to = new THREE.Vector3(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5).sub(player.pos);
-      const len = to.length();
       gadgetCd.use(def.item, worldTimeLocal);
-      to.normalize();
-      const power = Math.min(26, 8 + len * 0.9);
-      player.vel.x = to.x * power;
-      player.vel.y = Math.max(to.y * power, 8); // always a little lift
-      player.vel.z = to.z * power;
-      player.fallDistance = 0;
+      // Anchor the string to the hit block and start reeling — the per-frame pull
+      // in updateGrapple() drags the player the WHOLE way there.
+      grappleAnchor.set(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
+      grappleActive = true;
+      grappleTime = 0;
+      grapplePrev.copy(player.pos);
+      grappleRope.visible = true;
       particles.poof(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
       break;
     }
@@ -2334,12 +2248,10 @@ function useGadget(def: GadgetDef): void {
       break;
     }
     case 'horn': {
-      if (!iAmLeader()) { showNotice('Only a Commander/Officer can sound the War Horn.'); return; }
       gadgetCd.use(def.item, worldTimeLocal);
       if (net.connected) net.sendGadgetUse(def.item, player.pos.x, player.pos.y, player.pos.z);
-      else politicsOffline((now) => { localPolitics.triggerBuff(localFaction, def.duration ?? 20, now, authedName); });
       gadgetFxAt('horn', player.pos.x, player.pos.y, player.pos.z);
-      showNotice('📯 War Horn! Faction combat buff active.');
+      showNotice('📯 War Horn sounded — rally the troops!');
       break;
     }
     case 'disguise': {
@@ -2634,6 +2546,7 @@ function frame(): void {
     // reads this; jump while falling to start gliding).
     const wornChest = inventory.chestplateStack;
     player.gliderEquipped = !!wornChest && wornChest.id === Item.Glider;
+    updateGrapple(dt); // sustained grapple pull (sets velocity before the step)
     player.update(dt, moveInput, world);
     // World border: keep the player inside the 1000×1000 play area (the server
     // clamps authoritatively too).
@@ -2782,9 +2695,19 @@ function frame(): void {
     // Seasons (Phase 5): offline the local clock is authoritative.
     if (!net.connected) updateSeasonOffline(dt);
     updateSeasonHud();
-    // Politics (Phase 6): offline advance the government clock; rally HUD always.
-    if (!net.connected) updatePoliticsOffline();
-    updateRallyHud();
+    updateWarHud(dt); // war clock (capture window); offline = perpetual skirmish
+    // Circular radar: visible while playing (hidden behind the full map /
+    // inventory, and behind the F3 debug overlay since they share the top-left).
+    const showRadar = screen === 'playing' && !worldMap.open && !invUI.open && !hud.debugVisible;
+    minimap.setVisible(showRadar);
+    const flagMk = flagMarkers();
+    worldMap.setDynamicMarkers(flagMk); // war flags as in-world beacons + on the map
+    if (showRadar) {
+      // Tint reflects the TERRITORY you're standing in (blue in Azure land, red
+      // in Crimson land), not your own faction; neutral land gets no tint.
+      const hereOwner = regionOwners[regionOf(player.pos.x, player.pos.z)] ?? NO_FACTION;
+      minimap.update(player.pos.x, player.pos.z, player.yaw, hereOwner, worldMap.listWaypoints(), flagMk);
+    }
     tickDisguises(dt); // Phase 8: expire spy disguises on remote avatars
     updateThrownItems(dt); // animate tossed grenades/bombs
     // Jump Boost: zero fall distance while the immunity window is active.

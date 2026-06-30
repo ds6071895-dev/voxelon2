@@ -159,9 +159,11 @@ export class GameAudio {
     this.noise({ freq: MATERIAL_FREQ[material] * 0.8, dur: 0.07, gain: 0.16 });
   }
 
+  /** Taking damage: a soft, muffled "oof" — a low triangle thump + a brief
+   *  low-passed noise body. No harsh sawtooth buzz (it was painful on repeat). */
   hurt(): void {
-    this.tone({ type: 'sawtooth', from: 220, to: 110, dur: 0.22, gain: 0.3 });
-    this.noise({ freq: 500, dur: 0.15, gain: 0.15 });
+    this.tone({ type: 'triangle', from: 180, to: 95, dur: 0.16, gain: 0.16 });
+    this.noise({ freq: 260, dur: 0.1, gain: 0.06, slideTo: 120, type: 'lowpass', q: 0.6 });
   }
 
   eatTick(): void {

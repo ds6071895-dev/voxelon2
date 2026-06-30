@@ -8,9 +8,8 @@ import type { MachineState, UpgradeAxis } from '../machines';
 import type { ShipState, ShipAxis } from '../ships';
 import type { TurretState, TurretAxis } from '../turrets';
 import type { ClaimState } from '../claims';
-import type { FactionPolitics } from '../politics';
 import {
-  ClientMsg, GameMode, ItemEntityInfo, PlayerInfo, SERVER_PORT, ServerMsg, ShipTransform,
+  ClientMsg, FlagInfo, GameMode, ItemEntityInfo, PlayerInfo, SERVER_PORT, ServerMsg, ShipTransform,
   TRANSFORM_HZ,
 } from './protocol';
 
@@ -19,6 +18,22 @@ export interface Remote {
   tx: number; ty: number; tz: number; tyaw: number; tpitch: number;
   health: number;
   dead: boolean;
+}
+
+/** Resolve the WebSocket URL. When the page is served by the game server itself
+ *  (production build / a Cloudflare tunnel / any reverse proxy) the socket is
+ *  SAME-ORIGIN — `wss://host` over https, `ws://host` over http — so a single
+ *  tunnel on one port hosts the whole game. Only in Vite dev (the page is on a
+ *  different port, e.g. 5173) do we target the ws server's own port directly. */
+function serverUrl(): string {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const sameOrigin =
+    location.protocol === 'https:' ||        // tunnel / proxy → same origin (wss)
+    location.port === '' ||                  // default 80/443 → same origin
+    location.port === String(SERVER_PORT);   // served directly by the game server
+  return sameOrigin
+    ? `${proto}//${location.host}`
+    : `ws://${location.hostname || 'localhost'}:${SERVER_PORT}`;
 }
 
 export class NetClient {
@@ -82,10 +97,10 @@ export class NetClient {
   onSeason?: (number: number, timeLeft: number) => void;
   /** A season ended (winner faction, or NO_FACTION for a stalemate). */
   onSeasonEnd?: (winner: number, number: number) => void;
-  /** Faction government state changed (Phase 6). */
-  onPolitics?: (factions: FactionPolitics[]) => void;
-  /** A faction elected a new Commander. */
-  onCommanderElected?: (faction: number, commander: string) => void;
+  /** War window changed: capture open now? + seconds left / until next war. */
+  onWar?: (active: boolean, timeLeft: number, nextIn: number) => void;
+  /** War flags changed (land-claim markers + countdowns). */
+  onFlags?: (flags: FlagInfo[]) => void;
   /** Private confirmation of YOUR secret faction switch (Phase 7). */
   onFactionSwitched?: (faction: number, remaining: number) => void;
   /** Play a gadget visual effect (frag/oil blast, smoke cloud) at a point. */
@@ -102,10 +117,9 @@ export class NetClient {
 
   /** Begin connecting. Falls back to offline after `timeoutMs`. */
   connect(timeoutMs = 2500): void {
-    const host = location.hostname || 'localhost';
     let ws: WebSocket;
     try {
-      ws = new WebSocket(`ws://${host}:${SERVER_PORT}`);
+      ws = new WebSocket(serverUrl());
     } catch {
       this.offline = true;
       return;
@@ -164,7 +178,8 @@ export class NetClient {
         for (const cl of msg.claims) this.onClaim?.(cl);
         this.onRegions?.(msg.regions);
         this.onSeason?.(msg.season.number, msg.season.timeLeft);
-        this.onPolitics?.(msg.politics);
+        this.onWar?.(msg.war.active, msg.war.timeLeft, msg.war.nextIn);
+        this.onFlags?.(msg.flags);
         const me = msg.players.find((p) => p.id === this.myId);
         // Restore saved inventory BEFORE onWelcome (which adopts the server
         // position) so the comeback loadout/inventory is in place from frame one.
@@ -267,14 +282,14 @@ export class NetClient {
       case 'season':
         this.onSeason?.(msg.number, msg.timeLeft);
         break;
+      case 'war':
+        this.onWar?.(msg.active, msg.timeLeft, msg.nextIn);
+        break;
+      case 'flags':
+        this.onFlags?.(msg.flags);
+        break;
       case 'seasonEnd':
         this.onSeasonEnd?.(msg.winner, msg.number);
-        break;
-      case 'politics':
-        this.onPolitics?.(msg.factions);
-        break;
-      case 'commanderElected':
-        this.onCommanderElected?.(msg.faction, msg.commander);
         break;
       case 'factionSwitched':
         this.onFactionSwitched?.(msg.faction, msg.remaining);
@@ -441,18 +456,6 @@ export class NetClient {
     if (this.connected) this.raw({ t: 'claimHit', x, y, z, amount });
   }
 
-  // Politics (Phase 6).
-  sendNominate(party: string): void { if (this.connected) this.raw({ t: 'nominate', party }); }
-  sendVote(candidate: string): void { if (this.connected) this.raw({ t: 'vote', candidate }); }
-  sendSetRally(region: number): void { if (this.connected) this.raw({ t: 'setRally', region }); }
-  sendAppointOfficer(user: string): void { if (this.connected) this.raw({ t: 'appointOfficer', user }); }
-  sendDismissOfficer(user: string): void { if (this.connected) this.raw({ t: 'dismissOfficer', user }); }
-  sendSetTax(rate: number): void { if (this.connected) this.raw({ t: 'setTax', rate }); }
-  sendDonate(amount: number): void { if (this.connected) this.raw({ t: 'donate', amount }); }
-  sendCommanderSpend(kind: 'shield' | 'crate' | 'buff', x: number, y: number, z: number): void {
-    if (this.connected) this.raw({ t: 'commanderSpend', kind, x, y, z });
-  }
-  sendRecall(): void { if (this.connected) this.raw({ t: 'recall' }); }
   sendSwitchFaction(faction: number): void { if (this.connected) this.raw({ t: 'switchFaction', faction }); }
   sendGadgetUse(item: number, x: number, y: number, z: number): void {
     if (this.connected) this.raw({ t: 'gadgetUse', item, x, y, z });

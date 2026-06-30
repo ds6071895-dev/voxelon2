@@ -55,6 +55,9 @@ export class WorldMap {
   private base: HTMLCanvasElement | null = null; // cached biome render
   private landChunks = 1;                         // non-ocean chunks in the window
   private waypoints: Waypoint[] = [];
+  // Dynamic markers (war flags): server-driven, NOT persisted; shown on the map
+  // + as in-world beacons exactly like waypoints. Refreshed each frame by main.
+  private dynamicMarkers: { x: number; z: number; color: number; name: string }[] = [];
   private readonly markerGroup = new THREE.Group();
   private readonly markerGeo = new THREE.BoxGeometry(1.2, 30, 1.2);
   // In-world MC-mod-style screen markers (one DOM badge per shown waypoint).
@@ -225,6 +228,16 @@ export class WorldMap {
       ctx.closePath(); ctx.fill(); ctx.stroke();
     }
 
+    // War flags (dynamic markers): a colored flag glyph + label.
+    for (const m of this.dynamicMarkers) {
+      const fx = this.cx(m.x), fy = this.cy(m.z);
+      ctx.strokeStyle = '#000'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(fx, fy + 7); ctx.lineTo(fx, fy - 8); ctx.stroke();
+      ctx.fillStyle = this.rgba(m.color, 1);
+      ctx.beginPath(); ctx.moveTo(fx, fy - 8); ctx.lineTo(fx + 10, fy - 5); ctx.lineTo(fx, fy - 2);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+    }
+
     // Player marker (heading triangle).
     const p = this.mapCtx.player();
     const px = this.cx(p.x), py = this.cy(p.z);
@@ -325,6 +338,17 @@ export class WorldMap {
   }
 
   // --- waypoints ---
+  /** Read-only view of the saved waypoints (for the HUD minimap). */
+  listWaypoints(): ReadonlyArray<{ x: number; z: number; color: number; name: string }> {
+    return this.waypoints;
+  }
+
+  /** Replace the dynamic (war-flag) markers shown on the map + as beacons. */
+  setDynamicMarkers(list: { x: number; z: number; color: number; name: string }[]): void {
+    this.dynamicMarkers = list;
+    if (this.open) this.draw();
+  }
+
   private onClick(e: MouseEvent): void {
     const rect = this.canvas.getBoundingClientRect();
     const px = (e.clientX - rect.left) * (CANVAS_PX / rect.width);
@@ -373,7 +397,9 @@ export class WorldMap {
    *  in any direction stays visible, pointing where to walk. Call each rendered
    *  frame while playing; pass the canvas size. */
   renderBeacons(width: number, height: number): void {
-    const shown = this.open ? [] : this.waypoints.filter((w) => w.show);
+    // War flags always show as beacons; saved waypoints only when toggled on.
+    const shown = this.open ? []
+      : [...this.waypoints.filter((w) => w.show), ...this.dynamicMarkers];
     // Grow/shrink the pool of badge elements to match.
     while (this.beaconEls.length > shown.length) {
       this.beaconLayer.removeChild(this.beaconEls.pop()!);

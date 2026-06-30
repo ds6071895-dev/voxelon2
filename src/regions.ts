@@ -254,6 +254,14 @@ export class Regions {
     this.disconnect = new Array(REGION_COUNT).fill(0);
   }
 
+  /** Wipe all in-progress capture meters + cut-off timers (owners untouched).
+   *  Called when a war ends so half-captured regions don't linger in peacetime. */
+  clearMeters(): void {
+    this.capFaction = new Array(REGION_COUNT).fill(NO_FACTION);
+    this.capProgress = new Array(REGION_COUNT).fill(0);
+    this.disconnect = new Array(REGION_COUNT).fill(0);
+  }
+
   /** Owner faction id of a region index (NO_FACTION = neutral). */
   ownerAt(i: number): number {
     return (i >= 0 && i < REGION_COUNT) ? this.owners[i] : NO_FACTION;
