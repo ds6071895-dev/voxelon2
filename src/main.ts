@@ -1090,9 +1090,9 @@ const controlsPanel = (() => {
   list.style.cssText = 'display:grid;grid-template-columns:auto auto;gap:6px 32px;font-size:15px;';
   const binds: [string, string][] = [
     ['Move', 'W A S D'], ['Jump', 'Space'], ['Sneak', 'Shift'],
-    ['Sprint', 'Ctrl / double-tap W'], ['Break / attack mob', 'Left click'],
+    ['Sprint', 'Q / double-tap W'], ['Break / attack mob', 'Left click'],
     ['Place / use', 'Right click'], ['Aim down sights (guns)', 'Hold right click'],
-    ['Reload gun', 'R'], ['Drop item', 'Q (Ctrl+Q = stack)'], ['Deploy glider (in mid-air)', 'Jump'],
+    ['Reload gun', 'R'], ['Drop item', 'O (Shift+O = stack)'], ['Deploy glider (in mid-air)', 'Jump'],
     ['Hotbar slot', '1 – 9 / scroll'], ['Inventory', 'E'], ['World map', 'M'],
     ['Debug overlay', 'F3'], ['Pause / back', 'Esc'],
   ];
@@ -2526,7 +2526,7 @@ function frame(): void {
       if (input.debugToggled) hud.toggleDebug();
       if (input.hotbarKey >= 0) inventory.select(input.hotbarKey);
       if (input.wheelDelta !== 0) inventory.select(inventory.selected + input.wheelDelta);
-      if (input.dropPressed) dropCurrentItem(input.down('ControlLeft') || input.down('ControlRight'));
+      if (input.dropPressed) dropCurrentItem(input.down('ShiftLeft') || input.down('ShiftRight'));
     }
 
     // Ships move first; then carry the local rider; then run player physics so

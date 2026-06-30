@@ -49,7 +49,7 @@ export class Input {
       if (e.code === 'KeyE') this.inventoryToggled = true;
       if (e.code === 'KeyM') this.mapToggled = true;
       if (e.code === 'KeyR') this.reloadPressed = true;
-      if (e.code === 'KeyQ') this.dropPressed = true;
+      if (e.code === 'KeyO') this.dropPressed = true;
       if (e.code === 'KeyW') {
         const now = performance.now();
         if (now - this.lastWDown < 250) this.sprintHeld = true;
@@ -108,7 +108,7 @@ export class Input {
   get right(): boolean { return this.down('KeyD'); }
   get jump(): boolean { return this.down('Space'); }
   get sneak(): boolean { return this.down('ShiftLeft') || this.down('ShiftRight'); }
-  get sprintKey(): boolean { return this.down('ControlLeft') || this.down('ControlRight'); }
+  get sprintKey(): boolean { return this.down('KeyQ'); }
 
   /** Consume per-frame deltas/edges; call once at the end of each frame. */
   endFrame(): void {
