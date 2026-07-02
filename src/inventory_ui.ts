@@ -18,9 +18,6 @@ import {
   allowedFilterMask, machineMaxHp, storageCap, totalStored, upgradeCost,
 } from './machines';
 import {
-  ShipState, ShipAxis, SHIP_MAX_LEVEL, cannonCount, shipUpgradeCost,
-} from './ships';
-import {
   TurretState, TurretAxis, TURRET_MAX_LEVEL, TURRET_AMMO_CAP, TURRET_FUEL_CAP,
   turretDamage, turretInterval, turretRange, turretUpgradeCost,
 } from './turrets';
@@ -31,7 +28,7 @@ import {
 import { factionColor, factionName } from './teams';
 
 export type ContainerMode =
-  | 'inventory' | 'table' | 'furnace' | 'chest' | 'machine' | 'ship' | 'turret'
+  | 'inventory' | 'table' | 'furnace' | 'chest' | 'machine' | 'turret'
   | 'claim';
 
 /** Callbacks for the faction-Core (claim) panel: feed oil + read shield state. */
@@ -41,14 +38,6 @@ export interface ClaimUIContext {
   feed(): void;
   canFeed(): boolean;
   mine(): boolean; // is this the local player's faction's claim?
-}
-
-/** Callbacks the host wires so the ship-helm panel can route to server/offline. */
-export interface ShipUIContext {
-  state(): ShipState | null;
-  upgrade(axis: ShipAxis): void;
-  canAfford(axis: ShipAxis): boolean;
-  dock(): void;
 }
 
 /** Callbacks for the turret panel (upgrade / claim / load ammo + fuel). */
@@ -139,12 +128,6 @@ export class InventoryUI {
     collectBtn: HTMLButtonElement;
     claimBtn: HTMLButtonElement;
     moveBtn: HTMLButtonElement;
-  } | null = null;
-  private shipCtx: ShipUIContext | null = null;
-  private shipViews: {
-    info: HTMLDivElement; hpBar: HTMLDivElement; hpText: HTMLSpanElement;
-    speedBtn: HTMLButtonElement; hullBtn: HTMLButtonElement; cannonBtn: HTMLButtonElement;
-    dockBtn: HTMLButtonElement;
   } | null = null;
   private turretCtx: TurretUIContext | null = null;
   private turretViews: {
@@ -726,7 +709,7 @@ export class InventoryUI {
     btn.style.opacity = afford ? '1' : '0.5';
   }
 
-  // --- ship helm panel -------------------------------------------------------
+  // --- turret panel ----------------------------------------------------------
 
   private warBtn(): HTMLButtonElement {
     const b = document.createElement('button');
@@ -734,85 +717,6 @@ export class InventoryUI {
     b.addEventListener('contextmenu', (e) => e.preventDefault());
     return b;
   }
-
-  private buildShipTop(ctx: ShipUIContext): void {
-    const wrap = document.createElement('div');
-    wrap.style.cssText = 'display:flex;flex-direction:column;gap:8px;width:340px;';
-    const info = document.createElement('div');
-    info.className = 'mc-font';
-    info.style.cssText = 'font-size:12px;text-align:center;';
-    wrap.appendChild(info);
-
-    const hpOuter = document.createElement('div');
-    hpOuter.style.cssText = 'position:relative;height:14px;background:#1c1c1c;border:2px solid #000;';
-    const hpBar = document.createElement('div');
-    hpBar.style.cssText = 'height:100%;width:100%;background:#cc4444;';
-    const hpText = document.createElement('span');
-    hpText.className = 'mc-font';
-    hpText.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;' +
-      'justify-content:center;font-size:10px;text-shadow:none;';
-    hpOuter.appendChild(hpBar); hpOuter.appendChild(hpText);
-    wrap.appendChild(hpOuter);
-
-    const row = document.createElement('div');
-    row.style.cssText = 'display:flex;gap:6px;';
-    const speedBtn = this.warBtn();
-    speedBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.upgrade('speed'); });
-    const hullBtn = this.warBtn();
-    hullBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.upgrade('hull'); });
-    const cannonBtn = this.warBtn();
-    cannonBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.upgrade('cannon'); });
-    row.append(speedBtn, hullBtn, cannonBtn);
-    wrap.appendChild(row);
-
-    const dockBtn = this.warBtn();
-    dockBtn.style.background = '#7a5a3b';
-    dockBtn.textContent = 'Dock / Break Down';
-    dockBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.dock(); });
-    wrap.appendChild(dockBtn);
-
-    const tip = document.createElement('div');
-    tip.className = 'mc-font';
-    tip.style.cssText = 'font-size:10px;text-align:center;color:#9ab;';
-    tip.textContent = 'Stand at the helm to sail (WASD). Left-click fires cannons.';
-    wrap.appendChild(tip);
-
-    this.shipViews = { info, hpBar, hpText, speedBtn, hullBtn, cannonBtn, dockBtn };
-    this.topEl.appendChild(wrap);
-  }
-
-  private refreshShip(): void {
-    const ctx = this.shipCtx, v = this.shipViews;
-    if (!ctx || !v) return;
-    const s = ctx.state();
-    if (!s) return;
-    v.info.textContent =
-      `Ship  ·  ${s.blocks.length} blocks  ·  ${cannonCount(s)} cannon(s)  ·  ` +
-      `Spd ${s.level.speed} / Hull ${s.level.hull} / Cannon ${s.level.cannon}`;
-    const frac = s.maxHp > 0 ? Math.max(0, Math.min(1, s.hp / s.maxHp)) : 0;
-    v.hpBar.style.width = `${Math.round(frac * 100)}%`;
-    v.hpBar.style.background = frac > 0.5 ? '#4caf50' : frac > 0.25 ? '#e0a14e' : '#cc4444';
-    v.hpText.textContent = `Hull ${Math.ceil(s.hp)} / ${s.maxHp}`;
-    this.setShipBtn(v.speedBtn, ctx, s, 'speed', 'Speed');
-    this.setShipBtn(v.hullBtn, ctx, s, 'hull', 'Hull');
-    this.setShipBtn(v.cannonBtn, ctx, s, 'cannon', 'Cannon');
-  }
-
-  private setShipBtn(
-    btn: HTMLButtonElement, ctx: ShipUIContext, s: ShipState, axis: ShipAxis, label: string
-  ): void {
-    if (s.level[axis] >= SHIP_MAX_LEVEL) {
-      btn.textContent = `${label}: MAX`; btn.disabled = true; btn.style.opacity = '0.5'; return;
-    }
-    const cost = shipUpgradeCost(s, axis);
-    const costStr = cost
-      ? Object.entries(cost).map(([id, n]) => `${n} ${ITEMS[Number(id)]?.name ?? '?'}`).join(', ') : '';
-    btn.textContent = `▲ ${label} ${s.level[axis]}\n${costStr}`;
-    const afford = ctx.canAfford(axis);
-    btn.disabled = !afford; btn.style.opacity = afford ? '1' : '0.5';
-  }
-
-  // --- turret panel ----------------------------------------------------------
 
   private buildTurretTop(ctx: TurretUIContext): void {
     const wrap = document.createElement('div');
@@ -1019,7 +923,7 @@ export class InventoryUI {
 
   show(
     mode: ContainerMode, furnace?: FurnaceState, machineCtx?: MachineUIContext,
-    shipCtx?: ShipUIContext, turretCtx?: TurretUIContext, claimCtx?: ClaimUIContext,
+    turretCtx?: TurretUIContext, claimCtx?: ClaimUIContext,
   ): void {
     // Rebuild the top section for the requested mode.
     for (const { index } of this.craftCells) this.invSlots.delete(index);
@@ -1033,8 +937,6 @@ export class InventoryUI {
     this.furnace = furnace ?? null;
     this.machineViews = null;
     this.machineCtx = machineCtx ?? null;
-    this.shipViews = null;
-    this.shipCtx = shipCtx ?? null;
     this.turretViews = null;
     this.turretCtx = turretCtx ?? null;
     this.claimViews = null;
@@ -1044,9 +946,6 @@ export class InventoryUI {
     if (mode === 'claim' && claimCtx) {
       this.titleEl.textContent = 'Faction Core';
       this.buildClaimTop(claimCtx);
-    } else if (mode === 'ship' && shipCtx) {
-      this.titleEl.textContent = 'Ship Helm';
-      this.buildShipTop(shipCtx);
     } else if (mode === 'turret' && turretCtx) {
       this.titleEl.textContent = 'Turret';
       this.buildTurretTop(turretCtx);
@@ -1115,7 +1014,6 @@ export class InventoryUI {
 
     // Machine panel refreshes every frame (live fill bar + rate, like furnace).
     if (this.mode === 'machine') this.refreshMachine();
-    if (this.mode === 'ship') this.refreshShip();
     if (this.mode === 'turret') this.refreshTurret();
     if (this.mode === 'claim') this.refreshClaim();
 

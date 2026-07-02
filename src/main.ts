@@ -8,7 +8,7 @@ import { Input, FROZEN_INPUT } from './input';
 import { Interaction, raycastBlocks } from './interact';
 import { Inventory } from './inventory';
 import {
-  InventoryUI, MachineUIContext, ShipUIContext, TurretUIContext, ClaimUIContext,
+  InventoryUI, MachineUIContext, TurretUIContext, ClaimUIContext,
 } from './inventory_ui';
 import { dropFor, GunInfo, Item, ItemStack, ITEMS } from './items';
 import { RECIPES, Recipe } from './crafting';
@@ -23,18 +23,12 @@ import { ItemEntities } from './itementity';
 import { Chests } from './chests';
 import { Mobs } from './mobs';
 import { NetClient } from './net/client';
-import { WORLD_SEED, WORLD_HALF, makeUsername, GameMode, FlagInfo } from './net/protocol';
+import { WORLD_SEED, WORLD_HALF, makeUsername, skinSeed, GameMode, FlagInfo } from './net/protocol';
 import { MachineModels } from './machinemodels';
 import { NetItems } from './netitems';
 import { Particles } from './particles';
 import { Projectiles } from './projectiles';
 import { Player, MAX_AIR } from './player';
-import {
-  Ships, applyShipUpgrade, blockWorldPos, cannonCount, deckHeightAt,
-  floodFillHull, newShip, sanitizeShipState, shipCannonDamage, shipFireInterval,
-  shipUpgradeCost, tickShip, ShipState, ShipAxis,
-} from './ships';
-import { ShipModels } from './shipmodels';
 import {
   TurretState, TurretAxis, applyTurretUpgrade, claimTurret, damageTurret,
   newTurret, sanitizeTurretState, turretLoad, turretUpgradeCost, TURRET_AMMO_CAP,
@@ -132,19 +126,19 @@ function grantStarterKit(): void {
 }
 grantStarterKit();
 // Debug loadout (testing the automation + warfare layers): ?kit=full grants all
-// guns, machines, ship/turret parts and upgrade materials.
+// guns, machines, turret parts and upgrade materials.
 if (new URLSearchParams(location.search).get('kit') === 'full') for (const [id, n] of [
   [Item.Pistol, 1], [Item.Rifle, 1], [Item.RocketLauncher, 1],
   [Item.Shotgun, 1], [Item.SMG, 1], [Item.Sniper, 1], [Item.BurstRifle, 1],
   [Item.Bullet, 256], [Item.Rocket, 16],
   [Block.Autominer, 8], [Block.OilDerrick, 8],
-  // warfare kit: ship parts, turrets, cannon ammo
-  [Block.ShipHelm, 4], [Block.Cannon, 16], [Block.Turret, 8],
+  // warfare kit: turrets, cannon ammo
+  [Block.Turret, 8],
   [Item.Cannonball, 128],
-  // building set for nicer-looking ships
+  // building set
   [Block.OakPlanks, 64], [Block.OakSlab, 64], [Block.OakStairsN, 64],
   [Block.SpruceSlab, 64], [Block.SpruceStairsN, 64],
-  // materials to craft/upgrade machines + ships + turrets on the spot
+  // materials to craft/upgrade machines + turrets on the spot
   [Item.IronIngot, 64], [Item.Redstone, 64], [Item.Diamond, 32],
   [Item.CobaltIngot, 64], [Item.OilBarrel, 64], [Item.IronPickaxe, 1],
 ] as [number, number][]) {
@@ -198,14 +192,9 @@ const chests = new Chests();
 chests.net = net;
 const machines = new Machines(world.terrain);
 const machineModels = new MachineModels(scene, machines);
-// --- Warfare (M14): ships, turrets, territory ---
-const ships = new Ships();
-const shipModels = new ShipModels(scene, atlas);
-/** Last server transform per ship (for reconcile/interpolation). */
-const shipTargets = new Map<number, { x: number; y: number; z: number; yaw: number; hp: number }>();
+// --- Warfare (M14): turrets, territory ---
 const turretStates = new Map<string, TurretState>();
 const turretModels = new TurretModels(scene, turretStates);
-projectiles.shipsProvider = () => ships.list(); // bullets/cannonballs chip hull HP
 // A round that lands inside an enemy faction's claim drains its shield (M19).
 projectiles.claimSink = (x, y, z, damage) => {
   const c = claims.at(x, z);
@@ -246,6 +235,10 @@ let jumpImmuneUntil = 0; // suppress fall damage briefly after a Jump Boost
 // player the ENTIRE way (a sustained per-frame pull, not a one-shot nudge).
 let grappleActive = false;
 let grappleTime = 0;            // safety-timeout clock
+/** A server teleport waiting for the destination chunks to stream in. While
+ *  set, the player is pinned at the target (no gravity fall into ungenerated
+ *  world); cleared once the near bubble is meshed (or after a timeout). */
+let pendingTeleport: { x: number; y: number; z: number; started: number } | null = null;
 const grappleAnchor = new THREE.Vector3();
 const grapplePrev = new THREE.Vector3(); // last-frame pos to detect "stuck on a wall"
 const grappleRope = new THREE.Line(
@@ -260,7 +253,7 @@ scene.add(grappleRope);
  *  the physics step integrates. */
 function updateGrapple(dt: number): void {
   if (!grappleActive) return;
-  if (player.dead || pilotingShipId !== null) { endGrapple(); return; }
+  if (player.dead) { endGrapple(); return; }
   grappleTime += dt;
   // Pull from roughly chest height toward the anchor.
   const tx = grappleAnchor.x - player.pos.x;
@@ -346,16 +339,7 @@ function flagMarkers(): { x: number; z: number; color: number; name: string }[] 
     };
   });
 }
-let pilotingShipId: number | null = null;
-let ridingShipId: number | null = null;
-let localShipId = 1; // offline ship ids (no server to assign them)
-/** Per-ship motion this frame (pivot + new origin + yaw delta) for rider carry. */
-const shipDelta = new Map<number, { ox: number; oz: number; nx: number; nz: number; dyaw: number }>();
-let openShip: number | null = null;
 let openTurret: { x: number; y: number; z: number } | null = null;
-let shipSteerAcc = 0;       // throttle for shipSteer sends
-let cannonCooldown = 0;     // local cannon fire-rate gate
-let lastSneak = false;      // sneak rising-edge (Shift docks while piloting)
 let openMachine: { x: number; y: number; z: number } | null = null;
 let openChest: { x: number; y: number; z: number } | null = null;
 let lastChestVersion = -1;   // last version pushed/loaded — gates the live sync
@@ -577,12 +561,12 @@ interaction.onOpenContainer = (kind, x, y, z) => {
     const key = `${x},${y},${z}`;
     if (!turretStates.has(key)) turretStates.set(key, newTurret()); // local predict
     if (net.connected) net.sendTurretOpen(x, y, z);
-    invUI.show('turret', undefined, undefined, undefined, turretCtxFor(x, y, z));
+    invUI.show('turret', undefined, undefined, turretCtxFor(x, y, z));
   } else if (kind === 'claim') {
     if (!claims.coreAt(x, y, z)) return; // no claim here (e.g. an orphan Core)
     openClaim = { x, y, z };
     if (net.connected) net.sendClaimOpen(x, y, z);
-    invUI.show('claim', undefined, undefined, undefined, undefined, claimCtxFor(x, y, z));
+    invUI.show('claim', undefined, undefined, undefined, claimCtxFor(x, y, z));
   } else {
     invUI.show(kind, kind === 'furnace' ? furnaces.get(x, y, z) : undefined);
   }
@@ -847,14 +831,6 @@ interaction.onSabotage = (x, y, z) => {
     showNotice('💥 Machines only break to explosives — use a grenade!');
   }
 };
-// Right-click a placed (not-yet-launched) Ship Helm to capture + launch its hull.
-interaction.onUseHelm = (hx, hy, hz) => {
-  if (net.connected) {
-    net.sendShipLaunch(hx, hy, hz); // server flood-fills + broadcasts shipState
-    return;
-  }
-  launchShipLocal(hx, hy, hz);
-};
 // Right-click a Respawn Beacon to set your personal respawn point there.
 interaction.onSetSpawn = (x, y, z) => {
   if (net.connected) {
@@ -872,8 +848,7 @@ invUI.onClose = () => {
     openChest = null;
   }
   openMachine = null; // machine actions sync immediately; nothing to flush
-  openShip = null;    // ship/turret actions also sync immediately
-  openTurret = null;
+  openTurret = null;  // turret actions also sync immediately
 };
 const spillAtPlayer = (stacks: ItemStack[]) =>
   spillStacks(stacks, player.pos.x, player.pos.y + 1, player.pos.z);
@@ -966,6 +941,7 @@ function announceSide(faction: number): void {
 function onAuthSuccess(username: string): void {
   authed = true;
   authedName = username;
+  held.setSkin(skinSeed(username)); // match the first-person hand to our avatar
   authEl.style.display = 'none';
   menuBtns.style.display = 'flex'; // Play / Controls appear once logged in
   authErr.textContent = '';
@@ -1335,9 +1311,15 @@ net.onRoster = refreshNetInfo;
 // Admin gamemode/teleport/notice (driven from the server console).
 net.onGamemode = (mode) => { applyLocalMode(mode); showNotice(`Gamemode: ${mode}`); };
 net.onTeleport = (x, y, z) => {
+  endGrapple();
   player.pos.set(x, y, z);
   player.vel.set(0, 0, 0);
   player.fallDistance = 0;
+  // The destination is usually unstreamed world (getBlock reads air there), so
+  // hold the player in place until a bubble of chunks loads — otherwise they
+  // free-fall into the not-yet-generated void and die on arrival.
+  pendingTeleport = { x, y, z, started: worldTimeLocal };
+  showNotice('Teleporting…');
 };
 net.onNotice = (text) => showNotice(text);
 net.onGotItem = (id, count) => {
@@ -1366,38 +1348,6 @@ net.onMachine = (x, y, z, state) => {
   // upgrade / collect echo), replacing our local prediction.
   const s = sanitizeState(state);
   if (s) machines.set(x, y, z, s);
-};
-net.onShipState = (ship) => {
-  const s = sanitizeShipState(ship);
-  if (!s) return;
-  ships.set(s);
-  shipTargets.set(s.id, { x: s.x, y: s.y, z: s.z, yaw: s.yaw, hp: s.hp });
-  // Auto-board a ship I just launched (my own, no current ship, standing near it).
-  if (s.owner === net.username && pilotingShipId === null &&
-    Math.hypot(s.x - player.pos.x, s.z - player.pos.z) < 6) {
-    boardShip(s);
-  }
-};
-net.onShipTransforms = (list) => {
-  for (const t of list) {
-    shipTargets.set(t.id, { x: t.x, y: t.y, z: t.z, yaw: t.yaw, hp: t.hp });
-    const s = ships.get(t.id);
-    // Non-piloted ships follow the server (lerped in updateShips); the piloted
-    // ship keeps its local prediction and only adopts the server hp here.
-    if (s && t.id !== pilotingShipId) { /* lerp handled in frame */ }
-    if (s && t.id === pilotingShipId) s.hp = t.hp;
-  }
-};
-net.onShipRemove = (id) => {
-  const s = ships.get(id);
-  if (s) particles.explosion(s.x, s.y + 0.5, s.z);
-  ships.remove(id);
-  shipTargets.delete(id);
-  shipDelta.delete(id);
-  if (pilotingShipId === id) pilotingShipId = null;
-  if (ridingShipId === id) ridingShipId = null;
-  if (openShip === id && invUI.open && invUI.mode === 'ship') invUI.hide();
-  if (openShip === id) openShip = null;
 };
 net.onTurret = (x, y, z, state) => {
   const s = sanitizeTurretState(state);
@@ -1482,14 +1432,8 @@ net.onDisconnect = () => {
   player.damageSink = undefined;
   survival.enableRegen = true;
   // Drop all server-owned warfare state so its meshes/markers don't linger
-  // (shipModels/turretModels reconcile to the now-empty sets).
-  ships.clear();
-  shipTargets.clear();
-  shipDelta.clear();
+  // (turretModels reconciles to the now-empty set).
   turretStates.clear();
-  pilotingShipId = null;
-  ridingShipId = null;
-  openShip = null;
   claims.clear();
   for (const id of [...shieldMeshes.keys()]) removeShieldDome(id);
   forceCloseClaim();
@@ -1682,85 +1626,12 @@ function toggleInventory(): void {
     invUI.hide();
     input.lock();
   } else if (input.locked) {
-    // At the helm, the inventory key opens the ship panel (upgrades + dock).
-    if (pilotingShipId !== null && ships.get(pilotingShipId)) {
-      openShip = pilotingShipId;
-      invUI.show('ship', undefined, undefined, shipCtxFor(pilotingShipId));
-    } else {
-      invUI.show('inventory');
-    }
+    invUI.show('inventory');
     document.exitPointerLock();
   }
 }
 
-// --- Warfare: ship launch / board / steer / dock + turret + territory -------
-
-function launchShipLocal(hx: number, hy: number, hz: number): void {
-  const cap = (x: number, y: number, z: number) => world.getEditedBlock(x, y, z) ?? 0;
-  const blocks = floodFillHull(hx, hy, hz, cap);
-  if (!blocks) return; // not a helm / too small / too big
-  const ship = newShip(localShipId++, 'You',
-    { x: hx + 0.5, y: hy + 0.5, z: hz + 0.5 }, 0, blocks);
-  for (const b of blocks) world.applyRemoteEdit(hx + b.dx, hy + b.dy, hz + b.dz, Block.Air);
-  ships.set(ship);
-  boardShip(ship);
-}
-
-function boardShip(ship: ShipState): void {
-  ridingShipId = ship.id;
-  pilotingShipId = ship.id;
-  const deck = deckHeightAt(ship, ship.x, ship.z);
-  player.pos.set(ship.x, deck ?? ship.y, ship.z);
-  player.vel.set(0, 0, 0);
-}
-
-/** Dock/break down a ship: re-place its hull, remove the ship, return the
- *  player to control. Shared by the helm-panel button and the Shift shortcut. */
-function dockShip(id: number): void {
-  const s = ships.get(id);
-  if (!s) return;
-  if (net.connected) net.sendShipDock(id);
-  else dockShipLocal(s);
-  openShip = null; pilotingShipId = null; ridingShipId = null;
-  // The hull re-materialises around where you stand (the helm lands in your
-  // cell) — lift up so you settle on top of the deck instead of inside it.
-  player.pos.y += 1.5;
-  player.vel.set(0, 0, 0);
-  if (invUI.open && invUI.mode === 'ship') invUI.hide();
-  input.lock(); // closing via the in-panel button must re-capture the mouse
-}
-
-function dockShipLocal(ship: ShipState): void {
-  for (const b of ship.blocks) {
-    const w = blockWorldPos(ship, b);
-    world.applyRemoteEdit(Math.round(w.x - 0.5), Math.round(w.y - 0.5), Math.round(w.z - 0.5), b.id);
-  }
-  ships.remove(ship.id);
-  shipDelta.delete(ship.id);
-  shipTargets.delete(ship.id);
-}
-
-function shipCtxFor(id: number): ShipUIContext {
-  const here = () => ships.get(id) ?? null;
-  return {
-    state: here,
-    upgrade: (axis: ShipAxis) => {
-      const s = here();
-      if (!s) return;
-      const cost = shipUpgradeCost(s, axis);
-      if (!cost || !canAffordCost(cost)) return;
-      payCost(cost);
-      applyShipUpgrade(s, axis); // local predict; server also applies + caps
-      if (net.connected) net.sendShipUpgrade(id, axis);
-    },
-    canAfford: (axis) => {
-      const s = here();
-      const c = s ? shipUpgradeCost(s, axis) : null;
-      return !!c && canAffordCost(c);
-    },
-    dock: () => dockShip(id),
-  };
-}
+// --- Warfare: turret panel + territory --------------------------------------
 
 function turretCtxFor(x: number, y: number, z: number): TurretUIContext {
   const key = `${x},${y},${z}`;
@@ -1807,90 +1678,6 @@ function turretCtxFor(x: number, y: number, z: number): TurretUIContext {
     },
     myName: () => (net.connected ? net.username : 'You'),
   };
-}
-
-/** Fire a cannonball from the piloted ship along the look direction. Consumes a
- *  Cannonball from the inventory; the projectile chips ships via shipHit and
- *  hits players via the ranged path (both server-validated). */
-function fireCannon(ship: ShipState, dir: THREE.Vector3): void {
-  if (cannonCooldown > 0 || cannonCount(ship) < 1) return;
-  if (inventory.countItem(Item.Cannonball) <= 0) return;
-  inventory.removeItem(Item.Cannonball, 1);
-  cannonCooldown = shipFireInterval(ship.level);
-  const cannonGun: GunInfo = {
-    damage: shipCannonDamage(ship.level), ammo: Item.Cannonball, mag: 1,
-    cooldown: cannonCooldown, auto: false, speed: 42, range: 64, rocket: true,
-  };
-  projectiles.fire(player.eyePosition, dir, cannonGun, ship.id);
-  if (net.connected) net.sendShipFire(ship.id, dir.x, dir.y, dir.z);
-  held.recoil();
-  audio.gun(player.eyePosition);
-}
-
-/** Advance ships: predict the piloted ship from steer, follow others toward the
- *  server transform, and record each ship's frame motion for rider carry. */
-function updateShips(dt: number, steer: { thrust: number; turn: number }): void {
-  const height = (x: number, z: number) => world.terrain.height(x, z);
-  shipDelta.clear();
-  for (const ship of ships.list()) {
-    const ox = ship.x, oz = ship.z, oyaw = ship.yaw;
-    if (ship.id === pilotingShipId) {
-      tickShip(ship, steer, dt, height); // local authority/prediction
-    } else {
-      const t = shipTargets.get(ship.id);
-      if (t) {
-        const k = Math.min(1, 12 * dt);
-        ship.x += (t.x - ship.x) * k;
-        ship.y += (t.y - ship.y) * k;
-        ship.z += (t.z - ship.z) * k;
-        let dy = t.yaw - ship.yaw;
-        while (dy > Math.PI) dy -= Math.PI * 2;
-        while (dy < -Math.PI) dy += Math.PI * 2;
-        ship.yaw += dy * k;
-        ship.hp = t.hp;
-      }
-    }
-    let dyaw = ship.yaw - oyaw;
-    while (dyaw > Math.PI) dyaw -= Math.PI * 2;
-    while (dyaw < -Math.PI) dyaw += Math.PI * 2;
-    shipDelta.set(ship.id, { ox, oz, nx: ship.x, nz: ship.z, dyaw });
-  }
-}
-
-/** Carry the local player with the ship they're aboard: apply this frame's ship
- *  motion (translation + rotation about the pre-move origin) to the player. Run
- *  BEFORE player.update so look/gravity then apply on top. Returns the ship. */
-function carryRider(): ShipState | null {
-  let aboard: ShipState | null = null;
-  for (const ship of ships.list()) {
-    const dh = deckHeightAt(ship, player.pos.x, player.pos.z);
-    if (dh !== null && player.pos.y >= dh - 0.6 && player.pos.y <= dh + 2.2) { aboard = ship; break; }
-  }
-  ridingShipId = aboard ? aboard.id : null;
-  if (!aboard) { pilotingShipId = null; return null; }
-  const d = shipDelta.get(aboard.id);
-  if (d) {
-    const relX = player.pos.x - d.ox, relZ = player.pos.z - d.oz;
-    const c = Math.cos(d.dyaw), s = Math.sin(d.dyaw);
-    player.pos.x = d.nx + (relX * c - relZ * s);
-    player.pos.z = d.nz + (relX * s + relZ * c);
-    player.yaw += d.dyaw;
-  }
-  // Auto-pilot when on/near the helm (origin). (Shift docks; see the frame loop.)
-  const nearHelm = Math.hypot(player.pos.x - aboard.x, player.pos.z - aboard.z) < 1.8;
-  pilotingShipId = nearHelm ? aboard.id : null;
-  return aboard;
-}
-
-/** Keep an aboard rider standing on the deck (hull blocks aren't world-solid).
- *  Run AFTER player.update so it overrides the gravity that ran over open water. */
-function snapToDeck(ship: ShipState): void {
-  const onDeck = deckHeightAt(ship, player.pos.x, player.pos.z);
-  if (onDeck !== null && player.pos.y < onDeck + 0.05) {
-    player.pos.y = onDeck;
-    if (player.vel.y < 0) player.vel.y = 0;
-    player.onGround = true;
-  }
 }
 
 // --- Region war (Phase 2): capture HUD + offline sim -------------------------
@@ -2348,7 +2135,7 @@ const COMBAT_IDS = new Set<number>([
   Item.Sniper, Item.BurstRifle, Item.Bullet, Item.Rocket,
 ]);
 const WAR_IDS = new Set<number>([
-  Block.Core, Block.Turret, Block.ShipHelm, Block.Cannon, Item.Cannonball,
+  Block.Core, Block.Turret, Item.Cannonball,
 ]);
 function guideCategory(id: number): string {
   if (gadgetOf(id)) return 'Gadgets & Toys';
@@ -2477,7 +2264,6 @@ function frame(): void {
   // Gun timers tick regardless of menu state (so a reload finishes even if you
   // open a menu); the reload pulls ammo into the magazine when it completes.
   if (fireCooldown > 0) fireCooldown = Math.max(0, fireCooldown - dt);
-  if (cannonCooldown > 0) cannonCooldown = Math.max(0, cannonCooldown - dt);
   // Continue an in-flight burst (burst rifle) — cancelled if the gun is swapped.
   if (burstRemaining > 0 && burstGun && burstStack) {
     if (burstStack !== inventory.selectedStack || player.dead) {
@@ -2529,49 +2315,35 @@ function frame(): void {
       if (input.dropPressed) dropCurrentItem(input.down('ShiftLeft') || input.down('ShiftRight'));
     }
 
-    // Ships move first; then carry the local rider; then run player physics so
-    // look/gravity apply on top of the carry. Steering reads this frame's input.
-    const steer = { thrust: 0, turn: 0 };
-    if (controlling && pilotingShipId !== null) {
-      steer.thrust = input.forward ? 1 : input.back ? -1 : 0;
-      steer.turn = input.left ? 1 : input.right ? -1 : 0;
-    }
-    updateShips(dt, steer);
-    const aboard = carryRider();
-    const piloting = controlling && pilotingShipId !== null && !!ships.get(pilotingShipId);
-    // Shift docks/breaks down the ship you're piloting (rising-edge).
-    if (piloting && controlling && input.sneak && !lastSneak) {
-      dockShip(pilotingShipId!);
-    }
-    lastSneak = input.sneak;
-    if (net.connected && pilotingShipId !== null) {
-      shipSteerAcc += dt;
-      if (shipSteerAcc >= 1 / 15) { shipSteerAcc = 0; net.sendShipSteer(pilotingShipId, steer.thrust, steer.turn); }
-    }
-    // While piloting, WASD steers (not walks): feed a look-only input.
-    const moveInput = piloting
-      ? { mouseDX: input.mouseDX, mouseDY: input.mouseDY, forward: false, back: false,
-          left: false, right: false, jump: false, sneak: false,
-          sprintKey: false, sprintHeld: false }
-      : (controlling ? input : FROZEN_INPUT);
+    const moveInput = controlling ? input : FROZEN_INPUT;
     // A glider worn in the chestplate slot enables mid-air deploy (player.update
     // reads this; jump while falling to start gliding).
     const wornChest = inventory.chestplateStack;
     player.gliderEquipped = !!wornChest && wornChest.id === Item.Glider;
+    // Teleport arrival: pin the player at the destination and pour extra frame
+    // budget into streaming a small chunk bubble there; release once the ground
+    // is real (or after a generous timeout so we can never get stuck).
+    if (pendingTeleport) {
+      const tp = pendingTeleport;
+      player.pos.set(tp.x, tp.y, tp.z);
+      player.vel.set(0, 0, 0);
+      player.fallDistance = 0;
+      const bubbleReady = world.update(tp.x, tp.z, 14, 2);
+      if (bubbleReady || worldTimeLocal - tp.started > 8) pendingTeleport = null;
+    }
     updateGrapple(dt); // sustained grapple pull (sets velocity before the step)
     player.update(dt, moveInput, world);
     // World border: keep the player inside the 1000×1000 play area (the server
     // clamps authoritatively too).
     player.pos.x = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, player.pos.x));
     player.pos.z = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, player.pos.z));
-    if (aboard) snapToDeck(aboard);
 
     // Gun aim-down-sights: hold right-click with a gun to zoom (per-gun amount).
     {
       const hs = inventory.selectedStack;
       const g = hs ? ITEMS[hs.id]?.gun : undefined;
       const aiming = controlling && localMode !== 'spectator' &&
-        pilotingShipId === null && !!g?.zoom && input.rightDown;
+        !!g?.zoom && input.rightDown;
       aimZoom = aiming ? g!.zoom! : 1;
     }
     updateCamera();
@@ -2622,12 +2394,7 @@ function frame(): void {
       const heldGun = heldStack ? ITEMS[heldStack.id]?.gun : undefined;
       const heldGadget = heldStack && !heldGun ? gadgetOf(heldStack.id) : undefined;
 
-      if (piloting) {
-        // At the helm: left-click fires cannons; mining/melee suppressed.
-        const ship = ships.get(pilotingShipId!);
-        if (ship && input.leftClicked) fireCannon(ship, lookDir);
-        interaction.update(dt, input, camera, true);
-      } else if (heldGadget) {
+      if (heldGadget) {
         // Gadgets: left-click uses the toy (suppresses mining + block use).
         if (input.leftClicked) useGadget(heldGadget);
         interaction.update(dt, input, camera, true, true);
@@ -2638,7 +2405,7 @@ function frame(): void {
         const wantFire = heldGun.auto ? input.leftDown : input.leftClicked;
         if (wantFire && fireCooldown <= 0 && reloadTimer <= 0) tryFire(heldStack!, heldGun);
         interaction.update(dt, input, camera, true, true);
-      } else if (input.rightClicked &&
+      } else if (input.rightClicked && !interaction.armedMove &&
           heldStack && ITEMS[heldStack.id]?.armor?.slot === 'chestplate') {
         // Right-click a chestplate-slot item straight from the hotbar to equip it
         // into the chest slot — and SWAP: a glider swaps with a worn chestplate
@@ -2697,8 +2464,7 @@ function frame(): void {
     // bar (the server is authoritative and reconciles on open/collect).
     machines.update(dt);
     machineModels.update(dt); // animate drills/pumpjacks
-    // Warfare: render ships/turrets, run the region war + its HUD.
-    shipModels.update(ships.list());
+    // Warfare: render turrets, run the region war + its HUD.
     turretModels.update(dt);
     // Region war (Phase 2): offline the local sim is authoritative; the War HUD
     // reads the latest board + meters (server-fed online, local sim offline).

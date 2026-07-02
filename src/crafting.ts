@@ -112,11 +112,7 @@ export const RECIPES: Recipe[] = [
   // Oil Derrick = iron + cobalt ingots + redstone.
   shaped([[Cb, I, Cb], [I, R, I], [I, I, I]], Block.OilDerrick),
 
-  // Warfare (M14): ships + turrets + cannonball ammo.
-  // Ship Helm = a planks wheel around a redstone core on a cobalt hub.
-  shaped([[P, R, P], [R, Cb, R], [P, R, P]], Block.ShipHelm),
-  // Cannon = an iron barrel reinforced with cobalt over a planks carriage.
-  shaped([[I, I, Cb], [I, R, I], [P, P, P]], Block.Cannon),
+  // Warfare (M14): turret + cannonball ammo.
   // Turret = a cannon-grade barrel on an iron+redstone auto-mount.
   shaped([[I, Cb, I], [R, I, R], [I, I, I]], Block.Turret),
   // Cannonball = iron shell packed with coal/charcoal powder.

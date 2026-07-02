@@ -60,7 +60,7 @@ export class NetItems {
       mesh.rotation.y = a * 1.8;
 
       // Request a pickup when in range (server validates + grants).
-      if (!player.dead && !this.requested.has(eid)) {
+      if (!player.dead && !this.requested.has(eid) && a > 1.0) {
         const dx = info.x - pcx, dy = info.y - pcy, dz = info.z - pcz;
         if (dx * dx + dy * dy + dz * dz <= PICKUP_RANGE * PICKUP_RANGE &&
           inventory.canAccept(info.item)) {

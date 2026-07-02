@@ -44,7 +44,7 @@ function saveAccounts(): void {
 console.log(`loaded ${accounts.size} account(s) from ${ACCOUNTS_FILE}`);
 
 // --- World persistence ------------------------------------------------------
-// The whole authoritative world (edits, claims, machines, chests, ships,
+// The whole authoritative world (edits, claims, machines, chests,
 // turrets) is serialized to a JSON file and reloaded on boot, so a restart
 // doesn't wipe everyone's builds. Autosaved on a timer + on shutdown.
 const WORLD_FILE = path.join(process.cwd(), 'voxelon-world.json');
@@ -278,7 +278,6 @@ setInterval(() => {
   game.tickRegen(dt);
   game.tickMachines(dt);
   const moved = game.tickItems(dt);
-  const shipXf = game.tickShips(dt);
   dispatch(game.tickTurrets(dt));
   dispatch(game.tickRegions(dt));
   dispatch(game.tickSeason(dt));
@@ -289,10 +288,6 @@ setInterval(() => {
   if (moved.length) {
     const mv: ServerMsg = { t: 'itemsmove', items: moved };
     for (const cid of sockets.keys()) send(cid, mv);
-  }
-  if (shipXf.length) {
-    const sx: ServerMsg = { t: 'shipTransforms', ships: shipXf };
-    for (const cid of sockets.keys()) send(cid, sx);
   }
 }, 1000 / SNAPSHOT_HZ);
 
@@ -362,6 +357,7 @@ function resolvePlayer(token: string): number | null {
 const HELP = [
   'Commands:',
   '  list                          - list online players',
+  '  coords [player]               - show coords of all players, or one player',
   '  give <player> <item> [count]  - give items (item = name or id)',
   '  gamemode <mode> <player>      - survival | creative | spectator (s/c/sp)',
   '  tp <player> <x> <y> <z>       - teleport a player',
@@ -385,6 +381,20 @@ function runCommand(line: string): void {
         const list = game.playerList();
         console.log(`${list.length} online:`);
         for (const p of list) console.log(`  [${p.id}] ${p.username} (faction ${p.faction}, ${p.mode})`);
+        break;
+      }
+      case 'coords': {
+        const allCoords = game.playerCoords();
+        if (!allCoords.length) { console.log('no players online'); break; }
+        // Optional filter: `coords Alice` shows only Alice
+        const filter = parts[1]?.toLowerCase();
+        const shown = filter
+          ? allCoords.filter((c) => c.username.toLowerCase().includes(filter))
+          : allCoords;
+        if (!shown.length) { console.log(`no player matching "${parts[1]}"`); break; }
+        for (const c of shown) {
+          console.log(`  ${c.username}: x=${c.x.toFixed(1)} y=${c.y.toFixed(1)} z=${c.z.toFixed(1)}`);
+        }
         break;
       }
       case 'give': {

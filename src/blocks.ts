@@ -53,9 +53,7 @@ export const enum Block {
   Autominer = 41,    // block-entity: drills the column beneath it
   OilDerrick = 42,   // block-entity: pumps oil from the local oil field
   MachinePart = 43,  // structural cell of a machine's multi-block footprint
-  // Warfare layer (M14): ships + turrets
-  ShipHelm = 44,     // control block; interact to capture/launch a hull
-  Cannon = 45,       // ship weapon block (fires cannonballs while sailing)
+  // Warfare layer (M14): turrets
   Turret = 46,       // auto-targeting defensive block-entity (sabotage to raid)
   // Decorative building set (M15): per-wood planks + slabs + stairs (stairs use
   // 4 consecutive ids for N/E/S/W facing, like wall torches).
@@ -203,10 +201,6 @@ export const enum Tile {
   OilDerrickTop = 111,
   MachinePart = 112,
   // Warfare layer (M14)
-  ShipHelmSide = 113,
-  ShipHelmTop = 114,
-  CannonSide = 115,
-  CannonTop = 116,
   TurretSide = 117,
   TurretTop = 118,
   Cannonball = 119,
@@ -546,16 +540,6 @@ export const BLOCKS: Record<number, BlockInfo> = {
   }),
 
   // --- Warfare (M14) ---
-  // Ship blocks are ordinary placeable blocks you build a hull from, then
-  // capture by interacting the helm. They mine normally before launch.
-  [Block.ShipHelm]: def({
-    name: 'Ship Helm', hardness: 3.0,
-    top: Tile.ShipHelmTop, bottom: Tile.Planks, side: Tile.ShipHelmSide,
-  }),
-  [Block.Cannon]: def({
-    name: 'Cannon', hardness: 3.5,
-    top: Tile.CannonTop, bottom: Tile.AutominerTop, side: Tile.CannonSide,
-  }),
   // Turret is a block-entity (like a machine): placed as a normal edit but
   // sabotaged (HP), not mined, and tracked server-side. Single block footprint.
   [Block.Turret]: def({
@@ -602,7 +586,7 @@ const PICKAXE_TIERS: [Block, number][] = [
   [Block.OilShale, 0],
   [Block.Furnace, 0], [Block.FurnaceLit, 0],
   [Block.Autominer, 0], [Block.OilDerrick, 0],
-  [Block.Cannon, 1], [Block.Turret, 1], // metal war machines need a stone+ pick
+  [Block.Turret, 1], // metal war machines need a stone+ pick
   [Block.Core, 1], // the claim Core is pickaxe-mineable (owner-only, server-gated)
 ];
 for (const [b, tier] of PICKAXE_TIERS) {
@@ -613,7 +597,7 @@ for (const [b, tier] of PICKAXE_TIERS) {
 for (const b of [
   Block.OakLog, Block.BirchLog, Block.SpruceLog, Block.OakPlanks,
   Block.BirchPlanks, Block.SprucePlanks,
-  Block.CraftingTable, Block.Chest, Block.ShipHelm,
+  Block.CraftingTable, Block.Chest,
 ]) BLOCKS[b].tool = 'axe';
 // All slabs (bottom + top) + stairs are wood: axe-mineable like planks.
 for (let b = Block.OakSlab; b <= Block.SpruceSlabTop; b++) BLOCKS[b].tool = 'axe';

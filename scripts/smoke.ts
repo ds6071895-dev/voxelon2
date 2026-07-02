@@ -40,12 +40,6 @@ import {
   totalStored, upgradeCost,
 } from '../src/machines';
 import {
-  Ships, applyShipUpgrade, blockAtWorld, blockWorldPos, cannonCount, damageShip,
-  deckHeightAt, floodFillHull, hullRadius, isHullBlock, newShip, sanitizeShipState,
-  shipMaxHp, shipSpeed, shipUpgradeCost, tickShip, worldToLocalOffset,
-  MAX_SHIP_BLOCKS, SHIP_MAX_LEVEL,
-} from '../src/ships';
-import {
   applyTurretUpgrade, claimTurret, damageTurret, newTurret, sanitizeTurretState,
   turretArmed, turretDamage, turretLoad, turretRange, turretUpgradeCost,
   TURRET_MAX_LEVEL,
@@ -1511,6 +1505,32 @@ check('furnace smelts ore/sand/log but not removed foods',
     s.handle(1, { t: 'machineOpen', x: 1, y: 70, z: 0 }).length === 0);
 }
 
+// --- Rocket splash: server-authoritative AoE + crater broadcast --------------
+{
+  const facs = FACTIONS.map((f) => f.id);
+  const s = new GameServer(1337, mulberry32(321));
+  s.addPlayer(1, { username: 'Gunner', faction: facs[0] }); // shooter
+  s.addPlayer(2, { username: 'Foe', faction: facs[1] });    // enemy in range
+  s.addPlayer(3, { username: 'Ally', faction: facs[0] });   // friendly in range
+  s.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+  s.handle(2, { t: 'xform', x: 3, y: 70, z: 0, yaw: 0, pitch: 0 });
+  s.handle(3, { t: 'xform', x: 3, y: 70, z: 1, yaw: 0, pitch: 0 });
+  // A placed block in the crater radius should be cleared + broadcast to others.
+  s.handle(1, { t: 'edit', x: 2, y: 70, z: 0, block: Block.OakPlanks });
+  const blast = s.handle(1, { t: 'rocketBlast', x: 3, y: 70, z: 0 });
+  check('rocket splash hurts an enemy in range',
+    blast.some((o) => o.to === 2 && o.msg.t === 'hurt'));
+  check('rocket splash spares a friendly in range (no friendly fire)',
+    !blast.some((o) => o.to === 3 && o.msg.t === 'hurt'));
+  check('rocket crater clears a placed block + broadcasts it to others',
+    blast.some((o) => o.msg.t === 'edit' && o.to === 'others' &&
+      (o.msg as { x: number; z: number; block: number }).x === 2 &&
+      (o.msg as { block: number }).block === Block.Air));
+  // A burst beyond ranged range is rejected (fail-closed vs a hacked client).
+  check('rocket blast beyond range is rejected',
+    s.handle(1, { t: 'rocketBlast', x: 999, y: 70, z: 999 }).length === 0);
+}
+
 // --- Respawn Beacon: right-click sets a personal spawn the respawn honors ------
 {
   const s = new GameServer(1337, mulberry32(122));
@@ -1734,160 +1754,6 @@ check('furnace smelts ore/sand/log but not removed foods',
     totalStored(bloated) === storageCap(bloated), `${totalStored(bloated)}/${storageCap(bloated)}`);
 }
 
-// --- Ships: capture, physics, combat, upgrades, validation ------------------
-{
-  // Flood-fill a small connected hull: helm + a 3-block deck.
-  const grid: Record<string, number> = {
-    '0,70,0': Block.ShipHelm,
-    '1,70,0': Block.OakPlanks,
-    '2,70,0': Block.OakPlanks,
-    '1,70,1': Block.Cannon,
-  };
-  const cap = (x: number, y: number, z: number) => grid[`${x},${y},${z}`] ?? 0;
-  const hull = floodFillHull(0, 70, 0, cap);
-  check('floodFillHull captures the connected hull from the helm',
-    !!hull && hull.length === 4);
-  check('floodFillHull rejects a non-helm start',
-    floodFillHull(1, 70, 0, cap) === null);
-  check('isHullBlock excludes water/air/entities + containers',
-    isHullBlock(Block.OakPlanks) && !isHullBlock(Block.Water) &&
-    !isHullBlock(Block.Turret) && !isHullBlock(Block.Chest));
-
-  // Oversize hull -> rejected (cap enforced).
-  const big: Record<string, number> = { '0,70,0': Block.ShipHelm };
-  for (let i = 1; i <= MAX_SHIP_BLOCKS + 5; i++) big[`${i},70,0`] = Block.OakPlanks;
-  check('floodFillHull rejects an oversize hull',
-    floodFillHull(0, 70, 0, (x, y, z) => big[`${x},${y},${z}`] ?? 0) === null);
-
-  const ship = newShip(1, 'Cap', { x: 0.5, y: 70.5, z: 0.5 }, 0, hull!);
-  check('cannonCount counts cannon blocks', cannonCount(ship) === 1);
-  check('hullRadius is positive', hullRadius(hull!) >= 2);
-
-  // blockWorldPos: the helm sits at the origin; a +x deck block is +x at yaw 0.
-  const helmW = blockWorldPos(ship, hull!.find((b) => b.dx === 0 && b.dz === 0)!);
-  check('helm block sits at the ship origin',
-    Math.abs(helmW.x - 0.5) < 1e-6 && Math.abs(helmW.z - 0.5) < 1e-6);
-  const deckW = blockWorldPos(ship, { dx: 2, dy: 0, dz: 0, id: Block.OakPlanks });
-  check('deck offset rotates with yaw (yaw 0 keeps +x)',
-    Math.abs(deckW.x - 2.5) < 1e-6 && Math.abs(deckW.z - 0.5) < 1e-6);
-
-  // Physics: sails forward over open water, stops at a shoreline.
-  const water = () => 0;                 // everywhere below sea level
-  const sail = newShip(2, 'Cap', { x: 100.5, y: 64, z: 100.5 }, 0, hull!);
-  for (let i = 0; i < 30; i++) tickShip(sail, { thrust: 1, turn: 0 }, 0.1, water);
-  check('ship sails forward over water', sail.z < 100.5 - 1); // yaw 0 faces -Z
-
-  const land = (x: number, z: number) => (z < 95 ? 100 : 0); // wall of land north
-  const blocked = newShip(3, 'Cap', { x: 100.5, y: 64, z: 100.5 }, 0, hull!);
-  for (let i = 0; i < 80; i++) tickShip(blocked, { thrust: 1, turn: 0 }, 0.1, land);
-  // It sailed north a bit but halted at the shore — never crossing into land.
-  check('ship stops at a shoreline (water-only)',
-    blocked.z > 95 && blocked.z < 100.5);
-
-  // Combat: damage + destruction threshold.
-  check('shipMaxHp grows with the hull axis',
-    shipMaxHp({ hull: 5 }) > shipMaxHp({ hull: 1 }));
-  const dmgShip = newShip(4, 'Cap', { x: 0, y: 64, z: 0 }, 0, hull!);
-  check('damageShip returns true only at 0 hp',
-    !damageShip(dmgShip, dmgShip.maxHp - 1) && damageShip(dmgShip, 5));
-
-  // Upgrades cap at SHIP_MAX_LEVEL; speed scales.
-  const up = newShip(5, 'Cap', { x: 0, y: 64, z: 0 }, 0, hull!);
-  for (let i = 0; i < SHIP_MAX_LEVEL + 4; i++) applyShipUpgrade(up, 'speed');
-  check('ship speed upgrade caps at SHIP_MAX_LEVEL', up.level.speed === SHIP_MAX_LEVEL);
-  check('shipSpeed increases with level', shipSpeed({ speed: 10 }) > shipSpeed({ speed: 1 }));
-  check('shipUpgradeCost is null at max', shipUpgradeCost(up, 'speed') === null);
-
-  // Rider/collision helpers: deck height + world-point hit test, incl. rotated.
-  const helmShip = newShip(7, 'Cap', { x: 10.5, y: 64, z: 20.5 }, 0, hull!);
-  check('deckHeightAt finds the deck over a hull column + null off it',
-    deckHeightAt(helmShip, 10.5, 20.5) !== null &&
-    deckHeightAt(helmShip, 50, 50) === null);
-  check('blockAtWorld detects a hull block at its world position', (() => {
-    const w = blockWorldPos(helmShip, { dx: 1, dy: 0, dz: 0, id: Block.OakPlanks });
-    return blockAtWorld(helmShip, w.x, w.y, w.z) === Block.OakPlanks &&
-      blockAtWorld(helmShip, w.x + 5, w.y, w.z) === 0;
-  })());
-  // Rotate 90° and confirm the collision model rotates with it.
-  helmShip.yaw = Math.PI / 2;
-  check('blockAtWorld tracks the hull under rotation', (() => {
-    const w = blockWorldPos(helmShip, { dx: 2, dy: 0, dz: 0, id: Block.OakPlanks });
-    const loc = worldToLocalOffset(helmShip, w.x, w.z);
-    return Math.abs(Math.round(loc.lx) - 2) < 1e-6 && Math.abs(Math.round(loc.lz)) < 1e-6 &&
-      blockAtWorld(helmShip, w.x, w.y, w.z) === Block.OakPlanks;
-  })());
-
-  // sanitize rejects junk + clamps.
-  check('sanitizeShipState rejects non-objects', sanitizeShipState(null) === null &&
-    sanitizeShipState({ id: NaN }) === null);
-  const san = sanitizeShipState({
-    id: 9, owner: 'x'.repeat(100), x: 1, y: 2, z: 3, yaw: 0,
-    hp: 999999, level: { speed: 999, hull: -5, cannon: 2 },
-    blocks: [{ dx: 0, dy: 0, dz: 0, id: Block.ShipHelm }, { dx: 1, dy: 0, dz: 0, id: Block.OakPlanks }],
-  })!;
-  check('sanitizeShipState clamps level + hp + owner',
-    san.level.speed === SHIP_MAX_LEVEL && san.level.hull === 1 &&
-    san.hp <= san.maxHp && san.owner.length <= 24);
-}
-
-// --- Ships via the authoritative server -------------------------------------
-{
-  const s = new GameServer(1337, mulberry32(11));
-  s.addPlayer(1);
-  s.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
-  // Build a tiny hull next to the player via edits (server records them).
-  s.handle(1, { t: 'edit', x: 0, y: 70, z: 0, block: Block.ShipHelm });
-  s.handle(1, { t: 'edit', x: 1, y: 70, z: 0, block: Block.Cannon });
-  const launch = s.handle(1, { t: 'shipLaunch', x: 0, y: 70, z: 0 });
-  const stateMsg = launch.find((o) => o.msg.t === 'shipState');
-  check('shipLaunch creates a ship + lifts its blocks out of the world',
-    !!stateMsg && launch.filter((o) => o.msg.t === 'edit'
-      && (o.msg as { block: number }).block === Block.Air).length === 2);
-  const shipId = (stateMsg!.msg as { ship: { id: number } }).ship.id;
-
-  // A second player far away can't steer/dock it (fail-closed).
-  s.addPlayer(2);
-  s.handle(2, { t: 'xform', x: 500, y: 70, z: 500, yaw: 0, pitch: 0 });
-  check('a far player cannot steer a ship',
-    s.handle(2, { t: 'shipSteer', id: shipId, thrust: 1, turn: 0 }).length === 0);
-
-  // A gun hit from out of range is rejected; in range it chips HP.
-  check('ship hit beyond ranged range is rejected',
-    s.handle(2, { t: 'shipHit', id: shipId, amount: 20 }).length === 0);
-  s.handle(2, { t: 'xform', x: 2, y: 70, z: 0, yaw: 0, pitch: 0 });
-  const chip = s.handle(2, { t: 'shipHit', id: shipId, amount: 20 });
-  check('an in-range ship hit broadcasts a transform (hp update)',
-    chip.some((o) => o.msg.t === 'shipTransforms'));
-
-  // Dock restores the hull to the world + removes the ship (no item dup/loss).
-  {
-    const d = new GameServer(1337, mulberry32(44));
-    d.addPlayer(1);
-    d.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
-    d.handle(1, { t: 'edit', x: 0, y: 70, z: 0, block: Block.ShipHelm });
-    d.handle(1, { t: 'edit', x: 1, y: 70, z: 0, block: Block.Cannon });
-    const lid = (d.handle(1, { t: 'shipLaunch', x: 0, y: 70, z: 0 })
-      .find((o) => o.msg.t === 'shipState')!.msg as { ship: { id: number } }).ship.id;
-    const dock = d.handle(1, { t: 'shipDock', id: lid });
-    const placed = dock.filter((o) => o.msg.t === 'edit' &&
-      (o.msg as { block: number }).block !== Block.Air);
-    check('docking restores the hull blocks + removes the ship',
-      dock.some((o) => o.msg.t === 'shipRemove') && placed.length === 2);
-  }
-
-  // Destroy it: a single hit is damage-capped (no one-shot), so it takes a few.
-  let destroyOut: ReturnType<typeof s.handle> = [];
-  for (let i = 0; i < 12; i++) {
-    const o = s.handle(2, { t: 'shipHit', id: shipId, amount: 60 });
-    if (o.some((m) => m.msg.t === 'shipRemove')) { destroyOut = o; break; }
-  }
-  check('destroying a ship spills loot + removes it',
-    destroyOut.some((o) => o.msg.t === 'shipRemove') &&
-    destroyOut.some((o) => o.msg.t === 'itemspawn'));
-  check('a destroyed ship no longer exists',
-    s.handle(2, { t: 'shipHit', id: shipId, amount: 10 }).length === 0);
-}
-
 // --- Turrets ----------------------------------------------------------------
 {
   check('turretRange + turretDamage scale with level',
@@ -2006,19 +1872,6 @@ check('furnace smelts ore/sand/log but not removed foods',
     !s.handle(1, { t: 'rangedAttack', target: 3, amount: 10 }).some((o) => o.msg.t === 'hurt'));
   check('cross-faction ranged applies',
     s.handle(1, { t: 'rangedAttack', target: 2, amount: 10 }).some((o) => o.msg.t === 'hurt'));
-
-  // Ship: launched by player 1 (faction A). Ally 3 can't shell it; enemy 2 can.
-  s.handle(1, { t: 'edit', x: 0, y: 70, z: 0, block: Block.ShipHelm });
-  s.handle(1, { t: 'edit', x: 1, y: 70, z: 0, block: Block.Cannon });
-  const sid = (s.handle(1, { t: 'shipLaunch', x: 0, y: 70, z: 0 })
-    .find((o) => o.msg.t === 'shipState')!.msg as { ship: { id: number; faction: number } }).ship;
-  check('a launched ship carries its owner faction', sid.faction === facs[0]);
-  s.handle(3, { t: 'xform', x: 2, y: 70, z: 0, yaw: 0, pitch: 0 });
-  s.handle(2, { t: 'xform', x: 2, y: 70, z: 0, yaw: 0, pitch: 0 });
-  check('same-faction ship hit is rejected',
-    s.handle(3, { t: 'shipHit', id: sid.id, amount: 20 }).length === 0);
-  check('cross-faction ship hit applies',
-    s.handle(2, { t: 'shipHit', id: sid.id, amount: 20 }).some((o) => o.msg.t === 'shipTransforms'));
 
   // Turret claimed by player 1 (faction A): ignores ally 3, fires on enemy 2.
   s.handle(1, { t: 'xform', x: 40, y: 70, z: 40, yaw: 0, pitch: 0 });
@@ -2697,6 +2550,13 @@ check('furnace smelts ore/sand/log but not removed foods',
   check('teleport updated the authoritative position',
     g.snapshot().find((s) => s.id === 1)!.x === 100);
 
+  // Out-of-bounds teleports clamp to the world border + a survivable height,
+  // so an admin typo can't strand someone outside the play area / in the void.
+  const far = g.adminTeleport(1, 99999, -50, -99999);
+  const fm = far[0].msg as { t: 'teleport'; x: number; y: number; z: number };
+  check('adminTeleport clamps to the world border and y>=1',
+    fm.x === WORLD_HALF && fm.z === -WORLD_HALF && fm.y === 1);
+
   // Mode persists through the saved-state blob (capture → re-add).
   const cap = g.capturePlayerState(2);
   check('capturePlayerState carries the gamemode', cap!.data.mode === 'spectator');
@@ -3028,21 +2888,6 @@ check('furnace smelts ore/sand/log but not removed foods',
       p.intersectsBlock(cx, base, cz, Block.Stone) &&
       p.intersectsBlock(cx, base, cz, Block.OakSlabTop) &&
       p.intersectsBlock(cx, base, cz)); // no id -> full cube fallback
-  }
-
-  // Ship deck height: a bottom-slab-topped column stands a rider half a block
-  // lower than a full-block deck.
-  {
-    const helm = { dx: 0, dy: 0, dz: 0, id: Block.ShipHelm };
-    const full = newShip(90, 'Cap', { x: 0, y: 64, z: 0 }, 0,
-      [helm, { dx: 1, dy: 0, dz: 0, id: Block.OakPlanks }]);
-    const slab = newShip(91, 'Cap', { x: 0, y: 64, z: 0 }, 0,
-      [helm, { dx: 1, dy: 0, dz: 0, id: Block.OakSlab }]);
-    const topf = deckHeightAt(full, 1, 0)!;
-    const tops = deckHeightAt(slab, 1, 0)!;
-    check('deckHeightAt: bottom-slab deck is half a block below a full-block deck',
-      Math.abs(topf - 64.5) < 1e-6 && Math.abs(tops - 64.0) < 1e-6,
-      `full=${topf} slab=${tops}`);
   }
 }
 

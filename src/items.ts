@@ -48,7 +48,7 @@ export const enum Item {
   CobaltIngot = 142,
   OilBarrel = 143,
   // Warfare layer (M14)
-  Cannonball = 144, // ammo for ship cannons + turrets (craft: iron + coal)
+  Cannonball = 144, // ammo for turrets (craft: iron + coal)
   // Arcade guns (distinct roles): close-range, spray, pinpoint, burst.
   Shotgun = 145,
   SMG = 146,
@@ -250,9 +250,7 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Item.CobaltIngot]: pureItem('Cobalt Ingot', Tile.CobaltIngot),
   [Item.OilBarrel]: pureItem('Oil Barrel', Tile.OilBarrel),
 
-  // Warfare (M14): ship/turret blocks + cannonball ammo.
-  [Block.ShipHelm]: blockItem(Block.ShipHelm),
-  [Block.Cannon]: blockItem(Block.Cannon),
+  // Warfare (M14): turret block + cannonball ammo.
   [Block.Turret]: blockItem(Block.Turret),
   [Item.Cannonball]: pureItem('Cannonball', Tile.Cannonball),
   // Factions (M18): claim Core block.

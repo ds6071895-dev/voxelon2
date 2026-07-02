@@ -4,7 +4,6 @@
 
 import type { ItemStack } from '../items';
 import type { MachineState, UpgradeAxis } from '../machines';
-import type { ShipState, ShipAxis } from '../ships';
 import type { TurretState, TurretAxis } from '../turrets';
 import type { ClaimState } from '../claims';
 import type { GadgetKind } from '../gadgets';
@@ -61,12 +60,6 @@ export const CHEST_SLOTS = 27;
 export const ARMOR_POINT_CAP = 20;  // 20 points = the max 80% reduction
 export const RANGED_MAX_RANGE = 80; // server cap on a validated gun hit distance
 export const RANGED_MAX_DAMAGE = 30;
-export const SHIP_HIT_MAX_DAMAGE = 60;  // server cap on a reported ship-cannon/gun hit
-
-/** Periodic compact ship transform (folded into a broadcast, like itemsmove). */
-export interface ShipTransform {
-  id: number; x: number; y: number; z: number; yaw: number; hp: number;
-}
 
 /** Vanilla-ish armor: each point blocks 4% of incoming damage, capped at 80%.
  *  Used by BOTH the offline client and the authoritative server so mitigation
@@ -104,13 +97,6 @@ export type ClientMsg =
   // clears the old footprint and rebuilds it at the target, preserving level/
   // storage/filter/stored/owner. Both ends must be within reach of the player.
   | { t: 'machineMove'; x: number; y: number; z: number; tx: number; ty: number; tz: number }
-  // Ships (warfare M14): captured-block vehicles.
-  | { t: 'shipLaunch'; x: number; y: number; z: number }  // helm world pos
-  | { t: 'shipSteer'; id: number; thrust: number; turn: number }
-  | { t: 'shipFire'; id: number; dx: number; dy: number; dz: number } // aim dir
-  | { t: 'shipDock'; id: number }
-  | { t: 'shipUpgrade'; id: number; axis: ShipAxis }
-  | { t: 'shipHit'; id: number; amount: number }          // gun/other chips a ship
   // Turrets (warfare M14): block-entities (placement is a normal edit).
   | { t: 'turretOpen'; x: number; y: number; z: number }
   | { t: 'turretUpgrade'; x: number; y: number; z: number; axis: TurretAxis }
@@ -124,6 +110,11 @@ export type ClientMsg =
   // is down, breaking a stored container inside the claim raids it (handled on
   // the normal `edit` path, server-side).
   | { t: 'claimHit'; x: number; y: number; z: number; amount: number }
+  // A rocket detonation point: the client fires + simulates the projectile and
+  // reports where it burst. The server applies the (capped) splash damage to
+  // enemies in range + broadcasts the crater, so rocket splash syncs to everyone
+  // (the shooter already ran the blast locally; the server skips re-sending it).
+  | { t: 'rocketBlast'; x: number; y: number; z: number }
   // Secret faction switch (Phase 7): defect to the other side. NO public
   // announcement — others keep seeing your old colors (a spy), but the server
   // treats you as your new faction. Max 2/season, locked in the final week.
@@ -147,7 +138,7 @@ export type ServerMsg =
   | {
       t: 'welcome'; id: number; seed: number; username: string;
       players: PlayerInfo[]; edits: [string, number][]; items: ItemEntityInfo[];
-      ships: ShipState[]; turrets: { x: number; y: number; z: number; state: TurretState }[];
+      turrets: { x: number; y: number; z: number; state: TurretState }[];
       claims: ClaimState[];
       /** Region board: owner faction id per region index (teams/regions modules). */
       regions: number[];
@@ -175,10 +166,6 @@ export type ServerMsg =
   | { t: 'gotitem'; item: number; count: number }
   | { t: 'chest'; x: number; y: number; z: number; slots: (ItemStack | null)[] }
   | { t: 'machine'; x: number; y: number; z: number; state: MachineState }
-  // Ships.
-  | { t: 'shipState'; ship: ShipState }                 // full (launch/upgrade/board)
-  | { t: 'shipTransforms'; ships: ShipTransform[] }      // periodic broadcast
-  | { t: 'shipRemove'; id: number }
   // Turrets.
   | { t: 'turret'; x: number; y: number; z: number; state: TurretState }
   | { t: 'turretFire'; x: number; y: number; z: number; tx: number; ty: number; tz: number }

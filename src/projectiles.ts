@@ -13,12 +13,10 @@ import type { NetClient } from './net/client';
 import type { Particles } from './particles';
 import type { Player } from './player';
 import type { RemotePlayers } from './remoteplayers';
-import { blockAtWorld, ShipState } from './ships';
 import type { World } from './world';
 
 const STEP = 0.2;          // collision sub-step (blocks)
 const SPAWN_OFFSET = 0.6;  // start ahead of the eye so it can't hit the shooter
-const SHIP_HIT_MIN = 1.5;  // don't let a round hit the ship it was fired from
 
 interface Projectile {
   mesh: THREE.Mesh;
@@ -27,8 +25,6 @@ interface Projectile {
   gun: GunInfo;
   traveled: number;
   alive: boolean;
-  /** Ship the shooter was aboard (immune until SHIP_HIT_MIN of travel). */
-  fromShip: number;
 }
 
 export class Projectiles {
@@ -38,8 +34,6 @@ export class Projectiles {
   private readonly bulletMat = new THREE.MeshBasicMaterial({ color: 0xffe27a });
   private readonly rocketMat = new THREE.MeshBasicMaterial({ color: 0xcc4434 });
 
-  /** Live ships to test projectile hits against (set by main). */
-  shipsProvider: () => ShipState[] = () => [];
   /** Report a block impact so the host can drain an enemy faction's claim
    *  shield if the round struck inside it (M19 breaching). Set by main. */
   claimSink?: (x: number, y: number, z: number, damage: number) => void;
@@ -54,7 +48,7 @@ export class Projectiles {
     private readonly particles: Particles,
   ) {}
 
-  fire(origin: THREE.Vector3, dir: THREE.Vector3, gun: GunInfo, fromShip = -1): void {
+  fire(origin: THREE.Vector3, dir: THREE.Vector3, gun: GunInfo): void {
     const d = dir.clone().normalize();
     const rocket = gun.rocket === true;
     const mesh = new THREE.Mesh(
@@ -65,7 +59,7 @@ export class Projectiles {
     mesh.position.copy(pos);
     if (rocket) mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), d);
     this.scene.add(mesh);
-    this.list.push({ mesh, pos, dir: d, gun, traveled: 0, alive: true, fromShip });
+    this.list.push({ mesh, pos, dir: d, gun, traveled: 0, alive: true });
   }
 
   update(dt: number): void {
@@ -91,10 +85,12 @@ export class Projectiles {
 
   /** Test the projectile's current point against players, mobs, then blocks. */
   private collideAt(p: Projectile): void {
-    // Remote player (PvP): the server validates + applies the damage.
+    // Remote player (PvP): the server validates + applies the damage. Rockets
+    // deal NO direct hit — they detonate and damage via the server-side splash
+    // (sent from despawn), so a near-miss still hurts and there's no double-count.
     const pid = this.remotePlayers.avatarAtPoint(p.pos);
     if (pid >= 0) {
-      this.net.sendRangedAttack(pid, p.gun.damage);
+      if (p.gun.rocket !== true) this.net.sendRangedAttack(pid, p.gun.damage);
       this.despawn(p, true);
       return;
     }
@@ -102,22 +98,6 @@ export class Projectiles {
     if (this.mobs.shootPoint(p.pos, p.gun.damage, p.dir)) {
       this.despawn(p, true);
       return;
-    }
-    // Ships (server-validated like ranged PvP): a round that strikes a hull
-    // block reports a ship hit. Immune to the shooter's own ship until it has
-    // cleared the muzzle.
-    if (p.traveled >= SHIP_HIT_MIN) {
-      for (const ship of this.shipsProvider()) {
-        if (ship.id === p.fromShip) continue;
-        // Cheap reject before the per-block scan (hulls are well under 48 wide).
-        const sdx = ship.x - p.pos.x, sdz = ship.z - p.pos.z;
-        if (sdx * sdx + sdz * sdz > 48 * 48) continue;
-        if (blockAtWorld(ship, p.pos.x, p.pos.y, p.pos.z) !== 0) {
-          this.net.sendShipHit(ship.id, p.gun.damage);
-          this.despawn(p, true);
-          return;
-        }
-      }
     }
     // Block.
     if (isSolid(this.world.getBlock(
@@ -134,9 +114,11 @@ export class Projectiles {
     this.scene.remove(p.mesh);
     if (!impact) return;
     if (p.gun.rocket === true) {
-      // Reuse the creeper blast: destroys blocks + hurts local mobs and the
-      // shooter (the direct-hit player was already damaged via the server).
+      // Reuse the creeper blast locally: destroys blocks + hurts local mobs and
+      // the shooter. The server applies the (capped) splash damage to enemy
+      // players + broadcasts the crater so the blast syncs to everyone else.
       this.mobs.explode(p.pos.clone(), this.player);
+      this.net.sendRocketBlast(p.pos.x, p.pos.y, p.pos.z);
     } else {
       this.particles.poof(p.pos.x, p.pos.y, p.pos.z);
     }

@@ -99,7 +99,7 @@ const RADIUS = 0.125;
 const MERGE_RADIUS = 0.75;
 const MAGNET_RADIUS = 1.6;
 const PICKUP_RADIUS = 0.45;
-const PICKUP_DELAY = 0.4; // seconds before a fresh drop can be collected
+const PICKUP_DELAY = 1.0; // seconds before a fresh drop can be collected
 const DESPAWN = 300;
 const MAX_ENTITIES = 300;
 

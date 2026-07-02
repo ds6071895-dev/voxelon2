@@ -144,19 +144,35 @@ export class GameAudio {
 
   // --- game sounds -----------------------------------------------------------
 
+  // Dig/place/step follow the same recipe as the softened gunshot: a low-passed
+  // "thump" body carries the impact, and the material identity comes from a
+  // QUIET bandpass layer — no loud raw bandpass hiss (it was painful on repeat,
+  // especially sand/glass whose material frequencies sit at 2.4–3.2 kHz).
+
   dig(material: Material, pos?: THREE.Vector3): void {
-    this.noise({ freq: MATERIAL_FREQ[material], dur: 0.16, gain: 0.5, pos });
+    const f = MATERIAL_FREQ[material];
+    this.noise({ freq: Math.min(f, 520), dur: 0.13, gain: 0.24, slideTo: 110, type: 'lowpass', q: 0.7, pos });
+    this.noise({ freq: f * 0.7, dur: 0.08, gain: 0.07, q: 0.8, pos });
     if (material === 'stone' || material === 'wood') {
-      this.tone({ type: 'triangle', from: 160, to: 70, dur: 0.1, gain: 0.25, pos });
+      this.tone({ type: 'triangle', from: 150, to: 65, dur: 0.09, gain: 0.14, pos });
     }
   }
 
   place(material: Material, pos?: THREE.Vector3): void {
-    this.noise({ freq: MATERIAL_FREQ[material] * 1.2, dur: 0.1, gain: 0.45, pos });
+    const f = MATERIAL_FREQ[material];
+    this.noise({ freq: Math.min(f, 600), dur: 0.08, gain: 0.2, slideTo: 150, type: 'lowpass', q: 0.7, pos });
+    this.noise({ freq: f * 0.75, dur: 0.05, gain: 0.06, q: 0.8, pos });
+    this.tone({ type: 'triangle', from: 230, to: 120, dur: 0.06, gain: 0.09, pos });
   }
 
   step(material: Material): void {
-    this.noise({ freq: MATERIAL_FREQ[material] * 0.8, dur: 0.07, gain: 0.16 });
+    // Soft low pat with a little random pitch drift so repeated footsteps
+    // don't machine-gun the exact same sample.
+    const jitter = 0.88 + Math.random() * 0.24;
+    this.noise({
+      freq: Math.min(MATERIAL_FREQ[material] * 0.6, 420) * jitter,
+      dur: 0.055, gain: 0.09, slideTo: 90, type: 'lowpass', q: 0.6,
+    });
   }
 
   /** Taking damage: a soft, muffled "oof" — a low triangle thump + a brief

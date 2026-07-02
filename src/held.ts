@@ -5,6 +5,7 @@
 import * as THREE from 'three';
 import { itemGeometry } from './itementity';
 import { ITEMS } from './items';
+import { skinColor } from './remoteplayers';
 import type { Atlas } from './textures';
 
 const BASE_X = 0.42, BASE_Y = -0.42, BASE_Z = -0.7;
@@ -20,6 +21,10 @@ export class HeldItemView {
   private readonly atlas: Atlas;
   private readonly flash: THREE.Mesh;
   private readonly flashMat: THREE.MeshBasicMaterial;
+  // First-person arm: a skin-colored forearm + fist coming in from the
+  // bottom-right, parented to the pivot so it swings/recoils with the item.
+  private readonly armMat: THREE.MeshBasicMaterial;
+  private readonly baseSkin = new THREE.Color(0xc89a6a);
 
   constructor(camera: THREE.Camera, atlas: Atlas) {
     this.atlas = atlas;
@@ -50,6 +55,27 @@ export class HeldItemView {
     this.flash.renderOrder = 101;
     this.flash.visible = false;
     this.pivot.add(this.flash);
+
+    // First-person arm: a blocky forearm + fist angled in from the bottom-right
+    // so the held item reads as actually held (and an empty hand shows a fist),
+    // matching the boxy avatar other players see.
+    this.armMat = new THREE.MeshBasicMaterial({ color: this.baseSkin.clone() });
+    const arm = new THREE.Group();
+    const forearm = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.17, 0.55), this.armMat);
+    forearm.position.set(0, 0, 0.3); // extends back toward the screen corner
+    arm.add(forearm);
+    const fist = new THREE.Mesh(new THREE.BoxGeometry(0.21, 0.21, 0.2), this.armMat);
+    arm.add(fist); // the grip, at the item's position
+    arm.position.set(0.05, -0.16, 0.06);
+    arm.rotation.set(0.5, -0.32, 0.32);
+    arm.renderOrder = 99; // just behind the item
+    this.pivot.add(arm);
+  }
+
+  /** Tint the first-person hand to the local player's deterministic skin tone
+   *  (so your own hand matches the avatar everyone else sees). */
+  setSkin(seed: number): void {
+    this.baseSkin.copy(skinColor(seed));
   }
 
   setItem(id: number | null): void {
@@ -80,7 +106,9 @@ export class HeldItemView {
   }
 
   update(dt: number, mining: boolean, sunlight: number): void {
-    this.material.color.setScalar(0.55 + 0.45 * sunlight);
+    const shade = 0.55 + 0.45 * sunlight;
+    this.material.color.setScalar(shade);
+    this.armMat.color.copy(this.baseSkin).multiplyScalar(shade);
     // Mining a block swings the hand — but guns animate via recoil(), so a held
     // gun never swings (its left-click fires instead of mining).
     if (mining && !this.isGun) this.swing();

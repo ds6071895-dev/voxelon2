@@ -17,12 +17,10 @@ const DESCRIPTIONS: Record<number, string> = {
   [Item.BurstRifle]: 'Fires a tight 3-round burst per trigger pull.',
   [Item.Bullet]: 'Ammo for the pistol, rifle, shotgun, SMG and sniper.',
   [Item.Rocket]: 'Explosive ammo for the rocket launcher.',
-  [Item.Cannonball]: 'Ammo for ship cannons and turrets.',
+  [Item.Cannonball]: 'Ammo for turrets.',
   // War economy + factions.
   [Block.Core]: 'Founds a BASE in your territory — raises an oil-powered shield.',
   [Block.Turret]: 'Auto-targets enemies. Load it with cannonballs + oil.',
-  [Block.ShipHelm]: 'Place on water to build + pilot a ship. Add cannons.',
-  [Block.Cannon]: 'A ship weapon — mount it on your hull around the helm.',
   [Block.Autominer]: 'Mines ore automatically over time. Collect its output.',
   [Block.OilDerrick]: 'Pumps OIL — the fuel for base shields + the war chest.',
   [Item.OilBarrel]: 'Oil: feeds base shields, the treasury and oil bombs.',

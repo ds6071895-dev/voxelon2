@@ -1007,51 +1007,118 @@ function paintMachineFrame(p: Painter, seed: number, base: RGBA): void {
 
 function paintAutominerSide(p: Painter, seed: number): void {
   paintMachineFrame(p, seed, MACHINE_METAL);
-  // hazard stripe band
+  // Diagonal hazard chevrons across the crown.
   for (let x = 1; x <= 14; x++) {
-    const c: RGBA = ((x + 1) >> 1) % 2 ? [230, 196, 40, 255] : [40, 40, 44, 255];
-    p.set(x, 2, c); p.set(x, 3, c);
+    for (let y = 1; y <= 2; y++) {
+      p.set(x, y, ((x + y) >> 1) % 2 ? [232, 196, 44, 255] : [42, 42, 46, 255]);
+    }
   }
-  // central drill bit pointing down
-  const bit: RGBA = [184, 188, 194, 255];
-  for (let y = 6; y <= 11; y++) {
-    const w = 11 - y;
-    for (let x = 7 - w; x <= 8 + w; x++) p.set(x, y, shade(bit, 0.78 + hash2(seed, x, y) * 0.3));
+  // Recessed dark drill bay with orange heat vents on either side.
+  for (let y = 4; y <= 13; y++) {
+    for (let x = 4; x <= 11; x++) p.set(x, y, shade([34, 35, 41, 255], 0.9 + hash2(seed ^ 5, x, y) * 0.2));
   }
-  p.set(7, 12, [150, 154, 160, 255]); p.set(8, 12, [150, 154, 160, 255]);
+  for (const yy of [6, 8, 10]) {
+    p.set(2, yy, [246, 138, 42, 255]); p.set(13, yy, [246, 138, 42, 255]); // glowing vents
+    p.set(2, yy + 1, [150, 74, 24, 255]); p.set(13, yy + 1, [150, 74, 24, 255]);
+  }
+  // Big chevron drill bit with alternating carbide teeth.
+  const bit: RGBA = [190, 194, 202, 255];
+  const bitD: RGBA = [126, 130, 140, 255];
+  for (let y = 4; y <= 12; y++) {
+    const w = Math.max(0, Math.floor((12 - y) / 2.4));
+    for (let x = 7 - w; x <= 8 + w; x++) {
+      p.set(x, y, shade((x + y) % 2 ? bit : bitD, 0.85 + hash2(seed, x, y) * 0.2));
+    }
+  }
+  p.set(7, 13, [255, 214, 120, 255]); p.set(8, 13, [255, 190, 90, 255]); // sparks at the tip
+  // Riveted side pillars.
+  for (const x of [1, 14]) for (const y of [5, 8, 11]) p.set(x, y, [168, 172, 180, 255]);
+  // Cobalt power cell window bottom-left.
+  p.set(2, 13, [96, 140, 235, 255]); p.set(3, 13, [60, 92, 180, 255]);
 }
 
 function paintAutominerTop(p: Painter, seed: number): void {
   paintMachineFrame(p, seed, [110, 114, 122, 255]);
-  // central bore hole
-  for (let a = 0; a < 16; a++) {
-    const ang = (a / 16) * Math.PI * 2;
-    p.set(Math.round(7.5 + 3 * Math.cos(ang)), Math.round(7.5 + 3 * Math.sin(ang)), MACHINE_DARK);
+  // Cross-brace plating seams.
+  for (let i = 1; i <= 14; i++) {
+    p.set(i, 7, shade([88, 92, 100, 255], 0.95)); p.set(i, 8, shade([88, 92, 100, 255], 0.95));
+    p.set(7, i, shade([88, 92, 100, 255], 0.95)); p.set(8, i, shade([88, 92, 100, 255], 0.95));
   }
-  for (let y = 6; y <= 9; y++) for (let x = 6; x <= 9; x++) p.set(x, y, [24, 24, 28, 255]);
+  // Bolted gear ring around the bore.
+  for (let a = 0; a < 24; a++) {
+    const ang = (a / 24) * Math.PI * 2;
+    const x = Math.round(7.5 + 4 * Math.cos(ang)), y = Math.round(7.5 + 4 * Math.sin(ang));
+    p.set(x, y, a % 3 ? [58, 60, 66, 255] : [178, 182, 190, 255]); // teeth glint
+  }
+  // Dark bore with a hint of the spinning bit.
+  for (let y = 5; y <= 10; y++) {
+    for (let x = 5; x <= 10; x++) {
+      const d = Math.hypot(x - 7.5, y - 7.5);
+      if (d > 2.8) continue;
+      p.set(x, y, d < 1.2 ? [140, 144, 152, 255] : [18, 18, 22, 255]);
+    }
+  }
+  // Corner service bolts.
+  for (const [x, y] of [[2, 2], [13, 2], [2, 13], [13, 13]]) p.set(x, y, [178, 182, 190, 255]);
 }
 
 function paintOilDerrickSide(p: Painter, seed: number): void {
-  paintMachineFrame(p, seed, [96, 100, 108, 255]);
-  const beam: RGBA = [40, 40, 44, 255];
-  // A-frame derrick legs that taper toward the top
-  for (let y = 2; y <= 13; y++) {
-    const inset = Math.floor((13 - y) / 3);
-    p.set(3 + inset, y, beam); p.set(12 - inset, y, beam);
+  // Weathered panel behind a rust-red lattice tower (classic pumpjack paint).
+  paintMachineFrame(p, seed, [88, 90, 96, 255]);
+  const beam: RGBA = [148, 66, 44, 255];
+  const beamD: RGBA = [96, 42, 30, 255];
+  // Tapered truss legs with riveted X-bracing between them.
+  for (let y = 1; y <= 13; y++) {
+    const inset = Math.floor((13 - y) / 4);
+    p.set(2 + inset, y, beam); p.set(3 + inset, y, beamD);
+    p.set(13 - inset, y, beam); p.set(12 - inset, y, beamD);
   }
-  for (const yy of [4, 7, 10]) for (let x = 4; x <= 11; x++) p.set(x, yy, beam); // braces
-  for (let x = 5; x <= 10; x++) p.set(x, 13, [24, 22, 20, 255]); // oil pool at base
+  for (const [y0, y1] of [[2, 5], [6, 9], [10, 13]] as const) {
+    for (let y = y0; y <= y1; y++) {
+      const t = (y - y0) / (y1 - y0);
+      const inset = Math.floor((13 - (y0 + y1) / 2) / 4);
+      const xl = 3 + inset, xr = 12 - inset;
+      p.set(Math.round(xl + (xr - xl) * t), y, beamD); // "/" brace
+      p.set(Math.round(xr - (xr - xl) * t), y, beam);  // "\" brace
+    }
+  }
+  // Crown block platform at the top.
+  for (let x = 4; x <= 11; x++) p.set(x, 1, [52, 50, 54, 255]);
+  // Warning beacon.
+  p.set(7, 0, [246, 90, 60, 255]); p.set(8, 0, [180, 50, 34, 255]);
+  // Oil splatter pooling at the base + a green pressure gauge.
+  for (let x = 3; x <= 12; x++) {
+    if (hash2(seed ^ 9, x, 0) > 0.35) p.set(x, 14, [22, 20, 18, 255]);
+    p.set(x, 15 - (x % 2), [16, 14, 12, 255]);
+  }
+  p.set(13, 12, [110, 220, 130, 255]);
 }
 
 function paintOilDerrickTop(p: Painter, seed: number): void {
-  paintMachineFrame(p, seed, [96, 100, 108, 255]);
-  // red wellhead valve wheel
-  const red: RGBA = [180, 60, 50, 255];
+  paintMachineFrame(p, seed, [88, 90, 96, 255]);
+  // Bolted wellhead flange.
+  for (let a = 0; a < 20; a++) {
+    const ang = (a / 20) * Math.PI * 2;
+    const x = Math.round(7.5 + 4.6 * Math.cos(ang)), y = Math.round(7.5 + 4.6 * Math.sin(ang));
+    p.set(x, y, a % 2 ? [54, 56, 60, 255] : [172, 176, 184, 255]);
+  }
+  // Oil pooling inside the flange with an iridescent sheen.
+  for (let y = 4; y <= 11; y++) {
+    for (let x = 4; x <= 11; x++) {
+      const d = Math.hypot(x - 7.5, y - 7.5);
+      if (d > 3.6) continue;
+      p.set(x, y, shade([20, 18, 22, 255], 0.9 + hash2(seed ^ 3, x, y) * 0.3));
+    }
+  }
+  p.set(6, 5, [70, 88, 110, 255]); p.set(9, 9, [88, 74, 34, 255]); // sheen glints
+  // Red valve wheel: rim + 4 spokes + hub.
+  const red: RGBA = [206, 66, 52, 255];
   for (let a = 0; a < 16; a++) {
     const ang = (a / 16) * Math.PI * 2;
-    p.set(Math.round(7.5 + 3 * Math.cos(ang)), Math.round(7.5 + 3 * Math.sin(ang)), red);
+    p.set(Math.round(7.5 + 2.6 * Math.cos(ang)), Math.round(7.5 + 2.6 * Math.sin(ang)), red);
   }
-  for (let y = 7; y <= 8; y++) for (let x = 7; x <= 8; x++) p.set(x, y, MACHINE_FRAME);
+  for (let k = -2; k <= 2; k++) { p.set(Math.round(7.5 + k), 7, red); p.set(8, Math.round(7.5 + k), red); }
+  p.set(7, 7, [244, 120, 100, 255]); p.set(8, 8, [140, 40, 32, 255]); // hub shading
 }
 
 function paintMachinePart(p: Painter, seed: number): void {
@@ -1069,52 +1136,6 @@ function paintMachinePart(p: Painter, seed: number): void {
 }
 
 // --- Warfare (M14) -----------------------------------------------------------
-function paintShipHelmSide(p: Painter, seed: number): void {
-  // A wooden ship's wheel mounted on a planks face.
-  paintPlanks(p, seed);
-  const rim: RGBA = [120, 86, 44, 255];
-  const spoke: RGBA = [150, 110, 60, 255];
-  for (let a = 0; a < 24; a++) {
-    const ang = (a / 24) * Math.PI * 2;
-    p.set(Math.round(7.5 + 5 * Math.cos(ang)), Math.round(7.5 + 5 * Math.sin(ang)), rim);
-    p.set(Math.round(7.5 + 6 * Math.cos(ang)), Math.round(7.5 + 6 * Math.sin(ang)), shade(rim, 0.7));
-  }
-  for (let a = 0; a < 8; a++) {
-    const ang = (a / 8) * Math.PI * 2;
-    for (let r = 0; r <= 6; r++) {
-      p.set(Math.round(7.5 + r * Math.cos(ang)), Math.round(7.5 + r * Math.sin(ang)), spoke);
-    }
-  }
-  p.set(7, 7, [60, 44, 24, 255]); p.set(8, 8, [60, 44, 24, 255]); // hub
-}
-
-function paintShipHelmTop(p: Painter, seed: number): void {
-  paintPlanks(p, seed);
-  const brass: RGBA = [196, 150, 64, 255];
-  for (let y = 6; y <= 9; y++) for (let x = 6; x <= 9; x++) p.set(x, y, shade(brass, 0.8 + hash2(seed, x, y) * 0.3));
-  for (let i = 4; i <= 11; i++) { p.set(i, 7, brass); p.set(i, 8, brass); }
-}
-
-function paintCannonSide(p: Painter, seed: number): void {
-  paintMachineFrame(p, seed, [70, 72, 80, 255]);
-  // A dark barrel running left->right with a muzzle ring at the right.
-  const barrel: RGBA = [44, 46, 52, 255];
-  for (let y = 6; y <= 9; y++) for (let x = 2; x <= 13; x++) {
-    p.set(x, y, shade(barrel, 0.85 + hash2(seed, x, y) * 0.25));
-  }
-  for (let y = 5; y <= 10; y++) { p.set(12, y, [24, 24, 28, 255]); p.set(13, y, [16, 16, 18, 255]); }
-  for (let x = 3; x <= 9; x++) p.set(x, 11, [96, 70, 38, 255]); // wood carriage
-}
-
-function paintCannonTop(p: Painter, seed: number): void {
-  paintMachineFrame(p, seed, [80, 82, 90, 255]);
-  for (let a = 0; a < 16; a++) {
-    const ang = (a / 16) * Math.PI * 2;
-    p.set(Math.round(7.5 + 3 * Math.cos(ang)), Math.round(7.5 + 3 * Math.sin(ang)), [40, 40, 46, 255]);
-  }
-  for (let y = 6; y <= 9; y++) for (let x = 6; x <= 9; x++) p.set(x, y, [18, 18, 20, 255]); // bore
-}
-
 function paintTurretSide(p: Painter, seed: number): void {
   paintMachineFrame(p, seed, [92, 96, 104, 255]);
   // hazard band + a forward gun port
@@ -1244,78 +1265,272 @@ function paintRespawnBeaconTop(p: Painter, seed: number): void {
   }
 }
 
-// --- Gadget sprites (Phase 8): a shared device-icon base + per-gadget motifs ---
+// --- Gadget sprites (Phase 8): each gadget gets its own hand-drawn silhouette ---
 const GADGET_OUTLINE: RGBA = [18, 20, 26, 255];
-/** A rounded device body in `base`, dark-outlined, with a top cap in `accent`. */
-function paintGadgetBody(p: Painter, seed: number, base: RGBA, accent: RGBA): void {
-  for (let y = 3; y <= 13; y++) {
-    for (let x = 4; x <= 11; x++) {
-      const corner = (x <= 4 || x >= 11) && (y <= 3 || y >= 13);
-      if (corner) continue;
-      const edge = x === 4 || x === 11 || y === 3 || y === 13;
-      p.set(x, y, edge ? GADGET_OUTLINE : shade(base, 0.82 + hash2(seed, x, y) * 0.26));
+
+/** Filled axis-aligned rectangle helper for the sprite painters. */
+function rect(p: Painter, x0: number, y0: number, x1: number, y1: number, c: RGBA): void {
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) p.set(x, y, c);
+}
+
+/** Classic pineapple frag: olive segmented oval, steel cap, spoon lever + pin. */
+function paintGrenade(p: Painter, seed: number): void {
+  const base: RGBA = [88, 112, 68, 255];
+  const dark: RGBA = [52, 70, 42, 255];
+  const lite: RGBA = [124, 150, 96, 255];
+  // Oval body with outline (rows y5..12; narrower at the ends).
+  for (let y = 5; y <= 12; y++) {
+    const slim = y === 5 || y === 12;
+    const x0 = slim ? 6 : 5, x1 = slim ? 9 : 10;
+    for (let x = x0; x <= x1; x++) {
+      const edge = x === x0 || x === x1 || ((y === 5 || y === 12) && true);
+      p.set(x, y, edge ? GADGET_OUTLINE : shade(base, 0.9 + hash2(seed, x, y) * 0.2));
     }
   }
-  for (let x = 5; x <= 10; x++) { p.set(x, 4, shade(accent, 0.95)); p.set(x, 5, shade(accent, 0.8)); }
-  p.set(6, 7, shade(base, 1.3)); // highlight
+  // Frag segmentation grooves (cast-iron grid) + upper-left sheen.
+  for (let x = 6; x <= 9; x++) p.set(x, 8, dark);
+  for (const y of [6, 7, 9, 10, 11]) { p.set(7, y, dark); }
+  p.set(6, 6, lite); p.set(6, 7, lite);
+  // Steel cap, spoon lever curling down the right side, gold pin ring left.
+  const steel: RGBA = [176, 182, 190, 255];
+  const steelD: RGBA = [110, 116, 126, 255];
+  rect(p, 6, 3, 9, 3, steel); rect(p, 6, 4, 9, 4, steelD);
+  p.set(10, 3, steelD); p.set(11, 4, steelD); p.set(11, 5, steelD); p.set(11, 6, steelD);
+  const gold: RGBA = [212, 188, 84, 255];
+  p.set(4, 2, gold); p.set(3, 3, gold); p.set(4, 4, gold); p.set(5, 3, gold);
 }
-function paintGrenade(p: Painter, seed: number): void {
-  paintGadgetBody(p, seed, [70, 96, 64, 255], [120, 150, 110, 255]);
-  p.set(7, 2, [150, 150, 60, 255]); p.set(8, 2, [150, 150, 60, 255]); // pin ring
-  for (let y = 7; y <= 12; y += 2) for (let x = 5; x <= 10; x += 2) p.set(x, y, [40, 56, 36, 255]); // frag grid
-}
+
+/** C4: tan demolition brick, black straps, red LED timer, arming wires. */
 function paintC4(p: Painter, seed: number): void {
-  paintGadgetBody(p, seed, [196, 176, 120, 255], [150, 130, 90, 255]);
-  for (let x = 5; x <= 10; x++) p.set(x, 9, [180, 60, 60, 255]); // red wire
-  p.set(11, 6, [40, 40, 44, 255]); p.set(12, 6, [40, 40, 44, 255]); // detonator
-  p.set(8, 11, [220, 70, 70, 255]); // arm light
+  const clay: RGBA = [202, 182, 126, 255];
+  const clayD: RGBA = [162, 142, 92, 255];
+  // Brick with outline; bottom/right rows shaded darker for volume.
+  for (let y = 5; y <= 13; y++) {
+    for (let x = 3; x <= 12; x++) {
+      const edge = x === 3 || x === 12 || y === 5 || y === 13;
+      const c = edge ? GADGET_OUTLINE : (y >= 11 || x >= 11 ? clayD : clay);
+      p.set(x, y, edge ? c : shade(c, 0.92 + hash2(seed, x, y) * 0.16));
+    }
+  }
+  // Two black webbing straps.
+  const strap: RGBA = [44, 46, 50, 255];
+  for (let y = 6; y <= 12; y++) { p.set(5, y, strap); p.set(10, y, strap); }
+  // LED timer panel with red digits.
+  rect(p, 6, 7, 9, 9, [26, 28, 32, 255]);
+  p.set(7, 8, [240, 70, 50, 255]); p.set(9, 8, [240, 70, 50, 255]);
+  p.set(8, 8, [130, 30, 24, 255]);
+  // Detonator nub + wires sprouting off the top.
+  p.set(7, 4, [120, 124, 132, 255]); p.set(8, 4, [120, 124, 132, 255]);
+  p.set(6, 3, [200, 60, 54, 255]); p.set(5, 2, [200, 60, 54, 255]);   // red wire
+  p.set(9, 3, [70, 110, 210, 255]); p.set(10, 2, [70, 110, 210, 255]); // blue wire
+  // Blinking arm light.
+  p.set(11, 11, [245, 90, 70, 255]);
 }
+
+/** Grappling hook: steel grapnel with curled flukes + a coiled rope. */
 function paintGrapplingHook(p: Painter, seed: number): void {
-  paintGadgetBody(p, seed, [120, 96, 60, 255], [150, 124, 80, 255]);
-  // a steel hook
-  const steel: RGBA = [180, 188, 198, 255];
-  for (let y = 4; y <= 9; y++) p.set(7, y, steel);
-  p.set(6, 9, steel); p.set(8, 9, steel); p.set(5, 8, steel); p.set(9, 8, steel);
+  const steel: RGBA = [186, 194, 204, 255];
+  const steelD: RGBA = [116, 124, 136, 255];
+  // Eye + shaft.
+  p.set(8, 1, steelD); p.set(7, 2, steelD); p.set(9, 2, steelD); p.set(8, 3, steel);
+  for (let y = 3; y <= 8; y++) p.set(8, y, y % 2 ? steel : shade(steel, 0.9));
+  // Three flukes sweeping up from the crown at (8,9).
+  p.set(8, 9, steelD);
+  p.set(6, 9, steel); p.set(5, 8, steel); p.set(4, 7, steelD); p.set(4, 6, steel); // left barb
+  p.set(10, 9, steel); p.set(11, 8, steel); p.set(12, 7, steelD); p.set(12, 6, steel); // right barb
+  p.set(8, 10, steel); p.set(8, 11, steelD); // center spike
+  // Barb tips glint.
+  p.set(4, 5, [232, 238, 246, 255]); p.set(12, 5, [232, 238, 246, 255]);
+  // Rope: a line running off the eye into a coil at the bottom-left.
+  const rope: RGBA = [156, 116, 62, 255];
+  const ropeD: RGBA = [114, 82, 44, 255];
+  p.set(7, 1, rope); p.set(6, 2, rope); p.set(5, 3, ropeD); p.set(4, 4, rope);
+  p.set(3, 5, ropeD); p.set(2, 6, rope); p.set(2, 7, ropeD); p.set(2, 8, rope);
+  // Coil (a fat donut of rope).
+  for (let y = 10; y <= 14; y++) {
+    for (let x = 1; x <= 5; x++) {
+      const d = Math.hypot(x - 3, y - 12);
+      if (d > 2.4) continue;
+      p.set(x, y, d < 0.8 ? ropeD : shade(rope, 0.82 + ((x + y) % 2) * 0.28));
+    }
+  }
 }
+
+/** Deployable cover: riveted blast barricade with a hazard chevron top. */
 function paintDeployCover(p: Painter, seed: number): void {
-  paintGadgetBody(p, seed, [96, 100, 108, 255], [70, 74, 82, 255]);
-  for (let x = 5; x <= 10; x++) { p.set(x, 6, [200, 170, 40, 255]); p.set(x, 7, x % 2 ? [40, 40, 44, 255] : [200, 170, 40, 255]); } // hazard band
+  const plate: RGBA = [118, 124, 134, 255];
+  const plateD: RGBA = [82, 88, 98, 255];
+  // Trapezoid: narrow at the top, wide feet — reads "barricade" at a glance.
+  for (let y = 4; y <= 13; y++) {
+    const spread = Math.min(3, (y - 4) >> 1);
+    const x0 = 5 - spread, x1 = 10 + spread;
+    for (let x = x0; x <= x1; x++) {
+      const edge = x === x0 || x === x1 || y === 4 || y === 13;
+      p.set(x, y, edge ? GADGET_OUTLINE : shade(y > 10 ? plateD : plate, 0.9 + hash2(seed, x, y) * 0.18));
+    }
+  }
+  // Diagonal yellow/black hazard chevrons across the crown.
+  for (let x = 6; x <= 9; x++) {
+    for (let y = 5; y <= 6; y++) {
+      p.set(x, y, ((x + y) >> 1) % 2 ? [226, 190, 48, 255] : [40, 40, 44, 255]);
+    }
+  }
+  // Vision slit + corner rivets + fold-out feet.
+  rect(p, 6, 9, 9, 9, [30, 32, 38, 255]);
+  p.set(4, 8, [200, 206, 214, 255]); p.set(11, 8, [200, 206, 214, 255]);
+  p.set(3, 12, [200, 206, 214, 255]); p.set(12, 12, [200, 206, 214, 255]);
+  rect(p, 2, 14, 4, 14, GADGET_OUTLINE); rect(p, 11, 14, 13, 14, GADGET_OUTLINE);
 }
+
+/** Sentry kit: a folded mini-turret on a tripod, barrel out, red eye lit. */
 function paintSentryKit(p: Painter, seed: number): void {
-  paintGadgetBody(p, seed, [80, 88, 100, 255], [60, 66, 78, 255]);
-  const barrel: RGBA = [40, 44, 50, 255];
-  for (let x = 6; x <= 12; x++) p.set(x, 8, barrel); // gun barrel
-  p.set(7, 7, [220, 90, 70, 255]); // eye
+  const body: RGBA = [96, 104, 116, 255];
+  const dark: RGBA = [48, 52, 60, 255];
+  // Tripod legs.
+  p.set(4, 14, dark); p.set(5, 13, dark); p.set(6, 12, dark);
+  p.set(8, 12, dark); p.set(8, 13, dark); p.set(8, 14, dark);
+  p.set(10, 12, dark); p.set(11, 13, dark); p.set(12, 14, dark);
+  // Turret head (outlined box).
+  for (let y = 6; y <= 11; y++) {
+    for (let x = 4; x <= 10; x++) {
+      const edge = x === 4 || x === 10 || y === 6 || y === 11;
+      p.set(x, y, edge ? GADGET_OUTLINE : shade(body, 0.9 + hash2(seed, x, y) * 0.2));
+    }
+  }
+  // Twin barrels poking right with dark muzzles.
+  rect(p, 11, 7, 14, 7, dark); p.set(14, 7, [16, 16, 18, 255]);
+  rect(p, 11, 9, 13, 9, dark); p.set(13, 9, [16, 16, 18, 255]);
+  // Targeting eye + status stripe + sensor mast.
+  p.set(6, 8, [244, 84, 60, 255]); p.set(7, 8, [150, 40, 30, 255]);
+  rect(p, 5, 10, 9, 10, [64, 70, 80, 255]);
+  p.set(4, 4, dark); p.set(4, 5, dark); p.set(4, 3, [120, 220, 130, 255]);
 }
+
+/** Smoke grenade: gray canister, pull-ring, soft puffs drifting off the top. */
 function paintSmokeGrenade(p: Painter, seed: number): void {
-  paintGadgetBody(p, seed, [90, 98, 110, 255], [150, 158, 168, 255]);
-  for (let y = 8; y <= 12; y++) for (let x = 5; x <= 10; x++) if (hash2(seed ^ 3, x, y) > 0.5) p.set(x, y, [170, 176, 186, 255]); // puffs
+  const can: RGBA = [158, 166, 176, 255];
+  const canD: RGBA = [104, 112, 124, 255];
+  // Cylinder body with outlined sides.
+  for (let y = 5; y <= 13; y++) {
+    for (let x = 5; x <= 10; x++) {
+      const edge = x === 5 || x === 10 || y === 13;
+      const band = y === 8 || y === 9; // ID band
+      const c: RGBA = band ? [86, 130, 150, 255] : (x >= 9 ? canD : can);
+      p.set(x, y, edge ? GADGET_OUTLINE : shade(c, 0.9 + hash2(seed, x, y) * 0.16));
+    }
+  }
+  p.set(6, 6, [214, 220, 228, 255]); // sheen
+  // Vent holes at the base.
+  p.set(6, 12, [40, 42, 48, 255]); p.set(8, 12, [40, 42, 48, 255]);
+  // Cap + spoon + pull ring.
+  rect(p, 5, 4, 10, 4, [70, 76, 86, 255]);
+  p.set(11, 4, canD); p.set(12, 5, canD);
+  p.set(12, 3, [212, 188, 84, 255]); p.set(13, 2, [212, 188, 84, 255]); p.set(13, 3, [212, 188, 84, 255]);
+  // Smoke puffs rising to the upper-left.
+  const puff: RGBA = [228, 232, 238, 230];
+  const puffD: RGBA = [196, 202, 210, 200];
+  p.set(4, 3, puff); p.set(3, 2, puffD); p.set(4, 2, puff); p.set(2, 1, puffD);
+  p.set(3, 0, puff); p.set(5, 1, puffD); p.set(1, 3, puffD);
 }
+
+/** War horn: a curved brass horn with a flared bell and banding. */
 function paintWarHorn(p: Painter, seed: number): void {
-  paintGadgetBody(p, seed, [40, 44, 56, 255], [70, 76, 92, 255]);
-  const gold: RGBA = [220, 180, 70, 255];
-  for (let x = 5; x <= 11; x++) p.set(x, 8, shade(gold, 0.9 + (x - 5) * 0.03)); // horn body
-  p.set(11, 7, gold); p.set(11, 9, gold); p.set(12, 6, gold); p.set(12, 10, gold); // bell
+  const brass: RGBA = [204, 160, 66, 255];
+  const brassD: RGBA = [144, 108, 42, 255];
+  const brassL: RGBA = [240, 206, 110, 255];
+  // Crescent body: mouthpiece bottom-left sweeping up to the bell top-right.
+  const path: [number, number][] = [
+    [3, 12], [4, 12], [5, 12], [6, 11], [7, 10], [8, 9], [9, 8], [9, 7], [10, 6], [10, 5],
+  ];
+  for (const [x, y] of path) {
+    p.set(x, y, brass);
+    p.set(x, y + 1, brassD);
+    p.set(x + 1, y, shade(brass, 0.95 + hash2(seed, x, y) * 0.1));
+  }
+  // Highlight along the top curve.
+  p.set(4, 11, brassL); p.set(5, 11, brassL); p.set(7, 9, brassL); p.set(9, 6, brassL);
+  // Flared bell.
+  for (let y = 2; y <= 7; y++) {
+    const w = y <= 4 ? 2 : 1;
+    for (let x = 11; x <= 11 + w; x++) p.set(x, y, x === 11 + w ? brassL : brass);
+  }
+  p.set(12, 1, brassL); p.set(13, 1, brassL); p.set(14, 2, brassL); p.set(14, 3, brassL);
+  // Dark bore of the bell + mouthpiece tip + decorative band.
+  p.set(13, 2, [60, 44, 20, 255]); p.set(13, 3, [60, 44, 20, 255]);
+  p.set(2, 12, [60, 44, 20, 255]);
+  p.set(8, 9, [120, 80, 40, 255]); p.set(8, 10, [120, 80, 40, 255]);
 }
+
+/** Oil bomb: glossy black sphere, lit fuse, amber oil sheen dripping. */
 function paintOilBomb(p: Painter, seed: number): void {
-  paintGadgetBody(p, seed, [34, 32, 40, 255], [60, 56, 46, 255]);
-  p.set(7, 2, [60, 50, 40, 255]); p.set(8, 2, [60, 50, 40, 255]); // cap
-  for (let y = 8; y <= 12; y++) for (let x = 5; x <= 10; x++) if (hash2(seed ^ 7, x, y) > 0.6) p.set(x, y, [80, 70, 30, 255]); // oily sheen
-  p.set(6, 6, [120, 110, 60, 255]);
+  const shell: RGBA = [40, 38, 46, 255];
+  // Sphere with radial shading.
+  for (let y = 4; y <= 14; y++) {
+    for (let x = 3; x <= 13; x++) {
+      const d = Math.hypot(x - 8, y - 9);
+      if (d > 4.9) continue;
+      let f = 1.15 - d * 0.1;
+      if (x < 7 && y < 8 && d < 4) f += 0.5; // gloss
+      p.set(x, y, shade(shell, f * (0.9 + hash2(seed, x, y) * 0.14)));
+    }
+  }
+  p.set(6, 6, [130, 134, 156, 255]); p.set(5, 7, [104, 108, 128, 255]); // hard glint
+  // Amber oil sheen swirl low on the shell.
+  p.set(9, 11, [128, 108, 40, 255]); p.set(10, 10, [96, 82, 32, 255]); p.set(8, 12, [96, 82, 32, 255]);
+  // Cap + rope fuse + spark.
+  rect(p, 7, 3, 9, 4, [96, 100, 110, 255]);
+  p.set(10, 2, [140, 104, 56, 255]); p.set(11, 1, [140, 104, 56, 255]);
+  p.set(12, 0, [255, 200, 80, 255]); p.set(13, 1, [244, 120, 40, 255]); p.set(12, 2, [244, 160, 60, 255]);
 }
+
+/** Spy disguise: fedora + dark shades + moustache — the classic incognito kit. */
 function paintSpyDisguise(p: Painter, seed: number): void {
-  paintGadgetBody(p, seed, [60, 56, 70, 255], [90, 84, 104, 255]);
-  for (let x = 5; x <= 10; x++) p.set(x, 7, [20, 20, 26, 255]); // mask band
-  p.set(6, 7, [220, 220, 230, 255]); p.set(9, 7, [220, 220, 230, 255]); // eye holes
+  const felt: RGBA = [56, 58, 72, 255];
+  const feltD: RGBA = [38, 40, 52, 255];
+  // Hat crown + band + wide brim.
+  for (let y = 2; y <= 5; y++) {
+    for (let x = 5; x <= 10; x++) p.set(x, y, shade(felt, 0.92 + hash2(seed, x, y) * 0.16));
+  }
+  rect(p, 5, 5, 10, 5, [140, 44, 48, 255]); // hat band (dark red)
+  rect(p, 3, 6, 12, 6, feltD);
+  p.set(2, 6, feltD); p.set(13, 6, feltD);
+  // Sunglasses: two lenses joined by a bridge, arms out to the sides.
+  const lens: RGBA = [22, 24, 30, 255];
+  rect(p, 4, 8, 6, 9, lens); rect(p, 9, 8, 11, 9, lens);
+  p.set(7, 8, [90, 94, 106, 255]); p.set(8, 8, [90, 94, 106, 255]); // bridge
+  p.set(3, 8, [90, 94, 106, 255]); p.set(12, 8, [90, 94, 106, 255]); // arms
+  p.set(4, 8, [130, 150, 170, 255]); p.set(9, 8, [130, 150, 170, 255]); // lens glint
+  // Moustache: a two-lobe curl under the glasses.
+  const tache: RGBA = [58, 42, 30, 255];
+  rect(p, 5, 12, 7, 12, tache); rect(p, 8, 12, 10, 12, tache);
+  p.set(4, 11, tache); p.set(11, 11, tache);
+  p.set(6, 13, tache); p.set(9, 13, tache);
 }
+
+/** Jump boost: a coiled launch spring on a plate with a green up arrow. */
 function paintJumpBoost(p: Painter, seed: number): void {
-  paintGadgetBody(p, seed, [60, 120, 70, 255], [90, 170, 100, 255]);
-  // a coiled spring + up-arrows
-  const steel: RGBA = [200, 206, 214, 255];
-  for (let y = 6; y <= 12; y += 2) for (let x = 5; x <= 10; x++) p.set(x, y, steel);
-  for (let x = 5; x <= 10; x++) p.set(x, 13, [120, 124, 130, 255]); // base plate
-  p.set(7, 4, [230, 240, 180, 255]); p.set(8, 4, [230, 240, 180, 255]); // up tip
-  p.set(6, 5, [230, 240, 180, 255]); p.set(9, 5, [230, 240, 180, 255]);
+  const steel: RGBA = [198, 204, 212, 255];
+  const steelD: RGBA = [122, 128, 138, 255];
+  // Base plate with outline + bolts.
+  rect(p, 3, 13, 12, 14, GADGET_OUTLINE);
+  rect(p, 4, 13, 11, 13, steelD);
+  p.set(4, 13, [230, 234, 240, 255]); p.set(11, 13, [230, 234, 240, 255]);
+  // Coil: alternating offset windings so it reads as a spring.
+  for (let y = 7; y <= 12; y++) {
+    const off = y % 2 ? 0 : 1;
+    for (let x = 5 + off; x <= 9 + off; x++) {
+      p.set(x, y, x === 5 + off ? steelD : (x === 9 + off ? [232, 238, 246, 255] : steel));
+    }
+  }
+  // Green up arrow launching out of the spring.
+  const green: RGBA = [96, 214, 108, 255];
+  const greenD: RGBA = [52, 140, 66, 255];
+  p.set(7, 1, green); p.set(8, 1, green);
+  rect(p, 6, 2, 9, 2, green);
+  p.set(5, 3, green); p.set(6, 3, greenD); p.set(9, 3, greenD); p.set(10, 3, green);
+  rect(p, 7, 3, 8, 5, greenD);
+  // Motion ticks either side.
+  p.set(4, 5, [190, 240, 190, 200]); p.set(11, 5, [190, 240, 190, 200]);
 }
 
 const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
@@ -1449,10 +1664,6 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.OilDerrickSide]: paintOilDerrickSide,
   [Tile.OilDerrickTop]: paintOilDerrickTop,
   [Tile.MachinePart]: paintMachinePart,
-  [Tile.ShipHelmSide]: paintShipHelmSide,
-  [Tile.ShipHelmTop]: paintShipHelmTop,
-  [Tile.CannonSide]: flipX(paintCannonSide),
-  [Tile.CannonTop]: paintCannonTop,
   [Tile.TurretSide]: flipX(paintTurretSide),
   [Tile.TurretTop]: paintTurretTop,
   [Tile.Cannonball]: paintCannonball,

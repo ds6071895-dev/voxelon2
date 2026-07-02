@@ -13,10 +13,6 @@ import {
 } from '../machines';
 import { Item } from '../items';
 import {
-  ShipState, applyShipUpgrade, blockWorldPos, cannonCount, damageShip,
-  floodFillHull, newShip, shipFireInterval, tickShip, sanitizeShipState,
-} from '../ships';
-import {
   TurretState, applyTurretUpgrade, claimTurret, damageTurret, newTurret,
   turretArmed, turretConsumeShot, turretDamage, turretLoad, turretRange,
   sanitizeTurretState,
@@ -41,19 +37,21 @@ import { GadgetCooldowns, gadgetOf, falloffDamage } from '../gadgets';
 import { Terrain } from '../terrain';
 import {
   ClientMsg, EDIT_RANGE, CHEST_SLOTS, PICKUP_RANGE,
-  ARMOR_POINT_CAP, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE, SHIP_HIT_MAX_DAMAGE,
-  mitigate, ItemEntityInfo, PlayerInfo, PlayerSnapshot, ServerMsg, ShipTransform,
+  ARMOR_POINT_CAP, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE,
+  mitigate, ItemEntityInfo, PlayerInfo, PlayerSnapshot, ServerMsg,
   WORLD_SEED, WORLD_HALF, makeUsername, skinSeed, GameMode,
 } from './protocol';
 
-const BOARD_RANGE = 6;          // how close a player must be to pilot/dock/upgrade a ship
-const SHIP_BLAST_RADIUS = 7;    // ship-destruction explosion radius (player damage)
 const SEASON_BROADCAST = 2;      // seconds between season-clock broadcasts
 const WAR_BROADCAST = 2;         // seconds between war-clock broadcasts
 const FLAG_BROADCAST = 2;        // seconds between war-flag countdown broadcasts
 const CLAIM_BROADCAST = 1;      // seconds between bulk claim-state refreshes
 const CLAIM_HIT_MAX = 200;      // server cap on a single reported shield hit
 export const RAID_STEAL_FRAC = 0.5; // fraction of a stored container a raid takes
+// Rocket splash (mirrors the client-side mobs.explode blast so PvP/craters sync).
+const ROCKET_BLAST_DAMAGE = 22; // base AoE damage at the burst centre
+const ROCKET_BLAST_RADIUS = 6;  // player-damage falloff radius (blocks)
+const ROCKET_CRATER_RADIUS = 3; // block-destruction radius (= client EXPLOSION_RADIUS)
 
 /** All arguments are finite numbers (rejects NaN/Infinity/non-numbers). */
 function fin(...ns: number[]): boolean {
@@ -90,9 +88,8 @@ const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
   'edit', 'attack', 'rangedAttack', 'selfhurt', 'drop', 'pickup', 'chestSet',
   'machineConfig', 'machineUpgrade', 'machineCollect', 'machineHit', 'machineClaim',
   'machineMove', 'setSpawn',
-  'shipLaunch', 'shipSteer', 'shipFire', 'shipDock', 'shipUpgrade', 'shipHit',
   'turretUpgrade', 'turretClaim', 'turretHit', 'turretLoad',
-  'claimFeed', 'claimHit', 'gadgetUse',
+  'claimFeed', 'claimHit', 'gadgetUse', 'rocketBlast',
 ]);
 
 /** One message the transport should deliver. `to` is a client id, or a
@@ -112,9 +109,6 @@ export class GameServer {
   private readonly chests = new Map<string, (ItemStack | null)[]>();
   private readonly machines = new Map<string, MachineState>();
   // Warfare layer (M14).
-  private readonly ships = new Map<number, ShipState>();
-  private readonly shipInput = new Map<number, { thrust: number; turn: number; age: number }>();
-  private nextShipId = 1;
   private readonly turrets = new Map<string, TurretState>();
   // Land claims (M18).
   private readonly claims = new Claims();
@@ -244,7 +238,6 @@ export class GameServer {
       players: [...this.players.values()].map(toInfo),
       edits: [...this.edits.entries()],
       items: [...this.items.values()],
-      ships: [...this.ships.values()],
       turrets: [...this.turrets.entries()].map(([k, state]) => {
         const [x, y, z] = k.split(',').map(Number);
         return { x, y, z, state };
@@ -300,6 +293,8 @@ export class GameServer {
         return this.handleSwitch(p, msg.faction);
       case 'gadgetUse':
         return this.handleGadget(p, msg.item, msg.x, msg.y, msg.z);
+      case 'rocketBlast':
+        return this.handleRocketBlast(p, msg.x, msg.y, msg.z);
       case 'saveState':
         // Stash the client-owned blob (inventory/hotbar). Position is added from
         // the authoritative record at capture time. The shell persists to disk.
@@ -422,48 +417,6 @@ export class GameServer {
         if (this.edits.get(`${bx},${by},${bz}`) !== Block.RespawnBeacon) return [];
         p.spawnX = bx; p.spawnY = by; p.spawnZ = bz;
         return [{ to: p.id, msg: { t: 'notice', text: 'Respawn point set!' } }];
-      }
-      // --- Ships ---
-      case 'shipLaunch':
-        return this.handleShipLaunch(p, msg.x, msg.y, msg.z);
-      case 'shipSteer': {
-        const ship = this.ships.get(msg.id);
-        if (!ship || !this.nearShip(p, ship)) return [];
-        if (!fin(msg.thrust, msg.turn)) return [];
-        this.shipInput.set(ship.id, { thrust: msg.thrust, turn: msg.turn, age: 0 });
-        return [];
-      }
-      case 'shipFire': {
-        // Anti-spam gate only: the cannonball projectile + its hit are
-        // client-simulated and validated via shipHit/rangedAttack (trust model).
-        const ship = this.ships.get(msg.id);
-        if (!ship || !this.nearShip(p, ship) || cannonCount(ship) < 1) return [];
-        if (ship.fireCooldown > 0) return [];
-        ship.fireCooldown = shipFireInterval(ship.level);
-        return [];
-      }
-      case 'shipHit': {
-        const ship = this.ships.get(msg.id);
-        if (!ship || p.dead || !fin(ship.x, ship.y, ship.z, p.x, p.y, p.z, msg.amount)) return [];
-        if (sameFaction(p.faction, ship.faction)) return []; // can't shell your own faction's ship
-        const dist = Math.hypot(ship.x - p.x, ship.y - p.y, ship.z - p.z);
-        if (!(dist <= RANGED_MAX_RANGE)) return []; // fail-closed (NaN -> reject)
-        const dmg = Math.max(0, Math.min(SHIP_HIT_MAX_DAMAGE, msg.amount));
-        if (dmg <= 0) return [];
-        if (damageShip(ship, dmg)) return this.destroyShip(ship);
-        return [{ to: 'all', msg: { t: 'shipTransforms', ships: [shipTransform(ship)] } }];
-      }
-      case 'shipDock': {
-        const ship = this.ships.get(msg.id);
-        if (!ship || !this.nearShip(p, ship)) return [];
-        return this.dockShip(ship);
-      }
-      case 'shipUpgrade': {
-        const ship = this.ships.get(msg.id);
-        if (!ship || !this.nearShip(p, ship)) return [];
-        if (msg.axis !== 'speed' && msg.axis !== 'hull' && msg.axis !== 'cannon') return [];
-        applyShipUpgrade(ship, msg.axis); // cost paid client-side; server caps
-        return [{ to: 'all', msg: { t: 'shipState', ship } }];
       }
       // --- Turrets ---
       case 'turretOpen': {
@@ -988,110 +941,10 @@ export class GameServer {
     }
   }
 
-  // --- Ships -----------------------------------------------------------------
-
   private playerByName(name: string): ServerPlayer | undefined {
     if (!name) return undefined;
     for (const p of this.players.values()) if (p.username === name) return p;
     return undefined;
-  }
-
-  /** Alive + within boarding range of a ship's origin (steer/dock/upgrade gate). */
-  private nearShip(p: ServerPlayer, ship: ShipState): boolean {
-    if (p.dead || !fin(p.x, p.z, ship.x, ship.z)) return false;
-    const dx = ship.x - p.x, dz = ship.z - p.z;
-    return dx * dx + dz * dz <= BOARD_RANGE * BOARD_RANGE;
-  }
-
-  /** Flood-fill the hull from a helm, lift it out of the world, and create the
-   *  ship. Rejected (no-op) if the helm isn't placed/near, or the hull is too
-   *  small/large (floodFillHull is size-capped, so this can't be abused). */
-  private handleShipLaunch(p: ServerPlayer, x: number, y: number, z: number): Outbound[] {
-    if (!this.nearMachine(p, x, y, z)) return []; // alive + in range (reuses the gate)
-    x = Math.floor(x); y = Math.floor(y); z = Math.floor(z);
-    const capturableAt = (cx: number, cy: number, cz: number) =>
-      this.edits.get(`${cx},${cy},${cz}`) ?? 0; // only player-placed cells; 0 = natural/air
-    const blocks = floodFillHull(x, y, z, capturableAt);
-    if (!blocks) return [];
-    const ship = newShip(this.nextShipId++, p.username,
-      { x: x + 0.5, y: y + 0.5, z: z + 0.5 }, 0, blocks, p.faction);
-    this.ships.set(ship.id, ship);
-    const out: Outbound[] = [];
-    // Remove the captured blocks from the world (everyone sees them lift off).
-    for (const b of blocks) {
-      const cx = x + b.dx, cy = y + b.dy, cz = z + b.dz;
-      this.edits.set(`${cx},${cy},${cz}`, Block.Air);
-      out.push({ to: 'all', msg: { t: 'edit', x: cx, y: cy, z: cz, block: Block.Air } });
-    }
-    out.push({ to: 'all', msg: { t: 'shipState', ship } });
-    return out;
-  }
-
-  /** Ship HP hit 0: explode (damage nearby players), spill the hull + cargo as
-   *  loot entities, and remove the ship for everyone. */
-  private destroyShip(ship: ShipState): Outbound[] {
-    this.ships.delete(ship.id);
-    this.shipInput.delete(ship.id);
-    const out: Outbound[] = [];
-    // Server-authoritative blast damage to nearby players (linear falloff).
-    // Friendly fire is off: the ship's own faction is unharmed by its wreck.
-    for (const target of this.players.values()) {
-      if (target.dead || sameFaction(target.faction, ship.faction)) continue;
-      const d = Math.hypot(target.x - ship.x, target.y - ship.y, target.z - ship.z);
-      const f = 1 - d / SHIP_BLAST_RADIUS;
-      if (f <= 0) continue;
-      const horiz = Math.hypot(target.x - ship.x, target.z - ship.z) || 1;
-      out.push(...this.applyDamage(target, Math.round(28 * f), -1, {
-        x: (target.x - ship.x) / horiz, y: 0.6, z: (target.z - ship.z) / horiz,
-      }));
-    }
-    // Spill the hull blocks as loot (capped), at the ship's position.
-    let entities = 0;
-    for (const b of ship.blocks) {
-      if (entities >= 80) break;
-      if (!ITEMS[b.id]) continue;
-      entities++;
-      out.push(this.spawnItem(b.id, 1,
-        ship.x + (this.rng() - 0.5) * 2, ship.y + 0.5, ship.z + (this.rng() - 0.5) * 2));
-    }
-    out.push({ to: 'all', msg: { t: 'shipRemove', id: ship.id } });
-    return out;
-  }
-
-  /** Re-place the captured hull into the world at the ship's current transform
-   *  and delete the ship (dock / break down). */
-  private dockShip(ship: ShipState): Outbound[] {
-    const out: Outbound[] = [];
-    for (const b of ship.blocks) {
-      const w = blockWorldPos(ship, b);
-      const cx = Math.round(w.x - 0.5), cy = Math.round(w.y - 0.5), cz = Math.round(w.z - 0.5);
-      if (cy < 0 || cy >= 256) continue;
-      this.edits.set(`${cx},${cy},${cz}`, b.id);
-      out.push({ to: 'all', msg: { t: 'edit', x: cx, y: cy, z: cz, block: b.id } });
-    }
-    this.ships.delete(ship.id);
-    this.shipInput.delete(ship.id);
-    out.push({ to: 'all', msg: { t: 'shipRemove', id: ship.id } });
-    return out;
-  }
-
-  /** Advance every ship; returns the transforms to broadcast (like tickItems). */
-  tickShips(dt: number): ShipTransform[] {
-    if (!fin(dt) || dt <= 0) return [];
-    const out: ShipTransform[] = [];
-    const height = (x: number, z: number) => this.terrain.height(x, z);
-    for (const ship of this.ships.values()) {
-      const inp = this.shipInput.get(ship.id);
-      let steer = { thrust: 0, turn: 0 };
-      if (inp) {
-        inp.age += dt;
-        if (inp.age <= 0.6) steer = inp; // input expires if the driver goes quiet
-      }
-      tickShip(ship, steer, dt, height);
-      ship.fireCooldown = Math.max(0, ship.fireCooldown - dt);
-      out.push(shipTransform(ship));
-    }
-    return out;
   }
 
   // --- Turrets ---------------------------------------------------------------
@@ -1345,26 +1198,9 @@ export class GameServer {
         if (Math.hypot(x - p.x, y - p.y, z - p.z) > RANGED_MAX_RANGE) return [];
         if (!p.gadgetCd.use(item, now)) return []; // cooldown
         const out: Outbound[] = [{ to: 'all', msg: { t: 'gadgetFx', kind: def.kind, x, y, z } }];
-        if (def.kind !== 'smoke' && def.damage && def.radius) {
-          // AoE damage to living enemies in radius (friendly fire stays off).
-          for (const t of this.players.values()) {
-            if (t.dead || t.id === p.id || sameFaction(t.faction, p.faction)) continue;
-            const d = Math.hypot(t.x - x, t.y - y, t.z - z);
-            const dmg = falloffDamage(def.damage, d, def.radius);
-            if (dmg > 0) out.push(...this.applyDamage(t, dmg, p.id,
-              { x: (t.x - x) || 0.01, y: 0.4, z: (t.z - z) || 0 }));
-          }
-        }
         if (def.kind !== 'smoke') {
-          // Machines shrug off bullets + melee but are DEMOLISHED by an explosive:
-          // any machine caught in the blast is destroyed outright (HP-independent).
-          const blastR = (def.radius ?? 4) + 1.5;
-          for (const key of [...this.machines.keys()]) {
-            const [mx, my, mz] = key.split(',').map(Number);
-            if (Math.hypot(mx + 0.5 - x, my + 0.5 - y, mz + 0.5 - z) <= blastR) {
-              out.push(...this.destroyMachine(key, mx, my, mz));
-            }
-          }
+          out.push(...this.detonate(p, x, y, z,
+            def.damage ?? 0, def.radius ?? 0, def.radius ?? 4));
         }
         return out;
       }
@@ -1383,6 +1219,69 @@ export class GameServer {
       default:
         return []; // client-handled gadget kind
     }
+  }
+
+  /** A rocket detonation reported by the shooter's client: validate the burst is
+   *  within range, then apply the server-authoritative splash. The shooter
+   *  already ran the local blast, so the crater goes to everyone else. Damage +
+   *  radii are fixed server-side (the client supplies only the burst point). */
+  private handleRocketBlast(p: ServerPlayer, x: number, y: number, z: number): Outbound[] {
+    if (p.dead || !fin(x, y, z)) return [];
+    if (Math.hypot(x - p.x, y - p.y, z - p.z) > RANGED_MAX_RANGE) return [];
+    return this.detonate(p, x, y, z,
+      ROCKET_BLAST_DAMAGE, ROCKET_BLAST_RADIUS, ROCKET_CRATER_RADIUS);
+  }
+
+  /** Shared explosive blast: server-authoritative AoE damage to enemies (linear
+   *  falloff over dmgRadius), a broadcast crater of player-placed blocks (radius
+   *  blastR), and machine demolition. The instigator already ran the local
+   *  blast, so crater edits go to 'others' and the instigator is never
+   *  self-damaged here. Friendly fire stays off. */
+  private detonate(
+    by: ServerPlayer, x: number, y: number, z: number,
+    damage: number, dmgRadius: number, blastR: number,
+  ): Outbound[] {
+    const out: Outbound[] = [];
+    if (damage > 0 && dmgRadius > 0) {
+      // AoE damage to living enemies in radius (friendly fire stays off).
+      for (const t of this.players.values()) {
+        if (t.dead || t.id === by.id || sameFaction(t.faction, by.faction)) continue;
+        const d = Math.hypot(t.x - x, t.y - y, t.z - z);
+        const dmg = falloffDamage(damage, d, dmgRadius);
+        if (dmg > 0) out.push(...this.applyDamage(t, dmg, by.id,
+          { x: (t.x - x) || 0.01, y: 0.4, z: (t.z - z) || 0 }));
+      }
+    }
+    // Break player-placed blocks in a sphere and broadcast each removal so every
+    // other client sees the crater. Natural terrain isn't networked, so it's
+    // skipped; bedrock/indestructible (hardness < 0) survives.
+    const ir = Math.ceil(blastR);
+    const r2 = blastR * blastR + 1;
+    for (let dx = -ir; dx <= ir; dx++) {
+      for (let dy = -ir; dy <= ir; dy++) {
+        for (let dz = -ir; dz <= ir; dz++) {
+          if (dx * dx + dy * dy + dz * dz > r2) continue;
+          const bx = Math.floor(x) + dx;
+          const by2 = Math.floor(y) + dy;
+          const bz = Math.floor(z) + dz;
+          const key = `${bx},${by2},${bz}`;
+          const existing = this.edits.get(key);
+          if (existing === undefined || existing === Block.Air) continue;
+          if ((BLOCKS[existing]?.hardness ?? -1) < 0) continue;
+          this.edits.set(key, Block.Air);
+          out.push({ to: 'others', from: by.id, msg: { t: 'edit', x: bx, y: by2, z: bz, block: Block.Air } });
+        }
+      }
+    }
+    // Machines are immune to bullets/melee but DEMOLISHED outright by a blast.
+    const machineR = blastR + 1.5;
+    for (const key of [...this.machines.keys()]) {
+      const [mx, my, mz] = key.split(',').map(Number);
+      if (Math.hypot(mx + 0.5 - x, my + 0.5 - y, mz + 0.5 - z) <= machineR) {
+        out.push(...this.destroyMachine(key, mx, my, mz));
+      }
+    }
+    return out;
   }
 
   /** The opposing faction id (two-faction war). */
@@ -1457,6 +1356,12 @@ export class GameServer {
       ({ id: p.id, username: p.username, faction: p.faction, mode: p.mode }));
   }
 
+  /** Live coordinates of every online player (console `coords`). */
+  playerCoords(): { id: number; username: string; x: number; y: number; z: number }[] {
+    return [...this.players.values()].map((p) =>
+      ({ id: p.id, username: p.username, x: p.x, y: p.y, z: p.z }));
+  }
+
   /** Grant items to an online player (console `give`); same dup-safe gotitem
    *  path as a pickup, so it stacks into their inventory client-side. */
   adminGive(id: number, item: number, count: number): Outbound[] {
@@ -1484,6 +1389,10 @@ export class GameServer {
   adminTeleport(id: number, x: number, y: number, z: number): Outbound[] {
     const p = this.players.get(id);
     if (!p || !fin(x, y, z)) return [];
+    // Clamp inside the world border and to a survivable height.
+    x = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, x));
+    z = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, z));
+    y = Math.max(1, Math.min(255, y));
     p.x = x; p.y = y; p.z = z;
     return [{ to: id, msg: { t: 'teleport', x, y, z } }];
   }
@@ -1560,11 +1469,9 @@ export class GameServer {
       v: 1,
       seed: this.seed,
       worldTime: this.worldTime,
-      nextShipId: this.nextShipId,
       edits: [...this.edits.entries()],
       chests: [...this.chests.entries()],
       machines: [...this.machines.entries()],
-      ships: [...this.ships.values()],
       turrets: [...this.turrets.entries()],
       claims: this.claims.list(),
       regions: this.regions.serialize(),
@@ -1612,15 +1519,6 @@ export class GameServer {
         if (validBlockKey(k) && st) this.machines.set(k as string, st);
       }
     }
-    if (Array.isArray(s.ships)) {
-      let maxId = this.nextShipId - 1;
-      for (const raw of s.ships) {
-        const st = sanitizeShipState(raw);
-        if (st) { this.ships.set(st.id, st); if (st.id > maxId) maxId = st.id; }
-      }
-      this.nextShipId = Math.max(this.nextShipId,
-        Number.isInteger(s.nextShipId) ? (s.nextShipId as number) : 0, maxId + 1);
-    }
     if (Array.isArray(s.turrets)) {
       for (const e of s.turrets) {
         if (!Array.isArray(e) || e.length !== 2) continue;
@@ -1648,10 +1546,6 @@ export class GameServer {
   }
 }
 
-function shipTransform(ship: ShipState): ShipTransform {
-  return { id: ship.id, x: ship.x, y: ship.y, z: ship.z, yaw: ship.yaw, hp: ship.hp };
-}
-
 function toInfo(p: ServerPlayer): PlayerInfo {
   return {
     id: p.id, username: p.username, skin: p.skin, faction: p.faction, mode: p.mode,
@@ -1667,11 +1561,9 @@ export interface WorldSave {
   v: number;
   seed: number;
   worldTime: number;
-  nextShipId: number;
   edits: [string, number][];
   chests: [string, (ItemStack | null)[]][];
   machines: [string, MachineState][];
-  ships: ShipState[];
   turrets: [string, TurretState][];
   claims: ClaimState[];
   regions?: RegionsSave;

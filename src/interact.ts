@@ -11,7 +11,6 @@ import type { Inventory } from './inventory';
 import { ITEMS, miningStats } from './items';
 import { machineHeight, machineTypeForBlock } from './machines';
 import type { Player } from './player';
-import { isHullBlock } from './ships';
 import type { World } from './world';
 
 export const REACH = 4.5;
@@ -91,8 +90,6 @@ export class Interaction {
   ) => void;
   /** Fired on left-click against a machine/turret block: sabotage (HP), not mining. */
   onSabotage?: (x: number, y: number, z: number) => void;
-  /** Fired on right-click of a (not-yet-launched) Ship Helm: capture + launch. */
-  onUseHelm?: (x: number, y: number, z: number) => void;
   /** Fired on right-click of a Respawn Beacon: set the player's spawn point. */
   onSetSpawn?: (x: number, y: number, z: number) => void;
   /** When set ("Move machine" armed), the NEXT right-click consumes itself and
@@ -173,8 +170,11 @@ export class Interaction {
     }
 
     // "Move machine" armed: the next right-click drops the machine at the cell
-    // against the aimed face (no placing/opening), then disarms.
-    if (this.armedMove && input.rightClicked && this.target && !suppressUse) {
+    // against the aimed face (no placing/opening), then disarms. This is an
+    // explicit one-shot mode the player just armed from the machine panel, so
+    // it fires even while a gun/gadget is held (ignores suppressUse — otherwise
+    // holding a gun would silently swallow the move click as an ADS zoom).
+    if (this.armedMove && input.rightClicked && this.target) {
       const tId = this.world.getBlock(this.target.x, this.target.y, this.target.z);
       const into = BLOCKS[tId]?.replaceable ?? false;
       const px = this.target.x + (into ? 0 : this.target.nx);
@@ -219,11 +219,6 @@ export class Interaction {
   private tryOpenContainer(input: Input): boolean {
     if (!input.rightClicked || !this.target || this.player.sneaking) return false;
     const id = this.world.getBlock(this.target.x, this.target.y, this.target.z);
-    // A helm in the world (not yet launched) captures + launches its hull.
-    if (id === Block.ShipHelm) {
-      this.onUseHelm?.(this.target.x, this.target.y, this.target.z);
-      return true;
-    }
     // A Respawn Beacon: set the player's personal spawn point here.
     if (id === Block.RespawnBeacon) {
       this.onSetSpawn?.(this.target.x, this.target.y, this.target.z);
@@ -305,9 +300,6 @@ export class Interaction {
     if (!stack || !info || info.kind !== 'block') return;
     let blockId: number = info.block!;
 
-    // A Ship Helm aimed at open water lands on the water surface (so a hull can
-    // be built floating). Takes priority over any solid block behind the water.
-    if (blockId === Block.ShipHelm && this.tryPlaceHelmOnWater(origin, dir)) return;
     if (!this.target) return;
     // Stairs orient to the player's look direction (the tall step faces that way).
     if (stairsBaseOf(blockId) >= 0) {
@@ -332,12 +324,6 @@ export class Interaction {
     if (this.canEdit && !this.canEdit(px, py, pz)) return;
     // Block-specific placement veto (e.g. a base Core needs owned territory).
     if (this.canPlace && !this.canPlace(px, py, pz, blockId)) return;
-
-    // Ship-build rule: a solid block may EXTEND a helm-rooted hull, but must not
-    // BRIDGE it to terrain or other structures — rejected if the placement cell
-    // would touch both a helm-connected hull block and a foreign solid block.
-    if (blockId !== Block.ShipHelm && (BLOCKS[blockId]?.solid ?? false) &&
-        this.shipBuildBlocked(px, py, pz)) return;
 
     // Machines occupy a vertical footprint (anchor at base + part cells above).
     // Validate the whole column is clear before committing the structure.
@@ -386,75 +372,4 @@ export class Interaction {
     this.onAction?.();
   }
 
-  /** Place a Ship Helm on the water surface the player is aiming at (the air
-   *  cell on top of the topmost water in that column). Returns true on success. */
-  private tryPlaceHelmOnWater(origin: THREE.Vector3, dir: THREE.Vector3): boolean {
-    const d = dir.clone().normalize();
-    let hitWater: { x: number; z: number; y: number } | null = null;
-    for (let t = 0; t <= REACH; t += 0.1) {
-      const x = Math.floor(origin.x + d.x * t);
-      const y = Math.floor(origin.y + d.y * t);
-      const z = Math.floor(origin.z + d.z * t);
-      const id = this.world.getBlock(x, y, z);
-      if (isSolid(id)) return false;          // hit land before any water
-      if (id === Block.Water) { hitWater = { x, y, z }; break; }
-    }
-    if (!hitWater) return false;
-    // Climb to the water surface, then sit on top of it.
-    let sy = hitWater.y;
-    while (this.world.getBlock(hitWater.x, sy + 1, hitWater.z) === Block.Water) sy++;
-    const py = sy + 1;
-    if (py < 0 || py >= 256) return false;
-    if (this.world.getBlock(hitWater.x, py, hitWater.z) !== Block.Air) return false;
-    if (this.player.intersectsBlock(hitWater.x, py, hitWater.z)) return false;
-    this.world.setBlock(hitWater.x, py, hitWater.z, Block.ShipHelm);
-    this.onEdit?.(hitWater.x, py, hitWater.z, Block.ShipHelm);
-    this.onBlockSound?.('place', Block.ShipHelm, hitWater.x, py, hitWater.z);
-    if (!this.creative) this.inventory.consumeSelected(1);
-    this.placeCooldown = PLACE_REPEAT;
-    this.onAction?.();
-    return true;
-  }
-
-  /** True if placing a solid block at (px,py,pz) would touch BOTH a helm-rooted
-   *  hull block and a foreign solid (terrain/other) — i.e. illegally bridge the
-   *  ship to the world. Pure ship-building gate; normal land building (no hull
-   *  neighbour) is never blocked. */
-  private shipBuildBlocked(px: number, py: number, pz: number): boolean {
-    const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
-    let touchesShip = false, touchesForeign = false;
-    for (const [dx, dy, dz] of dirs) {
-      const nx = px + dx, ny = py + dy, nz = pz + dz;
-      const nb = this.world.getBlock(nx, ny, nz);
-      if (nb === Block.Air || nb === Block.Water) continue;
-      if (isHullBlock(nb) && this.connectsToHelm(nx, ny, nz)) touchesShip = true;
-      else touchesForeign = true;
-    }
-    return touchesShip && touchesForeign;
-  }
-
-  /** BFS over PLACED hull blocks from a cell; true if it reaches a Ship Helm. */
-  private connectsToHelm(sx: number, sy: number, sz: number): boolean {
-    const start = this.world.getEditedBlock(sx, sy, sz);
-    if (start === undefined || !isHullBlock(start)) return false;
-    const seen = new Set<string>([`${sx},${sy},${sz}`]);
-    const queue: [number, number, number][] = [[sx, sy, sz]];
-    const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
-    let n = 0;
-    while (queue.length) {
-      const [x, y, z] = queue.shift()!;
-      const id = this.world.getEditedBlock(x, y, z);
-      if (id === undefined) continue;
-      if (id === Block.ShipHelm) return true;
-      if (!isHullBlock(id)) continue;
-      if (++n > 512) return false; // cap (matches the launch flood-fill bound)
-      for (const [dx, dy, dz] of dirs) {
-        const k = `${x + dx},${y + dy},${z + dz}`;
-        if (seen.has(k)) continue;
-        seen.add(k);
-        queue.push([x + dx, y + dy, z + dz]);
-      }
-    }
-    return false;
-  }
 }

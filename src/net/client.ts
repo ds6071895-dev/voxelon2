@@ -5,11 +5,10 @@
 
 import type { ItemStack } from '../items';
 import type { MachineState, UpgradeAxis } from '../machines';
-import type { ShipState, ShipAxis } from '../ships';
 import type { TurretState, TurretAxis } from '../turrets';
 import type { ClaimState } from '../claims';
 import {
-  ClientMsg, FlagInfo, GameMode, ItemEntityInfo, PlayerInfo, SERVER_PORT, ServerMsg, ShipTransform,
+  ClientMsg, FlagInfo, GameMode, ItemEntityInfo, PlayerInfo, SERVER_PORT, ServerMsg,
   TRANSFORM_HZ,
 } from './protocol';
 
@@ -74,11 +73,6 @@ export class NetClient {
   onChest?: (x: number, y: number, z: number, slots: (ItemStack | null)[]) => void;
   /** Authoritative machine state (open reply / config / upgrade / collect). */
   onMachine?: (x: number, y: number, z: number, state: MachineState) => void;
-  /** Full ship state (launch / upgrade / hp on first sight). */
-  onShipState?: (ship: ShipState) => void;
-  /** Periodic ship transforms (id -> position/yaw/hp). */
-  onShipTransforms?: (ships: ShipTransform[]) => void;
-  onShipRemove?: (id: number) => void;
   /** Authoritative turret state (open reply / upgrade / load / fire refresh). */
   onTurret?: (x: number, y: number, z: number, state: TurretState) => void;
   /** A turret fired (render a tracer + aim the barrel). */
@@ -174,7 +168,6 @@ export class NetClient {
         }
         this.netItems.clear();
         for (const it of msg.items) this.netItems.set(it.eid, it);
-        for (const ship of msg.ships) this.onShipState?.(ship);
         for (const tr of msg.turrets) this.onTurret?.(tr.x, tr.y, tr.z, tr.state);
         for (const cl of msg.claims) this.onClaim?.(cl);
         this.onRegions?.(msg.regions);
@@ -255,15 +248,6 @@ export class NetClient {
         break;
       case 'machine':
         this.onMachine?.(msg.x, msg.y, msg.z, msg.state);
-        break;
-      case 'shipState':
-        this.onShipState?.(msg.ship);
-        break;
-      case 'shipTransforms':
-        this.onShipTransforms?.(msg.ships);
-        break;
-      case 'shipRemove':
-        this.onShipRemove?.(msg.id);
         break;
       case 'turret':
         this.onTurret?.(msg.x, msg.y, msg.z, msg.state);
@@ -412,25 +396,6 @@ export class NetClient {
   sendRangedAttack(target: number, amount: number): void {
     if (this.connected) this.raw({ t: 'rangedAttack', target, amount });
   }
-  // Ships.
-  sendShipLaunch(x: number, y: number, z: number): void {
-    if (this.connected) this.raw({ t: 'shipLaunch', x, y, z });
-  }
-  sendShipSteer(id: number, thrust: number, turn: number): void {
-    if (this.connected) this.raw({ t: 'shipSteer', id, thrust, turn });
-  }
-  sendShipFire(id: number, dx: number, dy: number, dz: number): void {
-    if (this.connected) this.raw({ t: 'shipFire', id, dx, dy, dz });
-  }
-  sendShipDock(id: number): void {
-    if (this.connected) this.raw({ t: 'shipDock', id });
-  }
-  sendShipUpgrade(id: number, axis: ShipAxis): void {
-    if (this.connected) this.raw({ t: 'shipUpgrade', id, axis });
-  }
-  sendShipHit(id: number, amount: number): void {
-    if (this.connected) this.raw({ t: 'shipHit', id, amount });
-  }
   // Turrets.
   sendTurretOpen(x: number, y: number, z: number): void {
     if (this.connected) this.raw({ t: 'turretOpen', x, y, z });
@@ -456,6 +421,9 @@ export class NetClient {
   }
   sendClaimHit(x: number, y: number, z: number, amount: number): void {
     if (this.connected) this.raw({ t: 'claimHit', x, y, z, amount });
+  }
+  sendRocketBlast(x: number, y: number, z: number): void {
+    if (this.connected) this.raw({ t: 'rocketBlast', x, y, z });
   }
 
   sendSwitchFaction(faction: number): void { if (this.connected) this.raw({ t: 'switchFaction', faction }); }
