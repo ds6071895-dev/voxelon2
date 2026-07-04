@@ -1,8 +1,11 @@
-// World map overlay (M key): a top-down 1000×1000 view of the world centred on
-// origin. A biome-colored base (sampled from the deterministic Terrain, cached)
-// with a faction-colored region board + CLAIM overlay, the player's position
-// + heading, and click-to-drop WAYPOINTS (shown here AND as in-world beacons,
-// persisted in localStorage). A legend shows each faction's % of claimed land.
+// World map overlay (M key): a top-down view of the world centred on origin,
+// with a ZOOM TOGGLE between the HEARTLAND core (inner 1000×1000, where society
+// lives) and the full 5000×5000 world (the Wilds). A biome-colored base
+// (sampled from the deterministic Terrain, cached PER VIEW — never the full
+// 5000² block grid) with a faction-colored region board + CLAIM overlay, the
+// player's position + heading, attuned WAYPOINT TOTEMS (click to travel), and
+// click-to-drop WAYPOINTS (shown here AND as in-world beacons, persisted in
+// localStorage). A legend shows each faction's % of claimed land.
 
 import * as THREE from 'three';
 import { Biome } from './biomes';
@@ -13,12 +16,16 @@ import {
   REGION_COUNT, capitalFaction, isCapital, regionBounds, regionCenter,
 } from './regions';
 import { Terrain } from './terrain';
+import { CORE_BORDER, CORE_HALF, WORLD_BORDER } from './net/protocol';
 
-const MAP_SPAN = 1000;     // world units shown (centred on origin: -500..500)
-const HALF = MAP_SPAN / 2;
 const CANVAS_PX = 700;
-const SCALE = CANVAS_PX / MAP_SPAN; // px per world unit
-const SAMPLE = 8;          // biome base sampled every N blocks
+type MapView = 'core' | 'world';
+// Per-view span + biome sample step. Both bases stay ~a few tens of thousands
+// of terrain samples (rendered lazily once, cached) — NEVER the full 5000² grid.
+const VIEWS: Record<MapView, { span: number; sample: number }> = {
+  core: { span: CORE_BORDER + 160, sample: 8 },  // Heartland + a small fringe
+  world: { span: WORLD_BORDER, sample: 34 },     // the whole 5000 world
+};
 
 const BIOME_COLOR: Record<number, string> = {
   [Biome.Ocean]: '#1d3a6b',
@@ -32,9 +39,14 @@ const BIOME_COLOR: Record<number, string> = {
   [Biome.SnowyMountains]: '#cdd7df',
   [Biome.Mesa]: '#b06a39',
   [Biome.Ashlands]: '#3a3640',
+  [Biome.Jungle]: '#2e7a2a',
+  [Biome.Swamp]: '#4a5c38',
+  [Biome.CherryGrove]: '#d98cb0',
+  [Biome.Crystalfields]: '#b9c6e8',
 };
 
 interface Waypoint { x: number; z: number; color: number; name: string; show: boolean; }
+export interface TotemPos { x: number; y: number; z: number; }
 
 /** Live game state the map reads each frame it's open. */
 export interface MapContext {
@@ -52,9 +64,15 @@ export class WorldMap {
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
   private readonly legend: HTMLDivElement;
-  private base: HTMLCanvasElement | null = null; // cached biome render
-  private landChunks = 1;                         // non-ocean chunks in the window
+  private view: MapView = 'core';
+  private readonly bases = new Map<MapView, HTMLCanvasElement>(); // cached biome renders
+  private landChunks = 1;                         // non-ocean chunks in the core
   private waypoints: Waypoint[] = [];
+  /** Attuned Waypoint Totems (B4) — click one on the map to travel to it. */
+  private totems: TotemPos[] = [];
+  /** Fired when the player clicks an attuned totem marker (main runs the
+   *  wind-up + the actual teleport). */
+  onTotemTravel?: (t: TotemPos) => void;
   // Dynamic markers (war flags): server-driven, NOT persisted; shown on the map
   // + as in-world beacons exactly like waypoints. Refreshed each frame by main.
   private dynamicMarkers: { x: number; z: number; color: number; name: string }[] = [];
@@ -93,10 +111,28 @@ export class WorldMap {
     panel.style.cssText =
       'background:#11141c;border:2px solid #2a3550;padding:14px 16px;' +
       'display:flex;flex-direction:column;gap:10px;';
+    const header = document.createElement('div');
+    header.style.cssText = 'display:flex;align-items:center;gap:14px;';
     const title = document.createElement('div');
     title.className = 'mc-font';
-    title.textContent = 'WORLD MAP';
     title.style.cssText = 'color:#cfe0ff;font-size:16px;text-shadow:none;letter-spacing:1px;';
+    // Zoom toggle: the Heartland core (dense, readable) <-> the full 5000 world.
+    const zoomBtn = document.createElement('button');
+    zoomBtn.className = 'mc-font';
+    zoomBtn.style.cssText =
+      'font-size:11px;padding:4px 10px;cursor:pointer;border:2px solid;' +
+      'border-color:#fff #555 #555 #fff;background:#6b6b6b;color:#fff;text-shadow:none;';
+    const syncZoom = (): void => {
+      title.textContent = this.view === 'core' ? 'WORLD MAP — HEARTLAND' : 'WORLD MAP — FULL WORLD';
+      zoomBtn.textContent = this.view === 'core' ? '🔍 Full world' : '🔍 Heartland';
+    };
+    zoomBtn.addEventListener('click', () => {
+      this.view = this.view === 'core' ? 'world' : 'core';
+      syncZoom();
+      this.draw();
+    });
+    syncZoom();
+    header.append(title, zoomBtn);
     const row = document.createElement('div');
     row.style.cssText = 'display:flex;gap:14px;align-items:flex-start;';
     this.canvas = document.createElement('canvas');
@@ -111,8 +147,8 @@ export class WorldMap {
     const hint = document.createElement('div');
     hint.className = 'mc-font';
     hint.style.cssText = 'font-size:11px;color:#8da0c0;text-shadow:none;';
-    hint.textContent = 'Left-click: add named waypoint  ·  Right-click a marker: remove  ·  M / Esc: close';
-    panel.append(title, row, hint);
+    hint.textContent = 'Click a gold totem: travel there  ·  Left-click: add waypoint  ·  Right-click a marker: remove  ·  M / Esc: close';
+    panel.append(header, row, hint);
     this.el.appendChild(panel);
     app.appendChild(this.el);
 
@@ -130,44 +166,66 @@ export class WorldMap {
   /** Redraw while open (player + claims + nodes move). */
   update(): void { if (this.open) this.draw(); }
 
-  // --- coordinate transforms (world <-> canvas) ---
-  private cx(x: number): number { return (x + HALF) * SCALE; }
-  private cy(z: number): number { return (z + HALF) * SCALE; }
-  private worldX(px: number): number { return px / SCALE - HALF; }
-  private worldZ(py: number): number { return py / SCALE - HALF; }
+  // --- coordinate transforms (world <-> canvas), per the active view ---
+  private get half(): number { return VIEWS[this.view].span / 2; }
+  private get scale(): number { return CANVAS_PX / VIEWS[this.view].span; }
+  private cx(x: number): number { return (x + this.half) * this.scale; }
+  private cy(z: number): number { return (z + this.half) * this.scale; }
+  private worldX(px: number): number { return px / this.scale - this.half; }
+  private worldZ(py: number): number { return py / this.scale - this.half; }
 
-  /** Render the biome base ONCE (terrain is static) + count land chunks. */
-  private renderBase(): void {
+  /** Render the active view's biome base ONCE (terrain is static; cached per
+   *  view). The sample step scales with the span so cost stays bounded. */
+  private renderBase(): HTMLCanvasElement {
+    const cached = this.bases.get(this.view);
+    if (cached) return cached;
+    const { sample } = VIEWS[this.view];
+    const half = this.half;
     const c = document.createElement('canvas');
     c.width = CANVAS_PX; c.height = CANVAS_PX;
     const g = c.getContext('2d')!;
-    const step = SAMPLE * SCALE;
-    for (let x = -HALF; x < HALF; x += SAMPLE) {
-      for (let z = -HALF; z < HALF; z += SAMPLE) {
+    const step = sample * this.scale;
+    for (let x = -half; x < half; x += sample) {
+      for (let z = -half; z < half; z += sample) {
         const b = this.terrain.biomeWithWater(x, z, this.terrain.height(x, z));
         g.fillStyle = BIOME_COLOR[b] ?? '#444';
         g.fillRect(this.cx(x), this.cy(z), step + 1, step + 1);
       }
     }
-    this.base = c;
-    // Count non-ocean chunks in the window (denominator for land %).
-    let land = 0, total = 0;
-    const cmin = Math.floor(-HALF / CHUNK_X), cmax = Math.floor(HALF / CHUNK_X);
-    for (let chx = cmin; chx < cmax; chx++) {
-      for (let chz = cmin; chz < cmax; chz++) {
-        const wx = chx * CHUNK_X + 8, wz = chz * CHUNK_Z + 8;
-        total++;
-        if (this.terrain.biomeWithWater(wx, wz, this.terrain.height(wx, wz)) !== Biome.Ocean) land++;
+    this.bases.set(this.view, c);
+    if (this.landChunks === 1) {
+      // Count non-ocean chunks in the CORE once (denominator for the claimed-land
+      // % — claims are Heartland-only, so the core is the right window).
+      let land = 0;
+      const cmin = Math.floor(-CORE_HALF / CHUNK_X), cmax = Math.floor(CORE_HALF / CHUNK_X);
+      for (let chx = cmin; chx < cmax; chx++) {
+        for (let chz = cmin; chz < cmax; chz++) {
+          const wx = chx * CHUNK_X + 8, wz = chz * CHUNK_Z + 8;
+          if (this.terrain.biomeWithWater(wx, wz, this.terrain.height(wx, wz)) !== Biome.Ocean) land++;
+        }
       }
+      this.landChunks = Math.max(1, land);
     }
-    this.landChunks = Math.max(1, land);
-    void total;
+    return c;
   }
 
   private draw(): void {
-    if (!this.base) this.renderBase();
     const ctx = this.ctx;
-    ctx.drawImage(this.base!, 0, 0);
+    ctx.drawImage(this.renderBase(), 0, 0);
+
+    // The HEARTLAND boundary: a gold square at ±CORE_HALF. In the full-world
+    // view, label the two societies so kids can read the geography at a glance.
+    ctx.strokeStyle = 'rgba(255,216,74,0.9)';
+    ctx.lineWidth = this.view === 'world' ? 1.5 : 2;
+    ctx.strokeRect(this.cx(-CORE_HALF), this.cy(-CORE_HALF),
+      CORE_BORDER * this.scale, CORE_BORDER * this.scale);
+    if (this.view === 'world') {
+      ctx.font = 'bold 13px monospace'; ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(255,216,74,0.95)';
+      ctx.fillText('HEARTLAND', this.cx(0), this.cy(-CORE_HALF) - 5);
+      ctx.fillStyle = 'rgba(190,205,230,0.8)';
+      ctx.fillText('WILDS', this.cx(0), this.cy(-WORLD_BORDER * 0.36));
+    }
 
     // Region board: faction-tinted grid of territories with a capital star on
     // each home region (Phase 1). Drawn first so claims/nodes sit on top.
@@ -178,7 +236,7 @@ export class WorldMap {
       const owner = owners[i];
       const b = regionBounds(i);
       const x = this.cx(b.minX), y = this.cy(b.minZ);
-      const w = (b.maxX - b.minX) * SCALE, h = (b.maxZ - b.minZ) * SCALE;
+      const w = (b.maxX - b.minX) * this.scale, h = (b.maxZ - b.minZ) * this.scale;
       if (owner !== NO_FACTION) {
         ctx.fillStyle = this.rgba(factionColor(owner), 0.22);
         ctx.fillRect(x, y, w, h);
@@ -211,10 +269,10 @@ export class WorldMap {
       const w = 3 * CHUNK_X, h = 3 * CHUNK_Z;
       const col = factionColor(claim.faction);
       ctx.fillStyle = this.rgba(col, 0.4);
-      ctx.fillRect(this.cx(x0), this.cy(z0), w * SCALE, h * SCALE);
+      ctx.fillRect(this.cx(x0), this.cy(z0), w * this.scale, h * this.scale);
       ctx.strokeStyle = this.rgba(col, 0.9);
       ctx.lineWidth = 1.5;
-      ctx.strokeRect(this.cx(x0), this.cy(z0), w * SCALE, h * SCALE);
+      ctx.strokeRect(this.cx(x0), this.cy(z0), w * this.scale, h * this.scale);
       claimedByFaction[claim.faction] = (claimedByFaction[claim.faction] ?? 0) + claimChunkKeys(claim.cx, claim.cz).length;
     }
 
@@ -226,6 +284,19 @@ export class WorldMap {
       ctx.beginPath();
       ctx.moveTo(px, py - 5); ctx.lineTo(px + 5, py); ctx.lineTo(px, py + 5); ctx.lineTo(px - 5, py);
       ctx.closePath(); ctx.fill(); ctx.stroke();
+    }
+
+    // Attuned Waypoint Totems (B4): gold ringed markers — CLICK to travel.
+    for (const t of this.totems) {
+      const px = this.cx(t.x), py = this.cy(t.z);
+      ctx.strokeStyle = '#000'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(px, py, 7, 0, Math.PI * 2); ctx.stroke();
+      ctx.strokeStyle = '#ffd84a'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(px, py, 7, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = '#ffe27a';
+      ctx.beginPath();
+      ctx.moveTo(px, py - 4); ctx.lineTo(px + 4, py); ctx.lineTo(px, py + 4); ctx.lineTo(px - 4, py);
+      ctx.closePath(); ctx.fill();
     }
 
     // War flags (dynamic markers): a colored flag glyph + label.
@@ -343,6 +414,12 @@ export class WorldMap {
     return this.waypoints;
   }
 
+  /** Replace the attuned-totem markers (click-to-travel). */
+  setTotems(list: TotemPos[]): void {
+    this.totems = list;
+    if (this.open) this.draw();
+  }
+
   /** Replace the dynamic (war-flag) markers shown on the map + as beacons. */
   setDynamicMarkers(list: { x: number; z: number; color: number; name: string }[]): void {
     this.dynamicMarkers = list;
@@ -354,9 +431,18 @@ export class WorldMap {
     const px = (e.clientX - rect.left) * (CANVAS_PX / rect.width);
     const py = (e.clientY - rect.top) * (CANVAS_PX / rect.height);
     const wx = Math.round(this.worldX(px)), wz = Math.round(this.worldZ(py));
+    if (e.button === 0) {
+      // An attuned totem within click radius wins over dropping a waypoint.
+      let bestT: TotemPos | null = null, bestTD = 14 / this.scale;
+      for (const t of this.totems) {
+        const d = Math.hypot(t.x - wx, t.z - wz);
+        if (d < bestTD) { bestTD = d; bestT = t; }
+      }
+      if (bestT) { this.onTotemTravel?.(bestT); return; }
+    }
     if (e.button === 2) {
       // Remove the nearest waypoint within a small radius.
-      let best = -1, bestD = 18 / SCALE;
+      let best = -1, bestD = 18 / this.scale;
       this.waypoints.forEach((w, i) => {
         const d = Math.hypot(w.x - wx, w.z - wz);
         if (d < bestD) { bestD = d; best = i; }

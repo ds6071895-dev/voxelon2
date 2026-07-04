@@ -35,12 +35,19 @@ import {
 } from '../war';
 import { GadgetCooldowns, gadgetOf, falloffDamage } from '../gadgets';
 import { Terrain } from '../terrain';
+import { structureChestTier } from '../structures';
+import { chestLootSlots } from '../loot';
 import {
   ClientMsg, EDIT_RANGE, CHEST_SLOTS, PICKUP_RANGE,
   ARMOR_POINT_CAP, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE,
   mitigate, ItemEntityInfo, PlayerInfo, PlayerSnapshot, ServerMsg,
-  WORLD_SEED, WORLD_HALF, makeUsername, skinSeed, GameMode,
+  WORLD_SEED, WORLD_HALF, CORE_HALF, inCore, makeUsername, skinSeed, GameMode,
+  MAX_ATTUNED, TOTEM_COOLDOWN, COMBAT_TAG,
 } from './protocol';
+import {
+  COMEBACK_HEARTS, KILL_CREDIT_WINDOW, MAX_HEARTS, canConsume, canWithdraw,
+  clampHearts, maxHealthFor, transferHeart,
+} from '../hearts';
 
 const SEASON_BROADCAST = 2;      // seconds between season-clock broadcasts
 const WAR_BROADCAST = 2;         // seconds between war-clock broadcasts
@@ -58,13 +65,25 @@ function fin(...ns: number[]): boolean {
   return ns.every((n) => Number.isFinite(n));
 }
 
-const MAX_HEALTH = 20;
 const REGEN_INTERVAL = 2;       // +1 HP every 2s out of combat
 const REGEN_DELAY = 5;          // seconds after damage before regen resumes
 
 interface ServerPlayer extends PlayerInfo {
   regenCooldown: number;
   regenTimer: number;
+  /** Lifesteal: the last DIRECT player attacker (gun/explosive) + when — a
+   *  death within KILL_CREDIT_WINDOW of the hit credits them the heart. */
+  lastHitBy: number;
+  lastHitTime: number;
+  /** Set the instant hearts hit 0; blocks respawn until the shell disconnects. */
+  eliminated: boolean;
+  /** worldTime of the last damage taken from ANY source (combat tag: no
+   *  totem teleports for COMBAT_TAG seconds after). */
+  lastDamageTime: number;
+  /** Attuned Waypoint Totem positions (max MAX_ATTUNED; persisted per account). */
+  totems: { x: number; y: number; z: number }[];
+  /** worldTime before which totem teleports are refused (60s cooldown). */
+  totemCooldownUntil: number;
   /** Worn-armor defense points the client reports (clamped 0..cap). */
   armorPoints: number;
   /** Secret-switch bookkeeping (Phase 7): defections used this season + which
@@ -90,6 +109,8 @@ const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
   'machineMove', 'setSpawn',
   'turretUpgrade', 'turretClaim', 'turretHit', 'turretLoad',
   'claimFeed', 'claimHit', 'gadgetUse', 'rocketBlast',
+  'heartConsume', 'heartWithdraw', 'beaconRevive',
+  'attune', 'totemTeleport',
 ]);
 
 /** One message the transport should deliver. `to` is a client id, or a
@@ -130,6 +151,18 @@ export class GameServer {
   /** Set by the shell to persist a secret faction switch to the account (new
    *  faction + switch counters + the forfeited season). */
   onFactionSwitch?: (username: string, faction: number, switchesUsed: number, switchSeason: number, forfeitSeason: number) => void;
+  /** Lifesteal (A2): a player hit 0 hearts. The shell records the wall-clock
+   *  elimination on the account and disconnects the socket shortly after (the
+   *  pure core has no wall clock). Returns the `eliminatedUntil` ms for the
+   *  victim's banner (0/undefined = elimination unsupported, e.g. tests). */
+  onEliminate?: (username: string, by: string) => number;
+  /** Revival Beacon (A3): eliminated faction-mates of `faction` (from the
+   *  account store — the pure core doesn't know offline accounts). */
+  listEliminated?: (faction: number) => { username: string; remainingMs: number }[];
+  /** Revival Beacon (A3): clear `target`'s elimination if they're an eliminated
+   *  member of `faction`; returns success. `by` is credited in the target's
+   *  next-login notice. */
+  onRevive?: (target: string, faction: number, by: string) => boolean;
   private worldTime = 0;        // seconds since boot (grace-period clock)
   private claimAccum = 0;
   private readonly items = new Map<number, ItemEntityInfo>();
@@ -189,8 +222,23 @@ export class GameServer {
         return { x: s.x, y: s.y, z: s.z };
       }
     }
-    const s = this.terrain.randomDrySpawn(this.rng, WORLD_HALF);
+    // Spawns stay inside the Heartland core (B2) — nobody wakes up in the Wilds.
+    const s = this.terrain.randomDrySpawn(this.rng, CORE_HALF);
     return { x: s.x, y: s.y, z: s.z };
+  }
+
+  /** Fail-closed sanitizer for a saved attuned-totem list (account data). */
+  private static sanitizeTotems(raw: unknown): { x: number; y: number; z: number }[] {
+    if (!Array.isArray(raw)) return [];
+    const out: { x: number; y: number; z: number }[] = [];
+    for (const t of raw) {
+      const o = t as { x?: unknown; y?: unknown; z?: unknown };
+      if (out.length >= MAX_ATTUNED) break;
+      if (fin(o?.x as number, o?.y as number, o?.z as number)) {
+        out.push({ x: Math.floor(o.x as number), y: Math.floor(o.y as number), z: Math.floor(o.z as number) });
+      }
+    }
+    return out;
   }
 
   /** Register a player; returns the welcome (to them) + join (to others). With
@@ -215,11 +263,19 @@ export class GameServer {
       : this.spawn(faction);
     const savedMode = typeof saved?.mode === 'string' && GAME_MODES.includes(saved.mode as GameMode)
       ? saved.mode as GameMode : 'survival';
+    // Lifesteal: hearts persist in the account data blob; fresh accounts (or
+    // junk values) start at START_HEARTS via clampHearts' fail-safe.
+    const hearts = clampHearts(saved?.hearts);
     const player: ServerPlayer = {
       id, username, skin: skinSeed(username), faction, mode: savedMode,
       seasonsWon: Number.isFinite(account?.seasonsWon) ? Math.max(0, Math.floor(account!.seasonsWon!)) : 0,
+      hearts,
       x: s.x, y: s.y, z: s.z, yaw: fin(syaw as number) ? syaw as number : 0, pitch: 0,
-      health: MAX_HEALTH, dead: false, regenCooldown: 0, regenTimer: 0,
+      health: maxHealthFor(hearts), dead: false, regenCooldown: 0, regenTimer: 0,
+      lastHitBy: -1, lastHitTime: -Infinity, eliminated: false,
+      lastDamageTime: -Infinity,
+      totems: GameServer.sanitizeTotems(saved?.totems),
+      totemCooldownUntil: 0,
       armorPoints: 0,
       switchesUsed: Number.isFinite(account?.switchesUsed) ? Math.max(0, Math.floor(account!.switchesUsed!)) : 0,
       switchSeason: Number.isFinite(account?.switchSeason) ? Math.floor(account!.switchSeason!) : 0,
@@ -251,6 +307,7 @@ export class GameServer {
     };
     return [
       { to: id, msg: welcome },
+      { to: id, msg: { t: 'attuned', totems: player.totems.slice() } },
       { to: 'others', from: id, msg: { t: 'join', player: toInfo(player) } },
     ];
   }
@@ -313,7 +370,11 @@ export class GameServer {
         return this.handleRanged(p, msg.target, msg.amount);
       case 'chestOpen': {
         if (this.enemyShielded(p, msg.x, msg.z)) return []; // can't peek a shielded chest
+        // A pristine STRUCTURE chest generates its seeded loot on first open
+        // (identical for every client + the offline world; dup-safe — the roll
+        // happens exactly once, then it's an ordinary stored chest).
         const slots = this.chests.get(`${msg.x},${msg.y},${msg.z}`)
+          ?? this.ensureStructureChest(msg.x, msg.y, msg.z)
           ?? new Array(CHEST_SLOTS).fill(null);
         return [{ to: id, msg: { t: 'chest', x: msg.x, y: msg.y, z: msg.z, slots } }];
       }
@@ -323,9 +384,13 @@ export class GameServer {
         // Only an actual chest block can hold contents. This fail-closes a
         // stale/late write (e.g. from a client whose chest was just broken by
         // someone else) so it cannot resurrect or fork contents at a now-empty
-        // location. All chests are player-placed, so a chest position is always
-        // recorded in the edit log as Block.Chest.
-        if (this.edits.get(`${msg.x},${msg.y},${msg.z}`) !== Block.Chest) return [];
+        // location. A chest position is either recorded in the edit log as
+        // Block.Chest (player-placed) or is an UNEDITED structure chest
+        // (terrain-generated; once edited away it can't be resurrected).
+        const editAt = this.edits.get(`${msg.x},${msg.y},${msg.z}`);
+        if (editAt !== Block.Chest &&
+            !(editAt === undefined &&
+              this.structureChestTierAt(msg.x, msg.y, msg.z) !== null)) return [];
         const slots = msg.slots.slice(0, CHEST_SLOTS);
         while (slots.length < CHEST_SLOTS) slots.push(null);
         this.chests.set(`${msg.x},${msg.y},${msg.z}`, slots);
@@ -483,6 +548,89 @@ export class GameServer {
       }
       case 'claimHit':
         return this.handleClaimHit(p, msg.x, msg.y, msg.z, msg.amount);
+      // --- Lifesteal (Milestone A) ---
+      case 'heartConsume': {
+        // +1 max heart from a Heart item (the item cost is paid client-side,
+        // like other crafting; the server clamps the cap so it can't run away).
+        if (p.dead) return [];
+        if (!canConsume(p.hearts)) {
+          return [{ to: id, msg: { t: 'notice', text: `Your hearts are already full (${MAX_HEARTS})!` } }];
+        }
+        p.hearts = clampHearts(p.hearts + 1);
+        return [{ to: id, msg: { t: 'hearts', hearts: p.hearts, reason: 'consume' } }];
+      }
+      case 'heartWithdraw': {
+        // Bottle one of YOUR hearts (the crafting grid mints the item; this is
+        // the server-side heart deduction + floor check).
+        if (p.dead) return [];
+        if (!canWithdraw(p.hearts)) {
+          return [{ to: id, msg: { t: 'notice', text: 'You need at least 3 hearts to bottle one!' } }];
+        }
+        p.hearts = clampHearts(p.hearts - 1);
+        p.health = Math.min(p.health, maxHealthFor(p.hearts)); // shrink into the new max
+        return [{ to: id, msg: { t: 'hearts', hearts: p.hearts, reason: 'withdraw' } }];
+      }
+      case 'reviveList': {
+        const targets = this.listEliminated?.(p.faction) ?? [];
+        return [{ to: id, msg: { t: 'reviveList', targets } }];
+      }
+      case 'beaconRevive': {
+        if (p.dead || typeof msg.target !== 'string') return [];
+        const target = msg.target.slice(0, 32);
+        const ok = this.onRevive?.(target, p.faction, p.username) === true;
+        const out: Outbound[] = [{ to: id, msg: { t: 'revived', target, ok } }];
+        out.push({ to: id, msg: { t: 'notice', text: ok
+          ? `✨ You revived ${target}!`
+          : `Can't revive ${target} (not an eliminated teammate).` } });
+        return out;
+      }
+      // --- Waypoint Totems (B4) ---
+      case 'attune': {
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return []; // in-reach + alive gate
+        const x = Math.floor(msg.x), y = Math.floor(msg.y), z = Math.floor(msg.z);
+        if (this.edits.get(`${x},${y},${z}`) !== Block.WaypointTotem) return [];
+        const at = p.totems.findIndex((t) => t.x === x && t.y === y && t.z === z);
+        const out: Outbound[] = [];
+        if (at >= 0) {
+          // Toggle: attuning an already-attuned totem releases it.
+          p.totems.splice(at, 1);
+          out.push({ to: id, msg: { t: 'notice', text: 'Attunement released.' } });
+        } else if (p.totems.length >= MAX_ATTUNED) {
+          return [{ to: id, msg: { t: 'notice',
+            text: `You can attune at most ${MAX_ATTUNED} totems — release one first (right-click it).` } }];
+        } else {
+          p.totems.push({ x, y, z });
+          out.push({ to: id, msg: { t: 'notice',
+            text: `🗿 Totem attuned (${p.totems.length}/${MAX_ATTUNED}) — open the map (M) to travel!` } });
+        }
+        out.push({ to: id, msg: { t: 'attuned', totems: p.totems.slice() } });
+        return out;
+      }
+      case 'totemTeleport': {
+        if (p.dead || !fin(msg.x, msg.y, msg.z)) return [];
+        const x = Math.floor(msg.x), y = Math.floor(msg.y), z = Math.floor(msg.z);
+        if (!p.totems.some((t) => t.x === x && t.y === y && t.z === z)) return []; // not attuned
+        // The totem must still be standing — a raided/broken totem is pruned.
+        if (this.edits.get(`${x},${y},${z}`) !== Block.WaypointTotem) {
+          p.totems = p.totems.filter((t) => !(t.x === x && t.y === y && t.z === z));
+          return [
+            { to: id, msg: { t: 'notice', text: 'That totem was destroyed!' } },
+            { to: id, msg: { t: 'attuned', totems: p.totems.slice() } },
+          ];
+        }
+        if (this.worldTime < p.totemCooldownUntil) {
+          const left = Math.ceil(p.totemCooldownUntil - this.worldTime);
+          return [{ to: id, msg: { t: 'notice', text: `Totem travel recharging — ${left}s left.` } }];
+        }
+        // Combat tag: any damage in the last COMBAT_TAG seconds blocks the port
+        // (this also covers "wind-up interrupted by damage" server-side).
+        if (this.worldTime - p.lastDamageTime < COMBAT_TAG) {
+          return [{ to: id, msg: { t: 'notice', text: "You can't teleport while in combat!" } }];
+        }
+        p.totemCooldownUntil = this.worldTime + TOTEM_COOLDOWN;
+        p.x = x + 0.5; p.y = y + 1; p.z = z + 0.5; // stand on top of the totem
+        return [{ to: id, msg: { t: 'teleport', x: p.x, y: p.y, z: p.z } }];
+      }
       default:
         return [];
     }
@@ -737,9 +885,13 @@ export class GameServer {
     const raiding = enemyClaim && claim !== undefined &&
       (!claimProtected(claim, this.worldTime) || ownsRegion);
 
-    // Placing a Core founds a BASE (Phase 3): only inside a region your faction
-    // owns, and rejected (no-op) if it would overlap an existing claim.
+    // Placing a Core founds a BASE (Phase 3): only inside the Heartland core
+    // (B2 — no claims in the Wilds), only in a region your faction owns, and
+    // rejected (no-op) if it would overlap an existing claim.
     if (block === Block.Core && prev !== Block.Core) {
+      if (!inCore(x, z)) {
+        return [{ to: p.id, msg: { t: 'notice', text: 'Claims only work in the Heartland (inner 1000×1000)!' } }];
+      }
       if (!ownsRegion) {
         return [{ to: p.id, msg: { t: 'notice', text: 'You can only build a base in territory your faction controls!' } }];
       }
@@ -759,6 +911,14 @@ export class GameServer {
     // raider, the rest spills to the world (dup-safe — contents leave once).
     if (prev === Block.Chest && block !== Block.Chest) {
       out.push(...(raiding ? this.raidChest(key, x, y, z, p) : this.spillChest(key, x, y, z)));
+    }
+    // Breaking a pristine STRUCTURE chest (terrain block, never edited): its
+    // seeded loot still spills — generate-on-break if nobody opened it yet
+    // (single roll either way, so nothing dupes or vanishes).
+    if (prev === undefined && block !== Block.Chest &&
+        this.structureChestTierAt(x, y, z) !== null) {
+      this.ensureStructureChest(x, y, z);
+      out.push(...this.spillChest(key, x, y, z));
     }
     // Same for machines: removing/replacing the anchor spills its stored output
     // and clears the rest of the footprint (the breaker bypasses no validation —
@@ -792,6 +952,28 @@ export class GameServer {
     }
     out.push({ to: 'all', msg: { t: 'edit', x, y, z, block } });
     return out;
+  }
+
+  /** The loot tier if (x,y,z) is a structure chest position (fail-closed on
+   *  junk coords; pure — derives from the seed + terrain only). */
+  private structureChestTierAt(x: number, y: number, z: number) {
+    if (!fin(x, y, z)) return null;
+    return structureChestTier(this.seed, Math.floor(x), Math.floor(y), Math.floor(z), this.terrain);
+  }
+
+  /** Generate + store a pristine structure chest's seeded first-open loot.
+   *  Null if it isn't a structure chest or the cell was edited away (a broken
+   *  chest can never re-roll). */
+  private ensureStructureChest(x: number, y: number, z: number): (ItemStack | null)[] | null {
+    if (!fin(x, y, z)) return null;
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    const key = `${bx},${by},${bz}`;
+    if (this.edits.has(key)) return null; // edited cell -> no longer pristine
+    const tier = this.structureChestTierAt(bx, by, bz);
+    if (!tier) return null;
+    const slots = chestLootSlots(this.seed, bx, by, bz, tier);
+    this.chests.set(key, slots);
+    return slots;
   }
 
   /** Drop a chest's stored items into the world as entities, then clear it. */
@@ -856,12 +1038,15 @@ export class GameServer {
     const knock = horiz > 1e-3
       ? { x: dx / horiz, y: 0.3, z: dz / horiz }
       : { x: 0, y: 0.4, z: 0 };
-    return this.applyDamage(target, dmg, attacker.id, knock);
+    return this.applyDamage(target, dmg, attacker.id, knock, true);
   }
 
+  /** `direct` marks damage a player personally dealt (gun/explosive) — only
+   *  direct hits arm the lifesteal kill-credit window, so turret/mob/fall
+   *  deaths never move hearts. */
   private applyDamage(
     p: ServerPlayer, amount: number, by: number,
-    knock?: { x: number; y: number; z: number }
+    knock?: { x: number; y: number; z: number }, direct = false
   ): Outbound[] {
     if (p.dead || amount <= 0) return [];
     if (p.mode !== 'survival') return []; // creative/spectator are invulnerable
@@ -870,6 +1055,11 @@ export class GameServer {
     p.health = Math.max(0, p.health - amount);
     p.regenCooldown = REGEN_DELAY;
     p.regenTimer = 0;
+    p.lastDamageTime = this.worldTime; // combat tag (blocks totem teleports)
+    if (direct && by !== p.id && this.players.has(by)) {
+      p.lastHitBy = by;
+      p.lastHitTime = this.worldTime;
+    }
     const out: Outbound[] = [{
       to: p.id,
       msg: {
@@ -888,15 +1078,56 @@ export class GameServer {
           victim: p.username,
         },
       });
+      out.push(...this.settleLifesteal(p));
       // Killing an enemy DURING A WAR plants a flag at the kill spot — if it
       // survives the timer (no enemy defuses it), this region flips to the
       // killer's faction. One flag per faction at a time (flags.ts enforces it).
+      // Flags claim REGIONS, and regions only exist in the Heartland core —
+      // a kill out in the Wilds plants nothing (B2).
       if (killer && killer !== p && isFaction(killer.faction) && killer.faction !== p.faction &&
-          this.isWarActive()) {
+          this.isWarActive() && inCore(p.x, p.z)) {
         const owner = this.regions.ownerAt(regionOf(p.x, p.z));
         const flag = this.flags.plant(killer.faction, p.x, p.y, p.z, owner, this.worldTime);
         if (flag) out.push({ to: 'all', msg: this.flagsSnapshot() });
       }
+    }
+    return out;
+  }
+
+  /** Lifesteal settlement on a death: a heart moves ONLY when a live enemy
+   *  player directly damaged the victim within the credit window (kids never
+   *  lose hearts to zombies/falls/lava/unattended turrets). Hitting 0 hearts
+   *  ELIMINATES the victim: banner + killfeed + the shell records the 24h
+   *  lockout and disconnects; they come back (timer/revive) at 5 hearts. */
+  private settleLifesteal(victim: ServerPlayer): Outbound[] {
+    const recent = this.worldTime - victim.lastHitTime <= KILL_CREDIT_WINDOW;
+    const killer = recent ? this.players.get(victim.lastHitBy) : undefined;
+    if (!killer || killer.id === victim.id || sameFaction(killer.faction, victim.faction)) {
+      return []; // no PvP credit — hearts don't move
+    }
+    const moved = transferHeart(killer.hearts, victim.hearts);
+    const wasted = moved.killer === killer.hearts; // killer already at the cap
+    killer.hearts = moved.killer;
+    victim.hearts = moved.victim;
+    const out: Outbound[] = [
+      { to: killer.id, msg: { t: 'hearts', hearts: killer.hearts,
+        reason: 'steal', from: victim.username } },
+      { to: victim.id, msg: { t: 'hearts', hearts: victim.hearts,
+        reason: 'loss', from: killer.username } },
+    ];
+    if (wasted) {
+      out.push({ to: killer.id, msg: { t: 'notice',
+        text: `❤ full (${MAX_HEARTS}) — the stolen heart was wasted!` } });
+    }
+    if (victim.hearts <= 0) {
+      victim.eliminated = true; // blocks respawn until the shell disconnects
+      // Comeback penalty is applied NOW so the disconnect persists 5 hearts —
+      // the account also carries `eliminatedUntil`, which gates login.
+      victim.hearts = COMEBACK_HEARTS;
+      const until = this.onEliminate?.(victim.username, killer.username) ?? 0;
+      out.push({ to: victim.id, msg: { t: 'eliminated', by: killer.username, until } });
+      out.push({ to: 'all', msg: { t: 'killfeed',
+        killer: killer.username, victim: `☠ ${victim.username} (ELIMINATED)` } });
     }
     return out;
   }
@@ -916,13 +1147,13 @@ export class GameServer {
   }
 
   private handleRespawn(p: ServerPlayer): Outbound[] {
-    if (!p.dead) return [];
+    if (!p.dead || p.eliminated) return []; // eliminated: no respawn, only the boot
     const s = this.respawnPoint(p);
     p.x = s.x; p.y = s.y; p.z = s.z;
-    p.health = MAX_HEALTH; p.dead = false;
+    p.health = maxHealthFor(p.hearts); p.dead = false;
     p.regenCooldown = 0; p.regenTimer = 0;
     return [{
-      to: p.id, msg: { t: 'respawned', x: s.x, y: s.y, z: s.z, health: MAX_HEALTH },
+      to: p.id, msg: { t: 'respawned', x: s.x, y: s.y, z: s.z, health: p.health },
     }];
   }
 
@@ -930,12 +1161,13 @@ export class GameServer {
   tickRegen(dt: number): void {
     for (const p of this.players.values()) {
       if (p.dead) continue;
+      const max = maxHealthFor(p.hearts);
       p.regenCooldown = Math.max(0, p.regenCooldown - dt);
-      if (p.regenCooldown <= 0 && p.health < MAX_HEALTH) {
+      if (p.regenCooldown <= 0 && p.health < max) {
         p.regenTimer += dt;
         if (p.regenTimer >= REGEN_INTERVAL) {
           p.regenTimer = 0;
-          p.health = Math.min(MAX_HEALTH, p.health + 1);
+          p.health = Math.min(max, p.health + 1);
         }
       }
     }
@@ -1249,7 +1481,7 @@ export class GameServer {
         const d = Math.hypot(t.x - x, t.y - y, t.z - z);
         const dmg = falloffDamage(damage, d, dmgRadius);
         if (dmg > 0) out.push(...this.applyDamage(t, dmg, by.id,
-          { x: (t.x - x) || 0.01, y: 0.4, z: (t.z - z) || 0 }));
+          { x: (t.x - x) || 0.01, y: 0.4, z: (t.z - z) || 0 }, true));
       }
     }
     // Break player-placed blocks in a sphere and broadcast each removal so every
@@ -1378,10 +1610,23 @@ export class GameServer {
     if (!p) return [];
     p.mode = mode;
     // Don't strand an admin "dead" in creative/spectator — heal + revive.
-    if (mode !== 'survival') { p.health = MAX_HEALTH; p.dead = false; }
+    if (mode !== 'survival') { p.health = maxHealthFor(p.hearts); p.dead = false; }
     return [
       { to: 'all', msg: { t: 'gamemode', id, mode } },
       { to: id, msg: { t: 'notice', text: `Gamemode set to ${mode}` } },
+    ];
+  }
+
+  /** Set a player's hearts (console `sethearts`). Clamps to the lifesteal
+   *  range and shrinks health into the new max. */
+  adminSetHearts(id: number, hearts: number): Outbound[] {
+    const p = this.players.get(id);
+    if (!p || !fin(hearts)) return [];
+    p.hearts = clampHearts(hearts);
+    p.health = Math.min(p.health, maxHealthFor(p.hearts));
+    return [
+      { to: id, msg: { t: 'hearts', hearts: p.hearts, reason: 'admin' } },
+      { to: id, msg: { t: 'notice', text: `An admin set your hearts to ${p.hearts} ❤` } },
     ];
   }
 
@@ -1451,6 +1696,8 @@ export class GameServer {
     if (!p) return null;
     const data: Record<string, unknown> = { ...(p.savedClientData ?? {}) };
     data.x = p.x; data.y = p.y; data.z = p.z; data.yaw = p.yaw; data.mode = p.mode;
+    data.hearts = p.hearts; // lifesteal max-health currency survives re-login
+    data.totems = p.totems.slice(); // attuned Waypoint Totems survive re-login
     // Persist the personal respawn point so it survives a reconnect.
     if (fin(p.spawnX as number, p.spawnY as number, p.spawnZ as number)) {
       data.spawnX = p.spawnX; data.spawnY = p.spawnY; data.spawnZ = p.spawnZ;
@@ -1549,7 +1796,7 @@ export class GameServer {
 function toInfo(p: ServerPlayer): PlayerInfo {
   return {
     id: p.id, username: p.username, skin: p.skin, faction: p.faction, mode: p.mode,
-    seasonsWon: p.seasonsWon,
+    seasonsWon: p.seasonsWon, hearts: p.hearts,
     x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
     health: p.health, dead: p.dead,
     gliding: p.gliding,

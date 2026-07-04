@@ -20,6 +20,13 @@ export interface Account {
   switchSeason?: number;
   /** The season a defection forfeited the "Won" badge in (0 = none). */
   forfeitSeason?: number;
+  /** Lifesteal elimination (Milestone A): wall-clock ms until which login is
+   *  refused (0/undefined = not eliminated). Top-level — NOT in `data` — so
+   *  routine state saves can never clobber it. */
+  eliminatedUntil?: number;
+  /** Username of the teammate who beacon-revived this account (shown as a
+   *  notice on next login, then cleared). */
+  revivedBy?: string;
   /** Saved player state, restored on login (position/health/armor/inventory). */
   data?: Record<string, unknown>;
 }
@@ -53,6 +60,8 @@ export class Accounts {
           switchesUsed: Number.isFinite(a.switchesUsed) ? Math.max(0, Math.floor(a.switchesUsed as number)) : 0,
           switchSeason: Number.isFinite(a.switchSeason) ? Math.floor(a.switchSeason as number) : 0,
           forfeitSeason: Number.isFinite(a.forfeitSeason) ? Math.floor(a.forfeitSeason as number) : 0,
+          eliminatedUntil: Number.isFinite(a.eliminatedUntil) ? Math.max(0, a.eliminatedUntil as number) : 0,
+          revivedBy: typeof a.revivedBy === 'string' ? a.revivedBy : undefined,
           data: a.data,
         });
       }
@@ -113,6 +122,60 @@ export class Accounts {
   setData(name: string, data: Record<string, unknown>): void {
     const a = this.get(name);
     if (a) a.data = data;
+  }
+
+  // --- Lifesteal elimination (Milestone A) -----------------------------------
+
+  /** Record an elimination lockout (wall-clock ms) + optionally reset the
+   *  saved hearts to the comeback value. */
+  eliminate(name: string, until: number, comebackHearts?: number): void {
+    const a = this.get(name);
+    if (!a || !Number.isFinite(until)) return;
+    a.eliminatedUntil = Math.max(0, until);
+    if (comebackHearts !== undefined) {
+      a.data = { ...(a.data ?? {}), hearts: comebackHearts };
+    }
+  }
+
+  /** Remaining elimination lockout in ms at `now` (0 = free to play). */
+  eliminationRemaining(name: string, now: number): number {
+    const until = this.get(name)?.eliminatedUntil;
+    return Number.isFinite(until) ? Math.max(0, (until as number) - now) : 0;
+  }
+
+  /** Clear an elimination (timer expired or beacon revival). `revivedBy`
+   *  stamps the reviver for a next-login notice. Returns false if the account
+   *  doesn't exist or wasn't eliminated. */
+  clearElimination(name: string, now: number, revivedBy?: string): boolean {
+    const a = this.get(name);
+    if (!a || this.eliminationRemaining(name, now) <= 0) {
+      // Timer-expiry cleanup still zeroes a stale field on a known account.
+      if (a) a.eliminatedUntil = 0;
+      return false;
+    }
+    a.eliminatedUntil = 0;
+    if (revivedBy) a.revivedBy = revivedBy;
+    return true;
+  }
+
+  /** Eliminated members of `faction` at `now` (for the Revival Beacon picker). */
+  eliminatedOf(faction: number, now: number): { username: string; remainingMs: number }[] {
+    const out: { username: string; remainingMs: number }[] = [];
+    for (const a of this.byName.values()) {
+      if (a.faction !== faction) continue;
+      const remainingMs = this.eliminationRemaining(a.username, now);
+      if (remainingMs > 0) out.push({ username: a.username, remainingMs });
+    }
+    return out;
+  }
+
+  /** Pop (read + clear) the "revived by" stamp for a next-login notice. */
+  popRevivedBy(name: string): string | undefined {
+    const a = this.get(name);
+    if (!a || !a.revivedBy) return undefined;
+    const by = a.revivedBy;
+    a.revivedBy = undefined;
+    return by;
   }
 
   /** Award a "Seasons Won" badge to every account on a faction (Phase 5 reset),

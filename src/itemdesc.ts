@@ -29,6 +29,14 @@ const DESCRIPTIONS: Record<number, string> = {
   [Item.Glider]: 'Wear it in the chest slot (right-click to equip); jump in mid-air to glide.',
   // Respawn point.
   [Block.RespawnBeacon]: 'Right-click to set your respawn point. Cheap + easily broken.',
+  [Block.WaypointTotem]: 'Right-click to attune (max 4). Teleport to attuned totems from the map (M) — 60s cooldown, not while in combat.',
+  // Discovery (Milestone C).
+  [Item.CrystalShard]: 'Mined from glowing Crystalfields spikes — found only in the WILDS.',
+  [Block.CrystalBlock]: 'A glowing crystal spike. Mine it for Crystal Shards.',
+  [Block.Mud]: 'Sticky swamp ground — walking through it is slow.',
+  // Lifesteal (Milestone A).
+  [Item.Heart]: 'Right-click to gain +1 max heart (up to 20). Crafting one costs a heart of YOUR OWN — never below 2.',
+  [Item.RevivalBeacon]: 'Right-click to bring an ELIMINATED teammate back early. One use.',
 };
 
 /** A short description for an item, or '' if none. Gadgets win automatically. */

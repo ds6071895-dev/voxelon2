@@ -16,13 +16,17 @@ export function materialOf(block: number): Material {
     case Block.Furnace: case Block.FurnaceLit:
       return 'stone';
     case Block.OakLog: case Block.BirchLog: case Block.SpruceLog:
+    case Block.JungleLog: case Block.CherryLog:
+    case Block.JunglePlanks: case Block.CherryPlanks:
     case Block.OakPlanks: case Block.CraftingTable: case Block.Torch:
     case Block.TorchPX: case Block.TorchNX: case Block.TorchPZ:
     case Block.TorchNZ:
       return 'wood';
+    case Block.RespawnBeacon: case Block.WaypointTotem:
+      return 'stone';
     case Block.Sand:
       return 'sand';
-    case Block.Glass:
+    case Block.Glass: case Block.CrystalBlock:
       return 'glass';
     case Block.Wool:
       return 'wool';
@@ -222,6 +226,19 @@ export class GameAudio {
     this.tone({ type: 'triangle', from: 320, to: 90, dur: 0.18, gain: 0.16 });
   }
 
+  /** Lifesteal: you STOLE a heart — a warm little triangle up-chirp (LOW gain,
+   *  kid-friendly; same soft recipe as the rest of the kit). */
+  heartSteal(): void {
+    this.tone({ type: 'triangle', from: 330, to: 640, dur: 0.2, gain: 0.11 });
+    this.tone({ type: 'triangle', from: 500, to: 980, dur: 0.16, gain: 0.06, delay: 0.09 });
+  }
+
+  /** Lifesteal: you LOST a heart — a soft downward chirp, sad but gentle. */
+  heartLoss(): void {
+    this.tone({ type: 'triangle', from: 460, to: 190, dur: 0.26, gain: 0.11 });
+    this.noise({ freq: 300, dur: 0.12, gain: 0.04, slideTo: 130, type: 'lowpass', q: 0.6 });
+  }
+
   caveAmbience(): void {
     // eerie detuned pad
     const base = 110 + Math.random() * 80;
@@ -241,6 +258,14 @@ export class GameAudio {
         break;
       case 'mobHurt':
         this.tone({ type: 'square', from: 350, to: 180, dur: 0.12, gain: 0.2, pos });
+        break;
+      case 'spit': // a soft wet blip as the gob launches
+        this.tone({ type: 'triangle', from: 420, to: 160, dur: 0.14, gain: 0.14, pos });
+        this.noise({ freq: 700, dur: 0.08, gain: 0.05, slideTo: 250, type: 'lowpass', q: 0.7, pos });
+        break;
+      case 'skitter': // a quick chittery rattle (two fast soft clicks)
+        this.tone({ type: 'triangle', from: 640, to: 480, dur: 0.05, gain: 0.09, pos });
+        this.tone({ type: 'triangle', from: 560, to: 400, dur: 0.05, gain: 0.08, pos, delay: 0.07 });
         break;
       case 'poof':
         this.poof(pos);

@@ -8,14 +8,18 @@
 // still read as a direction.
 import { Biome } from './biomes';
 import { Terrain } from './terrain';
-import { WORLD_HALF } from './net/protocol';
 import { REGION_COUNT, regionCenter, capitalFaction, isCapital } from './regions';
 import { factionColor, isFaction } from './teams';
 
 const SIZE = 150;         // canvas pixels (a square; the circle is inscribed)
 const RANGE = 260;        // world blocks from the centre to the rim
 const BASE_SAMPLE = 6;    // world blocks per cached-base pixel (lower = sharper)
-const BASE_RES = Math.ceil((WORLD_HALF * 2) / BASE_SAMPLE); // base canvas px/side
+// The 5000×5000 world is far too big to pre-render whole (694k terrain samples),
+// so the cached base is a WINDOW around the player, re-rendered only when they
+// wander near its edge (a ~17k-sample refresh every ~2 chunks of travel).
+const WINDOW = RANGE + 128;                       // window half-size (world blocks)
+const REFRESH_DIST = WINDOW - RANGE - 24;         // recenter this far from the cache centre
+const BASE_RES = Math.ceil((WINDOW * 2) / BASE_SAMPLE); // window canvas px/side
 
 const BIOME_COLOR: Record<number, string> = {
   [Biome.Ocean]: '#1d3a6b',
@@ -29,6 +33,10 @@ const BIOME_COLOR: Record<number, string> = {
   [Biome.SnowyMountains]: '#cdd7df',
   [Biome.Mesa]: '#b06a39',
   [Biome.Ashlands]: '#3a3640',
+  [Biome.Jungle]: '#2e7a2a',
+  [Biome.Swamp]: '#4a5c38',
+  [Biome.CherryGrove]: '#d98cb0',
+  [Biome.Crystalfields]: '#b9c6e8',
 };
 
 export interface MinimapMarker { x: number; z: number; color: number; }
@@ -39,7 +47,9 @@ export class Minimap {
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
   private readonly capitals: { x: number; z: number; faction: number }[] = [];
-  private base: HTMLCanvasElement | null = null; // cached biome render (lazy)
+  private base: HTMLCanvasElement | null = null; // cached biome window (lazy)
+  private baseCx = 0; // world centre of the cached window
+  private baseCz = 0;
 
   constructor(parent: HTMLElement, private readonly terrain: Terrain) {
     this.canvas = document.createElement('canvas');
@@ -62,15 +72,17 @@ export class Minimap {
 
   setVisible(v: boolean): void { this.canvas.style.display = v ? 'block' : 'none'; }
 
-  /** Sample the biome base ONCE (terrain is static). Lazy so it doesn't block boot. */
-  private renderBase(): void {
-    const c = document.createElement('canvas');
+  /** (Re)sample the biome window centred on the player (terrain is static, so
+   *  each window renders once and is reused until they wander off it). */
+  private renderBase(px: number, pz: number): void {
+    const c = this.base ?? document.createElement('canvas');
     c.width = BASE_RES; c.height = BASE_RES;
     const g = c.getContext('2d')!;
+    this.baseCx = px; this.baseCz = pz;
     for (let bx = 0; bx < BASE_RES; bx++) {
-      const wx = -WORLD_HALF + bx * BASE_SAMPLE;
+      const wx = px - WINDOW + bx * BASE_SAMPLE;
       for (let by = 0; by < BASE_RES; by++) {
-        const wz = -WORLD_HALF + by * BASE_SAMPLE;
+        const wz = pz - WINDOW + by * BASE_SAMPLE;
         const b = this.terrain.biomeWithWater(wx, wz, this.terrain.height(wx, wz));
         g.fillStyle = BIOME_COLOR[b] ?? '#444';
         g.fillRect(bx, by, 1, 1);
@@ -82,7 +94,10 @@ export class Minimap {
   /** Redraw the radar for the current player pose, waypoints, and war flags. */
   update(px: number, pz: number, yaw: number, faction: number,
     waypoints: ReadonlyArray<MinimapMarker>, flags: ReadonlyArray<MinimapMarker> = []): void {
-    if (!this.base) this.renderBase();
+    if (!this.base ||
+        Math.abs(px - this.baseCx) > REFRESH_DIST || Math.abs(pz - this.baseCz) > REFRESH_DIST) {
+      this.renderBase(px, pz);
+    }
     const ctx = this.ctx;
     const R = SIZE / 2, cx = R, cy = R;
     ctx.clearRect(0, 0, SIZE, SIZE);
@@ -92,8 +107,8 @@ export class Minimap {
 
     // Terrain: crop the cached base to a RANGE-radius window around the player.
     ctx.fillStyle = '#0d1018'; ctx.fillRect(0, 0, SIZE, SIZE); // backdrop past the edges
-    const sx = (px + WORLD_HALF - RANGE) / BASE_SAMPLE; // base-px of window's left edge
-    const sy = (pz + WORLD_HALF - RANGE) / BASE_SAMPLE; // ...and its top edge
+    const sx = (px - (this.baseCx - WINDOW) - RANGE) / BASE_SAMPLE; // base-px of view's left edge
+    const sy = (pz - (this.baseCz - WINDOW) - RANGE) / BASE_SAMPLE;  // ...and its top edge
     const sw = (RANGE * 2) / BASE_SAMPLE;
     ctx.drawImage(this.base!, sx, sy, sw, sw, 0, 0, SIZE, SIZE);
 

@@ -12,6 +12,7 @@ import { ClientMsg, GameMode, SERVER_PORT, SNAPSHOT_HZ, ServerMsg } from '../src
 import { GameServer, Outbound, WorldSave } from '../src/net/server_core';
 import { Accounts, Account } from '../src/net/accounts';
 import { ITEMS, Item } from '../src/items';
+import { COMEBACK_HEARTS, ELIMINATION_MS, formatRemaining } from '../src/hearts';
 
 const port = Number(process.env.PORT) || SERVER_PORT;
 const sockets = new Map<number, WebSocket>();
@@ -72,6 +73,32 @@ game.onFactionSwitch = (username, faction, switchesUsed, switchSeason, forfeitSe
   accounts.applySwitch(username, faction, switchesUsed, switchSeason, forfeitSeason);
   saveAccounts();
   worldDirty = true;
+};
+// Lifesteal elimination (Milestone A): record the 24h wall-clock lockout on the
+// account (login is refused until it expires) and boot the victim shortly after
+// so their full-screen banner has time to deliver. Comeback hearts are written
+// now so no later state capture can resurrect the pre-elimination count.
+game.onEliminate = (username, by) => {
+  const until = Date.now() + ELIMINATION_MS;
+  accounts.eliminate(username, until, COMEBACK_HEARTS);
+  saveAccounts();
+  console.log(`☠ ${username} was ELIMINATED by ${by} (locked out 24h)`);
+  const pid = game.playerIdByName(username);
+  if (pid !== undefined) {
+    setTimeout(() => {
+      try { sockets.get(pid)?.close(); } catch { /* close handler cleans up */ }
+    }, 1500);
+  }
+  return until;
+};
+// Revival Beacon: eliminated faction-mates + the actual revive (faction-gated).
+game.listEliminated = (faction) => accounts.eliminatedOf(faction, Date.now());
+game.onRevive = (target, faction, by) => {
+  const a = accounts.get(target);
+  if (!a || a.faction !== faction) return false; // faction-mates only
+  const ok = accounts.clearElimination(target, Date.now(), by);
+  if (ok) { saveAccounts(); console.log(`✨ ${by} revived ${target}`); }
+  return ok;
 };
 let worldDirty = false;
 function saveWorld(): void {
@@ -157,6 +184,17 @@ function handleAuth(id: number, msg: ClientMsg & { t: 'register' | 'login' }): v
     send(id, { t: 'authErr', error: 'That account is already online' });
     return;
   }
+  // Lifesteal elimination: the credentials may be right, but an eliminated
+  // account can't play until the 24h lockout expires (or a teammate revives
+  // them). Friendly countdown, not a generic error.
+  const lockMs = accounts.eliminationRemaining(res.account.username, Date.now());
+  if (lockMs > 0) {
+    send(id, { t: 'authErr', error: `💀 Eliminated — back in ${formatRemaining(lockMs)}` });
+    return;
+  }
+  accounts.clearElimination(res.account.username, Date.now()); // clear a stale/expired stamp
+  const revivedBy = accounts.popRevivedBy(res.account.username);
+  if (revivedBy) saveAccounts(); // the one-shot notice must not replay next login
   authed.set(id, res.account.username);
   dispatch(game.addPlayer(id, {
     username: res.account.username, faction: res.account.faction,
@@ -164,6 +202,9 @@ function handleAuth(id: number, msg: ClientMsg & { t: 'register' | 'login' }): v
     switchSeason: res.account.switchSeason, forfeitSeason: res.account.forfeitSeason,
     data: res.account.data,
   }));
+  if (revivedBy) {
+    send(id, { t: 'notice', text: `✨ ${revivedBy} revived you — welcome back at ${COMEBACK_HEARTS} ❤!` });
+  }
   console.log(`+ ${res.account.username} authed (${game.playerCount} online)`);
 }
 
@@ -361,6 +402,8 @@ const HELP = [
   '  give <player> <item> [count]  - give items (item = name or id)',
   '  gamemode <mode> <player>      - survival | creative | spectator (s/c/sp)',
   '  tp <player> <x> <y> <z>       - teleport a player',
+  '  sethearts <player> <n>        - set an online player\'s hearts (0-20)',
+  '  revive <player>               - clear a player\'s 24h elimination lockout',
   '  war start <min>               - start a war NOW for <min> minutes',
   '  war schedule <delay> <min>    - schedule a war in <delay> min, lasting <min>',
   '  war cancel                    - end/cancel the war (back to peacetime)',
@@ -428,6 +471,29 @@ function runCommand(line: string): void {
         if (![x, y, z].every(Number.isFinite)) { console.log('x y z must be numbers'); break; }
         dispatch(game.adminTeleport(pid, x, y, z));
         console.log(`teleported ${parts[1]} to ${x} ${y} ${z}`);
+        break;
+      }
+      case 'sethearts': {
+        if (parts.length < 3) { console.log('usage: sethearts <player> <n>'); break; }
+        const pid = resolvePlayer(parts[1]); if (pid === null) break;
+        const n = Number(parts[2]);
+        if (!Number.isFinite(n)) { console.log('n must be a number (0-20)'); break; }
+        dispatch(game.adminSetHearts(pid, n));
+        worldDirty = true; // checkpoint the new hearts on the next autosave
+        console.log(`set ${parts[1]}'s hearts to ${Math.max(0, Math.min(20, Math.floor(n)))}`);
+        break;
+      }
+      case 'revive': {
+        if (parts.length < 2) { console.log('usage: revive <player>'); break; }
+        const name = parts[1];
+        if (!accounts.has(name)) { console.log(`no account named "${name}"`); break; }
+        if (accounts.eliminationRemaining(name, Date.now()) <= 0) {
+          console.log(`${name} isn't eliminated`);
+          break;
+        }
+        accounts.clearElimination(name, Date.now());
+        saveAccounts();
+        console.log(`revived ${name} — they can log back in (at ${COMEBACK_HEARTS} hearts)`);
         break;
       }
       case 'war': {

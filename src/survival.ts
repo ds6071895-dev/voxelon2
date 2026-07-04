@@ -6,6 +6,8 @@ import { MAX_AIR } from './player';
 
 export interface SurvivalActor {
   health: number;
+  /** Hearts-driven max HP (lifesteal: 2 HP per heart). */
+  maxHealth: number;
   air: number;
   eyeUnderwater: boolean;
   dead: boolean;
@@ -32,11 +34,11 @@ export class Survival {
     p.regenCooldown = Math.max(0, p.regenCooldown - dt);
 
     // Passive regeneration once the post-damage cooldown has elapsed.
-    if (this.enableRegen && p.regenCooldown <= 0 && p.health < 20) {
+    if (this.enableRegen && p.regenCooldown <= 0 && p.health < p.maxHealth) {
       this.regenTimer += dt;
       if (this.regenTimer >= REGEN_INTERVAL) {
         this.regenTimer = 0;
-        p.health = Math.min(20, p.health + 1);
+        p.health = Math.min(p.maxHealth, p.health + 1);
       }
     } else {
       this.regenTimer = 0;

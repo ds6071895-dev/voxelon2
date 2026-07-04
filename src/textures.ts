@@ -1265,6 +1265,116 @@ function paintRespawnBeaconTop(p: Painter, seed: number): void {
   }
 }
 
+// Waypoint Totem (B4): a dark plinth with glowing GOLD travel runes (distinct
+// from the green Respawn Beacon and the cyan Core).
+function paintWaypointTotemSide(p: Painter, seed: number): void {
+  paintMachineFrame(p, seed, [58, 52, 44, 255]);
+  const gold: RGBA = [255, 214, 92, 255];
+  const goldD: RGBA = [206, 156, 44, 255];
+  // A diamond travel rune with a piercing vertical beam.
+  for (let y = 3; y <= 12; y++) { p.set(7, y, y % 2 ? gold : goldD); p.set(8, y, y % 2 ? goldD : gold); }
+  for (let k = 0; k < 3; k++) {
+    p.set(5 + k, 8 - k, gold); p.set(10 - k, 8 - k, gold);
+    p.set(5 + k, 8 + k, goldD); p.set(10 - k, 8 + k, goldD);
+  }
+}
+
+function paintWaypointTotemTop(p: Painter, seed: number): void {
+  paintMachineFrame(p, seed, [66, 60, 50, 255]);
+  const gold: RGBA = [255, 224, 120, 255];
+  // A glowing ring (the "portal pad") seen from above.
+  for (let y = 3; y <= 12; y++) {
+    for (let x = 3; x <= 12; x++) {
+      const d = Math.hypot(x - 7.5, y - 7.5);
+      if (d > 4.4 || d < 2.4) continue;
+      p.set(x, y, shade(gold, 0.85 + hash2(seed, x, y) * 0.25));
+    }
+  }
+  p.set(7, 7, [255, 244, 190, 255]); p.set(8, 8, [255, 244, 190, 255]);
+}
+
+// --- Discovery biomes (Milestone C) -------------------------------------------
+
+const JUNGLE_BARK: RGBA = [86, 66, 38, 255];
+function paintJungleLogSide(p: Painter, seed: number): void {
+  p.fill((x, y) => {
+    // Deep-brown bark with mossy green flecks.
+    if (hash2(seed ^ 0x1c, x >> 1, y >> 1) > 0.88) return [88, 118, 52, 255];
+    const streak = hash2(seed, x, Math.floor(y / 4));
+    return shade(JUNGLE_BARK, (0.82 + streak * 0.36) * speckle(seed ^ 3, x, y, 0.08));
+  });
+}
+function paintJungleLogTop(p: Painter, seed: number): void {
+  p.fill((x, y) => {
+    const border = x < 1 || y < 1 || x > 14 || y > 14;
+    if (border) return shade(JUNGLE_BARK, speckle(seed, x, y, 0.08));
+    const d = Math.max(Math.abs(x - 7.5), Math.abs(y - 7.5));
+    const ring = Math.floor(d) % 2 === 0 ? 1.0 : 0.82;
+    return shade([172, 138, 92, 255], ring * speckle(seed ^ 9, x, y, 0.05));
+  });
+}
+
+const CHERRY_BARK: RGBA = [214, 196, 190, 255];
+function paintCherryLogSide(p: Painter, seed: number): void {
+  p.fill((x, y) => {
+    // White-pink bark with thin dark horizontal lenticels (birch-like but warm).
+    const dash = hash2(seed, x >> 2, y) > 0.86 && y % 3 === 1;
+    if (dash) return [92, 62, 66, 255];
+    return shade(CHERRY_BARK, speckle(seed ^ 5, x, y, 0.05));
+  });
+}
+function paintCherryLogTop(p: Painter, seed: number): void {
+  p.fill((x, y) => {
+    const border = x < 1 || y < 1 || x > 14 || y > 14;
+    if (border) return shade(CHERRY_BARK, speckle(seed, x, y, 0.05));
+    const d = Math.max(Math.abs(x - 7.5), Math.abs(y - 7.5));
+    const ring = Math.floor(d) % 2 === 0 ? 1.0 : 0.86;
+    return shade([222, 168, 160, 255], ring * speckle(seed ^ 9, x, y, 0.05));
+  });
+}
+
+function paintMud(p: Painter, seed: number): void {
+  p.fill((x, y) => {
+    // Wet, dark dirt with glossy puddled patches.
+    const wet = hash2(seed ^ 0x30d, x >> 2, y >> 2) > 0.7;
+    const base: RGBA = wet ? [58, 48, 40, 255] : [82, 66, 50, 255];
+    return shade(base, speckle(seed, x, y, 0.1));
+  });
+}
+
+function paintCrystalBlock(p: Painter, seed: number): void {
+  p.fill((x, y) => {
+    // Pale violet-cyan crystal with bright facet streaks (emissive in-world).
+    const facet = (x + y * 2 + (hash2(seed, x >> 2, y >> 2) > 0.5 ? 1 : 0)) % 5;
+    const base: RGBA = facet === 0 ? [222, 246, 255, 255]
+      : facet < 3 ? [168, 208, 246, 255] : [190, 172, 244, 255];
+    return shade(base, 0.9 + hash2(seed ^ 7, x, y) * 0.18);
+  });
+}
+
+/** Crystal Shard item: a slim glowing spike with a bright core. */
+function paintCrystalShard(p: Painter, seed: number): void {
+  const body: RGBA = [176, 206, 248, 255];
+  const core: RGBA = [236, 250, 255, 255];
+  const dark: RGBA = [120, 138, 210, 255];
+  // A tapered shard leaning right, plus a small companion sliver.
+  const rows: Record<number, [number, number]> = {
+    2: [8, 8], 3: [7, 9], 4: [7, 9], 5: [6, 10], 6: [6, 10],
+    7: [6, 10], 8: [5, 10], 9: [5, 9], 10: [6, 9], 11: [6, 8], 12: [7, 8],
+  };
+  for (const yStr of Object.keys(rows)) {
+    const y = Number(yStr);
+    const [a, b] = rows[y];
+    for (let x = a; x <= b; x++) {
+      const c = x === a ? dark : x === Math.floor((a + b) / 2) ? core : body;
+      p.set(x, y, shade(c, 0.92 + hash2(seed, x, y) * 0.16));
+    }
+  }
+  p.set(3, 9, body); p.set(3, 10, dark); p.set(4, 11, dark); // sliver
+  p.set(12, 4, [255, 255, 255, 220]); // sparkle
+  outlineSprite(p);
+}
+
 // --- Gadget sprites (Phase 8): each gadget gets its own hand-drawn silhouette ---
 const GADGET_OUTLINE: RGBA = [18, 20, 26, 255];
 
@@ -1533,6 +1643,70 @@ function paintJumpBoost(p: Painter, seed: number): void {
   p.set(4, 5, [190, 240, 190, 200]); p.set(11, 5, [190, 240, 190, 200]);
 }
 
+// --- Lifesteal (Milestone A): Heart + Revival Beacon sprites ------------------
+
+/** A chunky rounded pixel heart with a glossy highlight (the lifesteal
+ *  currency — big, warm and readable at hotbar size). */
+function paintHeart(p: Painter, seed: number): void {
+  const red: RGBA = [224, 46, 60, 255];
+  const dark: RGBA = [156, 22, 38, 255];
+  const hi: RGBA = [255, 150, 158, 255];
+  // Right-half horizontal span per row, mirrored (a fat symmetric heart).
+  const span: Record<number, [number, number]> = {
+    3: [9, 11], 4: [8, 12], 5: [8, 12], 6: [8, 12],
+    7: [8, 13], 8: [8, 12], 9: [8, 12], 10: [8, 11],
+    11: [8, 10], 12: [8, 9], 13: [8, 8],
+  };
+  for (const yStr of Object.keys(span)) {
+    const y = Number(yStr);
+    const [a, b] = span[y];
+    for (let x = a; x <= b; x++) {
+      const edge = x === b || y >= 12;
+      const c = edge ? dark : red;
+      const jit = 0.94 + hash2(seed, x, y) * 0.1;
+      p.set(x, y, shade(c, jit));
+      p.set(15 - x, y, shade(c, jit)); // mirrored left lobe
+    }
+  }
+  // Centre dip between the lobes + a glossy top-left highlight.
+  p.set(7, 3, dark); p.set(8, 3, dark);
+  p.set(4, 4, hi); p.set(5, 4, hi); p.set(4, 5, hi);
+  p.set(5, 5, shade(hi, 0.92));
+  outlineSprite(p);
+}
+
+/** The Revival Beacon: a gold totem cradling an emerald "life" gem — reads as
+ *  precious + magical (it clears a teammate's 24h elimination). */
+function paintRevivalBeacon(p: Painter, seed: number): void {
+  const gold: RGBA = [232, 186, 62, 255];
+  const goldD: RGBA = [168, 126, 34, 255];
+  const goldHi: RGBA = [255, 232, 140, 255];
+  const gem: RGBA = [66, 214, 118, 255];
+  const gemHi: RGBA = [170, 255, 200, 255];
+  // Pedestal base.
+  rect(p, 4, 13, 11, 14, goldD);
+  rect(p, 5, 12, 10, 12, gold);
+  p.set(4, 13, goldHi); p.set(11, 13, goldHi);
+  // Twin uprights (a cradle) with highlight/shadow columns.
+  for (let y = 4; y <= 11; y++) {
+    p.set(4, y, y % 3 ? gold : goldD); p.set(5, y, goldHi);
+    p.set(11, y, y % 3 ? gold : goldD); p.set(10, y, goldD);
+  }
+  // Crown tips.
+  p.set(4, 3, goldHi); p.set(11, 3, goldHi);
+  // Floating emerald life-gem in the cradle.
+  for (let y = 5; y <= 9; y++) {
+    for (let x = 6; x <= 9; x++) {
+      const d = Math.abs(x - 7.5) + Math.abs(y - 7);
+      if (d > 2.6) continue;
+      p.set(x, y, shade(d < 1 ? gemHi : gem, 0.92 + hash2(seed, x, y) * 0.12));
+    }
+  }
+  // Sparkles.
+  p.set(7, 2, gemHi); p.set(13, 6, [255, 255, 220, 220]); p.set(2, 8, [255, 255, 220, 220]);
+  outlineSprite(p);
+}
+
 const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.GrassTop]: paintGrassTop,
   [Tile.GrassSide]: paintGrassSide,
@@ -1673,6 +1847,26 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.CoreTop]: paintCoreTop,
   [Tile.RespawnBeaconSide]: paintRespawnBeaconSide,
   [Tile.RespawnBeaconTop]: paintRespawnBeaconTop,
+  [Tile.WaypointTotemSide]: paintWaypointTotemSide,
+  [Tile.WaypointTotemTop]: paintWaypointTotemTop,
+  // Discovery biomes (Milestone C)
+  [Tile.JungleLogSide]: paintJungleLogSide,
+  [Tile.JungleLogTop]: paintJungleLogTop,
+  [Tile.JungleLeaves]: paintLeaves, // biome-foliage tinted, like oak
+  [Tile.JunglePlanks]: (p, seed) => paintPlanksColored(p, seed, [150, 112, 66, 255]),
+  [Tile.CherryLogSide]: paintCherryLogSide,
+  [Tile.CherryLogTop]: paintCherryLogTop,
+  [Tile.CherryLeaves]: paintColoredLeaves([236, 160, 190, 255]), // fixed pink (untinted)
+  [Tile.CherryPlanks]: (p, seed) => paintPlanksColored(p, seed, [226, 188, 184, 255]),
+  [Tile.Mud]: paintMud,
+  [Tile.CrystalBlock]: paintCrystalBlock,
+  [Tile.CrystalShard]: paintCrystalShard,
+  // New mobs (Milestone C): spitter = sickly bog green, skitter = dark chitin.
+  [Tile.SpitterSkin]: paintSkin([128, 148, 84, 255], 0.16, [96, 116, 60, 255]),
+  [Tile.SpitterFace]: paintFace([128, 148, 84, 255], [230, 210, 60, 255],
+    { color: [58, 78, 40, 255], x0: 5, y0: 9, x1: 10, y1: 12 }), // wide dark maw
+  [Tile.SkitterSkin]: paintSkin([56, 50, 66, 255], 0.2, [84, 74, 96, 255]),
+  [Tile.SkitterFace]: paintFace([56, 50, 66, 255], [255, 90, 70, 255], null, 4),
   [Tile.RedSand]: paintRedSand,
   [Tile.Terracotta]: paintTerracotta,
   [Tile.Basalt]: paintBasalt,
@@ -1688,6 +1882,9 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.OilBomb]: paintOilBomb,
   [Tile.SpyDisguise]: paintSpyDisguise,
   [Tile.JumpBoost]: paintJumpBoost,
+  // Lifesteal (Milestone A)
+  [Tile.Heart]: paintHeart,
+  [Tile.RevivalBeacon]: paintRevivalBeacon,
 };
 
 export function createAtlas(seed = 1337): Atlas {

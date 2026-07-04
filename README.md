@@ -309,7 +309,58 @@ XP leveling) and **guns** (pistol / rifle / rocket launcher with magazines + R
 reload, sub-stepped client projectiles, local mob hits, and server-validated
 range + facing PvP).
 
-The latest revision adds the **automation economy** (M13): Cobalt ore, an oil
+The latest revision (Beta 1.6) adds the **discovery layer** (Milestone C):
+four new biomes — steamy **Jungles** (tall two-canopy trees + jungle planks),
+flattened **Swamps** (shallow pools, dead bushes, darker grass and a new Mud
+block that slows walking), gentle pink **Cherry Groves** (white-barked cherry
+wood, petal-strewn hills), and the **Crystalfields**, a Wilds-EXCLUSIVE biome
+of pale ground and glowing crystal spikes that mine into **Crystal Shards**.
+A new pure structure framework (`structures.ts`) stamps seeded, deterministic
+**surface ruins** into chunk generation exactly like trees (never wider than
+3×3 chunks, identical on the server and every client): partly-collapsed
+**Watchtowers** (common loot), buried **Bunkers** with a hatch, shaft, carved
+basalt room and sometimes a dormant sentry (military loot), and scorched
+**Crashed Cargo Pods**, Wilds-biased with the best surface loot — titanium,
+gadgets, and RARELY a Heart. Every structure holds a chest whose contents come
+from tiered seeded loot tables (`loot.ts`) rolled **on first open** — server-
+authoritative online, the identical pure roll offline — after which it's an
+ordinary chest (a broken pristine chest still spills its roll; nothing dupes).
+Two new hostile mobs join at night: the ranged **Spitter** (keeps its distance,
+lobs slow gobs) and the fast, fragile **Skitter** (a lunging chitin scuttler,
+Wilds-only) — both with procedural skins and soft synthesized voices.
+
+The revision before (Beta 1.5) grew the world to **5000×5000** with a
+claimable **1000×1000 HEARTLAND core** (Milestone B): claims, the war region
+board, oil scoring and all spawns stay inside the core (server-validated, with
+a friendly client-side message before a Wilds Core placement) while the
+**WILDS** outside are pure frontier — no claims or shields, machines/turrets
+placeable but unprotected, hostile mobs +50% denser. A soft gold boundary wall
+marks the core in-world (the hard cyan border moves to ±2500), the world map
+gains a **Heartland ↔ full-world zoom toggle** with HEARTLAND/WILDS labels
+(biome bases cached per view; the minimap now caches a sliding window instead
+of pre-rendering 5000² terrain), and craftable **Waypoint Totems** (2 gold +
+5 planks, glowing) shrink the 2.5 km world: right-click to attune (max 4,
+toggle to release, persisted per account), click one on the map to travel —
+3 s wind-up interrupted by damage, 60 s cooldown and a 10 s combat tag, all
+server-enforced, with a broken totem pruned on use. Full offline parity.
+
+The revision before (Beta 1.4) added **LIFESTEAL** (Milestone A of the
+lifesteal-world plan): every player's max health is a currency of **hearts**
+(start 10, cap 20, 2 HP each). A **PvP kill steals a heart** (killer +1,
+victim −1 — deaths to mobs/falls/lava/unattended turrets move nothing, decided
+by a 10 s direct-damager credit window); hitting **0 hearts ELIMINATES** you
+for 24 h real time (login refused with a friendly countdown, full-screen
+banner, comeback at 5 hearts). Hearts are also an economy: craft a **Heart
+item** by bottling one of your own (server-enforced floor of 2 — lootable,
+tradeable, raidable), right-click one to grow your max (server-validated cap),
+and craft the expensive **Revival Beacon** (titanium + diamonds + a Heart) to
+bring an eliminated teammate back early (faction-mates only, server-gated).
+The HUD renders max hearts with half-heart granularity (compact "x / N" past
+10), with soft steal/loss chirps; the console gains `sethearts` + `revive`;
+hearts persist through the account save and the offline localStorage mirror
+(no elimination offline).
+
+An earlier revision added the **automation economy** (M13): Cobalt ore, an oil
 field, and the server-authoritative **Autominer** / **Oil Derrick** machines —
 contested **multi-block, animated structures** with HP/sabotage, ownership/
 claiming, a level-gated ore filter, and ~100 levels of geometric-cost
@@ -317,7 +368,10 @@ production/storage upgrades, all driven by a pure, unit-tested yield module
 mirrored offline — the economic base for the planned warfare layer (missiles,
 turrets, drones consuming stored oil/ore).
 
-Verified headless via `npm run smoke` (211 checks incl. server-core logic for
+Verified headless via `npm run smoke` (522 checks incl. biome presence +
+Crystalfields core-exclusion, structure/loot determinism + first-open flow,
+mud slowdown, the Heartland/Wilds border rules, totem attune/teleport validation, the lifesteal heart
+model/steal/elimination/revival/persistence, server-core logic for
 edits, PvP, item entities, chests, armor mitigation and ranged PvP, the cobalt/
 oil/machine sim, machine HP/sabotage/claim, multi-block footprint teardown, and
 server↔offline machine parity, stable across repeated runs), a live two-client

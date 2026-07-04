@@ -23,7 +23,10 @@ import { ItemEntities } from './itementity';
 import { Chests } from './chests';
 import { Mobs } from './mobs';
 import { NetClient } from './net/client';
-import { WORLD_SEED, WORLD_HALF, makeUsername, skinSeed, GameMode, FlagInfo } from './net/protocol';
+import {
+  WORLD_SEED, WORLD_HALF, CORE_HALF, inCore, makeUsername, skinSeed, GameMode,
+  FlagInfo, MAX_ATTUNED, TOTEM_COOLDOWN, TOTEM_WINDUP, COMBAT_TAG,
+} from './net/protocol';
 import { MachineModels } from './machinemodels';
 import { NetItems } from './netitems';
 import { Particles } from './particles';
@@ -55,11 +58,17 @@ import {
   advanceSeason,
 } from './season';
 import { GadgetCooldowns, GadgetDef, gadgetOf } from './gadgets';
+import {
+  MAX_HEARTS, START_HEARTS, WITHDRAW_FLOOR, canConsume, canWithdraw,
+  clampHearts, formatRemaining, maxHealthFor,
+} from './hearts';
 import { Sky, WATER_FOG_COLOR } from './sky';
 import { Survival } from './survival';
 import { createAtlas, createCrackTextures } from './textures';
 import { World, RENDER_DISTANCE } from './world';
 import { Panorama } from './panorama';
+import { structureChestTier } from './structures';
+import { chestLootSlots } from './loot';
 
 const FOG_NEAR = RENDER_DISTANCE * 16 - 38;
 const FOG_FAR = RENDER_DISTANCE * 16 - 6;
@@ -99,7 +108,7 @@ const atlas = createAtlas(seed);
 const cracks = createCrackTextures();
 const world = new World(scene, atlas, seed);
 // Offline single-player gets a random dry spawn too (MP uses the server's).
-const spawn = world.terrain.randomDrySpawn(Math.random, WORLD_HALF);
+const spawn = world.terrain.randomDrySpawn(Math.random, CORE_HALF);
 const player = new Player(spawn);
 const input = new Input(renderer.domElement);
 const inventory = new Inventory();
@@ -149,22 +158,27 @@ const interaction = new Interaction(scene, world, player, cracks, inventory);
 const panoramaView = new Panorama(atlas, window.innerWidth / window.innerHeight);
 
 // Visual world border: four translucent cyan walls at ±WORLD_HALF so players
-// can see the edge of the 1000×1000 play area (movement is clamped to it).
+// can see the edge of the 5000×5000 play area (movement is clamped to it), plus
+// a subtler faction-gold ring at ±CORE_HALF marking the HEARTLAND core — the
+// inner 1000×1000 where claims/war/spawns live (outside = the Wilds).
 (() => {
-  const mat = new THREE.MeshBasicMaterial({
-    color: 0x5ad0ff, transparent: true, opacity: 0.42,
-    side: THREE.DoubleSide, depthWrite: false,
-  });
-  const H = 160, B = WORLD_HALF;
-  const geoNS = new THREE.PlaneGeometry(B * 2, H);
-  for (const [z, ry] of [[-B, 0], [B, 0]] as [number, number][]) {
-    const w = new THREE.Mesh(geoNS, mat);
-    w.position.set(0, H / 2, z); w.rotation.y = ry; scene.add(w);
-  }
-  for (const x of [-B, B]) {
-    const w = new THREE.Mesh(geoNS, mat);
-    w.position.set(x, H / 2, 0); w.rotation.y = Math.PI / 2; scene.add(w);
-  }
+  const ring = (half: number, color: number, opacity: number, height: number): void => {
+    const mat = new THREE.MeshBasicMaterial({
+      color, transparent: true, opacity,
+      side: THREE.DoubleSide, depthWrite: false,
+    });
+    const geoNS = new THREE.PlaneGeometry(half * 2, height);
+    for (const z of [-half, half]) {
+      const w = new THREE.Mesh(geoNS, mat);
+      w.position.set(0, height / 2, z); scene.add(w);
+    }
+    for (const x of [-half, half]) {
+      const w = new THREE.Mesh(geoNS, mat);
+      w.position.set(x, height / 2, 0); w.rotation.y = Math.PI / 2; scene.add(w);
+    }
+  };
+  ring(WORLD_HALF, 0x5ad0ff, 0.42, 160); // hard outer border (cyan)
+  ring(CORE_HALF, 0xffd84a, 0.14, 120);  // Heartland boundary (soft gold)
 })();
 
 const sky = new Sky(scene, seed);
@@ -442,6 +456,29 @@ function applyLocalMode(mode: GameMode): void {
 }
 // Local grace/shield clock for the offline claim sim (advanced in the frame loop).
 let worldTimeLocal = 0;
+// Lifesteal (Milestone A): the local player's hearts (max-health currency,
+// 2 HP each). Server-authoritative online; a localStorage-mirrored SP stat
+// offline (no elimination offline — zombies can't take hearts).
+let localHearts = START_HEARTS;
+function applyHearts(n: number): void {
+  localHearts = clampHearts(n);
+  player.maxHealth = maxHealthFor(localHearts);
+  player.health = Math.min(player.health, player.maxHealth);
+  saveOfflineHearts();
+}
+function saveOfflineHearts(): void {
+  if (net.connected || !authedName) return;
+  try {
+    localStorage.setItem(`voxelon.hearts.${authedName.toLowerCase()}`, String(localHearts));
+  } catch { /* ignore */ }
+}
+function restoreOfflineHearts(): void {
+  if (net.connected || !authedName) return;
+  try {
+    const h = localStorage.getItem(`voxelon.hearts.${authedName.toLowerCase()}`);
+    applyHearts(h === null ? START_HEARTS : Number(h));
+  } catch { /* ignore */ }
+}
 function factionCss(id: number): string {
   const c = factionColor(id);
   return `#${(c & 0xffffff).toString(16).padStart(6, '0')}`;
@@ -517,6 +554,7 @@ world.onBlockBroken = (x, y, z, oldId, harvested) => {
     // online the server spills the authoritative stored contents on the edit,
     // so the client must not (its cache may be empty/stale — that would lose or
     // wipe items, especially for a chest this player never opened).
+    if (!net.connected) ensureOfflineStructureLoot(x, y, z); // unopened loot still spills
     const dropped = chests.remove(x, y, z);
     if (!net.connected) spillStacks(dropped, x + 0.5, y + 0.3, z + 0.5);
   }
@@ -540,9 +578,25 @@ interaction.onBlockSound = (kind, blockId, x, y, z) => {
   if (kind === 'break') audio.dig(materialOf(blockId), pos);
   else audio.place(materialOf(blockId), pos);
 };
+// Offline structure-chest loot: a pristine terrain chest rolls its seeded loot
+// on FIRST interaction (open or break) — the same pure roll the server makes
+// online, so the contents are identical. `structLooted` stops a re-roll after
+// the chest is broken and replaced in the same session.
+const structLooted = new Set<string>();
+function ensureOfflineStructureLoot(x: number, y: number, z: number): void {
+  if (net.connected) return; // online: the server owns the roll
+  const key = `${x},${y},${z}`;
+  if (chests.has(x, y, z) || structLooted.has(key)) return;
+  const tier = structureChestTier(seed, x, y, z, world.terrain);
+  if (!tier) return;
+  structLooted.add(key);
+  chests.store(x, y, z, chestLootSlots(seed, x, y, z, tier));
+}
+
 interaction.onOpenContainer = (kind, x, y, z) => {
   if (kind === 'chest') {
     openChest = { x, y, z };
+    ensureOfflineStructureLoot(x, y, z);
     inventory.loadChest(chests.open(x, y, z));
     lastChestVersion = chestBaseVersion = inventory.version;
     invUI.show('chest');
@@ -853,6 +907,25 @@ invUI.onClose = () => {
 const spillAtPlayer = (stacks: ItemStack[]) =>
   spillStacks(stacks, player.pos.x, player.pos.y + 1, player.pos.z);
 invUI.onOverflow = spillAtPlayer;
+// Lifesteal: crafting a Heart item bottles one of YOUR hearts. Veto the craft
+// at the withdrawal floor; a successful craft tells the server to deduct the
+// heart (offline it's deducted locally). Mirrors the server's own floor check.
+invUI.canCraft = (r) => {
+  if (r.id !== Item.Heart) return true;
+  if (canWithdraw(localHearts)) return true;
+  showNotice(`You need at least ${WITHDRAW_FLOOR + 1} hearts to bottle one!`);
+  return false;
+};
+invUI.onCrafted = (r) => {
+  if (r.id !== Item.Heart) return;
+  if (net.connected) {
+    net.sendHeartWithdraw(); // the echo applies the new count + plays the toast
+  } else {
+    applyHearts(localHearts - 1);
+    showNotice(`−1 ❤ bottled — now ${localHearts}`);
+    audio.heartLoss();
+  }
+};
 
 // The chest we're viewing was removed by someone else (MP). Salvage the items
 // we were arranging in it back to us and close WITHOUT re-pushing to the now
@@ -972,6 +1045,8 @@ function attemptAuth(mode: 'login' | 'register', retries = 12): void {
     spawnInOwnTerritory(); // never drop into enemy land (offline)
     if (mode === 'register') announceSide(localFaction);
     if (mode === 'login') restoreOfflineInventory(); // bring back saved single-player stuff
+    restoreOfflineHearts(); // fresh accounts fall back to the 10-heart start
+    restoreOfflineTotems(); // attuned Waypoint Totems (fast travel)
   } else if (retries > 0) {
     // Still resolving whether a server is reachable — try again shortly.
     authStatus.textContent = 'Connecting…';
@@ -1204,7 +1279,7 @@ document.getElementById('respawn')!.addEventListener('click', () => {
   } else {
     spawnInOwnTerritory(); // respawn in our own land, never enemy territory
     player.respawn({ x: player.pos.x, y: player.pos.y, z: player.pos.z });
-    lastHealth = 20;
+    lastHealth = player.maxHealth;
     deathShown = false;
     deathEl.style.display = 'none';
     grantStarterKit(); // re-claim the basic loadout after death (offline)
@@ -1265,6 +1340,7 @@ net.onWelcome = (me) => {
   if (justRegistered) { justRegistered = false; announceSide(localFaction); }
   player.pos.set(me.x, me.y, me.z);
   player.vel.set(0, 0, 0);
+  applyHearts(me.hearts ?? START_HEARTS); // hearts first so max HP is right
   player.health = me.health;
   player.dead = false;
   lastHealth = me.health;
@@ -1322,6 +1398,217 @@ net.onTeleport = (x, y, z) => {
   showNotice('Teleporting…');
 };
 net.onNotice = (text) => showNotice(text);
+
+// --- Waypoint Totems (B4): attune (right-click) + travel (map click) ----------
+// Server-authoritative online (attuned list + cooldown + combat tag live
+// there); the same rules run locally offline. The client owns the 3s wind-up,
+// which any damage interrupts (the server's combat tag re-checks it anyway).
+let attunedTotems: { x: number; y: number; z: number }[] = [];
+let totemCdUntil = 0;        // local cooldown clock (worldTimeLocal; UX + offline rule)
+let lastDamageLocal = -999;  // worldTimeLocal of the last damage taken (combat tag)
+let totemWindup: { x: number; y: number; z: number; left: number } | null = null;
+function setAttuned(list: { x: number; y: number; z: number }[]): void {
+  attunedTotems = list;
+  worldMap.setTotems(list);
+  if (!net.connected && authedName) {
+    try {
+      localStorage.setItem(`voxelon.totems.${authedName.toLowerCase()}`, JSON.stringify(list));
+    } catch { /* ignore */ }
+  }
+}
+function restoreOfflineTotems(): void {
+  if (net.connected || !authedName) return;
+  try {
+    const raw = localStorage.getItem(`voxelon.totems.${authedName.toLowerCase()}`);
+    const list = raw ? JSON.parse(raw) as { x: number; y: number; z: number }[] : [];
+    setAttuned(Array.isArray(list)
+      ? list.filter((t) => Number.isFinite(t?.x) && Number.isFinite(t?.y) && Number.isFinite(t?.z))
+          .slice(0, MAX_ATTUNED)
+      : []);
+  } catch { setAttuned([]); }
+}
+net.onAttuned = (totems) => setAttuned(totems);
+interaction.onAttune = (x, y, z) => {
+  if (net.connected) { net.sendAttune(x, y, z); return; }
+  // Offline: the same toggle + cap rules the server enforces online.
+  const at = attunedTotems.findIndex((t) => t.x === x && t.y === y && t.z === z);
+  if (at >= 0) {
+    setAttuned(attunedTotems.filter((_, i) => i !== at));
+    showNotice('Attunement released.');
+  } else if (attunedTotems.length >= MAX_ATTUNED) {
+    showNotice(`You can attune at most ${MAX_ATTUNED} totems — release one first (right-click it).`);
+  } else {
+    setAttuned([...attunedTotems, { x, y, z }]);
+    showNotice(`🗿 Totem attuned (${attunedTotems.length}/${MAX_ATTUNED}) — open the map (M) to travel!`);
+  }
+};
+worldMap.onTotemTravel = (t) => {
+  if (player.dead || totemWindup) return;
+  if (worldTimeLocal < totemCdUntil) {
+    showNotice(`Totem travel recharging — ${Math.ceil(totemCdUntil - worldTimeLocal)}s left.`);
+    return;
+  }
+  if (worldTimeLocal - lastDamageLocal < COMBAT_TAG) {
+    showNotice("You can't teleport while in combat!");
+    return;
+  }
+  worldMap.hide();
+  input.lock();
+  totemWindup = { x: t.x, y: t.y, z: t.z, left: TOTEM_WINDUP };
+  showNotice(`🗿 Focusing on the totem… ${TOTEM_WINDUP}s — don't get hit!`);
+};
+/** Advance the wind-up each frame; damage cancels, completion teleports. */
+function tickTotemWindup(dt: number): void {
+  if (!totemWindup) return;
+  if (player.dead || worldTimeLocal - lastDamageLocal < 0.5) {
+    totemWindup = null;
+    showNotice('Teleport interrupted!');
+    return;
+  }
+  totemWindup.left -= dt;
+  if (totemWindup.left > 0) return;
+  const { x, y, z } = totemWindup;
+  totemWindup = null;
+  totemCdUntil = worldTimeLocal + TOTEM_COOLDOWN;
+  if (net.connected) {
+    net.sendTotemTeleport(x, y, z); // server validates + replies `teleport`
+    return;
+  }
+  // Offline: the totem must still be standing (mirror of the server rule).
+  if (world.getBlock(x, y, z) !== Block.WaypointTotem) {
+    setAttuned(attunedTotems.filter((tt) => !(tt.x === x && tt.y === y && tt.z === z)));
+    showNotice('That totem was destroyed!');
+    return;
+  }
+  endGrapple();
+  player.pos.set(x + 0.5, y + 1, z + 0.5);
+  player.vel.set(0, 0, 0);
+  player.fallDistance = 0;
+  pendingTeleport = { x: x + 0.5, y: y + 1, z: z + 0.5, started: worldTimeLocal };
+  showNotice('Teleporting…');
+}
+
+// --- Lifesteal (Milestone A) -------------------------------------------------
+net.onHearts = (hearts, reason, from) => {
+  applyHearts(hearts);
+  switch (reason) {
+    case 'steal':
+      showNotice(`+1 ❤ (stole from ${from ?? 'an enemy'})`);
+      audio.heartSteal();
+      break;
+    case 'loss':
+      showNotice(from ? `−1 ❤ (stolen by ${from})` : '−1 ❤');
+      audio.heartLoss();
+      break;
+    case 'consume':
+      showNotice(`+1 max ❤ — now ${localHearts}!`);
+      audio.heartSteal();
+      break;
+    case 'withdraw':
+      showNotice(`−1 ❤ bottled — now ${localHearts}`);
+      audio.heartLoss();
+      break;
+    // 'init'/'admin': the server sends its own notice when one is warranted.
+  }
+};
+// Full-screen elimination banner (the server disconnects us moments later).
+const elimEl = document.createElement('div');
+elimEl.className = 'mc-font';
+elimEl.style.cssText =
+  'position:absolute;inset:0;display:none;flex-direction:column;align-items:center;' +
+  'justify-content:center;gap:16px;background:rgba(24,4,10,0.93);z-index:40;text-align:center;';
+app.appendChild(elimEl);
+net.onEliminated = (by, until) => {
+  deathEl.style.display = 'none'; // the elimination banner replaces the death screen
+  const ms = Math.max(0, until - Date.now());
+  elimEl.innerHTML =
+    '<div style="font-size:44px;color:#ff5a5a;text-shadow:3px 3px 0 #000;letter-spacing:3px;">💀 ELIMINATED</div>' +
+    `<div style="font-size:18px;color:#ffd0d0;">${by} took your last heart!</div>` +
+    '<div style="font-size:14px;color:#cfe0ff;max-width:460px;line-height:1.7;">' +
+    `You can come back in <b>${formatRemaining(ms)}</b> — or a teammate can bring you back early with a Revival Beacon. ` +
+    'Your base, faction and stuff are waiting for you.</div>';
+  const back = document.createElement('button');
+  back.className = 'mc-btn';
+  back.textContent = 'Back to Title';
+  back.style.cssText = 'font-size:15px;padding:8px 24px;margin-top:8px;';
+  back.addEventListener('click', () => { elimEl.style.display = 'none'; enterTitle(); });
+  elimEl.appendChild(back);
+  elimEl.style.display = 'flex';
+  audio.heartLoss();
+  document.exitPointerLock();
+};
+// Revival Beacon: right-click opens a picker of eliminated teammates (the
+// server supplies the list; the beacon is consumed only on a confirmed revive).
+const revivePanel = document.createElement('div');
+revivePanel.style.cssText =
+  'position:absolute;inset:0;display:none;flex-direction:column;align-items:center;' +
+  'justify-content:center;gap:12px;background:rgba(8,10,18,0.9);z-index:30;';
+app.appendChild(revivePanel);
+function hideRevivePanel(lock = true): void {
+  revivePanel.style.display = 'none';
+  if (lock && worldReady && !player.dead) input.lock();
+}
+function openRevivePicker(): void {
+  if (!net.connected) { showNotice('Reviving teammates works on the online server.'); return; }
+  net.sendReviveList(); // the reply builds + shows the picker
+}
+net.onReviveList = (targets) => {
+  if (!inventory.countItem(Item.RevivalBeacon)) return; // beacon gone in the meantime
+  if (!targets.length) {
+    showNotice('No eliminated teammates right now — lucky team!');
+    return;
+  }
+  revivePanel.innerHTML = '';
+  const title = document.createElement('div');
+  title.className = 'mc-font';
+  title.textContent = '✨ REVIVE A TEAMMATE';
+  title.style.cssText = 'font-size:26px;color:#ffd84a;letter-spacing:2px;text-shadow:2px 2px 0 #000;';
+  revivePanel.appendChild(title);
+  for (const t of targets.slice(0, 12)) {
+    const b = document.createElement('button');
+    b.className = 'mc-btn';
+    b.style.cssText = 'font-size:15px;padding:8px 22px;min-width:340px;';
+    b.textContent = `${t.username} — back in ${formatRemaining(t.remainingMs)}`;
+    b.addEventListener('click', () => {
+      net.sendBeaconRevive(t.username);
+      hideRevivePanel();
+    });
+    revivePanel.appendChild(b);
+  }
+  const cancel = document.createElement('button');
+  cancel.className = 'mc-btn';
+  cancel.textContent = 'Cancel';
+  cancel.style.cssText = 'font-size:14px;padding:7px 20px;margin-top:6px;';
+  cancel.addEventListener('click', () => hideRevivePanel());
+  revivePanel.appendChild(cancel);
+  revivePanel.style.display = 'flex';
+  document.exitPointerLock();
+};
+net.onRevived = (target, ok) => {
+  // The server's notice explains either way; a confirmed revive consumes the
+  // beacon (it was validated against a real eliminated teammate).
+  if (ok) {
+    inventory.removeItem(Item.RevivalBeacon, 1);
+    pushStateSave();
+    showRegionBanner(`✨ ${target.toUpperCase()} IS BACK!`, '#7dffa0');
+  }
+};
+/** Right-click a held Heart: +1 max heart (server-validated online). */
+function consumeHeartItem(): void {
+  if (!canConsume(localHearts)) {
+    showNotice(`Your hearts are already full (${MAX_HEARTS})!`);
+    return;
+  }
+  inventory.consumeSelected(1);
+  if (net.connected) {
+    net.sendHeartConsume(); // the echo applies the count + plays the toast
+  } else {
+    applyHearts(localHearts + 1);
+    showNotice(`+1 max ❤ — now ${localHearts}!`);
+    audio.heartSteal();
+  }
+  pushStateSave();
+}
 net.onGotItem = (id, count) => {
   // The server grants the whole stack on a valid pickup; if it doesn't all fit,
   // re-drop the remainder as a server item entity so it isn't destroyed (the
@@ -1460,6 +1747,12 @@ interaction.onEdit = (x, y, z, b) => {
 // off. Other blocks are unrestricted here.
 interaction.canPlace = (x, _y, z, block) => {
   if (block !== Block.Core) return true;
+  // Claims are Heartland-only (B2): tell the player BEFORE the place attempt
+  // so a rejected Core in the Wilds is never a silent mystery.
+  if (!inCore(x, z)) {
+    showNotice('Claims only work in the Heartland (inner 1000×1000)!');
+    return false;
+  }
   if (sameFaction(regionOwners[regionOf(x, z)] ?? NO_FACTION, localFaction)) return true;
   showNotice('You can only build a base in territory your faction controls!');
   return false;
@@ -1863,7 +2156,7 @@ function spawnInOwnTerritory(): void {
   }
   const s = pick >= 0
     ? (() => { const b = regionBounds(pick); return world.terrain.drySpawnInBounds(Math.random, b.minX + 6, b.maxX - 6, b.minZ + 6, b.maxZ - 6); })()
-    : world.terrain.randomDrySpawn(Math.random, WORLD_HALF);
+    : world.terrain.randomDrySpawn(Math.random, CORE_HALF);
   player.pos.set(s.x, s.y, s.z);
   player.vel.set(0, 0, 0);
 }
@@ -2333,7 +2626,7 @@ function frame(): void {
     }
     updateGrapple(dt); // sustained grapple pull (sets velocity before the step)
     player.update(dt, moveInput, world);
-    // World border: keep the player inside the 1000×1000 play area (the server
+    // World border: keep the player inside the 5000×5000 play area (the server
     // clamps authoritatively too).
     player.pos.x = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, player.pos.x));
     player.pos.z = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, player.pos.z));
@@ -2405,6 +2698,13 @@ function frame(): void {
         const wantFire = heldGun.auto ? input.leftDown : input.leftClicked;
         if (wantFire && fireCooldown <= 0 && reloadTimer <= 0) tryFire(heldStack!, heldGun);
         interaction.update(dt, input, camera, true, true);
+      } else if (input.rightClicked && !interaction.armedMove && heldStack &&
+          (heldStack.id === Item.Heart || heldStack.id === Item.RevivalBeacon)) {
+        // Lifesteal consumables: a Heart grows your max hearts; a Revival
+        // Beacon opens the eliminated-teammate picker.
+        if (heldStack.id === Item.Heart) consumeHeartItem();
+        else openRevivePicker();
+        interaction.update(dt, input, camera, true, true); // suppress mine + use
       } else if (input.rightClicked && !interaction.armedMove &&
           heldStack && ITEMS[heldStack.id]?.armor?.slot === 'chestplate') {
         // Right-click a chestplate-slot item straight from the hotbar to equip it
@@ -2535,7 +2835,9 @@ function frame(): void {
     if (!player.dead) audio.hurt();
     // Taking a hit levels your worn armor (more for harder hits).
     inventory.addArmorXp(2 + (lastHealth - player.health));
+    lastDamageLocal = worldTimeLocal; // combat tag (blocks totem travel 10s)
   }
+  tickTotemWindup(dt);
   lastHealth = player.health;
   if (player.inWater && !lastInWater && Math.abs(player.vel.y) > 1) audio.splash();
   lastInWater = player.inWater;
@@ -2575,6 +2877,7 @@ function frame(): void {
   if (guideOpen && !(invUI.open && invUI.mode === 'table')) hideGuide();
   hud.updateStatus({
     health: player.health,
+    hearts: localHearts,
     energy: player.energy,
     exhausted: player.exhausted,
     air: player.air,

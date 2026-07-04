@@ -10,7 +10,9 @@
 // authoritatively, and an init/connectivity model the offline client mirrors.
 // Phase 2 layers capture meters + adjacency rules on top of this.
 
-import { WORLD_BORDER, WORLD_HALF } from './net/protocol';
+// The war board covers the HEARTLAND core square only (B2): the 5000-block
+// world beyond it is the Wilds — no regions, no territory scoring out there.
+import { CORE_BORDER, CORE_HALF } from './net/protocol';
 import { FACTIONS, NO_FACTION, isFaction } from './teams';
 
 // --- Capture tuning (Phase 2). All tunable; the smoke tests assert behaviour,
@@ -30,8 +32,8 @@ export const DISCONNECT_SECONDS = 30;
 /** Board is GRID×GRID regions (6×6 = 36). */
 export const GRID = 6;
 export const REGION_COUNT = GRID * GRID;
-/** Side length of one square region in world units (≈166.67 for a 1000 world). */
-export const REGION_SIZE = WORLD_BORDER / GRID;
+/** Side length of one square region in world units (≈166.67 for the 1000 core). */
+export const REGION_SIZE = CORE_BORDER / GRID;
 
 /** The two faction ids, named for war flavour (A = left/home-west, B = right). */
 export const FACTION_A = FACTIONS[0].id; // 0 — Crimson, starts on the LEFT
@@ -49,11 +51,11 @@ function clampCell(v: number): number {
 
 /** Column (x axis) for a world x. Clamped into the board. */
 export function regionCol(x: number): number {
-  return clampCell(Math.floor((x + WORLD_HALF) / REGION_SIZE));
+  return clampCell(Math.floor((x + CORE_HALF) / REGION_SIZE));
 }
 /** Row (z axis) for a world z. Clamped into the board. */
 export function regionRow(z: number): number {
-  return clampCell(Math.floor((z + WORLD_HALF) / REGION_SIZE));
+  return clampCell(Math.floor((z + CORE_HALF) / REGION_SIZE));
 }
 
 /** Region index (0..REGION_COUNT-1) for a column+row. */
@@ -77,8 +79,8 @@ export interface RegionBounds { minX: number; maxX: number; minZ: number; maxZ: 
 /** World-coordinate bounds of a region index. */
 export function regionBounds(i: number): RegionBounds {
   const { col, row } = regionCoord(i);
-  const minX = -WORLD_HALF + col * REGION_SIZE;
-  const minZ = -WORLD_HALF + row * REGION_SIZE;
+  const minX = -CORE_HALF + col * REGION_SIZE;
+  const minZ = -CORE_HALF + row * REGION_SIZE;
   return { minX, maxX: minX + REGION_SIZE, minZ, maxZ: minZ + REGION_SIZE };
 }
 

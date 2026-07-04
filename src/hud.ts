@@ -39,6 +39,8 @@ function drawIcon(
 
 export interface StatusInfo {
   health: number;
+  /** Lifesteal max-health hearts (1 heart = 2 HP); sizes the heart row. */
+  hearts: number;
   /** Stamina, 0..1. */
   energy: number;
   /** True when energy is depleted and sprinting is locked out. */
@@ -167,21 +169,34 @@ export class HUD {
 
   /** Hearts (left), blue energy bar (right), bubbles when submerged. */
   updateStatus(s: StatusInfo): void {
-    const key = `${s.health}|${Math.round(s.energy * 40)}|${s.exhausted}|` +
+    const key = `${s.health}|${s.hearts}|${Math.round(s.energy * 40)}|${s.exhausted}|` +
       `${Math.ceil(s.air)}|${s.underwater}|${Math.round(s.armor * 2)}`;
     if (key === this.lastStatus) return;
     this.lastStatus = key;
 
+    // Lifesteal heart row: one icon per MAX heart (half-heart granularity).
+    // Past 10 hearts a full row won't fit, so render compactly: one heart icon
+    // + "12.5 / 14" style text (current hearts of max hearts).
     const hearts = (document.getElementById('hearts') as HTMLCanvasElement)
       .getContext('2d')!;
     hearts.clearRect(0, 0, 202, 20);
-    for (let i = 0; i < 10; i++) {
-      const v = s.health - i * 2; // 2 HP per heart
-      drawIcon(hearts, i * 20, HEART_MASK, (px) => {
-        if (v >= 2) return px % 6 === 1 ? '#ff6a6a' : '#e02020';
-        if (v >= 1) return px < 3 ? '#e02020' : '#3b3b3b';
-        return '#3b3b3b';
-      });
+    const maxHearts = Math.max(1, Math.round(s.hearts));
+    const heartFill = (v: number) => (px: number): string => {
+      if (v >= 2) return px % 6 === 1 ? '#ff6a6a' : '#e02020';
+      if (v >= 1) return px < 3 ? '#e02020' : '#3b3b3b';
+      return '#3b3b3b';
+    };
+    if (maxHearts <= 10) {
+      for (let i = 0; i < maxHearts; i++) {
+        drawIcon(hearts, i * 20, HEART_MASK, heartFill(s.health - i * 2));
+      }
+    } else {
+      drawIcon(hearts, 0, HEART_MASK, heartFill(Math.min(2, s.health)));
+      hearts.font = 'bold 13px monospace';
+      hearts.fillStyle = '#1a0a0a';
+      hearts.fillText(`${s.health / 2} / ${maxHearts}`, 21, 15);
+      hearts.fillStyle = '#ff5a5a';
+      hearts.fillText(`${s.health / 2} / ${maxHearts}`, 20, 14);
     }
 
     // Energy: 10 blue segments filling left→right; dim red while exhausted.

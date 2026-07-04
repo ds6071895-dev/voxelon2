@@ -12,8 +12,22 @@ export const SERVER_PORT = 8080;
 export const SNAPSHOT_HZ = 15;     // server -> clients transform broadcasts
 export const TRANSFORM_HZ = 20;    // client -> server transform sends
 export const WORLD_SEED = 1337;    // fixed shared seed (clients + server)
-export const WORLD_BORDER = 1000;  // square play area side length (centred on origin)
+export const WORLD_BORDER = 5000;  // square play area side length (centred on origin)
 export const WORLD_HALF = WORLD_BORDER / 2; // movement clamps to [-HALF, +HALF]
+// The HEARTLAND core: the inner square where society lives — claims, the war
+// region board, oil scoring and spawns are all core-only. Outside it lie the
+// WILDS: no claims, no shields, denser mobs — pure risk/reward frontier.
+export const CORE_BORDER = 1000;
+export const CORE_HALF = CORE_BORDER / 2;
+/** Is a world position inside the Heartland core square? */
+export function inCore(x: number, z: number): boolean {
+  return Math.abs(x) <= CORE_HALF && Math.abs(z) <= CORE_HALF;
+}
+// Waypoint Totems (B4): fast travel across the 5000-block world.
+export const MAX_ATTUNED = 4;        // attuned totems per player
+export const TOTEM_COOLDOWN = 60;    // seconds between teleports (server clock)
+export const TOTEM_WINDUP = 3;       // client-side cast time before the port
+export const COMBAT_TAG = 10;        // seconds after ANY damage that block a port
 export const MELEE_DAMAGE = 4;     // server-applied fist damage
 export const MELEE_RANGE = 4.5;
 export const EDIT_RANGE = 7;       // max distance a player may edit a block
@@ -38,6 +52,8 @@ export interface PlayerInfo extends PlayerSnapshot {
   faction: number; // preset team id (teams.ts); NO_FACTION when neutral/offline
   mode: GameMode; // gamemode (survival default; admin-set creative/spectator)
   seasonsWon: number; // permanent "Seasons Won" badge rank (Phase 5)
+  /** Lifesteal max-health currency (Milestone A): max HP = hearts * 2. */
+  hearts: number;
 }
 
 /** A dropped item entity owned by the server. */
@@ -129,7 +145,23 @@ export type ClientMsg =
   // Persistence: the client periodically pushes its owned state (inventory +
   // hotbar + position) for the server to store against the account and restore
   // on next login. Opaque blob — the server treats it as data, not authority.
-  | { t: 'saveState'; data: Record<string, unknown> };
+  | { t: 'saveState'; data: Record<string, unknown> }
+  // Lifesteal (Milestone A): consume a Heart item (+1 max heart, item cost is
+  // paid client-side like other crafts) / bottle one of YOUR hearts into a
+  // Heart item (the server enforces the withdrawal floor; the item itself is
+  // minted by the crafting grid client-side).
+  | { t: 'heartConsume' }
+  | { t: 'heartWithdraw' }
+  // Revival Beacon: ask for the eliminated faction-mates you could revive,
+  // then revive one by username (beacon item is consumed client-side on the
+  // server's `revived ok` confirmation).
+  | { t: 'reviveList' }
+  | { t: 'beaconRevive'; target: string }
+  // Waypoint Totems (B4): attune to a placed totem block (toggle; max 4), and
+  // teleport to an attuned one (the client runs the 3s wind-up; the server
+  // enforces attunement + block-exists + 60s cooldown + the combat tag).
+  | { t: 'attune'; x: number; y: number; z: number }
+  | { t: 'totemTeleport'; x: number; y: number; z: number };
 
 // --- server -> client -------------------------------------------------------
 export type ServerMsg =
@@ -205,7 +237,23 @@ export type ServerMsg =
   | { t: 'gamemode'; id: number; mode: GameMode }
   | { t: 'teleport'; x: number; y: number; z: number }
   // Admin notice shown to a player (e.g. "You are now in creative mode").
-  | { t: 'notice'; text: string };
+  | { t: 'notice'; text: string }
+  // Lifesteal (Milestone A): the local player's authoritative hearts count.
+  // `reason` drives the client toast + sound; `from` names the other player on
+  // a steal/loss.
+  | { t: 'hearts'; hearts: number;
+      reason: 'init' | 'steal' | 'loss' | 'consume' | 'withdraw' | 'admin';
+      from?: string }
+  // You hit 0 hearts: full-screen banner (the server disconnects shortly
+  // after; `until` is the wall-clock ms your elimination ends).
+  | { t: 'eliminated'; by: string; until: number }
+  // Revival Beacon support: the eliminated faction-mates you could revive,
+  // and the result of a revive attempt (ok=true consumes the beacon).
+  | { t: 'reviveList'; targets: { username: string; remainingMs: number }[] }
+  | { t: 'revived'; target: string; ok: boolean }
+  // Waypoint Totems (B4): the player's authoritative attuned-totem list (sent
+  // on welcome + after every attune/unattune/prune).
+  | { t: 'attuned'; totems: { x: number; y: number; z: number }[] };
 
 const ADJECTIVES = [
   'Brave', 'Swift', 'Iron', 'Shadow', 'Crimson', 'Frost', 'Rapid', 'Silent',

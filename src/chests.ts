@@ -20,6 +20,11 @@ export class Chests {
     return this.local.get(this.key(x, y, z)) ?? new Array(CHEST_SLOTS).fill(null);
   }
 
+  /** Is there any cached content at this position? */
+  has(x: number, y: number, z: number): boolean {
+    return this.local.has(this.key(x, y, z));
+  }
+
   /** Cache an authoritative copy received from the server. */
   store(x: number, y: number, z: number, slots: (ItemStack | null)[]): void {
     this.local.set(this.key(x, y, z), slots);

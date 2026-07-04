@@ -11,6 +11,8 @@ import { factionColor, isFaction } from './teams';
 // Per-face shading (right/left/top/bottom/front/back) — mimics Minecraft's
 // directional lighting so the model reads as 3D even without real lights.
 const FACE_SHADE = [0.75, 0.6, 1.0, 0.45, 0.85, 0.7];
+// Fallback max HP for a remote whose hearts we don't know (lifesteal makes
+// max HP per-player: hearts * 2).
 const REMOTE_MAX_HEALTH = 20;
 
 /** The deterministic skin tone for a given skin seed — the FIRST three draws of
@@ -391,7 +393,9 @@ export class RemotePlayers {
       const showHealth = id === this.hovered && av.group.visible;
       av.healthSprite.visible = showHealth;
       if (showHealth && av.lastHealth !== r.health) {
-        drawHealthBar(av.healthCanvas, r.health / REMOTE_MAX_HEALTH);
+        const remoteMax = Number.isFinite(r.info.hearts) && r.info.hearts > 0
+          ? r.info.hearts * 2 : REMOTE_MAX_HEALTH;
+        drawHealthBar(av.healthCanvas, Math.min(1, r.health / remoteMax));
         av.healthTex.needsUpdate = true;
         av.lastHealth = r.health;
       }

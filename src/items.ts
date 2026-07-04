@@ -67,6 +67,12 @@ export const enum Item {
   OilBomb = 157,
   SpyDisguise = 158,
   JumpBoost = 159,
+  // Lifesteal (Milestone A): a bottled max-health heart + the teammate-revival
+  // totem. Hearts are lootable/tradeable/raidable like any other item.
+  Heart = 160,
+  RevivalBeacon = 161,
+  // Crystal Shard (Milestone C): mined from Crystalfields spikes (Wilds-only).
+  CrystalShard = 162,
 }
 
 export interface ToolInfo {
@@ -257,6 +263,17 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Block.Core]: blockItem(Block.Core),
   // Personal respawn point block (right-click to set spawn).
   [Block.RespawnBeacon]: blockItem(Block.RespawnBeacon),
+  // Waypoint Totem (B4): fast-travel anchor (right-click to attune).
+  [Block.WaypointTotem]: blockItem(Block.WaypointTotem),
+  // Discovery biomes (Milestone C).
+  [Block.JungleLog]: blockItem(Block.JungleLog),
+  [Block.JungleLeaves]: blockItem(Block.JungleLeaves),
+  [Block.JunglePlanks]: blockItem(Block.JunglePlanks),
+  [Block.CherryLog]: blockItem(Block.CherryLog),
+  [Block.CherryLeaves]: blockItem(Block.CherryLeaves),
+  [Block.CherryPlanks]: blockItem(Block.CherryPlanks),
+  [Block.Mud]: blockItem(Block.Mud),
+  [Block.CrystalBlock]: blockItem(Block.CrystalBlock),
   // Terrain (M21): mesa + ashlands materials (Lava is a liquid, like Water).
   [Block.RedSand]: blockItem(Block.RedSand),
   [Block.Terracotta]: blockItem(Block.Terracotta),
@@ -368,6 +385,12 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Item.OilBomb]: gadgetItem('Oil Bomb', Tile.OilBomb, 8),
   [Item.SpyDisguise]: gadgetItem('Spy Disguise', Tile.SpyDisguise, 1),
   [Item.JumpBoost]: gadgetItem('Jump Boost', Tile.JumpBoost, 8),
+
+  // Lifesteal (Milestone A). Hearts stack small (they're precious loot);
+  // the Revival Beacon is a one-shot totem.
+  [Item.Heart]: gadgetItem('Heart', Tile.Heart, 16),
+  [Item.CrystalShard]: pureItem('Crystal Shard', Tile.CrystalShard),
+  [Item.RevivalBeacon]: gadgetItem('Revival Beacon', Tile.RevivalBeacon, 1),
 };
 
 /**
@@ -410,8 +433,15 @@ export function dropFor(
       return null;
     case Block.BirchLeaves:
     case Block.SpruceLeaves:
+    case Block.JungleLeaves:
       if (rng < 0.02) return { id: Item.Stick, count: 1 };
       return null;
+    case Block.CherryLeaves:
+      // Petals are pretty but yield little.
+      if (rng < 0.015) return { id: Item.Stick, count: 1 };
+      return null;
+    case Block.CrystalBlock:
+      return { id: Item.CrystalShard, count: 1 + (rng < 0.35 ? 1 : 0) };
     case Block.Glass:
     case Block.TallGrass:
       return null; // vanilla: nothing without shears/silk touch

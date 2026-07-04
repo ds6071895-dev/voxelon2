@@ -8,8 +8,13 @@ import { materialOf } from '../src/audio';
 import { Biome, BIOME_NAMES } from '../src/biomes';
 import {
   Block, BLOCKS, isSlab, isTopSlab, isSolid, orientStairsForYaw, slabBottomId,
-  slabPlacement, slabTopId, stairsBaseOf,
+  slabPlacement, slabTopId, stairsBaseOf, Tile,
 } from '../src/blocks';
+import {
+  COMEBACK_HEARTS, ELIMINATION_MS, MAX_HEARTS, START_HEARTS, WITHDRAW_FLOOR,
+  canConsume, canWithdraw, clampHearts, formatRemaining, maxHealthFor,
+  transferHeart,
+} from '../src/hearts';
 import { Chunk } from '../src/chunk';
 import { matchGrid, craftResult, consumeCraft } from '../src/crafting';
 import { Furnaces, SMELT } from '../src/furnace';
@@ -31,7 +36,10 @@ import { Player } from '../src/player';
 import { daylight } from '../src/sky';
 import { Survival } from '../src/survival';
 import { GameServer } from '../src/net/server_core';
-import { mitigate, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE, WORLD_HALF } from '../src/net/protocol';
+import {
+  mitigate, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE, WORLD_BORDER, WORLD_HALF,
+  CORE_BORDER, CORE_HALF, inCore, MAX_ATTUNED, TOTEM_COOLDOWN, COMBAT_TAG,
+} from '../src/net/protocol';
 import {
   Machines, MachineType, MAX_LEVEL, allowedFilterMask, applyUpgrade,
   autominerRates, claimMachine, collectMachine, currentRate, damageMachine,
@@ -51,7 +59,7 @@ import {
 } from '../src/teams';
 import {
   GRID, REGION_COUNT, FACTION_A, FACTION_B, Regions, regionOf, regionIndex,
-  regionCenter, regionCounts, neighbors4, initialOwners, capitalOf, capitalFaction,
+  regionBounds, regionCenter, regionCounts, neighbors4, initialOwners, capitalOf, capitalFaction,
   connectedRegions, canCapture, capitalCapturable, DISCONNECT_SECONDS,
 } from '../src/regions';
 import {
@@ -67,6 +75,10 @@ import {
 } from '../src/gadgets';
 import { itemDescription } from '../src/itemdesc';
 import { Accounts, validUsername } from '../src/net/accounts';
+import {
+  structureKindAt, structureStamp, structureChestTier,
+} from '../src/structures';
+import { LOOT_TABLES, chestLoot, chestLootSlots } from '../src/loot';
 import {
   Claims, GRACE_PERIOD, MAX_SHIELD_HP, OIL_PER_BARREL, chunkOf, claimChunkKeys,
   claimProtected, damageShield, feedOil, inGrace, newClaim, sanitizeClaim,
@@ -263,7 +275,7 @@ check('daylight: noon full, midnight moonlit floor, dawn between',
 // --- Survival: passive regen + drowning -------------------------------------------
 {
   const mk = () => ({
-    health: 10, air: 15, eyeUnderwater: false, dead: false, regenCooldown: 0,
+    health: 10, maxHealth: 20, air: 15, eyeUnderwater: false, dead: false, regenCooldown: 0,
     damage(n: number) {
       this.health = Math.max(0, this.health - n);
       this.regenCooldown = 3; // mirror Player.damage: pauses regen after a hit
@@ -303,7 +315,7 @@ check('daylight: noon full, midnight moonlit floor, dawn between',
 const biomeChunk = new Map<Biome, [number, number]>();
 for (let cx = -120; cx <= 120; cx++) {
   for (let cz = -120; cz <= 120; cz++) {
-    if (biomeChunk.size >= 9) break;
+    if (biomeChunk.size >= 15) break; // all biome kinds incl. Milestone C's four
     const x = cx * 16 + 8, z = cz * 16 + 8;
     const b = terrain.biomeWithWater(x, z, terrain.height(x, z));
     if (!biomeChunk.has(b)) biomeChunk.set(b, [cx, cz]);
@@ -636,7 +648,8 @@ check('materialOf maps blocks to sound classes',
   };
 
   check('only hostile mob types exist',
-    Object.keys(MOB_DEFS).sort().join(',') === 'creeper,zombie');
+    Object.keys(MOB_DEFS).sort().join(',') === 'creeper,skitter,spitter,zombie' &&
+    Object.values(MOB_DEFS).every((d) => d.hostile));
 
   const modelMobs = newMobs();
   let ok = true;
@@ -2889,6 +2902,613 @@ check('furnace smelts ore/sand/log but not removed foods',
       p.intersectsBlock(cx, base, cz, Block.OakSlabTop) &&
       p.intersectsBlock(cx, base, cz)); // no id -> full cube fallback
   }
+}
+
+
+// =============================================================================
+// LIFESTEAL (Milestone A): hearts, steal, elimination, revival, items
+// =============================================================================
+
+// --- hearts.ts pure model -----------------------------------------------------
+{
+  check('clampHearts clamps + fail-safes junk to the 10-heart start',
+    clampHearts(-5) === 0 && clampHearts(99) === MAX_HEARTS &&
+    clampHearts(NaN) === START_HEARTS && clampHearts('x') === START_HEARTS &&
+    clampHearts(7.9) === 7);
+  check('maxHealthFor: 2 HP per heart (10 hearts = today\'s 20 HP)',
+    maxHealthFor(10) === 20 && maxHealthFor(1) === 2 && maxHealthFor(20) === 40);
+  const t1 = transferHeart(10, 10);
+  check('transferHeart moves exactly one heart', t1.killer === 11 && t1.victim === 9);
+  const t2 = transferHeart(MAX_HEARTS, 5);
+  check('a kill at 20 hearts wastes the steal (victim still loses)',
+    t2.killer === MAX_HEARTS && t2.victim === 4);
+  check('a victim at 1 heart drops to 0 (elimination trigger)',
+    transferHeart(10, 1).victim === 0);
+  check('withdraw floor: allowed at 3 hearts, blocked at 2',
+    canWithdraw(3) && !canWithdraw(WITHDRAW_FLOOR));
+  check('consume cap: allowed at 19 hearts, blocked at 20',
+    canConsume(19) && !canConsume(MAX_HEARTS));
+  check('formatRemaining is a kid-friendly countdown',
+    formatRemaining(17 * 3600_000 + 22 * 60_000) === '17h 22m' &&
+    formatRemaining(30_000) === '1m');
+}
+
+// --- Server: PvP kills steal a heart; nothing else does ------------------------
+{
+  const s = new GameServer(1337, mulberry32(77));
+  s.addPlayer(1); s.addPlayer(2); // auto-balance -> opposite factions
+  const heartsMsg = (out: ReturnType<GameServer['handle']>, to: number) =>
+    out.find((o) => o.to === to && o.msg.t === 'hearts')?.msg as
+      { hearts: number; reason: string; from?: string } | undefined;
+  const aim = () => {
+    s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: Math.PI, pitch: 0 }); // faces +z
+    s.handle(2, { t: 'xform', x: 0, y: 70, z: 20, yaw: 0, pitch: 0 });
+  };
+  aim();
+  const kill = s.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 });
+  const kh = heartsMsg(kill, 1), vh = heartsMsg(kill, 2);
+  check('a PvP kill steals a heart (killer 11 "steal", victim 9 "loss")',
+    kh?.hearts === 11 && kh?.reason === 'steal' &&
+    vh?.hearts === 9 && vh?.reason === 'loss');
+  const re = s.handle(2, { t: 'respawn' }).find((o) => o.msg.t === 'respawned')!
+    .msg as { health: number };
+  check('the victim respawns at their reduced max health (9 hearts = 18 HP)',
+    re.health === 18);
+  // A death with NO recent direct player damager moves nothing: let the 10s
+  // kill-credit window lapse, then die to "the world" (fall/lava/mob path).
+  s.tickClaims(11); // advances worldTime past KILL_CREDIT_WINDOW
+  const mobDeath = s.handle(2, { t: 'selfhurt', amount: 9999 });
+  check('a mob/fall death moves no hearts',
+    mobDeath.some((o) => o.msg.t === 'killfeed') &&
+    !mobDeath.some((o) => o.msg.t === 'hearts') &&
+    !mobDeath.some((o) => o.msg.t === 'eliminated'));
+  s.handle(2, { t: 'respawn' });
+  // A killer already at the cap wastes the steal but the victim still pays.
+  s.adminSetHearts(1, MAX_HEARTS);
+  aim();
+  const capKill = s.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 });
+  check('a kill at 20 hearts keeps the killer at 20 (victim still loses one)',
+    heartsMsg(capKill, 1)?.hearts === MAX_HEARTS &&
+    heartsMsg(capKill, 2)?.hearts === 8);
+}
+
+// --- Server: 0 hearts eliminates (and only PvP can do it) ----------------------
+{
+  const s = new GameServer(1337, mulberry32(78));
+  s.addPlayer(1, { username: 'Hunter', faction: 0 });
+  s.addPlayer(2, { username: 'Prey', faction: 1 });
+  // A mob death at 1 heart does NOT eliminate (kids never lose hearts to zombies).
+  s.adminSetHearts(2, 1);
+  const mob = s.handle(2, { t: 'selfhurt', amount: 9999 });
+  check('a mob kill at 1 heart does NOT eliminate',
+    !mob.some((o) => o.msg.t === 'eliminated') &&
+    s.handle(2, { t: 'respawn' }).some((o) => o.msg.t === 'respawned'));
+  // A PvP kill at 1 heart DOES: hook fires, banner + killfeed go out, respawn
+  // is refused, and the comeback penalty (5 hearts) is what persists.
+  let hooked = '';
+  s.onEliminate = (u, by) => { hooked = `${u}<${by}`; return 4242; };
+  s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: Math.PI, pitch: 0 });
+  s.handle(2, { t: 'xform', x: 0, y: 70, z: 20, yaw: 0, pitch: 0 });
+  const fatal = s.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 });
+  const banner = fatal.find((o) => o.to === 2 && o.msg.t === 'eliminated')?.msg as
+    { by: string; until: number } | undefined;
+  check('0 hearts eliminates: shell hook + full-screen banner + killfeed line',
+    hooked === 'Prey<Hunter' && banner?.by === 'Hunter' && banner?.until === 4242 &&
+    fatal.some((o) => o.msg.t === 'killfeed' &&
+      String((o.msg as { victim: string }).victim).includes('ELIMINATED')));
+  check('an eliminated player cannot respawn (only the boot)',
+    s.handle(2, { t: 'respawn' }).length === 0);
+  check('the comeback penalty (5 hearts) is what persists at elimination',
+    (s.capturePlayerState(2)!.data.hearts as number) === COMEBACK_HEARTS);
+}
+
+// --- Server: an unattended turret kill moves nothing ---------------------------
+{
+  const s = new GameServer(1337, mulberry32(79));
+  s.addPlayer(1, { username: 'Owner', faction: 0 });
+  s.addPlayer(2, { username: 'Walker', faction: 1 });
+  s.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+  s.handle(1, { t: 'edit', x: 1, y: 70, z: 0, block: Block.Turret });
+  s.handle(1, { t: 'turretClaim', x: 1, y: 70, z: 0 });
+  s.handle(1, { t: 'turretLoad', x: 1, y: 70, z: 0, item: Item.Cannonball, count: 64 });
+  s.handle(1, { t: 'turretLoad', x: 1, y: 70, z: 0, item: Item.OilBarrel, count: 8 });
+  s.adminSetHearts(2, 1);
+  s.handle(2, { t: 'xform', x: 3, y: 70, z: 0, yaw: 0, pitch: 0 });
+  const out: ReturnType<GameServer['handle']> = [];
+  for (let i = 0; i < 60 && !s.snapshot().find((p) => p.id === 2)!.dead; i++) {
+    out.push(...s.tickTurrets(1));
+  }
+  check('a turret kill with no recent player attacker moves NO hearts',
+    s.snapshot().find((p) => p.id === 2)!.dead &&
+    !out.some((o) => o.msg.t === 'hearts') &&
+    !out.some((o) => o.msg.t === 'eliminated'));
+}
+
+// --- Server: heart consume/withdraw validation ---------------------------------
+{
+  const s = new GameServer(1337, mulberry32(80));
+  s.addPlayer(1);
+  const heartsOf = (out: ReturnType<GameServer['handle']>) =>
+    (out.find((o) => o.msg.t === 'hearts')?.msg as { hearts: number } | undefined)?.hearts;
+  check('heartConsume grants +1 max heart', heartsOf(s.handle(1, { t: 'heartConsume' })) === 11);
+  s.adminSetHearts(1, MAX_HEARTS);
+  const full = s.handle(1, { t: 'heartConsume' });
+  check('heartConsume at the 20-heart cap is rejected with a notice',
+    !full.some((o) => o.msg.t === 'hearts') && full.some((o) => o.msg.t === 'notice'));
+  s.adminSetHearts(1, 3);
+  const w1 = s.handle(1, { t: 'heartWithdraw' });
+  check('heartWithdraw at 3 hearts leaves the 2-heart floor', heartsOf(w1) === 2);
+  const w2 = s.handle(1, { t: 'heartWithdraw' });
+  check('heartWithdraw below the floor is rejected with a notice',
+    !w2.some((o) => o.msg.t === 'hearts') && w2.some((o) => o.msg.t === 'notice'));
+  // Spectators can't touch the lifesteal economy.
+  s.adminSetMode(1, 'spectator');
+  check('a spectator cannot consume/withdraw hearts',
+    s.handle(1, { t: 'heartConsume' }).length === 0 &&
+    s.handle(1, { t: 'heartWithdraw' }).length === 0);
+}
+
+// --- Server: hearts persistence round-trip -------------------------------------
+{
+  const s = new GameServer(1337, mulberry32(81));
+  s.addPlayer(1, { username: 'Keeper', faction: 0 });
+  s.adminSetHearts(1, 14);
+  const cap = s.capturePlayerState(1)!;
+  check('capturePlayerState carries the hearts count', cap.data.hearts === 14);
+  const s2 = new GameServer(1337, mulberry32(82));
+  const w = s2.addPlayer(5, { username: 'Keeper', faction: 0, data: cap.data })
+    .find((o) => o.to === 5)!.msg as
+    { players: { id: number; hearts: number; health: number }[] };
+  const me = w.players.find((p) => p.id === 5)!;
+  check('hearts survive account data -> re-login (max HP follows: 14 = 28 HP)',
+    me.hearts === 14 && me.health === 28);
+  const s3 = new GameServer(1337, mulberry32(83));
+  const w2 = s3.addPlayer(6, { username: 'Junk', faction: 0, data: { hearts: 'lots' } })
+    .find((o) => o.to === 6)!.msg as { players: { id: number; hearts: number }[] };
+  check('junk saved hearts fail-safe to the 10-heart start',
+    w2.players.find((p) => p.id === 6)!.hearts === START_HEARTS);
+}
+
+// --- Server: Revival Beacon plumbing (faction-gated via shell hooks) ------------
+{
+  const s = new GameServer(1337, mulberry32(84));
+  s.addPlayer(1, { username: 'Medic', faction: 0 });
+  s.listEliminated = (f) => (f === 0 ? [{ username: 'FallenPal', remainingMs: 60_000 }] : []);
+  const list = s.handle(1, { t: 'reviveList' }).find((o) => o.msg.t === 'reviveList')!
+    .msg as { targets: { username: string }[] };
+  check('reviveList returns eliminated faction-mates',
+    list.targets.length === 1 && list.targets[0].username === 'FallenPal');
+  let revived = '';
+  s.onRevive = (target, faction, by) => {
+    if (faction !== 0 || target !== 'FallenPal') return false;
+    revived = `${by}->${target}`;
+    return true;
+  };
+  const ok = s.handle(1, { t: 'beaconRevive', target: 'FallenPal' });
+  check('beaconRevive succeeds for an eliminated teammate (ok=true consumes the beacon)',
+    ok.some((o) => o.msg.t === 'revived' && (o.msg as { ok: boolean }).ok) &&
+    revived === 'Medic->FallenPal');
+  check('beaconRevive on a non-eliminated / unknown target is rejected (ok=false)',
+    s.handle(1, { t: 'beaconRevive', target: 'Nobody' })
+      .some((o) => o.msg.t === 'revived' && !(o.msg as { ok: boolean }).ok));
+}
+
+// --- Accounts: the 24h elimination lockout (login gate) -------------------------
+{
+  const fakeHash = (pass: string, salt: string): string => `${pass}:${salt}`;
+  const acc = new Accounts();
+  acc.register('Fallen1', 'pass', fakeHash, 'salt', 0);
+  const now = 1_000_000;
+  acc.eliminate('Fallen1', now + ELIMINATION_MS, COMEBACK_HEARTS);
+  check('elimination records the 24h lockout + writes the comeback hearts',
+    acc.eliminationRemaining('Fallen1', now) === ELIMINATION_MS &&
+    (acc.get('Fallen1')!.data!.hearts as number) === COMEBACK_HEARTS);
+  check('eliminatedOf lists the fallen for their own faction only',
+    acc.eliminatedOf(0, now).length === 1 && acc.eliminatedOf(1, now).length === 0);
+  check('the lockout expires on its own (timer path)',
+    acc.eliminationRemaining('Fallen1', now + ELIMINATION_MS + 1) === 0);
+  check('clearElimination (revive) unlocks + stamps the reviver once',
+    acc.clearElimination('Fallen1', now, 'Medic') &&
+    acc.eliminationRemaining('Fallen1', now) === 0 &&
+    acc.popRevivedBy('Fallen1') === 'Medic' &&
+    acc.popRevivedBy('Fallen1') === undefined);
+  acc.eliminate('Fallen1', now + 5000);
+  const acc2 = new Accounts(JSON.parse(JSON.stringify(acc.toJSON())));
+  check('an elimination survives the accounts save/load round-trip',
+    acc2.eliminationRemaining('Fallen1', now) === 5000);
+}
+
+// --- Items + recipes: Heart and Revival Beacon ----------------------------------
+{
+  check('Heart + Revival Beacon are registered items with their own sprites',
+    ITEMS[Item.Heart]?.sprite === Tile.Heart &&
+    ITEMS[Item.RevivalBeacon]?.sprite === Tile.RevivalBeacon &&
+    ITEMS[Item.RevivalBeacon]?.maxStack === 1);
+  const cells: (ItemStack | null)[] = new Array(9).fill(null);
+  cells[0] = { id: Item.GoldIngot, count: 1 };
+  cells[1] = { id: Item.GoldIngot, count: 1 };
+  check('2 gold ingots craft a Heart (the vessel; the heart cost is enforced server-side)',
+    matchGrid(cells)?.id === Item.Heart);
+  const beacon: (ItemStack | null)[] = [
+    { id: Item.TitaniumIngot, count: 1 }, { id: Item.Diamond, count: 1 }, { id: Item.TitaniumIngot, count: 1 },
+    { id: Item.TitaniumIngot, count: 1 }, { id: Item.Heart, count: 1 }, { id: Item.TitaniumIngot, count: 1 },
+    null, { id: Item.Diamond, count: 1 }, null,
+  ];
+  check('the Revival Beacon crafts from 4 titanium + 2 diamonds + a Heart',
+    matchGrid(beacon)?.id === Item.RevivalBeacon);
+  check('lifesteal items carry kid-friendly descriptions',
+    itemDescription(Item.Heart).length > 0 && itemDescription(Item.RevivalBeacon).length > 0);
+}
+
+
+// =============================================================================
+// MILESTONE B: 5000×5000 world, Heartland core, Waypoint Totems
+// =============================================================================
+
+// --- B1/B2: border + core constants, war board confined to the core ------------
+{
+  check('world grew to 5000×5000 with a 1000×1000 Heartland core',
+    WORLD_BORDER === 5000 && WORLD_HALF === 2500 &&
+    CORE_BORDER === 1000 && CORE_HALF === 500);
+  check('inCore edges: ±(500−ε) inside, ±(500+ε) outside',
+    inCore(499, 0) && inCore(-500, 500) && !inCore(501, 0) && !inCore(0, -500.5));
+  let allIn = true;
+  for (let i = 0; i < REGION_COUNT; i++) {
+    const b = regionBounds(i);
+    if (b.minX < -CORE_HALF || b.maxX > CORE_HALF || b.minZ < -CORE_HALF || b.maxZ > CORE_HALF) allIn = false;
+    const c = regionCenter(i);
+    if (!inCore(c.x, c.z)) allIn = false;
+  }
+  check('the whole war region board (bounds + control points) sits inside the core', allIn);
+}
+
+// --- B2: Core (claim) placement is Heartland-only ------------------------------
+{
+  const s = new GameServer(1337, mulberry32(90));
+  s.addPlayer(1, { username: 'Founder', faction: 0 });
+  // Inside the core, at the western edge (x=-499 is region col 0 = faction 0's).
+  s.handle(1, { t: 'xform', x: -499, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+  const okPlace = s.handle(1, { t: 'edit', x: -499, y: 70, z: 0, block: Block.Core });
+  check('a Core at x=−(500−ε) (core edge, owned region) founds a claim',
+    okPlace.some((o) => o.msg.t === 'claim'));
+  // Outside the core: rejected with the friendly Heartland notice, no claim.
+  s.handle(1, { t: 'xform', x: -503, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+  const wilds = s.handle(1, { t: 'edit', x: -503, y: 70, z: 0, block: Block.Core });
+  check('a Core at x=−(500+ε) (the Wilds) is rejected with the Heartland notice',
+    !wilds.some((o) => o.msg.t === 'claim') &&
+    wilds.some((o) => o.msg.t === 'notice' &&
+      /Heartland/.test((o.msg as { text: string }).text)));
+  // Ordinary building in the Wilds is still allowed (machines/turrets/loot piñatas).
+  const build = s.handle(1, { t: 'edit', x: -503, y: 70, z: 0, block: Block.OakPlanks });
+  check('ordinary blocks (and machines) still place fine in the Wilds',
+    build.some((o) => o.msg.t === 'edit'));
+}
+
+// --- B2: spawns never land outside the core ------------------------------------
+{
+  const s = new GameServer(1337, mulberry32(91));
+  let allCore = true;
+  for (let id = 1; id <= 24; id++) {
+    const w = s.addPlayer(id).find((o) => o.to === id)!.msg as
+      { players: { id: number; x: number; z: number }[] };
+    const me = w.players.find((p) => p.id === id)!;
+    if (!inCore(me.x, me.z)) allCore = false;
+  }
+  check('24 fresh spawns all land inside the Heartland core', allCore);
+}
+
+// --- B2: war flags only plant inside the core -----------------------------------
+{
+  const facs = FACTIONS.map((f) => f.id);
+  const srv = new GameServer(1337, mulberry32(92));
+  srv.addPlayer(1, { username: 'WarKiller', faction: facs[0] });
+  srv.addPlayer(2, { username: 'WarVictim', faction: facs[1] });
+  srv.adminStartWar(600);
+  // Kill deep in the Wilds: no flag may plant (regions don't exist out there).
+  srv.handle(1, { t: 'xform', x: 2000, y: 70, z: 2000, yaw: Math.PI, pitch: 0 });
+  srv.handle(2, { t: 'xform', x: 2000, y: 70, z: 2020, yaw: 0, pitch: 0 });
+  srv.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 });
+  const flags = (srv.flagsSnapshot() as Extract<ReturnType<GameServer['flagsSnapshot']>, { t: 'flags' }>);
+  check('a war kill in the Wilds plants NO region flag',
+    flags.t === 'flags' && flags.flags.length === 0);
+}
+
+// --- B4: Waypoint Totems — attune cap, toggle, teleport rules --------------------
+{
+  const s = new GameServer(1337, mulberry32(93));
+  s.addPlayer(1, { username: 'Traveler', faction: 0 });
+  const attunedOf = (out: ReturnType<GameServer['handle']>) =>
+    (out.find((o) => o.msg.t === 'attuned')?.msg as
+      { totems: { x: number; y: number; z: number }[] } | undefined)?.totems;
+  const noticeOf = (out: ReturnType<GameServer['handle']>) =>
+    (out.find((o) => o.msg.t === 'notice')?.msg as { text: string } | undefined)?.text ?? '';
+  // Place + attune 4 totems in reach (the cap), then a 5th is refused.
+  s.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+  for (let i = 0; i < 5; i++) s.handle(1, { t: 'edit', x: i, y: 70, z: 2, block: Block.WaypointTotem });
+  for (let i = 0; i < 4; i++) s.handle(1, { t: 'attune', x: i, y: 70, z: 2 });
+  const fifth = s.handle(1, { t: 'attune', x: 4, y: 70, z: 2 });
+  check('attunement caps at 4 totems (5th refused with a notice)',
+    !attunedOf(fifth) && /at most 4/.test(noticeOf(fifth)));
+  // Toggle: re-attuning an attuned totem releases it, freeing a slot.
+  const release = s.handle(1, { t: 'attune', x: 0, y: 70, z: 2 });
+  check('re-attuning releases (toggle) and frees a slot',
+    attunedOf(release)?.length === 3 &&
+    attunedOf(s.handle(1, { t: 'attune', x: 4, y: 70, z: 2 }))?.length === 4);
+  // Attuning a non-totem block or out of reach is a no-op.
+  check('attuning a non-totem cell / out-of-reach totem is rejected',
+    s.handle(1, { t: 'attune', x: 0, y: 70, z: 0 }).length === 0 &&
+    s.handle(1, { t: 'attune', x: 400, y: 70, z: 400 }).length === 0);
+
+  // Teleport: succeeds to a standing attuned totem (lands on top)...
+  const tp1 = s.handle(1, { t: 'totemTeleport', x: 1, y: 70, z: 2 });
+  const tpMsg = tp1.find((o) => o.msg.t === 'teleport')?.msg as
+    { x: number; y: number; z: number } | undefined;
+  check('totem teleport lands the player on top of the totem',
+    tpMsg?.x === 1.5 && tpMsg?.y === 71 && tpMsg?.z === 2.5);
+  // ...but a second port inside the 60s cooldown is refused.
+  const tp2 = s.handle(1, { t: 'totemTeleport', x: 2, y: 70, z: 2 });
+  check('a second teleport inside the 60s cooldown is refused server-side',
+    !tp2.some((o) => o.msg.t === 'teleport') && /recharging/.test(noticeOf(tp2)));
+  // After the cooldown, a recent hit (combat tag) still blocks the port.
+  s.tickClaims(TOTEM_COOLDOWN + 1); // advance worldTime past the cooldown
+  s.handle(1, { t: 'selfhurt', amount: 2 });
+  const tagged = s.handle(1, { t: 'totemTeleport', x: 2, y: 70, z: 2 });
+  check('the combat tag (hit in the last 10s) blocks totem travel',
+    !tagged.some((o) => o.msg.t === 'teleport') && /combat/.test(noticeOf(tagged)));
+  s.tickClaims(COMBAT_TAG + 1); // let the tag lapse
+  // Teleporting to an attuned totem that was BROKEN prunes it instead.
+  s.handle(1, { t: 'edit', x: 2, y: 70, z: 2, block: Block.Air });
+  const broken = s.handle(1, { t: 'totemTeleport', x: 2, y: 70, z: 2 });
+  check('teleporting to a broken totem is refused and prunes the attunement',
+    !broken.some((o) => o.msg.t === 'teleport') &&
+    /destroyed/.test(noticeOf(broken)) && attunedOf(broken)?.length === 3);
+  // A teleport to a coordinate that was never attuned is a silent no-op.
+  check('teleporting to an unattuned totem is rejected',
+    s.handle(1, { t: 'totemTeleport', x: 0, y: 70, z: 2 }).length === 0);
+
+  // Persistence: attunements survive capture -> account data -> re-login.
+  const cap = s.capturePlayerState(1)!;
+  const totems = cap.data.totems as { x: number }[];
+  const s2 = new GameServer(1337, mulberry32(94));
+  const out2 = s2.addPlayer(7, { username: 'Traveler', faction: 0, data: cap.data });
+  const restored = (out2.find((o) => o.to === 7 && o.msg.t === 'attuned')?.msg as
+    { totems: unknown[] } | undefined)?.totems;
+  check('attuned totems survive the account-data round-trip',
+    totems.length === 3 && restored?.length === 3);
+  const s3 = new GameServer(1337, mulberry32(95));
+  const junk = s3.addPlayer(8, { username: 'Junky', faction: 0, data: { totems: [{ x: 'a' }, 5, { x: 1, y: 2, z: 3 }] } });
+  check('junk saved totems are sanitized fail-closed (only valid entries load)',
+    (junk.find((o) => o.to === 8 && o.msg.t === 'attuned')?.msg as
+      { totems: unknown[] }).totems.length === 1);
+}
+
+// --- B4: totem item/recipe/registration -----------------------------------------
+{
+  check('the Waypoint Totem is a registered, craftable, glowing block',
+    ITEMS[Block.WaypointTotem]?.kind === 'block' &&
+    BLOCKS[Block.WaypointTotem].emission > 0 &&
+    itemDescription(Block.WaypointTotem).length > 0);
+  const cells: (ItemStack | null)[] = [
+    null, { id: Item.GoldIngot, count: 1 }, null,
+    { id: Block.OakPlanks, count: 1 }, { id: Item.GoldIngot, count: 1 }, { id: Block.OakPlanks, count: 1 },
+    { id: Block.OakPlanks, count: 1 }, { id: Block.OakPlanks, count: 1 }, { id: Block.OakPlanks, count: 1 },
+  ];
+  check('Waypoint Totem crafts from 2 gold + 5 planks',
+    matchGrid(cells)?.id === Block.WaypointTotem);
+}
+
+
+// =============================================================================
+// MILESTONE C: discovery biomes, surface structures + seeded loot, new mobs
+// =============================================================================
+
+// --- C1: the four new biomes exist; Crystalfields is Wilds-exclusive -----------
+{
+  const found = new Set<Biome>();
+  let crystalSamples = 0, crystalInCore = 0, swampHighest = -1;
+  outer:
+  for (let x = -2400; x <= 2400; x += 24) {
+    for (let z = -2400; z <= 2400; z += 24) {
+      const h = terrain.height(x, z);
+      const b = terrain.biomeWithWater(x, z, h);
+      if (b === Biome.Crystalfields) {
+        crystalSamples++;
+        if (inCore(x, z)) crystalInCore++;
+      }
+      if (b === Biome.Swamp) swampHighest = Math.max(swampHighest, h);
+      found.add(b);
+      if (found.has(Biome.Jungle) && found.has(Biome.Swamp) &&
+          found.has(Biome.CherryGrove) && found.has(Biome.Crystalfields) &&
+          crystalSamples >= 20 && swampHighest >= 0 &&
+          x > 600) break outer; // enough evidence gathered
+    }
+  }
+  check('Jungle, Swamp, Cherry Grove and Crystalfields all generate for the seed',
+    found.has(Biome.Jungle) && found.has(Biome.Swamp) &&
+    found.has(Biome.CherryGrove) && found.has(Biome.Crystalfields));
+  check('Crystalfields NEVER appears inside the Heartland core',
+    crystalSamples > 0 && crystalInCore === 0, `${crystalSamples} samples`);
+  // Edge columns (mask ~0.5) flatten only partially — gentle banks are fine,
+  // but no swamp may sit meaningfully above the waterline plain.
+  check('swamps flatten to near-water lowlands',
+    swampHighest >= SEA_LEVEL - 1 && swampHighest <= SEA_LEVEL + 6, `h=${swampHighest}`);
+  // A jungle chunk grows jungle trees (logs present) with the new blocks.
+  check('new biome blocks are registered craftable items',
+    ITEMS[Block.JungleLog] !== undefined && ITEMS[Block.CherryLeaves] !== undefined &&
+    ITEMS[Block.Mud] !== undefined && ITEMS[Block.CrystalBlock] !== undefined &&
+    BLOCKS[Block.CrystalBlock].emission > 0);
+  check('crystal spikes drop Crystal Shards',
+    dropFor(Block.CrystalBlock, 0.9)?.id === Item.CrystalShard);
+  const jc: (ItemStack | null)[] = new Array(9).fill(null);
+  jc[0] = { id: Block.JungleLog, count: 1 };
+  const cc: (ItemStack | null)[] = new Array(9).fill(null);
+  cc[0] = { id: Block.CherryLog, count: 1 };
+  check('jungle + cherry logs craft their own planks (wired like birch/spruce)',
+    matchGrid(jc)?.id === Block.JunglePlanks && matchGrid(jc)?.count === 4 &&
+    matchGrid(cc)?.id === Block.CherryPlanks);
+  const sc: (ItemStack | null)[] = new Array(9).fill(null);
+  sc[0] = { id: Block.JunglePlanks, count: 1 }; sc[3] = { id: Block.JunglePlanks, count: 1 };
+  check('new planks count as ANY-plank in generic recipes (sticks)',
+    matchGrid(sc)?.id === Item.Stick);
+}
+
+// --- C2/C3: structure framework — deterministic, bounded, chest-bearing ---------
+{
+  // Scan for anchors: same seed -> identical placements; a fresh Terrain agrees.
+  const terrain2 = new Terrain(1337);
+  const sites: { cx: number; cz: number; kind: string }[] = [];
+  for (let cx = -150; cx <= 150; cx++) {
+    for (let cz = -150; cz <= 150; cz++) {
+      const st = structureStamp(1337, cx, cz, terrain);
+      if (!st) continue;
+      sites.push({ cx, cz, kind: st.kind });
+      const st2 = structureStamp(1337, cx, cz, terrain2);
+      if (!st2 || st2.kind !== st.kind || st2.chest.x !== st.chest.x ||
+          st2.chest.y !== st.chest.y || st2.chest.z !== st.chest.z) {
+        sites.push({ cx: NaN, cz: NaN, kind: 'MISMATCH' });
+      }
+    }
+  }
+  check('structures generate deterministically from the seed (two Terrains agree)',
+    sites.length > 3 && !sites.some((s2) => s2.kind === 'MISMATCH'), `${sites.length} sites`);
+  check('a different seed moves the structures',
+    (() => {
+      const t9 = new Terrain(9999);
+      let same = 0, checked = 0;
+      for (const site of sites.slice(0, 20)) {
+        checked++;
+        if (structureKindAt(9999, site.cx, site.cz)) same++;
+      }
+      return checked > 0 && same < checked;
+    })());
+  // Footprint bound: every block within 24 of the anchor chunk centre (3×3 chunks).
+  check('structure stamps never reach past a 3×3-chunk footprint',
+    sites.slice(0, 30).every((site) => {
+      const st = structureStamp(1337, site.cx, site.cz, terrain)!;
+      const cxc = site.cx * 16 + 8, czc = site.cz * 16 + 8;
+      return st.blocks.every((b) =>
+        Math.abs(b.x - cxc) <= 24 && Math.abs(b.z - czc) <= 24);
+    }));
+  // The chest actually lands in a filled chunk as a real Block.Chest.
+  const withChest = sites.map((site) => structureStamp(1337, site.cx, site.cz, terrain)!)
+    .find((st) => st.chest.y >= 1 && st.chest.y <= 250);
+  check('a filled chunk contains the structure loot chest block', (() => {
+    if (!withChest) return false;
+    const ccx = Math.floor(withChest.chest.x / 16), ccz = Math.floor(withChest.chest.z / 16);
+    const chunk = new Chunk(ccx, ccz);
+    terrain.fill(chunk);
+    return chunk.get(withChest.chest.x - ccx * 16, withChest.chest.y,
+      withChest.chest.z - ccz * 16) === Block.Chest;
+  })());
+  check('structureChestTier resolves the chest (and only the chest)', (() => {
+    if (!withChest) return false;
+    const c = withChest.chest;
+    return structureChestTier(1337, c.x, c.y, c.z, terrain) === withChest.tier &&
+      structureChestTier(1337, c.x + 1, c.y + 3, c.z, terrain) === null;
+  })());
+}
+
+// --- C3: loot tables — seeded, tiered, sane ------------------------------------
+{
+  check('loot tables are sane (positive weights, valid items, min<=max, tiers differ)',
+    (['common', 'rare', 'epic'] as const).every((tier) =>
+      LOOT_TABLES[tier].every((e) => e.w > 0 && e.min >= 1 && e.min <= e.max && !!ITEMS[e.id])) &&
+    LOOT_TABLES.epic.some((e) => e.id === Item.TitaniumIngot) &&
+    !LOOT_TABLES.common.some((e) => e.id === Item.TitaniumIngot) &&
+    LOOT_TABLES.epic.some((e) => e.id === Item.Heart));
+  const a = chestLoot(1337, 10, 70, -20, 'epic');
+  const b = chestLoot(1337, 10, 70, -20, 'epic');
+  const c = chestLoot(1337, 11, 70, -20, 'epic');
+  check('chest loot is a pure function of (seed, position, tier)',
+    JSON.stringify(a) === JSON.stringify(b) && a.length >= 3 &&
+    JSON.stringify(a) !== JSON.stringify(c));
+  const slots = chestLootSlots(1337, 10, 70, -20, 'epic');
+  check('loot slots carry exactly the rolled stacks',
+    slots.filter(Boolean).length >= 3 && slots.length === 27);
+}
+
+// --- C3: server-side first-open loot (authoritative, dup-safe) ------------------
+{
+  // Find a real structure chest for the shared seed.
+  let chest: { x: number; y: number; z: number } | null = null;
+  const t = new Terrain(1337);
+  outer:
+  for (let cx = -150; cx <= 150; cx++) {
+    for (let cz = -150; cz <= 150; cz++) {
+      const st = structureStamp(1337, cx, cz, t);
+      if (st) { chest = st.chest; break outer; }
+    }
+  }
+  check('found a structure chest to test against', chest !== null);
+  if (chest) {
+    const s = new GameServer(1337, mulberry32(96));
+    s.addPlayer(1, { username: 'Looter', faction: 0 });
+    const open1 = s.handle(1, { t: 'chestOpen', x: chest.x, y: chest.y, z: chest.z })
+      .find((o) => o.msg.t === 'chest')!.msg as { slots: (ItemStack | null)[] };
+    check('first open of a structure chest rolls seeded loot (server-side)',
+      open1.slots.filter(Boolean).length >= 3);
+    const open2 = s.handle(1, { t: 'chestOpen', x: chest.x, y: chest.y, z: chest.z })
+      .find((o) => o.msg.t === 'chest')!.msg as { slots: (ItemStack | null)[] };
+    check('a second open returns the SAME contents (no re-roll)',
+      JSON.stringify(open1.slots) === JSON.stringify(open2.slots));
+    const s2 = new GameServer(1337, mulberry32(97));
+    s2.addPlayer(1, { username: 'Other', faction: 1 });
+    const openB = s2.handle(1, { t: 'chestOpen', x: chest.x, y: chest.y, z: chest.z })
+      .find((o) => o.msg.t === 'chest')!.msg as { slots: (ItemStack | null)[] };
+    check('another server on the same seed rolls IDENTICAL loot (online = offline)',
+      JSON.stringify(open1.slots) === JSON.stringify(openB.slots));
+    // Writes to an (opened) structure chest work like any chest.
+    const empty = new Array(27).fill(null);
+    s.handle(1, { t: 'chestSet', x: chest.x, y: chest.y, z: chest.z, slots: empty });
+    const open3 = s.handle(1, { t: 'chestOpen', x: chest.x, y: chest.y, z: chest.z })
+      .find((o) => o.msg.t === 'chest')!.msg as { slots: (ItemStack | null)[] };
+    check('an opened structure chest behaves like a normal chest (writes stick)',
+      open3.slots.every((sl) => sl === null));
+    // Breaking a PRISTINE structure chest still spills its seeded loot.
+    const s3 = new GameServer(1337, mulberry32(98));
+    s3.addPlayer(1, { username: 'Smasher', faction: 0 });
+    s3.handle(1, { t: 'xform', x: chest.x + 0.5, y: chest.y, z: chest.z + 1.5, yaw: 0, pitch: 0 });
+    const smash = s3.handle(1, { t: 'edit', x: chest.x, y: chest.y, z: chest.z, block: 0 });
+    check('breaking an unopened structure chest spills its seeded loot',
+      smash.some((o) => o.msg.t === 'itemspawn'));
+    // ...and once broken, the position can never re-roll (stale write refused).
+    check('a broken structure chest cannot be resurrected by a stale write',
+      s3.handle(1, { t: 'chestSet', x: chest.x, y: chest.y, z: chest.z, slots: [{ id: Item.Diamond, count: 64 }] }).length === 0);
+  }
+}
+
+// --- C1: mud slows walking (ground-material hook) --------------------------------
+{
+  const base2 = 200;
+  const cx2 = Math.floor(spawn.x) - 20, cz2 = Math.floor(spawn.z) - 20;
+  const idle2 = { ...IDLE_INPUT } as never;
+  const walk2 = { ...IDLE_INPUT, forward: true } as never;
+  const walkDist = (groundBlock: number): number => {
+    for (let dx = -1; dx <= 18; dx++) {
+      for (let dz = -1; dz <= 1; dz++) {
+        world.setBlock(cx2 + dx, base2, cz2 + dz, groundBlock);
+        for (let dy = 1; dy <= 3; dy++) world.setBlock(cx2 + dx, base2 + dy, cz2 + dz, Block.Air);
+      }
+    }
+    const p = new Player({ x: cx2 + 0.5, y: base2 + 1, z: cz2 + 0.5 });
+    p.yaw = -Math.PI / 2; // face +x
+    for (let i = 0; i < 10; i++) p.update(1 / 60, idle2, world);
+    for (let i = 0; i < 100; i++) p.update(1 / 60, walk2, world);
+    return p.pos.x - (cx2 + 0.5);
+  };
+  const onGrass = walkDist(Block.Grass);
+  const onMud = walkDist(Block.Mud);
+  check('swamp mud slows walking (gentle ~28% drag)',
+    onMud < onGrass * 0.88 && onMud > onGrass * 0.55,
+    `grass=${onGrass.toFixed(2)} mud=${onMud.toFixed(2)}`);
+}
+
+// --- C4: the new mobs are sane ---------------------------------------------------
+{
+  check('spitter is fragile ranged support; skitter is fast, low-HP melee',
+    MOB_DEFS.spitter.health < MOB_DEFS.zombie.health &&
+    MOB_DEFS.skitter.health <= 8 &&
+    MOB_DEFS.skitter.speed > MOB_DEFS.zombie.speed * 1.5);
 }
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} FAILURES`);

@@ -25,7 +25,7 @@ const ANY_COAL = [Item.Coal, Item.Charcoal];
 const OAK = Block.OakPlanks, BIRCH = Block.BirchPlanks, SPRUCE = Block.SprucePlanks;
 // Generic recipes accept ANY plank type (vanilla behaviour); slab/stairs are
 // per-wood so each wood yields its own matching pieces.
-const ANY_PLANKS = [OAK, BIRCH, SPRUCE];
+const ANY_PLANKS = [OAK, BIRCH, SPRUCE, Block.JunglePlanks, Block.CherryPlanks];
 const P = ANY_PLANKS;
 const S = Item.Stick;
 const C = Block.Cobblestone;
@@ -77,6 +77,9 @@ export const RECIPES: Recipe[] = [
   shapeless([Block.OakLog], OAK, 4),
   shapeless([Block.BirchLog], BIRCH, 4),
   shapeless([Block.SpruceLog], SPRUCE, 4),
+  // Discovery woods (Milestone C): jungle + cherry, wired like birch/spruce.
+  shapeless([Block.JungleLog], Block.JunglePlanks, 4),
+  shapeless([Block.CherryLog], Block.CherryPlanks, 4),
   shaped([[P], [P]], Item.Stick, 4),
   shaped([[P, P], [P, P]], Block.CraftingTable),
   shaped([[C, C, C], [C, null, C], [C, C, C]], Block.Furnace),
@@ -126,6 +129,10 @@ export const RECIPES: Recipe[] = [
   // Right-click to set your spawn; easily broken so it's a soft, contestable point.
   shaped([[C, R, C], [C, I, C], [C, C, C]], Block.RespawnBeacon),
 
+  // Waypoint Totem (B4): a mid-cost travel anchor — gold runes on a plank
+  // pillar. The 5000-block world is 2.5 km to the edge; totems shrink it.
+  shaped([[null, Item.GoldIngot, null], [P, Item.GoldIngot, P], [P, P, P]], Block.WaypointTotem),
+
   // Glider: an early-game pair of wings — stick struts over plank membranes.
   // Cheap on purpose (worn in the chest slot, wears out fast).
   shaped([[S, S, S], [P, null, P]], Item.Glider),
@@ -143,6 +150,14 @@ export const RECIPES: Recipe[] = [
   // Jump Boost: a one-use spring — redstone + a slime-less feather-light frame
   // (sticks + iron). Cheap-ish but not trivial.
   shaped([[S, R, S], [I, R, I]], Item.JumpBoost, 2),
+
+  // Lifesteal (Milestone A). WITHDRAW a heart: two gold ingots make the vessel;
+  // crafting it ALSO costs 1 of YOUR hearts (main.ts vetoes the craft at the
+  // 2-heart floor + sends heartWithdraw so the server deducts it).
+  shapeless([Item.GoldIngot, Item.GoldIngot], Item.Heart),
+  // Revival Beacon: an expensive teammate-rescue totem — titanium cage, twin
+  // diamonds, and a real Heart at its core.
+  shaped([[T, D, T], [T, Item.Heart, T], [null, D, null]], Item.RevivalBeacon),
 
   // Building set (M15): per-wood slabs + stairs.
   ...woodCraft(OAK, Block.OakSlab, Block.OakStairsN),

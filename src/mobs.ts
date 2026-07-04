@@ -6,14 +6,17 @@
 import * as THREE from 'three';
 import { Block, BLOCKS, isSolid, Tile } from './blocks';
 import type { ItemEntities } from './itementity';
-import { ItemStack } from './items';
+import { Item, ItemStack } from './items';
+import { inCore } from './net/protocol';
 import type { Particles } from './particles';
 import type { Player } from './player';
 import type { Atlas } from './textures';
 import type { World } from './world';
 
-// VOXELON: hostile mobs only — passive animals were removed.
-export type MobType = 'zombie' | 'creeper';
+// VOXELON: hostile mobs only — passive animals were removed. Milestone C adds
+// the SPITTER (ranged lobber, keeps its distance) and the SKITTER (fast, low-HP
+// lunger — panic fun, dies to one good hit; Wilds + dungeons).
+export type MobType = 'zombie' | 'creeper' | 'spitter' | 'skitter';
 
 const GRAVITY = 32;
 const JUMP_V = 8.4;
@@ -37,9 +40,22 @@ export const MOB_DEFS: Record<MobType, MobDef> = {
     health: 20, speed: 2.0, hostile: true, halfW: 0.3, height: 1.7,
     drops: () => [],
   },
+  // Ranged bog-lobber: fragile, keeps its distance, spits slow gobs.
+  spitter: {
+    health: 10, speed: 2.1, hostile: true, halfW: 0.3, height: 1.6,
+    drops: (rng) => (rng() < 0.5 ? [{ id: Item.Bullet, count: 2 }] : []),
+  },
+  // Fast low chitin lunger: one good sword hit kills it.
+  skitter: {
+    health: 6, speed: 4.3, hostile: true, halfW: 0.35, height: 0.9,
+    drops: (rng) => (rng() < 0.3 ? [{ id: Item.Stick, count: 1 }] : []),
+  },
 };
 
 const ZOMBIE_DAMAGE = 3;
+const SKITTER_DAMAGE = 2;
+const SPIT_DAMAGE = 3;
+const SPIT_COOLDOWN = 2.4;
 const CREEPER_FUSE = 1.5;
 const EXPLOSION_RADIUS = 3;
 
@@ -117,6 +133,36 @@ function buildModel(type: MobType, atlas: Atlas, mat: THREE.Material): MobModel 
       }
       break;
     }
+    case 'spitter': {
+      // A hunched bog-thing: squat body, oversized head with a wide maw.
+      group.add(fixed(atlas, mat, 0.5, 0.6, 0.32, Tile.SpitterSkin, 0, 0.84, 0));
+      const hg = new THREE.Group();
+      hg.position.set(0, 1.1, 0);
+      hg.add(fixed(atlas, mat, 0.56, 0.5, 0.52, Tile.SpitterSkin, 0, 0.25, 0.04, Tile.SpitterFace));
+      group.add(hg);
+      head = hg;
+      for (const sx of [-1, 1]) {
+        const leg = hung(atlas, mat, 0.2, 0.56, 0.2, Tile.SpitterSkin, sx * 0.14, 0.56, 0);
+        legs.push(leg);
+        group.add(leg);
+      }
+      break;
+    }
+    case 'skitter': {
+      // A low, wide chitin scuttler on four stubby legs (spider-like silhouette).
+      group.add(fixed(atlas, mat, 0.62, 0.34, 0.72, Tile.SkitterSkin, 0, 0.46, 0));
+      const hg = new THREE.Group();
+      hg.position.set(0, 0.52, -0.42);
+      hg.add(fixed(atlas, mat, 0.4, 0.32, 0.34, Tile.SkitterSkin, 0, 0, 0, Tile.SkitterFace));
+      group.add(hg);
+      head = hg;
+      for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+        const leg = hung(atlas, mat, 0.14, 0.32, 0.14, Tile.SkitterSkin, sx * 0.34, 0.32, sz * 0.24);
+        legs.push(leg);
+        group.add(leg);
+      }
+      break;
+    }
     case 'creeper': {
       group.add(fixed(atlas, mat, 0.45, 0.8, 0.3, Tile.CreeperSkin, 0, 0.78, 0));
       const hg = new THREE.Group();
@@ -177,6 +223,8 @@ export class Mob {
 // --- mob manager ---------------------------------------------------------------
 
 const HOSTILE_CAP = 10;
+/** The Wilds (outside the Heartland core) are +50% denser — risk out there. */
+const HOSTILE_CAP_WILDS = 15;
 const DESPAWN_DIST = 44;
 
 export class Mobs {
@@ -193,6 +241,10 @@ export class Mobs {
   private readonly particles: Particles;
   private spawnTimer = 0;
   private lightTimer = 0;
+  /** In-flight spitter gobs (simple lobbed projectiles; client-side like mobs). */
+  private readonly spits: { pos: THREE.Vector3; vel: THREE.Vector3; mesh: THREE.Mesh; life: number }[] = [];
+  private readonly spitGeo = new THREE.SphereGeometry(0.16, 6, 5);
+  private readonly spitMat = new THREE.MeshBasicMaterial({ color: 0x9ab33a });
 
   constructor(
     scene: THREE.Scene, world: World, atlas: Atlas,
@@ -217,7 +269,8 @@ export class Mobs {
   }
 
   private trySpawns(player: Player, sun: number): void {
-    if (this.hostileCount() >= HOSTILE_CAP) return;
+    const cap = inCore(player.pos.x, player.pos.z) ? HOSTILE_CAP : HOSTILE_CAP_WILDS;
+    if (this.hostileCount() >= cap) return;
     const angle = Math.random() * Math.PI * 2;
     const dist = 20 + Math.random() * 22;
     const x = Math.floor(player.pos.x + Math.cos(angle) * dist);
@@ -240,9 +293,15 @@ export class Mobs {
       this.world.approxBlockLight(x, y, z) < 8 &&
       (sun < 0.5 || !this.world.hasSkyAccess(x, y, z))
     ) {
-      // Creepers removed from the spawn pool — only zombies spawn now. (The
-      // explosion helper they shared still powers rocket blasts.)
-      this.spawnAt('zombie', x + 0.5, y, z + 0.5);
+      // Creepers stay out of the spawn pool (their explosion helper still
+      // powers rockets). Night/dark spawns: mostly zombies, some spitters —
+      // and out in the WILDS the fast little skitters join the pool.
+      const wilds = !inCore(player.pos.x, player.pos.z);
+      const roll = Math.random();
+      const type: MobType = wilds
+        ? (roll < 0.5 ? 'zombie' : roll < 0.75 ? 'spitter' : 'skitter')
+        : (roll < 0.72 ? 'zombie' : 'spitter');
+      this.spawnAt(type, x + 0.5, y, z + 0.5);
     }
   }
 
@@ -401,6 +460,50 @@ export class Mobs {
     for (const mob of [...this.list]) {
       this.updateMob(dt, mob, player, sun, relight);
     }
+    this.updateSpits(dt, player);
+  }
+
+  /** Launch a lobbed spit gob from a spitter toward the player. */
+  private spitAt(mob: Mob, player: Player): void {
+    const from = mob.pos.clone(); from.y += mob.def.height * 0.75;
+    const target = player.pos.clone(); target.y += 1.0;
+    const d = target.clone().sub(from);
+    const flat = Math.hypot(d.x, d.z) || 1;
+    const speed = 11;
+    const t = flat / speed;
+    const vel = new THREE.Vector3(
+      (d.x / flat) * speed,
+      d.y / t + 0.5 * 18 * t, // lob arc that lands on the player (gravity 18)
+      (d.z / flat) * speed,
+    );
+    const mesh = new THREE.Mesh(this.spitGeo, this.spitMat);
+    mesh.position.copy(from);
+    this.scene.add(mesh);
+    this.spits.push({ pos: from, vel, mesh, life: 0 });
+    this.onSound?.('spit', mob.pos);
+  }
+
+  /** Advance spit gobs: gravity arc, hit the player, splat on terrain. */
+  private updateSpits(dt: number, player: Player): void {
+    for (let i = this.spits.length - 1; i >= 0; i--) {
+      const sp = this.spits[i];
+      sp.life += dt;
+      sp.vel.y -= 18 * dt;
+      sp.pos.addScaledVector(sp.vel, dt);
+      sp.mesh.position.copy(sp.pos);
+      const hitPlayer = !player.dead &&
+        Math.abs(sp.pos.x - player.pos.x) < 0.6 &&
+        Math.abs(sp.pos.z - player.pos.z) < 0.6 &&
+        sp.pos.y > player.pos.y - 0.2 && sp.pos.y < player.pos.y + 2.0;
+      const inBlock = isSolid(this.world.getBlock(
+        Math.floor(sp.pos.x), Math.floor(sp.pos.y), Math.floor(sp.pos.z)));
+      if (hitPlayer) player.damage(SPIT_DAMAGE);
+      if (hitPlayer || inBlock || sp.life > 5) {
+        this.particles.poof(sp.pos.x, sp.pos.y, sp.pos.z);
+        this.scene.remove(sp.mesh);
+        this.spits.splice(i, 1);
+      }
+    }
   }
 
   private updateMob(
@@ -457,12 +560,23 @@ export class Mobs {
       mob.state = 'chase';
       mob.yaw = Math.atan2(toPlayer.x, toPlayer.z);
       speedMul = 1;
-      if (mob.type === 'zombie') {
+      if (mob.type === 'zombie' || mob.type === 'skitter') {
         moving = true;
+        if (mob.type === 'skitter') {
+          speedMul = 1.15;
+          // Lunge: a telegraphed hop that closes the last few blocks fast.
+          if (mob.onGround && dist < 5 && dist > 1.6 && mob.attackCooldown <= 0.3 &&
+              Math.abs(toPlayer.y) < 2) {
+            const dir = toPlayer.clone().setY(0).normalize();
+            mob.vel.x = dir.x * 8; mob.vel.z = dir.z * 8; mob.vel.y = 5;
+          }
+        }
+        const dmg = mob.type === 'skitter' ? SKITTER_DAMAGE : ZOMBIE_DAMAGE;
+        const cd = mob.type === 'skitter' ? 0.9 : 1.2;
         if (distXZ < def.halfW + 1.0 && Math.abs(toPlayer.y) < 2.5 &&
           mob.attackCooldown <= 0) {
-          mob.attackCooldown = 1.2;
-          player.damage(ZOMBIE_DAMAGE);
+          mob.attackCooldown = cd;
+          player.damage(dmg);
           const kick = toPlayer.clone().setY(0).normalize().multiplyScalar(7);
           player.vel.add(kick);
           player.vel.y += 3;
@@ -470,7 +584,21 @@ export class Mobs {
         mob.soundTimer -= dt;
         if (mob.soundTimer <= 0) {
           mob.soundTimer = 3 + Math.random() * 4;
-          this.onSound?.('zombie', mob.pos);
+          this.onSound?.(mob.type === 'skitter' ? 'skitter' : 'zombie', mob.pos);
+        }
+      } else if (mob.type === 'spitter') {
+        // Keep a ranged distance: advance when far, back off when crowded,
+        // and lob a slow spit gob whenever the player is in the sweet band.
+        if (dist > 9) {
+          moving = true;
+        } else if (dist < 5.5) {
+          mob.yaw = Math.atan2(-toPlayer.x, -toPlayer.z); // back away
+          moving = true;
+          speedMul = 1.1;
+        }
+        if (dist >= 4 && dist < 15 && mob.attackCooldown <= 0) {
+          mob.attackCooldown = SPIT_COOLDOWN;
+          this.spitAt(mob, player);
         }
       } else { // creeper: stalk silently, fuse close in
         moving = dist > 2.2;

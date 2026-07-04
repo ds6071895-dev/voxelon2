@@ -97,6 +97,12 @@ export class InventoryUI {
   onOverflow?: (stacks: ItemStack[]) => void;
   /** Fired when the panel closes (main persists/syncs an open chest here). */
   onClose?: () => void;
+  /** Veto a craft result BEFORE it's taken (e.g. a Heart withdrawal at the
+   *  2-heart floor). Return false to block; show your own notice. */
+  canCraft?: (result: ItemStack) => boolean;
+  /** Fired once per successful craft of `result` (e.g. a Heart withdrawal
+   *  tells the server to deduct the bottled heart). */
+  onCrafted?: (result: ItemStack) => void;
   private chestCells: number[] = [];
   private armorCells: number[] = [];
 
@@ -893,6 +899,7 @@ export class InventoryUI {
     const inv = this.inventory;
     const r = craftResult(inv);
     if (!r) return;
+    if (this.canCraft && !this.canCraft(r)) return;
     if (!inv.cursor) {
       inv.cursor = r;
     } else if (inv.cursor.id === r.id && inv.cursor.count + r.count <= maxStack(r.id)) {
@@ -901,6 +908,7 @@ export class InventoryUI {
       return;
     }
     consumeCraft(inv);
+    this.onCrafted?.(r);
   }
 
   private craftAll(): void {
@@ -909,7 +917,9 @@ export class InventoryUI {
     for (let guard = 0; guard < 256; guard++) {
       const r = craftResult(inv);
       if (!r) break;
+      if (this.canCraft && !this.canCraft(r)) break;
       consumeCraft(inv);
+      this.onCrafted?.(r);
       const left = inv.add(r.id, r.count);
       if (left > 0) {
         overflow.push({ id: r.id, count: left });

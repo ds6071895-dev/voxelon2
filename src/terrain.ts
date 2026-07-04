@@ -6,6 +6,7 @@ import { Biome, Biomes, ColumnTints } from './biomes';
 import { Block } from './blocks';
 import { Chunk, CHUNK_X, CHUNK_Z } from './chunk';
 import { Noise2D, Noise3D, hash2, mulberry32 } from './noise';
+import { structureStamp } from './structures';
 
 export const SEA_LEVEL = 63;
 const TREE_MARGIN = 3; // trees up to 3 blocks outside a chunk can reach into it
@@ -13,7 +14,7 @@ const ROCK_LINE = 96;  // mountains expose bare stone above this altitude
 const SNOW_LINE = 120; // mountains get snow caps above this
 const MAX_HEIGHT = 235;
 
-type Species = 'oak' | 'birch' | 'spruce';
+type Species = 'oak' | 'birch' | 'spruce' | 'jungle' | 'cherry';
 interface Tree {
   species: Species;
   trunk: number;
@@ -122,6 +123,12 @@ export class Terrain {
       const ridge = 1 - Math.abs(this.hills.fbm(x * 0.01, z * 0.01, 3));
       h += m * (50 + 90 * m) * (0.55 + 0.45 * ridge);
     }
+    // Swamps flatten toward just-above-sea-level lowlands (mask-driven +
+    // continuous; damped where mountains dominate so ranges stay ranges).
+    const sf = this.biomes.swampFlat(x, z) * (1 - m);
+    if (sf > 0 && h > SEA_LEVEL) {
+      h += (SEA_LEVEL + 1.4 - h) * sf;
+    }
     return Math.min(MAX_HEIGHT, Math.max(12, Math.round(h)));
   }
 
@@ -132,6 +139,11 @@ export class Terrain {
   /** Biome including Ocean/Beach/Mountains, which depend on terrain height. */
   biomeWithWater(x: number, z: number, h: number): Biome {
     if (h < SEA_LEVEL - 1) return Biome.Ocean;
+    // Swamps ARE the waterline — their flattened columns read as Swamp, not
+    // Beach. Height-gated: a swamp-mask zone under a mountain range stays a
+    // mountain (the flattening is damped there too).
+    if (h >= SEA_LEVEL - 1 && h <= SEA_LEVEL + 4 && this.biomes.swampFlat(x, z) > 0.5 &&
+        this.biomes.biomeAt(x, z) === Biome.Swamp) return Biome.Swamp;
     if (h <= SEA_LEVEL + 1) return Biome.Beach;
     if (this.biomes.mountainFactor(x, z) > 0.45 || h >= ROCK_LINE) {
       const [t] = this.biomes.climate(x, z);
@@ -184,6 +196,14 @@ export class Terrain {
         p = 0.0015;
         species = 'oak';
         break;
+      case Biome.Jungle:
+        p = 0.03;
+        species = 'jungle';
+        break;
+      case Biome.CherryGrove:
+        p = 0.02;
+        species = 'cherry';
+        break;
       default:
         return null; // desert/beach/ocean: no trees
     }
@@ -199,8 +219,10 @@ export class Terrain {
       }
     }
     const v = hash2(this.seed ^ 0x33, x, z);
-    const trunk = species === 'spruce' ? 6 + Math.floor(v * 3)
+    const trunk = species === 'jungle' ? 8 + Math.floor(v * 4)
+      : species === 'spruce' ? 6 + Math.floor(v * 3)
       : species === 'birch' ? 5 + Math.floor(v * 2)
+      : species === 'cherry' ? 4 + Math.floor(v * 3)
       : 4 + Math.floor(v * 3);
     return { species, trunk };
   }
@@ -222,6 +244,12 @@ export class Terrain {
         const bareRock = mountain && h >= ROCK_LINE && h < SNOW_LINE;
         const mesa = biome === Biome.Mesa;
         const ashen = biome === Biome.Ashlands;
+        const swamp = biome === Biome.Swamp;
+        const crystal = biome === Biome.Crystalfields;
+        // Swamp texture: scattered shallow pools + mud patches on the surface.
+        const swampPool = swamp && h > SEA_LEVEL &&
+          hash2(this.seed ^ 0x5009, wx, wz) < 0.07;
+        const swampMud = swamp && hash2(this.seed ^ 0x30d9, wx, wz) < 0.3;
         // Scattered surface lava pools across the ashlands (a PvP hazard).
         const lavaPool = ashen && h > SEA_LEVEL &&
           hash2(this.seed ^ 0x1a7a, wx, wz) < 0.05;
@@ -236,6 +264,9 @@ export class Terrain {
             id = Block.Bedrock;
           } else if (y === h) {
             id = lavaPool ? Block.Lava
+              : swampPool ? Block.Water              // shallow swamp pool
+              : swamp ? (swampMud ? Block.Mud : Block.Grass)
+              : crystal ? Block.Sandstone            // pale crystalfields ground
               : ashen ? Block.Basalt
               : mesa ? Block.RedSand
               : sandy ? Block.Sand
@@ -244,7 +275,9 @@ export class Terrain {
               : snowy ? Block.SnowyGrass
               : Block.Grass;
           } else if (y >= h - 3) {
-            id = ashen ? Block.Basalt
+            id = swampPool || (swamp && y >= h - 1) ? Block.Mud // muddy swamp bed
+              : crystal ? Block.Sandstone
+              : ashen ? Block.Basalt
               : mesa ? Block.Terracotta
               : sandy ? Block.Sand
               : bareRock || h >= SNOW_LINE ? Block.Stone // rocky mountainside
@@ -287,6 +320,25 @@ export class Terrain {
 
     this.placeOres(chunk);
     this.plantTrees(chunk, ox, oz);
+    this.placeStructures(chunk, ox, oz);
+  }
+
+  /** Stamp any structures whose anchor chunk is this one or a neighbour
+   *  (stamps never reach past 1 chunk). Applied AFTER trees so carves clear
+   *  leaves; runs identically on the server and every client (seed-pure). */
+  private placeStructures(chunk: Chunk, ox: number, oz: number): void {
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dz = -1; dz <= 1; dz++) {
+        const st = structureStamp(this.seed, chunk.cx + dx, chunk.cz + dz, this);
+        if (!st) continue;
+        for (const b of st.blocks) {
+          const lx = b.x - ox, lz = b.z - oz;
+          if (lx < 0 || lx >= CHUNK_X || lz < 0 || lz >= CHUNK_Z) continue;
+          if (b.y < 1 || b.y > 250) continue;
+          chunk.set(lx, b.y, lz, b.id);
+        }
+      }
+    }
   }
 
   /** Column-local features: cacti, dead bushes, tall grass, flowers. */
@@ -307,15 +359,39 @@ export class Terrain {
       return;
     }
 
+    // Crystalfields: scattered glowing crystal spikes, 1-4 blocks tall.
+    if (biome === Biome.Crystalfields) {
+      if (r < 0.012) {
+        const tall = 1 + Math.floor(hash2(this.seed ^ 0xc59, wx, wz) * 4);
+        for (let i = 1; i <= tall; i++) chunk.set(lx, h + i, lz, Block.CrystalBlock);
+      }
+      return;
+    }
+    // Swamps: dead bushes on the mud + sparse murky grass.
+    if (biome === Biome.Swamp) {
+      if (chunk.get(lx, h, lz) === Block.Water) return; // no plants on pools
+      if (r < 0.02) chunk.set(lx, h + 1, lz, Block.DeadBush);
+      else if (r < 0.05) chunk.set(lx, h + 1, lz, Block.TallGrass);
+      return;
+    }
+
     const grassy = biome === Biome.Plains || biome === Biome.Forest ||
-      biome === Biome.BirchForest;
+      biome === Biome.BirchForest || biome === Biome.Jungle ||
+      biome === Biome.CherryGrove;
     if (!grassy) return;
-    const pGrass = biome === Biome.Plains ? 0.06 : 0.035;
+    // Jungle floors are DENSE with tall grass; cherry groves scatter petals
+    // (poppy-heavy flowers) through lighter grass.
+    const pGrass = biome === Biome.Jungle ? 0.14
+      : biome === Biome.Plains ? 0.06
+      : biome === Biome.CherryGrove ? 0.05
+      : 0.035;
+    const pFlower = biome === Biome.CherryGrove ? 0.02 : 0.006;
     if (r < pGrass) {
       chunk.set(lx, h + 1, lz, Block.TallGrass);
-    } else if (r < pGrass + 0.006) {
+    } else if (r < pGrass + pFlower) {
+      const poppyBias = biome === Biome.CherryGrove ? 0.85 : 0.4;
       chunk.set(lx, h + 1, lz,
-        hash2(this.seed ^ 0xf1, wx, wz) < 0.6 ? Block.Dandelion : Block.Poppy);
+        hash2(this.seed ^ 0xf1, wx, wz) < poppyBias ? Block.Poppy : Block.Dandelion);
     }
   }
 
@@ -394,9 +470,13 @@ export class Terrain {
         const top = ground + tree.trunk;
         const log = tree.species === 'birch' ? Block.BirchLog
           : tree.species === 'spruce' ? Block.SpruceLog
+          : tree.species === 'jungle' ? Block.JungleLog
+          : tree.species === 'cherry' ? Block.CherryLog
           : Block.OakLog;
         const leaves = tree.species === 'birch' ? Block.BirchLeaves
           : tree.species === 'spruce' ? Block.SpruceLeaves
+          : tree.species === 'jungle' ? Block.JungleLeaves
+          : tree.species === 'cherry' ? Block.CherryLeaves
           : Block.Leaves;
 
         stamp(tx, ground, tz, Block.Dirt); // grass under trunk -> dirt
@@ -404,6 +484,10 @@ export class Terrain {
 
         if (tree.species === 'spruce') {
           this.spruceCanopy(stamp, tx, tz, top, tree.trunk, leaves);
+        } else if (tree.species === 'jungle') {
+          // Tall jungle giants wear TWO canopies: the crown + a mid-trunk skirt.
+          this.oakCanopy(stamp, tx, tz, top, leaves);
+          this.oakCanopy(stamp, tx, tz, top - 4, leaves);
         } else {
           this.oakCanopy(stamp, tx, tz, top, leaves);
         }

@@ -56,8 +56,11 @@ export class Player {
   sneaking = false;
   inWater = false;
   eyeUnderwater = false;
-  // Survival stats: 20 HP, plus a 0..1 energy bar that gates sprinting.
+  // Survival stats: hearts-driven max HP (lifesteal: 2 HP per heart, start
+  // 10 hearts = 20 HP), plus a 0..1 energy bar that gates sprinting.
   health = 20;
+  /** Max HP = hearts * 2; main keeps it in sync with the hearts count. */
+  maxHealth = 20;
   energy = 1;
   /** True after energy hits 0 until it recovers to the sprint threshold. */
   exhausted = false;
@@ -119,7 +122,7 @@ export class Player {
   respawn(spawn: { x: number; y: number; z: number }): void {
     this.pos.set(spawn.x, spawn.y, spawn.z);
     this.vel.set(0, 0, 0);
-    this.health = 20;
+    this.health = this.maxHealth;
     this.energy = 1;
     this.exhausted = false;
     this.air = MAX_AIR;
@@ -204,6 +207,10 @@ export class Player {
         : this.sprinting ? SPRINT_SPEED
         : WALK_SPEED;
       if (this.inWater) speed *= 0.45;
+      // Swamp mud drags the feet (slight, kid-gentle slowdown).
+      if (!this.flying && this.onGround && world.getBlock(
+        Math.floor(this.pos.x), Math.floor(this.pos.y - 0.05), Math.floor(this.pos.z)
+      ) === Block.Mud) speed *= 0.72;
       if (this.flying) speed = (this.sprinting ? SPRINT_SPEED : WALK_SPEED) * FLY_SPEED_MULT;
 
       // Approach target velocity; much weaker control while airborne (but full

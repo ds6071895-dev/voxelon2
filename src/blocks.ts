@@ -79,6 +79,19 @@ export const enum Block {
   // Respawn Beacon: a cheap personal spawn block. Mined normally (easily broken,
   // not a tanky block-entity); RIGHT-CLICK to set your respawn point here.
   RespawnBeacon = 72,
+  // Waypoint Totem (B4): fast travel across the 5000-block world. Place it,
+  // RIGHT-CLICK to attune (max 4 per player), teleport to it from the map.
+  WaypointTotem = 73,
+  // Discovery biomes (Milestone C): jungle + cherry wood sets, swamp mud, and
+  // the Wilds-only glowing crystal.
+  JungleLog = 74,
+  JungleLeaves = 75,
+  JunglePlanks = 76,
+  CherryLog = 77,
+  CherryLeaves = 78,
+  CherryPlanks = 79,
+  Mud = 80,          // swamp ground — slows walking slightly
+  CrystalBlock = 81, // emissive crystal spike (mineable -> Crystal Shard)
 }
 
 export const enum Tile {
@@ -237,6 +250,29 @@ export const enum Tile {
   // Respawn Beacon (personal spawn point block)
   RespawnBeaconSide = 143,
   RespawnBeaconTop = 144,
+  // Lifesteal (Milestone A): the Heart consumable + the Revival Beacon totem.
+  Heart = 145,
+  RevivalBeacon = 146,
+  // Waypoint Totem (B4)
+  WaypointTotemSide = 147,
+  WaypointTotemTop = 148,
+  // Discovery biomes (Milestone C)
+  JungleLogSide = 149,
+  JungleLogTop = 150,
+  JungleLeaves = 151,
+  JunglePlanks = 152,
+  CherryLogSide = 153,
+  CherryLogTop = 154,
+  CherryLeaves = 155,
+  CherryPlanks = 156,
+  Mud = 157,
+  CrystalBlock = 158,
+  CrystalShard = 159,
+  // New mobs (Milestone C)
+  SpitterSkin = 160,
+  SpitterFace = 161,
+  SkitterSkin = 162,
+  SkitterFace = 163,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel';
@@ -567,6 +603,36 @@ export const BLOCKS: Record<number, BlockInfo> = {
   [Block.RespawnBeacon]: def({
     name: 'Respawn Beacon', hardness: 1.0, emission: 9,
     top: Tile.RespawnBeaconTop, bottom: Tile.AutominerTop, side: Tile.RespawnBeaconSide,
+  }),
+  // Waypoint Totem (B4): a glowing gold travel anchor. Mined normally (easily
+  // raided — a totem in the Wilds is a commitment, not a fortress).
+  [Block.WaypointTotem]: def({
+    name: 'Waypoint Totem', hardness: 1.2, emission: 10,
+    top: Tile.WaypointTotemTop, bottom: Tile.AutominerTop, side: Tile.WaypointTotemSide,
+  }),
+
+  // --- Discovery biomes (Milestone C) ---
+  [Block.JungleLog]: def({
+    name: 'Jungle Log', hardness: 2.0, top: Tile.JungleLogTop, side: Tile.JungleLogSide,
+  }),
+  [Block.JungleLeaves]: def({
+    name: 'Jungle Leaves', hardness: 0.2, top: Tile.JungleLeaves,
+    opaque: false, tint: 'foliage',
+  }),
+  [Block.JunglePlanks]: def({ name: 'Jungle Planks', hardness: 2.0, top: Tile.JunglePlanks }),
+  [Block.CherryLog]: def({
+    name: 'Cherry Log', hardness: 2.0, top: Tile.CherryLogTop, side: Tile.CherryLogSide,
+  }),
+  // Cherry leaves are PINK — painted directly, no biome foliage tint.
+  [Block.CherryLeaves]: def({
+    name: 'Cherry Leaves', hardness: 0.2, top: Tile.CherryLeaves, opaque: false,
+  }),
+  [Block.CherryPlanks]: def({ name: 'Cherry Planks', hardness: 2.0, top: Tile.CherryPlanks }),
+  [Block.Mud]: def({ name: 'Mud', hardness: 0.5, top: Tile.Mud }),
+  // Crystalfields spike: glows like a torch, drops Crystal Shards.
+  [Block.CrystalBlock]: def({
+    name: 'Crystal', hardness: 1.5, emission: 11, top: Tile.CrystalBlock,
+    opaque: false,
   }),
 
   // --- Building set (M15): per-wood planks + slabs + stairs ---

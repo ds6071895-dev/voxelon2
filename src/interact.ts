@@ -92,6 +92,8 @@ export class Interaction {
   onSabotage?: (x: number, y: number, z: number) => void;
   /** Fired on right-click of a Respawn Beacon: set the player's spawn point. */
   onSetSpawn?: (x: number, y: number, z: number) => void;
+  /** Fired on right-click of a Waypoint Totem: attune/release it (B4). */
+  onAttune?: (x: number, y: number, z: number) => void;
   /** When set ("Move machine" armed), the NEXT right-click consumes itself and
    *  calls this with the placement cell (against the aimed face) instead of
    *  placing/opening — so a machine can be relocated without breaking it. */
@@ -222,6 +224,11 @@ export class Interaction {
     // A Respawn Beacon: set the player's personal spawn point here.
     if (id === Block.RespawnBeacon) {
       this.onSetSpawn?.(this.target.x, this.target.y, this.target.z);
+      return true;
+    }
+    // A Waypoint Totem: attune/release it (fast travel from the map).
+    if (id === Block.WaypointTotem) {
+      this.onAttune?.(this.target.x, this.target.y, this.target.z);
       return true;
     }
     const kind = id === Block.CraftingTable ? 'table'

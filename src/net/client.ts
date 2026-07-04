@@ -106,6 +106,16 @@ export class NetClient {
   onBreach?: (attacker: string, faction: number, victim: number) => void;
   /** A register/login was rejected (the login screen shows the error). */
   onAuthErr?: (error: string) => void;
+  /** Lifesteal: the local player's authoritative hearts count changed. */
+  onHearts?: (hearts: number, reason: string, from?: string) => void;
+  /** Lifesteal: YOU were eliminated (0 hearts) — banner before the boot. */
+  onEliminated?: (by: string, until: number) => void;
+  /** Revival Beacon: the eliminated faction-mates you could revive. */
+  onReviveList?: (targets: { username: string; remainingMs: number }[]) => void;
+  /** Revival Beacon: result of a revive attempt (ok consumes the beacon). */
+  onRevived?: (target: string, ok: boolean) => void;
+  /** Waypoint Totems: the authoritative attuned list changed (B4). */
+  onAttuned?: (totems: { x: number; y: number; z: number }[]) => void;
 
   private ws: WebSocket | null = null;
   private xformAcc = 0;
@@ -301,6 +311,21 @@ export class NetClient {
       case 'authErr':
         this.onAuthErr?.(msg.error);
         break;
+      case 'hearts':
+        this.onHearts?.(msg.hearts, msg.reason, msg.from);
+        break;
+      case 'eliminated':
+        this.onEliminated?.(msg.by, msg.until);
+        break;
+      case 'reviveList':
+        this.onReviveList?.(msg.targets);
+        break;
+      case 'revived':
+        this.onRevived?.(msg.target, msg.ok);
+        break;
+      case 'attuned':
+        this.onAttuned?.(msg.totems);
+        break;
     }
   }
 
@@ -427,6 +452,20 @@ export class NetClient {
   }
 
   sendSwitchFaction(faction: number): void { if (this.connected) this.raw({ t: 'switchFaction', faction }); }
+  // Lifesteal (Milestone A).
+  sendHeartConsume(): void { if (this.connected) this.raw({ t: 'heartConsume' }); }
+  sendHeartWithdraw(): void { if (this.connected) this.raw({ t: 'heartWithdraw' }); }
+  sendReviveList(): void { if (this.connected) this.raw({ t: 'reviveList' }); }
+  sendBeaconRevive(target: string): void {
+    if (this.connected) this.raw({ t: 'beaconRevive', target });
+  }
+  // Waypoint Totems (B4).
+  sendAttune(x: number, y: number, z: number): void {
+    if (this.connected) this.raw({ t: 'attune', x, y, z });
+  }
+  sendTotemTeleport(x: number, y: number, z: number): void {
+    if (this.connected) this.raw({ t: 'totemTeleport', x, y, z });
+  }
   sendGadgetUse(item: number, x: number, y: number, z: number): void {
     if (this.connected) this.raw({ t: 'gadgetUse', item, x, y, z });
   }
