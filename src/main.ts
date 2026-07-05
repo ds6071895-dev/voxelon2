@@ -70,8 +70,8 @@ import { Panorama } from './panorama';
 import { structureChestTier, worldStructures } from './structures';
 import { chestLootSlots } from './loot';
 import {
-  VAULT_LOOT_WINDOW, VAULT_RECHARGE, VaultStamp, bruteMaxHp, countVaults,
-  vaultAt, vaultLoot, vaultStamp,
+  VAULT_LOOT_WINDOW, VAULT_RECHARGE, VAULT_REVEAL, VaultStamp, bruteMaxHp,
+  vaultAt, vaultLoot, vaultStamp, worldVaults,
 } from './vaults';
 
 const FOG_NEAR = RENDER_DISTANCE * 16 - 38;
@@ -1029,6 +1029,10 @@ function refreshStructureMap(): void {
 function onAuthSuccess(username: string): void {
   authed = true;
   authedName = username;
+  lastUser = username;
+  // Remember the account so next visit prefills the login (username only — the
+  // password is never stored).
+  try { localStorage.setItem('voxelon.lastUser', username); } catch { /* ignore */ }
   discoveredVaults = null; // vault discoveries are per-account — reload lazily
   refreshVaultMap();
   refreshStructureMap();
@@ -1092,6 +1096,10 @@ rollBtn.addEventListener('click', rollUsername);
 const submitBtn = document.getElementById('submit-btn')!;
 const authToggle = document.getElementById('auth-toggle')!;
 let authMode: 'register' | 'login' = 'register';
+// Remember the last account that logged in (username only) so a returning player
+// lands on a prefilled login instead of retyping it.
+let lastUser = '';
+try { lastUser = localStorage.getItem('voxelon.lastUser') || ''; } catch { /* ignore */ }
 function setAuthMode(mode: 'register' | 'login'): void {
   authMode = mode;
   authErr.textContent = '';
@@ -1101,14 +1109,16 @@ function setAuthMode(mode: 'register' | 'login'): void {
     authUser.readOnly = true;          // names are random-only on register
     rollBtn.style.display = '';
     authToggle.innerHTML = 'Already have an account? <a id="toggle-link">Log in</a>';
-    if (!authUser.value) rollUsername();
+    // ALWAYS roll a fresh name on entering register — never keep a name typed
+    // while in login mode (switching login→signup must not carry it over).
+    rollUsername();
   } else {
     submitBtn.textContent = 'Log In';
     authUser.readOnly = false;         // type your existing name to log in
-    authUser.value = '';
+    authUser.value = lastUser;         // prefill the remembered account
     rollBtn.style.display = 'none';
     authToggle.innerHTML = 'Need an account? <a id="toggle-link">Register</a>';
-    authUser.focus();
+    if (lastUser) authPass.focus(); else authUser.focus();
   }
   // The link is replaced via innerHTML above, so rebind it each time.
   document.getElementById('toggle-link')!
@@ -1118,7 +1128,8 @@ function setAuthMode(mode: 'register' | 'login'): void {
 net.onAuthErr = (error) => { authStatus.textContent = ''; authErr.textContent = error; };
 submitBtn.addEventListener('click', () => attemptAuth(authMode));
 authPass.addEventListener('keydown', (e) => { if (e.key === 'Enter') attemptAuth(authMode); });
-setAuthMode('register'); // default: roll a random name, ready to register
+// Returning players land on a prefilled login; first-timers get register.
+setAuthMode(lastUser ? 'login' : 'register');
 
 playBtn.addEventListener('click', () => {
   if (!authed) return;
@@ -1714,21 +1725,81 @@ function discoveredList(): { key: string; x: number; z: number; tier: number }[]
   }
   return discoveredVaults!;
 }
-let vaultTotalCount = -1;
-function totalVaults(): number {
-  if (vaultTotalCount < 0) vaultTotalCount = countVaults(seed, world.terrain);
-  return vaultTotalCount;
+// Every vault ENTRANCE in the world (one cached sweep — the layout is fixed for
+// the seed). Vaults were too hard to find blind, so entrances within
+// VAULT_REVEAL blocks now surface on the map/minimap (faint until entered).
+let allVaults: { cx: number; cz: number; x: number; z: number; tier: number }[] | null = null;
+function allVaultsList(): { cx: number; cz: number; x: number; z: number; tier: number }[] {
+  if (!allVaults) allVaults = worldVaults(seed, world.terrain);
+  return allVaults;
 }
+function totalVaults(): number { return allVaultsList().length; }
+
+// Vault entrances currently within reveal range (recomputed as the player roams).
+let nearbyVaults: { cx: number; cz: number; x: number; z: number; tier: number }[] = [];
+let nearbyVaultKey = '';
+
+// A faint light column at each nearby entrance so you can SPOT it in-world once
+// the map has pointed you to the area. Shared geo + material (never disposed).
+const vaultBeamGroup = new THREE.Group();
+scene.add(vaultBeamGroup);
+const VAULT_BEAM_GEO = new THREE.CylinderGeometry(0.6, 0.6, 70, 8, 1, true);
+const VAULT_BEAM_MAT = new THREE.MeshBasicMaterial({
+  color: 0x9a6aff, transparent: true, opacity: 0.14, depthWrite: false,
+  side: THREE.DoubleSide,
+});
+function rebuildVaultBeams(): void {
+  while (vaultBeamGroup.children.length > nearbyVaults.length) vaultBeamGroup.children.pop();
+  while (vaultBeamGroup.children.length < nearbyVaults.length) {
+    vaultBeamGroup.add(new THREE.Mesh(VAULT_BEAM_GEO, VAULT_BEAM_MAT));
+  }
+  nearbyVaults.forEach((v, i) => {
+    const gy = world.terrain.height(Math.round(v.x), Math.round(v.z));
+    (vaultBeamGroup.children[i] as THREE.Mesh).position.set(v.x + 0.5, gy + 35, v.z + 0.5);
+  });
+}
+
+/** Recompute the reveal set; rebuild the beams + map only when it changes. */
+function updateNearbyVaults(): void {
+  const near = allVaultsList().filter((v) =>
+    Math.hypot(v.x - player.pos.x, v.z - player.pos.z) <= VAULT_REVEAL);
+  const key = near.map((v) => `${v.cx},${v.cz}`).join('|');
+  if (key === nearbyVaultKey) return;
+  nearbyVaultKey = key;
+  nearbyVaults = near;
+  rebuildVaultBeams();
+  refreshVaultMap();
+}
+
 function refreshVaultMap(): void {
-  worldMap.setVaults(discoveredList().map((d) => ({
-    x: d.x, z: d.z, tier: d.tier,
+  const disc = discoveredList();
+  const discKeys = new Set(disc.map((d) => d.key));
+  const marks = disc.map((d) => ({
+    x: d.x, z: d.z, tier: d.tier, discovered: true,
     cleared: vaultViews.get(d.key)?.alive === false,
-  })), totalVaults());
+  }));
+  // Sensed-but-not-entered vaults render faint with no tier.
+  for (const v of nearbyVaults) {
+    if (discKeys.has(`${v.cx},${v.cz}`)) continue;
+    marks.push({ x: v.x, z: v.z, tier: v.tier, discovered: false, cleared: false });
+  }
+  worldMap.setVaults(marks, totalVaults());
 }
+
+/** Vault pips for the HUD radar (nearby + discovered, deduped). */
+function vaultMinimapMarkers(): { x: number; z: number; color: number }[] {
+  const out: { x: number; z: number; color: number }[] = [];
+  const seen = new Set<string>();
+  for (const v of nearbyVaults) { out.push({ x: v.x, z: v.z, color: 0x9a6aff }); seen.add(`${v.cx},${v.cz}`); }
+  for (const d of discoveredList()) if (!seen.has(d.key)) out.push({ x: d.x, z: d.z, color: 0x9a6aff });
+  return out;
+}
+
 function discoverVault(v: VaultStamp): void {
   const list = discoveredList();
   if (!list.some((d) => d.key === vaultKeyOf(v))) {
-    list.push({ key: vaultKeyOf(v), x: v.x, z: v.z, tier: v.tier });
+    // Store the ENTRANCE (mouth) so the marker sits where you actually walked in.
+    list.push({ key: vaultKeyOf(v), x: v.mouth.x, z: v.mouth.z, tier: v.tier });
     try {
       localStorage.setItem(`voxelon.vaultsfound.${authedName.toLowerCase()}`, JSON.stringify(list));
     } catch { /* ignore */ }
@@ -1755,6 +1826,7 @@ function updateVaults(dt: number): void {
   vaultPollTimer -= dt;
   if (vaultPollTimer <= 0) {
     vaultPollTimer = 0.3;
+    updateNearbyVaults(); // reveal entrances within range as the player roams
     const v = vaultAt(seed, player.pos.x, player.pos.y + 0.5, player.pos.z,
       world.terrain, vaultStampCached);
     if (v?.cx !== curVault?.cx || v?.cz !== curVault?.cz) onVaultTransition(v);
@@ -3042,7 +3114,8 @@ function frame(): void {
       // Tint reflects the TERRITORY you're standing in (blue in Azure land, red
       // in Crimson land), not your own faction; neutral land gets no tint.
       const hereOwner = regionOwners[regionOf(player.pos.x, player.pos.z)] ?? NO_FACTION;
-      minimap.update(player.pos.x, player.pos.z, player.yaw, hereOwner, worldMap.listWaypoints(), flagMk);
+      minimap.update(player.pos.x, player.pos.z, player.yaw, hereOwner,
+        worldMap.listWaypoints(), flagMk, vaultMinimapMarkers());
     }
     tickDisguises(dt); // Phase 8: expire spy disguises on remote avatars
     updateThrownItems(dt); // animate tossed grenades/bombs

@@ -444,16 +444,29 @@ export function sanitizeVaultState(raw: unknown): VaultServerState | null {
   return { tier, hp, deadAt, openedBy };
 }
 
-/** Total vault count for the whole world (map "found X / Y" pressure). Cheap:
- *  a hash sweep with stamps computed only for the ~100 surviving anchors. */
-export function countVaults(seed: number, ctx: StructureCtx): number {
-  const cmax = Math.floor(2500 / 16);
-  let n = 0;
+/** Map reveal radius: a vault's entrance appears on the map/minimap once the
+ *  player is within this many blocks (faint until actually entered). */
+export const VAULT_REVEAL = 500;
+
+/** Every vault in the world, as its surface ENTRANCE (mouth) position + tier —
+ *  a one-time full sweep for the map. Cheap: `wantsAnchor` is a hash reject, so
+ *  stamps are built only for the ~100 surviving anchors. Pure (seed-only). */
+export function worldVaults(
+  seed: number, ctx: StructureCtx, half = 2500
+): { cx: number; cz: number; x: number; z: number; tier: VaultTier }[] {
+  const out: { cx: number; cz: number; x: number; z: number; tier: VaultTier }[] = [];
+  const cmax = Math.floor(half / 16);
   for (let cx = -cmax; cx <= cmax; cx++) {
     for (let cz = -cmax; cz <= cmax; cz++) {
       if (!wantsAnchor(seed, cx, cz)) continue;
-      if (vaultStamp(seed, cx, cz, ctx)) n++;
+      const st = vaultStamp(seed, cx, cz, ctx);
+      if (st) out.push({ cx: st.cx, cz: st.cz, x: st.mouth.x, z: st.mouth.z, tier: st.tier });
     }
   }
-  return n;
+  return out;
+}
+
+/** Total vault count for the whole world (map "found X / Y" pressure). */
+export function countVaults(seed: number, ctx: StructureCtx): number {
+  return worldVaults(seed, ctx).length;
 }

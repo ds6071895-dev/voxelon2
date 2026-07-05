@@ -81,7 +81,7 @@ import {
 import {
   VAULT_LOOT, VAULT_LOOT_WINDOW, VAULT_RECHARGE, VaultStamp, bruteMaxHp,
   countVaults, newVaultState, refreshVaultState, sanitizeVaultState, vaultAt,
-  vaultChestAt, vaultLoot, vaultLootable, vaultStamp, vaultTier,
+  vaultChestAt, vaultLoot, vaultLootable, vaultStamp, vaultTier, worldVaults,
 } from '../src/vaults';
 import { LOOT_TABLES, chestLoot, chestLootSlots } from '../src/loot';
 import {
@@ -3732,6 +3732,20 @@ let firstVault: VaultStamp | null = null;
     list.slice(0, 20).every((s) => {
       const st = structureStamp(1337, Math.floor(s.x / 16), Math.floor(s.z / 16), terrain);
       return st !== null && st.x === s.x && st.z === s.z && st.kind === s.kind;
+    }));
+}
+
+// --- Vault reveal: worldVaults enumerates entrances for the map ------------------
+{
+  const vs = worldVaults(1337, terrain);
+  check('worldVaults enumerates every vault entrance (count + tiers + determinism)',
+    vs.length === countVaults(1337, terrain) && vs.length > 60 &&
+    vs.every((v) => Number.isFinite(v.x) && Number.isFinite(v.z) && [1, 2, 3].includes(v.tier)) &&
+    JSON.stringify(worldVaults(1337, terrain)) === JSON.stringify(vs));
+  check('worldVaults positions are the vault mouths (walk-in entrances)',
+    vs.slice(0, 12).every((v) => {
+      const st = vaultStamp(1337, v.cx, v.cz, terrain)!;
+      return st !== null && st.mouth.x === v.x && st.mouth.z === v.z;
     }));
 }
 

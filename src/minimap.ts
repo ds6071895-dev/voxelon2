@@ -93,9 +93,11 @@ export class Minimap {
     this.base = c;
   }
 
-  /** Redraw the radar for the current player pose, waypoints, and war flags. */
+  /** Redraw the radar for the current player pose, waypoints, war flags, and
+   *  any nearby vault entrances (Milestone D — purple skull pips). */
   update(px: number, pz: number, yaw: number, faction: number,
-    waypoints: ReadonlyArray<MinimapMarker>, flags: ReadonlyArray<MinimapMarker> = []): void {
+    waypoints: ReadonlyArray<MinimapMarker>, flags: ReadonlyArray<MinimapMarker> = [],
+    vaults: ReadonlyArray<MinimapMarker> = []): void {
     if (!this.base ||
         Math.abs(px - this.baseCx) > REFRESH_DIST || Math.abs(pz - this.baseCz) > REFRESH_DIST) {
       this.renderBase(px, pz);
@@ -164,6 +166,18 @@ export class Minimap {
       ctx.fillStyle = css(f.color);
       ctx.beginPath(); ctx.moveTo(p.x, p.y - 6); ctx.lineTo(p.x + 7, p.y - 3.5); ctx.lineTo(p.x, p.y - 1);
       ctx.closePath(); ctx.fill(); ctx.stroke();
+    }
+
+    // Nearby vault entrances (Milestone D): a purple skull pip so you can home
+    // in on the dungeon the map surfaced.
+    for (const v of vaults) {
+      const p = plot(v.x, v.z);
+      ctx.fillStyle = '#0d0f18';
+      ctx.strokeStyle = css(v.color); ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(p.x, p.y, 4.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = css(v.color);
+      ctx.font = 'bold 7px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('☠', p.x, p.y);
     }
 
     // Player arrow at the centre, rotated to the facing direction.

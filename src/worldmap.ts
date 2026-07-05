@@ -54,8 +54,12 @@ const STRUCT_COLOR: Record<string, string> = {
 
 interface Waypoint { x: number; z: number; color: number; name: string; show: boolean; }
 export interface TotemPos { x: number; y: number; z: number; }
-/** A DISCOVERED vault for the map (Milestone D): position + tier + cleared. */
-export interface VaultMark { x: number; z: number; tier: number; cleared: boolean; }
+/** A vault marker for the map (Milestone D). `discovered` vaults (entered once)
+ *  render bright with their tier; merely SENSED nearby ones render faint with no
+ *  tier (you know something's there, not what). */
+export interface VaultMark {
+  x: number; z: number; tier: number; cleared: boolean; discovered: boolean;
+}
 /** A surface structure on the map: position + kind (tower/bunker/pod). */
 export interface StructureMark { x: number; z: number; kind: string; }
 
@@ -341,20 +345,22 @@ export class WorldMap {
       else { ctx.fillRect(px - 2, py - 0.5, 4, 1); ctx.fillRect(px - 0.5, py - 2, 1, 4); } // pod: cross
     }
 
-    // Discovered vaults (Milestone D): a skull marker + tier tag. Cleared
-    // vaults render dimmer (the Brute is down until it recharges).
+    // Vault markers (Milestone D): discovered vaults are bright + tier-labeled;
+    // merely SENSED nearby vaults are faint with no tier. Cleared ones dim.
     for (const v of this.vaults) {
       const px = this.cx(v.x), py = this.cy(v.z);
-      ctx.globalAlpha = v.cleared ? 0.55 : 1;
+      ctx.globalAlpha = !v.discovered ? 0.4 : (v.cleared ? 0.55 : 1);
       ctx.fillStyle = '#0d0f18';
       ctx.strokeStyle = '#b9a5ff'; ctx.lineWidth = 1.5;
       ctx.beginPath(); ctx.arc(px, py, 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-      ctx.fillStyle = '#e6dcff';
+      ctx.fillStyle = v.discovered ? '#e6dcff' : '#9a8fce';
       ctx.font = 'bold 9px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText('☠', px, py - 1);
-      ctx.fillStyle = '#b9a5ff';
-      ctx.font = 'bold 8px monospace';
-      ctx.fillText(['I', 'II', 'III'][v.tier - 1] ?? '?', px, py + 12);
+      ctx.fillText(v.discovered ? '☠' : '?', px, py - 1);
+      if (v.discovered) {
+        ctx.fillStyle = '#b9a5ff';
+        ctx.font = 'bold 8px monospace';
+        ctx.fillText(['I', 'II', 'III'][v.tier - 1] ?? '?', px, py + 12);
+      }
       ctx.globalAlpha = 1;
     }
 
