@@ -8,6 +8,7 @@ import { Block, BLOCKS, isSolid, Tile } from './blocks';
 import type { ItemEntities } from './itementity';
 import { Item, ItemStack } from './items';
 import { inCore } from './net/protocol';
+import { VAULT_RECHARGE, VaultStamp } from './vaults';
 import type { Particles } from './particles';
 import type { Player } from './player';
 import type { Atlas } from './textures';
@@ -15,8 +16,9 @@ import type { World } from './world';
 
 // VOXELON: hostile mobs only — passive animals were removed. Milestone C adds
 // the SPITTER (ranged lobber, keeps its distance) and the SKITTER (fast, low-HP
-// lunger — panic fun, dies to one good hit; Wilds + dungeons).
-export type MobType = 'zombie' | 'creeper' | 'spitter' | 'skitter';
+// lunger — panic fun, dies to one good hit; Wilds + dungeons). Milestone D adds
+// the vault-boss BRUTE (huge, slow, telegraphed lunge — server-side HP online).
+export type MobType = 'zombie' | 'creeper' | 'spitter' | 'skitter' | 'brute';
 
 const GRAVITY = 32;
 const JUMP_V = 8.4;
@@ -50,10 +52,18 @@ export const MOB_DEFS: Record<MobType, MobDef> = {
     health: 6, speed: 4.3, hostile: true, halfW: 0.35, height: 0.9,
     drops: (rng) => (rng() < 0.3 ? [{ id: Item.Stick, count: 1 }] : []),
   },
+  // Vault Brute (Milestone D): a 2×-scale slow boss zombie guarding the vault
+  // loot room. Online its HP is SERVER-side (this local value mirrors it); the
+  // chest is the reward, so it drops nothing itself.
+  brute: {
+    health: 130, speed: 1.7, hostile: true, halfW: 0.55, height: 3.5,
+    drops: () => [],
+  },
 };
 
 const ZOMBIE_DAMAGE = 3;
 const SKITTER_DAMAGE = 2;
+const BRUTE_DAMAGE = 6;
 const SPIT_DAMAGE = 3;
 const SPIT_COOLDOWN = 2.4;
 const CREEPER_FUSE = 1.5;
@@ -163,6 +173,26 @@ function buildModel(type: MobType, atlas: Atlas, mat: THREE.Material): MobModel 
       }
       break;
     }
+    case 'brute': {
+      // A hulking zombie silhouette at ~1.9× scale (uniform group scale keeps
+      // the walk/gaze animation code identical).
+      group.add(fixed(atlas, mat, 0.56, 0.76, 0.3, Tile.BruteSkin, 0, 1.16, 0));
+      const hg = new THREE.Group();
+      hg.position.set(0, 1.54, 0);
+      hg.add(fixed(atlas, mat, 0.56, 0.56, 0.56, Tile.BruteSkin, 0, 0.28, 0, Tile.BruteFace));
+      group.add(hg);
+      head = hg;
+      for (const sx of [-1, 1]) {
+        const arm = hung(atlas, mat, 0.26, 0.8, 0.26, Tile.BruteSkin, sx * 0.44, 1.5, 0);
+        arm.rotation.x = -Math.PI / 2;
+        group.add(arm);
+        const leg = hung(atlas, mat, 0.26, 0.8, 0.26, Tile.BruteSkin, sx * 0.15, 0.8, 0);
+        legs.push(leg);
+        group.add(leg);
+      }
+      group.scale.setScalar(1.9);
+      break;
+    }
     case 'creeper': {
       group.add(fixed(atlas, mat, 0.45, 0.8, 0.3, Tile.CreeperSkin, 0, 0.78, 0));
       const hg = new THREE.Group();
@@ -205,6 +235,10 @@ export class Mob {
   walkPhase = 0;
   brightness = 1;
   removed = false;
+  /** Vault-guard tag: "cx,cz:roomIndex" of the spawn anchor that owns this mob. */
+  room: string | null = null;
+  /** Tier-III armored guard variant: more HP + a rusty tint. */
+  armored = false;
   readonly model: MobModel;
   readonly material: THREE.MeshBasicMaterial;
 
@@ -233,6 +267,11 @@ export class Mobs {
   spawningEnabled = true;
   /** Sound cues: 'zombie' groan, 'hiss', 'mobHurt', 'explosion', 'poof'. */
   onSound?: (name: string, pos: THREE.Vector3) => void;
+  /** The player damaged the Vault Brute (main reports it to the server, which
+   *  owns the shared boss HP online). Fired AFTER the local damage applies. */
+  onBruteHit?: (mob: Mob, damage: number) => void;
+  /** The local Brute died (offline authority: main marks the vault cleared). */
+  onBruteDown?: (mob: Mob) => void;
 
   private readonly scene: THREE.Scene;
   private readonly world: World;
@@ -241,6 +280,15 @@ export class Mobs {
   private readonly particles: Particles;
   private spawnTimer = 0;
   private lightTimer = 0;
+  // --- Vault guards (Milestone D): per-room spawn anchors ---
+  /** The vault the player is currently inside (set by main each frame). */
+  private vault: VaultStamp | null = null;
+  /** Cleared-room dormancy: anchor key -> localTime the anchor recharges. */
+  private readonly roomCooldowns = new Map<string, number>();
+  /** Anchors that have populated at least once (so "cleared" means something). */
+  private readonly roomSpawned = new Set<string>();
+  private guardTimer = 0;
+  private localTime = 0;
   /** In-flight spitter gobs (simple lobbed projectiles; client-side like mobs). */
   private readonly spits: { pos: THREE.Vector3; vel: THREE.Vector3; mesh: THREE.Mesh; life: number }[] = [];
   private readonly spitGeo = new THREE.SphereGeometry(0.16, 6, 5);
@@ -262,6 +310,60 @@ export class Mobs {
     this.scene.add(mob.model.group);
     this.list.push(mob);
     return mob;
+  }
+
+  /** The vault the player is inside right now (null = not in a vault). Drives
+   *  the per-room guard spawn anchors; main sets it every frame. */
+  setVault(v: VaultStamp | null): void {
+    this.vault = v;
+  }
+
+  /** Remove a mob outright (poof, no drops) — used when the SERVER declares
+   *  the shared-HP Vault Brute dead before our local copy caught up. */
+  slay(mob: Mob): void {
+    if (mob.removed) return;
+    this.particles.poof(mob.pos.x, mob.pos.y + mob.def.height / 2, mob.pos.z);
+    this.onSound?.('poof', mob.pos);
+    this.remove(mob);
+  }
+
+  /** Vault guard anchors: while the player is inside the vault, keep each
+   *  room populated up to its cap; a room the player clears goes dormant for
+   *  VAULT_RECHARGE. Guards spawn regardless of light (it's a dungeon). */
+  private tickVaultGuards(player: Player): void {
+    const v = this.vault;
+    if (!v || player.dead) return;
+    for (let i = 0; i < v.rooms.length; i++) {
+      const room = v.rooms[i];
+      if (room.cap <= 0) continue; // the boss room belongs to the Brute
+      const key = `${v.cx},${v.cz}:${i}`;
+      let count = 0;
+      for (const m of this.list) if (m.room === key) count++;
+      // Cleared: the player stands in an emptied room -> the anchor sleeps.
+      const inRoom = Math.abs(player.pos.x - room.x) <= room.hw + 1 &&
+        Math.abs(player.pos.z - room.z) <= room.hw + 1 &&
+        Math.abs(player.pos.y - room.y) < 4;
+      if (inRoom && count === 0 && this.roomSpawned.has(key)) {
+        this.roomSpawned.delete(key);
+        this.roomCooldowns.set(key, this.localTime + VAULT_RECHARGE);
+        continue;
+      }
+      if (this.guardTimer > 0 || count >= room.cap) continue;
+      if ((this.roomCooldowns.get(key) ?? -Infinity) > this.localTime) continue;
+      const gx = room.x + (Math.random() * 2 - 1) * (room.hw - 1.5);
+      const gz = room.z + (Math.random() * 2 - 1) * (room.hw - 1.5);
+      const roll = Math.random();
+      const type: MobType = v.tier >= 2 && roll < 0.3 ? 'skitter'
+        : roll < 0.65 ? 'zombie' : 'spitter';
+      const mob = this.spawnAt(type, gx, room.y, gz);
+      mob.room = key;
+      if (v.tier >= 3) { // Tier III: armored variants (more HP, rusty tint)
+        mob.armored = true;
+        mob.health = Math.round(mob.health * 1.8);
+      }
+      this.roomSpawned.add(key);
+      this.guardTimer = 1.3; // at most one guard spawn per beat
+    }
   }
 
   private hostileCount(): number {
@@ -330,17 +432,20 @@ export class Mobs {
     if (!mob) return false;
     mob.health -= damage;
     mob.hurtTime = 0.5;
+    // The Brute is heavy — barely any knockback (it's a boss, not a piñata).
+    const heavy = mob.type === 'brute' ? 0.15 : 1;
     const away = new THREE.Vector3(
       mob.pos.x - player.pos.x, 0, mob.pos.z - player.pos.z
     ).normalize();
-    mob.vel.x += away.x * 7;
-    mob.vel.z += away.z * 7;
-    mob.vel.y += 4.5;
+    mob.vel.x += away.x * 7 * heavy;
+    mob.vel.z += away.z * 7 * heavy;
+    mob.vel.y += 4.5 * heavy;
     if (!mob.def.hostile) {
       mob.state = 'flee';
       mob.stateTime = 4;
     }
     this.onSound?.('mobHurt', mob.pos);
+    if (mob.type === 'brute') this.onBruteHit?.(mob, damage);
     if (mob.health <= 0) this.kill(mob);
     return true;
   }
@@ -363,16 +468,19 @@ export class Mobs {
     if (!mob) return false;
     mob.health -= damage;
     mob.hurtTime = 0.5;
-    mob.vel.x += dir.x * 5;
-    mob.vel.z += dir.z * 5;
-    mob.vel.y += 3;
+    const heavy = mob.type === 'brute' ? 0.15 : 1; // bosses barely budge
+    mob.vel.x += dir.x * 5 * heavy;
+    mob.vel.z += dir.z * 5 * heavy;
+    mob.vel.y += 3 * heavy;
     if (!mob.def.hostile) { mob.state = 'flee'; mob.stateTime = 4; }
     this.onSound?.('mobHurt', mob.pos);
+    if (mob.type === 'brute') this.onBruteHit?.(mob, damage);
     if (mob.health <= 0) this.kill(mob);
     return true;
   }
 
   private kill(mob: Mob): void {
+    if (mob.type === 'brute') this.onBruteDown?.(mob);
     for (const drop of mob.def.drops(Math.random)) {
       this.items.spawn(
         mob.pos.x, mob.pos.y + 0.4, mob.pos.z, drop.id, drop.count
@@ -448,6 +556,9 @@ export class Mobs {
   }
 
   update(dt: number, player: Player, sun: number): void {
+    this.localTime += dt;
+    this.guardTimer = Math.max(0, this.guardTimer - dt);
+    if (this.spawningEnabled) this.tickVaultGuards(player);
     this.spawnTimer += dt;
     if (this.spawnTimer >= 1) {
       this.spawnTimer = 0;
@@ -560,7 +671,7 @@ export class Mobs {
       mob.state = 'chase';
       mob.yaw = Math.atan2(toPlayer.x, toPlayer.z);
       speedMul = 1;
-      if (mob.type === 'zombie' || mob.type === 'skitter') {
+      if (mob.type === 'zombie' || mob.type === 'skitter' || mob.type === 'brute') {
         moving = true;
         if (mob.type === 'skitter') {
           speedMul = 1.15;
@@ -570,21 +681,32 @@ export class Mobs {
             const dir = toPlayer.clone().setY(0).normalize();
             mob.vel.x = dir.x * 8; mob.vel.z = dir.z * 8; mob.vel.y = 5;
           }
+        } else if (mob.type === 'brute') {
+          // The Brute: slow stalk, then a big telegraphed leap that closes in.
+          if (mob.onGround && dist < 7 && dist > 2.6 && mob.attackCooldown <= 0.5 &&
+              Math.abs(toPlayer.y) < 3) {
+            const dir = toPlayer.clone().setY(0).normalize();
+            mob.vel.x = dir.x * 8.5; mob.vel.z = dir.z * 8.5; mob.vel.y = 5.5;
+          }
         }
-        const dmg = mob.type === 'skitter' ? SKITTER_DAMAGE : ZOMBIE_DAMAGE;
-        const cd = mob.type === 'skitter' ? 0.9 : 1.2;
-        if (distXZ < def.halfW + 1.0 && Math.abs(toPlayer.y) < 2.5 &&
+        const dmg = mob.type === 'skitter' ? SKITTER_DAMAGE
+          : mob.type === 'brute' ? BRUTE_DAMAGE : ZOMBIE_DAMAGE;
+        const cd = mob.type === 'skitter' ? 0.9 : mob.type === 'brute' ? 2.0 : 1.2;
+        const reach = mob.type === 'brute' ? 1.4 : 1.0;
+        if (distXZ < def.halfW + reach && Math.abs(toPlayer.y) < 2.5 &&
           mob.attackCooldown <= 0) {
           mob.attackCooldown = cd;
           player.damage(dmg);
-          const kick = toPlayer.clone().setY(0).normalize().multiplyScalar(7);
+          const kick = toPlayer.clone().setY(0).normalize()
+            .multiplyScalar(mob.type === 'brute' ? 11 : 7);
           player.vel.add(kick);
-          player.vel.y += 3;
+          player.vel.y += mob.type === 'brute' ? 4.5 : 3;
         }
         mob.soundTimer -= dt;
         if (mob.soundTimer <= 0) {
           mob.soundTimer = 3 + Math.random() * 4;
-          this.onSound?.(mob.type === 'skitter' ? 'skitter' : 'zombie', mob.pos);
+          this.onSound?.(mob.type === 'skitter' ? 'skitter'
+            : mob.type === 'brute' ? 'brute' : 'zombie', mob.pos);
         }
       } else if (mob.type === 'spitter') {
         // Keep a ranged distance: advance when far, back off when crowded,
@@ -724,6 +846,7 @@ export class Mobs {
     }
     const b = mob.brightness;
     if (mob.hurtTime > 0) mob.material.color.setRGB(b, b * 0.35, b * 0.35);
+    else if (mob.armored) mob.material.color.setRGB(b, b * 0.78, b * 0.6); // rusty plate tint
     else if (mob.type === 'creeper' && mob.fuse > 0) {
       const w = 0.5 + 0.5 * Math.sin(mob.fuse * 25);
       mob.material.color.setRGB(b + (1 - b) * w, b + (1 - b) * w, b + (1 - b) * w);

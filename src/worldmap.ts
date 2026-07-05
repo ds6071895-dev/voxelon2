@@ -45,8 +45,19 @@ const BIOME_COLOR: Record<number, string> = {
   [Biome.Crystalfields]: '#b9c6e8',
 };
 
+/** Map-icon color per surface-structure kind. */
+const STRUCT_COLOR: Record<string, string> = {
+  tower: '#c8ccd4',   // ruined watchtower — pale stone
+  bunker: '#93a559',  // bunker — military olive
+  pod: '#e0913a',     // crashed cargo pod — scorched orange
+};
+
 interface Waypoint { x: number; z: number; color: number; name: string; show: boolean; }
 export interface TotemPos { x: number; y: number; z: number; }
+/** A DISCOVERED vault for the map (Milestone D): position + tier + cleared. */
+export interface VaultMark { x: number; z: number; tier: number; cleared: boolean; }
+/** A surface structure on the map: position + kind (tower/bunker/pod). */
+export interface StructureMark { x: number; z: number; kind: string; }
 
 /** Live game state the map reads each frame it's open. */
 export interface MapContext {
@@ -70,6 +81,11 @@ export class WorldMap {
   private waypoints: Waypoint[] = [];
   /** Attuned Waypoint Totems (B4) — click one on the map to travel to it. */
   private totems: TotemPos[] = [];
+  /** Discovered vaults (Milestone D) + the world's total (collection pressure). */
+  private vaults: VaultMark[] = [];
+  private vaultTotal = 0;
+  /** Every surface structure (shown as icons so the map reads as a treasure map). */
+  private structures: StructureMark[] = [];
   /** Fired when the player clicks an attuned totem marker (main runs the
    *  wind-up + the actual teleport). */
   onTotemTravel?: (t: TotemPos) => void;
@@ -108,9 +124,11 @@ export class WorldMap {
       'position:absolute;inset:0;display:none;z-index:30;align-items:center;' +
       'justify-content:center;background:rgba(6,8,14,0.78);';
     const panel = document.createElement('div');
+    // Responsive: never exceed the viewport (small screens clipped the map +
+    // legend before) — cap to the viewport and scroll inside if needed.
     panel.style.cssText =
-      'background:#11141c;border:2px solid #2a3550;padding:14px 16px;' +
-      'display:flex;flex-direction:column;gap:10px;';
+      'background:#11141c;border:2px solid #2a3550;padding:14px 16px;box-sizing:border-box;' +
+      'display:flex;flex-direction:column;gap:10px;max-width:96vw;max-height:96vh;overflow:auto;';
     const header = document.createElement('div');
     header.style.cssText = 'display:flex;align-items:center;gap:14px;';
     const title = document.createElement('div');
@@ -134,15 +152,24 @@ export class WorldMap {
     syncZoom();
     header.append(title, zoomBtn);
     const row = document.createElement('div');
-    row.style.cssText = 'display:flex;gap:14px;align-items:flex-start;';
+    // Wrap on narrow screens so the legend drops below the map instead of being
+    // pushed off-screen.
+    row.style.cssText = 'display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap;justify-content:center;';
     this.canvas = document.createElement('canvas');
     this.canvas.width = CANVAS_PX;
     this.canvas.height = CANVAS_PX;
-    this.canvas.style.cssText = 'border:1px solid #2a3550;cursor:crosshair;image-rendering:pixelated;';
+    // The canvas renders at CANVAS_PX internally but DISPLAYS at a size that
+    // fits the viewport (square kept via aspect-ratio); click math already
+    // rescales via the element's rendered rect, so hit-testing stays correct.
+    this.canvas.style.cssText =
+      'border:1px solid #2a3550;cursor:crosshair;image-rendering:pixelated;' +
+      'width:min(700px,88vw,74vh);height:auto;aspect-ratio:1/1;max-width:100%;flex:0 0 auto;';
     this.ctx = this.canvas.getContext('2d')!;
     this.legend = document.createElement('div');
     this.legend.className = 'mc-font';
-    this.legend.style.cssText = 'width:200px;font-size:12px;color:#dfe6f2;text-shadow:none;line-height:1.7;';
+    this.legend.style.cssText =
+      'flex:1 1 200px;min-width:180px;max-width:100%;font-size:12px;color:#dfe6f2;' +
+      'text-shadow:none;line-height:1.7;';
     row.append(this.canvas, this.legend);
     const hint = document.createElement('div');
     hint.className = 'mc-font';
@@ -299,6 +326,38 @@ export class WorldMap {
       ctx.closePath(); ctx.fill();
     }
 
+    // Surface structures (all of them): small kind-colored icons so the map
+    // reads as a treasure map. Drawn under the vaults/waypoints/player.
+    for (const st of this.structures) {
+      const px = this.cx(st.x), py = this.cy(st.z);
+      const col = STRUCT_COLOR[st.kind] ?? '#c9c9c9';
+      ctx.fillStyle = col;
+      ctx.strokeStyle = 'rgba(0,0,0,0.8)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.rect(px - 3, py - 3, 6, 6); ctx.fill(); ctx.stroke();
+      // A tiny inner mark to tell the kinds apart at a glance.
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      if (st.kind === 'tower') ctx.fillRect(px - 0.5, py - 3, 1, 6);       // vertical bar
+      else if (st.kind === 'bunker') ctx.fillRect(px - 3, py - 0.5, 6, 1); // horizontal bar
+      else { ctx.fillRect(px - 2, py - 0.5, 4, 1); ctx.fillRect(px - 0.5, py - 2, 1, 4); } // pod: cross
+    }
+
+    // Discovered vaults (Milestone D): a skull marker + tier tag. Cleared
+    // vaults render dimmer (the Brute is down until it recharges).
+    for (const v of this.vaults) {
+      const px = this.cx(v.x), py = this.cy(v.z);
+      ctx.globalAlpha = v.cleared ? 0.55 : 1;
+      ctx.fillStyle = '#0d0f18';
+      ctx.strokeStyle = '#b9a5ff'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(px, py, 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#e6dcff';
+      ctx.font = 'bold 9px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('☠', px, py - 1);
+      ctx.fillStyle = '#b9a5ff';
+      ctx.font = 'bold 8px monospace';
+      ctx.fillText(['I', 'II', 'III'][v.tier - 1] ?? '?', px, py + 12);
+      ctx.globalAlpha = 1;
+    }
+
     // War flags (dynamic markers): a colored flag glyph + label.
     for (const m of this.dynamicMarkers) {
       const fx = this.cx(m.x), fy = this.cy(m.z);
@@ -374,6 +433,21 @@ export class WorldMap {
         `${pct.toFixed(1)}%${mine}`);
     }
     lines.push('');
+    // Vault collection line (Milestone D): dungeon-hunting pressure.
+    if (this.vaultTotal > 0) {
+      lines.push(`<b>☠ VAULTS</b> — found ${this.vaults.length}/${this.vaultTotal}`);
+    }
+    // Surface structures legend (icon key + total).
+    if (this.structures.length) {
+      const c = (k: string): number =>
+        this.structures.reduce((n, s) => n + (s.kind === k ? 1 : 0), 0);
+      lines.push(`<b>◼ STRUCTURES</b> (${this.structures.length})`);
+      lines.push(
+        `<span style="color:${STRUCT_COLOR.tower}">◼</span> Towers ${c('tower')} · ` +
+        `<span style="color:${STRUCT_COLOR.bunker}">◼</span> Bunkers ${c('bunker')} · ` +
+        `<span style="color:${STRUCT_COLOR.pod}">◼</span> Pods ${c('pod')}`);
+    }
+    lines.push('');
     lines.push(`<b>WAYPOINTS</b> (${this.waypoints.length})`);
     const p = this.mapCtx.player();
     this.waypoints.forEach((w, i) => {
@@ -417,6 +491,20 @@ export class WorldMap {
   /** Replace the attuned-totem markers (click-to-travel). */
   setTotems(list: TotemPos[]): void {
     this.totems = list;
+    if (this.open) this.draw();
+  }
+
+  /** Replace the discovered-vault markers (Milestone D). `total` is the whole
+   *  world's vault count for the "found X / Y" collection line. */
+  setVaults(list: VaultMark[], total: number): void {
+    this.vaults = list;
+    this.vaultTotal = total;
+    if (this.open) this.draw();
+  }
+
+  /** Replace the surface-structure markers (shown as icons on the map). */
+  setStructures(list: StructureMark[]): void {
+    this.structures = list;
     if (this.open) this.draw();
   }
 

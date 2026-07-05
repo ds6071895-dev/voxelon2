@@ -159,6 +159,12 @@ export const RECIPES: Recipe[] = [
   // diamonds, and a real Heart at its core.
   shaped([[T, D, T], [T, Item.Heart, T], [null, D, null]], Item.RevivalBeacon),
 
+  // Healing consumables (right-click for a burst of fast regeneration).
+  // Bandage = cheap minor patch: redstone-soaked wrappings on a stick.
+  shapeless([R, R, S], Item.Bandage, 2),
+  // Medkit = a strong field kit: an iron case, a diamond healing core, redstone.
+  shaped([[null, R, null], [I, D, I], [null, R, null]], Item.Medkit),
+
   // Building set (M15): per-wood slabs + stairs.
   ...woodCraft(OAK, Block.OakSlab, Block.OakStairsN),
   ...woodCraft(BIRCH, Block.BirchSlab, Block.BirchStairsN),

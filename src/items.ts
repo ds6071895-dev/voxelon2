@@ -73,6 +73,9 @@ export const enum Item {
   RevivalBeacon = 161,
   // Crystal Shard (Milestone C): mined from Crystalfields spikes (Wilds-only).
   CrystalShard = 162,
+  // Healing consumables: right-click to trigger a burst of accelerated regen.
+  Bandage = 163,
+  Medkit = 164,
 }
 
 export interface ToolInfo {
@@ -105,6 +108,15 @@ export interface ArmorInfo {
  *  `durability` is the number of seconds of gliding before it wears out. */
 export interface GliderInfo {
   durability: number;
+}
+
+/** A healing consumable (right-click): applies an accelerated-regen buff that
+ *  bypasses the post-damage regen delay, so you can patch up mid-fight. */
+export interface HealInfo {
+  /** Seconds the fast-regen buff lasts. */
+  duration: number;
+  /** Seconds between +1 HP while the buff is active (normal regen is 2s). */
+  interval: number;
 }
 
 export interface GunInfo {
@@ -147,6 +159,7 @@ export interface ItemInfo {
   armor?: ArmorInfo;
   gun?: GunInfo;
   glider?: GliderInfo;
+  heal?: HealInfo;
 }
 
 export interface ItemStack {
@@ -193,6 +206,9 @@ function armorItem(name: string, sprite: Tile, armor: ArmorInfo): ItemInfo {
 }
 function gunItem(name: string, sprite: Tile, gun: GunInfo): ItemInfo {
   return { name, kind: 'item', sprite, maxStack: 1, gun };
+}
+function healItem(name: string, sprite: Tile, heal: HealInfo): ItemInfo {
+  return { name, kind: 'item', sprite, maxStack: 16, heal };
 }
 function gliderItem(name: string, sprite: Tile, glider: GliderInfo): ItemInfo {
   // A 0-defense "chestplate" so the existing armor-slot equip/swap plumbing
@@ -274,6 +290,9 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Block.CherryPlanks]: blockItem(Block.CherryPlanks),
   [Block.Mud]: blockItem(Block.Mud),
   [Block.CrystalBlock]: blockItem(Block.CrystalBlock),
+  // Dungeons (Milestone D): mined vault walls are a building trophy. The
+  // VaultChest is deliberately NOT an item (breaking one drops nothing).
+  [Block.VaultBrick]: blockItem(Block.VaultBrick),
   // Terrain (M21): mesa + ashlands materials (Lava is a liquid, like Water).
   [Block.RedSand]: blockItem(Block.RedSand),
   [Block.Terracotta]: blockItem(Block.Terracotta),
@@ -391,6 +410,11 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Item.Heart]: gadgetItem('Heart', Tile.Heart, 16),
   [Item.CrystalShard]: pureItem('Crystal Shard', Tile.CrystalShard),
   [Item.RevivalBeacon]: gadgetItem('Revival Beacon', Tile.RevivalBeacon, 1),
+
+  // Healing consumables: right-click for a burst of fast regeneration.
+  // Bandage = quick minor patch; Medkit = a strong, near-full heal.
+  [Item.Bandage]: healItem('Bandage', Tile.BandageSprite, { duration: 5, interval: 0.6 }),
+  [Item.Medkit]: healItem('Medkit', Tile.MedkitSprite, { duration: 8, interval: 0.3 }),
 };
 
 /**

@@ -24,7 +24,7 @@ const ARMOR_MASK = [
 
 function drawIcon(
   ctx: CanvasRenderingContext2D, x: number, mask: string[],
-  fill: (px: number, py: number) => string | null
+  fill: (px: number, py: number) => string | null, yBase = 0
 ): void {
   for (let py = 0; py < mask.length; py++) {
     for (let px = 0; px < 7; px++) {
@@ -32,7 +32,7 @@ function drawIcon(
       const c = fill(px, py);
       if (!c) continue;
       ctx.fillStyle = c;
-      ctx.fillRect(x + px * 2, 4 + py * 2, 2, 2);
+      ctx.fillRect(x + px * 2, 4 + py * 2 + yBase, 2, 2);
     }
   }
 }
@@ -174,30 +174,29 @@ export class HUD {
     if (key === this.lastStatus) return;
     this.lastStatus = key;
 
-    // Lifesteal heart row: one icon per MAX heart (half-heart granularity).
-    // Past 10 hearts a full row won't fit, so render compactly: one heart icon
-    // + "12.5 / 14" style text (current hearts of max hearts).
+    // Lifesteal heart row(s): exactly one icon per MAX heart (half-heart
+    // granularity), so fewer hearts show fewer icons. Past 10 the row WRAPS
+    // upward — a second row of hearts stacks on top (never a text readout).
     const hearts = (document.getElementById('hearts') as HTMLCanvasElement)
       .getContext('2d')!;
-    hearts.clearRect(0, 0, 202, 20);
+    hearts.clearRect(0, 0, 202, 40);
     const maxHearts = Math.max(1, Math.round(s.hearts));
     const heartFill = (v: number) => (px: number): string => {
       if (v >= 2) return px % 6 === 1 ? '#ff6a6a' : '#e02020';
       if (v >= 1) return px < 3 ? '#e02020' : '#3b3b3b';
       return '#3b3b3b';
     };
-    if (maxHearts <= 10) {
-      for (let i = 0; i < maxHearts; i++) {
-        drawIcon(hearts, i * 20, HEART_MASK, heartFill(s.health - i * 2));
-      }
-    } else {
-      drawIcon(hearts, 0, HEART_MASK, heartFill(Math.min(2, s.health)));
-      hearts.font = 'bold 13px monospace';
-      hearts.fillStyle = '#1a0a0a';
-      hearts.fillText(`${s.health / 2} / ${maxHearts}`, 21, 15);
-      hearts.fillStyle = '#ff5a5a';
-      hearts.fillText(`${s.health / 2} / ${maxHearts}`, 20, 14);
+    const rows = maxHearts > 10 ? 2 : 1; // MAX_HEARTS is 20, so at most 2 rows
+    for (let i = 0; i < maxHearts; i++) {
+      const row = i < 10 ? 0 : 1;                 // row 0 = bottom, row 1 = on top
+      const col = i - row * 10;
+      // Bottom row ALWAYS sits on the canvas floor (y=20); extra hearts stack
+      // in the upper half (y=0) — so a single row keeps its usual position.
+      drawIcon(hearts, col * 20, HEART_MASK, heartFill(s.health - i * 2), (1 - row) * 20);
     }
+    // The armor bar sits just above the (possibly two-row) heart stack.
+    const armorEl = document.getElementById('armor') as HTMLCanvasElement;
+    armorEl.style.bottom = rows > 1 ? '44px' : '22px';
 
     // Energy: 10 blue segments filling left→right; dim red while exhausted.
     const energy = (document.getElementById('energybar') as HTMLCanvasElement)

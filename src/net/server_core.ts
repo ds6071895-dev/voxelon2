@@ -38,6 +38,10 @@ import { Terrain } from '../terrain';
 import { structureChestTier } from '../structures';
 import { chestLootSlots } from '../loot';
 import {
+  VaultServerState, VaultStamp, bruteMaxHp, newVaultState, refreshVaultState,
+  sanitizeVaultState, vaultChestAt, vaultLoot, vaultLootable, vaultStamp,
+} from '../vaults';
+import {
   ClientMsg, EDIT_RANGE, CHEST_SLOTS, PICKUP_RANGE,
   ARMOR_POINT_CAP, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE,
   mitigate, ItemEntityInfo, PlayerInfo, PlayerSnapshot, ServerMsg,
@@ -71,6 +75,10 @@ const REGEN_DELAY = 5;          // seconds after damage before regen resumes
 interface ServerPlayer extends PlayerInfo {
   regenCooldown: number;
   regenTimer: number;
+  /** Healing consumable (Bandage/Medkit): seconds of accelerated regen left +
+   *  the boosted +1-HP interval while it's active (0 = no buff). */
+  regenBoostTimer: number;
+  regenBoostInterval: number;
   /** Lifesteal: the last DIRECT player attacker (gun/explosive) + when — a
    *  death within KILL_CREDIT_WINDOW of the hit credits them the heart. */
   lastHitBy: number;
@@ -109,8 +117,9 @@ const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
   'machineMove', 'setSpawn',
   'turretUpgrade', 'turretClaim', 'turretHit', 'turretLoad',
   'claimFeed', 'claimHit', 'gadgetUse', 'rocketBlast',
-  'heartConsume', 'heartWithdraw', 'beaconRevive',
+  'heartConsume', 'heartWithdraw', 'beaconRevive', 'useHeal',
   'attune', 'totemTeleport',
+  'vaultBossHit', 'vaultChestOpen',
 ]);
 
 /** One message the transport should deliver. `to` is a client id, or a
@@ -163,6 +172,11 @@ export class GameServer {
    *  member of `faction`; returns success. `by` is credited in the target's
    *  next-login notice. */
   onRevive?: (target: string, faction: number, by: string) => boolean;
+  // Vaults (Milestone D): per-vault boss HP + per-player loot ledger, keyed
+  // by the anchor chunk "cx,cz". Persisted in the world save.
+  private readonly vaults = new Map<string, VaultServerState>();
+  /** Deterministic vault stamps are pricey to rebuild — cache by anchor chunk. */
+  private readonly vaultStamps = new Map<string, VaultStamp | null>();
   private worldTime = 0;        // seconds since boot (grace-period clock)
   private claimAccum = 0;
   private readonly items = new Map<number, ItemEntityInfo>();
@@ -272,6 +286,7 @@ export class GameServer {
       hearts,
       x: s.x, y: s.y, z: s.z, yaw: fin(syaw as number) ? syaw as number : 0, pitch: 0,
       health: maxHealthFor(hearts), dead: false, regenCooldown: 0, regenTimer: 0,
+      regenBoostTimer: 0, regenBoostInterval: 0,
       lastHitBy: -1, lastHitTime: -Infinity, eliminated: false,
       lastDamageTime: -Infinity,
       totems: GameServer.sanitizeTotems(saved?.totems),
@@ -570,6 +585,20 @@ export class GameServer {
         p.health = Math.min(p.health, maxHealthFor(p.hearts)); // shrink into the new max
         return [{ to: id, msg: { t: 'hearts', hearts: p.hearts, reason: 'withdraw' } }];
       }
+      case 'useHeal': {
+        // Right-click a Bandage/Medkit: the item is consumed client-side; the
+        // server applies the accelerated-regen buff so healed HP is authoritative
+        // (it reaches the client through the periodic snapshot). Health itself is
+        // not set here — tickRegen ramps it up, so it can't overheal past the cap.
+        if (p.dead) return [];
+        const heal = ITEMS[msg.item]?.heal;
+        if (!heal) return []; // fail-closed: only real heal items apply
+        p.regenBoostTimer = heal.duration;
+        p.regenBoostInterval = heal.interval;
+        p.regenCooldown = 0;   // heal even right after a hit
+        p.regenTimer = 0;
+        return [];
+      }
       case 'reviveList': {
         const targets = this.listEliminated?.(p.faction) ?? [];
         return [{ to: id, msg: { t: 'reviveList', targets } }];
@@ -631,9 +660,102 @@ export class GameServer {
         p.x = x + 0.5; p.y = y + 1; p.z = z + 0.5; // stand on top of the totem
         return [{ to: id, msg: { t: 'teleport', x: p.x, y: p.y, z: p.z } }];
       }
+      // --- Vaults (Milestone D) ---
+      case 'vaultEnter': {
+        if (!fin(msg.cx, msg.cz)) return [];
+        const st = this.vaultStampAt(Math.floor(msg.cx), Math.floor(msg.cz));
+        if (!st) return [];
+        const v = this.ensureVault(st);
+        return [{ to: id, msg: { t: 'vault', cx: st.cx, cz: st.cz, tier: st.tier,
+          hp: v.hp, maxHp: bruteMaxHp(st.tier), alive: v.hp > 0,
+          opened: v.openedBy.includes(p.username) } }];
+      }
+      case 'vaultBossHit':
+        return this.handleVaultBossHit(p, msg.cx, msg.cz, msg.amount);
+      case 'vaultChestOpen':
+        return this.handleVaultChestOpen(p, msg.x, msg.y, msg.z);
       default:
         return [];
     }
+  }
+
+  // --- Vaults (Milestone D) ----------------------------------------------------
+
+  /** Cached deterministic vault stamp for an anchor chunk (or null). */
+  private vaultStampAt(cx: number, cz: number): VaultStamp | null {
+    const key = `${cx},${cz}`;
+    let st = this.vaultStamps.get(key);
+    if (st === undefined) {
+      st = vaultStamp(this.seed, cx, cz, this.terrain);
+      this.vaultStamps.set(key, st);
+    }
+    return st;
+  }
+
+  /** The vault's server state (created lazily; Brute lazily respawns after
+   *  VAULT_RECHARGE — the server never ticks vaults, mobs are client-side). */
+  private ensureVault(st: VaultStamp): VaultServerState {
+    const key = `${st.cx},${st.cz}`;
+    let v = this.vaults.get(key);
+    if (!v) { v = newVaultState(st.tier); this.vaults.set(key, v); }
+    refreshVaultState(v, this.worldTime);
+    return v;
+  }
+
+  /** A reported hit on the Vault Brute: shared server-side HP (all present
+   *  players' hits count, like machine sabotage). Fail-closed on range/state. */
+  private handleVaultBossHit(p: ServerPlayer, cx: number, cz: number, amount: number): Outbound[] {
+    if (p.dead || !fin(cx, cz, amount, p.x, p.z)) return [];
+    const st = this.vaultStampAt(Math.floor(cx), Math.floor(cz));
+    if (!st) return [];
+    // The attacker must actually be at the vault (fail-closed on NaN).
+    if (!(Math.hypot(p.x - st.x, p.z - st.z) <= 64)) return [];
+    const v = this.ensureVault(st);
+    if (v.hp <= 0) return []; // already dead — nothing to hit
+    const dmg = Math.max(0, Math.min(40, Math.round(amount)));
+    if (dmg <= 0) return [];
+    v.hp = Math.max(0, v.hp - dmg);
+    const out: Outbound[] = [{ to: 'all', msg: { t: 'vault', cx: st.cx, cz: st.cz,
+      tier: st.tier, hp: v.hp, maxHp: bruteMaxHp(st.tier), alive: v.hp > 0 } }];
+    if (v.hp <= 0) {
+      v.deadAt = this.worldTime; // opens the 10-minute loot window
+      out.push({ to: 'all', msg: { t: 'vaultCleared', cx: st.cx, cz: st.cz, by: p.username } });
+      out.push({ to: 'all', msg: { t: 'killfeed',
+        killer: p.username, victim: `Tier ${st.tier} Vault Brute ☠` } });
+    }
+    return out;
+  }
+
+  /** Open the per-player VaultChest: requires the Brute dead within the loot
+   *  window, in-reach, a pristine (unedited) chest cell, and at most ONE roll
+   *  per account per vault (openedBy is persisted in the world save). */
+  private handleVaultChestOpen(p: ServerPlayer, x: number, y: number, z: number): Outbound[] {
+    if (!fin(x, y, z)) return [];
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    if (!this.nearMachine(p, bx, by, bz)) return []; // alive + in-reach gate
+    const st = vaultChestAt(this.seed, bx, by, bz, this.terrain,
+      (cx, cz) => this.vaultStampAt(cx, cz));
+    if (!st) return [];
+    // A broken/replaced chest cell can never pay out (fail-closed vs edits).
+    if (this.edits.has(`${bx},${by},${bz}`)) return [];
+    const v = this.ensureVault(st);
+    if (!vaultLootable(v, this.worldTime)) {
+      return [{ to: p.id, msg: { t: 'notice', text: v.hp > 0
+        ? '☠ The Vault Brute guards this chest — defeat it first!'
+        : '🔒 The vault has resealed — the Brute will return to guard it.' } }];
+    }
+    if (v.openedBy.includes(p.username)) {
+      return [{ to: p.id, msg: { t: 'notice', text: "You've already claimed this vault's treasure!" } }];
+    }
+    v.openedBy.push(p.username);
+    const out: Outbound[] = [];
+    for (const s of vaultLoot(this.seed, st.cx, st.cz, st.tier, p.username)) {
+      if (!ITEMS[s.id] || !fin(s.count) || s.count <= 0) continue;
+      out.push({ to: p.id, msg: { t: 'gotitem', item: s.id, count: Math.floor(s.count) } });
+    }
+    out.push({ to: p.id, msg: { t: 'vaultLooted', cx: st.cx, cz: st.cz } });
+    out.push({ to: p.id, msg: { t: 'notice', text: `✨ Tier ${st.tier} vault treasure claimed!` } });
+    return out;
   }
 
   /** Raid-destroy a machine: spill its stored output AND drop the machine block
@@ -1162,13 +1284,20 @@ export class GameServer {
     for (const p of this.players.values()) {
       if (p.dead) continue;
       const max = maxHealthFor(p.hearts);
+      // A healing consumable (Bandage/Medkit) grants a window of fast regen that
+      // ignores the post-damage delay — patch up mid-fight.
+      const boosting = p.regenBoostTimer > 0;
+      if (boosting) { p.regenBoostTimer = Math.max(0, p.regenBoostTimer - dt); p.regenCooldown = 0; }
       p.regenCooldown = Math.max(0, p.regenCooldown - dt);
+      const interval = boosting ? p.regenBoostInterval : REGEN_INTERVAL;
       if (p.regenCooldown <= 0 && p.health < max) {
         p.regenTimer += dt;
-        if (p.regenTimer >= REGEN_INTERVAL) {
+        if (p.regenTimer >= interval) {
           p.regenTimer = 0;
           p.health = Math.min(max, p.health + 1);
         }
+      } else if (p.health >= max) {
+        p.regenBoostTimer = 0; // fully healed — end the buff early
       }
     }
   }
@@ -1725,6 +1854,7 @@ export class GameServer {
       season: this.season,
       war: this.war,
       flags: this.flags.serialize(),
+      vaults: [...this.vaults.entries()],
     };
   }
 
@@ -1774,6 +1904,16 @@ export class GameServer {
         if (validBlockKey(k) && st) this.turrets.set(k as string, st);
       }
     }
+    if (Array.isArray(s.vaults)) {
+      for (const e of s.vaults) {
+        if (!Array.isArray(e) || e.length !== 2) continue;
+        const [k, raw] = e as [unknown, unknown];
+        const st = sanitizeVaultState(raw);
+        if (typeof k === 'string' && /^-?\d+,-?\d+$/.test(k) && st) {
+          this.vaults.set(k, st);
+        }
+      }
+    }
     if (Array.isArray(s.claims)) this.claims.load(s.claims as ClaimState[]);
     this.regions.restore(s.regions);
     this.season = sanitizeSeason(s.season);
@@ -1817,6 +1957,8 @@ export interface WorldSave {
   season?: SeasonState;
   war?: WarState;
   flags?: import('../flags').Flag[];
+  /** Vault boss HP + per-player openedBy ledgers (Milestone D). */
+  vaults?: [string, VaultServerState][];
 }
 
 /** A "x,y,z" integer block-coordinate key (the map keys we persist). */

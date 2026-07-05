@@ -44,6 +44,8 @@ export interface MinimapMarker { x: number; z: number; color: number; }
 const css = (c: number): string => `#${(c & 0xffffff).toString(16).padStart(6, '0')}`;
 
 export class Minimap {
+  /** Inside a vault (Milestone D): the radar dims — you're off the grid. */
+  dimmed = false;
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
   private readonly capitals: { x: number; z: number; faction: number }[] = [];
@@ -115,6 +117,12 @@ export class Minimap {
     // Territory tint (Azure land -> blue, Crimson land -> red); none if neutral.
     if (isFaction(faction)) {
       ctx.globalAlpha = 0.28; ctx.fillStyle = css(factionColor(faction));
+      ctx.fillRect(0, 0, SIZE, SIZE);
+      ctx.globalAlpha = 1;
+    }
+    // Vault dim (Milestone D): underground, the radar goes dark + murky.
+    if (this.dimmed) {
+      ctx.globalAlpha = 0.62; ctx.fillStyle = '#05060c';
       ctx.fillRect(0, 0, SIZE, SIZE);
       ctx.globalAlpha = 1;
     }

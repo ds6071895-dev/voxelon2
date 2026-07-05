@@ -7,6 +7,7 @@ import { Block } from './blocks';
 import { Chunk, CHUNK_X, CHUNK_Z } from './chunk';
 import { Noise2D, Noise3D, hash2, mulberry32 } from './noise';
 import { structureStamp } from './structures';
+import { VAULT_REACH, vaultStamp } from './vaults';
 
 export const SEA_LEVEL = 63;
 const TREE_MARGIN = 3; // trees up to 3 blocks outside a chunk can reach into it
@@ -324,19 +325,28 @@ export class Terrain {
   }
 
   /** Stamp any structures whose anchor chunk is this one or a neighbour
-   *  (stamps never reach past 1 chunk). Applied AFTER trees so carves clear
-   *  leaves; runs identically on the server and every client (seed-pure). */
+   *  (stamps never reach past 1 chunk), then any VAULTS anchored within 2
+   *  chunks (a vault never reaches past 2). Applied AFTER trees so carves
+   *  clear leaves; runs identically on the server and every client. */
   private placeStructures(chunk: Chunk, ox: number, oz: number): void {
+    const apply = (blocks: { x: number; y: number; z: number; id: number }[]): void => {
+      for (const b of blocks) {
+        const lx = b.x - ox, lz = b.z - oz;
+        if (lx < 0 || lx >= CHUNK_X || lz < 0 || lz >= CHUNK_Z) continue;
+        if (b.y < 1 || b.y > 250) continue;
+        chunk.set(lx, b.y, lz, b.id);
+      }
+    };
     for (let dx = -1; dx <= 1; dx++) {
       for (let dz = -1; dz <= 1; dz++) {
         const st = structureStamp(this.seed, chunk.cx + dx, chunk.cz + dz, this);
-        if (!st) continue;
-        for (const b of st.blocks) {
-          const lx = b.x - ox, lz = b.z - oz;
-          if (lx < 0 || lx >= CHUNK_X || lz < 0 || lz >= CHUNK_Z) continue;
-          if (b.y < 1 || b.y > 250) continue;
-          chunk.set(lx, b.y, lz, b.id);
-        }
+        if (st) apply(st.blocks);
+      }
+    }
+    for (let dx = -VAULT_REACH; dx <= VAULT_REACH; dx++) {
+      for (let dz = -VAULT_REACH; dz <= VAULT_REACH; dz++) {
+        const v = vaultStamp(this.seed, chunk.cx + dx, chunk.cz + dz, this);
+        if (v) apply(v.blocks);
       }
     }
   }

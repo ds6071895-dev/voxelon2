@@ -1707,6 +1707,91 @@ function paintRevivalBeacon(p: Painter, seed: number): void {
   outlineSprite(p);
 }
 
+// --- Dungeons (Milestone D) ---------------------------------------------------
+
+/** Vault Brick: dark ancient masonry — big slate bricks, deep mortar seams,
+ *  the occasional faint teal rune-glint so vault walls read as "special". */
+function paintVaultBrick(p: Painter, seed: number): void {
+  const brick: RGBA = [74, 76, 94, 255];
+  const mortar: RGBA = [40, 42, 54, 255];
+  p.fill((x, y) => {
+    const row = y >> 2;                        // 4px course height
+    const shift = (row % 2) * 4;               // running bond
+    const mx = ((x + shift) & 7) === 0;        // vertical seams every 8px
+    const my = (y & 3) === 0;                  // horizontal seams
+    if (mx || my) return shade(mortar, 0.9 + hash2(seed, x, y) * 0.15);
+    return shade(brick, speckle(seed ^ row, x, y, 0.1));
+  });
+  // Rare rune-glints in the brick faces.
+  if (hash2(seed, 3, 3) < 0.6) p.set(5, 6, [96, 210, 200, 255]);
+  if (hash2(seed, 9, 12) < 0.5) p.set(11, 10, [96, 210, 200, 255]);
+}
+
+const VAULT_CHEST_BODY: RGBA = [56, 46, 66, 255];
+const VAULT_CHEST_TRIM: RGBA = [232, 196, 88, 255];
+
+/** Vault Chest side: dark relic chest with gold trim + a glowing cyan gem. */
+function paintVaultChestSide(p: Painter, seed: number): void {
+  p.fill((x, y) => {
+    const border = x === 0 || y === 0 || x === 15 || y === 15;
+    const lidLine = y === 5;
+    const c = border || lidLine ? VAULT_CHEST_TRIM : VAULT_CHEST_BODY;
+    return shade(c, speckle(seed, x, y >> 1, 0.08));
+  });
+  // Glowing gem latch.
+  for (const [x, y] of [[7, 7], [8, 7], [7, 8], [8, 8]]) p.set(x, y, [110, 235, 230, 255]);
+  p.set(7, 7, [190, 255, 250, 255]);
+}
+
+function paintVaultChestTop(p: Painter, seed: number): void {
+  p.fill((x, y) => {
+    const border = x === 0 || y === 0 || x === 15 || y === 15;
+    return shade(border ? VAULT_CHEST_TRIM : VAULT_CHEST_BODY,
+      speckle(seed, x, y >> 1, 0.08));
+  });
+  // Inlaid gold cross-band.
+  for (let x = 1; x < 15; x++) p.set(x, 7, shade(VAULT_CHEST_TRIM, 0.85));
+}
+
+/** Bandage: a rolled white gauze wrap with a red cross + a trailing strip. */
+function paintBandage(p: Painter, seed: number): void {
+  const gauze: RGBA = [238, 236, 228, 255];
+  const shadow: RGBA = [206, 202, 190, 255];
+  for (let y = 4; y <= 11; y++) {
+    for (let x = 3; x <= 12; x++) {
+      const edge = x === 3 || x === 12 || y === 4 || y === 11;
+      p.set(x, y, shade(edge ? shadow : gauze, 0.94 + hash2(seed, x, y) * 0.1));
+    }
+  }
+  // Wrap seams.
+  for (let y = 5; y <= 10; y++) { p.set(6, y, shadow); p.set(9, y, shadow); }
+  // Red cross.
+  const red: RGBA = [220, 48, 48, 255];
+  for (let x = 6; x <= 9; x++) p.set(x, 7, red), p.set(x, 8, red);
+  for (let y = 6; y <= 9; y++) p.set(7, y, red), p.set(8, y, red);
+  outlineSprite(p, [60, 58, 52, 255]);
+}
+
+/** Medkit: a boxy first-aid case, dark trim, bold red cross, latch. */
+function paintMedkit(p: Painter, seed: number): void {
+  const body: RGBA = [232, 234, 236, 255];
+  const trim: RGBA = [70, 78, 92, 255];
+  for (let y = 3; y <= 12; y++) {
+    for (let x = 2; x <= 13; x++) {
+      const edge = x === 2 || x === 13 || y === 3 || y === 12;
+      p.set(x, y, shade(edge ? trim : body, 0.95 + hash2(seed, x, y) * 0.08));
+    }
+  }
+  // Handle + latch.
+  for (let x = 6; x <= 9; x++) p.set(x, 3, trim);
+  p.set(7, 8, trim); p.set(8, 8, trim);
+  // Red cross.
+  const red: RGBA = [214, 44, 44, 255];
+  for (let x = 6; x <= 9; x++) { p.set(x, 6, red); p.set(x, 7, red); }
+  for (let y = 5; y <= 10; y++) { p.set(7, y, red); p.set(8, y, red); }
+  outlineSprite(p, [40, 44, 52, 255]);
+}
+
 const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.GrassTop]: paintGrassTop,
   [Tile.GrassSide]: paintGrassSide,
@@ -1867,6 +1952,14 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
     { color: [58, 78, 40, 255], x0: 5, y0: 9, x1: 10, y1: 12 }), // wide dark maw
   [Tile.SkitterSkin]: paintSkin([56, 50, 66, 255], 0.2, [84, 74, 96, 255]),
   [Tile.SkitterFace]: paintFace([56, 50, 66, 255], [255, 90, 70, 255], null, 4),
+  // Dungeons (Milestone D): vault masonry, the relic chest, the Brute.
+  [Tile.VaultBrick]: paintVaultBrick,
+  [Tile.VaultChestSide]: paintVaultChestSide,
+  [Tile.VaultChestTop]: paintVaultChestTop,
+  // Vault Brute: a hulking mossy-stone zombie — pale glowing eyes, heavy jaw.
+  [Tile.BruteSkin]: paintSkin([98, 112, 86, 255], 0.18, [72, 84, 62, 255]),
+  [Tile.BruteFace]: paintFace([98, 112, 86, 255], [235, 245, 170, 255],
+    { color: [50, 58, 44, 255], x0: 4, y0: 9, x1: 11, y1: 13 }), // heavy dark jaw
   [Tile.RedSand]: paintRedSand,
   [Tile.Terracotta]: paintTerracotta,
   [Tile.Basalt]: paintBasalt,
@@ -1885,6 +1978,9 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   // Lifesteal (Milestone A)
   [Tile.Heart]: paintHeart,
   [Tile.RevivalBeacon]: paintRevivalBeacon,
+  // Healing consumables
+  [Tile.BandageSprite]: paintBandage,
+  [Tile.MedkitSprite]: paintMedkit,
 };
 
 export function createAtlas(seed = 1337): Atlas {

@@ -56,6 +56,10 @@ export class NetClient {
   /** Server-authoritative health change for the local player. */
   onHurt?: (health: number, dead: boolean, k: [number, number, number]) => void;
   onRespawned?: (x: number, y: number, z: number, health: number) => void;
+  /** The local player's authoritative health/dead from the periodic snapshot —
+   *  this is how server-side REGEN reaches the client (hurt only fires on a
+   *  hit, so without this the HUD froze between hits then jumped on the next). */
+  onSelfHealth?: (health: number, dead: boolean) => void;
   onKillfeed?: (killer: string, victim: string) => void;
   /** The LOCAL player's gamemode changed (admin command). */
   onGamemode?: (mode: GameMode) => void;
@@ -116,6 +120,14 @@ export class NetClient {
   onRevived?: (target: string, ok: boolean) => void;
   /** Waypoint Totems: the authoritative attuned list changed (B4). */
   onAttuned?: (totems: { x: number; y: number; z: number }[]) => void;
+  /** Vaults (Milestone D): a vault's authoritative boss state (enter reply /
+   *  hit broadcast). `opened` is only present on the direct enter reply. */
+  onVault?: (cx: number, cz: number, tier: number, hp: number, maxHp: number,
+    alive: boolean, opened?: boolean) => void;
+  /** The Vault Brute fell (banner + fame). */
+  onVaultCleared?: (cx: number, cz: number, by: string) => void;
+  /** YOUR per-player vault loot was granted (items arrive via gotitem). */
+  onVaultLooted?: (cx: number, cz: number) => void;
 
   private ws: WebSocket | null = null;
   private xformAcc = 0;
@@ -204,7 +216,7 @@ export class NetClient {
         break;
       case 'snapshot':
         for (const s of msg.players) {
-          if (s.id === this.myId) continue;
+          if (s.id === this.myId) { this.onSelfHealth?.(s.health, s.dead); continue; }
           const r = this.remotes.get(s.id);
           if (r) {
             r.tx = s.x; r.ty = s.y; r.tz = s.z;
@@ -325,6 +337,15 @@ export class NetClient {
         break;
       case 'attuned':
         this.onAttuned?.(msg.totems);
+        break;
+      case 'vault':
+        this.onVault?.(msg.cx, msg.cz, msg.tier, msg.hp, msg.maxHp, msg.alive, msg.opened);
+        break;
+      case 'vaultCleared':
+        this.onVaultCleared?.(msg.cx, msg.cz, msg.by);
+        break;
+      case 'vaultLooted':
+        this.onVaultLooted?.(msg.cx, msg.cz);
         break;
     }
   }
@@ -455,6 +476,7 @@ export class NetClient {
   // Lifesteal (Milestone A).
   sendHeartConsume(): void { if (this.connected) this.raw({ t: 'heartConsume' }); }
   sendHeartWithdraw(): void { if (this.connected) this.raw({ t: 'heartWithdraw' }); }
+  sendUseHeal(item: number): void { if (this.connected) this.raw({ t: 'useHeal', item }); }
   sendReviveList(): void { if (this.connected) this.raw({ t: 'reviveList' }); }
   sendBeaconRevive(target: string): void {
     if (this.connected) this.raw({ t: 'beaconRevive', target });
@@ -468,6 +490,16 @@ export class NetClient {
   }
   sendGadgetUse(item: number, x: number, y: number, z: number): void {
     if (this.connected) this.raw({ t: 'gadgetUse', item, x, y, z });
+  }
+  // Vaults (Milestone D).
+  sendVaultEnter(cx: number, cz: number): void {
+    if (this.connected) this.raw({ t: 'vaultEnter', cx, cz });
+  }
+  sendVaultBossHit(cx: number, cz: number, amount: number): void {
+    if (this.connected) this.raw({ t: 'vaultBossHit', cx, cz, amount });
+  }
+  sendVaultChestOpen(x: number, y: number, z: number): void {
+    if (this.connected) this.raw({ t: 'vaultChestOpen', x, y, z });
   }
 }
 

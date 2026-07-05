@@ -152,6 +152,10 @@ export type ClientMsg =
   // minted by the crafting grid client-side).
   | { t: 'heartConsume' }
   | { t: 'heartWithdraw' }
+  // Healing consumable (Bandage/Medkit): the item is consumed client-side (like
+  // other crafts); the server applies the accelerated-regen buff so health is
+  // authoritative and flows back via the snapshot. `item` picks the heal tier.
+  | { t: 'useHeal'; item: number }
   // Revival Beacon: ask for the eliminated faction-mates you could revive,
   // then revive one by username (beacon item is consumed client-side on the
   // server's `revived ok` confirmation).
@@ -161,7 +165,13 @@ export type ClientMsg =
   // teleport to an attuned one (the client runs the 3s wind-up; the server
   // enforces attunement + block-exists + 60s cooldown + the combat tag).
   | { t: 'attune'; x: number; y: number; z: number }
-  | { t: 'totemTeleport'; x: number; y: number; z: number };
+  | { t: 'totemTeleport'; x: number; y: number; z: number }
+  // Vaults (Milestone D): announce entry (server replies with the vault's
+  // authoritative state incl. whether YOU already looted it), report a hit on
+  // the server-HP Vault Brute, and open the per-player VaultChest.
+  | { t: 'vaultEnter'; cx: number; cz: number }
+  | { t: 'vaultBossHit'; cx: number; cz: number; amount: number }
+  | { t: 'vaultChestOpen'; x: number; y: number; z: number };
 
 // --- server -> client -------------------------------------------------------
 export type ServerMsg =
@@ -253,7 +263,16 @@ export type ServerMsg =
   | { t: 'revived'; target: string; ok: boolean }
   // Waypoint Totems (B4): the player's authoritative attuned-totem list (sent
   // on welcome + after every attune/unattune/prune).
-  | { t: 'attuned'; totems: { x: number; y: number; z: number }[] };
+  | { t: 'attuned'; totems: { x: number; y: number; z: number }[] }
+  // Vaults (Milestone D): one vault's authoritative boss state. `opened` is
+  // per-recipient (whether YOU already looted) and only present on a direct
+  // vaultEnter reply — broadcasts omit it so clients keep their own flag.
+  | { t: 'vault'; cx: number; cz: number; tier: number; hp: number;
+      maxHp: number; alive: boolean; opened?: boolean }
+  // The Brute fell — banner + fame ("<name> cleared a Tier N vault").
+  | { t: 'vaultCleared'; cx: number; cz: number; by: string }
+  // YOUR per-player loot roll was granted (items arrive via gotitem).
+  | { t: 'vaultLooted'; cx: number; cz: number };
 
 const ADJECTIVES = [
   'Brave', 'Swift', 'Iron', 'Shadow', 'Crimson', 'Frost', 'Rapid', 'Silent',

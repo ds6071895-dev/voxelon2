@@ -92,6 +92,10 @@ export const enum Block {
   CherryPlanks = 79,
   Mud = 80,          // swamp ground — slows walking slightly
   CrystalBlock = 81, // emissive crystal spike (mineable -> Crystal Shard)
+  // Dungeons (Milestone D): vault walls (iron-pick tier, very hard — fight
+  // through the door, not the wall) + the per-player boss-room loot chest.
+  VaultBrick = 82,
+  VaultChest = 83,
 }
 
 export const enum Tile {
@@ -273,6 +277,15 @@ export const enum Tile {
   SpitterFace = 161,
   SkitterSkin = 162,
   SkitterFace = 163,
+  // Dungeons (Milestone D)
+  VaultBrick = 164,
+  VaultChestSide = 165,
+  VaultChestTop = 166,
+  BruteSkin = 167,
+  BruteFace = 168,
+  // Healing consumables
+  BandageSprite = 169,
+  MedkitSprite = 170,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel';
@@ -635,6 +648,17 @@ export const BLOCKS: Record<number, BlockInfo> = {
     opaque: false,
   }),
 
+  // --- Dungeons (Milestone D) ---
+  // Vault walls: VERY hard (iron-pick tier, long break) so raiders fight
+  // through the door, not the wall — but NOT unbreakable.
+  [Block.VaultBrick]: def({ name: 'Vault Brick', hardness: 18, top: Tile.VaultBrick }),
+  // The boss-room treasure chest: per-player loot (right-click after the Brute
+  // falls). Glows faintly; breaking it destroys the treasure (drops nothing).
+  [Block.VaultChest]: def({
+    name: 'Vault Chest', hardness: 22, emission: 8,
+    top: Tile.VaultChestTop, bottom: Tile.VaultChestTop, side: Tile.VaultChestSide,
+  }),
+
   // --- Building set (M15): per-wood planks + slabs + stairs ---
   [Block.BirchPlanks]: def({ name: 'Birch Planks', hardness: 2.0, top: Tile.BirchPlanks }),
   [Block.SprucePlanks]: def({ name: 'Spruce Planks', hardness: 2.0, top: Tile.SprucePlanks }),
@@ -654,6 +678,7 @@ const PICKAXE_TIERS: [Block, number][] = [
   [Block.Autominer, 0], [Block.OilDerrick, 0],
   [Block.Turret, 1], // metal war machines need a stone+ pick
   [Block.Core, 1], // the claim Core is pickaxe-mineable (owner-only, server-gated)
+  [Block.VaultBrick, 2], [Block.VaultChest, 2], // dungeon walls need an iron pick
 ];
 for (const [b, tier] of PICKAXE_TIERS) {
   BLOCKS[b].tool = 'pickaxe';

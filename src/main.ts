@@ -21,7 +21,7 @@ import {
 } from './machines';
 import { ItemEntities } from './itementity';
 import { Chests } from './chests';
-import { Mobs } from './mobs';
+import { Mob, Mobs } from './mobs';
 import { NetClient } from './net/client';
 import {
   WORLD_SEED, WORLD_HALF, CORE_HALF, inCore, makeUsername, skinSeed, GameMode,
@@ -67,8 +67,12 @@ import { Survival } from './survival';
 import { createAtlas, createCrackTextures } from './textures';
 import { World, RENDER_DISTANCE } from './world';
 import { Panorama } from './panorama';
-import { structureChestTier } from './structures';
+import { structureChestTier, worldStructures } from './structures';
 import { chestLootSlots } from './loot';
+import {
+  VAULT_LOOT_WINDOW, VAULT_RECHARGE, VaultStamp, bruteMaxHp, countVaults,
+  vaultAt, vaultLoot, vaultStamp,
+} from './vaults';
 
 const FOG_NEAR = RENDER_DISTANCE * 16 - 38;
 const FOG_FAR = RENDER_DISTANCE * 16 - 6;
@@ -1011,9 +1015,23 @@ function announceSide(faction: number): void {
   showNotice(`⚔ You joined the ${factionName(faction)} — keeping the war 50/50.`);
 }
 
+// All surface structures shown on the world map as icons (one cached sweep —
+// the layout is fixed for the seed, so it never needs recomputing).
+let structureMarks: { x: number; z: number; kind: string }[] | null = null;
+function refreshStructureMap(): void {
+  if (!structureMarks) {
+    structureMarks = worldStructures(seed, world.terrain)
+      .map((s) => ({ x: s.x, z: s.z, kind: s.kind }));
+  }
+  worldMap.setStructures(structureMarks);
+}
+
 function onAuthSuccess(username: string): void {
   authed = true;
   authedName = username;
+  discoveredVaults = null; // vault discoveries are per-account — reload lazily
+  refreshVaultMap();
+  refreshStructureMap();
   held.setSkin(skinSeed(username)); // match the first-person hand to our avatar
   authEl.style.display = 'none';
   menuBtns.style.display = 'flex'; // Play / Controls appear once logged in
@@ -1372,6 +1390,13 @@ net.onHurt = (health, dead, k) => {
   player.vel.x += k[0] * 6; player.vel.y += k[1] * 6; player.vel.z += k[2] * 6;
   // lastHealth is left alone so the frame loop plays the hurt sound.
 };
+// Server-authoritative health between hits (REGEN): the periodic snapshot
+// carries our own health, so the HUD ticks up smoothly instead of freezing
+// until the next hit. Never let a snapshot revive us — that's onRespawned's job.
+net.onSelfHealth = (health, dead) => {
+  if (player.dead && !dead) return;
+  player.setHealthFromServer(health, dead);
+};
 net.onRespawned = (x, y, z, h) => {
   player.respawn({ x, y, z });
   player.health = h;
@@ -1593,6 +1618,26 @@ net.onRevived = (target, ok) => {
     showRegionBanner(`✨ ${target.toUpperCase()} IS BACK!`, '#7dffa0');
   }
 };
+/** Right-click a held Bandage/Medkit: consume it and trigger fast regen. In MP
+ *  the server owns health (the buff flows back via the snapshot); offline the
+ *  local Survival sim applies the same accelerated regen. */
+function useHealItem(): void {
+  const stack = inventory.selectedStack;
+  const heal = stack ? ITEMS[stack.id]?.heal : undefined;
+  if (!stack || !heal) return;
+  if (player.health >= player.maxHealth) {
+    showNotice("You're already at full health!");
+    return;
+  }
+  const id = stack.id;
+  inventory.consumeSelected(1);
+  if (net.connected) net.sendUseHeal(id);
+  else survival.boost(heal.duration, heal.interval);
+  showNotice(`${ITEMS[id]?.name ?? 'Heal'} used — regenerating fast!`);
+  audio.heal();
+  pushStateSave();
+}
+
 /** Right-click a held Heart: +1 max heart (server-validated online). */
 function consumeHeartItem(): void {
   if (!canConsume(localHearts)) {
@@ -1609,6 +1654,213 @@ function consumeHeartItem(): void {
   }
   pushStateSave();
 }
+// --- Vaults (Milestone D): dungeons, the Brute, per-player treasure ------------
+// Deterministic stamps (cached per anchor chunk) drive everything client-side;
+// the SERVER owns the Brute's shared HP + the once-per-player loot ledger
+// online, and the identical pure rules run locally offline (localStorage).
+const vaultStampCache = new Map<string, VaultStamp | null>();
+function vaultStampCached(cx: number, cz: number): VaultStamp | null {
+  const key = `${cx},${cz}`;
+  let st = vaultStampCache.get(key);
+  if (st === undefined) {
+    st = vaultStamp(seed, cx, cz, world.terrain);
+    vaultStampCache.set(key, st);
+  }
+  return st;
+}
+interface VaultView { tier: number; hp: number; maxHp: number; alive: boolean; opened: boolean; }
+const vaultViews = new Map<string, VaultView>();
+let curVault: VaultStamp | null = null;
+let bruteMob: Mob | null = null;
+let vaultPollTimer = 0;
+let vaultSparkleTimer = 0;
+const vaultKeyOf = (v: VaultStamp): string => `${v.cx},${v.cz}`;
+
+// Offline per-account vault store: "cx,cz" -> Brute death epoch + looted flag.
+type VaultStore = Record<string, { deadAt?: number; opened?: boolean }>;
+function loadVaultStore(): VaultStore {
+  try {
+    return JSON.parse(
+      localStorage.getItem(`voxelon.vaults.${authedName.toLowerCase()}`) || '{}') as VaultStore;
+  } catch { return {}; }
+}
+function saveVaultStore(s: VaultStore): void {
+  try {
+    localStorage.setItem(`voxelon.vaults.${authedName.toLowerCase()}`, JSON.stringify(s));
+  } catch { /* ignore */ }
+}
+/** Offline mirror of the server's vault state (same recharge/loot-window rules,
+ *  on the wall clock so the Brute stays down across sessions). */
+function offlineVaultView(v: VaultStamp): VaultView {
+  const rec = loadVaultStore()[vaultKeyOf(v)];
+  const sinceDead = (Date.now() - (rec?.deadAt ?? -Infinity)) / 1000;
+  const alive = sinceDead > VAULT_RECHARGE;
+  const max = bruteMaxHp(v.tier);
+  return { tier: v.tier, hp: alive ? max : 0, maxHp: max, alive, opened: rec?.opened === true };
+}
+
+// Discovered vaults (client-side collection: map icons + "found X / Y").
+let discoveredVaults: { key: string; x: number; z: number; tier: number }[] | null = null;
+function discoveredList(): { key: string; x: number; z: number; tier: number }[] {
+  if (!discoveredVaults) {
+    try {
+      const raw = localStorage.getItem(`voxelon.vaultsfound.${authedName.toLowerCase()}`);
+      const list: { key: string; x: number; z: number; tier: number }[] =
+        raw ? JSON.parse(raw) : [];
+      discoveredVaults = Array.isArray(list)
+        ? list.filter((d) => d && typeof d.key === 'string' &&
+            Number.isFinite(d.x) && Number.isFinite(d.z)) : [];
+    } catch { discoveredVaults = []; }
+  }
+  return discoveredVaults!;
+}
+let vaultTotalCount = -1;
+function totalVaults(): number {
+  if (vaultTotalCount < 0) vaultTotalCount = countVaults(seed, world.terrain);
+  return vaultTotalCount;
+}
+function refreshVaultMap(): void {
+  worldMap.setVaults(discoveredList().map((d) => ({
+    x: d.x, z: d.z, tier: d.tier,
+    cleared: vaultViews.get(d.key)?.alive === false,
+  })), totalVaults());
+}
+function discoverVault(v: VaultStamp): void {
+  const list = discoveredList();
+  if (!list.some((d) => d.key === vaultKeyOf(v))) {
+    list.push({ key: vaultKeyOf(v), x: v.x, z: v.z, tier: v.tier });
+    try {
+      localStorage.setItem(`voxelon.vaultsfound.${authedName.toLowerCase()}`, JSON.stringify(list));
+    } catch { /* ignore */ }
+    showNotice(`☠ Vault discovered! (${list.length}/${totalVaults()} found)`);
+  }
+  refreshVaultMap();
+}
+
+/** Crossing a vault's bounds: sting + banner + minimap dim + discovery, and
+ *  fetch/derive the authoritative boss state. */
+function onVaultTransition(v: VaultStamp | null): void {
+  curVault = v;
+  if (!v) return;
+  if (net.connected) net.sendVaultEnter(v.cx, v.cz);
+  else vaultViews.set(vaultKeyOf(v), offlineVaultView(v));
+  discoverVault(v);
+  showRegionBanner(`☠ VAULT — TIER ${['I', 'II', 'III'][v.tier - 1] ?? '?'}`, '#b9a5ff');
+  audio.vaultSting();
+}
+
+/** Per-frame vault upkeep: bounds test (throttled), guard anchors, the Brute,
+ *  and the unopened-chest sparkle. */
+function updateVaults(dt: number): void {
+  vaultPollTimer -= dt;
+  if (vaultPollTimer <= 0) {
+    vaultPollTimer = 0.3;
+    const v = vaultAt(seed, player.pos.x, player.pos.y + 0.5, player.pos.z,
+      world.terrain, vaultStampCached);
+    if (v?.cx !== curVault?.cx || v?.cz !== curVault?.cz) onVaultTransition(v);
+  }
+  mobs.setVault(curVault);
+  minimap.dimmed = !!curVault;
+  if (!curVault) return;
+  const view = vaultViews.get(vaultKeyOf(curVault));
+  if (bruteMob?.removed) bruteMob = null;
+  // The Brute prowls its loot room whenever the vault is uncleared.
+  if (view?.alive && !bruteMob && !player.dead) {
+    const boss = curVault.rooms.find((r) => r.kind === 'boss');
+    if (boss) {
+      bruteMob = mobs.spawnAt('brute', boss.x + 0.5, boss.y, boss.z + 0.5);
+      bruteMob.health = view.hp; // mirror the shared server HP
+      audio.mob('brute', bruteMob.pos.clone());
+    }
+  }
+  // The treasure sparkles for players who haven't claimed their roll yet.
+  vaultSparkleTimer -= dt;
+  if (view && !view.opened && vaultSparkleTimer <= 0) {
+    vaultSparkleTimer = 0.4;
+    const c = curVault.chest;
+    if (Math.hypot(c.x - player.pos.x, c.z - player.pos.z) < 26) {
+      particles.burst(c.x + 0.5, c.y + 0.9, c.z + 0.5, 3, 0xffe27a, 1.4, 0.6);
+    }
+  }
+}
+
+// Boss combat: local hits mirror to the server's shared HP; offline the local
+// Brute IS the authority and its death opens the loot window.
+mobs.onBruteHit = (mob, dmg) => {
+  if (!curVault) return;
+  if (net.connected) {
+    net.sendVaultBossHit(curVault.cx, curVault.cz, dmg);
+  } else {
+    const view = vaultViews.get(vaultKeyOf(curVault));
+    if (view) view.hp = Math.max(0, Math.min(view.hp, mob.health));
+  }
+};
+mobs.onBruteDown = () => {
+  bruteMob = null;
+  if (!curVault || net.connected) return; // online: the server confirms the kill
+  const key = vaultKeyOf(curVault);
+  const store = loadVaultStore();
+  store[key] = { ...store[key], deadAt: Date.now() };
+  saveVaultStore(store);
+  vaultViews.set(key, offlineVaultView(curVault));
+  showRegionBanner('🏆 VAULT CLEARED!', '#ffd84a');
+  audio.vaultClear();
+  showKill(authedName || 'You', `Tier ${curVault.tier} Vault Brute ☠`);
+  refreshVaultMap();
+};
+net.onVault = (cx, cz, tier, hp, maxHp, alive, opened) => {
+  const key = `${cx},${cz}`;
+  const prev = vaultViews.get(key);
+  vaultViews.set(key, { tier, hp, maxHp, alive, opened: opened ?? prev?.opened ?? false });
+  if (curVault && curVault.cx === cx && curVault.cz === cz && bruteMob) {
+    // Adopt the shared HP (other raiders' hits count) — never heal mid-fight.
+    bruteMob.health = Math.min(bruteMob.health, hp);
+    if (!alive) { mobs.slay(bruteMob); bruteMob = null; }
+  }
+  refreshVaultMap();
+};
+net.onVaultCleared = (cx, cz, by) => {
+  if (curVault && curVault.cx === cx && curVault.cz === cz) {
+    showRegionBanner(by === net.username ? '🏆 VAULT CLEARED!' : `🏆 ${by.toUpperCase()} CLEARED THE VAULT!`, '#ffd84a');
+    audio.vaultClear();
+  }
+  refreshVaultMap();
+};
+net.onVaultLooted = (cx, cz) => {
+  const v = vaultViews.get(`${cx},${cz}`);
+  if (v) v.opened = true;
+  audio.heartSteal();
+  pushStateSave();
+};
+// Right-clicking the VaultChest: server-validated online; the identical rules
+// (boss dead within the window, once per account) run locally offline.
+interaction.onVaultChest = (x, y, z) => {
+  if (net.connected) { net.sendVaultChestOpen(x, y, z); return; }
+  const v = (curVault && curVault.chest.x === x && curVault.chest.y === y && curVault.chest.z === z)
+    ? curVault : vaultAt(seed, x, y, z, world.terrain, vaultStampCached);
+  if (!v || v.chest.x !== x || v.chest.y !== y || v.chest.z !== z) return;
+  const key = vaultKeyOf(v);
+  const view = vaultViews.get(key) ?? offlineVaultView(v);
+  if (view.alive) { showNotice('☠ The Vault Brute guards this chest — defeat it first!'); return; }
+  const store = loadVaultStore();
+  if ((Date.now() - (store[key]?.deadAt ?? -Infinity)) / 1000 > VAULT_LOOT_WINDOW) {
+    showNotice('🔒 The vault has resealed — the Brute will return to guard it.');
+    return;
+  }
+  if (view.opened) { showNotice("You've already claimed this vault's treasure!"); return; }
+  for (const s of vaultLoot(seed, v.cx, v.cz, v.tier, authedName || 'You')) {
+    const left = inventory.add(s.id, s.count);
+    if (left > 0) spillAtPlayer([{ id: s.id, count: left }]);
+  }
+  store[key] = { ...store[key], opened: true };
+  saveVaultStore(store);
+  view.opened = true;
+  vaultViews.set(key, view);
+  showNotice(`✨ Tier ${v.tier} vault treasure claimed!`);
+  audio.heartSteal();
+  pushStateSave();
+};
+
 net.onGotItem = (id, count) => {
   // The server grants the whole stack on a valid pickup; if it doesn't all fit,
   // re-drop the remainder as a server item entity so it isn't destroyed (the
@@ -2436,7 +2688,7 @@ function guideCategory(id: number): string {
   if (WAR_IDS.has(id)) return 'War & Factions';
   if (id === Block.Autominer || id === Block.OilDerrick) return 'Automation';
   const info = ITEMS[id];
-  if (info?.tool || info?.armor || info?.glider) return 'Tools, Armor & Travel';
+  if (info?.tool || info?.armor || info?.glider || info?.heal) return 'Tools, Armor & Travel';
   if (info?.kind === 'block') return 'Building';
   return 'Materials';
 }
@@ -2699,6 +2951,11 @@ function frame(): void {
         if (wantFire && fireCooldown <= 0 && reloadTimer <= 0) tryFire(heldStack!, heldGun);
         interaction.update(dt, input, camera, true, true);
       } else if (input.rightClicked && !interaction.armedMove && heldStack &&
+          ITEMS[heldStack.id]?.heal) {
+        // Healing consumables (Bandage/Medkit): a burst of fast regeneration.
+        useHealItem();
+        interaction.update(dt, input, camera, true, true); // suppress mine + use
+      } else if (input.rightClicked && !interaction.armedMove && heldStack &&
           (heldStack.id === Item.Heart || heldStack.id === Item.RevivalBeacon)) {
         // Lifesteal consumables: a Heart grows your max hearts; a Revival
         // Beacon opens the eliminated-teammate picker.
@@ -2749,6 +3006,7 @@ function frame(): void {
     // Simulation never pauses: mobs hunt you and survival ticks in menus too.
     survival.update(dt, player);
     mobs.update(dt, player, sky.sunIntensity);
+    updateVaults(dt); // dungeons: bounds/banner, guard anchors, the Brute, sparkle
     // Volcanic lava is a hazard: standing in it burns you (the M21 ashlands
     // doubles as a PvP hazard). Damage routes through the server in MP.
     lavaTimer = Math.max(0, lavaTimer - dt);

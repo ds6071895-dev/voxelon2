@@ -170,6 +170,24 @@ export function structureStamp(
   return { kind, tier, x: ax, y: g, z: az, blocks, chest };
 }
 
+/** Every surface structure in the world (a one-time full sweep for the map).
+ *  Cheap: `structureKindAt` is a hash reject, so only the ~1/500 candidate
+ *  chunks pay for a full `structureStamp`. Pure — the same on server + client. */
+export function worldStructures(
+  seed: number, ctx: StructureCtx, half = 2500
+): { x: number; z: number; kind: StructureKind; tier: LootTier }[] {
+  const out: { x: number; z: number; kind: StructureKind; tier: LootTier }[] = [];
+  const cmax = Math.floor(half / 16);
+  for (let cx = -cmax; cx <= cmax; cx++) {
+    for (let cz = -cmax; cz <= cmax; cz++) {
+      if (!structureKindAt(seed, cx, cz)) continue;
+      const st = structureStamp(seed, cx, cz, ctx);
+      if (st) out.push({ x: st.x, z: st.z, kind: st.kind, tier: st.tier });
+    }
+  }
+  return out;
+}
+
 /** Is (x,y,z) the pristine loot chest of some structure? Checks the anchors of
  *  the surrounding 3×3 chunks (a stamp never reaches further). Returns its loot
  *  tier, or null. Shared by the server (authoritative first-open) + offline. */

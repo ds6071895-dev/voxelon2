@@ -23,6 +23,7 @@ export function materialOf(block: number): Material {
     case Block.TorchNZ:
       return 'wood';
     case Block.RespawnBeacon: case Block.WaypointTotem:
+    case Block.VaultBrick: case Block.VaultChest:
       return 'stone';
     case Block.Sand:
       return 'sand';
@@ -226,6 +227,14 @@ export class GameAudio {
     this.tone({ type: 'triangle', from: 320, to: 90, dur: 0.18, gain: 0.16 });
   }
 
+  /** Healing consumable: a soft warm two-note "patch up" chime + a gentle
+   *  sparkle, so a Bandage/Medkit reads as restorative (kid-friendly, low gain). */
+  heal(): void {
+    this.tone({ type: 'triangle', from: 420, to: 620, dur: 0.18, gain: 0.1 });
+    this.tone({ type: 'triangle', from: 620, to: 820, dur: 0.22, gain: 0.09, delay: 0.12 });
+    this.noise({ freq: 900, dur: 0.4, gain: 0.03, slideTo: 1600, type: 'bandpass', q: 0.7 });
+  }
+
   /** Lifesteal: you STOLE a heart — a warm little triangle up-chirp (LOW gain,
    *  kid-friendly; same soft recipe as the rest of the kit). */
   heartSteal(): void {
@@ -237,6 +246,22 @@ export class GameAudio {
   heartLoss(): void {
     this.tone({ type: 'triangle', from: 460, to: 190, dur: 0.26, gain: 0.11 });
     this.noise({ freq: 300, dur: 0.12, gain: 0.04, slideTo: 130, type: 'lowpass', q: 0.6 });
+  }
+
+  /** Entering a vault (Milestone D): a low, ominous synth pad — soft attack,
+   *  gentle gain, nothing shrill (same kid-safe recipe as the rest). */
+  vaultSting(): void {
+    this.tone({ type: 'sine', from: 82, to: 66, dur: 2.4, gain: 0.13, attack: 0.7 });
+    this.tone({ type: 'sine', from: 123, to: 99, dur: 2.4, gain: 0.08, attack: 1.0 });
+    this.noise({ freq: 180, dur: 1.6, gain: 0.05, slideTo: 70, type: 'lowpass', q: 0.6 });
+  }
+
+  /** VAULT CLEARED: a warm rising triangle fanfare (triumphant, still soft). */
+  vaultClear(): void {
+    this.tone({ type: 'triangle', from: 330, to: 440, dur: 0.16, gain: 0.12 });
+    this.tone({ type: 'triangle', from: 440, to: 587, dur: 0.16, gain: 0.12, delay: 0.14 });
+    this.tone({ type: 'triangle', from: 587, to: 880, dur: 0.3, gain: 0.13, delay: 0.28 });
+    this.noise({ freq: 500, dur: 0.35, gain: 0.05, slideTo: 900, type: 'bandpass', q: 0.7, delay: 0.28 });
   }
 
   caveAmbience(): void {
@@ -252,6 +277,10 @@ export class GameAudio {
       case 'zombie':
         this.tone({ type: 'sawtooth', from: 95, to: 65, dur: 0.85, gain: 0.26, pos, vibrato: 4, attack: 0.15 });
         this.noise({ freq: 300, dur: 0.8, gain: 0.08, pos, q: 0.7 });
+        break;
+      case 'brute': // a deep, slow boss groan — bigger and lower than a zombie
+        this.tone({ type: 'sawtooth', from: 62, to: 40, dur: 1.3, gain: 0.3, pos, vibrato: 3, attack: 0.25 });
+        this.noise({ freq: 160, dur: 1.1, gain: 0.1, slideTo: 60, type: 'lowpass', q: 0.7, pos });
         break;
       case 'hiss':
         this.noise({ freq: 1800, dur: 1.5, gain: 0.45, slideTo: 4200, q: 0.6, pos });

@@ -34,6 +34,12 @@ const DESCRIPTIONS: Record<number, string> = {
   [Item.CrystalShard]: 'Mined from glowing Crystalfields spikes — found only in the WILDS.',
   [Block.CrystalBlock]: 'A glowing crystal spike. Mine it for Crystal Shards.',
   [Block.Mud]: 'Sticky swamp ground — walking through it is slow.',
+  // Dungeons (Milestone D).
+  [Block.VaultBrick]: 'Ancient dungeon wall. VERY tough — iron pick needed. The door is easier!',
+  [Block.VaultChest]: 'The vault treasure! Defeat the Vault Brute, then right-click — everyone gets ONE roll per vault.',
+  // Healing consumables.
+  [Item.Bandage]: 'Right-click to patch up — a quick burst of fast healing, even mid-fight.',
+  [Item.Medkit]: 'Right-click for a powerful surge of regeneration — heals you up fast.',
   // Lifesteal (Milestone A).
   [Item.Heart]: 'Right-click to gain +1 max heart (up to 20). Crafting one costs a heart of YOUR OWN — never below 2.',
   [Item.RevivalBeacon]: 'Right-click to bring an ELIMINATED teammate back early. One use.',

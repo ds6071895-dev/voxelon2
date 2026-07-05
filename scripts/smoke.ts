@@ -35,7 +35,7 @@ import { raycastBlocks } from '../src/interact';
 import { Player } from '../src/player';
 import { daylight } from '../src/sky';
 import { Survival } from '../src/survival';
-import { GameServer } from '../src/net/server_core';
+import { GameServer, Outbound } from '../src/net/server_core';
 import {
   mitigate, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE, WORLD_BORDER, WORLD_HALF,
   CORE_BORDER, CORE_HALF, inCore, MAX_ATTUNED, TOTEM_COOLDOWN, COMBAT_TAG,
@@ -76,8 +76,13 @@ import {
 import { itemDescription } from '../src/itemdesc';
 import { Accounts, validUsername } from '../src/net/accounts';
 import {
-  structureKindAt, structureStamp, structureChestTier,
+  structureKindAt, structureStamp, structureChestTier, worldStructures,
 } from '../src/structures';
+import {
+  VAULT_LOOT, VAULT_LOOT_WINDOW, VAULT_RECHARGE, VaultStamp, bruteMaxHp,
+  countVaults, newVaultState, refreshVaultState, sanitizeVaultState, vaultAt,
+  vaultChestAt, vaultLoot, vaultLootable, vaultStamp, vaultTier,
+} from '../src/vaults';
 import { LOOT_TABLES, chestLoot, chestLootSlots } from '../src/loot';
 import {
   Claims, GRACE_PERIOD, MAX_SHIELD_HP, OIL_PER_BARREL, chunkOf, claimChunkKeys,
@@ -648,7 +653,7 @@ check('materialOf maps blocks to sound classes',
   };
 
   check('only hostile mob types exist',
-    Object.keys(MOB_DEFS).sort().join(',') === 'creeper,skitter,spitter,zombie' &&
+    Object.keys(MOB_DEFS).sort().join(',') === 'brute,creeper,skitter,spitter,zombie' &&
     Object.values(MOB_DEFS).every((d) => d.hostile));
 
   const modelMobs = newMobs();
@@ -3509,6 +3514,282 @@ check('furnace smelts ore/sand/log but not removed foods',
     MOB_DEFS.spitter.health < MOB_DEFS.zombie.health &&
     MOB_DEFS.skitter.health <= 8 &&
     MOB_DEFS.skitter.speed > MOB_DEFS.zombie.speed * 1.5);
+}
+
+// --- D1: vault generation — deterministic, bounded, tiered ----------------------
+let firstVault: VaultStamp | null = null;
+{
+  // Sweep the whole world once: counts + collect sample stamps.
+  const cmax = Math.floor(2500 / 16);
+  let core = 0, wilds = 0;
+  let tier3: VaultStamp | null = null;
+  const stamps: VaultStamp[] = [];
+  for (let cx = -cmax; cx <= cmax; cx++) {
+    for (let cz = -cmax; cz <= cmax; cz++) {
+      const st = vaultStamp(1337, cx, cz, terrain);
+      if (!st) continue;
+      if (inCore(st.x, st.z)) core++; else wilds++;
+      if (stamps.length < 12) stamps.push(st);
+      if (!tier3 && st.tier === 3) tier3 = st;
+      if (!firstVault && st.tier === 1) firstVault = st;
+    }
+  }
+  check('vault counts hit the design band (12–20 core, 60+ Wilds)',
+    core >= 12 && core <= 20 && wilds >= 60, `core=${core} wilds=${wilds}`);
+  check('countVaults matches the sweep', countVaults(1337, terrain) === core + wilds);
+  check('a Tier III vault exists in the deep Wilds', tier3 !== null);
+  check('vault tier grows with distance from origin',
+    vaultTier(0, 0) === 1 && vaultTier(900, 200) === 2 && vaultTier(2400, 0) === 3);
+  check('vault stamps are deterministic',
+    stamps.length > 0 && stamps.every((st) =>
+      JSON.stringify(vaultStamp(1337, st.cx, st.cz, terrain)) === JSON.stringify(st)));
+  check('a different seed lays out different vaults', (() => {
+    let moved = 0;
+    for (const st of stamps) if (!vaultStamp(4242, st.cx, st.cz, terrain)) moved++;
+    return moved > 0;
+  })());
+  check('vault stamps never reach past a 5×5-chunk footprint',
+    stamps.every((st) => st.blocks.every((b) =>
+      Math.abs(Math.floor(b.x / 16) - st.cx) <= 2 &&
+      Math.abs(Math.floor(b.z / 16) - st.cz) <= 2)));
+  check('every vault has 4–8 rooms (hall → sides → boss) + a chest + a mouth',
+    stamps.every((st) =>
+      st.rooms.length >= 4 && st.rooms.length <= 8 &&
+      st.rooms[0].kind === 'hall' &&
+      st.rooms.filter((r) => r.kind === 'boss').length === 1 &&
+      st.blocks.some((b) => b.id === Block.VaultChest) &&
+      Number.isFinite(st.mouth.x)));
+  check('the staircase mouth breaks the actual surface (walk-in entrance)',
+    stamps.every((st) => st.mouth.y >= terrain.height(st.mouth.x, st.mouth.z) - 1));
+  check('vault walls are VaultBrick (plenty of them)',
+    stamps.every((st) => st.blocks.filter((b) => b.id === Block.VaultBrick).length > 400));
+}
+
+// --- D1: vaults land in filled chunks (terrain integration) ---------------------
+{
+  check('found a core vault to test against', firstVault !== null);
+  if (firstVault) {
+    const st = firstVault;
+    const ccx = Math.floor(st.chest.x / 16), ccz = Math.floor(st.chest.z / 16);
+    const chunk = new Chunk(ccx, ccz);
+    terrain.fill(chunk);
+    const lx = st.chest.x - ccx * 16, lz = st.chest.z - ccz * 16;
+    check('a filled chunk contains the VaultChest block',
+      chunk.get(lx, st.chest.y, lz) === Block.VaultChest);
+    check('the boss room is carved (air above the chest)',
+      chunk.get(lx, st.chest.y + 1, lz) === Block.Air);
+    check('vaultAt finds the vault from inside the hall (and not from afar)',
+      vaultAt(1337, st.rooms[0].x, st.rooms[0].y, st.rooms[0].z, terrain)?.cx === st.cx &&
+      vaultAt(1337, st.rooms[0].x + 400, st.rooms[0].y, st.rooms[0].z, terrain) === null);
+    check('vaultChestAt resolves the chest (and only the chest)',
+      vaultChestAt(1337, st.chest.x, st.chest.y, st.chest.z, terrain)?.cx === st.cx &&
+      vaultChestAt(1337, st.chest.x + 1, st.chest.y, st.chest.z, terrain) === null);
+    check('VaultBrick is iron-pick-tier hard (fight the door, not the wall)',
+      BLOCKS[Block.VaultBrick].hardness >= 10 && BLOCKS[Block.VaultBrick].minTier === 2 &&
+      BLOCKS[Block.VaultBrick].requiresTool);
+  }
+}
+
+// --- D3: per-player vault loot — pure + tiered ----------------------------------
+{
+  check('vault loot tables are sane (valid items, positive weights, tiers differ)',
+    ([1, 2, 3] as const).every((tier) =>
+      VAULT_LOOT[tier].every((e) => e.w > 0 && e.min >= 1 && e.min <= e.max && !!ITEMS[e.id])) &&
+    VAULT_LOOT[3].some((e) => e.id === Item.TitaniumIngot) &&
+    !VAULT_LOOT[1].some((e) => e.id === Item.TitaniumIngot));
+  const a = vaultLoot(1337, 9, -16, 2, 'Alice');
+  check('vault loot is a pure function of (seed, vault, username)',
+    JSON.stringify(a) === JSON.stringify(vaultLoot(1337, 9, -16, 2, 'Alice')) && a.length >= 4);
+  check('different players roll different loot from the same vault', (() => {
+    const users = ['Bob', 'Cara', 'Dan', 'Eve'];
+    return users.some((u) =>
+      JSON.stringify(vaultLoot(1337, 9, -16, 2, u)) !== JSON.stringify(a));
+  })());
+  check('Tier III ALWAYS grants a Heart',
+    ['P1', 'P2', 'P3', 'P4', 'P5'].every((u) =>
+      vaultLoot(1337, 100, 100, 3, u).some((s) => s.id === Item.Heart)));
+  check('brute HP scales by tier (and it is a real boss)',
+    bruteMaxHp(1) < bruteMaxHp(2) && bruteMaxHp(2) < bruteMaxHp(3) &&
+    MOB_DEFS.brute.health >= 100 && MOB_DEFS.brute.hostile &&
+    MOB_DEFS.brute.height > MOB_DEFS.zombie.height * 1.5);
+  // State helpers: lazy respawn + the loot window + the sanitizer.
+  const vs = newVaultState(2);
+  vs.hp = 0; vs.deadAt = 100;
+  check('vault is lootable inside the window, resealed after',
+    vaultLootable(vs, 100 + VAULT_LOOT_WINDOW) && !vaultLootable(vs, 101 + VAULT_LOOT_WINDOW));
+  refreshVaultState(vs, 100 + VAULT_RECHARGE + 1);
+  check('the Brute lazily respawns after the recharge', vs.hp === bruteMaxHp(2));
+  check('sanitizeVaultState fail-closes junk',
+    sanitizeVaultState({ tier: 9, hp: 50 }) === null &&
+    sanitizeVaultState('nope') === null &&
+    sanitizeVaultState({ tier: 3, hp: 1e9, deadAt: 5, openedBy: ['a', 7, 'b'] })!.hp === bruteMaxHp(3) &&
+    sanitizeVaultState({ tier: 3, hp: 10, deadAt: 5, openedBy: ['a', 7, 'b'] })!.openedBy.join(',') === 'a,b');
+}
+
+// --- D2/D3: server-authoritative boss + once-per-player chest -------------------
+{
+  check('found a vault for the server flow', firstVault !== null);
+  if (firstVault) {
+    const st = firstVault;
+    const chest = st.chest;
+    const s = new GameServer(1337, mulberry32(140));
+    s.addPlayer(1, { username: 'Raider', faction: 0 });
+    s.addPlayer(2, { username: 'Buddy', faction: 0 });
+    const near = (id: number) => s.handle(id,
+      { t: 'xform', x: chest.x + 0.5, y: chest.y + 0.5, z: chest.z + 1.5, yaw: 0, pitch: 0 });
+    near(1); near(2);
+    // Enter: the authoritative state reply.
+    const enter = s.handle(1, { t: 'vaultEnter', cx: st.cx, cz: st.cz })
+      .find((o) => o.msg.t === 'vault')!.msg as { hp: number; maxHp: number; alive: boolean; opened?: boolean };
+    check('vaultEnter replies with the boss state (alive, unopened)',
+      enter.alive && enter.hp === bruteMaxHp(st.tier) && enter.opened === false);
+    check('vaultEnter for a non-vault chunk is refused',
+      s.handle(1, { t: 'vaultEnter', cx: st.cx + 1, cz: st.cz }).length === 0);
+    // Chest while the Brute lives: refused with a notice, no loot.
+    const early = s.handle(1, { t: 'vaultChestOpen', x: chest.x, y: chest.y, z: chest.z });
+    check('opening the chest with the Brute alive is refused',
+      !early.some((o) => o.msg.t === 'gotitem') && early.some((o) => o.msg.t === 'notice'));
+    // Kill the Brute: both players' hits count against the SHARED server HP.
+    let cleared: Outbound[] = [];
+    for (let i = 0; i < 30 && !cleared.length; i++) {
+      const hit = s.handle(i % 2 === 0 ? 1 : 2,
+        { t: 'vaultBossHit', cx: st.cx, cz: st.cz, amount: 10 });
+      if (hit.some((o) => o.msg.t === 'vaultCleared')) cleared = hit;
+    }
+    check('shared boss HP falls to both players\' hits → vaultCleared + killfeed',
+      cleared.some((o) => o.msg.t === 'vaultCleared') &&
+      cleared.some((o) => o.msg.t === 'killfeed' &&
+        (o.msg as { victim: string }).victim.includes('Vault Brute')));
+    check('hits on a dead Brute do nothing',
+      s.handle(1, { t: 'vaultBossHit', cx: st.cx, cz: st.cz, amount: 10 }).length === 0);
+    // Per-player loot: player 1 rolls once…
+    const open1 = s.handle(1, { t: 'vaultChestOpen', x: chest.x, y: chest.y, z: chest.z });
+    const got1 = open1.filter((o) => o.msg.t === 'gotitem');
+    check('the winner\'s chest open grants the per-player roll + vaultLooted',
+      got1.length >= 4 && open1.some((o) => o.msg.t === 'vaultLooted'));
+    check('…and the roll matches the pure vaultLoot function',
+      JSON.stringify(got1.map((o) => o.msg as { item: number; count: number })
+        .map((m) => ({ id: m.item, count: m.count }))) ===
+      JSON.stringify(vaultLoot(1337, st.cx, st.cz, st.tier, 'Raider')));
+    const open1b = s.handle(1, { t: 'vaultChestOpen', x: chest.x, y: chest.y, z: chest.z });
+    check('a second open by the same player is refused (once per vault)',
+      !open1b.some((o) => o.msg.t === 'gotitem') && open1b.some((o) => o.msg.t === 'notice'));
+    // …while player 2 still gets their own roll (no husk dungeons).
+    const open2 = s.handle(2, { t: 'vaultChestOpen', x: chest.x, y: chest.y, z: chest.z });
+    check('a second player still gets their own loot',
+      open2.filter((o) => o.msg.t === 'gotitem').length >= 4);
+    // Persistence: openedBy survives serialize/restore.
+    const save = s.serialize();
+    const s2 = new GameServer(1337, mulberry32(141));
+    check('the world save restores (with vault ledgers)', s2.restore(save));
+    s2.addPlayer(1, { username: 'Raider', faction: 0 });
+    s2.handle(1, { t: 'xform', x: chest.x + 0.5, y: chest.y + 0.5, z: chest.z + 1.5, yaw: 0, pitch: 0 });
+    const openAgain = s2.handle(1, { t: 'vaultChestOpen', x: chest.x, y: chest.y, z: chest.z });
+    check('once-per-player survives a server restart',
+      !openAgain.some((o) => o.msg.t === 'gotitem'));
+    // The loot window closes; later the Brute respawns.
+    s2.tickClaims(VAULT_LOOT_WINDOW + 5); // advance worldTime past the window
+    s2.addPlayer(3, { username: 'Latecomer', faction: 1 });
+    s2.handle(3, { t: 'xform', x: chest.x + 0.5, y: chest.y + 0.5, z: chest.z + 1.5, yaw: 0, pitch: 0 });
+    const late = s2.handle(3, { t: 'vaultChestOpen', x: chest.x, y: chest.y, z: chest.z });
+    check('after the loot window the vault reseals (no loot)',
+      !late.some((o) => o.msg.t === 'gotitem') && late.some((o) => o.msg.t === 'notice'));
+    s2.tickClaims(VAULT_RECHARGE); // …and eventually the Brute is back
+    const reEnter = s2.handle(3, { t: 'vaultEnter', cx: st.cx, cz: st.cz })
+      .find((o) => o.msg.t === 'vault')!.msg as { alive: boolean };
+    check('the Brute respawns after the recharge clock', reEnter.alive);
+    // Fail-closed extras: far-away hits + a broken chest cell + spectators.
+    const s3 = new GameServer(1337, mulberry32(142));
+    s3.addPlayer(1, { username: 'Cheater', faction: 0 });
+    s3.handle(1, { t: 'xform', x: chest.x + 500, y: 70, z: chest.z, yaw: 0, pitch: 0 });
+    check('boss hits from across the map are refused',
+      s3.handle(1, { t: 'vaultBossHit', cx: st.cx, cz: st.cz, amount: 10 }).length === 0);
+    s3.handle(1, { t: 'xform', x: chest.x + 0.5, y: chest.y + 0.5, z: chest.z + 1.5, yaw: 0, pitch: 0 });
+    s3.handle(1, { t: 'edit', x: chest.x, y: chest.y, z: chest.z, block: 0 }); // smash the chest
+    for (let i = 0; i < 30; i++) s3.handle(1, { t: 'vaultBossHit', cx: st.cx, cz: st.cz, amount: 10 });
+    check('a broken VaultChest cell never pays out',
+      !s3.handle(1, { t: 'vaultChestOpen', x: chest.x, y: chest.y, z: chest.z })
+        .some((o) => o.msg.t === 'gotitem'));
+    s3.adminSetMode(1, 'spectator');
+    check('spectators cannot hit the Brute or loot the chest',
+      s3.handle(1, { t: 'vaultBossHit', cx: st.cx, cz: st.cz, amount: 10 }).length === 0 &&
+      s3.handle(1, { t: 'vaultChestOpen', x: chest.x, y: chest.y, z: chest.z }).length === 0);
+  }
+}
+
+// --- Map: every surface structure is enumerable + deterministic ----------------
+{
+  const list = worldStructures(1337, terrain);
+  check('worldStructures enumerates the whole map (sane count + kinds)',
+    list.length > 40 && list.length < 400 &&
+    list.every((s) => ['tower', 'bunker', 'pod'].includes(s.kind) &&
+      Number.isFinite(s.x) && Number.isFinite(s.z)),
+    `count=${list.length}`);
+  check('worldStructures is a pure function of the seed',
+    JSON.stringify(worldStructures(1337, terrain)) === JSON.stringify(list) &&
+    JSON.stringify(worldStructures(4242, terrain)) !== JSON.stringify(list));
+  check('map structures line up with the real stamped structures',
+    list.slice(0, 20).every((s) => {
+      const st = structureStamp(1337, Math.floor(s.x / 16), Math.floor(s.z / 16), terrain);
+      return st !== null && st.x === s.x && st.z === s.z && st.kind === s.kind;
+    }));
+}
+
+// --- Regen: the server snapshot carries the local player's healed HP ------------
+// (The HUD reads this to tick health up between hits; without it MP health froze
+// until the next hit then jumped — the "random half regen" bug.)
+{
+  const s = new GameServer(1337, mulberry32(210));
+  s.addPlayer(1, { username: 'Healer', faction: 0 });
+  s.handle(1, { t: 'selfhurt', amount: 10 });
+  const hurt = s.snapshot().find((p) => p.id === 1)!.health;
+  for (let i = 0; i < 20; i++) s.tickRegen(1); // past the delay + several intervals
+  const healed = s.snapshot().find((p) => p.id === 1)!.health;
+  check('server regen heals gradually and the snapshot reports the local HP',
+    hurt < 20 && healed > hurt && healed <= 20, `hurt=${hurt} healed=${healed}`);
+}
+
+// --- Healing consumables: craftable + fast-regen buff ---------------------------
+{
+  const grid = (ids: (number | null)[]): (ItemStack | null)[] =>
+    ids.map((id) => (id == null ? null : { id, count: 1 }));
+  check('Bandage + Medkit carry heal metadata (Medkit heals faster)',
+    !!ITEMS[Item.Bandage].heal && !!ITEMS[Item.Medkit].heal &&
+    ITEMS[Item.Medkit].heal!.interval < ITEMS[Item.Bandage].heal!.interval);
+  check('Bandage is craftable (redstone-soaked wrappings)',
+    matchGrid(grid([Item.Redstone, Item.Redstone, Item.Stick, null, null, null, null, null, null]))?.id === Item.Bandage);
+  check('Medkit is craftable (iron case + diamond core)',
+    matchGrid(grid([
+      null, Item.Redstone, null,
+      Item.IronIngot, Item.Diamond, Item.IronIngot,
+      null, Item.Redstone, null]))?.id === Item.Medkit);
+
+  // Server: a Medkit heals FAST and ignores the post-damage regen delay.
+  const s = new GameServer(1337, mulberry32(211));
+  s.addPlayer(1, { username: 'Medic', faction: 0 });
+  s.addPlayer(2, { username: 'Control', faction: 0 });
+  s.handle(1, { t: 'selfhurt', amount: 16 }); // Medic → 4 HP
+  s.handle(2, { t: 'selfhurt', amount: 16 }); // Control → 4 HP
+  const before = s.snapshot().find((p) => p.id === 1)!.health;
+  s.handle(1, { t: 'useHeal', item: Item.Medkit });
+  for (let i = 0; i < 10; i++) { s.tickRegen(0.5); } // 5s
+  const medic = s.snapshot().find((p) => p.id === 1)!.health;
+  const control = s.snapshot().find((p) => p.id === 2)!.health;
+  check('a Medkit heals fast + through the post-hit delay',
+    medic - before >= 8 && medic > control, `medic=${medic} control=${control}`);
+  check('useHeal fail-closes on a non-heal item',
+    s.handle(1, { t: 'useHeal', item: Block.Stone }).length === 0);
+
+  // Offline: Survival.boost mirrors the server buff.
+  const surv = new Survival();
+  const actor = {
+    health: 4, maxHealth: 20, air: 300, eyeUnderwater: false, dead: false,
+    regenCooldown: 5, damage(): void {},
+  };
+  surv.boost(ITEMS[Item.Medkit].heal!.duration, ITEMS[Item.Medkit].heal!.interval);
+  for (let i = 0; i < 10; i++) surv.update(0.5, actor); // 5s
+  check('offline Survival.boost heals fast despite the damage cooldown',
+    actor.health >= 12, `hp=${actor.health}`);
 }
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} FAILURES`);

@@ -309,7 +309,26 @@ XP leveling) and **guns** (pistol / rifle / rocket launcher with magazines + R
 reload, sub-stepped client projectiles, local mob hits, and server-validated
 range + facing PvP).
 
-The latest revision (Beta 1.6) adds the **discovery layer** (Milestone C):
+The latest revision (Beta 1.7) adds **DUNGEONS** (Milestone D): ~116 seeded
+underground **VAULTS** (12–20 in the Heartland, 100+ across the Wilds), each a
+ruined stone arch over a walk-down staircase into 4–8 carved rooms of
+**Vault Brick** (iron-pick-tier hard — fight through the door, not the wall):
+an entrance hall, side rooms with **guard spawn anchors** (zombies, spitters
+and skitters that keep a room populated until you CLEAR it — the anchor then
+sleeps for 30 minutes; Tier III vaults field armored variants), and a boss
+room where the **VAULT BRUTE** waits — a huge, slow, lunging zombie whose HP
+lives on the SERVER, so everyone's hits count. Vault tier (I–III) grows with
+distance from the origin, and the boss room holds a glowing **Vault Chest**
+with **per-player loot**: after the Brute falls (a 10-minute window), every
+account gets exactly ONE roll per vault (persisted in the world save — no husk
+dungeons, no double-dipping), and Tier III GUARANTEES a Heart. Entering a
+vault plays a low synth sting, flashes a "☠ VAULT — TIER II" banner and dims
+the minimap; clearing one is a fanfare + killfeed fame, and discovered vaults
+appear on the world map with a "found X / 116" collection counter. Everything
+is deterministic from the shared seed and runs identically offline
+(localStorage mirrors the boss clock + your loot ledger).
+
+The revision before (Beta 1.6) added the **discovery layer** (Milestone C):
 four new biomes — steamy **Jungles** (tall two-canopy trees + jungle planks),
 flattened **Swamps** (shallow pools, dead bushes, darker grass and a new Mud
 block that slows walking), gentle pink **Cherry Groves** (white-barked cherry

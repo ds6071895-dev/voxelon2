@@ -25,18 +25,37 @@ export class Survival {
   enableRegen = true;
   private regenTimer = 0;
   private drownTimer = 0;
+  /** Healing consumable buff (offline): seconds of fast regen left + its +1-HP
+   *  interval. Mirrors the server's `useHeal` boost. */
+  private boostTimer = 0;
+  private boostInterval = 0;
+
+  /** Apply a healing consumable's accelerated-regen buff (offline parity). */
+  boost(duration: number, interval: number): void {
+    this.boostTimer = duration;
+    this.boostInterval = interval;
+    this.regenTimer = 0;
+  }
 
   update(dt: number, p: SurvivalActor): void {
     if (p.dead) return;
+
+    // A healing consumable (Bandage/Medkit) grants fast regen that ignores the
+    // post-damage delay. It ends when it lapses or the player is topped up.
+    const boosting = this.boostTimer > 0 && p.health < p.maxHealth;
+    if (this.boostTimer > 0) this.boostTimer = Math.max(0, this.boostTimer - dt);
+    if (boosting) p.regenCooldown = 0;
 
     // Tick the post-damage cooldown here (not in Player.update) so it keeps
     // counting down while the inventory is open and regen can resume.
     p.regenCooldown = Math.max(0, p.regenCooldown - dt);
 
-    // Passive regeneration once the post-damage cooldown has elapsed.
+    // Passive regeneration once the post-damage cooldown has elapsed (faster
+    // while a heal buff is active).
+    const interval = boosting ? this.boostInterval : REGEN_INTERVAL;
     if (this.enableRegen && p.regenCooldown <= 0 && p.health < p.maxHealth) {
       this.regenTimer += dt;
-      if (this.regenTimer >= REGEN_INTERVAL) {
+      if (this.regenTimer >= interval) {
         this.regenTimer = 0;
         p.health = Math.min(p.maxHealth, p.health + 1);
       }
