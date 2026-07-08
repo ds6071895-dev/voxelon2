@@ -286,6 +286,11 @@ export const enum Tile {
   // Healing consumables
   BandageSprite = 169,
   MedkitSprite = 170,
+  // Runes (armor socketables)
+  RuneIron = 171,
+  RuneSwift = 172,
+  RuneFortune = 173,
+  RuneFocus = 174,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel';

@@ -190,35 +190,69 @@
     /* Title / pause menu over the live panorama */
     #overlay {
       position: absolute; inset: 0;
-      background: linear-gradient(rgba(8,8,14,0.25), rgba(8,8,14,0.55));
+      background:
+        radial-gradient(ellipse at 50% 34%, rgba(0,0,0,0) 0%, rgba(6,8,16,0.42) 68%, rgba(4,6,12,0.72) 100%),
+        linear-gradient(rgba(8,8,14,0.12), rgba(6,8,14,0.5));
       display: flex; flex-direction: column;
       align-items: center; justify-content: center;
-      gap: 22px; z-index: 20;
+      gap: 20px; z-index: 20;
     }
     #overlay.hidden { display: none; }
     #title {
-      font-size: 84px; letter-spacing: 10px; margin-bottom: 4px;
-      color: #e6e6e6; text-shadow: 0 2px 6px rgba(0, 0, 0, 0.55);
+      font-size: 92px; letter-spacing: 12px; margin-bottom: 4px;
+      color: #f2f4f8;
+      text-shadow:
+        0 3px 0 rgba(0,0,0,0.45),
+        0 10px 30px rgba(0, 0, 0, 0.75),
+        0 0 42px rgba(110, 170, 255, 0.25);
+      animation: title-drop 0.7s cubic-bezier(0.2, 1.4, 0.4, 1) both;
     }
-    #title .accent { color: #c0392b; } /* the VOXEL in VOXELON */
+    #title .accent {
+      color: #e2483a; /* the VOXEL in VOXELON */
+      text-shadow:
+        0 3px 0 rgba(0,0,0,0.45),
+        0 10px 30px rgba(0, 0, 0, 0.75),
+        0 0 42px rgba(255, 90, 60, 0.35);
+    }
+    @keyframes title-drop {
+      from { transform: translateY(-26px) scale(1.05); opacity: 0; }
+      to   { transform: none; opacity: 1; }
+    }
     #overlay .subtitle {
-      font-size: 15px; color: #c8c8c8; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
-      margin-top: -10px; letter-spacing: 2px;
+      font-size: 15px; color: #cdd8ea; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+      margin-top: -12px; letter-spacing: 3px;
     }
+    #overlay .subtitle .sub-dot { color: #6fa8ff; }
     /* Vanilla-style button (same bevel as the death screen). */
     .mc-btn {
       font-family: inherit; font-size: 20px; font-weight: bold;
       padding: 12px 64px; cursor: pointer;
       background: #6b6b6b; color: #fff; text-shadow: none;
       border: 3px solid; border-color: #fff #555 #555 #fff;
-      transition: background 0.12s;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+      transition: background 0.12s, transform 0.08s;
     }
-    .mc-btn:hover { background: #7c8b9c; }
-    /* Login / register form on the title overlay */
-    #auth { display: flex; flex-direction: column; gap: 8px; width: 260px; margin: 8px 0 4px; }
+    .mc-btn:hover { background: #7c8b9c; transform: translateY(-1px); }
+    .mc-btn:active { transform: translateY(1px); }
+    /* The big Play button pops. */
+    #play-btn {
+      background: linear-gradient(#4f8f45, #3f7a37); border-color: #9fd48f #24481f #24481f #9fd48f;
+      letter-spacing: 2px;
+    }
+    #play-btn:hover { background: linear-gradient(#5aa04f, #48883f); }
+    /* Login / register form on the title overlay — a soft card. */
+    #auth {
+      display: flex; flex-direction: column; gap: 8px; width: 280px; margin: 8px 0 4px;
+      background: rgba(10, 13, 22, 0.72);
+      border: 1px solid #2c3650; border-radius: 10px;
+      padding: 16px 18px 14px;
+      box-shadow: 0 10px 34px rgba(0,0,0,0.5);
+      backdrop-filter: blur(3px);
+    }
     #auth input {
-      font-size: 14px; padding: 8px 10px; color: #eee; background: #0f1420;
+      font-size: 14px; padding: 9px 10px; color: #eee; background: #0f1420;
       border: 2px solid; border-color: #2a3550 #4a5775 #4a5775 #2a3550; text-shadow: none;
+      border-radius: 4px;
       outline: none;
     }
     #auth input:focus { border-color: #6fd0ff; }
@@ -263,7 +297,7 @@
     <div id="debug" class="mc-font"></div>
     <div id="overlay" class="hidden">
       <h1 id="title" class="mc-font"><span class="accent">VOXEL</span>ON</h1>
-      <p class="subtitle mc-font">a multiplayer voxel arena · Beta 1.7 — DUNGEONS</p>
+      <p class="subtitle mc-font">mine <span class="sub-dot">·</span> build <span class="sub-dot">·</span> explore <span class="sub-dot">·</span> WAR</p>
       <div id="auth">
         <div id="auth-user-row">
           <input id="auth-user" class="mc-font" placeholder="username" maxlength="16" autocomplete="username" readonly />

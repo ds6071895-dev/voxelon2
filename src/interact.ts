@@ -85,7 +85,7 @@ export class Interaction {
   onAction?: () => void;
   /** Fired when right-clicking a crafting table, furnace, chest, machine, or turret. */
   onOpenContainer?: (
-    kind: 'table' | 'furnace' | 'chest' | 'machine' | 'turret' | 'claim',
+    kind: 'table' | 'furnace' | 'chest' | 'machine' | 'turret',
     x: number, y: number, z: number
   ) => void;
   /** Fired on left-click against a machine/turret block: sabotage (HP), not mining. */
@@ -106,11 +106,10 @@ export class Interaction {
   ) => void;
   /** Local block edit (break = block 0); main broadcasts it to the server. */
   onEdit?: (x: number, y: number, z: number, block: number) => void;
-  /** Veto an edit at a cell (e.g. an enemy faction's shielded claim). Returning
-   *  false blocks the break/place so the client doesn't mispredict it. */
+  /** Veto an edit at a cell. Returning false blocks the break/place so the
+   *  client doesn't mispredict it. */
   canEdit?: (x: number, y: number, z: number) => boolean;
-  /** Veto a PLACEMENT of a specific block (e.g. a base Core only inside owned
-   *  territory). Returning false cancels the place so it isn't mispredicted. */
+  /** Veto a PLACEMENT of a specific block. Returning false cancels the place. */
   canPlace?: (x: number, y: number, z: number, block: number) => boolean;
   private readonly world: World;
   private readonly player: Player;
@@ -124,6 +123,8 @@ export class Interaction {
   private placeCooldown = 0;
   /** Creative gamemode: instant break + placed blocks aren't consumed. */
   creative = false;
+  /** Mining-speed multiplier (Rune of Fortune etc.; 1 = normal). */
+  miningSpeedMult = 1;
 
   constructor(
     scene: THREE.Scene, world: World, player: Player,
@@ -241,7 +242,6 @@ export class Interaction {
     const kind = id === Block.CraftingTable ? 'table'
       : id === Block.Furnace || id === Block.FurnaceLit ? 'furnace'
       : id === Block.Chest ? 'chest'
-      : id === Block.Core ? 'claim'
       : isTurretBlock(id) ? 'turret'
       : isMachineBlock(id) ? 'machine' // anchor or a footprint part -> open the machine
       : null;
@@ -269,7 +269,6 @@ export class Interaction {
       this.crackMesh.visible = false;
       return;
     }
-    // Enemy faction's shielded claim: can't break inside it (mirrors the server).
     if (this.canEdit && !this.canEdit(t.x, t.y, t.z)) {
       this.crackMesh.visible = false;
       this.breakProgress = 0;
@@ -277,7 +276,8 @@ export class Interaction {
     }
     const held = this.inventory.selectedStack;
     const { time: rawTime, harvest } = miningStats(info, held);
-    const breakTime = this.creative ? 0 : rawTime; // creative breaks instantly
+    // Creative breaks instantly; runes speed survival mining up a little.
+    const breakTime = this.creative ? 0 : rawTime / Math.max(0.1, this.miningSpeedMult);
     this.breakProgress += dt;
 
     if (this.breakProgress >= breakTime) {
@@ -334,9 +334,7 @@ export class Interaction {
     const existing = this.world.getBlock(px, py, pz);
     if (!isReplaceable(existing)) return;
     if (py < 0 || py >= 256) return;
-    // Can't build inside an enemy faction's shielded claim (mirrors the server).
     if (this.canEdit && !this.canEdit(px, py, pz)) return;
-    // Block-specific placement veto (e.g. a base Core needs owned territory).
     if (this.canPlace && !this.canPlace(px, py, pz, blockId)) return;
 
     // Machines occupy a vertical footprint (anchor at base + part cells above).

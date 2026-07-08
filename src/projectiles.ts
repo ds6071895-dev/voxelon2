@@ -34,7 +34,7 @@ export class Projectiles {
   private readonly bulletMat = new THREE.MeshBasicMaterial({ color: 0xffe27a });
   private readonly rocketMat = new THREE.MeshBasicMaterial({ color: 0xcc4434 });
 
-  /** Report a block impact so the host can drain an enemy faction's claim
+  /** Report a block impact (unused hook kept for effects).
    *  shield if the round struck inside it (M19 breaching). Set by main. */
   claimSink?: (x: number, y: number, z: number, damage: number) => void;
 
@@ -103,7 +103,6 @@ export class Projectiles {
     if (isSolid(this.world.getBlock(
       Math.floor(p.pos.x), Math.floor(p.pos.y), Math.floor(p.pos.z)
     ))) {
-      this.claimSink?.(Math.floor(p.pos.x), Math.floor(p.pos.y), Math.floor(p.pos.z), p.gun.damage);
       this.despawn(p, true);
     }
   }

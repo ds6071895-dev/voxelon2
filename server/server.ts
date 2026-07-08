@@ -45,9 +45,9 @@ function saveAccounts(): void {
 console.log(`loaded ${accounts.size} account(s) from ${ACCOUNTS_FILE}`);
 
 // --- World persistence ------------------------------------------------------
-// The whole authoritative world (edits, claims, machines, chests,
-// turrets) is serialized to a JSON file and reloaded on boot, so a restart
-// doesn't wipe everyone's builds. Autosaved on a timer + on shutdown.
+// The whole authoritative world (edits, machines, chests, turrets, war score)
+// is serialized to a JSON file and reloaded on boot, so a restart doesn't wipe
+// everyone's builds. Autosaved on a timer + on shutdown.
 const WORLD_FILE = path.join(process.cwd(), 'voxelon-world.json');
 function loadWorld(): WorldSave | null {
   try { return JSON.parse(fs.readFileSync(WORLD_FILE, 'utf8')) as WorldSave; }
@@ -320,10 +320,8 @@ setInterval(() => {
   game.tickMachines(dt);
   const moved = game.tickItems(dt);
   dispatch(game.tickTurrets(dt));
-  dispatch(game.tickRegions(dt));
+  dispatch(game.tickWar(dt)); // advances worldTime + the shrinking border
   dispatch(game.tickSeason(dt));
-  dispatch(game.tickClaims(dt));
-  dispatch(game.tickFlags(dt)); // after tickClaims so worldTime is current
   const snap: ServerMsg = { t: 'snapshot', players: game.snapshot() };
   for (const cid of sockets.keys()) send(cid, snap);
   if (moved.length) {
@@ -401,7 +399,9 @@ const HELP = [
   '  coords [player]               - show coords of all players, or one player',
   '  give <player> <item> [count]  - give items (item = name or id)',
   '  gamemode <mode> <player>      - survival | creative | spectator (s/c/sp)',
-  '  tp <player> <x> <y> <z>       - teleport a player',
+  '  tp <player> <x> <y> <z>       - teleport a player to coordinates',
+  '  tp <player> <targetPlayer>    - teleport a player to another player',
+  '  tpstruct <player> [kind]      - tp to nearest tower|bunker|pod|vault',
   '  sethearts <player> <n>        - set an online player\'s hearts (0-20)',
   '  revive <player>               - clear a player\'s 24h elimination lockout',
   '  war start <min>               - start a war NOW for <min> minutes',
@@ -465,12 +465,36 @@ function runCommand(line: string): void {
         break;
       }
       case 'tp': {
-        if (parts.length < 5) { console.log('usage: tp <player> <x> <y> <z>'); break; }
-        const pid = resolvePlayer(parts[1]); if (pid === null) break;
+        const pid = resolvePlayer(parts[1] ?? ''); if (pid === null) break;
+        // `tp <player> <targetPlayer>` — warp to another online player.
+        if (parts.length === 3) {
+          const targetId = resolvePlayer(parts[2]); if (targetId === null) break;
+          if (targetId === pid) { console.log("can't teleport a player to themselves"); break; }
+          const tc = game.playerCoords().find((c) => c.id === targetId);
+          if (!tc) { console.log('target has no position'); break; }
+          dispatch(game.adminTeleport(pid, tc.x, tc.y, tc.z));
+          console.log(`teleported ${parts[1]} to ${tc.username} (${tc.x.toFixed(1)} ${tc.y.toFixed(1)} ${tc.z.toFixed(1)})`);
+          break;
+        }
+        // `tp <player> <x> <y> <z>` — warp to coordinates.
+        if (parts.length < 5) { console.log('usage: tp <player> <x> <y> <z>  OR  tp <player> <targetPlayer>'); break; }
         const [x, y, z] = [Number(parts[2]), Number(parts[3]), Number(parts[4])];
         if (![x, y, z].every(Number.isFinite)) { console.log('x y z must be numbers'); break; }
         dispatch(game.adminTeleport(pid, x, y, z));
         console.log(`teleported ${parts[1]} to ${x} ${y} ${z}`);
+        break;
+      }
+      case 'tpstruct': case 'tps': {
+        if (parts.length < 2) { console.log('usage: tpstruct <player> [tower|bunker|pod|vault]'); break; }
+        const pid = resolvePlayer(parts[1]); if (pid === null) break;
+        const kind = parts[2]?.toLowerCase();
+        if (kind && !['tower', 'bunker', 'pod', 'vault'].includes(kind)) {
+          console.log('kind must be tower | bunker | pod | vault'); break;
+        }
+        const s = game.nearestStructure(pid, kind);
+        if (!s) { console.log(`no ${kind ?? 'structure'} found`); break; }
+        dispatch(game.adminTeleport(pid, s.x, s.y, s.z));
+        console.log(`teleported ${parts[1]} to the nearest ${s.kind} at ${s.x} ${s.y} ${s.z}`);
         break;
       }
       case 'sethearts': {

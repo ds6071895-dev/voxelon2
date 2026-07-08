@@ -346,6 +346,7 @@ export const VAULT_LOOT: Record<VaultTier, LootEntry[]> = {
     { id: Item.JumpBoost, min: 1, max: 2, w: 1 },
     { id: Item.GoldIngot, min: 1, max: 3, w: 1.5 },
     { id: Item.Pistol, min: 1, max: 1, w: 0.7 },
+    { id: Item.RuneOfIron, min: 1, max: 1, w: 0.5 },
   ],
   // Tier II (mid Wilds): serious kit.
   2: [
@@ -358,6 +359,8 @@ export const VAULT_LOOT: Record<VaultTier, LootEntry[]> = {
     { id: Item.Grenade, min: 2, max: 3, w: 1.5 },
     { id: Item.OilBarrel, min: 2, max: 4, w: 1.5 },
     { id: Item.GrapplingHook, min: 1, max: 1, w: 0.7 },
+    { id: Item.RuneOfSwiftness, min: 1, max: 1, w: 0.7 },
+    { id: Item.RuneOfFortune, min: 1, max: 1, w: 0.6 },
   ],
   // Tier III (deep Wilds): the jackpot pool (+ a guaranteed Heart on top).
   3: [
@@ -370,6 +373,9 @@ export const VAULT_LOOT: Record<VaultTier, LootEntry[]> = {
     { id: Item.GoldIngot, min: 3, max: 6, w: 2 },
     { id: Item.OilBarrel, min: 3, max: 6, w: 1.5 },
     { id: Item.Heart, min: 1, max: 1, w: 0.5 }, // extra hearts CAN roll too
+    { id: Item.RuneOfFocus, min: 1, max: 1, w: 0.9 },
+    { id: Item.RuneOfSwiftness, min: 1, max: 1, w: 0.7 },
+    { id: Item.RuneOfIron, min: 1, max: 1, w: 0.7 },
   ],
 };
 

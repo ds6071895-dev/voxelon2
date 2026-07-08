@@ -6,9 +6,8 @@
 import type { ItemStack } from '../items';
 import type { MachineState, UpgradeAxis } from '../machines';
 import type { TurretState, TurretAxis } from '../turrets';
-import type { ClaimState } from '../claims';
 import {
-  ClientMsg, FlagInfo, GameMode, ItemEntityInfo, PlayerInfo, SERVER_PORT, ServerMsg,
+  ClientMsg, GameMode, ItemEntityInfo, PlayerInfo, SERVER_PORT, ServerMsg,
   TRANSFORM_HZ,
 } from './protocol';
 
@@ -81,33 +80,25 @@ export class NetClient {
   onTurret?: (x: number, y: number, z: number, state: TurretState) => void;
   /** A turret fired (render a tracer + aim the barrel). */
   onTurretFire?: (x: number, y: number, z: number, tx: number, ty: number, tz: number) => void;
-  /** Authoritative claim state (open reply / feed / breach / periodic refresh). */
-  onClaim?: (claim: ClaimState) => void;
-  onClaimRemove?: (id: number) => void;
-  /** Region board changed (owner faction id per region index). */
-  onRegions?: (owners: number[]) => void;
-  /** Capture meters refreshed (per-region filling faction + 0..1 fraction). */
-  onRegionMeters?: (capFaction: number[], capProgress: number[]) => void;
-  /** A region flipped owners ("WE CAPTURED X!" banner). */
-  onRegionCapture?: (region: number, faction: number, from: number) => void;
-  /** A faction took an enemy capital — instant win. */
-  onRegionWin?: (faction: number) => void;
   /** Season clock update (number + seconds left). */
   onSeason?: (number: number, timeLeft: number) => void;
   /** A season ended (winner faction, or NO_FACTION for a stalemate). */
   onSeasonEnd?: (winner: number, number: number) => void;
-  /** War window changed: capture open now? + seconds left / until next war. */
-  onWar?: (active: boolean, timeLeft: number, nextIn: number) => void;
-  /** War flags changed (land-claim markers + countdowns). */
-  onFlags?: (flags: FlagInfo[]) => void;
+  /** War clock changed: the shrinking-border battle state + score + wins. */
+  onWar?: (active: boolean, timeLeft: number, nextIn: number, duration: number,
+    score: number[], wins: number[]) => void;
+  /** A war ended: the most-kills faction won it (NO_FACTION = draw). */
+  onWarEnd?: (winner: number, score: number[]) => void;
+  /** The server granted YOU personal XP (PvP kill). */
+  onXpAward?: (amount: number, reason: string) => void;
+  /** Faction XP pools changed (shared progression). */
+  onFactionXp?: (xp: number[]) => void;
   /** Private confirmation of YOUR secret faction switch (Phase 7). */
   onFactionSwitched?: (faction: number, remaining: number) => void;
   /** Play a gadget visual effect (frag/oil blast, smoke cloud) at a point. */
   onGadgetFx?: (kind: string, x: number, y: number, z: number) => void;
   /** A player is disguised as `faction` until `until` (server worldTime). */
   onDisguised?: (id: number, faction: number, until: number) => void;
-  /** A faction breached an enemy claim (HUD/killfeed event). */
-  onBreach?: (attacker: string, faction: number, victim: number) => void;
   /** A register/login was rejected (the login screen shows the error). */
   onAuthErr?: (error: string) => void;
   /** Lifesteal: the local player's authoritative hearts count changed. */
@@ -191,11 +182,10 @@ export class NetClient {
         this.netItems.clear();
         for (const it of msg.items) this.netItems.set(it.eid, it);
         for (const tr of msg.turrets) this.onTurret?.(tr.x, tr.y, tr.z, tr.state);
-        for (const cl of msg.claims) this.onClaim?.(cl);
-        this.onRegions?.(msg.regions);
         this.onSeason?.(msg.season.number, msg.season.timeLeft);
-        this.onWar?.(msg.war.active, msg.war.timeLeft, msg.war.nextIn);
-        this.onFlags?.(msg.flags);
+        this.onWar?.(msg.war.active, msg.war.timeLeft, msg.war.nextIn,
+          msg.war.duration, msg.war.score, msg.war.wins);
+        this.onFactionXp?.(msg.factionXp);
         const me = msg.players.find((p) => p.id === this.myId);
         // Restore saved inventory BEFORE onWelcome (which adopts the server
         // position) so the comeback loadout/inventory is in place from frame one.
@@ -277,24 +267,20 @@ export class NetClient {
       case 'turretFire':
         this.onTurretFire?.(msg.x, msg.y, msg.z, msg.tx, msg.ty, msg.tz);
         break;
-      case 'regions':
-        this.onRegions?.(msg.owners);
-        this.onRegionMeters?.(msg.capFaction, msg.capProgress);
-        break;
-      case 'regionCapture':
-        this.onRegionCapture?.(msg.region, msg.faction, msg.from);
-        break;
-      case 'regionWin':
-        this.onRegionWin?.(msg.faction);
-        break;
       case 'season':
         this.onSeason?.(msg.number, msg.timeLeft);
         break;
       case 'war':
-        this.onWar?.(msg.active, msg.timeLeft, msg.nextIn);
+        this.onWar?.(msg.active, msg.timeLeft, msg.nextIn, msg.duration, msg.score, msg.wins);
         break;
-      case 'flags':
-        this.onFlags?.(msg.flags);
+      case 'warEnd':
+        this.onWarEnd?.(msg.winner, msg.score);
+        break;
+      case 'xpAward':
+        this.onXpAward?.(msg.amount, msg.reason);
+        break;
+      case 'fxp':
+        this.onFactionXp?.(msg.xp);
         break;
       case 'seasonEnd':
         this.onSeasonEnd?.(msg.winner, msg.number);
@@ -307,18 +293,6 @@ export class NetClient {
         break;
       case 'disguised':
         this.onDisguised?.(msg.id, msg.faction, msg.until);
-        break;
-      case 'claim':
-        this.onClaim?.(msg.claim);
-        break;
-      case 'claims':
-        for (const cl of msg.claims) this.onClaim?.(cl);
-        break;
-      case 'claimRemove':
-        this.onClaimRemove?.(msg.id);
-        break;
-      case 'breach':
-        this.onBreach?.(msg.attacker, msg.faction, msg.victim);
         break;
       case 'authErr':
         this.onAuthErr?.(msg.error);
@@ -458,21 +432,13 @@ export class NetClient {
   sendTurretHit(x: number, y: number, z: number, amount: number): void {
     if (this.connected) this.raw({ t: 'turretHit', x, y, z, amount });
   }
-  // Land claims.
-  sendClaimOpen(x: number, y: number, z: number): void {
-    if (this.connected) this.raw({ t: 'claimOpen', x, y, z });
-  }
-  sendClaimFeed(x: number, y: number, z: number, count: number): void {
-    if (this.connected) this.raw({ t: 'claimFeed', x, y, z, count });
-  }
-  sendClaimHit(x: number, y: number, z: number, amount: number): void {
-    if (this.connected) this.raw({ t: 'claimHit', x, y, z, amount });
-  }
   sendRocketBlast(x: number, y: number, z: number): void {
     if (this.connected) this.raw({ t: 'rocketBlast', x, y, z });
   }
 
   sendSwitchFaction(faction: number): void { if (this.connected) this.raw({ t: 'switchFaction', faction }); }
+  /** Report mob-kill XP (server clamps + feeds the faction pool). */
+  sendXp(amount: number): void { if (this.connected) this.raw({ t: 'xp', amount }); }
   // Lifesteal (Milestone A).
   sendHeartConsume(): void { if (this.connected) this.raw({ t: 'heartConsume' }); }
   sendHeartWithdraw(): void { if (this.connected) this.raw({ t: 'heartWithdraw' }); }

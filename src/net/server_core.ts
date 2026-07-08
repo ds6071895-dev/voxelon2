@@ -18,34 +18,32 @@ import {
   sanitizeTurretState,
 } from '../turrets';
 import {
-  FACTIONS, balancedFaction, factionName, isFaction, sameFaction,
+  FACTIONS, NO_FACTION, balancedFaction, factionName, isFaction, sameFaction,
   canSwitchFaction, switchesRemaining,
 } from '../teams';
-import {
-  Claims, ClaimState, claimProtected, damageShield, feedOil, shieldUp,
-} from '../claims';
-import { Regions, RegionsSave, regionOf, regionBounds, capitalOf, REGION_COUNT } from '../regions';
-import { Flags } from '../flags';
 import {
   SeasonState, newSeason, sanitizeSeason, seasonTimeLeft, seasonExpired,
   tickSeasonClock, advanceSeason, deadlineWinner,
 } from '../season';
 import {
-  WarState, newWar, warActive, warSnapshot, scheduleWar, sanitizeWar, DEFAULT_WAR_DURATION,
+  WarState, newWar, warActive, warSnapshot, scheduleWar, sanitizeWar,
+  warBorderAt, warDuration, DEFAULT_WAR_DURATION,
 } from '../war';
+import { XP_PLAYER_KILL, XP_REPORT_CAP, sanitizeFactionXp } from '../progress';
 import { GadgetCooldowns, gadgetOf, falloffDamage } from '../gadgets';
 import { Terrain } from '../terrain';
-import { structureChestTier } from '../structures';
+import { structureChestTier, worldStructures } from '../structures';
 import { chestLootSlots } from '../loot';
 import {
   VaultServerState, VaultStamp, bruteMaxHp, newVaultState, refreshVaultState,
   sanitizeVaultState, vaultChestAt, vaultLoot, vaultLootable, vaultStamp,
+  worldVaults,
 } from '../vaults';
 import {
   ClientMsg, EDIT_RANGE, CHEST_SLOTS, PICKUP_RANGE,
   ARMOR_POINT_CAP, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE,
   mitigate, ItemEntityInfo, PlayerInfo, PlayerSnapshot, ServerMsg,
-  WORLD_SEED, WORLD_HALF, CORE_HALF, inCore, makeUsername, skinSeed, GameMode,
+  WORLD_SEED, WORLD_HALF, WORLD_BORDER, CORE_HALF, makeUsername, skinSeed, GameMode,
   MAX_ATTUNED, TOTEM_COOLDOWN, COMBAT_TAG,
 } from './protocol';
 import {
@@ -55,10 +53,6 @@ import {
 
 const SEASON_BROADCAST = 2;      // seconds between season-clock broadcasts
 const WAR_BROADCAST = 2;         // seconds between war-clock broadcasts
-const FLAG_BROADCAST = 2;        // seconds between war-flag countdown broadcasts
-const CLAIM_BROADCAST = 1;      // seconds between bulk claim-state refreshes
-const CLAIM_HIT_MAX = 200;      // server cap on a single reported shield hit
-export const RAID_STEAL_FRAC = 0.5; // fraction of a stored container a raid takes
 // Rocket splash (mirrors the client-side mobs.explode blast so PvP/craters sync).
 const ROCKET_BLAST_DAMAGE = 22; // base AoE damage at the burst centre
 const ROCKET_BLAST_RADIUS = 6;  // player-damage falloff radius (blocks)
@@ -116,7 +110,7 @@ const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
   'machineConfig', 'machineUpgrade', 'machineCollect', 'machineHit', 'machineClaim',
   'machineMove', 'setSpawn',
   'turretUpgrade', 'turretClaim', 'turretHit', 'turretLoad',
-  'claimFeed', 'claimHit', 'gadgetUse', 'rocketBlast',
+  'gadgetUse', 'rocketBlast', 'xp',
   'heartConsume', 'heartWithdraw', 'beaconRevive', 'useHeal',
   'attune', 'totemTeleport',
   'vaultBossHit', 'vaultChestOpen',
@@ -140,17 +134,16 @@ export class GameServer {
   private readonly machines = new Map<string, MachineState>();
   // Warfare layer (M14).
   private readonly turrets = new Map<string, TurretState>();
-  // Land claims (M18).
-  private readonly claims = new Claims();
-  // Region board — the 50/50 war frontline (Phase 1).
-  private readonly regions = new Regions();
-  // War flags — land is claimed by planting a flag on a kill (see flags.ts).
-  private readonly flags = new Flags();
-  private flagAccum = 0;
-  // War windows: capture is only open during a scheduled war (admin-controlled).
+  // War windows: the shrinking-border battle (admin-scheduled).
   private war: WarState = newWar();
   private warAccum = 0;
   private warWasActive = false;
+  /** Kills per faction id in the CURRENT war (most kills wins the war). */
+  private warKills: number[] = new Array(FACTIONS.length).fill(0);
+  /** War wins per faction id THIS SEASON (most wins takes the season). */
+  private warWins: number[] = new Array(FACTIONS.length).fill(0);
+  /** Shared faction XP pools (progression perks for every member). */
+  private factionXp: number[] = new Array(FACTIONS.length).fill(0);
   // Seasons (Phase 5): month-long war cycles with reset + a "Seasons Won" badge.
   private season = newSeason();
   private seasonAccum = 0;
@@ -177,8 +170,7 @@ export class GameServer {
   private readonly vaults = new Map<string, VaultServerState>();
   /** Deterministic vault stamps are pricey to rebuild — cache by anchor chunk. */
   private readonly vaultStamps = new Map<string, VaultStamp | null>();
-  private worldTime = 0;        // seconds since boot (grace-period clock)
-  private claimAccum = 0;
+  private worldTime = 0;        // seconds since boot
   private readonly items = new Map<number, ItemEntityInfo>();
   /** Per-item fall state (server-owned gravity so drops settle to the ground). */
   private readonly itemPhys = new Map<number, { vy: number; resting: boolean }>();
@@ -219,23 +211,7 @@ export class GameServer {
     return makeUsername(this.rng) + Math.floor(this.rng() * 1000);
   }
 
-  private spawn(faction?: number): { x: number; y: number; z: number } {
-    // Faction-aware: drop inside a region your faction controls (prefer the home
-    // capital), never in enemy/neutral land. Falls back to any dry spot.
-    if (faction !== undefined && isFaction(faction)) {
-      const cap = capitalOf(faction);
-      let pick = this.regions.ownerAt(cap) === faction ? cap : -1;
-      if (pick < 0) {
-        const owned: number[] = [];
-        for (let i = 0; i < REGION_COUNT; i++) if (this.regions.ownerAt(i) === faction) owned.push(i);
-        if (owned.length) pick = owned[Math.floor(this.rng() * owned.length)];
-      }
-      if (pick >= 0) {
-        const b = regionBounds(pick);
-        const s = this.terrain.drySpawnInBounds(this.rng, b.minX + 6, b.maxX - 6, b.minZ + 6, b.maxZ - 6);
-        return { x: s.x, y: s.y, z: s.z };
-      }
-    }
+  private spawn(): { x: number; y: number; z: number } {
     // Spawns stay inside the Heartland core (B2) — nobody wakes up in the Wilds.
     const s = this.terrain.randomDrySpawn(this.rng, CORE_HALF);
     return { x: s.x, y: s.y, z: s.z };
@@ -274,7 +250,7 @@ export class GameServer {
     const hasPos = fin(sx as number, sy as number, sz as number) && (sy as number) > 0;
     const s = hasPos
       ? { x: sx as number, y: sy as number, z: sz as number }
-      : this.spawn(faction);
+      : this.spawn();
     const savedMode = typeof saved?.mode === 'string' && GAME_MODES.includes(saved.mode as GameMode)
       ? saved.mode as GameMode : 'survival';
     // Lifesteal: hearts persist in the account data blob; fresh accounts (or
@@ -313,11 +289,10 @@ export class GameServer {
         const [x, y, z] = k.split(',').map(Number);
         return { x, y, z, state };
       }),
-      claims: this.claims.list(),
-      regions: this.regions.ownerList(),
       season: { number: this.season.number, timeLeft: seasonTimeLeft(this.season) },
-      war: warSnapshot(this.war, this.worldTime),
-      flags: (this.flagsSnapshot() as Extract<ServerMsg, { t: 'flags' }>).flags,
+      war: { ...warSnapshot(this.war, this.worldTime),
+        score: this.warKills.slice(), wins: this.warWins.slice() },
+      factionXp: this.factionXp.slice(),
       state: saved, // opaque per-account blob (inventory/hotbar) for the client to restore
     };
     return [
@@ -344,9 +319,11 @@ export class GameServer {
         // Reject non-finite transforms so they can't poison distance/facing
         // math elsewhere (range/hit checks must never fail open).
         if (!p.dead && fin(msg.x, msg.y, msg.z, msg.yaw, msg.pitch)) {
-          // Clamp into the world border (authoritative: a client can't roam past it).
-          p.x = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, msg.x));
-          p.z = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, msg.z));
+          // Clamp into the (war-shrinking) world border — a client can't roam
+          // past it, and during a war the closing ring drags everyone inward.
+          const half = this.borderHalf();
+          p.x = Math.max(-half, Math.min(half, msg.x));
+          p.z = Math.max(-half, Math.min(half, msg.z));
           p.y = msg.y;
           p.yaw = msg.yaw; p.pitch = msg.pitch;
           p.gliding = msg.gliding === true;
@@ -367,6 +344,15 @@ export class GameServer {
         return this.handleGadget(p, msg.item, msg.x, msg.y, msg.z);
       case 'rocketBlast':
         return this.handleRocketBlast(p, msg.x, msg.y, msg.z);
+      case 'xp': {
+        // Mob-kill XP report (mobs are client-simulated). Clamped so a hacked
+        // client can't flood the faction pool; personal XP is client-owned.
+        if (p.dead || !isFaction(p.faction)) return [];
+        const amt = fin(msg.amount) ? Math.max(0, Math.min(XP_REPORT_CAP, Math.floor(msg.amount))) : 0;
+        if (amt <= 0) return [];
+        this.factionXp[p.faction] += amt;
+        return [{ to: 'all', msg: { t: 'fxp', xp: this.factionXp.slice() } }];
+      }
       case 'saveState':
         // Stash the client-owned blob (inventory/hotbar). Position is added from
         // the authoritative record at capture time. The shell persists to disk.
@@ -384,7 +370,6 @@ export class GameServer {
       case 'rangedAttack':
         return this.handleRanged(p, msg.target, msg.amount);
       case 'chestOpen': {
-        if (this.enemyShielded(p, msg.x, msg.z)) return []; // can't peek a shielded chest
         // A pristine STRUCTURE chest generates its seeded loot on first open
         // (identical for every client + the offline world; dup-safe — the roll
         // happens exactly once, then it's an ordinary stored chest).
@@ -395,7 +380,6 @@ export class GameServer {
       }
       case 'chestSet': {
         if (!Array.isArray(msg.slots)) return [];
-        if (this.enemyShielded(p, msg.x, msg.z)) return []; // can't write a shielded chest
         // Only an actual chest block can hold contents. This fail-closes a
         // stale/late write (e.g. from a client whose chest was just broken by
         // someone else) so it cannot resurrect or fork contents at a now-empty
@@ -417,14 +401,12 @@ export class GameServer {
       }
       case 'machineOpen': {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
-        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
         const s = this.ensureMachine(msg.x, msg.y, msg.z);
         if (!s) return [];
         return [{ to: id, msg: { t: 'machine', x: msg.x, y: msg.y, z: msg.z, state: s } }];
       }
       case 'machineConfig': {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
-        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
         const s = this.ensureMachine(msg.x, msg.y, msg.z);
         if (!s || s.type !== MachineType.Autominer) return [];
         setFilter(s, msg.filter);
@@ -435,7 +417,6 @@ export class GameServer {
         // Fail-closed on an unknown axis (rather than defaulting to production).
         if (msg.axis !== 'production' && msg.axis !== 'storage') return [];
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
-        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
         const s = this.ensureMachine(msg.x, msg.y, msg.z);
         if (!s) return [];
         // Cost is paid client-side (authoritative-lite); the server just bumps
@@ -445,7 +426,6 @@ export class GameServer {
       }
       case 'machineCollect': {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
-        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
         const s = this.ensureMachine(msg.x, msg.y, msg.z);
         if (!s) return [];
         const taken = collectMachine(s);
@@ -462,7 +442,6 @@ export class GameServer {
       }
       case 'machineHit': {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
-        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
         const s = this.ensureMachine(msg.x, msg.y, msg.z);
         if (!s) return [];
         const dmg = fin(msg.amount) ? Math.max(0, Math.min(1000, msg.amount)) : 0;
@@ -475,7 +454,6 @@ export class GameServer {
       }
       case 'machineClaim': {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
-        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
         const s = this.ensureMachine(msg.x, msg.y, msg.z);
         if (!s) return [];
         claimMachine(s, p.username);
@@ -487,7 +465,6 @@ export class GameServer {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
         if (!this.nearMachine(p, msg.tx, msg.ty, msg.tz)) return [];
         // Enemy-claim protection on either end blocks the move (no shield theft).
-        if (this.enemyShielded(p, msg.x, msg.z) || this.enemyShielded(p, msg.tx, msg.tz)) return [];
         return this.moveMachine(msg.x, msg.y, msg.z, msg.tx, msg.ty, msg.tz);
       }
       case 'setSpawn': {
@@ -501,7 +478,6 @@ export class GameServer {
       // --- Turrets ---
       case 'turretOpen': {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
-        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
         const s = this.ensureTurret(msg.x, msg.y, msg.z);
         if (!s) return [];
         return [{ to: id, msg: { t: 'turret', x: msg.x, y: msg.y, z: msg.z, state: s } }];
@@ -509,7 +485,6 @@ export class GameServer {
       case 'turretUpgrade': {
         if (msg.axis !== 'range' && msg.axis !== 'damage' && msg.axis !== 'rate') return [];
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
-        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
         const s = this.ensureTurret(msg.x, msg.y, msg.z);
         if (!s) return [];
         applyTurretUpgrade(s, msg.axis);
@@ -517,7 +492,6 @@ export class GameServer {
       }
       case 'turretClaim': {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
-        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
         const s = this.ensureTurret(msg.x, msg.y, msg.z);
         if (!s) return [];
         claimTurret(s, p.username, p.faction);
@@ -525,7 +499,6 @@ export class GameServer {
       }
       case 'turretLoad': {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
-        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
         const s = this.ensureTurret(msg.x, msg.y, msg.z);
         if (!s) return [];
         if (!fin(msg.count) || (msg.item !== Item.Cannonball && msg.item !== Item.OilBarrel)) return [];
@@ -534,7 +507,6 @@ export class GameServer {
       }
       case 'turretHit': {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
-        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
         const s = this.ensureTurret(msg.x, msg.y, msg.z);
         if (!s) return [];
         const dmg = fin(msg.amount) ? Math.max(0, Math.min(1000, msg.amount)) : 0;
@@ -543,26 +515,6 @@ export class GameServer {
         }
         return [{ to: 'all', msg: { t: 'turret', x: msg.x, y: msg.y, z: msg.z, state: s } }];
       }
-      // --- Land claims (M18 / M19) ---
-      case 'claimOpen': {
-        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
-        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
-        const c = this.claims.coreAt(msg.x, msg.y, msg.z);
-        if (!c) return [];
-        return [{ to: p.id, msg: { t: 'claim', claim: c } }];
-      }
-      case 'claimFeed': {
-        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
-        if (this.enemyShielded(p, msg.x, msg.z)) return []; // enemy-claim protection
-        const c = this.claims.coreAt(msg.x, msg.y, msg.z);
-        // Only the owning faction may fuel their Core.
-        if (!c || !sameFaction(p.faction, c.faction)) return [];
-        if (!fin(msg.count) || msg.count <= 0) return [];
-        feedOil(c, Math.floor(msg.count)); // client only sends what its room allowed
-        return [{ to: 'all', msg: { t: 'claim', claim: c } }];
-      }
-      case 'claimHit':
-        return this.handleClaimHit(p, msg.x, msg.y, msg.z, msg.amount);
       // --- Lifesteal (Milestone A) ---
       case 'heartConsume': {
         // +1 max heart from a Heart item (the item cost is paid client-side,
@@ -989,50 +941,11 @@ export class GameServer {
     const key = `${x},${y},${z}`;
     const prev = this.edits.get(key);
     const out: Outbound[] = [];
-    // --- Bases (Phase 3) = land claims (M18) + raiding (M19) ---
-    const claim = this.claims.at(x, z);
-    const enemyClaim = claim !== undefined && !sameFaction(p.faction, claim.faction);
-    // A base is also raidable by whoever OWNS the region it sits in (Phase 3) —
-    // not only by breaching the shield. Holding the territory opens the base.
-    const ownsRegion = sameFaction(this.regions.ownerOf(x, z), p.faction);
-    if (enemyClaim) {
-      // Enemies can NEVER break the Core — claims persist through raids.
-      if (prev === Block.Core) return [];
-      // While the shield holds (or during grace), enemies can't touch the claim —
-      // UNLESS they own the region the base is in, which opens it to a raid.
-      if (claimProtected(claim!, this.worldTime) && !ownsRegion) return [];
-    }
-    // A breached (or region-captured) claim: an enemy's break of a stored
-    // container raids it.
-    const raiding = enemyClaim && claim !== undefined &&
-      (!claimProtected(claim, this.worldTime) || ownsRegion);
-
-    // Placing a Core founds a BASE (Phase 3): only inside the Heartland core
-    // (B2 — no claims in the Wilds), only in a region your faction owns, and
-    // rejected (no-op) if it would overlap an existing claim.
-    if (block === Block.Core && prev !== Block.Core) {
-      if (!inCore(x, z)) {
-        return [{ to: p.id, msg: { t: 'notice', text: 'Claims only work in the Heartland (inner 1000×1000)!' } }];
-      }
-      if (!ownsRegion) {
-        return [{ to: p.id, msg: { t: 'notice', text: 'You can only build a base in territory your faction controls!' } }];
-      }
-      const created = this.claims.create(p.faction, x, y, z, this.worldTime);
-      if (!created) return [];
-      out.push({ to: 'all', msg: { t: 'claim', claim: created } });
-    }
-    // The owning faction breaking its own Core dissolves the claim.
-    if (prev === Block.Core && block !== Block.Core) {
-      const c = this.claims.coreAt(x, y, z);
-      if (c) { this.claims.remove(c.id); out.push({ to: 'all', msg: { t: 'claimRemove', id: c.id } }); }
-    }
     // Server-authoritative chest break: if this edit removes a chest, spill its
     // stored contents as item entities everyone sees and clear the storage —
-    // independent of whether the breaking client ever opened (cached) it. Inside
-    // a breached enemy claim the break is a RAID: a capped share goes to the
-    // raider, the rest spills to the world (dup-safe — contents leave once).
+    // independent of whether the breaking client ever opened (cached) it.
     if (prev === Block.Chest && block !== Block.Chest) {
-      out.push(...(raiding ? this.raidChest(key, x, y, z, p) : this.spillChest(key, x, y, z)));
+      out.push(...this.spillChest(key, x, y, z));
     }
     // Breaking a pristine STRUCTURE chest (terrain block, never edited): its
     // seeded loot still spills — generate-on-break if nobody opened it yet
@@ -1112,25 +1025,6 @@ export class GameServer {
     return out;
   }
 
-  /** Raid a chest in a breached claim: a capped fraction of EACH stack goes
-   *  straight to the raider (dup-safe gotitem path), the remainder spills to the
-   *  world. Storage is cleared exactly once, so nothing is duplicated or lost. */
-  private raidChest(key: string, x: number, y: number, z: number, raider: ServerPlayer): Outbound[] {
-    const contents = this.chests.get(key);
-    this.chests.delete(key);
-    if (!contents) return [];
-    const out: Outbound[] = [];
-    for (const s of contents) {
-      if (!s || !ITEMS[s.id] || !fin(s.count) || s.count <= 0) continue;
-      const stolen = Math.floor(s.count * RAID_STEAL_FRAC);
-      if (stolen > 0) out.push({ to: raider.id, msg: { t: 'gotitem', item: s.id, count: stolen } });
-      const rest = s.count - stolen;
-      if (rest > 0) out.push(this.spawnItem(s.id, rest,
-        x + 0.5 + (this.rng() - 0.5), y + 0.3, z + 0.5 + (this.rng() - 0.5)));
-    }
-    return out;
-  }
-
   private handleAttack(attacker: ServerPlayer, targetId: number): Outbound[] {
     // Melee PvP is disabled — players can only be damaged by guns/explosions,
     // not by fists or ordinary tools. Fail-closed against hacked clients.
@@ -1201,16 +1095,17 @@ export class GameServer {
         },
       });
       out.push(...this.settleLifesteal(p));
-      // Killing an enemy DURING A WAR plants a flag at the kill spot — if it
-      // survives the timer (no enemy defuses it), this region flips to the
-      // killer's faction. One flag per faction at a time (flags.ts enforces it).
-      // Flags claim REGIONS, and regions only exist in the Heartland core —
-      // a kill out in the Wilds plants nothing (B2).
-      if (killer && killer !== p && isFaction(killer.faction) && killer.faction !== p.faction &&
-          this.isWarActive() && inCore(p.x, p.z)) {
-        const owner = this.regions.ownerAt(regionOf(p.x, p.z));
-        const flag = this.flags.plant(killer.faction, p.x, p.y, p.z, owner, this.worldTime);
-        if (flag) out.push({ to: 'all', msg: this.flagsSnapshot() });
+      // A PvP kill scores XP for the killer + their faction pool, and DURING A
+      // WAR it counts toward the war score (most kills wins the shrinking-border
+      // battle). Server-awarded — never client-reported.
+      if (killer && killer !== p && isFaction(killer.faction) && killer.faction !== p.faction) {
+        this.factionXp[killer.faction] += XP_PLAYER_KILL;
+        out.push({ to: killer.id, msg: { t: 'xpAward', amount: XP_PLAYER_KILL, reason: 'kill' } });
+        out.push({ to: 'all', msg: { t: 'fxp', xp: this.factionXp.slice() } });
+        if (this.isWarActive()) {
+          this.warKills[killer.faction]++;
+          out.push({ to: 'all', msg: this.warSnapshotMsg() });
+        }
       }
     }
     return out;
@@ -1265,7 +1160,7 @@ export class GameServer {
       // Beacon gone (broken/raided): forget the stale point and fall back.
       p.spawnX = p.spawnY = p.spawnZ = undefined;
     }
-    return this.spawn(p.faction);
+    return this.spawn();
   }
 
   private handleRespawn(p: ServerPlayer): Outbound[] {
@@ -1372,92 +1267,82 @@ export class GameServer {
     return out;
   }
 
-  // --- Region board + capture (Phase 1/2) ------------------------------------
+  // --- The WAR: a shrinking-border battle royale ------------------------------
 
-  /** Live presence (faction + position) for region capture resolution. */
-  private regionPresence(): { faction: number; x: number; z: number; dead: boolean }[] {
-    return [...this.players.values()].map((p) => ({
-      faction: p.faction, x: p.x, z: p.z, dead: p.dead,
-    }));
-  }
-
-  /** Force a region's owner (admin / season setup / tests) and broadcast the
-   *  updated board. World coords pick the region. */
-  setRegionOwner(x: number, z: number, faction: number): Outbound[] {
-    if (!this.regions.setOwner(regionOf(x, z), faction)) return [];
-    return [{ to: 'all', msg: this.regionsSnapshot() }];
-  }
-
-  /** Full region board + capture meters (the war map). */
-  regionsSnapshot(): ServerMsg {
-    const m = this.regions.meters();
-    return { t: 'regions', owners: this.regions.ownerList(), capFaction: m.faction, capProgress: m.progress };
-  }
-
-  /** Is a war on right now (capture open)? */
+  /** Is a war on right now? */
   isWarActive(): boolean { return warActive(this.war, this.worldTime); }
 
-  /** Clock-relative war state for the HUD/wire. */
+  /** The CURRENT border side length: full world in peacetime; during a war it
+   *  closes in toward the 100×100 final ring (pure warBorderAt). */
+  currentBorder(): number {
+    if (!this.isWarActive()) return WORLD_BORDER;
+    const timeLeft = Math.max(0, this.war.end - this.worldTime);
+    return warBorderAt(timeLeft, warDuration(this.war), WORLD_BORDER);
+  }
+  private borderHalf(): number { return this.currentBorder() / 2; }
+
+  /** Clock-relative war state for the HUD/wire (clock + score + season wins). */
   warSnapshotMsg(): ServerMsg {
     const w = warSnapshot(this.war, this.worldTime);
-    return { t: 'war', active: w.active, timeLeft: w.timeLeft, nextIn: w.nextIn };
+    return { t: 'war', active: w.active, timeLeft: w.timeLeft, nextIn: w.nextIn,
+      duration: w.duration, score: this.warKills.slice(), wins: this.warWins.slice() };
   }
 
-  /** War-window bookkeeping only: broadcast the clock periodically + on every
-   *  peace<->war transition. Land is actually claimed by FLAGS (see tickFlags);
-   *  when a war ends any planted flags are dropped so none linger into peace. */
-  tickRegions(dt: number): Outbound[] {
+  /** Advance the war clock: move worldTime, pull everyone inside the shrinking
+   *  border, broadcast the clock periodically + on every peace<->war transition,
+   *  and RESOLVE the war when it ends (most kills wins). */
+  tickWar(dt: number): Outbound[] {
     if (!fin(dt) || dt <= 0) return [];
+    this.worldTime += dt;
     const out: Outbound[] = [];
     const active = this.isWarActive();
+    // The closing ring drags everyone inward (authoritative — matches the xform
+    // clamp, so nobody can sit outside the border).
+    if (active) {
+      const half = this.borderHalf();
+      for (const p of this.players.values()) {
+        p.x = Math.max(-half, Math.min(half, p.x));
+        p.z = Math.max(-half, Math.min(half, p.z));
+      }
+    }
     this.warAccum += dt;
     if (active !== this.warWasActive) {
       this.warWasActive = active;
       this.warAccum = 0;
-      if (!active && this.flags.list().length) { this.flags.clear(); out.push({ to: 'all', msg: this.flagsSnapshot() }); }
+      if (!active) out.push(...this.endWar());
       out.push({ to: 'all', msg: this.warSnapshotMsg() });
     } else if (this.warAccum >= WAR_BROADCAST) {
       this.warAccum = 0;
-      out.push({ to: 'all', msg: this.warSnapshotMsg() });
+      if (active) out.push({ to: 'all', msg: this.warSnapshotMsg() });
     }
     return out;
   }
 
-  /** Live war flags + their countdowns for the wire. */
-  flagsSnapshot(): ServerMsg {
-    const now = this.worldTime;
-    return {
-      t: 'flags',
-      flags: this.flags.list().map((f) => ({
-        faction: f.faction, x: f.x, y: f.y, z: f.z, region: f.region,
-        secondsLeft: Math.max(0, Math.round(f.expiresAt - now)),
-      })),
-    };
-  }
-
-  /** Advance war flags: an enemy reaching a flag defuses it; a flag that outlasts
-   *  its timer flips its WHOLE region to the planting faction. Broadcasts the
-   *  countdown periodically + immediately whenever a flag claims/defuses. */
-  tickFlags(dt: number): Outbound[] {
-    if (!fin(dt) || dt <= 0) return [];
+  /** Resolve a finished war: the faction with the most kills wins it (tie = a
+   *  draw), earning a war win toward the season. Kills reset for the next war. */
+  private endWar(): Outbound[] {
     const out: Outbound[] = [];
-    if (!this.isWarActive()) return out; // flags only resolve during a war
-    const res = this.flags.tick(this.regionPresence(), this.worldTime);
-    let boardChanged = false;
-    for (const flag of res.claimed) {
-      const from = this.regions.ownerAt(flag.region);
-      if (this.regions.setOwner(flag.region, flag.faction)) {
-        boardChanged = true;
-        out.push({ to: 'all', msg: { t: 'regionCapture', region: flag.region, faction: flag.faction, from } });
-      }
+    let winner = NO_FACTION, best = -1, tie = false;
+    for (const f of FACTIONS) {
+      const k = this.warKills[f.id] ?? 0;
+      if (k > best) { best = k; winner = f.id; tie = false; }
+      else if (k === best) tie = true;
     }
-    if (boardChanged) out.push({ to: 'all', msg: this.regionsSnapshot() });
-    this.flagAccum += dt;
-    if (res.claimed.length || res.defused.length || this.flagAccum >= FLAG_BROADCAST) {
-      this.flagAccum = 0;
-      out.push({ to: 'all', msg: this.flagsSnapshot() });
-    }
+    if (tie || best <= 0) winner = NO_FACTION;
+    if (winner !== NO_FACTION) this.warWins[winner]++;
+    out.push({ to: 'all', msg: { t: 'warEnd', winner, score: this.warKills.slice() } });
+    out.push({ to: 'all', msg: { t: 'notice', text: winner === NO_FACTION
+      ? '🕊️ The war ends in a DRAW.'
+      : `🏆 ${factionName(winner)} wins the war with ${best} kill${best === 1 ? '' : 's'}!` } });
+    this.warKills = new Array(FACTIONS.length).fill(0);
     return out;
+  }
+
+  /** War wins per faction id (the season scoreboard). */
+  private warWinCounts(): Record<number, number> {
+    const counts: Record<number, number> = {};
+    for (const f of FACTIONS) counts[f.id] = this.warWins[f.id] ?? 0;
+    return counts;
   }
 
   // --- Seasons (Phase 5) -----------------------------------------------------
@@ -1467,15 +1352,15 @@ export class GameServer {
     return { t: 'season', number: this.season.number, timeLeft: seasonTimeLeft(this.season) };
   }
 
-  /** Advance the season clock; at the deadline the faction holding the most
-   *  regions wins (a tie is a stalemate — no winner, fresh season either way).
+  /** Advance the season clock; at the deadline the faction with the most WAR
+   *  WINS takes the season (a tie is a stalemate — fresh season either way).
    *  Periodically broadcasts the clock for the HUD. */
   tickSeason(dt: number): Outbound[] {
     if (!fin(dt) || dt <= 0) return [];
     tickSeasonClock(this.season, dt);
     const out: Outbound[] = [];
     if (seasonExpired(this.season)) {
-      out.push(...this.endSeason(deadlineWinner(this.regions.counts())));
+      out.push(...this.endSeason(deadlineWinner(this.warWinCounts())));
       return out;
     }
     this.seasonAccum += dt;
@@ -1488,27 +1373,21 @@ export class GameServer {
 
   /**
    * End the current season and start the next: announce the winner (NO_FACTION =
-   * stalemate), award the "Seasons Won" badge via the shell callback, then RESET
-   * the war — the board back to 50/50 and every base (claim) cleared. Player
-   * inventories/accounts are untouched (kept across seasons).
+   * stalemate), award the "Seasons Won" badge via the shell callback, then reset
+   * the war scoreboard. Player inventories/accounts are untouched.
    */
   endSeason(winner: number): Outbound[] {
     const out: Outbound[] = [];
     const ended = this.season.number;
     this.onSeasonEnd?.(winner, ended); // shell persists badges to winning accounts
-    // Clear every base; tell clients to drop each claim (domes + indexes).
-    for (const c of this.claims.list()) out.push({ to: 'all', msg: { t: 'claimRemove', id: c.id } });
-    this.claims.clear();
-    // Reset the board + drop any flags + start the next season.
-    this.regions.reset();
-    this.flags.clear();
+    // Fresh season: war wins + kills reset; accounts/inventories are untouched.
+    this.warKills = new Array(FACTIONS.length).fill(0);
+    this.warWins = new Array(FACTIONS.length).fill(0);
     advanceSeason(this.season);
     this.seasonAccum = 0;
-    this.flagAccum = 0;
     out.push({ to: 'all', msg: { t: 'seasonEnd', winner, number: ended } });
-    out.push({ to: 'all', msg: this.regionsSnapshot() });
     out.push({ to: 'all', msg: this.seasonSnapshot() });
-    out.push({ to: 'all', msg: this.flagsSnapshot() });
+    out.push({ to: 'all', msg: this.warSnapshotMsg() });
     return out;
   }
 
@@ -1542,24 +1421,24 @@ export class GameServer {
   // --- Gadgets (Phase 8): server-authoritative effects -----------------------
 
   /**
-   * Apply a gadget's authoritative effect: AoE damage (frag/oil bomb), a
+   * Apply a gadget's authoritative effect: AoE damage (frag/oil bomb/C4), a
    * cosmetic broadcast (smoke / war horn), or a spy disguise. Cooldown + range
-   * are server-validated so a hacked client can't
-   * spam or blast from across the map. Other gadgets (C4/grapple/cover/sentry)
-   * route through existing paths (claimHit / edits) and never reach here.
+   * are server-validated so a hacked client can't spam or blast from across the
+   * map. Other gadgets (grapple/cover/sentry) route through existing paths
+   * (edits) and never reach here.
    */
   private handleGadget(p: ServerPlayer, item: number, x: number, y: number, z: number): Outbound[] {
     const def = gadgetOf(item);
     if (!def || p.dead) return [];
     const now = this.worldTime;
     switch (def.kind) {
-      case 'frag': case 'oil': case 'smoke': {
+      case 'frag': case 'oil': case 'smoke': case 'c4': {
         if (!fin(x, y, z)) return [];
         // The detonation must be within throw range of the thrower.
         if (Math.hypot(x - p.x, y - p.y, z - p.z) > RANGED_MAX_RANGE) return [];
         if (!p.gadgetCd.use(item, now)) return []; // cooldown
         const out: Outbound[] = [{ to: 'all', msg: { t: 'gadgetFx', kind: def.kind, x, y, z } }];
-        if (def.kind !== 'smoke') {
+        if (def.kind !== 'smoke') { // frag/oil/c4 all detonate
           out.push(...this.detonate(p, x, y, z,
             def.damage ?? 0, def.radius ?? 0, def.radius ?? 4));
         }
@@ -1629,6 +1508,8 @@ export class GameServer {
           const existing = this.edits.get(key);
           if (existing === undefined || existing === Block.Air) continue;
           if ((BLOCKS[existing]?.hardness ?? -1) < 0) continue;
+          // Vault blocks are blast-proof (dungeons can't be cracked open).
+          if (existing === Block.VaultBrick || existing === Block.VaultChest) continue;
           this.edits.set(key, Block.Air);
           out.push({ to: 'others', from: by.id, msg: { t: 'edit', x: bx, y: by2, z: bz, block: Block.Air } });
         }
@@ -1648,56 +1529,6 @@ export class GameServer {
   /** The opposing faction id (two-faction war). */
   private otherFactionId(faction: number): number {
     return faction === FACTIONS[0].id ? FACTIONS[1].id : FACTIONS[0].id;
-  }
-
-  // --- Land claims (M18 / M19) -----------------------------------------------
-
-  /** True if an enemy of the claim covering (x,z) is currently blocked by its
-   *  shield/grace (used to gate machine/turret/chest ops + edits). Own-faction
-   *  members are never blocked; a breached (down + ungraced) claim is open. */
-  private enemyShielded(p: ServerPlayer, x: number, z: number): boolean {
-    const c = this.claims.at(x, z);
-    // Owning the region the base sits in opens it (Phase 3), so a region-holder
-    // is never "shielded out" of an enemy base there.
-    return c !== undefined && !sameFaction(p.faction, c.faction) &&
-      claimProtected(c, this.worldTime) && !sameFaction(this.regions.ownerOf(x, z), p.faction);
-  }
-
-  /** A weapon hit drains an enemy claim's shield (M19 breaching). The client
-   *  reports the hit (like shipHit); the server caps it, requires the attacker
-   *  be near + enemy, and emits a breach event when the shield first drops. */
-  private handleClaimHit(p: ServerPlayer, x: number, y: number, z: number, amount: number): Outbound[] {
-    const c = this.claims.coreAt(x, y, z);
-    if (!c || p.dead || !fin(p.x, p.y, p.z, amount)) return [];
-    if (sameFaction(p.faction, c.faction)) return []; // can't shell your own shield
-    const dx = c.coreX + 0.5 - p.x, dy = c.coreY + 0.5 - p.y, dz = c.coreZ + 0.5 - p.z;
-    if (!(dx * dx + dy * dy + dz * dz <= RANGED_MAX_RANGE * RANGED_MAX_RANGE)) return [];
-    const wasUp = shieldUp(c);
-    const dmg = Math.max(0, Math.min(CLAIM_HIT_MAX, amount));
-    if (dmg <= 0) return [];
-    const downed = damageShield(c, dmg);
-    const out: Outbound[] = [{ to: 'all', msg: { t: 'claim', claim: c } }];
-    if (downed && wasUp) {
-      // The shield just cracked: announce the breach to everyone.
-      out.push({ to: 'all', msg: { t: 'breach', attacker: p.username, faction: p.faction, victim: c.faction } });
-      out.push({ to: 'all', msg: {
-        t: 'killfeed', killer: factionName(p.faction), victim: `${factionName(c.faction)}'s claim` } });
-    }
-    return out;
-  }
-
-  /** Advance every claim (regen vs oil drain + bleed) and broadcast a periodic
-   *  bulk refresh. The worldTime clock here also drives the grace period. */
-  tickClaims(dt: number): Outbound[] {
-    if (!fin(dt) || dt <= 0) return [];
-    this.worldTime += dt;
-    this.claims.tick(dt);
-    this.claimAccum += dt;
-    if (this.claimAccum < CLAIM_BROADCAST) return [];
-    this.claimAccum = 0;
-    const claims = this.claims.list();
-    if (!claims.length) return [];
-    return [{ to: 'all', msg: { t: 'claims', claims } }];
   }
 
   // --- Admin (server-console) operations ------------------------------------
@@ -1759,6 +1590,37 @@ export class GameServer {
     ];
   }
 
+  /** All map landmarks (surface structures + vault entrances), computed once
+   *  from the seed — for the admin `tpstruct` command. */
+  private landmarkCache?: { x: number; z: number; kind: string }[];
+  private landmarks(): { x: number; z: number; kind: string }[] {
+    if (!this.landmarkCache) {
+      this.landmarkCache = [
+        ...worldStructures(this.seed, this.terrain).map((s) => ({ x: s.x, z: s.z, kind: s.kind })),
+        ...worldVaults(this.seed, this.terrain).map((v) => ({ x: v.x, z: v.z, kind: 'vault' })),
+      ];
+    }
+    return this.landmarkCache;
+  }
+
+  /** The nearest landmark to a player (optionally filtered by kind), with a
+   *  standable Y on the surface. Null if none match (console `tpstruct`). */
+  nearestStructure(
+    id: number, kind?: string
+  ): { kind: string; x: number; y: number; z: number } | null {
+    const p = this.players.get(id);
+    if (!p) return null;
+    let best: { x: number; z: number; kind: string } | null = null;
+    let bestD = Infinity;
+    for (const s of this.landmarks()) {
+      if (kind && s.kind !== kind) continue;
+      const d = (s.x - p.x) ** 2 + (s.z - p.z) ** 2;
+      if (d < bestD) { bestD = d; best = s; }
+    }
+    if (!best) return null;
+    return { kind: best.kind, x: best.x, y: this.terrain.height(best.x, best.z) + 1, z: best.z };
+  }
+
   /** Teleport a player to an absolute position (console `tp`). */
   adminTeleport(id: number, x: number, y: number, z: number): Outbound[] {
     const p = this.players.get(id);
@@ -1772,8 +1634,7 @@ export class GameServer {
   }
 
   // --- War scheduling (admin console) ---------------------------------------
-  // Capture (gaining land on the war map) is only open during a war. These set
-  // the war window in worldTime seconds and broadcast the new clock to everyone.
+  // These set the war window in worldTime seconds and broadcast the new clock.
 
   /** Schedule a war to begin `delaySec` from now, lasting `durationSec`. */
   adminScheduleWar(delaySec: number, durationSec: number): Outbound[] {
@@ -1781,12 +1642,10 @@ export class GameServer {
     this.war = scheduleWar(fin(delaySec) ? delaySec : 0, dur, this.worldTime);
     this.warWasActive = this.isWarActive();
     this.warAccum = 0;
+    this.warKills = new Array(FACTIONS.length).fill(0); // fresh scoreboard
     const out: Outbound[] = [{ to: 'all', msg: this.warSnapshotMsg() }];
-    // A fresh war resets any stale meters so the front starts clean.
-    this.regions.clearMeters();
-    out.push({ to: 'all', msg: this.regionsSnapshot() });
     const banner = delaySec <= 0
-      ? '⚔️ WAR! Capture the regions now!'
+      ? '⚔️ WAR! The border is closing — fight!'
       : `⚔️ A war is scheduled — get ready!`;
     out.push({ to: 'all', msg: { t: 'notice', text: banner } });
     return out;
@@ -1800,10 +1659,9 @@ export class GameServer {
     this.war = newWar();
     this.warWasActive = false;
     this.warAccum = 0;
-    this.regions.clearMeters();
+    this.warKills = new Array(FACTIONS.length).fill(0);
     return [
       { to: 'all', msg: this.warSnapshotMsg() },
-      { to: 'all', msg: this.regionsSnapshot() },
       { to: 'all', msg: { t: 'notice', text: '🕊️ The war is over — peacetime.' } },
     ];
   }
@@ -1836,9 +1694,8 @@ export class GameServer {
 
   // --- Persistence ----------------------------------------------------------
   // The whole authoritative world (player-made changes) serialized to a plain
-  // JSON-able object the shell writes to disk and reloads on boot. Territory
-  // node control is intentionally NOT saved — it re-resolves from live player
-  // presence each tick — and dropped item entities are ephemeral.
+  // JSON-able object the shell writes to disk and reloads on boot. Dropped item
+  // entities are ephemeral (not saved).
 
   serialize(): WorldSave {
     return {
@@ -1849,11 +1706,10 @@ export class GameServer {
       chests: [...this.chests.entries()],
       machines: [...this.machines.entries()],
       turrets: [...this.turrets.entries()],
-      claims: this.claims.list(),
-      regions: this.regions.serialize(),
       season: this.season,
       war: this.war,
-      flags: this.flags.serialize(),
+      warWins: this.warWins.slice(),
+      factionXp: this.factionXp.slice(),
       vaults: [...this.vaults.entries()],
     };
   }
@@ -1914,12 +1770,11 @@ export class GameServer {
         }
       }
     }
-    if (Array.isArray(s.claims)) this.claims.load(s.claims as ClaimState[]);
-    this.regions.restore(s.regions);
     this.season = sanitizeSeason(s.season);
     this.war = sanitizeWar(s.war);
     this.warWasActive = this.isWarActive();
-    this.flags.restore(s.flags);
+    this.warWins = sanitizeFactionXp(s.warWins, FACTIONS.length);
+    this.factionXp = sanitizeFactionXp(s.factionXp, FACTIONS.length);
     return true;
   }
 
@@ -1952,11 +1807,12 @@ export interface WorldSave {
   chests: [string, (ItemStack | null)[]][];
   machines: [string, MachineState][];
   turrets: [string, TurretState][];
-  claims: ClaimState[];
-  regions?: RegionsSave;
   season?: SeasonState;
   war?: WarState;
-  flags?: import('../flags').Flag[];
+  /** War wins per faction id this season (the season scoreboard). */
+  warWins?: number[];
+  /** Shared faction XP pools (progression perks). */
+  factionXp?: number[];
   /** Vault boss HP + per-player openedBy ledgers (Milestone D). */
   vaults?: [string, VaultServerState][];
 }
@@ -1976,6 +1832,7 @@ function sanitizeSlots(raw: unknown[]): (ItemStack | null)[] {
       if (Number.isFinite(s.loaded)) stack.loaded = Math.max(0, Math.floor(s.loaded as number));
       if (Number.isFinite(s.damage)) stack.damage = Math.max(0, s.damage as number);
       if (Number.isFinite(s.xp)) stack.xp = Math.max(0, s.xp as number);
+      if (Number.isInteger(s.rune) && ITEMS[s.rune as number]) stack.rune = s.rune as number;
       out.push(stack);
     } else {
       out.push(null);

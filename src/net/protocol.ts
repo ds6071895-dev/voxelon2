@@ -5,7 +5,6 @@
 import type { ItemStack } from '../items';
 import type { MachineState, UpgradeAxis } from '../machines';
 import type { TurretState, TurretAxis } from '../turrets';
-import type { ClaimState } from '../claims';
 import type { GadgetKind } from '../gadgets';
 
 export const SERVER_PORT = 8080;
@@ -14,9 +13,9 @@ export const TRANSFORM_HZ = 20;    // client -> server transform sends
 export const WORLD_SEED = 1337;    // fixed shared seed (clients + server)
 export const WORLD_BORDER = 5000;  // square play area side length (centred on origin)
 export const WORLD_HALF = WORLD_BORDER / 2; // movement clamps to [-HALF, +HALF]
-// The HEARTLAND core: the inner square where society lives — claims, the war
-// region board, oil scoring and spawns are all core-only. Outside it lie the
-// WILDS: no claims, no shields, denser mobs — pure risk/reward frontier.
+// The HEARTLAND core: the inner square where society lives — spawns land here.
+// Outside it lie the WILDS: denser mobs, exclusive biomes — pure risk/reward
+// frontier.
 export const CORE_BORDER = 1000;
 export const CORE_HALF = CORE_BORDER / 2;
 /** Is a world position inside the Heartland core square? */
@@ -60,15 +59,6 @@ export interface PlayerInfo extends PlayerSnapshot {
 export interface ItemEntityInfo {
   eid: number; item: number; count: number;
   x: number; y: number; z: number;
-}
-
-/** A war flag on the wire: position, owning faction, the region it claims, and a
- *  live countdown (seconds left before it flips the region). */
-export interface FlagInfo {
-  faction: number;
-  x: number; y: number; z: number;
-  region: number;
-  secondsLeft: number;
 }
 
 export const PICKUP_RANGE = 2.0; // server-validated pickup distance
@@ -119,13 +109,6 @@ export type ClientMsg =
   | { t: 'turretClaim'; x: number; y: number; z: number }
   | { t: 'turretHit'; x: number; y: number; z: number; amount: number } // sabotage
   | { t: 'turretLoad'; x: number; y: number; z: number; item: number; count: number }
-  // Land claims (M18): Core placement is a normal edit; these manage the claim.
-  | { t: 'claimOpen'; x: number; y: number; z: number }
-  | { t: 'claimFeed'; x: number; y: number; z: number; count: number } // feed oil barrels
-  // Raiding (M19): a weapon hit drains an enemy claim's shield. Once the shield
-  // is down, breaking a stored container inside the claim raids it (handled on
-  // the normal `edit` path, server-side).
-  | { t: 'claimHit'; x: number; y: number; z: number; amount: number }
   // A rocket detonation point: the client fires + simulates the projectile and
   // reports where it burst. The server applies the (capped) splash damage to
   // enemies in range + broadcasts the crater, so rocket splash syncs to everyone
@@ -135,6 +118,11 @@ export type ClientMsg =
   // announcement — others keep seeing your old colors (a spy), but the server
   // treats you as your new faction. Max 2/season, locked in the final week.
   | { t: 'switchFaction'; faction: number }
+  // Progression: the client reports XP it earned from MOB kills (mobs are
+  // client-simulated). The server clamps the amount, adds it to the account's
+  // personal XP and the faction's shared pool. PvP-kill XP is awarded by the
+  // server itself (never reported).
+  | { t: 'xp'; amount: number }
   // Gadgets (Phase 8): server-authoritative gadget effects. `item` is the gadget
   // item id; the server derives the effect kind + params. (frag/oil/smoke use the
   // detonation point; horn/disguise ignore it; other kinds are client-handled.)
@@ -181,16 +169,17 @@ export type ServerMsg =
       t: 'welcome'; id: number; seed: number; username: string;
       players: PlayerInfo[]; edits: [string, number][]; items: ItemEntityInfo[];
       turrets: { x: number; y: number; z: number; state: TurretState }[];
-      claims: ClaimState[];
-      /** Region board: owner faction id per region index (teams/regions modules). */
-      regions: number[];
       /** Current season number + seconds left before the deadline (Phase 5). */
       season: { number: number; timeLeft: number };
-      /** War window: capture is only open while `active`; else a countdown to the
-       *  next scheduled war (`nextIn`), or all-zero for peacetime. */
-      war: { active: boolean; timeLeft: number; nextIn: number };
-      /** Active war flags (land-claim markers) with live countdowns. */
-      flags: FlagInfo[];
+      /** War window: the shrinking-border battle. While `active` the border is
+       *  closing (derive it from timeLeft+duration via warBorderAt); else a
+       *  countdown to the next scheduled war (`nextIn`), or all-zero peacetime.
+       *  `score` is each faction's kills in the current war; `wins` is each
+       *  faction's war wins this season (the season winner). */
+      war: { active: boolean; timeLeft: number; nextIn: number; duration: number;
+        score: number[]; wins: number[] };
+      /** Faction XP pools (progression): shared XP per faction id. */
+      factionXp: number[];
       /** Saved per-account state to restore (inventory/hotbar); undefined for new accounts. */
       state?: Record<string, unknown>;
     }
@@ -211,21 +200,15 @@ export type ServerMsg =
   // Turrets.
   | { t: 'turret'; x: number; y: number; z: number; state: TurretState }
   | { t: 'turretFire'; x: number; y: number; z: number; tx: number; ty: number; tz: number }
-  // Region board (Phase 1/2): owner faction id per region + capture meters
-  // (which faction is filling each region's control point + fill fraction 0..1).
-  | { t: 'regions'; owners: number[]; capFaction: number[]; capProgress: number[] }
-  // A region flipped owners (Phase 2) — drives the "WE CAPTURED X!" banner.
-  | { t: 'regionCapture'; region: number; faction: number; from: number }
-  // A faction took an enemy CAPITAL = instant win (Phase 2; Phase 5 = full season).
-  | { t: 'regionWin'; faction: number }
   // Season clock (Phase 5): number + seconds left (periodic HUD broadcast).
   | { t: 'season'; number: number; timeLeft: number }
-  // War window: whether capture is open now + seconds left (active) / seconds
-  // until the next scheduled war (pending). Admin-scheduled from the console.
-  | { t: 'war'; active: boolean; timeLeft: number; nextIn: number }
-  // War flags (the land-claim mechanic): every active flag with its live
-  // countdown. Shown to EVERYONE as a waypoint; if it survives, its region flips.
-  | { t: 'flags'; flags: FlagInfo[] }
+  // War clock: the shrinking-border battle. `score` = kills per faction in the
+  // current war; `wins` = war wins per faction this season. Broadcast
+  // periodically + on every peace<->war transition. Admin-scheduled.
+  | { t: 'war'; active: boolean; timeLeft: number; nextIn: number; duration: number;
+      score: number[]; wins: number[] }
+  // A war just ended: the most-kills faction wins it (NO_FACTION = draw).
+  | { t: 'warEnd'; winner: number; score: number[] }
   // Private confirmation of a secret faction switch (only to the defector).
   | { t: 'factionSwitched'; faction: number; remaining: number }
   // Gadget visual effect to play everywhere (frag/oil blast, smoke cloud).
@@ -234,15 +217,13 @@ export type ServerMsg =
   // (server worldTime). Broadcast to OTHERS; the spy sees themselves normally.
   | { t: 'disguised'; id: number; faction: number; until: number }
   // A season ended — winner faction (NO_FACTION = stalemate) + the season that
-  // just finished. Clients clear bases + flash a banner; the board is reset.
+  // just finished. Clients flash a banner; war scores reset.
   | { t: 'seasonEnd'; winner: number; number: number }
-  // Land claims (M18): one claim's authoritative state, a periodic bulk refresh,
-  // and removals (Core broken / overlap).
-  | { t: 'claim'; claim: ClaimState }
-  | { t: 'claims'; claims: ClaimState[] }
-  | { t: 'claimRemove'; id: number }
-  // Raid feed (M19): "RED breached BLUE's claim".
-  | { t: 'breach'; attacker: string; faction: number; victim: number }
+  // Progression: the server granted YOU personal XP (PvP kill / validated mob
+  // report echo) — the client adds it to its local total and toasts it.
+  | { t: 'xpAward'; amount: number; reason: string }
+  // Faction XP pools changed (shared progression; drives faction perks).
+  | { t: 'fxp'; xp: number[] }
   // Admin (server console): a player's gamemode changed; teleport snaps a player.
   | { t: 'gamemode'; id: number; mode: GameMode }
   | { t: 'teleport'; x: number; y: number; z: number }

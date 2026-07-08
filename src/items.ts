@@ -76,6 +76,11 @@ export const enum Item {
   // Healing consumables: right-click to trigger a burst of accelerated regen.
   Bandage = 163,
   Medkit = 164,
+  // Runes: exploration-only armor socketables (never craftable — loot them).
+  RuneOfIron = 165,
+  RuneOfSwiftness = 166,
+  RuneOfFortune = 167,
+  RuneOfFocus = 168,
 }
 
 export interface ToolInfo {
@@ -171,6 +176,8 @@ export interface ItemStack {
   xp?: number;
   /** Rounds currently in a gun's magazine (guns only; undefined = full). */
   loaded?: number;
+  /** Socketed rune item id (worn armor only; one rune per piece). */
+  rune?: number;
 }
 
 // Per-piece armor leveling: wearing a piece through hits levels it up, adding
@@ -275,8 +282,6 @@ export const ITEMS: Record<number, ItemInfo> = {
   // Warfare (M14): turret block + cannonball ammo.
   [Block.Turret]: blockItem(Block.Turret),
   [Item.Cannonball]: pureItem('Cannonball', Tile.Cannonball),
-  // Factions (M18): claim Core block.
-  [Block.Core]: blockItem(Block.Core),
   // Personal respawn point block (right-click to set spawn).
   [Block.RespawnBeacon]: blockItem(Block.RespawnBeacon),
   // Waypoint Totem (B4): fast-travel anchor (right-click to attune).
@@ -373,13 +378,16 @@ export const ITEMS: Record<number, ItemInfo> = {
       pellets: 7, spread: 0.13 }),
   // SMG — spray-and-pray: blistering auto fire, low per-hit damage, big mag,
   // a touch of bloom and short reach. A small ADS zoom to tighten sprays.
+  // (0.08s cooldown keeps its DPS just ABOVE the rifle's but only up close.)
   [Item.SMG]: gunItem('SMG', Tile.SMG,
-    { damage: 3, ammo: Item.Bullet, mag: 35, cooldown: 0.07, auto: true, speed: 95, range: 38,
+    { damage: 3, ammo: Item.Bullet, mag: 35, cooldown: 0.08, auto: true, speed: 95, range: 38,
       spread: 0.035, zoom: 1.2 }),
   // Sniper — pinpoint hitscan-feel: huge damage, dead-accurate, long reach, but
-  // a long recovery between shots and a tiny mag. A big scope zoom.
+  // a long recovery between shots and a tiny mag. A big scope zoom. 18 damage =
+  // NEVER a one-shot body kill on a full-health player (20 HP) — hurts, not
+  // deletes.
   [Item.Sniper]: gunItem('Sniper', Tile.Sniper,
-    { damage: 24, ammo: Item.Bullet, mag: 5, cooldown: 1.35, auto: false, speed: 150, range: 80,
+    { damage: 18, ammo: Item.Bullet, mag: 5, cooldown: 1.35, auto: false, speed: 150, range: 80,
       zoom: 4 }),
   // Burst Rifle — disciplined 3-round bursts; rewards aim with a quick clustered
   // hit then a beat of downtime. A medium marksman zoom.
@@ -415,6 +423,12 @@ export const ITEMS: Record<number, ItemInfo> = {
   // Bandage = quick minor patch; Medkit = a strong, near-full heal.
   [Item.Bandage]: healItem('Bandage', Tile.BandageSprite, { duration: 5, interval: 0.6 }),
   [Item.Medkit]: healItem('Medkit', Tile.MedkitSprite, { duration: 8, interval: 0.3 }),
+
+  // Runes (loot-only): right-click to socket into a worn armor piece.
+  [Item.RuneOfIron]: pureItem('Rune of Iron', Tile.RuneIron),
+  [Item.RuneOfSwiftness]: pureItem('Rune of Swiftness', Tile.RuneSwift),
+  [Item.RuneOfFortune]: pureItem('Rune of Fortune', Tile.RuneFortune),
+  [Item.RuneOfFocus]: pureItem('Rune of Focus', Tile.RuneFocus),
 };
 
 /**

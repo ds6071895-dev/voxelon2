@@ -16,7 +16,7 @@ import {
   transferHeart,
 } from '../src/hearts';
 import { Chunk } from '../src/chunk';
-import { matchGrid, craftResult, consumeCraft } from '../src/crafting';
+import { matchGrid, craftResult, consumeCraft, RECIPES } from '../src/crafting';
 import { Furnaces, SMELT } from '../src/furnace';
 import { Inventory, CRAFT_START, ARMOR_START } from '../src/inventory';
 import {
@@ -58,22 +58,25 @@ import {
   MAX_SWITCHES_PER_SEASON, canSwitchFaction, switchesRemaining, otherFaction,
 } from '../src/teams';
 import {
-  GRID, REGION_COUNT, FACTION_A, FACTION_B, Regions, regionOf, regionIndex,
-  regionBounds, regionCenter, regionCounts, neighbors4, initialOwners, capitalOf, capitalFaction,
-  connectedRegions, canCapture, capitalCapturable, DISCONNECT_SECONDS,
-} from '../src/regions';
-import {
   SEASON_LENGTH, newSeason, seasonTimeLeft, seasonExpired, tickSeasonClock,
   advanceSeason, deadlineWinner, sanitizeSeason,
 } from '../src/season';
 import {
   newWar, warActive, warPending, warTimeLeft, warStartsIn, scheduleWar,
-  warSnapshot, sanitizeWar,
+  warSnapshot, sanitizeWar, warBorderAt, warDuration,
+  WAR_MIN_BORDER, WAR_SHRINK_PORTION,
 } from '../src/war';
+import {
+  XP_MOB, XP_PLAYER_KILL, XP_REPORT_CAP, levelFor, xpForLevel, levelProgress,
+  newProgress, totalPointsFor, pointsAvailable, canBuy, buyRank, personalBuffs,
+  sanitizeProgress, factionLevelFor, factionPerks, sanitizeFactionXp, TRACKS,
+} from '../src/progress';
 import {
   GADGETS, isGadget, gadgetOf, GadgetCooldowns, falloffDamage,
 } from '../src/gadgets';
 import { itemDescription } from '../src/itemdesc';
+import { RUNES, isRune, runeOf, runeBonuses } from '../src/runes';
+import { Inventory as RuneInv } from '../src/inventory';
 import { Accounts, validUsername } from '../src/net/accounts';
 import {
   structureKindAt, structureStamp, structureChestTier, worldStructures,
@@ -84,16 +87,14 @@ import {
   vaultChestAt, vaultLoot, vaultLootable, vaultStamp, vaultTier, worldVaults,
 } from '../src/vaults';
 import { LOOT_TABLES, chestLoot, chestLootSlots } from '../src/loot';
-import {
-  Claims, GRACE_PERIOD, MAX_SHIELD_HP, OIL_PER_BARREL, chunkOf, claimChunkKeys,
-  claimProtected, damageShield, feedOil, inGrace, newClaim, sanitizeClaim,
-  shieldUp, tickClaim,
-} from '../src/claims';
 import { mulberry32 } from '../src/noise';
 import { AUTOMINER_ORES, Terrain, SEA_LEVEL } from '../src/terrain';
 import { Biome } from '../src/biomes';
 import { World } from '../src/world';
 import type { Atlas } from '../src/textures';
+
+const FACTION_A = FACTIONS[0].id;
+const FACTION_B = FACTIONS[1].id;
 
 let failures = 0;
 function check(name: string, cond: boolean, detail = ''): void {
@@ -1134,8 +1135,9 @@ check('furnace smelts ore/sand/log but not removed foods',
   check('shotgun sprays multiple pellets', (ITEMS[Item.Shotgun].gun?.pellets ?? 0) >= 5);
   check('smg is full-auto', ITEMS[Item.SMG].gun?.auto === true);
   check('burst rifle fires a 3-round burst', (ITEMS[Item.BurstRifle].gun?.burst ?? 0) === 3);
-  check('sniper hits hard but stays under the server damage cap',
-    (ITEMS[Item.Sniper].gun?.damage ?? 0) > 18 &&
+  check('sniper hits hard but never one-shots a full-health player (20 HP)',
+    (ITEMS[Item.Sniper].gun?.damage ?? 0) >= 15 &&
+    (ITEMS[Item.Sniper].gun?.damage ?? 99) < 20 &&
     (ITEMS[Item.Sniper].gun?.damage ?? 99) <= RANGED_MAX_DAMAGE);
   check('every gun draws from a real ammo reserve',
     [Item.Shotgun, Item.SMG, Item.Sniper, Item.BurstRifle].every(
@@ -1907,222 +1909,7 @@ check('furnace smelts ore/sand/log but not removed foods',
     s.tickTurrets(2).some((o) => o.msg.t === 'turretFire'));
 }
 
-// --- Region board (Phase 1): grid + 50/50 + capitals + adjacency -------------
-{
-  // Coordinate round-trip: a region's centre maps back to that region.
-  let centreOk = true;
-  for (let i = 0; i < REGION_COUNT; i++) {
-    const c = regionCenter(i);
-    if (regionOf(c.x, c.z) !== i) { centreOk = false; break; }
-  }
-  check('regionCenter maps back to its own region for all regions', centreOk);
-  check('the grid is GRID×GRID regions', REGION_COUNT === GRID * GRID);
-  check('out-of-board coords clamp into the board (no negative/oob index)',
-    regionOf(-99999, -99999) === 0 &&
-    regionOf(99999, 99999) === REGION_COUNT - 1);
-
-  // Neighbour counts: a corner has 2, an edge 3, an interior region 4.
-  const corner = regionIndex(0, 0);
-  const edge = regionIndex(0, 2);
-  const interior = regionIndex(2, 2);
-  check('neighbors4 gives 2/3/4 for corner/edge/interior',
-    neighbors4(corner).length === 2 && neighbors4(edge).length === 3 &&
-    neighbors4(interior).length === 4);
-
-  // 50/50 opening: left half faction A, right half faction B; no neutrals.
-  const owners = initialOwners();
-  const oc = regionCounts(owners);
-  check('the opening board splits 50/50 with no neutrals',
-    oc[FACTION_A] === REGION_COUNT / 2 && oc[FACTION_B] === REGION_COUNT / 2);
-
-  // Capitals sit on opposite far edges, each owned by its faction at start.
-  check('capitals are on opposite far edges, owned at start',
-    capitalOf(FACTION_A) !== capitalOf(FACTION_B) &&
-    owners[capitalOf(FACTION_A)] === FACTION_A &&
-    owners[capitalOf(FACTION_B)] === FACTION_B &&
-    capitalFaction(capitalOf(FACTION_A)) === FACTION_A);
-
-  // Connectivity: at the opening, every owned region is supplied by its capital.
-  check('all opening regions connect to their capital',
-    connectedRegions(owners, FACTION_A).size === REGION_COUNT / 2 &&
-    connectedRegions(owners, FACTION_B).size === REGION_COUNT / 2);
-
-  // Adjacency capture: A may take a frontline region touching its land, but NOT
-  // leapfrog to a region deep in B's half.
-  const frontA = regionIndex(GRID / 2, 2);      // B-owned, touches A's col 2
-  const deepB = regionIndex(GRID - 1, 0);       // B-owned, far from A
-  check('a faction may capture a region adjacent to its own land',
-    canCapture(owners, FACTION_A, frontA));
-  check('a faction may NOT leapfrog to a non-adjacent enemy region',
-    !canCapture(owners, FACTION_A, deepB));
-  check('a faction cannot "capture" land it already owns',
-    !canCapture(owners, FACTION_A, regionIndex(0, 0)));
-
-  // Capital is only capturable as a last stand: not while the defender holds
-  // other land, yes once everything else is gone.
-  check('a capital is not capturable while its faction holds other land',
-    !capitalCapturable(owners, FACTION_B));
-  const stripped = owners.slice();
-  for (let i = 0; i < REGION_COUNT; i++) if (stripped[i] === FACTION_B && i !== capitalOf(FACTION_B)) stripped[i] = FACTION_A;
-  check('a capital becomes capturable once its faction holds only the capital',
-    capitalCapturable(stripped, FACTION_B));
-
-  // Region store: ownership get/set + serialize round-trip + fail-closed restore.
-  const reg = new Regions();
-  check('a fresh Regions store is the 50/50 opening board',
-    reg.ownerAt(capitalOf(FACTION_A)) === FACTION_A && reg.counts()[FACTION_B] === REGION_COUNT / 2);
-  check('setOwner reports + applies a real change only',
-    reg.setOwner(frontA, FACTION_A) === true && reg.ownerAt(frontA) === FACTION_A &&
-    reg.setOwner(frontA, FACTION_A) === false);
-  const reg2 = new Regions();
-  reg2.restore(reg.serialize());
-  check('a region board survives a serialize round-trip',
-    reg2.ownerAt(frontA) === FACTION_A);
-  const reg3 = new Regions();
-  reg3.restore({ owners: [1, 2, 3] as unknown as number[] }); // wrong length -> opening board
-  check('restore fail-closes to the opening board on a bad owner array',
-    reg3.counts()[FACTION_A] === REGION_COUNT / 2);
-}
-
-// --- Region capture (Phase 2): control points + tug-of-war + win -------------
-{
-  const at = (f: number, i: number) => {
-    const c = regionCenter(i);
-    return { faction: f, x: c.x, z: c.z, dead: false };
-  };
-  const frontA = regionIndex(GRID / 2, 2);   // B-owned, on the front, adjacent to A
-  const deepB = regionIndex(GRID - 1, 0);     // B-owned, far from A
-
-  // A lone eligible attacker standing on the control point flips the region.
-  const reg = new Regions();
-  let flipped = false;
-  for (let t = 0; t < 20 && !flipped; t++) {
-    if (reg.tick([at(FACTION_A, frontA)], 1).captured.some((e) => e.region === frontA)) flipped = true;
-  }
-  check('a lone attacker captures an adjacent enemy region', flipped && reg.ownerAt(frontA) === FACTION_A);
-
-  // ...but cannot capture a non-adjacent enemy region (no leapfrog), even camped.
-  const reg2 = new Regions();
-  for (let t = 0; t < 20; t++) reg2.tick([at(FACTION_A, deepB)], 1);
-  check('a non-adjacent enemy region cannot be captured while camped', reg2.ownerAt(deepB) === FACTION_B);
-
-  // Equal defenders hold the region (tug-of-war: ties go to the defender).
-  const reg3 = new Regions();
-  for (let t = 0; t < 20; t++) reg3.tick([at(FACTION_A, frontA), at(FACTION_B, frontA)], 1);
-  check('equal defenders hold the region (defender wins ties)', reg3.ownerAt(frontA) === FACTION_B);
-
-  // A neutral region contested by BOTH factions flips to neither.
-  const reg4 = new Regions();
-  reg4.setOwner(frontA, NO_FACTION);
-  for (let t = 0; t < 20; t++) reg4.tick([at(FACTION_A, frontA), at(FACTION_B, frontA)], 1);
-  check('a region contested by both factions flips to neither', reg4.ownerAt(frontA) === NO_FACTION);
-
-  // A region cut off from its capital drifts neutral after the decay window.
-  const reg5 = new Regions();
-  const iso = regionIndex(GRID - 1, GRID - 1); // A pocket deep in B territory
-  reg5.setOwner(iso, FACTION_A);
-  let neutralized = false;
-  for (let t = 0; t < DISCONNECT_SECONDS + 2 && !neutralized; t++) {
-    if (reg5.tick([], 1).neutralized.includes(iso)) neutralized = true;
-  }
-  check('a region cut off from its capital drifts neutral', neutralized && reg5.ownerAt(iso) === NO_FACTION);
-
-  // Taking the LAST enemy capital wins the war (instant win).
-  const reg6 = new Regions();
-  const capB = capitalOf(FACTION_B);
-  for (let i = 0; i < REGION_COUNT; i++) if (i !== capB) reg6.setOwner(i, FACTION_A);
-  let winner = NO_FACTION;
-  for (let t = 0; t < 40 && winner === NO_FACTION; t++) {
-    const r = reg6.tick([at(FACTION_A, capB)], 1);
-    if (r.winner !== NO_FACTION) winner = r.winner;
-  }
-  check('taking the last enemy capital wins the war', winner === FACTION_A);
-
-  // Capture meters survive a server->client sync round-trip.
-  const reg7 = new Regions();
-  reg7.tick([at(FACTION_A, frontA)], 3); // partial fill
-  const meters = reg7.meters();
-  const reg8 = new Regions();
-  reg8.setMeters(meters);
-  const m2 = reg8.meters();
-  check('capture meters survive a setMeters round-trip',
-    m2.faction[frontA] === FACTION_A && meters.progress[frontA] > 0 &&
-    Math.abs(m2.progress[frontA] - meters.progress[frontA]) < 0.05);
-
-  // Server wiring: killing an enemy plants a flag that captures the region if it survives.
-  const srv = new GameServer(1337, mulberry32(3));
-  srv.addPlayer(1, { username: 'A', faction: FACTION_A });
-  srv.addPlayer(2, { username: 'B', faction: FACTION_B });
-  srv.adminStartWar(600); // capture only happens during a war
-  const wc = regionCenter(frontA);
-  srv.handle(1, { t: 'xform', x: wc.x, y: 70, z: wc.z, yaw: Math.PI, pitch: 0 });
-  srv.handle(2, { t: 'xform', x: wc.x, y: 70, z: wc.z + 2, yaw: 0, pitch: 0 });
-  srv.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 }); // kill B to plant flag
-  let srvCap = false;
-  for (let t = 0; t < 125 && !srvCap; t++) {
-    srv.tickClaims(1);
-    const out = srv.tickFlags(1);
-    srv.tickRegions(1);
-    if (out.some((o) => o.msg.t === 'regionCapture')) srvCap = true;
-  }
-  check('the server captures a region from live player presence', srvCap);
-  // The welcome carries the opening region board.
-  const w = srv.addPlayer(3).find((o) => o.msg.t === 'welcome')!.msg as { regions: number[] };
-  check('the welcome carries the region board', Array.isArray(w.regions) && w.regions.length === REGION_COUNT);
-}
-
-// --- Bases & shields rework (Phase 3): owned-territory + region raids ---------
-{
-  const g = new GameServer(1337, mulberry32(13));
-  g.addPlayer(1); // faction A (0)
-  g.addPlayer(2); // faction B (1)
-  // A owns a left-half region; B owns a right-half one.
-  const aReg = regionIndex(1, 1), ac = regionCenter(aReg);
-  // B's base sits on the FRONTLINE (col 3) so A can actually capture that region.
-  const bReg = regionIndex(GRID / 2, 1), bc = regionCenter(bReg);
-
-  // A founds a base inside its own region.
-  g.handle(1, { t: 'xform', x: ac.x, y: 70, z: ac.z, yaw: 0, pitch: 0 });
-  const founded = g.handle(1, { t: 'edit', x: Math.floor(ac.x), y: 69, z: Math.floor(ac.z), block: Block.Core });
-  check('a base Core in owned territory founds a claim', founded.some((o) => o.msg.t === 'claim'));
-
-  // A cannot found a base in enemy/neutral territory — rejected with a notice.
-  g.handle(1, { t: 'xform', x: bc.x, y: 70, z: bc.z, yaw: 0, pitch: 0 });
-  const denied = g.handle(1, { t: 'edit', x: Math.floor(bc.x), y: 69, z: Math.floor(bc.z), block: Block.Core });
-  check('a base Core outside owned territory is rejected with a notice',
-    !denied.some((o) => o.msg.t === 'claim') && denied.some((o) => o.msg.t === 'notice'));
-
-  // B founds a base in its OWN region, with a stored block inside the claim.
-  g.handle(2, { t: 'xform', x: bc.x, y: 70, z: bc.z, yaw: 0, pitch: 0 });
-  const bBase = g.handle(2, { t: 'edit', x: Math.floor(bc.x), y: 69, z: Math.floor(bc.z), block: Block.Core });
-  check('B founds a base in its own region', bBase.some((o) => o.msg.t === 'claim'));
-  const lootX = Math.floor(bc.x) + 1, lootY = 69, lootZ = Math.floor(bc.z);
-  g.handle(2, { t: 'edit', x: lootX, y: lootY, z: lootZ, block: Block.Stone });
-  g.handle(2, { t: 'xform', x: 0, y: 70, z: 0, yaw: 0, pitch: 0 }); // leave so B doesn't defend
-
-  // While the shield is up AND A doesn't own the region, A can't touch the base.
-  g.handle(1, { t: 'xform', x: bc.x, y: 70, z: bc.z, yaw: Math.PI, pitch: 0 });
-  const beforeCapture = g.handle(1, { t: 'edit', x: lootX, y: lootY, z: lootZ, block: Block.Air });
-  check('a shielded enemy base is safe from a faction that does not own the region',
-    beforeCapture.length === 0);
-
-  // A captures the region; now owning it opens the base to a raid (shield up).
-  g.handle(2, { t: 'xform', x: bc.x, y: 70, z: bc.z + 2, yaw: 0, pitch: 0 }); // move B back to base region
-  g.adminStartWar(600); // capture only happens during a war
-  g.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 }); // kill B to plant flag
-  let captured = false;
-  for (let t = 0; t < 125 && !captured; t++) {
-    g.tickClaims(1);
-    const out = g.tickFlags(1);
-    g.tickRegions(1);
-    if (out.some((o) => o.msg.t === 'regionCapture')) captured = true;
-  }
-  const raided = g.handle(1, { t: 'edit', x: lootX, y: lootY, z: lootZ, block: Block.Air });
-  check('owning the region opens an enemy base to a raid even with the shield up',
-    captured && raided.some((o) => o.msg.t === 'edit'));
-}
-
-// --- Seasons (Phase 5): clock + deadline/instant win + reset + badge ----------
+// --- Seasons (Phase 5): clock + deadline from WAR WINS + reset + badge --------
 {
   const hash: (p: string, s: string) => string = (p, s) => `${s}:${p}`;
 
@@ -2137,9 +1924,9 @@ check('furnace smelts ore/sand/log but not removed foods',
   check('advanceSeason bumps the number + resets the clock', s.number === 2 && s.elapsed === 0);
   check('sanitizeSeason fail-closes junk to season #1',
     sanitizeSeason(null).number === 1 && sanitizeSeason({ number: -3, elapsed: -9 }).number === 1);
-  check('deadlineWinner is the region leader, stalemate on a tie',
-    deadlineWinner({ 0: 19, 1: 17 }) === FACTION_A &&
-    deadlineWinner({ 0: 18, 1: 18 }) === NO_FACTION &&
+  check('deadlineWinner is the war-wins leader, stalemate on a tie',
+    deadlineWinner({ 0: 3, 1: 1 }) === FACTION_A &&
+    deadlineWinner({ 0: 2, 1: 2 }) === NO_FACTION &&
     deadlineWinner({ 0: 0, 1: 0 }) === NO_FACTION);
 
   // Accounts: the "Seasons Won" badge goes to exactly the winning faction.
@@ -2160,43 +1947,36 @@ check('furnace smelts ore/sand/log but not removed foods',
   check('the welcome carries the season clock + the player badge',
     wel.season.number === 1 && wel.season.timeLeft > 0 && wel.players[0].seasonsWon === 3);
 
-  // Server deadline: the region leader wins, a seasonEnd fires, board resets 50/50.
+  // Server deadline: the faction with more WAR WINS takes the season.
   const gd = new GameServer(1337, mulberry32(7));
+  gd.addPlayer(1, { username: 'A', faction: FACTION_A });
+  gd.addPlayer(2, { username: 'B', faction: FACTION_B });
   let dWinner = -2, dNum = 0;
   gd.onSeasonEnd = (w, n) => { dWinner = w; dNum = n; };
-  const tilt = regionCenter(regionIndex(GRID - 2, 1)); // flip one B region to A
-  gd.setRegionOwner(tilt.x, tilt.z, FACTION_A);
+  // Faction A wins one war: a kill during the war, then the clock expires.
+  gd.adminStartWar(60);
+  gd.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: Math.PI, pitch: 0 });
+  gd.handle(2, { t: 'xform', x: 0, y: 70, z: 2, yaw: 0, pitch: 0 });
+  gd.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 });
+  const endOut = gd.tickWar(61); // the war expires -> resolved by kills
+  check('a finished war resolves to the most-kills faction (warEnd)',
+    endOut.some((o) => o.msg.t === 'warEnd' &&
+      (o.msg as { winner: number }).winner === FACTION_A));
   const de = gd.tickSeason(SEASON_LENGTH + 1);
-  const boardAfter = de.find((o) => o.msg.t === 'regions')!.msg as { owners: number[] };
-  check('the season ends at the deadline → winner + reset to 50/50',
-    de.some((o) => o.msg.t === 'seasonEnd') && dWinner === FACTION_A && dNum === 1 &&
-    boardAfter.owners.filter((o) => o === FACTION_A).length === REGION_COUNT / 2);
+  check('the season ends at the deadline → the war-wins leader takes it',
+    de.some((o) => o.msg.t === 'seasonEnd') && dWinner === FACTION_A && dNum === 1);
+  const wAfter = gd.addPlayer(3).find((o) => o.msg.t === 'welcome')!.msg as
+    { war: { wins: number[] } };
+  check('war wins reset with the new season',
+    wAfter.war.wins.every((n) => n === 0));
 
-  // Capturing the enemy capital no longer ends the season instantly (no instant knockout).
-  const gi = new GameServer(1337, mulberry32(9));
-  gi.addPlayer(1, { username: 'A', faction: FACTION_A });
-  gi.addPlayer(2, { username: 'B', faction: FACTION_B });
-  let iWinner = -2;
-  gi.onSeasonEnd = (w) => { iWinner = w; };
-  const capB = capitalOf(FACTION_B);
-  for (let i = 0; i < REGION_COUNT; i++) {
-    if (i !== capB) { const c = regionCenter(i); gi.setRegionOwner(c.x, c.z, FACTION_A); }
-  }
-  const cc = regionCenter(capB);
-  gi.handle(1, { t: 'xform', x: cc.x, y: 70, z: cc.z, yaw: Math.PI, pitch: 0 });
-  gi.handle(2, { t: 'xform', x: cc.x, y: 70, z: cc.z + 2, yaw: 0, pitch: 0 });
-  gi.adminStartWar(600); // capture only happens during a war
-  gi.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 }); // kill B to plant flag
-  let instantEnd = false;
-  for (let t = 0; t < 125 && !instantEnd; t++) {
-    gi.tickClaims(1);
-    const out = gi.tickFlags(1);
-    const outReg = gi.tickRegions(1);
-    if (out.some((o) => o.msg.t === 'seasonEnd') || outReg.some((o) => o.msg.t === 'seasonEnd')) {
-      instantEnd = true;
-    }
-  }
-  check('taking the enemy capital does not end the season instantly', !instantEnd && iWinner === -2);
+  // A drawn war (no kills) awards no win.
+  const gt = new GameServer(1337, mulberry32(8));
+  gt.adminStartWar(30);
+  const drawOut = gt.tickWar(31);
+  check('a kill-less war ends in a draw (no faction win)',
+    drawOut.some((o) => o.msg.t === 'warEnd' &&
+      (o.msg as { winner: number }).winner === NO_FACTION));
 
   // A season survives a serialize round-trip.
   const gp = new GameServer(1337, mulberry32(2));
@@ -2208,12 +1988,11 @@ check('furnace smelts ore/sand/log but not removed foods',
     Math.abs(rs.timeLeft - (SEASON_LENGTH - 12345)) < 1);
 }
 
-// --- War windows: pure schedule maths + capture only during a war ------------
+// --- WAR: shrinking-border battle royale ---------------------------------------
 {
-  // Pure helpers: a fresh state is perpetual peace.
+  // Pure schedule maths: a fresh state is perpetual peace.
   check('newWar is peacetime (not active, not pending)',
     !warActive(newWar(), 0) && !warPending(newWar(), 0));
-  // Scheduled-in-the-future war: pending now, active after it starts, over after.
   const w = scheduleWar(60, 120, 1000); // starts at 1060, ends at 1180
   check('scheduleWar sets the right window', w.start === 1060 && w.end === 1180);
   check('a future war is pending (not yet active)',
@@ -2222,49 +2001,86 @@ check('furnace smelts ore/sand/log but not removed foods',
     warActive(w, 1100) && warTimeLeft(w, 1100) === 80 && !warPending(w, 1100));
   check('a war is over after its end', !warActive(w, 1200) && warStartsIn(w, 1200) === 0);
   const snap = warSnapshot(w, 1100);
-  check('warSnapshot is clock-relative', snap.active && snap.timeLeft === 80 && snap.nextIn === 0);
+  check('warSnapshot is clock-relative + carries the duration',
+    snap.active && snap.timeLeft === 80 && snap.nextIn === 0 && snap.duration === 120);
   check('sanitizeWar fail-closes junk to peace',
     sanitizeWar(null).start === 0 && sanitizeWar({ start: -1, end: 5 }).start === 0);
+  check('warDuration reads the window length', warDuration(w) === 120 && warDuration(newWar()) === 0);
 
-  // Server gating: capturing land is LOCKED in peacetime, OPEN during a war.
+  // The border shrink curve: full at the start, min at/after the shrink portion,
+  // strictly between in the middle, and full-size with no war at all.
+  const shrinkEnd = 120 * WAR_SHRINK_PORTION;
+  check('warBorderAt: full at start, WAR_MIN_BORDER once the shrink completes',
+    warBorderAt(120, 120, 5000) === 5000 &&
+    warBorderAt(120 - shrinkEnd, 120, 5000) === WAR_MIN_BORDER &&
+    warBorderAt(0, 120, 5000) === WAR_MIN_BORDER);
+  const mid = warBorderAt(120 - shrinkEnd / 2, 120, 5000);
+  check('warBorderAt is between full and min mid-shrink',
+    mid < 5000 && mid > WAR_MIN_BORDER);
+  check('warBorderAt with no war (0 duration) is the full size',
+    warBorderAt(0, 0, 5000) === 5000);
+
+  // Server: the border clamps movement authoritatively during a war.
   const s = new GameServer(1337, mulberry32(200));
   s.addPlayer(1, { username: 'A', faction: FACTION_A });
   s.addPlayer(2, { username: 'B', faction: FACTION_B });
-  const tgt = regionIndex(GRID / 2, 0); // first enemy (B) region on the frontline
-  const c = regionCenter(tgt);
-  s.handle(1, { t: 'xform', x: c.x, y: 70, z: c.z, yaw: Math.PI, pitch: 0 });
-  s.handle(2, { t: 'xform', x: c.x, y: 70, z: c.z + 2, yaw: 0, pitch: 0 });
-  const ownerOf = (i: number): number =>
-    (s.regionsSnapshot() as unknown as { owners: number[] }).owners[i];
+  check('peacetime border is the full world', s.currentBorder() === WORLD_BORDER);
+  s.handle(1, { t: 'xform', x: 2000, y: 70, z: -2000, yaw: 0, pitch: 0 });
+  check('peacetime movement roams the full world',
+    s.playerCoords()[0].x === 2000 && s.playerCoords()[0].z === -2000);
+  s.adminStartWar(100);
+  check('starting a war leaves the border full at t=0', s.currentBorder() === WORLD_BORDER);
+  s.tickWar(90); // deep past the shrink portion (70s) -> final ring
+  check('deep into the war the border has closed to the final ring',
+    s.currentBorder() === WAR_MIN_BORDER);
+  check('tickWar drags a far player inside the ring',
+    Math.abs(s.playerCoords()[0].x) <= WAR_MIN_BORDER / 2 &&
+    Math.abs(s.playerCoords()[0].z) <= WAR_MIN_BORDER / 2);
+  s.handle(1, { t: 'xform', x: 2000, y: 70, z: 2000, yaw: 0, pitch: 0 });
+  check('an xform outside the ring is clamped back in',
+    Math.abs(s.playerCoords()[0].x) <= WAR_MIN_BORDER / 2);
 
-  check('no war scheduled => peacetime', s.isWarActive() === false);
-  s.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 }); // kill B in peace
-  for (let i = 0; i < 125; i++) {
-    s.tickClaims(1);
-    s.tickFlags(1);
-    s.tickRegions(1);
-  }
-  check('capture is LOCKED in peacetime (region not flipped)', ownerOf(tgt) === FACTION_B);
+  // Kills score the war; the snapshot message carries score + wins.
+  s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: Math.PI, pitch: 0 });
+  s.handle(2, { t: 'xform', x: 0, y: 70, z: 2, yaw: 0, pitch: 0 });
+  const kill = s.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 });
+  const warMsg = kill.find((o) => o.msg.t === 'war')?.msg as
+    { score: number[]; wins: number[] } | undefined;
+  check('a war kill scores for the killer faction (broadcast in the war msg)',
+    !!warMsg && warMsg.score[FACTION_A] === 1 && warMsg.score[FACTION_B] === 0);
 
-  // Respawn B so we can kill B again.
+  // The war expires: A most kills -> warEnd names A, wins bump, kills reset.
+  const endOut = s.tickWar(20);
+  const endMsg = endOut.find((o) => o.msg.t === 'warEnd')?.msg as
+    { winner: number; score: number[] } | undefined;
+  check('the war end names the most-kills faction + the final score',
+    !!endMsg && endMsg.winner === FACTION_A && endMsg.score[FACTION_A] === 1);
+  const after = endOut.find((o) => o.msg.t === 'war')?.msg as
+    { score: number[]; wins: number[] } | undefined;
+  check('after the war: kills reset, the win is on the board',
+    !!after && after.score.every((n) => n === 0) && after.wins[FACTION_A] === 1);
+  check('after the war the border is full again', s.currentBorder() === WORLD_BORDER);
+
+  // Peacetime kills do NOT score a war.
   s.handle(2, { t: 'respawn' });
-  s.handle(2, { t: 'xform', x: c.x, y: 70, z: c.z + 2, yaw: 0, pitch: 0 });
-
-  s.adminStartWar(600);
-  check('admin can start a war (capture opens)', s.isWarActive() === true);
-  s.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 }); // kill B in war
-  let capOk = false;
-  for (let i = 0; i < 125; i++) {
-    s.tickClaims(1);
-    const out = s.tickFlags(1);
-    s.tickRegions(1);
-    if (out.some((o) => o.msg.t === 'regionCapture')) capOk = true;
-  }
-  check('capture works during a war (region flips to the attacker)',
-    capOk && ownerOf(tgt) === FACTION_A);
-
+  s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: Math.PI, pitch: 0 });
+  s.handle(2, { t: 'xform', x: 0, y: 70, z: 2, yaw: 0, pitch: 0 });
+  s.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 });
+  s.adminStartWar(50);
+  const w2 = s.warSnapshotMsg() as { t: 'war'; score: number[] };
+  check('peacetime kills never reach the war scoreboard',
+    w2.score.every((n) => n === 0));
   s.adminCancelWar();
-  check('admin can cancel a war (back to peacetime)', s.isWarActive() === false);
+  check('admin can cancel a war (back to peacetime, full border)',
+    s.isWarActive() === false && s.currentBorder() === WORLD_BORDER);
+
+  // War state survives a serialize round-trip (wins + faction XP).
+  const blob = JSON.parse(JSON.stringify(s.serialize()));
+  const s2 = new GameServer(1337, mulberry32(201));
+  s2.restore(blob);
+  const w3 = s2.addPlayer(9).find((o) => o.msg.t === 'welcome')!.msg as
+    { war: { wins: number[] } };
+  check('war wins survive a serialize round-trip', w3.war.wins[FACTION_A] === 1);
 }
 
 // --- Secret faction switching / betrayals (Phase 7) --------------------------
@@ -2399,19 +2215,6 @@ check('furnace smelts ore/sand/log but not removed foods',
     itemDescription(Item.Grenade) === GADGETS[Item.Grenade].desc &&
     itemDescription(Item.RocketLauncher).length > 0 &&
     itemDescription(Item.Stick) === '');
-}
-
-// --- Faction-aware spawn: never drop into enemy/neutral territory ------------
-{
-  const opening = initialOwners();
-  for (const seed of [50, 51, 52, 7, 99]) {
-    const g = new GameServer(1337, mulberry32(seed));
-    const w = g.addPlayer(1).find((o) => o.msg.t === 'welcome')!.msg as
-      { players: { id: number; faction: number; x: number; z: number }[] };
-    const me = w.players[w.players.length - 1];
-    check(`a player (seed ${seed}) spawns inside their own faction territory`,
-      opening[regionOf(me.x, me.z)] === me.faction);
-  }
 }
 
 // --- Accounts: login / register foundation -----------------------------------
@@ -2607,109 +2410,6 @@ check('furnace smelts ore/sand/log but not removed foods',
   const s = g2.snapshot().find((p) => p.id === 1)!;
   check('out-of-border movement is clamped to ±WORLD_HALF',
     s.x === WORLD_HALF && s.z === -WORLD_HALF);
-}
-
-// --- Land claims + oil shield (M18) + raiding (M19) --------------------------
-{
-  // Pure claim helpers.
-  check('chunkOf + claimChunkKeys cover a 3×3 footprint',
-    chunkOf(20, -5).cx === 1 && chunkOf(20, -5).cz === -1 &&
-    claimChunkKeys(0, 0).length === 9);
-  const c0 = newClaim(1, 0, 0, 70, 0, 0);
-  check('a fresh claim has a full shield + grace',
-    c0.shieldHp === MAX_SHIELD_HP && shieldUp(c0) && inGrace(c0, 0) &&
-    claimProtected(c0, 0));
-  check('grace expires after GRACE_PERIOD', !inGrace(c0, GRACE_PERIOD + 1));
-
-  // Regen only while oil>0 (and drains oil); no oil -> passive decay to 0.
-  const fueled = newClaim(2, 0, 0, 70, 0, 0);
-  fueled.shieldHp = 500; fueled.oil = 100;
-  const oilBefore = fueled.oil;
-  tickClaim(fueled, 1);
-  check('a fuelled below-max shield regenerates and drains oil',
-    fueled.shieldHp > 500 && fueled.oil < oilBefore);
-  const dry = newClaim(3, 0, 0, 70, 0, 0);
-  dry.shieldHp = 500; dry.oil = 0;
-  tickClaim(dry, 1);
-  check('an unfuelled shield decays (no regen)', dry.shieldHp < 500);
-  // Run it dry: with no oil it eventually drops to 0 (raidable).
-  for (let i = 0; i < 400; i++) tickClaim(dry, 1);
-  check('an unfuelled shield decays all the way to raidable',
-    dry.shieldHp === 0 && !shieldUp(dry));
-
-  check('feedOil tops the buffer in barrel units',
-    feedOil(newClaim(4, 0, 0, 70, 0, 0), 3) === 3 &&
-    (() => { const c = newClaim(5, 0, 0, 70, 0, 0); feedOil(c, 2); return c.oil === 2 * OIL_PER_BARREL; })());
-  check('damageShield drives the shield down + reports it',
-    (() => { const c = newClaim(6, 0, 0, 70, 0, 0); return !damageShield(c, 10) && damageShield(c, MAX_SHIELD_HP); })());
-  check('sanitizeClaim clamps oil/shield + rejects junk',
-    sanitizeClaim(null) === null &&
-    (() => { const c = sanitizeClaim({ id: 1, faction: 0, coreX: 0, coreY: 1, coreZ: 0, oil: 1e9, shieldHp: 1e9 })!;
-      return c.oil <= 4000 && c.shieldHp <= MAX_SHIELD_HP; })());
-
-  // Claims manager: overlap rejection + chunk lookup.
-  const mgr = new Claims();
-  check('placing a Core claims a 3×3 footprint + indexes it',
-    !!mgr.create(0, 0, 70, 0, 0) && !!mgr.at(20, 0) && !!mgr.at(-10, -10) && !mgr.at(40, 0));
-  check('an overlapping claim is rejected, a distant one allowed',
-    mgr.create(1, 10, 70, 10, 0) === null && !!mgr.create(1, 200, 70, 200, 0));
-
-  // --- Server: place, protect, breach, raid (the demonstrable loop) ---
-  const s = new GameServer(1337, mulberry32(7)); // joins -> 1:fA, 2:fB, ...
-  s.addPlayer(1); s.addPlayer(2);
-  s.setRegionOwner(0, 0, 0); // Phase 3: faction 0 owns this region so it can base here
-  s.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
-  const placeOut = s.handle(1, { t: 'edit', x: 0, y: 70, z: 0, block: Block.Core });
-  const claimMsg = placeOut.find((o) => o.msg.t === 'claim');
-  check('placing a Core broadcasts a claim for the placer faction',
-    !!claimMsg && (claimMsg!.msg as { claim: { faction: number } }).claim.faction === 0);
-
-  // Enemy (player 2) cannot edit inside the up/graced claim; owner can.
-  s.handle(2, { t: 'xform', x: 2.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
-  check('an enemy edit inside an up shield is rejected',
-    s.handle(2, { t: 'edit', x: 2, y: 70, z: 0, block: Block.Stone }).length === 0);
-  check('a faction member edit inside the claim is allowed',
-    s.handle(1, { t: 'edit', x: 2, y: 71, z: 0, block: Block.Stone })
-      .some((o) => o.msg.t === 'edit'));
-  check('an enemy can never break the Core itself',
-    s.handle(2, { t: 'edit', x: 0, y: 70, z: 0, block: Block.Air }).length === 0);
-
-  // Grace alone blocks raids even with the shield knocked to 0.
-  for (let i = 0; i < 20; i++) s.handle(2, { t: 'claimHit', x: 0, y: 70, z: 0, amount: 200 });
-  check('grace blocks a raid even with the shield at 0',
-    s.handle(2, { t: 'edit', x: 2, y: 70, z: 0, block: Block.Air }).length === 0);
-
-  // Past grace + drained shield -> the claim is raidable.
-  s.tickClaims(GRACE_PERIOD + 400); // expire grace; with no oil the shield bleeds to 0
-  check('after grace + fuel-starvation the claim is breached',
-    s.handle(2, { t: 'edit', x: 3, y: 70, z: 0, block: Block.Stone }).some((o) => o.msg.t === 'edit'));
-
-  // Raid a stored chest: a capped fraction goes to the raider, the rest spills.
-  s.handle(1, { t: 'edit', x: 1, y: 70, z: 0, block: Block.Chest });
-  s.handle(1, { t: 'chestSet', x: 1, y: 70, z: 0, slots: [{ id: Item.IronIngot, count: 10 }] });
-  s.handle(2, { t: 'xform', x: 1.6, y: 70, z: 0.5, yaw: 0, pitch: 0 });
-  const raid = s.handle(2, { t: 'edit', x: 1, y: 70, z: 0, block: Block.Air });
-  const got = raid.find((o) => o.msg.t === 'gotitem' && o.to === 2);
-  const spill = raid.find((o) => o.msg.t === 'itemspawn');
-  check('raiding a chest gives the raider exactly the capped fraction',
-    !!got && (got!.msg as { count: number }).count === 5 &&
-    !!spill && (spill!.msg as { item: { count: number } }).item.count === 5);
-
-  // A fuelled shield out-paces a lone attacker (bursts with reload gaps that let
-  // regen resume) but falls to sustained multi-source fire (regen never clears).
-  const lone = newClaim(10, 0, 0, 70, 0, 0); lone.oil = 2000;
-  for (let i = 0; i < 80; i++) { if (i % 6 === 0) damageShield(lone, 30); tickClaim(lone, 1); }
-  check('a fuelled shield holds vs a single attacker', lone.shieldHp > 800);
-  const swarm = newClaim(11, 0, 0, 70, 0, 0); swarm.oil = 2000;
-  for (let i = 0; i < 120; i++) { damageShield(swarm, 12); tickClaim(swarm, 1); }
-  check('a fuelled shield falls to sustained multi-hit fire', swarm.shieldHp === 0);
-
-  // The Core survives a raid: the claim still exists + can be re-fuelled.
-  s.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
-  const fed = s.handle(1, { t: 'claimFeed', x: 0, y: 70, z: 0, count: 5 });
-  check('the Core persists through a raid and can be re-fuelled',
-    fed.some((o) => o.msg.t === 'claim' &&
-      (o.msg as { claim: { oil: number } }).claim.oil > 0));
 }
 
 // --- Building set (M15): per-wood planks + slabs + stairs --------------------
@@ -2961,7 +2661,7 @@ check('furnace smelts ore/sand/log but not removed foods',
     re.health === 18);
   // A death with NO recent direct player damager moves nothing: let the 10s
   // kill-credit window lapse, then die to "the world" (fall/lava/mob path).
-  s.tickClaims(11); // advances worldTime past KILL_CREDIT_WINDOW
+  s.tickWar(11); // advances worldTime past KILL_CREDIT_WINDOW
   const mobDeath = s.handle(2, { t: 'selfhurt', amount: 9999 });
   check('a mob/fall death moves no hearts',
     mobDeath.some((o) => o.msg.t === 'killfeed') &&
@@ -3157,36 +2857,6 @@ check('furnace smelts ore/sand/log but not removed foods',
     CORE_BORDER === 1000 && CORE_HALF === 500);
   check('inCore edges: ±(500−ε) inside, ±(500+ε) outside',
     inCore(499, 0) && inCore(-500, 500) && !inCore(501, 0) && !inCore(0, -500.5));
-  let allIn = true;
-  for (let i = 0; i < REGION_COUNT; i++) {
-    const b = regionBounds(i);
-    if (b.minX < -CORE_HALF || b.maxX > CORE_HALF || b.minZ < -CORE_HALF || b.maxZ > CORE_HALF) allIn = false;
-    const c = regionCenter(i);
-    if (!inCore(c.x, c.z)) allIn = false;
-  }
-  check('the whole war region board (bounds + control points) sits inside the core', allIn);
-}
-
-// --- B2: Core (claim) placement is Heartland-only ------------------------------
-{
-  const s = new GameServer(1337, mulberry32(90));
-  s.addPlayer(1, { username: 'Founder', faction: 0 });
-  // Inside the core, at the western edge (x=-499 is region col 0 = faction 0's).
-  s.handle(1, { t: 'xform', x: -499, y: 70, z: 0.5, yaw: 0, pitch: 0 });
-  const okPlace = s.handle(1, { t: 'edit', x: -499, y: 70, z: 0, block: Block.Core });
-  check('a Core at x=−(500−ε) (core edge, owned region) founds a claim',
-    okPlace.some((o) => o.msg.t === 'claim'));
-  // Outside the core: rejected with the friendly Heartland notice, no claim.
-  s.handle(1, { t: 'xform', x: -503, y: 70, z: 0.5, yaw: 0, pitch: 0 });
-  const wilds = s.handle(1, { t: 'edit', x: -503, y: 70, z: 0, block: Block.Core });
-  check('a Core at x=−(500+ε) (the Wilds) is rejected with the Heartland notice',
-    !wilds.some((o) => o.msg.t === 'claim') &&
-    wilds.some((o) => o.msg.t === 'notice' &&
-      /Heartland/.test((o.msg as { text: string }).text)));
-  // Ordinary building in the Wilds is still allowed (machines/turrets/loot piñatas).
-  const build = s.handle(1, { t: 'edit', x: -503, y: 70, z: 0, block: Block.OakPlanks });
-  check('ordinary blocks (and machines) still place fine in the Wilds',
-    build.some((o) => o.msg.t === 'edit'));
 }
 
 // --- B2: spawns never land outside the core ------------------------------------
@@ -3202,20 +2872,133 @@ check('furnace smelts ore/sand/log but not removed foods',
   check('24 fresh spawns all land inside the Heartland core', allCore);
 }
 
-// --- B2: war flags only plant inside the core -----------------------------------
+// --- Runes: loot-only armor socketables ------------------------------------------
 {
-  const facs = FACTIONS.map((f) => f.id);
-  const srv = new GameServer(1337, mulberry32(92));
-  srv.addPlayer(1, { username: 'WarKiller', faction: facs[0] });
-  srv.addPlayer(2, { username: 'WarVictim', faction: facs[1] });
-  srv.adminStartWar(600);
-  // Kill deep in the Wilds: no flag may plant (regions don't exist out there).
-  srv.handle(1, { t: 'xform', x: 2000, y: 70, z: 2000, yaw: Math.PI, pitch: 0 });
-  srv.handle(2, { t: 'xform', x: 2000, y: 70, z: 2020, yaw: 0, pitch: 0 });
-  srv.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 });
-  const flags = (srv.flagsSnapshot() as Extract<ReturnType<GameServer['flagsSnapshot']>, { t: 'flags' }>);
-  check('a war kill in the Wilds plants NO region flag',
-    flags.t === 'flags' && flags.flags.length === 0);
+  const ids = Object.keys(RUNES).map(Number);
+  check('four runes registered, real items, with descriptions',
+    ids.length === 4 && ids.every((id) =>
+      isRune(id) && runeOf(id)?.item === id && !!ITEMS[id] &&
+      itemDescription(id).length > 0));
+  check('runes are loot-only (no crafting recipe mints one)',
+    !RECIPES.some((r) => ids.includes(r.result.id)));
+
+  // Socketing: first worn REAL armor piece with a free slot takes the rune.
+  const inv = new RuneInv();
+  check('socketing with no armor worn fails', inv.socketRune(Item.RuneOfIron) === null);
+  inv.slots[ARMOR_START] = { id: Item.IronHelmet, count: 1 };
+  inv.slots[ARMOR_START + 1] = { id: Item.Glider, count: 1 }; // glider is NOT armor
+  const took = inv.socketRune(Item.RuneOfIron);
+  check('a rune sockets into worn armor (never a glider), one per piece',
+    took?.id === Item.IronHelmet && took?.rune === Item.RuneOfIron &&
+    inv.socketRune(Item.RuneOfSwiftness) === null);
+
+  // Bonus aggregation is modest and clamped.
+  const none = runeBonuses([null, null, null, null]);
+  check('no runes = no bonuses',
+    none.armor === 0 && none.speedMult === 1 && none.mineMult === 1 && none.spreadMult === 1);
+  const some = runeBonuses([
+    { id: Item.IronHelmet, count: 1, rune: Item.RuneOfIron },
+    { id: Item.IronChestplate, count: 1, rune: Item.RuneOfSwiftness },
+    { id: Item.IronLeggings, count: 1, rune: Item.RuneOfFortune },
+    { id: Item.IronBoots, count: 1, rune: Item.RuneOfFocus },
+  ]);
+  check('rune bonuses aggregate across worn pieces (small + bounded)',
+    some.armor === 1 && some.speedMult > 1 && some.speedMult <= 1.12 &&
+    some.mineMult > 1 && some.spreadMult < 1 && some.spreadMult >= 0.25);
+  check('a rune on a NON-armor stack is ignored',
+    runeBonuses([{ id: Item.Stick, count: 1, rune: Item.RuneOfIron }]).armor === 0);
+
+  // The socketed rune survives the persistence round-trip.
+  const blob = JSON.parse(JSON.stringify(inv.serialize()));
+  const inv2 = new RuneInv();
+  inv2.restore(blob);
+  check('a socketed rune survives inventory serialize/restore',
+    inv2.slots[ARMOR_START]?.rune === Item.RuneOfIron);
+
+  // Runes actually appear in the loot pools (exploration reward).
+  const inLoot = (id: number): boolean =>
+    LOOT_TABLES.rare.some((e) => e.id === id) || LOOT_TABLES.epic.some((e) => e.id === id) ||
+    VAULT_LOOT[1].some((e) => e.id === id) || VAULT_LOOT[2].some((e) => e.id === id) ||
+    VAULT_LOOT[3].some((e) => e.id === id);
+  check('every rune is findable in structure or vault loot', ids.every(inLoot));
+}
+
+// --- Progression: XP curve, upgrade tracks, faction pool ------------------------
+{
+  // Level curve: 0 XP = level 1; thresholds match xpForLevel; capped at 20.
+  check('levelFor curve + xpForLevel inverse',
+    levelFor(0) === 1 && levelFor(39) === 1 && levelFor(40) === 2 &&
+    levelFor(xpForLevel(5)) === 5 && levelFor(1e9) === 20);
+  check('levelProgress stays in [0,1]',
+    levelProgress(0) >= 0 && levelProgress(50) > 0 && levelProgress(50) < 1 &&
+    levelProgress(1e9) === 1);
+
+  // Skill points: one per level past 1; buying decrements; tracks cap.
+  const st = newProgress();
+  st.xp = xpForLevel(4); // level 4 -> 3 points
+  check('points: level 4 grants 3; buying a rank spends one',
+    totalPointsFor(4) === 3 && pointsAvailable(st) === 3 &&
+    buyRank(st, 'swift') && pointsAvailable(st) === 2);
+  st.xp = xpForLevel(20); // plenty of points
+  for (let i = 0; i < 30; i++) buyRank(st, 'swift');
+  const swiftMax = TRACKS.find((t) => t.id === 'swift')!.max;
+  check('a track caps at its max ranks',
+    st.spent.swift === swiftMax && !canBuy(st, 'swift'));
+  buyRank(st, 'gunner');
+  check('personalBuffs scale with ranks',
+    personalBuffs(st).speedMult > 1 && personalBuffs(newProgress()).speedMult === 1 &&
+    personalBuffs(st).reloadMult < 1 && personalBuffs(newProgress()).reloadMult === 1);
+
+  // sanitizeProgress clamps junk AND overspent ranks to the earned budget.
+  const dirty = sanitizeProgress({ xp: xpForLevel(3), spent: { swift: 99, tough: 99, gunner: 99 } });
+  check('sanitizeProgress clamps spent ranks to the XP-earned budget',
+    pointsAvailable(dirty) === 0 &&
+    dirty.spent.swift + dirty.spent.tough + dirty.spent.gunner === totalPointsFor(3));
+  check('sanitizeProgress fail-closes garbage',
+    sanitizeProgress(null).xp === 0 && sanitizeProgress({ xp: -5 }).xp === 0);
+
+  // Faction pool: levels + bounded perks.
+  check('factionPerks are small and bounded',
+    factionPerks(1).armor === 0 && factionPerks(10).armor === 3 &&
+    factionPerks(10).speedMult <= 1.05 && factionLevelFor(0) === 1);
+  check('sanitizeFactionXp shapes the pool array',
+    sanitizeFactionXp([5, 'x'], 2)[0] === 5 && sanitizeFactionXp(null, 2).length === 2);
+  check('mob XP table covers the roster',
+    XP_MOB.zombie > 0 && XP_MOB.brute > XP_MOB.zombie && XP_PLAYER_KILL > 0);
+
+  // Server: a mob-XP report feeds the faction pool (clamped) + broadcasts fxp.
+  const g = new GameServer(1337, mulberry32(60));
+  g.addPlayer(1, { username: 'Xer', faction: FACTION_A });
+  g.addPlayer(2, { username: 'Yer', faction: FACTION_B });
+  const r1 = g.handle(1, { t: 'xp', amount: 20 });
+  check('an xp report feeds the faction pool + broadcasts fxp',
+    r1.some((o) => o.msg.t === 'fxp' && (o.msg as { xp: number[] }).xp[FACTION_A] === 20));
+  const r2 = g.handle(1, { t: 'xp', amount: 999999 });
+  check('an oversized xp report is clamped to the cap',
+    r2.some((o) => o.msg.t === 'fxp' &&
+      (o.msg as { xp: number[] }).xp[FACTION_A] === 20 + XP_REPORT_CAP));
+  check('junk xp reports are dropped',
+    g.handle(1, { t: 'xp', amount: NaN }).length === 0 &&
+    g.handle(1, { t: 'xp', amount: -5 }).length === 0);
+
+  // A PvP kill: the KILLER gets a server xpAward + the pool grows.
+  g.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: Math.PI, pitch: 0 });
+  g.handle(2, { t: 'xform', x: 0, y: 70, z: 2, yaw: 0, pitch: 0 });
+  const kill = g.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 });
+  check('a PvP kill awards XP to the killer + the faction pool',
+    kill.some((o) => o.msg.t === 'xpAward' && o.to === 1 &&
+      (o.msg as { amount: number }).amount === XP_PLAYER_KILL) &&
+    kill.some((o) => o.msg.t === 'fxp' &&
+      (o.msg as { xp: number[] }).xp[FACTION_A] === 20 + XP_REPORT_CAP + XP_PLAYER_KILL));
+
+  // The pools survive a serialize round-trip + ride the welcome.
+  const blob = JSON.parse(JSON.stringify(g.serialize()));
+  const g2 = new GameServer(1337, mulberry32(61));
+  g2.restore(blob);
+  const w = g2.addPlayer(5).find((o) => o.msg.t === 'welcome')!.msg as
+    { factionXp: number[] };
+  check('faction XP survives a serialize round-trip + rides the welcome',
+    w.factionXp[FACTION_A] === 20 + XP_REPORT_CAP + XP_PLAYER_KILL);
 }
 
 // --- B4: Waypoint Totems — attune cap, toggle, teleport rules --------------------
@@ -3255,12 +3038,12 @@ check('furnace smelts ore/sand/log but not removed foods',
   check('a second teleport inside the 60s cooldown is refused server-side',
     !tp2.some((o) => o.msg.t === 'teleport') && /recharging/.test(noticeOf(tp2)));
   // After the cooldown, a recent hit (combat tag) still blocks the port.
-  s.tickClaims(TOTEM_COOLDOWN + 1); // advance worldTime past the cooldown
+  s.tickWar(TOTEM_COOLDOWN + 1); // advance worldTime past the cooldown
   s.handle(1, { t: 'selfhurt', amount: 2 });
   const tagged = s.handle(1, { t: 'totemTeleport', x: 2, y: 70, z: 2 });
   check('the combat tag (hit in the last 10s) blocks totem travel',
     !tagged.some((o) => o.msg.t === 'teleport') && /combat/.test(noticeOf(tagged)));
-  s.tickClaims(COMBAT_TAG + 1); // let the tag lapse
+  s.tickWar(COMBAT_TAG + 1); // let the tag lapse
   // Teleporting to an attuned totem that was BROKEN prunes it instead.
   s.handle(1, { t: 'edit', x: 2, y: 70, z: 2, block: Block.Air });
   const broken = s.handle(1, { t: 'totemTeleport', x: 2, y: 70, z: 2 });
@@ -3688,13 +3471,13 @@ let firstVault: VaultStamp | null = null;
     check('once-per-player survives a server restart',
       !openAgain.some((o) => o.msg.t === 'gotitem'));
     // The loot window closes; later the Brute respawns.
-    s2.tickClaims(VAULT_LOOT_WINDOW + 5); // advance worldTime past the window
+    s2.tickWar(VAULT_LOOT_WINDOW + 5); // advance worldTime past the window
     s2.addPlayer(3, { username: 'Latecomer', faction: 1 });
     s2.handle(3, { t: 'xform', x: chest.x + 0.5, y: chest.y + 0.5, z: chest.z + 1.5, yaw: 0, pitch: 0 });
     const late = s2.handle(3, { t: 'vaultChestOpen', x: chest.x, y: chest.y, z: chest.z });
     check('after the loot window the vault reseals (no loot)',
       !late.some((o) => o.msg.t === 'gotitem') && late.some((o) => o.msg.t === 'notice'));
-    s2.tickClaims(VAULT_RECHARGE); // …and eventually the Brute is back
+    s2.tickWar(VAULT_RECHARGE); // …and eventually the Brute is back
     const reEnter = s2.handle(3, { t: 'vaultEnter', cx: st.cx, cz: st.cz })
       .find((o) => o.msg.t === 'vault')!.msg as { alive: boolean };
     check('the Brute respawns after the recharge clock', reEnter.alive);

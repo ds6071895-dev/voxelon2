@@ -305,6 +305,28 @@ export class Inventory {
     return total;
   }
 
+  /** The worn armor stacks (helmet/chest/legs/boots; null = empty slot). */
+  wornArmor(): (ItemStack | null)[] {
+    const out: (ItemStack | null)[] = [];
+    for (let i = ARMOR_START; i < ARMOR_START + ARMOR_SIZE; i++) out.push(this.slots[i]);
+    return out;
+  }
+
+  /** Socket a rune into the first worn REAL armor piece without one. Returns
+   *  the receiving stack (the caller consumes the rune item), or null if no
+   *  worn piece has a free socket. One rune per piece, permanent. */
+  socketRune(runeId: number): ItemStack | null {
+    for (let i = ARMOR_START; i < ARMOR_START + ARMOR_SIZE; i++) {
+      const s = this.slots[i];
+      if (s && ITEMS[s.id]?.armor && !ITEMS[s.id]?.glider && s.rune === undefined) {
+        s.rune = runeId;
+        this.version++;
+        return s;
+      }
+    }
+    return null;
+  }
+
   /** Grant XP to every worn piece (called when the player takes a hit). */
   addArmorXp(amount: number): void {
     let changed = false;
@@ -359,5 +381,6 @@ function sanitizeStack(raw: unknown): ItemStack | null {
   if (Number.isFinite(s.loaded)) stack.loaded = Math.max(0, Math.floor(s.loaded as number));
   if (Number.isFinite(s.damage)) stack.damage = Math.max(0, s.damage as number);
   if (Number.isFinite(s.xp)) stack.xp = Math.max(0, s.xp as number);
+  if (Number.isInteger(s.rune) && ITEMS[s.rune as number]) stack.rune = s.rune as number;
   return stack;
 }

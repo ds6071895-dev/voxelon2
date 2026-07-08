@@ -24,6 +24,7 @@ export class HeldItemView {
   // First-person arm: a skin-colored forearm + fist coming in from the
   // bottom-right, parented to the pivot so it swings/recoils with the item.
   private readonly armMat: THREE.MeshBasicMaterial;
+  private readonly arm: THREE.Group;
   private readonly baseSkin = new THREE.Color(0xc89a6a);
 
   constructor(camera: THREE.Camera, atlas: Atlas) {
@@ -57,8 +58,8 @@ export class HeldItemView {
     this.pivot.add(this.flash);
 
     // First-person arm: a blocky forearm + fist angled in from the bottom-right
-    // so the held item reads as actually held (and an empty hand shows a fist),
-    // matching the boxy avatar other players see.
+    // so the held item reads as actually held. Hidden while the hand is empty —
+    // an empty POV shows nothing at all.
     this.armMat = new THREE.MeshBasicMaterial({ color: this.baseSkin.clone() });
     const arm = new THREE.Group();
     const forearm = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.17, 0.55), this.armMat);
@@ -69,7 +70,9 @@ export class HeldItemView {
     arm.position.set(0.05, -0.16, 0.06);
     arm.rotation.set(0.5, -0.32, 0.32);
     arm.renderOrder = 99; // just behind the item
+    arm.visible = false;  // nothing held yet
     this.pivot.add(arm);
+    this.arm = arm;
   }
 
   /** Tint the first-person hand to the local player's deterministic skin tone
@@ -93,6 +96,8 @@ export class HeldItemView {
       this.mesh.rotation.set(0.1, -0.6, 0);
       this.pivot.add(this.mesh);
     }
+    // The arm only shows while something is actually held.
+    this.arm.visible = id !== null;
   }
 
   /** Generic mining/placing swing (tools, blocks). */

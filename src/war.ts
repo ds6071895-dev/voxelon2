@@ -1,19 +1,48 @@
-// WAR WINDOWS — region capture (gaining land on the war map) is only allowed
-// during a scheduled WAR. An admin schedules wars from the server console; in
-// between it's PEACETIME and the frontline is frozen. Times are in the server's
-// worldTime clock (seconds since boot). PURE + transport-agnostic (no DOM/Node),
-// so the server owns it authoritatively and the smoke tests can drive it.
+// WAR WINDOWS — the war is a SHRINKING-BORDER battle royale. An admin schedules
+// wars from the server console; while a war is on, the world border closes in
+// from the full 5000×5000 down to a 100×100 final ring, EVERYONE GLOWS (no
+// hiding), and the faction with the most kills when the clock runs out wins the
+// war. In between it's PEACETIME. Times are in the server's worldTime clock
+// (seconds since boot). PURE + transport-agnostic (no DOM/Node), so the server
+// owns it authoritatively and the smoke tests can drive it.
 
 /** Default war length when an admin doesn't specify one (seconds). */
 export const DEFAULT_WAR_DURATION = 30 * 60; // 30 minutes
+
+/** Final border side length the war shrinks down to (blocks). */
+export const WAR_MIN_BORDER = 100;
+/** The border shrinks over this leading fraction of the war, then HOLDS at the
+ *  100×100 ring for the remainder (the final brawl). */
+export const WAR_SHRINK_PORTION = 0.7;
 
 /** A scheduled war window: [start, end) in worldTime seconds. start===end===0
  *  (or end<=start) means "no war scheduled" — perpetual peacetime. */
 export interface WarState { start: number; end: number; }
 
 /** The compact, CLOCK-RELATIVE view sent to clients (so they needn't sync the
- *  server's absolute worldTime — they just count the remaining seconds down). */
-export interface WarSnapshot { active: boolean; timeLeft: number; nextIn: number; }
+ *  server's absolute worldTime — they just count the remaining seconds down).
+ *  `duration` lets a client derive the live border size purely from timeLeft. */
+export interface WarSnapshot { active: boolean; timeLeft: number; nextIn: number; duration: number; }
+
+/**
+ * The live border SIDE LENGTH during a war: linear shrink from `fullSize` down
+ * to WAR_MIN_BORDER over the first WAR_SHRINK_PORTION of the war, then held.
+ * Pure — the server clamps movement with it and every client renders the same
+ * wall from its own countdown. Outside a war it's just `fullSize`.
+ */
+export function warBorderAt(timeLeft: number, duration: number, fullSize: number): number {
+  if (!Number.isFinite(timeLeft) || !Number.isFinite(duration) || duration <= 0) return fullSize;
+  const elapsed = Math.max(0, duration - Math.max(0, timeLeft));
+  const shrinkTime = duration * WAR_SHRINK_PORTION;
+  if (elapsed <= 0) return fullSize;
+  if (elapsed >= shrinkTime) return WAR_MIN_BORDER;
+  return fullSize + (WAR_MIN_BORDER - fullSize) * (elapsed / shrinkTime);
+}
+
+/** War duration in seconds (0 = no war scheduled). */
+export function warDuration(w: WarState): number {
+  return Math.max(0, w.end - w.start);
+}
 
 export function newWar(): WarState { return { start: 0, end: 0 }; }
 
@@ -53,6 +82,7 @@ export function warSnapshot(w: WarState, now: number): WarSnapshot {
     active: warActive(w, now),
     timeLeft: warTimeLeft(w, now),
     nextIn: warStartsIn(w, now),
+    duration: warDuration(w),
   };
 }
 

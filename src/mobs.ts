@@ -270,6 +270,8 @@ export class Mobs {
   /** The player damaged the Vault Brute (main reports it to the server, which
    *  owns the shared boss HP online). Fired AFTER the local damage applies. */
   onBruteHit?: (mob: Mob, damage: number) => void;
+  /** A mob died to PLAYER damage (melee or projectile) — XP progression hook. */
+  onPlayerKill?: (kind: string) => void;
   /** The local Brute died (offline authority: main marks the vault cleared). */
   onBruteDown?: (mob: Mob) => void;
 
@@ -446,7 +448,7 @@ export class Mobs {
     }
     this.onSound?.('mobHurt', mob.pos);
     if (mob.type === 'brute') this.onBruteHit?.(mob, damage);
-    if (mob.health <= 0) this.kill(mob);
+    if (mob.health <= 0) { this.onPlayerKill?.(mob.type); this.kill(mob); }
     return true;
   }
 
@@ -475,7 +477,7 @@ export class Mobs {
     if (!mob.def.hostile) { mob.state = 'flee'; mob.stateTime = 4; }
     this.onSound?.('mobHurt', mob.pos);
     if (mob.type === 'brute') this.onBruteHit?.(mob, damage);
-    if (mob.health <= 0) this.kill(mob);
+    if (mob.health <= 0) { this.onPlayerKill?.(mob.type); this.kill(mob); }
     return true;
   }
 
@@ -524,6 +526,9 @@ export class Mobs {
           const id = this.world.getBlock(x, y, z);
           if (id === Block.Air || id === Block.Water) continue;
           if ((BLOCKS[id]?.hardness ?? -1) < 0) continue; // bedrock
+          // Vaults are blast-proof: no rocket/grenade can crack a dungeon open
+          // (mirrors the server, which also skips vault blocks in its crater).
+          if (id === Block.VaultBrick || id === Block.VaultChest) continue;
           this.world.setBlock(x, y, z, Block.Air);
         }
       }

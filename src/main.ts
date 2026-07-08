@@ -7,9 +7,7 @@ import { HUD } from './hud';
 import { Input, FROZEN_INPUT } from './input';
 import { Interaction, raycastBlocks } from './interact';
 import { Inventory } from './inventory';
-import {
-  InventoryUI, MachineUIContext, TurretUIContext, ClaimUIContext,
-} from './inventory_ui';
+import { InventoryUI, MachineUIContext, TurretUIContext } from './inventory_ui';
 import { dropFor, GunInfo, Item, ItemStack, ITEMS } from './items';
 import { RECIPES, Recipe } from './crafting';
 import { renderItemIcon } from './icons';
@@ -24,8 +22,8 @@ import { Chests } from './chests';
 import { Mob, Mobs } from './mobs';
 import { NetClient } from './net/client';
 import {
-  WORLD_SEED, WORLD_HALF, CORE_HALF, inCore, makeUsername, skinSeed, GameMode,
-  FlagInfo, MAX_ATTUNED, TOTEM_COOLDOWN, TOTEM_WINDUP, COMBAT_TAG,
+  WORLD_SEED, WORLD_HALF, WORLD_BORDER, CORE_HALF, makeUsername, skinSeed,
+  GameMode, MAX_ATTUNED, TOTEM_COOLDOWN, TOTEM_WINDUP, COMBAT_TAG,
 } from './net/protocol';
 import { MachineModels } from './machinemodels';
 import { NetItems } from './netitems';
@@ -40,24 +38,18 @@ import {
 import { TurretModels } from './turretmodels';
 import { RemotePlayers } from './remoteplayers';
 import { WorldMap } from './worldmap';
-import { Minimap } from './minimap';
 import { Accounts, Account } from './net/accounts';
 import {
-  FACTIONS, NO_FACTION, factionColor, factionName, sameFaction, otherFaction,
+  FACTIONS, NO_FACTION, factionColor, factionName, otherFaction,
 } from './teams';
+import { warBorderAt, WAR_MIN_BORDER } from './war';
 import {
-  Claims, OIL_CAP, OIL_PER_BARREL, MAX_SHIELD_HP, claimProtected, damageShield,
-  feedOil, shieldUp,
-} from './claims';
-import {
-  Regions, CaptureMeters, REGION_COUNT, regionOf, regionCenter, regionBounds,
-  capitalFaction, capitalOf, isCapital, CONTROL_RADIUS,
-} from './regions';
-import {
-  newSeason, tickSeasonClock, seasonTimeLeft, seasonExpired, deadlineWinner,
-  advanceSeason,
-} from './season';
+  ProgressState, TRACKS, XP_MOB, buyRank, canBuy, factionLevelFor,
+  factionLevelProgress, factionPerks, levelFor, levelProgress, newProgress,
+  personalBuffs, pointsAvailable, sanitizeProgress, sanitizeFactionXp,
+} from './progress';
 import { GadgetCooldowns, GadgetDef, gadgetOf } from './gadgets';
+import { isRune, runeOf, runeBonuses } from './runes';
 import {
   MAX_HEARTS, START_HEARTS, WITHDRAW_FLOOR, canConsume, canWithdraw,
   clampHearts, formatRemaining, maxHealthFor,
@@ -185,6 +177,51 @@ const panoramaView = new Panorama(atlas, window.innerWidth / window.innerHeight)
   ring(CORE_HALF, 0xffd84a, 0.14, 120);  // Heartland boundary (soft gold)
 })();
 
+// WAR BORDER: a closing ring of red walls, shown only during a war. The four
+// walls reposition/rescale every frame from the pure shrink curve so every
+// client renders the identical ring the server clamps movement to.
+const warWallGroup = new THREE.Group();
+warWallGroup.visible = false;
+scene.add(warWallGroup);
+const warWallMat = new THREE.MeshBasicMaterial({
+  color: 0xff4a3a, transparent: true, opacity: 0.4,
+  side: THREE.DoubleSide, depthWrite: false,
+});
+const warWallGeo = new THREE.PlaneGeometry(1, 240);
+const warWalls = [0, 1, 2, 3].map(() => {
+  const m = new THREE.Mesh(warWallGeo, warWallMat);
+  m.frustumCulled = false;
+  warWallGroup.add(m);
+  return m;
+});
+warWalls[2].rotation.y = Math.PI / 2;
+warWalls[3].rotation.y = Math.PI / 2;
+
+// EVERYBODY GLOWS during a war: an additive faction-colored halo floats on
+// every player (depth-test off, so it shows through walls) — nobody hides.
+const glowTexture = (() => {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const g = c.getContext('2d')!;
+  const grad = g.createRadialGradient(32, 32, 2, 32, 32, 32);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.35, 'rgba(255,255,255,0.55)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+})();
+const glowGroup = new THREE.Group();
+scene.add(glowGroup);
+const glowSprites = new Map<number, THREE.Sprite>();
+function warGlowMaterial(faction: number): THREE.SpriteMaterial {
+  return new THREE.SpriteMaterial({
+    map: glowTexture, color: factionColor(faction),
+    blending: THREE.AdditiveBlending, depthTest: false, depthWrite: false,
+    transparent: true, opacity: 0.85,
+  });
+}
+
 const sky = new Sky(scene, seed);
 const hud = new HUD(atlas.canvas, inventory);
 // Gadget cooldown sweep on the hotbar (ender-pearl style).
@@ -213,37 +250,19 @@ const machineModels = new MachineModels(scene, machines);
 // --- Warfare (M14): turrets, territory ---
 const turretStates = new Map<string, TurretState>();
 const turretModels = new TurretModels(scene, turretStates);
-// A round that lands inside an enemy faction's claim drains its shield (M19).
-projectiles.claimSink = (x, y, z, damage) => {
-  const c = claims.at(x, z);
-  if (!c || sameFaction(localFaction, c.faction)) return;
-  if (net.connected) net.sendClaimHit(c.coreX, c.coreY, c.coreZ, damage);
-  else damageShield(c, damage); // offline parity (no enemy claims in SP)
-};
-// --- Factions (M18): land claims + oil shields ---
-const claims = new Claims();
-let openClaim: { x: number; y: number; z: number } | null = null;
-const shieldGroup = new THREE.Group();
-scene.add(shieldGroup);
-const shieldMeshes = new Map<number, THREE.LineSegments>();
-// Region board (Phase 1/2): owner faction id per region + capture meters.
-// Server-authoritative in MP (net.onRegions); offline the local Regions sim is
-// authoritative (identical pure module), driven by the local player's presence.
-const localRegions = new Regions();
-let regionOwners: number[] = localRegions.ownerList();
-let regionMeters: CaptureMeters = localRegions.meters();
-// Seasons (Phase 5): server-authoritative in MP (net.onSeason); offline the
-// local season clock is authoritative. The badge count is shown in the HUD.
-const localSeason = newSeason();
-let seasonNumber = localSeason.number;
-let seasonLeft = seasonTimeLeft(localSeason);
+// Seasons: server-authoritative (net.onSeason); shown in the HUD online.
+let seasonNumber = 1;
+let seasonLeft = 0;
 let localSeasonsWon = 0;
-// War windows (admin-scheduled in MP): capture is only open while `warActiveNow`.
-// Offline single-player is always "at war" (free-play skirmish). The HUD counts
-// these down locally between the server's periodic broadcasts.
+// The WAR (admin-scheduled, MP-only): a shrinking-border battle royale. The
+// HUD counts down locally between the server's periodic broadcasts; the live
+// border size derives purely from timeLeft+duration (warBorderAt).
 let warActiveNow = false;
-let warLeft = 0;   // seconds left in the active war
-let warNextIn = 0; // seconds until the next scheduled war (peacetime)
+let warLeft = 0;    // seconds left in the active war
+let warNextIn = 0;  // seconds until the next scheduled war (peacetime)
+let warDur = 0;     // total war duration (drives the border shrink curve)
+let warScore: number[] = new Array(FACTIONS.length).fill(0); // kills this war
+let warWins: number[] = new Array(FACTIONS.length).fill(0);  // war wins this season
 // Gadgets (Phase 8): a local cooldown gate (the server enforces its own) +
 // active spy disguises on remote players (id -> seconds of local time left).
 const gadgetCd = new GadgetCooldowns();
@@ -305,58 +324,11 @@ function endGrapple(): void {
   player.vel.multiplyScalar(0.3);     // bleed reel speed so you don't overshoot
   jumpImmuneUntil = worldTimeLocal + 2; // no fall damage right after release
 }
-// World map (M key): region board + claims + capture meters + waypoints.
-const worldMap = new WorldMap(scene, camera, world.terrain, claims, {
+// World map (M key): terrain + structures + vaults + waypoints + travel.
+const worldMap = new WorldMap(scene, camera, world.terrain, {
   player: () => ({ x: player.pos.x, z: player.pos.z, yaw: player.yaw }),
   faction: () => localFaction,
-  regions: () => regionOwners,
-  captureMeters: () => regionMeters,
 });
-// Circular HUD radar (top-left): live terrain + waypoints + capitals + faction tint.
-const minimap = new Minimap(app, world.terrain);
-// War flags (the land-claim markers). Server-driven; shown to everyone as a
-// waypoint + an in-world flag. `flagsSetAt` lets the countdown tick smoothly
-// between the server's periodic broadcasts.
-let activeFlags: FlagInfo[] = [];
-let flagsSetAt = 0;
-const flagGroup = new THREE.Group();
-scene.add(flagGroup);
-const flagPoleGeo = new THREE.CylinderGeometry(0.12, 0.12, 6, 6);
-const flagClothGeo = new THREE.PlaneGeometry(2.2, 1.2);
-/** Seconds left before a flag claims its land (smoothly counted down locally). */
-function flagSecondsLeft(f: FlagInfo): number {
-  return Math.max(0, Math.round(f.secondsLeft - (worldTimeLocal - flagsSetAt)));
-}
-/** Rebuild the in-world flag posts (a pole + a colored pennant) to match the
- *  active flag list. Cheap (at most a couple of flags). */
-function rebuildFlagMeshes(): void {
-  while (flagGroup.children.length) {
-    const m = flagGroup.children.pop() as THREE.Mesh;
-    (m.material as THREE.Material).dispose();
-  }
-  for (const f of activeFlags) {
-    const gy = world.terrain.height(Math.round(f.x), Math.round(f.z));
-    const col = factionColor(f.faction);
-    const pole = new THREE.Mesh(flagPoleGeo, new THREE.MeshBasicMaterial({ color: 0x6b4a2a }));
-    pole.position.set(f.x + 0.5, gy + 3, f.z + 0.5);
-    flagGroup.add(pole);
-    const cloth = new THREE.Mesh(flagClothGeo,
-      new THREE.MeshBasicMaterial({ color: col, side: THREE.DoubleSide }));
-    cloth.position.set(f.x + 0.5 + 1.1, gy + 5, f.z + 0.5);
-    flagGroup.add(cloth);
-  }
-}
-/** Flag markers (with countdown labels) for the map beacons + minimap. */
-function flagMarkers(): { x: number; z: number; color: number; name: string }[] {
-  return activeFlags.map((f) => {
-    const s = flagSecondsLeft(f);
-    const mm = Math.floor(s / 60), ss = s % 60;
-    return {
-      x: f.x, z: f.z, color: factionColor(f.faction),
-      name: `🚩 ${factionName(f.faction)} ${mm}:${ss < 10 ? '0' : ''}${ss}`,
-    };
-  });
-}
 let openTurret: { x: number; y: number; z: number } | null = null;
 let openMachine: { x: number; y: number; z: number } | null = null;
 let openChest: { x: number; y: number; z: number } | null = null;
@@ -392,20 +364,11 @@ mapBtn.addEventListener('click', () => {
 });
 app.appendChild(mapBtn);
 
-// War HUD (Phase 2): a top-centre region tug bar (Crimson vs Azure region
-// counts), a capture-meter bar shown while you stand on a contested control
-// point, and a big capture/win banner that flashes on major events.
-const regionWarEl = document.createElement('div');
-regionWarEl.className = 'mc-font';
-regionWarEl.style.cssText =
-  'position:absolute;top:6px;left:50%;transform:translateX(-50%);z-index:10;' +
-  'pointer-events:none;text-align:center;font-size:13px;text-shadow:1px 1px 0 #000;' +
-  'width:340px;display:none;';
-app.appendChild(regionWarEl);
+// War HUD: the war clock/score line + a big banner that flashes on events.
 const seasonEl = document.createElement('div');
 seasonEl.className = 'mc-font';
 seasonEl.style.cssText =
-  'position:absolute;top:38px;left:50%;transform:translateX(-50%);z-index:10;' +
+  'position:absolute;top:6px;left:50%;transform:translateX(-50%);z-index:10;' +
   'pointer-events:none;text-align:center;font-size:11px;color:#cfe0ff;' +
   'text-shadow:1px 1px 0 #000;width:340px;display:none;';
 app.appendChild(seasonEl);
@@ -413,17 +376,10 @@ app.appendChild(seasonEl);
 const warEl = document.createElement('div');
 warEl.className = 'mc-font';
 warEl.style.cssText =
-  'position:absolute;top:56px;left:50%;transform:translateX(-50%);z-index:10;' +
+  'position:absolute;top:24px;left:50%;transform:translateX(-50%);z-index:10;' +
   'pointer-events:none;text-align:center;font-size:13px;' +
   'text-shadow:1px 1px 0 #000;width:340px;display:none;';
 app.appendChild(warEl);
-const captureBarEl = document.createElement('div');
-captureBarEl.className = 'mc-font';
-captureBarEl.style.cssText =
-  'position:absolute;top:64px;left:50%;transform:translateX(-50%);z-index:10;' +
-  'pointer-events:none;text-align:center;font-size:14px;text-shadow:1px 1px 0 #000;' +
-  'width:300px;display:none;';
-app.appendChild(captureBarEl);
 const regionBannerEl = document.createElement('div');
 regionBannerEl.className = 'mc-font';
 regionBannerEl.style.cssText =
@@ -620,11 +576,6 @@ interaction.onOpenContainer = (kind, x, y, z) => {
     if (!turretStates.has(key)) turretStates.set(key, newTurret()); // local predict
     if (net.connected) net.sendTurretOpen(x, y, z);
     invUI.show('turret', undefined, undefined, turretCtxFor(x, y, z));
-  } else if (kind === 'claim') {
-    if (!claims.coreAt(x, y, z)) return; // no claim here (e.g. an orphan Core)
-    openClaim = { x, y, z };
-    if (net.connected) net.sendClaimOpen(x, y, z);
-    invUI.show('claim', undefined, undefined, undefined, claimCtxFor(x, y, z));
   } else {
     invUI.show(kind, kind === 'furnace' ? furnaces.get(x, y, z) : undefined);
   }
@@ -752,68 +703,6 @@ function moveMachine(
 function forceCloseMachine(): void {
   openMachine = null;
   if (invUI.open && invUI.mode === 'machine') invUI.hide();
-}
-function forceCloseClaim(): void {
-  openClaim = null;
-  if (invUI.open && invUI.mode === 'claim') invUI.hide();
-}
-// Faction-colored wireframe shield dome over a claim's 3×3-chunk footprint.
-const SHIELD_EDGES = new THREE.EdgesGeometry(new THREE.BoxGeometry(48, 80, 48));
-function removeShieldDome(id: number): void {
-  const m = shieldMeshes.get(id);
-  if (!m) return;
-  shieldGroup.remove(m);
-  (m.material as THREE.Material).dispose(); // geometry is shared — never dispose it
-  shieldMeshes.delete(id);
-}
-/** Drop every base (claim + its dome). Used on a season reset + disconnect. */
-function clearAllBases(): void {
-  for (const id of [...shieldMeshes.keys()]) removeShieldDome(id);
-  claims.clear();
-  forceCloseClaim();
-}
-function updateShieldDomes(_dt: number): void {
-  const live = new Set<number>();
-  for (const c of claims.list()) {
-    live.add(c.id);
-    let mesh = shieldMeshes.get(c.id);
-    if (!mesh) {
-      mesh = new THREE.LineSegments(SHIELD_EDGES,
-        new THREE.LineBasicMaterial({ transparent: true, depthWrite: false }));
-      shieldGroup.add(mesh);
-      shieldMeshes.set(c.id, mesh);
-    }
-    mesh.position.set(c.cx * 16 + 8, c.coreY + 30, c.cz * 16 + 8);
-    const mat = mesh.material as THREE.LineBasicMaterial;
-    mat.color.setHex(factionColor(c.faction));
-    mesh.visible = shieldUp(c);
-    const frac = Math.max(0, Math.min(1, c.shieldHp / MAX_SHIELD_HP));
-    const flick = frac < 0.25 ? 0.35 + 0.5 * Math.abs(Math.sin(worldTimeLocal * 8)) : 1;
-    mat.opacity = (0.16 + 0.34 * frac) * flick;
-  }
-  for (const id of [...shieldMeshes.keys()]) if (!live.has(id)) removeShieldDome(id);
-}
-function claimCtxFor(x: number, y: number, z: number): ClaimUIContext {
-  const here = () => claims.coreAt(x, y, z) ?? null;
-  const mine = () => { const c = here(); return !!c && sameFaction(localFaction, c.faction); };
-  return {
-    state: here,
-    mine,
-    canFeed: () => mine() && inventory.countItem(Item.OilBarrel) > 0,
-    feed: () => {
-      const c = here();
-      if (!c || !mine()) return;
-      const have = inventory.countItem(Item.OilBarrel);
-      if (have <= 0) return;
-      // Feed as many barrels as the buffer has room for.
-      const room = Math.floor((OIL_CAP - c.oil) / OIL_PER_BARREL);
-      const n = Math.min(have, room);
-      if (n <= 0) return;
-      inventory.removeItem(Item.OilBarrel, n);
-      if (net.connected) net.sendClaimFeed(x, y, z, n);
-      else feedOil(c, n); // offline: apply locally
-    },
-  };
 }
 // Resolve a footprint cell (anchor or MachinePart) to the anchor block below.
 function resolveMachineAnchor(x: number, y: number, z: number): { x: number; y: number; z: number } | null {
@@ -1069,6 +958,7 @@ function attemptAuth(mode: 'login' | 'register', retries = 12): void {
     if (mode === 'login') restoreOfflineInventory(); // bring back saved single-player stuff
     restoreOfflineHearts(); // fresh accounts fall back to the 10-heart start
     restoreOfflineTotems(); // attuned Waypoint Totems (fast travel)
+    restoreOfflineProgress(); // XP + upgrades + the faction pool
   } else if (retries > 0) {
     // Still resolving whether a server is reachable — try again shortly.
     authStatus.textContent = 'Connecting…';
@@ -1213,7 +1103,8 @@ const tutorial = (() => {
     ] },
     { title: '⚔️ WAR', lines: [
       "You're auto-assigned to a faction — fight for it!",
-      'Stand in an enemy region to capture it · M = map',
+      'When WAR starts the border closes in and everyone glows —',
+      'most kills wins · M = map · G = your progress',
     ] },
   ];
   let i = 0;
@@ -1292,6 +1183,7 @@ renderer.domElement.addEventListener('mousedown', () => {
 document.addEventListener('keydown', (e) => {
   if (e.code !== 'Escape') return;
   if (tutorial.open) { tutorial.finish(); }
+  else if (progressOpen) { hideProgress(); }
   else if (guideOpen) { hideGuide(); }
   else if (worldMap.open) { worldMap.hide(); input.lock(); }
   else if (invUI.open) { invUI.hide(); input.lock(); }
@@ -1338,15 +1230,23 @@ function checkDeath(): void {
 // (offline). The server is the system of record online; offline we mirror to
 // localStorage keyed by the local account so single-player also persists.
 function pushStateSave(): void {
-  if (net.connected) net.sendSaveState(inventory.serialize() as unknown as Record<string, unknown>);
-  else if (authedName) {
+  if (net.connected) {
+    const blob = inventory.serialize() as unknown as Record<string, unknown>;
+    blob.progress = { xp: progress.xp, spent: progress.spent }; // XP rides along
+    net.sendSaveState(blob);
+  } else if (authedName) {
     try {
       localStorage.setItem(`voxelon.inv.${authedName.toLowerCase()}`,
         JSON.stringify(inventory.serialize()));
     } catch { /* ignore */ }
+    saveOfflineProgress();
   }
 }
-net.onRestoreState = (state) => inventory.restore(state);
+net.onRestoreState = (state) => {
+  inventory.restore(state);
+  const st = sanitizeProgress((state as { progress?: unknown }).progress);
+  progress.xp = st.xp; progress.spent = st.spent;
+};
 // Offline: restore the saved inventory for the just-authed local account.
 function restoreOfflineInventory(): void {
   if (net.connected || !authedName) return;
@@ -1665,6 +1565,226 @@ function consumeHeartItem(): void {
   }
   pushStateSave();
 }
+// --- Progression (XP + upgrades): G panel, kill XP, faction pool --------------
+// Personal XP is CLIENT-owned (persisted like the inventory: saveState online,
+// localStorage offline). The faction pool is server-owned online (fxp
+// broadcasts) and localStorage-mirrored offline. All rules live in progress.ts.
+const progress: ProgressState = newProgress();
+let factionXpPools: number[] = new Array(FACTIONS.length).fill(0);
+
+function saveOfflineProgress(): void {
+  if (net.connected || !authedName) return;
+  try {
+    localStorage.setItem(`voxelon.prog.${authedName.toLowerCase()}`, JSON.stringify(progress));
+    localStorage.setItem(`voxelon.fxp.${authedName.toLowerCase()}`, JSON.stringify(factionXpPools));
+  } catch { /* ignore */ }
+}
+function restoreOfflineProgress(): void {
+  if (net.connected || !authedName) return;
+  try {
+    const raw = localStorage.getItem(`voxelon.prog.${authedName.toLowerCase()}`);
+    const st = sanitizeProgress(raw ? JSON.parse(raw) : null);
+    progress.xp = st.xp; progress.spent = st.spent;
+    const fraw = localStorage.getItem(`voxelon.fxp.${authedName.toLowerCase()}`);
+    factionXpPools = sanitizeFactionXp(fraw ? JSON.parse(fraw) : null, FACTIONS.length);
+  } catch { /* ignore */ }
+}
+
+/** Grant personal XP (+ toast + level-up fanfare). */
+function grantXp(amount: number, reason?: string): void {
+  if (amount <= 0) return;
+  const before = levelFor(progress.xp);
+  progress.xp += amount;
+  const after = levelFor(progress.xp);
+  showNotice(`+${amount} XP${reason ? ` — ${reason}` : ''}`);
+  if (after > before) {
+    showRegionBanner(`⭐ LEVEL ${after}!`, '#ffd84a');
+    showNotice('Level up! Press G to spend your skill point.');
+    audio.heartSteal();
+  }
+  saveOfflineProgress();
+  refreshProgressPanel();
+}
+
+// Mob kills feed personal XP + the faction pool (server clamps the report).
+mobs.onPlayerKill = (kind) => {
+  const amt = XP_MOB[kind] ?? 4;
+  grantXp(amt, kind);
+  if (net.connected) net.sendXp(amt);
+  else if (localFaction >= 0) {
+    factionXpPools[localFaction] = (factionXpPools[localFaction] ?? 0) + amt;
+    saveOfflineProgress();
+  }
+};
+net.onXpAward = (amount, reason) => grantXp(amount, reason === 'kill' ? 'enemy kill' : reason);
+net.onFactionXp = (xp) => {
+  const before = factionLevelFor(factionXpPools[localFaction] ?? 0);
+  factionXpPools = sanitizeFactionXp(xp, FACTIONS.length);
+  const after = factionLevelFor(factionXpPools[localFaction] ?? 0);
+  if (after > before) {
+    showRegionBanner(`⚑ ${factionName(localFaction).toUpperCase()} REACHED LEVEL ${after}!`, factionCss(localFaction));
+    audio.heartSteal();
+  }
+  refreshProgressPanel();
+};
+
+/** All progression + rune buffs that apply to the local player right now. */
+function activeBuffs(): {
+  speedMult: number; armorBonus: number; reloadMult: number;
+  mineMult: number; spreadMult: number;
+} {
+  const mine = personalBuffs(progress);
+  const perks = factionPerks(factionLevelFor(factionXpPools[localFaction] ?? 0));
+  const runes = runeBonuses(inventory.wornArmor());
+  return {
+    speedMult: mine.speedMult * perks.speedMult * runes.speedMult,
+    armorBonus: mine.armorBonus + perks.armor + runes.armor,
+    reloadMult: mine.reloadMult,
+    mineMult: runes.mineMult,
+    spreadMult: runes.spreadMult,
+  };
+}
+
+// --- The G panel: your XP/level/upgrades + your faction's level/perks ---------
+let progressOpen = false;
+const progressEl = document.createElement('div');
+progressEl.style.cssText =
+  'position:absolute;inset:0;display:none;z-index:34;align-items:center;' +
+  'justify-content:center;background:rgba(6,8,14,0.82);';
+const progressPanel = document.createElement('div');
+progressPanel.className = 'mc-font';
+progressPanel.style.cssText =
+  'background:linear-gradient(#161a26,#10131c);border:2px solid #34406a;border-radius:10px;' +
+  'box-shadow:0 10px 40px rgba(0,0,0,0.6);width:430px;max-height:88vh;overflow:auto;' +
+  'color:#e7edf7;text-shadow:none;font-size:13px;padding-bottom:8px;';
+progressEl.appendChild(progressPanel);
+app.appendChild(progressEl);
+progressEl.addEventListener('mousedown', (e) => { if (e.target === progressEl) hideProgress(); });
+
+function xpBar(frac: number, color: string, label: string): string {
+  return `<div style="position:relative;height:16px;background:#0c0f18;border:1px solid #2a3550;border-radius:4px;overflow:hidden">` +
+    `<div style="height:100%;width:${(frac * 100).toFixed(1)}%;background:${color}"></div>` +
+    `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff">${label}</div></div>`;
+}
+
+function refreshProgressPanel(): void {
+  if (!progressOpen) return;
+  const lvl = levelFor(progress.xp);
+  const pts = pointsAvailable(progress);
+  const fxp = factionXpPools[localFaction] ?? 0;
+  const flvl = factionLevelFor(fxp);
+  const perks = factionPerks(flvl);
+  const buffs = activeBuffs();
+  let html =
+    `<div style="position:sticky;top:0;background:#10131c;display:flex;align-items:center;gap:10px;` +
+    `padding:12px 16px;border-bottom:1px solid #232a40;z-index:1">` +
+    `<div style="flex:1;font-size:15px;color:#ffd84a;letter-spacing:1px">⚑ FACTION &amp; PROGRESS</div>` +
+    `<button id="prog-close" style="width:26px;height:26px;cursor:pointer;border:1px solid #3a4666;` +
+    `border-radius:5px;background:#1c2335;color:#cdd6ee;font-size:13px">✕</button></div>`;
+
+  // --- you ---
+  html += `<div style="padding:12px 16px 4px">` +
+    `<div style="font-size:11px;letter-spacing:2px;color:#7f8db0;margin-bottom:6px">YOU — ${authedName || 'PLAYER'}</div>` +
+    `<div style="display:flex;align-items:baseline;gap:10px;margin-bottom:5px">` +
+    `<span style="font-size:22px;color:#ffd84a">Lv ${lvl}</span>` +
+    `<span style="color:#8f9ec0;font-size:11px">${progress.xp} XP</span>` +
+    (pts > 0 ? `<span style="color:#7dffa0;font-size:12px">● ${pts} skill point${pts === 1 ? '' : 's'} to spend!</span>`
+             : `<span style="color:#7f8db0;font-size:11px">kill mobs &amp; enemies for XP</span>`) +
+    `</div>${xpBar(levelProgress(progress.xp), '#e2b23b', `to Lv ${Math.min(20, lvl + 1)}`)}</div>`;
+
+  // --- tracks ---
+  html += `<div style="padding:8px 16px 4px;display:flex;flex-direction:column;gap:7px">`;
+  for (const t of TRACKS) {
+    const rank = progress.spent[t.id] ?? 0;
+    const can = canBuy(progress, t.id);
+    html += `<div style="display:flex;align-items:center;gap:10px;background:#141827;border:1px solid #232a40;border-radius:7px;padding:8px 10px">` +
+      `<div style="font-size:20px">${t.icon}</div>` +
+      `<div style="flex:1;min-width:0">` +
+      `<div>${t.name} <span style="color:#ffd84a">${'▮'.repeat(rank)}${'▯'.repeat(t.max - rank)}</span>` +
+      ` <span style="color:#8f9ec0;font-size:10px">${t.perRank}/rank</span></div>` +
+      `<div style="color:#8f9ec0;font-size:11px">${t.desc}</div></div>` +
+      `<button data-track="${t.id}" ${can ? '' : 'disabled'} style="cursor:${can ? 'pointer' : 'default'};` +
+      `padding:6px 10px;border:1px solid ${can ? '#3f6a3f' : '#2a3040'};border-radius:6px;` +
+      `background:${can ? '#274a27' : '#181d2b'};color:${can ? '#9fffb0' : '#5a6580'};font-size:11px">` +
+      `${rank >= t.max ? 'MAX' : '+1'}</button></div>`;
+  }
+  html += `</div>`;
+
+  // --- faction ---
+  const fname = factionName(localFaction);
+  const fcol = factionCss(localFaction);
+  const wa = warWins[FACTIONS[0].id] ?? 0, wb = warWins[FACTIONS[1].id] ?? 0;
+  html += `<div style="padding:10px 16px 6px">` +
+    `<div style="font-size:11px;letter-spacing:2px;color:#7f8db0;margin-bottom:6px">YOUR FACTION</div>` +
+    `<div style="display:flex;align-items:baseline;gap:10px;margin-bottom:5px">` +
+    `<span style="font-size:18px;color:${fcol}">■ ${fname}</span>` +
+    `<span style="font-size:15px;color:#ffd84a">Lv ${flvl}</span>` +
+    `<span style="color:#8f9ec0;font-size:11px">${fxp} shared XP</span></div>` +
+    xpBar(factionLevelProgress(fxp), fcol, `to Lv ${Math.min(10, flvl + 1)}`) +
+    `<div style="color:#9fb4cc;font-size:11px;margin-top:6px;line-height:1.7">` +
+    `Everyone's kills level the whole faction. Current perks for every member:<br>` +
+    `🛡 +${perks.armor} armor &nbsp;·&nbsp; 👟 +${((perks.speedMult - 1) * 100).toFixed(1)}% speed</div>` +
+    (net.connected
+      ? `<div style="color:#8f9ec0;font-size:11px;margin-top:6px">War wins this season — ` +
+        `<span style="color:${factionCss(FACTIONS[0].id)}">${FACTIONS[0].name} ${wa}</span> · ` +
+        `<span style="color:${factionCss(FACTIONS[1].id)}">${FACTIONS[1].name} ${wb}</span></div>`
+      : '') +
+    `</div>`;
+
+  // --- your live totals ---
+  html += `<div style="padding:4px 16px 8px;color:#7f8db0;font-size:11px">` +
+    `Your combined buffs: +${((buffs.speedMult - 1) * 100).toFixed(1)}% speed · ` +
+    `+${buffs.armorBonus} armor · −${((1 - buffs.reloadMult) * 100).toFixed(0)}% reload time</div>`;
+
+  progressPanel.innerHTML = html;
+  progressPanel.querySelector('#prog-close')!.addEventListener('click', hideProgress);
+  for (const btn of progressPanel.querySelectorAll('button[data-track]')) {
+    btn.addEventListener('click', () => {
+      const id = (btn as HTMLElement).getAttribute('data-track') as 'swift' | 'tough' | 'gunner';
+      if (buyRank(progress, id)) {
+        audio.heartSteal();
+        saveOfflineProgress();
+        pushStateSave();
+        refreshProgressPanel();
+      }
+    });
+  }
+}
+
+function showProgress(): void {
+  if (progressOpen || player.dead) return;
+  if (invUI.open) invUI.hide();
+  if (worldMap.open) worldMap.hide();
+  progressOpen = true;
+  progressEl.style.display = 'flex';
+  refreshProgressPanel();
+  document.exitPointerLock();
+}
+function hideProgress(): void {
+  if (!progressOpen) return;
+  progressOpen = false;
+  progressEl.style.display = 'none';
+  if (worldReady && !player.dead && screen === 'playing') input.lock();
+}
+document.addEventListener('keydown', (e) => {
+  if (e.code !== 'KeyG') return;
+  if (progressOpen) hideProgress();
+  else if (input.locked && screen === 'playing') showProgress();
+});
+// A clickable button stacked above the Map button (same footprint).
+const progressBtn = document.createElement('button');
+progressBtn.className = 'mc-font';
+progressBtn.textContent = '⚑ Progress (G)';
+progressBtn.style.cssText =
+  'position:absolute;bottom:46px;right:8px;z-index:12;font-size:12px;padding:6px 10px;' +
+  'width:118px;box-sizing:border-box;text-align:center;cursor:pointer;border:2px solid;' +
+  'border-color:#fff #555 #555 #fff;background:#6b6b6b;color:#fff;text-shadow:none;';
+progressBtn.addEventListener('click', () => {
+  if (progressOpen) hideProgress();
+  else if (!player.dead) showProgress();
+});
+app.appendChild(progressBtn);
+
 // --- Vaults (Milestone D): dungeons, the Brute, per-player treasure ------------
 // Deterministic stamps (cached per anchor chunk) drive everything client-side;
 // the SERVER owns the Brute's shared HP + the once-per-player loot ledger
@@ -1786,15 +1906,6 @@ function refreshVaultMap(): void {
   worldMap.setVaults(marks, totalVaults());
 }
 
-/** Vault pips for the HUD radar (nearby + discovered, deduped). */
-function vaultMinimapMarkers(): { x: number; z: number; color: number }[] {
-  const out: { x: number; z: number; color: number }[] = [];
-  const seen = new Set<string>();
-  for (const v of nearbyVaults) { out.push({ x: v.x, z: v.z, color: 0x9a6aff }); seen.add(`${v.cx},${v.cz}`); }
-  for (const d of discoveredList()) if (!seen.has(d.key)) out.push({ x: d.x, z: d.z, color: 0x9a6aff });
-  return out;
-}
-
 function discoverVault(v: VaultStamp): void {
   const list = discoveredList();
   if (!list.some((d) => d.key === vaultKeyOf(v))) {
@@ -1832,7 +1943,6 @@ function updateVaults(dt: number): void {
     if (v?.cx !== curVault?.cx || v?.cz !== curVault?.cz) onVaultTransition(v);
   }
   mobs.setVault(curVault);
-  minimap.dimmed = !!curVault;
   if (!curVault) return;
   const view = vaultViews.get(vaultKeyOf(curVault));
   if (bruteMob?.removed) bruteMob = null;
@@ -1969,37 +2079,25 @@ net.onTurretFire = (x, y, z, tx, ty, tz) => {
   particles.poof(tx, ty, tz);
   audio.gun(new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
 };
-net.onRegions = (owners) => {
-  if (Array.isArray(owners) && owners.length) regionOwners = owners;
-};
-net.onRegionMeters = (capFaction, capProgress) => {
-  regionMeters = { faction: capFaction, progress: capProgress };
-};
-net.onRegionCapture = (region, faction, from) => {
-  announceCapture(region, faction, from);
-};
-net.onRegionWin = (faction) => {
-  showRegionBanner(`${factionName(faction).toUpperCase()} WINS THE WAR!`, factionCss(faction));
-  showKill('★ SEASON WON ★', factionName(faction));
-};
 net.onSeason = (number, timeLeft) => { seasonNumber = number; seasonLeft = timeLeft; };
-net.onWar = (active, timeLeft, nextIn) => {
+net.onWar = (active, timeLeft, nextIn, duration, score, wins) => {
   const wasActive = warActiveNow;
-  warActiveNow = active; warLeft = timeLeft; warNextIn = nextIn;
-  if (active && !wasActive) showRegionBanner('⚔️ WAR! CAPTURE THE REGIONS!', '#ff5a5a');
-  else if (!active && wasActive) showRegionBanner('🕊️ PEACETIME — CAPTURE LOCKED', '#9fd0ff');
-};
-net.onFlags = (flags) => {
-  // Announce a flag that's newly aimed at land you care about (plant feedback).
-  const known = new Set(activeFlags.map((f) => `${f.faction}:${f.region}`));
-  for (const f of flags) {
-    if (known.has(`${f.faction}:${f.region}`)) continue;
-    if (f.faction === localFaction) showRegionBanner('🚩 FLAG PLANTED — HOLD IT!', factionCss(f.faction));
-    else showRegionBanner('🚩 ENEMY FLAG — GO DEFEND!', factionCss(f.faction));
+  warActiveNow = active; warLeft = timeLeft; warNextIn = nextIn; warDur = duration;
+  if (Array.isArray(score)) warScore = score;
+  if (Array.isArray(wins)) warWins = wins;
+  if (active && !wasActive) {
+    showRegionBanner('⚔️ WAR! THE BORDER IS CLOSING!', '#ff5a5a');
   }
-  activeFlags = flags;
-  flagsSetAt = worldTimeLocal;
-  rebuildFlagMeshes();
+};
+net.onWarEnd = (winner, score) => {
+  const a = score[FACTIONS[0].id] ?? 0, b = score[FACTIONS[1].id] ?? 0;
+  if (winner === NO_FACTION) {
+    showRegionBanner(`WAR OVER — DRAW (${a} : ${b})`, '#cfe0ff');
+  } else if (winner === localFaction) {
+    showRegionBanner(`🏆 WE WON THE WAR! (${a} : ${b})`, factionCss(winner));
+  } else {
+    showRegionBanner(`${factionName(winner).toUpperCase()} WINS THE WAR (${a} : ${b})`, factionCss(winner));
+  }
 };
 net.onGadgetFx = (kind, x, y, z) => gadgetFxAt(kind, x, y, z);
 net.onDisguised = (id, faction) => {
@@ -2020,24 +2118,12 @@ net.onFactionSwitched = (faction, remaining) => {
   showNotice(`🤫 You secretly joined ${factionName(faction)}. Switches left: ${remaining}.`);
 };
 net.onSeasonEnd = (winner, number) => {
-  // The server already reset the board + cleared bases authoritatively; mirror it
-  // locally (drop claim domes) and flash the result. The winning side's badge is
-  // refreshed on the next welcome, but bump it now for instant feedback.
-  clearAllBases();
+  // The winning side's badge is refreshed on the next welcome, but bump it now
+  // for instant feedback.
   if (winner === localFaction && winner >= 0) localSeasonsWon++;
+  warWins = new Array(FACTIONS.length).fill(0);
   announceSeasonEnd(winner, number);
   refreshNetInfo();
-};
-net.onClaim = (claim) => {
-  claims.set(claim); // adopt authoritative state (re-indexes its chunks)
-};
-net.onClaimRemove = (id) => {
-  claims.remove(id);
-  removeShieldDome(id);
-  if (openClaim) { const c = claims.coreAt(openClaim.x, openClaim.y, openClaim.z); if (!c) forceCloseClaim(); }
-};
-net.onBreach = (attacker, faction, victim) => {
-  showKill(`${factionName(faction)} breached`, `${factionName(victim)}'s claim`);
 };
 net.onDisconnect = () => {
   player.damageSink = undefined;
@@ -2045,52 +2131,14 @@ net.onDisconnect = () => {
   // Drop all server-owned warfare state so its meshes/markers don't linger
   // (turretModels reconciles to the now-empty set).
   turretStates.clear();
-  claims.clear();
-  for (const id of [...shieldMeshes.keys()]) removeShieldDome(id);
-  forceCloseClaim();
+  warActiveNow = false;
   refreshNetInfo();
 };
 interaction.onEdit = (x, y, z, b) => {
   // Placing a machine block creates its local entity (prediction offline + MP).
   const mt = machineTypeForBlock(b);
   if (mt !== null) machines.place(x, y, z, mt);
-  // Base Core: offline we own the claim sim (server owns it in MP). Placing a
-  // Core founds a base (3×3 footprint) — only in owned territory (Phase 3);
-  // breaking one (owner) dissolves its claim.
-  if (!net.connected) {
-    if (b === Block.Core) claims.create(localFaction, x, y, z, worldTimeLocal);
-    else if (b === Block.Air) {
-      const c = claims.coreAt(x, y, z);
-      if (c) { claims.remove(c.id); removeShieldDome(c.id); }
-    }
-  }
   net.sendEdit(x, y, z, b);
-};
-// A base Core may only be placed in a region your faction controls (Phase 3) —
-// mirrors the server so the client never mispredicts an illegal base, online or
-// off. Other blocks are unrestricted here.
-interaction.canPlace = (x, _y, z, block) => {
-  if (block !== Block.Core) return true;
-  // Claims are Heartland-only (B2): tell the player BEFORE the place attempt
-  // so a rejected Core in the Wilds is never a silent mystery.
-  if (!inCore(x, z)) {
-    showNotice('Claims only work in the Heartland (inner 1000×1000)!');
-    return false;
-  }
-  if (sameFaction(regionOwners[regionOf(x, z)] ?? NO_FACTION, localFaction)) return true;
-  showNotice('You can only build a base in territory your faction controls!');
-  return false;
-};
-// Block edits inside an enemy faction's protected claim (mirrors the server so
-// the client never mispredicts a break/place it isn't allowed to make).
-interaction.canEdit = (x, y, z) => {
-  const c = claims.at(x, z);
-  if (!c || sameFaction(localFaction, c.faction)) return true;
-  // Enemies can never touch the Core block; otherwise blocked while protected —
-  // UNLESS your faction owns the region the base sits in, which opens it (Phase 3).
-  if (Math.floor(x) === c.coreX && Math.floor(y) === c.coreY && Math.floor(z) === c.coreZ) return false;
-  const ownsRegion = sameFaction(regionOwners[regionOf(x, z)] ?? NO_FACTION, localFaction);
-  return ownsRegion || !claimProtected(c, worldTimeLocal);
 };
 net.connect();
 
@@ -2143,7 +2191,7 @@ function fireVolley(stack: ItemStack, gun: GunInfo): boolean {
   inventory.version++; // refresh the ammo counter
   const base = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
   const pellets = Math.max(1, gun.pellets ?? 1);
-  const spread = gun.spread ?? 0;
+  const spread = (gun.spread ?? 0) * activeBuffs().spreadMult; // Rune of Focus
   for (let i = 0; i < pellets; i++) {
     projectiles.fire(player.eyePosition, spreadDir(base, spread), gun);
   }
@@ -2171,7 +2219,7 @@ function reloadGun(): void {
   if (!stack || !gun) return;
   const loaded = stack.loaded ?? gun.mag;
   if (loaded >= gun.mag || inventory.countItem(gun.ammo) <= 0) return;
-  reloadTimer = RELOAD_TIME;
+  reloadTimer = RELOAD_TIME * activeBuffs().reloadMult; // Gunslinger ranks
   reloadingStack = stack;
 }
 let stepAccum = 0;
@@ -2297,83 +2345,6 @@ function turretCtxFor(x: number, y: number, z: number): TurretUIContext {
   };
 }
 
-// --- Region war (Phase 2): capture HUD + offline sim -------------------------
-
-/** Friendly region label: a column letter + row number (e.g. "C4"), or CAPITAL. */
-function regionLabel(i: number): string {
-  if (isCapital(i)) return capitalFaction(i) === localFaction ? 'OUR CAPITAL' : 'ENEMY CAPITAL';
-  const col = i % 6, row = Math.floor(i / 6);
-  return `${String.fromCharCode(65 + col)}${row + 1}`;
-}
-
-/** Flash a banner + killfeed line for a region flip (loud + visual for kids). */
-function announceCapture(region: number, faction: number, from: number): void {
-  const label = regionLabel(region);
-  if (faction === localFaction) showRegionBanner(`WE CAPTURED ${label}!`, factionCss(faction));
-  else if (from === localFaction) showRegionBanner(`WE LOST ${label}!`, '#ff6a5a');
-  showKill(`${factionName(faction)} took`, label);
-}
-
-/** Offline single-player: the local Regions sim IS authoritative (same pure
- *  module the server runs), driven by the local player's presence. */
-function updateRegionsOffline(dt: number): void {
-  const presence = [{ faction: localFaction, x: player.pos.x, z: player.pos.z, dead: player.dead }];
-  const res = localRegions.tick(presence, dt);
-  for (const ev of res.captured) announceCapture(ev.region, ev.faction, ev.from);
-  if (res.winner >= 0) {
-    // Taking the enemy capital wins the season instantly (Phase 5).
-    endLocalSeason(res.winner);
-    return;
-  }
-  regionOwners = localRegions.ownerList();
-  regionMeters = localRegions.meters();
-}
-
-/** The always-on War HUD: a region tug bar + the control-point status of the
- *  region you're standing on (capturing / defending / neutral). */
-function updateRegionWarHud(): void {
-  const a = FACTIONS[0], b = FACTIONS[1];
-  let ca = 0, cb = 0;
-  for (let i = 0; i < regionOwners.length; i++) {
-    if (regionOwners[i] === a.id) ca++; else if (regionOwners[i] === b.id) cb++;
-  }
-  regionWarEl.style.display = 'block';
-  const aPct = (ca / Math.max(1, ca + cb)) * 100;
-  regionWarEl.innerHTML =
-    `<div style="margin-bottom:2px">⚔ <span style="color:${factionCss(a.id)}">${a.name} ${ca}</span>` +
-    ` &nbsp;·&nbsp; <span style="color:${factionCss(b.id)}">${cb} ${b.name}</span></div>` +
-    `<div style="height:9px;background:${factionCss(b.id)};border:1px solid #000;overflow:hidden">` +
-    `<div style="height:100%;width:${aPct.toFixed(1)}%;background:${factionCss(a.id)}"></div></div>`;
-
-  // Control-point status of the region under the player.
-  const ri = regionOf(player.pos.x, player.pos.z);
-  const c = regionCenter(ri);
-  const onPoint = Math.hypot(player.pos.x - c.x, player.pos.z - c.z) <= CONTROL_RADIUS;
-  if (!onPoint || ri >= REGION_COUNT) { captureBarEl.style.display = 'none'; return; }
-  captureBarEl.style.display = 'block';
-  // Online peacetime: capture is locked — say so instead of showing a meter.
-  if (net.connected && !warActiveNow) {
-    captureBarEl.innerHTML = '<div style="color:#9fd0ff">🕊️ Capture locked — wait for the war</div>';
-    return;
-  }
-  const owner = regionOwners[ri];
-  const capF = regionMeters.faction[ri] ?? NO_FACTION;
-  const frac = Math.max(0, Math.min(1, regionMeters.progress[ri] ?? 0));
-  if (capF !== NO_FACTION && frac > 0.001) {
-    const label = capF === localFaction
-      ? `CAPTURING ${regionLabel(ri)}`
-      : owner === localFaction ? `DEFEND ${regionLabel(ri)}!` : `${factionName(capF)} TAKING ${regionLabel(ri)}`;
-    captureBarEl.innerHTML =
-      `<div style="color:${factionCss(capF)}">${label}</div>` +
-      `<div style="height:13px;background:rgba(0,0,0,0.6);border:1px solid #000">` +
-      `<div style="height:100%;width:${(frac * 100).toFixed(0)}%;background:${factionCss(capF)}"></div></div>`;
-  } else {
-    const who = owner === NO_FACTION ? 'Neutral' : factionName(owner) + (owner === localFaction ? ' (ours)' : '');
-    const col = owner === NO_FACTION ? '#9fb0c4' : factionCss(owner);
-    captureBarEl.innerHTML = `<div style="color:${col}">${isCapital(ri) ? '★ ' : ''}${regionLabel(ri)} — ${who}</div>`;
-  }
-}
-
 // --- Seasons (Phase 5) -------------------------------------------------------
 
 /** Human-readable "Xd Yh" / "Ym Zs" countdown for the season clock. */
@@ -2387,8 +2358,15 @@ function formatSeasonLeft(secs: number): string {
 }
 
 function updateSeasonHud(): void {
+  if (!net.connected) { seasonEl.style.display = 'none'; return; }
   seasonEl.style.display = 'block';
-  seasonEl.innerHTML = `Season ${seasonNumber} · ${formatSeasonLeft(seasonLeft)}`;
+  const a = FACTIONS[0], b = FACTIONS[1];
+  const wa = warWins[a.id] ?? 0, wb = warWins[b.id] ?? 0;
+  seasonEl.innerHTML =
+    `Season ${seasonNumber} · ${formatSeasonLeft(seasonLeft)} · ` +
+    `<span style="color:${factionCss(a.id)}">${a.name} ${wa}</span>` +
+    ` <span style="color:#8da0c0">wars</span> ` +
+    `<span style="color:${factionCss(b.id)}">${wb} ${b.name}</span>`;
 }
 
 /** mm:ss (or h:mm:ss) clock for the war timer. */
@@ -2399,23 +2377,33 @@ function formatClock(secs: number): string {
   return h > 0 ? `${h}:${pad(m)}:${pad(ss)}` : `${m}:${pad(ss)}`;
 }
 
-/** The war clock: shows whether capture is open + a live countdown. Offline is a
- *  perpetual free-play skirmish; online it reflects the admin-scheduled war. */
+/** The live war border side length (full world outside a war). */
+function currentWarBorder(): number {
+  return warActiveNow ? warBorderAt(warLeft, warDur, WORLD_BORDER) : WORLD_BORDER;
+}
+
+/** The war clock: countdown + live border size + the kill score. Offline
+ *  single-player has no wars (free play) — the line stays hidden. */
 function updateWarHud(dt: number): void {
+  if (!net.connected) { warEl.style.display = 'none'; return; }
   warEl.style.display = 'block';
-  if (!net.connected) {
-    warEl.innerHTML = '<span style="color:#ffb86a">⚔️ Skirmish — capture open</span>';
-    return;
-  }
   // Count down locally between the server's periodic broadcasts.
   if (warActiveNow) warLeft = Math.max(0, warLeft - dt);
   else if (warNextIn > 0) warNextIn = Math.max(0, warNextIn - dt);
   if (warActiveNow) {
-    warEl.innerHTML = `<span style="color:#ff6a6a">⚔️ WAR · ${formatClock(warLeft)} left</span>`;
+    const a = FACTIONS[0], b = FACTIONS[1];
+    const border = Math.round(currentWarBorder());
+    const shrinking = border > WAR_MIN_BORDER;
+    warEl.innerHTML =
+      `<span style="color:#ff6a6a">⚔️ WAR · ${formatClock(warLeft)}</span> ` +
+      `<span style="color:${shrinking ? '#ffb86a' : '#ff5a5a'}">· border ${border}m${shrinking ? ' ⤵' : ' — FINAL RING'}</span><br>` +
+      `<span style="color:${factionCss(a.id)}">${a.name} ${warScore[a.id] ?? 0}</span>` +
+      ` <span style="color:#8da0c0">kills</span> ` +
+      `<span style="color:${factionCss(b.id)}">${warScore[b.id] ?? 0} ${b.name}</span>`;
   } else if (warNextIn > 0) {
     warEl.innerHTML = `<span style="color:#9fd0ff">🕊️ Next war in ${formatClock(warNextIn)}</span>`;
   } else {
-    warEl.innerHTML = '<span style="color:#9fb0c4">🕊️ Peacetime — capture locked</span>';
+    warEl.innerHTML = '<span style="color:#9fb0c4">🕊️ Peacetime</span>';
   }
 }
 
@@ -2429,58 +2417,21 @@ function announceSeasonEnd(winner: number, number: number): void {
   }
 }
 
-/** Offline single-player: the local season clock is authoritative. Advance it,
- *  end the season at the deadline (most regions wins), and keep the HUD synced. */
-function updateSeasonOffline(dt: number): void {
-  tickSeasonClock(localSeason, dt);
-  seasonNumber = localSeason.number;
-  seasonLeft = seasonTimeLeft(localSeason);
-  if (seasonExpired(localSeason)) endLocalSeason(deadlineWinner(localRegions.counts()));
-}
-
-/** Reset the war offline: award the local badge, clear bases, reset the board,
- *  and start the next season. */
-function endLocalSeason(winner: number): void {
-  const ended = localSeason.number;
-  if (winner === localFaction && winner >= 0) {
-    localSeasonsWon++;
-    localAccounts.awardSeasonWin(winner);
-    saveLocalAccounts();
-    refreshNetInfo();
-  }
-  clearAllBases();
-  localRegions.reset();
-  regionOwners = localRegions.ownerList();
-  regionMeters = localRegions.meters();
-  advanceSeason(localSeason);
-  seasonNumber = localSeason.number;
-  seasonLeft = seasonTimeLeft(localSeason);
-  announceSeasonEnd(winner, ended);
-}
-
-
-/** Drop the (offline) player into a region their faction controls — never enemy
- *  land. Mirrors the server's faction-aware spawn. */
 // Personal respawn point set via a Respawn Beacon (offline; online the server
 // tracks it). Cleared if the beacon block is gone when we try to use it.
 let localSpawn: { x: number; y: number; z: number } | null = null;
 
+/** Drop the (offline) player at their Respawn Beacon if it still stands, else a
+ *  fresh dry Heartland spawn. Mirrors the server's spawn rules. */
 function spawnInOwnTerritory(): void {
   if (net.connected) return; // online: the server places us
-  // A personal Respawn Beacon (still standing) overrides the faction spawn.
   if (localSpawn && world.getBlock(localSpawn.x, localSpawn.y, localSpawn.z) === Block.RespawnBeacon) {
     player.pos.set(localSpawn.x + 0.5, localSpawn.y + 1, localSpawn.z + 0.5);
     player.vel.set(0, 0, 0);
     return;
   }
   localSpawn = null; // beacon gone — forget the stale point
-  let pick = localRegions.ownerAt(capitalOf(localFaction)) === localFaction ? capitalOf(localFaction) : -1;
-  if (pick < 0) {
-    for (let i = 0; i < REGION_COUNT; i++) if (localRegions.ownerAt(i) === localFaction) { pick = i; break; }
-  }
-  const s = pick >= 0
-    ? (() => { const b = regionBounds(pick); return world.terrain.drySpawnInBounds(Math.random, b.minX + 6, b.maxX - 6, b.minZ + 6, b.maxZ - 6); })()
-    : world.terrain.randomDrySpawn(Math.random, CORE_HALF);
+  const s = world.terrain.randomDrySpawn(Math.random, CORE_HALF);
   player.pos.set(s.x, s.y, s.z);
   player.vel.set(0, 0, 0);
 }
@@ -2676,17 +2627,19 @@ function useGadget(def: GadgetDef): void {
       break;
     }
     case 'c4': {
+      // A planted timed bomb: stick it on the aimed block, big blast after the
+      // fuse. The blast itself routes through the same paths as a grenade.
       const t = interaction.target;
-      const c = t ? claims.at(t.x, t.z) : undefined;
-      if (!t || !c || sameFaction(c.faction, localFaction)) { showNotice('Plant C4 on an ENEMY base.'); return; }
+      if (!t) { showNotice('Aim at a block to plant C4.'); return; }
       gadgetCd.use(def.item, worldTimeLocal); consume();
       const bx = t.x + 0.5, by = t.y + 0.5, bz = t.z + 0.5;
-      const cx = c.coreX, cy = c.coreY, cz = c.coreZ, dmg = def.damage ?? 200;
-      showNotice(`💣 C4 planted — ${def.fuse ?? 3}s to breach!`);
+      const blastR = def.radius ?? 5, item = def.item;
+      showNotice(`💣 C4 planted — ${def.fuse ?? 3}s. RUN!`);
       window.setTimeout(() => {
-        particles.explosion(bx, by, bz);
-        if (net.connected) net.sendClaimHit(cx, cy, cz, dmg);
-        else { const cl = claims.coreAt(cx, cy, cz); if (cl) damageShield(cl, dmg); }
+        if (net.connected) net.sendGadgetUse(item, bx, by, bz);
+        gadgetFxAt('frag', bx, by, bz);
+        mobs.explode(new THREE.Vector3(bx, by, bz), player);
+        if (!net.connected) destroyMachinesNear(new THREE.Vector3(bx, by, bz), blastR);
       }, (def.fuse ?? 3) * 1000);
       break;
     }
@@ -2701,6 +2654,49 @@ function tickDisguises(dt: number): void {
       const r = net.remotes.get(id);
       if (r) { r.info.faction = d.realFaction; remotePlayers.invalidate(id); }
       disguises.delete(id);
+    }
+  }
+}
+
+/** Reposition the closing war ring + reconcile the everybody-glows halos. */
+function updateWarVisuals(): void {
+  const active = net.connected && warActiveNow;
+  warWallGroup.visible = active;
+  if (active) {
+    const half = currentWarBorder() / 2;
+    const size = half * 2;
+    const y = 120;
+    warWalls[0].position.set(0, y, -half);
+    warWalls[1].position.set(0, y, half);
+    warWalls[2].position.set(-half, y, 0);
+    warWalls[3].position.set(half, y, 0);
+    for (const w of warWalls) w.scale.x = size;
+    // Pulse the ring so it reads as dangerous.
+    warWallMat.opacity = 0.32 + 0.12 * Math.abs(Math.sin(worldTimeLocal * 2.2));
+  }
+  // Faction-colored halos over every living remote player while the war is on.
+  const live = new Set<number>();
+  if (active) {
+    for (const [id, r] of net.remotes) {
+      if (r.dead || r.info.mode === 'spectator') continue;
+      live.add(id);
+      let sp = glowSprites.get(id);
+      if (!sp) {
+        sp = new THREE.Sprite(warGlowMaterial(r.info.faction));
+        sp.scale.setScalar(2.6);
+        sp.renderOrder = 50;
+        glowGroup.add(sp);
+        glowSprites.set(id, sp);
+      }
+      (sp.material as THREE.SpriteMaterial).color.setHex(factionColor(r.info.faction));
+      sp.position.set(r.tx, r.ty + 1.1, r.tz);
+    }
+  }
+  for (const [id, sp] of glowSprites) {
+    if (!live.has(id)) {
+      glowGroup.remove(sp);
+      sp.material.dispose();
+      glowSprites.delete(id);
     }
   }
 }
@@ -2752,7 +2748,7 @@ const COMBAT_IDS = new Set<number>([
   Item.Sniper, Item.BurstRifle, Item.Bullet, Item.Rocket,
 ]);
 const WAR_IDS = new Set<number>([
-  Block.Core, Block.Turret, Item.Cannonball,
+  Block.Turret, Item.Cannonball,
 ]);
 function guideCategory(id: number): string {
   if (gadgetOf(id)) return 'Gadgets & Toys';
@@ -2913,8 +2909,12 @@ function frame(): void {
 
   // Keep worn-armor mitigation current before any damage can land this frame:
   // offline the player mitigates locally; in MP the server mitigates from this
-  // synced value (clamped server-side).
-  const armorPts = inventory.armorPoints();
+  // synced value (clamped server-side). Progression bonuses (Toughness ranks +
+  // the faction perk) ride on top of worn gear; speed applies to movement.
+  const buffsNow = activeBuffs();
+  player.speedMult = buffsNow.speedMult;
+  interaction.miningSpeedMult = buffsNow.mineMult; // Rune of Fortune
+  const armorPts = inventory.armorPoints() + buffsNow.armorBonus;
   player.armorPoints = armorPts;
   if (net.connected && armorPts !== lastSentArmor) {
     lastSentArmor = armorPts;
@@ -2950,10 +2950,11 @@ function frame(): void {
     }
     updateGrapple(dt); // sustained grapple pull (sets velocity before the step)
     player.update(dt, moveInput, world);
-    // World border: keep the player inside the 5000×5000 play area (the server
-    // clamps authoritatively too).
-    player.pos.x = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, player.pos.x));
-    player.pos.z = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, player.pos.z));
+    // World border: keep the player inside the play area (the server clamps
+    // authoritatively too). During a war this is the CLOSING red ring.
+    const clampHalf = net.connected && warActiveNow ? currentWarBorder() / 2 : WORLD_HALF;
+    player.pos.x = Math.max(-clampHalf, Math.min(clampHalf, player.pos.x));
+    player.pos.z = Math.max(-clampHalf, Math.min(clampHalf, player.pos.z));
 
     // Gun aim-down-sights: hold right-click with a gun to zoom (per-gun amount).
     {
@@ -3028,6 +3029,20 @@ function frame(): void {
         useHealItem();
         interaction.update(dt, input, camera, true, true); // suppress mine + use
       } else if (input.rightClicked && !interaction.armedMove && heldStack &&
+          isRune(heldStack.id)) {
+        // Socket a held rune into the first worn armor piece with a free slot.
+        const runeId = heldStack.id;
+        const target = inventory.socketRune(runeId);
+        if (target) {
+          inventory.consumeSelected(1);
+          showNotice(`✨ ${runeOf(runeId)?.name} socketed into your ${ITEMS[target.id]?.name}!`);
+          audio.heartSteal();
+          pushStateSave();
+        } else {
+          showNotice('No worn armor with a free rune slot — equip armor first (one rune per piece).');
+        }
+        interaction.update(dt, input, camera, true, true); // suppress mine + use
+      } else if (input.rightClicked && !interaction.armedMove && heldStack &&
           (heldStack.id === Item.Heart || heldStack.id === Item.RevivalBeacon)) {
         // Lifesteal consumables: a Heart grows your max hearts; a Revival
         // Beacon opens the eliminated-teammate picker.
@@ -3094,29 +3109,10 @@ function frame(): void {
     // bar (the server is authoritative and reconciles on open/collect).
     machines.update(dt);
     machineModels.update(dt); // animate drills/pumpjacks
-    // Warfare: render turrets, run the region war + its HUD.
     turretModels.update(dt);
-    // Region war (Phase 2): offline the local sim is authoritative; the War HUD
-    // reads the latest board + meters (server-fed online, local sim offline).
-    if (!net.connected) updateRegionsOffline(dt);
-    updateRegionWarHud();
-    // Seasons (Phase 5): offline the local clock is authoritative.
-    if (!net.connected) updateSeasonOffline(dt);
     updateSeasonHud();
-    updateWarHud(dt); // war clock (capture window); offline = perpetual skirmish
-    // Circular radar: visible while playing (hidden behind the full map /
-    // inventory, and behind the F3 debug overlay since they share the top-left).
-    const showRadar = screen === 'playing' && !worldMap.open && !invUI.open && !hud.debugVisible;
-    minimap.setVisible(showRadar);
-    const flagMk = flagMarkers();
-    worldMap.setDynamicMarkers(flagMk); // war flags as in-world beacons + on the map
-    if (showRadar) {
-      // Tint reflects the TERRITORY you're standing in (blue in Azure land, red
-      // in Crimson land), not your own faction; neutral land gets no tint.
-      const hereOwner = regionOwners[regionOf(player.pos.x, player.pos.z)] ?? NO_FACTION;
-      minimap.update(player.pos.x, player.pos.z, player.yaw, hereOwner,
-        worldMap.listWaypoints(), flagMk, vaultMinimapMarkers());
-    }
+    updateWarHud(dt);     // war clock + border + kill score (MP only)
+    updateWarVisuals();   // the closing red ring + everybody-glows halos
     tickDisguises(dt); // Phase 8: expire spy disguises on remote avatars
     updateThrownItems(dt); // animate tossed grenades/bombs
     // Jump Boost: zero fall distance while the immunity window is active.
@@ -3129,11 +3125,7 @@ function frame(): void {
       regionBannerTimer -= dt;
       if (regionBannerTimer <= 0) regionBannerEl.style.display = 'none';
     }
-    // Land claims: advance the grace/shield clock; offline this is the
-    // authoritative claim sim (MP the server ticks + reconciles via 'claims').
     worldTimeLocal += dt;
-    if (!net.connected) claims.tick(dt);
-    updateShieldDomes(dt);
   }
 
   checkDeath();

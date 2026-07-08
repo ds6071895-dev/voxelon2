@@ -86,6 +86,8 @@ export class Player {
   /** Mouse-look sensitivity multiplier (1 = normal). Lowered while a gun is
    *  scoped (aim-down-sights) so high-zoom aiming is steady. */
   lookScale = 1;
+  /** Progression speed multiplier (Swiftness ranks + faction perk). */
+  speedMult = 1;
   /** A glider is worn in the chestplate slot (set by main from the inventory). */
   gliderEquipped = false;
   /** Currently gliding (wings deployed). */
@@ -203,9 +205,9 @@ export class Player {
       // still resolve at integration). WASD is ignored — you fly where you aim.
       this.applyGlide();
     } else {
-      let speed = this.sneaking ? SNEAK_SPEED
+      let speed = (this.sneaking ? SNEAK_SPEED
         : this.sprinting ? SPRINT_SPEED
-        : WALK_SPEED;
+        : WALK_SPEED) * this.speedMult;
       if (this.inWater) speed *= 0.45;
       // Swamp mud drags the feet (slight, kid-gentle slowdown).
       if (!this.flying && this.onGround && world.getBlock(

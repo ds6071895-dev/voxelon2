@@ -2,19 +2,14 @@
 // with a ZOOM TOGGLE between the HEARTLAND core (inner 1000×1000, where society
 // lives) and the full 5000×5000 world (the Wilds). A biome-colored base
 // (sampled from the deterministic Terrain, cached PER VIEW — never the full
-// 5000² block grid) with a faction-colored region board + CLAIM overlay, the
-// player's position + heading, attuned WAYPOINT TOTEMS (click to travel), and
+// 5000² block grid) with big readable landmark icons: surface structures,
+// vault entrances, attuned WAYPOINT TOTEMS (click to travel), and
 // click-to-drop WAYPOINTS (shown here AND as in-world beacons, persisted in
-// localStorage). A legend shows each faction's % of claimed land.
+// localStorage).
 
 import * as THREE from 'three';
 import { Biome } from './biomes';
-import { CHUNK_X, CHUNK_Z } from './chunk';
-import { Claims, claimChunkKeys } from './claims';
-import { FACTIONS, NO_FACTION, factionColor, factionName } from './teams';
-import {
-  REGION_COUNT, capitalFaction, isCapital, regionBounds, regionCenter,
-} from './regions';
+import { factionColor } from './teams';
 import { Terrain } from './terrain';
 import { CORE_BORDER, CORE_HALF, WORLD_BORDER } from './net/protocol';
 
@@ -67,10 +62,6 @@ export interface StructureMark { x: number; z: number; kind: string; }
 export interface MapContext {
   player(): { x: number; z: number; yaw: number };
   faction(): number;
-  /** Region board: owner faction id per region index (Phase 1). */
-  regions(): number[];
-  /** Per-region capture meters (Phase 2): filling faction + 0..1 fraction. */
-  captureMeters(): { faction: number[]; progress: number[] };
 }
 
 export class WorldMap {
@@ -81,7 +72,6 @@ export class WorldMap {
   private readonly legend: HTMLDivElement;
   private view: MapView = 'core';
   private readonly bases = new Map<MapView, HTMLCanvasElement>(); // cached biome renders
-  private landChunks = 1;                         // non-ocean chunks in the core
   private waypoints: Waypoint[] = [];
   /** Attuned Waypoint Totems (B4) — click one on the map to travel to it. */
   private totems: TotemPos[] = [];
@@ -109,7 +99,6 @@ export class WorldMap {
     private readonly scene: THREE.Scene,
     private readonly camera: THREE.Camera,
     private readonly terrain: Terrain,
-    private readonly claims: Claims,
     private readonly mapCtx: MapContext,
   ) {
     this.scene.add(this.markerGroup);
@@ -224,19 +213,6 @@ export class WorldMap {
       }
     }
     this.bases.set(this.view, c);
-    if (this.landChunks === 1) {
-      // Count non-ocean chunks in the CORE once (denominator for the claimed-land
-      // % — claims are Heartland-only, so the core is the right window).
-      let land = 0;
-      const cmin = Math.floor(-CORE_HALF / CHUNK_X), cmax = Math.floor(CORE_HALF / CHUNK_X);
-      for (let chx = cmin; chx < cmax; chx++) {
-        for (let chz = cmin; chz < cmax; chz++) {
-          const wx = chx * CHUNK_X + 8, wz = chz * CHUNK_Z + 8;
-          if (this.terrain.biomeWithWater(wx, wz, this.terrain.height(wx, wz)) !== Biome.Ocean) land++;
-        }
-      }
-      this.landChunks = Math.max(1, land);
-    }
     return c;
   }
 
@@ -258,190 +234,144 @@ export class WorldMap {
       ctx.fillText('WILDS', this.cx(0), this.cy(-WORLD_BORDER * 0.36));
     }
 
-    // Region board: faction-tinted grid of territories with a capital star on
-    // each home region (Phase 1). Drawn first so claims/nodes sit on top.
-    const owners = this.mapCtx.regions();
-    const meters = this.mapCtx.captureMeters();
-    const regionByFaction: Record<number, number> = {};
-    for (let i = 0; i < REGION_COUNT && i < owners.length; i++) {
-      const owner = owners[i];
-      const b = regionBounds(i);
-      const x = this.cx(b.minX), y = this.cy(b.minZ);
-      const w = (b.maxX - b.minX) * this.scale, h = (b.maxZ - b.minZ) * this.scale;
-      if (owner !== NO_FACTION) {
-        ctx.fillStyle = this.rgba(factionColor(owner), 0.22);
-        ctx.fillRect(x, y, w, h);
-        regionByFaction[owner] = (regionByFaction[owner] ?? 0) + 1;
-      }
-      ctx.strokeStyle = 'rgba(10,14,22,0.5)';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(x, y, w, h);
-      // Capture meter: a small filling bar at the region's foot in the attacker's
-      // color, plus a pulsing attacker-colored border so the front pops.
-      const capF = meters.faction?.[i] ?? NO_FACTION;
-      const frac = Math.max(0, Math.min(1, meters.progress?.[i] ?? 0));
-      if (capF !== NO_FACTION && frac > 0.001) {
-        const bw = w - 8, bx = x + 4, by = y + h - 8;
-        ctx.fillStyle = 'rgba(0,0,0,0.55)';
-        ctx.fillRect(bx, by, bw, 5);
-        ctx.fillStyle = this.rgba(factionColor(capF), 1);
-        ctx.fillRect(bx, by, bw * frac, 5);
-        ctx.strokeStyle = this.rgba(factionColor(capF), 0.9);
-        ctx.lineWidth = 2;
-        ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
-      }
-      if (isCapital(i)) this.drawCapital(regionCenter(i), capitalFaction(i));
+    // Surface structures: big, readable kind-shaped icons with a drop shadow.
+    for (const st of this.structures) {
+      this.drawStructure(this.cx(st.x), this.cy(st.z), st.kind);
     }
 
-    // Claim overlays (faction-colored translucent footprints).
-    const claimedByFaction: Record<number, number> = {};
-    for (const claim of this.claims.list()) {
-      const x0 = (claim.cx - 1) * CHUNK_X, z0 = (claim.cz - 1) * CHUNK_Z;
-      const w = 3 * CHUNK_X, h = 3 * CHUNK_Z;
-      const col = factionColor(claim.faction);
-      ctx.fillStyle = this.rgba(col, 0.4);
-      ctx.fillRect(this.cx(x0), this.cy(z0), w * this.scale, h * this.scale);
-      ctx.strokeStyle = this.rgba(col, 0.9);
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(this.cx(x0), this.cy(z0), w * this.scale, h * this.scale);
-      claimedByFaction[claim.faction] = (claimedByFaction[claim.faction] ?? 0) + claimChunkKeys(claim.cx, claim.cz).length;
+    // Vault markers (Milestone D): discovered vaults are bright + tier-labeled;
+    // merely SENSED nearby ones are faint with a '?'. Cleared ones dim.
+    for (const v of this.vaults) {
+      const px = this.cx(v.x), py = this.cy(v.z);
+      ctx.save();
+      ctx.globalAlpha = !v.discovered ? 0.5 : (v.cleared ? 0.6 : 1);
+      ctx.shadowColor = 'rgba(0,0,0,0.7)'; ctx.shadowBlur = 4;
+      ctx.fillStyle = '#171224';
+      ctx.strokeStyle = '#b9a5ff'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(px, py, 9, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = v.discovered ? '#efe6ff' : '#a898e0';
+      ctx.font = 'bold 11px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(v.discovered ? '☠' : '?', px, py);
+      if (v.discovered) {
+        ctx.fillStyle = '#c9b8ff';
+        ctx.font = 'bold 9px monospace';
+        ctx.fillText(['I', 'II', 'III'][v.tier - 1] ?? '?', px, py + 15);
+      }
+      ctx.restore();
     }
 
-    // Waypoints.
+    // Waypoints: big named diamonds.
     for (const w of this.waypoints) {
       const px = this.cx(w.x), py = this.cy(w.z);
+      ctx.save();
+      ctx.shadowColor = 'rgba(0,0,0,0.7)'; ctx.shadowBlur = 3;
       ctx.fillStyle = this.rgba(w.color, 1);
-      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1;
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.6;
       ctx.beginPath();
-      ctx.moveTo(px, py - 5); ctx.lineTo(px + 5, py); ctx.lineTo(px, py + 5); ctx.lineTo(px - 5, py);
+      ctx.moveTo(px, py - 8); ctx.lineTo(px + 8, py); ctx.lineTo(px, py + 8); ctx.lineTo(px - 8, py);
       ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 3;
+      ctx.strokeText(w.name, px, py + 10);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(w.name, px, py + 10);
+      ctx.restore();
     }
 
     // Attuned Waypoint Totems (B4): gold ringed markers — CLICK to travel.
     for (const t of this.totems) {
       const px = this.cx(t.x), py = this.cy(t.z);
-      ctx.strokeStyle = '#000'; ctx.lineWidth = 3;
-      ctx.beginPath(); ctx.arc(px, py, 7, 0, Math.PI * 2); ctx.stroke();
-      ctx.strokeStyle = '#ffd84a'; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(px, py, 7, 0, Math.PI * 2); ctx.stroke();
+      ctx.save();
+      ctx.shadowColor = 'rgba(0,0,0,0.7)'; ctx.shadowBlur = 4;
+      ctx.strokeStyle = '#000'; ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.arc(px, py, 9, 0, Math.PI * 2); ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = '#ffd84a'; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(px, py, 9, 0, Math.PI * 2); ctx.stroke();
       ctx.fillStyle = '#ffe27a';
       ctx.beginPath();
-      ctx.moveTo(px, py - 4); ctx.lineTo(px + 4, py); ctx.lineTo(px, py + 4); ctx.lineTo(px - 4, py);
+      ctx.moveTo(px, py - 5); ctx.lineTo(px + 5, py); ctx.lineTo(px, py + 5); ctx.lineTo(px - 5, py);
       ctx.closePath(); ctx.fill();
+      ctx.restore();
     }
 
-    // Surface structures (all of them): small kind-colored icons so the map
-    // reads as a treasure map. Drawn under the vaults/waypoints/player.
-    for (const st of this.structures) {
-      const px = this.cx(st.x), py = this.cy(st.z);
-      const col = STRUCT_COLOR[st.kind] ?? '#c9c9c9';
-      ctx.fillStyle = col;
-      ctx.strokeStyle = 'rgba(0,0,0,0.8)'; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.rect(px - 3, py - 3, 6, 6); ctx.fill(); ctx.stroke();
-      // A tiny inner mark to tell the kinds apart at a glance.
-      ctx.fillStyle = 'rgba(0,0,0,0.55)';
-      if (st.kind === 'tower') ctx.fillRect(px - 0.5, py - 3, 1, 6);       // vertical bar
-      else if (st.kind === 'bunker') ctx.fillRect(px - 3, py - 0.5, 6, 1); // horizontal bar
-      else { ctx.fillRect(px - 2, py - 0.5, 4, 1); ctx.fillRect(px - 0.5, py - 2, 1, 4); } // pod: cross
-    }
-
-    // Vault markers (Milestone D): discovered vaults are bright + tier-labeled;
-    // merely SENSED nearby vaults are faint with no tier. Cleared ones dim.
-    for (const v of this.vaults) {
-      const px = this.cx(v.x), py = this.cy(v.z);
-      ctx.globalAlpha = !v.discovered ? 0.4 : (v.cleared ? 0.55 : 1);
-      ctx.fillStyle = '#0d0f18';
-      ctx.strokeStyle = '#b9a5ff'; ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.arc(px, py, 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-      ctx.fillStyle = v.discovered ? '#e6dcff' : '#9a8fce';
-      ctx.font = 'bold 9px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(v.discovered ? '☠' : '?', px, py - 1);
-      if (v.discovered) {
-        ctx.fillStyle = '#b9a5ff';
-        ctx.font = 'bold 8px monospace';
-        ctx.fillText(['I', 'II', 'III'][v.tier - 1] ?? '?', px, py + 12);
-      }
-      ctx.globalAlpha = 1;
-    }
-
-    // War flags (dynamic markers): a colored flag glyph + label.
+    // Dynamic markers (server events): a colored flag glyph.
     for (const m of this.dynamicMarkers) {
       const fx = this.cx(m.x), fy = this.cy(m.z);
       ctx.strokeStyle = '#000'; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.moveTo(fx, fy + 7); ctx.lineTo(fx, fy - 8); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(fx, fy + 8); ctx.lineTo(fx, fy - 10); ctx.stroke();
       ctx.fillStyle = this.rgba(m.color, 1);
-      ctx.beginPath(); ctx.moveTo(fx, fy - 8); ctx.lineTo(fx + 10, fy - 5); ctx.lineTo(fx, fy - 2);
+      ctx.beginPath(); ctx.moveTo(fx, fy - 10); ctx.lineTo(fx + 12, fy - 6); ctx.lineTo(fx, fy - 2);
       ctx.closePath(); ctx.fill(); ctx.stroke();
     }
 
-    // Player marker (heading triangle).
+
+
+    // Player marker: a big outlined heading arrow with a soft glow.
     const p = this.mapCtx.player();
     const px = this.cx(p.x), py = this.cy(p.z);
     ctx.save();
     ctx.translate(px, py);
     ctx.rotate(-p.yaw); // map +z is down; yaw 0 faces -z (up)
-    ctx.fillStyle = '#fff'; ctx.strokeStyle = '#000'; ctx.lineWidth = 1;
+    ctx.shadowColor = 'rgba(255,255,255,0.7)'; ctx.shadowBlur = 6;
+    ctx.fillStyle = '#fff'; ctx.strokeStyle = '#000'; ctx.lineWidth = 1.6;
     ctx.beginPath();
-    ctx.moveTo(0, -7); ctx.lineTo(5, 6); ctx.lineTo(0, 3); ctx.lineTo(-5, 6);
+    ctx.moveTo(0, -10); ctx.lineTo(7, 8); ctx.lineTo(0, 4); ctx.lineTo(-7, 8);
     ctx.closePath(); ctx.fill(); ctx.stroke();
     ctx.restore();
 
-    this.drawLegend(claimedByFaction, regionByFaction);
+    this.drawLegend();
     this.syncMarkers();
   }
 
-  /** A capital marker: a faction-colored star at the home region centre. */
-  private drawCapital(c: { x: number; z: number }, faction: number): void {
+  /** A big, kind-shaped structure icon (tower/bunker/pod) with a drop shadow. */
+  private drawStructure(px: number, py: number, kind: string): void {
     const ctx = this.ctx;
-    const px = this.cx(c.x), py = this.cy(c.z);
+    const col = STRUCT_COLOR[kind] ?? '#c9c9c9';
     ctx.save();
-    ctx.translate(px, py);
-    ctx.fillStyle = this.rgba(factionColor(faction), 1);
-    ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    for (let k = 0; k < 5; k++) {
-      const a = -Math.PI / 2 + (k * 2 * Math.PI) / 5;
-      const a2 = a + Math.PI / 5;
-      ctx.lineTo(Math.cos(a) * 9, Math.sin(a) * 9);
-      ctx.lineTo(Math.cos(a2) * 4, Math.sin(a2) * 4);
+    ctx.shadowColor = 'rgba(0,0,0,0.75)'; ctx.shadowBlur = 3;
+    ctx.fillStyle = col;
+    ctx.strokeStyle = 'rgba(10,12,18,0.9)'; ctx.lineWidth = 1.5;
+    if (kind === 'tower') {
+      // A little watchtower: a tall keep with crenellations.
+      ctx.beginPath();
+      ctx.moveTo(px - 4, py + 5); ctx.lineTo(px - 4, py - 3);
+      ctx.lineTo(px - 5, py - 3); ctx.lineTo(px - 5, py - 6); ctx.lineTo(px - 2, py - 6);
+      ctx.lineTo(px - 2, py - 4); ctx.lineTo(px + 2, py - 4); ctx.lineTo(px + 2, py - 6);
+      ctx.lineTo(px + 5, py - 6); ctx.lineTo(px + 5, py - 3); ctx.lineTo(px + 4, py - 3);
+      ctx.lineTo(px + 4, py + 5);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+    } else if (kind === 'bunker') {
+      // A dome bunker with a slit.
+      ctx.beginPath();
+      ctx.moveTo(px - 6, py + 4);
+      ctx.arc(px, py + 4, 6, Math.PI, 0);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = 'rgba(10,12,18,0.85)';
+      ctx.fillRect(px - 3, py, 6, 1.6);
+    } else {
+      // Crashed cargo pod: a canted crate with a cross strap.
+      ctx.translate(px, py);
+      ctx.rotate(Math.PI / 4);
+      ctx.fillRect(-4.5, -4.5, 9, 9);
+      ctx.strokeRect(-4.5, -4.5, 9, 9);
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = 'rgba(10,12,18,0.7)';
+      ctx.fillRect(-4.5, -0.8, 9, 1.6);
+      ctx.fillRect(-0.8, -4.5, 1.6, 9);
     }
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
     ctx.restore();
   }
 
-  private drawLegend(
-    claimedByFaction: Record<number, number>,
-    regionByFaction: Record<number, number>,
-  ): void {
-    const me = this.mapCtx.faction();
-    const lines = ['<b>WAR MAP — REGIONS</b>'];
-    for (const f of FACTIONS) {
-      const regions = regionByFaction[f.id] ?? 0;
-      const pct = (regions / REGION_COUNT) * 100;
-      const mine = f.id === me ? ' ◀ you' : '';
-      lines.push(
-        `<span style="color:${this.rgba(f.color, 1)}">■</span> ${factionName(f.id)}: ` +
-        `${regions} <span style="color:#8da0c0">(${pct.toFixed(0)}%)</span>${mine}`);
-    }
-    const neutral = REGION_COUNT - Object.values(regionByFaction).reduce((a, b) => a + b, 0);
-    if (neutral > 0) lines.push(`<span style="color:#8da0c0">Neutral: ${neutral}</span>`);
-    lines.push('');
-    lines.push('<b>YOUR BASES</b>');
-    for (const f of FACTIONS) {
-      const chunks = claimedByFaction[f.id] ?? 0;
-      const pct = (chunks / this.landChunks) * 100;
-      const mine = f.id === me ? ' ◀' : '';
-      lines.push(
-        `<span style="color:${this.rgba(f.color, 1)}">■</span> ${factionName(f.id)}: ` +
-        `${pct.toFixed(1)}%${mine}`);
-    }
-    lines.push('');
+  private drawLegend(): void {
+    const lines: string[] = [];
     // Vault collection line (Milestone D): dungeon-hunting pressure.
     if (this.vaultTotal > 0) {
       lines.push(`<b>☠ VAULTS</b> — found ${this.vaults.length}/${this.vaultTotal}`);
+      lines.push('');
     }
     // Surface structures legend (icon key + total).
     if (this.structures.length) {
@@ -452,8 +382,8 @@ export class WorldMap {
         `<span style="color:${STRUCT_COLOR.tower}">◼</span> Towers ${c('tower')} · ` +
         `<span style="color:${STRUCT_COLOR.bunker}">◼</span> Bunkers ${c('bunker')} · ` +
         `<span style="color:${STRUCT_COLOR.pod}">◼</span> Pods ${c('pod')}`);
+      lines.push('');
     }
-    lines.push('');
     lines.push(`<b>WAYPOINTS</b> (${this.waypoints.length})`);
     const p = this.mapCtx.player();
     this.waypoints.forEach((w, i) => {

@@ -1643,6 +1643,78 @@ function paintJumpBoost(p: Painter, seed: number): void {
   p.set(4, 5, [190, 240, 190, 200]); p.set(11, 5, [190, 240, 190, 200]);
 }
 
+// --- Runes: glowing stone tablets (exploration-only armor socketables) --------
+
+/** A carved stone tablet with a glowing glyph. Each rune gets its own glow
+ *  color + glyph so they're readable apart at hotbar size. */
+function paintRuneTablet(
+  p: Painter, seed: number, glow: RGBA, glowHi: RGBA,
+  glyph: (set: (x: number, y: number, c: RGBA) => void) => void,
+): void {
+  const stone: RGBA = [96, 100, 112, 255];
+  const stoneD: RGBA = [66, 70, 82, 255];
+  const stoneHi: RGBA = [128, 133, 148, 255];
+  // Rounded tablet body with jittered stone shading.
+  for (let y = 2; y <= 13; y++) {
+    for (let x = 4; x <= 11; x++) {
+      const corner = (x === 4 || x === 11) && (y === 2 || y === 13);
+      if (corner) continue;
+      const edge = x === 4 || x === 11 || y === 2 || y === 13;
+      const jit = 0.9 + hash2(seed, x, y) * 0.2;
+      p.set(x, y, shade(edge ? stoneD : stone, jit));
+    }
+  }
+  p.set(5, 3, stoneHi); p.set(6, 3, stoneHi); p.set(5, 4, stoneHi);
+  // The glyph, in glow color with a bright core pixel jitter.
+  glyph((x, y, c) => p.set(x, y, c));
+  void glowHi; void glow;
+  outlineSprite(p);
+}
+
+function paintRuneIron(p: Painter, seed: number): void {
+  const glow: RGBA = [255, 196, 92, 255];
+  const hi: RGBA = [255, 236, 170, 255];
+  paintRuneTablet(p, seed, glow, hi, (set) => {
+    // A shield glyph.
+    for (let y = 5; y <= 9; y++) { set(6, y, glow); set(9, y, glow); }
+    for (let x = 6; x <= 9; x++) set(x, 5, glow);
+    set(7, 10, glow); set(8, 10, glow);
+    set(7, 11, hi); set(8, 11, hi);
+    set(7, 7, hi); set(8, 7, hi);
+  });
+}
+function paintRuneSwift(p: Painter, seed: number): void {
+  const glow: RGBA = [110, 220, 255, 255];
+  const hi: RGBA = [200, 245, 255, 255];
+  paintRuneTablet(p, seed, glow, hi, (set) => {
+    // A lightning zag.
+    set(9, 4, glow); set(8, 5, glow); set(7, 6, glow);
+    set(6, 7, glow); set(7, 7, hi); set(8, 7, glow); set(9, 7, glow);
+    set(8, 8, glow); set(7, 9, glow); set(6, 10, glow); set(5, 11, hi);
+  });
+}
+function paintRuneFortune(p: Painter, seed: number): void {
+  const glow: RGBA = [130, 240, 140, 255];
+  const hi: RGBA = [210, 255, 210, 255];
+  paintRuneTablet(p, seed, glow, hi, (set) => {
+    // A pick glyph: haft + head arc.
+    for (let i = 0; i < 5; i++) set(6 + i, 10 - i, glow);
+    set(5, 5, glow); set(6, 4, glow); set(7, 4, hi); set(8, 4, glow);
+    set(9, 4, glow); set(10, 5, glow);
+  });
+}
+function paintRuneFocus(p: Painter, seed: number): void {
+  const glow: RGBA = [235, 120, 235, 255];
+  const hi: RGBA = [255, 200, 255, 255];
+  paintRuneTablet(p, seed, glow, hi, (set) => {
+    // A crosshair ring + dot.
+    for (const [x, y] of [[7, 4], [8, 4], [6, 5], [9, 5], [5, 6], [10, 6],
+      [5, 7], [10, 7], [6, 8], [9, 8], [7, 9], [8, 9]] as [number, number][]) set(x, y, glow);
+    set(7, 6, hi); set(8, 6, hi); set(7, 7, hi); set(8, 7, hi);
+    set(7, 11, glow); set(8, 11, glow);
+  });
+}
+
 // --- Lifesteal (Milestone A): Heart + Revival Beacon sprites ------------------
 
 /** A chunky rounded pixel heart with a glossy highlight (the lifesteal
@@ -1981,6 +2053,11 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   // Healing consumables
   [Tile.BandageSprite]: paintBandage,
   [Tile.MedkitSprite]: paintMedkit,
+  // Runes
+  [Tile.RuneIron]: paintRuneIron,
+  [Tile.RuneSwift]: paintRuneSwift,
+  [Tile.RuneFortune]: paintRuneFortune,
+  [Tile.RuneFocus]: paintRuneFocus,
 };
 
 export function createAtlas(seed = 1337): Atlas {

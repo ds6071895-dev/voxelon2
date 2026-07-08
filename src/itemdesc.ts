@@ -19,7 +19,6 @@ const DESCRIPTIONS: Record<number, string> = {
   [Item.Rocket]: 'Explosive ammo for the rocket launcher.',
   [Item.Cannonball]: 'Ammo for turrets.',
   // War economy + factions.
-  [Block.Core]: 'Founds a BASE in your territory — raises an oil-powered shield.',
   [Block.Turret]: 'Auto-targets enemies. Load it with cannonballs + oil.',
   [Block.Autominer]: 'Mines ore automatically over time. Collect its output.',
   [Block.OilDerrick]: 'Pumps OIL — the fuel for base shields + the war chest.',
@@ -28,6 +27,10 @@ const DESCRIPTIONS: Record<number, string> = {
   // Travel.
   [Item.Glider]: 'Wear it in the chest slot (right-click to equip); jump in mid-air to glide.',
   // Respawn point.
+  [Item.RuneOfIron]: 'Loot-only rune — right-click to socket into worn armor: +1 armor.',
+  [Item.RuneOfSwiftness]: 'Loot-only rune — right-click to socket into worn armor: +3% speed.',
+  [Item.RuneOfFortune]: 'Loot-only rune — right-click to socket into worn armor: +20% mining speed.',
+  [Item.RuneOfFocus]: 'Loot-only rune — right-click to socket into worn armor: −25% gun spread.',
   [Block.RespawnBeacon]: 'Right-click to set your respawn point. Cheap + easily broken.',
   [Block.WaypointTotem]: 'Right-click to attune (max 4). Teleport to attuned totems from the map (M) — 60s cooldown, not while in combat.',
   // Discovery (Milestone C).

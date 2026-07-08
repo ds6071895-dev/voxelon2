@@ -284,7 +284,8 @@ export class Terrain {
               : bareRock || h >= SNOW_LINE ? Block.Stone // rocky mountainside
               : Block.Dirt;
           } else if (mesa && y >= h - 9) {
-            id = Block.Terracotta;                   // banded badlands rock
+            // BANDED badlands rock: alternating strata read as painted cliffs.
+            id = (y % 5) < 2 ? Block.RedSand : Block.Terracotta;
           } else if (ashen && y >= h - 7) {
             id = Block.Basalt;
           } else if (biome === Biome.Desert && y >= h - 7) {
@@ -351,7 +352,9 @@ export class Terrain {
     }
   }
 
-  /** Column-local features: cacti, dead bushes, tall grass, flowers. */
+  /** Column-local features: cacti, bushes, tall grass, flowers, boulders,
+   *  hoodoos, basalt spikes — each biome gets its own signature clutter so
+   *  the landscapes stop looking samey. */
   private decorate(
     chunk: Chunk, lx: number, lz: number, wx: number, wz: number,
     h: number, biome: Biome
@@ -365,6 +368,29 @@ export class Terrain {
         for (let i = 1; i <= tall; i++) chunk.set(lx, h + i, lz, Block.Cactus);
       } else if (r < 0.012) {
         chunk.set(lx, h + 1, lz, Block.DeadBush);
+      } else if (r < 0.0135) {
+        // A weathered sandstone slab poking out of the dunes.
+        chunk.set(lx, h + 1, lz, Block.Sandstone);
+      }
+      return;
+    }
+
+    // Mesa: dead bushes + occasional terracotta HOODOOS (2–5 tall pillars).
+    if (biome === Biome.Mesa) {
+      if (r < 0.01) {
+        chunk.set(lx, h + 1, lz, Block.DeadBush);
+      } else if (r < 0.0125) {
+        const tall = 2 + Math.floor(hash2(this.seed ^ 0x40d0, wx, wz) * 4);
+        for (let i = 1; i <= tall; i++) chunk.set(lx, h + i, lz, Block.Terracotta);
+      }
+      return;
+    }
+
+    // Ashlands: jagged basalt spikes rising from the flats.
+    if (biome === Biome.Ashlands) {
+      if (r < 0.006) {
+        const tall = 2 + Math.floor(hash2(this.seed ^ 0xba51, wx, wz) * 4);
+        for (let i = 1; i <= tall; i++) chunk.set(lx, h + i, lz, Block.Basalt);
       }
       return;
     }
@@ -385,6 +411,16 @@ export class Terrain {
       return;
     }
 
+    // Snowy plains: low spruce shrubs + mossy boulders break up the white.
+    if (biome === Biome.Snowy) {
+      if (r < 0.008) chunk.set(lx, h + 1, lz, Block.SpruceLeaves);
+      else if (r < 0.011) {
+        chunk.set(lx, h + 1, lz, Block.Cobblestone);
+        if (hash2(this.seed ^ 0xb0d, wx, wz) < 0.4) chunk.set(lx, h + 2, lz, Block.Cobblestone);
+      }
+      return;
+    }
+
     const grassy = biome === Biome.Plains || biome === Biome.Forest ||
       biome === Biome.BirchForest || biome === Biome.Jungle ||
       biome === Biome.CherryGrove;
@@ -395,13 +431,35 @@ export class Terrain {
       : biome === Biome.Plains ? 0.06
       : biome === Biome.CherryGrove ? 0.05
       : 0.035;
-    const pFlower = biome === Biome.CherryGrove ? 0.02 : 0.006;
+    // Flowers cluster into MEADOW PATCHES (a coarse 8×8 mask) so plains read as
+    // fields with drifts of color instead of uniform speckle.
+    const meadow = hash2(this.seed ^ 0xf10a, wx >> 3, wz >> 3) < 0.22;
+    const pFlower = biome === Biome.CherryGrove ? 0.02
+      : meadow ? 0.055
+      : 0.004;
     if (r < pGrass) {
       chunk.set(lx, h + 1, lz, Block.TallGrass);
     } else if (r < pGrass + pFlower) {
-      const poppyBias = biome === Biome.CherryGrove ? 0.85 : 0.4;
+      // Meadow patches lean one color per patch (real drifts, not confetti).
+      const poppyBias = biome === Biome.CherryGrove ? 0.85
+        : meadow ? (hash2(this.seed ^ 0xf1f1, wx >> 3, wz >> 3) < 0.5 ? 0.85 : 0.15)
+        : 0.4;
       chunk.set(lx, h + 1, lz,
         hash2(this.seed ^ 0xf1, wx, wz) < poppyBias ? Block.Poppy : Block.Dandelion);
+    } else if (biome === Biome.Forest || biome === Biome.BirchForest) {
+      // Forest floor clutter: leafy shrubs + rare mossy boulders.
+      if (r > 0.985 && r < 0.995) {
+        chunk.set(lx, h + 1, lz,
+          biome === Biome.BirchForest ? Block.BirchLeaves : Block.Leaves);
+      } else if (r >= 0.998) {
+        chunk.set(lx, h + 1, lz, Block.Cobblestone);
+      }
+    } else if (biome === Biome.Jungle && r > 0.97) {
+      // Dense jungle underbrush: ground-level leaf bushes.
+      chunk.set(lx, h + 1, lz, Block.JungleLeaves);
+    } else if (biome === Biome.Plains && r > 0.9985) {
+      // A lone plains boulder (landmark clutter).
+      chunk.set(lx, h + 1, lz, Block.Cobblestone);
     }
   }
 
