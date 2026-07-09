@@ -30,6 +30,11 @@ export const COMBAT_TAG = 10;        // seconds after ANY damage that block a po
 export const MELEE_DAMAGE = 4;     // server-applied fist damage
 export const MELEE_RANGE = 4.5;
 export const EDIT_RANGE = 7;       // max distance a player may edit a block
+// TPA (teleport requests, DonutSMP-style): the target must HOLD the accept key
+// for TPA_HOLD seconds (client-side — moving or taking damage resets the hold);
+// a pending request expires server-side after TPA_EXPIRE seconds.
+export const TPA_HOLD = 5;
+export const TPA_EXPIRE = 60;
 
 /** Public, render-relevant state of one player. */
 export interface PlayerSnapshot {
@@ -39,6 +44,7 @@ export interface PlayerSnapshot {
   health: number;
   dead: boolean;
   gliding?: boolean;
+  boating?: boolean;
 }
 
 /** Gamemode, set by a server-console admin command. */
@@ -81,8 +87,18 @@ export type ClientMsg =
   // Mandatory accounts: a socket must authenticate before it spawns a player.
   | { t: 'register'; username: string; password: string; faction?: number } // faction = picked side
   | { t: 'login'; username: string; password: string }
-  | { t: 'xform'; x: number; y: number; z: number; yaw: number; pitch: number; gliding?: boolean }
+  | { t: 'xform'; x: number; y: number; z: number; yaw: number; pitch: number;
+      gliding?: boolean; boating?: boolean }
   | { t: 'edit'; x: number; y: number; z: number; block: number }
+  // Pull a Lever: the server recomputes the flips (lever + linked traps within
+  // LEVER_RADIUS, traps.ts) over its edit log and broadcasts them as edits —
+  // linked traps can sit beyond the puller's own EDIT_RANGE, so this can't be
+  // expressed as plain client edits.
+  | { t: 'lever'; x: number; y: number; z: number }
+  // TPA: ask to teleport to `target` (by username); the target accepts their
+  // newest pending request after the client-side 5s hold completes.
+  | { t: 'tpa'; target: string }
+  | { t: 'tpaAccept' }
   | { t: 'attack'; target: number }
   | { t: 'selfhurt'; amount: number }   // fall/drown damage, applied by server
   | { t: 'respawn' }
@@ -229,6 +245,8 @@ export type ServerMsg =
   | { t: 'teleport'; x: number; y: number; z: number }
   // Admin notice shown to a player (e.g. "You are now in creative mode").
   | { t: 'notice'; text: string }
+  // TPA: `from` wants to teleport to YOU — hold the accept key to allow it.
+  | { t: 'tpaRequest'; from: string }
   // Lifesteal (Milestone A): the local player's authoritative hearts count.
   // `reason` drives the client toast + sound; `from` names the other player on
   // a steal/loss.

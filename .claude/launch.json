@@ -1,0 +1,14 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "vite-dev",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        "-c",
+        "export PATH=/home/aiscoding2022/.config/nvm/versions/node/v24.13.1/bin:$PATH && npm run dev"
+      ],
+      "port": 5173
+    }
+  ]
+}

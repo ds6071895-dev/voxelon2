@@ -89,6 +89,11 @@ export const RECIPES: Recipe[] = [
   ...tools(C, [Item.StonePickaxe, Item.StoneAxe, Item.StoneShovel]),
   ...tools(I, [Item.IronPickaxe, Item.IronAxe, Item.IronShovel]),
 
+  // Early-game armor: wood (planks) + stone (cobble) starter sets — cheap on
+  // purpose so a fresh spawn can suit up before their first Tier I vault.
+  ...armorSet(P, [Item.WoodHelmet, Item.WoodChestplate, Item.WoodLeggings, Item.WoodBoots]),
+  ...armorSet(C, [Item.StoneHelmet, Item.StoneChestplate, Item.StoneLeggings, Item.StoneBoots]),
+
   // Armor (M10): iron / diamond / titanium sets.
   ...armorSet(I, [Item.IronHelmet, Item.IronChestplate, Item.IronLeggings, Item.IronBoots]),
   ...armorSet(D, [Item.DiamondHelmet, Item.DiamondChestplate, Item.DiamondLeggings, Item.DiamondBoots]),
@@ -161,6 +166,26 @@ export const RECIPES: Recipe[] = [
   shapeless([R, R, S], Item.Bandage, 2),
   // Medkit = a strong field kit: an iron case, a diamond healing core, redstone.
   shaped([[null, R, null], [I, D, I], [null, R, null]], Item.Medkit),
+
+  // Traps. Spike Trap = a row of iron spikes on a stone base (batch of 3).
+  shaped([[I, I, I], [C, C, C]], Block.SpikeTrap, 3),
+  // Landmine = twin redstone triggers over an iron shell packed with powder.
+  shaped([[R, null, R], [I, ANY_COAL, I]], Block.Landmine, 2),
+  // Lever-triggered traps — DIRT cheap on purpose (trap-building is core play).
+  // Lever = a stick on cobble. Fall Trap = two planks (a flimsy hatch).
+  // Wall Trap = two cobble (a spring-loaded wall block).
+  shaped([[S], [C]], Block.Lever, 2),
+  shaped([[P, P]], Block.FallTrap, 2),
+  shaped([[C, C]], Block.WallTrap, 2),
+
+  // Boat: a plank hull, like the classic. Right-click water to launch.
+  shaped([[P, null, P], [P, P, P]], Item.Boat),
+
+  // Vault compasses (one-use vault finders): a redstone needle in a ring —
+  // iron for Tier I, gold for Tier II, diamond for the deep-Wilds Tier III.
+  shaped([[null, I, null], [I, R, I], [null, S, null]], Item.VaultCompass1),
+  shaped([[null, Item.GoldIngot, null], [Item.GoldIngot, R, Item.GoldIngot], [null, S, null]], Item.VaultCompass2),
+  shaped([[null, D, null], [D, R, D], [null, S, null]], Item.VaultCompass3),
 
   // Building set (M15): per-wood slabs + stairs.
   ...woodCraft(OAK, Block.OakSlab, Block.OakStairsN),

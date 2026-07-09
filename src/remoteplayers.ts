@@ -203,6 +203,8 @@ interface Avatar {
   head: THREE.Group;    // separate group so we can pitch it with look-dir
   /** [leftLeg, rightLeg, leftArm, rightArm] — each pivots at its hip/shoulder. */
   parts: THREE.Group[];
+  /** Wooden boat hull, shown while the player is boating. */
+  boat: THREE.Group;
   material: THREE.MeshBasicMaterial;
   nameTex: THREE.CanvasTexture;
   sprite: THREE.Sprite;
@@ -338,6 +340,25 @@ export class RemotePlayers {
 
     group.add(ll, rl, la, ra);
 
+    // ── Boat hull (shown while boating) ────────────────────────────────────
+    // Per-avatar geometry (not shared) so dispose()'s traverse stays correct.
+    const boat = new THREE.Group();
+    const hullC = new THREE.Color(0x8a6a3f);
+    const hullD = new THREE.Color(0x6d5330);
+    const floor = new THREE.Mesh(shadedBox(1.1, 0.18, 2.0, hullD), mat);
+    floor.position.y = 0.09;
+    const railL = new THREE.Mesh(shadedBox(0.14, 0.36, 2.0, hullC), mat);
+    railL.position.set(-0.55, 0.3, 0);
+    const railR = new THREE.Mesh(shadedBox(0.14, 0.36, 2.0, hullC), mat);
+    railR.position.set(0.55, 0.3, 0);
+    const bow = new THREE.Mesh(shadedBox(1.1, 0.42, 0.16, hullC), mat);
+    bow.position.set(0, 0.34, -1.0); // model faces -z
+    const stern = new THREE.Mesh(shadedBox(1.1, 0.36, 0.16, hullC), mat);
+    stern.position.set(0, 0.3, 1.0);
+    boat.add(floor, railL, railR, bow, stern);
+    boat.visible = false;
+    group.add(boat);
+
     // ── Name tag ───────────────────────────────────────────────────────────
     const { tex, sprite } = makeNameTag(remote.info.username, team, isFaction(faction));
     sprite.position.y = 2.34;
@@ -358,7 +379,7 @@ export class RemotePlayers {
 
     this.scene.add(group);
     return {
-      group, head: headGroup,
+      group, head: headGroup, boat,
       parts: [ll, rl, la, ra],
       material: mat, nameTex: tex, sprite,
       healthCanvas, healthTex, healthSprite, lastHealth: -1,
@@ -401,7 +422,16 @@ export class RemotePlayers {
       }
 
       // ── Pose / animation ──── parts = [leftLeg, rightLeg, leftArm, rightArm] ─
-      if (r.gliding) {
+      av.boat.visible = r.boating;
+      if (r.boating) {
+        // Seated in the hull: legs stretched forward, arms rowing out front.
+        av.group.rotation.x = 0;
+        av.head.rotation.x = 0;
+        av.parts[0].rotation.x = 1.35;
+        av.parts[1].rotation.x = 1.35;
+        av.parts[2].rotation.x = 0.55;
+        av.parts[3].rotation.x = 0.55;
+      } else if (r.gliding) {
         // Body tilts forward like a hang-glider; arms swept forward like wings.
         av.group.rotation.x = 1.05;
         av.parts[0].rotation.x = 0.2;  // legs trail together behind

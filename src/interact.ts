@@ -96,6 +96,8 @@ export class Interaction {
   onAttune?: (x: number, y: number, z: number) => void;
   /** Fired on right-click of a VaultChest: claim the per-player vault loot. */
   onVaultChest?: (x: number, y: number, z: number) => void;
+  /** Fired on right-click of a Lever: pull it (flips linked traps). */
+  onLever?: (x: number, y: number, z: number) => void;
   /** When set ("Move machine" armed), the NEXT right-click consumes itself and
    *  calls this with the placement cell (against the aimed face) instead of
    *  placing/opening — so a machine can be relocated without breaking it. */
@@ -237,6 +239,11 @@ export class Interaction {
     // A VaultChest: roll your once-per-vault treasure (Milestone D).
     if (id === Block.VaultChest) {
       this.onVaultChest?.(this.target.x, this.target.y, this.target.z);
+      return true;
+    }
+    // A Lever: pull it — flips itself + every linked trap in radius.
+    if (id === Block.Lever || id === Block.LeverOn) {
+      this.onLever?.(this.target.x, this.target.y, this.target.z);
       return true;
     }
     const kind = id === Block.CraftingTable ? 'table'

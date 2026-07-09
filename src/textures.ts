@@ -736,6 +736,8 @@ function paintOre(spotColor: RGBA, spotColor2: RGBA) {
 
 // --- Armor + guns (parked features) ----------------------------------------
 
+const ARMOR_WOOD: RGBA = [158, 118, 66, 255];
+const ARMOR_STONE: RGBA = [130, 132, 138, 255];
 const ARMOR_IRON: RGBA = [200, 200, 205, 255];
 const ARMOR_DIAMOND: RGBA = [120, 222, 224, 255];
 const ARMOR_TITAN: RGBA = [180, 196, 220, 255];
@@ -1864,6 +1866,198 @@ function paintMedkit(p: Painter, seed: number): void {
   outlineSprite(p, [40, 44, 52, 255]);
 }
 
+// --- Traps + boat ---------------------------------------------------------------
+
+/** Spike Trap top: a dark iron plate studded with a 3×3 grid of gleaming spikes. */
+function paintSpikeTrapTop(p: Painter, seed: number): void {
+  const plate: RGBA = [88, 90, 96, 255];
+  p.fill((x, y) => shade(plate, speckle(seed, x, y, 0.1)));
+  for (const cx of [3, 8, 13]) {
+    for (const cy of [3, 8, 13]) {
+      p.set(cx, cy, [234, 238, 244, 255]);      // gleaming tip
+      p.set(cx - 1, cy, [152, 156, 164, 255]);  // lit flank
+      p.set(cx + 1, cy, [56, 58, 64, 255]);     // shadowed flank
+      p.set(cx, cy + 1, [56, 58, 64, 255]);
+    }
+  }
+}
+
+/** Spike Trap side: a riveted iron base with spike silhouettes above it. */
+function paintSpikeTrapSide(p: Painter, seed: number): void {
+  const base: RGBA = [70, 72, 78, 255];
+  p.fill((x, y) => shade(base, speckle(seed, x, y, 0.12)));
+  for (const x of [2, 7, 12]) p.set(x, 12, [142, 146, 154, 255]); // rivets
+  for (const x of [2, 6, 10, 14]) { // spike tips (read from any crop)
+    p.set(x, 2, [226, 230, 236, 255]);
+    p.set(x, 3, [162, 166, 174, 255]);
+    p.set(x, 4, [110, 112, 120, 255]);
+  }
+}
+
+/** Landmine top: olive-drab camo plate with a red arming button dead centre. */
+function paintLandmineTop(p: Painter, seed: number): void {
+  const camo: RGBA = [96, 104, 74, 255];
+  const camo2: RGBA = [76, 84, 60, 255];
+  p.fill((x, y) => shade(hash2(seed, x >> 2, y >> 2) > 0.5 ? camo : camo2,
+    speckle(seed ^ 3, x, y, 0.08)));
+  // Plate ridge highlights.
+  for (let i = 2; i <= 13; i++) { p.set(i, 2, shade(camo, 1.18)); p.set(2, i, shade(camo, 1.12)); }
+  // The red trigger button.
+  for (const [x, y] of [[7, 7], [8, 7], [7, 8], [8, 8]]) p.set(x, y, [214, 48, 44, 255]);
+  p.set(7, 7, [255, 112, 102, 255]);
+}
+
+/** Landmine side: the thin dark metal rim of the plate. */
+function paintLandmineSide(p: Painter, seed: number): void {
+  p.fill((x, y) => shade([52, 56, 46, 255], speckle(seed, x, y, 0.1)));
+  for (let x = 0; x < 16; x++) p.set(x, 14, [30, 32, 26, 255]);
+}
+
+/** Lever: a cobble base plinth with a wooden pull-handle — tilted left when
+ *  off, right (with a lit red tip) when on. Drawn as a cross billboard. */
+function paintLever(on: boolean) {
+  return (p: Painter, seed: number): void => {
+    const cobble: RGBA = [118, 118, 118, 255];
+    for (let y = 12; y <= 14; y++) {
+      for (let x = 5; x <= 10; x++) {
+        p.set(x, y, shade(cobble, 0.85 + hash2(seed, x, y) * 0.3));
+      }
+    }
+    const stick: RGBA = [148, 110, 62, 255];
+    for (let i = 0; i < 8; i++) { // the handle leans off its pivot at (8, 12)
+      const x = on ? 8 + (i >> 1) : 8 - (i >> 1);
+      const y = 11 - i;
+      p.set(x, y, shade(stick, 0.9 + hash2(seed, x, y) * 0.2));
+    }
+    const tipX = on ? 8 + 3 : 8 - 3;
+    p.set(tipX, 4, on ? [236, 60, 48, 255] : [96, 74, 46, 255]); // tip knob
+    p.set(tipX, 3, on ? [255, 130, 110, 255] : [120, 92, 56, 255]);
+  };
+}
+
+/** Fall Trap (closed): a plank hatch — border frame, dark X seam, hinge studs.
+ *  Solid + walkable until a linked lever swings it open. */
+function paintFallTrap(p: Painter, seed: number): void {
+  const plank: RGBA = [166, 130, 78, 255];
+  const dark: RGBA = [96, 72, 42, 255];
+  p.fill((x, y) => shade(plank, 0.88 + hash2(seed, x, (y >> 2) * 7) * 0.2));
+  for (let i = 0; i < 16; i++) { // frame
+    p.set(i, 0, dark); p.set(i, 15, dark); p.set(0, i, dark); p.set(15, i, dark);
+  }
+  for (let i = 2; i <= 13; i++) { // the X seam (reads "hatch", not "planks")
+    p.set(i, i, shade(dark, 1.1));
+    p.set(15 - i, i, shade(dark, 1.1));
+  }
+  for (const [x, y] of [[2, 2], [13, 2], [2, 13], [13, 13]]) { // hinge studs
+    p.set(x, y, [210, 214, 222, 255]);
+  }
+}
+
+/** Fall Trap (open): mostly transparent — just the broken frame and a couple
+ *  of snapped slats (rendered as a cross billboard you fall straight through). */
+function paintFallTrapOpen(p: Painter, seed: number): void {
+  const dark: RGBA = [96, 72, 42, 255];
+  p.fill(() => [0, 0, 0, 0]);
+  for (let i = 0; i < 16; i++) { // the frame stays
+    p.set(i, 0, dark); p.set(i, 15, shade(dark, 0.8));
+    p.set(0, i, dark); p.set(15, i, dark);
+  }
+  for (let i = 1; i < 7; i++) { // two snapped slats dangling inward
+    p.set(3, i, shade([150, 116, 68, 255], 0.9 + hash2(seed, 3, i) * 0.2));
+    p.set(11, i + 2, shade([150, 116, 68, 255], 0.85 + hash2(seed, 11, i) * 0.2));
+  }
+}
+
+/** Wall Trap top: a steel spring-plate with a bright "pops UP" chevron. */
+function paintWallTrapTop(p: Painter, seed: number): void {
+  const steel: RGBA = [96, 100, 110, 255];
+  p.fill((x, y) => shade(steel, speckle(seed, x, y, 0.1)));
+  for (let i = 0; i < 16; i++) { p.set(i, 0, shade(steel, 1.25)); p.set(0, i, shade(steel, 1.15)); }
+  const hi: RGBA = [232, 206, 84, 255]; // warning-yellow chevron pointing up
+  for (let i = 0; i <= 4; i++) {
+    p.set(8 - i, 5 + i, hi); p.set(7 + i, 5 + i, hi);
+  }
+  p.set(7, 11, hi); p.set(8, 11, hi); // chevron stem
+}
+
+/** Wall Trap side: dark steel with a yellow/black hazard band across the top. */
+function paintWallTrapSide(p: Painter, seed: number): void {
+  const steel: RGBA = [78, 82, 92, 255];
+  p.fill((x, y) => shade(steel, speckle(seed, x, y, 0.12)));
+  for (let x = 0; x < 16; x++) { // hazard band
+    const yellow = ((x >> 1) & 1) === 0;
+    p.set(x, 1, yellow ? [222, 186, 60, 255] : [34, 34, 38, 255]);
+    p.set(x, 2, yellow ? [198, 162, 48, 255] : [28, 28, 32, 255]);
+  }
+  for (const x of [3, 8, 13]) p.set(x, 12, [150, 154, 164, 255]); // rivets
+}
+
+/** Boat sprite: a little plank hull from the side — curved bow, dark cockpit,
+ *  a paddle poking up. */
+function paintBoat(p: Painter, seed: number): void {
+  const hull: RGBA = [150, 116, 68, 255];
+  const hullHi: RGBA = [186, 150, 96, 255];
+  const hullLo: RGBA = [108, 82, 48, 255];
+  const rows: Record<number, [number, number]> = {
+    6: [1, 14], 7: [1, 14], 8: [2, 13], 9: [3, 12], 10: [5, 10],
+  };
+  for (const yStr of Object.keys(rows)) {
+    const y = Number(yStr);
+    const [a, b] = rows[y];
+    for (let x = a; x <= b; x++) {
+      const c = y === 6 ? hullHi : y >= 9 ? hullLo : hull;
+      p.set(x, y, shade(c, 0.92 + hash2(seed, x, y) * 0.14));
+    }
+  }
+  // Raised bow/stern tips + a dark cockpit + the paddle.
+  p.set(0, 5, hullHi); p.set(1, 5, hullHi); p.set(14, 5, hullHi); p.set(15, 5, hullHi);
+  for (let x = 6; x <= 9; x++) p.set(x, 5, [70, 54, 34, 255]);
+  p.set(11, 3, [122, 94, 58, 255]); p.set(10, 4, [122, 94, 58, 255]);
+  outlineSprite(p);
+}
+
+/** Mob Spawner: a dark iron cage — thick lattice bars over a glowing ember
+ *  heart, so guarded vault rooms read as "kill the cage". */
+function paintMobSpawner(p: Painter, seed: number): void {
+  const bar: RGBA = [44, 46, 54, 255];
+  const barHi: RGBA = [74, 78, 90, 255];
+  p.fill((x, y) => {
+    const onBar = x % 5 === 0 || y % 5 === 0;
+    if (!onBar) return [16, 12, 20, 200]; // dark interior, slightly see-through
+    const edge = x === 0 || y === 0 || x === 15 || y === 15;
+    return shade(edge ? barHi : bar, 0.9 + hash2(seed, x, y) * 0.18);
+  });
+  // The ember heart, peeking through the middle gap.
+  for (const [x, y] of [[7, 7], [8, 7], [7, 8], [8, 8]]) p.set(x, y, [255, 120, 40, 255]);
+  p.set(7, 7, [255, 190, 90, 255]);
+  p.set(12, 3, [220, 90, 30, 220]); p.set(3, 12, [220, 90, 30, 220]); // stray sparks
+}
+
+/** Vault compass: a metal ring with a redstone needle; the ring metal marks the
+ *  tier (iron / gold / diamond-blue). */
+function paintVaultCompass(ring: RGBA, ringHi: RGBA) {
+  return (p: Painter, seed: number): void => {
+    // Ring: a circle of radius ~6 centred on (7.5, 7.5).
+    for (let y = 0; y < 16; y++) {
+      for (let x = 0; x < 16; x++) {
+        const d = Math.hypot(x - 7.5, y - 7.5);
+        if (d >= 5.1 && d <= 6.9) {
+          p.set(x, y, shade(d < 6 ? ringHi : ring, 0.9 + hash2(seed, x, y) * 0.16));
+        } else if (d < 5.1) {
+          p.set(x, y, [26, 28, 38, 255]); // dark face
+        }
+      }
+    }
+    // Redstone needle pointing NE + a pivot pin + the skull tick at north.
+    const needle: RGBA = [226, 60, 48, 255];
+    p.set(8, 7, needle); p.set(9, 6, needle); p.set(10, 5, needle);
+    p.set(7, 8, [140, 42, 34, 255]); p.set(6, 9, [140, 42, 34, 255]); // tail
+    p.set(7, 7, [240, 240, 244, 255]); // pivot
+    p.set(7, 3, [200, 190, 230, 255]); // the vault mark
+    outlineSprite(p);
+  };
+}
+
 const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.GrassTop]: paintGrassTop,
   [Tile.GrassSide]: paintGrassSide,
@@ -2058,6 +2252,31 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.RuneSwift]: paintRuneSwift,
   [Tile.RuneFortune]: paintRuneFortune,
   [Tile.RuneFocus]: paintRuneFocus,
+  [Tile.SpikeTrapTop]: paintSpikeTrapTop,
+  [Tile.SpikeTrapSide]: paintSpikeTrapSide,
+  [Tile.LandmineTop]: paintLandmineTop,
+  [Tile.LandmineSide]: paintLandmineSide,
+  [Tile.Boat]: paintBoat,
+  [Tile.MobSpawner]: paintMobSpawner,
+  [Tile.VaultCompass1]: paintVaultCompass([150, 152, 160, 255], [204, 208, 216, 255]),
+  [Tile.VaultCompass2]: paintVaultCompass([214, 176, 72, 255], [246, 216, 120, 255]),
+  [Tile.VaultCompass3]: paintVaultCompass([84, 190, 210, 255], [150, 236, 244, 255]),
+  // Early-game armor (wood + stone starter sets).
+  [Tile.ArmorHelmetWood]: paintArmorPiece('helmet', ARMOR_WOOD),
+  [Tile.ArmorChestWood]: paintArmorPiece('chestplate', ARMOR_WOOD),
+  [Tile.ArmorLegsWood]: paintArmorPiece('leggings', ARMOR_WOOD),
+  [Tile.ArmorBootsWood]: paintArmorPiece('boots', ARMOR_WOOD),
+  [Tile.ArmorHelmetStone]: paintArmorPiece('helmet', ARMOR_STONE),
+  [Tile.ArmorChestStone]: paintArmorPiece('chestplate', ARMOR_STONE),
+  [Tile.ArmorLegsStone]: paintArmorPiece('leggings', ARMOR_STONE),
+  [Tile.ArmorBootsStone]: paintArmorPiece('boots', ARMOR_STONE),
+  // Lever-triggered traps.
+  [Tile.Lever]: paintLever(false),
+  [Tile.LeverOn]: paintLever(true),
+  [Tile.FallTrap]: paintFallTrap,
+  [Tile.FallTrapOpen]: paintFallTrapOpen,
+  [Tile.WallTrapTop]: paintWallTrapTop,
+  [Tile.WallTrapSide]: paintWallTrapSide,
 };
 
 export function createAtlas(seed = 1337): Atlas {

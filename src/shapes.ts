@@ -5,7 +5,7 @@
 // hits collisionBoxes per overlapping cell, so the common cases return cached
 // constant arrays and never allocate — only stairs build a 2-element array.
 
-import { BLOCKS, isSolid, isTopSlab } from './blocks';
+import { Block, BLOCKS, isSolid, isTopSlab } from './blocks';
 
 /** Min/max corner of a box in cell-local [0,1] space. */
 export type Box = [[number, number, number], [number, number, number]];
@@ -13,11 +13,14 @@ export type Box = [[number, number, number], [number, number, number]];
 export const FULL_BOX: Box = [[0, 0, 0], [1, 1, 1]];
 export const SLAB_BOTTOM: Box = [[0, 0, 0], [1, 0.5, 1]];
 export const SLAB_TOP: Box = [[0, 0.5, 0], [1, 1, 1]];
+/** The landmine's thin pressure plate (slab-shaped block, custom height). */
+export const PLATE_BOX: Box = [[0, 0, 0], [1, 0.15, 1]];
 
 // Cached single-box arrays so the common (non-stairs) cases never allocate.
 const FULL: Box[] = [FULL_BOX];
 const BOTTOM: Box[] = [SLAB_BOTTOM];
 const TOP: Box[] = [SLAB_TOP];
+const PLATE: Box[] = [PLATE_BOX];
 const NONE: Box[] = [];
 
 /** The sub-boxes that make up a stairs block facing dir (0=N 1=E 2=S 3=W): a
@@ -36,7 +39,11 @@ export function stairBoxes(facing: number): Box[] {
 export function collisionBoxes(id: number): Box[] {
   if (!isSolid(id)) return NONE;
   const shape = BLOCKS[id].shape;
-  if (shape === 'slab') return isTopSlab(id) ? TOP : BOTTOM;
+  if (shape === 'slab') {
+    // Thin pressure/spring plates: the landmine and the retracted wall trap.
+    if (id === Block.Landmine || id === Block.WallTrap) return PLATE;
+    return isTopSlab(id) ? TOP : BOTTOM;
+  }
   if (shape === 'stairs') return stairBoxes(BLOCKS[id].facing);
   return FULL; // cube (and any other solid shape) fills the cell
 }

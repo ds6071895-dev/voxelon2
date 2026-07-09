@@ -7,7 +7,7 @@ import { Block } from './blocks';
 import { Chunk, CHUNK_X, CHUNK_Z } from './chunk';
 import { Noise2D, Noise3D, hash2, mulberry32 } from './noise';
 import { structureStamp } from './structures';
-import { VAULT_REACH, vaultStamp } from './vaults';
+import { VAULT_REACH, VaultStamp, vaultStamp } from './vaults';
 
 export const SEA_LEVEL = 63;
 const TREE_MARGIN = 3; // trees up to 3 blocks outside a chunk can reach into it
@@ -50,6 +50,8 @@ export class Terrain {
   private readonly caverns: Noise3D;
   private readonly oreField: Noise2D;
   private readonly oilField: Noise2D;
+  /** Vault stamps cached per anchor chunk (see vaultStampCached). */
+  private readonly vaultStampCache = new Map<string, VaultStamp | null>();
 
   constructor(seed: number) {
     this.seed = seed;
@@ -346,10 +348,22 @@ export class Terrain {
     }
     for (let dx = -VAULT_REACH; dx <= VAULT_REACH; dx++) {
       for (let dz = -VAULT_REACH; dz <= VAULT_REACH; dz++) {
-        const v = vaultStamp(this.seed, chunk.cx + dx, chunk.cz + dz, this);
+        const v = this.vaultStampCached(chunk.cx + dx, chunk.cz + dz);
         if (v) apply(v.blocks);
       }
     }
+  }
+
+  /** Vault stamps are big (sprawling complexes) and every chunk in reach needs
+   *  the same one — cache per anchor chunk instead of rebuilding per fill. */
+  private vaultStampCached(cx: number, cz: number): VaultStamp | null {
+    const key = `${cx},${cz}`;
+    let st = this.vaultStampCache.get(key);
+    if (st === undefined) {
+      st = vaultStamp(this.seed, cx, cz, this);
+      this.vaultStampCache.set(key, st);
+    }
+    return st;
   }
 
   /** Column-local features: cacti, bushes, tall grass, flowers, boulders,

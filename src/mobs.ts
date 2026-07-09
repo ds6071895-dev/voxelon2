@@ -8,7 +8,7 @@ import { Block, BLOCKS, isSolid, Tile } from './blocks';
 import type { ItemEntities } from './itementity';
 import { Item, ItemStack } from './items';
 import { inCore } from './net/protocol';
-import { VAULT_RECHARGE, VaultStamp } from './vaults';
+import { VaultStamp } from './vaults';
 import type { Particles } from './particles';
 import type { Player } from './player';
 import type { Atlas } from './textures';
@@ -231,6 +231,8 @@ export class Mob {
   attackCooldown = 0;
   despawnTime = 0;
   burnAccum = 0;
+  /** Damage-tick accumulator while standing on a Spike Trap. */
+  spikeAccum = 0;
   soundTimer = 3 + Math.random() * 9;
   walkPhase = 0;
   brightness = 1;
@@ -282,15 +284,10 @@ export class Mobs {
   private readonly particles: Particles;
   private spawnTimer = 0;
   private lightTimer = 0;
-  // --- Vault guards (Milestone D): per-room spawn anchors ---
+  // --- Vault guards (Milestone D): spawner-driven per-room populations ---
   /** The vault the player is currently inside (set by main each frame). */
   private vault: VaultStamp | null = null;
-  /** Cleared-room dormancy: anchor key -> localTime the anchor recharges. */
-  private readonly roomCooldowns = new Map<string, number>();
-  /** Anchors that have populated at least once (so "cleared" means something). */
-  private readonly roomSpawned = new Set<string>();
   private guardTimer = 0;
-  private localTime = 0;
   /** In-flight spitter gobs (simple lobbed projectiles; client-side like mobs). */
   private readonly spits: { pos: THREE.Vector3; vel: THREE.Vector3; mesh: THREE.Mesh; life: number }[] = [];
   private readonly spitGeo = new THREE.SphereGeometry(0.16, 6, 5);
@@ -329,31 +326,30 @@ export class Mobs {
     this.remove(mob);
   }
 
-  /** Vault guard anchors: while the player is inside the vault, keep each
-   *  room populated up to its cap; a room the player clears goes dormant for
-   *  VAULT_RECHARGE. Guards spawn regardless of light (it's a dungeon). */
+  /** Vault guards pour out of each room's MOB SPAWNER: while the cage block at
+   *  the room centre still stands (and a player is near), the room refills up
+   *  to its cap. BREAK the spawner (iron pick) to silence the room for good.
+   *  Guards spawn regardless of light (it's a dungeon). */
   private tickVaultGuards(player: Player): void {
     const v = this.vault;
     if (!v || player.dead) return;
     for (let i = 0; i < v.rooms.length; i++) {
       const room = v.rooms[i];
-      if (room.cap <= 0) continue; // the boss room belongs to the Brute
+      if (room.cap <= 0) continue; // the hall + boss room have no spawner
+      // The spawner block sits at the room centre; no block, no guards.
+      const sx = Math.floor(room.x), sy = Math.floor(room.y), sz = Math.floor(room.z);
+      if (this.world.getBlock(sx, sy, sz) !== Block.MobSpawner) continue;
+      // Spawners activate only with a player nearby (MC-style pressure).
+      const near = Math.hypot(player.pos.x - room.x, player.pos.z - room.z) < 26 &&
+        Math.abs(player.pos.y - room.y) < 10;
+      if (!near) continue;
       const key = `${v.cx},${v.cz}:${i}`;
       let count = 0;
       for (const m of this.list) if (m.room === key) count++;
-      // Cleared: the player stands in an emptied room -> the anchor sleeps.
-      const inRoom = Math.abs(player.pos.x - room.x) <= room.hw + 1 &&
-        Math.abs(player.pos.z - room.z) <= room.hw + 1 &&
-        Math.abs(player.pos.y - room.y) < 4;
-      if (inRoom && count === 0 && this.roomSpawned.has(key)) {
-        this.roomSpawned.delete(key);
-        this.roomCooldowns.set(key, this.localTime + VAULT_RECHARGE);
-        continue;
-      }
       if (this.guardTimer > 0 || count >= room.cap) continue;
-      if ((this.roomCooldowns.get(key) ?? -Infinity) > this.localTime) continue;
-      const gx = room.x + (Math.random() * 2 - 1) * (room.hw - 1.5);
-      const gz = room.z + (Math.random() * 2 - 1) * (room.hw - 1.5);
+      // Pour out right beside the cage (the spawner's 3×3 plinth is safe floor).
+      const gx = room.x + 0.5 + (Math.random() * 2 - 1) * 1.2;
+      const gz = room.z + 0.5 + (Math.random() * 2 - 1) * 1.2;
       const roll = Math.random();
       const type: MobType = v.tier >= 2 && roll < 0.3 ? 'skitter'
         : roll < 0.65 ? 'zombie' : 'spitter';
@@ -363,8 +359,8 @@ export class Mobs {
         mob.armored = true;
         mob.health = Math.round(mob.health * 1.8);
       }
-      this.roomSpawned.add(key);
-      this.guardTimer = 1.3; // at most one guard spawn per beat
+      this.particles.poof(room.x + 0.5, room.y + 0.6, room.z + 0.5); // cage flash
+      this.guardTimer = 2.0; // at most one guard spawn per beat
     }
   }
 
@@ -561,7 +557,6 @@ export class Mobs {
   }
 
   update(dt: number, player: Player, sun: number): void {
-    this.localTime += dt;
     this.guardTimer = Math.max(0, this.guardTimer - dt);
     if (this.spawningEnabled) this.tickVaultGuards(player);
     this.spawnTimer += dt;
@@ -786,6 +781,25 @@ export class Mobs {
           return;
         }
       }
+    }
+
+    // Spike Traps prick mobs standing on them (base defense: spikes work on
+    // zombies as well as raiders).
+    if (this.world.getBlock(
+      Math.floor(mob.pos.x), Math.floor(mob.pos.y - 0.05), Math.floor(mob.pos.z)
+    ) === Block.SpikeTrap) {
+      mob.spikeAccum += dt;
+      if (mob.spikeAccum >= 0.7) {
+        mob.spikeAccum = 0;
+        mob.health -= 2;
+        mob.hurtTime = 0.3;
+        if (mob.health <= 0) {
+          this.kill(mob);
+          return;
+        }
+      }
+    } else {
+      mob.spikeAccum = 0;
     }
 
     // --- physics ------------------------------------------------------------

@@ -45,6 +45,11 @@ const GLIDE_MIN_SPEED = 6;
 const GLIDE_MAX_SPEED = 32;
 const GLIDE_SINK = 2.2;        // baseline downward drift (blocks/s)
 const GLIDE_MIN_CLEARANCE = 3; // air blocks below required to deploy
+// Boat: fast, drifty travel over water. W rows toward where you look, S back-
+// paddles; buoyancy bobs the hull at the surface (mounted/dismounted by main).
+const BOAT_SPEED = 11;         // ~2.5× walking
+const BOAT_REVERSE = 0.35;     // back-paddle fraction of full speed
+const BOAT_ACCEL = 2.5;        // low accel = a drifty, boaty feel
 
 export class Player {
   readonly pos = new THREE.Vector3(); // feet, centre of the box
@@ -86,12 +91,18 @@ export class Player {
   /** Mouse-look sensitivity multiplier (1 = normal). Lowered while a gun is
    *  scoped (aim-down-sights) so high-zoom aiming is steady. */
   lookScale = 1;
-  /** Progression speed multiplier (Swiftness ranks + faction perk). */
+  /** Progression speed multiplier (skill tree + faction perk). */
   speedMult = 1;
+  /** Sprint energy-drain multiplier (<1 = Windrunner capstones). */
+  energyDrainMult = 1;
+  /** Fall-damage multiplier (<1 = Juggernaut capstones). */
+  fallDamageMult = 1;
   /** A glider is worn in the chestplate slot (set by main from the inventory). */
   gliderEquipped = false;
   /** Currently gliding (wings deployed). */
   gliding = false;
+  /** Riding a boat (mounted/dismounted by main; drives water-surface physics). */
+  boating = false;
   private prevJump = false;
   private eye = EYE_STANDING;
 
@@ -134,6 +145,7 @@ export class Player {
     this.damageFlash = 0;
     this.dead = false;
     this.gliding = false;
+    this.boating = false;
     this.prevJump = false;
   }
 
@@ -177,13 +189,15 @@ export class Player {
     // immediately re-toggle.
     const jumpEdge = input.jump && !this.prevJump;
     this.prevJump = input.jump;
+    if (this.boating) this.gliding = false;
     if (this.gliding) {
       if (this.onGround || this.inWater || this.flying ||
           !this.gliderEquipped || jumpEdge) {
         this.gliding = false;
       }
-    } else if (jumpEdge && this.gliderEquipped && !this.onGround && !this.inWater &&
-        !this.flying && this.groundClearance(world) > GLIDE_MIN_CLEARANCE) {
+    } else if (jumpEdge && this.gliderEquipped && !this.boating && !this.onGround &&
+        !this.inWater && !this.flying &&
+        this.groundClearance(world) > GLIDE_MIN_CLEARANCE) {
       this.gliding = true;
     }
 
@@ -200,7 +214,12 @@ export class Player {
     const dirX = -sin * fwd + cos * strafe;
     const dirZ = -cos * fwd - sin * strafe;
 
-    if (this.gliding) {
+    if (this.boating && !this.flying) {
+      // In a boat: W rows toward where you look, buoyancy pins the hull to the
+      // water surface (collisions still resolve at integration).
+      this.sprinting = false;
+      this.applyBoat(dt, input, world);
+    } else if (this.gliding) {
       // Wings deployed: the look direction sets the whole velocity (collisions
       // still resolve at integration). WASD is ignored — you fly where you aim.
       this.applyGlide();
@@ -254,7 +273,7 @@ export class Player {
     // Energy: sprinting drains it; otherwise it refills. Hitting 0 forces a
     // recovery to ENERGY_SPRINT_THRESHOLD before sprinting is allowed again.
     if (this.sprinting) {
-      this.energy = Math.max(0, this.energy - ENERGY_DRAIN * dt);
+      this.energy = Math.max(0, this.energy - ENERGY_DRAIN * this.energyDrainMult * dt);
       if (this.energy === 0) {
         this.exhausted = true;
         this.sprinting = false;
@@ -285,9 +304,10 @@ export class Player {
       this.moveAxisSneakAware(world, 0, this.vel.x * dt, wasOnGround);
       this.moveAxisSneakAware(world, 2, this.vel.z * dt, wasOnGround);
 
-      // Landing: vanilla fall damage = blocks fallen minus 3.
+      // Landing: vanilla fall damage = blocks fallen minus 3 (skill-tree
+      // capstones shave a fraction off).
       if (this.onGround && this.fallDistance > 0) {
-        const dmg = Math.ceil(this.fallDistance - 3.2);
+        const dmg = Math.ceil(Math.max(0, this.fallDistance - 3.2) * this.fallDamageMult);
         if (dmg > 0) this.damage(dmg);
         this.fallDistance = 0;
       }
@@ -366,6 +386,30 @@ export class Player {
       world.getBlock(bx, fy + 1, bz) === Block.Air &&
       world.getBlock(bx, fy + 2, bz) === Block.Air
     );
+  }
+
+  /** Boat physics: a drifty rowed throttle along the look yaw + buoyancy that
+   *  bobs the hull at the water surface (mild gravity when it leaves water, so
+   *  waterfalls and beachings feel right). */
+  private applyBoat(dt: number, input: PlayerInput, world: World): void {
+    let throttle = 0;
+    if (input.forward) throttle = 1;
+    else if (input.back) throttle = -BOAT_REVERSE;
+    const speed = BOAT_SPEED * this.speedMult * throttle;
+    const tx = -Math.sin(this.yaw) * speed;
+    const tz = -Math.cos(this.yaw) * speed;
+    const t = Math.min(1, BOAT_ACCEL * dt);
+    this.vel.x += (tx - this.vel.x) * t;
+    this.vel.z += (tz - this.vel.z) * t;
+    // Buoyancy: push up while the hull sits in water, mild gravity otherwise;
+    // heavy damping keeps the bob small — the boat rides right at the surface.
+    const hull = world.getBlock(
+      Math.floor(this.pos.x), Math.floor(this.pos.y + 0.1), Math.floor(this.pos.z));
+    if (hull === Block.Water) this.vel.y += 26 * dt;
+    else this.vel.y -= GRAVITY * 0.6 * dt;
+    this.vel.y *= 1 - Math.min(1, 7 * dt);
+    this.vel.y = Math.max(-8, Math.min(2.6, this.vel.y));
+    this.fallDistance = 0; // a boat never takes fall damage
   }
 
   /** Glider velocity from the look direction: dive to go fast, level out to

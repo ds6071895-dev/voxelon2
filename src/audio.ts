@@ -21,9 +21,12 @@ export function materialOf(block: number): Material {
     case Block.OakPlanks: case Block.CraftingTable: case Block.Torch:
     case Block.TorchPX: case Block.TorchNX: case Block.TorchPZ:
     case Block.TorchNZ:
+    case Block.Lever: case Block.LeverOn:
+    case Block.FallTrap: case Block.FallTrapOpen:
       return 'wood';
     case Block.RespawnBeacon: case Block.WaypointTotem:
     case Block.VaultBrick: case Block.VaultChest:
+    case Block.WallTrap: case Block.WallTrapUp:
       return 'stone';
     case Block.Sand:
       return 'sand';

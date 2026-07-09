@@ -81,6 +81,23 @@ export const enum Item {
   RuneOfSwiftness = 166,
   RuneOfFortune = 167,
   RuneOfFocus = 168,
+  // Boat: right-click on water to launch and ride it (jump to hop out).
+  Boat = 169,
+  // Vault compasses (one per tier): right-click to reveal the nearest vault of
+  // that tier — drops a waypoint pointing straight at it. ONE USE.
+  VaultCompass1 = 170,
+  VaultCompass2 = 171,
+  VaultCompass3 = 172,
+  // Early-game armor (wood/stone): cheap starter sets — thin protection next
+  // to iron, but a real edge for a fresh spawn's first Tier I vault run.
+  WoodHelmet = 173,
+  WoodChestplate = 174,
+  WoodLeggings = 175,
+  WoodBoots = 176,
+  StoneHelmet = 177,
+  StoneChestplate = 178,
+  StoneLeggings = 179,
+  StoneBoots = 180,
 }
 
 export interface ToolInfo {
@@ -333,6 +350,26 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Item.GoldIngot]: pureItem('Gold Ingot', Tile.GoldIngot),
   [Item.TitaniumIngot]: pureItem('Titanium Ingot', Tile.TitaniumIngot),
 
+  // Early-game armor — wood (5 points total = 20% reduction) and stone
+  // (8 points = 32%): cheap, fast-wearing starter sets so a fresh spawn can
+  // walk into a Tier I vault with SOMETHING on. Iron and up outclass them.
+  [Item.WoodHelmet]: armorItem('Wood Helmet', Tile.ArmorHelmetWood,
+    { slot: 'helmet', points: 1, tier: 0, durability: 55 }),
+  [Item.WoodChestplate]: armorItem('Wood Chestplate', Tile.ArmorChestWood,
+    { slot: 'chestplate', points: 2, tier: 0, durability: 80 }),
+  [Item.WoodLeggings]: armorItem('Wood Leggings', Tile.ArmorLegsWood,
+    { slot: 'leggings', points: 1, tier: 0, durability: 75 }),
+  [Item.WoodBoots]: armorItem('Wood Boots', Tile.ArmorBootsWood,
+    { slot: 'boots', points: 1, tier: 0, durability: 65 }),
+  [Item.StoneHelmet]: armorItem('Stone Helmet', Tile.ArmorHelmetStone,
+    { slot: 'helmet', points: 1, tier: 0, durability: 110 }),
+  [Item.StoneChestplate]: armorItem('Stone Chestplate', Tile.ArmorChestStone,
+    { slot: 'chestplate', points: 3, tier: 0, durability: 160 }),
+  [Item.StoneLeggings]: armorItem('Stone Leggings', Tile.ArmorLegsStone,
+    { slot: 'leggings', points: 2, tier: 0, durability: 150 }),
+  [Item.StoneBoots]: armorItem('Stone Boots', Tile.ArmorBootsStone,
+    { slot: 'boots', points: 2, tier: 0, durability: 130 }),
+
   // Armor — base points roughly track vanilla (iron 15, diamond ~17, titanium
   // ~21 total), with per-piece XP leveling adding up to +3 each over time.
   [Item.IronHelmet]: armorItem('Iron Helmet', Tile.ArmorHelmetIron,
@@ -424,6 +461,24 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Item.Bandage]: healItem('Bandage', Tile.BandageSprite, { duration: 5, interval: 0.6 }),
   [Item.Medkit]: healItem('Medkit', Tile.MedkitSprite, { duration: 8, interval: 0.3 }),
 
+  // Traps: placeable blocks (spikes hurt anyone standing on them; the mine
+  // detonates underfoot).
+  [Block.SpikeTrap]: blockItem(Block.SpikeTrap),
+  [Block.Landmine]: blockItem(Block.Landmine),
+  // Lever-triggered traps: the item is always the off/closed/down variant
+  // (LeverOn/FallTrapOpen/WallTrapUp are placement states, like wall torches).
+  [Block.Lever]: blockItem(Block.Lever),
+  [Block.FallTrap]: blockItem(Block.FallTrap),
+  [Block.WallTrap]: blockItem(Block.WallTrap),
+
+  // Boat: right-click water to launch, ride it fast across the surface.
+  [Item.Boat]: { name: 'Boat', kind: 'item', sprite: Tile.Boat, maxStack: 4 },
+
+  // Vault compasses: one-use vault finders, one per tier.
+  [Item.VaultCompass1]: { name: 'Vault Compass I', kind: 'item', sprite: Tile.VaultCompass1, maxStack: 8 },
+  [Item.VaultCompass2]: { name: 'Vault Compass II', kind: 'item', sprite: Tile.VaultCompass2, maxStack: 8 },
+  [Item.VaultCompass3]: { name: 'Vault Compass III', kind: 'item', sprite: Tile.VaultCompass3, maxStack: 8 },
+
   // Runes (loot-only): right-click to socket into a worn armor piece.
   [Item.RuneOfIron]: pureItem('Rune of Iron', Tile.RuneIron),
   [Item.RuneOfSwiftness]: pureItem('Rune of Swiftness', Tile.RuneSwift),
@@ -497,6 +552,13 @@ export function dropFor(
     case Block.TorchPZ:
     case Block.TorchNZ:
       return { id: Block.Torch, count: 1 };
+    // Triggered trap states drop their base (item) variant.
+    case Block.LeverOn:
+      return { id: Block.Lever, count: 1 };
+    case Block.FallTrapOpen:
+      return { id: Block.FallTrap, count: 1 };
+    case Block.WallTrapUp:
+      return { id: Block.WallTrap, count: 1 };
     case Block.Bedrock:
     case Block.Water:
     case Block.Air:

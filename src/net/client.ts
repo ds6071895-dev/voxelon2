@@ -17,6 +17,7 @@ export interface Remote {
   health: number;
   dead: boolean;
   gliding: boolean;
+  boating: boolean;
 }
 
 /** Resolve the WebSocket URL. When the page is served by the game server itself
@@ -66,6 +67,8 @@ export class NetClient {
   onTeleport?: (x: number, y: number, z: number) => void;
   /** A server notice to surface to the local player (admin feedback). */
   onNotice?: (text: string) => void;
+  /** TPA: `from` wants to teleport to YOU (hold the accept key to allow). */
+  onTpaRequest?: (from: string) => void;
   /** Roster changed (join/leave/welcome) — refresh player count UI. */
   onRoster?: () => void;
   /** Connection lost after having been live. */
@@ -213,6 +216,7 @@ export class NetClient {
             r.tyaw = s.yaw; r.tpitch = s.pitch;
             r.health = s.health; r.dead = s.dead;
             r.gliding = s.gliding === true;
+            r.boating = s.boating === true;
           }
         }
         break;
@@ -227,6 +231,9 @@ export class NetClient {
         break;
       case 'notice':
         this.onNotice?.(msg.text);
+        break;
+      case 'tpaRequest':
+        this.onTpaRequest?.(msg.from);
         break;
       case 'edit':
         this.onEdit?.(msg.x, msg.y, msg.z, msg.block);
@@ -338,7 +345,8 @@ export class NetClient {
 
   /** Throttled transform send (call every frame with dt). */
   sendXform(
-    dt: number, x: number, y: number, z: number, yaw: number, pitch: number, gliding = false
+    dt: number, x: number, y: number, z: number, yaw: number, pitch: number,
+    gliding = false, boating = false
   ): void {
     if (!this.connected) return;
     const interval = 1 / TRANSFORM_HZ;
@@ -347,7 +355,7 @@ export class NetClient {
     // Subtract the interval (don't zero) so the long-run rate matches
     // TRANSFORM_HZ; clamp to avoid a burst after a long stall.
     this.xformAcc = Math.min(this.xformAcc - interval, interval);
-    this.raw({ t: 'xform', x, y, z, yaw, pitch, gliding });
+    this.raw({ t: 'xform', x, y, z, yaw, pitch, gliding, boating });
   }
 
   /** Send register/login over the open socket (before `welcome`/connected). */
@@ -360,6 +368,17 @@ export class NetClient {
 
   sendEdit(x: number, y: number, z: number, block: number): void {
     if (this.connected) this.raw({ t: 'edit', x, y, z, block });
+  }
+  /** Pull a lever (the server flips it + every linked trap). */
+  sendLever(x: number, y: number, z: number): void {
+    if (this.connected) this.raw({ t: 'lever', x, y, z });
+  }
+  // TPA (teleport requests).
+  sendTpa(target: string): void {
+    if (this.connected) this.raw({ t: 'tpa', target });
+  }
+  sendTpaAccept(): void {
+    if (this.connected) this.raw({ t: 'tpaAccept' });
   }
   sendAttack(target: number): void {
     if (this.connected) this.raw({ t: 'attack', target });
@@ -473,5 +492,6 @@ function toRemote(p: PlayerInfo): Remote {
   return {
     info: p, tx: p.x, ty: p.y, tz: p.z, tyaw: p.yaw, tpitch: p.pitch,
     health: p.health, dead: p.dead, gliding: p.gliding === true,
+    boating: p.boating === true,
   };
 }

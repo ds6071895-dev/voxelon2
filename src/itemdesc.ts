@@ -26,6 +26,26 @@ const DESCRIPTIONS: Record<number, string> = {
   [Item.CobaltIngot]: 'A war-grade metal smelted from cobalt ore.',
   // Travel.
   [Item.Glider]: 'Wear it in the chest slot (right-click to equip); jump in mid-air to glide.',
+  [Item.Boat]: 'Right-click on water to launch. Steer with your view, W to row — jump to hop out.',
+  [Item.VaultCompass1]: 'Right-click: marks the nearest Tier I vault on your map. ONE use.',
+  [Item.VaultCompass2]: 'Right-click: marks the nearest Tier II vault (mid Wilds). ONE use.',
+  [Item.VaultCompass3]: 'Right-click: marks the nearest Tier III vault (deep Wilds). ONE use.',
+  [Block.MobSpawner]: 'Vault guards pour out while it stands — break it (iron pick) to silence the room.',
+  // Traps.
+  [Block.SpikeTrap]: 'Iron spikes — anyone STANDING on them gets hurt. Line moats + walls!',
+  [Block.Landmine]: 'Arms when placed. EXPLODES when stepped on — even by YOU. Hide it well.',
+  [Block.Lever]: 'Right-click to pull: flips every Fall/Wall Trap within 8 blocks.',
+  [Block.FallTrap]: 'Looks like a solid hatch — a linked Lever swings it OPEN and the floor drops away!',
+  [Block.WallTrap]: 'A flat plate — a linked Lever springs it UP into a solid wall. Box them in!',
+  // Early-game armor.
+  [Item.WoodHelmet]: 'Cheap plank armor — thin, but way better than nothing in a Tier I vault.',
+  [Item.WoodChestplate]: 'Cheap plank armor — thin, but way better than nothing in a Tier I vault.',
+  [Item.WoodLeggings]: 'Cheap plank armor — thin, but way better than nothing in a Tier I vault.',
+  [Item.WoodBoots]: 'Cheap plank armor — thin, but way better than nothing in a Tier I vault.',
+  [Item.StoneHelmet]: 'Budget cobble armor — solid early protection for your first vault runs.',
+  [Item.StoneChestplate]: 'Budget cobble armor — solid early protection for your first vault runs.',
+  [Item.StoneLeggings]: 'Budget cobble armor — solid early protection for your first vault runs.',
+  [Item.StoneBoots]: 'Budget cobble armor — solid early protection for your first vault runs.',
   // Respawn point.
   [Item.RuneOfIron]: 'Loot-only rune — right-click to socket into worn armor: +1 armor.',
   [Item.RuneOfSwiftness]: 'Loot-only rune — right-click to socket into worn armor: +3% speed.',

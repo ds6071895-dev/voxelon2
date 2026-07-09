@@ -96,6 +96,24 @@ export const enum Block {
   // through the door, not the wall) + the per-player boss-room loot chest.
   VaultBrick = 82,
   VaultChest = 83,
+  // Traps: a low slab of iron spikes that pricks anyone standing on it, and a
+  // camouflaged blast plate that detonates when stepped on (even by its owner).
+  SpikeTrap = 84,
+  Landmine = 85,
+  // Vault guard spawner: a caged dark heart at the centre of each guarded
+  // vault room — guards pour out while it stands; break it to silence the room.
+  MobSpawner = 86,
+  // Lever-triggered traps: pulling a Lever flips every linked trap within
+  // LEVER_RADIUS blocks (traps.ts). FallTrap = a solid floor hatch that swings
+  // OPEN (non-solid — victims drop through) when triggered; WallTrap = a flat
+  // floor plate whose block POPS UP into a solid wall. The ITEM is always the
+  // off/closed/down variant, like wall torches and top slabs.
+  Lever = 87,
+  LeverOn = 88,
+  FallTrap = 89,
+  FallTrapOpen = 90,
+  WallTrap = 91,
+  WallTrapUp = 92,
 }
 
 export const enum Tile {
@@ -291,6 +309,35 @@ export const enum Tile {
   RuneSwift = 172,
   RuneFortune = 173,
   RuneFocus = 174,
+  // Traps
+  SpikeTrapTop = 175,
+  SpikeTrapSide = 176,
+  LandmineTop = 177,
+  LandmineSide = 178,
+  // Boat (item sprite)
+  Boat = 179,
+  // Vault guard spawner (cage block)
+  MobSpawner = 180,
+  // Vault compasses (item sprites, one per tier)
+  VaultCompass1 = 181,
+  VaultCompass2 = 182,
+  VaultCompass3 = 183,
+  // Early-game armor (wood + stone starter sets)
+  ArmorHelmetWood = 184,
+  ArmorChestWood = 185,
+  ArmorLegsWood = 186,
+  ArmorBootsWood = 187,
+  ArmorHelmetStone = 188,
+  ArmorChestStone = 189,
+  ArmorLegsStone = 190,
+  ArmorBootsStone = 191,
+  // Lever-triggered traps
+  Lever = 192,
+  LeverOn = 193,
+  FallTrap = 194,
+  FallTrapOpen = 195,
+  WallTrapTop = 196,
+  WallTrapSide = 197,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel';
@@ -440,8 +487,11 @@ export function slabTopId(id: number): number {
  *  (`hitFracY` in [0,1)). Top face -> bottom slab; bottom face -> top slab;
  *  side face -> bottom for the lower half, top for the upper half. */
 export function slabPlacement(bottomId: number, ny: number, hitFracY: number): number {
+  // Single-variant slab-shaped blocks (traps) always sit in the lower half.
+  const top = slabTopId(bottomId);
+  if (top < 0) return bottomId;
   const useTop = ny > 0 ? false : ny < 0 ? true : hitFracY >= 0.5;
-  return useTop ? slabTopId(bottomId) : bottomId;
+  return useTop ? top : bottomId;
 }
 
 function plant(name: string, tile: Tile, tint: TintKind, replaceable: boolean): BlockInfo {
@@ -664,6 +714,59 @@ export const BLOCKS: Record<number, BlockInfo> = {
     top: Tile.VaultChestTop, bottom: Tile.VaultChestTop, side: Tile.VaultChestSide,
   }),
 
+  // --- Traps ---
+  // Spike Trap: a low slab of iron spikes. Anyone STANDING on it takes steady
+  // damage (players + mobs) — line moats, walls and vault doors with them.
+  [Block.SpikeTrap]: def({
+    name: 'Spike Trap', hardness: 1.2, shape: 'slab',
+    top: Tile.SpikeTrapTop, bottom: Tile.SpikeTrapSide, side: Tile.SpikeTrapSide,
+    opaque: false, occludes: false,
+  }),
+  // Landmine: a thin camouflaged blast plate. Arms the moment it's placed and
+  // DETONATES when any player steps on it (even the owner — watch your feet).
+  [Block.Landmine]: def({
+    name: 'Landmine', hardness: 0.6, shape: 'slab',
+    top: Tile.LandmineTop, bottom: Tile.LandmineSide, side: Tile.LandmineSide,
+    opaque: false, occludes: false,
+  }),
+
+  // --- Lever-triggered traps ---
+  // Lever: a small pull-handle (cross billboard, like a plant — pops if its
+  // support breaks). Right-click flips it + every linked trap in LEVER_RADIUS.
+  [Block.Lever]: def({
+    name: 'Lever', hardness: 0.5, top: Tile.Lever,
+    solid: false, opaque: false, occludes: false, shape: 'cross',
+  }),
+  [Block.LeverOn]: def({
+    name: 'Lever', hardness: 0.5, top: Tile.LeverOn,
+    solid: false, opaque: false, occludes: false, shape: 'cross',
+  }),
+  // Fall Trap: reads as an ordinary wooden hatch while closed (a solid cube);
+  // a linked lever swings it OPEN — non-solid, and whoever stood on it drops.
+  [Block.FallTrap]: def({ name: 'Fall Trap', hardness: 1.0, top: Tile.FallTrap }),
+  [Block.FallTrapOpen]: def({
+    name: 'Fall Trap', hardness: 1.0, top: Tile.FallTrapOpen,
+    solid: false, opaque: false, occludes: false, shape: 'cross',
+  }),
+  // Wall Trap: a flat plate underfoot until a linked lever springs it UP into
+  // a full solid block — box raiders in, seal doorways behind visitors.
+  [Block.WallTrap]: def({
+    name: 'Wall Trap', hardness: 1.2, shape: 'slab',
+    top: Tile.WallTrapTop, bottom: Tile.WallTrapSide, side: Tile.WallTrapSide,
+    opaque: false, occludes: false,
+  }),
+  [Block.WallTrapUp]: def({
+    name: 'Wall Trap', hardness: 1.2,
+    top: Tile.WallTrapTop, bottom: Tile.WallTrapSide, side: Tile.WallTrapSide,
+  }),
+
+  // Vault guard spawner: a dark iron cage. Tough but breakable (iron pick) —
+  // silencing a room is a strategy; it drops nothing and can't be rebuilt.
+  [Block.MobSpawner]: def({
+    name: 'Mob Spawner', hardness: 10, emission: 5,
+    top: Tile.MobSpawner, opaque: false, occludes: false,
+  }),
+
   // --- Building set (M15): per-wood planks + slabs + stairs ---
   [Block.BirchPlanks]: def({ name: 'Birch Planks', hardness: 2.0, top: Tile.BirchPlanks }),
   [Block.SprucePlanks]: def({ name: 'Spruce Planks', hardness: 2.0, top: Tile.SprucePlanks }),
@@ -684,6 +787,7 @@ const PICKAXE_TIERS: [Block, number][] = [
   [Block.Turret, 1], // metal war machines need a stone+ pick
   [Block.Core, 1], // the claim Core is pickaxe-mineable (owner-only, server-gated)
   [Block.VaultBrick, 2], [Block.VaultChest, 2], // dungeon walls need an iron pick
+  [Block.MobSpawner, 2], // silencing a guard room takes an iron pick too
 ];
 for (const [b, tier] of PICKAXE_TIERS) {
   BLOCKS[b].tool = 'pickaxe';

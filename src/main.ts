@@ -24,7 +24,9 @@ import { NetClient } from './net/client';
 import {
   WORLD_SEED, WORLD_HALF, WORLD_BORDER, CORE_HALF, makeUsername, skinSeed,
   GameMode, MAX_ATTUNED, TOTEM_COOLDOWN, TOTEM_WINDUP, COMBAT_TAG,
+  TPA_HOLD, TPA_EXPIRE,
 } from './net/protocol';
+import { leverFlips } from './traps';
 import { MachineModels } from './machinemodels';
 import { NetItems } from './netitems';
 import { Particles } from './particles';
@@ -44,11 +46,16 @@ import {
 } from './teams';
 import { warBorderAt, WAR_MIN_BORDER } from './war';
 import {
-  ProgressState, TRACKS, XP_MOB, buyRank, canBuy, factionLevelFor,
-  factionLevelProgress, factionPerks, levelFor, levelProgress, newProgress,
-  personalBuffs, pointsAvailable, sanitizeProgress, sanitizeFactionXp,
+  BRANCHES, MAX_LEVEL as MAX_PLAYER_LEVEL, ProgressState, XP_MOB, branchNodes,
+  branchRank, buyNode, canBuyNode, factionLevelFor, factionLevelProgress,
+  factionPerks, levelFor, levelProgress, newProgress, ownsNode, personalBuffs,
+  pointsAvailable, sanitizeProgress, sanitizeFactionXp,
 } from './progress';
 import { GadgetCooldowns, GadgetDef, gadgetOf } from './gadgets';
+import {
+  GUIDE_STEPS, GuideState, compassGlyph, guideComplete, markGuideStep,
+  newGuideState, nextGuideStep, sanitizeGuide,
+} from './guide';
 import { isRune, runeOf, runeBonuses } from './runes';
 import {
   MAX_HEARTS, START_HEARTS, WITHDRAW_FLOOR, canConsume, canWithdraw,
@@ -62,7 +69,8 @@ import { Panorama } from './panorama';
 import { structureChestTier, worldStructures } from './structures';
 import { chestLootSlots } from './loot';
 import {
-  VAULT_LOOT_WINDOW, VAULT_RECHARGE, VAULT_REVEAL, VaultStamp, bruteMaxHp,
+  VAULT_LOOT_COOLDOWN, VAULT_LOOT_WINDOW, VAULT_RECHARGE, VAULT_REVEAL,
+  VaultStamp, bruteMaxHp,
   vaultAt, vaultLoot, vaultStamp, worldVaults,
 } from './vaults';
 
@@ -109,27 +117,8 @@ const player = new Player(spawn);
 const input = new Input(renderer.domElement);
 const inventory = new Inventory();
 
-// Basic starter kit — a modest comeback loadout granted on first spawn and
-// re-claimable after death (see grantStarterKit). Just enough to dig, build a
-// little, and defend yourself; NOT a head-start on the war economy.
-const BASIC_KIT: [number, number][] = [
-  [Item.WoodenPickaxe, 1],
-  [Item.WoodenAxe, 1],
-  [Item.Pistol, 1],
-  [Item.Bullet, 24],
-  [Block.Torch, 8],
-  [Block.OakPlanks, 16],
-];
-/** Top up the inventory to the basic-kit amounts. Top-up (not blind add) is the
- *  anti-farm: you can't drop-and-reclaim to stockpile — you only ever receive
- *  the shortfall below the kit quantity, so a full pouch grants nothing. */
-function grantStarterKit(): void {
-  for (const [id, n] of BASIC_KIT) {
-    const have = inventory.countItem(id);
-    if (have < n) inventory.add(id, n - have);
-  }
-}
-grantStarterKit();
+// No starter kit: everyone begins bare-handed — the Getting Started guide
+// walks new players from punching a tree to their first vault instead.
 // Debug loadout (testing the automation + warfare layers): ?kit=full grants all
 // guns, machines, turret parts and upgrade materials.
 if (new URLSearchParams(location.search).get('kit') === 'full') for (const [id, n] of [
@@ -250,9 +239,8 @@ const machineModels = new MachineModels(scene, machines);
 // --- Warfare (M14): turrets, territory ---
 const turretStates = new Map<string, TurretState>();
 const turretModels = new TurretModels(scene, turretStates);
-// Seasons: server-authoritative (net.onSeason); shown in the HUD online.
-let seasonNumber = 1;
-let seasonLeft = 0;
+// Seasons: server-authoritative. Only the permanent ★ badge is shown — the
+// old top-centre "Season N · time" HUD line was cut as clutter.
 let localSeasonsWon = 0;
 // The WAR (admin-scheduled, MP-only): a shrinking-border battle royale. The
 // HUD counts down locally between the server's periodic broadcasts; the live
@@ -324,6 +312,70 @@ function endGrapple(): void {
   player.vel.multiplyScalar(0.3);     // bleed reel speed so you don't overshoot
   jumpImmuneUntil = worldTimeLocal + 2; // no fall damage right after release
 }
+// --- Boat: fast water travel. Riding is a movement MODE (like gliding) — the
+// boat item stays in your inventory, so nothing is ever lost overboard. ---
+let boatActive = false;
+let boatGroundTime = 0; // seconds beached (auto-dismount)
+let prevBoatJump = false;
+/** The local hull mesh (follows the player while boating). */
+const boatGroup = (() => {
+  const g = new THREE.Group();
+  const hull = new THREE.MeshBasicMaterial({ color: 0x7c5f38 });
+  const dark = new THREE.MeshBasicMaterial({ color: 0x54401f });
+  const floor = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.18, 2.0), dark);
+  floor.position.y = 0.09;
+  const railL = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.36, 2.0), hull);
+  railL.position.set(-0.55, 0.3, 0);
+  const railR = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.36, 2.0), hull);
+  railR.position.set(0.55, 0.3, 0);
+  const bow = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.42, 0.16), hull);
+  bow.position.set(0, 0.34, -1.0); // -z = forward at yaw 0
+  const stern = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.36, 0.16), hull);
+  stern.position.set(0, 0.3, 1.0);
+  g.add(floor, railL, railR, bow, stern);
+  g.visible = false;
+  scene.add(g);
+  return g;
+})();
+
+/** Right-clicked holding a Boat: find a water-surface cell along the aim
+ *  (block raycasts skip water, so we walk the ray ourselves) and hop in. */
+function tryLaunchBoat(): void {
+  if (boatActive) return;
+  const eye = player.eyePosition;
+  const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  for (let t = 0.6; t <= 5.5; t += 0.25) {
+    const x = Math.floor(eye.x + dir.x * t);
+    const y = Math.floor(eye.y + dir.y * t);
+    const z = Math.floor(eye.z + dir.z * t);
+    if (world.getBlock(x, y, z) !== Block.Water) continue;
+    // Ride the topmost water cell of the column (needs open air above).
+    let top = y;
+    while (top - y < 4 && world.getBlock(x, top + 1, z) === Block.Water) top++;
+    if (world.getBlock(x, top + 1, z) !== Block.Air) continue;
+    boatActive = true;
+    boatGroundTime = 0;
+    player.pos.set(x + 0.5, top + 0.95, z + 0.5);
+    player.vel.set(0, 0, 0);
+    player.gliding = false;
+    player.boating = true;
+    boatGroup.visible = true;
+    audio.splash();
+    showNotice('⛵ Boat launched! Look + W to row · jump to hop out');
+    return;
+  }
+  showNotice('Aim at open water to launch the boat.');
+}
+
+function exitBoat(hop = true): void {
+  if (!boatActive) return;
+  boatActive = false;
+  player.boating = false;
+  boatGroup.visible = false;
+  boatGroundTime = 0;
+  if (hop) { player.vel.y = 5; player.fallDistance = 0; }
+}
+
 // World map (M key): terrain + structures + vaults + waypoints + travel.
 const worldMap = new WorldMap(scene, camera, world.terrain, {
   player: () => ({ x: player.pos.x, z: player.pos.z, yaw: player.yaw }),
@@ -365,18 +417,12 @@ mapBtn.addEventListener('click', () => {
 app.appendChild(mapBtn);
 
 // War HUD: the war clock/score line + a big banner that flashes on events.
-const seasonEl = document.createElement('div');
-seasonEl.className = 'mc-font';
-seasonEl.style.cssText =
-  'position:absolute;top:6px;left:50%;transform:translateX(-50%);z-index:10;' +
-  'pointer-events:none;text-align:center;font-size:11px;color:#cfe0ff;' +
-  'text-shadow:1px 1px 0 #000;width:340px;display:none;';
-app.appendChild(seasonEl);
-// War clock: capture is only open during a war (admin-scheduled in MP).
+// Shown ONLY while a war is actually running — no top-centre text otherwise
+// (the old always-on "Season N" / "Peacetime" lines were cut as clutter).
 const warEl = document.createElement('div');
 warEl.className = 'mc-font';
 warEl.style.cssText =
-  'position:absolute;top:24px;left:50%;transform:translateX(-50%);z-index:10;' +
+  'position:absolute;top:6px;left:50%;transform:translateX(-50%);z-index:10;' +
   'pointer-events:none;text-align:center;font-size:13px;' +
   'text-shadow:1px 1px 0 #000;width:340px;display:none;';
 app.appendChild(warEl);
@@ -1063,6 +1109,9 @@ const controlsPanel = (() => {
     ['Sprint', 'Q / double-tap W'], ['Break / attack mob', 'Left click'],
     ['Place / use', 'Right click'], ['Aim down sights (guns)', 'Hold right click'],
     ['Reload gun', 'R'], ['Drop item', 'O (Shift+O = stack)'], ['Deploy glider (in mid-air)', 'Jump'],
+    ['Launch boat (on water)', 'Right click'], ['Hop out of boat', 'Jump'],
+    ['Set waypoint here', 'B'], ['Getting-started guide', 'H'],
+    ['TPA — teleport to a player', 'T'], ['Accept a TPA request', 'Hold Y'],
     ['Hotbar slot', '1 – 9 / scroll'], ['Inventory', 'E'], ['World map', 'M'],
     ['Debug overlay', 'F3'], ['Pause / back', 'Esc'],
   ];
@@ -1166,7 +1215,8 @@ document.addEventListener('pointerlockchange', () => {
   if (!worldReady) return;
   if (input.locked) {
     enterPlaying(); // entered or returned to the game
-  } else if (!player.dead && !invUI.open && !worldMap.open && screen === 'playing') {
+  } else if (!player.dead && !invUI.open && !worldMap.open && !tpaPromptVisible &&
+      screen === 'playing') {
     enterPause(); // Esc / lost focus while playing -> pause, not the title
   }
 });
@@ -1176,13 +1226,14 @@ document.addEventListener('pointerlockchange', () => {
 // always get movement back after closing the Map panel.
 renderer.domElement.addEventListener('mousedown', () => {
   if (screen === 'playing' && !input.locked && !player.dead &&
-      !invUI.open && !worldMap.open) {
+      !invUI.open && !worldMap.open && !tpaPromptVisible) {
     input.lock();
   }
 });
 document.addEventListener('keydown', (e) => {
   if (e.code !== 'Escape') return;
   if (tutorial.open) { tutorial.finish(); }
+  else if (tpaPromptVisible) { closeTpaPrompt(); }
   else if (progressOpen) { hideProgress(); }
   else if (guideOpen) { hideGuide(); }
   else if (worldMap.open) { worldMap.hide(); input.lock(); }
@@ -1203,7 +1254,6 @@ document.getElementById('respawn')!.addEventListener('click', () => {
     lastHealth = player.maxHealth;
     deathShown = false;
     deathEl.style.display = 'none';
-    grantStarterKit(); // re-claim the basic loadout after death (offline)
     pushStateSave();
     input.lock();
   }
@@ -1232,7 +1282,7 @@ function checkDeath(): void {
 function pushStateSave(): void {
   if (net.connected) {
     const blob = inventory.serialize() as unknown as Record<string, unknown>;
-    blob.progress = { xp: progress.xp, spent: progress.spent }; // XP rides along
+    blob.progress = { xp: progress.xp, nodes: progress.nodes }; // XP rides along
     net.sendSaveState(blob);
   } else if (authedName) {
     try {
@@ -1245,7 +1295,7 @@ function pushStateSave(): void {
 net.onRestoreState = (state) => {
   inventory.restore(state);
   const st = sanitizeProgress((state as { progress?: unknown }).progress);
-  progress.xp = st.xp; progress.spent = st.spent;
+  progress.xp = st.xp; progress.nodes = st.nodes;
 };
 // Offline: restore the saved inventory for the just-authed local account.
 function restoreOfflineInventory(): void {
@@ -1314,7 +1364,6 @@ net.onRespawned = (x, y, z, h) => {
   lastHealth = h;
   deathShown = false;
   deathEl.style.display = 'none';
-  grantStarterKit(); // re-claim the basic loadout after death (MP)
   pushStateSave();
   if (worldReady) input.lock();
 };
@@ -1584,7 +1633,7 @@ function restoreOfflineProgress(): void {
   try {
     const raw = localStorage.getItem(`voxelon.prog.${authedName.toLowerCase()}`);
     const st = sanitizeProgress(raw ? JSON.parse(raw) : null);
-    progress.xp = st.xp; progress.spent = st.spent;
+    progress.xp = st.xp; progress.nodes = st.nodes;
     const fraw = localStorage.getItem(`voxelon.fxp.${authedName.toLowerCase()}`);
     factionXpPools = sanitizeFactionXp(fraw ? JSON.parse(fraw) : null, FACTIONS.length);
   } catch { /* ignore */ }
@@ -1607,8 +1656,9 @@ function grantXp(amount: number, reason?: string): void {
 }
 
 // Mob kills feed personal XP + the faction pool (server clamps the report).
+// Slayer capstones (+% mob XP) multiply the personal award.
 mobs.onPlayerKill = (kind) => {
-  const amt = XP_MOB[kind] ?? 4;
+  const amt = Math.round((XP_MOB[kind] ?? 4) * activeBuffs().xpMult);
   grantXp(amt, kind);
   if (net.connected) net.sendXp(amt);
   else if (localFaction >= 0) {
@@ -1631,7 +1681,8 @@ net.onFactionXp = (xp) => {
 /** All progression + rune buffs that apply to the local player right now. */
 function activeBuffs(): {
   speedMult: number; armorBonus: number; reloadMult: number;
-  mineMult: number; spreadMult: number;
+  mineMult: number; spreadMult: number; gunDamageMult: number;
+  meleeBonus: number; energyMult: number; fallMult: number; xpMult: number;
 } {
   const mine = personalBuffs(progress);
   const perks = factionPerks(factionLevelFor(factionXpPools[localFaction] ?? 0));
@@ -1640,8 +1691,13 @@ function activeBuffs(): {
     speedMult: mine.speedMult * perks.speedMult * runes.speedMult,
     armorBonus: mine.armorBonus + perks.armor + runes.armor,
     reloadMult: mine.reloadMult,
-    mineMult: runes.mineMult,
-    spreadMult: runes.spreadMult,
+    mineMult: mine.mineMult * runes.mineMult,
+    spreadMult: mine.spreadMult * runes.spreadMult,
+    gunDamageMult: mine.gunDamageMult,
+    meleeBonus: mine.meleeBonus,
+    energyMult: mine.energyMult,
+    fallMult: mine.fallMult,
+    xpMult: mine.xpMult,
   };
 }
 
@@ -1655,7 +1711,7 @@ const progressPanel = document.createElement('div');
 progressPanel.className = 'mc-font';
 progressPanel.style.cssText =
   'background:linear-gradient(#161a26,#10131c);border:2px solid #34406a;border-radius:10px;' +
-  'box-shadow:0 10px 40px rgba(0,0,0,0.6);width:430px;max-height:88vh;overflow:auto;' +
+  'box-shadow:0 10px 40px rgba(0,0,0,0.6);width:730px;max-width:96vw;max-height:88vh;overflow:auto;' +
   'color:#e7edf7;text-shadow:none;font-size:13px;padding-bottom:8px;';
 progressEl.appendChild(progressPanel);
 app.appendChild(progressEl);
@@ -1690,23 +1746,38 @@ function refreshProgressPanel(): void {
     `<span style="color:#8f9ec0;font-size:11px">${progress.xp} XP</span>` +
     (pts > 0 ? `<span style="color:#7dffa0;font-size:12px">● ${pts} skill point${pts === 1 ? '' : 's'} to spend!</span>`
              : `<span style="color:#7f8db0;font-size:11px">kill mobs &amp; enemies for XP</span>`) +
-    `</div>${xpBar(levelProgress(progress.xp), '#e2b23b', `to Lv ${Math.min(20, lvl + 1)}`)}</div>`;
+    `</div>${xpBar(levelProgress(progress.xp), '#e2b23b', `to Lv ${Math.min(MAX_PLAYER_LEVEL, lvl + 1)}`)}</div>`;
 
-  // --- tracks ---
-  html += `<div style="padding:8px 16px 4px;display:flex;flex-direction:column;gap:7px">`;
-  for (const t of TRACKS) {
-    const rank = progress.spent[t.id] ?? 0;
-    const can = canBuy(progress, t.id);
-    html += `<div style="display:flex;align-items:center;gap:10px;background:#141827;border:1px solid #232a40;border-radius:7px;padding:8px 10px">` +
-      `<div style="font-size:20px">${t.icon}</div>` +
-      `<div style="flex:1;min-width:0">` +
-      `<div>${t.name} <span style="color:#ffd84a">${'▮'.repeat(rank)}${'▯'.repeat(t.max - rank)}</span>` +
-      ` <span style="color:#8f9ec0;font-size:10px">${t.perRank}/rank</span></div>` +
-      `<div style="color:#8f9ec0;font-size:11px">${t.desc}</div></div>` +
-      `<button data-track="${t.id}" ${can ? '' : 'disabled'} style="cursor:${can ? 'pointer' : 'default'};` +
-      `padding:6px 10px;border:1px solid ${can ? '#3f6a3f' : '#2a3040'};border-radius:6px;` +
-      `background:${can ? '#274a27' : '#181d2b'};color:${can ? '#9fffb0' : '#5a6580'};font-size:11px">` +
-      `${rank >= t.max ? 'MAX' : '+1'}</button></div>`;
+  // --- THE SKILL TREE: 5 branches × 20 nodes. Costs rise with depth (1→4 pts)
+  // and every 5th node is a named capstone — 250 points of tree against the 99
+  // a maxed character earns, so you specialize. Hover a node for its story.
+  html += `<div style="padding:8px 16px 2px;color:#7f8db0;font-size:10px;letter-spacing:1px">` +
+    `SKILL TREE — 100 upgrades · deeper ranks cost more (1→4 pts) · ★ = capstone</div>`;
+  html += `<div style="padding:4px 16px 6px;display:flex;flex-direction:column;gap:6px">`;
+  for (const b of BRANCHES) {
+    const nodes = branchNodes(b.id);
+    const rank = branchRank(progress, b.id);
+    html += `<div style="background:#141827;border:1px solid #232a40;border-radius:7px;padding:7px 9px">` +
+      `<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:5px">` +
+      `<span style="font-size:15px">${b.icon}</span>` +
+      `<span style="color:#ffd84a">${b.name}</span>` +
+      `<span style="color:#8f9ec0;font-size:10px">${b.perNode.label} per rank · ${rank}/20</span></div>` +
+      `<div style="display:flex;gap:3px;flex-wrap:nowrap">`;
+    for (const n of nodes) {
+      const owned = ownsNode(progress, n.id);
+      const can = canBuyNode(progress, n.id);
+      const capstone = n.name !== `${b.name} ${n.index + 1}`;
+      const bg = owned ? '#7a5c14' : can ? '#1e3a24' : '#151a28';
+      const border = owned ? '#ffd84a' : can ? '#54c96a' : '#262e44';
+      const label = capstone ? '★' : String(n.index + 1);
+      const color = owned ? '#ffe9a8' : can ? '#9fffb0' : '#4a5570';
+      html += `<button data-node="${n.id}" title="${n.name} — ${n.desc} (${n.cost} pt${n.cost > 1 ? 's' : ''})" ` +
+        `style="width:29px;height:29px;flex:0 0 auto;cursor:${can ? 'pointer' : 'default'};` +
+        `border:${capstone ? 2 : 1}px solid ${border};border-radius:5px;background:${bg};` +
+        `color:${color};font-size:${capstone ? 13 : 10}px;padding:0;font-family:inherit">` +
+        `${label}</button>`;
+    }
+    html += `</div></div>`;
   }
   html += `</div>`;
 
@@ -1732,16 +1803,23 @@ function refreshProgressPanel(): void {
     `</div>`;
 
   // --- your live totals ---
-  html += `<div style="padding:4px 16px 8px;color:#7f8db0;font-size:11px">` +
+  html += `<div style="padding:4px 16px 8px;color:#7f8db0;font-size:11px;line-height:1.8">` +
     `Your combined buffs: +${((buffs.speedMult - 1) * 100).toFixed(1)}% speed · ` +
-    `+${buffs.armorBonus} armor · −${((1 - buffs.reloadMult) * 100).toFixed(0)}% reload time</div>`;
+    `+${buffs.armorBonus} armor · −${((1 - buffs.reloadMult) * 100).toFixed(0)}% reload · ` +
+    `+${((buffs.gunDamageMult - 1) * 100).toFixed(0)}% gun dmg · ` +
+    `−${((1 - buffs.spreadMult) * 100).toFixed(0)}% spread · ` +
+    `+${buffs.meleeBonus.toFixed(2)} melee · ` +
+    `+${((buffs.mineMult - 1) * 100).toFixed(0)}% mining · ` +
+    `−${((1 - buffs.energyMult) * 100).toFixed(0)}% sprint drain · ` +
+    `−${((1 - buffs.fallMult) * 100).toFixed(0)}% fall dmg · ` +
+    `+${((buffs.xpMult - 1) * 100).toFixed(0)}% mob XP</div>`;
 
   progressPanel.innerHTML = html;
   progressPanel.querySelector('#prog-close')!.addEventListener('click', hideProgress);
-  for (const btn of progressPanel.querySelectorAll('button[data-track]')) {
+  for (const btn of progressPanel.querySelectorAll('button[data-node]')) {
     btn.addEventListener('click', () => {
-      const id = (btn as HTMLElement).getAttribute('data-track') as 'swift' | 'tough' | 'gunner';
-      if (buyRank(progress, id)) {
+      const id = (btn as HTMLElement).getAttribute('data-node')!;
+      if (buyNode(progress, id)) {
         audio.heartSteal();
         saveOfflineProgress();
         pushStateSave();
@@ -1784,6 +1862,20 @@ progressBtn.addEventListener('click', () => {
   else if (!player.dead) showProgress();
 });
 app.appendChild(progressBtn);
+// Flash the Progress button whenever there are unspent skill points.
+const progressFlashStyle = document.createElement('style');
+progressFlashStyle.textContent =
+  '@keyframes prog-flash { 0%,100% { background:#6b6b6b; } 50% { background:#b8912b; } }';
+document.head.appendChild(progressFlashStyle);
+let progressFlashing = false;
+function updateProgressFlash(): void {
+  const want = pointsAvailable(progress) > 0;
+  if (want === progressFlashing) return;
+  progressFlashing = want;
+  progressBtn.style.animation = want ? 'prog-flash 1.1s ease-in-out infinite' : '';
+  progressBtn.textContent = want ? '⚑ Progress (G) ●' : '⚑ Progress (G)';
+  progressBtn.style.borderColor = want ? '#ffd84a #7a5c10 #7a5c10 #ffd84a' : '#fff #555 #555 #fff';
+}
 
 // --- Vaults (Milestone D): dungeons, the Brute, per-player treasure ------------
 // Deterministic stamps (cached per anchor chunk) drive everything client-side;
@@ -1807,8 +1899,12 @@ let vaultPollTimer = 0;
 let vaultSparkleTimer = 0;
 const vaultKeyOf = (v: VaultStamp): string => `${v.cx},${v.cz}`;
 
-// Offline per-account vault store: "cx,cz" -> Brute death epoch + looted flag.
-type VaultStore = Record<string, { deadAt?: number; opened?: boolean }>;
+// Offline per-account vault store: "cx,cz" -> Brute death epoch + the loot
+// regrow ledger (lootedAt wall-clock ms + roll count). Legacy saves carried a
+// once-only `opened` flag — migrated as "ready to loot again".
+type VaultStore = Record<string, {
+  deadAt?: number; opened?: boolean; lootedAt?: number; rolls?: number;
+}>;
 function loadVaultStore(): VaultStore {
   try {
     return JSON.parse(
@@ -1820,6 +1916,11 @@ function saveVaultStore(s: VaultStore): void {
     localStorage.setItem(`voxelon.vaults.${authedName.toLowerCase()}`, JSON.stringify(s));
   } catch { /* ignore */ }
 }
+/** Seconds left on the offline per-player loot-regrow cooldown (0 = ready). */
+function offlineLootCooldownLeft(rec?: VaultStore[string]): number {
+  if (rec?.lootedAt === undefined) return 0;
+  return Math.max(0, VAULT_LOOT_COOLDOWN - (Date.now() - rec.lootedAt) / 1000);
+}
 /** Offline mirror of the server's vault state (same recharge/loot-window rules,
  *  on the wall clock so the Brute stays down across sessions). */
 function offlineVaultView(v: VaultStamp): VaultView {
@@ -1827,7 +1928,10 @@ function offlineVaultView(v: VaultStamp): VaultView {
   const sinceDead = (Date.now() - (rec?.deadAt ?? -Infinity)) / 1000;
   const alive = sinceDead > VAULT_RECHARGE;
   const max = bruteMaxHp(v.tier);
-  return { tier: v.tier, hp: alive ? max : 0, maxHp: max, alive, opened: rec?.opened === true };
+  return {
+    tier: v.tier, hp: alive ? max : 0, maxHp: max, alive,
+    opened: offlineLootCooldownLeft(rec) > 0, // = "your loot is regrowing"
+  };
 }
 
 // Discovered vaults (client-side collection: map icons + "found X / Y").
@@ -1898,9 +2002,14 @@ function refreshVaultMap(): void {
     x: d.x, z: d.z, tier: d.tier, discovered: true,
     cleared: vaultViews.get(d.key)?.alive === false,
   }));
-  // Sensed-but-not-entered vaults render faint with no tier.
-  for (const v of nearbyVaults) {
-    if (discKeys.has(`${v.cx},${v.cz}`)) continue;
+  // Sensed-but-not-entered vaults render faint with no tier. EVERY Heartland
+  // (Tier I) entrance is marked from the start — finding your first vault
+  // should be a map-read, not a needle hunt.
+  const marked = new Set(discKeys);
+  for (const v of [...nearbyVaults, ...allVaultsList().filter((a) => a.tier === 1)]) {
+    const key = `${v.cx},${v.cz}`;
+    if (marked.has(key)) continue;
+    marked.add(key);
     marks.push({ x: v.x, z: v.z, tier: v.tier, discovered: false, cleared: false });
   }
   worldMap.setVaults(marks, totalVaults());
@@ -1966,6 +2075,154 @@ function updateVaults(dt: number): void {
   }
 }
 
+// --- GETTING STARTED guide (early-game direction) ------------------------------
+// A small checklist panel so a fresh spawn always knows what to do next: punch
+// a tree → tools → a gun → find + loot your first vault. Steps auto-check off
+// (inventory scans + vault hooks), persist per account, and H hides/shows it.
+const starterEl = document.createElement('div');
+starterEl.className = 'mc-font';
+starterEl.style.cssText =
+  'position:absolute;top:110px;left:8px;z-index:10;pointer-events:none;' +
+  'font-size:11px;line-height:1.75;color:#dfe6f2;text-shadow:1px 1px 0 #000;' +
+  'background:rgba(8,10,16,0.55);border:1px solid #2a3550;border-radius:6px;' +
+  'padding:7px 10px;max-width:250px;display:none;';
+app.appendChild(starterEl);
+let guideState: GuideState = newGuideState();
+let guideLoadedFor = ''; // account the current state belongs to
+let guideHidden = false;
+let guideCheckTimer = 0;
+let guideDirty = true; // re-render the panel HTML on the next update
+
+function guideKey(): string { return `voxelon.guide.${authedName.toLowerCase()}`; }
+function loadGuide(): void {
+  if (!authedName || guideLoadedFor === authedName) return;
+  guideLoadedFor = authedName;
+  try {
+    guideState = sanitizeGuide(JSON.parse(localStorage.getItem(guideKey()) ?? 'null'));
+  } catch { guideState = newGuideState(); }
+  try { guideHidden = localStorage.getItem(`${guideKey()}.hidden`) === '1'; } catch { /* ignore */ }
+  guideDirty = true;
+}
+function saveGuide(): void {
+  try { localStorage.setItem(guideKey(), JSON.stringify(guideState)); } catch { /* ignore */ }
+}
+function guideMark(id: string): void {
+  if (!markGuideStep(guideState, id)) return;
+  saveGuide();
+  guideDirty = true;
+  const step = GUIDE_STEPS.find((s) => s.id === id);
+  if (step) showNotice(`✅ ${step.icon} ${step.text}`);
+  if (guideComplete(guideState)) {
+    showRegionBanner('🎉 GETTING STARTED — COMPLETE!', '#9affb0');
+  }
+}
+function toggleGuidePanel(): void {
+  guideHidden = !guideHidden;
+  try {
+    localStorage.setItem(`${guideKey()}.hidden`, guideHidden ? '1' : '0');
+  } catch { /* ignore */ }
+  guideDirty = true;
+}
+/** Inventory-scan detection for the early steps (cheap; runs twice a second). */
+function detectGuideSteps(): void {
+  const hasAny = (pred: (id: number) => boolean): boolean =>
+    inventory.slots.some((s) => s !== null && pred(s.id));
+  if (!guideState.wood && hasAny((id) => id === Block.OakLog || id === Block.BirchLog ||
+    id === Block.SpruceLog || id === Block.JungleLog || id === Block.CherryLog)) guideMark('wood');
+  if (!guideState.planks && hasAny((id) => id === Block.OakPlanks || id === Block.BirchPlanks ||
+    id === Block.SprucePlanks || id === Block.JunglePlanks || id === Block.CherryPlanks)) guideMark('planks');
+  if (!guideState.table && hasAny((id) => id === Block.CraftingTable)) guideMark('table');
+  if (!guideState.pickaxe && hasAny((id) => ITEMS[id]?.tool?.type === 'pickaxe')) guideMark('pickaxe');
+  if (!guideState.stone && hasAny((id) => id === Block.Cobblestone || id === Block.Stone)) guideMark('stone');
+  if (!guideState.gun && hasAny((id) => !!ITEMS[id]?.gun)) guideMark('gun');
+  if (!guideState.bullets && hasAny((id) => id === Item.Bullet || id === Item.Rocket)) {
+    guideMark('bullets');
+  }
+  // Any real armor counts (worn or carried) — the glider shares the armor slot
+  // but is 0-defense travel gear, not armor.
+  if (!guideState.armor && hasAny((id) => !!ITEMS[id]?.armor && !ITEMS[id]?.glider)) {
+    guideMark('armor');
+  }
+  if (!guideState.vault && discoveredList().length > 0) guideMark('vault');
+  if (!guideState.loot) {
+    for (const v of vaultViews.values()) {
+      if (v.opened) { guideMark('loot'); break; }
+    }
+  }
+}
+/** Nearest not-yet-discovered vault entrance — the guide's compass hint. */
+function nearestVaultHint(): string {
+  const found = new Set(discoveredList().map((d) => d.key));
+  let best: { x: number; z: number } | null = null;
+  let bestD = Infinity;
+  for (const v of allVaultsList()) {
+    if (found.has(`${v.cx},${v.cz}`)) continue;
+    const d = Math.hypot(v.x - player.pos.x, v.z - player.pos.z);
+    if (d < bestD) { bestD = d; best = v; }
+  }
+  if (!best) return '';
+  const glyph = compassGlyph(best.x - player.pos.x, best.z - player.pos.z);
+  return `☠ Nearest vault: <b>${Math.round(bestD)}m ${glyph}</b>`;
+}
+/** A one-use Vault Compass: find the nearest vault of the compass's tier,
+ *  drop a named waypoint on its entrance (with the terrain height, so the
+ *  in-world badge floats right over the arch) and consume the compass. */
+function useVaultCompass(item: number): void {
+  const tier = item === Item.VaultCompass1 ? 1 : item === Item.VaultCompass2 ? 2 : 3;
+  let best: { x: number; z: number } | null = null;
+  let bestD = Infinity;
+  for (const v of allVaultsList()) {
+    if (v.tier !== tier) continue;
+    const d = Math.hypot(v.x - player.pos.x, v.z - player.pos.z);
+    if (d < bestD) { bestD = d; best = v; }
+  }
+  if (!best) { showNotice(`No Tier ${['I', 'II', 'III'][tier - 1]} vault exists in this world.`); return; }
+  const glyph = compassGlyph(best.x - player.pos.x, best.z - player.pos.z);
+  worldMap.addWaypointAt(best.x, world.terrain.height(best.x, best.z) + 1, best.z,
+    `☠ Vault ${['I', 'II', 'III'][tier - 1]}`);
+  inventory.consumeSelected(1);
+  audio.heartSteal();
+  showNotice(`🧭 Tier ${['I', 'II', 'III'][tier - 1]} vault: ${Math.round(bestD)}m ${glyph} — waypoint set!`);
+}
+
+function renderGuidePanel(): void {
+  const next = nextGuideStep(guideState);
+  const lines: string[] = [
+    '<b style="color:#ffd84a">GETTING STARTED</b> <span style="color:#7f8db0">(H to hide)</span>',
+  ];
+  for (const step of GUIDE_STEPS) {
+    const done = guideState[step.id];
+    const active = next?.id === step.id;
+    const color = done ? '#7f8db0' : active ? '#ffe27a' : '#cdd6ee';
+    const tick = done ? '✔' : active ? '▶' : '·';
+    lines.push(`<span style="color:${color}">${tick} ${step.icon} ` +
+      `${done ? `<s>${step.text}</s>` : step.text}</span>`);
+  }
+  // Live compass hint toward the nearest unexplored vault until one is looted.
+  if (!guideState.loot) {
+    const hint = nearestVaultHint();
+    if (hint) lines.push(`<span style="color:#b9a5ff">${hint}</span>`);
+  }
+  starterEl.innerHTML = lines.join('<br>');
+}
+/** Per-frame guide upkeep: visibility, periodic detection, live vault hint. */
+function updateGuide(dt: number, controlling: boolean): void {
+  loadGuide();
+  const show = controlling && authed && !guideHidden && !guideComplete(guideState);
+  starterEl.style.display = show ? 'block' : 'none';
+  if (!authed) return;
+  guideCheckTimer -= dt;
+  if (guideCheckTimer <= 0) {
+    guideCheckTimer = 0.5;
+    if (!guideComplete(guideState)) detectGuideSteps();
+    guideDirty = true; // the distance hint ticks along as you walk
+  }
+  if (show && guideDirty) {
+    guideDirty = false;
+    renderGuidePanel();
+  }
+}
+
 // Boss combat: local hits mirror to the server's shared HP; offline the local
 // Brute IS the authority and its death opens the loot window.
 mobs.onBruteHit = (mob, dmg) => {
@@ -2012,6 +2269,7 @@ net.onVaultLooted = (cx, cz) => {
   const v = vaultViews.get(`${cx},${cz}`);
   if (v) v.opened = true;
   audio.heartSteal();
+  guideMark('loot');
   pushStateSave();
 };
 // Right-clicking the VaultChest: server-validated online; the identical rules
@@ -2029,19 +2287,178 @@ interaction.onVaultChest = (x, y, z) => {
     showNotice('🔒 The vault has resealed — the Brute will return to guard it.');
     return;
   }
-  if (view.opened) { showNotice("You've already claimed this vault's treasure!"); return; }
-  for (const s of vaultLoot(seed, v.cx, v.cz, v.tier, authedName || 'You')) {
+  const cd = offlineLootCooldownLeft(store[key]);
+  if (cd > 0) {
+    showNotice(`⏳ You've looted this vault — the treasure regrows in ${Math.ceil(cd / 60)}m.`);
+    return;
+  }
+  const roll = store[key]?.rolls ?? 0;
+  for (const s of vaultLoot(seed, v.cx, v.cz, v.tier, authedName || 'You', roll)) {
     const left = inventory.add(s.id, s.count);
     if (left > 0) spillAtPlayer([{ id: s.id, count: left }]);
   }
-  store[key] = { ...store[key], opened: true };
+  store[key] = { ...store[key], lootedAt: Date.now(), rolls: roll + 1 };
   saveVaultStore(store);
   view.opened = true;
   vaultViews.set(key, view);
   showNotice(`✨ Tier ${v.tier} vault treasure claimed!`);
   audio.heartSteal();
+  guideMark('loot');
   pushStateSave();
 };
+
+// A Lever pull: server-authoritative online (linked traps can flip beyond the
+// puller's own edit range, so it can't be sent as plain edits); offline the
+// identical pure flip rules (traps.ts) run over the local world.
+interaction.onLever = (x, y, z) => {
+  audio.place(materialOf(Block.Lever), new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
+  if (net.connected) { net.sendLever(x, y, z); return; }
+  for (const f of leverFlips((bx, by, bz) => world.getBlock(bx, by, bz), x, y, z)) {
+    world.setBlock(f.x, f.y, f.z, f.block);
+  }
+};
+
+// --- TPA: teleport requests (DonutSMP-style) ----------------------------------
+// T opens a small "teleport to who?" prompt; the TARGET must hold Y for
+// TPA_HOLD seconds to accept — moving or taking damage resets the hold — and
+// the requester is then teleported straight to them (server-authoritative).
+// Multiplayer only: offline there is nobody to teleport to.
+let tpaPromptVisible = false;
+let tpaIncomingFrom = '';   // username of the pending requester ('' = none)
+let tpaIncomingAtMs = 0;    // wall-clock ms the request arrived
+let tpaHold = 0;            // seconds the accept key has been held
+let tpaHoldStart: THREE.Vector3 | null = null; // position when the hold began
+let tpaHoldHealth = 0;      // health when the hold began (a hit = cancel)
+let tpaHoldBlocked = false; // a cancelled hold needs a key release to retry
+
+const tpaPromptEl = document.createElement('div');
+tpaPromptEl.style.cssText =
+  'position:absolute;inset:0;display:none;align-items:center;justify-content:center;' +
+  'background:rgba(8,8,14,0.6);z-index:24;';
+const tpaCard = document.createElement('div');
+tpaCard.className = 'mc-font';
+tpaCard.style.cssText = 'background:#15182b;border:2px solid #3a4790;border-radius:10px;' +
+  'padding:18px 22px;display:flex;flex-direction:column;gap:10px;width:330px;';
+tpaCard.innerHTML =
+  '<div style="font-size:18px;color:#ffd84a;letter-spacing:1px;">🌀 TPA REQUEST</div>' +
+  '<div style="font-size:12px;color:#cfe0ff;line-height:1.6;">Type a player name — if they ' +
+  `hold <b>Y</b> for ${TPA_HOLD}s you teleport straight to them.</div>`;
+const tpaInput = document.createElement('input');
+tpaInput.type = 'text';
+tpaInput.maxLength = 32;
+tpaInput.placeholder = 'player name…';
+tpaInput.className = 'mc-font';
+tpaInput.style.cssText = 'font-size:15px;padding:7px 10px;background:#0c0e1a;color:#fff;' +
+  'border:1px solid #3a4790;border-radius:6px;outline:none;';
+const tpaHint = document.createElement('div');
+tpaHint.className = 'mc-font';
+tpaHint.style.cssText = 'font-size:11px;color:#7f8db0;';
+tpaHint.textContent = 'Enter = send · Esc = cancel';
+tpaCard.append(tpaInput, tpaHint);
+tpaPromptEl.appendChild(tpaCard);
+app.appendChild(tpaPromptEl);
+
+function openTpaPrompt(): void {
+  if (!net.connected) { showNotice('TPA needs multiplayer — no server connected.'); return; }
+  if (tpaPromptVisible) return;
+  tpaPromptVisible = true;
+  tpaPromptEl.style.display = 'flex';
+  tpaInput.value = '';
+  document.exitPointerLock();
+  window.setTimeout(() => tpaInput.focus(), 0);
+}
+function closeTpaPrompt(): void {
+  if (!tpaPromptVisible) return;
+  tpaPromptVisible = false;
+  tpaPromptEl.style.display = 'none';
+  tpaInput.blur();
+  if (worldReady && !player.dead) input.lock();
+}
+tpaInput.addEventListener('keydown', (e) => {
+  e.stopPropagation(); // typing must never trigger game hotkeys (E, M, T…)
+  if (e.key === 'Enter') {
+    const name = tpaInput.value.trim();
+    if (name) net.sendTpa(name);
+    closeTpaPrompt();
+  } else if (e.key === 'Escape') {
+    closeTpaPrompt();
+  }
+});
+tpaPromptEl.addEventListener('mousedown', (e) => {
+  if (e.target === tpaPromptEl) closeTpaPrompt(); // click outside = cancel
+});
+
+// Incoming-request banner (target side): sticky while the request is pending.
+const tpaBannerEl = document.createElement('div');
+tpaBannerEl.className = 'mc-font';
+tpaBannerEl.style.cssText =
+  'position:absolute;top:130px;left:50%;transform:translateX(-50%);z-index:12;' +
+  'display:none;text-align:center;font-size:13px;line-height:1.8;color:#eaf0ff;' +
+  'white-space:pre-line;text-shadow:1px 1px 0 #000;background:rgba(8,10,16,0.62);' +
+  'border:1px solid #3a4790;border-radius:8px;padding:8px 16px;pointer-events:none;';
+app.appendChild(tpaBannerEl);
+
+net.onTpaRequest = (from) => {
+  tpaIncomingFrom = from;
+  tpaIncomingAtMs = performance.now();
+  tpaHold = 0;
+  tpaHoldStart = null;
+  tpaHoldBlocked = false;
+  showNotice(`📨 ${from} wants to teleport to YOU — hold Y to accept!`);
+};
+
+function cancelTpaHold(reason: string): void {
+  showNotice(reason);
+  tpaHold = 0;
+  tpaHoldStart = null;
+  tpaHoldBlocked = true; // release Y before trying again
+}
+
+/** Per-frame TPA upkeep: expire the pending request, run the hold-Y-to-accept
+ *  clock (moving or taking damage resets it), and render the banner. */
+function updateTpa(dt: number, controlling: boolean): void {
+  if (!tpaIncomingFrom) { tpaBannerEl.style.display = 'none'; return; }
+  const ageSec = (performance.now() - tpaIncomingAtMs) / 1000;
+  if (ageSec > TPA_EXPIRE || !net.connected) {
+    tpaIncomingFrom = '';
+    tpaBannerEl.style.display = 'none';
+    return;
+  }
+  const holding = controlling && !player.dead && input.down('KeyY');
+  if (holding && !tpaHoldBlocked) {
+    if (!tpaHoldStart) {
+      tpaHoldStart = player.pos.clone();
+      tpaHoldHealth = player.health;
+    }
+    if (player.pos.distanceTo(tpaHoldStart) > 0.35) {
+      cancelTpaHold('❌ TPA accept cancelled — you moved!');
+    } else if (player.health < tpaHoldHealth) {
+      cancelTpaHold('❌ TPA accept cancelled — you were hit!');
+    } else {
+      tpaHold += dt;
+      if (tpaHold >= TPA_HOLD) {
+        net.sendTpaAccept();
+        showNotice(`🌀 Accepted — ${tpaIncomingFrom} is on their way!`);
+        tpaIncomingFrom = '';
+        tpaHold = 0;
+        tpaHoldStart = null;
+        tpaBannerEl.style.display = 'none';
+        return;
+      }
+    }
+  } else if (!holding) {
+    tpaHold = 0;
+    tpaHoldStart = null;
+    tpaHoldBlocked = false;
+  }
+  tpaBannerEl.style.display = 'block';
+  const bar = '█'.repeat(Math.round((tpaHold / TPA_HOLD) * 10)).padEnd(10, '░');
+  tpaBannerEl.textContent =
+    `📨 ${tpaIncomingFrom} wants to teleport to you\n` +
+    (tpaHold > 0
+      ? `accepting… ${bar} ${Math.max(0, TPA_HOLD - tpaHold).toFixed(1)}s — don't move!`
+      : `hold Y for ${TPA_HOLD}s to accept (${Math.ceil(TPA_EXPIRE - ageSec)}s left)`);
+}
 
 net.onGotItem = (id, count) => {
   // The server grants the whole stack on a valid pickup; if it doesn't all fit,
@@ -2079,7 +2496,6 @@ net.onTurretFire = (x, y, z, tx, ty, tz) => {
   particles.poof(tx, ty, tz);
   audio.gun(new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
 };
-net.onSeason = (number, timeLeft) => { seasonNumber = number; seasonLeft = timeLeft; };
 net.onWar = (active, timeLeft, nextIn, duration, score, wins) => {
   const wasActive = warActiveNow;
   warActiveNow = active; warLeft = timeLeft; warNextIn = nextIn; warDur = duration;
@@ -2150,6 +2566,21 @@ let lastHealth = 20;
 let lastSentArmor = -1; // last armor-points value pushed to the server
 let lastInWater = false;
 let lavaTimer = 0; // throttles lava burn damage
+let spikeHurtTimer = 0; // throttles spike-trap damage ticks
+
+/** Someone (you) stepped on a landmine: the plate detonates — blocks crater,
+ *  you and nearby mobs take blast damage, and in MP the server splashes other
+ *  players + broadcasts the crater (same path as a rocket burst). */
+function triggerLandmine(x: number, y: number, z: number): void {
+  world.setBlock(x, y, z, Block.Air);
+  net.sendEdit(x, y, z, 0);
+  const at = new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5);
+  gadgetFxAt('frag', at.x, at.y, at.z);
+  mobs.explode(at, player); // local blocks/mobs/self blast
+  if (net.connected) net.sendRocketBlast(at.x, at.y, at.z);
+  else destroyMachinesNear(at, 4);
+  showNotice('💥 You stepped on a landmine!');
+}
 
 // Gun state.
 const ammoEl = document.getElementById('ammo')!;
@@ -2191,9 +2622,14 @@ function fireVolley(stack: ItemStack, gun: GunInfo): boolean {
   inventory.version++; // refresh the ammo counter
   const base = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
   const pellets = Math.max(1, gun.pellets ?? 1);
-  const spread = (gun.spread ?? 0) * activeBuffs().spreadMult; // Rune of Focus
+  const buffs = activeBuffs();
+  const spread = (gun.spread ?? 0) * buffs.spreadMult; // Gunslinger + Rune of Focus
+  // Gunslinger capstones boost per-round damage (server still clamps PvP hits).
+  const boosted = buffs.gunDamageMult > 1
+    ? { ...gun, damage: Math.max(1, Math.round(gun.damage * buffs.gunDamageMult)) }
+    : gun;
   for (let i = 0; i < pellets; i++) {
-    projectiles.fire(player.eyePosition, spreadDir(base, spread), gun);
+    projectiles.fire(player.eyePosition, spreadDir(base, spread), boosted);
   }
   held.recoil();
   audio.gun(player.eyePosition);
@@ -2346,28 +2782,7 @@ function turretCtxFor(x: number, y: number, z: number): TurretUIContext {
 }
 
 // --- Seasons (Phase 5) -------------------------------------------------------
-
-/** Human-readable "Xd Yh" / "Ym Zs" countdown for the season clock. */
-function formatSeasonLeft(secs: number): string {
-  const s = Math.max(0, Math.floor(secs));
-  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  if (d > 0) return `${d}d ${h}h left`;
-  if (h > 0) return `${h}h ${m}m left`;
-  return `${m}m ${s % 60}s left`;
-}
-
-function updateSeasonHud(): void {
-  if (!net.connected) { seasonEl.style.display = 'none'; return; }
-  seasonEl.style.display = 'block';
-  const a = FACTIONS[0], b = FACTIONS[1];
-  const wa = warWins[a.id] ?? 0, wb = warWins[b.id] ?? 0;
-  seasonEl.innerHTML =
-    `Season ${seasonNumber} · ${formatSeasonLeft(seasonLeft)} · ` +
-    `<span style="color:${factionCss(a.id)}">${a.name} ${wa}</span>` +
-    ` <span style="color:#8da0c0">wars</span> ` +
-    `<span style="color:${factionCss(b.id)}">${wb} ${b.name}</span>`;
-}
+// (The old top-centre season HUD line was removed; only the ★ badge remains.)
 
 /** mm:ss (or h:mm:ss) clock for the war timer. */
 function formatClock(secs: number): string {
@@ -2382,29 +2797,24 @@ function currentWarBorder(): number {
   return warActiveNow ? warBorderAt(warLeft, warDur, WORLD_BORDER) : WORLD_BORDER;
 }
 
-/** The war clock: countdown + live border size + the kill score. Offline
- *  single-player has no wars (free play) — the line stays hidden. */
+/** The war clock: countdown + live border size + the kill score. Only visible
+ *  DURING a war — peacetime keeps the top of the screen clean (the old
+ *  "Peacetime" / "Next war in…" lines were cut as clutter). */
 function updateWarHud(dt: number): void {
-  if (!net.connected) { warEl.style.display = 'none'; return; }
-  warEl.style.display = 'block';
   // Count down locally between the server's periodic broadcasts.
   if (warActiveNow) warLeft = Math.max(0, warLeft - dt);
   else if (warNextIn > 0) warNextIn = Math.max(0, warNextIn - dt);
-  if (warActiveNow) {
-    const a = FACTIONS[0], b = FACTIONS[1];
-    const border = Math.round(currentWarBorder());
-    const shrinking = border > WAR_MIN_BORDER;
-    warEl.innerHTML =
-      `<span style="color:#ff6a6a">⚔️ WAR · ${formatClock(warLeft)}</span> ` +
-      `<span style="color:${shrinking ? '#ffb86a' : '#ff5a5a'}">· border ${border}m${shrinking ? ' ⤵' : ' — FINAL RING'}</span><br>` +
-      `<span style="color:${factionCss(a.id)}">${a.name} ${warScore[a.id] ?? 0}</span>` +
-      ` <span style="color:#8da0c0">kills</span> ` +
-      `<span style="color:${factionCss(b.id)}">${warScore[b.id] ?? 0} ${b.name}</span>`;
-  } else if (warNextIn > 0) {
-    warEl.innerHTML = `<span style="color:#9fd0ff">🕊️ Next war in ${formatClock(warNextIn)}</span>`;
-  } else {
-    warEl.innerHTML = '<span style="color:#9fb0c4">🕊️ Peacetime</span>';
-  }
+  if (!net.connected || !warActiveNow) { warEl.style.display = 'none'; return; }
+  warEl.style.display = 'block';
+  const a = FACTIONS[0], b = FACTIONS[1];
+  const border = Math.round(currentWarBorder());
+  const shrinking = border > WAR_MIN_BORDER;
+  warEl.innerHTML =
+    `<span style="color:#ff6a6a">⚔️ WAR · ${formatClock(warLeft)}</span> ` +
+    `<span style="color:${shrinking ? '#ffb86a' : '#ff5a5a'}">· border ${border}m${shrinking ? ' ⤵' : ' — FINAL RING'}</span><br>` +
+    `<span style="color:${factionCss(a.id)}">${a.name} ${warScore[a.id] ?? 0}</span>` +
+    ` <span style="color:#8da0c0">kills</span> ` +
+    `<span style="color:${factionCss(b.id)}">${warScore[b.id] ?? 0} ${b.name}</span>`;
 }
 
 /** Flash the season result + clear the old war (banner is loud for kids). */
@@ -2913,7 +3323,9 @@ function frame(): void {
   // the faction perk) ride on top of worn gear; speed applies to movement.
   const buffsNow = activeBuffs();
   player.speedMult = buffsNow.speedMult;
-  interaction.miningSpeedMult = buffsNow.mineMult; // Rune of Fortune
+  player.energyDrainMult = buffsNow.energyMult;   // Windrunner capstones
+  player.fallDamageMult = buffsNow.fallMult;      // Juggernaut capstones
+  interaction.miningSpeedMult = buffsNow.mineMult; // Prospector + Rune of Fortune
   const armorPts = inventory.armorPoints() + buffsNow.armorBonus;
   player.armorPoints = armorPts;
   if (net.connected && armorPts !== lastSentArmor) {
@@ -2930,6 +3342,15 @@ function frame(): void {
       if (input.hotbarKey >= 0) inventory.select(input.hotbarKey);
       if (input.wheelDelta !== 0) inventory.select(inventory.selected + input.wheelDelta);
       if (input.dropPressed) dropCurrentItem(input.down('ShiftLeft') || input.down('ShiftRight'));
+      if (input.waypointPressed) {
+        // B: drop a named waypoint right here (shows on the map + in-world,
+        // with the altitude so you can find your way back to a cave/tower).
+        const name = worldMap.addWaypointAt(player.pos.x, player.pos.y, player.pos.z);
+        showNotice(`📍 Waypoint "${name}" set — ` +
+          `${Math.round(player.pos.x)}, Y${Math.round(player.pos.y)}, ${Math.round(player.pos.z)}`);
+      }
+      if (input.guideToggled) toggleGuidePanel();
+      if (input.tpaPressed) openTpaPrompt();
     }
 
     const moveInput = controlling ? input : FROZEN_INPUT;
@@ -3024,6 +3445,17 @@ function frame(): void {
         if (wantFire && fireCooldown <= 0 && reloadTimer <= 0) tryFire(heldStack!, heldGun);
         interaction.update(dt, input, camera, true, true);
       } else if (input.rightClicked && !interaction.armedMove && heldStack &&
+          heldStack.id === Item.Boat) {
+        // Boat: right-click open water to launch and ride it.
+        tryLaunchBoat();
+        interaction.update(dt, input, camera, true, true); // suppress mine + use
+      } else if (input.rightClicked && !interaction.armedMove && heldStack &&
+          (heldStack.id === Item.VaultCompass1 || heldStack.id === Item.VaultCompass2 ||
+           heldStack.id === Item.VaultCompass3)) {
+        // Vault compass: one use — mark the nearest vault of its tier.
+        useVaultCompass(heldStack.id);
+        interaction.update(dt, input, camera, true, true); // suppress mine + use
+      } else if (input.rightClicked && !interaction.armedMove && heldStack &&
           ITEMS[heldStack.id]?.heal) {
         // Healing consumables (Bandage/Medkit): a burst of fast regeneration.
         useHealItem();
@@ -3064,7 +3496,8 @@ function frame(): void {
         const mobInSights = mobs.rayHit(eye, lookDir, 3.5);
         if (input.leftClicked && mobInSights) {
           const tool = heldStack ? ITEMS[heldStack.id]?.tool : undefined;
-          mobs.attack(eye, lookDir, tool?.damage ?? 1, player);
+          // Prospector/Slayer nodes add flat melee damage (mobs only).
+          mobs.attack(eye, lookDir, (tool?.damage ?? 1) + activeBuffs().meleeBonus, player);
           if (tool) inventory.damageSelected(2);
           held.swing();
         }
@@ -3088,7 +3521,8 @@ function frame(): void {
 
     // Stream our transform even while paused/in a menu, so others still see
     // us (e.g. being knocked around). Throttled + connection-gated inside.
-    net.sendXform(dt, player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch, player.gliding);
+    net.sendXform(dt, player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch,
+      player.gliding, player.boating);
 
     // Simulation never pauses: mobs hunt you and survival ticks in menus too.
     survival.update(dt, player);
@@ -3104,14 +3538,45 @@ function frame(): void {
           Math.floor(player.pos.y + 1.0), Math.floor(player.pos.z)) === Block.Lava;
       if (inLava && lavaTimer <= 0) { player.damage(6); lavaTimer = 0.5; }
     }
+    // Boat upkeep: hull follows the player; jump hops out; beaching dismounts.
+    if (boatActive) {
+      if (player.dead || player.flying) exitBoat(false);
+      else {
+        const jumpNow = controlling && input.jump;
+        if (jumpNow && !prevBoatJump) exitBoat();
+        prevBoatJump = jumpNow;
+        if (boatActive) {
+          if (player.onGround) {
+            boatGroundTime += dt;
+            if (boatGroundTime > 0.6) { exitBoat(); showNotice('You ran aground.'); }
+          } else boatGroundTime = 0;
+          boatGroup.position.copy(player.pos);
+          boatGroup.rotation.y = player.yaw;
+        }
+      }
+    } else prevBoatJump = false;
+    // Traps: spikes prick anyone standing on them; a landmine detonates.
+    spikeHurtTimer = Math.max(0, spikeHurtTimer - dt);
+    if (!player.dead && localMode === 'survival' && !player.noclip) {
+      const bx = Math.floor(player.pos.x), bz = Math.floor(player.pos.z);
+      const by = Math.floor(player.pos.y - 0.05);
+      const under = world.getBlock(bx, by, bz);
+      if (under === Block.SpikeTrap && player.onGround && spikeHurtTimer <= 0) {
+        player.damage(2);
+        spikeHurtTimer = 0.7;
+      } else if (under === Block.Landmine) {
+        triggerLandmine(bx, by, bz);
+      }
+    }
     // Machines run under the same never-pausing sim. Offline this is the
     // authoritative tick; in multiplayer it's a local prediction for the fill
     // bar (the server is authoritative and reconciles on open/collect).
     machines.update(dt);
     machineModels.update(dt); // animate drills/pumpjacks
     turretModels.update(dt);
-    updateSeasonHud();
-    updateWarHud(dt);     // war clock + border + kill score (MP only)
+    updateWarHud(dt);     // war clock + border + kill score (MP only, war only)
+    updateGuide(dt, controlling); // getting-started checklist + vault compass
+    updateTpa(dt, controlling);   // TPA accept hold + incoming-request banner
     updateWarVisuals();   // the closing red ring + everybody-glows halos
     tickDisguises(dt); // Phase 8: expire spy disguises on remote avatars
     updateThrownItems(dt); // animate tossed grenades/bombs
@@ -3195,6 +3660,7 @@ function frame(): void {
   }
   hud.update();
   hud.updateCooldowns();
+  updateProgressFlash(); // gold pulse while skill points wait to be spent
   // The Crafting Guide button shows whenever a crafting table is open.
   guideBtn.style.display = (invUI.open && invUI.mode === 'table' && !guideOpen) ? 'block' : 'none';
   if (guideOpen && !(invUI.open && invUI.mode === 'table')) hideGuide();

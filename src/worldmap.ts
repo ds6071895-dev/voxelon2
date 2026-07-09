@@ -47,7 +47,11 @@ const STRUCT_COLOR: Record<string, string> = {
   pod: '#e0913a',     // crashed cargo pod — scorched orange
 };
 
-interface Waypoint { x: number; z: number; color: number; name: string; show: boolean; }
+interface Waypoint {
+  x: number; z: number; color: number; name: string; show: boolean;
+  /** Altitude of the waypoint (older saved points have none). */
+  y?: number;
+}
 export interface TotemPos { x: number; y: number; z: number; }
 /** A vault marker for the map (Milestone D). `discovered` vaults (entered once)
  *  render bright with their tier; merely SENSED nearby ones render faint with no
@@ -167,7 +171,7 @@ export class WorldMap {
     const hint = document.createElement('div');
     hint.className = 'mc-font';
     hint.style.cssText = 'font-size:11px;color:#8da0c0;text-shadow:none;';
-    hint.textContent = 'Click a gold totem: travel there  ·  Left-click: add waypoint  ·  Right-click a marker: remove  ·  M / Esc: close';
+    hint.textContent = 'Click a gold totem: travel there  ·  Left-click: add waypoint  ·  Right-click a marker: remove  ·  B in-game: waypoint at your feet  ·  M / Esc: close';
     panel.append(header, row, hint);
     this.el.appendChild(panel);
     app.appendChild(this.el);
@@ -388,10 +392,11 @@ export class WorldMap {
     const p = this.mapCtx.player();
     this.waypoints.forEach((w, i) => {
       const dist = Math.round(Math.hypot(w.x - p.x, w.z - p.z));
+      const alt = w.y !== undefined ? ` · Y${w.y}` : '';
       const eye = w.show ? '👁' : '–';
       lines.push(
         `<span style="color:${this.rgba(w.color, 1)}">■</span> ` +
-        `${this.escape(w.name)} <span style="color:#8da0c0">${dist}m</span> ` +
+        `${this.escape(w.name)} <span style="color:#8da0c0">${dist}m${alt}</span> ` +
         `<a data-eye="${i}" title="Show in world" ` +
         `style="cursor:pointer;text-decoration:none">${eye}</a> ` +
         `<a data-del="${i}" title="Delete" style="cursor:pointer;color:#ff8a7a">✕</a>`);
@@ -422,6 +427,20 @@ export class WorldMap {
   /** Read-only view of the saved waypoints (for the HUD minimap). */
   listWaypoints(): ReadonlyArray<{ x: number; z: number; color: number; name: string }> {
     return this.waypoints;
+  }
+
+  /** Drop a waypoint at a world position (the B hotkey / a Vault Compass) —
+   *  auto-named unless given one; shown in-world immediately. Returns the name. */
+  addWaypointAt(x: number, y: number, z: number, wantName?: string): string {
+    const name = (wantName ?? '').trim().slice(0, 24) || `WP ${this.waypoints.length + 1}`;
+    this.waypoints.push({
+      x: Math.round(x), y: Math.round(y), z: Math.round(z),
+      color: factionColor(this.mapCtx.faction()), name, show: true,
+    });
+    this.saveWaypoints();
+    this.syncMarkers();
+    if (this.open) this.draw();
+    return name;
   }
 
   /** Replace the attuned-totem markers (click-to-travel). */
@@ -477,7 +496,10 @@ export class WorldMap {
     if (e.button !== 0) return;
     const def = `WP ${this.waypoints.length + 1}`;
     const name = (prompt('Waypoint name:', def) ?? def).trim().slice(0, 24) || def;
-    this.waypoints.push({ x: wx, z: wz, color: factionColor(this.mapCtx.faction()), name, show: true });
+    this.waypoints.push({
+      x: wx, y: this.terrain.height(wx, wz) + 1, z: wz,
+      color: factionColor(this.mapCtx.faction()), name, show: true,
+    });
     this.saveWaypoints();
     this.draw();
   }
@@ -496,7 +518,7 @@ export class WorldMap {
     }
     shown.forEach((w, i) => {
       const m = this.markerGroup.children[i] as THREE.Mesh;
-      const gy = this.terrain.height(Math.round(w.x), Math.round(w.z));
+      const gy = w.y ?? this.terrain.height(Math.round(w.x), Math.round(w.z));
       m.position.set(w.x + 0.5, gy + 15, w.z + 0.5);
       (m.material as THREE.MeshBasicMaterial).color.setHex(w.color);
     });
@@ -534,7 +556,8 @@ export class WorldMap {
 
     shown.forEach((w, i) => {
       const el = this.beaconEls[i];
-      const gy = this.terrain.height(Math.round(w.x), Math.round(w.z)) + 2;
+      const wy = (w as { y?: number }).y;
+      const gy = (wy ?? this.terrain.height(Math.round(w.x), Math.round(w.z))) + 2;
       this._v.set(w.x + 0.5, gy, w.z + 0.5);
       const front =
         (this._v.x - this._camPos.x) * this._camFwd.x +
@@ -555,6 +578,7 @@ export class WorldMap {
       sy = Math.max(margin, Math.min(height - margin, sy));
       const dist = Math.round(Math.hypot(w.x - p.x, w.z - p.z));
       const col = this.rgba(w.color, 1);
+      const alt = wy !== undefined ? ` · Y${wy}` : '';
       el.style.display = '';
       el.style.left = `${sx}px`;
       el.style.top = `${sy}px`;
@@ -562,7 +586,7 @@ export class WorldMap {
       el.innerHTML =
         `<div style="width:9px;height:9px;margin:0 auto 2px;background:${col};` +
         `border:1px solid #000;transform:rotate(45deg)"></div>` +
-        `${this.escape(w.name)}<br><span style="color:#cfe0ff">${dist}m</span>`;
+        `${this.escape(w.name)}<br><span style="color:#cfe0ff">${dist}m${alt}</span>`;
     });
   }
 
@@ -582,6 +606,7 @@ export class WorldMap {
         .filter((w) => Number.isFinite(w.x) && Number.isFinite(w.z))
         .map((w, i) => ({
           x: w.x as number, z: w.z as number,
+          y: Number.isFinite(w.y) ? (w.y as number) : undefined,
           color: Number.isFinite(w.color) ? (w.color as number) : 0xffffff,
           name: typeof w.name === 'string' && w.name ? w.name : `WP ${i + 1}`,
           show: w.show !== false, // default ON (older saved points had no flag)

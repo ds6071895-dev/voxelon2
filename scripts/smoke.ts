@@ -27,8 +27,12 @@ import { ItemEntities, itemGeometry } from '../src/itementity';
 import { computeLight } from '../src/light';
 import { buildChunkGeometry, TintSampler } from '../src/mesher';
 import {
-  collisionBoxes, FULL_BOX, SLAB_BOTTOM, SLAB_TOP, stairBoxes,
+  collisionBoxes, FULL_BOX, PLATE_BOX, SLAB_BOTTOM, SLAB_TOP, stairBoxes,
 } from '../src/shapes';
+import {
+  GUIDE_STEPS, compassGlyph, guideComplete, guideProgress, markGuideStep,
+  newGuideState, nextGuideStep, sanitizeGuide,
+} from '../src/guide';
 import { Mobs, MOB_DEFS } from '../src/mobs';
 import { Particles } from '../src/particles';
 import { raycastBlocks } from '../src/interact';
@@ -39,7 +43,9 @@ import { GameServer, Outbound } from '../src/net/server_core';
 import {
   mitigate, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE, WORLD_BORDER, WORLD_HALF,
   CORE_BORDER, CORE_HALF, inCore, MAX_ATTUNED, TOTEM_COOLDOWN, COMBAT_TAG,
+  TPA_EXPIRE, TPA_HOLD,
 } from '../src/net/protocol';
+import { LEVER_RADIUS, flippedTrap, isLeverBlock, leverFlips } from '../src/traps';
 import {
   Machines, MachineType, MAX_LEVEL, allowedFilterMask, applyUpgrade,
   autominerRates, claimMachine, collectMachine, currentRate, damageMachine,
@@ -68,8 +74,10 @@ import {
 } from '../src/war';
 import {
   XP_MOB, XP_PLAYER_KILL, XP_REPORT_CAP, levelFor, xpForLevel, levelProgress,
-  newProgress, totalPointsFor, pointsAvailable, canBuy, buyRank, personalBuffs,
-  sanitizeProgress, factionLevelFor, factionPerks, sanitizeFactionXp, TRACKS,
+  newProgress, totalPointsFor, pointsAvailable, personalBuffs, sanitizeProgress,
+  factionLevelFor, factionPerks, sanitizeFactionXp,
+  BRANCHES, BRANCH_LENGTH, MAX_LEVEL, SKILL_TREE, branchRank, buyNode,
+  canBuyNode, nodeCost, ownsNode, pointsSpent,
 } from '../src/progress';
 import {
   GADGETS, isGadget, gadgetOf, GadgetCooldowns, falloffDamage,
@@ -82,9 +90,10 @@ import {
   structureKindAt, structureStamp, structureChestTier, worldStructures,
 } from '../src/structures';
 import {
-  VAULT_LOOT, VAULT_LOOT_WINDOW, VAULT_RECHARGE, VaultStamp, bruteMaxHp,
-  countVaults, newVaultState, refreshVaultState, sanitizeVaultState, vaultAt,
-  vaultChestAt, vaultLoot, vaultLootable, vaultStamp, vaultTier, worldVaults,
+  VAULT_LOOT, VAULT_LOOT_COOLDOWN, VAULT_LOOT_WINDOW, VAULT_RECHARGE,
+  VaultStamp, bruteMaxHp, countVaults, newVaultState, recordVaultLoot,
+  refreshVaultState, sanitizeVaultState, vaultAt, vaultChestAt, vaultLoot,
+  vaultLootCooldownLeft, vaultLootable, vaultStamp, vaultTier, worldVaults,
 } from '../src/vaults';
 import { LOOT_TABLES, chestLoot, chestLootSlots } from '../src/loot';
 import { mulberry32 } from '../src/noise';
@@ -2923,37 +2932,63 @@ check('furnace smelts ore/sand/log but not removed foods',
   check('every rune is findable in structure or vault loot', ids.every(inLoot));
 }
 
-// --- Progression: XP curve, upgrade tracks, faction pool ------------------------
+// --- Progression: XP curve, the 100-node skill tree, faction pool ---------------
 {
-  // Level curve: 0 XP = level 1; thresholds match xpForLevel; capped at 20.
+  // Level curve: 0 XP = level 1; thresholds match xpForLevel; capped at 100.
   check('levelFor curve + xpForLevel inverse',
-    levelFor(0) === 1 && levelFor(39) === 1 && levelFor(40) === 2 &&
-    levelFor(xpForLevel(5)) === 5 && levelFor(1e9) === 20);
+    levelFor(0) === 1 && levelFor(xpForLevel(2) - 1) === 1 &&
+    levelFor(xpForLevel(2)) === 2 && levelFor(xpForLevel(5)) === 5 &&
+    levelFor(xpForLevel(50)) === 50 && levelFor(1e9) === MAX_LEVEL);
+  check('the road to max level is long but finite (hours of content)',
+    xpForLevel(MAX_LEVEL) > 50_000 && xpForLevel(MAX_LEVEL) < 500_000 &&
+    xpForLevel(2) <= 60); // the first level comes fast
   check('levelProgress stays in [0,1]',
     levelProgress(0) >= 0 && levelProgress(50) > 0 && levelProgress(50) < 1 &&
     levelProgress(1e9) === 1);
 
-  // Skill points: one per level past 1; buying decrements; tracks cap.
+  // The tree: 5 branches × 20 nodes, costs rising 1→4 with depth. The full
+  // tree costs MORE points than a maxed character has — specialization.
+  check('the skill tree is 100 unique nodes across 5 branches',
+    SKILL_TREE.length === 100 && BRANCHES.length === 5 &&
+    new Set(SKILL_TREE.map((n) => n.id)).size === 100 &&
+    BRANCHES.every((b) => SKILL_TREE.filter((n) => n.branch === b.id).length === BRANCH_LENGTH));
+  check('node costs rise with depth (harder the further you go)',
+    nodeCost(0) === 1 && nodeCost(4) === 1 && nodeCost(5) === 2 &&
+    nodeCost(10) === 3 && nodeCost(19) === 4);
+  const fullTreeCost = SKILL_TREE.reduce((a, n) => a + n.cost, 0);
+  check('the full tree costs more than a maxed character earns',
+    fullTreeCost === 250 && totalPointsFor(MAX_LEVEL) === MAX_LEVEL - 1);
+  check('every node grants at least one effect; capstones are named uniquely',
+    SKILL_TREE.every((n) => Object.keys(n.effects).length >= 1) &&
+    new Set(SKILL_TREE.filter((n) => n.index % 5 === 4).map((n) => n.name)).size === 20);
+
+  // Buying: prerequisites chain within a branch; points gate purchases.
   const st = newProgress();
   st.xp = xpForLevel(4); // level 4 -> 3 points
-  check('points: level 4 grants 3; buying a rank spends one',
+  check('points: level 4 grants 3; roots buyable, deep nodes locked',
     totalPointsFor(4) === 3 && pointsAvailable(st) === 3 &&
-    buyRank(st, 'swift') && pointsAvailable(st) === 2);
-  st.xp = xpForLevel(20); // plenty of points
-  for (let i = 0; i < 30; i++) buyRank(st, 'swift');
-  const swiftMax = TRACKS.find((t) => t.id === 'swift')!.max;
-  check('a track caps at its max ranks',
-    st.spent.swift === swiftMax && !canBuy(st, 'swift'));
-  buyRank(st, 'gunner');
-  check('personalBuffs scale with ranks',
-    personalBuffs(st).speedMult > 1 && personalBuffs(newProgress()).speedMult === 1 &&
-    personalBuffs(st).reloadMult < 1 && personalBuffs(newProgress()).reloadMult === 1);
+    canBuyNode(st, 'scout0') && !canBuyNode(st, 'scout1') && !canBuyNode(st, 'nope0'));
+  check('buying spends points and unlocks the next rank',
+    buyNode(st, 'scout0') && pointsAvailable(st) === 2 && !buyNode(st, 'scout0') &&
+    canBuyNode(st, 'scout1') && buyNode(st, 'scout1') && branchRank(st, 'scout') === 2);
+  st.xp = xpForLevel(MAX_LEVEL); // 99 points
+  for (let i = 0; i < BRANCH_LENGTH; i++) buyNode(st, `scout${i}`);
+  check('a whole branch can be finished (50 points) and buffs stack',
+    branchRank(st, 'scout') === 20 && ownsNode(st, 'scout19') &&
+    pointsSpent(st) >= 50 && personalBuffs(st).speedMult > 1.2 &&
+    personalBuffs(st).energyMult < 1 &&
+    personalBuffs(newProgress()).speedMult === 1);
 
-  // sanitizeProgress clamps junk AND overspent ranks to the earned budget.
-  const dirty = sanitizeProgress({ xp: xpForLevel(3), spent: { swift: 99, tough: 99, gunner: 99 } });
-  check('sanitizeProgress clamps spent ranks to the XP-earned budget',
-    pointsAvailable(dirty) === 0 &&
-    dirty.spent.swift + dirty.spent.tough + dirty.spent.gunner === totalPointsFor(3));
+  // sanitizeProgress: contiguity + budget enforced; old-format saves refund.
+  const dirty = sanitizeProgress({ xp: xpForLevel(4), // 3 points earned
+    nodes: ['scout0', 'scout1', 'scout5', 'gunner3', 'junk', 'tank0'] });
+  check('sanitizeProgress keeps only contiguous, affordable prefixes',
+    dirty.nodes.includes('scout0') && dirty.nodes.includes('scout1') &&
+    !dirty.nodes.includes('scout5') && !dirty.nodes.includes('gunner3') &&
+    !dirty.nodes.includes('junk') && pointsSpent(dirty) <= totalPointsFor(4));
+  check('old-format saves (spent tracks) refund into unspent points',
+    sanitizeProgress({ xp: xpForLevel(5), spent: { swift: 3 } }).nodes.length === 0 &&
+    pointsAvailable(sanitizeProgress({ xp: xpForLevel(5), spent: { swift: 3 } })) === 4);
   check('sanitizeProgress fail-closes garbage',
     sanitizeProgress(null).xp === 0 && sanitizeProgress({ xp: -5 }).xp === 0);
 
@@ -3317,8 +3352,8 @@ let firstVault: VaultStamp | null = null;
       if (!firstVault && st.tier === 1) firstVault = st;
     }
   }
-  check('vault counts hit the design band (12–20 core, 60+ Wilds)',
-    core >= 12 && core <= 20 && wilds >= 60, `core=${core} wilds=${wilds}`);
+  check('vault counts hit the design band (8–18 core, 60+ Wilds — each MASSIVE)',
+    core >= 8 && core <= 18 && wilds >= 60, `core=${core} wilds=${wilds}`);
   check('countVaults matches the sweep', countVaults(1337, terrain) === core + wilds);
   check('a Tier III vault exists in the deep Wilds', tier3 !== null);
   check('vault tier grows with distance from origin',
@@ -3331,17 +3366,25 @@ let firstVault: VaultStamp | null = null;
     for (const st of stamps) if (!vaultStamp(4242, st.cx, st.cz, terrain)) moved++;
     return moved > 0;
   })());
-  check('vault stamps never reach past a 5×5-chunk footprint',
+  check('vault stamps never reach past a 7×7-chunk footprint',
     stamps.every((st) => st.blocks.every((b) =>
-      Math.abs(Math.floor(b.x / 16) - st.cx) <= 2 &&
-      Math.abs(Math.floor(b.z / 16) - st.cz) <= 2)));
-  check('every vault has 4–8 rooms (hall → sides → boss) + a chest + a mouth',
+      Math.abs(Math.floor(b.x / 16) - st.cx) <= 3 &&
+      Math.abs(Math.floor(b.z / 16) - st.cz) <= 3)));
+  check('every vault is MASSIVE: 8–16 rooms (hall → wings → boss) + chest + mouth',
     stamps.every((st) =>
-      st.rooms.length >= 4 && st.rooms.length <= 8 &&
+      st.rooms.length >= 8 && st.rooms.length <= 16 &&
       st.rooms[0].kind === 'hall' &&
       st.rooms.filter((r) => r.kind === 'boss').length === 1 &&
       st.blocks.some((b) => b.id === Block.VaultChest) &&
       Number.isFinite(st.mouth.x)));
+  check('every guarded room hosts a MOB SPAWNER cage at its centre',
+    stamps.every((st) => st.rooms.filter((r) => r.cap > 0).length >= 4 &&
+      st.rooms.filter((r) => r.cap > 0).every((r) =>
+        st.blocks.some((b) => b.x === r.x && b.y === r.y && b.z === r.z &&
+          b.id === Block.MobSpawner))));
+  check('vaults grew room variety (great halls / pits / crypts exist somewhere)',
+    ['great', 'pit', 'crypt'].every((kind) =>
+      stamps.some((st) => st.rooms.some((r) => r.kind === kind))));
   check('the staircase mouth breaks the actual surface (walk-in entrance)',
     stamps.every((st) => st.mouth.y >= terrain.height(st.mouth.x, st.mouth.z) - 1));
   check('vault walls are VaultBrick (plenty of them)',
@@ -3402,11 +3445,29 @@ let firstVault: VaultStamp | null = null;
     vaultLootable(vs, 100 + VAULT_LOOT_WINDOW) && !vaultLootable(vs, 101 + VAULT_LOOT_WINDOW));
   refreshVaultState(vs, 100 + VAULT_RECHARGE + 1);
   check('the Brute lazily respawns after the recharge', vs.hp === bruteMaxHp(2));
-  check('sanitizeVaultState fail-closes junk',
+  check('sanitizeVaultState fail-closes junk + migrates legacy openedBy ledgers',
     sanitizeVaultState({ tier: 9, hp: 50 }) === null &&
     sanitizeVaultState('nope') === null &&
     sanitizeVaultState({ tier: 3, hp: 1e9, deadAt: 5, openedBy: ['a', 7, 'b'] })!.hp === bruteMaxHp(3) &&
-    sanitizeVaultState({ tier: 3, hp: 10, deadAt: 5, openedBy: ['a', 7, 'b'] })!.openedBy.join(',') === 'a,b');
+    Object.keys(sanitizeVaultState({ tier: 3, hp: 10, deadAt: 5, openedBy: ['a', 7, 'b'] })!.looters)
+      .join(',') === 'a,b');
+
+  // The loot-regrow ledger: per-player 30-minute cooldown + fresh rolls.
+  const lv = newVaultState(1);
+  check('a fresh vault has no loot cooldown for anyone',
+    vaultLootCooldownLeft(lv, 'Alice', 1000) === 0);
+  check('looting starts the cooldown and hands out roll indexes 0,1,2…',
+    recordVaultLoot(lv, 'Alice', 1000) === 0 &&
+    vaultLootCooldownLeft(lv, 'Alice', 1000) === VAULT_LOOT_COOLDOWN &&
+    vaultLootCooldownLeft(lv, 'Bob', 1000) === 0 && // per-player, not global
+    vaultLootCooldownLeft(lv, 'Alice', 1000 + VAULT_LOOT_COOLDOWN) === 0 &&
+    recordVaultLoot(lv, 'Alice', 1000 + VAULT_LOOT_COOLDOWN) === 1);
+  check('each re-loot rolls a DIFFERENT haul (roll index seeds the rng)',
+    JSON.stringify(vaultLoot(1337, 9, -16, 2, 'Alice', 0)) !==
+    JSON.stringify(vaultLoot(1337, 9, -16, 2, 'Alice', 1)));
+  check('sanitized looters round-trip through JSON',
+    vaultLootCooldownLeft(sanitizeVaultState(JSON.parse(JSON.stringify(lv)))!,
+      'Alice', 1000 + VAULT_LOOT_COOLDOWN + 1) < VAULT_LOOT_COOLDOWN);
 }
 
 // --- D2/D3: server-authoritative boss + once-per-player chest -------------------
@@ -3455,20 +3516,20 @@ let firstVault: VaultStamp | null = null;
         .map((m) => ({ id: m.item, count: m.count }))) ===
       JSON.stringify(vaultLoot(1337, st.cx, st.cz, st.tier, 'Raider')));
     const open1b = s.handle(1, { t: 'vaultChestOpen', x: chest.x, y: chest.y, z: chest.z });
-    check('a second open by the same player is refused (once per vault)',
+    check('an immediate second open by the same player is refused (30m regrow)',
       !open1b.some((o) => o.msg.t === 'gotitem') && open1b.some((o) => o.msg.t === 'notice'));
     // …while player 2 still gets their own roll (no husk dungeons).
     const open2 = s.handle(2, { t: 'vaultChestOpen', x: chest.x, y: chest.y, z: chest.z });
     check('a second player still gets their own loot',
       open2.filter((o) => o.msg.t === 'gotitem').length >= 4);
-    // Persistence: openedBy survives serialize/restore.
+    // Persistence: the loot ledger survives serialize/restore.
     const save = s.serialize();
     const s2 = new GameServer(1337, mulberry32(141));
     check('the world save restores (with vault ledgers)', s2.restore(save));
     s2.addPlayer(1, { username: 'Raider', faction: 0 });
     s2.handle(1, { t: 'xform', x: chest.x + 0.5, y: chest.y + 0.5, z: chest.z + 1.5, yaw: 0, pitch: 0 });
     const openAgain = s2.handle(1, { t: 'vaultChestOpen', x: chest.x, y: chest.y, z: chest.z });
-    check('once-per-player survives a server restart',
+    check('the per-player loot cooldown survives a server restart',
       !openAgain.some((o) => o.msg.t === 'gotitem'));
     // The loot window closes; later the Brute respawns.
     s2.tickWar(VAULT_LOOT_WINDOW + 5); // advance worldTime past the window
@@ -3481,6 +3542,19 @@ let firstVault: VaultStamp | null = null;
     const reEnter = s2.handle(3, { t: 'vaultEnter', cx: st.cx, cz: st.cz })
       .find((o) => o.msg.t === 'vault')!.msg as { alive: boolean };
     check('the Brute respawns after the recharge clock', reEnter.alive);
+    // Loot REGROWS: enough worldTime has passed (window + recharge > cooldown),
+    // so after re-killing the Brute the ORIGINAL looter rolls a fresh haul.
+    for (let i = 0; i < 40; i++) {
+      s2.handle(3, { t: 'vaultBossHit', cx: st.cx, cz: st.cz, amount: 10 });
+    }
+    const regrow = s2.handle(1, { t: 'vaultChestOpen', x: chest.x, y: chest.y, z: chest.z });
+    const got2 = regrow.filter((o) => o.msg.t === 'gotitem')
+      .map((o) => o.msg as { item: number; count: number })
+      .map((m) => ({ id: m.item, count: m.count }));
+    check('the treasure regrows after the cooldown — a fresh roll for the same player',
+      got2.length >= 4 &&
+      JSON.stringify(got2) ===
+        JSON.stringify(vaultLoot(1337, st.cx, st.cz, st.tier, 'Raider', 1)));
     // Fail-closed extras: far-away hits + a broken chest cell + spectators.
     const s3 = new GameServer(1337, mulberry32(142));
     s3.addPlayer(1, { username: 'Cheater', faction: 0 });
@@ -3587,6 +3661,220 @@ let firstVault: VaultStamp | null = null;
   for (let i = 0; i < 10; i++) surv.update(0.5, actor); // 5s
   check('offline Survival.boost heals fast despite the damage cooldown',
     actor.health >= 12, `hp=${actor.health}`);
+}
+
+// --- Batch: traps + boats + getting-started guide + vault rebalance --------------
+{
+  // Trap blocks: slab-shaped, partial collision (the landmine is a thin plate).
+  check('spike trap is a bottom-slab shape; landmine is a thin plate',
+    JSON.stringify(collisionBoxes(Block.SpikeTrap)) === JSON.stringify([SLAB_BOTTOM]) &&
+    JSON.stringify(collisionBoxes(Block.Landmine)) === JSON.stringify([PLATE_BOX]) &&
+    PLATE_BOX[1][1] < 0.25);
+  check('single-variant slabs always place in the lower half (no -1 top id)',
+    slabPlacement(Block.SpikeTrap, -1, 0.9) === Block.SpikeTrap &&
+    slabPlacement(Block.Landmine, 0, 0.8) === Block.Landmine &&
+    slabPlacement(Block.OakSlab, -1, 0.9) === slabTopId(Block.OakSlab));
+  check('trap blocks are registered items that drop themselves',
+    ITEMS[Block.SpikeTrap]?.block === Block.SpikeTrap &&
+    ITEMS[Block.Landmine]?.block === Block.Landmine &&
+    dropFor(Block.SpikeTrap, 0.5)?.id === Block.SpikeTrap &&
+    dropFor(Block.Landmine, 0.5)?.id === Block.Landmine);
+  const cells = (ids: (number | null)[]): (ItemStack | null)[] =>
+    ids.map((id) => (id === null ? null : { id, count: 1 }));
+  check('trap + boat recipes craft',
+    matchGrid(cells([Item.IronIngot, Item.IronIngot, Item.IronIngot,
+      Block.Cobblestone, Block.Cobblestone, Block.Cobblestone,
+      null, null, null]))?.id === Block.SpikeTrap &&
+    matchGrid(cells([Item.Redstone, null, Item.Redstone,
+      Item.IronIngot, Item.Coal, Item.IronIngot,
+      null, null, null]))?.id === Block.Landmine &&
+    matchGrid(cells([Block.OakPlanks, null, Block.OakPlanks,
+      Block.OakPlanks, Block.OakPlanks, Block.OakPlanks,
+      null, null, null]))?.id === Item.Boat);
+
+  // Boating flag round-trips through the server snapshot (like gliding).
+  const s = new GameServer(1337, mulberry32(77));
+  s.addPlayer(1, { username: 'Sailor', faction: 0 });
+  s.handle(1, { t: 'xform', x: 1, y: 70, z: 1, yaw: 0, pitch: 0, boating: true });
+  check('xform boating flag reaches the snapshot',
+    s.snapshot().find((p) => p.id === 1)?.boating === true);
+  s.handle(1, { t: 'xform', x: 1, y: 70, z: 1, yaw: 0, pitch: 0 });
+  check('boating flag clears when omitted',
+    s.snapshot().find((p) => p.id === 1)?.boating === false);
+
+  // Getting-started guide: unique steps, sticky marking, fail-closed sanitize.
+  const ids = new Set(GUIDE_STEPS.map((st) => st.id));
+  check('guide steps have unique ids',
+    ids.size === GUIDE_STEPS.length && GUIDE_STEPS.length >= 6);
+  const g = newGuideState();
+  check('fresh guide: nothing done, first step next',
+    guideProgress(g).done === 0 && !guideComplete(g) &&
+    nextGuideStep(g)?.id === GUIDE_STEPS[0].id);
+  check('marking works once and is sticky',
+    markGuideStep(g, 'wood') && !markGuideStep(g, 'wood') && guideProgress(g).done === 1);
+  check('marking an unknown step fails closed', !markGuideStep(g, 'nope'));
+  for (const st of GUIDE_STEPS) markGuideStep(g, st.id);
+  check('all steps marked → complete', guideComplete(g) && nextGuideStep(g) === null);
+  check('sanitizeGuide round-trips + drops junk', (() => {
+    const round = sanitizeGuide(JSON.parse(JSON.stringify(g)));
+    return guideComplete(round) && !guideComplete(sanitizeGuide({ hacker: true })) &&
+      guideProgress(sanitizeGuide(null)).done === 0;
+  })());
+  check('compass glyph points sensibly',
+    compassGlyph(0, -10) === 'N' && compassGlyph(10, 0) === 'E' &&
+    compassGlyph(0, 10) === 'S' && compassGlyph(-10, 10) === 'SW');
+
+  // Vault compasses: three tiers, craftable, distinct sprites.
+  check('vault compasses craft (iron / gold / diamond rings)',
+    matchGrid(cells([null, Item.IronIngot, null,
+      Item.IronIngot, Item.Redstone, Item.IronIngot,
+      null, Item.Stick, null]))?.id === Item.VaultCompass1 &&
+    matchGrid(cells([null, Item.GoldIngot, null,
+      Item.GoldIngot, Item.Redstone, Item.GoldIngot,
+      null, Item.Stick, null]))?.id === Item.VaultCompass2 &&
+    matchGrid(cells([null, Item.Diamond, null,
+      Item.Diamond, Item.Redstone, Item.Diamond,
+      null, Item.Stick, null]))?.id === Item.VaultCompass3);
+  check('mob spawner is a tough, no-drop dungeon block',
+    BLOCKS[Block.MobSpawner].requiresTool && BLOCKS[Block.MobSpawner].minTier === 2 &&
+    dropFor(Block.MobSpawner, 0.5) === null && !ITEMS[Block.MobSpawner]);
+
+  // Vault rebalance: soft Tier-I Brute; richer (never-OP) Tier-I loot.
+  check('Tier I Brute is soft; II/III unchanged',
+    bruteMaxHp(1) === 80 && bruteMaxHp(2) === 200 && bruteMaxHp(3) === 270);
+  check('every Tier I roll includes bandages; pool has pistol+glider, no diamond',
+    vaultLoot(1337, 3, 3, 1, 'Newbie').some((st) => st.id === Item.Bandage) &&
+    VAULT_LOOT[1].some((e) => e.id === Item.Pistol) &&
+    VAULT_LOOT[1].some((e) => e.id === Item.Glider) &&
+    !VAULT_LOOT[1].some((e) => e.id === Item.Diamond));
+}
+
+// --- Batch: early-game armor + lever traps + TPA -------------------------------
+{
+  const cells = (ids: (number | null)[]): (ItemStack | null)[] =>
+    ids.map((id) => (id === null ? null : { id, count: 1 }));
+
+  // Early-game armor: wood + stone starter sets craft, equip, and mitigate less
+  // than iron (but a real full-set edge over nothing).
+  check('wood + stone armor craft from planks / cobble',
+    matchGrid(cells([Block.OakPlanks, Block.OakPlanks, Block.OakPlanks,
+      Block.OakPlanks, null, Block.OakPlanks, null, null, null]))?.id === Item.WoodHelmet &&
+    matchGrid(cells([Block.Cobblestone, null, Block.Cobblestone,
+      Block.Cobblestone, Block.Cobblestone, Block.Cobblestone,
+      Block.Cobblestone, Block.Cobblestone, Block.Cobblestone]))?.id === Item.StoneChestplate);
+  check('wood/stone armor pieces are real armor (points > 0, but under iron)',
+    (ITEMS[Item.WoodChestplate]?.armor?.points ?? 0) > 0 &&
+    (ITEMS[Item.StoneChestplate]?.armor?.points ?? 0) > 0 &&
+    (ITEMS[Item.WoodChestplate]!.armor!.points) < (ITEMS[Item.IronChestplate]!.armor!.points) &&
+    (ITEMS[Item.StoneChestplate]!.armor!.points) < (ITEMS[Item.IronChestplate]!.armor!.points));
+  check('a full stone set gives a modest, non-zero armor total',
+    (() => {
+      const pts = [Item.StoneHelmet, Item.StoneChestplate, Item.StoneLeggings, Item.StoneBoots]
+        .reduce((a, id) => a + (ITEMS[id]!.armor!.points), 0);
+      return pts === 8; // 1+3+2+2 = 32% reduction
+    })());
+  check('wood/stone armor equips into the right slots',
+    ITEMS[Item.WoodHelmet]!.armor!.slot === 'helmet' &&
+    ITEMS[Item.StoneBoots]!.armor!.slot === 'boots' &&
+    !ITEMS[Item.WoodHelmet]!.glider);
+
+  // Lever-triggered traps: registry + flip logic (pure traps.ts).
+  check('lever + fall/wall traps craft cheap',
+    matchGrid(cells([Item.Stick, null, null, Block.Cobblestone, null, null,
+      null, null, null]))?.id === Block.Lever &&
+    matchGrid(cells([Block.OakPlanks, Block.OakPlanks, null, null, null, null,
+      null, null, null]))?.id === Block.FallTrap &&
+    matchGrid(cells([Block.Cobblestone, Block.Cobblestone, null, null, null, null,
+      null, null, null]))?.id === Block.WallTrap);
+  check('trap items place the base variant and drop the base on break',
+    ITEMS[Block.Lever]?.block === Block.Lever &&
+    ITEMS[Block.FallTrap]?.block === Block.FallTrap &&
+    ITEMS[Block.WallTrap]?.block === Block.WallTrap &&
+    dropFor(Block.LeverOn, 0.5)?.id === Block.Lever &&
+    dropFor(Block.FallTrapOpen, 0.5)?.id === Block.FallTrap &&
+    dropFor(Block.WallTrapUp, 0.5)?.id === Block.WallTrap);
+  check('flippedTrap toggles every lever/trap state (and is an involution)',
+    flippedTrap(Block.Lever) === Block.LeverOn &&
+    flippedTrap(Block.FallTrap) === Block.FallTrapOpen &&
+    flippedTrap(Block.WallTrap) === Block.WallTrapUp &&
+    flippedTrap(flippedTrap(Block.FallTrap)) === Block.FallTrap &&
+    flippedTrap(Block.Stone) === -1 && isLeverBlock(Block.LeverOn));
+  check('closed fall trap is solid; open is not; wall trap springs up to solid',
+    isSolid(Block.FallTrap) && !isSolid(Block.FallTrapOpen) &&
+    !BLOCKS[Block.WallTrap].opaque && isSolid(Block.WallTrapUp) &&
+    BLOCKS[Block.WallTrapUp].opaque);
+  // A lever pulls itself + nearby traps, but never chains OTHER levers.
+  check('leverFlips toggles the lever + in-range traps, ignores other levers', (() => {
+    const w = new Map<string, number>([
+      ['0,70,0', Block.Lever],           // the pulled lever
+      ['2,70,0', Block.FallTrap],        // in range -> flips
+      ['0,70,3', Block.WallTrap],        // in range -> flips
+      ['1,70,0', Block.Lever],           // another lever -> NOT flipped
+      [`${LEVER_RADIUS + 3},70,0`, Block.FallTrap], // out of range -> untouched
+    ]);
+    const get = (x: number, y: number, z: number) => w.get(`${x},${y},${z}`) ?? Block.Air;
+    const flips = leverFlips(get, 0, 70, 0);
+    const at = (x: number, y: number, z: number) =>
+      flips.find((f) => f.x === x && f.y === y && f.z === z)?.block;
+    return at(0, 70, 0) === Block.LeverOn && at(2, 70, 0) === Block.FallTrapOpen &&
+      at(0, 70, 3) === Block.WallTrapUp &&
+      at(1, 70, 0) === undefined && at(LEVER_RADIUS + 3, 70, 0) === undefined;
+  })());
+  check('leverFlips fails closed when there is no lever at the cell',
+    leverFlips(() => Block.Air, 0, 70, 0).length === 0);
+
+  // Server: a lever pull broadcasts the flips as edits (and needs the lever in
+  // reach). Linked traps beyond the puller's own edit range still flip.
+  {
+    const s = new GameServer(1337, mulberry32(51));
+    s.addPlayer(1, { username: 'Trapper', faction: 0 });
+    s.handle(1, { t: 'xform', x: 0, y: 65, z: 0, yaw: 0, pitch: 0 });
+    const g = (s.snapshot()[0]);
+    const px = Math.round(g.x), py = Math.round(g.y), pz = Math.round(g.z);
+    s.handle(1, { t: 'edit', x: px + 1, y: py, z: pz, block: Block.Lever });
+    s.handle(1, { t: 'edit', x: px + 1, y: py, z: pz + 2, block: Block.FallTrap });
+    const out = s.handle(1, { t: 'lever', x: px + 1, y: py, z: pz });
+    const edits = out.filter((o) => o.msg.t === 'edit')
+      .map((o) => o.msg as { x: number; y: number; z: number; block: number });
+    check('server lever pull flips the lever + linked trap and broadcasts edits',
+      edits.some((e) => e.x === px + 1 && e.z === pz && e.block === Block.LeverOn) &&
+      edits.some((e) => e.z === pz + 2 && e.block === Block.FallTrapOpen) &&
+      out.every((o) => o.to === 'all'));
+    check('server lever pull out of reach is refused',
+      s.handle(1, { t: 'lever', x: px + 100, y: py, z: pz }).length === 0);
+  }
+
+  // TPA: request -> target holds accept -> requester teleported.
+  {
+    const s = new GameServer(1337, mulberry32(52));
+    s.addPlayer(1, { username: 'Alice', faction: 0 });
+    s.addPlayer(2, { username: 'Bob', faction: 0 });
+    s.handle(1, { t: 'xform', x: 10, y: 70, z: 10, yaw: 0, pitch: 0 });
+    s.handle(2, { t: 'xform', x: 200, y: 72, z: 200, yaw: 0, pitch: 0 });
+    const req = s.handle(1, { t: 'tpa', target: 'Bob' });
+    check('tpa request reaches the target as tpaRequest',
+      req.some((o) => o.to === 2 && o.msg.t === 'tpaRequest' &&
+        (o.msg as { from: string }).from === 'Alice'));
+    check('tpa to an offline name notices the sender, no request sent',
+      s.handle(1, { t: 'tpa', target: 'Ghost' }).every((o) => o.msg.t === 'notice'));
+    const acc = s.handle(2, { t: 'tpaAccept' });
+    check('accepting teleports the requester to the target',
+      acc.some((o) => o.to === 1 && o.msg.t === 'teleport' &&
+        (o.msg as { x: number }).x === 200) &&
+      Math.round(s.snapshot().find((p) => p.id === 1)!.x) === 200);
+    check('a second accept does nothing (request was one-shot)',
+      s.handle(2, { t: 'tpaAccept' }).every((o) => o.msg.t === 'notice'));
+    check('TPA constants are sane', TPA_HOLD === 5 && TPA_EXPIRE >= TPA_HOLD);
+  }
+
+  // Getting-started guide gained bullets + armor steps.
+  check('guide includes bullets + armor steps after the gun step', (() => {
+    const ids = GUIDE_STEPS.map((s) => s.id);
+    return ids.includes('bullets') && ids.includes('armor') &&
+      ids.indexOf('bullets') > ids.indexOf('gun') &&
+      ids.indexOf('armor') > ids.indexOf('gun') &&
+      ids.indexOf('vault') > ids.indexOf('armor');
+  })());
 }
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} FAILURES`);

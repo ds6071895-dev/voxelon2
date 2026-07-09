@@ -31,12 +31,14 @@ import {
 } from '../war';
 import { XP_PLAYER_KILL, XP_REPORT_CAP, sanitizeFactionXp } from '../progress';
 import { GadgetCooldowns, gadgetOf, falloffDamage } from '../gadgets';
+import { leverFlips } from '../traps';
 import { Terrain } from '../terrain';
 import { structureChestTier, worldStructures } from '../structures';
 import { chestLootSlots } from '../loot';
 import {
   VaultServerState, VaultStamp, bruteMaxHp, newVaultState, refreshVaultState,
-  sanitizeVaultState, vaultChestAt, vaultLoot, vaultLootable, vaultStamp,
+  recordVaultLoot, sanitizeVaultState, vaultChestAt, vaultLoot,
+  vaultLootCooldownLeft, vaultLootable, vaultStamp,
   worldVaults,
 } from '../vaults';
 import {
@@ -44,7 +46,7 @@ import {
   ARMOR_POINT_CAP, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE,
   mitigate, ItemEntityInfo, PlayerInfo, PlayerSnapshot, ServerMsg,
   WORLD_SEED, WORLD_HALF, WORLD_BORDER, CORE_HALF, makeUsername, skinSeed, GameMode,
-  MAX_ATTUNED, TOTEM_COOLDOWN, COMBAT_TAG,
+  MAX_ATTUNED, TOTEM_COOLDOWN, COMBAT_TAG, TPA_EXPIRE,
 } from './protocol';
 import {
   COMEBACK_HEARTS, KILL_CREDIT_WINDOW, MAX_HEARTS, canConsume, canWithdraw,
@@ -100,13 +102,16 @@ interface ServerPlayer extends PlayerInfo {
   spawnX?: number; spawnY?: number; spawnZ?: number;
   /** Last client-pushed persistable blob (inventory/hotbar) for saveState. */
   savedClientData?: Record<string, unknown>;
+  /** Newest pending TPA request AT this player (someone wants to port to
+   *  them); expires TPA_EXPIRE seconds after `at` (worldTime). */
+  tpaFrom?: { id: number; username: string; at: number };
 }
 
 const GAME_MODES: GameMode[] = ['survival', 'creative', 'spectator'];
 
 /** Client messages a spectator may NOT send (world edits + combat + economy). */
 const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
-  'edit', 'attack', 'rangedAttack', 'selfhurt', 'drop', 'pickup', 'chestSet',
+  'edit', 'lever', 'attack', 'rangedAttack', 'selfhurt', 'drop', 'pickup', 'chestSet',
   'machineConfig', 'machineUpgrade', 'machineCollect', 'machineHit', 'machineClaim',
   'machineMove', 'setSpawn',
   'turretUpgrade', 'turretClaim', 'turretHit', 'turretLoad',
@@ -327,11 +332,66 @@ export class GameServer {
           p.y = msg.y;
           p.yaw = msg.yaw; p.pitch = msg.pitch;
           p.gliding = msg.gliding === true;
+          p.boating = msg.boating === true;
         }
         return [];
       }
       case 'edit':
         return this.handleEdit(p, msg.x, msg.y, msg.z, msg.block);
+      case 'lever': {
+        // A lever pull: recompute the flips over the edit log (levers + traps
+        // only ever exist as player edits) and broadcast them as normal edits.
+        // The lever itself must be within reach; the LINKED traps may not be —
+        // that's the point of a lever — so this is server-computed, not a
+        // client edit batch.
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        const bx = Math.floor(msg.x), by = Math.floor(msg.y), bz = Math.floor(msg.z);
+        const flips = leverFlips(
+          (x, y, z) => this.edits.get(`${x},${y},${z}`) ?? Block.Air, bx, by, bz);
+        const out: Outbound[] = [];
+        for (const f of flips) {
+          this.edits.set(`${f.x},${f.y},${f.z}`, f.block);
+          out.push({ to: 'all', msg: { t: 'edit', x: f.x, y: f.y, z: f.z, block: f.block } });
+        }
+        return out;
+      }
+      case 'tpa': {
+        if (p.dead || typeof msg.target !== 'string') return [];
+        const name = msg.target.slice(0, 32).trim();
+        const targetId = this.playerIdByName(name);
+        const target = targetId !== undefined ? this.players.get(targetId) : undefined;
+        if (!target) {
+          return [{ to: id, msg: { t: 'notice', text: `"${name}" is not online.` } }];
+        }
+        if (target.id === p.id) {
+          return [{ to: id, msg: { t: 'notice', text: "You can't TPA to yourself!" } }];
+        }
+        target.tpaFrom = { id: p.id, username: p.username, at: this.worldTime };
+        return [
+          { to: target.id, msg: { t: 'tpaRequest', from: p.username } },
+          { to: id, msg: { t: 'notice',
+            text: `📨 TPA sent to ${target.username} — if they accept, you teleport to them.` } },
+        ];
+      }
+      case 'tpaAccept': {
+        const req = p.tpaFrom;
+        p.tpaFrom = undefined; // one shot, granted or not
+        if (p.dead) return [];
+        if (!req || this.worldTime - req.at > TPA_EXPIRE) {
+          return [{ to: id, msg: { t: 'notice', text: 'That TPA request has expired.' } }];
+        }
+        const requester = this.players.get(req.id);
+        // The slot id could have been recycled by a reconnect — verify the name.
+        if (!requester || requester.dead || requester.username !== req.username) {
+          return [{ to: id, msg: { t: 'notice', text: `${req.username} is no longer available.` } }];
+        }
+        requester.x = p.x; requester.y = p.y; requester.z = p.z;
+        return [
+          { to: requester.id, msg: { t: 'teleport', x: p.x, y: p.y, z: p.z } },
+          { to: requester.id, msg: { t: 'notice', text: `🌀 ${p.username} accepted your TPA!` } },
+          { to: id, msg: { t: 'notice', text: `🌀 ${requester.username} teleported to you.` } },
+        ];
+      }
       case 'attack':
         return this.handleAttack(p, msg.target);
       case 'selfhurt':
@@ -618,9 +678,10 @@ export class GameServer {
         const st = this.vaultStampAt(Math.floor(msg.cx), Math.floor(msg.cz));
         if (!st) return [];
         const v = this.ensureVault(st);
+        // `opened` = YOUR per-player loot cooldown is running (regrows in 30m).
         return [{ to: id, msg: { t: 'vault', cx: st.cx, cz: st.cz, tier: st.tier,
           hp: v.hp, maxHp: bruteMaxHp(st.tier), alive: v.hp > 0,
-          opened: v.openedBy.includes(p.username) } }];
+          opened: vaultLootCooldownLeft(v, p.username, this.worldTime) > 0 } }];
       }
       case 'vaultBossHit':
         return this.handleVaultBossHit(p, msg.cx, msg.cz, msg.amount);
@@ -679,8 +740,8 @@ export class GameServer {
   }
 
   /** Open the per-player VaultChest: requires the Brute dead within the loot
-   *  window, in-reach, a pristine (unedited) chest cell, and at most ONE roll
-   *  per account per vault (openedBy is persisted in the world save). */
+   *  window, in-reach, a pristine (unedited) chest cell, and the per-player
+   *  30-minute regrow cooldown elapsed (the ledger persists in the world save). */
   private handleVaultChestOpen(p: ServerPlayer, x: number, y: number, z: number): Outbound[] {
     if (!fin(x, y, z)) return [];
     const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
@@ -696,12 +757,14 @@ export class GameServer {
         ? '☠ The Vault Brute guards this chest — defeat it first!'
         : '🔒 The vault has resealed — the Brute will return to guard it.' } }];
     }
-    if (v.openedBy.includes(p.username)) {
-      return [{ to: p.id, msg: { t: 'notice', text: "You've already claimed this vault's treasure!" } }];
+    const cd = vaultLootCooldownLeft(v, p.username, this.worldTime);
+    if (cd > 0) {
+      return [{ to: p.id, msg: { t: 'notice',
+        text: `⏳ You've looted this vault — the treasure regrows in ${Math.ceil(cd / 60)}m.` } }];
     }
-    v.openedBy.push(p.username);
+    const roll = recordVaultLoot(v, p.username, this.worldTime);
     const out: Outbound[] = [];
-    for (const s of vaultLoot(this.seed, st.cx, st.cz, st.tier, p.username)) {
+    for (const s of vaultLoot(this.seed, st.cx, st.cz, st.tier, p.username, roll)) {
       if (!ITEMS[s.id] || !fin(s.count) || s.count <= 0) continue;
       out.push({ to: p.id, msg: { t: 'gotitem', item: s.id, count: Math.floor(s.count) } });
     }
@@ -1783,7 +1846,7 @@ export class GameServer {
     return [...this.players.values()].map((p) => ({
       id: p.id, x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
       health: p.health, dead: p.dead,
-      gliding: p.gliding,
+      gliding: p.gliding, boating: p.boating,
     }));
   }
 }
@@ -1794,7 +1857,7 @@ function toInfo(p: ServerPlayer): PlayerInfo {
     seasonsWon: p.seasonsWon, hearts: p.hearts,
     x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
     health: p.health, dead: p.dead,
-    gliding: p.gliding,
+    gliding: p.gliding, boating: p.boating,
   };
 }
 

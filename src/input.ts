@@ -29,6 +29,9 @@ export class Input {
   mapToggled = false; // M pressed this frame (world map)
   reloadPressed = false; // R pressed this frame (gun reload)
   dropPressed = false;   // Q pressed this frame (item drop)
+  waypointPressed = false; // B pressed this frame (drop a waypoint here)
+  guideToggled = false;    // H pressed this frame (getting-started panel)
+  tpaPressed = false;      // T pressed this frame (open the TPA prompt)
   locked = false;
   sprintHeld = false; // via double-tap W, persists until W released
 
@@ -50,6 +53,9 @@ export class Input {
       if (e.code === 'KeyM') this.mapToggled = true;
       if (e.code === 'KeyR') this.reloadPressed = true;
       if (e.code === 'KeyO') this.dropPressed = true;
+      if (e.code === 'KeyB') this.waypointPressed = true;
+      if (e.code === 'KeyH') this.guideToggled = true;
+      if (e.code === 'KeyT') this.tpaPressed = true;
       if (e.code === 'KeyW') {
         const now = performance.now();
         if (now - this.lastWDown < 250) this.sprintHeld = true;
@@ -124,5 +130,8 @@ export class Input {
     this.mapToggled = false;
     this.reloadPressed = false;
     this.dropPressed = false;
+    this.waypointPressed = false;
+    this.guideToggled = false;
+    this.tpaPressed = false;
   }
 }
