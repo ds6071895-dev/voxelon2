@@ -322,6 +322,7 @@ setInterval(() => {
   dispatch(game.tickTurrets(dt));
   dispatch(game.tickWar(dt)); // advances worldTime + the shrinking border
   dispatch(game.tickSeason(dt));
+  dispatch(game.tickGoldwars(dt)); // void falls in live arena matches
   const snap: ServerMsg = { t: 'snapshot', players: game.snapshot() };
   for (const cid of sockets.keys()) send(cid, snap);
   if (moved.length) {

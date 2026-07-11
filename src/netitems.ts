@@ -59,8 +59,9 @@ export class NetItems {
       mesh.position.set(info.x, info.y + 0.25 + Math.sin(a * 2) * 0.07, info.z);
       mesh.rotation.y = a * 1.8;
 
-      // Request a pickup when in range (server validates + grants).
-      if (!player.dead && !this.requested.has(eid) && a > 1.0) {
+      // Request a pickup when in range (server validates + grants). The short
+      // delay matches the offline drop's PICKUP_DELAY (0.5s).
+      if (!player.dead && !this.requested.has(eid) && a > 0.5) {
         const dx = info.x - pcx, dy = info.y - pcy, dz = info.z - pcz;
         if (dx * dx + dy * dy + dz * dz <= PICKUP_RANGE * PICKUP_RANGE &&
           inventory.canAccept(info.item)) {

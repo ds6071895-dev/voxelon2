@@ -122,6 +122,20 @@ export class NetClient {
   onVaultCleared?: (cx: number, cz: number, by: string) => void;
   /** YOUR per-player vault loot was granted (items arrive via gotitem). */
   onVaultLooted?: (cx: number, cz: number) => void;
+  // --- GOLDWARS ---
+  /** Lobby snapshot (membership/teams/host/started changed). */
+  onGwLobby?: (code: string, host: number, started: boolean,
+    players: { id: number; username: string; team: number }[]) => void;
+  /** A Goldwars request was refused (bad code, not host, arenas busy…). */
+  onGwErr?: (error: string) => void;
+  /** The match began: your slot + team (the teleport arrives separately). */
+  onGwBegin?: (slot: number, team: number) => void;
+  /** A team's gold block fell (they stop respawning). */
+  onGwGold?: (team: number, by: string) => void;
+  /** YOU are out of the match — the server already ported you home. */
+  onGwOut?: () => void;
+  /** The match ended (winner team id, -1 = aborted). */
+  onGwOver?: (winner: number) => void;
 
   private ws: WebSocket | null = null;
   private xformAcc = 0;
@@ -328,6 +342,24 @@ export class NetClient {
       case 'vaultLooted':
         this.onVaultLooted?.(msg.cx, msg.cz);
         break;
+      case 'gwLobby':
+        this.onGwLobby?.(msg.code, msg.host, msg.started, msg.players);
+        break;
+      case 'gwErr':
+        this.onGwErr?.(msg.error);
+        break;
+      case 'gwBegin':
+        this.onGwBegin?.(msg.slot, msg.team);
+        break;
+      case 'gwGold':
+        this.onGwGold?.(msg.team, msg.by);
+        break;
+      case 'gwOut':
+        this.onGwOut?.();
+        break;
+      case 'gwOver':
+        this.onGwOver?.(msg.winner);
+        break;
     }
   }
 
@@ -392,6 +424,22 @@ export class NetClient {
   }
   sendRespawn(): void {
     if (this.connected) this.raw({ t: 'respawn' });
+  }
+  // GOLDWARS lobby control.
+  sendGwCreate(): void {
+    if (this.connected) this.raw({ t: 'gwCreate' });
+  }
+  sendGwJoin(code: string): void {
+    if (this.connected) this.raw({ t: 'gwJoin', code });
+  }
+  sendGwLeave(): void {
+    if (this.connected) this.raw({ t: 'gwLeave' });
+  }
+  sendGwTeam(id: number, team: number): void {
+    if (this.connected) this.raw({ t: 'gwTeam', id, team });
+  }
+  sendGwStart(): void {
+    if (this.connected) this.raw({ t: 'gwStart' });
   }
   sendDrop(items: { id: number; count: number }[], x: number, y: number, z: number): void {
     if (this.connected && items.length) this.raw({ t: 'drop', items, x, y, z });

@@ -234,12 +234,21 @@
     }
     .mc-btn:hover { background: #7c8b9c; transform: translateY(-1px); }
     .mc-btn:active { transform: translateY(1px); }
-    /* The big Play button pops. */
+    /* The big Play (Civilization) button pops. */
     #play-btn {
       background: linear-gradient(#4f8f45, #3f7a37); border-color: #9fd48f #24481f #24481f #9fd48f;
       letter-spacing: 2px;
     }
     #play-btn:hover { background: linear-gradient(#5aa04f, #48883f); }
+    /* Goldwars: a GOLDEN button under Civilization. */
+    #goldwars-btn {
+      background: linear-gradient(#e8bc2f, #c99a18);
+      border-color: #ffe9a0 #6e5209 #6e5209 #ffe9a0;
+      color: #3a2c05; text-shadow: 0 1px 0 rgba(255, 240, 180, 0.6);
+      letter-spacing: 2px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.35), 0 0 22px rgba(255, 208, 64, 0.35);
+    }
+    #goldwars-btn:hover { background: linear-gradient(#f6cc45, #d8a920); }
     /* Login / register form on the title overlay — a soft card. */
     #auth {
       display: flex; flex-direction: column; gap: 8px; width: 280px; margin: 8px 0 4px;
@@ -310,7 +319,8 @@
         <div id="auth-status" class="mc-font"></div>
       </div>
       <div id="menu-btns" style="display:none; flex-direction:column; gap:12px; align-items:center;">
-        <button id="play-btn" class="mc-btn">Play</button>
+        <button id="play-btn" class="mc-btn">Civilization</button>
+        <button id="goldwars-btn" class="mc-btn">Goldwars</button>
         <button id="controls-btn" class="mc-btn">Controls</button>
       </div>
     </div>

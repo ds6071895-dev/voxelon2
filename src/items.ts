@@ -98,6 +98,9 @@ export const enum Item {
   StoneChestplate = 178,
   StoneLeggings = 179,
   StoneBoots = 180,
+  // The Sword: the dedicated melee weapon (mobs everywhere; players ONLY in
+  // Goldwars — normal-world PvP stays guns-only).
+  Sword = 181,
 }
 
 export interface ToolInfo {
@@ -315,6 +318,13 @@ export const ITEMS: Record<number, ItemInfo> = {
   // Dungeons (Milestone D): mined vault walls are a building trophy. The
   // VaultChest is deliberately NOT an item (breaking one drops nothing).
   [Block.VaultBrick]: blockItem(Block.VaultBrick),
+  // Solid gold: vault-treasury loot + the Goldwars objective block.
+  [Block.GoldBlock]: blockItem(Block.GoldBlock),
+  // The Sword: top melee damage, useless as a mining tool.
+  [Item.Sword]: {
+    name: 'Sword', kind: 'item', sprite: Tile.IronSword, maxStack: 1,
+    tool: { type: 'sword', tier: 0, speed: 1, durability: 350, damage: 7 },
+  },
   // Terrain (M21): mesa + ashlands materials (Lava is a liquid, like Water).
   [Block.RedSand]: blockItem(Block.RedSand),
   [Block.Terracotta]: blockItem(Block.Terracotta),

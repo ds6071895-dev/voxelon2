@@ -175,7 +175,16 @@ export type ClientMsg =
   // the server-HP Vault Brute, and open the per-player VaultChest.
   | { t: 'vaultEnter'; cx: number; cz: number }
   | { t: 'vaultBossHit'; cx: number; cz: number; amount: number }
-  | { t: 'vaultChestOpen'; x: number; y: number; z: number };
+  | { t: 'vaultChestOpen'; x: number; y: number; z: number }
+  // GOLDWARS: create a link-invite lobby / join one by code / leave (lobby OR
+  // a running match) / host-assign a member's team / host-start the match.
+  // In-match combat reuses `attack` (sword melee, server-validated) and block
+  // play reuses `edit` (the server watches the gold-block cells).
+  | { t: 'gwCreate' }
+  | { t: 'gwJoin'; code: string }
+  | { t: 'gwLeave' }
+  | { t: 'gwTeam'; id: number; team: number }
+  | { t: 'gwStart' };
 
 // --- server -> client -------------------------------------------------------
 export type ServerMsg =
@@ -271,7 +280,21 @@ export type ServerMsg =
   // The Brute fell — banner + fame ("<name> cleared a Tier N vault").
   | { t: 'vaultCleared'; cx: number; cz: number; by: string }
   // YOUR per-player loot roll was granted (items arrive via gotitem).
-  | { t: 'vaultLooted'; cx: number; cz: number };
+  | { t: 'vaultLooted'; cx: number; cz: number }
+  // GOLDWARS lobby snapshot (sent to every member on any change). `started`
+  // flips true when the host launches the match.
+  | { t: 'gwLobby'; code: string; host: number; started: boolean;
+      players: { id: number; username: string; team: number }[] }
+  // A Goldwars request was refused (bad code, match running, not host…).
+  | { t: 'gwErr'; error: string }
+  // The match began — YOUR slot + team (the teleport arrives separately).
+  | { t: 'gwBegin'; slot: number; team: number }
+  // A team's GOLD BLOCK was mined out (`by` = the raider) — they stop respawning.
+  | { t: 'gwGold'; team: number; by: string }
+  // YOU are out of the match (gold gone + died / left) — back to civilization.
+  | { t: 'gwOut' }
+  // The match ended; `winner` is a team id (-1 = aborted). Everyone returns.
+  | { t: 'gwOver'; winner: number };
 
 const ADJECTIVES = [
   'Brave', 'Swift', 'Iron', 'Shadow', 'Crimson', 'Frost', 'Rapid', 'Silent',

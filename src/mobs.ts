@@ -8,7 +8,7 @@ import { Block, BLOCKS, isSolid, Tile } from './blocks';
 import type { ItemEntities } from './itementity';
 import { Item, ItemStack } from './items';
 import { inCore } from './net/protocol';
-import { VaultStamp } from './vaults';
+import { VaultBossKind, VaultStamp } from './vaults';
 import type { Particles } from './particles';
 import type { Player } from './player';
 import type { Atlas } from './textures';
@@ -64,6 +64,18 @@ export const MOB_DEFS: Record<MobType, MobDef> = {
 const ZOMBIE_DAMAGE = 3;
 const SKITTER_DAMAGE = 2;
 const BRUTE_DAMAGE = 6;
+
+/** Vault-boss variants (Milestone D+): one skeleton, three personalities. The
+ *  RAVAGER is lean and fast, the COLOSSUS towers and hits like a turret.
+ *  Server HP stays tier-based; these tune the client body/AI/damage. */
+export const BOSS_VARIANTS: Record<VaultBossKind, {
+  scale: number; speed: number; damage: number;
+  tint: [number, number, number] | null;
+}> = {
+  brute:    { scale: 1.9,  speed: 1.0,  damage: BRUTE_DAMAGE, tint: null },
+  ravager:  { scale: 1.45, speed: 1.8,  damage: 4,  tint: [1.0, 0.62, 0.5] },
+  colossus: { scale: 2.5,  speed: 0.72, damage: 10, tint: [0.72, 0.85, 1.12] },
+};
 const SPIT_DAMAGE = 3;
 const SPIT_COOLDOWN = 2.4;
 const CREEPER_FUSE = 1.5;
@@ -239,8 +251,15 @@ export class Mob {
   removed = false;
   /** Vault-guard tag: "cx,cz:roomIndex" of the spawn anchor that owns this mob. */
   room: string | null = null;
-  /** Tier-III armored guard variant: more HP + a rusty tint. */
+  /** Armored elite guard variant: more HP + a rusty tint. */
   armored = false;
+  /** Per-instance collision size (boss variants rescale it). */
+  halfW: number;
+  height: number;
+  /** Boss-variant modifiers (vault bosses only; 1/null = the plain mob). */
+  speedFactor = 1;
+  meleeDmg: number | null = null;
+  tint: [number, number, number] | null = null;
   readonly model: MobModel;
   readonly material: THREE.MeshBasicMaterial;
 
@@ -248,6 +267,8 @@ export class Mob {
     this.type = type;
     this.def = MOB_DEFS[type];
     this.health = this.def.health;
+    this.halfW = this.def.halfW;
+    this.height = this.def.height;
     this.pos = new THREE.Vector3(x, y, z);
     this.material = new THREE.MeshBasicMaterial({
       map: atlas.texture, vertexColors: true,
@@ -311,6 +332,21 @@ export class Mobs {
     return mob;
   }
 
+  /** Spawn a vault boss of the given flavour: the brute skeleton, rescaled and
+   *  retuned per variant (hitbox follows the visual scale). */
+  spawnBoss(kind: VaultBossKind, x: number, y: number, z: number): Mob {
+    const mob = this.spawnAt('brute', x, y, z);
+    const v = BOSS_VARIANTS[kind] ?? BOSS_VARIANTS.brute;
+    mob.model.group.scale.setScalar(v.scale);
+    const f = v.scale / 1.9; // buildModel bakes 1.9× into the brute body
+    mob.halfW = mob.def.halfW * f;
+    mob.height = mob.def.height * f;
+    mob.speedFactor = v.speed;
+    mob.meleeDmg = v.damage;
+    mob.tint = v.tint;
+    return mob;
+  }
+
   /** The vault the player is inside right now (null = not in a vault). Drives
    *  the per-room guard spawn anchors; main sets it every frame. */
   setVault(v: VaultStamp | null): void {
@@ -321,7 +357,7 @@ export class Mobs {
    *  the shared-HP Vault Brute dead before our local copy caught up. */
   slay(mob: Mob): void {
     if (mob.removed) return;
-    this.particles.poof(mob.pos.x, mob.pos.y + mob.def.height / 2, mob.pos.z);
+    this.particles.poof(mob.pos.x, mob.pos.y + mob.height / 2, mob.pos.z);
     this.onSound?.('poof', mob.pos);
     this.remove(mob);
   }
@@ -351,11 +387,25 @@ export class Mobs {
       const gx = room.x + 0.5 + (Math.random() * 2 - 1) * 1.2;
       const gz = room.z + 0.5 + (Math.random() * 2 - 1) * 1.2;
       const roll = Math.random();
-      const type: MobType = v.tier >= 2 && roll < 0.3 ? 'skitter'
-        : roll < 0.65 ? 'zombie' : 'spitter';
+      // Each room THEME breeds its own garrison: bog wings spit, groves crawl,
+      // crypts hide creepers (the walls are blast-proof — the raider isn't),
+      // and the treasury fields nothing but elites.
+      let type: MobType;
+      switch (room.kind) {
+        case 'flooded': type = roll < 0.7 ? 'spitter' : 'zombie'; break;
+        case 'garden': type = roll < 0.65 ? 'skitter' : 'spitter'; break;
+        case 'crypt': type = roll < 0.35 ? 'creeper' : 'zombie'; break;
+        case 'lava': type = roll < 0.5 ? 'skitter' : 'zombie'; break;
+        case 'treasury': type = roll < 0.5 ? 'zombie' : 'spitter'; break;
+        case 'pit': type = roll < 0.55 ? 'skitter' : 'zombie'; break;
+        default: type = v.tier >= 2 && roll < 0.3 ? 'skitter'
+          : roll < 0.65 ? 'zombie' : 'spitter';
+      }
       const mob = this.spawnAt(type, gx, room.y, gz);
       mob.room = key;
-      if (v.tier >= 3) { // Tier III: armored variants (more HP, rusty tint)
+      // Armored elites: every treasury guard, all of Tier III, some of Tier II.
+      if (room.kind === 'treasury' || v.tier >= 3 ||
+          (v.tier === 2 && Math.random() < 0.35)) {
         mob.armored = true;
         mob.health = Math.round(mob.health * 1.8);
       }
@@ -410,7 +460,7 @@ export class Mobs {
     let best: Mob | null = null;
     let bestT = maxDist;
     for (const mob of this.list) {
-      const { halfW, height } = mob.def;
+      const { halfW, height } = mob;
       const min = new THREE.Vector3(mob.pos.x - halfW, mob.pos.y, mob.pos.z - halfW);
       const max = new THREE.Vector3(mob.pos.x + halfW, mob.pos.y + height, mob.pos.z + halfW);
       const t = rayBox(origin, dir, min, max);
@@ -451,7 +501,7 @@ export class Mobs {
   /** First mob whose AABB contains the point (projectile point-collision). */
   private mobAtPoint(p: THREE.Vector3): Mob | null {
     for (const mob of this.list) {
-      const { halfW, height } = mob.def;
+      const { halfW, height } = mob;
       if (p.x >= mob.pos.x - halfW && p.x <= mob.pos.x + halfW &&
         p.y >= mob.pos.y && p.y <= mob.pos.y + height &&
         p.z >= mob.pos.z - halfW && p.z <= mob.pos.z + halfW) return mob;
@@ -484,7 +534,7 @@ export class Mobs {
         mob.pos.x, mob.pos.y + 0.4, mob.pos.z, drop.id, drop.count
       );
     }
-    this.particles.poof(mob.pos.x, mob.pos.y + mob.def.height / 2, mob.pos.z);
+    this.particles.poof(mob.pos.x, mob.pos.y + mob.height / 2, mob.pos.z);
     this.onSound?.('poof', mob.pos);
     this.remove(mob);
   }
@@ -524,7 +574,10 @@ export class Mobs {
           if ((BLOCKS[id]?.hardness ?? -1) < 0) continue; // bedrock
           // Vaults are blast-proof: no rocket/grenade can crack a dungeon open
           // (mirrors the server, which also skips vault blocks in its crater).
-          if (id === Block.VaultBrick || id === Block.VaultChest) continue;
+          // Spawners + gold hoards survive too — crypt creepers must not clear
+          // their own room, and treasure is mined, never vaporized.
+          if (id === Block.VaultBrick || id === Block.VaultChest ||
+              id === Block.MobSpawner || id === Block.GoldBlock) continue;
           this.world.setBlock(x, y, z, Block.Air);
         }
       }
@@ -576,7 +629,7 @@ export class Mobs {
 
   /** Launch a lobbed spit gob from a spitter toward the player. */
   private spitAt(mob: Mob, player: Player): void {
-    const from = mob.pos.clone(); from.y += mob.def.height * 0.75;
+    const from = mob.pos.clone(); from.y += mob.height * 0.75;
     const target = player.pos.clone(); target.y += 1.0;
     const d = target.clone().sub(from);
     const flat = Math.hypot(d.x, d.z) || 1;
@@ -690,10 +743,10 @@ export class Mobs {
           }
         }
         const dmg = mob.type === 'skitter' ? SKITTER_DAMAGE
-          : mob.type === 'brute' ? BRUTE_DAMAGE : ZOMBIE_DAMAGE;
+          : mob.type === 'brute' ? (mob.meleeDmg ?? BRUTE_DAMAGE) : ZOMBIE_DAMAGE;
         const cd = mob.type === 'skitter' ? 0.9 : mob.type === 'brute' ? 2.0 : 1.2;
         const reach = mob.type === 'brute' ? 1.4 : 1.0;
-        if (distXZ < def.halfW + reach && Math.abs(toPlayer.y) < 2.5 &&
+        if (distXZ < mob.halfW + reach && Math.abs(toPlayer.y) < 2.5 &&
           mob.attackCooldown <= 0) {
           mob.attackCooldown = cd;
           player.damage(dmg);
@@ -803,7 +856,7 @@ export class Mobs {
     }
 
     // --- physics ------------------------------------------------------------
-    const speed = moving ? def.speed * speedMul : 0;
+    const speed = moving ? def.speed * mob.speedFactor * speedMul : 0;
     const dirX = Math.sin(mob.yaw), dirZ = Math.cos(mob.yaw);
     const t = Math.min(1, 8 * dt);
     mob.vel.x += (dirX * speed - mob.vel.x) * t;
@@ -865,6 +918,10 @@ export class Mobs {
     }
     const b = mob.brightness;
     if (mob.hurtTime > 0) mob.material.color.setRGB(b, b * 0.35, b * 0.35);
+    else if (mob.tint) { // boss-variant hide color (ravager red / colossus pale)
+      mob.material.color.setRGB(
+        Math.min(1, b * mob.tint[0]), Math.min(1, b * mob.tint[1]), Math.min(1, b * mob.tint[2]));
+    }
     else if (mob.armored) mob.material.color.setRGB(b, b * 0.78, b * 0.6); // rusty plate tint
     else if (mob.type === 'creeper' && mob.fuse > 0) {
       const w = 0.5 + 0.5 * Math.sin(mob.fuse * 25);
@@ -892,7 +949,7 @@ export class Mobs {
   private moveAxisStep(mob: Mob, axis: 0 | 1 | 2, amount: number): boolean {
     if (amount === 0) return false;
     const p = mob.pos;
-    const { halfW, height } = mob.def;
+    const { halfW, height } = mob;
     if (axis === 0) p.x += amount;
     else if (axis === 1) p.y += amount;
     else p.z += amount;

@@ -2277,6 +2277,26 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.FallTrapOpen]: paintFallTrapOpen,
   [Tile.WallTrapTop]: paintWallTrapTop,
   [Tile.WallTrapSide]: paintWallTrapSide,
+  // Solid gold block: bright bullion face with a raised rim + rivet corners.
+  [Tile.GoldBlock]: (p, seed) => {
+    const base: RGBA = [244, 208, 64, 255];
+    for (let y = 0; y < 16; y++) {
+      for (let x = 0; x < 16; x++) {
+        let f = 0.86 + hash2(seed, x, y) * 0.22;
+        const edge = x === 0 || y === 0 || x === 15 || y === 15;
+        const rim = !edge && (x === 1 || y === 1 || x === 14 || y === 14);
+        if (edge) f *= 0.62;          // dark frame
+        else if (rim) f *= 1.22;      // bright bevel
+        else if ((x + y) % 7 === 0) f *= 1.12; // glinting streaks
+        p.set(x, y, shade(base, Math.min(1.35, f)));
+      }
+    }
+    // Rivets in the four inner corners.
+    for (const [rx, ry] of [[3, 3], [12, 3], [3, 12], [12, 12]]) {
+      p.set(rx, ry, shade(base, 1.32));
+      p.set(rx + 1, ry + 1, shade(base, 0.6));
+    }
+  },
 };
 
 export function createAtlas(seed = 1337): Atlas {

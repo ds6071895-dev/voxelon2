@@ -13,6 +13,7 @@
 
 import { Biome } from './biomes';
 import { Block } from './blocks';
+import { inGoldwarsXZ } from './goldwars';
 import { Item, ItemStack } from './items';
 import type { LootEntry } from './loot';
 import { inCore, CORE_HALF } from './net/protocol';
@@ -40,9 +41,14 @@ export const VAULT_LOOT_COOLDOWN = 1800;
 // map and Vault Compasses point the way). 60+ out in the 5000² Wilds (rarer
 // per-chunk, but the Wilds are 24× the area). Ocean/beach/ravine/extreme sites
 // reject candidate anchors on the real terrain.
-const DENSITY_CORE = 1 / 22;
-const DENSITY_WILDS = 1 / 420;
-const MIN_GROUND = 65, MAX_GROUND = 140;
+// (Densities were re-tuned upward when the BURIAL GUARANTEE landed — it
+// rejects hilly/coastal sites that used to pass, so anchors try more often.)
+const DENSITY_CORE = 1 / 6;
+const DENSITY_WILDS = 1 / 200;
+// MIN_GROUND admits swampy lowlands (the burial rules keep those sealed and
+// the mouth still refuses to surface below sea level); Beach/Ocean anchors
+// are rejected separately by biome.
+const MIN_GROUND = 60, MAX_GROUND = 140;
 
 export interface VaultRoom {
   /** World-space centre of the room at interior floor level. */
@@ -50,17 +56,29 @@ export interface VaultRoom {
   /** Interior half-width (the room spans centre ± hw, walls at ±(hw)). */
   hw: number;
   /** Room flavour: hall = entrance, great = pillared hall, pit = sunken
-   *  spike-floored trap room, crypt = cramped side chamber, boss = the lair. */
-  kind: 'hall' | 'room' | 'great' | 'pit' | 'crypt' | 'boss';
+   *  spike-floored trap room, crypt = cramped side chamber, boss = the lair,
+   *  flooded = waterlogged bog wing, lava = molten trench crossing, garden =
+   *  glowing crystal grove, treasury = a gold-block hoard (mineable jackpot). */
+  kind: 'hall' | 'room' | 'great' | 'pit' | 'crypt' | 'boss'
+    | 'flooded' | 'lava' | 'garden' | 'treasury';
   /** Guard population cap for this room's MOB SPAWNER (0 = no spawner:
    *  the hall and the boss room). Guards only spawn while the spawner block
    *  at the room centre still stands — break it to silence the room. */
   cap: number;
 }
 
+/** Which boss prowls the lair: the classic Brute, the fast lean Ravager, or
+ *  the towering slow Colossus. Seeded per vault — variety between dungeons. */
+export type VaultBossKind = 'brute' | 'ravager' | 'colossus';
+export const VAULT_BOSS_NAMES: Record<VaultBossKind, string> = {
+  brute: 'Vault Brute', ravager: 'Vault Ravager', colossus: 'Vault Colossus',
+};
+
 export interface VaultStamp {
   cx: number; cz: number;
   tier: VaultTier;
+  /** The lair's boss flavour (visual/AI variant; HP stays tier-based). */
+  bossKind: VaultBossKind;
   /** Surface anchor (above the entrance hall). */
   x: number; y: number; z: number;
   /** Interior floor level (rooms stand on VaultBrick at floorY). */
@@ -115,16 +133,41 @@ function wantsAnchor(seed: number, cx: number, cz: number): boolean {
   return anchorHash(seed, cx, cz) <= density;
 }
 
-/** Does a vault anchor in chunk (cx, cz)? Density hash + a suppression rule
- *  (only the lowest hash within ±2·VAULT_REACH chunks survives) so two vault
- *  footprints can never interleave. */
-export function vaultAnchorAt(seed: number, cx: number, cz: number): boolean {
+/** The deterministic candidate anchor point inside chunk (cx, cz) — exactly
+ *  the first two rng draws of the stamp builder (kept in lockstep with it). */
+function anchorPoint(seed: number, cx: number, cz: number): { ax: number; az: number } {
+  const rng = mulberry32(
+    (seed ^ Math.imul(cx, 0x85ebca77) ^ Math.imul(cz, 0xc2b2ae3d) ^ 0xda17) >>> 0);
+  return {
+    ax: cx * 16 + 4 + Math.floor(rng() * 8),
+    az: cz * 16 + 4 + Math.floor(rng() * 8),
+  };
+}
+
+/** Cheap anchor-site viability (the checks that need no full stamp): density
+ *  hash + ground band + no ravine + a dry biome. Suppression competes ONLY
+ *  among viable anchors — a doomed beach candidate never shadows a good site
+ *  (without this, dense coasts starved whole regions of vaults). */
+function anchorViable(seed: number, cx: number, cz: number, ctx: StructureCtx): boolean {
   if (!wantsAnchor(seed, cx, cz)) return false;
+  const { ax, az } = anchorPoint(seed, cx, cz);
+  const g = ctx.height(ax, az);
+  if (g < MIN_GROUND || g > MAX_GROUND) return false;
+  if (ctx.ravineDepth(ax, az) > 0) return false;
+  const biome = ctx.biomeWithWater(ax, az, g);
+  return biome !== Biome.Ocean && biome !== Biome.Beach;
+}
+
+/** Does a vault anchor in chunk (cx, cz)? Viability + a suppression rule
+ *  (only the lowest hash among VIABLE anchors within ±2·VAULT_REACH chunks
+ *  survives) so two vault footprints can never interleave. */
+export function vaultAnchorAt(seed: number, cx: number, cz: number, ctx: StructureCtx): boolean {
+  if (!anchorViable(seed, cx, cz, ctx)) return false;
   const mine = anchorHash(seed, cx, cz);
   for (let dx = -2 * VAULT_REACH; dx <= 2 * VAULT_REACH; dx++) {
     for (let dz = -2 * VAULT_REACH; dz <= 2 * VAULT_REACH; dz++) {
       if (dx === 0 && dz === 0) continue;
-      if (!wantsAnchor(seed, cx + dx, cz + dz)) continue;
+      if (!anchorViable(seed, cx + dx, cz + dz, ctx)) continue;
       const h = anchorHash(seed, cx + dx, cz + dz);
       if (h < mine || (h === mine && (dx < 0 || (dx === 0 && dz < 0)))) return false;
     }
@@ -143,25 +186,60 @@ const BOSS_IH = 7;
 /** Guard-spawner population cap per room kind (0 = no spawner). */
 const ROOM_CAP: Record<VaultRoom['kind'], number> = {
   hall: 0, room: 3, great: 5, pit: 3, crypt: 2, boss: 0,
+  flooded: 3, lava: 3, garden: 3, treasury: 4, // the hoard is well guarded
 };
 
 /** The full deterministic vault stamp anchored in (cx, cz), or null. */
 export function vaultStamp(
   seed: number, cx: number, cz: number, ctx: StructureCtx
 ): VaultStamp | null {
-  if (!vaultAnchorAt(seed, cx, cz)) return null;
+  if (!vaultAnchorAt(seed, cx, cz, ctx)) return null;
   const rng = mulberry32(
     (seed ^ Math.imul(cx, 0x85ebca77) ^ Math.imul(cz, 0xc2b2ae3d) ^ 0xda17) >>> 0);
-  // Anchor ≥4 blocks inside the chunk so every offset ≤ ±43±hw fits in ±3 chunks.
+  // Anchor ≥4 blocks inside the chunk so every offset ≤ ±43±hw fits in ±3
+  // chunks. (These two draws mirror anchorPoint — keep them in lockstep.)
   const ax = cx * 16 + 4 + Math.floor(rng() * 8);
   const az = cz * 16 + 4 + Math.floor(rng() * 8);
   const g = ctx.height(ax, az);
-  if (g < MIN_GROUND || g > MAX_GROUND) return null;
-  if (ctx.ravineDepth(ax, az) > 0) return null;
-  const biome = ctx.biomeWithWater(ax, az, g);
-  if (biome === Biome.Ocean || biome === Biome.Beach) return null;
   const tier = vaultTier(ax, az);
-  const fy = Math.max(24, g - 14); // interior floor level (pits dig 4 deeper)
+  // --- BURIAL GUARANTEE: a vault must NEVER poke out of the ground anywhere.
+  // The complex sprawls ±51 blocks from the anchor, so sample the whole
+  // footprint (an 8-block grid) for the LOWEST effective surface — valleys,
+  // ocean dips and RAVINE floors all count. The interior is then sunk below
+  // that minimum, and sites the terrain can't hide are rejected outright.
+  let minSurf = g;
+  // Heights are smooth — a 4-block grid can't miss a valley.
+  for (let du = -14; du <= 54; du += 4) {
+    for (let dv = -40; dv <= 40; dv += 4) {
+      const sx = ax + du, sz = az + dv; // orientation-agnostic: cover both axes
+      for (const [px, pz] of [[sx, sz], [ax + dv, az + du]] as [number, number][]) {
+        if (inGoldwarsXZ(px, pz)) return null; // never straddle the arena void
+        const h = ctx.height(px, pz);
+        if (h < minSurf) minSurf = h;
+      }
+    }
+  }
+  // Ravines are NARROW (a few blocks) — scan them on a 2-block grid so a thin
+  // canyon slicing the footprint can't sneak between samples. ravineDepth has
+  // a cheap mask early-out, so this stays fast outside ravine country.
+  for (let du = -14; du <= 54; du += 2) {
+    for (let dv = -40; dv <= 40; dv += 2) {
+      const sx = ax + du, sz = az + dv;
+      for (const [px, pz] of [[sx, sz], [ax + dv, az + du]] as [number, number][]) {
+        const rd = ctx.ravineDepth(px, pz);
+        if (rd <= 0) continue;
+        const eff = Math.max(10, ctx.height(px, pz) - rd);
+        if (eff < minSurf) minSurf = eff;
+      }
+    }
+  }
+  if (g - minSurf > 26) return null;  // extreme relief — the stairs can't climb out
+  if (minSurf < 32) return null;      // can't sink deep enough (ravine/abyss floor)
+  // Interior floor: ≥14 below the LOWEST surface in the footprint (ocean
+  // floors and ravine floors count), so the highest roof block
+  // (fy + BOSS_IH + 1) keeps ≥3 blocks of solid cover EVERYWHERE — a vault
+  // can sprawl under a seabed, but never breaks any surface.
+  const fy = Math.max(20, minSurf - 14);
 
   // Layout direction: rotate (u, v) onto world axes.
   const dirs: [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1]];
@@ -170,9 +248,29 @@ export function vaultStamp(
   const wx = (u: number, v: number) => ax + u * ux + v * vx;
   const wz = (u: number, v: number) => az + u * uz + v * vz;
 
-  // Lighting theme: most vaults burn torches; some glow with cold crystal.
-  const crystalLit = rng() < 0.35;
-  const lightBlock = crystalLit ? Block.CrystalBlock : Block.Torch;
+  // The ENTRANCE LINE (the staircase runs back along −u) must stay dry: a
+  // mouth can't climb out through open ocean, so reject sites whose stair
+  // corridor crosses ocean columns. (Wings under a seabed are fine — they
+  // stay sealed below it — only the walk-in line needs land.)
+  for (let i = 0; i <= 44; i += 4) {
+    const px = wx(-4 - i, 0), pz = wz(-4 - i, 0);
+    const h = ctx.height(px, pz);
+    if (ctx.biomeWithWater(px, pz, h) === Biome.Ocean) return null;
+  }
+
+  // Lighting theme: warm torchlight, cold crystal glow, or a GILDED vault
+  // whose corner lights are gold plinths crowned with torches.
+  const themeRoll = rng();
+  const theme: 'torch' | 'crystal' | 'gilded' =
+    themeRoll < 0.45 ? 'torch' : themeRoll < 0.75 ? 'crystal' : 'gilded';
+  const lightBlock = theme === 'crystal' ? Block.CrystalBlock : Block.Torch;
+
+  // Boss flavour: deeper vaults skew toward the nastier variants.
+  const bossRoll = rng();
+  const bossKind: VaultBossKind =
+    tier === 1 ? (bossRoll < 0.6 ? 'brute' : 'ravager')
+    : tier === 2 ? (bossRoll < 0.4 ? 'brute' : bossRoll < 0.75 ? 'ravager' : 'colossus')
+    : (bossRoll < 0.25 ? 'brute' : bossRoll < 0.6 ? 'ravager' : 'colossus');
 
   // --- Pick the wings: hall + boss are fixed; the rest is a seeded spread of
   // themed rooms across the lattice, denser at higher tiers (8–15 total).
@@ -205,13 +303,21 @@ export function vaultStamp(
   const boxes: RoomBox[] = [hall];
   for (const slot of openSlots.slice(0, wingCount)) {
     const roll = rng();
-    if (roll < 0.2) {           // great pillared hall
+    if (roll < 0.16) {          // great pillared hall
       boxes.push({ ...slot, hw: 6 + Math.floor(rng() * 2), ih: 6 + Math.floor(rng() * 2),
         kind: 'great', floorY: fy });
-    } else if (roll < 0.35) {   // sunken spike pit
+    } else if (roll < 0.28) {   // sunken spike pit
       boxes.push({ ...slot, hw: 4 + Math.floor(rng() * 2), ih: 4, kind: 'pit', floorY: fy - 4 });
-    } else if (roll < 0.55) {   // cramped crypt
+    } else if (roll < 0.42) {   // cramped crypt
       boxes.push({ ...slot, hw: 3, ih: 3, kind: 'crypt', floorY: fy });
+    } else if (roll < 0.54) {   // waterlogged bog wing
+      boxes.push({ ...slot, hw: 4 + Math.floor(rng() * 2), ih: 4, kind: 'flooded', floorY: fy });
+    } else if (roll < 0.64) {   // glowing crystal grove
+      boxes.push({ ...slot, hw: 4 + Math.floor(rng() * 2), ih: 5, kind: 'garden', floorY: fy });
+    } else if (roll < 0.72 && tier >= 2) { // molten trench (tier II+ only)
+      boxes.push({ ...slot, hw: 5, ih: 4, kind: 'lava', floorY: fy });
+    } else if (roll < 0.79) {   // the gold hoard — mineable jackpot, elite guards
+      boxes.push({ ...slot, hw: 4, ih: 4, kind: 'treasury', floorY: fy });
     } else {                    // standard chamber
       boxes.push({ ...slot, hw: 4 + Math.floor(rng() * 2), ih: 4 + Math.floor(rng() * 2),
         kind: 'room', floorY: fy });
@@ -302,18 +408,98 @@ export function vaultStamp(
   //    a corner stair back out), the boss dais + chest.
   for (const b of boxes) {
     const floor = b.floorY + 1;
-    // Corner lights (all four corners in big rooms, two in small ones).
+    // Corner lights (all four corners in big rooms, two in small ones). A
+    // gilded vault raises each light on a glowing gold plinth.
     const corners: [number, number][] = b.hw >= 5
       ? [[-1, -1], [-1, 1], [1, -1], [1, 1]] : [[-1, -1], [1, 1]];
     for (const [su, sv] of corners) {
-      mark(wx(b.u + su * (b.hw - 1), b.v + sv * (b.hw - 1)), floor,
-        wz(b.u + su * (b.hw - 1), b.v + sv * (b.hw - 1)), lightBlock);
+      const lx = wx(b.u + su * (b.hw - 1), b.v + sv * (b.hw - 1));
+      const lz = wz(b.u + su * (b.hw - 1), b.v + sv * (b.hw - 1));
+      if (theme === 'gilded') {
+        mark(lx, floor, lz, Block.GoldBlock);
+        mark(lx, floor + 1, lz, Block.Torch);
+      } else {
+        mark(lx, floor, lz, lightBlock);
+      }
     }
     if (b.kind === 'great' || b.kind === 'boss') {
       // Pillars: four brick columns floor→ceiling.
       for (const [su, sv] of [[-1, -1], [-1, 1], [1, -1], [1, 1]]) {
         const pu = b.u + su * (b.hw - 3), pv = b.v + sv * (b.hw - 3);
         for (let y = floor; y <= fy + b.ih; y++) mark(wx(pu, pv), y, wz(pu, pv), Block.VaultBrick);
+      }
+    }
+    if (b.kind === 'great') {
+      // Checkered basalt inlay across the floor — the hall reads as a ballroom.
+      for (let du = -(b.hw - 1); du <= b.hw - 1; du++) {
+        for (let dv = -(b.hw - 1); dv <= b.hw - 1; dv++) {
+          if (((du + dv) & 1) === 0) {
+            mark(wx(b.u + du, b.v + dv), b.floorY, wz(b.u + du, b.v + dv), Block.Basalt);
+          }
+        }
+      }
+    }
+    if (b.kind === 'flooded') {
+      // A shin-deep bog: mud bed + a sheet of water everywhere but the
+      // spawner's 3×3 plinth. Spitters love it here.
+      for (let du = -(b.hw - 1); du <= b.hw - 1; du++) {
+        for (let dv = -(b.hw - 1); dv <= b.hw - 1; dv++) {
+          if (Math.abs(du) <= 1 && Math.abs(dv) <= 1) continue;
+          mark(wx(b.u + du, b.v + dv), b.floorY, wz(b.u + du, b.v + dv), Block.Mud);
+          mark(wx(b.u + du, b.v + dv), floor, wz(b.u + du, b.v + dv), Block.Water);
+        }
+      }
+    }
+    if (b.kind === 'lava') {
+      // Molten floor with a safe walkway CROSS through the middle — cross the
+      // glow or burn. Basalt bed under the lava sells the volcanic look.
+      for (let du = -(b.hw - 1); du <= b.hw - 1; du++) {
+        for (let dv = -(b.hw - 1); dv <= b.hw - 1; dv++) {
+          if (Math.abs(du) <= 1 || Math.abs(dv) <= 1) continue; // the walkway
+          mark(wx(b.u + du, b.v + dv), b.floorY, wz(b.u + du, b.v + dv), Block.Basalt);
+          mark(wx(b.u + du, b.v + dv), floor, wz(b.u + du, b.v + dv), Block.Lava);
+        }
+      }
+    }
+    if (b.kind === 'garden') {
+      // A crystal grove: mud beds sprouting tall grass around glowing crystal
+      // clusters — the one vault room that feels ALIVE.
+      for (const [su, sv] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+        const pu = b.u + su * (b.hw - 2), pv = b.v + sv * (b.hw - 2);
+        mark(wx(pu, pv), floor, wz(pu, pv), Block.CrystalBlock);
+        if (rng() < 0.5) mark(wx(pu, pv), floor + 1, wz(pu, pv), Block.CrystalBlock);
+      }
+      for (let du = -(b.hw - 1); du <= b.hw - 1; du++) {
+        for (let dv = -(b.hw - 1); dv <= b.hw - 1; dv++) {
+          if (Math.abs(du) <= 1 && Math.abs(dv) <= 1) continue;
+          const r = rng();
+          if (r < 0.3) {
+            mark(wx(b.u + du, b.v + dv), b.floorY, wz(b.u + du, b.v + dv), Block.Mud);
+            if (r < 0.18) mark(wx(b.u + du, b.v + dv), floor, wz(b.u + du, b.v + dv), Block.TallGrass);
+          }
+        }
+      }
+    }
+    if (b.kind === 'treasury') {
+      // The hoard: glowing gold-block piles in all four corners (MINEABLE —
+      // this room IS loot), guarded by a beefed-up elite spawner.
+      for (const [su, sv] of [[-1, -1], [-1, 1], [1, -1], [1, 1]]) {
+        const pu = b.u + su * (b.hw - 2), pv = b.v + sv * (b.hw - 2);
+        mark(wx(pu, pv), floor, wz(pu, pv), Block.GoldBlock);
+        if (rng() < 0.7) mark(wx(pu, pv), floor + 1, wz(pu, pv), Block.GoldBlock);
+        if (rng() < 0.5) {
+          mark(wx(pu + su, pv), floor, wz(pu + su, pv), Block.GoldBlock);
+        }
+      }
+    }
+    if (b.kind === 'crypt') {
+      // Cobbled burial floor strips — old stone under old bones.
+      for (let du = -(b.hw - 1); du <= b.hw - 1; du++) {
+        for (let dv = -(b.hw - 1); dv <= b.hw - 1; dv++) {
+          if ((dv & 1) === 0) {
+            mark(wx(b.u + du, b.v + dv), b.floorY, wz(b.u + du, b.v + dv), Block.Cobblestone);
+          }
+        }
       }
     }
     if (b.kind === 'pit') {
@@ -341,7 +527,10 @@ export function vaultStamp(
   const daisU = boss.u + boss.hw - 3;
   for (let du = -1; du <= 1; du++) {
     for (let dv = -1; dv <= 1; dv++) {
-      mark(wx(daisU + du, boss.v + dv), fy + 1, wz(daisU + du, boss.v + dv), Block.VaultBrick);
+      // Gold-trimmed corners make the treasure dais gleam from the doorway.
+      const gold = du !== 0 && dv !== 0;
+      mark(wx(daisU + du, boss.v + dv), fy + 1, wz(daisU + du, boss.v + dv),
+        gold ? Block.GoldBlock : Block.VaultBrick);
     }
   }
   const chest = { x: wx(daisU, boss.v), y: fy + 2, z: wz(daisU, boss.v) };
@@ -353,8 +542,10 @@ export function vaultStamp(
   //    1 block per step until it breaks the surface (deterministic: ctx.height).
   let mouth = { x: ax, y: g, z: az };
   {
+    const SEA = 63; // terrain SEA_LEVEL (not imported — would be a module cycle)
     let surfaced = false;
-    for (let i = 0; i <= 26 && !surfaced; i++) {
+    // Deeper burial means a longer climb: up to 40 steps (u stays ≤ 44 ≈ reach).
+    for (let i = 0; i <= 40 && !surfaced; i++) {
       const u = -(hall.hw + i);
       const stepY = fy + 1 + i;
       const colH = ctx.height(wx(u, 0), wz(u, 0));
@@ -363,7 +554,8 @@ export function vaultStamp(
           mark(wx(u, s), y, wz(u, s), Block.Air);
         }
       }
-      if (stepY >= colH) {
+      // Never surface below sea level — keep climbing until the mouth is dry.
+      if (stepY >= colH && stepY > SEA) {
         surfaced = true;
         mouth = { x: wx(u, 0), y: Math.max(stepY, colH), z: wz(u, 0) };
         // Ruined arch: two cobble pillars either side of the mouth + a beam +
@@ -376,6 +568,9 @@ export function vaultStamp(
         for (const s of [-1, 0]) mark(wx(u, s), mouth.y + 3, wz(u, s), Block.Cobblestone);
       }
     }
+    // No dry surfacing point within reach — the site can't host a reachable
+    // vault, so reject it outright (every vault MUST have a walk-in mouth).
+    if (!surfaced) return null;
   }
 
   // Emit blocks + compute rooms/bounds in world space.
@@ -396,7 +591,7 @@ export function vaultStamp(
   }
   const bounds = { minX, minZ, maxX, maxZ, minY: fy - 6, maxY: fy + BOSS_IH + 3 };
 
-  return { cx, cz, tier, x: ax, y: g, z: az, floorY: fy, rooms, chest, mouth, bounds, blocks };
+  return { cx, cz, tier, bossKind, x: ax, y: g, z: az, floorY: fy, rooms, chest, mouth, bounds, blocks };
 }
 
 /** The vault whose underground bounds contain (x, y, z), scanning the ±2-chunk

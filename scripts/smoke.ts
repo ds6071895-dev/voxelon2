@@ -96,6 +96,11 @@ import {
   vaultLootCooldownLeft, vaultLootable, vaultStamp, vaultTier, worldVaults,
 } from '../src/vaults';
 import { LOOT_TABLES, chestLoot, chestLootSlots } from '../src/loot';
+import {
+  GW_KIT, GW_MIN_PLAYERS, GW_SLOTS, GW_SWORD_DAMAGE, GW_VOID_Y, goldPos,
+  gwBaseBlockAt, gwColumnBlocks, gwSlotAt, gwSlotBounds, gwSpawn, inGoldwarsXZ,
+  newGwCode,
+} from '../src/goldwars';
 import { mulberry32 } from '../src/noise';
 import { AUTOMINER_ORES, Terrain, SEA_LEVEL } from '../src/terrain';
 import { Biome } from '../src/biomes';

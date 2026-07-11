@@ -240,6 +240,15 @@ export class Inventory {
     this.version++;
   }
 
+  /** Clear carried items + worn armor + cursor (no drops) — used to swap into
+   *  the temporary Goldwars kit and back. Chest/craft mirrors are untouched. */
+  clearCarried(): void {
+    for (let i = 0; i < INV_SIZE; i++) this.slots[i] = null;
+    for (let i = ARMOR_START; i < ARMOR_START + ARMOR_SIZE; i++) this.slots[i] = null;
+    this.cursor = null;
+    this.version++;
+  }
+
   /** Take everything (death): returns all stacks and clears the inventory. */
   spillAll(): ItemStack[] {
     const out: ItemStack[] = [];
