@@ -207,30 +207,27 @@ export function vaultStamp(
   // footprint (an 8-block grid) for the LOWEST effective surface — valleys,
   // ocean dips and RAVINE floors all count. The interior is then sunk below
   // that minimum, and sites the terrain can't hide are rejected outright.
+  // The layout direction rolls later, so a room can reach ±51 blocks along
+  // EITHER axis — sample the full ±54 square around the anchor.
   let minSurf = g;
   // Heights are smooth — a 4-block grid can't miss a valley.
-  for (let du = -14; du <= 54; du += 4) {
-    for (let dv = -40; dv <= 40; dv += 4) {
-      const sx = ax + du, sz = az + dv; // orientation-agnostic: cover both axes
-      for (const [px, pz] of [[sx, sz], [ax + dv, az + du]] as [number, number][]) {
-        if (inGoldwarsXZ(px, pz)) return null; // never straddle the arena void
-        const h = ctx.height(px, pz);
-        if (h < minSurf) minSurf = h;
-      }
+  for (let du = -54; du <= 54; du += 4) {
+    for (let dv = -54; dv <= 54; dv += 4) {
+      const px = ax + du, pz = az + dv;
+      if (inGoldwarsXZ(px, pz)) return null; // never straddle the arena void
+      const h = ctx.height(px, pz);
+      if (h < minSurf) minSurf = h;
     }
   }
-  // Ravines are NARROW (a few blocks) — scan them on a 2-block grid so a thin
-  // canyon slicing the footprint can't sneak between samples. ravineDepth has
-  // a cheap mask early-out, so this stays fast outside ravine country.
-  for (let du = -14; du <= 54; du += 2) {
-    for (let dv = -40; dv <= 40; dv += 2) {
-      const sx = ax + du, sz = az + dv;
-      for (const [px, pz] of [[sx, sz], [ax + dv, az + du]] as [number, number][]) {
-        const rd = ctx.ravineDepth(px, pz);
-        if (rd <= 0) continue;
-        const eff = Math.max(10, ctx.height(px, pz) - rd);
-        if (eff < minSurf) minSurf = eff;
-      }
+  // Ravines can be a SINGLE column wide — scan every column. Cheap in
+  // practice: ravineDepth mask-gates to one noise call outside the rare
+  // "ravine country" regions, and stamps are cached per anchor chunk.
+  for (let du = -52; du <= 52; du++) {
+    for (let dv = -52; dv <= 52; dv++) {
+      const rd = ctx.ravineDepth(ax + du, az + dv);
+      if (rd <= 0) continue;
+      const eff = Math.max(10, ctx.height(ax + du, az + dv) - rd);
+      if (eff < minSurf) minSurf = eff;
     }
   }
   if (g - minSurf > 26) return null;  // extreme relief — the stairs can't climb out

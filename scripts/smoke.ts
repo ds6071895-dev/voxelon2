@@ -3882,5 +3882,207 @@ let firstVault: VaultStamp | null = null;
   })());
 }
 
+// === Beta 1.10: buried vaults + vault variety + Sword/GoldBlock + GOLDWARS ====
+
+// --- Vault BURIAL GUARANTEE + themed-wing variety + boss flavours ---------------
+{
+  const vs = worldVaults(1337, terrain);
+  const stamps = vs.slice(0, 16).map((v) => vaultStamp(1337, v.cx, v.cz, terrain)!);
+  check('BURIAL: no vault block breaks any surface (valleys + ravine floors count)',
+    stamps.every((st) => st.blocks.every((b) => {
+      if (b.id === Block.Air) return true;
+      // The ruined arch at the mouth is the ONE intentional surface feature.
+      if (Math.abs(b.x - st.mouth.x) <= 3 && Math.abs(b.z - st.mouth.z) <= 3) return true;
+      const h = terrain.height(b.x, b.z);
+      const rd = terrain.ravineDepth(b.x, b.z);
+      const eff = rd > 0 ? Math.max(10, h - rd) : h;
+      return b.y <= eff;
+    })));
+  check('every vault mouth surfaces on dry land (above sea level)',
+    stamps.every((st) => st.mouth.y > SEA_LEVEL));
+  const kinds = new Set<string>();
+  for (const st of stamps) for (const r of st.rooms) kinds.add(r.kind);
+  check('new themed wings generate (flooded / garden / treasury / lava)',
+    ['flooded', 'garden', 'treasury', 'lava'].every((k) => kinds.has(k)),
+    [...kinds].join(','));
+  check('boss flavours vary between vaults (brute/ravager/colossus roll)',
+    new Set(stamps.map((st) => st.bossKind)).size >= 2 &&
+    stamps.every((st) => ['brute', 'ravager', 'colossus'].includes(st.bossKind)));
+  check('every boss dais is gold-trimmed; treasuries hoard extra gold blocks',
+    stamps.every((st) => st.blocks.filter((b) => b.id === Block.GoldBlock).length >= 4) &&
+    stamps.filter((st) => st.rooms.some((r) => r.kind === 'treasury'))
+      .every((st) => st.blocks.filter((b) => b.id === Block.GoldBlock).length >= 8));
+}
+
+// --- The Sword + Gold Block ------------------------------------------------------
+{
+  const sword = ITEMS[Item.Sword];
+  check('the Sword exists: top melee damage, no mining power',
+    !!sword?.tool && sword.tool.type === 'sword' && sword.tool.damage >= 7 &&
+    sword.tool.speed <= 1);
+  check('the Sword out-damages every other tool',
+    Object.values(ITEMS).every((it) =>
+      !it.tool || it.tool.type === 'sword' || it.tool.damage < sword.tool!.damage));
+  check('Sword + Gold Block recipes exist (and gold banks 4:1 both ways)',
+    RECIPES.some((r) => r.result.id === Item.Sword) &&
+    RECIPES.some((r) => r.result.id === Block.GoldBlock) &&
+    RECIPES.some((r) => r.kind === 'shapeless' && r.result.id === Item.GoldIngot &&
+      r.result.count === 4));
+  check('Gold Block is a glowing, placeable block item',
+    BLOCKS[Block.GoldBlock].emission > 0 && BLOCKS[Block.GoldBlock].solid &&
+    ITEMS[Block.GoldBlock]?.kind === 'block');
+}
+
+// --- GOLDWARS: the arena map ------------------------------------------------------
+{
+  check('the arena strip sits far from spawn (origin is NOT Goldwars)',
+    !inGoldwarsXZ(0, 0) && !inGoldwarsXZ(500, 500) && GW_SLOTS >= 2);
+  const g0 = goldPos(0, 0), g1 = goldPos(0, 1);
+  check('each team gets one GOLD BLOCK on its base island',
+    gwBaseBlockAt(g0.x, g0.y, g0.z) === Block.GoldBlock &&
+    gwBaseBlockAt(g1.x, g1.y, g1.z) === Block.GoldBlock && g0.x !== g1.x);
+  check('team spawns land on solid team decks over the void',
+    [0, 1].every((team) => {
+      const sp = gwSpawn(0, team, mulberry32(3));
+      const under = gwColumnBlocks(Math.floor(sp.x), Math.floor(sp.z))
+        .some((b) => b.y === sp.y - 1);
+      return under && gwSlotAt(sp.x, sp.z) === 0;
+    }));
+  check('the void really is void (no floor a few blocks off the islands)',
+    gwColumnBlocks(g0.x, g0.z + 40).length === 0 && GW_VOID_Y > 0);
+  const chunkX = Math.floor(g0.x / 16), chunkZ = Math.floor(g0.z / 16);
+  const ch = new Chunk(chunkX, chunkZ);
+  terrain.fill(ch);
+  check('terrain generation stamps the arena (gold block present in the chunk)',
+    ch.get(g0.x - chunkX * 16, g0.y, g0.z - chunkZ * 16) === Block.GoldBlock);
+  check('invite codes are 5 chars from the unambiguous alphabet',
+    /^[A-HJ-NP-Z2-9]{5}$/.test(newGwCode(mulberry32(9))));
+  check('the kit is sword-led (sword + pickaxe + bridge blocks, NO guns)',
+    GW_KIT.some(([id]) => id === Item.Sword) &&
+    GW_KIT.every(([id]) => !ITEMS[id]?.gun));
+}
+
+// --- GOLDWARS: lobby -> teams -> start -> swords -> gold -> knockout -> win ------
+{
+  const s = new GameServer(1337, mulberry32(77));
+  const sent = new Map<number, { t: string }[]>();
+  const collect = (out: Outbound[]): void => {
+    for (const o of out) {
+      if (typeof o.to === 'number') {
+        sent.set(o.to, [...(sent.get(o.to) ?? []), o.msg as { t: string }]);
+      }
+    }
+  };
+  for (let id = 1; id <= 4; id++) s.addPlayer(id);
+  // Create a lobby; grab the code from the snapshot.
+  const created = s.handle(1, { t: 'gwCreate' });
+  const lobby0 = created.find((o) => o.msg.t === 'gwLobby')!.msg as
+    { code: string; host: number; players: { id: number; team: number }[] };
+  check('gwCreate opens a lobby (creator = host, on team 0)',
+    !!lobby0 && lobby0.host === 1 && lobby0.players.length === 1);
+  const code = lobby0.code;
+  check('starting alone is refused (needs 2+ players)',
+    s.handle(1, { t: 'gwStart' }).some((o) => o.msg.t === 'gwErr') &&
+    GW_MIN_PLAYERS >= 2);
+  check('a bogus code is refused with a friendly error',
+    s.handle(2, { t: 'gwJoin', code: 'ZZZZZ' }).some((o) => o.msg.t === 'gwErr'));
+  const j2 = s.handle(2, { t: 'gwJoin', code });
+  const j3 = s.handle(3, { t: 'gwJoin', code });
+  const lobby3 = j3.filter((o) => o.msg.t === 'gwLobby').pop()!.msg as typeof lobby0;
+  check('joins by code reach the lobby + teams auto-balance',
+    j2.some((o) => o.msg.t === 'gwLobby') && lobby3.players.length === 3 &&
+    new Set(lobby3.players.map((p) => p.team)).size === 2);
+  check('a non-host cannot reassign teams or start',
+    s.handle(2, { t: 'gwTeam', id: 3, team: 0 }).length === 0 &&
+    s.handle(2, { t: 'gwStart' }).some((o) => o.msg.t === 'gwErr'));
+  // Host reassignment: put 2+3 on Azure, host alone on Crimson (1v2).
+  s.handle(1, { t: 'gwTeam', id: 2, team: 1 });
+  const reT = s.handle(1, { t: 'gwTeam', id: 3, team: 1 });
+  const lobbyT = reT.filter((o) => o.msg.t === 'gwLobby').pop()!.msg as typeof lobby0;
+  check('the host can assign players to teams',
+    lobbyT.players.find((p) => p.id === 2)!.team === 1 &&
+    lobbyT.players.find((p) => p.id === 3)!.team === 1);
+  // Start: everyone teleports into slot 0, gets gwBegin, and is team-tinted.
+  const started = s.handle(1, { t: 'gwStart' });
+  collect(started);
+  const begin1 = (sent.get(1) ?? []).find((m) => m.t === 'gwBegin') as
+    { slot: number; team: number } | undefined;
+  check('gwStart launches the match (gwBegin + teleports + team disguises)',
+    !!begin1 && begin1.slot === 0 &&
+    started.filter((o) => o.msg.t === 'teleport').length === 3 &&
+    started.filter((o) => o.msg.t === 'disguised').length === 3);
+  const bounds = gwSlotBounds(0);
+  check('every fighter stands inside the arena slot',
+    s.snapshot().filter((p) => p.id <= 3).every((p) =>
+      p.x >= bounds.minX && p.x <= bounds.maxX && p.z >= bounds.minZ && p.z <= bounds.maxZ));
+  check('a mid-match join is refused',
+    s.handle(4, { t: 'gwJoin', code }).some((o) => o.msg.t === 'gwErr'));
+  // Movement clamps into the slot; outsiders can't touch arena blocks.
+  const sp0 = { x: goldPos(0, 0).x, y: goldPos(0, 0).y - 1, z: goldPos(0, 0).z };
+  s.handle(1, { t: 'xform', x: 99999, y: sp0.y, z: sp0.z, yaw: 0, pitch: 0 });
+  check('a Goldwars player is penned into their arena slot',
+    s.snapshot().find((p) => p.id === 1)!.x <= bounds.maxX);
+  s.handle(4, { t: 'xform', x: sp0.x, y: sp0.y, z: sp0.z, yaw: 0, pitch: 0 });
+  check('a civilization bystander cannot edit a live arena',
+    s.handle(4, { t: 'edit', x: sp0.x + 1, y: sp0.y, z: sp0.z, block: 0 }).length === 0);
+  // Sword melee: only in-match, only across teams, range + facing validated.
+  const hp = (id: number): number => s.snapshot().find((p) => p.id === id)!.health;
+  const az = goldPos(0, 1); // fight on Azure's island
+  s.handle(1, { t: 'xform', x: az.x, y: az.y - 1, z: az.z - 3, yaw: Math.PI, pitch: 0 });
+  s.handle(2, { t: 'xform', x: az.x, y: az.y - 1, z: az.z - 1, yaw: 0, pitch: 0 });
+  s.handle(3, { t: 'xform', x: az.x, y: az.y - 1, z: az.z + 2, yaw: 0, pitch: 0 });
+  const slash = s.handle(1, { t: 'attack', target: 2 });
+  check('a sword hit lands (range + facing) for exactly GW_SWORD_DAMAGE',
+    slash.some((o) => o.to === 2 && o.msg.t === 'hurt') && hp(2) === 20 - GW_SWORD_DAMAGE);
+  check('friendly fire is off (Azure cannot slash Azure)',
+    s.handle(2, { t: 'attack', target: 3 }).length === 0);
+  check('guns are dead inside Goldwars (server rejects ranged hits)',
+    s.handle(1, { t: 'rangedAttack', target: 2, amount: 30 }).length === 0 &&
+    s.handle(4, { t: 'rangedAttack', target: 2, amount: 30 }).length === 0);
+  check('a civilization bystander cannot be sword-slashed',
+    s.handle(1, { t: 'attack', target: 4 }).length === 0);
+  // Your own gold is sacred; the ENEMY gold flips their respawns off.
+  const own = goldPos(0, 0);
+  s.handle(1, { t: 'xform', x: own.x, y: own.y - 1, z: own.z - 2, yaw: Math.PI, pitch: 0 });
+  const ownTry = s.handle(1, { t: 'edit', x: own.x, y: own.y, z: own.z, block: 0 });
+  check("breaking your OWN gold is refused",
+    ownTry.length > 0 && ownTry.every((o) => o.msg.t === 'notice'));
+  s.handle(2, { t: 'xform', x: own.x, y: own.y - 1, z: own.z - 2, yaw: Math.PI, pitch: 0 });
+  const broke = s.handle(2, { t: 'edit', x: own.x, y: own.y, z: own.z, block: 0 });
+  check("mining the ENEMY gold broadcasts gwGold + a killfeed line",
+    broke.some((o) => o.msg.t === 'gwGold') && broke.some((o) => o.msg.t === 'killfeed'));
+  // Death with gold standing = respawn at base; without gold = KNOCKOUT + win.
+  sent.clear();
+  for (let i = 0; i < 3; i++) collect(s.handle(1, { t: 'attack', target: 2 }));
+  check('three sword hits down an unarmored fighter',
+    s.snapshot().find((p) => p.id === 2)!.dead);
+  const re2 = s.handle(2, { t: 'respawn' });
+  check('death while YOUR gold stands respawns you at base',
+    re2.some((o) => o.msg.t === 'respawned') && hp(2) === 20 &&
+    !s.snapshot().find((p) => p.id === 2)!.dead);
+  // Crimson's gold is already gone (team 0 = player 1). Kill player 1 twice? No —
+  // kill player 1 once: their gold was broken above, so their death is final.
+  s.handle(2, { t: 'xform', x: az.x, y: az.y - 1, z: az.z - 3, yaw: Math.PI, pitch: 0 });
+  s.handle(1, { t: 'xform', x: az.x, y: az.y - 1, z: az.z - 1, yaw: 0, pitch: 0 });
+  for (let i = 0; i < 3; i++) collect(s.handle(2, { t: 'attack', target: 1 }));
+  const knockout = s.handle(1, { t: 'respawn' });
+  check('death after your gold falls is a KNOCKOUT (gwOut) that ends the match',
+    knockout.some((o) => o.to === 1 && o.msg.t === 'gwOut') &&
+    knockout.some((o) => o.msg.t === 'gwOver' &&
+      (o.msg as { winner: number }).winner === 1));
+  const w9 = s.addPlayer(9).find((o) => o.to === 9)!.msg as
+    { players: { id: number; hearts: number }[] };
+  check('Goldwars deaths never move lifesteal hearts',
+    w9.players.filter((p) => p.id <= 3).every((p) => p.hearts === START_HEARTS));
+  check('the match over, everyone is back OUT of the arena region',
+    s.snapshot().filter((p) => p.id <= 3).every((p) => gwSlotAt(p.x, p.z) === null));
+  check('the slot frees up for a rematch (a fresh lobby can start)',
+    (() => {
+      const c2 = s.handle(3, { t: 'gwCreate' }).find((o) => o.msg.t === 'gwLobby')!.msg as { code: string };
+      s.handle(4, { t: 'gwJoin', code: c2.code });
+      return s.handle(3, { t: 'gwStart' }).some((o) => o.msg.t === 'gwBegin');
+    })());
+}
+
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);
