@@ -27,6 +27,9 @@ export interface Account {
   /** Username of the teammate who beacon-revived this account (shown as a
    *  notice on next login, then cleared). */
   revivedBy?: string;
+  /** Session token for password-less resume (rotated on every successful
+   *  auth; the client mirrors it in localStorage). */
+  token?: string;
   /** Saved player state, restored on login (position/health/armor/inventory). */
   data?: Record<string, unknown>;
 }
@@ -62,6 +65,7 @@ export class Accounts {
           forfeitSeason: Number.isFinite(a.forfeitSeason) ? Math.floor(a.forfeitSeason as number) : 0,
           eliminatedUntil: Number.isFinite(a.eliminatedUntil) ? Math.max(0, a.eliminatedUntil as number) : 0,
           revivedBy: typeof a.revivedBy === 'string' ? a.revivedBy : undefined,
+          token: typeof a.token === 'string' ? a.token : undefined,
           data: a.data,
         });
       }
@@ -116,6 +120,23 @@ export class Accounts {
     if (!a || typeof pass !== 'string') return { ok: false, error: 'Wrong username or password' };
     if (hash(pass, a.salt) !== a.hash) return { ok: false, error: 'Wrong username or password' };
     return { ok: true, account: a };
+  }
+
+  /** Resume via a stored session token (no password). Fail-closed: an account
+   *  with no token can never match, and the generic error avoids enumeration. */
+  sessionLogin(name: string, token: string): AuthResult {
+    const a = this.get(name);
+    if (!a || typeof token !== 'string' || token.length < 8 ||
+        !a.token || a.token !== token) {
+      return { ok: false, error: 'Session expired — please log in again.' };
+    }
+    return { ok: true, account: a };
+  }
+
+  /** Store (rotate) an account's session token. */
+  setToken(name: string, token: string): void {
+    const a = this.get(name);
+    if (a) a.token = token;
   }
 
   /** Merge saved player state into an account (for persistence phases). */

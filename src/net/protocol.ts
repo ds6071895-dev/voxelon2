@@ -89,6 +89,9 @@ export type ClientMsg =
   // Mandatory accounts: a socket must authenticate before it spawns a player.
   | { t: 'register'; username: string; password: string; faction?: number } // faction = picked side
   | { t: 'login'; username: string; password: string }
+  // Resume a saved session (token issued by the server on each successful
+  // auth) — lets a returning browser skip the password.
+  | { t: 'session'; username: string; token: string }
   | { t: 'xform'; x: number; y: number; z: number; yaw: number; pitch: number;
       gliding?: boolean; boating?: boolean }
   | { t: 'edit'; x: number; y: number; z: number; block: number }
@@ -185,6 +188,9 @@ export type ClientMsg =
 export type ServerMsg =
   // Auth: a rejected login/register (success is signalled by the `welcome`).
   | { t: 'authErr'; error: string }
+  // A fresh session token (sent right after every successful auth); the client
+  // stores it in localStorage so the next visit can skip the login form.
+  | { t: 'session'; token: string }
   | {
       t: 'welcome'; id: number; seed: number; username: string;
       players: PlayerInfo[]; edits: [string, number][]; items: ItemEntityInfo[];

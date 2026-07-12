@@ -33,7 +33,17 @@ export class Input {
   guideToggled = false;    // H pressed this frame (getting-started panel)
   tpaPressed = false;      // T pressed this frame (open the TPA prompt)
   locked = false;
-  sprintHeld = false; // via double-tap W, persists until W released
+
+  // Touch controls (mobile): when true, "pointer lock" is virtual — lock()
+  // just flips `locked` (there's no OS pointer to capture) and the on-screen
+  // controls (src/touch.ts) write into the t* fields below, which the getters
+  // OR together with the keyboard so gameplay code never special-cases touch.
+  touchMode = false;
+  tForward = false; tBack = false; tLeft = false; tRight = false;
+  tJump = false; tSneak = false; tSprint = false;
+
+  private kbSprint = false; // via double-tap W, persists until W released
+  get sprintHeld(): boolean { return this.kbSprint || this.tSprint; }
 
   private lastWDown = 0;
   private readonly canvas: HTMLCanvasElement;
@@ -58,7 +68,7 @@ export class Input {
       if (e.code === 'KeyT') this.tpaPressed = true;
       if (e.code === 'KeyW') {
         const now = performance.now();
-        if (now - this.lastWDown < 250) this.sprintHeld = true;
+        if (now - this.lastWDown < 250) this.kbSprint = true;
         this.lastWDown = now;
       }
       if (e.code.startsWith('Digit')) {
@@ -68,7 +78,7 @@ export class Input {
     });
     document.addEventListener('keyup', (e) => {
       this.keys.delete(e.code);
-      if (e.code === 'KeyW') this.sprintHeld = false;
+      if (e.code === 'KeyW') this.kbSprint = false;
     });
 
     document.addEventListener('mousemove', (e) => {
@@ -92,6 +102,7 @@ export class Input {
     });
 
     document.addEventListener('pointerlockchange', () => {
+      if (this.touchMode) return; // virtual lock — the OS pointer is not involved
       this.locked = document.pointerLockElement === this.canvas;
       if (!this.locked) {
         this.keys.clear();
@@ -101,19 +112,40 @@ export class Input {
   }
 
   lock(): void {
+    if (this.touchMode) {
+      if (this.locked) return;
+      this.locked = true;
+      // Fire the same event the real pointer lock would, so the screen state
+      // machine in main.ts (enterPlaying/enterPause) works unchanged.
+      document.dispatchEvent(new Event('pointerlockchange'));
+      return;
+    }
     this.canvas.requestPointerLock();
+  }
+
+  /** Release the (real or virtual) pointer lock. */
+  unlock(): void {
+    if (this.touchMode) {
+      if (!this.locked) return;
+      this.locked = false;
+      this.keys.clear();
+      this.leftDown = this.rightDown = false;
+      document.dispatchEvent(new Event('pointerlockchange'));
+      return;
+    }
+    document.exitPointerLock();
   }
 
   down(code: string): boolean {
     return this.keys.has(code);
   }
 
-  get forward(): boolean { return this.down('KeyW'); }
-  get back(): boolean { return this.down('KeyS'); }
-  get left(): boolean { return this.down('KeyA'); }
-  get right(): boolean { return this.down('KeyD'); }
-  get jump(): boolean { return this.down('Space'); }
-  get sneak(): boolean { return this.down('ShiftLeft') || this.down('ShiftRight'); }
+  get forward(): boolean { return this.down('KeyW') || this.tForward; }
+  get back(): boolean { return this.down('KeyS') || this.tBack; }
+  get left(): boolean { return this.down('KeyA') || this.tLeft; }
+  get right(): boolean { return this.down('KeyD') || this.tRight; }
+  get jump(): boolean { return this.down('Space') || this.tJump; }
+  get sneak(): boolean { return this.down('ShiftLeft') || this.down('ShiftRight') || this.tSneak; }
   get sprintKey(): boolean { return this.down('KeyQ'); }
 
   /** Consume per-frame deltas/edges; call once at the end of each frame. */

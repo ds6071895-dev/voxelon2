@@ -2,11 +2,16 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>VOXELON</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+    /* Touch devices: no pinch-zoom/scroll gestures, no long-press callouts or
+       accidental text selection (inputs still type fine). */
+    html, body { touch-action: none; -webkit-user-select: none; user-select: none;
+                 -webkit-touch-callout: none; }
+    #auth input { -webkit-user-select: text; user-select: text; }
     #app { width: 100%; height: 100%; position: relative; }
     canvas.game { display: block; image-rendering: pixelated; }
 
@@ -322,6 +327,7 @@
         <button id="play-btn" class="mc-btn">Civilization</button>
         <button id="character-btn" class="mc-btn">Character</button>
         <button id="controls-btn" class="mc-btn">Controls</button>
+        <button id="logout-btn" class="mc-btn" style="font-size:14px;padding:7px 28px;opacity:0.85;">Log Out</button>
       </div>
     </div>
   </div>

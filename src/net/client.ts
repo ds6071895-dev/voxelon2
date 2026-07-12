@@ -107,6 +107,8 @@ export class NetClient {
   onCosmetics?: (id: number) => void;
   /** A register/login was rejected (the login screen shows the error). */
   onAuthErr?: (error: string) => void;
+  /** A fresh session token arrived (store it for password-less resume). */
+  onSession?: (token: string) => void;
   /** Lifesteal: the local player's authoritative hearts count changed. */
   onHearts?: (hearts: number, reason: string, from?: string) => void;
   /** Lifesteal: YOU were eliminated (0 hearts) — banner before the boot. */
@@ -313,6 +315,9 @@ export class NetClient {
       case 'authErr':
         this.onAuthErr?.(msg.error);
         break;
+      case 'session':
+        this.onSession?.(msg.token);
+        break;
       case 'hearts':
         this.onHearts?.(msg.hearts, msg.reason, msg.from);
         break;
@@ -373,6 +378,10 @@ export class NetClient {
   }
   sendLogin(username: string, password: string): void {
     this.raw({ t: 'login', username, password });
+  }
+  /** Resume a saved session (token from a previous visit's `session` msg). */
+  sendSession(username: string, token: string): void {
+    this.raw({ t: 'session', username, token });
   }
 
   sendEdit(x: number, y: number, z: number, block: number): void {

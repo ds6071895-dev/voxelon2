@@ -149,8 +149,8 @@ function recordFail(bucket: Map<string, Throttle>, key: string, max: number, now
 
 /** Authenticate a connecting socket (register or login). On success the socket
  *  gets a player with its account's persisted faction; on failure an authErr. */
-function handleAuth(id: number, msg: ClientMsg & { t: 'register' | 'login' }): void {
-  const { username, password } = msg;
+function handleAuth(id: number, msg: ClientMsg & { t: 'register' | 'login' | 'session' }): void {
+  const { username } = msg;
   const now = Date.now();
   const sk = String(id);
   // Per-socket cap: a single connection can't hammer the auth path. Every
@@ -168,13 +168,14 @@ function handleAuth(id: number, msg: ClientMsg & { t: 'register' | 'login' }): v
     return;
   }
   const res = msg.t === 'register'
-    ? accounts.register(username, password, hasher, randomSalt(), msg.faction)
-    : accounts.login(username, password, hasher);
-  if (msg.t === 'register' && res.ok) saveAccounts();
+    ? accounts.register(username, msg.password, hasher, randomSalt(), msg.faction)
+    : msg.t === 'login'
+      ? accounts.login(username, msg.password, hasher)
+      : accounts.sessionLogin(username, msg.token);
   if (!res.ok || !res.account) {
-    // Count failed LOGINS toward the lockout (a failed register is a name clash,
-    // not a guess, so it doesn't lock the existing account out).
-    if (msg.t === 'login') recordFail(loginFails, throttleKey(username), LOGIN_MAX_FAILS, now);
+    // Count failed logins AND session resumes toward the lockout (both are
+    // secret guesses; a failed register is just a name clash).
+    if (msg.t !== 'register') recordFail(loginFails, throttleKey(username), LOGIN_MAX_FAILS, now);
     send(id, { t: 'authErr', error: res.error ?? 'Authentication failed' });
     return;
   }
