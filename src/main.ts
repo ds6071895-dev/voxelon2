@@ -5,6 +5,7 @@ import { Furnaces } from './furnace';
 import { HeldItemView } from './held';
 import { HUD } from './hud';
 import { Input, FROZEN_INPUT } from './input';
+import { TouchControls, isTouchDevice } from './touch';
 import { Interaction, raycastBlocks } from './interact';
 import { Inventory } from './inventory';
 import { InventoryUI, MachineUIContext, TurretUIContext } from './inventory_ui';
@@ -120,6 +121,21 @@ const world = new World(scene, atlas, seed);
 const spawn = world.terrain.randomDrySpawn(Math.random, CORE_HALF);
 const player = new Player(spawn);
 const input = new Input(renderer.domElement);
+// Phones/tablets get on-screen controls (joystick + buttons) that feed the
+// exact same Input fields the keyboard/mouse write — pointer lock is virtual
+// in touch mode. Callbacks close over UI declared further down; they only run
+// on taps, long after module init.
+const touch = isTouchDevice() ? new TouchControls(input, {
+  onInventory: () => { input.inventoryToggled = true; },
+  onMap: () => { input.mapToggled = true; },
+  onPause: () => {
+    if (player.dead) return;
+    if (screen === 'paused') { input.lock(); return; }        // resume
+    if (invUI.open) { input.inventoryToggled = true; return; } // close menu first
+    if (worldMap.open) { input.mapToggled = true; return; }
+    if (input.locked) input.unlock();                          // open pause menu
+  },
+}) : null;
 const inventory = new Inventory();
 
 // No starter kit: everyone begins bare-handed — the Getting Started guide
@@ -630,7 +646,7 @@ interaction.onOpenContainer = (kind, x, y, z) => {
   } else {
     invUI.show(kind, kind === 'furnace' ? furnaces.get(x, y, z) : undefined);
   }
-  document.exitPointerLock();
+  input.unlock();
 };
 
 // --- Machine UI plumbing ----------------------------------------------------
@@ -947,12 +963,49 @@ function saveLocalAccounts(): void {
 }
 
 // Registration auto-assigns the balanced (50/50) side — no picking. We flag a
-// fresh registration so the assigned side is announced once the faction is known
-// (immediately offline; on `welcome` online).
+// fresh registration so the assigned side is revealed once the faction is known
+// (immediately offline; on `welcome` online) on a dedicated full-screen reveal
+// shown right after Register — not as a banner shouted over the game.
 let justRegistered = false;
+const factionReveal = (() => {
+  const panel = document.createElement('div');
+  panel.style.cssText = 'position:absolute;inset:0;display:none;flex-direction:column;' +
+    'align-items:center;justify-content:center;gap:6px;text-align:center;' +
+    'background:rgba(6,8,14,0.88);z-index:30;backdrop-filter:blur(3px);';
+  const eyebrow = document.createElement('div');
+  eyebrow.className = 'mc-font';
+  eyebrow.textContent = '⚔ WELCOME TO THE WAR ⚔';
+  eyebrow.style.cssText = 'font-size:16px;letter-spacing:5px;color:#cdd8ea;';
+  const lead = document.createElement('div');
+  lead.className = 'mc-font';
+  lead.textContent = 'You fight for';
+  lead.style.cssText = 'font-size:20px;color:#9fb4cc;margin-top:14px;';
+  const name = document.createElement('h1');
+  name.className = 'mc-font';
+  name.style.cssText = 'font-size:60px;letter-spacing:8px;margin:2px 0 10px;' +
+    'text-shadow:0 3px 0 rgba(0,0,0,0.45),0 10px 30px rgba(0,0,0,0.75);';
+  const blurb = document.createElement('div');
+  blurb.className = 'mc-font';
+  blurb.innerHTML = 'Sides are assigned automatically to keep the war a fair <b>50 / 50</b>.' +
+    '<br/>Claim land, arm up and win the season for your faction!';
+  blurb.style.cssText = 'font-size:14px;line-height:22px;color:#cdd8ea;max-width:460px;';
+  const go = document.createElement('button');
+  go.className = 'mc-btn';
+  go.textContent = '⚔ Fight!';
+  go.style.cssText = 'margin-top:18px;';
+  go.addEventListener('click', () => { panel.style.display = 'none'; });
+  panel.append(eyebrow, lead, name, blurb, go);
+  app.appendChild(panel);
+  return {
+    show(faction: number): void {
+      name.textContent = factionName(faction).toUpperCase();
+      name.style.color = factionCss(faction);
+      panel.style.display = 'flex';
+    },
+  };
+})();
 function announceSide(faction: number): void {
-  showRegionBanner(`YOU FIGHT FOR ${factionName(faction).toUpperCase()}!`, factionCss(faction));
-  showNotice(`⚔ You joined the ${factionName(faction)} — keeping the war 50/50.`);
+  factionReveal.show(faction);
 }
 
 // All surface structures shown on the world map as icons (one cached sweep —
@@ -969,6 +1022,7 @@ function refreshStructureMap(): void {
 function onAuthSuccess(username: string): void {
   authed = true;
   authedName = username;
+  sessionPending = false;
   lastUser = username;
   // Remember the account so next visit prefills the login (username only — the
   // password is never stored).
@@ -983,6 +1037,75 @@ function onAuthSuccess(username: string): void {
   authErr.textContent = '';
   authStatus.textContent = '';
   refreshNetInfo();
+}
+
+// --- Saved session (skip the login form on return visits) -------------------
+// On every successful auth the server issues a rotating token (offline: a
+// locally-generated one) which we mirror in localStorage; next visit we resume
+// with it instead of asking for the password again. "Log Out" clears it.
+const SESSION_KEY = 'voxelon.session';
+let sessionPending = false; // a session resume is in flight (authErr = expired)
+function loadSession(): { u: string; t: string } | null {
+  try {
+    const s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null') as { u?: string; t?: string } | null;
+    return s && typeof s.u === 'string' && typeof s.t === 'string' ? { u: s.u, t: s.t } : null;
+  } catch { return null; }
+}
+function saveSession(u: string, t: string): void {
+  try { localStorage.setItem(SESSION_KEY, JSON.stringify({ u, t })); } catch { /* ignore */ }
+}
+function clearSession(): void {
+  try { localStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
+}
+net.onSession = (token) => { if (authedName) saveSession(authedName, token); };
+
+/** Issue + store a local session token for OFFLINE accounts (the server does
+ *  this for online play; offline we are our own authority). */
+function issueOfflineSession(username: string): void {
+  const token = `${Math.floor(Math.random() * 1e9).toString(16)}` +
+    `${Date.now().toString(16)}${Math.floor(Math.random() * 1e9).toString(16)}`;
+  localAccounts.setToken(username, token);
+  saveLocalAccounts();
+  saveSession(username, token);
+}
+
+/** Everything a fresh OFFLINE auth needs after the account checks out. */
+function finishOfflineAuth(account: Account, freshRegister: boolean): void {
+  localFaction = account.faction;
+  onAuthSuccess(account.username);
+  spawnInOwnTerritory(); // never drop into enemy land (offline)
+  if (freshRegister) announceSide(localFaction);
+  else restoreOfflineInventory(); // bring back saved single-player stuff
+  restoreOfflineHearts(); // fresh accounts fall back to the 10-heart start
+  restoreOfflineTotems(); // attuned Waypoint Totems (fast travel)
+  restoreOfflineProgress(); // XP + upgrades + the faction pool
+  issueOfflineSession(account.username);
+}
+
+/** Try to resume a saved session (no password). Falls back to the normal
+ *  login form if the token is stale or the account is gone. */
+function attemptSessionAuth(sess: { u: string; t: string }, retries = 12): void {
+  if (authed) return;
+  if (net.socketOpen) {
+    sessionPending = true;
+    authStatus.textContent = `Resuming session as ${sess.u}…`;
+    net.sendSession(sess.u, sess.t);
+  } else if (net.offline) {
+    const res = localAccounts.sessionLogin(sess.u, sess.t);
+    if (!res.ok || !res.account) {
+      clearSession();
+      authStatus.textContent = '';
+      authErr.textContent = 'Session expired — please log in again.';
+      return;
+    }
+    finishOfflineAuth(res.account, false);
+  } else if (retries > 0) {
+    authStatus.textContent = 'Connecting…';
+    setTimeout(() => attemptSessionAuth(sess, retries - 1), 350);
+  } else {
+    authStatus.textContent = '';
+    authErr.textContent = 'Could not reach the server. Try again.';
+  }
 }
 
 function attemptAuth(mode: 'login' | 'register', retries = 12): void {
@@ -1003,14 +1126,7 @@ function attemptAuth(mode: 'login' | 'register', retries = 12): void {
       : localAccounts.login(username, password, localHash);
     if (!res.ok || !res.account) { authErr.textContent = res.error ?? 'Failed'; return; }
     if (mode === 'register') saveLocalAccounts();
-    localFaction = res.account.faction;
-    onAuthSuccess(res.account.username);
-    spawnInOwnTerritory(); // never drop into enemy land (offline)
-    if (mode === 'register') announceSide(localFaction);
-    if (mode === 'login') restoreOfflineInventory(); // bring back saved single-player stuff
-    restoreOfflineHearts(); // fresh accounts fall back to the 10-heart start
-    restoreOfflineTotems(); // attuned Waypoint Totems (fast travel)
-    restoreOfflineProgress(); // XP + upgrades + the faction pool
+    finishOfflineAuth(res.account, mode === 'register');
   } else if (retries > 0) {
     // Still resolving whether a server is reachable — try again shortly.
     authStatus.textContent = 'Connecting…';
@@ -1067,11 +1183,32 @@ function setAuthMode(mode: 'register' | 'login'): void {
     .addEventListener('click', () => setAuthMode(mode === 'register' ? 'login' : 'register'));
 }
 
-net.onAuthErr = (error) => { authStatus.textContent = ''; authErr.textContent = error; };
+net.onAuthErr = (error) => {
+  authStatus.textContent = '';
+  if (sessionPending) {
+    // A stale/rotated token — drop it and fall back to the normal login form.
+    sessionPending = false;
+    clearSession();
+    authErr.textContent = 'Session expired — please log in again.';
+    return;
+  }
+  authErr.textContent = error;
+};
 submitBtn.addEventListener('click', () => attemptAuth(authMode));
 authPass.addEventListener('keydown', (e) => { if (e.key === 'Enter') attemptAuth(authMode); });
 // Returning players land on a prefilled login; first-timers get register.
 setAuthMode(lastUser ? 'login' : 'register');
+// A saved session skips the form entirely (resume as soon as we know whether
+// the server is reachable; a stale token falls back to the login form).
+{
+  const sess = loadSession();
+  if (sess) attemptSessionAuth(sess);
+}
+// Log Out (title menu): forget the saved session + reload back to the form.
+document.getElementById('logout-btn')!.addEventListener('click', () => {
+  clearSession();
+  location.reload();
+});
 
 playBtn.addEventListener('click', () => {
   if (!authed) return;
@@ -1197,7 +1334,7 @@ const charUI = (() => {
     'align-items:center;justify-content:center;gap:14px;background:rgba(8,8,14,0.92);z-index:24;';
   const h = document.createElement('h2');
   h.className = 'mc-font';
-  h.textContent = '🧍 CHARACTER';
+  h.textContent = 'CHARACTER';
   h.style.cssText = 'font-size:30px;letter-spacing:4px;color:#c9a6ff;';
   panel.appendChild(h);
 
@@ -1291,7 +1428,7 @@ const charUI = (() => {
   btnRow.style.cssText = 'display:flex;gap:12px;';
   const randomBtn = document.createElement('button');
   randomBtn.className = 'mc-btn';
-  randomBtn.textContent = '🎲 Randomise';
+  randomBtn.textContent = 'Randomise';
   randomBtn.style.cssText = 'font-size:15px;padding:9px 18px;';
   randomBtn.addEventListener('click', () => {
     Object.assign(editing, randomCosmetics());
@@ -1300,13 +1437,13 @@ const charUI = (() => {
   });
   const saveBtn = document.createElement('button');
   saveBtn.className = 'mc-btn';
-  saveBtn.textContent = '💾 Save Look';
+  saveBtn.textContent = 'Save Look';
   saveBtn.style.cssText = 'font-size:15px;padding:9px 24px;background:linear-gradient(#8a5fd6,#6a41b0);' +
     'border-color:#d6bdff #35205e #35205e #d6bdff;color:#f3ecff;text-shadow:none;';
   saveBtn.addEventListener('click', () => {
     myCosmetics = { ...editing };
     saveCosmetics();
-    showNotice('🧍 New look saved — everyone sees it!');
+    showNotice('New look saved — everyone sees it!');
     close();
   });
   const backBtn = document.createElement('button');
@@ -1500,7 +1637,7 @@ function checkDeath(): void {
   screen = 'playing';
   pauseEl.style.display = 'none';
   deathEl.style.display = 'flex';
-  document.exitPointerLock();
+  input.unlock();
 }
 
 // --- Persistence: server-stored inventory + position (MP) and localStorage
@@ -1757,7 +1894,7 @@ net.onEliminated = (by, until) => {
   elimEl.appendChild(back);
   elimEl.style.display = 'flex';
   audio.heartLoss();
-  document.exitPointerLock();
+  input.unlock();
 };
 // Revival Beacon: right-click opens a picker of eliminated teammates (the
 // server supplies the list; the beacon is consumed only on a confirmed revive).
@@ -1804,7 +1941,7 @@ net.onReviveList = (targets) => {
   cancel.addEventListener('click', () => hideRevivePanel());
   revivePanel.appendChild(cancel);
   revivePanel.style.display = 'flex';
-  document.exitPointerLock();
+  input.unlock();
 };
 net.onRevived = (target, ok) => {
   // The server's notice explains either way; a confirmed revive consumes the
@@ -2073,7 +2210,7 @@ function showProgress(): void {
   progressOpen = true;
   progressEl.style.display = 'flex';
   refreshProgressPanel();
-  document.exitPointerLock();
+  input.unlock();
 }
 function hideProgress(): void {
   if (!progressOpen) return;
@@ -2602,7 +2739,7 @@ function openTpaPrompt(): void {
   tpaPromptVisible = true;
   tpaPromptEl.style.display = 'flex';
   tpaInput.value = '';
-  document.exitPointerLock();
+  input.unlock();
   window.setTimeout(() => tpaInput.focus(), 0);
 }
 function closeTpaPrompt(): void {
@@ -2955,7 +3092,7 @@ function toggleMap(): void {
   } else if (input.locked) {
     if (invUI.open) invUI.hide();
     worldMap.show();
-    document.exitPointerLock();
+    input.unlock();
   }
 }
 
@@ -2966,7 +3103,7 @@ function toggleInventory(): void {
     input.lock();
   } else if (input.locked) {
     invUI.show('inventory');
-    document.exitPointerLock();
+    input.unlock();
   }
 }
 
@@ -3514,6 +3651,7 @@ function frame(): void {
     panoramaView.update(dt);
     panoramaView.render(renderer);
     worldMap.hideBeacons();
+    touch?.update({ shown: false, playing: false, gun: false });
     input.endFrame();
     return;
   }
@@ -3933,6 +4071,18 @@ function frame(): void {
         ? `${BLOCKS[world.getBlock(t.x, t.y, t.z)]?.name ?? '?'} at ${t.x} ${t.y} ${t.z}`
         : 'none',
       time: clockString(),
+    });
+  }
+
+  // Touch overlay visibility: pads only while actively controlling; the
+  // utility row stays up so the inventory/map buttons can also close them.
+  if (touch) {
+    const hs = inventory.selectedStack;
+    touch.update({
+      shown: screen === 'playing' && !player.dead,
+      playing: input.locked && screen === 'playing' && !player.dead &&
+        !invUI.open && !worldMap.open,
+      gun: !!(hs && ITEMS[hs.id]?.gun),
     });
   }
 

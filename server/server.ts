@@ -203,6 +203,12 @@ function handleAuth(id: number, msg: ClientMsg & { t: 'register' | 'login' | 'se
     switchSeason: res.account.switchSeason, forfeitSeason: res.account.forfeitSeason,
     data: res.account.data,
   }));
+  // Issue (rotate) a session token so this browser can resume without the
+  // password next visit — persisted on the account, mirrored in localStorage.
+  const token = crypto.randomBytes(24).toString('hex');
+  accounts.setToken(res.account.username, token);
+  saveAccounts();
+  send(id, { t: 'session', token });
   if (revivedBy) {
     send(id, { t: 'notice', text: `✨ ${revivedBy} revived you — welcome back at ${COMEBACK_HEARTS} ❤!` });
   }
@@ -274,8 +280,8 @@ wss.on('connection', (ws: WebSocket) => {
       return;
     }
     if (!authed.has(id)) {
-      // Unauthenticated: the ONLY accepted messages are register/login.
-      if (msg.t === 'register' || msg.t === 'login') handleAuth(id, msg);
+      // Unauthenticated: the ONLY accepted messages are register/login/session.
+      if (msg.t === 'register' || msg.t === 'login' || msg.t === 'session') handleAuth(id, msg);
       return;
     }
     dispatch(game.handle(id, msg));

@@ -2273,11 +2273,27 @@ check('furnace smelts ore/sand/log but not removed foods',
   check('the stored hash is never the raw password',
     accs.get('Alice')!.hash !== 'hunter2');
 
+  // Session tokens (password-less resume, mirrored in localStorage).
+  accs.setToken('Alice', 'tok-alice-12345678');
+  check('a stored session token resumes the account',
+    accs.sessionLogin('Alice', 'tok-alice-12345678').ok);
+  check('a wrong / short / missing token is rejected',
+    !accs.sessionLogin('Alice', 'tok-wrong-12345678').ok &&
+    !accs.sessionLogin('Alice', 'short').ok &&
+    !accs.sessionLogin('Bob', 'tok-alice-12345678').ok &&
+    !accs.sessionLogin('Ghost', 'tok-alice-12345678').ok);
+  check('rotating the token invalidates the old one',
+    (accs.setToken('Alice', 'tok-alice-rotated9'),
+      !accs.sessionLogin('Alice', 'tok-alice-12345678').ok &&
+      accs.sessionLogin('Alice', 'tok-alice-rotated9').ok));
+
   // Serialize -> reload round-trips (the shell persists this to disk).
   const reloaded = new Accounts(JSON.parse(JSON.stringify(accs.toJSON())));
   check('accounts survive a JSON round-trip + still authenticate',
     reloaded.size === accs.size && reloaded.login('Alice', 'hunter2', hash).ok &&
     reloaded.get('Alice')!.faction === accs.get('Alice')!.faction);
+  check('session tokens survive the JSON round-trip',
+    reloaded.sessionLogin('Alice', 'tok-alice-rotated9').ok);
 }
 
 // --- World + per-account persistence ----------------------------------------
