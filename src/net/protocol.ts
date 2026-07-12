@@ -6,6 +6,7 @@ import type { ItemStack } from '../items';
 import type { MachineState, UpgradeAxis } from '../machines';
 import type { TurretState, TurretAxis } from '../turrets';
 import type { GadgetKind } from '../gadgets';
+import type { Cosmetics } from '../character';
 
 export const SERVER_PORT = 8080;
 export const SNAPSHOT_HZ = 15;     // server -> clients transform broadcasts
@@ -28,7 +29,6 @@ export const TOTEM_COOLDOWN = 60;    // seconds between teleports (server clock)
 export const TOTEM_WINDUP = 3;       // client-side cast time before the port
 export const COMBAT_TAG = 10;        // seconds after ANY damage that block a port
 export const MELEE_DAMAGE = 4;     // server-applied fist damage
-export const MELEE_RANGE = 4.5;
 export const EDIT_RANGE = 7;       // max distance a player may edit a block
 // TPA (teleport requests, DonutSMP-style): the target must HOLD the accept key
 // for TPA_HOLD seconds (client-side — moving or taking damage resets the hold);
@@ -59,6 +59,8 @@ export interface PlayerInfo extends PlayerSnapshot {
   seasonsWon: number; // permanent "Seasons Won" badge rank (Phase 5)
   /** Lifesteal max-health currency (Milestone A): max HP = hearts * 2. */
   hearts: number;
+  /** Avatar customisation (Character screen). Absent = seed-derived default. */
+  cosmetics?: Cosmetics;
 }
 
 /** A dropped item entity owned by the server. */
@@ -99,7 +101,6 @@ export type ClientMsg =
   // newest pending request after the client-side 5s hold completes.
   | { t: 'tpa'; target: string }
   | { t: 'tpaAccept' }
-  | { t: 'attack'; target: number }
   | { t: 'selfhurt'; amount: number }   // fall/drown damage, applied by server
   | { t: 'respawn' }
   | { t: 'drop'; items: { id: number; count: number }[]; x: number; y: number; z: number }
@@ -170,21 +171,15 @@ export type ClientMsg =
   // enforces attunement + block-exists + 60s cooldown + the combat tag).
   | { t: 'attune'; x: number; y: number; z: number }
   | { t: 'totemTeleport'; x: number; y: number; z: number }
+  // Character screen: push the local player's new look (server sanitizes,
+  // persists it on the account and broadcasts it to everyone).
+  | { t: 'cosmetics'; c: Cosmetics }
   // Vaults (Milestone D): announce entry (server replies with the vault's
   // authoritative state incl. whether YOU already looted it), report a hit on
   // the server-HP Vault Brute, and open the per-player VaultChest.
   | { t: 'vaultEnter'; cx: number; cz: number }
   | { t: 'vaultBossHit'; cx: number; cz: number; amount: number }
-  | { t: 'vaultChestOpen'; x: number; y: number; z: number }
-  // GOLDWARS: create a link-invite lobby / join one by code / leave (lobby OR
-  // a running match) / host-assign a member's team / host-start the match.
-  // In-match combat reuses `attack` (sword melee, server-validated) and block
-  // play reuses `edit` (the server watches the gold-block cells).
-  | { t: 'gwCreate' }
-  | { t: 'gwJoin'; code: string }
-  | { t: 'gwLeave' }
-  | { t: 'gwTeam'; id: number; team: number }
-  | { t: 'gwStart' };
+  | { t: 'vaultChestOpen'; x: number; y: number; z: number };
 
 // --- server -> client -------------------------------------------------------
 export type ServerMsg =
@@ -281,20 +276,8 @@ export type ServerMsg =
   | { t: 'vaultCleared'; cx: number; cz: number; by: string }
   // YOUR per-player loot roll was granted (items arrive via gotitem).
   | { t: 'vaultLooted'; cx: number; cz: number }
-  // GOLDWARS lobby snapshot (sent to every member on any change). `started`
-  // flips true when the host launches the match.
-  | { t: 'gwLobby'; code: string; host: number; started: boolean;
-      players: { id: number; username: string; team: number }[] }
-  // A Goldwars request was refused (bad code, match running, not host…).
-  | { t: 'gwErr'; error: string }
-  // The match began — YOUR slot + team (the teleport arrives separately).
-  | { t: 'gwBegin'; slot: number; team: number }
-  // A team's GOLD BLOCK was mined out (`by` = the raider) — they stop respawning.
-  | { t: 'gwGold'; team: number; by: string }
-  // YOU are out of the match (gold gone + died / left) — back to civilization.
-  | { t: 'gwOut' }
-  // The match ended; `winner` is a team id (-1 = aborted). Everyone returns.
-  | { t: 'gwOver'; winner: number };
+  // A player changed their avatar cosmetics — rebuild their model.
+  | { t: 'cosmetics'; id: number; c: Cosmetics };
 
 const ADJECTIVES = [
   'Brave', 'Swift', 'Iron', 'Shadow', 'Crimson', 'Frost', 'Rapid', 'Silent',

@@ -19,9 +19,6 @@ import {
 } from './machines';
 import { ItemEntities } from './itementity';
 import { Chests } from './chests';
-import {
-  GW_KIT, GW_MIN_PLAYERS, GW_TEAMS, gwSlotCenter, gwTeamName,
-} from './goldwars';
 import { Mob, Mobs } from './mobs';
 import { NetClient } from './net/client';
 import {
@@ -41,7 +38,12 @@ import {
   TURRET_FUEL_CAP,
 } from './turrets';
 import { TurretModels } from './turretmodels';
-import { RemotePlayers } from './remoteplayers';
+import { RemotePlayers, buildAvatarBody, disposeAvatarBody, AvatarBody } from './remoteplayers';
+import {
+  CAPES, CAPE_COLORS, COSMETIC_RANGES, Cosmetics, EYE_COLORS, FACE_ACCESSORIES,
+  HAIR_COLORS, HAIR_STYLES, HATS, HAT_COLORS, PANTS_COLORS, SHIRT_COLORS,
+  SKIN_TONES, Swatch, defaultCosmetics, randomCosmetics, sanitizeCosmetics,
+} from './character';
 import { WorldMap } from './worldmap';
 import { Accounts, Account } from './net/accounts';
 import {
@@ -974,18 +976,13 @@ function onAuthSuccess(username: string): void {
   discoveredVaults = null; // vault discoveries are per-account — reload lazily
   refreshVaultMap();
   refreshStructureMap();
-  held.setSkin(skinSeed(username)); // match the first-person hand to our avatar
+  loadCosmetics(username); // per-account avatar look (Character screen)
+  held.setSkin(skinSeed(username), myCosmetics); // first-person hand matches avatar
   authEl.style.display = 'none';
-  menuBtns.style.display = 'flex'; // Civilization / Goldwars / Controls appear once logged in
+  menuBtns.style.display = 'flex'; // Civilization / Character / Controls appear once logged in
   authErr.textContent = '';
   authStatus.textContent = '';
   refreshNetInfo();
-  // Arrived through a Goldwars invite link (?gw=CODE): hop into that lobby.
-  if (gwInvite && net.connected) {
-    net.sendGwJoin(gwInvite);
-    gwUI.status.textContent = '';
-    gwUI.panel.style.display = 'flex';
-  }
 }
 
 function attemptAuth(mode: 'login' | 'register', retries = 12): void {
@@ -1142,233 +1139,227 @@ const controlsPanel = (() => {
 })();
 
 controlsBtn.addEventListener('click', () => {
+  charUI.close();
   controlsPanel.style.display = controlsPanel.style.display === 'flex' ? 'none' : 'flex';
 });
 
-// --- GOLDWARS: link-invite bedwars on floating sky islands --------------------
-// Click Goldwars → the server opens a lobby and you get a SHARE LINK. Friends
-// open the link (they log in first), the host optionally shuffles teams, and
-// at 2+ players the host starts. Each team defends a GOLD BLOCK: while it
-// stands you respawn; once it's mined, deaths are final. Swords only.
-const goldwarsBtn = document.getElementById('goldwars-btn')!;
-let gwActive = false;   // in a RUNNING match right now
-let gwMyTeam = 0;
-let gwSavedInv: ReturnType<Inventory['serialize']> | null = null;
-let gwLobbyState: { code: string; host: number; started: boolean;
-  players: { id: number; username: string; team: number }[] } | null = null;
-const gwInvite = new URLSearchParams(location.search).get('gw');
+// --- CHARACTER: customise your avatar (skin, hair, hats, capes, face…) --------
+// Opens from the title menu. A live rotating 3D preview of the same avatar
+// model other players see, plus ‹ › cyclers for every cosmetic category.
+// Saved per-account: localStorage always, plus the server (which sanitizes,
+// persists to the account and broadcasts) when online.
+const characterBtn = document.getElementById('character-btn')!;
+let myCosmetics: Cosmetics = defaultCosmetics(0);
+let hasCustomLook = false; // only a saved custom look is pushed to the server
 
-function grantGwKit(): void {
-  for (const [id, n] of GW_KIT) inventory.add(id, n);
+function cosmeticsKey(user: string): string { return `voxelon.cosmetics.${user}`; }
+function loadCosmetics(user: string): void {
+  hasCustomLook = false;
+  myCosmetics = defaultCosmetics(skinSeed(user));
+  try {
+    const raw = localStorage.getItem(cosmeticsKey(user));
+    if (raw) {
+      myCosmetics = sanitizeCosmetics(JSON.parse(raw), skinSeed(user));
+      hasCustomLook = true;
+    }
+  } catch { /* ignore */ }
+}
+function saveCosmetics(): void {
+  if (!authedName) return;
+  hasCustomLook = true;
+  try {
+    localStorage.setItem(cosmeticsKey(authedName), JSON.stringify(myCosmetics));
+  } catch { /* ignore */ }
+  held.setSkin(skinSeed(authedName), myCosmetics);
+  if (net.connected) net.sendCosmetics(myCosmetics);
 }
 
-// The lobby panel (share link + roster + host controls).
-const gwUI = (() => {
+// Every editor row: which Cosmetics field it cycles, its label, the display
+// name per index and (for colour categories) the swatch to preview.
+const CHAR_OPTIONS: { key: keyof Cosmetics; label: string; names: string[];
+  swatches?: Swatch[] }[] = [
+  { key: 'skin', label: 'Skin Tone', names: SKIN_TONES.map((s) => s.name), swatches: SKIN_TONES },
+  { key: 'hairStyle', label: 'Hair Style', names: HAIR_STYLES },
+  { key: 'hair', label: 'Hair Colour', names: HAIR_COLORS.map((s) => s.name), swatches: HAIR_COLORS },
+  { key: 'eyes', label: 'Eyes', names: EYE_COLORS.map((s) => s.name), swatches: EYE_COLORS },
+  { key: 'shirt', label: 'Shirt', names: SHIRT_COLORS.map((s) => s.name), swatches: SHIRT_COLORS },
+  { key: 'pants', label: 'Trousers', names: PANTS_COLORS.map((s) => s.name), swatches: PANTS_COLORS },
+  { key: 'hat', label: 'Hat', names: HATS },
+  { key: 'hatColor', label: 'Hat Colour', names: HAT_COLORS.map((s) => s.name), swatches: HAT_COLORS },
+  { key: 'cape', label: 'Cape', names: CAPES },
+  { key: 'capeColor', label: 'Cape Colour', names: CAPE_COLORS.map((s) => s.name), swatches: CAPE_COLORS },
+  { key: 'face', label: 'Face', names: FACE_ACCESSORIES },
+];
+
+const charUI = (() => {
   const panel = document.createElement('div');
   panel.style.cssText = 'position:absolute;inset:0;display:none;flex-direction:column;' +
-    'align-items:center;justify-content:center;gap:12px;background:rgba(8,8,14,0.9);z-index:24;';
+    'align-items:center;justify-content:center;gap:14px;background:rgba(8,8,14,0.92);z-index:24;';
   const h = document.createElement('h2');
   h.className = 'mc-font';
-  h.textContent = '🥇 GOLDWARS';
-  h.style.cssText = 'font-size:34px;letter-spacing:4px;color:#ffd84a;';
+  h.textContent = '🧍 CHARACTER';
+  h.style.cssText = 'font-size:30px;letter-spacing:4px;color:#c9a6ff;';
   panel.appendChild(h);
-  const sub = document.createElement('div');
-  sub.className = 'mc-font';
-  sub.style.cssText = 'font-size:13px;color:#cfe0ff;text-align:center;max-width:520px;';
-  sub.innerHTML = 'Two teams · one <b style="color:#ffd84a">GOLD BLOCK</b> each · swords only.<br>' +
-    'While your gold stands you respawn — mine theirs, then wipe them out!';
-  panel.appendChild(sub);
-  const status = document.createElement('div');
-  status.className = 'mc-font';
-  status.style.cssText = 'font-size:13px;color:#ff8a7a;min-height:16px;';
-  panel.appendChild(status);
-  // Share-link row.
-  const linkRow = document.createElement('div');
-  linkRow.style.cssText = 'display:flex;gap:8px;align-items:stretch;width:420px;max-width:90%;';
-  const link = document.createElement('input');
-  link.className = 'mc-font';
-  link.readOnly = true;
-  link.style.cssText = 'flex:1;min-width:0;font-size:13px;padding:9px 10px;color:#ffe9a0;' +
-    'background:#0f1420;border:2px solid #4a5775;border-radius:4px;outline:none;text-shadow:none;';
-  link.addEventListener('focus', () => link.select());
-  const copyBtn = document.createElement('button');
-  copyBtn.className = 'mc-btn';
-  copyBtn.textContent = 'Copy';
-  copyBtn.style.cssText = 'font-size:14px;padding:8px 16px;';
-  copyBtn.addEventListener('click', () => {
-    link.select();
-    navigator.clipboard?.writeText(link.value).catch(() => document.execCommand('copy'));
-    copyBtn.textContent = 'Copied!';
-    setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1200);
-  });
-  linkRow.append(link, copyBtn);
-  panel.appendChild(linkRow);
-  const hint = document.createElement('div');
-  hint.className = 'mc-font';
-  hint.style.cssText = 'font-size:12px;color:#9fb4cc;';
-  hint.textContent = 'Share this link — friends who open it join your lobby.';
-  panel.appendChild(hint);
-  // Roster.
-  const roster = document.createElement('div');
-  roster.style.cssText = 'display:flex;flex-direction:column;gap:6px;min-width:340px;' +
-    'background:rgba(10,13,22,0.72);border:1px solid #2c3650;border-radius:10px;padding:12px 14px;';
-  panel.appendChild(roster);
-  // Buttons.
-  const btnRow = document.createElement('div');
-  btnRow.style.cssText = 'display:flex;gap:12px;';
-  const startBtn = document.createElement('button');
-  startBtn.className = 'mc-btn';
-  startBtn.style.cssText = 'font-size:16px;padding:10px 28px;background:linear-gradient(#e8bc2f,#c99a18);' +
-    'border-color:#ffe9a0 #6e5209 #6e5209 #ffe9a0;color:#3a2c05;text-shadow:none;';
-  startBtn.addEventListener('click', () => net.sendGwStart());
-  const leaveBtn = document.createElement('button');
-  leaveBtn.className = 'mc-btn';
-  leaveBtn.textContent = 'Leave';
-  leaveBtn.style.cssText = 'font-size:16px;padding:10px 22px;';
-  leaveBtn.addEventListener('click', () => {
-    net.sendGwLeave();
-    gwLobbyState = null;
-    panel.style.display = 'none';
-  });
-  btnRow.append(startBtn, leaveBtn);
-  panel.appendChild(btnRow);
-  app.appendChild(panel);
-  return { panel, status, link, roster, startBtn };
-})();
 
-/** Repaint the lobby panel from the latest snapshot. */
-function renderGwLobby(): void {
-  const L = gwLobbyState;
-  if (!L) return;
-  gwUI.link.value = `${location.origin}${location.pathname}?gw=${L.code}`;
-  const iAmHost = L.host === net.myId;
-  gwUI.roster.innerHTML = '';
-  for (const pl of L.players) {
+  const cols = document.createElement('div');
+  cols.style.cssText = 'display:flex;gap:34px;align-items:center;';
+  panel.appendChild(cols);
+
+  // Left: the live 3D preview (renderer created lazily on first open).
+  const previewWrap = document.createElement('div');
+  previewWrap.style.cssText = 'width:280px;height:400px;background:rgba(10,13,22,0.72);' +
+    'border:1px solid #3a2a5e;border-radius:10px;overflow:hidden;';
+  cols.appendChild(previewWrap);
+
+  // Right: one ‹ value › cycler row per cosmetic category.
+  const rows = document.createElement('div');
+  rows.style.cssText = 'display:flex;flex-direction:column;gap:7px;min-width:360px;';
+  cols.appendChild(rows);
+
+  const editing: Cosmetics = defaultCosmetics(0);
+  const valueEls = new Map<keyof Cosmetics, { text: HTMLSpanElement; dot: HTMLSpanElement }>();
+
+  let previewRenderer: THREE.WebGLRenderer | null = null;
+  let previewScene: THREE.Scene | null = null;
+  let previewCam: THREE.PerspectiveCamera | null = null;
+  let previewBody: AvatarBody | null = null;
+  let previewSpin = 0.6;
+  let previewRAF = 0;
+  let lastFrame = 0;
+
+  function rebuildPreview(): void {
+    if (!previewScene) return;
+    if (previewBody) {
+      previewScene.remove(previewBody.group);
+      disposeAvatarBody(previewBody);
+    }
+    previewBody = buildAvatarBody({ ...editing });
+    previewBody.group.rotation.y = previewSpin;
+    // Relaxed idle pose so the model doesn't look like a mannequin.
+    previewBody.parts[2].rotation.x = -0.08;
+    previewBody.parts[3].rotation.x = 0.08;
+    previewScene.add(previewBody.group);
+  }
+
+  function refreshRows(): void {
+    for (const opt of CHAR_OPTIONS) {
+      const el = valueEls.get(opt.key);
+      if (!el) continue;
+      const i = editing[opt.key];
+      el.text.textContent = opt.names[i] ?? '—';
+      if (opt.swatches) {
+        el.dot.style.display = '';
+        el.dot.style.background = `#${opt.swatches[i].hex.toString(16).padStart(6, '0')}`;
+      } else {
+        el.dot.style.display = 'none';
+      }
+    }
+  }
+
+  for (const opt of CHAR_OPTIONS) {
     const row = document.createElement('div');
     row.className = 'mc-font';
-    row.style.cssText = 'display:flex;align-items:center;gap:10px;font-size:14px;';
-    const chip = document.createElement(iAmHost ? 'button' : 'span');
-    const t = GW_TEAMS[pl.team];
-    chip.textContent = t?.name ?? '—';
-    chip.style.cssText = `min-width:86px;text-align:center;padding:3px 8px;font-size:12px;` +
-      `color:#fff;background:${t?.css ?? '#666'};border:2px solid rgba(0,0,0,0.4);` +
-      (iAmHost ? 'cursor:pointer;' : '');
-    if (iAmHost) {
-      chip.title = 'Click to switch this player\'s team';
-      chip.addEventListener('click', () => net.sendGwTeam(pl.id, pl.team === 0 ? 1 : 0));
-    }
-    const name = document.createElement('span');
-    name.textContent = pl.username + (pl.id === L.host ? '  👑' : '') +
-      (pl.id === net.myId ? '  (you)' : '');
-    row.append(chip, name);
-    gwUI.roster.appendChild(row);
+    row.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:14px;';
+    const label = document.createElement('span');
+    label.textContent = opt.label;
+    label.style.cssText = 'flex:0 0 110px;color:#cfe0ff;';
+    const mkArrow = (txt: string, d: number): HTMLButtonElement => {
+      const b = document.createElement('button');
+      b.className = 'mc-btn';
+      b.textContent = txt;
+      b.style.cssText = 'font-size:14px;padding:4px 12px;';
+      b.addEventListener('click', () => {
+        const n = COSMETIC_RANGES[opt.key];
+        editing[opt.key] = (editing[opt.key] + d + n) % n;
+        refreshRows();
+        rebuildPreview();
+      });
+      return b;
+    };
+    const dot = document.createElement('span');
+    dot.style.cssText = 'width:14px;height:14px;border:1px solid rgba(255,255,255,0.4);' +
+      'border-radius:3px;display:none;';
+    const value = document.createElement('span');
+    value.style.cssText = 'flex:1;text-align:center;color:#fff;';
+    row.append(label, mkArrow('‹', -1), dot, value, mkArrow('›', 1));
+    rows.appendChild(row);
+    valueEls.set(opt.key, { text: value, dot });
   }
-  gwUI.startBtn.style.display = iAmHost ? '' : 'none';
-  const enough = L.players.length >= GW_MIN_PLAYERS;
-  gwUI.startBtn.textContent = enough
-    ? '⚔ Start Match' : `Waiting for players (${L.players.length}/${GW_MIN_PLAYERS})…`;
-  if (!iAmHost) {
-    gwUI.status.style.color = '#9fb4cc';
-    gwUI.status.textContent = enough ? 'Waiting for the host to start…' : 'Waiting for more players…';
-  }
-}
 
-goldwarsBtn.addEventListener('click', () => {
+  // Bottom buttons: randomise / save / back.
+  const btnRow = document.createElement('div');
+  btnRow.style.cssText = 'display:flex;gap:12px;';
+  const randomBtn = document.createElement('button');
+  randomBtn.className = 'mc-btn';
+  randomBtn.textContent = '🎲 Randomise';
+  randomBtn.style.cssText = 'font-size:15px;padding:9px 18px;';
+  randomBtn.addEventListener('click', () => {
+    Object.assign(editing, randomCosmetics());
+    refreshRows();
+    rebuildPreview();
+  });
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'mc-btn';
+  saveBtn.textContent = '💾 Save Look';
+  saveBtn.style.cssText = 'font-size:15px;padding:9px 24px;background:linear-gradient(#8a5fd6,#6a41b0);' +
+    'border-color:#d6bdff #35205e #35205e #d6bdff;color:#f3ecff;text-shadow:none;';
+  saveBtn.addEventListener('click', () => {
+    myCosmetics = { ...editing };
+    saveCosmetics();
+    showNotice('🧍 New look saved — everyone sees it!');
+    close();
+  });
+  const backBtn = document.createElement('button');
+  backBtn.className = 'mc-btn';
+  backBtn.textContent = 'Back';
+  backBtn.style.cssText = 'font-size:15px;padding:9px 18px;';
+  backBtn.addEventListener('click', () => close());
+  btnRow.append(randomBtn, saveBtn, backBtn);
+  panel.appendChild(btnRow);
+  app.appendChild(panel);
+
+  function animatePreview(now: number): void {
+    previewRAF = requestAnimationFrame(animatePreview);
+    const dt = Math.min(0.05, (now - lastFrame) / 1000 || 0);
+    lastFrame = now;
+    if (!previewRenderer || !previewScene || !previewCam) return;
+    previewSpin += dt * 0.7; // slow turntable
+    if (previewBody) previewBody.group.rotation.y = previewSpin;
+    previewRenderer.render(previewScene, previewCam);
+  }
+
+  function open(): void {
+    Object.assign(editing, myCosmetics);
+    if (!previewRenderer) {
+      previewRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      previewRenderer.setSize(280, 400);
+      previewRenderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+      previewWrap.appendChild(previewRenderer.domElement);
+      previewScene = new THREE.Scene();
+      previewCam = new THREE.PerspectiveCamera(38, 280 / 400, 0.1, 20);
+      previewCam.position.set(0, 1.25, 3.4);
+      previewCam.lookAt(0, 1.0, 0);
+    }
+    refreshRows();
+    rebuildPreview();
+    panel.style.display = 'flex';
+    lastFrame = performance.now();
+    previewRAF = requestAnimationFrame(animatePreview);
+  }
+  function close(): void {
+    if (panel.style.display === 'none') return;
+    panel.style.display = 'none';
+    cancelAnimationFrame(previewRAF);
+  }
+  return { open, close };
+})();
+
+characterBtn.addEventListener('click', () => {
   if (!authed) return;
   audio.resume();
   controlsPanel.style.display = 'none';
-  gwUI.status.style.color = '#ff8a7a';
-  if (!net.connected) {
-    gwUI.status.textContent = 'Goldwars needs the online server — offline play has nobody to invite!';
-    gwUI.link.value = '';
-    gwUI.roster.innerHTML = '';
-    gwUI.startBtn.style.display = 'none';
-    gwUI.panel.style.display = 'flex';
-    return;
-  }
-  gwUI.status.textContent = '';
-  if (gwLobbyState) renderGwLobby();
-  else net.sendGwCreate();
-  gwUI.panel.style.display = 'flex';
+  charUI.open();
 });
-
-/** The match is ON: stash the civ loadout, take the kit, drop onto the island
- *  (the server teleport arrives alongside). */
-function enterGoldwars(slot: number, team: number): void {
-  gwUI.panel.style.display = 'none';
-  controlsPanel.style.display = 'none';
-  gwMyTeam = team;
-  if (!gwActive) gwSavedInv = inventory.serialize();
-  gwActive = true;
-  inventory.clearCarried();
-  grantGwKit();
-  mobs.spawningEnabled = false; // no zombies gate-crashing the arena
-  const c = gwSlotCenter(slot);
-  world.forceLoad(c.x, c.z, 4); // islands exist the instant we land
-  deathShown = false;
-  deathEl.style.display = 'none';
-  showRegionBanner(`⚔ GOLDWARS — FIGHT FOR ${gwTeamName(team).toUpperCase()}!`,
-    GW_TEAMS[team]?.css ?? '#ffd84a');
-  showNotice('🥇 Defend your GOLD BLOCK — mine theirs to stop their respawns!');
-  enterPlaying();
-  input.lock();
-}
-
-/** Back to civilization (the server already teleported us): restore the real
- *  inventory over the temporary kit. */
-function leaveGoldwarsLocal(): void {
-  if (!gwActive) return;
-  gwActive = false;
-  mobs.spawningEnabled = true;
-  inventory.clearCarried();
-  if (gwSavedInv) inventory.restore(gwSavedInv);
-  gwSavedInv = null;
-  deathShown = false;
-  deathEl.style.display = 'none';
-  pushStateSave();
-}
-
-net.onGwLobby = (code, host, started, players) => {
-  gwLobbyState = { code, host, started, players };
-  const me = players.find((pl) => pl.id === net.myId);
-  if (me) gwMyTeam = me.team;
-  if (started) { gwUI.panel.style.display = 'none'; return; }
-  gwUI.status.textContent = '';
-  renderGwLobby();
-  // Pop the lobby open on updates only while we're on the title/menus — never
-  // over live gameplay (e.g. someone joining while we walk around pre-start).
-  if (screen !== 'playing') gwUI.panel.style.display = 'flex';
-};
-net.onGwErr = (error) => {
-  gwUI.status.style.color = '#ff8a7a';
-  gwUI.status.textContent = error;
-  showNotice(`⚠ ${error}`);
-};
-net.onGwBegin = (slot, team) => enterGoldwars(slot, team);
-net.onGwGold = (team, by) => {
-  const mine = team === gwMyTeam;
-  showRegionBanner(mine
-    ? `💔 YOUR GOLD IS DESTROYED — NO MORE RESPAWNS! (${by})`
-    : `🥇 ${by} BROKE ${gwTeamName(team).toUpperCase()}'S GOLD!`,
-    mine ? '#ff7a5c' : '#ffd84a');
-  audio.vaultSting();
-};
-net.onGwOut = () => {
-  leaveGoldwarsLocal();
-  showRegionBanner('☠ YOU ARE OUT OF GOLDWARS!', '#ff7a5c');
-};
-net.onGwOver = (winner) => {
-  const won = winner >= 0 && winner === gwMyTeam && (gwActive || gwLobbyState !== null);
-  if (gwActive) leaveGoldwarsLocal();
-  gwLobbyState = null;
-  gwUI.panel.style.display = 'none';
-  if (winner < 0) showNotice('Goldwars match ended.');
-  else {
-    showRegionBanner(won ? '🏆 GOLDWARS VICTORY!' : `🏆 ${gwTeamName(winner).toUpperCase()} WINS GOLDWARS!`,
-      GW_TEAMS[winner]?.css ?? '#ffd84a');
-    audio.vaultClear();
-  }
-};
 
 // --- First-play tutorial: 3 tiny cards, shown ONCE on the first Play ----------
 let tutorialSeen = false;
@@ -1444,12 +1435,6 @@ const tutorial = (() => {
 
 document.getElementById('resume-btn')!.addEventListener('click', () => input.lock());
 document.getElementById('quit-btn')!.addEventListener('click', () => {
-  // Quitting mid-Goldwars forfeits: the server ports us home; restore the kit.
-  if (gwActive || gwLobbyState) {
-    net.sendGwLeave();
-    leaveGoldwarsLocal();
-    gwLobbyState = null;
-  }
   enterTitle();
 });
 
@@ -1522,7 +1507,6 @@ function checkDeath(): void {
 // (offline). The server is the system of record online; offline we mirror to
 // localStorage keyed by the local account so single-player also persists.
 function pushStateSave(): void {
-  if (gwActive) return; // never persist the temporary Goldwars kit as real gear
   if (net.connected) {
     const blob = inventory.serialize() as unknown as Record<string, unknown>;
     blob.progress = { xp: progress.xp, nodes: progress.nodes }; // XP rides along
@@ -1569,8 +1553,18 @@ net.onWelcome = (me) => {
   player.damageSink = (a) => net.sendSelfHurt(a); // server owns health in MP
   survival.enableRegen = false;                   // server runs regen
   applyLocalMode(me.mode);                         // restore admin-set gamemode
+  // Cosmetics: adopt the account-saved look from the server unless this
+  // browser has a newer local edit — then push ours so everyone sees it.
+  if (me.cosmetics && !hasCustomLook) {
+    myCosmetics = sanitizeCosmetics(me.cosmetics, me.skin);
+  } else if (hasCustomLook) {
+    net.sendCosmetics(myCosmetics);
+  }
+  held.setSkin(skinSeed(me.username), myCosmetics);
   refreshNetInfo();
 };
+// Someone (possibly us) changed their look: rebuild that avatar.
+net.onCosmetics = (id) => remotePlayers.invalidate(id);
 net.onEdit = (x, y, z, b) => {
   world.applyRemoteEdit(x, y, z, b);
   // If someone removed/replaced the chest block we have open, stop viewing it.
@@ -1607,9 +1601,6 @@ net.onRespawned = (x, y, z, h) => {
   lastHealth = h;
   deathShown = false;
   deathEl.style.display = 'none';
-  // A Goldwars respawn comes back to base with a FRESH kit (the old one
-  // spilled where we fell — classic bedwars).
-  if (gwActive) { inventory.clearCarried(); grantGwKit(); }
   pushStateSave();
   if (worldReady) input.lock();
 };
@@ -2884,11 +2875,6 @@ function fireVolley(stack: ItemStack, gun: GunInfo): boolean {
 }
 
 function tryFire(stack: ItemStack, gun: GunInfo): void {
-  if (gwActive) { // Goldwars is swords-only (the server rejects gun hits too)
-    fireCooldown = 0.6;
-    showNotice('⚔ Swords only in Goldwars!');
-    return;
-  }
   fireCooldown = gun.cooldown;
   if (!fireVolley(stack, gun)) { fireCooldown = 0; reloadGun(); return; } // empty -> reload
   const burst = Math.max(1, gun.burst ?? 1);
@@ -3743,25 +3729,17 @@ function frame(): void {
         pushStateSave();
         interaction.update(dt, input, camera, true, true); // suppress mine + use
       } else {
-        // Melee no longer hits players — PvP is guns-only now… EXCEPT inside
-        // GOLDWARS, where enemy players are fair sword targets. Left-click
-        // still fights MOBS, otherwise mines the block. Priority: player
-        // (Goldwars) > mob > mine.
-        const gwTarget = gwActive
-          ? remotePlayers.rayHit(player.eyePosition, lookDir, 3.5) : -1;
+        // Melee never hits players — PvP is guns-only. Left-click fights
+        // MOBS, otherwise mines the block. Priority: mob > mine.
         const mobInSights = mobs.rayHit(eye, lookDir, 3.5);
-        if (input.leftClicked && gwTarget >= 0) {
-          net.sendAttack(gwTarget); // server validates range/team + applies damage
-          held.swing();
-          audio.mob('mobHurt', player.pos.clone());
-        } else if (input.leftClicked && mobInSights) {
+        if (input.leftClicked && mobInSights) {
           const tool = heldStack ? ITEMS[heldStack.id]?.tool : undefined;
           // Prospector/Slayer nodes add flat melee damage (mobs only).
           mobs.attack(eye, lookDir, (tool?.damage ?? 1) + activeBuffs().meleeBonus, player);
           if (tool) inventory.damageSelected(2);
           held.swing();
         }
-        interaction.update(dt, input, camera, gwTarget >= 0 || mobInSights !== null);
+        interaction.update(dt, input, camera, mobInSights !== null);
       }
 
       // Footsteps.

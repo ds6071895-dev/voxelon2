@@ -10,6 +10,7 @@ import {
   ClientMsg, GameMode, ItemEntityInfo, PlayerInfo, SERVER_PORT, ServerMsg,
   TRANSFORM_HZ,
 } from './protocol';
+import type { Cosmetics } from '../character';
 
 export interface Remote {
   info: PlayerInfo;
@@ -102,6 +103,8 @@ export class NetClient {
   onGadgetFx?: (kind: string, x: number, y: number, z: number) => void;
   /** A player is disguised as `faction` until `until` (server worldTime). */
   onDisguised?: (id: number, faction: number, until: number) => void;
+  /** A player changed their avatar cosmetics (their info is already updated). */
+  onCosmetics?: (id: number) => void;
   /** A register/login was rejected (the login screen shows the error). */
   onAuthErr?: (error: string) => void;
   /** Lifesteal: the local player's authoritative hearts count changed. */
@@ -122,20 +125,6 @@ export class NetClient {
   onVaultCleared?: (cx: number, cz: number, by: string) => void;
   /** YOUR per-player vault loot was granted (items arrive via gotitem). */
   onVaultLooted?: (cx: number, cz: number) => void;
-  // --- GOLDWARS ---
-  /** Lobby snapshot (membership/teams/host/started changed). */
-  onGwLobby?: (code: string, host: number, started: boolean,
-    players: { id: number; username: string; team: number }[]) => void;
-  /** A Goldwars request was refused (bad code, not host, arenas busy…). */
-  onGwErr?: (error: string) => void;
-  /** The match began: your slot + team (the teleport arrives separately). */
-  onGwBegin?: (slot: number, team: number) => void;
-  /** A team's gold block fell (they stop respawning). */
-  onGwGold?: (team: number, by: string) => void;
-  /** YOU are out of the match — the server already ported you home. */
-  onGwOut?: () => void;
-  /** The match ended (winner team id, -1 = aborted). */
-  onGwOver?: (winner: number) => void;
 
   private ws: WebSocket | null = null;
   private xformAcc = 0;
@@ -315,6 +304,12 @@ export class NetClient {
       case 'disguised':
         this.onDisguised?.(msg.id, msg.faction, msg.until);
         break;
+      case 'cosmetics': {
+        const rc = this.remotes.get(msg.id);
+        if (rc) rc.info.cosmetics = msg.c;
+        this.onCosmetics?.(msg.id);
+        break;
+      }
       case 'authErr':
         this.onAuthErr?.(msg.error);
         break;
@@ -341,24 +336,6 @@ export class NetClient {
         break;
       case 'vaultLooted':
         this.onVaultLooted?.(msg.cx, msg.cz);
-        break;
-      case 'gwLobby':
-        this.onGwLobby?.(msg.code, msg.host, msg.started, msg.players);
-        break;
-      case 'gwErr':
-        this.onGwErr?.(msg.error);
-        break;
-      case 'gwBegin':
-        this.onGwBegin?.(msg.slot, msg.team);
-        break;
-      case 'gwGold':
-        this.onGwGold?.(msg.team, msg.by);
-        break;
-      case 'gwOut':
-        this.onGwOut?.();
-        break;
-      case 'gwOver':
-        this.onGwOver?.(msg.winner);
         break;
     }
   }
@@ -412,9 +389,6 @@ export class NetClient {
   sendTpaAccept(): void {
     if (this.connected) this.raw({ t: 'tpaAccept' });
   }
-  sendAttack(target: number): void {
-    if (this.connected) this.raw({ t: 'attack', target });
-  }
   sendSelfHurt(amount: number): void {
     if (this.connected) this.raw({ t: 'selfhurt', amount });
   }
@@ -424,22 +398,6 @@ export class NetClient {
   }
   sendRespawn(): void {
     if (this.connected) this.raw({ t: 'respawn' });
-  }
-  // GOLDWARS lobby control.
-  sendGwCreate(): void {
-    if (this.connected) this.raw({ t: 'gwCreate' });
-  }
-  sendGwJoin(code: string): void {
-    if (this.connected) this.raw({ t: 'gwJoin', code });
-  }
-  sendGwLeave(): void {
-    if (this.connected) this.raw({ t: 'gwLeave' });
-  }
-  sendGwTeam(id: number, team: number): void {
-    if (this.connected) this.raw({ t: 'gwTeam', id, team });
-  }
-  sendGwStart(): void {
-    if (this.connected) this.raw({ t: 'gwStart' });
   }
   sendDrop(items: { id: number; count: number }[], x: number, y: number, z: number): void {
     if (this.connected && items.length) this.raw({ t: 'drop', items, x, y, z });
@@ -452,6 +410,9 @@ export class NetClient {
   }
   sendChestSet(x: number, y: number, z: number, slots: (ItemStack | null)[]): void {
     if (this.connected) this.raw({ t: 'chestSet', x, y, z, slots });
+  }
+  sendCosmetics(c: Cosmetics): void {
+    if (this.connected) this.raw({ t: 'cosmetics', c });
   }
   sendArmor(points: number): void {
     if (this.connected) this.raw({ t: 'armor', points });

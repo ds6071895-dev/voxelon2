@@ -13,7 +13,6 @@
 
 import { Biome } from './biomes';
 import { Block } from './blocks';
-import { inGoldwarsXZ } from './goldwars';
 import { Item, ItemStack } from './items';
 import type { LootEntry } from './loot';
 import { inCore, CORE_HALF } from './net/protocol';
@@ -214,7 +213,6 @@ export function vaultStamp(
   for (let du = -54; du <= 54; du += 4) {
     for (let dv = -54; dv <= 54; dv += 4) {
       const px = ax + du, pz = az + dv;
-      if (inGoldwarsXZ(px, pz)) return null; // never straddle the arena void
       const h = ctx.height(px, pz);
       if (h < minSurf) minSurf = h;
     }

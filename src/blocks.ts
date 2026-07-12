@@ -114,8 +114,7 @@ export const enum Block {
   FallTrapOpen = 90,
   WallTrap = 91,
   WallTrapUp = 92,
-  // Solid gold: vault-treasury decor, a compact way to bank ingots — and the
-  // objective block each GOLDWARS team defends (its "bed").
+  // Solid gold: vault-treasury decor, a compact way to bank ingots.
   GoldBlock = 93,
 }
 
@@ -341,7 +340,7 @@ export const enum Tile {
   FallTrapOpen = 195,
   WallTrapTop = 196,
   WallTrapSide = 197,
-  // Solid gold block (vault treasuries + the Goldwars objective).
+  // Solid gold block (vault treasuries + ingot banking).
   GoldBlock = 198,
 }
 
@@ -656,8 +655,8 @@ export const BLOCKS: Record<number, BlockInfo> = {
     top: Tile.TurretTop, bottom: Tile.AutominerTop, side: Tile.TurretSide,
   }),
 
-  // Solid gold: treasury decor + the Goldwars objective. Softly glows; breaks
-  // fast enough for a raid (fists work — bedwars-style) but not instantly.
+  // Solid gold: treasury decor + ingot banking. Softly glows; breaks fast
+  // enough for a raid (fists work) but not instantly.
   [Block.GoldBlock]: def({ name: 'Gold Block', hardness: 2.0, emission: 5, top: Tile.GoldBlock }),
 
   // --- Terrain overhaul (M21): mesa + volcanic ashlands ---

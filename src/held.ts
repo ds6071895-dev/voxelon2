@@ -5,7 +5,8 @@
 import * as THREE from 'three';
 import { itemGeometry } from './itementity';
 import { ITEMS } from './items';
-import { skinColor } from './remoteplayers';
+import { skinColorFor } from './remoteplayers';
+import type { Cosmetics } from './character';
 import type { Atlas } from './textures';
 
 const BASE_X = 0.42, BASE_Y = -0.42, BASE_Z = -0.7;
@@ -75,10 +76,10 @@ export class HeldItemView {
     this.arm = arm;
   }
 
-  /** Tint the first-person hand to the local player's deterministic skin tone
-   *  (so your own hand matches the avatar everyone else sees). */
-  setSkin(seed: number): void {
-    this.baseSkin.copy(skinColor(seed));
+  /** Tint the first-person hand to the local player's skin tone — cosmetics-
+   *  aware (so your own hand matches the avatar everyone else sees). */
+  setSkin(seed: number, cosmetics?: Cosmetics): void {
+    this.baseSkin.copy(skinColorFor(seed, cosmetics));
   }
 
   setItem(id: number | null): void {

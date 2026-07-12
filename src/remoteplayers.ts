@@ -1,12 +1,16 @@
 // Renders other players as boxy, Minecraft-style humanoid avatars with
-// per-username procedural skins and floating name tags. Positions are
+// customisable cosmetics (character.ts) and floating name tags. Positions are
 // interpolated toward the latest networked transform. Also provides a ray
-// test against avatars for PvP targeting.
+// test against avatars for PvP targeting, and exports the avatar-body builder
+// so the Character screen can show a live preview of the same model.
 
 import * as THREE from 'three';
 import type { NetClient, Remote } from './net/client';
-import { mulberry32 } from './noise';
 import { factionColor, isFaction } from './teams';
+import {
+  CAPE_COLORS, Cosmetics, EYE_COLORS, HAIR_COLORS, HAT_COLORS, PANTS_COLORS,
+  SHIRT_COLORS, SKIN_TONES, defaultCosmetics, sanitizeCosmetics,
+} from './character';
 
 // Per-face shading (right/left/top/bottom/front/back) — mimics Minecraft's
 // directional lighting so the model reads as 3D even without real lights.
@@ -15,15 +19,12 @@ const FACE_SHADE = [0.75, 0.6, 1.0, 0.45, 0.85, 0.7];
 // max HP per-player: hearts * 2).
 const REMOTE_MAX_HEALTH = 20;
 
-/** The deterministic skin tone for a given skin seed — the FIRST three draws of
- *  the avatar's RNG. Shared so the local first-person hand matches the avatar
- *  other players see. Must stay in lockstep with build()'s opening draws. */
-export function skinColor(seed: number): THREE.Color {
-  const rng = mulberry32(seed);
-  const hue = 0.05 + rng() * 0.05;
-  const sat = 0.3 + rng() * 0.18;
-  const lit = 0.52 + rng() * 0.2;
-  return new THREE.Color().setHSL(hue, sat, lit);
+/** The skin tone a given player renders with — cosmetics-aware, falling back
+ *  to the seed-derived default. Shared so the local first-person hand matches
+ *  the avatar other players see. */
+export function skinColorFor(seed: number, cosmetics?: Cosmetics): THREE.Color {
+  const c = cosmetics ?? defaultCosmetics(seed);
+  return new THREE.Color(SKIN_TONES[c.skin]?.hex ?? SKIN_TONES[0].hex);
 }
 
 // ─── geometry helpers ──────────────────────────────────────────────────────
@@ -75,14 +76,26 @@ function limb(
   return g;
 }
 
+/** Add a plain shaded box to `parent` at (x, y, z). */
+function addBoxTo(
+  parent: THREE.Object3D, mat: THREE.Material,
+  w: number, h: number, d: number, color: THREE.Color,
+  x: number, y: number, z: number, shade?: number[]
+): THREE.Mesh {
+  const mesh = new THREE.Mesh(shadedBox(w, h, d, color, shade), mat);
+  mesh.position.set(x, y, z);
+  parent.add(mesh);
+  return mesh;
+}
+
 // ─── face builder ─────────────────────────────────────────────────────────
 
 /**
  * Paints a flat, friendly blocky face onto the front of the head: chunky
  * two-tone pixel eyes (white + a coloured pupil on the inner edge), soft flat
  * brows in the hair colour, a smile with upturned corners, and faint rosy
- * cheeks. Everything sits a hair proud of the face cube so it doesn't
- * z-fight — no protruding nose or ears, keeping the silhouette a clean cube.
+ * cheeks — plus the chosen face accessory (glasses/mask/…). Everything sits
+ * a hair proud of the face cube so it doesn't z-fight.
  */
 function buildFace(
   parent: THREE.Group,
@@ -90,23 +103,18 @@ function buildFace(
   skin: THREE.Color,
   hair: THREE.Color,
   eye: THREE.Color,
-  headY: number  // local Y of the centre of the head
+  headY: number,  // local Y of the centre of the head
+  accessory: number
 ): void {
   const white = new THREE.Color(0xf5f7f9);
   const mouth = new THREE.Color(skin).multiplyScalar(0.55);
   const blush = new THREE.Color(skin).lerp(new THREE.Color(0xe86a55), 0.3);
   // Flat front-face shading (features read straight-on, not directionally lit).
   const flat = [1, 1, 1, 1, 1, 1];
-
   const addBox = (
-    w: number, h: number, d: number,
-    color: THREE.Color,
+    w: number, h: number, d: number, color: THREE.Color,
     x: number, y: number, z: number
-  ) => {
-    const mesh = new THREE.Mesh(shadedBox(w, h, d, color, flat), mat);
-    mesh.position.set(x, y, z);
-    parent.add(mesh);
-  };
+  ): THREE.Mesh => addBoxTo(parent, mat, w, h, d, color, x, y, z, flat);
 
   const fz = -0.252; // just proud of the front face of the 0.5-deep head
 
@@ -124,6 +132,335 @@ function buildFace(
   addBox(0.14, 0.035, 0.02, mouth, 0, headY - 0.145, fz);
   addBox(0.035, 0.035, 0.02, mouth, -0.085, headY - 0.115, fz);
   addBox(0.035, 0.035, 0.02, mouth, 0.085, headY - 0.115, fz);
+
+  // Face accessory (FACE_ACCESSORIES order: None, Glasses, Sunglasses,
+  // Eyepatch, Mask, Moustache, Monocle).
+  const dark = new THREE.Color(0x22242a);
+  const az = fz - 0.02; // accessories float just proud of the face features
+  switch (accessory) {
+    case 1: { // Glasses: two thin frames + a bridge
+      for (const side of [-1, 1]) {
+        addBox(0.17, 0.15, 0.02, dark, side * 0.125, headY + 0.04, az);
+        addBox(0.12, 0.1, 0.025, new THREE.Color(0xbfd8e8),
+          side * 0.125, headY + 0.04, az - 0.001);
+      }
+      addBox(0.08, 0.03, 0.02, dark, 0, headY + 0.06, az);
+      break;
+    }
+    case 2: { // Sunglasses: one solid dark band
+      addBox(0.44, 0.13, 0.02, dark, 0, headY + 0.04, az);
+      break;
+    }
+    case 3: { // Eyepatch: a patch over the left eye + a strap
+      addBox(0.16, 0.14, 0.02, dark, -0.125, headY + 0.04, az);
+      addBox(0.5, 0.035, 0.02, dark, 0, headY + 0.1, az + 0.005);
+      break;
+    }
+    case 4: { // Mask: covers the mouth/nose area
+      addBox(0.4, 0.18, 0.02, new THREE.Color(0x5a6470), 0, headY - 0.12, az);
+      break;
+    }
+    case 5: { // Moustache: a proud bar above the smile
+      addBox(0.2, 0.05, 0.02, hair, 0, headY - 0.1, az);
+      break;
+    }
+    case 6: { // Monocle: one round-ish frame + a hanging chain hint
+      addBox(0.15, 0.15, 0.02, new THREE.Color(0xd8b32a), 0.125, headY + 0.04, az);
+      addBox(0.1, 0.1, 0.025, new THREE.Color(0xbfd8e8), 0.125, headY + 0.04, az - 0.001);
+      addBox(0.02, 0.14, 0.02, new THREE.Color(0xd8b32a), 0.2, headY - 0.08, az);
+      break;
+    }
+  }
+}
+
+// ─── hair + hat + cape builders ────────────────────────────────────────────
+
+const HEAD = 0.5;
+
+/** Hair styles (HAIR_STYLES order: Classic, Long, Mohawk, Buns, Ponytail,
+ *  Bowl, Bald). Built onto the head group so it pitches with look-dir. */
+function buildHair(
+  head: THREE.Group, mat: THREE.Material, hair: THREE.Color,
+  headY: number, style: number
+): void {
+  if (style === 6) return; // Bald
+
+  const cap = (): void => {
+    addBoxTo(head, mat, HEAD + 0.04, 0.13, HEAD + 0.04, hair,
+      0, headY + HEAD / 2 - 0.025, 0);
+  };
+  const fringe = (h = 0.07): void => {
+    addBoxTo(head, mat, HEAD + 0.02, h, 0.035, hair,
+      0, headY + 0.18, -HEAD / 2 - 0.005);
+  };
+  const sides = (h = 0.2): void => {
+    for (const side of [-1, 1]) {
+      addBoxTo(head, mat, 0.035, h, HEAD + 0.02, hair,
+        side * (HEAD / 2 + 0.005), headY + HEAD / 2 - h / 2 - 0.08, 0);
+    }
+  };
+  const back = (h = 0.3): void => {
+    addBoxTo(head, mat, HEAD + 0.02, h, 0.045, hair,
+      0, headY + HEAD / 2 - h / 2 - 0.05, HEAD / 2 - 0.01);
+  };
+
+  switch (style) {
+    case 0: // Classic: cap + fringe + side panels + fuller back
+      cap(); fringe(); sides(); back();
+      break;
+    case 1: // Long: flows past the shoulders on the sides + back
+      cap(); fringe(); sides(0.55);
+      addBoxTo(head, mat, HEAD + 0.02, 0.72, 0.05, hair,
+        0, headY - 0.1, HEAD / 2 + 0.005);
+      break;
+    case 2: { // Mohawk: a tall centre strip, shaved sides
+      for (let i = 0; i < 4; i++) {
+        addBoxTo(head, mat, 0.09, 0.14, 0.14, hair,
+          0, headY + HEAD / 2 + 0.055, -0.18 + i * 0.12);
+      }
+      break;
+    }
+    case 3: // Buns: neat cap + two buns on top
+      cap(); fringe();
+      for (const side of [-1, 1]) {
+        addBoxTo(head, mat, 0.14, 0.12, 0.14, hair,
+          side * 0.16, headY + HEAD / 2 + 0.05, 0.08);
+      }
+      break;
+    case 4: // Ponytail: cap + a tail hanging down the back
+      cap(); fringe(); sides();
+      addBoxTo(head, mat, 0.12, 0.16, 0.12, hair,
+        0, headY + 0.12, HEAD / 2 + 0.05);
+      addBoxTo(head, mat, 0.09, 0.42, 0.09, hair,
+        0, headY - 0.12, HEAD / 2 + 0.06);
+      break;
+    case 5: // Bowl: a deep all-around cut
+      addBoxTo(head, mat, HEAD + 0.05, 0.2, HEAD + 0.05, hair,
+        0, headY + HEAD / 2 - 0.06, 0);
+      fringe(0.1); sides(0.16); back(0.2);
+      break;
+  }
+}
+
+/** Hats (HATS order: None, Cap, Beanie, Top Hat, Crown, Halo, Horns, Cowboy,
+ *  Wizard, Headband). Built onto the head group, above the hair. */
+function buildHat(
+  head: THREE.Group, mat: THREE.Material, color: THREE.Color,
+  headY: number, hat: number
+): void {
+  const topY = headY + HEAD / 2;
+  const dark = new THREE.Color(color).multiplyScalar(0.7);
+  switch (hat) {
+    case 1: // Cap: crown + a front brim
+      addBoxTo(head, mat, HEAD + 0.08, 0.14, HEAD + 0.08, color, 0, topY + 0.05, 0);
+      addBoxTo(head, mat, 0.4, 0.035, 0.22, dark, 0, topY + 0.01, -HEAD / 2 - 0.13);
+      break;
+    case 2: // Beanie: a snug dome + fold band
+      addBoxTo(head, mat, HEAD + 0.07, 0.16, HEAD + 0.07, color, 0, topY + 0.06, 0);
+      addBoxTo(head, mat, HEAD + 0.1, 0.07, HEAD + 0.1, dark, 0, topY - 0.01, 0);
+      addBoxTo(head, mat, 0.12, 0.09, 0.12, dark, 0, topY + 0.18, 0);
+      break;
+    case 3: // Top Hat: wide brim + a tall stack
+      addBoxTo(head, mat, HEAD + 0.24, 0.04, HEAD + 0.24, color, 0, topY + 0.02, 0);
+      addBoxTo(head, mat, HEAD - 0.06, 0.36, HEAD - 0.06, color, 0, topY + 0.22, 0);
+      addBoxTo(head, mat, HEAD - 0.04, 0.06, HEAD - 0.04, dark, 0, topY + 0.08, 0);
+      break;
+    case 4: { // Crown: a golden band + spikes (hat colour = gem accents)
+      const gold = new THREE.Color(0xd8b32a);
+      addBoxTo(head, mat, HEAD + 0.06, 0.09, HEAD + 0.06, gold, 0, topY + 0.045, 0);
+      for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]] as const) {
+        addBoxTo(head, mat, 0.06, 0.12, 0.06, gold,
+          sx * 0.2, topY + 0.14, sz * 0.2);
+      }
+      addBoxTo(head, mat, 0.07, 0.07, 0.03, color, 0, topY + 0.045, -HEAD / 2 - 0.045);
+      break;
+    }
+    case 5: { // Halo: a glowing ring floating above (always light gold)
+      const glow = new THREE.Color(0xf5e28a);
+      const flat = [1, 1, 1, 1, 1, 1];
+      const r = 0.19, t = 0.05;
+      addBoxTo(head, mat, r * 2, 0.03, t, glow, 0, topY + 0.22, -r, flat);
+      addBoxTo(head, mat, r * 2, 0.03, t, glow, 0, topY + 0.22, r, flat);
+      addBoxTo(head, mat, t, 0.03, r * 2, glow, -r, topY + 0.22, 0, flat);
+      addBoxTo(head, mat, t, 0.03, r * 2, glow, r, topY + 0.22, 0, flat);
+      break;
+    }
+    case 6: // Horns: two stubby devil horns
+      for (const side of [-1, 1]) {
+        addBoxTo(head, mat, 0.08, 0.14, 0.08, color, side * 0.17, topY + 0.06, -0.05);
+        addBoxTo(head, mat, 0.055, 0.1, 0.055, color, side * 0.19, topY + 0.16, -0.05);
+      }
+      break;
+    case 7: // Cowboy: a wide brim + a rounded crown with a band
+      addBoxTo(head, mat, HEAD + 0.3, 0.045, HEAD + 0.22, color, 0, topY + 0.02, 0);
+      addBoxTo(head, mat, HEAD - 0.08, 0.17, HEAD - 0.1, color, 0, topY + 0.12, 0);
+      addBoxTo(head, mat, HEAD - 0.06, 0.05, HEAD - 0.08, dark, 0, topY + 0.06, 0);
+      break;
+    case 8: // Wizard: a brim + a tapering point
+      addBoxTo(head, mat, HEAD + 0.18, 0.045, HEAD + 0.18, color, 0, topY + 0.02, 0);
+      addBoxTo(head, mat, 0.34, 0.16, 0.34, color, 0, topY + 0.12, 0);
+      addBoxTo(head, mat, 0.22, 0.15, 0.22, color, 0, topY + 0.27, 0.02);
+      addBoxTo(head, mat, 0.11, 0.15, 0.11, color, 0, topY + 0.4, 0.045);
+      break;
+    case 9: // Headband: a thin band around the forehead
+      addBoxTo(head, mat, HEAD + 0.05, 0.055, HEAD + 0.05, color, 0, headY + 0.16, 0);
+      break;
+  }
+}
+
+/** Capes (CAPES order: None, Plain, Trimmed, Two-Tone, Royal, Tattered).
+ *  Returns the cape group (pivot at the shoulders) for sway animation. */
+function buildCape(
+  parent: THREE.Group, mat: THREE.Material, color: THREE.Color, style: number,
+  shoulderY: number
+): THREE.Group | null {
+  if (style === 0) return null;
+  const g = new THREE.Group();
+  const dark = new THREE.Color(color).multiplyScalar(0.72);
+  const trim = style === 4 ? new THREE.Color(0xd8b32a) : dark;
+  const W = 0.52, T = 0.05, L = 0.92;
+  // Main sheet hangs from the pivot (top edge at the shoulders).
+  const sheet = (w: number, l: number, c: THREE.Color, x: number, drop: number): void => {
+    addBoxTo(g, mat, w, l, T, c, x, -l / 2 - drop, 0);
+  };
+  switch (style) {
+    case 1: // Plain
+      sheet(W, L, color, 0, 0);
+      break;
+    case 2: // Trimmed: darker border strip at the bottom
+      sheet(W, L - 0.14, color, 0, 0);
+      sheet(W, 0.14, trim, 0, L - 0.14);
+      break;
+    case 3: // Two-Tone: split down the middle
+      sheet(W / 2, L, color, -W / 4, 0);
+      sheet(W / 2, L, dark, W / 4, 0);
+      break;
+    case 4: // Royal: gold trim down both edges + the hem
+      sheet(W - 0.16, L, color, 0, 0);
+      sheet(0.08, L, trim, -(W / 2 - 0.04), 0);
+      sheet(0.08, L, trim, W / 2 - 0.04, 0);
+      break;
+    case 5: // Tattered: ragged bottom (three uneven tails)
+      sheet(W, L - 0.26, color, 0, 0);
+      sheet(0.14, 0.26, color, -0.17, L - 0.26);
+      sheet(0.12, 0.16, color, 0.02, L - 0.26);
+      sheet(0.13, 0.22, color, 0.19, L - 0.26);
+      break;
+  }
+  g.position.set(0, shoulderY + 0.04, 0.17);
+  g.rotation.x = -0.12; // resting drape angle away from the back
+  parent.add(g);
+  return g;
+}
+
+// ─── full body builder (shared with the Character screen preview) ─────────
+
+export interface AvatarBody {
+  group: THREE.Group;
+  head: THREE.Group;
+  /** [leftLeg, rightLeg, leftArm, rightArm] — each pivots at its hip/shoulder. */
+  parts: THREE.Group[];
+  /** Cape group (pivot at the shoulders) for sway animation, if worn. */
+  cape: THREE.Group | null;
+  material: THREE.MeshBasicMaterial;
+}
+
+/** Build the full customised avatar body (feet at y=0, facing -z). The
+ *  optional shirt override paints faction colours over the cosmetic shirt so
+ *  teams stay readable in the war. */
+export function buildAvatarBody(
+  cosmetics: Cosmetics, shirtOverride?: THREE.Color
+): AvatarBody {
+  const c = cosmetics;
+  const skin  = new THREE.Color(SKIN_TONES[c.skin].hex);
+  const eye   = new THREE.Color(EYE_COLORS[c.eyes].hex);
+  const hair  = new THREE.Color(HAIR_COLORS[c.hair].hex);
+  const shirt = shirtOverride ?? new THREE.Color(SHIRT_COLORS[c.shirt].hex);
+  const pants = new THREE.Color(PANTS_COLORS[c.pants].hex);
+  const shoe  = new THREE.Color(PANTS_COLORS[c.pants].hex).multiplyScalar(0.45);
+
+  const mat = new THREE.MeshBasicMaterial({ vertexColors: true });
+  const group = new THREE.Group();
+  group.rotation.order = 'YXZ';
+
+  // Classic Minecraft proportions, in world blocks (feet at y=0):
+  //   head 0.5³ · torso 0.5w×0.75h×0.25d · arms/legs 0.25×0.75×0.25.
+  // Total height ≈ 2.0. Single-segment limbs (no forearms/shins) for the
+  // crisp blocky look; hands/feet are short skin/shoe caps on each limb.
+  const TORSO_W = 0.5, TORSO_H = 0.75, TORSO_D = 0.26;
+  const LIMB_W = 0.24, LIMB_H = 0.74, LIMB_D = 0.24;
+  const HIP_Y = 0.75;        // top of the legs / bottom of the torso
+  const SHOULDER_Y = 1.46;   // arm pivot
+  const NECK_Y = 1.5;        // bottom of the head / neck base
+
+  // ── Torso ──────────────────────────────────────────────────────────────
+  const torso = new THREE.Mesh(shadedBox(TORSO_W, TORSO_H, TORSO_D, shirt), mat);
+  torso.position.y = HIP_Y + TORSO_H / 2;
+  group.add(torso);
+  // Belt strip (pants-colored) at the waist for a two-tone read.
+  const belt = new THREE.Mesh(shadedBox(TORSO_W + 0.006, 0.16, TORSO_D + 0.006, pants), mat);
+  belt.position.y = HIP_Y + 0.08;
+  group.add(belt);
+
+  // Neck
+  const neck = new THREE.Mesh(shadedBox(0.2, 0.1, 0.2, skin), mat);
+  neck.position.y = NECK_Y + 0.04;
+  group.add(neck);
+
+  // ── Head ──────────────────────────────────────────────────────────────
+  // Separate group, pivot at the neck base so it can pitch with look-dir.
+  const headGroup = new THREE.Group();
+  const headY_local = HEAD / 2 + 0.05; // centre of the head above the pivot
+  const headMesh = new THREE.Mesh(shadedBox(HEAD, HEAD, HEAD, skin), mat);
+  headMesh.position.y = headY_local;
+  headGroup.add(headMesh);
+
+  buildHair(headGroup, mat, hair, headY_local, c.hairStyle);
+  buildHat(headGroup, mat, new THREE.Color(HAT_COLORS[c.hatColor].hex),
+    headY_local, c.hat);
+  buildFace(headGroup, mat, skin, hair, eye, headY_local, c.face);
+
+  headGroup.position.y = NECK_Y;
+  group.add(headGroup);
+
+  // ── Legs (single segment, pivot at the hip) ────────────────────────────
+  const ll = limb(mat, LIMB_W, LIMB_H, LIMB_D, pants, -0.12, HIP_Y, 0);
+  const rl = limb(mat, LIMB_W, LIMB_H, LIMB_D, pants,  0.12, HIP_Y, 0);
+  // Shoes — short caps at the foot of each leg (swing with the leg).
+  for (const leg of [ll, rl]) {
+    const foot = new THREE.Mesh(shadedBox(LIMB_W + 0.01, 0.12, LIMB_D + 0.06, shoe), mat);
+    foot.position.set(0, -LIMB_H + 0.06, -0.02);
+    leg.add(foot);
+  }
+
+  // ── Arms (single segment, pivot at the shoulder) ───────────────────────
+  const armX = TORSO_W / 2 + LIMB_W / 2;
+  const la = limb(mat, LIMB_W, LIMB_H, LIMB_D, shirt, -armX, SHOULDER_Y, 0);
+  const ra = limb(mat, LIMB_W, LIMB_H, LIMB_D, shirt,  armX, SHOULDER_Y, 0);
+  // Hands — skin-colored caps below the sleeve (swing with the arm).
+  for (const arm of [la, ra]) {
+    const hand = new THREE.Mesh(shadedBox(LIMB_W + 0.006, 0.14, LIMB_D + 0.006, skin), mat);
+    hand.position.y = -LIMB_H + 0.07;
+    arm.add(hand);
+  }
+
+  group.add(ll, rl, la, ra);
+
+  // ── Cape ───────────────────────────────────────────────────────────────
+  const cape = buildCape(group, mat,
+    new THREE.Color(CAPE_COLORS[c.capeColor].hex), c.cape, SHOULDER_Y);
+
+  return { group, head: headGroup, parts: [ll, rl, la, ra], cape, material: mat };
+}
+
+/** Dispose every geometry under an avatar body + its shared material. */
+export function disposeAvatarBody(body: AvatarBody): void {
+  body.group.traverse((o) => {
+    if ((o as THREE.Sprite).isSprite) return;
+    const m = o as THREE.Mesh;
+    if (m.geometry) m.geometry.dispose();
+  });
+  body.material.dispose();
 }
 
 // ─── name/health tag helpers ───────────────────────────────────────────────
@@ -199,13 +536,13 @@ function makeNameTag(
 // ─── avatar state ─────────────────────────────────────────────────────────
 
 interface Avatar {
+  body: AvatarBody;
   group: THREE.Group;
   head: THREE.Group;    // separate group so we can pitch it with look-dir
   /** [leftLeg, rightLeg, leftArm, rightArm] — each pivots at its hip/shoulder. */
   parts: THREE.Group[];
   /** Wooden boat hull, shown while the player is boating. */
   boat: THREE.Group;
-  material: THREE.MeshBasicMaterial;
   nameTex: THREE.CanvasTexture;
   sprite: THREE.Sprite;
   healthCanvas: HTMLCanvasElement;
@@ -234,111 +571,13 @@ export class RemotePlayers {
   setHovered(id: number): void { this.hovered = id; }
 
   private build(remote: Remote): Avatar {
-    const rng = mulberry32(remote.info.skin);
-
-    // Skin tone: warm peachy spectrum, gentle saturation & lightness.
-    // NOTE: these three draws must stay in lockstep with skinColor() above.
-    const skinHue = 0.05 + rng() * 0.05;
-    const skinSat = 0.3 + rng() * 0.18;
-    const skinLit = 0.52 + rng() * 0.2;
-    const skin = new THREE.Color().setHSL(skinHue, skinSat, skinLit);
-
-    // Eye colour: a small friendly palette picked deterministically per skin.
-    const EYES = [0x3a5fa8, 0x4a7a3e, 0x6b4a2e, 0x40707a];
-    const eye = new THREE.Color(EYES[Math.floor(rng() * EYES.length)]);
-
+    const cosmetics = sanitizeCosmetics(remote.info.cosmetics, remote.info.skin);
     const faction = remote.info.faction;
     const team    = new THREE.Color(factionColor(faction));
-    const shirt   = isFaction(faction) ? team : new THREE.Color().setHSL(rng(), 0.55, 0.45);
-    // Pants: distinctly darker, slightly desaturated
-    const pantsH  = rng();
-    const pants   = new THREE.Color().setHSL(pantsH, 0.3, 0.25);
-    // Shoes: near-black with a slight hue
-    const shoe    = new THREE.Color().setHSL(pantsH, 0.2, 0.12);
-    // Hair: dark variant of skin hue
-    const hair    = new THREE.Color().setHSL(skinHue, 0.4, 0.18 + rng() * 0.12);
-
-    const mat = new THREE.MeshBasicMaterial({ vertexColors: true });
-    const group = new THREE.Group();
-    group.rotation.order = 'YXZ';
-
-    // Classic Minecraft proportions, in world blocks (feet at y=0):
-    //   head 0.5³ · torso 0.5w×0.75h×0.25d · arms/legs 0.25×0.75×0.25.
-    // Total height ≈ 2.0. Single-segment limbs (no forearms/shins) for the
-    // crisp blocky look; hands/feet are short skin/shoe caps on each limb.
-    const TORSO_W = 0.5, TORSO_H = 0.75, TORSO_D = 0.26;
-    const LIMB_W = 0.24, LIMB_H = 0.74, LIMB_D = 0.24;
-    const HEAD = 0.5;
-    const HIP_Y = 0.75;        // top of the legs / bottom of the torso
-    const SHOULDER_Y = 1.46;   // arm pivot
-    const NECK_Y = 1.5;        // bottom of the head / neck base
-
-    // ── Torso ──────────────────────────────────────────────────────────────
-    const torso = new THREE.Mesh(shadedBox(TORSO_W, TORSO_H, TORSO_D, shirt), mat);
-    torso.position.y = HIP_Y + TORSO_H / 2;
-    group.add(torso);
-    // Belt strip (pants-colored) at the waist for a two-tone read.
-    const belt = new THREE.Mesh(shadedBox(TORSO_W + 0.006, 0.16, TORSO_D + 0.006, pants), mat);
-    belt.position.y = HIP_Y + 0.08;
-    group.add(belt);
-
-    // Neck
-    const neck = new THREE.Mesh(shadedBox(0.2, 0.1, 0.2, skin), mat);
-    neck.position.y = NECK_Y + 0.04;
-    group.add(neck);
-
-    // ── Head ──────────────────────────────────────────────────────────────
-    // Separate group, pivot at the neck base so it can pitch with look-dir.
-    const headGroup = new THREE.Group();
-    const headY_local = HEAD / 2 + 0.05; // centre of the head above the pivot
-    const headMesh = new THREE.Mesh(shadedBox(HEAD, HEAD, HEAD, skin), mat);
-    headMesh.position.y = headY_local;
-    headGroup.add(headMesh);
-
-    // Hair: overhanging cap + front fringe over the brow + side panels + a
-    // fuller back panel, so the head reads as a styled haircut, not a bald cube.
-    const hairCap = new THREE.Mesh(shadedBox(HEAD + 0.04, 0.13, HEAD + 0.04, hair), mat);
-    hairCap.position.y = headY_local + HEAD / 2 - 0.025;
-    headGroup.add(hairCap);
-    const fringe = new THREE.Mesh(shadedBox(HEAD + 0.02, 0.07, 0.035, hair), mat);
-    fringe.position.set(0, headY_local + 0.18, -HEAD / 2 - 0.005);
-    headGroup.add(fringe);
-    for (const side of [-1, 1]) {
-      const panel = new THREE.Mesh(shadedBox(0.035, 0.2, HEAD + 0.02, hair), mat);
-      panel.position.set(side * (HEAD / 2 + 0.005), headY_local + HEAD / 2 - 0.18, 0);
-      headGroup.add(panel);
-    }
-    const hairBack = new THREE.Mesh(shadedBox(HEAD + 0.02, 0.3, 0.045, hair), mat);
-    hairBack.position.set(0, headY_local + 0.08, HEAD / 2 - 0.01);
-    headGroup.add(hairBack);
-
-    buildFace(headGroup, mat, skin, hair, eye, headY_local);
-
-    headGroup.position.y = NECK_Y;
-    group.add(headGroup);
-
-    // ── Legs (single segment, pivot at the hip) ────────────────────────────
-    const ll = limb(mat, LIMB_W, LIMB_H, LIMB_D, pants, -0.12, HIP_Y, 0);
-    const rl = limb(mat, LIMB_W, LIMB_H, LIMB_D, pants,  0.12, HIP_Y, 0);
-    // Shoes — short caps at the foot of each leg (swing with the leg).
-    for (const leg of [ll, rl]) {
-      const foot = new THREE.Mesh(shadedBox(LIMB_W + 0.01, 0.12, LIMB_D + 0.06, shoe), mat);
-      foot.position.set(0, -LIMB_H + 0.06, -0.02);
-      leg.add(foot);
-    }
-
-    // ── Arms (single segment, pivot at the shoulder) ───────────────────────
-    const armX = TORSO_W / 2 + LIMB_W / 2;
-    const la = limb(mat, LIMB_W, LIMB_H, LIMB_D, shirt, -armX, SHOULDER_Y, 0);
-    const ra = limb(mat, LIMB_W, LIMB_H, LIMB_D, shirt,  armX, SHOULDER_Y, 0);
-    // Hands — skin-colored caps below the sleeve (swing with the arm).
-    for (const arm of [la, ra]) {
-      const hand = new THREE.Mesh(shadedBox(LIMB_W + 0.006, 0.14, LIMB_D + 0.006, skin), mat);
-      hand.position.y = -LIMB_H + 0.07;
-      arm.add(hand);
-    }
-
-    group.add(ll, rl, la, ra);
+    // Faction members wear their team colour so sides stay readable in a war.
+    const body = buildAvatarBody(cosmetics, isFaction(faction) ? team : undefined);
+    const { group } = body;
+    const mat = body.material;
 
     // ── Boat hull (shown while boating) ────────────────────────────────────
     // Per-avatar geometry (not shared) so dispose()'s traverse stays correct.
@@ -379,9 +618,9 @@ export class RemotePlayers {
 
     this.scene.add(group);
     return {
-      group, head: headGroup, boat,
-      parts: [ll, rl, la, ra],
-      material: mat, nameTex: tex, sprite,
+      body, group, head: body.head, boat,
+      parts: body.parts,
+      nameTex: tex, sprite,
       healthCanvas, healthTex, healthSprite, lastHealth: -1,
       dx: remote.tx, dy: remote.ty, dz: remote.tz, dyaw: remote.tyaw,
       walkPhase: 0, lastX: remote.tx, lastZ: remote.tz,
@@ -431,6 +670,7 @@ export class RemotePlayers {
         av.parts[1].rotation.x = 1.35;
         av.parts[2].rotation.x = 0.55;
         av.parts[3].rotation.x = 0.55;
+        if (av.body.cape) av.body.cape.rotation.x = -0.25;
       } else if (r.gliding) {
         // Body tilts forward like a hang-glider; arms swept forward like wings.
         av.group.rotation.x = 1.05;
@@ -439,6 +679,7 @@ export class RemotePlayers {
         av.parts[2].rotation.x = 1.2;  // arms out front holding the glider bar
         av.parts[3].rotation.x = 1.2;
         av.head.rotation.x = -0.9;     // head up to look forward despite the tilt
+        if (av.body.cape) av.body.cape.rotation.x = -1.1; // streams out behind
       } else {
         av.group.rotation.x = 0;
         av.head.rotation.x = 0;
@@ -455,6 +696,12 @@ export class RemotePlayers {
         av.parts[1].rotation.x = -amp;   // right leg back
         av.parts[2].rotation.x = -amp;   // left arm back
         av.parts[3].rotation.x =  amp;   // right arm forward
+        // Cape sways with the stride: billows out with speed + a gentle flutter.
+        if (av.body.cape) {
+          const billow = Math.min(1, hspeed / 5) * 0.55;
+          av.body.cape.rotation.x = -0.12 - billow -
+            Math.sin(av.walkPhase * 0.5) * 0.06;
+        }
       }
     }
   }
@@ -485,7 +732,7 @@ export class RemotePlayers {
     return best;
   }
 
-  /** Force one avatar to rebuild (e.g. spy disguise changed faction). */
+  /** Force one avatar to rebuild (e.g. spy disguise or cosmetics changed). */
   invalidate(id: number): void {
     const av = this.avatars.get(id);
     if (av) { this.dispose(av); this.avatars.delete(id); }
@@ -493,12 +740,7 @@ export class RemotePlayers {
 
   private dispose(av: Avatar): void {
     this.scene.remove(av.group);
-    av.group.traverse((o) => {
-      if ((o as THREE.Sprite).isSprite) return; // shared sprite geo — don't dispose
-      const m = o as THREE.Mesh;
-      if (m.geometry) m.geometry.dispose();
-    });
-    av.material.dispose();
+    disposeAvatarBody(av.body);
     av.nameTex.dispose();
     (av.sprite.material as THREE.SpriteMaterial).dispose();
     av.healthTex.dispose();

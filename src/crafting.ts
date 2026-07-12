@@ -88,7 +88,7 @@ export const RECIPES: Recipe[] = [
   ...tools(P, [Item.WoodenPickaxe, Item.WoodenAxe, Item.WoodenShovel]),
   ...tools(C, [Item.StonePickaxe, Item.StoneAxe, Item.StoneShovel]),
   ...tools(I, [Item.IronPickaxe, Item.IronAxe, Item.IronShovel]),
-  // The Sword: classic blade shape (mob melee everywhere; the Goldwars weapon).
+  // The Sword: classic blade shape (top melee damage against mobs).
   shaped([[I], [I], [S]], Item.Sword),
   // Gold banking: 4 ingots <-> 1 solid Gold Block (vault treasuries drop them).
   shaped([[Item.GoldIngot, Item.GoldIngot], [Item.GoldIngot, Item.GoldIngot]], Block.GoldBlock),

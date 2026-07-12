@@ -137,15 +137,6 @@ export class World {
     this.torchUniform.value.set(x, y, z, intensity);
   }
 
-  /** Synchronously generate chunk DATA around a world position (no meshes —
-   *  update() builds those). Used before teleporting into the Goldwars arena
-   *  so the islands exist the instant the player lands. */
-  forceLoad(wx: number, wz: number, rChunks = 2): void {
-    const ccx = Math.floor(wx) >> 4, ccz = Math.floor(wz) >> 4;
-    for (let dx = -rChunks; dx <= rChunks; dx++) {
-      for (let dz = -rChunks; dz <= rChunks; dz++) this.ensureData(ccx + dx, ccz + dz);
-    }
-  }
 
   private ensureData(cx: number, cz: number): Chunk {
     const key = Chunk.key(cx, cz);

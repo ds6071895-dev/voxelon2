@@ -31,12 +31,8 @@ import {
 } from '../war';
 import { XP_PLAYER_KILL, XP_REPORT_CAP, sanitizeFactionXp } from '../progress';
 import { GadgetCooldowns, gadgetOf, falloffDamage } from '../gadgets';
-import {
-  GW_MIN_PLAYERS, GW_SLOTS, GW_SWORD_DAMAGE, GW_VOID_Y, gwBalancedTeam,
-  gwBaseBlockAt, gwSlotAt, gwSlotBounds, gwSpawn, gwTeamName, goldPos,
-  newGwCode,
-} from '../goldwars';
 import { leverFlips } from '../traps';
+import { sanitizeCosmetics } from '../character';
 import { Terrain } from '../terrain';
 import { structureChestTier, worldStructures } from '../structures';
 import { chestLootSlots } from '../loot';
@@ -47,7 +43,7 @@ import {
   worldVaults,
 } from '../vaults';
 import {
-  ClientMsg, EDIT_RANGE, CHEST_SLOTS, MELEE_RANGE, PICKUP_RANGE,
+  ClientMsg, EDIT_RANGE, CHEST_SLOTS, PICKUP_RANGE,
   ARMOR_POINT_CAP, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE,
   mitigate, ItemEntityInfo, PlayerInfo, PlayerSnapshot, ServerMsg,
   WORLD_SEED, WORLD_HALF, WORLD_BORDER, CORE_HALF, makeUsername, skinSeed, GameMode,
@@ -110,34 +106,13 @@ interface ServerPlayer extends PlayerInfo {
   /** Newest pending TPA request AT this player (someone wants to port to
    *  them); expires TPA_EXPIRE seconds after `at` (worldTime). */
   tpaFrom?: { id: number; username: string; at: number };
-  // --- GOLDWARS ---
-  /** Lobby code while in a Goldwars lobby/match (undefined = civilization). */
-  gw?: string;
-  /** Team id within the lobby (0 Crimson / 1 Azure). */
-  gwTeam: number;
-  /** Knocked out of the running match (gold gone + died). */
-  gwOut: boolean;
-  /** Pre-match civilization position, restored when the match ends. */
-  civPos?: { x: number; y: number; z: number };
-}
-
-/** One Goldwars lobby: invite code, membership and (once started) match state. */
-interface GwLobby {
-  code: string;
-  host: number;
-  started: boolean;
-  /** Arena slot occupied while started (-1 = none). */
-  slot: number;
-  members: number[];
-  /** Each team's gold block still standing? */
-  goldAlive: [boolean, boolean];
 }
 
 const GAME_MODES: GameMode[] = ['survival', 'creative', 'spectator'];
 
 /** Client messages a spectator may NOT send (world edits + combat + economy). */
 const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
-  'edit', 'lever', 'attack', 'rangedAttack', 'selfhurt', 'drop', 'pickup', 'chestSet',
+  'edit', 'lever', 'rangedAttack', 'selfhurt', 'drop', 'pickup', 'chestSet',
   'machineConfig', 'machineUpgrade', 'machineCollect', 'machineHit', 'machineClaim',
   'machineMove', 'setSpawn',
   'turretUpgrade', 'turretClaim', 'turretHit', 'turretLoad',
@@ -196,10 +171,6 @@ export class GameServer {
    *  member of `faction`; returns success. `by` is credited in the target's
    *  next-login notice. */
   onRevive?: (target: string, faction: number, by: string) => boolean;
-  // GOLDWARS: live lobbies by invite code + which arena slots are in use.
-  // Ephemeral by design (a restart clears matches; the arena resets on start).
-  private readonly gwLobbies = new Map<string, GwLobby>();
-  private readonly gwSlotsBusy = new Set<number>();
   // Vaults (Milestone D): per-vault boss HP + per-player loot ledger, keyed
   // by the anchor chunk "cx,cz". Persisted in the world save.
   private readonly vaults = new Map<string, VaultServerState>();
@@ -307,7 +278,8 @@ export class GameServer {
       switchSeason: Number.isFinite(account?.switchSeason) ? Math.floor(account!.switchSeason!) : 0,
       forfeitSeason: Number.isFinite(account?.forfeitSeason) ? Math.floor(account!.forfeitSeason!) : 0,
       gadgetCd: new GadgetCooldowns(),
-      gwTeam: 0, gwOut: false,
+      cosmetics: saved?.cosmetics !== undefined
+        ? sanitizeCosmetics(saved.cosmetics, skinSeed(username)) : undefined,
     };
     // Restore a saved personal respawn point if the account carries one.
     if (fin(saved?.spawnX as number, saved?.spawnY as number, saved?.spawnZ as number)) {
@@ -342,9 +314,6 @@ export class GameServer {
     const p = this.players.get(id);
     if (!p) return [];
     const out: Outbound[] = [];
-    // Goldwars cleanup first: leave the lobby / forfeit the match so the
-    // remaining players get a proper win instead of a ghost opponent.
-    if (p.gw) out.push(...this.gwLeave(p));
     this.players.delete(id);
     out.push({ to: 'others', from: id, msg: { t: 'leave', id } });
     return out;
@@ -371,13 +340,6 @@ export class GameServer {
           p.yaw = msg.yaw; p.pitch = msg.pitch;
           p.gliding = msg.gliding === true;
           p.boating = msg.boating === true;
-          // A live Goldwars match pens its players into their arena slot.
-          const gwL = p.gw ? this.gwLobbies.get(p.gw) : undefined;
-          if (gwL?.started) {
-            const b = gwSlotBounds(gwL.slot);
-            p.x = Math.max(b.minX, Math.min(b.maxX, p.x));
-            p.z = Math.max(b.minZ, Math.min(b.maxZ, p.z));
-          }
         }
         return [];
       }
@@ -401,7 +363,7 @@ export class GameServer {
         return out;
       }
       case 'tpa': {
-        if (p.dead || p.gw || typeof msg.target !== 'string') return [];
+        if (p.dead || typeof msg.target !== 'string') return [];
         const name = msg.target.slice(0, 32).trim();
         const targetId = this.playerIdByName(name);
         const target = targetId !== undefined ? this.players.get(targetId) : undefined;
@@ -421,7 +383,7 @@ export class GameServer {
       case 'tpaAccept': {
         const req = p.tpaFrom;
         p.tpaFrom = undefined; // one shot, granted or not
-        if (p.dead || p.gw) return []; // no TPA into (or out of) a Goldwars arena
+        if (p.dead) return [];
         if (!req || this.worldTime - req.at > TPA_EXPIRE) {
           return [{ to: id, msg: { t: 'notice', text: 'That TPA request has expired.' } }];
         }
@@ -437,8 +399,6 @@ export class GameServer {
           { to: id, msg: { t: 'notice', text: `🌀 ${requester.username} teleported to you.` } },
         ];
       }
-      case 'attack':
-        return this.handleAttack(p, msg.target);
       case 'selfhurt':
         return this.applyDamage(p, Math.max(0, Math.min(40, msg.amount)), id);
       case 'respawn':
@@ -458,12 +418,16 @@ export class GameServer {
         this.factionXp[p.faction] += amt;
         return [{ to: 'all', msg: { t: 'fxp', xp: this.factionXp.slice() } }];
       }
+      case 'cosmetics': {
+        // Sanitize + adopt the new look, persist it with the account and tell
+        // every client to rebuild this player's avatar.
+        p.cosmetics = sanitizeCosmetics(msg.c, p.skin);
+        return [{ to: 'all', msg: { t: 'cosmetics', id: p.id, c: p.cosmetics } }];
+      }
       case 'saveState':
         // Stash the client-owned blob (inventory/hotbar). Position is added from
         // the authoritative record at capture time. The shell persists to disk.
-        // Ignored inside Goldwars — the temporary kit must never overwrite the
-        // real civilization loadout.
-        if (!p.gw && msg.data && typeof msg.data === 'object') p.savedClientData = msg.data;
+        if (msg.data && typeof msg.data === 'object') p.savedClientData = msg.data;
         return [];
       case 'drop':
         return this.handleDrop(p, msg.items, msg.x, msg.y, msg.z);
@@ -695,7 +659,7 @@ export class GameServer {
         return out;
       }
       case 'totemTeleport': {
-        if (p.dead || p.gw || !fin(msg.x, msg.y, msg.z)) return []; // no porting out of Goldwars
+        if (p.dead || !fin(msg.x, msg.y, msg.z)) return [];
         const x = Math.floor(msg.x), y = Math.floor(msg.y), z = Math.floor(msg.z);
         if (!p.totems.some((t) => t.x === x && t.y === y && t.z === z)) return []; // not attuned
         // The totem must still be standing — a raided/broken totem is pruned.
@@ -734,257 +698,9 @@ export class GameServer {
         return this.handleVaultBossHit(p, msg.cx, msg.cz, msg.amount);
       case 'vaultChestOpen':
         return this.handleVaultChestOpen(p, msg.x, msg.y, msg.z);
-      // --- GOLDWARS ---
-      case 'gwCreate':
-        return this.gwCreate(p);
-      case 'gwJoin':
-        return this.gwJoin(p, msg.code);
-      case 'gwLeave':
-        return this.gwLeave(p);
-      case 'gwTeam':
-        return this.gwSetTeam(p, msg.id, msg.team);
-      case 'gwStart':
-        return this.gwStart(p);
       default:
         return [];
     }
-  }
-
-  // --- GOLDWARS ----------------------------------------------------------------
-  // A link-invite bedwars: lobbies keyed by a 5-letter code; on start each
-  // lobby occupies one arena slot in the fixed sky-island region. Members are
-  // teleported in (their civ position stashed), fight with server-validated
-  // SWORD melee only, and respawn while their team's GOLD BLOCK stands.
-
-  /** The lobby snapshot, addressed to every member. */
-  private gwLobbyMsgs(L: GwLobby): Outbound[] {
-    const players = L.members
-      .map((id) => this.players.get(id))
-      .filter((m): m is ServerPlayer => !!m)
-      .map((m) => ({ id: m.id, username: m.username, team: m.gwTeam }));
-    const msg: ServerMsg = { t: 'gwLobby', code: L.code, host: L.host, started: L.started, players };
-    return L.members.map((id) => ({ to: id, msg }));
-  }
-
-  private gwTeamCounts(L: GwLobby): [number, number] {
-    const counts: [number, number] = [0, 0];
-    for (const id of L.members) {
-      const m = this.players.get(id);
-      if (m && (m.gwTeam === 0 || m.gwTeam === 1)) counts[m.gwTeam]++;
-    }
-    return counts;
-  }
-
-  private gwCreate(p: ServerPlayer): Outbound[] {
-    if (p.dead) return [];
-    if (p.gw) { // already in one — just resend the snapshot
-      const L = this.gwLobbies.get(p.gw);
-      return L ? this.gwLobbyMsgs(L) : [];
-    }
-    if (p.mode !== 'survival') {
-      return [{ to: p.id, msg: { t: 'gwErr', error: 'Switch to survival mode first.' } }];
-    }
-    let code = newGwCode(this.rng);
-    for (let i = 0; i < 50 && this.gwLobbies.has(code); i++) code = newGwCode(this.rng);
-    const L: GwLobby = {
-      code, host: p.id, started: false, slot: -1,
-      members: [p.id], goldAlive: [true, true],
-    };
-    this.gwLobbies.set(code, L);
-    p.gw = code; p.gwTeam = 0; p.gwOut = false;
-    return this.gwLobbyMsgs(L);
-  }
-
-  private gwJoin(p: ServerPlayer, code: unknown): Outbound[] {
-    if (p.dead) return [];
-    const c = String(code ?? '').trim().toUpperCase().slice(0, 8);
-    const L = this.gwLobbies.get(c);
-    if (p.gw && p.gw !== c) return [{ to: p.id, msg: { t: 'gwErr', error: 'You are already in a lobby.' } }];
-    if (!L) return [{ to: p.id, msg: { t: 'gwErr', error: `No Goldwars lobby "${c}" — ask for a fresh link!` } }];
-    if (L.members.includes(p.id)) return this.gwLobbyMsgs(L);
-    if (L.started) return [{ to: p.id, msg: { t: 'gwErr', error: 'That match already started — ask for a rematch link!' } }];
-    if (L.members.length >= 8) return [{ to: p.id, msg: { t: 'gwErr', error: 'That lobby is full (8 players).' } }];
-    if (p.mode !== 'survival') {
-      return [{ to: p.id, msg: { t: 'gwErr', error: 'Switch to survival mode first.' } }];
-    }
-    L.members.push(p.id);
-    p.gw = c;
-    p.gwTeam = gwBalancedTeam(this.gwTeamCounts(L)); // auto-balance; host can reassign
-    p.gwOut = false;
-    return this.gwLobbyMsgs(L);
-  }
-
-  /** Host-only pre-match team assignment ("optionally assign people"). */
-  private gwSetTeam(p: ServerPlayer, id: number, team: number): Outbound[] {
-    const L = p.gw ? this.gwLobbies.get(p.gw) : undefined;
-    if (!L || L.host !== p.id || L.started) return [];
-    if (team !== 0 && team !== 1) return [];
-    const target = this.players.get(id);
-    if (!target || !L.members.includes(id)) return [];
-    target.gwTeam = team;
-    return this.gwLobbyMsgs(L);
-  }
-
-  private gwStart(p: ServerPlayer): Outbound[] {
-    const L = p.gw ? this.gwLobbies.get(p.gw) : undefined;
-    if (!L || L.started) return [];
-    if (L.host !== p.id) return [{ to: p.id, msg: { t: 'gwErr', error: 'Only the host can start.' } }];
-    if (L.members.length < GW_MIN_PLAYERS) {
-      return [{ to: p.id, msg: { t: 'gwErr', error: `Need at least ${GW_MIN_PLAYERS} players — share the link!` } }];
-    }
-    const counts = this.gwTeamCounts(L);
-    if (counts[0] === 0 || counts[1] === 0) {
-      return [{ to: p.id, msg: { t: 'gwErr', error: 'Both teams need at least one player.' } }];
-    }
-    let slot = -1;
-    for (let s = 0; s < GW_SLOTS; s++) if (!this.gwSlotsBusy.has(s)) { slot = s; break; }
-    if (slot < 0) return [{ to: p.id, msg: { t: 'gwErr', error: 'All arenas are busy — try again in a bit.' } }];
-
-    const out: Outbound[] = [];
-    // Reset the arena: any edit inside this slot reverts to the BASE map (a
-    // previous match's craters/bridges/broken gold all restore).
-    for (const [key] of [...this.edits]) {
-      const [ex, ey, ez] = key.split(',').map(Number);
-      if (gwSlotAt(ex, ez) !== slot) continue;
-      const base = gwBaseBlockAt(ex, ey, ez);
-      this.edits.set(key, base);
-      out.push({ to: 'all', msg: { t: 'edit', x: ex, y: ey, z: ez, block: base } });
-    }
-    // Sweep leftover dropped items off the arena floor.
-    const b = gwSlotBounds(slot);
-    for (const [eid, info] of [...this.items]) {
-      if (info.x >= b.minX && info.x <= b.maxX && info.z >= b.minZ && info.z <= b.maxZ) {
-        this.items.delete(eid);
-        this.itemPhys.delete(eid);
-        out.push({ to: 'all', msg: { t: 'itemremove', eid } });
-      }
-    }
-
-    this.gwSlotsBusy.add(slot);
-    L.slot = slot;
-    L.started = true;
-    L.goldAlive = [true, true];
-    for (const id of L.members) {
-      const m = this.players.get(id);
-      if (!m) continue;
-      m.civPos = { x: m.x, y: m.y, z: m.z }; // restored when the match ends
-      m.gwOut = false;
-      const sp = gwSpawn(slot, m.gwTeam, this.rng);
-      m.x = sp.x; m.y = sp.y; m.z = sp.z;
-      m.health = maxHealthFor(m.hearts); m.dead = false;
-      m.regenCooldown = 0; m.regenTimer = 0;
-      out.push({ to: id, msg: { t: 'gwBegin', slot, team: m.gwTeam } });
-      out.push({ to: id, msg: { t: 'teleport', x: sp.x, y: sp.y, z: sp.z } });
-      // Everyone else renders this player in their TEAM color for the match
-      // (team ids intentionally match faction ids — the disguise path tints).
-      out.push({ to: 'others', from: id,
-        msg: { t: 'disguised', id, faction: m.gwTeam, until: this.worldTime + 86400 } });
-    }
-    out.push(...this.gwLobbyMsgs(L));
-    return out;
-  }
-
-  /** Return one player to civilization (position + avatar color restored). */
-  private gwExitPlayer(p: ServerPlayer): Outbound[] {
-    const s = p.civPos ?? this.spawn();
-    p.civPos = undefined;
-    p.gw = undefined;
-    p.gwOut = false;
-    p.x = s.x; p.y = s.y; p.z = s.z;
-    if (p.dead) { p.dead = false; p.health = maxHealthFor(p.hearts); }
-    return [
-      { to: p.id, msg: { t: 'teleport', x: s.x, y: s.y, z: s.z } },
-      { to: 'others', from: p.id,
-        msg: { t: 'disguised', id: p.id, faction: p.faction, until: this.worldTime + 86400 } },
-    ];
-  }
-
-  /** Leave the lobby (pre-match) or forfeit out of the match. Also the
-   *  disconnect cleanup path (removePlayer calls it before dropping the id). */
-  private gwLeave(p: ServerPlayer): Outbound[] {
-    const L = p.gw ? this.gwLobbies.get(p.gw) : undefined;
-    if (!L) { p.gw = undefined; return []; }
-    const out: Outbound[] = [];
-    L.members = L.members.filter((id) => id !== p.id);
-    if (L.started) {
-      out.push(...this.gwExitPlayer(p));
-    } else {
-      p.gw = undefined;
-    }
-    if (!L.members.length) {
-      // Last one out turns off the lights.
-      if (L.started) this.gwSlotsBusy.delete(L.slot);
-      this.gwLobbies.delete(L.code);
-      return out;
-    }
-    if (L.host === p.id) L.host = L.members[0]; // host hand-off
-    out.push(...this.gwLobbyMsgs(L));
-    out.push(...this.gwCheckWin(L));
-    return out;
-  }
-
-  /** A Goldwars death chose Respawn: back to base while the team's gold
-   *  stands; once it's gone the knockout is final — back to civilization. */
-  private gwRespawn(p: ServerPlayer): Outbound[] {
-    const L = p.gw ? this.gwLobbies.get(p.gw) : undefined;
-    if (!L || !L.started) return this.gwExitPlayer(p); // stale state — bail out
-    if (L.goldAlive[p.gwTeam]) {
-      const sp = gwSpawn(L.slot, p.gwTeam, this.rng);
-      p.x = sp.x; p.y = sp.y; p.z = sp.z;
-      p.health = maxHealthFor(p.hearts); p.dead = false;
-      p.regenCooldown = 0; p.regenTimer = 0;
-      return [{ to: p.id, msg: { t: 'respawned', x: sp.x, y: sp.y, z: sp.z, health: p.health } }];
-    }
-    p.gwOut = true;
-    const out: Outbound[] = [{ to: p.id, msg: { t: 'gwOut' } }];
-    for (const id of L.members) {
-      out.push({ to: id, msg: { t: 'notice', text: `☠ ${p.username} is OUT!` } });
-    }
-    out.push(...this.gwExitPlayer(p));
-    L.members = L.members.filter((id) => id !== p.id);
-    out.push(...this.gwCheckWin(L));
-    return out;
-  }
-
-  /** End the match if a whole team is gone (out / left / disconnected). */
-  private gwCheckWin(L: GwLobby): Outbound[] {
-    if (!L.started) return [];
-    const counts = this.gwTeamCounts(L);
-    if (counts[0] > 0 && counts[1] > 0) return [];
-    const winner = counts[0] > 0 ? 0 : counts[1] > 0 ? 1 : -1;
-    return this.gwEndMatch(L, winner);
-  }
-
-  private gwEndMatch(L: GwLobby, winner: number): Outbound[] {
-    const out: Outbound[] = [];
-    for (const id of L.members) {
-      const m = this.players.get(id);
-      out.push({ to: id, msg: { t: 'gwOver', winner } });
-      if (m) out.push(...this.gwExitPlayer(m));
-    }
-    if (winner >= 0) {
-      out.push({ to: 'all', msg: { t: 'killfeed',
-        killer: gwTeamName(winner), victim: '🏆 GOLDWARS' } });
-    }
-    this.gwSlotsBusy.delete(L.slot);
-    this.gwLobbies.delete(L.code);
-    return out;
-  }
-
-  /** Per-tick arena upkeep: falling into the void is death. */
-  tickGoldwars(dt: number): Outbound[] {
-    if (!fin(dt) || dt <= 0) return [];
-    const out: Outbound[] = [];
-    for (const L of [...this.gwLobbies.values()]) {
-      if (!L.started) continue;
-      for (const id of [...L.members]) {
-        const m = this.players.get(id);
-        if (m && !m.dead && m.y < GW_VOID_Y) {
-          out.push(...this.applyDamage(m, 999, -1));
-        }
-      }
-    }
-    return out;
   }
 
   // --- Vaults (Milestone D) ----------------------------------------------------
@@ -1299,29 +1015,6 @@ export class GameServer {
     const key = `${x},${y},${z}`;
     const prev = this.edits.get(key);
     const out: Outbound[] = [];
-    // GOLDWARS arena cells: only players in a RUNNING match on that slot may
-    // touch them (civ wanderers can't grief a live arena), your own team's
-    // gold is sacred, and mining the ENEMY gold flips their respawns off.
-    const gwSlot = gwSlotAt(x, z);
-    if (gwSlot !== null) {
-      const L = p.gw ? this.gwLobbies.get(p.gw) : undefined;
-      if (!L || !L.started || L.slot !== gwSlot) return [];
-      for (const team of [0, 1] as const) {
-        const g = goldPos(gwSlot, team);
-        if (g.x !== x || g.y !== y || g.z !== z || block === Block.GoldBlock) continue;
-        if (p.gwTeam === team) {
-          return [{ to: p.id, msg: { t: 'notice', text: "⚠ That's YOUR team's gold — defend it!" } }];
-        }
-        if (L.goldAlive[team]) {
-          L.goldAlive[team] = false;
-          for (const mid of L.members) {
-            out.push({ to: mid, msg: { t: 'gwGold', team, by: p.username } });
-          }
-          out.push({ to: 'all', msg: { t: 'killfeed',
-            killer: p.username, victim: `⛏ ${gwTeamName(team)} GOLD` } });
-        }
-      }
-    }
     // Server-authoritative chest break: if this edit removes a chest, spill its
     // stored contents as item entities everyone sees and clear the storage —
     // independent of whether the breaking client ever opened (cached) it.
@@ -1406,31 +1099,6 @@ export class GameServer {
     return out;
   }
 
-  private handleAttack(attacker: ServerPlayer, targetId: number): Outbound[] {
-    // Melee PvP exists ONLY inside a running GOLDWARS match (sword duels).
-    // Everywhere else it stays disabled — normal-world PvP is guns-only.
-    const L = attacker.gw ? this.gwLobbies.get(attacker.gw) : undefined;
-    if (!L || !L.started) return [];
-    const target = this.players.get(targetId);
-    if (!target || target.dead || attacker.dead || target.id === attacker.id) return [];
-    if (target.gw !== attacker.gw) return [];         // same match only
-    if (target.gwTeam === attacker.gwTeam) return []; // no friendly fire
-    if (!fin(attacker.x, attacker.y, attacker.z, attacker.yaw,
-      target.x, target.y, target.z)) return [];
-    const dx = target.x - attacker.x, dy = target.y - attacker.y, dz = target.z - attacker.z;
-    const dist = Math.hypot(dx, dy, dz);
-    if (!(dist <= MELEE_RANGE)) return []; // fail-closed (NaN -> reject)
-    const horiz = Math.hypot(dx, dz);
-    if (horiz > 0.2) {
-      const fwd = { x: -Math.sin(attacker.yaw), z: -Math.cos(attacker.yaw) };
-      if ((fwd.x * dx + fwd.z * dz) / horiz < 0.2) return []; // not facing target
-    }
-    const knock = horiz > 1e-3
-      ? { x: dx / horiz, y: 0.35, z: dz / horiz }
-      : { x: 0, y: 0.45, z: 0 };
-    return this.applyDamage(target, GW_SWORD_DAMAGE, attacker.id, knock);
-  }
-
   /** Gun/projectile PvP: the client raycasts the hit and reports it; the server
    *  sanity-checks range + rough facing (like melee) and applies clamped,
    *  armor-mitigated damage. It can't verify line-of-sight, matching the
@@ -1438,7 +1106,6 @@ export class GameServer {
   private handleRanged(attacker: ServerPlayer, targetId: number, amount: number): Outbound[] {
     const target = this.players.get(targetId);
     if (!target || target.dead || attacker.dead || target.id === attacker.id) return [];
-    if (attacker.gw || target.gw) return []; // GOLDWARS is swords-only (no guns in OR into it)
     if (sameFaction(attacker.faction, target.faction)) return []; // no friendly fire
     if (!fin(attacker.x, attacker.y, attacker.z, attacker.yaw,
       target.x, target.y, target.z, amount)) return [];
@@ -1497,9 +1164,8 @@ export class GameServer {
       out.push(...this.settleLifesteal(p));
       // A PvP kill scores XP for the killer + their faction pool, and DURING A
       // WAR it counts toward the war score (most kills wins the shrinking-border
-      // battle). Server-awarded — never client-reported. GOLDWARS kills are a
-      // minigame: no XP, no war score.
-      if (killer && killer !== p && !killer.gw && !p.gw &&
+      // battle). Server-awarded — never client-reported.
+      if (killer && killer !== p &&
           isFaction(killer.faction) && killer.faction !== p.faction) {
         this.factionXp[killer.faction] += XP_PLAYER_KILL;
         out.push({ to: killer.id, msg: { t: 'xpAward', amount: XP_PLAYER_KILL, reason: 'kill' } });
@@ -1519,7 +1185,6 @@ export class GameServer {
    *  ELIMINATES the victim: banner + killfeed + the shell records the 24h
    *  lockout and disconnects; they come back (timer/revive) at 5 hearts. */
   private settleLifesteal(victim: ServerPlayer): Outbound[] {
-    if (victim.gw) return []; // Goldwars deaths never move hearts
     const recent = this.worldTime - victim.lastHitTime <= KILL_CREDIT_WINDOW;
     const killer = recent ? this.players.get(victim.lastHitBy) : undefined;
     if (!killer || killer.id === victim.id || sameFaction(killer.faction, victim.faction)) {
@@ -1568,7 +1233,6 @@ export class GameServer {
 
   private handleRespawn(p: ServerPlayer): Outbound[] {
     if (!p.dead || p.eliminated) return []; // eliminated: no respawn, only the boot
-    if (p.gw) return this.gwRespawn(p);     // Goldwars: base spawn / knockout
     const s = this.respawnPoint(p);
     p.x = s.x; p.y = s.y; p.z = s.z;
     p.health = maxHealthFor(p.hearts); p.dead = false;
@@ -1833,7 +1497,7 @@ export class GameServer {
    */
   private handleGadget(p: ServerPlayer, item: number, x: number, y: number, z: number): Outbound[] {
     const def = gadgetOf(item);
-    if (!def || p.dead || p.gw) return []; // no gadgets inside Goldwars
+    if (!def || p.dead) return [];
     const now = this.worldTime;
     switch (def.kind) {
       case 'frag': case 'oil': case 'smoke': case 'c4': {
@@ -1870,7 +1534,7 @@ export class GameServer {
    *  already ran the local blast, so the crater goes to everyone else. Damage +
    *  radii are fixed server-side (the client supplies only the burst point). */
   private handleRocketBlast(p: ServerPlayer, x: number, y: number, z: number): Outbound[] {
-    if (p.dead || p.gw || !fin(x, y, z)) return []; // no rockets inside Goldwars
+    if (p.dead || !fin(x, y, z)) return [];
     if (Math.hypot(x - p.x, y - p.y, z - p.z) > RANGED_MAX_RANGE) return [];
     return this.detonate(p, x, y, z,
       ROCKET_BLAST_DAMAGE, ROCKET_BLAST_RADIUS, ROCKET_CRATER_RADIUS);
@@ -2086,11 +1750,9 @@ export class GameServer {
     const p = this.players.get(id);
     if (!p) return null;
     const data: Record<string, unknown> = { ...(p.savedClientData ?? {}) };
-    // Mid-Goldwars captures persist the CIVILIZATION position, never the arena
-    // (a crash/reconnect drops the player back into the real world).
-    const pos = p.gw && p.civPos ? p.civPos : p;
-    data.x = pos.x; data.y = pos.y; data.z = pos.z; data.yaw = p.yaw; data.mode = p.mode;
+    data.x = p.x; data.y = p.y; data.z = p.z; data.yaw = p.yaw; data.mode = p.mode;
     data.hearts = p.hearts; // lifesteal max-health currency survives re-login
+    if (p.cosmetics) data.cosmetics = p.cosmetics; // avatar look survives re-login
     data.totems = p.totems.slice(); // attuned Waypoint Totems survive re-login
     // Persist the personal respawn point so it survives a reconnect.
     if (fin(p.spawnX as number, p.spawnY as number, p.spawnZ as number)) {
@@ -2198,7 +1860,7 @@ export class GameServer {
 function toInfo(p: ServerPlayer): PlayerInfo {
   return {
     id: p.id, username: p.username, skin: p.skin, faction: p.faction, mode: p.mode,
-    seasonsWon: p.seasonsWon, hearts: p.hearts,
+    seasonsWon: p.seasonsWon, hearts: p.hearts, cosmetics: p.cosmetics,
     x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
     health: p.health, dead: p.dead,
     gliding: p.gliding, boating: p.boating,

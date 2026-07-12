@@ -5,7 +5,6 @@
 import { Biome, Biomes, ColumnTints } from './biomes';
 import { Block } from './blocks';
 import { Chunk, CHUNK_X, CHUNK_Z } from './chunk';
-import { gwColumnBlocks, inGoldwarsXZ } from './goldwars';
 import { Noise2D, Noise3D, hash2, mulberry32 } from './noise';
 import { structureStamp } from './structures';
 import { VAULT_REACH, VaultStamp, vaultStamp } from './vaults';
@@ -173,7 +172,6 @@ export class Terrain {
   }
 
   private treeAt(x: number, z: number): Tree | null {
-    if (inGoldwarsXZ(x, z)) return null; // no trees over the arena void
     const h = this.height(x, z);
     if (h <= SEA_LEVEL + 1 || h > 118) return null;
     // No trees on bare mountain rock. Surfaces render as bare Stone for any
@@ -239,12 +237,6 @@ export class Terrain {
     for (let lx = 0; lx < CHUNK_X; lx++) {
       for (let lz = 0; lz < CHUNK_Z; lz++) {
         const wx = ox + lx, wz = oz + lz;
-        // The GOLDWARS arena strip replaces terrain outright: floating sky
-        // islands over pure void (no ground, no water, no decoration).
-        if (inGoldwarsXZ(wx, wz)) {
-          for (const b of gwColumnBlocks(wx, wz)) chunk.set(lx, b.y, lz, b.id);
-          continue;
-        }
         const h = this.height(wx, wz);
         const biome = this.biomeWithWater(wx, wz, h);
         const sandy = biome === Biome.Beach || biome === Biome.Ocean ||
@@ -345,7 +337,6 @@ export class Terrain {
         const lx = b.x - ox, lz = b.z - oz;
         if (lx < 0 || lx >= CHUNK_X || lz < 0 || lz >= CHUNK_Z) continue;
         if (b.y < 1 || b.y > 250) continue;
-        if (inGoldwarsXZ(b.x, b.z)) continue; // nothing stamps into the arena
         chunk.set(lx, b.y, lz, b.id);
       }
     };
@@ -638,7 +629,6 @@ export class Terrain {
    *  a water/beach biome, NOT ashlands (surface lava), and surrounded by dry
    *  land so you don't land on a lone spike at the water's edge. */
   private safeSpawnColumn(x: number, z: number): boolean {
-    if (inGoldwarsXZ(x, z)) return false;           // the arena void is no spawn
     const h = this.height(x, z);
     if (h < SEA_LEVEL + 3) return false;            // would be at/near water
     if (this.ravineDepth(x, z) > 0) return false;   // surface carved -> air/fall
