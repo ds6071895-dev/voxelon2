@@ -29,6 +29,24 @@ export const TOTEM_COOLDOWN = 60;    // seconds between teleports (server clock)
 export const TOTEM_WINDUP = 3;       // client-side cast time before the port
 export const COMBAT_TAG = 10;        // seconds after ANY damage that block a port
 export const MELEE_DAMAGE = 4;     // server-applied fist damage
+// Bloodlust (anti-stalemate): the longer a PvP fight drags on, the harder every
+// hit lands, so no fight can last forever. A fight "starts" on the first PvP
+// hit and stays live while hits keep landing within COMBAT_TAG of each other;
+// after BLOODLUST_START seconds of continuous fighting, incoming PvP damage
+// grows +BLOODLUST_PER_STEP per BLOODLUST_STEP seconds, capped at
+// BLOODLUST_CAP×. While combat-tagged, natural regen is fully blocked and
+// heal-item regen runs at half speed.
+export const BLOODLUST_START = 30; // seconds of fighting before damage ramps
+export const BLOODLUST_STEP = 15;  // seconds per additional escalation step
+export const BLOODLUST_PER_STEP = 0.25; // +25% incoming damage per step
+export const BLOODLUST_CAP = 2;    // never more than double damage
+
+/** Incoming-damage multiplier after `fightSeconds` of continuous PvP combat. */
+export function bloodlustMult(fightSeconds: number): number {
+  if (!(fightSeconds > BLOODLUST_START)) return 1;
+  const steps = 1 + Math.floor((fightSeconds - BLOODLUST_START) / BLOODLUST_STEP);
+  return Math.min(BLOODLUST_CAP, 1 + steps * BLOODLUST_PER_STEP);
+}
 export const EDIT_RANGE = 7;       // max distance a player may edit a block
 // TPA (teleport requests, DonutSMP-style): the target must HOLD the accept key
 // for TPA_HOLD seconds (client-side — moving or taking damage resets the hold);
@@ -45,6 +63,11 @@ export interface PlayerSnapshot {
   dead: boolean;
   gliding?: boolean;
   boating?: boolean;
+  /** Item id held in hand (0 = empty) — rendered on the avatar's arm. */
+  held?: number;
+  /** Worn armor item ids [helmet, chest, legs, boots] (0 = bare slot) —
+   *  rendered as overlay plating on the avatar. */
+  armor?: number[];
 }
 
 /** Gamemode, set by a server-console admin command. */
@@ -93,7 +116,7 @@ export type ClientMsg =
   // auth) — lets a returning browser skip the password.
   | { t: 'session'; username: string; token: string }
   | { t: 'xform'; x: number; y: number; z: number; yaw: number; pitch: number;
-      gliding?: boolean; boating?: boolean }
+      gliding?: boolean; boating?: boolean; held?: number; armor?: number[] }
   | { t: 'edit'; x: number; y: number; z: number; block: number }
   // Pull a Lever: the server recomputes the flips (lever + linked traps within
   // LEVER_RADIUS, traps.ts) over its edit log and broadcasts them as edits —

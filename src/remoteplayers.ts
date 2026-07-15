@@ -7,6 +7,9 @@
 import * as THREE from 'three';
 import type { NetClient, Remote } from './net/client';
 import { factionColor, isFaction } from './teams';
+import { itemGeometry } from './itementity';
+import { ITEMS, Item, ARMOR_SLOT_INDEX } from './items';
+import type { Atlas } from './textures';
 import {
   CAPE_COLORS, Cosmetics, EYE_COLORS, HAIR_COLORS, HAT_COLORS, PANTS_COLORS,
   SHIRT_COLORS, SKIN_TONES, defaultCosmetics, sanitizeCosmetics,
@@ -463,6 +466,79 @@ export function disposeAvatarBody(body: AvatarBody): void {
   body.material.dispose();
 }
 
+// ─── worn armor + held item (equip visuals) ────────────────────────────────
+
+// Body dimensions mirrored from buildAvatarBody (keep in sync).
+const TORSO_W = 0.5, TORSO_H = 0.75, TORSO_D = 0.26;
+const LIMB_W = 0.24, LIMB_H = 0.74, LIMB_D = 0.24;
+const HIP_Y = 0.75;
+const HEAD_Y = HEAD / 2 + 0.05; // centre of the head above the head-group pivot
+
+/** Plating colour per armor material (readable at a distance). */
+function armorColorFor(id: number): THREE.Color {
+  if (id >= Item.WoodHelmet && id <= Item.WoodBoots) return new THREE.Color(0x7a5b33);
+  if (id >= Item.StoneHelmet && id <= Item.StoneBoots) return new THREE.Color(0x83878d);
+  if (id >= Item.IronHelmet && id <= Item.IronBoots) return new THREE.Color(0xd8dce2);
+  if (id >= Item.DiamondHelmet && id <= Item.DiamondBoots) return new THREE.Color(0x45d6c9);
+  if (id >= Item.TitaniumHelmet && id <= Item.TitaniumBoots) return new THREE.Color(0xaec4e8);
+  return new THREE.Color(0x9aa0a8);
+}
+
+/** Build worn-armor plating onto an avatar body. `armor` is the synced
+ *  [helmet, chest, legs, boots] item ids (0 = bare). Returns every mesh added
+ *  so a re-equip can strip them (their geometries die with the body's group
+ *  traverse on dispose; the material is the body's shared one). */
+export function buildArmorOverlay(body: AvatarBody, armor: number[]): THREE.Mesh[] {
+  const mat = body.material;
+  const added: THREE.Mesh[] = [];
+  const [ll, rl, la, ra] = body.parts;
+  const add = (
+    parent: THREE.Object3D, w: number, h: number, d: number,
+    color: THREE.Color, x: number, y: number, z: number
+  ): void => { added.push(addBoxTo(parent, mat, w, h, d, color, x, y, z)); };
+
+  const helmet = armor[ARMOR_SLOT_INDEX.helmet] | 0;
+  const chest  = armor[ARMOR_SLOT_INDEX.chestplate] | 0;
+  const legs   = armor[ARMOR_SLOT_INDEX.leggings] | 0;
+  const boots  = armor[ARMOR_SLOT_INDEX.boots] | 0;
+
+  if (helmet && ITEMS[helmet]?.armor) {
+    const c = armorColorFor(helmet);
+    const dark = new THREE.Color(c).multiplyScalar(0.8);
+    // Open-faced dome + a brow band, so the face/eyes stay visible.
+    add(body.head, HEAD + 0.1, 0.3, HEAD + 0.1, c, 0, HEAD_Y + 0.13, 0);
+    add(body.head, HEAD + 0.08, 0.09, 0.05, dark, 0, HEAD_Y + 0.02, -HEAD / 2 - 0.035);
+    for (const side of [-1, 1]) { // cheek guards
+      add(body.head, 0.05, 0.3, HEAD + 0.06, dark, side * (HEAD / 2 + 0.035), HEAD_Y - 0.05, 0.02);
+    }
+  }
+  if (chest && ITEMS[chest]?.glider) {
+    // A glider worn in the chest slot reads as a backpack, not plating.
+    add(body.group, 0.36, 0.5, 0.13, new THREE.Color(0x8a6a3f),
+      0, HIP_Y + TORSO_H - 0.3, TORSO_D / 2 + 0.08);
+  } else if (chest && ITEMS[chest]?.armor) {
+    const c = armorColorFor(chest);
+    add(body.group, TORSO_W + 0.09, TORSO_H + 0.04, TORSO_D + 0.09, c,
+      0, HIP_Y + TORSO_H / 2 + 0.02, 0);
+    for (const arm of [la, ra]) { // shoulder pads swing with the arms
+      add(arm, LIMB_W + 0.1, 0.26, LIMB_D + 0.1, c, 0, -0.13, 0);
+    }
+  }
+  if (legs && ITEMS[legs]?.armor) {
+    const c = armorColorFor(legs);
+    for (const leg of [ll, rl]) {
+      add(leg, LIMB_W + 0.06, 0.46, LIMB_D + 0.06, c, 0, -0.23, 0);
+    }
+  }
+  if (boots && ITEMS[boots]?.armor) {
+    const c = armorColorFor(boots);
+    for (const leg of [ll, rl]) {
+      add(leg, LIMB_W + 0.09, 0.24, LIMB_D + 0.12, c, 0, -LIMB_H + 0.12, -0.02);
+    }
+  }
+  return added;
+}
+
 // ─── name/health tag helpers ───────────────────────────────────────────────
 
 function drawHealthBar(canvas: HTMLCanvasElement, frac: number): void {
@@ -552,6 +628,11 @@ interface Avatar {
   dx: number; dy: number; dz: number; dyaw: number;
   walkPhase: number;
   lastX: number; lastZ: number;
+  /** Equip visuals currently built (rebuilt when the synced state changes). */
+  heldId: number;
+  heldMesh: THREE.Mesh | null;   // geometry is the SHARED itemGeometry cache
+  armorKey: string;
+  armorMeshes: THREE.Mesh[];
 }
 
 // ─── main class ───────────────────────────────────────────────────────────
@@ -561,10 +642,18 @@ export class RemotePlayers {
   private readonly net: NetClient;
   private readonly avatars = new Map<number, Avatar>();
   private hovered = -1;
+  private readonly atlas: Atlas;
+  /** Shared material for held-item meshes (same look as dropped items). */
+  private readonly itemMat: THREE.MeshBasicMaterial;
 
-  constructor(scene: THREE.Scene, net: NetClient) {
+  constructor(scene: THREE.Scene, net: NetClient, atlas: Atlas) {
     this.scene = scene;
     this.net = net;
+    this.atlas = atlas;
+    this.itemMat = new THREE.MeshBasicMaterial({
+      map: atlas.texture, alphaTest: 0.4, vertexColors: true,
+      side: THREE.DoubleSide,
+    });
   }
 
   /** Mark which avatar the local crosshair is over (-1 = none). */
@@ -624,7 +713,39 @@ export class RemotePlayers {
       healthCanvas, healthTex, healthSprite, lastHealth: -1,
       dx: remote.tx, dy: remote.ty, dz: remote.tz, dyaw: remote.tyaw,
       walkPhase: 0, lastX: remote.tx, lastZ: remote.tz,
+      heldId: 0, heldMesh: null, armorKey: '', armorMeshes: [],
     };
+  }
+
+  /** Keep the avatar's held item + worn armor in step with the synced state. */
+  private syncEquip(av: Avatar, r: Remote): void {
+    const held = r.held | 0;
+    if (held !== av.heldId) {
+      av.heldId = held;
+      if (av.heldMesh) {
+        // Shared cached geometry — detach only, never dispose.
+        av.heldMesh.parent?.remove(av.heldMesh);
+        av.heldMesh = null;
+      }
+      if (held > 0 && ITEMS[held]) {
+        const mesh = new THREE.Mesh(itemGeometry(this.atlas, held), this.itemMat);
+        // In the right hand: just below the sleeve, out front, tilted forward.
+        mesh.position.set(0, -LIMB_H + 0.06, -0.2);
+        mesh.rotation.set(-0.5, 0, 0);
+        mesh.scale.setScalar(ITEMS[held].kind === 'block' ? 1.5 : 1.1);
+        av.parts[3].add(mesh); // right arm — swings with the arm
+        av.heldMesh = mesh;
+      }
+    }
+    const key = (r.armor ?? []).join(',');
+    if (key !== av.armorKey) {
+      av.armorKey = key;
+      for (const m of av.armorMeshes) {
+        m.parent?.remove(m);
+        m.geometry.dispose(); // per-piece geometry (material is the body's)
+      }
+      av.armorMeshes = buildArmorOverlay(av.body, r.armor ?? []);
+    }
   }
 
   /** Reconcile avatars with the net roster and interpolate, once per frame. */
@@ -648,6 +769,8 @@ export class RemotePlayers {
       av.group.position.set(av.dx, av.dy, av.dz);
       av.group.rotation.y = av.dyaw;
       av.group.visible = !r.dead && r.info.mode !== 'spectator';
+
+      this.syncEquip(av, r); // held item + worn armor follow the synced state
 
       // Health bar
       const showHealth = id === this.hovered && av.group.visible;
@@ -695,7 +818,8 @@ export class RemotePlayers {
         av.parts[0].rotation.x =  amp;   // left leg forward
         av.parts[1].rotation.x = -amp;   // right leg back
         av.parts[2].rotation.x = -amp;   // left arm back
-        av.parts[3].rotation.x =  amp;   // right arm forward
+        // Right arm swings too, but raises a touch while holding something.
+        av.parts[3].rotation.x =  amp - (av.heldId > 0 ? 0.45 : 0);
         // Cape sways with the stride: billows out with speed + a gentle flutter.
         if (av.body.cape) {
           const billow = Math.min(1, hspeed / 5) * 0.55;
@@ -740,6 +864,9 @@ export class RemotePlayers {
 
   private dispose(av: Avatar): void {
     this.scene.remove(av.group);
+    // The held item's geometry is the shared itemGeometry cache — detach it
+    // BEFORE the body traverse below would dispose it for everyone.
+    if (av.heldMesh) { av.heldMesh.parent?.remove(av.heldMesh); av.heldMesh = null; }
     disposeAvatarBody(av.body);
     av.nameTex.dispose();
     (av.sprite.material as THREE.SpriteMaterial).dispose();

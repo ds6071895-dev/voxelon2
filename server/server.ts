@@ -182,8 +182,25 @@ function handleAuth(id: number, msg: ClientMsg & { t: 'register' | 'login' | 'se
   loginFails.delete(throttleKey(res.account.username)); // success clears the counter
   socketAttempts.delete(sk);
   if (game.usernameOnline(res.account.username)) {
-    send(id, { t: 'authErr', error: 'That account is already online' });
-    return;
+    // Same account reconnecting — usually a browser that was closed and
+    // reopened before its old socket timed out. The newest login wins: kick
+    // the ghost (persisting its state) so the returning player is never
+    // locked out of their own account.
+    let ghost = -1;
+    for (const [cid, name] of authed) {
+      if (name === res.account.username) { ghost = cid; break; }
+    }
+    if (ghost < 0) { // shouldn't happen, but never let auth wedge
+      send(id, { t: 'authErr', error: 'That account is already online' });
+      return;
+    }
+    persistPlayer(ghost);
+    authed.delete(ghost);
+    dispatch(game.removePlayer(ghost));
+    const gws = sockets.get(ghost);
+    sockets.delete(ghost);
+    try { gws?.terminate(); } catch { /* already gone */ }
+    console.log(`~ ${res.account.username} reconnected — ghost session replaced`);
   }
   // Lifesteal elimination: the credentials may be right, but an eliminated
   // account can't play until the 24h lockout expires (or a teammate revives

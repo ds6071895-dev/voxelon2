@@ -37,6 +37,7 @@ import { Mobs, MOB_DEFS } from '../src/mobs';
 import { Particles } from '../src/particles';
 import { raycastBlocks } from '../src/interact';
 import { Player } from '../src/player';
+import { buildAvatarBody, buildArmorOverlay } from '../src/remoteplayers';
 import { daylight } from '../src/sky';
 import { Survival } from '../src/survival';
 import { GameServer, Outbound } from '../src/net/server_core';
@@ -44,6 +45,7 @@ import {
   ClientMsg, mitigate, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE, WORLD_BORDER, WORLD_HALF,
   CORE_BORDER, CORE_HALF, inCore, MAX_ATTUNED, TOTEM_COOLDOWN, COMBAT_TAG,
   TPA_EXPIRE, TPA_HOLD,
+  bloodlustMult, BLOODLUST_START, BLOODLUST_STEP, BLOODLUST_PER_STEP, BLOODLUST_CAP,
 } from '../src/net/protocol';
 import {
   COSMETIC_KEYS, COSMETIC_RANGES, Cosmetics, defaultCosmetics, randomCosmetics,
@@ -4001,6 +4003,132 @@ let firstVault: VaultStamp | null = null;
   const hbc = hacked.find((o) => o.msg.t === 'cosmetics')?.msg as { c: Cosmetics };
   check('a hacked out-of-range look is clamped server-side',
     hbc.c.hat >= 0 && hbc.c.hat < COSMETIC_RANGES.hat);
+}
+
+// --- Equip sync: held item + worn armor ride the xform into the snapshot ---------
+{
+  const s = new GameServer(1337, mulberry32(500));
+  s.addPlayer(1, { username: 'Knight', faction: 0 });
+  s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: 0, pitch: 0,
+    held: Item.Rifle, armor: [Item.IronHelmet, Item.DiamondChestplate, 0, Item.IronBoots] });
+  const me = s.snapshot().find((p) => p.id === 1)!;
+  check('the snapshot carries the held item + worn armor ids',
+    me.held === Item.Rifle &&
+    JSON.stringify(me.armor) === JSON.stringify([Item.IronHelmet, Item.DiamondChestplate, 0, Item.IronBoots]));
+  // Fail-closed: junk ids / non-armor in an armor slot render as bare.
+  s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: 0, pitch: 0,
+    held: 99999, armor: [Item.Rifle, NaN, -3, Item.WoodBoots, 7, 7] as number[] });
+  const me2 = s.snapshot().find((p) => p.id === 1)!;
+  check('junk equip ids are sanitized server-side (held 0, non-armor slots 0)',
+    me2.held === 0 &&
+    JSON.stringify(me2.armor) === JSON.stringify([0, 0, 0, Item.WoodBoots]));
+  // The welcome roster carries equip too, so late joiners see it immediately.
+  s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: 0, pitch: 0,
+    held: Item.Sword, armor: [Item.TitaniumHelmet, 0, 0, 0] });
+  const w = s.addPlayer(2).find((o) => o.to === 2)!.msg as
+    { players: { id: number; held?: number; armor?: number[] }[] };
+  const k = w.players.find((p) => p.id === 1)!;
+  check('the welcome roster carries held + armor to late joiners',
+    k.held === Item.Sword && k.armor?.[0] === Item.TitaniumHelmet);
+}
+
+// --- Avatar armor overlay: plating builds onto the body per worn piece ----------
+{
+  const bare = buildAvatarBody(defaultCosmetics(7));
+  check('no worn armor builds no plating', buildArmorOverlay(bare, [0, 0, 0, 0]).length === 0);
+  const suited = buildAvatarBody(defaultCosmetics(7));
+  const full = buildArmorOverlay(suited,
+    [Item.IronHelmet, Item.DiamondChestplate, Item.TitaniumLeggings, Item.WoodBoots]);
+  check('a full armor set builds plating on head, torso, arms, legs and feet',
+    full.length >= 8 && full.every((m) => !!m.parent));
+  const glider = buildAvatarBody(defaultCosmetics(7));
+  const pack = buildArmorOverlay(glider, [0, Item.Glider, 0, 0]);
+  check('a worn glider reads as a backpack (single mesh), not chest plating',
+    pack.length === 1);
+  const junk = buildAvatarBody(defaultCosmetics(7));
+  check('junk ids in armor slots build nothing',
+    buildArmorOverlay(junk, [Item.Rifle, 99999, -1, NaN]).length === 0);
+}
+
+// --- Anti-stalemate combat: bloodlust + combat regen block ----------------------
+{
+  check('bloodlustMult ramps after the grace period and caps at double',
+    bloodlustMult(0) === 1 && bloodlustMult(BLOODLUST_START) === 1 &&
+    bloodlustMult(BLOODLUST_START + 1) === 1 + BLOODLUST_PER_STEP &&
+    bloodlustMult(BLOODLUST_START + BLOODLUST_STEP + 1) === 1 + 2 * BLOODLUST_PER_STEP &&
+    bloodlustMult(9999) === BLOODLUST_CAP);
+
+  const s = new GameServer(1337, mulberry32(501));
+  s.addPlayer(1, { username: 'Duelist', faction: 0 });
+  s.addPlayer(2, { username: 'Rival', faction: 1 });
+  const hp = (id: number) => s.snapshot().find((p) => p.id === id)!.health;
+  s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: Math.PI, pitch: 0 }); // faces +z
+  s.handle(2, { t: 'xform', x: 0, y: 70, z: 10, yaw: 0, pitch: 0 });
+
+  // PvP damage blocks natural regen for the full combat tag (10s), not the
+  // 5s environmental delay — trading pot-shots can no longer out-heal a fight.
+  s.handle(1, { t: 'rangedAttack', target: 2, amount: 6 });
+  const afterHit = hp(2);
+  for (let i = 0; i < 8; i++) s.tickRegen(1); // 8s: past the old 5s delay
+  check('natural regen stays blocked through the PvP combat tag',
+    hp(2) === afterHit, `hp=${hp(2)} vs ${afterHit}`);
+  for (let i = 0; i < 6; i++) s.tickRegen(1); // 14s total: tag expired
+  check('regen resumes once the fight lapses', hp(2) > afterHit);
+
+  // A dragging fight escalates: keep exchanging hits past BLOODLUST_START of
+  // continuous combat and the same shot starts hitting harder.
+  const s2 = new GameServer(1337, mulberry32(502));
+  s2.addPlayer(1, { username: 'GrindA', faction: 0 });
+  s2.addPlayer(2, { username: 'GrindB', faction: 1 });
+  s2.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: Math.PI, pitch: 0 });
+  s2.handle(2, { t: 'xform', x: 0, y: 70, z: 10, yaw: 0, pitch: 0 });
+  const hp2 = (id: number) => s2.snapshot().find((p) => p.id === id)!.health;
+  const h0 = hp2(2);
+  s2.handle(1, { t: 'rangedAttack', target: 2, amount: 2 }); // fight starts
+  const baseDmg = h0 - hp2(2);
+  let escalated = 0;
+  for (let i = 0; i < 6; i++) { // hits every 9s keep the fight live past 45s
+    s2.tickWar(9);
+    const before = hp2(2);
+    s2.handle(1, { t: 'rangedAttack', target: 2, amount: 2 });
+    escalated = before - hp2(2);
+  }
+  check('bloodlust makes late-fight hits land harder than the opener',
+    baseDmg === 2 && escalated > baseDmg, `base=${baseDmg} late=${escalated}`);
+
+  // Even a max-armor turtle can't absorb hits forever once bloodlust ramps.
+  const s3 = new GameServer(1337, mulberry32(503));
+  s3.addPlayer(1, { username: 'Chipper', faction: 0 });
+  s3.addPlayer(2, { username: 'Turtle', faction: 1 });
+  s3.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: Math.PI, pitch: 0 });
+  s3.handle(2, { t: 'xform', x: 0, y: 70, z: 10, yaw: 0, pitch: 0 });
+  s3.handle(2, { t: 'armor', points: 20 }); // 80% mitigation: mitigate(1,20)=1? no — rounds to 0
+  const hp3 = (id: number) => s3.snapshot().find((p) => p.id === id)!.health;
+  s3.handle(1, { t: 'rangedAttack', target: 2, amount: 6 }); // opens the fight
+  const opened = hp3(2);
+  for (let i = 0; i < 5; i++) {
+    s3.tickWar(9);
+    s3.handle(1, { t: 'rangedAttack', target: 2, amount: 1 }); // mitigates to 0…
+  }
+  check('once bloodlust ramps, no hit is fully absorbed (fights must end)',
+    hp3(2) < opened, `hp=${hp3(2)} opened=${opened}`);
+
+  // Mid-fight healing is halved: a Medkit in combat regenerates slower than
+  // the same Medkit out of combat.
+  const s4 = new GameServer(1337, mulberry32(504));
+  s4.addPlayer(1, { username: 'Shooter', faction: 0 });
+  s4.addPlayer(2, { username: 'Fighter', faction: 1 });
+  s4.addPlayer(3, { username: 'Camper', faction: 1 });
+  s4.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: Math.PI, pitch: 0 });
+  s4.handle(2, { t: 'xform', x: 0, y: 70, z: 10, yaw: 0, pitch: 0 });
+  const hp4 = (id: number) => s4.snapshot().find((p) => p.id === id)!.health;
+  s4.handle(1, { t: 'rangedAttack', target: 2, amount: 15 }); // Fighter tagged
+  s4.handle(3, { t: 'selfhurt', amount: hp4(3) - hp4(2) });   // Camper equal HP, untagged
+  s4.handle(2, { t: 'useHeal', item: Item.Medkit });
+  s4.handle(3, { t: 'useHeal', item: Item.Medkit });
+  for (let i = 0; i < 8; i++) s4.tickRegen(0.5); // 4s of boosted regen
+  check('a Medkit still heals in combat, but at half speed',
+    hp4(2) > 5 && hp4(3) > hp4(2), `tagged=${hp4(2)} untagged=${hp4(3)}`);
 }
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} FAILURES`);

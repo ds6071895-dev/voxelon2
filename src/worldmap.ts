@@ -66,6 +66,9 @@ export interface StructureMark { x: number; z: number; kind: string; }
 export interface MapContext {
   player(): { x: number; z: number; yaw: number };
   faction(): number;
+  /** Optional: called when the in-panel ✕ close button is tapped/clicked —
+   *  lets the caller re-lock the pointer the same way the M key does. */
+  onClose?(): void;
 }
 
 export class WorldMap {
@@ -147,7 +150,17 @@ export class WorldMap {
       this.draw();
     });
     syncZoom();
-    header.append(title, zoomBtn);
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'mc-font';
+    closeBtn.textContent = '✕';
+    closeBtn.style.cssText =
+      'margin-left:auto;font-size:14px;width:28px;height:28px;cursor:pointer;border:2px solid;' +
+      'border-color:#fff #555 #555 #fff;background:#6b6b6b;color:#fff;text-shadow:none;';
+    closeBtn.addEventListener('click', () => {
+      this.hide();
+      this.mapCtx.onClose?.();
+    });
+    header.append(title, zoomBtn, closeBtn);
     const row = document.createElement('div');
     // Wrap on narrow screens so the legend drops below the map instead of being
     // pushed off-screen.
@@ -171,7 +184,7 @@ export class WorldMap {
     const hint = document.createElement('div');
     hint.className = 'mc-font';
     hint.style.cssText = 'font-size:11px;color:#8da0c0;text-shadow:none;';
-    hint.textContent = 'Click a gold totem: travel there  ·  Left-click: add waypoint  ·  Right-click a marker: remove  ·  B in-game: waypoint at your feet  ·  M / Esc: close';
+    hint.textContent = 'Tap a gold totem: travel there  ·  Tap: add waypoint  ·  Right-click a marker: remove  ·  B in-game: waypoint at your feet  ·  ✕ / M / Esc: close';
     panel.append(header, row, hint);
     this.el.appendChild(panel);
     app.appendChild(this.el);

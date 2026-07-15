@@ -125,14 +125,18 @@ const input = new Input(renderer.domElement);
 // exact same Input fields the keyboard/mouse write — pointer lock is virtual
 // in touch mode. Callbacks close over UI declared further down; they only run
 // on taps, long after module init.
-const touch = isTouchDevice() ? new TouchControls(input, {
+const isMobile = isTouchDevice();
+const touch = isMobile ? new TouchControls(input, {
   onInventory: () => { input.inventoryToggled = true; },
   onMap: () => { input.mapToggled = true; },
+  onProgress: () => { input.progressPressed = true; },
+  onTpa: () => { input.tpaPressed = true; },
   onPause: () => {
     if (player.dead) return;
     if (screen === 'paused') { input.lock(); return; }        // resume
     if (invUI.open) { input.inventoryToggled = true; return; } // close menu first
     if (worldMap.open) { input.mapToggled = true; return; }
+    if (progressOpen) { input.progressPressed = true; return; }
     if (input.locked) input.unlock();                          // open pause menu
   },
 }) : null;
@@ -250,7 +254,7 @@ const mobs = new Mobs(scene, world, atlas, itemEntities, particles);
 const audio = new GameAudio();
 mobs.onSound = (name, pos) => audio.mob(name, pos.clone());
 const net = new NetClient();
-const remotePlayers = new RemotePlayers(scene, net);
+const remotePlayers = new RemotePlayers(scene, net, atlas);
 const netItems = new NetItems(scene, net, atlas);
 const projectiles = new Projectiles(scene, world, mobs, remotePlayers, net, player, particles);
 const chests = new Chests();
@@ -401,6 +405,7 @@ function exitBoat(hop = true): void {
 const worldMap = new WorldMap(scene, camera, world.terrain, {
   player: () => ({ x: player.pos.x, z: player.pos.z, yaw: player.yaw }),
   faction: () => localFaction,
+  onClose: () => { if (worldReady && !player.dead && screen === 'playing') input.lock(); },
 });
 let openTurret: { x: number; y: number; z: number } | null = null;
 let openMachine: { x: number; y: number; z: number } | null = null;
@@ -428,7 +433,9 @@ mapBtn.textContent = '🗺 Map (M)';
 mapBtn.style.cssText =
   'position:absolute;bottom:8px;right:8px;z-index:12;font-size:12px;padding:6px 10px;' +
   'width:118px;box-sizing:border-box;text-align:center;cursor:pointer;border:2px solid;' +
-  'border-color:#fff #555 #555 #fff;background:#6b6b6b;color:#fff;text-shadow:none;';
+  'border-color:#fff #555 #555 #fff;background:#6b6b6b;color:#fff;text-shadow:none;display:none;';
+  // Hidden on the title screen (no world/character to show yet) and on mobile
+  // (which has its own 🗺 icon in the touch overlay) — enterPlaying() reveals it.
 mapBtn.addEventListener('click', () => {
   if (player.dead) return;
   if (worldMap.open) { worldMap.hide(); input.lock(); return; }
@@ -922,6 +929,8 @@ function enterPlaying(): void {
   screen = 'playing';
   overlay.classList.add('hidden');
   pauseEl.style.display = 'none';
+  mapBtn.style.display = isMobile ? 'none' : '';
+  progressBtn.style.display = isMobile ? 'none' : '';
 }
 function enterPause(): void {
   screen = 'paused';
@@ -931,6 +940,10 @@ function enterTitle(): void {
   screen = 'title';
   overlay.classList.remove('hidden');
   pauseEl.style.display = 'none';
+  // The Map/Progress corner buttons are gameplay-only — don't show them over
+  // the title panorama (there's no world/character to view progress for yet).
+  mapBtn.style.display = 'none';
+  progressBtn.style.display = 'none';
 }
 
 // --- Login / register (mandatory accounts) ---------------------------------
@@ -1023,6 +1036,7 @@ function onAuthSuccess(username: string): void {
   authed = true;
   authedName = username;
   sessionPending = false;
+  if (pendingToken) { saveSession(username, pendingToken); pendingToken = null; }
   lastUser = username;
   // Remember the account so next visit prefills the login (username only — the
   // password is never stored).
@@ -1057,7 +1071,13 @@ function saveSession(u: string, t: string): void {
 function clearSession(): void {
   try { localStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
 }
-net.onSession = (token) => { if (authedName) saveSession(authedName, token); };
+// If the token beats the welcome over the wire, hold it until the username is
+// known — a dropped token here would silently log the player out next visit.
+let pendingToken: string | null = null;
+net.onSession = (token) => {
+  if (authedName) saveSession(authedName, token);
+  else pendingToken = token;
+};
 
 /** Issue + store a local session token for OFFLINE accounts (the server does
  *  this for online play; offline we are our own authority). */
@@ -1186,10 +1206,16 @@ function setAuthMode(mode: 'register' | 'login'): void {
 net.onAuthErr = (error) => {
   authStatus.textContent = '';
   if (sessionPending) {
-    // A stale/rotated token — drop it and fall back to the normal login form.
     sessionPending = false;
-    clearSession();
-    authErr.textContent = 'Session expired — please log in again.';
+    // Only a REAL token rejection invalidates the saved session. Transient
+    // refusals (attempt throttle, elimination countdown, a hiccup) keep the
+    // token so the next visit still resumes without a password.
+    if (/session expired|authentication failed/i.test(error)) {
+      clearSession();
+      authErr.textContent = 'Session expired — please log in again.';
+    } else {
+      authErr.textContent = error;
+    }
     return;
   }
   authErr.textContent = error;
@@ -1247,7 +1273,17 @@ const controlsPanel = (() => {
   const list = document.createElement('div');
   list.className = 'mc-font';
   list.style.cssText = 'display:grid;grid-template-columns:auto auto;gap:6px 32px;font-size:15px;';
-  const binds: [string, string][] = [
+  const binds: [string, string][] = isMobile ? [
+    ['Move', 'left joystick'], ['Jump', '⬆ button (hold)'], ['Sneak', '⇩ button (toggle)'],
+    ['Sprint', 'push joystick past the rim'], ['Break / attack mob', 'long-press'],
+    ['Place / use', 'tap'], ['Aim down sights (guns)', '⊕ button'],
+    ['Reload gun', 'R button'], ['Deploy glider (in mid-air)', '⬆ button'],
+    ['Launch boat (on water)', 'tap'], ['Hop out of boat', '⬆ button'],
+    ['Getting-started guide', 'starts open — tap ✕ to hide'],
+    ['TPA — teleport to a player', '🌀 button'], ['Accept a TPA request', 'hold the accept button'],
+    ['Hotbar slot', 'tap a slot'], ['Inventory', '🎒 button'], ['World map', '🗺 button'],
+    ['Your progress', '⚑ button'], ['Pause / back', '⏸ button'],
+  ] : [
     ['Move', 'W A S D'], ['Jump', 'Space'], ['Sneak', 'Shift'],
     ['Sprint', 'Q / double-tap W'], ['Break / attack mob', 'Left click'],
     ['Place / use', 'Right click'], ['Aim down sights (guns)', 'Hold right click'],
@@ -1256,7 +1292,7 @@ const controlsPanel = (() => {
     ['Set waypoint here', 'B'], ['Getting-started guide', 'H'],
     ['TPA — teleport to a player', 'T'], ['Accept a TPA request', 'Hold Y'],
     ['Hotbar slot', '1 – 9 / scroll'], ['Inventory', 'E'], ['World map', 'M'],
-    ['Debug overlay', 'F3'], ['Pause / back', 'Esc'],
+    ['Your progress', 'G'], ['Debug overlay', 'F3'], ['Pause / back', 'Esc'],
   ];
   for (const [action, key] of binds) {
     const a = document.createElement('div'); a.textContent = action; a.style.color = '#cfe0ff';
@@ -1503,7 +1539,21 @@ let tutorialSeen = false;
 try { tutorialSeen = localStorage.getItem('voxelon.tutorialSeen') === '1'; } catch { /* ignore */ }
 
 const tutorial = (() => {
-  const steps: { title: string; lines: string[] }[] = [
+  const steps: { title: string; lines: string[] }[] = isMobile ? [
+    { title: '⛏️ MOVE & BUILD', lines: [
+      'Left joystick to move · ⬆ to jump',
+      'Long-press mines blocks · Tap places & uses them',
+    ] },
+    { title: '🎒 CRAFT', lines: [
+      'Tap 🎒 for your inventory + crafting',
+      'Build a Crafting Table, open it, and hit 📖 Guide for every recipe',
+    ] },
+    { title: '⚔️ WAR', lines: [
+      "You're auto-assigned to a faction — fight for it!",
+      'When WAR starts the border closes in and everyone glows —',
+      'most kills wins · 🗺 = map · ⚑ = your progress',
+    ] },
+  ] : [
     { title: '⛏️ MOVE & BUILD', lines: [
       'WASD to move · Space to jump',
       'Left-click mines blocks · Right-click places & uses them',
@@ -2022,7 +2072,9 @@ function grantXp(amount: number, reason?: string): void {
   showNotice(`+${amount} XP${reason ? ` — ${reason}` : ''}`);
   if (after > before) {
     showRegionBanner(`⭐ LEVEL ${after}!`, '#ffd84a');
-    showNotice('Level up! Press G to spend your skill point.');
+    showNotice(isMobile
+      ? 'Level up! Tap ⚑ to spend your skill point.'
+      : 'Level up! Press G to spend your skill point.');
     audio.heartSteal();
   }
   saveOfflineProgress();
@@ -2218,11 +2270,10 @@ function hideProgress(): void {
   progressEl.style.display = 'none';
   if (worldReady && !player.dead && screen === 'playing') input.lock();
 }
-document.addEventListener('keydown', (e) => {
-  if (e.code !== 'KeyG') return;
+function toggleProgress(): void {
   if (progressOpen) hideProgress();
   else if (input.locked && screen === 'playing') showProgress();
-});
+}
 // A clickable button stacked above the Map button (same footprint).
 const progressBtn = document.createElement('button');
 progressBtn.className = 'mc-font';
@@ -2230,7 +2281,8 @@ progressBtn.textContent = '⚑ Progress (G)';
 progressBtn.style.cssText =
   'position:absolute;bottom:46px;right:8px;z-index:12;font-size:12px;padding:6px 10px;' +
   'width:118px;box-sizing:border-box;text-align:center;cursor:pointer;border:2px solid;' +
-  'border-color:#fff #555 #555 #fff;background:#6b6b6b;color:#fff;text-shadow:none;';
+  'border-color:#fff #555 #555 #fff;background:#6b6b6b;color:#fff;text-shadow:none;display:none;';
+  // Hidden on the title screen and on mobile (own ⚑ icon in the touch overlay).
 progressBtn.addEventListener('click', () => {
   if (progressOpen) hideProgress();
   else if (!player.dead) showProgress();
@@ -2460,8 +2512,18 @@ starterEl.style.cssText =
   'position:absolute;top:110px;left:8px;z-index:10;pointer-events:none;' +
   'font-size:11px;line-height:1.75;color:#dfe6f2;text-shadow:1px 1px 0 #000;' +
   'background:rgba(8,10,16,0.55);border:1px solid #2a3550;border-radius:6px;' +
-  'padding:7px 10px;max-width:250px;display:none;';
+  'padding:7px 24px 7px 10px;max-width:250px;display:none;';
 app.appendChild(starterEl);
+const starterBody = document.createElement('div');
+starterEl.appendChild(starterBody);
+// A tappable ✕ so touch devices (no H key) can dismiss the checklist too.
+const starterCloseBtn = document.createElement('div');
+starterCloseBtn.textContent = '✕';
+starterCloseBtn.style.cssText =
+  'position:absolute;top:5px;right:6px;pointer-events:auto;cursor:pointer;' +
+  'color:#7f8db0;font-size:11px;';
+starterCloseBtn.addEventListener('pointerdown', (e) => { e.stopPropagation(); toggleGuidePanel(); });
+starterEl.appendChild(starterCloseBtn);
 let guideState: GuideState = newGuideState();
 let guideLoadedFor = ''; // account the current state belongs to
 let guideHidden = false;
@@ -2563,22 +2625,29 @@ function useVaultCompass(item: number): void {
 function renderGuidePanel(): void {
   const next = nextGuideStep(guideState);
   const lines: string[] = [
-    '<b style="color:#ffd84a">GETTING STARTED</b> <span style="color:#7f8db0">(H to hide)</span>',
+    '<b style="color:#ffd84a">GETTING STARTED</b> <span style="color:#7f8db0">' +
+      (isMobile ? '(tap ✕ to hide)' : '(H to hide)') + '</span>',
   ];
   for (const step of GUIDE_STEPS) {
     const done = guideState[step.id];
     const active = next?.id === step.id;
     const color = done ? '#7f8db0' : active ? '#ffe27a' : '#cdd6ee';
     const tick = done ? '✔' : active ? '▶' : '·';
+    // The step text has a couple of keyboard-key parentheticals baked in —
+    // swap them for the touch equivalent rather than pointing at keys mobile
+    // players can't press.
+    const text = isMobile
+      ? step.text.replace('(E)', '(🎒)').replace('check the map — M', 'check the map — 🗺')
+      : step.text;
     lines.push(`<span style="color:${color}">${tick} ${step.icon} ` +
-      `${done ? `<s>${step.text}</s>` : step.text}</span>`);
+      `${done ? `<s>${text}</s>` : text}</span>`);
   }
   // Live compass hint toward the nearest unexplored vault until one is looted.
   if (!guideState.loot) {
     const hint = nearestVaultHint();
     if (hint) lines.push(`<span style="color:#b9a5ff">${hint}</span>`);
   }
-  starterEl.innerHTML = lines.join('<br>');
+  starterBody.innerHTML = lines.join('<br>');
 }
 /** Per-frame guide upkeep: visibility, periodic detection, live vault hint. */
 function updateGuide(dt: number, controlling: boolean): void {
@@ -2716,8 +2785,10 @@ tpaCard.style.cssText = 'background:#15182b;border:2px solid #3a4790;border-radi
   'padding:18px 22px;display:flex;flex-direction:column;gap:10px;width:330px;';
 tpaCard.innerHTML =
   '<div style="font-size:18px;color:#ffd84a;letter-spacing:1px;">🌀 TPA REQUEST</div>' +
-  '<div style="font-size:12px;color:#cfe0ff;line-height:1.6;">Type a player name — if they ' +
-  `hold <b>Y</b> for ${TPA_HOLD}s you teleport straight to them.</div>`;
+  `<div style="font-size:12px;color:#cfe0ff;line-height:1.6;">Type a player name — if they ` +
+  (isMobile
+    ? `hold the accept button for ${TPA_HOLD}s you teleport straight to them.</div>`
+    : `hold <b>Y</b> for ${TPA_HOLD}s you teleport straight to them.</div>`);
 const tpaInput = document.createElement('input');
 tpaInput.type = 'text';
 tpaInput.maxLength = 32;
@@ -2728,10 +2799,29 @@ tpaInput.style.cssText = 'font-size:15px;padding:7px 10px;background:#0c0e1a;col
 const tpaHint = document.createElement('div');
 tpaHint.className = 'mc-font';
 tpaHint.style.cssText = 'font-size:11px;color:#7f8db0;';
-tpaHint.textContent = 'Enter = send · Esc = cancel';
-tpaCard.append(tpaInput, tpaHint);
+tpaHint.textContent = isMobile ? 'Tap Send to send' : 'Enter = send · Esc = cancel';
+const tpaBtnRow = document.createElement('div');
+tpaBtnRow.style.cssText = 'display:flex;gap:10px;';
+const tpaSendBtn = document.createElement('button');
+tpaSendBtn.className = 'mc-btn';
+tpaSendBtn.textContent = 'Send';
+tpaSendBtn.style.cssText = 'flex:1;font-size:14px;padding:7px 0;';
+const tpaCancelBtn = document.createElement('button');
+tpaCancelBtn.className = 'mc-btn';
+tpaCancelBtn.textContent = 'Cancel';
+tpaCancelBtn.style.cssText = 'flex:1;font-size:14px;padding:7px 0;';
+tpaBtnRow.append(tpaSendBtn, tpaCancelBtn);
+tpaCard.append(tpaInput, tpaHint, tpaBtnRow);
 tpaPromptEl.appendChild(tpaCard);
 app.appendChild(tpaPromptEl);
+
+function sendTpaFromPrompt(): void {
+  const name = tpaInput.value.trim();
+  if (name) net.sendTpa(name);
+  closeTpaPrompt();
+}
+tpaSendBtn.addEventListener('click', sendTpaFromPrompt);
+tpaCancelBtn.addEventListener('click', () => closeTpaPrompt());
 
 function openTpaPrompt(): void {
   if (!net.connected) { showNotice('TPA needs multiplayer — no server connected.'); return; }
@@ -2752,9 +2842,7 @@ function closeTpaPrompt(): void {
 tpaInput.addEventListener('keydown', (e) => {
   e.stopPropagation(); // typing must never trigger game hotkeys (E, M, T…)
   if (e.key === 'Enter') {
-    const name = tpaInput.value.trim();
-    if (name) net.sendTpa(name);
-    closeTpaPrompt();
+    sendTpaFromPrompt();
   } else if (e.key === 'Escape') {
     closeTpaPrompt();
   }
@@ -2773,13 +2861,38 @@ tpaBannerEl.style.cssText =
   'border:1px solid #3a4790;border-radius:8px;padding:8px 16px;pointer-events:none;';
 app.appendChild(tpaBannerEl);
 
+// Mobile has no Y key — a press-and-hold on-screen button drives the same
+// `input.tAccept` flag `updateTpa` ORs in with `KeyY`. Only shown on touch
+// devices, right under the banner, while a request is actually pending.
+const tpaAcceptBtn = document.createElement('div');
+if (isMobile) {
+  tpaAcceptBtn.className = 'mc-font';
+  tpaAcceptBtn.textContent = 'HOLD TO ACCEPT';
+  tpaAcceptBtn.style.cssText =
+    'position:absolute;top:230px;left:50%;transform:translateX(-50%);z-index:12;' +
+    'display:none;text-align:center;font-size:13px;letter-spacing:1px;color:#0c0e1a;' +
+    'background:#7dffa0;border:2px solid;border-color:#fff #3a7a4e #3a7a4e #fff;' +
+    'border-radius:8px;padding:10px 22px;pointer-events:auto;cursor:pointer;user-select:none;';
+  const setAccept = (down: boolean): void => {
+    input.tAccept = down;
+    tpaAcceptBtn.style.background = down ? '#54d980' : '#7dffa0';
+  };
+  tpaAcceptBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); setAccept(true); });
+  tpaAcceptBtn.addEventListener('pointerup', () => setAccept(false));
+  tpaAcceptBtn.addEventListener('pointercancel', () => setAccept(false));
+  tpaAcceptBtn.addEventListener('pointerleave', () => setAccept(false));
+  app.appendChild(tpaAcceptBtn);
+}
+
 net.onTpaRequest = (from) => {
   tpaIncomingFrom = from;
   tpaIncomingAtMs = performance.now();
   tpaHold = 0;
   tpaHoldStart = null;
   tpaHoldBlocked = false;
-  showNotice(`📨 ${from} wants to teleport to YOU — hold Y to accept!`);
+  showNotice(isMobile
+    ? `📨 ${from} wants to teleport to YOU — hold the accept button!`
+    : `📨 ${from} wants to teleport to YOU — hold Y to accept!`);
 };
 
 function cancelTpaHold(reason: string): void {
@@ -2792,14 +2905,20 @@ function cancelTpaHold(reason: string): void {
 /** Per-frame TPA upkeep: expire the pending request, run the hold-Y-to-accept
  *  clock (moving or taking damage resets it), and render the banner. */
 function updateTpa(dt: number, controlling: boolean): void {
-  if (!tpaIncomingFrom) { tpaBannerEl.style.display = 'none'; return; }
+  if (!tpaIncomingFrom) {
+    tpaBannerEl.style.display = 'none';
+    if (isMobile) tpaAcceptBtn.style.display = 'none';
+    return;
+  }
   const ageSec = (performance.now() - tpaIncomingAtMs) / 1000;
   if (ageSec > TPA_EXPIRE || !net.connected) {
     tpaIncomingFrom = '';
     tpaBannerEl.style.display = 'none';
+    if (isMobile) tpaAcceptBtn.style.display = 'none';
     return;
   }
-  const holding = controlling && !player.dead && input.down('KeyY');
+  if (isMobile) tpaAcceptBtn.style.display = 'block';
+  const holding = controlling && !player.dead && (input.down('KeyY') || input.tAccept);
   if (holding && !tpaHoldBlocked) {
     if (!tpaHoldStart) {
       tpaHoldStart = player.pos.clone();
@@ -2818,6 +2937,7 @@ function updateTpa(dt: number, controlling: boolean): void {
         tpaHold = 0;
         tpaHoldStart = null;
         tpaBannerEl.style.display = 'none';
+        if (isMobile) tpaAcceptBtn.style.display = 'none';
         return;
       }
     }
@@ -2832,7 +2952,9 @@ function updateTpa(dt: number, controlling: boolean): void {
     `📨 ${tpaIncomingFrom} wants to teleport to you\n` +
     (tpaHold > 0
       ? `accepting… ${bar} ${Math.max(0, TPA_HOLD - tpaHold).toFixed(1)}s — don't move!`
-      : `hold Y for ${TPA_HOLD}s to accept (${Math.ceil(TPA_EXPIRE - ageSec)}s left)`);
+      : isMobile
+        ? `hold the button below for ${TPA_HOLD}s to accept (${Math.ceil(TPA_EXPIRE - ageSec)}s left)`
+        : `hold Y for ${TPA_HOLD}s to accept (${Math.ceil(TPA_EXPIRE - ageSec)}s left)`);
 }
 
 net.onGotItem = (id, count) => {
@@ -3658,6 +3780,7 @@ function frame(): void {
 
   if (input.inventoryToggled) toggleInventory();
   if (input.mapToggled) toggleMap();
+  if (input.progressPressed) toggleProgress();
   worldMap.update();
 
   // Gun timers tick regardless of menu state (so a reload finishes even if you
@@ -3898,7 +4021,9 @@ function frame(): void {
     // Stream our transform even while paused/in a menu, so others still see
     // us (e.g. being knocked around). Throttled + connection-gated inside.
     net.sendXform(dt, player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch,
-      player.gliding, player.boating);
+      player.gliding, player.boating,
+      inventory.selectedStack?.id ?? 0,                 // held item on the avatar
+      inventory.wornArmor().map((s) => s?.id ?? 0));    // worn armor plating
 
     // Simulation never pauses: mobs hunt you and survival ticks in menus too.
     survival.update(dt, player);

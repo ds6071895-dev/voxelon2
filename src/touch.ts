@@ -38,6 +38,8 @@ export interface TouchCallbacks {
   onPause(): void;
   onInventory(): void;
   onMap(): void;
+  onProgress(): void;
+  onTpa(): void;
 }
 
 const LOOK_SENS = 2.3;      // css px -> mouseDX units (≈ mouse movementX feel)
@@ -178,6 +180,8 @@ export class TouchControls {
     };
     util('🎒', cb.onInventory);
     util('🗺', cb.onMap);
+    util('⚑', cb.onProgress);
+    util('🌀', cb.onTpa);
     util('⏸', cb.onPause);
 
     // --- hotbar: tap a slot to select it ---

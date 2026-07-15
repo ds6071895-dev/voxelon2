@@ -47,7 +47,7 @@ import {
   ARMOR_POINT_CAP, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE,
   mitigate, ItemEntityInfo, PlayerInfo, PlayerSnapshot, ServerMsg,
   WORLD_SEED, WORLD_HALF, WORLD_BORDER, CORE_HALF, makeUsername, skinSeed, GameMode,
-  MAX_ATTUNED, TOTEM_COOLDOWN, COMBAT_TAG, TPA_EXPIRE,
+  MAX_ATTUNED, TOTEM_COOLDOWN, COMBAT_TAG, TPA_EXPIRE, bloodlustMult,
 } from './protocol';
 import {
   COMEBACK_HEARTS, KILL_CREDIT_WINDOW, MAX_HEARTS, canConsume, canWithdraw,
@@ -91,6 +91,17 @@ interface ServerPlayer extends PlayerInfo {
   totemCooldownUntil: number;
   /** Worn-armor defense points the client reports (clamped 0..cap). */
   armorPoints: number;
+  /** Cosmetic equip state for other clients' avatars: the held item id (0 =
+   *  bare hand) and worn armor item ids [helmet, chest, legs, boots]. */
+  held: number;
+  armor: number[];
+  /** Bloodlust (anti-stalemate): when the last PvP hit landed on this player,
+   *  and when the current continuous fight began. A fight lapses once no PvP
+   *  hit lands for COMBAT_TAG seconds. */
+  lastPvpTime: number;
+  pvpSince: number;
+  /** The "damage is ramping" notice was already sent for this fight. */
+  bloodlustWarned: boolean;
   /** Secret-switch bookkeeping (Phase 7): defections used this season + which
    *  season they were counted in, and the season a defection forfeited a badge. */
   switchesUsed: number;
@@ -274,6 +285,8 @@ export class GameServer {
       totems: GameServer.sanitizeTotems(saved?.totems),
       totemCooldownUntil: 0,
       armorPoints: 0,
+      held: 0, armor: [0, 0, 0, 0],
+      lastPvpTime: -Infinity, pvpSince: 0, bloodlustWarned: false,
       switchesUsed: Number.isFinite(account?.switchesUsed) ? Math.max(0, Math.floor(account!.switchesUsed!)) : 0,
       switchSeason: Number.isFinite(account?.switchSeason) ? Math.floor(account!.switchSeason!) : 0,
       forfeitSeason: Number.isFinite(account?.forfeitSeason) ? Math.floor(account!.forfeitSeason!) : 0,
@@ -340,6 +353,12 @@ export class GameServer {
           p.yaw = msg.yaw; p.pitch = msg.pitch;
           p.gliding = msg.gliding === true;
           p.boating = msg.boating === true;
+          // Cosmetic equip state (fail-closed: junk ids render as bare).
+          p.held = typeof msg.held === 'number' && ITEMS[msg.held] ? msg.held : 0;
+          p.armor = Array.isArray(msg.armor)
+            ? msg.armor.slice(0, 4).map((a) =>
+                typeof a === 'number' && ITEMS[a]?.armor ? a : 0)
+            : [0, 0, 0, 0];
         }
         return [];
       }
@@ -1134,22 +1153,46 @@ export class GameServer {
     if (p.dead || amount <= 0) return [];
     if (p.mode !== 'survival') return []; // creative/spectator are invulnerable
     amount = mitigate(amount, p.armorPoints); // server-authoritative armor reduction
+    // Bloodlust (anti-stalemate): another player's hit in an ongoing fight
+    // lands harder the longer the fight has raged — and once it's ramping, a
+    // hit can never be fully absorbed, so no armor stack stalls forever.
+    const pvp = by !== p.id && this.players.has(by);
+    const out: Outbound[] = [];
+    if (pvp) {
+      if (this.worldTime - p.lastPvpTime >= COMBAT_TAG) {
+        p.pvpSince = this.worldTime; // previous fight lapsed — fresh clock
+        p.bloodlustWarned = false;
+      }
+      p.lastPvpTime = this.worldTime;
+      const mult = bloodlustMult(this.worldTime - p.pvpSince);
+      if (mult > 1) {
+        amount = Math.max(1, Math.round(amount * mult));
+        if (!p.bloodlustWarned) {
+          p.bloodlustWarned = true;
+          out.push({ to: p.id, msg: { t: 'notice',
+            text: '⚔ Bloodlust — this fight has raged too long, damage is ramping up!' } });
+        }
+      }
+    }
     if (amount <= 0) return []; // fully absorbed
     p.health = Math.max(0, p.health - amount);
-    p.regenCooldown = REGEN_DELAY;
+    // PvP hits block natural regen for the whole combat tag (out-healing an
+    // active fight is what made fights drag forever); environment damage keeps
+    // the short delay.
+    p.regenCooldown = pvp ? COMBAT_TAG : REGEN_DELAY;
     p.regenTimer = 0;
     p.lastDamageTime = this.worldTime; // combat tag (blocks totem teleports)
-    if (direct && by !== p.id && this.players.has(by)) {
+    if (direct && pvp) {
       p.lastHitBy = by;
       p.lastHitTime = this.worldTime;
     }
-    const out: Outbound[] = [{
+    out.push({
       to: p.id,
       msg: {
         t: 'hurt', health: p.health, dead: p.health <= 0, by,
         kx: knock?.x ?? 0, ky: knock?.y ?? 0, kz: knock?.z ?? 0,
       },
-    }];
+    });
     if (p.health <= 0 && !p.dead) {
       p.dead = true;
       const killer = this.players.get(by);
@@ -1252,7 +1295,11 @@ export class GameServer {
       const boosting = p.regenBoostTimer > 0;
       if (boosting) { p.regenBoostTimer = Math.max(0, p.regenBoostTimer - dt); p.regenCooldown = 0; }
       p.regenCooldown = Math.max(0, p.regenCooldown - dt);
-      const interval = boosting ? p.regenBoostInterval : REGEN_INTERVAL;
+      // Mid-fight healing is halved (anti-stalemate): while PvP combat-tagged a
+      // Bandage/Medkit still works, but can't out-pace incoming fire forever.
+      const inPvp = this.worldTime - p.lastPvpTime < COMBAT_TAG;
+      const interval = boosting
+        ? p.regenBoostInterval * (inPvp ? 2 : 1) : REGEN_INTERVAL;
       if (p.regenCooldown <= 0 && p.health < max) {
         p.regenTimer += dt;
         if (p.regenTimer >= interval) {
@@ -1853,6 +1900,7 @@ export class GameServer {
       id: p.id, x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
       health: p.health, dead: p.dead,
       gliding: p.gliding, boating: p.boating,
+      held: p.held, armor: p.armor,
     }));
   }
 }
@@ -1864,6 +1912,7 @@ function toInfo(p: ServerPlayer): PlayerInfo {
     x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
     health: p.health, dead: p.dead,
     gliding: p.gliding, boating: p.boating,
+    held: p.held, armor: p.armor,
   };
 }
 
