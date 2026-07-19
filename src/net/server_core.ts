@@ -1623,8 +1623,9 @@ export class GameServer {
           const existing = this.edits.get(key);
           if (existing === undefined || existing === Block.Air) continue;
           if ((BLOCKS[existing]?.hardness ?? -1) < 0) continue;
-          // Vault blocks are blast-proof (dungeons can't be cracked open).
-          if (existing === Block.VaultBrick || existing === Block.VaultChest) continue;
+          // Blast-proof blocks survive (vault walls, spawners, gold, reinforced
+          // trap chambers) — same flag the client crater skips, so no desync.
+          if (BLOCKS[existing]?.blastProof) continue;
           this.edits.set(key, Block.Air);
           out.push({ to: 'others', from: by.id, msg: { t: 'edit', x: bx, y: by2, z: bz, block: Block.Air } });
         }

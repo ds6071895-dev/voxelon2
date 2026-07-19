@@ -116,6 +116,10 @@ export const enum Block {
   WallTrapUp = 92,
   // Solid gold: vault-treasury decor, a compact way to bank ingots.
   GoldBlock = 93,
+  // Reinforced trap-chamber blocks: BLAST-PROOF (landmines won't crater them)
+  // and iron-pick-tier slow to mine — escape is possible, never quick.
+  ReinforcedStone = 94,
+  ReinforcedGlass = 95,
 }
 
 export const enum Tile {
@@ -342,6 +346,9 @@ export const enum Tile {
   WallTrapSide = 197,
   // Solid gold block (vault treasuries + ingot banking).
   GoldBlock = 198,
+  // Reinforced trap-chamber blocks.
+  ReinforcedStone = 199,
+  ReinforcedGlass = 200,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel' | 'sword';
@@ -373,6 +380,8 @@ export interface BlockInfo {
   tint: TintKind;
   /** Placing a block into this one replaces it (tall grass, dead bush). */
   replaceable: boolean;
+  /** Survives explosions (vault walls, reinforced trap-chamber blocks). */
+  blastProof: boolean;
   /** Atlas tile per face (cross shapes use `side`). */
   top: Tile;
   bottom: Tile;
@@ -395,6 +404,7 @@ interface Partial {
   replaceable?: boolean;
   emission?: number;
   facing?: number;
+  blastProof?: boolean;
 }
 
 function def(p: Partial): BlockInfo {
@@ -411,6 +421,7 @@ function def(p: Partial): BlockInfo {
     shape: p.shape ?? 'cube',
     tint: p.tint ?? null,
     replaceable: p.replaceable ?? false,
+    blastProof: p.blastProof ?? false,
     top: p.top,
     bottom: p.bottom ?? p.top,
     side: p.side ?? p.top,
@@ -657,7 +668,23 @@ export const BLOCKS: Record<number, BlockInfo> = {
 
   // Solid gold: treasury decor + ingot banking. Softly glows; breaks fast
   // enough for a raid (fists work) but not instantly.
-  [Block.GoldBlock]: def({ name: 'Gold Block', hardness: 2.0, emission: 5, top: Tile.GoldBlock }),
+  [Block.GoldBlock]: def({
+    name: 'Gold Block', hardness: 2.0, emission: 5, blastProof: true,
+    top: Tile.GoldBlock,
+  }),
+
+  // --- Reinforced trap-chamber blocks ---
+  // Blast-proof shells for kill boxes: a landmine going off INSIDE the chamber
+  // leaves the walls standing. Iron-pick tier and very hard, so a trapped
+  // player can dig out — slowly. The glass variant lets you watch.
+  [Block.ReinforcedStone]: def({
+    name: 'Reinforced Stone', hardness: 16, blastProof: true,
+    top: Tile.ReinforcedStone,
+  }),
+  [Block.ReinforcedGlass]: def({
+    name: 'Reinforced Glass', hardness: 10, blastProof: true,
+    top: Tile.ReinforcedGlass, opaque: false, occludes: false,
+  }),
 
   // --- Terrain overhaul (M21): mesa + volcanic ashlands ---
   [Block.RedSand]: def({ name: 'Red Sand', hardness: 0.5, top: Tile.RedSand }),
@@ -714,11 +741,13 @@ export const BLOCKS: Record<number, BlockInfo> = {
   // --- Dungeons (Milestone D) ---
   // Vault walls: VERY hard (iron-pick tier, long break) so raiders fight
   // through the door, not the wall — but NOT unbreakable.
-  [Block.VaultBrick]: def({ name: 'Vault Brick', hardness: 18, top: Tile.VaultBrick }),
+  [Block.VaultBrick]: def({
+    name: 'Vault Brick', hardness: 18, blastProof: true, top: Tile.VaultBrick,
+  }),
   // The boss-room treasure chest: per-player loot (right-click after the Brute
   // falls). Glows faintly; breaking it destroys the treasure (drops nothing).
   [Block.VaultChest]: def({
-    name: 'Vault Chest', hardness: 22, emission: 8,
+    name: 'Vault Chest', hardness: 22, emission: 8, blastProof: true,
     top: Tile.VaultChestTop, bottom: Tile.VaultChestTop, side: Tile.VaultChestSide,
   }),
 
@@ -771,7 +800,7 @@ export const BLOCKS: Record<number, BlockInfo> = {
   // Vault guard spawner: a dark iron cage. Tough but breakable (iron pick) —
   // silencing a room is a strategy; it drops nothing and can't be rebuilt.
   [Block.MobSpawner]: def({
-    name: 'Mob Spawner', hardness: 10, emission: 5,
+    name: 'Mob Spawner', hardness: 10, emission: 5, blastProof: true,
     top: Tile.MobSpawner, opaque: false, occludes: false,
   }),
 
@@ -796,6 +825,8 @@ const PICKAXE_TIERS: [Block, number][] = [
   [Block.Core, 1], // the claim Core is pickaxe-mineable (owner-only, server-gated)
   [Block.VaultBrick, 2], [Block.VaultChest, 2], // dungeon walls need an iron pick
   [Block.MobSpawner, 2], // silencing a guard room takes an iron pick too
+  // Reinforced trap-chamber blocks: iron pick or you're digging for a LONG time.
+  [Block.ReinforcedStone, 2], [Block.ReinforcedGlass, 2],
 ];
 for (const [b, tier] of PICKAXE_TIERS) {
   BLOCKS[b].tool = 'pickaxe';

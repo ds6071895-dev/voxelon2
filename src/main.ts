@@ -98,7 +98,7 @@ statusEl.style.display = 'none';
 // server (the ?seed override was removed).
 const seed = WORLD_SEED;
 
-const renderer = new THREE.WebGLRenderer({ antialias: false });
+const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.domElement.className = 'game';
@@ -3781,6 +3781,23 @@ function frame(): void {
   if (input.inventoryToggled) toggleInventory();
   if (input.mapToggled) toggleMap();
   if (input.progressPressed) toggleProgress();
+  // WAR intel: while a war runs, every online player shows on the map as a
+  // faction-colored named blip (they already glow in-world — no new hiding
+  // is lost). Cleared the moment the war ends.
+  if (warActiveNow && worldMap.open && net.connected) {
+    const blips: { x: number; z: number; color: number; name: string }[] = [];
+    for (const r of net.remotes.values()) {
+      if (r.dead) continue;
+      blips.push({
+        x: r.tx, z: r.tz,
+        color: factionColor(r.info.faction),
+        name: r.info.username,
+      });
+    }
+    worldMap.setLivePlayers(blips);
+  } else {
+    worldMap.setLivePlayers([]);
+  }
   worldMap.update();
 
   // Gun timers tick regardless of menu state (so a reload finishes even if you

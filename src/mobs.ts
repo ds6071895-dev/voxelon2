@@ -572,12 +572,10 @@ export class Mobs {
           const id = this.world.getBlock(x, y, z);
           if (id === Block.Air || id === Block.Water) continue;
           if ((BLOCKS[id]?.hardness ?? -1) < 0) continue; // bedrock
-          // Vaults are blast-proof: no rocket/grenade can crack a dungeon open
-          // (mirrors the server, which also skips vault blocks in its crater).
-          // Spawners + gold hoards survive too — crypt creepers must not clear
-          // their own room, and treasure is mined, never vaporized.
-          if (id === Block.VaultBrick || id === Block.VaultChest ||
-              id === Block.MobSpawner || id === Block.GoldBlock) continue;
+          // Blast-proof blocks survive (BLOCKS[].blastProof — vault walls,
+          // spawners, gold hoards, reinforced trap chambers). Mirrors the
+          // server, which skips the same flag in its crater.
+          if (BLOCKS[id]?.blastProof) continue;
           this.world.setBlock(x, y, z, Block.Air);
         }
       }

@@ -93,6 +93,9 @@ export class WorldMap {
   // Dynamic markers (war flags): server-driven, NOT persisted; shown on the map
   // + as in-world beacons exactly like waypoints. Refreshed each frame by main.
   private dynamicMarkers: { x: number; z: number; color: number; name: string }[] = [];
+  // WAR intel: live blips for every online player (empty in peacetime — the
+  // map only exposes people while everyone already glows). Refreshed by main.
+  private livePlayers: { x: number; z: number; color: number; name: string }[] = [];
   private readonly markerGroup = new THREE.Group();
   private readonly markerGeo = new THREE.BoxGeometry(1.2, 30, 1.2);
   // In-world MC-mod-style screen markers (one DOM badge per shown waypoint).
@@ -326,6 +329,24 @@ export class WorldMap {
 
 
 
+    // WAR blips: every online player, faction-colored + named. Only fed to us
+    // during an active war (everyone glows anyway — the map just matches).
+    for (const lp of this.livePlayers) {
+      const bx = this.cx(lp.x), by = this.cy(lp.z);
+      ctx.save();
+      ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 3;
+      ctx.fillStyle = this.rgba(lp.color, 1);
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.arc(bx, by, 5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.font = 'bold 9px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 3;
+      ctx.strokeText(lp.name, bx, by + 7);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(lp.name, bx, by + 7);
+      ctx.restore();
+    }
+
     // Player marker: a big outlined heading arrow with a soft glow.
     const p = this.mapCtx.player();
     const px = this.cx(p.x), py = this.cy(p.z);
@@ -480,6 +501,12 @@ export class WorldMap {
   setDynamicMarkers(list: { x: number; z: number; color: number; name: string }[]): void {
     this.dynamicMarkers = list;
     if (this.open) this.draw();
+  }
+
+  /** Replace the live war blips (main clears this outside a war). No redraw:
+   *  main refreshes it every frame and update() already draws while open. */
+  setLivePlayers(list: { x: number; z: number; color: number; name: string }[]): void {
+    this.livePlayers = list;
   }
 
   private onClick(e: MouseEvent): void {

@@ -1,5 +1,6 @@
 // Chunk mesher: culled faces, vanilla directional shading, per-vertex
-// ambient occlusion (the classic 0-3 corner test), AO-aware quad flipping.
+// ambient occlusion (the classic 0-3 corner test), AO-aware quad flipping,
+// smooth lighting (per-corner light averaged over the open AO cells).
 
 import * as THREE from 'three';
 import type { ColumnTints, Tint } from './biomes';
@@ -104,7 +105,7 @@ class GeoBuffer {
   quad(
     face: FaceDef, bx: number, by: number, bz: number,
     uvRect: [number, number, number, number], ao: number[],
-    topOffset: number, tint: Tint, skyL: number, blockL: number
+    topOffset: number, tint: Tint, skyLs: number[], blockLs: number[]
   ): void {
     const base = this.positions.length / 3;
     const [u0, v0, u1, v1] = uvRect;
@@ -116,7 +117,7 @@ class GeoBuffer {
       const b = face.shade * AO_CURVE[ao[i]];
       this.colors.push(b * tint[0], b * tint[1], b * tint[2]);
       this.uvs.push(u0 + (u1 - u0) * c.uv[0], v0 + (v1 - v0) * c.uv[1]);
-      this.lights.push(skyL / 15, blockL / 15);
+      this.lights.push(skyLs[i] / 15, blockLs[i] / 15);
     }
     // Flip the quad diagonal when needed so AO interpolates correctly.
     if (ao[0] + ao[3] > ao[1] + ao[2]) {
@@ -248,6 +249,8 @@ export function buildChunkGeometry(
   const oz = chunk.cz * CHUNK_Z;
   const maxY = Math.min(chunk.maxY, 256);
   const ao = [0, 0, 0, 0];
+  const skyLs = [0, 0, 0, 0];
+  const blockLs = [0, 0, 0, 0];
 
   for (let x = 0; x < CHUNK_X; x++) {
     for (let z = 0; z < CHUNK_Z; z++) {
@@ -313,11 +316,17 @@ export function buildChunkGeometry(
             if (isOpaque(neighbor) || neighbor === id) continue;
           }
 
-          // Per-vertex AO (skip for water: it has no corner shading).
+          // Per-vertex AO + smooth per-corner light (water keeps flat light:
+          // it has no corner shading).
           if (isWater) {
             ao[0] = ao[1] = ao[2] = ao[3] = 3;
+            const ly = Math.max(0, ny);
+            skyLs[0] = skyLs[1] = skyLs[2] = skyLs[3] =
+              light.sky(wx + dx, ly, wz + dz);
+            blockLs[0] = blockLs[1] = blockLs[2] = blockLs[3] =
+              light.block(wx + dx, ly, wz + dz);
           } else {
-            computeAO(face, wx, y, wz, sample, ao);
+            computeAO(face, wx, y, wz, sample, light, ao, skyLs, blockLs);
           }
 
           const tile: Tile = dy > 0 ? info.top : dy < 0 ? info.bottom : info.side;
@@ -332,13 +341,9 @@ export function buildChunkGeometry(
             : info.tint === 'grass' && dy > 0 ? tintFor('grass')
             : WHITE;
 
-          // Faces are lit by the cell they are exposed to.
-          const ly = Math.max(0, ny);
-          const skyL = light.sky(wx + dx, ly, wz + dz);
-          const blockL = light.block(wx + dx, ly, wz + dz);
-
           (isWater ? water : opaque).quad(
-            face, x, y, z, atlas.uvRect(tile), ao, topOffset, tint, skyL, blockL
+            face, x, y, z, atlas.uvRect(tile), ao, topOffset, tint,
+            skyLs, blockLs
           );
         }
       }
@@ -350,7 +355,8 @@ export function buildChunkGeometry(
 
 function computeAO(
   face: FaceDef, wx: number, wy: number, wz: number,
-  sample: BlockSampler, out: number[]
+  sample: BlockSampler, light: LightField,
+  out: number[], skyOut: number[], blockOut: number[]
 ): void {
   const [dx, dy, dz] = face.dir;
   // Tangent axes = the two axes perpendicular to the face normal.
@@ -374,5 +380,31 @@ function computeAO(
     const corner = occludesAO(sample(q3[0], q3[1], q3[2])) ? 1 : 0;
 
     out[i] = side1 && side2 ? 0 : 3 - (side1 + side2 + corner);
+
+    // Smooth lighting: average the light over the open cells this corner
+    // touches (blocked cells are excluded; a fully pinched corner cell is
+    // unreachable so it is excluded too). The face cell itself is always
+    // open, or the face would have been culled.
+    const py = Math.max(0, p[1]);
+    let sky = light.sky(p[0], py, p[2]);
+    let blk = light.block(p[0], py, p[2]);
+    let n = 1;
+    if (!side1 && q1[1] >= 0) {
+      sky += light.sky(q1[0], q1[1], q1[2]);
+      blk += light.block(q1[0], q1[1], q1[2]);
+      n++;
+    }
+    if (!side2 && q2[1] >= 0) {
+      sky += light.sky(q2[0], q2[1], q2[2]);
+      blk += light.block(q2[0], q2[1], q2[2]);
+      n++;
+    }
+    if (!(side1 && side2) && !corner && q3[1] >= 0) {
+      sky += light.sky(q3[0], q3[1], q3[2]);
+      blk += light.block(q3[0], q3[1], q3[2]);
+      n++;
+    }
+    skyOut[i] = sky / n;
+    blockOut[i] = blk / n;
   }
 }

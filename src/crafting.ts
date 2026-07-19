@@ -176,6 +176,11 @@ export const RECIPES: Recipe[] = [
   shaped([[I, I, I], [C, C, C]], Block.SpikeTrap, 3),
   // Landmine = twin redstone triggers over an iron shell packed with powder.
   shaped([[R, null, R], [I, ANY_COAL, I]], Block.Landmine, 2),
+  // Reinforced trap-chamber blocks: blast-proof shells so a landmine going off
+  // INSIDE a fall chamber leaves the walls standing. Iron-banded cobble (batch
+  // of 4) + an iron-framed pane so you can watch the chamber work.
+  shaped([[C, I, C], [I, C, I], [C, I, C]], Block.ReinforcedStone, 4),
+  shaped([[null, I, null], [I, Block.Glass, I], [null, I, null]], Block.ReinforcedGlass, 2),
   // Lever-triggered traps — DIRT cheap on purpose (trap-building is core play).
   // Lever = a stick on cobble. Fall Trap = two planks (a flimsy hatch).
   // Wall Trap = two cobble (a spring-loaded wall block).
