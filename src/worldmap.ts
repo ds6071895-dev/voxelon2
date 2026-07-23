@@ -314,14 +314,25 @@ export class WorldMap {
       ctx.restore();
     }
 
-    // Dynamic markers (server events): a colored flag glyph.
+    // Dynamic markers (the war flags): a pole with a coloured pennant + label.
     for (const m of this.dynamicMarkers) {
       const fx = this.cx(m.x), fy = this.cy(m.z);
-      ctx.strokeStyle = '#000'; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.moveTo(fx, fy + 8); ctx.lineTo(fx, fy - 10); ctx.stroke();
+      ctx.save();
+      ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 4;
+      ctx.strokeStyle = '#000'; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.moveTo(fx, fy + 8); ctx.lineTo(fx, fy - 14); ctx.stroke();
       ctx.fillStyle = this.rgba(m.color, 1);
-      ctx.beginPath(); ctx.moveTo(fx, fy - 10); ctx.lineTo(fx + 12, fy - 6); ctx.lineTo(fx, fy - 2);
+      ctx.beginPath();
+      ctx.moveTo(fx, fy - 14); ctx.lineTo(fx + 14, fy - 9); ctx.lineTo(fx, fy - 4);
       ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.shadowBlur = 0;
+      // Name under the pole, outlined so it survives any terrain colour.
+      ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 3;
+      ctx.strokeText(m.name, fx, fy + 10);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(m.name, fx, fy + 10);
+      ctx.restore();
     }
 
 
@@ -401,8 +412,20 @@ export class WorldMap {
         `<span style="color:${STRUCT_COLOR.pod}">◼</span> Pods ${c('pod')}`);
       lines.push('');
     }
-    lines.push(`<b>WAYPOINTS</b> (${this.waypoints.length})`);
     const p = this.mapCtx.player();
+    // War flags (server-driven): always listed, with the distance to each, so
+    // "where is our flag right now" is answerable at a glance.
+    if (this.dynamicMarkers.length) {
+      lines.push('<b>FLAGS</b>');
+      for (const m of this.dynamicMarkers) {
+        const dist = Math.round(Math.hypot(m.x - p.x, m.z - p.z));
+        lines.push(
+          `<span style="color:${this.rgba(m.color, 1)}">■</span> ` +
+          `${this.escape(m.name)} <span style="color:#8da0c0">${dist}m</span>`);
+      }
+      lines.push('');
+    }
+    lines.push(`<b>WAYPOINTS</b> (${this.waypoints.length})`);
     this.waypoints.forEach((w, i) => {
       const dist = Math.round(Math.hypot(w.x - p.x, w.z - p.z));
       const alt = w.y !== undefined ? ` · Y${w.y}` : '';

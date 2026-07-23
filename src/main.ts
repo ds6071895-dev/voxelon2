@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { GameAudio, materialOf } from './audio';
-import { Block, BLOCKS, isReplaceable } from './blocks';
+import { Block, BLOCKS, isReplaceable, isSolid } from './blocks';
 import { Furnaces } from './furnace';
 import { HeldItemView } from './held';
 import { HUD } from './hud';
@@ -18,7 +18,7 @@ import {
   collectMachine, currentRate, machineHeight, machineTypeForBlock,
   sanitizeState, setFilter, upgradeCost,
 } from './machines';
-import { ItemEntities } from './itementity';
+import { ItemEntities, itemGeometry } from './itementity';
 import { Chests } from './chests';
 import { Mob, Mobs } from './mobs';
 import { NetClient } from './net/client';
@@ -39,7 +39,9 @@ import {
   TURRET_FUEL_CAP,
 } from './turrets';
 import { TurretModels } from './turretmodels';
-import { RemotePlayers, buildAvatarBody, disposeAvatarBody, AvatarBody } from './remoteplayers';
+import {
+  RemotePlayers, buildAvatarBody, buildArmorOverlay, disposeAvatarBody, AvatarBody,
+} from './remoteplayers';
 import {
   CAPES, CAPE_COLORS, COSMETIC_RANGES, Cosmetics, EYE_COLORS, FACE_ACCESSORIES,
   HAIR_COLORS, HAIR_STYLES, HATS, HAT_COLORS, PANTS_COLORS, SHIRT_COLORS,
@@ -48,9 +50,11 @@ import {
 import { WorldMap } from './worldmap';
 import { Accounts, Account } from './net/accounts';
 import {
-  FACTIONS, NO_FACTION, factionColor, factionName, otherFaction,
+  FACTIONS, NO_FACTION, factionColor, factionName, isFaction, otherFaction,
 } from './teams';
 import { warBorderAt, WAR_MIN_BORDER } from './war';
+import { Flag, FLAG_REACH, FLAG_MAX_HP, newFlags, flagPosition } from './flags';
+import { FlagModels } from './flagmodels';
 import {
   BRANCHES, MAX_LEVEL as MAX_PLAYER_LEVEL, ProgressState, XP_MOB, branchNodes,
   branchRank, buyNode, canBuyNode, factionLevelFor, factionLevelProgress,
@@ -113,6 +117,20 @@ const camera = new THREE.PerspectiveCamera(
 );
 camera.rotation.order = 'YXZ';
 scene.add(camera); // so the held-item view (a camera child) renders
+
+// Camera views (V cycles): first person → third-person BACK → third-person
+// FRONT. `camera` always stays at the eye with the true look direction — every
+// raycast (mining, guns, hover) reads it — and a separate `viewCamera` is what
+// actually renders in the third-person views, so aiming is never affected.
+const enum View { First = 0, Back = 1, Front = 2 }
+const VIEW_NAMES = ['First person', 'Third person (back)', 'Third person (front)'];
+let view: View = View.First;
+const VIEW_DIST = 4.0;       // how far the boom reaches when nothing blocks it
+const viewCamera = new THREE.PerspectiveCamera(
+  FOV, window.innerWidth / window.innerHeight, 0.08, 2000
+);
+viewCamera.rotation.order = 'YXZ';
+scene.add(viewCamera);
 
 const atlas = createAtlas(seed);
 const cracks = createCrackTextures();
@@ -264,6 +282,14 @@ const machineModels = new MachineModels(scene, machines);
 // --- Warfare (M14): turrets, territory ---
 const turretStates = new Map<string, TurretState>();
 const turretModels = new TurretModels(scene, turretStates);
+// --- CAPTURE THE FLAG: one flag per faction, server-authoritative ---
+let flagState = newFlags();
+const flagModels = new FlagModels(scene);
+flagModels.setGroundProbe((x, z) => world.terrain.height(Math.floor(x), Math.floor(z)) + 1);
+/** Seconds until the client may send another flag swing (matches the server). */
+let flagHitTimer = 0;
+/** Local mirror of "my faction holds no flag" — drives the danger banner. */
+let myFactionFlagless = false;
 // Seasons: server-authoritative. Only the permanent ★ badge is shown — the
 // old top-centre "Season N · time" HUD line was cut as clutter.
 let localSeasonsWon = 0;
@@ -524,8 +550,13 @@ function refreshNetInfo(): void {
     `<span style="color:#ffe27a">[${localMode.toUpperCase()}]</span>  `;
   // Permanent "Seasons Won" badge (Phase 5): a gold star + count.
   const wonBadge = localSeasonsWon > 0 ? `<span style="color:#ffd84a">★${localSeasonsWon}</span>  ` : '';
+  // No flag = no comeback: your faction's deaths are permanent until you take
+  // one back. It rides in the status line so it's impossible to miss.
+  const flagBadge = myFactionFlagless && net.connected
+    ? '<span style="color:#ff5c5c">💀 NO FLAG — deaths are FOREVER</span>  ' : '';
   if (net.connected) {
-    netinfoEl.innerHTML = `${wonBadge}${modeBadge}${badge}${net.username}   ${net.remotes.size + 1} online`;
+    netinfoEl.innerHTML =
+      `${flagBadge}${wonBadge}${modeBadge}${badge}${net.username}   ${net.remotes.size + 1} online`;
   } else if (authed) {
     netinfoEl.innerHTML = `${wonBadge}${badge}${authedName}   (offline)`;
   } else {
@@ -915,6 +946,8 @@ window.addEventListener('resize', () => {
   const aspect = window.innerWidth / window.innerHeight;
   camera.aspect = aspect;
   camera.updateProjectionMatrix();
+  viewCamera.aspect = aspect;
+  viewCamera.updateProjectionMatrix();
   panoramaView.resize(aspect);
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
@@ -1050,6 +1083,7 @@ function onAuthSuccess(username: string): void {
   menuBtns.style.display = 'flex'; // Civilization / Character / Controls appear once logged in
   authErr.textContent = '';
   authStatus.textContent = '';
+  clearElimination(); // you're in — no lockout panel hanging around
   refreshNetInfo();
 }
 
@@ -1092,6 +1126,7 @@ function issueOfflineSession(username: string): void {
 /** Everything a fresh OFFLINE auth needs after the account checks out. */
 function finishOfflineAuth(account: Account, freshRegister: boolean): void {
   localFaction = account.faction;
+  invalidateSelfAvatar(); // your third-person body reflects the new look/side
   onAuthSuccess(account.username);
   spawnInOwnTerritory(); // never drop into enemy land (offline)
   if (freshRegister) announceSide(localFaction);
@@ -1203,7 +1238,63 @@ function setAuthMode(mode: 'register' | 'login'): void {
     .addEventListener('click', () => setAuthMode(mode === 'register' ? 'login' : 'register'));
 }
 
-net.onAuthErr = (error) => {
+// --- Elimination countdown on the title screen ------------------------------
+// A knocked-out player lands back here, so the wait is shown as a LIVE ticking
+// clock rather than a one-off error line. A permanent elimination (your faction
+// had no flag) says so plainly instead of counting toward a date in 2286.
+const elimPanel = document.createElement('div');
+elimPanel.className = 'mc-font';
+elimPanel.style.cssText =
+  'display:none;margin:14px auto 0;max-width:430px;padding:14px 18px;border-radius:10px;' +
+  'background:rgba(40,8,12,0.86);border:2px solid #ff5c5c;color:#ffd9d9;' +
+  'font-size:14px;text-align:center;line-height:1.5;';
+overlay.appendChild(elimPanel);
+let elimUntilMs = 0;        // wall-clock ms when the lockout lifts (0 = none)
+let elimPermanent = false;
+
+function showElimination(lockMs: number, permanent: boolean): void {
+  elimPermanent = permanent;
+  elimUntilMs = permanent ? 0 : Date.now() + lockMs;
+  renderElimination();
+}
+function clearElimination(): void {
+  elimUntilMs = 0; elimPermanent = false;
+  elimPanel.style.display = 'none';
+}
+function renderElimination(): void {
+  if (elimPermanent) {
+    elimPanel.innerHTML =
+      '<b style="font-size:17px">💀 ELIMINATED — FOREVER</b><br>' +
+      'You ran out of hearts while your faction held no flag.<br>' +
+      'There is no comeback from this one. Ask an admin for a fresh start.';
+    elimPanel.style.display = 'block';
+    return;
+  }
+  if (!elimUntilMs) { elimPanel.style.display = 'none'; return; }
+  const left = elimUntilMs - Date.now();
+  if (left <= 0) {
+    elimPanel.innerHTML =
+      '<b style="font-size:17px">✨ You\'re back!</b><br>Log in to rejoin the war with 3 hearts.';
+    elimPanel.style.display = 'block';
+    return;
+  }
+  const h = Math.floor(left / 3600000);
+  const m = Math.floor(left / 60000) % 60;
+  const sec = Math.floor(left / 1000) % 60;
+  const clock = `${h}h ${String(m).padStart(2, '0')}m ${String(sec).padStart(2, '0')}s`;
+  elimPanel.innerHTML =
+    '<b style="font-size:17px">💀 ELIMINATED</b><br>' +
+    `You come back in <b style="font-size:18px">${clock}</b> — with 3 hearts.<br>` +
+    'A teammate with a Revival Beacon can bring you back sooner.';
+  elimPanel.style.display = 'block';
+}
+// Tick the countdown once a second while it's on screen.
+window.setInterval(() => {
+  if (elimPanel.style.display !== 'none') renderElimination();
+}, 1000);
+
+net.onAuthErr = (error, lockMs, permanent) => {
+  if (lockMs !== undefined && lockMs > 0) showElimination(lockMs, permanent === true);
   authStatus.textContent = '';
   if (sessionPending) {
     sessionPending = false;
@@ -1292,7 +1383,8 @@ const controlsPanel = (() => {
     ['Set waypoint here', 'B'], ['Getting-started guide', 'H'],
     ['TPA — teleport to a player', 'T'], ['Accept a TPA request', 'Hold Y'],
     ['Hotbar slot', '1 – 9 / scroll'], ['Inventory', 'E'], ['World map', 'M'],
-    ['Your progress', 'G'], ['Debug overlay', 'F3'], ['Pause / back', 'Esc'],
+    ['Your progress', 'G'], ['Camera view (1st / 3rd)', 'V'],
+    ['Debug overlay', 'F3'], ['Pause / back', 'Esc'],
   ];
   for (const [action, key] of binds) {
     const a = document.createElement('div'); a.textContent = action; a.style.color = '#cfe0ff';
@@ -1329,10 +1421,12 @@ function cosmeticsKey(user: string): string { return `voxelon.cosmetics.${user}`
 function loadCosmetics(user: string): void {
   hasCustomLook = false;
   myCosmetics = defaultCosmetics(skinSeed(user));
+  invalidateSelfAvatar(); // your third-person body reflects the new look/side
   try {
     const raw = localStorage.getItem(cosmeticsKey(user));
     if (raw) {
       myCosmetics = sanitizeCosmetics(JSON.parse(raw), skinSeed(user));
+      invalidateSelfAvatar();
       hasCustomLook = true;
     }
   } catch { /* ignore */ }
@@ -1478,6 +1572,7 @@ const charUI = (() => {
     'border-color:#d6bdff #35205e #35205e #d6bdff;color:#f3ecff;text-shadow:none;';
   saveBtn.addEventListener('click', () => {
     myCosmetics = { ...editing };
+    invalidateSelfAvatar(); // your third-person body reflects the new look/side
     saveCosmetics();
     showNotice('New look saved — everyone sees it!');
     close();
@@ -1729,6 +1824,7 @@ net.onWelcome = (me) => {
   onAuthSuccess(me.username);
   // Adopt the server-assigned spawn so we line up with the server's record.
   localFaction = me.faction;
+  invalidateSelfAvatar(); // your third-person body reflects the new look/side
   localSeasonsWon = me.seasonsWon ?? 0; // authoritative badge from the account
   if (justRegistered) { justRegistered = false; announceSide(localFaction); }
   player.pos.set(me.x, me.y, me.z);
@@ -1744,6 +1840,7 @@ net.onWelcome = (me) => {
   // browser has a newer local edit — then push ours so everyone sees it.
   if (me.cosmetics && !hasCustomLook) {
     myCosmetics = sanitizeCosmetics(me.cosmetics, me.skin);
+    invalidateSelfAvatar(); // your third-person body reflects the new look/side
   } else if (hasCustomLook) {
     net.sendCosmetics(myCosmetics);
   }
@@ -3027,6 +3124,7 @@ net.onFactionSwitched = (faction, remaining) => {
   // Secret: no banner, just a private notice. Your nameplate stays the OLD color
   // to everyone else (a spy) — only the server knows your true side.
   localFaction = faction;
+  invalidateSelfAvatar(); // your third-person body reflects the new look/side
   refreshNetInfo();
   showNotice(`🤫 You secretly joined ${factionName(faction)}. Switches left: ${remaining}.`);
 };
@@ -3045,6 +3143,13 @@ net.onDisconnect = () => {
   // (turretModels reconciles to the now-empty set).
   turretStates.clear();
   warActiveNow = false;
+  // Flags are server state: drop the markers so a stale pole/beacon can't linger
+  // over an offline world.
+  flagState = newFlags();
+  flagModels.setState(false, flagState.flags);
+  lastFlagMarkerKey = '';
+  worldMap.setDynamicMarkers([]);
+  myFactionFlagless = false;
   refreshNetInfo();
 };
 interaction.onEdit = (x, y, z, b) => {
@@ -3188,6 +3293,145 @@ function updateCamera(): void {
   if (Math.abs(camera.fov - targetFov) > 0.01) {
     camera.fov += (targetFov - camera.fov) * 0.3;
     camera.updateProjectionMatrix();
+  }
+  if (view !== View.First) updateViewCamera();
+}
+
+const boomDir = new THREE.Vector3();
+const boomProbe = new THREE.Vector3();
+
+/**
+ * Place the third-person render camera on a boom out of the player's eye.
+ * BACK keeps the player's own orientation (the boom trails behind); FRONT
+ * spins it 180° and mirrors the pitch so the camera looks back at your face.
+ * Either way the boom is pulled in short of the first solid block, so the
+ * view never ends up inside terrain.
+ */
+function updateViewCamera(): void {
+  const front = view === View.Front;
+  const eye = player.eyePosition;
+  viewCamera.fov = camera.fov;
+  viewCamera.rotation.set(
+    front ? -player.pitch : player.pitch,
+    front ? player.yaw + Math.PI : player.yaw,
+    0
+  );
+  viewCamera.updateProjectionMatrix();
+  // The boom runs straight backwards out of the camera's own facing.
+  boomDir.set(0, 0, 1).applyQuaternion(viewCamera.quaternion);
+  let dist = VIEW_DIST;
+  for (let d = 0.4; d <= VIEW_DIST; d += 0.25) {
+    boomProbe.copy(eye).addScaledVector(boomDir, d);
+    if (isSolid(world.getBlock(
+      Math.floor(boomProbe.x), Math.floor(boomProbe.y), Math.floor(boomProbe.z)
+    ))) { dist = Math.max(0.6, d - 0.35); break; }
+  }
+  viewCamera.position.copy(eye).addScaledVector(boomDir, dist);
+}
+
+/** V: cycle first person → third-person back → third-person front. */
+function cycleView(): void {
+  view = ((view + 1) % 3) as View;
+  showNotice(`🎥 ${VIEW_NAMES[view]}`);
+  if (view === View.First) hideSelfAvatar();
+}
+
+// ── The local player's own avatar (only rendered in the third-person views) ──
+// Built from the same builder everyone else's body comes from, so you see
+// exactly what other players see: your cosmetics, faction shirt, worn armor
+// and the item in your hand.
+let selfBody: AvatarBody | null = null;
+let selfArmorKey = '';
+let selfArmorMeshes: THREE.Mesh[] = [];
+let selfHeldId = 0;
+let selfHeldMesh: THREE.Mesh | null = null;
+let selfWalkPhase = 0;
+const selfItemMat = new THREE.MeshBasicMaterial({
+  map: atlas.texture, alphaTest: 0.4, vertexColors: true, side: THREE.DoubleSide,
+});
+
+function hideSelfAvatar(): void {
+  if (selfBody) selfBody.group.visible = false;
+}
+
+/** Drop the avatar so the next third-person frame rebuilds it (cosmetics or
+ *  faction changed). */
+function invalidateSelfAvatar(): void {
+  if (!selfBody) return;
+  // The held mesh uses the shared itemGeometry cache — detach, never dispose.
+  if (selfHeldMesh) { selfHeldMesh.parent?.remove(selfHeldMesh); selfHeldMesh = null; }
+  for (const m of selfArmorMeshes) { m.parent?.remove(m); m.geometry.dispose(); }
+  selfArmorMeshes = [];
+  selfArmorKey = ''; selfHeldId = 0;
+  scene.remove(selfBody.group);
+  disposeAvatarBody(selfBody);
+  selfBody = null;
+}
+
+/** Pose the local avatar for this frame (third person only). */
+function updateSelfAvatar(dt: number): void {
+  if (view === View.First || player.dead || localMode === 'spectator') {
+    hideSelfAvatar();
+    return;
+  }
+  if (!selfBody) {
+    selfBody = buildAvatarBody({ ...myCosmetics },
+      isFaction(localFaction) ? new THREE.Color(factionColor(localFaction)) : undefined);
+    scene.add(selfBody.group);
+  }
+  const b = selfBody;
+  b.group.visible = true;
+  b.group.position.set(player.pos.x, player.pos.y, player.pos.z);
+  b.group.rotation.y = player.yaw;
+
+  // Held item + worn armor, kept in step with the inventory.
+  const heldId = inventory.selectedStack?.id ?? 0;
+  if (heldId !== selfHeldId) {
+    selfHeldId = heldId;
+    if (selfHeldMesh) { selfHeldMesh.parent?.remove(selfHeldMesh); selfHeldMesh = null; }
+    if (heldId > 0 && ITEMS[heldId]) {
+      const mesh = new THREE.Mesh(itemGeometry(atlas, heldId), selfItemMat);
+      mesh.position.set(0, -0.68, -0.2);
+      mesh.rotation.set(-0.5, 0, 0);
+      mesh.scale.setScalar(ITEMS[heldId].kind === 'block' ? 1.5 : 1.1);
+      b.parts[3].add(mesh); // right hand
+      selfHeldMesh = mesh;
+    }
+  }
+  const armorIds = inventory.wornArmor().map((s) => s?.id ?? 0);
+  const key = armorIds.join(',');
+  if (key !== selfArmorKey) {
+    selfArmorKey = key;
+    for (const m of selfArmorMeshes) { m.parent?.remove(m); m.geometry.dispose(); }
+    selfArmorMeshes = buildArmorOverlay(b, armorIds);
+  }
+
+  // Pose: the same glide/boat/stride poses the remote avatars use.
+  if (player.boating) {
+    b.group.rotation.x = 0; b.head.rotation.x = 0;
+    b.parts[0].rotation.x = 1.35; b.parts[1].rotation.x = 1.35;
+    b.parts[2].rotation.x = 0.55; b.parts[3].rotation.x = 0.55;
+    if (b.cape) b.cape.rotation.x = -0.25;
+  } else if (player.gliding) {
+    b.group.rotation.x = 1.05;
+    b.parts[0].rotation.x = 0.2; b.parts[1].rotation.x = 0.2;
+    b.parts[2].rotation.x = 1.2; b.parts[3].rotation.x = 1.2;
+    b.head.rotation.x = -0.9;
+    if (b.cape) b.cape.rotation.x = -1.1;
+  } else {
+    b.group.rotation.x = 0;
+    b.head.rotation.x = player.pitch; // your head actually looks where you look
+    const hspeed = Math.hypot(player.vel.x, player.vel.z);
+    selfWalkPhase += Math.min(hspeed, 7) * dt * 2.4;
+    const amp = Math.sin(selfWalkPhase) * Math.min(1, hspeed / 4.5) * 0.8;
+    b.parts[0].rotation.x = amp;
+    b.parts[1].rotation.x = -amp;
+    b.parts[2].rotation.x = -amp;
+    b.parts[3].rotation.x = amp - (selfHeldId > 0 ? 0.45 : 0);
+    if (b.cape) {
+      const billow = Math.min(1, hspeed / 5) * 0.55;
+      b.cape.rotation.x = -0.12 - billow - Math.sin(selfWalkPhase * 0.5) * 0.06;
+    }
   }
 }
 
@@ -3565,6 +3809,250 @@ function tickDisguises(dt: number): void {
   }
 }
 
+// --- Holding traps: bear trap, tar, barbed wire -----------------------------
+// The rule these follow: a trap must be ESCAPABLE but never free. A bear trap
+// costs you a fixed number of frantic jumps (and everyone nearby hears it);
+// tar costs you your speed and your jump; barbed wire costs speed and blood.
+
+/** Jumps needed to prise a bear trap open. */
+const BEAR_TRAP_STRUGGLES = 6;
+/** Hard ceiling on how long the jaws can hold you, however badly you struggle. */
+const BEAR_TRAP_MAX_SECONDS = 7;
+
+let trapStruggles = 0;      // jumps banked toward getting free
+let trapPinLeft = 0;        // seconds left on the current pin
+let prevJumpForTrap = false;
+let wireHurtTimer = 0;
+const trapHudEl = document.createElement('div');
+trapHudEl.className = 'mc-font';
+trapHudEl.style.cssText =
+  'position:absolute;top:52%;left:50%;transform:translate(-50%,-50%);z-index:23;' +
+  'display:none;padding:10px 20px;border-radius:8px;font-size:17px;color:#fff;' +
+  'background:rgba(60,10,10,0.8);border:2px solid #ff6a3d;text-align:center;';
+app.appendChild(trapHudEl);
+
+/** Which holding trap the player is standing in (Air if none). */
+function trapUnderfoot(): number {
+  const bx = Math.floor(player.pos.x), bz = Math.floor(player.pos.z);
+  const feet = world.getBlock(bx, Math.floor(player.pos.y + 0.1), bz);
+  if (feet === Block.Tar || feet === Block.BarbedWire) return feet;
+  const under = world.getBlock(bx, Math.floor(player.pos.y - 0.05), bz);
+  if (under === Block.BearTrap || under === Block.Tar) return under;
+  return Block.Air;
+}
+
+function updateTrapGrip(dt: number): void {
+  wireHurtTimer = Math.max(0, wireHurtTimer - dt);
+  player.pinned = false;
+  player.trapSlow = 1;
+  player.trapNoJump = false;
+  if (player.dead || localMode !== 'survival' || player.noclip) {
+    trapPinLeft = 0; trapHudEl.style.display = 'none';
+    return;
+  }
+
+  const trap = trapUnderfoot();
+
+  // Bear trap: the jaws snap shut the moment you step on them.
+  if (trap === Block.BearTrap && trapPinLeft <= 0 && trapStruggles === 0) {
+    trapPinLeft = BEAR_TRAP_MAX_SECONDS;
+    trapStruggles = 0;
+    player.damage(2);
+    audio.hurt();
+    showNotice('🪤 A bear trap snapped shut on your leg!');
+  }
+
+  if (trapPinLeft > 0) {
+    trapPinLeft = Math.max(0, trapPinLeft - dt);
+    player.pinned = true;
+    player.trapNoJump = true;
+    // Struggle out: each fresh jump press prises the jaws a little wider.
+    const jumpNow = input.jump;
+    if (jumpNow && !prevJumpForTrap) trapStruggles++;
+    prevJumpForTrap = jumpNow;
+    const left = Math.max(0, BEAR_TRAP_STRUGGLES - trapStruggles);
+    if (left <= 0 || trapPinLeft <= 0) {
+      trapPinLeft = 0; trapStruggles = 0;
+      trapHudEl.style.display = 'none';
+      showNotice('🪤 You wrenched the trap open!');
+    } else {
+      trapHudEl.innerHTML =
+        `🪤 <b>CAUGHT IN A BEAR TRAP</b><br>Mash <b>JUMP</b> to break free — ${left} more`;
+      trapHudEl.style.display = 'block';
+    }
+    return;
+  }
+  trapStruggles = 0;
+  prevJumpForTrap = input.jump;
+  trapHudEl.style.display = 'none';
+
+  // Tar: a crawl, and no jumping out of the pit.
+  if (trap === Block.Tar) {
+    player.trapSlow = 0.32;
+    player.trapNoJump = true;
+    return;
+  }
+  // Barbed wire: slow AND bleeding while you push through it.
+  if (trap === Block.BarbedWire) {
+    player.trapSlow = 0.45;
+    if (wireHurtTimer <= 0) {
+      wireHurtTimer = 0.8;
+      player.damage(2);
+    }
+  }
+}
+
+// --- CAPTURE THE FLAG (client side) -----------------------------------------
+// Everything here is presentation + intent: the server owns the rules, decides
+// which flag a swing lands on, and broadcasts every change.
+
+const flagHudEl = document.createElement('div');
+flagHudEl.className = 'mc-font';
+flagHudEl.style.cssText =
+  'position:absolute;top:96px;left:50%;transform:translateX(-50%);z-index:22;' +
+  'display:none;padding:7px 16px;border-radius:8px;font-size:14px;color:#fff;' +
+  'background:rgba(10,12,20,0.72);border:2px solid #7a5cff;text-align:center;';
+app.appendChild(flagHudEl);
+
+function showFlagHud(html: string, border: string): void {
+  flagHudEl.innerHTML = html;
+  flagHudEl.style.borderColor = border;
+  flagHudEl.style.display = 'block';
+}
+
+/**
+ * Swing at the flag pad you're standing on. Returns true when the flag layer
+ * has claimed this frame's left-click (so mining stays suppressed).
+ * Also drives the on-screen prompt: what to hit, how far along you are, and
+ * where to run once you've got it.
+ */
+function flagSwingUpdate(dt: number, leftDown: boolean): boolean {
+  flagHitTimer = Math.max(0, flagHitTimer - dt);
+  if (!net.connected) { flagHudEl.style.display = 'none'; return false; }
+
+  const px = player.pos.x, pz = player.pos.z;
+  const mine = flagModels.carriedBy(net.myId ?? -1);
+  if (mine) {
+    // You're running a flag: point the way home and score on arrival (the
+    // server does the actual capture check off your transform).
+    const d = flagModels.distanceToOwnPad(localFaction, px, pz);
+    showFlagHud(
+      `🚩 <b>You are carrying the ${factionName(mine.faction)} flag!</b><br>` +
+      `Run it to your own flag — <b>${Math.round(d)}m</b> away. Die and it goes home.`,
+      factionCss(mine.faction));
+    return false; // carrying doesn't consume clicks — you still need to fight
+  }
+
+  const target = flagModels.plantedInReach(localFaction, px, pz, FLAG_REACH);
+  if (!target) { flagHudEl.style.display = 'none'; return false; }
+
+  if (!flagState.breakable) {
+    showFlagHud(
+      `🛡 The ${factionName(target.faction)} flag is <b>protected</b> — it can't be taken right now.`,
+      '#7a8090');
+    return false;
+  }
+  const pct = Math.round(100 - (target.hp / FLAG_MAX_HP) * 100);
+  showFlagHud(
+    `🚩 <b>Hold left-click</b> to prise the ${factionName(target.faction)} flag loose — ${pct}%`,
+    factionCss(target.faction));
+  if (!leftDown || player.dead) return true;
+  if (flagHitTimer <= 0) {
+    flagHitTimer = 0.25;
+    net.sendFlagHit();
+    held.swing();
+  }
+  return true;
+}
+
+net.onFlags = (breakable, flags) => {
+  flagState = { breakable, flags: flags.map((f) => ({ ...f })) };
+  flagModels.setState(breakable, flagState.flags as Flag[]);
+  const flagless = !flagState.flags.some((f) => f.holder === localFaction);
+  if (flagless !== myFactionFlagless) {
+    myFactionFlagless = flagless;
+    refreshNetInfo();
+  }
+};
+
+net.onFlagEvent = (kind, faction, by, holder) => {
+  const who = by || 'Someone';
+  if (kind === 'taken') {
+    const mineNow = faction === localFaction;
+    showRegionBanner(
+      mineNow ? `🚩 ${who} IS STEALING YOUR FLAG — STOP THEM!`
+              : `🚩 ${who} took the ${factionName(faction)} flag!`,
+      factionCss(faction));
+    audio.heartSteal();
+  } else if (kind === 'returned') {
+    showNotice(`🚩 The ${factionName(faction)} flag is back home.`);
+  } else {
+    const lost = faction === localFaction;
+    showRegionBanner(
+      lost ? `💀 YOUR FLAG IS GONE — deaths are now PERMANENT until you take it back!`
+           : `🏴 ${factionName(holder)} captured the ${factionName(faction)} flag!`,
+      factionCss(holder));
+  }
+};
+
+/** Update flag poles/banners; resolves carriers to their live positions. */
+function updateFlagVisuals(dt: number): void {
+  if (!net.connected) return;
+  flagModels.update(dt, camera, flagCarrierPos);
+  updateFlagMarkers();
+}
+
+/** Where a flag carrier is right now (me or a synced remote), or null. */
+function flagCarrierPos(pid: number): THREE.Vector3 | null {
+  if (pid === net.myId) return player.pos.clone();
+  const r = net.remotes.get(pid);
+  return r ? new THREE.Vector3(r.tx, r.ty, r.tz) : null;
+}
+
+// The map/beacon markers are rebuilt only when something actually moved —
+// setDynamicMarkers redraws the whole map canvas, and a carrier running across
+// the world would otherwise redraw it every single frame.
+let lastFlagMarkerKey = '';
+
+/**
+ * Put every flag on the world map (and, for free, on the floating in-world
+ * beacon badges): planted flags sit on their pad, a stolen one rides with its
+ * carrier so the whole server can watch the chase. Each marker is coloured by
+ * the flag it IS, and says who's holding it.
+ */
+function updateFlagMarkers(): void {
+  const markers: { x: number; z: number; color: number; name: string }[] = [];
+  for (const f of flagState.flags) {
+    const owner = factionName(f.faction);
+    if (f.carrier >= 0) {
+      const pos = flagCarrierPos(f.carrier);
+      if (!pos) continue; // carrier out of sync range — no marker to place
+      const who = f.carrier === net.myId
+        ? 'YOU'
+        : net.remotes.get(f.carrier)?.info.username ?? 'a raider';
+      markers.push({
+        x: Math.round(pos.x), z: Math.round(pos.z),
+        color: factionColor(f.faction),
+        name: `🚩 ${owner} flag — ${who}`,
+      });
+      continue;
+    }
+    const home = flagPosition(f);
+    const stolen = f.holder !== f.faction;
+    markers.push({
+      x: home.x, z: home.z,
+      color: factionColor(f.faction),
+      name: stolen
+        ? `🏴 ${owner} flag — held by ${factionName(f.holder)}`
+        : `🚩 ${owner} flag`,
+    });
+  }
+  const key = markers.map((m) => `${m.x},${m.z},${m.color},${m.name}`).join('|');
+  if (key === lastFlagMarkerKey) return;
+  lastFlagMarkerKey = key;
+  worldMap.setDynamicMarkers(markers);
+}
+
 /** Reposition the closing war ring + reconcile the everybody-glows halos. */
 function updateWarVisuals(): void {
   const active = net.connected && warActiveNow;
@@ -3606,7 +4094,26 @@ function updateWarVisuals(): void {
       glowSprites.delete(id);
     }
   }
+
+  // Everyone glows means everyone: in third person you see your own halo too,
+  // exactly as the rest of the server sees you.
+  const showSelf = active && view !== View.First && !player.dead &&
+    localMode !== 'spectator';
+  if (showSelf && !selfGlow) {
+    selfGlow = new THREE.Sprite(warGlowMaterial(localFaction));
+    selfGlow.scale.setScalar(2.6);
+    selfGlow.renderOrder = 50;
+    glowGroup.add(selfGlow);
+  }
+  if (selfGlow) {
+    selfGlow.visible = showSelf;
+    if (showSelf) {
+      (selfGlow.material as THREE.SpriteMaterial).color.setHex(factionColor(localFaction));
+      selfGlow.position.set(player.pos.x, player.pos.y + 1.1, player.pos.z);
+    }
+  }
 }
+let selfGlow: THREE.Sprite | null = null;
 
 // --- Crafting Guide (recipe book) -------------------------------------------
 let guideOpen = false;
@@ -3849,6 +4356,7 @@ function frame(): void {
           `${Math.round(player.pos.x)}, Y${Math.round(player.pos.y)}, ${Math.round(player.pos.z)}`);
       }
       if (input.guideToggled) toggleGuidePanel();
+      if (input.viewPressed) cycleView();
       if (input.tpaPressed) openTpaPrompt();
     }
 
@@ -3932,7 +4440,12 @@ function frame(): void {
       const heldGun = heldStack ? ITEMS[heldStack.id]?.gun : undefined;
       const heldGadget = heldStack && !heldGun ? gadgetOf(heldStack.id) : undefined;
 
-      if (heldGadget) {
+      // FLAGS come first: standing at an enemy flag pad, left-click is a swing
+      // at the pole (never a mine), because that's the only thing you could
+      // possibly mean to be doing there.
+      if (flagSwingUpdate(dt, input.leftDown)) {
+        interaction.update(dt, input, camera, true, true); // suppress mine + use
+      } else if (heldGadget) {
         // Gadgets: left-click uses the toy (suppresses mining + block use).
         if (input.leftClicked) useGadget(heldGadget);
         interaction.update(dt, input, camera, true, true);
@@ -4056,15 +4569,18 @@ function frame(): void {
         }
       }
     } else prevBoatJump = false;
-    // Traps: spikes prick anyone standing on them; a landmine detonates.
+    // Traps: spikes prick anyone standing on them; a landmine detonates; the
+    // holding traps (bear trap / tar / barbed wire) grab you where you stand.
     spikeHurtTimer = Math.max(0, spikeHurtTimer - dt);
+    updateTrapGrip(dt);
     if (!player.dead && localMode === 'survival' && !player.noclip) {
       const bx = Math.floor(player.pos.x), bz = Math.floor(player.pos.z);
       const by = Math.floor(player.pos.y - 0.05);
       const under = world.getBlock(bx, by, bz);
       if (under === Block.SpikeTrap && player.onGround && spikeHurtTimer <= 0) {
-        player.damage(2);
-        spikeHurtTimer = 0.7;
+        // Spikes bite harder now — a spike moat is meant to hurt.
+        player.damage(3);
+        spikeHurtTimer = 0.55;
       } else if (under === Block.Landmine) {
         triggerLandmine(bx, by, bz);
       }
@@ -4079,6 +4595,7 @@ function frame(): void {
     updateGuide(dt, controlling); // getting-started checklist + vault compass
     updateTpa(dt, controlling);   // TPA accept hold + incoming-request banner
     updateWarVisuals();   // the closing red ring + everybody-glows halos
+    updateFlagVisuals(dt); // flag poles, beacons + the carrier's banner
     tickDisguises(dt); // Phase 8: expire spy disguises on remote avatars
     updateThrownItems(dt); // animate tossed grenades/bombs
     // Jump Boost: zero fall distance while the immunity window is active.
@@ -4098,7 +4615,10 @@ function frame(): void {
   furnaces.update(dt);
 
   // Past this point we're always in-game (title returns early above).
-  const activeCamera: THREE.Camera = camera;
+  // First person renders through the eye camera itself; the third-person
+  // views render through the boom camera (aiming still uses `camera`).
+  const activeCamera: THREE.Camera = view === View.First ? camera : viewCamera;
+  updateSelfAvatar(dt);
 
   world.update(player.pos.x, player.pos.z, 6);
   sky.update(dt, activeCamera);
@@ -4138,7 +4658,8 @@ function frame(): void {
     )) audio.caveAmbience();
   }
   // Held item shows only during active play.
-  held.setItem(controlling ? inventory.selectedStack?.id ?? null : null);
+  held.setItem(controlling && view === View.First
+    ? inventory.selectedStack?.id ?? null : null);
   held.update(dt, controlling && input.leftDown, sky.sunIntensity);
 
   // Gameplay HUD chrome shows only during active play.

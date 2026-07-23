@@ -17,6 +17,13 @@ import {
 } from '../src/hearts';
 import { Chunk } from '../src/chunk';
 import { matchGrid, craftResult, consumeCraft, RECIPES } from '../src/crafting';
+import {
+  FLAG_MAX_HP, FLAG_REACH, factionHasFlag, flagHome, flagPosition, flaglessFactions,
+  hitFlag, newFlags, returnFlag, sanitizeFlags, tryCapture,
+} from '../src/flags';
+import {
+  COMEBACK_HEARTS, PERMANENT_UNTIL, formatRemaining, isPermanentElimination,
+} from '../src/hearts';
 import { Furnaces, SMELT } from '../src/furnace';
 import { Inventory, CRAFT_START, ARMOR_START } from '../src/inventory';
 import {
@@ -169,9 +176,10 @@ check('daylight: noon full, midnight moonlit floor, dawn between',
 
 // --- Drop table (VOXELON: no apples/food) -----------------------------------------
 {
-  check('stone->cobble, grass->dirt',
+  check('stone->cobble, grass->grass (turf keeps its green)',
     dropFor(Block.Stone, 0.5)?.id === Block.Cobblestone &&
-    dropFor(Block.Grass, 0.5)?.id === Block.Dirt);
+    dropFor(Block.Grass, 0.5)?.id === Block.Grass &&
+    dropFor(Block.SnowyGrass, 0.5)?.id === Block.SnowyGrass);
   check('ores drop coal/redstone/diamond',
     dropFor(Block.CoalOre, 0.5)?.id === Item.Coal &&
     dropFor(Block.RedstoneOre, 0.5)!.count >= 4 &&
@@ -257,6 +265,21 @@ check('daylight: noon full, midnight moonlit floor, dawn between',
     !miningStats(BLOCKS[Block.IronOre], pick(Item.WoodenPickaxe)).harvest &&
     !miningStats(BLOCKS[Block.DiamondOre], pick(Item.StonePickaxe)).harvest &&
     miningStats(BLOCKS[Block.DiamondOre], pick(Item.IronPickaxe)).harvest);
+  check('diamond shovel INSTAMINES grass/dirt/sand', (() => {
+    const sh = pick(Item.DiamondShovel);
+    return [Block.Grass, Block.Dirt, Block.Sand, Block.RedSand, Block.SnowyGrass]
+      .every((b) => {
+        const s = miningStats(BLOCKS[b], sh);
+        return s.time === 0 && s.harvest;
+      });
+  })());
+  check('the diamond shovel is no shortcut on stone/wood', (() => {
+    const sh = pick(Item.DiamondShovel);
+    return miningStats(BLOCKS[Block.Stone], sh).time > 1 &&
+      miningStats(BLOCKS[Block.OakLog], sh).time > 1 &&
+      // an iron shovel still DIGS, just not instantly
+      miningStats(BLOCKS[Block.Dirt], pick(Item.IronShovel)).time > 0;
+  })());
   const inv = new Inventory();
   inv.add(Item.WoodenPickaxe, 1);
   inv.slots[0]!.damage = 58;
@@ -3946,6 +3969,12 @@ let firstVault: VaultStamp | null = null;
     RECIPES.some((r) => r.result.id === Block.GoldBlock) &&
     RECIPES.some((r) => r.kind === 'shapeless' && r.result.id === Item.GoldIngot &&
       r.result.count === 4));
+  check('the Diamond Shovel is craftable, top-tier and wears slowly', (() => {
+    const sh = ITEMS[Item.DiamondShovel];
+    return RECIPES.some((r) => r.result.id === Item.DiamondShovel) &&
+      sh?.tool?.type === 'shovel' && sh.tool.tier === 3 &&
+      sh.tool.durability > ITEMS[Item.IronShovel]!.tool!.durability;
+  })());
   check('Gold Block is a glowing, placeable block item',
     BLOCKS[Block.GoldBlock].emission > 0 && BLOCKS[Block.GoldBlock].solid &&
     ITEMS[Block.GoldBlock]?.kind === 'block');
@@ -4129,6 +4158,158 @@ let firstVault: VaultStamp | null = null;
   for (let i = 0; i < 8; i++) s4.tickRegen(0.5); // 4s of boosted regen
   check('a Medkit still heals in combat, but at half speed',
     hp4(2) > 5 && hp4(3) > hp4(2), `tagged=${hp4(2)} untagged=${hp4(3)}`);
+}
+
+
+// --- CAPTURE THE FLAG -------------------------------------------------------
+{
+  const home0 = flagHome(0), home1 = flagHome(1);
+  check('each faction gets its own pad, inside the Heartland, well apart',
+    home0.x !== home1.x && Math.abs(home0.x) <= CORE_HALF && Math.abs(home1.x) <= CORE_HALF &&
+    Math.abs(home0.x - home1.x) > FLAG_REACH * 4,
+    `${home0.x},${home0.z} vs ${home1.x},${home1.z}`);
+
+  // Pure rules first (no server needed).
+  {
+    const st = newFlags();
+    check('flags start planted, owned, and UNBREAKABLE',
+      !st.breakable && st.flags.every((f) => f.holder === f.faction && f.carrier === -1) &&
+      hitFlag(st, 1, 1, home0.x, home0.z) === null);
+
+    st.breakable = true;
+    check('you can never rip up your OWN flag',
+      hitFlag(st, 1, 0, home0.x, home0.z) === null);
+    check('out of reach is out of luck',
+      hitFlag(st, 1, 1, home0.x + FLAG_REACH + 3, home0.z) === null);
+
+    // A full siege: every hit but the last just chips the pole.
+    let taken = null as ReturnType<typeof hitFlag>;
+    for (let i = 0; i < FLAG_MAX_HP; i++) {
+      const ev = hitFlag(st, 1, 1, home0.x, home0.z);
+      if (ev?.kind === 'taken') { taken = ev; break; }
+    }
+    check('prising a flag loose takes the FULL pole HP, then it is carried',
+      taken?.kind === 'taken' && st.flags[0].carrier === 1);
+    check('a carrier cannot pick up a second flag',
+      hitFlag(st, 1, 1, home1.x, home1.z) === null);
+    check('carrying does not transfer ownership on its own',
+      factionHasFlag(st, 0) && !factionHasFlag(st, 1) === false || st.flags[0].holder === 0);
+
+    // Dying on the way home hands nothing over.
+    check('death returns the flag home untouched',
+      returnFlag(st, 1)?.kind === 'returned' &&
+      st.flags[0].carrier === -1 && st.flags[0].hp === FLAG_MAX_HP &&
+      st.flags[0].holder === 0);
+
+    // Take it again and actually run it home.
+    for (let i = 0; i < FLAG_MAX_HP; i++) hitFlag(st, 1, 1, home0.x, home0.z);
+    check('walking a stolen flag anywhere but your own pad scores nothing',
+      tryCapture(st, 1, 1, home0.x + 40, home0.z) === null);
+    const cap = tryCapture(st, 1, 1, home1.x, home1.z);
+    check('running it to YOUR pad captures it',
+      cap?.kind === 'captured' && st.flags[0].holder === 1 && st.flags[0].carrier === -1);
+    check('a captured flag leaves its old faction FLAGLESS',
+      !factionHasFlag(st, 0) && factionHasFlag(st, 1) &&
+      flaglessFactions(st).length === 1 && flaglessFactions(st)[0] === 0);
+    check('a captured flag now stands at the captor\'s base',
+      flagPosition(st.flags[0]).x === home1.x);
+    check('the robbed faction can steal it back the same way', (() => {
+      for (let i = 0; i < FLAG_MAX_HP; i++) hitFlag(st, 2, 0, home1.x, home1.z);
+      const back = tryCapture(st, 2, 0, home0.x, home0.z);
+      return back?.kind === 'captured' && factionHasFlag(st, 0);
+    })());
+  }
+
+  // Junk off the wire never produces a half-broken war.
+  check('sanitizeFlags fails closed on junk',
+    sanitizeFlags(null).flags.length === FACTIONS.length &&
+    sanitizeFlags({ breakable: 'yes', flags: [{ faction: 0, holder: 99, hp: -5 }] })
+      .flags.every((f) => f.holder === f.faction && f.hp > 0) &&
+    sanitizeFlags({ breakable: true, flags: [{ faction: 0, holder: 1, hp: 12, carrier: 7 }] })
+      .flags[0].carrier === -1);
+
+  // Now the same rules over the real server, including elimination.
+  const srv = new GameServer(1337, mulberry32(601));
+  srv.addPlayer(1, { username: 'Raider', faction: 1 });
+  srv.addPlayer(2, { username: 'Keeper', faction: 0 });
+  const at = (id: number, x: number, z: number) =>
+    srv.handle(id, { t: 'xform', x, y: 70, z, yaw: 0, pitch: 0 });
+  at(1, home0.x, home0.z);
+  const lockedHits = srv.handle(1, { t: 'flagHit' });
+  check('server refuses flag hits while flags are locked', lockedHits.length === 0);
+
+  srv.adminSetFlagsBreakable(true);
+  check('both factions hold a flag before anything is stolen',
+    srv.factionHasFlag(0) && srv.factionHasFlag(1));
+
+  // The rate limiter means a spam-clicking macro gains nothing.
+  const firstSwing = srv.handle(1, { t: 'flagHit' }).length;
+  const instantSecond = srv.handle(1, { t: 'flagHit' }).length;
+  check('flag swings are rate-limited server-side (no macro spam)',
+    firstSwing > 0 && instantSecond === 0, `${firstSwing} then ${instantSecond}`);
+
+  // Beat it loose (advancing worldTime so the cooldown clears each swing).
+  let takenMsg = false;
+  for (let i = 0; i < FLAG_MAX_HP + 4 && !takenMsg; i++) {
+    srv.tickWar(1);
+    const out = srv.handle(1, { t: 'flagHit' });
+    takenMsg = out.some((o) => (o.msg as { t: string; kind?: string }).kind === 'taken');
+  }
+  check('a real siege over the wire ends with the flag in enemy hands', takenMsg);
+
+  // Run it home: the capture fires off the transform, not a client claim.
+  const capOut = at(1, home1.x, home1.z);
+  check('capture is decided from the carrier\'s own transform',
+    capOut.some((o) => (o.msg as { t: string; kind?: string }).kind === 'captured'));
+  check('the robbed faction is now flagless on the server',
+    !srv.factionHasFlag(0) && srv.factionHasFlag(1));
+
+  // The stake: flagless deaths are permanent, flagged deaths are the 24h kind.
+  const elims: { user: string; permanent: boolean }[] = [];
+  srv.onEliminate = (user, _by, permanent) => { elims.push({ user, permanent }); return 1; };
+  srv.adminSetHearts(2, 1); // one heart left
+  at(2, home1.x, home1.z - 1); // in front of the raider (yaw 0 faces -z)
+  srv.handle(1, { t: 'rangedAttack', target: 2, amount: 999 });
+  check('a flagless faction\'s players are eliminated PERMANENTLY',
+    elims.length === 1 && elims[0].user === 'Keeper' && elims[0].permanent === true,
+    JSON.stringify(elims));
+
+  // Give the flag back and the same death is only a 24h lockout.
+  srv.adminResetFlags();
+  elims.length = 0;
+  srv.addPlayer(3, { username: 'Keeper2', faction: 0 });
+  srv.adminSetHearts(3, 1);
+  at(3, home1.x, home1.z - 1);
+  srv.handle(1, { t: 'rangedAttack', target: 3, amount: 999 });
+  check('with a flag in hand, elimination is only the 24h kind',
+    elims.length === 1 && elims[0].permanent === false, JSON.stringify(elims));
+
+  check('a comeback is 3 hearts, and permanence never counts down',
+    COMEBACK_HEARTS === 3 && isPermanentElimination(PERMANENT_UNTIL) &&
+    !isPermanentElimination(Date.now() + 3600_000) &&
+    formatRemaining(PERMANENT_UNTIL) === 'never');
+}
+
+// --- Holding traps + defenses -----------------------------------------------
+{
+  check('the holding traps exist, are walk-into-able and cheap to place',
+    !BLOCKS[Block.Tar].solid && !BLOCKS[Block.BarbedWire].solid &&
+    BLOCKS[Block.BearTrap].shape === 'slab' &&
+    [Block.BearTrap, Block.Tar, Block.BarbedWire].every((b) => ITEMS[b]?.kind === 'block'));
+  check('every trap + defense block is craftable',
+    [Block.BearTrap, Block.Tar, Block.BarbedWire,
+     Block.Barricade, Block.ReinforcedStone, Block.Floodlight]
+      .every((b) => RECIPES.some((r) => r.result.id === b)));
+  check('defenses are genuinely hard to chew through', (() => {
+    const wall = miningStats(BLOCKS[Block.ReinforcedStone], { id: Item.IronPickaxe, count: 1 });
+    const stone = miningStats(BLOCKS[Block.Stone], { id: Item.IronPickaxe, count: 1 });
+    const barricade = miningStats(BLOCKS[Block.Barricade], { id: Item.IronAxe, count: 1 });
+    return wall.time > stone.time * 10 && wall.harvest && barricade.time > stone.time * 3;
+  })());
+  check('a wooden-tier raider cannot breach reinforced stone at all',
+    !miningStats(BLOCKS[Block.ReinforcedStone], { id: Item.StonePickaxe, count: 1 }).harvest);
+  check('the floodlight lights a base at full brightness',
+    BLOCKS[Block.Floodlight].emission >= 15);
 }
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} FAILURES`);

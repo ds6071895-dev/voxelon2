@@ -60,14 +60,14 @@ function speckle(seed: number, x: number, y: number, amount: number): number {
   return 1 - amount + (coarse * 0.65 + fine * 0.35) * amount * 2;
 }
 
-const STONE: RGBA = [125, 125, 125, 255];
-const DIRT: RGBA = [134, 96, 67, 255];
-const GRASS_GREEN: RGBA = [121, 192, 90, 255];
-const SAND: RGBA = [219, 211, 160, 255];
-const WOOD_BARK: RGBA = [103, 82, 49, 255];
-const WOOD_INNER: RGBA = [174, 142, 86, 255];
-const PLANKS: RGBA = [184, 148, 95, 255];
-const WATER: RGBA = [53, 97, 217, 200];
+const STONE: RGBA = [130, 132, 138, 255];
+const DIRT: RGBA = [143, 99, 62, 255];
+const GRASS_GREEN: RGBA = [110, 205, 76, 255];
+const SAND: RGBA = [227, 214, 148, 255];
+const WOOD_BARK: RGBA = [107, 82, 43, 255];
+const WOOD_INNER: RGBA = [185, 147, 78, 255];
+const PLANKS: RGBA = [193, 152, 86, 255];
+const WATER: RGBA = [42, 105, 233, 200];
 
 function paintStone(p: Painter, seed: number): void {
   p.fill((x, y) => shade(STONE, speckle(seed, x, y, 0.12)));
@@ -594,6 +594,7 @@ function paintToolSprite(
 const TOOL_WOOD: RGBA = [171, 140, 91, 255];
 const TOOL_STONE: RGBA = [150, 150, 150, 255];
 const TOOL_IRON: RGBA = [222, 222, 222, 255];
+const TOOL_DIAMOND: RGBA = [92, 231, 214, 255];
 
 // --- M7: mob drops + skins ---------------------------------------------------
 
@@ -2058,6 +2059,121 @@ function paintVaultCompass(ring: RGBA, ringHi: RGBA) {
   };
 }
 
+
+// --- Trapping + defense kit (flag war) --------------------------------------
+
+/** Bear Trap: a round steel jaw with interlocking teeth, sprung open. */
+function paintBearTrap(p: Painter, seed: number): void {
+  const dark: RGBA = [46, 48, 54, 255];
+  const steel: RGBA = [156, 162, 172, 255];
+  const rust: RGBA = [122, 84, 52, 255];
+  p.fill((x, y) => shade(dark, speckle(seed, x, y, 0.18)));
+  // The jaw ring.
+  for (let a = 0; a < 44; a++) {
+    const ang = (a / 44) * Math.PI * 2;
+    const x = Math.round(7.5 + 5.6 * Math.cos(ang));
+    const y = Math.round(7.5 + 5.6 * Math.sin(ang));
+    p.set(x, y, shade(steel, 0.9 + hash2(seed, x, y) * 0.25));
+  }
+  // Teeth, biting inward from top and bottom.
+  for (let x = 3; x <= 12; x += 2) {
+    p.set(x, 4, steel); p.set(x, 5, shade(steel, 0.8));
+    p.set(x + 1, 11, steel); p.set(x + 1, 10, shade(steel, 0.8));
+  }
+  // The pressure plate in the middle.
+  for (let y = 6; y <= 9; y++) {
+    for (let x = 6; x <= 9; x++) p.set(x, y, shade(rust, 0.85 + hash2(seed ^ 3, x, y) * 0.3));
+  }
+}
+
+/** Tar: a glossy black pool with oily highlights. */
+function paintTar(p: Painter, seed: number): void {
+  const tar: RGBA = [22, 20, 26, 255];
+  p.fill((x, y) => {
+    const f = speckle(seed, x, y, 0.25);
+    // Slow oily swirls catching the light.
+    const swirl = Math.sin((x + y * 1.7) * 0.7 + hash2(seed, x >> 2, y >> 2) * 6);
+    const c = shade(tar, f + (swirl > 0.82 ? 0.9 : 0));
+    if (swirl > 0.92) return [c[0] + 24, c[1] + 18, c[2] + 40, 255];
+    return c;
+  });
+}
+
+/** Barbed Wire: crossed strands with barbs, mostly transparent. */
+function paintBarbedWire(p: Painter, seed: number): void {
+  const wire: RGBA = [178, 180, 186, 255];
+  const dark: RGBA = [108, 110, 116, 255];
+  p.fill(() => [0, 0, 0, 0]);
+  for (let i = 0; i < 16; i++) {
+    p.set(i, (i + 2) % 16, wire);          // strand one
+    p.set(i, (18 - i) % 16, dark);         // strand two, crossing
+    if (i % 4 === 0) {                      // barbs
+      const y = (i + 2) % 16;
+      p.set(i, Math.max(0, y - 1), wire);
+      p.set(i, Math.min(15, y + 1), wire);
+    }
+  }
+}
+
+/** Barricade: rough planks nailed across each other. */
+function paintBarricade(p: Painter, seed: number): void {
+  const plank: RGBA = [138, 100, 58, 255];
+  const dark: RGBA = [92, 66, 38, 255];
+  const nail: RGBA = [186, 190, 198, 255];
+  p.fill((x, y) => {
+    const board = Math.floor(y / 4);
+    const f = (board % 2 === 0 ? 1 : 0.86) * speckle(seed, x, y, 0.16);
+    return shade(y % 4 === 0 ? dark : plank, f);
+  });
+  // Diagonal brace + nails.
+  for (let i = 0; i < 16; i++) p.set(i, i, shade(dark, 1.25));
+  for (const [x, y] of [[2, 2], [13, 13], [2, 13], [13, 2]] as [number, number][]) {
+    p.set(x, y, nail);
+  }
+}
+
+/** Reinforced Stone: heavy blocks banded with iron plating + rivets. */
+function paintReinforcedStone(p: Painter, seed: number): void {
+  const rock: RGBA = [112, 116, 124, 255];
+  const band: RGBA = [92, 96, 106, 255];
+  const iron: RGBA = [168, 172, 182, 255];
+  p.fill((x, y) => {
+    const brick = Math.floor(y / 5.3);
+    const off = brick % 2 === 0 ? 0 : 3;
+    const seam = (x + off) % 8 === 0 || y % 5 === 0;
+    return shade(seam ? band : rock, speckle(seed, x, y, 0.12));
+  });
+  // Iron straps across the face with rivets at the corners.
+  for (let x = 0; x < 16; x++) { p.set(x, 7, iron); p.set(x, 8, shade(iron, 0.82)); }
+  for (const [x, y] of [[1, 1], [14, 1], [1, 14], [14, 14], [1, 7], [14, 7]] as [number, number][]) {
+    p.set(x, y, shade(iron, 1.15));
+  }
+}
+
+/** Floodlight: a caged lamp face, blindingly bright. */
+function paintFloodlightTop(p: Painter, seed: number): void {
+  const body: RGBA = [78, 82, 92, 255];
+  const glow: RGBA = [255, 246, 198, 255];
+  p.fill((x, y) => shade(body, speckle(seed, x, y, 0.14)));
+  for (let y = 3; y <= 12; y++) {
+    for (let x = 3; x <= 12; x++) {
+      const d = Math.hypot(x - 7.5, y - 7.5) / 6;
+      p.set(x, y, shade(glow, 1.05 - d * 0.35));
+    }
+  }
+  // Cage bars over the lens.
+  for (let i = 2; i <= 13; i++) { p.set(i, 5, body); p.set(i, 10, body); p.set(7, i, body); }
+}
+
+function paintFloodlightSide(p: Painter, seed: number): void {
+  const body: RGBA = [88, 92, 102, 255];
+  const dark: RGBA = [58, 62, 70, 255];
+  const glow: RGBA = [255, 240, 180, 255];
+  p.fill((x, y) => shade(y < 5 ? dark : body, speckle(seed, x, y, 0.15)));
+  for (let x = 2; x <= 13; x++) p.set(x, 11, glow); // light spilling from the housing
+  for (let x = 3; x <= 12; x++) p.set(x, 12, shade(glow, 0.7));
+}
+
 const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.GrassTop]: paintGrassTop,
   [Tile.GrassSide]: paintGrassSide,
@@ -2121,6 +2237,14 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.IronAxe]: paintToolSprite('axe', TOOL_IRON),
   [Tile.IronShovel]: paintToolSprite('shovel', TOOL_IRON),
   [Tile.IronSword]: paintToolSprite('sword', TOOL_IRON),
+  [Tile.DiamondShovel]: paintToolSprite('shovel', TOOL_DIAMOND),
+  [Tile.BearTrap]: paintBearTrap,
+  [Tile.Tar]: paintTar,
+  [Tile.BarbedWire]: paintBarbedWire,
+  [Tile.Barricade]: paintBarricade,
+  [Tile.ReinforcedStone]: paintReinforcedStone,
+  [Tile.FloodlightTop]: paintFloodlightTop,
+  [Tile.FloodlightSide]: paintFloodlightSide,
   [Tile.Charcoal]: paintCharcoal,
   [Tile.GoldIngot]: paintIngot([250, 222, 80, 255]),
   [Tile.Wool]: paintWool,
@@ -2299,6 +2423,44 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   },
 };
 
+// --- Vibrance -------------------------------------------------------------
+// Modern Minecraft resource art reads far punchier than the classic muted
+// palette. Rather than hand-retuning ~150 painters, every finished tile goes
+// through one post-pass in atlas space, so block faces, held items and the map
+// all shift together.
+//
+// NOTE on what this can and can't do: saturation only AMPLIFIES chroma that is
+// already there — a pure grey (r=g=b) has none, so no amount of saturation
+// moves stone. That's why this pass pairs the chroma boost with a real midtone
+// GAMMA lift (which does brighten greys), and why the base palette constants
+// below were pushed richer at the source.
+const SAT = 1.6;    // chroma multiplier around luma (hue preserved)
+const GAMMA = 0.86; // <1 lifts midtones — the "brighter, fresher" half
+
+/** Saturate + lift a painted tile in place. Transparent pixels are skipped. */
+function vibrance(p: Painter): void {
+  const d = p.data;
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] === 0) continue;
+    // Rec.709 luma keeps perceived brightness stable while chroma grows.
+    const lum = 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+    let r = lum + (d[i] - lum) * SAT;
+    let g = lum + (d[i + 1] - lum) * SAT;
+    let b = lum + (d[i + 2] - lum) * SAT;
+    // Clipping a single channel would SHIFT THE HUE (a bright red turning
+    // orange), so when any channel overshoots, pull all three back toward luma
+    // by the same factor instead. Colors stay true, just as vivid as they fit.
+    const mx = Math.max(r, g, b);
+    if (mx > 255) {
+      const t = (255 - lum) / (mx - lum);
+      r = lum + (r - lum) * t; g = lum + (g - lum) * t; b = lum + (b - lum) * t;
+    }
+    d[i]     = 255 * Math.pow(Math.max(0, r) / 255, GAMMA);
+    d[i + 1] = 255 * Math.pow(Math.max(0, g) / 255, GAMMA);
+    d[i + 2] = 255 * Math.pow(Math.max(0, b) / 255, GAMMA);
+  }
+}
+
 export function createAtlas(seed = 1337): Atlas {
   const canvas = document.createElement('canvas');
   canvas.width = ATLAS_PX;
@@ -2309,6 +2471,7 @@ export function createAtlas(seed = 1337): Atlas {
     const tile = Number(tileStr);
     const p = new Painter();
     paint(p, seed ^ (tile * 7919));
+    vibrance(p);
     const img = new ImageData(p.data, TILE_PX, TILE_PX);
     const col = tile % ATLAS_TILES;
     const row = Math.floor(tile / ATLAS_TILES);

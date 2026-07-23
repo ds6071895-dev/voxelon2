@@ -88,6 +88,8 @@ export const RECIPES: Recipe[] = [
   ...tools(P, [Item.WoodenPickaxe, Item.WoodenAxe, Item.WoodenShovel]),
   ...tools(C, [Item.StonePickaxe, Item.StoneAxe, Item.StoneShovel]),
   ...tools(I, [Item.IronPickaxe, Item.IronAxe, Item.IronShovel]),
+  // Diamond Shovel: the only diamond TOOL — it instamines grass/dirt/sand.
+  shaped([[D], [S], [S]], Item.DiamondShovel),
   // The Sword: classic blade shape (top melee damage against mobs).
   shaped([[I], [I], [S]], Item.Sword),
   // Gold banking: 4 ingots <-> 1 solid Gold Block (vault treasuries drop them).
@@ -182,6 +184,20 @@ export const RECIPES: Recipe[] = [
   shaped([[S], [C]], Block.Lever, 2),
   shaped([[P, P]], Block.FallTrap, 2),
   shaped([[C, C]], Block.WallTrap, 2),
+
+  // --- Flag-war kit ---------------------------------------------------------
+  // Bear Trap = a sprung iron jaw on a redstone plate: pins whoever steps in it.
+  shaped([[I, R, I], [I, null, I]], Block.BearTrap, 2),
+  // Tar = coal boiled down with oil: a sticky pool nobody jumps out of.
+  shaped([[ANY_COAL, ANY_COAL], [ANY_COAL, Item.OilBarrel]], Block.Tar, 4),
+  // Barbed Wire = iron drawn out into cheap, nasty strands.
+  shaped([[I, null, I], [null, I, null], [I, null, I]], Block.BarbedWire, 6),
+  // Barricade = planks and sticks nailed crossways — the cheap wall.
+  shaped([[P, S, P], [S, P, S], [P, S, P]], Block.Barricade, 4),
+  // Reinforced Stone = cobble bound with iron: the wall you build round a flag.
+  shaped([[C, I, C], [I, C, I], [C, I, C]], Block.ReinforcedStone, 5),
+  // Floodlight = a torch behind glass in an iron housing: no more night sneaks.
+  shaped([[I, Block.Glass, I], [I, Block.Torch, I]], Block.Floodlight, 2),
 
   // Boat: a plank hull, like the classic. Right-click water to launch.
   shaped([[P, null, P], [P, P, P]], Item.Boat),

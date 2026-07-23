@@ -425,15 +425,8 @@ export class Terrain {
       return;
     }
 
-    // Snowy plains: low spruce shrubs + mossy boulders break up the white.
-    if (biome === Biome.Snowy) {
-      if (r < 0.008) chunk.set(lx, h + 1, lz, Block.SpruceLeaves);
-      else if (r < 0.011) {
-        chunk.set(lx, h + 1, lz, Block.Cobblestone);
-        if (hash2(this.seed ^ 0xb0d, wx, wz) < 0.4) chunk.set(lx, h + 2, lz, Block.Cobblestone);
-      }
-      return;
-    }
+    // Snowy plains: nothing but the snow (no stray boulders/shrubs).
+    if (biome === Biome.Snowy) return;
 
     const grassy = biome === Biome.Plains || biome === Biome.Forest ||
       biome === Biome.BirchForest || biome === Biome.Jungle ||
@@ -460,21 +453,9 @@ export class Terrain {
         : 0.4;
       chunk.set(lx, h + 1, lz,
         hash2(this.seed ^ 0xf1, wx, wz) < poppyBias ? Block.Poppy : Block.Dandelion);
-    } else if (biome === Biome.Forest || biome === Biome.BirchForest) {
-      // Forest floor clutter: leafy shrubs + rare mossy boulders.
-      if (r > 0.985 && r < 0.995) {
-        chunk.set(lx, h + 1, lz,
-          biome === Biome.BirchForest ? Block.BirchLeaves : Block.Leaves);
-      } else if (r >= 0.998) {
-        chunk.set(lx, h + 1, lz, Block.Cobblestone);
-      }
-    } else if (biome === Biome.Jungle && r > 0.97) {
-      // Dense jungle underbrush: ground-level leaf bushes.
-      chunk.set(lx, h + 1, lz, Block.JungleLeaves);
-    } else if (biome === Biome.Plains && r > 0.9985) {
-      // A lone plains boulder (landmark clutter).
-      chunk.set(lx, h + 1, lz, Block.Cobblestone);
     }
+    // No ground-level boulders or leaf bushes: stray cobblestone/leaf blocks on
+    // the surface read as litter, not decoration, so grass + flowers are it.
   }
 
   /** Rare visual oil seeps: convert a few stone blocks under rich desert/ocean

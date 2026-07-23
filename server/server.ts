@@ -12,7 +12,10 @@ import { ClientMsg, GameMode, SERVER_PORT, SNAPSHOT_HZ, ServerMsg } from '../src
 import { GameServer, Outbound, WorldSave } from '../src/net/server_core';
 import { Accounts, Account } from '../src/net/accounts';
 import { ITEMS, Item } from '../src/items';
-import { COMEBACK_HEARTS, ELIMINATION_MS, formatRemaining } from '../src/hearts';
+import {
+  COMEBACK_HEARTS, ELIMINATION_MS, PERMANENT_UNTIL, formatRemaining,
+  isPermanentElimination,
+} from '../src/hearts';
 
 const port = Number(process.env.PORT) || SERVER_PORT;
 const sockets = new Map<number, WebSocket>();
@@ -78,11 +81,14 @@ game.onFactionSwitch = (username, faction, switchesUsed, switchSeason, forfeitSe
 // account (login is refused until it expires) and boot the victim shortly after
 // so their full-screen banner has time to deliver. Comeback hearts are written
 // now so no later state capture can resurrect the pre-elimination count.
-game.onEliminate = (username, by) => {
-  const until = Date.now() + ELIMINATION_MS;
+game.onEliminate = (username, by, permanent) => {
+  // Permanent when the victim's faction holds no flag — that's the whole point
+  // of the flag: it's the only thing that buys anyone a second life.
+  const until = permanent ? PERMANENT_UNTIL : Date.now() + ELIMINATION_MS;
   accounts.eliminate(username, until, COMEBACK_HEARTS);
   saveAccounts();
-  console.log(`☠ ${username} was ELIMINATED by ${by} (locked out 24h)`);
+  console.log(`☠ ${username} was ELIMINATED by ${by} ` +
+    `(${permanent ? 'PERMANENTLY — their faction has no flag' : 'locked out 24h'})`);
   const pid = game.playerIdByName(username);
   if (pid !== undefined) {
     setTimeout(() => {
@@ -207,7 +213,14 @@ function handleAuth(id: number, msg: ClientMsg & { t: 'register' | 'login' | 'se
   // them). Friendly countdown, not a generic error.
   const lockMs = accounts.eliminationRemaining(res.account.username, Date.now());
   if (lockMs > 0) {
-    send(id, { t: 'authErr', error: `💀 Eliminated — back in ${formatRemaining(lockMs)}` });
+    const forever = isPermanentElimination(accounts.get(res.account.username)?.eliminatedUntil);
+    send(id, {
+      t: 'authErr',
+      error: forever
+        ? '💀 Eliminated FOREVER — your faction had no flag when you fell.'
+        : `💀 Eliminated — back in ${formatRemaining(lockMs)}`,
+      lockMs, permanent: forever,
+    });
     return;
   }
   accounts.clearElimination(res.account.username, Date.now()); // clear a stale/expired stamp
@@ -432,6 +445,9 @@ const HELP = [
   '  war schedule <delay> <min>    - schedule a war in <delay> min, lasting <min>',
   '  war cancel                    - end/cancel the war (back to peacetime)',
   '  war status                    - show the current war / next-war timer',
+  '  flags on|off                  - arm/lock flag breaking (default: locked)',
+  '  flags reset                   - send every flag home to its own faction',
+  '  flags status                  - who holds which flag right now',
   '  save                          - force-save the world + accounts',
   '  stop                          - save and shut down',
   '  help                          - this list',
@@ -565,6 +581,24 @@ function runCommand(line: string): void {
           console.log(game.warStatusText());
         } else {
           console.log('usage: war start|schedule|cancel|status');
+        }
+        break;
+      }
+      case 'flags': case 'flag': {
+        const sub = (parts[1] || 'status').toLowerCase();
+        if (sub === 'on' || sub === 'arm' || sub === 'breakable') {
+          dispatch(game.adminSetFlagsBreakable(true));
+          console.log('flags ARMED — enemy flags can now be broken (very slowly)');
+        } else if (sub === 'off' || sub === 'lock' || sub === 'safe') {
+          dispatch(game.adminSetFlagsBreakable(false));
+          console.log('flags LOCKED — flags are unbreakable again');
+        } else if (sub === 'reset') {
+          dispatch(game.adminResetFlags());
+          console.log('flags reset to their home pads');
+        } else if (sub === 'status') {
+          console.log(game.flagsStatusText());
+        } else {
+          console.log('usage: flags on|off|reset|status');
         }
         break;
       }

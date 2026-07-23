@@ -63,9 +63,12 @@ function lerp3(
 }
 
 // Colormap anchors (approximating vanilla grass.png corners).
-const COLD = hex(0x80b497);
-const HOT_DRY = hex(0xbfb755);
-const LUSH = hex(0x55c93f);
+// Colormap anchors, pushed richer than the classic muted set so grass reads as
+// vivid as the modern game's (the tiles themselves are grayscale — all of the
+// grass/leaf color comes from here).
+const COLD = hex(0x74c8a0);
+const HOT_DRY = hex(0xcfc44a);
+const LUSH = hex(0x48d92f);
 
 // Larger than the previous 0.0022 so biomes read as real regions (~700-1000
 // blocks across) while several octaves keep enough variety that no single
@@ -173,7 +176,7 @@ export class Biomes {
     const sw = this.swampFlat(x, z);
     if (sw > 0) grass = lerp3(grass, [grass[0] * 0.62, grass[1] * 0.72, grass[2] * 0.5], sw);
     // Foliage: darker and greener than grass, like vanilla foliage.png.
-    const foliage: Tint = [grass[0] * 0.74, grass[1] * 0.9, grass[2] * 0.62];
+    const foliage: Tint = [grass[0] * 0.8, grass[1] * 0.97, grass[2] * 0.6];
     return { grass, foliage };
   }
 }

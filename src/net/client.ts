@@ -97,6 +97,12 @@ export class NetClient {
     score: number[], wins: number[]) => void;
   /** A war ended: the most-kills faction won it (NO_FACTION = draw). */
   onWarEnd?: (winner: number, score: number[]) => void;
+  /** Capture-the-flag state changed (also fires once from `welcome`). */
+  onFlags?: (breakable: boolean,
+    flags: { faction: number; holder: number; hp: number; carrier: number }[]) => void;
+  /** A flag was taken / returned / captured (drives banners + notices). */
+  onFlagEvent?: (kind: 'taken' | 'returned' | 'captured', faction: number,
+    by: string, holder: number) => void;
   /** The server granted YOU personal XP (PvP kill). */
   onXpAward?: (amount: number, reason: string) => void;
   /** Faction XP pools changed (shared progression). */
@@ -110,7 +116,7 @@ export class NetClient {
   /** A player changed their avatar cosmetics (their info is already updated). */
   onCosmetics?: (id: number) => void;
   /** A register/login was rejected (the login screen shows the error). */
-  onAuthErr?: (error: string) => void;
+  onAuthErr?: (error: string, lockMs?: number, permanent?: boolean) => void;
   /** A fresh session token arrived (store it for password-less resume). */
   onSession?: (token: string) => void;
   /** Lifesteal: the local player's authoritative hearts count changed. */
@@ -198,6 +204,7 @@ export class NetClient {
         this.onWar?.(msg.war.active, msg.war.timeLeft, msg.war.nextIn,
           msg.war.duration, msg.war.score, msg.war.wins);
         this.onFactionXp?.(msg.factionXp);
+        this.onFlags?.(msg.flags.breakable, msg.flags.flags);
         const me = msg.players.find((p) => p.id === this.myId);
         // Restore saved inventory BEFORE onWelcome (which adopts the server
         // position) so the comeback loadout/inventory is in place from frame one.
@@ -294,6 +301,12 @@ export class NetClient {
       case 'warEnd':
         this.onWarEnd?.(msg.winner, msg.score);
         break;
+      case 'flags':
+        this.onFlags?.(msg.breakable, msg.flags);
+        break;
+      case 'flagEvent':
+        this.onFlagEvent?.(msg.kind, msg.faction, msg.by, msg.holder);
+        break;
       case 'xpAward':
         this.onXpAward?.(msg.amount, msg.reason);
         break;
@@ -319,7 +332,7 @@ export class NetClient {
         break;
       }
       case 'authErr':
-        this.onAuthErr?.(msg.error);
+        this.onAuthErr?.(msg.error, msg.lockMs, msg.permanent);
         break;
       case 'session':
         this.onSession?.(msg.token);
@@ -394,6 +407,11 @@ export class NetClient {
     if (this.connected) this.raw({ t: 'edit', x, y, z, block });
   }
   /** Pull a lever (the server flips it + every linked trap). */
+  /** Swing at the flag you're standing next to (the server picks which). */
+  sendFlagHit(): void {
+    if (this.connected) this.raw({ t: 'flagHit' });
+  }
+
   sendLever(x: number, y: number, z: number): void {
     if (this.connected) this.raw({ t: 'lever', x, y, z });
   }

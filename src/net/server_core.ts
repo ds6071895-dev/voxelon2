@@ -29,6 +29,10 @@ import {
   WarState, newWar, warActive, warSnapshot, scheduleWar, sanitizeWar,
   warBorderAt, warDuration, DEFAULT_WAR_DURATION,
 } from '../war';
+import {
+  FlagsState, newFlags, sanitizeFlags, hitFlag, returnFlag, tryCapture,
+  factionHasFlag, carriedBy, FLAG_HIT_COOLDOWN,
+} from '../flags';
 import { XP_PLAYER_KILL, XP_REPORT_CAP, sanitizeFactionXp } from '../progress';
 import { GadgetCooldowns, gadgetOf, falloffDamage } from '../gadgets';
 import { leverFlips } from '../traps';
@@ -82,6 +86,8 @@ interface ServerPlayer extends PlayerInfo {
   lastHitTime: number;
   /** Set the instant hearts hit 0; blocks respawn until the shell disconnects. */
   eliminated: boolean;
+  /** worldTime of this player's last accepted flag swing (rate limit). */
+  lastFlagHit: number;
   /** worldTime of the last damage taken from ANY source (combat tag: no
    *  totem teleports for COMBAT_TAG seconds after). */
   lastDamageTime: number;
@@ -151,6 +157,8 @@ export class GameServer {
   private readonly machines = new Map<string, MachineState>();
   // Warfare layer (M14).
   private readonly turrets = new Map<string, TurretState>();
+  // Capture the flag: one flag per faction, disarmed until an admin arms them.
+  private flags: FlagsState = newFlags();
   // War windows: the shrinking-border battle (admin-scheduled).
   private war: WarState = newWar();
   private warAccum = 0;
@@ -174,7 +182,7 @@ export class GameServer {
    *  elimination on the account and disconnects the socket shortly after (the
    *  pure core has no wall clock). Returns the `eliminatedUntil` ms for the
    *  victim's banner (0/undefined = elimination unsupported, e.g. tests). */
-  onEliminate?: (username: string, by: string) => number;
+  onEliminate?: (username: string, by: string, permanent: boolean) => number;
   /** Revival Beacon (A3): eliminated faction-mates of `faction` (from the
    *  account store — the pure core doesn't know offline accounts). */
   listEliminated?: (faction: number) => { username: string; remainingMs: number }[];
@@ -280,7 +288,7 @@ export class GameServer {
       x: s.x, y: s.y, z: s.z, yaw: fin(syaw as number) ? syaw as number : 0, pitch: 0,
       health: maxHealthFor(hearts), dead: false, regenCooldown: 0, regenTimer: 0,
       regenBoostTimer: 0, regenBoostInterval: 0,
-      lastHitBy: -1, lastHitTime: -Infinity, eliminated: false,
+      lastHitBy: -1, lastHitTime: -Infinity, eliminated: false, lastFlagHit: -Infinity,
       lastDamageTime: -Infinity,
       totems: GameServer.sanitizeTotems(saved?.totems),
       totemCooldownUntil: 0,
@@ -314,6 +322,7 @@ export class GameServer {
       war: { ...warSnapshot(this.war, this.worldTime),
         score: this.warKills.slice(), wins: this.warWins.slice() },
       factionXp: this.factionXp.slice(),
+      flags: this.flagsPayload(),
       state: saved, // opaque per-account blob (inventory/hotbar) for the client to restore
     };
     return [
@@ -327,8 +336,11 @@ export class GameServer {
     const p = this.players.get(id);
     if (!p) return [];
     const out: Outbound[] = [];
+    // Logging out never banks a flag run: it goes straight back to its pad.
+    const dropped = returnFlag(this.flags, id);
     this.players.delete(id);
     out.push({ to: 'others', from: id, msg: { t: 'leave', id } });
+    if (dropped) out.push(...this.flagBroadcast('returned', dropped.flag, p.username));
     return out;
   }
 
@@ -359,9 +371,12 @@ export class GameServer {
             ? msg.armor.slice(0, 4).map((a) =>
                 typeof a === 'number' && ITEMS[a]?.armor ? a : 0)
             : [0, 0, 0, 0];
+          // Walking a stolen flag onto your own pad scores the capture.
+          return this.checkFlagCapture(p);
         }
         return [];
       }
+      case 'flagHit': return this.handleFlagHit(p);
       case 'edit':
         return this.handleEdit(p, msg.x, msg.y, msg.z, msg.block);
       case 'lever': {
@@ -1204,6 +1219,7 @@ export class GameServer {
           victim: p.username,
         },
       });
+      out.push(...this.dropCarriedFlag(p)); // a dead carrier drops it home
       out.push(...this.settleLifesteal(p));
       // A PvP kill scores XP for the killer + their faction pool, and DURING A
       // WAR it counts toward the war score (most kills wins the shrinking-border
@@ -1249,13 +1265,23 @@ export class GameServer {
     }
     if (victim.hearts <= 0) {
       victim.eliminated = true; // blocks respawn until the shell disconnects
-      // Comeback penalty is applied NOW so the disconnect persists 5 hearts —
-      // the account also carries `eliminatedUntil`, which gates login.
+      // THE FLAG IS THE SAFETY NET. A faction that still holds a flag gets its
+      // players back after the 24h lockout at COMEBACK_HEARTS; a faction whose
+      // flag has been captured has none — its players are gone for good. This
+      // is what makes defending the flag matter more than any single fight.
+      const permanent = !this.factionHasFlag(victim.faction);
+      // Comeback hearts are applied NOW so the disconnect persists them — the
+      // account also carries `eliminatedUntil`, which gates login.
       victim.hearts = COMEBACK_HEARTS;
-      const until = this.onEliminate?.(victim.username, killer.username) ?? 0;
+      const until = this.onEliminate?.(victim.username, killer.username, permanent) ?? 0;
       out.push({ to: victim.id, msg: { t: 'eliminated', by: killer.username, until } });
       out.push({ to: 'all', msg: { t: 'killfeed',
-        killer: killer.username, victim: `☠ ${victim.username} (ELIMINATED)` } });
+        killer: killer.username,
+        victim: `☠ ${victim.username} (${permanent ? 'ELIMINATED FOREVER' : 'ELIMINATED'})` } });
+      if (permanent) {
+        out.push({ to: 'all', msg: { t: 'notice',
+          text: `💀 ${victim.username} is gone FOREVER — ${factionName(victim.faction)} has no flag to bring them back.` } });
+      }
     }
     return out;
   }
@@ -1380,6 +1406,123 @@ export class GameServer {
       out.push({ to: 'all', msg: { t: 'turret', x: tx, y: ty, z: tz, state: s } });
     }
     return out;
+  }
+
+  // --- FLAGS: capture the flag ------------------------------------------------
+
+  /** Wire form of the flag state (welcome + every broadcast). */
+  private flagsPayload(): { breakable: boolean;
+    flags: { faction: number; holder: number; hp: number; carrier: number }[] } {
+    return {
+      breakable: this.flags.breakable,
+      flags: this.flags.flags.map((f) => ({ ...f })),
+    };
+  }
+
+  /** The full-state broadcast plus the human-readable event that caused it. */
+  private flagBroadcast(
+    kind: 'taken' | 'returned' | 'captured', flag: { faction: number; holder: number },
+    by: string
+  ): Outbound[] {
+    return [
+      { to: 'all', msg: { t: 'flags', ...this.flagsPayload() } },
+      { to: 'all', msg: { t: 'flagEvent', kind, faction: flag.faction, by,
+        holder: flag.holder } },
+    ];
+  }
+
+  /** Push the flag state to everyone (no event line). */
+  flagsSnapshotMsg(): ServerMsg { return { t: 'flags', ...this.flagsPayload() }; }
+
+  /** Does this faction still hold a flag? (Drives permanent elimination.) */
+  factionHasFlag(faction: number): boolean {
+    return factionHasFlag(this.flags, faction);
+  }
+
+  /** One swing at the flag the player is standing next to. Rate-limited and
+   *  fully server-decided: the client only says "I swung", never at what. */
+  private handleFlagHit(p: ServerPlayer): Outbound[] {
+    if (p.dead || p.mode !== 'survival') return [];
+    if (this.worldTime - p.lastFlagHit < FLAG_HIT_COOLDOWN) return [];
+    const ev = hitFlag(this.flags, p.id, p.faction, p.x, p.z);
+    // Only a swing that actually LANDS starts the cooldown — swinging at thin
+    // air (or at a locked flag) must not lock you out of the real thing.
+    if (!ev) return [];
+    p.lastFlagHit = this.worldTime;
+    if (ev.kind === 'taken') {
+      return [
+        ...this.flagBroadcast('taken', ev.flag, p.username),
+        { to: 'all', msg: { t: 'notice',
+          text: `🚩 ${p.username} has taken the ${factionName(ev.flag.faction)} flag!` } },
+      ];
+    }
+    // Progress ticks are cheap and frequent — send the state only to the raider
+    // so a long siege doesn't spam the whole server.
+    return [{ to: p.id, msg: this.flagsSnapshotMsg() }];
+  }
+
+  /** Called after every accepted move: standing on your own pad with a stolen
+   *  flag scores the capture. */
+  private checkFlagCapture(p: ServerPlayer): Outbound[] {
+    if (p.dead || !carriedBy(this.flags, p.id)) return [];
+    const ev = tryCapture(this.flags, p.id, p.faction, p.x, p.z);
+    if (!ev || ev.kind !== 'captured') return [];
+    return [
+      ...this.flagBroadcast('captured', ev.flag, p.username),
+      { to: 'all', msg: { t: 'notice',
+        text: `🏴 ${factionName(ev.faction)} CAPTURED the ${factionName(ev.flag.faction)} flag! ` +
+          `${factionName(ev.flag.faction)} now fights with no flag — their deaths are FOREVER.` } },
+    ];
+  }
+
+  /** Death/disconnect: a carried flag snaps home. */
+  private dropCarriedFlag(p: ServerPlayer): Outbound[] {
+    const ev = returnFlag(this.flags, p.id);
+    if (!ev) return [];
+    return [
+      ...this.flagBroadcast('returned', ev.flag, p.username),
+      { to: 'all', msg: { t: 'notice',
+        text: `🚩 The ${factionName(ev.flag.faction)} flag returned home.` } },
+    ];
+  }
+
+  /** Admin: arm/disarm flag breaking (console `flags on|off`). */
+  adminSetFlagsBreakable(on: boolean): Outbound[] {
+    this.flags.breakable = on;
+    return [
+      { to: 'all', msg: this.flagsSnapshotMsg() },
+      { to: 'all', msg: { t: 'notice', text: on
+        ? '🚩 FLAGS ARE ARMED — enemy flags can now be prised loose. Defend yours!'
+        : '🛡 Flags are locked again — nobody can take a flag.' } },
+    ];
+  }
+
+  /** Admin: send every flag home to its own faction (a clean slate). */
+  adminResetFlags(): Outbound[] {
+    const breakable = this.flags.breakable;
+    this.flags = newFlags();
+    this.flags.breakable = breakable;
+    return [
+      { to: 'all', msg: this.flagsSnapshotMsg() },
+      { to: 'all', msg: { t: 'notice', text: '🚩 All flags reset to their home pads.' } },
+    ];
+  }
+
+  /** Console-friendly flag report. */
+  flagsStatusText(): string {
+    const lines = [`flags are ${this.flags.breakable ? 'ARMED (breakable)' : 'LOCKED (unbreakable)'}`];
+    for (const f of this.flags.flags) {
+      const who = f.carrier >= 0
+        ? `carried by ${this.players.get(f.carrier)?.username ?? '?'}`
+        : `planted at ${factionName(f.holder)}'s base`;
+      lines.push(`  ${factionName(f.faction)} flag: ${who} (hp ${f.hp})`);
+    }
+    for (const id of FACTIONS.map((f) => f.id)) {
+      if (!factionHasFlag(this.flags, id)) {
+        lines.push(`  ⚠ ${factionName(id)} holds NO flag — their deaths are permanent`);
+      }
+    }
+    return lines.join('\n');
   }
 
   // --- The WAR: a shrinking-border battle royale ------------------------------
@@ -1826,6 +1969,7 @@ export class GameServer {
       war: this.war,
       warWins: this.warWins.slice(),
       factionXp: this.factionXp.slice(),
+      flags: this.flags,
       vaults: [...this.vaults.entries()],
     };
   }
@@ -1891,6 +2035,7 @@ export class GameServer {
     this.warWasActive = this.isWarActive();
     this.warWins = sanitizeFactionXp(s.warWins, FACTIONS.length);
     this.factionXp = sanitizeFactionXp(s.factionXp, FACTIONS.length);
+    this.flags = sanitizeFlags(s.flags); // carriers never survive a reboot
     return true;
   }
 
@@ -1931,6 +2076,8 @@ export interface WorldSave {
   warWins?: number[];
   /** Shared faction XP pools (progression perks). */
   factionXp?: number[];
+  /** Capture-the-flag state: who holds which flag + the armed switch. */
+  flags?: FlagsState;
   /** Vault boss HP + per-player openedBy ledgers (Milestone D). */
   vaults?: [string, VaultServerState][];
 }

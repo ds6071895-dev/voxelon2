@@ -88,6 +88,11 @@ export class Player {
   flying = false;
   /** Admin/gamemode noclip: move through blocks, ignore collision (spectator). */
   noclip = false;
+  /** Trap grip: a Bear Trap pins you outright, Tar/Barbed Wire drag you down.
+   *  main.ts writes these each frame from the block you're standing in. */
+  pinned = false;      // Bear Trap: no movement at all until you break free
+  trapSlow = 1;        // Tar/Barbed Wire speed multiplier (1 = free)
+  trapNoJump = false;  // Tar/Bear Trap: you cannot jump out of it
   /** Mouse-look sensitivity multiplier (1 = normal). Lowered while a gun is
    *  scoped (aim-down-sights) so high-zoom aiming is steady. */
   lookScale = 1;
@@ -226,7 +231,9 @@ export class Player {
     } else {
       let speed = (this.sneaking ? SNEAK_SPEED
         : this.sprinting ? SPRINT_SPEED
-        : WALK_SPEED) * this.speedMult;
+        : WALK_SPEED) * this.speedMult * this.trapSlow;
+      // Caught in a Bear Trap: the jaws hold you exactly where you stand.
+      if (this.pinned) speed = 0;
       if (this.inWater) speed *= 0.45;
       // Swamp mud drags the feet (slight, kid-gentle slowdown).
       if (!this.flying && this.onGround && world.getBlock(
@@ -261,7 +268,8 @@ export class Player {
           this.vel.y = 5.5;
         }
       } else {
-        if (input.jump && this.onGround) {
+        // Tar and bear-trap jaws hold your feet: no jumping out of them.
+        if (input.jump && this.onGround && !this.trapNoJump) {
           this.vel.y = JUMP_VELOCITY;
           this.onGround = false;
         }

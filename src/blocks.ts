@@ -116,6 +116,23 @@ export const enum Block {
   WallTrapUp = 92,
   // Solid gold: vault-treasury decor, a compact way to bank ingots.
   GoldBlock = 93,
+  // --- Trapping kit (the "you are NOT getting out of this" set) -------------
+  // BearTrap: snaps shut and PINS you in place for a few seconds — you break
+  // out by mashing jump, so it's escapable but never instant.
+  BearTrap = 94,
+  // Tar: a sticky black pool. Wading through it is slow and you can't jump out
+  // of it — the classic way to hold raiders in a kill zone.
+  Tar = 95,
+  // BarbedWire: cheap, ugly, effective — walk through and you're slowed AND
+  // bleeding. Stack it in front of a wall.
+  BarbedWire = 96,
+  // --- Defensive kit (what a flag base is made of) --------------------------
+  // Barricade: fast to place, cheap, and a real pain to chew through.
+  Barricade = 97,
+  // ReinforcedStone: the wall you build around a flag — very slow to break.
+  ReinforcedStone = 98,
+  // Floodlight: throws bright light so night raids can't sneak the last 20m.
+  Floodlight = 99,
 }
 
 export const enum Tile {
@@ -342,6 +359,16 @@ export const enum Tile {
   WallTrapSide = 197,
   // Solid gold block (vault treasuries + ingot banking).
   GoldBlock = 198,
+  // The Diamond Shovel: the top-tier digging tool (instant on soft ground).
+  DiamondShovel = 199,
+  // Traps + defenses (flag-war kit)
+  BearTrap = 200,
+  Tar = 201,
+  BarbedWire = 202,
+  Barricade = 203,
+  ReinforcedStone = 204,
+  FloodlightTop = 205,
+  FloodlightSide = 206,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel' | 'sword';
@@ -738,6 +765,40 @@ export const BLOCKS: Record<number, BlockInfo> = {
     opaque: false, occludes: false,
   }),
 
+  // Bear Trap: a sprung steel jaw. Standing on it PINS you for TRAP_PIN_SECONDS
+  // (main.ts) — mash jump to prise it open. Non-solid so you walk right into it.
+  [Block.BearTrap]: def({
+    name: 'Bear Trap', hardness: 1.0, shape: 'slab',
+    top: Tile.BearTrap, bottom: Tile.BearTrap, side: Tile.BearTrap,
+    opaque: false, occludes: false,
+  }),
+  // Tar: a sticky pool you wade through at a crawl and cannot jump out of.
+  [Block.Tar]: def({
+    name: 'Tar', hardness: 0.4, shape: 'slab', top: Tile.Tar,
+    solid: false, opaque: false, occludes: false,
+  }),
+  // Barbed Wire: slows AND cuts anyone moving through it.
+  [Block.BarbedWire]: def({
+    name: 'Barbed Wire', hardness: 0.6, top: Tile.BarbedWire,
+    solid: false, opaque: false, occludes: false, shape: 'cross',
+  }),
+
+  // --- Defenses (flag-base building blocks) ---
+  // Barricade: cheap wooden wall that still takes real effort to break.
+  [Block.Barricade]: def({
+    name: 'Barricade', hardness: 6.0, top: Tile.Barricade,
+  }),
+  // Reinforced Stone: the serious wall. Iron-tier and very slow — a raid has to
+  // commit to it (or go around, which is what the traps are for).
+  [Block.ReinforcedStone]: def({
+    name: 'Reinforced Stone', hardness: 22.0, top: Tile.ReinforcedStone,
+  }),
+  // Floodlight: max-brightness lamp; kills the "sneak in at night" strategy.
+  [Block.Floodlight]: def({
+    name: 'Floodlight', hardness: 1.2, emission: 15,
+    top: Tile.FloodlightTop, bottom: Tile.FloodlightSide, side: Tile.FloodlightSide,
+  }),
+
   // --- Lever-triggered traps ---
   // Lever: a small pull-handle (cross billboard, like a plant — pops if its
   // support breaks). Right-click flips it + every linked trap in LEVER_RADIUS.
@@ -813,6 +874,12 @@ for (const b of [
   Block.Dirt, Block.Grass, Block.SnowyGrass, Block.Sand, Block.RedSand,
 ]) BLOCKS[b].tool = 'shovel';
 for (const b of [Block.Terracotta, Block.Basalt]) BLOCKS[b].tool = 'pickaxe';
+// Defenses: Reinforced Stone needs an IRON pick (a wooden-tool raider simply
+// cannot get through a proper flag wall); Barricade is axe work.
+BLOCKS[Block.ReinforcedStone].tool = 'pickaxe';
+BLOCKS[Block.ReinforcedStone].requiresTool = true;
+BLOCKS[Block.ReinforcedStone].minTier = 2;
+BLOCKS[Block.Barricade].tool = 'axe';
 
 export function isSolid(id: number): boolean {
   return id !== Block.Air && (BLOCKS[id]?.solid ?? false);

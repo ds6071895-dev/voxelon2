@@ -33,6 +33,7 @@ export class Input {
   guideToggled = false;    // H pressed this frame (getting-started panel)
   tpaPressed = false;      // T pressed this frame (open the TPA prompt)
   progressPressed = false; // G pressed this frame (or tapped on touch)
+  viewPressed = false;     // V pressed this frame (cycle the camera view)
   locked = false;
 
   // Touch controls (mobile): when true, "pointer lock" is virtual — lock()
@@ -69,6 +70,7 @@ export class Input {
       if (e.code === 'KeyH') this.guideToggled = true;
       if (e.code === 'KeyT') this.tpaPressed = true;
       if (e.code === 'KeyG') this.progressPressed = true;
+      if (e.code === 'KeyV') this.viewPressed = true;
       if (e.code === 'KeyW') {
         const now = performance.now();
         if (now - this.lastWDown < 250) this.kbSprint = true;
@@ -169,5 +171,6 @@ export class Input {
     this.guideToggled = false;
     this.tpaPressed = false;
     this.progressPressed = false;
+    this.viewPressed = false;
   }
 }

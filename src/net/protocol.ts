@@ -123,6 +123,10 @@ export type ClientMsg =
   // linked traps can sit beyond the puller's own EDIT_RANGE, so this can't be
   // expressed as plain client edits.
   | { t: 'lever'; x: number; y: number; z: number }
+  // FLAGS (capture the flag): one swing at the flag pad you're standing next
+  // to. The server decides WHICH flag from your position + faction, so a
+  // forged hit can never reach across the map or touch your own flag.
+  | { t: 'flagHit' }
   // TPA: ask to teleport to `target` (by username); the target accepts their
   // newest pending request after the client-side 5s hold completes.
   | { t: 'tpa'; target: string }
@@ -210,7 +214,9 @@ export type ClientMsg =
 // --- server -> client -------------------------------------------------------
 export type ServerMsg =
   // Auth: a rejected login/register (success is signalled by the `welcome`).
-  | { t: 'authErr'; error: string }
+  // `lockMs` (when present) is a live elimination lockout in ms — the title
+  // screen turns it into a ticking countdown. `permanent` means never.
+  | { t: 'authErr'; error: string; lockMs?: number; permanent?: boolean }
   // A fresh session token (sent right after every successful auth); the client
   // stores it in localStorage so the next visit can skip the login form.
   | { t: 'session'; token: string }
@@ -229,6 +235,9 @@ export type ServerMsg =
         score: number[]; wins: number[] };
       /** Faction XP pools (progression): shared XP per faction id. */
       factionXp: number[];
+      /** Capture-the-flag state (see flags.ts). */
+      flags: { breakable: boolean;
+        flags: { faction: number; holder: number; hp: number; carrier: number }[] };
       /** Saved per-account state to restore (inventory/hotbar); undefined for new accounts. */
       state?: Record<string, unknown>;
     }
@@ -258,6 +267,13 @@ export type ServerMsg =
       score: number[]; wins: number[] }
   // A war just ended: the most-kills faction wins it (NO_FACTION = draw).
   | { t: 'warEnd'; winner: number; score: number[] }
+  // FLAGS: the whole capture-the-flag state (small — one entry per faction).
+  // Broadcast on every change; also carried in `welcome`.
+  | { t: 'flags'; breakable: boolean;
+      flags: { faction: number; holder: number; hp: number; carrier: number }[] }
+  // A flag changed hands — drives the banners/notices ('' name = nobody).
+  | { t: 'flagEvent'; kind: 'taken' | 'returned' | 'captured';
+      faction: number; by: string; holder: number }
   // Private confirmation of a secret faction switch (only to the defector).
   | { t: 'factionSwitched'; faction: number; remaining: number }
   // Gadget visual effect to play everywhere (frag/oil blast, smoke cloud).

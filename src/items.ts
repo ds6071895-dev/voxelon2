@@ -100,6 +100,9 @@ export const enum Item {
   StoneBoots = 180,
   // The Sword: the dedicated melee weapon (mobs only — PvP stays guns-only).
   Sword = 181,
+  // The Diamond Shovel: end-game digging. INSTANTLY breaks soft ground
+  // (grass/dirt/sand) — the terraforming reward for a diamond haul.
+  DiamondShovel = 182,
 }
 
 export interface ToolInfo {
@@ -249,7 +252,11 @@ const TOOL_TIERS = [
   { prefix: 'Wooden', tier: 0, speed: 2, durability: 59 },
   { prefix: 'Stone', tier: 1, speed: 4, durability: 131 },
   { prefix: 'Iron', tier: 2, speed: 6, durability: 250 },
+  { prefix: 'Diamond', tier: 3, speed: 8, durability: 1561 },
 ];
+
+/** Tool tier that digs its blocks INSTANTLY (diamond and up). */
+export const INSTAMINE_TIER = 3;
 
 function toolItem(tierIdx: number, type: ToolKind, sprite: Tile): ItemInfo {
   const t = TOOL_TIERS[tierIdx];
@@ -355,6 +362,7 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Item.IronPickaxe]: toolItem(2, 'pickaxe', Tile.IronPickaxe),
   [Item.IronAxe]: toolItem(2, 'axe', Tile.IronAxe),
   [Item.IronShovel]: toolItem(2, 'shovel', Tile.IronShovel),
+  [Item.DiamondShovel]: toolItem(3, 'shovel', Tile.DiamondShovel),
   [Item.Charcoal]: pureItem('Charcoal', Tile.Charcoal),
   [Item.GoldIngot]: pureItem('Gold Ingot', Tile.GoldIngot),
   [Item.TitaniumIngot]: pureItem('Titanium Ingot', Tile.TitaniumIngot),
@@ -476,6 +484,13 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Block.Landmine]: blockItem(Block.Landmine),
   // Lever-triggered traps: the item is always the off/closed/down variant
   // (LeverOn/FallTrapOpen/WallTrapUp are placement states, like wall torches).
+  // Flag-war kit — traps that HOLD you and defenses that hold a base.
+  [Block.BearTrap]: blockItem(Block.BearTrap),
+  [Block.Tar]: blockItem(Block.Tar),
+  [Block.BarbedWire]: blockItem(Block.BarbedWire),
+  [Block.Barricade]: blockItem(Block.Barricade),
+  [Block.ReinforcedStone]: blockItem(Block.ReinforcedStone),
+  [Block.Floodlight]: blockItem(Block.Floodlight),
   [Block.Lever]: blockItem(Block.Lever),
   [Block.FallTrap]: blockItem(Block.FallTrap),
   [Block.WallTrap]: blockItem(Block.WallTrap),
@@ -508,6 +523,9 @@ export function miningStats(
   const harvest =
     !info.requiresTool || (effective && tool!.tier >= info.minTier);
   if (info.hardness <= 0) return { time: 0, harvest };
+  // A diamond-tier tool INSTAMINES the ground it's made for — the diamond
+  // shovel clears grass/dirt/sand (every 'shovel' block) in one click.
+  if (effective && harvest && tool!.tier >= INSTAMINE_TIER) return { time: 0, harvest };
   const speed = effective && harvest ? tool!.speed : 1;
   const time = harvest ? (info.hardness * 1.5) / speed : info.hardness * 5;
   return { time, harvest };
@@ -524,9 +542,12 @@ export function dropFor(
   switch (block) {
     case Block.FurnaceLit:
       return { id: Block.Furnace, count: 1 };
+    // Grass keeps its turf: breaking a grass block gives you the grass block
+    // back (not dirt), so you can re-lay a green surface anywhere.
     case Block.Grass:
+      return { id: Block.Grass, count: 1 };
     case Block.SnowyGrass:
-      return { id: Block.Dirt, count: 1 };
+      return { id: Block.SnowyGrass, count: 1 };
     case Block.Stone:
       return { id: Block.Cobblestone, count: 1 };
     case Block.Leaves:

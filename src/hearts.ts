@@ -13,13 +13,23 @@ export const MAX_HEARTS = 20;
 export const MIN_HEARTS = 0;
 /** Hearts you come back with after an elimination (timer or revival) — a
  *  comeback penalty, not a wipe. */
-export const COMEBACK_HEARTS = 5;
+export const COMEBACK_HEARTS = 3;
 /** You can't withdraw (bottle) a heart if it would leave you below this. */
 export const WITHDRAW_FLOOR = 2;
 /** Seconds after a direct player hit in which a death still credits them. */
 export const KILL_CREDIT_WINDOW = 10;
 /** Elimination lockout: real wall-clock ms (24 h). */
 export const ELIMINATION_MS = 24 * 60 * 60 * 1000;
+/** A PERMANENT elimination: stored as an `eliminatedUntil` so far out that it
+ *  never expires. Used when a player's faction holds no flag — the flag is the
+ *  only thing that buys a comeback (see flags.ts). */
+export const PERMANENT_UNTIL = 8.64e15; // max safe Date value
+
+/** Is this lockout a permanent (flagless) elimination rather than a 24h one? */
+export function isPermanentElimination(until: unknown): boolean {
+  return typeof until === 'number' && Number.isFinite(until) &&
+    until >= PERMANENT_UNTIL - 1;
+}
 /** HP per heart. */
 export const HP_PER_HEART = 2;
 
@@ -65,8 +75,11 @@ export function eliminationRemaining(until: unknown, now: number): number {
   return Math.max(0, until - now);
 }
 
-/** Kid-friendly "17h 22m" countdown for the login screen / console. */
+/** Kid-friendly "17h 22m" countdown for the login screen / console. A
+ *  permanent elimination has no countdown to show. */
 export function formatRemaining(ms: number): string {
+  // Anything past a century of lockout is the permanent sentinel, not a wait.
+  if (ms > 100 * 365 * 24 * 60 * 60 * 1000) return 'never';
   const totalMin = Math.max(1, Math.ceil(ms / 60_000));
   const h = Math.floor(totalMin / 60), m = totalMin % 60;
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
