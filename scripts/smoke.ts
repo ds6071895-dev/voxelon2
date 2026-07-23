@@ -169,10 +169,9 @@ check('daylight: noon full, midnight moonlit floor, dawn between',
 
 // --- Drop table (VOXELON: no apples/food) -----------------------------------------
 {
-  check('stone->cobble, grass->grass block (not dirt)',
+  check('stone->cobble, grass->dirt',
     dropFor(Block.Stone, 0.5)?.id === Block.Cobblestone &&
-    dropFor(Block.Grass, 0.5)?.id === Block.Grass &&
-    dropFor(Block.SnowyGrass, 0.5)?.id === Block.Grass);
+    dropFor(Block.Grass, 0.5)?.id === Block.Dirt);
   check('ores drop coal/redstone/diamond',
     dropFor(Block.CoalOre, 0.5)?.id === Item.Coal &&
     dropFor(Block.RedstoneOre, 0.5)!.count >= 4 &&
@@ -263,23 +262,6 @@ check('daylight: noon full, midnight moonlit floor, dawn between',
   inv.slots[0]!.damage = 58;
   inv.damageSelected(1);
   check('tools break at zero durability', inv.slots[0] === null);
-  // An IRON shovel instamines soft ground; lesser shovels do not.
-  check('iron shovel instamines grass/dirt/sand',
-    miningStats(BLOCKS[Block.Grass], pick(Item.IronShovel)).time === 0 &&
-    miningStats(BLOCKS[Block.Dirt], pick(Item.IronShovel)).time === 0 &&
-    miningStats(BLOCKS[Block.Sand], pick(Item.IronShovel)).time === 0);
-  check('wood/stone shovels still take time',
-    miningStats(BLOCKS[Block.Dirt], pick(Item.WoodenShovel)).time > 0 &&
-    miningStats(BLOCKS[Block.Dirt], pick(Item.StoneShovel)).time > 0);
-  check('an iron pickaxe does NOT instamine dirt',
-    miningStats(BLOCKS[Block.Dirt], pick(Item.IronPickaxe)).time > 0);
-  // Reinforced trap-chamber blocks: blast-proof, iron-pick tier, mineable.
-  check('reinforced blocks are blast-proof + iron-pick gated',
-    BLOCKS[Block.ReinforcedStone].blastProof &&
-    BLOCKS[Block.ReinforcedGlass].blastProof &&
-    !miningStats(BLOCKS[Block.ReinforcedStone], pick(Item.StonePickaxe)).harvest &&
-    miningStats(BLOCKS[Block.ReinforcedStone], pick(Item.IronPickaxe)).harvest &&
-    miningStats(BLOCKS[Block.ReinforcedStone], pick(Item.IronPickaxe)).time > 2);
 }
 
 // --- Energy / stamina (replaces hunger) -------------------------------------------
@@ -1569,10 +1551,8 @@ check('furnace smelts ore/sand/log but not removed foods',
   s.handle(1, { t: 'xform', x: 0.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
   s.handle(2, { t: 'xform', x: 3, y: 70, z: 0, yaw: 0, pitch: 0 });
   s.handle(3, { t: 'xform', x: 3, y: 70, z: 1, yaw: 0, pitch: 0 });
-  // A placed block in the crater radius should be cleared + broadcast to others
-  // — but a blast-proof Reinforced Stone right next to it must survive.
+  // A placed block in the crater radius should be cleared + broadcast to others.
   s.handle(1, { t: 'edit', x: 2, y: 70, z: 0, block: Block.OakPlanks });
-  s.handle(1, { t: 'edit', x: 4, y: 70, z: 0, block: Block.ReinforcedStone });
   const blast = s.handle(1, { t: 'rocketBlast', x: 3, y: 70, z: 0 });
   check('rocket splash hurts an enemy in range',
     blast.some((o) => o.to === 2 && o.msg.t === 'hurt'));
@@ -1582,9 +1562,6 @@ check('furnace smelts ore/sand/log but not removed foods',
     blast.some((o) => o.msg.t === 'edit' && o.to === 'others' &&
       (o.msg as { x: number; z: number; block: number }).x === 2 &&
       (o.msg as { block: number }).block === Block.Air));
-  check('a blast-proof Reinforced Stone survives the crater',
-    !blast.some((o) => o.msg.t === 'edit' &&
-      (o.msg as { x: number }).x === 4));
   // A burst beyond ranged range is rejected (fail-closed vs a hacked client).
   check('rocket blast beyond range is rejected',
     s.handle(1, { t: 'rocketBlast', x: 999, y: 70, z: 999 }).length === 0);

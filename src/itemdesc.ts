@@ -34,8 +34,6 @@ const DESCRIPTIONS: Record<number, string> = {
   // Traps.
   [Block.SpikeTrap]: 'Iron spikes — anyone STANDING on them gets hurt. Line moats + walls!',
   [Block.Landmine]: 'Arms when placed. EXPLODES when stepped on — even by YOU. Hide it well.',
-  [Block.ReinforcedStone]: 'BLAST-PROOF chamber wall — landmines won\'t crater it. Iron pick to mine, slowly.',
-  [Block.ReinforcedGlass]: 'BLAST-PROOF iron-latticed pane — watch your fall chamber work. Iron pick to mine.',
   [Block.Lever]: 'Right-click to pull: flips every Fall/Wall Trap within 8 blocks.',
   [Block.FallTrap]: 'Looks like a solid hatch — a linked Lever swings it OPEN and the floor drops away!',
   [Block.WallTrap]: 'A flat plate — a linked Lever springs it UP into a solid wall. Box them in!',

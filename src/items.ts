@@ -319,9 +319,6 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Block.VaultBrick]: blockItem(Block.VaultBrick),
   // Solid gold: vault-treasury loot, a compact way to bank ingots.
   [Block.GoldBlock]: blockItem(Block.GoldBlock),
-  // Reinforced trap-chamber blocks: blast-proof kill-box shells.
-  [Block.ReinforcedStone]: blockItem(Block.ReinforcedStone),
-  [Block.ReinforcedGlass]: blockItem(Block.ReinforcedGlass),
   // The Sword: top melee damage, useless as a mining tool.
   [Item.Sword]: {
     name: 'Sword', kind: 'item', sprite: Tile.IronSword, maxStack: 1,
@@ -511,11 +508,6 @@ export function miningStats(
   const harvest =
     !info.requiresTool || (effective && tool!.tier >= info.minTier);
   if (info.hardness <= 0) return { time: 0, harvest };
-  // A fully upgraded (iron) shovel INSTAMINES soft ground — grass, dirt, sand.
-  if (effective && tool!.type === 'shovel' && tool!.tier >= 2 &&
-      info.hardness <= 0.6) {
-    return { time: 0, harvest };
-  }
   const speed = effective && harvest ? tool!.speed : 1;
   const time = harvest ? (info.hardness * 1.5) / speed : info.hardness * 5;
   return { time, harvest };
@@ -534,8 +526,7 @@ export function dropFor(
       return { id: Block.Furnace, count: 1 };
     case Block.Grass:
     case Block.SnowyGrass:
-      // Grass blocks drop themselves (build green without waiting for spread).
-      return { id: Block.Grass, count: 1 };
+      return { id: Block.Dirt, count: 1 };
     case Block.Stone:
       return { id: Block.Cobblestone, count: 1 };
     case Block.Leaves:

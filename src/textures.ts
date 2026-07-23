@@ -53,35 +53,11 @@ function flipX(fn: (p: Painter, seed: number) => void) {
   };
 }
 
-/** Bilinear-interpolated lattice noise that wraps at the tile edge (so block
- *  faces still tile seamlessly). `period` is the blob size in pixels and must
- *  divide TILE_PX. Smoothstepped for soft rounded shapes. */
-function valueNoise(seed: number, x: number, y: number, period: number): number {
-  const cells = TILE_PX / period;
-  const fx = x / period, fy = y / period;
-  const x0 = Math.floor(fx), y0 = Math.floor(fy);
-  let tx = fx - x0, ty = fy - y0;
-  tx = tx * tx * (3 - 2 * tx);
-  ty = ty * ty * (3 - 2 * ty);
-  const w = (n: number) => ((n % cells) + cells) % cells;
-  const v00 = hash2(seed, w(x0), w(y0));
-  const v10 = hash2(seed, w(x0 + 1), w(y0));
-  const v01 = hash2(seed, w(x0), w(y0 + 1));
-  const v11 = hash2(seed, w(x0 + 1), w(y0 + 1));
-  const a = v00 + (v10 - v00) * tx;
-  const b = v01 + (v11 - v01) * tx;
-  return a + (b - a) * ty;
-}
-
-/** Soft clumpy brightness variation quantized into a few shade steps —
- *  coherent blobs like the modern (1.14+) textures, not per-pixel static. */
+/** Per-pixel brightness jitter with 2x2 clumping, like vanilla's speckle. */
 function speckle(seed: number, x: number, y: number, amount: number): number {
-  const blob =
-    valueNoise(seed, x, y, 4) * 0.55 +
-    valueNoise(seed ^ 0x51ab, x, y, 2) * 0.3 +
-    hash2(seed ^ 0x9e37, x >> 1, y >> 1) * 0.15;
-  const n = Math.round(blob * 4) / 4; // ~5 shade steps keeps the pixel-art feel
-  return 1 - amount + n * amount * 2;
+  const coarse = hash2(seed, x >> 1, y >> 1);
+  const fine = hash2(seed ^ 0x9e37, x, y);
+  return 1 - amount + (coarse * 0.65 + fine * 0.35) * amount * 2;
 }
 
 const STONE: RGBA = [125, 125, 125, 255];
@@ -94,13 +70,13 @@ const PLANKS: RGBA = [184, 148, 95, 255];
 const WATER: RGBA = [53, 97, 217, 200];
 
 function paintStone(p: Painter, seed: number): void {
-  p.fill((x, y) => shade(STONE, speckle(seed, x, y, 0.1)));
+  p.fill((x, y) => shade(STONE, speckle(seed, x, y, 0.12)));
 }
 
 function paintDirt(p: Painter, seed: number): void {
   p.fill((x, y) => {
-    let f = speckle(seed, x, y, 0.13);
-    if (hash2(seed ^ 7, x, y) > 0.93) f *= 0.84; // sparse dark crumbs
+    let f = speckle(seed, x, y, 0.16);
+    if (hash2(seed ^ 7, x, y) > 0.88) f *= 0.78; // dark crumbs
     return shade(DIRT, f);
   });
 }
@@ -110,7 +86,7 @@ function paintDirt(p: Painter, seed: number): void {
 const TINT_GRAY: RGBA = [210, 210, 210, 255];
 
 function paintGrassTop(p: Painter, seed: number): void {
-  p.fill((x, y) => shade(TINT_GRAY, speckle(seed, x, y, 0.12)));
+  p.fill((x, y) => shade(TINT_GRAY, speckle(seed, x, y, 0.15)));
 }
 
 function paintGrassSide(p: Painter, seed: number): void {
@@ -125,7 +101,7 @@ function paintGrassSide(p: Painter, seed: number): void {
 }
 
 function paintSand(p: Painter, seed: number): void {
-  p.fill((x, y) => shade(SAND, speckle(seed, x, y, 0.07)));
+  p.fill((x, y) => shade(SAND, speckle(seed, x, y, 0.09)));
 }
 
 function paintCobblestone(p: Painter, seed: number): void {
@@ -199,8 +175,8 @@ function paintSprucePlanks(p: Painter, seed: number): void {
 function paintLeaves(p: Painter, seed: number): void {
   // Grayscale; tinted by the biome foliage color at mesh time.
   p.fill((x, y) => {
-    if (hash2(seed, x, y) > 0.86) return [0, 0, 0, 0]; // sparse cutout holes
-    const f = 0.72 + hash2(seed ^ 21, x >> 1, y >> 1) * 0.4;
+    if (hash2(seed, x, y) > 0.8) return [0, 0, 0, 0]; // cutout holes
+    const f = 0.65 + hash2(seed ^ 21, x, y) * 0.55;
     return shade(TINT_GRAY, f);
   });
 }
@@ -208,8 +184,8 @@ function paintLeaves(p: Painter, seed: number): void {
 function paintColoredLeaves(base: RGBA) {
   return (p: Painter, seed: number): void => {
     p.fill((x, y) => {
-      if (hash2(seed, x, y) > 0.86) return [0, 0, 0, 0];
-      const f = 0.72 + hash2(seed ^ 21, x >> 1, y >> 1) * 0.4;
+      if (hash2(seed, x, y) > 0.8) return [0, 0, 0, 0];
+      const f = 0.65 + hash2(seed ^ 21, x, y) * 0.55;
       return shade(base, f);
     });
   };
@@ -229,7 +205,7 @@ function paintGlass(p: Painter, seed: number): void {
 
 function paintWater(p: Painter, seed: number): void {
   p.fill((x, y) => {
-    const f = 0.92 + valueNoise(seed, x, y, 4) * 0.16;
+    const f = 0.9 + hash2(seed, x, y >> 1) * 0.2;
     return [WATER[0] * f, WATER[1] * f, WATER[2] * f, WATER[3]];
   });
 }
@@ -2321,71 +2297,7 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
       p.set(rx + 1, ry + 1, shade(base, 0.6));
     }
   },
-  // Reinforced Stone: dark armoured plate — bevelled rim, X cross-brace,
-  // bright corner rivets. Reads as "this wall is not going anywhere".
-  [Tile.ReinforcedStone]: (p, seed) => {
-    const base: RGBA = [92, 96, 105, 255];
-    for (let y = 0; y < 16; y++) {
-      for (let x = 0; x < 16; x++) {
-        let f = speckle(seed, x, y, 0.06);
-        const edge = x === 0 || y === 0 || x === 15 || y === 15;
-        const rim = !edge && (x === 1 || y === 1 || x === 14 || y === 14);
-        if (edge) f *= 0.5;
-        else if (rim) f *= 1.16;
-        p.set(x, y, shade(base, f));
-      }
-    }
-    for (let i = 3; i <= 12; i++) { // welded X brace
-      p.set(i, i, shade(base, 0.72));
-      p.set(15 - i, i, shade(base, 0.72));
-    }
-    for (const [rx, ry] of [[2, 2], [13, 2], [2, 13], [13, 13]]) {
-      p.set(rx, ry, shade(base, 1.4));
-      p.set(rx + 1, ry + 1, shade(base, 0.62));
-    }
-  },
-  // Reinforced Glass: an iron lattice over clear panes (alpha-cutout windows).
-  [Tile.ReinforcedGlass]: (p, seed) => {
-    const metal: RGBA = [118, 124, 134, 255];
-    p.fill((x, y) => {
-      const border = x === 0 || y === 0 || x === 15 || y === 15;
-      const lattice = x % 5 === 0 || y % 5 === 0;
-      if (border || lattice) {
-        const rivet = x % 5 === 0 && y % 5 === 0;
-        return shade(metal, rivet ? 1.3 : border ? 1.0 : 0.86);
-      }
-      // diagonal glints on otherwise-open panes
-      if ((x + y) % 9 === 0) return [225, 242, 250, 255];
-      void seed;
-      return [0, 0, 0, 0];
-    });
-  },
 };
-
-/** Halve an image with an alpha-weighted 2x2 box filter (transparent texels
- *  don't darken cutout edges). Atlas tiles sit on 16px-aligned boundaries, so
- *  the filter never mixes neighbouring tiles until a tile reaches 1px. */
-function halveImage(src: ImageData): ImageData {
-  const w = src.width >> 1, h = src.height >> 1;
-  const out = new ImageData(w, h);
-  const s = src.data, d = out.data;
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      let r = 0, g = 0, b = 0, a = 0;
-      for (let dy = 0; dy < 2; dy++) {
-        for (let dx = 0; dx < 2; dx++) {
-          const i = ((y * 2 + dy) * src.width + (x * 2 + dx)) * 4;
-          const pa = s[i + 3];
-          r += s[i] * pa; g += s[i + 1] * pa; b += s[i + 2] * pa; a += pa;
-        }
-      }
-      const o = (y * w + x) * 4;
-      if (a > 0) { d[o] = r / a; d[o + 1] = g / a; d[o + 2] = b / a; }
-      d[o + 3] = a / 4;
-    }
-  }
-  return out;
-}
 
 export function createAtlas(seed = 1337): Atlas {
   const canvas = document.createElement('canvas');
@@ -2405,16 +2317,8 @@ export function createAtlas(seed = 1337): Atlas {
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.magFilter = THREE.NearestFilter;
-  // Hand-built mip chain, capped where a tile bottoms out at 1x1 (vanilla's
-  // "4 mipmap levels"): distant terrain stops shimmering, and nearest
-  // sampling within each level means no cross-tile bleed and the close-up
-  // pixel look is untouched.
-  texture.minFilter = THREE.NearestMipmapLinearFilter;
+  texture.minFilter = THREE.NearestFilter;
   texture.generateMipmaps = false;
-  let level = ctx.getImageData(0, 0, ATLAS_PX, ATLAS_PX);
-  const mips: ImageData[] = [level];
-  for (let px = TILE_PX; px > 1; px >>= 1) mips.push(level = halveImage(level));
-  texture.mipmaps = mips;
   texture.colorSpace = THREE.SRGBColorSpace;
 
   const inset = 0.25 / ATLAS_PX; // quarter-texel inset against bleeding
