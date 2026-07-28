@@ -20,6 +20,28 @@ import { hash2, mulberry32 } from './noise';
 import type { StructureCtx } from './structures';
 
 export type VaultTier = 1 | 2 | 3;
+export type VaultFamily = 'crypt' | 'mire' | 'ember' | 'crystal' | 'gilded';
+export type VaultBossKind =
+  | 'bone_warden'
+  | 'mire_queen'
+  | 'ember_colossus'
+  | 'crystal_seer'
+  | 'gilded_artificer';
+
+export const VAULT_BOSS_NAMES: Record<VaultBossKind, string> = {
+  bone_warden: 'Bone Warden',
+  mire_queen: 'Mire Queen',
+  ember_colossus: 'Ember Colossus',
+  crystal_seer: 'Crystal Seer',
+  gilded_artificer: 'Gilded Artificer',
+};
+export const VAULT_BOSS_FAMILY: Record<VaultBossKind, VaultFamily> = {
+  bone_warden: 'crypt',
+  mire_queen: 'mire',
+  ember_colossus: 'ember',
+  crystal_seer: 'crystal',
+  gilded_artificer: 'gilded',
+};
 
 /** A vault stamp never reaches past 3 chunks beyond its anchor chunk (all
  *  offsets are ≤ ±51 blocks and the anchor sits ≥4 blocks inside its chunk).
@@ -64,18 +86,14 @@ export interface VaultRoom {
    *  the hall and the boss room). Guards only spawn while the spawner block
    *  at the room centre still stands — break it to silence the room. */
   cap: number;
+  /** Furnishing variation. Derived from a separate hash, never layout RNG. */
+  variant: 0 | 1 | 2;
 }
-
-/** Which boss prowls the lair: the classic Brute, the fast lean Ravager, or
- *  the towering slow Colossus. Seeded per vault — variety between dungeons. */
-export type VaultBossKind = 'brute' | 'ravager' | 'colossus';
-export const VAULT_BOSS_NAMES: Record<VaultBossKind, string> = {
-  brute: 'Vault Brute', ravager: 'Vault Ravager', colossus: 'Vault Colossus',
-};
 
 export interface VaultStamp {
   cx: number; cz: number;
   tier: VaultTier;
+  family: VaultFamily;
   /** The lair's boss flavour (visual/AI variant; HP stays tier-based). */
   bossKind: VaultBossKind;
   /** Surface anchor (above the entrance hall). */
@@ -89,6 +107,13 @@ export interface VaultStamp {
   mouth: { x: number; y: number; z: number };
   /** Underground bounding box: "you are inside the vault" test. */
   bounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number };
+  /** Combat-only sockets. These never become permanent world edits. */
+  arena: {
+    bounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number };
+    sockets: { x: number; y: number; z: number }[];
+    cameraAnchors: { x: number; y: number; z: number }[];
+    safeLanes: { x: number; y: number; z: number }[];
+  };
   /** Absolute world-coordinate block writes (Block.Air entries CARVE). */
   blocks: { x: number; y: number; z: number; id: number }[];
 }
@@ -110,7 +135,36 @@ export interface VaultServerState {
 /** The Vault Brute's max HP by tier — a group fight, not a one-tap. The Tier I
  *  Brute is deliberately soft: a fresh spawn with a starter kit CAN solo it. */
 export function bruteMaxHp(tier: VaultTier): number {
-  return tier === 1 ? 80 : 60 + 70 * tier; // 80 / 200 / 270
+  return tier === 1 ? 320 : tier === 2 ? 720 : 1200;
+}
+
+const BOSS_WEIGHTS: Record<VaultTier, readonly number[]> = {
+  1: [35, 25, 15, 15, 10],
+  2: [20, 20, 22, 20, 18],
+  3: [12, 16, 24, 24, 24],
+};
+const BOSS_ORDER: readonly VaultBossKind[] = [
+  'bone_warden', 'mire_queen', 'ember_colossus', 'crystal_seer', 'gilded_artificer',
+];
+
+/** Boss selection is independent of the layout RNG stream. */
+export function vaultBossFor(
+  seed: number, cx: number, cz: number, tier: VaultTier,
+): VaultBossKind {
+  const roll = hash2(seed ^ 0xb055fa11, cx, cz) * 100;
+  const weights = BOSS_WEIGHTS[tier];
+  let sum = 0;
+  for (let i = 0; i < BOSS_ORDER.length; i++) {
+    sum += weights[i];
+    if (roll < sum) return BOSS_ORDER[i];
+  }
+  return BOSS_ORDER[BOSS_ORDER.length - 1];
+}
+
+export function vaultFamilyFor(
+  seed: number, cx: number, cz: number, tier: VaultTier,
+): VaultFamily {
+  return VAULT_BOSS_FAMILY[vaultBossFor(seed, cx, cz, tier)];
 }
 
 /** Vault tier by distance from the origin: the core is Tier I training wheels,
@@ -180,7 +234,7 @@ export function vaultAnchorAt(seed: number, cx: number, cz: number, ctx: Structu
 // offsets stay ≤ ±43 (+ hw ≤ 8) — inside VAULT_REACH = 3 chunks.
 const LAT_U = [0, 15, 30, 43];
 const LAT_V = [-30, -15, 0, 15, 30];
-const BOSS_HW = 7;
+const BOSS_HW = 9;
 const BOSS_IH = 7;
 /** Guard-spawner population cap per room kind (0 = no spawner). */
 const ROOM_CAP: Record<VaultRoom['kind'], number> = {
@@ -253,19 +307,33 @@ export function vaultStamp(
     if (ctx.biomeWithWater(px, pz, h) === Biome.Ocean) return null;
   }
 
-  // Lighting theme: warm torchlight, cold crystal glow, or a GILDED vault
-  // whose corner lights are gold plinths crowned with torches.
-  const themeRoll = rng();
-  const theme: 'torch' | 'crystal' | 'gilded' =
-    themeRoll < 0.45 ? 'torch' : themeRoll < 0.75 ? 'crystal' : 'gilded';
-  const lightBlock = theme === 'crystal' ? Block.CrystalBlock : Block.Torch;
-
-  // Boss flavour: deeper vaults skew toward the nastier variants.
-  const bossRoll = rng();
-  const bossKind: VaultBossKind =
-    tier === 1 ? (bossRoll < 0.6 ? 'brute' : 'ravager')
-    : tier === 2 ? (bossRoll < 0.4 ? 'brute' : bossRoll < 0.75 ? 'ravager' : 'colossus')
-    : (bossRoll < 0.25 ? 'brute' : bossRoll < 0.6 ? 'ravager' : 'colossus');
+  // Keep consuming the two legacy visual/boss draws so every later layout draw
+  // remains byte-for-byte aligned with old worlds. The new family/boss comes
+  // from a separate coordinate hash and therefore cannot move any room.
+  rng();
+  rng();
+  const bossKind = vaultBossFor(seed, cx, cz, tier);
+  const family = VAULT_BOSS_FAMILY[bossKind];
+  const familyBrick: Record<VaultFamily, Block> = {
+    crypt: Block.CarvedVaultBrick,
+    mire: Block.MossyVaultBrick,
+    ember: Block.EmberBrick,
+    crystal: Block.PrismBrick,
+    gilded: Block.GildedVaultBrick,
+  };
+  const familyLight: Record<VaultFamily, Block> = {
+    crypt: Block.SoulLantern,
+    mire: Block.GlowFungus,
+    ember: Block.EmberBrazier,
+    crystal: Block.PrismLamp,
+    gilded: Block.GildedLamp,
+  };
+  // Legacy VaultBrick remains the structural shell (old fixtures, edits and
+  // mined-wall trophies stay compatible); family masonry is a deterministic
+  // decorative layer on floors, pillars and arena inlays.
+  const shellBlock = Block.VaultBrick;
+  const accentBlock = familyBrick[family];
+  const lightBlock = familyLight[family];
 
   // --- Pick the wings: hall + boss are fixed; the rest is a seeded spread of
   // themed rooms across the lattice, denser at higher tiers (8–15 total).
@@ -318,6 +386,22 @@ export function vaultStamp(
         kind: 'room', floorY: fy });
     }
   }
+  // Family weighting is a separate decoration decision. It changes flavour,
+  // never slot choice/centre/size and never consumes the layout stream.
+  const favored: Record<VaultFamily, readonly VaultRoom['kind'][]> = {
+    crypt: ['crypt', 'great', 'crypt'],
+    mire: ['flooded', 'garden', 'flooded'],
+    ember: ['lava', 'great', 'lava'],
+    crystal: ['garden', 'great', 'garden'],
+    gilded: ['treasury', 'great', 'treasury'],
+  };
+  for (let i = 1; i < boxes.length; i++) {
+    if (boxes[i].kind === 'pit') continue; // sunk geometry needs its stair variant
+    const roll = hash2(seed ^ 0xfa617e, cx * 37 + i, cz * 41 - i);
+    if (roll >= 0.48) continue;
+    const picks = favored[family];
+    boxes[i].kind = picks[Math.min(picks.length - 1, Math.floor(roll / 0.16))];
+  }
   boxes.push(boss);
 
   // Local block map: later marks win, so carve order is explicit and safe.
@@ -331,7 +415,7 @@ export function vaultStamp(
     for (let du = -b.hw; du <= b.hw; du++) {
       for (let dv = -b.hw; dv <= b.hw; dv++) {
         for (let y = b.floorY; y <= fy + b.ih + 1; y++) {
-          mark(wx(b.u + du, b.v + dv), y, wz(b.u + du, b.v + dv), Block.VaultBrick);
+          mark(wx(b.u + du, b.v + dv), y, wz(b.u + du, b.v + dv), shellBlock);
         }
       }
     }
@@ -359,7 +443,7 @@ export function vaultStamp(
           const u = leg.alongU ? t : leg.fixed + s;
           const v = leg.alongU ? leg.fixed + s : t;
           const key = `${wx(u, v)},${y},${wz(u, v)}`;
-          if (cells.get(key) !== Block.Air) mark(wx(u, v), y, wz(u, v), Block.VaultBrick);
+          if (cells.get(key) !== Block.Air) mark(wx(u, v), y, wz(u, v), shellBlock);
         }
       }
     }
@@ -401,8 +485,27 @@ export function vaultStamp(
   // 5) Room furnishing: theme lights in the corners, MOB SPAWNERS at the heart
   //    of guarded rooms, pillars in great halls, spikes lining pit floors (with
   //    a corner stair back out), the boss dais + chest.
-  for (const b of boxes) {
+  for (let boxIndex = 0; boxIndex < boxes.length; boxIndex++) {
+    const b = boxes[boxIndex];
     const floor = b.floorY + 1;
+    const variant = Math.floor(hash2(seed ^ 0x726f6f6d, cx * 31 + boxIndex,
+      cz * 31 + boxIndex) * 3);
+    // Three floor-language variants shared by every room kind: border, cross,
+    // or checker. They are furnishing-only and cannot obstruct traversal.
+    if (b.kind !== 'pit' && b.kind !== 'flooded' && b.kind !== 'lava') {
+      for (let du = -(b.hw - 1); du <= b.hw - 1; du++) {
+        for (let dv = -(b.hw - 1); dv <= b.hw - 1; dv++) {
+          const border = Math.abs(du) === b.hw - 1 || Math.abs(dv) === b.hw - 1;
+          const cross = du === 0 || dv === 0;
+          const checker = ((du + dv) & 3) === 0;
+          if ((variant === 0 && border) || (variant === 1 && cross) ||
+              (variant === 2 && checker)) {
+            mark(wx(b.u + du, b.v + dv), b.floorY, wz(b.u + du, b.v + dv),
+              family === 'ember' ? Block.Basalt : accentBlock);
+          }
+        }
+      }
+    }
     // Corner lights (all four corners in big rooms, two in small ones). A
     // gilded vault raises each light on a glowing gold plinth.
     const corners: [number, number][] = b.hw >= 5
@@ -410,18 +513,17 @@ export function vaultStamp(
     for (const [su, sv] of corners) {
       const lx = wx(b.u + su * (b.hw - 1), b.v + sv * (b.hw - 1));
       const lz = wz(b.u + su * (b.hw - 1), b.v + sv * (b.hw - 1));
-      if (theme === 'gilded') {
+      if (family === 'gilded') {
         mark(lx, floor, lz, Block.GoldBlock);
-        mark(lx, floor + 1, lz, Block.Torch);
-      } else {
-        mark(lx, floor, lz, lightBlock);
-      }
+        mark(lx, floor + 1, lz, lightBlock);
+      } else mark(lx, floor, lz, lightBlock);
     }
     if (b.kind === 'great' || b.kind === 'boss') {
       // Pillars: four brick columns floor→ceiling.
       for (const [su, sv] of [[-1, -1], [-1, 1], [1, -1], [1, 1]]) {
-        const pu = b.u + su * (b.hw - 3), pv = b.v + sv * (b.hw - 3);
-        for (let y = floor; y <= fy + b.ih; y++) mark(wx(pu, pv), y, wz(pu, pv), Block.VaultBrick);
+        const inset = b.kind === 'boss' ? b.hw - 2 : b.hw - 3;
+        const pu = b.u + su * inset, pv = b.v + sv * inset;
+        for (let y = floor; y <= fy + b.ih; y++) mark(wx(pu, pv), y, wz(pu, pv), accentBlock);
       }
     }
     if (b.kind === 'great') {
@@ -509,7 +611,7 @@ export function vaultStamp(
       for (let k = 0; k < 4; k++) { // 1-wide corner steps up to the doorway
         const su = b.hw - 1 - k;
         for (let y = b.floorY + 1; y <= b.floorY + k; y++) {
-          mark(wx(b.u + su, b.v + (b.hw - 1)), y, wz(b.u + su, b.v + (b.hw - 1)), Block.VaultBrick);
+          mark(wx(b.u + su, b.v + (b.hw - 1)), y, wz(b.u + su, b.v + (b.hw - 1)), shellBlock);
         }
       }
     }
@@ -519,13 +621,15 @@ export function vaultStamp(
   }
   // Boss dais: a raised 3×3 brick platform at the back of the lair with the
   // VaultChest on top, flanked by theme lights.
-  const daisU = boss.u + boss.hw - 3;
+  // The arena grew from 15×15 to 19×19, but this legacy +4 offset is fixed:
+  // old chest records, map lookups and player edits continue to line up.
+  const daisU = boss.u + 4;
   for (let du = -1; du <= 1; du++) {
     for (let dv = -1; dv <= 1; dv++) {
       // Gold-trimmed corners make the treasure dais gleam from the doorway.
       const gold = du !== 0 && dv !== 0;
       mark(wx(daisU + du, boss.v + dv), fy + 1, wz(daisU + du, boss.v + dv),
-        gold ? Block.GoldBlock : Block.VaultBrick);
+        gold ? Block.GoldBlock : shellBlock);
     }
   }
   const chest = { x: wx(daisU, boss.v), y: fy + 2, z: wz(daisU, boss.v) };
@@ -574,10 +678,12 @@ export function vaultStamp(
     const [x, y, z] = key.split(',').map(Number);
     blocks.push({ x, y, z, id });
   }
-  const rooms: VaultRoom[] = boxes.map((b) => ({
+  const rooms: VaultRoom[] = boxes.map((b, roomIndex) => ({
     x: wx(b.u, b.v), y: b.floorY + 1, z: wz(b.u, b.v), hw: b.hw,
     kind: b.kind,
     cap: ROOM_CAP[b.kind],
+    variant: Math.floor(hash2(seed ^ 0x726f6f6d, cx * 31 + roomIndex,
+      cz * 31 + roomIndex) * 3) as 0 | 1 | 2,
   }));
   let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
   for (const r of rooms) {
@@ -586,7 +692,26 @@ export function vaultStamp(
   }
   const bounds = { minX, minZ, maxX, maxZ, minY: fy - 6, maxY: fy + BOSS_IH + 3 };
 
-  return { cx, cz, tier, bossKind, x: ax, y: g, z: az, floorY: fy, rooms, chest, mouth, bounds, blocks };
+  const bossCenter = { x: wx(boss.u, boss.v), y: fy + 1, z: wz(boss.u, boss.v) };
+  const socketLocal: [number, number][] = [[-6, -6], [-6, 6], [6, -6], [6, 6]];
+  const sockets = socketLocal.map(([du, dv]) =>
+    ({ x: wx(boss.u + du, boss.v + dv), y: fy + 1, z: wz(boss.u + du, boss.v + dv) }));
+  const cameraAnchors = [
+    { x: wx(boss.u - 7, boss.v), y: fy + 4, z: wz(boss.u - 7, boss.v) },
+    { x: wx(boss.u + 1, boss.v + 7), y: fy + 5, z: wz(boss.u + 1, boss.v + 7) },
+  ];
+  const safeLanes = [[0, -4], [0, 4], [-4, 0], [0, 0]].map(([du, dv]) =>
+    ({ x: wx(boss.u + du, boss.v + dv), y: fy + 1, z: wz(boss.u + du, boss.v + dv) }));
+  const arena = {
+    bounds: {
+      minX: bossCenter.x - BOSS_HW + 1, minY: fy + 1,
+      minZ: bossCenter.z - BOSS_HW + 1, maxX: bossCenter.x + BOSS_HW - 1,
+      maxY: fy + BOSS_IH, maxZ: bossCenter.z + BOSS_HW - 1,
+    },
+    sockets, cameraAnchors, safeLanes,
+  };
+  return { cx, cz, tier, family, bossKind, x: ax, y: g, z: az, floorY: fy,
+    rooms, chest, mouth, bounds, arena, blocks };
 }
 
 /** The vault whose underground bounds contain (x, y, z), scanning the ±2-chunk
@@ -696,6 +821,13 @@ const VAULT_ROLLS: Record<VaultTier, number> = { 1: 7, 2: 8, 3: 9 };
 const RUNE_POOL = [
   Item.RuneOfIron, Item.RuneOfSwiftness, Item.RuneOfFortune, Item.RuneOfFocus,
 ];
+const BOSS_RELIC: Record<VaultBossKind, Item> = {
+  bone_warden: Item.WardenSigil,
+  mire_queen: Item.MireBloom,
+  ember_colossus: Item.EmberCore,
+  crystal_seer: Item.SeerPrism,
+  gilded_artificer: Item.ArtificerGear,
+};
 
 /** FNV-1a over a string (per-player loot personalisation). */
 function strHash(s: string): number {
@@ -723,6 +855,7 @@ export function vaultLoot(
   const table = VAULT_LOOT[tier];
   const totalW = table.reduce((a, e) => a + e.w, 0);
   const out: ItemStack[] = [];
+  out.push({ id: BOSS_RELIC[vaultBossFor(seed, cx, cz, tier)], count: 1 });
   if (tier === 1) {
     out.push({ id: Item.Bandage, count: 3 });
     out.push({ id: Item.Bullet, count: 16 });

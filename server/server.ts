@@ -348,6 +348,14 @@ setInterval(() => {
 }, 30000);
 
 // Periodic snapshot + regeneration tick.
+let vaultLast = Date.now();
+setInterval(() => {
+  const now = Date.now();
+  const dt = Math.min(0.25, (now - vaultLast) / 1000);
+  vaultLast = now;
+  dispatch(game.tickVaultEncounters(dt));
+}, 1000 / 20);
+
 let last = Date.now();
 setInterval(() => {
   const now = Date.now();

@@ -7,6 +7,10 @@ import type { MachineState, UpgradeAxis } from '../machines';
 import type { TurretState, TurretAxis } from '../turrets';
 import type { GadgetKind } from '../gadgets';
 import type { Cosmetics } from '../character';
+import type {
+  ArenaBounds, EncounterEvent, EncounterSnapshot, VaultAttackIntent, Vec3,
+} from '../vault_encounter';
+import type { VaultBossKind, VaultFamily, VaultTier } from '../vaults';
 
 export const SERVER_PORT = 8080;
 export const SNAPSHOT_HZ = 15;     // server -> clients transform broadcasts
@@ -208,7 +212,7 @@ export type ClientMsg =
   // authoritative state incl. whether YOU already looted it), report a hit on
   // the server-HP Vault Brute, and open the per-player VaultChest.
   | { t: 'vaultEnter'; cx: number; cz: number }
-  | { t: 'vaultBossHit'; cx: number; cz: number; amount: number }
+  | { t: 'vaultAttack'; cx: number; cz: number; intent: VaultAttackIntent }
   | { t: 'vaultChestOpen'; x: number; y: number; z: number };
 
 // --- server -> client -------------------------------------------------------
@@ -321,6 +325,18 @@ export type ServerMsg =
   | { t: 'vaultCleared'; cx: number; cz: number; by: string }
   // YOUR per-player loot roll was granted (items arrive via gotitem).
   | { t: 'vaultLooted'; cx: number; cz: number }
+  | {
+      t: 'encounterStart'; cx: number; cz: number; encounterId: string;
+      family: VaultFamily; kind: VaultBossKind; tier: VaultTier;
+      startTime: number; seed: number; bounds: ArenaBounds;
+      scaling: number; cameraAnchors: Vec3[]; snapshot: EncounterSnapshot;
+    }
+  | { t: 'encounterSnapshot'; cx: number; cz: number; snapshot: EncounterSnapshot }
+  | { t: 'encounterEvent'; cx: number; cz: number; event: EncounterEvent }
+  | {
+      t: 'encounterEnd'; cx: number; cz: number;
+      outcome: 'victory' | 'reset' | 'abandonment'; credited?: string;
+    }
   // A player changed their avatar cosmetics — rebuild their model.
   | { t: 'cosmetics'; id: number; c: Cosmetics };
 

@@ -103,6 +103,12 @@ export const enum Item {
   // The Diamond Shovel: end-game digging. INSTANTLY breaks soft ground
   // (grass/dirt/sand) — the terraforming reward for a diamond haul.
   DiamondShovel = 182,
+  // Family relics are personal vault-chest rewards and cosmetic currencies.
+  WardenSigil = 193,
+  MireBloom = 194,
+  EmberCore = 195,
+  SeerPrism = 196,
+  ArtificerGear = 197,
 }
 
 export interface ToolInfo {
@@ -324,6 +330,16 @@ export const ITEMS: Record<number, ItemInfo> = {
   // Dungeons (Milestone D): mined vault walls are a building trophy. The
   // VaultChest is deliberately NOT an item (breaking one drops nothing).
   [Block.VaultBrick]: blockItem(Block.VaultBrick),
+  [Block.CarvedVaultBrick]: blockItem(Block.CarvedVaultBrick),
+  [Block.MossyVaultBrick]: blockItem(Block.MossyVaultBrick),
+  [Block.EmberBrick]: blockItem(Block.EmberBrick),
+  [Block.PrismBrick]: blockItem(Block.PrismBrick),
+  [Block.GildedVaultBrick]: blockItem(Block.GildedVaultBrick),
+  [Block.SoulLantern]: blockItem(Block.SoulLantern),
+  [Block.GlowFungus]: blockItem(Block.GlowFungus),
+  [Block.EmberBrazier]: blockItem(Block.EmberBrazier),
+  [Block.PrismLamp]: blockItem(Block.PrismLamp),
+  [Block.GildedLamp]: blockItem(Block.GildedLamp),
   // Solid gold: vault-treasury loot, a compact way to bank ingots.
   [Block.GoldBlock]: blockItem(Block.GoldBlock),
   // The Sword: top melee damage, useless as a mining tool.
@@ -508,6 +524,11 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Item.RuneOfSwiftness]: pureItem('Rune of Swiftness', Tile.RuneSwift),
   [Item.RuneOfFortune]: pureItem('Rune of Fortune', Tile.RuneFortune),
   [Item.RuneOfFocus]: pureItem('Rune of Focus', Tile.RuneFocus),
+  [Item.WardenSigil]: pureItem('Warden Sigil', Tile.WardenSigil),
+  [Item.MireBloom]: pureItem('Mire Bloom', Tile.MireBloom),
+  [Item.EmberCore]: pureItem('Ember Core', Tile.EmberCore),
+  [Item.SeerPrism]: pureItem('Seer Prism', Tile.SeerPrism),
+  [Item.ArtificerGear]: pureItem('Artificer Gear', Tile.ArtificerGear),
 };
 
 /**

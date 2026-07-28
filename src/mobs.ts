@@ -4,7 +4,7 @@
 // knockback combat, drops and death poofs.
 
 import * as THREE from 'three';
-import { Block, BLOCKS, isSolid, Tile } from './blocks';
+import { Block, BLOCKS, isSolid, isVaultMasonry, Tile } from './blocks';
 import type { ItemEntities } from './itementity';
 import { Item, ItemStack } from './items';
 import { inCore } from './net/protocol';
@@ -72,9 +72,11 @@ export const BOSS_VARIANTS: Record<VaultBossKind, {
   scale: number; speed: number; damage: number;
   tint: [number, number, number] | null;
 }> = {
-  brute:    { scale: 1.9,  speed: 1.0,  damage: BRUTE_DAMAGE, tint: null },
-  ravager:  { scale: 1.45, speed: 1.8,  damage: 4,  tint: [1.0, 0.62, 0.5] },
-  colossus: { scale: 2.5,  speed: 0.72, damage: 10, tint: [0.72, 0.85, 1.12] },
+  bone_warden:       { scale: 2.05, speed: 0.95, damage: BRUTE_DAMAGE, tint: [0.8, 0.65, 1.15] },
+  mire_queen:        { scale: 1.85, speed: 1.15, damage: 5, tint: [0.55, 1.05, 0.82] },
+  ember_colossus:    { scale: 2.5, speed: 0.72, damage: 10, tint: [1.18, 0.62, 0.38] },
+  crystal_seer:      { scale: 1.65, speed: 1.35, damage: 6, tint: [0.62, 0.84, 1.2] },
+  gilded_artificer:  { scale: 1.75, speed: 1.25, damage: 7, tint: [1.18, 0.92, 0.42] },
 };
 const SPIT_DAMAGE = 3;
 const SPIT_COOLDOWN = 2.4;
@@ -336,7 +338,7 @@ export class Mobs {
    *  retuned per variant (hitbox follows the visual scale). */
   spawnBoss(kind: VaultBossKind, x: number, y: number, z: number): Mob {
     const mob = this.spawnAt('brute', x, y, z);
-    const v = BOSS_VARIANTS[kind] ?? BOSS_VARIANTS.brute;
+    const v = BOSS_VARIANTS[kind] ?? BOSS_VARIANTS.bone_warden;
     mob.model.group.scale.setScalar(v.scale);
     const f = v.scale / 1.9; // buildModel bakes 1.9× into the brute body
     mob.halfW = mob.def.halfW * f;
@@ -344,6 +346,43 @@ export class Mobs {
     mob.speedFactor = v.speed;
     mob.meleeDmg = v.damage;
     mob.tint = v.tint;
+    // Family silhouettes are assembled from tiny code-native primitives so
+    // every boss reads differently without external model assets.
+    const mat = new THREE.MeshBasicMaterial({
+      color: kind === 'bone_warden' ? 0x8f78b8
+        : kind === 'mire_queen' ? 0x3a9b72
+        : kind === 'ember_colossus' ? 0xd84d28
+        : kind === 'crystal_seer' ? 0x668ee8 : 0xc99432,
+    });
+    const addBox = (w: number, h: number, d: number, px: number, py: number, pz: number) => {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+      mesh.position.set(px, py, pz); mob.model.group.add(mesh); return mesh;
+    };
+    if (kind === 'bone_warden') {
+      addBox(0.85, 1.1, 0.16, -0.62, 1.8, -0.12); // shield
+      const blade = addBox(0.16, 1.8, 0.28, 0.72, 1.45, -0.1);
+      blade.rotation.z = -0.3;
+    } else if (kind === 'mire_queen') {
+      for (let i = 0; i < 5; i++) {
+        const t = addBox(0.16, 1.2, 0.16, (i - 2) * 0.24, 2.65 + (i & 1) * 0.18, 0);
+        t.rotation.z = (i - 2) * 0.16;
+      }
+    } else if (kind === 'ember_colossus') {
+      const furnace = addBox(0.9, 0.85, 0.12, 0, 1.85, -0.62);
+      (furnace.material as THREE.MeshBasicMaterial).color.setHex(0xff7a28);
+    } else if (kind === 'crystal_seer') {
+      for (let i = 0; i < 4; i++) {
+        const shard = new THREE.Mesh(new THREE.OctahedronGeometry(0.2, 0), mat);
+        const a = i * Math.PI / 2;
+        shard.position.set(Math.cos(a) * 0.9, 2 + (i & 1) * 0.35, Math.sin(a) * 0.9);
+        mob.model.group.add(shard);
+      }
+    } else {
+      const gear = new THREE.Mesh(new THREE.TorusGeometry(0.65, 0.14, 6, 12), mat);
+      gear.position.set(0, 1.9, 0.55); gear.rotation.x = Math.PI / 2;
+      mob.model.group.add(gear);
+      addBox(1.6, 0.16, 0.16, 0, 1.75, 0.45); // articulated tool rail
+    }
     return mob;
   }
 
@@ -576,7 +615,7 @@ export class Mobs {
           // (mirrors the server, which also skips vault blocks in its crater).
           // Spawners + gold hoards survive too — crypt creepers must not clear
           // their own room, and treasure is mined, never vaporized.
-          if (id === Block.VaultBrick || id === Block.VaultChest ||
+          if (isVaultMasonry(id) || id === Block.VaultChest ||
               id === Block.MobSpawner || id === Block.GoldBlock) continue;
           this.world.setBlock(x, y, z, Block.Air);
         }

@@ -1802,6 +1802,63 @@ function paintVaultBrick(p: Painter, seed: number): void {
   if (hash2(seed, 9, 12) < 0.5) p.set(11, 10, [96, 210, 200, 255]);
 }
 
+function paintFamilyBrick(base: RGBA, seam: RGBA, accent: RGBA, organic = false) {
+  return (p: Painter, seed: number): void => {
+    p.fill((x, y) => {
+      const row = y >> 2;
+      const mortar = (y & 3) === 0 || ((x + (row & 1) * 4) & 7) === 0;
+      if (mortar) return shade(seam, 0.88 + hash2(seed, x, y) * 0.16);
+      let c = shade(base, speckle(seed ^ row, x, y, 0.13));
+      if (organic && hash2(seed ^ 0x51, x >> 1, y >> 1) > 0.82) {
+        c = shade(accent, 0.75 + hash2(seed, y, x) * 0.3);
+      }
+      return c;
+    });
+    // Inlay seams remain readable even after the global vibrance pass.
+    for (let i = 2; i < 15; i += 5) {
+      if (hash2(seed ^ 0xa7, i, i) > 0.35) p.set(i, 2 + (i * 3) % 11, accent);
+    }
+  };
+}
+
+function paintVaultLight(body: RGBA, glow: RGBA, fungus = false) {
+  return (p: Painter, seed: number): void => {
+    if (fungus) {
+      for (let y = 4; y <= 13; y++) for (let x = 3; x <= 12; x++) {
+        const cap = y <= 8 && Math.abs(x - 7.5) <= 5 - Math.abs(y - 7);
+        const stem = y >= 8 && x >= 6 && x <= 9;
+        if (cap || stem) p.set(x, y, shade(cap ? glow : body,
+          0.85 + hash2(seed, x, y) * 0.25));
+      }
+      return;
+    }
+    p.fill((x, y) => {
+      const frame = x <= 2 || x >= 13 || y <= 2 || y >= 13;
+      const bar = x === 5 || x === 10 || y === 5 || y === 10;
+      return frame || bar ? shade(body, speckle(seed, x, y, 0.08))
+        : shade(glow, 0.9 + hash2(seed, x, y) * 0.18);
+    });
+  };
+}
+
+function paintRelic(base: RGBA, glow: RGBA, shape: 'sigil' | 'bloom' | 'core' | 'prism' | 'gear') {
+  return (p: Painter, seed: number): void => {
+    for (let y = 2; y <= 13; y++) for (let x = 2; x <= 13; x++) {
+      const dx = x - 7.5, dy = y - 7.5;
+      const r = Math.hypot(dx, dy);
+      const on = shape === 'sigil' ? (r < 5 && r > 2.8) || Math.abs(dx) < 1
+        : shape === 'bloom' ? r < 2.3 || (r > 2.8 && r < 5 && ((Math.atan2(dy, dx) * 4 / Math.PI) & 1) === 0)
+        : shape === 'core' ? Math.abs(dx) + Math.abs(dy) < 5
+        : shape === 'prism' ? Math.abs(dx) < 5 - Math.abs(dy) * 0.45
+        : (r < 5.5 && r > 3) || r < 1.8 ||
+          (Math.abs(dx) < 1.2 && r < 6) || (Math.abs(dy) < 1.2 && r < 6);
+      if (on) p.set(x, y, shade(r < 2.2 ? glow : base,
+        0.88 + hash2(seed, x, y) * 0.22));
+    }
+    outlineSprite(p);
+  };
+}
+
 const VAULT_CHEST_BODY: RGBA = [56, 46, 66, 255];
 const VAULT_CHEST_TRIM: RGBA = [232, 196, 88, 255];
 
@@ -2346,6 +2403,26 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.VaultBrick]: paintVaultBrick,
   [Tile.VaultChestSide]: paintVaultChestSide,
   [Tile.VaultChestTop]: paintVaultChestTop,
+  [Tile.CarvedVaultBrick]: paintFamilyBrick(
+    [104, 100, 118, 255], [42, 38, 54, 255], [174, 134, 214, 255]),
+  [Tile.MossyVaultBrick]: paintFamilyBrick(
+    [70, 86, 76, 255], [30, 44, 39, 255], [78, 176, 108, 255], true),
+  [Tile.EmberBrick]: paintFamilyBrick(
+    [54, 48, 52, 255], [25, 22, 27, 255], [255, 94, 36, 255]),
+  [Tile.PrismBrick]: paintFamilyBrick(
+    [64, 72, 126, 255], [31, 34, 70, 255], [94, 218, 255, 255]),
+  [Tile.GildedVaultBrick]: paintFamilyBrick(
+    [40, 41, 48, 255], [17, 18, 23, 255], [246, 190, 58, 255]),
+  [Tile.SoulLantern]: paintVaultLight([52, 42, 68, 255], [176, 94, 255, 255]),
+  [Tile.GlowFungus]: paintVaultLight([48, 94, 70, 255], [72, 246, 186, 255], true),
+  [Tile.EmberBrazier]: paintVaultLight([70, 46, 34, 255], [255, 100, 28, 255]),
+  [Tile.PrismLamp]: paintVaultLight([52, 60, 112, 255], [108, 224, 255, 255]),
+  [Tile.GildedLamp]: paintVaultLight([64, 48, 25, 255], [255, 210, 76, 255]),
+  [Tile.WardenSigil]: paintRelic([112, 84, 150, 255], [220, 172, 255, 255], 'sigil'),
+  [Tile.MireBloom]: paintRelic([52, 154, 104, 255], [126, 255, 194, 255], 'bloom'),
+  [Tile.EmberCore]: paintRelic([190, 54, 28, 255], [255, 202, 62, 255], 'core'),
+  [Tile.SeerPrism]: paintRelic([74, 126, 226, 255], [184, 244, 255, 255], 'prism'),
+  [Tile.ArtificerGear]: paintRelic([174, 124, 38, 255], [255, 226, 118, 255], 'gear'),
   // Vault Brute: a hulking mossy-stone zombie — pale glowing eyes, heavy jaw.
   [Tile.BruteSkin]: paintSkin([98, 112, 86, 255], 0.18, [72, 84, 62, 255]),
   [Tile.BruteFace]: paintFace([98, 112, 86, 255], [235, 245, 170, 255],

@@ -11,6 +11,11 @@ import {
   TRANSFORM_HZ,
 } from './protocol';
 import type { Cosmetics } from '../character';
+import type {
+  EncounterEvent, EncounterSnapshot, VaultAttackIntent,
+} from '../vault_encounter';
+import { sanitizeEncounterSnapshot } from '../vault_encounter';
+import type { VaultBossKind, VaultFamily, VaultTier } from '../vaults';
 
 export interface Remote {
   info: PlayerInfo;
@@ -137,6 +142,16 @@ export class NetClient {
   onVaultCleared?: (cx: number, cz: number, by: string) => void;
   /** YOUR per-player vault loot was granted (items arrive via gotitem). */
   onVaultLooted?: (cx: number, cz: number) => void;
+  onEncounterStart?: (cx: number, cz: number, data: {
+    encounterId: string; family: VaultFamily; kind: VaultBossKind; tier: VaultTier;
+    startTime: number; seed: number; scaling: number;
+    cameraAnchors: { x: number; y: number; z: number }[];
+    snapshot: EncounterSnapshot;
+  }) => void;
+  onEncounterSnapshot?: (cx: number, cz: number, snapshot: EncounterSnapshot) => void;
+  onEncounterEvent?: (cx: number, cz: number, event: EncounterEvent) => void;
+  onEncounterEnd?: (cx: number, cz: number,
+    outcome: 'victory' | 'reset' | 'abandonment', credited?: string) => void;
 
   private ws: WebSocket | null = null;
   private xformAcc = 0;
@@ -361,6 +376,33 @@ export class NetClient {
       case 'vaultLooted':
         this.onVaultLooted?.(msg.cx, msg.cz);
         break;
+      case 'encounterStart':
+        {
+        const snapshot = sanitizeEncounterSnapshot(msg.snapshot);
+        if (!snapshot) break;
+        this.onEncounterStart?.(msg.cx, msg.cz, {
+          encounterId: msg.encounterId, family: msg.family, kind: msg.kind,
+          tier: msg.tier, startTime: msg.startTime, seed: msg.seed,
+          scaling: msg.scaling, cameraAnchors: msg.cameraAnchors,
+          snapshot,
+        });
+        break;
+        }
+      case 'encounterSnapshot':
+        {
+          const snapshot = sanitizeEncounterSnapshot(msg.snapshot);
+          if (snapshot) this.onEncounterSnapshot?.(msg.cx, msg.cz, snapshot);
+        }
+        break;
+      case 'encounterEvent':
+        if (msg.event && typeof msg.event.id === 'string' &&
+            msg.event.id.length <= 192 && Number.isFinite(msg.event.executeAt)) {
+          this.onEncounterEvent?.(msg.cx, msg.cz, msg.event);
+        }
+        break;
+      case 'encounterEnd':
+        this.onEncounterEnd?.(msg.cx, msg.cz, msg.outcome, msg.credited);
+        break;
     }
   }
 
@@ -522,8 +564,8 @@ export class NetClient {
   sendVaultEnter(cx: number, cz: number): void {
     if (this.connected) this.raw({ t: 'vaultEnter', cx, cz });
   }
-  sendVaultBossHit(cx: number, cz: number, amount: number): void {
-    if (this.connected) this.raw({ t: 'vaultBossHit', cx, cz, amount });
+  sendVaultAttack(cx: number, cz: number, intent: VaultAttackIntent): void {
+    if (this.connected) this.raw({ t: 'vaultAttack', cx, cz, intent });
   }
   sendVaultChestOpen(x: number, y: number, z: number): void {
     if (this.connected) this.raw({ t: 'vaultChestOpen', x, y, z });

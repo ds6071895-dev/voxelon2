@@ -133,6 +133,18 @@ export const enum Block {
   ReinforcedStone = 98,
   // Floodlight: throws bright light so night raids can't sneak the last 20m.
   Floodlight = 99,
+  // Cinematic vault families. IDs are appended (the 100–182 numeric range is
+  // occupied by non-block inventory items, so these continue after it).
+  CarvedVaultBrick = 183,
+  MossyVaultBrick = 184,
+  EmberBrick = 185,
+  PrismBrick = 186,
+  GildedVaultBrick = 187,
+  SoulLantern = 188,
+  GlowFungus = 189,
+  EmberBrazier = 190,
+  PrismLamp = 191,
+  GildedLamp = 192,
 }
 
 export const enum Tile {
@@ -369,6 +381,21 @@ export const enum Tile {
   ReinforcedStone = 204,
   FloodlightTop = 205,
   FloodlightSide = 206,
+  CarvedVaultBrick = 207,
+  MossyVaultBrick = 208,
+  EmberBrick = 209,
+  PrismBrick = 210,
+  GildedVaultBrick = 211,
+  SoulLantern = 212,
+  GlowFungus = 213,
+  EmberBrazier = 214,
+  PrismLamp = 215,
+  GildedLamp = 216,
+  WardenSigil = 217,
+  MireBloom = 218,
+  EmberCore = 219,
+  SeerPrism = 220,
+  ArtificerGear = 221,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel' | 'sword';
@@ -748,6 +775,41 @@ export const BLOCKS: Record<number, BlockInfo> = {
     name: 'Vault Chest', hardness: 22, emission: 8,
     top: Tile.VaultChestTop, bottom: Tile.VaultChestTop, side: Tile.VaultChestSide,
   }),
+  [Block.CarvedVaultBrick]: def({
+    name: 'Carved Vault Brick', hardness: 18, top: Tile.CarvedVaultBrick,
+  }),
+  [Block.MossyVaultBrick]: def({
+    name: 'Mossy Vault Brick', hardness: 16, top: Tile.MossyVaultBrick,
+  }),
+  [Block.EmberBrick]: def({
+    name: 'Ember Brick', hardness: 20, emission: 2, top: Tile.EmberBrick,
+  }),
+  [Block.PrismBrick]: def({
+    name: 'Prism Brick', hardness: 18, emission: 4, top: Tile.PrismBrick,
+  }),
+  [Block.GildedVaultBrick]: def({
+    name: 'Gilded Vault Brick', hardness: 20, emission: 2, top: Tile.GildedVaultBrick,
+  }),
+  [Block.SoulLantern]: def({
+    name: 'Soul Lantern', hardness: 1.5, emission: 13, top: Tile.SoulLantern,
+    opaque: false, occludes: false,
+  }),
+  [Block.GlowFungus]: def({
+    name: 'Glow Fungus', hardness: 0.2, emission: 11, top: Tile.GlowFungus,
+    solid: false, opaque: false, occludes: false, shape: 'cross',
+  }),
+  [Block.EmberBrazier]: def({
+    name: 'Ember Brazier', hardness: 2, emission: 15, top: Tile.EmberBrazier,
+    opaque: false, occludes: false,
+  }),
+  [Block.PrismLamp]: def({
+    name: 'Prism Lamp', hardness: 1.5, emission: 14, top: Tile.PrismLamp,
+    opaque: false, occludes: false,
+  }),
+  [Block.GildedLamp]: def({
+    name: 'Gilded Lamp', hardness: 1.5, emission: 14, top: Tile.GildedLamp,
+    opaque: false, occludes: false,
+  }),
 
   // --- Traps ---
   // Spike Trap: a low slab of iron spikes. Anyone STANDING on it takes steady
@@ -856,6 +918,10 @@ const PICKAXE_TIERS: [Block, number][] = [
   [Block.Turret, 1], // metal war machines need a stone+ pick
   [Block.Core, 1], // the claim Core is pickaxe-mineable (owner-only, server-gated)
   [Block.VaultBrick, 2], [Block.VaultChest, 2], // dungeon walls need an iron pick
+  [Block.CarvedVaultBrick, 2], [Block.MossyVaultBrick, 2],
+  [Block.EmberBrick, 2], [Block.PrismBrick, 2], [Block.GildedVaultBrick, 2],
+  [Block.SoulLantern, 1], [Block.EmberBrazier, 1],
+  [Block.PrismLamp, 1], [Block.GildedLamp, 1],
   [Block.MobSpawner, 2], // silencing a guard room takes an iron pick too
 ];
 for (const [b, tier] of PICKAXE_TIERS) {
@@ -883,6 +949,11 @@ BLOCKS[Block.Barricade].tool = 'axe';
 
 export function isSolid(id: number): boolean {
   return id !== Block.Air && (BLOCKS[id]?.solid ?? false);
+}
+export function isVaultMasonry(id: number): boolean {
+  return id === Block.VaultBrick || id === Block.CarvedVaultBrick ||
+    id === Block.MossyVaultBrick || id === Block.EmberBrick ||
+    id === Block.PrismBrick || id === Block.GildedVaultBrick;
 }
 export function isOpaque(id: number): boolean {
   return id !== Block.Air && (BLOCKS[id]?.opaque ?? false);

@@ -208,6 +208,19 @@ export const RECIPES: Recipe[] = [
   shaped([[null, Item.GoldIngot, null], [Item.GoldIngot, R, Item.GoldIngot], [null, S, null]], Item.VaultCompass2),
   shaped([[null, D, null], [D, R, D], [null, S, null]], Item.VaultCompass3),
 
+  // Boss relic trophies: convert legacy masonry/torches into the cleared
+  // family's decorative kit without replacing progression materials.
+  shapeless([Item.WardenSigil, Block.VaultBrick], Block.CarvedVaultBrick, 8),
+  shapeless([Item.MireBloom, Block.VaultBrick], Block.MossyVaultBrick, 8),
+  shapeless([Item.EmberCore, Block.VaultBrick], Block.EmberBrick, 8),
+  shapeless([Item.SeerPrism, Block.VaultBrick], Block.PrismBrick, 8),
+  shapeless([Item.ArtificerGear, Block.VaultBrick], Block.GildedVaultBrick, 8),
+  shapeless([Item.WardenSigil, Block.Torch], Block.SoulLantern, 2),
+  shapeless([Item.MireBloom, Block.Torch], Block.GlowFungus, 2),
+  shapeless([Item.EmberCore, Block.Torch], Block.EmberBrazier, 2),
+  shapeless([Item.SeerPrism, Block.Torch], Block.PrismLamp, 2),
+  shapeless([Item.ArtificerGear, Block.Torch], Block.GildedLamp, 2),
+
   // Building set (M15): per-wood slabs + stairs.
   ...woodCraft(OAK, Block.OakSlab, Block.OakStairsN),
   ...woodCraft(BIRCH, Block.BirchSlab, Block.BirchStairsN),

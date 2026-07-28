@@ -4,7 +4,7 @@
 // assignment, spawns (via the shared deterministic Terrain), PvP hit
 // validation, regen, and snapshots.
 
-import { BLOCKS, Block } from '../blocks';
+import { BLOCKS, Block, isVaultMasonry } from '../blocks';
 import { ITEMS, ItemStack } from '../items';
 import {
   MachineState, MachineType, applyUpgrade, claimMachine, collectMachine,
@@ -41,7 +41,7 @@ import { Terrain } from '../terrain';
 import { structureChestTier, worldStructures } from '../structures';
 import { chestLootSlots } from '../loot';
 import {
-  VAULT_BOSS_NAMES, VaultServerState, VaultStamp, bruteMaxHp, newVaultState,
+  VAULT_BOSS_NAMES, VaultServerState, VaultStamp, newVaultState,
   refreshVaultState, recordVaultLoot, sanitizeVaultState, vaultChestAt,
   vaultLoot, vaultLootCooldownLeft, vaultLootable, vaultStamp,
   worldVaults,
@@ -57,6 +57,10 @@ import {
   COMEBACK_HEARTS, KILL_CREDIT_WINDOW, MAX_HEARTS, canConsume, canWithdraw,
   clampHearts, maxHealthFor, transferHeart,
 } from '../hearts';
+import {
+  EncounterParticipant, VaultAttackIntent, VaultEncounter, bossMaxHp,
+  participantHpMultiplier,
+} from '../vault_encounter';
 
 const SEASON_BROADCAST = 2;      // seconds between season-clock broadcasts
 const WAR_BROADCAST = 2;         // seconds between war-clock broadcasts
@@ -136,7 +140,7 @@ const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
   'gadgetUse', 'rocketBlast', 'xp',
   'heartConsume', 'heartWithdraw', 'beaconRevive', 'useHeal',
   'attune', 'totemTeleport',
-  'vaultBossHit', 'vaultChestOpen',
+  'vaultAttack', 'vaultChestOpen',
 ]);
 
 /** One message the transport should deliver. `to` is a client id, or a
@@ -193,6 +197,12 @@ export class GameServer {
   // Vaults (Milestone D): per-vault boss HP + per-player loot ledger, keyed
   // by the anchor chunk "cx,cz". Persisted in the world save.
   private readonly vaults = new Map<string, VaultServerState>();
+  /** Active fights are intentionally ephemeral and never serialized. */
+  private readonly vaultEncounters = new Map<string, {
+    stamp: VaultStamp; engine: VaultEncounter; snapshotAccum: number;
+    credited: string;
+  }>();
+  private encounterSerial = 0;
   /** Deterministic vault stamps are pricey to rebuild — cache by anchor chunk. */
   private readonly vaultStamps = new Map<string, VaultStamp | null>();
   private worldTime = 0;        // seconds since boot
@@ -723,13 +733,29 @@ export class GameServer {
         const st = this.vaultStampAt(Math.floor(msg.cx), Math.floor(msg.cz));
         if (!st) return [];
         const v = this.ensureVault(st);
-        // `opened` = YOUR per-player loot cooldown is running (regrows in 30m).
-        return [{ to: id, msg: { t: 'vault', cx: st.cx, cz: st.cz, tier: st.tier,
-          hp: v.hp, maxHp: bruteMaxHp(st.tier), alive: v.hp > 0,
+        const out: Outbound[] = [{ to: id, msg: { t: 'vault', cx: st.cx, cz: st.cz, tier: st.tier,
+          hp: v.hp, maxHp: bossMaxHp(st.tier, st.bossKind), alive: v.hp > 0,
           opened: vaultLootCooldownLeft(v, p.username, this.worldTime) > 0 } }];
+        if (v.hp > 0 && !p.dead && this.playerInArena(p, st)) {
+          const active = this.ensureEncounter(st, p);
+          active.engine.start(p.id, this.worldTime);
+          active.credited = p.username;
+          out.push({ to: id, msg: {
+            t: 'encounterStart', cx: st.cx, cz: st.cz,
+            encounterId: active.engine.config.encounterId,
+            family: st.family, kind: st.bossKind, tier: st.tier,
+            startTime: active.engine.startedAt, seed: active.engine.config.seed,
+            bounds: { ...st.arena.bounds },
+            scaling: participantHpMultiplier(active.engine.peakParticipants),
+            cameraAnchors: st.arena.cameraAnchors.map((x) => ({ ...x })),
+            snapshot: active.engine.snapshot(),
+          } });
+        }
+        // `opened` = YOUR per-player loot cooldown is running (regrows in 30m).
+        return out;
       }
-      case 'vaultBossHit':
-        return this.handleVaultBossHit(p, msg.cx, msg.cz, msg.amount);
+      case 'vaultAttack':
+        return this.handleVaultAttack(p, msg.cx, msg.cz, msg.intent);
       case 'vaultChestOpen':
         return this.handleVaultChestOpen(p, msg.x, msg.y, msg.z);
       default:
@@ -755,31 +781,211 @@ export class GameServer {
   private ensureVault(st: VaultStamp): VaultServerState {
     const key = `${st.cx},${st.cz}`;
     let v = this.vaults.get(key);
-    if (!v) { v = newVaultState(st.tier); this.vaults.set(key, v); }
+    if (!v) {
+      v = newVaultState(st.tier);
+      v.hp = bossMaxHp(st.tier, st.bossKind);
+      this.vaults.set(key, v);
+    }
     refreshVaultState(v, this.worldTime);
+    // Partial fights are never persistent. Outside a live attempt, any living
+    // record represents an idle full-health boss (including migrated saves).
+    if (v.hp > 0 && !this.vaultEncounters.has(key)) {
+      v.hp = bossMaxHp(st.tier, st.bossKind);
+    }
     return v;
   }
 
-  /** A reported hit on the Vault Brute: shared server-side HP (all present
-   *  players' hits count, like machine sabotage). Fail-closed on range/state. */
-  private handleVaultBossHit(p: ServerPlayer, cx: number, cz: number, amount: number): Outbound[] {
-    if (p.dead || !fin(cx, cz, amount, p.x, p.z)) return [];
+  private playerInArena(p: ServerPlayer, st: VaultStamp): boolean {
+    const b = st.arena.bounds;
+    return p.x >= b.minX && p.x <= b.maxX && p.y >= b.minY && p.y <= b.maxY &&
+      p.z >= b.minZ && p.z <= b.maxZ;
+  }
+
+  private ensureEncounter(st: VaultStamp, starter: ServerPlayer): {
+    stamp: VaultStamp; engine: VaultEncounter; snapshotAccum: number; credited: string;
+  } {
+    const key = `${st.cx},${st.cz}`;
+    const current = this.vaultEncounters.get(key);
+    if (current && current.engine.status !== 'victory' && current.engine.status !== 'cooldown') {
+      current.engine.join(starter.id);
+      return current;
+    }
+    const bossRoom = st.rooms.find((r) => r.kind === 'boss')!;
+    const passable = (p: { x: number; y: number; z: number }): boolean => {
+      const edit = this.edits.get(`${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`);
+      return edit === undefined || !BLOCKS[edit]?.solid;
+    };
+    const sockets = st.arena.sockets.filter(passable);
+    for (const fallback of st.arena.safeLanes) {
+      if (sockets.length >= 4) break;
+      if (passable(fallback)) sockets.push(fallback);
+    }
+    if (!sockets.length) sockets.push({ x: bossRoom.x, y: bossRoom.y, z: bossRoom.z });
+    const attempt = `${st.cx}:${st.cz}:${Math.floor(this.worldTime * 20)}:${++this.encounterSerial}`;
+    const engine = new VaultEncounter({
+      encounterId: attempt,
+      seed: (this.seed ^ Math.imul(st.cx, 0x85ebca77) ^
+        Math.imul(st.cz, 0xc2b2ae3d) ^ this.encounterSerial) >>> 0,
+      tier: st.tier, kind: st.bossKind, family: st.family,
+      center: { x: bossRoom.x, y: bossRoom.y, z: bossRoom.z },
+      bounds: { ...st.arena.bounds }, sockets,
+      cameraAnchors: st.arena.cameraAnchors, startTime: this.worldTime,
+    });
+    const active = { stamp: st, engine, snapshotAccum: 0, credited: starter.username };
+    this.vaultEncounters.set(key, active);
+    return active;
+  }
+
+  /** Validated attack intent. Numeric client damage is never trusted directly. */
+  private handleVaultAttack(
+    p: ServerPlayer, cx: number, cz: number, intent: VaultAttackIntent,
+  ): Outbound[] {
+    if (p.dead || !fin(cx, cz, p.x, p.y, p.z) || !intent || typeof intent !== 'object') return [];
     const st = this.vaultStampAt(Math.floor(cx), Math.floor(cz));
     if (!st) return [];
-    // The attacker must actually be at the vault (fail-closed on NaN).
-    if (!(Math.hypot(p.x - st.x, p.z - st.z) <= 64)) return [];
+    const active = this.vaultEncounters.get(`${st.cx},${st.cz}`);
+    if (!active || active.engine.config.encounterId !== intent.encounterId) return [];
+    const held = ITEMS[p.held];
+    let source: VaultAttackIntent['source'] | null = null;
+    let maxDamage = 0, range = 0, cadence = 0;
+    if (held?.gun) {
+      source = held.gun.rocket ? 'rocket' : 'bullet';
+      maxDamage = held.gun.damage * Math.max(1, held.gun.pellets ?? 1);
+      range = Math.min(RANGED_MAX_RANGE, held.gun.range);
+      cadence = Math.max(0.06, held.gun.cooldown / Math.max(1, held.gun.burst ?? 1));
+    } else if (p.held === Item.Sword || p.held === 0) {
+      source = 'melee'; maxDamage = p.held === Item.Sword ? 7 : 4; range = 4; cadence = 0.32;
+    } else if (gadgetOf(p.held)) {
+      source = 'gadget'; maxDamage = Math.min(30, gadgetOf(p.held)?.damage ?? 8);
+      range = 24; cadence = 0.8;
+    }
+    const attacker: EncounterParticipant = {
+      id: p.id, position: { x: p.x, y: p.y, z: p.z },
+      alive: !p.dead, inside: this.playerInArena(p, st),
+    };
+    const result = active.engine.attack(intent, attacker, {
+      heldSource: source, maxDamage, range, cadence, now: this.worldTime,
+    });
+    if (!result.accepted) return [];
+    active.credited = p.username;
     const v = this.ensureVault(st);
-    if (v.hp <= 0) return []; // already dead — nothing to hit
-    const dmg = Math.max(0, Math.min(40, Math.round(amount)));
-    if (dmg <= 0) return [];
-    v.hp = Math.max(0, v.hp - dmg);
-    const out: Outbound[] = [{ to: 'all', msg: { t: 'vault', cx: st.cx, cz: st.cz,
-      tier: st.tier, hp: v.hp, maxHp: bruteMaxHp(st.tier), alive: v.hp > 0 } }];
-    if (v.hp <= 0) {
-      v.deadAt = this.worldTime; // opens the 10-minute loot window
-      out.push({ to: 'all', msg: { t: 'vaultCleared', cx: st.cx, cz: st.cz, by: p.username } });
-      out.push({ to: 'all', msg: { t: 'killfeed',
-        killer: p.username, victim: `Tier ${st.tier} ${VAULT_BOSS_NAMES[st.bossKind]} ☠` } });
+    v.hp = active.engine.hp;
+    const out: Outbound[] = [{ to: 'all', msg: {
+      t: 'encounterSnapshot', cx: st.cx, cz: st.cz, snapshot: active.engine.snapshot(),
+    } }];
+    if (result.killed && active.engine.status === 'victory') {
+      out.push(...this.finishVaultEncounter(active, p.username));
+    }
+    return out;
+  }
+
+  private finishVaultEncounter(
+    active: { stamp: VaultStamp; engine: VaultEncounter; credited: string },
+    credited: string,
+  ): Outbound[] {
+    const st = active.stamp;
+    const v = this.ensureVault(st);
+    if (v.deadAt === this.worldTime && v.hp === 0) return [];
+    v.hp = 0;
+    v.deadAt = this.worldTime;
+    const elapsed = Math.max(0, active.engine.now - active.engine.startedAt);
+    for (const id of active.engine.participants) {
+      const participant = this.players.get(id);
+      if (!participant) continue;
+      const data = participant.savedClientData ?? {};
+      const raw = data.vaultRecords;
+      const records = raw && typeof raw === 'object'
+        ? { ...(raw as Record<string, unknown>) } : {};
+      const recordKey = `${st.cx},${st.cz}`;
+      const previous = records[recordKey] && typeof records[recordKey] === 'object'
+        ? records[recordKey] as { best?: unknown } : {};
+      const priorBest = typeof previous.best === 'number' && Number.isFinite(previous.best)
+        ? previous.best : Infinity;
+      records[recordKey] = {
+        boss: st.bossKind, family: st.family,
+        best: Math.min(priorBest, elapsed), clears:
+          typeof (previous as { clears?: unknown }).clears === 'number'
+            ? Math.max(1, Math.floor((previous as { clears: number }).clears) + 1) : 1,
+      };
+      data.vaultRecords = records;
+      participant.savedClientData = data;
+    }
+    const out: Outbound[] = [];
+    for (const event of active.engine.tick(0, [])) {
+      out.push({ to: 'all', msg: { t: 'encounterEvent', cx: st.cx, cz: st.cz, event } });
+    }
+    out.push({ to: 'all', msg: {
+      t: 'encounterEnd', cx: st.cx, cz: st.cz, outcome: 'victory', credited,
+    } });
+    out.push({ to: 'all', msg: { t: 'vault', cx: st.cx, cz: st.cz, tier: st.tier,
+      hp: 0, maxHp: active.engine.maxHp, alive: false } });
+    out.push({ to: 'all', msg: { t: 'vaultCleared', cx: st.cx, cz: st.cz, by: credited } });
+    out.push({ to: 'all', msg: { t: 'killfeed',
+      killer: credited, victim: `Tier ${st.tier} ${VAULT_BOSS_NAMES[st.bossKind]} ☠` } });
+    this.vaultEncounters.delete(`${st.cx},${st.cz}`);
+    return out;
+  }
+
+  /** Fixed-step authoritative encounter tick. The WS shell calls this at 20 Hz. */
+  tickVaultEncounters(dt: number): Outbound[] {
+    if (!fin(dt) || dt <= 0) return [];
+    const out: Outbound[] = [];
+    for (const [key, active] of this.vaultEncounters) {
+      const st = active.stamp;
+      const before = new Set(active.engine.participants);
+      const inputs: EncounterParticipant[] = [...this.players.values()].map((p) => ({
+        id: p.id, position: { x: p.x, y: p.y, z: p.z },
+        alive: !p.dead, inside: this.playerInArena(p, st),
+      }));
+      const events = active.engine.tick(dt, inputs);
+      for (const event of events) {
+        out.push({ to: 'all', msg: { t: 'encounterEvent', cx: st.cx, cz: st.cz, event } });
+      }
+      // Late arrivals get the current complete state, never the four-second
+      // introduction or a replay of old event IDs.
+      for (const id of active.engine.participants) {
+        if (before.has(id)) continue;
+        out.push({ to: id, msg: {
+          t: 'encounterStart', cx: st.cx, cz: st.cz,
+          encounterId: active.engine.config.encounterId,
+          family: st.family, kind: st.bossKind, tier: st.tier,
+          startTime: active.engine.startedAt, seed: active.engine.config.seed,
+          bounds: { ...st.arena.bounds },
+          scaling: participantHpMultiplier(active.engine.peakParticipants),
+          cameraAnchors: st.arena.cameraAnchors.map((x) => ({ ...x })),
+          snapshot: active.engine.snapshot(),
+        } });
+      }
+      // Damage is decided only from authoritative transforms at execution time.
+      for (const hazard of active.engine.hazards) {
+        for (const input of inputs) {
+          const damage = active.engine.hitByHazard(hazard.id, input);
+          if (damage <= 0) continue;
+          const player = this.players.get(input.id);
+          if (!player) continue;
+          out.push(...this.applyDamage(player, damage, -1,
+            { x: player.x - hazard.origin.x, y: 0.25, z: player.z - hazard.origin.z }, false));
+        }
+      }
+      const v = this.ensureVault(st);
+      if (active.engine.status === 'idle') {
+        v.hp = bossMaxHp(st.tier, st.bossKind);
+        v.deadAt = -1e15;
+        out.push({ to: 'all', msg: {
+          t: 'encounterEnd', cx: st.cx, cz: st.cz, outcome: 'reset',
+        } });
+        this.vaultEncounters.delete(key);
+        continue;
+      }
+      v.hp = active.engine.hp;
+      active.snapshotAccum += dt;
+      if (active.snapshotAccum >= 0.1) {
+        active.snapshotAccum %= 0.1;
+        out.push({ to: 'all', msg: {
+          t: 'encounterSnapshot', cx: st.cx, cz: st.cz,
+          snapshot: active.engine.snapshot(),
+        } });
+      }
     }
     return out;
   }
@@ -799,7 +1005,7 @@ export class GameServer {
     const v = this.ensureVault(st);
     if (!vaultLootable(v, this.worldTime)) {
       return [{ to: p.id, msg: { t: 'notice', text: v.hp > 0
-        ? '☠ The Vault Brute guards this chest — defeat it first!'
+        ? `☠ The ${VAULT_BOSS_NAMES[st.bossKind]} guards this chest — defeat it first!`
         : '🔒 The vault has resealed — the Brute will return to guard it.' } }];
     }
     const cd = vaultLootCooldownLeft(v, p.username, this.worldTime);
@@ -1767,7 +1973,7 @@ export class GameServer {
           if (existing === undefined || existing === Block.Air) continue;
           if ((BLOCKS[existing]?.hardness ?? -1) < 0) continue;
           // Vault blocks are blast-proof (dungeons can't be cracked open).
-          if (existing === Block.VaultBrick || existing === Block.VaultChest) continue;
+          if (isVaultMasonry(existing) || existing === Block.VaultChest) continue;
           this.edits.set(key, Block.Air);
           out.push({ to: 'others', from: by.id, msg: { t: 'edit', x: bx, y: by2, z: bz, block: Block.Air } });
         }
@@ -1958,7 +2164,7 @@ export class GameServer {
 
   serialize(): WorldSave {
     return {
-      v: 1,
+      v: 2,
       seed: this.seed,
       worldTime: this.worldTime,
       edits: [...this.edits.entries()],

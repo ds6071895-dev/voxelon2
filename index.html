@@ -217,6 +217,20 @@
       justify-content: center; gap: 18px; z-index: 22;
     }
     #pause h1 { font-size: 48px; letter-spacing: 4px; }
+    #vault-accessibility {
+      display: grid; grid-template-columns: auto 150px; gap: 7px 12px;
+      padding: 10px 14px; background: rgba(8,10,16,.72);
+      border: 1px solid #45506a; font-size: 10px; align-items: center;
+    }
+    #vault-accessibility label { display: contents; }
+    #vault-accessibility input[type="range"] { width: 150px; }
+    #vault-accessibility input[type="checkbox"] { justify-self: start; }
+    body.reduced-motion *, body.photosensitivity-safe * {
+      animation-duration: .001ms !important; animation-iteration-count: 1 !important;
+    }
+    body.reduced-motion .vault-cinematic { transition: none !important; }
+    body.high-contrast-telegraphs .vault-boss-hud { filter: contrast(1.35); }
+    body.vault-cinematic-active #crosshair { visibility: hidden; }
 
     /* Debug overlay (F3) */
     #debug {
@@ -393,6 +407,14 @@
     </div>
     <div id="pause">
       <h1 class="mc-font">Paused</h1>
+      <div id="vault-accessibility" class="mc-font">
+        <label>Music <input id="music-volume" type="range" min="0" max="1" step="0.05" /></label>
+        <label>Effects <input id="effects-volume" type="range" min="0" max="1" step="0.05" /></label>
+        <label>Camera shake <input id="camera-shake" type="range" min="0" max="1" step="0.1" /></label>
+        <label>Reduced motion <input id="reduced-motion" type="checkbox" /></label>
+        <label>High-contrast telegraphs <input id="contrast-telegraphs" type="checkbox" /></label>
+        <label>Photosensitivity safe <input id="safe-effects" type="checkbox" /></label>
+      </div>
       <button id="resume-btn" class="mc-btn">Resume</button>
       <button id="quit-btn" class="mc-btn">Quit to Title</button>
     </div>

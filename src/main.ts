@@ -80,9 +80,17 @@ import { structureChestTier, worldStructures } from './structures';
 import { chestLootSlots } from './loot';
 import {
   VAULT_BOSS_NAMES, VAULT_LOOT_COOLDOWN, VAULT_LOOT_WINDOW, VAULT_RECHARGE,
-  VAULT_REVEAL, VaultStamp, bruteMaxHp,
+  VAULT_REVEAL, VaultStamp,
   vaultAt, vaultLoot, vaultStamp, worldVaults,
 } from './vaults';
+import {
+  EncounterEvent, EncounterSnapshot, VaultAttackIntent, VaultEncounter,
+  bossMaxHp,
+} from './vault_encounter';
+import {
+  VaultBossHUD, VaultCinematic, loadAccessibility, saveAccessibility,
+} from './vault_presentation';
+import { VaultEncounterVisuals } from './vault_visuals';
 
 const FOG_NEAR = RENDER_DISTANCE * 16 - 38;
 const FOG_FAR = RENDER_DISTANCE * 16 - 6;
@@ -97,6 +105,8 @@ const statusEl = document.getElementById('status')!;
 crosshair.style.display = 'none'; // HUD hidden until the player is in-game
 hotbarEl.style.display = 'none';
 statusEl.style.display = 'none';
+const vaultBossHud = new VaultBossHUD(app);
+const vaultCinematic = new VaultCinematic(app);
 
 // The world always uses the shared seed so clients never desync from the
 // server (the ?seed override was removed).
@@ -109,6 +119,7 @@ renderer.domElement.className = 'game';
 app.prepend(renderer.domElement);
 
 const scene = new THREE.Scene();
+const vaultEncounterVisuals = new VaultEncounterVisuals(scene);
 scene.background = new THREE.Color();
 scene.fog = new THREE.Fog(new THREE.Color(), FOG_NEAR, FOG_FAR);
 
@@ -270,6 +281,9 @@ const survival = new Survival();
 const particles = new Particles(scene);
 const mobs = new Mobs(scene, world, atlas, itemEntities, particles);
 const audio = new GameAudio();
+const accessibility = loadAccessibility();
+audio.setMusicVolume(accessibility.musicVolume);
+audio.setEffectsVolume(accessibility.effectsVolume);
 mobs.onSound = (name, pos) => audio.mob(name, pos.clone());
 const net = new NetClient();
 const remotePlayers = new RemotePlayers(scene, net, atlas);
@@ -955,6 +969,37 @@ window.addEventListener('resize', () => {
 // Screen state: 'title' shows the orbiting panorama + Play; 'paused' shows
 // the pause menu over the frozen first-person view; 'playing' is locked.
 const pauseEl = document.getElementById('pause')!;
+const musicVolumeInput = document.getElementById('music-volume') as HTMLInputElement;
+const effectsVolumeInput = document.getElementById('effects-volume') as HTMLInputElement;
+const cameraShakeInput = document.getElementById('camera-shake') as HTMLInputElement;
+const reducedMotionInput = document.getElementById('reduced-motion') as HTMLInputElement;
+const contrastInput = document.getElementById('contrast-telegraphs') as HTMLInputElement;
+const safeEffectsInput = document.getElementById('safe-effects') as HTMLInputElement;
+musicVolumeInput.value = String(accessibility.musicVolume);
+effectsVolumeInput.value = String(accessibility.effectsVolume);
+cameraShakeInput.value = String(accessibility.cameraShake);
+reducedMotionInput.checked = accessibility.reducedMotion;
+contrastInput.checked = accessibility.highContrastTelegraphs;
+safeEffectsInput.checked = accessibility.photosensitivitySafe;
+const saveAccessUi = (): void => {
+  accessibility.musicVolume = Number(musicVolumeInput.value);
+  accessibility.effectsVolume = Number(effectsVolumeInput.value);
+  accessibility.cameraShake = Number(cameraShakeInput.value);
+  accessibility.reducedMotion = reducedMotionInput.checked;
+  accessibility.highContrastTelegraphs = contrastInput.checked;
+  accessibility.photosensitivitySafe = safeEffectsInput.checked;
+  saveAccessibility(accessibility);
+  audio.setMusicVolume(accessibility.musicVolume);
+  audio.setEffectsVolume(accessibility.effectsVolume);
+  document.body.classList.toggle('reduced-motion', accessibility.reducedMotion);
+  document.body.classList.toggle('high-contrast-telegraphs', accessibility.highContrastTelegraphs);
+  document.body.classList.toggle('photosensitivity-safe', accessibility.photosensitivitySafe);
+};
+for (const el of [musicVolumeInput, effectsVolumeInput, cameraShakeInput,
+  reducedMotionInput, contrastInput, safeEffectsInput]) {
+  el.addEventListener('input', saveAccessUi);
+}
+saveAccessUi();
 type Screen = 'title' | 'playing' | 'paused';
 let screen: Screen = 'title';
 
@@ -977,6 +1022,10 @@ function enterTitle(): void {
   // the title panorama (there's no world/character to view progress for yet).
   mapBtn.style.display = 'none';
   progressBtn.style.display = 'none';
+  vaultBossHud.hide();
+  vaultCinematic.finish();
+  vaultEncounterVisuals.hide();
+  audio.stopVaultMusic();
 }
 
 // --- Login / register (mandatory accounts) ---------------------------------
@@ -1771,6 +1820,8 @@ document.getElementById('respawn')!.addEventListener('click', () => {
 function checkDeath(): void {
   if (!player.dead || deathShown) return;
   deathShown = true;
+  audio.stopVaultMusic(0.35);
+  vaultCinematic.finish();
   invUI.hide(); // closes (and saves) an open chest BEFORE we spill the inventory
   // Drop everything where we died — networked so others can grab it (MP) or
   // local item entities (offline). We can't pick anything up while dead.
@@ -2418,6 +2469,11 @@ interface VaultView { tier: number; hp: number; maxHp: number; alive: boolean; o
 const vaultViews = new Map<string, VaultView>();
 let curVault: VaultStamp | null = null;
 let bruteMob: Mob | null = null;
+let localVaultEncounter: VaultEncounter | null = null;
+let encounterSnapshot: EncounterSnapshot | null = null;
+let encounterAttackSequence = 0;
+let encounterRequestTimer = 0;
+const seenEncounterEvents = new Set<string>();
 let vaultPollTimer = 0;
 let vaultSparkleTimer = 0;
 const vaultKeyOf = (v: VaultStamp): string => `${v.cx},${v.cz}`;
@@ -2427,6 +2483,7 @@ const vaultKeyOf = (v: VaultStamp): string => `${v.cx},${v.cz}`;
 // once-only `opened` flag — migrated as "ready to loot again".
 type VaultStore = Record<string, {
   deadAt?: number; opened?: boolean; lootedAt?: number; rolls?: number;
+  boss?: string; best?: number; clears?: number;
 }>;
 function loadVaultStore(): VaultStore {
   try {
@@ -2450,7 +2507,7 @@ function offlineVaultView(v: VaultStamp): VaultView {
   const rec = loadVaultStore()[vaultKeyOf(v)];
   const sinceDead = (Date.now() - (rec?.deadAt ?? -Infinity)) / 1000;
   const alive = sinceDead > VAULT_RECHARGE;
-  const max = bruteMaxHp(v.tier);
+  const max = bossMaxHp(v.tier, v.bossKind);
   return {
     tier: v.tier, hp: alive ? max : 0, maxHp: max, alive,
     opened: offlineLootCooldownLeft(rec) > 0, // = "your loot is regrowing"
@@ -2554,6 +2611,15 @@ function discoverVault(v: VaultStamp): void {
 /** Crossing a vault's bounds: sting + banner + minimap dim + discovery, and
  *  fetch/derive the authoritative boss state. */
 function onVaultTransition(v: VaultStamp | null): void {
+  if (!v) {
+    localVaultEncounter = null;
+    encounterSnapshot = null;
+    encounterAttackSequence = 0;
+    seenEncounterEvents.clear();
+    vaultBossHud.hide();
+    vaultCinematic.finish();
+    audio.stopVaultMusic();
+  }
   curVault = v;
   if (!v) return;
   if (net.connected) net.sendVaultEnter(v.cx, v.cz);
@@ -2561,6 +2627,88 @@ function onVaultTransition(v: VaultStamp | null): void {
   discoverVault(v);
   showRegionBanner(`☠ VAULT — TIER ${['I', 'II', 'III'][v.tier - 1] ?? '?'}`, '#b9a5ff');
   audio.vaultSting();
+}
+
+function localInsideArena(v: VaultStamp): boolean {
+  const b = v.arena.bounds;
+  return player.pos.x >= b.minX && player.pos.x <= b.maxX &&
+    player.pos.y >= b.minY && player.pos.y <= b.maxY &&
+    player.pos.z >= b.minZ && player.pos.z <= b.maxZ;
+}
+
+function localEncounterParticipant(v: VaultStamp) {
+  return {
+    id: net.connected ? net.myId : 0,
+    position: { x: player.pos.x, y: player.pos.y, z: player.pos.z },
+    alive: !player.dead, inside: localInsideArena(v),
+  };
+}
+
+function heldEncounterSource(): VaultAttackIntent['source'] {
+  const info = inventory.selectedStack ? ITEMS[inventory.selectedStack.id] : undefined;
+  if (info?.gun?.rocket) return 'rocket';
+  if (info?.gun) return 'bullet';
+  if (inventory.selectedStack && gadgetOf(inventory.selectedStack.id)) return 'gadget';
+  return 'melee';
+}
+
+function encounterEvent(event: EncounterEvent): void {
+  if (seenEncounterEvents.has(event.id)) return;
+  seenEncounterEvents.add(event.id);
+  if (seenEncounterEvents.size > 512) {
+    const first = seenEncounterEvents.values().next().value as string | undefined;
+    if (first) seenEncounterEvents.delete(first);
+  }
+  if (event.type === 'phase' && encounterSnapshot) {
+    showRegionBanner(`PHASE ${encounterSnapshot.phase}`, '#d8c4ff');
+    audio.setVaultMusicPhase(encounterSnapshot.phase, encounterSnapshot.hpPercent < 0.15);
+  } else if (event.type === 'spawn') {
+    audio.vaultMusicCue('summon');
+  } else if (event.type === 'poise_break') {
+    showNotice('✦ BOSS EXPOSED!');
+    audio.vaultMusicCue('poise');
+  } else if (event.type === 'victory') {
+    audio.vaultMusicCue('victory');
+  } else if (event.type === 'reset') {
+    audio.vaultMusicCue('reset');
+  }
+}
+
+function beginOfflineEncounter(v: VaultStamp): void {
+  const boss = v.rooms.find((r) => r.kind === 'boss');
+  if (!boss) return;
+  localVaultEncounter = new VaultEncounter({
+    encounterId: `offline:${v.cx}:${v.cz}:${Date.now()}`,
+    seed: (seed ^ Math.imul(v.cx, 0x85ebca77) ^ Math.imul(v.cz, 0xc2b2ae3d)) >>> 0,
+    tier: v.tier, kind: v.bossKind, family: v.family,
+    center: { x: boss.x + 0.5, y: boss.y, z: boss.z + 0.5 },
+    bounds: { ...v.arena.bounds }, sockets: v.arena.sockets,
+    cameraAnchors: v.arena.cameraAnchors, startTime: worldTimeLocal,
+  });
+  localVaultEncounter.start(0, worldTimeLocal);
+  encounterSnapshot = localVaultEncounter.snapshot();
+  vaultBossHud.update(encounterSnapshot);
+  vaultCinematic.play(encounterSnapshot);
+  audio.startVaultMusic(v.family, 1);
+}
+
+function completeOfflineEncounter(v: VaultStamp): void {
+  const key = vaultKeyOf(v);
+  const store = loadVaultStore();
+  if ((store[key]?.deadAt ?? 0) > Date.now() - 1000) return;
+  const elapsed = localVaultEncounter
+    ? Math.max(0, localVaultEncounter.now - localVaultEncounter.startedAt) : Infinity;
+  store[key] = {
+    ...store[key], deadAt: Date.now(), boss: v.bossKind,
+    best: Math.min(store[key]?.best ?? Infinity, elapsed),
+    clears: (store[key]?.clears ?? 0) + 1,
+  };
+  saveVaultStore(store);
+  vaultViews.set(key, offlineVaultView(v));
+  showRegionBanner('🏆 VAULT CLEARED!', '#ffd84a');
+  audio.vaultMusicCue('victory');
+  showKill(authedName || 'You', `Tier ${v.tier} ${VAULT_BOSS_NAMES[v.bossKind]} ☠`);
+  refreshVaultMap();
 }
 
 /** Per-frame vault upkeep: bounds test (throttled), guard anchors, the Brute,
@@ -2575,8 +2723,44 @@ function updateVaults(dt: number): void {
     if (v?.cx !== curVault?.cx || v?.cz !== curVault?.cz) onVaultTransition(v);
   }
   mobs.setVault(curVault);
-  if (!curVault) return;
+  if (!curVault) { vaultEncounterVisuals.hide(); return; }
   const view = vaultViews.get(vaultKeyOf(curVault));
+  const inArena = localInsideArena(curVault);
+  encounterRequestTimer -= dt;
+  if (net.connected && view?.alive && inArena && !encounterSnapshot &&
+      encounterRequestTimer <= 0) {
+    encounterRequestTimer = 1;
+    net.sendVaultEnter(curVault.cx, curVault.cz);
+  }
+  if (!net.connected && view?.alive && inArena && !localVaultEncounter) {
+    beginOfflineEncounter(curVault);
+  }
+  if (localVaultEncounter) {
+    const events = localVaultEncounter.tick(dt, [localEncounterParticipant(curVault)]);
+    for (const event of events) encounterEvent(event);
+    for (const hazard of localVaultEncounter.hazards) {
+      const damage = localVaultEncounter.hitByHazard(hazard.id, localEncounterParticipant(curVault));
+      if (damage > 0) player.damage(damage);
+    }
+    encounterSnapshot = localVaultEncounter.snapshot();
+    if (bruteMob) {
+      bruteMob.health = encounterSnapshot.hp;
+      bruteMob.pos.set(encounterSnapshot.boss.position.x,
+        encounterSnapshot.boss.position.y, encounterSnapshot.boss.position.z);
+    }
+    vaultBossHud.update(encounterSnapshot);
+    vaultCinematic.update(dt);
+    audio.setVaultMusicPhase(encounterSnapshot.phase, encounterSnapshot.hpPercent < 0.15);
+    if (localVaultEncounter.status === 'victory') {
+      completeOfflineEncounter(curVault);
+      localVaultEncounter = null;
+    } else if (localVaultEncounter.status === 'idle') {
+      encounterSnapshot = null;
+      localVaultEncounter = null;
+      vaultBossHud.hide();
+      audio.stopVaultMusic();
+    }
+  } else vaultCinematic.update(dt);
   if (bruteMob?.removed) bruteMob = null;
   // The Brute prowls its loot room whenever the vault is uncleared.
   if (view?.alive && !bruteMob && !player.dead) {
@@ -2585,6 +2769,10 @@ function updateVaults(dt: number): void {
       // The seeded boss FLAVOUR varies per vault: Brute / Ravager / Colossus.
       bruteMob = mobs.spawnBoss(curVault.bossKind, boss.x + 0.5, boss.y, boss.z + 0.5);
       bruteMob.health = view.hp; // mirror the shared server HP
+      // Encounter attacks/transforms come only from the shared runtime. The
+      // legacy mob body is now a renderer/hit volume, not a second damage AI.
+      bruteMob.meleeDmg = 0;
+      bruteMob.speedFactor = 0;
       audio.mob('brute', bruteMob.pos.clone());
     }
   }
@@ -2597,6 +2785,7 @@ function updateVaults(dt: number): void {
       particles.burst(c.x + 0.5, c.y + 0.9, c.z + 0.5, 3, 0xffe27a, 1.4, 0.6);
     }
   }
+  vaultEncounterVisuals.update(encounterSnapshot, accessibility.highContrastTelegraphs);
 }
 
 // --- GETTING STARTED guide (early-game direction) ------------------------------
@@ -2768,36 +2957,92 @@ function updateGuide(dt: number, controlling: boolean): void {
 // Brute IS the authority and its death opens the loot window.
 mobs.onBruteHit = (mob, dmg) => {
   if (!curVault) return;
+  const source = heldEncounterSource();
+  const intent: VaultAttackIntent = {
+    encounterId: encounterSnapshot?.encounterId ?? '',
+    sequence: ++encounterAttackSequence,
+    targetId: 0, source,
+    hit: { x: mob.pos.x, y: mob.pos.y + mob.height * 0.5, z: mob.pos.z },
+    claimedDamage: dmg,
+  };
   if (net.connected) {
-    net.sendVaultBossHit(curVault.cx, curVault.cz, dmg);
-  } else {
+    if (encounterSnapshot) net.sendVaultAttack(curVault.cx, curVault.cz, intent);
+    if (encounterSnapshot) mob.health = encounterSnapshot.hp;
+  } else if (localVaultEncounter) {
+    const heldInfo = inventory.selectedStack ? ITEMS[inventory.selectedStack.id] : undefined;
+    const maxDamage = heldInfo?.gun
+      ? heldInfo.gun.damage * Math.max(1, heldInfo.gun.pellets ?? 1)
+      : inventory.selectedStack?.id === Item.Sword ? 7 : 4;
+    const range = heldInfo?.gun ? heldInfo.gun.range : 4;
+    const cadence = heldInfo?.gun ? heldInfo.gun.cooldown : 0.32;
+    localVaultEncounter.attack(intent, localEncounterParticipant(curVault), {
+      heldSource: source, maxDamage, range, cadence, now: worldTimeLocal,
+    });
+    mob.health = localVaultEncounter.hp;
     const view = vaultViews.get(vaultKeyOf(curVault));
-    if (view) view.hp = Math.max(0, Math.min(view.hp, mob.health));
+    if (view) view.hp = localVaultEncounter.hp;
   }
 };
 mobs.onBruteDown = () => {
   bruteMob = null;
-  if (!curVault || net.connected) return; // online: the server confirms the kill
-  const key = vaultKeyOf(curVault);
-  const store = loadVaultStore();
-  store[key] = { ...store[key], deadAt: Date.now() };
-  saveVaultStore(store);
-  vaultViews.set(key, offlineVaultView(curVault));
-  showRegionBanner('🏆 VAULT CLEARED!', '#ffd84a');
-  audio.vaultClear();
-  showKill(authedName || 'You', `Tier ${curVault.tier} ${VAULT_BOSS_NAMES[curVault.bossKind]} ☠`);
-  refreshVaultMap();
+  // The shared encounter engine owns victory. A rejected intro/invulnerable hit
+  // restores mirrored HP in onBruteHit before Mobs reaches this callback.
 };
 net.onVault = (cx, cz, tier, hp, maxHp, alive, opened) => {
   const key = `${cx},${cz}`;
   const prev = vaultViews.get(key);
   vaultViews.set(key, { tier, hp, maxHp, alive, opened: opened ?? prev?.opened ?? false });
   if (curVault && curVault.cx === cx && curVault.cz === cz && bruteMob) {
-    // Adopt the shared HP (other raiders' hits count) — never heal mid-fight.
-    bruteMob.health = Math.min(bruteMob.health, hp);
+    // Scaling can raise absolute HP while preserving percentage, so adopt the
+    // authoritative value rather than enforcing a client-side no-heal rule.
+    bruteMob.health = hp;
     if (!alive) { mobs.slay(bruteMob); bruteMob = null; }
   }
   refreshVaultMap();
+};
+net.onEncounterStart = (cx, cz, data) => {
+  if (!curVault || curVault.cx !== cx || curVault.cz !== cz) return;
+  encounterSnapshot = data.snapshot;
+  encounterAttackSequence = 0;
+  vaultBossHud.update(encounterSnapshot);
+  const late = encounterSnapshot.status === 'active' && encounterSnapshot.elapsed > 1;
+  vaultCinematic.play(encounterSnapshot, late);
+  audio.startVaultMusic(data.family, encounterSnapshot.phase);
+  audio.setVaultMusicPhase(encounterSnapshot.phase, encounterSnapshot.hpPercent < 0.15);
+  const view = vaultViews.get(`${cx},${cz}`);
+  if (view) {
+    view.hp = encounterSnapshot.hp;
+    view.maxHp = encounterSnapshot.maxHp;
+    view.alive = encounterSnapshot.hp > 0;
+  }
+};
+net.onEncounterSnapshot = (cx, cz, snapshot) => {
+  if (!curVault || curVault.cx !== cx || curVault.cz !== cz) return;
+  encounterSnapshot = snapshot;
+  vaultBossHud.update(snapshot);
+  audio.setVaultMusicPhase(snapshot.phase, snapshot.hpPercent < 0.15);
+  if (bruteMob) {
+    bruteMob.health = snapshot.hp;
+    bruteMob.pos.set(snapshot.boss.position.x, snapshot.boss.position.y, snapshot.boss.position.z);
+  }
+  const view = vaultViews.get(`${cx},${cz}`);
+  if (view) { view.hp = snapshot.hp; view.maxHp = snapshot.maxHp; view.alive = snapshot.hp > 0; }
+};
+net.onEncounterEvent = (cx, cz, event) => {
+  if (curVault?.cx === cx && curVault.cz === cz) encounterEvent(event);
+};
+net.onEncounterEnd = (cx, cz, outcome) => {
+  if (curVault?.cx !== cx || curVault.cz !== cz) return;
+  if (outcome === 'victory') {
+    showRegionBanner('🏆 VAULT CLEARED!', '#ffd84a');
+    audio.vaultMusicCue('victory');
+  } else {
+    audio.vaultMusicCue('reset');
+    if (bruteMob) { mobs.slay(bruteMob); bruteMob = null; }
+  }
+  encounterSnapshot = null;
+  vaultBossHud.hide();
+  vaultCinematic.finish();
 };
 net.onVaultCleared = (cx, cz, by) => {
   if (curVault && curVault.cx === cx && curVault.cz === cz) {
@@ -2822,7 +3067,10 @@ interaction.onVaultChest = (x, y, z) => {
   if (!v || v.chest.x !== x || v.chest.y !== y || v.chest.z !== z) return;
   const key = vaultKeyOf(v);
   const view = vaultViews.get(key) ?? offlineVaultView(v);
-  if (view.alive) { showNotice('☠ The Vault Brute guards this chest — defeat it first!'); return; }
+  if (view.alive) {
+    showNotice(`☠ The ${VAULT_BOSS_NAMES[v.bossKind]} guards this chest — defeat it first!`);
+    return;
+  }
   const store = loadVaultStore();
   if ((Date.now() - (store[key]?.deadAt ?? -Infinity)) / 1000 > VAULT_LOOT_WINDOW) {
     showNotice('🔒 The vault has resealed — the Brute will return to guard it.');
@@ -3139,6 +3387,11 @@ net.onSeasonEnd = (winner, number) => {
 net.onDisconnect = () => {
   player.damageSink = undefined;
   survival.enableRegen = true;
+  encounterSnapshot = null;
+  vaultBossHud.hide();
+  vaultCinematic.finish();
+  vaultEncounterVisuals.hide();
+  audio.stopVaultMusic();
   // Drop all server-owned warfare state so its meshes/markers don't linger
   // (turretModels reconciles to the now-empty set).
   turretStates.clear();
@@ -3442,6 +3695,14 @@ function updateAtmosphere(): void {
     fog.color.copy(WATER_FOG_COLOR).multiplyScalar(0.3 + 0.7 * sky.sunIntensity);
     fog.near = 0;
     fog.far = 24;
+  } else if (curVault) {
+    const familyFog = {
+      crypt: 0x281d3b, mire: 0x153a35, ember: 0x4a2118,
+      crystal: 0x172d4d, gilded: 0x3d301b,
+    }[curVault.family];
+    fog.color.setHex(familyFog);
+    fog.near = 8;
+    fog.far = Math.min(72, FOG_FAR);
   } else {
     fog.color.copy(sky.skyColor);
     fog.near = FOG_NEAR;

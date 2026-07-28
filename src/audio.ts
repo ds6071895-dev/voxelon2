@@ -4,6 +4,7 @@
 
 import * as THREE from 'three';
 import { Block } from './blocks';
+import type { VaultFamily } from './vaults';
 
 export type Material = 'stone' | 'wood' | 'grass' | 'sand' | 'glass' | 'wool';
 
@@ -26,11 +27,15 @@ export function materialOf(block: number): Material {
       return 'wood';
     case Block.RespawnBeacon: case Block.WaypointTotem:
     case Block.VaultBrick: case Block.VaultChest:
+    case Block.CarvedVaultBrick: case Block.MossyVaultBrick:
+    case Block.EmberBrick: case Block.GildedVaultBrick:
+    case Block.SoulLantern: case Block.EmberBrazier: case Block.GildedLamp:
     case Block.WallTrap: case Block.WallTrapUp:
       return 'stone';
     case Block.Sand:
       return 'sand';
-    case Block.Glass: case Block.CrystalBlock:
+    case Block.Glass: case Block.CrystalBlock: case Block.PrismBrick:
+    case Block.PrismLamp:
       return 'glass';
     case Block.Wool:
       return 'wool';
@@ -46,8 +51,24 @@ const MATERIAL_FREQ: Record<Material, number> = {
 export class GameAudio {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
+  private effectsBus: GainNode | null = null;
+  private ambienceBus: GainNode | null = null;
+  private musicBus: GainNode | null = null;
   private noiseBuf: AudioBuffer | null = null;
   private readonly listenerPos = new THREE.Vector3();
+  private effectsVolume = GameAudio.savedVolume('effects', 0.8);
+  private musicVolume = GameAudio.savedVolume('music', 0.65);
+  private music: {
+    family: VaultFamily; phase: 1 | 2 | 3; low: boolean;
+    timer: number; step: number; nextAt: number; nodes: Set<AudioScheduledSourceNode>;
+  } | null = null;
+
+  private static savedVolume(key: string, fallback: number): number {
+    try {
+      const n = Number(localStorage.getItem(`voxelon.audio.${key}`));
+      return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : fallback;
+    } catch { return fallback; }
+  }
 
   /** Create/resume the context. Must be called from a user gesture. */
   resume(): void {
@@ -59,6 +80,15 @@ export class GameAudio {
       this.master = this.ctx.createGain();
       this.master.gain.value = 0.5;
       this.master.connect(this.ctx.destination);
+      this.effectsBus = this.ctx.createGain();
+      this.ambienceBus = this.ctx.createGain();
+      this.musicBus = this.ctx.createGain();
+      this.effectsBus.gain.value = this.effectsVolume;
+      this.ambienceBus.gain.value = this.effectsVolume * 0.7;
+      this.musicBus.gain.value = this.musicVolume;
+      this.effectsBus.connect(this.master);
+      this.ambienceBus.connect(this.master);
+      this.musicBus.connect(this.master);
       const len = this.ctx.sampleRate;
       this.noiseBuf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
       const data = this.noiseBuf.getChannelData(0);
@@ -66,6 +96,26 @@ export class GameAudio {
     }
     if (this.ctx.state === 'suspended') void this.ctx.resume();
   }
+
+  setEffectsVolume(value: number): void {
+    this.effectsVolume = Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0.8));
+    if (this.effectsBus && this.ctx) {
+      this.effectsBus.gain.setTargetAtTime(this.effectsVolume, this.ctx.currentTime, 0.03);
+      this.ambienceBus?.gain.setTargetAtTime(this.effectsVolume * 0.7, this.ctx.currentTime, 0.03);
+    }
+    try { localStorage.setItem('voxelon.audio.effects', String(this.effectsVolume)); } catch { /* ignore */ }
+  }
+
+  setMusicVolume(value: number): void {
+    this.musicVolume = Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0.65));
+    if (this.musicBus && this.ctx) {
+      this.musicBus.gain.setTargetAtTime(this.musicVolume, this.ctx.currentTime, 0.03);
+    }
+    try { localStorage.setItem('voxelon.audio.music', String(this.musicVolume)); } catch { /* ignore */ }
+  }
+
+  getEffectsVolume(): number { return this.effectsVolume; }
+  getMusicVolume(): number { return this.musicVolume; }
 
   updateListener(camera: THREE.Camera): void {
     if (!this.ctx) return;
@@ -82,7 +132,7 @@ export class GameAudio {
 
   /** Output chain: (panner?) -> master. */
   private out(pos?: THREE.Vector3): AudioNode {
-    if (!pos || !this.ctx) return this.master!;
+    if (!pos || !this.ctx) return this.effectsBus ?? this.master!;
     const panner = new PannerNode(this.ctx, {
       distanceModel: 'linear',
       refDistance: 2,
@@ -91,8 +141,97 @@ export class GameAudio {
       positionY: pos.y,
       positionZ: pos.z,
     });
-    panner.connect(this.master!);
+    panner.connect(this.effectsBus ?? this.master!);
     return panner;
+  }
+
+  /** Start (or rebuild after suspension) a bar-aligned procedural vault score. */
+  startVaultMusic(family: VaultFamily, phase: 1 | 2 | 3 = 1): void {
+    this.resume();
+    if (!this.ctx || !this.musicBus) return;
+    this.stopVaultMusic(0.08);
+    this.music = {
+      family, phase, low: false, timer: window.setInterval(() => this.scheduleMusic(), 100),
+      step: 0, nextAt: this.ctx.currentTime + 0.05, nodes: new Set(),
+    };
+    this.scheduleMusic();
+  }
+
+  setVaultMusicPhase(phase: 1 | 2 | 3, lowHealth = false): void {
+    if (!this.music) return;
+    this.music.phase = phase;
+    this.music.low = lowHealth;
+    // Layers are selected per scheduled note, so this crossfades at the next
+    // short lookahead boundary instead of restarting the motif.
+  }
+
+  vaultMusicCue(kind: 'summon' | 'poise' | 'victory' | 'reset'): void {
+    if (!this.ctx || !this.musicBus) return;
+    const f = kind === 'poise' ? 880 : kind === 'victory' ? 660
+      : kind === 'summon' ? 330 : 140;
+    this.musicTone(f, this.ctx.currentTime + 0.02, kind === 'victory' ? 0.7 : 0.25, 0.08);
+    if (kind === 'victory' || kind === 'reset') this.stopVaultMusic(kind === 'victory' ? 1.2 : 0.45);
+  }
+
+  stopVaultMusic(fade = 0.4): void {
+    if (!this.music) return;
+    window.clearInterval(this.music.timer);
+    if (this.ctx && this.musicBus) {
+      const now = this.ctx.currentTime;
+      this.musicBus.gain.cancelScheduledValues(now);
+      this.musicBus.gain.setValueAtTime(this.musicBus.gain.value, now);
+      this.musicBus.gain.linearRampToValueAtTime(0.0001, now + Math.max(0.02, fade));
+      for (const node of this.music.nodes) {
+        try { node.stop(now + Math.max(0.03, fade)); } catch { /* already stopped */ }
+      }
+      this.musicBus.gain.setValueAtTime(this.musicVolume, now + Math.max(0.03, fade) + 0.01);
+    }
+    this.music = null;
+  }
+
+  private scheduleMusic(): void {
+    const music = this.music, ctx = this.ctx;
+    if (!music || !ctx || ctx.state !== 'running') return;
+    // Eight-note family motifs; phase adds upper harmony/percussion without
+    // replacing the underlying pulse.
+    const motifs: Record<VaultFamily, readonly number[]> = {
+      crypt: [55, 82.4, 65.4, 98, 55, 73.4, 61.7, 82.4],
+      mire: [65.4, 73.4, 58.3, 77.8, 65.4, 87.3, 61.7, 73.4],
+      ember: [49, 49, 58.3, 46.2, 49, 65.4, 58.3, 46.2],
+      crystal: [130.8, 196, 155.6, 233.1, 174.6, 261.6, 196, 293.7],
+      gilded: [73.4, 110, 92.5, 138.6, 82.4, 123.5, 98, 146.8],
+    };
+    const beat = music.phase === 3 ? 0.24 : music.phase === 2 ? 0.32 : 0.4;
+    if (music.nextAt < ctx.currentTime - beat) music.nextAt = ctx.currentTime + 0.05;
+    // Keep only 200 ms scheduled ahead; cancellation remains clean.
+    while (music.nextAt <= ctx.currentTime + 0.2) {
+      const at = music.nextAt;
+      const root = motifs[music.family][music.step++ % 8];
+      this.musicTone(root, at, beat * 0.9, 0.045);
+      if (music.phase >= 2 && (music.step & 1) === 0) {
+        this.musicTone(root * 1.5, at, beat * 0.65, 0.025);
+      }
+      if (music.phase === 3 || music.low) {
+        this.musicTone(root * 2, at + beat * 0.5, beat * 0.35, music.low ? 0.04 : 0.025);
+      }
+      music.nextAt += beat;
+    }
+  }
+
+  private musicTone(freq: number, at: number, dur: number, gainValue: number): void {
+    if (!this.ctx || !this.musicBus) return;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = this.music?.family === 'ember' ? 'sawtooth'
+      : this.music?.family === 'gilded' ? 'square' : 'triangle';
+    osc.frequency.setValueAtTime(Math.max(30, freq), at);
+    gain.gain.setValueAtTime(0.0001, at);
+    gain.gain.exponentialRampToValueAtTime(gainValue, at + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+    osc.connect(gain).connect(this.musicBus);
+    osc.start(at); osc.stop(at + dur + 0.02);
+    this.music?.nodes.add(osc);
+    osc.onended = () => this.music?.nodes.delete(osc);
   }
 
   /** Band-filtered noise burst. */
