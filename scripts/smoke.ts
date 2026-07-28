@@ -4070,6 +4070,11 @@ let firstVault: VaultStamp | null = null;
     [Item.IronHelmet, Item.DiamondChestplate, Item.TitaniumLeggings, Item.WoodBoots]);
   check('a full armor set builds plating on head, torso, arms, legs and feet',
     full.length >= 8 && full.every((m) => !!m.parent));
+  check('avatar visual layers use deterministic depth bias to prevent flicker',
+    suited.materials.length >= 5 &&
+    suited.materials.slice(1).every((m) => m.polygonOffset) &&
+    full.every((m) => m.material === suited.armorMaterial) &&
+    suited.armorMaterial.polygonOffsetUnits < suited.materials[1].polygonOffsetUnits);
   const glider = buildAvatarBody(defaultCosmetics(7));
   const pack = buildArmorOverlay(glider, [0, Item.Glider, 0, 0]);
   check('a worn glider reads as a backpack (single mesh), not chest plating',

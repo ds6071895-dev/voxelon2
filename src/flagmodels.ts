@@ -8,14 +8,17 @@ import { Flag, FLAG_MAX_HP, flagHome, flagPosition } from './flags';
 import { factionColor } from './teams';
 
 /** Height of the pole (blocks) — tall enough to spot over trees. */
-const POLE_H = 6;
-const CLOTH_W = 2.2;
-const CLOTH_H = 1.4;
+const POLE_H = 6.5;
+const CLOTH_W = 2.55;
+const CLOTH_H = 1.65;
 
 interface Pole {
   group: THREE.Group;
   cloth: THREE.Mesh;
   clothMat: THREE.MeshBasicMaterial;
+  clothGeo: THREE.BufferGeometry;
+  tassels: THREE.Group;
+  halo: THREE.Mesh;
   beam: THREE.Mesh;
   damage: THREE.Mesh;      // a red "health" bar that shrinks as the flag is beaten
   damageMat: THREE.MeshBasicMaterial;
@@ -33,6 +36,7 @@ export class FlagModels {
   private readonly banners = new Map<number, Banner>(); // by carrier player id
   private flags: Flag[] = [];
   private breakable = false;
+  private warActive = false;
   private t = 0;
   /** Ground height lookup so a pole stands on the terrain, not in the air. */
   private groundAt: (x: number, z: number) => number = () => 64;
@@ -46,6 +50,10 @@ export class FlagModels {
     this.breakable = breakable;
     this.flags = flags.map((f) => ({ ...f }));
   }
+
+  /** Wayfinding is a war mechanic: the monument remains in peacetime, but its
+   *  sky beam and the map/HUD waypoint do not reveal the base. */
+  setWarActive(active: boolean): void { this.warActive = active; }
 
   /** The flag this player is carrying, or null. */
   carriedBy(playerId: number): Flag | null {
@@ -74,25 +82,99 @@ export class FlagModels {
     const color = new THREE.Color(factionColor(faction));
     const group = new THREE.Group();
 
-    const poleMat = new THREE.MeshBasicMaterial({ color: 0x2b2b33 });
-    const pole = new THREE.Mesh(new THREE.BoxGeometry(0.18, POLE_H, 0.18), poleMat);
+    const poleMat = new THREE.MeshBasicMaterial({ color: 0x302a25 });
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.105, 0.14, POLE_H, 8), poleMat);
     pole.position.y = POLE_H / 2;
     group.add(pole);
 
-    // Stone pad so the site reads as built, not dropped.
-    const base = new THREE.Mesh(
-      new THREE.BoxGeometry(2.4, 0.25, 2.4),
-      new THREE.MeshBasicMaterial({ color: 0x5c5f66 })
+    // A layered faction monument: broad dark footing, bevel-like stone step,
+    // glowing inset and iron collar. It reads cleanly from every direction.
+    const footing = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.65, 1.85, 0.28, 8),
+      new THREE.MeshBasicMaterial({ color: 0x24262c })
     );
-    base.position.y = 0.12;
+    footing.position.y = 0.14;
+    group.add(footing);
+    const base = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.28, 1.52, 0.34, 8),
+      new THREE.MeshBasicMaterial({ color: 0x686b72 })
+    );
+    base.position.y = 0.42;
     group.add(base);
+    const inset = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.93, 1.16, 0.09, 8),
+      new THREE.MeshBasicMaterial({ color })
+    );
+    inset.position.y = 0.635;
+    group.add(inset);
+    const collar = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.28, 0.4, 0.55, 8),
+      new THREE.MeshBasicMaterial({ color: 0x373b43 })
+    );
+    collar.position.y = 0.89;
+    group.add(collar);
+
+    const crossbar = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.07, 0.07, CLOTH_W + 0.28, 8),
+      poleMat
+    );
+    crossbar.rotation.z = Math.PI / 2;
+    crossbar.position.set((CLOTH_W + 0.28) / 2, POLE_H - 0.2, 0);
+    group.add(crossbar);
+    const finial = new THREE.Mesh(
+      new THREE.OctahedronGeometry(0.22),
+      new THREE.MeshBasicMaterial({ color: 0xe8c76a })
+    );
+    finial.position.y = POLE_H + 0.2;
+    group.add(finial);
 
     const clothMat = new THREE.MeshBasicMaterial({
       color, side: THREE.DoubleSide,
     });
-    const cloth = new THREE.Mesh(new THREE.PlaneGeometry(CLOTH_W, CLOTH_H, 6, 1), clothMat);
-    cloth.position.set(CLOTH_W / 2 + 0.09, POLE_H - CLOTH_H / 2 - 0.2, 0);
+    // Five vertical strips give the banner a real travelling wave. The pointed
+    // lower edge, pale charge and tassels make it a faction standard, not a
+    // plain coloured rectangle.
+    const shape = new THREE.Shape();
+    shape.moveTo(0, 0);
+    shape.lineTo(CLOTH_W, 0);
+    shape.lineTo(CLOTH_W, -CLOTH_H * 0.72);
+    shape.lineTo(CLOTH_W * 0.82, -CLOTH_H);
+    shape.lineTo(CLOTH_W * 0.62, -CLOTH_H * 0.78);
+    shape.lineTo(CLOTH_W * 0.42, -CLOTH_H);
+    shape.lineTo(CLOTH_W * 0.22, -CLOTH_H * 0.78);
+    shape.lineTo(0, -CLOTH_H * 0.86);
+    shape.closePath();
+    const clothGeo = new THREE.ShapeGeometry(shape, 8);
+    const cloth = new THREE.Mesh(clothGeo, clothMat);
+    cloth.position.set(0.12, POLE_H - 0.28, 0);
     group.add(cloth);
+
+    const charge = new THREE.Mesh(
+      new THREE.OctahedronGeometry(0.34, 0),
+      new THREE.MeshBasicMaterial({ color: 0xf5e8bf, side: THREE.DoubleSide })
+    );
+    charge.scale.set(1, 1.35, 0.12);
+    charge.position.set(CLOTH_W * 0.48, -CLOTH_H * 0.46, -0.018);
+    cloth.add(charge);
+
+    const tassels = new THREE.Group();
+    for (let i = 0; i < 3; i++) {
+      const tassel = new THREE.Mesh(
+        new THREE.ConeGeometry(0.095, 0.38, 5),
+        new THREE.MeshBasicMaterial({ color: 0xe8c76a })
+      );
+      tassel.position.set(CLOTH_W * (0.23 + i * 0.2), -CLOTH_H * (i === 1 ? 1.02 : 0.84), 0);
+      tassels.add(tassel);
+    }
+    cloth.add(tassels);
+
+    const halo = new THREE.Mesh(
+      new THREE.TorusGeometry(1.16, 0.045, 5, 32),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.7 })
+    );
+    halo.rotation.x = Math.PI / 2;
+    halo.position.y = 0.72;
+    group.add(halo);
 
     // A wide light column: visible from far away, faction-coloured.
     const beam = new THREE.Mesh(
@@ -116,7 +198,7 @@ export class FlagModels {
     group.add(damage);
 
     this.scene.add(group);
-    return { group, cloth, clothMat, beam, damage, damageMat };
+    return { group, cloth, clothMat, clothGeo, tassels, halo, beam, damage, damageMat };
   }
 
   private buildBanner(faction: number): Banner {
@@ -163,10 +245,18 @@ export class FlagModels {
       // while somebody is running it.
       const planted = flag.carrier < 0;
       pole.cloth.visible = planted;
-      pole.beam.visible = planted;
-      // Cloth ripple: a slow wave so it reads as fabric, not cardboard.
-      pole.cloth.rotation.y = Math.sin(this.t * 1.6) * 0.22;
-      pole.cloth.scale.y = 1 + Math.sin(this.t * 2.4) * 0.04;
+      pole.beam.visible = planted && this.warActive;
+      pole.halo.visible = planted;
+      pole.halo.rotation.z = this.t * 0.22;
+      // Cloth ripple: deform the actual banner surface instead of rotating a
+      // cardboard plane. The pole edge stays pinned while the fly edge rolls.
+      const pos = pole.clothGeo.getAttribute('position') as THREE.BufferAttribute;
+      for (let i = 0; i < pos.count; i++) {
+        const x = pos.getX(i);
+        pos.setZ(i, Math.sin(this.t * 2.1 - x * 2.35) * 0.13 * (x / CLOTH_W));
+      }
+      pos.needsUpdate = true;
+      pole.tassels.rotation.z = Math.sin(this.t * 2.1) * 0.035;
 
       // Damage bar only while the flag is under attack (armed + chipped).
       const hurt = this.breakable && planted && flag.hp < FLAG_MAX_HP;

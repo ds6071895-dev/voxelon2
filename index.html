@@ -121,14 +121,49 @@
       padding: 4px 8px; font-size: 14px;
     }
 
-    /* Crafting / furnace top sections */
-    .inv-top { min-height: 52px; display: flex; justify-content: center; }
-    .craft-row { display: flex; align-items: center; gap: 14px; }
-    .craft-arrow {
-      width: 44px; height: 14px; background: #8b8b8b;
-      border: 2px solid #555;
+    /* Crafting is presented as a compact field workbench: the grid sits on an
+       illuminated blueprint, with a pulsing energy path into the result. */
+    .inv-top {
+      min-height: 52px; display: flex; justify-content: center;
+      position: relative; padding: 12px 14px;
+      background:
+        linear-gradient(rgba(105,200,255,.07) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(105,200,255,.07) 1px, transparent 1px),
+        linear-gradient(145deg, #343b45, #232830);
+      background-size: 12px 12px, 12px 12px, auto;
+      border: 2px solid; border-color: #758392 #171b20 #171b20 #758392;
+      box-shadow: inset 0 0 22px rgba(42,157,210,.1);
     }
-    .craft-arrow div { height: 100%; width: 0%; background: #fff; }
+    .inv-top::before {
+      content: 'FIELD ASSEMBLY'; position: absolute; left: 8px; top: -9px;
+      padding: 2px 7px; background: #25313b; color: #8ee5ff;
+      border: 1px solid #527487; font: bold 8px 'Lucida Console', monospace;
+      letter-spacing: 1.5px; text-shadow: none;
+    }
+    .craft-row { display: flex; align-items: center; gap: 16px; }
+    .craft-row .inv-slot {
+      background: radial-gradient(circle at 45% 40%, #6c7882, #444c55);
+      border-color: #26313a #8797a4 #8797a4 #26313a;
+      box-shadow: inset 0 0 0 1px rgba(120,220,255,.08);
+    }
+    .craft-arrow {
+      width: 54px; height: 12px; position: relative;
+      background: #11171d; border: 2px solid #52616d;
+      clip-path: polygon(0 24%, 72% 24%, 72% 0, 100% 50%, 72% 100%, 72% 76%, 0 76%);
+      filter: drop-shadow(0 0 4px rgba(92,210,255,.25));
+    }
+    .craft-arrow div {
+      height: 100%; width: 0%;
+      background: linear-gradient(90deg, #45b8df, #d5f8ff);
+      box-shadow: 0 0 10px #64ddff;
+    }
+    .craft-row .result-slot {
+      transform: rotate(45deg); margin: 7px;
+      border-color: #e7d78a #62551f #62551f #e7d78a;
+      background: radial-gradient(circle, #7f733e, #36331f);
+      box-shadow: 0 0 15px rgba(255,220,95,.28);
+    }
+    .craft-row .result-slot > * { transform: rotate(-45deg); }
     .flame {
       width: 14px; height: 14px; background: #555;
       display: flex; align-items: flex-end;
@@ -196,38 +231,74 @@
     #overlay {
       position: absolute; inset: 0;
       background:
-        radial-gradient(ellipse at 50% 34%, rgba(0,0,0,0) 0%, rgba(6,8,16,0.42) 68%, rgba(4,6,12,0.72) 100%),
-        linear-gradient(rgba(8,8,14,0.12), rgba(6,8,14,0.5));
+        linear-gradient(90deg, rgba(4,7,12,.7) 0%, transparent 28%, transparent 72%, rgba(4,7,12,.7) 100%),
+        radial-gradient(ellipse at 50% 38%, rgba(32,69,91,.05) 0%, rgba(6,8,16,.44) 68%, rgba(2,4,8,.88) 100%),
+        linear-gradient(rgba(8,8,14,.1), rgba(3,5,9,.7));
       display: flex; flex-direction: column;
       align-items: center; justify-content: center;
-      gap: 20px; z-index: 20;
+      gap: 16px; z-index: 20;
+    }
+    #overlay::before, #overlay::after {
+      content: ''; position: absolute; pointer-events: none;
+    }
+    #overlay::before {
+      inset: 20px; border: 1px solid rgba(166,215,236,.2);
+      clip-path: polygon(0 0, 12% 0, 12% 1px, 88% 1px, 88% 0, 100% 0, 100% 100%, 88% 100%, 88% calc(100% - 1px), 12% calc(100% - 1px), 12% 100%, 0 100%);
+    }
+    #overlay::after {
+      left: 50%; bottom: 0; width: min(720px, 88vw); height: 1px;
+      transform: translateX(-50%);
+      background: linear-gradient(90deg, transparent, #58cbed, transparent);
+      box-shadow: 0 0 24px #58cbed;
     }
     #overlay.hidden { display: none; }
+    .title-lockup {
+      text-align: center; position: relative; padding: 12px 36px 18px;
+      animation: title-drop .7s cubic-bezier(.2,1.2,.4,1) both;
+    }
+    .title-lockup::before {
+      content: ''; position: absolute; inset: 22% -6% 0;
+      background: radial-gradient(ellipse, rgba(31,169,211,.17), transparent 68%);
+      filter: blur(10px); z-index: -1;
+    }
+    .title-kicker {
+      display: inline-flex; align-items: center; gap: 10px;
+      color: #8fdcf5; font-size: 10px; letter-spacing: 5px;
+      text-transform: uppercase; opacity: .9;
+    }
+    .title-kicker::before, .title-kicker::after {
+      content: ''; width: 52px; height: 1px;
+      background: linear-gradient(90deg, transparent, #78d9f5);
+    }
+    .title-kicker::after { transform: scaleX(-1); }
     #title {
-      font-size: 92px; letter-spacing: 12px; margin-bottom: 4px;
-      color: #f2f4f8;
+      font-size: clamp(58px, 8vw, 106px); letter-spacing: clamp(7px, 1.2vw, 16px);
+      margin: 5px 0 3px; line-height: .92; color: #ecf7fb;
       text-shadow:
-        0 3px 0 rgba(0,0,0,0.45),
-        0 10px 30px rgba(0, 0, 0, 0.75),
-        0 0 42px rgba(110, 170, 255, 0.25);
-      animation: title-drop 0.7s cubic-bezier(0.2, 1.4, 0.4, 1) both;
+        0 2px 0 #7b8d96, 0 5px 0 #17242c,
+        0 12px 34px rgba(0,0,0,.85), 0 0 48px rgba(91,213,245,.25);
     }
     #title .accent {
-      color: #e2483a; /* the VOXEL in VOXELON */
+      color: #ff5a45;
       text-shadow:
-        0 3px 0 rgba(0,0,0,0.45),
-        0 10px 30px rgba(0, 0, 0, 0.75),
-        0 0 42px rgba(255, 90, 60, 0.35);
+        0 2px 0 #8f3029, 0 5px 0 #321917,
+        0 12px 34px rgba(0,0,0,.85), 0 0 40px rgba(255,75,48,.5);
     }
     @keyframes title-drop {
       from { transform: translateY(-26px) scale(1.05); opacity: 0; }
       to   { transform: none; opacity: 1; }
     }
     #overlay .subtitle {
-      font-size: 15px; color: #cdd8ea; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
-      margin-top: -12px; letter-spacing: 3px;
+      font-size: 11px; color: #d5e8ee; text-shadow: 0 1px 3px #000;
+      margin-top: 7px; letter-spacing: 4px; text-transform: uppercase;
     }
-    #overlay .subtitle .sub-dot { color: #6fa8ff; }
+    #overlay .subtitle .sub-dot { color: #55d5ff; }
+    .season-chip {
+      display: inline-block; margin-top: 12px; padding: 5px 12px;
+      border: 1px solid rgba(108,216,244,.35); color: #a6e8fa;
+      background: rgba(7,18,25,.62); font-size: 9px; letter-spacing: 2px;
+      box-shadow: inset 0 0 12px rgba(60,196,232,.08);
+    }
     /* Vanilla-style button (same bevel as the death screen). */
     .mc-btn {
       font-family: inherit; font-size: 20px; font-weight: bold;
@@ -241,10 +312,11 @@
     .mc-btn:active { transform: translateY(1px); }
     /* The big Play (Civilization) button pops. */
     #play-btn {
-      background: linear-gradient(#4f8f45, #3f7a37); border-color: #9fd48f #24481f #24481f #9fd48f;
-      letter-spacing: 2px;
+      min-width: 300px; background: linear-gradient(135deg, #ee5b3e, #a62f2a);
+      border-color: #ffb093 #511a1a #511a1a #ffb093;
+      letter-spacing: 4px; box-shadow: 0 6px 20px rgba(0,0,0,.45), 0 0 24px rgba(255,67,42,.25);
     }
-    #play-btn:hover { background: linear-gradient(#5aa04f, #48883f); }
+    #play-btn:hover { background: linear-gradient(135deg, #ff704f, #bd3930); }
     /* Character: a violet button under Civilization — customise your avatar. */
     #character-btn {
       background: linear-gradient(#8a5fd6, #6a41b0);
@@ -256,12 +328,12 @@
     #character-btn:hover { background: linear-gradient(#9a6fe6, #7a4fc4); }
     /* Login / register form on the title overlay — a soft card. */
     #auth {
-      display: flex; flex-direction: column; gap: 8px; width: 280px; margin: 8px 0 4px;
-      background: rgba(10, 13, 22, 0.72);
-      border: 1px solid #2c3650; border-radius: 10px;
-      padding: 16px 18px 14px;
-      box-shadow: 0 10px 34px rgba(0,0,0,0.5);
-      backdrop-filter: blur(3px);
+      display: flex; flex-direction: column; gap: 8px; width: 310px; margin: 0 0 4px;
+      background: linear-gradient(145deg, rgba(17,28,37,.88), rgba(7,11,17,.9));
+      border: 1px solid #38515e; border-radius: 2px;
+      padding: 18px 20px 16px;
+      box-shadow: 0 16px 45px rgba(0,0,0,.6), inset 0 0 24px rgba(58,177,216,.04);
+      backdrop-filter: blur(7px);
     }
     #auth input {
       font-size: 14px; padding: 9px 10px; color: #eee; background: #0f1420;
@@ -284,6 +356,22 @@
     #toggle-link { color: #6fd0ff; cursor: pointer; text-decoration: underline; }
     #auth-err { color: #ff8a7a; font-size: 12px; min-height: 14px; text-shadow: none; text-align: center; }
     #auth-status { color: #9fb4cc; font-size: 12px; min-height: 14px; text-shadow: none; text-align: center; }
+    #menu-btns {
+      padding: 18px 24px !important; min-width: 350px;
+      background: linear-gradient(145deg, rgba(17,28,37,.86), rgba(7,11,17,.88));
+      border: 1px solid #38515e; box-shadow: 0 16px 45px rgba(0,0,0,.55);
+      backdrop-filter: blur(7px);
+    }
+    #menu-btns .mc-btn:not(#play-btn) { min-width: 260px; font-size: 15px; padding: 9px 28px; }
+    @media (max-width: 640px), (max-height: 720px) {
+      #overlay { gap: 8px; }
+      .title-lockup { padding: 5px 20px 8px; }
+      .title-kicker, .season-chip { display: none; }
+      #title { font-size: clamp(44px, 14vw, 70px); }
+      #overlay .subtitle { font-size: 9px; }
+      #auth { padding: 12px 14px; width: min(310px, 86vw); }
+      #menu-btns { min-width: min(350px, 90vw); padding: 12px !important; }
+    }
 
   </style>
 </head>
@@ -310,8 +398,12 @@
     </div>
     <div id="debug" class="mc-font"></div>
     <div id="overlay" class="hidden">
-      <h1 id="title" class="mc-font"><span class="accent">VOXEL</span>ON</h1>
-      <p class="subtitle mc-font">mine <span class="sub-dot">·</span> build <span class="sub-dot">·</span> explore <span class="sub-dot">·</span> WAR</p>
+      <div class="title-lockup">
+        <div class="title-kicker mc-font">A world worth fighting for</div>
+        <h1 id="title" class="mc-font"><span class="accent">VOXEL</span>ON</h1>
+        <p class="subtitle mc-font">mine <span class="sub-dot">◆</span> build <span class="sub-dot">◆</span> conquer <span class="sub-dot">◆</span> survive</p>
+        <div class="season-chip mc-font">LIFESTEAL CIVILIZATIONS</div>
+      </div>
       <div id="auth">
         <div id="auth-user-row">
           <input id="auth-user" class="mc-font" placeholder="username" maxlength="16" autocomplete="username" readonly />

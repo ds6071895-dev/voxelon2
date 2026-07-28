@@ -32,6 +32,24 @@ export function skinColorFor(seed: number, cosmetics?: Cosmetics): THREE.Color {
 
 // ─── geometry helpers ──────────────────────────────────────────────────────
 
+/**
+ * Avatar parts are deliberately built from overlapping boxes. At long range,
+ * the depth buffer cannot reliably distinguish the very small gaps between
+ * skin, cuffs, facial pixels, cosmetics and armor, which causes z-fighting.
+ * Give each visual layer a progressively stronger camera-facing depth bias.
+ * The meshes remain opaque and keep writing depth, so avatars still occlude
+ * themselves and the world normally.
+ */
+function layeredAvatarMaterial(layer: number): THREE.MeshBasicMaterial {
+  const mat = new THREE.MeshBasicMaterial({ vertexColors: true });
+  if (layer > 0) {
+    mat.polygonOffset = true;
+    mat.polygonOffsetFactor = -1;
+    mat.polygonOffsetUnits = -layer;
+  }
+  return mat;
+}
+
 function shadedBox(
   w: number, h: number, d: number, color: THREE.Color,
   shadeOverride?: number[]
@@ -103,6 +121,7 @@ function addBoxTo(
 function buildFace(
   parent: THREE.Group,
   mat: THREE.Material,
+  accessoryMat: THREE.Material,
   skin: THREE.Color,
   hair: THREE.Color,
   eye: THREE.Color,
@@ -125,7 +144,7 @@ function buildFace(
     const ex = side * 0.125;
     // Chunky two-pixel eye: white outer half, coloured pupil on the inner half.
     addBox(0.14, 0.11, 0.02, white, ex, headY + 0.04, fz);
-    addBox(0.07, 0.11, 0.025, eye, ex - side * 0.035, headY + 0.04, fz - 0.001);
+    addBox(0.07, 0.11, 0.025, eye, ex - side * 0.035, headY + 0.04, fz - 0.012);
     // Flat relaxed brow in the hair colour.
     addBox(0.14, 0.03, 0.02, hair, ex, headY + 0.125, fz);
     // Rosy cheek dot just outside each eye.
@@ -140,37 +159,45 @@ function buildFace(
   // Eyepatch, Mask, Moustache, Monocle).
   const dark = new THREE.Color(0x22242a);
   const az = fz - 0.02; // accessories float just proud of the face features
+  const addAccessory = (
+    w: number, h: number, d: number, color: THREE.Color,
+    x: number, y: number, z: number
+  ): THREE.Mesh => addBoxTo(parent, accessoryMat, w, h, d, color, x, y, z, flat);
   switch (accessory) {
     case 1: { // Glasses: two thin frames + a bridge
       for (const side of [-1, 1]) {
-        addBox(0.17, 0.15, 0.02, dark, side * 0.125, headY + 0.04, az);
-        addBox(0.12, 0.1, 0.025, new THREE.Color(0xbfd8e8),
-          side * 0.125, headY + 0.04, az - 0.001);
+        addAccessory(0.17, 0.15, 0.02, dark, side * 0.125, headY + 0.04, az);
+        addAccessory(0.12, 0.1, 0.025, new THREE.Color(0xbfd8e8),
+          side * 0.125, headY + 0.04, az - 0.012);
       }
-      addBox(0.08, 0.03, 0.02, dark, 0, headY + 0.06, az);
+      addAccessory(0.08, 0.03, 0.02, dark, 0, headY + 0.06, az);
       break;
     }
     case 2: { // Sunglasses: one solid dark band
-      addBox(0.44, 0.13, 0.02, dark, 0, headY + 0.04, az);
+      addAccessory(0.44, 0.13, 0.02, dark, 0, headY + 0.04, az);
       break;
     }
     case 3: { // Eyepatch: a patch over the left eye + a strap
-      addBox(0.16, 0.14, 0.02, dark, -0.125, headY + 0.04, az);
-      addBox(0.5, 0.035, 0.02, dark, 0, headY + 0.1, az + 0.005);
+      addAccessory(0.16, 0.14, 0.02, dark, -0.125, headY + 0.04, az);
+      addAccessory(0.5, 0.035, 0.02, dark, 0, headY + 0.1, az + 0.005);
       break;
     }
     case 4: { // Mask: covers the mouth/nose area
-      addBox(0.4, 0.18, 0.02, new THREE.Color(0x5a6470), 0, headY - 0.12, az);
+      addAccessory(0.4, 0.18, 0.02, new THREE.Color(0x5a6470),
+        0, headY - 0.12, az);
       break;
     }
     case 5: { // Moustache: a proud bar above the smile
-      addBox(0.2, 0.05, 0.02, hair, 0, headY - 0.1, az);
+      addAccessory(0.2, 0.05, 0.02, hair, 0, headY - 0.1, az);
       break;
     }
     case 6: { // Monocle: one round-ish frame + a hanging chain hint
-      addBox(0.15, 0.15, 0.02, new THREE.Color(0xd8b32a), 0.125, headY + 0.04, az);
-      addBox(0.1, 0.1, 0.025, new THREE.Color(0xbfd8e8), 0.125, headY + 0.04, az - 0.001);
-      addBox(0.02, 0.14, 0.02, new THREE.Color(0xd8b32a), 0.2, headY - 0.08, az);
+      addAccessory(0.15, 0.15, 0.02, new THREE.Color(0xd8b32a),
+        0.125, headY + 0.04, az);
+      addAccessory(0.1, 0.1, 0.025, new THREE.Color(0xbfd8e8),
+        0.125, headY + 0.04, az - 0.012);
+      addAccessory(0.02, 0.14, 0.02, new THREE.Color(0xd8b32a),
+        0.2, headY - 0.08, az);
       break;
     }
   }
@@ -365,7 +392,12 @@ export interface AvatarBody {
   parts: THREE.Group[];
   /** Cape group (pivot at the shoulders) for sway animation, if worn. */
   cape: THREE.Group | null;
+  /** Base material retained for callers adding solid avatar-adjacent meshes. */
   material: THREE.MeshBasicMaterial;
+  /** Strongest depth-biased layer, used by dynamically rebuilt worn armor. */
+  armorMaterial: THREE.MeshBasicMaterial;
+  /** Every owned material, disposed together with the body. */
+  materials: readonly THREE.MeshBasicMaterial[];
 }
 
 /** Build the full customised avatar body (feet at y=0, facing -z). The
@@ -382,7 +414,15 @@ export function buildAvatarBody(
   const pants = new THREE.Color(PANTS_COLORS[c.pants].hex);
   const shoe  = new THREE.Color(PANTS_COLORS[c.pants].hex).multiplyScalar(0.45);
 
-  const mat = new THREE.MeshBasicMaterial({ vertexColors: true });
+  // Stable opaque layers replace tiny geometry-only offsets. This avoids
+  // distance/animation-dependent z-fighting without disabling the depth test.
+  const mat = layeredAvatarMaterial(0);
+  const trimMat = layeredAvatarMaterial(1);
+  const cosmeticMat = layeredAvatarMaterial(2);
+  const detailMat = layeredAvatarMaterial(3);
+  const accessoryMat = layeredAvatarMaterial(4);
+  const armorMat = layeredAvatarMaterial(6);
+  const materials = [mat, trimMat, cosmeticMat, detailMat, accessoryMat, armorMat];
   const group = new THREE.Group();
   group.rotation.order = 'YXZ';
 
@@ -401,7 +441,8 @@ export function buildAvatarBody(
   torso.position.y = HIP_Y + TORSO_H / 2;
   group.add(torso);
   // Belt strip (pants-colored) at the waist for a two-tone read.
-  const belt = new THREE.Mesh(shadedBox(TORSO_W + 0.006, 0.16, TORSO_D + 0.006, pants), mat);
+  const belt = new THREE.Mesh(
+    shadedBox(TORSO_W + 0.006, 0.16, TORSO_D + 0.006, pants), trimMat);
   belt.position.y = HIP_Y + 0.08;
   group.add(belt);
 
@@ -418,10 +459,10 @@ export function buildAvatarBody(
   headMesh.position.y = headY_local;
   headGroup.add(headMesh);
 
-  buildHair(headGroup, mat, hair, headY_local, c.hairStyle);
-  buildHat(headGroup, mat, new THREE.Color(HAT_COLORS[c.hatColor].hex),
+  buildHair(headGroup, cosmeticMat, hair, headY_local, c.hairStyle);
+  buildHat(headGroup, accessoryMat, new THREE.Color(HAT_COLORS[c.hatColor].hex),
     headY_local, c.hat);
-  buildFace(headGroup, mat, skin, hair, eye, headY_local, c.face);
+  buildFace(headGroup, detailMat, accessoryMat, skin, hair, eye, headY_local, c.face);
 
   headGroup.position.y = NECK_Y;
   group.add(headGroup);
@@ -431,7 +472,8 @@ export function buildAvatarBody(
   const rl = limb(mat, LIMB_W, LIMB_H, LIMB_D, pants,  0.12, HIP_Y, 0);
   // Shoes — short caps at the foot of each leg (swing with the leg).
   for (const leg of [ll, rl]) {
-    const foot = new THREE.Mesh(shadedBox(LIMB_W + 0.01, 0.12, LIMB_D + 0.06, shoe), mat);
+    const foot = new THREE.Mesh(
+      shadedBox(LIMB_W + 0.01, 0.12, LIMB_D + 0.06, shoe), trimMat);
     foot.position.set(0, -LIMB_H + 0.06, -0.02);
     leg.add(foot);
   }
@@ -442,7 +484,8 @@ export function buildAvatarBody(
   const ra = limb(mat, LIMB_W, LIMB_H, LIMB_D, shirt,  armX, SHOULDER_Y, 0);
   // Hands — skin-colored caps below the sleeve (swing with the arm).
   for (const arm of [la, ra]) {
-    const hand = new THREE.Mesh(shadedBox(LIMB_W + 0.006, 0.14, LIMB_D + 0.006, skin), mat);
+    const hand = new THREE.Mesh(
+      shadedBox(LIMB_W + 0.006, 0.14, LIMB_D + 0.006, skin), trimMat);
     hand.position.y = -LIMB_H + 0.07;
     arm.add(hand);
   }
@@ -450,20 +493,23 @@ export function buildAvatarBody(
   group.add(ll, rl, la, ra);
 
   // ── Cape ───────────────────────────────────────────────────────────────
-  const cape = buildCape(group, mat,
+  const cape = buildCape(group, cosmeticMat,
     new THREE.Color(CAPE_COLORS[c.capeColor].hex), c.cape, SHOULDER_Y);
 
-  return { group, head: headGroup, parts: [ll, rl, la, ra], cape, material: mat };
+  return {
+    group, head: headGroup, parts: [ll, rl, la, ra], cape,
+    material: mat, armorMaterial: armorMat, materials,
+  };
 }
 
-/** Dispose every geometry under an avatar body + its shared material. */
+/** Dispose every geometry and layered material owned by an avatar body. */
 export function disposeAvatarBody(body: AvatarBody): void {
   body.group.traverse((o) => {
     if ((o as THREE.Sprite).isSprite) return;
     const m = o as THREE.Mesh;
     if (m.geometry) m.geometry.dispose();
   });
-  body.material.dispose();
+  for (const mat of body.materials) mat.dispose();
 }
 
 // ─── worn armor + held item (equip visuals) ────────────────────────────────
@@ -487,9 +533,9 @@ function armorColorFor(id: number): THREE.Color {
 /** Build worn-armor plating onto an avatar body. `armor` is the synced
  *  [helmet, chest, legs, boots] item ids (0 = bare). Returns every mesh added
  *  so a re-equip can strip them (their geometries die with the body's group
- *  traverse on dispose; the material is the body's shared one). */
+ *  traverse on dispose; the material is the body's owned armor layer). */
 export function buildArmorOverlay(body: AvatarBody, armor: number[]): THREE.Mesh[] {
-  const mat = body.material;
+  const mat = body.armorMaterial;
   const added: THREE.Mesh[] = [];
   const [ll, rl, la, ra] = body.parts;
   const add = (

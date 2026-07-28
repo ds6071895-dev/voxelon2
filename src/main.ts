@@ -3998,6 +3998,7 @@ net.onFlagEvent = (kind, faction, by, holder) => {
 /** Update flag poles/banners; resolves carriers to their live positions. */
 function updateFlagVisuals(dt: number): void {
   if (!net.connected) return;
+  flagModels.setWarActive(warActiveNow);
   flagModels.update(dt, camera, flagCarrierPos);
   updateFlagMarkers();
 }
@@ -4022,6 +4023,16 @@ let lastFlagMarkerKey = '';
  */
 function updateFlagMarkers(): void {
   const markers: { x: number; z: number; color: number; name: string }[] = [];
+  // Flags remain physical monuments during peace, but their exact location is
+  // strategic information. Map, edge badge and sky-beam wayfinding begin with
+  // the war and disappear again the moment it ends.
+  if (!warActiveNow) {
+    if (lastFlagMarkerKey !== '') {
+      lastFlagMarkerKey = '';
+      worldMap.setDynamicMarkers([]);
+    }
+    return;
+  }
   for (const f of flagState.flags) {
     const owner = factionName(f.faction);
     if (f.carrier >= 0) {
