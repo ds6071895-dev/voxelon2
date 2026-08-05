@@ -79,11 +79,17 @@ export class TouchControls {
 
     const style = document.createElement('style');
     style.textContent = `
-      #touch { position:absolute; inset:0; z-index:9; pointer-events:none;
+      #touch { position:absolute; inset:0; z-index:9; pointer-events:none; overflow:hidden;
                user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
+      #touch { --edge-l: max(10px, env(safe-area-inset-left));
+               --edge-r: max(10px, env(safe-area-inset-right));
+               --edge-t: max(8px, env(safe-area-inset-top));
+               --edge-b: max(8px, env(safe-area-inset-bottom));
+               --stick-size: clamp(112px, 22vw, 150px); }
       #touch * { touch-action:none; }
       .t-look { position:absolute; inset:0; pointer-events:auto; }
-      .t-stick { position:absolute; left:24px; bottom:92px; width:150px; height:150px;
+      .t-stick { position:absolute; left:calc(var(--edge-l) + 8px); bottom:calc(var(--edge-b) + 72px);
+                  width:var(--stick-size); height:var(--stick-size);
                  border-radius:50%; background:rgba(255,255,255,0.06);
                  border:2px solid rgba(255,255,255,0.22); pointer-events:auto; }
       .t-knob { position:absolute; left:50%; top:50%; width:60px; height:60px;
@@ -96,6 +102,38 @@ export class TouchControls {
                text-shadow:0 1px 2px rgba(0,0,0,0.6); }
       .t-btn.t-on { background:rgba(110,190,255,0.5); border-color:#bfe6ff; }
       .t-sq { border-radius:10px; }
+      .t-jump { right:calc(var(--edge-r) + 8px) !important; bottom:calc(var(--edge-b) + 82px) !important;
+                width:clamp(68px,14vw,88px) !important; height:clamp(68px,14vw,88px) !important; }
+      .t-sneak { right:calc(var(--edge-r) + clamp(92px,19vw,118px)) !important;
+                 bottom:calc(var(--edge-b) + 22px) !important; }
+      .t-fire { right:calc(var(--edge-r) + clamp(96px,20vw,126px)) !important;
+                bottom:calc(var(--edge-b) + 110px) !important; }
+      .t-aim { right:calc(var(--edge-r) + 20px) !important; bottom:calc(var(--edge-b) + 194px) !important; }
+      .t-reload { right:calc(var(--edge-r) + clamp(118px,23vw,150px)) !important;
+                  bottom:calc(var(--edge-b) + 205px) !important; }
+      .t-utils { top:var(--edge-t) !important; right:var(--edge-r) !important;
+                 max-width:min(270px,calc(100vw - var(--edge-l) - var(--edge-r) - 16px));
+                 flex-wrap:wrap; justify-content:flex-end; }
+      @media (max-width:380px), (max-height:620px) {
+        #touch { --stick-size: 108px; }
+        .t-btn { transform:scale(.88); transform-origin:center; }
+        .t-utils { gap:4px !important; max-width:160px; }
+        .t-utils .t-btn { width:40px !important; height:40px !important; font-size:17px !important; }
+        .t-jump { bottom:calc(var(--edge-b) + 68px) !important; }
+        .t-fire { bottom:calc(var(--edge-b) + 92px) !important; }
+        .t-aim { bottom:calc(var(--edge-b) + 162px) !important; }
+        .t-reload { bottom:calc(var(--edge-b) + 170px) !important; }
+      }
+      @media (orientation:landscape) and (max-height:520px) {
+        #touch { --stick-size: clamp(96px,24vh,122px); }
+        .t-stick { bottom:calc(var(--edge-b) + 40px); }
+        .t-jump { bottom:calc(var(--edge-b) + 28px) !important; }
+        .t-sneak { right:calc(var(--edge-r) + 98px) !important; bottom:calc(var(--edge-b) + 8px) !important; }
+        .t-fire { right:calc(var(--edge-r) + 110px) !important; bottom:calc(var(--edge-b) + 72px) !important; }
+        .t-aim { right:calc(var(--edge-r) + 12px) !important; bottom:calc(var(--edge-b) + 118px) !important; }
+        .t-reload { right:calc(var(--edge-r) + 184px) !important; bottom:calc(var(--edge-b) + 80px) !important; }
+        .t-utils { max-width:280px; flex-wrap:nowrap; }
+      }
     `;
     document.head.appendChild(style);
 
@@ -145,10 +183,12 @@ export class TouchControls {
 
     // --- action buttons ---
     // JUMP: hold-to-hold (swimming, glider deploy, boat hop-out all read it).
-    this.hold(this.mkBtn(this.pads, '⬆', 'right:24px;bottom:104px;width:88px;height:88px;font-size:30px;'),
-      (down) => { this.input.tJump = down; });
+    const jumpBtn = this.mkBtn(this.pads, '⬆', 'right:24px;bottom:104px;width:88px;height:88px;font-size:30px;');
+    jumpBtn.classList.add('t-jump');
+    this.hold(jumpBtn, (down) => { this.input.tJump = down; });
     // SNEAK: a toggle (holding a toggle AND moving is awkward on glass).
     this.sneakBtn = this.mkBtn(this.pads, '⇩', 'right:134px;bottom:40px;width:56px;height:56px;');
+    this.sneakBtn.classList.add('t-sneak');
     this.tap(this.sneakBtn, () => {
       this.input.tSneak = !this.input.tSneak;
       this.sneakBtn.classList.toggle('t-on', this.input.tSneak);
@@ -158,19 +198,23 @@ export class TouchControls {
     this.gunBox = document.createElement('div');
     this.gunBox.style.cssText = 'position:absolute;inset:0;pointer-events:none;display:none;';
     this.pads.appendChild(this.gunBox);
-    this.hold(this.mkBtn(this.gunBox, '◉', 'right:126px;bottom:128px;width:78px;height:78px;font-size:28px;'),
-      (down) => {
+    const fireBtn = this.mkBtn(this.gunBox, '◉', 'right:126px;bottom:128px;width:78px;height:78px;font-size:28px;');
+    fireBtn.classList.add('t-fire');
+    this.hold(fireBtn, (down) => {
         if (down) { this.input.leftClicked = true; this.input.leftDown = true; }
         else this.input.leftDown = false;
       });
     this.aimBtn = this.mkBtn(this.gunBox, '⊕', 'right:36px;bottom:216px;width:58px;height:58px;font-size:24px;');
+    this.aimBtn.classList.add('t-aim');
     this.tap(this.aimBtn, () => this.setAim(!this.aimOn));
-    this.tap(this.mkBtn(this.gunBox, 'R', 'right:150px;bottom:230px;width:50px;height:50px;font-size:18px;'),
-      () => { this.input.reloadPressed = true; });
+    const reloadBtn = this.mkBtn(this.gunBox, 'R', 'right:150px;bottom:230px;width:50px;height:50px;font-size:18px;');
+    reloadBtn.classList.add('t-reload');
+    this.tap(reloadBtn, () => { this.input.reloadPressed = true; });
 
     // --- utility row (kept visible while any in-game menu is open, so the
     // same button that opened the inventory/map can close it again) ---
     this.utils = document.createElement('div');
+    this.utils.className = 't-utils';
     this.utils.style.cssText = 'position:absolute;top:8px;right:8px;display:flex;gap:8px;pointer-events:none;';
     this.root.appendChild(this.utils);
     const util = (label: string, fn: () => void): void => {

@@ -340,6 +340,16 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Block.EmberBrazier]: blockItem(Block.EmberBrazier),
   [Block.PrismLamp]: blockItem(Block.PrismLamp),
   [Block.GildedLamp]: blockItem(Block.GildedLamp),
+  [Block.LuminousLimestone]: blockItem(Block.LuminousLimestone),
+  [Block.PearlTile]: blockItem(Block.PearlTile),
+  [Block.RuneGlass]: blockItem(Block.RuneGlass),
+  [Block.IvoryColumn]: blockItem(Block.IvoryColumn),
+  [Block.SpectralMarble]: blockItem(Block.SpectralMarble),
+  [Block.JadeMosaic]: blockItem(Block.JadeMosaic),
+  [Block.FurnaceCeramic]: blockItem(Block.FurnaceCeramic),
+  [Block.OpalBrick]: blockItem(Block.OpalBrick),
+  [Block.ClockworkGrate]: blockItem(Block.ClockworkGrate),
+  [Block.VaultMosaic]: blockItem(Block.VaultMosaic),
   // Solid gold: vault-treasury loot, a compact way to bank ingots.
   [Block.GoldBlock]: blockItem(Block.GoldBlock),
   // The Sword: top melee damage, useless as a mining tool.

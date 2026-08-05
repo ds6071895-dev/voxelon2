@@ -1821,6 +1821,40 @@ function paintFamilyBrick(base: RGBA, seam: RGBA, accent: RGBA, organic = false)
   };
 }
 
+function paintRuneGlass(p: Painter, seed: number): void {
+  p.fill((x, y) => {
+    const frame = x <= 1 || x >= 14 || y <= 1 || y >= 14;
+    const rune = x === 7 || x === 8 || y === 7 || y === 8 ||
+      (Math.abs(x - 7.5) + Math.abs(y - 7.5) >= 8 &&
+       Math.abs(x - 7.5) + Math.abs(y - 7.5) <= 9);
+    if (frame) return [210, 238, 255, 235];
+    if (rune) return shade([116, 226, 255, 220], 0.9 + hash2(seed, x, y) * 0.18);
+    return [168, 214, 236, 70];
+  });
+}
+
+function paintIvoryColumn(p: Painter, seed: number): void {
+  p.fill((x, y) => {
+    const edge = x <= 2 || x >= 13;
+    const flute = x % 4 === 0 || x % 4 === 1;
+    const cap = y <= 2 || y >= 13;
+    const base: RGBA = cap ? [244, 232, 205, 255]
+      : edge ? [182, 176, 164, 255]
+        : flute ? [229, 222, 207, 255] : [208, 201, 190, 255];
+    return shade(base, 0.94 + hash2(seed, x, y) * 0.1);
+  });
+}
+
+function paintClockworkGrate(p: Painter, seed: number): void {
+  p.fill((x, y) => {
+    const rail = x <= 1 || x >= 14 || y <= 1 || y >= 14 || x % 5 === 0 || y % 5 === 0;
+    if (!rail) return [34, 42, 52, 90];
+    const joint = (x % 5 === 0 && y % 5 === 0);
+    return shade(joint ? [255, 224, 126, 255] : [176, 160, 126, 255],
+      0.9 + hash2(seed, x, y) * 0.18);
+  });
+}
+
 function paintVaultLight(body: RGBA, glow: RGBA, fungus = false) {
   return (p: Painter, seed: number): void => {
     if (fungus) {
@@ -2404,15 +2438,15 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.VaultChestSide]: paintVaultChestSide,
   [Tile.VaultChestTop]: paintVaultChestTop,
   [Tile.CarvedVaultBrick]: paintFamilyBrick(
-    [104, 100, 118, 255], [42, 38, 54, 255], [174, 134, 214, 255]),
+    [194, 184, 210, 255], [116, 102, 134, 255], [220, 164, 255, 255]),
   [Tile.MossyVaultBrick]: paintFamilyBrick(
-    [70, 86, 76, 255], [30, 44, 39, 255], [78, 176, 108, 255], true),
+    [168, 204, 184, 255], [86, 126, 104, 255], [84, 232, 158, 255], true),
   [Tile.EmberBrick]: paintFamilyBrick(
-    [54, 48, 52, 255], [25, 22, 27, 255], [255, 94, 36, 255]),
+    [226, 200, 176, 255], [132, 92, 72, 255], [255, 108, 38, 255]),
   [Tile.PrismBrick]: paintFamilyBrick(
-    [64, 72, 126, 255], [31, 34, 70, 255], [94, 218, 255, 255]),
+    [174, 204, 232, 255], [92, 118, 168, 255], [106, 232, 255, 255]),
   [Tile.GildedVaultBrick]: paintFamilyBrick(
-    [40, 41, 48, 255], [17, 18, 23, 255], [246, 190, 58, 255]),
+    [224, 215, 190, 255], [136, 118, 86, 255], [255, 205, 72, 255]),
   [Tile.SoulLantern]: paintVaultLight([52, 42, 68, 255], [176, 94, 255, 255]),
   [Tile.GlowFungus]: paintVaultLight([48, 94, 70, 255], [72, 246, 186, 255], true),
   [Tile.EmberBrazier]: paintVaultLight([70, 46, 34, 255], [255, 100, 28, 255]),
@@ -2423,6 +2457,23 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.EmberCore]: paintRelic([190, 54, 28, 255], [255, 202, 62, 255], 'core'),
   [Tile.SeerPrism]: paintRelic([74, 126, 226, 255], [184, 244, 255, 255], 'prism'),
   [Tile.ArtificerGear]: paintRelic([174, 124, 38, 255], [255, 226, 118, 255], 'gear'),
+  [Tile.LuminousLimestone]: paintFamilyBrick(
+    [218, 224, 226, 255], [152, 164, 172, 255], [126, 232, 255, 255]),
+  [Tile.PearlTile]: paintFamilyBrick(
+    [234, 226, 210, 255], [174, 158, 144, 255], [255, 245, 214, 255]),
+  [Tile.RuneGlass]: paintRuneGlass,
+  [Tile.IvoryColumn]: paintIvoryColumn,
+  [Tile.SpectralMarble]: paintFamilyBrick(
+    [204, 190, 222, 255], [126, 108, 148, 255], [218, 158, 255, 255]),
+  [Tile.JadeMosaic]: paintFamilyBrick(
+    [174, 216, 194, 255], [94, 142, 118, 255], [88, 242, 182, 255], true),
+  [Tile.FurnaceCeramic]: paintFamilyBrick(
+    [238, 216, 190, 255], [150, 104, 78, 255], [255, 118, 42, 255]),
+  [Tile.OpalBrick]: paintFamilyBrick(
+    [198, 224, 238, 255], [100, 142, 178, 255], [136, 238, 255, 255]),
+  [Tile.ClockworkGrate]: paintClockworkGrate,
+  [Tile.VaultMosaic]: paintFamilyBrick(
+    [224, 216, 204, 255], [148, 138, 132, 255], [122, 210, 244, 255]),
   // Vault Brute: a hulking mossy-stone zombie — pale glowing eyes, heavy jaw.
   [Tile.BruteSkin]: paintSkin([98, 112, 86, 255], 0.18, [72, 84, 62, 255]),
   [Tile.BruteFace]: paintFace([98, 112, 86, 255], [235, 245, 170, 255],

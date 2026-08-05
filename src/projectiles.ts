@@ -37,6 +37,10 @@ export class Projectiles {
   /** Report a block impact (unused hook kept for effects).
    *  shield if the round struck inside it (M19 breaching). Set by main. */
   claimSink?: (x: number, y: number, z: number, damage: number) => void;
+  /** Optional dungeon encounter collision, checked before ordinary local mobs. */
+  encounterSink?: (
+    point: THREE.Vector3, damage: number, source: 'bullet' | 'rocket',
+  ) => boolean;
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -91,6 +95,14 @@ export class Projectiles {
     const pid = this.remotePlayers.avatarAtPoint(p.pos);
     if (pid >= 0) {
       if (p.gun.rocket !== true) this.net.sendRangedAttack(pid, p.gun.damage);
+      this.despawn(p, true);
+      return;
+    }
+    // Dungeon wards/summons are authoritative encounter actors rather than
+    // ordinary local mobs. Let the adapter validate and consume the round.
+    if (this.encounterSink?.(
+      p.pos, p.gun.damage, p.gun.rocket === true ? 'rocket' : 'bullet',
+    )) {
       this.despawn(p, true);
       return;
     }

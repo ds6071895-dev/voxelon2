@@ -84,7 +84,7 @@ import {
   vaultAt, vaultLoot, vaultStamp, worldVaults,
 } from './vaults';
 import {
-  EncounterEvent, EncounterSnapshot, VaultAttackIntent, VaultEncounter,
+  BOSS_DEFINITIONS, EncounterEvent, EncounterSnapshot, VaultAttackIntent, VaultEncounter,
   bossMaxHp,
 } from './vault_encounter';
 import {
@@ -1005,6 +1005,7 @@ let screen: Screen = 'title';
 
 function enterPlaying(): void {
   screen = 'playing';
+  document.body.classList.add('in-game');
   overlay.classList.add('hidden');
   pauseEl.style.display = 'none';
   mapBtn.style.display = isMobile ? 'none' : '';
@@ -1016,16 +1017,14 @@ function enterPause(): void {
 }
 function enterTitle(): void {
   screen = 'title';
+  document.body.classList.remove('in-game');
   overlay.classList.remove('hidden');
   pauseEl.style.display = 'none';
   // The Map/Progress corner buttons are gameplay-only — don't show them over
   // the title panorama (there's no world/character to view progress for yet).
   mapBtn.style.display = 'none';
   progressBtn.style.display = 'none';
-  vaultBossHud.hide();
-  vaultCinematic.finish();
-  vaultEncounterVisuals.hide();
-  audio.stopVaultMusic();
+  onVaultTransition(null);
 }
 
 // --- Login / register (mandatory accounts) ---------------------------------
@@ -1820,8 +1819,7 @@ document.getElementById('respawn')!.addEventListener('click', () => {
 function checkDeath(): void {
   if (!player.dead || deathShown) return;
   deathShown = true;
-  audio.stopVaultMusic(0.35);
-  vaultCinematic.finish();
+  clearVaultPresentation(true, 0.35);
   invUI.hide(); // closes (and saves) an open chest BEFORE we spill the inventory
   // Drop everything where we died — networked so others can grab it (MP) or
   // local item entities (offline). We can't pick anything up while dead.
@@ -2470,10 +2468,28 @@ const vaultViews = new Map<string, VaultView>();
 let curVault: VaultStamp | null = null;
 let bruteMob: Mob | null = null;
 let localVaultEncounter: VaultEncounter | null = null;
+let localEncounterVaultKey: string | null = null;
 let encounterSnapshot: EncounterSnapshot | null = null;
 let encounterAttackSequence = 0;
 let encounterRequestTimer = 0;
+let encounterShakeTime = 0;
+let encounterShakeStrength = 0;
 const seenEncounterEvents = new Set<string>();
+const seenEncounterIntros = new Set<string>();
+let activeEncounterId = '';
+
+/** One cleanup gate for every way an encounter presentation can end. Keeping
+ * this atomic prevents a late snapshot from leaving a boss bar, cinematic or
+ * soundtrack behind on the title/death/disconnect screens. */
+function clearVaultPresentation(dropSnapshot = true, musicFade = 0.3): void {
+  if (dropSnapshot) encounterSnapshot = null;
+  encounterAttackSequence = 0;
+  activeEncounterId = '';
+  vaultBossHud.hide();
+  vaultCinematic.finish();
+  vaultEncounterVisuals.hide();
+  audio.stopVaultMusic(musicFade);
+}
 let vaultPollTimer = 0;
 let vaultSparkleTimer = 0;
 const vaultKeyOf = (v: VaultStamp): string => `${v.cx},${v.cz}`;
@@ -2611,22 +2627,41 @@ function discoverVault(v: VaultStamp): void {
 /** Crossing a vault's bounds: sting + banner + minimap dim + discovery, and
  *  fetch/derive the authoritative boss state. */
 function onVaultTransition(v: VaultStamp | null): void {
+  const previousKey = curVault ? vaultKeyOf(curVault) : null;
   if (!v) {
-    localVaultEncounter = null;
-    encounterSnapshot = null;
-    encounterAttackSequence = 0;
+    clearVaultPresentation(true);
     seenEncounterEvents.clear();
-    vaultBossHud.hide();
-    vaultCinematic.finish();
-    audio.stopVaultMusic();
+    if (bruteMob) { mobs.slay(bruteMob); bruteMob = null; }
+    curVault = null;
+    return;
+  }
+
+  const nextKey = vaultKeyOf(v);
+  // Offline encounters are kept when briefly stepping out of the same vault so
+  // returning cannot manufacture a fresh encounter id and replay its intro.
+  // Moving to a different vault intentionally abandons the old local runtime.
+  if (localEncounterVaultKey && localEncounterVaultKey !== nextKey) {
+    localVaultEncounter = null;
+    localEncounterVaultKey = null;
   }
   curVault = v;
-  if (!v) return;
-  if (net.connected) net.sendVaultEnter(v.cx, v.cz);
-  else vaultViews.set(vaultKeyOf(v), offlineVaultView(v));
+  if (net.connected) {
+    net.sendVaultEnter(v.cx, v.cz);
+  } else {
+    vaultViews.set(nextKey, offlineVaultView(v));
+    if (localVaultEncounter && localEncounterVaultKey === nextKey) {
+      encounterSnapshot = localVaultEncounter.snapshot();
+      activeEncounterId = encounterSnapshot.encounterId;
+      vaultBossHud.update(encounterSnapshot);
+      audio.startVaultMusic(v.family, encounterSnapshot.phase);
+      audio.setVaultMusicPhase(encounterSnapshot.phase, encounterSnapshot.hpPercent < 0.15);
+    }
+  }
   discoverVault(v);
-  showRegionBanner(`☠ VAULT — TIER ${['I', 'II', 'III'][v.tier - 1] ?? '?'}`, '#b9a5ff');
-  audio.vaultSting();
+  if (previousKey !== nextKey) {
+    showRegionBanner(`☠ VAULT — TIER ${['I', 'II', 'III'][v.tier - 1] ?? '?'}`, '#b9a5ff');
+    audio.vaultSting();
+  }
 }
 
 function localInsideArena(v: VaultStamp): boolean {
@@ -2652,6 +2687,39 @@ function heldEncounterSource(): VaultAttackIntent['source'] {
   return 'melee';
 }
 
+function hitEncounterTarget(
+  targetId: number, hit: { x: number; y: number; z: number }, damage: number,
+  source: VaultAttackIntent['source'],
+): boolean {
+  if (!curVault || !encounterSnapshot) return false;
+  const stack = inventory.selectedStack;
+  const heldInfo = stack ? ITEMS[stack.id] : undefined;
+  const gadget = stack ? gadgetOf(stack.id) : undefined;
+  const maxDamage = heldInfo?.gun
+    ? heldInfo.gun.damage * Math.max(1, heldInfo.gun.pellets ?? 1)
+    : gadget ? Math.min(30, gadget.damage ?? 8)
+      : stack?.id === Item.Sword ? 7 : 4;
+  const range = heldInfo?.gun ? heldInfo.gun.range : gadget ? 24 : 4;
+  const cadence = heldInfo?.gun ? heldInfo.gun.cooldown : gadget ? 0.8 : 0.32;
+  const intent: VaultAttackIntent = {
+    encounterId: encounterSnapshot.encounterId,
+    sequence: ++encounterAttackSequence,
+    targetId, source, hit: { ...hit },
+    claimedDamage: Math.max(1, Math.min(maxDamage, damage)),
+  };
+  if (net.connected) {
+    net.sendVaultAttack(curVault.cx, curVault.cz, intent);
+    return true;
+  }
+  if (!localVaultEncounter) return false;
+  localVaultEncounter.attack(intent, localEncounterParticipant(curVault), {
+    heldSource: source, maxDamage, range, cadence, now: worldTimeLocal,
+  });
+  encounterSnapshot = localVaultEncounter.snapshot();
+  vaultBossHud.update(encounterSnapshot);
+  return true;
+}
+
 function encounterEvent(event: EncounterEvent): void {
   if (seenEncounterEvents.has(event.id)) return;
   seenEncounterEvents.add(event.id);
@@ -2660,18 +2728,57 @@ function encounterEvent(event: EncounterEvent): void {
     if (first) seenEncounterEvents.delete(first);
   }
   if (event.type === 'phase' && encounterSnapshot) {
-    showRegionBanner(`PHASE ${encounterSnapshot.phase}`, '#d8c4ff');
-    audio.setVaultMusicPhase(encounterSnapshot.phase, encounterSnapshot.hpPercent < 0.15);
+    const phase = event.audio === 'phase_3' ? 3 : 2;
+    const phaseSnapshot = { ...encounterSnapshot, phase } as EncounterSnapshot;
+    showRegionBanner(`⚔ PHASE ${phase} — ${
+      BOSS_DEFINITIONS[phaseSnapshot.kind].phaseTitles[phase - 1].toUpperCase()}`,
+      '#d8c4ff');
+    vaultCinematic.playPhase(phaseSnapshot, phase);
+    audio.setVaultMusicPhase(phase, phaseSnapshot.hpPercent < 0.15);
+    audio.vaultMusicCue('phase');
+    triggerEncounterShake(0.55, 0.18);
   } else if (event.type === 'spawn') {
     audio.vaultMusicCue('summon');
+    triggerEncounterShake(0.22, 0.07);
   } else if (event.type === 'poise_break') {
     showNotice('✦ BOSS EXPOSED!');
     audio.vaultMusicCue('poise');
+    triggerEncounterShake(0.3, 0.12);
+  } else if (event.type === 'enrage') {
+    showRegionBanner('☠ ENRAGED — FINISH THE FIGHT!', '#ff493d');
+    audio.vaultMusicCue('enrage');
+    triggerEncounterShake(0.8, 0.2);
   } else if (event.type === 'victory') {
+    if (encounterSnapshot) vaultCinematic.playVictory(encounterSnapshot);
     audio.vaultMusicCue('victory');
+    triggerEncounterShake(0.9, 0.22);
   } else if (event.type === 'reset') {
     audio.vaultMusicCue('reset');
+  } else if (event.type === 'cast') {
+    triggerEncounterShake(0.12, 0.025);
   }
+}
+
+function triggerEncounterShake(duration: number, strength: number): void {
+  if (accessibility.reducedMotion || accessibility.cameraShake <= 0) return;
+  encounterShakeTime = Math.max(encounterShakeTime, duration);
+  encounterShakeStrength = Math.max(encounterShakeStrength,
+    strength * accessibility.cameraShake);
+}
+
+function updateEncounterShake(dt: number): void {
+  if (encounterShakeTime <= 0 || accessibility.reducedMotion) return;
+  encounterShakeTime = Math.max(0, encounterShakeTime - dt);
+  const fade = Math.min(1, encounterShakeTime * 4);
+  const x = Math.sin(worldTimeLocal * 79) * encounterShakeStrength * fade;
+  const y = Math.cos(worldTimeLocal * 63) * encounterShakeStrength * fade * 0.65;
+  camera.position.x += x;
+  camera.position.y += y;
+  if (view !== View.First) {
+    viewCamera.position.x += x;
+    viewCamera.position.y += y;
+  }
+  encounterShakeStrength *= Math.pow(0.08, dt);
 }
 
 function beginOfflineEncounter(v: VaultStamp): void {
@@ -2686,9 +2793,14 @@ function beginOfflineEncounter(v: VaultStamp): void {
     cameraAnchors: v.arena.cameraAnchors, startTime: worldTimeLocal,
   });
   localVaultEncounter.start(0, worldTimeLocal);
+  localEncounterVaultKey = vaultKeyOf(v);
   encounterSnapshot = localVaultEncounter.snapshot();
+  activeEncounterId = encounterSnapshot.encounterId;
   vaultBossHud.update(encounterSnapshot);
-  vaultCinematic.play(encounterSnapshot);
+  if (!seenEncounterIntros.has(encounterSnapshot.encounterId)) {
+    seenEncounterIntros.add(encounterSnapshot.encounterId);
+    vaultCinematic.play(encounterSnapshot);
+  }
   audio.startVaultMusic(v.family, 1);
 }
 
@@ -2749,18 +2861,31 @@ function updateVaults(dt: number): void {
         encounterSnapshot.boss.position.y, encounterSnapshot.boss.position.z);
     }
     vaultBossHud.update(encounterSnapshot);
-    vaultCinematic.update(dt);
     audio.setVaultMusicPhase(encounterSnapshot.phase, encounterSnapshot.hpPercent < 0.15);
     if (localVaultEncounter.status === 'victory') {
+      const victorySnapshot = encounterSnapshot;
       completeOfflineEncounter(curVault);
+      if (victorySnapshot) vaultCinematic.playVictory(victorySnapshot);
+      if (bruteMob) { mobs.slay(bruteMob); bruteMob = null; }
+      encounterSnapshot = null;
       localVaultEncounter = null;
+      localEncounterVaultKey = null;
+      activeEncounterId = '';
+      vaultBossHud.hide();
+      vaultEncounterVisuals.hide();
+      // `view` was read before completeOfflineEncounter replaced the cached
+      // state. Ending this frame prevents that stale alive=true object from
+      // spawning a fresh body immediately after the kill.
+      return;
     } else if (localVaultEncounter.status === 'idle') {
       encounterSnapshot = null;
       localVaultEncounter = null;
+      localEncounterVaultKey = null;
+      activeEncounterId = '';
       vaultBossHud.hide();
       audio.stopVaultMusic();
     }
-  } else vaultCinematic.update(dt);
+  }
   if (bruteMob?.removed) bruteMob = null;
   // The Brute prowls its loot room whenever the vault is uncleared.
   if (view?.alive && !bruteMob && !player.dead) {
@@ -2785,7 +2910,9 @@ function updateVaults(dt: number): void {
       particles.burst(c.x + 0.5, c.y + 0.9, c.z + 0.5, 3, 0xffe27a, 1.4, 0.6);
     }
   }
-  vaultEncounterVisuals.update(encounterSnapshot, accessibility.highContrastTelegraphs);
+  vaultBossHud.update(encounterSnapshot);
+  vaultEncounterVisuals.update(encounterSnapshot, accessibility.highContrastTelegraphs,
+    accessibility.reducedMotion || accessibility.photosensitivitySafe);
 }
 
 // --- GETTING STARTED guide (early-game direction) ------------------------------
@@ -2956,37 +3083,25 @@ function updateGuide(dt: number, controlling: boolean): void {
 // Boss combat: local hits mirror to the server's shared HP; offline the local
 // Brute IS the authority and its death opens the loot window.
 mobs.onBruteHit = (mob, dmg) => {
-  if (!curVault) return;
+  if (!curVault || !encounterSnapshot) return;
   const source = heldEncounterSource();
-  const intent: VaultAttackIntent = {
-    encounterId: encounterSnapshot?.encounterId ?? '',
-    sequence: ++encounterAttackSequence,
-    targetId: 0, source,
-    hit: { x: mob.pos.x, y: mob.pos.y + mob.height * 0.5, z: mob.pos.z },
-    claimedDamage: dmg,
-  };
-  if (net.connected) {
-    if (encounterSnapshot) net.sendVaultAttack(curVault.cx, curVault.cz, intent);
-    if (encounterSnapshot) mob.health = encounterSnapshot.hp;
-  } else if (localVaultEncounter) {
-    const heldInfo = inventory.selectedStack ? ITEMS[inventory.selectedStack.id] : undefined;
-    const maxDamage = heldInfo?.gun
-      ? heldInfo.gun.damage * Math.max(1, heldInfo.gun.pellets ?? 1)
-      : inventory.selectedStack?.id === Item.Sword ? 7 : 4;
-    const range = heldInfo?.gun ? heldInfo.gun.range : 4;
-    const cadence = heldInfo?.gun ? heldInfo.gun.cooldown : 0.32;
-    localVaultEncounter.attack(intent, localEncounterParticipant(curVault), {
-      heldSource: source, maxDamage, range, cadence, now: worldTimeLocal,
-    });
-    mob.health = localVaultEncounter.hp;
-    const view = vaultViews.get(vaultKeyOf(curVault));
-    if (view) view.hp = localVaultEncounter.hp;
-  }
+  hitEncounterTarget(0, {
+    x: mob.pos.x, y: mob.pos.y + mob.height * 0.5, z: mob.pos.z,
+  }, dmg, source);
+  mob.health = encounterSnapshot.hp;
+  const view = vaultViews.get(vaultKeyOf(curVault));
+  if (view) view.hp = encounterSnapshot.hp;
 };
 mobs.onBruteDown = () => {
   bruteMob = null;
   // The shared encounter engine owns victory. A rejected intro/invulnerable hit
   // restores mirrored HP in onBruteHit before Mobs reaches this callback.
+};
+projectiles.encounterSink = (point, damage, source) => {
+  const target = vaultEncounterVisuals.targetAtPoint(encounterSnapshot, point);
+  return target
+    ? hitEncounterTarget(target.id, target.hit, damage, source)
+    : false;
 };
 net.onVault = (cx, cz, tier, hp, maxHp, alive, opened) => {
   const key = `${cx},${cz}`;
@@ -3001,12 +3116,21 @@ net.onVault = (cx, cz, tier, hp, maxHp, alive, opened) => {
   refreshVaultMap();
 };
 net.onEncounterStart = (cx, cz, data) => {
-  if (!curVault || curVault.cx !== cx || curVault.cz !== cz) return;
+  if (screen !== 'playing' || !curVault || curVault.cx !== cx || curVault.cz !== cz) return;
   encounterSnapshot = data.snapshot;
+  activeEncounterId = encounterSnapshot.encounterId;
   encounterAttackSequence = 0;
+  seenEncounterEvents.clear();
   vaultBossHud.update(encounterSnapshot);
-  const late = encounterSnapshot.status === 'active' && encounterSnapshot.elapsed > 1;
-  vaultCinematic.play(encounterSnapshot, late);
+  const canShowIntro = encounterSnapshot.status === 'intro' && encounterSnapshot.elapsed <= 1.25;
+  if (canShowIntro && !seenEncounterIntros.has(encounterSnapshot.encounterId)) {
+    seenEncounterIntros.add(encounterSnapshot.encounterId);
+    vaultCinematic.play(encounterSnapshot);
+  } else {
+    // Re-entering or joining an encounter already underway restores combat
+    // presentation without replaying the opening cinematic.
+    vaultCinematic.finish();
+  }
   audio.startVaultMusic(data.family, encounterSnapshot.phase);
   audio.setVaultMusicPhase(encounterSnapshot.phase, encounterSnapshot.hpPercent < 0.15);
   const view = vaultViews.get(`${cx},${cz}`);
@@ -3017,7 +3141,10 @@ net.onEncounterStart = (cx, cz, data) => {
   }
 };
 net.onEncounterSnapshot = (cx, cz, snapshot) => {
-  if (!curVault || curVault.cx !== cx || curVault.cz !== cz) return;
+  if (screen !== 'playing' || !curVault || curVault.cx !== cx || curVault.cz !== cz) return;
+  // An older encounter can still have a packet in flight after a reset/quit.
+  if (activeEncounterId && snapshot.encounterId !== activeEncounterId) return;
+  activeEncounterId = snapshot.encounterId;
   encounterSnapshot = snapshot;
   vaultBossHud.update(snapshot);
   audio.setVaultMusicPhase(snapshot.phase, snapshot.hpPercent < 0.15);
@@ -3029,20 +3156,27 @@ net.onEncounterSnapshot = (cx, cz, snapshot) => {
   if (view) { view.hp = snapshot.hp; view.maxHp = snapshot.maxHp; view.alive = snapshot.hp > 0; }
 };
 net.onEncounterEvent = (cx, cz, event) => {
-  if (curVault?.cx === cx && curVault.cz === cz) encounterEvent(event);
+  if (screen === 'playing' && curVault?.cx === cx && curVault.cz === cz) encounterEvent(event);
 };
 net.onEncounterEnd = (cx, cz, outcome) => {
   if (curVault?.cx !== cx || curVault.cz !== cz) return;
-  if (outcome === 'victory') {
+  const endedSnapshot = encounterSnapshot;
+  if (screen === 'playing' && outcome === 'victory') {
+    if (endedSnapshot) vaultCinematic.playVictory(endedSnapshot);
     showRegionBanner('🏆 VAULT CLEARED!', '#ffd84a');
     audio.vaultMusicCue('victory');
-  } else {
-    audio.vaultMusicCue('reset');
+    const viewState = vaultViews.get(`${cx},${cz}`);
+    if (viewState) { viewState.hp = 0; viewState.alive = false; }
     if (bruteMob) { mobs.slay(bruteMob); bruteMob = null; }
+    encounterSnapshot = null;
+    activeEncounterId = '';
+    vaultBossHud.hide();
+    vaultEncounterVisuals.hide();
+  } else {
+    if (screen === 'playing') audio.vaultMusicCue('reset');
+    if (bruteMob) { mobs.slay(bruteMob); bruteMob = null; }
+    clearVaultPresentation(true);
   }
-  encounterSnapshot = null;
-  vaultBossHud.hide();
-  vaultCinematic.finish();
 };
 net.onVaultCleared = (cx, cz, by) => {
   if (curVault && curVault.cx === cx && curVault.cz === cz) {
@@ -3387,11 +3521,7 @@ net.onSeasonEnd = (winner, number) => {
 net.onDisconnect = () => {
   player.damageSink = undefined;
   survival.enableRegen = true;
-  encounterSnapshot = null;
-  vaultBossHud.hide();
-  vaultCinematic.finish();
-  vaultEncounterVisuals.hide();
-  audio.stopVaultMusic();
+  clearVaultPresentation(true);
   // Drop all server-owned warfare state so its meshes/markers don't linger
   // (turretModels reconciles to the now-empty set).
   turretStates.clear();
@@ -3550,6 +3680,76 @@ function updateCamera(): void {
   if (view !== View.First) updateViewCamera();
 }
 
+const cinematicShotA = new THREE.Vector3();
+const cinematicShotB = new THREE.Vector3();
+const cinematicShotPos = new THREE.Vector3();
+const cinematicGameplayPos = new THREE.Vector3();
+const cinematicGameplayQuat = new THREE.Quaternion();
+
+/** Drive both render cameras through the authored vault camera anchors. Gameplay
+ * camera state is recomputed first every frame, then blended back during the
+ * final section so control returns without a hard snap. */
+function updateVaultCinematicCamera(): void {
+  const frame = vaultCinematic.frame;
+  if (!frame || !curVault) return;
+  const p = frame.progress;
+  const boss = frame.snapshot.boss.position;
+  const anchors = curVault.arena.cameraAnchors;
+  const a = anchors[0] ?? { x: boss.x - 7, y: boss.y + 4, z: boss.z - 7 };
+  const b = anchors[1] ?? { x: boss.x + 6, y: boss.y + 5, z: boss.z + 6 };
+  cinematicGameplayPos.copy(camera.position);
+  cinematicGameplayQuat.copy(camera.quaternion);
+  const gameplayFov = camera.fov;
+  cinematicShotA.set(a.x, a.y, a.z);
+  cinematicShotB.set(b.x, b.y, b.z);
+
+  let returnMix = 0;
+  let cinematicFov = 54;
+  if (frame.mode === 'intro') {
+    const sweep = THREE.MathUtils.smoothstep(p, 0.02, 0.55);
+    cinematicShotPos.copy(cinematicShotA).lerp(cinematicShotB, sweep);
+    // The second half pushes close to the boss before retreating into gameplay.
+    const close = THREE.MathUtils.smoothstep(p, 0.42, 0.72);
+    const orbit = p * Math.PI * 1.2;
+    cinematicShotPos.lerp(cinematicShotA.set(
+      boss.x + Math.cos(orbit) * 4.8,
+      boss.y + 2.2 + Math.sin(p * Math.PI) * 1.3,
+      boss.z + Math.sin(orbit) * 4.8,
+    ), close);
+    returnMix = THREE.MathUtils.smoothstep(p, 0.73, 1);
+    cinematicFov = THREE.MathUtils.lerp(62, 42, close);
+  } else if (frame.mode === 'phase') {
+    const angle = -0.7 + p * Math.PI * 1.35;
+    cinematicShotPos.set(
+      boss.x + Math.cos(angle) * 5.2,
+      boss.y + 2.8 + Math.sin(p * Math.PI) * 0.7,
+      boss.z + Math.sin(angle) * 5.2,
+    );
+    returnMix = THREE.MathUtils.smoothstep(p, 0.62, 1);
+    cinematicFov = 48;
+  } else {
+    const rise = THREE.MathUtils.smoothstep(p, 0.05, 0.78);
+    cinematicShotPos.copy(cinematicShotB).lerp(cinematicShotA.set(
+      boss.x + 0.5, boss.y + 8.5, boss.z + 8.5,
+    ), rise);
+    returnMix = THREE.MathUtils.smoothstep(p, 0.84, 1);
+    cinematicFov = THREE.MathUtils.lerp(52, 64, rise);
+  }
+
+  camera.position.copy(cinematicShotPos).lerp(cinematicGameplayPos, returnMix);
+  camera.lookAt(boss.x, boss.y + (frame.mode === 'victory' ? 1.1 : 1.8), boss.z);
+  camera.quaternion.slerp(cinematicGameplayQuat, returnMix);
+  camera.fov = THREE.MathUtils.lerp(cinematicFov, gameplayFov, returnMix);
+  camera.updateProjectionMatrix();
+
+  // Third-person mode still renders through viewCamera; during a cutscene it
+  // deliberately mirrors the cinematic eye so every view gets the same shot.
+  viewCamera.position.copy(camera.position);
+  viewCamera.quaternion.copy(camera.quaternion);
+  viewCamera.fov = camera.fov;
+  viewCamera.updateProjectionMatrix();
+}
+
 const boomDir = new THREE.Vector3();
 const boomProbe = new THREE.Vector3();
 
@@ -3697,12 +3897,12 @@ function updateAtmosphere(): void {
     fog.far = 24;
   } else if (curVault) {
     const familyFog = {
-      crypt: 0x281d3b, mire: 0x153a35, ember: 0x4a2118,
-      crystal: 0x172d4d, gilded: 0x3d301b,
+      crypt: 0x514865, mire: 0x315e55, ember: 0x744432,
+      crystal: 0x365f82, gilded: 0x6b5934,
     }[curVault.family];
     fog.color.setHex(familyFog);
-    fog.near = 8;
-    fog.far = Math.min(72, FOG_FAR);
+    fog.near = 5;
+    fog.far = Math.min(92, FOG_FAR);
   } else {
     fog.color.copy(sky.skyColor);
     fog.near = FOG_NEAR;
@@ -4592,8 +4792,12 @@ function frame(): void {
     }
   }
 
+  // Advance cinematics before control/camera decisions so their final frame and
+  // UI restoration happen atomically.
+  vaultCinematic.update(dt);
+
   // Direct control only while actively playing (pointer locked, no UI, alive).
-  const controlling = input.locked && !player.dead && !invUI.open;
+  const controlling = input.locked && !player.dead && !invUI.open && !vaultCinematic.playing;
 
   // Keep worn-armor mitigation current before any damage can land this frame:
   // offline the player mitigates locally; in MP the server mitigates from this
@@ -4665,6 +4869,8 @@ function frame(): void {
       aimZoom = aiming ? g!.zoom! : 1;
     }
     updateCamera();
+    updateVaultCinematicCamera();
+    updateEncounterShake(dt);
 
     // Held-torch dynamic light: holding a torch lights the world around you
     // (a moving point light in the chunk shader, with a gentle flame flicker).
@@ -4777,15 +4983,25 @@ function frame(): void {
       } else {
         // Melee never hits players — PvP is guns-only. Left-click fights
         // MOBS, otherwise mines the block. Priority: mob > mine.
-        const mobInSights = mobs.rayHit(eye, lookDir, 3.5);
-        if (input.leftClicked && mobInSights) {
+        const encounterInSights = vaultEncounterVisuals.rayTarget(
+          encounterSnapshot, eye, lookDir, 3.5,
+        );
+        const mobInSights = encounterInSights ? null : mobs.rayHit(eye, lookDir, 3.5);
+        if (input.leftClicked && encounterInSights) {
+          const tool = heldStack ? ITEMS[heldStack.id]?.tool : undefined;
+          hitEncounterTarget(encounterInSights.id, encounterInSights.hit,
+            (tool?.damage ?? 1) + activeBuffs().meleeBonus, 'melee');
+          if (tool) inventory.damageSelected(2);
+          held.swing();
+        } else if (input.leftClicked && mobInSights) {
           const tool = heldStack ? ITEMS[heldStack.id]?.tool : undefined;
           // Prospector/Slayer nodes add flat melee damage (mobs only).
           mobs.attack(eye, lookDir, (tool?.damage ?? 1) + activeBuffs().meleeBonus, player);
           if (tool) inventory.damageSelected(2);
           held.swing();
         }
-        interaction.update(dt, input, camera, mobInSights !== null);
+        interaction.update(dt, input, camera,
+          encounterInSights !== null || mobInSights !== null);
       }
 
       // Footsteps.

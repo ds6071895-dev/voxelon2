@@ -314,13 +314,6 @@ export function vaultStamp(
   rng();
   const bossKind = vaultBossFor(seed, cx, cz, tier);
   const family = VAULT_BOSS_FAMILY[bossKind];
-  const familyBrick: Record<VaultFamily, Block> = {
-    crypt: Block.CarvedVaultBrick,
-    mire: Block.MossyVaultBrick,
-    ember: Block.EmberBrick,
-    crystal: Block.PrismBrick,
-    gilded: Block.GildedVaultBrick,
-  };
   const familyLight: Record<VaultFamily, Block> = {
     crypt: Block.SoulLantern,
     mire: Block.GlowFungus,
@@ -328,11 +321,33 @@ export function vaultStamp(
     crystal: Block.PrismLamp,
     gilded: Block.GildedLamp,
   };
-  // Legacy VaultBrick remains the structural shell (old fixtures, edits and
-  // mined-wall trophies stay compatible); family masonry is a deterministic
-  // decorative layer on floors, pillars and arena inlays.
-  const shellBlock = Block.VaultBrick;
-  const accentBlock = familyBrick[family];
+  // Bright architectural grammar: every family now owns its structural shell,
+  // flooring, trim and window language instead of hiding its color behind the
+  // old near-black VaultBrick shell. Layout coordinates remain unchanged.
+  const familyShell: Record<VaultFamily, Block> = {
+    crypt: Block.SpectralMarble,
+    mire: Block.PearlTile,
+    ember: Block.FurnaceCeramic,
+    crystal: Block.OpalBrick,
+    gilded: Block.LuminousLimestone,
+  };
+  const familyFloor: Record<VaultFamily, Block> = {
+    crypt: Block.VaultMosaic,
+    mire: Block.JadeMosaic,
+    ember: Block.PearlTile,
+    crystal: Block.PearlTile,
+    gilded: Block.VaultMosaic,
+  };
+  const familyTrim: Record<VaultFamily, Block> = {
+    crypt: Block.CarvedVaultBrick,
+    mire: Block.JadeMosaic,
+    ember: Block.EmberBrick,
+    crystal: Block.PrismBrick,
+    gilded: Block.GildedVaultBrick,
+  };
+  const shellBlock = familyShell[family];
+  const floorBlock = familyFloor[family];
+  const trimBlock = familyTrim[family];
   const lightBlock = familyLight[family];
 
   // --- Pick the wings: hall + boss are fixed; the rest is a seeded spread of
@@ -479,6 +494,16 @@ export function vaultStamp(
         const v = leg.alongU ? leg.fixed + s : t;
         mark(wx(u, v), fy + 1, wz(u, v), Block.SpikeTrap);
       }
+      // A continuous luminous ceiling rhythm makes every connector readable
+      // and prevents the sprawling layout from collapsing into dark tunnels.
+      if ((t - lo) % 7 === 3) {
+        const u = leg.alongU ? t : leg.fixed;
+        const v = leg.alongU ? leg.fixed : t;
+        mark(wx(u, v), fy + 4, wz(u, v), lightBlock);
+        const u2 = leg.alongU ? t : leg.fixed - 1;
+        const v2 = leg.alongU ? leg.fixed - 1 : t;
+        mark(wx(u2, v2), fy + 4, wz(u2, v2), Block.RuneGlass);
+      }
     }
   }
 
@@ -501,7 +526,7 @@ export function vaultStamp(
           if ((variant === 0 && border) || (variant === 1 && cross) ||
               (variant === 2 && checker)) {
             mark(wx(b.u + du, b.v + dv), b.floorY, wz(b.u + du, b.v + dv),
-              family === 'ember' ? Block.Basalt : accentBlock);
+              variant === 1 ? trimBlock : floorBlock);
           }
         }
       }
@@ -518,12 +543,27 @@ export function vaultStamp(
         mark(lx, floor + 1, lz, lightBlock);
       } else mark(lx, floor, lz, lightBlock);
     }
+    // Mid-wall rune windows and ceiling coffers give even standard chambers a
+    // composed silhouette. They replace shell cells only and never block lanes.
+    if (b.hw >= 4) {
+      for (const [du, dv] of [[b.hw, 0], [-b.hw, 0], [0, b.hw], [0, -b.hw]] as [number, number][]) {
+        mark(wx(b.u + du, b.v + dv), floor + 2, wz(b.u + du, b.v + dv), Block.RuneGlass);
+        if (b.ih >= 5) mark(wx(b.u + du, b.v + dv), floor + 3,
+          wz(b.u + du, b.v + dv), Block.RuneGlass);
+      }
+      for (let du = -(b.hw - 2); du <= b.hw - 2; du += 3) {
+        mark(wx(b.u + du, b.v), fy + b.ih + 1, wz(b.u + du, b.v), Block.VaultMosaic);
+      }
+    }
     if (b.kind === 'great' || b.kind === 'boss') {
       // Pillars: four brick columns floor→ceiling.
       for (const [su, sv] of [[-1, -1], [-1, 1], [1, -1], [1, 1]]) {
         const inset = b.kind === 'boss' ? b.hw - 2 : b.hw - 3;
         const pu = b.u + su * inset, pv = b.v + sv * inset;
-        for (let y = floor; y <= fy + b.ih; y++) mark(wx(pu, pv), y, wz(pu, pv), accentBlock);
+        for (let y = floor; y <= fy + b.ih; y++) {
+          const capital = y === floor || y === fy + b.ih;
+          mark(wx(pu, pv), y, wz(pu, pv), capital ? trimBlock : Block.IvoryColumn);
+        }
       }
     }
     if (b.kind === 'great') {
@@ -531,7 +571,8 @@ export function vaultStamp(
       for (let du = -(b.hw - 1); du <= b.hw - 1; du++) {
         for (let dv = -(b.hw - 1); dv <= b.hw - 1; dv++) {
           if (((du + dv) & 1) === 0) {
-            mark(wx(b.u + du, b.v + dv), b.floorY, wz(b.u + du, b.v + dv), Block.Basalt);
+            mark(wx(b.u + du, b.v + dv), b.floorY, wz(b.u + du, b.v + dv),
+              ((du - dv) & 2) === 0 ? floorBlock : trimBlock);
           }
         }
       }
@@ -619,23 +660,42 @@ export function vaultStamp(
       mark(wx(b.u, b.v), floor, wz(b.u, b.v), Block.MobSpawner);
     }
   }
-  // Boss dais: a raised 3×3 brick platform at the back of the lair with the
-  // VaultChest on top, flanked by theme lights.
+  // Boss dais: a raised 5×5 family-stone platform at the back of the lair with
+  // the VaultChest on top, flanked by theme lights and a rune-glass backdrop.
   // The arena grew from 15×15 to 19×19, but this legacy +4 offset is fixed:
   // old chest records, map lookups and player edits continue to line up.
+  // Arena floor mandala: concentric light-stone and family trim rings frame
+  // attacks without changing collision or safe lanes.
+  for (let du = -(boss.hw - 2); du <= boss.hw - 2; du++) {
+    for (let dv = -(boss.hw - 2); dv <= boss.hw - 2; dv++) {
+      const d = Math.round(Math.hypot(du, dv));
+      if (d === 3 || d === 6) {
+        mark(wx(boss.u + du, boss.v + dv), fy, wz(boss.u + du, boss.v + dv),
+          d === 3 ? floorBlock : trimBlock);
+      }
+    }
+  }
   const daisU = boss.u + 4;
-  for (let du = -1; du <= 1; du++) {
-    for (let dv = -1; dv <= 1; dv++) {
-      // Gold-trimmed corners make the treasure dais gleam from the doorway.
-      const gold = du !== 0 && dv !== 0;
+  for (let du = -2; du <= 2; du++) {
+    for (let dv = -2; dv <= 2; dv++) {
+      // Themed edge trim makes the treasure dais gleam from the doorway.
+      const edge = Math.abs(du) === 2 || Math.abs(dv) === 2;
       mark(wx(daisU + du, boss.v + dv), fy + 1, wz(daisU + du, boss.v + dv),
-        gold ? Block.GoldBlock : shellBlock);
+        edge ? trimBlock : floorBlock);
     }
   }
   const chest = { x: wx(daisU, boss.v), y: fy + 2, z: wz(daisU, boss.v) };
   mark(chest.x, chest.y, chest.z, Block.VaultChest);
   mark(wx(daisU, boss.v - 1), fy + 2, wz(daisU, boss.v - 1), lightBlock);
   mark(wx(daisU, boss.v + 1), fy + 2, wz(daisU, boss.v + 1), lightBlock);
+  for (let dv = -3; dv <= 3; dv++) {
+    for (let y = fy + 2; y <= fy + 5; y++) {
+      if ((Math.abs(dv) + y) % 2 === 0) {
+        mark(wx(boss.u + boss.hw, boss.v + dv), y, wz(boss.u + boss.hw, boss.v + dv),
+          Block.RuneGlass);
+      }
+    }
+  }
 
   // 6) Entrance staircase: a walk-down tunnel from the hall's -u wall, rising
   //    1 block per step until it breaks the surface (deterministic: ctx.height).

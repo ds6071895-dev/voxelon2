@@ -262,6 +262,10 @@ export class Mob {
   speedFactor = 1;
   meleeDmg: number | null = null;
   tint: [number, number, number] | null = null;
+  bossKind: VaultBossKind | null = null;
+  bossBaseScale = 1;
+  bossAnimTime = 0;
+  readonly bossParts: THREE.Object3D[] = [];
   readonly model: MobModel;
   readonly material: THREE.MeshBasicMaterial;
 
@@ -340,51 +344,137 @@ export class Mobs {
     const mob = this.spawnAt('brute', x, y, z);
     const v = BOSS_VARIANTS[kind] ?? BOSS_VARIANTS.bone_warden;
     mob.model.group.scale.setScalar(v.scale);
+    mob.bossKind = kind;
+    mob.bossBaseScale = v.scale;
     const f = v.scale / 1.9; // buildModel bakes 1.9× into the brute body
     mob.halfW = mob.def.halfW * f;
     mob.height = mob.def.height * f;
     mob.speedFactor = v.speed;
     mob.meleeDmg = v.damage;
     mob.tint = v.tint;
-    // Family silhouettes are assembled from tiny code-native primitives so
-    // every boss reads differently without external model assets.
-    const mat = new THREE.MeshBasicMaterial({
-      color: kind === 'bone_warden' ? 0x8f78b8
-        : kind === 'mire_queen' ? 0x3a9b72
-        : kind === 'ember_colossus' ? 0xd84d28
-        : kind === 'crystal_seer' ? 0x668ee8 : 0xc99432,
+
+    const primary = kind === 'bone_warden' ? 0xa785e8
+      : kind === 'mire_queen' ? 0x49d39c
+      : kind === 'ember_colossus' ? 0xff5b2c
+      : kind === 'crystal_seer' ? 0x72c8ff : 0xf0bd42;
+    const secondary = kind === 'bone_warden' ? 0xe9dcff
+      : kind === 'mire_queen' ? 0x9cffb9
+      : kind === 'ember_colossus' ? 0xffd06a
+      : kind === 'crystal_seer' ? 0xd9f5ff : 0xfff2a6;
+    const mat = new THREE.MeshBasicMaterial({ color: primary });
+    const glow = new THREE.MeshBasicMaterial({
+      color: secondary, transparent: true, opacity: 0.9,
+      blending: THREE.AdditiveBlending, depthWrite: false,
     });
-    const addBox = (w: number, h: number, d: number, px: number, py: number, pz: number) => {
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
-      mesh.position.set(px, py, pz); mob.model.group.add(mesh); return mesh;
+    const add = (mesh: THREE.Object3D, px: number, py: number, pz: number,
+      animate = true): THREE.Object3D => {
+      mesh.position.set(px, py, pz);
+      mob.model.group.add(mesh);
+      if (animate) mob.bossParts.push(mesh);
+      return mesh;
     };
+    const box = (w: number, h: number, d: number, px: number, py: number, pz: number,
+      material: THREE.Material = mat, animate = true): THREE.Object3D =>
+      add(new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material), px, py, pz, animate);
+
     if (kind === 'bone_warden') {
-      addBox(0.85, 1.1, 0.16, -0.62, 1.8, -0.12); // shield
-      const blade = addBox(0.16, 1.8, 0.28, 0.72, 1.45, -0.1);
-      blade.rotation.z = -0.3;
+      // Layered shield, executioner blade, horned crown and orbiting soul runes.
+      const shield = box(1.05, 1.35, 0.18, -0.72, 1.78, -0.18);
+      box(0.74, 0.82, 0.08, -0.72, 1.8, -0.3, glow, false).rotation.z = Math.PI / 4;
+      const blade = box(0.2, 2.1, 0.34, 0.82, 1.45, -0.12);
+      blade.rotation.z = -0.28;
+      box(0.72, 0.18, 0.22, 0.72, 2.25, -0.12, glow, false);
+      for (const sx of [-1, 1]) {
+        const horn = box(0.18, 0.72, 0.18, sx * 0.3, 3.02, 0);
+        horn.rotation.z = sx * -0.42;
+      }
+      for (let i = 0; i < 4; i++) {
+        const rune = new THREE.Mesh(new THREE.TorusGeometry(0.18, 0.045, 5, 12), glow);
+        rune.userData.orbit = i;
+        add(rune, 0, 2.1, 0);
+      }
+      shield.userData.role = 'shield';
     } else if (kind === 'mire_queen') {
-      for (let i = 0; i < 5; i++) {
-        const t = addBox(0.16, 1.2, 0.16, (i - 2) * 0.24, 2.65 + (i & 1) * 0.18, 0);
-        t.rotation.z = (i - 2) * 0.16;
+      // Crown fronds, articulated tendrils, glowing brood sacs and a broad mantle.
+      box(1.25, 0.28, 0.62, 0, 2.2, 0.12);
+      for (let i = 0; i < 7; i++) {
+        const frond = box(0.14, 1.15 + (i % 2) * 0.22, 0.14,
+          (i - 3) * 0.21, 2.72 + (i % 2) * 0.12, 0);
+        frond.rotation.z = (i - 3) * 0.13;
+        frond.userData.role = 'frond';
+        frond.userData.baseRotZ = frond.rotation.z;
+      }
+      for (let i = 0; i < 6; i++) {
+        const a = i / 6 * Math.PI * 2;
+        const tendril = box(0.13, 1.55, 0.13, Math.cos(a) * 0.68, 0.88,
+          Math.sin(a) * 0.68);
+        tendril.rotation.z = Math.cos(a) * 0.7;
+        tendril.rotation.x = Math.sin(a) * 0.7;
+        tendril.userData.role = 'tendril';
+        tendril.userData.baseRotZ = tendril.rotation.z;
+        tendril.userData.baseRotX = tendril.rotation.x;
+        const sac = new THREE.Mesh(new THREE.SphereGeometry(0.22, 8, 6), glow);
+        add(sac, Math.cos(a) * 0.82, 1.45, Math.sin(a) * 0.82);
+        sac.userData.role = 'sac';
       }
     } else if (kind === 'ember_colossus') {
-      const furnace = addBox(0.9, 0.85, 0.12, 0, 1.85, -0.62);
-      (furnace.material as THREE.MeshBasicMaterial).color.setHex(0xff7a28);
-    } else if (kind === 'crystal_seer') {
-      for (let i = 0; i < 4; i++) {
-        const shard = new THREE.Mesh(new THREE.OctahedronGeometry(0.2, 0), mat);
-        const a = i * Math.PI / 2;
-        shard.position.set(Math.cos(a) * 0.9, 2 + (i & 1) * 0.35, Math.sin(a) * 0.9);
-        mob.model.group.add(shard);
+      // Heavy shoulder furnaces, white-hot chest core, exhaust stacks and hammer fists.
+      box(1.45, 0.42, 0.7, 0, 2.08, 0.05);
+      const core = box(0.9, 0.92, 0.14, 0, 1.82, -0.66, glow);
+      core.userData.role = 'core';
+      for (const sx of [-1, 1]) {
+        box(0.72, 0.58, 0.72, sx * 0.72, 2.35, 0.05);
+        const chimney = box(0.3, 1.25, 0.3, sx * 0.48, 2.92, 0.28);
+        chimney.userData.role = 'chimney';
+        const fist = box(0.68, 0.72, 0.68, sx * 0.86, 0.88, -0.12);
+        fist.userData.role = 'fist';
       }
+      for (let i = 0; i < 5; i++) {
+        const seam = box(0.09, 0.5, 0.06, (i - 2) * 0.16, 1.82, -0.75, glow);
+        seam.userData.role = 'seam';
+      }
+    } else if (kind === 'crystal_seer') {
+      // Floating crown, central eye and two independently rotating shard orbits.
+      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.28, 12, 8), glow);
+      add(eye, 0, 2.05, -0.62);
+      eye.scale.set(1.45, 0.72, 0.5);
+      eye.userData.role = 'eye';
+      for (let i = 0; i < 10; i++) {
+        const shard = new THREE.Mesh(new THREE.OctahedronGeometry(i < 6 ? 0.24 : 0.16, 0),
+          i % 3 === 0 ? glow : mat);
+        shard.userData.orbit = i;
+        shard.userData.role = 'shard';
+        add(shard, 0, 2.15, 0);
+      }
+      const halo = new THREE.Mesh(new THREE.TorusGeometry(0.78, 0.09, 6, 20), glow);
+      halo.rotation.x = Math.PI / 2;
+      halo.userData.role = 'halo';
+      add(halo, 0, 2.45, 0);
     } else {
-      const gear = new THREE.Mesh(new THREE.TorusGeometry(0.65, 0.14, 6, 12), mat);
-      gear.position.set(0, 1.9, 0.55); gear.rotation.x = Math.PI / 2;
-      mob.model.group.add(gear);
-      addBox(1.6, 0.16, 0.16, 0, 1.75, 0.45); // articulated tool rail
+      // Counter-rotating gear halo, articulated tool rails, pistons and energy core.
+      for (let i = 0; i < 3; i++) {
+        const gear = new THREE.Mesh(new THREE.TorusGeometry(0.62 + i * 0.18, 0.09, 6, 16),
+          i === 1 ? glow : mat);
+        gear.position.set(0, 2.0, 0.42 + i * 0.04);
+        gear.rotation.x = Math.PI / 2;
+        gear.userData.role = 'gear';
+        gear.userData.spin = i % 2 ? -1 : 1;
+        mob.model.group.add(gear);
+        mob.bossParts.push(gear);
+      }
+      const core = new THREE.Mesh(new THREE.OctahedronGeometry(0.3, 0), glow);
+      add(core, 0, 1.88, -0.58);
+      core.userData.role = 'core';
+      for (const sx of [-1, 1]) {
+        const rail = box(1.15, 0.14, 0.14, sx * 0.45, 1.65, 0.42);
+        rail.rotation.z = sx * 0.18;
+        rail.userData.role = 'rail';
+        box(0.3, 0.65, 0.3, sx * 0.78, 1.3, 0.3, glow).userData.role = 'piston';
+      }
     }
     return mob;
   }
+
 
   /** The vault the player is inside right now (null = not in a vault). Drives
    *  the per-room guard spawn anchors; main sets it every frame. */
@@ -922,6 +1012,52 @@ export class Mobs {
     // --- presentation ---------------------------------------------------------
     mob.model.group.position.copy(mob.pos);
     mob.model.group.rotation.y = mob.yaw;
+
+    if (mob.bossKind) {
+      mob.bossAnimTime += dt;
+      const bt = mob.bossAnimTime;
+      const breathe = 1 + Math.sin(bt * 1.8) * 0.015;
+      mob.model.group.scale.setScalar(mob.bossBaseScale * breathe);
+      for (let i = 0; i < mob.bossParts.length; i++) {
+        const part = mob.bossParts[i];
+        const role = part.userData.role as string | undefined;
+        const orbit = part.userData.orbit as number | undefined;
+        if (orbit !== undefined && role === 'shard') {
+          const outer = orbit < 6;
+          const a = bt * (outer ? 0.72 : -1.05) + orbit * (Math.PI * 2 / (outer ? 6 : 4));
+          const r = outer ? 1.0 : 0.64;
+          part.position.set(Math.cos(a) * r, 2.15 + Math.sin(a * 2) * 0.22,
+            Math.sin(a) * r);
+          part.rotation.y = -a * 1.7;
+          part.rotation.z = a * 0.8;
+        } else if (orbit !== undefined) {
+          const a = bt * 0.62 + orbit * Math.PI / 2;
+          part.position.set(Math.cos(a) * 0.92, 2.05 + Math.sin(a * 2) * 0.18,
+            Math.sin(a) * 0.92);
+          part.rotation.y = -a;
+        } else if (role === 'gear') {
+          part.rotation.z = bt * 0.75 * (part.userData.spin ?? 1);
+        } else if (role === 'halo') {
+          part.rotation.z = bt * 0.55;
+          part.rotation.y = Math.sin(bt * 0.6) * 0.18;
+        } else if (role === 'tendril') {
+          part.rotation.z = (part.userData.baseRotZ ?? 0) + Math.sin(bt * 1.9 + i) * 0.16;
+          part.rotation.x = (part.userData.baseRotX ?? 0) + Math.cos(bt * 1.5 + i) * 0.12;
+        } else if (role === 'frond') {
+          part.rotation.z = (part.userData.baseRotZ ?? 0) + Math.sin(bt * 1.2 + i) * 0.1;
+        } else if (role === 'core' || role === 'eye' || role === 'sac' || role === 'seam') {
+          const pulse = 1 + Math.sin(bt * (role === 'core' ? 5 : 3.2) + i) * 0.09;
+          part.scale.setScalar(pulse);
+          if (role === 'eye') part.scale.set(1.45 * pulse, 0.72 * pulse, 0.5 * pulse);
+        } else if (role === 'piston') {
+          part.position.y = 1.3 + Math.sin(bt * 3.5 + i) * 0.14;
+        } else if (role === 'chimney') {
+          part.position.y = 2.92 + Math.sin(bt * 2.2 + i) * 0.04;
+        } else if (role === 'fist') {
+          part.rotation.x = Math.sin(bt * 1.25 + i * Math.PI) * 0.12;
+        }
+      }
+    }
 
     const horiz = Math.hypot(mob.vel.x, mob.vel.z);
     mob.walkPhase += horiz * dt * 3.2;

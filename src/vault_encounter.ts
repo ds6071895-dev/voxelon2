@@ -8,7 +8,9 @@ import type { VaultBossKind, VaultFamily, VaultTier } from './vaults';
 
 export const ENCOUNTER_HZ = 20;
 export const ENCOUNTER_SNAPSHOT_HZ = 10;
-export const ENCOUNTER_INTRO_SECONDS = 4;
+export const ENCOUNTER_INTRO_SECONDS = 11.5;
+export const ENCOUNTER_PHASE_TRANSITION_SECONDS = 3.4;
+export const ENCOUNTER_VICTORY_CINEMATIC_SECONDS = 7.2;
 export const ENCOUNTER_RESET_GRACE_SECONDS = 15;
 export const ENCOUNTER_ENRAGE_SECONDS = 360;
 export const MAX_ENCOUNTER_PARTICIPANTS = 6;
@@ -113,6 +115,9 @@ export interface BossDefinition {
   family: VaultFamily;
   name: string;
   title: string;
+  introLine: string;
+  victoryLine: string;
+  phaseTitles: readonly [string, string, string];
   hpModifier: number;
   color: string;
   phases: readonly [
@@ -150,6 +155,9 @@ export const BOSS_DEFINITIONS: Record<VaultBossKind, BossDefinition> = {
   bone_warden: {
     kind: 'bone_warden', family: 'crypt', name: 'Bone Warden',
     title: 'Keeper of the Restless', hpModifier: 0.9, color: '#aa72ff',
+    introLine: 'The seals crack. Every grave answers.',
+    victoryLine: 'The dead fall silent at last.',
+    phaseTitles: ['The Sealed Tomb', 'The Graves Open', 'Last Rites'],
     criticalObject: 'sarcophagus', criticalCount: 4, poiseObjects: 2,
     phases: [
       [
@@ -174,6 +182,9 @@ export const BOSS_DEFINITIONS: Record<VaultBossKind, BossDefinition> = {
   mire_queen: {
     kind: 'mire_queen', family: 'mire', name: 'Mire Queen',
     title: 'Mother Beneath the Reeds', hpModifier: 1, color: '#42e2bd',
+    introLine: 'Something ancient stirs below the black water.',
+    victoryLine: 'The brood sinks back into the mire.',
+    phaseTitles: ['Venom Crown', 'The Brood Awakens', 'Drowning Court'],
     criticalObject: 'brood_pool', criticalCount: 3,
     phases: [
       [
@@ -200,6 +211,9 @@ export const BOSS_DEFINITIONS: Record<VaultBossKind, BossDefinition> = {
   ember_colossus: {
     kind: 'ember_colossus', family: 'ember', name: 'Ember Colossus',
     title: 'The Furnace Unbound', hpModifier: 1.2, color: '#ff6b32',
+    introLine: 'The forge has found a heartbeat.',
+    victoryLine: 'The furnace gutters into ash.',
+    phaseTitles: ['Cold Iron', 'Furnace Heart', 'Worldfire'],
     criticalObject: 'brazier', criticalCount: 4,
     phases: [
       [
@@ -224,6 +238,9 @@ export const BOSS_DEFINITIONS: Record<VaultBossKind, BossDefinition> = {
   crystal_seer: {
     kind: 'crystal_seer', family: 'crystal', name: 'Crystal Seer',
     title: 'Eye Beyond the Prism', hpModifier: 0.95, color: '#65b9ff',
+    introLine: 'It has already seen how you die.',
+    victoryLine: 'A thousand doomed futures shatter.',
+    phaseTitles: ['Foreseen', 'Hall of Mirrors', 'Final Prophecy'],
     criticalObject: 'prism', criticalCount: 3,
     phases: [
       [
@@ -250,6 +267,9 @@ export const BOSS_DEFINITIONS: Record<VaultBossKind, BossDefinition> = {
   gilded_artificer: {
     kind: 'gilded_artificer', family: 'gilded', name: 'Gilded Artificer',
     title: 'Architect of Avarice', hpModifier: 1.05, color: '#f1bd42',
+    introLine: 'The vault itself takes up arms.',
+    victoryLine: 'The golden engine grinds to a halt.',
+    phaseTitles: ['Calculated Defense', 'War Machine', 'Total Lockdown'],
     criticalObject: 'turret', criticalCount: 2,
     phases: [
       [
@@ -328,6 +348,8 @@ export interface AttackResult {
 export interface EncounterSnapshot {
   encounterId: string;
   tick: number;
+  /** Encounter clock used by renderers to animate telegraph countdowns. */
+  time: number;
   status: EncounterStatus;
   family: VaultFamily;
   kind: VaultBossKind;
@@ -490,6 +512,9 @@ export class VaultEncounter {
       else if (this.now >= this.resetAt) { this.reset(); return; }
     }
     if (this.status !== 'active') return;
+    // Phase cinematics are authoritative safe windows: no boss pattern, summon
+    // movement or hazard resolution can run while player control is suppressed.
+    if (this.now < this.phaseInvulnerableUntil) return;
 
     const elapsed = this.now - this.startedAt;
     if (!this.enrage && elapsed >= ENCOUNTER_ENRAGE_SECONDS) {
@@ -657,7 +682,8 @@ export class VaultEncounter {
 
   /** True once per participant/hazard and only during its execution window. */
   hitByHazard(hazardId: number, participant: EncounterParticipant): number {
-    if (this.status !== 'active' || !participant.alive || !this.participants.has(participant.id)) return 0;
+    if (this.status !== 'active' || this.now < this.phaseInvulnerableUntil ||
+        !participant.alive || !this.participants.has(participant.id)) return 0;
     const h = this.hazards.find((x) => x.id === hazardId);
     if (!h || this.now < h.executeAt || this.now > h.expiresAt ||
         h.hitParticipants.includes(participant.id)) return 0;
@@ -748,8 +774,9 @@ export class VaultEncounter {
     this.phaseObjectsSpawned = false;
     this.cast = null;
     this.pendingMove = null;
-    this.phaseInvulnerableUntil = this.now + 1;
-    this.nextAttackAt = this.now + 1.2;
+    this.hazards.length = 0;
+    this.phaseInvulnerableUntil = this.now + ENCOUNTER_PHASE_TRANSITION_SECONDS;
+    this.nextAttackAt = this.phaseInvulnerableUntil + 0.2;
     this.emit('phase', this.now, [], `phase_${phase}`);
     if (phase === 2) {
       for (let i = 0; i < this.definition.criticalCount; i++) {
@@ -846,7 +873,7 @@ export class VaultEncounter {
 
   snapshot(): EncounterSnapshot {
     return {
-      encounterId: this.config.encounterId, tick: this.tickCount,
+      encounterId: this.config.encounterId, tick: this.tickCount, time: this.now,
       status: this.status, family: this.config.family, kind: this.config.kind,
       tier: this.config.tier, phase: this.phase, hp: this.hp, maxHp: this.maxHp,
       hpPercent: this.maxHp > 0 ? this.hp / this.maxHp : 0,
@@ -921,7 +948,7 @@ export function sanitizeEncounterSnapshot(raw: unknown): EncounterSnapshot | nul
       !Object.prototype.hasOwnProperty.call(BOSS_DEFINITIONS, o.kind ?? '') ||
       (o.tier !== 1 && o.tier !== 2 && o.tier !== 3) ||
       (o.phase !== 1 && o.phase !== 2 && o.phase !== 3)) return null;
-  const nums = [o.hp, o.maxHp, o.poise, o.maxPoise, o.exposedUntil, o.elapsed,
+  const nums = [o.time, o.hp, o.maxHp, o.poise, o.maxPoise, o.exposedUntil, o.elapsed,
     o.peakParticipants];
   if (!nums.every((n) => typeof n === 'number' && Number.isFinite(n))) return null;
   if (!o.boss || !validVec(o.boss.position) || !Array.isArray(o.actors) ||

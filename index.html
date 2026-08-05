@@ -6,13 +6,20 @@
   <title>VOXELON</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+    :root {
+      --safe-top: env(safe-area-inset-top, 0px);
+      --safe-right: env(safe-area-inset-right, 0px);
+      --safe-bottom: env(safe-area-inset-bottom, 0px);
+      --safe-left: env(safe-area-inset-left, 0px);
+      --hotbar-slot: clamp(32px, 10.2vw, 48px);
+    }
+    html, body { width: 100%; height: 100%; min-height: 100dvh; overflow: hidden; background: #000; }
     /* Touch devices: no pinch-zoom/scroll gestures, no long-press callouts or
        accidental text selection (inputs still type fine). */
     html, body { touch-action: none; -webkit-user-select: none; user-select: none;
                  -webkit-touch-callout: none; }
     #auth input { -webkit-user-select: text; user-select: text; }
-    #app { width: 100%; height: 100%; position: relative; }
+    #app { width: 100%; height: 100%; min-height: 100dvh; position: relative; overflow: hidden; }
     canvas.game { display: block; image-rendering: pixelated; }
 
     .mc-font {
@@ -42,7 +49,7 @@
 
     /* Hotbar */
     #hotbar {
-      position: absolute; bottom: 8px; left: 50%;
+      position: absolute; bottom: calc(8px + var(--safe-bottom)); left: 50%;
       transform: translateX(-50%);
       display: flex;
       background: rgba(0,0,0,0.55);
@@ -52,7 +59,7 @@
       pointer-events: none;
     }
     .slot {
-      width: 48px; height: 48px;
+      width: var(--hotbar-slot); height: var(--hotbar-slot);
       border: 2px solid #8b8b8b;
       border-right-color: #555; border-bottom-color: #555;
       display: flex; align-items: center; justify-content: center;
@@ -64,7 +71,7 @@
       outline: 2px solid #000;
       z-index: 2;
     }
-    .slot canvas { width: 36px; height: 36px; image-rendering: pixelated; }
+    .slot canvas { width: calc(var(--hotbar-slot) * .75); height: calc(var(--hotbar-slot) * .75); image-rendering: pixelated; }
     .slot .count {
       position: absolute; right: 2px; bottom: 0;
       font-size: 14px; pointer-events: none; z-index: 3;
@@ -177,9 +184,10 @@
 
     /* Survival HUD */
     #status {
-      position: absolute; bottom: 62px; left: 50%;
+      position: absolute; bottom: calc(var(--hotbar-slot) + 14px + var(--safe-bottom)); left: 50%;
       transform: translateX(-50%);
-      width: 444px; z-index: 10; pointer-events: none;
+      width: min(444px, calc(100vw - var(--safe-left) - var(--safe-right) - 16px)); z-index: 10; pointer-events: none;
+      transform-origin: bottom center;
     }
     #status canvas { image-rendering: pixelated; }
     #hearts { position: absolute; left: 0; bottom: 0; }
@@ -187,7 +195,7 @@
     #bubbles { position: absolute; right: 0; bottom: 22px; }
     #armor { position: absolute; left: 0; bottom: 22px; }
     #ammo {
-      position: absolute; bottom: 96px; left: 50%; transform: translateX(-50%);
+      position: absolute; bottom: calc(var(--hotbar-slot) + 48px + var(--safe-bottom)); left: 50%; transform: translateX(-50%);
       z-index: 10; pointer-events: none; font-size: 18px; display: none;
       text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6); color: #fff;
     }
@@ -230,7 +238,23 @@
     }
     body.reduced-motion .vault-cinematic { transition: none !important; }
     body.high-contrast-telegraphs .vault-boss-hud { filter: contrast(1.35); }
-    body.vault-cinematic-active #crosshair { visibility: hidden; }
+    body:not(.in-game) .vault-boss-hud { display: none !important; }
+    body.vault-cinematic-active { cursor: none; }
+    body.vault-cinematic-active #app > *:not(canvas.game):not(.vault-cinematic) {
+      visibility: hidden !important; opacity: 0 !important; pointer-events: none !important;
+    }
+    body.vault-cinematic-active #app > .vault-cinematic {
+      visibility: visible !important; opacity: 1;
+    }
+    body.vault-cinematic-active canvas.game { visibility: visible !important; }
+    .vault-cinematic { contain: layout paint; }
+    .vault-cinematic::before, .vault-cinematic::after {
+      content: ''; position: absolute; left: 0; right: 0; height: 1px; opacity: .8;
+      background: linear-gradient(90deg, transparent, currentColor, transparent);
+      box-shadow: 0 0 22px currentColor;
+    }
+    .vault-cinematic::before { top: 12vh; }
+    .vault-cinematic::after { bottom: 12vh; }
 
     /* Debug overlay (F3) */
     #debug {
@@ -378,6 +402,10 @@
     }
     #menu-btns .mc-btn:not(#play-btn) { min-width: 260px; font-size: 15px; padding: 9px 28px; }
     @media (max-width: 640px), (max-height: 720px) {
+      :root { --hotbar-slot: clamp(30px, 10.4vw, 40px); }
+      #status { transform: translateX(-50%) scale(.84); }
+      #ammo { font-size: 14px; }
+      .vault-boss-hud > div:nth-child(3) { gap: 4px !important; }
       #overlay { gap: 8px; }
       .title-lockup { padding: 5px 20px 8px; }
       .title-kicker, .season-chip { display: none; }

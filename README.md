@@ -309,22 +309,25 @@ XP leveling) and **guns** (pistol / rifle / rocket launcher with magazines + R
 reload, sub-stepped client projectiles, local mob hits, and server-validated
 range + facing PvP).
 
-The latest revision (Beta 1.7) adds **DUNGEONS** (Milestone D): ~116 seeded
-underground **VAULTS** (12–20 in the Heartland, 100+ across the Wilds), each a
-ruined stone arch over a walk-down staircase into 4–8 carved rooms of
+The dungeon revision adds seeded underground **VAULTS** across the Heartland
+and Wilds, each a ruined stone arch over a walk-down staircase into 8–16 carved rooms of
 **Vault Brick** (iron-pick-tier hard — fight through the door, not the wall):
 an entrance hall, side rooms with **guard spawn anchors** (zombies, spitters
 and skitters that keep a room populated until you CLEAR it — the anchor then
 sleeps for 30 minutes; Tier III vaults field armored variants), and a boss
-room where the **VAULT BRUTE** waits — a huge, slow, lunging zombie whose HP
-lives on the SERVER, so everyone's hits count. Vault tier (I–III) grows with
+room containing one of five family bosses: the **Bone Warden**, **Mire Queen**,
+**Ember Colossus**, **Crystal Seer**, or **Gilded Artificer**. Every boss has
+three named phases, an encounter health/poise bar, intro/phase/victory
+cinematics, family music, readable ground telegraphs, breakable wards, and
+themed summoned mobs. Boss HP and encounter actors live on the SERVER, so
+everyone's hits count. Vault tier (I–III) grows with
 distance from the origin, and the boss room holds a glowing **Vault Chest**
-with **per-player loot**: after the Brute falls (a 10-minute window), every
+with **per-player loot**: after the boss falls (a 10-minute window), every
 account gets exactly ONE roll per vault (persisted in the world save — no husk
 dungeons, no double-dipping), and Tier III GUARANTEES a Heart. Entering a
-vault plays a low synth sting, flashes a "☠ VAULT — TIER II" banner and dims
-the minimap; clearing one is a fanfare + killfeed fame, and discovered vaults
-appear on the world map with a "found X / 116" collection counter. Everything
+vault plays a low synth sting and flashes a "☠ VAULT — TIER II" banner;
+clearing one is a fanfare + killfeed fame, and discovered vaults
+appear on the world map with a collection counter. Everything
 is deterministic from the shared seed and runs identically offline
 (localStorage mirrors the boss clock + your loot ledger).
 

@@ -145,6 +145,17 @@ export const enum Block {
   EmberBrazier = 190,
   PrismLamp = 191,
   GildedLamp = 192,
+  // Bright-vault architecture set. Appended for save compatibility.
+  LuminousLimestone = 203,
+  PearlTile = 204,
+  RuneGlass = 205,
+  IvoryColumn = 206,
+  SpectralMarble = 207,
+  JadeMosaic = 208,
+  FurnaceCeramic = 209,
+  OpalBrick = 210,
+  ClockworkGrate = 211,
+  VaultMosaic = 212,
 }
 
 export const enum Tile {
@@ -396,6 +407,16 @@ export const enum Tile {
   EmberCore = 219,
   SeerPrism = 220,
   ArtificerGear = 221,
+  LuminousLimestone = 222,
+  PearlTile = 223,
+  RuneGlass = 224,
+  IvoryColumn = 225,
+  SpectralMarble = 226,
+  JadeMosaic = 227,
+  FurnaceCeramic = 228,
+  OpalBrick = 229,
+  ClockworkGrate = 230,
+  VaultMosaic = 231,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel' | 'sword';
@@ -810,6 +831,28 @@ export const BLOCKS: Record<number, BlockInfo> = {
     name: 'Gilded Lamp', hardness: 1.5, emission: 14, top: Tile.GildedLamp,
     opaque: false, occludes: false,
   }),
+  [Block.LuminousLimestone]: def({
+    name: 'Luminous Limestone', hardness: 18, emission: 3, top: Tile.LuminousLimestone,
+  }),
+  [Block.PearlTile]: def({ name: 'Pearl Tile', hardness: 18, emission: 2, top: Tile.PearlTile }),
+  [Block.RuneGlass]: def({
+    name: 'Rune Glass', hardness: 12, emission: 8, top: Tile.RuneGlass,
+    opaque: false, occludes: false,
+  }),
+  [Block.IvoryColumn]: def({ name: 'Ivory Column', hardness: 20, top: Tile.IvoryColumn }),
+  [Block.SpectralMarble]: def({
+    name: 'Spectral Marble', hardness: 18, emission: 4, top: Tile.SpectralMarble,
+  }),
+  [Block.JadeMosaic]: def({ name: 'Jade Mosaic', hardness: 17, emission: 3, top: Tile.JadeMosaic }),
+  [Block.FurnaceCeramic]: def({
+    name: 'Furnace Ceramic', hardness: 20, emission: 3, top: Tile.FurnaceCeramic,
+  }),
+  [Block.OpalBrick]: def({ name: 'Opal Brick', hardness: 18, emission: 5, top: Tile.OpalBrick }),
+  [Block.ClockworkGrate]: def({
+    name: 'Clockwork Grate', hardness: 20, emission: 2, top: Tile.ClockworkGrate,
+    opaque: false,
+  }),
+  [Block.VaultMosaic]: def({ name: 'Vault Mosaic', hardness: 18, emission: 2, top: Tile.VaultMosaic }),
 
   // --- Traps ---
   // Spike Trap: a low slab of iron spikes. Anyone STANDING on it takes steady
@@ -919,6 +962,10 @@ const PICKAXE_TIERS: [Block, number][] = [
   [Block.Core, 1], // the claim Core is pickaxe-mineable (owner-only, server-gated)
   [Block.VaultBrick, 2], [Block.VaultChest, 2], // dungeon walls need an iron pick
   [Block.CarvedVaultBrick, 2], [Block.MossyVaultBrick, 2],
+  [Block.LuminousLimestone, 2], [Block.PearlTile, 2], [Block.RuneGlass, 2],
+  [Block.IvoryColumn, 2], [Block.SpectralMarble, 2], [Block.JadeMosaic, 2],
+  [Block.FurnaceCeramic, 2], [Block.OpalBrick, 2], [Block.ClockworkGrate, 2],
+  [Block.VaultMosaic, 2],
   [Block.EmberBrick, 2], [Block.PrismBrick, 2], [Block.GildedVaultBrick, 2],
   [Block.SoulLantern, 1], [Block.EmberBrazier, 1],
   [Block.PrismLamp, 1], [Block.GildedLamp, 1],
@@ -953,7 +1000,12 @@ export function isSolid(id: number): boolean {
 export function isVaultMasonry(id: number): boolean {
   return id === Block.VaultBrick || id === Block.CarvedVaultBrick ||
     id === Block.MossyVaultBrick || id === Block.EmberBrick ||
-    id === Block.PrismBrick || id === Block.GildedVaultBrick;
+    id === Block.PrismBrick || id === Block.GildedVaultBrick ||
+    id === Block.LuminousLimestone || id === Block.PearlTile ||
+    id === Block.RuneGlass || id === Block.IvoryColumn ||
+    id === Block.SpectralMarble || id === Block.JadeMosaic ||
+    id === Block.FurnaceCeramic || id === Block.OpalBrick ||
+    id === Block.ClockworkGrate || id === Block.VaultMosaic;
 }
 export function isOpaque(id: number): boolean {
   return id !== Block.Air && (BLOCKS[id]?.opaque ?? false);
