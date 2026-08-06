@@ -105,6 +105,10 @@ interface ServerPlayer extends PlayerInfo {
    *  bare hand) and worn armor item ids [helmet, chest, legs, boots]. */
   held: number;
   armor: number[];
+  /** Current crouch state, forwarded to other clients for the avatar pose. */
+  sneaking: boolean;
+  /** Latest client swing sequence, forwarded for third-person attack animation. */
+  swing: number;
   /** Bloodlust (anti-stalemate): when the last PvP hit landed on this player,
    *  and when the current continuous fight began. A fight lapses once no PvP
    *  hit lands for COMBAT_TAG seconds. */
@@ -303,7 +307,7 @@ export class GameServer {
       totems: GameServer.sanitizeTotems(saved?.totems),
       totemCooldownUntil: 0,
       armorPoints: 0,
-      held: 0, armor: [0, 0, 0, 0],
+      held: 0, armor: [0, 0, 0, 0], sneaking: false, swing: 0,
       lastPvpTime: -Infinity, pvpSince: 0, bloodlustWarned: false,
       switchesUsed: Number.isFinite(account?.switchesUsed) ? Math.max(0, Math.floor(account!.switchesUsed!)) : 0,
       switchSeason: Number.isFinite(account?.switchSeason) ? Math.floor(account!.switchSeason!) : 0,
@@ -384,12 +388,16 @@ export class GameServer {
           p.yaw = msg.yaw; p.pitch = msg.pitch;
           p.gliding = msg.gliding === true;
           p.boating = msg.boating === true;
+          p.sneaking = msg.sneaking === true && !p.gliding && !p.boating;
           // Cosmetic equip state (fail-closed: junk ids render as bare).
           p.held = typeof msg.held === 'number' && ITEMS[msg.held] ? msg.held : 0;
           p.armor = Array.isArray(msg.armor)
             ? msg.armor.slice(0, 4).map((a) =>
                 typeof a === 'number' && ITEMS[a]?.armor ? a : 0)
             : [0, 0, 0, 0];
+          if (typeof msg.swing === 'number' && Number.isFinite(msg.swing)) {
+            p.swing = Math.floor(msg.swing) & 0xffff;
+          }
           // Walking a stolen flag onto your own pad scores the capture.
           return this.checkFlagCapture(p);
         }
@@ -2260,8 +2268,8 @@ export class GameServer {
     return [...this.players.values()].map((p) => ({
       id: p.id, x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
       health: p.health, dead: p.dead,
-      gliding: p.gliding, boating: p.boating,
-      held: p.held, armor: p.armor,
+      gliding: p.gliding, boating: p.boating, sneaking: p.sneaking,
+      held: p.held, armor: p.armor, swing: p.swing,
     }));
   }
 }
@@ -2272,8 +2280,8 @@ function toInfo(p: ServerPlayer): PlayerInfo {
     seasonsWon: p.seasonsWon, hearts: p.hearts, cosmetics: p.cosmetics,
     x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
     health: p.health, dead: p.dead,
-    gliding: p.gliding, boating: p.boating,
-    held: p.held, armor: p.armor,
+    gliding: p.gliding, boating: p.boating, sneaking: p.sneaking,
+    held: p.held, armor: p.armor, swing: p.swing,
   };
 }
 

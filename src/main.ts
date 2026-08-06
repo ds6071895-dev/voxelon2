@@ -40,7 +40,8 @@ import {
 } from './turrets';
 import { TurretModels } from './turretmodels';
 import {
-  RemotePlayers, buildAvatarBody, buildArmorOverlay, disposeAvatarBody, AvatarBody,
+  RemotePlayers, applyAvatarSneak, buildAvatarBody, buildArmorOverlay,
+  disposeAvatarBody, AvatarBody,
 } from './remoteplayers';
 import {
   CAPES, CAPE_COLORS, COSMETIC_RANGES, Cosmetics, EYE_COLORS, FACE_ACCESSORIES,
@@ -67,6 +68,7 @@ import {
   newGuideState, nextGuideStep, sanitizeGuide,
 } from './guide';
 import { isRune, runeOf, runeBonuses } from './runes';
+import { createFieldGuide } from './field_guide';
 import {
   MAX_HEARTS, START_HEARTS, WITHDRAW_FLOOR, canConsume, canWithdraw,
   clampHearts, formatRemaining, maxHealthFor,
@@ -162,6 +164,7 @@ const touch = isMobile ? new TouchControls(input, {
   onTpa: () => { input.tpaPressed = true; },
   onPause: () => {
     if (player.dead) return;
+    if (screen === 'guide') { fieldGuide.backToPause(); return; }
     if (screen === 'paused') { input.lock(); return; }        // resume
     if (invUI.open) { input.inventoryToggled = true; return; } // close menu first
     if (worldMap.open) { input.mapToggled = true; return; }
@@ -275,6 +278,8 @@ hud.cooldownOf = (id) => {
 const invUI = new InventoryUI(inventory, atlas.canvas);
 const itemEntities = new ItemEntities(scene, world, atlas);
 const held = new HeldItemView(camera, atlas);
+let heldSwingSeq = 0;
+held.onSwing = () => { heldSwingSeq = (heldSwingSeq + 1) & 0xffff; };
 
 const furnaces = new Furnaces(world);
 const survival = new Survival();
@@ -1000,7 +1005,7 @@ for (const el of [musicVolumeInput, effectsVolumeInput, cameraShakeInput,
   el.addEventListener('input', saveAccessUi);
 }
 saveAccessUi();
-type Screen = 'title' | 'playing' | 'paused';
+type Screen = 'title' | 'playing' | 'paused' | 'guide';
 let screen: Screen = 'title';
 
 function enterPlaying(): void {
@@ -1016,6 +1021,7 @@ function enterPause(): void {
   pauseEl.style.display = 'flex';
 }
 function enterTitle(): void {
+  if (fieldGuide?.open) fieldGuide.closeSilently();
   screen = 'title';
   document.body.classList.remove('in-game');
   overlay.classList.remove('hidden');
@@ -1026,6 +1032,24 @@ function enterTitle(): void {
   progressBtn.style.display = 'none';
   onVaultTransition(null);
 }
+
+
+const fieldGuide = createFieldGuide({
+  root: app,
+  multiplayerActive: () => net.connected,
+  onBackToPause: () => {
+    screen = 'paused';
+    pauseEl.style.display = 'flex';
+  },
+  onResume: () => input.lock(),
+});
+
+document.getElementById('pause-guide-btn')!.addEventListener('click', () => {
+  if (player.dead || screen !== 'paused') return;
+  screen = 'guide';
+  pauseEl.style.display = 'none';
+  fieldGuide.show();
+});
 
 // --- Login / register (mandatory accounts) ---------------------------------
 // Online: the server verifies against its account store (scrypt). Offline SP:
@@ -1039,6 +1063,8 @@ const authStatus = document.getElementById('auth-status')!;
 const playBtn = document.getElementById('play-btn')!;
 const controlsBtn = document.getElementById('controls-btn')!;
 const menuBtns = document.getElementById('menu-btns')!;
+const menuUser = document.getElementById('menu-user')!;
+const authModeLabel = document.getElementById('auth-mode-label')!;
 
 /** Non-cryptographic salted hash for OFFLINE local accounts (identity gate only;
  *  real security is the server's scrypt). FNV-1a over salt+password. */
@@ -1063,38 +1089,32 @@ function saveLocalAccounts(): void {
 let justRegistered = false;
 const factionReveal = (() => {
   const panel = document.createElement('div');
-  panel.style.cssText = 'position:absolute;inset:0;display:none;flex-direction:column;' +
-    'align-items:center;justify-content:center;gap:6px;text-align:center;' +
-    'background:rgba(6,8,14,0.88);z-index:30;backdrop-filter:blur(3px);';
-  const eyebrow = document.createElement('div');
-  eyebrow.className = 'mc-font';
-  eyebrow.textContent = '⚔ WELCOME TO THE WAR ⚔';
-  eyebrow.style.cssText = 'font-size:16px;letter-spacing:5px;color:#cdd8ea;';
-  const lead = document.createElement('div');
-  lead.className = 'mc-font';
-  lead.textContent = 'You fight for';
-  lead.style.cssText = 'font-size:20px;color:#9fb4cc;margin-top:14px;';
-  const name = document.createElement('h1');
-  name.className = 'mc-font';
-  name.style.cssText = 'font-size:60px;letter-spacing:8px;margin:2px 0 10px;' +
-    'text-shadow:0 3px 0 rgba(0,0,0,0.45),0 10px 30px rgba(0,0,0,0.75);';
-  const blurb = document.createElement('div');
-  blurb.className = 'mc-font';
-  blurb.innerHTML = 'Sides are assigned automatically to keep the war a fair <b>50 / 50</b>.' +
-    '<br/>Claim land, arm up and win the season for your faction!';
-  blurb.style.cssText = 'font-size:14px;line-height:22px;color:#cdd8ea;max-width:460px;';
-  const go = document.createElement('button');
-  go.className = 'mc-btn';
-  go.textContent = '⚔ Fight!';
-  go.style.cssText = 'margin-top:18px;';
+  panel.className = 'faction-reveal mc-font';
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-modal', 'true');
+  panel.setAttribute('aria-label', 'Faction assignment');
+  const card = document.createElement('div'); card.className = 'faction-card';
+  const eyebrow = document.createElement('div'); eyebrow.className = 'faction-eyebrow';
+  eyebrow.textContent = 'Balance protocol complete · Identity assigned';
+  const crest = document.createElement('div'); crest.className = 'faction-crest';
+  const crestMark = document.createElement('span'); crestMark.textContent = '⚔'; crest.appendChild(crestMark);
+  const lead = document.createElement('div'); lead.className = 'faction-lead'; lead.textContent = 'You fight for';
+  const name = document.createElement('h1'); name.className = 'faction-name';
+  const rule = document.createElement('div'); rule.className = 'faction-rule';
+  rule.innerHTML = 'Sides are assigned automatically to preserve a fair <strong>50 / 50 conflict</strong>.<br>' +
+    'Build leverage, defend your flag, and win the season with your faction.';
+  const go = document.createElement('button'); go.className = 'mc-btn faction-continue'; go.textContent = 'Accept assignment';
   go.addEventListener('click', () => { panel.style.display = 'none'; });
-  panel.append(eyebrow, lead, name, blurb, go);
+  card.append(eyebrow, crest, lead, name, rule, go);
+  panel.appendChild(card);
   app.appendChild(panel);
   return {
     show(faction: number): void {
+      const color = factionCss(faction);
       name.textContent = factionName(faction).toUpperCase();
-      name.style.color = factionCss(faction);
+      panel.style.setProperty('--faction-color', color);
       panel.style.display = 'flex';
+      go.focus();
     },
   };
 })();
@@ -1129,6 +1149,7 @@ function onAuthSuccess(username: string): void {
   held.setSkin(skinSeed(username), myCosmetics); // first-person hand matches avatar
   authEl.style.display = 'none';
   menuBtns.style.display = 'flex'; // Civilization / Character / Controls appear once logged in
+  menuUser.textContent = username;
   authErr.textContent = '';
   authStatus.textContent = '';
   clearElimination(); // you're in — no lockout panel hanging around
@@ -1266,7 +1287,8 @@ function setAuthMode(mode: 'register' | 'login'): void {
   authErr.textContent = '';
   authStatus.textContent = '';
   if (mode === 'register') {
-    submitBtn.textContent = 'Register';
+    submitBtn.textContent = 'Create account';
+    authModeLabel.textContent = 'Create your identity';
     authUser.readOnly = true;          // names are random-only on register
     rollBtn.style.display = '';
     authToggle.innerHTML = 'Already have an account? <a id="toggle-link">Log in</a>';
@@ -1274,7 +1296,8 @@ function setAuthMode(mode: 'register' | 'login'): void {
     // while in login mode (switching login→signup must not carry it over).
     rollUsername();
   } else {
-    submitBtn.textContent = 'Log In';
+    submitBtn.textContent = 'Log in';
+    authModeLabel.textContent = 'Return to the frontier';
     authUser.readOnly = false;         // type your existing name to log in
     authUser.value = lastUser;         // prefill the remembered account
     rollBtn.style.display = 'none';
@@ -1293,9 +1316,10 @@ function setAuthMode(mode: 'register' | 'login'): void {
 const elimPanel = document.createElement('div');
 elimPanel.className = 'mc-font';
 elimPanel.style.cssText =
-  'display:none;margin:14px auto 0;max-width:430px;padding:14px 18px;border-radius:10px;' +
-  'background:rgba(40,8,12,0.86);border:2px solid #ff5c5c;color:#ffd9d9;' +
-  'font-size:14px;text-align:center;line-height:1.5;';
+  'display:none;position:absolute;left:50%;bottom:54px;transform:translateX(-50%);z-index:8;' +
+  'width:min(430px,calc(100vw - 36px));padding:14px 18px;background:rgba(40,8,12,0.92);' +
+  'border:1px solid #ff6b62;color:#ffd9d9;font-size:12px;text-align:center;line-height:1.55;' +
+  'box-shadow:0 18px 45px rgba(0,0,0,.55);';
 overlay.appendChild(elimPanel);
 let elimUntilMs = 0;        // wall-clock ms when the lockout lifts (0 = none)
 let elimPermanent = false;
@@ -1383,7 +1407,7 @@ playBtn.addEventListener('click', () => {
   if (!worldReady) {
     playBtn.textContent = 'Preparing…';
     const wait = (): void => {
-      if (worldReady) { playBtn.textContent = 'Civilization'; beginPlay(); }
+      if (worldReady) { playBtn.textContent = 'Enter Civilization'; beginPlay(); }
       else setTimeout(wait, 100);
     };
     wait();
@@ -1392,8 +1416,8 @@ playBtn.addEventListener('click', () => {
   beginPlay();
 });
 
-// First drop-in shows a tiny tutorial (once, tracked in localStorage); after
-// that — or on Skip/Play! — we lock the pointer and enter the game.
+// First drop-in shows the guided briefing once (tracked in localStorage); after
+// that — or when the briefing is skipped/completed — enter the game directly.
 function beginPlay(): void {
   if (!tutorialSeen) { tutorial.show(); return; }
   input.lock();
@@ -1677,88 +1701,195 @@ characterBtn.addEventListener('click', () => {
   charUI.open();
 });
 
-// --- First-play tutorial: 3 tiny cards, shown ONCE on the first Play ----------
+// --- First-play onboarding: guided mission briefing, shown once ---------------
 let tutorialSeen = false;
 try { tutorialSeen = localStorage.getItem('voxelon.tutorialSeen') === '1'; } catch { /* ignore */ }
 
+type TutorialStep = {
+  chapter: string;
+  icon: string;
+  title: string;
+  summary: string;
+  tip: string;
+  accent: string;
+  items: { label: string; value: string }[];
+};
+
 const tutorial = (() => {
-  const steps: { title: string; lines: string[] }[] = isMobile ? [
-    { title: '⛏️ MOVE & BUILD', lines: [
-      'Left joystick to move · ⬆ to jump',
-      'Long-press mines blocks · Tap places & uses them',
-    ] },
-    { title: '🎒 CRAFT', lines: [
-      'Tap 🎒 for your inventory + crafting',
-      'Build a Crafting Table, open it, and hit 📖 Guide for every recipe',
-    ] },
-    { title: '⚔️ WAR', lines: [
-      "You're auto-assigned to a faction — fight for it!",
-      'When WAR starts the border closes in and everyone glows —',
-      'most kills wins · 🗺 = map · ⚑ = your progress',
-    ] },
+  const steps: TutorialStep[] = isMobile ? [
+    {
+      chapter: 'Orientation 01 · Movement', icon: '✦', title: 'Claim your first ground', accent: '#65dcff',
+      summary: 'Explore with the left joystick, look by dragging the world, and learn the rhythm of movement before night closes in.',
+      tip: 'Push the joystick beyond its rim to sprint. The jump control also deploys your glider while airborne.',
+      items: [
+        { label: 'Move', value: 'Use the left joystick · push farther to sprint' },
+        { label: 'Look', value: 'Drag anywhere on the right side of the screen' },
+        { label: 'Jump / glide', value: 'Hold the ⬆ control' },
+      ],
+    },
+    {
+      chapter: 'Orientation 02 · Survival', icon: '⛏', title: 'Turn the world into tools', accent: '#f7c95d',
+      summary: 'Mine your first tree, shape raw blocks into equipment, and build a shelter that can survive the frontier.',
+      tip: 'Your getting-started guide remains available in-game and tracks the path from bare hands to your first vault.',
+      items: [
+        { label: 'Break / attack', value: 'Long-press a block or target' },
+        { label: 'Place / use', value: 'Tap a block face or interactable object' },
+        { label: 'Inventory', value: 'Tap 🎒 to craft and manage items' },
+      ],
+    },
+    {
+      chapter: 'Orientation 03 · Civilization', icon: '◆', title: 'Build power, not just shelter', accent: '#a98cff',
+      summary: 'Automate resources, customize your character, unlock progression branches, and turn a camp into a functioning civilization.',
+      tip: 'Open the recipe guide from crafting screens whenever you need a complete production path.',
+      items: [
+        { label: 'World map', value: 'Tap 🗺 to inspect territory and travel points' },
+        { label: 'Progress', value: 'Tap ⚑ to spend upgrades and view faction growth' },
+        { label: 'Machines', value: 'Build autominers, derricks, defenses, and transport' },
+      ],
+    },
+    {
+      chapter: 'Orientation 04 · War', icon: '⚔', title: 'Every heart changes the war', accent: '#ff6b52',
+      summary: 'You are assigned to a balanced faction. Fight for territory, protect your flag, and remember that defeat can cost more than gear.',
+      tip: 'During war the border contracts and every player glows. Stay with your faction and watch the map.',
+      items: [
+        { label: 'Lifesteal', value: 'Kills can transfer hearts between players' },
+        { label: 'Faction war', value: 'The side with the strongest season performance wins' },
+        { label: 'Your objective', value: 'Survive, build leverage, and fight as a team' },
+      ],
+    },
   ] : [
-    { title: '⛏️ MOVE & BUILD', lines: [
-      'WASD to move · Space to jump',
-      'Left-click mines blocks · Right-click places & uses them',
-    ] },
-    { title: '🎒 CRAFT', lines: [
-      'Press E for your inventory + crafting',
-      'Build a Crafting Table, open it, and hit 📖 Guide for every recipe',
-    ] },
-    { title: '⚔️ WAR', lines: [
-      "You're auto-assigned to a faction — fight for it!",
-      'When WAR starts the border closes in and everyone glows —',
-      'most kills wins · M = map · G = your progress',
-    ] },
+    {
+      chapter: 'Orientation 01 · Movement', icon: '✦', title: 'Claim your first ground', accent: '#65dcff',
+      summary: 'Learn the movement language of the frontier before you commit to a direction. The world is large, persistent, and dangerous after dark.',
+      tip: 'Double-tap W or press Q to sprint. Press V later to cycle first- and third-person views.',
+      items: [
+        { label: 'Move', value: 'W A S D · Space to jump · Shift to sneak' },
+        { label: 'Sprint', value: 'Q or double-tap W' },
+        { label: 'Look', value: 'Move the mouse after entering the world' },
+      ],
+    },
+    {
+      chapter: 'Orientation 02 · Survival', icon: '⛏', title: 'Turn the world into tools', accent: '#f7c95d',
+      summary: 'Mine your first tree, convert raw blocks into equipment, and build a shelter that can survive the frontier.',
+      tip: 'Press H at any time for the getting-started guide. It tracks the path from bare hands to your first vault.',
+      items: [
+        { label: 'Break / attack', value: 'Left click' },
+        { label: 'Place / use', value: 'Right click' },
+        { label: 'Inventory', value: 'Press E to craft and manage items' },
+      ],
+    },
+    {
+      chapter: 'Orientation 03 · Civilization', icon: '◆', title: 'Build power, not just shelter', accent: '#a98cff',
+      summary: 'Automate resources, unlock progression branches, and turn a temporary camp into a functioning civilization.',
+      tip: 'Crafting screens include a recipe guide. Use it to trace complete production chains for machines, weapons, and defenses.',
+      items: [
+        { label: 'World map', value: 'M · inspect territory, structures, and travel points' },
+        { label: 'Progress', value: 'G · spend upgrades and view faction growth' },
+        { label: 'Machines', value: 'Build autominers, derricks, defenses, and transport' },
+      ],
+    },
+    {
+      chapter: 'Orientation 04 · War', icon: '⚔', title: 'Every heart changes the war', accent: '#ff6b52',
+      summary: 'You are assigned to a balanced faction. Fight for territory, protect your flag, and remember that defeat can cost more than gear.',
+      tip: 'During war the border contracts and every player glows. Stay close to allies, watch the map, and choose fights carefully.',
+      items: [
+        { label: 'Lifesteal', value: 'Kills can transfer hearts between players' },
+        { label: 'Faction war', value: 'The side with the strongest season performance wins' },
+        { label: 'Your objective', value: 'Survive, build leverage, and fight as a team' },
+      ],
+    },
   ];
+
   let i = 0;
   const panel = document.createElement('div');
-  panel.style.cssText = 'position:absolute;inset:0;display:none;flex-direction:column;' +
-    'align-items:center;justify-content:center;gap:16px;background:rgba(8,8,14,0.92);z-index:26;';
-  const card = document.createElement('div');
-  card.className = 'mc-font';
-  card.style.cssText = 'background:#15182b;border:2px solid #3a4790;border-radius:10px;' +
-    'padding:22px 26px;max-width:440px;text-align:center;';
-  const title = document.createElement('div');
-  title.style.cssText = 'font-size:24px;letter-spacing:2px;color:#ffd84a;margin-bottom:12px;';
-  const body = document.createElement('div');
-  body.style.cssText = 'font-size:15px;color:#cfe0ff;line-height:1.7;text-shadow:none;';
-  const dots = document.createElement('div');
-  dots.style.cssText = 'font-size:14px;color:#7f8db0;margin-top:14px;letter-spacing:3px;';
-  card.append(title, body, dots);
-  const row = document.createElement('div');
-  row.style.cssText = 'display:flex;gap:12px;';
-  const skip = document.createElement('button');
-  skip.className = 'mc-btn'; skip.textContent = 'Skip';
-  skip.style.cssText = 'font-size:15px;padding:7px 20px;';
-  const next = document.createElement('button');
-  next.className = 'mc-btn';
-  next.style.cssText = 'font-size:15px;padding:7px 26px;';
-  row.append(skip, next);
-  panel.append(card, row);
+  panel.className = 'onboarding-shell mc-font';
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-modal', 'true');
+  panel.setAttribute('aria-label', 'First-play briefing');
+  panel.tabIndex = -1;
+
+  const frame = document.createElement('div');
+  frame.className = 'onboarding-frame';
+  const visual = document.createElement('section');
+  visual.className = 'onboarding-visual';
+  const visualTop = document.createElement('div');
+  const chapter = document.createElement('div'); chapter.className = 'brief-chapter';
+  const icon = document.createElement('div'); icon.className = 'brief-icon';
+  const number = document.createElement('div'); number.className = 'brief-number';
+  const title = document.createElement('h2'); title.className = 'brief-title';
+  const summary = document.createElement('p'); summary.className = 'brief-summary';
+  visualTop.append(chapter, icon, number, title, summary);
+  const tip = document.createElement('div'); tip.className = 'brief-tip';
+  visual.append(visualTop, tip);
+
+  const content = document.createElement('section');
+  content.className = 'onboarding-content';
+  const progress = document.createElement('div'); progress.className = 'brief-progress';
+  const track = document.createElement('div'); track.className = 'brief-progress-track';
+  const fill = document.createElement('div'); fill.className = 'brief-progress-fill';
+  track.appendChild(fill);
+  const count = document.createElement('div'); count.className = 'brief-progress-count';
+  progress.append(track, count);
+  const contentLabel = document.createElement('div'); contentLabel.className = 'brief-content-label';
+  contentLabel.textContent = 'Field essentials';
+  const items = document.createElement('div'); items.className = 'brief-items';
+  const actions = document.createElement('div'); actions.className = 'brief-actions';
+  const back = document.createElement('button'); back.className = 'mc-btn brief-back'; back.textContent = '← Back';
+  const skip = document.createElement('button'); skip.className = 'mc-btn brief-skip'; skip.textContent = 'Skip briefing';
+  const next = document.createElement('button'); next.className = 'mc-btn brief-next';
+  actions.append(back, skip, next);
+  content.append(progress, contentLabel, items, actions);
+  frame.append(visual, content);
+  panel.appendChild(frame);
   app.appendChild(panel);
 
   function render(): void {
-    const s = steps[i];
-    title.textContent = s.title;
-    body.innerHTML = s.lines.map((l) => `<div>${l}</div>`).join('');
-    dots.textContent = steps.map((_, k) => (k === i ? '●' : '○')).join(' ');
-    next.textContent = i === steps.length - 1 ? 'Play!' : 'Next ▶';
+    const step = steps[i];
+    panel.style.setProperty('--brief-accent', step.accent);
+    panel.dataset.step = String(i + 1);
+    chapter.textContent = step.chapter;
+    icon.textContent = step.icon;
+    number.textContent = 'BRIEF ' + String(i + 1).padStart(2, '0');
+    title.textContent = step.title;
+    summary.textContent = step.summary;
+    tip.textContent = step.tip;
+    count.textContent = String(i + 1).padStart(2, '0') + ' / ' + String(steps.length).padStart(2, '0');
+    fill.style.width = (((i + 1) / steps.length) * 100) + '%';
+    items.replaceChildren();
+    for (const detail of step.items) {
+      const row = document.createElement('div'); row.className = 'brief-item';
+      const label = document.createElement('div'); label.className = 'brief-item-label'; label.textContent = detail.label;
+      const value = document.createElement('div'); value.className = 'brief-item-value'; value.textContent = detail.value;
+      row.append(label, value); items.appendChild(row);
+    }
+    back.disabled = i === 0;
+    next.textContent = i === steps.length - 1 ? 'Enter the world →' : 'Continue →';
   }
+
   function finish(): void {
     panel.style.display = 'none';
     tutorialSeen = true;
     try { localStorage.setItem('voxelon.tutorialSeen', '1'); } catch { /* ignore */ }
     if (worldReady) input.lock();
   }
+
+  back.addEventListener('click', () => { if (i > 0) { i--; render(); } });
   skip.addEventListener('click', finish);
   next.addEventListener('click', () => {
     if (i >= steps.length - 1) finish();
     else { i++; render(); }
   });
+  panel.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowLeft' && i > 0) { e.preventDefault(); i--; render(); }
+    if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      if (i >= steps.length - 1) finish(); else { i++; render(); }
+    }
+  });
+
   return {
     get open(): boolean { return panel.style.display === 'flex'; },
-    show(): void { i = 0; render(); panel.style.display = 'flex'; },
+    show(): void { i = 0; render(); panel.style.display = 'flex'; panel.focus(); },
     finish,
   };
 })();
@@ -1795,6 +1926,7 @@ document.addEventListener('keydown', (e) => {
   else if (guideOpen) { hideGuide(); }
   else if (worldMap.open) { worldMap.hide(); input.lock(); }
   else if (invUI.open) { invUI.hide(); input.lock(); }
+  else if (fieldGuide.open) fieldGuide.backToPause();
   else if (screen === 'paused' && !player.dead) input.lock(); // Esc resumes from pause
 });
 
@@ -1828,6 +1960,7 @@ function checkDeath(): void {
   // We can die while the pause menu is up (the sim never pauses). Normalize to
   // 'playing' and drop the pause menu so the death screen is the only overlay
   // and the Esc handler has no 'paused' branch to re-lock the pointer over it.
+  if (fieldGuide.open) fieldGuide.closeSilently();
   screen = 'playing';
   pauseEl.style.display = 'none';
   deathEl.style.display = 'flex';
@@ -3830,6 +3963,7 @@ let selfArmorMeshes: THREE.Mesh[] = [];
 let selfHeldId = 0;
 let selfHeldMesh: THREE.Mesh | null = null;
 let selfWalkPhase = 0;
+let selfSneakT = 0;
 const selfItemMat = new THREE.MeshBasicMaterial({
   map: atlas.texture, alphaTest: 0.4, vertexColors: true, side: THREE.DoubleSide,
 });
@@ -3890,28 +4024,39 @@ function updateSelfAvatar(dt: number): void {
     selfArmorMeshes = buildArmorOverlay(b, armorIds);
   }
 
-  // Pose: the same glide/boat/stride poses the remote avatars use.
+  // Pose: the same glide/boat/stride/crouch poses the remote avatars use.
+  const sneakTarget = player.sneaking && !player.boating && !player.gliding ? 1 : 0;
+  selfSneakT += (sneakTarget - selfSneakT) * Math.min(1, 12 * dt);
   if (player.boating) {
+    applyAvatarSneak(b, 0);
     b.group.rotation.x = 0; b.head.rotation.x = 0;
     b.parts[0].rotation.x = 1.35; b.parts[1].rotation.x = 1.35;
     b.parts[2].rotation.x = 0.55; b.parts[3].rotation.x = 0.55;
+    b.parts[2].rotation.z = 0; b.parts[3].rotation.z = 0;
     if (b.cape) b.cape.rotation.x = -0.25;
   } else if (player.gliding) {
+    applyAvatarSneak(b, 0);
     b.group.rotation.x = 1.05;
     b.parts[0].rotation.x = 0.2; b.parts[1].rotation.x = 0.2;
     b.parts[2].rotation.x = 1.2; b.parts[3].rotation.x = 1.2;
+    b.parts[2].rotation.z = 0; b.parts[3].rotation.z = 0;
     b.head.rotation.x = -0.9;
     if (b.cape) b.cape.rotation.x = -1.1;
   } else {
+    applyAvatarSneak(b, selfSneakT);
     b.group.rotation.x = 0;
-    b.head.rotation.x = player.pitch; // your head actually looks where you look
+    b.head.rotation.x = player.pitch + selfSneakT * 0.12; // hunch while keeping look direction
     const hspeed = Math.hypot(player.vel.x, player.vel.z);
     selfWalkPhase += Math.min(hspeed, 7) * dt * 2.4;
     const amp = Math.sin(selfWalkPhase) * Math.min(1, hspeed / 4.5) * 0.8;
-    b.parts[0].rotation.x = amp;
-    b.parts[1].rotation.x = -amp;
-    b.parts[2].rotation.x = -amp;
-    b.parts[3].rotation.x = amp - (selfHeldId > 0 ? 0.45 : 0);
+    b.parts[0].rotation.x = amp + selfSneakT * 0.28;
+    b.parts[1].rotation.x = -amp + selfSneakT * 0.28;
+    const attackSwing = held.swingAmount();
+    b.parts[2].rotation.x = -amp - selfSneakT * 0.18;
+    b.parts[2].rotation.z = 0;
+    b.parts[3].rotation.x = amp - (selfHeldId > 0 ? 0.45 : 0) -
+      attackSwing * 1.45 - selfSneakT * 0.18;
+    b.parts[3].rotation.z = attackSwing * 0.12;
     if (b.cape) {
       const billow = Math.min(1, hspeed / 5) * 0.55;
       b.cape.rotation.x = -0.12 - billow - Math.sin(selfWalkPhase * 0.5) * 0.06;
@@ -5053,9 +5198,10 @@ function frame(): void {
     // Stream our transform even while paused/in a menu, so others still see
     // us (e.g. being knocked around). Throttled + connection-gated inside.
     net.sendXform(dt, player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch,
-      player.gliding, player.boating,
+      player.gliding, player.boating, player.sneaking,
       inventory.selectedStack?.id ?? 0,                 // held item on the avatar
-      inventory.wornArmor().map((s) => s?.id ?? 0));    // worn armor plating
+      inventory.wornArmor().map((s) => s?.id ?? 0),     // worn armor plating
+      heldSwingSeq);                                      // hand/tool hit animation
 
     // Simulation never pauses: mobs hunt you and survival ticks in menus too.
     survival.update(dt, player);
@@ -5176,10 +5322,12 @@ function frame(): void {
       Math.floor(player.pos.x), Math.floor(player.pos.y + 1), Math.floor(player.pos.z)
     )) audio.caveAmbience();
   }
-  // Held item shows only during active play.
-  held.setItem(controlling && view === View.First
-    ? inventory.selectedStack?.id ?? null : null);
-  held.update(dt, controlling && input.leftDown, sky.sunIntensity);
+  // The POV arm only renders in first person, but selected-item state remains
+  // current in third person so guns do not accidentally trigger punch swings.
+  const firstPersonActive = controlling && view === View.First;
+  held.setActive(firstPersonActive);
+  held.setItem(controlling ? inventory.selectedStack?.id ?? null : null);
+  held.update(dt, controlling && interaction.breakingActive, sky.sunIntensity);
 
   // Gameplay HUD chrome shows only during active play.
   const hudDisplay = controlling ? '' : 'none';

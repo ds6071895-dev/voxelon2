@@ -67,11 +67,15 @@ export interface PlayerSnapshot {
   dead: boolean;
   gliding?: boolean;
   boating?: boolean;
+  /** True while the player is holding sneak/crouch. */
+  sneaking?: boolean;
   /** Item id held in hand (0 = empty) — rendered on the avatar's arm. */
   held?: number;
   /** Worn armor item ids [helmet, chest, legs, boots] (0 = bare slot) —
    *  rendered as overlay plating on the avatar. */
   armor?: number[];
+  /** Monotonic 16-bit swing sequence; a change starts the arm-hit animation. */
+  swing?: number;
 }
 
 /** Gamemode, set by a server-console admin command. */
@@ -120,7 +124,7 @@ export type ClientMsg =
   // auth) — lets a returning browser skip the password.
   | { t: 'session'; username: string; token: string }
   | { t: 'xform'; x: number; y: number; z: number; yaw: number; pitch: number;
-      gliding?: boolean; boating?: boolean; held?: number; armor?: number[] }
+      gliding?: boolean; boating?: boolean; sneaking?: boolean; held?: number; armor?: number[]; swing?: number }
   | { t: 'edit'; x: number; y: number; z: number; block: number }
   // Pull a Lever: the server recomputes the flips (lever + linked traps within
   // LEVER_RADIUS, traps.ts) over its edit log and broadcasts them as edits —

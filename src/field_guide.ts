@@ -1,0 +1,320 @@
+import { Item, ITEMS } from './items';
+import { VAULT_BOSS_NAMES } from './vaults';
+
+export interface FieldGuideEntry {
+  id: string;
+  title: string;
+  keywords: string[];
+  html: string;
+}
+
+export interface FieldGuideSection {
+  id: string;
+  title: string;
+  icon: string;
+  summary: string;
+  entries: FieldGuideEntry[];
+}
+
+export interface FieldGuideController {
+  readonly open: boolean;
+  show(): void;
+  backToPause(): void;
+  closeForResume(): void;
+  closeSilently(): void;
+  destroy(): void;
+}
+
+export interface FieldGuideOptions {
+  root: HTMLElement;
+  multiplayerActive: () => boolean;
+  onBackToPause: () => void;
+  onResume: () => void;
+}
+
+const esc = (value: string): string => value.replace(/[&<>"']/g, (ch) => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+}[ch]!));
+
+const list = (items: string[]): string => `<ul>${items.map((item) => `<li>${item}</li>`).join('')}</ul>`;
+const steps = (items: string[]): string => `<ol class="field-guide-steps">${items.map((item) => `<li>${item}</li>`).join('')}</ol>`;
+const tip = (title: string, body: string): string => `<aside class="field-guide-callout tip"><strong>${title}</strong><p>${body}</p></aside>`;
+const warning = (title: string, body: string): string => `<aside class="field-guide-callout warning"><strong>${title}</strong><p>${body}</p></aside>`;
+const table = (headers: string[], rows: string[][]): string => `<div class="field-guide-table-wrap"><table><thead><tr>${headers.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+const entry = (id: string, title: string, keywords: string[], html: string): FieldGuideEntry => ({ id, title, keywords, html });
+
+function weaponRows(): string[][] {
+  const ids = [Item.Pistol, Item.Rifle, Item.Shotgun, Item.SMG, Item.Sniper,
+    Item.BurstRifle, Item.RocketLauncher, Item.Grenade, Item.OilBomb, Item.C4,
+    Item.DeployCover, Item.GrapplingHook, Item.SentryKit, Item.WarHorn];
+  return ids.map((id) => {
+    const def = ITEMS[id];
+    if (!def) return [String(id), 'Registry entry unavailable', '—', '—'];
+    if (def.gun) {
+      const rate = def.gun.cooldown > 0 ? `${(1 / def.gun.cooldown).toFixed(1)}/s` : '—';
+      return [esc(def.name), `${def.gun.damage} damage`, `${def.gun.range} blocks`, `${def.gun.mag} rounds · ${rate}`];
+    }
+    if (def.tool) return [esc(def.name), `${def.tool.damage} melee damage`, 'Close', `${def.tool.durability} durability`];
+    return [esc(def.name), 'Tactical gadget', 'Contextual', `Stack ${def.maxStack}`];
+  });
+}
+
+function bossName(index: number, fallback: string): string {
+  const values = Object.values(VAULT_BOSS_NAMES) as string[];
+  return values[index] ?? fallback;
+}
+
+export function fieldGuideSections(): FieldGuideSection[] {
+  const bosses = [
+    [bossName(0, 'Bone Warden'), 'Sarcophagi', 'Damage resistance, cleaves, and summons', 'Sustained rifle or SMG', 'Destroy sarcophagi during objective phases and clear adds before they overwhelm the arena.'],
+    [bossName(1, 'Mire Queen'), 'Brood pools', 'Poison rain and ranged summons', 'Mobile automatic weapon', 'Keep moving, destroy brood pools early, and prioritize spitters.'],
+    [bossName(2, 'Ember Colossus'), 'Braziers', 'Heavy area attacks and charges', 'Strong sustained ranged DPS', 'Break braziers and save burst damage for exposed windows.'],
+    [bossName(3, 'Crystal Seer'), 'Prisms', 'Extreme damage reduction and beams', 'Accurate ranged weapon', 'Destroy every prism, move laterally, and control mirror summons.'],
+    [bossName(4, 'Gilded Artificer'), 'Turrets', 'Healing machines, mines, and guards', 'High sustained DPS', 'Destroy both turrets quickly and avoid mine and crusher-wall lanes.'],
+  ];
+
+  return [
+    {
+      id: 'start', title: 'Start Here', icon: '◆', summary: 'Your first ten minutes and the safest route into the war.', entries: [
+        entry('first-ten', 'Your first ten minutes', ['beginner', 'wood', 'iron', 'starter', 'first vault'],
+          steps(['Gather wood and craft planks.', 'Build a workbench and basic tools.', 'Mine stone and coal; craft torches.', 'Find iron and upgrade tools and armor.', 'Carry bandages and obtain a ranged weapon.', 'Identify your faction base and flag.', 'Prepare for a Tier I vault.']) +
+          tip('Starter route', 'Gather → Craft → Gear Up → Find Your Faction → Prepare for a Tier I Vault.')),
+        entry('starter-checklist', 'Starter checklist', ['checklist', 'logs', 'torches', 'armor', 'bandages'],
+          list(['Collect logs and craft planks.', 'Craft a workbench and pickaxe.', 'Mine stone and coal; make torches.', 'Smelt iron and equip armor.', 'Carry a ranged weapon and bandages.', 'Locate a vault.']) +
+          warning('Avoid early losses', 'Do not enter a deep vault without healing, carry every valuable resource into risky exploration, or leave your faction flag undefended.')),
+      ],
+    },
+    {
+      id: 'objective', title: 'Main Objective', icon: '◎', summary: 'How survival, progression, factions, vaults, and warfare connect.', entries: [
+        entry('game-loop', 'What am I trying to do?', ['objective', 'gameplay loop', 'season', 'faction'],
+          `<p>Survive, improve your equipment, strengthen your faction, defend your flag, raid enemy infrastructure, clear vaults, defeat bosses, and turn rare loot into lasting strategic power.</p>` +
+          tip('Core loop', 'Gather → Build → Gear Up → Explore → Clear Vaults → Defend Flag → Raid Enemies → Strengthen Faction.')),
+      ],
+    },
+    {
+      id: 'controls', title: 'Controls', icon: '⌨', summary: 'Desktop and mobile controls, plus contextual behavior.', entries: [
+        entry('desktop-controls', 'Desktop controls', ['keyboard', 'mouse', 'wasd', 'reload', 'inventory'],
+          table(['Action', 'Binding'], [['Move', 'W A S D'], ['Jump / glide', 'Space'], ['Sprint', 'Q or double-tap W'], ['Sneak', 'Shift'], ['Attack / mine', 'Left click'], ['Place / use / aim', 'Right click'], ['Inventory', 'E'], ['Map', 'M'], ['Progress', 'G'], ['Reload', 'R'], ['Pause', 'Esc']]) +
+          tip('Context matters', 'Left click may hit an enemy before the block behind it. Right click changes behavior based on the held item.')),
+        entry('mobile-controls', 'Mobile controls', ['touch', 'joystick', 'phone', 'tablet'],
+          table(['Action', 'Control'], [['Move / sprint', 'Left joystick; push beyond rim to sprint'], ['Look', 'Drag the right side'], ['Jump / glide', 'Up control'], ['Attack / mine', 'Long-press'], ['Place / use', 'Tap'], ['Inventory', 'Backpack button'], ['Map', 'Map button'], ['Pause / back', 'Pause button']]))
+      ],
+    },
+    {
+      id: 'survival', title: 'Survival & Progression', icon: '⛏', summary: 'Resources, tools, armor, runes, and healing.', entries: [
+        entry('resource-progression', 'Resource and armor progression', ['wood', 'stone', 'iron', 'diamond', 'titanium', 'cobalt', 'armor'],
+          table(['Stage', 'Practical role'], [['Wood', 'Emergency tools and starter protection'], ['Stone', 'Early mining and Tier I preparation'], ['Iron', 'Reliable Tier I and entry Tier II gear'], ['Diamond', 'Strong Tier II and possible Tier III gear'], ['Titanium', 'Safest high-tier combat armor'], ['Cobalt / oil / crystal', 'Advanced machines, warfare, and specialist crafting']]) +
+          tip('Armor systems', 'Armor has durability, gains levels through use, accepts runes, and is subject to a damage-reduction cap.')),
+        entry('healing', 'Healing in combat', ['bandage', 'medkit', 'regen', 'heal'],
+          `<p>Bandages are efficient for routine recovery. Medkits are your emergency sustain during vault bosses and raids. Heal during safe movement windows rather than while standing in a telegraphed attack.</p>` +
+          warning('High-tier vaults', 'Tier II and III fights last longer and punish mistakes harder. Carry multiple healing items and keep inventory space free.')),
+      ],
+    },
+    {
+      id: 'factions', title: 'Factions & Flags', icon: '⚑', summary: 'The central strategic objective of the season.', entries: [
+        entry('flag-defense', 'Protecting the faction flag', ['flag', 'defense', 'fortress', 'faction'],
+          steps(['Create an outer warning zone with lighting and clear sightlines.', 'Build a delay zone with wire, tar, bear traps, barricades, and narrow approaches.', 'Layer a damage zone with spikes, mines, turrets, wall traps, and fall traps.', 'Reinforce the inner flag room with controlled entrances, defender cover, and an escape route.']) +
+          warning('Do not trap your own team', 'Keep friendly routes open, split supplies across multiple caches, and repair walls and traps after every attack.')),
+        entry('flag-raids', 'Attacking enemy flags', ['raid', 'enemy flag', 'scout', 'war'],
+          list(['Scout before committing.', 'Identify traps and alternate approaches.', 'Bring healing, ammunition, and deployable cover.', 'Suppress defenders with ranged fire.', 'Plan transport and escape before taking the flag.'])),
+      ],
+    },
+    {
+      id: 'defenses', title: 'Building & Defenses', icon: '▦', summary: 'Layered bases, traps, and defensive infrastructure.', entries: [
+        entry('building-principles', 'Base design principles', ['building', 'walls', 'storage', 'outpost'],
+          list(['Use layered walls rather than one monolithic wall.', 'Keep storage and industry away from the flag room.', 'Create controlled firing angles and more than one exit.', 'Use height for observation and protect machines.', 'Maintain safe respawn, recovery, and supply routes.'])),
+        entry('traps', 'Trap combinations', ['bear trap', 'tar', 'barbed wire', 'spike', 'landmine', 'lever'],
+          table(['Tool', 'Best use'], [['Bear trap', 'Hold attackers in chokepoints'], ['Tar', 'Slow targets in firing lanes'], ['Barbed wire', 'Shape perimeter movement'], ['Spike trap', 'Damage corridors and drop zones'], ['Landmine', 'Burst damage after commitment'], ['Barricade', 'Emergency cover and movement denial'], ['Floodlight', 'Reveal approaches and protect roads'], ['Lever traps', 'Trigger fall or wall traps at the right moment']]) +
+          tip('Combination', 'Scout enters → defender waits → lever activates → route closes or damage triggers.')),
+      ],
+    },
+    {
+      id: 'vaults', title: 'Vaults & Dungeons', icon: '◇', summary: 'Vault tiers, room types, preparation, and loot flow.', entries: [
+        entry('vault-tiers', 'Vault tiers', ['tier i', 'tier ii', 'tier iii', 'wilds', 'vault'],
+          table(['Tier', 'Location and expectation'], [['I', 'Closer to the core; introduction to vault combat and starter rare loot'], ['II', 'Farther into the Wilds; stronger enemies and sustained-damage checks'], ['III', 'Deep Wilds; highest health and damage, strongest rewards, teams recommended']]) +
+          tip('Vault flow', 'Explore rooms → reach boss arena → complete mechanics → defeat boss → loot the personal chest during its open window.')),
+        entry('vault-preparation', 'Vault preparation checklist', ['prepare', 'ammo', 'torches', 'respawn'],
+          list(['Repair armor.', 'Bring spare ammunition and healing.', 'Clear unnecessary inventory space.', 'Carry close- and long-range options.', 'Bring torches and set a nearby respawn point.', 'For Tier III, bring teammates and assign objective roles.'])),
+      ],
+    },
+    {
+      id: 'bosses', title: 'Bosses', icon: '☠', summary: 'Objective priorities and suggested gear for every vault boss.', entries: [
+        entry('boss-comparison', 'Boss comparison', ['boss', 'warden', 'queen', 'colossus', 'seer', 'artificer'],
+          table(['Boss', 'Priority target', 'Main danger', 'Weapon style'], bosses.map((b) => b.slice(0, 4))) +
+          bosses.map((b) => `<section class="field-guide-boss"><h3>${esc(b[0])}</h3><p><strong>Priority:</strong> ${b[1]}. ${b[4]}</p></section>`).join('')),
+        entry('boss-gear', 'Suggested gear by vault tier', ['recommended gear', 'ammo', 'armor', 'healing'],
+          table(['Tier', 'Armor', 'Weapon', 'Healing', 'Ammunition'], [['I', 'Stone minimum, iron preferred', 'Pistol, shotgun, or SMG', '3–5 bandages, 1 medkit', 'About 150–250 rounds'], ['II', 'Full iron minimum, diamond preferred', 'Rifle, SMG, or shotgun', '2–3 medkits', 'About 400–600 rounds'], ['III', 'Diamond minimum, titanium preferred', 'Rifle, SMG, Burst Rifle, rockets', '4–6 medkits', 'About 700–1,000 rounds']]) +
+          warning('Suggested, not required', 'These are preparation guidelines, not equipment locks. Player skill, group size, and boss familiarity matter.')),
+      ],
+    },
+    {
+      id: 'gear', title: 'Weapons & Gear', icon: '⌁', summary: 'Live registry-backed weapon and gadget reference.', entries: [
+        entry('weapon-reference', 'Weapon and gadget reference', ['weapon', 'gun', 'gadget', 'range', 'damage'],
+          table(['Equipment', 'Role / damage', 'Range', 'Live stat'], weaponRows()) +
+          tip('Source of truth', 'Names and numeric weapon statistics on this page are generated from the current item registry.')),
+      ],
+    },
+    {
+      id: 'hearts', title: 'Hearts & Elimination', icon: '♥', summary: 'Maximum health, PvP transfer, elimination, and revival.', entries: [
+        entry('heart-system', 'How Hearts work', ['heart', 'lifesteal', 'elimination', 'revival beacon'],
+          list(['Each Heart increases maximum health.', 'PvP can transfer Hearts between players.', 'Reaching zero Hearts causes elimination.', 'Revival rules and duration depend on faction flag control and beacon availability.', 'Heart withdrawals are restricted so players cannot bypass the survival floor.']) +
+          warning('Protect rare recovery items', 'Do not carry spare Hearts or revival items into unnecessary fights unless your team has a recovery plan.')),
+      ],
+    },
+    {
+      id: 'machines', title: 'Machines & Automation', icon: '⚙', summary: 'Production, ownership, fuel, ammunition, upgrades, and safety.', entries: [
+        entry('machine-workflow', 'Recommended machine workflow', ['autominer', 'oil derrick', 'turret', 'machine', 'automation'],
+          steps(['Secure the area.', 'Place and claim the machine.', 'Configure its filter or loadout.', 'Protect it with walls and lighting.', 'Check storage, fuel, and ammunition regularly.', 'Upgrade only after the site is defensible.']) +
+          tip('Separation', 'Do not cluster all machines, storage, and the faction flag into one easy raid target.')),
+      ],
+    },
+    {
+      id: 'travel', title: 'Travel & Exploration', icon: '➤', summary: 'Maps, compasses, waypoints, mobility, and long journeys.', entries: [
+        entry('travel-tools', 'Exploration toolkit', ['map', 'vault compass', 'waypoint', 'boat', 'glider', 'grappling hook'],
+          table(['Tool', 'Use'], [['World map', 'Read territory, structures, and travel routes'], ['Vault Compass', 'Reveal a vault of the matching tier'], ['Waypoint Totem', 'Mark a destination'], ['Respawn Beacon', 'Create a recovery point'], ['Boat / Glider', 'Cross water or descend quickly'], ['Grappling Hook / Jump Boost', 'Reach vertical or exposed terrain']]) +
+          warning('Long journeys', 'Carry healing, ammunition, food or recovery supplies, and leave valuables in a protected cache before entering the deep Wilds.')),
+      ],
+    },
+    {
+      id: 'teamplay', title: 'Multiplayer & Team Play', icon: '◈', summary: 'Roles, boss coordination, and flag-war discipline.', entries: [
+        entry('team-roles', 'Useful team roles', ['scout', 'builder', 'defender', 'healer', 'raid leader'],
+          list(['Scout and route finder', 'Builder and repair specialist', 'Flag defender', 'Miner and machine operator', 'Boss damage dealer', 'Objective clearer', 'Healing and revive carrier', 'Raid leader'])) ,
+        entry('group-tactics', 'Group tactics', ['team', 'boss group', 'rally point', 'revive'],
+          list(['Assign one player to boss pressure and one to critical objects.', 'Have another player clear summons and protect revives.', 'Rotate healing responsibility.', 'Do not stack during area attacks.', 'For raids, establish rally points and assign home defenders before departure.'])),
+      ],
+    },
+    {
+      id: 'quick', title: 'Quick Reference', icon: '?', summary: 'Fast answers for common high-risk situations.', entries: [
+        entry('quick-reference', 'Field checklist', ['quick reference', 'tips'],
+          table(['Situation', 'Immediate action'], [['Entering a vault', 'Repair armor, clear inventory space, bring healing and ammo'], ['Boss becomes resistant', 'Find and destroy the arena objective'], ['Flag alarm', 'Call location, close routes, protect supplies'], ['Raiding', 'Scout, bring cover, plan escape'], ['Machine site', 'Claim, configure, light, wall, and resupply'], ['Lost in Wilds', 'Use map/waypoint tools and establish a safe cache']]))
+      ],
+    },
+  ];
+}
+
+export function createFieldGuide(options: FieldGuideOptions): FieldGuideController {
+  const sections = fieldGuideSections();
+  const overlay = document.createElement('section');
+  overlay.id = 'game-guide';
+  overlay.className = 'field-guide';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-label', 'VOXELON Field Guide');
+  overlay.tabIndex = -1;
+  overlay.innerHTML = `
+    <div class="field-guide-shell">
+      <header class="field-guide-header">
+        <div><span class="field-guide-eyebrow">TACTICAL ARCHIVE</span><h1>VOXELON FIELD GUIDE</h1></div>
+        <label class="field-guide-search-label" for="guide-search"><span>Search handbook</span><input id="guide-search" type="search" placeholder="flag, titanium, Bone Warden…" autocomplete="off"></label>
+        <div class="field-guide-header-actions"><button id="guide-resume-btn" class="mc-btn">Resume Game</button><button id="guide-close-btn" class="mc-btn" aria-label="Back to pause menu">×</button></div>
+      </header>
+      <div id="guide-live-warning" class="field-guide-live-warning" hidden>Multiplayer continues while the guide is open. Find a safe location first.</div>
+      <div class="field-guide-body">
+        <button id="guide-mobile-sections" class="mc-btn field-guide-mobile-sections" aria-expanded="false">Sections</button>
+        <nav id="guide-nav" class="field-guide-nav" aria-label="Guide sections"></nav>
+        <main id="guide-content" class="field-guide-content" tabindex="0"></main>
+      </div>
+      <footer class="field-guide-footer"><span id="guide-current-section"></span><span>/ focuses search · Esc returns to pause</span><button id="guide-back-btn" class="mc-btn">Back to Pause Menu</button></footer>
+    </div>`;
+  options.root.appendChild(overlay);
+
+  const nav = overlay.querySelector('#guide-nav') as HTMLElement;
+  const content = overlay.querySelector('#guide-content') as HTMLElement;
+  const search = overlay.querySelector('#guide-search') as HTMLInputElement;
+  const liveWarning = overlay.querySelector('#guide-live-warning') as HTMLElement;
+  const current = overlay.querySelector('#guide-current-section') as HTMLElement;
+  const mobileSections = overlay.querySelector('#guide-mobile-sections') as HTMLButtonElement;
+  let sectionId = sections[0].id;
+  let entryId: string | null = sections[0].entries[0]?.id ?? null;
+  let active = false;
+  let previousFocus: HTMLElement | null = null;
+  const scroll = new Map<string, number>();
+
+  function matches(e: FieldGuideEntry, q: string): boolean {
+    const haystack = `${e.title} ${e.keywords.join(' ')} ${e.html.replace(/<[^>]+>/g, ' ')}`.toLowerCase();
+    return haystack.includes(q);
+  }
+
+  function render(): void {
+    const q = search.value.trim().toLowerCase();
+    nav.replaceChildren();
+    for (const section of sections) {
+      const count = q ? section.entries.filter((e) => matches(e, q)).length : section.entries.length;
+      if (q && count === 0) continue;
+      const button = document.createElement('button');
+      button.className = 'field-guide-nav-item';
+      button.dataset.active = String(section.id === sectionId);
+      button.innerHTML = `<span>${section.icon}</span><span>${esc(section.title)}</span>${q ? `<small>${count}</small>` : ''}`;
+      button.addEventListener('click', () => {
+        scroll.set(sectionId, content.scrollTop);
+        sectionId = section.id;
+        entryId = section.entries.find((e) => !q || matches(e, q))?.id ?? null;
+        render();
+        nav.classList.remove('mobile-open');
+        mobileSections.setAttribute('aria-expanded', 'false');
+      });
+      nav.appendChild(button);
+    }
+
+    const selected = sections.find((s) => s.id === sectionId) ?? sections[0];
+    const visible = selected.entries.filter((e) => !q || matches(e, q));
+    if (q && visible.length === 0) {
+      const first = sections.find((s) => s.entries.some((e) => matches(e, q)));
+      if (first) { sectionId = first.id; entryId = first.entries.find((e) => matches(e, q))?.id ?? null; render(); return; }
+    }
+    current.textContent = selected.title;
+    content.innerHTML = `<header class="field-guide-article-header"><span>${selected.icon}</span><div><h2>${esc(selected.title)}</h2><p>${esc(selected.summary)}</p></div></header>` +
+      (visible.length ? visible.map((e) => `<article id="guide-entry-${e.id}" class="field-guide-entry"><h3>${esc(e.title)}</h3>${e.html}</article>`).join('') :
+        `<div class="field-guide-empty"><h3>No matching articles</h3><p>Try a boss name, weapon, trap, resource, or vault tier.</p></div>`);
+    requestAnimationFrame(() => {
+      if (q && entryId) document.getElementById(`guide-entry-${entryId}`)?.scrollIntoView({ block: 'start' });
+      else content.scrollTop = scroll.get(sectionId) ?? 0;
+    });
+  }
+
+  function show(): void {
+    if (active) return;
+    active = true;
+    previousFocus = document.activeElement as HTMLElement | null;
+    overlay.classList.add('open');
+    liveWarning.hidden = !options.multiplayerActive();
+    render();
+    overlay.focus();
+  }
+
+  function hide(): void {
+    active = false;
+    overlay.classList.remove('open');
+    nav.classList.remove('mobile-open');
+    previousFocus?.focus?.();
+  }
+
+  function backToPause(): void { if (!active) return; hide(); options.onBackToPause(); }
+  function closeForResume(): void { if (!active) return; hide(); options.onResume(); }
+
+  search.addEventListener('input', render);
+  overlay.querySelector('#guide-back-btn')!.addEventListener('click', backToPause);
+  overlay.querySelector('#guide-close-btn')!.addEventListener('click', backToPause);
+  overlay.querySelector('#guide-resume-btn')!.addEventListener('click', closeForResume);
+  mobileSections.addEventListener('click', () => {
+    const open = !nav.classList.contains('mobile-open');
+    nav.classList.toggle('mobile-open', open);
+    mobileSections.setAttribute('aria-expanded', String(open));
+  });
+  overlay.addEventListener('pointerdown', (event) => event.stopPropagation());
+  overlay.addEventListener('click', (event) => event.stopPropagation());
+  overlay.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); backToPause(); return; }
+    if (event.key === '/' && document.activeElement !== search) { event.preventDefault(); search.focus(); return; }
+    if (event.key === 'Home' && document.activeElement === content) { event.preventDefault(); content.scrollTop = 0; }
+    if (event.key === 'Tab') {
+      const focusable = Array.from(overlay.querySelectorAll<HTMLElement>('button:not([disabled]), input, [tabindex="0"]')).filter((el) => el.offsetParent !== null);
+      if (!focusable.length) return;
+      const first = focusable[0]; const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+  });
+
+  return { get open() { return active; }, show, backToPause, closeForResume, closeSilently: hide, destroy: () => overlay.remove() };
+}

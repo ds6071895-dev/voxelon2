@@ -44,7 +44,7 @@ import { Mobs, MOB_DEFS } from '../src/mobs';
 import { Particles } from '../src/particles';
 import { raycastBlocks } from '../src/interact';
 import { Player } from '../src/player';
-import { buildAvatarBody, buildArmorOverlay } from '../src/remoteplayers';
+import { applyAvatarSneak, buildAvatarBody, buildArmorOverlay } from '../src/remoteplayers';
 import { daylight } from '../src/sky';
 import { Survival } from '../src/survival';
 import { GameServer, Outbound } from '../src/net/server_core';
@@ -4090,10 +4090,11 @@ let firstVault: VaultStamp | null = null;
   const s = new GameServer(1337, mulberry32(500));
   s.addPlayer(1, { username: 'Knight', faction: 0 });
   s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: 0, pitch: 0,
-    held: Item.Rifle, armor: [Item.IronHelmet, Item.DiamondChestplate, 0, Item.IronBoots] });
+    sneaking: true, swing: 7, held: Item.Rifle,
+    armor: [Item.IronHelmet, Item.DiamondChestplate, 0, Item.IronBoots] });
   const me = s.snapshot().find((p) => p.id === 1)!;
-  check('the snapshot carries the held item + worn armor ids',
-    me.held === Item.Rifle &&
+  check('the snapshot carries held, armor, crouch + swing state',
+    me.held === Item.Rifle && me.sneaking === true && me.swing === 7 &&
     JSON.stringify(me.armor) === JSON.stringify([Item.IronHelmet, Item.DiamondChestplate, 0, Item.IronBoots]));
   // Fail-closed: junk ids / non-armor in an armor slot render as bare.
   s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: 0, pitch: 0,
@@ -4104,17 +4105,21 @@ let firstVault: VaultStamp | null = null;
     JSON.stringify(me2.armor) === JSON.stringify([0, 0, 0, Item.WoodBoots]));
   // The welcome roster carries equip too, so late joiners see it immediately.
   s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: 0, pitch: 0,
-    held: Item.Sword, armor: [Item.TitaniumHelmet, 0, 0, 0] });
+    sneaking: true, swing: 8, held: Item.Sword, armor: [Item.TitaniumHelmet, 0, 0, 0] });
   const w = s.addPlayer(2).find((o) => o.to === 2)!.msg as
-    { players: { id: number; held?: number; armor?: number[] }[] };
+    { players: { id: number; held?: number; armor?: number[]; sneaking?: boolean; swing?: number }[] };
   const k = w.players.find((p) => p.id === 1)!;
-  check('the welcome roster carries held + armor to late joiners',
-    k.held === Item.Sword && k.armor?.[0] === Item.TitaniumHelmet);
+  check('the welcome roster carries held, armor, crouch + swing to late joiners',
+    k.held === Item.Sword && k.armor?.[0] === Item.TitaniumHelmet &&
+    k.sneaking === true && k.swing === 8);
 }
 
 // --- Avatar armor overlay: plating builds onto the body per worn piece ----------
 {
   const bare = buildAvatarBody(defaultCosmetics(7));
+  applyAvatarSneak(bare, 1);
+  check('avatar sneak pose lowers the head and both shoulders',
+    bare.head.position.y < 1.5 && bare.parts[2].position.y < 1.46 && bare.parts[3].position.y < 1.46);
   check('no worn armor builds no plating', buildArmorOverlay(bare, [0, 0, 0, 0]).length === 0);
   const suited = buildAvatarBody(defaultCosmetics(7));
   const full = buildArmorOverlay(suited,

@@ -22,6 +22,39 @@ const FACE_SHADE = [0.75, 0.6, 1.0, 0.45, 0.85, 0.7];
 // max HP per-player: hearts * 2).
 const REMOTE_MAX_HEALTH = 20;
 
+// A tiny neutral pixel pattern multiplied by each customised colour. It adds
+// cloth/skin variation without changing any cosmetic choices or palette values.
+const AVATAR_SURFACE_TEXTURE = (() => {
+  const shades = [
+    246, 252, 240, 249, 244, 255, 242, 250,
+    252, 243, 248, 238, 253, 245, 250, 241,
+    241, 249, 255, 244, 239, 251, 246, 253,
+    250, 240, 247, 254, 243, 248, 239, 252,
+    245, 253, 241, 249, 255, 242, 250, 244,
+    255, 244, 250, 242, 247, 253, 240, 249,
+    242, 250, 244, 255, 241, 248, 253, 243,
+    249, 241, 253, 245, 250, 239, 247, 255,
+  ];
+  const data = new Uint8Array(shades.length * 4);
+  for (let i = 0; i < shades.length; i++) {
+    data[i * 4] = shades[i];
+    data[i * 4 + 1] = shades[i];
+    data[i * 4 + 2] = shades[i];
+    data[i * 4 + 3] = 255;
+  }
+  const texture = new THREE.DataTexture(data, 8, 8, THREE.RGBAFormat);
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+  return texture;
+})();
+
+/** Shared neutral texture used by the avatar and the first-person hand. */
+export function avatarSurfaceTexture(): THREE.Texture {
+  return AVATAR_SURFACE_TEXTURE;
+}
+
 /** The skin tone a given player renders with — cosmetics-aware, falling back
  *  to the seed-derived default. Shared so the local first-person hand matches
  *  the avatar other players see. */
@@ -41,7 +74,12 @@ export function skinColorFor(seed: number, cosmetics?: Cosmetics): THREE.Color {
  * themselves and the world normally.
  */
 function layeredAvatarMaterial(layer: number): THREE.MeshBasicMaterial {
-  const mat = new THREE.MeshBasicMaterial({ vertexColors: true });
+  // Keep tiny face/accessory pixels crisp; texture the body, clothes, hair and armor.
+  const texturedSurface = layer <= 2 || layer === 6;
+  const mat = new THREE.MeshBasicMaterial({
+    vertexColors: true,
+    map: texturedSurface ? avatarSurfaceTexture() : null,
+  });
   if (layer > 0) {
     mat.polygonOffset = true;
     mat.polygonOffsetFactor = -1;
@@ -400,6 +438,22 @@ export interface AvatarBody {
   materials: readonly THREE.MeshBasicMaterial[];
 }
 
+/** Apply the positional part of the Minecraft-style sneak pose. Rotations stay
+ * with the caller because walking, boating, gliding, and attacking compose them. */
+export function applyAvatarSneak(body: AvatarBody, amount: number): void {
+  const a = Math.max(0, Math.min(1, amount));
+  body.head.position.y = 1.5 - a * 0.16;
+  body.head.position.z = -a * 0.08;
+  for (const arm of [body.parts[2], body.parts[3]]) {
+    arm.position.y = 1.46 - a * 0.14;
+    arm.position.z = -a * 0.08;
+  }
+  for (const leg of [body.parts[0], body.parts[1]]) {
+    leg.position.y = 0.75;
+    leg.position.z = a * 0.04;
+  }
+}
+
 /** Build the full customised avatar body (feet at y=0, facing -z). The
  *  optional shirt override paints faction colours over the cosmetic shirt so
  *  teams stay readable in the war. */
@@ -679,6 +733,9 @@ interface Avatar {
   heldMesh: THREE.Mesh | null;   // geometry is the SHARED itemGeometry cache
   armorKey: string;
   armorMeshes: THREE.Mesh[];
+  lastSwing: number;
+  swingT: number;
+  sneakT: number;
 }
 
 // ─── main class ───────────────────────────────────────────────────────────
@@ -760,6 +817,7 @@ export class RemotePlayers {
       dx: remote.tx, dy: remote.ty, dz: remote.tz, dyaw: remote.tyaw,
       walkPhase: 0, lastX: remote.tx, lastZ: remote.tz,
       heldId: 0, heldMesh: null, armorKey: '', armorMeshes: [],
+      lastSwing: remote.swing | 0, swingT: 1, sneakT: 0,
     };
   }
 
@@ -817,6 +875,14 @@ export class RemotePlayers {
       av.group.visible = !r.dead && r.info.mode !== 'spectator';
 
       this.syncEquip(av, r); // held item + worn armor follow the synced state
+      if ((r.swing | 0) !== av.lastSwing) {
+        av.lastSwing = r.swing | 0;
+        av.swingT = 0;
+      }
+      if (av.swingT < 1) av.swingT = Math.min(1, av.swingT + dt / 0.25);
+      const attackSwing = av.swingT < 1 ? Math.sin(av.swingT * Math.PI) : 0;
+      const sneakTarget = r.sneaking && !r.boating && !r.gliding ? 1 : 0;
+      av.sneakT += (sneakTarget - av.sneakT) * Math.min(1, 12 * dt);
 
       // Health bar
       const showHealth = id === this.hovered && av.group.visible;
@@ -833,25 +899,30 @@ export class RemotePlayers {
       av.boat.visible = r.boating;
       if (r.boating) {
         // Seated in the hull: legs stretched forward, arms rowing out front.
+        applyAvatarSneak(av.body, 0);
         av.group.rotation.x = 0;
         av.head.rotation.x = 0;
         av.parts[0].rotation.x = 1.35;
         av.parts[1].rotation.x = 1.35;
         av.parts[2].rotation.x = 0.55;
         av.parts[3].rotation.x = 0.55;
+        av.parts[2].rotation.z = 0; av.parts[3].rotation.z = 0;
         if (av.body.cape) av.body.cape.rotation.x = -0.25;
       } else if (r.gliding) {
         // Body tilts forward like a hang-glider; arms swept forward like wings.
+        applyAvatarSneak(av.body, 0);
         av.group.rotation.x = 1.05;
         av.parts[0].rotation.x = 0.2;  // legs trail together behind
         av.parts[1].rotation.x = 0.2;
         av.parts[2].rotation.x = 1.2;  // arms out front holding the glider bar
         av.parts[3].rotation.x = 1.2;
+        av.parts[2].rotation.z = 0; av.parts[3].rotation.z = 0;
         av.head.rotation.x = -0.9;     // head up to look forward despite the tilt
         if (av.body.cape) av.body.cape.rotation.x = -1.1; // streams out behind
       } else {
+        applyAvatarSneak(av.body, av.sneakT);
         av.group.rotation.x = 0;
-        av.head.rotation.x = 0;
+        av.head.rotation.x = av.sneakT * 0.12;
 
         // Walk/idle animation based on horizontal movement speed.
         const hspeed = Math.hypot(av.dx - av.lastX, av.dz - av.lastZ) / Math.max(dt, 1e-4);
@@ -861,11 +932,14 @@ export class RemotePlayers {
         // Amplitude scales from 0 (idle) → ~0.8 (full run). Legs alternate;
         // arms counter-swing (opposite phase) like a real stride.
         const amp = Math.sin(av.walkPhase) * Math.min(1, hspeed / 4.5) * 0.8;
-        av.parts[0].rotation.x =  amp;   // left leg forward
-        av.parts[1].rotation.x = -amp;   // right leg back
-        av.parts[2].rotation.x = -amp;   // left arm back
-        // Right arm swings too, but raises a touch while holding something.
-        av.parts[3].rotation.x =  amp - (av.heldId > 0 ? 0.45 : 0);
+        av.parts[0].rotation.x = amp + av.sneakT * 0.28;   // left leg forward / crouched
+        av.parts[1].rotation.x = -amp + av.sneakT * 0.28;  // right leg back / crouched
+        av.parts[2].rotation.x = -amp - av.sneakT * 0.18;  // left arm hunches forward
+        av.parts[2].rotation.z = 0;
+        // Right arm swings too, raises while holding, and punches forward on a hit.
+        av.parts[3].rotation.x = amp - (av.heldId > 0 ? 0.45 : 0) -
+          attackSwing * 1.45 - av.sneakT * 0.18;
+        av.parts[3].rotation.z = attackSwing * 0.12;
         // Cape sways with the stride: billows out with speed + a gentle flutter.
         if (av.body.cape) {
           const billow = Math.min(1, hspeed / 5) * 0.55;

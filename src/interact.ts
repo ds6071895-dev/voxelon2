@@ -123,6 +123,8 @@ export class Interaction {
   private breakKey = '';
   private breakProgress = 0;
   private placeCooldown = 0;
+  /** True for this frame while left-click is actively working a block target. */
+  breakingActive = false;
   /** Creative gamemode: instant break + placed blocks aren't consumed. */
   creative = false;
   /** Mining-speed multiplier (Rune of Fortune etc.; 1 = normal). */
@@ -162,6 +164,7 @@ export class Interaction {
     dt: number, input: Input, camera: THREE.Camera,
     suppressMining = false, suppressUse = false
   ): void {
+    this.breakingActive = false;
     const origin = this.player.eyePosition;
     const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
     this.target = raycastBlocks(this.world, origin, dir, REACH);
@@ -265,6 +268,7 @@ export class Interaction {
       this.crackMesh.visible = false;
       return;
     }
+    this.breakingActive = true;
     const key = t.x + ',' + t.y + ',' + t.z;
     if (key !== this.breakKey) {
       this.breakKey = key;

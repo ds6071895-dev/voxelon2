@@ -5,7 +5,7 @@
 import * as THREE from 'three';
 import { itemGeometry } from './itementity';
 import { ITEMS } from './items';
-import { skinColorFor } from './remoteplayers';
+import { avatarSurfaceTexture, skinColorFor } from './remoteplayers';
 import type { Cosmetics } from './character';
 import type { Atlas } from './textures';
 
@@ -17,6 +17,8 @@ export class HeldItemView {
   private mesh: THREE.Mesh | null = null;
   private currentItem: number | null = null;
   private swingT = 1; // 0..1, animating while < 1
+  /** Fires once whenever a new hand/tool swing begins. */
+  onSwing?: () => void;
   private recoilT = 1; // 0..1, animating while < 1 (gun kick)
   private isGun = false;
   private readonly atlas: Atlas;
@@ -43,6 +45,7 @@ export class HeldItemView {
     this.pivot = new THREE.Group();
     this.pivot.position.set(BASE_X, BASE_Y, BASE_Z);
     this.pivot.renderOrder = 100;
+    this.pivot.visible = false;
     camera.add(this.pivot);
 
     // Muzzle flash: a small additive quad in front of the gun, flicked on for
@@ -58,10 +61,11 @@ export class HeldItemView {
     this.flash.visible = false;
     this.pivot.add(this.flash);
 
-    // First-person arm: a blocky forearm + fist angled in from the bottom-right
-    // so the held item reads as actually held. Hidden while the hand is empty —
-    // an empty POV shows nothing at all.
-    this.armMat = new THREE.MeshBasicMaterial({ color: this.baseSkin.clone() });
+    // First-person arm: a blocky forearm + fist angled in from the bottom-right.
+    // It remains visible with an empty hotbar, like Minecraft's bare hand.
+    this.armMat = new THREE.MeshBasicMaterial({
+      color: this.baseSkin.clone(), map: avatarSurfaceTexture(),
+    });
     const arm = new THREE.Group();
     const forearm = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.17, 0.55), this.armMat);
     forearm.position.set(0, 0, 0.3); // extends back toward the screen corner
@@ -71,7 +75,6 @@ export class HeldItemView {
     arm.position.set(0.05, -0.16, 0.06);
     arm.rotation.set(0.5, -0.32, 0.32);
     arm.renderOrder = 99; // just behind the item
-    arm.visible = false;  // nothing held yet
     this.pivot.add(arm);
     this.arm = arm;
   }
@@ -80,6 +83,11 @@ export class HeldItemView {
    *  aware (so your own hand matches the avatar everyone else sees). */
   setSkin(seed: number, cosmetics?: Cosmetics): void {
     this.baseSkin.copy(skinColorFor(seed, cosmetics));
+  }
+
+  /** Show only in active first-person gameplay; item state is tracked separately. */
+  setActive(active: boolean): void {
+    this.pivot.visible = active;
   }
 
   setItem(id: number | null): void {
@@ -97,13 +105,21 @@ export class HeldItemView {
       this.mesh.rotation.set(0.1, -0.6, 0);
       this.pivot.add(this.mesh);
     }
-    // The arm only shows while something is actually held.
-    this.arm.visible = id !== null;
+    // The arm stays visible even with no item; setActive controls POV visibility.
+    this.arm.visible = true;
   }
 
   /** Generic mining/placing swing (tools, blocks). */
   swing(): void {
-    if (this.swingT >= 1) this.swingT = 0;
+    if (this.swingT >= 1) {
+      this.swingT = 0;
+      this.onSwing?.();
+    }
+  }
+
+  /** 0 at rest, 1 at the middle of the current swing. */
+  swingAmount(): number {
+    return this.swingT < 1 ? Math.sin(this.swingT * Math.PI) : 0;
   }
 
   /** Gun fired: kick the weapon back + up and pop the muzzle flash. */
@@ -115,9 +131,10 @@ export class HeldItemView {
     const shade = 0.55 + 0.45 * sunlight;
     this.material.color.setScalar(shade);
     this.armMat.color.copy(this.baseSkin).multiplyScalar(shade);
-    // Mining a block swings the hand — but guns animate via recoil(), so a held
-    // gun never swings (its left-click fires instead of mining).
-    if (mining && !this.isGun) this.swing();
+    // A real block-breaking attempt swings the whole hand/item pivot regardless
+    // of what is held. Gunfire still uses recoil because main only passes true
+    // here when Interaction is actually working a block target.
+    if (mining) this.swing();
 
     if (this.swingT < 1) this.swingT = Math.min(1, this.swingT + dt / 0.25);
     if (this.recoilT < 1) this.recoilT = Math.min(1, this.recoilT + dt / 0.16);

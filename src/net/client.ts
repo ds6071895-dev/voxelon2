@@ -24,10 +24,13 @@ export interface Remote {
   dead: boolean;
   gliding: boolean;
   boating: boolean;
+  sneaking: boolean;
   /** Held item id (0 = bare hand) — rendered in the avatar's hand. */
   held: number;
   /** Worn armor item ids [helmet, chest, legs, boots] (0 = bare slot). */
   armor: number[];
+  /** Latest networked swing sequence. */
+  swing: number;
 }
 
 /** Resolve the WebSocket URL. When the page is served by the game server itself
@@ -248,8 +251,10 @@ export class NetClient {
             r.health = s.health; r.dead = s.dead;
             r.gliding = s.gliding === true;
             r.boating = s.boating === true;
+            r.sneaking = s.sneaking === true;
             r.held = typeof s.held === 'number' ? s.held : 0;
             if (Array.isArray(s.armor)) r.armor = s.armor;
+            r.swing = typeof s.swing === 'number' ? s.swing : r.swing;
           }
         }
         break;
@@ -421,7 +426,7 @@ export class NetClient {
   /** Throttled transform send (call every frame with dt). */
   sendXform(
     dt: number, x: number, y: number, z: number, yaw: number, pitch: number,
-    gliding = false, boating = false, held = 0, armor: number[] = []
+    gliding = false, boating = false, sneaking = false, held = 0, armor: number[] = [], swing = 0
   ): void {
     if (!this.connected) return;
     const interval = 1 / TRANSFORM_HZ;
@@ -430,7 +435,7 @@ export class NetClient {
     // Subtract the interval (don't zero) so the long-run rate matches
     // TRANSFORM_HZ; clamp to avoid a burst after a long stall.
     this.xformAcc = Math.min(this.xformAcc - interval, interval);
-    this.raw({ t: 'xform', x, y, z, yaw, pitch, gliding, boating, held, armor });
+    this.raw({ t: 'xform', x, y, z, yaw, pitch, gliding, boating, sneaking, held, armor, swing });
   }
 
   /** Send register/login over the open socket (before `welcome`/connected). */
@@ -576,8 +581,9 @@ function toRemote(p: PlayerInfo): Remote {
   return {
     info: p, tx: p.x, ty: p.y, tz: p.z, tyaw: p.yaw, tpitch: p.pitch,
     health: p.health, dead: p.dead, gliding: p.gliding === true,
-    boating: p.boating === true,
+    boating: p.boating === true, sneaking: p.sneaking === true,
     held: typeof p.held === 'number' ? p.held : 0,
     armor: Array.isArray(p.armor) ? p.armor : [0, 0, 0, 0],
+    swing: typeof p.swing === 'number' ? p.swing : 0,
   };
 }
