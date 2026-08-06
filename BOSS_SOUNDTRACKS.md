@@ -79,3 +79,18 @@ A clockwork orchestral-industrial duel combining alternating ticks, gear clacks,
 - `npm run music-smoke` runs the dedicated soundtrack checks.
 
 To add another boss, create its score profile and family-specific scheduling voice, then extend the long-form harmony path. Keep individual voice gains conservative; the compressor is protection and glue, not a substitute for balanced orchestration.
+
+
+## Dramatic encounter redesign
+
+Boss music now runs through an encounter mix that lifts the score while gently
+ducking ambience and non-critical effects. Warning sounds remain prominent and
+the ordinary mix is restored on victory, reset, death, disconnect, or leaving a
+vault. New synchronized cues cover the boss-room seal, locomotion/teleports,
+army waves, healing channels, healing interruption, and major combo beats.
+
+All five bosses now use the shared deterministic locomotion, army, healing and
+arena-seal systems. Critical family structures visibly channel bounded healing
+until players destroy them; the same structures continue producing themed army
+pressure. The server owns these systems online and the identical encounter
+engine owns them offline.

@@ -5,7 +5,7 @@
 import * as THREE from 'three';
 import { Block } from './blocks';
 import type { VaultFamily } from './vaults';
-import { BossMusicEngine } from './boss_music';
+import { BossMusicEngine, type BossMusicCue } from './boss_music';
 
 export type Material = 'stone' | 'wood' | 'grass' | 'sand' | 'glass' | 'wool';
 
@@ -48,6 +48,10 @@ export function materialOf(block: number): Material {
   }
 }
 
+export const ENCOUNTER_MUSIC_BOOST = 1.22;
+export const ENCOUNTER_EFFECTS_DUCK = 0.82;
+export const ENCOUNTER_AMBIENCE_DUCK = 0.42;
+
 const MATERIAL_FREQ: Record<Material, number> = {
   stone: 700, wood: 380, grass: 950, sand: 2400, glass: 3200, wool: 500,
 };
@@ -63,6 +67,7 @@ export class GameAudio {
   private readonly listenerPos = new THREE.Vector3();
   private effectsVolume = GameAudio.savedVolume('effects', 0.8);
   private musicVolume = GameAudio.savedVolume('music', 0.65);
+  private encounterMix = false;
 
   private static savedVolume(key: string, fallback: number): number {
     try {
@@ -98,20 +103,32 @@ export class GameAudio {
     if (this.ctx.state === 'suspended') void this.ctx.resume();
   }
 
+  private applyBusMix(): void {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const music = Math.min(1, this.musicVolume * (this.encounterMix ? ENCOUNTER_MUSIC_BOOST : 1));
+    const effects = this.effectsVolume * (this.encounterMix ? ENCOUNTER_EFFECTS_DUCK : 1);
+    const ambience = this.effectsVolume * (this.encounterMix ? ENCOUNTER_AMBIENCE_DUCK : 0.7);
+    this.musicBus?.gain.setTargetAtTime(music, now, 0.08);
+    this.effectsBus?.gain.setTargetAtTime(effects, now, 0.08);
+    this.ambienceBus?.gain.setTargetAtTime(ambience, now, 0.1);
+  }
+
+  private setEncounterMix(active: boolean): void {
+    if (this.encounterMix === active) return;
+    this.encounterMix = active;
+    this.applyBusMix();
+  }
+
   setEffectsVolume(value: number): void {
     this.effectsVolume = Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0.8));
-    if (this.effectsBus && this.ctx) {
-      this.effectsBus.gain.setTargetAtTime(this.effectsVolume, this.ctx.currentTime, 0.03);
-      this.ambienceBus?.gain.setTargetAtTime(this.effectsVolume * 0.7, this.ctx.currentTime, 0.03);
-    }
+    this.applyBusMix();
     try { localStorage.setItem('voxelon.audio.effects', String(this.effectsVolume)); } catch { /* ignore */ }
   }
 
   setMusicVolume(value: number): void {
     this.musicVolume = Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0.65));
-    if (this.musicBus && this.ctx) {
-      this.musicBus.gain.setTargetAtTime(this.musicVolume, this.ctx.currentTime, 0.03);
-    }
+    this.applyBusMix();
     try { localStorage.setItem('voxelon.audio.music', String(this.musicVolume)); } catch { /* ignore */ }
   }
 
@@ -150,6 +167,7 @@ export class GameAudio {
   startVaultMusic(family: VaultFamily, phase: 1 | 2 | 3 = 1): void {
     this.resume();
     if (!this.ctx || !this.musicBus) return;
+    this.setEncounterMix(true);
     this.bossScore ??= new BossMusicEngine(this.ctx, this.musicBus);
     this.bossScore.start(family, phase);
   }
@@ -160,12 +178,14 @@ export class GameAudio {
   }
 
   /** Fire a score-synchronised encounter stinger. */
-  vaultMusicCue(kind: 'summon' | 'poise' | 'phase' | 'enrage' | 'victory' | 'reset'): void {
+  vaultMusicCue(kind: BossMusicCue): void {
     this.bossScore?.cue(kind);
+    if (kind === 'reset' || kind === 'victory') this.setEncounterMix(false);
   }
 
   stopVaultMusic(fade = 0.4): void {
     this.bossScore?.stop(fade);
+    this.setEncounterMix(false);
   }
 
   /** Band-filtered noise burst. */

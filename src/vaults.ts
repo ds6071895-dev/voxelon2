@@ -113,6 +113,12 @@ export interface VaultStamp {
     sockets: { x: number; y: number; z: number }[];
     cameraAnchors: { x: number; y: number; z: number }[];
     safeLanes: { x: number; y: number; z: number }[];
+    seal: {
+      center: { x: number; y: number; z: number };
+      axis: 'x' | 'z'; halfWidth: number; height: number;
+      inside: { x: number; y: number; z: number };
+      outside: { x: number; y: number; z: number };
+    };
   };
   /** Absolute world-coordinate block writes (Block.Air entries CARVE). */
   blocks: { x: number; y: number; z: number; id: number }[];
@@ -762,13 +768,21 @@ export function vaultStamp(
   ];
   const safeLanes = [[0, -4], [0, 4], [-4, 0], [0, 0]].map(([du, dv]) =>
     ({ x: wx(boss.u + du, boss.v + dv), y: fy + 1, z: wz(boss.u + du, boss.v + dv) }));
+  const sealU = boss.u - boss.hw;
+  const seal = {
+    center: { x: wx(sealU, boss.v), y: fy + 1, z: wz(sealU, boss.v) },
+    axis: (ux !== 0 ? 'x' : 'z') as 'x' | 'z',
+    halfWidth: 1.6, height: 4,
+    inside: { x: wx(sealU + 2, boss.v), y: fy + 1, z: wz(sealU + 2, boss.v) },
+    outside: { x: wx(sealU - 2, boss.v), y: fy + 1, z: wz(sealU - 2, boss.v) },
+  };
   const arena = {
     bounds: {
       minX: bossCenter.x - BOSS_HW + 1, minY: fy + 1,
       minZ: bossCenter.z - BOSS_HW + 1, maxX: bossCenter.x + BOSS_HW - 1,
       maxY: fy + BOSS_IH, maxZ: bossCenter.z + BOSS_HW - 1,
     },
-    sockets, cameraAnchors, safeLanes,
+    sockets, cameraAnchors, safeLanes, seal,
   };
   return { cx, cz, tier, family, bossKind, x: ax, y: g, z: az, floorY: fy,
     rooms, chest, mouth, bounds, arena, blocks };

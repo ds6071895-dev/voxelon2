@@ -5,6 +5,9 @@ import {
   bossScoreLoopSeconds,
 } from '../src/boss_music';
 import type { VaultFamily } from '../src/vaults';
+import type { BossMusicCue } from '../src/boss_music';
+import { ENCOUNTER_AMBIENCE_DUCK, ENCOUNTER_EFFECTS_DUCK,
+  ENCOUNTER_MUSIC_BOOST } from '../src/audio';
 
 const families: readonly VaultFamily[] = ['crypt', 'mire', 'ember', 'crystal', 'gilded'];
 let failures = 0;
@@ -26,6 +29,14 @@ check(BOSS_SCORE_LOOP_BARS === 96, 'macro arrangement is exactly 96 bars');
 check(BOSS_SCORE_LOOP_STEPS === 1536, '96 bars contain exactly 1,536 sixteenth-note steps');
 check(Object.keys(BOSS_SCORE_PROFILES).length === families.length,
   'all five dungeon-boss families have score profiles');
+check(ENCOUNTER_MUSIC_BOOST > 1 && ENCOUNTER_MUSIC_BOOST <= 1.3 &&
+  ENCOUNTER_EFFECTS_DUCK >= 0.7 && ENCOUNTER_EFFECTS_DUCK < 1 &&
+  ENCOUNTER_AMBIENCE_DUCK >= 0.3 && ENCOUNTER_AMBIENCE_DUCK < ENCOUNTER_EFFECTS_DUCK,
+  'encounter mix lifts music while safely ducking effects and ambience');
+const redesignedCues: BossMusicCue[] = ['door', 'movement', 'army', 'healing',
+  'interrupt', 'combo', 'phase', 'enrage', 'victory', 'reset'];
+check(new Set(redesignedCues).size === 10,
+  'dramatic encounter cue surface covers movement, armies, healing and lifecycle');
 
 const titles = new Set<string>();
 const bosses = new Set<string>();

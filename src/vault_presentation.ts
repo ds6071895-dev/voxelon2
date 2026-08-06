@@ -139,17 +139,19 @@ export class VaultBossHUD {
     this.hpText.textContent = `${Math.ceil(snapshot.hp)} / ${snapshot.maxHp}`;
     this.phase.textContent =
       `PHASE ${snapshot.phase}/3 — ${def.phaseTitles[snapshot.phase - 1].toUpperCase()}`;
-    this.poise.textContent = snapshot.exposedUntil > 0
-      ? `✦ EXPOSED ${snapshot.exposedUntil.toFixed(1)}s`
-      : snapshot.criticalObjects > 0
-        ? `🛡 ${snapshot.criticalObjects} WARD${snapshot.criticalObjects === 1 ? '' : 'S'}`
-        : `POISE ${Math.round(snapshot.poise)}%`;
+    this.poise.textContent = snapshot.healing.active
+      ? `❤ HEALING +${snapshot.healing.rate.toFixed(1)}/s — DESTROY ${snapshot.healing.sources} SOURCE${snapshot.healing.sources === 1 ? '' : 'S'}`
+      : snapshot.exposedUntil > 0
+        ? `✦ EXPOSED ${snapshot.exposedUntil.toFixed(1)}s`
+        : snapshot.criticalObjects > 0
+          ? `🛡 DESTROY ${snapshot.criticalObjects} SOURCE${snapshot.criticalObjects === 1 ? '' : 'S'}`
+          : `POISE ${Math.round(snapshot.poise)}%`;
     const enrage = snapshot.enrage ? ' • ENRAGED'
       : snapshot.elapsed >= 300 ? ` • ENRAGE ${Math.max(0, Math.ceil(360 - snapshot.elapsed))}s` : '';
     this.details.textContent =
       `${snapshot.participants.length} raider${snapshot.participants.length === 1 ? '' : 's'} ` +
       `×${(1 + 0.6 * (snapshot.peakParticipants - 1)).toFixed(1)} • ` +
-      `${snapshot.actors.length} summon${snapshot.actors.length === 1 ? '' : 's'}${enrage}`;
+      `WAVE ${snapshot.wave.number} • ${snapshot.wave.alive}/${snapshot.wave.cap} army${enrage}`;
     this.cast.textContent = snapshot.status === 'reset_grace'
       ? 'ARENA EMPTY — RESETTING…'
       : snapshot.status === 'intro' ? def.introLine.toUpperCase()

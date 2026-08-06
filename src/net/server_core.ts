@@ -372,6 +372,15 @@ export class GameServer {
           p.x = Math.max(-half, Math.min(half, msg.x));
           p.z = Math.max(-half, Math.min(half, msg.z));
           p.y = msg.y;
+          for (const active of this.vaultEncounters.values()) {
+            if (!active.engine.participants.has(p.id)) continue;
+            if (active.engine.status !== 'intro' && active.engine.status !== 'active' &&
+                active.engine.status !== 'reset_grace') continue;
+            const b = active.stamp.arena.bounds;
+            p.x = Math.max(b.minX + 0.15, Math.min(b.maxX - 0.15, p.x));
+            p.z = Math.max(b.minZ + 0.15, Math.min(b.maxZ - 0.15, p.z));
+            break;
+          }
           p.yaw = msg.yaw; p.pitch = msg.pitch;
           p.gliding = msg.gliding === true;
           p.boating = msg.boating === true;
@@ -829,7 +838,8 @@ export class GameServer {
       tier: st.tier, kind: st.bossKind, family: st.family,
       center: { x: bossRoom.x, y: bossRoom.y, z: bossRoom.z },
       bounds: { ...st.arena.bounds }, sockets,
-      cameraAnchors: st.arena.cameraAnchors, startTime: this.worldTime,
+      cameraAnchors: st.arena.cameraAnchors, seal: st.arena.seal,
+      startTime: this.worldTime,
     });
     const active = { stamp: st, engine, snapshotAccum: 0, credited: starter.username };
     this.vaultEncounters.set(key, active);

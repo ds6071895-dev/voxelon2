@@ -1,6 +1,8 @@
 import {
   BOSS_DEFINITIONS, ENCOUNTER_INTRO_SECONDS, ENCOUNTER_PHASE_TRANSITION_SECONDS,
-  VaultEncounter, type EncounterParticipant,
+  ENCOUNTER_RESET_GRACE_SECONDS, MAX_ENCOUNTER_ACTORS, MAX_ENCOUNTER_HAZARDS,
+  MAX_ENCOUNTER_OBJECTS, VaultEncounter, sanitizeEncounterSnapshot, sealContains,
+  type EncounterParticipant, type EncounterConfig,
 } from '../src/vault_encounter';
 import type { VaultBossKind } from '../src/vaults';
 
@@ -30,6 +32,8 @@ for (const [index, kind] of kinds.entries()) {
       { x: 7, y: 10, z: 7 }, { x: -7, y: 10, z: 7 },
     ],
     cameraAnchors: [{ x: 0, y: 14, z: 12 }],
+    seal: { center: { x: -10, y: 10, z: 0 }, axis: 'x', halfWidth: 1.6, height: 4,
+      inside: { x: -8, y: 10, z: 0 }, outside: { x: -12, y: 10, z: 0 } },
     startTime: 0,
   });
   encounter.start(1, 0);
@@ -37,6 +41,13 @@ for (const [index, kind] of kinds.entries()) {
     encounter.tick(0.25, [participant]);
   }
   check(encounter.status === 'active', `${def.name}: cinematic intro enters combat`);
+  check(encounter.snapshot().seal.sealed, `${def.name}: boss room seals during combat`);
+  let moveEvent = false;
+  for (let i = 0; i < 32; i++) {
+    const events = encounter.tick(0.25, [participant]);
+    if (events.some((event) => event.type === 'move')) moveEvent = true;
+  }
+  check(moveEvent, `${def.name}: locomotion director schedules a relocation`);
   check(def.phaseTitles.length === 3 && !!def.introLine && !!def.victoryLine,
     `${def.name}: dramatic copy covers intro, three phases and victory`);
 
@@ -45,7 +56,7 @@ for (const [index, kind] of kinds.entries()) {
     sequence: 1,
     targetId: 0,
     source: 'melee',
-    hit: { ...center },
+    hit: { ...encounter.bossPosition },
     claimedDamage: Math.ceil(encounter.maxHp * 0.31),
   }, participant, {
     heldSource: 'melee', maxDamage: encounter.maxHp, range: 30,
@@ -53,8 +64,18 @@ for (const [index, kind] of kinds.entries()) {
   });
   check(phaseHit.accepted && encounter.phase === 2,
     `${def.name}: phase two triggers at 70% health`);
-  check(encounter.actors.length >= 2,
-    `${def.name}: phase two summons its themed mob wave`);
+  check(encounter.actors.length >= 5,
+    `${def.name}: phase two summons a themed army`);
+  check(encounter.actors.length <= MAX_ENCOUNTER_ACTORS &&
+    encounter.objects.length <= MAX_ENCOUNTER_OBJECTS &&
+    encounter.hazards.length <= MAX_ENCOUNTER_HAZARDS,
+    `${def.name}: encounter entities stay inside hard performance caps`);
+  const hpBeforeHeal = encounter.hp;
+  for (let i = 0; i < Math.ceil((ENCOUNTER_PHASE_TRANSITION_SECONDS + 0.75) / 0.25); i++) {
+    encounter.tick(0.25, [participant]);
+  }
+  check(encounter.hp > hpBeforeHeal && encounter.snapshot().healing.active,
+    `${def.name}: active objectives restore boss health`);
   check(encounter.objects.filter((object) => object.critical).length === def.criticalCount,
     `${def.name}: phase two creates every breakable ward`);
 
@@ -72,6 +93,10 @@ for (const [index, kind] of kinds.entries()) {
       cadence: 0, now: encounter.now,
     });
   }
+  const healedAtBreak = encounter.hp;
+  encounter.tick(1, [participant]);
+  check(encounter.hp <= healedAtBreak + 0.01 && !encounter.snapshot().healing.active,
+    `${def.name}: destroying sources interrupts healing`);
   for (let i = 0; i < Math.ceil((ENCOUNTER_PHASE_TRANSITION_SECONDS + 0.25) / 0.25); i++) {
     encounter.tick(0.25, [participant]);
   }
@@ -91,7 +116,93 @@ for (const [index, kind] of kinds.entries()) {
   for (let i = 0; i < 80; i++) encounter.tick(0.25, [participant]);
   check(encounter.status === 'victory' && encounter.hp === 0,
     `${def.name}: defeated boss cannot respawn itself`);
+  check(!encounter.snapshot().seal.sealed, `${def.name}: victory opens the boss room`);
 }
+
+
+const deterministicConfig: EncounterConfig = {
+  encounterId: 'deterministic-replay', seed: 424242, tier: 3,
+  kind: 'crystal_seer', family: 'crystal', center: { x: 0, y: 10, z: 0 },
+  bounds: { minX: -20, minY: 5, minZ: -20, maxX: 20, maxY: 20, maxZ: 20 },
+  sockets: [{ x: -7, y: 10, z: -7 }, { x: 7, y: 10, z: -7 },
+    { x: 7, y: 10, z: 7 }, { x: -7, y: 10, z: 7 }],
+  cameraAnchors: [{ x: 0, y: 14, z: 12 }],
+  seal: { center: { x: -10, y: 10, z: 0 }, axis: 'x', halfWidth: 1.6, height: 4,
+    inside: { x: -8, y: 10, z: 0 }, outside: { x: -12, y: 10, z: 0 } },
+  startTime: 0,
+};
+const replayParticipant: EncounterParticipant = {
+  id: 7, position: { x: 2, y: 10, z: 3 }, alive: true, inside: true,
+};
+const replayA = new VaultEncounter(deterministicConfig);
+const replayB = new VaultEncounter(deterministicConfig);
+replayA.start(7, 0); replayB.start(7, 0);
+let replayEventsA: unknown[] = [], replayEventsB: unknown[] = [];
+for (let i = 0; i < 120; i++) {
+  replayEventsA = replayEventsA.concat(replayA.tick(0.25, [replayParticipant]));
+  replayEventsB = replayEventsB.concat(replayB.tick(0.25, [replayParticipant]));
+}
+check(JSON.stringify(replayA.snapshot()) === JSON.stringify(replayB.snapshot()) &&
+  JSON.stringify(replayEventsA) === JSON.stringify(replayEventsB),
+  'same seed and participant inputs produce identical movement, attacks and events');
+check(replayEventsA.some((event) => (event as { type?: string }).type === 'combo'),
+  'combo director schedules sequential signature chains without repeating one cast');
+const cleanSnapshot = replayA.snapshot();
+check(sanitizeEncounterSnapshot(cleanSnapshot) !== null,
+  'expanded movement/healing/wave/seal snapshot survives network sanitization');
+check(sanitizeEncounterSnapshot({ ...cleanSnapshot,
+  seal: { sealed: true, geometry: { ...cleanSnapshot.seal.geometry!, axis: 'bad' } } }) === null &&
+  sanitizeEncounterSnapshot({ ...cleanSnapshot, movement: { ...cleanSnapshot.movement!,
+    executeAt: Number.NaN } }) === null,
+  'snapshot sanitizer rejects malformed seal and movement state');
+check(sealContains(deterministicConfig.seal!, { x: -10, y: 12, z: 0 }) &&
+  !sealContains(deterministicConfig.seal!, { x: -8, y: 12, z: 0 }),
+  'temporary seal collision is exact to the boss-room doorway plane');
+
+const stressConfig: EncounterConfig = { ...deterministicConfig,
+  encounterId: 'maximum-load-stress', kind: 'gilded_artificer', family: 'gilded' };
+const stress = new VaultEncounter(stressConfig);
+const stressParticipants: EncounterParticipant[] = Array.from({ length: 6 }, (_, id) => ({
+  id, position: { x: (id % 3 - 1) * 3, y: 10, z: (Math.floor(id / 3) * 2 - 1) * 3 },
+  alive: true, inside: true,
+}));
+stress.start(0, 0);
+for (let id = 1; id < stressParticipants.length; id++) stress.join(id);
+for (let i = 0; i < Math.ceil((ENCOUNTER_INTRO_SECONDS + 0.5) / 0.25); i++) {
+  stress.tick(0.25, stressParticipants);
+}
+stress.attack({ encounterId: stress.config.encounterId, sequence: 1, targetId: 0,
+  source: 'melee', hit: { ...stress.bossPosition },
+  claimedDamage: Math.ceil(stress.maxHp * 0.31) }, stressParticipants[0], {
+  heldSource: 'melee', maxDamage: stress.maxHp, range: 30, cadence: 0, now: stress.now,
+});
+let stressSafe = true;
+for (let i = 0; i < 480; i++) {
+  stress.tick(0.25, stressParticipants);
+  const snap = stress.snapshot();
+  stressSafe = stressSafe && snap.actors.length <= MAX_ENCOUNTER_ACTORS &&
+    snap.objects.length <= MAX_ENCOUNTER_OBJECTS &&
+    snap.hazards.length <= MAX_ENCOUNTER_HAZARDS &&
+    JSON.stringify(snap).length < 50000 && Number.isFinite(snap.hp);
+}
+stress.join(99);
+const lateSnapshot = stress.snapshot();
+check(stressSafe, 'six-player maximum-load simulation stays capped and snapshot-bounded');
+check(lateSnapshot.participants.includes(99) && lateSnapshot.seal.sealed &&
+  lateSnapshot.wave.number > 0 && lateSnapshot.healing.sources > 0,
+  'late join snapshot carries the live seal, wave and healing-objective state');
+
+const resetEncounter = new VaultEncounter({ ...deterministicConfig,
+  encounterId: 'reset-seal-test' });
+resetEncounter.start(7, 0);
+for (let i = 0; i < Math.ceil((ENCOUNTER_INTRO_SECONDS + 0.5) / 0.25); i++) {
+  resetEncounter.tick(0.25, [replayParticipant]);
+}
+for (let i = 0; i < Math.ceil((ENCOUNTER_RESET_GRACE_SECONDS + 0.5) / 0.25); i++) {
+  resetEncounter.tick(0.25, []);
+}
+check(resetEncounter.status === 'idle' && !resetEncounter.snapshot().seal.sealed,
+  'empty arena resets cleanly and fails open after the grace period');
 
 check(kinds.length === 5, 'all five dungeon boss families are covered');
 if (failures.length) throw new Error(`${failures.length} boss smoke check(s) failed`);

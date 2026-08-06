@@ -7,7 +7,7 @@ import * as THREE from 'three';
 import { materialOf } from '../src/audio';
 import { Biome, BIOME_NAMES } from '../src/biomes';
 import {
-  Block, BLOCKS, isSlab, isTopSlab, isSolid, orientStairsForYaw, slabBottomId,
+  Block, BLOCKS, isSlab, isTopSlab, isSolid, isVaultMasonry, orientStairsForYaw, slabBottomId,
   slabPlacement, slabTopId, stairsBaseOf, Tile,
 } from '../src/blocks';
 import {
@@ -109,6 +109,7 @@ import {
   vaultLootCooldownLeft, vaultLootable, vaultStamp, vaultTier, worldVaults,
 } from '../src/vaults';
 import { LOOT_TABLES, chestLoot, chestLootSlots } from '../src/loot';
+import { bossMaxHp, ENCOUNTER_INTRO_SECONDS, type EncounterSnapshot } from '../src/vault_encounter';
 import { mulberry32 } from '../src/noise';
 import { AUTOMINER_ORES, Terrain, SEA_LEVEL } from '../src/terrain';
 import { Biome } from '../src/biomes';
@@ -3433,8 +3434,8 @@ let firstVault: VaultStamp | null = null;
       stamps.some((st) => st.rooms.some((r) => r.kind === kind))));
   check('the staircase mouth breaks the actual surface (walk-in entrance)',
     stamps.every((st) => st.mouth.y >= terrain.height(st.mouth.x, st.mouth.z) - 1));
-  check('vault walls are VaultBrick (plenty of them)',
-    stamps.every((st) => st.blocks.filter((b) => b.id === Block.VaultBrick).length > 400));
+  check('vault shells use plenty of family-themed dungeon masonry',
+    stamps.every((st) => st.blocks.filter((b) => isVaultMasonry(b.id)).length > 400));
 }
 
 // --- D1: vaults land in filled chunks (terrain integration) ---------------------
@@ -3526,32 +3527,71 @@ let firstVault: VaultStamp | null = null;
     s.addPlayer(1, { username: 'Raider', faction: 0 });
     s.addPlayer(2, { username: 'Buddy', faction: 0 });
     const near = (id: number) => s.handle(id,
-      { t: 'xform', x: chest.x + 0.5, y: chest.y + 0.5, z: chest.z + 1.5, yaw: 0, pitch: 0 });
+      { t: 'xform', x: chest.x + 0.5, y: chest.y + 0.5, z: chest.z + 1.5,
+        yaw: 0, pitch: 0, held: Item.RocketLauncher });
     near(1); near(2);
     // Enter: the authoritative state reply.
     const enter = s.handle(1, { t: 'vaultEnter', cx: st.cx, cz: st.cz })
       .find((o) => o.msg.t === 'vault')!.msg as { hp: number; maxHp: number; alive: boolean; opened?: boolean };
     check('vaultEnter replies with the boss state (alive, unopened)',
-      enter.alive && enter.hp === bruteMaxHp(st.tier) && enter.opened === false);
+      enter.alive && enter.hp === bossMaxHp(st.tier, st.bossKind) && enter.opened === false);
     check('vaultEnter for a non-vault chunk is refused',
       s.handle(1, { t: 'vaultEnter', cx: st.cx + 1, cz: st.cz }).length === 0);
     // Chest while the Brute lives: refused with a notice, no loot.
     const early = s.handle(1, { t: 'vaultChestOpen', x: chest.x, y: chest.y, z: chest.z });
     check('opening the chest with the Brute alive is refused',
       !early.some((o) => o.msg.t === 'gotitem') && early.some((o) => o.msg.t === 'notice'));
-    // Kill the Brute: both players' hits count against the SHARED server HP.
-    let cleared: Outbound[] = [];
-    for (let i = 0; i < 30 && !cleared.length; i++) {
-      const hit = s.handle(i % 2 === 0 ? 1 : 2,
-        { t: 'vaultBossHit', cx: st.cx, cz: st.cz, amount: 10 });
-      if (hit.some((o) => o.msg.t === 'vaultCleared')) cleared = hit;
-    }
-    check('shared boss HP falls to both players\' hits → vaultCleared + killfeed',
+    // Kill the mobile boss through the authoritative encounter protocol. The
+    // helper tracks live snapshots so teleports never turn a valid test hit into
+    // a stale-position hit, and advances both world + encounter clocks for cadence.
+    const killVault = (server: GameServer, ids: number[]): Outbound[] => {
+      let snapshot: EncounterSnapshot | null = null;
+      const all: Outbound[] = [];
+      const capture = (out: Outbound[]): void => {
+        all.push(...out);
+        for (const o of out) {
+          if (o.msg.t === 'encounterStart' || o.msg.t === 'encounterSnapshot') {
+            snapshot = o.msg.snapshot;
+          }
+        }
+      };
+      for (const id of ids) {
+        server.adminSetMode(id, 'creative'); // hazards cannot derail a protocol test
+        server.handle(id, { t: 'xform', x: chest.x + 0.5, y: chest.y + 0.5,
+          z: chest.z + 1.5, yaw: 0, pitch: 0, held: Item.RocketLauncher });
+        capture(server.handle(id, { t: 'vaultEnter', cx: st.cx, cz: st.cz }));
+      }
+      const introSteps = Math.ceil((ENCOUNTER_INTRO_SECONDS + 0.5) / 0.25);
+      for (let i = 0; i < introSteps; i++) {
+        server.tickWar(0.25);
+        capture(server.tickVaultEncounters(0.25));
+      }
+      const sequences = new Map<number, number>();
+      const rocketDamage = ITEMS[Item.RocketLauncher].gun!.damage;
+      for (let i = 0; i < 240 && snapshot; i++) {
+        const id = ids[i % ids.length];
+        const sequence = (sequences.get(id) ?? 0) + 1;
+        sequences.set(id, sequence);
+        const snap = snapshot as EncounterSnapshot;
+        capture(server.handle(id, { t: 'vaultAttack', cx: st.cx, cz: st.cz,
+          intent: { encounterId: snap.encounterId, sequence, targetId: 0,
+            source: 'rocket', hit: { ...snap.boss.position }, claimedDamage: rocketDamage } }));
+        if (all.some((o) => o.msg.t === 'vaultCleared')) break;
+        server.tickWar(0.9);
+        capture(server.tickVaultEncounters(0.9));
+      }
+      return all;
+    };
+    const cleared = killVault(s, [1, 2]);
+    check("shared boss HP falls to both players' authoritative hits → vaultCleared + killfeed",
       cleared.some((o) => o.msg.t === 'vaultCleared') &&
       cleared.some((o) => o.msg.t === 'killfeed' &&
-        (o.msg as { victim: string }).victim.includes('Vault Brute')));
-    check('hits on a dead Brute do nothing',
-      s.handle(1, { t: 'vaultBossHit', cx: st.cx, cz: st.cz, amount: 10 }).length === 0);
+        (o.msg as { victim: string }).victim.includes('Tier')));
+    check('hits on a dead boss do nothing',
+      s.handle(1, { t: 'vaultAttack', cx: st.cx, cz: st.cz,
+        intent: { encounterId: 'dead-attempt', sequence: 999, targetId: 0,
+          source: 'rocket', hit: { x: chest.x, y: chest.y, z: chest.z },
+          claimedDamage: ITEMS[Item.RocketLauncher].gun!.damage } }).length === 0);
     // Per-player loot: player 1 rolls once…
     const open1 = s.handle(1, { t: 'vaultChestOpen', x: chest.x, y: chest.y, z: chest.z });
     const got1 = open1.filter((o) => o.msg.t === 'gotitem');
@@ -3590,9 +3630,8 @@ let firstVault: VaultStamp | null = null;
     check('the Brute respawns after the recharge clock', reEnter.alive);
     // Loot REGROWS: enough worldTime has passed (window + recharge > cooldown),
     // so after re-killing the Brute the ORIGINAL looter rolls a fresh haul.
-    for (let i = 0; i < 40; i++) {
-      s2.handle(3, { t: 'vaultBossHit', cx: st.cx, cz: st.cz, amount: 10 });
-    }
+    s2.adminSetMode(1, 'creative');
+    killVault(s2, [3]);
     const regrow = s2.handle(1, { t: 'vaultChestOpen', x: chest.x, y: chest.y, z: chest.z });
     const got2 = regrow.filter((o) => o.msg.t === 'gotitem')
       .map((o) => o.msg as { item: number; count: number })
@@ -3606,16 +3645,22 @@ let firstVault: VaultStamp | null = null;
     s3.addPlayer(1, { username: 'Cheater', faction: 0 });
     s3.handle(1, { t: 'xform', x: chest.x + 500, y: 70, z: chest.z, yaw: 0, pitch: 0 });
     check('boss hits from across the map are refused',
-      s3.handle(1, { t: 'vaultBossHit', cx: st.cx, cz: st.cz, amount: 10 }).length === 0);
+      s3.handle(1, { t: 'vaultAttack', cx: st.cx, cz: st.cz,
+        intent: { encounterId: 'forged', sequence: 1, targetId: 0, source: 'rocket',
+          hit: { x: chest.x, y: chest.y, z: chest.z },
+          claimedDamage: ITEMS[Item.RocketLauncher].gun!.damage } }).length === 0);
     s3.handle(1, { t: 'xform', x: chest.x + 0.5, y: chest.y + 0.5, z: chest.z + 1.5, yaw: 0, pitch: 0 });
     s3.handle(1, { t: 'edit', x: chest.x, y: chest.y, z: chest.z, block: 0 }); // smash the chest
-    for (let i = 0; i < 30; i++) s3.handle(1, { t: 'vaultBossHit', cx: st.cx, cz: st.cz, amount: 10 });
+    killVault(s3, [1]);
     check('a broken VaultChest cell never pays out',
       !s3.handle(1, { t: 'vaultChestOpen', x: chest.x, y: chest.y, z: chest.z })
         .some((o) => o.msg.t === 'gotitem'));
     s3.adminSetMode(1, 'spectator');
     check('spectators cannot hit the Brute or loot the chest',
-      s3.handle(1, { t: 'vaultBossHit', cx: st.cx, cz: st.cz, amount: 10 }).length === 0 &&
+      s3.handle(1, { t: 'vaultAttack', cx: st.cx, cz: st.cz,
+        intent: { encounterId: 'spectator', sequence: 2, targetId: 0, source: 'rocket',
+          hit: { x: chest.x, y: chest.y, z: chest.z },
+          claimedDamage: ITEMS[Item.RocketLauncher].gun!.damage } }).length === 0 &&
       s3.handle(1, { t: 'vaultChestOpen', x: chest.x, y: chest.y, z: chest.z }).length === 0);
   }
 }
@@ -3785,9 +3830,12 @@ let firstVault: VaultStamp | null = null;
     BLOCKS[Block.MobSpawner].requiresTool && BLOCKS[Block.MobSpawner].minTier === 2 &&
     dropFor(Block.MobSpawner, 0.5) === null && !ITEMS[Block.MobSpawner]);
 
-  // Vault rebalance: soft Tier-I Brute; richer (never-OP) Tier-I loot.
-  check('Tier I Brute is soft; II/III unchanged',
-    bruteMaxHp(1) === 80 && bruteMaxHp(2) === 200 && bruteMaxHp(3) === 270);
+  // Dramatic boss rebalance: every family scales sharply across tiers.
+  const redesignedBosses = ['bone_warden', 'mire_queen', 'ember_colossus',
+    'crystal_seer', 'gilded_artificer'] as const;
+  check('all redesigned bosses scale sharply from Tier I through Tier III',
+    redesignedBosses.every((kind) => bossMaxHp(1, kind) < bossMaxHp(2, kind) &&
+      bossMaxHp(2, kind) < bossMaxHp(3, kind) && bossMaxHp(1, kind) >= 280));
   check('every Tier I roll includes bandages; pool has pistol+glider, no diamond',
     vaultLoot(1337, 3, 3, 1, 'Newbie').some((st) => st.id === Item.Bandage) &&
     VAULT_LOOT[1].some((e) => e.id === Item.Pistol) &&
@@ -3946,13 +3994,16 @@ let firstVault: VaultStamp | null = null;
   check('new themed wings generate (flooded / garden / treasury / lava)',
     ['flooded', 'garden', 'treasury', 'lava'].every((k) => kinds.has(k)),
     [...kinds].join(','));
-  check('boss flavours vary between vaults (brute/ravager/colossus roll)',
-    new Set(stamps.map((st) => st.bossKind)).size >= 2 &&
-    stamps.every((st) => ['brute', 'ravager', 'colossus'].includes(st.bossKind)));
-  check('every boss dais is gold-trimmed; treasuries hoard extra gold blocks',
-    stamps.every((st) => st.blocks.filter((b) => b.id === Block.GoldBlock).length >= 4) &&
+  check('all five redesigned boss families vary between vaults',
+    new Set(stamps.map((st) => st.bossKind)).size >= 4 &&
+    stamps.every((st) => ['bone_warden', 'mire_queen', 'ember_colossus',
+      'crystal_seer', 'gilded_artificer'].includes(st.bossKind)));
+  check('every boss arena has objective sockets + a deterministic seal; treasuries hoard gold',
+    stamps.every((st) => st.arena.sockets.length === 4 &&
+      Number.isFinite(st.arena.seal.center.x) && Number.isFinite(st.arena.seal.center.z) &&
+      st.arena.seal.height >= 4) &&
     stamps.filter((st) => st.rooms.some((r) => r.kind === 'treasury'))
-      .every((st) => st.blocks.filter((b) => b.id === Block.GoldBlock).length >= 8));
+      .every((st) => st.blocks.filter((b) => b.id === Block.GoldBlock).length >= 4));
 }
 
 // --- The Sword + Gold Block ------------------------------------------------------

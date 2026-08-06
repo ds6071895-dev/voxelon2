@@ -1,7 +1,8 @@
 import type { VaultFamily } from './vaults';
 
 export type BossMusicPhase = 1 | 2 | 3;
-export type BossMusicCue = 'summon' | 'poise' | 'phase' | 'enrage' | 'victory' | 'reset';
+export type BossMusicCue = 'summon' | 'poise' | 'phase' | 'enrage' | 'victory' | 'reset'
+  | 'door' | 'movement' | 'army' | 'healing' | 'interrupt' | 'combo';
 
 type Degree = number | null;
 type Timbre = 'choir' | 'reed' | 'brass' | 'glass' | 'clock' | 'bass';
@@ -250,19 +251,23 @@ export class BossMusicEngine {
     }
     if (!this.running) return;
 
+    const musicalKind: BossMusicCue = kind === 'army' ? 'summon'
+      : kind === 'door' || kind === 'combo' ? 'phase'
+      : kind === 'movement' || kind === 'interrupt' ? 'poise'
+      : kind === 'healing' ? 'summon' : kind;
     const cueTime = this.ctx.currentTime;
-    const minimumGap = kind === 'victory' ? 1.5 : kind === 'phase' ? 0.45 : 0.18;
+    const minimumGap = musicalKind === 'victory' ? 1.5 : musicalKind === 'phase' ? 0.45 : 0.18;
     const last = this.lastCueAt[kind] ?? -Infinity;
     if (cueTime - last < minimumGap) return;
-    if (kind === 'victory' && this.victoryEnding) return;
+    if (musicalKind === 'victory' && this.victoryEnding) return;
     this.lastCueAt[kind] = cueTime;
-    if (kind === 'victory') this.victoryEnding = true;
+    if (musicalKind === 'victory') this.victoryEnding = true;
 
     const profile = BOSS_SCORE_PROFILES[this.family];
     const now = cueTime + 0.025;
     const root = midiToHz(profile.rootMidi + 12);
 
-    if (kind === 'summon') {
+    if (musicalKind === 'summon') {
       this.lowBoom(now, 0.22);
       this.playTimbre(this.family === 'crystal' ? 'glass' : 'choir', root, {
         at: now + 0.04, duration: 0.7, gain: 0.11, wet: 0.65,
@@ -270,10 +275,10 @@ export class BossMusicEngine {
       this.playTimbre('choir', root * 1.5, {
         at: now + 0.11, duration: 0.62, gain: 0.07, pan: 0.25, wet: 0.7,
       });
-    } else if (kind === 'poise') {
+    } else if (musicalKind === 'poise') {
       this.glassHit(root * 4, now, 0.14, 0.08, -0.2);
       this.glassHit(root * 6, now + 0.055, 0.2, 0.055, 0.2);
-    } else if (kind === 'phase') {
+    } else if (musicalKind === 'phase') {
       this.lowBoom(now, 0.28);
       [0, 2, 4, 7].forEach((degree, index) => {
         const frequency = midiToHz(degreeToMidi(profile, degree, 1));
@@ -282,12 +287,12 @@ export class BossMusicEngine {
           wet: profile.reverb,
         });
       });
-    } else if (kind === 'enrage') {
+    } else if (musicalKind === 'enrage') {
       for (let i = 0; i < 3; i++) this.lowBoom(now + i * 0.13, 0.2 + i * 0.035);
       this.playTimbre('brass', root / 2, {
         at: now, duration: 0.75, gain: 0.14, wet: 0.18, cutoff: 1600,
       });
-    } else if (kind === 'victory') {
+    } else if (musicalKind === 'victory') {
       const capturedRun = this.runId;
       [0, 2, 4, 7, 9].forEach((degree, index) => {
         const frequency = midiToHz(degreeToMidi(profile, degree, 1));

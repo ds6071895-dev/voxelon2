@@ -65,10 +65,13 @@ export class VaultEncounterVisuals {
   private readonly objects: THREE.Mesh[] = [];
   private readonly actors: THREE.Mesh[] = [];
   private readonly aura: THREE.Mesh[] = [];
+  private readonly healingBeams: THREE.Mesh[] = [];
+  private readonly seal: THREE.Mesh;
+  private readonly moveMarker: THREE.Mesh;
 
   constructor(scene: THREE.Scene) {
     scene.add(this.root);
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < 12; i++) {
       const mesh = new THREE.Mesh(TELEGRAPH_GEOMETRY.circle, new THREE.MeshBasicMaterial({
         color: 0xffffff, transparent: true, opacity: 0.58,
         side: THREE.DoubleSide, depthWrite: false,
@@ -88,7 +91,7 @@ export class VaultEncounterVisuals {
       this.root.add(mesh);
       this.objects.push(mesh);
     }
-    for (let i = 0; i < 16; i++) {
+    for (let i = 0; i < 32; i++) {
       const mesh = new THREE.Mesh(ACTOR_GEOMETRY.brute, new THREE.MeshBasicMaterial({
         color: 0xffffff, transparent: true, opacity: 0.9,
       }));
@@ -97,6 +100,22 @@ export class VaultEncounterVisuals {
       this.root.add(mesh);
       this.actors.push(mesh);
     }
+    for (let i = 0; i < 8; i++) {
+      const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.09, 1, 8),
+        new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.62,
+          depthWrite: false }));
+      beam.visible = false; beam.renderOrder = 3; this.root.add(beam);
+      this.healingBeams.push(beam);
+    }
+    this.seal = new THREE.Mesh(new THREE.BoxGeometry(0.16, 1, 1),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5,
+        depthWrite: false }));
+    this.seal.visible = false; this.seal.renderOrder = 4; this.root.add(this.seal);
+    this.moveMarker = new THREE.Mesh(new THREE.RingGeometry(0.76, 1, 36),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.68,
+        side: THREE.DoubleSide, depthWrite: false }));
+    this.moveMarker.rotation.x = -Math.PI / 2; this.moveMarker.visible = false;
+    this.moveMarker.renderOrder = 4; this.root.add(this.moveMarker);
     for (let i = 0; i < 2; i++) {
       const ring = new THREE.Mesh(
         new THREE.RingGeometry(i ? 0.84 : 0.9, 1, 48),
@@ -180,6 +199,42 @@ export class VaultEncounterVisuals {
       mesh.scale.set(0.8 + hp * 0.2, 0.8 + hp * 0.2, 0.8 + hp * 0.2);
       (mesh.material as THREE.MeshBasicMaterial).color.set(color);
     });
+    const critical = snapshot.objects.filter((o) => o.critical && o.hp > 0);
+    this.healingBeams.forEach((beam, i) => {
+      const source = snapshot.healing.active ? critical[i] : undefined;
+      beam.visible = !!source;
+      if (!source) return;
+      const a = new THREE.Vector3(source.position.x, source.position.y + 1,
+        source.position.z);
+      const b = new THREE.Vector3(snapshot.boss.position.x,
+        snapshot.boss.position.y + 1.2, snapshot.boss.position.z);
+      const d = b.clone().sub(a); const len = Math.max(0.01, d.length());
+      beam.position.copy(a).addScaledVector(d, 0.5);
+      beam.scale.set(1, len, 1);
+      beam.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), d.normalize());
+      const mat = beam.material as THREE.MeshBasicMaterial;
+      mat.color.set(color); mat.opacity = reducedMotion ? 0.5 : 0.48 +
+        Math.sin(snapshot.time * 10 + i) * 0.14;
+    });
+    const seal = snapshot.seal.geometry;
+    this.seal.visible = snapshot.seal.sealed && !!seal;
+    if (seal) {
+      this.seal.position.set(seal.center.x, seal.center.y + seal.height / 2, seal.center.z);
+      this.seal.rotation.set(0, seal.axis === 'z' ? Math.PI / 2 : 0, 0);
+      this.seal.scale.set(1, seal.height, seal.halfWidth * 2);
+      const mat = this.seal.material as THREE.MeshBasicMaterial;
+      mat.color.set(highContrast ? 0xffffff : color);
+      mat.opacity = reducedMotion ? 0.48 : 0.42 + Math.sin(snapshot.time * 8) * 0.12;
+    }
+    this.moveMarker.visible = !!snapshot.movement;
+    if (snapshot.movement) {
+      this.moveMarker.position.set(snapshot.movement.to.x, snapshot.movement.to.y + 0.07,
+        snapshot.movement.to.z);
+      const left = Math.max(0, snapshot.movement.executeAt - snapshot.time);
+      const size = 1.3 + Math.min(1, left) * 0.7;
+      this.moveMarker.scale.setScalar(size);
+      (this.moveMarker.material as THREE.MeshBasicMaterial).color.set(color);
+    }
     this.aura.forEach((ring, i) => {
       ring.visible = snapshot.status === 'intro' || snapshot.status === 'active';
       ring.position.set(snapshot.boss.position.x, snapshot.boss.position.y + 0.055 + i * 0.01,
@@ -247,7 +302,9 @@ export class VaultEncounterVisuals {
 
   hide(): void {
     this.root.visible = false;
-    for (const pool of [this.hazards, this.objects, this.actors, this.aura]) {
+    this.seal.visible = false;
+    this.moveMarker.visible = false;
+    for (const pool of [this.hazards, this.objects, this.actors, this.aura, this.healingBeams]) {
       for (const mesh of pool) mesh.visible = false;
     }
   }

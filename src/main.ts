@@ -85,7 +85,7 @@ import {
 } from './vaults';
 import {
   BOSS_DEFINITIONS, EncounterEvent, EncounterSnapshot, VaultAttackIntent, VaultEncounter,
-  bossMaxHp,
+  bossMaxHp, sealContains,
 } from './vault_encounter';
 import {
   VaultBossHUD, VaultCinematic, loadAccessibility, saveAccessibility,
@@ -2467,6 +2467,7 @@ interface VaultView { tier: number; hp: number; maxHp: number; alive: boolean; o
 const vaultViews = new Map<string, VaultView>();
 let curVault: VaultStamp | null = null;
 let bruteMob: Mob | null = null;
+const bossRenderTarget = new THREE.Vector3();
 let localVaultEncounter: VaultEncounter | null = null;
 let localEncounterVaultKey: string | null = null;
 let encounterSnapshot: EncounterSnapshot | null = null;
@@ -2737,6 +2738,21 @@ function encounterEvent(event: EncounterEvent): void {
     audio.setVaultMusicPhase(phase, phaseSnapshot.hpPercent < 0.15);
     audio.vaultMusicCue('phase');
     triggerEncounterShake(0.55, 0.18);
+  } else if (event.type === 'seal') {
+    audio.vaultMusicCue('door');
+    triggerEncounterShake(0.45, 0.12);
+  } else if (event.type === 'move') {
+    audio.vaultMusicCue('movement');
+    triggerEncounterShake(0.18, 0.045);
+  } else if (event.type === 'combo') {
+    audio.vaultMusicCue('combo');
+    triggerEncounterShake(0.5, 0.13);
+  } else if (event.type === 'wave') {
+    audio.vaultMusicCue('army');
+    triggerEncounterShake(0.4, 0.1);
+  } else if (event.type === 'heal') {
+    audio.vaultMusicCue(event.audio === 'healing_interrupt' ? 'interrupt' : 'healing');
+    if (event.audio === 'healing_interrupt') showNotice('✦ HEALING NETWORK BROKEN!');
   } else if (event.type === 'spawn') {
     audio.vaultMusicCue('summon');
     triggerEncounterShake(0.22, 0.07);
@@ -2790,7 +2806,8 @@ function beginOfflineEncounter(v: VaultStamp): void {
     tier: v.tier, kind: v.bossKind, family: v.family,
     center: { x: boss.x + 0.5, y: boss.y, z: boss.z + 0.5 },
     bounds: { ...v.arena.bounds }, sockets: v.arena.sockets,
-    cameraAnchors: v.arena.cameraAnchors, startTime: worldTimeLocal,
+    cameraAnchors: v.arena.cameraAnchors, seal: v.arena.seal,
+    startTime: worldTimeLocal,
   });
   localVaultEncounter.start(0, worldTimeLocal);
   localEncounterVaultKey = vaultKeyOf(v);
@@ -2838,6 +2855,13 @@ function updateVaults(dt: number): void {
   if (!curVault) { vaultEncounterVisuals.hide(); return; }
   const view = vaultViews.get(vaultKeyOf(curVault));
   const inArena = localInsideArena(curVault);
+  const myEncounterId = net.connected ? net.myId : 0;
+  if (encounterSnapshot?.seal.sealed &&
+      encounterSnapshot.participants.includes(myEncounterId)) {
+    const b = curVault.arena.bounds;
+    player.pos.x = Math.max(b.minX + 0.15, Math.min(b.maxX - 0.15, player.pos.x));
+    player.pos.z = Math.max(b.minZ + 0.15, Math.min(b.maxZ - 0.15, player.pos.z));
+  }
   encounterRequestTimer -= dt;
   if (net.connected && view?.alive && inArena && !encounterSnapshot &&
       encounterRequestTimer <= 0) {
@@ -2857,8 +2881,6 @@ function updateVaults(dt: number): void {
     encounterSnapshot = localVaultEncounter.snapshot();
     if (bruteMob) {
       bruteMob.health = encounterSnapshot.hp;
-      bruteMob.pos.set(encounterSnapshot.boss.position.x,
-        encounterSnapshot.boss.position.y, encounterSnapshot.boss.position.z);
     }
     vaultBossHud.update(encounterSnapshot);
     audio.setVaultMusicPhase(encounterSnapshot.phase, encounterSnapshot.hpPercent < 0.15);
@@ -2887,6 +2909,13 @@ function updateVaults(dt: number): void {
     }
   }
   if (bruteMob?.removed) bruteMob = null;
+  if (bruteMob && encounterSnapshot) {
+    bossRenderTarget.set(encounterSnapshot.boss.position.x,
+      encounterSnapshot.boss.position.y, encounterSnapshot.boss.position.z);
+    bruteMob.pos.lerp(bossRenderTarget, Math.min(1, dt *
+      (encounterSnapshot.movement ? 8 : 12)));
+    bruteMob.model.group.position.copy(bruteMob.pos);
+  }
   // The Brute prowls its loot room whenever the vault is uncleared.
   if (view?.alive && !bruteMob && !player.dead) {
     const boss = curVault.rooms.find((r) => r.kind === 'boss');
@@ -3098,6 +3127,11 @@ mobs.onBruteDown = () => {
   // restores mirrored HP in onBruteHit before Mobs reaches this callback.
 };
 projectiles.encounterSink = (point, damage, source) => {
+  const seal = encounterSnapshot?.seal;
+  if (seal?.sealed && seal.geometry && sealContains(seal.geometry, point, 0.08)) {
+    particles.poof(point.x, point.y, point.z);
+    return true;
+  }
   const target = vaultEncounterVisuals.targetAtPoint(encounterSnapshot, point);
   return target
     ? hitEncounterTarget(target.id, target.hit, damage, source)
@@ -3148,10 +3182,7 @@ net.onEncounterSnapshot = (cx, cz, snapshot) => {
   encounterSnapshot = snapshot;
   vaultBossHud.update(snapshot);
   audio.setVaultMusicPhase(snapshot.phase, snapshot.hpPercent < 0.15);
-  if (bruteMob) {
-    bruteMob.health = snapshot.hp;
-    bruteMob.pos.set(snapshot.boss.position.x, snapshot.boss.position.y, snapshot.boss.position.z);
-  }
+  if (bruteMob) bruteMob.health = snapshot.hp;
   const view = vaultViews.get(`${cx},${cz}`);
   if (view) { view.hp = snapshot.hp; view.maxHp = snapshot.maxHp; view.alive = snapshot.hp > 0; }
 };

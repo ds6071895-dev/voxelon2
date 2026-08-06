@@ -15,9 +15,9 @@ export const ENCOUNTER_RESET_GRACE_SECONDS = 15;
 export const ENCOUNTER_ENRAGE_SECONDS = 360;
 export const MAX_ENCOUNTER_PARTICIPANTS = 6;
 export const MAX_ENCOUNTER_TRACKED_PARTICIPANTS = 64;
-export const MAX_ENCOUNTER_ACTORS = 16;
+export const MAX_ENCOUNTER_ACTORS = 32;
 export const MAX_ENCOUNTER_OBJECTS = 24;
-export const MAX_ENCOUNTER_HAZARDS = 8;
+export const MAX_ENCOUNTER_HAZARDS = 12;
 export const MIN_MAJOR_TELEGRAPH = 0.8;
 
 export type EncounterStatus =
@@ -40,6 +40,42 @@ export interface VaultAttackIntent {
 }
 
 export interface Vec3 { x: number; y: number; z: number }
+
+export type BossMoveKind =
+  | 'strafe' | 'pursue' | 'retreat' | 'charge' | 'leap'
+  | 'blink' | 'burrow' | 'socket' | 'target_swap' | 'center';
+
+export interface EncounterSealGeometry {
+  center: Vec3;
+  axis: 'x' | 'z';
+  halfWidth: number;
+  height: number;
+  inside: Vec3;
+  outside: Vec3;
+}
+
+export interface BossMovementState {
+  kind: BossMoveKind;
+  from: Vec3;
+  to: Vec3;
+  startedAt: number;
+  executeAt: number;
+}
+
+export interface EncounterHealingState {
+  active: boolean;
+  sources: number;
+  rate: number;
+  healed: number;
+  cap: number;
+}
+
+export interface EncounterWaveState {
+  number: number;
+  alive: number;
+  cap: number;
+}
+
 export interface ArenaBounds {
   minX: number; minY: number; minZ: number;
   maxX: number; maxY: number; maxZ: number;
@@ -53,8 +89,9 @@ export interface EncounterParticipant {
 }
 
 export type EncounterActorKind =
-  | 'zombie' | 'skitter' | 'spitter' | 'mireling'
-  | 'emberling' | 'mirror_clone' | 'clockwork_guard';
+  | 'zombie' | 'skeleton' | 'bone_knight' | 'skitter' | 'spitter' | 'mireling'
+  | 'bog_brute' | 'emberling' | 'magma_brute' | 'shardling' | 'mirror_clone'
+  | 'clockwork_guard' | 'clockwork_drone';
 export type EncounterObjectKind =
   | 'sarcophagus' | 'brood_pool' | 'brazier' | 'prism' | 'turret'
   | 'bone_pillar' | 'safe_island' | 'cover' | 'mine' | 'crusher_wall';
@@ -101,6 +138,7 @@ export interface EncounterHazard {
 export interface EncounterEvent {
   id: string;
   type: 'start' | 'cast' | 'attack' | 'phase' | 'spawn' | 'death'
+    | 'move' | 'heal' | 'seal' | 'wave' | 'combo'
     | 'poise_break' | 'enrage' | 'victory' | 'reset';
   executeAt: number;
   sourceId: number;
@@ -128,6 +166,10 @@ export interface BossDefinition {
   criticalObject: EncounterObjectKind;
   criticalCount: number;
   poiseObjects?: number;
+  moveStyle: readonly BossMoveKind[];
+  moveCadence: number;
+  healingPerSource: number;
+  army: readonly EncounterActorKind[];
 }
 
 export interface AttackDefinition {
@@ -159,6 +201,8 @@ export const BOSS_DEFINITIONS: Record<VaultBossKind, BossDefinition> = {
     victoryLine: 'The dead fall silent at last.',
     phaseTitles: ['The Sealed Tomb', 'The Graves Open', 'Last Rites'],
     criticalObject: 'sarcophagus', criticalCount: 4, poiseObjects: 2,
+    moveStyle: ['socket', 'blink', 'charge', 'target_swap'], moveCadence: 5.2,
+    healingPerSource: 1.25, army: ['skeleton', 'zombie', 'bone_knight'],
     phases: [
       [
         attack('Warden Cleave', 'cone', 0.9, 3.2, 6, 5, { angle: Math.PI * 0.7 }),
@@ -186,6 +230,8 @@ export const BOSS_DEFINITIONS: Record<VaultBossKind, BossDefinition> = {
     victoryLine: 'The brood sinks back into the mire.',
     phaseTitles: ['Venom Crown', 'The Brood Awakens', 'Drowning Court'],
     criticalObject: 'brood_pool', criticalCount: 3,
+    moveStyle: ['burrow', 'target_swap', 'retreat', 'pursue'], moveCadence: 4.4,
+    healingPerSource: 1.55, army: ['mireling', 'spitter', 'skitter', 'bog_brute'],
     phases: [
       [
         attack('Poison Spit', 'cone', 0.8, 2.8, 5, 9,
@@ -215,6 +261,8 @@ export const BOSS_DEFINITIONS: Record<VaultBossKind, BossDefinition> = {
     victoryLine: 'The furnace gutters into ash.',
     phaseTitles: ['Cold Iron', 'Furnace Heart', 'Worldfire'],
     criticalObject: 'brazier', criticalCount: 4,
+    moveStyle: ['leap', 'charge', 'center', 'pursue'], moveCadence: 5.6,
+    healingPerSource: 1.35, army: ['emberling', 'emberling', 'magma_brute'],
     phases: [
       [
         attack('Hammer Fist', 'circle', 1.1, 4, 8, 4),
@@ -242,6 +290,8 @@ export const BOSS_DEFINITIONS: Record<VaultBossKind, BossDefinition> = {
     victoryLine: 'A thousand doomed futures shatter.',
     phaseTitles: ['Foreseen', 'Hall of Mirrors', 'Final Prophecy'],
     criticalObject: 'prism', criticalCount: 3,
+    moveStyle: ['blink', 'target_swap', 'socket', 'retreat'], moveCadence: 3.9,
+    healingPerSource: 1.45, army: ['mirror_clone', 'shardling', 'mirror_clone'],
     phases: [
       [
         attack('Fate Beam', 'line', 1.1, 3.8, 7, 18, { width: 1.4 }),
@@ -271,6 +321,8 @@ export const BOSS_DEFINITIONS: Record<VaultBossKind, BossDefinition> = {
     victoryLine: 'The golden engine grinds to a halt.',
     phaseTitles: ['Calculated Defense', 'War Machine', 'Total Lockdown'],
     criticalObject: 'turret', criticalCount: 2,
+    moveStyle: ['strafe', 'charge', 'socket', 'target_swap'], moveCadence: 4.3,
+    healingPerSource: 2.1, army: ['clockwork_guard', 'clockwork_drone', 'clockwork_guard'],
     phases: [
       [
         attack('Golden Blades', 'cone', 0.85, 3, 6, 10,
@@ -326,6 +378,7 @@ export interface EncounterConfig {
   bounds: ArenaBounds;
   sockets: readonly Vec3[];
   cameraAnchors: readonly Vec3[];
+  seal?: EncounterSealGeometry;
   startTime: number;
 }
 
@@ -371,6 +424,10 @@ export interface EncounterSnapshot {
   participants: number[];
   peakParticipants: number;
   criticalObjects: number;
+  movement: BossMovementState | null;
+  healing: EncounterHealingState;
+  wave: EncounterWaveState;
+  seal: { sealed: boolean; geometry: EncounterSealGeometry | null };
 }
 
 function hash32(x: number): number {
@@ -427,7 +484,14 @@ export class VaultEncounter {
   private entityNo = 1;
   private nextAttackAt = 0;
   private phaseObjectsSpawned = false;
-  private pendingMove: { at: number; position: Vec3 } | null = null;
+  private pendingMove: (BossMovementState & { position: Vec3; at: number }) | null = null;
+  private nextMoveAt = 0;
+  private waveNo = 0;
+  private healedTotal = 0;
+  private healingActive = false;
+  private readonly comboQueue: AttackDefinition[] = [];
+  private attackNo = 0;
+  private lastAttackName = '';
   private enrageEmitted = false;
   private victoryEmitted = false;
 
@@ -435,7 +499,9 @@ export class VaultEncounter {
     this.config = { ...config, center: copyVec(config.center),
       bounds: { ...config.bounds },
       sockets: config.sockets.map(copyVec),
-      cameraAnchors: config.cameraAnchors.map(copyVec) };
+      cameraAnchors: config.cameraAnchors.map(copyVec),
+      seal: config.seal ? { ...config.seal, center: copyVec(config.seal.center),
+        inside: copyVec(config.seal.inside), outside: copyVec(config.seal.outside) } : undefined };
     this.definition = BOSS_DEFINITIONS[config.kind];
     if (!this.definition || this.definition.family !== config.family) {
       throw new Error('vault encounter family/boss mismatch');
@@ -455,6 +521,8 @@ export class VaultEncounter {
     this.status = 'intro';
     this.startedAt = this.now + ENCOUNTER_INTRO_SECONDS;
     this.nextAttackAt = this.startedAt + 0.8;
+    this.nextMoveAt = this.startedAt + 2.2;
+    this.emit('seal', this.now, [], 'door_seal');
     this.emit('start', this.startedAt, [], 'intro');
   }
 
@@ -526,9 +594,13 @@ export class VaultEncounter {
     }
 
     this.expireEntities();
+    this.tickHealing(dt);
     if (this.pendingMove && this.now >= this.pendingMove.at) {
       this.bossPosition = copyVec(this.pendingMove.position);
       this.pendingMove = null;
+    }
+    if (!this.cast && !this.pendingMove && this.now >= this.nextMoveAt && livingInside.length) {
+      this.beginMove(livingInside, input);
     }
     this.resolveHazards();
     if (!this.cast && this.now >= this.nextAttackAt && livingInside.length) {
@@ -546,20 +618,111 @@ export class VaultEncounter {
       choices = attacks.filter((a) => !a.object || a.object !== this.definition.criticalObject);
       if (!choices.length) choices = attacks;
     }
-    const chosen = choices[Math.floor(this.rng() * choices.length)];
+    let chosen = this.comboQueue.shift();
+    if (!chosen) {
+      const fresh = choices.filter((a) => a.name !== this.lastAttackName);
+      const pool = fresh.length ? fresh : choices;
+      chosen = pool[Math.floor(this.rng() * pool.length)];
+      this.attackNo++;
+      if (this.attackNo % 4 === 0) {
+        const follow = choices.filter((a) => a.name !== chosen!.name);
+        if (follow.length) {
+          this.comboQueue.push(follow[Math.floor(this.rng() * follow.length)]);
+          this.emit('combo', this.now, targetIds, 'major_combo');
+        }
+      }
+    }
+    this.lastAttackName = chosen.name;
     const targetId = targetIds[Math.floor(this.rng() * targetIds.length)];
     const target = input.get(targetId)?.position ?? this.config.center;
     this.cast = { attack: chosen, endsAt: this.now + chosen.telegraph + chosen.recovery };
-    this.nextAttackAt = this.now + chosen.cooldown * (this.enrage ? 0.75 : 1);
+    const comboDelay = chosen.telegraph + chosen.recovery + 0.25;
+    this.nextAttackAt = this.now + (this.comboQueue.length ? comboDelay
+      : chosen.cooldown * (this.enrage ? 0.75 : 1));
     this.emit('cast', this.now, [targetId], chosen.name);
     this.spawnPattern(chosen, target, targetIds);
     if (chosen.name === 'Burrow' || chosen.name === 'Astral Arrival') {
       const p = this.config.sockets[Math.floor(this.rng() *
         Math.max(1, this.config.sockets.length))] ?? this.config.center;
-      this.pendingMove = { at: this.now + chosen.telegraph, position: copyVec(p) };
+      this.scheduleMove(chosen.name === 'Burrow' ? 'burrow' : 'blink', p, chosen.telegraph);
     } else if (chosen.name.includes('Charge') || chosen.name === 'Preview Dash') {
-      this.pendingMove = { at: this.now + chosen.telegraph, position: copyVec(target) };
+      this.scheduleMove('charge', target, chosen.telegraph);
     }
+  }
+
+  private beginMove(targetIds: number[], input: ReadonlyMap<number, EncounterParticipant>): void {
+    const styles = this.definition.moveStyle;
+    const kind = styles[Math.floor(this.rng() * styles.length)] ?? 'socket';
+    const targetId = targetIds[Math.floor(this.rng() * targetIds.length)];
+    const target = input.get(targetId)?.position ?? this.config.center;
+    const sockets = this.config.sockets.length ? this.config.sockets : [this.config.center];
+    let destination = copyVec(sockets[Math.floor(this.rng() * sockets.length)] ?? this.config.center);
+    if (kind === 'center') destination = copyVec(this.config.center);
+    else if (kind === 'charge' || kind === 'leap' || kind === 'pursue' || kind === 'target_swap') {
+      const dx = target.x - this.config.center.x, dz = target.z - this.config.center.z;
+      const rawLen = Math.hypot(dx, dz);
+      if (rawLen < 0.5) {
+        destination = copyVec(sockets[Math.floor(this.rng() * sockets.length)] ?? this.config.center);
+      } else {
+        const offset = kind === 'pursue' ? -2.5 : -1.8;
+        destination = { x: target.x + dx / rawLen * offset, y: this.config.center.y,
+          z: target.z + dz / rawLen * offset };
+      }
+    } else if (kind === 'retreat') {
+      const dx = this.bossPosition.x - target.x, dz = this.bossPosition.z - target.z;
+      const len = Math.max(0.001, Math.hypot(dx, dz));
+      destination = { x: this.bossPosition.x + dx / len * 6, y: this.config.center.y,
+        z: this.bossPosition.z + dz / len * 6 };
+    } else if (kind === 'strafe') {
+      const angle = Math.atan2(target.z - this.config.center.z, target.x - this.config.center.x) +
+        (this.rng() < 0.5 ? Math.PI / 2 : -Math.PI / 2);
+      destination = { x: target.x + Math.cos(angle) * 5, y: this.config.center.y,
+        z: target.z + Math.sin(angle) * 5 };
+    }
+    destination.x = Math.max(this.config.bounds.minX + 1.2,
+      Math.min(this.config.bounds.maxX - 1.2, destination.x));
+    destination.z = Math.max(this.config.bounds.minZ + 1.2,
+      Math.min(this.config.bounds.maxZ - 1.2, destination.z));
+    destination.y = this.config.center.y;
+    const telegraph = kind === 'charge' || kind === 'leap' ? 1.05
+      : kind === 'burrow' || kind === 'blink' || kind === 'target_swap' ? 0.8 : 0.55;
+    this.scheduleMove(kind, destination, telegraph);
+    const pressure = Math.max(0, this.phase - 1) + (this.enrage ? 1 : 0);
+    this.nextMoveAt = this.now + Math.max(2.4,
+      this.definition.moveCadence - pressure * 0.65) * (this.enrage ? 0.8 : 1);
+  }
+
+  private scheduleMove(kind: BossMoveKind, destination: Vec3, telegraph: number): void {
+    const executeAt = this.now + Math.max(0.45, telegraph);
+    this.pendingMove = {
+      kind, from: copyVec(this.bossPosition), to: copyVec(destination),
+      startedAt: this.now, executeAt, at: executeAt, position: copyVec(destination),
+    };
+    this.emit('move', this.now, [], `move_${kind}`);
+  }
+
+  private healingRate(): number {
+    if (this.phase < 2 || this.status !== 'active') return 0;
+    const sources = this.objects.filter((o) => o.critical && o.hp > 0).length;
+    if (!sources || this.hp >= this.maxHp * 0.9 || this.healedTotal >= this.maxHp * 0.35) return 0;
+    return sources * this.definition.healingPerSource * (1 + (this.config.tier - 1) * 0.2);
+  }
+
+  private tickHealing(dt: number): void {
+    const rate = this.healingRate();
+    if (rate <= 0) {
+      this.healingActive = false;
+      return;
+    }
+    if (!this.healingActive) {
+      this.healingActive = true;
+      this.emit('heal', this.now, [], 'healing_channel');
+    }
+    const capLeft = this.maxHp * 0.35 - this.healedTotal;
+    const healthLeft = this.maxHp * 0.9 - this.hp;
+    const amount = Math.max(0, Math.min(rate * dt, capLeft, healthLeft));
+    this.hp += amount;
+    this.healedTotal += amount;
   }
 
   private spawnPattern(a: AttackDefinition, target: Vec3, targetIds: number[]): void {
@@ -590,7 +753,16 @@ export class VaultEncounter {
     }
     if (a.summons) {
       const pressure = Math.ceil((this.peakParticipants - 1) / 2);
-      for (let i = 0; i < count + pressure; i++) this.spawnActor(a.summons, targetIds);
+      const total = Math.min(MAX_ENCOUNTER_ACTORS - this.actors.length,
+        count + pressure + this.phase + this.config.tier);
+      if (total > 0) {
+        this.waveNo++;
+        this.emit('wave', this.now, targetIds, `army_${this.waveNo}`);
+      }
+      for (let i = 0; i < total; i++) {
+        const kind = i === 0 ? a.summons : this.definition.army[i % this.definition.army.length];
+        this.spawnActor(kind, targetIds);
+      }
     }
   }
 
@@ -612,7 +784,9 @@ export class VaultEncounter {
     if (this.actors.length >= MAX_ENCOUNTER_ACTORS) return;
     const socket = this.config.sockets[this.actors.length % Math.max(1, this.config.sockets.length)]
       ?? this.config.center;
-    const hp = 12 + this.config.tier * 8;
+    const elite = kind === 'bone_knight' || kind === 'bog_brute' || kind === 'magma_brute' ||
+      kind === 'clockwork_guard';
+    const hp = (elite ? 24 : 14) + this.config.tier * (elite ? 12 : 9);
     const a: EncounterActor = {
       id: this.entityNo++, kind, position: copyVec(socket), hp, maxHp: hp,
       targetId: targets[Math.floor(this.rng() * Math.max(1, targets.length))] ?? -1,
@@ -634,7 +808,11 @@ export class VaultEncounter {
       const dx = target.position.x - actor.position.x;
       const dz = target.position.z - actor.position.z;
       const len = Math.max(0.001, Math.hypot(dx, dz));
-      const speed = actor.kind === 'mireling' || actor.kind === 'clockwork_guard' ? 2.3 : 1.5;
+      const fast = actor.kind === 'mireling' || actor.kind === 'skitter' ||
+        actor.kind === 'clockwork_drone' || actor.kind === 'shardling';
+      const heavy = actor.kind === 'bone_knight' || actor.kind === 'bog_brute' ||
+        actor.kind === 'magma_brute';
+      const speed = fast ? 2.8 : heavy ? 1.25 : actor.kind === 'clockwork_guard' ? 2.1 : 1.7;
       const nx = actor.position.x + dx / len * Math.min(len, speed * dt);
       const nz = actor.position.z + dz / len * Math.min(len, speed * dt);
       actor.position.x = Math.max(this.config.bounds.minX,
@@ -642,14 +820,20 @@ export class VaultEncounter {
       actor.position.z = Math.max(this.config.bounds.minZ,
         Math.min(this.config.bounds.maxZ, nz));
       if (this.now >= actor.nextActionAt && this.hazards.length < MAX_ENCOUNTER_HAZARDS) {
-        actor.nextActionAt = this.now + 2.4;
-        const executeAt = this.now + MIN_MAJOR_TELEGRAPH;
+        const ranged = actor.kind === 'spitter' || actor.kind === 'mirror_clone' ||
+          actor.kind === 'shardling' || actor.kind === 'clockwork_drone' || actor.kind === 'skeleton';
+        actor.nextActionAt = this.now + (ranged ? 3 : heavy ? 3.2 : 2.4);
+        const executeAt = this.now + (ranged ? 0.95 : MIN_MAJOR_TELEGRAPH);
         const h: EncounterHazard = {
-          id: this.entityNo++, shape: 'circle', origin: copyVec(target.position),
-          radius: 1.25, width: 0.4, angle: Math.PI * 2,
+          id: this.entityNo++, shape: ranged ? 'line' : 'circle',
+          origin: ranged ? copyVec(actor.position) : copyVec(target.position),
+          target: ranged ? copyVec(target.position) : undefined,
+          radius: ranged ? Math.min(14, Math.max(3, len)) : heavy ? 1.8 : 1.25,
+          width: ranged ? 1.1 : 0.4, angle: Math.PI * 2,
           telegraphAt: this.now, executeAt, expiresAt: executeAt + 0.3,
-          damage: Math.max(2, Math.round(3 * encounterDamageMultiplier(this.config.tier))),
-          attack: `${actor.kind} strike`, hitParticipants: [],
+          damage: Math.max(2, Math.round((heavy ? 5 : ranged ? 4 : 3) *
+            encounterDamageMultiplier(this.config.tier))),
+          attack: `${actor.kind} ${ranged ? 'volley' : 'strike'}`, hitParticipants: [],
         };
         this.hazards.push(h);
         this.emit('attack', executeAt, [target.id], h.attack, h, actor.id);
@@ -772,12 +956,19 @@ export class VaultEncounter {
   private changePhase(phase: 2 | 3): void {
     this.phase = phase;
     this.phaseObjectsSpawned = false;
+    this.comboQueue.length = 0;
+    this.nextMoveAt = this.now + 2;
+    this.healingActive = false;
     this.cast = null;
     this.pendingMove = null;
     this.hazards.length = 0;
     this.phaseInvulnerableUntil = this.now + ENCOUNTER_PHASE_TRANSITION_SECONDS;
     this.nextAttackAt = this.phaseInvulnerableUntil + 0.2;
     this.emit('phase', this.now, [], `phase_${phase}`);
+    const opener = this.definition.phases[phase - 1].filter((a) =>
+      !a.object || a.object !== this.definition.criticalObject).slice(0, 2);
+    this.comboQueue.splice(0, this.comboQueue.length, ...opener);
+    if (opener.length > 1) this.emit('combo', this.now, [...this.participants], 'phase_combo');
     if (phase === 2) {
       for (let i = 0; i < this.definition.criticalCount; i++) {
         this.spawnObject(this.definition.criticalObject, i);
@@ -789,9 +980,25 @@ export class VaultEncounter {
         gilded_artificer: 'clockwork_guard',
       };
       const targets = [...this.participants];
-      const count = Math.min(2 + Math.ceil((this.peakParticipants - 1) / 2),
+      const count = Math.min(5 + this.config.tier + Math.ceil((this.peakParticipants - 1) * 1.5),
         MAX_ENCOUNTER_ACTORS);
-      for (let i = 0; i < count; i++) this.spawnActor(summon[this.config.kind], targets);
+      this.waveNo++;
+      this.emit('wave', this.now, targets, `phase_army_${this.waveNo}`);
+      for (let i = 0; i < count; i++) {
+        this.spawnActor(i === 0 ? summon[this.config.kind]
+          : this.definition.army[i % this.definition.army.length], targets);
+      }
+    } else if (phase === 3) {
+      const targets = [...this.participants];
+      const count = Math.min(4 + this.config.tier + this.peakParticipants,
+        MAX_ENCOUNTER_ACTORS - this.actors.length);
+      if (count > 0) {
+        this.waveNo++;
+        this.emit('wave', this.now, targets, `final_army_${this.waveNo}`);
+      }
+      for (let i = 0; i < count; i++) {
+        this.spawnActor(this.definition.army[i % this.definition.army.length], targets);
+      }
     }
   }
 
@@ -806,6 +1013,10 @@ export class VaultEncounter {
     if (i < 0) return;
     const [o] = this.objects.splice(i, 1);
     if (o.critical) {
+      if (this.healingActive && !this.objects.some((x) => x.critical && x.hp > 0)) {
+        this.healingActive = false;
+        this.emit('heal', this.now, [], 'healing_interrupt');
+      }
       this.poise = Math.max(0, this.poise - 100 /
         Math.max(1, this.definition.poiseObjects ?? this.definition.criticalCount));
       if (this.poise <= 0) {
@@ -854,6 +1065,13 @@ export class VaultEncounter {
     this.phaseObjectsSpawned = false;
     this.cast = null;
     this.pendingMove = null;
+    this.nextMoveAt = 0;
+    this.waveNo = 0;
+    this.healedTotal = 0;
+    this.healingActive = false;
+    this.comboQueue.length = 0;
+    this.attackNo = 0;
+    this.lastAttackName = '';
     this.actors.length = 0;
     this.objects.length = 0;
     this.hazards.length = 0;
@@ -889,6 +1107,17 @@ export class VaultEncounter {
         safeLanes: h.safeLanes && [...h.safeLanes] })),
       participants: [...this.participants], peakParticipants: this.peakParticipants,
       criticalObjects: this.objects.filter((o) => o.critical && o.hp > 0).length,
+      movement: this.pendingMove ? { kind: this.pendingMove.kind,
+        from: copyVec(this.pendingMove.from), to: copyVec(this.pendingMove.to),
+        startedAt: this.pendingMove.startedAt, executeAt: this.pendingMove.executeAt } : null,
+      healing: { active: this.healingRate() > 0,
+        sources: this.objects.filter((o) => o.critical && o.hp > 0).length,
+        rate: this.healingRate(), healed: this.healedTotal, cap: this.maxHp * 0.35 },
+      wave: { number: this.waveNo, alive: this.actors.length, cap: MAX_ENCOUNTER_ACTORS },
+      seal: { sealed: this.status === 'intro' || this.status === 'active' ||
+        this.status === 'reset_grace', geometry: this.config.seal ? { ...this.config.seal,
+          center: copyVec(this.config.seal.center), inside: copyVec(this.config.seal.inside),
+          outside: copyVec(this.config.seal.outside) } : null },
     };
   }
 
@@ -937,6 +1166,22 @@ export function hazardContains(h: EncounterHazard, p: Vec3): boolean {
   return false;
 }
 
+/** Point test for the temporary boss-room barrier. `axis` is the corridor
+ * direction, so the barrier plane is perpendicular to it. */
+export function sealContains(
+  seal: EncounterSealGeometry, point: Vec3, padding = 0,
+): boolean {
+  if (point.y < seal.center.y - padding ||
+      point.y > seal.center.y + seal.height + padding) return false;
+  const forward = seal.axis === 'x'
+    ? Math.abs(point.x - seal.center.x)
+    : Math.abs(point.z - seal.center.z);
+  const across = seal.axis === 'x'
+    ? Math.abs(point.z - seal.center.z)
+    : Math.abs(point.x - seal.center.x);
+  return forward <= 0.28 + padding && across <= seal.halfWidth + padding;
+}
+
 /** Fail-closed network/save sanitizer. Active attempts themselves are never saved. */
 export function sanitizeEncounterSnapshot(raw: unknown): EncounterSnapshot | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -956,8 +1201,14 @@ export function sanitizeEncounterSnapshot(raw: unknown): EncounterSnapshot | nul
       !Array.isArray(o.participants) || o.actors.length > MAX_ENCOUNTER_ACTORS ||
       o.objects.length > MAX_ENCOUNTER_OBJECTS || o.hazards.length > MAX_ENCOUNTER_HAZARDS ||
       o.participants.length > MAX_ENCOUNTER_TRACKED_PARTICIPANTS) return null;
+  if (o.movement && (!validVec(o.movement.from) || !validVec(o.movement.to) ||
+      !Number.isFinite(o.movement.startedAt) || !Number.isFinite(o.movement.executeAt))) return null;
+  if (o.seal?.geometry && (!validVec(o.seal.geometry.center) ||
+      !validVec(o.seal.geometry.inside) || !validVec(o.seal.geometry.outside) ||
+      (o.seal.geometry.axis !== 'x' && o.seal.geometry.axis !== 'z') ||
+      !Number.isFinite(o.seal.geometry.halfWidth) || !Number.isFinite(o.seal.geometry.height))) return null;
   if (!o.actors.every((a) => a && validVec(a.position) && Number.isFinite(a.hp) &&
-      Number.isFinite(a.maxHp)) ||
+       Number.isFinite(a.maxHp)) ||
       !o.objects.every((x) => x && validVec(x.position) && Number.isFinite(x.hp) &&
         Number.isFinite(x.maxHp)) ||
       !o.hazards.every((h) => h && validVec(h.origin) && Number.isFinite(h.executeAt) &&
@@ -977,6 +1228,26 @@ export function sanitizeEncounterSnapshot(raw: unknown): EncounterSnapshot | nul
     participants: o.participants.filter(Number.isSafeInteger)
       .slice(0, MAX_ENCOUNTER_TRACKED_PARTICIPANTS),
     peakParticipants: Math.max(1, Math.min(6, Math.floor(o.peakParticipants!))),
+    movement: o.movement ? { ...o.movement, from: copyVec(o.movement.from),
+      to: copyVec(o.movement.to) } : null,
+    healing: o.healing && Number.isFinite(o.healing.rate) ? {
+      active: o.healing.active === true,
+      sources: Math.max(0, Math.min(24, Math.floor(o.healing.sources ?? 0))),
+      rate: Math.max(0, Math.min(1000, o.healing.rate)),
+      healed: Math.max(0, Number.isFinite(o.healing.healed) ? o.healing.healed : 0),
+      cap: Math.max(0, Number.isFinite(o.healing.cap) ? o.healing.cap : 0),
+    } : { active: false, sources: 0, rate: 0, healed: 0, cap: 0 },
+    wave: o.wave && Number.isFinite(o.wave.number) ? {
+      number: Math.max(0, Math.floor(o.wave.number)),
+      alive: Math.max(0, Math.min(MAX_ENCOUNTER_ACTORS, Math.floor(o.wave.alive ?? 0))),
+      cap: MAX_ENCOUNTER_ACTORS,
+    } : { number: 0, alive: o.actors.length, cap: MAX_ENCOUNTER_ACTORS },
+    seal: { sealed: o.seal?.sealed === true, geometry: o.seal?.geometry ? {
+      ...o.seal.geometry, center: copyVec(o.seal.geometry.center),
+      inside: copyVec(o.seal.geometry.inside), outside: copyVec(o.seal.geometry.outside),
+      halfWidth: Math.max(0.5, Math.min(8, o.seal.geometry.halfWidth)),
+      height: Math.max(1, Math.min(12, o.seal.geometry.height)),
+    } : null },
   };
 }
 
