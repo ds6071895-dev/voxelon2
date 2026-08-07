@@ -64,7 +64,7 @@ import {
 } from './progress';
 import { GadgetCooldowns, GadgetDef, gadgetOf } from './gadgets';
 import {
-  GUIDE_STEPS, GuideState, compassGlyph, guideComplete, markGuideStep,
+  GUIDE_STEPS, GuideState, compassGlyph, guideComplete, guideProgress, markGuideStep,
   newGuideState, nextGuideStep, sanitizeGuide,
 } from './guide';
 import { isRune, runeOf, runeBonuses } from './runes';
@@ -3203,23 +3203,33 @@ function updateVaults(dt: number): void {
 // a tree → tools → a gun → find + loot your first vault. Steps auto-check off
 // (inventory scans + vault hooks), persist per account, and H hides/shows it.
 const starterEl = document.createElement('div');
-starterEl.className = 'mc-font';
-starterEl.style.cssText =
-  'position:absolute;top:110px;left:8px;z-index:10;pointer-events:none;' +
-  'font-size:11px;line-height:1.75;color:#dfe6f2;text-shadow:1px 1px 0 #000;' +
-  'background:rgba(8,10,16,0.55);border:1px solid #2a3550;border-radius:6px;' +
-  'padding:7px 24px 7px 10px;max-width:250px;display:none;';
+starterEl.className = 'mc-font guide-hud';
 app.appendChild(starterEl);
-const starterBody = document.createElement('div');
-starterEl.appendChild(starterBody);
+const starterHead = document.createElement('div');
+starterHead.className = 'guide-hud-head';
+const starterTitle = document.createElement('div');
+starterTitle.className = 'guide-hud-title';
+starterTitle.textContent = 'Getting started';
+const starterCount = document.createElement('div');
+starterCount.className = 'guide-hud-count';
 // A tappable ✕ so touch devices (no H key) can dismiss the checklist too.
 const starterCloseBtn = document.createElement('div');
+starterCloseBtn.className = 'guide-hud-close';
 starterCloseBtn.textContent = '✕';
-starterCloseBtn.style.cssText =
-  'position:absolute;top:5px;right:6px;pointer-events:auto;cursor:pointer;' +
-  'color:#7f8db0;font-size:11px;';
+starterCloseBtn.title = isMobile ? 'Hide' : 'Hide (H)';
 starterCloseBtn.addEventListener('pointerdown', (e) => { e.stopPropagation(); toggleGuidePanel(); });
-starterEl.appendChild(starterCloseBtn);
+starterHead.append(starterTitle, starterCount, starterCloseBtn);
+const starterBar = document.createElement('div');
+starterBar.className = 'guide-hud-bar';
+const starterBarFill = document.createElement('div');
+starterBarFill.className = 'guide-hud-bar-fill';
+starterBar.appendChild(starterBarFill);
+const starterBody = document.createElement('div');
+starterBody.className = 'guide-hud-steps';
+const starterHint = document.createElement('div');
+starterHint.className = 'guide-hud-hint';
+starterHint.hidden = true;
+starterEl.append(starterHead, starterBar, starterBody, starterHint);
 let guideState: GuideState = newGuideState();
 let guideLoadedFor = ''; // account the current state belongs to
 let guideHidden = false;
@@ -3320,30 +3330,36 @@ function useVaultCompass(item: number): void {
 
 function renderGuidePanel(): void {
   const next = nextGuideStep(guideState);
-  const lines: string[] = [
-    '<b style="color:#ffd84a">GETTING STARTED</b> <span style="color:#7f8db0">' +
-      (isMobile ? '(tap ✕ to hide)' : '(H to hide)') + '</span>',
-  ];
+  const { done, total } = guideProgress(guideState);
+  starterCount.textContent = `${done} / ${total}`;
+  starterBarFill.style.width = `${total ? (done / total) * 100 : 0}%`;
+  starterBody.replaceChildren();
   for (const step of GUIDE_STEPS) {
-    const done = guideState[step.id];
+    const stepDone = guideState[step.id];
     const active = next?.id === step.id;
-    const color = done ? '#7f8db0' : active ? '#ffe27a' : '#cdd6ee';
-    const tick = done ? '✔' : active ? '▶' : '·';
     // The step text has a couple of keyboard-key parentheticals baked in —
     // swap them for the touch equivalent rather than pointing at keys mobile
     // players can't press.
     const text = isMobile
       ? step.text.replace('(E)', '(🎒)').replace('check the map — M', 'check the map — 🗺')
       : step.text;
-    lines.push(`<span style="color:${color}">${tick} ${step.icon} ` +
-      `${done ? `<s>${text}</s>` : text}</span>`);
+    const row = document.createElement('div');
+    row.className = `guide-hud-step${stepDone ? ' done' : active ? ' active' : ''}`;
+    const tick = document.createElement('span');
+    tick.className = 'guide-hud-step-tick';
+    tick.textContent = stepDone ? '✔' : step.icon;
+    const label = document.createElement('span');
+    label.className = 'guide-hud-step-text';
+    label.textContent = text;
+    row.append(tick, label);
+    starterBody.appendChild(row);
   }
   // Live compass hint toward the nearest unexplored vault until one is looted.
+  starterHint.hidden = true;
   if (!guideState.loot) {
     const hint = nearestVaultHint();
-    if (hint) lines.push(`<span style="color:#b9a5ff">${hint}</span>`);
+    if (hint) { starterHint.hidden = false; starterHint.innerHTML = hint; }
   }
-  starterBody.innerHTML = lines.join('<br>');
 }
 /** Per-frame guide upkeep: visibility, periodic detection, live vault hint. */
 function updateGuide(dt: number, controlling: boolean): void {
