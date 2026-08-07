@@ -105,13 +105,26 @@ export const CHEST_SLOTS = 27;
 export const ARMOR_POINT_CAP = 20;  // 20 points = the max 80% reduction
 export const RANGED_MAX_RANGE = 80; // server cap on a validated gun hit distance
 export const RANGED_MAX_DAMAGE = 30;
+/** Flat damage soaked AFTER percentage mitigation (Greater Rune of Iron).
+ *  A full set of four is the ceiling, mirroring how the rune multiplier caps
+ *  are sized. Percentage armor alone already saturates at full titanium
+ *  (20 points), so this is the only defensive stat an endgame set can still
+ *  grow — which is exactly why it is boss-locked. */
+export const TOUGHNESS_CAP = 4;
 
 /** Vanilla-ish armor: each point blocks 4% of incoming damage, capped at 80%.
+ *  `toughness` then soaks a flat amount on top, but a hit that connects always
+ *  costs at least 1 HP — no stack of runes can make a player literally
+ *  unkillable (the same rule bloodlust uses so fights always end).
  *  Used by BOTH the offline client and the authoritative server so mitigation
- *  is identical. Returns the (rounded) damage that gets through. */
-export function mitigate(amount: number, armorPoints: number): number {
+ *  is identical. Returns the (rounded) damage that gets through.
+ *  With `toughness` 0 this is exactly the percentage-only function it has
+ *  always been, so a player with no runes is bit-for-bit unaffected. */
+export function mitigate(amount: number, armorPoints: number, toughness = 0): number {
   const eff = Math.max(0, Math.min(ARMOR_POINT_CAP, armorPoints));
-  return Math.max(0, Math.round(amount * (1 - eff * 0.04)));
+  const base = Math.max(0, Math.round(amount * (1 - eff * 0.04)));
+  if (!(toughness > 0) || base <= 0) return base;
+  return Math.max(1, base - Math.min(TOUGHNESS_CAP, toughness));
 }
 
 // --- client -> server -------------------------------------------------------
@@ -145,7 +158,10 @@ export type ClientMsg =
   | { t: 'pickup'; eid: number }
   | { t: 'chestOpen'; x: number; y: number; z: number }
   | { t: 'chestSet'; x: number; y: number; z: number; slots: (ItemStack | null)[] }
-  | { t: 'armor'; points: number }            // worn-armor defense, server mitigates
+  // Worn-armor defense, server mitigates. `toughness` is the flat soak from
+  // Greater Runes of Iron; like `points` it is client-reported and
+  // server-clamped (same trust model).
+  | { t: 'armor'; points: number; toughness?: number }
   | { t: 'rangedAttack'; target: number; amount: number } // gun/projectile PvP hit
   // Automation machines (block-entities; placement is a normal edit).
   | { t: 'machineOpen'; x: number; y: number; z: number }

@@ -1,4 +1,5 @@
 import { Item, ITEMS } from './items';
+import { RUNES } from './runes';
 import { VAULT_BOSS_NAMES } from './vaults';
 
 export interface FieldGuideEntry {
@@ -56,6 +57,16 @@ function weaponRows(): string[][] {
     }
     if (def.tool) return [esc(def.name), `${def.tool.damage} melee damage`, 'Close', `${def.tool.durability} durability`];
     return [esc(def.name), 'Tactical gadget', 'Contextual', `Stack ${def.maxStack}`];
+  });
+}
+
+/** Live rune stats, straight out of the registry so the guide can never drift
+ *  from the real bonuses (same "source of truth" rule as weaponRows). */
+function runeRows(ids: number[]): string[][] {
+  return ids.map((id) => {
+    const def = RUNES[id];
+    if (!def) return [String(id), 'Registry entry unavailable'];
+    return [esc(def.name), esc(def.desc.replace(/^.*?:\s*/, ''))];
   });
 }
 
@@ -142,6 +153,31 @@ export function fieldGuideSections(): FieldGuideSection[] {
         entry('boss-comparison', 'Boss comparison', ['boss', 'warden', 'queen', 'colossus', 'seer', 'artificer'],
           table(['Boss', 'Priority target', 'Main danger', 'Weapon style'], bosses.map((b) => b.slice(0, 4))) +
           `<div class="field-guide-boss-grid">${bosses.map((b) => `<section class="field-guide-boss"><h3>${esc(b[0])}</h3><p><strong>Priority:</strong> ${b[1]}. ${b[4]}</p></section>`).join('')}</div>`),
+        entry('boss-rewards', 'What you get for killing a boss', ['relic', 'greater rune', 'reward', 'loot', 'worth it', 'sigil', 'bloom', 'core', 'prism', 'gear'],
+          `<p>Clearing a vault opens its chest for <strong>ten minutes</strong>. The haul is <strong>personal</strong> — every player who helped opens their own, nobody loots anyone else's — and it <strong>regrows every 30 minutes</strong>, so a vault you can beat is a repeatable income, not a one-off.</p>` +
+          `<p>Every haul is guaranteed to contain that boss's <strong>relic</strong>, plus ammunition, healing and materials scaled to the tier. The guaranteed ammo is deliberate: a boss should always refund more than it costs you to kill it.</p>` +
+          table(['Tier', 'Guaranteed on top of the relic', 'Weighted picks'], [
+            ['I', '3 Bandages, 32 Bullets', '8'],
+            ['II', '2 Medkits, 3 Titanium, 48 Bullets, 1 rune', '10'],
+            ['III', '1 Heart, 4 Diamonds, 4 Titanium, 64 Bullets, 2 Medkits, 1 rune', '12'],
+          ]) +
+          tip('Hearts', 'A vault boss is the best Heart source in the game — better than a Crashed Cargo Pod, which costs you nothing to open. Tier III guarantees one outright.')),
+        entry('greater-runes', 'Relics and Greater Runes', ['relic', 'greater rune', 'socket', 'armor upgrade', 'craft', 'farm'],
+          `<p>Relics are the whole reason to fight the <em>same</em> boss more than once. Two matching relics, the base rune they upgrade and a Diamond craft a <strong>Greater Rune</strong> — and since a haul only ever contains one relic, a Greater Rune costs at least <strong>two full kills of that specific boss</strong>.</p>` +
+          `<p>Greater Runes socket into worn armor exactly like ordinary ones (right-click, one rune per piece), but they are far stronger. They are the only armor upgrade in the game that cannot be mined, crafted from raw materials or found in a chest.</p>` +
+          table(['Boss', 'Relic', 'Forges'], [
+            [bossName(0, 'Bone Warden'), 'Warden Sigil', 'Greater Rune of Iron'],
+            [bossName(1, 'Mire Queen'), 'Mire Bloom', 'Greater Rune of Swiftness'],
+            [bossName(2, 'Ember Colossus'), 'Ember Core', 'Greater Rune of Fortune'],
+            [bossName(3, 'Crystal Seer'), 'Seer Prism', 'Greater Rune of Focus'],
+            [bossName(4, 'Gilded Artificer'), 'Artificer Gear', 'Greater Rune of Power'],
+          ]) +
+          table(['Greater Rune', 'While the armor piece is worn'], runeRows([
+            Item.GreaterRuneOfIron, Item.GreaterRuneOfSwiftness, Item.GreaterRuneOfFortune,
+            Item.GreaterRuneOfFocus, Item.GreaterRuneOfPower,
+          ])) +
+          tip('Why Iron is not simply "+3 armor"', 'A full titanium set is already 20 armor points — the hard cap, where percentage armor stops doing anything at all. The Greater Rune of Iron instead soaks a flat point of damage off every single hit, which nothing else in the game can do, so it keeps working on a maxed-out set.') +
+          warning('A hit always hurts', 'Toughness can never make you immune: any hit that connects still costs at least 1 health, no matter how many runes you stack.')),
         entry('boss-gear', 'Suggested gear by vault tier', ['recommended gear', 'ammo', 'armor', 'healing'],
           table(['Tier', 'Armor', 'Weapon', 'Healing', 'Ammunition'], [['I', 'Stone minimum, iron preferred', 'Pistol, shotgun, or SMG', '3–5 bandages, 1 medkit', 'About 150–250 rounds'], ['II', 'Full iron minimum, diamond preferred', 'Rifle, SMG, or shotgun', '2–3 medkits', 'About 400–600 rounds'], ['III', 'Diamond minimum, titanium preferred', 'Rifle, SMG, Burst Rifle, rockets', '4–6 medkits', 'About 700–1,000 rounds']]) +
           warning('Suggested, not required', 'These are preparation guidelines, not equipment locks. Player skill, group size, and boss familiarity matter.')),

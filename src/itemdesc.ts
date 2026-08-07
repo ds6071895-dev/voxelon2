@@ -50,7 +50,7 @@ const DESCRIPTIONS: Record<number, string> = {
   [Item.RuneOfIron]: 'Loot-only rune — right-click to socket into worn armor: +1 armor.',
   [Item.RuneOfSwiftness]: 'Loot-only rune — right-click to socket into worn armor: +3% speed.',
   [Item.RuneOfFortune]: 'Loot-only rune — right-click to socket into worn armor: +20% mining speed.',
-  [Item.RuneOfFocus]: 'Loot-only rune — right-click to socket into worn armor: −25% gun spread.',
+  [Item.RuneOfFocus]: 'Loot-only rune — right-click to socket into worn armor: −18% gun spread.',
   [Block.RespawnBeacon]: 'Right-click to set your respawn point. Cheap + easily broken.',
   [Block.WaypointTotem]: 'Right-click to attune (max 4). Teleport to attuned totems from the map (M) — 60s cooldown, not while in combat.',
   // Discovery (Milestone C).
@@ -80,11 +80,19 @@ const DESCRIPTIONS: Record<number, string> = {
   [Block.ClockworkGrate]: 'A gold-jointed mechanical grate from artificer vaults.',
   [Block.VaultMosaic]: 'Ornamental light-stone mosaic shared by grand vault rooms.',
   [Block.GildedLamp]: 'A warm black-and-gold vault lamp.',
-  [Item.WardenSigil]: 'Relic of the Bone Warden. Used for crypt trophies and violet decoration.',
-  [Item.MireBloom]: 'Relic of the Mire Queen. Used for living trophies and mire decoration.',
-  [Item.EmberCore]: 'Relic of the Ember Colossus. Used for forge trophies and ember decoration.',
-  [Item.SeerPrism]: 'Relic of the Crystal Seer. Used for arcane trophies and prism decoration.',
-  [Item.ArtificerGear]: 'Relic of the Gilded Artificer. Used for mechanical trophies and gilded decoration.',
+  // Relics: one per vault haul, from that vault's boss. TWO of them craft that
+  // boss's Greater Rune — that is the reason to farm a boss, not the trophies.
+  [Item.WardenSigil]: 'Relic of the Bone Warden. 2 + a Rune of Iron + a Diamond = Greater Rune of Iron. Also makes crypt trophies.',
+  [Item.MireBloom]: 'Relic of the Mire Queen. 2 + a Rune of Swiftness + a Diamond = Greater Rune of Swiftness. Also makes mire trophies.',
+  [Item.EmberCore]: 'Relic of the Ember Colossus. 2 + a Rune of Fortune + a Diamond = Greater Rune of Fortune. Also makes forge trophies.',
+  [Item.SeerPrism]: 'Relic of the Crystal Seer. 2 + a Rune of Focus + a Diamond = Greater Rune of Focus. Also makes prism trophies.',
+  [Item.ArtificerGear]: 'Relic of the Gilded Artificer. 2 + any rune + a Diamond = Greater Rune of Power. Also makes gilded trophies.',
+  // Greater Runes: boss-locked armor sockets, far stronger than the base runes.
+  [Item.GreaterRuneOfIron]: 'Boss-forged rune — right-click to socket into worn armor: +1 armor AND -1 damage from every hit.',
+  [Item.GreaterRuneOfSwiftness]: 'Boss-forged rune — right-click to socket into worn armor: +8% move speed.',
+  [Item.GreaterRuneOfFortune]: 'Boss-forged rune — right-click to socket into worn armor: +50% mining speed.',
+  [Item.GreaterRuneOfFocus]: 'Boss-forged rune — right-click to socket into worn armor: -55% gun spread.',
+  [Item.GreaterRuneOfPower]: 'Boss-forged rune — right-click to socket into worn armor: +1 armor, +3% speed, -15% gun spread.',
   // Healing consumables.
   [Item.Bandage]: 'Right-click to patch up — a quick burst of fast healing, even mid-fight.',
   [Item.Medkit]: 'Right-click for a powerful surge of regeneration — heals you up fast.',

@@ -49,7 +49,7 @@ import {
 import {
   ClientMsg, EDIT_RANGE, CHEST_SLOTS, PICKUP_RANGE,
   ARMOR_POINT_CAP, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE,
-  mitigate, ItemEntityInfo, PlayerInfo, PlayerSnapshot, ServerMsg,
+  mitigate, TOUGHNESS_CAP, ItemEntityInfo, PlayerInfo, PlayerSnapshot, ServerMsg,
   WORLD_SEED, WORLD_HALF, WORLD_BORDER, CORE_HALF, makeUsername, skinSeed, GameMode,
   MAX_ATTUNED, TOTEM_COOLDOWN, COMBAT_TAG, TPA_EXPIRE, bloodlustMult,
 } from './protocol';
@@ -103,6 +103,9 @@ interface ServerPlayer extends PlayerInfo {
   totemCooldownUntil: number;
   /** Worn-armor defense points the client reports (clamped 0..cap). */
   armorPoints: number;
+  /** Flat post-percentage damage soak from Greater Runes of Iron
+   *  (client-reported, clamped 0..TOUGHNESS_CAP). */
+  toughness: number;
   /** Cosmetic equip state for other clients' avatars: the held item id (0 =
    *  bare hand) and worn armor item ids [helmet, chest, legs, boots]. */
   held: number;
@@ -312,6 +315,7 @@ export class GameServer {
       totems: GameServer.sanitizeTotems(saved?.totems),
       totemCooldownUntil: 0,
       armorPoints: 0,
+      toughness: 0,
       held: 0, armor: [0, 0, 0, 0], sneaking: false, swing: 0,
       lastPvpTime: -Infinity, pvpSince: 0, bloodlustWarned: false,
       switchesUsed: Number.isFinite(account?.switchesUsed) ? Math.max(0, Math.floor(account!.switchesUsed!)) : 0,
@@ -503,6 +507,8 @@ export class GameServer {
       case 'armor': {
         // Client-trusted armor value, but clamped so it can't exceed the cap.
         p.armorPoints = fin(msg.points) ? Math.max(0, Math.min(ARMOR_POINT_CAP, msg.points)) : 0;
+        const tough = msg.toughness ?? 0;
+        p.toughness = fin(tough) ? Math.max(0, Math.min(TOUGHNESS_CAP, tough)) : 0;
         return [];
       }
       case 'rangedAttack':
@@ -1398,7 +1404,7 @@ export class GameServer {
   ): Outbound[] {
     if (p.dead || amount <= 0) return [];
     if (p.mode !== 'survival') return []; // creative/spectator are invulnerable
-    amount = mitigate(amount, p.armorPoints); // server-authoritative armor reduction
+    amount = mitigate(amount, p.armorPoints, p.toughness); // server-authoritative armor reduction
     // Bloodlust (anti-stalemate): another player's hit in an ongoing fight
     // lands harder the longer the fight has raged — and once it's ramping, a
     // hit can never be fully absorbed, so no armor stack stalls forever.

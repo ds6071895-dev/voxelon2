@@ -1329,11 +1329,12 @@ tabLogin.addEventListener('click', () => {
 // had no flag) says so plainly instead of counting toward a date in 2286.
 const elimPanel = document.createElement('div');
 elimPanel.className = 'mc-font';
+// Light-theme alert to match the title screen it sits on: warm paper, red ink.
 elimPanel.style.cssText =
-  'display:none;position:absolute;left:50%;bottom:54px;transform:translateX(-50%);z-index:8;' +
-  'width:min(430px,calc(100vw - 36px));padding:14px 18px;background:rgba(40,8,12,0.92);' +
-  'border:1px solid #ff6b62;color:#ffd9d9;font-size:12px;text-align:center;line-height:1.55;' +
-  'box-shadow:0 18px 45px rgba(0,0,0,.55);';
+  'display:none;position:absolute;left:50%;bottom:26px;transform:translateX(-50%);z-index:8;' +
+  'width:min(430px,calc(100vw - 36px));padding:14px 18px;background:#fff6f4;border-radius:14px;' +
+  'border:1px solid rgba(169,30,20,.28);color:#7d1b13;font-size:12px;text-align:center;' +
+  'line-height:1.55;text-shadow:none;box-shadow:0 18px 40px rgba(15,26,36,.16);';
 overlay.appendChild(elimPanel);
 let elimUntilMs = 0;        // wall-clock ms when the lockout lifts (0 = none)
 let elimPermanent = false;
@@ -1632,13 +1633,17 @@ const CHAR_OPTIONS: { key: keyof Cosmetics; label: string; names: string[];
 ];
 
 const charUI = (() => {
+  // Daylight palette, same as the title screen this opens from.
   const panel = document.createElement('div');
   panel.style.cssText = 'position:absolute;inset:0;display:none;flex-direction:column;' +
-    'align-items:center;justify-content:center;gap:14px;background:rgba(8,8,14,0.92);z-index:24;';
+    'align-items:center;justify-content:center;gap:16px;z-index:24;' +
+    'background:linear-gradient(180deg,#f7f9fc,#fffdfa);' +
+    'font-family:ui-sans-serif,-apple-system,"Segoe UI",Roboto,system-ui,sans-serif;';
   const h = document.createElement('h2');
   h.className = 'mc-font';
-  h.textContent = 'CHARACTER';
-  h.style.cssText = 'font-size:30px;letter-spacing:4px;color:#c9a6ff;';
+  h.textContent = 'Character';
+  h.style.cssText = 'font-size:30px;letter-spacing:.5px;color:#0f1a24;text-shadow:none;' +
+    'font-family:inherit;';
   panel.appendChild(h);
 
   const cols = document.createElement('div');
@@ -1647,8 +1652,9 @@ const charUI = (() => {
 
   // Left: the live 3D preview (renderer created lazily on first open).
   const previewWrap = document.createElement('div');
-  previewWrap.style.cssText = 'width:280px;height:400px;background:rgba(10,13,22,0.72);' +
-    'border:1px solid #3a2a5e;border-radius:10px;overflow:hidden;';
+  previewWrap.style.cssText = 'width:280px;height:400px;border-radius:16px;overflow:hidden;' +
+    'background:linear-gradient(180deg,#eaf1f8,#fdfbf7);border:1px solid rgba(15,26,36,.13);' +
+    'box-shadow:0 22px 48px rgba(15,26,36,.14);';
   cols.appendChild(previewWrap);
 
   // Right: one ‹ value › cycler row per cosmetic category.
@@ -1699,15 +1705,19 @@ const charUI = (() => {
   for (const opt of CHAR_OPTIONS) {
     const row = document.createElement('div');
     row.className = 'mc-font';
-    row.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:14px;';
+    row.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:14px;' +
+      'font-family:inherit;text-shadow:none;padding:3px 8px;border-radius:11px;' +
+      'background:#fff;border:1px solid rgba(15,26,36,.1);box-shadow:0 3px 10px rgba(15,26,36,.05);';
     const label = document.createElement('span');
     label.textContent = opt.label;
-    label.style.cssText = 'flex:0 0 110px;color:#cfe0ff;';
+    label.style.cssText = 'flex:0 0 110px;color:#78899a;font-size:10px;font-weight:700;' +
+      'letter-spacing:1.4px;text-transform:uppercase;';
     const mkArrow = (txt: string, d: number): HTMLButtonElement => {
       const b = document.createElement('button');
       b.className = 'mc-btn';
       b.textContent = txt;
-      b.style.cssText = 'font-size:14px;padding:4px 12px;';
+      b.style.cssText = 'font-size:14px;padding:5px 12px;border:1px solid rgba(15,26,36,.12);' +
+        'border-radius:9px;background:#f6f7f9;color:#0f1a24;box-shadow:none;';
       b.addEventListener('click', () => {
         const n = COSMETIC_RANGES[opt.key];
         editing[opt.key] = (editing[opt.key] + d + n) % n;
@@ -1717,10 +1727,10 @@ const charUI = (() => {
       return b;
     };
     const dot = document.createElement('span');
-    dot.style.cssText = 'width:14px;height:14px;border:1px solid rgba(255,255,255,0.4);' +
-      'border-radius:3px;display:none;';
+    dot.style.cssText = 'width:14px;height:14px;border:1px solid rgba(15,26,36,0.25);' +
+      'border-radius:4px;display:none;';
     const value = document.createElement('span');
-    value.style.cssText = 'flex:1;text-align:center;color:#fff;';
+    value.style.cssText = 'flex:1;text-align:center;color:#0f1a24;font-weight:600;';
     row.append(label, mkArrow('‹', -1), dot, value, mkArrow('›', 1));
     rows.appendChild(row);
     valueEls.set(opt.key, { text: value, dot });
@@ -1732,7 +1742,9 @@ const charUI = (() => {
   const randomBtn = document.createElement('button');
   randomBtn.className = 'mc-btn';
   randomBtn.textContent = 'Randomise';
-  randomBtn.style.cssText = 'font-size:15px;padding:9px 18px;';
+  randomBtn.style.cssText = 'font-size:12px;font-weight:700;letter-spacing:1.4px;' +
+    'text-transform:uppercase;padding:11px 20px;border:1px solid rgba(15,26,36,.12);' +
+    'border-radius:12px;background:#fff;color:#0f1a24;box-shadow:0 4px 12px rgba(15,26,36,.07);';
   randomBtn.addEventListener('click', () => {
     Object.assign(editing, randomCosmetics());
     refreshRows();
@@ -1741,8 +1753,10 @@ const charUI = (() => {
   const saveBtn = document.createElement('button');
   saveBtn.className = 'mc-btn';
   saveBtn.textContent = 'Save Look';
-  saveBtn.style.cssText = 'font-size:15px;padding:9px 24px;background:linear-gradient(#8a5fd6,#6a41b0);' +
-    'border-color:#d6bdff #35205e #35205e #d6bdff;color:#f3ecff;text-shadow:none;';
+  saveBtn.style.cssText = 'font-size:12px;font-weight:700;letter-spacing:1.4px;' +
+    'text-transform:uppercase;padding:11px 26px;border:1px solid transparent;border-radius:12px;' +
+    'background:linear-gradient(180deg,#ffd06a,#eda01a);color:#26180a;text-shadow:none;' +
+    'box-shadow:0 10px 24px rgba(215,138,12,.32);';
   saveBtn.addEventListener('click', () => {
     myCosmetics = { ...editing };
     invalidateSelfAvatar(); // your third-person body reflects the new look/side
@@ -1753,7 +1767,9 @@ const charUI = (() => {
   const backBtn = document.createElement('button');
   backBtn.className = 'mc-btn';
   backBtn.textContent = 'Back';
-  backBtn.style.cssText = 'font-size:15px;padding:9px 18px;';
+  backBtn.style.cssText = 'font-size:12px;font-weight:700;letter-spacing:1.4px;' +
+    'text-transform:uppercase;padding:11px 20px;border:1px solid rgba(15,26,36,.12);' +
+    'border-radius:12px;background:#fff;color:#0f1a24;box-shadow:0 4px 12px rgba(15,26,36,.07);';
   backBtn.addEventListener('click', () => close());
   btnRow.append(randomBtn, saveBtn, backBtn);
   panel.appendChild(btnRow);
@@ -2486,7 +2502,7 @@ net.onFactionXp = (xp) => {
 
 /** All progression + rune buffs that apply to the local player right now. */
 function activeBuffs(): {
-  speedMult: number; armorBonus: number; reloadMult: number;
+  speedMult: number; armorBonus: number; toughness: number; reloadMult: number;
   mineMult: number; spreadMult: number; gunDamageMult: number;
   meleeBonus: number; energyMult: number; fallMult: number; xpMult: number;
 } {
@@ -2496,6 +2512,7 @@ function activeBuffs(): {
   return {
     speedMult: mine.speedMult * perks.speedMult * runes.speedMult,
     armorBonus: mine.armorBonus + perks.armor + runes.armor,
+    toughness: runes.toughness,
     reloadMult: mine.reloadMult,
     mineMult: mine.mineMult * runes.mineMult,
     spreadMult: mine.spreadMult * runes.spreadMult,
@@ -3850,6 +3867,7 @@ let fps = 0, frames = 0, fpsTime = 0;
 // Sound state
 let lastHealth = 20;
 let lastSentArmor = -1; // last armor-points value pushed to the server
+let lastSentToughness = -1; // last flat-soak value pushed to the server
 let lastInWater = false;
 let lavaTimer = 0; // throttles lava burn damage
 let spikeHurtTimer = 0; // throttles spike-trap damage ticks
@@ -5143,9 +5161,12 @@ function frame(): void {
   interaction.miningSpeedMult = buffsNow.mineMult; // Prospector + Rune of Fortune
   const armorPts = inventory.armorPoints() + buffsNow.armorBonus;
   player.armorPoints = armorPts;
-  if (net.connected && armorPts !== lastSentArmor) {
+  player.toughness = buffsNow.toughness;           // Greater Rune of Iron
+  if (net.connected &&
+      (armorPts !== lastSentArmor || buffsNow.toughness !== lastSentToughness)) {
     lastSentArmor = armorPts;
-    net.sendArmor(armorPts);
+    lastSentToughness = buffsNow.toughness;
+    net.sendArmor(armorPts, buffsNow.toughness);
   }
 
   // In-world simulation (we've already returned early on the title screen) —

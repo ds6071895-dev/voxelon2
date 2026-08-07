@@ -103,12 +103,22 @@ export const enum Item {
   // The Diamond Shovel: end-game digging. INSTANTLY breaks soft ground
   // (grass/dirt/sand) — the terraforming reward for a diamond haul.
   DiamondShovel = 182,
-  // Family relics are personal vault-chest rewards and cosmetic currencies.
+  // Family relics: personal vault-chest rewards, one guaranteed per haul.
+  // Their real value is crafting Greater Runes (below) — decorative vault
+  // trophy blocks (crafting.ts) are a bonus use, not the point.
   WardenSigil = 193,
   MireBloom = 194,
   EmberCore = 195,
   SeerPrism = 196,
   ArtificerGear = 197,
+  // Greater Runes: crafted ONLY from a matching boss's relics (farm THAT
+  // boss repeatedly) + the base rune they upgrade. Real BiS armor sockets —
+  // the reason a vault boss is worth killing more than once.
+  GreaterRuneOfIron = 198,
+  GreaterRuneOfSwiftness = 199,
+  GreaterRuneOfFortune = 200,
+  GreaterRuneOfFocus = 201,
+  GreaterRuneOfPower = 202,
 }
 
 export interface ToolInfo {
@@ -565,6 +575,13 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Item.EmberCore]: pureItem('Ember Core', Tile.EmberCore),
   [Item.SeerPrism]: pureItem('Seer Prism', Tile.SeerPrism),
   [Item.ArtificerGear]: pureItem('Artificer Gear', Tile.ArtificerGear),
+
+  // Greater Runes (crafted, not looted): stronger single-piece armor sockets.
+  [Item.GreaterRuneOfIron]: pureItem('Greater Rune of Iron', Tile.GreaterRuneIron),
+  [Item.GreaterRuneOfSwiftness]: pureItem('Greater Rune of Swiftness', Tile.GreaterRuneSwift),
+  [Item.GreaterRuneOfFortune]: pureItem('Greater Rune of Fortune', Tile.GreaterRuneFortune),
+  [Item.GreaterRuneOfFocus]: pureItem('Greater Rune of Focus', Tile.GreaterRuneFocus),
+  [Item.GreaterRuneOfPower]: pureItem('Greater Rune of Power', Tile.GreaterRuneOfPower),
 };
 
 /**

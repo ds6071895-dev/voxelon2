@@ -84,6 +84,9 @@ export class Player {
   /** Total worn-armor defense points (kept in sync by main each frame); used
    *  for offline mitigation. In MP the server mitigates from its synced copy. */
   armorPoints = 0;
+  /** Flat post-percentage damage soak from Greater Runes of Iron (same
+   *  sync/authority split as `armorPoints`). */
+  toughness = 0;
   /** Admin/gamemode flight: no gravity, jump/sneak rise/descend (creative+spectator). */
   flying = false;
   /** Admin/gamemode noclip: move through blocks, ignore collision (spectator). */
@@ -121,7 +124,7 @@ export class Player {
     // it isn't reduced twice. Offline, mitigate here with our worn armor.
     if (this.damageSink) { this.damageSink(amount); return; }
     if (this.hurtTimer > 0) return;
-    const dealt = mitigate(amount, this.armorPoints);
+    const dealt = mitigate(amount, this.armorPoints, this.toughness);
     this.hurtTimer = 0.5;
     this.damageFlash = 0.45;
     this.regenCooldown = DAMAGE_REGEN_DELAY;

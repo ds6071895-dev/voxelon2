@@ -417,6 +417,11 @@ export const enum Tile {
   OpalBrick = 229,
   ClockworkGrate = 230,
   VaultMosaic = 231,
+  GreaterRuneIron = 232,
+  GreaterRuneSwift = 233,
+  GreaterRuneFortune = 234,
+  GreaterRuneFocus = 235,
+  GreaterRuneOfPower = 236,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel' | 'sword';

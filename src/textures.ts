@@ -1718,6 +1718,35 @@ function paintRuneFocus(p: Painter, seed: number): void {
   });
 }
 
+/** A boss-forged upgrade of a base rune tablet: same glyph, wrapped in a
+ *  gilded frame with a gem at each corner so it reads as the rarer tier at
+ *  a glance (loot UI, hotbar, crafting guide — all share this atlas tile). */
+function paintGreaterRune(base: (p: Painter, seed: number) => void) {
+  return (p: Painter, seed: number): void => {
+    base(p, seed);
+    const gold: RGBA = [255, 205, 84, 255];
+    const goldHi: RGBA = [255, 236, 168, 255];
+    for (const [x, y] of [[4, 2], [11, 2], [4, 13], [11, 13]] as [number, number][]) {
+      p.set(x, y, gold);
+    }
+    // A thin gilt border tracing the tablet edge (skips the gem corners).
+    for (let x = 5; x <= 10; x++) { p.set(x, 2, goldHi); p.set(x, 13, goldHi); }
+    for (let y = 3; y <= 12; y++) { p.set(4, y, goldHi); p.set(11, y, goldHi); }
+  };
+}
+
+function paintGreaterRunePower(p: Painter, seed: number): void {
+  const glow: RGBA = [255, 226, 118, 255];
+  const hi: RGBA = [255, 245, 200, 255];
+  paintRuneTablet(p, seed, glow, hi, (set) => {
+    // A cogwheel-and-star hybrid glyph (Artificer: a jack-of-all-trades rune).
+    for (const [x, y] of [[7, 4], [8, 4], [5, 6], [10, 6], [5, 9], [10, 9],
+      [7, 11], [8, 11]] as [number, number][]) set(x, y, glow);
+    for (let y = 6; y <= 9; y++) { set(7, y, hi); set(8, y, hi); }
+    set(6, 7, glow); set(9, 7, glow); set(6, 8, glow); set(9, 8, glow);
+  });
+}
+
 // --- Lifesteal (Milestone A): Heart + Revival Beacon sprites ------------------
 
 /** A chunky rounded pixel heart with a glossy highlight (the lifesteal
@@ -2474,6 +2503,12 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.ClockworkGrate]: paintClockworkGrate,
   [Tile.VaultMosaic]: paintFamilyBrick(
     [224, 216, 204, 255], [148, 138, 132, 255], [122, 210, 244, 255]),
+  // Greater Runes: boss-forged upgrades of the base rune tablets, above.
+  [Tile.GreaterRuneIron]: paintGreaterRune(paintRuneIron),
+  [Tile.GreaterRuneSwift]: paintGreaterRune(paintRuneSwift),
+  [Tile.GreaterRuneFortune]: paintGreaterRune(paintRuneFortune),
+  [Tile.GreaterRuneFocus]: paintGreaterRune(paintRuneFocus),
+  [Tile.GreaterRuneOfPower]: paintGreaterRune(paintGreaterRunePower),
   // Vault Brute: a hulking mossy-stone zombie — pale glowing eyes, heavy jaw.
   [Tile.BruteSkin]: paintSkin([98, 112, 86, 255], 0.18, [72, 84, 62, 255]),
   [Tile.BruteFace]: paintFace([98, 112, 86, 255], [235, 245, 170, 255],

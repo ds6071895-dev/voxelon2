@@ -848,7 +848,9 @@ export const VAULT_LOOT: Record<VaultTier, LootEntry[]> = {
     { id: Item.Bandage, min: 2, max: 4, w: 1.5 },
     { id: Item.Medkit, min: 1, max: 1, w: 0.9 },
     { id: Item.RuneOfIron, min: 1, max: 1, w: 0.5 },
-    { id: Item.Heart, min: 1, max: 1, w: 0.35 }, // the rare Tier-I jackpot thrill
+    // The Tier-I jackpot. Weighted so a boss fight beats a FREE Crashed Cargo
+    // Pod (~12%/open) rather than losing to it, which is what 0.35 did.
+    { id: Item.Heart, min: 1, max: 1, w: 0.9 },
   ],
   // Tier II (mid Wilds): serious kit + a guaranteed Medkit/titanium base.
   2: [
@@ -864,7 +866,7 @@ export const VAULT_LOOT: Record<VaultTier, LootEntry[]> = {
     { id: Item.OilBarrel, min: 3, max: 6, w: 1.5 },
     { id: Item.Medkit, min: 1, max: 2, w: 1.2 },
     { id: Item.GrapplingHook, min: 1, max: 1, w: 0.8 },
-    { id: Item.Heart, min: 1, max: 1, w: 0.45 },
+    { id: Item.Heart, min: 1, max: 1, w: 1.3 },
     { id: Item.RuneOfSwiftness, min: 1, max: 1, w: 0.7 },
     { id: Item.RuneOfFortune, min: 1, max: 1, w: 0.6 },
   ],
@@ -883,14 +885,18 @@ export const VAULT_LOOT: Record<VaultTier, LootEntry[]> = {
     { id: Item.GoldIngot, min: 4, max: 8, w: 2 },
     { id: Item.OilBarrel, min: 4, max: 8, w: 1.5 },
     { id: Item.Medkit, min: 1, max: 2, w: 1.5 },
-    { id: Item.Heart, min: 1, max: 1, w: 0.7 }, // extra hearts CAN roll too
+    { id: Item.Heart, min: 1, max: 1, w: 1.8 }, // extra hearts CAN roll too
     { id: Item.RuneOfFocus, min: 1, max: 1, w: 0.9 },
     { id: Item.RuneOfSwiftness, min: 1, max: 1, w: 0.7 },
     { id: Item.RuneOfIron, min: 1, max: 1, w: 0.7 },
   ],
 };
 
-const VAULT_ROLLS: Record<VaultTier, number> = { 1: 7, 2: 8, 3: 9 };
+/** Weighted picks per haul, on top of the guarantees in `vaultLoot`. Scaled to
+ *  the MEASURED cost of the fight: a Tier I Brute dies in ~30s, a Tier III boss
+ *  takes 74s (rifle) to 292s (sniper) against a 360s enrage, plus the ammo,
+ *  consumables and death risk spent getting there. */
+const VAULT_ROLLS: Record<VaultTier, number> = { 1: 8, 2: 10, 3: 12 };
 /** The four socketable runes (Tier III guarantees one per haul). */
 const RUNE_POOL = [
   Item.RuneOfIron, Item.RuneOfSwiftness, Item.RuneOfFortune, Item.RuneOfFocus,
@@ -915,9 +921,13 @@ function strHash(s: string): number {
 
 /** The per-player vault loot HAUL: a pure function of (seed, vault, username,
  *  roll index), so it is identical wherever it's computed — and every 30-minute
- *  re-loot (`roll` increments) is a fresh, different haul. Guarantees: Tier I
- *  bandages + bullets, Tier II a Medkit + titanium, Tier III a Heart + a rune
- *  + diamonds — plus VAULT_ROLLS weighted picks on top. */
+ *  re-loot (`roll` increments) is a fresh, different haul.
+ *
+ *  Every haul opens with the boss's RELIC (the only source — two of them craft
+ *  a Greater Rune, see crafting.ts), then a tier guarantee, then VAULT_ROLLS
+ *  weighted picks. The guaranteed ammo matters as much as the jackpots: a boss
+ *  fight that does not at least refund the ammunition it consumed is a net
+ *  loss no matter how good the rare table looks. */
 export function vaultLoot(
   seed: number, cx: number, cz: number, tier: VaultTier, username: string, roll = 0
 ): ItemStack[] {
@@ -932,13 +942,21 @@ export function vaultLoot(
   out.push({ id: BOSS_RELIC[vaultBossFor(seed, cx, cz, tier)], count: 1 });
   if (tier === 1) {
     out.push({ id: Item.Bandage, count: 3 });
-    out.push({ id: Item.Bullet, count: 16 });
+    out.push({ id: Item.Bullet, count: 32 });
   } else if (tier === 2) {
-    out.push({ id: Item.Medkit, count: 1 });
-    out.push({ id: Item.TitaniumIngot, count: 2 });
+    out.push({ id: Item.Medkit, count: 2 });
+    out.push({ id: Item.TitaniumIngot, count: 3 });
+    out.push({ id: Item.Bullet, count: 48 });
+    // Tier II now guarantees a rune too — without it a Tier II haul could come
+    // out flatly worse than a free Crashed Cargo Pod, which rolls runes at a
+    // combined weight of 1.6.
+    out.push({ id: RUNE_POOL[Math.floor(rng() * RUNE_POOL.length)], count: 1 });
   } else {
     out.push({ id: Item.Heart, count: 1 });
-    out.push({ id: Item.Diamond, count: 3 });
+    out.push({ id: Item.Diamond, count: 4 });
+    out.push({ id: Item.TitaniumIngot, count: 4 });
+    out.push({ id: Item.Bullet, count: 64 });
+    out.push({ id: Item.Medkit, count: 2 });
     out.push({ id: RUNE_POOL[Math.floor(rng() * RUNE_POOL.length)], count: 1 });
   }
   for (let i = 0; i < VAULT_ROLLS[tier]; i++) {

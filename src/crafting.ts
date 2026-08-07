@@ -221,6 +221,17 @@ export const RECIPES: Recipe[] = [
   shapeless([Item.SeerPrism, Block.Torch], Block.PrismLamp, 2),
   shapeless([Item.ArtificerGear, Block.Torch], Block.GildedLamp, 2),
 
+  // Greater Runes: the relics' REAL value. Forged from 2 of a matching boss's
+  // relics + the base rune being upgraded + a Diamond — so a Greater Rune
+  // costs at minimum two full boss kills (relics are one-per-haul), not a
+  // single lucky drop. Socket like any rune (runes.ts).
+  shapeless([Item.WardenSigil, Item.WardenSigil, Item.RuneOfIron, D], Item.GreaterRuneOfIron),
+  shapeless([Item.MireBloom, Item.MireBloom, Item.RuneOfSwiftness, D], Item.GreaterRuneOfSwiftness),
+  shapeless([Item.EmberCore, Item.EmberCore, Item.RuneOfFortune, D], Item.GreaterRuneOfFortune),
+  shapeless([Item.SeerPrism, Item.SeerPrism, Item.RuneOfFocus, D], Item.GreaterRuneOfFocus),
+  shapeless([Item.ArtificerGear, Item.ArtificerGear,
+    [Item.RuneOfIron, Item.RuneOfSwiftness, Item.RuneOfFortune, Item.RuneOfFocus], D], Item.GreaterRuneOfPower),
+
   // Building set (M15): per-wood slabs + stairs.
   ...woodCraft(OAK, Block.OakSlab, Block.OakStairsN),
   ...woodCraft(BIRCH, Block.BirchSlab, Block.BirchStairsN),

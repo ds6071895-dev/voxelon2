@@ -494,8 +494,8 @@ export class NetClient {
   sendCosmetics(c: Cosmetics): void {
     if (this.connected) this.raw({ t: 'cosmetics', c });
   }
-  sendArmor(points: number): void {
-    if (this.connected) this.raw({ t: 'armor', points });
+  sendArmor(points: number, toughness = 0): void {
+    if (this.connected) this.raw({ t: 'armor', points, toughness });
   }
   sendMachineOpen(x: number, y: number, z: number): void {
     if (this.connected) this.raw({ t: 'machineOpen', x, y, z });

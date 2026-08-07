@@ -51,7 +51,9 @@ export class Panorama {
     this.world.update(this.cx, this.cz, 6, PANO_DIST);
     this.yaw += dt * 0.05;
     this.camera.position.set(this.cx, this.cy, this.cz);
-    this.camera.rotation.set(-0.14, this.yaw, 0);
+    // Tilted down enough that the landscape — not empty sky — fills the frame
+    // behind the (light, mostly translucent) title screen.
+    this.camera.rotation.set(-0.26, this.yaw, 0);
     this.sky.update(dt, this.camera);
     this.world.sunUniform.value = this.sky.sunIntensity;
     // Track the live sky colour so the background + fog blend into the horizon.

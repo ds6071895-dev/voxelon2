@@ -55,6 +55,7 @@ import {
   CORE_BORDER, CORE_HALF, inCore, MAX_ATTUNED, TOTEM_COOLDOWN, COMBAT_TAG,
   TPA_EXPIRE, TPA_HOLD,
   bloodlustMult, BLOODLUST_START, BLOODLUST_STEP, BLOODLUST_PER_STEP, BLOODLUST_CAP,
+  mitigate, TOUGHNESS_CAP, ARMOR_POINT_CAP,
 } from '../src/net/protocol';
 import {
   COSMETIC_KEYS, COSMETIC_RANGES, Cosmetics, defaultCosmetics, randomCosmetics,
@@ -109,6 +110,7 @@ import {
   VaultStamp, bruteMaxHp, countVaults, newVaultState, recordVaultLoot,
   refreshVaultState, sanitizeVaultState, vaultAt, vaultChestAt, vaultLoot,
   vaultLootCooldownLeft, vaultLootable, vaultStamp, vaultTier, worldVaults,
+  vaultBossFor,
 } from '../src/vaults';
 import { LOOT_TABLES, chestLoot, chestLootSlots } from '../src/loot';
 import { bossMaxHp, ENCOUNTER_INTRO_SECONDS, type EncounterSnapshot } from '../src/vault_encounter';
@@ -2993,12 +2995,23 @@ check('furnace smelts ore/sand/log but not removed foods',
 // --- Runes: loot-only armor socketables ------------------------------------------
 {
   const ids = Object.keys(RUNES).map(Number);
-  check('four runes registered, real items, with descriptions',
-    ids.length === 4 && ids.every((id) =>
+  const BASE_RUNES = [Item.RuneOfIron, Item.RuneOfSwiftness, Item.RuneOfFortune, Item.RuneOfFocus];
+  const GREATER_RUNES = [
+    Item.GreaterRuneOfIron, Item.GreaterRuneOfSwiftness, Item.GreaterRuneOfFortune,
+    Item.GreaterRuneOfFocus, Item.GreaterRuneOfPower,
+  ];
+  check('nine runes registered, real items, with descriptions',
+    ids.length === 9 && ids.every((id) =>
       isRune(id) && runeOf(id)?.item === id && !!ITEMS[id] &&
       itemDescription(id).length > 0));
-  check('runes are loot-only (no crafting recipe mints one)',
-    !RECIPES.some((r) => ids.includes(r.result.id)));
+  check('BASE runes are loot-only (no crafting recipe mints one)',
+    !RECIPES.some((r) => BASE_RUNES.includes(r.result.id)));
+  // The inverse rule for the boss-locked tier: crafted only, never in a table.
+  check('GREATER runes are craft-only (every one has a recipe)',
+    GREATER_RUNES.every((id) => RECIPES.some((r) => r.result.id === id)));
+  check('GREATER runes never drop from any loot table',
+    !Object.values(LOOT_TABLES).some((t) => t.some((e) => GREATER_RUNES.includes(e.id))) &&
+    !Object.values(VAULT_LOOT).some((t) => t.some((e) => GREATER_RUNES.includes(e.id))));
 
   // Socketing: first worn REAL armor piece with a free slot takes the rune.
   const inv = new RuneInv();
@@ -3026,6 +3039,69 @@ check('furnace smelts ore/sand/log but not removed foods',
   check('a rune on a NON-armor stack is ignored',
     runeBonuses([{ id: Item.Stick, count: 1, rune: Item.RuneOfIron }]).armor === 0);
 
+  // --- Greater Runes: the boss-locked tier ------------------------------------
+  // Regression guard FIRST: with no toughness, mitigate must be bit-for-bit the
+  // percentage-only function it has always been.
+  check('mitigate with no toughness is unchanged',
+    mitigate(10, 0) === 10 && mitigate(10, 10) === 6 &&
+    mitigate(10, ARMOR_POINT_CAP) === 2 && mitigate(2, ARMOR_POINT_CAP) === 0 &&
+    mitigate(10, 999) === mitigate(10, ARMOR_POINT_CAP));
+  check('toughness soaks flat damage AFTER percentage armor',
+    mitigate(20, 0, 3) === 17 && mitigate(10, 10, 2) === 4);
+  check('toughness can never grant immunity (a hit always costs >= 1)',
+    mitigate(10, ARMOR_POINT_CAP, 4) === 1 && mitigate(1, 0, 4) === 1 &&
+    mitigate(30, ARMOR_POINT_CAP, TOUGHNESS_CAP) >= 1);
+  check('toughness is capped, and zero damage stays zero',
+    mitigate(20, 0, 999) === 20 - TOUGHNESS_CAP && mitigate(0, 0, 4) === 0);
+
+  // Greater runes socket exactly like base runes (isRune drives the click path).
+  const ginv = new RuneInv();
+  ginv.slots[ARMOR_START] = { id: Item.TitaniumHelmet, count: 1 };
+  check('a Greater Rune sockets into worn armor like any other',
+    ginv.socketRune(Item.GreaterRuneOfIron)?.rune === Item.GreaterRuneOfIron);
+
+  // Every Greater Rune must beat the base rune it upgrades, on its own stat.
+  const wear = (rune: number) => runeBonuses([{ id: Item.IronHelmet, count: 1, rune }]);
+  check('each Greater Rune strictly beats the base rune it upgrades',
+    wear(Item.GreaterRuneOfSwiftness).speedMult > wear(Item.RuneOfSwiftness).speedMult &&
+    wear(Item.GreaterRuneOfFortune).mineMult > wear(Item.RuneOfFortune).mineMult &&
+    wear(Item.GreaterRuneOfFocus).spreadMult < wear(Item.RuneOfFocus).spreadMult &&
+    wear(Item.GreaterRuneOfIron).toughness > wear(Item.RuneOfIron).toughness);
+
+  // The caps must leave a FULL set of Greater Runes room to matter — the bug
+  // this batch fixed was caps sized for base runes swallowing the boss tier.
+  const fullGreater = (rune: number) => runeBonuses([
+    { id: Item.IronHelmet, count: 1, rune }, { id: Item.IronChestplate, count: 1, rune },
+    { id: Item.IronLeggings, count: 1, rune }, { id: Item.IronBoots, count: 1, rune },
+  ]);
+  const fullBase = (rune: number) => runeBonuses([
+    { id: Item.IronHelmet, count: 1, rune }, { id: Item.IronChestplate, count: 1, rune },
+    { id: Item.IronLeggings, count: 1, rune }, { id: Item.IronBoots, count: 1, rune },
+  ]);
+  check('a full set of Greater Runes is not swallowed by the caps',
+    fullGreater(Item.GreaterRuneOfSwiftness).speedMult >
+      fullBase(Item.RuneOfSwiftness).speedMult &&
+    fullGreater(Item.GreaterRuneOfFortune).mineMult >
+      fullBase(Item.RuneOfFortune).mineMult &&
+    fullGreater(Item.GreaterRuneOfFocus).spreadMult <
+      fullBase(Item.RuneOfFocus).spreadMult);
+  check('...but they are still bounded (no superpowers)',
+    fullGreater(Item.GreaterRuneOfSwiftness).speedMult <= 1.24 &&
+    fullGreater(Item.GreaterRuneOfFortune).mineMult <= 3 &&
+    fullGreater(Item.GreaterRuneOfFocus).spreadMult >= 0.15 &&
+    fullGreater(Item.GreaterRuneOfIron).toughness === TOUGHNESS_CAP);
+
+  // Percentage armor saturates at full titanium — the reason Greater Iron is
+  // toughness rather than "+3 armor". Lock the premise in so it can't drift.
+  const titaniumSet = [Item.TitaniumHelmet, Item.TitaniumChestplate,
+    Item.TitaniumLeggings, Item.TitaniumBoots]
+    .reduce((n, id) => n + (ITEMS[id]?.armor?.points ?? 0), 0);
+  check('full titanium already saturates the armor cap (so +armor runes do nothing there)',
+    titaniumSet >= ARMOR_POINT_CAP &&
+    mitigate(20, titaniumSet) === mitigate(20, titaniumSet + 12));
+  check('...but toughness still works on a maxed-out set',
+    mitigate(20, titaniumSet, 4) < mitigate(20, titaniumSet));
+
   // The socketed rune survives the persistence round-trip.
   const blob = JSON.parse(JSON.stringify(inv.serialize()));
   const inv2 = new RuneInv();
@@ -3038,7 +3114,8 @@ check('furnace smelts ore/sand/log but not removed foods',
     LOOT_TABLES.rare.some((e) => e.id === id) || LOOT_TABLES.epic.some((e) => e.id === id) ||
     VAULT_LOOT[1].some((e) => e.id === id) || VAULT_LOOT[2].some((e) => e.id === id) ||
     VAULT_LOOT[3].some((e) => e.id === id);
-  check('every rune is findable in structure or vault loot', ids.every(inLoot));
+  // Only the BASE tier is findable; Greater Runes are boss-forged by hand.
+  check('every BASE rune is findable in structure or vault loot', BASE_RUNES.every(inLoot));
 }
 
 // --- Progression: XP curve, the 100-node skill tree, faction pool ---------------
@@ -3543,6 +3620,51 @@ let firstVault: VaultStamp | null = null;
   check('Tier III ALWAYS grants a Heart',
     ['P1', 'P2', 'P3', 'P4', 'P5'].every((u) =>
       vaultLoot(1337, 100, 100, 3, u).some((s) => s.id === Item.Heart)));
+
+  // --- Is the boss worth killing? ---------------------------------------------
+  const RELICS = [Item.WardenSigil, Item.MireBloom, Item.EmberCore,
+    Item.SeerPrism, Item.ArtificerGear];
+  const RELIC_OF: Record<string, number> = {
+    bone_warden: Item.WardenSigil, mire_queen: Item.MireBloom,
+    ember_colossus: Item.EmberCore, crystal_seer: Item.SeerPrism,
+    gilded_artificer: Item.ArtificerGear,
+  };
+  check('every haul carries exactly ONE relic, and it is THAT vault\'s boss', (() => {
+    const cases: [number, number, 1 | 2 | 3][] = [[9, -16, 2], [3, 3, 1], [100, 100, 3]];
+    return cases.every(([cx, cz, tier]) => ['Alice', 'Bob', 'Cara'].every((u) => {
+      const haul = vaultLoot(1337, cx, cz, tier, u);
+      const relics = haul.filter((st) => RELICS.includes(st.id));
+      return relics.length === 1 && relics[0].count === 1 &&
+        relics[0].id === RELIC_OF[vaultBossFor(1337, cx, cz, tier)];
+    }));
+  })());
+  // A boss that does not refund the ammunition it costs is a net loss.
+  check('every tier guarantees an ammo refund that scales with the fight',
+    ([[3, 3, 1], [9, -16, 2], [100, 100, 3]] as [number, number, 1 | 2 | 3][])
+      .map(([cx, cz, tier]) => vaultLoot(1337, cx, cz, tier, 'Gunner')
+        .filter((st) => st.id === Item.Bullet)
+        .reduce((n, st) => n + st.count, 0))
+      .every((n, i, all) => n >= 32 && (i === 0 || n >= all[i - 1])));
+  check('Tier II and III guarantee a rune, Tier I does not',
+    vaultLoot(1337, 9, -16, 2, 'Alice').some((st) => isRune(st.id)) &&
+    vaultLoot(1337, 100, 100, 3, 'Alice').some((st) => isRune(st.id)));
+  check('a bigger tier is a bigger haul',
+    vaultLoot(1337, 3, 3, 1, 'Alice').length <
+      vaultLoot(1337, 9, -16, 2, 'Alice').length &&
+    vaultLoot(1337, 9, -16, 2, 'Alice').length <
+      vaultLoot(1337, 100, 100, 3, 'Alice').length);
+  // The rule the rebalance existed to fix: a boss fight must out-pay loot that
+  // costs nothing but a walk. Compared as per-haul jackpot probability.
+  check('a boss haul beats a FREE cargo pod for Hearts, and scales by tier', (() => {
+    const odds = (tbl: { id: number; w: number }[], rolls: number): number => {
+      const total = tbl.reduce((n, e) => n + e.w, 0);
+      const heart = tbl.filter((e) => e.id === Item.Heart).reduce((n, e) => n + e.w, 0);
+      return 1 - (1 - heart / total) ** rolls;
+    };
+    const pod = odds(LOOT_TABLES.epic, 5);
+    const t1 = odds(VAULT_LOOT[1], 8), t2 = odds(VAULT_LOOT[2], 10), t3 = odds(VAULT_LOOT[3], 12);
+    return t1 > pod && t2 > t1 && t3 > t2;
+  })());
   check('brute HP scales by tier (and it is a real boss)',
     bruteMaxHp(1) < bruteMaxHp(2) && bruteMaxHp(2) < bruteMaxHp(3) &&
     MOB_DEFS.brute.health >= 100 && MOB_DEFS.brute.hostile &&
