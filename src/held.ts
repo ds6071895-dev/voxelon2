@@ -5,11 +5,16 @@
 import * as THREE from 'three';
 import { itemGeometry } from './itementity';
 import { ITEMS } from './items';
-import { avatarSurfaceTexture, skinColorFor } from './remoteplayers';
-import type { Cosmetics } from './character';
+import { avatarTexture } from './avatartex';
+import { skinColorFor } from './remoteplayers';
+import { Cosmetics, SHIRT_COLORS, defaultCosmetics } from './character';
 import type { Atlas } from './textures';
 
-const BASE_X = 0.42, BASE_Y = -0.42, BASE_Z = -0.7;
+// Rest pose of the held item in camera space. At the game's 70° FOV, y=-0.42
+// put the hand ~86% of the way down the screen — so low it read as falling off
+// the bottom edge. -0.30 sits it around two-thirds down, where the eye expects
+// a held weapon to be.
+const BASE_X = 0.42, BASE_Y = -0.3, BASE_Z = -0.7;
 
 export class HeldItemView {
   private readonly pivot: THREE.Group;
@@ -27,8 +32,10 @@ export class HeldItemView {
   // First-person arm: a skin-colored forearm + fist coming in from the
   // bottom-right, parented to the pivot so it swings/recoils with the item.
   private readonly armMat: THREE.MeshBasicMaterial;
+  private readonly sleeveMat: THREE.MeshBasicMaterial;
   private readonly arm: THREE.Group;
   private readonly baseSkin = new THREE.Color(0xc89a6a);
+  private readonly baseSleeve = new THREE.Color(0x3f6f9c);
 
   constructor(camera: THREE.Camera, atlas: Atlas) {
     this.atlas = atlas;
@@ -61,15 +68,22 @@ export class HeldItemView {
     this.flash.visible = false;
     this.pivot.add(this.flash);
 
-    // First-person arm: a blocky forearm + fist angled in from the bottom-right.
-    // It remains visible with an empty hotbar, like Minecraft's bare hand.
+    // First-person arm: a blocky sleeved forearm + bare fist angled in from the
+    // bottom-right, textured like the avatar everyone else sees. It remains
+    // visible with an empty hotbar, like Minecraft's bare hand.
     this.armMat = new THREE.MeshBasicMaterial({
-      color: this.baseSkin.clone(), map: avatarSurfaceTexture(),
+      color: this.baseSkin.clone(), map: avatarTexture('skin'),
+    });
+    this.sleeveMat = new THREE.MeshBasicMaterial({
+      color: this.baseSleeve.clone(), map: avatarTexture('cloth'),
     });
     const arm = new THREE.Group();
-    const forearm = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.17, 0.55), this.armMat);
+    const forearm = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.17, 0.55), this.sleeveMat);
     forearm.position.set(0, 0, 0.3); // extends back toward the screen corner
     arm.add(forearm);
+    const wrist = new THREE.Mesh(new THREE.BoxGeometry(0.185, 0.185, 0.1), this.armMat);
+    wrist.position.set(0, 0, 0.09); // bare skin between the cuff and the grip
+    arm.add(wrist);
     const fist = new THREE.Mesh(new THREE.BoxGeometry(0.21, 0.21, 0.2), this.armMat);
     arm.add(fist); // the grip, at the item's position
     arm.position.set(0.05, -0.16, 0.06);
@@ -83,6 +97,8 @@ export class HeldItemView {
    *  aware (so your own hand matches the avatar everyone else sees). */
   setSkin(seed: number, cosmetics?: Cosmetics): void {
     this.baseSkin.copy(skinColorFor(seed, cosmetics));
+    const c = cosmetics ?? defaultCosmetics(seed);
+    this.baseSleeve.setHex(SHIRT_COLORS[c.shirt]?.hex ?? SHIRT_COLORS[0].hex);
   }
 
   /** Show only in active first-person gameplay; item state is tracked separately. */
@@ -131,6 +147,7 @@ export class HeldItemView {
     const shade = 0.55 + 0.45 * sunlight;
     this.material.color.setScalar(shade);
     this.armMat.color.copy(this.baseSkin).multiplyScalar(shade);
+    this.sleeveMat.color.copy(this.baseSleeve).multiplyScalar(shade);
     // A real block-breaking attempt swings the whole hand/item pivot regardless
     // of what is held. Gunfire still uses recoil because main only passes true
     // here when Interaction is actually working a block target.
@@ -139,12 +156,27 @@ export class HeldItemView {
     if (this.swingT < 1) this.swingT = Math.min(1, this.swingT + dt / 0.25);
     if (this.recoilT < 1) this.recoilT = Math.min(1, this.recoilT + dt / 0.16);
 
-    let px = BASE_X, py = BASE_Y, pz = BASE_Z, rx = 0;
+    let px = BASE_X, py = BASE_Y, pz = BASE_Z, rx = 0, rz = 0;
     if (this.swingT < 1) {
-      const s = Math.sin(this.swingT * Math.PI);
-      rx = -s * 0.9;
-      py = BASE_Y - s * 0.15;
-      pz = BASE_Z - s * 0.12;
+      // A real strike is two moves, not one symmetric wobble: a short wind-up
+      // that lifts the fist back toward the camera, then a longer drive that
+      // throws it FORWARD (-z) and down through the target. A single sine both
+      // ways is what made the hand look like it travelled backwards on a hit.
+      const t = this.swingT;
+      const WIND = 0.26;
+      const draw = t < WIND
+        ? Math.sin((t / WIND) * Math.PI * 0.5)   // 0 → 1, ease-out cock-back
+        : 1 - (t - WIND) / (1 - WIND);           // 1 → 0, released into the strike
+      const strike = t < WIND
+        ? 0
+        : Math.sin(((t - WIND) / (1 - WIND)) * Math.PI);
+      px = BASE_X + draw * 0.05 - strike * 0.10;
+      py = BASE_Y + draw * 0.09 - strike * 0.15;
+      pz = BASE_Z + draw * 0.13 - strike * 0.27;
+      // Negative pitch drops the item's nose (it points at -z), so the wind-up
+      // raises it and the strike chops down through the swing.
+      rx = draw * 0.42 - strike * 1.05;
+      rz = -strike * 0.2; // rolls slightly inward as it lands
     }
     if (this.recoilT < 1) {
       // Sharp onset, quick settle: kick straight back toward the camera + up.
@@ -155,7 +187,7 @@ export class HeldItemView {
       rx += e * 0.55;
     }
     this.pivot.position.set(px, py, pz);
-    this.pivot.rotation.x = rx;
+    this.pivot.rotation.set(rx, 0, rz);
 
     // Muzzle flash: brief (first ~1/3 of the recoil), gun-only, gently spinning.
     const fa = this.isGun ? Math.max(0, 1 - this.recoilT * 3) : 0;

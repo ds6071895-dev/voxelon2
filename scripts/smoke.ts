@@ -44,7 +44,9 @@ import { Mobs, MOB_DEFS } from '../src/mobs';
 import { Particles } from '../src/particles';
 import { raycastBlocks } from '../src/interact';
 import { Player } from '../src/player';
-import { applyAvatarSneak, buildAvatarBody, buildArmorOverlay } from '../src/remoteplayers';
+import {
+  applyAvatarSneak, buildAvatarBody, buildArmorOverlay, stridePose,
+} from '../src/remoteplayers';
 import { daylight } from '../src/sky';
 import { Survival } from '../src/survival';
 import { GameServer, Outbound } from '../src/net/server_core';
@@ -2079,6 +2081,66 @@ check('furnace smelts ore/sand/log but not removed foods',
   s.handle(1, { t: 'xform', x: 2000, y: 70, z: 2000, yaw: 0, pitch: 0 });
   check('an xform outside the ring is clamped back in',
     Math.abs(s.playerCoords()[0].x) <= WAR_MIN_BORDER / 2);
+
+  // Being dragged in from far away must never leave you sealed inside rock at
+  // whatever depth you happened to be at — the ring lands you on real ground.
+  {
+    const b = new GameServer(1337, mulberry32(201));
+    b.addPlayer(1, { username: 'Digger', faction: FACTION_A });
+    b.handle(1, { t: 'xform', x: 1800, y: 12, z: 1800, yaw: 0, pitch: 0 });
+    b.adminStartWar(100);
+    const pulled = b.tickWar(90);
+    const spot = b.playerCoords()[0];
+    check('the closing ring lands a deep-underground player on the surface',
+      Math.abs(spot.x) <= WAR_MIN_BORDER / 2 && spot.y > 40);
+    check('a border relocation tells the player why they moved + teleports them',
+      pulled.some((o) => o.to === 1 && o.msg.t === 'teleport') &&
+      pulled.some((o) => o.to === 1 && o.msg.t === 'notice' &&
+        /border/i.test((o.msg as { text: string }).text)));
+    // A player already inside the ring is never relocated.
+    b.handle(1, { t: 'xform', x: 4, y: 70, z: 4, yaw: 0, pitch: 0 });
+    check('a player already inside the ring is left alone',
+      !b.tickWar(1).some((o) => o.msg.t === 'teleport'));
+  }
+
+  // The first vault comfortably outside the 100×100 final ring — that is the
+  // whole point of the case: the war border closes right over it.
+  let borderVault: VaultStamp | null = null;
+  for (let cx = 24; cx < 90 && !borderVault; cx++) {
+    for (let cz = 24; cz < 90 && !borderVault; cz++) {
+      const st = vaultStamp(1337, cx, cz, terrain);
+      if (st && Math.max(Math.abs(st.x), Math.abs(st.z)) > WAR_MIN_BORDER) borderVault = st;
+    }
+  }
+  check('found a vault outside the final war ring to test against', !!borderVault);
+
+  // A sealed vault arena OUTRANKS the ring: a war must never rip a raider out
+  // of a live boss fight and drop them in the middle of the map.
+  if (borderVault) {
+    const st = borderVault;
+    const seat = st.arena.bounds;
+    const cx = (seat.minX + seat.maxX) / 2, cz = (seat.minZ + seat.maxZ) / 2;
+    const b = new GameServer(1337, mulberry32(202));
+    b.addPlayer(1, { username: 'Raider', faction: FACTION_A });
+    b.adminSetMode(1, 'creative'); // hazards cannot derail a border test
+    b.handle(1, { t: 'xform', x: cx, y: seat.minY + 1, z: cz, yaw: 0, pitch: 0 });
+    b.handle(1, { t: 'vaultEnter', cx: st.cx, cz: st.cz });
+    for (let i = 0; i < 8; i++) b.tickVaultEncounters(0.25);
+    check('the raider is in a live encounter far outside the final ring',
+      Math.max(Math.abs(cx), Math.abs(cz)) > WAR_MIN_BORDER &&
+      Math.hypot(b.playerCoords()[0].x - cx, b.playerCoords()[0].z - cz) < 20);
+    b.adminStartWar(100);
+    const pulled = b.tickWar(90);
+    check('the border has closed far past the vault',
+      b.currentBorder() === WAR_MIN_BORDER);
+    check('the closing border does not drag a raider out of a live boss fight',
+      Math.hypot(b.playerCoords()[0].x - cx, b.playerCoords()[0].z - cz) < 20 &&
+      !pulled.some((o) => o.msg.t === 'teleport'));
+    // An xform from inside the arena is honoured rather than border-clamped.
+    b.handle(1, { t: 'xform', x: cx, y: seat.minY + 1, z: cz, yaw: 0, pitch: 0 });
+    check('arena bounds beat the ring for the encounter xform clamp too',
+      Math.hypot(b.playerCoords()[0].x - cx, b.playerCoords()[0].z - cz) < 20);
+  }
 
   // Kills score the war; the snapshot message carries score + wins.
   s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: Math.PI, pitch: 0 });
@@ -4126,11 +4188,36 @@ let firstVault: VaultStamp | null = null;
     [Item.IronHelmet, Item.DiamondChestplate, Item.TitaniumLeggings, Item.WoodBoots]);
   check('a full armor set builds plating on head, torso, arms, legs and feet',
     full.length >= 8 && full.every((m) => !!m.parent));
+  const biased = suited.materials.filter((m) => (m.userData.avatarLayer as number) > 0);
+  const base = suited.materials.filter((m) => (m.userData.avatarLayer as number) === 0);
   check('avatar visual layers use deterministic depth bias to prevent flicker',
-    suited.materials.length >= 5 &&
-    suited.materials.slice(1).every((m) => m.polygonOffset) &&
+    suited.materials.length >= 5 && base.length > 0 && biased.length >= 4 &&
+    biased.every((m) => m.polygonOffset) && base.every((m) => !m.polygonOffset) &&
     full.every((m) => m.material === suited.armorMaterial) &&
-    suited.armorMaterial.polygonOffsetUnits < suited.materials[1].polygonOffsetUnits);
+    suited.armorMaterial.polygonOffsetUnits <
+      Math.max(...biased.map((m) => m.polygonOffsetUnits)));
+  check('every avatar material carries a real surface texture except crisp detail pixels',
+    suited.materials.every((m) =>
+      m.userData.avatarSurface === 'none' ? m.map === null : m.map !== null) &&
+    new Set(suited.materials.map((m) => m.userData.avatarSurface as string)).size >= 6);
+  // Limbs pivot at the top of a model that faces -z, so rotation.x > 0 is
+  // FORWARD. A swing that subtracted here threw the hand out behind the player.
+  const rest = stridePose(0, 0, 0, false, 0);
+  const punch = stridePose(0, 0, 0, false, 1);
+  const carry = stridePose(0, 0, 0, true, 0);
+  check('an attack swings the right arm forward, not backward',
+    rest.arms[1] === 0 && punch.arms[1] > rest.arms[1] && punch.arms[1] > 1);
+  check('a held item is carried out in front of the body',
+    carry.arms[1] > 0);
+  check('crouching hunches both arms forward',
+    stridePose(0, 0, 1, false, 0).arms[0] > 0 &&
+    stridePose(0, 0, 1, false, 0).arms[1] > 0);
+  // Mid-stride the legs and arms must be in opposite phase (a real gait).
+  const mid = stridePose(Math.PI / 2, 6, 0, false, 0);
+  check('walking counter-swings the arms against the legs',
+    mid.legs[0] > 0.5 && mid.legs[1] < -0.5 &&
+    mid.arms[0] < -0.5 && mid.arms[1] > 0.5);
+
   const glider = buildAvatarBody(defaultCosmetics(7));
   const pack = buildArmorOverlay(glider, [0, Item.Glider, 0, 0]);
   check('a worn glider reads as a backpack (single mesh), not chest plating',

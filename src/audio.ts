@@ -163,13 +163,22 @@ export class GameAudio {
     return panner;
   }
 
-  /** Start a long-form, bar-aligned adaptive score for this dungeon boss. */
+  /** Start a long-form, bar-aligned adaptive score for this dungeon boss.
+   *  IDEMPOTENT: if that boss's score is already running this is a no-op, so a
+   *  re-sent vaultEnter, a reconnect or a knockback that flickers the vault
+   *  bounds cannot rewind a five-minute track back to bar one. */
   startVaultMusic(family: VaultFamily, phase: 1 | 2 | 3 = 1): void {
     this.resume();
     if (!this.ctx || !this.musicBus) return;
     this.setEncounterMix(true);
     this.bossScore ??= new BossMusicEngine(this.ctx, this.musicBus);
+    if (this.bossScore.playing(family)) return; // already scored — let it run
     this.bossScore.start(family, phase);
+  }
+
+  /** Is a boss score currently playing (optionally for a specific family)? */
+  vaultMusicPlaying(family?: VaultFamily): boolean {
+    return this.bossScore?.playing(family) ?? false;
   }
 
   /** Change orchestration at the next scheduler boundary without restarting. */

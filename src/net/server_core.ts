@@ -5,7 +5,7 @@
 // validation, regen, and snapshots.
 
 import { BLOCKS, Block, isVaultMasonry } from '../blocks';
-import { ITEMS, ItemStack } from '../items';
+import { ITEMS, ItemStack, gunVolley } from '../items';
 import {
   MachineState, MachineType, applyUpgrade, claimMachine, collectMachine,
   damageMachine, machineHeight, machineTypeForBlock, newMachine, setFilter,
@@ -27,7 +27,7 @@ import {
 } from '../season';
 import {
   WarState, newWar, warActive, warSnapshot, scheduleWar, sanitizeWar,
-  warBorderAt, warDuration, DEFAULT_WAR_DURATION,
+  warBorderAt, warDuration, DEFAULT_WAR_DURATION, clampInsideBorder,
 } from '../war';
 import {
   FlagsState, newFlags, sanitizeFlags, hitFlag, returnFlag, tryCapture,
@@ -58,12 +58,14 @@ import {
   clampHearts, maxHealthFor, transferHeart,
 } from '../hearts';
 import {
-  EncounterParticipant, VaultAttackIntent, VaultEncounter, bossMaxHp,
+  ArenaBounds, EncounterParticipant, VaultAttackIntent, VaultEncounter, bossMaxHp,
   participantHpMultiplier,
 } from '../vault_encounter';
 
 const SEASON_BROADCAST = 2;      // seconds between season-clock broadcasts
 const WAR_BROADCAST = 2;         // seconds between war-clock broadcasts
+/** Seconds before the closing border may relocate the same player again. */
+const BORDER_RELOCATE_COOLDOWN = 6;
 // Rocket splash (mirrors the client-side mobs.explode blast so PvP/craters sync).
 const ROCKET_BLAST_DAMAGE = 22; // base AoE damage at the burst centre
 const ROCKET_BLAST_RADIUS = 6;  // player-damage falloff radius (blocks)
@@ -123,6 +125,9 @@ interface ServerPlayer extends PlayerInfo {
   forfeitSeason: number;
   /** Per-gadget cooldown tracker (Phase 8; server-authoritative anti-spam). */
   gadgetCd: GadgetCooldowns;
+  /** worldTime before which the shrinking war border may not relocate this
+   *  player again (stops a tick-rate teleport loop at the ring's edge). */
+  borderRelocateAt: number;
   /** Personal respawn point set via a Respawn Beacon (right-click). undefined =
    *  use the default faction spawn. Persisted with the account. */
   spawnX?: number; spawnY?: number; spawnZ?: number;
@@ -313,6 +318,7 @@ export class GameServer {
       switchSeason: Number.isFinite(account?.switchSeason) ? Math.floor(account!.switchSeason!) : 0,
       forfeitSeason: Number.isFinite(account?.forfeitSeason) ? Math.floor(account!.forfeitSeason!) : 0,
       gadgetCd: new GadgetCooldowns(),
+      borderRelocateAt: 0,
       cosmetics: saved?.cosmetics !== undefined
         ? sanitizeCosmetics(saved.cosmetics, skinSeed(username)) : undefined,
     };
@@ -370,21 +376,21 @@ export class GameServer {
         // Reject non-finite transforms so they can't poison distance/facing
         // math elsewhere (range/hit checks must never fail open).
         if (!p.dead && fin(msg.x, msg.y, msg.z, msg.yaw, msg.pitch)) {
-          // Clamp into the (war-shrinking) world border — a client can't roam
-          // past it, and during a war the closing ring drags everyone inward.
-          const half = this.borderHalf();
-          p.x = Math.max(-half, Math.min(half, msg.x));
-          p.z = Math.max(-half, Math.min(half, msg.z));
-          p.y = msg.y;
-          for (const active of this.vaultEncounters.values()) {
-            if (!active.engine.participants.has(p.id)) continue;
-            if (active.engine.status !== 'intro' && active.engine.status !== 'active' &&
-                active.engine.status !== 'reset_grace') continue;
-            const b = active.stamp.arena.bounds;
-            p.x = Math.max(b.minX + 0.15, Math.min(b.maxX - 0.15, p.x));
-            p.z = Math.max(b.minZ + 0.15, Math.min(b.maxZ - 0.15, p.z));
-            break;
+          // A sealed vault arena OUTRANKS the war border. Otherwise a ring
+          // closing over a distant vault would rip a raider out of a live boss
+          // fight and drop them, at vault depth, into solid rock at the middle
+          // of the map. Everyone else is clamped inside the border so no client
+          // can roam past it, and during a war the ring drags them inward.
+          const b = this.liveArenaFor(p.id);
+          if (b) {
+            p.x = Math.max(b.minX + 0.15, Math.min(b.maxX - 0.15, msg.x));
+            p.z = Math.max(b.minZ + 0.15, Math.min(b.maxZ - 0.15, msg.z));
+          } else {
+            const clamped = clampInsideBorder(msg.x, msg.z, this.borderHalf());
+            p.x = clamped.x;
+            p.z = clamped.z;
           }
+          p.y = msg.y;
           p.yaw = msg.yaw; p.pitch = msg.pitch;
           p.gliding = msg.gliding === true;
           p.boating = msg.boating === true;
@@ -868,9 +874,10 @@ export class GameServer {
     let maxDamage = 0, range = 0, cadence = 0;
     if (held?.gun) {
       source = held.gun.rocket ? 'rocket' : 'bullet';
-      maxDamage = held.gun.damage * Math.max(1, held.gun.pellets ?? 1);
+      const volley = gunVolley(held.gun);
+      maxDamage = volley.perHit;   // one projectile, not the whole volley
       range = Math.min(RANGED_MAX_RANGE, held.gun.range);
-      cadence = Math.max(0.06, held.gun.cooldown / Math.max(1, held.gun.burst ?? 1));
+      cadence = volley.cadence;    // the cooldown, budgeted across the volley
     } else if (p.held === Item.Sword || p.held === 0) {
       source = 'melee'; maxDamage = p.held === Item.Sword ? 7 : 4; range = 4; cadence = 0.32;
     } else if (gadgetOf(p.held)) {
@@ -1763,6 +1770,44 @@ export class GameServer {
   }
   private borderHalf(): number { return this.currentBorder() / 2; }
 
+  /** The arena bounds of the live vault encounter `id` is fighting in, or null.
+   *  A fight counts as live through its intro, the fight itself and the empty-
+   *  arena grace window — the whole span where yanking a raider out would
+   *  destroy the run. */
+  private liveArenaFor(id: number): ArenaBounds | null {
+    for (const active of this.vaultEncounters.values()) {
+      if (!active.engine.participants.has(id)) continue;
+      const status = active.engine.status;
+      if (status !== 'intro' && status !== 'active' && status !== 'reset_grace') continue;
+      return active.stamp.arena.bounds;
+    }
+    return null;
+  }
+
+  /**
+   * The ring closed over someone who was underground — a mine, a cave, a vault
+   * they had already left. Clamping x/z alone buries them alive inside solid
+   * rock, so put them down on real dry ground inside the ring and tell them why
+   * they moved. Rate-limited so a player pinned against a shrinking edge can't
+   * be teleported every tick.
+   */
+  private relocateInsideBorder(p: ServerPlayer, half: number): Outbound[] {
+    if (this.worldTime < p.borderRelocateAt) return [];
+    p.borderRelocateAt = this.worldTime + BORDER_RELOCATE_COOLDOWN;
+    const edge = Math.max(8, half - 8);
+    const inside = (v: number): number => Math.max(-edge, Math.min(edge, v));
+    // Search near where the ring pushed them first; drySpawnInBounds widens to
+    // a grid scan and finally the world spawn if that pocket is all water.
+    const s = this.terrain.drySpawnInBounds(this.rng,
+      inside(p.x - 40), inside(p.x + 40), inside(p.z - 40), inside(p.z + 40));
+    p.x = s.x; p.y = s.y; p.z = s.z;
+    return [
+      { to: p.id, msg: { t: 'teleport', x: s.x, y: s.y, z: s.z } },
+      { to: p.id, msg: { t: 'notice',
+        text: '⚠️ The war border closed over you — moved to safe ground inside the ring.' } },
+    ];
+  }
+
   /** Clock-relative war state for the HUD/wire (clock + score + season wins). */
   warSnapshotMsg(): ServerMsg {
     const w = warSnapshot(this.war, this.worldTime);
@@ -1783,8 +1828,15 @@ export class GameServer {
     if (active) {
       const half = this.borderHalf();
       for (const p of this.players.values()) {
-        p.x = Math.max(-half, Math.min(half, p.x));
-        p.z = Math.max(-half, Math.min(half, p.z));
+        // A live boss fight is exempt — the sealed arena outranks the ring.
+        if (p.dead || this.liveArenaFor(p.id)) continue;
+        const clamped = clampInsideBorder(p.x, p.z, half);
+        if (clamped.moved <= 0) continue;
+        p.x = clamped.x;
+        p.z = clamped.z;
+        // Dragged in from far away: their old Y is somewhere else entirely, so
+        // land them on real ground rather than sealing them into bedrock.
+        if (clamped.relocated) out.push(...this.relocateInsideBorder(p, half));
       }
     }
     this.warAccum += dt;

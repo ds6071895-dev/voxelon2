@@ -5,6 +5,7 @@
 // so the Character screen can show a live preview of the same model.
 
 import * as THREE from 'three';
+import { AvatarSurface, avatarTexture } from './avatartex';
 import type { NetClient, Remote } from './net/client';
 import { factionColor, isFaction } from './teams';
 import { itemGeometry } from './itementity';
@@ -22,37 +23,9 @@ const FACE_SHADE = [0.75, 0.6, 1.0, 0.45, 0.85, 0.7];
 // max HP per-player: hearts * 2).
 const REMOTE_MAX_HEALTH = 20;
 
-// A tiny neutral pixel pattern multiplied by each customised colour. It adds
-// cloth/skin variation without changing any cosmetic choices or palette values.
-const AVATAR_SURFACE_TEXTURE = (() => {
-  const shades = [
-    246, 252, 240, 249, 244, 255, 242, 250,
-    252, 243, 248, 238, 253, 245, 250, 241,
-    241, 249, 255, 244, 239, 251, 246, 253,
-    250, 240, 247, 254, 243, 248, 239, 252,
-    245, 253, 241, 249, 255, 242, 250, 244,
-    255, 244, 250, 242, 247, 253, 240, 249,
-    242, 250, 244, 255, 241, 248, 253, 243,
-    249, 241, 253, 245, 250, 239, 247, 255,
-  ];
-  const data = new Uint8Array(shades.length * 4);
-  for (let i = 0; i < shades.length; i++) {
-    data[i * 4] = shades[i];
-    data[i * 4 + 1] = shades[i];
-    data[i * 4 + 2] = shades[i];
-    data[i * 4 + 3] = 255;
-  }
-  const texture = new THREE.DataTexture(data, 8, 8, THREE.RGBAFormat);
-  texture.magFilter = THREE.NearestFilter;
-  texture.minFilter = THREE.NearestFilter;
-  texture.generateMipmaps = false;
-  texture.needsUpdate = true;
-  return texture;
-})();
-
-/** Shared neutral texture used by the avatar and the first-person hand. */
-export function avatarSurfaceTexture(): THREE.Texture {
-  return AVATAR_SURFACE_TEXTURE;
+/** Shared skin texture, used by the avatar and the first-person hand. */
+export function avatarSurfaceTexture(): THREE.Texture | null {
+  return avatarTexture('skin');
 }
 
 /** The skin tone a given player renders with — cosmetics-aware, falling back
@@ -73,13 +46,17 @@ export function skinColorFor(seed: number, cosmetics?: Cosmetics): THREE.Color {
  * The meshes remain opaque and keep writing depth, so avatars still occlude
  * themselves and the world normally.
  */
-function layeredAvatarMaterial(layer: number): THREE.MeshBasicMaterial {
-  // Keep tiny face/accessory pixels crisp; texture the body, clothes, hair and armor.
-  const texturedSurface = layer <= 2 || layer === 6;
+function layeredAvatarMaterial(
+  layer: number, surface: AvatarSurface
+): THREE.MeshBasicMaterial {
   const mat = new THREE.MeshBasicMaterial({
     vertexColors: true,
-    map: texturedSurface ? avatarSurfaceTexture() : null,
+    map: avatarTexture(surface),
   });
+  // Recorded so callers (and the smoke suite) can reason about the bias order
+  // without depending on the position of a material inside `body.materials`.
+  mat.userData.avatarLayer = layer;
+  mat.userData.avatarSurface = surface;
   if (layer > 0) {
     mat.polygonOffset = true;
     mat.polygonOffsetFactor = -1;
@@ -430,9 +407,9 @@ export interface AvatarBody {
   parts: THREE.Group[];
   /** Cape group (pivot at the shoulders) for sway animation, if worn. */
   cape: THREE.Group | null;
-  /** Base material retained for callers adding solid avatar-adjacent meshes. */
+  /** Wood-grained base material for solid avatar-adjacent props (the boat). */
   material: THREE.MeshBasicMaterial;
-  /** Strongest depth-biased layer, used by dynamically rebuilt worn armor. */
+  /** Strongest depth-biased layer (brushed plate), used by worn armor. */
   armorMaterial: THREE.MeshBasicMaterial;
   /** Every owned material, disposed together with the body. */
   materials: readonly THREE.MeshBasicMaterial[];
@@ -454,6 +431,49 @@ export function applyAvatarSneak(body: AvatarBody, amount: number): void {
   }
 }
 
+/** Limb rotations for the standing walk/idle/attack pose, in radians.
+ *  Limbs pivot at the top and the model faces -z, so a POSITIVE rotation.x
+ *  swings a limb FORWARD. Every term below is signed to match that. */
+export interface StridePose {
+  /** rotation.x for [leftLeg, rightLeg]. */
+  legs: [number, number];
+  /** rotation.x for [leftArm, rightArm]. */
+  arms: [number, number];
+  /** rotation.z for the right arm — the strike crosses slightly inward. */
+  rightArmRoll: number;
+  /** rotation.x for the cape, if worn. */
+  cape: number;
+}
+
+/**
+ * The single source of truth for the standing avatar pose, shared by remote
+ * avatars and the local third-person body so the two can never drift apart.
+ *
+ * `attackSwing` is 0 at rest and 1 at the peak of a swing; it drives the right
+ * arm forward (toward -z), which is the direction the punch actually travels.
+ */
+export function stridePose(
+  walkPhase: number,
+  hspeed: number,
+  sneak: number,
+  holding: boolean,
+  attackSwing: number
+): StridePose {
+  const amp = Math.sin(walkPhase) * Math.min(1, hspeed / 4.5) * 0.8;
+  const billow = Math.min(1, hspeed / 5) * 0.55;
+  return {
+    legs: [amp + sneak * 0.28, -amp + sneak * 0.28],
+    arms: [
+      -amp + sneak * 0.18,                                        // counter-swings
+      // Peaks around 95° with an item raised, 72° bare-handed — a strike that
+      // travels forward, not an arm thrown up past vertical.
+      amp + (holding ? 0.4 : 0) + attackSwing * 1.25 + sneak * 0.18,
+    ],
+    rightArmRoll: -attackSwing * 0.12,
+    cape: -0.12 - billow - Math.sin(walkPhase * 0.5) * 0.06,
+  };
+}
+
 /** Build the full customised avatar body (feet at y=0, facing -z). The
  *  optional shirt override paints faction colours over the cosmetic shirt so
  *  teams stay readable in the war. */
@@ -470,13 +490,24 @@ export function buildAvatarBody(
 
   // Stable opaque layers replace tiny geometry-only offsets. This avoids
   // distance/animation-dependent z-fighting without disabling the depth test.
-  const mat = layeredAvatarMaterial(0);
-  const trimMat = layeredAvatarMaterial(1);
-  const cosmeticMat = layeredAvatarMaterial(2);
-  const detailMat = layeredAvatarMaterial(3);
-  const accessoryMat = layeredAvatarMaterial(4);
-  const armorMat = layeredAvatarMaterial(6);
-  const materials = [mat, trimMat, cosmeticMat, detailMat, accessoryMat, armorMat];
+  // Each layer also carries the material texture for what it actually is, so
+  // skin, cloth, denim, hair, leather and plate all read differently.
+  const skinMat  = layeredAvatarMaterial(0, 'skin');    // head, neck
+  const clothMat = layeredAvatarMaterial(0, 'cloth');   // torso, sleeves
+  const denimMat = layeredAvatarMaterial(0, 'denim');   // legs
+  const propMat  = layeredAvatarMaterial(0, 'wood');    // boat hull / props
+  const handMat  = layeredAvatarMaterial(1, 'skin');    // hands
+  const trimMat  = layeredAvatarMaterial(1, 'leather'); // belt, shoes
+  const hairMat  = layeredAvatarMaterial(2, 'hair');
+  const capeMat  = layeredAvatarMaterial(2, 'cloth');
+  const detailMat = layeredAvatarMaterial(3, 'none');   // face pixels stay crisp
+  const accessoryMat = layeredAvatarMaterial(4, 'none');
+  const hatMat   = layeredAvatarMaterial(4, 'cloth');
+  const armorMat = layeredAvatarMaterial(6, 'metal');
+  const materials = [
+    skinMat, clothMat, denimMat, propMat, handMat, trimMat,
+    hairMat, capeMat, detailMat, accessoryMat, hatMat, armorMat,
+  ];
   const group = new THREE.Group();
   group.rotation.order = 'YXZ';
 
@@ -491,7 +522,7 @@ export function buildAvatarBody(
   const NECK_Y = 1.5;        // bottom of the head / neck base
 
   // ── Torso ──────────────────────────────────────────────────────────────
-  const torso = new THREE.Mesh(shadedBox(TORSO_W, TORSO_H, TORSO_D, shirt), mat);
+  const torso = new THREE.Mesh(shadedBox(TORSO_W, TORSO_H, TORSO_D, shirt), clothMat);
   torso.position.y = HIP_Y + TORSO_H / 2;
   group.add(torso);
   // Belt strip (pants-colored) at the waist for a two-tone read.
@@ -501,7 +532,7 @@ export function buildAvatarBody(
   group.add(belt);
 
   // Neck
-  const neck = new THREE.Mesh(shadedBox(0.2, 0.1, 0.2, skin), mat);
+  const neck = new THREE.Mesh(shadedBox(0.2, 0.1, 0.2, skin), skinMat);
   neck.position.y = NECK_Y + 0.04;
   group.add(neck);
 
@@ -509,12 +540,12 @@ export function buildAvatarBody(
   // Separate group, pivot at the neck base so it can pitch with look-dir.
   const headGroup = new THREE.Group();
   const headY_local = HEAD / 2 + 0.05; // centre of the head above the pivot
-  const headMesh = new THREE.Mesh(shadedBox(HEAD, HEAD, HEAD, skin), mat);
+  const headMesh = new THREE.Mesh(shadedBox(HEAD, HEAD, HEAD, skin), skinMat);
   headMesh.position.y = headY_local;
   headGroup.add(headMesh);
 
-  buildHair(headGroup, cosmeticMat, hair, headY_local, c.hairStyle);
-  buildHat(headGroup, accessoryMat, new THREE.Color(HAT_COLORS[c.hatColor].hex),
+  buildHair(headGroup, hairMat, hair, headY_local, c.hairStyle);
+  buildHat(headGroup, hatMat, new THREE.Color(HAT_COLORS[c.hatColor].hex),
     headY_local, c.hat);
   buildFace(headGroup, detailMat, accessoryMat, skin, hair, eye, headY_local, c.face);
 
@@ -522,8 +553,8 @@ export function buildAvatarBody(
   group.add(headGroup);
 
   // ── Legs (single segment, pivot at the hip) ────────────────────────────
-  const ll = limb(mat, LIMB_W, LIMB_H, LIMB_D, pants, -0.12, HIP_Y, 0);
-  const rl = limb(mat, LIMB_W, LIMB_H, LIMB_D, pants,  0.12, HIP_Y, 0);
+  const ll = limb(denimMat, LIMB_W, LIMB_H, LIMB_D, pants, -0.12, HIP_Y, 0);
+  const rl = limb(denimMat, LIMB_W, LIMB_H, LIMB_D, pants,  0.12, HIP_Y, 0);
   // Shoes — short caps at the foot of each leg (swing with the leg).
   for (const leg of [ll, rl]) {
     const foot = new THREE.Mesh(
@@ -534,12 +565,12 @@ export function buildAvatarBody(
 
   // ── Arms (single segment, pivot at the shoulder) ───────────────────────
   const armX = TORSO_W / 2 + LIMB_W / 2;
-  const la = limb(mat, LIMB_W, LIMB_H, LIMB_D, shirt, -armX, SHOULDER_Y, 0);
-  const ra = limb(mat, LIMB_W, LIMB_H, LIMB_D, shirt,  armX, SHOULDER_Y, 0);
+  const la = limb(clothMat, LIMB_W, LIMB_H, LIMB_D, shirt, -armX, SHOULDER_Y, 0);
+  const ra = limb(clothMat, LIMB_W, LIMB_H, LIMB_D, shirt,  armX, SHOULDER_Y, 0);
   // Hands — skin-colored caps below the sleeve (swing with the arm).
   for (const arm of [la, ra]) {
     const hand = new THREE.Mesh(
-      shadedBox(LIMB_W + 0.006, 0.14, LIMB_D + 0.006, skin), trimMat);
+      shadedBox(LIMB_W + 0.006, 0.14, LIMB_D + 0.006, skin), handMat);
     hand.position.y = -LIMB_H + 0.07;
     arm.add(hand);
   }
@@ -547,12 +578,12 @@ export function buildAvatarBody(
   group.add(ll, rl, la, ra);
 
   // ── Cape ───────────────────────────────────────────────────────────────
-  const cape = buildCape(group, cosmeticMat,
+  const cape = buildCape(group, capeMat,
     new THREE.Color(CAPE_COLORS[c.capeColor].hex), c.cape, SHOULDER_Y);
 
   return {
     group, head: headGroup, parts: [ll, rl, la, ra], cape,
-    material: mat, armorMaterial: armorMat, materials,
+    material: propMat, armorMaterial: armorMat, materials,
   };
 }
 
@@ -929,23 +960,15 @@ export class RemotePlayers {
         av.lastX = av.dx; av.lastZ = av.dz;
         av.walkPhase += Math.min(hspeed, 7) * dt * 2.4;
 
-        // Amplitude scales from 0 (idle) → ~0.8 (full run). Legs alternate;
-        // arms counter-swing (opposite phase) like a real stride.
-        const amp = Math.sin(av.walkPhase) * Math.min(1, hspeed / 4.5) * 0.8;
-        av.parts[0].rotation.x = amp + av.sneakT * 0.28;   // left leg forward / crouched
-        av.parts[1].rotation.x = -amp + av.sneakT * 0.28;  // right leg back / crouched
-        av.parts[2].rotation.x = -amp - av.sneakT * 0.18;  // left arm hunches forward
+        const pose = stridePose(
+          av.walkPhase, hspeed, av.sneakT, av.heldId > 0, attackSwing);
+        av.parts[0].rotation.x = pose.legs[0];
+        av.parts[1].rotation.x = pose.legs[1];
+        av.parts[2].rotation.x = pose.arms[0];
         av.parts[2].rotation.z = 0;
-        // Right arm swings too, raises while holding, and punches forward on a hit.
-        av.parts[3].rotation.x = amp - (av.heldId > 0 ? 0.45 : 0) -
-          attackSwing * 1.45 - av.sneakT * 0.18;
-        av.parts[3].rotation.z = attackSwing * 0.12;
-        // Cape sways with the stride: billows out with speed + a gentle flutter.
-        if (av.body.cape) {
-          const billow = Math.min(1, hspeed / 5) * 0.55;
-          av.body.cape.rotation.x = -0.12 - billow -
-            Math.sin(av.walkPhase * 0.5) * 0.06;
-        }
+        av.parts[3].rotation.x = pose.arms[1];
+        av.parts[3].rotation.z = pose.rightArmRoll;
+        if (av.body.cape) av.body.cape.rotation.x = pose.cape;
       }
     }
   }

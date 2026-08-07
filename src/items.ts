@@ -239,6 +239,32 @@ function gadgetItem(name: string, sprite: Tile, maxStack: number): ItemInfo {
 function armorItem(name: string, sprite: Tile, armor: ArmorInfo): ItemInfo {
   return { name, kind: 'item', sprite, maxStack: 1, armor };
 }
+/**
+ * How a trigger pull is validated when it hits a vault boss.
+ *
+ * A "shot" is not always one projectile: a shotgun volley is 7 pellets and a
+ * burst rifle fires 3 rounds, and every projectile arrives as its own hit.
+ * Validating one hit per gun cooldown therefore threw away 6 of 7 shotgun
+ * pellets, leaving that gun doing a seventh of its damage to a boss. Budget the
+ * cooldown across the whole volley instead and cap each hit at ONE projectile's
+ * damage — the sustained ceiling is identical, but every projectile counts.
+ *
+ * Shared by the client and the server so their boss-hit validation can never
+ * disagree (and so offline play matches online exactly).
+ */
+export function gunVolley(gun: GunInfo): {
+  /** Damage ceiling for a single accepted hit. */
+  perHit: number;
+  /** Minimum spacing between two accepted hits. */
+  cadence: number;
+  /** Projectiles in one trigger pull. */
+  shots: number;
+} {
+  const shots = Math.max(1, Math.floor(gun.pellets ?? 1)) *
+    Math.max(1, Math.floor(gun.burst ?? 1));
+  return { perHit: gun.damage, cadence: Math.max(0.02, gun.cooldown / shots), shots };
+}
+
 function gunItem(name: string, sprite: Tile, gun: GunInfo): ItemInfo {
   return { name, kind: 'item', sprite, maxStack: 1, gun };
 }

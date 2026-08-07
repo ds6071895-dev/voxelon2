@@ -39,14 +39,43 @@ export function warBorderAt(timeLeft: number, duration: number, fullSize: number
   return fullSize + (WAR_MIN_BORDER - fullSize) * (elapsed / shrinkTime);
 }
 
+function fin(...n: number[]): boolean { return n.every(Number.isFinite); }
+
+/**
+ * A horizontal pull larger than this means the old Y is meaningless: the
+ * position came from somewhere else entirely — a mine, a cave, a sealed vault
+ * far out in the Wilds. Clamping x/z alone would leave that player embedded in
+ * solid rock wherever the ring dragged them to, so anything past this distance
+ * has to be re-grounded on real terrain instead.
+ */
+export const BORDER_RELOCATE_DISTANCE = 1.5;
+
+export interface BorderClamp {
+  x: number; z: number;
+  /** Horizontal distance the clamp actually moved the position (0 = inside). */
+  moved: number;
+  /** The pull was far enough that the player needs a safe landing, not a nudge. */
+  relocated: boolean;
+}
+
+/** Clamp a position into the (possibly war-shrunk) border, reporting how far it
+ *  had to move. Shared by the server's authoritative clamp and the client's
+ *  local one so the two can never disagree about what counts as a relocation. */
+export function clampInsideBorder(x: number, z: number, half: number): BorderClamp {
+  if (!fin(x, z, half)) return { x: 0, z: 0, moved: 0, relocated: false };
+  const h = Math.max(0, half);
+  const cx = Math.max(-h, Math.min(h, x));
+  const cz = Math.max(-h, Math.min(h, z));
+  const moved = Math.hypot(cx - x, cz - z);
+  return { x: cx, z: cz, moved, relocated: moved > BORDER_RELOCATE_DISTANCE };
+}
+
 /** War duration in seconds (0 = no war scheduled). */
 export function warDuration(w: WarState): number {
   return Math.max(0, w.end - w.start);
 }
 
 export function newWar(): WarState { return { start: 0, end: 0 }; }
-
-function fin(...n: number[]): boolean { return n.every(Number.isFinite); }
 
 /** A war is on right now. */
 export function warActive(w: WarState, now: number): boolean {

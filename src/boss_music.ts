@@ -5,7 +5,8 @@ export type BossMusicCue = 'summon' | 'poise' | 'phase' | 'enrage' | 'victory' |
   | 'door' | 'movement' | 'army' | 'healing' | 'interrupt' | 'combo';
 
 type Degree = number | null;
-type Timbre = 'choir' | 'reed' | 'brass' | 'glass' | 'clock' | 'bass';
+type Timbre = 'choir' | 'reed' | 'brass' | 'glass' | 'clock' | 'bass'
+  | 'strings' | 'horn';
 
 export interface BossScoreProfile {
   readonly title: string;
@@ -133,6 +134,23 @@ interface VoiceOptions {
 const clamp = (value: number, min: number, max: number): number =>
   Math.max(min, Math.min(max, value));
 
+/**
+ * Overall score level for a macro section — the arrangement's dynamic arc.
+ * A four-minute fight held at one volume reads as a loop no matter how much
+ * the notes change, so quiet sections genuinely drop away and the late
+ * sections genuinely surge. Pure, so the shape is testable without audio.
+ */
+export function sectionDynamic(
+  section: number, phase: BossMusicPhase, lowHealth = false
+): number {
+  const count = ARRANGEMENT.length;
+  const shape = ARRANGEMENT[((section % count) + count) % count];
+  const phaseLift = phase === 1 ? 0.9 : phase === 2 ? 1 : 1.08;
+  return clamp(
+    (0.34 + shape.energy * 0.62) * phaseLift * (lowHealth ? 1.05 : 1),
+    0.35, 1.25);
+}
+
 function midiToHz(midi: number): number {
   return 440 * 2 ** ((midi - 69) / 12);
 }
@@ -176,6 +194,8 @@ export class BossMusicEngine {
   private currentBar = 0;
   private currentSection = 0;
   private currentSectionBar = 0;
+  /** Earliest time the section dynamics may take over from the entry fade. */
+  private arcFrom = 0;
   private readonly lastCueAt: Partial<Record<BossMusicCue, number>> = {};
   private victoryEnding = false;
 
@@ -234,9 +254,23 @@ export class BossMusicEngine {
     this.scoreGain.gain.cancelScheduledValues(now);
     this.scoreGain.gain.setValueAtTime(0.0001, now);
     this.scoreGain.gain.exponentialRampToValueAtTime(1, now + 0.42);
+    this.arcFrom = now + 0.5;
 
     this.timer = window.setInterval(() => this.schedule(), 80);
     this.schedule();
+  }
+
+  /**
+   * True while a score is already running (and not already bowing out on a
+   * victory). `start()` rewinds to bar one, so callers MUST check this before
+   * restarting: re-entering the arena, a re-sent vaultEnter, a knockback that
+   * flickers the vault bounds or a reconnect would otherwise replay the opening
+   * bars forever and you would never hear more than the first few seconds of a
+   * five-minute track.
+   */
+  playing(family?: VaultFamily): boolean {
+    return this.running && !this.victoryEnding &&
+      (family === undefined || this.family === family);
   }
 
   setPhase(phase: BossMusicPhase, lowHealth = false): void {
@@ -268,7 +302,7 @@ export class BossMusicEngine {
     const root = midiToHz(profile.rootMidi + 12);
 
     if (musicalKind === 'summon') {
-      this.lowBoom(now, 0.22);
+      this.lowBoom(now, 0.2, 1.2);
       this.playTimbre(this.family === 'crystal' ? 'glass' : 'choir', root, {
         at: now + 0.04, duration: 0.7, gain: 0.11, wet: 0.65,
       });
@@ -279,31 +313,59 @@ export class BossMusicEngine {
       this.glassHit(root * 4, now, 0.14, 0.08, -0.2);
       this.glassHit(root * 6, now + 0.055, 0.2, 0.055, 0.2);
     } else if (musicalKind === 'phase') {
-      this.lowBoom(now, 0.28);
+      // The boss transforming is the biggest musical moment in the fight: a
+      // rising roll, a hall-sized impact and the full brass section answering.
+      this.drumRoll(now, 0.72, 0.055);
+      this.noiseSweep(now, 0.78, 420, 6200, 0.036, -0.4);
+      this.impactHit(now + 0.78, 0.24);
       [0, 2, 4, 7].forEach((degree, index) => {
         const frequency = midiToHz(degreeToMidi(profile, degree, 1));
-        this.playTimbre(this.signatureTimbre(), frequency, {
-          at: now + index * 0.09, duration: 0.42, gain: 0.09, pan: index % 2 ? 0.24 : -0.24,
-          wet: profile.reverb,
+        this.playTimbre('horn', frequency, {
+          at: now + 0.8 + index * 0.035, duration: 1.5, gain: 0.062,
+          pan: -0.45 + index * 0.3, wet: profile.reverb, attack: 0.04, release: 0.8,
+          cutoff: 2600,
+        });
+        this.playTimbre(this.signatureTimbre(), frequency * 2, {
+          at: now + 0.86 + index * 0.09, duration: 0.5, gain: 0.05,
+          pan: index % 2 ? 0.3 : -0.3, wet: profile.reverb,
         });
       });
     } else if (musicalKind === 'enrage') {
-      for (let i = 0; i < 3; i++) this.lowBoom(now + i * 0.13, 0.2 + i * 0.035);
-      this.playTimbre('brass', root / 2, {
-        at: now, duration: 0.75, gain: 0.14, wet: 0.18, cutoff: 1600,
+      for (let i = 0; i < 3; i++) this.lowBoom(now + i * 0.13, 0.2 + i * 0.035, 1.3);
+      this.subDrop(now, 0.2);
+      this.playTimbre('horn', root / 2, {
+        at: now, duration: 1.1, gain: 0.13, wet: 0.2, attack: 0.03, cutoff: 1900,
+      });
+      // A snarling minor second against the root — the sound of losing control.
+      this.playTimbre('brass', root / 2 * 1.06, {
+        at: now + 0.06, duration: 0.9, gain: 0.07, pan: 0.35, wet: 0.24, cutoff: 1700,
       });
     } else if (musicalKind === 'victory') {
       const capturedRun = this.runId;
+      this.impactHit(now, 0.2);
+      // A real cadence: the full section lands on the tonic triad, then a
+      // rising fanfare over the top of it.
+      for (const [degree, pan] of [[0, -0.3], [2, 0], [4, 0.3]] as const) {
+        this.playTimbre('horn', midiToHz(degreeToMidi(profile, degree, 0)), {
+          at: now + 0.02, duration: 2.6, gain: 0.075, pan,
+          wet: 0.55, attack: 0.05, release: 1.4, cutoff: 2400,
+        });
+        this.playTimbre('strings', midiToHz(degreeToMidi(profile, degree, 1)), {
+          at: now + 0.06, duration: 2.7, gain: 0.045, pan: -pan,
+          wet: 0.75, attack: 0.3, release: 1.6, cutoff: 2600,
+        });
+      }
       [0, 2, 4, 7, 9].forEach((degree, index) => {
         const frequency = midiToHz(degreeToMidi(profile, degree, 1));
         this.playTimbre(this.family === 'crystal' ? 'glass' : 'brass', frequency, {
-          at: now + index * 0.12, duration: 0.75 - index * 0.04,
+          at: now + 0.25 + index * 0.13, duration: 0.9 - index * 0.04,
           gain: 0.085, pan: -0.35 + index * 0.17, wet: 0.7,
         });
       });
+      this.cymbal(now, 3.2, 0.05);
       window.setTimeout(() => {
-        if (capturedRun === this.runId) this.stop(1.2);
-      }, 760);
+        if (capturedRun === this.runId) this.stop(2.4);
+      }, 2300);
     }
   }
 
@@ -394,7 +456,9 @@ export class BossMusicEngine {
       case 'gilded': this.scheduleGilded(profile, at, step, stepSeconds, motifDegree, intensity); break;
     }
 
+    this.epicPercussion(shape, at, step, stepSeconds, intensity);
     this.scheduleLongFormLayers(profile, shape, at, step, stepSeconds, motifDegree, intensity);
+    if (step === 0) this.applyDynamicArc(at);
 
     if (this.lowHealth) {
       if (step % 8 === 0 || step % 8 === 2) this.lowBoom(at, step % 8 === 0 ? 0.19 : 0.12);
@@ -406,6 +470,61 @@ export class BossMusicEngine {
         });
       }
     }
+  }
+
+  /**
+   * A cinematic drum backbone shared by all five scores. The per-family
+   * schedulers keep their own signature percussion; this sits underneath and
+   * supplies the trailer-scale pulse — a taiko heart, a gallop that only opens
+   * up as the fight escalates, and rolls that hand over into each new section.
+   */
+  private epicPercussion(
+    shape: ArrangementShape,
+    at: number,
+    step: number,
+    stepSeconds: number,
+    intensity: number,
+  ): void {
+    const drive = shape.rhythm *
+      (this.phase === 1 ? 0.82 : this.phase === 2 ? 1 : 1.16) *
+      (this.lowHealth ? 1.08 : 1);
+    // Breakdown sections deliberately keep almost nothing, so the return of the
+    // full kit lands. Without this contrast nothing later sounds big.
+    if (shape.breakdown && this.phase < 3) {
+      if (step === 0) this.lowBoom(at, 0.09 * intensity, 0.8);
+      return;
+    }
+
+    if (step === 0) this.lowBoom(at, 0.15 * intensity, 1.4);
+    else if (step === 8) this.lowBoom(at, 0.105 * intensity, 1.1);
+    else if (step % 4 === 0 && drive > 0.88) this.lowBoom(at, 0.062 * intensity, 0.7);
+
+    // Backbeat snare from phase two, doubling up in the broadest sections.
+    if (drive > 0.9 && (step === 4 || step === 12)) {
+      this.snareTap(at, 0.05 * intensity, step === 4 ? -0.22 : 0.22);
+      if (drive > 1.05) this.snareTap(at + stepSeconds * 0.5, 0.024 * intensity, 0.3);
+    }
+    // Syncopated pickup — the "war drum" gallop.
+    if (drive > 1 && (step === 3 || step === 11 || step === 14)) {
+      this.lowBoom(at, 0.042 * intensity, 0.55);
+    }
+    // A cymbal marks every second bar once the arrangement is wide open.
+    if (step === 0 && drive > 1.02 && (this.currentSectionBar & 1) === 0) {
+      this.cymbal(at, 1.5, 0.026 * intensity);
+    }
+  }
+
+  /**
+   * Section-level dynamics. A score that sits at one volume for four minutes
+   * reads as loops; letting the quiet sections genuinely drop and the finale
+   * genuinely surge is most of what makes a long fight feel scored.
+   */
+  private applyDynamicArc(at: number): void {
+    const target = sectionDynamic(this.currentSection, this.phase, this.lowHealth);
+    // Ramp across roughly a bar so the change is felt, never heard as a jump.
+    // Held off until the entry fade has finished so the two never fight.
+    const when = Math.max(at, this.ctx.currentTime, this.arcFrom);
+    this.scoreGain.gain.setTargetAtTime(target, when, 0.9);
   }
 
   /** Transform the 16-step signature into 24 distinct four-bar phrases without
@@ -471,6 +590,27 @@ export class BossMusicEngine {
       });
     }
 
+    // The hero line: one long, soaring horn note per two bars in the widest
+    // sections. It is the melody you remember after the fight, and it only
+    // exists where the arrangement can carry it — never in a breakdown.
+    if (step === 0 && shape.energy >= 0.94 && !shape.breakdown &&
+        this.phase >= 2 && (this.currentSectionBar & 1) === 0) {
+      const anchor = profile.chords[
+        HARMONY_PATHS[this.family][Math.floor(this.currentBar / 2) %
+          HARMONY_PATHS[this.family].length] % profile.chords.length];
+      const top = anchor[anchor.length - 1] + (shape.energy > 1.05 ? profile.scale.length : 0);
+      this.playTimbre('horn', midiToHz(degreeToMidi(profile, top, 1)), {
+        at: at + stepSeconds * 0.5,
+        duration: stepSeconds * 27,
+        gain: 0.036 * intensity,
+        pan: -0.12,
+        wet: Math.min(0.85, profile.reverb + 0.18),
+        attack: 0.34,
+        release: 1.2,
+        cutoff: 2000 + this.phase * 400,
+      });
+    }
+
     // Section-opening impacts make the arrangement readable during a long fight.
     // The first bar intentionally has no impact, keeping encounter fade-in clean.
     if (step === 0 && this.currentSectionBar === 0 && this.currentBar > 0) {
@@ -484,6 +624,12 @@ export class BossMusicEngine {
       if (step === 12 && this.currentBar < BOSS_SCORE_LOOP_BARS - 1) {
         this.noiseSweep(at, stepSeconds * 3.8, 350, 5200, 0.018 * intensity,
           this.currentSection & 1 ? 0.45 : -0.45);
+      }
+      // Rolling into a big section gets a real accelerating drum roll rather
+      // than the same fill every eight bars.
+      if (step === 8 && ARRANGEMENT[(this.currentSection + 1) % ARRANGEMENT.length].energy > 0.9 &&
+          this.currentBar < BOSS_SCORE_LOOP_BARS - 1) {
+        this.drumRoll(at, stepSeconds * 8, 0.030 * intensity);
       }
       if (step === 15) this.sectionFill(at, stepSeconds, intensity);
     }
@@ -602,19 +748,45 @@ export class BossMusicEngine {
     duration: number,
     gain: number,
   ): void {
+    const level = gain / Math.sqrt(chord.length);
     chord.forEach((degree, index) => {
       const frequency = midiToHz(degreeToMidi(profile, degree, 0));
       this.playTimbre(this.family === 'crystal' ? 'glass' : 'choir', frequency, {
         at: at + index * 0.018,
         duration,
-        gain: gain / Math.sqrt(chord.length),
+        gain: level,
         pan: -0.42 + index * 0.42,
         wet: profile.reverb,
         attack: this.family === 'crystal' ? 0.025 : 0.22,
         release: Math.min(1.1, duration * 0.42),
         cutoff: this.family === 'ember' ? 1300 : 2100,
       });
+      // A string section doubles the harmony an octave down and slightly wider
+      // in the stereo field. This is the layer that gives the score its size —
+      // the choir sings the chord, the strings hold the room up underneath it.
+      this.playTimbre('strings', frequency / 2, {
+        at: at + 0.03 + index * 0.026,
+        duration: duration * 1.04,
+        gain: level * 0.72,
+        pan: 0.58 - index * 0.58,
+        wet: Math.min(0.9, profile.reverb + 0.1),
+        attack: 0.3,
+        release: Math.min(1.4, duration * 0.5),
+        cutoff: 1500,
+      });
     });
+    // A sustained low horn on the chord root anchors the whole stack once the
+    // fight has developed past its opening statement.
+    if (this.phase >= 2) {
+      this.playTimbre('horn', midiToHz(degreeToMidi(profile, chord[0], -1)), {
+        at: at + 0.05,
+        duration: duration * 0.9,
+        gain: level * 0.6,
+        wet: 0.24,
+        attack: 0.22,
+        cutoff: 900,
+      });
+    }
   }
 
   private sectionImpact(
@@ -623,8 +795,20 @@ export class BossMusicEngine {
     intensity: number,
     section: number,
   ): void {
-    this.lowBoom(at, 0.18 * intensity);
+    // A full trailer impact, not just a thump: sub drop, doubled taiko, cymbal
+    // wash, and a brass swell announcing the new section.
+    this.impactHit(at, 0.17 * intensity);
     const root = midiToHz(profile.rootMidi + 12 + (section % 3 === 0 ? 7 : 0));
+    if (ARRANGEMENT[section].energy > 0.9) {
+      this.playTimbre('horn', root / 2, {
+        at, duration: 1.35, gain: 0.055 * intensity,
+        wet: 0.3, attack: 0.05, release: 0.7, cutoff: 1500,
+      });
+      this.playTimbre('strings', root, {
+        at: at + 0.04, duration: 1.5, gain: 0.034 * intensity, pan: 0.3,
+        wet: Math.min(0.9, profile.reverb + 0.15), attack: 0.26, cutoff: 1800,
+      });
+    }
     if (this.family === 'ember' || this.family === 'gilded') {
       this.metalHit(at + 0.025, 0.044 * intensity, this.family === 'ember' ? 82 : 126);
     } else if (this.family === 'crystal') {
@@ -703,14 +887,17 @@ export class BossMusicEngine {
 
     const at = options.at;
     const duration = Math.max(0.045, options.duration);
-    const attack = Math.max(0.006, options.attack ?? (timbre === 'choir' ? 0.12 : 0.018));
-    const release = Math.max(0.04, options.release ?? (timbre === 'choir' ? 0.42 : 0.16));
+    const sustained = timbre === 'choir' || timbre === 'strings' || timbre === 'horn';
+    const attack = Math.max(0.006, options.attack ??
+      (timbre === 'strings' ? 0.19 : timbre === 'choir' ? 0.12 : timbre === 'horn' ? 0.055 : 0.018));
+    const release = Math.max(0.04, options.release ?? (sustained ? 0.42 : 0.16));
     const peak = Math.max(0.0002, options.gain);
     const filter = this.ctx.createBiquadFilter();
     filter.type = 'lowpass';
     filter.Q.value = timbre === 'reed' ? 3.2 : timbre === 'clock' ? 1.8 : 0.8;
     filter.frequency.setValueAtTime(options.cutoff ?? 2200, at);
-    if (timbre === 'brass') {
+    if (timbre === 'brass' || timbre === 'horn') {
+      // Brass "blooms": the bell opens on the attack, then closes as it sits.
       filter.frequency.exponentialRampToValueAtTime((options.cutoff ?? 2200) * 1.5, at + Math.min(0.16, duration * 0.25));
       filter.frequency.exponentialRampToValueAtTime(Math.max(500, options.cutoff ?? 1500), at + duration);
     }
@@ -718,7 +905,11 @@ export class BossMusicEngine {
     const amp = this.ctx.createGain();
     amp.gain.setValueAtTime(0.0001, at);
     amp.gain.exponentialRampToValueAtTime(peak, at + attack);
-    amp.gain.exponentialRampToValueAtTime(peak * (timbre === 'choir' ? 0.72 : 0.5), at + Math.max(attack + 0.02, duration - release));
+    // Sustained orchestral voices swell slightly instead of decaying, which is
+    // what makes a long note read as a section rather than a synth pad.
+    const bodyLevel = timbre === 'strings' ? 0.95 : sustained ? 0.78 : 0.5;
+    amp.gain.exponentialRampToValueAtTime(peak * bodyLevel,
+      at + Math.max(attack + 0.02, duration - release));
     amp.gain.exponentialRampToValueAtTime(0.0001, at + duration);
 
     const panner = this.ctx.createStereoPanner();
@@ -726,13 +917,40 @@ export class BossMusicEngine {
     filter.connect(amp).connect(panner);
     this.connectVoice(panner, options.wet ?? 0.35);
 
+    // [waveform, frequency ratio, detune cents, level]. Wide detuned unisons on
+    // the orchestral timbres are what turn one oscillator into a whole section.
     const voices: readonly [OscillatorType, number, number, number][] = timbre === 'choir'
-      ? [['triangle', 1, -6, 0.66], ['sine', 2, 4, 0.22], ['sine', 0.5, 0, 0.18]]
-      : timbre === 'reed'
-        ? [['sawtooth', 1, -4, 0.58], ['triangle', 1, 5, 0.42], ['sine', 2, 0, 0.12]]
-        : timbre === 'brass'
-          ? [['sawtooth', 1, -8, 0.62], ['sawtooth', 1, 8, 0.62], ['square', 0.5, 0, 0.13]]
-          : [['square', 1, -3, 0.46], ['triangle', 2, 4, 0.34], ['sine', 3, 0, 0.12]];
+      ? [['triangle', 1, -9, 0.5], ['triangle', 1, 9, 0.5], ['sine', 2, 4, 0.2],
+         ['sine', 0.5, 0, 0.2], ['sawtooth', 1, 0, 0.08]]
+      : timbre === 'strings'
+        ? [['sawtooth', 1, -13, 0.4], ['sawtooth', 1, 12, 0.4], ['sawtooth', 1, -4, 0.3],
+           ['sawtooth', 2, 6, 0.16], ['triangle', 0.5, 0, 0.22]]
+        : timbre === 'horn'
+          ? [['sawtooth', 1, -7, 0.5], ['sawtooth', 1, 7, 0.5], ['sawtooth', 1.5, 3, 0.24],
+             ['triangle', 2, -3, 0.14], ['sine', 0.5, 0, 0.26]]
+          : timbre === 'reed'
+            ? [['sawtooth', 1, -4, 0.58], ['triangle', 1, 5, 0.42], ['sine', 2, 0, 0.12]]
+            : timbre === 'brass'
+              ? [['sawtooth', 1, -8, 0.62], ['sawtooth', 1, 8, 0.62], ['square', 0.5, 0, 0.13]]
+              : [['square', 1, -3, 0.46], ['triangle', 2, 4, 0.34], ['sine', 3, 0, 0.12]];
+
+    // One shared vibrato for the whole section — players breathing together,
+    // not each oscillator wobbling independently.
+    let vibrato: GainNode | null = null;
+    if (sustained && duration > 0.5) {
+      const lfo = this.ctx.createOscillator();
+      const depth = this.ctx.createGain();
+      lfo.type = 'sine';
+      lfo.frequency.setValueAtTime(timbre === 'strings' ? 5.1 : 4.3, at);
+      depth.gain.setValueAtTime(0, at);
+      // Vibrato fades in, the way a held orchestral note actually does.
+      depth.gain.linearRampToValueAtTime(timbre === 'strings' ? 9 : 6,
+        at + Math.min(duration * 0.6, 0.9));
+      lfo.connect(depth);
+      lfo.start(at); lfo.stop(at + duration + 0.04);
+      this.track(lfo);
+      vibrato = depth;
+    }
 
     for (const [type, ratio, detune, level] of voices) {
       const osc = this.ctx.createOscillator();
@@ -744,6 +962,8 @@ export class BossMusicEngine {
       if (timbre === 'reed') {
         osc.detune.linearRampToValueAtTime(detune + 7, at + duration * 0.45);
         osc.detune.linearRampToValueAtTime(detune - 2, at + duration);
+      } else if (vibrato) {
+        vibrato.connect(osc.detune);
       }
       osc.connect(levelGain).connect(filter);
       osc.start(at);
@@ -805,20 +1025,142 @@ export class BossMusicEngine {
     }
   }
 
-  private lowBoom(at: number, gainValue: number): void {
+  /**
+   * The score's main drum. Every family leans on this, so a single fixed thump
+   * made five different tracks sound like the same sound repeating. It is now a
+   * layered cinematic taiko — struck skin, tuned shell, sub body and room tail
+   * — whose pitch, decay, stick weight and stereo placement all vary
+   * deterministically per strike, so consecutive hits are never identical.
+   */
+  private lowBoom(at: number, gainValue: number, weight = 1): void {
+    const v = hashUnit(this.absoluteStep * 3.71 + gainValue * 17.3);
+    const w = hashUnit(this.absoluteStep * 9.13 + 5.5);
+    const tuning = 0.86 + v * 0.3;                 // ±15% drum size
+    const decay = (0.34 + w * 0.16) * (0.75 + weight * 0.35);
+    const pan = (w - 0.5) * 0.24;
+    const panner = this.ctx.createStereoPanner();
+    panner.pan.setValueAtTime(clamp(pan, -1, 1), at);
+    this.connectVoice(panner, 0.16 + weight * 0.1);
+
+    // Sub body: the weight you feel rather than hear.
+    const sub = this.ctx.createOscillator();
+    const subAmp = this.ctx.createGain();
+    sub.type = 'sine';
+    sub.frequency.setValueAtTime(96 * tuning, at);
+    sub.frequency.exponentialRampToValueAtTime(30 * tuning, at + decay * 0.7);
+    subAmp.gain.setValueAtTime(gainValue, at);
+    subAmp.gain.exponentialRampToValueAtTime(0.0001, at + decay);
+    sub.connect(subAmp).connect(panner);
+    sub.start(at); sub.stop(at + decay + 0.05);
+    this.track(sub);
+
+    // Tuned shell: a second, faster-decaying partial that gives the drum a
+    // recognisable pitch and stops successive hits blurring together.
+    const shell = this.ctx.createOscillator();
+    const shellAmp = this.ctx.createGain();
+    shell.type = 'triangle';
+    shell.frequency.setValueAtTime(188 * tuning, at);
+    shell.frequency.exponentialRampToValueAtTime(64 * tuning, at + decay * 0.28);
+    shellAmp.gain.setValueAtTime(gainValue * 0.5, at);
+    shellAmp.gain.exponentialRampToValueAtTime(0.0001, at + decay * 0.55);
+    shell.connect(shellAmp).connect(panner);
+    shell.start(at); shell.stop(at + decay + 0.05);
+    this.track(shell);
+
+    // Struck skin: a short filtered noise transient — the stick, not the tone.
+    const stick = this.ctx.createBufferSource();
+    stick.buffer = this.noiseBuffer;
+    const stickFilter = this.ctx.createBiquadFilter();
+    stickFilter.type = 'lowpass';
+    stickFilter.Q.value = 2.4;
+    stickFilter.frequency.setValueAtTime(1500 + v * 900, at);
+    stickFilter.frequency.exponentialRampToValueAtTime(260, at + 0.09);
+    const stickAmp = this.ctx.createGain();
+    stickAmp.gain.setValueAtTime(gainValue * (0.3 + weight * 0.22), at);
+    stickAmp.gain.exponentialRampToValueAtTime(0.0001, at + 0.075 + v * 0.03);
+    stick.connect(stickFilter).connect(stickAmp).connect(panner);
+    const offset = v * Math.max(0, this.noiseBuffer.duration - 0.2);
+    stick.start(at, offset, 0.14);
+    this.track(stick);
+  }
+
+  /** Hall-sized trailer impact: sub drop, doubled taiko and a cymbal wash.
+   *  Reserved for section openings, phase changes and the finale. */
+  private impactHit(at: number, gainValue: number): void {
+    this.lowBoom(at, gainValue, 1.6);
+    this.lowBoom(at + 0.012, gainValue * 0.7, 1.3);
+    this.subDrop(at, gainValue * 0.85);
+    this.cymbal(at, 2.1, gainValue * 0.3);
+  }
+
+  /** A falling sub sine — the "whoomph" under every cinematic hit. */
+  private subDrop(at: number, gainValue: number): void {
     const osc = this.ctx.createOscillator();
     const amp = this.ctx.createGain();
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(115, at);
-    osc.frequency.exponentialRampToValueAtTime(38, at + 0.24);
-    amp.gain.setValueAtTime(gainValue, at);
-    amp.gain.exponentialRampToValueAtTime(0.0001, at + 0.32);
+    osc.frequency.setValueAtTime(72, at);
+    osc.frequency.exponentialRampToValueAtTime(19, at + 1.05);
+    amp.gain.setValueAtTime(0.0001, at);
+    amp.gain.exponentialRampToValueAtTime(gainValue, at + 0.03);
+    amp.gain.exponentialRampToValueAtTime(0.0001, at + 1.15);
     osc.connect(amp);
-    this.connectVoice(amp, 0.08);
-    osc.start(at);
-    osc.stop(at + 0.35);
+    this.connectVoice(amp, 0.05);
+    osc.start(at); osc.stop(at + 1.2);
     this.track(osc);
-    this.noiseHit(at, 0.045, 180, gainValue * 0.16, 'lowpass', 0);
+  }
+
+  /** Shimmering cymbal wash (filtered noise with a long tail). */
+  private cymbal(at: number, duration: number, gainValue: number): void {
+    const source = this.ctx.createBufferSource();
+    source.buffer = this.noiseBuffer;
+    source.loop = true;
+    const high = this.ctx.createBiquadFilter();
+    high.type = 'highpass';
+    high.frequency.setValueAtTime(5200, at);
+    const peak = this.ctx.createBiquadFilter();
+    peak.type = 'peaking';
+    peak.frequency.setValueAtTime(9000, at);
+    peak.gain.value = 6;
+    const amp = this.ctx.createGain();
+    amp.gain.setValueAtTime(gainValue, at);
+    amp.gain.exponentialRampToValueAtTime(gainValue * 0.22, at + duration * 0.3);
+    amp.gain.exponentialRampToValueAtTime(0.0001, at + duration);
+    source.connect(high).connect(peak).connect(amp);
+    this.connectVoice(amp, 0.7);
+    source.start(at); source.stop(at + duration + 0.05);
+    this.track(source);
+  }
+
+  /** Tight military snare — the rolls that build into every section change. */
+  private snareTap(at: number, gainValue: number, pan: number): void {
+    const source = this.ctx.createBufferSource();
+    source.buffer = this.noiseBuffer;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.Q.value = 0.9;
+    filter.frequency.setValueAtTime(1850 + hashUnit(at * 91.7) * 700, at);
+    const amp = this.ctx.createGain();
+    amp.gain.setValueAtTime(gainValue, at);
+    amp.gain.exponentialRampToValueAtTime(0.0001, at + 0.07);
+    const panner = this.ctx.createStereoPanner();
+    panner.pan.setValueAtTime(clamp(pan, -1, 1), at);
+    source.connect(filter).connect(amp).connect(panner);
+    this.connectVoice(panner, 0.34);
+    const offset = hashUnit(at * 13.9) * Math.max(0, this.noiseBuffer.duration - 0.2);
+    source.start(at, offset, 0.1);
+    this.track(source);
+  }
+
+  /** Accelerating snare/taiko roll that hands over to the next downbeat. */
+  private drumRoll(at: number, duration: number, gainValue: number): void {
+    const hits = 14;
+    for (let i = 0; i < hits; i++) {
+      // Quadratic spacing: sparse at the start, a blur by the end.
+      const t = at + duration * (i / hits) ** 1.55;
+      const grow = 0.35 + (i / hits) * 0.85;
+      this.snareTap(t, gainValue * grow, (i & 1 ? 0.32 : -0.32) * (1 - i / hits));
+      if (i % 4 === 0) this.lowBoom(t, gainValue * grow * 0.8, 0.7);
+    }
   }
 
   private noiseHit(

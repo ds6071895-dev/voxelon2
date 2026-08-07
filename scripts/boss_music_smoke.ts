@@ -3,6 +3,7 @@ import {
   BOSS_SCORE_LOOP_STEPS,
   BOSS_SCORE_PROFILES,
   bossScoreLoopSeconds,
+  sectionDynamic,
 } from '../src/boss_music';
 import type { VaultFamily } from '../src/vaults';
 import type { BossMusicCue } from '../src/boss_music';
@@ -61,6 +62,25 @@ for (const family of families) {
 
 check(titles.size === families.length, 'every boss track has a unique title');
 check(bosses.size === families.length, 'every profile targets a unique boss');
+
+// The arrangement must actually breathe — a score held at one level for four
+// minutes reads as a loop however much the notes underneath it change.
+{
+  const levels = Array.from({ length: 12 }, (_, i) => sectionDynamic(i, 1));
+  const quietest = Math.min(...levels);
+  const loudest = Math.max(...levels);
+  check(loudest / quietest >= 1.4,
+    `the macro arrangement has real dynamic range (${quietest.toFixed(2)}→${loudest.toFixed(2)})`);
+  check(levels.every((l) => l >= 0.35 && l <= 1.25),
+    'every section level stays inside safe headroom');
+  check(sectionDynamic(10, 3) > sectionDynamic(10, 2) &&
+    sectionDynamic(10, 2) > sectionDynamic(10, 1),
+    'each boss phase raises the score above the last');
+  check(sectionDynamic(10, 3, true) > sectionDynamic(10, 3),
+    'a boss on its last legs pushes the score harder still');
+  check(sectionDynamic(0, 1) === sectionDynamic(12, 1),
+    'the dynamic arc repeats exactly at the loop boundary');
+}
 
 if (failures > 0) {
   console.error(`\n${failures} BOSS MUSIC FAILURE${failures === 1 ? '' : 'S'}`);

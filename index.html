@@ -323,164 +323,185 @@
     }
     #debug .line { background: rgba(80,80,80,0.45); padding: 0 4px; display: inline-block; }
 
-    /* Cinematic title screen over the live panorama */
+    /* ── Sheet: the shared full-screen card used by Controls and the guide ──
+       Scrolls internally and pins its header, so long content can never be
+       silently clipped the way a bare centred column was. */
+    .sheet-scrim {
+      position: absolute; inset: 0; z-index: 24; display: none;
+      align-items: center; justify-content: center;
+      justify-content: safe center;
+      padding: calc(20px + var(--safe-top)) calc(18px + var(--safe-right))
+               calc(20px + var(--safe-bottom)) calc(18px + var(--safe-left));
+      background: rgba(4, 8, 13, .88); backdrop-filter: blur(10px);
+      overflow-y: auto; overscroll-behavior: contain;
+    }
+    .sheet-card {
+      display: flex; flex-direction: column; width: min(720px, 100%);
+      max-height: 100%; min-height: 0;
+      padding: clamp(20px, 3.2vw, 30px);
+      border: 1px solid rgba(215, 232, 245, .14); border-radius: 15px;
+      background: linear-gradient(180deg, rgba(18, 25, 34, .96), rgba(7, 11, 17, .98));
+      box-shadow: 0 30px 72px rgba(0, 0, 0, .62), inset 0 1px rgba(255, 255, 255, .08);
+      color: #dfe9f1;
+    }
+    .sheet-head { flex: 0 0 auto; padding-bottom: 16px; border-bottom: 1px solid rgba(215, 232, 245, .12); }
+    .sheet-eyebrow { color: #f0b429; font-size: 9px; letter-spacing: 2.6px; text-transform: uppercase; text-shadow: none; }
+    .sheet-title { margin-top: 9px; color: #f4f8fb; font-size: clamp(21px, 4vw, 28px); letter-spacing: 1.5px; text-shadow: none; }
+    .sheet-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 4px 4px 4px 0; margin-right: -4px; }
+    .sheet-body::-webkit-scrollbar { width: 8px; }
+    .sheet-body::-webkit-scrollbar-thumb { background: rgba(215, 232, 245, .16); border-radius: 4px; }
+    .sheet-close {
+      flex: 0 0 auto; align-self: center; margin-top: 18px; min-height: 44px; padding: 11px 34px;
+      border: 0 !important; border-radius: 10px; font-size: 12px; letter-spacing: 2px; text-transform: uppercase;
+      color: #17120a; background: linear-gradient(180deg, #ffdf9c, #eda81f) !important;
+      box-shadow: 0 9px 24px rgba(237, 168, 31, .28);
+    }
+
+    /* Keybinding groups */
+    .keygroup { margin-top: 22px; }
+    .keygroup:first-child { margin-top: 14px; }
+    .keygroup-title {
+      margin-bottom: 6px; color: #8ea3b3; font-size: 9px; letter-spacing: 2.4px;
+      text-transform: uppercase; text-shadow: none;
+    }
+    .keyrow {
+      display: flex; align-items: center; justify-content: space-between; gap: 16px;
+      padding: 9px 0; border-bottom: 1px solid rgba(215, 232, 245, .07);
+    }
+    .keyrow:last-child { border-bottom: 0; }
+    .keyrow-action { color: #cfdce6; font-size: 12px; text-shadow: none; }
+    .keyrow-keys { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; justify-content: flex-end; }
+    .keyrow-combo { display: inline-flex; gap: 3px; }
+    .keyrow-sep { color: #5d707e; font-size: 10px; font-style: normal; }
+    .keyrow-hint { color: #7c8f9d; font-size: 10px; font-style: normal; letter-spacing: .4px; }
+    .keyrow-keys kbd {
+      display: inline-block; padding: 5px 9px; border-radius: 6px;
+      border: 1px solid rgba(215, 232, 245, .16); border-bottom-width: 2px;
+      background: rgba(0, 0, 0, .5); color: #ffdf9c;
+      font-family: inherit; font-size: 11px; letter-spacing: .6px; text-shadow: none; white-space: nowrap;
+    }
+    @media (max-width: 560px) {
+      .keyrow { flex-direction: column; align-items: flex-start; gap: 6px; }
+      .keyrow-keys { justify-content: flex-start; }
+    }
+
+    /* ── Title screen ─────────────────────────────────────────────────────
+       One centred column over the live panorama: crest, wordmark, tagline and
+       a single focused card. The sky reads through a soft ink wash rather than
+       being boxed in by frames, scanlines and orbital rings, and the type
+       carries the hierarchy instead of a dozen competing accent colours. */
     #overlay {
-      position: absolute; inset: 0; z-index: 20; overflow: hidden;
-      display: flex; align-items: center; justify-content: center;
-      padding: calc(36px + var(--safe-top)) calc(42px + var(--safe-right))
-               calc(34px + var(--safe-bottom)) calc(42px + var(--safe-left));
+      position: absolute; inset: 0; z-index: 20; overflow-y: auto; overscroll-behavior: contain;
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center;
+      justify-content: safe center; /* never clip the crest on short viewports */
+      overflow-x: hidden;
+      gap: clamp(18px, 3.2vh, 38px);
+      padding: calc(30px + var(--safe-top)) calc(20px + var(--safe-right))
+               calc(26px + var(--safe-bottom)) calc(20px + var(--safe-left));
       background:
-        linear-gradient(90deg, rgba(2,6,10,.94) 0%, rgba(2,6,10,.68) 35%, rgba(2,6,10,.22) 62%, rgba(2,6,10,.76) 100%),
-        radial-gradient(circle at 67% 44%, rgba(34,169,220,.14), transparent 30%),
-        linear-gradient(180deg, rgba(2,5,9,.14), rgba(2,5,9,.86));
-      isolation: isolate;
+        radial-gradient(ellipse 74% 58% at 50% 44%,
+          rgba(4,8,13,.88), rgba(4,8,13,.40) 64%, rgba(4,8,13,0) 100%),
+        linear-gradient(180deg, rgba(4,8,13,.78) 0%, rgba(4,8,13,.18) 26%,
+          rgba(4,8,13,.26) 58%, rgba(2,4,8,.94) 100%);
+      color: #e8eef3; -webkit-tap-highlight-color: transparent;
     }
     #overlay.hidden { display: none; }
+    /* One slow warm sweep across the sky — the only ambient motion up here. */
     #overlay::before {
-      content: ''; position: absolute; inset: 18px; pointer-events: none; z-index: -1;
-      border: 1px solid rgba(157,220,242,.18);
-      clip-path: polygon(0 0, 16% 0, 16% 1px, 84% 1px, 84% 0, 100% 0,
-        100% 36%, calc(100% - 1px) 36%, calc(100% - 1px) 64%, 100% 64%,
-        100% 100%, 84% 100%, 84% calc(100% - 1px), 16% calc(100% - 1px),
-        16% 100%, 0 100%, 0 64%, 1px 64%, 1px 36%, 0 36%);
+      content: ''; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+      background: radial-gradient(ellipse 42% 56% at 30% 22%, rgba(255,196,102,.19), transparent 70%);
+      background-size: 165% 165%; background-position: 0% 0%;
+      animation: title-drift 34s ease-in-out infinite alternate;
     }
-    #overlay::after {
-      content: ''; position: absolute; inset: 0; pointer-events: none; z-index: -2;
-      background:
-        repeating-linear-gradient(0deg, transparent 0 3px, rgba(120,220,255,.014) 3px 4px),
-        radial-gradient(ellipse at 50% 115%, rgba(255,80,45,.15), transparent 48%);
-      mix-blend-mode: screen;
-    }
-    .title-atmosphere { position: absolute; inset: 0; z-index: -3; pointer-events: none; }
-    .title-atmosphere::before {
-      content: ''; position: absolute; width: 54vmax; height: 54vmax;
-      right: -22vmax; top: -28vmax; border: 1px solid rgba(91,212,245,.15);
-      border-radius: 50%; box-shadow: 0 0 0 64px rgba(91,212,245,.025),
-        0 0 0 128px rgba(91,212,245,.018); animation: orbital-drift 24s linear infinite;
-    }
-    .title-atmosphere::after {
-      content: ''; position: absolute; left: 7%; bottom: 12%; width: 130px; height: 130px;
-      background: linear-gradient(135deg, rgba(255,78,49,.3), transparent 56%);
-      clip-path: polygon(0 0, 100% 0, 100% 18%, 18% 18%, 18% 100%, 0 100%);
-      opacity: .45;
-    }
-    @keyframes orbital-drift { to { transform: rotate(360deg); } }
+    @keyframes title-drift { to { background-position: 46% 34%; opacity: .55; } }
 
-    .landing-shell {
-      width: min(1180px, 100%); min-height: min(690px, calc(100dvh - 92px));
-      display: grid; grid-template-columns: minmax(0, 1.18fr) minmax(340px, .72fr);
-      align-items: center; gap: clamp(44px, 7vw, 96px); position: relative;
+    .title-lockup {
+      position: relative; text-align: center;
+      animation: title-rise .8s cubic-bezier(.16,.84,.28,1) both;
     }
-    .brand-panel { position: relative; padding: 34px 0 34px clamp(18px, 3vw, 38px); }
-    .brand-panel::before {
-      content: ''; position: absolute; left: 0; top: 7%; bottom: 7%; width: 2px;
-      background: linear-gradient(transparent, #63d9ff 18%, #63d9ff 58%, #ff5b3f 82%, transparent);
-      box-shadow: 0 0 18px rgba(89,214,255,.65);
+    @keyframes title-rise { from { transform: translateY(18px); opacity: 0; filter: blur(6px); } }
+    .title-crest {
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+      margin-bottom: clamp(13px, 2.1vh, 22px);
     }
-    .brand-panel::after {
-      content: 'VX-01'; position: absolute; left: -4px; top: 2%; transform: translateX(-50%) rotate(-90deg);
-      color: #6f8a95; font: 700 8px 'Lucida Console', monospace; letter-spacing: 3px;
-      text-shadow: none;
+    .title-crest span {
+      width: 9px; height: 9px; transform: rotate(45deg);
+      background: #f0b429; box-shadow: 0 0 15px rgba(240,180,41,.7);
     }
-    .title-kicker {
-      display: inline-flex; align-items: center; gap: 9px; margin-bottom: 20px;
-      padding: 7px 10px 7px 8px; border: 1px solid rgba(105,218,255,.25);
-      background: rgba(6,17,24,.58); color: #a3e8ff; font-size: 9px;
-      letter-spacing: 3px; text-transform: uppercase; text-shadow: none;
-      box-shadow: inset 0 0 18px rgba(63,194,239,.06);
-    }
-    .title-kicker::before {
-      content: ''; width: 7px; height: 7px; background: #72e29b; border-radius: 50%;
-      box-shadow: 0 0 11px rgba(114,226,155,.9); animation: status-pulse 2.2s ease-in-out infinite;
-    }
-    @keyframes status-pulse { 50% { opacity: .45; transform: scale(.72); } }
-    .title-lockup { position: relative; animation: title-arrive .75s cubic-bezier(.18,.85,.25,1) both; }
-    @keyframes title-arrive {
-      from { transform: translate3d(-34px, 0, 0); opacity: 0; filter: blur(5px); }
-      to { transform: none; opacity: 1; filter: none; }
+    .title-crest span:nth-child(2) {
+      width: 15px; height: 15px; background: #ffdf9c; box-shadow: 0 0 22px rgba(255,214,130,.85);
     }
     #title {
-      display: flex; align-items: baseline; flex-wrap: wrap;
-      font-size: clamp(64px, 8.4vw, 116px); line-height: .8;
-      letter-spacing: clamp(4px, .75vw, 11px); color: #eef8fb; margin: 0;
-      text-shadow: 0 3px 0 #71858e, 0 7px 0 #14222a,
-        0 18px 52px rgba(0,0,0,.9), 0 0 55px rgba(90,215,251,.23);
+      margin: 0; color: #f4f8fb;
+      font-size: clamp(56px, 11.5vw, 132px); line-height: .86;
+      letter-spacing: clamp(6px, 1.3vw, 17px); text-indent: clamp(6px, 1.3vw, 17px);
+      text-shadow: 0 2px 0 #495563, 0 5px 0 #19212a, 0 16px 44px rgba(0,0,0,.88);
     }
     #title .accent {
-      color: #ff6048;
-      text-shadow: 0 3px 0 #99362d, 0 7px 0 #351a17,
-        0 18px 52px rgba(0,0,0,.9), 0 0 48px rgba(255,82,56,.46);
+      color: #ffc94d;
+      text-shadow: 0 2px 0 #9a6c14, 0 5px 0 #3a2708,
+        0 16px 44px rgba(0,0,0,.88), 0 0 48px rgba(255,190,70,.42);
     }
     #overlay .subtitle {
-      margin-top: 18px; color: #b9d1d9; font-size: clamp(10px, 1.1vw, 13px);
-      letter-spacing: clamp(3px, .55vw, 7px); text-transform: uppercase; text-shadow: 0 2px 4px #000;
+      margin: clamp(14px, 2vh, 20px) 0 0; color: #a8bccb;
+      font-size: clamp(10px, 1.15vw, 13px); letter-spacing: clamp(4px, .8vw, 9px);
+      text-transform: uppercase; text-shadow: 0 2px 5px rgba(0,0,0,.8);
     }
-    #overlay .subtitle .sub-dot { color: #61dbff; }
-    .brand-copy {
-      max-width: 640px; margin-top: 28px; color: #c5d4d9; font-size: clamp(13px, 1.15vw, 16px);
-      line-height: 1.8; text-shadow: 0 2px 4px rgba(0,0,0,.75);
-    }
-    .brand-copy strong { color: #fff; font-weight: 700; }
-    .world-pill-row { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 27px; }
-    .world-pill {
-      display: inline-flex; align-items: center; gap: 7px; padding: 8px 11px;
-      border: 1px solid rgba(154,205,221,.2); background: rgba(4,12,17,.62);
-      color: #c6dce4; font-size: 9px; letter-spacing: 1.5px; text-transform: uppercase;
-      text-shadow: none; backdrop-filter: blur(5px);
-    }
-    .world-pill span { color: #63d9ff; }
-    .season-brief {
-      display: grid; grid-template-columns: auto 1fr; gap: 0 16px; max-width: 570px;
-      margin-top: 22px; padding: 15px 17px; border-left: 2px solid #ff5b3f;
-      background: linear-gradient(90deg, rgba(24,12,10,.76), rgba(7,14,19,.62));
-      box-shadow: inset 0 0 24px rgba(255,79,48,.035), 0 15px 35px rgba(0,0,0,.2);
-    }
-    .season-glyph { grid-row: 1 / 3; align-self: center; color: #ff725c; font-size: 23px; text-shadow: 0 0 18px rgba(255,84,58,.55); }
-    .season-label { color: #ff9c8b; font-size: 9px; letter-spacing: 2.4px; text-transform: uppercase; text-shadow: none; }
-    .season-copy { color: #d9e5e8; margin-top: 5px; font-size: 11px; line-height: 1.55; text-shadow: none; }
+    #overlay .subtitle b { color: #f0b429; font-weight: 400; }
 
-    .entry-panel { width: 100%; max-width: 420px; justify-self: end; animation: panel-arrive .75s .08s cubic-bezier(.18,.85,.25,1) both; }
-    @keyframes panel-arrive { from { transform: translateX(28px); opacity: 0; } to { transform: none; opacity: 1; } }
-    .entry-topline {
-      display: flex; justify-content: space-between; align-items: center; margin: 0 2px 9px;
-      color: #829ca7; font-size: 8px; letter-spacing: 2px; text-transform: uppercase; text-shadow: none;
+    /* ── Entry card (login / register, then the menu) ───────────────────── */
+    .entry-card {
+      position: relative; width: min(430px, 100%);
+      animation: card-rise .8s .1s cubic-bezier(.16,.84,.28,1) both;
     }
-    .entry-topline .live { display: inline-flex; align-items: center; gap: 7px; color: #8adba7; }
-    .entry-topline .live::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: #78e09d; box-shadow: 0 0 8px #78e09d; }
+    @keyframes card-rise { from { transform: translateY(22px); opacity: 0; } }
     #auth, #menu-btns {
-      width: 100%; position: relative; padding: 26px;
-      border: 1px solid rgba(122,183,203,.34); border-top-color: rgba(185,231,244,.5);
-      background:
-        linear-gradient(145deg, rgba(17,31,40,.94), rgba(5,10,15,.95)),
-        repeating-linear-gradient(90deg, rgba(255,255,255,.014) 0 1px, transparent 1px 12px);
-      box-shadow: 0 28px 70px rgba(0,0,0,.62), inset 0 0 40px rgba(71,193,228,.045);
-      backdrop-filter: blur(14px); overflow: hidden;
+      flex-direction: column; gap: 14px;
+      padding: clamp(20px, 3.4vw, 28px);
+      border: 1px solid rgba(215,232,245,.14); border-radius: 15px;
+      background: linear-gradient(180deg, rgba(18,25,34,.90), rgba(7,11,17,.95));
+      box-shadow: 0 30px 72px rgba(0,0,0,.62), inset 0 1px rgba(255,255,255,.09);
+      backdrop-filter: blur(16px);
     }
-    #auth::before, #menu-btns::before {
-      content: ''; position: absolute; left: 0; top: 0; width: 82px; height: 2px;
-      background: #64dcff; box-shadow: 0 0 15px rgba(100,220,255,.8);
+    #auth { display: flex; }
+
+    .auth-tabs {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px;
+      border: 1px solid rgba(255,255,255,.07); border-radius: 11px; background: rgba(0,0,0,.42);
     }
-    #auth::after, #menu-btns::after {
-      content: ''; position: absolute; right: -22px; bottom: -22px; width: 90px; height: 90px;
-      border: 1px solid rgba(100,220,255,.1); transform: rotate(45deg); pointer-events: none;
+    .auth-tab {
+      appearance: none; border: 0; border-radius: 8px; cursor: pointer;
+      min-height: 40px; padding: 10px 8px; font-family: inherit; font-size: 11px;
+      letter-spacing: 1.6px; text-transform: uppercase; text-shadow: none;
+      color: #8ea3b3; background: transparent; transition: color .15s, background .15s;
     }
-    #auth { display: flex; flex-direction: column; gap: 12px; }
-    .panel-heading { margin-bottom: 4px; }
-    .panel-eyebrow { color: #68d9fb; font-size: 8px; letter-spacing: 2.5px; text-transform: uppercase; text-shadow: none; }
-    .panel-heading h2 { margin-top: 7px; font-size: 21px; letter-spacing: 1.5px; color: #f1f8fa; text-shadow: none; }
-    .panel-heading p { margin-top: 8px; color: #8ea7b2; font-size: 10px; line-height: 1.55; text-shadow: none; font-weight: 400; }
-    .field-label { display: flex; flex-direction: column; gap: 7px; color: #87a6b3; font-size: 8px; letter-spacing: 1.8px; text-transform: uppercase; text-shadow: none; }
-    #auth-user-row { display: flex; gap: 8px; align-items: stretch; }
+    .auth-tab:hover { color: #dce7f0; }
+    .auth-tab.active {
+      color: #17120a; background: linear-gradient(180deg, #ffdf9c, #f0b429);
+      box-shadow: 0 5px 16px rgba(240,180,41,.28);
+    }
+    .auth-tab:focus-visible { outline: 2px solid #ffd98a; outline-offset: 2px; }
+
+    .auth-lede { color: #92a7b6; font-size: 11px; line-height: 1.55; text-shadow: none; }
+    .field-label {
+      display: flex; flex-direction: column; gap: 8px;
+      color: #7e94a4; font-size: 9px; letter-spacing: 2px; text-transform: uppercase; text-shadow: none;
+    }
+    #auth-user-row { display: flex; gap: 8px; }
     #auth-user-row #auth-user { flex: 1; min-width: 0; }
     #auth input {
-      width: 100%; min-height: 46px; padding: 11px 12px; outline: none;
-      color: #edf7fa; background: rgba(2,7,12,.84); border: 1px solid #304653;
-      border-bottom-color: #526c78; border-radius: 0; font-size: 13px; text-shadow: none;
-      box-shadow: inset 0 0 18px rgba(0,0,0,.35); transition: border-color .15s, box-shadow .15s, background .15s;
+      width: 100%; min-height: 48px; padding: 12px 14px; border-radius: 10px; outline: none;
+      color: #f2f7fa; background: rgba(0,0,0,.46); border: 1px solid rgba(255,255,255,.12);
+      font-family: inherit; font-size: 14px; letter-spacing: .5px; text-shadow: none;
+      transition: border-color .15s, box-shadow .15s, background .15s;
     }
-    #auth input::placeholder { color: #54707b; }
-    #auth input:focus { border-color: #6edcff; background: rgba(3,11,17,.96); box-shadow: inset 0 0 18px rgba(0,0,0,.3), 0 0 0 1px rgba(110,220,255,.2), 0 0 18px rgba(70,196,236,.12); }
-    #auth input[readonly] { color: #b8e9f8; cursor: default; }
+    #auth input::placeholder { color: #5c6f7d; letter-spacing: 1px; }
+    #auth input:focus {
+      border-color: #f0b429; background: rgba(0,0,0,.6);
+      box-shadow: 0 0 0 3px rgba(240,180,41,.16);
+    }
+    #auth input[readonly] { color: #ffdf9c; letter-spacing: 1.6px; cursor: default; }
 
     .mc-btn {
       font-family: inherit; font-size: 16px; font-weight: bold; cursor: pointer; color: #eef7fa;
@@ -490,41 +511,52 @@
     }
     .mc-btn:hover { filter: brightness(1.14); transform: translateY(-1px); }
     .mc-btn:active { transform: translateY(1px); }
-    #auth .mc-btn { min-height: 46px; padding: 10px 14px; font-size: 13px; letter-spacing: 1px; }
-    #roll-btn { flex: 0 0 48px; padding: 8px; font-size: 17px; background: linear-gradient(#263c49, #17252d); border-color: #6a94a7 #102029 #102029 #6a94a7; }
-    #submit-btn {
-      width: 100%; margin-top: 3px; color: #071014; letter-spacing: 2px; text-transform: uppercase;
-      background: linear-gradient(135deg, #83eaff, #36b7dc); border-color: #d4f8ff #17627a #17627a #d4f8ff;
-      box-shadow: 0 9px 26px rgba(48,185,223,.22);
-    }
-    #auth-toggle { color: #819ba6; font-size: 10px; text-align: center; text-shadow: none; }
-    #toggle-link { color: #77ddfb; cursor: pointer; text-decoration: none; border-bottom: 1px solid rgba(119,221,251,.55); }
-    #auth-err, #auth-status { min-height: 14px; font-size: 10px; text-align: center; text-shadow: none; }
-    #auth-err { color: #ff8c7d; }
-    #auth-status { color: #92b4c0; }
 
-    #menu-btns { flex-direction: column; gap: 10px; align-items: stretch; }
-    .menu-profile { margin-bottom: 8px; padding-bottom: 17px; border-bottom: 1px solid rgba(129,183,201,.15); }
-    .menu-profile .panel-eyebrow { color: #8cabb6; }
-    .menu-profile h2 { margin-top: 7px; color: #f1f8fa; font-size: 21px; letter-spacing: 1px; text-shadow: none; }
-    #menu-user { color: #73defd; }
-    .menu-profile p { margin-top: 7px; color: #839da8; font-size: 10px; line-height: 1.5; text-shadow: none; }
-    #menu-btns .mc-btn { width: 100%; min-height: 46px; padding: 10px 18px; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; }
-    #play-btn {
-      min-height: 58px !important; color: #fff8f4; font-size: 15px !important; letter-spacing: 3px !important;
-      background: linear-gradient(135deg, #ff6c48, #b93227); border-color: #ffc0ad #631b18 #631b18 #ffc0ad;
-      box-shadow: 0 12px 32px rgba(0,0,0,.42), 0 0 28px rgba(255,78,48,.24);
+    /* The title screen drops the chiselled bevel for flat, legible buttons. */
+    #overlay .mc-btn {
+      min-height: 48px; padding: 12px 18px; border: 0; border-radius: 10px;
+      font-size: 12px; letter-spacing: 2px; text-transform: uppercase; color: #dfe9f1;
+      background: linear-gradient(180deg, #2d3843, #1a222b);
+      box-shadow: 0 8px 22px rgba(0,0,0,.42);
     }
-    #character-btn { background: linear-gradient(135deg, #7150bb, #46307d); border-color: #baa0ee #291c49 #291c49 #baa0ee; }
-    #controls-btn { background: linear-gradient(#344a56, #223039); border-color: #7897a5 #172129 #172129 #7897a5; }
-    #logout-btn { min-height: 34px !important; opacity: .72; background: transparent; border-color: #3d535e; box-shadow: none; }
-    .entry-note { margin: 11px 2px 0; color: #6f8994; font-size: 8px; line-height: 1.55; letter-spacing: 1px; text-align: center; text-shadow: none; }
+    #overlay .mc-btn:hover { filter: brightness(1.2); }
+    #overlay .mc-btn:focus-visible { outline: 2px solid #ffd98a; outline-offset: 2px; }
+    #overlay #submit-btn, #overlay #play-btn {
+      color: #17120a; background: linear-gradient(180deg, #ffdf9c, #eda81f);
+      box-shadow: 0 10px 28px rgba(237,168,31,.32);
+    }
+    #overlay #submit-btn:hover, #overlay #play-btn:hover { filter: brightness(1.08); }
+    #overlay #play-btn { min-height: 60px; font-size: 15px; letter-spacing: 4px; }
+    #overlay #roll-btn {
+      flex: 0 0 52px; padding: 0; font-size: 19px; letter-spacing: 0; color: #ffdf9c;
+      background: linear-gradient(180deg, #303c48, #1c242d);
+    }
+    #overlay #logout-btn {
+      min-height: 38px; font-size: 10px; letter-spacing: 2px; color: #7b8f9d;
+      background: transparent; box-shadow: none;
+    }
+    #overlay #logout-btn:hover { color: #dce7f0; filter: none; }
+    #auth-err, #auth-status {
+      font-size: 11px; line-height: 1.45; text-align: center; text-shadow: none;
+    }
+    #auth-err:empty, #auth-status:empty { display: none; }
+    #auth-err { color: #ff9a86; }
+    #auth-status { color: #8fb9cb; }
+
+    #menu-btns { display: none; } /* revealed as flex once authenticated */
+    .menu-profile { text-align: center; }
+    .menu-eyebrow { color: #7e94a4; font-size: 9px; letter-spacing: 2.4px; text-transform: uppercase; text-shadow: none; }
+    #menu-user {
+      margin-top: 9px; color: #ffdf9c; font-size: clamp(19px, 4.4vw, 26px);
+      letter-spacing: 1.2px; text-shadow: none; overflow-wrap: anywhere;
+    }
+    .menu-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
     .title-footer {
-      position: absolute; left: calc(26px + var(--safe-left)); right: calc(26px + var(--safe-right));
-      bottom: calc(14px + var(--safe-bottom)); display: flex; justify-content: space-between;
-      color: #607781; font-size: 8px; letter-spacing: 1.5px; text-transform: uppercase; text-shadow: none;
+      margin: 0; color: #64798a; font-size: 10px; letter-spacing: 1.6px;
+      text-align: center; text-shadow: none;
     }
-    .title-footer strong { color: #91aeb9; }
+    .title-footer strong { color: #9fb4c2; font-weight: 400; }
 
     .faction-reveal {
       position: absolute; inset: 0; z-index: 30; display: none; align-items: center; justify-content: center;
@@ -636,12 +668,6 @@
     .brief-next { min-width: 160px; color: #071014; background: var(--brief-accent, #65dcff); border-color: #e6fbff #1f697d #1f697d #e6fbff; box-shadow: 0 9px 26px color-mix(in srgb, var(--brief-accent, #65dcff) 20%, transparent); }
 
     @media (max-width: 920px) {
-      #overlay { align-items: flex-start; overflow-y: auto; padding-top: calc(28px + var(--safe-top)); }
-      .landing-shell { grid-template-columns: 1fr; gap: 26px; min-height: auto; padding-bottom: 44px; }
-      .brand-panel { padding-top: 10px; padding-bottom: 0; }
-      .entry-panel { max-width: 520px; justify-self: start; margin-left: clamp(18px, 3vw, 38px); }
-      .brand-copy { max-width: 720px; }
-      .season-brief { max-width: 720px; }
       .title-footer { display: none; }
       .onboarding-frame { grid-template-columns: 1fr; min-height: auto; max-height: calc(100dvh - 54px); overflow-y: auto; }
       .onboarding-visual { min-height: 270px; border-right: 0; border-bottom: 1px solid rgba(137,199,219,.18); }
@@ -654,20 +680,18 @@
       #status { transform: translateX(-50%) scale(.84); }
       #ammo { font-size: 14px; }
       .vault-boss-hud > div:nth-child(3) { gap: 4px !important; }
-      #overlay { padding: calc(18px + var(--safe-top)) calc(16px + var(--safe-right)) calc(18px + var(--safe-bottom)) calc(16px + var(--safe-left)); }
-      #overlay::before { inset: 8px; }
-      .landing-shell { gap: 18px; }
-      .brand-panel { padding-left: 16px; }
-      .brand-panel::after, .brand-copy, .season-brief { display: none; }
-      .title-kicker { margin-bottom: 13px; padding: 5px 8px; font-size: 7px; letter-spacing: 2px; }
-      #title { font-size: clamp(50px, 17vw, 76px); }
-      #overlay .subtitle { margin-top: 12px; font-size: 8px; letter-spacing: 2.5px; }
-      .world-pill-row { margin-top: 16px; gap: 6px; }
-      .world-pill { padding: 6px 8px; font-size: 7px; }
-      .entry-panel { margin-left: 16px; max-width: calc(100% - 16px); }
-      #auth, #menu-btns { padding: 18px; }
-      .panel-heading h2, .menu-profile h2 { font-size: 18px; }
-      .entry-note { display: none; }
+      #overlay {
+        gap: 18px;
+        padding: calc(18px + var(--safe-top)) calc(16px + var(--safe-right))
+                 calc(18px + var(--safe-bottom)) calc(16px + var(--safe-left));
+      }
+      .title-crest { margin-bottom: 10px; }
+      .title-crest span { width: 7px; height: 7px; }
+      .title-crest span:nth-child(2) { width: 11px; height: 11px; }
+      #title { font-size: clamp(46px, 16vw, 76px); }
+      #overlay .subtitle { margin-top: 11px; font-size: 9px; letter-spacing: 3px; }
+      #auth, #menu-btns { padding: 18px; gap: 12px; }
+      #overlay #play-btn { min-height: 54px; }
       .onboarding-shell { padding: calc(10px + var(--safe-top)) calc(10px + var(--safe-right)) calc(10px + var(--safe-bottom)) calc(10px + var(--safe-left)); }
       .onboarding-shell::before { inset: 5px; }
       .onboarding-frame { max-height: calc(100dvh - 20px); }
@@ -682,9 +706,13 @@
       .brief-skip { order: 3; width: 100%; margin-left: 0; }
       .brief-next { flex: 1; min-width: 130px; }
     }
+    /* Too short to centre a full lockup: pin to the top and let it scroll. */
+    @media (max-height: 700px) {
+      #overlay { justify-content: flex-start; }
+    }
     @media (prefers-reduced-motion: reduce) {
-      .title-atmosphere::before, .title-kicker::before { animation: none; }
-      .title-lockup, .entry-panel { animation: none; }
+      #overlay::before { animation: none; }
+      .title-lockup, .entry-card { animation: none; }
       .brief-progress-fill { transition: none; }
     }
 
@@ -723,65 +751,49 @@
     </div>
     <div id="debug" class="mc-font"></div>
     <div id="overlay" class="hidden">
-      <div class="title-atmosphere"></div>
-      <main class="landing-shell">
-        <section class="brand-panel" aria-labelledby="title">
-          <div class="title-lockup">
-            <h1 id="title" class="mc-font"><span class="accent">VOXEL</span><span>ON</span></h1>
-            <p class="subtitle mc-font">mine <span class="sub-dot">◆</span> build <span class="sub-dot">◆</span> conquer <span class="sub-dot">◆</span> survive</p>
-          </div>
-          <p class="brand-copy mc-font">
-            Enter a persistent voxel frontier where <strong>every heart matters</strong>, factions shape the map,
-            and the world remembers what you build.
-          </p>
-          <div class="world-pill-row mc-font" aria-label="Game features">
-            <div class="world-pill"><span>◆</span> Persistent world</div>
-            <div class="world-pill"><span>◆</span> Lifesteal warfare</div>
-            <div class="world-pill"><span>◆</span> Buildable industry</div>
-          </div>
-          <div class="season-brief mc-font">
-            <div class="season-glyph">⚔</div>
-            <div class="season-label">Current operation · Lifesteal Civilizations</div>
-            <div class="season-copy">Choose your identity. Your faction will be balanced automatically when you enter the war.</div>
-          </div>
-        </section>
+      <header class="title-lockup">
+        <div class="title-crest" aria-hidden="true"><span></span><span></span><span></span></div>
+        <h1 id="title" class="mc-font"><span class="accent">VOXEL</span><span>ON</span></h1>
+        <p class="subtitle mc-font">Mine <b>·</b> Build <b>·</b> Conquer <b>·</b> Survive</p>
+      </header>
 
-        <section class="entry-panel" aria-label="World access">
-          <div id="auth">
-            <div class="panel-heading mc-font">
-              <div id="auth-mode-label" class="panel-eyebrow">Create your identity</div>
-              <h2>Begin your civilization</h2>
-              <p>Accounts preserve your character, inventory, progress, and place in the season.</p>
-            </div>
-            <label class="field-label mc-font">
-              Callsign
-              <span id="auth-user-row">
-                <input id="auth-user" class="mc-font" placeholder="username" maxlength="16" autocomplete="username" readonly />
-                <button id="roll-btn" class="mc-btn" type="button" title="Roll a new random username" aria-label="Roll a new username">↻</button>
-              </span>
-            </label>
-            <label class="field-label mc-font">
-              Passphrase
-              <input id="auth-pass" class="mc-font" type="password" placeholder="Enter password" autocomplete="current-password" />
-            </label>
-            <button id="submit-btn" class="mc-btn">Create account</button>
-            <div id="auth-toggle" class="mc-font">Already have an account? <a id="toggle-link">Log in</a></div>
-            <div id="auth-err" class="mc-font"></div>
-            <div id="auth-status" class="mc-font"></div>
+      <section class="entry-card" aria-label="World access">
+        <div id="auth">
+          <div class="auth-tabs" role="tablist" aria-label="Account">
+            <button id="tab-register" class="auth-tab mc-font" type="button" role="tab" aria-selected="true">New here</button>
+            <button id="tab-login" class="auth-tab mc-font" type="button" role="tab" aria-selected="false">Returning</button>
           </div>
-          <div id="menu-btns" style="display:none;">
-            <div class="menu-profile mc-font">
-              <h2>Welcome, <span id="menu-user">traveller</span></h2>
-              <p>Your world state is synchronized. Enter the realm or prepare your character first.</p>
-            </div>
-            <button id="play-btn" class="mc-btn">Enter Civilization</button>
-            <button id="character-btn" class="mc-btn">Customize Character</button>
-            <button id="controls-btn" class="mc-btn">View Controls</button>
-            <button id="logout-btn" class="mc-btn">Log Out</button>
+          <p id="auth-mode-label" class="auth-lede mc-font">Create your identity</p>
+          <label class="field-label mc-font" for="auth-user">
+            Callsign
+            <span id="auth-user-row">
+              <input id="auth-user" class="mc-font" placeholder="username" maxlength="16" autocomplete="username" readonly />
+              <button id="roll-btn" class="mc-btn" type="button" title="Roll a new random username" aria-label="Roll a new username">&#8635;</button>
+            </span>
+          </label>
+          <label class="field-label mc-font" for="auth-pass">
+            Passphrase
+            <input id="auth-pass" class="mc-font" type="password" placeholder="Enter password" autocomplete="current-password" />
+          </label>
+          <button id="submit-btn" class="mc-btn">Create account</button>
+          <div id="auth-err" class="mc-font" role="alert"></div>
+          <div id="auth-status" class="mc-font" role="status"></div>
+        </div>
+        <div id="menu-btns">
+          <div class="menu-profile mc-font">
+            <div class="menu-eyebrow">Signed in as</div>
+            <h2 id="menu-user">traveller</h2>
           </div>
-          <div class="entry-note mc-font">VOXELON stores no password in this browser · Press Enter to submit</div>
-        </section>
-      </main>
+          <button id="play-btn" class="mc-btn">Play</button>
+          <div class="menu-row">
+            <button id="character-btn" class="mc-btn">Character</button>
+            <button id="controls-btn" class="mc-btn">Controls</button>
+          </div>
+          <button id="logout-btn" class="mc-btn">Log out</button>
+        </div>
+      </section>
+
+      <p class="title-footer mc-font">A persistent lifesteal world <strong>&#183;</strong> Every block original <strong>&#183;</strong> No password is ever stored in this browser</p>
     </div>
   </div>
   <script type="module" src="/src/main.ts"></script>

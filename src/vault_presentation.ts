@@ -3,6 +3,16 @@ import {
   BOSS_DEFINITIONS, ENCOUNTER_INTRO_SECONDS, ENCOUNTER_PHASE_TRANSITION_SECONDS,
   ENCOUNTER_VICTORY_CINEMATIC_SECONDS,
 } from './vault_encounter';
+import { BOSS_SCORE_PROFILES, bossScoreLoopSeconds } from './boss_music';
+
+/** "Ossuary Oath · 5:03" — the score a vault family fights to. Announcing it
+ *  in the intro is what makes the encounter read as a set piece with a
+ *  soundtrack rather than a mob with a health bar. */
+function scoreCredit(family: EncounterSnapshot['family']): string {
+  const seconds = Math.round(bossScoreLoopSeconds(family));
+  const clock = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+  return `♪ ${BOSS_SCORE_PROFILES[family].title.toUpperCase()} · ${clock}`;
+}
 
 export interface AccessibilitySettings {
   musicVolume: number;
@@ -152,6 +162,20 @@ export class VaultBossHUD {
       `${snapshot.participants.length} raider${snapshot.participants.length === 1 ? '' : 's'} ` +
       `×${(1 + 0.6 * (snapshot.peakParticipants - 1)).toFixed(1)} • ` +
       `WAVE ${snapshot.wave.number} • ${snapshot.wave.alive}/${snapshot.wave.cap} army${enrage}`;
+    // Desperation: once the boss enrages or drops into its last sliver of
+    // health the whole bar throbs, so the kill window is felt, not read.
+    // Suppressed for players who asked for reduced motion or safe effects.
+    const calm = document.body.classList.contains('reduced-motion') ||
+      document.body.classList.contains('photosensitivity-safe');
+    if ((snapshot.enrage || hp <= 0.15) && !calm) {
+      const beat = 0.5 + 0.5 * Math.sin(performance.now() * 0.0138);
+      this.root.style.filter =
+        `drop-shadow(0 0 ${(5 + beat * 15).toFixed(1)}px rgba(255,72,48,${(0.3 + beat * 0.5).toFixed(2)}))`;
+      this.root.style.transform = `translateX(-50%) scale(${(1 + beat * 0.013).toFixed(4)})`;
+    } else {
+      this.root.style.filter = 'none';
+      this.root.style.transform = 'translateX(-50%)';
+    }
     this.cast.textContent = snapshot.status === 'reset_grace'
       ? 'ARENA EMPTY — RESETTING…'
       : snapshot.status === 'intro' ? def.introLine.toUpperCase()
@@ -307,9 +331,12 @@ export class VaultCinematic {
         ? `VAULT TIER ${['I', 'II', 'III'][snapshot.tier - 1]}`
         : def.title.toUpperCase();
       this.title.textContent = progress < 0.24 ? 'THE VAULT AWAKENS' : def.name.toUpperCase();
-      this.subtitle.textContent = progress < 0.54
+      // Three beats: the threat, then the score credit, then the call to arms.
+      this.subtitle.textContent = progress < 0.5
         ? def.introLine
-        : `${def.phaseTitles[0].toUpperCase()}  •  PREPARE YOURSELF`;
+        : progress < 0.72
+          ? scoreCredit(snapshot.family)
+          : `${def.phaseTitles[0].toUpperCase()}  •  PREPARE YOURSELF`;
     } else if (this.modeValue === 'phase') {
       const p = this.phaseValue;
       this.sigil.textContent = p === 2 ? 'Ⅱ' : 'Ⅲ';

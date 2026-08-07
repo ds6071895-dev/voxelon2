@@ -4,7 +4,9 @@ import {
   MAX_ENCOUNTER_OBJECTS, VaultEncounter, sanitizeEncounterSnapshot, sealContains,
   type EncounterParticipant, type EncounterConfig,
 } from '../src/vault_encounter';
-import type { VaultBossKind } from '../src/vaults';
+import { bossMaxHp, encounterBaseHp } from '../src/vault_encounter';
+import type { VaultBossKind, VaultTier } from '../src/vaults';
+import { Item, ITEMS, gunVolley } from '../src/items';
 
 const kinds = Object.keys(BOSS_DEFINITIONS) as VaultBossKind[];
 const failures: string[] = [];
@@ -203,6 +205,62 @@ for (let i = 0; i < Math.ceil((ENCOUNTER_RESET_GRACE_SECONDS + 0.5) / 0.25); i++
 }
 check(resetEncounter.status === 'idle' && !resetEncounter.snapshot().seal.sealed,
   'empty arena resets cleanly and fails open after the grace period');
+
+// --- Every weapon must be able to finish every tier -----------------------------
+// A "shot" is not always one projectile. Validating one hit per gun cooldown
+// silently threw away 6 of a shotgun's 7 pellets, so it did a seventh of its
+// intended damage to a boss. These checks pin the volley budget and then prove
+// each gun can actually clear each tier inside the enrage timer.
+{
+  const shotgun = ITEMS[Item.Shotgun].gun!;
+  const burst = ITEMS[Item.BurstRifle].gun!;
+  const rifle = ITEMS[Item.Rifle].gun!;
+  check(gunVolley(shotgun).shots === 7 && gunVolley(burst).shots === 3 &&
+    gunVolley(rifle).shots === 1,
+    'a volley counts every pellet and every burst round as its own hit');
+  check(Math.abs(gunVolley(shotgun).cadence * 7 - shotgun.cooldown) < 1e-9 &&
+    Math.abs(gunVolley(burst).cadence * 3 - burst.cooldown) < 1e-9,
+    'the gun cooldown is budgeted across the volley, never multiplied by it');
+  check(gunVolley(shotgun).perHit === shotgun.damage &&
+    gunVolley(burst).perHit === burst.damage,
+    'each accepted hit is still capped at ONE projectile of damage');
+
+  // Sustained damage per second must be unchanged by the fix — the ceiling is
+  // the same, it is just no longer thrown away.
+  const dps = (id: number): number => {
+    const g = ITEMS[id].gun!;
+    const v = gunVolley(g);
+    return v.perHit / v.cadence;
+  };
+  check(Math.abs(dps(Item.Shotgun) - shotgun.damage * 7 / shotgun.cooldown) < 1e-9,
+    'shotgun sustained damage matches its full pellet spread');
+
+  // Clearing budget: every tier, every boss, with each primary weapon. Assumes
+  // half the fight is spent moving, reloading, breaking objectives and waiting
+  // out phase transitions, and that the boss heals its full 35% cap.
+  const UPTIME = 0.5, HEAL_CAP = 1.35, ENRAGE = 360;
+  const primaries = [Item.Pistol, Item.Rifle, Item.Shotgun, Item.SMG,
+    Item.Sniper, Item.BurstRifle, Item.RocketLauncher];
+  let hardest = 0, hardestLabel = '';
+  let allClearable = true, anyTrivial = false;
+  for (const tier of [1, 2, 3] as VaultTier[]) {
+    for (const kind of kinds) {
+      const hp = bossMaxHp(tier, kind) * HEAL_CAP;
+      // Best weapon must comfortably clear; worst must still be viable.
+      const times = primaries.map((id) => hp / (dps(id) * UPTIME));
+      const best = Math.min(...times), worst = Math.max(...times);
+      if (worst > hardest) { hardest = worst; hardestLabel = `${kind} T${tier}`; }
+      if (worst >= ENRAGE) allClearable = false;
+      if (best < 12) anyTrivial = true; // a boss that dies in under 12s is a mob
+    }
+  }
+  check(allClearable,
+    `every boss is clearable before enrage with any primary (worst: ${hardestLabel} ` +
+    `${hardest.toFixed(0)}s vs ${ENRAGE}s)`);
+  check(!anyTrivial, 'no boss melts fast enough to be a mere mob');
+  check(encounterBaseHp(1) < encounterBaseHp(2) && encounterBaseHp(2) < encounterBaseHp(3),
+    'boss health still climbs with tier');
+}
 
 check(kinds.length === 5, 'all five dungeon boss families are covered');
 if (failures.length) throw new Error(`${failures.length} boss smoke check(s) failed`);

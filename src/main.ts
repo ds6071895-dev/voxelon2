@@ -9,7 +9,7 @@ import { TouchControls, isTouchDevice } from './touch';
 import { Interaction, raycastBlocks } from './interact';
 import { Inventory } from './inventory';
 import { InventoryUI, MachineUIContext, TurretUIContext } from './inventory_ui';
-import { dropFor, GunInfo, Item, ItemStack, ITEMS } from './items';
+import { dropFor, gunVolley, GunInfo, Item, ItemStack, ITEMS } from './items';
 import { RECIPES, Recipe } from './crafting';
 import { renderItemIcon } from './icons';
 import { itemDescription } from './itemdesc';
@@ -41,7 +41,7 @@ import {
 import { TurretModels } from './turretmodels';
 import {
   RemotePlayers, applyAvatarSneak, buildAvatarBody, buildArmorOverlay,
-  disposeAvatarBody, AvatarBody,
+  disposeAvatarBody, stridePose, AvatarBody,
 } from './remoteplayers';
 import {
   CAPES, CAPE_COLORS, COSMETIC_RANGES, Cosmetics, EYE_COLORS, FACE_ACCESSORIES,
@@ -53,7 +53,7 @@ import { Accounts, Account } from './net/accounts';
 import {
   FACTIONS, NO_FACTION, factionColor, factionName, isFaction, otherFaction,
 } from './teams';
-import { warBorderAt, WAR_MIN_BORDER } from './war';
+import { warBorderAt, clampInsideBorder, WAR_MIN_BORDER } from './war';
 import { Flag, FLAG_REACH, FLAG_MAX_HP, newFlags, flagPosition } from './flags';
 import { FlagModels } from './flagmodels';
 import {
@@ -1276,7 +1276,10 @@ rollBtn.addEventListener('click', rollUsername);
 // Two auth modes. REGISTER forces a randomly-rolled username (the field is
 // read-only + a 🎲 roller); LOGIN lets you type your existing name back in.
 const submitBtn = document.getElementById('submit-btn')!;
-const authToggle = document.getElementById('auth-toggle')!;
+// A two-way segmented control, so which mode you are in is visible at a glance
+// rather than hidden in a sentence of microcopy below the form.
+const tabRegister = document.getElementById('tab-register')!;
+const tabLogin = document.getElementById('tab-login')!;
 let authMode: 'register' | 'login' = 'register';
 // Remember the last account that logged in (username only) so a returning player
 // lands on a prefilled login instead of retyping it.
@@ -1286,28 +1289,39 @@ function setAuthMode(mode: 'register' | 'login'): void {
   authMode = mode;
   authErr.textContent = '';
   authStatus.textContent = '';
+  for (const [tab, active] of [
+    [tabRegister, mode === 'register'], [tabLogin, mode === 'login'],
+  ] as const) {
+    tab.classList.toggle('active', active);
+    tab.setAttribute('aria-selected', String(active));
+  }
   if (mode === 'register') {
     submitBtn.textContent = 'Create account';
-    authModeLabel.textContent = 'Create your identity';
+    authModeLabel.textContent =
+      'Roll a callsign and pick a passphrase. Your character, inventory and ' +
+      'faction are kept with the account.';
     authUser.readOnly = true;          // names are random-only on register
     rollBtn.style.display = '';
-    authToggle.innerHTML = 'Already have an account? <a id="toggle-link">Log in</a>';
     // ALWAYS roll a fresh name on entering register — never keep a name typed
     // while in login mode (switching login→signup must not carry it over).
     rollUsername();
   } else {
     submitBtn.textContent = 'Log in';
-    authModeLabel.textContent = 'Return to the frontier';
+    authModeLabel.textContent =
+      'Welcome back. Sign in and the world picks up exactly where you left it.';
     authUser.readOnly = false;         // type your existing name to log in
     authUser.value = lastUser;         // prefill the remembered account
     rollBtn.style.display = 'none';
-    authToggle.innerHTML = 'Need an account? <a id="toggle-link">Register</a>';
     if (lastUser) authPass.focus(); else authUser.focus();
   }
-  // The link is replaced via innerHTML above, so rebind it each time.
-  document.getElementById('toggle-link')!
-    .addEventListener('click', () => setAuthMode(mode === 'register' ? 'login' : 'register'));
 }
+// Re-entering the mode you are already in would silently re-roll your callsign.
+tabRegister.addEventListener('click', () => {
+  if (authMode !== 'register') setAuthMode('register');
+});
+tabLogin.addEventListener('click', () => {
+  if (authMode !== 'login') setAuthMode('login');
+});
 
 // --- Elimination countdown on the title screen ------------------------------
 // A knocked-out player lands back here, so the wait is shown as a LIVE ticking
@@ -1407,7 +1421,7 @@ playBtn.addEventListener('click', () => {
   if (!worldReady) {
     playBtn.textContent = 'Preparing…';
     const wait = (): void => {
-      if (worldReady) { playBtn.textContent = 'Enter Civilization'; beginPlay(); }
+      if (worldReady) { playBtn.textContent = 'Play'; beginPlay(); }
       else setTimeout(wait, 100);
     };
     wait();
@@ -1423,54 +1437,141 @@ function beginPlay(): void {
   input.lock();
 }
 
-// Controls / keybindings panel (Controls button).
+// Controls / keybindings panel (Controls button). Grouped by what you are
+// doing rather than one long alphabet soup, with the keys as chips so they can
+// be picked out at a glance. The card scrolls internally: the old centred
+// column silently clipped its first and last rows on shorter windows.
 const controlsPanel = (() => {
-  const panel = document.createElement('div');
-  panel.style.cssText = 'position:absolute;inset:0;display:none;flex-direction:column;' +
-    'align-items:center;justify-content:center;gap:14px;background:rgba(8,8,14,0.9);z-index:24;';
-  const h = document.createElement('h2');
-  h.className = 'mc-font';
-  h.textContent = 'CONTROLS';
-  h.style.cssText = 'font-size:30px;letter-spacing:4px;';
-  panel.appendChild(h);
-  const list = document.createElement('div');
-  list.className = 'mc-font';
-  list.style.cssText = 'display:grid;grid-template-columns:auto auto;gap:6px 32px;font-size:15px;';
-  const binds: [string, string][] = isMobile ? [
-    ['Move', 'left joystick'], ['Jump', '⬆ button (hold)'], ['Sneak', '⇩ button (toggle)'],
-    ['Sprint', 'push joystick past the rim'], ['Break / attack mob', 'long-press'],
-    ['Place / use', 'tap'], ['Aim down sights (guns)', '⊕ button'],
-    ['Reload gun', 'R button'], ['Deploy glider (in mid-air)', '⬆ button'],
-    ['Launch boat (on water)', 'tap'], ['Hop out of boat', '⬆ button'],
-    ['Getting-started guide', 'starts open — tap ✕ to hide'],
-    ['TPA — teleport to a player', '🌀 button'], ['Accept a TPA request', 'hold the accept button'],
-    ['Hotbar slot', 'tap a slot'], ['Inventory', '🎒 button'], ['World map', '🗺 button'],
-    ['Your progress', '⚑ button'], ['Pause / back', '⏸ button'],
+  // [action, alternatives, hint]. An alternative is a list of chips shown
+  // adjacent (W A S D is one combo, not four choices); alternatives are joined
+  // by "or"; the hint is prose ("in mid-air"), never a key.
+  type Bind = [string, string[][], string?];
+  type Group = { title: string; binds: Bind[] };
+  const groups: Group[] = isMobile ? [
+    { title: 'Moving', binds: [
+      ['Move', [['left joystick']]],
+      ['Sprint', [['left joystick']], 'push past the rim'],
+      ['Jump', [['⬆']], 'hold'], ['Sneak', [['⇩']], 'toggle'],
+      ['Deploy glider', [['⬆']], 'in mid-air'],
+      ['Launch boat', [['tap']], 'on water'], ['Hop out of boat', [['⬆']]],
+    ] },
+    { title: 'Fighting', binds: [
+      ['Break block / attack', [['long-press']]], ['Place / use', [['tap']]],
+      ['Aim down sights', [['⊕']]], ['Reload gun', [['R']]],
+    ] },
+    { title: 'Items', binds: [
+      ['Hotbar slot', [['tap a slot']]], ['Inventory', [['🎒']]],
+    ] },
+    { title: 'The world', binds: [
+      ['World map', [['🗺']]], ['Your progress', [['⚑']]],
+      ['Teleport to a player', [['🌀']]], ['Accept a request', [['accept']], 'hold'],
+    ] },
+    { title: 'Screens', binds: [
+      ['Getting-started guide', [['✕']], 'starts open — tap to hide'],
+      ['Pause / back', [['⏸']]],
+    ] },
   ] : [
-    ['Move', 'W A S D'], ['Jump', 'Space'], ['Sneak', 'Shift'],
-    ['Sprint', 'Q / double-tap W'], ['Break / attack mob', 'Left click'],
-    ['Place / use', 'Right click'], ['Aim down sights (guns)', 'Hold right click'],
-    ['Reload gun', 'R'], ['Drop item', 'O (Shift+O = stack)'], ['Deploy glider (in mid-air)', 'Jump'],
-    ['Launch boat (on water)', 'Right click'], ['Hop out of boat', 'Jump'],
-    ['Set waypoint here', 'B'], ['Getting-started guide', 'H'],
-    ['TPA — teleport to a player', 'T'], ['Accept a TPA request', 'Hold Y'],
-    ['Hotbar slot', '1 – 9 / scroll'], ['Inventory', 'E'], ['World map', 'M'],
-    ['Your progress', 'G'], ['Camera view (1st / 3rd)', 'V'],
-    ['Debug overlay', 'F3'], ['Pause / back', 'Esc'],
+    { title: 'Moving', binds: [
+      ['Move', [['W', 'A', 'S', 'D']]],
+      ['Sprint', [['Q'], ['W', 'W']], 'double-tap'],
+      ['Jump', [['Space']]], ['Sneak', [['Shift']]],
+      ['Deploy glider', [['Space']], 'in mid-air'],
+      ['Launch boat', [['Right click']], 'on water'], ['Hop out of boat', [['Space']]],
+    ] },
+    { title: 'Fighting', binds: [
+      ['Break block / attack', [['Left click']]], ['Place / use', [['Right click']]],
+      ['Aim down sights', [['Right click']], 'hold'], ['Reload gun', [['R']]],
+    ] },
+    { title: 'Items', binds: [
+      ['Hotbar slot', [['1'], ['9'], ['scroll']]], ['Inventory', [['E']]],
+      ['Drop item', [['O']], 'Shift + O drops the stack'],
+    ] },
+    { title: 'The world', binds: [
+      ['World map', [['M']]], ['Set waypoint here', [['B']]], ['Your progress', [['G']]],
+      ['Teleport to a player', [['T']]], ['Accept a request', [['Y']], 'hold'],
+    ] },
+    { title: 'Screens', binds: [
+      ['Getting-started guide', [['H']]], ['Camera view (1st / 3rd)', [['V']]],
+      ['Debug overlay', [['F3']]], ['Pause / back', [['Esc']]],
+    ] },
   ];
-  for (const [action, key] of binds) {
-    const a = document.createElement('div'); a.textContent = action; a.style.color = '#cfe0ff';
-    const k = document.createElement('div'); k.textContent = key;
-    k.style.color = '#fff'; k.style.textAlign = 'right';
-    list.append(a, k);
+
+  const panel = document.createElement('div');
+  panel.className = 'sheet-scrim';
+  const card = document.createElement('div');
+  card.className = 'sheet-card mc-font';
+
+  const head = document.createElement('div');
+  head.className = 'sheet-head';
+  const eyebrow = document.createElement('div');
+  eyebrow.className = 'sheet-eyebrow';
+  eyebrow.textContent = isMobile ? 'Touch controls' : 'Keyboard & mouse';
+  const title = document.createElement('h2');
+  title.className = 'sheet-title';
+  title.textContent = 'Controls';
+  head.append(eyebrow, title);
+
+  const body = document.createElement('div');
+  body.className = 'sheet-body';
+  for (const group of groups) {
+    const section = document.createElement('section');
+    section.className = 'keygroup';
+    const label = document.createElement('h3');
+    label.className = 'keygroup-title';
+    label.textContent = group.title;
+    section.appendChild(label);
+    for (const [action, alternatives, hint] of group.binds) {
+      const row = document.createElement('div');
+      row.className = 'keyrow';
+      const name = document.createElement('span');
+      name.className = 'keyrow-action';
+      name.textContent = action;
+      const chips = document.createElement('span');
+      chips.className = 'keyrow-keys';
+      alternatives.forEach((combo, i) => {
+        if (i > 0) {
+          const sep = document.createElement('i');
+          sep.className = 'keyrow-sep';
+          sep.textContent = 'or';
+          chips.appendChild(sep);
+        }
+        const set = document.createElement('span');
+        set.className = 'keyrow-combo';
+        for (const key of combo) {
+          const chip = document.createElement('kbd');
+          chip.textContent = key;
+          set.appendChild(chip);
+        }
+        chips.appendChild(set);
+      });
+      if (hint) {
+        const note = document.createElement('i');
+        note.className = 'keyrow-hint';
+        note.textContent = hint;
+        chips.appendChild(note);
+      }
+      row.append(name, chips);
+      section.appendChild(row);
+    }
+    body.appendChild(section);
   }
-  panel.appendChild(list);
+
   const back = document.createElement('button');
-  back.className = 'mc-btn';
+  back.className = 'mc-btn sheet-close';
   back.textContent = 'Back';
-  back.style.cssText = 'font-size:16px;padding:8px 24px;margin-top:6px;';
   back.addEventListener('click', () => { panel.style.display = 'none'; });
-  panel.appendChild(back);
+
+  card.append(head, body, back);
+  panel.appendChild(card);
+  panel.addEventListener('click', (e) => {
+    if (e.target === panel) panel.style.display = 'none'; // click the backdrop
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && panel.style.display === 'flex') {
+      panel.style.display = 'none';
+      e.stopPropagation();
+    }
+  });
   app.appendChild(panel);
   return panel;
 })();
@@ -2625,6 +2726,10 @@ function clearVaultPresentation(dropSnapshot = true, musicFade = 0.3): void {
   audio.stopVaultMusic(musicFade);
 }
 let vaultPollTimer = 0;
+/** Seconds you must stay outside a vault's bounds before it counts as leaving —
+ *  long enough to absorb a boss knockback, short enough to feel immediate. */
+const VAULT_EXIT_GRACE = 1.2;
+let vaultExitGrace = 0;
 let vaultSparkleTimer = 0;
 const vaultKeyOf = (v: VaultStamp): string => `${v.cx},${v.cz}`;
 
@@ -2829,12 +2934,15 @@ function hitEncounterTarget(
   const stack = inventory.selectedStack;
   const heldInfo = stack ? ITEMS[stack.id] : undefined;
   const gadget = stack ? gadgetOf(stack.id) : undefined;
-  const maxDamage = heldInfo?.gun
-    ? heldInfo.gun.damage * Math.max(1, heldInfo.gun.pellets ?? 1)
+  // Mirrors the server exactly (gunVolley): every pellet of a shotgun volley
+  // and every round of a burst is its own hit, so the cooldown is budgeted
+  // across the volley and each hit is capped at one projectile's damage.
+  const volley = heldInfo?.gun ? gunVolley(heldInfo.gun) : null;
+  const maxDamage = volley ? volley.perHit
     : gadget ? Math.min(30, gadget.damage ?? 8)
       : stack?.id === Item.Sword ? 7 : 4;
   const range = heldInfo?.gun ? heldInfo.gun.range : gadget ? 24 : 4;
-  const cadence = heldInfo?.gun ? heldInfo.gun.cooldown : gadget ? 0.8 : 0.32;
+  const cadence = volley ? volley.cadence : gadget ? 0.8 : 0.32;
   const intent: VaultAttackIntent = {
     encounterId: encounterSnapshot.encounterId,
     sequence: ++encounterAttackSequence,
@@ -2982,7 +3090,20 @@ function updateVaults(dt: number): void {
     updateNearbyVaults(); // reveal entrances within range as the player roams
     const v = vaultAt(seed, player.pos.x, player.pos.y + 0.5, player.pos.z,
       world.terrain, vaultStampCached);
-    if (v?.cx !== curVault?.cx || v?.cz !== curVault?.cz) onVaultTransition(v);
+    if (v?.cx !== curVault?.cx || v?.cz !== curVault?.cz) {
+      // The bounds test is a hard AABB polled a few times a second, and a boss
+      // leap, charge or knockback can push you a fraction outside it for a
+      // single poll. Tearing the whole encounter down on that flicker is what
+      // made the score cut out and restart mid-fight, so leaving a vault has to
+      // be sustained before it counts. Entering is still instant.
+      if (v) { vaultExitGrace = 0; onVaultTransition(v); }
+      else {
+        vaultExitGrace += 0.3;
+        if (vaultExitGrace >= VAULT_EXIT_GRACE) onVaultTransition(null);
+      }
+    } else {
+      vaultExitGrace = 0;
+    }
   }
   mobs.setVault(curVault);
   if (!curVault) { vaultEncounterVisuals.hide(); return; }
@@ -4048,19 +4169,17 @@ function updateSelfAvatar(dt: number): void {
     b.head.rotation.x = player.pitch + selfSneakT * 0.12; // hunch while keeping look direction
     const hspeed = Math.hypot(player.vel.x, player.vel.z);
     selfWalkPhase += Math.min(hspeed, 7) * dt * 2.4;
-    const amp = Math.sin(selfWalkPhase) * Math.min(1, hspeed / 4.5) * 0.8;
-    b.parts[0].rotation.x = amp + selfSneakT * 0.28;
-    b.parts[1].rotation.x = -amp + selfSneakT * 0.28;
-    const attackSwing = held.swingAmount();
-    b.parts[2].rotation.x = -amp - selfSneakT * 0.18;
+    // Same shared pose helper the remote avatars use, so your own body never
+    // animates differently from the one other players see.
+    const pose = stridePose(
+      selfWalkPhase, hspeed, selfSneakT, selfHeldId > 0, held.swingAmount());
+    b.parts[0].rotation.x = pose.legs[0];
+    b.parts[1].rotation.x = pose.legs[1];
+    b.parts[2].rotation.x = pose.arms[0];
     b.parts[2].rotation.z = 0;
-    b.parts[3].rotation.x = amp - (selfHeldId > 0 ? 0.45 : 0) -
-      attackSwing * 1.45 - selfSneakT * 0.18;
-    b.parts[3].rotation.z = attackSwing * 0.12;
-    if (b.cape) {
-      const billow = Math.min(1, hspeed / 5) * 0.55;
-      b.cape.rotation.x = -0.12 - billow - Math.sin(selfWalkPhase * 0.5) * 0.06;
-    }
+    b.parts[3].rotation.x = pose.arms[1];
+    b.parts[3].rotation.z = pose.rightArmRoll;
+    if (b.cape) b.cape.rotation.x = pose.cape;
   }
 }
 
@@ -4173,6 +4292,28 @@ function formatClock(secs: number): string {
 /** The live war border side length (full world outside a war). */
 function currentWarBorder(): number {
   return warActiveNow ? warBorderAt(warLeft, warDur, WORLD_BORDER) : WORLD_BORDER;
+}
+
+/** Standing in a vault whose boss encounter is running. The sealed arena
+ *  outranks the war border for exactly this span (server: `liveArenaFor`). */
+function inLiveVaultFight(): boolean {
+  if (!curVault || !encounterSnapshot) return false;
+  const s = encounterSnapshot.status;
+  return s === 'intro' || s === 'active' || s === 'reset_grace';
+}
+
+/** The border dragged us in from somewhere the old Y made sense and here it
+ *  does not. Stand on top of this column instead of inside it — without this
+ *  an underground player ends up permanently embedded in solid rock, unable to
+ *  move in any direction, because the clamp bypasses collision entirely. */
+function surfaceAfterBorderPull(): void {
+  const surface = world.terrain.height(
+    Math.floor(player.pos.x), Math.floor(player.pos.z)) + 1;
+  if (player.pos.y >= surface) return; // already above ground — leave them be
+  player.pos.y = surface;
+  player.vel.set(0, 0, 0);
+  player.fallDistance = 0;
+  showNotice('⚠️ The war border closed over you — pulled up to the surface.');
 }
 
 /** The war clock: countdown + live border size + the kill score. Only visible
@@ -5031,10 +5172,22 @@ function frame(): void {
     updateGrapple(dt); // sustained grapple pull (sets velocity before the step)
     player.update(dt, moveInput, world);
     // World border: keep the player inside the play area (the server clamps
-    // authoritatively too). During a war this is the CLOSING red ring.
-    const clampHalf = net.connected && warActiveNow ? currentWarBorder() / 2 : WORLD_HALF;
-    player.pos.x = Math.max(-clampHalf, Math.min(clampHalf, player.pos.x));
-    player.pos.z = Math.max(-clampHalf, Math.min(clampHalf, player.pos.z));
+    // authoritatively too). During a war this is the CLOSING red ring — but a
+    // live boss fight is exempt, matching the server, so a ring closing over a
+    // distant vault can never rip you out of a sealed arena mid-encounter.
+    if (!inLiveVaultFight()) {
+      const clampHalf = net.connected && warActiveNow ? currentWarBorder() / 2 : WORLD_HALF;
+      const clamped = clampInsideBorder(player.pos.x, player.pos.z, clampHalf);
+      if (clamped.moved > 0) {
+        player.pos.x = clamped.x;
+        player.pos.z = clamped.z;
+        // Pulled in from far away (a mine, a cave, a vault you had left): the
+        // old Y belongs somewhere else, so stand on this column rather than
+        // being sealed inside it. The server follows with an authoritative
+        // teleport onto guaranteed-dry ground.
+        if (clamped.relocated) surfaceAfterBorderPull();
+      }
+    }
 
     // Gun aim-down-sights: hold right-click with a gun to zoom (per-gun amount).
     {

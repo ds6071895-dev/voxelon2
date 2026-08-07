@@ -36,6 +36,23 @@ Every theme uses the same reliable macro form while retaining completely differe
 - Starting another encounter safely cancels scheduled sources from the previous score.
 - Leaving a vault, dying, disconnecting, resetting, and victory all use controlled fades and source cleanup.
 
+## Orchestration
+
+Every score is played by a shared synthetic orchestra rather than a handful of bare oscillators:
+
+- **String section** — a five-voice detuned sawtooth ensemble with a slow attack, a swelling body and a shared vibrato that fades in the way a real held note does. It doubles the harmony an octave below the choir and is what gives the score its size.
+- **Horn section** — brass with a stacked fifth and a filter that blooms open on the attack and closes as the note sits. Carries the section impacts, phase-change answers, victory cadence and the hero line.
+- **Choir** — widened to a five-voice detuned ensemble with the same shared vibrato.
+- **Cinematic percussion** — the main drum is a layered taiko: struck skin, tuned shell, sub body and room tail, with pitch, decay, stick weight and stereo placement all varying deterministically per strike, so consecutive hits are never identical. Around it sit a backbeat snare, a syncopated war-drum gallop, cymbal washes, sub drops and accelerating drum rolls that hand over into each new section.
+
+### Dynamic arc
+
+Section level is derived from the arrangement, the boss phase and the low-health state, and ramps across roughly a bar. Breakdowns genuinely drop away and late sections genuinely surge — a score held at one volume reads as a loop however much the notes underneath it change. The arc repeats exactly at the 96-bar boundary, and `sectionDynamic()` is exported as a pure function so the shape is covered by `npm run music-smoke`.
+
+### The hero line
+
+In the widest sections, from phase two onward, a single long horn note per two bars sits on top of the harmony. It is the melody left over after the fight, and it is deliberately absent from every breakdown.
+
 ## Shared production chain
 
 Each score runs through a dedicated music graph containing:
