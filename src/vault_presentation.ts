@@ -1,9 +1,10 @@
-import type { EncounterSnapshot } from './vault_encounter';
+import type { EncounterSnapshot, HazardShape } from './vault_encounter';
 import {
   BOSS_DEFINITIONS, ENCOUNTER_INTRO_SECONDS, ENCOUNTER_PHASE_TRANSITION_SECONDS,
   ENCOUNTER_VICTORY_CINEMATIC_SECONDS,
 } from './vault_encounter';
 import { BOSS_SCORE_PROFILES, bossScoreLoopSeconds } from './boss_music';
+import { DEFAULT_MUSIC_VOLUME } from './audio';
 
 /** "Ossuary Oath · 5:03" — the score a vault family fights to. Announcing it
  *  in the intro is what makes the encounter read as a set piece with a
@@ -24,7 +25,7 @@ export interface AccessibilitySettings {
 }
 
 export const DEFAULT_ACCESSIBILITY: AccessibilitySettings = {
-  musicVolume: 0.65,
+  musicVolume: DEFAULT_MUSIC_VOLUME,
   effectsVolume: 0.8,
   cameraShake: 1,
   reducedMotion: false,
@@ -60,6 +61,97 @@ export function saveAccessibility(settings: AccessibilitySettings): void {
   } catch { /* storage is optional */ }
 }
 
+// --- In-fight coaching -------------------------------------------------------
+// A boss fight teaches nothing while it is happening: the health bar stops
+// moving and the player has no way to learn WHY. Everything below turns the
+// authoritative snapshot into one plain-language instruction, so at any instant
+// the HUD can answer "what am I supposed to be doing right now?".
+
+export type CoachTone = 'info' | 'good' | 'warn' | 'danger';
+export interface CoachLine {
+  text: string;
+  tone: CoachTone;
+}
+
+/** How long the big "here is how this phase works" card stays up. */
+export const PHASE_BRIEF_SECONDS = 11;
+
+const TONE_COLOR: Record<CoachTone, string> = {
+  info: '#cfe0ff', good: '#8dffb0', warn: '#ffd86a', danger: '#ff8f7a',
+};
+
+/** How you survive each telegraph shape, phrased as an instruction. Derived
+ *  from the very same geometry `hazardContains` tests, so the advice can never
+ *  drift from the hitbox. */
+export function hazardAdvice(shape: HazardShape): string {
+  switch (shape) {
+    case 'line': return 'step SIDEWAYS out of the lane';
+    case 'cone': return 'get out of the wedge — go around its side';
+    case 'ring': return 'the ring hits at that distance only — close right in or sprint clear';
+    case 'quadrant': return 'that quarter of the floor — move to a clear one';
+    case 'rain': return 'keep moving, do not stand in the marked circles';
+    default: return 'step out of the marked circle';
+  }
+}
+
+/** The single most useful instruction for the current instant of the fight.
+ *  Pure: HUD-only, snapshot-only, no combat state of its own. */
+export function encounterCoach(
+  snapshot: EncounterSnapshot, incomingWindow = 1.8,
+): CoachLine {
+  const def = BOSS_DEFINITIONS[snapshot.kind];
+  if (snapshot.status === 'intro') {
+    return { text: def.phaseBriefs[0], tone: 'info' };
+  }
+  if (snapshot.status === 'reset_grace') {
+    return { text: 'Everyone left the arena — the boss is resetting to full health.', tone: 'warn' };
+  }
+  if (snapshot.status !== 'active') return { text: '', tone: 'info' };
+
+  // 1. Something is about to land on you. Nothing else matters for ~2 seconds.
+  let soonest: EncounterSnapshot['hazards'][number] | null = null;
+  for (const h of snapshot.hazards) {
+    const left = h.executeAt - snapshot.time;
+    if (left < 0 || left > incomingWindow) continue;
+    if (!soonest || h.executeAt < soonest.executeAt) soonest = h;
+  }
+  if (soonest) {
+    const name = (soonest.attack || snapshot.cast?.name || 'INCOMING').toUpperCase();
+    return { text: `⚠ ${name} — ${hazardAdvice(soonest.shape)}!`, tone: 'danger' };
+  }
+
+  // 2. The wards are the fight. Say which protection is running, by name.
+  if (snapshot.criticalObjects > 0) {
+    const n = snapshot.criticalObjects;
+    const what = n === 1 ? def.objectName : `${n} ${def.objectPlural}`;
+    const healing = snapshot.healing.active
+      ? ` It is HEALING +${snapshot.healing.rate.toFixed(1)}/s.`
+      : '';
+    return {
+      text: `🛡 BREAK THE ${what.toUpperCase()} — ${def.wardEffect}.${healing}`,
+      tone: 'warn',
+    };
+  }
+
+  // 3. Wards down: this is the damage window, and it is short.
+  if (snapshot.exposedUntil > 0) {
+    return {
+      text: `✦ EXPOSED for ${snapshot.exposedUntil.toFixed(1)}s — +35% damage. HIT IT NOW!`,
+      tone: 'good',
+    };
+  }
+  if (snapshot.enrage) {
+    return { text: '☠ ENRAGED — it hits far harder every second. Kill it or leave.', tone: 'danger' };
+  }
+  if (snapshot.wave.alive >= 6) {
+    return {
+      text: `⚔ ${snapshot.wave.alive} summons on you — thin them out before you push the boss.`,
+      tone: 'warn',
+    };
+  }
+  return { text: def.phaseBriefs[snapshot.phase - 1], tone: 'info' };
+}
+
 /** Dedicated encounter overlay. It owns no combat state and is snapshot-only. */
 export class VaultBossHUD {
   private readonly root: HTMLDivElement;
@@ -71,7 +163,13 @@ export class VaultBossHUD {
   private readonly poise: HTMLDivElement;
   private readonly cast: HTMLDivElement;
   private readonly details: HTMLDivElement;
+  private readonly coach: HTMLDivElement;
+  private readonly brief: HTMLDivElement;
   private displayedHp = 1;
+  /** Phase the brief card is currently showing, and how long it has been up.
+   *  HUD-local: the snapshot has no per-phase clock and does not need one. */
+  private briefPhase = -1;
+  private briefAt = 0;
 
   constructor(parent: HTMLElement) {
     this.root = document.createElement('div');
@@ -116,7 +214,22 @@ export class VaultBossHUD {
     this.cast.style.cssText =
       'min-height:14px;margin:5px auto 0;width:min(82%,520px);color:#ffe7a3;' +
       'font-size:clamp(9px,2.2vw,11px);letter-spacing:.7px;';
-    this.root.append(this.name, hp, row, this.cast);
+    // The coaching strip: one instruction, always answering "what do I do now?".
+    this.coach = document.createElement('div');
+    this.coach.style.cssText =
+      'margin:6px auto 0;width:min(94%,600px);padding:5px 10px;box-sizing:border-box;' +
+      'background:rgba(6,8,14,.82);border:1px solid rgba(255,255,255,.16);border-left-width:4px;' +
+      'border-radius:4px;font-size:clamp(9px,2.2vw,12px);line-height:1.45;letter-spacing:.3px;' +
+      'display:none;';
+    // The phase brief: the same coaching, held up big for a few seconds each
+    // time the fight changes shape (that is when players are most lost).
+    this.brief = document.createElement('div');
+    this.brief.style.cssText =
+      'margin:7px auto 0;width:min(94%,620px);padding:8px 12px;box-sizing:border-box;' +
+      'background:rgba(10,7,2,.86);border:1px solid rgba(255,216,74,.5);border-radius:5px;' +
+      'color:#ffe08a;font-size:clamp(10px,2.5vw,13px);line-height:1.5;display:none;' +
+      'box-shadow:0 6px 26px rgba(0,0,0,.6);';
+    this.root.append(this.name, hp, row, this.cast, this.coach, this.brief);
     parent.appendChild(this.root);
   }
 
@@ -180,10 +293,34 @@ export class VaultBossHUD {
       ? 'ARENA EMPTY — RESETTING…'
       : snapshot.status === 'intro' ? def.introLine.toUpperCase()
         : snapshot.cast ? `⚠ ${snapshot.cast.name.toUpperCase()}` : '';
+
+    // Coaching. The strip is live every frame; the brief is raised for a few
+    // seconds whenever the fight changes shape, which is exactly when a player
+    // stops understanding what the boss wants from them.
+    const coach = encounterCoach(snapshot);
+    this.coach.style.display = coach.text ? 'block' : 'none';
+    if (coach.text) {
+      this.coach.textContent = coach.text;
+      this.coach.style.color = TONE_COLOR[coach.tone];
+      this.coach.style.borderLeftColor = TONE_COLOR[coach.tone];
+    }
+    const stage = snapshot.status === 'intro' ? 0 : snapshot.phase;
+    if (stage !== this.briefPhase) {
+      this.briefPhase = stage;
+      this.briefAt = performance.now();
+    }
+    const briefUp = stage > 0 &&
+      (performance.now() - this.briefAt) / 1000 < PHASE_BRIEF_SECONDS;
+    this.brief.style.display = briefUp ? 'block' : 'none';
+    if (briefUp) {
+      this.brief.textContent =
+        `PHASE ${snapshot.phase} — ${def.phaseBriefs[snapshot.phase - 1]}`;
+    }
   }
 
   hide(): void {
     this.displayedHp = 1;
+    this.briefPhase = -1;
     this.update(null);
   }
 }
@@ -332,17 +469,23 @@ export class VaultCinematic {
         : def.title.toUpperCase();
       this.title.textContent = progress < 0.24 ? 'THE VAULT AWAKENS' : def.name.toUpperCase();
       // Three beats: the threat, then the score credit, then the call to arms.
-      this.subtitle.textContent = progress < 0.5
+      this.subtitle.textContent = progress < 0.44
         ? def.introLine
-        : progress < 0.72
+        : progress < 0.62
           ? scoreCredit(snapshot.family)
-          : `${def.phaseTitles[0].toUpperCase()}  •  PREPARE YOURSELF`;
+          : progress < 0.84
+            ? def.phaseBriefs[0]
+            : `${def.phaseTitles[0].toUpperCase()}  •  PREPARE YOURSELF`;
     } else if (this.modeValue === 'phase') {
       const p = this.phaseValue;
       this.sigil.textContent = p === 2 ? 'Ⅱ' : 'Ⅲ';
       this.eyebrow.textContent = `${def.name.toUpperCase()} TRANSFORMS`;
       this.title.textContent = `PHASE ${['I', 'II', 'III'][p - 1]}`;
-      this.subtitle.textContent = def.phaseTitles[p - 1].toUpperCase();
+      // The transform is the moment the rules change, so the card says what the
+      // new rules ARE rather than only naming them.
+      this.subtitle.textContent = progress < 0.42
+        ? def.phaseTitles[p - 1].toUpperCase()
+        : def.phaseBriefs[p - 1];
     } else {
       this.sigil.textContent = '✦';
       this.eyebrow.textContent = `${def.name.toUpperCase()} HAS FALLEN`;

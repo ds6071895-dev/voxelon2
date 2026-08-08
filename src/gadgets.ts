@@ -59,8 +59,10 @@ export const GADGETS: Record<number, GadgetDef> = {
   },
   [Item.GrapplingHook]: {
     item: Item.GrapplingHook, tile: Tile.GrapplingHook, name: 'Grappling Hook', kind: 'grapple',
-    desc: 'Aim at a block and yank yourself to it. Reusable. Great for cliffs.',
-    cooldown: 2.5, maxStack: 1, consumed: false, radius: 40,
+    // Short cooldown on purpose: the hook is only fun if you can CHAIN it, so
+    // the swing you just released can be re-anchored before you lose the speed.
+    desc: 'Fire a line and swing. SPACE to let go and launch — you keep the speed.',
+    cooldown: 1.1, maxStack: 1, consumed: false, radius: 48,
   },
   [Item.DeployCover]: {
     item: Item.DeployCover, tile: Tile.DeployCover, name: 'Deployable Cover', kind: 'cover',

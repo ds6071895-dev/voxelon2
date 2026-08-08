@@ -326,61 +326,323 @@ let warWins: number[] = new Array(FACTIONS.length).fill(0);  // war wins this se
 const gadgetCd = new GadgetCooldowns();
 const disguises = new Map<number, { realFaction: number; left: number }>();
 let jumpImmuneUntil = 0; // suppress fall damage briefly after a Jump Boost
-// Grappling hook: once fired, a string flies to the anchored block and reels the
-// player the ENTIRE way (a sustained per-frame pull, not a one-shot nudge).
-let grappleActive = false;
+// --- GRAPPLING HOOK ----------------------------------------------------------
+// A movement TOY, not an elevator. The old hook pinned your velocity to a fixed
+// 28 b/s straight at the anchor and then threw all of it away on arrival, which
+// made every shot feel identical and ended with a dead stop. This one has the
+// four beats a hook needs to feel good:
+//
+//   1. LAUNCH  — a real hook flies out; the line pays out behind it (anticipation)
+//   2. BITE    — it thunks into the surface and the reel YANKS, building speed
+//   3. SWING   — past the rope's length the line goes taut and the outward part
+//                of your velocity is cancelled: a pendulum you steer with WASD
+//   4. RELEASE — SPACE (or arriving) lets go and you KEEP every bit of the speed
+//                you built, with a pop upward so you clear the ledge you swung at
+//
+// Momentum survives the release because Player.momentumTime suspends the normal
+// air drag; chaining a second hook out of a launch is the whole point, so the
+// gadget cooldown is short enough to allow it.
+const GRAPPLE_HOOK_SPEED = 82;   // hook flight speed (blocks/s)
+const GRAPPLE_PULL = 86;         // reel acceleration while the line is taut
+const GRAPPLE_SLACK_PULL = 26;   // gentler assist while inside the rope length
+const GRAPPLE_MAX_SPEED = 33;    // ceiling on reel speed
+const GRAPPLE_REEL_RATE = 13;    // how fast the rope itself winds in (blocks/s)
+const GRAPPLE_ARRIVE = 2.6;      // rope length that counts as "you're there"
+const GRAPPLE_MIN_RANGE = 4.5;   // closer than this there is nothing to swing on
+const GRAPPLE_LIFT = 27;         // anti-gravity while reeling upward
+const GRAPPLE_MAX_TIME = 7;      // safety timeout (seconds attached)
+const GRAPPLE_LAUNCH_UP = 8.5;   // upward pop when you let go
+const GRAPPLE_MOMENTUM = 1.8;    // seconds of preserved speed after release
+const ROPE_CLEARANCE = 0.35;     // ignore blocks this close to either rope end
+const ROPE_CUT_GRACE = 0.15;     // seconds of blocked rope before the line snaps
+type GrappleStage = 'fly' | 'reel';
+let grappleStage: GrappleStage | null = null;
 let grappleTime = 0;            // safety-timeout clock
+let grappleRopeLen = 0;         // live rope length (shortens as you reel)
+let grappleStuckTime = 0;       // seconds of no progress (hugging a wall)
+let ropeCutTime = 0;            // seconds the rope has been blocked by terrain
+let grappleWhirAt = 0;          // next winch whir (local seconds)
+let grappleTrailAt = 0;         // next speed-trail particle (local seconds)
+let grapplePrevJump = false;    // rising-edge detach on SPACE
+let glideBlockedUntil = 0;      // the detach keypress must not also open wings
+let speedFov = 0;               // extra FOV from raw speed (the camera "kick")
 /** A server teleport waiting for the destination chunks to stream in. While
  *  set, the player is pinned at the target (no gravity fall into ungenerated
  *  world); cleared once the near bubble is meshed (or after a timeout). */
 let pendingTeleport: { x: number; y: number; z: number; started: number } | null = null;
 const grappleAnchor = new THREE.Vector3();
-const grapplePrev = new THREE.Vector3(); // last-frame pos to detect "stuck on a wall"
-const grappleRope = new THREE.Line(
-  new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
-  new THREE.LineBasicMaterial({ color: 0xf2efe6 }),
-);
-grappleRope.visible = false;
-grappleRope.frustumCulled = false;
-scene.add(grappleRope);
-/** Reel the player toward the anchored block each frame until they arrive, hit a
- *  wall, or time out. Runs BEFORE player.update so the velocity it sets is what
- *  the physics step integrates. */
-function updateGrapple(dt: number): void {
-  if (!grappleActive) return;
-  if (player.dead) { endGrapple(); return; }
-  grappleTime += dt;
-  // Pull from roughly chest height toward the anchor.
-  const tx = grappleAnchor.x - player.pos.x;
-  const ty = grappleAnchor.y - (player.pos.y + 0.9);
-  const tz = grappleAnchor.z - player.pos.z;
-  const dist = Math.hypot(tx, ty, tz) || 1;
-  // Update the rope visual (hand/eye -> anchor).
-  const eye = player.eyePosition;
-  const pos = grappleRope.geometry.attributes.position as THREE.BufferAttribute;
-  pos.setXYZ(0, eye.x, eye.y - 0.2, eye.z);
-  pos.setXYZ(1, grappleAnchor.x, grappleAnchor.y, grappleAnchor.z);
-  pos.needsUpdate = true;
-  // Arrived or timed out -> release.
-  if (dist < 2.0 || grappleTime > 3.5) { endGrapple(); return; }
-  // Stuck against a wall (no progress) -> release; we're as close as we'll get.
-  const moved = Math.hypot(
-    player.pos.x - grapplePrev.x, player.pos.y - grapplePrev.y, player.pos.z - grapplePrev.z);
-  if (grappleTime > 0.3 && moved < 0.03) { endGrapple(); return; }
-  grapplePrev.copy(player.pos);
-  // Constant strong reel (overwrites gravity each frame so it pulls the WHOLE way).
-  const speed = 28;
-  player.vel.x = (tx / dist) * speed;
-  player.vel.y = (ty / dist) * speed;
-  player.vel.z = (tz / dist) * speed;
-  player.fallDistance = 0;
+const grappleHookPos = new THREE.Vector3(); // the hook itself while in flight
+const grapplePrev = new THREE.Vector3();    // last-frame pos to detect "stuck on a wall"
+// The rope is drawn as a chain of thin cylinders rather than a THREE.Line so it
+// has real thickness at any distance (line widths are 1px on WebGL) and can sag
+// while slack, then pull straight as the reel takes up the tension.
+const ROPE_SEGMENTS = 14;
+const ropeGroup = new THREE.Group();
+const ropeSegments: THREE.Mesh[] = [];
+{
+  const geo = new THREE.CylinderGeometry(0.038, 0.038, 1, 5);
+  const mat = new THREE.MeshBasicMaterial({ color: 0xe9e2cf });
+  for (let i = 0; i < ROPE_SEGMENTS; i++) {
+    const seg = new THREE.Mesh(geo, mat);
+    seg.frustumCulled = false;
+    ropeGroup.add(seg);
+    ropeSegments.push(seg);
+  }
+  const head = new THREE.Mesh(
+    new THREE.ConeGeometry(0.13, 0.4, 6),
+    new THREE.MeshBasicMaterial({ color: 0xb6c1d0 }),
+  );
+  head.frustumCulled = false;
+  head.name = 'hook';
+  ropeGroup.add(head);
 }
-function endGrapple(): void {
-  if (!grappleActive) return;
-  grappleActive = false;
-  grappleRope.visible = false;
-  player.vel.multiplyScalar(0.3);     // bleed reel speed so you don't overshoot
-  jumpImmuneUntil = worldTimeLocal + 2; // no fall damage right after release
+const grappleHookMesh = ropeGroup.getObjectByName('hook') as THREE.Mesh;
+ropeGroup.visible = false;
+scene.add(ropeGroup);
+const ropeA = new THREE.Vector3();
+const ropeB = new THREE.Vector3();
+const ropeDir = new THREE.Vector3();
+const ropeUp = new THREE.Vector3(0, 1, 0);
+/** Lay the rope from the hand to `to`, sagging by `sag` blocks at its middle. */
+function drawRope(to: THREE.Vector3, sag: number): void {
+  const eye = player.eyePosition;
+  const handX = eye.x, handY = eye.y - 0.25, handZ = eye.z;
+  const sway = Math.sin(worldTimeLocal * 6) * 0.06;
+  const point = (t: number, out: THREE.Vector3): void => {
+    out.set(handX + (to.x - handX) * t, handY + (to.y - handY) * t,
+      handZ + (to.z - handZ) * t);
+    out.y -= (sag + sway) * Math.sin(Math.PI * t);
+  };
+  for (let i = 0; i < ROPE_SEGMENTS; i++) {
+    point(i / ROPE_SEGMENTS, ropeA);
+    point((i + 1) / ROPE_SEGMENTS, ropeB);
+    ropeDir.subVectors(ropeB, ropeA);
+    const len = Math.max(0.001, ropeDir.length());
+    const seg = ropeSegments[i];
+    seg.position.copy(ropeA).addScaledVector(ropeDir, 0.5);
+    seg.scale.set(1, len, 1);
+    seg.quaternion.setFromUnitVectors(ropeUp, ropeDir.divideScalar(len));
+  }
+  grappleHookMesh.position.copy(to);
+  grappleHookMesh.quaternion.copy(ropeSegments[ROPE_SEGMENTS - 1].quaternion);
+}
+
+/** Is the straight line from `from` to `to` broken by a solid block? The rope is
+ *  the one thing in the game that PULLS you along a line you did not walk, so it
+ *  has to know when terrain has come between you and the anchor — otherwise the
+ *  winch keeps hauling and grinds you into (and, given a thin enough wall and an
+ *  unlucky frame, through) whatever is in the way. Torches, plants and other
+ *  pass-through blocks are stepped over: they are not walls. */
+function ropeBlocked(from: THREE.Vector3, to: THREE.Vector3): boolean {
+  const dir = new THREE.Vector3().subVectors(to, from);
+  const span = dir.length();
+  if (span < ROPE_CLEARANCE * 2) return false;
+  dir.divideScalar(span);
+  const org = from.clone();
+  let travelled = 0;
+  // The anchor sits just off a surface, so stop short of it: the block the hook
+  // is biting must never count as the thing blocking its own rope.
+  for (let i = 0; i < 6; i++) {
+    const left = span - travelled - ROPE_CLEARANCE;
+    if (left <= 0) return false;
+    const hit = raycastBlocks(world, org, dir, left);
+    if (!hit) return false;
+    if (isSolid(world.getBlock(hit.x, hit.y, hit.z))) return true;
+    const step = Math.hypot(hit.hx - org.x, hit.hy - org.y, hit.hz - org.z) + 0.05;
+    travelled += step;
+    org.addScaledVector(dir, step);
+  }
+  return false;
+}
+
+/** Fire the hook at whatever you're aiming at. Returns false if nothing is in
+ *  range (the caller then skips the cooldown so a miss costs you nothing). */
+function fireGrapple(maxRange: number): boolean {
+  const eye = player.eyePosition;
+  const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  const hit = raycastBlocks(world, eye, dir, maxRange);
+  if (!hit) return false;
+  // A hook needs something to BITE. The block raycast also stops on torches,
+  // plants and the like — anchoring to one would reel you into the wall behind
+  // it, since nothing about it is solid enough to swing from.
+  if (!isSolid(world.getBlock(hit.x, hit.y, hit.z))) return false;
+  // Too close and the hook would bite, "arrive" and launch on the same frame —
+  // a free jump every cooldown. A hook needs somewhere to pull you TO.
+  if (Math.hypot(hit.hx - eye.x, hit.hy - eye.y, hit.hz - eye.z) < GRAPPLE_MIN_RANGE) {
+    return false;
+  }
+  // Anchor ON the surface (nudged out along the face normal) instead of the
+  // block centre, so the rope visibly bites where you aimed and the reel never
+  // tries to drag you inside a wall.
+  grappleAnchor.set(hit.hx + hit.nx * 0.22, hit.hy + hit.ny * 0.22, hit.hz + hit.nz * 0.22);
+  grappleHookPos.set(eye.x, eye.y - 0.25, eye.z);
+  grappleStage = 'fly';
+  grappleTime = 0;
+  grappleStuckTime = 0;
+  ropeCutTime = 0;
+  grappleWhirAt = 0;
+  grapplePrevJump = true; // ignore the SPACE that may still be held from a jump
+  grapplePrev.copy(player.pos);
+  ropeGroup.visible = true;
+  audio.grappleFire();
+  held.recoil();
+  return true;
+}
+
+/** Fly the hook, then reel/swing on it. Runs BEFORE player.update so the
+ *  velocity it writes is what the physics step integrates. */
+function updateGrapple(dt: number): void {
+  if (!grappleStage) return;
+  if (player.dead || player.flying || player.boating) { endGrapple(); return; }
+  grappleTime += dt;
+  const eye = player.eyePosition;
+
+  if (grappleStage === 'fly') {
+    // The hook travels; the line trails behind it with a bit of slack.
+    const step = GRAPPLE_HOOK_SPEED * dt;
+    const left = grappleHookPos.distanceTo(grappleAnchor);
+    if (left <= step || grappleTime > 1.6) {
+      grappleHookPos.copy(grappleAnchor);
+      grappleStage = 'reel';
+      grappleRopeLen = Math.max(GRAPPLE_ARRIVE,
+        grappleAnchor.distanceTo(eye));
+      audio.grappleHit(grappleAnchor);
+      audio.grappleReel();
+      grappleWhirAt = worldTimeLocal + 0.5; // the winch loop picks up from here
+      grappleTrailAt = 0;
+      particles.poof(grappleAnchor.x, grappleAnchor.y, grappleAnchor.z);
+      triggerEncounterShake(0.12, 0.03);
+    } else {
+      grappleHookPos.lerp(grappleAnchor, step / Math.max(0.001, left));
+    }
+    drawRope(grappleHookPos, Math.min(1.4, grappleHookPos.distanceTo(eye) * 0.06));
+    return;
+  }
+
+  // --- Attached: reel + swing ------------------------------------------------
+  // SPACE cuts the line and launches (rising edge, so a held jump can't do it).
+  const jumpNow = input.locked && !invUI.open && input.jump;
+  const detach = jumpNow && !grapplePrevJump;
+  grapplePrevJump = jumpNow;
+
+  // Pull from roughly chest height so the rope angle matches the body.
+  const cx = player.pos.x, cy = player.pos.y + 0.9, cz = player.pos.z;
+  const tx = grappleAnchor.x - cx, ty = grappleAnchor.y - cy, tz = grappleAnchor.z - cz;
+  const dist = Math.hypot(tx, ty, tz) || 0.001;
+  const dx = tx / dist, dy = ty / dist, dz = tz / dist;
+
+  if (detach || dist <= GRAPPLE_ARRIVE || grappleTime > GRAPPLE_MAX_TIME) {
+    endGrapple(true);
+    return;
+  }
+  // Hugging a surface with no progress for a moment: we're as close as the rope
+  // will ever get, so let go rather than grinding against the wall.
+  const moved = Math.hypot(player.pos.x - grapplePrev.x, player.pos.y - grapplePrev.y,
+    player.pos.z - grapplePrev.z);
+  grappleStuckTime = moved < 0.02 * (dt * 60) ? grappleStuckTime + dt : 0;
+  grapplePrev.copy(player.pos);
+  if (grappleTime > 0.35 && grappleStuckTime > 0.35) { endGrapple(true); return; }
+  // Terrain has come between us and the anchor: the line is cut. Sliding along
+  // a wall keeps `moved` high, so the stuck-detector above never fires on the
+  // case that matters most — a swing that carries you behind a corner while the
+  // winch is still pulling at full strength. A brief grace keeps a rope that
+  // merely clips a corner for one frame from snapping mid-swing.
+  ropeCutTime = ropeBlocked(new THREE.Vector3(cx, cy, cz), grappleAnchor)
+    ? ropeCutTime + dt : 0;
+  if (ropeCutTime > ROPE_CUT_GRACE) { endGrapple(true); return; }
+
+  // The winch takes the rope in; the pull is an ACCELERATION so the yank builds
+  // instead of teleporting you to a constant speed.
+  grappleRopeLen = Math.max(GRAPPLE_ARRIVE, grappleRopeLen - GRAPPLE_REEL_RATE * dt);
+  const taut = dist > grappleRopeLen;
+  const vel = player.vel;
+  vel.x += dx * (taut ? GRAPPLE_PULL : GRAPPLE_SLACK_PULL) * dt;
+  vel.y += dy * (taut ? GRAPPLE_PULL : GRAPPLE_SLACK_PULL) * dt;
+  vel.z += dz * (taut ? GRAPPLE_PULL : GRAPPLE_SLACK_PULL) * dt;
+  if (taut) {
+    // Pendulum: a rope cannot stretch, so cancel the part of the velocity that
+    // is moving AWAY from the anchor. What's left is the tangential swing.
+    const radial = vel.x * dx + vel.y * dy + vel.z * dz;
+    if (radial < 0) {
+      vel.x -= dx * radial; vel.y -= dy * radial; vel.z -= dz * radial;
+    }
+  }
+  // Reeling toward a high anchor has to beat gravity or you just dangle.
+  if (dy > 0.1) vel.y += GRAPPLE_LIFT * dy * dt;
+  const speed = vel.length();
+  if (speed > GRAPPLE_MAX_SPEED) vel.multiplyScalar(GRAPPLE_MAX_SPEED / speed);
+  player.fallDistance = 0;
+  // Suspend the normal air drag while attached: WASD steers the swing instead
+  // of dragging it back to walking pace (see Player.momentumTime).
+  player.momentumTime = Math.max(player.momentumTime, 0.3);
+  if (worldTimeLocal >= grappleWhirAt) {
+    audio.grappleReel();
+    grappleWhirAt = worldTimeLocal + 0.5;
+  }
+  // Speed trail: sparse on purpose (each particle is a mesh), just enough to
+  // read as "you are moving fast" out of the corner of your eye.
+  if (speed > 16 && worldTimeLocal >= grappleTrailAt) {
+    grappleTrailAt = worldTimeLocal + 0.06;
+    particles.burst(cx, cy, cz, 1, 0xdfe8ff, 1.2, 0.35);
+  }
+  drawRope(grappleAnchor, 0.1);
+}
+
+/** Cut the line. `launch` keeps the speed you built (and pops you up over the
+ *  lip you were swinging at) — a dead stop is what made the old hook boring. */
+function endGrapple(launch = false): void {
+  if (!grappleStage) return;
+  const wasAttached = grappleStage === 'reel';
+  grappleStage = null;
+  ropeGroup.visible = false;
+  glideBlockedUntil = worldTimeLocal + 0.3;
+  if (launch && wasAttached) {
+    player.vel.y = Math.max(player.vel.y, Math.min(GRAPPLE_LAUNCH_UP, player.vel.y + 6.5));
+    player.momentumTime = GRAPPLE_MOMENTUM;
+    audio.grappleRelease();
+    particles.burst(player.pos.x, player.pos.y + 0.9, player.pos.z, 8, 0xe9e2cf, 2.4, 0.4);
+  } else {
+    player.momentumTime = 0;
+  }
+  player.fallDistance = 0;
+  jumpImmuneUntil = worldTimeLocal + 2.5; // the landing after a swing is on us
+}
+
+// Anchor preview: while the hook is held, the surface you'd bite into is ringed
+// in the world. Aiming a grapple at a 48-block range through a crosshair is
+// guesswork otherwise — this is what turns "fire and hope" into a decision.
+const grappleMarker = new THREE.Mesh(
+  new THREE.RingGeometry(0.26, 0.4, 22),
+  new THREE.MeshBasicMaterial({
+    color: 0xbfe6ff, transparent: true, opacity: 0.8,
+    side: THREE.DoubleSide, depthWrite: false,
+  }),
+);
+grappleMarker.visible = false;
+grappleMarker.renderOrder = 4;
+scene.add(grappleMarker);
+function updateGrappleAim(controlling: boolean): void {
+  const stack = inventory.selectedStack;
+  grappleMarker.visible = false;
+  if (!controlling || grappleStage || stack?.id !== Item.GrapplingHook) return;
+  const eye = player.eyePosition;
+  const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  const hit = raycastBlocks(world, eye, dir,
+    gadgetOf(Item.GrapplingHook)?.radius ?? 48);
+  if (!hit) return;
+  grappleMarker.visible = true;
+  grappleMarker.position.set(hit.hx + hit.nx * 0.03, hit.hy + hit.ny * 0.03,
+    hit.hz + hit.nz * 0.03);
+  grappleMarker.lookAt(
+    grappleMarker.position.x + hit.nx,
+    grappleMarker.position.y + hit.ny,
+    grappleMarker.position.z + hit.nz);
+  const usable = gadgetCd.ready(Item.GrapplingHook, worldTimeLocal) &&
+    Math.hypot(hit.hx - eye.x, hit.hy - eye.y, hit.hz - eye.z) >= GRAPPLE_MIN_RANGE;
+  grappleMarker.scale.setScalar(
+    (1 + Math.sin(worldTimeLocal * 7) * 0.09) * (usable ? 1 : 0.68));
+  (grappleMarker.material as THREE.MeshBasicMaterial).color.set(
+    usable ? 0xbfe6ff : 0x7d8697);
 }
 // --- Boat: fast water travel. Riding is a movement MODE (like gliding) — the
 // boat item stays in your inventory, so nothing is ever lost overboard. ---
@@ -1154,6 +1416,7 @@ function onAuthSuccess(username: string): void {
   authStatus.textContent = '';
   clearElimination(); // you're in — no lockout panel hanging around
   refreshNetInfo();
+  titleStatusTimer = 0; // your side + the war clock appear with the menu
 }
 
 // --- Saved session (skip the login form on return visits) -------------------
@@ -1454,6 +1717,8 @@ const controlsPanel = (() => {
       ['Sprint', [['left joystick']], 'push past the rim'],
       ['Jump', [['⬆']], 'hold'], ['Sneak', [['⇩']], 'toggle'],
       ['Deploy glider', [['⬆']], 'in mid-air'],
+      ['Fire grappling hook', [['tap']], 'holding the hook'],
+      ['Let go and launch', [['⬆']], 'mid-swing — you keep the speed'],
       ['Launch boat', [['tap']], 'on water'], ['Hop out of boat', [['⬆']]],
     ] },
     { title: 'Fighting', binds: [
@@ -1477,6 +1742,9 @@ const controlsPanel = (() => {
       ['Sprint', [['Q'], ['W', 'W']], 'double-tap'],
       ['Jump', [['Space']]], ['Sneak', [['Shift']]],
       ['Deploy glider', [['Space']], 'in mid-air'],
+      ['Fire grappling hook', [['Left click']], 'holding the hook'],
+      ['Let go and launch', [['Space']], 'mid-swing — you keep the speed'],
+      ['Steer the swing', [['W', 'A', 'S', 'D']], 'while hooked'],
       ['Launch boat', [['Right click']], 'on water'], ['Hop out of boat', [['Space']]],
     ] },
     { title: 'Fighting', binds: [
@@ -3798,6 +4066,7 @@ net.onWar = (active, timeLeft, nextIn, duration, score, wins) => {
   if (active && !wasActive) {
     showRegionBanner('⚔️ WAR! THE BORDER IS CLOSING!', '#ff5a5a');
   }
+  titleStatusTimer = 0; // reflect the fresh schedule on the title strip at once
 };
 net.onWarEnd = (winner, score) => {
   const a = score[FACTIONS[0].id] ?? 0, b = score[FACTIONS[1].id] ?? 0;
@@ -3988,9 +4257,12 @@ function updateCamera(): void {
   // Brief roll tilt while the damage flash decays, like vanilla's hurt cam.
   camera.rotation.set(player.pitch, player.yaw, player.damageFlash * 0.18);
 
-  // Aim-down-sights divides the FOV (zoom) and steadies the look.
+  // Aim-down-sights divides the FOV (zoom) and steadies the look. Raw speed
+  // widens it instead: a grapple reel or a launch pushes the world past you,
+  // which is most of what makes going fast FEEL fast. (updateCamera already
+  // eases toward the target, so no extra smoothing is needed here.)
   const base = player.sprinting ? SPRINT_FOV : FOV;
-  const targetFov = base / aimZoom;
+  const targetFov = base / aimZoom + (aimZoom > 1 ? 0 : speedFov);
   player.lookScale = aimZoom > 1 ? Math.max(0.3, 1 / aimZoom) : 1;
   if (Math.abs(camera.fov - targetFov) > 0.01) {
     camera.fov += (targetFov - camera.fov) * 0.3;
@@ -4323,6 +4595,46 @@ function formatClock(secs: number): string {
   return h > 0 ? `${h}:${pad(m)}:${pad(ss)}` : `${m}:${pad(ss)}`;
 }
 
+// --- Title-screen world status ----------------------------------------------
+// The foot of the title screen answers the two questions you actually have
+// before pressing Play: which side am I, and when is the next war? Both are
+// live server state (the welcome carries a war snapshot, and `war` messages
+// keep it current), so this is reporting, not decoration — it stays hidden
+// until sign-in rather than inventing something to say.
+let titleStatusTimer = 0; // repaint the strip a few times a second, not every frame
+const titleStatusEl = document.getElementById('title-status') as HTMLDivElement;
+const titleSideEl = document.getElementById('tstat-side') as HTMLElement;
+const titleWarCell = document.getElementById('tstat-war-cell') as HTMLElement;
+const titleWarKeyEl = document.getElementById('tstat-war-k') as HTMLElement;
+const titleWarEl = document.getElementById('tstat-war') as HTMLElement;
+const titleWinsEl = document.getElementById('tstat-wins') as HTMLElement;
+function updateTitleStatus(): void {
+  if (!titleStatusEl) return;
+  if (!authed) { titleStatusEl.hidden = true; return; }
+  titleStatusEl.hidden = false;
+  const side = titleSideEl.querySelector('span');
+  if (side) side.textContent = net.connected ? factionName(localFaction) : 'Single player';
+  titleSideEl.style.setProperty('--side-color',
+    net.connected ? factionCss(localFaction) : '#9a9a9a');
+  if (!net.connected) {
+    titleWarCell.classList.remove('live');
+    titleWarKeyEl.textContent = 'Wars';
+    titleWarEl.textContent = 'Offline — no wars';
+    titleWinsEl.textContent = '—';
+    return;
+  }
+  titleWarCell.classList.toggle('live', warActiveNow);
+  titleWarKeyEl.textContent = warActiveNow ? 'War in progress' : 'Next war';
+  titleWarEl.textContent = warActiveNow
+    ? `${formatClock(warLeft)} left`
+    : warNextIn > 0 ? `in ${formatClock(warNextIn)}` : 'Not scheduled';
+  const a = FACTIONS[0], b = FACTIONS[1];
+  titleWinsEl.innerHTML =
+    `<span style="color:${factionCss(a.id)}">${a.name} ${warWins[a.id] ?? 0}</span>` +
+    `<span style="color:var(--ink-mute)">·</span>` +
+    `<span style="color:${factionCss(b.id)}">${b.name} ${warWins[b.id] ?? 0}</span>`;
+}
+
 /** The live war border side length (full world outside a war). */
 function currentWarBorder(): number {
   return warActiveNow ? warBorderAt(warLeft, warDur, WORLD_BORDER) : WORLD_BORDER;
@@ -4478,10 +4790,16 @@ function updateHeldGadgetTip(): void {
     gadgetTipEl.style.display = 'none'; return;
   }
   gadgetTipEl.style.display = 'block';
+  // The hook has a control scheme, not just a button, so it gets taught here.
+  const controls = def.kind === 'grapple'
+    ? (grappleStage
+      ? 'SPACE or LEFT-CLICK — let go and launch · WASD steers the swing'
+      : 'LEFT-CLICK to fire · SPACE mid-swing to launch off it')
+    : 'left-click to use';
   gadgetTipEl.innerHTML =
     `<div style="color:#ffd84a;font-size:13px">${def.name}</div>` +
     `<div style="color:#cdd6ee;font-size:11px;text-shadow:none">${def.desc}</div>` +
-    `<div style="color:#7f8db0;font-size:10px;text-shadow:none">left-click to use</div>`;
+    `<div style="color:#7f8db0;font-size:10px;text-shadow:none">${controls}</div>`;
 }
 
 /** Deploy a 3-wide × 2-tall blast wall a couple of blocks ahead (cover gadget). */
@@ -4505,6 +4823,9 @@ function deployCover(): void {
 }
 
 function useGadget(def: GadgetDef): void {
+  // Mid-swing the button means RELEASE, not re-fire, so it cannot be gated by
+  // the cooldown of the shot that put you on the rope in the first place.
+  if (def.kind === 'grapple' && grappleStage) { endGrapple(true); return; }
   if (!gadgetCd.ready(def.item, worldTimeLocal)) {
     showNotice(`${def.name}: ${gadgetCd.remaining(def.item, worldTimeLocal).toFixed(1)}s left`);
     return;
@@ -4535,20 +4856,12 @@ function useGadget(def: GadgetDef): void {
       break;
     }
     case 'grapple': {
-      // Long raycast (the grapple reaches much farther than your edit range).
-      const eye = player.eyePosition;
-      const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-      const hit = raycastBlocks(world, eye, dir, def.radius ?? 40);
-      if (!hit) { showNotice('No surface in range to grapple.'); return; }
+      // A miss costs nothing: the cooldown only starts once the hook is away.
+      if (!fireGrapple(def.radius ?? 48)) {
+        showNotice(`Nothing to hook — aim at a surface ${GRAPPLE_MIN_RANGE}+ blocks away.`);
+        return;
+      }
       gadgetCd.use(def.item, worldTimeLocal);
-      // Anchor the string to the hit block and start reeling — the per-frame pull
-      // in updateGrapple() drags the player the WHOLE way there.
-      grappleAnchor.set(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
-      grappleActive = true;
-      grappleTime = 0;
-      grapplePrev.copy(player.pos);
-      grappleRope.visible = true;
-      particles.poof(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
       break;
     }
     case 'jump': {
@@ -5100,6 +5413,12 @@ function frame(): void {
   // Title screen: render the fixed "fake" panorama (its own world) and skip the
   // gameplay sim entirely. The gameplay world keeps generating above.
   if (screen === 'title') {
+    // The war clock keeps running while you read the menu, so the countdown on
+    // the status strip stays honest between server broadcasts.
+    if (warActiveNow) warLeft = Math.max(0, warLeft - dt);
+    else if (warNextIn > 0) warNextIn = Math.max(0, warNextIn - dt);
+    titleStatusTimer -= dt;
+    if (titleStatusTimer <= 0) { titleStatusTimer = 0.25; updateTitleStatus(); }
     panoramaView.update(dt);
     panoramaView.render(renderer);
     worldMap.hideBeacons();
@@ -5194,7 +5513,11 @@ function frame(): void {
     // A glider worn in the chestplate slot enables mid-air deploy (player.update
     // reads this; jump while falling to start gliding).
     const wornChest = inventory.chestplateStack;
-    player.gliderEquipped = !!wornChest && wornChest.id === Item.Glider;
+    // ...unless a rope is in the way: SPACE cuts the grapple, and without this
+    // the very same keypress would also pop the wings and eat the launch you
+    // just earned. Press it again after the launch to glide.
+    player.gliderEquipped = !!wornChest && wornChest.id === Item.Glider &&
+      !grappleStage && worldTimeLocal >= glideBlockedUntil;
     // Teleport arrival: pin the player at the destination and pour extra frame
     // budget into streaming a small chunk bubble there; release once the ground
     // is real (or after a generous timeout so we can never get stuck).
@@ -5206,8 +5529,15 @@ function frame(): void {
       const bubbleReady = world.update(tp.x, tp.z, 14, 2);
       if (bubbleReady || worldTimeLocal - tp.started > 8) pendingTeleport = null;
     }
-    updateGrapple(dt); // sustained grapple pull (sets velocity before the step)
+    updateGrapple(dt); // hook flight / reel / swing (sets velocity before the step)
     player.update(dt, moveInput, world);
+    // Speed FOV: how fast you are actually travelling this frame, eased so a
+    // swing blooms the view open and a landing settles it back.
+    {
+      const horizontal = Math.hypot(player.vel.x, player.vel.z);
+      const want = Math.max(0, Math.min(13, (horizontal - 12) * 0.85));
+      speedFov += (want - speedFov) * Math.min(1, dt * 6);
+    }
     // World border: keep the player inside the play area (the server clamps
     // authoritatively too). During a war this is the CLOSING red ring — but a
     // live boss fight is exempt, matching the server, so a ring closing over a
@@ -5459,6 +5789,7 @@ function frame(): void {
       if (worldTimeLocal >= jumpImmuneUntil || (player.onGround && player.vel.y <= 0)) jumpImmuneUntil = 0;
     }
     updateHeldGadgetTip();
+    updateGrappleAim(controlling);
     if (regionBannerTimer > 0) {
       regionBannerTimer -= dt;
       if (regionBannerTimer <= 0) regionBannerEl.style.display = 'none';

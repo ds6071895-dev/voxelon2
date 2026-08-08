@@ -6,8 +6,10 @@ import * as THREE from 'three';
 import { Block, isSolid } from './blocks';
 import type { PlayerInput } from './input';
 import { mitigate } from './net/protocol';
-import { collisionBoxes, FULL_BOX } from './shapes';
+import { collisionBoxes, FULL_BOX, type Box } from './shapes';
 import type { World } from './world';
+
+const FULL: Box[] = [FULL_BOX];
 
 export const MAX_AIR = 15; // seconds of breath = vanilla's 10 bubbles
 
@@ -50,6 +52,15 @@ const GLIDE_MIN_CLEARANCE = 3; // air blocks below required to deploy
 const BOAT_SPEED = 11;         // ~2.5× walking
 const BOAT_REVERSE = 0.35;     // back-paddle fraction of full speed
 const BOAT_ACCEL = 2.5;        // low accel = a drifty, boaty feel
+// Grappling-hook momentum: how hard WASD can push a launch around mid-air, and
+// how fast the carried speed bleeds off (per-second multiplier). Tuned so a
+// full-speed reel release stays fast for roughly two seconds of flight.
+const MOMENTUM_STEER = 13;
+const MOMENTUM_DRAG = 0.62;
+// Un-sticking: how far the body may be shoved to escape geometry it is already
+// inside, and how far it will climb when there is no sideways way out.
+const UNSTICK_MAX_PUSH = 2.5;
+const UNSTICK_MAX_RISE = 8;
 
 export class Player {
   readonly pos = new THREE.Vector3(); // feet, centre of the box
@@ -111,8 +122,18 @@ export class Player {
   gliding = false;
   /** Riding a boat (mounted/dismounted by main; drives water-surface physics). */
   boating = false;
+  /** Seconds of PRESERVED MOMENTUM left (grappling hook). Normal air control
+   *  drags your horizontal speed back toward walking pace within a fraction of
+   *  a second, which would eat a hook launch the instant the rope let go —
+   *  while this is positive, WASD instead ADDS thrust to whatever speed you
+   *  already carry and only a light drag bleeds it off. main.ts tops it up
+   *  every frame the rope is attached and sets the launch window on release. */
+  momentumTime = 0;
   private prevJump = false;
   private eye = EYE_STANDING;
+  /** True while the body's own chunk column has streamed in — only then may
+   *  collision treat NEIGHBOURING unloaded columns as rock (see cellBoxes). */
+  private streamGuard = false;
 
   constructor(spawn: { x: number; y: number; z: number }) {
     this.pos.set(spawn.x, spawn.y, spawn.z);
@@ -154,6 +175,7 @@ export class Player {
     this.dead = false;
     this.gliding = false;
     this.boating = false;
+    this.momentumTime = 0;
     this.prevJump = false;
   }
 
@@ -163,6 +185,9 @@ export class Player {
 
   update(dt: number, input: PlayerInput, world: World): void {
     if (this.dead) return;
+    // Only trust "that chunk is empty" once our own chunk is real (see cellBoxes).
+    this.streamGuard =
+      world.isLoaded?.(Math.floor(this.pos.x), Math.floor(this.pos.z)) ?? false;
     this.hurtTimer = Math.max(0, this.hurtTimer - dt);
     this.damageFlash = Math.max(0, this.damageFlash - dt);
     // regenCooldown is ticked by Survival.update (runs while paused/inventory).
@@ -226,10 +251,12 @@ export class Player {
       // In a boat: W rows toward where you look, buoyancy pins the hull to the
       // water surface (collisions still resolve at integration).
       this.sprinting = false;
+      this.momentumTime = 0;
       this.applyBoat(dt, input, world);
     } else if (this.gliding) {
       // Wings deployed: the look direction sets the whole velocity (collisions
       // still resolve at integration). WASD is ignored — you fly where you aim.
+      this.momentumTime = 0; // the wings own the velocity now, not the hook
       this.applyGlide();
     } else {
       let speed = (this.sneaking ? SNEAK_SPEED
@@ -246,10 +273,25 @@ export class Player {
 
       // Approach target velocity; much weaker control while airborne (but full
       // authority while flying).
-      const accel = this.flying || this.onGround || this.inWater ? 14 : 3;
-      const t = Math.min(1, accel * dt);
-      this.vel.x += (dirX * speed - this.vel.x) * t;
-      this.vel.z += (dirZ * speed - this.vel.z) * t;
+      const grounded = this.flying || this.onGround || this.inWater;
+      if (this.momentumTime > 0 && !grounded) {
+        // Carrying hook momentum: steering ADDS thrust in the direction you
+        // ask for, and only a light air drag bleeds the speed off, so a launch
+        // stays a launch and can be aimed mid-flight.
+        this.vel.x += dirX * MOMENTUM_STEER * dt;
+        this.vel.z += dirZ * MOMENTUM_STEER * dt;
+        const drag = Math.pow(MOMENTUM_DRAG, dt);
+        this.vel.x *= drag;
+        this.vel.z *= drag;
+      } else {
+        const accel = grounded ? 14 : 3;
+        const t = Math.min(1, accel * dt);
+        this.vel.x += (dirX * speed - this.vel.x) * t;
+        this.vel.z += (dirZ * speed - this.vel.z) * t;
+      }
+      // Landing (or a swim) ends the momentum window; otherwise it decays.
+      this.momentumTime = grounded && !this.flying
+        ? 0 : Math.max(0, this.momentumTime - dt);
 
       // Vertical.
       if (this.flying) {
@@ -309,6 +351,9 @@ export class Player {
       this.onGround = false;
       this.fallDistance = 0;
     } else {
+      // The axis resolver assumes the body starts the step OUTSIDE the world.
+      // Restore that invariant first if something broke it.
+      this.unstick(world);
       const wasOnGround = this.onGround;
       this.onGround = false;
       this.moveAxis(world, 1, this.vel.y * dt);
@@ -450,6 +495,116 @@ export class Player {
     return 96;
   }
 
+  /** Collision boxes of one cell, with UNGENERATED WORLD TREATED AS ROCK.
+   *  `world.getBlock` answers Air for a chunk that has not streamed in yet, so
+   *  anything moving faster than the chunk loader (a grapple launch, a glide)
+   *  would sail straight through terrain that merely hasn't arrived, ending up
+   *  inside the ground once it does. Only guard while the body's OWN column is
+   *  loaded, so a player can never be frozen by the chunk they are standing in. */
+  private cellBoxes(world: World, x: number, y: number, z: number): Box[] {
+    if (this.streamGuard && !(world.isLoaded?.(x, z) ?? true)) return FULL;
+    return collisionBoxes(world.getBlock(x, y, z));
+  }
+
+  /** Does the body overlap solid geometry at (x, y, z)? */
+  private overlapping(world: World, x: number, y: number, z: number): boolean {
+    const minX = x - HALF_WIDTH, maxX = x + HALF_WIDTH;
+    const minY = y, maxY = y + HEIGHT;
+    const minZ = z - HALF_WIDTH, maxZ = z + HALF_WIDTH;
+    for (let cx = Math.floor(minX); cx <= Math.floor(maxX); cx++)
+      for (let cy = Math.floor(minY); cy <= Math.floor(maxY); cy++)
+        for (let cz = Math.floor(minZ); cz <= Math.floor(maxZ); cz++) {
+          const boxes = this.cellBoxes(world, cx, cy, cz);
+          for (let b = 0; b < boxes.length; b++) {
+            const [mn, mx] = boxes[b];
+            if (maxX <= cx + mn[0] || minX >= cx + mx[0]) continue;
+            if (maxY <= cy + mn[1] || minY >= cy + mx[1]) continue;
+            if (maxZ <= cz + mn[2] || minZ >= cz + mx[2]) continue;
+            return true;
+          }
+        }
+    return false;
+  }
+
+  /**
+   * Push the body out of any geometry it is ALREADY inside, along the shallowest
+   * axis that frees it.
+   *
+   * Nothing in normal movement can end a step overlapping a block — but plenty
+   * outside it can: a teleport, the war-border clamp, a vault seal clamping you
+   * back into the arena, a block placed where you stand, a chunk streaming in
+   * around you. The axis resolver's answer to a pre-existing overlap is to snap
+   * the body to the far face of the offending box, which is a BLOCK-SIZED JUMP
+   * WITH NO SWEEP: repeated over a few frames it walks a stuck player clean
+   * through a wall and out into the rock beyond, where they can then swim around
+   * underground. Restoring the invariant here is what makes that impossible.
+   */
+  private unstick(world: World): void {
+    const p = this.pos;
+    if (!this.overlapping(world, p.x, p.y, p.z)) return;
+
+    const minX = p.x - HALF_WIDTH, maxX = p.x + HALF_WIDTH;
+    const minY = p.y, maxY = p.y + HEIGHT;
+    const minZ = p.z - HALF_WIDTH, maxZ = p.z + HALF_WIDTH;
+    // Distance to travel along each of the six directions to clear EVERY box
+    // the body currently intersects.
+    let up = 0, down = 0, east = 0, west = 0, south = 0, north = 0;
+    for (let x = Math.floor(minX); x <= Math.floor(maxX); x++) {
+      for (let y = Math.floor(minY); y <= Math.floor(maxY); y++) {
+        for (let z = Math.floor(minZ); z <= Math.floor(maxZ); z++) {
+          const boxes = this.cellBoxes(world, x, y, z);
+          for (let b = 0; b < boxes.length; b++) {
+            const [mn, mx] = boxes[b];
+            const bx0 = x + mn[0], bx1 = x + mx[0];
+            const by0 = y + mn[1], by1 = y + mx[1];
+            const bz0 = z + mn[2], bz1 = z + mx[2];
+            if (maxX <= bx0 || minX >= bx1) continue;
+            if (maxY <= by0 || minY >= by1) continue;
+            if (maxZ <= bz0 || minZ >= bz1) continue;
+            up = Math.max(up, by1 - minY + EPS);
+            down = Math.max(down, maxY - by0 + EPS);
+            east = Math.max(east, bx1 - minX + EPS);
+            west = Math.max(west, maxX - bx0 + EPS);
+            south = Math.max(south, bz1 - minZ + EPS);
+            north = Math.max(north, maxZ - bz0 + EPS);
+          }
+        }
+      }
+    }
+
+    // Shallowest first; ties go to rising, which is the one direction that is
+    // always an escape from a floor that appeared underfoot.
+    const tries: Array<[number, number, number, number]> = [
+      [up, 0, up, 0], [east, east, 0, 0], [west, -west, 0, 0],
+      [south, 0, 0, south], [north, 0, 0, -north], [down, 0, -down, 0],
+    ];
+    tries.sort((a, b) => a[0] - b[0]);
+    for (const [cost, dx, dy, dz] of tries) {
+      if (cost <= 0 || cost > UNSTICK_MAX_PUSH) continue;
+      if (this.overlapping(world, p.x + dx, p.y + dy, p.z + dz)) continue;
+      p.set(p.x + dx, p.y + dy, p.z + dz);
+      if (dx !== 0) this.vel.x = 0;
+      if (dy !== 0) this.vel.y = 0;
+      if (dz !== 0) this.vel.z = 0;
+      this.fallDistance = 0; // being shoved out is not a fall
+      return;
+    }
+
+    // Entombed: climb out. Rising always terminates (there is sky above every
+    // column), and beats the alternative of phasing sideways through the rock.
+    for (let rise = 0.5; rise <= UNSTICK_MAX_RISE; rise += 0.5) {
+      if (this.overlapping(world, p.x, p.y + rise, p.z)) continue;
+      p.y += rise;
+      this.vel.set(0, 0, 0);
+      this.fallDistance = 0;
+      return;
+    }
+    // Buried deeper than we are willing to teleport: hold still rather than
+    // tunnel. The chunk/teleport that caused it will settle within a frame.
+    this.vel.set(0, 0, 0);
+    this.fallDistance = 0;
+  }
+
   private hasSupport(world: World): boolean {
     const y = Math.floor(this.pos.y - 0.05);
     const x0 = Math.floor(this.pos.x - HALF_WIDTH);
@@ -493,7 +648,7 @@ export class Player {
     for (let x = x0; x <= x1; x++) {
       for (let y = y0; y <= y1; y++) {
         for (let z = z0; z <= z1; z++) {
-          const boxes = collisionBoxes(world.getBlock(x, y, z));
+          const boxes = this.cellBoxes(world, x, y, z);
           for (let b = 0; b < boxes.length; b++) {
             const [mn, mx] = boxes[b];
             const bx0 = x + mn[0], bx1 = x + mx[0];

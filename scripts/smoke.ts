@@ -2256,6 +2256,36 @@ check('furnace smelts ore/sand/log but not removed foods',
         d.maxStack > 0 && typeof d.desc === 'string' && d.desc.length > 0;
     }));
 
+  // Grappling hook: the whole point of a hook is the speed you leave it with.
+  // Normal air control drags horizontal speed back toward walking pace within a
+  // fraction of a second, so a launch only survives if Player.momentumTime
+  // suspends that drag — assert both halves of the behaviour.
+  {
+    const air = { x: spawn.x, y: spawn.y + 40, z: spawn.z };
+    const dragged = new Player(air);
+    const launched = new Player(air);
+    dragged.vel.set(28, 0, 0);
+    launched.vel.set(28, 0, 0);
+    launched.momentumTime = 1.8;
+    const idle = { ...IDLE_INPUT } as never;
+    for (let i = 0; i < 60; i++) { // one second of flight
+      dragged.update(1 / 60, idle, world);
+      launched.update(1 / 60, idle, world);
+    }
+    check('hook momentum survives the release (normal air drag would eat it)',
+      launched.vel.x > 14 && dragged.vel.x < 6);
+    check('hook momentum still bleeds off instead of lasting forever',
+      launched.vel.x < 28 && launched.momentumTime < 1.8);
+    const landed = new Player({ x: spawn.x, y: spawn.y + 3, z: spawn.z });
+    landed.momentumTime = 1.8;
+    for (let i = 0; i < 400; i++) landed.update(1 / 120, idle, world);
+    check('landing ends the momentum window (no permanent ice skating)',
+      landed.onGround && landed.momentumTime === 0);
+    // The hook has to be chainable or it is a utility, not a movement toy.
+    check('the grappling hook cools down fast enough to chain swings',
+      GADGETS[Item.GrapplingHook].cooldown <= 1.5);
+  }
+
   // AoE falloff: full at the centre, linear, zero at/after the radius.
   check('falloffDamage is full at the centre, linear, zero past the radius',
     falloffDamage(20, 0, 5) === 20 && falloffDamage(20, 2.5, 5) === 10 &&

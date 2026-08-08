@@ -164,6 +164,14 @@ export class World {
     return m.get(((((wx & 15) << 4) | (wz & 15)) << 8) | (wy & 255));
   }
 
+  /** Has the chunk column holding (wx, wz) got its block data yet? `getBlock`
+   *  cannot distinguish "empty" from "not generated" — both read as Air — so
+   *  anything that must not move through unstreamed terrain (player collision)
+   *  asks here first. Data-only chunks count: collision needs blocks, not a mesh. */
+  isLoaded(wx: number, wz: number): boolean {
+    return this.chunks.has(Chunk.key(wx >> 4, wz >> 4));
+  }
+
   getBlock(wx: number, wy: number, wz: number): number {
     if (wy < 0 || wy >= 256) return Block.Air;
     const chunk = this.chunks.get(Chunk.key(wx >> 4, wz >> 4));

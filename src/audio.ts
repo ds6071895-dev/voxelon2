@@ -48,9 +48,22 @@ export function materialOf(block: number): Material {
   }
 }
 
-export const ENCOUNTER_MUSIC_BOOST = 1.22;
-export const ENCOUNTER_EFFECTS_DUCK = 0.82;
-export const ENCOUNTER_AMBIENCE_DUCK = 0.42;
+// Encounter mix. A boss score is a dense, compressed, SUSTAINED signal while
+// gunshots and explosions are short transients with far higher peaks — matched
+// on paper, the music still reads as background noise underneath a fight. So
+// the encounter mix pushes the score up and pulls the fight down harder than a
+// naive "slightly louder" balance would: combined with the score's own makeup
+// gain (MUSIC_MAKEUP_GAIN in boss_music.ts) the track finally sits ON TOP of
+// the boss fight instead of behind it.
+export const ENCOUNTER_MUSIC_BOOST = 1.28;
+export const ENCOUNTER_EFFECTS_DUCK = 0.74;
+export const ENCOUNTER_AMBIENCE_DUCK = 0.34;
+/** Bus ceiling for the music path. Above 1 on purpose: the bus feeds a master
+ *  at 0.5, so headroom is available and the score needs it to compete. */
+const MUSIC_BUS_CEILING = 1.6;
+/** Default music slider position. Higher than it used to be for the same
+ *  reason: at 0.65 the boss score was inaudible next to the fight. */
+export const DEFAULT_MUSIC_VOLUME = 0.85;
 
 const MATERIAL_FREQ: Record<Material, number> = {
   stone: 700, wood: 380, grass: 950, sand: 2400, glass: 3200, wool: 500,
@@ -66,7 +79,7 @@ export class GameAudio {
   private noiseBuf: AudioBuffer | null = null;
   private readonly listenerPos = new THREE.Vector3();
   private effectsVolume = GameAudio.savedVolume('effects', 0.8);
-  private musicVolume = GameAudio.savedVolume('music', 0.65);
+  private musicVolume = GameAudio.savedVolume('music', DEFAULT_MUSIC_VOLUME);
   private encounterMix = false;
 
   private static savedVolume(key: string, fallback: number): number {
@@ -106,7 +119,8 @@ export class GameAudio {
   private applyBusMix(): void {
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
-    const music = Math.min(1, this.musicVolume * (this.encounterMix ? ENCOUNTER_MUSIC_BOOST : 1));
+    const music = Math.min(MUSIC_BUS_CEILING,
+      this.musicVolume * (this.encounterMix ? ENCOUNTER_MUSIC_BOOST : 1));
     const effects = this.effectsVolume * (this.encounterMix ? ENCOUNTER_EFFECTS_DUCK : 1);
     const ambience = this.effectsVolume * (this.encounterMix ? ENCOUNTER_AMBIENCE_DUCK : 0.7);
     this.musicBus?.gain.setTargetAtTime(music, now, 0.08);
@@ -127,7 +141,8 @@ export class GameAudio {
   }
 
   setMusicVolume(value: number): void {
-    this.musicVolume = Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0.65));
+    this.musicVolume = Math.max(0, Math.min(1,
+      Number.isFinite(value) ? value : DEFAULT_MUSIC_VOLUME));
     this.applyBusMix();
     try { localStorage.setItem('voxelon.audio.music', String(this.musicVolume)); } catch { /* ignore */ }
   }
@@ -319,6 +334,36 @@ export class GameAudio {
     this.noise({ freq: 1500, dur: 0.025, gain: 0.1, type: 'bandpass', q: 1, pos });
     // Soft triangle thump (much smoother than the old square wave).
     this.tone({ type: 'triangle', from: 170, to: 55, dur: 0.07, gain: 0.15, pos });
+  }
+
+  // --- Grappling hook --------------------------------------------------------
+  // Four beats, because the hook is four beats: the launch, the bite, the reel
+  // and the release. Each one is short and low-mid so chaining swings never
+  // turns into a shriek.
+
+  /** Launch: a rising "thwip" as the line pays out. */
+  grappleFire(): void {
+    this.noise({ freq: 380, dur: 0.16, gain: 0.2, slideTo: 1500, type: 'bandpass', q: 0.8 });
+    this.tone({ type: 'triangle', from: 220, to: 520, dur: 0.12, gain: 0.09 });
+  }
+
+  /** The hook bites: a solid metal thunk with a short ring. */
+  grappleHit(pos?: THREE.Vector3): void {
+    this.noise({ freq: 700, dur: 0.09, gain: 0.26, slideTo: 140, type: 'lowpass', q: 0.7, pos });
+    this.tone({ type: 'triangle', from: 260, to: 90, dur: 0.13, gain: 0.18, pos });
+    this.tone({ type: 'sine', from: 1450, to: 900, dur: 0.22, gain: 0.05, pos });
+  }
+
+  /** Reeling: a low winch whir under the flight (called once per pull). */
+  grappleReel(): void {
+    this.tone({ type: 'sawtooth', from: 120, to: 210, dur: 0.55, gain: 0.05, attack: 0.08 });
+    this.noise({ freq: 240, dur: 0.6, gain: 0.05, slideTo: 700, type: 'lowpass', q: 0.6 });
+  }
+
+  /** Let go at speed: a snap of tension plus the wind of the launch. */
+  grappleRelease(): void {
+    this.tone({ type: 'triangle', from: 520, to: 180, dur: 0.1, gain: 0.1 });
+    this.noise({ freq: 700, dur: 0.42, gain: 0.16, slideTo: 2000, type: 'bandpass', q: 0.5 });
   }
 
   /** Glider deploy: an airy upward whoosh as the wings catch. */

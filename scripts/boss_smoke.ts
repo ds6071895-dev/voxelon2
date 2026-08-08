@@ -7,6 +7,7 @@ import {
 import { bossMaxHp, encounterBaseHp } from '../src/vault_encounter';
 import type { VaultBossKind, VaultTier } from '../src/vaults';
 import { Item, ITEMS, gunVolley } from '../src/items';
+import { encounterCoach, hazardAdvice } from '../src/vault_presentation';
 
 const kinds = Object.keys(BOSS_DEFINITIONS) as VaultBossKind[];
 const failures: string[] = [];
@@ -260,6 +261,54 @@ check(resetEncounter.status === 'idle' && !resetEncounter.snapshot().seal.sealed
   check(!anyTrivial, 'no boss melts fast enough to be a mere mob');
   check(encounterBaseHp(1) < encounterBaseHp(2) && encounterBaseHp(2) < encounterBaseHp(3),
     'boss health still climbs with tier');
+}
+
+// --- In-fight coaching -------------------------------------------------------
+// A boss that stops taking damage without saying why is the single most common
+// way a player bounces off this content, so the explanation is tested like a
+// mechanic: every boss must own one, and it must change with the fight.
+{
+  const base = {
+    encounterId: 'coach', tick: 0, time: 100, family: 'crystal' as const,
+    kind: 'crystal_seer' as VaultBossKind, tier: 2 as VaultTier, phase: 2 as const,
+    hp: 400, maxHp: 800, hpPercent: 0.5, poise: 100, maxPoise: 100,
+    exposedUntil: 0, enrage: false, elapsed: 60, cast: null,
+    boss: { id: 0, position: { x: 0, y: 0, z: 0 } },
+    actors: [], objects: [], hazards: [], participants: [1], peakParticipants: 1,
+    criticalObjects: 0, movement: null,
+    healing: { active: false, sources: 0, rate: 0, healed: 0, cap: 0 },
+    wave: { number: 1, alive: 0, cap: 32 },
+    seal: { sealed: true, geometry: null },
+    status: 'active' as const,
+  };
+  for (const kind of kinds) {
+    const def = BOSS_DEFINITIONS[kind];
+    check(def.phaseBriefs.length === 3 && def.phaseBriefs.every((b) => b.length > 40),
+      `${def.name}: every phase explains itself in plain language`);
+    check(def.objectName.length > 0 && def.objectPlural.length > 0 &&
+      def.wardEffect.length > 0,
+      `${def.name}: its wards are named and their protection is spelled out`);
+  }
+  const warded = encounterCoach({ ...base, criticalObjects: 3 });
+  check(/PRISMS/.test(warded.text) && /QUARTER/i.test(warded.text),
+    'a warded boss tells you to break the wards and why the boss will not die');
+  const incoming = encounterCoach({
+    ...base,
+    hazards: [{ id: 1, shape: 'line', origin: { x: 0, y: 0, z: 0 },
+      radius: 18, width: 1.4, angle: 0, telegraphAt: 99, executeAt: 101,
+      expiresAt: 102, damage: 7, attack: 'Fate Beam', hitParticipants: [] }],
+    criticalObjects: 3,
+  });
+  check(/FATE BEAM/.test(incoming.text) && incoming.tone === 'danger',
+    'an incoming telegraph outranks every other instruction');
+  check(incoming.text.includes(hazardAdvice('line')),
+    'the dodge advice matches the hazard shape that is about to land');
+  const exposed = encounterCoach({ ...base, exposedUntil: 3.2 });
+  check(exposed.tone === 'good' && /EXPOSED/.test(exposed.text),
+    'the damage window is called out as the moment to push');
+  check(encounterCoach({ ...base, status: 'intro' }).text ===
+    BOSS_DEFINITIONS.crystal_seer.phaseBriefs[0],
+    'the intro briefs you before the first hit lands');
 }
 
 check(kinds.length === 5, 'all five dungeon boss families are covered');

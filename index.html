@@ -763,6 +763,37 @@
     }
     .menu-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 
+    /* World status: three plates across the foot of the title screen. */
+    .title-status {
+      display: flex; flex-wrap: wrap; justify-content: center;
+      gap: clamp(8px, 1.4vw, 14px); margin: 0;
+    }
+    .title-status[hidden] { display: none; }
+    .tstat {
+      display: grid; gap: 4px; min-width: 152px; padding: 9px 15px;
+      border: 1px solid var(--line); border-radius: 13px;
+      background: rgba(255,255,255,.86); box-shadow: 0 6px 18px rgba(15,26,36,.06);
+    }
+    .tstat-k {
+      color: var(--ink-mute); font-size: 9px; font-weight: 700;
+      letter-spacing: 1.6px; text-transform: uppercase;
+    }
+    .tstat b {
+      display: flex; align-items: center; gap: 7px;
+      color: var(--ink); font-size: 14px; font-weight: 700; letter-spacing: .2px;
+    }
+    .tstat-dot {
+      width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto;
+      background: var(--side-color, #9a9a9a);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--side-color, #9a9a9a) 20%, transparent);
+    }
+    /* A war actually running is the one thing here worth shouting about. */
+    .tstat.live {
+      border-color: rgba(226,59,59,.45); background: rgba(255,243,242,.94);
+      box-shadow: 0 6px 20px rgba(226,59,59,.14);
+    }
+    .tstat.live b { color: #b32b22; }
+
     #overlay .title-footer {
       margin: 0; color: var(--ink-mute); font-size: 10px; font-weight: 500;
       letter-spacing: 1.2px; text-align: center;
@@ -934,9 +965,12 @@
       .brief-skip { order: 3; width: 100%; margin-left: 0; }
       .brief-next { flex: 1; min-width: 130px; }
     }
-    /* Phones only: the pitch strip gives way to the form. */
+    /* Phones only: the pitch strip gives way to the form, and the status
+       plates shrink rather than disappear — they are live information. */
     @media (max-width: 640px) {
       .title-facts { display: none; }
+      .tstat { min-width: 0; padding: 7px 11px; }
+      .tstat b { font-size: 12px; }
     }
     /* Too short to centre a full lockup: pin to the top and let it scroll. */
     @media (max-height: 700px) {
@@ -1039,6 +1073,24 @@
         </section>
       </div>
 
+      <!-- The bottom of the title screen reports on the world you are about to
+           enter: which side you fight for and when the next war opens. It only
+           appears once you are signed in, because before that there is nothing
+           true to say. -->
+      <div id="title-status" class="title-status mc-font" hidden>
+        <div class="tstat">
+          <span class="tstat-k">Your side</span>
+          <b id="tstat-side"><i class="tstat-dot"></i><span>Unassigned</span></b>
+        </div>
+        <div class="tstat" id="tstat-war-cell">
+          <span class="tstat-k" id="tstat-war-k">Next war</span>
+          <b id="tstat-war">Not scheduled</b>
+        </div>
+        <div class="tstat">
+          <span class="tstat-k">War wins</span>
+          <b id="tstat-wins">0 &#183; 0</b>
+        </div>
+      </div>
       <p class="title-footer mc-font">Every block original <strong>&#183;</strong> No password is ever stored in this browser</p>
     </div>
   </div>

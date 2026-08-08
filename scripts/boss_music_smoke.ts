@@ -4,10 +4,11 @@ import {
   BOSS_SCORE_PROFILES,
   bossScoreLoopSeconds,
   sectionDynamic,
+  MUSIC_MAKEUP_GAIN,
 } from '../src/boss_music';
 import type { VaultFamily } from '../src/vaults';
 import type { BossMusicCue } from '../src/boss_music';
-import { ENCOUNTER_AMBIENCE_DUCK, ENCOUNTER_EFFECTS_DUCK,
+import { DEFAULT_MUSIC_VOLUME, ENCOUNTER_AMBIENCE_DUCK, ENCOUNTER_EFFECTS_DUCK,
   ENCOUNTER_MUSIC_BOOST } from '../src/audio';
 
 const families: readonly VaultFamily[] = ['crypt', 'mire', 'ember', 'crystal', 'gilded'];
@@ -34,6 +35,12 @@ check(ENCOUNTER_MUSIC_BOOST > 1 && ENCOUNTER_MUSIC_BOOST <= 1.3 &&
   ENCOUNTER_EFFECTS_DUCK >= 0.7 && ENCOUNTER_EFFECTS_DUCK < 1 &&
   ENCOUNTER_AMBIENCE_DUCK >= 0.3 && ENCOUNTER_AMBIENCE_DUCK < ENCOUNTER_EFFECTS_DUCK,
   'encounter mix lifts music while safely ducking effects and ambience');
+// The score is quiet by construction (polite per-voice gains, then compressed).
+// Without real makeup gain it loses to every gunshot in the arena.
+check(MUSIC_MAKEUP_GAIN >= 2 && MUSIC_MAKEUP_GAIN <= 4,
+  `the score is made up to a competitive level after compression (×${MUSIC_MAKEUP_GAIN})`);
+check(DEFAULT_MUSIC_VOLUME >= 0.8 && DEFAULT_MUSIC_VOLUME <= 1,
+  `music defaults loud enough to be heard over a fight (${DEFAULT_MUSIC_VOLUME})`);
 const redesignedCues: BossMusicCue[] = ['door', 'movement', 'army', 'healing',
   'interrupt', 'combo', 'phase', 'enrage', 'victory', 'reset'];
 check(new Set(redesignedCues).size === 10,

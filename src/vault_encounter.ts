@@ -166,6 +166,19 @@ export interface BossDefinition {
   criticalObject: EncounterObjectKind;
   criticalCount: number;
   poiseObjects?: number;
+  // --- In-fight coaching -----------------------------------------------------
+  // Every boss protects itself in a DIFFERENT way (some are shielded by their
+  // wards, some are healed by them), and a player who does not know which one
+  // they are looking at just shoots a boss whose health bar refuses to move.
+  // These strings let the HUD explain the mechanic in the fight itself instead
+  // of expecting the fight to be read about beforehand.
+  /** What one critical object is called, singular then plural. */
+  objectName: string;
+  objectPlural: string;
+  /** What the wards do for the boss while they still stand (HUD-sized clause). */
+  wardEffect: string;
+  /** One plain-language instruction per phase: what to actually do right now. */
+  phaseBriefs: readonly [string, string, string];
   moveStyle: readonly BossMoveKind[];
   moveCadence: number;
   healingPerSource: number;
@@ -201,6 +214,13 @@ export const BOSS_DEFINITIONS: Record<VaultBossKind, BossDefinition> = {
     victoryLine: 'The dead fall silent at last.',
     phaseTitles: ['The Sealed Tomb', 'The Graves Open', 'Last Rites'],
     criticalObject: 'sarcophagus', criticalCount: 4, poiseObjects: 2,
+    objectName: 'Sarcophagus', objectPlural: 'Sarcophagi',
+    wardEffect: 'while 2 or more still stand the Warden takes HALF damage',
+    phaseBriefs: [
+      'Straight fight: stay out of its cone swings and leave the shockwave ring — then hit the Warden.',
+      'It raises 4 Sarcophagi. Break them — with 2+ standing the Warden takes HALF damage, and every one you break staggers it.',
+      'No more coffins. Dodge the falling bone pillars and its charge lane, and finish it.',
+    ],
     moveStyle: ['socket', 'blink', 'charge', 'target_swap'], moveCadence: 5.2,
     healingPerSource: 1.25, army: ['skeleton', 'zombie', 'bone_knight'],
     phases: [
@@ -230,6 +250,13 @@ export const BOSS_DEFINITIONS: Record<VaultBossKind, BossDefinition> = {
     victoryLine: 'The brood sinks back into the mire.',
     phaseTitles: ['Venom Crown', 'The Brood Awakens', 'Drowning Court'],
     criticalObject: 'brood_pool', criticalCount: 3,
+    objectName: 'Brood Pool', objectPlural: 'Brood Pools',
+    wardEffect: 'each pool still bubbling heals her back up',
+    phaseBriefs: [
+      'Straight fight: sidestep the venom cones and keep moving off the falling mud — then hit the Queen.',
+      'She wakes 3 Brood Pools that HEAL her. Smash the pools first or her health will not move.',
+      'Pools are done. Ride the safe islands, dodge the tidal lane, and finish her.',
+    ],
     moveStyle: ['burrow', 'target_swap', 'retreat', 'pursue'], moveCadence: 4.4,
     healingPerSource: 1.55, army: ['mireling', 'spitter', 'skitter', 'bog_brute'],
     phases: [
@@ -261,6 +288,13 @@ export const BOSS_DEFINITIONS: Record<VaultBossKind, BossDefinition> = {
     victoryLine: 'The furnace gutters into ash.',
     phaseTitles: ['Cold Iron', 'Furnace Heart', 'Worldfire'],
     criticalObject: 'brazier', criticalCount: 4,
+    objectName: 'Brazier', objectPlural: 'Braziers',
+    wardEffect: 'every lit brazier pours heat back into the Colossus and heals it',
+    phaseBriefs: [
+      'Straight fight: stay off the lava fissures and out of its grasp cone — then hit the Colossus.',
+      'It lights 4 Braziers that HEAL it. Put the braziers out first — damage on the Colossus is wasted while they burn.',
+      'Braziers are out. Watch which quarter of the floor lights up, cross the shockwaves, and finish it.',
+    ],
     moveStyle: ['leap', 'charge', 'center', 'pursue'], moveCadence: 5.6,
     healingPerSource: 1.35, army: ['emberling', 'emberling', 'magma_brute'],
     phases: [
@@ -290,6 +324,13 @@ export const BOSS_DEFINITIONS: Record<VaultBossKind, BossDefinition> = {
     victoryLine: 'A thousand doomed futures shatter.',
     phaseTitles: ['Foreseen', 'Hall of Mirrors', 'Final Prophecy'],
     criticalObject: 'prism', criticalCount: 3,
+    objectName: 'Prism', objectPlural: 'Prisms',
+    wardEffect: 'while ANY prism floats the Seer only takes a QUARTER of your damage',
+    phaseBriefs: [
+      'Straight fight: step out of the beam lanes and the prism fan — then hit the Seer.',
+      'HALL OF MIRRORS: it conjures 3 Prisms. Shoot the PRISMS, not the Seer — while even one floats it only takes a QUARTER of your damage. Break all three and it is exposed.',
+      'Prisms are gone. Cross the twin prophecy beams, keep moving under the falling shards, and finish it.',
+    ],
     moveStyle: ['blink', 'target_swap', 'socket', 'retreat'], moveCadence: 3.9,
     healingPerSource: 1.45, army: ['mirror_clone', 'shardling', 'mirror_clone'],
     phases: [
@@ -321,6 +362,13 @@ export const BOSS_DEFINITIONS: Record<VaultBossKind, BossDefinition> = {
     victoryLine: 'The golden engine grinds to a halt.',
     phaseTitles: ['Calculated Defense', 'War Machine', 'Total Lockdown'],
     criticalObject: 'turret', criticalCount: 2,
+    objectName: 'Turret', objectPlural: 'Turrets',
+    wardEffect: 'each live turret repairs the Artificer FAST',
+    phaseBriefs: [
+      'Straight fight: dodge the golden blade fan, avoid the mines it scatters, and hit the Artificer.',
+      'It deploys 2 Turrets that REPAIR it faster than you can hurt it. Wreck the turrets first.',
+      'Turrets are scrap. Get out from between the crusher walls, dodge the coin storm, and finish it.',
+    ],
     moveStyle: ['strafe', 'charge', 'socket', 'target_swap'], moveCadence: 4.3,
     healingPerSource: 2.1, army: ['clockwork_guard', 'clockwork_drone', 'clockwork_guard'],
     phases: [

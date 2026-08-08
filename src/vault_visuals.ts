@@ -8,6 +8,8 @@ const FAMILY_COLOR: Record<EncounterSnapshot['family'], number> = {
   crystal: 0x63c8ff, gilded: 0xf2bd3f,
 };
 
+const WHITE = new THREE.Color(0xffffff);
+
 const TELEGRAPH_GEOMETRY = {
   circle: new THREE.CircleGeometry(1, 48),
   ring: new THREE.RingGeometry(0.82, 1, 48),
@@ -181,7 +183,15 @@ export class VaultEncounterVisuals {
         (o.kind === 'mine' || o.kind === 'brood_pool' ? 0.14 : 0.9), o.position.z);
       const mat = mesh.material as THREE.MeshBasicMaterial;
       mat.color.set(color);
-      mat.opacity = o.critical ? 0.92 : 0.72;
+      // The wards ARE the fight, so a critical object has to look like a target
+      // rather than scenery: it strobes toward white on the family colour while
+      // ordinary props sit flat. (Held steady for reduced-motion players.)
+      if (o.critical && !reducedMotion) {
+        mat.color.lerp(WHITE, 0.3 + Math.sin(snapshot.time * 5.5 + i) * 0.28);
+      } else if (o.critical) {
+        mat.color.lerp(WHITE, 0.3);
+      }
+      mat.opacity = o.critical ? 0.96 : 0.72;
       mesh.rotation.y = reducedMotion ? 0 : snapshot.time * (o.kind === 'prism' ? 1.2 : 0.25);
       mesh.scale.set(1, 0.65 + hp * 0.35, 1);
       if (o.kind === 'crusher_wall') mesh.scale.set(2.8, 2.2, 0.5);

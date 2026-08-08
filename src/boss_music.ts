@@ -171,8 +171,21 @@ function hashUnit(value: number): number {
  * Native WebAudio adaptive boss-score engine. It produces original music in the
  * browser, needs no downloads, and keeps phase changes aligned to a shared pulse. Each boss runs through a 96-bar, exact-repeat macro form before returning seamlessly to bar one.
  */
+/**
+ * Post-compressor makeup gain for the whole score.
+ *
+ * Every voice in here is written at a polite 0.02–0.15, and the sum is then
+ * compressed — which is right for a MIX but leaves the finished track peaking
+ * roughly an order of magnitude below a gunshot or an explosion on the effects
+ * bus. The result was a boss fight where you could barely hear the boss music.
+ * Making it up AFTER the compressor keeps the internal balance and the dynamic
+ * arc exactly as composed and simply turns the whole thing up.
+ */
+export const MUSIC_MAKEUP_GAIN = 2.6;
+
 export class BossMusicEngine {
   private readonly scoreGain: GainNode;
+  private readonly makeup: GainNode;
   private readonly dryGain: GainNode;
   private readonly reverb: ConvolverNode;
   private readonly reverbReturn: GainNode;
@@ -222,17 +235,22 @@ export class BossMusicEngine {
     this.delayReturn.gain.value = 0.18;
 
     this.compressor = ctx.createDynamicsCompressor();
-    this.compressor.threshold.value = -18;
+    // A lower threshold with a gentler ratio catches more of the arrangement
+    // without squashing the section dynamics flat, so the makeup gain below
+    // lifts a dense, even track rather than a few stabs.
+    this.compressor.threshold.value = -21;
     this.compressor.knee.value = 18;
-    this.compressor.ratio.value = 4;
+    this.compressor.ratio.value = 3.4;
     this.compressor.attack.value = 0.012;
     this.compressor.release.value = 0.28;
+    this.makeup = ctx.createGain();
+    this.makeup.gain.value = MUSIC_MAKEUP_GAIN;
 
     this.dryGain.connect(this.scoreGain);
     this.reverb.connect(this.reverbReturn).connect(this.scoreGain);
     this.delay.connect(this.delayReturn).connect(this.scoreGain);
     this.delay.connect(this.delayFeedback).connect(this.delay);
-    this.scoreGain.connect(this.compressor).connect(destination);
+    this.scoreGain.connect(this.compressor).connect(this.makeup).connect(destination);
 
     this.noiseBuffer = this.createNoiseBuffer(2);
   }
