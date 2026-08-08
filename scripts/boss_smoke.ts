@@ -53,6 +53,8 @@ for (const [index, kind] of kinds.entries()) {
   check(moveEvent, `${def.name}: locomotion director schedules a relocation`);
   check(def.phaseTitles.length === 3 && !!def.introLine && !!def.victoryLine,
     `${def.name}: dramatic copy covers intro, three phases and victory`);
+  check(def.phases.every((phase) => phase.length >= 5),
+    `${def.name}: every phase has at least five distinct abilities`);
 
   const phaseHit = encounter.attack({
     encounterId: encounter.config.encounterId,
@@ -77,29 +79,27 @@ for (const [index, kind] of kinds.entries()) {
   for (let i = 0; i < Math.ceil((ENCOUNTER_PHASE_TRANSITION_SECONDS + 0.75) / 0.25); i++) {
     encounter.tick(0.25, [participant]);
   }
-  check(encounter.hp > hpBeforeHeal && encounter.snapshot().healing.active,
-    `${def.name}: active objectives restore boss health`);
-  check(encounter.objects.filter((object) => object.critical).length === def.criticalCount,
-    `${def.name}: phase two creates every breakable ward`);
+  check(encounter.hp === hpBeforeHeal && !encounter.snapshot().healing.active,
+    `${def.name}: phase two never heals or gates damage behind an objective`);
+  check(encounter.objects.every((object) => !object.critical) &&
+    encounter.snapshot().criticalObjects === 0,
+    `${def.name}: phase two creates no mandatory breakable objects`);
 
   let sequence = 1;
-  for (const object of [...encounter.objects]) {
-    encounter.attack({
-      encounterId: encounter.config.encounterId,
-      sequence: ++sequence,
-      targetId: object.id,
-      source: 'melee',
-      hit: { ...object.position },
-      claimedDamage: object.maxHp,
-    }, participant, {
-      heldSource: 'melee', maxDamage: object.maxHp, range: 30,
-      cadence: 0, now: encounter.now,
-    });
-  }
-  const healedAtBreak = encounter.hp;
-  encounter.tick(1, [participant]);
-  check(encounter.hp <= healedAtBreak + 0.01 && !encounter.snapshot().healing.active,
-    `${def.name}: destroying sources interrupts healing`);
+  const phaseThreeHit = encounter.attack({
+    encounterId: encounter.config.encounterId,
+    sequence: ++sequence,
+    targetId: 0,
+    source: 'melee',
+    hit: { ...encounter.bossPosition },
+    claimedDamage: encounter.maxHp,
+  }, participant, {
+    heldSource: 'melee', maxDamage: encounter.maxHp, range: 30,
+    cadence: 0, now: encounter.now,
+  });
+  check(phaseThreeHit.accepted && encounter.phase === 3 &&
+    Math.abs(encounter.hp - encounter.maxHp * 0.35) < 0.01,
+    `${def.name}: direct boss damage advances phase and cannot skip its final form`);
   for (let i = 0; i < Math.ceil((ENCOUNTER_PHASE_TRANSITION_SECONDS + 0.25) / 0.25); i++) {
     encounter.tick(0.25, [participant]);
   }
@@ -192,8 +192,9 @@ stress.join(99);
 const lateSnapshot = stress.snapshot();
 check(stressSafe, 'six-player maximum-load simulation stays capped and snapshot-bounded');
 check(lateSnapshot.participants.includes(99) && lateSnapshot.seal.sealed &&
-  lateSnapshot.wave.number > 0 && lateSnapshot.healing.sources > 0,
-  'late join snapshot carries the live seal, wave and healing-objective state');
+  lateSnapshot.wave.number > 0 && lateSnapshot.healing.sources === 0 &&
+  lateSnapshot.criticalObjects === 0,
+  'late join snapshot carries the live seal and wave without mandatory objectives');
 
 const resetEncounter = new VaultEncounter({ ...deterministicConfig,
   encounterId: 'reset-seal-test' });
@@ -237,16 +238,15 @@ check(resetEncounter.status === 'idle' && !resetEncounter.snapshot().seal.sealed
     'shotgun sustained damage matches its full pellet spread');
 
   // Clearing budget: every tier, every boss, with each primary weapon. Assumes
-  // half the fight is spent moving, reloading, breaking objectives and waiting
-  // out phase transitions, and that the boss heals its full 35% cap.
-  const UPTIME = 0.5, HEAL_CAP = 1.35, ENRAGE = 360;
+  // substantial downtime for movement, reloading, summons and transitions.
+  const UPTIME = 0.55, ENRAGE = 360;
   const primaries = [Item.Pistol, Item.Rifle, Item.Shotgun, Item.SMG,
     Item.Sniper, Item.BurstRifle, Item.RocketLauncher];
   let hardest = 0, hardestLabel = '';
   let allClearable = true, anyTrivial = false;
   for (const tier of [1, 2, 3] as VaultTier[]) {
     for (const kind of kinds) {
-      const hp = bossMaxHp(tier, kind) * HEAL_CAP;
+      const hp = bossMaxHp(tier, kind);
       // Best weapon must comfortably clear; worst must still be viable.
       const times = primaries.map((id) => hp / (dps(id) * UPTIME));
       const best = Math.min(...times), worst = Math.max(...times);
@@ -264,9 +264,8 @@ check(resetEncounter.status === 'idle' && !resetEncounter.snapshot().seal.sealed
 }
 
 // --- In-fight coaching -------------------------------------------------------
-// A boss that stops taking damage without saying why is the single most common
-// way a player bounces off this content, so the explanation is tested like a
-// mechanic: every boss must own one, and it must change with the fight.
+// Coaching is tested like a mechanic: every phase must explain its threats and
+// an imminent ability must always take priority.
 {
   const base = {
     encounterId: 'coach', tick: 0, time: 100, family: 'crystal' as const,
@@ -285,27 +284,23 @@ check(resetEncounter.status === 'idle' && !resetEncounter.snapshot().seal.sealed
     const def = BOSS_DEFINITIONS[kind];
     check(def.phaseBriefs.length === 3 && def.phaseBriefs.every((b) => b.length > 40),
       `${def.name}: every phase explains itself in plain language`);
-    check(def.objectName.length > 0 && def.objectPlural.length > 0 &&
-      def.wardEffect.length > 0,
-      `${def.name}: its wards are named and their protection is spelled out`);
+    check(def.phases.every((phase) => new Set(phase.map((ability) => ability.name)).size >= 5),
+      `${def.name}: phase ability names are varied and non-repeating`);
   }
-  const warded = encounterCoach({ ...base, criticalObjects: 3 });
-  check(/PRISMS/.test(warded.text) && /QUARTER/i.test(warded.text),
-    'a warded boss tells you to break the wards and why the boss will not die');
+  const active = encounterCoach({ ...base, criticalObjects: 0 });
+  check(active.text === BOSS_DEFINITIONS.crystal_seer.phaseBriefs[1],
+    'an open damage phase explains its ability set instead of a breakable gate');
   const incoming = encounterCoach({
     ...base,
     hazards: [{ id: 1, shape: 'line', origin: { x: 0, y: 0, z: 0 },
       radius: 18, width: 1.4, angle: 0, telegraphAt: 99, executeAt: 101,
       expiresAt: 102, damage: 7, attack: 'Fate Beam', hitParticipants: [] }],
-    criticalObjects: 3,
+    criticalObjects: 0,
   });
   check(/FATE BEAM/.test(incoming.text) && incoming.tone === 'danger',
     'an incoming telegraph outranks every other instruction');
   check(incoming.text.includes(hazardAdvice('line')),
     'the dodge advice matches the hazard shape that is about to land');
-  const exposed = encounterCoach({ ...base, exposedUntil: 3.2 });
-  check(exposed.tone === 'good' && /EXPOSED/.test(exposed.text),
-    'the damage window is called out as the moment to push');
   check(encounterCoach({ ...base, status: 'intro' }).text ===
     BOSS_DEFINITIONS.crystal_seer.phaseBriefs[0],
     'the intro briefs you before the first hit lands');

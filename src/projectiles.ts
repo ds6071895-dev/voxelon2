@@ -98,7 +98,7 @@ export class Projectiles {
       this.despawn(p, true);
       return;
     }
-    // Dungeon wards/summons are authoritative encounter actors rather than
+    // Dungeon props/summons are authoritative encounter actors rather than
     // ordinary local mobs. Let the adapter validate and consume the round.
     if (this.encounterSink?.(
       p.pos, p.gun.damage, p.gun.rocket === true ? 'rocket' : 'bullet',

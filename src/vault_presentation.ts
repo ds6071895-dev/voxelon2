@@ -62,10 +62,8 @@ export function saveAccessibility(settings: AccessibilitySettings): void {
 }
 
 // --- In-fight coaching -------------------------------------------------------
-// A boss fight teaches nothing while it is happening: the health bar stops
-// moving and the player has no way to learn WHY. Everything below turns the
-// authoritative snapshot into one plain-language instruction, so at any instant
-// the HUD can answer "what am I supposed to be doing right now?".
+// Everything below turns the authoritative snapshot into one plain-language
+// instruction, so the HUD can answer "what am I supposed to be doing right now?".
 
 export type CoachTone = 'info' | 'good' | 'warn' | 'danger';
 export interface CoachLine {
@@ -120,26 +118,6 @@ export function encounterCoach(
     return { text: `⚠ ${name} — ${hazardAdvice(soonest.shape)}!`, tone: 'danger' };
   }
 
-  // 2. The wards are the fight. Say which protection is running, by name.
-  if (snapshot.criticalObjects > 0) {
-    const n = snapshot.criticalObjects;
-    const what = n === 1 ? def.objectName : `${n} ${def.objectPlural}`;
-    const healing = snapshot.healing.active
-      ? ` It is HEALING +${snapshot.healing.rate.toFixed(1)}/s.`
-      : '';
-    return {
-      text: `🛡 BREAK THE ${what.toUpperCase()} — ${def.wardEffect}.${healing}`,
-      tone: 'warn',
-    };
-  }
-
-  // 3. Wards down: this is the damage window, and it is short.
-  if (snapshot.exposedUntil > 0) {
-    return {
-      text: `✦ EXPOSED for ${snapshot.exposedUntil.toFixed(1)}s — +35% damage. HIT IT NOW!`,
-      tone: 'good',
-    };
-  }
   if (snapshot.enrage) {
     return { text: '☠ ENRAGED — it hits far harder every second. Kill it or leave.', tone: 'danger' };
   }
@@ -262,13 +240,9 @@ export class VaultBossHUD {
     this.hpText.textContent = `${Math.ceil(snapshot.hp)} / ${snapshot.maxHp}`;
     this.phase.textContent =
       `PHASE ${snapshot.phase}/3 — ${def.phaseTitles[snapshot.phase - 1].toUpperCase()}`;
-    this.poise.textContent = snapshot.healing.active
-      ? `❤ HEALING +${snapshot.healing.rate.toFixed(1)}/s — DESTROY ${snapshot.healing.sources} SOURCE${snapshot.healing.sources === 1 ? '' : 'S'}`
-      : snapshot.exposedUntil > 0
-        ? `✦ EXPOSED ${snapshot.exposedUntil.toFixed(1)}s`
-        : snapshot.criticalObjects > 0
-          ? `🛡 DESTROY ${snapshot.criticalObjects} SOURCE${snapshot.criticalObjects === 1 ? '' : 'S'}`
-          : `POISE ${Math.round(snapshot.poise)}%`;
+    this.poise.textContent = snapshot.enrage
+      ? 'DAMAGE OPEN • MAXIMUM THREAT'
+      : `DAMAGE OPEN • PHASE ${snapshot.phase} PRESSURE`;
     const enrage = snapshot.enrage ? ' • ENRAGED'
       : snapshot.elapsed >= 300 ? ` • ENRAGE ${Math.max(0, Math.ceil(360 - snapshot.elapsed))}s` : '';
     this.details.textContent =

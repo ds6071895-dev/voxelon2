@@ -18,7 +18,7 @@ export const GUIDE_STEPS: GuideStep[] = [
   { id: 'pickaxe', icon: '⛏', text: 'Craft a pickaxe (planks + sticks)' },
   { id: 'stone', icon: '🪨', text: 'Mine some stone' },
   { id: 'gun', icon: '🔫', text: 'Get a gun (iron + redstone → pistol)' },
-  { id: 'bullets', icon: '🔸', text: 'Craft bullets (1 iron + 1 redstone = 8)' },
+  { id: 'bullets', icon: '🔸', text: 'Craft bullets (1 iron + 1 redstone = 24)' },
   { id: 'armor', icon: '🛡', text: 'Craft armor (wood or stone to start)' },
   { id: 'vault', icon: '☠', text: 'Find a vault (check the map — M)' },
   { id: 'loot', icon: '💰', text: 'Slay the Vault Brute + loot its chest' },

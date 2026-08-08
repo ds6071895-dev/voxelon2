@@ -159,7 +159,9 @@ function buildFace(
     const ex = side * 0.125;
     // Chunky two-pixel eye: white outer half, coloured pupil on the inner half.
     addBox(0.14, 0.11, 0.02, white, ex, headY + 0.04, fz);
-    addBox(0.07, 0.11, 0.025, eye, ex - side * 0.035, headY + 0.04, fz - 0.012);
+    // Keep the pupil fully proud of the white instead of intersecting it. Both
+    // use detailMat, so overlapping them can z-fight as the preview rotates.
+    addBox(0.07, 0.11, 0.025, eye, ex - side * 0.035, headY + 0.04, fz - 0.026);
     // Flat relaxed brow in the hair colour.
     addBox(0.14, 0.03, 0.02, hair, ex, headY + 0.125, fz);
     // Rosy cheek dot just outside each eye.

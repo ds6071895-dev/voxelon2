@@ -154,6 +154,23 @@ export class Inventory {
     this.version++;
   }
 
+  /** Fill the held stack from matching stacks in the currently visible slots. */
+  collectMatching(indices: Iterable<number>): void {
+    if (!this.cursor) return;
+    let moved = false;
+    for (const i of indices) {
+      const slot = this.slots[i];
+      if (!slot || slot.id !== this.cursor.id) continue;
+      const take = Math.min(slot.count, maxStack(this.cursor.id) - this.cursor.count);
+      if (take <= 0) break;
+      this.cursor.count += take;
+      slot.count -= take;
+      if (slot.count === 0) this.slots[i] = null;
+      moved = true;
+    }
+    if (moved) this.version++;
+  }
+
   /** Vanilla right click: take half / place one. */
   rightClick(i: number): void {
     const slot = this.slots[i];
@@ -208,6 +225,42 @@ export class Inventory {
     }
     if (left === 0) this.slots[from] = null;
     else slot.count = left;
+    this.version++;
+  }
+
+  /** Compact and sort the open chest. Stacks with identical item metadata are
+   *  combined up to their normal stack limit, then ordered by display name. */
+  sortChest(): void {
+    if (!this.chestOpen) return;
+    const stacks = this.slots
+      .slice(CHEST_START, CHEST_START + CHEST_SIZE)
+      .filter((s): s is ItemStack => s !== null)
+      .sort((a, b) => {
+        const byName = (ITEMS[a.id]?.name ?? '').localeCompare(ITEMS[b.id]?.name ?? '');
+        return byName || a.id - b.id;
+      });
+
+    const compacted: ItemStack[] = [];
+    for (const stack of stacks) {
+      let left = stack.count;
+      const metadata = JSON.stringify({ ...stack, count: 0 });
+      for (const target of compacted) {
+        if (left <= 0) break;
+        if (JSON.stringify({ ...target, count: 0 }) !== metadata) continue;
+        const take = Math.min(left, maxStack(target.id) - target.count);
+        target.count += take;
+        left -= take;
+      }
+      while (left > 0) {
+        const count = Math.min(left, maxStack(stack.id));
+        compacted.push({ ...stack, count });
+        left -= count;
+      }
+    }
+
+    for (let i = 0; i < CHEST_SIZE; i++) {
+      this.slots[CHEST_START + i] = compacted[i] ?? null;
+    }
     this.version++;
   }
 

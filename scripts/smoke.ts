@@ -215,6 +215,18 @@ check('daylight: noon full, midnight moonlit floor, dawn between',
   inv.leftClick(3); inv.shiftClick(3);
   check('shift click moves to main',
     !inv.slots[3] && inv.slots.slice(9, 36).some((s) => s?.id === Block.Dirt));
+  const gather = new Inventory();
+  gather.slots[0] = { id: Block.Dirt, count: 12 };
+  gather.slots[9] = { id: Block.Dirt, count: 30 };
+  gather.slots[10] = { id: Block.Stone, count: 20 };
+  gather.leftClick(0);
+  gather.collectMatching([0, 9, 10]);
+  check('double-click collection fills the held matching stack',
+    gather.cursor?.count === 42 && !gather.slots[9] && gather.slots[10]?.count === 20);
+  gather.slots[11] = { id: Block.Dirt, count: 40 };
+  gather.collectMatching([11]);
+  check('double-click collection respects max stack size',
+    gather.cursor?.count === 64 && gather.slots[11]?.count === 18);
   const full = new Inventory();
   for (let i = 0; i < 36; i++) full.add(Block.Stone, 64);
   check('full inventory rejects other items',
@@ -1165,7 +1177,7 @@ check('furnace smelts ore/sand/log but not removed foods',
   check('rocket launcher recipe',
     matchGrid(cellGrid([[I, I, I], [I, R, I], [I, I, I]]))?.id === Item.RocketLauncher);
   const bulletR = matchGrid(cellGrid([[I, R, null]]));
-  check('bullet recipe yields a stack', bulletR?.id === Item.Bullet && bulletR.count === 8);
+  check('bullet recipe yields 24 rounds', bulletR?.id === Item.Bullet && bulletR.count === 24);
   const rocketR = matchGrid(cellGrid([[null, I, null], [I, R, I], [null, Item.Coal, null]]));
   check('rocket recipe yields two', rocketR?.id === Item.Rocket && rocketR.count === 2);
   check('guns carry a magazine size', (ITEMS[Item.Rifle].gun?.mag ?? 0) === 30);
@@ -2284,6 +2296,96 @@ check('furnace smelts ore/sand/log but not removed foods',
     // The hook has to be chainable or it is a utility, not a movement toy.
     check('the grappling hook cools down fast enough to chain swings',
       GADGETS[Item.GrapplingHook].cooldown <= 1.5);
+  }
+
+  // A hook launch is the fastest the player ever moves, so it is the thing that
+  // finds every hole in collision. Two of them let you leave the world entirely:
+  // geometry appearing around the body, and terrain that has not streamed in.
+  {
+    /** A stub world: `solid` decides blocks, `loaded` decides chunk streaming. */
+    const stub = (
+      solid: (x: number, y: number, z: number) => boolean,
+      loaded: (x: number, z: number) => boolean = () => true,
+    ): World => ({
+      getBlock(x: number, y: number, z: number): number {
+        x = Math.floor(x); y = Math.floor(y); z = Math.floor(z);
+        if (!loaded(x, z)) return Block.Air; // ungenerated reads as air, as in World
+        return solid(x, y, z) ? Block.Stone : Block.Air;
+      },
+      isLoaded(x: number, z: number): boolean {
+        return loaded(Math.floor(x), Math.floor(z));
+      },
+    }) as unknown as World;
+
+    /** Deepest penetration of the player's box into solid geometry (0 = clear). */
+    const inside = (p: Player, w: World): number => {
+      let worst = 0;
+      for (let x = Math.floor(p.pos.x - 0.3); x <= Math.floor(p.pos.x + 0.3); x++)
+        for (let y = Math.floor(p.pos.y); y <= Math.floor(p.pos.y + 1.8); y++)
+          for (let z = Math.floor(p.pos.z - 0.3); z <= Math.floor(p.pos.z + 0.3); z++) {
+            if (!isSolid(w.getBlock(x, y, z))) continue;
+            const ox = Math.min(p.pos.x + 0.3, x + 1) - Math.max(p.pos.x - 0.3, x);
+            const oy = Math.min(p.pos.y + 1.8, y + 1) - Math.max(p.pos.y, y);
+            const oz = Math.min(p.pos.z + 0.3, z + 1) - Math.max(p.pos.z - 0.3, z);
+            if (ox > 0 && oy > 0 && oz > 0) worst = Math.max(worst, Math.min(ox, oy, oz));
+          }
+      return worst;
+    };
+    const idle = { ...IDLE_INPUT } as never;
+
+    // Inside a thick wall (a teleport, a border clamp, a chunk arriving), the
+    // axis resolver used to snap the body to the far face of each box it found:
+    // a block-sized jump with no sweep, which walks you out through the rock.
+    {
+      const w = stub((x, y) => y <= 60 || (x >= 8 && x <= 12 && y <= 66));
+      const p = new Player({ x: 10.5, y: 61, z: 0.5 });
+      for (let i = 0; i < 20; i++) { p.vel.x = 5; p.update(1 / 60, idle, w); }
+      check('a player stuck in rock is pushed clear, never phased out sideways',
+        inside(p, w) < 0.02 && p.pos.y >= 66 && p.pos.x > 8 && p.pos.x < 13);
+    }
+
+    // Blocks closing over a standing player: climb out, do not tunnel.
+    {
+      const w = stub((_x, y) => y <= 60 || (y >= 61 && y <= 62));
+      const p = new Player({ x: 0.5, y: 61, z: 0.5 });
+      for (let i = 0; i < 30; i++) p.update(1 / 60, idle, w);
+      check('a buried player surfaces instead of staying inside the blocks',
+        inside(p, w) < 0.02 && p.pos.y >= 63);
+    }
+
+    // Ungenerated chunks read as air, so a launch that outruns the chunk loader
+    // would fly straight through terrain. Collision treats them as rock.
+    {
+      const w = stub((_x, y) => y <= 66, (x) => x < 16);
+      const p = new Player({ x: 5.5, y: 70, z: 0.5 });
+      p.vel.set(33, 0, 0);
+      p.momentumTime = 2;
+      for (let i = 0; i < 20; i++) p.update(0.05, idle, w);
+      check('a hook launch cannot fly into a chunk that has not streamed in',
+        p.pos.x < 16);
+    }
+
+    // ...but the guard must never brick a player whose OWN chunk is missing,
+    // or arriving anywhere unstreamed (a teleport) would freeze them solid.
+    {
+      const w = stub(() => false, () => false);
+      const p = new Player({ x: 0.5, y: 70, z: 0.5 });
+      for (let i = 0; i < 20; i++) p.update(1 / 60, idle, w);
+      check('unstreamed collision never traps a player in an unloaded chunk',
+        p.pos.y < 70);
+    }
+
+    // The guards must not cost anything in ordinary play.
+    {
+      const w = stub((_x, y) => y <= 60);
+      const fall = new Player({ x: 0.5, y: 80, z: 0.5 });
+      for (let i = 0; i < 200; i++) fall.update(1 / 60, idle, w);
+      const walk = new Player({ x: 0.5, y: 61, z: 0.5 });
+      const fwd = { ...IDLE_INPUT, forward: true } as never;
+      for (let i = 0; i < 120; i++) walk.update(1 / 60, fwd, w);
+      check('normal falling and walking are unchanged by the stuck guard',
+        fall.onGround && Math.abs(fall.pos.y - 61) < 0.01 && Math.abs(walk.pos.z) > 4);
+    }
   }
 
   // AoE falloff: full at the centre, linear, zero at/after the radius.
@@ -3934,11 +4036,12 @@ let firstVault: VaultStamp | null = null;
     ITEMS[Item.Medkit].heal!.interval < ITEMS[Item.Bandage].heal!.interval);
   check('Bandage is craftable (redstone-soaked wrappings)',
     matchGrid(grid([Item.Redstone, Item.Redstone, Item.Stick, null, null, null, null, null, null]))?.id === Item.Bandage);
-  check('Medkit is craftable (iron case + diamond core)',
-    matchGrid(grid([
+  const medkitRecipe = matchGrid(grid([
       null, Item.Redstone, null,
       Item.IronIngot, Item.Diamond, Item.IronIngot,
-      null, Item.Redstone, null]))?.id === Item.Medkit);
+      null, Item.Redstone, null]));
+  check('Medkit recipe yields two kits from one diamond core',
+    medkitRecipe?.id === Item.Medkit && medkitRecipe.count === 2);
 
   // Server: a Medkit heals FAST and ignores the post-damage regen delay.
   const s = new GameServer(1337, mulberry32(211));

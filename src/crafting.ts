@@ -110,7 +110,9 @@ export const RECIPES: Recipe[] = [
   shaped([[I, I, null], [null, R, null]], Item.Pistol),
   shaped([[I, I, I], [null, R, I]], Item.Rifle),
   shaped([[I, I, I], [I, R, I], [I, I, I]], Item.RocketLauncher),
-  shapeless([I, R], Item.Bullet, 8),
+  // One batch covers most of a rifle magazine. Bosses demand sustained fire,
+  // but iron + redstone still keep large stockpiles from being free.
+  shapeless([I, R], Item.Bullet, 24),
   shaped([[null, I, null], [I, R, I], [null, ANY_COAL, null]], Item.Rocket, 2),
   // Arcade guns (distinct roles). Shotgun = iron barrels on a planks stock.
   shaped([[I, I, I], [P, R, null]], Item.Shotgun),
@@ -171,8 +173,8 @@ export const RECIPES: Recipe[] = [
   // Healing consumables (right-click for a burst of fast regeneration).
   // Bandage = cheap minor patch: redstone-soaked wrappings on a stick.
   shapeless([R, R, S], Item.Bandage, 2),
-  // Medkit = a strong field kit: an iron case, a diamond healing core, redstone.
-  shaped([[null, R, null], [I, D, I], [null, R, null]], Item.Medkit),
+  // A diamond healing core supplies two kits, keeping boss healing practical.
+  shaped([[null, R, null], [I, D, I], [null, R, null]], Item.Medkit, 2),
 
   // Traps. Spike Trap = a row of iron spikes on a stone base (batch of 3).
   shaped([[I, I, I], [C, C, C]], Block.SpikeTrap, 3),
@@ -221,16 +223,15 @@ export const RECIPES: Recipe[] = [
   shapeless([Item.SeerPrism, Block.Torch], Block.PrismLamp, 2),
   shapeless([Item.ArtificerGear, Block.Torch], Block.GildedLamp, 2),
 
-  // Greater Runes: the relics' REAL value. Forged from 2 of a matching boss's
-  // relics + the base rune being upgraded + a Diamond — so a Greater Rune
-  // costs at minimum two full boss kills (relics are one-per-haul), not a
-  // single lucky drop. Socket like any rune (runes.ts).
-  shapeless([Item.WardenSigil, Item.WardenSigil, Item.RuneOfIron, D], Item.GreaterRuneOfIron),
-  shapeless([Item.MireBloom, Item.MireBloom, Item.RuneOfSwiftness, D], Item.GreaterRuneOfSwiftness),
-  shapeless([Item.EmberCore, Item.EmberCore, Item.RuneOfFortune, D], Item.GreaterRuneOfFortune),
-  shapeless([Item.SeerPrism, Item.SeerPrism, Item.RuneOfFocus, D], Item.GreaterRuneOfFocus),
-  shapeless([Item.ArtificerGear, Item.ArtificerGear,
-    [Item.RuneOfIron, Item.RuneOfSwiftness, Item.RuneOfFortune, Item.RuneOfFocus], D], Item.GreaterRuneOfPower),
+  // Greater Runes: arranged as a 2×2 seal instead of a shapeless four-item
+  // row. That keeps the recipe preview honest and lets it fit the personal
+  // crafting grid as well as a crafting table.
+  shaped([[Item.WardenSigil, Item.WardenSigil], [Item.RuneOfIron, D]], Item.GreaterRuneOfIron),
+  shaped([[Item.MireBloom, Item.MireBloom], [Item.RuneOfSwiftness, D]], Item.GreaterRuneOfSwiftness),
+  shaped([[Item.EmberCore, Item.EmberCore], [Item.RuneOfFortune, D]], Item.GreaterRuneOfFortune),
+  shaped([[Item.SeerPrism, Item.SeerPrism], [Item.RuneOfFocus, D]], Item.GreaterRuneOfFocus),
+  shaped([[Item.ArtificerGear, Item.ArtificerGear],
+    [[Item.RuneOfIron, Item.RuneOfSwiftness, Item.RuneOfFortune, Item.RuneOfFocus], D]], Item.GreaterRuneOfPower),
 
   // Building set (M15): per-wood slabs + stairs.
   ...woodCraft(OAK, Block.OakSlab, Block.OakStairsN),

@@ -199,6 +199,10 @@ export class Interaction {
     // suppressUse (e.g. aiming a gun down sights) blocks right-click placing AND
     // container/helm use, so right-click is free to mean "zoom" instead.
     const opened = suppressUse ? false : this.tryOpenContainer(input);
+    const equipped = !opened && !suppressUse && input.rightClicked
+      ? this.inventory.tryEquipArmor(this.inventory.selected)
+      : false;
+    if (equipped) this.onAction?.();
     const targetId = this.target
       ? this.world.getBlock(this.target.x, this.target.y, this.target.z) : Block.Air;
     if (isEntityBlock(targetId)) {
@@ -208,10 +212,10 @@ export class Interaction {
         this.onAction?.();
       }
       this.breakKey = ''; this.breakProgress = 0; this.crackMesh.visible = false;
-      if (!opened && !suppressUse) this.updatePlacing(dt, input, origin, dir);
+      if (!opened && !equipped && !suppressUse) this.updatePlacing(dt, input, origin, dir);
     } else {
       this.updateBreaking(dt, input, suppressMining);
-      if (!opened && !suppressUse) this.updatePlacing(dt, input, origin, dir);
+      if (!opened && !equipped && !suppressUse) this.updatePlacing(dt, input, origin, dir);
     }
 
     // Middle-click pick block: select the matching hotbar slot.

@@ -401,6 +401,9 @@ ropeGroup.visible = false;
 scene.add(ropeGroup);
 const ropeA = new THREE.Vector3();
 const ropeB = new THREE.Vector3();
+const ropeCastDir = new THREE.Vector3();
+const ropeCastFrom = new THREE.Vector3();
+const ropeChest = new THREE.Vector3();
 const ropeDir = new THREE.Vector3();
 const ropeUp = new THREE.Vector3(0, 1, 0);
 /** Lay the rope from the hand to `to`, sagging by `sag` blocks at its middle. */
@@ -434,11 +437,11 @@ function drawRope(to: THREE.Vector3, sag: number): void {
  *  unlucky frame, through) whatever is in the way. Torches, plants and other
  *  pass-through blocks are stepped over: they are not walls. */
 function ropeBlocked(from: THREE.Vector3, to: THREE.Vector3): boolean {
-  const dir = new THREE.Vector3().subVectors(to, from);
+  const dir = ropeCastDir.subVectors(to, from);
   const span = dir.length();
   if (span < ROPE_CLEARANCE * 2) return false;
   dir.divideScalar(span);
-  const org = from.clone();
+  const org = ropeCastFrom.copy(from);
   let travelled = 0;
   // The anchor sits just off a surface, so stop short of it: the block the hook
   // is biting must never count as the thing blocking its own rope.
@@ -547,7 +550,7 @@ function updateGrapple(dt: number): void {
   // case that matters most — a swing that carries you behind a corner while the
   // winch is still pulling at full strength. A brief grace keeps a rope that
   // merely clips a corner for one frame from snapping mid-swing.
-  ropeCutTime = ropeBlocked(new THREE.Vector3(cx, cy, cz), grappleAnchor)
+  ropeCutTime = ropeBlocked(ropeChest.set(cx, cy, cz), grappleAnchor)
     ? ropeCutTime + dt : 0;
   if (ropeCutTime > ROPE_CUT_GRACE) { endGrapple(true); return; }
 
@@ -747,6 +750,7 @@ mapBtn.addEventListener('click', () => {
   if (player.dead) return;
   if (worldMap.open) { worldMap.hide(); input.lock(); return; }
   if (invUI.open) invUI.hide();
+  prepareWorldMap();
   worldMap.show(); // pointer is already unlocked when a DOM button is clickable
 });
 app.appendChild(mapBtn);
@@ -1405,12 +1409,13 @@ function onAuthSuccess(username: string): void {
   // password is never stored).
   try { localStorage.setItem('voxelon.lastUser', username); } catch { /* ignore */ }
   discoveredVaults = null; // vault discoveries are per-account — reload lazily
-  refreshVaultMap();
-  refreshStructureMap();
   loadCosmetics(username); // per-account avatar look (Character screen)
   held.setSkin(skinSeed(username), myCosmetics); // first-person hand matches avatar
+  overlay.classList.add('authenticated');
+  titleCharacterPreview.setCosmetics(myCosmetics);
   authEl.style.display = 'none';
   menuBtns.style.display = 'flex'; // Civilization / Character / Controls appear once logged in
+  playBtn.removeAttribute('disabled');
   menuUser.textContent = username;
   authErr.textContent = '';
   authStatus.textContent = '';
@@ -1436,6 +1441,22 @@ function saveSession(u: string, t: string): void {
 }
 function clearSession(): void {
   try { localStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
+}
+function previewSession(username: string): void {
+  overlay.classList.add('authenticated');
+  authEl.style.display = 'none';
+  menuBtns.style.display = 'flex';
+  menuUser.textContent = username;
+  playBtn.setAttribute('disabled', '');
+}
+function showSessionFailure(error: string): void {
+  overlay.classList.remove('authenticated');
+  sessionPending = false;
+  menuBtns.style.display = 'none';
+  authEl.style.display = '';
+  playBtn.removeAttribute('disabled');
+  authStatus.textContent = '';
+  authErr.textContent = error;
 }
 // If the token beats the welcome over the wire, hold it until the username is
 // known — a dropped token here would silently log the player out next visit.
@@ -1475,23 +1496,19 @@ function attemptSessionAuth(sess: { u: string; t: string }, retries = 12): void 
   if (authed) return;
   if (net.socketOpen) {
     sessionPending = true;
-    authStatus.textContent = `Resuming session as ${sess.u}…`;
     net.sendSession(sess.u, sess.t);
   } else if (net.offline) {
     const res = localAccounts.sessionLogin(sess.u, sess.t);
     if (!res.ok || !res.account) {
       clearSession();
-      authStatus.textContent = '';
-      authErr.textContent = 'Session expired — please log in again.';
+      showSessionFailure('Session expired — please log in again.');
       return;
     }
     finishOfflineAuth(res.account, false);
   } else if (retries > 0) {
-    authStatus.textContent = 'Connecting…';
     setTimeout(() => attemptSessionAuth(sess, retries - 1), 350);
   } else {
-    authStatus.textContent = '';
-    authErr.textContent = 'Could not reach the server. Try again.';
+    showSessionFailure('Could not reach the server. Try again.');
   }
 }
 
@@ -1647,15 +1664,14 @@ net.onAuthErr = (error, lockMs, permanent) => {
   if (lockMs !== undefined && lockMs > 0) showElimination(lockMs, permanent === true);
   authStatus.textContent = '';
   if (sessionPending) {
-    sessionPending = false;
     // Only a REAL token rejection invalidates the saved session. Transient
     // refusals (attempt throttle, elimination countdown, a hiccup) keep the
     // token so the next visit still resumes without a password.
     if (/session expired|authentication failed/i.test(error)) {
       clearSession();
-      authErr.textContent = 'Session expired — please log in again.';
+      showSessionFailure('Session expired — please log in again.');
     } else {
-      authErr.textContent = error;
+      showSessionFailure(error);
     }
     return;
   }
@@ -1669,7 +1685,10 @@ setAuthMode(lastUser ? 'login' : 'register');
 // the server is reachable; a stale token falls back to the login form).
 {
   const sess = loadSession();
-  if (sess) attemptSessionAuth(sess);
+  if (sess) {
+    previewSession(sess.u);
+    attemptSessionAuth(sess);
+  }
 }
 // Log Out (title menu): forget the saved session + reload back to the form.
 document.getElementById('logout-btn')!.addEventListener('click', () => {
@@ -1851,7 +1870,7 @@ controlsBtn.addEventListener('click', () => {
 });
 
 // --- CHARACTER: customise your avatar (skin, hair, hats, capes, face…) --------
-// Opens from the title menu. A live rotating 3D preview of the same avatar
+// Opens from the title menu. A live draggable 3D preview of the same avatar
 // model other players see, plus ‹ › cyclers for every cosmetic category.
 // Saved per-account: localStorage always, plus the server (which sanitizes,
 // persists to the account and broadcasts) when online.
@@ -1880,6 +1899,7 @@ function saveCosmetics(): void {
     localStorage.setItem(cosmeticsKey(authedName), JSON.stringify(myCosmetics));
   } catch { /* ignore */ }
   held.setSkin(skinSeed(authedName), myCosmetics);
+  titleCharacterPreview.setCosmetics(myCosmetics);
   if (net.connected) net.sendCosmetics(myCosmetics);
 }
 
@@ -1899,6 +1919,58 @@ const CHAR_OPTIONS: { key: keyof Cosmetics; label: string; names: string[];
   { key: 'capeColor', label: 'Cape Colour', names: CAPE_COLORS.map((s) => s.name), swatches: CAPE_COLORS },
   { key: 'face', label: 'Face', names: FACE_ACCESSORIES },
 ];
+
+const titleCharacterPreview = (() => {
+  const host = document.getElementById('title-character-preview')!;
+  const previewRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  previewRenderer.setClearColor(0x000000, 0);
+  previewRenderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+  host.appendChild(previewRenderer.domElement);
+  const previewScene = new THREE.Scene();
+  const previewCam = new THREE.PerspectiveCamera(36, 1, 0.1, 20);
+  previewCam.position.set(0, 1.15, 3.25);
+  previewCam.lookAt(0, 1.02, 0);
+  let body: AvatarBody | null = null;
+  let pointerX = 0;
+  let pointerY = 0;
+
+  const resize = (): void => {
+    const width = Math.max(1, host.clientWidth);
+    const height = Math.max(1, host.clientHeight);
+    previewRenderer.setSize(width, height, false);
+    previewCam.aspect = width / height;
+    previewCam.updateProjectionMatrix();
+  };
+  host.addEventListener('pointermove', (e) => {
+    const rect = host.getBoundingClientRect();
+    pointerX = ((e.clientX - rect.left) / rect.width - 0.5) * 2;
+    pointerY = ((e.clientY - rect.top) / rect.height - 0.5) * 2;
+  });
+  host.addEventListener('pointerleave', () => { pointerX = 0; pointerY = 0; });
+  new ResizeObserver(resize).observe(host);
+
+  const animate = (): void => {
+    requestAnimationFrame(animate);
+    if (body) {
+      body.head.rotation.y += (pointerX * 0.55 - body.head.rotation.y) * 0.12;
+      body.head.rotation.x += (pointerY * 0.3 - body.head.rotation.x) * 0.12;
+    }
+    if (screen === 'title' && authed) previewRenderer.render(previewScene, previewCam);
+  };
+  animate();
+
+  return {
+    setCosmetics(cosmetics: Cosmetics): void {
+      if (body) { previewScene.remove(body.group); disposeAvatarBody(body); }
+      body = buildAvatarBody({ ...cosmetics });
+      body.group.rotation.y = Math.PI;
+      body.parts[2].rotation.x = -0.08;
+      body.parts[3].rotation.x = 0.08;
+      previewScene.add(body.group);
+      resize();
+    },
+  };
+})();
 
 const charUI = (() => {
   // Daylight palette, same as the title screen this opens from.
@@ -1922,7 +1994,7 @@ const charUI = (() => {
   const previewWrap = document.createElement('div');
   previewWrap.style.cssText = 'width:280px;height:400px;border-radius:16px;overflow:hidden;' +
     'background:linear-gradient(180deg,#eaf1f8,#fdfbf7);border:1px solid rgba(15,26,36,.13);' +
-    'box-shadow:0 22px 48px rgba(15,26,36,.14);';
+    'box-shadow:0 22px 48px rgba(15,26,36,.14);cursor:grab;touch-action:none;';
   cols.appendChild(previewWrap);
 
   // Right: one ‹ value › cycler row per cosmetic category.
@@ -1939,7 +2011,28 @@ const charUI = (() => {
   let previewBody: AvatarBody | null = null;
   let previewSpin = 0.6;
   let previewRAF = 0;
-  let lastFrame = 0;
+  let dragPointer: number | null = null;
+  let dragX = 0;
+
+  previewWrap.addEventListener('pointerdown', (e) => {
+    dragPointer = e.pointerId;
+    dragX = e.clientX;
+    previewWrap.setPointerCapture(e.pointerId);
+    previewWrap.style.cursor = 'grabbing';
+  });
+  previewWrap.addEventListener('pointermove', (e) => {
+    if (dragPointer !== e.pointerId) return;
+    previewSpin += (e.clientX - dragX) * 0.012;
+    dragX = e.clientX;
+    if (previewBody) previewBody.group.rotation.y = previewSpin;
+  });
+  const stopDragging = (e: PointerEvent): void => {
+    if (dragPointer !== e.pointerId) return;
+    dragPointer = null;
+    previewWrap.style.cursor = 'grab';
+  };
+  previewWrap.addEventListener('pointerup', stopDragging);
+  previewWrap.addEventListener('pointercancel', stopDragging);
 
   function rebuildPreview(): void {
     if (!previewScene) return;
@@ -2043,13 +2136,9 @@ const charUI = (() => {
   panel.appendChild(btnRow);
   app.appendChild(panel);
 
-  function animatePreview(now: number): void {
+  function animatePreview(): void {
     previewRAF = requestAnimationFrame(animatePreview);
-    const dt = Math.min(0.05, (now - lastFrame) / 1000 || 0);
-    lastFrame = now;
     if (!previewRenderer || !previewScene || !previewCam) return;
-    previewSpin += dt * 0.7; // slow turntable
-    if (previewBody) previewBody.group.rotation.y = previewSpin;
     previewRenderer.render(previewScene, previewCam);
   }
 
@@ -2068,7 +2157,6 @@ const charUI = (() => {
     refreshRows();
     rebuildPreview();
     panel.style.display = 'flex';
-    lastFrame = performance.now();
     previewRAF = requestAnimationFrame(animatePreview);
   }
   function close(): void {
@@ -3133,6 +3221,11 @@ function refreshVaultMap(): void {
     marks.push({ x: v.x, z: v.z, tier: v.tier, discovered: false, cleared: false });
   }
   worldMap.setVaults(marks, totalVaults());
+}
+
+function prepareWorldMap(): void {
+  refreshVaultMap();
+  refreshStructureMap();
 }
 
 function discoverVault(v: VaultStamp): void {
@@ -4519,6 +4612,7 @@ function toggleMap(): void {
     input.lock();
   } else if (input.locked) {
     if (invUI.open) invUI.hide();
+    prepareWorldMap();
     worldMap.show();
     input.unlock();
   }

@@ -17,6 +17,32 @@ export interface FieldGuideSection {
   entries: FieldGuideEntry[];
 }
 
+type GuideIcon = 'start' | 'target' | 'controls' | 'pickaxe' | 'flag' | 'building' |
+  'vault' | 'skull' | 'weapon' | 'heart' | 'machine' | 'travel' | 'team' |
+  'help' | 'tip' | 'warning';
+
+const ICON_PATHS: Record<GuideIcon, string> = {
+  start: '<path d="m12 2 2.7 7.3L22 12l-7.3 2.7L12 22l-2.7-7.3L2 12l7.3-2.7L12 2Z"/>',
+  target: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
+  controls: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 9h2m2 0h2m2 0h2M7 13h2m2 0h6M7 16h10"/>',
+  pickaxe: '<path d="m14 5 5 5M5 19 16 8M9 4c4-2 8-1 11 2l-3 3c-2-2-5-3-8-2L9 4Z"/>',
+  flag: '<path d="M5 22V3m0 2h11l-2 4 2 4H5"/>',
+  building: '<path d="M3 21h18M5 21V8l7-4 7 4v13M9 21v-5h6v5M8 10h2m4 0h2"/>',
+  vault: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="12" cy="12" r="4"/><path d="M12 8v4l3 2M3 8h2m14 0h2M3 16h2m14 0h2"/>',
+  skull: '<path d="M5 11a7 7 0 1 1 14 0c0 3-1 5-3 6v3H8v-3c-2-1-3-3-3-6Z"/><circle cx="9" cy="11" r="1"/><circle cx="15" cy="11" r="1"/><path d="m10 16 2-2 2 2m-4 4v-2m4 2v-2"/>',
+  weapon: '<path d="M3 13h11l4-4h3v6h-4l-2 2h-4l-2 4H6l1-6H3v-2Zm4 0V9h4v4"/>',
+  heart: '<path d="M20.8 5.7a5.5 5.5 0 0 0-7.8 0L12 6.8l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 22l8.8-8.5a5.5 5.5 0 0 0 0-7.8Z"/>',
+  machine: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M4.9 4.9 7 7m10 10 2.1 2.1m0-14.2L17 7M7 17l-2.1 2.1"/>',
+  travel: '<path d="m21 3-7 18-3-8-8-3 18-7Z"/>',
+  team: '<circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2"/><path d="M3 20c0-4 2-7 6-7s6 3 6 7m0-6c4 0 6 2 6 6"/>',
+  help: '<circle cx="12" cy="12" r="9"/><path d="M9.8 9a2.4 2.4 0 1 1 3.5 2.1c-.8.5-1.3 1-1.3 2.4M12 17h.01"/>',
+  tip: '<path d="M9 18h6m-5 3h4M8.5 15.5A7 7 0 1 1 15.5 15.5c-.8.6-1 1.3-1 2.5h-5c0-1.2-.2-1.9-1-2.5Z"/>',
+  warning: '<path d="M12 3 2.5 20h19L12 3Z"/><path d="M12 9v5m0 3h.01"/>',
+};
+
+const icon = (name: GuideIcon, label?: string): string =>
+  `<svg class="field-guide-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"${label ? ` role="img" aria-label="${esc(label)}"` : ' aria-hidden="true"'}>${ICON_PATHS[name]}</svg>`;
+
 export interface FieldGuideController {
   readonly open: boolean;
   show(): void;
@@ -39,8 +65,8 @@ const esc = (value: string): string => value.replace(/[&<>"']/g, (ch) => ({
 
 const list = (items: string[]): string => `<ul>${items.map((item) => `<li>${item}</li>`).join('')}</ul>`;
 const steps = (items: string[]): string => `<ol class="field-guide-steps">${items.map((item) => `<li>${item}</li>`).join('')}</ol>`;
-const tip = (title: string, body: string): string => `<aside class="field-guide-callout tip"><strong>${title}</strong><p>${body}</p></aside>`;
-const warning = (title: string, body: string): string => `<aside class="field-guide-callout warning"><strong>${title}</strong><p>${body}</p></aside>`;
+const tip = (title: string, body: string): string => `<aside class="field-guide-callout tip">${icon('tip')}<strong>${title}</strong><p>${body}</p></aside>`;
+const warning = (title: string, body: string): string => `<aside class="field-guide-callout warning">${icon('warning')}<strong>${title}</strong><p>${body}</p></aside>`;
 const table = (headers: string[], rows: string[][]): string => `<div class="field-guide-table-wrap"><table><thead><tr>${headers.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
 const entry = (id: string, title: string, keywords: string[], html: string): FieldGuideEntry => ({ id, title, keywords, html });
 
@@ -77,16 +103,16 @@ function bossName(index: number, fallback: string): string {
 
 export function fieldGuideSections(): FieldGuideSection[] {
   const bosses = [
-    [bossName(0, 'Bone Warden'), 'Sarcophagi', 'Damage resistance, cleaves, and summons', 'Sustained rifle or SMG', 'Destroy sarcophagi during objective phases and clear adds before they overwhelm the arena.'],
-    [bossName(1, 'Mire Queen'), 'Brood pools', 'Poison rain and ranged summons', 'Mobile automatic weapon', 'Keep moving, destroy brood pools early, and prioritize spitters.'],
-    [bossName(2, 'Ember Colossus'), 'Braziers', 'Heavy area attacks and charges', 'Strong sustained ranged DPS', 'Break braziers and save burst damage for exposed windows.'],
-    [bossName(3, 'Crystal Seer'), 'Prisms', 'Extreme damage reduction and beams', 'Accurate ranged weapon', 'Destroy every prism, move laterally, and control mirror summons.'],
-    [bossName(4, 'Gilded Artificer'), 'Turrets', 'Healing machines, mines, and guards', 'High sustained DPS', 'Destroy both turrets quickly and avoid mine and crusher-wall lanes.'],
+    [bossName(0, 'Bone Warden'), 'Death marches', 'Cleaves, shockwaves, and undead armies', 'Sustained rifle or SMG', 'Keep damaging the Warden, cross expanding rings, and clear adds before they overwhelm the arena.'],
+    [bossName(1, 'Mire Queen'), 'Drowning court', 'Poison rain, tidal lanes, and ranged summons', 'Mobile automatic weapon', 'Keep moving and firing, read the safe floor quarters, and prioritize spitters.'],
+    [bossName(2, 'Ember Colossus'), 'Worldfire', 'Meteor storms, flame rings, and charges', 'Strong sustained ranged DPS', 'Maintain pressure while crossing shockwaves and leaving each burning floor quarter.'],
+    [bossName(3, 'Crystal Seer'), 'Final prophecy', 'Crossing beams, shard rain, and mirror echoes', 'Accurate ranged weapon', 'Move laterally through beam fans, keep damaging the Seer, and control mirror summons.'],
+    [bossName(4, 'Gilded Artificer'), 'Total lockdown', 'Crusher lanes, mines, guards, and suppression fire', 'High sustained DPS', 'Keep firing while avoiding mine, ricochet, coin-storm, and crusher-wall lanes.'],
   ];
 
   return [
     {
-      id: 'start', title: 'Start Here', icon: '◆', summary: 'Your first ten minutes and the safest route into the war.', entries: [
+      id: 'start', title: 'Start Here', icon: icon('start'), summary: 'Your first ten minutes and the safest route into the war.', entries: [
         entry('first-ten', 'Your first ten minutes', ['beginner', 'wood', 'iron', 'starter', 'first vault'],
           steps(['Gather wood and craft planks.', 'Build a workbench and basic tools.', 'Mine stone and coal; craft torches.', 'Find iron and upgrade tools and armor.', 'Carry bandages and obtain a ranged weapon.', 'Identify your faction base and flag.', 'Prepare for a Tier I vault.']) +
           tip('Starter route', 'Gather → Craft → Gear Up → Find Your Faction → Prepare for a Tier I Vault.')),
@@ -96,14 +122,14 @@ export function fieldGuideSections(): FieldGuideSection[] {
       ],
     },
     {
-      id: 'objective', title: 'Main Objective', icon: '◎', summary: 'How survival, progression, factions, vaults, and warfare connect.', entries: [
+      id: 'objective', title: 'Main Objective', icon: icon('target'), summary: 'How survival, progression, factions, vaults, and warfare connect.', entries: [
         entry('game-loop', 'What am I trying to do?', ['objective', 'gameplay loop', 'season', 'faction'],
           `<p>Survive, improve your equipment, strengthen your faction, defend your flag, raid enemy infrastructure, clear vaults, defeat bosses, and turn rare loot into lasting strategic power.</p>` +
           tip('Core loop', 'Gather → Build → Gear Up → Explore → Clear Vaults → Defend Flag → Raid Enemies → Strengthen Faction.')),
       ],
     },
     {
-      id: 'controls', title: 'Controls', icon: '⌨', summary: 'Desktop and mobile controls, plus contextual behavior.', entries: [
+      id: 'controls', title: 'Controls', icon: icon('controls'), summary: 'Desktop and mobile controls, plus contextual behavior.', entries: [
         entry('desktop-controls', 'Desktop controls', ['keyboard', 'mouse', 'wasd', 'reload', 'inventory'],
           table(['Action', 'Binding'], [['Move', 'W A S D'], ['Jump / glide', 'Space'], ['Sprint', 'Q or double-tap W'], ['Sneak', 'Shift'], ['Attack / mine', 'Left click'], ['Place / use / aim', 'Right click'], ['Inventory', 'E'], ['Map', 'M'], ['Progress', 'G'], ['Reload', 'R'], ['Pause', 'Esc']]) +
           tip('Context matters', 'Left click may hit an enemy before the block behind it. Right click changes behavior based on the held item.')),
@@ -112,7 +138,7 @@ export function fieldGuideSections(): FieldGuideSection[] {
       ],
     },
     {
-      id: 'survival', title: 'Survival & Progression', icon: '⛏', summary: 'Resources, tools, armor, runes, and healing.', entries: [
+      id: 'survival', title: 'Survival & Progression', icon: icon('pickaxe'), summary: 'Resources, tools, armor, runes, and healing.', entries: [
         entry('resource-progression', 'Resource and armor progression', ['wood', 'stone', 'iron', 'diamond', 'titanium', 'cobalt', 'armor'],
           table(['Stage', 'Practical role'], [['Wood', 'Emergency tools and starter protection'], ['Stone', 'Early mining and Tier I preparation'], ['Iron', 'Reliable Tier I and entry Tier II gear'], ['Diamond', 'Strong Tier II and possible Tier III gear'], ['Titanium', 'Safest high-tier combat armor'], ['Cobalt / oil / crystal', 'Advanced machines, warfare, and specialist crafting']]) +
           tip('Armor systems', 'Armor has durability, gains levels through use, accepts runes, and is subject to a damage-reduction cap.')),
@@ -122,7 +148,7 @@ export function fieldGuideSections(): FieldGuideSection[] {
       ],
     },
     {
-      id: 'factions', title: 'Factions & Flags', icon: '⚑', summary: 'The central strategic objective of the season.', entries: [
+      id: 'factions', title: 'Factions & Flags', icon: icon('flag'), summary: 'The central strategic objective of the season.', entries: [
         entry('flag-defense', 'Protecting the faction flag', ['flag', 'defense', 'fortress', 'faction'],
           steps(['Create an outer warning zone with lighting and clear sightlines.', 'Build a delay zone with wire, tar, bear traps, barricades, and narrow approaches.', 'Layer a damage zone with spikes, mines, turrets, wall traps, and fall traps.', 'Reinforce the inner flag room with controlled entrances, defender cover, and an escape route.']) +
           warning('Do not trap your own team', 'Keep friendly routes open, split supplies across multiple caches, and repair walls and traps after every attack.')),
@@ -131,7 +157,7 @@ export function fieldGuideSections(): FieldGuideSection[] {
       ],
     },
     {
-      id: 'defenses', title: 'Building & Defenses', icon: '▦', summary: 'Layered bases, traps, and defensive infrastructure.', entries: [
+      id: 'defenses', title: 'Building & Defenses', icon: icon('building'), summary: 'Layered bases, traps, and defensive infrastructure.', entries: [
         entry('building-principles', 'Base design principles', ['building', 'walls', 'storage', 'outpost'],
           list(['Use layered walls rather than one monolithic wall.', 'Keep storage and industry away from the flag room.', 'Create controlled firing angles and more than one exit.', 'Use height for observation and protect machines.', 'Maintain safe respawn, recovery, and supply routes.'])),
         entry('traps', 'Trap combinations', ['bear trap', 'tar', 'barbed wire', 'spike', 'landmine', 'lever'],
@@ -140,7 +166,7 @@ export function fieldGuideSections(): FieldGuideSection[] {
       ],
     },
     {
-      id: 'vaults', title: 'Vaults & Dungeons', icon: '◇', summary: 'Vault tiers, room types, preparation, and loot flow.', entries: [
+      id: 'vaults', title: 'Vaults & Dungeons', icon: icon('vault'), summary: 'Vault tiers, room types, preparation, and loot flow.', entries: [
         entry('vault-tiers', 'Vault tiers', ['tier i', 'tier ii', 'tier iii', 'wilds', 'vault'],
           table(['Tier', 'Location and expectation'], [['I', 'Closer to the core; introduction to vault combat and starter rare loot'], ['II', 'Farther into the Wilds; stronger enemies and sustained-damage checks'], ['III', 'Deep Wilds; highest health and damage, strongest rewards, teams recommended']]) +
           tip('Vault flow', 'Explore rooms → reach boss arena → complete mechanics → defeat boss → loot the personal chest during its open window.')),
@@ -149,7 +175,7 @@ export function fieldGuideSections(): FieldGuideSection[] {
       ],
     },
     {
-      id: 'bosses', title: 'Bosses', icon: '☠', summary: 'Objective priorities and suggested gear for every vault boss.', entries: [
+      id: 'bosses', title: 'Bosses', icon: icon('skull'), summary: 'Objective priorities and suggested gear for every vault boss.', entries: [
         entry('boss-comparison', 'Boss comparison', ['boss', 'warden', 'queen', 'colossus', 'seer', 'artificer'],
           table(['Boss', 'Priority target', 'Main danger', 'Weapon style'], bosses.map((b) => b.slice(0, 4))) +
           `<div class="field-guide-boss-grid">${bosses.map((b) => `<section class="field-guide-boss"><h3>${esc(b[0])}</h3><p><strong>Priority:</strong> ${b[1]}. ${b[4]}</p></section>`).join('')}</div>`),
@@ -184,35 +210,35 @@ export function fieldGuideSections(): FieldGuideSection[] {
       ],
     },
     {
-      id: 'gear', title: 'Weapons & Gear', icon: '⌁', summary: 'Live registry-backed weapon and gadget reference.', entries: [
+      id: 'gear', title: 'Weapons & Gear', icon: icon('weapon'), summary: 'Live registry-backed weapon and gadget reference.', entries: [
         entry('weapon-reference', 'Weapon and gadget reference', ['weapon', 'gun', 'gadget', 'range', 'damage'],
           table(['Equipment', 'Role / damage', 'Range', 'Live stat'], weaponRows()) +
           tip('Source of truth', 'Names and numeric weapon statistics on this page are generated from the current item registry.')),
       ],
     },
     {
-      id: 'hearts', title: 'Hearts & Elimination', icon: '♥', summary: 'Maximum health, PvP transfer, elimination, and revival.', entries: [
+      id: 'hearts', title: 'Hearts & Elimination', icon: icon('heart'), summary: 'Maximum health, PvP transfer, elimination, and revival.', entries: [
         entry('heart-system', 'How Hearts work', ['heart', 'lifesteal', 'elimination', 'revival beacon'],
           list(['Each Heart increases maximum health.', 'PvP can transfer Hearts between players.', 'Reaching zero Hearts causes elimination.', 'Revival rules and duration depend on faction flag control and beacon availability.', 'Heart withdrawals are restricted so players cannot bypass the survival floor.']) +
           warning('Protect rare recovery items', 'Do not carry spare Hearts or revival items into unnecessary fights unless your team has a recovery plan.')),
       ],
     },
     {
-      id: 'machines', title: 'Machines & Automation', icon: '⚙', summary: 'Production, ownership, fuel, ammunition, upgrades, and safety.', entries: [
+      id: 'machines', title: 'Machines & Automation', icon: icon('machine'), summary: 'Production, ownership, fuel, ammunition, upgrades, and safety.', entries: [
         entry('machine-workflow', 'Recommended machine workflow', ['autominer', 'oil derrick', 'turret', 'machine', 'automation'],
           steps(['Secure the area.', 'Place and claim the machine.', 'Configure its filter or loadout.', 'Protect it with walls and lighting.', 'Check storage, fuel, and ammunition regularly.', 'Upgrade only after the site is defensible.']) +
           tip('Separation', 'Do not cluster all machines, storage, and the faction flag into one easy raid target.')),
       ],
     },
     {
-      id: 'travel', title: 'Travel & Exploration', icon: '➤', summary: 'Maps, compasses, waypoints, mobility, and long journeys.', entries: [
+      id: 'travel', title: 'Travel & Exploration', icon: icon('travel'), summary: 'Maps, compasses, waypoints, mobility, and long journeys.', entries: [
         entry('travel-tools', 'Exploration toolkit', ['map', 'vault compass', 'waypoint', 'boat', 'glider', 'grappling hook'],
           table(['Tool', 'Use'], [['World map', 'Read territory, structures, and travel routes'], ['Vault Compass', 'Reveal a vault of the matching tier'], ['Waypoint Totem', 'Mark a destination'], ['Respawn Beacon', 'Create a recovery point'], ['Boat / Glider', 'Cross water or descend quickly'], ['Grappling Hook / Jump Boost', 'Reach vertical or exposed terrain']]) +
           warning('Long journeys', 'Carry healing, ammunition, food or recovery supplies, and leave valuables in a protected cache before entering the deep Wilds.')),
       ],
     },
     {
-      id: 'teamplay', title: 'Multiplayer & Team Play', icon: '◈', summary: 'Roles, boss coordination, and flag-war discipline.', entries: [
+      id: 'teamplay', title: 'Multiplayer & Team Play', icon: icon('team'), summary: 'Roles, boss coordination, and flag-war discipline.', entries: [
         entry('team-roles', 'Useful team roles', ['scout', 'builder', 'defender', 'healer', 'raid leader'],
           list(['Scout and route finder', 'Builder and repair specialist', 'Flag defender', 'Miner and machine operator', 'Boss damage dealer', 'Objective clearer', 'Healing and revive carrier', 'Raid leader'])) ,
         entry('group-tactics', 'Group tactics', ['team', 'boss group', 'rally point', 'revive'],
@@ -220,7 +246,7 @@ export function fieldGuideSections(): FieldGuideSection[] {
       ],
     },
     {
-      id: 'quick', title: 'Quick Reference', icon: '?', summary: 'Fast answers for common high-risk situations.', entries: [
+      id: 'quick', title: 'Quick Reference', icon: icon('help'), summary: 'Fast answers for common high-risk situations.', entries: [
         entry('quick-reference', 'Field checklist', ['quick reference', 'tips'],
           table(['Situation', 'Immediate action'], [['Entering a vault', 'Repair armor, clear inventory space, bring healing and ammo'], ['Boss becomes resistant', 'Find and destroy the arena objective'], ['Flag alarm', 'Call location, close routes, protect supplies'], ['Raiding', 'Scout, bring cover, plan escape'], ['Machine site', 'Claim, configure, light, wall, and resupply'], ['Lost in Wilds', 'Use map/waypoint tools and establish a safe cache']]))
       ],
@@ -244,7 +270,7 @@ export function createFieldGuide(options: FieldGuideOptions): FieldGuideControll
         <label class="field-guide-search-label" for="guide-search"><span>Search handbook</span><input id="guide-search" type="search" placeholder="flag, titanium, Bone Warden…" autocomplete="off"></label>
         <div class="field-guide-header-actions"><button id="guide-resume-btn" class="mc-btn">Resume Game</button><button id="guide-close-btn" class="mc-btn" aria-label="Back to pause menu">×</button></div>
       </header>
-      <div id="guide-live-warning" class="field-guide-live-warning" hidden>Multiplayer continues while the guide is open. Find a safe location first.</div>
+      <div id="guide-live-warning" class="field-guide-live-warning" hidden>${icon('warning')}Multiplayer continues while the guide is open. Find a safe location first.</div>
       <div class="field-guide-body">
         <button id="guide-mobile-sections" class="mc-btn field-guide-mobile-sections" aria-expanded="false">Sections</button>
         <nav id="guide-nav" class="field-guide-nav" aria-label="Guide sections"></nav>

@@ -88,6 +88,7 @@
       padding: 10px 12px 12px;
       z-index: 25;
     }
+    .inv-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
     .inv-title { color: #3f3f3f; text-shadow: none; font-size: 15px; }
     /* Warfare panels (machine / turret / ship / faction Core): consistent modern
        chrome — flat bevel buttons with a subtle hover, no chunky text shadows. */
@@ -108,6 +109,13 @@
       display: grid; grid-template-columns: repeat(9, 48px); gap: 0;
     }
     .inv-hotbar { margin-top: 8px; }
+    .chest-layout { display: flex; flex-direction: column; gap: 8px; }
+    .chest-sort-btn { flex: none; min-width: 112px; }
+    .inv-transfer-item {
+      position: fixed; width: 32px; height: 32px; z-index: 50;
+      pointer-events: none; image-rendering: pixelated;
+      filter: drop-shadow(0 2px 2px rgba(0,0,0,.55));
+    }
     .inv-slot {
       width: 48px; height: 48px;
       background: #8b8b8b;
@@ -297,8 +305,9 @@
     }
     .field-guide-header-actions #guide-resume-btn:hover { filter:brightness(1.05); background:linear-gradient(180deg,#ffd06a,#eda01a); }
     .field-guide-header-actions #guide-close-btn { padding:0; width:44px; font-size:16px; }
-    .field-guide-live-warning { padding:9px 22px; color:#7a4a06; background:#fdf3dd; border-bottom:1px solid rgba(215,138,12,.28); font-size:11px; }
-    .field-guide-live-warning::before { content:'⚠ '; }
+    .field-guide-live-warning { display:flex; align-items:center; gap:8px; padding:9px 22px; color:#7a4a06; background:#fdf3dd; border-bottom:1px solid rgba(215,138,12,.28); font-size:11px; }
+    .field-guide-live-warning[hidden] { display:none; }
+    .field-guide-live-warning .field-guide-icon { width:15px; height:15px; flex:none; }
     .field-guide-body { min-height:0; display:grid; grid-template-columns:236px minmax(0,1fr); position:relative; }
     .field-guide-nav { min-height:0; overflow:auto; padding:12px; border-right:1px solid rgba(15,26,36,.1); background:#fafbfc; }
     .field-guide-nav-item {
@@ -307,14 +316,16 @@
       background:transparent; border:1px solid transparent; cursor:pointer; font:inherit; font-size:13px;
       transition:background .12s, color .12s;
     }
-    .field-guide-nav-item span:first-child { font-size:15px; color:#b87709; text-align:center; }
+    .field-guide-nav-item span:first-child { display:grid; place-items:center; color:#b87709; }
+    .field-guide-nav-item .field-guide-icon { width:17px; height:17px; }
     .field-guide-nav-item:hover,.field-guide-nav-item:focus-visible { color:#0f1a24; background:#eef1f4; outline:none; }
     .field-guide-nav-item[data-active="true"] { color:#0f1a24; font-weight:700; background:#fdf3dd; border-color:rgba(215,138,12,.32); }
     .field-guide-nav-item[data-active="true"] span:first-child { color:#b87709; }
     .field-guide-nav-item small { color:#b87709; font-size:10px; }
     .field-guide-content { min-height:0; overflow:auto; scroll-behavior:smooth; padding:clamp(18px,3vw,38px); outline:none; }
     .field-guide-article-header { display:flex; gap:16px; align-items:flex-start; padding-bottom:20px; border-bottom:1px solid rgba(15,26,36,.1); }
-    .field-guide-article-header>span { font-size:27px; color:#b87709; line-height:1; }
+    .field-guide-article-header>span { display:grid; place-items:center; color:#b87709; line-height:1; }
+    .field-guide-article-header>span .field-guide-icon { width:29px; height:29px; }
     .field-guide-article-header h2 { margin:0; font-size:clamp(22px,2.6vw,34px); letter-spacing:.2px; color:#0f1a24; }
     .field-guide-article-header p { margin:8px 0 0; color:#788b99; line-height:1.6; font-size:13px; }
     .field-guide-entry {
@@ -338,14 +349,12 @@
       background:#fdf3dd; color:#b87709; font-size:10px; font-weight:700;
     }
     .field-guide-callout { margin:18px 0 0; padding:13px 16px 13px 42px; border-radius:11px; position:relative; }
-    .field-guide-callout::before { position:absolute; left:14px; top:13px; font-size:15px; }
+    .field-guide-callout>.field-guide-icon { position:absolute; left:14px; top:14px; width:17px; height:17px; }
     .field-guide-callout p { margin:5px 0 0; }
     .field-guide-callout.tip { background:#fdf3dd; border:1px solid rgba(215,138,12,.28); color:#6b4405; }
     .field-guide-callout.tip strong { color:#8a5a06; }
-    .field-guide-callout.tip::before { content:'💡'; }
     .field-guide-callout.warning { background:#fdeceb; border:1px solid rgba(198,58,48,.24); color:#8c2f27; }
     .field-guide-callout.warning strong { color:#a8362c; }
-    .field-guide-callout.warning::before { content:'⚠'; }
     .field-guide-table-wrap { overflow:auto; border-radius:11px; border:1px solid rgba(15,26,36,.1); }
     .field-guide table { width:100%; border-collapse:collapse; min-width:560px; background:#fff; }
     .field-guide th,.field-guide td { padding:11px 14px; border-bottom:1px solid rgba(15,26,36,.08); text-align:left; vertical-align:top; font-size:13px; color:#2b3d4c; }
@@ -568,6 +577,30 @@
       display: grid; grid-template-columns: minmax(0, 1fr) minmax(336px, 416px);
       align-items: center; gap: clamp(26px, 5vw, 68px);
     }
+    #overlay:not(.authenticated) .title-stage {
+      width: min(460px, 100%); grid-template-columns: 1fr; justify-items: center;
+      gap: clamp(18px, 3vh, 28px); text-align: center;
+    }
+    #overlay:not(.authenticated) .entry-card {
+      position: fixed; top: 50%; left: 50%; width: min(460px, calc(100% - 44px));
+      transform: translate(-50%, -50%); animation: none;
+    }
+    #overlay:not(.authenticated) .title-hero { display: grid; justify-items: center; }
+    #overlay:not(.authenticated) .title-badge,
+    #overlay:not(.authenticated) .title-rule,
+    #overlay:not(.authenticated) .subtitle,
+    #overlay:not(.authenticated) .title-facts,
+    #overlay:not(.authenticated) #menu-btns,
+    #overlay:not(.authenticated) .character-card,
+    #overlay:not(.authenticated) .title-footer { display: none; }
+    #overlay.authenticated #auth { display: none; }
+    #overlay.authenticated .entry-card { display: none; }
+    #overlay.authenticated .title-badge,
+    #overlay.authenticated .title-rule,
+    #overlay.authenticated .subtitle,
+    #overlay.authenticated .title-facts { display: none; }
+    #overlay.authenticated .title-hero { align-self: center; }
+    #overlay.authenticated #title { font-size: clamp(48px, 7vw, 88px); }
 
     /* ── Hero column ────────────────────────────────────────────────────── */
     .title-hero {
@@ -749,6 +782,9 @@
     #overlay #auth-status { color: #1a6b86; }
 
     #menu-btns { display: none; } /* revealed as flex once authenticated */
+    #overlay.authenticated #menu-btns {
+      display: flex; width: min(390px, 100%); margin-top: clamp(24px, 4vh, 38px);
+    }
     .menu-profile { display: flex; align-items: center; gap: 12px; }
     .menu-mark {
       flex: 0 0 auto; width: 44px; height: 44px; border-radius: 13px;
@@ -762,6 +798,18 @@
       letter-spacing: .2px; overflow-wrap: anywhere;
     }
     .menu-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .character-card {
+      min-height: 540px; display: flex; flex-direction: column; align-items: center;
+      padding: clamp(22px, 3vw, 30px); border: 1px solid var(--line); border-radius: 18px;
+      background: linear-gradient(180deg, rgba(255,255,255,.98), rgba(255,255,255,.91));
+      box-shadow: 0 26px 58px rgba(15,26,36,.16); overflow: hidden;
+    }
+    .character-card h2 { color: var(--ink); font-size: 20px; letter-spacing: .3px; }
+    #title-character-preview {
+      width: 100%; min-height: 390px; flex: 1; cursor: default; touch-action: none;
+    }
+    #title-character-preview canvas { display: block; width: 100%; height: 100%; background: transparent; }
+    #overlay #character-btn { width: 100%; border-color: transparent; color: #26180a; background: linear-gradient(180deg,#ffd06a,#eda01a); }
 
     /* World status: three plates across the foot of the title screen. */
     .title-status {
@@ -926,6 +974,7 @@
       }
       .entry-card { width: min(430px, 100%); justify-self: center; }
       .menu-profile { justify-content: center; text-align: left; }
+      #overlay.authenticated .title-stage { grid-template-columns: minmax(260px, 390px) minmax(300px, 390px); }
     }
     @media (max-width: 920px) {
       .title-footer { display: none; }
@@ -945,6 +994,7 @@
         padding: calc(18px + var(--safe-top)) calc(16px + var(--safe-right))
                  calc(18px + var(--safe-bottom)) calc(16px + var(--safe-left));
       }
+      #overlay:not(.authenticated) .entry-card { width: min(460px, calc(100% - 32px)); }
       .title-badge { padding: 6px 12px 6px 9px; font-size: 9px; letter-spacing: 1.2px; }
       #overlay #title { font-size: clamp(46px, 16vw, 76px); }
       .title-rule { width: 150px; margin-top: 12px; }
@@ -971,6 +1021,12 @@
       .title-facts { display: none; }
       .tstat { min-width: 0; padding: 7px 11px; }
       .tstat b { font-size: 12px; }
+      #overlay.authenticated { overflow-y: auto; justify-content: flex-start; }
+      #overlay.authenticated .title-stage { grid-template-columns: 1fr; }
+      #overlay.authenticated .title-hero { width: 100%; }
+      #overlay.authenticated #menu-btns { margin-top: 16px; }
+      .character-card { width: 100%; min-height: 470px; }
+      #title-character-preview { min-height: 330px; }
     }
     /* Too short to centre a full lockup: pin to the top and let it scroll. */
     @media (max-height: 700px) {
@@ -1031,6 +1087,18 @@
             <li><b>3</b><span>warring factions</span></li>
             <li><b>Vaults</b><span>seeded loot &amp; bosses</span></li>
           </ul>
+          <div id="menu-btns">
+            <div class="menu-profile mc-font">
+              <div class="menu-mark" aria-hidden="true">&#9670;</div>
+              <div>
+                <div class="menu-eyebrow">Signed in as</div>
+                <h2 id="menu-user">traveller</h2>
+              </div>
+            </div>
+            <button id="play-btn" class="mc-btn">Play</button>
+            <button id="controls-btn" class="mc-btn">Controls</button>
+            <button id="logout-btn" class="mc-btn">Log out</button>
+          </div>
         </header>
 
         <section class="entry-card" aria-label="World access">
@@ -1055,21 +1123,11 @@
             <div id="auth-err" class="mc-font" role="alert"></div>
             <div id="auth-status" class="mc-font" role="status"></div>
           </div>
-          <div id="menu-btns">
-            <div class="menu-profile mc-font">
-              <div class="menu-mark" aria-hidden="true">&#9670;</div>
-              <div>
-                <div class="menu-eyebrow">Signed in as</div>
-                <h2 id="menu-user">traveller</h2>
-              </div>
-            </div>
-            <button id="play-btn" class="mc-btn">Play</button>
-            <div class="menu-row">
-              <button id="character-btn" class="mc-btn">Character</button>
-              <button id="controls-btn" class="mc-btn">Controls</button>
-            </div>
-            <button id="logout-btn" class="mc-btn">Log out</button>
-          </div>
+        </section>
+        <section class="character-card" aria-label="Your character">
+          <h2 class="mc-font">Your Character:</h2>
+          <div id="title-character-preview" aria-label="Your character preview"></div>
+          <button id="character-btn" class="mc-btn">Edit Character</button>
         </section>
       </div>
 

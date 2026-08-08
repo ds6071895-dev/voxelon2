@@ -95,6 +95,7 @@ export class InventoryUI {
   private readonly inventory: Inventory;
   private readonly atlasCanvas: HTMLCanvasElement;
   private readonly panel: HTMLDivElement;
+  private readonly headerEl: HTMLDivElement;
   private readonly titleEl: HTMLDivElement;
   private readonly topEl: HTMLDivElement;
   private readonly invSlots = new Map<number, SlotView>();
@@ -133,6 +134,11 @@ export class InventoryUI {
   private readonly cursorCount: HTMLSpanElement;
   private readonly tooltip: HTMLDivElement;
   private renderedVersion = -1;
+  private shiftTransferDragging = false;
+  private readonly shiftedThisDrag = new Set<number>();
+  /** A right-drag deposits one item into each newly crossed ordinary slot. */
+  private rightPlaceDragging = false;
+  private readonly rightPlacedThisDrag = new Set<number>();
 
   constructor(inventory: Inventory, atlasCanvas: HTMLCanvasElement) {
     this.inventory = inventory;
@@ -141,9 +147,12 @@ export class InventoryUI {
 
     this.panel = document.createElement('div');
     this.panel.id = 'inventory';
+    this.headerEl = document.createElement('div');
+    this.headerEl.className = 'inv-header';
     this.titleEl = document.createElement('div');
     this.titleEl.className = 'mc-font inv-title';
-    this.panel.appendChild(this.titleEl);
+    this.headerEl.appendChild(this.titleEl);
+    this.panel.appendChild(this.headerEl);
 
     this.topEl = document.createElement('div');
     this.topEl.className = 'inv-top';
@@ -189,6 +198,14 @@ export class InventoryUI {
       this.tooltip.style.left = `${e.clientX + 14}px`;
       this.tooltip.style.top = `${e.clientY - 6}px`;
     });
+    document.addEventListener('mouseup', (e) => {
+      if (e.button === 0) this.endShiftTransferDrag();
+      if (e.button === 2) this.endRightPlaceDrag();
+    });
+    window.addEventListener('blur', () => {
+      this.endShiftTransferDrag();
+      this.endRightPlaceDrag();
+    });
   }
 
   // --- slot construction -----------------------------------------------------
@@ -232,7 +249,15 @@ export class InventoryUI {
     const view = this.makeSlotView();
     view.el.addEventListener('mousedown', (e) => {
       e.preventDefault();
-      if (e.button === 0 && e.shiftKey) this.inventory.shiftClick(index);
+      if (e.button === 0 && e.shiftKey && this.isChestTransferSlot(index)) {
+        this.shiftTransferDragging = true;
+        this.shiftedThisDrag.clear();
+        this.transferHoveredSlot(index, view);
+      }
+      else if (e.button === 0 && e.shiftKey) this.inventory.shiftClick(index);
+      else if (e.button === 0 && e.detail === 2 && this.inventory.cursor) {
+        this.inventory.collectMatching(this.invSlots.keys());
+      }
       else if (e.button === 0) this.inventory.leftClick(index);
       else if (e.button === 2) {
         // Right-click an armor item (empty cursor) to auto-equip it; otherwise
@@ -243,11 +268,91 @@ export class InventoryUI {
         } else {
           this.inventory.rightClick(index);
         }
+        if (this.inventory.cursor) {
+          this.rightPlaceDragging = true;
+          this.rightPlacedThisDrag.clear();
+          this.rightPlacedThisDrag.add(index);
+        }
       }
+    });
+    view.el.addEventListener('mouseenter', (e) => {
+      if (this.shiftTransferDragging && e.shiftKey && (e.buttons & 1)) {
+        this.transferHoveredSlot(index, view);
+      }
+      if (this.rightPlaceDragging && (e.buttons & 2)) this.placeOneOnDrag(index);
     });
     this.hookTooltip(view, () => this.inventory.slots[index]);
     this.invSlots.set(index, view);
     return view;
+  }
+
+  private isChestTransferSlot(index: number): boolean {
+    return this.mode === 'chest' && (
+      (index >= 0 && index < INV_SIZE) ||
+      (index >= CHEST_START && index < CHEST_START + CHEST_SIZE)
+    );
+  }
+
+  private endShiftTransferDrag(): void {
+    this.shiftTransferDragging = false;
+    this.shiftedThisDrag.clear();
+  }
+
+  private endRightPlaceDrag(): void {
+    this.rightPlaceDragging = false;
+    this.rightPlacedThisDrag.clear();
+  }
+
+  /** One item per slot crossed, covering inventory, chest, and crafting cells. */
+  private placeOneOnDrag(index: number): void {
+    if (this.rightPlacedThisDrag.has(index) || !this.inventory.cursor) return;
+    this.rightPlacedThisDrag.add(index);
+    this.inventory.rightClick(index);
+    if (!this.inventory.cursor) this.endRightPlaceDrag();
+  }
+
+  /** Transfer a newly hovered stack and animate it toward the first slot that
+   *  received items. Each slot fires at most once during a drag gesture. */
+  private transferHoveredSlot(index: number, source: SlotView): void {
+    if (!this.isChestTransferSlot(index) || this.shiftedThisDrag.has(index)) return;
+    this.shiftedThisDrag.add(index);
+    const stack = this.inventory.slots[index];
+    if (!stack) return;
+    const itemId = stack.id;
+    const destination = index >= CHEST_START
+      ? [0, INV_SIZE] as const
+      : [CHEST_START, CHEST_START + CHEST_SIZE] as const;
+    const before = this.inventory.slots.map((s) => s?.count ?? 0);
+    this.inventory.shiftClick(index);
+    let target: SlotView | undefined;
+    for (let i = destination[0]; i < destination[1]; i++) {
+      const now = this.inventory.slots[i];
+      if (now?.id === itemId && now.count > before[i]) {
+        target = this.invSlots.get(i);
+        if (target) break;
+      }
+    }
+    if (target) this.animateTransfer(itemId, source.el, target.el);
+  }
+
+  private animateTransfer(itemId: number, from: HTMLElement, to: HTMLElement, delay = 0): void {
+    const a = from.getBoundingClientRect();
+    const b = to.getBoundingClientRect();
+    const icon = document.createElement('canvas');
+    icon.width = 32;
+    icon.height = 32;
+    icon.className = 'inv-transfer-item';
+    icon.style.left = `${a.left + (a.width - 32) / 2}px`;
+    icon.style.top = `${a.top + (a.height - 32) / 2}px`;
+    renderItemIcon(icon, this.atlasCanvas, itemId);
+    document.body.appendChild(icon);
+    const dx = b.left + (b.width - 32) / 2 - (a.left + (a.width - 32) / 2);
+    const dy = b.top + (b.height - 32) / 2 - (a.top + (a.height - 32) / 2);
+    const animation = icon.animate([
+      { transform: 'translate(0, 0) scale(1)', opacity: 1 },
+      { transform: `translate(${dx}px, ${dy}px) scale(.82)`, opacity: .25 },
+    ], { duration: 300, delay, easing: 'cubic-bezier(.2,.8,.25,1)' });
+    animation.finished.then(() => icon.remove(), () => icon.remove());
   }
 
   private drawSlot(view: SlotView, stack: ItemStack | null): void {
@@ -864,6 +969,9 @@ export class InventoryUI {
     this.turretViews = null;
     this.turretCtx = turretCtx ?? null;
     this.topEl.innerHTML = '';
+    while (this.headerEl.lastElementChild !== this.titleEl) {
+      this.headerEl.lastElementChild?.remove();
+    }
     this.mode = mode;
     if (mode === 'turret' && turretCtx) {
       this.titleEl.textContent = 'Turret';
@@ -895,6 +1003,18 @@ export class InventoryUI {
   }
 
   private buildChestTop(): void {
+    const wrap = document.createElement('div');
+    wrap.className = 'chest-layout';
+    const sort = document.createElement('button');
+    sort.type = 'button';
+    sort.className = 'war-btn chest-sort-btn mc-font';
+    sort.textContent = 'Sort Items';
+    sort.addEventListener('click', () => {
+      const before = this.inventory.readChest();
+      this.inventory.sortChest();
+      this.animateChestSort(before);
+    });
+    this.headerEl.appendChild(sort);
     const grid = document.createElement('div');
     grid.className = 'inv-grid';
     for (let i = 0; i < CHEST_SIZE; i++) {
@@ -902,11 +1022,46 @@ export class InventoryUI {
       grid.appendChild(this.makeIndexedSlot(index).el);
       this.chestCells.push(index);
     }
-    this.topEl.appendChild(grid);
+    wrap.appendChild(grid);
+    this.topEl.appendChild(wrap);
+  }
+
+  /** Animate source stacks into their compacted, alphabetized chest slots. */
+  private animateChestSort(before: (ItemStack | null)[]): void {
+    type Portion = { index: number; count: number };
+    const sources = new Map<string, Portion[]>();
+    const keyOf = (stack: ItemStack) => JSON.stringify({ ...stack, count: 0 });
+    before.forEach((stack, index) => {
+      if (!stack) return;
+      const key = keyOf(stack);
+      const list = sources.get(key) ?? [];
+      list.push({ index, count: stack.count });
+      sources.set(key, list);
+    });
+    for (let target = 0; target < CHEST_SIZE; target++) {
+      const stack = this.inventory.slots[CHEST_START + target];
+      if (!stack) continue;
+      let remaining = stack.count;
+      const list = sources.get(keyOf(stack)) ?? [];
+      while (remaining > 0 && list.length) {
+        const source = list[0];
+        const moved = Math.min(remaining, source.count);
+        source.count -= moved;
+        remaining -= moved;
+        if (source.index !== target) {
+          const from = this.invSlots.get(CHEST_START + source.index);
+          const to = this.invSlots.get(CHEST_START + target);
+          if (from && to) this.animateTransfer(stack.id, from.el, to.el, 80 + target * 18);
+        }
+        if (source.count === 0) list.shift();
+      }
+    }
   }
 
   hide(): void {
     if (!this.open) return;
+    this.endShiftTransferDrag();
+    this.endRightPlaceDrag();
     this.open = false;
     const overflow = this.inventory.stashOpenSlots();
     if (overflow.length) this.onOverflow?.(overflow);

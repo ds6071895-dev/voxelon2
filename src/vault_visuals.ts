@@ -58,7 +58,7 @@ function actorGeometry(kind: EncounterActorKind): THREE.BufferGeometry {
 
 /**
  * Fixed-size visual pools for every encounter mechanic. Telegraphs use their
- * real geometry (line/cone/ring/impact), while wards, summons and the boss aura
+ * real geometry (line/cone/ring/impact), while arena props, summons and the boss aura
  * pulse from authoritative snapshot time. Nothing writes world blocks.
  */
 export class VaultEncounterVisuals {
@@ -183,9 +183,8 @@ export class VaultEncounterVisuals {
         (o.kind === 'mine' || o.kind === 'brood_pool' ? 0.14 : 0.9), o.position.z);
       const mat = mesh.material as THREE.MeshBasicMaterial;
       mat.color.set(color);
-      // The wards ARE the fight, so a critical object has to look like a target
-      // rather than scenery: it strobes toward white on the family colour while
-      // ordinary props sit flat. (Held steady for reduced-motion players.)
+      // Critical styling remains for snapshot compatibility. Current boss
+      // phases only use temporary props, which sit flat and never gate damage.
       if (o.critical && !reducedMotion) {
         mat.color.lerp(WHITE, 0.3 + Math.sin(snapshot.time * 5.5 + i) * 0.28);
       } else if (o.critical) {
@@ -256,7 +255,7 @@ export class VaultEncounterVisuals {
     });
   }
 
-  /** Pick a ward/summon with a melee ray; the legacy boss body is picked by Mobs. */
+  /** Pick an arena prop/summon with a melee ray; the boss body is picked by Mobs. */
   rayTarget(
     snapshot: EncounterSnapshot | null, origin: THREE.Vector3,
     direction: THREE.Vector3, maxDistance: number,
