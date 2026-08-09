@@ -4,11 +4,12 @@
 
 import * as THREE from 'three';
 import { itemGeometry } from './itementity';
-import { ITEMS } from './items';
+import { Item, ITEMS } from './items';
 import { avatarTexture } from './avatartex';
 import { skinColorFor } from './remoteplayers';
 import { Cosmetics, SHIRT_COLORS, defaultCosmetics } from './character';
 import type { Atlas } from './textures';
+import { createGunModel, poseGunModel } from './gunmodels';
 
 // Rest pose of the held item in camera space. At the game's 70° FOV, y=-0.42
 // put the hand ~86% of the way down the screen — so low it read as falling off
@@ -19,12 +20,13 @@ const BASE_X = 0.42, BASE_Y = -0.3, BASE_Z = -0.7;
 export class HeldItemView {
   private readonly pivot: THREE.Group;
   private readonly material: THREE.MeshBasicMaterial;
-  private mesh: THREE.Mesh | null = null;
+  private mesh: THREE.Object3D | null = null;
   private currentItem: number | null = null;
   private swingT = 1; // 0..1, animating while < 1
   /** Fires once whenever a new hand/tool swing begins. */
   onSwing?: () => void;
   private recoilT = 1; // 0..1, animating while < 1 (gun kick)
+  private aimT = 0;
   private isGun = false;
   private readonly atlas: Atlas;
   private readonly flash: THREE.Mesh;
@@ -115,10 +117,21 @@ export class HeldItemView {
       this.mesh = null;
     }
     if (id !== null) {
-      this.mesh = new THREE.Mesh(itemGeometry(this.atlas, id), this.material);
+      if (this.isGun) {
+        this.mesh = createGunModel(id);
+        poseGunModel(this.mesh, 'firstPerson');
+        const muzzleZ: Record<number, number> = {
+          [Item.Pistol]: -0.34, [Item.Rifle]: -0.78, [Item.RocketLauncher]: -0.68,
+          [Item.Shotgun]: -0.67, [Item.SMG]: -0.48, [Item.Sniper]: -0.86,
+          [Item.BurstRifle]: -0.78,
+        };
+        this.flash.position.set(-0.03, 0.07, muzzleZ[id] ?? -0.7);
+      } else {
+        this.mesh = new THREE.Mesh(itemGeometry(this.atlas, id), this.material);
+        this.mesh.scale.setScalar(1.4);
+        this.mesh.rotation.set(0.1, -0.6, 0);
+      }
       this.mesh.renderOrder = 100;
-      this.mesh.scale.setScalar(1.4);
-      this.mesh.rotation.set(0.1, -0.6, 0);
       this.pivot.add(this.mesh);
     }
     // The arm stays visible even with no item; setActive controls POV visibility.
@@ -143,7 +156,17 @@ export class HeldItemView {
     this.recoilT = 0;
   }
 
-  update(dt: number, mining: boolean, sunlight: number): void {
+  /** 0 at rest, 1 immediately after a shot; used by the local third-person body. */
+  recoilAmount(): number {
+    if (this.recoilT >= 1) return 0;
+    const k = 1 - this.recoilT;
+    return k * k;
+  }
+
+  update(
+    dt: number, mining: boolean, sunlight: number,
+    aiming = false, reloadProgress = -1
+  ): void {
     const shade = 0.55 + 0.45 * sunlight;
     this.material.color.setScalar(shade);
     this.armMat.color.copy(this.baseSkin).multiplyScalar(shade);
@@ -155,8 +178,19 @@ export class HeldItemView {
 
     if (this.swingT < 1) this.swingT = Math.min(1, this.swingT + dt / 0.25);
     if (this.recoilT < 1) this.recoilT = Math.min(1, this.recoilT + dt / 0.16);
+    const aimTarget = this.isGun && aiming && reloadProgress < 0 ? 1 : 0;
+    this.aimT += (aimTarget - this.aimT) * Math.min(1, dt * 14);
 
     let px = BASE_X, py = BASE_Y, pz = BASE_Z, rx = 0, rz = 0;
+    if (this.isGun) {
+      // Bring the sights to eye level and screen centre instead of merely
+      // changing FOV. The support hand/arm follows the same root.
+      const a = this.aimT;
+      px = THREE.MathUtils.lerp(BASE_X, 0.015, a);
+      py = THREE.MathUtils.lerp(BASE_Y, -0.16, a);
+      pz = THREE.MathUtils.lerp(BASE_Z, -0.58, a);
+      rx = -a * 0.025;
+    }
     if (this.swingT < 1) {
       // A real strike is two moves, not one symmetric wobble: a short wind-up
       // that lifts the fist back toward the camera, then a longer drive that
@@ -185,6 +219,16 @@ export class HeldItemView {
       pz += e * 0.2;
       py += e * 0.05;
       rx += e * 0.55;
+    }
+    if (this.isGun && reloadProgress >= 0) {
+      // Dip inward, roll the magazine well into view, then snap cleanly home.
+      const t = Math.max(0, Math.min(1, reloadProgress));
+      const dip = Math.sin(t * Math.PI);
+      const seat = Math.sin(Math.max(0, (t - 0.68) / 0.32) * Math.PI);
+      py -= dip * 0.2;
+      px += dip * 0.06;
+      rx -= dip * 0.45;
+      rz += dip * 0.72 - seat * 0.2;
     }
     this.pivot.position.set(px, py, pz);
     this.pivot.rotation.set(rx, 0, rz);

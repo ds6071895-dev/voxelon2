@@ -2,11 +2,40 @@
 // isometric mini-blocks for cube blocks, flat sprites for everything else.
 
 import { BLOCKS, Tile } from './blocks';
-import { ITEMS } from './items';
+import { Item, ITEMS } from './items';
 import { TILE_PX, ATLAS_TILES } from './textures';
 
 const ICON_GRASS = '#91bd59';
 const ICON_FOLIAGE = '#71a83d';
+
+/** Dimensional low-poly side view matching the in-world gun models. */
+function drawGunIcon(ctx: CanvasRenderingContext2D, itemId: number): void {
+  const long = itemId !== Item.Pistol && itemId !== Item.SMG;
+  const rocket = itemId === Item.RocketLauncher;
+  const shotgun = itemId === Item.Shotgun;
+  const sniper = itemId === Item.Sniper;
+  const x0 = long ? 3 : 7, x1 = long ? 28 : 25;
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = '#11151a'; ctx.lineWidth = 1.5;
+  ctx.fillStyle = rocket ? '#53634b' : shotgun ? '#70472b' : '#46515b';
+  ctx.beginPath();
+  ctx.moveTo(x0, 11); ctx.lineTo(x1, 11); ctx.lineTo(x1 - 2, 17);
+  ctx.lineTo(x0 + 5, 18); ctx.lineTo(x0, 15); ctx.closePath();
+  ctx.fill(); ctx.stroke();
+  // Bright top face creates the same chunky 3D read as the box model.
+  ctx.fillStyle = rocket ? '#77866a' : '#77838d';
+  ctx.beginPath(); ctx.moveTo(x0, 11); ctx.lineTo(x0 + 3, 8);
+  ctx.lineTo(x1, 8); ctx.lineTo(x1, 11); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#252a30';
+  ctx.beginPath(); ctx.moveTo(13, 17); ctx.lineTo(18, 17);
+  ctx.lineTo(17, 27); ctx.lineTo(13, 25); ctx.closePath(); ctx.fill(); ctx.stroke();
+  if (shotgun) {
+    ctx.fillStyle = '#aeb6bd'; ctx.fillRect(3, 8, 21, 3); ctx.strokeRect(3, 8, 21, 3);
+  }
+  if (sniper || itemId === Item.BurstRifle || rocket) {
+    ctx.fillStyle = '#161a1f'; ctx.fillRect(10, 4, 11, 4); ctx.strokeRect(10, 4, 11, 4);
+  }
+}
 
 function tileSource(
   atlasCanvas: HTMLCanvasElement, tile: number, tint: string | null
@@ -65,6 +94,11 @@ export function renderItemIcon(
   ctx.imageSmoothingEnabled = false;
   const info = ITEMS[itemId];
   if (!info) return;
+
+  if (info.gun) {
+    drawGunIcon(ctx, itemId);
+    return;
+  }
 
   const block = info.kind === 'block' ? BLOCKS[info.block!] : null;
 

@@ -76,6 +76,9 @@ export interface PlayerSnapshot {
   armor?: number[];
   /** Monotonic 16-bit swing sequence; a change starts the arm-hit animation. */
   swing?: number;
+  /** Firearm presentation state used by third-person weapon poses. */
+  aiming?: boolean;
+  reloading?: boolean;
 }
 
 /** Gamemode, set by a server-console admin command. */
@@ -137,7 +140,8 @@ export type ClientMsg =
   // auth) — lets a returning browser skip the password.
   | { t: 'session'; username: string; token: string }
   | { t: 'xform'; x: number; y: number; z: number; yaw: number; pitch: number;
-      gliding?: boolean; boating?: boolean; sneaking?: boolean; held?: number; armor?: number[]; swing?: number }
+      gliding?: boolean; boating?: boolean; sneaking?: boolean; held?: number; armor?: number[]; swing?: number;
+      aiming?: boolean; reloading?: boolean }
   | { t: 'edit'; x: number; y: number; z: number; block: number }
   // Pull a Lever: the server recomputes the flips (lever + linked traps within
   // LEVER_RADIUS, traps.ts) over its edit log and broadcasts them as edits —

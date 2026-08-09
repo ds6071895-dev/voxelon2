@@ -9,6 +9,7 @@ import { ITEMS } from './items';
 import type { Player } from './player';
 import type { Atlas } from './textures';
 import type { World } from './world';
+import { createGunModel, isGunItem, poseGunModel } from './gunmodels';
 
 // Shared mini-block / sprite geometry per item id (held view uses it too).
 const geoCache = new Map<number, THREE.BufferGeometry>();
@@ -110,7 +111,7 @@ interface Drop {
   vel: THREE.Vector3;
   age: number;
   phase: number;
-  mesh: THREE.Mesh;
+  mesh: THREE.Object3D;
 }
 
 export class ItemEntities {
@@ -140,7 +141,10 @@ export class ItemEntities {
   /** Spawn a drop at a block position with a small scatter burst. */
   spawn(x: number, y: number, z: number, id: number, count: number): void {
     if (this.list.length >= MAX_ENTITIES) return;
-    const mesh = new THREE.Mesh(itemGeometry(this.atlas, id), this.material);
+    const mesh = isGunItem(id)
+      ? createGunModel(id)
+      : new THREE.Mesh(itemGeometry(this.atlas, id), this.material);
+    if (isGunItem(id)) poseGunModel(mesh, 'drop');
     this.scene.add(mesh);
     this.list.push({
       id, count,

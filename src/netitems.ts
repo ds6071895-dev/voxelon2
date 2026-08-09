@@ -9,13 +9,14 @@ import type { NetClient } from './net/client';
 import { PICKUP_RANGE } from './net/protocol';
 import type { Player } from './player';
 import type { Atlas } from './textures';
+import { createGunModel, isGunItem, poseGunModel } from './gunmodels';
 
 export class NetItems {
   private readonly scene: THREE.Scene;
   private readonly net: NetClient;
   private readonly atlas: Atlas;
   private readonly material: THREE.MeshBasicMaterial;
-  private readonly meshes = new Map<number, THREE.Mesh>();
+  private readonly meshes = new Map<number, THREE.Object3D>();
   private readonly age = new Map<number, number>();
   private readonly requested = new Map<number, number>(); // eid -> cooldown s
 
@@ -49,7 +50,10 @@ export class NetItems {
     for (const [eid, info] of this.net.netItems) {
       let mesh = this.meshes.get(eid);
       if (!mesh) {
-        mesh = new THREE.Mesh(itemGeometry(this.atlas, info.item), this.material);
+        mesh = isGunItem(info.item)
+          ? createGunModel(info.item)
+          : new THREE.Mesh(itemGeometry(this.atlas, info.item), this.material);
+        if (isGunItem(info.item)) poseGunModel(mesh, 'drop');
         this.scene.add(mesh);
         this.meshes.set(eid, mesh);
         this.age.set(eid, 0);

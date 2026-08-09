@@ -11,6 +11,7 @@ import { factionColor, isFaction } from './teams';
 import { itemGeometry } from './itementity';
 import { ITEMS, Item, ARMOR_SLOT_INDEX } from './items';
 import type { Atlas } from './textures';
+import { createGunModel, isGunItem, poseGunModel } from './gunmodels';
 import {
   CAPE_COLORS, Cosmetics, EYE_COLORS, HAIR_COLORS, HAT_COLORS, PANTS_COLORS,
   SHIRT_COLORS, SKIN_TONES, defaultCosmetics, sanitizeCosmetics,
@@ -763,12 +764,14 @@ interface Avatar {
   lastX: number; lastZ: number;
   /** Equip visuals currently built (rebuilt when the synced state changes). */
   heldId: number;
-  heldMesh: THREE.Mesh | null;   // geometry is the SHARED itemGeometry cache
+  heldMesh: THREE.Object3D | null;
   armorKey: string;
   armorMeshes: THREE.Mesh[];
   lastSwing: number;
   swingT: number;
   sneakT: number;
+  aimT: number;
+  reloadT: number;
 }
 
 // ─── main class ───────────────────────────────────────────────────────────
@@ -850,7 +853,7 @@ export class RemotePlayers {
       dx: remote.tx, dy: remote.ty, dz: remote.tz, dyaw: remote.tyaw,
       walkPhase: 0, lastX: remote.tx, lastZ: remote.tz,
       heldId: 0, heldMesh: null, armorKey: '', armorMeshes: [],
-      lastSwing: remote.swing | 0, swingT: 1, sneakT: 0,
+      lastSwing: remote.swing | 0, swingT: 1, sneakT: 0, aimT: 0, reloadT: 0,
     };
   }
 
@@ -865,11 +868,16 @@ export class RemotePlayers {
         av.heldMesh = null;
       }
       if (held > 0 && ITEMS[held]) {
-        const mesh = new THREE.Mesh(itemGeometry(this.atlas, held), this.itemMat);
-        // In the right hand: just below the sleeve, out front, tilted forward.
-        mesh.position.set(0, -LIMB_H + 0.06, -0.2);
-        mesh.rotation.set(-0.5, 0, 0);
-        mesh.scale.setScalar(ITEMS[held].kind === 'block' ? 1.5 : 1.1);
+        const mesh = isGunItem(held)
+          ? createGunModel(held)
+          : new THREE.Mesh(itemGeometry(this.atlas, held), this.itemMat);
+        if (isGunItem(held)) {
+          poseGunModel(mesh, 'avatar');
+        } else {
+          mesh.position.set(0, -LIMB_H + 0.06, -0.2);
+          mesh.rotation.set(-0.5, 0, 0);
+          mesh.scale.setScalar(ITEMS[held].kind === 'block' ? 1.5 : 1.1);
+        }
         av.parts[3].add(mesh); // right arm — swings with the arm
         av.heldMesh = mesh;
       }
@@ -914,6 +922,9 @@ export class RemotePlayers {
       }
       if (av.swingT < 1) av.swingT = Math.min(1, av.swingT + dt / 0.25);
       const attackSwing = av.swingT < 1 ? Math.sin(av.swingT * Math.PI) : 0;
+      const gunHeld = isGunItem(av.heldId);
+      av.aimT += ((gunHeld && r.aiming ? 1 : 0) - av.aimT) * Math.min(1, dt * 12);
+      av.reloadT = r.reloading ? (av.reloadT + dt / 1.1) % 1 : 0;
       const sneakTarget = r.sneaking && !r.boating && !r.gliding ? 1 : 0;
       av.sneakT += (sneakTarget - av.sneakT) * Math.min(1, 12 * dt);
 
@@ -955,7 +966,7 @@ export class RemotePlayers {
       } else {
         applyAvatarSneak(av.body, av.sneakT);
         av.group.rotation.x = 0;
-        av.head.rotation.x = av.sneakT * 0.12;
+        av.head.rotation.x = THREE.MathUtils.clamp(r.tpitch, -1.15, 1.15) + av.sneakT * 0.12;
 
         // Walk/idle animation based on horizontal movement speed.
         const hspeed = Math.hypot(av.dx - av.lastX, av.dz - av.lastZ) / Math.max(dt, 1e-4);
@@ -970,6 +981,22 @@ export class RemotePlayers {
         av.parts[2].rotation.z = 0;
         av.parts[3].rotation.x = pose.arms[1];
         av.parts[3].rotation.z = pose.rightArmRoll;
+        if (gunHeld) {
+          // Shoulder the weapon with both hands. ADS raises it to the cheek;
+          // firing kicks both arms briefly and reload rolls the receiver inward.
+          const reloadDip = r.reloading ? Math.sin(av.reloadT * Math.PI) : 0;
+          const raise = 0.9 + av.aimT * 0.42;
+          av.parts[2].rotation.x = raise + attackSwing * 0.1 - reloadDip * 0.25;
+          av.parts[3].rotation.x = raise + 0.1 + attackSwing * 0.18 - reloadDip * 0.35;
+          av.parts[2].rotation.z = -0.42 + av.aimT * 0.12;
+          av.parts[3].rotation.z = 0.08 + reloadDip * 0.5;
+          if (av.heldMesh) {
+            // Counter the raised forearm so the barrel remains on the look line.
+            av.heldMesh.rotation.x = -(raise + 0.1) +
+              THREE.MathUtils.clamp(r.tpitch, -1.15, 1.15);
+            av.heldMesh.rotation.z = -reloadDip * 0.45;
+          }
+        }
         if (av.body.cape) av.body.cape.rotation.x = pose.cape;
       }
     }

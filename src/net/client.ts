@@ -31,6 +31,8 @@ export interface Remote {
   armor: number[];
   /** Latest networked swing sequence. */
   swing: number;
+  aiming: boolean;
+  reloading: boolean;
 }
 
 /** Resolve the WebSocket URL. When the page is served by the game server itself
@@ -255,6 +257,8 @@ export class NetClient {
             r.held = typeof s.held === 'number' ? s.held : 0;
             if (Array.isArray(s.armor)) r.armor = s.armor;
             r.swing = typeof s.swing === 'number' ? s.swing : r.swing;
+            r.aiming = s.aiming === true;
+            r.reloading = s.reloading === true;
           }
         }
         break;
@@ -426,7 +430,8 @@ export class NetClient {
   /** Throttled transform send (call every frame with dt). */
   sendXform(
     dt: number, x: number, y: number, z: number, yaw: number, pitch: number,
-    gliding = false, boating = false, sneaking = false, held = 0, armor: number[] = [], swing = 0
+    gliding = false, boating = false, sneaking = false, held = 0, armor: number[] = [], swing = 0,
+    aiming = false, reloading = false
   ): void {
     if (!this.connected) return;
     const interval = 1 / TRANSFORM_HZ;
@@ -435,7 +440,8 @@ export class NetClient {
     // Subtract the interval (don't zero) so the long-run rate matches
     // TRANSFORM_HZ; clamp to avoid a burst after a long stall.
     this.xformAcc = Math.min(this.xformAcc - interval, interval);
-    this.raw({ t: 'xform', x, y, z, yaw, pitch, gliding, boating, sneaking, held, armor, swing });
+    this.raw({ t: 'xform', x, y, z, yaw, pitch, gliding, boating, sneaking, held, armor, swing,
+      aiming, reloading });
   }
 
   /** Send register/login over the open socket (before `welcome`/connected). */
@@ -585,5 +591,6 @@ function toRemote(p: PlayerInfo): Remote {
     held: typeof p.held === 'number' ? p.held : 0,
     armor: Array.isArray(p.armor) ? p.armor : [0, 0, 0, 0],
     swing: typeof p.swing === 'number' ? p.swing : 0,
+    aiming: p.aiming === true, reloading: p.reloading === true,
   };
 }

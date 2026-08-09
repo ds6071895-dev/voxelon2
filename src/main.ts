@@ -19,6 +19,7 @@ import {
   sanitizeState, setFilter, upgradeCost,
 } from './machines';
 import { ItemEntities, itemGeometry } from './itementity';
+import { createGunModel, isGunItem, poseGunModel } from './gunmodels';
 import { Chests } from './chests';
 import { Mob, Mobs } from './mobs';
 import { NetClient } from './net/client';
@@ -4253,6 +4254,7 @@ const ammoEl = document.getElementById('ammo')!;
 const RELOAD_TIME = 1.1;
 let fireCooldown = 0;
 let reloadTimer = 0;
+let reloadDuration = 0;
 // Aim-down-sights magnification (1 = hip fire). Set each frame from the held
 // gun's `zoom` while right-click is held; drives camera FOV + look sensitivity.
 let aimZoom = 1;
@@ -4298,6 +4300,7 @@ function fireVolley(stack: ItemStack, gun: GunInfo): boolean {
     projectiles.fire(player.eyePosition, spreadDir(base, spread), boosted);
   }
   held.recoil();
+  heldSwingSeq = (heldSwingSeq + 1) & 0xffff;
   audio.gun(player.eyePosition);
   return true;
 }
@@ -4322,6 +4325,7 @@ function reloadGun(): void {
   const loaded = stack.loaded ?? gun.mag;
   if (loaded >= gun.mag || inventory.countItem(gun.ammo) <= 0) return;
   reloadTimer = RELOAD_TIME * activeBuffs().reloadMult; // Gunslinger ranks
+  reloadDuration = reloadTimer;
   reloadingStack = stack;
 }
 let stepAccum = 0;
@@ -4481,7 +4485,7 @@ let selfBody: AvatarBody | null = null;
 let selfArmorKey = '';
 let selfArmorMeshes: THREE.Mesh[] = [];
 let selfHeldId = 0;
-let selfHeldMesh: THREE.Mesh | null = null;
+let selfHeldMesh: THREE.Object3D | null = null;
 let selfWalkPhase = 0;
 let selfSneakT = 0;
 const selfItemMat = new THREE.MeshBasicMaterial({
@@ -4528,10 +4532,16 @@ function updateSelfAvatar(dt: number): void {
     selfHeldId = heldId;
     if (selfHeldMesh) { selfHeldMesh.parent?.remove(selfHeldMesh); selfHeldMesh = null; }
     if (heldId > 0 && ITEMS[heldId]) {
-      const mesh = new THREE.Mesh(itemGeometry(atlas, heldId), selfItemMat);
-      mesh.position.set(0, -0.68, -0.2);
-      mesh.rotation.set(-0.5, 0, 0);
-      mesh.scale.setScalar(ITEMS[heldId].kind === 'block' ? 1.5 : 1.1);
+      const mesh = isGunItem(heldId)
+        ? createGunModel(heldId)
+        : new THREE.Mesh(itemGeometry(atlas, heldId), selfItemMat);
+      if (isGunItem(heldId)) {
+        poseGunModel(mesh, 'avatar');
+      } else {
+        mesh.position.set(0, -0.68, -0.2);
+        mesh.rotation.set(-0.5, 0, 0);
+        mesh.scale.setScalar(ITEMS[heldId].kind === 'block' ? 1.5 : 1.1);
+      }
       b.parts[3].add(mesh); // right hand
       selfHeldMesh = mesh;
     }
@@ -4578,6 +4588,22 @@ function updateSelfAvatar(dt: number): void {
     b.parts[2].rotation.z = 0;
     b.parts[3].rotation.x = pose.arms[1];
     b.parts[3].rotation.z = pose.rightArmRoll;
+    if (isGunItem(selfHeldId)) {
+      const aiming = aimZoom > 1;
+      const reloadProgress = reloadTimer > 0 && reloadDuration > 0
+        ? 1 - reloadTimer / reloadDuration : -1;
+      const reloadDip = reloadProgress >= 0 ? Math.sin(reloadProgress * Math.PI) : 0;
+      const raise = 0.9 + (aiming ? 0.42 : 0);
+      const kick = held.recoilAmount();
+      b.parts[2].rotation.x = raise + kick * 0.1 - reloadDip * 0.25;
+      b.parts[3].rotation.x = raise + 0.1 + kick * 0.18 - reloadDip * 0.35;
+      b.parts[2].rotation.z = -0.42 + (aiming ? 0.12 : 0);
+      b.parts[3].rotation.z = 0.08 + reloadDip * 0.5;
+      if (selfHeldMesh) {
+        selfHeldMesh.rotation.x = -(raise + 0.1) + player.pitch;
+        selfHeldMesh.rotation.z = -reloadDip * 0.45;
+      }
+    }
     if (b.cape) b.cape.rotation.x = pose.cape;
   }
 }
@@ -5553,6 +5579,7 @@ function frame(): void {
         inventory.version++;
       }
       reloadingStack = null;
+      reloadDuration = 0;
     }
   }
 
@@ -5815,7 +5842,8 @@ function frame(): void {
       player.gliding, player.boating, player.sneaking,
       inventory.selectedStack?.id ?? 0,                 // held item on the avatar
       inventory.wornArmor().map((s) => s?.id ?? 0),     // worn armor plating
-      heldSwingSeq);                                      // hand/tool hit animation
+      heldSwingSeq,                                       // hit / firearm recoil sequence
+      aimZoom > 1, reloadTimer > 0);
 
     // Simulation never pauses: mobs hunt you and survival ticks in menus too.
     survival.update(dt, player);
@@ -5942,7 +5970,10 @@ function frame(): void {
   const firstPersonActive = controlling && view === View.First;
   held.setActive(firstPersonActive);
   held.setItem(controlling ? inventory.selectedStack?.id ?? null : null);
-  held.update(dt, controlling && interaction.breakingActive, sky.sunIntensity);
+  const reloadProgress = reloadTimer > 0 && reloadDuration > 0
+    ? 1 - reloadTimer / reloadDuration : -1;
+  held.update(dt, controlling && interaction.breakingActive, sky.sunIntensity,
+    aimZoom > 1, reloadProgress);
 
   // Gameplay HUD chrome shows only during active play.
   const hudDisplay = controlling ? '' : 'none';

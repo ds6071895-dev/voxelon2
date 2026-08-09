@@ -114,6 +114,8 @@ interface ServerPlayer extends PlayerInfo {
   sneaking: boolean;
   /** Latest client swing sequence, forwarded for third-person attack animation. */
   swing: number;
+  aiming: boolean;
+  reloading: boolean;
   /** Bloodlust (anti-stalemate): when the last PvP hit landed on this player,
    *  and when the current continuous fight began. A fight lapses once no PvP
    *  hit lands for COMBAT_TAG seconds. */
@@ -317,6 +319,7 @@ export class GameServer {
       armorPoints: 0,
       toughness: 0,
       held: 0, armor: [0, 0, 0, 0], sneaking: false, swing: 0,
+      aiming: false, reloading: false,
       lastPvpTime: -Infinity, pvpSince: 0, bloodlustWarned: false,
       switchesUsed: Number.isFinite(account?.switchesUsed) ? Math.max(0, Math.floor(account!.switchesUsed!)) : 0,
       switchSeason: Number.isFinite(account?.switchSeason) ? Math.floor(account!.switchSeason!) : 0,
@@ -408,6 +411,8 @@ export class GameServer {
           if (typeof msg.swing === 'number' && Number.isFinite(msg.swing)) {
             p.swing = Math.floor(msg.swing) & 0xffff;
           }
+          p.aiming = msg.aiming === true && !!ITEMS[p.held]?.gun;
+          p.reloading = msg.reloading === true && !!ITEMS[p.held]?.gun;
           // Walking a stolen flag onto your own pad scores the capture.
           return this.checkFlagCapture(p);
         }
@@ -2328,6 +2333,7 @@ export class GameServer {
       health: p.health, dead: p.dead,
       gliding: p.gliding, boating: p.boating, sneaking: p.sneaking,
       held: p.held, armor: p.armor, swing: p.swing,
+      aiming: p.aiming, reloading: p.reloading,
     }));
   }
 }
@@ -2340,6 +2346,7 @@ function toInfo(p: ServerPlayer): PlayerInfo {
     health: p.health, dead: p.dead,
     gliding: p.gliding, boating: p.boating, sneaking: p.sneaking,
     held: p.held, armor: p.armor, swing: p.swing,
+    aiming: p.aiming, reloading: p.reloading,
   };
 }
 
