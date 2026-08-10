@@ -17,6 +17,8 @@ const TELEGRAPH_GEOMETRY = {
   cone: new THREE.CircleGeometry(1, 48, -Math.PI * 0.4, Math.PI * 0.8),
   quadrant: new THREE.CircleGeometry(1, 32, 0, Math.PI / 2),
 };
+const coneGeometry = new Map<number, THREE.CircleGeometry>();
+const ringGeometry = new Map<number, THREE.RingGeometry>();
 const OBJECT_GEOMETRY = {
   box: new THREE.BoxGeometry(1.2, 1.8, 1.2),
   pillar: new THREE.CylinderGeometry(0.48, 0.65, 2.4, 8),
@@ -29,13 +31,36 @@ const ACTOR_GEOMETRY = {
   skitter: new THREE.TetrahedronGeometry(0.62, 0),
   guard: new THREE.BoxGeometry(0.9, 1.25, 0.9),
   clone: new THREE.OctahedronGeometry(0.7, 0),
+  skeleton: new THREE.CylinderGeometry(0.24, 0.42, 1.35, 6),
+  spitter: new THREE.ConeGeometry(0.58, 1.25, 7),
+  bog: new THREE.DodecahedronGeometry(0.68, 0),
+  ember: new THREE.ConeGeometry(0.5, 1.2, 6),
+  magma: new THREE.IcosahedronGeometry(0.7, 0),
+  drone: new THREE.TorusGeometry(0.5, 0.16, 6, 12),
 };
 
 function hazardGeometry(h: EncounterHazard): THREE.BufferGeometry {
   if (h.shape === 'line') return TELEGRAPH_GEOMETRY.line;
-  if (h.shape === 'cone') return TELEGRAPH_GEOMETRY.cone;
+  if (h.shape === 'cone') {
+    const key = Math.round(h.angle * 1000);
+    let geometry = coneGeometry.get(key);
+    if (!geometry) {
+      geometry = new THREE.CircleGeometry(1, 48, -h.angle / 2, h.angle);
+      coneGeometry.set(key, geometry);
+    }
+    return geometry;
+  }
   if (h.shape === 'quadrant') return TELEGRAPH_GEOMETRY.quadrant;
-  if (h.shape === 'ring') return TELEGRAPH_GEOMETRY.ring;
+  if (h.shape === 'ring') {
+    const ratio = Math.max(0.05, Math.min(0.95, 1 - h.width / Math.max(0.01, h.radius)));
+    const key = Math.round(ratio * 1000);
+    let geometry = ringGeometry.get(key);
+    if (!geometry) {
+      geometry = new THREE.RingGeometry(ratio, 1, 48);
+      ringGeometry.set(key, geometry);
+    }
+    return geometry;
+  }
   return TELEGRAPH_GEOMETRY.circle;
 }
 
@@ -51,6 +76,12 @@ function objectGeometry(kind: EncounterObjectKind): THREE.BufferGeometry {
 
 function actorGeometry(kind: EncounterActorKind): THREE.BufferGeometry {
   if (kind === 'skitter' || kind === 'mireling') return ACTOR_GEOMETRY.skitter;
+  if (kind === 'skeleton') return ACTOR_GEOMETRY.skeleton;
+  if (kind === 'spitter') return ACTOR_GEOMETRY.spitter;
+  if (kind === 'bog_brute') return ACTOR_GEOMETRY.bog;
+  if (kind === 'emberling') return ACTOR_GEOMETRY.ember;
+  if (kind === 'magma_brute') return ACTOR_GEOMETRY.magma;
+  if (kind === 'clockwork_drone') return ACTOR_GEOMETRY.drone;
   if (kind === 'clockwork_guard') return ACTOR_GEOMETRY.guard;
   if (kind === 'mirror_clone') return ACTOR_GEOMETRY.clone;
   return ACTOR_GEOMETRY.brute;
@@ -275,11 +306,6 @@ export class VaultEncounterVisuals {
       best = { id, hit: hit.clone(), distance };
     };
     for (const actor of snapshot.actors) consider(actor.id, actor.position, 0.75, 1.5);
-    for (const object of snapshot.objects) {
-      const wide = object.kind === 'cover' || object.kind === 'crusher_wall';
-      consider(object.id, object.position, wide ? 1.8 : 0.85,
-        object.kind === 'mine' || object.kind === 'brood_pool' ? 0.6 : 2.2);
-    }
     const result = best as { id: number; hit: THREE.Vector3; distance: number } | null;
     return result ? { id: result.id, hit: result.hit } : null;
   }
@@ -294,16 +320,6 @@ export class VaultEncounterVisuals {
           point.y >= actor.position.y && point.y <= actor.position.y + 1.5 &&
           Math.abs(point.z - actor.position.z) <= 0.75) {
         return { id: actor.id, hit: point.clone() };
-      }
-    }
-    for (const object of snapshot.objects) {
-      const wide = object.kind === 'cover' || object.kind === 'crusher_wall';
-      const halfWidth = wide ? 1.8 : 0.85;
-      const height = object.kind === 'mine' || object.kind === 'brood_pool' ? 0.6 : 2.2;
-      if (Math.abs(point.x - object.position.x) <= halfWidth &&
-          point.y >= object.position.y && point.y <= object.position.y + height &&
-          Math.abs(point.z - object.position.z) <= halfWidth) {
-        return { id: object.id, hit: point.clone() };
       }
     }
     return null;

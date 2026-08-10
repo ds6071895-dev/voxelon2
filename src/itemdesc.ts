@@ -30,7 +30,7 @@ const DESCRIPTIONS: Record<number, string> = {
   [Item.VaultCompass1]: 'Right-click: marks the nearest Tier I vault on your map. ONE use.',
   [Item.VaultCompass2]: 'Right-click: marks the nearest Tier II vault (mid Wilds). ONE use.',
   [Item.VaultCompass3]: 'Right-click: marks the nearest Tier III vault (deep Wilds). ONE use.',
-  [Block.MobSpawner]: 'Vault guards pour out while it stands — break it (iron pick) to silence the room.',
+  [Block.MobSpawner]: 'A protected vault anchor. Defeat its finite guard wave to silence the room.',
   // Traps.
   [Block.SpikeTrap]: 'Iron spikes — anyone STANDING on them gets hurt. Line moats + walls!',
   [Block.Landmine]: 'Arms when placed. EXPLODES when stepped on — even by YOU. Hide it well.',

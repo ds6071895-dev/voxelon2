@@ -317,9 +317,9 @@ and skitters that keep a room populated until you CLEAR it — the anchor then
 sleeps for 30 minutes; Tier III vaults field armored variants), and a boss
 room containing one of five family bosses: the **Bone Warden**, **Mire Queen**,
 **Ember Colossus**, **Crystal Seer**, or **Gilded Artificer**. Every boss has
-three named phases, an encounter health/poise bar, intro/phase/victory
-cinematics, family music, readable ground telegraphs, breakable wards, and
-themed summoned mobs. Boss HP and encounter actors live on the SERVER, so
+three named phases, an encounter health bar, intro/phase/victory cinematics,
+family music, authoritative ground telegraphs, and finite optional summons.
+Boss HP and encounter actors live on the SERVER, so
 everyone's hits count. Vault tier (I–III) grows with
 distance from the origin, and the boss room holds a glowing **Vault Chest**
 with **per-player loot**: after the boss falls (a 10-minute window), every

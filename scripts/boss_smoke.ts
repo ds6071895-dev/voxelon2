@@ -1,11 +1,13 @@
 import {
-  BOSS_DEFINITIONS, ENCOUNTER_INTRO_SECONDS, ENCOUNTER_PHASE_TRANSITION_SECONDS,
+  BOSS_DEFINITIONS, ENCOUNTER_HURT_SECONDS, ENCOUNTER_INTRO_SECONDS,
+  ENCOUNTER_PHASE_TRANSITION_SECONDS,
   ENCOUNTER_RESET_GRACE_SECONDS, MAX_ENCOUNTER_ACTORS, MAX_ENCOUNTER_HAZARDS,
-  MAX_ENCOUNTER_OBJECTS, VaultEncounter, sanitizeEncounterSnapshot, sealContains,
+  MAX_ENCOUNTER_OBJECTS, VaultEncounter, bossHitContains, hazardContains,
+  participantHpMultiplier, sanitizeEncounterSnapshot, sealContains,
   type EncounterParticipant, type EncounterConfig,
 } from '../src/vault_encounter';
 import { bossMaxHp, encounterBaseHp } from '../src/vault_encounter';
-import type { VaultBossKind, VaultTier } from '../src/vaults';
+import { VAULT_BOSS_HITBOX, type VaultBossKind, type VaultTier } from '../src/vaults';
 import { Item, ITEMS, gunVolley } from '../src/items';
 import { encounterCoach, hazardAdvice } from '../src/vault_presentation';
 
@@ -69,8 +71,8 @@ for (const [index, kind] of kinds.entries()) {
   });
   check(phaseHit.accepted && encounter.phase === 2,
     `${def.name}: phase two triggers at 70% health`);
-  check(encounter.actors.length >= 5,
-    `${def.name}: phase two summons a themed army`);
+  check(encounter.actors.length === 0,
+    `${def.name}: phase two starts without a mandatory army`);
   check(encounter.actors.length <= MAX_ENCOUNTER_ACTORS &&
     encounter.objects.length <= MAX_ENCOUNTER_OBJECTS &&
     encounter.hazards.length <= MAX_ENCOUNTER_HAZARDS,
@@ -120,6 +122,55 @@ for (const [index, kind] of kinds.entries()) {
   check(encounter.status === 'victory' && encounter.hp === 0,
     `${def.name}: defeated boss cannot respawn itself`);
   check(!encounter.snapshot().seal.sealed, `${def.name}: victory opens the boss room`);
+}
+
+for (const kind of kinds) {
+  const def = BOSS_DEFINITIONS[kind];
+  const bounds = VAULT_BOSS_HITBOX[kind];
+  check(bossHitContains(kind, { x: 0, y: 0, z: 0 },
+    { x: 0, y: bounds.height - 0.1, z: 0 }) &&
+    !bossHitContains(kind, { x: 0, y: 0, z: 0 },
+      { x: bounds.halfWidth + 1, y: 1, z: 0 }),
+  `${def.name}: shared hit profile covers the full body without infinite reach`);
+  check(def.phases.every((phase) => phase.every((ability) =>
+    ability.telegraph >= 1 && ability.radius <= 14 && ability.object === undefined)),
+  `${def.name}: every attack has a readable warning, arena-bounded reach and no breakable objective`);
+}
+for (const tier of [1, 2, 3] as VaultTier[]) {
+  check(new Set(kinds.map((kind) => bossMaxHp(tier, kind))).size === 1,
+    `Tier ${tier}: all bosses start from one fair HP budget`);
+}
+check(participantHpMultiplier(1) === 1 && participantHpMultiplier(6) === 4.5,
+  'participant scaling keeps groups faster without trivializing six-player bosses');
+
+{
+  const center = { x: 0, y: 10, z: 0 };
+  const participant: EncounterParticipant = { id: 1, position: center, alive: true, inside: true };
+  const overlap = new VaultEncounter({
+    encounterId: 'hazard-iframe', seed: 77, tier: 2, kind: 'bone_warden', family: 'crypt',
+    center, bounds: { minX: -8, minY: 5, minZ: -8, maxX: 8, maxY: 20, maxZ: 8 },
+    sockets: [], cameraAnchors: [], startTime: 0,
+  });
+  overlap.start(1, 0);
+  for (let i = 0; i < Math.ceil((ENCOUNTER_INTRO_SECONDS + 0.1) / 0.1); i++) {
+    overlap.tick(0.1, [participant]);
+  }
+  overlap.hazards.length = 0;
+  const hazard = { id: 900, shape: 'circle' as const, origin: center, radius: 4,
+    width: 1, angle: Math.PI * 2, telegraphAt: overlap.now - 1,
+    executeAt: overlap.now, expiresAt: overlap.now + 1, damage: 8,
+    attack: 'overlap', hitParticipants: [] as number[] };
+  overlap.hazards.push(hazard, { ...hazard, id: 901, hitParticipants: [] });
+  const first = overlap.hitByHazard(900, participant);
+  const second = overlap.hitByHazard(901, participant);
+  check(first === 8 && second === 0 && ENCOUNTER_HURT_SECONDS === 0.5,
+    'overlapping online hazards share the same half-second hurt protection as offline play');
+  const ring = { ...hazard, shape: 'ring' as const, radius: 5, width: 1 };
+  const quadrant = { ...hazard, shape: 'quadrant' as const, radius: 5 };
+  check(hazardContains(ring, { x: 5, y: 10, z: 0 }) &&
+    !hazardContains(ring, center) &&
+    !hazardContains(quadrant, { x: 7, y: 10, z: 0 }),
+  'ring width and quadrant radius are authoritative collision geometry');
 }
 
 

@@ -8,7 +8,7 @@ import { Block, BLOCKS, isSolid, isVaultMasonry, Tile } from './blocks';
 import type { ItemEntities } from './itementity';
 import { Item, ItemStack } from './items';
 import { inCore } from './net/protocol';
-import { VaultBossKind, VaultStamp } from './vaults';
+import { VAULT_BOSS_HITBOX, VAULT_RECHARGE, VaultBossKind, VaultStamp } from './vaults';
 import type { Particles } from './particles';
 import type { Player } from './player';
 import type { Atlas } from './textures';
@@ -65,18 +65,17 @@ const ZOMBIE_DAMAGE = 3;
 const SKITTER_DAMAGE = 2;
 const BRUTE_DAMAGE = 6;
 
-/** Vault-boss variants (Milestone D+): one skeleton, three personalities. The
- *  RAVAGER is lean and fast, the COLOSSUS towers and hits like a turret.
- *  Server HP stays tier-based; these tune the client body/AI/damage. */
+/** Vault-boss movement and collision profiles. Server HP stays tier-based;
+ * these tune each procedural client rig's scale, movement and melee damage. */
 export const BOSS_VARIANTS: Record<VaultBossKind, {
   scale: number; speed: number; damage: number;
   tint: [number, number, number] | null;
 }> = {
-  bone_warden:       { scale: 2.05, speed: 0.95, damage: BRUTE_DAMAGE, tint: [0.8, 0.65, 1.15] },
-  mire_queen:        { scale: 1.85, speed: 1.15, damage: 5, tint: [0.55, 1.05, 0.82] },
-  ember_colossus:    { scale: 2.5, speed: 0.72, damage: 10, tint: [1.18, 0.62, 0.38] },
-  crystal_seer:      { scale: 1.65, speed: 1.35, damage: 6, tint: [0.62, 0.84, 1.2] },
-  gilded_artificer:  { scale: 1.75, speed: 1.25, damage: 7, tint: [1.18, 0.92, 0.42] },
+  bone_warden:       { scale: 1.85, speed: 0.95, damage: BRUTE_DAMAGE, tint: null },
+  mire_queen:        { scale: 1.8, speed: 1.15, damage: 5, tint: null },
+  ember_colossus:    { scale: 1.9, speed: 0.72, damage: 10, tint: null },
+  crystal_seer:      { scale: 1.75, speed: 1.35, damage: 6, tint: null },
+  gilded_artificer:  { scale: 1.8, speed: 1.25, damage: 7, tint: null },
 };
 const SPIT_DAMAGE = 3;
 const SPIT_COOLDOWN = 2.4;
@@ -265,7 +264,11 @@ export class Mob {
   bossKind: VaultBossKind | null = null;
   bossBaseScale = 1;
   bossAnimTime = 0;
+  bossCast = '';
+  bossPhase: 1 | 2 | 3 = 1;
+  bossDefeated = false;
   readonly bossParts: THREE.Object3D[] = [];
+  readonly bossMaterials: THREE.Material[] = [];
   readonly model: MobModel;
   readonly material: THREE.MeshBasicMaterial;
 
@@ -280,6 +283,268 @@ export class Mob {
       map: atlas.texture, vertexColors: true,
     });
     this.model = buildModel(type, atlas, this.material);
+  }
+}
+
+/** Replace the generic brute mesh with a family-specific rig. The returned
+ * model still uses the normal mob root, head and leg pivots, and every shape is
+ * built above y=0 so encounter snapshot positions remain feet positions. */
+export function buildBossModel(mob: Mob, kind: VaultBossKind, atlas: Atlas): void {
+  const root = mob.model.group;
+  root.traverse((object) => {
+    const mesh = object as THREE.Mesh;
+    if (mesh.geometry) mesh.geometry.dispose();
+  });
+  root.clear();
+  mob.model.head = null;
+  mob.model.legs.length = 0;
+  mob.bossParts.length = 0;
+  root.userData.bossKind = kind;
+
+  const primary = kind === 'bone_warden' ? 0x2b2138
+    : kind === 'mire_queen' ? 0x173c30
+    : kind === 'ember_colossus' ? 0x241b1a
+    : kind === 'crystal_seer' ? 0x17334a : 0x302819;
+  const accentColor = kind === 'bone_warden' ? 0xd9cfad
+    : kind === 'mire_queen' ? 0x6f8b45
+    : kind === 'ember_colossus' ? 0x5d514b
+    : kind === 'crystal_seer' ? 0x56a6d6 : 0xb78c32;
+  const secondary = kind === 'bone_warden' ? 0xb984ff
+    : kind === 'mire_queen' ? 0x7cffc6
+    : kind === 'ember_colossus' ? 0xff7a2f
+    : kind === 'crystal_seer' ? 0xbdefff : 0xffdf72;
+  const armor = new THREE.MeshBasicMaterial({ color: primary });
+  const accent = new THREE.MeshBasicMaterial({ color: accentColor });
+  const glow = new THREE.MeshBasicMaterial({
+    color: secondary, transparent: true, opacity: 0.9,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  armor.userData.baseColor = new THREE.Color(primary);
+  accent.userData.baseColor = new THREE.Color(accentColor);
+  glow.userData.baseColor = new THREE.Color(secondary);
+  glow.userData.glow = true;
+  mob.bossMaterials.push(armor, accent, glow);
+
+  const add = <T extends THREE.Object3D>(
+    object: T, x: number, y: number, z: number, animate = false,
+  ): T => {
+    object.position.set(x, y, z);
+    root.add(object);
+    if (animate) mob.bossParts.push(object);
+    return object;
+  };
+  const box = (
+    w: number, h: number, d: number, x: number, y: number, z: number,
+    material: THREE.Material = armor, animate = false,
+  ): THREE.Mesh => add(new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material),
+    x, y, z, animate);
+  const sphere = (
+    radius: number, x: number, y: number, z: number,
+    material: THREE.Material = armor, animate = false,
+  ): THREE.Mesh => add(new THREE.Mesh(new THREE.SphereGeometry(radius, 8, 6), material),
+    x, y, z, animate);
+  const cylinder = (
+    top: number, bottom: number, height: number, x: number, y: number, z: number,
+    material: THREE.Material = armor, animate = false, sides = 8,
+  ): THREE.Mesh => add(new THREE.Mesh(
+    new THREE.CylinderGeometry(top, bottom, height, sides), material), x, y, z, animate);
+  const octa = (
+    radius: number, x: number, y: number, z: number,
+    material: THREE.Material = armor, animate = false,
+  ): THREE.Mesh => add(new THREE.Mesh(new THREE.OctahedronGeometry(radius, 0), material),
+    x, y, z, animate);
+  const tag = <T extends THREE.Object3D>(object: T, role: string, index = 0): T => {
+    object.userData.role = role;
+    object.userData.index = index;
+    object.userData.baseX = object.position.x;
+    object.userData.baseY = object.position.y;
+    object.userData.baseZ = object.position.z;
+    object.userData.baseRotX = object.rotation.x;
+    object.userData.baseRotY = object.rotation.y;
+    object.userData.baseRotZ = object.rotation.z;
+    return object;
+  };
+
+  if (kind === 'bone_warden') {
+    // Funeral bell suspended inside a walking ossuary cage.
+    for (const sx of [-1, 1]) {
+      box(0.22, 0.82, 0.24, sx * 0.28, 0.41, 0, accent);
+      const upright = box(0.14, 1.28, 0.16, sx * 0.54, 1.45, 0, accent);
+      upright.rotation.z = sx * -0.08;
+      const chain = new THREE.Group();
+      for (let i = 0; i < 4; i++) {
+        const link = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.18, 0.13),
+          i === 3 ? glow : accent);
+        link.position.set(sx * i * 0.07, -i * 0.22, 0);
+        link.rotation.z = i * Math.PI / 4;
+        chain.add(link);
+      }
+      tag(add(chain, sx * 0.76, 1.5, 0, true), 'chain', sx);
+    }
+    box(1.26, 0.16, 0.22, 0, 2.08, 0, accent);
+    box(1.02, 0.15, 0.2, 0, 1.15, 0, accent);
+    for (const sx of [-1, 1]) {
+      const arch = box(0.15, 0.78, 0.16, sx * 0.42, 2.37, 0, accent);
+      arch.rotation.z = sx * -0.28;
+    }
+    tag(cylinder(0.27, 0.42, 0.62, 0, 1.55, 0, glow, true), 'bell');
+    box(0.1, 0.42, 0.1, 0, 1.1, 0, glow);
+    const head = new THREE.Group();
+    head.add(new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.58, 0.3), armor));
+    for (const sx of [-1, 1]) {
+      const eye = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.12, 0.05), glow);
+      eye.position.set(sx * 0.14, 0.08, 0.17);
+      head.add(eye);
+    }
+    tag(add(head, 0, 2.78, -0.02, true), 'lantern');
+    mob.model.head = head;
+  } else if (kind === 'mire_queen') {
+    // Long lotus-crocodile serpent with a readable jaw, throat and tail.
+    for (let i = 0; i < 4; i++) {
+      const body = sphere(0.5 - i * 0.045, 0, 0.72 - i * 0.04, -i * 0.52,
+        accent, i > 0);
+      body.scale.set(1.25 - i * 0.08, 0.65, 1.2);
+      if (i > 0) tag(body, 'tail', i);
+    }
+    const head = new THREE.Group();
+    head.add(new THREE.Mesh(new THREE.BoxGeometry(0.92, 0.42, 0.76), armor));
+    const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.82, 0.16, 0.7), accent);
+    jaw.position.set(0, -0.25, -0.05);
+    head.add(jaw);
+    for (const sx of [-1, 1]) {
+      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.09, 6, 4), glow);
+      eye.position.set(sx * 0.3, 0.1, 0.37);
+      head.add(eye);
+    }
+    tag(add(head, 0, 0.98, 0.72, true), 'maw');
+    mob.model.head = head;
+    const throat = sphere(0.27, 0, 0.58, 0.72, glow, true);
+    throat.scale.set(1.2, 0.7, 1);
+    tag(throat, 'throat');
+    for (const sx of [-1, 1]) {
+      for (let i = 0; i < 3; i++) {
+        const fin = box(0.58, 0.1, 0.28, sx * 0.67, 0.73, 0.2 - i * 0.5,
+          i === 1 ? armor : accent, true);
+        fin.rotation.z = sx * -0.36;
+        tag(fin, 'fin', i + (sx > 0 ? 3 : 0));
+      }
+    }
+    for (let i = 0; i < 5; i++) {
+      const petal = cylinder(0, 0.15, 0.72 + (i % 2) * 0.18,
+        (i - 2) * 0.18, 1.54, 0.45, i === 2 ? glow : armor, true, 5);
+      petal.rotation.z = (i - 2) * 0.24;
+      tag(petal, 'crown', i);
+    }
+  } else if (kind === 'ember_colossus') {
+    // Four-legged volcanic beast with a crater shell and molten tail.
+    for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]] as [number, number][]) {
+      const leg = box(0.38, 0.74, 0.42, sx * 0.62, 0.37, sz * 0.56, accent, true);
+      tag(leg, 'caldera_leg', sx + sz * 2);
+    }
+    const body = sphere(0.76, 0, 1.08, 0.1, armor);
+    body.scale.set(1.35, 0.78, 1.45);
+    for (const sx of [-1, 1]) {
+      const plate = box(0.5, 0.18, 1.15, sx * 0.67, 1.38, 0.1, accent);
+      plate.rotation.z = sx * -0.16;
+    }
+    const crater = new THREE.Mesh(new THREE.TorusGeometry(0.48, 0.13, 6, 16), accent);
+    crater.rotation.x = Math.PI / 2;
+    tag(add(crater, 0, 1.72, 0.22, true), 'crater');
+    tag(cylinder(0, 0.23, 0.72, 0, 2.02, 0.22, glow, true, 6), 'flame');
+    const head = new THREE.Group();
+    head.add(new THREE.Mesh(new THREE.BoxGeometry(0.78, 0.5, 0.64), accent));
+    const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.18, 0.58), armor);
+    jaw.position.set(0, -0.3, -0.08);
+    head.add(jaw);
+    const eye = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.13, 0.06), glow);
+    eye.position.set(0, 0.08, 0.34);
+    head.add(eye);
+    tag(add(head, 0, 1.14, 1.02, true), 'caldera_head');
+    mob.model.head = head;
+    for (let i = 0; i < 3; i++) {
+      const tail = box(0.42 - i * 0.08, 0.32 - i * 0.04, 0.58,
+        0, 0.88 - i * 0.12, -1.05 - i * 0.46, i === 2 ? glow : accent, true);
+      tag(tail, 'tail', i);
+    }
+  } else if (kind === 'crystal_seer') {
+    // Broad prism moth with articulated wings and a hanging crystal tail.
+    const core = octa(0.62, 0, 1.28, 0, armor);
+    core.scale.set(0.68, 1.25, 0.62);
+    for (const sx of [-1, 1]) {
+      const wing = new THREE.Group();
+      for (let i = 0; i < 3; i++) {
+        const panel = new THREE.Mesh(new THREE.OctahedronGeometry(0.48 - i * 0.07, 0),
+          i === 1 ? glow : accent);
+        panel.scale.set(1.45, 0.58, 0.2);
+        panel.position.set(sx * (0.38 + i * 0.48), (1 - i) * 0.28, 0.08 + i * 0.05);
+        wing.add(panel);
+      }
+      tag(add(wing, sx * 0.36, 1.42, 0.08, true), 'wing', sx);
+    }
+    const head = new THREE.Group();
+    const mask = new THREE.Mesh(new THREE.OctahedronGeometry(0.42, 0), accent);
+    mask.scale.set(0.82, 1.08, 0.48);
+    head.add(mask);
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.2, 10, 6), glow);
+    eye.scale.set(0.5, 1.5, 0.38);
+    eye.position.z = 0.36;
+    head.add(eye);
+    tag(add(head, 0, 1.74, 0.32, true), 'seer_head');
+    mob.model.head = head;
+    for (let i = 0; i < 4; i++) {
+      const tail = octa(0.28 - i * 0.035, 0, 0.72 - i * 0.34, 0.08 + i * 0.06,
+        i % 2 ? glow : accent, true);
+      tail.scale.set(0.72, 1.25, 0.55);
+      tag(tail, 'prism_tail', i);
+    }
+  } else {
+    // Tall tripod crane automaton with clock-face head and three tools.
+    for (let i = 0; i < 3; i++) {
+      const a = -Math.PI / 2 + i * Math.PI * 2 / 3;
+      const leg = box(0.22, 1.25, 0.24, Math.cos(a) * 0.62, 0.62,
+        Math.sin(a) * 0.62, accent, true);
+      leg.rotation.z = Math.cos(a) * -0.24;
+      leg.rotation.x = Math.sin(a) * 0.24;
+      tag(leg, 'tripod', i);
+    }
+    cylinder(0.62, 0.76, 0.5, 0, 1.2, 0, armor);
+    tag(octa(0.32, 0, 1.02, 0, glow, true), 'core');
+    box(0.24, 0.9, 0.24, 0, 1.72, 0, accent);
+    const head = new THREE.Group();
+    const clock = new THREE.Mesh(new THREE.SphereGeometry(0.56, 10, 7), armor);
+    clock.scale.set(1, 1, 0.28);
+    head.add(clock);
+    const rim = new THREE.Mesh(new THREE.TorusGeometry(0.51, 0.07, 6, 20), accent);
+    rim.position.z = 0.17;
+    head.add(rim);
+    for (let i = 0; i < 8; i++) {
+      const mark = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.14, 0.04), glow);
+      const a = i * Math.PI / 4;
+      mark.position.set(Math.sin(a) * 0.38, Math.cos(a) * 0.38, 0.22);
+      mark.rotation.z = -a;
+      head.add(mark);
+    }
+    const hand = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.48, 0.05), glow);
+    hand.position.set(0, 0.16, 0.24);
+    head.add(hand);
+    tag(add(head, 0, 2.38, -0.02, true), 'clock');
+    mob.model.head = head;
+    for (let i = 0; i < 3; i++) {
+      const a = i * Math.PI * 2 / 3;
+      const arm = new THREE.Group();
+      const beam = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 1.15), accent);
+      beam.position.z = -0.52;
+      arm.add(beam);
+      const tool = new THREE.Mesh(i === 0
+        ? new THREE.ConeGeometry(0.22, 0.5, 6)
+        : i === 1 ? new THREE.BoxGeometry(0.5, 0.18, 0.35)
+          : new THREE.OctahedronGeometry(0.25, 0), i === 2 ? glow : armor);
+      tool.position.set(0, 0, -1.05);
+      tool.rotation.x = i === 0 ? Math.PI / 2 : 0;
+      arm.add(tool);
+      arm.rotation.y = a;
+      tag(add(arm, 0, 1.82, 0, true), 'tool', i);
+    }
   }
 }
 
@@ -315,6 +580,10 @@ export class Mobs {
   /** The vault the player is currently inside (set by main each frame). */
   private vault: VaultStamp | null = null;
   private guardTimer = 0;
+  private guardClock = 0;
+  private readonly roomWaves = new Map<string, {
+    spawned: number; defeated: number; dormantUntil: number;
+  }>();
   /** In-flight spitter gobs (simple lobbed projectiles; client-side like mobs). */
   private readonly spits: { pos: THREE.Vector3; vel: THREE.Vector3; mesh: THREE.Mesh; life: number }[] = [];
   private readonly spitGeo = new THREE.SphereGeometry(0.16, 6, 5);
@@ -338,141 +607,28 @@ export class Mobs {
     return mob;
   }
 
-  /** Spawn a vault boss of the given flavour: the brute skeleton, rescaled and
-   *  retuned per variant (hitbox follows the visual scale). */
+  /** Spawn a vault boss with a family-specific rig; the root and hitbox still
+   *  follow the standard brute API used by combat and snapshot playback. */
   spawnBoss(kind: VaultBossKind, x: number, y: number, z: number): Mob {
     const mob = this.spawnAt('brute', x, y, z);
     const v = BOSS_VARIANTS[kind] ?? BOSS_VARIANTS.bone_warden;
+    buildBossModel(mob, kind, this.atlas);
     mob.model.group.scale.setScalar(v.scale);
     mob.bossKind = kind;
     mob.bossBaseScale = v.scale;
-    const f = v.scale / 1.9; // buildModel bakes 1.9× into the brute body
-    mob.halfW = mob.def.halfW * f;
-    mob.height = mob.def.height * f;
+    mob.halfW = VAULT_BOSS_HITBOX[kind].halfWidth;
+    mob.height = VAULT_BOSS_HITBOX[kind].height;
     mob.speedFactor = v.speed;
     mob.meleeDmg = v.damage;
     mob.tint = v.tint;
-
-    const primary = kind === 'bone_warden' ? 0xa785e8
-      : kind === 'mire_queen' ? 0x49d39c
-      : kind === 'ember_colossus' ? 0xff5b2c
-      : kind === 'crystal_seer' ? 0x72c8ff : 0xf0bd42;
-    const secondary = kind === 'bone_warden' ? 0xe9dcff
-      : kind === 'mire_queen' ? 0x9cffb9
-      : kind === 'ember_colossus' ? 0xffd06a
-      : kind === 'crystal_seer' ? 0xd9f5ff : 0xfff2a6;
-    const mat = new THREE.MeshBasicMaterial({ color: primary });
-    const glow = new THREE.MeshBasicMaterial({
-      color: secondary, transparent: true, opacity: 0.9,
-      blending: THREE.AdditiveBlending, depthWrite: false,
-    });
-    const add = (mesh: THREE.Object3D, px: number, py: number, pz: number,
-      animate = true): THREE.Object3D => {
-      mesh.position.set(px, py, pz);
-      mob.model.group.add(mesh);
-      if (animate) mob.bossParts.push(mesh);
-      return mesh;
-    };
-    const box = (w: number, h: number, d: number, px: number, py: number, pz: number,
-      material: THREE.Material = mat, animate = true): THREE.Object3D =>
-      add(new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material), px, py, pz, animate);
-
-    if (kind === 'bone_warden') {
-      // Layered shield, executioner blade, horned crown and orbiting soul runes.
-      const shield = box(1.05, 1.35, 0.18, -0.72, 1.78, -0.18);
-      box(0.74, 0.82, 0.08, -0.72, 1.8, -0.3, glow, false).rotation.z = Math.PI / 4;
-      const blade = box(0.2, 2.1, 0.34, 0.82, 1.45, -0.12);
-      blade.rotation.z = -0.28;
-      box(0.72, 0.18, 0.22, 0.72, 2.25, -0.12, glow, false);
-      for (const sx of [-1, 1]) {
-        const horn = box(0.18, 0.72, 0.18, sx * 0.3, 3.02, 0);
-        horn.rotation.z = sx * -0.42;
-      }
-      for (let i = 0; i < 4; i++) {
-        const rune = new THREE.Mesh(new THREE.TorusGeometry(0.18, 0.045, 5, 12), glow);
-        rune.userData.orbit = i;
-        add(rune, 0, 2.1, 0);
-      }
-      shield.userData.role = 'shield';
-    } else if (kind === 'mire_queen') {
-      // Crown fronds, articulated tendrils, glowing brood sacs and a broad mantle.
-      box(1.25, 0.28, 0.62, 0, 2.2, 0.12);
-      for (let i = 0; i < 7; i++) {
-        const frond = box(0.14, 1.15 + (i % 2) * 0.22, 0.14,
-          (i - 3) * 0.21, 2.72 + (i % 2) * 0.12, 0);
-        frond.rotation.z = (i - 3) * 0.13;
-        frond.userData.role = 'frond';
-        frond.userData.baseRotZ = frond.rotation.z;
-      }
-      for (let i = 0; i < 6; i++) {
-        const a = i / 6 * Math.PI * 2;
-        const tendril = box(0.13, 1.55, 0.13, Math.cos(a) * 0.68, 0.88,
-          Math.sin(a) * 0.68);
-        tendril.rotation.z = Math.cos(a) * 0.7;
-        tendril.rotation.x = Math.sin(a) * 0.7;
-        tendril.userData.role = 'tendril';
-        tendril.userData.baseRotZ = tendril.rotation.z;
-        tendril.userData.baseRotX = tendril.rotation.x;
-        const sac = new THREE.Mesh(new THREE.SphereGeometry(0.22, 8, 6), glow);
-        add(sac, Math.cos(a) * 0.82, 1.45, Math.sin(a) * 0.82);
-        sac.userData.role = 'sac';
-      }
-    } else if (kind === 'ember_colossus') {
-      // Heavy shoulder furnaces, white-hot chest core, exhaust stacks and hammer fists.
-      box(1.45, 0.42, 0.7, 0, 2.08, 0.05);
-      const core = box(0.9, 0.92, 0.14, 0, 1.82, -0.66, glow);
-      core.userData.role = 'core';
-      for (const sx of [-1, 1]) {
-        box(0.72, 0.58, 0.72, sx * 0.72, 2.35, 0.05);
-        const chimney = box(0.3, 1.25, 0.3, sx * 0.48, 2.92, 0.28);
-        chimney.userData.role = 'chimney';
-        const fist = box(0.68, 0.72, 0.68, sx * 0.86, 0.88, -0.12);
-        fist.userData.role = 'fist';
-      }
-      for (let i = 0; i < 5; i++) {
-        const seam = box(0.09, 0.5, 0.06, (i - 2) * 0.16, 1.82, -0.75, glow);
-        seam.userData.role = 'seam';
-      }
-    } else if (kind === 'crystal_seer') {
-      // Floating crown, central eye and two independently rotating shard orbits.
-      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.28, 12, 8), glow);
-      add(eye, 0, 2.05, -0.62);
-      eye.scale.set(1.45, 0.72, 0.5);
-      eye.userData.role = 'eye';
-      for (let i = 0; i < 10; i++) {
-        const shard = new THREE.Mesh(new THREE.OctahedronGeometry(i < 6 ? 0.24 : 0.16, 0),
-          i % 3 === 0 ? glow : mat);
-        shard.userData.orbit = i;
-        shard.userData.role = 'shard';
-        add(shard, 0, 2.15, 0);
-      }
-      const halo = new THREE.Mesh(new THREE.TorusGeometry(0.78, 0.09, 6, 20), glow);
-      halo.rotation.x = Math.PI / 2;
-      halo.userData.role = 'halo';
-      add(halo, 0, 2.45, 0);
-    } else {
-      // Counter-rotating gear halo, articulated tool rails, pistons and energy core.
-      for (let i = 0; i < 3; i++) {
-        const gear = new THREE.Mesh(new THREE.TorusGeometry(0.62 + i * 0.18, 0.09, 6, 16),
-          i === 1 ? glow : mat);
-        gear.position.set(0, 2.0, 0.42 + i * 0.04);
-        gear.rotation.x = Math.PI / 2;
-        gear.userData.role = 'gear';
-        gear.userData.spin = i % 2 ? -1 : 1;
-        mob.model.group.add(gear);
-        mob.bossParts.push(gear);
-      }
-      const core = new THREE.Mesh(new THREE.OctahedronGeometry(0.3, 0), glow);
-      add(core, 0, 1.88, -0.58);
-      core.userData.role = 'core';
-      for (const sx of [-1, 1]) {
-        const rail = box(1.15, 0.14, 0.14, sx * 0.45, 1.65, 0.42);
-        rail.rotation.z = sx * 0.18;
-        rail.userData.role = 'rail';
-        box(0.3, 0.65, 0.3, sx * 0.78, 1.3, 0.3, glow).userData.role = 'piston';
-      }
-    }
     return mob;
+  }
+
+  poseBoss(mob: Mob, cast: string | null, phase: 1 | 2 | 3, defeated = false): void {
+    if (!mob.bossKind) return;
+    mob.bossCast = cast ?? '';
+    mob.bossPhase = phase;
+    mob.bossDefeated = defeated;
   }
 
 
@@ -491,17 +647,15 @@ export class Mobs {
     this.remove(mob);
   }
 
-  /** Vault guards pour out of each room's MOB SPAWNER: while the cage block at
-   *  the room centre still stands (and a player is near), the room refills up
-   *  to its cap. BREAK the spawner (iron pick) to silence the room for good.
-   *  Guards spawn regardless of light (it's a dungeon). */
+  /** Each intact cage releases one finite wave. Killing the wave silences the
+   * room for the vault recharge period; mining is never part of progression. */
   private tickVaultGuards(player: Player): void {
     const v = this.vault;
     if (!v || player.dead) return;
     for (let i = 0; i < v.rooms.length; i++) {
       const room = v.rooms[i];
       if (room.cap <= 0) continue; // the hall + boss room have no spawner
-      // The spawner block sits at the room centre; no block, no guards.
+      // The spawner is a protected visual anchor, not a destructible objective.
       const sx = Math.floor(room.x), sy = Math.floor(room.y), sz = Math.floor(room.z);
       if (this.world.getBlock(sx, sy, sz) !== Block.MobSpawner) continue;
       // Spawners activate only with a player nearby (MC-style pressure).
@@ -509,9 +663,28 @@ export class Mobs {
         Math.abs(player.pos.y - room.y) < 10;
       if (!near) continue;
       const key = `${v.cx},${v.cz}:${i}`;
+      let wave = this.roomWaves.get(key);
+      if (!wave) {
+        wave = { spawned: 0, defeated: 0, dormantUntil: 0 };
+        this.roomWaves.set(key, wave);
+      }
+      if (wave.dormantUntil > this.guardClock) continue;
+      if (wave.dormantUntil > 0) {
+        wave.spawned = 0;
+        wave.defeated = 0;
+        wave.dormantUntil = 0;
+      }
       let count = 0;
       for (const m of this.list) if (m.room === key) count++;
-      if (this.guardTimer > 0 || count >= room.cap) continue;
+      // A despawned guard is replaced; only real combat kills advance a clear.
+      wave.spawned = Math.min(wave.spawned, wave.defeated + count);
+      const total = room.cap + v.tier;
+      if (wave.defeated >= total && count === 0) {
+        wave.dormantUntil = this.guardClock + VAULT_RECHARGE;
+        this.particles.poof(room.x + 0.5, room.y + 0.6, room.z + 0.5);
+        continue;
+      }
+      if (this.guardTimer > 0 || count >= room.cap || wave.spawned >= total) continue;
       // Pour out right beside the cage (the spawner's 3×3 plinth is safe floor).
       const gx = room.x + 0.5 + (Math.random() * 2 - 1) * 1.2;
       const gz = room.z + 0.5 + (Math.random() * 2 - 1) * 1.2;
@@ -532,6 +705,7 @@ export class Mobs {
       }
       const mob = this.spawnAt(type, gx, room.y, gz);
       mob.room = key;
+      wave.spawned++;
       // Armored elites: every treasury guard, all of Tier III, some of Tier II.
       if (room.kind === 'treasury' || v.tier >= 3 ||
           (v.tier === 2 && Math.random() < 0.35)) {
@@ -657,6 +831,10 @@ export class Mobs {
   }
 
   private kill(mob: Mob): void {
+    if (mob.room) {
+      const wave = this.roomWaves.get(mob.room);
+      if (wave) wave.defeated++;
+    }
     if (mob.type === 'brute') this.onBruteDown?.(mob);
     for (const drop of mob.def.drops(Math.random)) {
       this.items.spawn(
@@ -679,6 +857,7 @@ export class Mobs {
       if (m.geometry) m.geometry.dispose();
     });
     mob.material.dispose();
+    for (const material of mob.bossMaterials) material.dispose();
     const i = this.list.indexOf(mob);
     if (i >= 0) this.list.splice(i, 1);
   }
@@ -739,6 +918,7 @@ export class Mobs {
   }
 
   update(dt: number, player: Player, sun: number): void {
+    this.guardClock += dt;
     this.guardTimer = Math.max(0, this.guardTimer - dt);
     if (this.spawningEnabled) this.tickVaultGuards(player);
     this.spawnTimer += dt;
@@ -843,7 +1023,11 @@ export class Mobs {
     let moving = false;
     let speedMul = 0.7;
 
-    if (mob.state === 'flee') {
+    if (mob.bossKind) {
+      mob.state = 'idle';
+      mob.vel.x = 0;
+      mob.vel.z = 0;
+    } else if (mob.state === 'flee') {
       mob.stateTime -= dt;
       mob.yaw = Math.atan2(-toPlayer.x, -toPlayer.z);
       moving = true;
@@ -1016,13 +1200,66 @@ export class Mobs {
     if (mob.bossKind) {
       mob.bossAnimTime += dt;
       const bt = mob.bossAnimTime;
-      const breathe = 1 + Math.sin(bt * 1.8) * 0.015;
+      const casting = mob.bossCast ? 1 : 0;
+      const pressure = 1 + (mob.bossPhase - 1) * 0.18;
+      const breathe = 1 + Math.sin(bt * 1.8) * 0.015 * pressure;
       mob.model.group.scale.setScalar(mob.bossBaseScale * breathe);
+      mob.model.group.rotation.z += ((mob.bossDefeated ? -Math.PI / 2 : 0) -
+        mob.model.group.rotation.z) * Math.min(1, dt * 4);
       for (let i = 0; i < mob.bossParts.length; i++) {
         const part = mob.bossParts[i];
         const role = part.userData.role as string | undefined;
         const orbit = part.userData.orbit as number | undefined;
-        if (orbit !== undefined && role === 'shard') {
+        const index = Number(part.userData.index ?? i);
+        if (role === 'chain') {
+          part.rotation.x = Math.sin(bt * 1.7 + index) * 0.12 - casting * 0.65;
+          part.rotation.z = Math.sin(bt * 1.1 + index) * 0.08;
+        } else if (role === 'bell') {
+          part.rotation.z = Math.sin(bt * (casting ? 9 : 2.2)) * (casting ? 0.22 : 0.04);
+          part.scale.setScalar(1 + casting * 0.13);
+        } else if (role === 'lantern') {
+          part.position.y = (part.userData.baseY ?? 2.78) + Math.sin(bt * 2.1) * 0.05;
+        } else if (role === 'tail') {
+          part.position.x = (part.userData.baseX ?? 0) +
+            Math.sin(bt * 1.5 - index * 0.65) * (0.08 + index * 0.035) * pressure;
+          part.rotation.y = Math.sin(bt * 1.4 - index * 0.7) * 0.12 * pressure;
+        } else if (role === 'maw' || role === 'caldera_head') {
+          part.rotation.x = casting ? -0.16 - Math.sin(bt * 7) * 0.08 : Math.sin(bt) * 0.025;
+        } else if (role === 'throat') {
+          const pulse = 1 + Math.sin(bt * (casting ? 8 : 3)) * (casting ? 0.22 : 0.08);
+          part.scale.set(1.2 * pulse, 0.7 * pulse, pulse);
+        } else if (role === 'fin') {
+          part.rotation.z = (part.userData.baseRotZ ?? 0) + Math.sin(bt * 2 + index) * 0.09;
+        } else if (role === 'crown') {
+          part.rotation.z = (part.userData.baseRotZ ?? 0) +
+            Math.sin(bt * 1.7 + index) * 0.1 + casting * (index - 2) * 0.06;
+        } else if (role === 'caldera_leg') {
+          part.position.y = (part.userData.baseY ?? 0.37) + Math.sin(bt * 2.4 + index) * 0.035;
+        } else if (role === 'crater') {
+          part.rotation.z = bt * (0.35 + mob.bossPhase * 0.16);
+        } else if (role === 'flame') {
+          const pulse = 1 + Math.sin(bt * 7) * 0.16 + casting * 0.25;
+          part.scale.set(1, pulse, 1);
+        } else if (role === 'wing') {
+          part.rotation.z = index * (0.08 + Math.sin(bt * 1.8) * 0.04);
+          part.rotation.y = index * Math.sin(bt * (casting ? 5 : 1.6)) *
+            (casting ? 0.2 : 0.06);
+        } else if (role === 'seer_head') {
+          part.position.y = (part.userData.baseY ?? 1.74) + Math.sin(bt * 1.5) * 0.08;
+        } else if (role === 'prism_tail') {
+          part.rotation.y = bt * (index % 2 ? -0.55 : 0.55);
+          part.position.x = Math.sin(bt * 1.4 + index) * 0.05;
+        } else if (role === 'clock') {
+          part.rotation.z = Math.sin(bt * 0.8) * 0.04;
+        } else if (role === 'tool') {
+          part.rotation.y = index * Math.PI * 2 / 3 + bt * (casting ? 1.6 : 0.28);
+          part.rotation.x = casting ? Math.sin(bt * 5 + index) * 0.2 : 0;
+        } else if (role === 'tripod') {
+          part.position.y = (part.userData.baseY ?? 0.62) + Math.sin(bt * 2 + index * 2) * 0.035;
+        } else if (role === 'core') {
+          const pulse = 1 + Math.sin(bt * (casting ? 8 : 5)) * 0.1 + casting * 0.1;
+          part.scale.setScalar(pulse);
+        } else if (orbit !== undefined && role === 'shard') {
           const outer = orbit < 6;
           const a = bt * (outer ? 0.72 : -1.05) + orbit * (Math.PI * 2 / (outer ? 6 : 4));
           const r = outer ? 1.0 : 0.64;
@@ -1045,14 +1282,14 @@ export class Mobs {
           part.rotation.x = (part.userData.baseRotX ?? 0) + Math.cos(bt * 1.5 + i) * 0.12;
         } else if (role === 'frond') {
           part.rotation.z = (part.userData.baseRotZ ?? 0) + Math.sin(bt * 1.2 + i) * 0.1;
-        } else if (role === 'core' || role === 'eye' || role === 'sac' || role === 'seam') {
-          const pulse = 1 + Math.sin(bt * (role === 'core' ? 5 : 3.2) + i) * 0.09;
+        } else if (role === 'eye' || role === 'sac' || role === 'seam') {
+          const pulse = 1 + Math.sin(bt * 3.2 + i) * 0.09;
           part.scale.setScalar(pulse);
           if (role === 'eye') part.scale.set(1.45 * pulse, 0.72 * pulse, 0.5 * pulse);
         } else if (role === 'piston') {
-          part.position.y = 1.3 + Math.sin(bt * 3.5 + i) * 0.14;
+          part.position.y = (part.userData.baseY ?? 1.3) + Math.sin(bt * 3.5 + i) * 0.14;
         } else if (role === 'chimney') {
-          part.position.y = 2.92 + Math.sin(bt * 2.2 + i) * 0.04;
+          part.position.y = (part.userData.baseY ?? 2.92) + Math.sin(bt * 2.2 + i) * 0.04;
         } else if (role === 'fist') {
           part.rotation.x = Math.sin(bt * 1.25 + i * Math.PI) * 0.12;
         }
@@ -1093,7 +1330,7 @@ export class Mobs {
     }
     const b = mob.brightness;
     if (mob.hurtTime > 0) mob.material.color.setRGB(b, b * 0.35, b * 0.35);
-    else if (mob.tint) { // boss-variant hide color (ravager red / colossus pale)
+    else if (mob.tint) { // family tint on the boss's textured body pieces
       mob.material.color.setRGB(
         Math.min(1, b * mob.tint[0]), Math.min(1, b * mob.tint[1]), Math.min(1, b * mob.tint[2]));
     }
@@ -1102,6 +1339,14 @@ export class Mobs {
       const w = 0.5 + 0.5 * Math.sin(mob.fuse * 25);
       mob.material.color.setRGB(b + (1 - b) * w, b + (1 - b) * w, b + (1 - b) * w);
     } else mob.material.color.setScalar(b);
+    for (const material of mob.bossMaterials) {
+      const mat = material as THREE.MeshBasicMaterial;
+      const base = mat.userData.baseColor as THREE.Color | undefined;
+      if (!base) continue;
+      if (mob.hurtTime > 0) mat.color.setRGB(1, 0.22, 0.16);
+      else if (mat.userData.glow) mat.color.copy(base);
+      else mat.color.setRGB(base.r * b, base.g * b, base.b * b);
+    }
   }
 
   /**

@@ -88,7 +88,7 @@ import {
 } from './vaults';
 import {
   BOSS_DEFINITIONS, EncounterEvent, EncounterSnapshot, VaultAttackIntent, VaultEncounter,
-  bossMaxHp, sealContains,
+  ENCOUNTER_VICTORY_CINEMATIC_SECONDS, bossMaxHp, sealContains,
 } from './vault_encounter';
 import {
   VaultBossHUD, VaultCinematic, loadAccessibility, saveAccessibility,
@@ -3075,6 +3075,7 @@ interface VaultView { tier: number; hp: number; maxHp: number; alive: boolean; o
 const vaultViews = new Map<string, VaultView>();
 let curVault: VaultStamp | null = null;
 let bruteMob: Mob | null = null;
+let bossVictoryTimer = 0;
 const bossRenderTarget = new THREE.Vector3();
 let localVaultEncounter: VaultEncounter | null = null;
 let localEncounterVaultKey: string | null = null;
@@ -3086,13 +3087,15 @@ let encounterShakeStrength = 0;
 const seenEncounterEvents = new Set<string>();
 const seenEncounterIntros = new Set<string>();
 let activeEncounterId = '';
+interface OfflineArenaPlacement { encounterId: string; block: number; restoreBlock: number; }
+const offlineArenaPlacements = new Map<string, OfflineArenaPlacement>();
+const pendingOfflineArenaPlacements = new Map<string, number>();
 
 /** One cleanup gate for every way an encounter presentation can end. Keeping
  * this atomic prevents a late snapshot from leaving a boss bar, cinematic or
  * soundtrack behind on the title/death/disconnect screens. */
 function clearVaultPresentation(dropSnapshot = true, musicFade = 0.3): void {
   if (dropSnapshot) encounterSnapshot = null;
-  encounterAttackSequence = 0;
   activeEncounterId = '';
   vaultBossHud.hide();
   vaultCinematic.finish();
@@ -3247,6 +3250,7 @@ function discoverVault(v: VaultStamp): void {
 function onVaultTransition(v: VaultStamp | null): void {
   const previousKey = curVault ? vaultKeyOf(curVault) : null;
   if (!v) {
+    cleanupOfflineArenaPlacements();
     clearVaultPresentation(true);
     seenEncounterEvents.clear();
     if (bruteMob) { mobs.slay(bruteMob); bruteMob = null; }
@@ -3259,6 +3263,7 @@ function onVaultTransition(v: VaultStamp | null): void {
   // returning cannot manufacture a fresh encounter id and replay its intro.
   // Moving to a different vault intentionally abandons the old local runtime.
   if (localEncounterVaultKey && localEncounterVaultKey !== nextKey) {
+    cleanupOfflineArenaPlacements();
     localVaultEncounter = null;
     localEncounterVaultKey = null;
   }
@@ -3287,6 +3292,28 @@ function localInsideArena(v: VaultStamp): boolean {
   return player.pos.x >= b.minX && player.pos.x <= b.maxX &&
     player.pos.y >= b.minY && player.pos.y <= b.maxY &&
     player.pos.z >= b.minZ && player.pos.z <= b.maxZ;
+}
+
+function blockInsideArena(v: VaultStamp, x: number, y: number, z: number): boolean {
+  const b = v.arena.bounds;
+  return x + 0.5 >= b.minX && x + 0.5 <= b.maxX &&
+    y + 0.5 >= b.minY && y + 0.5 <= b.maxY &&
+    z + 0.5 >= b.minZ && z + 0.5 <= b.maxZ;
+}
+
+/** Offline mirrors the server's ownership cleanup without firing block drops. */
+function cleanupOfflineArenaPlacements(encounterId?: string): void {
+  world.beginBatch();
+  for (const [key, placed] of [...offlineArenaPlacements]) {
+    if (encounterId && placed.encounterId !== encounterId) continue;
+    offlineArenaPlacements.delete(key);
+    const [x, y, z] = key.split(',').map(Number);
+    if (world.getBlock(x, y, z) !== placed.block) continue;
+    if (machines.has(x, y, z)) machines.remove(x, y, z);
+    world.applyRemoteEdit(x, y, z, placed.restoreBlock);
+  }
+  world.endBatch();
+  pendingOfflineArenaPlacements.clear();
 }
 
 function localEncounterParticipant(v: VaultStamp) {
@@ -3463,6 +3490,11 @@ function completeOfflineEncounter(v: VaultStamp): void {
 /** Per-frame vault upkeep: bounds test (throttled), guard anchors, the Brute,
  *  and the unopened-chest sparkle. */
 function updateVaults(dt: number): void {
+  if (bossVictoryTimer > 0 && bruteMob) {
+    bossVictoryTimer = Math.max(0, bossVictoryTimer - dt);
+    mobs.poseBoss(bruteMob, null, 3, true);
+    if (bossVictoryTimer === 0) { mobs.slay(bruteMob); bruteMob = null; }
+  }
   vaultPollTimer -= dt;
   if (vaultPollTimer <= 0) {
     vaultPollTimer = 0.3;
@@ -3485,9 +3517,23 @@ function updateVaults(dt: number): void {
     }
   }
   mobs.setVault(curVault);
-  if (!curVault) { vaultEncounterVisuals.hide(); return; }
+  if (!curVault) {
+    vaultEncounterVisuals.hide();
+    if (localVaultEncounter) {
+      localVaultEncounter.tick(dt, []);
+      if (localVaultEncounter.status === 'idle') {
+        cleanupOfflineArenaPlacements(localVaultEncounter.config.encounterId);
+        localVaultEncounter = null;
+        localEncounterVaultKey = null;
+      }
+    }
+    return;
+  }
   const view = vaultViews.get(vaultKeyOf(curVault));
   const inArena = localInsideArena(curVault);
+  if (!net.connected && localVaultEncounter && (!inArena || player.dead)) {
+    cleanupOfflineArenaPlacements(localVaultEncounter.config.encounterId);
+  }
   const myEncounterId = net.connected ? net.myId : 0;
   if (encounterSnapshot?.seal.sealed &&
       encounterSnapshot.participants.includes(myEncounterId)) {
@@ -3506,22 +3552,28 @@ function updateVaults(dt: number): void {
   }
   if (localVaultEncounter) {
     const events = localVaultEncounter.tick(dt, [localEncounterParticipant(curVault)]);
-    for (const event of events) encounterEvent(event);
-    for (const hazard of localVaultEncounter.hazards) {
-      const damage = localVaultEncounter.hitByHazard(hazard.id, localEncounterParticipant(curVault));
-      if (damage > 0) player.damage(damage);
+    if (!player.dead) {
+      for (const event of events) encounterEvent(event);
+      for (const hazard of localVaultEncounter.hazards) {
+        const damage = localVaultEncounter.hitByHazard(hazard.id, localEncounterParticipant(curVault));
+        if (damage > 0) player.damage(damage);
+      }
     }
-    encounterSnapshot = localVaultEncounter.snapshot();
-    if (bruteMob) {
-      bruteMob.health = encounterSnapshot.hp;
+    if (!player.dead) {
+      encounterSnapshot = localVaultEncounter.snapshot();
+      if (bruteMob) bruteMob.health = encounterSnapshot.hp;
+      vaultBossHud.update(encounterSnapshot);
+      audio.setVaultMusicPhase(encounterSnapshot.phase, encounterSnapshot.hpPercent < 0.15);
     }
-    vaultBossHud.update(encounterSnapshot);
-    audio.setVaultMusicPhase(encounterSnapshot.phase, encounterSnapshot.hpPercent < 0.15);
     if (localVaultEncounter.status === 'victory') {
       const victorySnapshot = encounterSnapshot;
+      cleanupOfflineArenaPlacements(localVaultEncounter.config.encounterId);
       completeOfflineEncounter(curVault);
       if (victorySnapshot) vaultCinematic.playVictory(victorySnapshot);
-      if (bruteMob) { mobs.slay(bruteMob); bruteMob = null; }
+      if (bruteMob) {
+        bossVictoryTimer = ENCOUNTER_VICTORY_CINEMATIC_SECONDS;
+        mobs.poseBoss(bruteMob, null, 3, true);
+      }
       encounterSnapshot = null;
       localVaultEncounter = null;
       localEncounterVaultKey = null;
@@ -3533,6 +3585,7 @@ function updateVaults(dt: number): void {
       // spawning a fresh body immediately after the kill.
       return;
     } else if (localVaultEncounter.status === 'idle') {
+      cleanupOfflineArenaPlacements(localVaultEncounter.config.encounterId);
       encounterSnapshot = null;
       localVaultEncounter = null;
       localEncounterVaultKey = null;
@@ -3543,6 +3596,7 @@ function updateVaults(dt: number): void {
   }
   if (bruteMob?.removed) bruteMob = null;
   if (bruteMob && encounterSnapshot) {
+    mobs.poseBoss(bruteMob, encounterSnapshot.cast?.name ?? null, encounterSnapshot.phase);
     bossRenderTarget.set(encounterSnapshot.boss.position.x,
       encounterSnapshot.boss.position.y, encounterSnapshot.boss.position.z);
     bruteMob.pos.lerp(bossRenderTarget, Math.min(1, dt *
@@ -3799,10 +3853,9 @@ net.onVault = (cx, cz, tier, hp, maxHp, alive, opened) => {
   refreshVaultMap();
 };
 net.onEncounterStart = (cx, cz, data) => {
-  if (screen !== 'playing' || !curVault || curVault.cx !== cx || curVault.cz !== cz) return;
+  if (screen !== 'playing' || player.dead || !curVault || curVault.cx !== cx || curVault.cz !== cz) return;
   encounterSnapshot = data.snapshot;
   activeEncounterId = encounterSnapshot.encounterId;
-  encounterAttackSequence = 0;
   seenEncounterEvents.clear();
   vaultBossHud.update(encounterSnapshot);
   const canShowIntro = encounterSnapshot.status === 'intro' && encounterSnapshot.elapsed <= 1.25;
@@ -3824,7 +3877,7 @@ net.onEncounterStart = (cx, cz, data) => {
   }
 };
 net.onEncounterSnapshot = (cx, cz, snapshot) => {
-  if (screen !== 'playing' || !curVault || curVault.cx !== cx || curVault.cz !== cz) return;
+  if (screen !== 'playing' || player.dead || !curVault || curVault.cx !== cx || curVault.cz !== cz) return;
   // An older encounter can still have a packet in flight after a reset/quit.
   if (activeEncounterId && snapshot.encounterId !== activeEncounterId) return;
   activeEncounterId = snapshot.encounterId;
@@ -3836,24 +3889,29 @@ net.onEncounterSnapshot = (cx, cz, snapshot) => {
   if (view) { view.hp = snapshot.hp; view.maxHp = snapshot.maxHp; view.alive = snapshot.hp > 0; }
 };
 net.onEncounterEvent = (cx, cz, event) => {
-  if (screen === 'playing' && curVault?.cx === cx && curVault.cz === cz) encounterEvent(event);
+  if (screen === 'playing' && !player.dead && curVault?.cx === cx && curVault.cz === cz) {
+    encounterEvent(event);
+  }
 };
 net.onEncounterEnd = (cx, cz, outcome) => {
   if (curVault?.cx !== cx || curVault.cz !== cz) return;
   const endedSnapshot = encounterSnapshot;
-  if (screen === 'playing' && outcome === 'victory') {
+  if (screen === 'playing' && !player.dead && outcome === 'victory') {
     if (endedSnapshot) vaultCinematic.playVictory(endedSnapshot);
     showRegionBanner('🏆 VAULT CLEARED!', '#ffd84a');
     audio.vaultMusicCue('victory');
     const viewState = vaultViews.get(`${cx},${cz}`);
     if (viewState) { viewState.hp = 0; viewState.alive = false; }
-    if (bruteMob) { mobs.slay(bruteMob); bruteMob = null; }
+    if (bruteMob) {
+      bossVictoryTimer = ENCOUNTER_VICTORY_CINEMATIC_SECONDS;
+      mobs.poseBoss(bruteMob, null, 3, true);
+    }
     encounterSnapshot = null;
     activeEncounterId = '';
     vaultBossHud.hide();
     vaultEncounterVisuals.hide();
   } else {
-    if (screen === 'playing') audio.vaultMusicCue('reset');
+    if (screen === 'playing' && !player.dead) audio.vaultMusicCue('reset');
     if (bruteMob) { mobs.slay(bruteMob); bruteMob = null; }
     clearVaultPresentation(true);
   }
@@ -4217,10 +4275,33 @@ net.onDisconnect = () => {
   refreshNetInfo();
 };
 interaction.onEdit = (x, y, z, b) => {
+  const key = `${x},${y},${z}`;
+  if (!net.connected && localVaultEncounter && curVault && blockInsideArena(curVault, x, y, z)) {
+    if (b === Block.Air) {
+      offlineArenaPlacements.delete(key);
+    } else {
+      const tracked = offlineArenaPlacements.get(key);
+      offlineArenaPlacements.set(key, {
+        encounterId: localVaultEncounter.config.encounterId,
+        block: b,
+        restoreBlock: tracked?.encounterId === localVaultEncounter.config.encounterId
+          ? tracked.restoreBlock : pendingOfflineArenaPlacements.get(key) ?? Block.Air,
+      });
+    }
+  }
+  pendingOfflineArenaPlacements.delete(key);
   // Placing a machine block creates its local entity (prediction offline + MP).
   const mt = machineTypeForBlock(b);
   if (mt !== null) machines.place(x, y, z, mt);
   net.sendEdit(x, y, z, b);
+};
+interaction.canPlace = (x, y, z) => {
+  return !(localVaultEncounter && curVault && blockInsideArena(curVault, x, y, z));
+};
+interaction.canEdit = (x, y, z) => {
+  const block = world.getBlock(x, y, z);
+  if (block === Block.MobSpawner || block === Block.VaultChest) return false;
+  return !(encounterSnapshot && curVault && blockInsideArena(curVault, x, y, z));
 };
 net.connect();
 

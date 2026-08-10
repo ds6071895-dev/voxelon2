@@ -43,7 +43,7 @@ import { chestLootSlots } from '../loot';
 import {
   VAULT_BOSS_NAMES, VaultServerState, VaultStamp, newVaultState,
   refreshVaultState, recordVaultLoot, sanitizeVaultState, vaultChestAt,
-  vaultLoot, vaultLootCooldownLeft, vaultLootable, vaultStamp,
+  vaultAt, vaultLoot, vaultLootCooldownLeft, vaultLootable, vaultStamp,
   worldVaults,
 } from '../vaults';
 import {
@@ -78,6 +78,12 @@ function fin(...ns: number[]): boolean {
 
 const REGEN_INTERVAL = 2;       // +1 HP every 2s out of combat
 const REGEN_DELAY = 5;          // seconds after damage before regen resumes
+
+/** Blocks a player must never materialize in or directly on during respawn. */
+const UNSAFE_RESPAWN_BLOCKS = new Set<number>([
+  Block.Water, Block.Cactus, Block.Lava, Block.SpikeTrap, Block.Landmine,
+  Block.BearTrap, Block.Tar, Block.BarbedWire,
+]);
 
 interface ServerPlayer extends PlayerInfo {
   regenCooldown: number;
@@ -165,6 +171,23 @@ export interface Outbound {
   msg: ServerMsg;
 }
 
+interface ArenaPlacement {
+  owner: number;
+  block: number;
+  restoreBlock: number;
+  previousEdit: number | undefined;
+}
+
+interface ActiveVaultEncounter {
+  stamp: VaultStamp;
+  engine: VaultEncounter;
+  snapshotAccum: number;
+  credited: string;
+  /** Authored arena cells let temporary placements restore the exact room. */
+  authoredBlocks: Map<string, number>;
+  placedBlocks: Map<string, ArenaPlacement>;
+}
+
 export class GameServer {
   readonly seed: number;
   private readonly terrain: Terrain;
@@ -212,10 +235,7 @@ export class GameServer {
   // by the anchor chunk "cx,cz". Persisted in the world save.
   private readonly vaults = new Map<string, VaultServerState>();
   /** Active fights are intentionally ephemeral and never serialized. */
-  private readonly vaultEncounters = new Map<string, {
-    stamp: VaultStamp; engine: VaultEncounter; snapshotAccum: number;
-    credited: string;
-  }>();
+  private readonly vaultEncounters = new Map<string, ActiveVaultEncounter>();
   private encounterSerial = 0;
   /** Deterministic vault stamps are pricey to rebuild — cache by anchor chunk. */
   private readonly vaultStamps = new Map<string, VaultStamp | null>();
@@ -262,8 +282,50 @@ export class GameServer {
 
   private spawn(): { x: number; y: number; z: number } {
     // Spawns stay inside the Heartland core (B2) — nobody wakes up in the Wilds.
-    const s = this.terrain.randomDrySpawn(this.rng, CORE_HALF);
-    return { x: s.x, y: s.y, z: s.z };
+    // Retry because player edits may have enclosed or trapped an otherwise-safe
+    // natural surface column since the terrain was generated.
+    for (let i = 0; i < 64; i++) {
+      const s = this.terrain.randomDrySpawn(this.rng, CORE_HALF);
+      if (this.safeRespawnPoint(s.x, s.y, s.z)) return s;
+    }
+    // A maliciously trapped fallback column must not put the player inside it.
+    // Search nearby natural surface columns deterministically before giving up.
+    const origin = this.terrain.findSpawn();
+    for (let r = 0; r <= 128; r++) {
+      for (let dx = -r; dx <= r; dx++) {
+        for (const dz of r === 0 ? [0] : [-r, r]) {
+          const s = this.terrain.safeSpawnAt(Math.floor(origin.x) + dx, Math.floor(origin.z) + dz);
+          if (s && this.safeRespawnPoint(s.x, s.y, s.z)) return s;
+        }
+      }
+      for (let dz = -r + 1; dz < r; dz++) {
+        for (const dx of [-r, r]) {
+          const s = this.terrain.safeSpawnAt(Math.floor(origin.x) + dx, Math.floor(origin.z) + dz);
+          if (s && this.safeRespawnPoint(s.x, s.y, s.z)) return s;
+        }
+      }
+    }
+    // This is only reachable if every checked column has been deliberately
+    // trapped. Spawning above them remains collision- and hazard-free.
+    return { x: origin.x, y: 257, z: origin.z };
+  }
+
+  private blockEditAt(x: number, y: number, z: number): number | undefined {
+    return this.edits.get(`${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`);
+  }
+
+  /** Requires solid safe support plus clear, non-hazardous feet and head cells. */
+  private safeRespawnPoint(x: number, y: number, z: number): boolean {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    const natural = this.terrain.blocksAtColumn(bx, bz, [by - 1, by, by + 1]);
+    const blocks = natural.map((block, i) =>
+      this.blockEditAt(bx, by - 1 + i, bz) ?? block);
+    const support = blocks[0];
+    if (!(BLOCKS[support]?.solid ?? false) || UNSAFE_RESPAWN_BLOCKS.has(support)) return false;
+    for (const block of blocks.slice(1)) {
+      if ((BLOCKS[block]?.solid ?? false) || UNSAFE_RESPAWN_BLOCKS.has(block)) return false;
+    }
+    return true;
   }
 
   /** Fail-closed sanitizer for a saved attuned-totem list (account data). */
@@ -292,13 +354,16 @@ export class GameServer {
       ? account.username : this.uniqueUsername();
     const faction = account?.faction !== undefined && FACTIONS.some((f) => f.id === account.faction)
       ? account.faction : this.assignFaction();
-    // Restore the saved position if the account carries one (and it's finite +
-    // above bedrock); otherwise drop in at a fresh scatter spawn.
+    // Restore the saved horizontal column, but always join on its surface. This
+    // prevents accounts saved in caves (or mid-air) from spawning there again.
     const saved = account?.data;
     const sx = saved?.x, sy = saved?.y, sz = saved?.z, syaw = saved?.yaw;
     const hasPos = fin(sx as number, sy as number, sz as number) && (sy as number) > 0;
-    const s = hasPos
-      ? { x: sx as number, y: sy as number, z: sz as number }
+    const savedSurface = hasPos
+      ? this.terrain.safeSpawnAt(sx as number, sz as number)
+      : undefined;
+    const s = savedSurface && this.safeRespawnPoint(savedSurface.x, savedSurface.y, savedSurface.z)
+      ? { x: sx as number, y: savedSurface.y, z: sz as number }
       : this.spawn();
     const savedMode = typeof saved?.mode === 'string' && GAME_MODES.includes(saved.mode as GameMode)
       ? saved.mode as GameMode : 'survival';
@@ -362,7 +427,7 @@ export class GameServer {
   removePlayer(id: number): Outbound[] {
     const p = this.players.get(id);
     if (!p) return [];
-    const out: Outbound[] = [];
+    const out = this.cleanupPlayerArenaPlacements(id);
     // Logging out never banks a flag run: it goes straight back to its pad.
     const dropped = returnFlag(this.flags, id);
     this.players.delete(id);
@@ -770,6 +835,22 @@ export class GameServer {
         const out: Outbound[] = [{ to: id, msg: { t: 'vault', cx: st.cx, cz: st.cz, tier: st.tier,
           hp: v.hp, maxHp: bossMaxHp(st.tier, st.bossKind), alive: v.hp > 0,
           opened: vaultLootCooldownLeft(v, p.username, this.worldTime) > 0 } }];
+        // Migrate old saves that broke a now-protected anchor or edited the boss
+        // floor. Deterministic authored cells are restored when the vault is used.
+        const protectedKeys = new Set<string>([
+          `${st.chest.x},${st.chest.y},${st.chest.z}`,
+          ...st.rooms.filter((room) => room.cap > 0).map((room) =>
+            `${Math.floor(room.x)},${Math.floor(room.y)},${Math.floor(room.z)}`),
+        ]);
+        const restoreArena = this.playerInArena(p, st);
+        for (const cell of st.blocks) {
+          const cellKey = `${cell.x},${cell.y},${cell.z}`;
+          if (!protectedKeys.has(cellKey) && !(restoreArena &&
+              this.blockInArena(cell.x, cell.y, cell.z, st))) continue;
+          if (!this.edits.delete(cellKey)) continue;
+          out.push({ to: 'all', msg: { t: 'edit', x: cell.x, y: cell.y, z: cell.z,
+            block: cell.id } });
+        }
         if (v.hp > 0 && !p.dead && this.playerInArena(p, st)) {
           const active = this.ensureEncounter(st, p);
           active.engine.start(p.id, this.worldTime);
@@ -835,9 +916,51 @@ export class GameServer {
       p.z >= b.minZ && p.z <= b.maxZ;
   }
 
-  private ensureEncounter(st: VaultStamp, starter: ServerPlayer): {
-    stamp: VaultStamp; engine: VaultEncounter; snapshotAccum: number; credited: string;
-  } {
+  private blockInArena(x: number, y: number, z: number, st: VaultStamp): boolean {
+    const b = st.arena.bounds;
+    return x + 0.5 >= b.minX && x + 0.5 <= b.maxX &&
+      y + 0.5 >= b.minY && y + 0.5 <= b.maxY &&
+      z + 0.5 >= b.minZ && z + 0.5 <= b.maxZ;
+  }
+
+  private liveEncounterForPlacement(
+    p: ServerPlayer, x: number, y: number, z: number,
+  ): ActiveVaultEncounter | null {
+    for (const active of this.vaultEncounters.values()) {
+      if (active.engine.participants.has(p.id) && this.blockInArena(x, y, z, active.stamp)) {
+        return active;
+      }
+    }
+    return null;
+  }
+
+  /** Restore only cells still containing the block registered to this owner. */
+  private cleanupArenaPlacements(active: ActiveVaultEncounter, owner?: number): Outbound[] {
+    const out: Outbound[] = [];
+    for (const [key, placed] of [...active.placedBlocks]) {
+      if (owner !== undefined && placed.owner !== owner) continue;
+      active.placedBlocks.delete(key);
+      if (this.edits.get(key) !== placed.block) continue;
+      if (placed.previousEdit === undefined) this.edits.delete(key);
+      else this.edits.set(key, placed.previousEdit);
+      this.chests.delete(key);
+      this.machines.delete(key);
+      this.turrets.delete(key);
+      const [x, y, z] = key.split(',').map(Number);
+      out.push({ to: 'all', msg: { t: 'edit', x, y, z, block: placed.restoreBlock } });
+    }
+    return out;
+  }
+
+  private cleanupPlayerArenaPlacements(owner: number): Outbound[] {
+    const out: Outbound[] = [];
+    for (const active of this.vaultEncounters.values()) {
+      out.push(...this.cleanupArenaPlacements(active, owner));
+    }
+    return out;
+  }
+
+  private ensureEncounter(st: VaultStamp, starter: ServerPlayer): ActiveVaultEncounter {
     const key = `${st.cx},${st.cz}`;
     const current = this.vaultEncounters.get(key);
     if (current && current.engine.status !== 'victory' && current.engine.status !== 'cooldown') {
@@ -866,7 +989,16 @@ export class GameServer {
       cameraAnchors: st.arena.cameraAnchors, seal: st.arena.seal,
       startTime: this.worldTime,
     });
-    const active = { stamp: st, engine, snapshotAccum: 0, credited: starter.username };
+    const authoredBlocks = new Map<string, number>();
+    for (const b of st.blocks) {
+      if (this.blockInArena(b.x, b.y, b.z, st)) {
+        authoredBlocks.set(`${b.x},${b.y},${b.z}`, b.id);
+      }
+    }
+    const active: ActiveVaultEncounter = {
+      stamp: st, engine, snapshotAccum: 0, credited: starter.username,
+      authoredBlocks, placedBlocks: new Map(),
+    };
     this.vaultEncounters.set(key, active);
     return active;
   }
@@ -916,7 +1048,7 @@ export class GameServer {
   }
 
   private finishVaultEncounter(
-    active: { stamp: VaultStamp; engine: VaultEncounter; credited: string },
+    active: ActiveVaultEncounter,
     credited: string,
   ): Outbound[] {
     const st = active.stamp;
@@ -946,7 +1078,7 @@ export class GameServer {
       data.vaultRecords = records;
       participant.savedClientData = data;
     }
-    const out: Outbound[] = [];
+    const out = this.cleanupArenaPlacements(active);
     for (const event of active.engine.tick(0, [])) {
       out.push({ to: 'all', msg: { t: 'encounterEvent', cx: st.cx, cz: st.cz, event } });
     }
@@ -977,6 +1109,11 @@ export class GameServer {
       for (const event of events) {
         out.push({ to: 'all', msg: { t: 'encounterEvent', cx: st.cx, cz: st.cz, event } });
       }
+      for (const id of before) {
+        if (!active.engine.participants.has(id)) {
+          out.push(...this.cleanupArenaPlacements(active, id));
+        }
+      }
       // Late arrivals get the current complete state, never the four-second
       // introduction or a replay of old event IDs.
       for (const id of active.engine.participants) {
@@ -1005,6 +1142,7 @@ export class GameServer {
       }
       const v = this.ensureVault(st);
       if (active.engine.status === 'idle') {
+        out.push(...this.cleanupArenaPlacements(active));
         v.hp = bossMaxHp(st.tier, st.bossKind);
         v.deadAt = -1e15;
         out.push({ to: 'all', msg: {
@@ -1291,6 +1429,18 @@ export class GameServer {
     const key = `${x},${y},${z}`;
     const prev = this.edits.get(key);
     const out: Outbound[] = [];
+    const arena = this.liveEncounterForPlacement(p, x, y, z);
+    if (arena) return [{ to: p.id, msg: { t: 'notice',
+      text: 'The sealed arena rejects block changes during the fight.' } }];
+    const vault = vaultAt(this.seed, x + 0.5, y + 0.5, z + 0.5, this.terrain,
+      (cx, cz) => this.vaultStampAt(cx, cz));
+    const protectedCell = vault && (
+      (vault.chest.x === x && vault.chest.y === y && vault.chest.z === z) ||
+      vault.rooms.some((room) => room.cap > 0 && Math.floor(room.x) === x &&
+        Math.floor(room.y) === y && Math.floor(room.z) === z)
+    );
+    if (protectedCell) return [{ to: p.id, msg: { t: 'notice',
+      text: 'That vault anchor is protected. Clear its guardians instead.' } }];
     // Server-authoritative chest break: if this edit removes a chest, spill its
     // stored contents as item entities everyone sees and clear the storage —
     // independent of whether the breaking client ever opened (cached) it.
@@ -1529,14 +1679,24 @@ export class GameServer {
   }
 
   /** Where a player respawns: their personal Respawn Beacon if it's set AND the
-   *  beacon block still exists there; otherwise the default faction spawn. */
+   *  beacon block still exists at the surface with open sky above it; otherwise
+   *  the default surface spawn. */
   private respawnPoint(p: ServerPlayer): { x: number; y: number; z: number } {
     if (fin(p.spawnX as number, p.spawnY as number, p.spawnZ as number)) {
       const bx = Math.floor(p.spawnX!), by = Math.floor(p.spawnY!), bz = Math.floor(p.spawnZ!);
-      if (this.edits.get(`${bx},${by},${bz}`) === Block.RespawnBeacon) {
-        return { x: bx + 0.5, y: by + 1, z: bz + 0.5 }; // stand on top of the beacon
+      let openToSky = by > this.terrain.height(bx, bz);
+      for (let y = by + 1; openToSky && y < 256; y++) {
+        const block = this.edits.get(`${bx},${y},${bz}`);
+        if (block !== undefined && block !== Block.Air && (BLOCKS[block]?.solid ?? false)) {
+          openToSky = false;
+        }
       }
-      // Beacon gone (broken/raided): forget the stale point and fall back.
+      const beaconSpawn = { x: bx + 0.5, y: by + 1, z: bz + 0.5 };
+      if (openToSky && this.edits.get(`${bx},${by},${bz}`) === Block.RespawnBeacon &&
+          this.safeRespawnPoint(beaconSpawn.x, beaconSpawn.y, beaconSpawn.z)) {
+        return beaconSpawn; // stand on top of the beacon
+      }
+      // Beacon gone, buried, or underground: forget it and fall back to the surface.
       p.spawnX = p.spawnY = p.spawnZ = undefined;
     }
     return this.spawn();

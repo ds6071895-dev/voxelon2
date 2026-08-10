@@ -1621,6 +1621,18 @@ check('furnace smelts ore/sand/log but not removed foods',
     Extract<typeof re[number]['msg'], { t: 'respawned' }> | undefined;
   check('respawn honors the Respawn Beacon (on top of it)',
     !!rs && Math.floor(rs.x) === 10 && rs.y === 71 && Math.floor(rs.z) === 11);
+  // Non-solid hazards used to pass the beacon's open-sky test and put the
+  // respawning player's body directly inside them.
+  s.handle(1, { t: 'edit', x: 10, y: 71, z: 11, block: Block.Lava });
+  s.handle(1, { t: 'selfhurt', amount: 100 });
+  const hazardRespawn = s.handle(1, { t: 'respawn' });
+  const hazardPoint = hazardRespawn.find((o) => o.msg.t === 'respawned')?.msg as
+    Extract<typeof hazardRespawn[number]['msg'], { t: 'respawned' }> | undefined;
+  check('respawn rejects a beacon obstructed by a dangerous non-solid block',
+    !!hazardPoint && !(hazardPoint.y === 71 && Math.floor(hazardPoint.x) === 10 &&
+      Math.floor(hazardPoint.z) === 11));
+  s.handle(1, { t: 'xform', x: 10.5, y: 71, z: 11.5, yaw: 0, pitch: 0 });
+  s.handle(1, { t: 'edit', x: 10, y: 71, z: 11, block: Block.Air });
   // Break the beacon -> respawn falls back (no longer pinned to the old point).
   s.handle(1, { t: 'edit', x: 10, y: 70, z: 11, block: Block.Air });
   s.handle(1, { t: 'selfhurt', amount: 100 });
@@ -1629,6 +1641,21 @@ check('furnace smelts ore/sand/log but not removed foods',
     Extract<typeof re2[number]['msg'], { t: 'respawned' }> | undefined;
   check('respawn falls back to faction spawn when the beacon is gone',
     !!rs2 && !(rs2.y === 71 && Math.floor(rs2.x) === 10 && Math.floor(rs2.z) === 11));
+}
+
+// An underground beacon must never pull a dead player below the surface.
+{
+  const s = new GameServer(1337, mulberry32(123));
+  s.addPlayer(1, { username: 'Caver', faction: 0 });
+  s.handle(1, { t: 'xform', x: 20.5, y: 10, z: 20.5, yaw: 0, pitch: 0 });
+  s.handle(1, { t: 'edit', x: 20, y: 10, z: 20, block: Block.RespawnBeacon });
+  s.handle(1, { t: 'setSpawn', x: 20, y: 10, z: 20 });
+  s.handle(1, { t: 'selfhurt', amount: 100 });
+  const re = s.handle(1, { t: 'respawn' });
+  const rs = re.find((o) => o.msg.t === 'respawned')?.msg as
+    Extract<typeof re[number]['msg'], { t: 'respawned' }> | undefined;
+  check('respawn ignores underground Respawn Beacons',
+    !!rs && !(rs.y === 11 && Math.floor(rs.x) === 20 && Math.floor(rs.z) === 20));
 }
 
 // --- Multi-block footprint: placement column + footprint clears on destroy ----
@@ -2541,12 +2568,21 @@ check('furnace smelts ore/sand/log but not removed foods',
     new GameServer(1337, mulberry32(1)).restore({ ...saveBlob, seed: 4242 }) === false);
   check('restore fail-closes on garbage', new GameServer(1337, mulberry32(1)).restore(null) === false);
 
-  // Per-account state: position + inventory round-trip through addPlayer/capture.
+  // Per-account state: horizontal position + inventory round-trip through
+  // addPlayer/capture. Rejoining always places the player on the surface.
   const c = new GameServer(1337, mulberry32(79));
-  const savedData = { x: 12.5, y: 71, z: -4.5, yaw: 1.5, slots: [{ id: Item.Bullet, count: 30 }] };
+  const savedSurface = new Terrain(1337).findSpawn();
+  const savedData = { ...savedSurface, yaw: 1.5, slots: [{ id: Item.Bullet, count: 30 }] };
   const wc = c.addPlayer(2, { username: 'Saver', faction: 0, data: savedData }).find((o) => o.to === 2)!.msg;
-  check('a returning account spawns at its saved position',
-    wc.t === 'welcome' && wc.players[0].x === 12.5 && wc.players[0].z === -4.5);
+  check('a returning account spawns at its saved surface position',
+    wc.t === 'welcome' && wc.players[0].x === savedSurface.x &&
+    wc.players[0].y === savedSurface.y && wc.players[0].z === savedSurface.z);
+  const underground = new GameServer(1337, mulberry32(80));
+  const wu = underground.addPlayer(3, { username: 'CaveSaver', faction: 0,
+    data: { ...savedData, y: 10 } }).find((o) => o.to === 3)!.msg;
+  check('a saved underground position is moved to the surface on reconnect',
+    wu.t === 'welcome' && wu.players[0].x === savedSurface.x &&
+    wu.players[0].y === savedSurface.y && wu.players[0].z === savedSurface.z);
   check('the saved inventory blob rides along in the welcome state',
     wc.t === 'welcome' && !!wc.state &&
     (wc.state.slots as { id: number }[])[0].id === Item.Bullet);
@@ -3956,7 +3992,7 @@ let firstVault: VaultStamp | null = null;
       got2.length >= 4 &&
       JSON.stringify(got2) ===
         JSON.stringify(vaultLoot(1337, st.cx, st.cz, st.tier, 'Raider', 1)));
-    // Fail-closed extras: far-away hits + a broken chest cell + spectators.
+    // Fail-closed extras: far-away hits + protected chest + spectators.
     const s3 = new GameServer(1337, mulberry32(142));
     s3.addPlayer(1, { username: 'Cheater', faction: 0 });
     s3.handle(1, { t: 'xform', x: chest.x + 500, y: 70, z: chest.z, yaw: 0, pitch: 0 });
@@ -3966,10 +4002,13 @@ let firstVault: VaultStamp | null = null;
           hit: { x: chest.x, y: chest.y, z: chest.z },
           claimedDamage: ITEMS[Item.RocketLauncher].gun!.damage } }).length === 0);
     s3.handle(1, { t: 'xform', x: chest.x + 0.5, y: chest.y + 0.5, z: chest.z + 1.5, yaw: 0, pitch: 0 });
-    s3.handle(1, { t: 'edit', x: chest.x, y: chest.y, z: chest.z, block: 0 }); // smash the chest
+    const chestBreak = s3.handle(1, { t: 'edit', x: chest.x, y: chest.y, z: chest.z, block: 0 });
+    check('the VaultChest is protected from destructive edits',
+      chestBreak.some((o) => o.msg.t === 'notice') &&
+      !chestBreak.some((o) => o.msg.t === 'edit'));
     killVault(s3, [1]);
-    check('a broken VaultChest cell never pays out',
-      !s3.handle(1, { t: 'vaultChestOpen', x: chest.x, y: chest.y, z: chest.z })
+    check('the protected VaultChest still pays out after the boss dies',
+      s3.handle(1, { t: 'vaultChestOpen', x: chest.x, y: chest.y, z: chest.z })
         .some((o) => o.msg.t === 'gotitem'));
     s3.adminSetMode(1, 'spectator');
     check('spectators cannot hit the Brute or loot the chest',
@@ -3978,6 +4017,71 @@ let firstVault: VaultStamp | null = null;
           hit: { x: chest.x, y: chest.y, z: chest.z },
           claimedDamage: ITEMS[Item.RocketLauncher].gun!.damage } }).length === 0 &&
       s3.handle(1, { t: 'vaultChestOpen', x: chest.x, y: chest.y, z: chest.z }).length === 0);
+  }
+}
+
+// --- Active boss rooms reject edits instead of creating cleanup objectives -------
+{
+  check('found a vault for protected boss-room edit checks', firstVault !== null);
+  if (firstVault) {
+    const st = firstVault;
+    const guardRoom = st.rooms.find((room) => room.cap > 0)!;
+    const anchorServer = new GameServer(1337, mulberry32(145));
+    anchorServer.addPlayer(1, { username: 'AnchorTester', faction: 0 });
+    anchorServer.handle(1, { t: 'xform', x: guardRoom.x + 0.5, y: guardRoom.y,
+      z: guardRoom.z + 1.5, yaw: 0, pitch: 0 });
+    const anchorEdit = anchorServer.handle(1, { t: 'edit', x: Math.floor(guardRoom.x),
+      y: Math.floor(guardRoom.y), z: Math.floor(guardRoom.z), block: Block.Air });
+    check('guard-room anchors reject mining without requiring an active boss fight',
+      anchorEdit.some((o) => o.msg.t === 'notice') &&
+      !anchorEdit.some((o) => o.msg.t === 'edit'));
+    const boss = st.rooms.find((room) => room.kind === 'boss')!;
+    const authored = new Map(st.blocks.map((b) => [`${b.x},${b.y},${b.z}`, b.id]));
+    const open: { x: number; y: number; z: number }[] = [];
+    for (let radius = 2; radius <= 6 && open.length < 3; radius++) {
+      for (let dx = -radius; dx <= radius && open.length < 3; dx++) {
+        for (let dz = -radius; dz <= radius && open.length < 3; dz++) {
+          const x = boss.x + dx, y = boss.y + 1, z = boss.z + dz;
+          if (authored.get(`${x},${y},${z}`) === Block.Air) open.push({ x, y, z });
+        }
+      }
+    }
+    check('boss room exposes three authored-air cells for protection checks', open.length === 3);
+    if (open.length === 3) {
+      const enterAt = (server: GameServer, id: number, cell: typeof open[number]): void => {
+        server.handle(id, { t: 'xform', x: cell.x + 0.5, y: cell.y,
+          z: cell.z + 0.5, yaw: 0, pitch: 0 });
+        server.handle(id, { t: 'vaultEnter', cx: st.cx, cz: st.cz });
+      };
+      const cleanup = new GameServer(1337, mulberry32(143));
+      cleanup.addPlayer(1, { username: 'Builder', faction: 0 });
+      cleanup.addPlayer(2, { username: 'BuddyBuilder', faction: 0 });
+      enterAt(cleanup, 1, open[0]);
+      enterAt(cleanup, 2, open[1]);
+      const firstEdit = cleanup.handle(1, { t: 'edit', ...open[0], block: Block.Cobblestone });
+      const secondEdit = cleanup.handle(2, { t: 'edit', ...open[1], block: Block.Cobblestone });
+      check('active boss rooms reject every participant block edit',
+        firstEdit.some((o) => o.msg.t === 'notice') &&
+        secondEdit.some((o) => o.msg.t === 'notice') &&
+        !firstEdit.some((o) => o.msg.t === 'edit') &&
+        !secondEdit.some((o) => o.msg.t === 'edit'));
+      const firstLeave = cleanup.removePlayer(1);
+      check('leaving a protected boss room needs no placement cleanup',
+        !firstLeave.some((o) => o.msg.t === 'edit'));
+      const secondLeave = cleanup.removePlayer(2);
+      check('the remaining participant also leaves without authored block changes',
+        !secondLeave.some((o) => o.msg.t === 'edit'));
+
+      const deathCleanup = new GameServer(1337, mulberry32(144));
+      deathCleanup.addPlayer(1, { username: 'FallenBuilder', faction: 0 });
+      enterAt(deathCleanup, 1, open[2]);
+      const deathEdit = deathCleanup.handle(1, { t: 'edit', ...open[2], block: Block.Cobblestone });
+      deathCleanup.handle(1, { t: 'selfhurt', amount: 100 });
+      const afterDeath = deathCleanup.tickVaultEncounters(0.05);
+      check('death cannot leave block changes inside the protected encounter',
+        deathEdit.some((o) => o.msg.t === 'notice') &&
+        !afterDeath.some((o) => o.msg.t === 'edit'));
+    }
   }
 }
 
@@ -4143,8 +4247,8 @@ let firstVault: VaultStamp | null = null;
     matchGrid(cells([null, Item.Diamond, null,
       Item.Diamond, Item.Redstone, Item.Diamond,
       null, Item.Stick, null]))?.id === Item.VaultCompass3);
-  check('mob spawner is a tough, no-drop dungeon block',
-    BLOCKS[Block.MobSpawner].requiresTool && BLOCKS[Block.MobSpawner].minTier === 2 &&
+  check('mob spawner is a protected, no-drop dungeon anchor',
+    BLOCKS[Block.MobSpawner].hardness < 0 &&
     dropFor(Block.MobSpawner, 0.5) === null && !ITEMS[Block.MobSpawner]);
 
   // Dramatic boss rebalance: every family scales sharply across tiers.

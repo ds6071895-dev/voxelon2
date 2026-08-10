@@ -4,6 +4,7 @@
 // dependencies.  The browser's offline adapter and the authoritative server
 // both feed it the same participant inputs at 20 Hz.
 
+import { VAULT_BOSS_HITBOX } from './vaults';
 import type { VaultBossKind, VaultFamily, VaultTier } from './vaults';
 
 export const ENCOUNTER_HZ = 20;
@@ -19,6 +20,7 @@ export const MAX_ENCOUNTER_ACTORS = 32;
 export const MAX_ENCOUNTER_OBJECTS = 24;
 export const MAX_ENCOUNTER_HAZARDS = 12;
 export const MIN_MAJOR_TELEGRAPH = 0.8;
+export const ENCOUNTER_HURT_SECONDS = 0.5;
 
 export type EncounterStatus =
   | 'idle'
@@ -188,46 +190,46 @@ export interface AttackDefinition {
 const attack = (
   name: string, shape: HazardShape, telegraph: number, cooldown: number,
   damage: number, radius: number, extra: Partial<AttackDefinition> = {},
-): AttackDefinition => ({ name, shape, telegraph, cooldown, damage, radius,
+): AttackDefinition => ({ name, shape, telegraph: Math.max(1, telegraph), cooldown, damage, radius,
   recovery: 0.9, ...extra });
 
 export const BOSS_DEFINITIONS: Record<VaultBossKind, BossDefinition> = {
   bone_warden: {
     kind: 'bone_warden', family: 'crypt', name: 'Bone Warden',
-    title: 'Keeper of the Restless', hpModifier: 0.9, color: '#aa72ff',
+    title: 'Keeper of the Restless', hpModifier: 1, color: '#aa72ff',
     introLine: 'The seals crack. Every grave answers.',
     victoryLine: 'The dead fall silent at last.',
     phaseTitles: ['The Sealed Tomb', 'The Graves Open', 'Last Rites'],
     phaseBriefs: [
-      'Keep damaging the Warden. Evade its cleaves, grave rushes, falling hands, and expanding soul shockwaves.',
-      'The dead march with it now. Keep firing while you cross the twin shockwaves and escape the death lanes.',
-      'Last Rites begins. Survive the pillar storms, eclipse quarters, and final charge, then finish the Warden.',
+      'Keep damaging the Warden. Step around chain sweeps, leave grave marks, and cross each clearly marked toll ring.',
+      'The funeral procession begins. Find the open lane, thin the optional pallbearers, and keep pressure on the Warden.',
+      'Last Rites begins. Read the condemned quarter and execution lane, then finish the Warden itself.',
     ],
     moveStyle: ['socket', 'blink', 'charge', 'target_swap'], moveCadence: 5.2,
     army: ['skeleton', 'zombie', 'bone_knight'],
     phases: [
       [
-        attack('Warden Cleave', 'cone', 0.9, 3.2, 6, 5, { angle: Math.PI * 0.7 }),
-        attack('Shield Bash', 'cone', 0.8, 3.6, 4, 3, { angle: Math.PI * 0.45 }),
-        attack('Soul Shockwave', 'ring', 1.1, 4.5, 6, 7),
-        attack('Grasping Dead', 'rain', 0.95, 4.1, 6, 1.7, { count: 4 }),
-        attack('Ossuary Rush', 'line', 1, 4.8, 7, 13, { width: 2 }),
+        attack('Chain Reap', 'cone', 1.1, 3.4, 6, 6, { angle: Math.PI * 0.62 }),
+        attack('Funeral Toll', 'ring', 1.25, 4.8, 6, 6.5, { width: 1 }),
+        attack('Grave Mark', 'rain', 1.15, 4.2, 6, 1.7, { count: 4 }),
+        attack('Processional Rush', 'line', 1.15, 4.9, 7, 12, { width: 2 }),
+        attack('Bellfall', 'circle', 1.2, 4.3, 6, 3.2),
       ],
       [
-        attack('Twin Soul Shockwave', 'ring', 1, 4.2, 7, 8, { count: 2 }),
-        attack('Death March', 'line', 1.05, 4.8, 8, 16, { width: 2.2, count: 3 }),
-        attack('Open Every Grave', 'rain', 1.15, 7.5, 6, 2,
-          { summons: 'zombie', count: 3 }),
-        attack('Warden Cleave', 'cone', 0.85, 3, 7, 5, { angle: Math.PI * 0.7 }),
-        attack('Mausoleum Collapse', 'rain', 1, 4.4, 8, 2.1, { count: 6 }),
+        attack('Three-Lane Procession', 'line', 1.25, 5.2, 8, 14,
+          { width: 1.8, count: 3 }),
+        attack('Double Toll', 'ring', 1.2, 4.8, 7, 8, { width: 0.9, count: 2 }),
+        attack('Call the Pallbearers', 'rain', 1.25, 8, 6, 1.8,
+          { summons: 'skeleton', count: 2 }),
+        attack('Chain Reap', 'cone', 1.05, 3.4, 7, 6, { angle: Math.PI * 0.68 }),
+        attack('Falling Ossuary', 'rain', 1.15, 4.7, 8, 1.9, { count: 5 }),
       ],
       [
-        attack('Bone Pillars', 'rain', 1, 4.6, 8, 2,
-          { object: 'bone_pillar', count: 5 }),
-        attack('Ossuary Eclipse', 'quadrant', 1.2, 5, 10, 13),
-        attack('Final Toll', 'cone', 0.85, 4.2, 10, 8, { angle: Math.PI * 0.9 }),
-        attack('Bone Storm', 'ring', 1.1, 5.2, 8, 7),
-        attack('Grave Charge', 'line', 1, 5.5, 10, 11, { width: 2.3 }),
+        attack('Last Rites', 'quadrant', 1.35, 5.2, 10, 11),
+        attack('Execution Charge', 'line', 1.2, 5.4, 10, 12, { width: 2.4 }),
+        attack('Final Toll', 'ring', 1.3, 5.6, 9, 8.5, { width: 1, count: 3 }),
+        attack('Chain Cross', 'line', 1.15, 5, 9, 14, { width: 1.7, count: 2 }),
+        attack('Mass Grave Mark', 'rain', 1.1, 4.6, 8, 1.8, { count: 6 }),
       ],
     ],
   },
@@ -238,158 +240,148 @@ export const BOSS_DEFINITIONS: Record<VaultBossKind, BossDefinition> = {
     victoryLine: 'The brood sinks back into the mire.',
     phaseTitles: ['Venom Crown', 'The Brood Awakens', 'Drowning Court'],
     phaseBriefs: [
-      'Keep damaging the Queen. Sidestep venom fans, move through the mud rain, and flee her burrow eruptions.',
-      'The brood floods in. Keep pressure on her while dodging sanctum waves, spore bursts, and hunting mirelings.',
-      'The court is drowning. Read the safe quarters, outrun poison rain, and punish her between tidal charges.',
+      'Keep damaging the Queen. Leave each sinkhole, cross the tail wake, and move around the venom bloom.',
+      'The tide is rising. Use the open side of each sweep while the optional brood pressures the room.',
+      'Follow the rotating clear quarter, cross each spiral ring, and punish the Queen after her serpent charge.',
     ],
     moveStyle: ['burrow', 'target_swap', 'retreat', 'pursue'], moveCadence: 4.4,
     army: ['mireling', 'spitter', 'skitter', 'bog_brute'],
     phases: [
       [
-        attack('Poison Spit', 'cone', 0.8, 2.8, 5, 9,
-          { angle: Math.PI * 0.6, count: 3 }),
-        attack('Festering Mud', 'rain', 1, 3.8, 5, 2, { count: 3 }),
-        attack('Burrow', 'circle', 0.9, 4.5, 4, 2),
-        attack('Reed Lashes', 'line', 0.9, 3.7, 6, 12, { width: 1.5, count: 3 }),
-        attack('Bog Breath', 'cone', 1, 4.2, 7, 11, { angle: Math.PI * 0.8 }),
+        attack('Venom Bloom', 'cone', 1.1, 3.2, 5, 9, { angle: Math.PI * 0.62 }),
+        attack('Locking Sinkhole', 'circle', 1.15, 4.1, 6, 2.7),
+        attack('Tail Wake', 'line', 1.15, 4.3, 6, 12, { width: 1.7, count: 2 }),
+        attack('Festering Rain', 'rain', 1.15, 4, 5, 1.7, { count: 4 }),
+        attack('Crown Snap', 'cone', 1.05, 3.8, 7, 6, { angle: Math.PI * 0.48 }),
       ],
       [
-        attack('Sanctum Wave', 'line', 1.2, 5.2, 8, 17, { width: 5 }),
-        attack('Brood Eruption', 'rain', 1.1, 7.2, 6, 2,
-          { summons: 'mireling', count: 4 }),
-        attack('Sporeburst Crown', 'ring', 1, 4.6, 8, 8, { count: 3 }),
-        attack('Poison Spit', 'cone', 0.8, 2.6, 6, 9,
-          { angle: Math.PI * 0.65, count: 3 }),
-        attack('Predator Below', 'circle', 0.85, 3.9, 8, 3.5),
+        attack('High Tide', 'line', 1.35, 5.4, 8, 14, { width: 4 }),
+        attack('Brood Drift', 'rain', 1.3, 8, 6, 1.8,
+          { summons: 'mireling', count: 2 }),
+        attack('Lotus Rings', 'ring', 1.2, 5, 8, 8, { width: 0.9, count: 3 }),
+        attack('Undertow', 'circle', 1.2, 4.5, 7, 4),
+        attack('Venom Bloom', 'cone', 1.05, 3.2, 7, 9, { angle: Math.PI * 0.68 }),
       ],
       [
-        attack('Poison Rain', 'rain', 0.9, 3.4, 7, 1.8, { count: 5 }),
-        attack('Tidal Charge', 'line', 1, 5, 9, 14, { width: 3 }),
-        attack('Rotating Islands', 'quadrant', 1.2, 6, 8, 12,
-          { object: 'safe_island', count: 4 }),
-        attack('Drowning Spiral', 'ring', 0.95, 4.5, 9, 9, { count: 3 }),
-        attack("Queen's Hunger", 'cone', 0.85, 3.8, 9, 10, { angle: Math.PI * 0.75 }),
+        attack('Rotating Lotus', 'quadrant', 1.35, 5.7, 9, 11),
+        attack('Drowning Spiral', 'ring', 1.2, 4.9, 9, 8.5, { width: 0.9, count: 3 }),
+        attack('Serpent Charge', 'line', 1.2, 5.2, 9, 13, { width: 2.8 }),
+        attack('Poison Monsoon', 'rain', 1.1, 4.1, 8, 1.7, { count: 6 }),
+        attack("Queen's Maw", 'cone', 1.1, 4, 9, 8, { angle: Math.PI * 0.7 }),
       ],
     ],
   },
   ember_colossus: {
     kind: 'ember_colossus', family: 'ember', name: 'Ember Colossus',
-    title: 'The Furnace Unbound', hpModifier: 1.2, color: '#ff6b32',
+    title: 'The Furnace Unbound', hpModifier: 1, color: '#ff6b32',
     introLine: 'The forge has found a heartbeat.',
     victoryLine: 'The furnace gutters into ash.',
     phaseTitles: ['Cold Iron', 'Furnace Heart', 'Worldfire'],
     phaseBriefs: [
-      'Keep damaging the Colossus. Escape hammer impacts, lava fissures, and the furnace grasp before they land.',
-      'Its heart ignites. Fight through meteor volleys, flame rings, and ember swarms without giving up boss damage.',
-      'Worldfire consumes the arena. Read the burning quarters, cross the shockwaves, and end the furnace.',
+      'Keep damaging the Colossus. Leave crater stomps, sidestep molten trails, and circle around the furnace roar.',
+      'The caldera opens. Read the vent sequence, keep moving through meteors, and ignore or thin the ember herd.',
+      'Worldfire begins. Alternate between the clear center and clear edge, then end the walking volcano.',
     ],
     moveStyle: ['leap', 'charge', 'center', 'pursue'], moveCadence: 5.6,
     army: ['emberling', 'emberling', 'magma_brute'],
     phases: [
       [
-        attack('Hammer Fist', 'circle', 1.1, 4, 8, 4),
-        attack('Lava Fissure', 'line', 1, 4.5, 7, 13, { width: 1.6 }),
-        attack('Furnace Grasp', 'cone', 1.1, 5.4, 10, 5, { angle: Math.PI * 0.4 }),
-        attack('Cinderfall', 'rain', 0.95, 4, 6, 1.8, { count: 5 }),
-        attack('Iron Stampede', 'line', 1.05, 5, 9, 14, { width: 2.5 }),
+        attack('Crater Stomp', 'circle', 1.25, 4.3, 8, 3.8),
+        attack('Molten Trail', 'line', 1.2, 4.7, 7, 13, { width: 1.7 }),
+        attack('Furnace Roar', 'cone', 1.25, 5.2, 9, 7, { angle: Math.PI * 0.55 }),
+        attack('Cinderfall', 'rain', 1.15, 4.2, 6, 1.7, { count: 5 }),
+        attack('Tail Quake', 'ring', 1.2, 4.8, 8, 6.5, { width: 1.1 }),
       ],
       [
-        attack('Meteor Forge', 'rain', 1, 3.8, 8, 2.2, { count: 4 }),
-        attack('Furnace Pulse', 'ring', 1.05, 4.6, 9, 8, { count: 3 }),
-        attack('Living Flame', 'circle', 1.1, 7.4, 7, 3,
-          { summons: 'emberling', count: 3 }),
-        attack('Hammer Fist', 'circle', 1, 3.8, 9, 4.5),
-        attack('Molten Cross', 'line', 1, 4.8, 9, 16, { width: 2, count: 4 }),
+        attack('Vent Cycle', 'line', 1.3, 5.4, 9, 14, { width: 1.8, count: 3 }),
+        attack('Meteor Cycle', 'rain', 1.2, 4.3, 8, 1.9, { count: 5 }),
+        attack('Ember Herd', 'circle', 1.3, 8.2, 6, 3,
+          { summons: 'emberling', count: 2 }),
+        attack('Caldera Pulse', 'ring', 1.25, 5.1, 9, 8, { width: 1, count: 2 }),
+        attack('Basalt Charge', 'line', 1.25, 5.2, 9, 13, { width: 2.5 }),
       ],
       [
-        attack('Forge Quadrants', 'quadrant', 1.2, 4.8, 9, 12),
-        attack('Crossing Shockwaves', 'line', 1, 5.2, 10, 17,
-          { width: 1.8, count: 2 }),
-        attack('Worldfire Rain', 'rain', 0.85, 3.6, 9, 2.1, { count: 7 }),
-        attack('Last Fissure', 'line', 0.9, 4, 9, 15, { width: 2 }),
-        attack('Supernova', 'ring', 1.3, 6.2, 12, 10, { count: 3 }),
+        attack('Worldfire Rim', 'ring', 1.4, 5.5, 10, 7.5, { width: 2.1 }),
+        attack('Crucible Cross', 'line', 1.3, 5.4, 10, 14, { width: 1.8, count: 2 }),
+        attack('Caldera Eruption', 'rain', 1.2, 4.4, 9, 1.8, { count: 6 }),
+        attack('Ashen Charge', 'line', 1.2, 4.8, 9, 13, { width: 2.2 }),
+        attack('Worldfire Core', 'circle', 1.45, 6.4, 11, 5.2),
       ],
     ],
   },
   crystal_seer: {
     kind: 'crystal_seer', family: 'crystal', name: 'Crystal Seer',
-    title: 'Eye Beyond the Prism', hpModifier: 0.95, color: '#65b9ff',
+    title: 'Eye Beyond the Prism', hpModifier: 1, color: '#65b9ff',
     introLine: 'It has already seen how you die.',
     victoryLine: 'A thousand doomed futures shatter.',
     phaseTitles: ['Foreseen', 'Hall of Mirrors', 'Final Prophecy'],
     phaseBriefs: [
-      'Keep damaging the Seer. Step through fate-beam lanes, evade the prism fan, and move before astral impacts.',
-      'Every future attacks at once. Track the real Seer through echo beams, starfall, and mirror-clone volleys.',
-      'The final prophecy unfolds. Cross the split beams, survive the shard deluge, and prove its vision wrong.',
+      'The Seer previews every strike. Leave the predicted beam, evade the wing prism, and move before each marked future.',
+      'Delayed echoes repeat the first attack. Remember the old lane while reading the new one; no clone needs to be shot.',
+      'The final prophecy is a sequence. Follow the previewed clear space through crossed beams and falling shards.',
     ],
     moveStyle: ['blink', 'target_swap', 'socket', 'retreat'], moveCadence: 3.9,
     army: ['mirror_clone', 'shardling', 'mirror_clone'],
     phases: [
       [
-        attack('Fate Beam', 'line', 1.1, 3.8, 7, 18, { width: 1.4 }),
-        attack('Prism Fan', 'cone', 0.9, 3.2, 6, 12,
-          { angle: Math.PI * 0.9, count: 5 }),
-        attack('Astral Arrival', 'circle', 0.9, 4.5, 6, 3),
-        attack('Foreseen Fracture', 'rain', 0.9, 3.9, 6, 1.7, { count: 5 }),
-        attack('Impossible Angle', 'line', 1, 4.3, 7, 18, { width: 1.2, count: 3 }),
+        attack('Predicted Beam', 'line', 1.4, 4.1, 7, 14, { width: 1.4 }),
+        attack('Prism Wing', 'cone', 1.2, 3.8, 6, 10, { angle: Math.PI * 0.72 }),
+        attack('Foreseen Mark', 'rain', 1.25, 4.2, 6, 1.6, { count: 5 }),
+        attack('Lens Arrival', 'circle', 1.2, 4.6, 6, 3),
+        attack('Split Future', 'line', 1.3, 4.8, 7, 14, { width: 1.2, count: 3 }),
       ],
       [
-        attack('Mirror Echo', 'line', 1, 4.4, 6, 18,
-          { summons: 'mirror_clone', count: 2, width: 1.2 }),
-        attack('Rotating Refraction', 'line', 1.1, 4.8, 8, 18, { width: 1.2 }),
-        attack('Shattered Timeline', 'rain', 0.95, 4, 7, 1.8, { count: 6 }),
-        attack('Paradox Ring', 'ring', 1.05, 4.8, 8, 8, { count: 3 }),
-        attack('Many-Eyed Gaze', 'cone', 0.9, 3.6, 8, 13,
-          { angle: Math.PI * 1.05, count: 3 }),
+        attack('Delayed Echo', 'line', 1.4, 4.8, 7, 14, { width: 1.3, count: 2 }),
+        attack('Rotating Refraction', 'line', 1.35, 5, 8, 14, { width: 1.2 }),
+        attack('Shattered Timeline', 'rain', 1.2, 4.3, 7, 1.7, { count: 6 }),
+        attack('Paradox Rings', 'ring', 1.3, 5.1, 8, 8, { width: 0.9, count: 3 }),
+        attack('Many-Eyed Gaze', 'cone', 1.2, 4.1, 8, 10, { angle: Math.PI * 0.9 }),
       ],
       [
-        attack('Crossed Prophecy', 'line', 1.1, 5, 9, 18,
-          { width: 1.6, count: 2 }),
-        attack('Falling Shards', 'rain', 0.9, 3.6, 7, 1.8, { count: 6 }),
-        attack('Astral Arrival', 'circle', 0.8, 3.8, 7, 3),
-        attack('End of All Paths', 'quadrant', 1.2, 5.2, 10, 13),
-        attack('Prophecy Cascade', 'line', 0.9, 4.4, 9, 18, { width: 1.4, count: 4 }),
+        attack('Crossed Prophecy', 'line', 1.45, 5.2, 9, 14,
+          { width: 1.5, count: 2 }),
+        attack('Falling Futures', 'rain', 1.2, 4.1, 8, 1.7, { count: 6 }),
+        attack('Final Arrival', 'circle', 1.2, 4.4, 8, 3.2),
+        attack('End of One Path', 'quadrant', 1.45, 5.5, 10, 11),
+        attack('Prophecy Sequence', 'line', 1.3, 5, 9, 14, { width: 1.3, count: 4 }),
       ],
     ],
   },
   gilded_artificer: {
     kind: 'gilded_artificer', family: 'gilded', name: 'Gilded Artificer',
-    title: 'Architect of Avarice', hpModifier: 1.05, color: '#f1bd42',
+    title: 'Architect of Avarice', hpModifier: 1, color: '#f1bd42',
     introLine: 'The vault itself takes up arms.',
     victoryLine: 'The golden engine grinds to a halt.',
     phaseTitles: ['Calculated Defense', 'War Machine', 'Total Lockdown'],
     phaseBriefs: [
-      'Keep damaging the Artificer. Dodge blade fans, dash lanes, and the mines scattered across its calculations.',
-      'The war machine overclocks. Fight through guard deployments, ricochet lanes, and sweeping suppression fire.',
-      'Total lockdown begins. Escape crusher lanes, outrun the coin storm, and break the machine itself.',
+      'Keep damaging the Artificer. Timed mine cells expire on their own; leave them and sidestep each previewed dash.',
+      'The mechanism accelerates. Use the open suppression lanes while optional guards and rotating tools add pressure.',
+      'Total lockdown begins. Follow the crusher gap and previewed golden grid; the machine is still the only objective.',
     ],
     moveStyle: ['strafe', 'charge', 'socket', 'target_swap'], moveCadence: 4.3,
     army: ['clockwork_guard', 'clockwork_drone', 'clockwork_guard'],
     phases: [
       [
-        attack('Golden Blades', 'cone', 0.85, 3, 6, 10,
-          { angle: Math.PI * 0.7, count: 5 }),
-        attack('Proximity Mines', 'rain', 1, 4.2, 7, 2,
-          { object: 'mine', count: 3 }),
-        attack('Preview Dash', 'line', 0.9, 4.4, 7, 10, { width: 2 }),
-        attack('Coinshot Volley', 'line', 0.8, 3.5, 6, 15, { width: 1.1, count: 3 }),
-        attack('Audit Sweep', 'cone', 1, 4.3, 7, 12, { angle: Math.PI * 0.85 }),
+        attack('Timed Mine Cells', 'rain', 1.25, 4.5, 7, 1.6, { count: 4 }),
+        attack('Preview Dash', 'line', 1.2, 4.7, 7, 11, { width: 2 }),
+        attack('Clock Hand', 'cone', 1.15, 3.8, 6, 9, { angle: Math.PI * 0.58 }),
+        attack('Coinshot Lanes', 'line', 1.15, 4.1, 6, 14, { width: 1.1, count: 3 }),
+        attack('Audit Wheel', 'ring', 1.2, 4.7, 7, 7, { width: 1 }),
       ],
       [
-        attack('Deploy War Guard', 'circle', 1, 7.5, 6, 3,
+        attack('Guard Deployment', 'circle', 1.3, 8.2, 6, 3,
           { summons: 'clockwork_guard', count: 2 }),
-        attack('Ricochet Protocol', 'line', 0.95, 4.4, 8, 16, { width: 1.3, count: 4 }),
-        attack('Suppression Wheel', 'ring', 1.05, 4.8, 8, 8, { count: 3 }),
-        attack('Raise Cover', 'line', 1, 5, 5, 8, { object: 'cover', count: 4 }),
-        attack('Clockwork Blitz', 'cone', 0.85, 3.8, 8, 11, { angle: Math.PI * 0.8 }),
+        attack('Suppression Lanes', 'line', 1.25, 4.9, 8, 14, { width: 1.3, count: 3 }),
+        attack('Clockwork Wheel', 'ring', 1.25, 5.1, 8, 8, { width: 0.9, count: 3 }),
+        attack('Conveyor Sweep', 'line', 1.3, 5.2, 7, 13, { width: 3 }),
+        attack('Tool Blitz', 'cone', 1.15, 4.2, 8, 9, { angle: Math.PI * 0.72 }),
       ],
       [
-        attack('Crusher Walls', 'line', 1.2, 5.2, 9, 17,
-          { object: 'crusher_wall', count: 2, width: 4 }),
-        attack('Coin Storm', 'rain', 0.9, 3.4, 7, 1.8, { count: 6 }),
-        attack('Overclock', 'ring', 1.1, 5.8, 10, 8),
-        attack('Golden Grid', 'line', 1, 4.7, 9, 17, { width: 1.7, count: 4 }),
-        attack('Final Calculation', 'quadrant', 1.25, 5.5, 11, 13),
+        attack('Crusher Gap', 'line', 1.45, 5.6, 9, 14, { width: 3.4, count: 2 }),
+        attack('Coin Storm', 'rain', 1.2, 4.1, 7, 1.7, { count: 6 }),
+        attack('Overclock Wheel', 'ring', 1.35, 5.8, 10, 8, { width: 1.2 }),
+        attack('Golden Grid', 'line', 1.3, 5.1, 9, 14, { width: 1.5, count: 4 }),
+        attack('Final Calculation', 'quadrant', 1.5, 5.8, 11, 11),
       ],
     ],
   },
@@ -406,7 +398,7 @@ export function encounterDamageMultiplier(tier: VaultTier): number {
 export function participantHpMultiplier(peakParticipants: number): number {
   const n = Math.max(1, Math.min(MAX_ENCOUNTER_PARTICIPANTS,
     Math.floor(peakParticipants)));
-  return 1 + 0.6 * (n - 1);
+  return 1 + 0.7 * (n - 1);
 }
 
 export function bossMaxHp(
@@ -500,6 +492,13 @@ function distance(a: Vec3, b: Vec3): number {
   return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 }
 
+export function bossHitContains(kind: VaultBossKind, boss: Vec3, hit: Vec3): boolean {
+  const bounds = VAULT_BOSS_HITBOX[kind];
+  const dx = hit.x - boss.x, dz = hit.z - boss.z;
+  return Math.hypot(dx, dz) <= bounds.halfWidth + 0.2 &&
+    hit.y >= boss.y - 0.25 && hit.y <= boss.y + bounds.height + 0.25;
+}
+
 export class VaultEncounter {
   readonly config: EncounterConfig;
   readonly definition: BossDefinition;
@@ -527,6 +526,7 @@ export class VaultEncounter {
   private readonly rng: () => number;
   private readonly sequence = new Map<number, number>();
   private readonly lastAttack = new Map<number, number>();
+  private readonly lastHazardHit = new Map<number, number>();
   private readonly eventQueue: EncounterEvent[] = [];
   private eventNo = 0;
   private entityNo = 1;
@@ -780,8 +780,8 @@ export class VaultEncounter {
     }
     if (a.summons) {
       const pressure = Math.ceil((this.peakParticipants - 1) / 2);
-      const total = Math.min(MAX_ENCOUNTER_ACTORS - this.actors.length,
-        count + pressure + this.phase + this.config.tier);
+      const actorBudget = Math.min(10, 4 + Math.ceil((this.peakParticipants - 1) * 1.2));
+      const total = Math.max(0, Math.min(actorBudget - this.actors.length, count + pressure));
       if (total > 0) {
         this.waveNo++;
         this.emit('wave', this.now, targetIds, `army_${this.waveNo}`);
@@ -880,7 +880,10 @@ export class VaultEncounter {
     if (!h || this.now < h.executeAt || this.now > h.expiresAt ||
         h.hitParticipants.includes(participant.id)) return 0;
     if (!hazardContains(h, participant.position)) return 0;
+    const lastHit = this.lastHazardHit.get(participant.id) ?? -Infinity;
+    if (this.now - lastHit + 1e-6 < ENCOUNTER_HURT_SECONDS) return 0;
     h.hitParticipants.push(participant.id);
+    this.lastHazardHit.set(participant.id, this.now);
     return h.damage;
   }
 
@@ -910,14 +913,15 @@ export class VaultEncounter {
     if (intent.claimedDamage <= 0 || intent.claimedDamage > validation.maxDamage) return reject('damage');
     if (intent.targetId !== 0) {
       const targetActor = this.actors.find((a) => a.id === intent.targetId);
-      const targetObject = this.objects.find((o) => o.id === intent.targetId);
-      if (!targetActor && !targetObject) return reject('target');
+      if (!targetActor) return reject('target');
     }
     if (distance(attacker.position, intent.hit) > validation.range) return reject('range');
     const targetPos = intent.targetId === 0 ? this.bossPosition
       : this.actors.find((a) => a.id === intent.targetId)?.position
-      ?? this.objects.find((o) => o.id === intent.targetId)?.position;
-    if (!targetPos || distance(targetPos, intent.hit) > (intent.targetId === 0 ? 3.2 : 2.1)) {
+      ;
+    if (!targetPos || (intent.targetId === 0
+      ? !bossHitContains(this.config.kind, targetPos, intent.hit)
+      : distance(targetPos, intent.hit) > 2.1)) {
       return reject('target');
     }
     if (intent.targetId === 0 && this.bossInvulnerable()) return reject('invulnerable');
@@ -933,10 +937,7 @@ export class VaultEncounter {
       if (actor.hp === 0) this.removeActor(actor.id);
       return { accepted: true, damage: dmg, killed: actor.hp === 0 };
     }
-    const object = this.objects.find((o) => o.id === intent.targetId)!;
-    object.hp = Math.max(0, object.hp - dmg);
-    if (object.hp === 0) this.destroyObject(object.id);
-    return { accepted: true, damage: dmg, killed: object.hp === 0 };
+    return reject('target');
   }
 
   private bossInvulnerable(): boolean {
@@ -964,46 +965,12 @@ export class VaultEncounter {
     const opener = this.definition.phases[phase - 1].slice(0, 3);
     this.comboQueue.splice(0, this.comboQueue.length, ...opener);
     if (opener.length > 1) this.emit('combo', this.now, [...this.participants], 'phase_combo');
-    if (phase === 2) {
-      const summon: Record<VaultBossKind, EncounterActorKind> = {
-        bone_warden: 'zombie', mire_queen: 'mireling',
-        ember_colossus: 'emberling', crystal_seer: 'mirror_clone',
-        gilded_artificer: 'clockwork_guard',
-      };
-      const targets = [...this.participants];
-      const count = Math.min(5 + this.config.tier + Math.ceil((this.peakParticipants - 1) * 1.5),
-        MAX_ENCOUNTER_ACTORS);
-      this.waveNo++;
-      this.emit('wave', this.now, targets, `phase_army_${this.waveNo}`);
-      for (let i = 0; i < count; i++) {
-        this.spawnActor(i === 0 ? summon[this.config.kind]
-          : this.definition.army[i % this.definition.army.length], targets);
-      }
-    } else if (phase === 3) {
-      const targets = [...this.participants];
-      const count = Math.min(4 + this.config.tier + this.peakParticipants,
-        MAX_ENCOUNTER_ACTORS - this.actors.length);
-      if (count > 0) {
-        this.waveNo++;
-        this.emit('wave', this.now, targets, `final_army_${this.waveNo}`);
-      }
-      for (let i = 0; i < count; i++) {
-        this.spawnActor(this.definition.army[i % this.definition.army.length], targets);
-      }
-    }
   }
 
   private removeActor(id: number): void {
     const i = this.actors.findIndex((a) => a.id === id);
     if (i >= 0) this.actors.splice(i, 1);
     this.emit('death', this.now, [], 'summon_down', undefined, id);
-  }
-
-  private destroyObject(id: number): void {
-    const i = this.objects.findIndex((o) => o.id === id);
-    if (i < 0) return;
-    const [o] = this.objects.splice(i, 1);
-    this.emit('death', this.now, [], `${o.kind}_down`, undefined, id);
   }
 
   private expireEntities(): void {
@@ -1053,6 +1020,7 @@ export class VaultEncounter {
     this.participants.clear();
     this.sequence.clear();
     this.lastAttack.clear();
+    this.lastHazardHit.clear();
     this.bossPosition = copyVec(this.config.center);
     this.emit('reset', this.now, [], 'reset');
   }
@@ -1122,6 +1090,7 @@ export function hazardContains(h: EncounterHazard, p: Vec3): boolean {
   if (h.shape === 'circle' || h.shape === 'rain') return d <= h.radius;
   if (h.shape === 'ring') return Math.abs(d - h.radius) <= h.width;
   if (h.shape === 'quadrant') {
+    if (d > h.radius) return false;
     const a = (Math.atan2(dz, dx) + Math.PI * 2) % (Math.PI * 2);
     return Math.floor(a / (Math.PI / 2)) === (h.id & 3);
   }

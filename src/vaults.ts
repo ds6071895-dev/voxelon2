@@ -43,6 +43,18 @@ export const VAULT_BOSS_FAMILY: Record<VaultBossKind, VaultFamily> = {
   gilded_artificer: 'gilded',
 };
 
+/** Shared visual/combat bounds. These cover each boss's substantial body while
+ * excluding thin decorative tips such as chains, wings and antennae. */
+export const VAULT_BOSS_HITBOX: Record<VaultBossKind, {
+  halfWidth: number; height: number;
+}> = {
+  bone_warden: { halfWidth: 1.1, height: 5.8 },
+  mire_queen: { halfWidth: 3.3, height: 3.8 },
+  ember_colossus: { halfWidth: 2.3, height: 4.7 },
+  crystal_seer: { halfWidth: 3.5, height: 4.5 },
+  gilded_artificer: { halfWidth: 1.9, height: 5.4 },
+};
+
 /** A vault stamp never reaches past 3 chunks beyond its anchor chunk (all
  *  offsets are ≤ ±51 blocks and the anchor sits ≥4 blocks inside its chunk).
  *  Vaults are MASSIVE now — sprawling multi-wing complexes. */
@@ -523,7 +535,7 @@ export function vaultStamp(
       cz * 31 + boxIndex) * 3);
     // Three floor-language variants shared by every room kind: border, cross,
     // or checker. They are furnishing-only and cannot obstruct traversal.
-    if (b.kind !== 'pit' && b.kind !== 'flooded' && b.kind !== 'lava') {
+    if (b.kind !== 'boss' && b.kind !== 'pit' && b.kind !== 'flooded' && b.kind !== 'lava') {
       for (let du = -(b.hw - 1); du <= b.hw - 1; du++) {
         for (let dv = -(b.hw - 1); dv <= b.hw - 1; dv++) {
           const border = Math.abs(du) === b.hw - 1 || Math.abs(dv) === b.hw - 1;
@@ -541,17 +553,19 @@ export function vaultStamp(
     // gilded vault raises each light on a glowing gold plinth.
     const corners: [number, number][] = b.hw >= 5
       ? [[-1, -1], [-1, 1], [1, -1], [1, 1]] : [[-1, -1], [1, 1]];
-    for (const [su, sv] of corners) {
-      const lx = wx(b.u + su * (b.hw - 1), b.v + sv * (b.hw - 1));
-      const lz = wz(b.u + su * (b.hw - 1), b.v + sv * (b.hw - 1));
-      if (family === 'gilded') {
-        mark(lx, floor, lz, Block.GoldBlock);
-        mark(lx, floor + 1, lz, lightBlock);
-      } else mark(lx, floor, lz, lightBlock);
+    if (b.kind !== 'boss') {
+      for (const [su, sv] of corners) {
+        const lx = wx(b.u + su * (b.hw - 1), b.v + sv * (b.hw - 1));
+        const lz = wz(b.u + su * (b.hw - 1), b.v + sv * (b.hw - 1));
+        if (family === 'gilded') {
+          mark(lx, floor, lz, Block.GoldBlock);
+          mark(lx, floor + 1, lz, lightBlock);
+        } else mark(lx, floor, lz, lightBlock);
+      }
     }
     // Mid-wall rune windows and ceiling coffers give even standard chambers a
     // composed silhouette. They replace shell cells only and never block lanes.
-    if (b.hw >= 4) {
+    if (b.hw >= 4 && b.kind !== 'boss') {
       for (const [du, dv] of [[b.hw, 0], [-b.hw, 0], [0, b.hw], [0, -b.hw]] as [number, number][]) {
         mark(wx(b.u + du, b.v + dv), floor + 2, wz(b.u + du, b.v + dv), Block.RuneGlass);
         if (b.ih >= 5) mark(wx(b.u + du, b.v + dv), floor + 3,
@@ -561,10 +575,10 @@ export function vaultStamp(
         mark(wx(b.u + du, b.v), fy + b.ih + 1, wz(b.u + du, b.v), Block.VaultMosaic);
       }
     }
-    if (b.kind === 'great' || b.kind === 'boss') {
+    if (b.kind === 'great') {
       // Pillars: four brick columns floor→ceiling.
       for (const [su, sv] of [[-1, -1], [-1, 1], [1, -1], [1, 1]]) {
-        const inset = b.kind === 'boss' ? b.hw - 2 : b.hw - 3;
+        const inset = b.hw - 3;
         const pu = b.u + su * inset, pv = b.v + sv * inset;
         for (let y = floor; y <= fy + b.ih; y++) {
           const capital = y === floor || y === fy + b.ih;
@@ -666,39 +680,168 @@ export function vaultStamp(
       mark(wx(b.u, b.v), floor, wz(b.u, b.v), Block.MobSpawner);
     }
   }
-  // Boss dais: a raised 5×5 family-stone platform at the back of the lair with
-  // the VaultChest on top, flanked by theme lights and a rune-glass backdrop.
-  // The arena grew from 15×15 to 19×19, but this legacy +4 offset is fixed:
-  // old chest records, map lookups and player edits continue to line up.
-  // Arena floor mandala: concentric light-stone and family trim rings frame
-  // attacks without changing collision or safe lanes.
-  for (let du = -(boss.hw - 2); du <= boss.hw - 2; du++) {
-    for (let dv = -(boss.hw - 2); dv <= boss.hw - 2; dv++) {
-      const d = Math.round(Math.hypot(du, dv));
-      if (d === 3 || d === 6) {
-        mark(wx(boss.u + du, boss.v + dv), fy, wz(boss.u + du, boss.v + dv),
-          d === 3 ? floorBlock : trimBlock);
+
+  // The lair is the one room whose architecture follows the BOSS family rather
+  // than the generic room grammar. All raised fixtures stay off the four
+  // encounter sockets, the doorway, the chest approach and the four safe lanes.
+  const arenaMark = (du: number, y: number, dv: number, id: Block): void => {
+    mark(wx(boss.u + du, boss.v + dv), y, wz(boss.u + du, boss.v + dv), id);
+  };
+  const arenaReserved = (du: number, dv: number): boolean =>
+    (Math.abs(du) === 6 && Math.abs(dv) === 6) ||
+    (du === 0 && (dv === -4 || dv === 0 || dv === 4)) ||
+    (du === -4 && dv === 0) ||
+    (du >= 1 && du <= 6 && Math.abs(dv) <= 2) ||
+    (du <= -7 && Math.abs(dv) <= 1);
+
+  if (family === 'crypt') {
+    // Processional crypt: three uninterrupted floor lanes teach the same read
+    // used by the Warden's marching attacks. All columns hug the outer wall.
+    for (let du = -7; du <= 7; du++) {
+      for (let dv = -7; dv <= 7; dv++) {
+        const lane = Math.abs(dv) <= 1 || Math.abs(dv - 4) <= 1 || Math.abs(dv + 4) <= 1;
+        if (lane) {
+          arenaMark(du, fy, dv, Math.abs(dv) <= 1
+            ? Block.SpectralMarble : Block.VaultMosaic);
+        }
       }
     }
+    for (const du of [-6, 6]) {
+      for (const dv of [-7, 7]) {
+        for (let y = fy + 1; y <= fy + 5; y++) {
+          arenaMark(du, y, dv, y === fy + 1 || y === fy + 5
+            ? Block.CarvedVaultBrick : Block.IvoryColumn);
+        }
+      }
+      for (let dv = -6; dv <= 6; dv++) arenaMark(du, fy + 6, dv, Block.CarvedVaultBrick);
+    }
+    for (const [du, dv] of [[-5, -7], [-5, 7], [0, -7], [0, 7]] as [number, number][]) {
+      if (!arenaReserved(du, dv)) arenaMark(du, fy + 1, dv, Block.Cobblestone);
+    }
+    arenaMark(-5, fy + 4, -7, Block.SoulLantern);
+    arenaMark(-5, fy + 4, 7, Block.SoulLantern);
+  } else if (family === 'mire') {
+    // Tidal court: two dry loops cross through the centre while water remains
+    // in recessed edge basins. Every socket and chest route stays dry.
+    for (let du = -7; du <= 7; du++) {
+      for (let dv = -7; dv <= 7; dv++) {
+        const leftLoop = Math.abs(Math.hypot(du + 3, dv) - 3) < 0.8;
+        const rightLoop = Math.abs(Math.hypot(du - 3, dv) - 3) < 0.8;
+        if (leftLoop || rightLoop || Math.abs(dv) <= 1) {
+          arenaMark(du, fy, dv, Block.JadeMosaic);
+        }
+        const basin = Math.abs(du) >= 5 && Math.abs(dv) >= 3;
+        if (basin && !arenaReserved(du, dv)) {
+          arenaMark(du, fy, dv, Block.Mud);
+          arenaMark(du, fy + 1, dv, Block.Water);
+        }
+      }
+    }
+    for (const [du, dv, h] of [[-6, -3, 4], [-6, 3, 5], [1, -7, 4], [1, 7, 4]] as
+      [number, number, number][]) {
+      for (let y = fy + 1; y <= fy + h; y++) arenaMark(du, y, dv, Block.MossyVaultBrick);
+      for (const [ou, ov] of [[-1, 0], [1, 0], [0, -1], [0, 1]] as [number, number][]) {
+        arenaMark(du + ou, fy + h, dv + ov, Block.GlowFungus);
+      }
+    }
+  } else if (family === 'ember') {
+    // Walking caldera: the center cross and diagonals are broad basalt escape
+    // routes. Lava is curbed at the perimeter and never enters a dodge lane.
+    for (let du = -7; du <= 7; du++) {
+      for (let dv = -7; dv <= 7; dv++) {
+        const spoke = du === 0 || dv === 0 || Math.abs(du) === Math.abs(dv);
+        if (spoke) arenaMark(du, fy, dv,
+          (du + dv) % 3 === 0 ? Block.EmberBrick : Block.Basalt);
+        const gutter = Math.max(Math.abs(du), Math.abs(dv)) === 7 &&
+          !(du <= -6 && Math.abs(dv) <= 1);
+        if (gutter && !arenaReserved(du, dv)) {
+          arenaMark(du, fy, dv, Block.Basalt);
+          arenaMark(du, fy + 1, dv, Block.Lava);
+        }
+      }
+    }
+    for (const [du, dv] of [[-5, -7], [-5, 7], [3, -7], [3, 7]] as [number, number][]) {
+      for (let y = fy + 1; y <= fy + 4; y++) {
+        arenaMark(du, y, dv, y === fy + 2 ? Block.EmberBrick : Block.FurnaceCeramic);
+      }
+      arenaMark(du, fy + 5, dv, Block.EmberBrazier);
+    }
+    for (let du = -5; du <= 3; du++) {
+      arenaMark(du, fy + 6, -7, Block.EmberBrick);
+      arenaMark(du, fy + 6, 7, Block.EmberBrick);
+    }
+  } else if (family === 'crystal') {
+    // Prism observatory: eight spokes are authoritative beam lanes. Obelisks and
+    // hanging crystals remain outside the player's movement and camera volume.
+    for (let du = -7; du <= 7; du++) {
+      for (let dv = -7; dv <= 7; dv++) {
+        const ray = du === dv || du === -dv || du === 0 || dv === 0;
+        const ring = Math.round(Math.hypot(du, dv)) === 5;
+        if (ray || ring) arenaMark(du, fy, dv,
+          ring ? Block.PrismBrick : Block.PearlTile);
+      }
+    }
+    for (const [du, dv, h] of [[-7, -5, 4], [-7, 5, 3], [7, -5, 3], [7, 5, 4]] as
+      [number, number, number][]) {
+      for (let y = fy + 1; y <= fy + h; y++) {
+        arenaMark(du, y, dv, y === fy + h ? Block.PrismLamp : Block.CrystalBlock);
+      }
+    }
+    for (const [du, dv, length] of [[-3, -3, 3], [-3, 3, 2], [3, -3, 2], [3, 3, 3]] as
+      [number, number, number][]) {
+      for (let k = 0; k < length; k++) arenaMark(du, fy + 6 - k, dv, Block.CrystalBlock);
+    }
+  } else {
+    // Clockwork grid: a crisp 5x5 board makes mine cells and crusher gaps
+    // readable. Machinery stays on the walls and overhead gantry.
+    for (let du = -7; du <= 7; du++) {
+      for (let dv = -7; dv <= 7; dv++) {
+        if (Math.abs(du) <= 5 && Math.abs(dv) <= 5) {
+          const cell = (Math.floor((du + 5) / 2) + Math.floor((dv + 5) / 2)) & 1;
+          arenaMark(du, fy, dv, cell ? Block.ClockworkGrate : Block.GildedVaultBrick);
+        } else if (Math.max(Math.abs(du), Math.abs(dv)) === 6) {
+          arenaMark(du, fy, dv, Block.VaultMosaic);
+        }
+      }
+    }
+    for (const [du, dv] of [[-5, -7], [-5, 7], [1, -7], [1, 7]] as [number, number][]) {
+      for (let y = fy + 1; y <= fy + 4; y++) {
+        arenaMark(du, y, dv, y === fy + 2 ? Block.GildedVaultBrick : Block.ClockworkGrate);
+      }
+      arenaMark(du, fy + 5, dv, Block.GildedLamp);
+    }
+    for (let du = -5; du <= 1; du++) {
+      arenaMark(du, fy + 6, -7, Block.ClockworkGrate);
+      arenaMark(du, fy + 6, 7, Block.ClockworkGrate);
+    }
   }
+
+  // Reward alcove: floor trim replaces the old raised 5x5 obstacle. The chest
+  // keeps its legacy coordinate on a single protected pedestal.
+  // The arena grew from 15×15 to 19×19, but this legacy +4 offset is fixed:
+  // old chest records, map lookups and player edits continue to line up.
   const daisU = boss.u + 4;
   for (let du = -2; du <= 2; du++) {
     for (let dv = -2; dv <= 2; dv++) {
       // Themed edge trim makes the treasure dais gleam from the doorway.
       const edge = Math.abs(du) === 2 || Math.abs(dv) === 2;
-      mark(wx(daisU + du, boss.v + dv), fy + 1, wz(daisU + du, boss.v + dv),
+      mark(wx(daisU + du, boss.v + dv), fy, wz(daisU + du, boss.v + dv),
         edge ? trimBlock : floorBlock);
     }
   }
   const chest = { x: wx(daisU, boss.v), y: fy + 2, z: wz(daisU, boss.v) };
+  mark(chest.x, fy + 1, chest.z, trimBlock);
   mark(chest.x, chest.y, chest.z, Block.VaultChest);
-  mark(wx(daisU, boss.v - 1), fy + 2, wz(daisU, boss.v - 1), lightBlock);
-  mark(wx(daisU, boss.v + 1), fy + 2, wz(daisU, boss.v + 1), lightBlock);
+  mark(wx(daisU, boss.v - 1), fy + 1, wz(daisU, boss.v - 1), lightBlock);
+  mark(wx(daisU, boss.v + 1), fy + 1, wz(daisU, boss.v + 1), lightBlock);
+  const backdropBlock = family === 'mire' ? Block.MossyVaultBrick
+    : family === 'ember' ? Block.EmberBrick
+    : family === 'gilded' ? Block.ClockworkGrate : Block.RuneGlass;
   for (let dv = -3; dv <= 3; dv++) {
     for (let y = fy + 2; y <= fy + 5; y++) {
       if ((Math.abs(dv) + y) % 2 === 0) {
         mark(wx(boss.u + boss.hw, boss.v + dv), y, wz(boss.u + boss.hw, boss.v + dv),
-          Block.RuneGlass);
+          backdropBlock);
       }
     }
   }

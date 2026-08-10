@@ -103,11 +103,11 @@ function bossName(index: number, fallback: string): string {
 
 export function fieldGuideSections(): FieldGuideSection[] {
   const bosses = [
-    [bossName(0, 'Bone Warden'), 'Death marches', 'Cleaves, shockwaves, and undead armies', 'Sustained rifle or SMG', 'Keep damaging the Warden, cross expanding rings, and clear adds before they overwhelm the arena.'],
-    [bossName(1, 'Mire Queen'), 'Drowning court', 'Poison rain, tidal lanes, and ranged summons', 'Mobile automatic weapon', 'Keep moving and firing, read the safe floor quarters, and prioritize spitters.'],
-    [bossName(2, 'Ember Colossus'), 'Worldfire', 'Meteor storms, flame rings, and charges', 'Strong sustained ranged DPS', 'Maintain pressure while crossing shockwaves and leaving each burning floor quarter.'],
-    [bossName(3, 'Crystal Seer'), 'Final prophecy', 'Crossing beams, shard rain, and mirror echoes', 'Accurate ranged weapon', 'Move laterally through beam fans, keep damaging the Seer, and control mirror summons.'],
-    [bossName(4, 'Gilded Artificer'), 'Total lockdown', 'Crusher lanes, mines, guards, and suppression fire', 'High sustained DPS', 'Keep firing while avoiding mine, ricochet, coin-storm, and crusher-wall lanes.'],
+    [bossName(0, 'Bone Warden'), 'Funeral procession', 'Toll rings, marching lanes, and chain sweeps', 'Sustained rifle or SMG', 'Keep damaging the Warden, cross each toll ring, and move into the open processional lane.'],
+    [bossName(1, 'Mire Queen'), 'Drowned crown', 'Sinkholes, tidal sweeps, and serpent charges', 'Mobile automatic weapon', 'Keep moving and firing, use the dry side of each tide, and follow the rotating clear quarter.'],
+    [bossName(2, 'Ember Colossus'), 'Walking caldera', 'Crater stomps, vent cycles, and worldfire', 'Strong sustained ranged DPS', 'Maintain pressure while alternating between the clear center and clear edge.'],
+    [bossName(3, 'Crystal Seer'), 'Final prophecy', 'Predicted beams, delayed echoes, and shard sequences', 'Accurate ranged weapon', 'Read each preview, remember delayed lanes, and follow the final clear-space sequence.'],
+    [bossName(4, 'Gilded Artificer'), 'Grand mechanism', 'Timed cells, crusher gaps, and golden grids', 'High sustained DPS', 'Keep firing while leaving marked cells and following the gap through each crusher sweep.'],
   ];
 
   return [
@@ -171,11 +171,11 @@ export function fieldGuideSections(): FieldGuideSection[] {
           table(['Tier', 'Location and expectation'], [['I', 'Closer to the core; introduction to vault combat and starter rare loot'], ['II', 'Farther into the Wilds; stronger enemies and sustained-damage checks'], ['III', 'Deep Wilds; highest health and damage, strongest rewards, teams recommended']]) +
           tip('Vault flow', 'Explore rooms → reach boss arena → complete mechanics → defeat boss → loot the personal chest during its open window.')),
         entry('vault-preparation', 'Vault preparation checklist', ['prepare', 'ammo', 'torches', 'respawn'],
-          list(['Repair armor.', 'Bring spare ammunition and healing.', 'Clear unnecessary inventory space.', 'Carry close- and long-range options.', 'Bring torches and set a nearby respawn point.', 'For Tier III, bring teammates and assign objective roles.'])),
+          list(['Repair armor.', 'Bring spare ammunition and healing.', 'Clear unnecessary inventory space.', 'Carry close- and long-range options.', 'Bring torches and set a nearby respawn point.', 'For Tier III, coordinate damage, summon control, and revives if teammates join.'])),
       ],
     },
     {
-      id: 'bosses', title: 'Bosses', icon: icon('skull'), summary: 'Objective priorities and suggested gear for every vault boss.', entries: [
+      id: 'bosses', title: 'Bosses', icon: icon('skull'), summary: 'Movement priorities and suggested gear for every vault boss.', entries: [
         entry('boss-comparison', 'Boss comparison', ['boss', 'warden', 'queen', 'colossus', 'seer', 'artificer'],
           table(['Boss', 'Priority target', 'Main danger', 'Weapon style'], bosses.map((b) => b.slice(0, 4))) +
           `<div class="field-guide-boss-grid">${bosses.map((b) => `<section class="field-guide-boss"><h3>${esc(b[0])}</h3><p><strong>Priority:</strong> ${b[1]}. ${b[4]}</p></section>`).join('')}</div>`),
@@ -240,15 +240,15 @@ export function fieldGuideSections(): FieldGuideSection[] {
     {
       id: 'teamplay', title: 'Multiplayer & Team Play', icon: icon('team'), summary: 'Roles, boss coordination, and flag-war discipline.', entries: [
         entry('team-roles', 'Useful team roles', ['scout', 'builder', 'defender', 'healer', 'raid leader'],
-          list(['Scout and route finder', 'Builder and repair specialist', 'Flag defender', 'Miner and machine operator', 'Boss damage dealer', 'Objective clearer', 'Healing and revive carrier', 'Raid leader'])) ,
+          list(['Scout and route finder', 'Builder and repair specialist', 'Flag defender', 'Miner and machine operator', 'Boss damage dealer', 'Summon controller', 'Healing and revive carrier', 'Raid leader'])) ,
         entry('group-tactics', 'Group tactics', ['team', 'boss group', 'rally point', 'revive'],
-          list(['Assign one player to boss pressure and one to critical objects.', 'Have another player clear summons and protect revives.', 'Rotate healing responsibility.', 'Do not stack during area attacks.', 'For raids, establish rally points and assign home defenders before departure.'])),
+          list(['Keep at least one player applying boss pressure.', 'Have another player control optional summons and protect revives.', 'Rotate healing responsibility.', 'Do not stack during area attacks.', 'No boss requires a crystal, ward, or arena prop to be destroyed.', 'For raids, establish rally points and assign home defenders before departure.'])),
       ],
     },
     {
       id: 'quick', title: 'Quick Reference', icon: icon('help'), summary: 'Fast answers for common high-risk situations.', entries: [
         entry('quick-reference', 'Field checklist', ['quick reference', 'tips'],
-          table(['Situation', 'Immediate action'], [['Entering a vault', 'Repair armor, clear inventory space, bring healing and ammo'], ['Boss becomes resistant', 'Find and destroy the arena objective'], ['Flag alarm', 'Call location, close routes, protect supplies'], ['Raiding', 'Scout, bring cover, plan escape'], ['Machine site', 'Claim, configure, light, wall, and resupply'], ['Lost in Wilds', 'Use map/waypoint tools and establish a safe cache']]))
+          table(['Situation', 'Immediate action'], [['Entering a vault', 'Repair armor, clear inventory space, bring healing and ammo'], ['Boss changes phase', 'Read the new floor preview and keep attacking the boss'], ['Flag alarm', 'Call location, close routes, protect supplies'], ['Raiding', 'Scout, bring cover, plan escape'], ['Machine site', 'Claim, configure, light, wall, and resupply'], ['Lost in Wilds', 'Use map/waypoint tools and establish a safe cache']]))
       ],
     },
   ];

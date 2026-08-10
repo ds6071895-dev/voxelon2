@@ -10,31 +10,74 @@ const ICON_FOLIAGE = '#71a83d';
 
 /** Dimensional low-poly side view matching the in-world gun models. */
 function drawGunIcon(ctx: CanvasRenderingContext2D, itemId: number): void {
-  const long = itemId !== Item.Pistol && itemId !== Item.SMG;
-  const rocket = itemId === Item.RocketLauncher;
-  const shotgun = itemId === Item.Shotgun;
-  const sniper = itemId === Item.Sniper;
-  const x0 = long ? 3 : 7, x1 = long ? 28 : 25;
-  ctx.lineJoin = 'round';
-  ctx.strokeStyle = '#11151a'; ctx.lineWidth = 1.5;
-  ctx.fillStyle = rocket ? '#53634b' : shotgun ? '#70472b' : '#46515b';
-  ctx.beginPath();
-  ctx.moveTo(x0, 11); ctx.lineTo(x1, 11); ctx.lineTo(x1 - 2, 17);
-  ctx.lineTo(x0 + 5, 18); ctx.lineTo(x0, 15); ctx.closePath();
-  ctx.fill(); ctx.stroke();
-  // Bright top face creates the same chunky 3D read as the box model.
-  ctx.fillStyle = rocket ? '#77866a' : '#77838d';
-  ctx.beginPath(); ctx.moveTo(x0, 11); ctx.lineTo(x0 + 3, 8);
-  ctx.lineTo(x1, 8); ctx.lineTo(x1, 11); ctx.closePath(); ctx.fill(); ctx.stroke();
-  ctx.fillStyle = '#252a30';
-  ctx.beginPath(); ctx.moveTo(13, 17); ctx.lineTo(18, 17);
-  ctx.lineTo(17, 27); ctx.lineTo(13, 25); ctx.closePath(); ctx.fill(); ctx.stroke();
-  if (shotgun) {
-    ctx.fillStyle = '#aeb6bd'; ctx.fillRect(3, 8, 21, 3); ctx.strokeRect(3, 8, 21, 3);
+  const edge = '#11151a', dark = '#252a30', steel = '#59636d';
+  const rect = (x: number, y: number, w: number, h: number, color: string): void => {
+    ctx.fillStyle = color; ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = edge; ctx.strokeRect(x, y, w, h);
+  };
+  const poly = (points: [number, number][], color: string): void => {
+    ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(...points[0]);
+    for (let i = 1; i < points.length; i++) ctx.lineTo(...points[i]);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+  };
+  ctx.lineJoin = 'miter'; ctx.lineCap = 'square';
+  ctx.strokeStyle = edge; ctx.lineWidth = 1.25;
+
+  if (itemId === Item.Pistol) {
+    rect(7, 9, 19, 6, steel); rect(9, 8, 15, 2, '#89949d');
+    rect(17, 11, 5, 3, '#111418');
+    poly([[10, 15], [17, 15], [15, 27], [10, 25]], dark);
+    rect(11, 18, 2, 5, '#70472b'); rect(24, 12, 3, 3, '#111418');
+    return;
   }
-  if (sniper || itemId === Item.BurstRifle || rocket) {
-    ctx.fillStyle = '#161a1f'; ctx.fillRect(10, 4, 11, 4); ctx.strokeRect(10, 4, 11, 4);
+  if (itemId === Item.SMG) {
+    rect(8, 9, 16, 8, '#315a72'); rect(10, 8, 13, 2, '#477d96');
+    rect(23, 11, 5, 3, '#111418'); rect(5, 11, 3, 2, dark);
+    ctx.strokeStyle = dark; ctx.lineWidth = 2; ctx.strokeRect(2, 8, 6, 7);
+    ctx.strokeStyle = edge; ctx.lineWidth = 1.25;
+    poly([[12, 17], [17, 17], [16, 28], [12, 27]], dark);
+    poly([[7, 17], [11, 17], [9, 25], [6, 24]], '#3e474d');
+    return;
   }
+  if (itemId === Item.Shotgun) {
+    rect(4, 8, 23, 3, '#89949d'); rect(4, 12, 23, 3, steel);
+    rect(12, 15, 7, 5, steel); rect(19, 16, 6, 3, '#9a7a4d');
+    poly([[4, 15], [12, 15], [10, 20], [3, 22], [1, 20]], '#70472b');
+    rect(26, 8, 2, 3, '#111418'); rect(26, 12, 2, 3, '#111418');
+    return;
+  }
+  if (itemId === Item.RocketLauncher) {
+    rect(3, 8, 26, 9, '#53634b'); rect(7, 7, 17, 3, '#748169');
+    rect(2, 7, 4, 11, dark); rect(27, 7, 3, 11, dark);
+    rect(10, 4, 10, 4, dark); rect(11, 18, 5, 9, dark);
+    rect(17, 18, 4, 6, '#252a30'); rect(9, 9, 12, 2, '#9a7a4d');
+    return;
+  }
+  if (itemId === Item.Sniper) {
+    rect(3, 11, 25, 3, '#111418'); rect(11, 13, 10, 6, steel);
+    rect(8, 5, 13, 4, dark); rect(9, 9, 2, 3, edge); rect(18, 9, 2, 3, edge);
+    rect(20, 6, 2, 2, '#2d7896');
+    poly([[2, 14], [12, 14], [10, 19], [3, 21], [1, 19]], '#70472b');
+    poly([[12, 18], [17, 18], [16, 27], [12, 26]], dark);
+    rect(27, 10, 3, 5, '#3e474d');
+    return;
+  }
+  if (itemId === Item.BurstRifle) {
+    rect(7, 10, 19, 7, '#315a72'); rect(18, 8, 9, 4, dark);
+    rect(25, 12, 4, 3, '#111418');
+    ctx.strokeStyle = edge; ctx.lineWidth = 2.5;
+    ctx.strokeRect(9, 5, 10, 5); ctx.lineWidth = 1.25;
+    rect(11, 8, 6, 2, '#477d96');
+    poly([[12, 17], [17, 17], [19, 27], [14, 27]], dark);
+    poly([[2, 13], [7, 11], [7, 17], [2, 19]], dark);
+    return;
+  }
+  // Automatic rifle: warm wood furniture and a curved magazine distinguish it.
+  rect(8, 10, 18, 7, '#3e474d'); rect(18, 9, 11, 3, '#111418');
+  rect(17, 13, 8, 5, '#70472b'); rect(25, 11, 5, 3, '#111418');
+  poly([[2, 12], [8, 10], [8, 17], [3, 20], [1, 18]], '#70472b');
+  poly([[11, 17], [16, 17], [18, 27], [14, 28], [12, 23]], dark);
+  rect(9, 8, 9, 2, '#89949d');
 }
 
 function tileSource(

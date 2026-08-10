@@ -119,7 +119,7 @@ export function encounterCoach(
   }
 
   if (snapshot.enrage) {
-    return { text: '☠ ENRAGED — it hits far harder every second. Kill it or leave.', tone: 'danger' };
+    return { text: '☠ ENRAGED — attacks and movement are accelerating. Finish the fight.', tone: 'danger' };
   }
   if (snapshot.wave.alive >= 6) {
     return {
@@ -247,7 +247,7 @@ export class VaultBossHUD {
       : snapshot.elapsed >= 300 ? ` • ENRAGE ${Math.max(0, Math.ceil(360 - snapshot.elapsed))}s` : '';
     this.details.textContent =
       `${snapshot.participants.length} raider${snapshot.participants.length === 1 ? '' : 's'} ` +
-      `×${(1 + 0.6 * (snapshot.peakParticipants - 1)).toFixed(1)} • ` +
+      `×${(1 + 0.7 * (snapshot.peakParticipants - 1)).toFixed(1)} • ` +
       `WAVE ${snapshot.wave.number} • ${snapshot.wave.alive}/${snapshot.wave.cap} army${enrage}`;
     // Desperation: once the boss enrages or drops into its last sliver of
     // health the whole bar throbs, so the kill window is felt, not read.

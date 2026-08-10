@@ -622,6 +622,23 @@ export class Terrain {
     return true;
   }
 
+  /** Return the safe natural-surface spawn at a specific column, if any. */
+  safeSpawnAt(x: number, z: number): { x: number; z: number; y: number } | undefined {
+    x = Math.floor(x); z = Math.floor(z);
+    if (!this.safeSpawnColumn(x, z)) return undefined;
+    return { x: x + 0.5, z: z + 0.5, y: this.height(x, z) + 1 };
+  }
+
+  /** Exact generated block IDs for selected cells in one world column. */
+  blocksAtColumn(x: number, z: number, ys: number[]): number[] {
+    const cx = Math.floor(x) >> 4, cz = Math.floor(z) >> 4;
+    const chunk = new Chunk(cx, cz);
+    this.fill(chunk);
+    const lx = ((Math.floor(x) % CHUNK_X) + CHUNK_X) % CHUNK_X;
+    const lz = ((Math.floor(z) % CHUNK_Z) + CHUNK_Z) % CHUNK_Z;
+    return ys.map((y) => chunk.get(lx, Math.floor(y), lz));
+  }
+
   /** A random spawn within ±half of origin that is guaranteed solid dry ground
    *  (never in water, never floating in air). Falls back to findSpawn if the rng
    *  is unlucky. The +1 on y places the feet exactly on top of the surface. */

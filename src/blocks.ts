@@ -795,10 +795,10 @@ export const BLOCKS: Record<number, BlockInfo> = {
   // Vault walls: VERY hard (iron-pick tier, long break) so raiders fight
   // through the door, not the wall — but NOT unbreakable.
   [Block.VaultBrick]: def({ name: 'Vault Brick', hardness: 18, top: Tile.VaultBrick }),
-  // The boss-room treasure chest: per-player loot (right-click after the Brute
-  // falls). Glows faintly; breaking it destroys the treasure (drops nothing).
+  // The boss-room treasure chest is protected progression: defeat the boss and
+  // right-click it. It cannot be broken or replaced.
   [Block.VaultChest]: def({
-    name: 'Vault Chest', hardness: 22, emission: 8,
+    name: 'Vault Chest', hardness: -1, emission: 8,
     top: Tile.VaultChestTop, bottom: Tile.VaultChestTop, side: Tile.VaultChestSide,
   }),
   [Block.CarvedVaultBrick]: def({
@@ -939,10 +939,10 @@ export const BLOCKS: Record<number, BlockInfo> = {
     top: Tile.WallTrapTop, bottom: Tile.WallTrapSide, side: Tile.WallTrapSide,
   }),
 
-  // Vault guard spawner: a dark iron cage. Tough but breakable (iron pick) —
-  // silencing a room is a strategy; it drops nothing and can't be rebuilt.
+  // Protected room anchor. Its finite wave goes dormant after combat, so the
+  // player never needs to mine a progression object.
   [Block.MobSpawner]: def({
-    name: 'Mob Spawner', hardness: 10, emission: 5,
+    name: 'Mob Spawner', hardness: -1, emission: 5,
     top: Tile.MobSpawner, opaque: false, occludes: false,
   }),
 
@@ -974,7 +974,6 @@ const PICKAXE_TIERS: [Block, number][] = [
   [Block.EmberBrick, 2], [Block.PrismBrick, 2], [Block.GildedVaultBrick, 2],
   [Block.SoulLantern, 1], [Block.EmberBrazier, 1],
   [Block.PrismLamp, 1], [Block.GildedLamp, 1],
-  [Block.MobSpawner, 2], // silencing a guard room takes an iron pick too
 ];
 for (const [b, tier] of PICKAXE_TIERS) {
   BLOCKS[b].tool = 'pickaxe';
