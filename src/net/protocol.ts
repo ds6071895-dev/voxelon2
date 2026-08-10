@@ -11,6 +11,10 @@ import type {
   ArenaBounds, EncounterEvent, EncounterSnapshot, VaultAttackIntent, Vec3,
 } from '../vault_encounter';
 import type { VaultBossKind, VaultFamily, VaultTier } from '../vaults';
+import type {
+  BatteryState, LaunchReject, MissileSnapshot, ProtectedArea, SiloState,
+} from '../strategic';
+import type { BombSnapshot, HelicopterSnapshot, SeatKind } from '../vehicles';
 
 export const SERVER_PORT = 8080;
 export const SNAPSHOT_HZ = 15;     // server -> clients transform broadcasts
@@ -122,12 +126,28 @@ export const TOUGHNESS_CAP = 4;
  *  Used by BOTH the offline client and the authoritative server so mitigation
  *  is identical. Returns the (rounded) damage that gets through.
  *  With `toughness` 0 this is exactly the percentage-only function it has
- *  always been, so a player with no runes is bit-for-bit unaffected. */
-export function mitigate(amount: number, armorPoints: number, toughness = 0): number {
-  const eff = Math.max(0, Math.min(ARMOR_POINT_CAP, armorPoints));
+ *  always been, so a player with no runes is bit-for-bit unaffected.
+ *
+ *  `pierce` (0..1) ignores that fraction of the target's armor points. It
+ *  exists because armor is MULTIPLICATIVE and the endgame saturates it: a full
+ *  titanium set blocks 80% flat, so a raw number tuned to threaten a geared
+ *  player deletes an ungeared one, and a number tuned to be fair to the
+ *  ungeared player is a tickle to the geared one. Nothing in the open world
+ *  uses it (default 0 = the old function, bit for bit); vault-boss hazards do,
+ *  which is what lets one authored damage ladder stay honest across the whole
+ *  gear curve. A pierced hit also caps the flat toughness soak at half the
+ *  hit, so four Greater Runes of Iron stay a strong upgrade instead of
+ *  flattening every attack in a lair to the 1 HP minimum. */
+export function mitigate(
+  amount: number, armorPoints: number, toughness = 0, pierce = 0,
+): number {
+  const bite = Math.max(0, Math.min(1, pierce)) || 0;
+  const eff = Math.max(0, Math.min(ARMOR_POINT_CAP, armorPoints)) * (1 - bite);
   const base = Math.max(0, Math.round(amount * (1 - eff * 0.04)));
   if (!(toughness > 0) || base <= 0) return base;
-  return Math.max(1, base - Math.min(TOUGHNESS_CAP, toughness));
+  const soak = Math.min(TOUGHNESS_CAP, toughness,
+    bite > 0 ? Math.floor(base / 2) : Infinity);
+  return Math.max(1, base - soak);
 }
 
 // --- client -> server -------------------------------------------------------
@@ -193,10 +213,8 @@ export type ClientMsg =
   // announcement — others keep seeing your old colors (a spy), but the server
   // treats you as your new faction. Max 2/season, locked in the final week.
   | { t: 'switchFaction'; faction: number }
-  // Progression: the client reports XP it earned from MOB kills (mobs are
-  // client-simulated). The server clamps the amount, adds it to the account's
-  // personal XP and the faction's shared pool. PvP-kill XP is awarded by the
-  // server itself (never reported).
+  // RETIRED (Warfare Command): the old mob-kill XP report. Kept in the union so
+  // an older client's message is accepted and ignored rather than desyncing.
   | { t: 'xp'; amount: number }
   // Gadgets (Phase 8): server-authoritative gadget effects. `item` is the gadget
   // item id; the server derives the effect kind + params. (frag/oil/smoke use the
@@ -237,7 +255,37 @@ export type ClientMsg =
   // the server-HP Vault Brute, and open the per-player VaultChest.
   | { t: 'vaultEnter'; cx: number; cz: number }
   | { t: 'vaultAttack'; cx: number; cz: number; intent: VaultAttackIntent }
-  | { t: 'vaultChestOpen'; x: number; y: number; z: number };
+  | { t: 'vaultChestOpen'; x: number; y: number; z: number }
+  // --- WARFARE COMMAND -------------------------------------------------------
+  // Progression. XP itself is NEVER client-reported: the server settles it from
+  // its own boss-contribution ledger. The client may only ask to SPEND.
+  | { t: 'warfareBuy'; node: string }
+  // Tactical silos (block-entities; placement is a normal edit).
+  | { t: 'siloOpen'; x: number; y: number; z: number }
+  | { t: 'siloLoad'; x: number; y: number; z: number; count: number }
+  | { t: 'siloUpgrade'; x: number; y: number; z: number }
+  // Fire. `tx/tz` is the map reticle; the server revalidates EVERYTHING
+  // (ownership, faction, range, ammunition, protected areas, cooldown, finite
+  // coordinates, in-flight caps) before a single missile is consumed.
+  | { t: 'siloLaunch'; x: number; y: number; z: number; tx: number; tz: number }
+  // Interceptor batteries.
+  | { t: 'batteryOpen'; x: number; y: number; z: number }
+  | { t: 'batteryLoad'; x: number; y: number; z: number; count: number }
+  | { t: 'batteryUpgrade'; x: number; y: number; z: number }
+  // Sabotage/raid damage against strategic hardware (same trust model as
+  // `machineHit`/`turretHit`: the server clamps the amount).
+  | { t: 'strategicHit'; kind: 'silo' | 'battery'; x: number; y: number; z: number; amount: number }
+  // Accurate gunfire against a missile hull in flight.
+  | { t: 'missileHit'; id: number; amount: number }
+  // Helicopters. The client sends INPUT, never positions.
+  | { t: 'heliSpawn'; x: number; y: number; z: number }
+  | { t: 'heliMount'; id: number; seat?: SeatKind }
+  | { t: 'heliDismount' }
+  | { t: 'heliInput'; forward: number; strafe: number; lift: number; yaw: number; seq: number }
+  | { t: 'heliBomb' }
+  | { t: 'heliService'; id: number; oil: number; bombs: number; repair: number }
+  | { t: 'heliUpgrade'; id: number }
+  | { t: 'heliHit'; id: number; amount: number };
 
 // --- server -> client -------------------------------------------------------
 export type ServerMsg =
@@ -261,13 +309,20 @@ export type ServerMsg =
        *  faction's war wins this season (the season winner). */
       war: { active: boolean; timeLeft: number; nextIn: number; duration: number;
         score: number[]; wins: number[] };
-      /** Faction XP pools (progression): shared XP per faction id. */
-      factionXp: number[];
       /** Capture-the-flag state (see flags.ts). */
       flags: { breakable: boolean;
         flags: { faction: number; holder: number; hp: number; carrier: number }[] };
       /** Saved per-account state to restore (inventory/hotbar); undefined for new accounts. */
       state?: Record<string, unknown>;
+      /** WARFARE COMMAND: your personal progression, stored on the ACCOUNT
+       *  (explicitly — never inside the opaque client `state` blob). */
+      warfare: { xp: number; nodes: string[] };
+      /** Strategic hardware standing in the world. */
+      silos: SiloState[];
+      batteries: BatteryState[];
+      helis: HelicopterSnapshot[];
+      /** Locations a tactical strike may never be aimed into. */
+      protectedAreas: ProtectedArea[];
     }
   | { t: 'join'; player: PlayerInfo }
   | { t: 'leave'; id: number }
@@ -312,11 +367,6 @@ export type ServerMsg =
   // A season ended — winner faction (NO_FACTION = stalemate) + the season that
   // just finished. Clients flash a banner; war scores reset.
   | { t: 'seasonEnd'; winner: number; number: number }
-  // Progression: the server granted YOU personal XP (PvP kill / validated mob
-  // report echo) — the client adds it to its local total and toasts it.
-  | { t: 'xpAward'; amount: number; reason: string }
-  // Faction XP pools changed (shared progression; drives faction perks).
-  | { t: 'fxp'; xp: number[] }
   // Admin (server console): a player's gamemode changed; teleport snaps a player.
   | { t: 'gamemode'; id: number; mode: GameMode }
   | { t: 'teleport'; x: number; y: number; z: number }
@@ -362,7 +412,36 @@ export type ServerMsg =
       outcome: 'victory' | 'reset' | 'abandonment'; credited?: string;
     }
   // A player changed their avatar cosmetics — rebuild their model.
-  | { t: 'cosmetics'; id: number; c: Cosmetics };
+  | { t: 'cosmetics'; id: number; c: Cosmetics }
+  // --- WARFARE COMMAND -------------------------------------------------------
+  // YOUR authoritative progression (sent on welcome + after every change).
+  | { t: 'warfare'; xp: number; nodes: string[] }
+  // A boss you helped kill paid out. `total` is your new earned total.
+  | { t: 'warfareXp'; amount: number; tier: number; total: number; boss: string }
+  // A purchase or a hardware action was refused, with the reason to show.
+  | { t: 'warfareErr'; reason: string }
+  // Strategic hardware state (broadcast on every change; also in `welcome`).
+  | { t: 'silo'; state: SiloState }
+  | { t: 'siloGone'; id: number; x: number; y: number; z: number }
+  | { t: 'battery'; state: BatteryState }
+  | { t: 'batteryGone'; id: number; x: number; y: number; z: number }
+  // Periodic missile snapshots + the discrete events worth an effect/sound.
+  | { t: 'missiles'; list: MissileSnapshot[] }
+  | { t: 'missileLaunch'; missile: MissileSnapshot; siloId: number }
+  | { t: 'interceptorLaunch'; missile: MissileSnapshot; batteryId: number }
+  | { t: 'missileEnd'; id: number; reason: 'impact' | 'intercepted' | 'shot' | 'expired';
+      x: number; y: number; z: number; radius: number }
+  // An inbound strike is on its way to `x/z`, landing in `eta` seconds.
+  | { t: 'strikeWarning'; faction: number; x: number; z: number; eta: number; radius: number }
+  // Areas a strike may never be aimed into (drawn on the targeting map).
+  | { t: 'protectedAreas'; areas: ProtectedArea[] }
+  // A launch request was rejected — the reticle turns red and explains why.
+  | { t: 'launchRejected'; reason: LaunchReject; text: string }
+  // Helicopters + their bombs.
+  | { t: 'helis'; list: HelicopterSnapshot[]; bombs: BombSnapshot[] }
+  | { t: 'heliSeat'; id: number; seat: SeatKind | null }
+  | { t: 'heliDown'; id: number; x: number; y: number; z: number; faction: number }
+  | { t: 'heliGone'; id: number };
 
 const ADJECTIVES = [
   'Brave', 'Swift', 'Iron', 'Shadow', 'Crimson', 'Frost', 'Rapid', 'Silent',

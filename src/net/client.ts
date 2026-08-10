@@ -16,6 +16,10 @@ import type {
 } from '../vault_encounter';
 import { sanitizeEncounterSnapshot } from '../vault_encounter';
 import type { VaultBossKind, VaultFamily, VaultTier } from '../vaults';
+import type {
+  BatteryState, LaunchReject, MissileSnapshot, ProtectedArea, SiloState,
+} from '../strategic';
+import type { BombSnapshot, HelicopterSnapshot, SeatKind } from '../vehicles';
 
 export interface Remote {
   info: PlayerInfo;
@@ -113,10 +117,36 @@ export class NetClient {
   /** A flag was taken / returned / captured (drives banners + notices). */
   onFlagEvent?: (kind: 'taken' | 'returned' | 'captured', faction: number,
     by: string, holder: number) => void;
-  /** The server granted YOU personal XP (PvP kill). */
-  onXpAward?: (amount: number, reason: string) => void;
-  /** Faction XP pools changed (shared progression). */
-  onFactionXp?: (xp: number[]) => void;
+  // --- WARFARE COMMAND ---
+  /** YOUR authoritative technology state (welcome + after every change). */
+  onWarfare?: (xp: number, nodes: string[]) => void;
+  /** A boss you helped kill paid out warfare XP. */
+  onWarfareXp?: (amount: number, tier: number, total: number, boss: string) => void;
+  /** A warfare action was refused, with the reason to show. */
+  onWarfareErr?: (reason: string) => void;
+  /** Strategic hardware state changed (or was removed). */
+  onSilo?: (state: SiloState) => void;
+  onSiloGone?: (id: number, x: number, y: number, z: number) => void;
+  onBattery?: (state: BatteryState) => void;
+  onBatteryGone?: (id: number, x: number, y: number, z: number) => void;
+  /** Periodic missile positions + the discrete flight events. */
+  onMissiles?: (list: MissileSnapshot[]) => void;
+  onMissileLaunch?: (missile: MissileSnapshot, siloId: number) => void;
+  onInterceptorLaunch?: (missile: MissileSnapshot, batteryId: number) => void;
+  onMissileEnd?: (id: number, reason: 'impact' | 'intercepted' | 'shot' | 'expired',
+    x: number, y: number, z: number, radius: number) => void;
+  /** An inbound strike is on its way (drives the warning banner + map ping). */
+  onStrikeWarning?: (faction: number, x: number, z: number, eta: number, radius: number) => void;
+  /** Areas a strike may never be aimed into (drawn on the targeting map). */
+  onProtectedAreas?: (areas: ProtectedArea[]) => void;
+  /** A launch request was refused. */
+  onLaunchRejected?: (reason: LaunchReject, text: string) => void;
+  /** Helicopters + their falling bombs. */
+  onHelis?: (list: HelicopterSnapshot[], bombs: BombSnapshot[]) => void;
+  /** YOUR seat changed (null = you are on your feet again). */
+  onHeliSeat?: (id: number, seat: SeatKind | null) => void;
+  onHeliDown?: (id: number, x: number, y: number, z: number, faction: number) => void;
+  onHeliGone?: (id: number) => void;
   /** Private confirmation of YOUR secret faction switch (Phase 7). */
   onFactionSwitched?: (faction: number, remaining: number) => void;
   /** Play a gadget visual effect (frag/oil blast, smoke cloud) at a point. */
@@ -223,8 +253,12 @@ export class NetClient {
         this.onSeason?.(msg.season.number, msg.season.timeLeft);
         this.onWar?.(msg.war.active, msg.war.timeLeft, msg.war.nextIn,
           msg.war.duration, msg.war.score, msg.war.wins);
-        this.onFactionXp?.(msg.factionXp);
         this.onFlags?.(msg.flags.breakable, msg.flags.flags);
+        this.onWarfare?.(msg.warfare.xp, msg.warfare.nodes);
+        for (const st of msg.silos) this.onSilo?.(st);
+        for (const st of msg.batteries) this.onBattery?.(st);
+        this.onHelis?.(msg.helis, []);
+        this.onProtectedAreas?.(msg.protectedAreas);
         const me = msg.players.find((p) => p.id === this.myId);
         // Restore saved inventory BEFORE onWelcome (which adopts the server
         // position) so the comeback loadout/inventory is in place from frame one.
@@ -331,11 +365,60 @@ export class NetClient {
       case 'flagEvent':
         this.onFlagEvent?.(msg.kind, msg.faction, msg.by, msg.holder);
         break;
-      case 'xpAward':
-        this.onXpAward?.(msg.amount, msg.reason);
+      // --- WARFARE COMMAND ---
+      case 'warfare':
+        this.onWarfare?.(msg.xp, msg.nodes);
         break;
-      case 'fxp':
-        this.onFactionXp?.(msg.xp);
+      case 'warfareXp':
+        this.onWarfareXp?.(msg.amount, msg.tier, msg.total, msg.boss);
+        break;
+      case 'warfareErr':
+        this.onWarfareErr?.(msg.reason);
+        break;
+      case 'silo':
+        this.onSilo?.(msg.state);
+        break;
+      case 'siloGone':
+        this.onSiloGone?.(msg.id, msg.x, msg.y, msg.z);
+        break;
+      case 'battery':
+        this.onBattery?.(msg.state);
+        break;
+      case 'batteryGone':
+        this.onBatteryGone?.(msg.id, msg.x, msg.y, msg.z);
+        break;
+      case 'missiles':
+        this.onMissiles?.(msg.list);
+        break;
+      case 'missileLaunch':
+        this.onMissileLaunch?.(msg.missile, msg.siloId);
+        break;
+      case 'interceptorLaunch':
+        this.onInterceptorLaunch?.(msg.missile, msg.batteryId);
+        break;
+      case 'missileEnd':
+        this.onMissileEnd?.(msg.id, msg.reason, msg.x, msg.y, msg.z, msg.radius);
+        break;
+      case 'strikeWarning':
+        this.onStrikeWarning?.(msg.faction, msg.x, msg.z, msg.eta, msg.radius);
+        break;
+      case 'protectedAreas':
+        this.onProtectedAreas?.(msg.areas);
+        break;
+      case 'launchRejected':
+        this.onLaunchRejected?.(msg.reason, msg.text);
+        break;
+      case 'helis':
+        this.onHelis?.(msg.list, msg.bombs);
+        break;
+      case 'heliSeat':
+        this.onHeliSeat?.(msg.id, msg.seat);
+        break;
+      case 'heliDown':
+        this.onHeliDown?.(msg.id, msg.x, msg.y, msg.z, msg.faction);
+        break;
+      case 'heliGone':
+        this.onHeliGone?.(msg.id);
         break;
       case 'seasonEnd':
         this.onSeasonEnd?.(msg.winner, msg.number);
@@ -552,7 +635,53 @@ export class NetClient {
 
   sendSwitchFaction(faction: number): void { if (this.connected) this.raw({ t: 'switchFaction', faction }); }
   /** Report mob-kill XP (server clamps + feeds the faction pool). */
-  sendXp(amount: number): void { if (this.connected) this.raw({ t: 'xp', amount }); }
+  // --- WARFARE COMMAND ---
+  sendWarfareBuy(node: string): void { if (this.connected) this.raw({ t: 'warfareBuy', node }); }
+  sendSiloOpen(x: number, y: number, z: number): void {
+    if (this.connected) this.raw({ t: 'siloOpen', x, y, z });
+  }
+  sendSiloLoad(x: number, y: number, z: number, count: number): void {
+    if (this.connected) this.raw({ t: 'siloLoad', x, y, z, count });
+  }
+  sendSiloUpgrade(x: number, y: number, z: number): void {
+    if (this.connected) this.raw({ t: 'siloUpgrade', x, y, z });
+  }
+  sendSiloLaunch(x: number, y: number, z: number, tx: number, tz: number): void {
+    if (this.connected) this.raw({ t: 'siloLaunch', x, y, z, tx, tz });
+  }
+  sendBatteryOpen(x: number, y: number, z: number): void {
+    if (this.connected) this.raw({ t: 'batteryOpen', x, y, z });
+  }
+  sendBatteryLoad(x: number, y: number, z: number, count: number): void {
+    if (this.connected) this.raw({ t: 'batteryLoad', x, y, z, count });
+  }
+  sendBatteryUpgrade(x: number, y: number, z: number): void {
+    if (this.connected) this.raw({ t: 'batteryUpgrade', x, y, z });
+  }
+  sendStrategicHit(kind: 'silo' | 'battery', x: number, y: number, z: number, amount: number): void {
+    if (this.connected) this.raw({ t: 'strategicHit', kind, x, y, z, amount });
+  }
+  sendMissileHit(id: number, amount: number): void {
+    if (this.connected) this.raw({ t: 'missileHit', id, amount });
+  }
+  sendHeliSpawn(x: number, y: number, z: number): void {
+    if (this.connected) this.raw({ t: 'heliSpawn', x, y, z });
+  }
+  sendHeliMount(id: number, seat?: SeatKind): void {
+    if (this.connected) this.raw({ t: 'heliMount', id, seat });
+  }
+  sendHeliDismount(): void { if (this.connected) this.raw({ t: 'heliDismount' }); }
+  sendHeliInput(forward: number, strafe: number, lift: number, yaw: number, seq: number): void {
+    if (this.connected) this.raw({ t: 'heliInput', forward, strafe, lift, yaw, seq });
+  }
+  sendHeliBomb(): void { if (this.connected) this.raw({ t: 'heliBomb' }); }
+  sendHeliService(id: number, oil: number, bombs: number, repair: number): void {
+    if (this.connected) this.raw({ t: 'heliService', id, oil, bombs, repair });
+  }
+  sendHeliUpgrade(id: number): void { if (this.connected) this.raw({ t: 'heliUpgrade', id }); }
+  sendHeliHit(id: number, amount: number): void {
+    if (this.connected) this.raw({ t: 'heliHit', id, amount });
+  }
   // Lifesteal (Milestone A).
   sendHeartConsume(): void { if (this.connected) this.raw({ t: 'heartConsume' }); }
   sendHeartWithdraw(): void { if (this.connected) this.raw({ t: 'heartWithdraw' }); }

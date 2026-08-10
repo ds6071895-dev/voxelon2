@@ -237,7 +237,99 @@ export const RECIPES: Recipe[] = [
   ...woodCraft(OAK, Block.OakSlab, Block.OakStairsN),
   ...woodCraft(BIRCH, Block.BirchSlab, Block.BirchStairsN),
   ...woodCraft(SPRUCE, Block.SpruceSlab, Block.SpruceStairsN),
+
+  // --- WARFARE COMMAND ------------------------------------------------------
+  // Strategic hardware is assembled from SUB-ASSEMBLIES, because a 3×3 grid
+  // cannot express "32 iron" in one recipe. Components are free to craft; the
+  // finished hardware below is BLUEPRINT-GATED (see WARFARE_BLUEPRINTS).
+  //
+  // Reinforced Frame — 8 Iron.
+  shaped([[I, I, I], [I, null, I], [I, I, I]], Item.ReinforcedFrame),
+  // Guidance Unit — 6 Redstone, 1 Cobalt, 2 Iron.
+  shaped([[R, R, R], [R, Cb, R], [I, R, I]], Item.GuidanceUnit),
+  // Warhead — 2 Cobalt, 1 Oil, 4 Iron.
+  shaped([[null, Cb, null], [I, Item.OilBarrel, I], [I, Cb, I]], Item.Warhead),
+  // Rotor Assembly — 4 Titanium, 1 Cobalt, 2 Iron.
+  shaped([[T, T, T], [I, Cb, I], [null, T, null]], Item.RotorAssembly),
+  // Fuel Tank — 4 Iron, 2 Oil.
+  shaped([[I, I], [Item.OilBarrel, Item.OilBarrel], [I, I]], Item.FuelTank),
+  // Bomb Casing — 2 Iron, 1 Coal.
+  shaped([[I], [ANY_COAL], [I]], Item.BombCasing),
+
+  // Tactical Silo — ≈38 Iron, 8 Redstone, 3 Cobalt, 2 Oil.
+  shaped([
+    [Item.ReinforcedFrame, Item.GuidanceUnit, Item.ReinforcedFrame],
+    [Item.ReinforcedFrame, Item.Warhead, Item.ReinforcedFrame],
+    [R, Item.OilBarrel, R],
+  ], Block.TacticalSilo),
+  // Tactical Missile — ≈8 Iron, 6 Redstone, 3 Cobalt, 2 Oil.
+  shaped([
+    [null, Item.Warhead, null],
+    [I, Item.GuidanceUnit, I],
+    [null, Item.OilBarrel, null],
+  ], Item.TacticalMissile),
+  // Interceptor Battery — ≈20 Iron, 6 Redstone, 2 Cobalt, 1 Oil.
+  shaped([
+    [null, Item.GuidanceUnit, null],
+    [Item.ReinforcedFrame, Cb, Item.ReinforcedFrame],
+    [I, Item.OilBarrel, I],
+  ], Block.InterceptorBattery),
+  // Two Interceptor Missiles — 4 Iron, 2 Redstone, 1 Cobalt, 1 Oil.
+  shaped([
+    [R, null, R],
+    [I, Cb, I],
+    [I, Item.OilBarrel, I],
+  ], Item.InterceptorMissile, 2),
+  // Helipad — 8 Iron, 6 Cobblestone, 2 Redstone. Deliberately the cheap piece:
+  // the pad is where an air wing LIVES, not what makes it expensive.
+  shaped([
+    [R, Item.ReinforcedFrame, R],
+    [C, C, C],
+    [C, C, C],
+  ], Block.Helipad),
+  // Helicopter Airframe — ≈38 Iron, 6 Redstone, 3 Cobalt, 8 Titanium, 4 Oil.
+  // Titanium lands here and in the retrofits, never in the first missile, so
+  // the very first unlock is usable long before a titanium run.
+  shaped([
+    [Item.RotorAssembly, Item.RotorAssembly, null],
+    [Item.ReinforcedFrame, Item.GuidanceUnit, Item.ReinforcedFrame],
+    [Item.FuelTank, Item.ReinforcedFrame, Item.FuelTank],
+  ], Item.HelicopterKit),
+  // Two Aerial Bombs — 4 Iron, 2 Redstone, 1 Cobalt, 1 Oil, 1 Coal.
+  shaped([
+    [R, Item.BombCasing, R],
+    [I, Cb, I],
+    [null, Item.OilBarrel, null],
+  ], Item.AerialBomb, 2),
+  // Hardware Repair Kit — 4 Iron, 1 Cobalt, 1 Oil (restores 25% of a hull).
+  shaped([[I, I], [Cb, Item.OilBarrel], [I, I]], Item.RepairKit),
 ];
+
+/**
+ * BLUEPRINT GATING — crafting these requires the matching Warfare Command node.
+ *
+ * Both the hardware AND its ordnance are gated: knowing how to build a silo and
+ * knowing how to build the warhead it fires are the same blueprint. The
+ * intermediate COMPONENTS (frames, guidance units, warheads, rotors, tanks,
+ * casings) stay open, which is what lets an un-authorized teammate still do the
+ * heavy lifting for a faction's war effort — and *loading* already-built
+ * ordnance into shared hardware is never gated at all (see server_core's
+ * siloLoad/batteryLoad, which check faction, not blueprints).
+ */
+export const WARFARE_BLUEPRINTS: Record<number, string> = {
+  [Block.TacticalSilo]: 'missile_command',
+  [Item.TacticalMissile]: 'missile_command',
+  [Block.InterceptorBattery]: 'aegis_systems',
+  [Item.InterceptorMissile]: 'aegis_systems',
+  [Block.Helipad]: 'flight_certification',
+  [Item.HelicopterKit]: 'flight_certification',
+  [Item.AerialBomb]: 'flight_certification',
+};
+
+/** The blueprint node a recipe result needs ('' = always craftable). */
+export function blueprintFor(result: number): string {
+  return WARFARE_BLUEPRINTS[result] ?? '';
+}
 
 function matches(ing: Ingredient, id: number | undefined): boolean {
   if (id === undefined) return false;
@@ -288,9 +380,24 @@ export function matchGrid(cells: (ItemStack | null)[]): ItemStack | null {
   return null;
 }
 
-/** Current craft result for the inventory's crafting cells. */
+/**
+ * Blueprint check, injected by the client so this module stays free of any
+ * progression dependency. Returns true when the player may craft `result`.
+ * Defaults to "everything is craftable" (tests + the crafting guide).
+ */
+let blueprintCheck: (result: number) => boolean = () => true;
+
+export function setBlueprintCheck(fn: (result: number) => boolean): void {
+  blueprintCheck = fn;
+}
+
+/** Current craft result for the inventory's crafting cells. Strategic hardware
+ *  is BLUEPRINT-GATED: the grid simply produces nothing until the matching
+ *  Warfare Command node is authorized. */
 export function craftResult(inv: Inventory): ItemStack | null {
-  return matchGrid(inv.slots.slice(CRAFT_START, CRAFT_START + CRAFT_SIZE));
+  const r = matchGrid(inv.slots.slice(CRAFT_START, CRAFT_START + CRAFT_SIZE));
+  if (r && WARFARE_BLUEPRINTS[r.id] && !blueprintCheck(r.id)) return null;
+  return r;
 }
 
 /** Consume one item from each occupied crafting cell. */

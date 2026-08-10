@@ -66,16 +66,20 @@ const SKITTER_DAMAGE = 2;
 const BRUTE_DAMAGE = 6;
 
 /** Vault-boss movement and collision profiles. Server HP stays tier-based;
- * these tune each procedural client rig's scale, movement and melee damage. */
+ * these tune each procedural client rig's scale, movement and melee damage.
+ * Every rig is authored at ONE scale so the local model extents and the shared
+ * `VAULT_BOSS_HITBOX` (which the lair's ceiling clearance is derived from)
+ * cannot drift apart. */
+export const BOSS_SCALE = 1.8;
 export const BOSS_VARIANTS: Record<VaultBossKind, {
   scale: number; speed: number; damage: number;
   tint: [number, number, number] | null;
 }> = {
-  bone_warden:       { scale: 1.85, speed: 0.95, damage: BRUTE_DAMAGE, tint: null },
-  mire_queen:        { scale: 1.8, speed: 1.15, damage: 5, tint: null },
-  ember_colossus:    { scale: 1.9, speed: 0.72, damage: 10, tint: null },
-  crystal_seer:      { scale: 1.75, speed: 1.35, damage: 6, tint: null },
-  gilded_artificer:  { scale: 1.8, speed: 1.25, damage: 7, tint: null },
+  bone_warden:       { scale: BOSS_SCALE, speed: 0.95, damage: BRUTE_DAMAGE, tint: null },
+  mire_queen:        { scale: BOSS_SCALE, speed: 1.15, damage: 5, tint: null },
+  ember_colossus:    { scale: BOSS_SCALE, speed: 0.72, damage: 10, tint: null },
+  crystal_seer:      { scale: BOSS_SCALE, speed: 1.35, damage: 6, tint: null },
+  gilded_artificer:  { scale: BOSS_SCALE, speed: 1.25, damage: 7, tint: null },
 };
 const SPIT_DAMAGE = 3;
 const SPIT_COOLDOWN = 2.4;
@@ -365,185 +369,274 @@ export function buildBossModel(mob: Mob, kind: VaultBossKind, atlas: Atlas): voi
     return object;
   };
 
+  /** An orbiting satellite: the animator drives its whole transform. It is
+   *  seeded on its own ring so the rig reads correctly on the very first frame,
+   *  before any animation has run. */
+  const orbiting = <T extends THREE.Object3D>(object: T, index: number, role?: string): T => {
+    object.userData.orbit = index;
+    if (role) object.userData.role = role;
+    const outer = index < 6;
+    const a = index * (Math.PI * 2 / (outer ? 6 : 4));
+    const r = outer ? 1 : 0.64;
+    object.position.set(Math.cos(a) * r, 2.15, Math.sin(a) * r);
+    root.add(object);
+    mob.bossParts.push(object);
+    return object;
+  };
+
   if (kind === 'bone_warden') {
-    // Funeral bell suspended inside a walking ossuary cage.
+    // THE WARDEN — a gaunt three-metre gravekeeper in a heavy stone pall,
+    // dragging a funeral censer on chains. Narrow, upright, unmistakable from
+    // across the nave: two burning eye-slits under a crown of grave candles.
     for (const sx of [-1, 1]) {
-      box(0.22, 0.82, 0.24, sx * 0.28, 0.41, 0, accent);
-      const upright = box(0.14, 1.28, 0.16, sx * 0.54, 1.45, 0, accent);
-      upright.rotation.z = sx * -0.08;
-      const chain = new THREE.Group();
-      for (let i = 0; i < 4; i++) {
-        const link = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.18, 0.13),
-          i === 3 ? glow : accent);
-        link.position.set(sx * i * 0.07, -i * 0.22, 0);
+      box(0.32, 0.26, 0.4, sx * 0.27, 0.13, 0.04, accent);           // boots
+      box(0.22, 0.68, 0.24, sx * 0.27, 0.6, 0, armor);               // shins
+    }
+    const pall = cylinder(0.36, 0.66, 1.05, 0, 1.42, 0, armor, false, 8);
+    pall.rotation.y = Math.PI / 8;
+    for (let i = 0; i < 4; i++) {                                    // exposed ribs
+      const rib = box(0.56 - i * 0.05, 0.07, 0.3, 0, 1.62 + i * 0.17, 0.02, accent, true);
+      tag(rib, 'seam', i);
+    }
+    box(1.02, 0.2, 0.32, 0, 2.06, 0, accent);                        // clavicle yoke
+    for (const sx of [-1, 1]) {
+      box(0.3, 0.26, 0.36, sx * 0.5, 2.06, 0, armor);                // pauldrons
+      const arm = new THREE.Group();
+      const upper = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.8, 0.19), armor);
+      upper.position.y = -0.4;
+      arm.add(upper);
+      const fist = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.24, 0.26), accent);
+      fist.position.y = -0.9;
+      arm.add(fist);
+      arm.rotation.x = -0.25;
+      tag(add(arm, sx * 0.54, 1.98, 0, true), 'fist', sx);
+      const chain = new THREE.Group();                               // hanging chains
+      for (let i = 0; i < 5; i++) {
+        const link = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.15, 0.11),
+          i === 4 ? glow : accent);
+        link.position.set(sx * i * 0.05, -i * 0.2, 0);
         link.rotation.z = i * Math.PI / 4;
         chain.add(link);
       }
-      tag(add(chain, sx * 0.76, 1.5, 0, true), 'chain', sx);
+      tag(add(chain, sx * 0.66, 2.02, -0.06, true), 'chain', sx);
     }
-    box(1.26, 0.16, 0.22, 0, 2.08, 0, accent);
-    box(1.02, 0.15, 0.2, 0, 1.15, 0, accent);
-    for (const sx of [-1, 1]) {
-      const arch = box(0.15, 0.78, 0.16, sx * 0.42, 2.37, 0, accent);
-      arch.rotation.z = sx * -0.28;
-    }
-    tag(cylinder(0.27, 0.42, 0.62, 0, 1.55, 0, glow, true), 'bell');
-    box(0.1, 0.42, 0.1, 0, 1.1, 0, glow);
+    // The censer: a glowing bell swinging at the Warden's waist.
+    box(0.1, 0.5, 0.1, 0, 1.36, 0.3, accent);
+    tag(cylinder(0.2, 0.36, 0.5, 0, 0.95, 0.3, glow, true), 'bell');
     const head = new THREE.Group();
-    head.add(new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.58, 0.3), armor));
+    head.add(new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.42, 0.32), armor));
+    const cowl = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.2, 0.42), accent);
+    cowl.position.y = 0.24;
+    head.add(cowl);
     for (const sx of [-1, 1]) {
-      const eye = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.12, 0.05), glow);
-      eye.position.set(sx * 0.14, 0.08, 0.17);
+      const eye = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.06, 0.05), glow);
+      eye.position.set(sx * 0.09, 0.03, 0.16);
       head.add(eye);
     }
-    tag(add(head, 0, 2.78, -0.02, true), 'lantern');
+    tag(add(head, 0, 2.44, 0.02, true), 'lantern');
     mob.model.head = head;
+    for (let i = 0; i < 5; i++) {                                    // candle crown
+      const candle = cylinder(0.045, 0.06, 0.34, (i - 2) * 0.13, 2.86,
+        -0.02, i === 2 ? glow : accent, true, 5);
+      candle.rotation.z = (i - 2) * 0.14;
+      tag(candle, 'crown', i);
+    }
   } else if (kind === 'mire_queen') {
-    // Long lotus-crocodile serpent with a readable jaw, throat and tail.
-    for (let i = 0; i < 4; i++) {
-      const body = sphere(0.5 - i * 0.045, 0, 0.72 - i * 0.04, -i * 0.52,
-        accent, i > 0);
-      body.scale.set(1.25 - i * 0.08, 0.65, 1.2);
-      if (i > 0) tag(body, 'tail', i);
+    // THE QUEEN — a broad, low, armoured serpent that fills the drowned ring
+    // rather than towering over it. Read her by the lotus crown and the wake
+    // of her tail: everything she does starts from the head.
+    for (let i = 0; i < 3; i++) {                                    // body plates
+      const seg = sphere(0.55 - i * 0.05, 0, 0.52 - i * 0.03, 0.15 - i * 0.62,
+        armor, i > 0);
+      seg.scale.set(1.5, 0.72, 1.35);
+      if (i > 0) tag(seg, 'tail', i);
     }
-    const head = new THREE.Group();
-    head.add(new THREE.Mesh(new THREE.BoxGeometry(0.92, 0.42, 0.76), armor));
-    const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.82, 0.16, 0.7), accent);
-    jaw.position.set(0, -0.25, -0.05);
-    head.add(jaw);
-    for (const sx of [-1, 1]) {
-      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.09, 6, 4), glow);
-      eye.position.set(sx * 0.3, 0.1, 0.37);
-      head.add(eye);
+    for (let i = 0; i < 3; i++) {                                    // trailing tail
+      const tail = sphere(0.32 - i * 0.07, 0, 0.4 - i * 0.05, -1.62 - i * 0.5,
+        i === 2 ? glow : accent, true);
+      tail.scale.set(1.2, 0.7, 1.2);
+      tag(tail, 'tail', i + 3);
     }
-    tag(add(head, 0, 0.98, 0.72, true), 'maw');
-    mob.model.head = head;
-    const throat = sphere(0.27, 0, 0.58, 0.72, glow, true);
-    throat.scale.set(1.2, 0.7, 1);
-    tag(throat, 'throat');
-    for (const sx of [-1, 1]) {
+    for (const sx of [-1, 1]) {                                      // swimming fins
       for (let i = 0; i < 3; i++) {
-        const fin = box(0.58, 0.1, 0.28, sx * 0.67, 0.73, 0.2 - i * 0.5,
-          i === 1 ? armor : accent, true);
-        fin.rotation.z = sx * -0.36;
+        const fin = box(0.95, 0.11, 0.36, sx * 1.12, 0.5 - i * 0.02,
+          0.5 - i * 0.6, i === 1 ? glow : accent, true);
+        fin.rotation.z = sx * -0.3;
         tag(fin, 'fin', i + (sx > 0 ? 3 : 0));
       }
     }
-    for (let i = 0; i < 5; i++) {
-      const petal = cylinder(0, 0.15, 0.72 + (i % 2) * 0.18,
-        (i - 2) * 0.18, 1.54, 0.45, i === 2 ? glow : armor, true, 5);
-      petal.rotation.z = (i - 2) * 0.24;
+    for (let i = 0; i < 5; i++) {                                    // dorsal fronds
+      const frond = cylinder(0, 0.11, 0.42, 0, 0.92, 0.3 - i * 0.42, accent, true, 4);
+      tag(frond, 'frond', i);
+    }
+    const head = new THREE.Group();
+    head.add(new THREE.Mesh(new THREE.BoxGeometry(0.88, 0.42, 0.82), armor));
+    const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.18, 0.76), accent);
+    jaw.position.set(0, -0.28, -0.04);
+    head.add(jaw);
+    for (const sx of [-1, 1]) {
+      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.09, 6, 4), glow);
+      eye.position.set(sx * 0.28, 0.12, 0.36);
+      head.add(eye);
+    }
+    tag(add(head, 0, 0.82, 1.02, true), 'maw');
+    mob.model.head = head;
+    const throat = sphere(0.28, 0, 0.5, 0.78, glow, true);
+    throat.scale.set(1.3, 0.7, 1);
+    tag(throat, 'throat');
+    for (let i = 0; i < 5; i++) {                                    // lotus crown
+      const petal = cylinder(0, 0.17, 0.78, (i - 2) * 0.2, 1.38, 0.66,
+        i === 2 ? glow : armor, true, 5);
+      petal.rotation.z = (i - 2) * 0.26;
+      petal.rotation.x = -0.2;
       tag(petal, 'crown', i);
     }
   } else if (kind === 'ember_colossus') {
-    // Four-legged volcanic beast with a crater shell and molten tail.
+    // THE COLOSSUS — a basalt quadruped with a live caldera on its back. Low
+    // head, high shoulders, a vent of flame you can see over the whole arena.
     for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]] as [number, number][]) {
-      const leg = box(0.38, 0.74, 0.42, sx * 0.62, 0.37, sz * 0.56, accent, true);
+      const leg = box(0.44, 0.82, 0.48, sx * 0.76, 0.41, sz * 0.62, armor, true);
       tag(leg, 'caldera_leg', sx + sz * 2);
+      box(0.5, 0.2, 0.54, sx * 0.76, 0.08, sz * 0.62, accent);        // hooves
     }
-    const body = sphere(0.76, 0, 1.08, 0.1, armor);
-    body.scale.set(1.35, 0.78, 1.45);
+    const body = sphere(0.86, 0, 1.24, 0.05, armor);
+    body.scale.set(1.45, 0.82, 1.55);
+    for (let i = 0; i < 4; i++) {                                    // molten seams
+      const seam = box(1.5, 0.08, 0.16, 0, 1.28, 0.75 - i * 0.5, glow, true);
+      tag(seam, 'seam', i);
+    }
     for (const sx of [-1, 1]) {
-      const plate = box(0.5, 0.18, 1.15, sx * 0.67, 1.38, 0.1, accent);
-      plate.rotation.z = sx * -0.16;
+      const plate = box(0.42, 0.24, 1.3, sx * 0.98, 1.5, 0.05, accent);
+      plate.rotation.z = sx * -0.22;
+      const spike = box(0.24, 0.5, 0.26, sx * 1.16, 1.72, -0.2, accent);
+      spike.rotation.z = sx * -0.5;
     }
-    const crater = new THREE.Mesh(new THREE.TorusGeometry(0.48, 0.13, 6, 16), accent);
+    const crater = new THREE.Mesh(new THREE.TorusGeometry(0.56, 0.16, 6, 16), accent);
     crater.rotation.x = Math.PI / 2;
-    tag(add(crater, 0, 1.72, 0.22, true), 'crater');
-    tag(cylinder(0, 0.23, 0.72, 0, 2.02, 0.22, glow, true, 6), 'flame');
+    tag(add(crater, 0, 1.94, 0.05, true), 'crater');
+    tag(cylinder(0, 0.26, 0.66, 0, 2.28, 0.05, glow, true, 6), 'flame');
+    for (let i = 0; i < 2; i++) {                                    // vent stacks
+      const stack = cylinder(0.13, 0.17, 0.4, (i ? 1 : -1) * 0.42, 1.9, -0.62,
+        accent, true, 6);
+      tag(stack, 'chimney', i);
+    }
     const head = new THREE.Group();
-    head.add(new THREE.Mesh(new THREE.BoxGeometry(0.78, 0.5, 0.64), accent));
-    const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.18, 0.58), armor);
-    jaw.position.set(0, -0.3, -0.08);
+    head.add(new THREE.Mesh(new THREE.BoxGeometry(0.86, 0.54, 0.72), armor));
+    const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.2, 0.64), accent);
+    jaw.position.set(0, -0.32, -0.06);
     head.add(jaw);
-    const eye = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.13, 0.06), glow);
-    eye.position.set(0, 0.08, 0.34);
+    const brow = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.14, 0.2), accent);
+    brow.position.set(0, 0.28, 0.24);
+    head.add(brow);
+    const eye = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.1, 0.06), glow);
+    eye.position.set(0, 0.06, 0.37);
     head.add(eye);
-    tag(add(head, 0, 1.14, 1.02, true), 'caldera_head');
+    tag(add(head, 0, 1.02, 1.36, true), 'caldera_head');
     mob.model.head = head;
-    for (let i = 0; i < 3; i++) {
-      const tail = box(0.42 - i * 0.08, 0.32 - i * 0.04, 0.58,
-        0, 0.88 - i * 0.12, -1.05 - i * 0.46, i === 2 ? glow : accent, true);
+    for (let i = 0; i < 3; i++) {                                    // molten tail
+      const tail = box(0.44 - i * 0.09, 0.34 - i * 0.05, 0.62,
+        0, 0.94 - i * 0.14, -1.15 - i * 0.5, i === 2 ? glow : accent, true);
       tag(tail, 'tail', i);
     }
   } else if (kind === 'crystal_seer') {
-    // Broad prism moth with articulated wings and a hanging crystal tail.
-    const core = octa(0.62, 0, 1.28, 0, armor);
-    core.scale.set(0.68, 1.25, 0.62);
-    for (const sx of [-1, 1]) {
+    // THE SEER — no body at all: a hovering prism eye inside a halo, wearing
+    // two long refracting wings and a mane of orbiting shards. Nothing about it
+    // touches the floor, which is exactly why the arena is a dome.
+    const core = octa(0.58, 0, 1.5, 0, armor, true);
+    core.scale.set(0.82, 1.32, 0.82);
+    tag(core, 'core');
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.22, 12, 8), glow);
+    eye.scale.set(1.45, 0.72, 0.5);
+    tag(add(eye, 0, 1.56, 0.44, true), 'eye');
+    mob.model.head = eye;
+    const halo = new THREE.Mesh(new THREE.TorusGeometry(0.92, 0.06, 6, 28), accent);
+    halo.rotation.x = Math.PI / 2.4;
+    tag(add(halo, 0, 1.5, 0, true), 'halo');
+    for (const sx of [-1, 1]) {                                      // refracting wings
       const wing = new THREE.Group();
       for (let i = 0; i < 3; i++) {
-        const panel = new THREE.Mesh(new THREE.OctahedronGeometry(0.48 - i * 0.07, 0),
+        const panel = new THREE.Mesh(new THREE.OctahedronGeometry(0.48 - i * 0.08, 0),
           i === 1 ? glow : accent);
-        panel.scale.set(1.45, 0.58, 0.2);
-        panel.position.set(sx * (0.38 + i * 0.48), (1 - i) * 0.28, 0.08 + i * 0.05);
+        panel.scale.set(1.3, 0.55, 0.18);
+        panel.position.set(sx * (0.35 + i * 0.34), (1 - i) * 0.3, -0.06 - i * 0.05);
         wing.add(panel);
       }
-      tag(add(wing, sx * 0.36, 1.42, 0.08, true), 'wing', sx);
+      tag(add(wing, sx * 0.34, 1.58, 0.04, true), 'wing', sx);
     }
-    const head = new THREE.Group();
-    const mask = new THREE.Mesh(new THREE.OctahedronGeometry(0.42, 0), accent);
-    mask.scale.set(0.82, 1.08, 0.48);
-    head.add(mask);
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.2, 10, 6), glow);
-    eye.scale.set(0.5, 1.5, 0.38);
-    eye.position.z = 0.36;
-    head.add(eye);
-    tag(add(head, 0, 1.74, 0.32, true), 'seer_head');
-    mob.model.head = head;
-    for (let i = 0; i < 4; i++) {
-      const tail = octa(0.28 - i * 0.035, 0, 0.72 - i * 0.34, 0.08 + i * 0.06,
+    for (let i = 0; i < 10; i++) {                                   // orbiting shards
+      const shard = new THREE.Mesh(new THREE.OctahedronGeometry(i < 6 ? 0.17 : 0.12, 0),
+        i < 6 ? accent : glow);
+      shard.scale.set(0.7, 1.5, 0.7);
+      orbiting(shard, i, 'shard');
+    }
+    for (let i = 0; i < 4; i++) {                                    // hanging prisms
+      const tail = octa(0.26 - i * 0.04, 0, 1.06 - i * 0.28, -0.06 - i * 0.05,
         i % 2 ? glow : accent, true);
-      tail.scale.set(0.72, 1.25, 0.55);
+      tail.scale.set(0.7, 1.3, 0.55);
       tag(tail, 'prism_tail', i);
     }
   } else {
-    // Tall tripod crane automaton with clock-face head and three tools.
+    // THE ARTIFICER — a foreman rig: three planted legs, a geared waist, a
+    // clock-face head and three working tool arms. It reads as MACHINERY, so
+    // the rhythm of its attacks looks like something you could learn.
     for (let i = 0; i < 3; i++) {
       const a = -Math.PI / 2 + i * Math.PI * 2 / 3;
-      const leg = box(0.22, 1.25, 0.24, Math.cos(a) * 0.62, 0.62,
-        Math.sin(a) * 0.62, accent, true);
-      leg.rotation.z = Math.cos(a) * -0.24;
-      leg.rotation.x = Math.sin(a) * 0.24;
+      const leg = box(0.24, 1.3, 0.26, Math.cos(a) * 0.66, 0.65,
+        Math.sin(a) * 0.66, accent, true);
+      leg.rotation.z = Math.cos(a) * -0.22;
+      leg.rotation.x = Math.sin(a) * 0.22;
       tag(leg, 'tripod', i);
+      box(0.34, 0.14, 0.36, Math.cos(a) * 0.78, 0.07, Math.sin(a) * 0.78, armor);
     }
-    cylinder(0.62, 0.76, 0.5, 0, 1.2, 0, armor);
-    tag(octa(0.32, 0, 1.02, 0, glow, true), 'core');
-    box(0.24, 0.9, 0.24, 0, 1.72, 0, accent);
+    cylinder(0.6, 0.78, 0.52, 0, 1.32, 0, armor);
+    tag(octa(0.3, 0, 1.34, 0.02, glow, true), 'core');
+    for (const sx of [-1, 1]) {                                      // drive gears
+      const gear = new THREE.Mesh(new THREE.TorusGeometry(0.26, 0.08, 5, 12), accent);
+      gear.userData.spin = sx;
+      tag(add(gear, sx * 0.56, 1.5, 0.16, true), 'gear', sx);
+      const piston = box(0.14, 0.42, 0.14, sx * 0.34, 1.62, -0.34, accent, true);
+      tag(piston, 'piston', sx);
+    }
+    box(0.28, 0.86, 0.28, 0, 1.94, 0, armor);
     const head = new THREE.Group();
-    const clock = new THREE.Mesh(new THREE.SphereGeometry(0.56, 10, 7), armor);
-    clock.scale.set(1, 1, 0.28);
+    const clock = new THREE.Mesh(new THREE.SphereGeometry(0.52, 10, 7), armor);
+    clock.scale.set(1, 1, 0.3);
     head.add(clock);
-    const rim = new THREE.Mesh(new THREE.TorusGeometry(0.51, 0.07, 6, 20), accent);
-    rim.position.z = 0.17;
+    const rim = new THREE.Mesh(new THREE.TorusGeometry(0.48, 0.07, 6, 20), accent);
+    rim.position.z = 0.14;
     head.add(rim);
     for (let i = 0; i < 8; i++) {
-      const mark = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.14, 0.04), glow);
+      const mark = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.13, 0.04), glow);
       const a = i * Math.PI / 4;
-      mark.position.set(Math.sin(a) * 0.38, Math.cos(a) * 0.38, 0.22);
+      mark.position.set(Math.sin(a) * 0.35, Math.cos(a) * 0.35, 0.2);
       mark.rotation.z = -a;
       head.add(mark);
     }
-    const hand = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.48, 0.05), glow);
-    hand.position.set(0, 0.16, 0.24);
+    const hand = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.44, 0.05), glow);
+    hand.position.set(0, 0.15, 0.22);
     head.add(hand);
-    tag(add(head, 0, 2.38, -0.02, true), 'clock');
+    tag(add(head, 0, 2.5, -0.02, true), 'clock');
     mob.model.head = head;
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 3; i++) {                                    // tool arms
       const a = i * Math.PI * 2 / 3;
       const arm = new THREE.Group();
-      const beam = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 1.15), accent);
-      beam.position.z = -0.52;
+      const beam = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.15, 1.05), accent);
+      beam.position.z = -0.5;
       arm.add(beam);
       const tool = new THREE.Mesh(i === 0
-        ? new THREE.ConeGeometry(0.22, 0.5, 6)
-        : i === 1 ? new THREE.BoxGeometry(0.5, 0.18, 0.35)
-          : new THREE.OctahedronGeometry(0.25, 0), i === 2 ? glow : armor);
-      tool.position.set(0, 0, -1.05);
+        ? new THREE.ConeGeometry(0.2, 0.46, 6)
+        : i === 1 ? new THREE.BoxGeometry(0.46, 0.17, 0.32)
+          : new THREE.OctahedronGeometry(0.23, 0), i === 2 ? glow : armor);
+      tool.position.set(0, 0, -0.98);
       tool.rotation.x = i === 0 ? Math.PI / 2 : 0;
       arm.add(tool);
       arm.rotation.y = a;
-      tag(add(arm, 0, 1.82, 0, true), 'tool', i);
+      tag(add(arm, 0, 2, 0, true), 'tool', i);
+    }
+    for (let i = 0; i < 2; i++) {                                    // exhaust stacks
+      const stack = cylinder(0.1, 0.13, 0.44, (i ? 1 : -1) * 0.3, 2.72, -0.3,
+        accent, true, 6);
+      tag(stack, 'chimney', i);
     }
   }
 }
@@ -1188,10 +1281,18 @@ export class Mobs {
 
     const wasOnGround = mob.onGround;
     mob.onGround = false;
-    this.moveAxis(mob, 1, mob.vel.y * dt);
-    const hitX = this.moveAxis(mob, 0, mob.vel.x * dt);
-    const hitZ = this.moveAxis(mob, 2, mob.vel.z * dt);
-    if ((hitX || hitZ) && wasOnGround && moving) mob.vel.y = JUMP_V; // hop up
+    if (mob.bossKind) {
+      // A lair boss is positioned by the authoritative encounter runtime, which
+      // already keeps it on the arena floor and inside the walls. Running voxel
+      // physics on a five-block body underneath that only ever fought it.
+      mob.vel.set(0, 0, 0);
+      mob.onGround = true;
+    } else {
+      this.moveAxis(mob, 1, mob.vel.y * dt);
+      const hitX = this.moveAxis(mob, 0, mob.vel.x * dt);
+      const hitZ = this.moveAxis(mob, 2, mob.vel.z * dt);
+      if ((hitX || hitZ) && wasOnGround && moving) mob.vel.y = JUMP_V; // hop up
+    }
 
     // --- presentation ---------------------------------------------------------
     mob.model.group.position.copy(mob.pos);
@@ -1377,8 +1478,15 @@ export class Mobs {
     const x0 = Math.floor(p.x - halfW), x1 = Math.floor(p.x + halfW);
     const y0 = Math.floor(p.y), y1 = Math.floor(p.y + height);
     const z0 = Math.floor(p.z - halfW), z1 = Math.floor(p.z + halfW);
+    // Vertical moves may only be stopped by the cell plane they are moving
+    // INTO. Scanning the whole column instead let a block anywhere along the
+    // body resolve a *downward* step, which snapped the feet to the top of it —
+    // harmless for a 1.7-block zombie in the open, but it is what parked a
+    // 5-block vault boss inside its own lair ceiling.
+    const yLo = axis === 1 ? (amount > 0 ? y1 : y0) : y0;
+    const yHi = axis === 1 ? (amount > 0 ? y1 : y0) : y1;
     for (let x = x0; x <= x1; x++) {
-      for (let y = y0; y <= y1; y++) {
+      for (let y = yLo; y <= yHi; y++) {
         for (let z = z0; z <= z1; z++) {
           if (!isSolid(this.world.getBlock(x, y, z))) continue;
           if (axis === 0) {

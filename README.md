@@ -28,7 +28,10 @@ To play over the internet, host `npm run server` on a reachable machine
 
 Other scripts: `npm run build` (typecheck + production bundle),
 `npm run smoke` (headless engine tests: terrain, meshing, raycast, physics,
-energy, mobs, armor/guns, and authoritative server-core logic — 151 checks).
+energy, mobs, armor/guns, and authoritative server-core logic),
+`npm run boss-smoke` (vault-boss encounter design + tuning), and
+`npm run warfare-smoke` (the Warfare Command tree, boss-XP settlement, missiles,
+interceptors and vehicles — 170+ checks).
 
 ## Controls
 
@@ -44,6 +47,9 @@ energy, mobs, armor/guns, and authoritative server-core logic — 151 checks).
 | Middle click | Select targeted block's hotbar slot |
 | 1–9 / scroll | Select hotbar slot |
 | E | Open/close inventory (click, right-click split, shift-click; armor column at left) |
+| G | **Warfare Command** — the boss-powered technology tree |
+| M | World map (and, from a silo, the select-target fire-control display) |
+| F | Leave a vehicle seat (near the ground, or as an emergency ejection) |
 | F3 | Debug overlay (FPS, coordinates, facing, target, clock) |
 | Esc | Close container / open pause menu (the world keeps running) |
 
@@ -191,6 +197,61 @@ initial title screen; pausing in-game freezes your view over the live world.
   predicts the fill bar and reconciles on open/collect in multiplayer). Oil
   Barrels are the intended fuel currency for a later warfare layer.
 
+## Warfare Command
+
+The progression system is **Warfare Command**: a boss-powered technology tree
+that replaced the old generic stat/skill-point system entirely. There are no
+"+2% speed" filler nodes — every purchase unlocks or visibly changes a machine.
+
+```
+          TACTICAL MISSILES        Missile Command → Guidance Vanes → Hardened Silo
+                  │
+           MISSILE DEFENSE         Aegis Systems → Radar Sweep → Fast Intercept
+                  │
+        HELICOPTER AVIATION        Flight Certification → Bomb Rack → Reinforced Airframe
+                  │
+      ┌───────────┼───────────┐
+    STRIKE      AEGIS        AIR    three endgame branches, 3 nodes each
+```
+
+Eighteen nodes, **8,200 XP** for the whole tree. Warfare XP has exactly one
+source: **dungeon bosses you actually helped kill** (300 / 750 / 1,500 XP by
+tier). Every qualifying participant is paid in full — never divided by party
+size — and qualification runs off the encounter engine's own contribution
+ledger, so dying seconds before the kill still pays and walking in at the end
+pays nothing. Mobs, PvP, guards, chests, missiles and bombs grant none of it.
+
+What it unlocks:
+
+- **Tactical silos** — a 2×2 launch pad with an opening hatch and a visible
+  loaded missile. Fire from the world map's select-target mode: range circle,
+  protected exclusion zones, nearby allies, distance, ETA and blast radius, then
+  an explicit **Confirm Launch**. Two silos per faction, 48 blocks apart, two
+  missiles in the air, 30 seconds between launches, and at least eight seconds
+  of warning for whoever is under it. Missiles have a ~24 HP hull and can be
+  shot down. Explosions damage enemies and a bounded number of player-PLACED
+  blocks — natural terrain is never permanently excavated.
+- **Interceptor batteries** — a rotating radar dish over an elevating rack of
+  visible interceptor tubes. They engage the inbound missile with the shortest
+  ETA, only one battery ever claims a track, and interception is deterministic
+  if the interceptor physically reaches it. They never fire at players.
+  Saturation still works.
+- **Two-seat helicopters** — spawned, fuelled, armed, repaired and retrofitted
+  at a Helipad. The pilot flies and bombs; the passenger rides and fires their
+  own gun within a side arc. Guns, rockets, turrets, explosions and collisions
+  all damage them; at zero HP both occupants are ejected and the wreck spins
+  into the ground.
+
+Blueprints are personal; the hardware is shared. You need the node to *build* or
+*retrofit*, but once it exists any faction teammate can load, operate and fly it.
+The server owns XP, purchases, contribution records, hardware state, cooldowns,
+missile flight, interception, vehicle movement, damage, seats, fuel and loaded
+ammunition; the client renders snapshots. Offline single-player runs the exact
+same pure simulations locally.
+
+Operator commands: `warfare status <player>`, `warfare grant <player> <xp>`,
+`warfare reset <player>`.
+
 ## Architecture
 
 ```
@@ -314,11 +375,19 @@ and Wilds, each a ruined stone arch over a walk-down staircase into 8–16 carve
 **Vault Brick** (iron-pick-tier hard — fight through the door, not the wall):
 an entrance hall, side rooms with **guard spawn anchors** (zombies, spitters
 and skitters that keep a room populated until you CLEAR it — the anchor then
-sleeps for 30 minutes; Tier III vaults field armored variants), and a boss
-room containing one of five family bosses: the **Bone Warden**, **Mire Queen**,
-**Ember Colossus**, **Crystal Seer**, or **Gilded Artificer**. Every boss has
-three named phases, an encounter health bar, intro/phase/victory cinematics,
-family music, authoritative ground telegraphs, and finite optional summons.
+sleeps for 30 minutes; Tier III vaults field armored variants), and a **lair**
+holding one of five bosses — each with its own room, not a repainted copy of
+one box. The **Bone Warden** fights in the tall pillared **Sunken Nave**, the
+**Mire Queen** in the round, moated **Drowned Ring**, the **Ember Colossus** on
+the lava-rimmed **Walking Caldera**, the **Crystal Seer** under the mirrored
+dome of the **Observatory**, and the **Gilded Artificer** on the **Assembly
+Hall** floor beneath a working gantry. Each boss is built around ONE movement
+habit (sidestep / keep moving / read early / react small / count the rhythm),
+with three named phases, an encounter health bar, intro/phase/victory
+cinematics, family music, authoritative ground telegraphs and finite optional
+summons. **Tier is the difficulty dial**: a Heartland lair telegraphs slowly and
+hits for a couple of hearts, while a deep-Wilds lair reads fast, chains casts
+and punishes hard — from a single authored kit.
 Boss HP and encounter actors live on the SERVER, so
 everyone's hits count. Vault tier (I–III) grows with
 distance from the origin, and the boss room holds a glowing **Vault Chest**

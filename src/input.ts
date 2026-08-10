@@ -32,7 +32,8 @@ export class Input {
   waypointPressed = false; // B pressed this frame (drop a waypoint here)
   guideToggled = false;    // H pressed this frame (getting-started panel)
   tpaPressed = false;      // T pressed this frame (open the TPA prompt)
-  progressPressed = false; // G pressed this frame (or tapped on touch)
+  progressPressed = false; // G pressed this frame (or tapped on touch) — Warfare Command
+  dismountPressed = false; // F pressed this frame (leave a vehicle seat)
   viewPressed = false;     // V pressed this frame (cycle the camera view)
   locked = false;
 
@@ -70,6 +71,7 @@ export class Input {
       if (e.code === 'KeyH') this.guideToggled = true;
       if (e.code === 'KeyT') this.tpaPressed = true;
       if (e.code === 'KeyG') this.progressPressed = true;
+      if (e.code === 'KeyF') this.dismountPressed = true;
       if (e.code === 'KeyV') this.viewPressed = true;
       if (e.code === 'KeyW') {
         const now = performance.now();
@@ -171,6 +173,7 @@ export class Input {
     this.guideToggled = false;
     this.tpaPressed = false;
     this.progressPressed = false;
+    this.dismountPressed = false;
     this.viewPressed = false;
   }
 }

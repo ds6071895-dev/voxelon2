@@ -7,6 +7,9 @@
 // (position/inventory).
 
 import { FACTIONS, resolveJoinFaction } from '../teams';
+import {
+  WarfareProgress, buyWarfareNode, grantWarfareXp, migrateWarfare, sanitizeWarfare,
+} from '../warfare';
 
 export interface Account {
   username: string;
@@ -32,6 +35,10 @@ export interface Account {
   token?: string;
   /** Saved player state, restored on login (position/health/armor/inventory). */
   data?: Record<string, unknown>;
+  /** WARFARE COMMAND progression. Stored EXPLICITLY on the account rather than
+   *  inside the opaque client-owned `data` blob, so a routine state save can
+   *  never overwrite (or mint) technology the player did not earn. */
+  warfare?: WarfareProgress;
 }
 
 /** Deterministic password hasher: (password, salt) -> hex digest. */
@@ -67,6 +74,7 @@ export class Accounts {
           revivedBy: typeof a.revivedBy === 'string' ? a.revivedBy : undefined,
           token: typeof a.token === 'string' ? a.token : undefined,
           data: a.data,
+          warfare: sanitizeWarfare(a.warfare),
         });
       }
     }
@@ -143,6 +151,46 @@ export class Accounts {
   setData(name: string, data: Record<string, unknown>): void {
     const a = this.get(name);
     if (a) a.data = data;
+  }
+
+  // --- Warfare Command --------------------------------------------------------
+
+  /** The account's warfare progression, running the one-time `warfare-v1`
+   *  migration on first touch: the retired Progress XP, skill nodes and faction
+   *  XP levels are dropped from `data` and never written again. Everything else
+   *  in `data` (inventory, hearts, vault records, …) is preserved verbatim. */
+  warfareOf(name: string): WarfareProgress {
+    const a = this.get(name);
+    if (!a) return sanitizeWarfare(null);
+    if (!a.warfare) {
+      // First touch: adopt anything the old client blob happened to carry, then
+      // scrub the retired keys out of `data` for good.
+      const seed = migrateWarfare({ ...(a.data ?? {}), warfare: a.data?.warfare });
+      a.warfare = seed.warfare;
+      a.data = seed.data;
+      delete (a.data as Record<string, unknown>).warfare; // it lives on the account now
+    }
+    return a.warfare;
+  }
+
+  /** Award earned warfare XP. Returns the new total (0 if unknown account). */
+  awardWarfareXp(name: string, amount: number): number {
+    const a = this.get(name);
+    if (!a) return 0;
+    const w = this.warfareOf(name);
+    grantWarfareXp(w, amount);
+    a.warfare = w;
+    return w.xp;
+  }
+
+  /** Spend XP on a node. Returns whether the purchase was applied. */
+  buyWarfare(name: string, node: string): boolean {
+    const a = this.get(name);
+    if (!a) return false;
+    const w = this.warfareOf(name);
+    if (!buyWarfareNode(w, node)) return false;
+    a.warfare = w;
+    return true;
   }
 
   // --- Lifesteal elimination (Milestone A) -----------------------------------

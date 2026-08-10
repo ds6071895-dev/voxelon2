@@ -26,9 +26,21 @@ export function isTurretBlock(id: number): boolean {
   return id === Block.Turret;
 }
 
-/** Any sabotage-target block-entity (machine or turret). */
+/** Warfare Command strategic hardware: silos (2×2 anchor + housing cells) and
+ *  interceptor batteries. Like turrets these are SHOT down, never mined. */
+export function isSiloBlock(id: number): boolean {
+  return id === Block.TacticalSilo || id === Block.SiloPart;
+}
+export function isBatteryBlock(id: number): boolean {
+  return id === Block.InterceptorBattery;
+}
+export function isStrategicBlock(id: number): boolean {
+  return isSiloBlock(id) || isBatteryBlock(id);
+}
+
+/** Any sabotage-target block-entity (machine, turret or strategic hardware). */
 export function isEntityBlock(id: number): boolean {
-  return isMachineBlock(id) || isTurretBlock(id);
+  return isMachineBlock(id) || isTurretBlock(id) || isStrategicBlock(id);
 }
 
 export interface RayHit {
@@ -85,7 +97,7 @@ export class Interaction {
   onAction?: () => void;
   /** Fired when right-clicking a crafting table, furnace, chest, machine, or turret. */
   onOpenContainer?: (
-    kind: 'table' | 'furnace' | 'chest' | 'machine' | 'turret',
+    kind: 'table' | 'furnace' | 'chest' | 'machine' | 'turret' | 'silo' | 'battery' | 'helipad',
     x: number, y: number, z: number
   ) => void;
   /** Fired on left-click against a machine/turret block: sabotage (HP), not mining. */
@@ -257,6 +269,9 @@ export class Interaction {
       : id === Block.Furnace || id === Block.FurnaceLit ? 'furnace'
       : id === Block.Chest ? 'chest'
       : isTurretBlock(id) ? 'turret'
+      : isSiloBlock(id) ? 'silo'       // anchor or housing cell -> open the silo
+      : isBatteryBlock(id) ? 'battery'
+      : id === Block.Helipad ? 'helipad'
       : isMachineBlock(id) ? 'machine' // anchor or a footprint part -> open the machine
       : null;
     if (!kind) return false;

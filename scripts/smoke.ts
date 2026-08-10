@@ -89,13 +89,6 @@ import {
   WAR_MIN_BORDER, WAR_SHRINK_PORTION,
 } from '../src/war';
 import {
-  XP_MOB, XP_PLAYER_KILL, XP_REPORT_CAP, levelFor, xpForLevel, levelProgress,
-  newProgress, totalPointsFor, pointsAvailable, personalBuffs, sanitizeProgress,
-  factionLevelFor, factionPerks, sanitizeFactionXp,
-  BRANCHES, BRANCH_LENGTH, MAX_LEVEL, SKILL_TREE, branchRank, buyNode,
-  canBuyNode, nodeCost, ownsNode, pointsSpent,
-} from '../src/progress';
-import {
   GADGETS, isGadget, gadgetOf, GadgetCooldowns, falloffDamage,
 } from '../src/gadgets';
 import { itemDescription } from '../src/itemdesc';
@@ -107,6 +100,7 @@ import {
 } from '../src/structures';
 import {
   VAULT_LOOT, VAULT_LOOT_COOLDOWN, VAULT_LOOT_WINDOW, VAULT_RECHARGE,
+  VAULT_BOSS_ARENA, VAULT_BOSS_HITBOX, MAX_LAIR_HEIGHT, VaultBossKind, bossClearance,
   VaultStamp, bruteMaxHp, countVaults, newVaultState, recordVaultLoot,
   refreshVaultState, sanitizeVaultState, vaultAt, vaultChestAt, vaultLoot,
   vaultLootCooldownLeft, vaultLootable, vaultStamp, vaultTier, worldVaults,
@@ -755,6 +749,73 @@ check('materialOf maps blocks to sound classes',
   combat.attack(origin, dir, 4, idlePlayer);
   check('killing a hostile removes it (drops nothing)',
     !combat.list.includes(z1) && combatItems.count === 0);
+
+  // --- A tall mob under a low roof stays on the floor -------------------------
+  // The bug that wedged vault bosses in their own ceiling: a downward collision
+  // step scanned the WHOLE body column and resolved against the first solid
+  // cell it found, so a beam touching the mob's head snapped its FEET to the top
+  // of that beam. Only the plane a move is heading INTO may stop it.
+  {
+    const rx = Math.floor(spawn.x) + 40, rz = Math.floor(spawn.z) + 40, ry = 210;
+    for (let dx = -4; dx <= 4; dx++) {
+      for (let dz = -4; dz <= 4; dz++) {
+        world.setBlock(rx + dx, ry, rz + dz, Block.Stone);          // floor
+        world.setBlock(rx + dx, ry + 7, rz + dz, Block.Stone);      // roof
+        for (let dy = 1; dy <= 6; dy++) world.setBlock(rx + dx, ry + dy, rz + dz, Block.Air);
+      }
+    }
+    world.setBlock(rx, ry + 5, rz, Block.Stone);   // a beam at the mob's head
+    const roomMobs = newMobs();
+    const tall = roomMobs.spawnAt('brute', rx + 0.5, ry + 1, rz + 0.5);
+    tall.halfW = 1.1;
+    tall.height = 5.2;                             // a boss-sized body
+    tall.speedFactor = 0;                          // isolate the vertical step
+    const away = new Player({ x: rx + 60, y: ry + 1, z: rz });
+    let highest = tall.pos.y;
+    for (let i = 0; i < 240; i++) {
+      roomMobs.update(1 / 60, away, 0);
+      highest = Math.max(highest, tall.pos.y);
+    }
+    check('a boss-sized body never gets launched onto the beam above its head',
+      Math.abs(tall.pos.y - (ry + 1)) < 0.2 && highest < ry + 1.5,
+      `settled at y=${tall.pos.y.toFixed(2)}, peaked at ${highest.toFixed(2)}, floor is ${ry + 1}`);
+  }
+
+  // --- Every boss rig physically fits the lair it spawns in --------------------
+  // The clearance rule in vaults.ts is derived from VAULT_BOSS_HITBOX, so the
+  // built MODEL has to agree with that hitbox or a rig quietly grows through a
+  // ceiling the generator thought it had cleared.
+  {
+    const rigMobs = newMobs();
+    const tooTall: string[] = [];
+    const tooWide: string[] = [];
+    const sunken: string[] = [];
+    for (const kind of Object.keys(VAULT_BOSS_ARENA) as VaultBossKind[]) {
+      const boss = rigMobs.spawnBoss(kind, 0, 0, 0);
+      boss.model.group.position.set(0, 0, 0);
+      boss.model.group.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(boss.model.group);
+      const lair = VAULT_BOSS_ARENA[kind];
+      const reach = Math.max(box.max.x, -box.min.x, box.max.z, -box.min.z);
+      const label = `${kind} ${box.max.y.toFixed(2)}h ${reach.toFixed(2)}r`;
+      // The rig may not reach the first legal fixture height in its own lair.
+      if (box.max.y > 1 + bossClearance(kind)) tooTall.push(label);
+      if (box.max.y > lair.ih) tooTall.push(`${label} > ceiling ${lair.ih}`);
+      // Worst case: the encounter clamp parks the boss as far off-centre as it
+      // is allowed to go. Even then, no part of the rig — tails and wings
+      // included — may reach into the lair's masonry.
+      const pad = Math.min(VAULT_BOSS_HITBOX[kind].halfWidth + 0.5, lair.fight - 0.75);
+      if (lair.fight - pad + reach > lair.hw - 0.5) tooWide.push(label);
+      // And it must stand ON the floor, not through it.
+      if (box.min.y < -0.35 || box.max.y < 2) sunken.push(label);
+    }
+    check('no boss rig grows taller than the clearance its lair reserves',
+      tooTall.length === 0, tooTall.join(' | '));
+    check('no boss rig is wider than the hitbox the arena clamp uses',
+      tooWide.length === 0, tooWide.join(' | '));
+    check('every boss rig is built standing on its own feet',
+      sunken.length === 0, sunken.join(' | '));
+  }
 }
 
 // --- Creeper explosion (high in the air, away from terrain) -----------------------
@@ -3286,108 +3347,35 @@ check('furnace smelts ore/sand/log but not removed foods',
   check('every BASE rune is findable in structure or vault loot', BASE_RUNES.every(inLoot));
 }
 
-// --- Progression: XP curve, the 100-node skill tree, faction pool ---------------
+// --- Retired progression: the old XP/skill-tree system is GONE ------------------
+// Warfare Command replaced it (see scripts/warfare_smoke.ts for the new tree).
+// What this file still guards is that the RETIRED surfaces stay retired: the
+// mob-XP report is a no-op, and a PvP kill grants no progression at all.
 {
-  // Level curve: 0 XP = level 1; thresholds match xpForLevel; capped at 100.
-  check('levelFor curve + xpForLevel inverse',
-    levelFor(0) === 1 && levelFor(xpForLevel(2) - 1) === 1 &&
-    levelFor(xpForLevel(2)) === 2 && levelFor(xpForLevel(5)) === 5 &&
-    levelFor(xpForLevel(50)) === 50 && levelFor(1e9) === MAX_LEVEL);
-  check('the road to max level is long but finite (hours of content)',
-    xpForLevel(MAX_LEVEL) > 50_000 && xpForLevel(MAX_LEVEL) < 500_000 &&
-    xpForLevel(2) <= 60); // the first level comes fast
-  check('levelProgress stays in [0,1]',
-    levelProgress(0) >= 0 && levelProgress(50) > 0 && levelProgress(50) < 1 &&
-    levelProgress(1e9) === 1);
-
-  // The tree: 5 branches × 20 nodes, costs rising 1→4 with depth. The full
-  // tree costs MORE points than a maxed character has — specialization.
-  check('the skill tree is 100 unique nodes across 5 branches',
-    SKILL_TREE.length === 100 && BRANCHES.length === 5 &&
-    new Set(SKILL_TREE.map((n) => n.id)).size === 100 &&
-    BRANCHES.every((b) => SKILL_TREE.filter((n) => n.branch === b.id).length === BRANCH_LENGTH));
-  check('node costs rise with depth (harder the further you go)',
-    nodeCost(0) === 1 && nodeCost(4) === 1 && nodeCost(5) === 2 &&
-    nodeCost(10) === 3 && nodeCost(19) === 4);
-  const fullTreeCost = SKILL_TREE.reduce((a, n) => a + n.cost, 0);
-  check('the full tree costs more than a maxed character earns',
-    fullTreeCost === 250 && totalPointsFor(MAX_LEVEL) === MAX_LEVEL - 1);
-  check('every node grants at least one effect; capstones are named uniquely',
-    SKILL_TREE.every((n) => Object.keys(n.effects).length >= 1) &&
-    new Set(SKILL_TREE.filter((n) => n.index % 5 === 4).map((n) => n.name)).size === 20);
-
-  // Buying: prerequisites chain within a branch; points gate purchases.
-  const st = newProgress();
-  st.xp = xpForLevel(4); // level 4 -> 3 points
-  check('points: level 4 grants 3; roots buyable, deep nodes locked',
-    totalPointsFor(4) === 3 && pointsAvailable(st) === 3 &&
-    canBuyNode(st, 'scout0') && !canBuyNode(st, 'scout1') && !canBuyNode(st, 'nope0'));
-  check('buying spends points and unlocks the next rank',
-    buyNode(st, 'scout0') && pointsAvailable(st) === 2 && !buyNode(st, 'scout0') &&
-    canBuyNode(st, 'scout1') && buyNode(st, 'scout1') && branchRank(st, 'scout') === 2);
-  st.xp = xpForLevel(MAX_LEVEL); // 99 points
-  for (let i = 0; i < BRANCH_LENGTH; i++) buyNode(st, `scout${i}`);
-  check('a whole branch can be finished (50 points) and buffs stack',
-    branchRank(st, 'scout') === 20 && ownsNode(st, 'scout19') &&
-    pointsSpent(st) >= 50 && personalBuffs(st).speedMult > 1.2 &&
-    personalBuffs(st).energyMult < 1 &&
-    personalBuffs(newProgress()).speedMult === 1);
-
-  // sanitizeProgress: contiguity + budget enforced; old-format saves refund.
-  const dirty = sanitizeProgress({ xp: xpForLevel(4), // 3 points earned
-    nodes: ['scout0', 'scout1', 'scout5', 'gunner3', 'junk', 'tank0'] });
-  check('sanitizeProgress keeps only contiguous, affordable prefixes',
-    dirty.nodes.includes('scout0') && dirty.nodes.includes('scout1') &&
-    !dirty.nodes.includes('scout5') && !dirty.nodes.includes('gunner3') &&
-    !dirty.nodes.includes('junk') && pointsSpent(dirty) <= totalPointsFor(4));
-  check('old-format saves (spent tracks) refund into unspent points',
-    sanitizeProgress({ xp: xpForLevel(5), spent: { swift: 3 } }).nodes.length === 0 &&
-    pointsAvailable(sanitizeProgress({ xp: xpForLevel(5), spent: { swift: 3 } })) === 4);
-  check('sanitizeProgress fail-closes garbage',
-    sanitizeProgress(null).xp === 0 && sanitizeProgress({ xp: -5 }).xp === 0);
-
-  // Faction pool: levels + bounded perks.
-  check('factionPerks are small and bounded',
-    factionPerks(1).armor === 0 && factionPerks(10).armor === 3 &&
-    factionPerks(10).speedMult <= 1.05 && factionLevelFor(0) === 1);
-  check('sanitizeFactionXp shapes the pool array',
-    sanitizeFactionXp([5, 'x'], 2)[0] === 5 && sanitizeFactionXp(null, 2).length === 2);
-  check('mob XP table covers the roster',
-    XP_MOB.zombie > 0 && XP_MOB.brute > XP_MOB.zombie && XP_PLAYER_KILL > 0);
-
-  // Server: a mob-XP report feeds the faction pool (clamped) + broadcasts fxp.
   const g = new GameServer(1337, mulberry32(60));
   g.addPlayer(1, { username: 'Xer', faction: FACTION_A });
   g.addPlayer(2, { username: 'Yer', faction: FACTION_B });
-  const r1 = g.handle(1, { t: 'xp', amount: 20 });
-  check('an xp report feeds the faction pool + broadcasts fxp',
-    r1.some((o) => o.msg.t === 'fxp' && (o.msg as { xp: number[] }).xp[FACTION_A] === 20));
-  const r2 = g.handle(1, { t: 'xp', amount: 999999 });
-  check('an oversized xp report is clamped to the cap',
-    r2.some((o) => o.msg.t === 'fxp' &&
-      (o.msg as { xp: number[] }).xp[FACTION_A] === 20 + XP_REPORT_CAP));
-  check('junk xp reports are dropped',
-    g.handle(1, { t: 'xp', amount: NaN }).length === 0 &&
-    g.handle(1, { t: 'xp', amount: -5 }).length === 0);
+  check('the retired mob-XP report is accepted and ignored',
+    g.handle(1, { t: 'xp', amount: 20 }).length === 0 &&
+    g.handle(1, { t: 'xp', amount: 999999 }).length === 0 &&
+    g.handle(1, { t: 'xp', amount: NaN }).length === 0);
 
-  // A PvP kill: the KILLER gets a server xpAward + the pool grows.
   g.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: Math.PI, pitch: 0 });
   g.handle(2, { t: 'xform', x: 0, y: 70, z: 2, yaw: 0, pitch: 0 });
   const kill = g.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 });
-  check('a PvP kill awards XP to the killer + the faction pool',
-    kill.some((o) => o.msg.t === 'xpAward' && o.to === 1 &&
-      (o.msg as { amount: number }).amount === XP_PLAYER_KILL) &&
-    kill.some((o) => o.msg.t === 'fxp' &&
-      (o.msg as { xp: number[] }).xp[FACTION_A] === 20 + XP_REPORT_CAP + XP_PLAYER_KILL));
+  check('a PvP kill grants no progression of any kind',
+    !kill.some((o) => o.msg.t === 'warfare' || o.msg.t === 'warfareXp') &&
+    kill.some((o) => o.msg.t === 'killfeed'));
 
-  // The pools survive a serialize round-trip + ride the welcome.
+  // The welcome no longer carries a faction XP pool, and DOES carry warfare.
   const blob = JSON.parse(JSON.stringify(g.serialize()));
   const g2 = new GameServer(1337, mulberry32(61));
   g2.restore(blob);
   const w = g2.addPlayer(5).find((o) => o.msg.t === 'welcome')!.msg as
-    { factionXp: number[] };
-  check('faction XP survives a serialize round-trip + rides the welcome',
-    w.factionXp[FACTION_A] === 20 + XP_REPORT_CAP + XP_PLAYER_KILL);
+    Record<string, unknown>;
+  check('the welcome carries warfare progression, not faction XP',
+    w.factionXp === undefined && !!w.warfare &&
+    (w.warfare as { xp: number }).xp === 0);
 }
 
 // --- B4: Waypoint Totems — attune cap, toggle, teleport rules --------------------
@@ -3690,6 +3678,8 @@ check('furnace smelts ore/sand/log but not removed foods',
 
 // --- D1: vault generation — deterministic, bounded, tiered ----------------------
 let firstVault: VaultStamp | null = null;
+/** One live lair per boss kind, harvested from the world sweep below. */
+const lairs = new Map<VaultBossKind, VaultStamp>();
 {
   // Sweep the whole world once: counts + collect sample stamps.
   const cmax = Math.floor(2500 / 16);
@@ -3702,6 +3692,7 @@ let firstVault: VaultStamp | null = null;
       if (!st) continue;
       if (inCore(st.x, st.z)) core++; else wilds++;
       if (stamps.length < 12) stamps.push(st);
+      if (!lairs.has(st.bossKind)) lairs.set(st.bossKind, st);
       if (!tier3 && st.tier === 3) tier3 = st;
       if (!firstVault && st.tier === 1) firstVault = st;
     }
@@ -3743,6 +3734,123 @@ let firstVault: VaultStamp | null = null;
     stamps.every((st) => st.mouth.y >= terrain.height(st.mouth.x, st.mouth.z) - 1));
   check('vault shells use plenty of family-themed dungeon masonry',
     stamps.every((st) => st.blocks.filter((b) => isVaultMasonry(b.id)).length > 400));
+}
+
+// --- D5: every boss fights in ITS OWN room --------------------------------------
+// Each of the five lairs is a different shape, a different height and a
+// different sealed floor — and, above all, none of them may stamp anything
+// solid into the volume the boss's body occupies. That was the bug behind
+// bosses standing wedged in their own ceiling: a tall mob resolving a downward
+// collision snaps its FEET onto whatever its HEAD is touching, so a decorative
+// beam overhead launched the boss into the roof and pinned it there.
+{
+  check('every boss kind actually generates a lair somewhere in the world',
+    lairs.size === 5, `found ${[...lairs.keys()].join(', ')}`);
+
+  const obstructed: string[] = [];
+  const cramped: string[] = [];
+  const holed: string[] = [];
+  for (const [kind, st] of lairs) {
+    const a = st.arena.bounds;
+    const lair = VAULT_BOSS_ARENA[kind];
+    const bodyTop = st.floorY + 1 + bossClearance(kind);
+    const solid = new Map<string, number>();
+    for (const b of st.blocks) solid.set(`${b.x},${b.y},${b.z}`, b.id);
+    // 1. Nothing solid in the boss's volume. The VaultChest is the single
+    //    authored exception — it is treasure furniture, and it is one block.
+    for (const b of st.blocks) {
+      if (b.x < a.minX || b.x > a.maxX || b.z < a.minZ || b.z > a.maxZ) continue;
+      if (b.y <= st.floorY || b.y >= bodyTop || b.id === Block.VaultChest) continue;
+      if (BLOCKS[b.id]?.solid) obstructed.push(`${kind} ${b.x},${b.y},${b.z}=${b.id}`);
+    }
+    // 2. The ceiling is genuinely above the boss, not just above a player.
+    if (st.floorY + lair.ih < bodyTop - 1) cramped.push(kind);
+    // 3. The fighting floor is a continuous surface — no holes to fall through.
+    for (let x = Math.ceil(a.minX); x <= Math.floor(a.maxX); x++) {
+      for (let z = Math.ceil(a.minZ); z <= Math.floor(a.maxZ); z++) {
+        const id = solid.get(`${x},${st.floorY},${z}`);
+        if (id === undefined || !BLOCKS[id]?.solid) holed.push(`${kind} ${x},${z}`);
+      }
+    }
+  }
+  check('no lair stamps anything solid inside the boss\'s own body volume',
+    obstructed.length === 0, obstructed.slice(0, 4).join(' | '));
+  check('every lair ceiling clears the boss standing under it',
+    cramped.length === 0, cramped.join(', '));
+  check('every sealed fighting floor is a continuous surface',
+    holed.length === 0, holed.slice(0, 4).join(' | '));
+
+  // The arena is walkable end to end from the doorway, and the treasure is
+  // reachable — a shaped lair must not wall its own chest off.
+  const unreachable: string[] = [];
+  for (const [kind, st] of lairs) {
+    const solid = new Map<string, number>();
+    for (const b of st.blocks) solid.set(`${b.x},${b.y},${b.z}`, b.id);
+    const walkable = (x: number, z: number): boolean =>
+      [1, 2].every((dy) => {
+        const id = solid.get(`${x},${st.floorY + dy},${z}`);
+        return id !== undefined && !BLOCKS[id]?.solid;
+      });
+    const seen = new Set<string>();
+    const queue = [[Math.floor(st.arena.seal.inside.x), Math.floor(st.arena.seal.inside.z)]];
+    while (queue.length && seen.size < 4000) {
+      const [x, z] = queue.pop()!;
+      if (seen.has(`${x},${z}`) || !walkable(x, z)) continue;
+      seen.add(`${x},${z}`);
+      queue.push([x + 1, z], [x - 1, z], [x, z + 1], [x, z - 1]);
+    }
+    const a = st.arena.bounds;
+    let floorCells = 0, reached = 0;
+    for (let x = Math.ceil(a.minX); x <= Math.floor(a.maxX); x++) {
+      for (let z = Math.ceil(a.minZ); z <= Math.floor(a.maxZ); z++) {
+        floorCells++;
+        if (seen.has(`${x},${z}`)) reached++;
+      }
+    }
+    // Everything but the chest cell itself must be reachable on foot.
+    if (reached < floorCells - 1) unreachable.push(`${kind} ${reached}/${floorCells}`);
+    const nextToChest = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) =>
+      seen.has(`${st.chest.x + dx},${st.chest.z + dz}`));
+    if (!nextToChest) unreachable.push(`${kind} chest`);
+  }
+  check('you can walk the whole fighting floor and reach the treasure',
+    unreachable.length === 0, unreachable.join(' | '));
+
+  // Five rooms, not one room in five colours.
+  const shapes = new Set<string>();
+  const heights = new Set<number>();
+  const floors = new Set<number>();
+  for (const kind of Object.keys(VAULT_BOSS_ARENA) as VaultBossKind[]) {
+    shapes.add(VAULT_BOSS_ARENA[kind].shape);
+    heights.add(VAULT_BOSS_ARENA[kind].ih);
+    floors.add(VAULT_BOSS_ARENA[kind].fight);
+  }
+  check('each boss gets its own arena shape', shapes.size === 5);
+  check('lairs differ in ceiling height and sealed floor size',
+    heights.size >= 3 && floors.size >= 2);
+  check('a lair is always taller than the boss it holds',
+    (Object.keys(VAULT_BOSS_ARENA) as VaultBossKind[]).every((kind) =>
+      VAULT_BOSS_ARENA[kind].ih >= bossClearance(kind)));
+  check('no lair reaches past the height the burial guarantee was sized for',
+    (Object.keys(VAULT_BOSS_ARENA) as VaultBossKind[]).every((kind) =>
+      VAULT_BOSS_ARENA[kind].ih <= MAX_LAIR_HEIGHT));
+
+  // Signature scenery: the mire floods, the caldera burns, and neither can be
+  // reached while the room is sealed.
+  const mire = lairs.get('mire_queen');
+  const ember = lairs.get('ember_colossus');
+  const outsideFight = (st: VaultStamp, b: { x: number; z: number }): boolean =>
+    b.x < st.arena.bounds.minX || b.x > st.arena.bounds.maxX ||
+    b.z < st.arena.bounds.minZ || b.z > st.arena.bounds.maxZ;
+  check('the Drowned Ring really is flooded, entirely outside the fight',
+    !!mire && mire.blocks.some((b) => b.id === Block.Water) &&
+    mire.blocks.filter((b) => b.id === Block.Water).every((b) => outsideFight(mire, b)));
+  check('the Caldera burns at the rim, and never underfoot mid-fight',
+    !!ember && ember.blocks.some((b) => b.id === Block.Lava) &&
+    ember.blocks.filter((b) => b.id === Block.Lava).every((b) => outsideFight(ember, b)));
+  check('no lair hides a spike trap on its fighting floor',
+    [...lairs.values()].every((st) => st.blocks.filter((b) => b.id === Block.SpikeTrap)
+      .every((b) => outsideFight(st, b))));
 }
 
 // --- D1: vaults land in filled chunks (terrain integration) ---------------------

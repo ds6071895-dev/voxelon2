@@ -102,12 +102,15 @@ function bossName(index: number, fallback: string): string {
 }
 
 export function fieldGuideSections(): FieldGuideSection[] {
+  // Every boss is built around ONE dodge habit, and every boss fights in its own
+  // room. Learn the habit and the room stops mattering; learn neither and the
+  // room will teach you.
   const bosses = [
-    [bossName(0, 'Bone Warden'), 'Funeral procession', 'Toll rings, marching lanes, and chain sweeps', 'Sustained rifle or SMG', 'Keep damaging the Warden, cross each toll ring, and move into the open processional lane.'],
-    [bossName(1, 'Mire Queen'), 'Drowned crown', 'Sinkholes, tidal sweeps, and serpent charges', 'Mobile automatic weapon', 'Keep moving and firing, use the dry side of each tide, and follow the rotating clear quarter.'],
-    [bossName(2, 'Ember Colossus'), 'Walking caldera', 'Crater stomps, vent cycles, and worldfire', 'Strong sustained ranged DPS', 'Maintain pressure while alternating between the clear center and clear edge.'],
-    [bossName(3, 'Crystal Seer'), 'Final prophecy', 'Predicted beams, delayed echoes, and shard sequences', 'Accurate ranged weapon', 'Read each preview, remember delayed lanes, and follow the final clear-space sequence.'],
-    [bossName(4, 'Gilded Artificer'), 'Grand mechanism', 'Timed cells, crusher gaps, and golden grids', 'High sustained DPS', 'Keep firing while leaving marked cells and following the gap through each crusher sweep.'],
+    [bossName(0, 'Bone Warden'), 'The Sunken Nave — a tall pillared cathedral with three long lanes', 'Chain sweeps, marching lanes and grave tolls, all aimed dead ahead', 'Sustained rifle or SMG', 'SIDESTEP. Fight from its flank: everything it throws is aimed straight forward, so moving sideways beats moving backwards.'],
+    [bossName(1, 'Mire Queen'), 'The Drowned Ring — a round court inside a wading moat', 'Sinkholes under your feet, expanding tide rings and a serpent lunge', 'Mobile automatic weapon', 'KEEP MOVING. She aims where you ARE. Walk a constant circle, cross rings as they pass, and punish her after the lunge.'],
+    [bossName(2, 'Ember Colossus'), 'The Walking Caldera — a clipped octagon rimmed with open lava', 'Crater stomps, vent rows, meteors, and a worldfire rim/core pair', 'Strong sustained ranged DPS', 'READ EARLY. It is enormous and slow. Start moving the moment the floor lights and it will never touch you.'],
+    [bossName(3, 'Crystal Seer'), 'The Observatory — a mirrored dome ringed with obelisks', 'Thin beam lattices, paradox rings and falling shards, cast fast', 'Accurate ranged weapon', 'REACT SMALL. Its beams are narrow. Step to the edge of a lane instead of sprinting across the room.'],
+    [bossName(4, 'Gilded Artificer'), 'The Assembly Hall — a machine floor under a working gantry', 'Grid rows, gear rings, crusher gaps and a quarter-floor audit', 'High sustained DPS', 'COUNT. It works to a rhythm. Watch one cycle without attacking, then stand inside the machine and take the gap it always leaves.'],
   ];
 
   return [
@@ -131,10 +134,10 @@ export function fieldGuideSections(): FieldGuideSection[] {
     {
       id: 'controls', title: 'Controls', icon: icon('controls'), summary: 'Desktop and mobile controls, plus contextual behavior.', entries: [
         entry('desktop-controls', 'Desktop controls', ['keyboard', 'mouse', 'wasd', 'reload', 'inventory'],
-          table(['Action', 'Binding'], [['Move', 'W A S D'], ['Jump / glide', 'Space'], ['Sprint', 'Q or double-tap W'], ['Sneak', 'Shift'], ['Attack / mine', 'Left click'], ['Place / use / aim', 'Right click'], ['Inventory', 'E'], ['Map', 'M'], ['Progress', 'G'], ['Reload', 'R'], ['Pause', 'Esc']]) +
+          table(['Action', 'Binding'], [['Move', 'W A S D'], ['Jump / glide', 'Space'], ['Sprint', 'Q or double-tap W'], ['Sneak', 'Shift'], ['Attack / mine', 'Left click'], ['Place / use / aim', 'Right click'], ['Inventory', 'E'], ['Map', 'M'], ['Warfare Command', 'G'], ['Leave vehicle', 'F'], ['Reload', 'R'], ['Pause', 'Esc']]) +
           tip('Context matters', 'Left click may hit an enemy before the block behind it. Right click changes behavior based on the held item.')),
         entry('mobile-controls', 'Mobile controls', ['touch', 'joystick', 'phone', 'tablet'],
-          table(['Action', 'Control'], [['Move / sprint', 'Left joystick; push beyond rim to sprint'], ['Look', 'Drag the right side'], ['Jump / glide', 'Up control'], ['Attack / mine', 'Long-press'], ['Place / use', 'Tap'], ['Inventory', 'Backpack button'], ['Map', 'Map button'], ['Pause / back', 'Pause button']]))
+          table(['Action', 'Control'], [['Move / sprint', 'Left joystick; push beyond rim to sprint'], ['Look', 'Drag the right side'], ['Jump / glide', 'Up control'], ['Attack / mine', 'Long-press'], ['Place / use', 'Tap'], ['Inventory', 'Backpack button'], ['Map', 'Map button'], ['Warfare Command', 'Command button'], ['Pause / back', 'Pause button']]))
       ],
     },
     {
@@ -175,10 +178,10 @@ export function fieldGuideSections(): FieldGuideSection[] {
       ],
     },
     {
-      id: 'bosses', title: 'Bosses', icon: icon('skull'), summary: 'Movement priorities and suggested gear for every vault boss.', entries: [
-        entry('boss-comparison', 'Boss comparison', ['boss', 'warden', 'queen', 'colossus', 'seer', 'artificer'],
-          table(['Boss', 'Priority target', 'Main danger', 'Weapon style'], bosses.map((b) => b.slice(0, 4))) +
-          `<div class="field-guide-boss-grid">${bosses.map((b) => `<section class="field-guide-boss"><h3>${esc(b[0])}</h3><p><strong>Priority:</strong> ${b[1]}. ${b[4]}</p></section>`).join('')}</div>`),
+      id: 'bosses', title: 'Bosses', icon: icon('skull'), summary: 'The arena, the danger and the one movement habit that beats each vault boss.', entries: [
+        entry('boss-comparison', 'Boss comparison', ['boss', 'warden', 'queen', 'colossus', 'seer', 'artificer', 'arena', 'room'],
+          table(['Boss', 'Its arena', 'Main danger', 'Weapon style'], bosses.map((b) => b.slice(0, 4))) +
+          `<div class="field-guide-boss-grid">${bosses.map((b) => `<section class="field-guide-boss"><h3>${esc(b[0])}</h3><p><strong>Arena:</strong> ${esc(b[1])}.</p><p><strong>How to beat it:</strong> ${esc(b[4])}</p></section>`).join('')}</div>`),
         entry('boss-rewards', 'What you get for killing a boss', ['relic', 'greater rune', 'reward', 'loot', 'worth it', 'sigil', 'bloom', 'core', 'prism', 'gear'],
           `<p>Clearing a vault opens its chest for <strong>ten minutes</strong>. The haul is <strong>personal</strong> — every player who helped opens their own, nobody loots anyone else's — and it <strong>regrows every 30 minutes</strong>, so a vault you can beat is a repeatable income, not a one-off.</p>` +
           `<p>Every haul is guaranteed to contain that boss's <strong>relic</strong>, plus ammunition, healing and materials scaled to the tier. The guaranteed ammo is deliberate: a boss should always refund more than it costs you to kill it.</p>` +
@@ -204,6 +207,15 @@ export function fieldGuideSections(): FieldGuideSection[] {
           ])) +
           tip('Why Iron is not simply "+3 armor"', 'A full titanium set is already 20 armor points — the hard cap, where percentage armor stops doing anything at all. The Greater Rune of Iron instead soaks a flat point of damage off every single hit, which nothing else in the game can do, so it keeps working on a maxed-out set.') +
           warning('A hit always hurts', 'Toughness can never make you immune: any hit that connects still costs at least 1 health, no matter how many runes you stack.')),
+        entry('boss-armor', 'Lair hazards cut through armor', ['armor', 'pierce', 'mitigation', 'difficulty', 'tier', 'why did that hurt'],
+          `<p>Ordinary damage — a mob, a bullet, a fall — is reduced by <strong>4% per armor point</strong>, up to 80% at 20 points. A vault boss is the one thing in the world that does not respect all of it. Every hazard a lair throws at you <strong>ignores part of your armor</strong>, and the deeper the vault the more it ignores.</p>` +
+          table(['Tier', 'Armor ignored', 'What that means'], [
+            ['I', 'A quarter', 'Barely noticeable — the teaching fight plays as it always has'],
+            ['II', 'Just under half', 'Good armor still halves the hit; it no longer erases it'],
+            ['III', 'Three fifths', 'Best-in-slot is the difference between six hits and three, not between one damage and one damage'],
+          ]) +
+          tip('Why it works this way', 'Armor is multiplicative, so a full titanium set blocks the same 80% of a Tier I tap and a Tier III execution. Without piercing, one authored attack cannot be both a fair hit on a fresh spawn and a real threat to a maxed player — every boss in the game landed for 1 or 2 damage on anyone who had finished the gear curve, and you could out-heal the hardest lair standing still.') +
+          warning('Armor still matters more than anything else', 'Piercing shaves your mitigation, it does not cancel it. Walking into a Tier III lair in diamond instead of titanium roughly doubles what every mistake costs you, and a full set of Greater Runes of Iron is still the single biggest survivability upgrade you can bring.')),
         entry('boss-gear', 'Suggested gear by vault tier', ['recommended gear', 'ammo', 'armor', 'healing'],
           table(['Tier', 'Armor', 'Weapon', 'Healing', 'Ammunition'], [['I', 'Stone minimum, iron preferred', 'Pistol, shotgun, or SMG', '3–5 bandages, 1 medkit', 'About 150–250 rounds'], ['II', 'Full iron minimum, diamond preferred', 'Rifle, SMG, or shotgun', '2–3 medkits', 'About 400–600 rounds'], ['III', 'Diamond minimum, titanium preferred', 'Rifle, SMG, Burst Rifle, rockets', '4–6 medkits', 'About 700–1,000 rounds']]) +
           warning('Suggested, not required', 'These are preparation guidelines, not equipment locks. Player skill, group size, and boss familiarity matter.')),
@@ -221,6 +233,59 @@ export function fieldGuideSections(): FieldGuideSection[] {
         entry('heart-system', 'How Hearts work', ['heart', 'lifesteal', 'elimination', 'revival beacon'],
           list(['Each Heart increases maximum health.', 'PvP can transfer Hearts between players.', 'Reaching zero Hearts causes elimination.', 'Revival rules and duration depend on faction flag control and beacon availability.', 'Heart withdrawals are restricted so players cannot bypass the survival floor.']) +
           warning('Protect rare recovery items', 'Do not carry spare Hearts or revival items into unnecessary fights unless your team has a recovery plan.')),
+      ],
+    },
+    {
+      id: 'warfare', title: 'Warfare Command', icon: icon('machine'), summary: 'Boss-powered technology: tactical missiles, missile defense, and helicopters.', entries: [
+        entry('warfare-xp', 'Where warfare XP comes from', ['warfare', 'xp', 'boss', 'vault', 'technology'],
+          `<p>Warfare XP has exactly one source: <b>dungeon-boss victories you actually helped win</b>. Mobs, PvP, guards, chests, missiles and bombs grant none of it.</p>` +
+          table(['Boss tier', 'Warfare XP'], [['Tier I', '300'], ['Tier II', '750'], ['Tier III', '1,500']]) +
+          list(['Every qualifying participant is paid in full — the award is never divided by party size.',
+            'You qualify by dealing at least 2% of the boss\'s scaled health and being present for at least a quarter of the fight, or by dealing 10% regardless of how long you stayed.',
+            'Dying shortly before the kill does not erase your contribution.',
+            'Walking in at the end without fighting earns nothing.',
+            'Each account is paid once per boss recharge cycle.']) +
+          tip('Press G', 'The Warfare Command tree is the G panel. Purchases are permanent, personal, and cost XP directly.')),
+        entry('warfare-tree', 'The technology tree', ['tree', 'nodes', 'blueprint', 'trunk', 'branch'],
+          `<p>One trunk of nine nodes, then three endgame branches. The trunk forces the order: <b>missiles, then missile defense, then helicopters</b>.</p>` +
+          table(['Stage', 'What it opens'], [
+            ['Missile Command → Hardened Silo', 'Tactical Silo, Tactical Missile, map targeting, range and magazine'],
+            ['Aegis Systems → Fast Intercept', 'Interceptor Turret, Interceptor Missiles, radar and reload'],
+            ['Flight Certification → Reinforced Airframe', 'Helipad, two-seat helicopter, bombs, hull and fuel'],
+            ['Strike / Aegis / Aviation', 'The three capstone branches: reach, airspace denial, and gunships']]) +
+          tip('Blueprints are personal, hardware is shared', 'You need the node to BUILD or RETROFIT. Once it exists, any faction teammate can load, operate and fly it.')),
+        entry('warfare-missiles', 'Tactical missiles', ['missile', 'silo', 'launch', 'targeting', 'blast'],
+          steps(['Build a Tactical Silo — it needs a clear 2×2 pad.',
+            'Load a Tactical Missile into it.',
+            'Right-click the silo and choose Select Target.',
+            'Click the map to place a reticle; check distance, ETA, blast radius and nearby allies.',
+            'Press Confirm Launch. The server revalidates everything before a round is spent.']) +
+          list(['Two silos per faction, at least 48 blocks apart.',
+            'Two offensive missiles in the air per faction, and a 30-second faction-wide gap between launches.',
+            'Every strike gives its target at least eight seconds of warning.',
+            'Vaults, spawn, faction cores and shielded bases can never be targeted.',
+            'Only player-PLACED blocks are destroyed — natural terrain is never excavated.',
+            'Friendly players and friendly hardware are immune. Strategic explosions grant no lifesteal.']) +
+          warning('It can be shot down', 'A missile hull has about 24 HP. Accurate gunfire can burst one in flight.')),
+        entry('warfare-defense', 'Missile defense', ['interceptor', 'battery', 'radar', 'saturation'],
+          list(['Interceptor batteries only ever shoot at MISSILES — never at players, and they deal no player damage.',
+            'A battery picks the hostile missile with the shortest impact ETA, and only one battery claims a track, so ammunition is never spent twice.',
+            'Interception is certain if the interceptor physically reaches the missile.',
+            'Four batteries per faction, at least 24 blocks apart.',
+            'Any teammate can load and operate a shared battery.']) +
+          tip('Saturation still works', 'More missiles than the reload window allows will get through. Defense buys you time, not immunity.')),
+        entry('warfare-air', 'Helicopters', ['helicopter', 'helipad', 'pilot', 'gunner', 'bomb'],
+          steps(['Build a Helipad and assemble a Helicopter Airframe.',
+            'Deploy the airframe on the pad, then refuel, load bombs and repair there.',
+            'Board as pilot or gunner. Only faction members can board.',
+            'Pilot: W A S D flies, the camera steers, Space climbs, Shift descends, right-click drops a bomb.',
+            'Gunner: look around and fire your own weapon within a sensible side arc.',
+            'Press F to step off — near the ground, or as an emergency ejection.']) +
+          list(['Two seats, two active helicopters per faction.',
+            'Guns, rockets, turrets, explosions and collisions all damage the airframe.',
+            'At zero HP both occupants are ejected and hurt, and the wreck explodes.',
+            'A pilot who disconnects leaves the airframe in a controlled hover that settles to the ground.',
+            'Helicopters cannot enter vault arenas or cross the world boundary.'])),
       ],
     },
     {

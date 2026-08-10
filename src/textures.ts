@@ -1177,6 +1177,310 @@ function paintCannonball(p: Painter, seed: number): void {
   p.set(5, 5, [150, 156, 166, 255]); p.set(6, 5, [130, 136, 146, 255]); // glint
 }
 
+// --- Warfare Command ---------------------------------------------------------
+// The strategic set reads as cold naval-grey steel with a CYAN command accent,
+// deliberately distinct from the yellow-hazard automation machines and the red
+// hazard band on the anti-player turret.
+const WAR_STEEL: RGBA = [78, 86, 98, 255];
+const WAR_STEEL_HI: RGBA = [116, 126, 142, 255];
+const WAR_DARK: RGBA = [30, 34, 42, 255];
+const WAR_CYAN: RGBA = [92, 226, 236, 255];
+const WAR_CYAN_DIM: RGBA = [44, 130, 148, 255];
+
+/** Rivet dots at the four inset corners — the shared "hardware" tell. */
+function rivets(p: Painter): void {
+  for (const [x, y] of [[2, 2], [13, 2], [2, 13], [13, 13]]) p.set(x, y, WAR_DARK);
+  for (const [x, y] of [[3, 3], [12, 3], [3, 12], [12, 12]]) p.set(x, y, WAR_STEEL_HI);
+}
+
+function paintSiloSide(p: Painter, seed: number): void {
+  paintMachineFrame(p, seed, WAR_STEEL);
+  // Vertical armour plating with a recessed blast channel down the middle.
+  for (let y = 1; y <= 14; y++) {
+    for (let x = 6; x <= 9; x++) {
+      p.set(x, y, shade(WAR_DARK, 0.85 + hash2(seed ^ 3, x, y) * 0.3));
+    }
+  }
+  // The loaded missile peeking out of the channel: white nose, red band.
+  for (let y = 4; y <= 12; y++) {
+    p.set(7, y, shade([206, 210, 218, 255], 0.86 + hash2(seed, 7, y) * 0.2));
+    p.set(8, y, shade([164, 170, 182, 255], 0.86 + hash2(seed, 8, y) * 0.2));
+  }
+  p.set(7, 3, [226, 230, 238, 255]); p.set(8, 3, [200, 206, 216, 255]);
+  for (const y of [6, 10]) { p.set(7, y, [198, 62, 52, 255]); p.set(8, y, [168, 46, 40, 255]); }
+  // Cyan status ladder on the left plate + a warning chevron on the right.
+  for (const y of [4, 6, 8]) { p.set(3, y, WAR_CYAN); p.set(4, y, WAR_CYAN_DIM); }
+  for (let i = 0; i < 4; i++) p.set(12 - i, 5 + i, [226, 190, 56, 255]);
+  rivets(p);
+}
+
+function paintSiloTop(p: Painter, seed: number): void {
+  paintMachineFrame(p, seed, WAR_STEEL_HI);
+  // The hatch: a dark circular bore ringed with cyan lock bolts.
+  for (let y = 3; y <= 12; y++) {
+    for (let x = 3; x <= 12; x++) {
+      const d = Math.hypot(x - 7.5, y - 7.5);
+      if (d > 4.6) continue;
+      p.set(x, y, d > 3.9 ? WAR_CYAN_DIM
+        : shade(WAR_DARK, 0.75 + (1 - d / 4) * 0.5 + hash2(seed, x, y) * 0.16));
+    }
+  }
+  // Missile nose seen from directly above.
+  for (let y = 6; y <= 9; y++) {
+    for (let x = 6; x <= 9; x++) {
+      const d = Math.hypot(x - 7.5, y - 7.5);
+      if (d > 2.1) continue;
+      p.set(x, y, shade([214, 218, 226, 255], 1 - d * 0.16));
+    }
+  }
+  for (const [x, y] of [[7, 2], [8, 13], [2, 8], [13, 7]]) p.set(x, y, WAR_CYAN);
+}
+
+function paintSiloPart(p: Painter, seed: number): void {
+  // The 2×2 footprint's supporting housing: heavy ribbed plate, not a lattice —
+  // a silo should look POURED, unlike the open girder of a mining rig.
+  p.fill((x, y) => shade(WAR_STEEL,
+    (0.78 + hash2(seed, x >> 2, y >> 2) * 0.24) * speckle(seed ^ 7, x, y, 0.07)));
+  for (let y = 0; y < 16; y += 4) {
+    for (let x = 0; x < 16; x++) {
+      p.set(x, y, shade(WAR_DARK, 0.9 + hash2(seed, x, y) * 0.2));
+      p.set(x, y + 1, shade(WAR_STEEL_HI, 0.92));
+    }
+  }
+  for (let i = 0; i < 16; i++) { p.set(0, i, WAR_DARK); p.set(15, i, WAR_DARK); }
+  for (const y of [2, 6, 10, 14]) { p.set(3, y, WAR_CYAN_DIM); p.set(12, y, WAR_CYAN_DIM); }
+}
+
+function paintBatterySide(p: Painter, seed: number): void {
+  paintMachineFrame(p, seed, WAR_STEEL);
+  // Four interceptor tubes in a rack, angled up-right.
+  for (let t = 0; t < 4; t++) {
+    const x = 3 + t * 3;
+    for (let y = 4; y <= 11; y++) {
+      p.set(x, y, shade(WAR_DARK, 0.9 + hash2(seed, x, y) * 0.2));
+      p.set(x + 1, y, shade([150, 158, 172, 255], 0.85 + hash2(seed, x + 1, y) * 0.2));
+    }
+    p.set(x, 3, WAR_CYAN); p.set(x + 1, 3, WAR_CYAN_DIM); // loaded tips glow
+  }
+  // Radar mast + dish silhouette across the crown.
+  for (let x = 2; x <= 13; x++) p.set(x, 1, shade(WAR_STEEL_HI, 0.95));
+  p.set(7, 13, WAR_CYAN); p.set(8, 14, WAR_CYAN_DIM);
+  rivets(p);
+}
+
+function paintBatteryTop(p: Painter, seed: number): void {
+  paintMachineFrame(p, seed, WAR_STEEL_HI);
+  // A rotating dish: a cyan sweep wedge over a dark parabola.
+  for (let y = 2; y <= 13; y++) {
+    for (let x = 2; x <= 13; x++) {
+      const d = Math.hypot(x - 7.5, y - 7.5);
+      if (d > 5.4) continue;
+      p.set(x, y, shade(WAR_DARK, 0.8 + (1 - d / 5.4) * 0.4 + hash2(seed, x, y) * 0.12));
+    }
+  }
+  for (let r = 1; r <= 5; r++) {
+    p.set(Math.round(7.5 + r * 0.92), Math.round(7.5 - r * 0.38), WAR_CYAN);
+  }
+  for (let a = 0; a < 20; a++) {
+    const ang = (a / 20) * Math.PI * 2;
+    p.set(Math.round(7.5 + 5 * Math.cos(ang)), Math.round(7.5 + 5 * Math.sin(ang)), WAR_CYAN_DIM);
+  }
+  p.set(7, 7, [220, 250, 255, 255]); p.set(8, 8, [220, 250, 255, 255]);
+}
+
+function paintHelipadTop(p: Painter, seed: number): void {
+  // Dark tarmac with a painted circle-H and cyan edge lights.
+  p.fill((x, y) => shade([46, 50, 58, 255], speckle(seed, x, y, 0.1)));
+  for (let a = 0; a < 40; a++) {
+    const ang = (a / 40) * Math.PI * 2;
+    p.set(Math.round(7.5 + 5.6 * Math.cos(ang)), Math.round(7.5 + 5.6 * Math.sin(ang)),
+      [222, 226, 232, 255]);
+  }
+  for (let y = 4; y <= 11; y++) { p.set(5, y, [232, 236, 242, 255]); p.set(10, y, [232, 236, 242, 255]); }
+  for (let x = 6; x <= 9; x++) p.set(x, 7, [232, 236, 242, 255]);
+  for (const [x, y] of [[1, 1], [14, 1], [1, 14], [14, 14]]) p.set(x, y, WAR_CYAN);
+  for (const [x, y] of [[2, 1], [13, 1], [1, 13], [14, 13]]) p.set(x, y, WAR_CYAN_DIM);
+}
+
+function paintHelipadSide(p: Painter, seed: number): void {
+  p.fill((x, y) => shade(WAR_STEEL, (0.8 + hash2(seed, x >> 1, y >> 2) * 0.2)));
+  for (let x = 0; x < 16; x++) {
+    p.set(x, 0, WAR_STEEL_HI);
+    p.set(x, 15, WAR_DARK);
+    // Hazard stripe along the pad lip.
+    if (((x + 1) >> 1) % 2) { p.set(x, 3, [226, 190, 56, 255]); p.set(x, 4, [226, 190, 56, 255]); }
+    else { p.set(x, 3, WAR_DARK); p.set(x, 4, WAR_DARK); }
+  }
+  for (const x of [2, 8, 14]) { p.set(x, 8, WAR_CYAN); p.set(x, 9, WAR_CYAN_DIM); }
+}
+
+// --- Component + ordnance sprites ---------------------------------------------
+
+function paintReinforcedFrame(p: Painter, seed: number): void {
+  const beam: RGBA = [136, 144, 158, 255];
+  for (let i = 3; i <= 12; i++) {
+    for (const [x, y] of [[i, 3], [i, 12], [3, i], [12, i]] as [number, number][]) {
+      p.set(x, y, shade(beam, 0.9 + hash2(seed, x, y) * 0.2));
+    }
+  }
+  for (let i = 0; i <= 9; i++) {
+    p.set(3 + i, 3 + i, shade(beam, 0.72));
+    p.set(12 - i, 3 + i, shade(beam, 0.72));
+  }
+  for (const [x, y] of [[3, 3], [12, 3], [3, 12], [12, 12]]) p.set(x, y, [58, 62, 72, 255]);
+  outlineSprite(p);
+}
+
+function paintGuidanceUnit(p: Painter, seed: number): void {
+  // A circuit board with a glowing gyro ring.
+  for (let y = 3; y <= 12; y++) {
+    for (let x = 3; x <= 12; x++) {
+      p.set(x, y, shade([34, 78, 62, 255], 0.86 + hash2(seed, x, y) * 0.24));
+    }
+  }
+  for (let a = 0; a < 20; a++) {
+    const ang = (a / 20) * Math.PI * 2;
+    p.set(Math.round(7.5 + 3.2 * Math.cos(ang)), Math.round(7.5 + 3.2 * Math.sin(ang)), WAR_CYAN);
+  }
+  p.set(7, 7, [226, 252, 255, 255]); p.set(8, 8, [180, 240, 250, 255]);
+  for (const y of [4, 11]) for (let x = 4; x <= 11; x += 2) p.set(x, y, [214, 176, 62, 255]);
+  outlineSprite(p);
+}
+
+function paintWarhead(p: Painter, seed: number): void {
+  // A stubby cone with a hazard band.
+  for (let y = 3; y <= 13; y++) {
+    const half = Math.min(4, Math.round((y - 2) * 0.72));
+    for (let x = 7 - half; x <= 8 + half; x++) {
+      const c: RGBA = y <= 5 ? [216, 220, 228, 255]
+        : y === 8 || y === 9 ? [206, 62, 52, 255] : [122, 130, 144, 255];
+      p.set(x, y, shade(c, 0.88 + hash2(seed, x, y) * 0.2 - (x > 8 ? 0.12 : 0)));
+    }
+  }
+  for (let x = 4; x <= 11; x++) p.set(x, 13, [58, 62, 72, 255]);
+  outlineSprite(p);
+}
+
+function paintRotorAssembly(p: Painter, seed: number): void {
+  // A hub with four swept blades.
+  const blade: RGBA = [176, 184, 198, 255];
+  for (let i = 1; i <= 6; i++) {
+    p.set(7 - i, 7 - Math.round(i * 0.25), shade(blade, 0.95));
+    p.set(8 + i, 8 + Math.round(i * 0.25), shade(blade, 0.8));
+    p.set(7 - Math.round(i * 0.25), 8 + i, shade(blade, 0.86));
+    p.set(8 + Math.round(i * 0.25), 7 - i, shade(blade, 1.05));
+  }
+  for (let y = 6; y <= 9; y++) {
+    for (let x = 6; x <= 9; x++) {
+      p.set(x, y, shade([104, 176, 196, 255], 1 - Math.hypot(x - 7.5, y - 7.5) * 0.12
+        + hash2(seed, x, y) * 0.1));
+    }
+  }
+  p.set(7, 7, [222, 250, 255, 255]);
+  outlineSprite(p);
+}
+
+function paintFuelTank(p: Painter, seed: number): void {
+  for (let y = 2; y <= 13; y++) {
+    for (let x = 4; x <= 11; x++) {
+      const edge = x === 4 || x === 11;
+      const c: RGBA = y === 2 || y === 13 ? [122, 132, 146, 255] : [58, 82, 92, 255];
+      p.set(x, y, shade(c, (edge ? 0.72 : 1) * (0.86 + hash2(seed, x, y) * 0.2)));
+    }
+  }
+  // Fill gauge down the face.
+  for (let y = 5; y <= 11; y++) p.set(6, y, y > 7 ? WAR_CYAN : WAR_CYAN_DIM);
+  p.set(9, 4, [214, 176, 62, 255]); p.set(10, 4, [180, 142, 46, 255]); // cap
+  outlineSprite(p);
+}
+
+function paintBombCasing(p: Painter, seed: number): void {
+  for (let y = 4; y <= 12; y++) {
+    const half = y <= 5 ? 2 : y >= 11 ? 2 : 3;
+    for (let x = 7 - half; x <= 8 + half; x++) {
+      p.set(x, y, shade([92, 98, 110, 255], 0.88 + hash2(seed, x, y) * 0.22 - (x > 8 ? 0.1 : 0)));
+    }
+  }
+  for (let x = 5; x <= 10; x++) p.set(x, 8, [40, 44, 52, 255]); // seam
+  p.set(6, 13, [70, 76, 88, 255]); p.set(9, 13, [70, 76, 88, 255]); // fins
+  outlineSprite(p);
+}
+
+/** Shared missile silhouette: nose, body, stripe, fins. `accent` is the band. */
+function paintMissileSprite(p: Painter, seed: number, accent: RGBA, tall: boolean): void {
+  const top = tall ? 1 : 3;
+  const bottom = tall ? 13 : 12;
+  p.set(7, top, [232, 236, 244, 255]); p.set(8, top, [206, 212, 222, 255]);
+  for (let x = 6; x <= 9; x++) p.set(x, top + 1, [222, 226, 236, 255]);
+  for (let y = top + 2; y <= bottom; y++) {
+    for (let x = 6; x <= 9; x++) {
+      const hi = x === 6;
+      p.set(x, y, shade(hi ? [190, 196, 208, 255] : [140, 148, 162, 255],
+        0.9 + hash2(seed, x, y) * 0.16));
+    }
+  }
+  for (const y of [top + 3, top + 4]) for (let x = 6; x <= 9; x++) p.set(x, y, shade(accent, x === 6 ? 1.15 : 1));
+  // Fins.
+  p.set(5, bottom - 1, [88, 94, 106, 255]); p.set(10, bottom - 1, [72, 78, 90, 255]);
+  p.set(5, bottom, [72, 78, 90, 255]); p.set(10, bottom, [60, 66, 76, 255]);
+  // Exhaust bell.
+  for (let x = 6; x <= 9; x++) p.set(x, bottom + 1, [46, 50, 58, 255]);
+  outlineSprite(p);
+}
+
+function paintTacticalMissile(p: Painter, seed: number): void {
+  paintMissileSprite(p, seed, [206, 62, 52, 255], true);
+}
+function paintInterceptorMissile(p: Painter, seed: number): void {
+  paintMissileSprite(p, seed, WAR_CYAN, false);
+}
+
+function paintAerialBomb(p: Painter, seed: number): void {
+  for (let y = 3; y <= 11; y++) {
+    const half = y <= 4 ? 1 : y <= 9 ? 3 : 2;
+    for (let x = 7 - half; x <= 8 + half; x++) {
+      p.set(x, y, shade([84, 90, 102, 255], 0.9 + hash2(seed, x, y) * 0.2 - (x > 8 ? 0.12 : 0)));
+    }
+  }
+  for (let x = 5; x <= 10; x++) p.set(x, 6, [214, 176, 62, 255]); // yellow band
+  // Tail fins.
+  for (const x of [5, 10]) for (let y = 12; y <= 14; y++) p.set(x, y, [64, 70, 82, 255]);
+  for (let x = 6; x <= 9; x++) p.set(x, 13, [50, 56, 66, 255]);
+  outlineSprite(p);
+}
+
+function paintRepairKit(p: Painter, seed: number): void {
+  for (let y = 4; y <= 12; y++) {
+    for (let x = 3; x <= 12; x++) {
+      p.set(x, y, shade([64, 86, 96, 255], 0.86 + hash2(seed, x, y) * 0.22));
+    }
+  }
+  for (let x = 3; x <= 12; x++) { p.set(x, 4, WAR_STEEL_HI); p.set(x, 12, [36, 42, 50, 255]); }
+  // A bright wrench cross.
+  for (let i = 5; i <= 10; i++) { p.set(i, 8, [226, 232, 240, 255]); p.set(7, i - 1, [226, 232, 240, 255]); }
+  p.set(6, 6, WAR_CYAN); p.set(9, 10, WAR_CYAN_DIM);
+  p.set(7, 3, [90, 96, 108, 255]); p.set(8, 3, [90, 96, 108, 255]); // handle
+  outlineSprite(p);
+}
+
+function paintHelicopterKit(p: Painter, seed: number): void {
+  // A packed airframe: fuselage silhouette under a folded rotor.
+  const body: RGBA = [72, 96, 84, 255], bodyHi: RGBA = [104, 132, 116, 255];
+  for (let y = 7; y <= 11; y++) {
+    for (let x = 3; x <= 11; x++) {
+      if (y === 11 && (x < 4 || x > 9)) continue;
+      p.set(x, y, shade(y === 7 ? bodyHi : body, 0.9 + hash2(seed, x, y) * 0.18));
+    }
+  }
+  for (let x = 11; x <= 14; x++) p.set(x, 8, shade(body, 0.85)); // tail boom
+  for (let y = 6; y <= 10; y++) p.set(14, y, shade(bodyHi, 0.8)); // tail fin
+  for (let x = 2; x <= 13; x++) p.set(x, 4, [176, 184, 198, 255]); // folded rotor
+  p.set(7, 5, [120, 128, 142, 255]); p.set(8, 5, [120, 128, 142, 255]); // mast
+  p.set(5, 9, WAR_CYAN); p.set(6, 9, [200, 246, 252, 255]); // canopy glass
+  p.set(4, 12, [48, 52, 60, 255]); p.set(9, 12, [48, 52, 60, 255]); // skids
+  outlineSprite(p);
+}
+
 function paintRedSand(p: Painter, seed: number): void {
   p.fill((x, y) => shade([196, 98, 54, 255], speckle(seed, x, y, 0.1)));
 }
@@ -2509,6 +2813,25 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.GreaterRuneFortune]: paintGreaterRune(paintRuneFortune),
   [Tile.GreaterRuneFocus]: paintGreaterRune(paintRuneFocus),
   [Tile.GreaterRuneOfPower]: paintGreaterRune(paintGreaterRunePower),
+  // --- Warfare Command ---
+  [Tile.SiloSide]: paintSiloSide,
+  [Tile.SiloTop]: paintSiloTop,
+  [Tile.SiloPart]: paintSiloPart,
+  [Tile.BatterySide]: paintBatterySide,
+  [Tile.BatteryTop]: paintBatteryTop,
+  [Tile.HelipadTop]: paintHelipadTop,
+  [Tile.HelipadSide]: paintHelipadSide,
+  [Tile.ReinforcedFrame]: paintReinforcedFrame,
+  [Tile.GuidanceUnit]: paintGuidanceUnit,
+  [Tile.WarheadSprite]: paintWarhead,
+  [Tile.RotorAssembly]: paintRotorAssembly,
+  [Tile.FuelTank]: paintFuelTank,
+  [Tile.BombCasingSprite]: paintBombCasing,
+  [Tile.TacticalMissileSprite]: paintTacticalMissile,
+  [Tile.InterceptorSprite]: paintInterceptorMissile,
+  [Tile.AerialBombSprite]: paintAerialBomb,
+  [Tile.RepairKitSprite]: paintRepairKit,
+  [Tile.HelicopterKitSprite]: paintHelicopterKit,
   // Vault Brute: a hulking mossy-stone zombie — pale glowing eyes, heavy jaw.
   [Tile.BruteSkin]: paintSkin([98, 112, 86, 255], 0.18, [72, 84, 62, 255]),
   [Tile.BruteFace]: paintFace([98, 112, 86, 255], [235, 245, 170, 255],

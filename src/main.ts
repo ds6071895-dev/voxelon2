@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { GameAudio, materialOf } from './audio';
-import { Block, BLOCKS, isReplaceable, isSolid } from './blocks';
+import { Block, BLOCKS, isReplaceable, isSolid, isVaultMasonry } from './blocks';
 import { Furnaces } from './furnace';
 import { HeldItemView } from './held';
 import { HUD } from './hud';
@@ -10,7 +10,7 @@ import { Interaction, raycastBlocks } from './interact';
 import { Inventory } from './inventory';
 import { InventoryUI, MachineUIContext, TurretUIContext } from './inventory_ui';
 import { dropFor, gunVolley, GunInfo, Item, ItemStack, ITEMS } from './items';
-import { RECIPES, Recipe } from './crafting';
+import { RECIPES, Recipe, WARFARE_BLUEPRINTS, setBlueprintCheck } from './crafting';
 import { renderItemIcon } from './icons';
 import { itemDescription } from './itemdesc';
 import {
@@ -58,11 +58,24 @@ import { warBorderAt, clampInsideBorder, WAR_MIN_BORDER } from './war';
 import { Flag, FLAG_REACH, FLAG_MAX_HP, newFlags, flagPosition } from './flags';
 import { FlagModels } from './flagmodels';
 import {
-  BRANCHES, MAX_LEVEL as MAX_PLAYER_LEVEL, ProgressState, XP_MOB, branchNodes,
-  branchRank, buyNode, canBuyNode, factionLevelFor, factionLevelProgress,
-  factionPerks, levelFor, levelProgress, newProgress, ownsNode, personalBuffs,
-  pointsAvailable, sanitizeProgress, sanitizeFactionXp,
-} from './progress';
+  WarfareProgress, buyWarfareNode, grantWarfareXp, migrateWarfare, newWarfare,
+  sanitizeWarfare, settleWarfareXp, warfareAvailable, warfareOwns, warfareTier,
+  ContributionRecord, MAX_HELICOPTERS_PER_FACTION,
+  PROTECTED_RADIUS, helicopterStats, siloStats, batteryStats, tierLabel,
+  MAX_SILOS_PER_FACTION, MIN_SILO_SPACING, MAX_BATTERIES_PER_FACTION,
+  MIN_BATTERY_SPACING,
+} from './warfare';
+import { WarfareUI } from './warfare_ui';
+import {
+  BatteryState, MissileSnapshot, ProtectedArea, SiloState, StrategicSim,
+  StrategicEvent, LAUNCH_REJECT_TEXT, blastAt, blastBlockCandidates, protectedArea,
+} from './strategic';
+import {
+  HelicopterSnapshot, SeatKind, VehicleSim, VehicleEvent, bombBlast,
+} from './vehicles';
+import { MissileModels, StrategicModels } from './warfare_models';
+import { VehicleModels } from './vehiclemodels';
+
 import { GadgetCooldowns, GadgetDef, gadgetOf } from './gadgets';
 import {
   GUIDE_STEPS, GuideState, compassGlyph, guideComplete, guideProgress, markGuideStep,
@@ -169,7 +182,7 @@ const touch = isMobile ? new TouchControls(input, {
     if (screen === 'paused') { input.lock(); return; }        // resume
     if (invUI.open) { input.inventoryToggled = true; return; } // close menu first
     if (worldMap.open) { input.mapToggled = true; return; }
-    if (progressOpen) { input.progressPressed = true; return; }
+    if (warfareUI.open) { input.progressPressed = true; return; }
     if (input.locked) input.unlock();                          // open pause menu
   },
 }) : null;
@@ -967,6 +980,12 @@ interaction.onOpenContainer = (kind, x, y, z) => {
     if (!turretStates.has(key)) turretStates.set(key, newTurret()); // local predict
     if (net.connected) net.sendTurretOpen(x, y, z);
     invUI.show('turret', undefined, undefined, turretCtxFor(x, y, z));
+  } else if (kind === 'silo') {
+    openSiloPanel(x, y, z);
+  } else if (kind === 'battery') {
+    openBatteryPanel(x, y, z);
+  } else if (kind === 'helipad') {
+    openHelipadPanel(x, y, z);
   } else {
     invUI.show(kind, kind === 'furnace' ? furnaces.get(x, y, z) : undefined);
   }
@@ -1140,6 +1159,8 @@ interaction.onSabotage = (x, y, z) => {
   const held = inventory.selectedStack;
   const tool = held ? ITEMS[held.id]?.tool : undefined;
   const dmg = (tool?.damage ?? 1) + 3; // fists chip away; tools hit harder
+  // Warfare Command hardware (silo pad / interceptor battery)?
+  if (sabotageStrategic(x, y, z, dmg)) return;
   // Turret? (single-block entity)
   if (world.getBlock(x, y, z) === Block.Turret) {
     const key = `${x},${y},${z}`;
@@ -1487,7 +1508,7 @@ function finishOfflineAuth(account: Account, freshRegister: boolean): void {
   else restoreOfflineInventory(); // bring back saved single-player stuff
   restoreOfflineHearts(); // fresh accounts fall back to the 10-heart start
   restoreOfflineTotems(); // attuned Waypoint Totems (fast travel)
-  restoreOfflineProgress(); // XP + upgrades + the faction pool
+  restoreOfflineWarfare(); // Warfare Command technology (offline mirror)
   issueOfflineSession(account.username);
 }
 
@@ -2396,7 +2417,7 @@ document.addEventListener('keydown', (e) => {
   if (e.code !== 'Escape') return;
   if (tutorial.open) { tutorial.finish(); }
   else if (tpaPromptVisible) { closeTpaPrompt(); }
-  else if (progressOpen) { hideProgress(); }
+  else if (warfareUI.open) { hideProgress(); }
   else if (guideOpen) { hideGuide(); }
   else if (worldMap.open) { worldMap.hide(); input.lock(); }
   else if (invUI.open) { invUI.hide(); input.lock(); }
@@ -2446,21 +2467,25 @@ function checkDeath(): void {
 // localStorage keyed by the local account so single-player also persists.
 function pushStateSave(): void {
   if (net.connected) {
-    const blob = inventory.serialize() as unknown as Record<string, unknown>;
-    blob.progress = { xp: progress.xp, nodes: progress.nodes }; // XP rides along
-    net.sendSaveState(blob);
+    // Warfare Command progression is deliberately NOT in this blob: the server
+    // stores it on the account, so a client state push can never mint or wipe
+    // technology. The retired `progress` key is simply never written again.
+    net.sendSaveState(inventory.serialize() as unknown as Record<string, unknown>);
   } else if (authedName) {
     try {
       localStorage.setItem(`voxelon.inv.${authedName.toLowerCase()}`,
         JSON.stringify(inventory.serialize()));
     } catch { /* ignore */ }
-    saveOfflineProgress();
+    saveOfflineWarfare();
   }
 }
 net.onRestoreState = (state) => {
-  inventory.restore(state);
-  const st = sanitizeProgress((state as { progress?: unknown }).progress);
-  progress.xp = st.xp; progress.nodes = st.nodes;
+  // Run the one-time warfare migration FIRST and use its cleaned output, so the
+  // retired progression keys (`progress`/`xp`/`skills`/`factionXp`) are gone
+  // before anything reads the blob. The authoritative technology itself arrives
+  // separately in the `warfare` message.
+  const cleaned = migrateWarfare(state as Record<string, unknown>).data;
+  inventory.restore(cleaned);
 };
 // Offline: restore the saved inventory for the just-authed local account.
 function restoreOfflineInventory(): void {
@@ -2791,270 +2816,154 @@ function consumeHeartItem(): void {
   }
   pushStateSave();
 }
-// --- Progression (XP + upgrades): G panel, kill XP, faction pool --------------
-// Personal XP is CLIENT-owned (persisted like the inventory: saveState online,
-// localStorage offline). The faction pool is server-owned online (fxp
-// broadcasts) and localStorage-mirrored offline. All rules live in progress.ts.
-const progress: ProgressState = newProgress();
-let factionXpPools: number[] = new Array(FACTIONS.length).fill(0);
+// --- WARFARE COMMAND ----------------------------------------------------------
+// The retired Progress system (personal kill XP, the five generic skill
+// branches, faction XP levels and every "+2% speed" buff) is GONE. Warfare XP
+// comes from exactly one place: dungeon bosses you actually helped kill.
+//
+// Online the SERVER owns the progression and pushes it down; offline the same
+// pure rules run locally against a versioned localStorage key. The old
+// `voxelon.prog.*` / `voxelon.fxp.*` keys are read once by the migration and
+// then never written again.
+const WARFARE_KEY_PREFIX = 'voxelon.warfare.v1.';
+let warfare: WarfareProgress = newWarfare();
 
-function saveOfflineProgress(): void {
+function warfareKey(): string {
+  return `${WARFARE_KEY_PREFIX}${(authedName || 'player').toLowerCase()}`;
+}
+
+function saveOfflineWarfare(): void {
+  if (net.connected || !authedName) return;
+  try { localStorage.setItem(warfareKey(), JSON.stringify(warfare)); }
+  catch { /* ignore */ }
+}
+
+/** Load the offline blob, running the one-time `warfare-v1` migration: the
+ *  retired progression keys are discarded and removed so later saves never
+ *  carry them. Inventory, hearts, factions, records and world edits live under
+ *  other keys and are untouched. */
+function restoreOfflineWarfare(): void {
   if (net.connected || !authedName) return;
   try {
-    localStorage.setItem(`voxelon.prog.${authedName.toLowerCase()}`, JSON.stringify(progress));
-    localStorage.setItem(`voxelon.fxp.${authedName.toLowerCase()}`, JSON.stringify(factionXpPools));
-  } catch { /* ignore */ }
-}
-function restoreOfflineProgress(): void {
-  if (net.connected || !authedName) return;
-  try {
-    const raw = localStorage.getItem(`voxelon.prog.${authedName.toLowerCase()}`);
-    const st = sanitizeProgress(raw ? JSON.parse(raw) : null);
-    progress.xp = st.xp; progress.nodes = st.nodes;
-    const fraw = localStorage.getItem(`voxelon.fxp.${authedName.toLowerCase()}`);
-    factionXpPools = sanitizeFactionXp(fraw ? JSON.parse(fraw) : null, FACTIONS.length);
-  } catch { /* ignore */ }
+    const raw = localStorage.getItem(warfareKey());
+    warfare = sanitizeWarfare(raw ? JSON.parse(raw) : null);
+    const name = authedName.toLowerCase();
+    // One-time cleanup of the dead progression keys.
+    localStorage.removeItem(`voxelon.prog.${name}`);
+    localStorage.removeItem(`voxelon.fxp.${name}`);
+  } catch { warfare = newWarfare(); }
 }
 
-/** Grant personal XP (+ toast + level-up fanfare). */
-function grantXp(amount: number, reason?: string): void {
-  if (amount <= 0) return;
-  const before = levelFor(progress.xp);
-  progress.xp += amount;
-  const after = levelFor(progress.xp);
-  showNotice(`+${amount} XP${reason ? ` — ${reason}` : ''}`);
-  if (after > before) {
-    showRegionBanner(`⭐ LEVEL ${after}!`, '#ffd84a');
-    showNotice(isMobile
-      ? 'Level up! Tap ⚑ to spend your skill point.'
-      : 'Level up! Press G to spend your skill point.');
-    audio.heartSteal();
-  }
-  saveOfflineProgress();
-  refreshProgressPanel();
+/** Award warfare XP locally (offline) with the toast + fanfare. */
+function grantOfflineWarfareXp(amount: number, boss: string, tier: number): void {
+  const got = grantWarfareXp(warfare, amount);
+  if (got <= 0) return;
+  showRegionBanner(`⌘ +${got} WARFARE XP`, '#5ce2ec');
+  showNotice(`Tier ${tier} ${boss} cleared — ${warfareAvailable(warfare)} XP available to spend.`);
+  audio.heartSteal();
+  saveOfflineWarfare();
+  warfareUI.refresh();
 }
 
-// Mob kills feed personal XP + the faction pool (server clamps the report).
-// Slayer capstones (+% mob XP) multiply the personal award.
-mobs.onPlayerKill = (kind) => {
-  const amt = Math.round((XP_MOB[kind] ?? 4) * activeBuffs().xpMult);
-  grantXp(amt, kind);
-  if (net.connected) net.sendXp(amt);
-  else if (localFaction >= 0) {
-    factionXpPools[localFaction] = (factionXpPools[localFaction] ?? 0) + amt;
-    saveOfflineProgress();
-  }
-};
-net.onXpAward = (amount, reason) => grantXp(amount, reason === 'kill' ? 'enemy kill' : reason);
-net.onFactionXp = (xp) => {
-  const before = factionLevelFor(factionXpPools[localFaction] ?? 0);
-  factionXpPools = sanitizeFactionXp(xp, FACTIONS.length);
-  const after = factionLevelFor(factionXpPools[localFaction] ?? 0);
-  if (after > before) {
-    showRegionBanner(`⚑ ${factionName(localFaction).toUpperCase()} REACHED LEVEL ${after}!`, factionCss(localFaction));
-    audio.heartSteal();
-  }
-  refreshProgressPanel();
-};
+// Mob kills no longer grant progression of ANY kind — that was the whole point
+// of retiring the old system. (The hook stays so mob-death sounds/loot keep
+// working through the same path.)
+mobs.onPlayerKill = () => { /* warfare XP comes from vault bosses only */ };
 
-/** All progression + rune buffs that apply to the local player right now. */
+/** Rune bonuses are the only surviving personal modifiers. The five generic
+ *  Progress branches and the faction-level perks were retired with the old
+ *  system, so this now reads straight off worn gear. */
 function activeBuffs(): {
   speedMult: number; armorBonus: number; toughness: number; reloadMult: number;
   mineMult: number; spreadMult: number; gunDamageMult: number;
   meleeBonus: number; energyMult: number; fallMult: number; xpMult: number;
 } {
-  const mine = personalBuffs(progress);
-  const perks = factionPerks(factionLevelFor(factionXpPools[localFaction] ?? 0));
   const runes = runeBonuses(inventory.wornArmor());
   return {
-    speedMult: mine.speedMult * perks.speedMult * runes.speedMult,
-    armorBonus: mine.armorBonus + perks.armor + runes.armor,
+    speedMult: runes.speedMult,
+    armorBonus: runes.armor,
     toughness: runes.toughness,
-    reloadMult: mine.reloadMult,
-    mineMult: mine.mineMult * runes.mineMult,
-    spreadMult: mine.spreadMult * runes.spreadMult,
-    gunDamageMult: mine.gunDamageMult,
-    meleeBonus: mine.meleeBonus,
-    energyMult: mine.energyMult,
-    fallMult: mine.fallMult,
-    xpMult: mine.xpMult,
+    reloadMult: 1,
+    mineMult: runes.mineMult,
+    spreadMult: runes.spreadMult,
+    gunDamageMult: 1,
+    meleeBonus: 0,
+    energyMult: 1,
+    fallMult: 1,
+    xpMult: 1,
   };
 }
 
-// --- The G panel: your XP/level/upgrades + your faction's level/perks ---------
-let progressOpen = false;
-const progressEl = document.createElement('div');
-progressEl.style.cssText =
-  'position:absolute;inset:0;display:none;z-index:34;align-items:center;' +
-  'justify-content:center;background:rgba(6,8,14,0.82);';
-const progressPanel = document.createElement('div');
-progressPanel.className = 'mc-font';
-progressPanel.style.cssText =
-  'background:linear-gradient(#161a26,#10131c);border:2px solid #34406a;border-radius:10px;' +
-  'box-shadow:0 10px 40px rgba(0,0,0,0.6);width:730px;max-width:96vw;max-height:88vh;overflow:auto;' +
-  'color:#e7edf7;text-shadow:none;font-size:13px;padding-bottom:8px;';
-progressEl.appendChild(progressPanel);
-app.appendChild(progressEl);
-progressEl.addEventListener('mousedown', (e) => { if (e.target === progressEl) hideProgress(); });
-
-function xpBar(frac: number, color: string, label: string): string {
-  return `<div style="position:relative;height:16px;background:#0c0f18;border:1px solid #2a3550;border-radius:4px;overflow:hidden">` +
-    `<div style="height:100%;width:${(frac * 100).toFixed(1)}%;background:${color}"></div>` +
-    `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff">${label}</div></div>`;
-}
-
-function refreshProgressPanel(): void {
-  if (!progressOpen) return;
-  const lvl = levelFor(progress.xp);
-  const pts = pointsAvailable(progress);
-  const fxp = factionXpPools[localFaction] ?? 0;
-  const flvl = factionLevelFor(fxp);
-  const perks = factionPerks(flvl);
-  const buffs = activeBuffs();
-  let html =
-    `<div style="position:sticky;top:0;background:#10131c;display:flex;align-items:center;gap:10px;` +
-    `padding:12px 16px;border-bottom:1px solid #232a40;z-index:1">` +
-    `<div style="flex:1;font-size:15px;color:#ffd84a;letter-spacing:1px">⚑ FACTION &amp; PROGRESS</div>` +
-    `<button id="prog-close" style="width:26px;height:26px;cursor:pointer;border:1px solid #3a4666;` +
-    `border-radius:5px;background:#1c2335;color:#cdd6ee;font-size:13px">✕</button></div>`;
-
-  // --- you ---
-  html += `<div style="padding:12px 16px 4px">` +
-    `<div style="font-size:11px;letter-spacing:2px;color:#7f8db0;margin-bottom:6px">YOU — ${authedName || 'PLAYER'}</div>` +
-    `<div style="display:flex;align-items:baseline;gap:10px;margin-bottom:5px">` +
-    `<span style="font-size:22px;color:#ffd84a">Lv ${lvl}</span>` +
-    `<span style="color:#8f9ec0;font-size:11px">${progress.xp} XP</span>` +
-    (pts > 0 ? `<span style="color:#7dffa0;font-size:12px">● ${pts} skill point${pts === 1 ? '' : 's'} to spend!</span>`
-             : `<span style="color:#7f8db0;font-size:11px">kill mobs &amp; enemies for XP</span>`) +
-    `</div>${xpBar(levelProgress(progress.xp), '#e2b23b', `to Lv ${Math.min(MAX_PLAYER_LEVEL, lvl + 1)}`)}</div>`;
-
-  // --- THE SKILL TREE: 5 branches × 20 nodes. Costs rise with depth (1→4 pts)
-  // and every 5th node is a named capstone — 250 points of tree against the 99
-  // a maxed character earns, so you specialize. Hover a node for its story.
-  html += `<div style="padding:8px 16px 2px;color:#7f8db0;font-size:10px;letter-spacing:1px">` +
-    `SKILL TREE — 100 upgrades · deeper ranks cost more (1→4 pts) · ★ = capstone</div>`;
-  html += `<div style="padding:4px 16px 6px;display:flex;flex-direction:column;gap:6px">`;
-  for (const b of BRANCHES) {
-    const nodes = branchNodes(b.id);
-    const rank = branchRank(progress, b.id);
-    html += `<div style="background:#141827;border:1px solid #232a40;border-radius:7px;padding:7px 9px">` +
-      `<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:5px">` +
-      `<span style="font-size:15px">${b.icon}</span>` +
-      `<span style="color:#ffd84a">${b.name}</span>` +
-      `<span style="color:#8f9ec0;font-size:10px">${b.perNode.label} per rank · ${rank}/20</span></div>` +
-      `<div style="display:flex;gap:3px;flex-wrap:nowrap">`;
-    for (const n of nodes) {
-      const owned = ownsNode(progress, n.id);
-      const can = canBuyNode(progress, n.id);
-      const capstone = n.name !== `${b.name} ${n.index + 1}`;
-      const bg = owned ? '#7a5c14' : can ? '#1e3a24' : '#151a28';
-      const border = owned ? '#ffd84a' : can ? '#54c96a' : '#262e44';
-      const label = capstone ? '★' : String(n.index + 1);
-      const color = owned ? '#ffe9a8' : can ? '#9fffb0' : '#4a5570';
-      html += `<button data-node="${n.id}" title="${n.name} — ${n.desc} (${n.cost} pt${n.cost > 1 ? 's' : ''})" ` +
-        `style="width:29px;height:29px;flex:0 0 auto;cursor:${can ? 'pointer' : 'default'};` +
-        `border:${capstone ? 2 : 1}px solid ${border};border-radius:5px;background:${bg};` +
-        `color:${color};font-size:${capstone ? 13 : 10}px;padding:0;font-family:inherit">` +
-        `${label}</button>`;
+// --- The G panel: Warfare Command ---------------------------------------------
+const warfareUI = new WarfareUI({
+  state: () => warfare,
+  tint: () => factionCss(localFaction),
+  buy: (id) => {
+    if (net.connected) {
+      // The server is the authority; it echoes the new state back to us.
+      net.sendWarfareBuy(id);
+      // Optimistic local apply keeps the panel responsive; a `warfare` message
+      // overwrites it either way, so a rejected buy self-corrects.
+      buyWarfareNode(warfare, id);
+    } else if (buyWarfareNode(warfare, id)) {
+      saveOfflineWarfare();
     }
-    html += `</div></div>`;
-  }
-  html += `</div>`;
-
-  // --- faction ---
-  const fname = factionName(localFaction);
-  const fcol = factionCss(localFaction);
-  const wa = warWins[FACTIONS[0].id] ?? 0, wb = warWins[FACTIONS[1].id] ?? 0;
-  html += `<div style="padding:10px 16px 6px">` +
-    `<div style="font-size:11px;letter-spacing:2px;color:#7f8db0;margin-bottom:6px">YOUR FACTION</div>` +
-    `<div style="display:flex;align-items:baseline;gap:10px;margin-bottom:5px">` +
-    `<span style="font-size:18px;color:${fcol}">■ ${fname}</span>` +
-    `<span style="font-size:15px;color:#ffd84a">Lv ${flvl}</span>` +
-    `<span style="color:#8f9ec0;font-size:11px">${fxp} shared XP</span></div>` +
-    xpBar(factionLevelProgress(fxp), fcol, `to Lv ${Math.min(10, flvl + 1)}`) +
-    `<div style="color:#9fb4cc;font-size:11px;margin-top:6px;line-height:1.7">` +
-    `Everyone's kills level the whole faction. Current perks for every member:<br>` +
-    `🛡 +${perks.armor} armor &nbsp;·&nbsp; 👟 +${((perks.speedMult - 1) * 100).toFixed(1)}% speed</div>` +
-    (net.connected
-      ? `<div style="color:#8f9ec0;font-size:11px;margin-top:6px">War wins this season — ` +
-        `<span style="color:${factionCss(FACTIONS[0].id)}">${FACTIONS[0].name} ${wa}</span> · ` +
-        `<span style="color:${factionCss(FACTIONS[1].id)}">${FACTIONS[1].name} ${wb}</span></div>`
-      : '') +
-    `</div>`;
-
-  // --- your live totals ---
-  html += `<div style="padding:4px 16px 8px;color:#7f8db0;font-size:11px;line-height:1.8">` +
-    `Your combined buffs: +${((buffs.speedMult - 1) * 100).toFixed(1)}% speed · ` +
-    `+${buffs.armorBonus} armor · −${((1 - buffs.reloadMult) * 100).toFixed(0)}% reload · ` +
-    `+${((buffs.gunDamageMult - 1) * 100).toFixed(0)}% gun dmg · ` +
-    `−${((1 - buffs.spreadMult) * 100).toFixed(0)}% spread · ` +
-    `+${buffs.meleeBonus.toFixed(2)} melee · ` +
-    `+${((buffs.mineMult - 1) * 100).toFixed(0)}% mining · ` +
-    `−${((1 - buffs.energyMult) * 100).toFixed(0)}% sprint drain · ` +
-    `−${((1 - buffs.fallMult) * 100).toFixed(0)}% fall dmg · ` +
-    `+${((buffs.xpMult - 1) * 100).toFixed(0)}% mob XP</div>`;
-
-  progressPanel.innerHTML = html;
-  progressPanel.querySelector('#prog-close')!.addEventListener('click', hideProgress);
-  for (const btn of progressPanel.querySelectorAll('button[data-node]')) {
-    btn.addEventListener('click', () => {
-      const id = (btn as HTMLElement).getAttribute('data-node')!;
-      if (buyNode(progress, id)) {
-        audio.heartSteal();
-        saveOfflineProgress();
-        pushStateSave();
-        refreshProgressPanel();
-      }
-    });
-  }
-}
+  },
+  onPurchase: (node) => {
+    audio.heartSteal();
+    showNotice(`${node.icon} ${node.name} authorized.`);
+  },
+  onOpen: () => input.unlock(),
+  onClose: () => {
+    if (worldReady && !player.dead && screen === 'playing') input.lock();
+  },
+});
+app.appendChild(warfareUI.root);
+warfareUI.root.addEventListener('mousedown', (e) => {
+  if (e.target === warfareUI.root) warfareUI.hide();
+});
+window.addEventListener('resize', () => { if (warfareUI.open) warfareUI.layoutMode(); });
 
 function showProgress(): void {
-  if (progressOpen || player.dead) return;
+  if (warfareUI.open || player.dead) return;
   if (invUI.open) invUI.hide();
   if (worldMap.open) worldMap.hide();
-  progressOpen = true;
-  progressEl.style.display = 'flex';
-  refreshProgressPanel();
-  input.unlock();
+  warfareUI.show();
 }
-function hideProgress(): void {
-  if (!progressOpen) return;
-  progressOpen = false;
-  progressEl.style.display = 'none';
-  if (worldReady && !player.dead && screen === 'playing') input.lock();
-}
+function hideProgress(): void { warfareUI.hide(); }
 function toggleProgress(): void {
-  if (progressOpen) hideProgress();
+  if (warfareUI.open) warfareUI.hide();
   else if (input.locked && screen === 'playing') showProgress();
 }
+
+
 // A clickable button stacked above the Map button (same footprint).
 const progressBtn = document.createElement('button');
 progressBtn.className = 'mc-font';
-progressBtn.textContent = '⚑ Progress (G)';
+progressBtn.textContent = '⌘ Warfare (G)';
 progressBtn.style.cssText =
   'position:absolute;bottom:46px;right:8px;z-index:12;font-size:12px;padding:6px 10px;' +
   'width:118px;box-sizing:border-box;text-align:center;cursor:pointer;border:2px solid;' +
   'border-color:#fff #555 #555 #fff;background:#6b6b6b;color:#fff;text-shadow:none;display:none;';
-  // Hidden on the title screen and on mobile (own ⚑ icon in the touch overlay).
+  // Hidden on the title screen and on mobile (own ⌘ icon in the touch overlay).
 progressBtn.addEventListener('click', () => {
-  if (progressOpen) hideProgress();
+  if (warfareUI.open) warfareUI.hide();
   else if (!player.dead) showProgress();
 });
 app.appendChild(progressBtn);
-// Flash the Progress button whenever there are unspent skill points.
+// Flash the Warfare button whenever there is unspent warfare XP.
 const progressFlashStyle = document.createElement('style');
 progressFlashStyle.textContent =
-  '@keyframes prog-flash { 0%,100% { background:#6b6b6b; } 50% { background:#b8912b; } }';
+  '@keyframes prog-flash { 0%,100% { background:#6b6b6b; } 50% { background:#1f6f7c; } }';
 document.head.appendChild(progressFlashStyle);
 let progressFlashing = false;
 function updateProgressFlash(): void {
-  const want = pointsAvailable(progress) > 0;
+  const want = warfareAvailable(warfare) > 0;
   if (want === progressFlashing) return;
   progressFlashing = want;
   progressBtn.style.animation = want ? 'prog-flash 1.1s ease-in-out infinite' : '';
-  progressBtn.textContent = want ? '⚑ Progress (G) ●' : '⚑ Progress (G)';
-  progressBtn.style.borderColor = want ? '#ffd84a #7a5c10 #7a5c10 #ffd84a' : '#fff #555 #555 #fff';
+  progressBtn.textContent = want ? '⌘ Warfare (G) ●' : '⌘ Warfare (G)';
+  progressBtn.style.borderColor = want ? '#5ce2ec #14535e #14535e #5ce2ec' : '#fff #555 #555 #fff';
 }
 
 // --- Vaults (Milestone D): dungeons, the Brute, per-player treasure ------------
@@ -3485,6 +3394,31 @@ function completeOfflineEncounter(v: VaultStamp): void {
   audio.vaultMusicCue('victory');
   showKill(authedName || 'You', `Tier ${v.tier} ${VAULT_BOSS_NAMES[v.bossKind]} ☠`);
   refreshVaultMap();
+  settleOfflineWarfareXp(v, elapsed);
+}
+
+/**
+ * The OFFLINE mirror of the server's warfare settlement. It runs the identical
+ * pure `settleWarfareXp` over the identical contribution ledger the encounter
+ * engine kept, so solo play and multiplayer pay out exactly the same amount for
+ * the same fight — and a solo player who watched from the doorway still earns
+ * nothing.
+ */
+function settleOfflineWarfareXp(v: VaultStamp, elapsed: number): void {
+  const engine = localVaultEncounter;
+  if (!engine) return;
+  const name = authedName || 'You';
+  const ledger: ContributionRecord[] = [];
+  for (const [id, row] of engine.ledger) {
+    ledger.push({ id, username: name, damage: row.damage, activeSeconds: row.activeSeconds });
+  }
+  const awards = settleWarfareXp(ledger, v.tier, engine.maxHp,
+    Number.isFinite(elapsed) ? elapsed : 0);
+  if (!awards.length) {
+    showNotice('No warfare XP — you have to actually fight the boss to earn it.');
+    return;
+  }
+  grantOfflineWarfareXp(awards[0].xp, VAULT_BOSS_NAMES[v.bossKind], v.tier);
 }
 
 /** Per-frame vault upkeep: bounds test (throttled), guard anchors, the Brute,
@@ -4264,6 +4198,16 @@ net.onDisconnect = () => {
   // Drop all server-owned warfare state so its meshes/markers don't linger
   // (turretModels reconciles to the now-empty set).
   turretStates.clear();
+  // Warfare Command hardware is server-owned too: drop it so no ghost silo,
+  // battery, missile or helicopter lingers over an offline world.
+  siloStates.clear();
+  batteryStates.clear();
+  liveMissiles = [];
+  mySeat = null;
+  strategicModels.clear();
+  missileModels.clear();
+  vehicleModels.clear();
+  inboundStrikes.length = 0;
   warActiveNow = false;
   // Flags are server state: drop the markers so a stale pole/beacon can't linger
   // over an offline world.
@@ -4294,9 +4238,40 @@ interaction.onEdit = (x, y, z, b) => {
   const mt = machineTypeForBlock(b);
   if (mt !== null) machines.place(x, y, z, mt);
   net.sendEdit(x, y, z, b);
+  // Warfare Command hardware: a silo stamps its 2×2 housing, and offline the
+  // local simulation gains the entity straight away.
+  if (b === Block.TacticalSilo) placeSilo(x, y, z);
+  else if (b === Block.InterceptorBattery) placeBattery(x, y, z);
 };
 interaction.canPlace = (x, y, z) => {
-  return !(localVaultEncounter && curVault && blockInsideArena(curVault, x, y, z));
+  if (localVaultEncounter && curVault && blockInsideArena(curVault, x, y, z)) return false;
+  // Strategic hardware is blueprint-gated, faction-capped and spaced apart —
+  // refuse the placement here rather than letting a block appear and vanish.
+  const held = inventory.selectedStack;
+  const id = held?.id ?? 0;
+  if (id === Block.TacticalSilo || id === Block.InterceptorBattery ||
+      id === Block.Helipad || id === Item.HelicopterKit) {
+    if (!hasBlueprint(id)) {
+      warfarePlaceHint(`${ITEMS[id]?.name ?? 'That'} needs a Warfare Command authorization (press G).`);
+      return false;
+    }
+  }
+  if (id === Block.TacticalSilo) {
+    // The pad occupies (x,z)..(x+1,z+1); every cell must be free.
+    for (const [dx, dz] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+      if (!isReplaceable(world.getBlock(x + dx, y, z + dz))) {
+        warfarePlaceHint('A silo needs a clear 2×2 pad.');
+        return false;
+      }
+    }
+    const err = siloPlacementError(x, z);
+    if (err) { warfarePlaceHint(err); return false; }
+  }
+  if (id === Block.InterceptorBattery) {
+    const err = batteryPlacementError(x, z);
+    if (err) { warfarePlaceHint(err); return false; }
+  }
+  return true;
 };
 interaction.canEdit = (x, y, z) => {
   const block = world.getBlock(x, y, z);
@@ -4389,6 +4364,10 @@ function fireVolley(stack: ItemStack, gun: GunInfo): boolean {
 function tryFire(stack: ItemStack, gun: GunInfo): void {
   fireCooldown = gun.cooldown;
   if (!fireVolley(stack, gun)) { fireCooldown = 0; reloadGun(); return; } // empty -> reload
+  // Air targets: a missile hull and a helicopter are both legitimate (and hard)
+  // gunfire targets. The projectile itself still flies for the visuals; this is
+  // the authoritative hit report, exactly like the PvP ranged path.
+  reportAirTargetHit(gun);
   const burst = Math.max(1, gun.burst ?? 1);
   if (burst > 1) {
     burstRemaining = burst - 1;
@@ -4405,7 +4384,7 @@ function reloadGun(): void {
   if (!stack || !gun) return;
   const loaded = stack.loaded ?? gun.mag;
   if (loaded >= gun.mag || inventory.countItem(gun.ammo) <= 0) return;
-  reloadTimer = RELOAD_TIME * activeBuffs().reloadMult; // Gunslinger ranks
+  reloadTimer = RELOAD_TIME * activeBuffs().reloadMult;
   reloadDuration = reloadTimer;
   reloadingStack = stack;
 }
@@ -4783,6 +4762,891 @@ function turretCtxFor(x: number, y: number, z: number): TurretUIContext {
     },
     myName: () => (net.connected ? net.username : 'You'),
   };
+}
+
+// --- WARFARE COMMAND: strategic hardware + vehicles (client) -----------------
+// Online the server owns silos, batteries, missiles and helicopters and pushes
+// snapshots; the client renders them and predicts nothing that matters.
+// Offline the SAME pure simulations run locally, so single-player behaves
+// identically to a server.
+
+/** Highest solid cell in a column, edits included (impact + heli floor/ceiling). */
+function warfareGroundY(x: number, z: number): number {
+  const bx = Math.floor(x), bz = Math.floor(z);
+  let top = world.terrain.height(bx, bz);
+  for (let y = top + 1; y <= top + 48 && y < 256; y++) {
+    if (isSolid(world.getBlock(bx, y, bz))) top = y;
+  }
+  return top;
+}
+
+/** Areas a strike may never be aimed into (mirrors the server's list offline). */
+function offlineProtectedAreas(): ProtectedArea[] {
+  const out: ProtectedArea[] = [protectedArea('spawn', 0, 0, 'Spawn safety zone', 120)];
+  for (const v of worldVaults(seed, world.terrain)) {
+    out.push(protectedArea('vault', v.x, v.z, `Tier ${v.tier} vault`, PROTECTED_RADIUS + 24));
+  }
+  return out;
+}
+
+const offlineStrategic = new StrategicSim({
+  groundY: warfareGroundY,
+  worldHalf: WORLD_HALF,
+  protectedAreas: offlineProtectedAreas,
+});
+const offlineVehicles = new VehicleSim({
+  solid: (x, y, z) => isSolid(world.getBlock(Math.floor(x), Math.floor(y), Math.floor(z))),
+  groundY: warfareGroundY,
+  worldHalf: WORLD_HALF,
+  vaultArena: (x, y, z) => {
+    const v = vaultAt(seed, x, y, z, world.terrain, vaultStampCached);
+    if (!v) return false;
+    const b = v.arena.bounds;
+    return x >= b.minX && x <= b.maxX && z >= b.minZ && z <= b.maxZ &&
+      y >= b.minY && y <= b.maxY;
+  },
+});
+
+const strategicModels = new StrategicModels(scene, (f) => factionCss(f));
+const missileModels = new MissileModels(scene, (f) => factionCss(f));
+const vehicleModels = new VehicleModels(scene, (f) => factionCss(f));
+
+/** Server-pushed hardware (online). Offline the sim's own maps are the truth. */
+const siloStates = new Map<number, SiloState>();
+const batteryStates = new Map<number, BatteryState>();
+let protectedAreasList: ProtectedArea[] = [];
+/** Live missile snapshots, for the HUD and for shooting a hull down. */
+let liveMissiles: MissileSnapshot[] = [];
+/** The helicopter the local player is riding, and in which seat. */
+let mySeat: { id: number; seat: SeatKind } | null = null;
+let heliInputSeq = 1;
+let heliInputAccum = 0;
+let heliBombCooldown = 0;
+/** Inbound strikes we are counting down (drives the HUD warning line). */
+const inboundStrikes: { x: number; z: number; at: number; radius: number; hostile: boolean }[] = [];
+
+function allSilos(): SiloState[] {
+  return net.connected ? [...siloStates.values()] : [...offlineStrategic.silos.values()];
+}
+function allBatteries(): BatteryState[] {
+  return net.connected ? [...batteryStates.values()] : [...offlineStrategic.batteries.values()];
+}
+/** Any of a silo's four footprint cells resolves to its anchor. */
+function siloAtBlock(x: number, y: number, z: number): SiloState | undefined {
+  return allSilos().find((s) =>
+    y === s.y && x >= s.x && x <= s.x + 1 && z >= s.z && z <= s.z + 1);
+}
+function batteryAtBlock(x: number, y: number, z: number): BatteryState | undefined {
+  return allBatteries().find((b) => b.x === x && b.y === y && b.z === z);
+}
+
+/** Does the local player hold the blueprint needed to build/retrofit this? */
+function hasBlueprint(id: number): boolean {
+  const node = WARFARE_BLUEPRINTS[id];
+  return !node || warfareOwns(warfare, node);
+}
+// The crafting grid refuses to produce strategic hardware you have not
+// authorized — the recipe is visible in the guide, but the bench stays empty.
+setBlueprintCheck(hasBlueprint);
+
+// --- Network handlers ---------------------------------------------------------
+
+net.onWarfare = (xp, nodes) => {
+  warfare = sanitizeWarfare({ version: 1, xp, nodes });
+  warfareUI.refresh();
+};
+net.onWarfareXp = (amount, tier, total, boss) => {
+  showRegionBanner(`⌘ +${amount} WARFARE XP`, '#5ce2ec');
+  showNotice(`Tier ${tier} ${boss} cleared — ${total} warfare XP earned in total.`);
+  audio.heartSteal();
+};
+/**
+ * Items debited client-side for an action the SERVER still has to approve.
+ * The inventory model is client-trusted, so the debit has to happen locally —
+ * but a refusal (faction cap, missing blueprint, out of range, wrong faction)
+ * must not silently destroy a 38-iron airframe or a stack of missiles. Every
+ * such payment is parked here and refunded on the next `warfareErr`.
+ */
+let pendingWarfarePayment: { id: number; count: number }[] = [];
+
+/** Debit `items` now, remembering them so a server refusal can refund them. */
+function payWarfare(items: { id: number; count: number }[]): void {
+  for (const it of items) inventory.removeItem(it.id, it.count);
+  pendingWarfarePayment = items.filter((it) => it.count > 0);
+}
+/** The server accepted whatever we last paid for — drop the refund ticket. */
+function settleWarfarePayment(): void { pendingWarfarePayment = []; }
+function refundWarfarePayment(): void {
+  for (const it of pendingWarfarePayment) {
+    const left = inventory.add(it.id, it.count);
+    if (left > 0) spillAtPlayer([{ id: it.id, count: left }]);
+  }
+  pendingWarfarePayment = [];
+}
+
+net.onWarfareErr = (reason) => {
+  refundWarfarePayment();
+  showNotice(`⛔ ${reason}`);
+};
+net.onSilo = (state) => {
+  settleWarfarePayment();
+  siloStates.set(state.id, state);
+  strategicModels.setSilo(state);
+  if (openSilo?.id === state.id) { openSilo = state; renderSiloPanel(); }
+};
+net.onSiloGone = (id) => {
+  siloStates.delete(id);
+  strategicModels.removeSilo(id);
+  if (openSilo?.id === id) closeStrategicPanel();
+};
+net.onBattery = (state) => {
+  settleWarfarePayment();
+  batteryStates.set(state.id, state);
+  strategicModels.setBattery(state);
+  if (openBattery?.id === state.id) { openBattery = state; renderBatteryPanel(); }
+};
+net.onBatteryGone = (id) => {
+  batteryStates.delete(id);
+  strategicModels.removeBattery(id);
+  if (openBattery?.id === id) closeStrategicPanel();
+};
+net.onMissiles = (list) => { liveMissiles = list; missileModels.sync(list); };
+net.onMissileLaunch = (m) => {
+  missileModels.launch(m);
+  audio.explosion(new THREE.Vector3(m.x, m.y, m.z));
+};
+net.onInterceptorLaunch = (m) => missileModels.launch(m);
+net.onMissileEnd = (id, reason, x, y, z, radius) => {
+  missileModels.remove(id);
+  liveMissiles = liveMissiles.filter((m) => m.id !== id);
+  if (reason === 'impact') {
+    missileModels.impact(x, y, z, radius);
+    audio.explosion(new THREE.Vector3(x, y, z));
+    triggerEncounterShake(0.6, 0.05);
+  } else if (reason === 'intercepted') {
+    missileModels.flash(x, y, z, 3.2, 0x9ff0ff);
+    showNotice('🛡 Missile intercepted.');
+  } else if (reason === 'shot') {
+    missileModels.flash(x, y, z, 2.4, 0xffc46a);
+  }
+};
+net.onStrikeWarning = (faction, x, z, eta, radius) =>
+  registerInboundStrike(faction, x, z, eta, radius);
+net.onProtectedAreas = (areas) => { protectedAreasList = areas; };
+net.onLaunchRejected = (_reason, text) => showNotice(`⛔ ${text}`);
+net.onHelis = (list, bombs) => {
+  settleWarfarePayment();
+  vehicleModels.sync(list, bombs);
+};
+net.onHeliSeat = (id, seat) => {
+  mySeat = seat ? { id, seat } : null;
+  showNotice(!seat ? 'You step down from the airframe.'
+    : seat === 'pilot'
+      ? 'Pilot seat — WASD flies, Space climbs, Shift descends, right-click drops a bomb.'
+      : 'Gunner seat — look around and fire your own weapon inside the side arc.');
+};
+net.onHeliDown = (_id, x, y, z) => {
+  vehicleModels.explode(x, y, z);
+  audio.explosion(new THREE.Vector3(x, y, z));
+  triggerEncounterShake(0.4, 0.04);
+};
+net.onHeliGone = (id) => { if (mySeat?.id === id) mySeat = null; };
+
+/** An inbound strike: banner, countdown, and a map ping. */
+function registerInboundStrike(
+  faction: number, x: number, z: number, eta: number, radius: number,
+): void {
+  const hostile = !(isFaction(faction) && faction === localFaction);
+  inboundStrikes.push({ x, z, at: worldTimeLocal + eta, radius, hostile });
+  if (!hostile) {
+    showNotice(`🚀 Strike away — impact in ${Math.round(eta)}s.`);
+    return;
+  }
+  const d = Math.hypot(player.pos.x - x, player.pos.z - z);
+  showRegionBanner('⚠ INBOUND MISSILE', '#ff5c4d');
+  showNotice(d < 240
+    ? `Impact ${Math.round(d)} blocks away in ${Math.round(eta)}s — MOVE.`
+    : `Impact in ${Math.round(eta)}s at ${Math.round(x)}, ${Math.round(z)}.`);
+}
+
+// --- Offline simulation -----------------------------------------------------------
+
+/** Shared blast application: damage first, then BOUNDED player-built block loss. */
+function offlineBlast(
+  faction: number, at: { x: number; y: number; z: number },
+  radius: number, playerDamage: number, hardwareDamage: number, blockCap: number,
+): void {
+  if (!isFaction(faction) || faction !== localFaction) {
+    const dmg = blastAt(at, { x: player.pos.x, y: player.pos.y, z: player.pos.z },
+      radius, playerDamage);
+    if (dmg > 0) player.damage(dmg);
+  }
+  for (const s of [...offlineStrategic.silos.values()]) {
+    if (s.faction === faction) continue;
+    const dmg = blastAt(at, { x: s.x + 0.5, y: s.y + 1, z: s.z + 0.5 }, radius, hardwareDamage);
+    if (dmg > 0 && offlineStrategic.damageSilo(s, dmg)) removeOfflineSilo(s);
+  }
+  for (const b of [...offlineStrategic.batteries.values()]) {
+    if (b.faction === faction) continue;
+    const dmg = blastAt(at, { x: b.x + 0.5, y: b.y + 1, z: b.z + 0.5 }, radius, hardwareDamage);
+    if (dmg > 0 && offlineStrategic.damageBattery(b, dmg)) removeOfflineBattery(b);
+  }
+  for (const h of [...offlineVehicles.helicopters.values()]) {
+    if (h.faction === faction || h.dying > 0) continue;
+    const dmg = bombBlast(at, h.position, radius, hardwareDamage);
+    if (dmg > 0) applyOfflineVehicleEvents(offlineVehicles.damage(h.id, dmg));
+  }
+  // ONLY player-placed destructible blocks are removed. `getEditedBlock` is
+  // undefined for untouched terrain, so natural ground is never excavated —
+  // the crater is cosmetic particles, not a hole in the world.
+  let removed = 0;
+  for (const c of blastBlockCandidates(at.x, at.y, at.z, radius)) {
+    if (removed >= blockCap) break;
+    const edited = world.getEditedBlock(c.x, c.y, c.z);
+    if (edited === undefined || edited === Block.Air) continue;
+    const info = BLOCKS[edited];
+    if (!info || info.hardness < 0 || isVaultMasonry(edited)) continue;
+    if (edited === Block.TacticalSilo || edited === Block.SiloPart ||
+        edited === Block.InterceptorBattery || edited === Block.Core) continue;
+    world.setBlock(c.x, c.y, c.z, Block.Air);
+    removed++;
+  }
+  particles.burst(at.x, at.y + 1, at.z, 40, 0xff8a3a, 8, 1.1);
+}
+
+function removeOfflineSilo(s: SiloState): void {
+  offlineStrategic.removeSilo(s.id);
+  strategicModels.removeSilo(s.id);
+  for (const [dx, dz] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+    const id = world.getBlock(s.x + dx, s.y, s.z + dz);
+    if (id === Block.TacticalSilo || id === Block.SiloPart) {
+      world.setBlock(s.x + dx, s.y, s.z + dz, Block.Air);
+    }
+  }
+  if (openSilo?.id === s.id) closeStrategicPanel();
+}
+
+function removeOfflineBattery(b: BatteryState): void {
+  offlineStrategic.removeBattery(b.id);
+  strategicModels.removeBattery(b.id);
+  if (world.getBlock(b.x, b.y, b.z) === Block.InterceptorBattery) {
+    world.setBlock(b.x, b.y, b.z, Block.Air);
+  }
+  if (b.ammo > 0) spawnDrop(b.x + 0.5, b.y + 0.3, b.z + 0.5, Item.InterceptorMissile, b.ammo);
+  if (openBattery?.id === b.id) closeStrategicPanel();
+}
+
+function applyOfflineStrategicEvents(events: readonly StrategicEvent[]): void {
+  for (const ev of events) {
+    switch (ev.kind) {
+      case 'launch':
+      case 'interceptorLaunch':
+        missileModels.launch(ev.missile);
+        break;
+      case 'warning':
+        registerInboundStrike(ev.faction, ev.x, ev.z, ev.eta, ev.radius);
+        break;
+      case 'intercepted':
+        missileModels.remove(ev.id);
+        missileModels.flash(ev.x, ev.y, ev.z, 3.2, 0x9ff0ff);
+        showNotice('🛡 Missile intercepted.');
+        break;
+      case 'shotDown':
+        missileModels.remove(ev.id);
+        missileModels.flash(ev.x, ev.y, ev.z, 2.4, 0xffc46a);
+        break;
+      case 'expired':
+        missileModels.remove(ev.id);
+        break;
+      case 'impact':
+        missileModels.remove(ev.id);
+        missileModels.impact(ev.x, ev.y, ev.z, ev.radius);
+        audio.explosion(new THREE.Vector3(ev.x, ev.y, ev.z));
+        triggerEncounterShake(0.6, 0.05);
+        offlineBlast(ev.faction, { x: ev.x, y: ev.y, z: ev.z }, ev.radius,
+          ev.playerDamage, ev.hardwareDamage, ev.blocks);
+        break;
+    }
+  }
+}
+
+function applyOfflineVehicleEvents(events: readonly VehicleEvent[]): void {
+  for (const ev of events) {
+    switch (ev.kind) {
+      case 'bombImpact':
+        offlineBlast(ev.faction, { x: ev.x, y: ev.y, z: ev.z }, ev.radius,
+          ev.playerDamage, ev.hardwareDamage, Math.ceil(ev.radius));
+        audio.explosion(new THREE.Vector3(ev.x, ev.y, ev.z));
+        break;
+      case 'heliDown':
+        vehicleModels.explode(ev.x, ev.y, ev.z);
+        audio.explosion(new THREE.Vector3(ev.x, ev.y, ev.z));
+        triggerEncounterShake(0.4, 0.04);
+        break;
+      case 'eject':
+        mySeat = null;
+        player.pos.set(ev.x, ev.y + 1, ev.z);
+        player.damage(ev.damage);
+        showNotice('💥 Ejected!');
+        break;
+      case 'heliRemoved':
+        if (mySeat?.id === ev.id) mySeat = null;
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+// --- The strategic panels ------------------------------------------------------
+
+let openSilo: SiloState | null = null;
+let openBattery: BatteryState | null = null;
+let openHelipad: { x: number; y: number; z: number } | null = null;
+
+const strategicPanel = document.createElement('div');
+strategicPanel.style.cssText =
+  'position:absolute;inset:0;display:none;z-index:34;align-items:center;justify-content:center;' +
+  'background:rgba(6,9,16,0.82);';
+const strategicCard = document.createElement('div');
+strategicCard.className = 'mc-font';
+strategicCard.style.cssText =
+  'background:linear-gradient(#111a2b,#0b1220);border:2px solid #26374f;border-radius:10px;' +
+  'box-shadow:0 12px 44px rgba(0,0,0,0.65);width:540px;max-width:94vw;max-height:88vh;' +
+  'overflow:auto;color:#dce6f5;text-shadow:none;font-size:13px;padding:16px;';
+strategicPanel.appendChild(strategicCard);
+app.appendChild(strategicPanel);
+strategicPanel.addEventListener('mousedown', (e) => {
+  if (e.target === strategicPanel) closeStrategicPanel();
+});
+
+function closeStrategicPanel(): void {
+  strategicPanel.style.display = 'none';
+  openSilo = null; openBattery = null; openHelipad = null;
+  if (worldReady && !player.dead && screen === 'playing' && !worldMap.open) input.lock();
+}
+
+/** Small helper: a 44px-minimum action button appended to a row. */
+function actionButton(
+  row: HTMLElement, label: string, enabled: boolean, onClick: () => void,
+  accent = '#5ce2ec',
+): HTMLButtonElement {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'mc-font';
+  b.textContent = label;
+  b.disabled = !enabled;
+  b.style.cssText =
+    `min-height:44px;padding:0 14px;border-radius:7px;font-family:inherit;font-size:12px;` +
+    `cursor:${enabled ? 'pointer' : 'not-allowed'};border:2px solid ${enabled ? accent : '#2a3346'};` +
+    `background:${enabled ? 'rgba(92,226,236,0.10)' : '#131a28'};` +
+    `color:${enabled ? '#e6faff' : '#5a6880'};`;
+  if (enabled) b.addEventListener('click', onClick);
+  row.appendChild(b);
+  return b;
+}
+
+function statLine(label: string, value: string, accent = '#dce6f5'): string {
+  return `<div style="display:flex;gap:10px;font-size:12px;padding:3px 0">` +
+    `<span style="flex:1;color:#7f93b3">${label}</span>` +
+    `<span style="color:${accent}">${value}</span></div>`;
+}
+
+function openSiloPanel(x: number, y: number, z: number): void {
+  const s = siloAtBlock(x, y, z);
+  if (!s) return;
+  openSilo = s; openBattery = null; openHelipad = null;
+  if (net.connected) net.sendSiloOpen(s.x, s.y, s.z);
+  strategicPanel.style.display = 'flex';
+  input.unlock();
+  renderSiloPanel();
+}
+
+function renderSiloPanel(): void {
+  const s = openSilo;
+  if (!s) return;
+  const stats = siloStats(s.tier);
+  const mine = !isFaction(s.faction) || s.faction === localFaction;
+  const canRetrofit = mine && s.tier < warfareTier(warfare, 'silo');
+  const have = inventory.countItem(Item.TacticalMissile);
+  const room = stats.magazine - s.ammo;
+  strategicCard.innerHTML =
+    `<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">` +
+    `<div style="flex:1;font-size:15px;color:#5ce2ec;letter-spacing:1px">🚀 TACTICAL SILO · ${tierLabel(s.tier)}</div>` +
+    `<div style="font-size:11px;color:#7f93b3">${s.owner || 'unclaimed'}</div></div>` +
+    statLine('Integrity', `${Math.round(s.hp)} / ${s.maxHp}`,
+      s.hp / s.maxHp > 0.5 ? '#5ff09a' : s.hp / s.maxHp > 0.25 ? '#ffd24a' : '#ff5c4d') +
+    statLine('Magazine', `${s.ammo} / ${stats.magazine}`, s.ammo > 0 ? '#5ff09a' : '#ff5c4d') +
+    statLine('Status', s.cooldown > 0 ? `cycling — ${Math.ceil(s.cooldown)}s` : 'ready',
+      s.cooldown > 0 ? '#ffd24a' : '#5ff09a') +
+    statLine('Target range', `${stats.range} blocks`) +
+    statLine('Blast radius', `${stats.blastRadius} blocks`) +
+    statLine('Warhead', `${stats.playerDamage} player · ${stats.hardwareDamage} hardware`) +
+    statLine('Silo cooldown', `${stats.cooldown}s`) +
+    `<div style="margin-top:8px;font-size:11px;color:#7f93b3;line-height:1.6">` +
+    `Any faction teammate can load and fire this silo. Only the operator's own ` +
+    `Warfare Command authorizations decide how far it can be RETROFITTED.</div>` +
+    `<div data-row style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px"></div>`;
+  const row = strategicCard.querySelector('[data-row]') as HTMLElement;
+  actionButton(row, `Load missile (${have} held)`, mine && have > 0 && room > 0, () => {
+    const n = Math.min(have, room);
+    if (net.connected) {
+      payWarfare([{ id: Item.TacticalMissile, count: n }]);
+      net.sendSiloLoad(s.x, s.y, s.z, n);
+    } else {
+      inventory.removeItem(Item.TacticalMissile, n);
+      offlineStrategic.loadSilo(s, n);
+      renderSiloPanel();
+    }
+  }, '#5ff09a');
+  actionButton(row, 'Choose target', mine && s.ammo > 0 && s.cooldown <= 0, () => {
+    strategicPanel.style.display = 'none';
+    beginTargeting(s);
+  }, '#ffd24a');
+  actionButton(row, canRetrofit ? `Retrofit → ${tierLabel(s.tier + 1)}` : 'Retrofit locked',
+    canRetrofit, () => {
+      if (net.connected) net.sendSiloUpgrade(s.x, s.y, s.z);
+      else { offlineStrategic.retrofitSilo(s, s.tier + 1); strategicModels.setSilo(s); renderSiloPanel(); }
+    });
+  actionButton(row, 'Close', true, closeStrategicPanel, '#7f93b3');
+}
+
+function openBatteryPanel(x: number, y: number, z: number): void {
+  const b = batteryAtBlock(x, y, z);
+  if (!b) return;
+  openBattery = b; openSilo = null; openHelipad = null;
+  if (net.connected) net.sendBatteryOpen(b.x, b.y, b.z);
+  strategicPanel.style.display = 'flex';
+  input.unlock();
+  renderBatteryPanel();
+}
+
+function renderBatteryPanel(): void {
+  const b = openBattery;
+  if (!b) return;
+  const stats = batteryStats(b.tier);
+  const mine = !isFaction(b.faction) || b.faction === localFaction;
+  const canRetrofit = mine && b.tier < warfareTier(warfare, 'battery');
+  const have = inventory.countItem(Item.InterceptorMissile);
+  const room = stats.capacity - b.ammo;
+  strategicCard.innerHTML =
+    `<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">` +
+    `<div style="flex:1;font-size:15px;color:#5ce2ec;letter-spacing:1px">🛰 INTERCEPTOR BATTERY · ${tierLabel(b.tier)}</div>` +
+    `<div style="font-size:11px;color:#7f93b3">${b.owner || 'unclaimed'}</div></div>` +
+    statLine('Integrity', `${Math.round(b.hp)} / ${b.maxHp}`,
+      b.hp / b.maxHp > 0.5 ? '#5ff09a' : b.hp / b.maxHp > 0.25 ? '#ffd24a' : '#ff5c4d') +
+    statLine('Interceptors', `${b.ammo} / ${stats.capacity}`, b.ammo > 0 ? '#5ff09a' : '#ff5c4d') +
+    statLine('Defense radius', `${stats.radius} blocks`) +
+    statLine('Acquisition', `${stats.acquire.toFixed(2)}s`) +
+    statLine('Reload', `${stats.reload}s`) +
+    statLine('Networked', stats.networked ? 'shares tracks with nearby batteries' : 'standalone') +
+    statLine('Track', b.target ? `engaging missile #${b.target}` : 'clear',
+      b.target ? '#ff5c4d' : '#5ff09a') +
+    `<div style="margin-top:8px;font-size:11px;color:#7f93b3;line-height:1.6">` +
+    `A battery only ever shoots at MISSILES — never at players. Interception is ` +
+    `certain if the interceptor physically reaches the track, so saturation (more ` +
+    `missiles than the reload window allows) is the way past it.</div>` +
+    `<div data-row style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px"></div>`;
+  const row = strategicCard.querySelector('[data-row]') as HTMLElement;
+  actionButton(row, `Load interceptors (${have} held)`, mine && have > 0 && room > 0, () => {
+    const n = Math.min(have, room);
+    if (net.connected) {
+      payWarfare([{ id: Item.InterceptorMissile, count: n }]);
+      net.sendBatteryLoad(b.x, b.y, b.z, n);
+    } else {
+      inventory.removeItem(Item.InterceptorMissile, n);
+      offlineStrategic.loadBattery(b, n);
+      renderBatteryPanel();
+    }
+  }, '#5ff09a');
+  actionButton(row, canRetrofit ? `Retrofit → ${tierLabel(b.tier + 1)}` : 'Retrofit locked',
+    canRetrofit, () => {
+      if (net.connected) net.sendBatteryUpgrade(b.x, b.y, b.z);
+      else { offlineStrategic.retrofitBattery(b, b.tier + 1); strategicModels.setBattery(b); renderBatteryPanel(); }
+    });
+  actionButton(row, 'Close', true, closeStrategicPanel, '#7f93b3');
+}
+
+function openHelipadPanel(x: number, y: number, z: number): void {
+  openHelipad = { x, y, z };
+  openSilo = null; openBattery = null;
+  strategicPanel.style.display = 'flex';
+  input.unlock();
+  renderHelipadPanel();
+}
+
+/** The helicopter parked on this pad, if any. */
+function heliAtPad(pad: { x: number; y: number; z: number }): HelicopterSnapshot | null {
+  for (const h of vehicleModels.snapshots()) {
+    if (Math.hypot(h.x - (pad.x + 0.5), h.z - (pad.z + 0.5)) <= 4 &&
+        Math.abs(h.y - (pad.y + 1.6)) <= 3) return h;
+  }
+  return null;
+}
+
+function renderHelipadPanel(): void {
+  const pad = openHelipad;
+  if (!pad) return;
+  const heli = heliAtPad(pad);
+  const kit = inventory.countItem(Item.HelicopterKit);
+  const oil = inventory.countItem(Item.OilBarrel);
+  const bombs = inventory.countItem(Item.AerialBomb);
+  const kits = inventory.countItem(Item.RepairKit);
+  const myTier = warfareTier(warfare, 'helicopter');
+  let html =
+    `<div style="font-size:15px;color:#5ce2ec;letter-spacing:1px;margin-bottom:10px">🚁 HELIPAD</div>`;
+  if (!heli) {
+    html += `<div style="font-size:12px;color:#7f93b3;line-height:1.7;margin-bottom:10px">` +
+      `No airframe on the pad. Assemble a <b style="color:#dce6f5">Helicopter Airframe</b> ` +
+      `and deploy it here. Your faction may field ${MAX_HELICOPTERS_PER_FACTION} at once.</div>` +
+      statLine('Airframes held', String(kit), kit > 0 ? '#5ff09a' : '#ff5c4d') +
+      statLine('Authorized mark', myTier > 0 ? tierLabel(myTier) : 'not authorized',
+        myTier > 0 ? '#5ff09a' : '#ff5c4d');
+  } else {
+    const stats = helicopterStats(heli.tier);
+    html +=
+      statLine('Airframe', `${tierLabel(heli.tier)} (Mk ${['I', 'II', 'III'][stats.mark - 1]})`) +
+      statLine('Integrity', `${heli.hp} / ${heli.maxHp}`,
+        heli.hp / heli.maxHp > 0.5 ? '#5ff09a' : '#ffd24a') +
+      statLine('Fuel', `${heli.fuel.toFixed(1)} / ${heli.maxFuel} oil`,
+        heli.fuel > 0 ? '#5ff09a' : '#ff5c4d') +
+      statLine('Bombs', `${heli.bombs} / ${heli.maxBombs}`) +
+      statLine('Cruise speed', `${stats.speed} blocks/s`) +
+      statLine('Altitude allowance', `${stats.altitude} blocks`) +
+      statLine('Crew', `${heli.pilot ? 'pilot' : '—'} · ${heli.passenger ? 'gunner' : '—'}`);
+  }
+  html += `<div data-row style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px"></div>`;
+  strategicCard.innerHTML = html;
+  const row = strategicCard.querySelector('[data-row]') as HTMLElement;
+  if (!heli) {
+    actionButton(row, 'Deploy airframe', kit > 0 && myTier > 0 && hasBlueprint(Item.HelicopterKit), () => {
+      if (net.connected) {
+        // A refusal (faction cap, range, blueprint) refunds the airframe —
+        // it costs ~38 iron and 8 titanium, so losing it to a rejected click
+        // would be brutal.
+        payWarfare([{ id: Item.HelicopterKit, count: 1 }]);
+        net.sendHeliSpawn(pad.x, pad.y, pad.z);
+      } else {
+        const err = offlineVehicles.spawnError(localFaction);
+        if (err) { showNotice(`⛔ ${err}`); return; }
+        inventory.removeItem(Item.HelicopterKit, 1);
+        offlineVehicles.spawn(authedName || 'You', localFaction, pad, Math.max(1, myTier));
+      }
+      closeStrategicPanel();
+      showNotice('🚁 Airframe deployed — fuel it, load bombs, then board it.');
+    }, '#5ff09a');
+  } else {
+    const canFuel = oil > 0 && heli.fuel < heli.maxFuel;
+    const canArm = bombs > 0 && heli.bombs < heli.maxBombs;
+    const canFix = kits > 0 && heli.hp < heli.maxHp;
+    actionButton(row, `Refuel (${oil} oil)`, canFuel, () => {
+      const n = Math.min(oil, Math.ceil(heli.maxFuel - heli.fuel));
+      serviceHeli(heli.id, n, 0, 0, [{ id: Item.OilBarrel, count: n }]);
+    }, '#5ff09a');
+    actionButton(row, `Load bombs (${bombs})`, canArm, () => {
+      const n = Math.min(bombs, heli.maxBombs - heli.bombs);
+      serviceHeli(heli.id, 0, n, 0, [{ id: Item.AerialBomb, count: n }]);
+    }, '#5ff09a');
+    actionButton(row, `Repair 25% (${kits} kits)`, canFix, () => {
+      serviceHeli(heli.id, 0, 0, 1, [{ id: Item.RepairKit, count: 1 }]);
+    }, '#5ff09a');
+    actionButton(row, heli.tier < myTier ? `Retrofit → ${tierLabel(heli.tier + 1)}` : 'Retrofit locked',
+      heli.tier < myTier, () => {
+        if (net.connected) net.sendHeliUpgrade(heli.id);
+        else {
+          const h = offlineVehicles.helicopters.get(heli.id);
+          if (h) offlineVehicles.retrofit(h, h.tier + 1);
+        }
+        renderHelipadPanel();
+      });
+    actionButton(row, 'Board (pilot)', !mySeat, () => { mountHeli(heli.id, 'pilot'); }, '#ffd24a');
+    actionButton(row, 'Board (gunner)', !mySeat, () => { mountHeli(heli.id, 'passenger'); }, '#ffd24a');
+  }
+  actionButton(row, 'Close', true, closeStrategicPanel, '#7f93b3');
+}
+
+function serviceHeli(
+  id: number, oil: number, bombs: number, repair: number,
+  cost: { id: number; count: number }[],
+): void {
+  if (net.connected) {
+    payWarfare(cost);
+    net.sendHeliService(id, oil, bombs, repair);
+  } else {
+    const h = offlineVehicles.helicopters.get(id);
+    if (!h) return;
+    // Offline the sim is the authority, so pay only for what it actually took.
+    const took = offlineVehicles.service(h, oil, bombs, repair);
+    for (const it of cost) {
+      const taken = it.id === Item.OilBarrel ? took.oil
+        : it.id === Item.AerialBomb ? took.bombs : took.repair;
+      if (taken > 0) inventory.removeItem(it.id, taken);
+    }
+  }
+  renderHelipadPanel();
+}
+
+function mountHeli(id: number, seat: SeatKind): void {
+  if (net.connected) {
+    net.sendHeliMount(id, seat);
+  } else {
+    const res = offlineVehicles.mount(id, 0, localFaction,
+      { x: player.pos.x, y: player.pos.y, z: player.pos.z }, seat);
+    if (!res.ok) { showNotice(`⛔ ${res.reason}`); return; }
+    mySeat = { id, seat: res.seat };
+    showNotice(res.seat === 'pilot'
+      ? 'Pilot seat — WASD flies, Space climbs, Shift descends, right-click drops a bomb.'
+      : 'Gunner seat — look around and fire your own weapon inside the side arc.');
+  }
+  closeStrategicPanel();
+}
+
+function dismountHeli(): void {
+  if (net.connected) { net.sendHeliDismount(); return; }
+  const res = offlineVehicles.dismount(0);
+  if (!res.ok) { showNotice(`⛔ ${res.reason}`); return; }
+  mySeat = null;
+  if (res.at) player.pos.set(res.at.x, res.at.y, res.at.z);
+}
+
+// --- Placement ---------------------------------------------------------------------
+
+let lastPlaceHint = -10;
+/** Throttled explanation for a refused placement (never spams the notice line). */
+function warfarePlaceHint(text: string): void {
+  if (worldTimeLocal - lastPlaceHint < 1.5) return;
+  lastPlaceHint = worldTimeLocal;
+  showNotice(`⛔ ${text}`);
+}
+
+/** Faction cap + minimum spacing for a new silo (null = fine). Checked on BOTH
+ *  ends — this is the client's honest preview of the same rule. */
+function siloPlacementError(x: number, z: number): string | null {
+  let count = 0;
+  for (const s of allSilos()) {
+    if (isFaction(s.faction) && s.faction !== localFaction) continue;
+    count++;
+    if (Math.hypot(s.x - x, s.z - z) < MIN_SILO_SPACING) {
+      return `Silos must stand ${MIN_SILO_SPACING} blocks apart.`;
+    }
+  }
+  return count >= MAX_SILOS_PER_FACTION
+    ? `Your faction already fields ${MAX_SILOS_PER_FACTION} silos.` : null;
+}
+
+function batteryPlacementError(x: number, z: number): string | null {
+  let count = 0;
+  for (const b of allBatteries()) {
+    if (isFaction(b.faction) && b.faction !== localFaction) continue;
+    count++;
+    if (Math.hypot(b.x - x, b.z - z) < MIN_BATTERY_SPACING) {
+      return `Interceptor batteries must stand ${MIN_BATTERY_SPACING} blocks apart.`;
+    }
+  }
+  return count >= MAX_BATTERIES_PER_FACTION
+    ? `Your faction already fields ${MAX_BATTERIES_PER_FACTION} batteries.` : null;
+}
+
+/** Offline: stamp the silo's 2×2 housing and create the entity. ONLINE the
+ *  server owns both — it stamps the housing and broadcasts the entity, so the
+ *  client must not send competing edits. */
+function placeSilo(x: number, y: number, z: number): void {
+  if (!net.connected) {
+    for (const [dx, dz] of [[1, 0], [0, 1], [1, 1]]) {
+      world.setBlock(x + dx, y, z + dz, Block.SiloPart);
+    }
+    const s = offlineStrategic.addSilo(authedName || 'You', localFaction, x, y, z,
+      Math.max(1, warfareTier(warfare, 'silo')));
+    strategicModels.setSilo(s);
+  }
+  showNotice('🚀 Silo built — load a Tactical Missile, then Choose Target.');
+}
+
+function placeBattery(x: number, y: number, z: number): void {
+  if (!net.connected) {
+    const b = offlineStrategic.addBattery(authedName || 'You', localFaction, x, y, z,
+      Math.max(1, warfareTier(warfare, 'battery')));
+    strategicModels.setBattery(b);
+  }
+  showNotice('🛰 Interceptor battery online — load Interceptor Missiles.');
+}
+
+/** Sabotage a strategic block-entity (left-click). Returns true if handled. */
+function sabotageStrategic(x: number, y: number, z: number, dmg: number): boolean {
+  const s = siloAtBlock(x, y, z);
+  if (s) {
+    if (net.connected) net.sendStrategicHit('silo', s.x, s.y, s.z, dmg);
+    else if (offlineStrategic.damageSilo(s, dmg)) removeOfflineSilo(s);
+    return true;
+  }
+  const b = batteryAtBlock(x, y, z);
+  if (b) {
+    if (net.connected) net.sendStrategicHit('battery', b.x, b.y, b.z, dmg);
+    else if (offlineStrategic.damageBattery(b, dmg)) removeOfflineBattery(b);
+    return true;
+  }
+  return false;
+}
+
+// --- Air targets (missiles + helicopters) ------------------------------------------
+
+const _airOrigin = new THREE.Vector3();
+const _airDir = new THREE.Vector3();
+const _airTo = new THREE.Vector3();
+
+/**
+ * Report a gunshot that lines up with a missile hull or a helicopter.
+ *
+ * A strike missile has ~24 hull HP and is small and fast, so this is genuinely
+ * hard — but it means a defender with no interceptor battery is not helpless.
+ * The test is a cheap ray/sphere: the target has to be close to the aim line
+ * AND in front of the shooter.
+ */
+function reportAirTargetHit(gun: GunInfo): void {
+  _airOrigin.copy(player.eyePosition);
+  _airDir.set(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
+  const range = Math.min(gun.range, 140);
+  const damage = Math.max(1, Math.round(gun.damage));
+
+  let bestKind: 'missile' | 'heli' | null = null;
+  let bestId = 0;
+  let bestT = Infinity;
+  const test = (pos: THREE.Vector3, radius: number, id: number, kind: 'missile' | 'heli'): void => {
+    _airTo.copy(pos).sub(_airOrigin);
+    const t = _airTo.dot(_airDir);
+    if (t <= 0 || t > range || t >= bestT) return;
+    // Perpendicular distance from the aim line.
+    const perp = Math.sqrt(Math.max(0, _airTo.lengthSq() - t * t));
+    if (perp > radius) return;
+    bestT = t; bestId = id; bestKind = kind;
+  };
+  for (const m of liveMissiles) {
+    if (m.kind !== 'strike') continue;
+    if (isFaction(m.faction) && m.faction === localFaction) continue;
+    const p = missileModels.positionOf(m.id);
+    if (p) test(p, 1.1, m.id, 'missile');
+  }
+  for (const h of vehicleModels.snapshots()) {
+    if (isFaction(h.faction) && h.faction === localFaction) continue;
+    if (h.dying > 0) continue;
+    const p = vehicleModels.positionOf(h.id);
+    if (p) test(p, 2.0, h.id, 'heli');
+  }
+  if (!bestKind) return;
+  if (bestKind === 'missile') {
+    if (net.connected) net.sendMissileHit(bestId, damage);
+    else applyOfflineStrategicEvents(
+      [offlineStrategic.damageMissile(bestId, damage)].filter(Boolean) as StrategicEvent[]);
+  } else if (net.connected) {
+    net.sendHeliHit(bestId, damage);
+  } else {
+    applyOfflineVehicleEvents(offlineVehicles.damage(bestId, damage));
+  }
+}
+
+// --- Map targeting ----------------------------------------------------------------
+
+let targetingSilo: SiloState | null = null;
+
+/** Enter the map's select-target mode for `silo`. */
+function beginTargeting(silo: SiloState): void {
+  targetingSilo = silo;
+  const stats = siloStats(silo.tier);
+  worldMap.beginTargeting({
+    origin: { x: silo.x + 0.5, z: silo.z + 0.5 },
+    range: stats.range,
+    radius: stats.blastRadius,
+    ammo: silo.ammo,
+    cooldown: silo.cooldown,
+    speed: stats.speed,
+    areas: net.connected ? protectedAreasList : offlineProtectedAreas(),
+    allies: () => {
+      const out: { x: number; z: number; name: string }[] = [];
+      for (const r of net.remotes.values()) {
+        if (isFaction(r.info.faction) && r.info.faction === localFaction) {
+          out.push({ x: r.info.x, z: r.info.z, name: r.info.username });
+        }
+      }
+      out.push({ x: player.pos.x, z: player.pos.z, name: 'You' });
+      return out;
+    },
+    confirm: (tx, tz) => {
+      const s = targetingSilo;
+      targetingSilo = null;
+      if (!s) return;
+      if (net.connected) { net.sendSiloLaunch(s.x, s.y, s.z, tx, tz); return; }
+      const check = offlineStrategic.validateLaunch({ siloId: s.id, faction: localFaction, tx, tz });
+      if (!check.ok) { showNotice(`⛔ ${LAUNCH_REJECT_TEXT[check.reason]}`); return; }
+      applyOfflineStrategicEvents(
+        offlineStrategic.launch({ siloId: s.id, faction: localFaction, tx, tz }));
+      strategicModels.setSilo(s);
+    },
+    cancel: () => { targetingSilo = null; },
+  });
+  worldMap.show();
+  input.unlock();
+}
+
+// --- Per-frame upkeep ---------------------------------------------------------------
+
+/** Drive the offline sims, the models, the seat camera and the pilot input. */
+function updateWarfare(dt: number): void {
+  // Offline: tick the authoritative simulations locally.
+  if (!net.connected) {
+    offlineStrategic.now = worldTimeLocal;
+    applyOfflineStrategicEvents(offlineStrategic.tick(dt));
+    applyOfflineVehicleEvents(offlineVehicles.tick(dt));
+    for (const s of offlineStrategic.silos.values()) strategicModels.setSilo(s);
+    for (const b of offlineStrategic.batteries.values()) strategicModels.setBattery(b);
+    liveMissiles = offlineStrategic.snapshotMissiles();
+    missileModels.sync(liveMissiles);
+    vehicleModels.sync(offlineVehicles.snapshot(), offlineVehicles.bombSnapshots());
+  }
+  strategicModels.update(dt);
+  missileModels.update(dt);
+  vehicleModels.update(dt);
+  heliBombCooldown = Math.max(0, heliBombCooldown - dt);
+
+  // Expire finished strike warnings.
+  for (let i = inboundStrikes.length - 1; i >= 0; i--) {
+    if (inboundStrikes[i].at < worldTimeLocal - 1) inboundStrikes.splice(i, 1);
+  }
+
+  if (!mySeat) return;
+  const heli = vehicleModels.snapshotOf(mySeat.id);
+  if (!heli) { mySeat = null; return; }
+
+  // Ride the seat: the player's body follows the airframe exactly (the server
+  // owns the flight, so this is pure presentation of an authoritative pose).
+  const seatPos = vehicleModels.seatWorldPosition(mySeat.id, mySeat.seat);
+  if (seatPos) {
+    player.pos.set(seatPos.x, seatPos.y, seatPos.z);
+    player.vel.set(0, 0, 0);
+    player.fallDistance = 0;
+  }
+
+  if (mySeat.seat !== 'pilot') return;
+  // Pilot input at the transform rate — WASD horizontal, Space/Shift vertical,
+  // camera yaw steers.
+  heliInputAccum += dt;
+  if (heliInputAccum >= 1 / 20) {
+    heliInputAccum = 0;
+    const fwd = (input.forward ? 1 : 0) - (input.back ? 1 : 0);
+    const side = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+    const lift = (input.jump ? 1 : 0) - (input.sneak ? 1 : 0);
+    const seq = heliInputSeq++;
+    if (net.connected) net.sendHeliInput(fwd, side, lift, player.yaw, seq);
+    else offlineVehicles.setInput(0, { forward: fwd, strafe: side, lift, yaw: player.yaw, seq });
+  }
+}
+
+/** The pilot's right-click drops a bomb rather than placing a block. */
+function tryDropBomb(): boolean {
+  if (!mySeat || mySeat.seat !== 'pilot' || heliBombCooldown > 0) return false;
+  heliBombCooldown = 0.25;   // input debounce only; the real cooldown is server-side
+  if (net.connected) net.sendHeliBomb();
+  else applyOfflineVehicleEvents(offlineVehicles.dropBomb(0));
+  return true;
 }
 
 // --- Seasons (Phase 5) -------------------------------------------------------
@@ -5819,7 +6683,14 @@ function frame(): void {
       // FLAGS come first: standing at an enemy flag pad, left-click is a swing
       // at the pole (never a mine), because that's the only thing you could
       // possibly mean to be doing there.
-      if (flagSwingUpdate(dt, input.leftDown)) {
+      if (mySeat) {
+        // Aboard a helicopter, the world controls change meaning entirely: the
+        // pilot's secondary action releases a bomb, and neither seat can mine,
+        // place or open anything from the air.
+        if (input.rightClicked) tryDropBomb();
+        if (input.dismountPressed) dismountHeli();
+        interaction.update(dt, input, camera, true, true); // suppress mine + use
+      } else if (flagSwingUpdate(dt, input.leftDown)) {
         interaction.update(dt, input, camera, true, true); // suppress mine + use
       } else if (heldGadget) {
         // Gadgets: left-click uses the toy (suppresses mining + block use).
@@ -5979,6 +6850,7 @@ function frame(): void {
     machines.update(dt);
     machineModels.update(dt); // animate drills/pumpjacks
     turretModels.update(dt);
+    updateWarfare(dt);    // silos, missiles, interceptors, helicopters
     updateWarHud(dt);     // war clock + border + kill score (MP only, war only)
     updateGuide(dt, controlling); // getting-started checklist + vault compass
     updateTpa(dt, controlling);   // TPA accept hold + incoming-request banner
@@ -6076,7 +6948,7 @@ function frame(): void {
   }
   hud.update();
   hud.updateCooldowns();
-  updateProgressFlash(); // gold pulse while skill points wait to be spent
+  updateProgressFlash(); // cyan pulse while warfare XP waits to be spent
   // The Crafting Guide button shows whenever a crafting table is open.
   guideBtn.style.display = (invUI.open && invUI.mode === 'table' && !guideOpen) ? 'block' : 'none';
   if (guideOpen && !(invUI.open && invUI.mode === 'table')) hideGuide();

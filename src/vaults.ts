@@ -48,12 +48,52 @@ export const VAULT_BOSS_FAMILY: Record<VaultBossKind, VaultFamily> = {
 export const VAULT_BOSS_HITBOX: Record<VaultBossKind, {
   halfWidth: number; height: number;
 }> = {
-  bone_warden: { halfWidth: 1.1, height: 5.8 },
-  mire_queen: { halfWidth: 3.3, height: 3.8 },
-  ember_colossus: { halfWidth: 2.3, height: 4.7 },
-  crystal_seer: { halfWidth: 3.5, height: 4.5 },
-  gilded_artificer: { halfWidth: 1.9, height: 5.4 },
+  bone_warden: { halfWidth: 1.3, height: 5.6 },
+  mire_queen: { halfWidth: 3, height: 3.6 },
+  ember_colossus: { halfWidth: 2.6, height: 5 },
+  crystal_seer: { halfWidth: 3.2, height: 4.4 },
+  gilded_artificer: { halfWidth: 2, height: 5.2 },
 };
+
+/**
+ * Every boss fights in its OWN lair, not a repainted copy of one box.
+ *
+ *   hw     — masonry half-width (walls sit at ±hw; the carve reaches ±(hw−1)).
+ *   ih     — interior height. Air spans floorY+1 … floorY+ih, so a lair is
+ *            always taller than the thing standing in it (see `bossClearance`).
+ *   fight  — half-extent of the sealed fighting floor. Everything beyond it is
+ *            scenery: moats, lava gutters, colonnades, machinery.
+ *   socket — the ring the boss's relocation anchors sit on.
+ *   shape  — how the masonry is cut back from the square carve.
+ */
+export const VAULT_BOSS_ARENA: Record<VaultBossKind, {
+  hw: number; ih: number; fight: number; socket: number;
+  shape: 'nave' | 'ring' | 'caldera' | 'observatory' | 'hall';
+}> = {
+  // A tall processional nave: three long lanes and a colonnade down the sides.
+  bone_warden: { hw: 9, ih: 9, fight: 7, socket: 5, shape: 'nave' },
+  // A round flooded court: a dry island inside a wading moat.
+  mire_queen: { hw: 9, ih: 7, fight: 6, socket: 4, shape: 'ring' },
+  // A clipped octagon with a lava gutter burning around the rim.
+  ember_colossus: { hw: 9, ih: 9, fight: 6, socket: 4, shape: 'caldera' },
+  // A domed observatory: eight obelisks, a mirrored floor and an oculus.
+  crystal_seer: { hw: 9, ih: 9, fight: 7, socket: 5, shape: 'observatory' },
+  // A rectangular factory floor under a working overhead gantry.
+  gilded_artificer: { hw: 9, ih: 8, fight: 7, socket: 5, shape: 'hall' },
+};
+
+/** The tallest lair, used to size the "you are inside this vault" box. */
+export const MAX_LAIR_HEIGHT = 9;
+
+/**
+ * Vertical space a boss's body needs above the lair floor. NOTHING solid may be
+ * stamped inside the sealed fighting floor below this — that is exactly how a
+ * boss used to end up wedged in an overhead beam, because a tall mob resolving
+ * a downward collision snaps its FEET on top of whatever its head is touching.
+ */
+export function bossClearance(kind: VaultBossKind): number {
+  return VAULT_BOSS_HITBOX[kind].height + 1;
+}
 
 /** A vault stamp never reaches past 3 chunks beyond its anchor chunk (all
  *  offsets are ≤ ±51 blocks and the anchor sits ≥4 blocks inside its chunk).
@@ -148,12 +188,26 @@ export interface VaultServerState {
    *  n: total rolls taken }. The treasure REGROWS per player every
    *  VAULT_LOOT_COOLDOWN seconds, and each re-roll is a fresh (seeded) haul. */
   looters: Record<string, { at: number; n: number }>;
+  /** WARFARE COMMAND: username -> the `deadAt` cycle that account was already
+   *  paid warfare XP for. One award per account per boss recharge cycle, so a
+   *  re-settlement (reconnect, duplicate victory event, replayed save) can
+   *  never pay twice for one kill. */
+  warfarePaid?: Record<string, number>;
 }
 
 /** The Vault Brute's max HP by tier — a group fight, not a one-tap. The Tier I
- *  Brute is deliberately soft: a fresh spawn with a starter kit CAN solo it. */
+ *  Brute is deliberately soft: a fresh spawn with a starter kit CAN solo it.
+ *
+ *  Tier I was 320, which a rifle clears in about sixteen seconds — shorter than
+ *  the eleven-second intro plus the two three-second phase cinematics, so the
+ *  "boss" was mostly cutscene and got roughly three casts off in total. 440
+ *  gives the teaching fight long enough to actually teach, and a fresh spawn
+ *  swinging a Sword still finishes inside forty seconds.
+ *
+ *  This is the single source of truth: `encounterBaseHp` delegates here so the
+ *  lair encounter and the world-state brute can never disagree. */
 export function bruteMaxHp(tier: VaultTier): number {
-  return tier === 1 ? 320 : tier === 2 ? 720 : 1200;
+  return tier === 1 ? 440 : tier === 2 ? 720 : 1200;
 }
 
 const BOSS_WEIGHTS: Record<VaultTier, readonly number[]> = {
@@ -252,8 +306,6 @@ export function vaultAnchorAt(seed: number, cx: number, cz: number, ctx: Structu
 // offsets stay ≤ ±43 (+ hw ≤ 8) — inside VAULT_REACH = 3 chunks.
 const LAT_U = [0, 15, 30, 43];
 const LAT_V = [-30, -15, 0, 15, 30];
-const BOSS_HW = 9;
-const BOSS_IH = 7;
 /** Guard-spawner population cap per room kind (0 = no spawner). */
 const ROOM_CAP: Record<VaultRoom['kind'], number> = {
   hall: 0, room: 3, great: 5, pit: 3, crypt: 2, boss: 0,
@@ -304,8 +356,8 @@ export function vaultStamp(
   if (minSurf < 32) return null;      // can't sink deep enough (ravine/abyss floor)
   // Interior floor: ≥14 below the LOWEST surface in the footprint (ocean
   // floors and ravine floors count), so the highest roof block
-  // (fy + BOSS_IH + 1) keeps ≥3 blocks of solid cover EVERYWHERE — a vault
-  // can sprawl under a seabed, but never breaks any surface.
+  // (fy + MAX_LAIR_HEIGHT + 1) keeps ≥3 blocks of solid cover EVERYWHERE — a
+  // vault can sprawl under a seabed, but never breaks any surface.
   const fy = Math.max(20, minSurf - 14);
 
   // Layout direction: rotate (u, v) onto world axes.
@@ -378,7 +430,10 @@ export function vaultStamp(
   }
   const hall: RoomBox = { u: 0, v: 0, hw: 4, ih: 4, kind: 'hall', floorY: fy };
   const bossV = LAT_V[1 + Math.floor(rng() * 3)]; // -15 / 0 / 15
-  const boss: RoomBox = { u: 43, v: bossV, hw: BOSS_HW, ih: BOSS_IH, kind: 'boss', floorY: fy };
+  const lair = VAULT_BOSS_ARENA[bossKind];
+  const boss: RoomBox = {
+    u: 43, v: bossV, hw: lair.hw, ih: lair.ih, kind: 'boss', floorY: fy,
+  };
   const openSlots: { u: number; v: number }[] = [];
   for (const u of LAT_U) {
     for (const v of LAT_V) {
@@ -496,6 +551,12 @@ export function vaultStamp(
   // 4) Carve corridor tunnels through walls + sleeves, with occasional spike
   //    traps in the walk lane at higher tiers (dodgeable — one lane of two).
   const spikeChance = tier === 1 ? 0 : tier === 2 ? 0.05 : 0.09;
+  // A corridor leg runs all the way to the room it serves, so the lair's own
+  // interior is on the boss leg's path. Its ceiling lights and floor spikes must
+  // NOT be stamped there: they used to leave lanterns hanging at head height and
+  // spike traps underfoot in the middle of a boss arena.
+  const inLair = (u: number, v: number): boolean =>
+    Math.abs(u - boss.u) <= boss.hw && Math.abs(v - boss.v) <= boss.hw;
   for (const leg of legs) {
     const lo = Math.min(leg.from, leg.to), hi = Math.max(leg.from, leg.to);
     for (let t = lo; t <= hi; t++) {
@@ -506,21 +567,23 @@ export function vaultStamp(
           mark(wx(u, v), y, wz(u, v), Block.Air);
         }
       }
+      // The rolls are consumed exactly as before — skipping a draw would shift
+      // every later furnishing decision in this vault. Only the WRITE is gated.
       if (rng() < spikeChance) {
         const s = rng() < 0.5 ? -1 : 0; // one lane only — always a way past
         const u = leg.alongU ? t : leg.fixed + s;
         const v = leg.alongU ? leg.fixed + s : t;
-        mark(wx(u, v), fy + 1, wz(u, v), Block.SpikeTrap);
+        if (!inLair(u, v)) mark(wx(u, v), fy + 1, wz(u, v), Block.SpikeTrap);
       }
       // A continuous luminous ceiling rhythm makes every connector readable
       // and prevents the sprawling layout from collapsing into dark tunnels.
       if ((t - lo) % 7 === 3) {
         const u = leg.alongU ? t : leg.fixed;
         const v = leg.alongU ? leg.fixed : t;
-        mark(wx(u, v), fy + 4, wz(u, v), lightBlock);
         const u2 = leg.alongU ? t : leg.fixed - 1;
         const v2 = leg.alongU ? leg.fixed - 1 : t;
-        mark(wx(u2, v2), fy + 4, wz(u2, v2), Block.RuneGlass);
+        if (!inLair(u, v)) mark(wx(u, v), fy + 4, wz(u, v), lightBlock);
+        if (!inLair(u2, v2)) mark(wx(u2, v2), fy + 4, wz(u2, v2), Block.RuneGlass);
       }
     }
   }
@@ -681,140 +744,197 @@ export function vaultStamp(
     }
   }
 
-  // The lair is the one room whose architecture follows the BOSS family rather
-  // than the generic room grammar. All raised fixtures stay off the four
-  // encounter sockets, the doorway, the chest approach and the four safe lanes.
+  // --- THE LAIR ---------------------------------------------------------------
+  // Every boss gets its own room, not a repaint of one box: the masonry is cut
+  // back to a nave / ring / caldera / observatory / hall, the ceiling is sized
+  // to the thing standing under it, and all the scenery worth looking at lives
+  // OUTSIDE the sealed fighting floor.
+  //
+  // Two rules are absolute, and `arenaSolid` is the only way solid geometry is
+  // allowed into this room so neither can be broken by accident:
+  //   1. Nothing solid inside the sealed fighting floor below the boss's
+  //      clearance — that is what used to wedge a boss in the ceiling.
+  //   2. Nothing solid across the doorway lane or the chest approach.
+  const clearance = bossClearance(bossKind);
+  /** First y at which an overhead fixture may hang above the fighting floor. */
+  const overheadY = fy + 1 + Math.ceil(clearance);
   const arenaMark = (du: number, y: number, dv: number, id: Block): void => {
     mark(wx(boss.u + du, boss.v + dv), y, wz(boss.u + du, boss.v + dv), id);
   };
-  const arenaReserved = (du: number, dv: number): boolean =>
-    (Math.abs(du) === 6 && Math.abs(dv) === 6) ||
-    (du === 0 && (dv === -4 || dv === 0 || dv === 4)) ||
-    (du === -4 && dv === 0) ||
-    (du >= 1 && du <= 6 && Math.abs(dv) <= 2) ||
-    (du <= -7 && Math.abs(dv) <= 1);
-
-  if (family === 'crypt') {
-    // Processional crypt: three uninterrupted floor lanes teach the same read
-    // used by the Warden's marching attacks. All columns hug the outer wall.
-    for (let du = -7; du <= 7; du++) {
-      for (let dv = -7; dv <= 7; dv++) {
-        const lane = Math.abs(dv) <= 1 || Math.abs(dv - 4) <= 1 || Math.abs(dv + 4) <= 1;
-        if (lane) {
-          arenaMark(du, fy, dv, Math.abs(dv) <= 1
-            ? Block.SpectralMarble : Block.VaultMosaic);
-        }
-      }
-    }
-    for (const du of [-6, 6]) {
-      for (const dv of [-7, 7]) {
-        for (let y = fy + 1; y <= fy + 5; y++) {
-          arenaMark(du, y, dv, y === fy + 1 || y === fy + 5
-            ? Block.CarvedVaultBrick : Block.IvoryColumn);
-        }
-      }
-      for (let dv = -6; dv <= 6; dv++) arenaMark(du, fy + 6, dv, Block.CarvedVaultBrick);
-    }
-    for (const [du, dv] of [[-5, -7], [-5, 7], [0, -7], [0, 7]] as [number, number][]) {
-      if (!arenaReserved(du, dv)) arenaMark(du, fy + 1, dv, Block.Cobblestone);
-    }
-    arenaMark(-5, fy + 4, -7, Block.SoulLantern);
-    arenaMark(-5, fy + 4, 7, Block.SoulLantern);
-  } else if (family === 'mire') {
-    // Tidal court: two dry loops cross through the centre while water remains
-    // in recessed edge basins. Every socket and chest route stays dry.
-    for (let du = -7; du <= 7; du++) {
-      for (let dv = -7; dv <= 7; dv++) {
-        const leftLoop = Math.abs(Math.hypot(du + 3, dv) - 3) < 0.8;
-        const rightLoop = Math.abs(Math.hypot(du - 3, dv) - 3) < 0.8;
-        if (leftLoop || rightLoop || Math.abs(dv) <= 1) {
-          arenaMark(du, fy, dv, Block.JadeMosaic);
-        }
-        const basin = Math.abs(du) >= 5 && Math.abs(dv) >= 3;
-        if (basin && !arenaReserved(du, dv)) {
-          arenaMark(du, fy, dv, Block.Mud);
-          arenaMark(du, fy + 1, dv, Block.Water);
-        }
-      }
-    }
-    for (const [du, dv, h] of [[-6, -3, 4], [-6, 3, 5], [1, -7, 4], [1, 7, 4]] as
-      [number, number, number][]) {
-      for (let y = fy + 1; y <= fy + h; y++) arenaMark(du, y, dv, Block.MossyVaultBrick);
-      for (const [ou, ov] of [[-1, 0], [1, 0], [0, -1], [0, 1]] as [number, number][]) {
-        arenaMark(du + ou, fy + h, dv + ov, Block.GlowFungus);
-      }
-    }
-  } else if (family === 'ember') {
-    // Walking caldera: the center cross and diagonals are broad basalt escape
-    // routes. Lava is curbed at the perimeter and never enters a dodge lane.
-    for (let du = -7; du <= 7; du++) {
-      for (let dv = -7; dv <= 7; dv++) {
-        const spoke = du === 0 || dv === 0 || Math.abs(du) === Math.abs(dv);
-        if (spoke) arenaMark(du, fy, dv,
-          (du + dv) % 3 === 0 ? Block.EmberBrick : Block.Basalt);
-        const gutter = Math.max(Math.abs(du), Math.abs(dv)) === 7 &&
-          !(du <= -6 && Math.abs(dv) <= 1);
-        if (gutter && !arenaReserved(du, dv)) {
-          arenaMark(du, fy, dv, Block.Basalt);
-          arenaMark(du, fy + 1, dv, Block.Lava);
-        }
-      }
-    }
-    for (const [du, dv] of [[-5, -7], [-5, 7], [3, -7], [3, 7]] as [number, number][]) {
-      for (let y = fy + 1; y <= fy + 4; y++) {
-        arenaMark(du, y, dv, y === fy + 2 ? Block.EmberBrick : Block.FurnaceCeramic);
-      }
-      arenaMark(du, fy + 5, dv, Block.EmberBrazier);
-    }
-    for (let du = -5; du <= 3; du++) {
-      arenaMark(du, fy + 6, -7, Block.EmberBrick);
-      arenaMark(du, fy + 6, 7, Block.EmberBrick);
-    }
-  } else if (family === 'crystal') {
-    // Prism observatory: eight spokes are authoritative beam lanes. Obelisks and
-    // hanging crystals remain outside the player's movement and camera volume.
-    for (let du = -7; du <= 7; du++) {
-      for (let dv = -7; dv <= 7; dv++) {
-        const ray = du === dv || du === -dv || du === 0 || dv === 0;
-        const ring = Math.round(Math.hypot(du, dv)) === 5;
-        if (ray || ring) arenaMark(du, fy, dv,
-          ring ? Block.PrismBrick : Block.PearlTile);
-      }
-    }
-    for (const [du, dv, h] of [[-7, -5, 4], [-7, 5, 3], [7, -5, 3], [7, 5, 4]] as
-      [number, number, number][]) {
-      for (let y = fy + 1; y <= fy + h; y++) {
-        arenaMark(du, y, dv, y === fy + h ? Block.PrismLamp : Block.CrystalBlock);
-      }
-    }
-    for (const [du, dv, length] of [[-3, -3, 3], [-3, 3, 2], [3, -3, 2], [3, 3, 3]] as
-      [number, number, number][]) {
-      for (let k = 0; k < length; k++) arenaMark(du, fy + 6 - k, dv, Block.CrystalBlock);
-    }
-  } else {
-    // Clockwork grid: a crisp 5x5 board makes mine cells and crusher gaps
-    // readable. Machinery stays on the walls and overhead gantry.
-    for (let du = -7; du <= 7; du++) {
-      for (let dv = -7; dv <= 7; dv++) {
-        if (Math.abs(du) <= 5 && Math.abs(dv) <= 5) {
-          const cell = (Math.floor((du + 5) / 2) + Math.floor((dv + 5) / 2)) & 1;
-          arenaMark(du, fy, dv, cell ? Block.ClockworkGrate : Block.GildedVaultBrick);
-        } else if (Math.max(Math.abs(du), Math.abs(dv)) === 6) {
-          arenaMark(du, fy, dv, Block.VaultMosaic);
-        }
-      }
-    }
-    for (const [du, dv] of [[-5, -7], [-5, 7], [1, -7], [1, 7]] as [number, number][]) {
-      for (let y = fy + 1; y <= fy + 4; y++) {
-        arenaMark(du, y, dv, y === fy + 2 ? Block.GildedVaultBrick : Block.ClockworkGrate);
-      }
-      arenaMark(du, fy + 5, dv, Block.GildedLamp);
-    }
-    for (let du = -5; du <= 1; du++) {
-      arenaMark(du, fy + 6, -7, Block.ClockworkGrate);
-      arenaMark(du, fy + 6, 7, Block.ClockworkGrate);
+  /** The walk-in corridor (−u) and the treasure approach (+u) stay clear. */
+  const arenaLane = (du: number, dv: number): boolean =>
+    (du <= -(lair.fight) && Math.abs(dv) <= 1) ||
+    (du >= 1 && Math.abs(dv) <= 2);
+  const inFightFloor = (du: number, dv: number): boolean =>
+    Math.abs(du) <= lair.fight && Math.abs(dv) <= lair.fight;
+  /** Solid geometry, refused wherever it would obstruct the fight. */
+  const arenaSolid = (du: number, y: number, dv: number, id: Block): void => {
+    if (arenaLane(du, dv) && y > fy) return;
+    if (inFightFloor(du, dv) && y > fy && y < overheadY) return;
+    arenaMark(du, y, dv, id);
+  };
+  // Hard-clear the boss's own volume before anything decorates it. Whatever an
+  // earlier pass (corridor lights, spike traps, a neighbouring wing) left inside
+  // the sealed fighting floor is erased here, so the guarantee holds no matter
+  // how the rest of the vault was laid out.
+  for (let du = -lair.fight; du <= lair.fight; du++) {
+    for (let dv = -lair.fight; dv <= lair.fight; dv++) {
+      for (let y = fy + 1; y < overheadY; y++) arenaMark(du, y, dv, Block.Air);
     }
   }
+  /** Re-fill the square carve back to the lair's real silhouette. */
+  const shapeWall = (keep: (du: number, dv: number) => boolean): void => {
+    for (let du = -(boss.hw - 1); du <= boss.hw - 1; du++) {
+      for (let dv = -(boss.hw - 1); dv <= boss.hw - 1; dv++) {
+        if (keep(du, dv) || arenaLane(du, dv)) continue;
+        for (let y = fy + 1; y <= fy + boss.ih; y++) arenaMark(du, y, dv, shellBlock);
+      }
+    }
+  };
+
+  if (lair.shape === 'nave') {
+    // THE SUNKEN NAVE — a tall cathedral of the dead. Three uninterrupted
+    // processional lanes teach the Warden's marching attacks; the colonnade and
+    // the rib vault sit outside/above the fighting floor entirely.
+    for (let du = -8; du <= 8; du++) {
+      for (let dv = -8; dv <= 8; dv++) {
+        const lane = Math.abs(dv) <= 1 || Math.abs(Math.abs(dv) - 4) <= 1;
+        arenaMark(du, fy, dv, lane
+          ? (Math.abs(dv) <= 1 ? Block.SpectralMarble : Block.VaultMosaic)
+          : ((du + dv) & 1) === 0 ? Block.CarvedVaultBrick : Block.Cobblestone);
+      }
+    }
+    // Side colonnade: piers rise the full height against both long walls.
+    for (const dv of [-8, 8]) {
+      for (const du of [-6, -2, 2, 6]) {
+        for (let y = fy + 1; y <= fy + 7; y++) {
+          arenaSolid(du, y, dv, y === fy + 1 || y === fy + 7
+            ? Block.CarvedVaultBrick : Block.IvoryColumn);
+        }
+        arenaSolid(du, fy + 8, dv, Block.CarvedVaultBrick);
+      }
+      for (const du of [-4, 0, 4]) arenaSolid(du, fy + 4, dv, Block.SoulLantern);
+      for (const du of [-7, 7]) arenaSolid(du, fy + 3, dv, Block.RuneGlass);
+    }
+    // Rib vault: transverse arches under the ceiling, well above the Warden.
+    for (const du of [-6, -2, 2, 6]) {
+      for (let dv = -8; dv <= 8; dv++) arenaSolid(du, fy + 9, dv, Block.CarvedVaultBrick);
+    }
+  } else if (lair.shape === 'ring') {
+    // THE DROWNED RING — a round court. A dry island of jade holds the fight;
+    // beyond it a wading moat of black water rings the room.
+    shapeWall((du, dv) => Math.hypot(du, dv) <= 9.5);
+    for (let du = -8; du <= 8; du++) {
+      for (let dv = -8; dv <= 8; dv++) {
+        const r = Math.hypot(du, dv);
+        if (r > 9.5) continue;
+        // The water starts exactly where the sealed floor ends, so wading is
+        // scenery you fight beside and never a hazard you fight inside.
+        const moat = !inFightFloor(du, dv) && !arenaLane(du, dv);
+        if (moat) {
+          arenaMark(du, fy, dv, Block.Mud);
+          arenaMark(du, fy + 1, dv, Block.Water);
+        } else {
+          arenaMark(du, fy, dv, r > 5.4 ? Block.PearlTile
+            : Math.round(r) % 2 === 0 ? Block.JadeMosaic : Block.MossyVaultBrick);
+        }
+      }
+    }
+    // Reed pillars stand in the moat, capped with glowing fungus.
+    for (const [du, dv] of [[-7, -4], [-7, 4], [0, -8], [0, 8], [7, -5], [7, 5]] as
+      [number, number][]) {
+      for (let y = fy + 1; y <= fy + 4; y++) arenaSolid(du, y, dv, Block.MossyVaultBrick);
+      arenaSolid(du, fy + 5, dv, Block.GlowFungus);
+    }
+    // Hanging roots, above the Queen's low silhouette.
+    for (const [du, dv] of [[-4, -4], [-4, 4], [4, -4], [4, 4], [0, 0]] as
+      [number, number][]) {
+      arenaSolid(du, Math.max(overheadY, fy + 6), dv, Block.GlowFungus);
+    }
+  } else if (lair.shape === 'caldera') {
+    // THE WALKING CALDERA — a clipped octagon whose rim is an open lava gutter.
+    // The fighting floor is basalt scored with concentric heat rings.
+    shapeWall((du, dv) => Math.abs(du) + Math.abs(dv) <= 13);
+    for (let du = -8; du <= 8; du++) {
+      for (let dv = -8; dv <= 8; dv++) {
+        if (Math.abs(du) + Math.abs(dv) > 13) continue;
+        // Same contract as the mire's moat: the gutter begins outside the
+        // sealed floor, so lava is never something you can be pushed into.
+        const rim = !inFightFloor(du, dv);
+        if (rim && !arenaLane(du, dv)) {
+          arenaMark(du, fy, dv, Block.Basalt);
+          arenaMark(du, fy + 1, dv, Block.Lava);
+        } else {
+          arenaMark(du, fy, dv, Math.round(Math.hypot(du, dv)) % 2 === 0
+            ? Block.Basalt : Block.EmberBrick);
+        }
+      }
+    }
+    // Furnace stacks at the four diagonals, standing clear of the gutter.
+    for (const [du, dv] of [[-6, -6], [-6, 6], [6, -6], [6, 6]] as [number, number][]) {
+      for (let y = fy + 1; y <= fy + 5; y++) {
+        arenaSolid(du, y, dv, y === fy + 3 ? Block.EmberBrick : Block.FurnaceCeramic);
+      }
+      arenaSolid(du, fy + 6, dv, Block.EmberBrazier);
+    }
+    // Roof lattice, hung above the Colossus's shoulders.
+    for (let du = -6; du <= 6; du += 3) {
+      for (let dv = -8; dv <= 8; dv++) arenaSolid(du, fy + 9, dv, Block.EmberBrick);
+    }
+  } else if (lair.shape === 'observatory') {
+    // THE OBSERVATORY — a domed octagon. Eight rays and a ring score the mirror
+    // floor; eight obelisks ring the wall; a rune-glass oculus crowns the dome.
+    shapeWall((du, dv) => Math.abs(du) + Math.abs(dv) <= 14);
+    for (let du = -8; du <= 8; du++) {
+      for (let dv = -8; dv <= 8; dv++) {
+        if (Math.abs(du) + Math.abs(dv) > 14) continue;
+        const ray = du === 0 || dv === 0 || Math.abs(du) === Math.abs(dv);
+        const ring = Math.round(Math.hypot(du, dv)) === 6;
+        arenaMark(du, fy, dv, ring ? Block.PrismBrick
+          : ray ? Block.PearlTile : Block.OpalBrick);
+      }
+    }
+    for (const [du, dv] of [[8, 4], [8, -4], [-8, 4], [-8, -4],
+      [4, 8], [-4, 8], [4, -8], [-4, -8]] as [number, number][]) {
+      for (let y = fy + 1; y <= fy + 5; y++) arenaSolid(du, y, dv, Block.CrystalBlock);
+      arenaSolid(du, fy + 6, dv, Block.PrismLamp);
+    }
+    // The oculus: a glazed disc in the crown of the dome, plus hung shards.
+    for (let du = -3; du <= 3; du++) {
+      for (let dv = -3; dv <= 3; dv++) {
+        if (Math.hypot(du, dv) > 3.2) continue;
+        arenaSolid(du, fy + 9, dv, Block.RuneGlass);
+      }
+    }
+    for (const [du, dv] of [[-5, -5], [-5, 5], [5, -5], [5, 5]] as [number, number][]) {
+      arenaSolid(du, fy + 9, dv, Block.CrystalBlock);
+      arenaSolid(du, fy + 8, dv, Block.CrystalBlock);
+    }
+  } else {
+    // THE ASSEMBLY HALL — a working factory floor. A crisp machine grid reads
+    // the Artificer's lane patterns; the presses line the walls and the gantry
+    // runs overhead, both clear of the floor you fight on.
+    for (let du = -8; du <= 8; du++) {
+      for (let dv = -8; dv <= 8; dv++) {
+        const border = Math.max(Math.abs(du), Math.abs(dv)) === 8;
+        const cell = (Math.floor((du + 8) / 2) + Math.floor((dv + 8) / 2)) & 1;
+        arenaMark(du, fy, dv, border ? Block.VaultMosaic
+          : cell ? Block.ClockworkGrate : Block.GildedVaultBrick);
+      }
+    }
+    for (const dv of [-8, 8]) {
+      for (const du of [-6, -3, 0, 3, 6]) {
+        for (let y = fy + 1; y <= fy + 4; y++) {
+          arenaSolid(du, y, dv, y === fy + 2 ? Block.GildedVaultBrick : Block.ClockworkGrate);
+        }
+        arenaSolid(du, fy + 5, dv, Block.GildedLamp);
+      }
+    }
+    for (let du = -8; du <= 8; du++) {
+      for (const dv of [-4, 0, 4]) arenaSolid(du, fy + 8, dv, Block.ClockworkGrate);
+    }
+  }
+
 
   // Reward alcove: floor trim replaces the old raised 5x5 obstacle. The chest
   // keeps its legacy coordinate on a single protected pedestal.
@@ -829,11 +949,16 @@ export function vaultStamp(
         edge ? trimBlock : floorBlock);
     }
   }
-  const chest = { x: wx(daisU, boss.v), y: fy + 2, z: wz(daisU, boss.v) };
-  mark(chest.x, fy + 1, chest.z, trimBlock);
+  // The chest now sits FLUSH on the lair floor instead of on a two-block
+  // plinth: the treasure is the only authored furniture inside the fighting
+  // floor, so it stays as low as a chest can be and the sconces move onto the
+  // back wall where nothing can collide with them.
+  const chest = { x: wx(daisU, boss.v), y: fy + 1, z: wz(daisU, boss.v) };
   mark(chest.x, chest.y, chest.z, Block.VaultChest);
-  mark(wx(daisU, boss.v - 1), fy + 1, wz(daisU, boss.v - 1), lightBlock);
-  mark(wx(daisU, boss.v + 1), fy + 1, wz(daisU, boss.v + 1), lightBlock);
+  for (const dv of [-2, 2]) {
+    mark(wx(boss.u + boss.hw, boss.v + dv), fy + 3, wz(boss.u + boss.hw, boss.v + dv),
+      lightBlock);
+  }
   const backdropBlock = family === 'mire' ? Block.MossyVaultBrick
     : family === 'ember' ? Block.EmberBrick
     : family === 'gilded' ? Block.ClockworkGrate : Block.RuneGlass;
@@ -899,31 +1024,38 @@ export function vaultStamp(
     minX = Math.min(minX, r.x - r.hw - 2); maxX = Math.max(maxX, r.x + r.hw + 2);
     minZ = Math.min(minZ, r.z - r.hw - 2); maxZ = Math.max(maxZ, r.z + r.hw + 2);
   }
-  const bounds = { minX, minZ, maxX, maxZ, minY: fy - 6, maxY: fy + BOSS_IH + 3 };
+  const bounds = { minX, minZ, maxX, maxZ, minY: fy - 6, maxY: fy + MAX_LAIR_HEIGHT + 3 };
 
-  const bossCenter = { x: wx(boss.u, boss.v), y: fy + 1, z: wz(boss.u, boss.v) };
-  const socketLocal: [number, number][] = [[-6, -6], [-6, 6], [6, -6], [6, 6]];
-  const sockets = socketLocal.map(([du, dv]) =>
-    ({ x: wx(boss.u + du, boss.v + dv), y: fy + 1, z: wz(boss.u + du, boss.v + dv) }));
+  // Arena geometry is CONTINUOUS world space, not block indices: everything
+  // here is centred in its block so the boss stands in the middle of the room
+  // rather than on a corner, and the sealed box is symmetric about it.
+  const arenaPos = (du: number, dv: number, y: number) =>
+    ({ x: wx(boss.u + du, boss.v + dv) + 0.5, y, z: wz(boss.u + du, boss.v + dv) + 0.5 });
+  const bossCenter = arenaPos(0, 0, fy + 1);
+  // Relocation anchors ride the lair's own socket ring, so a small round court
+  // and a long nave both place the boss somewhere that exists.
+  const s = lair.socket;
+  const socketLocal: [number, number][] = [[-s, -s], [-s, s], [s, -s], [s, s]];
+  const sockets = socketLocal.map(([du, dv]) => arenaPos(du, dv, fy + 1));
   const cameraAnchors = [
-    { x: wx(boss.u - 7, boss.v), y: fy + 4, z: wz(boss.u - 7, boss.v) },
-    { x: wx(boss.u + 1, boss.v + 7), y: fy + 5, z: wz(boss.u + 1, boss.v + 7) },
+    arenaPos(-lair.fight, 0, fy + 4),
+    arenaPos(1, lair.fight, fy + Math.min(6, lair.ih - 2)),
   ];
-  const safeLanes = [[0, -4], [0, 4], [-4, 0], [0, 0]].map(([du, dv]) =>
-    ({ x: wx(boss.u + du, boss.v + dv), y: fy + 1, z: wz(boss.u + du, boss.v + dv) }));
-  const sealU = boss.u - boss.hw;
+  const safeLanes = [[0, -(s - 1)], [0, s - 1], [-(s - 1), 0], [0, 0]].map(
+    ([du, dv]) => arenaPos(du, dv, fy + 1));
+  const sealDu = -boss.hw;
   const seal = {
-    center: { x: wx(sealU, boss.v), y: fy + 1, z: wz(sealU, boss.v) },
+    center: arenaPos(sealDu, 0, fy + 1),
     axis: (ux !== 0 ? 'x' : 'z') as 'x' | 'z',
     halfWidth: 1.6, height: 4,
-    inside: { x: wx(sealU + 2, boss.v), y: fy + 1, z: wz(sealU + 2, boss.v) },
-    outside: { x: wx(sealU - 2, boss.v), y: fy + 1, z: wz(sealU - 2, boss.v) },
+    inside: arenaPos(sealDu + 2, 0, fy + 1),
+    outside: arenaPos(sealDu - 2, 0, fy + 1),
   };
   const arena = {
     bounds: {
-      minX: bossCenter.x - BOSS_HW + 1, minY: fy + 1,
-      minZ: bossCenter.z - BOSS_HW + 1, maxX: bossCenter.x + BOSS_HW - 1,
-      maxY: fy + BOSS_IH, maxZ: bossCenter.z + BOSS_HW - 1,
+      minX: bossCenter.x - lair.fight, minY: fy + 1,
+      minZ: bossCenter.z - lair.fight, maxX: bossCenter.x + lair.fight,
+      maxY: fy + lair.ih, maxZ: bossCenter.z + lair.fight,
     },
     sockets, cameraAnchors, safeLanes, seal,
   };
@@ -1116,7 +1248,7 @@ export function vaultLoot(
 const DEAD_NEVER = -1e9; // finite "never died" sentinel (JSON-safe)
 
 export function newVaultState(tier: VaultTier): VaultServerState {
-  return { tier, hp: bruteMaxHp(tier), deadAt: DEAD_NEVER, looters: {} };
+  return { tier, hp: bruteMaxHp(tier), deadAt: DEAD_NEVER, looters: {}, warfarePaid: {} };
 }
 
 /** Lazy Brute respawn: VAULT_RECHARGE after death, HP refills. */
@@ -1184,7 +1316,15 @@ export function sanitizeVaultState(raw: unknown): VaultServerState | null {
       if (Object.keys(looters).length >= 10000) break;
     }
   }
-  return { tier, hp, deadAt, looters };
+  const warfarePaid: Record<string, number> = {};
+  if (o.warfarePaid && typeof o.warfarePaid === 'object') {
+    for (const [u, at] of Object.entries(o.warfarePaid as Record<string, unknown>)) {
+      if (typeof u !== 'string' || !Number.isFinite(at)) continue;
+      warfarePaid[u.toLowerCase()] = at as number;
+      if (Object.keys(warfarePaid).length >= 10000) break;
+    }
+  }
+  return { tier, hp, deadAt, looters, warfarePaid };
 }
 
 /** Map reveal radius: a vault's entrance appears on the map/minimap once the

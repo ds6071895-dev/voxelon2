@@ -38,6 +38,7 @@ export interface TouchCallbacks {
   onPause(): void;
   onInventory(): void;
   onMap(): void;
+  /** Warfare Command (the G panel). */
   onProgress(): void;
   onTpa(): void;
 }
@@ -224,7 +225,7 @@ export class TouchControls {
     };
     util('🎒', cb.onInventory);
     util('🗺', cb.onMap);
-    util('⚑', cb.onProgress);
+    util('⌘', cb.onProgress);   // Warfare Command
     util('🌀', cb.onTpa);
     util('⏸', cb.onPause);
 

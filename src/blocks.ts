@@ -156,6 +156,14 @@ export const enum Block {
   OpalBrick = 210,
   ClockworkGrate = 211,
   VaultMosaic = 212,
+  // --- Warfare Command: strategic hardware (block-entities) -----------------
+  // TacticalSilo is the ANCHOR of a 2×2 launch pad; the other three cells are
+  // SiloPart, exactly like a machine's MachinePart footprint. Both are
+  // sabotaged (HP), never mined.
+  TacticalSilo = 213,
+  SiloPart = 214,
+  InterceptorBattery = 215,
+  Helipad = 216,
 }
 
 export const enum Tile {
@@ -422,6 +430,25 @@ export const enum Tile {
   GreaterRuneFortune = 234,
   GreaterRuneFocus = 235,
   GreaterRuneOfPower = 236,
+  // --- Warfare Command ---
+  SiloSide = 237,
+  SiloTop = 238,
+  SiloPart = 239,
+  BatterySide = 240,
+  BatteryTop = 241,
+  HelipadTop = 242,
+  HelipadSide = 243,
+  ReinforcedFrame = 244,
+  GuidanceUnit = 245,
+  WarheadSprite = 246,
+  RotorAssembly = 247,
+  FuelTank = 248,
+  BombCasingSprite = 249,
+  TacticalMissileSprite = 250,
+  InterceptorSprite = 251,
+  AerialBombSprite = 252,
+  RepairKitSprite = 253,
+  HelicopterKitSprite = 254,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel' | 'sword';
@@ -952,6 +979,30 @@ export const BLOCKS: Record<number, BlockInfo> = {
   ...woodSet('Oak', Tile.Planks, Block.OakSlab, Block.OakStairsN, Block.OakSlabTop),
   ...woodSet('Birch', Tile.BirchPlanks, Block.BirchSlab, Block.BirchStairsN, Block.BirchSlabTop),
   ...woodSet('Spruce', Tile.SprucePlanks, Block.SpruceSlab, Block.SpruceStairsN, Block.SpruceSlabTop),
+
+  // --- Warfare Command (strategic hardware) ---------------------------------
+  // Every one of these is a block-entity: placed as a normal edit, tracked by
+  // the authoritative strategic sim, and taken down by SHOOTING it (HP), never
+  // by mining. The hardness values only matter for the visual break animation.
+  [Block.TacticalSilo]: def({
+    name: 'Tactical Silo', hardness: 6.0, emission: 4,
+    top: Tile.SiloTop, bottom: Tile.AutominerTop, side: Tile.SiloSide,
+  }),
+  [Block.SiloPart]: def({
+    name: 'Silo Housing', hardness: 5.0,
+    top: Tile.SiloPart, opaque: false, occludes: false,
+  }),
+  [Block.InterceptorBattery]: def({
+    name: 'Interceptor Battery', hardness: 5.0, emission: 5,
+    top: Tile.BatteryTop, bottom: Tile.AutominerTop, side: Tile.BatterySide,
+  }),
+  // The Helipad is a flat, walkable landing plate — a slab so a helicopter can
+  // sit on it and a pilot can stand next to it without jumping.
+  [Block.Helipad]: def({
+    name: 'Helipad', hardness: 3.5, emission: 6, shape: 'slab',
+    solid: true, opaque: false, occludes: false,
+    top: Tile.HelipadTop, side: Tile.HelipadSide,
+  }),
 };
 
 // Vanilla tool effectiveness and harvest tiers (wood 0, stone 1, iron 2).
@@ -964,6 +1015,8 @@ const PICKAXE_TIERS: [Block, number][] = [
   [Block.Furnace, 0], [Block.FurnaceLit, 0],
   [Block.Autominer, 0], [Block.OilDerrick, 0],
   [Block.Turret, 1], // metal war machines need a stone+ pick
+  [Block.TacticalSilo, 2], [Block.SiloPart, 2],
+  [Block.InterceptorBattery, 2], [Block.Helipad, 1],
   [Block.Core, 1], // the claim Core is pickaxe-mineable (owner-only, server-gated)
   [Block.VaultBrick, 2], [Block.VaultChest, 2], // dungeon walls need an iron pick
   [Block.CarvedVaultBrick, 2], [Block.MossyVaultBrick, 2],

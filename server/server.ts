@@ -11,6 +11,7 @@ import * as readline from 'readline';
 import { ClientMsg, GameMode, SERVER_PORT, SNAPSHOT_HZ, ServerMsg } from '../src/net/protocol';
 import { GameServer, Outbound, WorldSave } from '../src/net/server_core';
 import { Accounts, Account } from '../src/net/accounts';
+import { WARFARE_TREE, sanitizeWarfare, warfareAvailable } from '../src/warfare';
 import { ITEMS, Item } from '../src/items';
 import {
   COMEBACK_HEARTS, ELIMINATION_MS, PERMANENT_UNTIL, formatRemaining,
@@ -76,6 +77,14 @@ game.onFactionSwitch = (username, faction, switchesUsed, switchSeason, forfeitSe
   accounts.applySwitch(username, faction, switchesUsed, switchSeason, forfeitSeason);
   saveAccounts();
   worldDirty = true;
+};
+// WARFARE COMMAND: persist a player's technology to the ACCOUNT record (not the
+// opaque client state blob), so a routine state save can never mint or wipe it.
+game.onWarfareChange = (username, progress) => {
+  const a = accounts.get(username);
+  if (!a) return;
+  a.warfare = progress;
+  saveAccounts();
 };
 // Lifesteal elimination (Milestone A): record the 24h wall-clock lockout on the
 // account (login is refused until it expires) and boot the victim shortly after
@@ -232,6 +241,7 @@ function handleAuth(id: number, msg: ClientMsg & { t: 'register' | 'login' | 'se
     seasonsWon: res.account.seasonsWon, switchesUsed: res.account.switchesUsed,
     switchSeason: res.account.switchSeason, forfeitSeason: res.account.forfeitSeason,
     data: res.account.data,
+    warfare: accounts.warfareOf(res.account.username),
   }));
   // Issue (rotate) a session token so this browser can resume without the
   // password next visit — persisted on the account, mirrored in localStorage.
@@ -354,6 +364,7 @@ setInterval(() => {
   const dt = Math.min(0.25, (now - vaultLast) / 1000);
   vaultLast = now;
   dispatch(game.tickVaultEncounters(dt));
+  dispatch(game.tickWarfare(dt));
 }, 1000 / 20);
 
 let last = Date.now();
@@ -457,6 +468,9 @@ const HELP = [
   '  flags reset                   - send every flag home to its own faction',
   '  flags status                  - who holds which flag right now',
   '  save                          - force-save the world + accounts',
+  '  warfare status <player>       - show a player\'s Warfare Command tree',
+  '  warfare grant <player> <xp>   - award warfare XP',
+  '  warfare reset <player>        - wipe a player\'s technology',
   '  stop                          - save and shut down',
   '  help                          - this list',
 ].join('\n');
@@ -607,6 +621,48 @@ function runCommand(line: string): void {
           console.log(game.flagsStatusText());
         } else {
           console.log('usage: flags on|off|reset|status');
+        }
+        break;
+      }
+      case 'warfare': {
+        // Operator control over Warfare Command progression: inspect a player's
+        // technology, or grant/revoke warfare XP for testing and moderation.
+        const sub = (parts[1] || 'status').toLowerCase();
+        if (sub === 'status' || sub === 'show') {
+          const who = parts[2];
+          if (!who) { console.log('usage: warfare status <player>'); break; }
+          const account = accounts.get(who);
+          if (!account) { console.log(`no account "${who}"`); break; }
+          const w = accounts.warfareOf(account.username);
+          console.log(`${account.username}: ${w.xp} XP earned, ` +
+            `${warfareAvailable(w)} available, ${w.nodes.length}/${WARFARE_TREE.length} nodes`);
+          if (w.nodes.length) console.log(`  ${w.nodes.join(', ')}`);
+        } else if (sub === 'grant' || sub === 'xp') {
+          if (parts.length < 4) { console.log('usage: warfare grant <player> <xp>'); break; }
+          const account = accounts.get(parts[2]);
+          if (!account) { console.log(`no account "${parts[2]}"`); break; }
+          const amount = Math.floor(Number(parts[3]));
+          if (!Number.isFinite(amount) || amount <= 0) { console.log('xp must be a positive number'); break; }
+          const total = accounts.awardWarfareXp(account.username, amount);
+          game.setWarfare(account.username, accounts.warfareOf(account.username));
+          saveAccounts();
+          const pid = [...authed.entries()]
+            .find(([, n]) => n.toLowerCase() === account.username.toLowerCase())?.[0];
+          if (pid !== undefined) {
+            const w = accounts.warfareOf(account.username);
+            send(pid, { t: 'warfare', xp: w.xp, nodes: w.nodes.slice() });
+            send(pid, { t: 'notice', text: `⌘ +${amount} warfare XP granted by an operator.` });
+          }
+          console.log(`granted ${amount} warfare XP to ${account.username} (total ${total})`);
+        } else if (sub === 'reset') {
+          const account = accounts.get(parts[2] ?? '');
+          if (!account) { console.log('usage: warfare reset <player>'); break; }
+          account.warfare = sanitizeWarfare(null);
+          game.setWarfare(account.username, account.warfare);
+          saveAccounts();
+          console.log(`${account.username}'s Warfare Command tree was reset`);
+        } else {
+          console.log('usage: warfare status|grant|reset <player> [xp]');
         }
         break;
       }

@@ -33,7 +33,20 @@ import {
   FlagsState, newFlags, sanitizeFlags, hitFlag, returnFlag, tryCapture,
   factionHasFlag, carriedBy, FLAG_HIT_COOLDOWN,
 } from '../flags';
-import { XP_PLAYER_KILL, XP_REPORT_CAP, sanitizeFactionXp } from '../progress';
+import {
+  ContributionRecord, WarfareProgress, buyWarfareNode, grantWarfareXp,
+  newWarfare, sanitizeWarfare, settleWarfareXp,
+  warfareOwns, warfareTier, MAX_HARDWARE_TIER, PROTECTED_RADIUS,
+} from '../warfare';
+import {
+  BatteryState, LAUNCH_REJECT_TEXT, ProtectedArea, SiloState, StrategicSim,
+  StrategicEvent, blastAt, blastBlockCandidates, protectedArea,
+  sanitizeBattery, sanitizeSilo,
+} from '../strategic';
+import {
+  HelicopterState, VehicleSim, VehicleEvent, bombBlast, sanitizeHelicopter,
+} from '../vehicles';
+import { WARFARE_BLUEPRINTS } from '../crafting';
 import { GadgetCooldowns, gadgetOf, falloffDamage } from '../gadgets';
 import { leverFlips } from '../traps';
 import { sanitizeCosmetics } from '../character';
@@ -59,7 +72,7 @@ import {
 } from '../hearts';
 import {
   ArenaBounds, EncounterParticipant, VaultAttackIntent, VaultEncounter, bossMaxHp,
-  participantHpMultiplier,
+  participantHpMultiplier, encounterArmorPierce,
 } from '../vault_encounter';
 
 const SEASON_BROADCAST = 2;      // seconds between season-clock broadcasts
@@ -158,6 +171,11 @@ const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
   'machineMove', 'setSpawn',
   'turretUpgrade', 'turretClaim', 'turretHit', 'turretLoad',
   'gadgetUse', 'rocketBlast', 'xp',
+  // Warfare Command: a spectator may never build, fire, fly or sabotage.
+  'warfareBuy', 'siloLoad', 'siloUpgrade', 'siloLaunch',
+  'batteryLoad', 'batteryUpgrade', 'strategicHit', 'missileHit',
+  'heliSpawn', 'heliMount', 'heliInput', 'heliBomb', 'heliService',
+  'heliUpgrade', 'heliHit',
   'heartConsume', 'heartWithdraw', 'beaconRevive', 'useHeal',
   'attune', 'totemTeleport',
   'vaultAttack', 'vaultChestOpen',
@@ -183,6 +201,12 @@ interface ActiveVaultEncounter {
   engine: VaultEncounter;
   snapshotAccum: number;
   credited: string;
+  /** WARFARE CONTRIBUTION: runtime id -> account name, captured while the
+   *  player is present so a leaver/disconnect is still settled correctly. */
+  names: Map<number, string>;
+  /** Ids that were ever in creative/spectator during the attempt — those never
+   *  earn warfare XP, however much "damage" the engine accepted from them. */
+  observers: Set<number>;
   /** Authored arena cells let temporary placements restore the exact room. */
   authoredBlocks: Map<string, number>;
   placedBlocks: Map<string, ArenaPlacement>;
@@ -208,8 +232,16 @@ export class GameServer {
   private warKills: number[] = new Array(FACTIONS.length).fill(0);
   /** War wins per faction id THIS SEASON (most wins takes the season). */
   private warWins: number[] = new Array(FACTIONS.length).fill(0);
-  /** Shared faction XP pools (progression perks for every member). */
-  private factionXp: number[] = new Array(FACTIONS.length).fill(0);
+  // Warfare Command (replaces the retired Progress system): per-account
+  // technology, plus the server-owned strategic + vehicle simulations.
+  private readonly warfare = new Map<string, WarfareProgress>();
+  /** Set by the shell to persist a player's warfare progression to the account
+   *  store (the pure core has no disk). */
+  onWarfareChange?: (username: string, progress: WarfareProgress) => void;
+  private strategic!: StrategicSim;
+  private vehicles!: VehicleSim;
+  /** Accumulates toward the periodic missile/helicopter snapshot broadcast. */
+  private strategicSnapAccum = 0;
   // Seasons (Phase 5): month-long war cycles with reset + a "Seasons Won" badge.
   private season = newSeason();
   private seasonAccum = 0;
@@ -249,6 +281,122 @@ export class GameServer {
     this.seed = seed;
     this.rng = rng;
     this.terrain = new Terrain(seed);
+    this.strategic = new StrategicSim({
+      groundY: (x, z) => this.surfaceY(x, z),
+      worldHalf: WORLD_HALF,
+      protectedAreas: () => this.protectedAreas(),
+    });
+    this.vehicles = new VehicleSim({
+      solid: (x, y, z) => this.solidAt(x, y, z),
+      groundY: (x, z) => this.surfaceY(x, z),
+      worldHalf: WORLD_HALF,
+      vaultArena: (x, y, z) => this.insideAnyVaultArena(x, y, z),
+    });
+  }
+
+  // --- Warfare Command: shared world queries ---------------------------------
+
+  /** Height of the highest solid cell in a column, edits included. Used as the
+   *  ground reference for missile impacts, helicopter floors and ceilings. */
+  private surfaceY(x: number, z: number): number {
+    if (!fin(x, z)) return 0;
+    const bx = Math.floor(x), bz = Math.floor(z);
+    const base = this.terrain.height(bx, bz);
+    // A player-built tower counts: scan a modest window of edits above terrain.
+    let top = base;
+    for (let y = base + 1; y <= base + 48 && y < 256; y++) {
+      const e = this.edits.get(`${bx},${y},${bz}`);
+      if (e !== undefined && e !== Block.Air && BLOCKS[e]?.solid) top = y;
+    }
+    return top;
+  }
+
+  private solidAt(x: number, y: number, z: number): boolean {
+    if (!fin(x, y, z)) return true;
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    if (by < 0 || by >= 256) return true;
+    const e = this.edits.get(`${bx},${by},${bz}`);
+    if (e !== undefined) return e !== Block.Air && !!BLOCKS[e]?.solid;
+    return by <= this.terrain.height(bx, bz);
+  }
+
+  private insideAnyVaultArena(x: number, y: number, z: number): boolean {
+    if (!fin(x, y, z)) return false;
+    const st = vaultAt(this.seed, x, y, z, this.terrain, (cx, cz) => this.vaultStampAt(cx, cz));
+    if (!st) return false;
+    const b = st.arena.bounds;
+    return x >= b.minX && x <= b.maxX && z >= b.minZ && z <= b.maxZ &&
+      y >= b.minY && y <= b.maxY;
+  }
+
+  /**
+   * Everywhere a tactical strike may NEVER be aimed, sent to the client so the
+   * targeting map draws exactly the exclusion circles the server enforces.
+   *
+   * The static half (spawn + every seeded vault) is enumerated ONCE and cached:
+   * `worldVaults` walks the whole 5000×5000 world, and this is called on every
+   * single launch validation, so recomputing it would stall the server for the
+   * best part of a second each time someone opens a silo. The dynamic half
+   * (faction cores, which appear and vanish with edits) is cheap and is rebuilt
+   * whenever a Core block is placed or broken.
+   */
+  private staticProtected: ProtectedArea[] | null = null;
+  private coreProtected: ProtectedArea[] = [];
+  private coreProtectedDirty = true;
+
+  protectedAreas(): ProtectedArea[] {
+    if (!this.staticProtected) {
+      const out: ProtectedArea[] = [
+        // The spawn island: a fresh player must never land under a warhead.
+        protectedArea('spawn', 0, 0, 'Spawn safety zone', 120),
+      ];
+      // Every seeded vault: dungeons are shared content, not siege targets.
+      for (const v of worldVaults(this.seed, this.terrain)) {
+        out.push(protectedArea('vault', v.x, v.z, `Tier ${v.tier} vault`, PROTECTED_RADIUS + 24));
+      }
+      this.staticProtected = out;
+    }
+    if (this.coreProtectedDirty) {
+      this.coreProtectedDirty = false;
+      this.coreProtected = [];
+      for (const [key, block] of this.edits) {
+        if (block !== Block.Core) continue;
+        const [x, , z] = key.split(',').map(Number);
+        if (!fin(x, z)) continue;
+        this.coreProtected.push(
+          protectedArea('core', x, z, 'Faction core', PROTECTED_RADIUS + 16));
+      }
+    }
+    return [...this.staticProtected, ...this.coreProtected];
+  }
+
+  /** A player's warfare progression (created on demand, keyed by account). */
+  warfareOf(username: string): WarfareProgress {
+    const key = (username ?? '').toLowerCase();
+    let w = this.warfare.get(key);
+    if (!w) { w = newWarfare(); this.warfare.set(key, w); }
+    return w;
+  }
+
+  /** Seed a player's progression from the account store (shell-supplied). */
+  setWarfare(username: string, raw: unknown): void {
+    this.warfare.set((username ?? '').toLowerCase(), sanitizeWarfare(raw));
+  }
+
+  private warfareMsg(p: ServerPlayer): Outbound {
+    const w = this.warfareOf(p.username);
+    return { to: p.id, msg: { t: 'warfare', xp: w.xp, nodes: w.nodes.slice() } };
+  }
+
+  private saveWarfare(p: ServerPlayer): void {
+    this.onWarfareChange?.(p.username, this.warfareOf(p.username));
+  }
+
+  /** Does this player hold the blueprint needed to build/retrofit `block`? */
+  private hasBlueprint(p: ServerPlayer, id: number): boolean {
+    const node = WARFARE_BLUEPRINTS[id];
+    if (!node) return true;
+    return warfareOwns(this.warfareOf(p.username), node);
   }
 
   get playerCount(): number {
@@ -349,6 +497,8 @@ export class GameServer {
     username?: string; faction?: number; seasonsWon?: number;
     switchesUsed?: number; switchSeason?: number; forfeitSeason?: number;
     data?: Record<string, unknown>;
+    /** Warfare Command progression, straight off the account record. */
+    warfare?: unknown;
   }): Outbound[] {
     const username = account?.username && !this.usernameOnline(account.username)
       ? account.username : this.uniqueUsername();
@@ -401,6 +551,9 @@ export class GameServer {
       player.spawnZ = saved!.spawnZ as number;
     }
     this.players.set(id, player);
+    // Warfare Command progression comes off the ACCOUNT, not the client blob.
+    if (account && 'warfare' in account) this.setWarfare(username, account.warfare);
+    const warfare = this.warfareOf(username);
     const welcome: ServerMsg = {
       t: 'welcome', id, seed: this.seed, username,
       players: [...this.players.values()].map(toInfo),
@@ -413,9 +566,13 @@ export class GameServer {
       season: { number: this.season.number, timeLeft: seasonTimeLeft(this.season) },
       war: { ...warSnapshot(this.war, this.worldTime),
         score: this.warKills.slice(), wins: this.warWins.slice() },
-      factionXp: this.factionXp.slice(),
       flags: this.flagsPayload(),
       state: saved, // opaque per-account blob (inventory/hotbar) for the client to restore
+      warfare: { xp: warfare.xp, nodes: warfare.nodes.slice() },
+      silos: [...this.strategic.silos.values()],
+      batteries: [...this.strategic.batteries.values()],
+      helis: this.vehicles.snapshot(),
+      protectedAreas: this.protectedAreas(),
     };
     return [
       { to: id, msg: welcome },
@@ -428,6 +585,14 @@ export class GameServer {
     const p = this.players.get(id);
     if (!p) return [];
     const out = this.cleanupPlayerArenaPlacements(id);
+    // A disconnect must FREE the seat, or the airframe stays permanently
+    // "piloted" and hangs in the sky forever. Once the seat is empty the vehicle
+    // sim's own rule takes over: a controlled hover that settles to the ground.
+    const seat = this.vehicles.seatOf(id);
+    if (seat) {
+      this.vehicles.dismount(id, true);
+      out.push(...this.heliBroadcast());
+    }
     // Logging out never banks a flag run: it goes straight back to its pad.
     const dropped = returnFlag(this.flags, id);
     this.players.delete(id);
@@ -550,15 +715,12 @@ export class GameServer {
         return this.handleGadget(p, msg.item, msg.x, msg.y, msg.z);
       case 'rocketBlast':
         return this.handleRocketBlast(p, msg.x, msg.y, msg.z);
-      case 'xp': {
-        // Mob-kill XP report (mobs are client-simulated). Clamped so a hacked
-        // client can't flood the faction pool; personal XP is client-owned.
-        if (p.dead || !isFaction(p.faction)) return [];
-        const amt = fin(msg.amount) ? Math.max(0, Math.min(XP_REPORT_CAP, Math.floor(msg.amount))) : 0;
-        if (amt <= 0) return [];
-        this.factionXp[p.faction] += amt;
-        return [{ to: 'all', msg: { t: 'fxp', xp: this.factionXp.slice() } }];
-      }
+      case 'xp':
+        // RETIRED. Warfare XP comes only from qualifying dungeon-boss victories,
+        // settled by the server from its own contribution ledger — never from a
+        // client report. Kept as an accepted-and-ignored message so an older
+        // client cannot desync by sending it.
+        return [];
       case 'cosmetics': {
         // Sanitize + adopt the new look, persist it with the account and tell
         // every client to rebuild this player's avatar.
@@ -728,6 +890,158 @@ export class GameServer {
           return this.destroyTurret(Math.floor(msg.x), Math.floor(msg.y), Math.floor(msg.z));
         }
         return [{ to: 'all', msg: { t: 'turret', x: msg.x, y: msg.y, z: msg.z, state: s } }];
+      }
+      // --- WARFARE COMMAND ---------------------------------------------------
+      case 'warfareBuy': {
+        if (typeof msg.node !== 'string') return [];
+        const w = this.warfareOf(p.username);
+        if (!buyWarfareNode(w, msg.node)) {
+          return [{ to: id, msg: { t: 'warfareErr',
+            reason: 'That technology cannot be authorized yet.' } }];
+        }
+        this.saveWarfare(p);
+        return [this.warfareMsg(p)];
+      }
+      case 'siloOpen': {
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        const s = this.strategic.siloAt(Math.floor(msg.x), Math.floor(msg.y), Math.floor(msg.z));
+        if (!s) return [];
+        return [
+          { to: id, msg: { t: 'silo', state: s } },
+          { to: id, msg: { t: 'protectedAreas', areas: this.protectedAreas() } },
+        ];
+      }
+      case 'siloLoad': {
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        const s = this.strategic.siloAt(Math.floor(msg.x), Math.floor(msg.y), Math.floor(msg.z));
+        // Any faction teammate can keep a shared silo fed — loading is not
+        // blueprint-gated, only BUILDING and RETROFITTING are.
+        if (!s || !sameFaction(s.faction, p.faction)) return [];
+        if (!fin(msg.count)) return [];
+        this.strategic.loadSilo(s, msg.count);
+        return [{ to: 'all', msg: { t: 'silo', state: s } }];
+      }
+      case 'siloUpgrade': {
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        const s = this.strategic.siloAt(Math.floor(msg.x), Math.floor(msg.y), Math.floor(msg.z));
+        if (!s || !sameFaction(s.faction, p.faction)) return [];
+        const cap = warfareTier(this.warfareOf(p.username), 'silo');
+        if (s.tier >= Math.min(cap, MAX_HARDWARE_TIER)) {
+          return [{ to: id, msg: { t: 'warfareErr',
+            reason: 'You have not authorized the next silo retrofit.' } }];
+        }
+        this.strategic.retrofitSilo(s, s.tier + 1);
+        return [{ to: 'all', msg: { t: 'silo', state: s } }];
+      }
+      case 'siloLaunch':
+        return this.handleLaunch(p, msg.x, msg.y, msg.z, msg.tx, msg.tz);
+      case 'batteryOpen': {
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        const b = this.strategic.batteryAt(Math.floor(msg.x), Math.floor(msg.y), Math.floor(msg.z));
+        return b ? [{ to: id, msg: { t: 'battery', state: b } }] : [];
+      }
+      case 'batteryLoad': {
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        const b = this.strategic.batteryAt(Math.floor(msg.x), Math.floor(msg.y), Math.floor(msg.z));
+        if (!b || !sameFaction(b.faction, p.faction) || !fin(msg.count)) return [];
+        this.strategic.loadBattery(b, msg.count);
+        return [{ to: 'all', msg: { t: 'battery', state: b } }];
+      }
+      case 'batteryUpgrade': {
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        const b = this.strategic.batteryAt(Math.floor(msg.x), Math.floor(msg.y), Math.floor(msg.z));
+        if (!b || !sameFaction(b.faction, p.faction)) return [];
+        const cap = warfareTier(this.warfareOf(p.username), 'battery');
+        if (b.tier >= Math.min(cap, MAX_HARDWARE_TIER)) {
+          return [{ to: id, msg: { t: 'warfareErr',
+            reason: 'You have not authorized the next battery retrofit.' } }];
+        }
+        this.strategic.retrofitBattery(b, b.tier + 1);
+        return [{ to: 'all', msg: { t: 'battery', state: b } }];
+      }
+      case 'strategicHit': {
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        const dmg = fin(msg.amount) ? Math.max(0, Math.min(1000, msg.amount)) : 0;
+        if (dmg <= 0) return [];
+        const bx = Math.floor(msg.x), by = Math.floor(msg.y), bz = Math.floor(msg.z);
+        if (msg.kind === 'silo') {
+          const s = this.strategic.siloAt(bx, by, bz);
+          if (!s || sameFaction(s.faction, p.faction)) return [];
+          if (this.strategic.damageSilo(s, dmg)) return this.destroySilo(s);
+          return [{ to: 'all', msg: { t: 'silo', state: s } }];
+        }
+        const b = this.strategic.batteryAt(bx, by, bz);
+        if (!b || sameFaction(b.faction, p.faction)) return [];
+        if (this.strategic.damageBattery(b, dmg)) return this.destroyBattery(b);
+        return [{ to: 'all', msg: { t: 'battery', state: b } }];
+      }
+      case 'missileHit': {
+        // A missile hull is a legitimate (very hard) gunfire target.
+        const m = this.strategic.missiles.get(msg.id);
+        if (!m || sameFaction(m.faction, p.faction)) return [];
+        const dmg = fin(msg.amount) ? Math.max(0, Math.min(RANGED_MAX_DAMAGE, msg.amount)) : 0;
+        const ev = this.strategic.damageMissile(msg.id, dmg);
+        return ev ? this.applyStrategicEvents([ev]) : [];
+      }
+      // --- Helicopters ---
+      case 'heliSpawn':
+        return this.handleHeliSpawn(p, msg.x, msg.y, msg.z);
+      case 'heliMount': {
+        const seat = msg.seat === 'pilot' || msg.seat === 'passenger' ? msg.seat : undefined;
+        const res = this.vehicles.mount(msg.id, p.id, p.faction, { x: p.x, y: p.y, z: p.z }, seat);
+        if (!res.ok) return [{ to: id, msg: { t: 'warfareErr', reason: res.reason } }];
+        return [
+          { to: id, msg: { t: 'heliSeat', id: msg.id, seat: res.seat } },
+          ...this.heliBroadcast(),
+        ];
+      }
+      case 'heliDismount': {
+        const res = this.vehicles.dismount(p.id);
+        if (!res.ok) return [{ to: id, msg: { t: 'warfareErr', reason: res.reason ?? '' } }];
+        return [
+          { to: id, msg: { t: 'heliSeat', id: 0, seat: null } },
+          ...this.heliBroadcast(),
+        ];
+      }
+      case 'heliInput':
+        this.vehicles.setInput(p.id, msg);
+        return [];
+      case 'heliBomb':
+        return this.applyVehicleEvents(this.vehicles.dropBomb(p.id));
+      case 'heliService': {
+        const h = this.vehicles.helicopters.get(msg.id);
+        if (!h || !sameFaction(h.faction, p.faction)) return [];
+        if (!this.vehicles.atPad(h)) {
+          return [{ to: id, msg: { t: 'warfareErr',
+            reason: 'Land on your helipad to service the airframe.' } }];
+        }
+        this.vehicles.service(h,
+          fin(msg.oil) ? msg.oil : 0, fin(msg.bombs) ? msg.bombs : 0,
+          fin(msg.repair) ? msg.repair : 0);
+        return this.heliBroadcast();
+      }
+      case 'heliUpgrade': {
+        const h = this.vehicles.helicopters.get(msg.id);
+        if (!h || !sameFaction(h.faction, p.faction)) return [];
+        if (!this.vehicles.atPad(h)) {
+          return [{ to: id, msg: { t: 'warfareErr',
+            reason: 'Land on your helipad to retrofit the airframe.' } }];
+        }
+        const cap = warfareTier(this.warfareOf(p.username), 'helicopter');
+        if (h.tier >= Math.min(cap, MAX_HARDWARE_TIER)) {
+          return [{ to: id, msg: { t: 'warfareErr',
+            reason: 'You have not authorized the next airframe retrofit.' } }];
+        }
+        this.vehicles.retrofit(h, h.tier + 1);
+        return this.heliBroadcast();
+      }
+      case 'heliHit': {
+        const h = this.vehicles.helicopters.get(msg.id);
+        if (!h || sameFaction(h.faction, p.faction)) return [];
+        const dmg = fin(msg.amount) ? Math.max(0, Math.min(RANGED_MAX_DAMAGE, msg.amount)) : 0;
+        if (dmg <= 0) return [];
+        return [...this.applyVehicleEvents(this.vehicles.damage(msg.id, dmg)),
+          ...this.heliBroadcast()];
       }
       // --- Lifesteal (Milestone A) ---
       case 'heartConsume': {
@@ -984,7 +1298,9 @@ export class GameServer {
       seed: (this.seed ^ Math.imul(st.cx, 0x85ebca77) ^
         Math.imul(st.cz, 0xc2b2ae3d) ^ this.encounterSerial) >>> 0,
       tier: st.tier, kind: st.bossKind, family: st.family,
-      center: { x: bossRoom.x, y: bossRoom.y, z: bossRoom.z },
+      // Block CENTRE, matching the offline adapter: a boss standing on the
+      // corner of its middle block is half a block off in every hazard origin.
+      center: { x: bossRoom.x + 0.5, y: bossRoom.y, z: bossRoom.z + 0.5 },
       bounds: { ...st.arena.bounds }, sockets,
       cameraAnchors: st.arena.cameraAnchors, seal: st.arena.seal,
       startTime: this.worldTime,
@@ -997,6 +1313,8 @@ export class GameServer {
     }
     const active: ActiveVaultEncounter = {
       stamp: st, engine, snapshotAccum: 0, credited: starter.username,
+      names: new Map([[starter.id, starter.username]]),
+      observers: new Set(starter.mode === 'survival' ? [] : [starter.id]),
       authoredBlocks, placedBlocks: new Map(),
     };
     this.vaultEncounters.set(key, active);
@@ -1036,6 +1354,7 @@ export class GameServer {
     });
     if (!result.accepted) return [];
     active.credited = p.username;
+    this.noteEncounterPresence(active, p);
     const v = this.ensureVault(st);
     v.hp = active.engine.hp;
     const out: Outbound[] = [{ to: 'all', msg: {
@@ -1043,6 +1362,308 @@ export class GameServer {
     } }];
     if (result.killed && active.engine.status === 'victory') {
       out.push(...this.finishVaultEncounter(active, p.username));
+    }
+    return out;
+  }
+
+  // --- WARFARE COMMAND: strategic + vehicle authority ------------------------
+
+  /**
+   * Fire a tactical missile. The server revalidates EVERYTHING — ownership,
+   * faction, range, ammunition, protected areas, cooldown, finite coordinates
+   * and the in-flight cap — and only then consumes a round.
+   */
+  private handleLaunch(
+    p: ServerPlayer, x: number, y: number, z: number, tx: number, tz: number,
+  ): Outbound[] {
+    if (!this.nearMachine(p, x, y, z)) return [];
+    const silo = this.strategic.siloAt(Math.floor(x), Math.floor(y), Math.floor(z));
+    if (!silo) return [];
+    if (!sameFaction(silo.faction, p.faction)) {
+      return [{ to: p.id, msg: { t: 'launchRejected', reason: 'not-yours',
+        text: 'This silo belongs to another faction.' } }];
+    }
+    const req = { siloId: silo.id, faction: p.faction, tx, tz };
+    const check = this.strategic.validateLaunch(req);
+    if (!check.ok) {
+      return [{ to: p.id, msg: { t: 'launchRejected', reason: check.reason,
+        text: LAUNCH_REJECT_TEXT[check.reason] } }];
+    }
+    const events = this.strategic.launch(req);
+    return [
+      { to: 'all', msg: { t: 'silo', state: silo } },
+      ...this.applyStrategicEvents(events),
+    ];
+  }
+
+  private handleHeliSpawn(p: ServerPlayer, x: number, y: number, z: number): Outbound[] {
+    if (!this.nearMachine(p, x, y, z)) return [];
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    if (this.edits.get(`${bx},${by},${bz}`) !== Block.Helipad) return [];
+    if (!this.hasBlueprint(p, Item.HelicopterKit)) {
+      return [{ to: p.id, msg: { t: 'warfareErr',
+        reason: 'Flight Certification is not authorized.' } }];
+    }
+    const err = this.vehicles.spawnError(p.faction);
+    if (err) return [{ to: p.id, msg: { t: 'warfareErr', reason: err } }];
+    const tier = Math.max(1, warfareTier(this.warfareOf(p.username), 'helicopter'));
+    this.vehicles.spawn(p.username, p.faction, { x: bx, y: by, z: bz }, tier);
+    return this.heliBroadcast();
+  }
+
+  private heliBroadcast(): Outbound[] {
+    return [{ to: 'all', msg: {
+      t: 'helis', list: this.vehicles.snapshot(), bombs: this.vehicles.bombSnapshots(),
+    } }];
+  }
+
+  private destroySilo(s: SiloState): Outbound[] {
+    this.strategic.removeSilo(s.id);
+    const out: Outbound[] = this.clearHardwareFootprint(s.x, s.y, s.z, Block.TacticalSilo);
+    // Loaded ordnance cooks off with the silo — it is never recovered.
+    out.push({ to: 'all', msg: { t: 'siloGone', id: s.id, x: s.x, y: s.y, z: s.z } });
+    return out;
+  }
+
+  private destroyBattery(b: BatteryState): Outbound[] {
+    this.strategic.removeBattery(b.id);
+    const out: Outbound[] = this.clearHardwareFootprint(b.x, b.y, b.z, Block.InterceptorBattery);
+    if (b.ammo > 0) {
+      out.push(this.spawnItem(Item.InterceptorMissile, Math.min(64, b.ammo),
+        b.x + 0.5, b.y + 0.3, b.z + 0.5));
+    }
+    out.push({ to: 'all', msg: { t: 'batteryGone', id: b.id, x: b.x, y: b.y, z: b.z } });
+    return out;
+  }
+
+  /** Clear a strategic block-entity's cells (anchor + any 2×2 SiloPart). */
+  private clearHardwareFootprint(x: number, y: number, z: number, anchor: number): Outbound[] {
+    const out: Outbound[] = [];
+    const cells: [number, number][] = anchor === Block.TacticalSilo
+      ? [[0, 0], [1, 0], [0, 1], [1, 1]] : [[0, 0]];
+    for (const [dx, dz] of cells) {
+      const key = `${x + dx},${y},${z + dz}`;
+      const cur = this.edits.get(key);
+      if (cur !== anchor && cur !== Block.SiloPart) continue;
+      this.edits.set(key, Block.Air);
+      out.push({ to: 'all', msg: { t: 'edit', x: x + dx, y, z: z + dz, block: Block.Air } });
+    }
+    return out;
+  }
+
+  /** Turn simulation events into wire traffic + world damage. */
+  private applyStrategicEvents(events: readonly StrategicEvent[]): Outbound[] {
+    const out: Outbound[] = [];
+    for (const ev of events) {
+      switch (ev.kind) {
+        case 'launch':
+          out.push({ to: 'all', msg: { t: 'missileLaunch', missile: ev.missile, siloId: ev.siloId } });
+          break;
+        case 'interceptorLaunch':
+          out.push({ to: 'all', msg: {
+            t: 'interceptorLaunch', missile: ev.missile, batteryId: ev.batteryId } });
+          break;
+        case 'warning':
+          out.push({ to: 'all', msg: {
+            t: 'strikeWarning', faction: ev.faction, x: ev.x, z: ev.z,
+            eta: ev.eta, radius: ev.radius } });
+          break;
+        case 'intercepted':
+          out.push({ to: 'all', msg: { t: 'missileEnd', id: ev.id, reason: 'intercepted',
+            x: ev.x, y: ev.y, z: ev.z, radius: 0 } });
+          break;
+        case 'shotDown':
+          out.push({ to: 'all', msg: { t: 'missileEnd', id: ev.id, reason: 'shot',
+            x: ev.x, y: ev.y, z: ev.z, radius: 0 } });
+          break;
+        case 'expired':
+          out.push({ to: 'all', msg: { t: 'missileEnd', id: ev.id, reason: 'expired',
+            x: 0, y: 0, z: 0, radius: 0 } });
+          break;
+        case 'impact': {
+          out.push({ to: 'all', msg: { t: 'missileEnd', id: ev.id, reason: 'impact',
+            x: ev.x, y: ev.y, z: ev.z, radius: ev.radius } });
+          out.push(...this.applyBlast(ev.faction, { x: ev.x, y: ev.y, z: ev.z },
+            ev.radius, ev.playerDamage, ev.hardwareDamage, ev.blocks));
+          break;
+        }
+      }
+    }
+    return out;
+  }
+
+  private applyVehicleEvents(events: readonly VehicleEvent[]): Outbound[] {
+    const out: Outbound[] = [];
+    for (const ev of events) {
+      switch (ev.kind) {
+        case 'bombRelease':
+          out.push(...this.heliBroadcast());
+          break;
+        case 'bombImpact':
+          out.push(...this.applyBlast(ev.faction, { x: ev.x, y: ev.y, z: ev.z },
+            ev.radius, ev.playerDamage, ev.hardwareDamage, Math.ceil(ev.radius)));
+          out.push({ to: 'all', msg: { t: 'gadgetFx', kind: 'frag', x: ev.x, y: ev.y, z: ev.z } });
+          break;
+        case 'heliDown':
+          out.push({ to: 'all', msg: { t: 'heliDown', id: ev.id,
+            x: ev.x, y: ev.y, z: ev.z, faction: ev.faction } });
+          break;
+        case 'eject': {
+          const victim = this.players.get(ev.playerId);
+          out.push({ to: ev.playerId, msg: { t: 'heliSeat', id: 0, seat: null } });
+          out.push({ to: ev.playerId, msg: { t: 'teleport', x: ev.x, y: ev.y + 1, z: ev.z } });
+          if (victim) out.push(...this.applyDamage(victim, ev.damage, -1));
+          break;
+        }
+        case 'heliRemoved':
+          out.push({ to: 'all', msg: { t: 'heliGone', id: ev.id } });
+          break;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The shared explosion profile for missiles AND bombs.
+   *
+   * Enemies and enemy hardware take LINEAR-falloff damage, applied exactly once
+   * per target. Friendly players and friendly hardware are immune. Only a
+   * bounded number of player-PLACED, destructible blocks are removed — natural
+   * terrain is never permanently excavated, so a war can't erase the map.
+   * No lifesteal credit is taken from a strategic explosion.
+   */
+  private applyBlast(
+    faction: number, at: { x: number; y: number; z: number },
+    radius: number, playerDamage: number, hardwareDamage: number, blockCap: number,
+  ): Outbound[] {
+    const out: Outbound[] = [];
+    for (const victim of this.players.values()) {
+      if (victim.dead || victim.mode !== 'survival') continue;
+      if (sameFaction(victim.faction, faction)) continue;   // friendly fire is off
+      const dmg = blastAt(at, { x: victim.x, y: victim.y, z: victim.z }, radius, playerDamage);
+      // Pass the RAW blast figure: applyDamage runs armor mitigation itself, so
+      // mitigating here as well would halve every warhead twice over.
+      // `-1` attacker: a strategic explosion is never a lifesteal kill credit.
+      if (dmg > 0) out.push(...this.applyDamage(victim, dmg, -1));
+    }
+    for (const s of [...this.strategic.silos.values()]) {
+      if (sameFaction(s.faction, faction)) continue;
+      const dmg = blastAt(at, { x: s.x + 0.5, y: s.y + 1, z: s.z + 0.5 }, radius, hardwareDamage);
+      if (dmg <= 0) continue;
+      if (this.strategic.damageSilo(s, dmg)) out.push(...this.destroySilo(s));
+      else out.push({ to: 'all', msg: { t: 'silo', state: s } });
+    }
+    for (const b of [...this.strategic.batteries.values()]) {
+      if (sameFaction(b.faction, faction)) continue;
+      const dmg = blastAt(at, { x: b.x + 0.5, y: b.y + 1, z: b.z + 0.5 }, radius, hardwareDamage);
+      if (dmg <= 0) continue;
+      if (this.strategic.damageBattery(b, dmg)) out.push(...this.destroyBattery(b));
+      else out.push({ to: 'all', msg: { t: 'battery', state: b } });
+    }
+    for (const h of [...this.vehicles.helicopters.values()]) {
+      if (sameFaction(h.faction, faction) || h.dying > 0) continue;
+      const dmg = bombBlast(at, h.position, radius, hardwareDamage);
+      if (dmg > 0) out.push(...this.applyVehicleEvents(this.vehicles.damage(h.id, dmg)));
+    }
+    out.push(...this.blastBlocks(at, radius, blockCap));
+    return out;
+  }
+
+  /** Remove up to `cap` player-PLACED destructible blocks around an impact. */
+  private blastBlocks(
+    at: { x: number; y: number; z: number }, radius: number, cap: number,
+  ): Outbound[] {
+    const out: Outbound[] = [];
+    let removed = 0;
+    for (const c of blastBlockCandidates(at.x, at.y, at.z, radius)) {
+      if (removed >= cap) break;
+      const key = `${c.x},${c.y},${c.z}`;
+      const block = this.edits.get(key);
+      // Never natural terrain (undefined = untouched world), never air, never
+      // indestructible masonry, and never another faction's block-entity anchor
+      // (those are taken down by the damage pass above, not by digging).
+      if (block === undefined || block === Block.Air) continue;
+      const info = BLOCKS[block];
+      if (!info || info.hardness < 0) continue;
+      if (isVaultMasonry(block) || block === Block.Core || block === Block.TacticalSilo ||
+          block === Block.SiloPart || block === Block.InterceptorBattery) continue;
+      this.edits.set(key, Block.Air);
+      out.push({ to: 'all', msg: { t: 'edit', x: c.x, y: c.y, z: c.z, block: Block.Air } });
+      removed++;
+    }
+    return out;
+  }
+
+  /** Fixed-step strategic + vehicle tick. The WS shell calls this at 20 Hz. */
+  tickWarfare(dt: number): Outbound[] {
+    if (!fin(dt) || dt <= 0) return [];
+    this.strategic.now = this.worldTime;
+    const out = this.applyStrategicEvents(this.strategic.tick(dt));
+    out.push(...this.applyVehicleEvents(this.vehicles.tick(dt)));
+    this.strategicSnapAccum += dt;
+    if (this.strategicSnapAccum >= 1 / 10) {
+      this.strategicSnapAccum = 0;
+      if (this.strategic.missiles.size) {
+        out.push({ to: 'all', msg: { t: 'missiles', list: this.strategic.snapshotMissiles() } });
+      }
+      if (this.vehicles.helicopters.size || this.vehicles.bombs.size) {
+        out.push(...this.heliBroadcast());
+      }
+    }
+    return out;
+  }
+
+  /** Remember who this runtime id belongs to, and whether they were ever a
+   *  non-survival observer during the attempt. */
+  private noteEncounterPresence(active: ActiveVaultEncounter, p: ServerPlayer): void {
+    active.names.set(p.id, p.username);
+    if (p.mode !== 'survival') active.observers.add(p.id);
+  }
+
+  /**
+   * WARFARE XP SETTLEMENT — the only source of warfare XP in the whole game.
+   *
+   * Every qualifying participant is paid the tier's full award independently;
+   * it is never divided by party size. Qualification runs off the encounter
+   * engine's own ledger (damage it ACCEPTED, time spent in an active fight), so
+   * a player who died just before the kill still gets paid and a player who
+   * walked in at the end gets nothing. Payment is recorded against the vault's
+   * current recharge cycle, so one kill can only ever pay an account once.
+   */
+  private settleWarfare(
+    active: ActiveVaultEncounter, v: VaultServerState, elapsed: number,
+  ): Outbound[] {
+    const st = active.stamp;
+    const ledger: ContributionRecord[] = [];
+    for (const [id, row] of active.engine.ledger) {
+      const username = active.names.get(id);
+      if (!username) continue; // never seen as a real player — ignore
+      ledger.push({
+        id, username, damage: row.damage, activeSeconds: row.activeSeconds,
+        observer: active.observers.has(id),
+      });
+    }
+    const awards = settleWarfareXp(ledger, st.tier, active.engine.maxHp, elapsed);
+    if (!awards.length) return [];
+    const paid = v.warfarePaid ?? (v.warfarePaid = {});
+    const out: Outbound[] = [];
+    const bossName = VAULT_BOSS_NAMES[st.bossKind];
+    for (const award of awards) {
+      const key = award.username.toLowerCase();
+      if (paid[key] === v.deadAt) continue; // already settled this cycle
+      paid[key] = v.deadAt;
+      const w = this.warfareOf(award.username);
+      grantWarfareXp(w, award.xp);
+      const online = this.players.get(award.id);
+      if (online && online.username === award.username) {
+        out.push({ to: online.id, msg: {
+          t: 'warfareXp', amount: award.xp, tier: st.tier, total: w.xp, boss: bossName,
+        } });
+        out.push(this.warfareMsg(online));
+        this.saveWarfare(online);
+      } else {
+        this.onWarfareChange?.(award.username, w);
+      }
     }
     return out;
   }
@@ -1079,6 +1700,7 @@ export class GameServer {
       participant.savedClientData = data;
     }
     const out = this.cleanupArenaPlacements(active);
+    out.push(...this.settleWarfare(active, v, elapsed));
     for (const event of active.engine.tick(0, [])) {
       out.push({ to: 'all', msg: { t: 'encounterEvent', cx: st.cx, cz: st.cz, event } });
     }
@@ -1105,6 +1727,11 @@ export class GameServer {
         id: p.id, position: { x: p.x, y: p.y, z: p.z },
         alive: !p.dead, inside: this.playerInArena(p, st),
       }));
+      // Capture identities BEFORE the tick can prune anyone: the contribution
+      // ledger has to survive a player dying, leaving, or dropping their socket.
+      for (const p of this.players.values()) {
+        if (active.engine.participants.has(p.id)) this.noteEncounterPresence(active, p);
+      }
       const events = active.engine.tick(dt, inputs);
       for (const event of events) {
         out.push({ to: 'all', msg: { t: 'encounterEvent', cx: st.cx, cz: st.cz, event } });
@@ -1130,6 +1757,9 @@ export class GameServer {
         } });
       }
       // Damage is decided only from authoritative transforms at execution time.
+      // Lair hazards pierce armor (see `mitigate`) — a boss is the one thing in
+      // the world that a maxed set makes survivable rather than irrelevant.
+      const pierce = encounterArmorPierce(st.tier);
       for (const hazard of active.engine.hazards) {
         for (const input of inputs) {
           const damage = active.engine.hitByHazard(hazard.id, input);
@@ -1137,7 +1767,8 @@ export class GameServer {
           const player = this.players.get(input.id);
           if (!player) continue;
           out.push(...this.applyDamage(player, damage, -1,
-            { x: player.x - hazard.origin.x, y: 0.25, z: player.z - hazard.origin.z }, false));
+            { x: player.x - hazard.origin.x, y: 0.25, z: player.z - hazard.origin.z },
+            false, pierce));
         }
       }
       const v = this.ensureVault(st);
@@ -1465,6 +2096,18 @@ export class GameServer {
       out.push(...this.spillMachine(key, x, y, z));
       out.push(...this.clearFootprint(x, y, z, prevType, false));
     }
+    // WARFARE COMMAND hardware. Removing an anchor (or any silo housing cell)
+    // takes the whole entity down, so no orphan cells or ghost entities survive
+    // an explosion or a hacked direct edit.
+    if ((prev === Block.TacticalSilo || prev === Block.SiloPart) &&
+        block !== prev) {
+      const owner = this.siloCoveringCell(x, y, z);
+      if (owner) out.push(...this.destroySilo(owner));
+    }
+    if (prev === Block.InterceptorBattery && block !== Block.InterceptorBattery) {
+      const b = this.strategic.batteryAt(x, y, z);
+      if (b) out.push(...this.destroyBattery(b));
+    }
     // Turrets are single-block entities: removing/replacing one spills its
     // loaded ammo and deletes the entity (the block drop comes from the normal
     // break path, like machines).
@@ -1475,6 +2118,7 @@ export class GameServer {
         out.push(this.spawnItem(Item.Cannonball, Math.min(64, ts.ammo), x + 0.5, y + 0.3, z + 0.5));
       }
     }
+    if (prev === Block.Core || block === Block.Core) this.coreProtectedDirty = true;
     this.edits.set(key, block);
     // Placing a machine block creates its server entity, which then ticks even
     // with no chunk loaded and no one viewing it.
@@ -1486,7 +2130,78 @@ export class GameServer {
       this.turrets.set(key, newTurret());
     }
     out.push({ to: 'all', msg: { t: 'edit', x, y, z, block } });
+    // Placing warfare hardware creates its server entity — the ONLY place a
+    // silo or battery can come into existence. Blueprint ownership, faction
+    // caps and minimum spacing are all revalidated here, because the client
+    // that sent the edit cannot be trusted about any of them.
+    if (block === Block.TacticalSilo && !this.strategic.siloAt(x, y, z)) {
+      out.push(...this.createSilo(p, x, y, z));
+    } else if (block === Block.InterceptorBattery && !this.strategic.batteryAt(x, y, z)) {
+      out.push(...this.createBattery(p, x, y, z));
+    } else if (block === Block.Helipad && !this.hasBlueprint(p, Block.Helipad)) {
+      out.push(...this.revokePlacement(p, x, y, z,
+        'Flight Certification is not authorized.'));
+    }
     return out;
+  }
+
+  /** The silo whose 2×2 footprint covers this cell, if any. */
+  private siloCoveringCell(x: number, y: number, z: number): SiloState | undefined {
+    for (const s of this.strategic.silos.values()) {
+      if (y === s.y && x >= s.x && x <= s.x + 1 && z >= s.z && z <= s.z + 1) return s;
+    }
+    return undefined;
+  }
+
+  /** Undo a placement the player was not entitled to make. */
+  private revokePlacement(
+    p: ServerPlayer, x: number, y: number, z: number, reason: string,
+  ): Outbound[] {
+    this.edits.set(`${x},${y},${z}`, Block.Air);
+    return [
+      { to: 'all', msg: { t: 'edit', x, y, z, block: Block.Air } },
+      { to: p.id, msg: { t: 'warfareErr', reason } },
+    ];
+  }
+
+  private createSilo(p: ServerPlayer, x: number, y: number, z: number): Outbound[] {
+    if (!this.hasBlueprint(p, Block.TacticalSilo)) {
+      return this.revokePlacement(p, x, y, z, 'Missile Command is not authorized.');
+    }
+    const err = this.strategic.siloPlacementError(p.faction, x, y, z);
+    if (err) return this.revokePlacement(p, x, y, z, err);
+    // The pad's other three cells must be free before the housing is stamped.
+    // Test the RESOLVED block (edit ?? terrain): `edits` is undefined for
+    // untouched world, so checking it alone would bulldoze natural stone — and
+    // `clearHardwareFootprint` would later carve permanent holes in terrain the
+    // player never placed.
+    const cells: [number, number][] = [[1, 0], [0, 1], [1, 1]];
+    for (const [dx, dz] of cells) {
+      if (this.solidAt(x + dx, y, z + dz)) {
+        return this.revokePlacement(p, x, y, z, 'A silo needs a clear 2×2 pad.');
+      }
+    }
+    const tier = Math.max(1, warfareTier(this.warfareOf(p.username), 'silo'));
+    const s = this.strategic.addSilo(p.username, p.faction, x, y, z, tier);
+    const out: Outbound[] = [];
+    for (const [dx, dz] of cells) {
+      this.edits.set(`${x + dx},${y},${z + dz}`, Block.SiloPart);
+      out.push({ to: 'all', msg: {
+        t: 'edit', x: x + dx, y, z: z + dz, block: Block.SiloPart } });
+    }
+    out.push({ to: 'all', msg: { t: 'silo', state: s } });
+    return out;
+  }
+
+  private createBattery(p: ServerPlayer, x: number, y: number, z: number): Outbound[] {
+    if (!this.hasBlueprint(p, Block.InterceptorBattery)) {
+      return this.revokePlacement(p, x, y, z, 'Aegis Systems is not authorized.');
+    }
+    const err = this.strategic.batteryPlacementError(p.faction, x, y, z);
+    if (err) return this.revokePlacement(p, x, y, z, err);
+    const tier = Math.max(1, warfareTier(this.warfareOf(p.username), 'battery'));
+    const b = this.strategic.addBattery(p.username, p.faction, x, y, z, tier);
+    return [{ to: 'all', msg: { t: 'battery', state: b } }];
   }
 
   /** The loot tier if (x,y,z) is a structure chest position (fail-closed on
@@ -1552,14 +2267,16 @@ export class GameServer {
 
   /** `direct` marks damage a player personally dealt (gun/explosive) — only
    *  direct hits arm the lifesteal kill-credit window, so turret/mob/fall
-   *  deaths never move hearts. */
+   *  deaths never move hearts. `pierce` ignores a fraction of worn armor and is
+   *  only ever non-zero for vault-boss hazards. */
   private applyDamage(
     p: ServerPlayer, amount: number, by: number,
-    knock?: { x: number; y: number; z: number }, direct = false
+    knock?: { x: number; y: number; z: number }, direct = false, pierce = 0
   ): Outbound[] {
     if (p.dead || amount <= 0) return [];
     if (p.mode !== 'survival') return []; // creative/spectator are invulnerable
-    amount = mitigate(amount, p.armorPoints, p.toughness); // server-authoritative armor reduction
+    // server-authoritative armor reduction
+    amount = mitigate(amount, p.armorPoints, p.toughness, pierce);
     // Bloodlust (anti-stalemate): another player's hit in an ongoing fight
     // lands harder the longer the fight has raged — and once it's ramping, a
     // hit can never be fully absorbed, so no armor stack stalls forever.
@@ -1618,9 +2335,6 @@ export class GameServer {
       // battle). Server-awarded — never client-reported.
       if (killer && killer !== p &&
           isFaction(killer.faction) && killer.faction !== p.faction) {
-        this.factionXp[killer.faction] += XP_PLAYER_KILL;
-        out.push({ to: killer.id, msg: { t: 'xpAward', amount: XP_PLAYER_KILL, reason: 'kill' } });
-        out.push({ to: 'all', msg: { t: 'fxp', xp: this.factionXp.slice() } });
         if (this.isWarActive()) {
           this.warKills[killer.faction]++;
           out.push({ to: 'all', msg: this.warSnapshotMsg() });
@@ -2415,9 +3129,14 @@ export class GameServer {
       season: this.season,
       war: this.war,
       warWins: this.warWins.slice(),
-      factionXp: this.factionXp.slice(),
       flags: this.flags,
       vaults: [...this.vaults.entries()],
+      silos: [...this.strategic.silos.values()],
+      batteries: [...this.strategic.batteries.values()],
+      helis: [...this.vehicles.helicopters.values()].filter((h) => h.dying <= 0),
+      // peekNextId, NOT allocId: a serializer must be read-only, or every
+      // autosave would permanently burn an entity id.
+      strategicNextId: Math.max(this.strategic.peekNextId(), this.vehicles.peekNextId()),
     };
   }
 
@@ -2480,8 +3199,37 @@ export class GameServer {
     this.season = sanitizeSeason(s.season);
     this.war = sanitizeWar(s.war);
     this.warWasActive = this.isWarActive();
-    this.warWins = sanitizeFactionXp(s.warWins, FACTIONS.length);
-    this.factionXp = sanitizeFactionXp(s.factionXp, FACTIONS.length);
+    this.warWins = sanitizeCounterArray(s.warWins, FACTIONS.length);
+    // Warfare Command hardware. Active missiles are deliberately NOT restored —
+    // a restart cancels anything mid-arc rather than resuming a stale arc.
+    let highestId = 0;
+    for (const raw of Array.isArray(s.silos) ? s.silos : []) {
+      const st = sanitizeSilo(raw);
+      if (!st) continue;
+      this.strategic.silos.set(st.id, st);
+      highestId = Math.max(highestId, st.id);
+    }
+    for (const raw of Array.isArray(s.batteries) ? s.batteries : []) {
+      const st = sanitizeBattery(raw);
+      if (!st) continue;
+      this.strategic.batteries.set(st.id, st);
+      highestId = Math.max(highestId, st.id);
+    }
+    for (const raw of Array.isArray(s.helis) ? s.helis : []) {
+      const h = sanitizeHelicopter(raw);
+      if (!h) continue;
+      this.vehicles.helicopters.set(h.id, h);
+      highestId = Math.max(highestId, h.id);
+    }
+    if (Number.isFinite(s.strategicNextId)) {
+      highestId = Math.max(highestId, Math.floor(s.strategicNextId as number) - 1);
+    }
+    this.coreProtectedDirty = true;
+    // Both sims are seeded from the same floor so a silo and a helicopter can
+    // never be handed the same id by independent counters after a restart.
+    this.strategic.seedIds(highestId);
+    this.vehicles.seedIds(highestId);
+    this.vehicles.clearOccupants();   // occupants never survive a restart
     this.flags = sanitizeFlags(s.flags); // carriers never survive a reboot
     return true;
   }
@@ -2523,8 +3271,13 @@ export interface WorldSave {
   war?: WarState;
   /** War wins per faction id this season (the season scoreboard). */
   warWins?: number[];
-  /** Shared faction XP pools (progression perks). */
-  factionXp?: number[];
+  /** Warfare Command strategic hardware (silos / interceptor batteries /
+   *  helicopters). Active missiles are deliberately NOT saved — a restart
+   *  cancels anything in flight rather than restoring it mid-arc. */
+  silos?: SiloState[];
+  batteries?: BatteryState[];
+  helis?: HelicopterState[];
+  strategicNextId?: number;
   /** Capture-the-flag state: who holds which flag + the armed switch. */
   flags?: FlagsState;
   /** Vault boss HP + per-player openedBy ledgers (Milestone D). */
@@ -2532,6 +3285,17 @@ export interface WorldSave {
 }
 
 /** A "x,y,z" integer block-coordinate key (the map keys we persist). */
+/** Fail-closed non-negative integer array of a fixed length (war scoreboards). */
+function sanitizeCounterArray(raw: unknown, n: number): number[] {
+  const out = new Array<number>(n).fill(0);
+  if (!Array.isArray(raw)) return out;
+  for (let i = 0; i < n; i++) {
+    const v = raw[i];
+    out[i] = Number.isFinite(v) ? Math.max(0, Math.floor(v as number)) : 0;
+  }
+  return out;
+}
+
 function validBlockKey(k: unknown): k is string {
   return typeof k === 'string' && /^-?\d+,-?\d+,-?\d+$/.test(k);
 }

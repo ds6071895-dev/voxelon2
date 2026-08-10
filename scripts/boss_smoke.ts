@@ -2,13 +2,20 @@ import {
   BOSS_DEFINITIONS, ENCOUNTER_HURT_SECONDS, ENCOUNTER_INTRO_SECONDS,
   ENCOUNTER_PHASE_TRANSITION_SECONDS,
   ENCOUNTER_RESET_GRACE_SECONDS, MAX_ENCOUNTER_ACTORS, MAX_ENCOUNTER_HAZARDS,
-  MAX_ENCOUNTER_OBJECTS, VaultEncounter, bossHitContains, hazardContains,
+  MAX_ENCOUNTER_OBJECTS, MIN_MAJOR_TELEGRAPH, VaultEncounter, bossHitContains,
+  encounterTierTuning, hazardContains,
   participantHpMultiplier, sanitizeEncounterSnapshot, sealContains,
   type EncounterParticipant, type EncounterConfig,
 } from '../src/vault_encounter';
 import { bossMaxHp, encounterBaseHp } from '../src/vault_encounter';
-import { VAULT_BOSS_HITBOX, type VaultBossKind, type VaultTier } from '../src/vaults';
+import {
+  ENCOUNTER_ENRAGE_SECONDS, crowdCadenceMultiplier, encounterArmorPierce,
+} from '../src/vault_encounter';
+import {
+  VAULT_BOSS_HITBOX, bruteMaxHp, type VaultBossKind, type VaultTier,
+} from '../src/vaults';
 import { Item, ITEMS, gunVolley } from '../src/items';
+import { ARMOR_POINT_CAP, TOUGHNESS_CAP, mitigate } from '../src/net/protocol';
 import { encounterCoach, hazardAdvice } from '../src/vault_presentation';
 
 const kinds = Object.keys(BOSS_DEFINITIONS) as VaultBossKind[];
@@ -355,6 +362,212 @@ check(resetEncounter.status === 'idle' && !resetEncounter.snapshot().seal.sealed
   check(encounterCoach({ ...base, status: 'intro' }).text ===
     BOSS_DEFINITIONS.crystal_seer.phaseBriefs[0],
     'the intro briefs you before the first hit lands');
+}
+
+// --- Tier is the difficulty dial ----------------------------------------------
+// A Heartland lair must be a teaching fight and a deep-Wilds lair a real test,
+// from ONE authored kit. These checks pin the direction of every tier knob and
+// then prove it shows up in the simulation rather than just in a table.
+{
+  const [t1, t2, t3] = ([1, 2, 3] as VaultTier[]).map(encounterTierTuning);
+  check(t1.telegraph > t2.telegraph && t2.telegraph > t3.telegraph,
+    'lower tiers give you longer to read every telegraph');
+  check(t1.cooldown > t2.cooldown && t2.cooldown > t3.cooldown &&
+    t1.move > t2.move && t2.move > t3.move,
+    'lower tiers attack and reposition less often');
+  check(t1.damage < t2.damage && t2.damage < t3.damage && t1.damage < 1,
+    'a Tier I mistake is survivable; a Tier III mistake is not');
+
+  // Simulate the same boss at both ends of the ladder and compare what the
+  // player is actually asked to survive per minute.
+  const pressure = (tier: VaultTier): { casts: number; damage: number; read: number } => {
+    const participant: EncounterParticipant = {
+      id: 1, position: { x: 3, y: 10, z: 2 }, alive: true, inside: true,
+    };
+    const e = new VaultEncounter({ ...deterministicConfig,
+      encounterId: `pressure-${tier}`, tier, kind: 'ember_colossus', family: 'ember' });
+    e.start(1, 0);
+    let casts = 0, damage = 0, read = 0;
+    const seen = new Set<number>();
+    for (let i = 0; i < 4 * (ENCOUNTER_INTRO_SECONDS + 120); i++) {
+      for (const event of e.tick(0.25, [participant])) {
+        if (event.type === 'cast') casts++;
+      }
+      for (const h of e.hazards) {
+        if (seen.has(h.id)) continue;
+        seen.add(h.id);
+        damage += h.damage;
+        read += h.executeAt - h.telegraphAt;
+      }
+    }
+    return { casts, damage, read: read / Math.max(1, seen.size) };
+  };
+  const easy = pressure(1), hard = pressure(3);
+  check(hard.damage > easy.damage * 1.6,
+    `Tier III throws far more damage per fight than Tier I ` +
+    `(${hard.damage} vs ${easy.damage})`);
+  check(easy.read > hard.read,
+    `Tier I telegraphs stay on screen longer (${easy.read.toFixed(2)}s vs ` +
+    `${hard.read.toFixed(2)}s)`);
+  check(easy.casts < hard.casts,
+    `Tier III casts more often over the same minute (${hard.casts} vs ${easy.casts})`);
+  check(easy.read >= MIN_MAJOR_TELEGRAPH && hard.read >= MIN_MAJOR_TELEGRAPH,
+    'no tier can squeeze a telegraph below the readable floor');
+}
+
+// --- A boss stays in its own room ---------------------------------------------
+// Relocation used to clamp every boss to a flat 1.2 blocks from the wall, which
+// buried the wide bodies in masonry. The clamp is now the boss's own radius.
+{
+  for (const kind of kinds) {
+    const def = BOSS_DEFINITIONS[kind];
+    const half = VAULT_BOSS_HITBOX[kind].halfWidth;
+    const bounds = { minX: -7, minY: 5, minZ: -7, maxX: 7, maxY: 14, maxZ: 7 };
+    const e = new VaultEncounter({
+      encounterId: `containment:${kind}`, seed: 909, tier: 3, kind, family: def.family,
+      center: { x: 0, y: 10, z: 0 }, bounds,
+      sockets: [{ x: -4, y: 10, z: -4 }, { x: 4, y: 10, z: -4 },
+        { x: 4, y: 10, z: 4 }, { x: -4, y: 10, z: 4 }],
+      cameraAnchors: [], startTime: 0,
+    });
+    e.start(1, 0);
+    let worst = 0;
+    let floated = false;
+    // Chase the boss with a participant that hugs the walls AND jumps, so
+    // charges resolve against an off-floor, off-arena target position.
+    for (let i = 0; i < 900; i++) {
+      const t = i * 0.25;
+      e.tick(0.25, [{ id: 1, alive: true, inside: true,
+        position: { x: Math.sin(t) * 6.9, y: 10 + (i % 7 === 0 ? 3.5 : 0),
+          z: Math.cos(t * 0.7) * 6.9 } }]);
+      const p = e.bossPosition;
+      worst = Math.max(worst,
+        Math.abs(p.x) + Math.min(half, 6.25) - 7,
+        Math.abs(p.z) + Math.min(half, 6.25) - 7);
+      // The arena floor is the ONLY height a boss may ever occupy: a charge
+      // that inherited a jumping player's Y used to lift it off the ground.
+      if (p.y !== 10) floated = true;
+    }
+    check(worst <= 1e-6 && !floated,
+      `${def.name}: its body never leaves the arena floor, however it moves`);
+  }
+}
+
+// --- Five bosses, five fights --------------------------------------------------
+{
+  const signature = (kind: VaultBossKind): string => BOSS_DEFINITIONS[kind].phases
+    .flat().map((a) => a.shape).sort().join(',');
+  const names = new Set<string>();
+  for (const kind of kinds) {
+    for (const a of BOSS_DEFINITIONS[kind].phases.flat()) names.add(a.name);
+  }
+  const totalAbilities = kinds.reduce(
+    (n, kind) => n + BOSS_DEFINITIONS[kind].phases.flat().length, 0);
+  check(names.size === totalAbilities,
+    'no two bosses share an ability name — every kit is its own fight');
+  check(new Set(kinds.map(signature)).size >= 4,
+    'bosses differ by the SHAPES they ask you to dodge, not just by wording');
+  check(new Set(kinds.map((k) => BOSS_DEFINITIONS[k].moveCadence)).size === 5,
+    'each boss repositions at its own pace');
+  check(kinds.every((k) => BOSS_DEFINITIONS[k].phases[2].some((a) => a.damage >= 7)),
+    'every boss has a genuine punish in its final phase');
+  check(kinds.every((k) => BOSS_DEFINITIONS[k].phases[0].every((a) => a.damage <= 7)),
+    'no boss opens with a one-shot before you have read it');
+}
+
+// --- A boss must still be a threat to the gear that can reach it ---------------
+// The damage ladder is authored against a bare 20 HP bar, but armor is
+// MULTIPLICATIVE and saturates: 20 points blocks 80% flat and four Greater
+// Runes of Iron then soak 4 more. Unpierced, that turned every attack in the
+// game — a Tier I tap and a Tier III ULTIMATE alike — into the same 1 HP, so a
+// geared player could stand still in a lair and out-regen the boss. These
+// checks pin the pierce ladder AND the property it exists to protect: that the
+// authored rungs stay distinguishable through a maxed set.
+{
+  const rungs = { LIGHT: 3, MEDIUM: 5, HEAVY: 7, ULTIMATE: 9 };
+  const raw = (base: number, tier: VaultTier): number =>
+    Math.max(1, Math.round(base * encounterTierTuning(tier).damage));
+  // The endgame wall: full titanium plus a full set of Greater Runes of Iron.
+  const maxed = (amount: number, tier: VaultTier): number =>
+    mitigate(amount, ARMOR_POINT_CAP, TOUGHNESS_CAP, encounterArmorPierce(tier));
+
+  check(encounterArmorPierce(1) < encounterArmorPierce(2) &&
+    encounterArmorPierce(2) < encounterArmorPierce(3),
+    'deeper lairs cut through more of your armor');
+  check(encounterArmorPierce(1) > 0 && encounterArmorPierce(3) < 1,
+    'no tier either ignores armor entirely or lets it be ignored');
+  check(mitigate(10, 12, 2) === mitigate(10, 12, 2, 0),
+    'pierce defaults to zero — open-world damage is untouched');
+  check(mitigate(20, ARMOR_POINT_CAP, 0, 0.5) > mitigate(20, ARMOR_POINT_CAP, 0),
+    'a pierced hit always beats the same hit against the same armor');
+
+  // Checked per tier against the gear that tier is FOR. A maxed set trivialising
+  // the Heartland tutorial boss is the intended shape of progression; a maxed
+  // set trivialising the deep Wilds is the bug this pierce ladder exists to fix.
+  const audience: Record<VaultTier, number> = { 1: 15, 2: 19, 3: ARMOR_POINT_CAP };
+  for (const tier of [1, 2, 3] as VaultTier[]) {
+    const hit = (base: number): number =>
+      mitigate(raw(base, tier), audience[tier], TOUGHNESS_CAP, encounterArmorPierce(tier));
+    check(hit(rungs.ULTIMATE) > hit(rungs.LIGHT),
+      `T${tier}: an ULTIMATE still outweighs a tap through best-in-slot armor ` +
+      `(${hit(rungs.ULTIMATE)} vs ${hit(rungs.LIGHT)})`);
+  }
+  // The deep Wilds is the one place best-in-slot must not mean immunity: a
+  // 20-heart player has 40 HP, so an ULTIMATE has to be worth several of them.
+  const deepest = maxed(raw(rungs.ULTIMATE, 3), 3);
+  check(deepest >= 5 && deepest <= 12,
+    `a Tier III ULTIMATE costs a maxed 40 HP player a real bite (${deepest} HP)`);
+  // ...and the shallowest lair must stay the teaching fight, so a fresh spawn
+  // in wood armor survives more than a couple of mistakes.
+  const fresh = mitigate(raw(rungs.ULTIMATE, 1), 5, 0, encounterArmorPierce(1));
+  check(Math.ceil(20 / fresh) >= 4,
+    `a Tier I ULTIMATE still leaves a wood-armor fresh spawn room to learn ` +
+    `(${fresh} HP, ${Math.ceil(20 / fresh)} hits)`);
+
+  // Toughness is a strong upgrade, never an off switch.
+  const withRunes = maxed(raw(rungs.ULTIMATE, 3), 3);
+  const without = mitigate(raw(rungs.ULTIMATE, 3), ARMOR_POINT_CAP, 0,
+    encounterArmorPierce(3));
+  check(withRunes < without && withRunes > 1,
+    `Greater Runes of Iron are worth farming without flattening the fight ` +
+    `(${without} -> ${withRunes})`);
+}
+
+// --- A raid must not be a safer fight than a solo pull -------------------------
+{
+  check(crowdCadenceMultiplier(1) === 1,
+    'a solo pull uses the boss kit exactly as authored');
+  const scales = [1, 2, 3, 4, 5, 6].map(crowdCadenceMultiplier);
+  check(scales.every((s, i) => i === 0 || s <= scales[i - 1]),
+    'the boss never slows down as the group grows');
+  check(scales[scales.length - 1] >= 0.5,
+    'a full group still gets a readable rhythm, not a strobe');
+  // HP scales 0.7/player while the boss aims ONE cast at ONE player, so without
+  // this the sixth member made the fight 4.5x longer and 6x safer per head.
+  const solo = 1;
+  const six = crowdCadenceMultiplier(6) * 6;   // personal targeting interval
+  check(six / solo < 3.5,
+    `six players do not each get a sixth of the pressure (${(six).toFixed(2)}x)`);
+}
+
+// --- Enrage has to actually mean something --------------------------------------
+{
+  const slowest = Math.min(...[Item.Pistol, Item.Sniper, Item.RocketLauncher]
+    .map((id) => {
+      const v = gunVolley(ITEMS[id].gun!);
+      return ENCOUNTER_ENRAGE_SECONDS - bossMaxHp(3, 'bone_warden') / (v.perHit / v.cadence * 0.55);
+    }));
+  check(slowest > 0,
+    `even the slowest primary clears the deepest lair before enrage ` +
+    `(${slowest.toFixed(0)}s of margin)`);
+  check(ENCOUNTER_ENRAGE_SECONDS <= 300,
+    'the enrage timer is short enough that a stalled fight ever reaches it');
+}
+
+// --- One HP ladder, not two -----------------------------------------------------
+{
+  check(([1, 2, 3] as VaultTier[]).every((t) => encounterBaseHp(t) === bruteMaxHp(t)),
+    'the encounter and the persisted world-state brute share one HP ladder');
 }
 
 check(kinds.length === 5, 'all five dungeon boss families are covered');

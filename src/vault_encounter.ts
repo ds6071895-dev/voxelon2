@@ -4,7 +4,7 @@
 // dependencies.  The browser's offline adapter and the authoritative server
 // both feed it the same participant inputs at 20 Hz.
 
-import { VAULT_BOSS_HITBOX } from './vaults';
+import { VAULT_BOSS_HITBOX, bruteMaxHp } from './vaults';
 import type { VaultBossKind, VaultFamily, VaultTier } from './vaults';
 
 export const ENCOUNTER_HZ = 20;
@@ -13,7 +13,10 @@ export const ENCOUNTER_INTRO_SECONDS = 11.5;
 export const ENCOUNTER_PHASE_TRANSITION_SECONDS = 3.4;
 export const ENCOUNTER_VICTORY_CINEMATIC_SECONDS = 7.2;
 export const ENCOUNTER_RESET_GRACE_SECONDS = 15;
-export const ENCOUNTER_ENRAGE_SECONDS = 360;
+/** Six minutes was longer than the slowest weapon needs to clear the deepest
+ *  lair, so enrage had literally never fired. Four still clears comfortably
+ *  with every primary and leaves the timer as a real soft-wipe on a stall. */
+export const ENCOUNTER_ENRAGE_SECONDS = 240;
 export const MAX_ENCOUNTER_PARTICIPANTS = 6;
 export const MAX_ENCOUNTER_TRACKED_PARTICIPANTS = 64;
 export const MAX_ENCOUNTER_ACTORS = 32;
@@ -193,212 +196,290 @@ const attack = (
 ): AttackDefinition => ({ name, shape, telegraph: Math.max(1, telegraph), cooldown, damage, radius,
   recovery: 0.9, ...extra });
 
+/** Damage budget, expressed against a 20 HP (10-heart) bar and then scaled by
+ *  tier. A LIGHT tap is a nuisance, an ULTIMATE is "that was your own fault".
+ *  Keeping every boss on this ladder is what makes tier the difficulty dial
+ *  rather than five independently-guessed numbers. */
+const LIGHT = 3, MEDIUM = 5, HEAVY = 7, ULTIMATE = 9;
+
+/**
+ * The five lair bosses. Each one is built around ONE dodge verb so that
+ * learning a boss means learning a movement habit, not memorising a list:
+ *
+ *   Bone Warden      — SIDESTEP. Slow, enormous, close-range cones and lanes.
+ *   Mire Queen       — KEEP MOVING. Fast, evasive, expanding rings and pools.
+ *   Ember Colossus   — READ EARLY. Ponderous siege artillery with huge payloads.
+ *   Crystal Seer     — REACT. Light, relentless beam lattices, tiny windows.
+ *   Gilded Artificer — COUNT. A machine on a rhythm: dense but honest.
+ *
+ * Damage is drawn from the LIGHT/MEDIUM/HEAVY/ULTIMATE ladder and scaled by
+ * tier, so the same fight is a teaching encounter in the Heartland and a real
+ * test in the deep Wilds.
+ */
 export const BOSS_DEFINITIONS: Record<VaultBossKind, BossDefinition> = {
   bone_warden: {
     kind: 'bone_warden', family: 'crypt', name: 'Bone Warden',
-    title: 'Keeper of the Restless', hpModifier: 1, color: '#aa72ff',
-    introLine: 'The seals crack. Every grave answers.',
-    victoryLine: 'The dead fall silent at last.',
-    phaseTitles: ['The Sealed Tomb', 'The Graves Open', 'Last Rites'],
+    title: 'Warden of the Sunken Nave', hpModifier: 1, color: '#aa72ff',
+    introLine: 'The nave wakes. Every slab in the floor is a door.',
+    victoryLine: 'The vigil ends. The nave is quiet.',
+    phaseTitles: ['The Long Vigil', 'The Nave Opens', 'Last Rites'],
     phaseBriefs: [
-      'Keep damaging the Warden. Step around chain sweeps, leave grave marks, and cross each clearly marked toll ring.',
-      'The funeral procession begins. Find the open lane, thin the optional pallbearers, and keep pressure on the Warden.',
-      'Last Rites begins. Read the condemned quarter and execution lane, then finish the Warden itself.',
+      'The Warden is slow and hits like a wall. Fight from its flank: every sweep and lane is aimed straight ahead, so step sideways rather than backwards and keep swinging.',
+      'The floor slabs open. Pick one of the three lanes and commit to it, step out of the falling-ossuary marks, and cut down pallbearers only if they crowd you.',
+      'Last Rites. One quarter of the nave collapses at a time and the execution lane is a straight line — stand in the lit quarter, off the lane, and finish it.',
     ],
-    moveStyle: ['socket', 'blink', 'charge', 'target_swap'], moveCadence: 5.2,
-    army: ['skeleton', 'zombie', 'bone_knight'],
+    moveStyle: ['charge', 'socket', 'pursue', 'center'], moveCadence: 6.2,
+    army: ['bone_knight', 'skeleton', 'zombie'],
     phases: [
       [
-        attack('Chain Reap', 'cone', 1.1, 3.4, 6, 6, { angle: Math.PI * 0.62 }),
-        attack('Funeral Toll', 'ring', 1.25, 4.8, 6, 6.5, { width: 1 }),
-        attack('Grave Mark', 'rain', 1.15, 4.2, 6, 1.7, { count: 4 }),
-        attack('Processional Rush', 'line', 1.15, 4.9, 7, 12, { width: 2 }),
-        attack('Bellfall', 'circle', 1.2, 4.3, 6, 3.2),
+        attack('Reliquary Sweep', 'cone', 1.35, 3.6, MEDIUM, 7, { angle: Math.PI * 0.62 }),
+        attack('Grave Toll', 'ring', 1.45, 5.2, MEDIUM, 6, { width: 1.2 }),
+        attack("Pallbearer's March", 'line', 1.3, 4.6, HEAVY, 13, { width: 2.2 }),
+        attack('Falling Slabs', 'rain', 1.25, 4.4, LIGHT, 1.8, { count: 4 }),
+        attack('Iron Censer', 'circle', 1.3, 4.2, MEDIUM, 3.4),
       ],
       [
-        attack('Three-Lane Procession', 'line', 1.25, 5.2, 8, 14,
-          { width: 1.8, count: 3 }),
-        attack('Double Toll', 'ring', 1.2, 4.8, 7, 8, { width: 0.9, count: 2 }),
-        attack('Call the Pallbearers', 'rain', 1.25, 8, 6, 1.8,
-          { summons: 'skeleton', count: 2 }),
-        attack('Chain Reap', 'cone', 1.05, 3.4, 7, 6, { angle: Math.PI * 0.68 }),
-        attack('Falling Ossuary', 'rain', 1.15, 4.7, 8, 1.9, { count: 5 }),
+        attack('Three-Lane Cortège', 'line', 1.35, 5, HEAVY, 14, { width: 1.7, count: 3 }),
+        attack('Double Toll', 'ring', 1.3, 5, MEDIUM, 8, { width: 1, count: 2 }),
+        attack('Call the Pallbearers', 'rain', 1.4, 9, LIGHT, 1.9,
+          { summons: 'bone_knight', count: 2 }),
+        attack('Wide Reliquary Sweep', 'cone', 1.2, 3.4, HEAVY, 7, { angle: Math.PI * 0.72 }),
+        attack('Ossuary Collapse', 'rain', 1.25, 4.6, MEDIUM, 1.9, { count: 5 }),
       ],
       [
-        attack('Last Rites', 'quadrant', 1.35, 5.2, 10, 11),
-        attack('Execution Charge', 'line', 1.2, 5.4, 10, 12, { width: 2.4 }),
-        attack('Final Toll', 'ring', 1.3, 5.6, 9, 8.5, { width: 1, count: 3 }),
-        attack('Chain Cross', 'line', 1.15, 5, 9, 14, { width: 1.7, count: 2 }),
-        attack('Mass Grave Mark', 'rain', 1.1, 4.6, 8, 1.8, { count: 6 }),
+        attack('Rite of Ash', 'quadrant', 1.5, 5.4, ULTIMATE, 11),
+        attack('Execution March', 'line', 1.3, 5, ULTIMATE, 13, { width: 2.6 }),
+        attack('Funeral Peal', 'ring', 1.4, 5.6, HEAVY, 8.5, { width: 1, count: 3 }),
+        attack('Crossed Chains', 'line', 1.25, 4.8, HEAVY, 14, { width: 1.6, count: 2 }),
+        attack('Mass Interment', 'rain', 1.2, 4.4, MEDIUM, 1.8, { count: 6 }),
       ],
     ],
   },
   mire_queen: {
     kind: 'mire_queen', family: 'mire', name: 'Mire Queen',
-    title: 'Mother Beneath the Reeds', hpModifier: 1, color: '#42e2bd',
-    introLine: 'Something ancient stirs below the black water.',
-    victoryLine: 'The brood sinks back into the mire.',
-    phaseTitles: ['Venom Crown', 'The Brood Awakens', 'Drowning Court'],
+    title: 'Sovereign of the Drowned Ring', hpModifier: 1, color: '#42e2bd',
+    introLine: 'The ring floods. Something long uncoils beneath it.',
+    victoryLine: 'The water stills. The brood goes back to sleep.',
+    phaseTitles: ['Still Water', 'The Brood Wakes', 'Drowning Court'],
     phaseBriefs: [
-      'Keep damaging the Queen. Leave each sinkhole, cross the tail wake, and move around the venom bloom.',
-      'The tide is rising. Use the open side of each sweep while the optional brood pressures the room.',
-      'Follow the rotating clear quarter, cross each spiral ring, and punish the Queen after her serpent charge.',
+      'The Queen never lets you stand still. Sinkholes open where you are standing, not where you are going — keep walking a circle around her and she will miss.',
+      'The tide rises in rings that travel outward. Move THROUGH a ring as it passes rather than running from it, and let the brood come to you instead of chasing it.',
+      'Drowning Court. Rings, quarters and a straight lunge overlap now — pick the gap early, cross it early, and hit her while she recovers from the lunge.',
     ],
-    moveStyle: ['burrow', 'target_swap', 'retreat', 'pursue'], moveCadence: 4.4,
-    army: ['mireling', 'spitter', 'skitter', 'bog_brute'],
+    moveStyle: ['burrow', 'target_swap', 'retreat', 'strafe'], moveCadence: 3.8,
+    army: ['mireling', 'spitter', 'skitter'],
     phases: [
       [
-        attack('Venom Bloom', 'cone', 1.1, 3.2, 5, 9, { angle: Math.PI * 0.62 }),
-        attack('Locking Sinkhole', 'circle', 1.15, 4.1, 6, 2.7),
-        attack('Tail Wake', 'line', 1.15, 4.3, 6, 12, { width: 1.7, count: 2 }),
-        attack('Festering Rain', 'rain', 1.15, 4, 5, 1.7, { count: 4 }),
-        attack('Crown Snap', 'cone', 1.05, 3.8, 7, 6, { angle: Math.PI * 0.48 }),
+        attack('Bile Spray', 'cone', 1.15, 3, LIGHT, 9, { angle: Math.PI * 0.6 }),
+        attack('Sinkhole', 'circle', 1.2, 3.8, MEDIUM, 3),
+        attack('Tide Pull', 'ring', 1.25, 4.4, MEDIUM, 6.5, { width: 1.1 }),
+        attack('Spore Fall', 'rain', 1.15, 3.6, LIGHT, 1.7, { count: 4 }),
+        attack('Tail Lash', 'line', 1.2, 4, MEDIUM, 12, { width: 1.8, count: 2 }),
       ],
       [
-        attack('High Tide', 'line', 1.35, 5.4, 8, 14, { width: 4 }),
-        attack('Brood Drift', 'rain', 1.3, 8, 6, 1.8,
+        attack('Rising Tide', 'ring', 1.3, 4.8, MEDIUM, 8, { width: 0.95, count: 3 }),
+        attack('Broodfall', 'rain', 1.35, 8.5, LIGHT, 1.8,
           { summons: 'mireling', count: 2 }),
-        attack('Lotus Rings', 'ring', 1.2, 5, 8, 8, { width: 0.9, count: 3 }),
-        attack('Undertow', 'circle', 1.2, 4.5, 7, 4),
-        attack('Venom Bloom', 'cone', 1.05, 3.2, 7, 9, { angle: Math.PI * 0.68 }),
+        attack('Undertow', 'circle', 1.25, 4.2, HEAVY, 4.2),
+        attack('Venom Fan', 'cone', 1.1, 3.2, MEDIUM, 9, { angle: Math.PI * 0.7 }),
+        attack('Reed Whips', 'line', 1.25, 4.6, MEDIUM, 13, { width: 1.3, count: 3 }),
       ],
       [
-        attack('Rotating Lotus', 'quadrant', 1.35, 5.7, 9, 11),
-        attack('Drowning Spiral', 'ring', 1.2, 4.9, 9, 8.5, { width: 0.9, count: 3 }),
-        attack('Serpent Charge', 'line', 1.2, 5.2, 9, 13, { width: 2.8 }),
-        attack('Poison Monsoon', 'rain', 1.1, 4.1, 8, 1.7, { count: 6 }),
-        attack("Queen's Maw", 'cone', 1.1, 4, 9, 8, { angle: Math.PI * 0.7 }),
+        attack('Maelstrom', 'ring', 1.3, 4.6, HEAVY, 8.5, { width: 1, count: 3 }),
+        attack('Serpent Lunge', 'line', 1.2, 4.4, ULTIMATE, 13, { width: 2.6 }),
+        attack('Black Quarter', 'quadrant', 1.4, 5.2, HEAVY, 11),
+        attack('Monsoon', 'rain', 1.1, 3.8, MEDIUM, 1.7, { count: 6 }),
+        attack("Queen's Maw", 'cone', 1.15, 3.8, HEAVY, 8, { angle: Math.PI * 0.75 }),
       ],
     ],
   },
   ember_colossus: {
     kind: 'ember_colossus', family: 'ember', name: 'Ember Colossus',
-    title: 'The Furnace Unbound', hpModifier: 1, color: '#ff6b32',
-    introLine: 'The forge has found a heartbeat.',
-    victoryLine: 'The furnace gutters into ash.',
-    phaseTitles: ['Cold Iron', 'Furnace Heart', 'Worldfire'],
+    title: 'The Walking Caldera', hpModifier: 1, color: '#ff6b32',
+    introLine: 'The forge stands up. The floor remembers the weight.',
+    victoryLine: 'The caldera cools. Ash settles over the rim.',
+    phaseTitles: ['Cold Forge', 'Furnace Heart', 'Worldfire'],
     phaseBriefs: [
-      'Keep damaging the Colossus. Leave crater stomps, sidestep molten trails, and circle around the furnace roar.',
-      'The caldera opens. Read the vent sequence, keep moving through meteors, and ignore or thin the ember herd.',
-      'Worldfire begins. Alternate between the clear center and clear edge, then end the walking volcano.',
+      'Everything the Colossus does is enormous and slow. You have time — start moving the instant the ground lights up and you will never be hit.',
+      'The furnace opens. Vents fire in rows across the floor, so run ALONG a lit row after it fires rather than across the ones that have not.',
+      'Worldfire. The rim burns, then the core collapses — swap between the middle and the edge on each cast, and never be caught between the two.',
     ],
-    moveStyle: ['leap', 'charge', 'center', 'pursue'], moveCadence: 5.6,
-    army: ['emberling', 'emberling', 'magma_brute'],
+    moveStyle: ['leap', 'charge', 'center', 'pursue'], moveCadence: 6.6,
+    army: ['magma_brute', 'emberling'],
     phases: [
       [
-        attack('Crater Stomp', 'circle', 1.25, 4.3, 8, 3.8),
-        attack('Molten Trail', 'line', 1.2, 4.7, 7, 13, { width: 1.7 }),
-        attack('Furnace Roar', 'cone', 1.25, 5.2, 9, 7, { angle: Math.PI * 0.55 }),
-        attack('Cinderfall', 'rain', 1.15, 4.2, 6, 1.7, { count: 5 }),
-        attack('Tail Quake', 'ring', 1.2, 4.8, 8, 6.5, { width: 1.1 }),
+        attack('Crater Stomp', 'circle', 1.45, 4.6, HEAVY, 4.2),
+        attack('Magma Trail', 'line', 1.3, 4.8, MEDIUM, 13, { width: 1.9 }),
+        attack('Furnace Breath', 'cone', 1.4, 5, HEAVY, 8, { angle: Math.PI * 0.55 }),
+        attack('Cinder Rain', 'rain', 1.25, 4.2, LIGHT, 1.8, { count: 5 }),
+        attack('Shockring', 'ring', 1.35, 4.8, MEDIUM, 6.5, { width: 1.3 }),
       ],
       [
-        attack('Vent Cycle', 'line', 1.3, 5.4, 9, 14, { width: 1.8, count: 3 }),
-        attack('Meteor Cycle', 'rain', 1.2, 4.3, 8, 1.9, { count: 5 }),
-        attack('Ember Herd', 'circle', 1.3, 8.2, 6, 3,
+        attack('Vent Row', 'line', 1.4, 5.2, HEAVY, 14, { width: 1.9, count: 3 }),
+        attack('Meteor Fall', 'rain', 1.3, 4.4, MEDIUM, 2, { count: 5 }),
+        attack('Ember Herd', 'circle', 1.4, 9, LIGHT, 3,
           { summons: 'emberling', count: 2 }),
-        attack('Caldera Pulse', 'ring', 1.25, 5.1, 9, 8, { width: 1, count: 2 }),
-        attack('Basalt Charge', 'line', 1.25, 5.2, 9, 13, { width: 2.5 }),
+        attack('Caldera Pulse', 'ring', 1.35, 5.2, HEAVY, 8, { width: 1.1, count: 2 }),
+        attack('Basalt Charge', 'line', 1.35, 5, HEAVY, 13, { width: 2.6 }),
       ],
       [
-        attack('Worldfire Rim', 'ring', 1.4, 5.5, 10, 7.5, { width: 2.1 }),
-        attack('Crucible Cross', 'line', 1.3, 5.4, 10, 14, { width: 1.8, count: 2 }),
-        attack('Caldera Eruption', 'rain', 1.2, 4.4, 9, 1.8, { count: 6 }),
-        attack('Ashen Charge', 'line', 1.2, 4.8, 9, 13, { width: 2.2 }),
-        attack('Worldfire Core', 'circle', 1.45, 6.4, 11, 5.2),
+        attack('Worldfire Rim', 'ring', 1.5, 5.4, ULTIMATE, 7.5, { width: 2.2 }),
+        attack('Molten Cross', 'line', 1.35, 5, HEAVY, 14, { width: 1.9, count: 2 }),
+        attack('Eruption', 'rain', 1.25, 4.2, HEAVY, 1.9, { count: 6 }),
+        attack('Ashen Charge', 'line', 1.3, 4.6, HEAVY, 13, { width: 2.3 }),
+        attack('Core Collapse', 'circle', 1.55, 6, ULTIMATE, 5.4),
       ],
     ],
   },
   crystal_seer: {
     kind: 'crystal_seer', family: 'crystal', name: 'Crystal Seer',
-    title: 'Eye Beyond the Prism', hpModifier: 1, color: '#65b9ff',
-    introLine: 'It has already seen how you die.',
-    victoryLine: 'A thousand doomed futures shatter.',
-    phaseTitles: ['Foreseen', 'Hall of Mirrors', 'Final Prophecy'],
+    title: 'The Eye That Already Knows', hpModifier: 1, color: '#65b9ff',
+    introLine: 'It has already watched you lose. Twice.',
+    victoryLine: 'Every foreseen ending shatters at once.',
+    phaseTitles: ['Foresight', 'Hall of Mirrors', 'Final Prophecy'],
     phaseBriefs: [
-      'The Seer previews every strike. Leave the predicted beam, evade the wing prism, and move before each marked future.',
-      'Delayed echoes repeat the first attack. Remember the old lane while reading the new one; no clone needs to be shot.',
-      'The final prophecy is a sequence. Follow the previewed clear space through crossed beams and falling shards.',
+      'The Seer is quick but each beam is thin. Small steps beat big ones here — clip the edge of a lane instead of sprinting across the whole room.',
+      'Beams now come in pairs and echoes. Look for the untouched wedge between them and stand in it; the clones are noise and never have to be killed.',
+      'Final Prophecy. Four beams at once leave exactly one gap. Find it during the preview, walk into it, and stay there until the lattice fires.',
     ],
-    moveStyle: ['blink', 'target_swap', 'socket', 'retreat'], moveCadence: 3.9,
-    army: ['mirror_clone', 'shardling', 'mirror_clone'],
+    moveStyle: ['blink', 'target_swap', 'socket', 'strafe'], moveCadence: 3.2,
+    army: ['mirror_clone', 'shardling'],
     phases: [
       [
-        attack('Predicted Beam', 'line', 1.4, 4.1, 7, 14, { width: 1.4 }),
-        attack('Prism Wing', 'cone', 1.2, 3.8, 6, 10, { angle: Math.PI * 0.72 }),
-        attack('Foreseen Mark', 'rain', 1.25, 4.2, 6, 1.6, { count: 5 }),
-        attack('Lens Arrival', 'circle', 1.2, 4.6, 6, 3),
-        attack('Split Future', 'line', 1.3, 4.8, 7, 14, { width: 1.2, count: 3 }),
+        attack('Fate Beam', 'line', 1.4, 3.6, MEDIUM, 14, { width: 1.4 }),
+        attack('Split Future', 'line', 1.35, 4.2, LIGHT, 14, { width: 1.1, count: 3 }),
+        attack('Refracted Wing', 'cone', 1.2, 3.4, LIGHT, 10, { angle: Math.PI * 0.72 }),
+        attack('Foreseen Mark', 'rain', 1.25, 3.8, LIGHT, 1.6, { count: 5 }),
+        attack('Lens Arrival', 'circle', 1.2, 4, MEDIUM, 3.2),
       ],
       [
-        attack('Delayed Echo', 'line', 1.4, 4.8, 7, 14, { width: 1.3, count: 2 }),
-        attack('Rotating Refraction', 'line', 1.35, 5, 8, 14, { width: 1.2 }),
-        attack('Shattered Timeline', 'rain', 1.2, 4.3, 7, 1.7, { count: 6 }),
-        attack('Paradox Rings', 'ring', 1.3, 5.1, 8, 8, { width: 0.9, count: 3 }),
-        attack('Many-Eyed Gaze', 'cone', 1.2, 4.1, 8, 10, { angle: Math.PI * 0.9 }),
+        attack('Echo Beam', 'line', 1.35, 4, MEDIUM, 14, { width: 1.3, count: 2 }),
+        attack('Paradox Rings', 'ring', 1.3, 4.6, MEDIUM, 8, { width: 0.9, count: 3 }),
+        attack('Shattered Timeline', 'rain', 1.2, 3.8, LIGHT, 1.7, { count: 6 }),
+        attack('Mirror Court', 'circle', 1.3, 9, LIGHT, 3,
+          { summons: 'mirror_clone', count: 2 }),
+        attack('Many-Eyed Gaze', 'cone', 1.2, 3.6, MEDIUM, 10, { angle: Math.PI * 0.9 }),
       ],
       [
-        attack('Crossed Prophecy', 'line', 1.45, 5.2, 9, 14,
-          { width: 1.5, count: 2 }),
-        attack('Falling Futures', 'rain', 1.2, 4.1, 8, 1.7, { count: 6 }),
-        attack('Final Arrival', 'circle', 1.2, 4.4, 8, 3.2),
-        attack('End of One Path', 'quadrant', 1.45, 5.5, 10, 11),
-        attack('Prophecy Sequence', 'line', 1.3, 5, 9, 14, { width: 1.3, count: 4 }),
+        attack('Crossed Prophecy', 'line', 1.4, 4.4, HEAVY, 14, { width: 1.5, count: 2 }),
+        attack('End of One Path', 'quadrant', 1.45, 5, HEAVY, 11),
+        attack('Prophecy Sequence', 'line', 1.3, 4.6, MEDIUM, 14, { width: 1.2, count: 4 }),
+        attack('Falling Futures', 'rain', 1.15, 3.6, MEDIUM, 1.7, { count: 6 }),
+        attack('Certain Death', 'circle', 1.3, 4.6, ULTIMATE, 3.6),
       ],
     ],
   },
   gilded_artificer: {
     kind: 'gilded_artificer', family: 'gilded', name: 'Gilded Artificer',
-    title: 'Architect of Avarice', hpModifier: 1, color: '#f1bd42',
-    introLine: 'The vault itself takes up arms.',
-    victoryLine: 'The golden engine grinds to a halt.',
-    phaseTitles: ['Calculated Defense', 'War Machine', 'Total Lockdown'],
+    title: 'Foreman of the Assembly Hall', hpModifier: 1, color: '#f1bd42',
+    introLine: 'The assembly hall powers up. You are the work order.',
+    victoryLine: 'The line stops. The hall goes dark, bolt by bolt.',
+    phaseTitles: ['Calibration', 'Production Line', 'Total Lockdown'],
     phaseBriefs: [
-      'Keep damaging the Artificer. Timed mine cells expire on their own; leave them and sidestep each previewed dash.',
-      'The mechanism accelerates. Use the open suppression lanes while optional guards and rotating tools add pressure.',
-      'Total lockdown begins. Follow the crusher gap and previewed golden grid; the machine is still the only objective.',
+      'The Artificer works to a beat. Watch one full cycle without attacking, learn the timing, and after that you can stand inside the machine and never be touched.',
+      'The line speeds up. Grids and gear rings alternate: step off the grid rows, then walk inward through the gear ring while it expands past you.',
+      'Total Lockdown. The crushers always leave one gap and the audit always leaves one quarter — take the gap, take the quarter, and keep hitting the machine.',
     ],
-    moveStyle: ['strafe', 'charge', 'socket', 'target_swap'], moveCadence: 4.3,
-    army: ['clockwork_guard', 'clockwork_drone', 'clockwork_guard'],
+    moveStyle: ['strafe', 'socket', 'charge', 'target_swap'], moveCadence: 4.2,
+    army: ['clockwork_guard', 'clockwork_drone'],
     phases: [
       [
-        attack('Timed Mine Cells', 'rain', 1.25, 4.5, 7, 1.6, { count: 4 }),
-        attack('Preview Dash', 'line', 1.2, 4.7, 7, 11, { width: 2 }),
-        attack('Clock Hand', 'cone', 1.15, 3.8, 6, 9, { angle: Math.PI * 0.58 }),
-        attack('Coinshot Lanes', 'line', 1.15, 4.1, 6, 14, { width: 1.1, count: 3 }),
-        attack('Audit Wheel', 'ring', 1.2, 4.7, 7, 7, { width: 1 }),
+        attack('Coinshot Row', 'line', 1.25, 4, LIGHT, 14, { width: 1.1, count: 3 }),
+        attack('Clock Hand', 'cone', 1.2, 3.6, MEDIUM, 9, { angle: Math.PI * 0.58 }),
+        attack('Stamping Press', 'circle', 1.3, 4.2, MEDIUM, 3.4),
+        attack('Escapement Wheel', 'ring', 1.3, 4.6, MEDIUM, 7, { width: 1.1 }),
+        attack('Swarf Scatter', 'rain', 1.25, 4, LIGHT, 1.7, { count: 4 }),
       ],
       [
-        attack('Guard Deployment', 'circle', 1.3, 8.2, 6, 3,
+        attack('Guard Deployment', 'circle', 1.35, 9, LIGHT, 3,
           { summons: 'clockwork_guard', count: 2 }),
-        attack('Suppression Lanes', 'line', 1.25, 4.9, 8, 14, { width: 1.3, count: 3 }),
-        attack('Clockwork Wheel', 'ring', 1.25, 5.1, 8, 8, { width: 0.9, count: 3 }),
-        attack('Conveyor Sweep', 'line', 1.3, 5.2, 7, 13, { width: 3 }),
-        attack('Tool Blitz', 'cone', 1.15, 4.2, 8, 9, { angle: Math.PI * 0.72 }),
+        attack('Suppression Grid', 'line', 1.3, 4.6, MEDIUM, 14, { width: 1.3, count: 3 }),
+        attack('Gear Train', 'ring', 1.3, 5, MEDIUM, 8, { width: 0.9, count: 3 }),
+        attack('Conveyor Sweep', 'line', 1.35, 5, HEAVY, 13, { width: 3 }),
+        attack('Tool Blitz', 'cone', 1.2, 3.8, MEDIUM, 9, { angle: Math.PI * 0.72 }),
       ],
       [
-        attack('Crusher Gap', 'line', 1.45, 5.6, 9, 14, { width: 3.4, count: 2 }),
-        attack('Coin Storm', 'rain', 1.2, 4.1, 7, 1.7, { count: 6 }),
-        attack('Overclock Wheel', 'ring', 1.35, 5.8, 10, 8, { width: 1.2 }),
-        attack('Golden Grid', 'line', 1.3, 5.1, 9, 14, { width: 1.5, count: 4 }),
-        attack('Final Calculation', 'quadrant', 1.5, 5.8, 11, 11),
+        attack('Crusher Gap', 'line', 1.5, 5.4, ULTIMATE, 14, { width: 3.4, count: 2 }),
+        attack('Golden Grid', 'line', 1.35, 4.8, HEAVY, 14, { width: 1.4, count: 4 }),
+        attack('Overclock Wheel', 'ring', 1.4, 5.4, HEAVY, 8, { width: 1.3 }),
+        attack('Final Audit', 'quadrant', 1.5, 5.4, ULTIMATE, 11),
+        attack('Coin Storm', 'rain', 1.2, 3.8, MEDIUM, 1.7, { count: 6 }),
       ],
     ],
   },
 };
 
+/** Delegates to `bruteMaxHp` — these were two hand-copied ladders of the same
+ *  three numbers, so a retune of one silently desynced the encounter's HP bar
+ *  from the persisted world-state brute. */
 export function encounterBaseHp(tier: VaultTier): number {
-  return tier === 1 ? 320 : tier === 2 ? 720 : 1200;
+  return bruteMaxHp(tier);
+}
+
+/**
+ * Tier is the difficulty dial. A Tier I lair in the Heartland is the tutorial
+ * boss a fresh spawn is supposed to beat: long telegraphs, lazy cadence, and
+ * hits that cost a couple of hearts. A Tier III lair in the deep Wilds reads
+ * fast, chains attacks and takes half your bar for one mistake.
+ *
+ * Every field is a MULTIPLIER, so a boss is authored once and re-tuned three
+ * times by the world rather than being hand-balanced per tier.
+ */
+export interface EncounterTierTuning {
+  /** Telegraph (read-time) scale — higher is more generous. */
+  telegraph: number;
+  /** Gap between casts — higher is calmer. */
+  cooldown: number;
+  /** Hazard damage scale. */
+  damage: number;
+  /** Relocation cadence — higher means the boss repositions less often. */
+  move: number;
+  /** Fraction of the victim's armor a lair hazard ignores. See `mitigate`:
+   *  armor is multiplicative and saturates at 80%, so without this a Tier III
+   *  ULTIMATE and a Tier I tap both land as 1 HP on a titanium set and the
+   *  whole authored damage ladder collapses. Tier I barely pierces (its
+   *  audience is wearing wood), Tier III pierces hard (its audience is
+   *  wearing everything). */
+  pierce: number;
+}
+
+export function encounterTierTuning(tier: VaultTier): EncounterTierTuning {
+  return tier === 1
+    ? { telegraph: 1.35, cooldown: 1.3, damage: 0.72, move: 1.3, pierce: 0.25 }
+    : tier === 2
+      ? { telegraph: 1, cooldown: 1, damage: 1.12, move: 1, pierce: 0.45 }
+      : { telegraph: 0.86, cooldown: 0.85, damage: 1.5, move: 0.84, pierce: 0.6 };
 }
 
 export function encounterDamageMultiplier(tier: VaultTier): number {
-  return tier === 1 ? 1 : tier === 2 ? 1.3 : 1.65;
+  return encounterTierTuning(tier).damage;
+}
+
+/** Armor fraction a lair hazard ignores at this tier. The server feeds this
+ *  straight into `mitigate` so boss damage is the one place in the game where
+ *  a maxed set is a big advantage rather than total immunity. */
+export function encounterArmorPierce(tier: VaultTier): number {
+  return encounterTierTuning(tier).pierce;
 }
 
 export function participantHpMultiplier(peakParticipants: number): number {
   const n = Math.max(1, Math.min(MAX_ENCOUNTER_PARTICIPANTS,
     Math.floor(peakParticipants)));
   return 1 + 0.7 * (n - 1);
+}
+
+/**
+ * Cast-gap scale for the size of the group. A boss aims one cast at ONE
+ * randomly-chosen participant, so with six people in the room each individual
+ * was being targeted a sixth as often while the boss only gained 4.5x HP — a
+ * raid was strictly SAFER per player than a solo pull and barely longer. This
+ * tightens the rhythm as the group grows so personal pressure stays roughly
+ * flat, and is floored at 0.5 so a full group never gets an unreadable strobe.
+ */
+export function crowdCadenceMultiplier(peakParticipants: number): number {
+  const n = Math.max(1, Math.min(MAX_ENCOUNTER_PARTICIPANTS,
+    Math.floor(peakParticipants)));
+  return Math.max(0.5, 1 / (1 + 0.22 * (n - 1)));
 }
 
 export function bossMaxHp(
@@ -522,8 +603,21 @@ export class VaultEncounter {
   readonly hazards: EncounterHazard[] = [];
   readonly participants = new Set<number>();
   peakParticipants = 1;
+  /**
+   * WARFARE CONTRIBUTION LEDGER — kept for the WHOLE attempt, including players
+   * who died or walked out. Dying two seconds before the kill must never erase
+   * the work, and arriving at the end must never buy a share, so the ledger is
+   * intentionally never pruned the way `participants` is.
+   */
+  readonly ledger = new Map<number, { damage: number; activeSeconds: number }>();
 
   private readonly rng: () => number;
+  /** Tier difficulty multipliers, resolved once so every timing decision in the
+   *  fight scales from the same place. */
+  private readonly tune: EncounterTierTuning;
+  /** How far the boss's own body must stay clear of the arena walls, so a huge
+   *  body never ends up half-buried in masonry after a charge or a blink. */
+  private readonly bodyPad: number;
   private readonly sequence = new Map<number, number>();
   private readonly lastAttack = new Map<number, number>();
   private readonly lastHazardHit = new Map<number, number>();
@@ -552,6 +646,12 @@ export class VaultEncounter {
       throw new Error('vault encounter family/boss mismatch');
     }
     this.rng = rngFrom(hash32(config.seed ^ hash32(config.encounterId.length)));
+    this.tune = encounterTierTuning(config.tier);
+    // Never demand more clearance than the room can give: a pad wider than half
+    // the arena would collapse every destination onto the centre.
+    const b = this.config.bounds;
+    this.bodyPad = Math.min(VAULT_BOSS_HITBOX[config.kind].halfWidth + 0.5,
+      Math.max(0, Math.min(b.maxX - b.minX, b.maxZ - b.minZ) / 2 - 0.75));
     this.now = config.startTime;
     this.bossPosition = copyVec(config.center);
     this.maxHp = bossMaxHp(config.tier, config.kind, 1);
@@ -601,11 +701,21 @@ export class VaultEncounter {
     return this.drainEvents();
   }
 
+  /** Ledger row for `id`, created on first sight. */
+  private ledgerOf(id: number): { damage: number; activeSeconds: number } {
+    let row = this.ledger.get(id);
+    if (!row) { row = { damage: 0, activeSeconds: 0 }; this.ledger.set(id, row); }
+    return row;
+  }
+
   private step(dt: number, input: ReadonlyMap<number, EncounterParticipant>): void {
     this.now += dt;
     this.tickCount++;
     for (const id of [...this.participants]) {
       const p = input.get(id);
+      // Time in the room only counts once the fight is actually live — standing
+      // through the intro cinematic is not participation.
+      if (this.status === 'active') this.ledgerOf(id).activeSeconds += dt;
       if (!p || !p.alive || !p.inside || !this.inside(p.position)) this.participants.delete(id);
     }
     for (const p of input.values()) {
@@ -675,19 +785,29 @@ export class VaultEncounter {
     this.lastAttackName = chosen.name;
     const targetId = targetIds[Math.floor(this.rng() * targetIds.length)];
     const target = input.get(targetId)?.position ?? this.config.center;
-    this.cast = { attack: chosen, endsAt: this.now + chosen.telegraph + chosen.recovery };
-    const comboDelay = chosen.telegraph + chosen.recovery + 0.25;
+    // Tier stretches or squeezes the read window and the gap between casts.
+    const telegraph = chosen.telegraph * this.tune.telegraph;
+    this.cast = { attack: chosen, endsAt: this.now + telegraph + chosen.recovery };
+    const comboDelay = telegraph + chosen.recovery + 0.25;
     this.nextAttackAt = this.now + (this.comboQueue.length ? comboDelay
-      : chosen.cooldown * (this.enrage ? 0.75 : 1));
+      : chosen.cooldown * this.tune.cooldown * (this.enrage ? 0.75 : 1) *
+        crowdCadenceMultiplier(this.peakParticipants));
     this.emit('cast', this.now, [targetId], chosen.name);
-    this.spawnPattern(chosen, target, targetIds);
-    if (chosen.name === 'Burrow' || chosen.name === 'Astral Arrival') {
-      const p = this.config.sockets[Math.floor(this.rng() *
-        Math.max(1, this.config.sockets.length))] ?? this.config.center;
-      this.scheduleMove(chosen.name === 'Burrow' ? 'burrow' : 'blink', p, chosen.telegraph);
-    } else if (chosen.name.includes('Charge') || chosen.name === 'Preview Dash') {
-      this.scheduleMove('charge', target, chosen.telegraph);
+    this.spawnPattern(chosen, target, targetIds, telegraph);
+    // A named lunge moves the body as part of the cast, so the recovery window
+    // it leaves behind is the fight's reliable punish opportunity.
+    if (chosen.name.includes('Charge') || chosen.name.includes('Lunge') ||
+        chosen.name === 'Execution March' || chosen.name === 'Conveyor Sweep') {
+      this.scheduleMove('charge', target, telegraph);
     }
+  }
+
+  /** Tier scale + the enrage bonus, applied in ONE place so a hazard from the
+   *  boss and a hazard from its army can never drift apart. Enrage used to only
+   *  speed the boss up, which does nothing to a player who is dodging cleanly —
+   *  a stalled fight now also starts to hurt. */
+  private hazardDamage(base: number): number {
+    return Math.max(1, Math.round(base * this.tune.damage * (this.enrage ? 1.3 : 1)));
   }
 
   private beginMove(targetIds: number[], input: ReadonlyMap<number, EncounterParticipant>): void {
@@ -719,31 +839,48 @@ export class VaultEncounter {
       destination = { x: target.x + Math.cos(angle) * 5, y: this.config.center.y,
         z: target.z + Math.sin(angle) * 5 };
     }
-    destination.x = Math.max(this.config.bounds.minX + 1.2,
-      Math.min(this.config.bounds.maxX - 1.2, destination.x));
-    destination.z = Math.max(this.config.bounds.minZ + 1.2,
-      Math.min(this.config.bounds.maxZ - 1.2, destination.z));
-    destination.y = this.config.center.y;
-    const telegraph = kind === 'charge' || kind === 'leap' ? 1.05
-      : kind === 'burrow' || kind === 'blink' || kind === 'target_swap' ? 0.8 : 0.55;
+    // Clamped by the boss's OWN body radius (see `floorSpot`), not a fixed 1.2:
+    // a wide boss parked against a wall used to leave half its model in masonry.
+    const telegraph = (kind === 'charge' || kind === 'leap' ? 1.05
+      : kind === 'burrow' || kind === 'blink' || kind === 'target_swap' ? 0.8 : 0.55) *
+      this.tune.telegraph;
     this.scheduleMove(kind, destination, telegraph);
     const pressure = Math.max(0, this.phase - 1) + (this.enrage ? 1 : 0);
     this.nextMoveAt = this.now + Math.max(2.4,
-      this.definition.moveCadence - pressure * 0.65) * (this.enrage ? 0.8 : 1);
+      this.definition.moveCadence * this.tune.move - pressure * 0.65) *
+      (this.enrage ? 0.8 : 1);
   }
 
   private scheduleMove(kind: BossMoveKind, destination: Vec3, telegraph: number): void {
+    // EVERY relocation lands here, including charges aimed at a player's raw
+    // position. Floor height and wall clearance are re-applied unconditionally
+    // so a boss can never be dragged into the air by a jumping target or
+    // shouldered into the masonry by its own lunge.
+    const to = this.floorSpot(destination);
     const executeAt = this.now + Math.max(0.45, telegraph);
     this.pendingMove = {
-      kind, from: copyVec(this.bossPosition), to: copyVec(destination),
-      startedAt: this.now, executeAt, at: executeAt, position: copyVec(destination),
+      kind, from: copyVec(this.bossPosition), to: copyVec(to),
+      startedAt: this.now, executeAt, at: executeAt, position: copyVec(to),
     };
     this.emit('move', this.now, [], `move_${kind}`);
   }
 
-  private spawnPattern(a: AttackDefinition, target: Vec3, targetIds: number[]): void {
+  /** Snap a candidate destination onto the arena floor, inside the walls. */
+  private floorSpot(p: Vec3): Vec3 {
+    const b = this.config.bounds;
+    return {
+      x: Math.max(b.minX + this.bodyPad, Math.min(b.maxX - this.bodyPad, p.x)),
+      y: this.config.center.y,
+      z: Math.max(b.minZ + this.bodyPad, Math.min(b.maxZ - this.bodyPad, p.z)),
+    };
+  }
+
+  private spawnPattern(
+    a: AttackDefinition, target: Vec3, targetIds: number[],
+    telegraph = a.telegraph * this.tune.telegraph,
+  ): void {
     const count = Math.max(1, a.count ?? 1);
-    const executeAt = this.now + Math.max(MIN_MAJOR_TELEGRAPH, a.telegraph);
+    const executeAt = this.now + Math.max(MIN_MAJOR_TELEGRAPH, telegraph);
     const hazardCount = a.shape === 'cone' || a.shape === 'quadrant' ? 1 : count;
     const aim = Math.atan2(target.z - this.bossPosition.z, target.x - this.bossPosition.x);
     for (let i = 0; i < hazardCount && this.hazards.length < MAX_ENCOUNTER_HAZARDS; i++) {
@@ -767,10 +904,9 @@ export class VaultEncounter {
         radius: a.radius * ringScale, width: a.width ?? 1.5, angle: a.angle ?? Math.PI * 2,
         telegraphAt: this.now, executeAt: executeAt + stagger,
         expiresAt: executeAt + stagger + 0.35,
-        damage: Math.round(a.damage * encounterDamageMultiplier(this.config.tier)),
+        damage: this.hazardDamage(a.damage),
         attack: a.name, hitParticipants: [],
       };
-      if (a.name === 'Sanctum Wave') h.safeLanes = [-5, 5];
       this.hazards.push(h);
       this.emit('attack', executeAt, targetIds, a.name, h);
     }
@@ -857,8 +993,11 @@ export class VaultEncounter {
           radius: ranged ? Math.min(14, Math.max(3, len)) : heavy ? 1.8 : 1.25,
           width: ranged ? 1.1 : 0.4, angle: Math.PI * 2,
           telegraphAt: this.now, executeAt, expiresAt: executeAt + 0.3,
-          damage: Math.max(2, Math.round((heavy ? 5 : ranged ? 4 : 3) *
-            encounterDamageMultiplier(this.config.tier))),
+          // An elite's swing is a real HEAVY-rung hit, not chip damage: at the
+          // old 3/4/5 every summon in the game mitigated to the 1 HP floor
+          // against anything better than iron, so ignoring the whole army and
+          // tunnelling the boss was always correct.
+          damage: this.hazardDamage(heavy ? 7 : ranged ? 5 : 4),
           attack: `${actor.kind} ${ranged ? 'volley' : 'strike'}`, hitParticipants: [],
         };
         this.hazards.push(h);
@@ -928,6 +1067,9 @@ export class VaultEncounter {
     this.lastAttack.set(attacker.id, validation.now);
     const dmg = Math.max(1, Math.round(intent.claimedDamage));
     if (intent.targetId === 0) {
+      // Only damage the ENGINE accepted, and only damage to the boss itself,
+      // counts toward warfare XP — guards and summons are not the health bar.
+      this.ledgerOf(attacker.id).damage += Math.min(dmg, this.hp);
       this.damageBoss(dmg);
       return { accepted: true, damage: dmg, killed: this.hp <= 0 };
     }
