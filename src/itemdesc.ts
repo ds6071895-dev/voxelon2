@@ -52,7 +52,7 @@ const DESCRIPTIONS: Record<number, string> = {
   [Item.RuneOfFortune]: 'Loot-only rune — right-click to socket into worn armor: +20% mining speed.',
   [Item.RuneOfFocus]: 'Loot-only rune — right-click to socket into worn armor: −18% gun spread.',
   [Block.RespawnBeacon]: 'Right-click to set your respawn point. Cheap + easily broken.',
-  [Block.WaypointTotem]: 'Right-click to attune (max 4). Teleport to attuned totems from the map (M) — 60s cooldown, not while in combat.',
+  [Block.WaypointTotem]: 'Right-click to attune (max 4). Teleport to attuned totems from the map (/map) — 60s cooldown, not while in combat.',
   // Discovery (Milestone C).
   [Item.CrystalShard]: 'Mined from glowing Crystalfields spikes — found only in the WILDS.',
   [Block.CrystalBlock]: 'A glowing crystal spike. Mine it for Crystal Shards.',
@@ -94,8 +94,8 @@ const DESCRIPTIONS: Record<number, string> = {
   [Item.GreaterRuneOfFocus]: 'Boss-forged rune — right-click to socket into worn armor: -55% gun spread.',
   [Item.GreaterRuneOfPower]: 'Boss-forged rune — right-click to socket into worn armor: +1 armor, +3% speed, -15% gun spread.',
   // Healing consumables.
-  [Item.Bandage]: 'Right-click to patch up — a quick burst of fast healing, even mid-fight.',
-  [Item.Medkit]: 'Right-click for a powerful surge of regeneration — heals you up fast.',
+  [Item.Bandage]: 'Right-click to wrap up (~1s) — a quick burst of fast healing, even mid-fight.',
+  [Item.Medkit]: 'Right-click to work it in (~2s) — a powerful surge of regeneration.',
   // Lifesteal (Milestone A).
   [Item.Heart]: 'Right-click to gain +1 max heart (up to 20). Crafting one costs a heart of YOUR OWN — never below 2.',
   [Item.RevivalBeacon]: 'Right-click to bring an ELIMINATED teammate back early. One use.',

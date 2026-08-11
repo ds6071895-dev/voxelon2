@@ -10,7 +10,7 @@
 //   · SNEAK toggle           — sneak on/off
 //   · gun cluster            — FIRE (hold) / AIM toggle (ADS) / R reload,
 //                              shown only while a gun is selected
-//   · top-right utility row  — inventory / map / pause
+//   · top-right utility row  — inventory / map / warfare / commands / pause
 //   · tap a hotbar slot      — select it
 //
 // The whole overlay only exists on touch devices (isTouchDevice()).
@@ -38,9 +38,10 @@ export interface TouchCallbacks {
   onPause(): void;
   onInventory(): void;
   onMap(): void;
-  /** Warfare Command (the G panel). */
+  /** Warfare Command. */
   onProgress(): void;
-  onTpa(): void;
+  /** Open the command box (touch devices have no T key). */
+  onChat(): void;
 }
 
 const LOOK_SENS = 2.3;      // css px -> mouseDX units (≈ mouse movementX feel)
@@ -226,7 +227,7 @@ export class TouchControls {
     util('🎒', cb.onInventory);
     util('🗺', cb.onMap);
     util('⌘', cb.onProgress);   // Warfare Command
-    util('🌀', cb.onTpa);
+    util('/', cb.onChat);       // command box (/tpa, /waypoint, /guide…)
     util('⏸', cb.onPause);
 
     // --- hotbar: tap a slot to select it ---

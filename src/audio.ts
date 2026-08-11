@@ -307,6 +307,24 @@ export class GameAudio {
     this.noise({ freq: 260, dur: 0.1, gain: 0.06, slideTo: 120, type: 'lowpass', q: 0.6 });
   }
 
+  /** Hit confirmation for the SHOOTER: a crisp, tiny tick that cuts through
+   *  sustained fire. Deliberately dry and short (under 60ms) so an SMG burst
+   *  reads as a run of distinct hits instead of a smear. A kill drops a second,
+   *  lower note under it; a shot the target's armor ate is dulled and quieter,
+   *  which is audible feedback that you're shooting a tank. Head-relative (no
+   *  `pos`): it's UI, not something happening in the world. */
+  hitmarker(killed = false, soaked = false): void {
+    const top = soaked ? 900 : 1750;
+    this.tone({
+      type: 'square', from: top, to: top * 0.72,
+      dur: 0.045, gain: soaked ? 0.05 : 0.085,
+    });
+    this.noise({ freq: soaked ? 1200 : 2600, dur: 0.02, gain: soaked ? 0.03 : 0.06, q: 1.4 });
+    if (killed) {
+      this.tone({ type: 'triangle', from: 620, to: 300, dur: 0.16, gain: 0.11, delay: 0.04 });
+    }
+  }
+
   eatTick(): void {
     this.noise({ freq: 1300, dur: 0.07, gain: 0.3, q: 0.8 });
     this.tone({ type: 'triangle', from: 320, to: 180, dur: 0.06, gain: 0.12 });
@@ -326,14 +344,51 @@ export class GameAudio {
   }
 
   /** Gunshot: a soft body "thump" + a brief click — deliberately low on harsh
-   *  high frequencies so rapid fire isn't piercing/painful to listen to. */
-  gun(pos?: THREE.Vector3): void {
+   *  high frequencies so rapid fire isn't piercing/painful to listen to.
+   *  `weight` scales the report so a shotgun booms and an SMG snaps, without
+   *  any of them turning into the hiss the old shot used to be. */
+  gun(pos?: THREE.Vector3, weight = 1): void {
+    const w = Math.max(0.4, Math.min(2.6, weight));
     // Low-passed body (the punch), sliding down — no shrill hiss.
-    this.noise({ freq: 820, dur: 0.07, gain: 0.3, slideTo: 180, type: 'lowpass', q: 0.7, pos });
+    this.noise({
+      freq: 820 / w, dur: 0.07 * w, gain: 0.3 * Math.min(1.6, w),
+      slideTo: 180 / w, type: 'lowpass', q: 0.7, pos,
+    });
     // A short, gentle mid click for definition (bandpass, low gain).
     this.noise({ freq: 1500, dur: 0.025, gain: 0.1, type: 'bandpass', q: 1, pos });
     // Soft triangle thump (much smoother than the old square wave).
-    this.tone({ type: 'triangle', from: 170, to: 55, dur: 0.07, gain: 0.15, pos });
+    this.tone({
+      type: 'triangle', from: 170 / w, to: 55 / w, dur: 0.07 * w, gain: 0.15 * w, pos,
+    });
+    // Heavy weapons get a tail: the room answering the shot.
+    if (w > 1.3) {
+      this.noise({
+        freq: 300, dur: 0.34 * w, gain: 0.07 * w, slideTo: 90,
+        type: 'lowpass', q: 0.5, delay: 0.03, pos,
+      });
+    }
+  }
+
+  /** Working the action: racking a pump/bolt, dropping and seating magazines.
+   *  Small, dry, mechanical — these land on the animation, not the trigger. */
+  gunAction(kind: 'cycle' | 'magOut' | 'magIn' | 'shellDrop'): void {
+    switch (kind) {
+      case 'cycle': // metal on metal, twice: back, then home
+        this.noise({ freq: 2600, dur: 0.035, gain: 0.1, type: 'bandpass', q: 1.6 });
+        this.tone({ type: 'square', from: 380, to: 190, dur: 0.045, gain: 0.05 });
+        break;
+      case 'magOut':
+        this.noise({ freq: 1400, dur: 0.05, gain: 0.07, type: 'bandpass', q: 1.2 });
+        this.tone({ type: 'triangle', from: 240, to: 120, dur: 0.07, gain: 0.05 });
+        break;
+      case 'magIn': // the satisfying one: a solid seated thunk
+        this.noise({ freq: 700, dur: 0.07, gain: 0.13, slideTo: 200, type: 'lowpass', q: 0.8 });
+        this.tone({ type: 'triangle', from: 300, to: 110, dur: 0.08, gain: 0.1 });
+        break;
+      case 'shellDrop':
+        this.noise({ freq: 3200, dur: 0.03, gain: 0.05, type: 'bandpass', q: 2, delay: 0.12 });
+        break;
+    }
   }
 
   // --- Grappling hook --------------------------------------------------------
@@ -366,9 +421,23 @@ export class GameAudio {
     this.noise({ freq: 700, dur: 0.42, gain: 0.16, slideTo: 2000, type: 'bandpass', q: 0.5 });
   }
 
-  /** Glider deploy: an airy upward whoosh as the wings catch. */
+  /** Glider deploy: sailcloth cracking taut, then the wings catching the air. */
   glide(): void {
-    this.noise({ freq: 500, dur: 0.55, gain: 0.22, slideTo: 1700, type: 'bandpass', q: 0.6 });
+    this.noise({ freq: 900, dur: 0.09, gain: 0.3, slideTo: 260, type: 'bandpass', q: 0.8 });
+    this.noise({ freq: 320, dur: 0.6, gain: 0.24, slideTo: 1500, type: 'bandpass', q: 0.5,
+      delay: 0.05 });
+    this.tone({ type: 'triangle', from: 140, to: 260, dur: 0.35, gain: 0.09, attack: 0.05 });
+  }
+
+  /** One gust of the wind bed while gliding. Called on a short repeat by the
+   *  flight loop with `level` 0..1 for airspeed, so the rush swells as you dive
+   *  and drops back to a whisper on a level cruise. */
+  glideWind(level: number): void {
+    const l = Math.max(0, Math.min(1, level));
+    this.noise({
+      freq: 380 + l * 520, dur: 0.42, gain: 0.03 + l * 0.09,
+      slideTo: 200 + l * 420, type: 'lowpass', q: 0.5,
+    });
   }
 
   /** Glider breaks: a short snap + falling whoosh. */
@@ -377,12 +446,50 @@ export class GameAudio {
     this.tone({ type: 'triangle', from: 320, to: 90, dur: 0.18, gain: 0.16 });
   }
 
-  /** Healing consumable: a soft warm two-note "patch up" chime + a gentle
-   *  sparkle, so a Bandage/Medkit reads as restorative (kid-friendly, low gain). */
-  heal(): void {
-    this.tone({ type: 'triangle', from: 420, to: 620, dur: 0.18, gain: 0.1 });
-    this.tone({ type: 'triangle', from: 620, to: 820, dur: 0.22, gain: 0.09, delay: 0.12 });
-    this.noise({ freq: 900, dur: 0.4, gain: 0.03, slideTo: 1600, type: 'bandpass', q: 0.7 });
+  /** Starting to apply a healing consumable: a wrapper tear (bandage) or a
+   *  case latch pop (medkit) — the sound that says "you are committed now". */
+  healStart(medkit = false): void {
+    if (medkit) {
+      this.tone({ type: 'square', from: 260, to: 150, dur: 0.05, gain: 0.07 });
+      this.noise({ freq: 700, dur: 0.09, gain: 0.14, slideTo: 220, type: 'lowpass', q: 0.7 });
+      this.tone({ type: 'triangle', from: 180, to: 120, dur: 0.12, gain: 0.09, delay: 0.06 });
+    } else {
+      // Gauze tearing: a short rising noise rip with a papery body.
+      this.noise({ freq: 900, dur: 0.22, gain: 0.11, slideTo: 2600, type: 'bandpass', q: 0.5 });
+      this.noise({ freq: 400, dur: 0.14, gain: 0.06, slideTo: 180, type: 'lowpass', q: 0.6 });
+    }
+  }
+
+  /** One "work" beat while the wrap is being pressed in: a soft, quiet pat.
+   *  Pitch rises with `step` so the channel feels like it is going somewhere. */
+  healBeat(step = 0): void {
+    const f = 300 + step * 55;
+    this.noise({ freq: f, dur: 0.07, gain: 0.07, slideTo: f * 0.5, type: 'lowpass', q: 0.7 });
+    this.tone({ type: 'triangle', from: f * 1.5, to: f, dur: 0.06, gain: 0.05 });
+  }
+
+  /** Healing consumable applied: a warm rising three-note resolve + a soft
+   *  sparkle tail, so a Bandage/Medkit lands as relief (kid-friendly, low gain). */
+  heal(medkit = false): void {
+    const g = medkit ? 0.12 : 0.1;
+    this.tone({ type: 'triangle', from: 392, to: 523, dur: 0.16, gain: g });
+    this.tone({ type: 'triangle', from: 523, to: 659, dur: 0.18, gain: g * 0.9, delay: 0.1 });
+    this.tone({ type: 'triangle', from: 659, to: 784, dur: 0.3, gain: g * 0.85, delay: 0.2 });
+    if (medkit) {
+      this.tone({ type: 'sine', from: 196, to: 262, dur: 0.5, gain: 0.07 }); // warm floor
+    }
+    this.noise({ freq: 1100, dur: 0.5, gain: 0.03, slideTo: 2200, type: 'bandpass', q: 0.7, delay: 0.12 });
+  }
+
+  /** Each point of health the heal buff restores: a tiny glassy sparkle. */
+  healTick(pitch = 1): void {
+    this.tone({ type: 'sine', from: 880 * pitch, to: 1320 * pitch, dur: 0.09, gain: 0.045 });
+  }
+
+  /** An interrupted application (slot switched away, killed mid-wrap). */
+  healCancel(): void {
+    this.tone({ type: 'triangle', from: 360, to: 190, dur: 0.14, gain: 0.08 });
+    this.noise({ freq: 500, dur: 0.08, gain: 0.05, slideTo: 200, type: 'lowpass', q: 0.6 });
   }
 
   /** Lifesteal: you STOLE a heart — a warm little triangle up-chirp (LOW gain,
@@ -412,6 +519,22 @@ export class GameAudio {
     this.tone({ type: 'triangle', from: 440, to: 587, dur: 0.16, gain: 0.12, delay: 0.14 });
     this.tone({ type: 'triangle', from: 587, to: 880, dur: 0.3, gain: 0.13, delay: 0.28 });
     this.noise({ freq: 500, dur: 0.35, gain: 0.05, slideTo: 900, type: 'bandpass', q: 0.7, delay: 0.28 });
+  }
+
+  /** WARFARE COMMAND: a technology authorized. A confident four-note rise with
+   *  a mechanical latch underneath — this is the payoff for a whole boss fight,
+   *  so it is the biggest sound in the kit that still stays soft. */
+  warfareAuthorized(): void {
+    // The latch: a short filtered click, like a breaker being thrown.
+    this.noise({ freq: 900, dur: 0.07, gain: 0.07, slideTo: 260, type: 'lowpass', q: 1.1 });
+    // The rise: root, fifth, octave, then a held major tenth on top.
+    this.tone({ type: 'triangle', from: 294, to: 294, dur: 0.12, gain: 0.11 });
+    this.tone({ type: 'triangle', from: 440, to: 440, dur: 0.12, gain: 0.11, delay: 0.10 });
+    this.tone({ type: 'triangle', from: 587, to: 587, dur: 0.14, gain: 0.12, delay: 0.20 });
+    this.tone({ type: 'triangle', from: 740, to: 880, dur: 0.42, gain: 0.13, delay: 0.31, attack: 0.02 });
+    // A soft sine pad an octave down gives the chord some body.
+    this.tone({ type: 'sine', from: 147, to: 220, dur: 0.55, gain: 0.07, delay: 0.20, attack: 0.08 });
+    this.noise({ freq: 600, dur: 0.4, gain: 0.04, slideTo: 1400, type: 'bandpass', q: 0.8, delay: 0.31 });
   }
 
   caveAmbience(): void {

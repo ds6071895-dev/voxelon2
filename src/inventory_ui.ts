@@ -435,6 +435,17 @@ export class InventoryUI {
     label.className = 'mc-font';
     label.style.cssText = 'font-size:12px;color:#cfe0ff;text-shadow:none;';
     label.textContent = 'Creative — click any item for a stack (Shift = one)';
+    // Handing out infinite items needs a way to get rid of them again: the bin
+    // destroys whatever you drop on it (a whole stack, or one on right-click),
+    // and Shift-clicking it empties the inventory outright.
+    const binRow = document.createElement('div');
+    binRow.style.cssText = 'display:flex;gap:8px;align-items:center;align-self:flex-end;';
+    const binHint = document.createElement('div');
+    binHint.className = 'mc-font';
+    binHint.style.cssText = 'font-size:11px;color:#9fb2d8;text-shadow:none;text-align:right;';
+    binHint.textContent = 'Trash: drop a stack here\nright-click = one · Shift = empty all';
+    binHint.style.whiteSpace = 'pre-line';
+    binRow.append(binHint, this.makeTrashSlot().el);
     const grid = document.createElement('div');
     grid.style.cssText =
       'display:flex;flex-wrap:wrap;gap:2px;width:536px;max-height:256px;' +
@@ -454,7 +465,50 @@ export class InventoryUI {
     }
     wrap.appendChild(label);
     wrap.appendChild(grid);
+    wrap.appendChild(binRow);
     this.topEl.appendChild(wrap);
+  }
+
+  /**
+   * The creative trash slot. Left-click destroys the whole held stack,
+   * right-click one item off it, and Shift-click (with nothing held) wipes the
+   * hotbar + backpack. Nothing here can be recovered, so the sweep asks first.
+   */
+  private makeTrashSlot(): SlotView {
+    const view = this.makeSlotView();
+    view.el.classList.add('result-slot');
+    view.el.style.position = 'relative';
+    view.el.title = 'Trash';
+    const glyph = document.createElement('div');
+    glyph.className = 'mc-font';
+    glyph.style.cssText =
+      'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;' +
+      'font-size:20px;pointer-events:none;text-shadow:none;';
+    glyph.textContent = '🗑';
+    view.el.appendChild(glyph);
+    view.el.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const inv = this.inventory;
+      if (e.button === 0 && e.shiftKey) {
+        if (!inv.cursor && !confirm('Destroy every item in your inventory?')) return;
+        for (let i = 0; i < INV_SIZE; i++) inv.slots[i] = null;
+        inv.cursor = null;
+        inv.version++;
+        return;
+      }
+      const held = inv.cursor;
+      if (!held) return;
+      if (e.button === 0) {
+        inv.cursor = null;                                  // the whole stack
+      } else if (e.button === 2) {
+        held.count--;                                       // one off the top
+        if (held.count <= 0) inv.cursor = null;
+      } else {
+        return;                                             // middle click: no-op
+      }
+      inv.version++;
+    });
+    return view;
   }
 
   /** Armor slot: holds only the matching piece; click to equip/unequip. */

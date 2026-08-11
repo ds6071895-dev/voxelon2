@@ -33,6 +33,10 @@ export interface Account {
   /** Session token for password-less resume (rotated on every successful
    *  auth; the client mirrors it in localStorage). */
   token?: string;
+  /** SERVER OPERATOR: may run admin commands from the in-game command box.
+   *  Top-level (not in `data`) so a client state save can never mint it, and
+   *  granted ONLY from the server console (`op`/`deop`). */
+  op?: boolean;
   /** Saved player state, restored on login (position/health/armor/inventory). */
   data?: Record<string, unknown>;
   /** WARFARE COMMAND progression. Stored EXPLICITLY on the account rather than
@@ -73,6 +77,7 @@ export class Accounts {
           eliminatedUntil: Number.isFinite(a.eliminatedUntil) ? Math.max(0, a.eliminatedUntil as number) : 0,
           revivedBy: typeof a.revivedBy === 'string' ? a.revivedBy : undefined,
           token: typeof a.token === 'string' ? a.token : undefined,
+          op: a.op === true,
           data: a.data,
           warfare: sanitizeWarfare(a.warfare),
         });
@@ -151,6 +156,28 @@ export class Accounts {
   setData(name: string, data: Record<string, unknown>): void {
     const a = this.get(name);
     if (a) a.data = data;
+  }
+
+  // --- Operators --------------------------------------------------------------
+
+  /** Grant/revoke operator. Returns the account's canonical name, or null if
+   *  there is no such account (op works on offline accounts too). */
+  setOp(name: string, op: boolean): string | null {
+    const a = this.get(name);
+    if (!a) return null;
+    a.op = op;
+    return a.username;
+  }
+
+  /** Is this account a server operator? Unknown accounts are never OP. */
+  isOp(name: string): boolean {
+    return this.get(name)?.op === true;
+  }
+
+  /** Every operator's canonical username, alphabetical. */
+  operators(): string[] {
+    return this.list().filter((a) => a.op).map((a) => a.username)
+      .sort((a, b) => a.localeCompare(b));
   }
 
   // --- Warfare Command --------------------------------------------------------

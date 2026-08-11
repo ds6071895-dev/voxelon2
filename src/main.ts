@@ -19,7 +19,8 @@ import {
   sanitizeState, setFilter, upgradeCost,
 } from './machines';
 import { ItemEntities, itemGeometry } from './itementity';
-import { createGunModel, isGunItem, poseGunModel } from './gunmodels';
+import { createGunModel, gunFeel, isGunItem, poseGunModel } from './gunmodels';
+import { ChatBox } from './chat';
 import { Chests } from './chests';
 import { Mob, Mobs } from './mobs';
 import { NetClient } from './net/client';
@@ -41,9 +42,12 @@ import {
 } from './turrets';
 import { TurretModels } from './turretmodels';
 import {
-  RemotePlayers, applyAvatarSneak, buildAvatarBody, buildArmorOverlay,
-  disposeAvatarBody, stridePose, AvatarBody,
+  RemotePlayers, anchorTiltedBody, applyAvatarSneak, buildAvatarBody,
+  buildArmorOverlay, disposeAvatarBody, stridePose, AvatarBody,
 } from './remoteplayers';
+import {
+  GliderRig, RIG_HARNESS_Y, buildGliderRig, glidePose, poseGliderRig,
+} from './glidermodels';
 import {
   CAPES, CAPE_COLORS, COSMETIC_RANGES, Cosmetics, EYE_COLORS, FACE_ACCESSORIES,
   HAIR_COLORS, HAIR_STYLES, HATS, HAT_COLORS, PANTS_COLORS, SHIRT_COLORS,
@@ -82,6 +86,7 @@ import {
   newGuideState, nextGuideStep, sanitizeGuide,
 } from './guide';
 import { isRune, runeOf, runeBonuses } from './runes';
+import { HealUse } from './healuse';
 import { createFieldGuide } from './field_guide';
 import {
   MAX_HEARTS, START_HEARTS, WITHDRAW_FLOOR, canConsume, canWithdraw,
@@ -175,7 +180,7 @@ const touch = isMobile ? new TouchControls(input, {
   onInventory: () => { input.inventoryToggled = true; },
   onMap: () => { input.mapToggled = true; },
   onProgress: () => { input.progressPressed = true; },
-  onTpa: () => { input.tpaPressed = true; },
+  onChat: () => { input.chatPressed = true; },
   onPause: () => {
     if (player.dead) return;
     if (screen === 'guide') { fieldGuide.backToPause(); return; }
@@ -294,6 +299,10 @@ const itemEntities = new ItemEntities(scene, world, atlas);
 const held = new HeldItemView(camera, atlas);
 let heldSwingSeq = 0;
 held.onSwing = () => { heldSwingSeq = (heldSwingSeq + 1) & 0xffff; };
+// The weapon view drives its own mechanical sounds: racking a pump, dropping a
+// magazine, seating a fresh one. They land on the animation, not the input.
+held.onGunSound = (kind) => audio.gunAction(kind);
+const viewKickOut = { pitch: 0, yaw: 0, roll: 0 };
 
 const furnaces = new Furnaces(world);
 const survival = new Survival();
@@ -749,11 +758,51 @@ killfeedEl.style.cssText =
   'position:absolute;top:28px;right:8px;z-index:10;pointer-events:none;text-align:right;';
 app.appendChild(killfeedEl);
 
-// World-map button (also bound to the M key). Clickable whenever the pointer
-// isn't locked (menus); during locked FPS play the M key opens it.
+// ─── PvP combat feedback ────────────────────────────────────────────────────
+// A gunfight is only readable if two questions are answered instantly: did MY
+// shot land, and where is the fire coming from? Both are driven by the server
+// (`hitconfirm` and the `by` on `hurt`), never predicted, so neither can lie
+// about a hit the server rejected.
+
+// Hitmarker: the classic four ticks flicking out of the crosshair.
+const hitmarkerEl = document.createElement('div');
+hitmarkerEl.style.cssText =
+  'position:absolute;left:50%;top:50%;width:34px;height:34px;margin:-17px 0 0 -17px;' +
+  'z-index:11;pointer-events:none;opacity:0;';
+const hitmarkerTicks: HTMLDivElement[] = [];
+for (const [x, y, rot] of [
+  ['left:1px', 'top:1px', 45], ['right:1px', 'top:1px', -45],
+  ['left:1px', 'bottom:1px', -45], ['right:1px', 'bottom:1px', 45],
+] as [string, string, number][]) {
+  const tick = document.createElement('div');
+  tick.style.cssText =
+    `position:absolute;${x};${y};width:11px;height:2px;background:#fff;` +
+    `transform:rotate(${rot}deg);box-shadow:0 0 2px rgba(0,0,0,0.9);`;
+  hitmarkerEl.appendChild(tick);
+  hitmarkerTicks.push(tick);
+}
+app.appendChild(hitmarkerEl);
+let hitmarkerT = 0;               // seconds of marker left to play
+const HITMARKER_TIME = 0.4;
+
+// Directional damage arcs: a red wedge around the crosshair pointing back at
+// whoever shot you, held in world space so it keeps pointing at them as you
+// spin to return fire.
+const dmgArcWrap = document.createElement('div');
+dmgArcWrap.style.cssText =
+  'position:absolute;left:50%;top:50%;width:300px;height:300px;margin:-150px 0 0 -150px;' +
+  'z-index:11;pointer-events:none;';
+app.appendChild(dmgArcWrap);
+interface DamageArc { el: HTMLDivElement; x: number; z: number; t: number }
+const dmgArcs: DamageArc[] = [];
+const DMG_ARC_TIME = 1.6;
+const MAX_DMG_ARCS = 4;
+
+// World-map button. The map has no key of its own any more — this button and
+// `/map` in the command box are the two ways in.
 const mapBtn = document.createElement('button');
 mapBtn.className = 'mc-font';
-mapBtn.textContent = '🗺 Map (M)';
+mapBtn.textContent = '🗺 Map';
 mapBtn.style.cssText =
   'position:absolute;bottom:8px;right:8px;z-index:12;font-size:12px;padding:6px 10px;' +
   'width:118px;box-sizing:border-box;text-align:center;cursor:pointer;border:2px solid;' +
@@ -870,6 +919,75 @@ function showKill(killer: string, victim: string): void {
   killfeedEl.appendChild(line);
   window.setTimeout(() => line.remove(), 5000);
 }
+/** One of our rounds connected. `amount` is the health actually removed after
+ *  the target's armor, so 0 means "hit them, their kit ate all of it" — worth
+ *  showing in its own colour rather than staying silent, because a silent
+ *  crosshair is indistinguishable from a miss. */
+function showHitmarker(amount: number, killed: boolean): void {
+  hitmarkerT = HITMARKER_TIME;
+  const color = killed ? '#ff5555' : amount > 0 ? '#ffffff' : '#9fb4c7';
+  for (const tick of hitmarkerTicks) tick.style.background = color;
+  audio.hitmarker(killed, amount <= 0);
+}
+
+/** We took a hit from `(x, z)`: raise a wedge pointing that way. Recorded in
+ *  world space so turning toward the shooter sweeps the wedge to the crosshair
+ *  — that IS the affordance, it tells you which way to turn. */
+function showDamageFrom(x: number, z: number): void {
+  // Fold a fresh hit from roughly the same bearing into the existing arc rather
+  // than stacking duplicates during sustained automatic fire.
+  for (const arc of dmgArcs) {
+    if (Math.hypot(arc.x - x, arc.z - z) < 4) {
+      arc.x = x; arc.z = z; arc.t = DMG_ARC_TIME;
+      return;
+    }
+  }
+  if (dmgArcs.length >= MAX_DMG_ARCS) {
+    const oldest = dmgArcs.shift();
+    oldest?.el.remove();
+  }
+  const el = document.createElement('div');
+  el.style.cssText = 'position:absolute;inset:0;';
+  const wedge = document.createElement('div');
+  // A triangle pointing outward (up = straight ahead) at the rim of the wrap.
+  wedge.style.cssText =
+    'position:absolute;left:50%;top:6px;width:74px;height:26px;margin-left:-37px;' +
+    'background:linear-gradient(to bottom,rgba(255,52,52,0.95),rgba(255,52,52,0));' +
+    'clip-path:polygon(50% 0,100% 100%,0 100%);';
+  el.appendChild(wedge);
+  dmgArcWrap.appendChild(el);
+  dmgArcs.push({ el, x, z, t: DMG_ARC_TIME });
+}
+
+/** Per-frame decay + re-aim of the combat feedback overlays. */
+function updateCombatFeedback(dt: number): void {
+  if (hitmarkerT > 0) {
+    hitmarkerT = Math.max(0, hitmarkerT - dt);
+    const k = hitmarkerT / HITMARKER_TIME;
+    hitmarkerEl.style.opacity = String(Math.min(1, k * 2.2));
+    // Punches out slightly then settles, so rapid hits still read individually.
+    hitmarkerEl.style.transform = `scale(${1.35 - 0.35 * Math.min(1, k * 1.6)})`;
+  } else if (hitmarkerEl.style.opacity !== '0') {
+    hitmarkerEl.style.opacity = '0';
+  }
+
+  if (!dmgArcs.length) return;
+  // Screen-space basis for the current facing: forward is where the camera
+  // looks, right is 90° clockwise from it (same convention as the server's
+  // facing check).
+  const fx = -Math.sin(player.yaw), fz = -Math.cos(player.yaw);
+  const rx = Math.cos(player.yaw), rz = -Math.sin(player.yaw);
+  for (let i = dmgArcs.length - 1; i >= 0; i--) {
+    const arc = dmgArcs[i];
+    arc.t -= dt;
+    if (arc.t <= 0) { arc.el.remove(); dmgArcs.splice(i, 1); continue; }
+    const dx = arc.x - player.pos.x, dz = arc.z - player.pos.z;
+    const angle = Math.atan2(dx * rx + dz * rz, dx * fx + dz * fz);
+    arc.el.style.transform = `rotate(${angle}rad)`;
+    arc.el.style.opacity = String(Math.min(1, arc.t / (DMG_ARC_TIME * 0.6)));
+  }
+}
+
 /** Transient on-screen notice (admin feedback: gamemode/teleport/etc). */
 function showNotice(text: string): void {
   const line = document.createElement('div');
@@ -1771,7 +1889,13 @@ const controlsPanel = (() => {
     ] },
     { title: 'The world', binds: [
       ['World map', [['🗺']]], ['Your progress', [['⚑']]],
-      ['Teleport to a player', [['🌀']]], ['Accept a request', [['accept']], 'hold'],
+      ['Command box', [['/']], 'commands only — there is no chat'],
+    ] },
+    { title: 'Commands', binds: [
+      ['Open the world map', [['/map']]], ['Drop a waypoint here', [['/waypoint']]],
+      ['Warfare Command', [['/warfare']]], ['Getting-started guide', [['/guide']]],
+      ['Teleport to a player', [['/tpa']]], ['Accept a request', [['/tpaccept']], 'then stand still'],
+      ['Every command you can run', [['/help']]],
     ] },
     { title: 'Screens', binds: [
       ['Getting-started guide', [['✕']], 'starts open — tap to hide'],
@@ -1797,11 +1921,16 @@ const controlsPanel = (() => {
       ['Drop item', [['O']], 'Shift + O drops the stack'],
     ] },
     { title: 'The world', binds: [
-      ['World map', [['M']]], ['Set waypoint here', [['B']]], ['Your progress', [['G']]],
-      ['Teleport to a player', [['T']]], ['Accept a request', [['Y']], 'hold'],
+      ['Command box', [['T']], 'commands only — there is no chat'],
+    ] },
+    { title: 'Commands', binds: [
+      ['Open the world map', [['/map']]], ['Set waypoint here', [['/waypoint']]],
+      ['Warfare Command', [['/warfare']]], ['Getting-started guide', [['/guide']]],
+      ['Teleport to a player', [['/tpa']]], ['Accept a request', [['/tpaccept']], 'then stand still'],
+      ['Every command you can run', [['/help']]],
     ] },
     { title: 'Screens', binds: [
-      ['Getting-started guide', [['H']]], ['Camera view (1st / 3rd)', [['V']]],
+      ['Camera view (1st / 3rd)', [['V']]],
       ['Debug overlay', [['F3']]], ['Pause / back', [['Esc']]],
     ] },
   ];
@@ -2266,7 +2395,7 @@ const tutorial = (() => {
     {
       chapter: 'Orientation 02 · Survival', icon: '⛏', title: 'Turn the world into tools', accent: '#f7c95d',
       summary: 'Mine your first tree, convert raw blocks into equipment, and build a shelter that can survive the frontier.',
-      tip: 'Press H at any time for the getting-started guide. It tracks the path from bare hands to your first vault.',
+      tip: 'Press T at any time and type /guide for the getting-started checklist. It tracks the path from bare hands to your first vault.',
       items: [
         { label: 'Break / attack', value: 'Left click' },
         { label: 'Place / use', value: 'Right click' },
@@ -2278,8 +2407,8 @@ const tutorial = (() => {
       summary: 'Automate resources, unlock progression branches, and turn a temporary camp into a functioning civilization.',
       tip: 'Crafting screens include a recipe guide. Use it to trace complete production chains for machines, weapons, and defenses.',
       items: [
-        { label: 'World map', value: 'M · inspect territory, structures, and travel points' },
-        { label: 'Progress', value: 'G · spend upgrades and view faction growth' },
+        { label: 'World map', value: '/map · inspect territory, structures, and travel points' },
+        { label: 'Progress', value: '/warfare · spend upgrades and view faction growth' },
         { label: 'Machines', value: 'Build autominers, derricks, defenses, and transport' },
       ],
     },
@@ -2398,8 +2527,12 @@ document.addEventListener('pointerlockchange', () => {
   if (!worldReady) return;
   if (input.locked) {
     enterPlaying(); // entered or returned to the game
-  } else if (!player.dead && !invUI.open && !worldMap.open && !tpaPromptVisible &&
-      screen === 'playing') {
+  } else if (!player.dead && !invUI.open && !worldMap.open && !chatBox.open &&
+      !warfareUI.open && screen === 'playing') {
+    // Warfare Command is deliberately NOT in the pause path: it frees the cursor
+    // for the tree while the world keeps running, so unlocking for it must not
+    // slam the pause menu up behind it (which would also strand `screen` on
+    // 'paused' and stop the panel re-locking on close).
     enterPause(); // Esc / lost focus while playing -> pause, not the title
   }
 });
@@ -2408,15 +2541,21 @@ document.addEventListener('pointerlockchange', () => {
 // re-lock — "requestPointerLock too soon after exit"). This guarantees you can
 // always get movement back after closing the Map panel.
 renderer.domElement.addEventListener('mousedown', () => {
+  if (warfareUI.open) {
+    // The Warfare panel floats over a live world: clicking the world beside it
+    // means "I'm done reading" — close it and take the mouse back.
+    warfareUI.hide();
+    return;
+  }
   if (screen === 'playing' && !input.locked && !player.dead &&
-      !invUI.open && !worldMap.open && !tpaPromptVisible) {
+      !invUI.open && !worldMap.open && !chatBox.open) {
     input.lock();
   }
 });
 document.addEventListener('keydown', (e) => {
   if (e.code !== 'Escape') return;
   if (tutorial.open) { tutorial.finish(); }
-  else if (tpaPromptVisible) { closeTpaPrompt(); }
+  else if (chatBox.open) { chatBox.hide(); }
   else if (warfareUI.open) { hideProgress(); }
   else if (guideOpen) { hideGuide(); }
   else if (worldMap.open) { worldMap.hide(); input.lock(); }
@@ -2548,10 +2687,39 @@ net.onEdit = (x, y, z, b) => {
     }
   }
 };
-net.onHurt = (health, dead, k) => {
+net.onHurt = (health, dead, k, by) => {
   player.setHealthFromServer(health, dead);
   player.vel.x += k[0] * 6; player.vel.y += k[1] * 6; player.vel.z += k[2] * 6;
+  // Point a wedge back at whoever did it. Only another PLAYER gets one — falls,
+  // lava and mobs are self-evident, an unseen sniper is not.
+  const attacker = net.remotes.get(by);
+  if (attacker && by !== net.myId) showDamageFrom(attacker.tx, attacker.tz);
   // lastHealth is left alone so the frame loop plays the hurt sound.
+};
+net.onHitConfirm = (_target, amount, killed) => showHitmarker(amount, killed);
+// Someone else pulled a trigger: replay it as ghost tracers + a positional
+// report. This is what stops enemy fire being invisible and silent — you can
+// now see the streaks, hear the direction, and take cover.
+net.onShot = (id, item, x, y, z, dx, dy, dz) => {
+  const gun = ITEMS[item]?.gun;
+  if (!gun) return;
+  const origin = new THREE.Vector3(x, y, z);
+  const dir = new THREE.Vector3(dx, dy, dz);
+  if (dir.lengthSq() < 1e-6) return;
+  dir.normalize();
+  // Only the trigger pull is networked; every receiver re-rolls the gun's own
+  // pellet spread locally, so a shotgun still sprays without seven messages.
+  const pellets = Math.max(1, gun.pellets ?? 1);
+  for (let i = 0; i < pellets; i++) {
+    projectiles.fireGhost(origin, spreadDir(dir, gun.spread ?? 0), gun);
+  }
+  audio.gun(origin, gunFeel(item).kick);
+  remotePlayers.muzzleFlash(id);
+};
+// Cosmetic remote explosion (the crater itself arrives as ordinary edits).
+net.onBlast = (x, y, z) => {
+  particles.explosion(x, y, z);
+  audio.explosion(new THREE.Vector3(x, y, z));
 };
 // Server-authoritative health between hits (REGEN): the periodic snapshot
 // carries our own health, so the HUD ticks up smoothly instead of freezing
@@ -2626,7 +2794,7 @@ interaction.onAttune = (x, y, z) => {
     showNotice(`You can attune at most ${MAX_ATTUNED} totems — release one first (right-click it).`);
   } else {
     setAttuned([...attunedTotems, { x, y, z }]);
-    showNotice(`🗿 Totem attuned (${attunedTotems.length}/${MAX_ATTUNED}) — open the map (M) to travel!`);
+    showNotice(`🗿 Totem attuned (${attunedTotems.length}/${MAX_ATTUNED}) — open the map (/map) to travel!`);
   }
 };
 worldMap.onTotemTravel = (t) => {
@@ -2780,10 +2948,33 @@ net.onRevived = (target, ok) => {
     showRegionBanner(`✨ ${target.toUpperCase()} IS BACK!`, '#7dffa0');
   }
 };
-/** Right-click a held Bandage/Medkit: consume it and trigger fast regen. In MP
- *  the server owns health (the buff flows back via the snapshot); offline the
- *  local Survival sim applies the same accelerated regen. */
-function useHealItem(): void {
+// --- HEALING CONSUMABLES ------------------------------------------------------
+// Using a Bandage/Medkit is a short channelled ACT: the hand lifts the item into
+// view and works it in over ~1-2s (see healuse.ts for the timing), a bar under
+// the crosshair fills, soft beats tick along with the presses, and the payoff is
+// a chime + green motes + a breathing vignette while the regen buff runs.
+const useBarEl = document.getElementById('use-bar') as HTMLDivElement;
+const useBarFill = useBarEl.querySelector('.use-fill') as HTMLDivElement;
+const useBarLabel = useBarEl.querySelector('.use-label') as HTMLDivElement;
+const healGlowEl = document.getElementById('heal-glow') as HTMLDivElement;
+const heartsEl = document.getElementById('hearts') as HTMLCanvasElement;
+const healUse = new HealUse();
+let healGlow = 0;      // 0..1 vignette strength (decays; pulses on each heal tick)
+let healBuff = 0;      // seconds of accelerated regen left (visual only)
+let heartsSqueeze = 0; // seconds left of the hearts-bar squeeze
+
+/** Floating "+N" above the health bar whenever the buff restores health. */
+function showHealPopup(amount: number): void {
+  const el = document.createElement('div');
+  el.className = 'heal-pop mc-font';
+  el.textContent = `+${amount}`;
+  app.appendChild(el);
+  window.setTimeout(() => el.remove(), 1000);
+}
+
+/** Right-click a held Bandage/Medkit: begin applying it. */
+function beginHealUse(): void {
+  if (healUse.active) return;
   const stack = inventory.selectedStack;
   const heal = stack ? ITEMS[stack.id]?.heal : undefined;
   if (!stack || !heal) return;
@@ -2791,13 +2982,92 @@ function useHealItem(): void {
     showNotice("You're already at full health!");
     return;
   }
-  const id = stack.id;
+  healUse.start(stack.id, inventory.selected);
+  audio.healStart(stack.id === Item.Medkit);
+  held.swing(); // the hand reaches for it before the wrap animation takes over
+}
+
+/** Interrupted mid-wrap (switched away, opened a menu, died): nothing is spent. */
+function cancelHealUse(notice = true): void {
+  if (!healUse.active) return;
+  const name = ITEMS[healUse.itemId]?.name ?? 'Heal';
+  healUse.cancel();
+  audio.healCancel();
+  if (notice) showNotice(`${name} interrupted.`);
+}
+
+/** The channel completed: spend the item and start the fast-regen window. In MP
+ *  the server owns health (the buff flows back via the snapshot); offline the
+ *  local Survival sim applies the same accelerated regen. */
+function finishHealUse(id: number): void {
+  const heal = ITEMS[id]?.heal;
+  // The item is only spent on completion, and only if it is still in hand.
+  if (!heal || inventory.selectedStack?.id !== id) return;
   inventory.consumeSelected(1);
   if (net.connected) net.sendUseHeal(id);
   else survival.boost(heal.duration, heal.interval);
-  showNotice(`${ITEMS[id]?.name ?? 'Heal'} used — regenerating fast!`);
-  audio.heal();
+  const medkit = id === Item.Medkit;
+  showNotice(`${ITEMS[id]?.name ?? 'Heal'} applied — regenerating fast!`);
+  audio.heal(medkit);
+  healBuff = heal.duration;
+  healGlow = Math.max(healGlow, medkit ? 0.9 : 0.65);
+  heartsSqueeze = 0.16;
+  particles.heal(player.pos.x, player.pos.y + 1, player.pos.z, medkit ? 22 : 14, medkit);
   pushStateSave();
+}
+
+/** Per-frame: advance the channel, drive the bar, and keep the post-heal glow
+ *  breathing. `active` is false whenever the player can't be patching up. */
+function updateHealFeel(dt: number, active: boolean): void {
+  if (healUse.active) {
+    const stack = inventory.selectedStack;
+    if (!active || inventory.selected !== healUse.slot || stack?.id !== healUse.itemId) {
+      cancelHealUse();
+    } else {
+      const step = healUse.tick(dt);
+      for (let i = 0; i < step.beats; i++) {
+        audio.healBeat(i);
+        particles.heal(player.pos.x, player.pos.y + 1.1, player.pos.z, 3);
+      }
+      if (step.done) finishHealUse(step.item);
+    }
+  }
+
+  // Use bar under the crosshair.
+  if (healUse.active) {
+    useBarEl.style.display = 'block';
+    useBarFill.style.width = `${(healUse.progress * 100).toFixed(1)}%`;
+    useBarLabel.textContent = (ITEMS[healUse.itemId]?.name ?? 'Applying').toUpperCase();
+  } else {
+    useBarEl.style.display = 'none';
+  }
+
+  // Green vignette: a strong pop on application that settles into a slow
+  // breathing glow for as long as the fast regen runs.
+  if (healBuff > 0) {
+    healBuff = Math.max(0, healBuff - dt);
+    const breathe = accessibility.reducedMotion ? 0.5 : 0.5 + Math.sin(worldTimeLocal * 3.2) * 0.18;
+    healGlow = Math.max(healGlow - dt * 1.6, 0.26 * breathe);
+  } else {
+    healGlow = Math.max(0, healGlow - dt * 1.8);
+  }
+  const cap = accessibility.photosensitivitySafe ? 0.22 : 0.5;
+  healGlowEl.style.opacity = String(Math.min(cap, healGlow * 0.55));
+
+  // Hearts squeeze on each restored point.
+  heartsSqueeze = Math.max(0, heartsSqueeze - dt);
+  heartsEl.style.transform = heartsSqueeze > 0 && !accessibility.reducedMotion
+    ? 'scale(1.14)' : 'scale(1)';
+}
+
+/** Health went UP: while a bandage/medkit buff is running, sell every point. */
+function onHealthRestored(amount: number): void {
+  if (healBuff <= 0 || amount <= 0) return;
+  showHealPopup(amount);
+  audio.healTick(1 + Math.min(0.5, player.health / Math.max(1, player.maxHealth)));
+  healGlow = Math.min(1, healGlow + 0.22);
+  heartsSqueeze = 0.16;
+  particles.heal(player.pos.x, player.pos.y + 1, player.pos.z, 4);
 }
 
 /** Right-click a held Heart: +1 max heart (server-validated online). */
@@ -2910,8 +3180,10 @@ const warfareUI = new WarfareUI({
     }
   },
   onPurchase: (node) => {
-    audio.heartSteal();
-    showNotice(`${node.icon} ${node.name} authorized.`);
+    // The panel runs its own celebration (pop, shockwave, banner); this is the
+    // part that reaches outside it — a real fanfare and a world-space toast.
+    audio.warfareAuthorized();
+    showNotice(`${node.name} authorized.`);
   },
   onOpen: () => input.unlock(),
   onClose: () => {
@@ -2919,9 +3191,9 @@ const warfareUI = new WarfareUI({
   },
 });
 app.appendChild(warfareUI.root);
-warfareUI.root.addEventListener('mousedown', (e) => {
-  if (e.target === warfareUI.root) warfareUI.hide();
-});
+// No click-outside handler here on purpose: the panel's shell is click-through
+// so the world behind it stays live, and the canvas's own mousedown (above)
+// closes the panel when you click back into the game.
 window.addEventListener('resize', () => { if (warfareUI.open) warfareUI.layoutMode(); });
 
 function showProgress(): void {
@@ -2940,7 +3212,7 @@ function toggleProgress(): void {
 // A clickable button stacked above the Map button (same footprint).
 const progressBtn = document.createElement('button');
 progressBtn.className = 'mc-font';
-progressBtn.textContent = '⌘ Warfare (G)';
+progressBtn.textContent = '⌘ Warfare';
 progressBtn.style.cssText =
   'position:absolute;bottom:46px;right:8px;z-index:12;font-size:12px;padding:6px 10px;' +
   'width:118px;box-sizing:border-box;text-align:center;cursor:pointer;border:2px solid;' +
@@ -2962,7 +3234,7 @@ function updateProgressFlash(): void {
   if (want === progressFlashing) return;
   progressFlashing = want;
   progressBtn.style.animation = want ? 'prog-flash 1.1s ease-in-out infinite' : '';
-  progressBtn.textContent = want ? '⌘ Warfare (G) ●' : '⌘ Warfare (G)';
+  progressBtn.textContent = want ? '⌘ Warfare ●' : '⌘ Warfare';
   progressBtn.style.borderColor = want ? '#5ce2ec #14535e #14535e #5ce2ec' : '#fff #555 #555 #fff';
 }
 
@@ -3568,7 +3840,7 @@ function updateVaults(dt: number): void {
 // --- GETTING STARTED guide (early-game direction) ------------------------------
 // A small checklist panel so a fresh spawn always knows what to do next: punch
 // a tree → tools → a gun → find + loot your first vault. Steps auto-check off
-// (inventory scans + vault hooks), persist per account, and H hides/shows it.
+// (inventory scans + vault hooks), persist per account, and /guide toggles it.
 const starterEl = document.createElement('div');
 starterEl.className = 'mc-font guide-hud';
 app.appendChild(starterEl);
@@ -3583,7 +3855,7 @@ starterCount.className = 'guide-hud-count';
 const starterCloseBtn = document.createElement('div');
 starterCloseBtn.className = 'guide-hud-close';
 starterCloseBtn.textContent = '✕';
-starterCloseBtn.title = isMobile ? 'Hide' : 'Hide (H)';
+starterCloseBtn.title = 'Hide (/guide shows it again)';
 starterCloseBtn.addEventListener('pointerdown', (e) => { e.stopPropagation(); toggleGuidePanel(); });
 starterHead.append(starterTitle, starterCount, starterCloseBtn);
 const starterBar = document.createElement('div');
@@ -3763,6 +4035,9 @@ mobs.onBruteDown = () => {
   // The shared encounter engine owns victory. A rejected intro/invulnerable hit
   // restores mirrored HP in onBruteHit before Mobs reaches this callback.
 };
+// Mobs and dungeon actors are simulated locally, so their hitmarker is local
+// too. PvP markers deliberately still come from the server (`onHitConfirm`).
+projectiles.localHitSink = (damage) => showHitmarker(damage, false);
 projectiles.encounterSink = (point, damage, source) => {
   const seal = encounterSnapshot?.seal;
   if (seal?.sealed && seal.geometry && sealContains(seal.geometry, point, 0.08)) {
@@ -3914,93 +4189,17 @@ interaction.onLever = (x, y, z) => {
 };
 
 // --- TPA: teleport requests (DonutSMP-style) ----------------------------------
-// T opens a small "teleport to who?" prompt; the TARGET must hold Y for
-// TPA_HOLD seconds to accept — moving or taking damage resets the hold — and
-// the requester is then teleported straight to them (server-authoritative).
+// `/tpa <player>` asks; the TARGET runs `/tpaccept` and must then stand still
+// and untouched for TPA_HOLD seconds, after which the requester is teleported
+// straight to them (server-authoritative). The stand-still window is what stops
+// a request being accepted mid-fight to bail out or to bait someone in.
 // Multiplayer only: offline there is nobody to teleport to.
-let tpaPromptVisible = false;
 let tpaIncomingFrom = '';   // username of the pending requester ('' = none)
 let tpaIncomingAtMs = 0;    // wall-clock ms the request arrived
-let tpaHold = 0;            // seconds the accept key has been held
+let tpaAccepting = false;   // /tpaccept was run — the stand-still clock is live
+let tpaHold = 0;            // seconds held so far
 let tpaHoldStart: THREE.Vector3 | null = null; // position when the hold began
 let tpaHoldHealth = 0;      // health when the hold began (a hit = cancel)
-let tpaHoldBlocked = false; // a cancelled hold needs a key release to retry
-
-const tpaPromptEl = document.createElement('div');
-tpaPromptEl.style.cssText =
-  'position:absolute;inset:0;display:none;align-items:center;justify-content:center;' +
-  'background:rgba(8,8,14,0.6);z-index:24;';
-const tpaCard = document.createElement('div');
-tpaCard.className = 'mc-font';
-tpaCard.style.cssText = 'background:#15182b;border:2px solid #3a4790;border-radius:10px;' +
-  'padding:18px 22px;display:flex;flex-direction:column;gap:10px;width:330px;';
-tpaCard.innerHTML =
-  '<div style="font-size:18px;color:#ffd84a;letter-spacing:1px;">🌀 TPA REQUEST</div>' +
-  `<div style="font-size:12px;color:#cfe0ff;line-height:1.6;">Type a player name — if they ` +
-  (isMobile
-    ? `hold the accept button for ${TPA_HOLD}s you teleport straight to them.</div>`
-    : `hold <b>Y</b> for ${TPA_HOLD}s you teleport straight to them.</div>`);
-const tpaInput = document.createElement('input');
-tpaInput.type = 'text';
-tpaInput.maxLength = 32;
-tpaInput.placeholder = 'player name…';
-tpaInput.className = 'mc-font';
-tpaInput.style.cssText = 'font-size:15px;padding:7px 10px;background:#0c0e1a;color:#fff;' +
-  'border:1px solid #3a4790;border-radius:6px;outline:none;';
-const tpaHint = document.createElement('div');
-tpaHint.className = 'mc-font';
-tpaHint.style.cssText = 'font-size:11px;color:#7f8db0;';
-tpaHint.textContent = isMobile ? 'Tap Send to send' : 'Enter = send · Esc = cancel';
-const tpaBtnRow = document.createElement('div');
-tpaBtnRow.style.cssText = 'display:flex;gap:10px;';
-const tpaSendBtn = document.createElement('button');
-tpaSendBtn.className = 'mc-btn';
-tpaSendBtn.textContent = 'Send';
-tpaSendBtn.style.cssText = 'flex:1;font-size:14px;padding:7px 0;';
-const tpaCancelBtn = document.createElement('button');
-tpaCancelBtn.className = 'mc-btn';
-tpaCancelBtn.textContent = 'Cancel';
-tpaCancelBtn.style.cssText = 'flex:1;font-size:14px;padding:7px 0;';
-tpaBtnRow.append(tpaSendBtn, tpaCancelBtn);
-tpaCard.append(tpaInput, tpaHint, tpaBtnRow);
-tpaPromptEl.appendChild(tpaCard);
-app.appendChild(tpaPromptEl);
-
-function sendTpaFromPrompt(): void {
-  const name = tpaInput.value.trim();
-  if (name) net.sendTpa(name);
-  closeTpaPrompt();
-}
-tpaSendBtn.addEventListener('click', sendTpaFromPrompt);
-tpaCancelBtn.addEventListener('click', () => closeTpaPrompt());
-
-function openTpaPrompt(): void {
-  if (!net.connected) { showNotice('TPA needs multiplayer — no server connected.'); return; }
-  if (tpaPromptVisible) return;
-  tpaPromptVisible = true;
-  tpaPromptEl.style.display = 'flex';
-  tpaInput.value = '';
-  input.unlock();
-  window.setTimeout(() => tpaInput.focus(), 0);
-}
-function closeTpaPrompt(): void {
-  if (!tpaPromptVisible) return;
-  tpaPromptVisible = false;
-  tpaPromptEl.style.display = 'none';
-  tpaInput.blur();
-  if (worldReady && !player.dead) input.lock();
-}
-tpaInput.addEventListener('keydown', (e) => {
-  e.stopPropagation(); // typing must never trigger game hotkeys (E, M, T…)
-  if (e.key === 'Enter') {
-    sendTpaFromPrompt();
-  } else if (e.key === 'Escape') {
-    closeTpaPrompt();
-  }
-});
-tpaPromptEl.addEventListener('mousedown', (e) => {
-  if (e.target === tpaPromptEl) closeTpaPrompt(); // click outside = cancel
-});
 
 // Incoming-request banner (target side): sticky while the request is pending.
 const tpaBannerEl = document.createElement('div');
@@ -4012,100 +4211,177 @@ tpaBannerEl.style.cssText =
   'border:1px solid #3a4790;border-radius:8px;padding:8px 16px;pointer-events:none;';
 app.appendChild(tpaBannerEl);
 
-// Mobile has no Y key — a press-and-hold on-screen button drives the same
-// `input.tAccept` flag `updateTpa` ORs in with `KeyY`. Only shown on touch
-// devices, right under the banner, while a request is actually pending.
-const tpaAcceptBtn = document.createElement('div');
-if (isMobile) {
-  tpaAcceptBtn.className = 'mc-font';
-  tpaAcceptBtn.textContent = 'HOLD TO ACCEPT';
-  tpaAcceptBtn.style.cssText =
-    'position:absolute;top:230px;left:50%;transform:translateX(-50%);z-index:12;' +
-    'display:none;text-align:center;font-size:13px;letter-spacing:1px;color:#0c0e1a;' +
-    'background:#7dffa0;border:2px solid;border-color:#fff #3a7a4e #3a7a4e #fff;' +
-    'border-radius:8px;padding:10px 22px;pointer-events:auto;cursor:pointer;user-select:none;';
-  const setAccept = (down: boolean): void => {
-    input.tAccept = down;
-    tpaAcceptBtn.style.background = down ? '#54d980' : '#7dffa0';
-  };
-  tpaAcceptBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); setAccept(true); });
-  tpaAcceptBtn.addEventListener('pointerup', () => setAccept(false));
-  tpaAcceptBtn.addEventListener('pointercancel', () => setAccept(false));
-  tpaAcceptBtn.addEventListener('pointerleave', () => setAccept(false));
-  app.appendChild(tpaAcceptBtn);
-}
-
 net.onTpaRequest = (from) => {
   tpaIncomingFrom = from;
   tpaIncomingAtMs = performance.now();
+  tpaAccepting = false;
   tpaHold = 0;
   tpaHoldStart = null;
-  tpaHoldBlocked = false;
-  showNotice(isMobile
-    ? `📨 ${from} wants to teleport to YOU — hold the accept button!`
-    : `📨 ${from} wants to teleport to YOU — hold Y to accept!`);
+  showNotice(`📨 ${from} wants to teleport to YOU — run /tpaccept to allow it!`);
+  chatBox.print(`📨 ${from} wants to teleport to you — /tpaccept or /tpdeny`);
 };
+
+/** `/tpa <player>` — ask to be teleported to them. */
+function sendTpaTo(name: string): string | null {
+  if (!net.connected) return 'TPA needs multiplayer — no server connected.';
+  if (!name) return 'Usage: /tpa <player>';
+  if (name.toLowerCase() === net.username.toLowerCase()) return "You're already there.";
+  net.sendTpa(name);
+  chatBox.print(`🌀 Asked ${name} to let you teleport to them.`, 'ok');
+  return null;
+}
+
+/** `/tpaccept` — start the stand-still clock on the newest pending request. */
+function acceptTpa(): string | null {
+  if (!tpaIncomingFrom) return 'Nobody has asked to teleport to you.';
+  if (tpaAccepting) return `Already accepting — hold still for ${
+    Math.max(0, TPA_HOLD - tpaHold).toFixed(1)}s.`;
+  tpaAccepting = true;
+  tpaHold = 0;
+  tpaHoldStart = null; // captured on the first update frame, once we're back in control
+  chatBox.print(`🌀 Accepting ${tpaIncomingFrom} — stand still for ${TPA_HOLD}s.`, 'ok');
+  return null;
+}
+
+/** `/tpdeny` — drop the pending request without teleporting anyone. */
+function denyTpa(): string | null {
+  if (!tpaIncomingFrom) return 'Nobody has asked to teleport to you.';
+  chatBox.print(`❌ Refused ${tpaIncomingFrom}'s teleport request.`);
+  tpaIncomingFrom = '';
+  tpaAccepting = false;
+  tpaHold = 0;
+  tpaHoldStart = null;
+  return null;
+}
 
 function cancelTpaHold(reason: string): void {
   showNotice(reason);
+  chatBox.print(reason, 'err');
+  tpaAccepting = false;
   tpaHold = 0;
   tpaHoldStart = null;
-  tpaHoldBlocked = true; // release Y before trying again
 }
 
-/** Per-frame TPA upkeep: expire the pending request, run the hold-Y-to-accept
- *  clock (moving or taking damage resets it), and render the banner. */
+/** Per-frame TPA upkeep: expire the pending request, run the stand-still clock
+ *  started by /tpaccept (moving or taking damage cancels it), draw the banner. */
 function updateTpa(dt: number, controlling: boolean): void {
   if (!tpaIncomingFrom) {
     tpaBannerEl.style.display = 'none';
-    if (isMobile) tpaAcceptBtn.style.display = 'none';
     return;
   }
   const ageSec = (performance.now() - tpaIncomingAtMs) / 1000;
   if (ageSec > TPA_EXPIRE || !net.connected) {
     tpaIncomingFrom = '';
+    tpaAccepting = false;
     tpaBannerEl.style.display = 'none';
-    if (isMobile) tpaAcceptBtn.style.display = 'none';
     return;
   }
-  if (isMobile) tpaAcceptBtn.style.display = 'block';
-  const holding = controlling && !player.dead && (input.down('KeyY') || input.tAccept);
-  if (holding && !tpaHoldBlocked) {
-    if (!tpaHoldStart) {
-      tpaHoldStart = player.pos.clone();
-      tpaHoldHealth = player.health;
-    }
-    if (player.pos.distanceTo(tpaHoldStart) > 0.35) {
-      cancelTpaHold('❌ TPA accept cancelled — you moved!');
-    } else if (player.health < tpaHoldHealth) {
-      cancelTpaHold('❌ TPA accept cancelled — you were hit!');
-    } else {
-      tpaHold += dt;
-      if (tpaHold >= TPA_HOLD) {
-        net.sendTpaAccept();
-        showNotice(`🌀 Accepted — ${tpaIncomingFrom} is on their way!`);
-        tpaIncomingFrom = '';
-        tpaHold = 0;
-        tpaHoldStart = null;
-        tpaBannerEl.style.display = 'none';
-        if (isMobile) tpaAcceptBtn.style.display = 'none';
-        return;
+  if (tpaAccepting && !player.dead) {
+    // The clock only runs while you actually have control, so the seconds spent
+    // typing the command (pointer unlocked) don't count as standing still.
+    if (controlling) {
+      if (!tpaHoldStart) {
+        tpaHoldStart = player.pos.clone();
+        tpaHoldHealth = player.health;
+      }
+      if (player.pos.distanceTo(tpaHoldStart) > 0.35) {
+        cancelTpaHold('❌ TPA accept cancelled — you moved!');
+      } else if (player.health < tpaHoldHealth) {
+        cancelTpaHold('❌ TPA accept cancelled — you were hit!');
+      } else {
+        tpaHold += dt;
+        if (tpaHold >= TPA_HOLD) {
+          net.sendTpaAccept();
+          showNotice(`🌀 Accepted — ${tpaIncomingFrom} is on their way!`);
+          chatBox.print(`🌀 Accepted — ${tpaIncomingFrom} is on their way!`, 'ok');
+          tpaIncomingFrom = '';
+          tpaAccepting = false;
+          tpaHold = 0;
+          tpaHoldStart = null;
+          tpaBannerEl.style.display = 'none';
+          return;
+        }
       }
     }
-  } else if (!holding) {
+  } else if (player.dead) {
+    tpaAccepting = false;
     tpaHold = 0;
     tpaHoldStart = null;
-    tpaHoldBlocked = false;
   }
   tpaBannerEl.style.display = 'block';
   const bar = '█'.repeat(Math.round((tpaHold / TPA_HOLD) * 10)).padEnd(10, '░');
   tpaBannerEl.textContent =
     `📨 ${tpaIncomingFrom} wants to teleport to you\n` +
-    (tpaHold > 0
+    (tpaAccepting
       ? `accepting… ${bar} ${Math.max(0, TPA_HOLD - tpaHold).toFixed(1)}s — don't move!`
-      : isMobile
-        ? `hold the button below for ${TPA_HOLD}s to accept (${Math.ceil(TPA_EXPIRE - ageSec)}s left)`
-        : `hold Y for ${TPA_HOLD}s to accept (${Math.ceil(TPA_EXPIRE - ageSec)}s left)`);
+      : `run /tpaccept to allow it (${Math.ceil(TPA_EXPIRE - ageSec)}s left)`);
+}
+
+// --- The command box ---------------------------------------------------------
+// One key (T) opens a slash-only console. It is the ONLY way into the map,
+// waypoints, Warfare Command, the Getting Started guide and TPA — those lost
+// their dedicated keys — and, for operators, into the server's admin commands.
+// There is deliberately no free chat: an unrecognised line is refused locally
+// and never leaves the machine.
+const chatBox = new ChatBox(app, {
+  isOp: () => net.connected && net.isOp,
+  onOpen: () => { if (input.locked) input.unlock(); },
+  onClose: () => {
+    if (worldReady && screen === 'playing' && !player.dead &&
+        !invUI.open && !worldMap.open && !warfareUI.open) {
+      input.lock();
+    }
+  },
+  sendAdmin: (raw) => net.sendCommand(raw),
+  runLocal: (name, args) => {
+    switch (name) {
+      case 'help':
+        for (const line of chatBox.helpLines()) chatBox.print(line);
+        return null;
+      case 'map':
+        // The panels want the pointer back before they take over the screen;
+        // the box has already unlocked it, so open them straight away.
+        if (player.dead) return "You can't do that while dead.";
+        if (invUI.open) invUI.hide();
+        prepareWorldMap();
+        worldMap.show();
+        return null;
+      case 'warfare':
+        if (player.dead) return "You can't do that while dead.";
+        showProgress();
+        return null;
+      case 'guide':
+        toggleGuidePanel();
+        chatBox.print(guideHidden ? 'Getting Started guide hidden.' : 'Getting Started guide shown.');
+        return null;
+      case 'waypoint': {
+        if (player.dead) return "You can't do that while dead.";
+        const wpName = worldMap.addWaypointAt(
+          player.pos.x, player.pos.y, player.pos.z, args.join(' '));
+        const where = `${Math.round(player.pos.x)}, Y${Math.round(player.pos.y)}, ` +
+          `${Math.round(player.pos.z)}`;
+        showNotice(`📍 Waypoint "${wpName}" set — ${where}`);
+        chatBox.print(`📍 Waypoint "${wpName}" set at ${where}`, 'ok');
+        return null;
+      }
+      case 'tpa': return sendTpaTo(args[0] ?? '');
+      case 'tpaccept': return acceptTpa();
+      case 'tpdeny': return denyTpa();
+      default: return `"/${name}" isn't wired up yet.`;
+    }
+  },
+});
+net.onOpState = (op) => {
+  if (op) chatBox.print('🛡 You are a server operator — /help lists your commands.', 'ok');
+};
+net.onCmdOut = (lines, ok) => {
+  for (const line of lines) chatBox.print(line, ok ? 'info' : 'err');
+};
+
+/** T (or the touch button): open the command box, already primed with "/". */
+function openCommandBox(prefill = ''): void {
+  if (player.dead || screen !== 'playing') return;
+  chatBox.show(prefill);
 }
 
 net.onGotItem = (id, count) => {
@@ -4252,7 +4528,7 @@ interaction.canPlace = (x, y, z) => {
   if (id === Block.TacticalSilo || id === Block.InterceptorBattery ||
       id === Block.Helipad || id === Item.HelicopterKit) {
     if (!hasBlueprint(id)) {
-      warfarePlaceHint(`${ITEMS[id]?.name ?? 'That'} needs a Warfare Command authorization (press G).`);
+      warfarePlaceHint(`${ITEMS[id]?.name ?? 'That'} needs a Warfare Command authorization (/warfare).`);
       return false;
     }
   }
@@ -4352,12 +4628,20 @@ function fireVolley(stack: ItemStack, gun: GunInfo): boolean {
   const boosted = buffs.gunDamageMult > 1
     ? { ...gun, damage: Math.max(1, Math.round(gun.damage * buffs.gunDamageMult)) }
     : gun;
+  const eye = player.eyePosition;
   for (let i = 0; i < pellets; i++) {
-    projectiles.fire(player.eyePosition, spreadDir(base, spread), boosted);
+    projectiles.fire(eye, spreadDir(base, spread), boosted);
   }
+  // Tell everyone else we fired (cosmetic only — hits are reported separately
+  // and validated server-side). One message per trigger pull, not per pellet.
+  net.sendShot(eye.x, eye.y, eye.z, base.x, base.y, base.z, stack.id);
   held.recoil();
   heldSwingSeq = (heldSwingSeq + 1) & 0xffff;
-  audio.gun(player.eyePosition);
+  // The weapon's own feel profile drives how the shot sounds and how hard the
+  // world jolts, so a shotgun and an SMG never land the same way.
+  const feel = gunFeel(stack.id);
+  audio.gun(player.eyePosition, feel.kick);
+  if (feel.shake > 0) triggerEncounterShake(0.11, feel.shake);
   return true;
 }
 
@@ -4411,8 +4695,10 @@ function clockString(): string {
 
 function updateCamera(): void {
   camera.position.copy(player.eyePosition);
-  // Brief roll tilt while the damage flash decays, like vanilla's hurt cam.
-  camera.rotation.set(player.pitch, player.yaw, player.damageFlash * 0.18);
+  // Brief roll tilt while the damage flash decays, like vanilla's hurt cam —
+  // plus the glider's bank, so turning under the wing leans the whole horizon.
+  camera.rotation.set(
+    player.pitch, player.yaw, player.damageFlash * 0.18 + glideCamRoll);
 
   // Aim-down-sights divides the FOV (zoom) and steadies the look. Raw speed
   // widens it instead: a grapple reel or a launch pushes the world past you,
@@ -4619,22 +4905,27 @@ function updateSelfAvatar(dt: number): void {
   selfSneakT += (sneakTarget - selfSneakT) * Math.min(1, 12 * dt);
   if (player.boating) {
     applyAvatarSneak(b, 0);
-    b.group.rotation.x = 0; b.head.rotation.x = 0;
+    b.group.rotation.x = 0; b.group.rotation.z = 0; b.head.rotation.x = 0;
     b.parts[0].rotation.x = 1.35; b.parts[1].rotation.x = 1.35;
     b.parts[2].rotation.x = 0.55; b.parts[3].rotation.x = 0.55;
     b.parts[2].rotation.z = 0; b.parts[3].rotation.z = 0;
     if (b.cape) b.cape.rotation.x = -0.25;
-  } else if (player.gliding) {
+  } else if (selfGlideT > 0.01) {
+    // Hanging under the wing (the rig itself is placed by updateGliderRig).
     applyAvatarSneak(b, 0);
-    b.group.rotation.x = 1.05;
-    b.parts[0].rotation.x = 0.2; b.parts[1].rotation.x = 0.2;
-    b.parts[2].rotation.x = 1.2; b.parts[3].rotation.x = 1.2;
-    b.parts[2].rotation.z = 0; b.parts[3].rotation.z = 0;
-    b.head.rotation.x = -0.9;
-    if (b.cape) b.cape.rotation.x = -1.1;
+    const pose = glidePose(player.pitch, selfBank, glidePhase, selfGlideT);
+    b.group.rotation.x = pose.tilt;
+    b.group.rotation.z = pose.roll;
+    anchorTiltedBody(b.group, player.pos.x, player.pos.y, player.pos.z);
+    b.parts[0].rotation.x = pose.legs[0]; b.parts[1].rotation.x = pose.legs[1];
+    b.parts[2].rotation.x = pose.arms[0]; b.parts[3].rotation.x = pose.arms[1];
+    b.parts[2].rotation.z = -pose.armRoll; b.parts[3].rotation.z = pose.armRoll;
+    b.head.rotation.x = pose.head;
+    if (b.cape) b.cape.rotation.x = pose.cape;
   } else {
     applyAvatarSneak(b, selfSneakT);
     b.group.rotation.x = 0;
+    b.group.rotation.z = 0;
     b.head.rotation.x = player.pitch + selfSneakT * 0.12; // hunch while keeping look direction
     const hspeed = Math.hypot(player.vel.x, player.vel.z);
     selfWalkPhase += Math.min(hspeed, 7) * dt * 2.4;
@@ -4665,6 +4956,87 @@ function updateSelfAvatar(dt: number): void {
       }
     }
     if (b.cape) b.cape.rotation.x = pose.cape;
+  }
+}
+
+// ── The glider you are actually riding ──────────────────────────────────────
+// The rig is a scene object, not a first-person prop, and it stays visible in
+// FIRST person: hanging under a wing with the control bar out in front of you
+// IS the cockpit view, so there is nothing extra to model and what you see is
+// exactly what everyone else sees you flying.
+let selfRig: GliderRig | null = null;
+let selfGlideT = 0;      // 0..1 deploy ease (drives the pilot pose too)
+let selfBank = 0;        // smoothed bank angle, radians
+let glideCamRoll = 0;    // camera roll into the turn (updateCamera adds it)
+let glidePhase = 0;      // sail-flutter / leg-scissor clock
+let selfPrevYaw = 0;
+let windTimer = 0;       // next gust of the wind bed
+let vaporTimer = 0;      // next puff of wingtip vapour
+const rigScratch = new THREE.Vector3();
+
+/** How fast the wing is flying, 0..1, for wind, flutter and vapour. */
+function glideSpeed01(): number {
+  return Math.max(0, Math.min(1, (player.glideSpeed - 10) / 22));
+}
+
+/** Fly the wing: attitude, bank, wind and wingtip vapour. Runs every frame in
+ *  every view so the deploy/stow blend is never skipped. */
+function updateGliderRig(dt: number): void {
+  const flying = player.gliding && !player.dead;
+  selfGlideT += ((flying ? 1 : 0) - selfGlideT) * Math.min(1, dt * (flying ? 6 : 9));
+
+  // Bank comes from how hard you are turning — an aircraft rolls into a turn,
+  // and the roll is most of what sells the fact that you are flying one.
+  let turn = player.yaw - selfPrevYaw;
+  while (turn > Math.PI) turn -= Math.PI * 2;
+  while (turn < -Math.PI) turn += Math.PI * 2;
+  selfPrevYaw = player.yaw;
+  const bankTarget = flying
+    ? Math.max(-0.75, Math.min(0.75, (turn / Math.max(dt, 1e-4)) * 0.42)) : 0;
+  selfBank += (bankTarget - selfBank) * Math.min(1, dt * 5);
+  glideCamRoll = accessibility.reducedMotion ? 0 : selfBank * 0.32 * selfGlideT;
+
+  if (selfGlideT <= 0.02) {
+    if (selfRig) selfRig.group.visible = false;
+    return;
+  }
+  if (!selfRig) {
+    selfRig = buildGliderRig();
+    scene.add(selfRig.group);
+  }
+  glidePhase += dt * 2.2;
+  const speed01 = glideSpeed01();
+  poseGliderRig(selfRig, {
+    deploy: selfGlideT, bank: selfBank, time: glidePhase, speed01,
+  });
+  selfRig.group.position.set(
+    player.pos.x, player.pos.y + RIG_HARNESS_Y, player.pos.z);
+  selfRig.group.rotation.set(
+    THREE.MathUtils.clamp(player.pitch, -1.2, 1.2) * 0.8 + 0.06,
+    player.yaw, selfBank);
+  // Your own fists on the bar — only when the third-person body (which has its
+  // own hands) is not the one being drawn.
+  selfRig.hands.visible = view === View.First;
+
+  if (!flying) return;
+  // Wind bed: re-triggered gusts whose level tracks airspeed, so a dive roars
+  // and a level cruise whispers.
+  windTimer -= dt;
+  if (windTimer <= 0) {
+    windTimer = 0.34;
+    audio.glideWind(speed01);
+  }
+  // Vapour off the wingtips once you are really moving.
+  if (speed01 > 0.45 && !accessibility.reducedMotion) {
+    vaporTimer -= dt;
+    if (vaporTimer <= 0) {
+      vaporTimer = 0.09;
+      for (const tip of selfRig.tips) {
+        tip.getWorldPosition(rigScratch);
+        particles.burst(rigScratch.x, rigScratch.y, rigScratch.z, 1, 0xffffff,
+          0.4, 0.3, { gravity: 0, spread: 0.15, scale: 0.4 });
+      }
+    }
   }
 }
 
@@ -6534,6 +6906,12 @@ function frame(): void {
 
   // Direct control only while actively playing (pointer locked, no UI, alive).
   const controlling = input.locked && !player.dead && !invUI.open && !vaultCinematic.playing;
+  // PLAY-THROUGH: the Warfare panel is a floating card over a live world, so it
+  // hands the cursor to the tree WITHOUT taking your legs away. Movement keys
+  // still drive the player; look, mining, shooting and hotbar stay suspended
+  // (those all need the pointer lock this panel gave up).
+  const playThrough = warfareUI.open && !player.dead && !invUI.open &&
+    !vaultCinematic.playing && screen === 'playing';
 
   // Keep worn-armor mitigation current before any damage can land this frame:
   // offline the player mitigates locally; in MP the server mitigates from this
@@ -6563,19 +6941,13 @@ function frame(): void {
       if (input.hotbarKey >= 0) inventory.select(input.hotbarKey);
       if (input.wheelDelta !== 0) inventory.select(inventory.selected + input.wheelDelta);
       if (input.dropPressed) dropCurrentItem(input.down('ShiftLeft') || input.down('ShiftRight'));
-      if (input.waypointPressed) {
-        // B: drop a named waypoint right here (shows on the map + in-world,
-        // with the altitude so you can find your way back to a cave/tower).
-        const name = worldMap.addWaypointAt(player.pos.x, player.pos.y, player.pos.z);
-        showNotice(`📍 Waypoint "${name}" set — ` +
-          `${Math.round(player.pos.x)}, Y${Math.round(player.pos.y)}, ${Math.round(player.pos.z)}`);
-      }
-      if (input.guideToggled) toggleGuidePanel();
       if (input.viewPressed) cycleView();
-      if (input.tpaPressed) openTpaPrompt();
+      // T: the command box. The map, waypoints, Warfare Command, the guide and
+      // TPA all live behind it now — none of them has a key of its own.
+      if (input.chatPressed) openCommandBox();
     }
 
-    const moveInput = controlling ? input : FROZEN_INPUT;
+    const moveInput = controlling || playThrough ? input : FROZEN_INPUT;
     // A glider worn in the chestplate slot enables mid-air deploy (player.update
     // reads this; jump while falling to start gliding).
     const wornChest = inventory.chestplateStack;
@@ -6651,7 +7023,7 @@ function frame(): void {
     // flying — it snaps when worn out (easy to break, by design).
     if (player.gliding && !wasGliding) {
       audio.glide();
-      showNotice('Gliding! Look to steer · jump to stop');
+      showNotice('Wings out! Dive for speed · pull up to climb · jump to stow');
     }
     wasGliding = player.gliding;
     if (player.gliding) {
@@ -6683,7 +7055,11 @@ function frame(): void {
       // FLAGS come first: standing at an enemy flag pad, left-click is a swing
       // at the pole (never a mine), because that's the only thing you could
       // possibly mean to be doing there.
-      if (mySeat) {
+      if (healUse.active) {
+        // Both hands are busy with the wrap: no mining, placing or shooting
+        // until it is finished (or interrupted by switching away).
+        interaction.update(dt, input, camera, true, true); // suppress mine + use
+      } else if (mySeat) {
         // Aboard a helicopter, the world controls change meaning entirely: the
         // pilot's secondary action releases a bomb, and neither seat can mine,
         // place or open anything from the air.
@@ -6716,8 +7092,8 @@ function frame(): void {
         interaction.update(dt, input, camera, true, true); // suppress mine + use
       } else if (input.rightClicked && !interaction.armedMove && heldStack &&
           ITEMS[heldStack.id]?.heal) {
-        // Healing consumables (Bandage/Medkit): a burst of fast regeneration.
-        useHealItem();
+        // Healing consumables (Bandage/Medkit): start the patch-up channel.
+        beginHealUse();
         interaction.update(dt, input, camera, true, true); // suppress mine + use
       } else if (input.rightClicked && !interaction.armedMove && heldStack &&
           isRune(heldStack.id)) {
@@ -6879,6 +7255,7 @@ function frame(): void {
   // First person renders through the eye camera itself; the third-person
   // views render through the boom camera (aiming still uses `camera`).
   const activeCamera: THREE.Camera = view === View.First ? camera : viewCamera;
+  updateGliderRig(dt); // the wing first: the pilot pose hangs off its state
   updateSelfAvatar(dt);
 
   world.update(player.pos.x, player.pos.z, 6);
@@ -6898,6 +7275,7 @@ function frame(): void {
     netItems.update(dt, player, inventory, sky.sunIntensity);
     projectiles.update(dt); // in-flight rounds keep travelling even in a menu
   }
+  updateCombatFeedback(dt); // hitmarker burn-down + re-aim the damage arcs
 
   // State-driven sounds.
   audio.updateListener(activeCamera);
@@ -6906,9 +7284,13 @@ function frame(): void {
     // Taking a hit levels your worn armor (more for harder hits).
     inventory.addArmorXp(2 + (lastHealth - player.health));
     lastDamageLocal = worldTimeLocal; // combat tag (blocks totem travel 10s)
+  } else if (player.health > lastHealth) {
+    onHealthRestored(player.health - lastHealth); // "+N", sparkle, hearts squeeze
   }
   tickTotemWindup(dt);
   lastHealth = player.health;
+  // Bandage/medkit application: advance the channel and its feedback.
+  updateHealFeel(dt, controlling && localMode !== 'spectator' && !mySeat);
   if (player.inWater && !lastInWater && Math.abs(player.vel.y) > 1) audio.splash();
   lastInWater = player.inWater;
   ambienceTimer -= dt;
@@ -6920,19 +7302,35 @@ function frame(): void {
   }
   // The POV arm only renders in first person, but selected-item state remains
   // current in third person so guns do not accidentally trigger punch swings.
+  // Both hands are on the control bar while gliding, so the POV arm steps
+  // aside for the rig (which draws its own fists on the bar).
   const firstPersonActive = controlling && view === View.First;
-  held.setActive(firstPersonActive);
+  held.setActive(firstPersonActive && !player.gliding);
   held.setItem(controlling ? inventory.selectedStack?.id ?? null : null);
   const reloadProgress = reloadTimer > 0 && reloadDuration > 0
     ? 1 - reloadTimer / reloadDuration : -1;
   held.update(dt, controlling && interaction.breakingActive, sky.sunIntensity,
-    aimZoom > 1, reloadProgress);
+    aimZoom > 1, reloadProgress, healUse.active ? healUse.progress : -1,
+    Math.hypot(player.vel.x, player.vel.z), player.onGround);
+  // Recoil the VIEW, not the aim: this runs after the frame's shots were fired
+  // from camera.quaternion, and updateCamera rewrites the rotation next frame,
+  // so the kick is felt without ever bending a bullet.
+  if (firstPersonActive && !accessibility.reducedMotion) {
+    held.viewKick(viewKickOut);
+    camera.rotation.x -= viewKickOut.pitch;
+    camera.rotation.y += viewKickOut.yaw;
+    camera.rotation.z += viewKickOut.roll;
+  }
 
   // Gameplay HUD chrome shows only during active play.
   const hudDisplay = controlling ? '' : 'none';
   crosshair.style.display = hudDisplay;
   hotbarEl.style.display = controlling ? 'flex' : 'none';
   statusEl.style.display = hudDisplay;
+  // Combat feedback lives with the crosshair — a damage arc left hanging over
+  // the pause menu or the death screen is noise.
+  hitmarkerEl.style.display = hudDisplay;
+  dmgArcWrap.style.display = hudDisplay;
 
   // Ammo counter: "loaded / reserve" while a gun is held (RELOADING during one).
   const gunStack = controlling ? inventory.selectedStack : null;

@@ -25,6 +25,7 @@ import {
   COMEBACK_HEARTS, PERMANENT_UNTIL, formatRemaining, isPermanentElimination,
 } from '../src/hearts';
 import { Furnaces, SMELT } from '../src/furnace';
+import { HEAL_BEAT, HealUse, healUseTime } from '../src/healuse';
 import { Inventory, CRAFT_START, ARMOR_START } from '../src/inventory';
 import {
   dropFor, Item, ItemStack, ITEMS, miningStats, armorPointsOf, armorLevel,
@@ -43,15 +44,22 @@ import {
 import { Mobs, MOB_DEFS } from '../src/mobs';
 import { Particles } from '../src/particles';
 import { raycastBlocks } from '../src/interact';
+import {
+  EXTRAPOLATE_MAX, INTERP_DELAY, SNAP_DISTANCE, TransformBuffer, wrapAngle,
+} from '../src/interp';
 import { Player } from '../src/player';
 import {
   applyAvatarSneak, buildAvatarBody, buildArmorOverlay, stridePose,
 } from '../src/remoteplayers';
+import {
+  buildGliderRig, disposeGliderRig, glidePose, poseGliderRig,
+} from '../src/glidermodels';
 import { daylight } from '../src/sky';
 import { Survival } from '../src/survival';
 import { GameServer, Outbound } from '../src/net/server_core';
 import {
-  ClientMsg, mitigate, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE, WORLD_BORDER, WORLD_HALF,
+  ClientMsg, ServerMsg, SNAPSHOT_HZ,
+  mitigate, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE, WORLD_BORDER, WORLD_HALF,
   CORE_BORDER, CORE_HALF, inCore, MAX_ATTUNED, TOTEM_COOLDOWN, COMBAT_TAG,
   TPA_EXPIRE, TPA_HOLD,
   bloodlustMult, BLOODLUST_START, BLOODLUST_STEP, BLOODLUST_PER_STEP, BLOODLUST_CAP,
@@ -95,6 +103,10 @@ import { itemDescription } from '../src/itemdesc';
 import { RUNES, isRune, runeOf, runeBonuses } from '../src/runes';
 import { Inventory as RuneInv } from '../src/inventory';
 import { Accounts, validUsername } from '../src/net/accounts';
+import {
+  ADMIN_COMMANDS, PLAYER_COMMANDS, commandLabel, commandList, parseCommand,
+  suggestCommands,
+} from '../src/chat';
 import {
   structureKindAt, structureStamp, structureChestTier, worldStructures,
 } from '../src/structures';
@@ -356,6 +368,43 @@ check('daylight: noon full, midnight moonlit floor, dawn between',
   d.eyeUnderwater = false;
   sd.update(1, d);
   check('air refills out of water', d.air > 3);
+
+  // Applying a bandage/medkit is a timed channel, not an instant click.
+  {
+    const use = new HealUse();
+    check('a fresh heal channel is idle', !use.active && use.progress === 0);
+    use.start(Item.Bandage, 2);
+    check('bandage/medkit have distinct apply times, medkit slower',
+      healUseTime(Item.Medkit) > healUseTime(Item.Bandage) &&
+      healUseTime(Item.Bandage) >= 1 && use.duration === healUseTime(Item.Bandage));
+    let beats = 0, done = 0, finished = 0;
+    for (let i = 0; i < 200 && use.active; i++) {
+      const step = use.tick(1 / 60);
+      beats += step.beats;
+      if (step.done) { done++; finished = step.item; }
+    }
+    check('the channel completes exactly once, reporting its item',
+      done === 1 && finished === Item.Bandage && !use.active);
+    check('work beats punctuate the channel',
+      beats >= 2 && beats <= Math.ceil(healUseTime(Item.Bandage) / HEAL_BEAT),
+      `beats=${beats}`);
+    check('a finished channel stays idle (no double heal)',
+      !use.tick(1).done && !use.tick(1).beats);
+
+    const cancelled = new HealUse();
+    cancelled.start(Item.Medkit, 0);
+    cancelled.tick(0.5);
+    check('a channel reports partial progress while working',
+      cancelled.progress > 0.2 && cancelled.progress < 0.4,
+      `p=${cancelled.progress.toFixed(2)}`);
+    cancelled.cancel();
+    check('cancelling mid-wrap never completes (item is not spent)',
+      !cancelled.active && !cancelled.tick(5).done && cancelled.progress === 0);
+
+    const long = new HealUse();
+    long.start(Item.Medkit, 4);
+    check('one huge frame still finishes cleanly', long.tick(99).done && !long.active);
+  }
 
   const inv = new Inventory();
   inv.add(Block.Dirt, 10); inv.add(Item.Diamond, 3);
@@ -1301,6 +1350,40 @@ check('furnace smelts ore/sand/log but not removed foods',
     check('glider: a second mid-air jump stops gliding', !gp.gliding);
   }
 
+  // The wing carries ENERGY: a dive builds airspeed that can be traded back
+  // for a burst of climb, and the climb runs the speed out again so nobody
+  // pumps their way to the sky for free.
+  {
+    const flat = { ...IDLE_INPUT } as never;
+    const jump = { ...IDLE_INPUT, jump: true } as never;
+    const gp = new Player({ x: spawn.x, y: spawn.y + 100, z: spawn.z });
+    gp.gliderEquipped = true; gp.yaw = 0; gp.pitch = 0;
+    gp.vel.y = -34;                       // falling hard when the wings open
+    gp.update(1 / 60, jump, world);
+    check('glider: the wings CATCH a fall instead of riding it down',
+      gp.gliding && gp.vel.y > -4, `vy=${gp.vel.y.toFixed(1)}`);
+
+    const cruise = gp.glideSpeed;
+    gp.pitch = -1.0;                      // nose down
+    for (let i = 0; i < 90; i++) gp.update(1 / 60, flat, world);
+    const diveSpeed = gp.glideSpeed;
+    check('glider: a dive builds airspeed well past the cruise',
+      diveSpeed > cruise + 8, `cruise=${cruise.toFixed(1)} dive=${diveSpeed.toFixed(1)}`);
+
+    gp.pitch = 0.9;                       // pull up on all that speed
+    gp.update(1 / 60, flat, world);
+    check('glider: the speed bought in a dive buys a real climb',
+      gp.vel.y > 2, `vy=${gp.vel.y.toFixed(1)}`);
+    let climbTicks = 0;
+    while (climbTicks < 240 && gp.vel.y > 0) {
+      gp.update(1 / 60, flat, world);
+      climbTicks++;
+    }
+    check('glider: a zoom-climb runs out of energy (no free altitude)',
+      climbTicks < 180 && gp.glideSpeed < diveSpeed,
+      `ticks=${climbTicks} speed=${gp.glideSpeed.toFixed(1)}`);
+  }
+
   // Spawn safety: random spawns are always solid dry ground (never air/water).
   {
     let allDry = true, detail = '';
@@ -1366,6 +1449,170 @@ check('furnace smelts ore/sand/log but not removed foods',
   const kill = s.handle(1, { t: 'rangedAttack', target: 2, amount: 9999 }); // clamped, lethal
   check('ranged damage is clamped but can still kill',
     kill.some((o) => o.msg.t === 'killfeed') && hp(2) === 0);
+}
+
+// --- PvP FEEL: hitmarkers, gunfire broadcast, blast FX -----------------------
+// A gunfight is only readable if you can tell that your shots landed and where
+// incoming fire came from. All three signals below are server-driven so a
+// client can neither fake a hitmarker nor draw tracers from somewhere it isn't.
+{
+  const s = new GameServer(1337, mulberry32(7));
+  s.addPlayer(1); s.addPlayer(2);
+  const hp = (id: number) => s.snapshot().find((p) => p.id === id)!.health;
+  const confirms = (out: Outbound[]) =>
+    out.filter((o) => o.msg.t === 'hitconfirm') as
+      { to: number | string; msg: Extract<ServerMsg, { t: 'hitconfirm' }> }[];
+  s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: Math.PI, pitch: 0 }); // faces +z
+  s.handle(2, { t: 'xform', x: 0, y: 70, z: 12, yaw: 0, pitch: 0 });
+
+  const landed = confirms(s.handle(1, { t: 'rangedAttack', target: 2, amount: 6 }));
+  check('a landed hit sends the SHOOTER a hitmarker with the post-armor damage',
+    landed.length === 1 && landed[0].to === 1 &&
+    landed[0].msg.target === 2 && landed[0].msg.amount === 6 &&
+    landed[0].msg.killed === false && hp(2) === 14);
+  check('a rejected hit sends no hitmarker at all', (() => {
+    s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: 0, pitch: 0 }); // faces away
+    const out = s.handle(1, { t: 'rangedAttack', target: 2, amount: 6 });
+    s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: Math.PI, pitch: 0 });
+    return confirms(out).length === 0;
+  })());
+  check('a hit the target fully soaks still confirms, at zero', (() => {
+    s.handle(2, { t: 'armor', points: ARMOR_POINT_CAP, toughness: TOUGHNESS_CAP });
+    const before = hp(2);
+    const soaked = confirms(s.handle(1, { t: 'rangedAttack', target: 2, amount: 1 }));
+    s.handle(2, { t: 'armor', points: 0, toughness: 0 });
+    return soaked.length === 1 && soaked[0].to === 1 && soaked[0].msg.amount === 0 &&
+      hp(2) === before;
+  })());
+  check('the killing hit is marked as a kill', (() => {
+    const out = s.handle(1, { t: 'rangedAttack', target: 2, amount: RANGED_MAX_DAMAGE });
+    return confirms(out).some((c) => c.msg.killed) && hp(2) === 0;
+  })());
+
+  // Gunfire rebroadcast (cosmetic — carries no damage of its own).
+  const g = new GameServer(1337, mulberry32(8));
+  g.addPlayer(1); g.addPlayer(2);
+  g.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: 0, pitch: 0 });
+  const shotAt = (over: Partial<Extract<ClientMsg, { t: 'shot' }>> = {}) =>
+    g.handle(1, {
+      t: 'shot', x: 0, y: 71.6, z: 0, dx: 0, dy: 0, dz: -2, item: Item.Rifle, ...over,
+    });
+  const fired = shotAt();
+  check('a gunshot is rebroadcast to everyone else, never back to the shooter',
+    fired.length === 1 && fired[0].to === 'others' && fired[0].from === 1 &&
+    fired[0].msg.t === 'shot');
+  check('the rebroadcast is tagged with the shooter and carries a UNIT direction',
+    fired[0].msg.t === 'shot' && fired[0].msg.id === 1 &&
+    Math.abs(Math.hypot(fired[0].msg.dx, fired[0].msg.dy, fired[0].msg.dz) - 1) < 1e-9);
+  check('a shot carries no damage: nobody is hurt by it',
+    !fired.some((o) => o.msg.t === 'hurt' || o.msg.t === 'hitconfirm'));
+  check('a shot from a non-gun item is dropped',
+    shotAt({ item: Item.Dirt }).length === 0 && shotAt({ item: 0 }).length === 0);
+  check('a shot whose muzzle is nowhere near the shooter is dropped',
+    shotAt({ x: 60, z: 60 }).length === 0);
+  check('a degenerate or non-finite shot is dropped',
+    shotAt({ dx: 0, dy: 0, dz: 0 }).length === 0 &&
+    shotAt({ dz: Number.NaN }).length === 0 &&
+    shotAt({ y: Number.POSITIVE_INFINITY }).length === 0);
+  check('tracer spam is rate-limited without the clock advancing', (() => {
+    let broadcast = 0;
+    for (let i = 0; i < 400; i++) if (shotAt().length) broadcast++;
+    return broadcast > 0 && broadcast < 40;
+  })());
+  check('the budget refills as time passes, so real sustained fire gets through',
+    (() => {
+      g.tickWar(2); // advances worldTime
+      return shotAt().length === 1;
+    })());
+  check('a dead player cannot fire', (() => {
+    // Player 2 stands at +z looking back down -z at player 1, and kills them.
+    g.handle(2, { t: 'xform', x: 0, y: 70, z: 5, yaw: 0, pitch: 0 });
+    g.handle(2, { t: 'rangedAttack', target: 1, amount: RANGED_MAX_DAMAGE });
+    return g.snapshot().find((p) => p.id === 1)!.dead && shotAt().length === 0;
+  })());
+
+  // Explosions: the crater already syncs as edits, but silently. The blast FX
+  // has to reach everyone else or a rocket is an invisible hole in the world.
+  const b = new GameServer(1337, mulberry32(9));
+  b.addPlayer(1); b.addPlayer(2);
+  b.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: 0, pitch: 0 });
+  const burst = b.handle(1, { t: 'rocketBlast', x: 0, y: 70, z: -4 });
+  const fx = burst.filter((o) => o.msg.t === 'blast');
+  check('a rocket burst broadcasts explosion FX to the other clients',
+    fx.length === 1 && fx[0].to === 'others' && fx[0].from === 1);
+  check('a rocket burst out of range is rejected entirely',
+    b.handle(1, { t: 'rocketBlast', x: 0, y: 70, z: -9999 }).length === 0);
+}
+
+// --- Remote-player interpolation (interp.ts) --------------------------------
+// Snapshot playback is what makes a strafing enemy trackable: the avatar has to
+// move at the speed its owner moved, not ease toward each packet.
+{
+  const buf = new TransformBuffer();
+  check('an empty buffer has nothing to draw', buf.sample(0) === null);
+
+  // A player walking +x at 10 blocks/s, sampled at 15Hz.
+  for (let i = 0; i <= 10; i++) {
+    buf.push({ t: i / 15, x: i * (10 / 15), y: 70, z: 0, yaw: 0, pitch: 0 });
+  }
+  check('a time between two snapshots interpolates linearly', (() => {
+    const mid = buf.sample(0.5 / 15); // halfway through the first span
+    return !!mid && Math.abs(mid.x - 10 / 15 / 2) < 1e-9;
+  })());
+  check('playback runs at the real speed, not an easing curve', (() => {
+    // Two samples a fixed step apart must be exactly one step of travel apart.
+    const a = buf.sample(3 / 15), c = buf.sample(4 / 15);
+    return !!a && !!c && Math.abs((c.x - a.x) - 10 / 15) < 1e-9;
+  })());
+  check('a render time before any history clamps to the oldest sample',
+    buf.sample(-5)?.x === 0);
+  check('a gap is extrapolated along the last velocity, then frozen', (() => {
+    const last = buf.sample(10 / 15)!;
+    const ahead = buf.sample(10 / 15 + EXTRAPOLATE_MAX / 2)!;
+    const way = buf.sample(10 / 15 + 30)!;   // long dead air
+    const capped = buf.sample(10 / 15 + EXTRAPOLATE_MAX)!;
+    return ahead.x > last.x && way.x === capped.x;
+  })());
+
+  check('a teleport-sized jump snaps instead of sliding across the world', (() => {
+    const b2 = new TransformBuffer();
+    b2.push({ t: 0, x: 0, y: 70, z: 0, yaw: 0, pitch: 0 });
+    b2.push({ t: 0.1, x: 0.5, y: 70, z: 0, yaw: 0, pitch: 0 });
+    b2.push({ t: 0.2, x: 0.5 + SNAP_DISTANCE + 1, y: 70, z: 0, yaw: 0, pitch: 0 });
+    // Everything before the jump is discarded: there is nothing to lerp from.
+    return b2.length === 1 && b2.sample(0.15)!.x === 0.5 + SNAP_DISTANCE + 1;
+  })());
+  check('stale, duplicate and non-finite samples are ignored', (() => {
+    const b2 = new TransformBuffer();
+    b2.push({ t: 1, x: 1, y: 70, z: 0, yaw: 0, pitch: 0 });
+    b2.push({ t: 0.5, x: 99, y: 70, z: 0, yaw: 0, pitch: 0 }); // out of order
+    b2.push({ t: 1, x: 98, y: 70, z: 0, yaw: 0, pitch: 0 });   // duplicate stamp
+    b2.push({ t: 2, x: Number.NaN, y: 70, z: 0, yaw: 0, pitch: 0 });
+    b2.push({ t: 3, x: 1, y: 70, z: 0, yaw: 0, pitch: Number.POSITIVE_INFINITY });
+    return b2.length === 1 && b2.sample(1)!.x === 1;
+  })());
+  check('yaw takes the short way round the wrap', (() => {
+    const b2 = new TransformBuffer();
+    b2.push({ t: 0, x: 0, y: 0, z: 0, yaw: Math.PI - 0.1, pitch: 0 });
+    b2.push({ t: 1, x: 0, y: 0, z: 0, yaw: -Math.PI + 0.1, pitch: 0 });
+    const mid = b2.sample(0.5)!;
+    // Straight lerp would swing all the way back through 0; the short way is
+    // across the ±π seam, so the midpoint sits at the seam itself.
+    return Math.abs(Math.abs(mid.yaw) - Math.PI) < 1e-9;
+  })());
+  check('wrapAngle always returns the signed short way',
+    Math.abs(wrapAngle(Math.PI * 2 - 0.25) + 0.25) < 1e-9 &&
+    Math.abs(wrapAngle(-Math.PI * 2 + 0.25) - 0.25) < 1e-9 &&
+    Math.abs(wrapAngle(0.5) - 0.5) < 1e-9);
+  check('history is retired, so a long session cannot grow the buffer', (() => {
+    const b2 = new TransformBuffer();
+    for (let i = 0; i < 3000; i++) {
+      b2.push({ t: i / 15, x: i * 0.01, y: 0, z: 0, yaw: 0, pitch: 0 });
+    }
+    return b2.length < 40;
+  })());
+  check('the render delay covers more than one snapshot interval',
+    INTERP_DELAY > 1 / SNAPSHOT_HZ);
 }
 
 // --- Item metadata survives closing the UI (no XP/durability/ammo wipe) ------------
@@ -4687,11 +4934,48 @@ const lairs = new Map<VaultBossKind, VaultStamp>();
 
   const glider = buildAvatarBody(defaultCosmetics(7));
   const pack = buildArmorOverlay(glider, [0, Item.Glider, 0, 0]);
-  check('a worn glider reads as a backpack (single mesh), not chest plating',
-    pack.length === 1);
+  check('a worn glider reads as a folded wing on the back, not chest plating',
+    pack.length === 3 && pack.every((m) => m.userData.gliderPack === true));
   const junk = buildAvatarBody(defaultCosmetics(7));
   check('junk ids in armor slots build nothing',
     buildArmorOverlay(junk, [Item.Rifle, 99999, -1, NaN]).length === 0);
+
+  // The deployed glider is an actual aircraft you hang beneath, so the pilot
+  // flies PRONE with their hands on the bar — not reclining through the air.
+  {
+    const level = glidePose(0, 0.4, 0, 1);
+    check('glide pose: the pilot flies face down along the path',
+      level.tilt < -0.8, `tilt=${level.tilt.toFixed(2)}`);
+    check('glide pose: both hands reach up onto the control bar',
+      level.arms[0] > 2 && level.arms[1] > 2);
+    check('glide pose: the body rolls with the wing’s bank', level.roll === 0.4);
+    check('glide pose: the head cranes up so the gaze stays near level',
+      level.head > 0.4, `head=${level.head.toFixed(2)}`);
+    check('glide pose: diving flattens the pilot further along the path',
+      glidePose(-1.2, 0, 0, 1).tilt < level.tilt);
+    const stowed = glidePose(0, 0, 0, 0);
+    check('glide pose: an undeployed wing leaves the standing pose untouched',
+      stowed.tilt === 0 && stowed.head === 0 && stowed.arms[0] === 0 &&
+      stowed.legs[0] === 0 && stowed.cape === 0);
+  }
+
+  {
+    const rig = buildGliderRig();
+    check('the glider rig is a real wing: two panels, two tips, a frame',
+      rig.panels.length === 2 && rig.tips.length === 2 &&
+      rig.group.children.length > 4);
+    poseGliderRig(rig, { deploy: 0, bank: 0, speed01: 0, time: 0 });
+    check('a stowed wing is folded away and hidden',
+      !rig.group.visible && Math.abs(rig.panels[0].rotation.z) > 1);
+    poseGliderRig(rig, { deploy: 1, bank: 0, speed01: 0, time: 0 });
+    check('a deployed wing is open, visible and mirrored about the keel',
+      rig.group.visible && Math.abs(rig.panels[0].rotation.z) < 0.3 &&
+      rig.panels[0].rotation.z * rig.panels[1].rotation.z < 0);
+    let geometries = 0;
+    rig.group.traverse((o) => { if ((o as { geometry?: unknown }).geometry) geometries++; });
+    disposeGliderRig(rig);
+    check('the rig owns real geometry (freed on dispose)', geometries >= 10);
+  }
 }
 
 // --- Anti-stalemate combat: bloodlust + combat regen block ----------------------
@@ -4925,6 +5209,59 @@ const lairs = new Map<VaultBossKind, VaultStamp>();
     !miningStats(BLOCKS[Block.ReinforcedStone], { id: Item.StonePickaxe, count: 1 }).harvest);
   check('the floodlight lights a base at full brightness',
     BLOCKS[Block.Floodlight].emission >= 15);
+}
+
+// --- Command box + operators -------------------------------------------------
+// The command box replaced the old one-key-per-panel bindings, so everything a
+// key used to open must be reachable as a command, and nothing typed there may
+// ever escape as chat.
+{
+  const names = PLAYER_COMMANDS.map((c) => c.name);
+  check('every ex-keybind panel is reachable as a player command',
+    ['map', 'waypoint', 'warfare', 'guide', 'tpa', 'tpaccept'].every((n) => names.includes(n)));
+  check('player and operator command names never collide',
+    ADMIN_COMMANDS.every((a) => !names.includes(a.name)));
+  check('granting operator is NOT an in-game command (console only)',
+    !ADMIN_COMMANDS.some((c) => c.name === 'op' || c.name === 'deop') &&
+    !PLAYER_COMMANDS.some((c) => c.name === 'op' || c.name === 'deop'));
+  check('a normal player is only offered player commands',
+    commandList(false).length === PLAYER_COMMANDS.length &&
+    commandList(true).length === PLAYER_COMMANDS.length + ADMIN_COMMANDS.length);
+
+  check('a leading slash is optional and never survives the parse',
+    parseCommand('/tpa Alice').name === 'tpa' &&
+    parseCommand('///TPA   Alice ').name === 'tpa' &&
+    parseCommand('/tpa   Alice ').args.join() === 'Alice' &&
+    parseCommand('   ').name === '');
+  check('a bare box lists everything, a prefix narrows it',
+    suggestCommands('', false).length === PLAYER_COMMANDS.length &&
+    suggestCommands('tpa', false).map((c) => c.name).join() === 'tpa,tpaccept');
+  check('a substring still finds a command when no prefix matches',
+    suggestCommands('point', false).map((c) => c.name).join() === 'waypoint');
+  check('once the name is settled the strip becomes argument help',
+    suggestCommands('tpa Ali', false).map(commandLabel).join() === '/tpa <player>' &&
+    suggestCommands('nonsense arg', false).length === 0);
+  check('operator commands are only suggested to operators',
+    suggestCommands('gamemode', false).length === 0 &&
+    suggestCommands('gamemode', true).length === 1);
+}
+
+{
+  const accounts = new Accounts();
+  const hash = (pass: string, salt: string) => `${salt}:${pass}`;
+  accounts.register('Alice', 'hunter2', hash, 'salt', 0);
+  accounts.register('Bob', 'hunter2', hash, 'salt', 1);
+  check('nobody is an operator until the console says so',
+    !accounts.isOp('Alice') && accounts.operators().length === 0);
+  check('op/deop work by case-insensitive name and return the canonical one',
+    accounts.setOp('alice', true) === 'Alice' && accounts.isOp('ALICE') &&
+    !accounts.isOp('Bob') && accounts.setOp('nobody', true) === null);
+  check('operator survives a save/load round-trip, and deop clears it', (() => {
+    const reloaded = new Accounts(JSON.parse(JSON.stringify(accounts.toJSON())));
+    if (!reloaded.isOp('Alice') || reloaded.operators().join() !== 'Alice') return false;
+    reloaded.setOp('Alice', false);
+    return !reloaded.isOp('Alice') && reloaded.operators().length === 0;
+  })());
 }
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} FAILURES`);

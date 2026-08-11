@@ -26,13 +26,14 @@ export class Input {
   hotbarKey = -1; // 0-8 when a number key was pressed this frame
   debugToggled = false;
   inventoryToggled = false;
-  mapToggled = false; // M pressed this frame (world map)
+  // The world map and Warfare Command have NO key of their own any more — they
+  // are `/map` and `/warfare` in the command box. These two flags survive only
+  // for the on-screen touch buttons, which write them directly.
+  mapToggled = false;
   reloadPressed = false; // R pressed this frame (gun reload)
   dropPressed = false;   // Q pressed this frame (item drop)
-  waypointPressed = false; // B pressed this frame (drop a waypoint here)
-  guideToggled = false;    // H pressed this frame (getting-started panel)
-  tpaPressed = false;      // T pressed this frame (open the TPA prompt)
-  progressPressed = false; // G pressed this frame (or tapped on touch) — Warfare Command
+  chatPressed = false;   // T pressed this frame (open the command box)
+  progressPressed = false; // tapped on touch — Warfare Command
   dismountPressed = false; // F pressed this frame (leave a vehicle seat)
   viewPressed = false;     // V pressed this frame (cycle the camera view)
   locked = false;
@@ -44,7 +45,6 @@ export class Input {
   touchMode = false;
   tForward = false; tBack = false; tLeft = false; tRight = false;
   tJump = false; tSneak = false; tSprint = false;
-  tAccept = false; // on-screen "hold to accept" TPA button, ORed with KeyY
 
   private kbSprint = false; // via double-tap W, persists until W released
   get sprintHeld(): boolean { return this.kbSprint || this.tSprint; }
@@ -64,13 +64,11 @@ export class Input {
       if (e.repeat) return;
       this.keys.add(e.code);
       if (e.code === 'KeyE') this.inventoryToggled = true;
-      if (e.code === 'KeyM') this.mapToggled = true;
       if (e.code === 'KeyR') this.reloadPressed = true;
       if (e.code === 'KeyO') this.dropPressed = true;
-      if (e.code === 'KeyB') this.waypointPressed = true;
-      if (e.code === 'KeyH') this.guideToggled = true;
-      if (e.code === 'KeyT') this.tpaPressed = true;
-      if (e.code === 'KeyG') this.progressPressed = true;
+      // T is the ONE key for everything that used to have its own binding
+      // (map/waypoint/warfare/guide/tpa/tpa-accept): it opens the command box.
+      if (e.code === 'KeyT') this.chatPressed = true;
       if (e.code === 'KeyF') this.dismountPressed = true;
       if (e.code === 'KeyV') this.viewPressed = true;
       if (e.code === 'KeyW') {
@@ -169,9 +167,7 @@ export class Input {
     this.mapToggled = false;
     this.reloadPressed = false;
     this.dropPressed = false;
-    this.waypointPressed = false;
-    this.guideToggled = false;
-    this.tpaPressed = false;
+    this.chatPressed = false;
     this.progressPressed = false;
     this.dismountPressed = false;
     this.viewPressed = false;

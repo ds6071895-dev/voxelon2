@@ -134,7 +134,7 @@ export function fieldGuideSections(): FieldGuideSection[] {
     {
       id: 'controls', title: 'Controls', icon: icon('controls'), summary: 'Desktop and mobile controls, plus contextual behavior.', entries: [
         entry('desktop-controls', 'Desktop controls', ['keyboard', 'mouse', 'wasd', 'reload', 'inventory'],
-          table(['Action', 'Binding'], [['Move', 'W A S D'], ['Jump / glide', 'Space'], ['Sprint', 'Q or double-tap W'], ['Sneak', 'Shift'], ['Attack / mine', 'Left click'], ['Place / use / aim', 'Right click'], ['Inventory', 'E'], ['Map', 'M'], ['Warfare Command', 'G'], ['Leave vehicle', 'F'], ['Reload', 'R'], ['Pause', 'Esc']]) +
+          table(['Action', 'Binding'], [['Move', 'W A S D'], ['Jump / glide', 'Space'], ['Sprint', 'Q or double-tap W'], ['Sneak', 'Shift'], ['Attack / mine', 'Left click'], ['Place / use / aim', 'Right click'], ['Inventory', 'E'], ['Commands', 'T'], ['Map', '/map'], ['Warfare Command', '/warfare'], ['Waypoint here', '/waypoint'], ['Teleport to a player', '/tpa'], ['Leave vehicle', 'F'], ['Reload', 'R'], ['Pause', 'Esc']]) +
           tip('Context matters', 'Left click may hit an enemy before the block behind it. Right click changes behavior based on the held item.')),
         entry('mobile-controls', 'Mobile controls', ['touch', 'joystick', 'phone', 'tablet'],
           table(['Action', 'Control'], [['Move / sprint', 'Left joystick; push beyond rim to sprint'], ['Look', 'Drag the right side'], ['Jump / glide', 'Up control'], ['Attack / mine', 'Long-press'], ['Place / use', 'Tap'], ['Inventory', 'Backpack button'], ['Map', 'Map button'], ['Warfare Command', 'Command button'], ['Pause / back', 'Pause button']]))
@@ -147,6 +147,7 @@ export function fieldGuideSections(): FieldGuideSection[] {
           tip('Armor systems', 'Armor has durability, gains levels through use, accepts runes, and is subject to a damage-reduction cap.')),
         entry('healing', 'Healing in combat', ['bandage', 'medkit', 'regen', 'heal'],
           `<p>Bandages are efficient for routine recovery. Medkits are your emergency sustain during vault bosses and raids. Heal during safe movement windows rather than while standing in a telegraphed attack.</p>` +
+          `<p>Right-click and <b>keep holding the item out</b>: applying it takes about a second for a bandage and two for a medkit, shown by the bar under your crosshair. You can walk while you patch up, but switching hotbar slots interrupts the wrap — and an interrupted item is never spent.</p>` +
           warning('High-tier vaults', 'Tier II and III fights last longer and punish mistakes harder. Carry multiple healing items and keep inventory space free.')),
       ],
     },
@@ -245,7 +246,7 @@ export function fieldGuideSections(): FieldGuideSection[] {
             'Dying shortly before the kill does not erase your contribution.',
             'Walking in at the end without fighting earns nothing.',
             'Each account is paid once per boss recharge cycle.']) +
-          tip('Press G', 'The Warfare Command tree is the G panel. Purchases are permanent, personal, and cost XP directly.')),
+          tip('Type /warfare', 'The Warfare Command tree opens from the command box (press T). Purchases are permanent, personal, and cost XP directly.')),
         entry('warfare-tree', 'The technology tree', ['tree', 'nodes', 'blueprint', 'trunk', 'branch'],
           `<p>One trunk of nine nodes, then three endgame branches. The trunk forces the order: <b>missiles, then missile defense, then helicopters</b>.</p>` +
           table(['Stage', 'What it opens'], [

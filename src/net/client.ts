@@ -1,8 +1,10 @@
 // Browser-side network client. Connects to the VOXELON server, tracks remote
-// players (raw target transforms — interpolation lives in the renderer), and
-// exposes send helpers + event callbacks. Fails gracefully to offline mode so
-// the game is fully playable with no server running.
+// players (a timestamped transform history per player, which the renderer
+// replays on a fixed delay — see interp.ts), and exposes send helpers + event
+// callbacks. Fails gracefully to offline mode so the game is fully playable
+// with no server running.
 
+import { TransformBuffer, netNow } from '../interp';
 import type { ItemStack } from '../items';
 import type { MachineState, UpgradeAxis } from '../machines';
 import type { TurretState, TurretAxis } from '../turrets';
@@ -23,7 +25,13 @@ import type { BombSnapshot, HelicopterSnapshot, SeatKind } from '../vehicles';
 
 export interface Remote {
   info: PlayerInfo;
+  /** Newest networked transform. Kept for code that only needs "where are they
+   *  right now, roughly" (map markers, nameplate culling); anything that has to
+   *  match what the player SEES — rendering, hit tests — must go through `buf`. */
   tx: number; ty: number; tz: number; tyaw: number; tpitch: number;
+  /** Timestamped transform history, replayed INTERP_DELAY behind the local
+   *  clock so the avatar moves smoothly instead of easing toward each packet. */
+  buf: TransformBuffer;
   health: number;
   dead: boolean;
   gliding: boolean;
@@ -62,6 +70,9 @@ export class NetClient {
   socketOpen = false;
   myId = -1;
   username = '';
+  /** This account is a server operator (told to us right after auth). Only a
+   *  UI hint — the server re-authorises every operator command it receives. */
+  isOp = false;
   readonly remotes = new Map<number, Remote>();
   /** Server-owned dropped items, keyed by entity id (for the renderer). */
   readonly netItems = new Map<number, ItemEntityInfo>();
@@ -72,8 +83,20 @@ export class NetClient {
   onRestoreState?: (state: Record<string, unknown>) => void;
   /** A block edit from another player (apply without re-broadcasting). */
   onEdit?: (x: number, y: number, z: number, block: number) => void;
-  /** Server-authoritative health change for the local player. */
-  onHurt?: (health: number, dead: boolean, k: [number, number, number]) => void;
+  /** Server-authoritative health change for the local player. `by` is the id of
+   *  whoever dealt it (used for the directional damage indicator; it is the
+   *  local id, or an unknown id, for non-player damage). */
+  onHurt?: (health: number, dead: boolean, k: [number, number, number], by: number) => void;
+  /** One of OUR direct hits landed: the hitmarker. `amount` is post-armor, so 0
+   *  means "connected but fully soaked". */
+  onHitConfirm?: (target: number, amount: number, killed: boolean) => void;
+  /** Someone else fired a gun: play the tracer + report where it came from. */
+  onShot?: (
+    id: number, item: number,
+    x: number, y: number, z: number, dx: number, dy: number, dz: number,
+  ) => void;
+  /** Someone else's explosion went off (cosmetic; the crater arrives as edits). */
+  onBlast?: (x: number, y: number, z: number) => void;
   onRespawned?: (x: number, y: number, z: number, health: number) => void;
   /** The local player's authoritative health/dead from the periodic snapshot —
    *  this is how server-side REGEN reaches the client (hurt only fires on a
@@ -86,8 +109,12 @@ export class NetClient {
   onTeleport?: (x: number, y: number, z: number) => void;
   /** A server notice to surface to the local player (admin feedback). */
   onNotice?: (text: string) => void;
-  /** TPA: `from` wants to teleport to YOU (hold the accept key to allow). */
+  /** TPA: `from` wants to teleport to YOU (run /tpaccept to allow). */
   onTpaRequest?: (from: string) => void;
+  /** Operator status for this account changed (or arrived on login). */
+  onOpState?: (op: boolean) => void;
+  /** Output of an operator command we sent, for the command box. */
+  onCmdOut?: (lines: string[], ok: boolean) => void;
   /** Roster changed (join/leave/welcome) — refresh player count UI. */
   onRoster?: () => void;
   /** Connection lost after having been live. */
@@ -223,6 +250,7 @@ export class NetClient {
       this.socketOpen = false;
       if (this.connected) {
         this.connected = false;
+        this.isOp = false; // re-granted by the server on the next successful auth
         this.remotes.clear();
         this.netItems.clear();
         this.onDisconnect?.();
@@ -277,13 +305,18 @@ export class NetClient {
         this.remotes.delete(msg.id);
         this.onRoster?.();
         break;
-      case 'snapshot':
+      case 'snapshot': {
+        // One receive time for the whole batch: every transform in a snapshot
+        // describes the same server instant, so they must share a stamp or the
+        // avatars would drift apart from each other.
+        const at = netNow();
         for (const s of msg.players) {
           if (s.id === this.myId) { this.onSelfHealth?.(s.health, s.dead); continue; }
           const r = this.remotes.get(s.id);
           if (r) {
             r.tx = s.x; r.ty = s.y; r.tz = s.z;
             r.tyaw = s.yaw; r.tpitch = s.pitch;
+            r.buf.push({ t: at, x: s.x, y: s.y, z: s.z, yaw: s.yaw, pitch: s.pitch });
             r.health = s.health; r.dead = s.dead;
             r.gliding = s.gliding === true;
             r.boating = s.boating === true;
@@ -296,6 +329,7 @@ export class NetClient {
           }
         }
         break;
+      }
       case 'gamemode': {
         const r = this.remotes.get(msg.id);
         if (r) r.info.mode = msg.mode;          // keep remote rendering in step
@@ -311,11 +345,27 @@ export class NetClient {
       case 'tpaRequest':
         this.onTpaRequest?.(msg.from);
         break;
+      case 'op':
+        this.isOp = msg.op;
+        this.onOpState?.(msg.op);
+        break;
+      case 'cmdOut':
+        this.onCmdOut?.(msg.lines, msg.ok !== false);
+        break;
       case 'edit':
         this.onEdit?.(msg.x, msg.y, msg.z, msg.block);
         break;
       case 'hurt':
-        this.onHurt?.(msg.health, msg.dead, [msg.kx, msg.ky, msg.kz]);
+        this.onHurt?.(msg.health, msg.dead, [msg.kx, msg.ky, msg.kz], msg.by);
+        break;
+      case 'hitconfirm':
+        this.onHitConfirm?.(msg.target, msg.amount, msg.killed === true);
+        break;
+      case 'shot':
+        this.onShot?.(msg.id, msg.item, msg.x, msg.y, msg.z, msg.dx, msg.dy, msg.dz);
+        break;
+      case 'blast':
+        this.onBlast?.(msg.x, msg.y, msg.z);
         break;
       case 'respawned':
         this.onRespawned?.(msg.x, msg.y, msg.z, msg.health);
@@ -558,6 +608,12 @@ export class NetClient {
   sendTpaAccept(): void {
     if (this.connected) this.raw({ t: 'tpaAccept' });
   }
+  /** Run an operator command server-side (rejected there unless we're OP). */
+  sendCommand(text: string): boolean {
+    if (!this.connected) return false;
+    this.raw({ t: 'command', text });
+    return true;
+  }
   sendSelfHurt(amount: number): void {
     if (this.connected) this.raw({ t: 'selfhurt', amount });
   }
@@ -612,6 +668,13 @@ export class NetClient {
   }
   sendRangedAttack(target: number, amount: number): void {
     if (this.connected) this.raw({ t: 'rangedAttack', target, amount });
+  }
+  /** Cosmetic "I fired" report, sent once per trigger pull (NOT per pellet —
+   *  receivers re-roll the spread themselves from the gun's own stats). */
+  sendShot(
+    x: number, y: number, z: number, dx: number, dy: number, dz: number, item: number,
+  ): void {
+    if (this.connected) this.raw({ t: 'shot', x, y, z, dx, dy, dz, item });
   }
   // Turrets.
   sendTurretOpen(x: number, y: number, z: number): void {
@@ -713,8 +776,10 @@ export class NetClient {
 }
 
 function toRemote(p: PlayerInfo): Remote {
+  const buf = new TransformBuffer();
+  buf.reset({ t: netNow(), x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch });
   return {
-    info: p, tx: p.x, ty: p.y, tz: p.z, tyaw: p.yaw, tpitch: p.pitch,
+    info: p, buf, tx: p.x, ty: p.y, tz: p.z, tyaw: p.yaw, tpitch: p.pitch,
     health: p.health, dead: p.dead, gliding: p.gliding === true,
     boating: p.boating === true, sneaking: p.sneaking === true,
     held: typeof p.held === 'number' ? p.held : 0,

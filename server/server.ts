@@ -249,6 +249,9 @@ function handleAuth(id: number, msg: ClientMsg & { t: 'register' | 'login' | 'se
   accounts.setToken(res.account.username, token);
   saveAccounts();
   send(id, { t: 'session', token });
+  // Operator status drives which commands their command box offers (the
+  // server still re-checks it on every command it actually receives).
+  send(id, { t: 'op', op: accounts.isOp(res.account.username) });
   if (revivedBy) {
     send(id, { t: 'notice', text: `✨ ${revivedBy} revived you — welcome back at ${COMEBACK_HEARTS} ❤!` });
   }
@@ -322,6 +325,27 @@ wss.on('connection', (ws: WebSocket) => {
     if (!authed.has(id)) {
       // Unauthenticated: the ONLY accepted messages are register/login/session.
       if (msg.t === 'register' || msg.t === 'login' || msg.t === 'session') handleAuth(id, msg);
+      return;
+    }
+    // Operator commands typed into the in-game command box. Handled HERE, not
+    // in the pure GameServer, because they reach accounts/persistence/shutdown.
+    // Authorised per line against the account record — never against anything
+    // the client told us — so a forged `command` from a normal player is just
+    // a refusal.
+    if (msg.t === 'command') {
+      const who = authed.get(id)!;
+      if (!accounts.isOp(who)) {
+        send(id, { t: 'cmdOut', lines: ['You are not a server operator.'], ok: false });
+        console.log(`! ${who} tried to run "${String(msg.text).slice(0, 80)}" without OP`);
+        return;
+      }
+      const lines: string[] = [];
+      runCommand(String(msg.text ?? '').slice(0, 300), (text) => {
+        for (const part of String(text).split('\n')) lines.push(part);
+      }, false);
+      send(id, { t: 'cmdOut', lines: lines.length ? lines : ['(no output)'], ok: true });
+      console.log(`# ${who} ran: ${String(msg.text).slice(0, 120)}`);
+      worldDirty = true;
       return;
     }
     dispatch(game.handle(id, msg));
@@ -449,8 +473,42 @@ function resolvePlayer(token: string): number | null {
   return pid;
 }
 
+/** The socket id of an authed player, by (case-insensitive) account name. */
+function onlineIdOf(username: string): number | undefined {
+  return [...authed.entries()]
+    .find(([, n]) => n.toLowerCase() === username.toLowerCase())?.[0];
+}
+
+/**
+ * Award warfare XP to ONE account (online or not) and push it everywhere it
+ * needs to go: the account record (persisted), the live GameServer copy, and
+ * the player's own client if they happen to be connected. Shared by the `xp`
+ * command and `warfare grant` so the two can never drift apart.
+ * Returns the account's new lifetime total, or null if there's no such account.
+ */
+function grantXp(name: string, amount: number): { username: string; total: number } | null {
+  const account = accounts.get(name);
+  if (!account) return null;
+  const total = accounts.awardWarfareXp(account.username, amount);
+  const progress = accounts.warfareOf(account.username);
+  game.setWarfare(account.username, progress);
+  saveAccounts();
+  const pid = onlineIdOf(account.username);
+  if (pid !== undefined) {
+    send(pid, { t: 'warfare', xp: progress.xp, nodes: progress.nodes.slice() });
+    send(pid, { t: 'notice', text: `+${amount} warfare XP granted by an operator.` });
+  }
+  return { username: account.username, total };
+}
+
+/** Commands only the terminal may run — granting operator is never in-game. */
+const CONSOLE_ONLY = new Set(['op', 'deop']);
+
 const HELP = [
   'Commands:',
+  '  op <player>                   - grant operator (console only)',
+  '  deop <player>                 - revoke operator (console only)',
+  '  ops                           - list the server operators',
   '  list                          - list online players',
   '  coords [player]               - show coords of all players, or one player',
   '  give <player> <item> [count]  - give items (item = name or id)',
@@ -468,6 +526,8 @@ const HELP = [
   '  flags reset                   - send every flag home to its own faction',
   '  flags status                  - who holds which flag right now',
   '  save                          - force-save the world + accounts',
+  '  xp <player> <n>               - give a player n warfare XP (works offline)',
+  '  xp all <n>                    - give every online player n warfare XP',
   '  warfare status <player>       - show a player\'s Warfare Command tree',
   '  warfare grant <player> <xp>   - award warfare XP',
   '  warfare reset <player>        - wipe a player\'s technology',
@@ -475,55 +535,93 @@ const HELP = [
   '  help                          - this list',
 ].join('\n');
 
-function runCommand(line: string): void {
-  const parts = line.trim().split(/\s+/).filter(Boolean);
+/**
+ * Run one operator command.
+ *
+ * `out` receives every line of feedback — the terminal console when typed here,
+ * or the sender's in-game command box when an OP types it there. `fromConsole`
+ * gates the handful of commands that must never be reachable from in-game: an
+ * account can't promote itself (or anyone else) to operator, only the person at
+ * the terminal can.
+ */
+function runCommand(line: string, out: (text: string) => void = console.log,
+    fromConsole = true): void {
+  const log = out;
+  const parts = line.trim().replace(/^\/+/, '').split(/\s+/).filter(Boolean);
   if (!parts.length) return;
   const cmd = parts[0].toLowerCase();
+  if (!fromConsole && CONSOLE_ONLY.has(cmd)) {
+    log(`"${cmd}" can only be run from the server console.`);
+    return;
+  }
   try {
     switch (cmd) {
-      case 'help': case '?': console.log(HELP); break;
+      case 'help': case '?': log(HELP); break;
+      case 'op': case 'deop': {
+        const grant = cmd === 'op';
+        if (parts.length < 2) { log(`usage: ${cmd} <player>`); break; }
+        const name = accounts.setOp(parts[1], grant);
+        if (!name) { log(`no account named "${parts[1]}"`); break; }
+        saveAccounts();
+        // Tell them live if they're online, so their command box picks up (or
+        // drops) the operator commands without a relog.
+        const opId = onlineIdOf(name);
+        if (opId !== undefined) {
+          send(opId, { t: 'op', op: grant });
+          send(opId, { t: 'notice', text: grant
+            ? '🛡 You are now a server operator — press T and type a command.'
+            : '🛡 Your operator status was revoked.' });
+        }
+        log(`${name} is ${grant ? 'now' : 'no longer'} an operator`);
+        break;
+      }
+      case 'ops': {
+        const ops = accounts.operators();
+        log(ops.length ? `${ops.length} operator(s): ${ops.join(', ')}` : 'no operators yet');
+        break;
+      }
       case 'list': case 'players': {
         const list = game.playerList();
-        console.log(`${list.length} online:`);
-        for (const p of list) console.log(`  [${p.id}] ${p.username} (faction ${p.faction}, ${p.mode})`);
+        log(`${list.length} online:`);
+        for (const p of list) log(`  [${p.id}] ${p.username} (faction ${p.faction}, ${p.mode})`);
         break;
       }
       case 'coords': {
         const allCoords = game.playerCoords();
-        if (!allCoords.length) { console.log('no players online'); break; }
+        if (!allCoords.length) { log('no players online'); break; }
         // Optional filter: `coords Alice` shows only Alice
         const filter = parts[1]?.toLowerCase();
         const shown = filter
           ? allCoords.filter((c) => c.username.toLowerCase().includes(filter))
           : allCoords;
-        if (!shown.length) { console.log(`no player matching "${parts[1]}"`); break; }
+        if (!shown.length) { log(`no player matching "${parts[1]}"`); break; }
         for (const c of shown) {
-          console.log(`  ${c.username}: x=${c.x.toFixed(1)} y=${c.y.toFixed(1)} z=${c.z.toFixed(1)}`);
+          log(`  ${c.username}: x=${c.x.toFixed(1)} y=${c.y.toFixed(1)} z=${c.z.toFixed(1)}`);
         }
         break;
       }
       case 'give': {
-        if (parts.length < 3) { console.log('usage: give <player> <item> [count]'); break; }
+        if (parts.length < 3) { log('usage: give <player> <item> [count]'); break; }
         const pid = resolvePlayer(parts[1]); if (pid === null) break;
         const item = resolveItem(parts[2]);
-        if (item === null) { console.log(`unknown item "${parts[2]}"`); break; }
+        if (item === null) { log(`unknown item "${parts[2]}"`); break; }
         const count = parts[3] ? Math.max(1, Math.floor(Number(parts[3]))) : 1;
-        if (!Number.isFinite(count)) { console.log('count must be a number'); break; }
+        if (!Number.isFinite(count)) { log('count must be a number'); break; }
         dispatch(game.adminGive(pid, item, count));
-        console.log(`gave ${count}x ${ITEMS[item].name} to ${parts[1]}`);
+        log(`gave ${count}x ${ITEMS[item].name} to ${parts[1]}`);
         break;
       }
       case 'gamemode': case 'gm': {
-        if (parts.length < 3) { console.log('usage: gamemode <mode> <player>  (order-independent)'); break; }
+        if (parts.length < 3) { log('usage: gamemode <mode> <player>  (order-independent)'); break; }
         // Accept the mode + player in EITHER order (so `gm Alice creative` and
         // `gm creative Alice` both work).
         const a = parts[1].toLowerCase(), b = parts[2].toLowerCase();
         const mode = MODE_ALIASES[a] ?? MODE_ALIASES[b];
         const who = MODE_ALIASES[a] ? parts[2] : parts[1];
-        if (!mode) { console.log('mode must be survival | creative | spectator'); break; }
+        if (!mode) { log('mode must be survival | creative | spectator'); break; }
         const pid = resolvePlayer(who); if (pid === null) break;
         dispatch(game.adminSetMode(pid, mode));
-        console.log(`${who} -> ${mode}`);
+        log(`${who} -> ${mode}`);
         break;
       }
       case 'tp': {
@@ -531,78 +629,78 @@ function runCommand(line: string): void {
         // `tp <player> <targetPlayer>` — warp to another online player.
         if (parts.length === 3) {
           const targetId = resolvePlayer(parts[2]); if (targetId === null) break;
-          if (targetId === pid) { console.log("can't teleport a player to themselves"); break; }
+          if (targetId === pid) { log("can't teleport a player to themselves"); break; }
           const tc = game.playerCoords().find((c) => c.id === targetId);
-          if (!tc) { console.log('target has no position'); break; }
+          if (!tc) { log('target has no position'); break; }
           dispatch(game.adminTeleport(pid, tc.x, tc.y, tc.z));
-          console.log(`teleported ${parts[1]} to ${tc.username} (${tc.x.toFixed(1)} ${tc.y.toFixed(1)} ${tc.z.toFixed(1)})`);
+          log(`teleported ${parts[1]} to ${tc.username} (${tc.x.toFixed(1)} ${tc.y.toFixed(1)} ${tc.z.toFixed(1)})`);
           break;
         }
         // `tp <player> <x> <y> <z>` — warp to coordinates.
-        if (parts.length < 5) { console.log('usage: tp <player> <x> <y> <z>  OR  tp <player> <targetPlayer>'); break; }
+        if (parts.length < 5) { log('usage: tp <player> <x> <y> <z>  OR  tp <player> <targetPlayer>'); break; }
         const [x, y, z] = [Number(parts[2]), Number(parts[3]), Number(parts[4])];
-        if (![x, y, z].every(Number.isFinite)) { console.log('x y z must be numbers'); break; }
+        if (![x, y, z].every(Number.isFinite)) { log('x y z must be numbers'); break; }
         dispatch(game.adminTeleport(pid, x, y, z));
-        console.log(`teleported ${parts[1]} to ${x} ${y} ${z}`);
+        log(`teleported ${parts[1]} to ${x} ${y} ${z}`);
         break;
       }
       case 'tpstruct': case 'tps': {
-        if (parts.length < 2) { console.log('usage: tpstruct <player> [tower|bunker|pod|vault]'); break; }
+        if (parts.length < 2) { log('usage: tpstruct <player> [tower|bunker|pod|vault]'); break; }
         const pid = resolvePlayer(parts[1]); if (pid === null) break;
         const kind = parts[2]?.toLowerCase();
         if (kind && !['tower', 'bunker', 'pod', 'vault'].includes(kind)) {
-          console.log('kind must be tower | bunker | pod | vault'); break;
+          log('kind must be tower | bunker | pod | vault'); break;
         }
         const s = game.nearestStructure(pid, kind);
-        if (!s) { console.log(`no ${kind ?? 'structure'} found`); break; }
+        if (!s) { log(`no ${kind ?? 'structure'} found`); break; }
         dispatch(game.adminTeleport(pid, s.x, s.y, s.z));
-        console.log(`teleported ${parts[1]} to the nearest ${s.kind} at ${s.x} ${s.y} ${s.z}`);
+        log(`teleported ${parts[1]} to the nearest ${s.kind} at ${s.x} ${s.y} ${s.z}`);
         break;
       }
       case 'sethearts': {
-        if (parts.length < 3) { console.log('usage: sethearts <player> <n>'); break; }
+        if (parts.length < 3) { log('usage: sethearts <player> <n>'); break; }
         const pid = resolvePlayer(parts[1]); if (pid === null) break;
         const n = Number(parts[2]);
-        if (!Number.isFinite(n)) { console.log('n must be a number (0-20)'); break; }
+        if (!Number.isFinite(n)) { log('n must be a number (0-20)'); break; }
         dispatch(game.adminSetHearts(pid, n));
         worldDirty = true; // checkpoint the new hearts on the next autosave
-        console.log(`set ${parts[1]}'s hearts to ${Math.max(0, Math.min(20, Math.floor(n)))}`);
+        log(`set ${parts[1]}'s hearts to ${Math.max(0, Math.min(20, Math.floor(n)))}`);
         break;
       }
       case 'revive': {
-        if (parts.length < 2) { console.log('usage: revive <player>'); break; }
+        if (parts.length < 2) { log('usage: revive <player>'); break; }
         const name = parts[1];
-        if (!accounts.has(name)) { console.log(`no account named "${name}"`); break; }
+        if (!accounts.has(name)) { log(`no account named "${name}"`); break; }
         if (accounts.eliminationRemaining(name, Date.now()) <= 0) {
-          console.log(`${name} isn't eliminated`);
+          log(`${name} isn't eliminated`);
           break;
         }
         accounts.clearElimination(name, Date.now());
         saveAccounts();
-        console.log(`revived ${name} — they can log back in (at ${COMEBACK_HEARTS} hearts)`);
+        log(`revived ${name} — they can log back in (at ${COMEBACK_HEARTS} hearts)`);
         break;
       }
       case 'war': {
         const sub = (parts[1] || 'status').toLowerCase();
         if (sub === 'start' || sub === 'now') {
           const min = parts[2] ? Number(parts[2]) : 30;
-          if (!Number.isFinite(min) || min <= 0) { console.log('usage: war start <minutes>'); break; }
+          if (!Number.isFinite(min) || min <= 0) { log('usage: war start <minutes>'); break; }
           dispatch(game.adminStartWar(min * 60));
-          console.log(`war started for ${min} min`);
+          log(`war started for ${min} min`);
         } else if (sub === 'schedule' || sub === 'in') {
           const delay = Number(parts[2]), dur = Number(parts[3]);
           if (![delay, dur].every(Number.isFinite) || delay < 0 || dur <= 0) {
-            console.log('usage: war schedule <delayMinutes> <durationMinutes>'); break;
+            log('usage: war schedule <delayMinutes> <durationMinutes>'); break;
           }
           dispatch(game.adminScheduleWar(delay * 60, dur * 60));
-          console.log(`war scheduled in ${delay} min, lasting ${dur} min`);
+          log(`war scheduled in ${delay} min, lasting ${dur} min`);
         } else if (sub === 'cancel' || sub === 'end' || sub === 'stop') {
           dispatch(game.adminCancelWar());
-          console.log('war cancelled');
+          log('war cancelled');
         } else if (sub === 'status') {
-          console.log(game.warStatusText());
+          log(game.warStatusText());
         } else {
-          console.log('usage: war start|schedule|cancel|status');
+          log('usage: war start|schedule|cancel|status');
         }
         break;
       }
@@ -610,18 +708,42 @@ function runCommand(line: string): void {
         const sub = (parts[1] || 'status').toLowerCase();
         if (sub === 'on' || sub === 'arm' || sub === 'breakable') {
           dispatch(game.adminSetFlagsBreakable(true));
-          console.log('flags ARMED — enemy flags can now be broken (very slowly)');
+          log('flags ARMED — enemy flags can now be broken (very slowly)');
         } else if (sub === 'off' || sub === 'lock' || sub === 'safe') {
           dispatch(game.adminSetFlagsBreakable(false));
-          console.log('flags LOCKED — flags are unbreakable again');
+          log('flags LOCKED — flags are unbreakable again');
         } else if (sub === 'reset') {
           dispatch(game.adminResetFlags());
-          console.log('flags reset to their home pads');
+          log('flags reset to their home pads');
         } else if (sub === 'status') {
-          console.log(game.flagsStatusText());
+          log(game.flagsStatusText());
         } else {
-          console.log('usage: flags on|off|reset|status');
+          log('usage: flags on|off|reset|status');
         }
+        break;
+      }
+      case 'xp': case 'givexp': {
+        // Warfare XP is the game's ONLY XP, so plain `xp` grants that. It works
+        // on an offline account too (the grant lands on the account record and
+        // is already there when they next log in).
+        if (parts.length < 3) { log('usage: xp <player|all> <n>'); break; }
+        const amount = Math.floor(Number(parts[2]));
+        if (!Number.isFinite(amount) || amount <= 0) {
+          log('n must be a positive number (use `warfare reset <player>` to wipe a tree)');
+          break;
+        }
+        if (parts[1].toLowerCase() === 'all') {
+          const names = [...new Set(authed.values())];
+          if (!names.length) { log('no players online'); break; }
+          for (const name of names) {
+            const res = grantXp(name, amount);
+            if (res) log(`  ${res.username} +${amount} XP (total ${res.total})`);
+          }
+          break;
+        }
+        const res = grantXp(parts[1], amount);
+        if (!res) { log(`no account "${parts[1]}"`); break; }
+        log(`gave ${amount} warfare XP to ${res.username} (total ${res.total})`);
         break;
       }
       case 'warfare': {
@@ -630,47 +752,37 @@ function runCommand(line: string): void {
         const sub = (parts[1] || 'status').toLowerCase();
         if (sub === 'status' || sub === 'show') {
           const who = parts[2];
-          if (!who) { console.log('usage: warfare status <player>'); break; }
+          if (!who) { log('usage: warfare status <player>'); break; }
           const account = accounts.get(who);
-          if (!account) { console.log(`no account "${who}"`); break; }
+          if (!account) { log(`no account "${who}"`); break; }
           const w = accounts.warfareOf(account.username);
-          console.log(`${account.username}: ${w.xp} XP earned, ` +
+          log(`${account.username}: ${w.xp} XP earned, ` +
             `${warfareAvailable(w)} available, ${w.nodes.length}/${WARFARE_TREE.length} nodes`);
-          if (w.nodes.length) console.log(`  ${w.nodes.join(', ')}`);
+          if (w.nodes.length) log(`  ${w.nodes.join(', ')}`);
         } else if (sub === 'grant' || sub === 'xp') {
-          if (parts.length < 4) { console.log('usage: warfare grant <player> <xp>'); break; }
-          const account = accounts.get(parts[2]);
-          if (!account) { console.log(`no account "${parts[2]}"`); break; }
+          if (parts.length < 4) { log('usage: warfare grant <player> <xp>'); break; }
           const amount = Math.floor(Number(parts[3]));
-          if (!Number.isFinite(amount) || amount <= 0) { console.log('xp must be a positive number'); break; }
-          const total = accounts.awardWarfareXp(account.username, amount);
-          game.setWarfare(account.username, accounts.warfareOf(account.username));
-          saveAccounts();
-          const pid = [...authed.entries()]
-            .find(([, n]) => n.toLowerCase() === account.username.toLowerCase())?.[0];
-          if (pid !== undefined) {
-            const w = accounts.warfareOf(account.username);
-            send(pid, { t: 'warfare', xp: w.xp, nodes: w.nodes.slice() });
-            send(pid, { t: 'notice', text: `⌘ +${amount} warfare XP granted by an operator.` });
-          }
-          console.log(`granted ${amount} warfare XP to ${account.username} (total ${total})`);
+          if (!Number.isFinite(amount) || amount <= 0) { log('xp must be a positive number'); break; }
+          const res = grantXp(parts[2], amount); // same path as the `xp` command
+          if (!res) { log(`no account "${parts[2]}"`); break; }
+          log(`granted ${amount} warfare XP to ${res.username} (total ${res.total})`);
         } else if (sub === 'reset') {
           const account = accounts.get(parts[2] ?? '');
-          if (!account) { console.log('usage: warfare reset <player>'); break; }
+          if (!account) { log('usage: warfare reset <player>'); break; }
           account.warfare = sanitizeWarfare(null);
           game.setWarfare(account.username, account.warfare);
           saveAccounts();
-          console.log(`${account.username}'s Warfare Command tree was reset`);
+          log(`${account.username}'s Warfare Command tree was reset`);
         } else {
-          console.log('usage: warfare status|grant|reset <player> [xp]');
+          log('usage: warfare status|grant|reset <player> [xp]');
         }
         break;
       }
-      case 'save': for (const id of authed.keys()) persistPlayer(id); saveWorld(); saveAccounts(); console.log('saved'); break;
+      case 'save': for (const id of authed.keys()) persistPlayer(id); saveWorld(); saveAccounts(); log('saved'); break;
       case 'stop': shutdown(); break;
-      default: console.log(`unknown command "${cmd}" — type help`);
+      default: log(`unknown command "${cmd}" — type help`);
     }
-  } catch (e) { console.error('command error', e); }
+  } catch (e) { log(`command error: ${e instanceof Error ? e.message : String(e)}`); }
 }
 
 const rl = readline.createInterface({ input: process.stdin, prompt: '> ' });

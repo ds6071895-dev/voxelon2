@@ -42,11 +42,20 @@ const FLY_V_SPEED = 9;        // vertical rise/descend speed (blocks/s)
 // look direction steers; diving trades altitude for speed, leveling out cruises
 // fast with a small constant sink ("fun and easy" transport from high places).
 const GLIDE_BASE_SPEED = 13;   // cruise speed looking level (≈3× walking)
-const GLIDE_DIVE_GAIN = 16;    // extra speed gained nose-down
+const GLIDE_DIVE_GAIN = 20;    // extra speed gained nose-down
 const GLIDE_MIN_SPEED = 6;
-const GLIDE_MAX_SPEED = 32;
-const GLIDE_SINK = 2.2;        // baseline downward drift (blocks/s)
+const GLIDE_MAX_SPEED = 34;
+const GLIDE_SINK = 2.0;        // baseline downward drift (blocks/s)
 const GLIDE_MIN_CLEARANCE = 3; // air blocks below required to deploy
+// A wing carries ENERGY: airspeed does not jump to whatever the nose is
+// pointing at, it builds in a dive and bleeds off in a climb. That single
+// difference is what makes gliding feel like flying rather than like being
+// dragged along the look vector — dive to build speed, then pull up and trade
+// it back for a burst of altitude before the wing settles into a cruise.
+const GLIDE_ACCEL_DIVE = 2.0;  // per-second easing toward a faster target
+const GLIDE_ACCEL_CLIMB = 2.9; // speed bleeds off faster than it builds
+const GLIDE_LIFT = 0.72;       // how much of the airspeed becomes climb/descent
+const GLIDE_CATCH_V = -3;      // the wings catch: fall speed clamped on deploy
 // Boat: fast, drifty travel over water. W rows toward where you look, S back-
 // paddles; buoyancy bobs the hull at the surface (mounted/dismounted by main).
 const BOAT_SPEED = 11;         // ~2.5× walking
@@ -120,6 +129,9 @@ export class Player {
   gliderEquipped = false;
   /** Currently gliding (wings deployed). */
   gliding = false;
+  /** Current airspeed of the wing (blocks/s). Carried across frames so a dive
+   *  can be traded back for altitude; read by the view for wind and FX. */
+  glideSpeed = 0;
   /** Riding a boat (mounted/dismounted by main; drives water-surface physics). */
   boating = false;
   /** Seconds of PRESERVED MOMENTUM left (grappling hook). Normal air control
@@ -232,6 +244,11 @@ export class Player {
         !this.inWater && !this.flying &&
         this.groundClearance(world) > GLIDE_MIN_CLEARANCE) {
       this.gliding = true;
+      // Open with whatever speed you already carry (a grapple launch into the
+      // wings keeps its momentum), and let the sail catch the fall instead of
+      // snapping the descent to zero.
+      this.glideSpeed = Math.max(GLIDE_MIN_SPEED, Math.hypot(this.vel.x, this.vel.z));
+      this.vel.y = Math.max(this.vel.y, GLIDE_CATCH_V);
     }
 
     // Wish direction in the horizontal plane, relative to yaw.
@@ -257,7 +274,7 @@ export class Player {
       // Wings deployed: the look direction sets the whole velocity (collisions
       // still resolve at integration). WASD is ignored — you fly where you aim.
       this.momentumTime = 0; // the wings own the velocity now, not the hook
-      this.applyGlide();
+      this.applyGlide(dt);
     } else {
       let speed = (this.sneaking ? SNEAK_SPEED
         : this.sprinting ? SPRINT_SPEED
@@ -468,19 +485,34 @@ export class Player {
     this.fallDistance = 0; // a boat never takes fall damage
   }
 
-  /** Glider velocity from the look direction: dive to go fast, level out to
-   *  cruise with a gentle sink. Sets vel directly (integration still collides). */
-  private applyGlide(): void {
+  /** Glider velocity from the look direction: dive to build airspeed, pull up
+   *  to trade it back for altitude, level out to cruise with a gentle sink.
+   *  Sets vel directly (integration still collides). */
+  private applyGlide(dt: number): void {
     const cosP = Math.cos(this.pitch), sinP = Math.sin(this.pitch);
     const fx = -Math.sin(this.yaw) * cosP;
     const fy = sinP;                       // <0 looking down, >0 looking up
     const fz = -Math.cos(this.yaw) * cosP;
     const dive = -fy;                      // +1 nose straight down
-    const speed = Math.max(GLIDE_MIN_SPEED,
+
+    // The attitude sets a TARGET airspeed; the wing eases toward it, so speed
+    // has weight. Climbing sheds it faster than diving builds it, which is
+    // what stops a pilot pumping their way to the sky for free.
+    const target = Math.max(GLIDE_MIN_SPEED,
       Math.min(GLIDE_MAX_SPEED, GLIDE_BASE_SPEED + dive * GLIDE_DIVE_GAIN));
+    const rate = target > this.glideSpeed ? GLIDE_ACCEL_DIVE : GLIDE_ACCEL_CLIMB;
+    this.glideSpeed += (target - this.glideSpeed) * Math.min(1, rate * dt);
+    const speed = this.glideSpeed;
+
+    // A fast wing sinks less: holding speed is rewarded with range.
+    const fast = Math.max(0, Math.min(1,
+      (speed - GLIDE_BASE_SPEED) / (GLIDE_MAX_SPEED - GLIDE_BASE_SPEED)));
+    // Pulling up can only turn speed above the stall floor into altitude. At
+    // minimum airspeed the wing must sink, otherwise looking up climbs forever.
+    const liftSpeed = fy > 0 ? Math.max(0, speed - GLIDE_MIN_SPEED) : speed;
     this.vel.x = fx * speed;
     this.vel.z = fz * speed;
-    this.vel.y = fy * speed * 0.7 - GLIDE_SINK;
+    this.vel.y = fy * liftSpeed * GLIDE_LIFT - GLIDE_SINK * (1 - 0.45 * fast);
     this.fallDistance = 0; // gliding lands softly (no fall damage)
   }
 

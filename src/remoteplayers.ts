@@ -1,10 +1,19 @@
 // Renders other players as boxy, Minecraft-style humanoid avatars with
-// customisable cosmetics (character.ts) and floating name tags. Positions are
-// interpolated toward the latest networked transform. Also provides a ray
-// test against avatars for PvP targeting, and exports the avatar-body builder
-// so the Character screen can show a live preview of the same model.
+// customisable cosmetics (character.ts) and floating name tags.
+//
+// Motion is SNAPSHOT INTERPOLATION (interp.ts): each avatar is drawn at the
+// position its owner actually occupied INTERP_DELAY ago, reconstructed by
+// lerping between the two buffered snapshots that bracket that instant. That
+// costs a fixed sliver of latency and buys constant-velocity movement, so a
+// strafing enemy tracks predictably instead of easing toward each packet.
+// The PvP hit tests below deliberately run against these same rendered
+// positions — what you shoot at is what you hit.
+//
+// Also exports the avatar-body builder so the Character screen can show a live
+// preview of the same model.
 
 import * as THREE from 'three';
+import { INTERP_DELAY, netNow } from './interp';
 import { AvatarSurface, avatarTexture } from './avatartex';
 import type { NetClient, Remote } from './net/client';
 import { factionColor, isFaction } from './teams';
@@ -12,6 +21,10 @@ import { itemGeometry } from './itementity';
 import { ITEMS, Item, ARMOR_SLOT_INDEX } from './items';
 import type { Atlas } from './textures';
 import { createGunModel, isGunItem, poseGunModel } from './gunmodels';
+import {
+  GliderRig, RIG_HARNESS_Y, buildGliderRig, disposeGliderRig, glidePose,
+  poseGliderRig,
+} from './glidermodels';
 import {
   CAPE_COLORS, Cosmetics, EYE_COLORS, HAIR_COLORS, HAT_COLORS, PANTS_COLORS,
   SHIRT_COLORS, SKIN_TONES, defaultCosmetics, sanitizeCosmetics,
@@ -647,9 +660,15 @@ export function buildArmorOverlay(body: AvatarBody, armor: number[]): THREE.Mesh
     }
   }
   if (chest && ITEMS[chest]?.glider) {
-    // A glider worn in the chest slot reads as a backpack, not plating.
-    add(body.group, 0.36, 0.5, 0.13, new THREE.Color(0x8a6a3f),
-      0, HIP_Y + TORSO_H - 0.3, TORSO_D / 2 + 0.08);
+    // A worn glider is a FOLDED WING, not plating and not a rucksack: rolled
+    // sailcloth across the back with the spar ends poking out, so you can tell
+    // at a glance who can fly. Tagged because the deployed rig hides it — you
+    // cannot be wearing the wing you are hanging underneath.
+    const packY = HIP_Y + TORSO_H - 0.26, packZ = TORSO_D / 2 + 0.09;
+    add(body.group, 0.46, 0.19, 0.16, new THREE.Color(0xe4884a), 0, packY, packZ);
+    add(body.group, 0.5, 0.11, 0.13, new THREE.Color(0xf2e3c8), 0, packY - 0.17, packZ);
+    add(body.group, 0.64, 0.06, 0.06, new THREE.Color(0x5b431f), 0, packY + 0.13, packZ);
+    for (const m of added.slice(-3)) m.userData.gliderPack = true;
   } else if (chest && ITEMS[chest]?.armor) {
     const c = armorColorFor(chest);
     add(body.group, TORSO_W + 0.09, TORSO_H + 0.04, TORSO_D + 0.09, c,
@@ -671,6 +690,34 @@ export function buildArmorOverlay(body: AvatarBody, armor: number[]): THREE.Mesh
     }
   }
   return added;
+}
+
+// ─── tilted-body placement (gliding) ───────────────────────────────────────
+
+// An avatar body pivots at its FEET, so pitching it face-down for flight would
+// swing the whole model a metre out of its own hitbox and sling the name tag
+// along with it. Both helpers below undo that: the body is re-anchored around
+// its middle, and anything that must stay overhead is placed in the tilted
+// frame so it still ends up overhead in world space.
+const POSE_PIVOT_Y = 1.0;
+const _v = new THREE.Vector3();
+const _q = new THREE.Quaternion();
+
+/** Position a rotated body so its mid-height point stays on the hitbox. */
+export function anchorTiltedBody(
+  group: THREE.Object3D, x: number, y: number, z: number
+): void {
+  _v.set(0, POSE_PIVOT_Y, 0).applyQuaternion(group.quaternion);
+  group.position.set(x - _v.x, y + POSE_PIVOT_Y - _v.y, z - _v.z);
+}
+
+/** Place a child at a fixed world height above the body, whatever its tilt. */
+function placeOverhead(
+  group: THREE.Object3D, child: THREE.Object3D, worldY: number
+): void {
+  _q.copy(group.quaternion).invert();
+  _v.set(0, worldY - POSE_PIVOT_Y, 0).applyQuaternion(_q);
+  child.position.set(_v.x, _v.y + POSE_PIVOT_Y, _v.z);
 }
 
 // ─── name/health tag helpers ───────────────────────────────────────────────
@@ -753,13 +800,26 @@ interface Avatar {
   parts: THREE.Group[];
   /** Wooden boat hull, shown while the player is boating. */
   boat: THREE.Group;
+  /** Hang-glider rig — a scene-level object, NOT a child of the body: the
+   *  wing flies the flight path while the pilot hangs beneath it. */
+  rig: GliderRig;
+  /** 0..1 deploy ease, so the wings unfurl instead of popping into existence. */
+  glideT: number;
+  /** Smoothed bank angle (radians), driven by how hard the player is turning. */
+  bank: number;
+  /** Previous frame's interpolated yaw, for the turn rate behind `bank`. */
+  prevYaw: number;
+  /** True while the tags are being placed in the tilted frame. */
+  tagTilted: boolean;
   nameTex: THREE.CanvasTexture;
   sprite: THREE.Sprite;
   healthCanvas: HTMLCanvasElement;
   healthTex: THREE.CanvasTexture;
   healthSprite: THREE.Sprite;
   lastHealth: number;
-  dx: number; dy: number; dz: number; dyaw: number;
+  /** Rendered transform: the interpolated playback of the network history, and
+   *  the ONLY position the hit tests use — what you shoot is what you see. */
+  dx: number; dy: number; dz: number; dyaw: number; dpitch: number;
   walkPhase: number;
   lastX: number; lastZ: number;
   /** Equip visuals currently built (rebuilt when the synced state changes). */
@@ -772,6 +832,10 @@ interface Avatar {
   sneakT: number;
   aimT: number;
   reloadT: number;
+  /** Muzzle flash quad parented to the held gun's muzzle anchor (null when the
+   *  avatar isn't holding a gun), and its 1→0 burn-down. */
+  flash: THREE.Mesh | null;
+  flashT: number;
 }
 
 // ─── main class ───────────────────────────────────────────────────────────
@@ -784,6 +848,9 @@ export class RemotePlayers {
   private readonly atlas: Atlas;
   /** Shared material for held-item meshes (same look as dropped items). */
   private readonly itemMat: THREE.MeshBasicMaterial;
+  /** Shared muzzle-flash burst, instanced per armed avatar. */
+  private readonly flashGeo = new THREE.OctahedronGeometry(0.13, 0);
+  private readonly flashMat: THREE.MeshBasicMaterial;
 
   constructor(scene: THREE.Scene, net: NetClient, atlas: Atlas) {
     this.scene = scene;
@@ -793,10 +860,21 @@ export class RemotePlayers {
       map: atlas.texture, alphaTest: 0.4, vertexColors: true,
       side: THREE.DoubleSide,
     });
+    this.flashMat = new THREE.MeshBasicMaterial({
+      color: 0xffd27a, blending: THREE.AdditiveBlending,
+      transparent: true, depthWrite: false,
+    });
   }
 
   /** Mark which avatar the local crosshair is over (-1 = none). */
   setHovered(id: number): void { this.hovered = id; }
+
+  /** Light up a remote player's muzzle — driven by their broadcast gunshot, so
+   *  you can spot a shooter by the blink even at tracer-blurring range. */
+  muzzleFlash(id: number): void {
+    const av = this.avatars.get(id);
+    if (av?.flash) av.flashT = 1;
+  }
 
   private build(remote: Remote): Avatar {
     const cosmetics = sanitizeCosmetics(remote.info.cosmetics, remote.info.skin);
@@ -826,6 +904,11 @@ export class RemotePlayers {
     boat.visible = false;
     group.add(boat);
 
+    // ── Glider rig (shown while gliding) ───────────────────────────────────
+    const rig = buildGliderRig();
+    rig.group.visible = false;
+    this.scene.add(rig.group);
+
     // ── Name tag ───────────────────────────────────────────────────────────
     const { tex, sprite } = makeNameTag(remote.info.username, team, isFaction(faction));
     sprite.position.y = 2.34;
@@ -847,13 +930,16 @@ export class RemotePlayers {
     this.scene.add(group);
     return {
       body, group, head: body.head, boat,
+      rig, glideT: 0, bank: 0, prevYaw: remote.tyaw, tagTilted: false,
       parts: body.parts,
       nameTex: tex, sprite,
       healthCanvas, healthTex, healthSprite, lastHealth: -1,
       dx: remote.tx, dy: remote.ty, dz: remote.tz, dyaw: remote.tyaw,
+      dpitch: remote.tpitch,
       walkPhase: 0, lastX: remote.tx, lastZ: remote.tz,
       heldId: 0, heldMesh: null, armorKey: '', armorMeshes: [],
       lastSwing: remote.swing | 0, swingT: 1, sneakT: 0, aimT: 0, reloadT: 0,
+      flash: null, flashT: 0,
     };
   }
 
@@ -866,6 +952,8 @@ export class RemotePlayers {
         // Shared cached geometry — detach only, never dispose.
         av.heldMesh.parent?.remove(av.heldMesh);
         av.heldMesh = null;
+        av.flash = null; // went with the gun it was parented to
+        av.flashT = 0;
       }
       if (held > 0 && ITEMS[held]) {
         const mesh = isGunItem(held)
@@ -880,6 +968,15 @@ export class RemotePlayers {
         }
         av.parts[3].add(mesh); // right arm — swings with the arm
         av.heldMesh = mesh;
+        // Hang a muzzle flash off the gun's own muzzle anchor so a distant
+        // shooter reads as a muzzle blink even before the tracer resolves.
+        if (isGunItem(held)) {
+          const flash = new THREE.Mesh(this.flashGeo, this.flashMat);
+          flash.visible = false;
+          flash.renderOrder = 60;
+          (mesh.getObjectByName('muzzle') ?? mesh).add(flash);
+          av.flash = flash;
+        }
       }
     }
     const key = (r.armor ?? []).join(',');
@@ -902,20 +999,39 @@ export class RemotePlayers {
         this.avatars.delete(id);
       }
     }
-    const t = Math.min(1, 14 * dt);
+    // Replay every avatar at the same instant, INTERP_DELAY behind now. One
+    // clock read for the whole loop keeps them consistent with each other.
+    const renderTime = netNow() - INTERP_DELAY;
+    const fallback = Math.min(1, 14 * dt);
     for (const [id, r] of this.net.remotes) {
       let av = this.avatars.get(id);
       if (!av) { av = this.build(r); this.avatars.set(id, av); }
 
-      av.dx += (r.tx - av.dx) * t;
-      av.dy += (r.ty - av.dy) * t;
-      av.dz += (r.tz - av.dz) * t;
-      av.dyaw += wrap(r.tyaw - av.dyaw) * t;
+      const s = r.buf.sample(renderTime);
+      if (s) {
+        av.dx = s.x; av.dy = s.y; av.dz = s.z;
+        av.dyaw = s.yaw; av.dpitch = s.pitch;
+      } else {
+        // No history yet (a join whose first snapshot hasn't landed): ease
+        // toward the raw target rather than popping.
+        av.dx += (r.tx - av.dx) * fallback;
+        av.dy += (r.ty - av.dy) * fallback;
+        av.dz += (r.tz - av.dz) * fallback;
+        av.dyaw += wrap(r.tyaw - av.dyaw) * fallback;
+        av.dpitch += (r.tpitch - av.dpitch) * fallback;
+      }
       av.group.position.set(av.dx, av.dy, av.dz);
       av.group.rotation.y = av.dyaw;
       av.group.visible = !r.dead && r.info.mode !== 'spectator';
 
       this.syncEquip(av, r); // held item + worn armor follow the synced state
+      if (av.flash) {
+        // ~70ms burn-down: long enough to catch out of the corner of an eye,
+        // short enough that automatic fire strobes rather than glows.
+        av.flashT = Math.max(0, av.flashT - dt / 0.07);
+        av.flash.visible = av.flashT > 0;
+        if (av.flashT > 0) av.flash.scale.setScalar(0.6 + av.flashT * 0.8);
+      }
       if ((r.swing | 0) !== av.lastSwing) {
         av.lastSwing = r.swing | 0;
         av.swingT = 0;
@@ -927,6 +1043,21 @@ export class RemotePlayers {
       av.reloadT = r.reloading ? (av.reloadT + dt / 1.1) % 1 : 0;
       const sneakTarget = r.sneaking && !r.boating && !r.gliding ? 1 : 0;
       av.sneakT += (sneakTarget - av.sneakT) * Math.min(1, 12 * dt);
+
+      // How fast they are actually travelling — drives the walk cycle, the
+      // sail flutter and how hard the wing banks.
+      const hspeed = Math.hypot(av.dx - av.lastX, av.dz - av.lastZ) / Math.max(dt, 1e-4);
+      av.lastX = av.dx; av.lastZ = av.dz;
+
+      // Glider: ease the deploy (the wings unfurl, they do not blink open) and
+      // bank into turns off the yaw rate — a turning aircraft rolls.
+      av.glideT += ((r.gliding ? 1 : 0) - av.glideT) *
+        Math.min(1, dt * (r.gliding ? 6 : 9));
+      const turnRate = wrap(av.dyaw - av.prevYaw) / Math.max(dt, 1e-4);
+      av.prevYaw = av.dyaw;
+      const bankTarget = r.gliding
+        ? Math.max(-0.75, Math.min(0.75, turnRate * 0.42)) : 0;
+      av.bank += (bankTarget - av.bank) * Math.min(1, dt * 5);
 
       // Health bar
       const showHealth = id === this.hovered && av.group.visible;
@@ -941,6 +1072,15 @@ export class RemotePlayers {
 
       // ── Pose / animation ──── parts = [leftLeg, rightLeg, leftArm, rightArm] ─
       av.boat.visible = r.boating;
+      if (av.tagTilted && av.glideT <= 0.01) {
+        // Back on our feet: undo the flight anchoring.
+        av.tagTilted = false;
+        av.group.rotation.z = 0;
+        av.sprite.position.y = 2.34;
+        av.sprite.position.x = 0; av.sprite.position.z = 0;
+        av.healthSprite.position.y = 2.62;
+        av.healthSprite.position.x = 0; av.healthSprite.position.z = 0;
+      }
       if (r.boating) {
         // Seated in the hull: legs stretched forward, arms rowing out front.
         applyAvatarSneak(av.body, 0);
@@ -952,25 +1092,33 @@ export class RemotePlayers {
         av.parts[3].rotation.x = 0.55;
         av.parts[2].rotation.z = 0; av.parts[3].rotation.z = 0;
         if (av.body.cape) av.body.cape.rotation.x = -0.25;
-      } else if (r.gliding) {
-        // Body tilts forward like a hang-glider; arms swept forward like wings.
+      } else if (av.glideT > 0.01) {
+        // Hanging under the wing: prone along the flight path, hands on the
+        // control bar, banked into the turn.
         applyAvatarSneak(av.body, 0);
-        av.group.rotation.x = 1.05;
-        av.parts[0].rotation.x = 0.2;  // legs trail together behind
-        av.parts[1].rotation.x = 0.2;
-        av.parts[2].rotation.x = 1.2;  // arms out front holding the glider bar
-        av.parts[3].rotation.x = 1.2;
-        av.parts[2].rotation.z = 0; av.parts[3].rotation.z = 0;
-        av.head.rotation.x = -0.9;     // head up to look forward despite the tilt
-        if (av.body.cape) av.body.cape.rotation.x = -1.1; // streams out behind
+        av.walkPhase += dt * 2.2; // doubles as the flutter/scissor clock
+        const pose = glidePose(av.dpitch, av.bank, av.walkPhase, av.glideT);
+        av.group.rotation.x = pose.tilt;
+        av.group.rotation.z = pose.roll;
+        anchorTiltedBody(av.group, av.dx, av.dy, av.dz);
+        av.parts[0].rotation.x = pose.legs[0];
+        av.parts[1].rotation.x = pose.legs[1];
+        av.parts[2].rotation.x = pose.arms[0];
+        av.parts[3].rotation.x = pose.arms[1];
+        av.parts[2].rotation.z = -pose.armRoll;
+        av.parts[3].rotation.z = pose.armRoll;
+        av.head.rotation.x = pose.head;
+        if (av.body.cape) av.body.cape.rotation.x = pose.cape;
+        // Name tag and health bar belong overhead, not slung out behind.
+        placeOverhead(av.group, av.sprite, 2.34);
+        placeOverhead(av.group, av.healthSprite, 2.62);
+        av.tagTilted = true;
       } else {
         applyAvatarSneak(av.body, av.sneakT);
         av.group.rotation.x = 0;
-        av.head.rotation.x = THREE.MathUtils.clamp(r.tpitch, -1.15, 1.15) + av.sneakT * 0.12;
+        av.head.rotation.x = THREE.MathUtils.clamp(av.dpitch, -1.15, 1.15) + av.sneakT * 0.12;
 
         // Walk/idle animation based on horizontal movement speed.
-        const hspeed = Math.hypot(av.dx - av.lastX, av.dz - av.lastZ) / Math.max(dt, 1e-4);
-        av.lastX = av.dx; av.lastZ = av.dz;
         av.walkPhase += Math.min(hspeed, 7) * dt * 2.4;
 
         const pose = stridePose(
@@ -993,11 +1141,32 @@ export class RemotePlayers {
           if (av.heldMesh) {
             // Counter the raised forearm so the barrel remains on the look line.
             av.heldMesh.rotation.x = -(raise + 0.1) +
-              THREE.MathUtils.clamp(r.tpitch, -1.15, 1.15);
+              THREE.MathUtils.clamp(av.dpitch, -1.15, 1.15);
             av.heldMesh.rotation.z = -reloadDip * 0.45;
           }
         }
         if (av.body.cape) av.body.cape.rotation.x = pose.cape;
+      }
+
+      // ── The wing ───────────────────────────────────────────────────────
+      // Placed in world, not parented to the pilot: it holds the flight-path
+      // attitude while the body hangs (and pitches) underneath it.
+      poseGliderRig(av.rig, {
+        deploy: av.glideT, bank: av.bank, time: av.walkPhase,
+        speed01: Math.min(1, hspeed / 26),
+      });
+      if (av.rig.group.visible) {
+        av.rig.group.visible = av.group.visible;
+        av.rig.group.position.set(av.dx, av.dy + RIG_HARNESS_Y, av.dz);
+        av.rig.group.rotation.set(
+          THREE.MathUtils.clamp(av.dpitch, -1.2, 1.2) * 0.8 + 0.06,
+          av.dyaw, av.bank);
+      }
+      // You cannot wear the wing you are hanging from: fold the back-pack away
+      // once the rig is open.
+      const packOut = av.glideT > 0.35;
+      for (const m of av.armorMeshes) {
+        if (m.userData.gliderPack) m.visible = !packOut;
       }
     }
   }
@@ -1039,6 +1208,7 @@ export class RemotePlayers {
     // The held item's geometry is the shared itemGeometry cache — detach it
     // BEFORE the body traverse below would dispose it for everyone.
     if (av.heldMesh) { av.heldMesh.parent?.remove(av.heldMesh); av.heldMesh = null; }
+    disposeGliderRig(av.rig); // scene-level: it does not ride the body's traverse
     disposeAvatarBody(av.body);
     av.nameTex.dispose();
     (av.sprite.material as THREE.SpriteMaterial).dispose();

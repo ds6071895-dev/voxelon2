@@ -176,6 +176,11 @@ export type ClientMsg =
   // newest pending request after the client-side 5s hold completes.
   | { t: 'tpa'; target: string }
   | { t: 'tpaAccept' }
+  // An operator command typed into the in-game command box. The transport shell
+  // (server/server.ts) handles this one — NOT the pure GameServer — because it
+  // reaches accounts/persistence/shutdown. OP is re-checked there on every
+  // line, so this is safe to send from any client.
+  | { t: 'command'; text: string }
   | { t: 'selfhurt'; amount: number }   // fall/drown damage, applied by server
   | { t: 'respawn' }
   | { t: 'drop'; items: { id: number; count: number }[]; x: number; y: number; z: number }
@@ -187,6 +192,13 @@ export type ClientMsg =
   // server-clamped (same trust model).
   | { t: 'armor'; points: number; toughness?: number }
   | { t: 'rangedAttack'; target: number; amount: number } // gun/projectile PvP hit
+  // PURELY COSMETIC gunfire report: "I pulled the trigger of `item`, from here,
+  // pointing there". Carries NO damage — hits are still reported separately by
+  // `rangedAttack`, which the server validates. The server rebroadcasts this to
+  // everyone else so incoming fire can be seen and heard; without it an enemy's
+  // gun is silent and invisible and you just take damage out of nowhere.
+  | { t: 'shot'; x: number; y: number; z: number;
+      dx: number; dy: number; dz: number; item: number }
   // Automation machines (block-entities; placement is a normal edit).
   | { t: 'machineOpen'; x: number; y: number; z: number }
   | { t: 'machineConfig'; x: number; y: number; z: number; filter: number }
@@ -330,6 +342,18 @@ export type ServerMsg =
   | { t: 'edit'; x: number; y: number; z: number; block: number }
   | { t: 'hurt'; health: number; dead: boolean; by: number;
       kx: number; ky: number; kz: number }
+  // Told to the ATTACKER when one of their direct hits lands: the hitmarker.
+  // Sent from the server rather than predicted client-side so it can never lie
+  // about a shot the server rejected. `amount` is the health actually removed
+  // AFTER armor — 0 means the target soaked it, which is worth showing too.
+  | { t: 'hitconfirm'; target: number; amount: number; killed: boolean }
+  // Cosmetic explosion FX for everyone but the instigator (who already ran it
+  // locally). Craters arrive as ordinary `edit` messages, so without this a
+  // remote blast is a silent, invisible hole appearing in the world.
+  | { t: 'blast'; x: number; y: number; z: number }
+  // A rebroadcast gunshot (see the client-side `shot`), tagged with the shooter.
+  | { t: 'shot'; id: number; x: number; y: number; z: number;
+      dx: number; dy: number; dz: number; item: number }
   | { t: 'respawned'; x: number; y: number; z: number; health: number }
   | { t: 'killfeed'; killer: string; victim: string }
   | { t: 'itemspawn'; item: ItemEntityInfo }
@@ -372,8 +396,14 @@ export type ServerMsg =
   | { t: 'teleport'; x: number; y: number; z: number }
   // Admin notice shown to a player (e.g. "You are now in creative mode").
   | { t: 'notice'; text: string }
-  // TPA: `from` wants to teleport to YOU — hold the accept key to allow it.
+  // TPA: `from` wants to teleport to YOU — run /tpaccept to allow it.
   | { t: 'tpaRequest'; from: string }
+  // Operator status for THIS socket: sent right after auth and again whenever
+  // the console ops/deops the account. Drives the command box's suggestions
+  // (the server still re-checks it on every command it receives).
+  | { t: 'op'; op: boolean }
+  // Output of an operator command, echoed back into the sender's command box.
+  | { t: 'cmdOut'; lines: string[]; ok?: boolean }
   // Lifesteal (Milestone A): the local player's authoritative hearts count.
   // `reason` drives the client toast + sound; `from` names the other player on
   // a steal/loss.

@@ -75,6 +75,12 @@ import {
   participantHpMultiplier, encounterArmorPierce,
 } from '../vault_encounter';
 
+// Cosmetic gunshot rebroadcast budget (see handleShot). Sized well above the
+// fastest gun's cadence so it never eats a real shot; it exists to cap a
+// hacked client's tracer spam, not to police fire rate (hits are validated
+// separately by handleRanged).
+const SHOT_RATE = 25;            // sustained rebroadcast shots per second
+const SHOT_BURST = 12;           // shots that may be fired back to back
 const SEASON_BROADCAST = 2;      // seconds between season-clock broadcasts
 const WAR_BROADCAST = 2;         // seconds between war-clock broadcasts
 /** Seconds before the closing border may relocate the same player again. */
@@ -149,6 +155,11 @@ interface ServerPlayer extends PlayerInfo {
   forfeitSeason: number;
   /** Per-gadget cooldown tracker (Phase 8; server-authoritative anti-spam). */
   gadgetCd: GadgetCooldowns;
+  /** Token bucket limiting how many COSMETIC gunshot rebroadcasts this player
+   *  may generate, so a hacked client can't flood everyone with fake tracers.
+   *  Purely about noise — dropping one only costs a visual. */
+  shotTokens: number;
+  shotRefillAt: number;
   /** worldTime before which the shrinking war border may not relocate this
    *  player again (stops a tick-rate teleport loop at the ring's edge). */
   borderRelocateAt: number;
@@ -166,7 +177,7 @@ const GAME_MODES: GameMode[] = ['survival', 'creative', 'spectator'];
 
 /** Client messages a spectator may NOT send (world edits + combat + economy). */
 const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
-  'edit', 'lever', 'rangedAttack', 'selfhurt', 'drop', 'pickup', 'chestSet',
+  'edit', 'lever', 'rangedAttack', 'shot', 'selfhurt', 'drop', 'pickup', 'chestSet',
   'machineConfig', 'machineUpgrade', 'machineCollect', 'machineHit', 'machineClaim',
   'machineMove', 'setSpawn',
   'turretUpgrade', 'turretClaim', 'turretHit', 'turretLoad',
@@ -540,6 +551,7 @@ export class GameServer {
       switchSeason: Number.isFinite(account?.switchSeason) ? Math.floor(account!.switchSeason!) : 0,
       forfeitSeason: Number.isFinite(account?.forfeitSeason) ? Math.floor(account!.forfeitSeason!) : 0,
       gadgetCd: new GadgetCooldowns(),
+      shotTokens: SHOT_BURST, shotRefillAt: 0,
       borderRelocateAt: 0,
       cosmetics: saved?.cosmetics !== undefined
         ? sanitizeCosmetics(saved.cosmetics, skinSeed(username)) : undefined,
@@ -745,6 +757,8 @@ export class GameServer {
       }
       case 'rangedAttack':
         return this.handleRanged(p, msg.target, msg.amount);
+      case 'shot':
+        return this.handleShot(p, msg);
       case 'chestOpen': {
         // A pristine STRUCTURE chest generates its seeded loot on first open
         // (identical for every client + the offline world; dup-safe — the roll
@@ -2265,6 +2279,40 @@ export class GameServer {
     return this.applyDamage(target, dmg, attacker.id, knock, true);
   }
 
+  /**
+   * Rebroadcast a gunshot so everyone else can SEE and HEAR it. Cosmetic only —
+   * it carries no damage, and the hit itself still arrives (and is validated) as
+   * a separate `rangedAttack`. The checks here exist purely so a hacked client
+   * can't spam fake tracers or draw gunfire from somewhere it isn't standing:
+   * the item must really be a gun, the muzzle must be next to the shooter, the
+   * direction must be a usable vector, and the rate is bucketed.
+   */
+  private handleShot(p: ServerPlayer, msg: Extract<ClientMsg, { t: 'shot' }>): Outbound[] {
+    if (p.dead || !fin(msg.x, msg.y, msg.z, msg.dx, msg.dy, msg.dz)) return [];
+    const gun = ITEMS[msg.item]?.gun;
+    if (!gun) return [];
+    // The muzzle sits at the shooter's eye; allow a couple of blocks of slack
+    // for the snapshot being a fraction of a second out of date.
+    if (Math.hypot(msg.x - p.x, msg.y - (p.y + 1.6), msg.z - p.z) > 4) return [];
+    const len = Math.hypot(msg.dx, msg.dy, msg.dz);
+    if (!(len > 1e-3)) return [];
+    // Token bucket: SHOT_RATE sustained shots/second with a SHOT_BURST burst,
+    // which comfortably clears the fastest gun (the SMG's 12.5/s).
+    p.shotTokens = Math.min(
+      SHOT_BURST, p.shotTokens + Math.max(0, this.worldTime - p.shotRefillAt) * SHOT_RATE);
+    p.shotRefillAt = this.worldTime;
+    if (p.shotTokens < 1) return [];
+    p.shotTokens -= 1;
+    return [{
+      to: 'others', from: p.id,
+      msg: {
+        t: 'shot', id: p.id, item: msg.item,
+        x: msg.x, y: msg.y, z: msg.z,
+        dx: msg.dx / len, dy: msg.dy / len, dz: msg.dz / len,
+      },
+    }];
+  }
+
   /** `direct` marks damage a player personally dealt (gun/explosive) — only
    *  direct hits arm the lifesteal kill-credit window, so turret/mob/fall
    *  deaths never move hearts. `pierce` ignores a fraction of worn armor and is
@@ -2298,7 +2346,15 @@ export class GameServer {
         }
       }
     }
-    if (amount <= 0) return []; // fully absorbed
+    if (amount <= 0) {
+      // Fully absorbed. The shooter still connected, so they still get a
+      // hitmarker — a "your round landed and their armor ate it" marker is the
+      // feedback that tells them to change weapon rather than keep firing.
+      if (pvp && direct) {
+        out.push({ to: by, msg: { t: 'hitconfirm', target: p.id, amount: 0, killed: false } });
+      }
+      return out;
+    }
     p.health = Math.max(0, p.health - amount);
     // PvP hits block natural regen for the whole combat tag (out-healing an
     // active fight is what made fights drag forever); environment damage keeps
@@ -2317,6 +2373,14 @@ export class GameServer {
         kx: knock?.x ?? 0, ky: knock?.y ?? 0, kz: knock?.z ?? 0,
       },
     });
+    // Hitmarker for the attacker. Server-sent (never predicted) so it only ever
+    // appears for damage that actually landed, and it reports the post-armor
+    // number so the shooter can feel how much the target's kit is soaking.
+    if (pvp && direct) {
+      out.push({ to: by, msg: {
+        t: 'hitconfirm', target: p.id, amount, killed: p.health <= 0 && !p.dead,
+      } });
+    }
     if (p.health <= 0 && !p.dead) {
       p.dead = true;
       const killer = this.players.get(by);
@@ -2887,8 +2951,14 @@ export class GameServer {
   private handleRocketBlast(p: ServerPlayer, x: number, y: number, z: number): Outbound[] {
     if (p.dead || !fin(x, y, z)) return [];
     if (Math.hypot(x - p.x, y - p.y, z - p.z) > RANGED_MAX_RANGE) return [];
-    return this.detonate(p, x, y, z,
-      ROCKET_BLAST_DAMAGE, ROCKET_BLAST_RADIUS, ROCKET_CRATER_RADIUS);
+    // FX first: the shooter already ran the blast locally, but for everyone
+    // else the crater would otherwise be blocks silently vanishing. (Thrown
+    // gadgets don't need this — they broadcast their own `gadgetFx`.)
+    return [
+      { to: 'others', from: p.id, msg: { t: 'blast', x, y, z } },
+      ...this.detonate(p, x, y, z,
+        ROCKET_BLAST_DAMAGE, ROCKET_BLAST_RADIUS, ROCKET_CRATER_RADIUS),
+    ];
   }
 
   /** Shared explosive blast: server-authoritative AoE damage to enemies (linear

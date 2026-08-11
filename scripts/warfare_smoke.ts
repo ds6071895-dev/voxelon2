@@ -31,6 +31,7 @@ import { WARFARE_BLUEPRINTS, RECIPES } from '../src/crafting';
 import { Block } from '../src/blocks';
 import { Item, ITEMS } from '../src/items';
 import { mulberry32 } from '../src/noise';
+import { branchIconName, nodeIconName, warfareIconNames } from '../src/warfare_ui';
 
 const failures: string[] = [];
 const check = (condition: boolean, message: string): void => {
@@ -935,6 +936,30 @@ const check = (condition: boolean, message: string): void => {
   const flat = JSON.stringify(missile);
   check(!flat.includes(String(Item.TitaniumIngot)),
     'the first tactical missile needs no titanium — the first unlock is usable');
+}
+
+// --- Presentation: the tree screen is emoji-free and fully iconed ------------------
+// The Warfare Command panel draws every glyph as an inline SVG, so a node that
+// pointed at a mark the set doesn't define would render as a blank chip on the
+// player's screen — and the fallback would hide it from a visual check.
+{
+  const known = new Set(warfareIconNames());
+  check(known.size >= 20, 'the icon set defines a mark for every kind of hardware');
+  for (const node of WARFARE_TREE) {
+    check(known.has(nodeIconName(node)), `${node.name} draws a defined SVG icon`);
+  }
+  for (const branch of ['trunk', 'strike', 'aegis', 'air'] as const) {
+    check(known.has(branchIconName(branch)), `the ${branch} branch draws a defined SVG icon`);
+  }
+  // Distinct marks: two technologies wearing the same icon is a design bug, not
+  // a crash, so nothing else would ever catch it.
+  const marks = WARFARE_TREE.map(nodeIconName);
+  check(new Set(marks).size === marks.length,
+    'every technology in the tree wears a distinct icon');
+  // Chrome the panel needs by name — a rename would silently blank a button.
+  for (const name of ['close', 'recenter', 'plus', 'minus', 'check', 'lock', 'spark', 'chevron']) {
+    check(known.has(name), `panel chrome icon "${name}" exists`);
+  }
 }
 
 if (failures.length) throw new Error(`${failures.length} warfare smoke check(s) failed`);
