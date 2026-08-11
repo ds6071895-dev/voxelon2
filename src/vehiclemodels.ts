@@ -19,6 +19,7 @@ const FACE_SHADE = [0.80, 0.62, 1.0, 0.46, 0.90, 0.70];
 const VEHICLE_MAT = new THREE.MeshBasicMaterial({ vertexColors: true });
 const GLASS_MAT = new THREE.MeshBasicMaterial({
   vertexColors: true, transparent: true, opacity: 0.55,
+  side: THREE.DoubleSide,
 });
 const GLOW_MAT = new THREE.MeshBasicMaterial({
   vertexColors: true, transparent: true, opacity: 0.9,
@@ -37,6 +38,9 @@ const STEEL_DARK = 0x454a55;
 const GLASS = 0x9fd8e8;
 const NEAR_BLACK = 0x23272e;
 const AMBER = 0xe6a83a;
+/** The original airframe was barely player-wide. Keep simulation coordinates
+ * unchanged while giving the rendered helicopter a believable two-seat cabin. */
+const HELICOPTER_MODEL_SCALE = 1.5;
 
 function paintFaces(geo: THREE.BufferGeometry, hex: number): THREE.BufferGeometry {
   const color = new THREE.Color(hex);
@@ -124,6 +128,7 @@ export function buildHelicopterModel(tier: number, markingHex: number): Helicopt
   const group = new THREE.Group();
   const hull = new THREE.Group();
   group.add(hull);
+  group.scale.setScalar(HELICOPTER_MODEL_SCALE);
   const lights: THREE.Mesh[] = [];
 
   // --- Fuselage ---
@@ -136,9 +141,16 @@ export function buildHelicopterModel(tier: number, markingHex: number): Helicopt
     0, -0.02, 1.05 + noseLen / 2);
   nose.rotation.x = Math.PI / 2;
   // Canopy: two angled glass panels.
-  const canopy = box(hull, GLASS, 1.0, 0.5, 0.85, 0, 0.22, 0.72, GLASS_MAT);
+  const canopy = box(hull, GLASS, 1.08, 0.72, 1.65, 0, 0.34, 0.45, GLASS_MAT);
   canopy.rotation.x = -0.22;
-  box(hull, OLIVE_DARK, 1.04, 0.05, 0.05, 0, 0.46, 0.34);    // canopy frame
+  // Cockpit furniture is visible from the first-person seat: low dashboard,
+  // windscreen pillars and a roof crossbar frame the view without blocking it.
+  box(hull, OLIVE_DARK, 1.04, 0.14, 0.34, 0, 0.05, 1.02);   // dashboard
+  box(hull, NEAR_BLACK, 0.7, 0.12, 0.03, 0, 0.16, 0.86);    // instrument panel
+  box(hull, OLIVE_DARK, 0.07, 0.78, 0.07, -0.53, 0.42, 0.92);
+  box(hull, OLIVE_DARK, 0.07, 0.78, 0.07, 0.53, 0.42, 0.92);
+  box(hull, OLIVE_DARK, 1.1, 0.07, 0.07, 0, 0.82, 0.79);
+  box(hull, OLIVE_DARK, 0.07, 0.76, 0.07, 0, 0.43, 0.92);   // centre windscreen post
   // Side doors (open — you can see the occupants).
   box(hull, OLIVE_DARK, 0.06, 0.62, 0.8, 0.63, -0.02, -0.1);
   box(hull, OLIVE_DARK, 0.06, 0.62, 0.8, -0.63, -0.02, -0.1);
@@ -255,7 +267,14 @@ export function buildHelicopterModel(tier: number, markingHex: number): Helicopt
   for (const key of ['pilot', 'passenger'] as const) {
     const o = SEAT_OFFSETS[key];
     const seat = seats[key];
-    seat.position.set(o.x, o.y - 0.18, o.z);
+    // The group is enlarged, but the authoritative seat positions are not.
+    // Divide the anchors by the model scale so their world offsets remain the
+    // same values used by VehicleSim and player replication.
+    seat.position.set(
+      o.x / HELICOPTER_MODEL_SCALE,
+      o.y / HELICOPTER_MODEL_SCALE,
+      o.z / HELICOPTER_MODEL_SCALE,
+    );
     // The seat furniture itself, so an empty seat still looks like a cockpit.
     box(seat, OLIVE_DARK, 0.42, 0.1, 0.42, 0, -0.2, 0);
     box(seat, OLIVE_DARK, 0.42, 0.5, 0.1, 0, 0.05, -0.2);
@@ -390,6 +409,15 @@ export class VehicleModels {
     const e = this.helis.get(heliId);
     if (!e) return null;
     return e.model.seats[seat].getWorldPosition(new THREE.Vector3());
+  }
+
+  /** Seated eye position inside the canopy, transformed by aircraft attitude. */
+  cockpitWorldPosition(heliId: number, seat: 'pilot' | 'passenger'): THREE.Vector3 | null {
+    const e = this.helis.get(heliId);
+    if (!e) return null;
+    return e.model.seats[seat].localToWorld(new THREE.Vector3(
+      0, 0.78 / HELICOPTER_MODEL_SCALE, 0.08 / HELICOPTER_MODEL_SCALE,
+    ));
   }
 
   snapshotOf(id: number): HelicopterSnapshot | null {

@@ -6,7 +6,7 @@
 
 import * as THREE from 'three';
 import { itemGeometry } from './itementity';
-import { ITEMS } from './items';
+import { Item, ITEMS } from './items';
 import { avatarTexture } from './avatartex';
 import { skinColorFor } from './remoteplayers';
 import { Cosmetics, SHIRT_COLORS, defaultCosmetics } from './character';
@@ -693,7 +693,10 @@ export class HeldItemView {
    *  the receiver as the weapon comes up: a fist is a bigger block than the gun
    *  it is holding, and dead centre of an aimed shot is the worst place for it. */
   private placeHands(aim: number): void {
-    this.arm.position.set(0.05, -0.16 - aim * 0.13, 0.06 + aim * 0.05);
+    // A pistol has no stock to shoulder, so its firing hand must rise with the
+    // whole ADS pose instead of tucking behind the receiver like a long gun.
+    const handTuck = this.currentItem === Item.Pistol ? 0 : aim;
+    this.arm.position.set(0.05, -0.16 - handTuck * 0.13, 0.06 + handTuck * 0.05);
     if (!this.offArm.visible || !this.anchorGrip2) return;
     const target = this.pointInPivot(this.anchorGrip2, this.scratch);
     if (this.partMag && this.partMag.position.y < -0.01) {

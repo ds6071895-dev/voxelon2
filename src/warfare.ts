@@ -502,7 +502,6 @@ export const MAX_SILOS_PER_FACTION = 2;
 export const MIN_SILO_SPACING = 48;
 export const MAX_BATTERIES_PER_FACTION = 4;
 export const MIN_BATTERY_SPACING = 24;
-export const MAX_HELICOPTERS_PER_FACTION = 2;
 /** Offensive missiles in flight per faction. */
 export const MAX_MISSILES_IN_FLIGHT = 2;
 /** Seconds between launches ACROSS a whole faction. */

@@ -1418,8 +1418,6 @@ export class GameServer {
       return [{ to: p.id, msg: { t: 'warfareErr',
         reason: 'Flight Certification is not authorized.' } }];
     }
-    const err = this.vehicles.spawnError(p.faction);
-    if (err) return [{ to: p.id, msg: { t: 'warfareErr', reason: err } }];
     const tier = Math.max(1, warfareTier(this.warfareOf(p.username), 'helicopter'));
     this.vehicles.spawn(p.username, p.faction, { x: bx, y: by, z: bz }, tier);
     return this.heliBroadcast();

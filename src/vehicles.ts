@@ -7,8 +7,7 @@
 // snapshot they get back and predict nothing that matters.
 
 import {
-  HelicopterStats, MAX_HELICOPTERS_PER_FACTION, blastDamage, clampTier,
-  helicopterStats,
+  HelicopterStats, blastDamage, clampTier, helicopterStats,
 } from './warfare';
 
 const MAX_OWNER_LEN = 24;
@@ -29,6 +28,11 @@ export const AUTOLAND_DESCENT = 3.5;
 export const PASSENGER_ARC = Math.PI * 0.62;
 
 export type SeatKind = 'pilot' | 'passenger';
+
+/** Player/camera yaw faces -Z at zero; the authored airframe faces +Z. */
+export function viewYawToHeliYaw(yaw: number): number {
+  return Math.atan2(Math.sin(yaw + Math.PI), Math.cos(yaw + Math.PI));
+}
 
 export interface Vec3 { x: number; y: number; z: number }
 
@@ -168,8 +172,8 @@ export interface VehicleEnv {
 
 /** Seat offsets in the airframe's local space (right-handed, +Z forward). */
 export const SEAT_OFFSETS: Record<SeatKind, Vec3> = {
-  pilot: { x: -0.42, y: 0.05, z: 0.55 },
-  passenger: { x: 0.42, y: 0.02, z: -0.35 },
+  pilot: { x: -0.42, y: -0.22, z: 0.55 },
+  passenger: { x: 0.42, y: -0.22, z: -0.35 },
 };
 
 /** World-space position of a seat, given the airframe's pose. */
@@ -199,20 +203,6 @@ export class VehicleSim {
   /** The id the NEXT allocation would use, without consuming it (serialization
    *  must never have a side effect). */
   peekNextId(): number { return this.nextId; }
-
-  countFor(faction: number): number {
-    let n = 0;
-    for (const h of this.helicopters.values()) if (h.faction === faction && h.dying <= 0) n++;
-    return n;
-  }
-
-  /** Why this faction may not put another airframe in the air (null = fine). */
-  spawnError(faction: number): string | null {
-    if (this.countFor(faction) >= MAX_HELICOPTERS_PER_FACTION) {
-      return `Your faction already fields ${MAX_HELICOPTERS_PER_FACTION} helicopters.`;
-    }
-    return null;
-  }
 
   spawn(
     owner: string, faction: number, pad: Vec3, tier = 1,
@@ -267,15 +257,11 @@ export class VehicleSim {
     return { ok: true, seat };
   }
 
-  /** Step off. Refused in mid-air unless `force` (emergency ejection). */
-  dismount(playerId: number, force = false): { ok: boolean; reason?: string; at?: Vec3 } {
+  /** Step off. This is always available; leaving at altitude means falling. */
+  dismount(playerId: number, _force = false): { ok: boolean; reason?: string; at?: Vec3 } {
     const found = this.seatOf(playerId);
     if (!found) return { ok: false, reason: 'You are not aboard anything.' };
     const { heli: h, seat } = found;
-    const ground = this.env.groundY(h.position.x, h.position.z);
-    if (!force && h.position.y - ground > DISMOUNT_CLEARANCE) {
-      return { ok: false, reason: 'Too high — descend before stepping off.' };
-    }
     if (seat === 'pilot') { h.pilotId = null; this.inputs.delete(h.id); }
     else h.passengerId = null;
     return { ok: true, at: seatPosition(h, seat) };
@@ -299,8 +285,9 @@ export class VehicleSim {
   passengerCanFire(playerId: number, aimYaw: number): boolean {
     const found = this.seatOf(playerId);
     if (!found || found.seat !== 'passenger') return true; // not our business
-    const rel = Math.atan2(Math.sin(aimYaw - found.heli.rotation.y),
-      Math.cos(aimYaw - found.heli.rotation.y));
+    const heliAim = viewYawToHeliYaw(aimYaw);
+    const rel = Math.atan2(Math.sin(heliAim - found.heli.rotation.y),
+      Math.cos(heliAim - found.heli.rotation.y));
     return Math.abs(rel) <= PASSENGER_ARC;
   }
 

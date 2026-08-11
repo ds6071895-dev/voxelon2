@@ -197,6 +197,9 @@ export class HUD {
     // The armor bar sits just above the (possibly two-row) heart stack.
     const armorEl = document.getElementById('armor') as HTMLCanvasElement;
     armorEl.style.bottom = rows > 1 ? '44px' : '22px';
+    // Keep gun ammo directly above armor instead of independently overlapping it.
+    const ammoEl = document.getElementById('ammo')!;
+    ammoEl.style.bottom = rows > 1 ? '66px' : '44px';
 
     // Energy: 10 blue segments filling left→right; dim red while exhausted.
     const energy = (document.getElementById('energybar') as HTMLCanvasElement)

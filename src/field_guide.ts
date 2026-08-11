@@ -258,7 +258,7 @@ export function fieldGuideSections(): FieldGuideSection[] {
         entry('warfare-missiles', 'Tactical missiles', ['missile', 'silo', 'launch', 'targeting', 'blast'],
           steps(['Build a Tactical Silo — it needs a clear 2×2 pad.',
             'Load a Tactical Missile into it.',
-            'Right-click the silo and choose Select Target.',
+            'Right-click the silo and choose Select Target. Missiles can only lock onto a saved waypoint or a flag.',
             'Click the map to place a reticle; check distance, ETA, blast radius and nearby allies.',
             'Press Confirm Launch. The server revalidates everything before a round is spent.']) +
           list(['Two silos per faction, at least 48 blocks apart.',
@@ -282,7 +282,7 @@ export function fieldGuideSections(): FieldGuideSection[] {
             'Pilot: W A S D flies, the camera steers, Space climbs, Shift descends, right-click drops a bomb.',
             'Gunner: look around and fire your own weapon within a sensible side arc.',
             'Press F to step off — near the ground, or as an emergency ejection.']) +
-          list(['Two seats, two active helicopters per faction.',
+          list(['Two seats per helicopter, with no faction-wide airframe limit.',
             'Guns, rockets, turrets, explosions and collisions all damage the airframe.',
             'At zero HP both occupants are ejected and hurt, and the wreck explodes.',
             'A pilot who disconnects leaves the airframe in a controlled hover that settles to the ground.',

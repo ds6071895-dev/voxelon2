@@ -21,7 +21,7 @@ import {
   sanitizeSilo, type ProtectedArea, type StrategicEvent,
 } from '../src/strategic';
 import {
-  VehicleSim, sanitizeHelicopter, sanitizeHeliInput, seatPosition,
+  VehicleSim, sanitizeHelicopter, sanitizeHeliInput, seatPosition, viewYawToHeliYaw,
   DISMOUNT_CLEARANCE, PASSENGER_ARC, type VehicleEvent,
 } from '../src/vehicles';
 import { VaultEncounter, type EncounterParticipant } from '../src/vault_encounter';
@@ -686,9 +686,11 @@ const check = (condition: boolean, message: string): void => {
     'the passenger cannot fly the aircraft');
 
   // Passenger firing arc.
-  check(sim.passengerCanFire(2, h.rotation.y) &&
-    !sim.passengerCanFire(2, h.rotation.y + Math.PI),
+  check(sim.passengerCanFire(2, h.rotation.y - Math.PI) &&
+    !sim.passengerCanFire(2, h.rotation.y),
     `the gunner may only fire within ±${PASSENGER_ARC.toFixed(2)} rad of the nose`);
+  check(viewYawToHeliYaw(0) === Math.PI,
+    'helicopter steering rotates camera yaw 180 degrees to match the authored nose');
 
   // Refuelling must never destroy a barrel: fuel burns fractionally, so the
   // deficit is almost never a whole number, and the client debits the rounded-up
@@ -732,10 +734,9 @@ const check = (condition: boolean, message: string): void => {
   }
   check(bombImpacts === 1, 'a bomb produces exactly one impact');
 
-  // Dismount rules: refused in the air, allowed near the ground.
+  // Dismount is always available; jumping out at altitude leaves the fall to physics.
   h.position.y = 64 + DISMOUNT_CLEARANCE + 10;
-  check(sim.dismount(1).ok === false, 'you cannot step off at altitude');
-  check(sim.dismount(1, true).ok === true, 'an emergency ejection always works');
+  check(sim.dismount(1).ok === true, 'you can step off at altitude and fall');
   h.position.y = 64 + 1;
   check(sim.dismount(2).ok === true, 'you can step off near the ground');
 
@@ -782,9 +783,6 @@ const check = (condition: boolean, message: string): void => {
   for (let i = 0; i < 200; i++) sim.tick(0.05);
   check(h4.position.y < highY && h4.position.y <= 66,
     'a pilotless airframe hovers, then settles to the ground');
-
-  // Faction cap.
-  check(sim.spawnError(0) !== null, 'a faction cannot field unlimited helicopters');
 
   // Restart: occupants are cleared, never restored.
   const restored = sanitizeHelicopter({
@@ -844,10 +842,9 @@ const check = (condition: boolean, message: string): void => {
   const id = spawned?.[0]?.id;
   check(id !== undefined, 'a helipad deploys an airframe for an authorized pilot');
   check(heliListOf(g.handle(1, { t: 'heliSpawn', x: 401, y: 70, z: 401 }))?.length === 2,
-    'a second airframe is allowed, up to the faction cap');
-  check(g.handle(1, { t: 'heliSpawn', x: 401, y: 70, z: 401 })
-    .some((o) => o.msg.t === 'warfareErr'),
-    'a third airframe is refused by the faction cap');
+    'a second airframe is allowed');
+  check(heliListOf(g.handle(1, { t: 'heliSpawn', x: 401, y: 70, z: 401 }))?.length === 3,
+    'a faction may deploy more than two airframes');
   if (id !== undefined) {
     const seated = heliListOf(g.handle(1, { t: 'heliMount', id, seat: 'pilot' }));
     check(seated?.find((h) => h.id === id)?.pilot === 1, 'the pilot seat is occupied');

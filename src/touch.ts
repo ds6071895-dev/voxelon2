@@ -31,6 +31,8 @@ export interface TouchState {
   playing: boolean;
   /** A gun is selected — show the FIRE/AIM/RELOAD cluster. */
   gun: boolean;
+  /** Riding a helicopter: show a dedicated exit button. */
+  vehicle: boolean;
 }
 
 export interface TouchCallbacks {
@@ -57,6 +59,7 @@ export class TouchControls {
   private readonly pads: HTMLElement;    // gameplay zones (joystick, look, buttons)
   private readonly utils: HTMLElement;   // inventory / map / pause row
   private readonly gunBox: HTMLElement;  // FIRE / AIM / RELOAD cluster
+  private readonly vehicleBtn: HTMLElement;
   private readonly knob: HTMLElement;
   private readonly sneakBtn: HTMLElement;
   private readonly aimBtn: HTMLElement;
@@ -196,6 +199,11 @@ export class TouchControls {
       this.sneakBtn.classList.toggle('t-on', this.input.tSneak);
     });
 
+    this.vehicleBtn = this.mkBtn(
+      this.pads, 'EXIT', 'right:134px;bottom:108px;width:64px;height:48px;font-size:13px;');
+    this.vehicleBtn.classList.add('t-sq');
+    this.tap(this.vehicleBtn, () => { this.input.dismountPressed = true; });
+
     // Gun cluster (only visible while a gun is selected).
     this.gunBox = document.createElement('div');
     this.gunBox.style.cssText = 'position:absolute;inset:0;pointer-events:none;display:none;';
@@ -249,6 +257,7 @@ export class TouchControls {
     this.root.style.display = s.shown ? '' : 'none';
     this.pads.style.display = s.playing ? '' : 'none';
     this.gunBox.style.display = s.playing && s.gun ? '' : 'none';
+    this.vehicleBtn.style.display = s.playing && s.vehicle ? '' : 'none';
     if (!s.gun && this.aimOn) this.setAim(false);
     if (this.wasPlaying && !s.playing) this.resetTransient();
     this.wasPlaying = s.playing;

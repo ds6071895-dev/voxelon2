@@ -64,8 +64,7 @@ import { FlagModels } from './flagmodels';
 import {
   WarfareProgress, buyWarfareNode, grantWarfareXp, migrateWarfare, newWarfare,
   sanitizeWarfare, settleWarfareXp, warfareAvailable, warfareOwns, warfareTier,
-  ContributionRecord, MAX_HELICOPTERS_PER_FACTION,
-  PROTECTED_RADIUS, helicopterStats, siloStats, batteryStats, tierLabel,
+  ContributionRecord, PROTECTED_RADIUS, helicopterStats, siloStats, batteryStats, tierLabel,
   MAX_SILOS_PER_FACTION, MIN_SILO_SPACING, MAX_BATTERIES_PER_FACTION,
   MIN_BATTERY_SPACING,
 } from './warfare';
@@ -75,7 +74,7 @@ import {
   StrategicEvent, LAUNCH_REJECT_TEXT, blastAt, blastBlockCandidates, protectedArea,
 } from './strategic';
 import {
-  HelicopterSnapshot, SeatKind, VehicleSim, VehicleEvent, bombBlast,
+  HelicopterSnapshot, SeatKind, VehicleSim, VehicleEvent, bombBlast, viewYawToHeliYaw,
 } from './vehicles';
 import { MissileModels, StrategicModels } from './warfare_models';
 import { VehicleModels } from './vehiclemodels';
@@ -4694,7 +4693,10 @@ function clockString(): string {
 }
 
 function updateCamera(): void {
-  camera.position.copy(player.eyePosition);
+  const cockpitEye = mySeat
+    ? vehicleModels.cockpitWorldPosition(mySeat.id, mySeat.seat)
+    : null;
+  camera.position.copy(cockpitEye ?? player.eyePosition);
   // Brief roll tilt while the damage flash decays, like vanilla's hurt cam —
   // plus the glider's bank, so turning under the wing leans the whole horizon.
   camera.rotation.set(
@@ -5670,7 +5672,7 @@ function renderHelipadPanel(): void {
   if (!heli) {
     html += `<div style="font-size:12px;color:#7f93b3;line-height:1.7;margin-bottom:10px">` +
       `No airframe on the pad. Assemble a <b style="color:#dce6f5">Helicopter Airframe</b> ` +
-      `and deploy it here. Your faction may field ${MAX_HELICOPTERS_PER_FACTION} at once.</div>` +
+      `and deploy it here.</div>` +
       statLine('Airframes held', String(kit), kit > 0 ? '#5ff09a' : '#ff5c4d') +
       statLine('Authorized mark', myTier > 0 ? tierLabel(myTier) : 'not authorized',
         myTier > 0 ? '#5ff09a' : '#ff5c4d');
@@ -5693,14 +5695,12 @@ function renderHelipadPanel(): void {
   if (!heli) {
     actionButton(row, 'Deploy airframe', kit > 0 && myTier > 0 && hasBlueprint(Item.HelicopterKit), () => {
       if (net.connected) {
-        // A refusal (faction cap, range, blueprint) refunds the airframe —
+        // A refusal (range or blueprint) refunds the airframe —
         // it costs ~38 iron and 8 titanium, so losing it to a rejected click
         // would be brutal.
         payWarfare([{ id: Item.HelicopterKit, count: 1 }]);
         net.sendHeliSpawn(pad.x, pad.y, pad.z);
       } else {
-        const err = offlineVehicles.spawnError(localFaction);
-        if (err) { showNotice(`⛔ ${err}`); return; }
         inventory.removeItem(Item.HelicopterKit, 1);
         offlineVehicles.spawn(authedName || 'You', localFaction, pad, Math.max(1, myTier));
       }
@@ -6007,8 +6007,9 @@ function updateWarfare(dt: number): void {
     const side = (input.right ? 1 : 0) - (input.left ? 1 : 0);
     const lift = (input.jump ? 1 : 0) - (input.sneak ? 1 : 0);
     const seq = heliInputSeq++;
-    if (net.connected) net.sendHeliInput(fwd, side, lift, player.yaw, seq);
-    else offlineVehicles.setInput(0, { forward: fwd, strafe: side, lift, yaw: player.yaw, seq });
+    const heading = viewYawToHeliYaw(player.yaw);
+    if (net.connected) net.sendHeliInput(fwd, side, lift, heading, seq);
+    else offlineVehicles.setInput(0, { forward: fwd, strafe: side, lift, yaw: heading, seq });
   }
 }
 
@@ -6859,7 +6860,7 @@ function frame(): void {
     panoramaView.update(dt);
     panoramaView.render(renderer);
     worldMap.hideBeacons();
-    touch?.update({ shown: false, playing: false, gun: false });
+    touch?.update({ shown: false, playing: false, gun: false, vehicle: false });
     input.endFrame();
     return;
   }
@@ -7305,7 +7306,7 @@ function frame(): void {
   // Both hands are on the control bar while gliding, so the POV arm steps
   // aside for the rig (which draws its own fists on the bar).
   const firstPersonActive = controlling && view === View.First;
-  held.setActive(firstPersonActive && !player.gliding);
+  held.setActive(firstPersonActive && !player.gliding && !mySeat);
   held.setItem(controlling ? inventory.selectedStack?.id ?? null : null);
   const reloadProgress = reloadTimer > 0 && reloadDuration > 0
     ? 1 - reloadTimer / reloadDuration : -1;
@@ -7393,6 +7394,7 @@ function frame(): void {
       playing: input.locked && screen === 'playing' && !player.dead &&
         !invUI.open && !worldMap.open,
       gun: !!(hs && ITEMS[hs.id]?.gun),
+      vehicle: !!mySeat,
     });
   }
 

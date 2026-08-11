@@ -77,6 +77,7 @@ interface Waypoint {
   /** Altitude of the waypoint (older saved points have none). */
   y?: number;
 }
+interface StrikeTarget { x: number; z: number; name: string; kind: 'waypoint' | 'flag' }
 export interface TotemPos { x: number; y: number; z: number; }
 /** A vault marker for the map (Milestone D). `discovered` vaults (entered once)
  *  render bright with their tier; merely SENSED nearby ones render faint with no
@@ -123,7 +124,7 @@ export class WorldMap {
   // click only PLACES A RETICLE, and nothing launches until Confirm Launch is
   // pressed (which the server then revalidates from scratch).
   private targeting: TargetingSession | null = null;
-  private reticle: { x: number; z: number } | null = null;
+  private reticle: StrikeTarget | null = null;
   private readonly targetBar: HTMLDivElement;
   // Dynamic markers (war flags): server-driven, NOT persisted; shown on the map
   // + as in-world beacons exactly like waypoints. Refreshed each frame by main.
@@ -349,24 +350,7 @@ export class WorldMap {
       ctx.restore();
     }
 
-    // Waypoints: big named diamonds.
-    for (const w of this.waypoints) {
-      const px = this.cx(w.x), py = this.cy(w.z);
-      ctx.save();
-      ctx.shadowColor = 'rgba(0,0,0,0.7)'; ctx.shadowBlur = 3;
-      ctx.fillStyle = this.rgba(w.color, 1);
-      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.6;
-      ctx.beginPath();
-      ctx.moveTo(px, py - 8); ctx.lineTo(px + 8, py); ctx.lineTo(px, py + 8); ctx.lineTo(px - 8, py);
-      ctx.closePath(); ctx.fill(); ctx.stroke();
-      ctx.shadowBlur = 0;
-      ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-      ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 3;
-      ctx.strokeText(w.name, px, py + 10);
-      ctx.fillStyle = '#fff';
-      ctx.fillText(w.name, px, py + 10);
-      ctx.restore();
-    }
+    this.drawWaypoints();
 
     // Attuned Waypoint Totems (B4): gold ringed markers — CLICK to travel.
     for (const t of this.totems) {
@@ -385,7 +369,50 @@ export class WorldMap {
       ctx.restore();
     }
 
-    // Dynamic markers (the war flags): a pole with a coloured pennant + label.
+    this.drawDynamicMarkers();
+
+    // Player marker: a big outlined heading arrow with a soft glow.
+    const p = this.mapCtx.player();
+    const px = this.cx(p.x), py = this.cy(p.z);
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(-p.yaw); // map +z is down; yaw 0 faces -z (up)
+    ctx.shadowColor = 'rgba(255,255,255,0.7)'; ctx.shadowBlur = 6;
+    ctx.fillStyle = '#fff'; ctx.strokeStyle = '#000'; ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(0, -10); ctx.lineTo(7, 8); ctx.lineTo(0, 4); ctx.lineTo(-7, 8);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.restore();
+
+    this.drawLegend();
+    this.syncMarkers();
+  }
+
+  /** Saved waypoints remain visible while choosing a missile target. */
+  private drawWaypoints(): void {
+    const ctx = this.ctx;
+    for (const w of this.waypoints) {
+      const px = this.cx(w.x), py = this.cy(w.z);
+      ctx.save();
+      ctx.shadowColor = 'rgba(0,0,0,0.7)'; ctx.shadowBlur = 3;
+      ctx.fillStyle = this.rgba(w.color, 1);
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(px, py - 8); ctx.lineTo(px + 8, py); ctx.lineTo(px, py + 8); ctx.lineTo(px - 8, py);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 3;
+      ctx.strokeText(w.name, px, py + 10);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(w.name, px, py + 10);
+      ctx.restore();
+    }
+  }
+
+  /** Live war flags remain visible while choosing a missile target. */
+  private drawDynamicMarkers(): void {
+    const ctx = this.ctx;
     for (const m of this.dynamicMarkers) {
       const fx = this.cx(m.x), fy = this.cy(m.z);
       ctx.save();
@@ -405,24 +432,6 @@ export class WorldMap {
       ctx.fillText(m.name, fx, fy + 10);
       ctx.restore();
     }
-
-
-
-    // Player marker: a big outlined heading arrow with a soft glow.
-    const p = this.mapCtx.player();
-    const px = this.cx(p.x), py = this.cy(p.z);
-    ctx.save();
-    ctx.translate(px, py);
-    ctx.rotate(-p.yaw); // map +z is down; yaw 0 faces -z (up)
-    ctx.shadowColor = 'rgba(255,255,255,0.7)'; ctx.shadowBlur = 6;
-    ctx.fillStyle = '#fff'; ctx.strokeStyle = '#000'; ctx.lineWidth = 1.6;
-    ctx.beginPath();
-    ctx.moveTo(0, -10); ctx.lineTo(7, 8); ctx.lineTo(0, 4); ctx.lineTo(-7, 8);
-    ctx.closePath(); ctx.fill(); ctx.stroke();
-    ctx.restore();
-
-    this.drawLegend();
-    this.syncMarkers();
   }
 
   /** A big, kind-shaped structure icon (tower/bunker/pod) with a drop shadow. */
@@ -615,6 +624,11 @@ export class WorldMap {
     }
     ctx.setLineDash([]);
 
+    // These are the only valid strike targets, so keep them visible above the
+    // dimmed atlas and exclusion overlays.
+    this.drawWaypoints();
+    this.drawDynamicMarkers();
+
     // Friendly players — you should be able to see who you are about to hit.
     const allies = t.allies();
     for (const a of allies) {
@@ -669,6 +683,9 @@ export class WorldMap {
   private targetReject(tx: number, tz: number): string | null {
     const t = this.targeting;
     if (!t) return null;
+    if (!this.strikeTargets().some((m) => m.x === tx && m.z === tz)) {
+      return 'Target must be a waypoint or flag';
+    }
     if (!Number.isFinite(tx) || !Number.isFinite(tz)) return 'Invalid coordinates';
     if (Math.abs(tx) > WORLD_BORDER / 2 || Math.abs(tz) > WORLD_BORDER / 2) {
       return 'Outside the world boundary';
@@ -697,12 +714,12 @@ export class WorldMap {
     const t = this.targeting;
     if (!t) return;
     const r = this.reticle;
-    const key = `${r ? `${r.x},${r.z}` : 'none'}|${t.ammo}|${Math.ceil(t.cooldown)}|${t.range}|${t.radius}`;
+    const reject = r ? this.targetReject(r.x, r.z) : 'Select a waypoint or flag';
+    const key = `${r ? `${r.x},${r.z},${r.name}` : 'none'}|${reject}|${t.ammo}|${Math.ceil(t.cooldown)}|${t.range}|${t.radius}`;
     if (key === this.targetBarKey) return;
     this.targetBarKey = key;
     const d = r ? Math.hypot(r.x - t.origin.x, r.z - t.origin.z) : 0;
     const eta = r ? missileFlightTime(d, t.speed) : 0;
-    const reject = r ? this.targetReject(r.x, r.z) : 'Click the map to place a reticle';
     const near = r
       ? t.allies().filter((a) => Math.hypot(a.x - r.x, a.z - r.z) <= t.radius * 2).length
       : 0;
@@ -710,13 +727,13 @@ export class WorldMap {
       `<div style="flex:1 1 260px;line-height:1.7">` +
       `<div style="color:#5ce2ec;letter-spacing:1px;font-size:11px">SELECT TARGET</div>` +
       (r
-        ? `<div>Impact <b>${Math.round(r.x)}, ${Math.round(r.z)}</b> · ` +
+        ? `<div>Target <b>${this.escape(r.name)}</b> · impact <b>${Math.round(r.x)}, ${Math.round(r.z)}</b> · ` +
           `distance <b>${Math.round(d)}</b> blocks · ETA <b>${eta.toFixed(1)}s</b></div>` +
           `<div>Blast radius <b>${t.radius}</b> · ammunition <b>${t.ammo}</b> · ` +
           `cooldown <b>${t.cooldown > 0 ? Math.ceil(t.cooldown) + 's' : 'ready'}</b>` +
           (near > 0 ? ` · <span style="color:#ff5c4d">${near} ally in blast</span>` : '') +
           `</div>`
-        : '<div>Click anywhere inside the cyan circle to place a reticle.</div>') +
+        : '<div>Click a saved waypoint or flag inside the cyan circle.</div>') +
       (reject ? `<div style="color:#ff5c4d">⛔ ${reject}</div>` : '') +
       `</div>` +
       `<div data-tbtns style="display:flex;gap:8px"></div>`;
@@ -759,7 +776,11 @@ export class WorldMap {
     // SELECT-TARGET mode: a click places the reticle and NEVER launches. The
     // player must press Confirm Launch, which is a separate, deliberate action.
     if (this.targeting) {
-      if (e.button === 0) { this.reticle = { x: wx, z: wz }; this.draw(); }
+      if (e.button === 0) {
+        this.reticle = this.nearestStrikeTarget(wx, wz);
+        this.targetBarKey = '';
+        this.draw();
+      }
       else this.endTargeting(true);
       return;
     }
@@ -791,6 +812,29 @@ export class WorldMap {
     });
     this.saveWaypoints();
     this.draw();
+  }
+
+  private strikeTargets(): StrikeTarget[] {
+    return [
+      ...this.waypoints.map((w) => ({
+        x: w.x, z: w.z, name: w.name, kind: 'waypoint' as const,
+      })),
+      ...this.dynamicMarkers.map((m) => ({
+        x: m.x, z: m.z, name: m.name, kind: 'flag' as const,
+      })),
+    ];
+  }
+
+  /** Marker selection uses a fixed screen-space radius, so it remains usable
+   * at both Heartland and full-world zoom levels. */
+  private nearestStrikeTarget(x: number, z: number): StrikeTarget | null {
+    let best: StrikeTarget | null = null;
+    let bestDistance = 18 / this.scale;
+    for (const target of this.strikeTargets()) {
+      const distance = Math.hypot(target.x - x, target.z - z);
+      if (distance < bestDistance) { best = target; bestDistance = distance; }
+    }
+    return best;
   }
 
   /** Keep the in-world waypoint pillars in sync with the list (only the ones the
