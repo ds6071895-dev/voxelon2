@@ -41,6 +41,10 @@ const CYAN_DIM = 0x2a8896;
 const AMBER = 0xe6a83a;
 const NEAR_BLACK = 0x22262e;
 
+/** How far a `flash` shell expands over its life. Callers quote the radius they
+ *  want it to REACH, and the geometry is seeded at radius/FLASH_PEAK. */
+const FLASH_PEAK = 2.1;
+
 function paintFaces(geo: THREE.BufferGeometry, hex: number): THREE.BufferGeometry {
   const color = new THREE.Color(hex);
   const pos = geo.getAttribute('position');
@@ -537,6 +541,7 @@ export class MissileModels {
   private readonly live = new Map<number, FlightEntry>();
   private readonly puffs: Puff[] = [];
   private readonly flashes: { mesh: THREE.Mesh; ttl: number; life: number }[] = [];
+  private readonly rings: { mesh: THREE.Mesh; ttl: number; life: number }[] = [];
   private clock = 0;
 
   constructor(
@@ -596,25 +601,52 @@ export class MissileModels {
     return e ? e.model.group.position : null;
   }
 
-  /** A bright expanding shell — used for launches, intercepts and impacts. */
+  /**
+   * A bright expanding shell. `radius` is the radius the shell reaches at the
+   * PEAK of its animation, not the radius of the geometry — an explosion that
+   * claims to be seven blocks across has to actually look seven blocks across,
+   * and quoting the seed radius instead used to inflate every fireball to more
+   * than three times its own blast footprint.
+   */
   flash(x: number, y: number, z: number, radius: number, hex: number): void {
     const mesh = new THREE.Mesh(
-      paintRound(new THREE.SphereGeometry(radius, 12, 8), hex, 0.9), GLOW_MAT.clone());
+      paintRound(new THREE.SphereGeometry(radius / FLASH_PEAK, 12, 8), hex, 0.9),
+      GLOW_MAT.clone());
     mesh.position.set(x, y, z);
     this.scene.add(mesh);
     this.flashes.push({ mesh, ttl: 0.55, life: 0.55 });
   }
 
-  /** The full impact presentation: fireball, shockwave ring and a smoke column. */
+  /** A flat shockwave ring racing out along the ground to the blast rim. */
+  private ring(x: number, y: number, z: number, radius: number, hex: number): void {
+    const mesh = new THREE.Mesh(
+      paintRound(new THREE.RingGeometry(radius * 0.82, radius, 28), hex, 0.9),
+      new THREE.MeshBasicMaterial({
+        vertexColors: true, transparent: true, opacity: 0.75, depthWrite: false,
+        side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+      }));
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.set(x, y, z);
+    this.scene.add(mesh);
+    this.rings.push({ mesh, ttl: 0.7, life: 0.7 });
+  }
+
+  /**
+   * The full impact presentation, sized off the warhead's REAL blast radius:
+   * a white-hot core, a fireball that reaches just past the damage rim (so the
+   * thing you see is the thing that hurt you), a ground shockwave and a smoke
+   * column that outlives both.
+   */
   impact(x: number, y: number, z: number, radius: number): void {
-    this.flash(x, y + radius * 0.35, z, radius * 0.9, 0xffa63a);
-    this.flash(x, y + 0.3, z, radius * 1.5, 0xff6a20);
+    this.flash(x, y + radius * 0.3, z, radius * 0.7, 0xffe1a6);
+    this.flash(x, y + radius * 0.18, z, radius * 1.12, 0xff6a20);
+    this.ring(x, y + 0.35, z, radius * 1.5, 0xffb15a);
     for (let i = 0; i < 22; i++) {
       const a = (i / 22) * Math.PI * 2;
-      const r = radius * (0.25 + Math.random() * 0.8);
+      const r = radius * (0.2 + Math.random() * 0.65);
       this.puff(
-        x + Math.cos(a) * r, y + 0.4 + Math.random() * radius * 0.8, z + Math.sin(a) * r,
-        0.6 + Math.random() * 0.9, 0x4a4744, 2.4,
+        x + Math.cos(a) * r, y + 0.4 + Math.random() * radius * 0.7, z + Math.sin(a) * r,
+        radius * (0.11 + Math.random() * 0.13), 0x4a4744, 2.4,
         new THREE.Vector3(Math.cos(a) * 1.4, 1.6 + Math.random(), Math.sin(a) * 1.4));
     }
   }
@@ -672,11 +704,24 @@ export class MissileModels {
         this.puffs.splice(i, 1);
       }
     }
+    for (let i = this.rings.length - 1; i >= 0; i--) {
+      const r = this.rings[i];
+      r.ttl -= dt;
+      const k = Math.max(0, r.ttl / r.life);
+      r.mesh.scale.setScalar(0.15 + (1 - k) * 0.9);
+      (r.mesh.material as THREE.MeshBasicMaterial).opacity = k * 0.7;
+      if (r.ttl <= 0) {
+        this.scene.remove(r.mesh);
+        r.mesh.geometry.dispose();
+        (r.mesh.material as THREE.Material).dispose();
+        this.rings.splice(i, 1);
+      }
+    }
     for (let i = this.flashes.length - 1; i >= 0; i--) {
       const f = this.flashes[i];
       f.ttl -= dt;
       const k = Math.max(0, f.ttl / f.life);
-      f.mesh.scale.setScalar(0.4 + (1 - k) * 1.7);
+      f.mesh.scale.setScalar(0.4 + (1 - k) * (FLASH_PEAK - 0.4));
       (f.mesh.material as THREE.Material as THREE.MeshBasicMaterial).opacity = k * 0.85;
       if (f.ttl <= 0) {
         this.scene.remove(f.mesh);

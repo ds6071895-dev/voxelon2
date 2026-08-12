@@ -21,7 +21,9 @@ import type { VaultBossKind, VaultFamily, VaultTier } from '../vaults';
 import type {
   BatteryState, LaunchReject, MissileSnapshot, ProtectedArea, SiloState,
 } from '../strategic';
-import type { BombSnapshot, HelicopterSnapshot, SeatKind } from '../vehicles';
+import type {
+  BombSnapshot, HeliLossReason, HelicopterSnapshot, SeatKind,
+} from '../vehicles';
 
 export interface Remote {
   info: PlayerInfo;
@@ -36,6 +38,8 @@ export interface Remote {
   dead: boolean;
   gliding: boolean;
   boating: boolean;
+  /** Strapped into a vehicle seat — drives the seated avatar pose. */
+  seated: boolean;
   sneaking: boolean;
   /** Held item id (0 = bare hand) — rendered in the avatar's hand. */
   held: number;
@@ -172,8 +176,15 @@ export class NetClient {
   onHelis?: (list: HelicopterSnapshot[], bombs: BombSnapshot[]) => void;
   /** YOUR seat changed (null = you are on your feet again). */
   onHeliSeat?: (id: number, seat: SeatKind | null) => void;
-  onHeliDown?: (id: number, x: number, y: number, z: number, faction: number) => void;
+  onHeliDown?: (
+    id: number, x: number, y: number, z: number, faction: number, reason: HeliLossReason,
+  ) => void;
   onHeliGone?: (id: number) => void;
+  /** You were thrown clear of a bursting airframe, with an impulse to match. */
+  onEjected?: (
+    x: number, y: number, z: number, vx: number, vy: number, vz: number,
+    reason: HeliLossReason,
+  ) => void;
   /** Private confirmation of YOUR secret faction switch (Phase 7). */
   onFactionSwitched?: (faction: number, remaining: number) => void;
   /** Play a gadget visual effect (frag/oil blast, smoke cloud) at a point. */
@@ -339,6 +350,9 @@ export class NetClient {
       case 'teleport':
         this.onTeleport?.(msg.x, msg.y, msg.z);
         break;
+      case 'ejected':
+        this.onEjected?.(msg.x, msg.y, msg.z, msg.vx, msg.vy, msg.vz, msg.reason);
+        break;
       case 'notice':
         this.onNotice?.(msg.text);
         break;
@@ -465,7 +479,7 @@ export class NetClient {
         this.onHeliSeat?.(msg.id, msg.seat);
         break;
       case 'heliDown':
-        this.onHeliDown?.(msg.id, msg.x, msg.y, msg.z, msg.faction);
+        this.onHeliDown?.(msg.id, msg.x, msg.y, msg.z, msg.faction, msg.reason);
         break;
       case 'heliGone':
         this.onHeliGone?.(msg.id);
@@ -564,7 +578,7 @@ export class NetClient {
   sendXform(
     dt: number, x: number, y: number, z: number, yaw: number, pitch: number,
     gliding = false, boating = false, sneaking = false, held = 0, armor: number[] = [], swing = 0,
-    aiming = false, reloading = false
+    aiming = false, reloading = false, seated = false
   ): void {
     if (!this.connected) return;
     const interval = 1 / TRANSFORM_HZ;
@@ -573,8 +587,8 @@ export class NetClient {
     // Subtract the interval (don't zero) so the long-run rate matches
     // TRANSFORM_HZ; clamp to avoid a burst after a long stall.
     this.xformAcc = Math.min(this.xformAcc - interval, interval);
-    this.raw({ t: 'xform', x, y, z, yaw, pitch, gliding, boating, sneaking, held, armor, swing,
-      aiming, reloading });
+    this.raw({ t: 'xform', x, y, z, yaw, pitch, gliding, boating, seated, sneaking, held, armor,
+      swing, aiming, reloading });
   }
 
   /** Send register/login over the open socket (before `welcome`/connected). */
@@ -730,6 +744,9 @@ export class NetClient {
   sendHeliSpawn(x: number, y: number, z: number): void {
     if (this.connected) this.raw({ t: 'heliSpawn', x, y, z });
   }
+  sendHeliDeploy(x: number, y: number, z: number): void {
+    if (this.connected) this.raw({ t: 'heliDeploy', x, y, z });
+  }
   sendHeliMount(id: number, seat?: SeatKind): void {
     if (this.connected) this.raw({ t: 'heliMount', id, seat });
   }
@@ -781,7 +798,7 @@ function toRemote(p: PlayerInfo): Remote {
   return {
     info: p, buf, tx: p.x, ty: p.y, tz: p.z, tyaw: p.yaw, tpitch: p.pitch,
     health: p.health, dead: p.dead, gliding: p.gliding === true,
-    boating: p.boating === true, sneaking: p.sneaking === true,
+    boating: p.boating === true, seated: p.seated === true, sneaking: p.sneaking === true,
     held: typeof p.held === 'number' ? p.held : 0,
     armor: Array.isArray(p.armor) ? p.armor : [0, 0, 0, 0],
     swing: typeof p.swing === 'number' ? p.swing : 0,

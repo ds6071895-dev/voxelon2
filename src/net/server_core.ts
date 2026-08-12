@@ -185,7 +185,7 @@ const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
   // Warfare Command: a spectator may never build, fire, fly or sabotage.
   'warfareBuy', 'siloLoad', 'siloUpgrade', 'siloLaunch',
   'batteryLoad', 'batteryUpgrade', 'strategicHit', 'missileHit',
-  'heliSpawn', 'heliMount', 'heliInput', 'heliBomb', 'heliService',
+  'heliSpawn', 'heliDeploy', 'heliMount', 'heliInput', 'heliBomb', 'heliService',
   'heliUpgrade', 'heliHit',
   'heartConsume', 'heartWithdraw', 'beaconRevive', 'useHeal',
   'attune', 'totemTeleport',
@@ -643,7 +643,11 @@ export class GameServer {
           p.yaw = msg.yaw; p.pitch = msg.pitch;
           p.gliding = msg.gliding === true;
           p.boating = msg.boating === true;
-          p.sneaking = msg.sneaking === true && !p.gliding && !p.boating;
+          // Trust the CLIENT's seated flag only when the sim agrees they really
+          // are in a seat — the pose must never be forgeable into a free
+          // hitbox change.
+          p.seated = msg.seated === true && this.vehicles.seatOf(p.id) !== null;
+          p.sneaking = msg.sneaking === true && !p.gliding && !p.boating && !p.seated;
           // Cosmetic equip state (fail-closed: junk ids render as bare).
           p.held = typeof msg.held === 'number' && ITEMS[msg.held] ? msg.held : 0;
           p.armor = Array.isArray(msg.armor)
@@ -1000,6 +1004,8 @@ export class GameServer {
       // --- Helicopters ---
       case 'heliSpawn':
         return this.handleHeliSpawn(p, msg.x, msg.y, msg.z);
+      case 'heliDeploy':
+        return this.handleHeliDeploy(p, msg.x, msg.y, msg.z);
       case 'heliMount': {
         const seat = msg.seat === 'pilot' || msg.seat === 'passenger' ? msg.seat : undefined;
         const res = this.vehicles.mount(msg.id, p.id, p.faction, { x: p.x, y: p.y, z: p.z }, seat);
@@ -1025,9 +1031,9 @@ export class GameServer {
       case 'heliService': {
         const h = this.vehicles.helicopters.get(msg.id);
         if (!h || !sameFaction(h.faction, p.faction)) return [];
-        if (!this.vehicles.atPad(h)) {
+        if (!this.vehicles.canService(h)) {
           return [{ to: id, msg: { t: 'warfareErr',
-            reason: 'Land on your helipad to service the airframe.' } }];
+            reason: 'Set the airframe down and stop before servicing it.' } }];
         }
         this.vehicles.service(h,
           fin(msg.oil) ? msg.oil : 0, fin(msg.bombs) ? msg.bombs : 0,
@@ -1037,9 +1043,9 @@ export class GameServer {
       case 'heliUpgrade': {
         const h = this.vehicles.helicopters.get(msg.id);
         if (!h || !sameFaction(h.faction, p.faction)) return [];
-        if (!this.vehicles.atPad(h)) {
+        if (!this.vehicles.canService(h)) {
           return [{ to: id, msg: { t: 'warfareErr',
-            reason: 'Land on your helipad to retrofit the airframe.' } }];
+            reason: 'Set the airframe down and stop before retrofitting it.' } }];
         }
         const cap = warfareTier(this.warfareOf(p.username), 'helicopter');
         if (h.tier >= Math.min(cap, MAX_HARDWARE_TIER)) {
@@ -1423,6 +1429,44 @@ export class GameServer {
     return this.heliBroadcast();
   }
 
+  /**
+   * Field-assemble an airframe from a carried kit, no helipad required.
+   *
+   * A helipad used to be the ONLY way to get airborne, which meant carrying and
+   * placing a second structure every single time you wanted to fly. The kit is
+   * still the expensive part; all a pad buys you now is a tidy place to park.
+   * The landing spot must be real ground with room overhead, so this cannot be
+   * used to conjure an aircraft inside a wall or on top of someone's roof line.
+   */
+  private handleHeliDeploy(p: ServerPlayer, x: number, y: number, z: number): Outbound[] {
+    if (!fin(x, y, z)) return [];
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    if (Math.hypot(p.x - (bx + 0.5), p.y - by, p.z - (bz + 0.5)) > EDIT_RANGE + 2) return [];
+    if (!this.hasBlueprint(p, Item.HelicopterKit)) {
+      return [{ to: p.id, msg: { t: 'warfareErr',
+        reason: 'Flight Certification is not authorized.' } }];
+    }
+    // Solid footing directly under the deploy cell, and a clear column above it.
+    if (!this.solidAt(bx + 0.5, by - 0.5, bz + 0.5)) {
+      return [{ to: p.id, msg: { t: 'warfareErr',
+        reason: 'Assemble the airframe on solid, level ground.' } }];
+    }
+    for (let dy = 0; dy <= 3; dy++) {
+      for (const [dx, dz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        if (this.solidAt(bx + 0.5 + dx, by + 0.5 + dy, bz + 0.5 + dz)) {
+          return [{ to: p.id, msg: { t: 'warfareErr',
+            reason: 'Not enough clearance for the rotor here.' } }];
+        }
+      }
+    }
+    if (this.insideAnyVaultArena(bx + 0.5, by + 1, bz + 0.5)) {
+      return [{ to: p.id, msg: { t: 'warfareErr', reason: 'No flying inside a vault.' } }];
+    }
+    const tier = Math.max(1, warfareTier(this.warfareOf(p.username), 'helicopter'));
+    this.vehicles.spawn(p.username, p.faction, { x: bx, y: by, z: bz }, tier);
+    return this.heliBroadcast();
+  }
+
   private heliBroadcast(): Outbound[] {
     return [{ to: 'all', msg: {
       t: 'helis', list: this.vehicles.snapshot(), bombs: this.vehicles.bombSnapshots(),
@@ -1518,13 +1562,20 @@ export class GameServer {
           break;
         case 'heliDown':
           out.push({ to: 'all', msg: { t: 'heliDown', id: ev.id,
-            x: ev.x, y: ev.y, z: ev.z, faction: ev.faction } });
+            x: ev.x, y: ev.y, z: ev.z, faction: ev.faction, reason: ev.reason } });
           break;
         case 'eject': {
           const victim = this.players.get(ev.playerId);
           out.push({ to: ev.playerId, msg: { t: 'heliSeat', id: 0, seat: null } });
-          out.push({ to: ev.playerId, msg: { t: 'teleport', x: ev.x, y: ev.y + 1, z: ev.z } });
-          if (victim) out.push(...this.applyDamage(victim, ev.damage, -1));
+          // `ejected` rather than `teleport`: the crew is THROWN clear along the
+          // airframe's momentum, so a crash launches you instead of politely
+          // setting you down where the wreck used to be.
+          out.push({ to: ev.playerId, msg: { t: 'ejected',
+            x: ev.x, y: ev.y, z: ev.z, vx: ev.vx, vy: ev.vy, vz: ev.vz, reason: ev.reason } });
+          if (victim) {
+            victim.x = ev.x; victim.y = ev.y; victim.z = ev.z;
+            out.push(...this.applyDamage(victim, ev.damage, -1));
+          }
           break;
         }
         case 'heliRemoved':
@@ -2270,6 +2321,10 @@ export class GameServer {
       const fwd = { x: -Math.sin(attacker.yaw), z: -Math.cos(attacker.yaw) };
       if ((fwd.x * dx + fwd.z * dz) / horiz < 0.2) return []; // not facing target
     }
+    // A door gunner may only shoot inside the airframe's forward arc: strapped
+    // into a seat you cannot swing a rifle through the bulkhead behind you.
+    // (A pilot flying the thing is not shooting at all.)
+    if (!this.vehicles.passengerCanFire(attacker.id, attacker.yaw)) return [];
     const dmg = Math.round(Math.max(0, Math.min(RANGED_MAX_DAMAGE, amount)));
     const knock = horiz > 1e-3
       ? { x: dx / horiz, y: 0.3, z: dz / horiz }
@@ -3307,7 +3362,7 @@ export class GameServer {
     return [...this.players.values()].map((p) => ({
       id: p.id, x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
       health: p.health, dead: p.dead,
-      gliding: p.gliding, boating: p.boating, sneaking: p.sneaking,
+      gliding: p.gliding, boating: p.boating, seated: p.seated, sneaking: p.sneaking,
       held: p.held, armor: p.armor, swing: p.swing,
       aiming: p.aiming, reloading: p.reloading,
     }));
@@ -3320,7 +3375,7 @@ function toInfo(p: ServerPlayer): PlayerInfo {
     seasonsWon: p.seasonsWon, hearts: p.hearts, cosmetics: p.cosmetics,
     x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
     health: p.health, dead: p.dead,
-    gliding: p.gliding, boating: p.boating, sneaking: p.sneaking,
+    gliding: p.gliding, boating: p.boating, seated: p.seated, sneaking: p.sneaking,
     held: p.held, armor: p.armor, swing: p.swing,
     aiming: p.aiming, reloading: p.reloading,
   };

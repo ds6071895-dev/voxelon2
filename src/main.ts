@@ -42,7 +42,7 @@ import {
 } from './turrets';
 import { TurretModels } from './turretmodels';
 import {
-  RemotePlayers, anchorTiltedBody, applyAvatarSneak, buildAvatarBody,
+  RemotePlayers, SEAT_SINK, anchorTiltedBody, applyAvatarSneak, buildAvatarBody,
   buildArmorOverlay, disposeAvatarBody, stridePose, AvatarBody,
 } from './remoteplayers';
 import {
@@ -66,7 +66,7 @@ import {
   sanitizeWarfare, settleWarfareXp, warfareAvailable, warfareOwns, warfareTier,
   ContributionRecord, PROTECTED_RADIUS, helicopterStats, siloStats, batteryStats, tierLabel,
   MAX_SILOS_PER_FACTION, MIN_SILO_SPACING, MAX_BATTERIES_PER_FACTION,
-  MIN_BATTERY_SPACING,
+  MIN_BATTERY_SPACING, missileFlightTime,
 } from './warfare';
 import { WarfareUI } from './warfare_ui';
 import {
@@ -74,8 +74,12 @@ import {
   StrategicEvent, LAUNCH_REJECT_TEXT, blastAt, blastBlockCandidates, protectedArea,
 } from './strategic';
 import {
-  HelicopterSnapshot, SeatKind, VehicleSim, VehicleEvent, bombBlast, viewYawToHeliYaw,
+  HELI_FUEL_BURN, HELI_FUEL_IDLE, HELI_GROUND_CLEARANCE, HeliLossReason,
+  HelicopterSnapshot, PASSENGER_ARC, SeatKind, VehicleSim, VehicleEvent,
+  bombBlast, viewYawToHeliYaw,
 } from './vehicles';
+import { VehicleHUD } from './vehiclehud';
+import { MissileCam, MissileCamLaunch } from './missilecam';
 import { MissileModels, StrategicModels } from './warfare_models';
 import { VehicleModels } from './vehiclemodels';
 
@@ -2527,7 +2531,7 @@ document.addEventListener('pointerlockchange', () => {
   if (input.locked) {
     enterPlaying(); // entered or returned to the game
   } else if (!player.dead && !invUI.open && !worldMap.open && !chatBox.open &&
-      !warfareUI.open && screen === 'playing') {
+      !warfareUI.open && !missileCam.active && screen === 'playing') {
     // Warfare Command is deliberately NOT in the pause path: it frees the cursor
     // for the tree while the world keeps running, so unlocking for it must not
     // slam the pause menu up behind it (which would also strand `screen` on
@@ -2547,13 +2551,17 @@ renderer.domElement.addEventListener('mousedown', () => {
     return;
   }
   if (screen === 'playing' && !input.locked && !player.dead &&
-      !invUI.open && !worldMap.open && !chatBox.open) {
+      !invUI.open && !worldMap.open && !chatBox.open && !missileCam.active) {
     input.lock();
   }
 });
 document.addEventListener('keydown', (e) => {
   if (e.code !== 'Escape') return;
-  if (tutorial.open) { tutorial.finish(); }
+  // The strike camera outranks everything: it is the one overlay you may be
+  // watching with the pointer already unlocked, and "closeable at any time" has
+  // to include the key everyone reaches for first.
+  if (missileCam.active) { missileCam.close(); }
+  else if (tutorial.open) { tutorial.finish(); }
   else if (chatBox.open) { chatBox.hide(); }
   else if (warfareUI.open) { hideProgress(); }
   else if (guideOpen) { hideGuide(); }
@@ -4871,7 +4879,10 @@ function updateSelfAvatar(dt: number): void {
   }
   const b = selfBody;
   b.group.visible = true;
-  b.group.position.set(player.pos.x, player.pos.y, player.pos.z);
+  // A vehicle seat reports the seat PAN, so the body sinks a thigh's length to
+  // put its hips there — otherwise your own head sticks through the cabin roof
+  // exactly the way a remote rider's used to.
+  b.group.position.set(player.pos.x, player.pos.y - (mySeat ? SEAT_SINK : 0), player.pos.z);
   b.group.rotation.y = player.yaw;
 
   // Held item + worn armor, kept in step with the inventory.
@@ -4905,11 +4916,12 @@ function updateSelfAvatar(dt: number): void {
   // Pose: the same glide/boat/stride/crouch poses the remote avatars use.
   const sneakTarget = player.sneaking && !player.boating && !player.gliding ? 1 : 0;
   selfSneakT += (sneakTarget - selfSneakT) * Math.min(1, 12 * dt);
-  if (player.boating) {
+  if (player.boating || mySeat) {
     applyAvatarSneak(b, 0);
     b.group.rotation.x = 0; b.group.rotation.z = 0; b.head.rotation.x = 0;
     b.parts[0].rotation.x = 1.35; b.parts[1].rotation.x = 1.35;
-    b.parts[2].rotation.x = 0.55; b.parts[3].rotation.x = 0.55;
+    const arms = mySeat ? 0.95 : 0.55;
+    b.parts[2].rotation.x = arms; b.parts[3].rotation.x = arms;
     b.parts[2].rotation.z = 0; b.parts[3].rotation.z = 0;
     if (b.cape) b.cape.rotation.x = -0.25;
   } else if (selfGlideT > 0.01) {
@@ -5196,6 +5208,11 @@ let mySeat: { id: number; seat: SeatKind } | null = null;
 let heliInputSeq = 1;
 let heliInputAccum = 0;
 let heliBombCooldown = 0;
+/** How close you must stand to a parked airframe to climb aboard it. */
+const HELI_BOARD_RANGE = 5.5;
+/** Last-known airspeed of the ridden airframe, for the cockpit readout. */
+let heliSpeedSmoothed = 0;
+const vehicleHud = new VehicleHUD(app);
 /** Inbound strikes we are counting down (drives the HUD warning line). */
 const inboundStrikes: { x: number; z: number; at: number; radius: number; hostile: boolean }[] = [];
 
@@ -5288,11 +5305,13 @@ net.onMissiles = (list) => { liveMissiles = list; missileModels.sync(list); };
 net.onMissileLaunch = (m) => {
   missileModels.launch(m);
   audio.explosion(new THREE.Vector3(m.x, m.y, m.z));
+  adoptMissileCam(m);
 };
 net.onInterceptorLaunch = (m) => missileModels.launch(m);
 net.onMissileEnd = (id, reason, x, y, z, radius) => {
   missileModels.remove(id);
   liveMissiles = liveMissiles.filter((m) => m.id !== id);
+  if (missileCam.missileId === id) missileCam.finish(reason, x, y, z);
   if (reason === 'impact') {
     missileModels.impact(x, y, z, radius);
     audio.explosion(new THREE.Vector3(x, y, z));
@@ -5307,24 +5326,25 @@ net.onMissileEnd = (id, reason, x, y, z, radius) => {
 net.onStrikeWarning = (faction, x, z, eta, radius) =>
   registerInboundStrike(faction, x, z, eta, radius);
 net.onProtectedAreas = (areas) => { protectedAreasList = areas; };
-net.onLaunchRejected = (_reason, text) => showNotice(`⛔ ${text}`);
+net.onLaunchRejected = (_reason, text) => {
+  // Nothing left the rail, so there is nothing to watch.
+  missileCam.close();
+  showNotice(`⛔ ${text}`);
+};
 net.onHelis = (list, bombs) => {
   settleWarfarePayment();
   vehicleModels.sync(list, bombs);
 };
 net.onHeliSeat = (id, seat) => {
-  mySeat = seat ? { id, seat } : null;
+  setSeat(seat ? { id, seat } : null);
   showNotice(!seat ? 'You step down from the airframe.'
     : seat === 'pilot'
       ? 'Pilot seat — WASD flies, Space climbs, Shift descends, right-click drops a bomb.'
-      : 'Gunner seat — look around and fire your own weapon inside the side arc.');
+      : 'Gunner seat — look around and fire your own weapon inside the forward arc.');
 };
-net.onHeliDown = (_id, x, y, z) => {
-  vehicleModels.explode(x, y, z);
-  audio.explosion(new THREE.Vector3(x, y, z));
-  triggerEncounterShake(0.4, 0.04);
-};
-net.onHeliGone = (id) => { if (mySeat?.id === id) mySeat = null; };
+net.onHeliDown = (_id, x, y, z, _faction, reason) => heliLossEffect(x, y, z, reason);
+net.onHeliGone = (id) => { if (mySeat?.id === id) setSeat(null); };
+net.onEjected = (x, y, z, vx, vy, vz, reason) => applyEject(x, y, z, vx, vy, vz, reason);
 
 /** An inbound strike: banner, countdown, and a map ping. */
 function registerInboundStrike(
@@ -5416,6 +5436,7 @@ function applyOfflineStrategicEvents(events: readonly StrategicEvent[]): void {
       case 'launch':
       case 'interceptorLaunch':
         missileModels.launch(ev.missile);
+        adoptMissileCam(ev.missile);
         break;
       case 'warning':
         registerInboundStrike(ev.faction, ev.x, ev.z, ev.eta, ev.radius);
@@ -5423,17 +5444,23 @@ function applyOfflineStrategicEvents(events: readonly StrategicEvent[]): void {
       case 'intercepted':
         missileModels.remove(ev.id);
         missileModels.flash(ev.x, ev.y, ev.z, 3.2, 0x9ff0ff);
+        if (missileCam.missileId === ev.id) missileCam.finish('intercepted', ev.x, ev.y, ev.z);
         showNotice('🛡 Missile intercepted.');
         break;
       case 'shotDown':
         missileModels.remove(ev.id);
         missileModels.flash(ev.x, ev.y, ev.z, 2.4, 0xffc46a);
+        if (missileCam.missileId === ev.id) missileCam.finish('shot', ev.x, ev.y, ev.z);
         break;
       case 'expired':
         missileModels.remove(ev.id);
+        // An expired missile has no impact point to hold on, so the cam simply
+        // bows out rather than staring at the origin.
+        if (missileCam.missileId === ev.id) missileCam.close();
         break;
       case 'impact':
         missileModels.remove(ev.id);
+        if (missileCam.missileId === ev.id) missileCam.finish('impact', ev.x, ev.y, ev.z);
         missileModels.impact(ev.x, ev.y, ev.z, ev.radius);
         audio.explosion(new THREE.Vector3(ev.x, ev.y, ev.z));
         triggerEncounterShake(0.6, 0.05);
@@ -5453,18 +5480,14 @@ function applyOfflineVehicleEvents(events: readonly VehicleEvent[]): void {
         audio.explosion(new THREE.Vector3(ev.x, ev.y, ev.z));
         break;
       case 'heliDown':
-        vehicleModels.explode(ev.x, ev.y, ev.z);
-        audio.explosion(new THREE.Vector3(ev.x, ev.y, ev.z));
-        triggerEncounterShake(0.4, 0.04);
+        heliLossEffect(ev.x, ev.y, ev.z, ev.reason);
         break;
       case 'eject':
-        mySeat = null;
-        player.pos.set(ev.x, ev.y + 1, ev.z);
         player.damage(ev.damage);
-        showNotice('💥 Ejected!');
+        applyEject(ev.x, ev.y, ev.z, ev.vx, ev.vy, ev.vz, ev.reason);
         break;
       case 'heliRemoved':
-        if (mySeat?.id === ev.id) mySeat = null;
+        if (mySeat?.id === ev.id) setSeat(null);
         break;
       default:
         break;
@@ -5477,6 +5500,8 @@ function applyOfflineVehicleEvents(events: readonly VehicleEvent[]): void {
 let openSilo: SiloState | null = null;
 let openBattery: BatteryState | null = null;
 let openHelipad: { x: number; y: number; z: number } | null = null;
+/** When the bay was opened on a specific parked airframe rather than a pad. */
+let openAirframeId = 0;
 
 const strategicPanel = document.createElement('div');
 strategicPanel.style.cssText =
@@ -5497,6 +5522,9 @@ strategicPanel.addEventListener('mousedown', (e) => {
 function closeStrategicPanel(): void {
   strategicPanel.style.display = 'none';
   openSilo = null; openBattery = null; openHelipad = null;
+  openAirframeId = 0;
+  siloLive = null;
+  airframeLive = null;
   if (worldReady && !player.dead && screen === 'playing' && !worldMap.open) input.lock();
 }
 
@@ -5515,9 +5543,32 @@ function actionButton(
     `cursor:${enabled ? 'pointer' : 'not-allowed'};border:2px solid ${enabled ? accent : '#2a3346'};` +
     `background:${enabled ? 'rgba(92,226,236,0.10)' : '#131a28'};` +
     `color:${enabled ? '#e6faff' : '#5a6880'};`;
-  if (enabled) b.addEventListener('click', onClick);
+  // The listener is ALWAYS attached: a disabled button fires no click events by
+  // itself, and a live panel may re-enable this node later (see
+  // setButtonEnabled) — a handler that was never attached could not come back.
+  b.addEventListener('click', () => { if (!b.disabled) onClick(); });
   row.appendChild(b);
   return b;
+}
+
+/** Usernames and waypoint names reach these panels as plain text; anything
+ *  interpolated into innerHTML has to be neutralised first. */
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] ?? c));
+}
+
+/** Re-style an already-built button in place. Rebuilding a button every frame
+ *  destroys the node a mousedown landed on, so live panels mutate instead. */
+function setButtonEnabled(
+  b: HTMLButtonElement, enabled: boolean, accent = '#5ce2ec',
+): void {
+  if (b.disabled === !enabled) return;
+  b.disabled = !enabled;
+  b.style.cursor = enabled ? 'pointer' : 'not-allowed';
+  b.style.borderColor = enabled ? accent : '#2a3346';
+  b.style.background = enabled ? 'rgba(92,226,236,0.10)' : '#131a28';
+  b.style.color = enabled ? '#e6faff' : '#5a6880';
 }
 
 function statLine(label: string, value: string, accent = '#dce6f5'): string {
@@ -5536,54 +5587,289 @@ function openSiloPanel(x: number, y: number, z: number): void {
   renderSiloPanel();
 }
 
+// --- The launch console --------------------------------------------------------
+//
+// A silo is the most consequential button in the game, so it gets a console
+// rather than a list of stats: a faction-tinted header, live gauges for the
+// things that actually gate a launch (rounds, integrity, launch cycle), the
+// warhead card, and an ARMED/SAFE lamp that tells you at a glance whether
+// pressing the next button will put a missile in the air.
+//
+// The structure is built once per state change; the LIVE parts (cycle timer,
+// bars, lamp) are repainted every frame from `refreshSiloLive`, because
+// rebuilding the buttons at 60 Hz destroys the node a mousedown landed on before
+// the matching mouseup can turn it into a click.
+
+/** Injected once: the console's animations. Everything else is inline. */
+let siloCssInjected = false;
+function injectSiloCss(): void {
+  if (siloCssInjected) return;
+  siloCssInjected = true;
+  const style = document.createElement('style');
+  style.textContent =
+    '@keyframes vx-silo-sweep{0%{transform:translateX(-120%)}100%{transform:translateX(320%)}}' +
+    '@keyframes vx-silo-lamp{0%,100%{opacity:1}50%{opacity:0.35}}' +
+    '@keyframes vx-silo-grid{0%{background-position:0 0}100%{background-position:0 26px}}';
+  document.head.appendChild(style);
+}
+
+interface SiloConsoleLive {
+  lamp: HTMLDivElement;
+  lampText: HTMLSpanElement;
+  rounds: HTMLDivElement;
+  roundsText: HTMLSpanElement;
+  hullFill: HTMLDivElement;
+  hullText: HTMLSpanElement;
+  cycleFill: HTMLDivElement;
+  cycleText: HTMLSpanElement;
+  launchBtn: HTMLButtonElement | null;
+  loadBtn: HTMLButtonElement | null;
+}
+let siloLive: SiloConsoleLive | null = null;
+
+/** A labelled horizontal gauge. Returns the fill + value nodes to repaint. */
+function consoleGauge(
+  parent: HTMLElement, label: string, color: string,
+): { fill: HTMLDivElement; text: HTMLSpanElement } {
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;align-items:center;gap:9px;margin:5px 0;';
+  parent.appendChild(row);
+  const name = document.createElement('span');
+  name.style.cssText =
+    'font-size:10px;letter-spacing:1.3px;color:#63758f;min-width:104px;';
+  name.textContent = label;
+  row.appendChild(name);
+  const wrap = document.createElement('div');
+  wrap.style.cssText =
+    'position:relative;flex:1;height:13px;border-radius:3px;overflow:hidden;' +
+    'background:rgba(3,7,12,0.9);border:1px solid rgba(120,150,190,0.26);';
+  row.appendChild(wrap);
+  const fill = document.createElement('div');
+  fill.style.cssText =
+    `position:absolute;inset:0 auto 0 0;width:0%;background:${color};` +
+    'transition:width 0.15s linear;';
+  wrap.appendChild(fill);
+  const text = document.createElement('span');
+  text.style.cssText =
+    'font-size:10px;color:#c6d3e6;min-width:96px;text-align:right;';
+  row.appendChild(text);
+  return { fill, text };
+}
+
+/** One line of the warhead card. */
+function specCell(label: string, value: string): string {
+  return `<div style="display:flex;flex-direction:column;gap:2px;min-width:92px">` +
+    `<span style="font-size:9px;letter-spacing:1.2px;color:#5b6b83">${label}</span>` +
+    `<span style="font-size:12px;color:#dce6f5">${value}</span></div>`;
+}
+
+/**
+ * Build the console. Only called when the silo's STATE changes (or the panel is
+ * opened) — `refreshSiloLive` handles the per-frame numbers.
+ */
 function renderSiloPanel(): void {
   const s = openSilo;
   if (!s) return;
+  injectSiloCss();
   const stats = siloStats(s.tier);
   const mine = !isFaction(s.faction) || s.faction === localFaction;
   const canRetrofit = mine && s.tier < warfareTier(warfare, 'silo');
   const have = inventory.countItem(Item.TacticalMissile);
   const room = stats.magazine - s.ammo;
-  strategicCard.innerHTML =
-    `<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">` +
-    `<div style="flex:1;font-size:15px;color:#5ce2ec;letter-spacing:1px">🚀 TACTICAL SILO · ${tierLabel(s.tier)}</div>` +
-    `<div style="font-size:11px;color:#7f93b3">${s.owner || 'unclaimed'}</div></div>` +
-    statLine('Integrity', `${Math.round(s.hp)} / ${s.maxHp}`,
-      s.hp / s.maxHp > 0.5 ? '#5ff09a' : s.hp / s.maxHp > 0.25 ? '#ffd24a' : '#ff5c4d') +
-    statLine('Magazine', `${s.ammo} / ${stats.magazine}`, s.ammo > 0 ? '#5ff09a' : '#ff5c4d') +
-    statLine('Status', s.cooldown > 0 ? `cycling — ${Math.ceil(s.cooldown)}s` : 'ready',
-      s.cooldown > 0 ? '#ffd24a' : '#5ff09a') +
-    statLine('Target range', `${stats.range} blocks`) +
-    statLine('Blast radius', `${stats.blastRadius} blocks`) +
-    statLine('Warhead', `${stats.playerDamage} player · ${stats.hardwareDamage} hardware`) +
-    statLine('Silo cooldown', `${stats.cooldown}s`) +
-    `<div style="margin-top:8px;font-size:11px;color:#7f93b3;line-height:1.6">` +
-    `Any faction teammate can load and fire this silo. Only the operator's own ` +
-    `Warfare Command authorizations decide how far it can be RETROFITTED.</div>` +
-    `<div data-row style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px"></div>`;
-  const row = strategicCard.querySelector('[data-row]') as HTMLElement;
-  actionButton(row, `Load missile (${have} held)`, mine && have > 0 && room > 0, () => {
-    const n = Math.min(have, room);
-    if (net.connected) {
-      payWarfare([{ id: Item.TacticalMissile, count: n }]);
-      net.sendSiloLoad(s.x, s.y, s.z, n);
-    } else {
-      inventory.removeItem(Item.TacticalMissile, n);
-      offlineStrategic.loadSilo(s, n);
-      renderSiloPanel();
-    }
-  }, '#5ff09a');
-  actionButton(row, 'Choose target', mine && s.ammo > 0 && s.cooldown <= 0, () => {
-    strategicPanel.style.display = 'none';
-    beginTargeting(s);
-  }, '#ffd24a');
+  const accent = isFaction(s.faction) ? factionCss(s.faction) : '#5ce2ec';
+
+  strategicCard.innerHTML = '';
+  strategicCard.style.width = '620px';
+  siloLive = null;
+
+  // --- Header: accent bar, designation, operator, and a scanning sweep -------
+  const header = document.createElement('div');
+  header.style.cssText =
+    'position:relative;overflow:hidden;border-radius:8px;padding:12px 14px;' +
+    `margin:-4px -4px 12px;border:1px solid ${accent}55;` +
+    'background:linear-gradient(120deg,rgba(12,22,36,0.95),rgba(8,13,22,0.9));';
+  strategicCard.appendChild(header);
+  const sweep = document.createElement('div');
+  sweep.style.cssText =
+    'position:absolute;top:0;bottom:0;width:26%;pointer-events:none;' +
+    `background:linear-gradient(90deg,transparent,${accent}22,transparent);` +
+    'transform:skewX(-16deg);animation:vx-silo-sweep 4.2s linear infinite;';
+  header.appendChild(sweep);
+  const headRow = document.createElement('div');
+  headRow.style.cssText =
+    'position:relative;display:flex;align-items:center;gap:12px;';
+  header.appendChild(headRow);
+  const title = document.createElement('div');
+  title.style.cssText = 'flex:1;';
+  title.innerHTML =
+    `<div style="font-size:17px;letter-spacing:2.4px;color:${accent}">` +
+    `🚀 TACTICAL SILO</div>` +
+    `<div style="font-size:10px;letter-spacing:1.6px;color:#5b6b83;margin-top:3px">` +
+    `${tierLabel(s.tier)} · UNIT #${s.id} · ` +
+    `${escapeHtml(s.owner || 'unclaimed')}</div>`;
+  headRow.appendChild(title);
+  // The ARMED/SAFE lamp: the one thing you should be able to read instantly.
+  const lamp = document.createElement('div');
+  lamp.style.cssText =
+    'display:flex;align-items:center;gap:7px;padding:7px 12px;border-radius:6px;' +
+    'font-size:11px;letter-spacing:1.6px;border:1px solid #2a3346;';
+  headRow.appendChild(lamp);
+  const dot = document.createElement('div');
+  dot.style.cssText = 'width:9px;height:9px;border-radius:50%;background:#2a3346;';
+  lamp.appendChild(dot);
+  const lampText = document.createElement('span');
+  lamp.appendChild(lampText);
+
+  // --- Live gauges -----------------------------------------------------------
+  const gauges = document.createElement('div');
+  gauges.style.cssText =
+    'padding:10px 12px;border-radius:8px;border:1px solid #1e2a3d;' +
+    'background:rgba(6,10,17,0.6);';
+  strategicCard.appendChild(gauges);
+
+  // Magazine as discrete pips: rounds are countable, so count them.
+  const roundsRow = document.createElement('div');
+  roundsRow.style.cssText = 'display:flex;align-items:center;gap:9px;margin:2px 0 7px;';
+  gauges.appendChild(roundsRow);
+  const roundsLabel = document.createElement('span');
+  roundsLabel.style.cssText =
+    'font-size:10px;letter-spacing:1.3px;color:#63758f;min-width:104px;';
+  roundsLabel.textContent = 'ROUNDS';
+  roundsRow.appendChild(roundsLabel);
+  const rounds = document.createElement('div');
+  rounds.style.cssText = 'flex:1;display:flex;gap:5px;';
+  roundsRow.appendChild(rounds);
+  for (let i = 0; i < stats.magazine; i++) {
+    const pip = document.createElement('div');
+    pip.style.cssText =
+      'width:15px;height:24px;border-radius:3px;border:1px solid rgba(120,150,190,0.35);';
+    rounds.appendChild(pip);
+  }
+  const roundsText = document.createElement('span');
+  roundsText.style.cssText = 'font-size:10px;color:#c6d3e6;min-width:96px;text-align:right;';
+  roundsRow.appendChild(roundsText);
+
+  const hull = consoleGauge(gauges, 'INTEGRITY', '#5ff09a');
+  const cycle = consoleGauge(gauges, 'LAUNCH CYCLE', '#5ce2ec');
+
+  // --- Warhead card ----------------------------------------------------------
+  const spec = document.createElement('div');
+  spec.style.cssText =
+    'margin-top:10px;padding:11px 12px;border-radius:8px;border:1px solid #1e2a3d;' +
+    'background:repeating-linear-gradient(0deg,rgba(8,13,22,0.75) 0 12px,' +
+    'rgba(11,18,30,0.75) 12px 13px);animation:vx-silo-grid 9s linear infinite;';
+  strategicCard.appendChild(spec);
+  spec.innerHTML =
+    `<div style="font-size:10px;letter-spacing:1.6px;color:${accent};margin-bottom:9px">` +
+    `WARHEAD &amp; GUIDANCE</div>` +
+    `<div style="display:flex;flex-wrap:wrap;gap:16px 22px">` +
+    specCell('BLAST RADIUS', `${stats.blastRadius} blocks`) +
+    specCell('PLAYER DMG', `${stats.playerDamage}`) +
+    specCell('HARDWARE DMG', `${stats.hardwareDamage}`) +
+    specCell('REACH', `${stats.range} blocks`) +
+    specCell('CRUISE', `${stats.speed} b/s`) +
+    specCell('CYCLE TIME', `${stats.cooldown}s`) +
+    specCell('DEMOLITION', `${stats.blocks} blocks`) +
+    `</div>`;
+
+  const note = document.createElement('div');
+  note.style.cssText =
+    'margin-top:10px;font-size:11px;color:#63758f;line-height:1.65;';
+  note.innerHTML =
+    `Any faction teammate can load and fire this silo — only the operator's own ` +
+    `Warfare Command authorizations decide how far it can be <b>retrofitted</b>. ` +
+    `Targets must be a saved waypoint or a war flag inside the reach circle, and ` +
+    `the server revalidates every rule at the moment of launch.`;
+  strategicCard.appendChild(note);
+
+  // --- Actions ---------------------------------------------------------------
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;';
+  strategicCard.appendChild(row);
+
+  const loadBtn = actionButton(row, `Load missile (${have} held)`,
+    mine && have > 0 && room > 0, () => {
+      const n = Math.min(have, room);
+      if (net.connected) {
+        payWarfare([{ id: Item.TacticalMissile, count: n }]);
+        net.sendSiloLoad(s.x, s.y, s.z, n);
+      } else {
+        inventory.removeItem(Item.TacticalMissile, n);
+        offlineStrategic.loadSilo(s, n);
+        renderSiloPanel();
+      }
+    }, '#5ff09a');
+  const launchBtn = actionButton(row, '◎ SELECT TARGET',
+    mine && s.ammo > 0 && s.cooldown <= 0, () => {
+      strategicPanel.style.display = 'none';
+      beginTargeting(s);
+    }, '#ffd24a');
+  launchBtn.style.fontSize = '13px';
+  launchBtn.style.letterSpacing = '1.6px';
   actionButton(row, canRetrofit ? `Retrofit → ${tierLabel(s.tier + 1)}` : 'Retrofit locked',
     canRetrofit, () => {
       if (net.connected) net.sendSiloUpgrade(s.x, s.y, s.z);
-      else { offlineStrategic.retrofitSilo(s, s.tier + 1); strategicModels.setSilo(s); renderSiloPanel(); }
+      else {
+        offlineStrategic.retrofitSilo(s, s.tier + 1);
+        strategicModels.setSilo(s);
+        renderSiloPanel();
+      }
     });
   actionButton(row, 'Close', true, closeStrategicPanel, '#7f93b3');
+
+  siloLive = {
+    lamp, lampText, rounds, roundsText,
+    hullFill: hull.fill, hullText: hull.text,
+    cycleFill: cycle.fill, cycleText: cycle.text,
+    launchBtn, loadBtn,
+  };
+  refreshSiloLive();
 }
+
+/**
+ * Repaint the console's live numbers. Called every frame the panel is open so a
+ * ticking launch cycle actually ticks — and so the ARMED lamp lights the instant
+ * the silo becomes able to fire, without a state message having to arrive.
+ */
+function refreshSiloLive(): void {
+  const s = openSilo;
+  const L = siloLive;
+  if (!s || !L) return;
+  const stats = siloStats(s.tier);
+  const mine = !isFaction(s.faction) || s.faction === localFaction;
+  const armed = s.ammo > 0 && s.cooldown <= 0;
+
+  L.lampText.textContent = armed ? 'ARMED' : s.ammo <= 0 ? 'EMPTY' : 'CYCLING';
+  const lampColor = armed ? '#ff5c4d' : s.ammo <= 0 ? '#5b6b83' : '#ffd24a';
+  L.lampText.style.color = lampColor;
+  L.lamp.style.borderColor = `${lampColor}66`;
+  L.lamp.style.background = `${lampColor}12`;
+  const dot = L.lamp.firstElementChild as HTMLDivElement;
+  dot.style.background = lampColor;
+  dot.style.animation = armed ? 'vx-silo-lamp 1.1s ease-in-out infinite' : 'none';
+
+  for (let i = 0; i < L.rounds.children.length; i++) {
+    const pip = L.rounds.children[i] as HTMLDivElement;
+    pip.style.background = i < s.ammo ? '#5ff09a' : 'rgba(6,11,18,0.8)';
+  }
+  L.roundsText.textContent = `${s.ammo} / ${stats.magazine}`;
+
+  const hullFrac = s.maxHp > 0 ? Math.max(0, Math.min(1, s.hp / s.maxHp)) : 0;
+  L.hullFill.style.width = `${hullFrac * 100}%`;
+  L.hullFill.style.background =
+    hullFrac > 0.5 ? '#5ff09a' : hullFrac > 0.25 ? '#ffd24a' : '#ff5c4d';
+  L.hullText.textContent = `${Math.round(s.hp)} / ${s.maxHp}`;
+
+  // The cycle bar fills as the silo RECOVERS, so a full bar means ready.
+  const ready = stats.cooldown > 0
+    ? Math.max(0, Math.min(1, 1 - s.cooldown / stats.cooldown)) : 1;
+  L.cycleFill.style.width = `${ready * 100}%`;
+  L.cycleFill.style.background = s.cooldown > 0 ? '#ffd24a' : '#5ce2ec';
+  L.cycleText.textContent = s.cooldown > 0 ? `${Math.ceil(s.cooldown)}s` : 'READY';
+
+  if (L.launchBtn) setButtonEnabled(L.launchBtn, mine && armed, '#ffd24a');
+}
+
 
 function openBatteryPanel(x: number, y: number, z: number): void {
   const b = batteryAtBlock(x, y, z);
@@ -5641,8 +5927,25 @@ function renderBatteryPanel(): void {
   actionButton(row, 'Close', true, closeStrategicPanel, '#7f93b3');
 }
 
+/**
+ * Open the airframe bay. Either anchored to a HELIPAD (which may be empty, and
+ * can therefore deploy) or to a specific parked helicopter you walked up to and
+ * sneak-clicked. Servicing is no longer pad-only, so the second form is the one
+ * most people will use.
+ */
 function openHelipadPanel(x: number, y: number, z: number): void {
   openHelipad = { x, y, z };
+  openAirframeId = 0;
+  openSilo = null; openBattery = null;
+  strategicPanel.style.display = 'flex';
+  input.unlock();
+  renderHelipadPanel();
+}
+
+/** Open the bay for one specific airframe (sneak + right-click on it). */
+function openAirframePanel(id: number): void {
+  openHelipad = { x: 0, y: 0, z: 0 };
+  openAirframeId = id;
   openSilo = null; openBattery = null;
   strategicPanel.style.display = 'flex';
   input.unlock();
@@ -5658,84 +5961,252 @@ function heliAtPad(pad: { x: number; y: number; z: number }): HelicopterSnapshot
   return null;
 }
 
+/** Whichever airframe the open bay is about. */
+function bayHeli(): HelicopterSnapshot | null {
+  if (openAirframeId) return vehicleModels.snapshotOf(openAirframeId);
+  return openHelipad ? heliAtPad(openHelipad) : null;
+}
+
+interface AirframeLive {
+  fuelFill: HTMLDivElement; fuelText: HTMLSpanElement;
+  hullFill: HTMLDivElement; hullText: HTMLSpanElement;
+  bombFill: HTMLDivElement; bombText: HTMLSpanElement;
+  status: HTMLDivElement;
+  heliId: number;
+  buttons: { node: HTMLButtonElement; enabled: () => boolean; accent: string }[];
+}
+let airframeLive: AirframeLive | null = null;
+
 function renderHelipadPanel(): void {
-  const pad = openHelipad;
-  if (!pad) return;
-  const heli = heliAtPad(pad);
+  if (!openHelipad) return;
+  injectSiloCss();
+  const heli = bayHeli();
   const kit = inventory.countItem(Item.HelicopterKit);
-  const oil = inventory.countItem(Item.OilBarrel);
-  const bombs = inventory.countItem(Item.AerialBomb);
-  const kits = inventory.countItem(Item.RepairKit);
   const myTier = warfareTier(warfare, 'helicopter');
-  let html =
-    `<div style="font-size:15px;color:#5ce2ec;letter-spacing:1px;margin-bottom:10px">🚁 HELIPAD</div>`;
+  const accent = '#5ce2ec';
+  airframeLive = null;
+  strategicCard.innerHTML = '';
+  strategicCard.style.width = '580px';
+
+  const header = document.createElement('div');
+  header.style.cssText =
+    'position:relative;overflow:hidden;border-radius:8px;padding:12px 14px;' +
+    `margin:-4px -4px 12px;border:1px solid ${accent}55;` +
+    'background:linear-gradient(120deg,rgba(12,22,36,0.95),rgba(8,13,22,0.9));';
+  strategicCard.appendChild(header);
+  const sweep = document.createElement('div');
+  sweep.style.cssText =
+    'position:absolute;top:0;bottom:0;width:26%;pointer-events:none;' +
+    `background:linear-gradient(90deg,transparent,${accent}22,transparent);` +
+    'transform:skewX(-16deg);animation:vx-silo-sweep 4.2s linear infinite;';
+  header.appendChild(sweep);
+  const title = document.createElement('div');
+  title.style.cssText = 'position:relative;';
+  title.innerHTML =
+    `<div style="font-size:17px;letter-spacing:2.4px;color:${accent}">🚁 AIRFRAME BAY</div>` +
+    `<div style="font-size:10px;letter-spacing:1.6px;color:#5b6b83;margin-top:3px">` +
+    (heli
+      ? `${tierLabel(heli.tier)} · UNIT #${heli.id} · ${escapeHtml(heli.owner || 'unclaimed')}`
+      : 'NO AIRFRAME PRESENT') +
+    `</div>`;
+  header.appendChild(title);
+
   if (!heli) {
-    html += `<div style="font-size:12px;color:#7f93b3;line-height:1.7;margin-bottom:10px">` +
-      `No airframe on the pad. Assemble a <b style="color:#dce6f5">Helicopter Airframe</b> ` +
-      `and deploy it here.</div>` +
+    const note = document.createElement('div');
+    note.style.cssText = 'font-size:12px;color:#7f93b3;line-height:1.7;margin-bottom:10px;';
+    note.innerHTML =
+      `Nothing parked here. Deploy an airframe from this pad — or simply ` +
+      `<b style="color:#dce6f5">right-click the ground</b> anywhere while holding a ` +
+      `<b style="color:#dce6f5">Helicopter Airframe</b>: a pad is a convenient place to ` +
+      `keep an aircraft, not a requirement for flying one.`;
+    strategicCard.appendChild(note);
+    const stats = document.createElement('div');
+    stats.innerHTML =
       statLine('Airframes held', String(kit), kit > 0 ? '#5ff09a' : '#ff5c4d') +
       statLine('Authorized mark', myTier > 0 ? tierLabel(myTier) : 'not authorized',
         myTier > 0 ? '#5ff09a' : '#ff5c4d');
-  } else {
-    const stats = helicopterStats(heli.tier);
-    html +=
-      statLine('Airframe', `${tierLabel(heli.tier)} (Mk ${['I', 'II', 'III'][stats.mark - 1]})`) +
-      statLine('Integrity', `${heli.hp} / ${heli.maxHp}`,
-        heli.hp / heli.maxHp > 0.5 ? '#5ff09a' : '#ffd24a') +
-      statLine('Fuel', `${heli.fuel.toFixed(1)} / ${heli.maxFuel} oil`,
-        heli.fuel > 0 ? '#5ff09a' : '#ff5c4d') +
-      statLine('Bombs', `${heli.bombs} / ${heli.maxBombs}`) +
-      statLine('Cruise speed', `${stats.speed} blocks/s`) +
-      statLine('Altitude allowance', `${stats.altitude} blocks`) +
-      statLine('Crew', `${heli.pilot ? 'pilot' : '—'} · ${heli.passenger ? 'gunner' : '—'}`);
-  }
-  html += `<div data-row style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px"></div>`;
-  strategicCard.innerHTML = html;
-  const row = strategicCard.querySelector('[data-row]') as HTMLElement;
-  if (!heli) {
-    actionButton(row, 'Deploy airframe', kit > 0 && myTier > 0 && hasBlueprint(Item.HelicopterKit), () => {
-      if (net.connected) {
-        // A refusal (range or blueprint) refunds the airframe —
-        // it costs ~38 iron and 8 titanium, so losing it to a rejected click
-        // would be brutal.
-        payWarfare([{ id: Item.HelicopterKit, count: 1 }]);
-        net.sendHeliSpawn(pad.x, pad.y, pad.z);
-      } else {
-        inventory.removeItem(Item.HelicopterKit, 1);
-        offlineVehicles.spawn(authedName || 'You', localFaction, pad, Math.max(1, myTier));
-      }
-      closeStrategicPanel();
-      showNotice('🚁 Airframe deployed — fuel it, load bombs, then board it.');
-    }, '#5ff09a');
-  } else {
-    const canFuel = oil > 0 && heli.fuel < heli.maxFuel;
-    const canArm = bombs > 0 && heli.bombs < heli.maxBombs;
-    const canFix = kits > 0 && heli.hp < heli.maxHp;
-    actionButton(row, `Refuel (${oil} oil)`, canFuel, () => {
-      const n = Math.min(oil, Math.ceil(heli.maxFuel - heli.fuel));
-      serviceHeli(heli.id, n, 0, 0, [{ id: Item.OilBarrel, count: n }]);
-    }, '#5ff09a');
-    actionButton(row, `Load bombs (${bombs})`, canArm, () => {
-      const n = Math.min(bombs, heli.maxBombs - heli.bombs);
-      serviceHeli(heli.id, 0, n, 0, [{ id: Item.AerialBomb, count: n }]);
-    }, '#5ff09a');
-    actionButton(row, `Repair 25% (${kits} kits)`, canFix, () => {
-      serviceHeli(heli.id, 0, 0, 1, [{ id: Item.RepairKit, count: 1 }]);
-    }, '#5ff09a');
-    actionButton(row, heli.tier < myTier ? `Retrofit → ${tierLabel(heli.tier + 1)}` : 'Retrofit locked',
-      heli.tier < myTier, () => {
-        if (net.connected) net.sendHeliUpgrade(heli.id);
-        else {
-          const h = offlineVehicles.helicopters.get(heli.id);
-          if (h) offlineVehicles.retrofit(h, h.tier + 1);
+    strategicCard.appendChild(stats);
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;';
+    strategicCard.appendChild(row);
+    const pad = openHelipad;
+    actionButton(row, 'Deploy airframe',
+      kit > 0 && myTier > 0 && hasBlueprint(Item.HelicopterKit), () => {
+        if (net.connected) {
+          // A refusal (range or blueprint) refunds the airframe — it costs ~38
+          // iron and 8 titanium, so losing it to a rejected click would be brutal.
+          payWarfare([{ id: Item.HelicopterKit, count: 1 }]);
+          net.sendHeliSpawn(pad.x, pad.y, pad.z);
+        } else {
+          inventory.removeItem(Item.HelicopterKit, 1);
+          offlineVehicles.spawn(authedName || 'You', localFaction, pad, Math.max(1, myTier));
         }
-        renderHelipadPanel();
-      });
-    actionButton(row, 'Board (pilot)', !mySeat, () => { mountHeli(heli.id, 'pilot'); }, '#ffd24a');
-    actionButton(row, 'Board (gunner)', !mySeat, () => { mountHeli(heli.id, 'passenger'); }, '#ffd24a');
+        closeStrategicPanel();
+        showNotice('🚁 Airframe deployed — fuel it, load bombs, then board it.');
+      }, '#5ff09a');
+    actionButton(row, 'Close', true, closeStrategicPanel, '#7f93b3');
+    return;
   }
+
+  const stats = helicopterStats(heli.tier);
+
+  const gauges = document.createElement('div');
+  gauges.style.cssText =
+    'padding:10px 12px;border-radius:8px;border:1px solid #1e2a3d;' +
+    'background:rgba(6,10,17,0.6);';
+  strategicCard.appendChild(gauges);
+  // Oil first and biggest: it is the resource that decides whether a sortie
+  // comes home, and the turbine drinks it.
+  const fuel = consoleGauge(gauges, 'OIL', '#4ad9a0');
+  const hull = consoleGauge(gauges, 'INTEGRITY', '#8fb4ff');
+  const bomb = consoleGauge(gauges, 'BOMB RACK', '#e6a83a');
+
+  const status = document.createElement('div');
+  status.style.cssText = 'margin-top:8px;font-size:11px;letter-spacing:1.1px;';
+  gauges.appendChild(status);
+
+  const spec = document.createElement('div');
+  spec.style.cssText =
+    'margin-top:10px;padding:11px 12px;border-radius:8px;border:1px solid #1e2a3d;' +
+    'background:repeating-linear-gradient(0deg,rgba(8,13,22,0.75) 0 12px,' +
+    'rgba(11,18,30,0.75) 12px 13px);animation:vx-silo-grid 9s linear infinite;';
+  strategicCard.appendChild(spec);
+  const burn = HELI_FUEL_IDLE + HELI_FUEL_BURN;
+  spec.innerHTML =
+    `<div style="font-size:10px;letter-spacing:1.6px;color:${accent};margin-bottom:9px">` +
+    `AIRFRAME</div>` +
+    `<div style="display:flex;flex-wrap:wrap;gap:16px 22px">` +
+    specCell('MARK', `Mk ${['I', 'II', 'III'][stats.mark - 1]}`) +
+    specCell('CRUISE', `${stats.speed} b/s`) +
+    specCell('CLIMB', `${stats.climb} b/s`) +
+    specCell('CEILING', `${stats.altitude} b`) +
+    specCell('BOMB BLAST', `${stats.bombRadius} b`) +
+    specCell('BOMB DMG', `${stats.bombPlayerDamage} / ${stats.bombHardwareDamage}`) +
+    specCell('OIL BURN', `${HELI_FUEL_IDLE.toFixed(2)}–${burn.toFixed(2)} /s`) +
+    specCell('ENDURANCE', `~${Math.round(stats.fuel / burn)}s hard`) +
+    `</div>`;
+
+  const note = document.createElement('div');
+  note.style.cssText = 'margin-top:10px;font-size:11px;color:#63758f;line-height:1.65;';
+  note.innerHTML =
+    `Refuelling, rearming and retrofits need the airframe <b>on the ground and ` +
+    `stopped</b> — anywhere, not just on a pad. Run the tank dry in the air and ` +
+    `the crew is thrown clear while the aircraft falls, so watch the oil bar.`;
+  strategicCard.appendChild(note);
+
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;';
+  strategicCard.appendChild(row);
+
+  const held = (id: number): number => inventory.countItem(id);
+  const fuelBtn = actionButton(row, 'Refuel', false, () => {
+    const h = bayHeli();
+    if (!h) return;
+    const n = Math.min(held(Item.OilBarrel), Math.ceil(h.maxFuel - h.fuel));
+    if (n > 0) serviceHeli(h.id, n, 0, 0, [{ id: Item.OilBarrel, count: n }]);
+  }, '#5ff09a');
+  const armBtn = actionButton(row, 'Load bombs', false, () => {
+    const h = bayHeli();
+    if (!h) return;
+    const n = Math.min(held(Item.AerialBomb), h.maxBombs - h.bombs);
+    if (n > 0) serviceHeli(h.id, 0, n, 0, [{ id: Item.AerialBomb, count: n }]);
+  }, '#5ff09a');
+  const fixBtn = actionButton(row, 'Repair 25%', false, () => {
+    const h = bayHeli();
+    if (!h) return;
+    serviceHeli(h.id, 0, 0, 1, [{ id: Item.RepairKit, count: 1 }]);
+  }, '#5ff09a');
+  const upBtn = actionButton(row,
+    heli.tier < myTier ? `Retrofit → ${tierLabel(heli.tier + 1)}` : 'Retrofit locked',
+    false, () => {
+      const h = bayHeli();
+      if (!h) return;
+      if (net.connected) net.sendHeliUpgrade(h.id);
+      else {
+        const local = offlineVehicles.helicopters.get(h.id);
+        if (local) offlineVehicles.retrofit(local, local.tier + 1);
+      }
+      renderHelipadPanel();
+    });
+  const pilotBtn = actionButton(row, 'Board (pilot)', false,
+    () => { const h = bayHeli(); if (h) mountHeli(h.id, 'pilot'); }, '#ffd24a');
+  const gunBtn = actionButton(row, 'Board (gunner)', false,
+    () => { const h = bayHeli(); if (h) mountHeli(h.id, 'passenger'); }, '#ffd24a');
   actionButton(row, 'Close', true, closeStrategicPanel, '#7f93b3');
+
+  airframeLive = {
+    fuelFill: fuel.fill, fuelText: fuel.text,
+    hullFill: hull.fill, hullText: hull.text,
+    bombFill: bomb.fill, bombText: bomb.text,
+    status, heliId: heli.id,
+    buttons: [
+      { node: fuelBtn, accent: '#5ff09a', enabled: () => {
+        const h = bayHeli();
+        return !!h && serviceable(h) && held(Item.OilBarrel) > 0 && h.fuel < h.maxFuel;
+      } },
+      { node: armBtn, accent: '#5ff09a', enabled: () => {
+        const h = bayHeli();
+        return !!h && serviceable(h) && held(Item.AerialBomb) > 0 && h.bombs < h.maxBombs;
+      } },
+      { node: fixBtn, accent: '#5ff09a', enabled: () => {
+        const h = bayHeli();
+        return !!h && serviceable(h) && held(Item.RepairKit) > 0 && h.hp < h.maxHp;
+      } },
+      { node: upBtn, accent: '#5ce2ec', enabled: () => {
+        const h = bayHeli();
+        return !!h && serviceable(h) && h.tier < warfareTier(warfare, 'helicopter');
+      } },
+      { node: pilotBtn, accent: '#ffd24a', enabled: () => {
+        const h = bayHeli();
+        return !!h && !mySeat && h.pilot === 0 && h.dying <= 0;
+      } },
+      { node: gunBtn, accent: '#ffd24a', enabled: () => {
+        const h = bayHeli();
+        return !!h && !mySeat && h.passenger === 0 && h.dying <= 0;
+      } },
+    ],
+  };
+  refreshAirframeLive();
 }
+
+/** The client's honest preview of VehicleSim.canService: on the ground, stopped. */
+function serviceable(h: HelicopterSnapshot): boolean {
+  return h.dying <= 0 && h.y - warfareGroundY(h.x, h.z) <= HELI_GROUND_CLEARANCE + 1.2;
+}
+
+/** Repaint the bay's live gauges and re-gate its buttons, every frame it is up. */
+function refreshAirframeLive(): void {
+  const L = airframeLive;
+  if (!L) return;
+  const h = bayHeli();
+  if (!h) { renderHelipadPanel(); return; }
+  if (h.id !== L.heliId) { renderHelipadPanel(); return; }
+
+  const fuelFrac = h.maxFuel > 0 ? Math.max(0, Math.min(1, h.fuel / h.maxFuel)) : 0;
+  L.fuelFill.style.width = `${fuelFrac * 100}%`;
+  L.fuelFill.style.background =
+    fuelFrac > 0.28 ? '#4ad9a0' : fuelFrac > 0.12 ? '#ffd24a' : '#ff5c4d';
+  L.fuelText.textContent = `${h.fuel.toFixed(1)} / ${h.maxFuel}`;
+
+  const hullFrac = h.maxHp > 0 ? Math.max(0, Math.min(1, h.hp / h.maxHp)) : 0;
+  L.hullFill.style.width = `${hullFrac * 100}%`;
+  L.hullFill.style.background =
+    hullFrac > 0.5 ? '#8fb4ff' : hullFrac > 0.25 ? '#ffd24a' : '#ff5c4d';
+  L.hullText.textContent = `${h.hp} / ${h.maxHp}`;
+
+  const bombFrac = h.maxBombs > 0 ? Math.max(0, Math.min(1, h.bombs / h.maxBombs)) : 0;
+  L.bombFill.style.width = `${bombFrac * 100}%`;
+  L.bombText.textContent = h.maxBombs > 0 ? `${h.bombs} / ${h.maxBombs}` : 'no rack';
+
+  const parked = serviceable(h);
+  L.status.textContent = h.dying > 0 ? '💥 Airframe destroyed'
+    : parked ? '✓ On the ground — servicing available'
+    : '✈ Airborne — land and stop to service';
+  L.status.style.color = h.dying > 0 ? '#ff5c4d' : parked ? '#5ff09a' : '#ffd24a';
+
+  for (const b of L.buttons) setButtonEnabled(b.node, b.enabled(), b.accent);
+}
+
 
 function serviceHeli(
   id: number, oil: number, bombs: number, repair: number,
@@ -5758,6 +6229,44 @@ function serviceHeli(
   renderHelipadPanel();
 }
 
+/**
+ * The single place `mySeat` changes. Taking or leaving a seat has to move a
+ * handful of presentation state together — the vehicle HUD, and the glazing on
+ * the aircraft you are sitting inside — so routing every transition through one
+ * function is what keeps the cockpit from being left half-configured after an
+ * eject, a disconnect or a wreck.
+ */
+function setSeat(next: { id: number; seat: SeatKind } | null): void {
+  mySeat = next;
+  vehicleHud.setSeat(next?.seat ?? null);
+  vehicleModels.setCockpitView(next && view === View.First ? next.id : null);
+}
+
+/** Wreck presentation, scaled to how the airframe was lost. */
+function heliLossEffect(x: number, y: number, z: number, reason: HeliLossReason): void {
+  vehicleModels.explode(x, y, z);
+  audio.explosion(new THREE.Vector3(x, y, z));
+  triggerEncounterShake(reason === 'flameout' ? 0.25 : 0.45, 0.045);
+  if (reason === 'crash') missileModels.impact(x, y, z, 4);
+}
+
+/** Thrown clear of a bursting airframe: land where the sim says, carrying the
+ *  impulse it gave us, so a crash flings the crew instead of parking them. */
+function applyEject(
+  x: number, y: number, z: number, vx: number, vy: number, vz: number,
+  reason: HeliLossReason,
+): void {
+  setSeat(null);
+  player.pos.set(x, y, z);
+  player.vel.set(vx, vy, vz);
+  player.fallDistance = 0;
+  player.gliding = false;
+  showNotice(reason === 'flameout'
+    ? '⛽ Fuel starvation — you are thrown clear!'
+    : reason === 'crash' ? '💥 Crash! You are thrown from the wreck!'
+    : '💥 Ejected!');
+}
+
 function mountHeli(id: number, seat: SeatKind): void {
   if (net.connected) {
     net.sendHeliMount(id, seat);
@@ -5765,10 +6274,10 @@ function mountHeli(id: number, seat: SeatKind): void {
     const res = offlineVehicles.mount(id, 0, localFaction,
       { x: player.pos.x, y: player.pos.y, z: player.pos.z }, seat);
     if (!res.ok) { showNotice(`⛔ ${res.reason}`); return; }
-    mySeat = { id, seat: res.seat };
+    setSeat({ id, seat: res.seat });
     showNotice(res.seat === 'pilot'
       ? 'Pilot seat — WASD flies, Space climbs, Shift descends, right-click drops a bomb.'
-      : 'Gunner seat — look around and fire your own weapon inside the side arc.');
+      : 'Gunner seat — look around and fire your own weapon inside the forward arc.');
   }
   closeStrategicPanel();
 }
@@ -5777,8 +6286,88 @@ function dismountHeli(): void {
   if (net.connected) { net.sendHeliDismount(); return; }
   const res = offlineVehicles.dismount(0);
   if (!res.ok) { showNotice(`⛔ ${res.reason}`); return; }
-  mySeat = null;
+  setSeat(null);
   if (res.at) player.pos.set(res.at.x, res.at.y, res.at.z);
+}
+
+/**
+ * FIELD DEPLOY: right-click the ground holding a Helicopter Airframe kit and it
+ * assembles right there. The helipad remains a nice place to keep an aircraft,
+ * but it is no longer the price of admission for every single flight.
+ */
+function tryDeployHelicopter(): boolean {
+  const kit = inventory.selectedStack;
+  if (!kit || kit.id !== Item.HelicopterKit) return false;
+  if (!hasBlueprint(Item.HelicopterKit)) {
+    warfarePlaceHint('Flight Certification is not authorized.');
+    return true;
+  }
+  if (warfareTier(warfare, 'helicopter') < 1) {
+    warfarePlaceHint('You have not authorized an airframe yet.');
+    return true;
+  }
+  const eye = player.eyePosition;
+  const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  const hit = raycastBlocks(world, eye, dir, 7);
+  if (!hit) { warfarePlaceHint('Aim at the ground you want to assemble on.'); return true; }
+  // The cell ABOVE whatever we hit is where the skids go down.
+  const bx = hit.x, by = hit.y + 1, bz = hit.z;
+  if (!isSolid(world.getBlock(bx, by - 1, bz))) {
+    warfarePlaceHint('Assemble the airframe on solid, level ground.');
+    return true;
+  }
+  for (let dy = 0; dy <= 3; dy++) {
+    for (const [dx, dz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      if (isSolid(world.getBlock(bx + dx, by + dy, bz + dz))) {
+        warfarePlaceHint('Not enough clearance for the rotor here.');
+        return true;
+      }
+    }
+  }
+  if (net.connected) {
+    payWarfare([{ id: Item.HelicopterKit, count: 1 }]);
+    net.sendHeliDeploy(bx, by, bz);
+  } else {
+    inventory.removeItem(Item.HelicopterKit, 1);
+    offlineVehicles.spawn(authedName || 'You', localFaction, { x: bx, y: by, z: bz },
+      Math.max(1, warfareTier(warfare, 'helicopter')));
+  }
+  audio.explosion(new THREE.Vector3(bx + 0.5, by, bz + 0.5));
+  showNotice('🚁 Airframe assembled — right-click it to board.');
+  return true;
+}
+
+/** The nearest boardable airframe to the player, if they are stood by one. */
+function heliWithinBoarding(): HelicopterSnapshot | null {
+  let best: HelicopterSnapshot | null = null;
+  let bestD = HELI_BOARD_RANGE;
+  for (const h of vehicleModels.snapshots()) {
+    if (h.dying > 0) continue;
+    if (isFaction(h.faction) && isFaction(localFaction) && h.faction !== localFaction) continue;
+    const d = Math.hypot(h.x - player.pos.x, h.y - player.pos.y, h.z - player.pos.z);
+    if (d < bestD) { bestD = d; best = h; }
+  }
+  return best;
+}
+
+/**
+ * Walk up to a parked helicopter and right-click it to get in. Boarding used to
+ * be reachable only through a helipad's panel, which is why the pad felt
+ * mandatory; the aircraft itself is the obvious thing to interact with.
+ */
+function tryBoardHelicopter(): boolean {
+  const h = heliWithinBoarding();
+  if (!h) return false;
+  // Sneak + right-click opens the servicing bay instead of climbing in, which
+  // is how you refuel, rearm and retrofit without a helipad anywhere in sight.
+  if (input.sneak) { openAirframePanel(h.id); return true; }
+  if (h.pilot !== 0 && h.passenger !== 0) {
+    showNotice('⛔ Both seats are taken.');
+    return true;
+  }
+  // Pilot seat first, gunner if someone is already flying.
+  mountHeli(h.id, h.pilot === 0 ? 'pilot' : 'passenger');
+  return true;
 }
 
 // --- Placement ---------------------------------------------------------------------
@@ -5920,6 +6509,72 @@ function reportAirTargetHit(gun: GunInfo): void {
 
 let targetingSilo: SiloState | null = null;
 
+// --- The strike camera ---------------------------------------------------------
+//
+// Pressing CONFIRM LAUNCH hands you an optional ride-along on the missile you
+// just fired. It is presentation only: the flight, the validation and the damage
+// all belong to the simulation, and closing the camera changes nothing about any
+// of them. While it runs, terrain streams around the CAMERA rather than the
+// player, because a missile 900 blocks downrange is otherwise flying over void.
+
+/** Chunk radius streamed around the strike camera. Wide enough that the ground
+ *  under a missile at apex still reads as ground, cheap enough to be worth it. */
+const MISSILE_CAM_CHUNKS = 8;
+
+const missileCam = new MissileCam(app);
+/** Restored when the cam closes, so the player's own surroundings come back. */
+let missileCamWasLocked = false;
+
+missileCam.onClose = () => {
+  // Snap the world back to the player and hand control over.
+  world.update(player.pos.x, player.pos.z, 12);
+  if (missileCamWasLocked && worldReady && !player.dead && screen === 'playing' &&
+      !worldMap.open && !invUI.open && strategicPanel.style.display === 'none') {
+    input.lock();
+  }
+  missileCamWasLocked = false;
+};
+
+/** Open the strike camera on a launch we just ordered. */
+function beginMissileCam(launch: MissileCamLaunch): void {
+  missileCamWasLocked = input.locked;
+  missileCam.begin(launch);
+  input.unlock();
+}
+
+/**
+ * Bind the camera to the actual missile once the authoritative layer names it.
+ * Only OUR faction's strike missiles are adopted — an interceptor or an enemy
+ * launch arriving in the same tick must never hijack the shot.
+ */
+function adoptMissileCam(m: MissileSnapshot): void {
+  if (!missileCam.active || missileCam.missileId !== 0) return;
+  if (m.kind !== 'strike') return;
+  if (isFaction(m.faction) && isFaction(localFaction) && m.faction !== localFaction) return;
+  missileCam.adopt(m.id, m.eta);
+}
+
+/** Drive the strike camera: stream terrain around it and pose both cameras. */
+function updateMissileCam(dt: number): void {
+  if (!missileCam.active) return;
+  const live = missileCam.missileId ? missileModels.positionOf(missileCam.missileId) : null;
+  const pose = missileCam.update(dt, live ? live.clone() : null);
+  if (!pose) return;
+  // Terrain around the shot, on a small budget — a missile cam must never cost
+  // the frame rate of everyone standing next to the silo.
+  world.update(pose.eye.x, pose.eye.z, 5, MISSILE_CAM_CHUNKS);
+  camera.position.copy(pose.eye);
+  camera.lookAt(pose.look);
+  if (Math.abs(camera.fov - pose.fov) > 0.01) {
+    camera.fov += (pose.fov - camera.fov) * 0.25;
+    camera.updateProjectionMatrix();
+  }
+  viewCamera.position.copy(camera.position);
+  viewCamera.quaternion.copy(camera.quaternion);
+  viewCamera.fov = camera.fov;
+  viewCamera.updateProjectionMatrix();
+}
+
 /** Enter the map's select-target mode for `silo`. */
 function beginTargeting(silo: SiloState): void {
   targetingSilo = silo;
@@ -5942,13 +6597,29 @@ function beginTargeting(silo: SiloState): void {
       out.push({ x: player.pos.x, z: player.pos.z, name: 'You' });
       return out;
     },
-    confirm: (tx, tz) => {
+    confirm: (tx, tz, label) => {
       const s = targetingSilo;
       targetingSilo = null;
       if (!s) return;
+      const st = siloStats(s.tier);
+      const flight = missileFlightTime(Math.hypot(tx - (s.x + 0.5), tz - (s.z + 0.5)), st.speed);
+      // The camera opens BEFORE the launch is acknowledged and flies the planned
+      // arc until the real missile is named, so there is never a blank beat
+      // between pressing the button and seeing the rocket.
+      beginMissileCam({
+        id: 0,
+        from: { x: s.x + 0.5, y: s.y + 2, z: s.z + 0.5 },
+        to: { x: tx, y: warfareGroundY(tx, tz), z: tz },
+        eta: flight, radius: st.blastRadius,
+        label, accent: factionCss(localFaction),
+      });
       if (net.connected) { net.sendSiloLaunch(s.x, s.y, s.z, tx, tz); return; }
       const check = offlineStrategic.validateLaunch({ siloId: s.id, faction: localFaction, tx, tz });
-      if (!check.ok) { showNotice(`⛔ ${LAUNCH_REJECT_TEXT[check.reason]}`); return; }
+      if (!check.ok) {
+        missileCam.close();
+        showNotice(`⛔ ${LAUNCH_REJECT_TEXT[check.reason]}`);
+        return;
+      }
       applyOfflineStrategicEvents(
         offlineStrategic.launch({ siloId: s.id, faction: localFaction, tx, tz }));
       strategicModels.setSilo(s);
@@ -5978,15 +6649,22 @@ function updateWarfare(dt: number): void {
   missileModels.update(dt);
   vehicleModels.update(dt);
   heliBombCooldown = Math.max(0, heliBombCooldown - dt);
+  // The launch console shows a ticking cycle timer and an ARMED lamp, so it has
+  // to repaint continuously rather than only when a state message lands.
+  if (openSilo) refreshSiloLive();
+  if (openHelipad) refreshAirframeLive();
 
   // Expire finished strike warnings.
   for (let i = inboundStrikes.length - 1; i >= 0; i--) {
     if (inboundStrikes[i].at < worldTimeLocal - 1) inboundStrikes.splice(i, 1);
   }
 
-  if (!mySeat) return;
+  if (!mySeat) {
+    if (vehicleHud.active) vehicleHud.setSeat(null);
+    return;
+  }
   const heli = vehicleModels.snapshotOf(mySeat.id);
-  if (!heli) { mySeat = null; return; }
+  if (!heli) { setSeat(null); return; }
 
   // Ride the seat: the player's body follows the airframe exactly (the server
   // owns the flight, so this is pure presentation of an authoritative pose).
@@ -5996,6 +6674,15 @@ function updateWarfare(dt: number): void {
     player.vel.set(0, 0, 0);
     player.fallDistance = 0;
   }
+
+  // Instruments. Airspeed is differentiated from the snapshot stream (the wire
+  // carries a pose, not a velocity) and smoothed so the needle does not buzz.
+  const rawSpeed = heliAirspeed(heli);
+  heliSpeedSmoothed += (rawSpeed - heliSpeedSmoothed) * Math.min(1, dt * 6);
+  vehicleHud.update(dt, heli, heliSpeedSmoothed,
+    heli.y - warfareGroundY(heli.x, heli.z), tierLabel(heli.tier));
+  // Drop our own glazing only while we are actually looking out of the canopy.
+  vehicleModels.setCockpitView(view === View.First ? mySeat.id : null);
 
   if (mySeat.seat !== 'pilot') return;
   // Pilot input at the transform rate — WASD horizontal, Space/Shift vertical,
@@ -6013,10 +6700,58 @@ function updateWarfare(dt: number): void {
   }
 }
 
+/**
+ * Airspeed of a ridden airframe, differentiated from consecutive snapshots. The
+ * wire carries a pose rather than a velocity, so this is the only honest way to
+ * put a speed on the instrument panel.
+ */
+const _heliPrevPos = new THREE.Vector3();
+let _heliPrevId = 0;
+let _heliPrevTime = -1;
+function heliAirspeed(snap: HelicopterSnapshot): number {
+  const now = worldTimeLocal;
+  if (snap.id !== _heliPrevId || _heliPrevTime < 0 || now <= _heliPrevTime) {
+    _heliPrevId = snap.id;
+    _heliPrevTime = now;
+    _heliPrevPos.set(snap.x, snap.y, snap.z);
+    return heliSpeedSmoothed;
+  }
+  const gap = now - _heliPrevTime;
+  // Ignore sub-frame gaps: dividing a rounded position delta by a tiny dt
+  // produces enormous nonsense readings.
+  if (gap < 0.05) return heliSpeedSmoothed;
+  const speed = _heliPrevPos.distanceTo(new THREE.Vector3(snap.x, snap.y, snap.z)) / gap;
+  _heliPrevTime = now;
+  _heliPrevPos.set(snap.x, snap.y, snap.z);
+  return speed;
+}
+
+/** Is the gunner looking inside the airframe's forward firing arc? Mirrors
+ *  VehicleSim.passengerCanFire so the client and the server agree. */
+function gunnerArcClear(): boolean {
+  if (!mySeat || mySeat.seat !== 'passenger') return true;
+  const snap = vehicleModels.snapshotOf(mySeat.id);
+  if (!snap) return true;
+  const aim = viewYawToHeliYaw(player.yaw);
+  const rel = Math.atan2(Math.sin(aim - snap.yaw), Math.cos(aim - snap.yaw));
+  return Math.abs(rel) <= PASSENGER_ARC;
+}
+
 /** The pilot's right-click drops a bomb rather than placing a block. */
 function tryDropBomb(): boolean {
   if (!mySeat || mySeat.seat !== 'pilot' || heliBombCooldown > 0) return false;
   heliBombCooldown = 0.25;   // input debounce only; the real cooldown is server-side
+  const snap = vehicleModels.snapshotOf(mySeat.id);
+  // Honest feedback for a rack that cannot answer: the server silently drops a
+  // release it refuses, which made an empty rack feel like a broken button.
+  if (snap && snap.maxBombs === 0) {
+    showNotice('⛔ This airframe has no bomb rack.');
+    return true;
+  }
+  if (snap && snap.bombs <= 0) {
+    showNotice('⛔ Bomb rack empty — land and rearm.');
+    return true;
+  }
   if (net.connected) net.sendHeliBomb();
   else applyOfflineVehicleEvents(offlineVehicles.dropBomb(0));
   return true;
@@ -6906,7 +7641,8 @@ function frame(): void {
   vaultCinematic.update(dt);
 
   // Direct control only while actively playing (pointer locked, no UI, alive).
-  const controlling = input.locked && !player.dead && !invUI.open && !vaultCinematic.playing;
+  const controlling = input.locked && !player.dead && !invUI.open && !vaultCinematic.playing &&
+    !missileCam.active;
   // PLAY-THROUGH: the Warfare panel is a floating card over a live world, so it
   // hands the cursor to the tree WITHOUT taking your legs away. Movement keys
   // still drive the player; look, mining, shooting and hotbar stay suspended
@@ -7005,6 +7741,9 @@ function frame(): void {
     }
     updateCamera();
     updateVaultCinematicCamera();
+    // The strike camera runs LAST so it wins over both: while you are watching a
+    // missile fly, nothing else gets to decide where the camera is.
+    updateMissileCam(dt);
     updateEncounterShake(dt);
 
     // Held-torch dynamic light: holding a torch lights the world around you
@@ -7061,11 +7800,31 @@ function frame(): void {
         // until it is finished (or interrupted by switching away).
         interaction.update(dt, input, camera, true, true); // suppress mine + use
       } else if (mySeat) {
-        // Aboard a helicopter, the world controls change meaning entirely: the
-        // pilot's secondary action releases a bomb, and neither seat can mine,
-        // place or open anything from the air.
-        if (input.rightClicked) tryDropBomb();
+        // Aboard a helicopter, the world controls change meaning entirely:
+        // neither seat can mine, place or open anything from the air, the
+        // PILOT's secondary action releases a bomb, and the GUNNER keeps their
+        // own weapon — a gunner seat that cannot shoot is just a passenger seat.
         if (input.dismountPressed) dismountHeli();
+        if (mySeat.seat === 'pilot') {
+          if (input.rightClicked) tryDropBomb();
+        } else if (heldGun) {
+          if (input.reloadPressed) reloadGun();
+          const wantFire = heldGun.auto ? input.leftDown : input.leftClicked;
+          if (wantFire && fireCooldown <= 0 && reloadTimer <= 0) {
+            // Mirror the server's gunner arc so a shot outside it is EXPLAINED
+            // rather than silently swallowed.
+            if (gunnerArcClear()) tryFire(heldStack!, heldGun);
+            else if (input.leftClicked) showNotice('⛔ Turn the nose — no shot from that angle.');
+          }
+        }
+        interaction.update(dt, input, camera, true, true); // suppress mine + use
+      } else if (input.rightClicked && !interaction.armedMove && heldStack &&
+          heldStack.id === Item.HelicopterKit && tryDeployHelicopter()) {
+        // Field-assemble an airframe wherever you are standing.
+        interaction.update(dt, input, camera, true, true); // suppress mine + use
+      } else if (input.rightClicked && !interaction.armedMove && !heldGun &&
+          tryBoardHelicopter()) {
+        // Stood beside a parked airframe: right-click climbs in.
         interaction.update(dt, input, camera, true, true); // suppress mine + use
       } else if (flagSwingUpdate(dt, input.leftDown)) {
         interaction.update(dt, input, camera, true, true); // suppress mine + use
@@ -7172,7 +7931,8 @@ function frame(): void {
       inventory.selectedStack?.id ?? 0,                 // held item on the avatar
       inventory.wornArmor().map((s) => s?.id ?? 0),     // worn armor plating
       heldSwingSeq,                                       // hit / firearm recoil sequence
-      aimZoom > 1, reloadTimer > 0);
+      aimZoom > 1, reloadTimer > 0,
+      !!mySeat);                                          // strapped into a vehicle seat
 
     // Simulation never pauses: mobs hunt you and survival ticks in menus too.
     survival.update(dt, player);
@@ -7259,7 +8019,9 @@ function frame(): void {
   updateGliderRig(dt); // the wing first: the pilot pose hangs off its state
   updateSelfAvatar(dt);
 
-  world.update(player.pos.x, player.pos.z, 6);
+  // The strike camera streams its own terrain (around the missile, not around
+  // us), so leave it alone rather than fighting it chunk for chunk.
+  if (!missileCam.active) world.update(player.pos.x, player.pos.z, 6);
   sky.update(dt, activeCamera);
   updateAtmosphere();
   itemEntities.update(dt, player, inventory, sky.sunIntensity);
@@ -7306,7 +8068,10 @@ function frame(): void {
   // Both hands are on the control bar while gliding, so the POV arm steps
   // aside for the rig (which draws its own fists on the bar).
   const firstPersonActive = controlling && view === View.First;
-  held.setActive(firstPersonActive && !player.gliding && !mySeat);
+  // A PILOT has both hands on the controls, so the POV arm steps aside. A
+  // GUNNER is holding their own weapon and needs to see it — hiding it was why
+  // the gunner seat felt like a passenger seat.
+  held.setActive(firstPersonActive && !player.gliding && mySeat?.seat !== 'pilot');
   held.setItem(controlling ? inventory.selectedStack?.id ?? null : null);
   const reloadProgress = reloadTimer > 0 && reloadDuration > 0
     ? 1 - reloadTimer / reloadDuration : -1;

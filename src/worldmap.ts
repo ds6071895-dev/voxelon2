@@ -33,8 +33,10 @@ export interface TargetingSession {
   areas: readonly ProtectedArea[];
   /** Friendly players near the reticle, recomputed on each redraw. */
   allies: () => { x: number; z: number; name: string }[];
-  /** Fire. Only reached via the explicit Confirm Launch button. */
-  confirm: (tx: number, tz: number) => void;
+  /** Fire. Only reached via the explicit Confirm Launch button. `label` is the
+   *  human name of the waypoint/flag that was picked, so the launch-side UI can
+   *  name what it is shooting at without re-deriving it. */
+  confirm: (tx: number, tz: number, label: string) => void;
   cancel: () => void;
 }
 
@@ -757,7 +759,7 @@ export class WorldMap {
       const target = this.reticle!;
       const session = this.targeting!;
       this.endTargeting(false);
-      session.confirm(target.x, target.z);
+      session.confirm(target.x, target.z, target.name);
       this.hide();
       this.mapCtx.onClose?.();
     });

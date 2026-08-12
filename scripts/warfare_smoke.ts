@@ -22,7 +22,8 @@ import {
 } from '../src/strategic';
 import {
   VehicleSim, sanitizeHelicopter, sanitizeHeliInput, seatPosition, viewYawToHeliYaw,
-  DISMOUNT_CLEARANCE, PASSENGER_ARC, type VehicleEvent,
+  DISMOUNT_CLEARANCE, EJECT_DAMAGE, HELI_FUEL_BURN, HELI_FUEL_IDLE, PASSENGER_ARC,
+  SEAT_OFFSETS, type VehicleEvent,
 } from '../src/vehicles';
 import { VaultEncounter, type EncounterParticipant } from '../src/vault_encounter';
 import { GameServer } from '../src/net/server_core';
@@ -146,15 +147,15 @@ const check = (condition: boolean, message: string): void => {
     'the maximum battery matches the design table');
 
   const h1 = helicopterStats(1), h5 = helicopterStats(5), h6 = helicopterStats(6);
-  check(h1.hp === 140 && h1.speed === 16 && h1.fuel === 12 && h1.bombs === 2 &&
+  check(h1.hp === 140 && h1.speed === 16 && h1.fuel === 48 && h1.bombs === 2 &&
     h1.bombRadius === 4 && h1.bombPlayerDamage === 10 &&
     h1.bombHardwareDamage === 80 && h1.bombCooldown === 6 && h1.mark === 1,
     'the Mk I helicopter matches the design table');
-  check(h5.hp === 190 && h5.speed === 20 && h5.fuel === 18 && h5.bombs === 4 &&
+  check(h5.hp === 190 && h5.speed === 20 && h5.fuel === 72 && h5.bombs === 4 &&
     h5.bombRadius === 5 && h5.bombPlayerDamage === 12 &&
     h5.bombHardwareDamage === 100 && h5.bombCooldown === 5 && h5.mark === 2,
     'the Mk II helicopter matches the design table');
-  check(h6.hp === 220 && h6.speed === 24 && h6.fuel === 24 && h6.bombs === 5 &&
+  check(h6.hp === 220 && h6.speed === 24 && h6.fuel === 96 && h6.bombs === 5 &&
     h6.bombRadius === 6 && h6.bombPlayerDamage === 14 &&
     h6.bombHardwareDamage === 130 && h6.bombCooldown === 4 && h6.mark === 3,
     'the Mk III helicopter matches the design table');
@@ -710,7 +711,7 @@ const check = (condition: boolean, message: string): void => {
   }
 
   // Fuel burns only under power, and a dry airframe sinks.
-  sim.service(h, 12, 2, 0);
+  sim.service(h, helicopterStats(1).fuel, 2, 0);
   check(h.fuel === helicopterStats(1).fuel && h.bombs === 2,
     'servicing fills fuel and the bomb rack to capacity');
   const fuelBefore = h.fuel;
@@ -743,7 +744,7 @@ const check = (condition: boolean, message: string): void => {
   // Collision costs hull.
   const h2 = sim.spawn('Ben', 0, { x: 100, y: 64, z: 100 }, 6);
   sim.mount(h2.id, 7, 0, { x: h2.position.x, y: h2.position.y, z: h2.position.z }, 'pilot');
-  sim.service(h2, 24, 0, 0);
+  sim.service(h2, helicopterStats(6).fuel, 0, 0);
   solidAt.add(`${Math.floor(h2.position.x)},${Math.floor(h2.position.y)},${Math.floor(h2.position.z + 2)}`);
   const hullBefore = h2.hp;
   for (let i = 0; i < 40; i++) {
@@ -773,7 +774,7 @@ const check = (condition: boolean, message: string): void => {
   // Pilot disconnect: a controlled descent, not a parked aircraft.
   const h4 = sim.spawn('Dee', 0, { x: 600, y: 64, z: 600 }, 1);
   sim.mount(h4.id, 21, 0, { x: h4.position.x, y: h4.position.y, z: h4.position.z }, 'pilot');
-  sim.service(h4, 12, 0, 0);
+  sim.service(h4, helicopterStats(1).fuel, 0, 0);
   for (let i = 0; i < 40; i++) {
     sim.setInput(21, { forward: 0, strafe: 0, lift: 1, yaw: 0, seq: 900 + i });
     sim.tick(0.05);
@@ -956,6 +957,299 @@ const check = (condition: boolean, message: string): void => {
   // Chrome the panel needs by name — a rename would silently blank a button.
   for (const name of ['close', 'recenter', 'plus', 'minus', 'check', 'lock', 'spark', 'chevron']) {
     check(known.has(name), `panel chrome icon "${name}" exists`);
+  }
+}
+
+
+// --- Helicopter overhaul: controls, thirst, collision, crashes, seats ------------
+{
+  const freeSim = (): VehicleSim => new VehicleSim({
+    solid: () => false, groundY: () => 64, worldHalf: 2500, vaultArena: () => false,
+  });
+
+  // STRAFE DIRECTION. The authored airframe faces local +Z, so with Y up its own
+  // starboard side is local −X. Pressing D (strafe +1) must move the aircraft to
+  // the PILOT'S RIGHT, which for a nose pointing down world −Z is world −X.
+  {
+    const sim = freeSim();
+    const h = sim.spawn('Ana', 0, { x: 0, y: 64, z: 0 }, 1);
+    sim.mount(h.id, 1, 0, { x: h.position.x, y: h.position.y, z: h.position.z }, 'pilot');
+    sim.service(h, helicopterStats(1).fuel, 0, 0);
+    // Camera yaw 0 faces world −Z; viewYawToHeliYaw turns that into the airframe
+    // heading that points the nose the same way. Set it directly: the sim SLEWS
+    // heading at 2.6 rad/s, and this test is about the strafe axis, not the turn.
+    const heading = viewYawToHeliYaw(0);
+    h.rotation.y = heading;
+    const startX = h.position.x;
+    for (let i = 0; i < 30; i++) {
+      sim.setInput(1, { forward: 0, strafe: 1, lift: 0, yaw: heading, seq: 1 + i });
+      sim.tick(0.05);
+    }
+    // Facing world −Z, the pilot's right hand points at world +X
+    // (right = forward × up = (0,0,−1) × (0,1,0) = (1,0,0)).
+    check(h.position.x > startX + 1,
+      'pressing D with the nose down −Z slides the aircraft to the pilot\'s right (+X)');
+    check(h.rotation.z > 0.05,
+      'and it banks INTO that slide rather than away from it');
+  }
+
+  // A LEFT strafe must be the exact mirror — the fix is one sign, not a fudge.
+  {
+    const sim = freeSim();
+    const h = sim.spawn('Ana', 0, { x: 0, y: 64, z: 0 }, 1);
+    sim.mount(h.id, 1, 0, { x: h.position.x, y: h.position.y, z: h.position.z }, 'pilot');
+    sim.service(h, helicopterStats(1).fuel, 0, 0);
+    const heading = viewYawToHeliYaw(0);
+    h.rotation.y = heading;
+    for (let i = 0; i < 30; i++) {
+      sim.setInput(1, { forward: 0, strafe: -1, lift: 0, yaw: heading, seq: 1 + i });
+      sim.tick(0.05);
+    }
+    check(h.position.x < -1, 'and A slides it to the pilot\'s left (−X)');
+  }
+
+  // OIL HUNGER. Hovering costs fuel even with the stick centred, and full
+  // deflection costs much more.
+  {
+    const idle = freeSim();
+    const a = idle.spawn('Ana', 0, { x: 0, y: 64, z: 0 }, 1);
+    idle.mount(a.id, 1, 0, { x: a.position.x, y: a.position.y, z: a.position.z }, 'pilot');
+    idle.service(a, helicopterStats(1).fuel, 0, 0);
+    for (let i = 0; i < 20; i++) {
+      idle.setInput(1, { forward: 0, strafe: 0, lift: 0, yaw: 0, seq: 1 + i });
+      idle.tick(0.05);
+    }
+    const idleBurn = helicopterStats(1).fuel - a.fuel;
+
+    const hard = freeSim();
+    const b = hard.spawn('Ben', 0, { x: 0, y: 64, z: 0 }, 1);
+    hard.mount(b.id, 1, 0, { x: b.position.x, y: b.position.y, z: b.position.z }, 'pilot');
+    hard.service(b, helicopterStats(1).fuel, 0, 0);
+    for (let i = 0; i < 20; i++) {
+      hard.setInput(1, { forward: 1, strafe: 1, lift: 1, yaw: 0, seq: 1 + i });
+      hard.tick(0.05);
+    }
+    const hardBurn = helicopterStats(1).fuel - b.fuel;
+    check(idleBurn > 0, 'simply hovering burns oil — the turbine is running either way');
+    check(hardBurn > idleBurn * 1.8,
+      `full deflection is far thirstier than a hover (${hardBurn.toFixed(2)} vs ${idleBurn.toFixed(2)})`);
+    // A full Mk I tank should be minutes, not hours: the whole point is that a
+    // sortie has to be planned around the return leg.
+    const endurance = helicopterStats(1).fuel / (HELI_FUEL_IDLE + HELI_FUEL_BURN);
+    check(endurance > 20 && endurance < 120,
+      `a full Mk I tank is ${Math.round(endurance)}s of hard flying — thirsty but flyable`);
+  }
+
+  // FLAMEOUT. Run the tank dry in the air and the crew is thrown clear while the
+  // airframe falls; nobody is left flying an aircraft with no fuel in it.
+  {
+    const sim = freeSim();
+    const h = sim.spawn('Ana', 0, { x: 0, y: 140, z: 0 }, 1);
+    sim.mount(h.id, 1, 0, { x: h.position.x, y: h.position.y, z: h.position.z }, 'pilot');
+    sim.mount(h.id, 2, 0, { x: h.position.x, y: h.position.y, z: h.position.z }, 'passenger');
+    h.fuel = 0.3;
+    let ejects = 0;
+    let downReason = '';
+    let guard = 0;
+    while (guard++ < 200 && !downReason) {
+      sim.setInput(1, { forward: 1, strafe: 0, lift: 1, yaw: 0, seq: guard });
+      for (const ev of sim.tick(0.05)) {
+        if (ev.kind === 'eject') ejects++;
+        if (ev.kind === 'heliDown') downReason = ev.reason;
+      }
+    }
+    check(downReason === 'flameout', 'running the tank dry reports a flameout, not a shootdown');
+    check(ejects === 2, 'and throws BOTH crew members clear');
+    check(h.pilotId === null && h.passengerId === null && h.dying > 0,
+      'leaving an empty airframe falling out of the sky');
+  }
+
+  // COLLISION. The whole box is sampled, so an airframe cannot sit inside a wall
+  // its own cabin overlaps. The old single-point test at the hub passed straight
+  // through this.
+  {
+    const wall = new Set<string>();
+    // A slab of solid cells the airframe would have to eat its nose into.
+    for (let y = 60; y < 70; y++) {
+      for (let x = -6; x <= 6; x++) {
+        for (let z = -14; z >= -16; z--) wall.add(`${x},${y},${z}`);
+      }
+    }
+    const sim = new VehicleSim({
+      solid: (x, y, z) => wall.has(`${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`),
+      groundY: () => 50, worldHalf: 2500, vaultArena: () => false,
+    });
+    const h = sim.spawn('Ana', 0, { x: 0, y: 63, z: 0 }, 6);
+    sim.mount(h.id, 1, 0, { x: h.position.x, y: h.position.y, z: h.position.z }, 'pilot');
+    sim.service(h, helicopterStats(6).fuel, 0, 0);
+    const heading = viewYawToHeliYaw(0);   // nose down −Z, straight at the wall
+    h.rotation.y = heading;
+    let guard = 0;
+    while (guard++ < 200 && h.dying <= 0 && h.position.z > -12) {
+      sim.setInput(1, { forward: 1, strafe: 0, lift: 0, yaw: heading, seq: guard });
+      sim.tick(0.05);
+    }
+    // Whatever happened (stopped short or exploded), it must never have ended a
+    // tick with its hull buried in the slab.
+    check(h.position.z > -13.9,
+      `the airframe never penetrates the wall (stopped at z=${h.position.z.toFixed(2)})`);
+  }
+
+  // CRASHING. Cruising into a cliff destroys the aircraft and LAUNCHES the crew.
+  {
+    const wall = new Set<string>();
+    for (let y = 55; y < 80; y++) {
+      for (let x = -8; x <= 8; x++) {
+        for (let z = -20; z >= -24; z--) wall.add(`${x},${y},${z}`);
+      }
+    }
+    const sim = new VehicleSim({
+      solid: (x, y, z) => wall.has(`${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`),
+      groundY: () => 50, worldHalf: 2500, vaultArena: () => false,
+    });
+    const h = sim.spawn('Ana', 0, { x: 0, y: 64, z: 0 }, 1);
+    sim.mount(h.id, 1, 0, { x: h.position.x, y: h.position.y, z: h.position.z }, 'pilot');
+    sim.service(h, helicopterStats(1).fuel, 0, 0);
+    const heading = viewYawToHeliYaw(0);
+    h.rotation.y = heading;
+    let crash: VehicleEvent | undefined;
+    let eject: VehicleEvent | undefined;
+    let guard = 0;
+    while (guard++ < 400 && !crash) {
+      sim.setInput(1, { forward: 1, strafe: 0, lift: 0, yaw: heading, seq: guard });
+      for (const ev of sim.tick(0.05)) {
+        if (ev.kind === 'heliDown' && ev.reason === 'crash') crash = ev;
+        if (ev.kind === 'eject') eject = ev;
+      }
+    }
+    check(!!crash, 'flying a Mk I into a cliff face at cruise destroys the airframe');
+    check(!!eject && eject.kind === 'eject' &&
+      Math.hypot(eject.vx, eject.vy, eject.vz) > 9,
+      'and physically launches the pilot rather than setting them down');
+    check(!!eject && eject.kind === 'eject' && eject.damage > EJECT_DAMAGE,
+      'a crash hurts more than a routine ejection — bad gear will not survive it');
+  }
+
+  // …but SETTING DOWN is landing, not crashing. A descent at the airframe's own
+  // climb rate must not cost the hull.
+  {
+    const sim = freeSim();
+    const h = sim.spawn('Ana', 0, { x: 0, y: 90, z: 0 }, 1);
+    sim.mount(h.id, 1, 0, { x: h.position.x, y: h.position.y, z: h.position.z }, 'pilot');
+    sim.service(h, helicopterStats(1).fuel, 0, 0);
+    const full = h.hp;
+    for (let i = 0; i < 400 && h.position.y > 65.3; i++) {
+      sim.setInput(1, { forward: 0, strafe: 0, lift: -1, yaw: 0, seq: 1 + i });
+      sim.tick(0.05);
+    }
+    check(h.hp === full && h.dying <= 0,
+      'descending at full rate onto the ground is a landing, and costs nothing');
+    check(sim.landed(h), 'and the sim agrees the airframe is parked');
+  }
+
+  // SERVICING no longer needs a helipad — just the ground, and a full stop.
+  {
+    const sim = freeSim();
+    const h = sim.spawn('Ana', 0, { x: 0, y: 64, z: 0 }, 1);   // pad at the origin
+    h.position = { x: 900, y: 65.25, z: 900 };   // flown a long way from it
+    h.velocity = { x: 0, y: 0, z: 0 };
+    check(!sim.atPad(h), 'an airframe flown away from its pad is not at its pad');
+    check(sim.canService(h),
+      'but it can still be refuelled where it stands, because it is on the ground');
+    h.velocity = { x: 9, y: 0, z: 0 };
+    check(!sim.canService(h), 'a moving airframe cannot be serviced');
+    h.velocity = { x: 0, y: 0, z: 0 };
+    h.position = { x: 900, y: 120, z: 900 };
+    check(!sim.canService(h), 'and neither can one that is still in the air');
+  }
+
+  // SEATS: side by side at the front, so both crew see out of the windscreen,
+  // and the PILOT sits on the port side (local +X on a +Z-forward model).
+  {
+    check(SEAT_OFFSETS.pilot.x > 0 && SEAT_OFFSETS.passenger.x < 0,
+      'the pilot sits to port and the gunner to starboard');
+    check(Math.abs(SEAT_OFFSETS.pilot.z - SEAT_OFFSETS.passenger.z) < 1e-6 &&
+      SEAT_OFFSETS.pilot.z > 0,
+      'both seats are level with each other at the front of the cabin');
+    check(SEAT_OFFSETS.pilot.y < 0,
+      'and the seat pan sits below the rotor hub, inside the cabin');
+  }
+
+  // CREW ROLES: the gunner shoots inside the forward arc; the pilot never does.
+  {
+    const sim = freeSim();
+    const h = sim.spawn('Ana', 0, { x: 0, y: 64, z: 0 }, 1);
+    const at = { x: h.position.x, y: h.position.y, z: h.position.z };
+    sim.mount(h.id, 1, 0, at, 'pilot');
+    sim.mount(h.id, 2, 0, at, 'passenger');
+    check(!sim.passengerCanFire(1, h.rotation.y - Math.PI),
+      'a pilot flying the aircraft cannot fire, however they are looking');
+    check(sim.passengerCanFire(2, h.rotation.y - Math.PI),
+      'the gunner can fire straight over the nose');
+    check(!sim.passengerCanFire(2, h.rotation.y),
+      'but not backwards through the bulkhead');
+    check(sim.passengerCanFire(99, 0),
+      'and someone who is not aboard anything is unaffected by the rule');
+  }
+
+  // The BOMB RACK still works end to end after the rework: one release per
+  // round, a cooldown between them, and exactly one impact per bomb.
+  {
+    const sim = freeSim();
+    const h = sim.spawn('Ana', 0, { x: 0, y: 90, z: 0 }, 6);
+    sim.mount(h.id, 1, 0, { x: h.position.x, y: h.position.y, z: h.position.z }, 'pilot');
+    const maxBombs = helicopterStats(6).bombs;
+    sim.service(h, helicopterStats(6).fuel, maxBombs, 0);
+    check(h.bombs === maxBombs, 'the rack fills to the airframe\'s capacity');
+    let released = 0;
+    let impacts = 0;
+    let guard = 0;
+    while (guard++ < 4000 && (h.bombs > 0 || sim.bombs.size)) {
+      if (sim.dropBomb(1).length) released++;
+      for (const ev of sim.tick(0.05)) if (ev.kind === 'bombImpact') impacts++;
+    }
+    check(released === maxBombs, `every round on the rack can be released (${released})`);
+    check(impacts === maxBombs, 'and each one produces exactly one impact');
+    check(h.bombs === 0 && sim.dropBomb(1).length === 0, 'an empty rack releases nothing');
+  }
+}
+
+// --- Field deploy: an airframe without a helipad ----------------------------------
+{
+  const g = new GameServer(1337, mulberry32(71));
+  g.addPlayer(1, { username: 'Ana', faction: 0, warfare: { version: 1, xp: 9000, nodes: [] } });
+  for (const n of WARFARE_TREE) g.handle(1, { t: 'warfareBuy', node: n.id });
+  type HeliList = { t: string; list: { id: number; pilot: number }[] };
+  const heliListOf = (out: ReturnType<GameServer['handle']>): HeliList['list'] | undefined =>
+    (out.map((o) => o.msg).filter((m) => m.t === 'helis') as HeliList[]).at(-1)?.list;
+  const errOf = (out: ReturnType<GameServer['handle']>): string | undefined =>
+    (out.map((o) => o.msg).find((m) => m.t === 'warfareErr') as { reason: string } | undefined)
+      ?.reason;
+
+  // Stand somewhere with a solid cell under us — well clear of any helipad —
+  // and assemble an airframe straight onto it.
+  const PAD_Y = 140;   // above any terrain, so the footing is exactly what we lay
+  g.handle(1, { t: 'xform', x: 400, y: PAD_Y, z: 400, yaw: 0, pitch: 0 });
+  g.handle(1, { t: 'edit', x: 400, y: PAD_Y - 1, z: 400, block: Block.Stone });
+  const deployed = heliListOf(g.handle(1, { t: 'heliDeploy', x: 400, y: PAD_Y, z: 400 }));
+  check(deployed?.length === 1,
+    'a Helicopter Airframe deploys on open ground with no helipad in sight');
+
+  // Out of reach is refused, so this cannot conjure aircraft across the map.
+  const far = g.handle(1, { t: 'heliDeploy', x: 900, y: PAD_Y, z: 900 });
+  check(heliListOf(far) === undefined, 'deploying out of arm\'s reach is refused');
+
+  // Mid-air is refused: the skids need something to stand on.
+  const air = g.handle(1, { t: 'heliDeploy', x: 401, y: PAD_Y + 4, z: 401 });
+  check(!!errOf(air) && heliListOf(air) === undefined,
+    'and so is assembling one in mid-air');
+
+  // Boarding one you deployed still works, and a disconnect still frees the seat.
+  const id = deployed?.[0]?.id;
+  if (id !== undefined) {
+    const seated = heliListOf(g.handle(1, { t: 'heliMount', id, seat: 'pilot' }));
+    check(seated?.find((h) => h.id === id)?.pilot === 1,
+      'you can board a field-deployed airframe');
   }
 }
 

@@ -14,7 +14,9 @@ import type { VaultBossKind, VaultFamily, VaultTier } from '../vaults';
 import type {
   BatteryState, LaunchReject, MissileSnapshot, ProtectedArea, SiloState,
 } from '../strategic';
-import type { BombSnapshot, HelicopterSnapshot, SeatKind } from '../vehicles';
+import type {
+  BombSnapshot, HeliLossReason, HelicopterSnapshot, SeatKind,
+} from '../vehicles';
 
 export const SERVER_PORT = 8080;
 export const SNAPSHOT_HZ = 15;     // server -> clients transform broadcasts
@@ -71,6 +73,9 @@ export interface PlayerSnapshot {
   dead: boolean;
   gliding?: boolean;
   boating?: boolean;
+  /** True while strapped into a vehicle seat — the avatar sits (and sits LOW,
+   *  so a rider's head is inside the cabin rather than through its roof). */
+  seated?: boolean;
   /** True while the player is holding sneak/crouch. */
   sneaking?: boolean;
   /** Item id held in hand (0 = empty) — rendered on the avatar's arm. */
@@ -160,7 +165,8 @@ export type ClientMsg =
   // auth) — lets a returning browser skip the password.
   | { t: 'session'; username: string; token: string }
   | { t: 'xform'; x: number; y: number; z: number; yaw: number; pitch: number;
-      gliding?: boolean; boating?: boolean; sneaking?: boolean; held?: number; armor?: number[]; swing?: number;
+      gliding?: boolean; boating?: boolean; seated?: boolean;
+      sneaking?: boolean; held?: number; armor?: number[]; swing?: number;
       aiming?: boolean; reloading?: boolean }
   | { t: 'edit'; x: number; y: number; z: number; block: number }
   // Pull a Lever: the server recomputes the flips (lever + linked traps within
@@ -291,6 +297,10 @@ export type ClientMsg =
   | { t: 'missileHit'; id: number; amount: number }
   // Helicopters. The client sends INPUT, never positions.
   | { t: 'heliSpawn'; x: number; y: number; z: number }
+  // Field-assemble an airframe from a carried Helicopter Airframe kit. A
+  // helipad is a convenience, not a prerequisite — needing to build one every
+  // time you wanted to fly made the whole aircraft feel bolted to the ground.
+  | { t: 'heliDeploy'; x: number; y: number; z: number }
   | { t: 'heliMount'; id: number; seat?: SeatKind }
   | { t: 'heliDismount' }
   | { t: 'heliInput'; forward: number; strafe: number; lift: number; yaw: number; seq: number }
@@ -394,6 +404,10 @@ export type ServerMsg =
   // Admin (server console): a player's gamemode changed; teleport snaps a player.
   | { t: 'gamemode'; id: number; mode: GameMode }
   | { t: 'teleport'; x: number; y: number; z: number }
+  // Thrown clear of a bursting airframe: a teleport that also hands the body an
+  // impulse, so a crash physically launches the crew instead of dropping them.
+  | { t: 'ejected'; x: number; y: number; z: number;
+      vx: number; vy: number; vz: number; reason: HeliLossReason }
   // Admin notice shown to a player (e.g. "You are now in creative mode").
   | { t: 'notice'; text: string }
   // TPA: `from` wants to teleport to YOU — run /tpaccept to allow it.
@@ -470,7 +484,8 @@ export type ServerMsg =
   // Helicopters + their bombs.
   | { t: 'helis'; list: HelicopterSnapshot[]; bombs: BombSnapshot[] }
   | { t: 'heliSeat'; id: number; seat: SeatKind | null }
-  | { t: 'heliDown'; id: number; x: number; y: number; z: number; faction: number }
+  | { t: 'heliDown'; id: number; x: number; y: number; z: number; faction: number;
+      reason: HeliLossReason }
   | { t: 'heliGone'; id: number };
 
 const ADJECTIVES = [

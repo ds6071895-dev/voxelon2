@@ -38,9 +38,16 @@ const STEEL_DARK = 0x454a55;
 const GLASS = 0x9fd8e8;
 const NEAR_BLACK = 0x23272e;
 const AMBER = 0xe6a83a;
-/** The original airframe was barely player-wide. Keep simulation coordinates
- * unchanged while giving the rendered helicopter a believable two-seat cabin. */
-const HELICOPTER_MODEL_SCALE = 1.5;
+/**
+ * The airframe is authored directly in WORLD units — one unit is one block —
+ * so the cabin you can see is the cabin the simulation collides with and the
+ * seat anchors are the seat positions. (It used to be drawn small and scaled up
+ * at the group, which made every offset a division and hid the fact that the
+ * cabin was too short to actually contain a person.)
+ */
+const HELICOPTER_MODEL_SCALE = 1;
+/** Seat-pan → eye height for someone strapped into a seat. */
+const SEAT_EYE = 0.95;
 
 function paintFaces(geo: THREE.BufferGeometry, hex: number): THREE.BufferGeometry {
   const color = new THREE.Color(hex);
@@ -111,11 +118,23 @@ export interface HelicopterModel {
   bombs: THREE.Object3D[];
   /** Navigation + anti-collision lights. */
   lights: THREE.Mesh[];
+  /** Glazing. Hidden for whoever is sitting inside in first person, so the
+   *  pilot flies through open apertures instead of through tinted panels. */
+  glazing: THREE.Object3D[];
   tier: number;
 }
 
 /**
- * The airframe. +Z is the nose.
+ * The airframe. +Z is the nose, and because Y is up that means the model's own
+ * STARBOARD side is local −X (right = forward × up) — the one fact the whole
+ * cockpit layout hangs off.
+ *
+ * The cabin is a real cavity, not a solid block with seats stuck to it: floor,
+ * waist-high side panels, a rear bulkhead, a roof on pillars, and glazing that
+ * fills the gaps. Two seats sit side by side at the front with the whole
+ * windscreen in front of them, so a pilot in first person looks OUT rather than
+ * into the back of the fuselage, and a rider's head is inside the cabin instead
+ * of poking through the roof.
  *
  * Marks are visually distinct, not just numerically better:
  *   Mk I    slim cabin, skid gear, two hardpoints, a single mast light
@@ -130,159 +149,208 @@ export function buildHelicopterModel(tier: number, markingHex: number): Helicopt
   group.add(hull);
   group.scale.setScalar(HELICOPTER_MODEL_SCALE);
   const lights: THREE.Mesh[] = [];
+  const glazing: THREE.Object3D[] = [];
 
-  // --- Fuselage ---
-  box(hull, OLIVE, 1.25, 0.9, 2.1, 0, 0, 0);
-  box(hull, OLIVE_LIGHT, 1.28, 0.16, 2.0, 0, 0.42, 0);       // spine highlight
-  box(hull, OLIVE_DARK, 1.18, 0.2, 1.9, 0, -0.44, 0);        // belly
-  // Nose — longer and more pointed at higher marks.
-  const noseLen = mark === 1 ? 0.5 : mark === 2 ? 0.75 : 0.9;
-  const nose = round(hull, new THREE.CylinderGeometry(0.18, 0.58, noseLen, 10), OLIVE,
-    0, -0.02, 1.05 + noseLen / 2);
+  // Cabin envelope. Everything else is positioned off these six numbers so the
+  // interior stays a coherent, person-sized room.
+  const CAB = {
+    halfW: 0.88,    // interior half-width
+    floorY: -0.78,  // interior floor
+    roofY: 0.98,    // interior ceiling
+    backZ: -0.78,   // rear bulkhead
+    frontZ: 1.52,   // windscreen base
+  };
+  const wallY = (CAB.floorY + -0.16) / 2;          // waist panel centre
+  const cabLen = CAB.frontZ - CAB.backZ;
+  const cabMidZ = (CAB.frontZ + CAB.backZ) / 2;
+
+  // --- Cabin shell ---
+  box(hull, OLIVE_DARK, CAB.halfW * 2 + 0.16, 0.14, cabLen + 0.2, 0, CAB.floorY - 0.07, cabMidZ);
+  box(hull, OLIVE, CAB.halfW * 2 + 0.06, 0.06, cabLen, 0, CAB.floorY + 0.02, cabMidZ); // deck plate
+  // Waist panels down each side (the door is the aperture ABOVE them).
+  for (const side of [-1, 1]) {
+    box(hull, OLIVE, 0.12, -0.16 - CAB.floorY, cabLen, side * (CAB.halfW + 0.06), wallY, cabMidZ);
+    box(hull, OLIVE_LIGHT, 0.14, 0.07, cabLen, side * (CAB.halfW + 0.06), -0.13, cabMidZ); // sill rail
+    // Corner pillars only — the middle of each doorway stays wide open.
+    box(hull, OLIVE_DARK, 0.11, CAB.roofY + 0.2, 0.12,
+      side * (CAB.halfW + 0.04), (CAB.roofY - 0.16) / 2, CAB.backZ + 0.1);
+    box(hull, OLIVE_DARK, 0.10, CAB.roofY + 0.2, 0.11,
+      side * (CAB.halfW + 0.02), (CAB.roofY - 0.16) / 2, CAB.frontZ - 0.06);
+    box(hull, OLIVE_DARK, 0.11, 0.11, cabLen, side * (CAB.halfW + 0.02), CAB.roofY + 0.02, cabMidZ);
+  }
+  // Roof + rear bulkhead close the box off.
+  box(hull, OLIVE, CAB.halfW * 2 + 0.2, 0.13, cabLen - 0.5, 0, CAB.roofY + 0.07, cabMidZ - 0.16);
+  box(hull, OLIVE_LIGHT, CAB.halfW * 2 + 0.1, 0.05, cabLen - 0.8, 0, CAB.roofY + 0.15, cabMidZ - 0.2);
+  box(hull, OLIVE, CAB.halfW * 2 + 0.16, CAB.roofY - CAB.floorY + 0.2, 0.14,
+    0, (CAB.roofY + CAB.floorY) / 2, CAB.backZ - 0.06);
+
+  // --- Glazing: door windows + a wide one-piece windscreen ---
+  for (const side of [-1, 1]) {
+    glazing.push(box(hull, GLASS, 0.05, 0.92, cabLen - 0.35,
+      side * (CAB.halfW + 0.05), 0.36, cabMidZ, GLASS_MAT));
+  }
+  const screen = box(hull, GLASS, CAB.halfW * 2 + 0.02, 1.72, 0.05, 0, 0.16, CAB.frontZ + 0.28,
+    GLASS_MAT);
+  screen.rotation.x = -0.46;   // rakes down and forward, out of the eyeline
+  glazing.push(screen);
+  // Thin A-pillars at the outer edges of the screen — deliberately NOT down the
+  // middle, which is exactly where a pilot needs to be able to see.
+  for (const side of [-1, 1]) {
+    const pillar = box(hull, OLIVE_DARK, 0.09, 1.78, 0.09,
+      side * (CAB.halfW + 0.01), 0.16, CAB.frontZ + 0.28);
+    pillar.rotation.x = -0.46;
+  }
+
+  // --- Nose + chin, all of it BELOW the windscreen line ---
+  const noseLen = mark === 1 ? 0.6 : mark === 2 ? 0.9 : 1.05;
+  box(hull, OLIVE, CAB.halfW * 1.9, 0.5, 0.7, 0, -0.52, CAB.frontZ + 0.3);
+  const nose = round(hull, new THREE.CylinderGeometry(0.22, 0.72, noseLen, 10), OLIVE,
+    0, -0.5, CAB.frontZ + 0.62 + noseLen / 2);
   nose.rotation.x = Math.PI / 2;
-  // Canopy: two angled glass panels.
-  const canopy = box(hull, GLASS, 1.08, 0.72, 1.65, 0, 0.34, 0.45, GLASS_MAT);
-  canopy.rotation.x = -0.22;
-  // Cockpit furniture is visible from the first-person seat: low dashboard,
-  // windscreen pillars and a roof crossbar frame the view without blocking it.
-  box(hull, OLIVE_DARK, 1.04, 0.14, 0.34, 0, 0.05, 1.02);   // dashboard
-  box(hull, NEAR_BLACK, 0.7, 0.12, 0.03, 0, 0.16, 0.86);    // instrument panel
-  box(hull, OLIVE_DARK, 0.07, 0.78, 0.07, -0.53, 0.42, 0.92);
-  box(hull, OLIVE_DARK, 0.07, 0.78, 0.07, 0.53, 0.42, 0.92);
-  box(hull, OLIVE_DARK, 1.1, 0.07, 0.07, 0, 0.82, 0.79);
-  box(hull, OLIVE_DARK, 0.07, 0.76, 0.07, 0, 0.43, 0.92);   // centre windscreen post
-  // Side doors (open — you can see the occupants).
-  box(hull, OLIVE_DARK, 0.06, 0.62, 0.8, 0.63, -0.02, -0.1);
-  box(hull, OLIVE_DARK, 0.06, 0.62, 0.8, -0.63, -0.02, -0.1);
+  box(hull, OLIVE_DARK, CAB.halfW * 1.8, 0.12, 0.6, 0, -0.76, CAB.frontZ + 0.3);
+
+  // --- Cockpit furniture (low enough to frame the view, never fill it) ---
+  box(hull, OLIVE_DARK, CAB.halfW * 1.9, 0.13, 0.42, 0, -0.18, CAB.frontZ - 0.18);  // coaming
+  const cluster = box(hull, NEAR_BLACK, 1.24, 0.30, 0.05, 0, -0.05, CAB.frontZ - 0.34);
+  cluster.rotation.x = 0.55;
+  for (const dx of [-0.4, -0.14, 0.14, 0.4]) {
+    const dial = round(hull, new THREE.CylinderGeometry(0.055, 0.055, 0.02, 10), 0x6ff0c0,
+      dx, -0.02, CAB.frontZ - 0.37, GLOW_MAT, 0.6);
+    dial.rotation.x = Math.PI / 2 + 0.55;
+  }
+  // Collective/cyclic sticks between the seats, so the cabin reads as flown.
+  for (const side of [-1, 1]) {
+    round(hull, new THREE.CylinderGeometry(0.035, 0.045, 0.5, 6), NEAR_BLACK,
+      side * 0.46, CAB.floorY + 0.3, CAB.frontZ - 0.62);
+  }
 
   // --- Armoured cheeks + chin turret (Mk III) ---
   if (mark >= 3) {
-    box(hull, STEEL_DARK, 0.2, 0.5, 0.9, 0.68, -0.05, 0.5);
-    box(hull, STEEL_DARK, 0.2, 0.5, 0.9, -0.68, -0.05, 0.5);
-    const chin = round(hull, new THREE.SphereGeometry(0.22, 10, 8), STEEL_DARK, 0, -0.42, 1.15);
-    round(chin, new THREE.CylinderGeometry(0.05, 0.05, 0.34, 8), NEAR_BLACK, 0, -0.02, 0.2)
+    for (const side of [-1, 1]) {
+      box(hull, STEEL_DARK, 0.2, 0.62, 1.0, side * (CAB.halfW + 0.16), -0.42, CAB.frontZ - 0.2);
+    }
+    const chin = round(hull, new THREE.SphereGeometry(0.26, 10, 8), STEEL_DARK,
+      0, -0.82, CAB.frontZ + 0.5);
+    round(chin, new THREE.CylinderGeometry(0.05, 0.05, 0.38, 8), NEAR_BLACK, 0, -0.02, 0.22)
       .rotation.x = Math.PI / 2;
   }
 
-  // --- Engine deck + intakes ---
-  box(hull, OLIVE_DARK, 0.85, 0.34, 0.9, 0, 0.55, -0.25);
+  // --- Engine deck + intakes, sitting on top of the cabin roof ---
+  box(hull, OLIVE_DARK, 1.15, 0.42, 1.3, 0, CAB.roofY + 0.32, cabMidZ - 0.55);
   if (mark >= 2) {
-    round(hull, new THREE.CylinderGeometry(0.14, 0.14, 0.4, 8), NEAR_BLACK, 0.34, 0.6, 0.24)
-      .rotation.x = Math.PI / 2;
-    round(hull, new THREE.CylinderGeometry(0.14, 0.14, 0.4, 8), NEAR_BLACK, -0.34, 0.6, 0.24)
-      .rotation.x = Math.PI / 2;
+    for (const side of [-1, 1]) {
+      round(hull, new THREE.CylinderGeometry(0.16, 0.16, 0.46, 8), NEAR_BLACK,
+        side * 0.42, CAB.roofY + 0.4, cabMidZ - 0.05).rotation.x = Math.PI / 2;
+    }
   }
-  // Exhausts (one at Mk I/II, twin at Mk III), canted out and back.
-  const exhausts = mark >= 3 ? [-0.3, 0.3] : [0];
-  for (const ex of exhausts) {
-    const pipe = round(hull, new THREE.CylinderGeometry(0.12, 0.15, 0.42, 8), STEEL_DARK,
-      ex, 0.5, -0.78);
+  for (const ex of mark >= 3 ? [-0.34, 0.34] : [0]) {
+    const pipe = round(hull, new THREE.CylinderGeometry(0.13, 0.17, 0.46, 8), STEEL_DARK,
+      ex, CAB.roofY + 0.26, CAB.backZ - 0.1);
     pipe.rotation.x = Math.PI / 2 - 0.25;
   }
 
   // --- Tail boom + fins ---
-  const boom = round(hull, new THREE.CylinderGeometry(0.11, 0.2, 2.0, 8), OLIVE, 0, 0.16, -1.6);
+  const boom = round(hull, new THREE.CylinderGeometry(0.14, 0.26, 2.3, 8), OLIVE,
+    0, 0.24, CAB.backZ - 1.2);
   boom.rotation.x = Math.PI / 2;
-  box(hull, OLIVE_DARK, 0.08, 0.72, 0.42, 0, 0.5, -2.42);       // vertical fin
-  box(hull, OLIVE_LIGHT, 0.72, 0.06, 0.3, 0, 0.1, -2.2);        // horizontal stabiliser
+  box(hull, OLIVE_DARK, 0.1, 0.86, 0.5, 0, 0.62, CAB.backZ - 2.2);       // vertical fin
+  box(hull, OLIVE_LIGHT, 0.86, 0.07, 0.36, 0, 0.18, CAB.backZ - 1.9);    // stabiliser
 
-  // --- Skid landing gear ---
+  // --- Skid landing gear (clear of the bomb rack, inboard of the rotor) ---
   for (const side of [-1, 1]) {
-    box(hull, STEEL_DARK, 0.08, 0.08, 1.5, side * 0.52, -0.86, 0.05);
-    box(hull, STEEL_DARK, 0.07, 0.42, 0.07, side * 0.5, -0.66, 0.5);
-    box(hull, STEEL_DARK, 0.07, 0.42, 0.07, side * 0.5, -0.66, -0.42);
+    box(hull, STEEL_DARK, 0.1, 0.1, 1.9, side * 0.82, -1.16, cabMidZ + 0.15);
+    box(hull, STEEL_DARK, 0.09, 0.44, 0.09, side * 0.78, -0.96, cabMidZ + 0.75);
+    box(hull, STEEL_DARK, 0.09, 0.44, 0.09, side * 0.78, -0.96, cabMidZ - 0.45);
   }
 
-  // --- Stub wings + bomb rack ---
+  // --- Stub wings + bomb rack, slung under the belly ---
   const bombs: THREE.Object3D[] = [];
   const hardpoints = stats.bombs;
-  if (mark >= 2) {
-    box(hull, OLIVE_DARK, 1.9, 0.1, 0.5, 0, -0.24, -0.05);      // stub wing
-  }
+  if (mark >= 2) box(hull, OLIVE_DARK, 2.1, 0.11, 0.55, 0, -0.9, cabMidZ);
   for (let i = 0; i < hardpoints; i++) {
-    // Alternate left/right, walking outward, so a rack of 5 stays symmetric.
+    // Alternate left/right walking outward, so a rack of 5 stays symmetric.
     const pair = Math.floor(i / 2);
     const side = i % 2 === 0 ? -1 : 1;
-    const bx = hardpoints === 1 ? 0 : side * (0.42 + pair * 0.34);
+    const bx = hardpoints === 1 ? 0 : side * (0.26 + pair * 0.24);
     const bomb = new THREE.Group();
-    bomb.position.set(bx, -0.58, -0.05 + (i === hardpoints - 1 && hardpoints % 2 ? 0.25 : 0));
-    round(bomb, new THREE.CylinderGeometry(0.09, 0.09, 0.44, 8), STEEL_DARK, 0, 0, 0)
+    bomb.position.set(bx, -1.0, cabMidZ + (i === hardpoints - 1 && hardpoints % 2 ? 0.3 : 0));
+    round(bomb, new THREE.CylinderGeometry(0.1, 0.1, 0.5, 8), STEEL_DARK, 0, 0, 0)
       .rotation.x = Math.PI / 2;
-    round(bomb, new THREE.ConeGeometry(0.09, 0.18, 8), STEEL, 0, 0, 0.3).rotation.x = Math.PI / 2;
-    box(bomb, AMBER, 0.19, 0.02, 0.05, 0, 0, 0.02);
+    round(bomb, new THREE.ConeGeometry(0.1, 0.2, 8), STEEL, 0, 0, 0.34).rotation.x = Math.PI / 2;
+    box(bomb, AMBER, 0.21, 0.02, 0.06, 0, 0, 0.02);
     for (const f of [0, 1, 2, 3]) {
-      const fin = box(bomb, STEEL_DARK, 0.02, 0.14, 0.12, 0, 0, -0.24);
+      const fin = box(bomb, STEEL_DARK, 0.02, 0.15, 0.13, 0, 0, -0.27);
       fin.rotation.z = (f / 4) * Math.PI * 2;
     }
     hull.add(bomb);
     bombs.push(bomb);
   }
 
-  // --- Faction markings: a band on the tail and a roundel on the nose ---
-  box(hull, markingHex, 0.09, 0.4, 0.16, 0, 0.5, -2.42);
-  const roundel = round(hull, new THREE.CylinderGeometry(0.16, 0.16, 0.02, 12), markingHex,
-    0.63, 0.05, 0.2, VEHICLE_MAT, 0.15);
-  roundel.rotation.z = Math.PI / 2;
-  const roundel2 = round(hull, new THREE.CylinderGeometry(0.16, 0.16, 0.02, 12), markingHex,
-    -0.63, 0.05, 0.2, VEHICLE_MAT, 0.15);
-  roundel2.rotation.z = Math.PI / 2;
+  // --- Faction markings: a band on the tail and a roundel on each flank ---
+  box(hull, markingHex, 0.11, 0.46, 0.18, 0, 0.62, CAB.backZ - 2.2);
+  for (const side of [-1, 1]) {
+    const roundel = round(hull, new THREE.CylinderGeometry(0.2, 0.2, 0.02, 12), markingHex,
+      side * (CAB.halfW + 0.13), -0.44, cabMidZ, VEHICLE_MAT, 0.15);
+    roundel.rotation.z = Math.PI / 2;
+  }
 
   // --- Rotors ---
-  const mast = round(hull, new THREE.CylinderGeometry(0.08, 0.1, 0.4, 8), STEEL_DARK, 0, 0.86, -0.2);
-  void mast;
+  round(hull, new THREE.CylinderGeometry(0.1, 0.13, 0.5, 8), STEEL_DARK,
+    0, CAB.roofY + 0.72, cabMidZ - 0.55);
   const mainRotor = new THREE.Group();
-  mainRotor.position.set(0, 1.06, -0.2);
-  round(mainRotor, new THREE.CylinderGeometry(0.14, 0.14, 0.14, 10), STEEL, 0, 0, 0);
+  mainRotor.position.set(0, CAB.roofY + 1.0, cabMidZ - 0.55);
+  round(mainRotor, new THREE.CylinderGeometry(0.17, 0.17, 0.16, 10), STEEL, 0, 0, 0);
   const blades = mark >= 3 ? 5 : 4;
   for (let i = 0; i < blades; i++) {
     const blade = new THREE.Group();
     blade.rotation.y = (i / blades) * Math.PI * 2;
-    const b = box(blade, 0x2f3238, 0.16, 0.035, 3.5, 0, 0, 1.72, ROTOR_MAT);
+    const b = box(blade, 0x2f3238, 0.2, 0.04, 4.4, 0, 0, 2.2, ROTOR_MAT);
     b.rotation.x = 0.06;   // a touch of pitch, so it reads as an aerofoil
-    box(blade, STEEL_DARK, 0.1, 0.05, 0.3, 0, 0, 0.22);   // blade root
+    box(blade, STEEL_DARK, 0.12, 0.06, 0.36, 0, 0, 0.28);   // blade root
     mainRotor.add(blade);
   }
   hull.add(mainRotor);
 
   const tailRotor = new THREE.Group();
-  tailRotor.position.set(0.18, 0.5, -2.42);
-  round(tailRotor, new THREE.CylinderGeometry(0.06, 0.06, 0.1, 8), STEEL, 0, 0, 0)
+  tailRotor.position.set(0.22, 0.62, CAB.backZ - 2.2);
+  round(tailRotor, new THREE.CylinderGeometry(0.07, 0.07, 0.12, 8), STEEL, 0, 0, 0)
     .rotation.z = Math.PI / 2;
   for (let i = 0; i < 3; i++) {
     const blade = new THREE.Group();
     blade.rotation.x = (i / 3) * Math.PI * 2;
-    box(blade, 0x2f3238, 0.03, 0.9, 0.1, 0, 0.45, 0, ROTOR_MAT);
+    box(blade, 0x2f3238, 0.035, 1.05, 0.12, 0, 0.52, 0, ROTOR_MAT);
     tailRotor.add(blade);
   }
   hull.add(tailRotor);
 
   // --- Running lights: red port, green starboard, white tail, red beacon ---
-  lights.push(round(hull, new THREE.SphereGeometry(0.06, 8, 6), 0xff4a3a, -0.66, 0.05, 0.55, GLOW_MAT, 0.8));
-  lights.push(round(hull, new THREE.SphereGeometry(0.06, 8, 6), 0x46e06a, 0.66, 0.05, 0.55, GLOW_MAT, 0.8));
-  lights.push(round(hull, new THREE.SphereGeometry(0.05, 8, 6), 0xffffff, 0, 0.2, -2.6, GLOW_MAT, 0.9));
-  lights.push(round(hull, new THREE.SphereGeometry(0.06, 8, 6), 0xff3a2a, 0, -0.56, -0.6, GLOW_MAT, 0.9));
+  // Port is local +X on a +Z-forward model, so the red light goes on +X.
+  lights.push(round(hull, new THREE.SphereGeometry(0.07, 8, 6), 0xff4a3a,
+    CAB.halfW + 0.14, -0.4, CAB.frontZ - 0.1, GLOW_MAT, 0.8));
+  lights.push(round(hull, new THREE.SphereGeometry(0.07, 8, 6), 0x46e06a,
+    -(CAB.halfW + 0.14), -0.4, CAB.frontZ - 0.1, GLOW_MAT, 0.8));
+  lights.push(round(hull, new THREE.SphereGeometry(0.06, 8, 6), 0xffffff,
+    0, 0.3, CAB.backZ - 2.42, GLOW_MAT, 0.9));
+  lights.push(round(hull, new THREE.SphereGeometry(0.08, 8, 6), 0xff3a2a,
+    0, -0.86, cabMidZ - 0.6, GLOW_MAT, 0.9));
 
   // --- Seats ---
   const seats = { pilot: new THREE.Group(), passenger: new THREE.Group() };
   for (const key of ['pilot', 'passenger'] as const) {
     const o = SEAT_OFFSETS[key];
     const seat = seats[key];
-    // The group is enlarged, but the authoritative seat positions are not.
-    // Divide the anchors by the model scale so their world offsets remain the
-    // same values used by VehicleSim and player replication.
-    seat.position.set(
-      o.x / HELICOPTER_MODEL_SCALE,
-      o.y / HELICOPTER_MODEL_SCALE,
-      o.z / HELICOPTER_MODEL_SCALE,
-    );
-    // The seat furniture itself, so an empty seat still looks like a cockpit.
-    box(seat, OLIVE_DARK, 0.42, 0.1, 0.42, 0, -0.2, 0);
-    box(seat, OLIVE_DARK, 0.42, 0.5, 0.1, 0, 0.05, -0.2);
+    seat.position.set(o.x, o.y, o.z);
+    // The seat furniture itself, so an empty cockpit still looks like a cockpit.
+    box(seat, OLIVE_DARK, 0.5, 0.11, 0.5, 0, 0, 0);              // pan
+    box(seat, OLIVE_DARK, 0.5, 0.86, 0.11, 0, 0.44, -0.28);      // back
+    box(seat, NEAR_BLACK, 0.44, 0.06, 0.42, 0, 0.06, 0.02);      // cushion
+    box(seat, markingHex, 0.34, 0.05, 0.06, 0, 0.3, -0.21);      // harness strap
     hull.add(seat);
   }
 
-  return { group, hull, mainRotor, tailRotor, seats, bombs, lights, tier };
+  return { group, hull, mainRotor, tailRotor, seats, bombs, lights, glazing, tier };
 }
+
 
 /** A falling bomb (the same silhouette as the ones on the rack). */
 export function buildBombModel(): THREE.Group {
@@ -411,13 +479,24 @@ export class VehicleModels {
     return e.model.seats[seat].getWorldPosition(new THREE.Vector3());
   }
 
-  /** Seated eye position inside the canopy, transformed by aircraft attitude. */
+  /** Seated eye position inside the cabin, transformed by aircraft attitude. */
   cockpitWorldPosition(heliId: number, seat: 'pilot' | 'passenger'): THREE.Vector3 | null {
     const e = this.helis.get(heliId);
     if (!e) return null;
-    return e.model.seats[seat].localToWorld(new THREE.Vector3(
-      0, 0.78 / HELICOPTER_MODEL_SCALE, 0.08 / HELICOPTER_MODEL_SCALE,
-    ));
+    return e.model.seats[seat].localToWorld(new THREE.Vector3(0, SEAT_EYE, 0.06));
+  }
+
+  /**
+   * Hide/show an airframe's glazing. The rider's OWN aircraft drops its glass
+   * while they are looking out of it in first person — tinted panels across the
+   * entire field of view are the single biggest reason the cockpit was hard to
+   * fly from, and everyone outside still sees a properly glazed helicopter.
+   */
+  setCockpitView(heliId: number | null): void {
+    for (const [id, e] of this.helis) {
+      const hide = id === heliId;
+      for (const g of e.model.glazing) g.visible = !hide;
+    }
   }
 
   snapshotOf(id: number): HelicopterSnapshot | null {

@@ -700,6 +700,9 @@ export function buildArmorOverlay(body: AvatarBody, armor: number[]): THREE.Mesh
 // its middle, and anything that must stay overhead is placed in the tilted
 // frame so it still ends up overhead in world space.
 const POSE_PIVOT_Y = 1.0;
+/** How far a vehicle-seated avatar drops so its HIPS land on the seat pan the
+ *  simulation reports, rather than its feet. Roughly a thigh. */
+export const SEAT_SINK = 0.52;
 const _v = new THREE.Vector3();
 const _q = new THREE.Quaternion();
 
@@ -1081,15 +1084,19 @@ export class RemotePlayers {
         av.healthSprite.position.y = 2.62;
         av.healthSprite.position.x = 0; av.healthSprite.position.z = 0;
       }
-      if (r.boating) {
-        // Seated in the hull: legs stretched forward, arms rowing out front.
+      if (r.boating || r.seated) {
+        // Seated: legs stretched forward, arms out to the controls. A vehicle
+        // seat additionally DROPS the whole body by a thigh's length, because
+        // the reported position is the seat pan and a body drawn standing on it
+        // puts the rider's head straight through the cabin roof.
         applyAvatarSneak(av.body, 0);
         av.group.rotation.x = 0;
         av.head.rotation.x = 0;
+        if (r.seated) av.group.position.y = av.dy - SEAT_SINK;
         av.parts[0].rotation.x = 1.35;
         av.parts[1].rotation.x = 1.35;
-        av.parts[2].rotation.x = 0.55;
-        av.parts[3].rotation.x = 0.55;
+        av.parts[2].rotation.x = r.seated ? 0.95 : 0.55;
+        av.parts[3].rotation.x = r.seated ? 0.95 : 0.55;
         av.parts[2].rotation.z = 0; av.parts[3].rotation.z = 0;
         if (av.body.cape) av.body.cape.rotation.x = -0.25;
       } else if (av.glideT > 0.01) {

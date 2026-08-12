@@ -465,24 +465,28 @@ export interface HelicopterStats {
   mark: 1 | 2 | 3;
 }
 
+// Fuel is quoted in oil barrels and the turbine drinks it: see HELI_FUEL_IDLE /
+// HELI_FUEL_BURN in vehicles.ts. A Mk I tank is roughly two minutes of hovering
+// or forty seconds of hard flying, so a sortie is a real logistics decision and
+// running dry over hostile ground drops you out of the sky.
 const HELI_TABLE: HelicopterStats[] = [
   // Mk I — Flight Certification.
-  { hp: 140, speed: 16, climb: 7, fuel: 12, bombs: 2, bombRadius: 4,
+  { hp: 140, speed: 16, climb: 7, fuel: 48, bombs: 2, bombRadius: 4,
     bombPlayerDamage: 10, bombHardwareDamage: 80, bombCooldown: 6, altitude: 64, mark: 1 },
   // Bomb Rack.
-  { hp: 140, speed: 16, climb: 7, fuel: 12, bombs: 3, bombRadius: 4,
+  { hp: 140, speed: 16, climb: 7, fuel: 48, bombs: 3, bombRadius: 4,
     bombPlayerDamage: 10, bombHardwareDamage: 80, bombCooldown: 5, altitude: 64, mark: 1 },
   // Reinforced Airframe.
-  { hp: 170, speed: 16, climb: 7, fuel: 16, bombs: 3, bombRadius: 4,
+  { hp: 170, speed: 16, climb: 7, fuel: 60, bombs: 3, bombRadius: 4,
     bombPlayerDamage: 10, bombHardwareDamage: 80, bombCooldown: 5, altitude: 64, mark: 1 },
   // Turbine II.
-  { hp: 190, speed: 20, climb: 9, fuel: 18, bombs: 3, bombRadius: 4,
+  { hp: 190, speed: 20, climb: 9, fuel: 72, bombs: 3, bombRadius: 4,
     bombPlayerDamage: 10, bombHardwareDamage: 80, bombCooldown: 5, altitude: 96, mark: 2 },
   // Heavy Bomb Bay — the plan's "Mk II" column.
-  { hp: 190, speed: 20, climb: 9, fuel: 18, bombs: 4, bombRadius: 5,
+  { hp: 190, speed: 20, climb: 9, fuel: 72, bombs: 4, bombRadius: 5,
     bombPlayerDamage: 12, bombHardwareDamage: 100, bombCooldown: 5, altitude: 96, mark: 2 },
   // Air Command III — the plan's "Mk III" column.
-  { hp: 220, speed: 24, climb: 11, fuel: 24, bombs: 5, bombRadius: 6,
+  { hp: 220, speed: 24, climb: 11, fuel: 96, bombs: 5, bombRadius: 6,
     bombPlayerDamage: 14, bombHardwareDamage: 130, bombCooldown: 4, altitude: 128, mark: 3 },
 ];
 
