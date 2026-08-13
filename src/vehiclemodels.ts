@@ -46,8 +46,12 @@ const AMBER = 0xe6a83a;
  * cabin was too short to actually contain a person.)
  */
 const HELICOPTER_MODEL_SCALE = 1;
-/** Seat-pan → eye height for someone strapped into a seat. */
-const SEAT_EYE = 0.95;
+/** Seat-pan → eye height for someone strapped into a seat. Sitting a little
+ *  taller clears the nose line, which is what you are really aiming over. */
+const SEAT_EYE = 1.02;
+/** …and a little further forward, so the eye sits AT the windscreen instead of
+ *  a seat-back's length behind it. The nose stays in view either way. */
+const COCKPIT_EYE_FWD = 0.34;
 
 function paintFaces(geo: THREE.BufferGeometry, hex: number): THREE.BufferGeometry {
   const color = new THREE.Color(hex);
@@ -121,6 +125,15 @@ export interface HelicopterModel {
   /** Glazing. Hidden for whoever is sitting inside in first person, so the
    *  pilot flies through open apertures instead of through tinted panels. */
   glazing: THREE.Object3D[];
+  /**
+   * Everything that only ever gets in the way of the person strapped INSIDE:
+   * roof, pillars, waist panels, floor, bulkhead, engine deck and the whole
+   * instrument shelf. Hidden alongside the glazing for the rider's own airframe
+   * in first person, which turns a cramped box with letterbox apertures into an
+   * open gunship seat — you can look straight down at what you are bombing and
+   * straight up at the rotor. Everyone else still sees a complete helicopter.
+   */
+  interior: THREE.Object3D[];
   tier: number;
 }
 
@@ -150,6 +163,9 @@ export function buildHelicopterModel(tier: number, markingHex: number): Helicopt
   group.scale.setScalar(HELICOPTER_MODEL_SCALE);
   const lights: THREE.Mesh[] = [];
   const glazing: THREE.Object3D[] = [];
+  const interior: THREE.Object3D[] = [];
+  /** Tag a part as cabin furniture — invisible to the person sitting in it. */
+  const inner = <T extends THREE.Object3D>(o: T): T => { interior.push(o); return o; };
 
   // Cabin envelope. Everything else is positioned off these six numbers so the
   // interior stays a coherent, person-sized room.
@@ -165,24 +181,32 @@ export function buildHelicopterModel(tier: number, markingHex: number): Helicopt
   const cabMidZ = (CAB.frontZ + CAB.backZ) / 2;
 
   // --- Cabin shell ---
-  box(hull, OLIVE_DARK, CAB.halfW * 2 + 0.16, 0.14, cabLen + 0.2, 0, CAB.floorY - 0.07, cabMidZ);
-  box(hull, OLIVE, CAB.halfW * 2 + 0.06, 0.06, cabLen, 0, CAB.floorY + 0.02, cabMidZ); // deck plate
+  // The floor goes in the interior list too: a bombing run is flown looking
+  // STRAIGHT DOWN, and a deck plate between the pilot and the target is the
+  // most obstructive panel on the whole airframe.
+  inner(box(hull, OLIVE_DARK, CAB.halfW * 2 + 0.16, 0.14, cabLen + 0.2,
+    0, CAB.floorY - 0.07, cabMidZ));
+  inner(box(hull, OLIVE, CAB.halfW * 2 + 0.06, 0.06, cabLen,
+    0, CAB.floorY + 0.02, cabMidZ)); // deck plate
   // Waist panels down each side (the door is the aperture ABOVE them).
   for (const side of [-1, 1]) {
-    box(hull, OLIVE, 0.12, -0.16 - CAB.floorY, cabLen, side * (CAB.halfW + 0.06), wallY, cabMidZ);
-    box(hull, OLIVE_LIGHT, 0.14, 0.07, cabLen, side * (CAB.halfW + 0.06), -0.13, cabMidZ); // sill rail
+    inner(box(hull, OLIVE, 0.12, -0.16 - CAB.floorY, cabLen,
+      side * (CAB.halfW + 0.06), wallY, cabMidZ));
+    inner(box(hull, OLIVE_LIGHT, 0.14, 0.07, cabLen,
+      side * (CAB.halfW + 0.06), -0.13, cabMidZ)); // sill rail
     // Corner pillars only — the middle of each doorway stays wide open.
-    box(hull, OLIVE_DARK, 0.11, CAB.roofY + 0.2, 0.12,
-      side * (CAB.halfW + 0.04), (CAB.roofY - 0.16) / 2, CAB.backZ + 0.1);
-    box(hull, OLIVE_DARK, 0.10, CAB.roofY + 0.2, 0.11,
-      side * (CAB.halfW + 0.02), (CAB.roofY - 0.16) / 2, CAB.frontZ - 0.06);
-    box(hull, OLIVE_DARK, 0.11, 0.11, cabLen, side * (CAB.halfW + 0.02), CAB.roofY + 0.02, cabMidZ);
+    inner(box(hull, OLIVE_DARK, 0.11, CAB.roofY + 0.2, 0.12,
+      side * (CAB.halfW + 0.04), (CAB.roofY - 0.16) / 2, CAB.backZ + 0.1));
+    inner(box(hull, OLIVE_DARK, 0.10, CAB.roofY + 0.2, 0.11,
+      side * (CAB.halfW + 0.02), (CAB.roofY - 0.16) / 2, CAB.frontZ - 0.06));
+    inner(box(hull, OLIVE_DARK, 0.11, 0.11, cabLen,
+      side * (CAB.halfW + 0.02), CAB.roofY + 0.02, cabMidZ));
   }
   // Roof + rear bulkhead close the box off.
-  box(hull, OLIVE, CAB.halfW * 2 + 0.2, 0.13, cabLen - 0.5, 0, CAB.roofY + 0.07, cabMidZ - 0.16);
-  box(hull, OLIVE_LIGHT, CAB.halfW * 2 + 0.1, 0.05, cabLen - 0.8, 0, CAB.roofY + 0.15, cabMidZ - 0.2);
-  box(hull, OLIVE, CAB.halfW * 2 + 0.16, CAB.roofY - CAB.floorY + 0.2, 0.14,
-    0, (CAB.roofY + CAB.floorY) / 2, CAB.backZ - 0.06);
+  inner(box(hull, OLIVE, CAB.halfW * 2 + 0.2, 0.13, cabLen - 0.5, 0, CAB.roofY + 0.07, cabMidZ - 0.16));
+  inner(box(hull, OLIVE_LIGHT, CAB.halfW * 2 + 0.1, 0.05, cabLen - 0.8, 0, CAB.roofY + 0.15, cabMidZ - 0.2));
+  inner(box(hull, OLIVE, CAB.halfW * 2 + 0.16, CAB.roofY - CAB.floorY + 0.2, 0.14,
+    0, (CAB.roofY + CAB.floorY) / 2, CAB.backZ - 0.06));
 
   // --- Glazing: door windows + a wide one-piece windscreen ---
   for (const side of [-1, 1]) {
@@ -196,8 +220,8 @@ export function buildHelicopterModel(tier: number, markingHex: number): Helicopt
   // Thin A-pillars at the outer edges of the screen — deliberately NOT down the
   // middle, which is exactly where a pilot needs to be able to see.
   for (const side of [-1, 1]) {
-    const pillar = box(hull, OLIVE_DARK, 0.09, 1.78, 0.09,
-      side * (CAB.halfW + 0.01), 0.16, CAB.frontZ + 0.28);
+    const pillar = inner(box(hull, OLIVE_DARK, 0.09, 1.78, 0.09,
+      side * (CAB.halfW + 0.01), 0.16, CAB.frontZ + 0.28));
     pillar.rotation.x = -0.46;
   }
 
@@ -210,24 +234,25 @@ export function buildHelicopterModel(tier: number, markingHex: number): Helicopt
   box(hull, OLIVE_DARK, CAB.halfW * 1.8, 0.12, 0.6, 0, -0.76, CAB.frontZ + 0.3);
 
   // --- Cockpit furniture (low enough to frame the view, never fill it) ---
-  box(hull, OLIVE_DARK, CAB.halfW * 1.9, 0.13, 0.42, 0, -0.18, CAB.frontZ - 0.18);  // coaming
-  const cluster = box(hull, NEAR_BLACK, 1.24, 0.30, 0.05, 0, -0.05, CAB.frontZ - 0.34);
+  inner(box(hull, OLIVE_DARK, CAB.halfW * 1.9, 0.13, 0.42, 0, -0.18, CAB.frontZ - 0.18)); // coaming
+  const cluster = inner(box(hull, NEAR_BLACK, 1.24, 0.30, 0.05, 0, -0.05, CAB.frontZ - 0.34));
   cluster.rotation.x = 0.55;
   for (const dx of [-0.4, -0.14, 0.14, 0.4]) {
-    const dial = round(hull, new THREE.CylinderGeometry(0.055, 0.055, 0.02, 10), 0x6ff0c0,
-      dx, -0.02, CAB.frontZ - 0.37, GLOW_MAT, 0.6);
+    const dial = inner(round(hull, new THREE.CylinderGeometry(0.055, 0.055, 0.02, 10), 0x6ff0c0,
+      dx, -0.02, CAB.frontZ - 0.37, GLOW_MAT, 0.6));
     dial.rotation.x = Math.PI / 2 + 0.55;
   }
   // Collective/cyclic sticks between the seats, so the cabin reads as flown.
   for (const side of [-1, 1]) {
-    round(hull, new THREE.CylinderGeometry(0.035, 0.045, 0.5, 6), NEAR_BLACK,
-      side * 0.46, CAB.floorY + 0.3, CAB.frontZ - 0.62);
+    inner(round(hull, new THREE.CylinderGeometry(0.035, 0.045, 0.5, 6), NEAR_BLACK,
+      side * 0.46, CAB.floorY + 0.3, CAB.frontZ - 0.62));
   }
 
   // --- Armoured cheeks + chin turret (Mk III) ---
   if (mark >= 3) {
     for (const side of [-1, 1]) {
-      box(hull, STEEL_DARK, 0.2, 0.62, 1.0, side * (CAB.halfW + 0.16), -0.42, CAB.frontZ - 0.2);
+      inner(box(hull, STEEL_DARK, 0.2, 0.62, 1.0,
+        side * (CAB.halfW + 0.16), -0.42, CAB.frontZ - 0.2));
     }
     const chin = round(hull, new THREE.SphereGeometry(0.26, 10, 8), STEEL_DARK,
       0, -0.82, CAB.frontZ + 0.5);
@@ -236,11 +261,12 @@ export function buildHelicopterModel(tier: number, markingHex: number): Helicopt
   }
 
   // --- Engine deck + intakes, sitting on top of the cabin roof ---
-  box(hull, OLIVE_DARK, 1.15, 0.42, 1.3, 0, CAB.roofY + 0.32, cabMidZ - 0.55);
+  // Hidden with the roof: with the roof gone it would be the new ceiling.
+  inner(box(hull, OLIVE_DARK, 1.15, 0.42, 1.3, 0, CAB.roofY + 0.32, cabMidZ - 0.55));
   if (mark >= 2) {
     for (const side of [-1, 1]) {
-      round(hull, new THREE.CylinderGeometry(0.16, 0.16, 0.46, 8), NEAR_BLACK,
-        side * 0.42, CAB.roofY + 0.4, cabMidZ - 0.05).rotation.x = Math.PI / 2;
+      inner(round(hull, new THREE.CylinderGeometry(0.16, 0.16, 0.46, 8), NEAR_BLACK,
+        side * 0.42, CAB.roofY + 0.4, cabMidZ - 0.05)).rotation.x = Math.PI / 2;
     }
   }
   for (const ex of mark >= 3 ? [-0.34, 0.34] : [0]) {
@@ -348,7 +374,7 @@ export function buildHelicopterModel(tier: number, markingHex: number): Helicopt
     hull.add(seat);
   }
 
-  return { group, hull, mainRotor, tailRotor, seats, bombs, lights, glazing, tier };
+  return { group, hull, mainRotor, tailRotor, seats, bombs, lights, glazing, interior, tier };
 }
 
 
@@ -376,19 +402,63 @@ function disposeTree(root: THREE.Object3D): void {
   });
 }
 
+/**
+ * MOTION SMOOTHING — why this is not a plain lerp between snapshots.
+ *
+ * The wire carries a POSE at a fixed, fairly slow rate; frames are drawn far
+ * more often than that. The old code re-based a 0→1 lerp on every snapshot and
+ * advanced it at a fixed rate, so the airframe raced to the last known position
+ * and then SAT STILL until the next packet — motion, stall, jump, motion,
+ * stall. From the cockpit (where the camera is bolted to the aircraft) that
+ * reads as the whole world juddering, which is exactly the "laggy" feel.
+ *
+ * Instead each airframe carries an estimated velocity, differentiated from
+ * consecutive snapshots. Between packets the render target keeps MOVING along
+ * that velocity, so the aircraft never stalls, and the drawn pose chases the
+ * target with a frame-rate-independent exponential follow that absorbs the
+ * correction whenever the estimate was wrong. Attitude gets the same treatment
+ * with shortest-way-round angle wrapping, so a turn no longer snaps 10 times a
+ * second.
+ */
 interface HeliEntry {
   model: HelicopterModel;
   snap: HelicopterSnapshot;
-  from: THREE.Vector3;
-  to: THREE.Vector3;
-  blend: number;
+  /** Last authoritative position + the pose drawn this frame. */
+  target: THREE.Vector3;
+  pos: THREE.Vector3;
+  /** Blocks/second, differentiated from the last two snapshots. */
+  vel: THREE.Vector3;
+  /** Seconds since the last snapshot, and the smoothed gap between them. */
+  sinceSnap: number;
+  gap: number;
+  /** Drawn attitude, chasing the snapshot's. */
+  yaw: number;
+  pitch: number;
+  roll: number;
+  /** Radians/second of yaw, so a sustained turn extrapolates too. */
+  yawRate: number;
   rotorPhase: number;
   smokeAccum: number;
   /** Avatars currently parented into the seats, so they can be detached. */
   riders: { pilot: THREE.Object3D | null; passenger: THREE.Object3D | null };
 }
 
+/** Never extrapolate further than this past the last packet (a stop or a wall
+ *  would otherwise fling the airframe on into open air). */
+const EXTRAPOLATE_CAP = 0.22;
+/** Beyond this the pose is teleporting, not flying — jump, don't glide. */
+const TELEPORT_DIST = 12;
+
+/** Shortest signed way round from `a` to `b`. */
+function angleDelta(a: number, b: number): number {
+  return Math.atan2(Math.sin(b - a), Math.cos(b - a));
+}
+
 interface Smoke { mesh: THREE.Mesh; ttl: number; life: number; drift: THREE.Vector3 }
+
+/** Scratch vectors — sync/update run every frame for every airframe. */
+const _tmp = new THREE.Vector3();
+const _predict = new THREE.Vector3();
 
 export class VehicleModels {
   private readonly helis = new Map<number, HeliEntry>();
@@ -416,16 +486,38 @@ export class VehicleModels {
         this.scene.add(model.group);
         e = {
           model, snap,
-          from: new THREE.Vector3(snap.x, snap.y, snap.z),
-          to: new THREE.Vector3(snap.x, snap.y, snap.z),
-          blend: 1, rotorPhase: 0, smokeAccum: 0,
+          target: new THREE.Vector3(snap.x, snap.y, snap.z),
+          pos: new THREE.Vector3(snap.x, snap.y, snap.z),
+          vel: new THREE.Vector3(),
+          sinceSnap: 0, gap: 0.1,
+          yaw: snap.yaw, pitch: snap.pitch, roll: snap.roll, yawRate: 0,
+          rotorPhase: 0, smokeAccum: 0,
           riders: { pilot: null, passenger: null },
         };
+        e.model.hull.rotation.order = 'YXZ';
         this.helis.set(snap.id, e);
+      } else if (e.sinceSnap > 1e-4) {
+        // Differentiate the packet stream. The gap is measured rather than
+        // assumed so this behaves identically at the server's snapshot rate and
+        // in the offline sim, which "snapshots" every single frame.
+        const dt = e.sinceSnap;
+        e.gap += (Math.min(0.35, dt) - e.gap) * 0.35;
+        const moved = e.target.distanceTo(_tmp.set(snap.x, snap.y, snap.z));
+        if (moved > TELEPORT_DIST) {
+          e.vel.set(0, 0, 0);
+          e.pos.set(snap.x, snap.y, snap.z);
+          e.yaw = snap.yaw; e.pitch = snap.pitch; e.roll = snap.roll; e.yawRate = 0;
+        } else {
+          // Half-weight the new estimate: rounded positions over a short gap
+          // are noisy, and a jumpy velocity is worse than a slightly late one.
+          _tmp.set(snap.x - e.target.x, snap.y - e.target.y, snap.z - e.target.z)
+            .divideScalar(dt);
+          e.vel.lerp(_tmp, 0.5);
+          e.yawRate += (angleDelta(e.snap.yaw, snap.yaw) / dt - e.yawRate) * 0.5;
+        }
       }
-      e.from.copy(e.model.group.position);
-      e.to.set(snap.x, snap.y, snap.z);
-      e.blend = 0;
+      e.target.set(snap.x, snap.y, snap.z);
+      e.sinceSnap = 0;
       e.snap = snap;
     }
     for (const id of [...this.helis.keys()]) if (!seen.has(id)) this.remove(id);
@@ -483,19 +575,24 @@ export class VehicleModels {
   cockpitWorldPosition(heliId: number, seat: 'pilot' | 'passenger'): THREE.Vector3 | null {
     const e = this.helis.get(heliId);
     if (!e) return null;
-    return e.model.seats[seat].localToWorld(new THREE.Vector3(0, SEAT_EYE, 0.06));
+    const anchor = e.model.seats[seat];
+    anchor.updateWorldMatrix(true, false);
+    return anchor.localToWorld(new THREE.Vector3(0, SEAT_EYE, COCKPIT_EYE_FWD));
   }
 
   /**
-   * Hide/show an airframe's glazing. The rider's OWN aircraft drops its glass
-   * while they are looking out of it in first person — tinted panels across the
-   * entire field of view are the single biggest reason the cockpit was hard to
-   * fly from, and everyone outside still sees a properly glazed helicopter.
+   * Hide/show an airframe's cabin for the person sitting in it. The rider's OWN
+   * aircraft drops its glass AND its cabin furniture while they are looking out
+   * of it in first person: tinted panels, a roof, waist panels and a deck plate
+   * across the entire field of view are the reason the cockpit was hard to fly
+   * from, and none of it is information the pilot needs. Everyone outside still
+   * sees a complete, properly glazed helicopter.
    */
   setCockpitView(heliId: number | null): void {
     for (const [id, e] of this.helis) {
       const hide = id === heliId;
       for (const g of e.model.glazing) g.visible = !hide;
+      for (const g of e.model.interior) g.visible = !hide;
     }
   }
 
@@ -560,13 +657,32 @@ export class VehicleModels {
     this.clock += dt;
     for (const e of this.helis.values()) {
       const { model, snap } = e;
-      e.blend = Math.min(1, e.blend + dt * 10);
-      model.group.position.lerpVectors(e.from, e.to, e.blend);
-      // Attitude comes straight from the server flight state.
-      model.hull.rotation.order = 'YXZ';
-      model.hull.rotation.y = snap.yaw;
-      model.hull.rotation.x = snap.pitch;
-      model.hull.rotation.z = snap.roll;
+      e.sinceSnap += dt;
+
+      // Where the airframe should be RIGHT NOW: last packet, carried forward
+      // along its own velocity (capped, so a sudden stop can only ever overshoot
+      // by a fraction of a second's travel).
+      const lead = Math.min(e.sinceSnap, EXTRAPOLATE_CAP);
+      _predict.copy(e.target).addScaledVector(e.vel, lead);
+      // Follow rate scales with the packet gap: sparse updates are eased, and
+      // the offline sim — which produces a fresh pose every single frame, with
+      // nothing to smooth away — is simply drawn where it says it is.
+      const follow = e.gap < 0.03 ? 1
+        : 1 - Math.exp(-dt * THREE.MathUtils.clamp(2 / e.gap, 10, 60));
+      e.pos.lerp(_predict, follow);
+      model.group.position.copy(e.pos);
+
+      // Attitude chases the server's the same way, the short way round.
+      e.yaw += angleDelta(e.yaw, snap.yaw + e.yawRate * lead) * follow;
+      e.pitch += angleDelta(e.pitch, snap.pitch) * follow;
+      e.roll += angleDelta(e.roll, snap.roll) * follow;
+      model.hull.rotation.y = e.yaw;
+      model.hull.rotation.x = e.pitch;
+      model.hull.rotation.z = e.roll;
+      // Seats are read back out for the rider's camera in the SAME frame, so
+      // the matrices have to be current — otherwise the cockpit view lags the
+      // airframe it is bolted to by one frame and jitters against the world.
+      model.group.updateMatrixWorld(true);
 
       // Rotor speed: full while flown, winding DOWN once the wreck is falling.
       const dying = snap.dying > 0;

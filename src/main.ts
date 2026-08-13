@@ -161,6 +161,12 @@ const enum View { First = 0, Back = 1, Front = 2 }
 const VIEW_NAMES = ['First person', 'Third person (back)', 'Third person (front)'];
 let view: View = View.First;
 const VIEW_DIST = 4.0;       // how far the boom reaches when nothing blocks it
+// Aboard a helicopter the boom has a whole airframe to clear before it sees
+// anything: at walking distance the camera sits inside the tail. A chase view
+// that actually frames the aircraft is the best answer to "I can't see out",
+// so V from the cockpit gives you a proper gunship chase cam.
+const VIEW_DIST_SEATED = 9.0;
+const VIEW_LIFT_SEATED = 1.6;  // and rides above the rotor disc, looking down
 const viewCamera = new THREE.PerspectiveCamera(
   FOV, window.innerWidth / window.innerHeight, 0.08, 2000
 );
@@ -3617,12 +3623,18 @@ function triggerEncounterShake(duration: number, strength: number): void {
     strength * accessibility.cameraShake);
 }
 
+/** This frame's shake offset, remembered so a camera repositioned later in the
+ *  frame (the helicopter seat) can re-apply it instead of cancelling it. */
+const shakeOffset = new THREE.Vector2();
+
 function updateEncounterShake(dt: number): void {
+  shakeOffset.set(0, 0);
   if (encounterShakeTime <= 0 || accessibility.reducedMotion) return;
   encounterShakeTime = Math.max(0, encounterShakeTime - dt);
   const fade = Math.min(1, encounterShakeTime * 4);
   const x = Math.sin(worldTimeLocal * 79) * encounterShakeStrength * fade;
   const y = Math.cos(worldTimeLocal * 63) * encounterShakeStrength * fade * 0.65;
+  shakeOffset.set(x, y);
   camera.position.x += x;
   camera.position.y += y;
   if (view !== View.First) {
@@ -4796,6 +4808,7 @@ function updateVaultCinematicCamera(): void {
 
 const boomDir = new THREE.Vector3();
 const boomProbe = new THREE.Vector3();
+const boomEye = new THREE.Vector3();
 
 /**
  * Place the third-person render camera on a boom out of the player's eye.
@@ -4806,7 +4819,15 @@ const boomProbe = new THREE.Vector3();
  */
 function updateViewCamera(): void {
   const front = view === View.Front;
-  const eye = player.eyePosition;
+  // Seated, the boom hangs off the COCKPIT eye rather than the player capsule's
+  // — they are the same place, but only one of them is smoothed with the
+  // airframe — and rides a little higher, over the rotor disc.
+  const seatEye = mySeat
+    ? vehicleModels.cockpitWorldPosition(mySeat.id, mySeat.seat)
+    : null;
+  const seated = !!seatEye;
+  const eye = boomEye.copy(seatEye ?? player.eyePosition);
+  if (seated) eye.y += VIEW_LIFT_SEATED;
   viewCamera.fov = camera.fov;
   viewCamera.rotation.set(
     front ? -player.pitch : player.pitch,
@@ -4816,8 +4837,9 @@ function updateViewCamera(): void {
   viewCamera.updateProjectionMatrix();
   // The boom runs straight backwards out of the camera's own facing.
   boomDir.set(0, 0, 1).applyQuaternion(viewCamera.quaternion);
-  let dist = VIEW_DIST;
-  for (let d = 0.4; d <= VIEW_DIST; d += 0.25) {
+  const reach = seated ? VIEW_DIST_SEATED : VIEW_DIST;
+  let dist = reach;
+  for (let d = 0.4; d <= reach; d += 0.25) {
     boomProbe.copy(eye).addScaledVector(boomDir, d);
     if (isSolid(world.getBlock(
       Math.floor(boomProbe.x), Math.floor(boomProbe.y), Math.floor(boomProbe.z)
@@ -4828,6 +4850,12 @@ function updateViewCamera(): void {
 
 /** V: cycle first person → third-person back → third-person front. */
 function cycleView(): void {
+  // Riding always uses the rear chase camera. Do not let keyboard, mouse or
+  // touch view controls put the camera back in the cockpit or in front.
+  if (mySeat) {
+    view = View.Back;
+    return;
+  }
   view = ((view + 1) % 3) as View;
   showNotice(`🎥 ${VIEW_NAMES[view]}`);
   if (view === View.First) hideSelfAvatar();
@@ -4924,6 +4952,12 @@ function updateSelfAvatar(dt: number): void {
     b.parts[2].rotation.x = arms; b.parts[3].rotation.x = arms;
     b.parts[2].rotation.z = 0; b.parts[3].rotation.z = 0;
     if (b.cape) b.cape.rotation.x = -0.25;
+    // The seat banks and pitches with the helicopter. Inheriting its complete
+    // attitude keeps the rider inside the cabin when A/D rolls the airframe.
+    if (mySeat) {
+      const heli = vehicleModels.snapshotOf(mySeat.id);
+      if (heli) b.group.rotation.set(heli.pitch, heli.yaw, heli.roll, 'YXZ');
+    }
   } else if (selfGlideT > 0.01) {
     // Hanging under the wing (the rig itself is placed by updateGliderRig).
     applyAvatarSneak(b, 0);
@@ -6238,8 +6272,9 @@ function serviceHeli(
  */
 function setSeat(next: { id: number; seat: SeatKind } | null): void {
   mySeat = next;
+  if (next) view = View.Back;
   vehicleHud.setSeat(next?.seat ?? null);
-  vehicleModels.setCockpitView(next && view === View.First ? next.id : null);
+  vehicleModels.setCockpitView(null);
 }
 
 /** Wreck presentation, scaled to how the airframe was lost. */
@@ -6675,6 +6710,13 @@ function updateWarfare(dt: number): void {
     player.fallDistance = 0;
   }
 
+  // The camera was placed from the pose this airframe had at the START of the
+  // frame, several hundred lines ago — but the pose has just moved. Re-seating
+  // the camera on the CURRENT pose is what stops the world sliding a frame
+  // behind the aircraft carrying it, which is most of the judder you feel from
+  // the cockpit even when the aircraft itself is drawn perfectly smoothly.
+  refreshSeatCamera();
+
   // Instruments. Airspeed is differentiated from the snapshot stream (the wire
   // carries a pose, not a velocity) and smoothed so the needle does not buzz.
   const rawSpeed = heliAirspeed(heli);
@@ -6682,13 +6724,16 @@ function updateWarfare(dt: number): void {
   vehicleHud.update(dt, heli, heliSpeedSmoothed,
     heli.y - warfareGroundY(heli.x, heli.z), tierLabel(heli.tier));
   // Drop our own glazing only while we are actually looking out of the canopy.
-  vehicleModels.setCockpitView(view === View.First ? mySeat.id : null);
+  vehicleModels.setCockpitView(null);
 
   if (mySeat.seat !== 'pilot') return;
   // Pilot input at the transform rate — WASD horizontal, Space/Shift vertical,
   // camera yaw steers.
+  // 30 Hz, comfortably above the server's 20 Hz flight tick: a control change
+  // then waits at most a third of a tick to be picked up instead of a whole
+  // one, which is the cheapest latency there is to buy back.
   heliInputAccum += dt;
-  if (heliInputAccum >= 1 / 20) {
+  if (heliInputAccum >= 1 / 30) {
     heliInputAccum = 0;
     const fwd = (input.forward ? 1 : 0) - (input.back ? 1 : 0);
     const side = (input.right ? 1 : 0) - (input.left ? 1 : 0);
@@ -6697,6 +6742,27 @@ function updateWarfare(dt: number): void {
     const heading = viewYawToHeliYaw(player.yaw);
     if (net.connected) net.sendHeliInput(fwd, side, lift, heading, seq);
     else offlineVehicles.setInput(0, { forward: fwd, strafe: side, lift, yaw: heading, seq });
+  }
+}
+
+/**
+ * Put the camera back on the seat after the airframe has been advanced for this
+ * frame. Mirrors what updateCamera() does for the seat case, and re-applies the
+ * shake this frame already added, so nothing is lost by running later. The two
+ * cameras that deliberately take the whole screen — a missile's nose and a
+ * vault cutscene — are never overridden.
+ */
+function refreshSeatCamera(): void {
+  if (!mySeat || missileCam.active || vaultCinematic.frame) return;
+  const eye = vehicleModels.cockpitWorldPosition(mySeat.id, mySeat.seat);
+  if (!eye) return;
+  camera.position.copy(eye);
+  camera.position.x += shakeOffset.x;
+  camera.position.y += shakeOffset.y;
+  if (view !== View.First) {
+    updateViewCamera();
+    viewCamera.position.x += shakeOffset.x;
+    viewCamera.position.y += shakeOffset.y;
   }
 }
 

@@ -855,6 +855,34 @@ const check = (condition: boolean, message: string): void => {
   }
 }
 
+// --- Aircraft are broadcast on EVERY flight tick ------------------------------------
+{
+  // A helicopter carries the camera of whoever is flying it, so its snapshot
+  // rate IS that player's frame rate as far as the ride feels. Anything slower
+  // than the 20 Hz flight tick leaves the client inventing motion between
+  // packets, which is what made flying feel like a slideshow — so every tick
+  // with an airframe in the world must carry a pose for it.
+  const g = new GameServer(1337, mulberry32(47));
+  g.addPlayer(1, { username: 'Flyer', faction: 0, warfare: { version: 1, xp: 9000, nodes: [] } });
+  for (const n of WARFARE_TREE) g.handle(1, { t: 'warfareBuy', node: n.id });
+  g.handle(1, { t: 'xform', x: 400, y: 70, z: 400, yaw: 0, pitch: 0 });
+  g.handle(1, { t: 'edit', x: 401, y: 70, z: 401, block: Block.Helipad });
+  g.handle(1, { t: 'heliSpawn', x: 401, y: 70, z: 401 });
+  let ticks = 0;
+  let carried = 0;
+  for (let i = 0; i < 20; i++) {
+    ticks++;
+    if (g.tickWarfare(0.05).some((o) => o.msg.t === 'helis')) carried++;
+  }
+  check(carried === ticks,
+    `every flight tick carries an aircraft pose (${carried}/${ticks})`);
+
+  // …and an empty sky costs nothing: no airframes, no snapshot traffic.
+  const quiet = new GameServer(1337, mulberry32(48));
+  check(!quiet.tickWarfare(0.05).some((o) => o.msg.t === 'helis'),
+    'but a sky with nothing in it broadcasts no aircraft at all');
+}
+
 // --- Blast damage lands ONCE, mitigated ONCE ---------------------------------------
 {
   // The server's applyDamage() runs armor mitigation itself, so the blast path

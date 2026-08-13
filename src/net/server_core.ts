@@ -1669,9 +1669,15 @@ export class GameServer {
       if (this.strategic.missiles.size) {
         out.push({ to: 'all', msg: { t: 'missiles', list: this.strategic.snapshotMissiles() } });
       }
-      if (this.vehicles.helicopters.size || this.vehicles.bombs.size) {
-        out.push(...this.heliBroadcast());
-      }
+    }
+    // Aircraft go out on EVERY tick (20 Hz), not on the 10 Hz strategic beat a
+    // missile is happy with. A helicopter carries the camera of whoever is
+    // flying it, so its update rate is a framerate as far as that player is
+    // concerned — at 10 Hz the client had to invent a tenth of a second of
+    // motion between packets and the ride felt like a slideshow. The payload is
+    // a handful of small poses and only exists while something is airborne.
+    if (this.vehicles.helicopters.size || this.vehicles.bombs.size) {
+      out.push(...this.heliBroadcast());
     }
     return out;
   }

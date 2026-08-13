@@ -24,6 +24,38 @@ interface Gauge {
   value: HTMLSpanElement;
 }
 
+/**
+ * The seat's controls, in the corner, for as long as you are in that seat.
+ *
+ * Flying rebinds most of the game: WASD stops being walking, right-click stops
+ * placing blocks and starts releasing ordnance, and F — a key that does nothing
+ * on foot — is the only way out. None of that is guessable, and a notice that
+ * scrolled past when you climbed in is no help ten minutes later, so the seat's
+ * own bindings stay on screen the whole time you are strapped in.
+ *
+ * Each entry is [keys, what it does]; the two seats fly completely differently,
+ * so each gets its own list rather than one list with caveats.
+ */
+const PILOT_CONTROLS: ReadonlyArray<readonly [string, string]> = [
+  ['W / S', 'Fly forward / back'],
+  ['A / D', 'Slide left / right'],
+  ['Mouse', 'Steer the nose'],
+  ['Space', 'Climb'],
+  ['Shift', 'Descend'],
+  ['R-click', 'Drop a bomb'],
+  ['V', 'Cockpit ↔ chase cam'],
+  ['F', 'Step down'],
+];
+
+const GUNNER_CONTROLS: ReadonlyArray<readonly [string, string]> = [
+  ['Mouse', 'Aim (forward arc only)'],
+  ['L-click', 'Fire your weapon'],
+  ['R', 'Reload'],
+  ['1 … 9', 'Switch weapon'],
+  ['V', 'Cabin ↔ chase cam'],
+  ['F', 'Step down'],
+];
+
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K, css: string, parent?: HTMLElement,
 ): HTMLElementTagNameMap[K] {
@@ -43,6 +75,9 @@ export class VehicleHUD {
   private readonly bombPips: HTMLDivElement[] = [];
   private readonly readout: HTMLDivElement;
   private readonly caption: HTMLDivElement;
+  private readonly controls: HTMLDivElement;
+  private readonly controlsTitle: HTMLDivElement;
+  private readonly controlsBody: HTMLDivElement;
   private seat: SeatKind | null = null;
   private clock = 0;
   private lastBombCount = -1;
@@ -74,6 +109,40 @@ export class VehicleHUD {
       'display:flex;gap:14px;font-size:10px;color:#7f93b3;letter-spacing:0.6px;', this.root);
     this.caption = el('div',
       'font-size:11px;letter-spacing:1.2px;min-height:13px;color:#ff5c4d;', this.root);
+
+    // --- Controls card, bottom-right, clear of the hotbar and the status bars ---
+    this.controls = el('div', [
+      'position:absolute;right:12px;z-index:12;',
+      'bottom:calc(var(--hotbar-slot, 44px) + 18px + var(--safe-bottom, 0px));',
+      'display:none;flex-direction:column;gap:5px;min-width:186px;',
+      'padding:9px 11px 10px;border-radius:9px;',
+      'border:2px solid rgba(92,226,236,0.28);',
+      'background:linear-gradient(180deg,rgba(10,16,26,0.86),rgba(8,12,20,0.78));',
+      'box-shadow:0 6px 22px rgba(0,0,0,0.45);pointer-events:none;',
+      'color:#dce6f5;text-shadow:none;',
+    ].join(''), parent);
+    this.controls.className = 'mc-font';
+    this.controlsTitle = el('div',
+      'font-size:10px;letter-spacing:1.4px;color:#5ce2ec;', this.controls);
+    this.controlsBody = el('div',
+      'display:flex;flex-direction:column;gap:3px;', this.controls);
+  }
+
+  /** Repaint the corner card for whichever seat is occupied. */
+  private buildControls(seat: SeatKind): void {
+    this.controlsTitle.textContent = seat === 'pilot' ? '🚁 PILOT CONTROLS' : '🎯 GUNNER CONTROLS';
+    this.controlsBody.textContent = '';
+    for (const [keys, what] of seat === 'pilot' ? PILOT_CONTROLS : GUNNER_CONTROLS) {
+      const row = el('div',
+        'display:flex;align-items:center;gap:8px;font-size:10px;', this.controlsBody);
+      const chip = el('span', [
+        'flex:0 0 auto;min-width:52px;text-align:center;padding:2px 5px;',
+        'border-radius:4px;border:1px solid rgba(120,150,190,0.35);',
+        'background:rgba(4,8,14,0.8);color:#ffd24a;letter-spacing:0.6px;',
+      ].join(''), row);
+      chip.textContent = keys;
+      el('span', 'color:#a8b8ce;letter-spacing:0.4px;', row).textContent = what;
+    }
   }
 
   private gauge(label: string, color: string): Gauge {
@@ -96,8 +165,11 @@ export class VehicleHUD {
 
   /** Enter/leave a seat. Passing null hides the whole strip. */
   setSeat(seat: SeatKind | null): void {
+    const changed = seat !== this.seat;
     this.seat = seat;
     this.root.style.display = seat ? 'flex' : 'none';
+    this.controls.style.display = seat ? 'flex' : 'none';
+    if (seat && changed) this.buildControls(seat);
     if (!seat) this.lastBombCount = -1;
   }
 
@@ -113,8 +185,13 @@ export class VehicleHUD {
     markLabel: string,
   ): void {
     if (!this.seat) return;
-    if (!snap) { this.root.style.display = 'none'; return; }
+    if (!snap) {
+      this.root.style.display = 'none';
+      this.controls.style.display = 'none';
+      return;
+    }
     this.root.style.display = 'flex';
+    this.controls.style.display = 'flex';
     this.clock += dt;
 
     this.title.textContent = `🚁 ${markLabel} AIRFRAME`;
@@ -166,15 +243,16 @@ export class VehicleHUD {
       `CREW ${snap.pilot ? 'pilot' : '—'} · ${snap.passenger ? 'gunner' : '—'}`;
 
     // --- Caption: one line, the most urgent thing true right now ---
+    // Nothing but the urgent thing: the bindings live on the corner card now,
+    // so this line is free to stay silent until something is actually wrong.
     this.caption.textContent = critical
       ? '⛽ BINGO FUEL — LAND NOW'
       : warn ? '⛽ Low oil — head for the ground'
       : hullFrac <= 0.3 ? '⚠ Hull critical'
-      : this.seat === 'pilot' ? 'F to step down · right-click drops a bomb'
-      : 'F to step down · fire your own weapon';
+      : '';
     this.caption.style.color = critical || hullFrac <= 0.3 ? '#ff5c4d'
       : warn ? '#ffd24a' : '#54637d';
   }
 
-  dispose(): void { this.root.remove(); }
+  dispose(): void { this.root.remove(); this.controls.remove(); }
 }
