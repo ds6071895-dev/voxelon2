@@ -307,6 +307,8 @@ export type ClientMsg =
   | { t: 'heliBomb' }
   | { t: 'heliService'; id: number; oil: number; bombs: number; repair: number }
   | { t: 'heliUpgrade'; id: number }
+  | { t: 'heliModule'; id: number; item: number }
+  | { t: 'heliRope'; action: 'toggle' | 'attach' | 'drop' | 'move'; motion?: number }
   | { t: 'heliHit'; id: number; amount: number };
 
 // --- server -> client -------------------------------------------------------
@@ -350,6 +352,7 @@ export type ServerMsg =
   | { t: 'leave'; id: number }
   | { t: 'snapshot'; players: PlayerSnapshot[] }
   | { t: 'edit'; x: number; y: number; z: number; block: number }
+  | { t: 'editBatch'; edits: { x: number; y: number; z: number; block: number }[] }
   | { t: 'hurt'; health: number; dead: boolean; by: number;
       kx: number; ky: number; kz: number }
   // Told to the ATTACKER when one of their direct hits lands: the hitmarker.
@@ -484,6 +487,8 @@ export type ServerMsg =
   // Helicopters + their bombs.
   | { t: 'helis'; list: HelicopterSnapshot[]; bombs: BombSnapshot[] }
   | { t: 'heliSeat'; id: number; seat: SeatKind | null }
+  | { t: 'heliRopeState'; id: number; progress: number }
+  | { t: 'heliModuleInstalled'; id: number; item: number }
   | { t: 'heliDown'; id: number; x: number; y: number; z: number; faction: number;
       reason: HeliLossReason }
   | { t: 'heliGone'; id: number };

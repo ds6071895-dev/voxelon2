@@ -128,6 +128,9 @@ const STROKE_ICONS: Record<string, string> = {
   rack: 'M3.8 4.8h16.4v3.2H3.8zM7.4 8v2.8M12 8v2.8M16.6 8v2.8' +
     '|circle:7.4,13.4,2.6|circle:12,13.4,2.6|circle:16.6,13.4,2.6',
   star: 'M12 2.8l2.7 5.6 6.1.8-4.5 4.3 1.1 6.1-5.4-3-5.4 3 1.1-6.1L3.2 9.2l6.1-.8Z',
+  tanks: 'M4 7h6v12H4zM14 7h6v12h-6zM6 4h2v3M16 4h2v3M10 13h4',
+  drum: 'M6 4h12v16H6zM6 8h12M6 16h12M9 4v16M15 4v16',
+  rope: 'M8 3c0 4 8 4 8 8s-8 4-8 8M16 3c0 4-8 4-8 8s8 4 8 8',
 
   // UI chrome
   close: 'M6.4 6.4 17.6 17.6M17.6 6.4 6.4 17.6',
@@ -207,6 +210,9 @@ const NODE_ICON: Record<string, string> = {
   air_turbine: 'turbine',
   air_heavy_bay: 'rack',
   air_command: 'star',
+  air_aux_tanks: 'tanks',
+  air_long_range_tanks: 'drum',
+  air_fast_rope: 'rope',
 };
 
 const BRANCH_ICON: Record<WarfareBranch, string> = {

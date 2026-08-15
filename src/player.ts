@@ -119,6 +119,9 @@ export class Player {
   /** Mouse-look sensitivity multiplier (1 = normal). Lowered while a gun is
    *  scoped (aim-down-sights) so high-zoom aiming is steady. */
   lookScale = 1;
+  /** A cockpit may opt into the complete vertical hemisphere, including the
+   *  exact straight-up and straight-down poles. */
+  fullVerticalLook = false;
   /** Progression speed multiplier (skill tree + faction perk). */
   speedMult = 1;
   /** Sprint energy-drain multiplier (<1 = Windrunner capstones). */
@@ -207,7 +210,7 @@ export class Player {
     // Mouse look (lookScale < 1 while scoped for steady aim-down-sights).
     this.yaw -= input.mouseDX * MOUSE_SENSITIVITY * this.lookScale;
     this.pitch -= input.mouseDY * MOUSE_SENSITIVITY * this.lookScale;
-    const maxPitch = Math.PI / 2 - 0.001;
+    const maxPitch = Math.PI / 2 - (this.fullVerticalLook ? 0 : 0.001);
     this.pitch = Math.max(-maxPitch, Math.min(maxPitch, this.pitch));
 
     // Sprint is gated on energy: blocked while sneaking, not moving forward,

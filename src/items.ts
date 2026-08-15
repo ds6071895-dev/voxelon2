@@ -136,6 +136,9 @@ export const enum Item {
   RepairKit = 226,
   /** Right-click a Helipad with this to assemble a helicopter on it. */
   HelicopterKit = 227,
+  RopeWinch = 228,
+  AuxiliaryTank = 229,
+  LongRangeTank = 230,
 }
 
 export interface ToolInfo {
@@ -617,6 +620,9 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Item.AerialBomb]: { name: 'Aerial Bomb', kind: 'item', sprite: Tile.AerialBombSprite, maxStack: 16 },
   [Item.RepairKit]: { name: 'Hardware Repair Kit', kind: 'item', sprite: Tile.RepairKitSprite, maxStack: 16 },
   [Item.HelicopterKit]: { name: 'Helicopter Airframe', kind: 'item', sprite: Tile.HelicopterKitSprite, maxStack: 1 },
+  [Item.RopeWinch]: { name: 'Fast-Rope Winch', kind: 'item', sprite: Tile.GrapplingHook, maxStack: 1 },
+  [Item.AuxiliaryTank]: { name: 'Auxiliary Tank Module', kind: 'item', sprite: Tile.FuelTank, maxStack: 4 },
+  [Item.LongRangeTank]: { name: 'Long-Range Tank Module', kind: 'item', sprite: Tile.OilBarrel, maxStack: 4 },
 };
 
 /**

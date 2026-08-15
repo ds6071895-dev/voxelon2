@@ -639,6 +639,26 @@ export class Terrain {
     return ys.map((y) => chunk.get(lx, Math.floor(y), lz));
   }
 
+  /** Exact generated block IDs for arbitrary cells, generating each touched
+   * chunk only once. Useful for bounded server-side blast queries. */
+  blocksAtCells(cells: readonly { x: number; y: number; z: number }[]): number[] {
+    const chunks = new Map<string, Chunk>();
+    return cells.map(({ x, y, z }) => {
+      const wx = Math.floor(x), wy = Math.floor(y), wz = Math.floor(z);
+      const cx = wx >> 4, cz = wz >> 4;
+      const key = `${cx},${cz}`;
+      let chunk = chunks.get(key);
+      if (!chunk) {
+        chunk = new Chunk(cx, cz);
+        this.fill(chunk);
+        chunks.set(key, chunk);
+      }
+      const lx = ((wx % CHUNK_X) + CHUNK_X) % CHUNK_X;
+      const lz = ((wz % CHUNK_Z) + CHUNK_Z) % CHUNK_Z;
+      return chunk.get(lx, wy, lz);
+    });
+  }
+
   /** A random spawn within ±half of origin that is guaranteed solid dry ground
    *  (never in water, never floating in air). Falls back to findSpawn if the rng
    *  is unlucky. The +1 on y places the feet exactly on top of the surface. */

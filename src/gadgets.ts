@@ -10,7 +10,7 @@ import { Tile } from './blocks';
 
 export type GadgetKind =
   | 'frag'      // thrown explosive — server AoE damage on detonation
-  | 'c4'        // planted breaching charge — a big timed blast after a fuse
+  | 'c4'        // planted timed charge
   | 'grapple'   // client movement — yanks you toward a targeted block
   | 'cover'     // deploys an instant blast wall (block edits)
   | 'sentry'    // drops an auto-targeting turret (reuses the turret system)
@@ -54,7 +54,7 @@ export const GADGETS: Record<number, GadgetDef> = {
   },
   [Item.C4]: {
     item: Item.C4, tile: Tile.C4, name: 'C4 Charge', kind: 'c4',
-    desc: 'Stick it on a block — a big timed blast after a 3s fuse. Stand back!',
+    desc: 'Plant it on a block, then run before its timed blast.',
     cooldown: 4, maxStack: 8, consumed: true, radius: 5, damage: 34, fuse: 3,
   },
   [Item.GrapplingHook]: {

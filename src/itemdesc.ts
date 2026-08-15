@@ -24,6 +24,9 @@ const DESCRIPTIONS: Record<number, string> = {
   [Block.OilDerrick]: 'Pumps OIL — the fuel for base shields + the war chest.',
   [Item.OilBarrel]: 'Oil: feeds base shields, the treasury and oil bombs.',
   [Item.CobaltIngot]: 'A war-grade metal smelted from cobalt ore.',
+  [Item.RopeWinch]: 'Install on a landed helicopter to unlock hover hold and a fast rope.',
+  [Item.AuxiliaryTank]: 'Install on a landed helicopter to double its base oil capacity.',
+  [Item.LongRangeTank]: 'Install after Auxiliary Tanks to triple base oil capacity.',
   // Travel.
   [Item.Glider]: 'Wear it in the chest slot (right-click to equip); jump in mid-air to glide.',
   [Item.Boat]: 'Right-click on water to launch. Steer with your view, W to row — jump to hop out.',

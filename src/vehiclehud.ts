@@ -39,21 +39,27 @@ interface Gauge {
 const PILOT_CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ['W / S', 'Fly forward / back'],
   ['A / D', 'Slide left / right'],
-  ['Mouse', 'Steer the nose'],
+  ['Mouse', 'Steer / look (full vertical)'],
   ['Space', 'Climb'],
   ['Shift', 'Descend'],
+  ['R', 'Deploy / retract rope'],
   ['R-click', 'Drop a bomb'],
   ['V', 'Cockpit ↔ chase cam'],
-  ['F', 'Step down'],
+  ['F', 'Transfer to rope / step down'],
 ];
 
 const GUNNER_CONTROLS: ReadonlyArray<readonly [string, string]> = [
-  ['Mouse', 'Aim (forward arc only)'],
+  ['Mouse', 'Aim / orbit (full vertical)'],
   ['L-click', 'Fire your weapon'],
   ['R', 'Reload'],
   ['1 … 9', 'Switch weapon'],
   ['V', 'Cabin ↔ chase cam'],
-  ['F', 'Step down'],
+  ['F', 'Transfer to rope / step down'],
+];
+const ROPE_CONTROLS: ReadonlyArray<readonly [string, string]> = [
+  ['W / S', 'Climb / slide'],
+  ['Space', 'Drop from rope'],
+  ['Mouse', 'Look around'],
 ];
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -78,7 +84,7 @@ export class VehicleHUD {
   private readonly controls: HTMLDivElement;
   private readonly controlsTitle: HTMLDivElement;
   private readonly controlsBody: HTMLDivElement;
-  private seat: SeatKind | null = null;
+  private seat: SeatKind | 'rope' | null = null;
   private clock = 0;
   private lastBombCount = -1;
 
@@ -129,10 +135,13 @@ export class VehicleHUD {
   }
 
   /** Repaint the corner card for whichever seat is occupied. */
-  private buildControls(seat: SeatKind): void {
-    this.controlsTitle.textContent = seat === 'pilot' ? '🚁 PILOT CONTROLS' : '🎯 GUNNER CONTROLS';
+  private buildControls(seat: SeatKind | 'rope'): void {
+    this.controlsTitle.textContent = seat === 'pilot' ? '🚁 PILOT CONTROLS'
+      : seat === 'passenger' ? '🎯 GUNNER CONTROLS' : 'FAST ROPE';
     this.controlsBody.textContent = '';
-    for (const [keys, what] of seat === 'pilot' ? PILOT_CONTROLS : GUNNER_CONTROLS) {
+    const controls = seat === 'pilot' ? PILOT_CONTROLS
+      : seat === 'passenger' ? GUNNER_CONTROLS : ROPE_CONTROLS;
+    for (const [keys, what] of controls) {
       const row = el('div',
         'display:flex;align-items:center;gap:8px;font-size:10px;', this.controlsBody);
       const chip = el('span', [
@@ -173,6 +182,15 @@ export class VehicleHUD {
     if (!seat) this.lastBombCount = -1;
   }
 
+  setRope(active: boolean): void {
+    const next = active ? 'rope' as const : null;
+    const changed = next !== this.seat;
+    this.seat = next;
+    this.root.style.display = active ? 'flex' : 'none';
+    this.controls.style.display = active ? 'flex' : 'none';
+    if (active && changed) this.buildControls('rope');
+  }
+
   get active(): boolean { return this.seat !== null; }
 
   /**
@@ -195,7 +213,8 @@ export class VehicleHUD {
     this.clock += dt;
 
     this.title.textContent = `🚁 ${markLabel} AIRFRAME`;
-    this.role.textContent = this.seat === 'pilot' ? 'PILOT' : 'GUNNER';
+    this.role.textContent = this.seat === 'pilot' ? 'PILOT'
+      : this.seat === 'passenger' ? 'GUNNER' : 'ROPE RIDER';
 
     // --- Oil ---
     const fuelFrac = snap.maxFuel > 0 ? Math.max(0, Math.min(1, snap.fuel / snap.maxFuel)) : 0;

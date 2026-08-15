@@ -1083,6 +1083,14 @@
       .title-hero, .entry-card { animation: none; }
       .brief-progress-fill { transition: none; }
     }
+    @media (max-width: 640px) {
+      .table-station {
+        grid-template-columns: 1fr !important;
+        width: min(330px, calc(100vw - 34px)) !important;
+        max-height: 52vh;
+        overflow-y: auto;
+      }
+    }
 
 
   </style>

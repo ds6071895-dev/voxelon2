@@ -134,10 +134,10 @@ export function fieldGuideSections(): FieldGuideSection[] {
     {
       id: 'controls', title: 'Controls', icon: icon('controls'), summary: 'Desktop and mobile controls, plus contextual behavior.', entries: [
         entry('desktop-controls', 'Desktop controls', ['keyboard', 'mouse', 'wasd', 'reload', 'inventory'],
-          table(['Action', 'Binding'], [['Move', 'W A S D'], ['Jump / glide', 'Space'], ['Sprint', 'Q or double-tap W'], ['Sneak', 'Shift'], ['Attack / mine', 'Left click'], ['Place / use / aim', 'Right click'], ['Inventory', 'E'], ['Commands', 'T'], ['Map', '/map'], ['Warfare Command', '/warfare'], ['Waypoint here', '/waypoint'], ['Teleport to a player', '/tpa'], ['Leave vehicle', 'F'], ['Reload', 'R'], ['Pause', 'Esc']]) +
+          table(['Action', 'Binding'], [['Move', 'W A S D'], ['Jump / glide', 'Space'], ['Sprint', 'Q or double-tap W'], ['Sneak', 'Shift'], ['Attack / mine', 'Left click'], ['Place / use / aim', 'Right click'], ['Inventory', 'E'], ['Commands', 'T'], ['Map', '/map'], ['Warfare Command', '/warfare'], ['Waypoint here', '/waypoint'], ['Teleport to a player', '/tpa'], ['Vehicle / rope transfer', 'F'], ['Reload / pilot rope control', 'R'], ['Pause', 'Esc']]) +
           tip('Context matters', 'Left click may hit an enemy before the block behind it. Right click changes behavior based on the held item.')),
         entry('mobile-controls', 'Mobile controls', ['touch', 'joystick', 'phone', 'tablet'],
-          table(['Action', 'Control'], [['Move / sprint', 'Left joystick; push beyond rim to sprint'], ['Look', 'Drag the right side'], ['Jump / glide', 'Up control'], ['Attack / mine', 'Long-press'], ['Place / use', 'Tap'], ['Inventory', 'Backpack button'], ['Map', 'Map button'], ['Warfare Command', 'Command button'], ['Pause / back', 'Pause button']]))
+          table(['Action', 'Control'], [['Move / sprint', 'Left joystick; push beyond rim to sprint'], ['Look', 'Drag the right side'], ['Jump / glide', 'Up control'], ['Attack / mine', 'Long-press'], ['Place / use', 'Tap'], ['Inventory', 'Backpack button'], ['Commands (map, warfare, waypoint, tpa…)', 'Command button'], ['Pause / back', 'Pause button']]))
       ],
     },
     {
@@ -248,12 +248,13 @@ export function fieldGuideSections(): FieldGuideSection[] {
             'Each account is paid once per boss recharge cycle.']) +
           tip('Type /warfare', 'The Warfare Command tree opens from the command box (press T). Purchases are permanent, personal, and cost XP directly.')),
         entry('warfare-tree', 'The technology tree', ['tree', 'nodes', 'blueprint', 'trunk', 'branch'],
-          `<p>One trunk of nine nodes, then three endgame branches. The trunk forces the order: <b>missiles, then missile defense, then helicopters</b>.</p>` +
+          `<p>One trunk of nine nodes, then three endgame branches and three operations modules. The trunk forces the order: <b>missiles, then missile defense, then helicopters</b>. The complete tree costs 9,800 Warfare XP.</p>` +
           table(['Stage', 'What it opens'], [
             ['Missile Command → Hardened Silo', 'Tactical Silo, Tactical Missile, map targeting, range and magazine'],
             ['Aegis Systems → Fast Intercept', 'Interceptor Turret, Interceptor Missiles, radar and reload'],
-            ['Flight Certification → Reinforced Airframe', 'Helipad, two-seat helicopter, bombs, hull and fuel'],
-            ['Strike / Aegis / Aviation', 'The three capstone branches: reach, airspace denial, and gunships']]) +
+             ['Flight Certification → Reinforced Airframe', 'Helipad, two-seat helicopter, bombs, hull and fuel'],
+             ['Strike / Aegis / Aviation', 'The three capstone branches: reach, airspace denial, and gunships'],
+             ['Operations modules', '2×/3× fuel tanks and fast-rope winches']]) +
           tip('Blueprints are personal, hardware is shared', 'You need the node to BUILD or RETROFIT. Once it exists, any faction teammate can load, operate and fly it.')),
         entry('warfare-missiles', 'Tactical missiles', ['missile', 'silo', 'launch', 'targeting', 'blast'],
           steps(['Build a Tactical Silo — it needs a clear 2×2 pad.',
@@ -280,13 +281,17 @@ export function fieldGuideSections(): FieldGuideSection[] {
             'Deploy the airframe on the pad, then refuel, load bombs and repair there.',
             'Board as pilot or gunner. Only faction members can board.',
             'Pilot: W A S D flies, the camera steers, Space climbs, Shift descends, right-click drops a bomb.',
-            'Gunner: look around and fire your own weapon within a sensible side arc.',
-            'Press F to step off — near the ground, or as an emergency ejection.']) +
+             'Gunner: look around and fire your own weapon within a sensible side arc.',
+             'With a winch installed, the pilot presses R to deploy/retract the rope; F transfers or attaches, W/S climbs or slides, and Space drops.',
+             'Press F to step off — near the ground, or as an emergency ejection.']) +
           list(['Two seats per helicopter, with no faction-wide airframe limit.',
             'Guns, rockets, turrets, explosions and collisions all damage the airframe.',
             'At zero HP both occupants are ejected and hurt, and the wreck explodes.',
-            'A pilot who disconnects leaves the airframe in a controlled hover that settles to the ground.',
-            'Helicopters cannot enter vault arenas or cross the world boundary.'])),
+             'A pilot who disconnects leaves the airframe in a controlled hover that settles to the ground.',
+             'A deployed fast rope instead holds the hover after pilot exit and keeps burning idle fuel.',
+             'Auxiliary and Long-Range tank modules raise capacity to 2× and 3×; installing one never creates free oil.',
+             'Bomb marks crater at radius 7 / 9 / 11, capped at 40 / 80 / 140 removed blocks.',
+             'Helicopters cannot enter vault arenas or cross the world boundary.'])),
       ],
     },
     {

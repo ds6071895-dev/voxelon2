@@ -295,6 +295,21 @@ export const RECIPES: Recipe[] = [
     [Item.ReinforcedFrame, Item.GuidanceUnit, Item.ReinforcedFrame],
     [Item.FuelTank, Item.ReinforcedFrame, Item.FuelTank],
   ], Item.HelicopterKit),
+  shaped([
+    [I, Item.GrapplingHook, I],
+    [R, Item.RotorAssembly, R],
+    [I, Cb, I],
+  ], Item.RopeWinch),
+  shaped([
+    [Item.FuelTank, Item.ReinforcedFrame, Item.FuelTank],
+    [I, Item.FuelTank, I],
+    [null, R, null],
+  ], Item.AuxiliaryTank),
+  shaped([
+    [T, Item.FuelTank, T],
+    [Item.FuelTank, Cb, Item.FuelTank],
+    [T, Item.FuelTank, T],
+  ], Item.LongRangeTank),
   // Two Aerial Bombs — 4 Iron, 2 Redstone, 1 Cobalt, 1 Oil, 1 Coal.
   shaped([
     [R, Item.BombCasing, R],
@@ -324,6 +339,9 @@ export const WARFARE_BLUEPRINTS: Record<number, string> = {
   [Block.Helipad]: 'flight_certification',
   [Item.HelicopterKit]: 'flight_certification',
   [Item.AerialBomb]: 'flight_certification',
+  [Item.RopeWinch]: 'air_fast_rope',
+  [Item.AuxiliaryTank]: 'air_aux_tanks',
+  [Item.LongRangeTank]: 'air_long_range_tanks',
 };
 
 /** The blueprint node a recipe result needs ('' = always craftable). */

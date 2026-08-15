@@ -139,6 +139,7 @@ export class InventoryUI {
   /** A right-drag deposits one item into each newly crossed ordinary slot. */
   private rightPlaceDragging = false;
   private readonly rightPlacedThisDrag = new Set<number>();
+  private hoveredHotbarAction: ((hotbar: number) => boolean) | null = null;
 
   constructor(inventory: Inventory, atlasCanvas: HTMLCanvasElement) {
     this.inventory = inventory;
@@ -245,6 +246,19 @@ export class InventoryUI {
     });
   }
 
+  private hookHotbarAction(view: SlotView, action: (hotbar: number) => boolean): void {
+    view.el.addEventListener('mouseenter', () => { this.hoveredHotbarAction = action; });
+    view.el.addEventListener('mouseleave', () => {
+      if (this.hoveredHotbarAction === action) this.hoveredHotbarAction = null;
+    });
+  }
+
+  /** Minecraft-style number-key exchange with the hovered slot. */
+  hotbarSwap(hotbar: number): boolean {
+    if (!this.open || hotbar < 0 || hotbar >= HOTBAR_SIZE) return false;
+    return this.hoveredHotbarAction?.(hotbar) ?? false;
+  }
+
   private makeIndexedSlot(index: number): SlotView {
     const view = this.makeSlotView();
     view.el.addEventListener('mousedown', (e) => {
@@ -282,6 +296,7 @@ export class InventoryUI {
       if (this.rightPlaceDragging && (e.buttons & 2)) this.placeOneOnDrag(index);
     });
     this.hookTooltip(view, () => this.inventory.slots[index]);
+    this.hookHotbarAction(view, (hotbar) => this.inventory.swapWithHotbar(index, hotbar));
     this.invSlots.set(index, view);
     return view;
   }
@@ -404,9 +419,24 @@ export class InventoryUI {
       else if (e.button === 0) this.craftOnce();
     });
     this.hookTooltip(result, () => craftResult(this.inventory));
+    this.hookHotbarAction(result, (hotbar) => this.craftIntoHotbar(hotbar));
     this.resultView = result;
     wrap.appendChild(result.el);
     parent.appendChild(wrap);
+  }
+
+  private craftIntoHotbar(hotbar: number): boolean {
+    const result = craftResult(this.inventory);
+    if (!result || (this.canCraft && !this.canCraft(result))) return false;
+    const target = this.inventory.slots[hotbar];
+    if (target && (target.id !== result.id || target.count + result.count > maxStack(result.id))) {
+      return false;
+    }
+    if (target) target.count += result.count;
+    else this.inventory.slots[hotbar] = { ...result };
+    consumeCraft(this.inventory);
+    this.onCrafted?.(result);
+    return true;
   }
 
   /** Inventory mode: a 4-slot armor column beside the 2x2 crafting grid. */
@@ -424,6 +454,27 @@ export class InventoryUI {
     row.appendChild(col);
     this.buildCraftingTop(2, row);
     this.topEl.appendChild(row);
+  }
+
+  /** Crafting-table-only workbench. Personal inventory keeps its compact 2x2. */
+  private buildTableTop(): void {
+    const station = document.createElement('div');
+    station.className = 'table-station';
+    station.style.cssText = 'display:flex;justify-content:center;';
+    const bench = document.createElement('section');
+    bench.style.cssText =
+      'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;' +
+      'padding:14px;border:1px solid #59677d;background:linear-gradient(145deg,#182131,#0e1420);' +
+      'box-shadow:inset 0 0 0 1px #0a0e16,0 8px 24px #0007;';
+    const label = document.createElement('div');
+    label.className = 'mc-font';
+    label.style.cssText = 'align-self:stretch;color:#8eddf0;font-size:11px;letter-spacing:1px;text-shadow:none;';
+    label.textContent = 'ASSEMBLY GRID  /  3 × 3';
+    bench.appendChild(label);
+    this.buildCraftingTop(3, bench);
+
+    station.appendChild(bench);
+    this.topEl.appendChild(station);
   }
 
   /** Creative mode: a scrollable palette of every item — click to grab a full
@@ -531,6 +582,11 @@ export class InventoryUI {
       }
     });
     this.hookTooltip(view, () => this.inventory.slots[index]);
+    this.hookHotbarAction(view, (hotbar) => {
+      const incoming = this.inventory.slots[hotbar];
+      if (incoming && ITEMS[incoming.id]?.armor?.slot !== slot) return false;
+      return this.inventory.swapWithHotbar(index, hotbar);
+    });
     this.invSlots.set(index, view);
     return view;
   }
@@ -627,6 +683,15 @@ export class InventoryUI {
       inv.version++;
     });
     this.hookTooltip(view, get);
+    this.hookHotbarAction(view, (hotbar) => {
+      const incoming = this.inventory.slots[hotbar];
+      if (incoming && !accepts(incoming.id)) return false;
+      const previous = get();
+      set(incoming);
+      this.inventory.slots[hotbar] = previous;
+      this.inventory.version++;
+      return true;
+    });
     return view;
   }
 
@@ -656,6 +721,22 @@ export class InventoryUI {
       inv.version++;
     });
     this.hookTooltip(view, () => state.output);
+    this.hookHotbarAction(view, (hotbar) => {
+      const out = state.output;
+      if (!out) return false;
+      const target = this.inventory.slots[hotbar];
+      if (!target) {
+        this.inventory.slots[hotbar] = out;
+        state.output = null;
+      } else if (target.id === out.id && target.count < maxStack(out.id)) {
+        const moved = Math.min(out.count, maxStack(out.id) - target.count);
+        target.count += moved;
+        out.count -= moved;
+        if (out.count <= 0) state.output = null;
+      } else return false;
+      this.inventory.version++;
+      return true;
+    });
     return view;
   }
 
@@ -1009,6 +1090,7 @@ export class InventoryUI {
     turretCtx?: TurretUIContext,
   ): void {
     // Rebuild the top section for the requested mode.
+    this.hoveredHotbarAction = null;
     for (const { index } of this.craftCells) this.invSlots.delete(index);
     for (const idx of this.chestCells) this.invSlots.delete(idx);
     for (const idx of this.armorCells) this.invSlots.delete(idx);
@@ -1042,8 +1124,8 @@ export class InventoryUI {
       this.titleEl.textContent = 'Chest';
       this.buildChestTop();
     } else if (mode === 'table') {
-      this.titleEl.textContent = 'Crafting';
-      this.buildCraftingTop(3);
+      this.titleEl.textContent = 'Crafting Workbench';
+      this.buildTableTop();
     } else if (this.creative) {
       this.titleEl.textContent = 'Creative Inventory';
       this.buildCreativeTop();
@@ -1116,6 +1198,7 @@ export class InventoryUI {
     if (!this.open) return;
     this.endShiftTransferDrag();
     this.endRightPlaceDrag();
+    this.hoveredHotbarAction = null;
     this.open = false;
     const overflow = this.inventory.stashOpenSlots();
     if (overflow.length) this.onOverflow?.(overflow);

@@ -87,6 +87,8 @@ export class NetClient {
   onRestoreState?: (state: Record<string, unknown>) => void;
   /** A block edit from another player (apply without re-broadcasting). */
   onEdit?: (x: number, y: number, z: number, block: number) => void;
+  /** Bulk world change, allowing the renderer to remesh touched chunks once. */
+  onEditBatch?: (edits: { x: number; y: number; z: number; block: number }[]) => void;
   /** Server-authoritative health change for the local player. `by` is the id of
    *  whoever dealt it (used for the directional damage indicator; it is the
    *  local id, or an unknown id, for non-player damage). */
@@ -176,6 +178,8 @@ export class NetClient {
   onHelis?: (list: HelicopterSnapshot[], bombs: BombSnapshot[]) => void;
   /** YOUR seat changed (null = you are on your feet again). */
   onHeliSeat?: (id: number, seat: SeatKind | null) => void;
+  onHeliRopeState?: (id: number, progress: number) => void;
+  onHeliModuleInstalled?: (id: number, item: number) => void;
   onHeliDown?: (
     id: number, x: number, y: number, z: number, faction: number, reason: HeliLossReason,
   ) => void;
@@ -369,6 +373,10 @@ export class NetClient {
       case 'edit':
         this.onEdit?.(msg.x, msg.y, msg.z, msg.block);
         break;
+      case 'editBatch':
+        if (this.onEditBatch) this.onEditBatch(msg.edits);
+        else for (const e of msg.edits) this.onEdit?.(e.x, e.y, e.z, e.block);
+        break;
       case 'hurt':
         this.onHurt?.(msg.health, msg.dead, [msg.kx, msg.ky, msg.kz], msg.by);
         break;
@@ -477,6 +485,12 @@ export class NetClient {
         break;
       case 'heliSeat':
         this.onHeliSeat?.(msg.id, msg.seat);
+        break;
+      case 'heliRopeState':
+        this.onHeliRopeState?.(msg.id, msg.progress);
+        break;
+      case 'heliModuleInstalled':
+        this.onHeliModuleInstalled?.(msg.id, msg.item);
         break;
       case 'heliDown':
         this.onHeliDown?.(msg.id, msg.x, msg.y, msg.z, msg.faction, msg.reason);
@@ -759,6 +773,12 @@ export class NetClient {
     if (this.connected) this.raw({ t: 'heliService', id, oil, bombs, repair });
   }
   sendHeliUpgrade(id: number): void { if (this.connected) this.raw({ t: 'heliUpgrade', id }); }
+  sendHeliModule(id: number, item: number): void {
+    if (this.connected) this.raw({ t: 'heliModule', id, item });
+  }
+  sendHeliRope(action: 'toggle' | 'attach' | 'drop' | 'move', motion?: number): void {
+    if (this.connected) this.raw({ t: 'heliRope', action, motion });
+  }
   sendHeliHit(id: number, amount: number): void {
     if (this.connected) this.raw({ t: 'heliHit', id, amount });
   }

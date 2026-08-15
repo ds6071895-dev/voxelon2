@@ -31,8 +31,12 @@ export const EJECT_DAMAGE = 8;
 export const WRECK_SECONDS = 2.4;
 /** Blocks/s the airframe sinks on its own after the pilot disconnects. */
 export const AUTOLAND_DESCENT = 3.5;
-/** A passenger may only fire within this half-arc off the airframe's nose. */
-export const PASSENGER_ARC = Math.PI * 0.62;
+/**
+ * A passenger can traverse the door gun through almost a complete circle.
+ * Only the narrow cone occupied by the tail remains blocked, so mouse-look is
+ * useful without allowing shots straight through the airframe behind the crew.
+ */
+export const PASSENGER_ARC = Math.PI * 0.90;
 
 /**
  * Half-extents of the airframe's collision box in HULL-LOCAL space (+Z nose).
@@ -61,6 +65,13 @@ export const EJECT_LAUNCH_UP = 9;
 /** Landed + this slow counts as parked, which is where servicing is allowed. */
 export const LANDED_SPEED = 1.2;
 
+export type FuelModule = 1 | 2 | 3;
+
+/** Installed tanks increase capacity, never the amount of oil already aboard. */
+export function helicopterFuelCapacity(h: Pick<HelicopterState, 'tier' | 'fuelModule'>): number {
+  return helicopterStats(h.tier).fuel * h.fuelModule;
+}
+
 export type SeatKind = 'pilot' | 'passenger';
 
 /** Player/camera yaw faces -Z at zero; the authored airframe faces +Z. */
@@ -83,6 +94,12 @@ export interface HelicopterState {
   fuel: number;
   bombs: number;
   tier: number;
+  /** Capacity multiplier: base tank, auxiliary tanks, or long-range tanks. */
+  fuelModule: FuelModule;
+  ropeWinch: boolean;
+  ropeDeployed: boolean;
+  /** Length below the rotor hub in blocks. */
+  ropeLength: number;
   pilotId: number | null;
   passengerId: number | null;
   /** Seconds until the next bomb may be released. */
@@ -97,6 +114,9 @@ export interface HelicopterState {
   padX: number; padY: number; padZ: number;
 }
 
+/** Full deployed reach of an installed fast-rope winch. */
+export const FAST_ROPE_LENGTH = 32;
+
 /** One frame of pilot intent. Every field is clamped — a forged input can only
  *  ever ask for full deflection, never for teleportation. */
 export interface HeliInput {
@@ -110,6 +130,15 @@ export interface HeliInput {
   yaw: number;
   /** Sequence number — an out-of-order or replayed input is dropped. */
   seq: number;
+}
+
+export interface RopeRiderState {
+  playerId: number;
+  heliId: number;
+  /** 0 at the winch, 1 at the free end. */
+  progress: number;
+  /** -1 climbs, +1 slides, 0 holds. */
+  motion: number;
 }
 
 export function sanitizeHeliInput(raw: unknown): HeliInput | null {
@@ -141,6 +170,7 @@ export interface BombState {
   radius: number;
   playerDamage: number;
   hardwareDamage: number;
+  blockCap: number;
   /** Seconds alive, so a bomb dropped over a void still expires. */
   age: number;
 }
@@ -158,6 +188,7 @@ export interface HelicopterSnapshot {
   bombs: number; maxBombs: number; tier: number;
   pilot: number; passenger: number;
   rotor: number; dying: number;
+  fuelModule: FuelModule; ropeWinch: boolean; ropeDeployed: boolean; ropeLength: number;
 }
 
 export function helicopterSnapshot(h: HelicopterState): HelicopterSnapshot {
@@ -166,10 +197,12 @@ export function helicopterSnapshot(h: HelicopterState): HelicopterSnapshot {
     id: h.id, faction: h.faction, owner: h.owner,
     x: r2(h.position.x), y: r2(h.position.y), z: r2(h.position.z),
     yaw: r3(h.rotation.y), pitch: r3(h.rotation.x), roll: r3(h.rotation.z),
-    hp: Math.round(h.hp), maxHp: h.maxHp, fuel: r2(h.fuel), maxFuel: stats.fuel,
+    hp: Math.round(h.hp), maxHp: h.maxHp, fuel: r2(h.fuel), maxFuel: helicopterFuelCapacity(h),
     bombs: h.bombs, maxBombs: stats.bombs, tier: h.tier,
     pilot: h.pilotId ?? 0, passenger: h.passengerId ?? 0,
     rotor: r3(h.rotor), dying: r2(h.dying),
+    fuelModule: h.fuelModule, ropeWinch: h.ropeWinch,
+    ropeDeployed: h.ropeDeployed, ropeLength: r2(h.ropeLength),
   };
 }
 
@@ -191,7 +224,7 @@ export type VehicleEvent =
   | { kind: 'bombRelease'; bomb: BombSnapshot; heliId: number }
   | { kind: 'bombImpact'; id: number; faction: number; owner: string;
       x: number; y: number; z: number; radius: number;
-      playerDamage: number; hardwareDamage: number }
+      playerDamage: number; hardwareDamage: number; blockCap: number }
   | { kind: 'heliDown'; id: number; x: number; y: number; z: number; faction: number;
       reason: HeliLossReason }
   /** An occupant is thrown clear. `v*` is the impulse to give their body. */
@@ -238,6 +271,7 @@ export class VehicleSim {
   readonly bombs = new Map<number, BombState>();
   private readonly inputs = new Map<number, HeliInput>();
   private readonly lastSeq = new Map<number, number>();
+  private readonly ropeRiders = new Map<number, RopeRiderState>();
   private nextId = 1;
 
   constructor(private readonly env: VehicleEnv) {}
@@ -261,6 +295,7 @@ export class VehicleSim {
       rotation: { x: 0, y: 0, z: 0 },
       velocity: { x: 0, y: 0, z: 0 },
       hp: stats.hp, maxHp: stats.hp, fuel: 0, bombs: 0, tier: clampTier(tier),
+      fuelModule: 1, ropeWinch: false, ropeDeployed: false, ropeLength: 0,
       pilotId: null, passengerId: null, bombCooldown: 0, rotor: 0, dying: 0,
       unpiloted: 0, padX: pad.x, padY: pad.y, padZ: pad.z,
     };
@@ -272,6 +307,9 @@ export class VehicleSim {
     this.helicopters.delete(id);
     this.inputs.delete(id);
     this.lastSeq.delete(id);
+    for (const [playerId, rider] of this.ropeRiders) {
+      if (rider.heliId === id) this.ropeRiders.delete(playerId);
+    }
   }
 
   seatOf(playerId: number): { heli: HelicopterState; seat: SeatKind } | null {
@@ -312,6 +350,30 @@ export class VehicleSim {
     if (seat === 'pilot') { h.pilotId = null; this.inputs.delete(h.id); }
     else h.passengerId = null;
     return { ok: true, at: seatPosition(h, seat) };
+  }
+
+  /**
+   * Forget a player who has left the server. Unlike a voluntary dismount this
+   * sweeps every airframe, so a corrupt/legacy save cannot leave a ghost pilot
+   * behind or retain input that keeps an abandoned helicopter powered.
+   */
+  disconnectPlayer(playerId: number): boolean {
+    let changed = false;
+    for (const h of this.helicopters.values()) {
+      if (h.pilotId === playerId) {
+        h.pilotId = null;
+        h.unpiloted = 0;
+        this.inputs.delete(h.id);
+        this.lastSeq.delete(h.id);
+        changed = true;
+      }
+      if (h.passengerId === playerId) {
+        h.passengerId = null;
+        changed = true;
+      }
+    }
+    if (this.ropeRiders.delete(playerId)) changed = true;
+    return changed;
   }
 
   /** Queue a pilot input frame. Out-of-order/replayed frames are dropped. */
@@ -359,7 +421,7 @@ export class VehicleSim {
       position: { x: h.position.x, y: h.position.y - 1.3, z: h.position.z },
       velocity: { x: h.velocity.x, y: Math.min(0, h.velocity.y), z: h.velocity.z },
       radius: stats.bombRadius, playerDamage: stats.bombPlayerDamage,
-      hardwareDamage: stats.bombHardwareDamage, age: 0,
+      hardwareDamage: stats.bombHardwareDamage, blockCap: stats.bombBlocks, age: 0,
     };
     this.bombs.set(bomb.id, bomb);
     return [{ kind: 'bombRelease', bomb: bombSnapshot(bomb), heliId: h.id }];
@@ -419,8 +481,9 @@ export class VehicleSim {
     // Rounding DOWN here while the client debits the rounded-up count destroys
     // a barrel on essentially every refuel — take the ceiling instead, and let
     // the tank cap the result.
-    const takeOil = Math.max(0, Math.min(Math.floor(oil), Math.ceil(stats.fuel - h.fuel)));
-    h.fuel = Math.min(stats.fuel, h.fuel + takeOil);
+    const maxFuel = helicopterFuelCapacity(h);
+    const takeOil = Math.max(0, Math.min(Math.floor(oil), Math.ceil(maxFuel - h.fuel)));
+    h.fuel = Math.min(maxFuel, h.fuel + takeOil);
     const takeBombs = Math.max(0, Math.min(Math.floor(bombs), stats.bombs - h.bombs));
     h.bombs += takeBombs;
     // One repair kit restores a quarter of the bar.
@@ -438,9 +501,86 @@ export class VehicleSim {
     const stats = helicopterStats(next);
     h.maxHp = stats.hp;
     h.hp = Math.min(h.maxHp, h.hp + Math.max(0, h.maxHp - before));
-    h.fuel = Math.min(h.fuel, stats.fuel);
+    h.fuel = Math.min(h.fuel, helicopterFuelCapacity(h));
     h.bombs = Math.min(h.bombs, stats.bombs);
     return true;
+  }
+
+  /** Install one permanent field module. The caller owns unlock/item validation. */
+  installModule(h: HelicopterState, module: 'auxTank' | 'longRangeTank' | 'ropeWinch'): boolean {
+    if (!this.canService(h)) return false;
+    if (module === 'auxTank' && h.fuelModule < 2) { h.fuelModule = 2; return true; }
+    if (module === 'longRangeTank' && h.fuelModule === 2) { h.fuelModule = 3; return true; }
+    if (module === 'ropeWinch' && !h.ropeWinch) { h.ropeWinch = true; return true; }
+    return false;
+  }
+
+  /** Pilot-operated rope control. Retraction is always allowed. */
+  toggleRope(playerId: number): boolean {
+    const found = this.seatOf(playerId);
+    if (!found || found.seat !== 'pilot') return false;
+    const h = found.heli;
+    if (!h.ropeWinch && !h.ropeDeployed) return false;
+    h.ropeDeployed = !h.ropeDeployed;
+    h.ropeLength = h.ropeDeployed ? FAST_ROPE_LENGTH : 0;
+    if (!h.ropeDeployed) {
+      for (const [riderId, rider] of this.ropeRiders) {
+        if (rider.heliId === h.id) this.ropeRiders.delete(riderId);
+      }
+    }
+    return true;
+  }
+
+  /** Attach to the nearest point on a deployed friendly rope. */
+  attachRope(
+    playerId: number, faction: number, from: Vec3, onlyHeliId?: number,
+  ): { ok: true; rider: RopeRiderState } | { ok: false; reason: string } {
+    if (this.seatOf(playerId) || this.ropeRiders.has(playerId)) {
+      return { ok: false, reason: 'You are already attached to an airframe.' };
+    }
+    let best: { h: HelicopterState; progress: number; distance: number } | null = null;
+    for (const h of this.helicopters.values()) {
+      if (onlyHeliId !== undefined && h.id !== onlyHeliId) continue;
+      if (!h.ropeDeployed || h.ropeLength <= 0 || h.dying > 0 || h.faction !== faction) continue;
+      const top = h.position.y - 0.75;
+      const progress = Math.max(0, Math.min(1, (top - from.y) / h.ropeLength));
+      const y = top - progress * h.ropeLength;
+      const distance = Math.hypot(from.x - h.position.x, from.y - y, from.z - h.position.z);
+      if (distance <= 2.25 && (!best || distance < best.distance)) best = { h, progress, distance };
+    }
+    if (!best) return { ok: false, reason: 'Move closer to a deployed friendly rope.' };
+    const rider: RopeRiderState = {
+      playerId, heliId: best.h.id, progress: best.progress, motion: 0,
+    };
+    this.ropeRiders.set(playerId, rider);
+    return { ok: true, rider: { ...rider } };
+  }
+
+  setRopeMotion(playerId: number, motion: number): boolean {
+    const rider = this.ropeRiders.get(playerId);
+    if (!rider) return false;
+    rider.motion = Number.isFinite(motion) ? Math.max(-1, Math.min(1, motion)) : 0;
+    return true;
+  }
+
+  detachRope(playerId: number): boolean { return this.ropeRiders.delete(playerId); }
+  ropeRider(playerId: number): RopeRiderState | null {
+    const rider = this.ropeRiders.get(playerId);
+    return rider ? { ...rider } : null;
+  }
+  ropePosition(playerId: number): Vec3 | null {
+    const rider = this.ropeRiders.get(playerId);
+    if (!rider) return null;
+    const h = this.helicopters.get(rider.heliId);
+    if (!h || !h.ropeDeployed || h.dying > 0) return null;
+    return {
+      x: h.position.x,
+      y: h.position.y - 0.75 - rider.progress * h.ropeLength,
+      z: h.position.z,
+    };
+  }
+  ropeRiderStates(): RopeRiderState[] {
+    return [...this.ropeRiders.values()].map((rider) => ({ ...rider }));
   }
 
   /** True when the airframe is parked on the pad it belongs to. */
@@ -476,6 +616,15 @@ export class VehicleSim {
     dt = Math.min(dt, 0.25);
     const out: VehicleEvent[] = [];
     for (const h of [...this.helicopters.values()]) this.stepHeli(h, dt, out);
+    for (const [playerId, rider] of this.ropeRiders) {
+      const h = this.helicopters.get(rider.heliId);
+      if (!h || !h.ropeDeployed || h.ropeLength <= 0 || h.dying > 0) {
+        this.ropeRiders.delete(playerId);
+        continue;
+      }
+      rider.progress = Math.max(0, Math.min(1,
+        rider.progress + rider.motion * 5 * dt / h.ropeLength));
+    }
     for (const b of [...this.bombs.values()]) this.stepBomb(b, dt, out);
     return out;
   }
@@ -500,13 +649,26 @@ export class VehicleSim {
     }
 
     const input = h.pilotId !== null ? this.inputs.get(h.id) : undefined;
-    const powered = !!input && h.fuel > 0;
+    const ropeHover = h.ropeDeployed && h.pilotId === null && h.fuel > 0;
+    const powered = (!!input || ropeHover) && h.fuel > 0;
     h.rotor += dt * (powered ? 34 : h.pilotId !== null ? 20 : 8);
 
     // A seated pilot who has not sent an input frame yet (the gap between
     // boarding and their first `heliInput`) flies exactly like a pilotless
     // airframe: rotors idling, holding station. Anything else would dereference
     // an input that does not exist yet.
+    if (ropeHover) {
+      h.unpiloted = 0;
+      h.fuel = Math.max(0, h.fuel - HELI_FUEL_IDLE * dt);
+      h.velocity.x *= Math.pow(0.04, dt);
+      h.velocity.y *= Math.pow(0.04, dt);
+      h.velocity.z *= Math.pow(0.04, dt);
+      h.rotation.x *= Math.pow(0.2, dt);
+      h.rotation.z *= Math.pow(0.2, dt);
+      if (h.fuel <= 0) { h.ropeDeployed = false; h.ropeLength = 0; }
+      this.integrate(h, dt, out);
+      return;
+    }
     if (h.pilotId === null || !input) {
       // Pilot disconnect / step-off: a controlled hover that settles, never a
       // permanently parked airframe in the sky. A pilot who is aboard but has
@@ -668,6 +830,7 @@ export class VehicleSim {
       kind: 'bombImpact', id: b.id, faction: b.faction, owner: b.owner,
       x: b.position.x, y: Math.max(ground, b.position.y), z: b.position.z,
       radius: b.radius, playerDamage: b.playerDamage, hardwareDamage: b.hardwareDamage,
+      blockCap: b.blockCap,
     });
   }
 
@@ -687,6 +850,7 @@ export class VehicleSim {
     }
     this.inputs.clear();
     this.lastSeq.clear();
+    this.ropeRiders.clear();
   }
 }
 
@@ -713,6 +877,7 @@ export function sanitizeHelicopter(raw: unknown): HelicopterState | null {
   // corrupted rows would otherwise overwrite each other (and a legitimate
   // entity that really is id 1).
   if (!Number.isFinite(r.id) || Math.floor(Number(r.id)) < 1) return null;
+  const fuelModule: FuelModule = r.fuelModule === 3 ? 3 : r.fuelModule === 2 ? 2 : 1;
   return {
     id: Math.floor(Number(r.id)),
     owner: typeof r.owner === 'string' ? r.owner.slice(0, MAX_OWNER_LEN) : '',
@@ -722,8 +887,13 @@ export function sanitizeHelicopter(raw: unknown): HelicopterState | null {
     velocity: { x: 0, y: 0, z: 0 },
     tier, maxHp: stats.hp,
     hp: Number.isFinite(r.hp) ? Math.max(1, Math.min(stats.hp, Math.round(Number(r.hp)))) : stats.hp,
-    fuel: Number.isFinite(r.fuel) ? Math.max(0, Math.min(stats.fuel, Number(r.fuel))) : 0,
+    fuel: Number.isFinite(r.fuel) ? Math.max(0, Math.min(stats.fuel * fuelModule, Number(r.fuel))) : 0,
     bombs: Number.isFinite(r.bombs) ? Math.max(0, Math.min(stats.bombs, Math.floor(Number(r.bombs)))) : 0,
+    fuelModule,
+    ropeWinch: r.ropeWinch === true,
+    ropeDeployed: r.ropeWinch === true && r.ropeDeployed === true,
+    ropeLength: r.ropeWinch === true && r.ropeDeployed === true
+      ? Math.max(4, Math.min(FAST_ROPE_LENGTH, num(r.ropeLength, FAST_ROPE_LENGTH))) : 0,
     // Occupants are ALWAYS cleared on restart — never restore a seated ghost.
     pilotId: null, passengerId: null,
     bombCooldown: 0, rotor: 0, dying: 0, unpiloted: 0,

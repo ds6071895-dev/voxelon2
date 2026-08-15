@@ -10,7 +10,7 @@
 //   · SNEAK toggle           — sneak on/off
 //   · gun cluster            — FIRE (hold) / AIM toggle (ADS) / R reload,
 //                              shown only while a gun is selected
-//   · top-right utility row  — inventory / map / warfare / commands / pause
+//   · top-right utility row  — inventory / commands / pause
 //   · tap a hotbar slot      — select it
 //
 // The whole overlay only exists on touch devices (isTouchDevice()).
@@ -33,16 +33,17 @@ export interface TouchState {
   gun: boolean;
   /** Riding a helicopter: show a dedicated exit button. */
   vehicle: boolean;
+  vehicleLabel: string;
+  /** Pilot has a rope control available. */
+  rope: boolean;
 }
 
 export interface TouchCallbacks {
   /** Utility-row buttons — main.ts routes these through its own toggles. */
   onPause(): void;
   onInventory(): void;
-  onMap(): void;
-  /** Warfare Command. */
-  onProgress(): void;
-  /** Open the command box (touch devices have no T key). */
+  /** Open the command box (touch devices have no T key). The map, Warfare
+   *  Command, waypoints and the guide all live behind /map, /warfare, etc. */
   onChat(): void;
 }
 
@@ -60,6 +61,7 @@ export class TouchControls {
   private readonly utils: HTMLElement;   // inventory / map / pause row
   private readonly gunBox: HTMLElement;  // FIRE / AIM / RELOAD cluster
   private readonly vehicleBtn: HTMLElement;
+  private readonly ropeBtn: HTMLElement;
   private readonly knob: HTMLElement;
   private readonly sneakBtn: HTMLElement;
   private readonly aimBtn: HTMLElement;
@@ -203,6 +205,10 @@ export class TouchControls {
       this.pads, 'EXIT', 'right:134px;bottom:108px;width:64px;height:48px;font-size:13px;');
     this.vehicleBtn.classList.add('t-sq');
     this.tap(this.vehicleBtn, () => { this.input.dismountPressed = true; });
+    this.ropeBtn = this.mkBtn(
+      this.pads, 'ROPE', 'right:206px;bottom:108px;width:64px;height:48px;font-size:12px;');
+    this.ropeBtn.classList.add('t-sq');
+    this.tap(this.ropeBtn, () => { this.input.reloadPressed = true; });
 
     // Gun cluster (only visible while a gun is selected).
     this.gunBox = document.createElement('div');
@@ -233,9 +239,7 @@ export class TouchControls {
       this.tap(b, fn);
     };
     util('🎒', cb.onInventory);
-    util('🗺', cb.onMap);
-    util('⌘', cb.onProgress);   // Warfare Command
-    util('/', cb.onChat);       // command box (/tpa, /waypoint, /guide…)
+    util('/', cb.onChat);       // command box (/map, /warfare, /tpa, /guide…)
     util('⏸', cb.onPause);
 
     // --- hotbar: tap a slot to select it ---
@@ -258,6 +262,8 @@ export class TouchControls {
     this.pads.style.display = s.playing ? '' : 'none';
     this.gunBox.style.display = s.playing && s.gun ? '' : 'none';
     this.vehicleBtn.style.display = s.playing && s.vehicle ? '' : 'none';
+    this.vehicleBtn.textContent = s.vehicleLabel;
+    this.ropeBtn.style.display = s.playing && s.rope ? '' : 'none';
     if (!s.gun && this.aimOn) this.setAim(false);
     if (this.wasPlaying && !s.playing) this.resetTransient();
     this.wasPlaying = s.playing;

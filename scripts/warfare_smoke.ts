@@ -22,7 +22,7 @@ import {
 } from '../src/strategic';
 import {
   VehicleSim, sanitizeHelicopter, sanitizeHeliInput, seatPosition, viewYawToHeliYaw,
-  DISMOUNT_CLEARANCE, EJECT_DAMAGE, HELI_FUEL_BURN, HELI_FUEL_IDLE, PASSENGER_ARC,
+  DISMOUNT_CLEARANCE, EJECT_DAMAGE, FAST_ROPE_LENGTH, HELI_FUEL_BURN, HELI_FUEL_IDLE, PASSENGER_ARC,
   SEAT_OFFSETS, type VehicleEvent,
 } from '../src/vehicles';
 import { VaultEncounter, type EncounterParticipant } from '../src/vault_encounter';
@@ -42,18 +42,18 @@ const check = (condition: boolean, message: string): void => {
 
 // --- The tree ---------------------------------------------------------------------
 {
-  check(WARFARE_TREE_COST === 8200,
-    `the complete tree costs exactly 8,200 XP (got ${WARFARE_TREE_COST})`);
-  check(WARFARE_TREE.length === 18 &&
-    new Set(WARFARE_TREE.map((n) => n.id)).size === 18,
-    'the tree is 18 uniquely-identified nodes');
+  check(WARFARE_TREE_COST === 9800,
+    `the complete tree costs exactly 9,800 XP (got ${WARFARE_TREE_COST})`);
+  check(WARFARE_TREE.length === 21 &&
+    new Set(WARFARE_TREE.map((n) => n.id)).size === 21,
+    'the tree is 21 uniquely-identified nodes');
 
   const branchCost = (b: string): number =>
     WARFARE_TREE.filter((n) => n.branch === b).reduce((a, n) => a + n.cost, 0);
   check(branchCost('trunk') === 2750, `the trunk costs 2,750 XP (got ${branchCost('trunk')})`);
   check(branchCost('strike') === 1700, `Strike costs 1,700 XP (got ${branchCost('strike')})`);
   check(branchCost('aegis') === 1700, `Aegis costs 1,700 XP (got ${branchCost('aegis')})`);
-  check(branchCost('air') === 2050, `Aviation costs 2,050 XP (got ${branchCost('air')})`);
+  check(branchCost('air') === 3650, `Aviation costs 3,650 XP (got ${branchCost('air')})`);
 
   // Every prerequisite exists and points strictly shallower — no cycles.
   check(WARFARE_TREE.every((n) =>
@@ -86,7 +86,7 @@ const check = (condition: boolean, message: string): void => {
 
   // Buying the whole tree spends exactly the tree cost, and nothing is left.
   for (const n of WARFARE_TREE) buyWarfareNode(s, n.id);
-  check(s.nodes.length === 18 && warfareSpent(s) === WARFARE_TREE_COST &&
+  check(s.nodes.length === 21 && warfareSpent(s) === WARFARE_TREE_COST &&
     warfareAvailable(s) === 0 && warfareCompletion(s) === 1,
     'the exact tree budget buys the exact tree — no change left over');
 
@@ -148,16 +148,16 @@ const check = (condition: boolean, message: string): void => {
 
   const h1 = helicopterStats(1), h5 = helicopterStats(5), h6 = helicopterStats(6);
   check(h1.hp === 140 && h1.speed === 16 && h1.fuel === 48 && h1.bombs === 2 &&
-    h1.bombRadius === 4 && h1.bombPlayerDamage === 10 &&
-    h1.bombHardwareDamage === 80 && h1.bombCooldown === 6 && h1.mark === 1,
+    h1.bombRadius === 7 && h1.bombBlocks === 40 && h1.bombPlayerDamage === 30 &&
+    h1.bombHardwareDamage === 140 && h1.bombCooldown === 6 && h1.mark === 1,
     'the Mk I helicopter matches the design table');
   check(h5.hp === 190 && h5.speed === 20 && h5.fuel === 72 && h5.bombs === 4 &&
-    h5.bombRadius === 5 && h5.bombPlayerDamage === 12 &&
-    h5.bombHardwareDamage === 100 && h5.bombCooldown === 5 && h5.mark === 2,
+    h5.bombRadius === 9 && h5.bombBlocks === 80 && h5.bombPlayerDamage === 36 &&
+    h5.bombHardwareDamage === 180 && h5.bombCooldown === 5 && h5.mark === 2,
     'the Mk II helicopter matches the design table');
   check(h6.hp === 220 && h6.speed === 24 && h6.fuel === 96 && h6.bombs === 5 &&
-    h6.bombRadius === 6 && h6.bombPlayerDamage === 14 &&
-    h6.bombHardwareDamage === 130 && h6.bombCooldown === 4 && h6.mark === 3,
+    h6.bombRadius === 11 && h6.bombBlocks === 140 && h6.bombPlayerDamage === 44 &&
+    h6.bombHardwareDamage === 240 && h6.bombCooldown === 4 && h6.mark === 3,
     'the Mk III helicopter matches the design table');
 
   check(tierLabel(1) === 'Mk I' && tierLabel(6) === 'Mk VI' && tierLabel(99) === 'Mk VI',
@@ -175,8 +175,8 @@ const check = (condition: boolean, message: string): void => {
     'boss tiers pay 300 / 750 / 1500 and nothing else pays at all');
 
   // The expected completion route reaches the tree cost.
-  const route = 5 * 300 + 5 * 750 + 2 * 1500;
-  check(route === 8250 && route >= WARFARE_TREE_COST,
+  const route = 5 * 300 + 7 * 750 + 3 * 1500;
+  check(route === 11250 && route >= WARFARE_TREE_COST,
     `the documented clear route (${route} XP) covers the ${WARFARE_TREE_COST} tree`);
 
   const HP = 1000;
@@ -807,7 +807,8 @@ const check = (condition: boolean, message: string): void => {
 // --- World serialization ------------------------------------------------------------
 {
   const g = new GameServer(1337, mulberry32(23));
-  g.addPlayer(1, { username: 'Ana', faction: 0, warfare: { version: 1, xp: 9000, nodes: [] } });
+  g.addPlayer(1, { username: 'Ana', faction: 0,
+    warfare: { version: 1, xp: WARFARE_TREE_COST, nodes: [] } });
   // Authorize everything so the player may build.
   for (const n of WARFARE_TREE) g.handle(1, { t: 'warfareBuy', node: n.id });
   check(warfareTier(g.warfareOf('Ana'), 'silo') === MAX_HARDWARE_TIER,
@@ -835,7 +836,7 @@ const check = (condition: boolean, message: string): void => {
   for (const n of WARFARE_TREE) g.handle(1, { t: 'warfareBuy', node: n.id });
   g.handle(1, { t: 'xform', x: 400, y: 70, z: 400, yaw: 0, pitch: 0 });
   g.handle(1, { t: 'edit', x: 401, y: 70, z: 401, block: Block.Helipad });
-  type HeliList = { t: string; list: { id: number; pilot: number }[] };
+  type HeliList = { t: string; list: { id: number; pilot: number; passenger: number }[] };
   const heliListOf = (out: ReturnType<GameServer['handle']>): HeliList['list'] | undefined =>
     (out.map((o) => o.msg).filter((m) => m.t === 'helis') as HeliList[]).at(-1)?.list;
 
@@ -849,9 +850,15 @@ const check = (condition: boolean, message: string): void => {
   if (id !== undefined) {
     const seated = heliListOf(g.handle(1, { t: 'heliMount', id, seat: 'pilot' }));
     check(seated?.find((h) => h.id === id)?.pilot === 1, 'the pilot seat is occupied');
+    // Simulate legacy/corrupt restored state that has duplicated the player in
+    // another seat. Disconnect cleanup must be a sweep, not a first-match exit.
+    const other = [...g.vehicles.helicopters.values()].find((h) => h.id !== id);
+    if (other) other.passengerId = 1;
     const after = heliListOf(g.removePlayer(1));
     check(after?.find((h) => h.id === id)?.pilot === 0,
       'a disconnect frees the seat, so the airframe never hangs there piloted forever');
+    check(!after?.some((h) => h.pilot === 1 || h.passenger === 1),
+      'a disconnect removes every stale helicopter occupant reference');
   }
 }
 
@@ -944,12 +951,13 @@ const check = (condition: boolean, message: string): void => {
     Item.ReinforcedFrame, Item.GuidanceUnit, Item.Warhead, Item.RotorAssembly,
     Item.FuelTank, Item.BombCasing, Item.TacticalMissile, Item.InterceptorMissile,
     Item.AerialBomb, Item.RepairKit, Item.HelicopterKit,
+    Item.RopeWinch, Item.AuxiliaryTank, Item.LongRangeTank,
     Block.TacticalSilo, Block.InterceptorBattery, Block.Helipad,
   ]) {
     check(results.has(id), `${ITEMS[id]?.name ?? id} is craftable`);
   }
-  check(Object.keys(WARFARE_BLUEPRINTS).length === 7,
-    'exactly the seven pieces of hardware and ordnance are blueprint-gated');
+  check(Object.keys(WARFARE_BLUEPRINTS).length === 10,
+    'exactly ten pieces of hardware, modules and ordnance are blueprint-gated');
   check(WARFARE_BLUEPRINTS[Block.TacticalSilo] === 'missile_command' &&
     WARFARE_BLUEPRINTS[Block.InterceptorBattery] === 'aegis_systems' &&
     WARFARE_BLUEPRINTS[Item.HelicopterKit] === 'flight_certification',
@@ -1245,9 +1253,14 @@ const check = (condition: boolean, message: string): void => {
 // --- Field deploy: an airframe without a helipad ----------------------------------
 {
   const g = new GameServer(1337, mulberry32(71));
-  g.addPlayer(1, { username: 'Ana', faction: 0, warfare: { version: 1, xp: 9000, nodes: [] } });
+  g.addPlayer(1, { username: 'Ana', faction: 0,
+    warfare: { version: 1, xp: WARFARE_TREE_COST, nodes: [] } });
   for (const n of WARFARE_TREE) g.handle(1, { t: 'warfareBuy', node: n.id });
-  type HeliList = { t: string; list: { id: number; pilot: number }[] };
+  const owned = g.warfareOf('Ana');
+  check(warfareOwns(owned, 'air_aux_tanks') &&
+    warfareOwns(owned, 'air_long_range_tanks') && warfareOwns(owned, 'air_fast_rope'),
+  `server purchase route authorizes all airframe modules (${owned.nodes.length} nodes)`);
+  type HeliList = { t: string; list: { id: number; pilot: number; ropeDeployed: boolean }[] };
   const heliListOf = (out: ReturnType<GameServer['handle']>): HeliList['list'] | undefined =>
     (out.map((o) => o.msg).filter((m) => m.t === 'helis') as HeliList[]).at(-1)?.list;
   const errOf = (out: ReturnType<GameServer['handle']>): string | undefined =>
@@ -1275,10 +1288,66 @@ const check = (condition: boolean, message: string): void => {
   // Boarding one you deployed still works, and a disconnect still frees the seat.
   const id = deployed?.[0]?.id;
   if (id !== undefined) {
+    for (const item of [Item.AuxiliaryTank, Item.LongRangeTank, Item.RopeWinch]) {
+      const installed = g.handle(1, { t: 'heliModule', id, item });
+      check(installed.some((o) => o.to === 1 && o.msg.t === 'heliModuleInstalled' &&
+        o.msg.item === item), `${ITEMS[item].name} installs through server confirmation` +
+        (errOf(installed) ? ` (${errOf(installed)})` : ''));
+    }
     const seated = heliListOf(g.handle(1, { t: 'heliMount', id, seat: 'pilot' }));
     check(seated?.find((h) => h.id === id)?.pilot === 1,
       'you can board a field-deployed airframe');
+    const deployedRope = g.handle(1, { t: 'heliRope', action: 'toggle' });
+    check(heliListOf(deployedRope)?.find((h) => h.id === id)?.ropeDeployed === true,
+      'the server accepts the installed pilot rope control');
+    const transfer = g.handle(1, { t: 'heliRope', action: 'attach' });
+    check(transfer.some((o) => o.to === 1 && o.msg.t === 'heliSeat' && o.msg.seat === null) &&
+      transfer.some((o) => o.to === 1 && o.msg.t === 'heliRopeState' && o.msg.id === id),
+    'F-style transfer leaves the seat and attaches to that airframe rope');
+    g.handle(1, { t: 'heliRope', action: 'move', motion: 1 });
+    const ropeTick = g.tickWarfare(0.5);
+    check(ropeTick.some((o) => o.to === 1 && o.msg.t === 'heliRopeState' && o.msg.progress > 0),
+      'rope climb progress is advanced and echoed by the authoritative tick');
+    const dropped = g.handle(1, { t: 'heliRope', action: 'drop' });
+    check(dropped.some((o) => o.to === 1 && o.msg.t === 'heliRopeState' && o.msg.id === 0),
+      'Space-style drop clears authoritative rope membership');
   }
+}
+
+// --- Operations modules + persistent demolition ------------------------------
+{
+  const sim = new VehicleSim({
+    solid: () => false, groundY: () => 0, worldHalf: 1000, vaultArena: () => false,
+  });
+  const h = sim.spawn('Ace', 0, { x: 0, y: 0, z: 0 }, 1);
+  check(sim.installModule(h, 'auxTank') && sim.installModule(h, 'longRangeTank') &&
+    sim.installModule(h, 'ropeWinch'),
+  'landed airframes accept the ordered tank upgrades and fast-rope winch');
+  sim.service(h, 1000, 0, 0);
+  check(h.fuel === helicopterStats(1).fuel * 3,
+    'long-range tanks triple capacity without changing base airframe stats');
+  sim.mount(h.id, 77, 0, h.position, 'pilot');
+  check(sim.toggleRope(77), 'the pilot can deploy an installed fast rope');
+  check(h.ropeLength === FAST_ROPE_LENGTH && FAST_ROPE_LENGTH >= 32,
+    'the deployed fast rope reaches far below a hovering helicopter');
+  sim.dismount(77);
+  const before = h.fuel, y = h.position.y;
+  sim.tick(1);
+  check(h.ropeDeployed && h.position.y === y && h.fuel < before,
+    'a deployed rope holds pilotless hover while continuing idle fuel burn');
+  const attached = sim.attachRope(88, 0,
+    { x: h.position.x, y: h.position.y - 0.75 - h.ropeLength, z: h.position.z }, h.id);
+  check(attached.ok, 'a nearby faction member attaches to the deployed rope');
+  if (attached.ok) {
+    const start = attached.rider.progress;
+    sim.setRopeMotion(88, -1);
+    sim.tick(0.5);
+    check((sim.ropeRider(88)?.progress ?? start) < start,
+      'W climbs toward the winch in shared simulation state');
+    sim.detachRope(88);
+    check(sim.ropePosition(88) === null, 'dropping removes the rope position immediately');
+  }
+
 }
 
 if (failures.length) throw new Error(`${failures.length} warfare smoke check(s) failed`);

@@ -31,7 +31,7 @@ import {
 } from '../war';
 import {
   FlagsState, newFlags, sanitizeFlags, hitFlag, returnFlag, tryCapture,
-  factionHasFlag, carriedBy, FLAG_HIT_COOLDOWN,
+  factionHasFlag, carriedBy, flagHome, FLAG_HIT_COOLDOWN,
 } from '../flags';
 import {
   ContributionRecord, WarfareProgress, buyWarfareNode, grantWarfareXp,
@@ -186,7 +186,7 @@ const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
   'warfareBuy', 'siloLoad', 'siloUpgrade', 'siloLaunch',
   'batteryLoad', 'batteryUpgrade', 'strategicHit', 'missileHit',
   'heliSpawn', 'heliDeploy', 'heliMount', 'heliInput', 'heliBomb', 'heliService',
-  'heliUpgrade', 'heliHit',
+  'heliUpgrade', 'heliModule', 'heliRope', 'heliHit',
   'heartConsume', 'heartWithdraw', 'beaconRevive', 'useHeal',
   'attune', 'totemTeleport',
   'vaultAttack', 'vaultChestOpen',
@@ -251,6 +251,8 @@ export class GameServer {
   onWarfareChange?: (username: string, progress: WarfareProgress) => void;
   private strategic!: StrategicSim;
   private vehicles!: VehicleSim;
+  /** Players known by the transport to be on a rope (for one-shot detach state). */
+  private readonly ropePlayers = new Set<number>();
   /** Accumulates toward the periodic missile/helicopter snapshot broadcast. */
   private strategicSnapAccum = 0;
   // Seasons (Phase 5): month-long war cycles with reset + a "Seasons Won" badge.
@@ -439,34 +441,49 @@ export class GameServer {
     return makeUsername(this.rng) + Math.floor(this.rng() * 1000);
   }
 
-  private spawn(): { x: number; y: number; z: number } {
-    // Spawns stay inside the Heartland core (B2) — nobody wakes up in the Wilds.
-    // Retry because player edits may have enclosed or trapped an otherwise-safe
-    // natural surface column since the terrain was generated.
+  private inFactionHalf(faction: number, x: number, z: number): boolean {
+    if (!isFaction(faction) || Math.abs(x) > CORE_HALF || Math.abs(z) > CORE_HALF) return false;
+    const band = (CORE_HALF * 2) / FACTIONS.length;
+    const index = FACTIONS.findIndex((f) => f.id === faction);
+    const minX = -CORE_HALF + band * index;
+    return x >= minX && x <= minX + band;
+  }
+
+  private spawn(faction: number): { x: number; y: number; z: number } {
+    const home = flagHome(faction);
+    // Respawns cluster around their own flag and never cross the faction-half
+    // boundary. Retry because edits may have trapped an otherwise-safe column.
     for (let i = 0; i < 64; i++) {
-      const s = this.terrain.randomDrySpawn(this.rng, CORE_HALF);
-      if (this.safeRespawnPoint(s.x, s.y, s.z)) return s;
+      const angle = this.rng() * Math.PI * 2;
+      const radius = 8 + Math.sqrt(this.rng()) * 48;
+      const x = Math.floor(home.x + Math.cos(angle) * radius);
+      const z = Math.floor(home.z + Math.sin(angle) * radius);
+      if (!this.inFactionHalf(faction, x, z)) continue;
+      const s = this.terrain.safeSpawnAt(x, z);
+      if (s && this.safeRespawnPoint(s.x, s.y, s.z)) return s;
     }
-    // A maliciously trapped fallback column must not put the player inside it.
-    // Search nearby natural surface columns deterministically before giving up.
-    const origin = this.terrain.findSpawn();
+    // Search outward from the flag deterministically before giving up.
     for (let r = 0; r <= 128; r++) {
       for (let dx = -r; dx <= r; dx++) {
         for (const dz of r === 0 ? [0] : [-r, r]) {
-          const s = this.terrain.safeSpawnAt(Math.floor(origin.x) + dx, Math.floor(origin.z) + dz);
+          const x = home.x + dx, z = home.z + dz;
+          if (!this.inFactionHalf(faction, x, z)) continue;
+          const s = this.terrain.safeSpawnAt(x, z);
           if (s && this.safeRespawnPoint(s.x, s.y, s.z)) return s;
         }
       }
       for (let dz = -r + 1; dz < r; dz++) {
         for (const dx of [-r, r]) {
-          const s = this.terrain.safeSpawnAt(Math.floor(origin.x) + dx, Math.floor(origin.z) + dz);
+          const x = home.x + dx, z = home.z + dz;
+          if (!this.inFactionHalf(faction, x, z)) continue;
+          const s = this.terrain.safeSpawnAt(x, z);
           if (s && this.safeRespawnPoint(s.x, s.y, s.z)) return s;
         }
       }
     }
     // This is only reachable if every checked column has been deliberately
     // trapped. Spawning above them remains collision- and hazard-free.
-    return { x: origin.x, y: 257, z: origin.z };
+    return { x: home.x + 0.5, y: 257, z: home.z + 0.5 };
   }
 
   private blockEditAt(x: number, y: number, z: number): number | undefined {
@@ -525,7 +542,7 @@ export class GameServer {
       : undefined;
     const s = savedSurface && this.safeRespawnPoint(savedSurface.x, savedSurface.y, savedSurface.z)
       ? { x: sx as number, y: savedSurface.y, z: sz as number }
-      : this.spawn();
+      : this.spawn(faction);
     const savedMode = typeof saved?.mode === 'string' && GAME_MODES.includes(saved.mode as GameMode)
       ? saved.mode as GameMode : 'survival';
     // Lifesteal: hearts persist in the account data blob; fresh accounts (or
@@ -600,11 +617,10 @@ export class GameServer {
     // A disconnect must FREE the seat, or the airframe stays permanently
     // "piloted" and hangs in the sky forever. Once the seat is empty the vehicle
     // sim's own rule takes over: a controlled hover that settles to the ground.
-    const seat = this.vehicles.seatOf(id);
-    if (seat) {
-      this.vehicles.dismount(id, true);
+    if (this.vehicles.disconnectPlayer(id)) {
       out.push(...this.heliBroadcast());
     }
+    this.ropePlayers.delete(id);
     // Logging out never banks a flag run: it goes straight back to its pad.
     const dropped = returnFlag(this.flags, id);
     this.players.delete(id);
@@ -630,16 +646,23 @@ export class GameServer {
           // fight and drop them, at vault depth, into solid rock at the middle
           // of the map. Everyone else is clamped inside the border so no client
           // can roam past it, and during a war the ring drags them inward.
-          const b = this.liveArenaFor(p.id);
-          if (b) {
-            p.x = Math.max(b.minX + 0.15, Math.min(b.maxX - 0.15, msg.x));
-            p.z = Math.max(b.minZ + 0.15, Math.min(b.maxZ - 0.15, msg.z));
+          const ropePos = this.vehicles.ropePosition(p.id);
+          if (ropePos) {
+            // Rope riders are server-positioned from the aircraft pose. Their
+            // transform packets still carry look/equipment, never movement.
+            p.x = ropePos.x; p.y = ropePos.y; p.z = ropePos.z;
           } else {
-            const clamped = clampInsideBorder(msg.x, msg.z, this.borderHalf());
-            p.x = clamped.x;
-            p.z = clamped.z;
+            const b = this.liveArenaFor(p.id);
+            if (b) {
+              p.x = Math.max(b.minX + 0.15, Math.min(b.maxX - 0.15, msg.x));
+              p.z = Math.max(b.minZ + 0.15, Math.min(b.maxZ - 0.15, msg.z));
+            } else {
+              const clamped = clampInsideBorder(msg.x, msg.z, this.borderHalf());
+              p.x = clamped.x;
+              p.z = clamped.z;
+            }
+            p.y = msg.y;
           }
-          p.y = msg.y;
           p.yaw = msg.yaw; p.pitch = msg.pitch;
           p.gliding = msg.gliding === true;
           p.boating = msg.boating === true;
@@ -1054,6 +1077,69 @@ export class GameServer {
         }
         this.vehicles.retrofit(h, h.tier + 1);
         return this.heliBroadcast();
+      }
+      case 'heliModule': {
+        const h = this.vehicles.helicopters.get(msg.id);
+        if (!h || !sameFaction(h.faction, p.faction)) return [];
+        const spec = msg.item === Item.AuxiliaryTank
+          ? { module: 'auxTank' as const, node: 'air_aux_tanks' }
+          : msg.item === Item.LongRangeTank
+            ? { module: 'longRangeTank' as const, node: 'air_long_range_tanks' }
+            : msg.item === Item.RopeWinch
+              ? { module: 'ropeWinch' as const, node: 'air_fast_rope' }
+              : null;
+        if (!spec || !warfareOwns(this.warfareOf(p.username), spec.node)) {
+          return [{ to: id, msg: { t: 'warfareErr', reason: 'That airframe module is not authorized.' } }];
+        }
+        if (!this.vehicles.canService(h)) {
+          return [{ to: id, msg: { t: 'warfareErr',
+            reason: 'Set the airframe down and stop before installing modules.' } }];
+        }
+        if (!this.vehicles.installModule(h, spec.module)) {
+          return [{ to: id, msg: { t: 'warfareErr', reason: 'That module cannot be installed here.' } }];
+        }
+        return [
+          { to: id, msg: { t: 'heliModuleInstalled', id: h.id, item: msg.item } },
+          ...this.heliBroadcast(),
+        ];
+      }
+      case 'heliRope': {
+        if (msg.action === 'toggle') {
+          if (!this.vehicles.toggleRope(p.id)) {
+            return [{ to: id, msg: { t: 'warfareErr', reason: 'No fast-rope winch is available.' } }];
+          }
+          return this.heliBroadcast();
+        }
+        if (msg.action === 'drop') {
+          this.vehicles.detachRope(p.id);
+          this.ropePlayers.delete(p.id);
+          return [{ to: id, msg: { t: 'heliRopeState', id: 0, progress: 0 } }];
+        }
+        if (msg.action === 'move') {
+          this.vehicles.setRopeMotion(p.id, fin(msg.motion as number) ? msg.motion as number : 0);
+          return [];
+        }
+        const seated = this.vehicles.seatOf(p.id);
+        let onlyHeliId: number | undefined;
+        const from = seated ? seated.heli.position : { x: p.x, y: p.y, z: p.z };
+        const out: Outbound[] = [];
+        if (seated) {
+          if (!seated.heli.ropeDeployed) {
+            return [{ to: id, msg: { t: 'warfareErr', reason: 'Deploy the rope before transferring.' } }];
+          }
+          onlyHeliId = seated.heli.id;
+          this.vehicles.dismount(p.id);
+          out.push({ to: id, msg: { t: 'heliSeat', id: 0, seat: null } });
+        }
+        const attached = this.vehicles.attachRope(p.id, p.faction, from, onlyHeliId);
+        if (!attached.ok) {
+          return [...out, { to: id, msg: { t: 'warfareErr', reason: attached.reason } }];
+        }
+        this.ropePlayers.add(p.id);
+        out.push({ to: id, msg: { t: 'heliRopeState',
+          id: attached.rider.heliId, progress: attached.rider.progress } });
+        out.push(...this.heliBroadcast());
+        return out;
       }
       case 'heliHit': {
         const h = this.vehicles.helicopters.get(msg.id);
@@ -1557,7 +1643,7 @@ export class GameServer {
           break;
         case 'bombImpact':
           out.push(...this.applyBlast(ev.faction, { x: ev.x, y: ev.y, z: ev.z },
-            ev.radius, ev.playerDamage, ev.hardwareDamage, Math.ceil(ev.radius)));
+            ev.radius, ev.playerDamage, ev.hardwareDamage, ev.blockCap, true));
           out.push({ to: 'all', msg: { t: 'gadgetFx', kind: 'frag', x: ev.x, y: ev.y, z: ev.z } });
           break;
         case 'heliDown':
@@ -1598,6 +1684,7 @@ export class GameServer {
   private applyBlast(
     faction: number, at: { x: number; y: number; z: number },
     radius: number, playerDamage: number, hardwareDamage: number, blockCap: number,
+    breakNatural = false,
   ): Outbound[] {
     const out: Outbound[] = [];
     for (const victim of this.players.values()) {
@@ -1628,32 +1715,39 @@ export class GameServer {
       const dmg = bombBlast(at, h.position, radius, hardwareDamage);
       if (dmg > 0) out.push(...this.applyVehicleEvents(this.vehicles.damage(h.id, dmg)));
     }
-    out.push(...this.blastBlocks(at, radius, blockCap));
+    out.push(...this.blastBlocks(at, radius, blockCap, breakNatural));
     return out;
   }
 
-  /** Remove up to `cap` player-PLACED destructible blocks around an impact. */
+  /** Remove up to `cap` destructible blocks around an impact. */
   private blastBlocks(
     at: { x: number; y: number; z: number }, radius: number, cap: number,
+    breakNatural = false,
   ): Outbound[] {
     const out: Outbound[] = [];
+    const edits: { x: number; y: number; z: number; block: number }[] = [];
     let removed = 0;
-    for (const c of blastBlockCandidates(at.x, at.y, at.z, radius)) {
+    const candidates = blastBlockCandidates(at.x, at.y, at.z, radius);
+    const natural = breakNatural ? this.terrain.blocksAtCells(candidates) : [];
+    for (let i = 0; i < candidates.length; i++) {
+      const c = candidates[i];
       if (removed >= cap) break;
       const key = `${c.x},${c.y},${c.z}`;
-      const block = this.edits.get(key);
-      // Never natural terrain (undefined = untouched world), never air, never
-      // indestructible masonry, and never another faction's block-entity anchor
-      // (those are taken down by the damage pass above, not by digging).
+      const edited = this.edits.get(key);
+      const block = edited ?? (breakNatural ? natural[i] : undefined);
+      // Strategic missiles preserve natural terrain. Helicopter bombs may
+      // crater it, but air, indestructible masonry and block-entity anchors
+      // are still protected here.
       if (block === undefined || block === Block.Air) continue;
       const info = BLOCKS[block];
       if (!info || info.hardness < 0) continue;
       if (isVaultMasonry(block) || block === Block.Core || block === Block.TacticalSilo ||
           block === Block.SiloPart || block === Block.InterceptorBattery) continue;
       this.edits.set(key, Block.Air);
-      out.push({ to: 'all', msg: { t: 'edit', x: c.x, y: c.y, z: c.z, block: Block.Air } });
+      edits.push({ x: c.x, y: c.y, z: c.z, block: Block.Air });
       removed++;
     }
+    if (edits.length) out.push({ to: 'all', msg: { t: 'editBatch', edits } });
     return out;
   }
 
@@ -1663,6 +1757,19 @@ export class GameServer {
     this.strategic.now = this.worldTime;
     const out = this.applyStrategicEvents(this.strategic.tick(dt));
     out.push(...this.applyVehicleEvents(this.vehicles.tick(dt)));
+    for (const p of this.players.values()) {
+      const rider = this.vehicles.ropeRider(p.id);
+      const at = rider ? this.vehicles.ropePosition(p.id) : null;
+      if (rider && at) {
+        p.x = at.x; p.y = at.y; p.z = at.z;
+        p.seated = false; p.gliding = false; p.boating = false;
+        this.ropePlayers.add(p.id);
+        out.push({ to: p.id, msg: { t: 'heliRopeState', id: rider.heliId,
+          progress: rider.progress } });
+      } else if (this.ropePlayers.delete(p.id)) {
+        out.push({ to: p.id, msg: { t: 'heliRopeState', id: 0, progress: 0 } });
+      }
+    }
     this.strategicSnapAccum += dt;
     if (this.strategicSnapAccum >= 1 / 10) {
       this.strategicSnapAccum = 0;
@@ -2442,6 +2549,10 @@ export class GameServer {
     }
     if (p.health <= 0 && !p.dead) {
       p.dead = true;
+      if (this.vehicles.detachRope(p.id)) {
+        this.ropePlayers.delete(p.id);
+        out.push({ to: p.id, msg: { t: 'heliRopeState', id: 0, progress: 0 } });
+      }
       const killer = this.players.get(by);
       out.push({
         to: 'all',
@@ -2529,14 +2640,15 @@ export class GameServer {
         }
       }
       const beaconSpawn = { x: bx + 0.5, y: by + 1, z: bz + 0.5 };
-      if (openToSky && this.edits.get(`${bx},${by},${bz}`) === Block.RespawnBeacon &&
+      if (this.inFactionHalf(p.faction, beaconSpawn.x, beaconSpawn.z) && openToSky &&
+          this.edits.get(`${bx},${by},${bz}`) === Block.RespawnBeacon &&
           this.safeRespawnPoint(beaconSpawn.x, beaconSpawn.y, beaconSpawn.z)) {
         return beaconSpawn; // stand on top of the beacon
       }
       // Beacon gone, buried, or underground: forget it and fall back to the surface.
       p.spawnX = p.spawnY = p.spawnZ = undefined;
     }
-    return this.spawn();
+    return this.spawn(p.faction);
   }
 
   private handleRespawn(p: ServerPlayer): Outbound[] {

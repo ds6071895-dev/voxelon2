@@ -134,6 +134,10 @@ export interface HelicopterModel {
    * straight up at the rotor. Everyone else still sees a complete helicopter.
    */
   interior: THREE.Object3D[];
+  /** Optional field modules, driven directly from authoritative snapshots. */
+  winch: THREE.Object3D;
+  fuelTanks: THREE.Object3D[];
+  rope: THREE.Mesh;
   tier: number;
 }
 
@@ -374,7 +378,32 @@ export function buildHelicopterModel(tier: number, markingHex: number): Helicopt
     hull.add(seat);
   }
 
-  return { group, hull, mainRotor, tailRotor, seats, bombs, lights, glazing, interior, tier };
+  // Field modules are authored on every model and hidden until installed. This
+  // avoids rebuilding the airframe when a mechanic bolts one on.
+  const winch = new THREE.Group();
+  box(winch, STEEL_DARK, 0.48, 0.34, 0.44, 0, -0.68, -0.15);
+  round(winch, new THREE.CylinderGeometry(0.16, 0.16, 0.42, 8), STEEL,
+    0, -0.68, -0.15).rotation.z = Math.PI / 2;
+  hull.add(winch);
+  winch.visible = false;
+  const fuelTanks = [
+    round(hull, new THREE.CylinderGeometry(0.24, 0.24, 1.7, 8), OLIVE_DARK,
+      1.18, -0.38, -0.1),
+    round(hull, new THREE.CylinderGeometry(0.24, 0.24, 1.7, 8), OLIVE_DARK,
+      -1.18, -0.38, -0.1),
+  ];
+  for (const tank of fuelTanks) { tank.rotation.x = Math.PI / 2; tank.visible = false; }
+  const rope = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.035, 0.035, 1, 6),
+    new THREE.MeshBasicMaterial({ color: 0x8e6535 }),
+  );
+  rope.visible = false;
+  group.add(rope);
+
+  return {
+    group, hull, mainRotor, tailRotor, seats, bombs, lights, glazing, interior,
+    winch, fuelTanks, rope, tier,
+  };
 }
 
 
@@ -580,6 +609,18 @@ export class VehicleModels {
     return anchor.localToWorld(new THREE.Vector3(0, SEAT_EYE, COCKPIT_EYE_FWD));
   }
 
+  /** World point one metre behind the seat along the airframe's OWN centreline
+   *  (roll, pitch and yaw all included). The third-person boom hangs off this
+   *  line instead of the pilot's facing, so a bank or a turn can never swing
+   *  the chase camera off the fuselage and out through the canopy. */
+  chaseAnchor(heliId: number, seat: 'pilot' | 'passenger'): THREE.Vector3 | null {
+    const e = this.helis.get(heliId);
+    if (!e) return null;
+    const anchor = e.model.seats[seat];
+    anchor.updateWorldMatrix(true, false);
+    return anchor.localToWorld(new THREE.Vector3(0, SEAT_EYE, COCKPIT_EYE_FWD - 1));
+  }
+
   /**
    * Hide/show an airframe's cabin for the person sitting in it. The rider's OWN
    * aircraft drops its glass AND its cabin furniture while they are looking out
@@ -607,6 +648,17 @@ export class VehicleModels {
 
   positionOf(id: number): THREE.Vector3 | null {
     return this.helis.get(id)?.model.group.position ?? null;
+  }
+
+  /** Render-space point along a deployed rope (0 winch, 1 free end). */
+  ropeWorldPosition(id: number, progress: number): THREE.Vector3 | null {
+    const e = this.helis.get(id);
+    if (!e || !e.snap.ropeDeployed) return null;
+    return new THREE.Vector3(
+      e.model.group.position.x,
+      e.model.group.position.y - 0.75 - Math.max(0, Math.min(1, progress)) * e.snap.ropeLength,
+      e.model.group.position.z,
+    );
   }
 
   remove(id: number): void {
@@ -686,7 +738,7 @@ export class VehicleModels {
 
       // Rotor speed: full while flown, winding DOWN once the wreck is falling.
       const dying = snap.dying > 0;
-      const spin = dying ? 4 + snap.dying * 8 : snap.pilot ? 34 : 6;
+      const spin = dying ? 4 + snap.dying * 8 : (snap.pilot || snap.ropeDeployed) ? 34 : 6;
       e.rotorPhase += dt * spin;
       model.mainRotor.rotation.y = e.rotorPhase;
       model.tailRotor.rotation.x = -e.rotorPhase * 2.4;
@@ -697,6 +749,14 @@ export class VehicleModels {
 
       // Empty the visible rack as bombs are released.
       for (let i = 0; i < model.bombs.length; i++) model.bombs[i].visible = i < snap.bombs;
+      model.winch.visible = snap.ropeWinch;
+      model.fuelTanks[0].visible = snap.fuelModule >= 2;
+      model.fuelTanks[1].visible = snap.fuelModule >= 3;
+      model.rope.visible = snap.ropeDeployed && snap.ropeLength > 0;
+      if (model.rope.visible) {
+        model.rope.scale.y = snap.ropeLength;
+        model.rope.position.set(0, -snap.ropeLength * 0.5 - 0.75, -0.15);
+      }
 
       // Running lights: a slow strobe on the belly beacon, steady nav lights.
       const strobe = (Math.sin(this.clock * 6) > 0.7) ? 1.5 : 0.7;

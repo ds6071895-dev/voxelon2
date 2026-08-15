@@ -127,6 +127,15 @@ export class Inventory {
     return -1;
   }
 
+  /** Exchange any inventory-backed slot with a numbered hotbar slot. */
+  swapWithHotbar(index: number, hotbar: number): boolean {
+    if (hotbar < 0 || hotbar >= HOTBAR_SIZE || index < 0 || index >= this.slots.length ||
+        index === hotbar) return false;
+    [this.slots[index], this.slots[hotbar]] = [this.slots[hotbar], this.slots[index]];
+    this.version++;
+    return true;
+  }
+
   /** Vanilla left click: pick up / place all / merge / swap. */
   leftClick(i: number): void {
     const slot = this.slots[i];

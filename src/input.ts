@@ -25,10 +25,12 @@ export class Input {
   wheelDelta = 0;
   hotbarKey = -1; // 0-8 when a number key was pressed this frame
   debugToggled = false;
+  operatorModeTogglePressed = false; // secret F4 shortcut; server still verifies OP
   inventoryToggled = false;
-  // The world map and Warfare Command have NO key of their own any more — they
-  // are `/map` and `/warfare` in the command box. These two flags survive only
-  // for the on-screen touch buttons, which write them directly.
+  // The world map and Warfare Command have NO key and NO button of their own
+  // any more — they are `/map` and `/warfare` in the command box. These two
+  // flags survive only so the mobile pause button can close an open map or
+  // Warfare panel (they toggle, so setting them is all main.ts needs).
   mapToggled = false;
   reloadPressed = false; // R pressed this frame (gun reload)
   dropPressed = false;   // Q pressed this frame (item drop)
@@ -59,6 +61,11 @@ export class Input {
       if (e.code === 'F3') {
         e.preventDefault();
         this.debugToggled = true;
+        return;
+      }
+      if (e.code === 'F4') {
+        e.preventDefault();
+        if (!e.repeat) this.operatorModeTogglePressed = true;
         return;
       }
       if (e.repeat) return;
@@ -163,6 +170,7 @@ export class Input {
     this.middleClicked = false;
     this.rightClicked = false;
     this.debugToggled = false;
+    this.operatorModeTogglePressed = false;
     this.inventoryToggled = false;
     this.mapToggled = false;
     this.reloadPressed = false;

@@ -235,8 +235,10 @@ export class HeldItemView {
   private buildArm(scale: number): THREE.Group {
     const arm = new THREE.Group();
     const forearm = new THREE.Mesh(
-      new THREE.BoxGeometry(0.17 * scale, 0.17 * scale, 0.55), this.sleeveMat);
-    forearm.position.set(0, 0, 0.3); // extends back toward the screen corner
+      new THREE.BoxGeometry(0.17 * scale, 0.17 * scale, 0.42), this.sleeveMat);
+    // Stop before the camera near plane. The old camera-end vertices crossed it,
+    // exposing a clipped sleeve triangle beside held blocks at sprint FOV.
+    forearm.position.set(0, 0, 0.22);
     arm.add(forearm);
     const wrist = new THREE.Mesh(
       new THREE.BoxGeometry(0.185 * scale, 0.185 * scale, 0.1), this.armMat);

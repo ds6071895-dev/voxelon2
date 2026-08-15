@@ -237,6 +237,14 @@ check('daylight: noon full, midnight moonlit floor, dawn between',
   for (let i = 0; i < 36; i++) full.add(Block.Stone, 64);
   check('full inventory rejects other items',
     !full.canAccept(Block.Dirt) && full.add(Block.Dirt, 1) === 1);
+
+  const swap = new Inventory();
+  swap.slots[10] = { id: Block.Dirt, count: 12 };
+  swap.slots[2] = { id: Block.Stone, count: 7 };
+  const dirt = swap.slots[10], stone = swap.slots[2];
+  check('number-key swap exchanges complete stacks with a hotbar slot',
+    swap.swapWithHotbar(10, 2) && swap.slots[2] === dirt && swap.slots[10] === stone);
+  check('number-key swap ignores its own hotbar slot', !swap.swapWithHotbar(2, 2));
 }
 
 // --- Crafting (no swords) ---------------------------------------------------------
@@ -1918,7 +1926,7 @@ check('furnace smelts ore/sand/log but not removed foods',
 // --- Respawn Beacon: right-click sets a personal spawn the respawn honors ------
 {
   const s = new GameServer(1337, mulberry32(122));
-  s.addPlayer(1, { username: 'Homer', faction: 0 });
+  s.addPlayer(1, { username: 'Homer', faction: 1 });
   s.handle(1, { t: 'xform', x: 10.5, y: 70, z: 10.5, yaw: 0, pitch: 0 });
   s.handle(1, { t: 'edit', x: 10, y: 70, z: 11, block: Block.RespawnBeacon });
   check('setting spawn on a Respawn Beacon returns a notice',
@@ -1948,7 +1956,21 @@ check('furnace smelts ore/sand/log but not removed foods',
   const rs2 = re2.find((o) => o.msg.t === 'respawned')?.msg as
     Extract<typeof re2[number]['msg'], { t: 'respawned' }> | undefined;
   check('respawn falls back to faction spawn when the beacon is gone',
-    !!rs2 && !(rs2.y === 71 && Math.floor(rs2.x) === 10 && Math.floor(rs2.z) === 11));
+    !!rs2 && rs2.x >= 0 && !(rs2.y === 71 && Math.floor(rs2.x) === 10 && Math.floor(rs2.z) === 11));
+}
+
+// Respawn Beacons in enemy territory are never valid faction spawns.
+{
+  const s = new GameServer(1337, mulberry32(124));
+  s.addPlayer(1, { username: 'Invader', faction: 0 });
+  s.handle(1, { t: 'xform', x: 40.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
+  s.handle(1, { t: 'edit', x: 40, y: 70, z: 0, block: Block.RespawnBeacon });
+  s.handle(1, { t: 'setSpawn', x: 40, y: 70, z: 0 });
+  s.handle(1, { t: 'selfhurt', amount: 100 });
+  const re = s.handle(1, { t: 'respawn' });
+  const rs = re.find((o) => o.msg.t === 'respawned')?.msg as
+    Extract<typeof re[number]['msg'], { t: 'respawned' }> | undefined;
+  check('respawn rejects a beacon in the enemy faction half', !!rs && rs.x <= 0);
 }
 
 // An underground beacon must never pull a dead player below the surface.
@@ -2594,7 +2616,7 @@ check('furnace smelts ore/sand/log but not removed foods',
 
 // --- Gadgets (Phase 8): registry, cooldowns, AoE, server effects -------------
 {
-  // Registry: ten gadgets, each with sane params + a description.
+  // Registry: the ten launch gadgets.
   const ids = Object.keys(GADGETS).map(Number);
   check('all gadgets are registered with valid params + descriptions',
     ids.length === 10 && ids.every((id) => {

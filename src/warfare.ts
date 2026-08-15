@@ -1,7 +1,7 @@
 // WARFARE COMMAND — the boss-powered technology tree that replaces the old
 // generic stat-based Progress system.
 //
-// One trunk, three branches, nine + nine nodes, 8,200 XP:
+// One trunk, three branches, plus optional operations modules.
 //
 //        TACTICAL MISSILES  →  MISSILE DEFENSE  →  HELICOPTER AVIATION
 //                                      │
@@ -214,7 +214,6 @@ export const WARFARE_TREE: WarfareNode[] = [
       'Player-built blocks removed 16',
       'Silo cooldown 105s → 90s · magazine 3',
     ], true),
-
   // --- Aegis branch (1,700 XP) ---
   node('aegis_network', 'aegis', 'Network Radar',
     'Batteries stop working alone.', 450, 'reinforced_airframe', '🌐', 'battery', 4, 9, [
@@ -254,6 +253,22 @@ export const WARFARE_TREE: WarfareNode[] = [
       'Five bombs · radius 6 · cooldown 4s',
       'Altitude allowance 128 blocks · fuel 24 oil',
     ], true),
+  node('air_aux_tanks', 'air', 'Auxiliary Tanks',
+    'A second fuel circuit doubles sortie endurance.', 450, 'air_command', '⛽', 'helicopter', 6, 12, [
+      'Blueprint: Auxiliary Tank Module',
+      'Installed helicopter fuel capacity ×2',
+    ]),
+  node('air_long_range_tanks', 'air', 'Long-Range Tanks',
+    'Triple-range tanks turn a raid into an expedition.', 650, 'air_aux_tanks', '🛢', 'helicopter', 6, 13, [
+      'Blueprint: Long-Range Tank Module',
+      'Installed helicopter fuel capacity ×3',
+    ]),
+  node('air_fast_rope', 'air', 'Fast-Rope Operations',
+    'Hold the hover, throw the line, own the vertical.', 500, 'air_long_range_tanks', '🪢', 'helicopter', 6, 14, [
+      'Blueprint: Fast-Rope Winch',
+      'R lowers or retracts a rope while piloting',
+      'The helicopter holds position while people climb',
+    ]),
 ];
 
 const NODE_BY_ID = new Map(WARFARE_TREE.map((n) => [n.id, n]));
@@ -265,7 +280,7 @@ export function warfareBranchNodes(branch: WarfareBranch): WarfareNode[] {
   return WARFARE_TREE.filter((n) => n.branch === branch);
 }
 
-/** Total XP to own the entire tree (8,200). */
+/** Total XP to own the entire tree (9,800). */
 export const WARFARE_TREE_COST = WARFARE_TREE.reduce((s, n) => s + n.cost, 0);
 
 export const WARFARE_BRANCH_META: Record<WarfareBranch, { name: string; icon: string; blurb: string }> = {
@@ -458,6 +473,8 @@ export interface HelicopterStats {
   bombRadius: number;
   bombPlayerDamage: number;
   bombHardwareDamage: number;
+  /** Maximum destructible world blocks removed by one aerial bomb. */
+  bombBlocks: number;
   bombCooldown: number;
   /** Blocks above terrain the airframe is allowed to climb. */
   altitude: number;
@@ -471,23 +488,23 @@ export interface HelicopterStats {
 // running dry over hostile ground drops you out of the sky.
 const HELI_TABLE: HelicopterStats[] = [
   // Mk I — Flight Certification.
-  { hp: 140, speed: 16, climb: 7, fuel: 48, bombs: 2, bombRadius: 4,
-    bombPlayerDamage: 10, bombHardwareDamage: 80, bombCooldown: 6, altitude: 64, mark: 1 },
+  { hp: 140, speed: 16, climb: 7, fuel: 48, bombs: 2, bombRadius: 7,
+    bombPlayerDamage: 30, bombHardwareDamage: 140, bombBlocks: 40, bombCooldown: 6, altitude: 64, mark: 1 },
   // Bomb Rack.
-  { hp: 140, speed: 16, climb: 7, fuel: 48, bombs: 3, bombRadius: 4,
-    bombPlayerDamage: 10, bombHardwareDamage: 80, bombCooldown: 5, altitude: 64, mark: 1 },
+  { hp: 140, speed: 16, climb: 7, fuel: 48, bombs: 3, bombRadius: 7,
+    bombPlayerDamage: 30, bombHardwareDamage: 140, bombBlocks: 40, bombCooldown: 5, altitude: 64, mark: 1 },
   // Reinforced Airframe.
-  { hp: 170, speed: 16, climb: 7, fuel: 60, bombs: 3, bombRadius: 4,
-    bombPlayerDamage: 10, bombHardwareDamage: 80, bombCooldown: 5, altitude: 64, mark: 1 },
+  { hp: 170, speed: 16, climb: 7, fuel: 60, bombs: 3, bombRadius: 7,
+    bombPlayerDamage: 30, bombHardwareDamage: 140, bombBlocks: 40, bombCooldown: 5, altitude: 64, mark: 1 },
   // Turbine II.
-  { hp: 190, speed: 20, climb: 9, fuel: 72, bombs: 3, bombRadius: 4,
-    bombPlayerDamage: 10, bombHardwareDamage: 80, bombCooldown: 5, altitude: 96, mark: 2 },
+  { hp: 190, speed: 20, climb: 9, fuel: 72, bombs: 3, bombRadius: 7,
+    bombPlayerDamage: 30, bombHardwareDamage: 140, bombBlocks: 40, bombCooldown: 5, altitude: 96, mark: 2 },
   // Heavy Bomb Bay — the plan's "Mk II" column.
-  { hp: 190, speed: 20, climb: 9, fuel: 72, bombs: 4, bombRadius: 5,
-    bombPlayerDamage: 12, bombHardwareDamage: 100, bombCooldown: 5, altitude: 96, mark: 2 },
+  { hp: 190, speed: 20, climb: 9, fuel: 72, bombs: 4, bombRadius: 9,
+    bombPlayerDamage: 36, bombHardwareDamage: 180, bombBlocks: 80, bombCooldown: 5, altitude: 96, mark: 2 },
   // Air Command III — the plan's "Mk III" column.
-  { hp: 220, speed: 24, climb: 11, fuel: 96, bombs: 5, bombRadius: 6,
-    bombPlayerDamage: 14, bombHardwareDamage: 130, bombCooldown: 4, altitude: 128, mark: 3 },
+  { hp: 220, speed: 24, climb: 11, fuel: 96, bombs: 5, bombRadius: 11,
+    bombPlayerDamage: 44, bombHardwareDamage: 240, bombBlocks: 140, bombCooldown: 4, altitude: 128, mark: 3 },
 ];
 
 export function helicopterStats(tier: number): HelicopterStats {

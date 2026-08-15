@@ -160,11 +160,14 @@ scene.add(camera); // so the held-item view (a camera child) renders
 const enum View { First = 0, Back = 1, Front = 2 }
 const VIEW_NAMES = ['First person', 'Third person (back)', 'Third person (front)'];
 let view: View = View.First;
+/** The perspective the player had BEFORE taking a helicopter seat; boarding
+ *  switches to the rear third-person view, and leaving restores this. */
+let preSeatView: View = View.First;
 const VIEW_DIST = 4.0;       // how far the boom reaches when nothing blocks it
 // Aboard a helicopter the boom has a whole airframe to clear before it sees
-// anything: at walking distance the camera sits inside the tail. A chase view
-// that actually frames the aircraft is the best answer to "I can't see out",
-// so V from the cockpit gives you a proper gunship chase cam.
+// anything: at walking distance the camera sits inside the tail. The seated
+// boom still follows mouse-look, however, so both crew members can freely orbit
+// the aircraft instead of having their view welded to its centreline.
 const VIEW_DIST_SEATED = 9.0;
 const VIEW_LIFT_SEATED = 1.6;  // and rides above the rotor disc, looking down
 const viewCamera = new THREE.PerspectiveCamera(
@@ -187,8 +190,6 @@ const input = new Input(renderer.domElement);
 const isMobile = isTouchDevice();
 const touch = isMobile ? new TouchControls(input, {
   onInventory: () => { input.inventoryToggled = true; },
-  onMap: () => { input.mapToggled = true; },
-  onProgress: () => { input.progressPressed = true; },
   onChat: () => { input.chatPressed = true; },
   onPause: () => {
     if (player.dead) return;
@@ -337,6 +338,7 @@ const turretModels = new TurretModels(scene, turretStates);
 let flagState = newFlags();
 const flagModels = new FlagModels(scene);
 flagModels.setGroundProbe((x, z) => world.terrain.height(Math.floor(x), Math.floor(z)) + 1);
+flagModels.setState(flagState.breakable, flagState.flags);
 /** Seconds until the client may send another flag swing (matches the server). */
 let flagHitTimer = 0;
 /** Local mirror of "my faction holds no flag" — drives the danger banner. */
@@ -806,26 +808,6 @@ interface DamageArc { el: HTMLDivElement; x: number; z: number; t: number }
 const dmgArcs: DamageArc[] = [];
 const DMG_ARC_TIME = 1.6;
 const MAX_DMG_ARCS = 4;
-
-// World-map button. The map has no key of its own any more — this button and
-// `/map` in the command box are the two ways in.
-const mapBtn = document.createElement('button');
-mapBtn.className = 'mc-font';
-mapBtn.textContent = '🗺 Map';
-mapBtn.style.cssText =
-  'position:absolute;bottom:8px;right:8px;z-index:12;font-size:12px;padding:6px 10px;' +
-  'width:118px;box-sizing:border-box;text-align:center;cursor:pointer;border:2px solid;' +
-  'border-color:#fff #555 #555 #fff;background:#6b6b6b;color:#fff;text-shadow:none;display:none;';
-  // Hidden on the title screen (no world/character to show yet) and on mobile
-  // (which has its own 🗺 icon in the touch overlay) — enterPlaying() reveals it.
-mapBtn.addEventListener('click', () => {
-  if (player.dead) return;
-  if (worldMap.open) { worldMap.hide(); input.lock(); return; }
-  if (invUI.open) invUI.hide();
-  prepareWorldMap();
-  worldMap.show(); // pointer is already unlocked when a DOM button is clickable
-});
-app.appendChild(mapBtn);
 
 // War HUD: the war clock/score line + a big banner that flashes on events.
 // Shown ONLY while a war is actually running — no top-centre text otherwise
@@ -1428,8 +1410,6 @@ function enterPlaying(): void {
   document.body.classList.add('in-game');
   overlay.classList.add('hidden');
   pauseEl.style.display = 'none';
-  mapBtn.style.display = isMobile ? 'none' : '';
-  progressBtn.style.display = isMobile ? 'none' : '';
 }
 function enterPause(): void {
   screen = 'paused';
@@ -1441,10 +1421,6 @@ function enterTitle(): void {
   document.body.classList.remove('in-game');
   overlay.classList.remove('hidden');
   pauseEl.style.display = 'none';
-  // The Map/Progress corner buttons are gameplay-only — don't show them over
-  // the title panorama (there's no world/character to view progress for yet).
-  mapBtn.style.display = 'none';
-  progressBtn.style.display = 'none';
   onVaultTransition(null);
 }
 
@@ -2598,6 +2574,11 @@ document.getElementById('respawn')!.addEventListener('click', () => {
 function checkDeath(): void {
   if (!player.dead || deathShown) return;
   deathShown = true;
+  if (myRope) {
+    if (!net.connected) offlineVehicles.detachRope(0);
+    myRope = null;
+    vehicleHud.setRope(false);
+  }
   clearVaultPresentation(true, 0.35);
   invUI.hide(); // closes (and saves) an open chest BEFORE we spill the inventory
   // Drop everything where we died — networked so others can grab it (MP) or
@@ -2680,9 +2661,15 @@ net.onWelcome = (me) => {
   held.setSkin(skinSeed(me.username), myCosmetics);
   refreshNetInfo();
 };
+net.onFlags = (breakable, flags) => {
+  flagState = { breakable, flags: flags.map((flag) => ({ ...flag })) };
+  flagModels.setState(breakable, flagState.flags);
+  myFactionFlagless = !flagState.flags.some((flag) => flag.holder === localFaction);
+  refreshNetInfo();
+};
 // Someone (possibly us) changed their look: rebuild that avatar.
 net.onCosmetics = (id) => remotePlayers.invalidate(id);
-net.onEdit = (x, y, z, b) => {
+function applyNetworkEdit(x: number, y: number, z: number, b: number): void {
   world.applyRemoteEdit(x, y, z, b);
   // If someone removed/replaced the chest block we have open, stop viewing it.
   if (openChest && openChest.x === x && openChest.y === y && openChest.z === z
@@ -2699,6 +2686,12 @@ net.onEdit = (x, y, z, b) => {
       forceCloseMachine();
     }
   }
+}
+net.onEdit = applyNetworkEdit;
+net.onEditBatch = (edits) => {
+  world.beginBatch();
+  for (const e of edits) applyNetworkEdit(e.x, e.y, e.z, e.block);
+  world.endBatch();
 };
 net.onHurt = (health, dead, k, by) => {
   player.setHealthFromServer(health, dead);
@@ -3221,35 +3214,6 @@ function toggleProgress(): void {
   else if (input.locked && screen === 'playing') showProgress();
 }
 
-
-// A clickable button stacked above the Map button (same footprint).
-const progressBtn = document.createElement('button');
-progressBtn.className = 'mc-font';
-progressBtn.textContent = '⌘ Warfare';
-progressBtn.style.cssText =
-  'position:absolute;bottom:46px;right:8px;z-index:12;font-size:12px;padding:6px 10px;' +
-  'width:118px;box-sizing:border-box;text-align:center;cursor:pointer;border:2px solid;' +
-  'border-color:#fff #555 #555 #fff;background:#6b6b6b;color:#fff;text-shadow:none;display:none;';
-  // Hidden on the title screen and on mobile (own ⌘ icon in the touch overlay).
-progressBtn.addEventListener('click', () => {
-  if (warfareUI.open) warfareUI.hide();
-  else if (!player.dead) showProgress();
-});
-app.appendChild(progressBtn);
-// Flash the Warfare button whenever there is unspent warfare XP.
-const progressFlashStyle = document.createElement('style');
-progressFlashStyle.textContent =
-  '@keyframes prog-flash { 0%,100% { background:#6b6b6b; } 50% { background:#1f6f7c; } }';
-document.head.appendChild(progressFlashStyle);
-let progressFlashing = false;
-function updateProgressFlash(): void {
-  const want = warfareAvailable(warfare) > 0;
-  if (want === progressFlashing) return;
-  progressFlashing = want;
-  progressBtn.style.animation = want ? 'prog-flash 1.1s ease-in-out infinite' : '';
-  progressBtn.textContent = want ? '⌘ Warfare ●' : '⌘ Warfare';
-  progressBtn.style.borderColor = want ? '#5ce2ec #14535e #14535e #5ce2ec' : '#fff #555 #555 #fff';
-}
 
 // --- Vaults (Milestone D): dungeons, the Brute, per-player treasure ------------
 // Deterministic stamps (cached per anchor chunk) drive everything client-side;
@@ -4498,7 +4462,7 @@ net.onDisconnect = () => {
   siloStates.clear();
   batteryStates.clear();
   liveMissiles = [];
-  mySeat = null;
+  setSeat(null);
   strategicModels.clear();
   missileModels.clear();
   vehicleModels.clear();
@@ -4829,15 +4793,19 @@ function updateViewCamera(): void {
   const eye = boomEye.copy(seatEye ?? player.eyePosition);
   if (seated) eye.y += VIEW_LIFT_SEATED;
   viewCamera.fov = camera.fov;
+  viewCamera.updateProjectionMatrix();
+  const reach = seated ? VIEW_DIST_SEATED : VIEW_DIST;
+
+  // Always derive the boom from mouse-look. This makes the two chase views
+  // proper orbit cameras for pilot and gunner alike; aircraft attitude still
+  // moves the eye anchor, but no longer confiscates either occupant's camera.
   viewCamera.rotation.set(
     front ? -player.pitch : player.pitch,
     front ? player.yaw + Math.PI : player.yaw,
     0
   );
-  viewCamera.updateProjectionMatrix();
   // The boom runs straight backwards out of the camera's own facing.
   boomDir.set(0, 0, 1).applyQuaternion(viewCamera.quaternion);
-  const reach = seated ? VIEW_DIST_SEATED : VIEW_DIST;
   let dist = reach;
   for (let d = 0.4; d <= reach; d += 0.25) {
     boomProbe.copy(eye).addScaledVector(boomDir, d);
@@ -4850,10 +4818,13 @@ function updateViewCamera(): void {
 
 /** V: cycle first person → third-person back → third-person front. */
 function cycleView(): void {
-  // Riding always uses the rear chase camera. Do not let keyboard, mouse or
-  // touch view controls put the camera back in the cockpit or in front.
+  // A seated player gets the same complete camera cycle as someone on foot.
+  // Cockpit/cabin view is especially useful to the gunner now that their mouse
+  // can traverse almost all the way around the aircraft.
   if (mySeat) {
-    view = View.Back;
+    view = ((view + 1) % 3) as View;
+    showNotice(`🎥 ${VIEW_NAMES[view]}`);
+    if (view === View.First) hideSelfAvatar();
     return;
   }
   view = ((view + 1) % 3) as View;
@@ -5239,6 +5210,9 @@ let protectedAreasList: ProtectedArea[] = [];
 let liveMissiles: MissileSnapshot[] = [];
 /** The helicopter the local player is riding, and in which seat. */
 let mySeat: { id: number; seat: SeatKind } | null = null;
+let myRope: { id: number; progress: number } | null = null;
+let ropeInputAccum = 0;
+let prevRopeJump = false;
 let heliInputSeq = 1;
 let heliInputAccum = 0;
 let heliBombCooldown = 0;
@@ -5376,6 +5350,20 @@ net.onHeliSeat = (id, seat) => {
       ? 'Pilot seat — WASD flies, Space climbs, Shift descends, right-click drops a bomb.'
       : 'Gunner seat — look around and fire your own weapon inside the forward arc.');
 };
+net.onHeliRopeState = (id, progress) => {
+  myRope = id > 0 ? { id, progress: Math.max(0, Math.min(1, progress)) } : null;
+  if (myRope) {
+    setSeat(null);
+    vehicleHud.setRope(true);
+  } else {
+    vehicleHud.setRope(false);
+    prevRopeJump = input.jump;
+  }
+};
+net.onHeliModuleInstalled = (_id, item) => {
+  settleWarfarePayment();
+  showNotice(`✓ ${ITEMS[item]?.name ?? 'Airframe module'} installed.`);
+};
 net.onHeliDown = (_id, x, y, z, _faction, reason) => heliLossEffect(x, y, z, reason);
 net.onHeliGone = (id) => { if (mySeat?.id === id) setSeat(null); };
 net.onEjected = (x, y, z, vx, vy, vz, reason) => applyEject(x, y, z, vx, vy, vz, reason);
@@ -5403,6 +5391,7 @@ function registerInboundStrike(
 function offlineBlast(
   faction: number, at: { x: number; y: number; z: number },
   radius: number, playerDamage: number, hardwareDamage: number, blockCap: number,
+  breakNatural = false,
 ): void {
   if (!isFaction(faction) || faction !== localFaction) {
     const dmg = blastAt(at, { x: player.pos.x, y: player.pos.y, z: player.pos.z },
@@ -5424,20 +5413,25 @@ function offlineBlast(
     const dmg = bombBlast(at, h.position, radius, hardwareDamage);
     if (dmg > 0) applyOfflineVehicleEvents(offlineVehicles.damage(h.id, dmg));
   }
-  // ONLY player-placed destructible blocks are removed. `getEditedBlock` is
-  // undefined for untouched terrain, so natural ground is never excavated —
-  // the crater is cosmetic particles, not a hole in the world.
+  // Strategic missiles preserve untouched terrain; helicopter bombs pass
+  // `breakNatural` so their impact makes a real crater.
   let removed = 0;
-  for (const c of blastBlockCandidates(at.x, at.y, at.z, radius)) {
-    if (removed >= blockCap) break;
-    const edited = world.getEditedBlock(c.x, c.y, c.z);
-    if (edited === undefined || edited === Block.Air) continue;
-    const info = BLOCKS[edited];
-    if (!info || info.hardness < 0 || isVaultMasonry(edited)) continue;
-    if (edited === Block.TacticalSilo || edited === Block.SiloPart ||
-        edited === Block.InterceptorBattery || edited === Block.Core) continue;
-    world.setBlock(c.x, c.y, c.z, Block.Air);
-    removed++;
+  world.beginBatch();
+  try {
+    for (const c of blastBlockCandidates(at.x, at.y, at.z, radius)) {
+      if (removed >= blockCap) break;
+      const edited = world.getEditedBlock(c.x, c.y, c.z);
+      const block = edited ?? (breakNatural ? world.getBlock(c.x, c.y, c.z) : undefined);
+      if (block === undefined || block === Block.Air) continue;
+      const info = BLOCKS[block];
+      if (!info || info.hardness < 0 || isVaultMasonry(block)) continue;
+      if (block === Block.TacticalSilo || block === Block.SiloPart ||
+          block === Block.InterceptorBattery || block === Block.Core) continue;
+      world.setBlock(c.x, c.y, c.z, Block.Air);
+      removed++;
+    }
+  } finally {
+    world.endBatch();
   }
   particles.burst(at.x, at.y + 1, at.z, 40, 0xff8a3a, 8, 1.1);
 }
@@ -5510,7 +5504,7 @@ function applyOfflineVehicleEvents(events: readonly VehicleEvent[]): void {
     switch (ev.kind) {
       case 'bombImpact':
         offlineBlast(ev.faction, { x: ev.x, y: ev.y, z: ev.z }, ev.radius,
-          ev.playerDamage, ev.hardwareDamage, Math.ceil(ev.radius));
+          ev.playerDamage, ev.hardwareDamage, ev.blockCap, true);
         audio.explosion(new THREE.Vector3(ev.x, ev.y, ev.z));
         break;
       case 'heliDown':
@@ -6117,7 +6111,10 @@ function renderHelipadPanel(): void {
     specCell('BOMB BLAST', `${stats.bombRadius} b`) +
     specCell('BOMB DMG', `${stats.bombPlayerDamage} / ${stats.bombHardwareDamage}`) +
     specCell('OIL BURN', `${HELI_FUEL_IDLE.toFixed(2)}–${burn.toFixed(2)} /s`) +
-    specCell('ENDURANCE', `~${Math.round(stats.fuel / burn)}s hard`) +
+    specCell('ENDURANCE', `~${Math.round(heli.maxFuel / burn)}s hard`) +
+    specCell('TANK MODULE', heli.fuelModule === 3 ? 'long-range ×3'
+      : heli.fuelModule === 2 ? 'auxiliary ×2' : 'standard') +
+    specCell('FAST ROPE', heli.ropeWinch ? 'installed' : 'not installed') +
     `</div>`;
 
   const note = document.createElement('div');
@@ -6166,6 +6163,12 @@ function renderHelipadPanel(): void {
     () => { const h = bayHeli(); if (h) mountHeli(h.id, 'pilot'); }, '#ffd24a');
   const gunBtn = actionButton(row, 'Board (gunner)', false,
     () => { const h = bayHeli(); if (h) mountHeli(h.id, 'passenger'); }, '#ffd24a');
+  const auxBtn = actionButton(row, 'Install auxiliary tanks', false,
+    () => { const h = bayHeli(); if (h) installHeliModule(h.id, Item.AuxiliaryTank); }, '#4ad9a0');
+  const rangeBtn = actionButton(row, 'Install long-range tanks', false,
+    () => { const h = bayHeli(); if (h) installHeliModule(h.id, Item.LongRangeTank); }, '#4ad9a0');
+  const winchBtn = actionButton(row, 'Install fast-rope winch', false,
+    () => { const h = bayHeli(); if (h) installHeliModule(h.id, Item.RopeWinch); }, '#e6a83a');
   actionButton(row, 'Close', true, closeStrategicPanel, '#7f93b3');
 
   airframeLive = {
@@ -6197,6 +6200,21 @@ function renderHelipadPanel(): void {
       { node: gunBtn, accent: '#ffd24a', enabled: () => {
         const h = bayHeli();
         return !!h && !mySeat && h.passenger === 0 && h.dying <= 0;
+      } },
+      { node: auxBtn, accent: '#4ad9a0', enabled: () => {
+        const h = bayHeli();
+        return !!h && serviceable(h) && h.fuelModule < 2 && held(Item.AuxiliaryTank) > 0 &&
+          hasBlueprint(Item.AuxiliaryTank);
+      } },
+      { node: rangeBtn, accent: '#4ad9a0', enabled: () => {
+        const h = bayHeli();
+        return !!h && serviceable(h) && h.fuelModule === 2 && held(Item.LongRangeTank) > 0 &&
+          hasBlueprint(Item.LongRangeTank);
+      } },
+      { node: winchBtn, accent: '#e6a83a', enabled: () => {
+        const h = bayHeli();
+        return !!h && serviceable(h) && !h.ropeWinch && held(Item.RopeWinch) > 0 &&
+          hasBlueprint(Item.RopeWinch);
       } },
     ],
   };
@@ -6263,6 +6281,25 @@ function serviceHeli(
   renderHelipadPanel();
 }
 
+function installHeliModule(id: number, item: number): void {
+  if (inventory.countItem(item) < 1 || !hasBlueprint(item)) return;
+  if (net.connected) {
+    payWarfare([{ id: item, count: 1 }]);
+    net.sendHeliModule(id, item);
+  } else {
+    const h = offlineVehicles.helicopters.get(id);
+    if (!h) return;
+    const module = item === Item.AuxiliaryTank ? 'auxTank'
+      : item === Item.LongRangeTank ? 'longRangeTank'
+        : item === Item.RopeWinch ? 'ropeWinch' : null;
+    if (module && offlineVehicles.installModule(h, module)) {
+      inventory.removeItem(item, 1);
+      showNotice(`✓ ${ITEMS[item]?.name ?? 'Airframe module'} installed.`);
+    }
+  }
+  renderHelipadPanel();
+}
+
 /**
  * The single place `mySeat` changes. Taking or leaving a seat has to move a
  * handful of presentation state together — the vehicle HUD, and the glazing on
@@ -6271,10 +6308,23 @@ function serviceHeli(
  * eject, a disconnect or a wreck.
  */
 function setSeat(next: { id: number; seat: SeatKind } | null): void {
+  if (next && !mySeat) {
+    // Boarding: remember where we were looking so leaving the seat can put it
+    // back exactly, then use the rear chase view so the helicopter remains
+    // visible ahead of the camera while flying.
+    preSeatView = view;
+    view = View.Back;
+  } else if (!next && mySeat) {
+    // Leaving the seat: restore the perspective from before boarding.
+    view = preSeatView;
+  }
   mySeat = next;
-  if (next) view = View.Back;
+  if (next) myRope = null;
+  // Pilot and gunner get identical full-range vertical mouse-look in every
+  // camera view; leaving restores the usual on-foot pole margin.
+  player.fullVerticalLook = next !== null;
   vehicleHud.setSeat(next?.seat ?? null);
-  vehicleModels.setCockpitView(null);
+  vehicleModels.setCockpitView(next && view === View.First ? next.id : null);
 }
 
 /** Wreck presentation, scaled to how the airframe was lost. */
@@ -6323,6 +6373,67 @@ function dismountHeli(): void {
   if (!res.ok) { showNotice(`⛔ ${res.reason}`); return; }
   setSeat(null);
   if (res.at) player.pos.set(res.at.x, res.at.y, res.at.z);
+}
+
+function toggleFastRope(): void {
+  if (!mySeat || mySeat.seat !== 'pilot') return;
+  const h = vehicleModels.snapshotOf(mySeat.id);
+  if (!h?.ropeWinch) { showNotice('⛔ This airframe has no fast-rope winch.'); return; }
+  if (net.connected) net.sendHeliRope('toggle');
+  else if (!offlineVehicles.toggleRope(0)) showNotice('⛔ Fast-rope control unavailable.');
+}
+
+/** F transfers crew to a deployed rope; without one it remains ordinary exit. */
+function transferOrDismount(): void {
+  if (!mySeat) return;
+  const h = vehicleModels.snapshotOf(mySeat.id);
+  if (!h?.ropeDeployed) { dismountHeli(); return; }
+  if (net.connected) { net.sendHeliRope('attach'); return; }
+  const id = mySeat.id;
+  const local = offlineVehicles.helicopters.get(id);
+  if (!local) return;
+  const from = { ...local.position };
+  offlineVehicles.dismount(0);
+  const attached = offlineVehicles.attachRope(0, localFaction, from, id);
+  if (!attached.ok) { showNotice(`⛔ ${attached.reason}`); return; }
+  setSeat(null);
+  myRope = { id, progress: attached.rider.progress };
+  vehicleHud.setRope(true);
+}
+
+function nearestRopeInReach(): HelicopterSnapshot | null {
+  let best: HelicopterSnapshot | null = null, bestD = 2.25;
+  for (const h of vehicleModels.snapshots()) {
+    if (!h.ropeDeployed || h.dying > 0 || h.faction !== localFaction) continue;
+    const top = h.y - 0.75;
+    const p = Math.max(0, Math.min(1, (top - player.pos.y) / Math.max(1, h.ropeLength)));
+    const d = Math.hypot(player.pos.x - h.x, player.pos.y - (top - p * h.ropeLength), player.pos.z - h.z);
+    if (d < bestD) { bestD = d; best = h; }
+  }
+  return best;
+}
+
+function tryAttachFastRope(): boolean {
+  const h = nearestRopeInReach();
+  if (!h) return false;
+  if (net.connected) { net.sendHeliRope('attach'); return true; }
+  const attached = offlineVehicles.attachRope(0, localFaction,
+    { x: player.pos.x, y: player.pos.y, z: player.pos.z }, h.id);
+  if (!attached.ok) { showNotice(`⛔ ${attached.reason}`); return true; }
+  myRope = { id: h.id, progress: attached.rider.progress };
+  vehicleHud.setRope(true);
+  showNotice('Fast rope attached — W/S climb, Space drops.');
+  return true;
+}
+
+function dropFastRope(): void {
+  if (!myRope) return;
+  if (net.connected) net.sendHeliRope('drop');
+  else offlineVehicles.detachRope(0);
+  myRope = null;
+  vehicleHud.setRope(false);
+  player.fallDistance = 0;
+  showNotice('Released fast rope.');
 }
 
 /**
@@ -6695,7 +6806,31 @@ function updateWarfare(dt: number): void {
   }
 
   if (!mySeat) {
-    if (vehicleHud.active) vehicleHud.setSeat(null);
+    if (!myRope) {
+      if (vehicleHud.active) vehicleHud.setSeat(null);
+      return;
+    }
+    if (!net.connected) {
+      const rider = offlineVehicles.ropeRider(0);
+      if (!rider) { myRope = null; vehicleHud.setRope(false); return; }
+      myRope.progress = rider.progress;
+    }
+    const heli = vehicleModels.snapshotOf(myRope.id);
+    const at = vehicleModels.ropeWorldPosition(myRope.id, myRope.progress);
+    if (!heli || !at) { myRope = null; vehicleHud.setRope(false); return; }
+    player.pos.copy(at); player.vel.set(0, 0, 0); player.fallDistance = 0;
+    vehicleHud.setRope(true);
+    vehicleHud.update(dt, heli, 0, heli.y - warfareGroundY(heli.x, heli.z), tierLabel(heli.tier));
+    ropeInputAccum += dt;
+    if (ropeInputAccum >= 1 / 20) {
+      ropeInputAccum = 0;
+      const motion = (input.back ? 1 : 0) - (input.forward ? 1 : 0);
+      if (net.connected) net.sendHeliRope('move', motion);
+      else offlineVehicles.setRopeMotion(0, motion);
+    }
+    const jump = input.jump;
+    if (jump && !prevRopeJump) dropFastRope();
+    prevRopeJump = jump;
     return;
   }
   const heli = vehicleModels.snapshotOf(mySeat.id);
@@ -6723,8 +6858,9 @@ function updateWarfare(dt: number): void {
   heliSpeedSmoothed += (rawSpeed - heliSpeedSmoothed) * Math.min(1, dt * 6);
   vehicleHud.update(dt, heli, heliSpeedSmoothed,
     heli.y - warfareGroundY(heli.x, heli.z), tierLabel(heli.tier));
-  // Drop our own glazing only while we are actually looking out of the canopy.
-  vehicleModels.setCockpitView(null);
+  // Remove our own glazing/interior only in cockpit view. Outside observers
+  // continue to see the complete aircraft in every view.
+  vehicleModels.setCockpitView(view === View.First ? mySeat.id : null);
 
   if (mySeat.seat !== 'pilot') return;
   // Pilot input at the transform rate — WASD horizontal, Space/Shift vertical,
@@ -7142,8 +7278,6 @@ function useGadget(def: GadgetDef): void {
       break;
     }
     case 'c4': {
-      // A planted timed bomb: stick it on the aimed block, big blast after the
-      // fuse. The blast itself routes through the same paths as a grenade.
       const t = interaction.target;
       if (!t) { showNotice('Aim at a block to plant C4.'); return; }
       gadgetCd.use(def.item, worldTimeLocal); consume();
@@ -7661,12 +7795,14 @@ function frame(): void {
     panoramaView.update(dt);
     panoramaView.render(renderer);
     worldMap.hideBeacons();
-    touch?.update({ shown: false, playing: false, gun: false, vehicle: false });
+    touch?.update({ shown: false, playing: false, gun: false, vehicle: false,
+      vehicleLabel: 'EXIT', rope: false });
     input.endFrame();
     return;
   }
 
   if (input.inventoryToggled) toggleInventory();
+  if (invUI.open && input.hotbarKey >= 0) invUI.hotbarSwap(input.hotbarKey);
   if (input.mapToggled) toggleMap();
   if (input.progressPressed) toggleProgress();
   worldMap.update();
@@ -7741,6 +7877,10 @@ function frame(): void {
   {
     if (controlling) {
       if (input.debugToggled) hud.toggleDebug();
+      if (input.operatorModeTogglePressed && net.connected && net.isOp) {
+        const mode = localMode === 'creative' ? 'survival' : 'creative';
+        net.sendCommand(`gamemode ${mode} ${net.username}`);
+      }
       if (input.hotbarKey >= 0) inventory.select(input.hotbarKey);
       if (input.wheelDelta !== 0) inventory.select(inventory.selected + input.wheelDelta);
       if (input.dropPressed) dropCurrentItem(input.down('ShiftLeft') || input.down('ShiftRight'));
@@ -7865,15 +8005,22 @@ function frame(): void {
         // Both hands are busy with the wrap: no mining, placing or shooting
         // until it is finished (or interrupted by switching away).
         interaction.update(dt, input, camera, true, true); // suppress mine + use
+      } else if (myRope) {
+        // Movement is consumed by the shared rope sim; no mining, placing or
+        // firing while both hands are on the line.
+        if (input.dismountPressed) dropFastRope();
+        interaction.update(dt, input, camera, true, true);
       } else if (mySeat) {
         // Aboard a helicopter, the world controls change meaning entirely:
         // neither seat can mine, place or open anything from the air, the
         // PILOT's secondary action releases a bomb, and the GUNNER keeps their
         // own weapon — a gunner seat that cannot shoot is just a passenger seat.
-        if (input.dismountPressed) dismountHeli();
-        if (mySeat.seat === 'pilot') {
+        const occupiedSeat = mySeat.seat;
+        if (input.dismountPressed) transferOrDismount();
+        if (mySeat && occupiedSeat === 'pilot') {
+          if (input.reloadPressed) toggleFastRope();
           if (input.rightClicked) tryDropBomb();
-        } else if (heldGun) {
+        } else if (mySeat && heldGun) {
           if (input.reloadPressed) reloadGun();
           const wantFire = heldGun.auto ? input.leftDown : input.leftClicked;
           if (wantFire && fireCooldown <= 0 && reloadTimer <= 0) {
@@ -7884,6 +8031,8 @@ function frame(): void {
           }
         }
         interaction.update(dt, input, camera, true, true); // suppress mine + use
+      } else if (input.dismountPressed && tryAttachFastRope()) {
+        interaction.update(dt, input, camera, true, true);
       } else if (input.rightClicked && !interaction.armedMove && heldStack &&
           heldStack.id === Item.HelicopterKit && tryDeployHelicopter()) {
         // Field-assemble an airframe wherever you are standing.
@@ -8178,7 +8327,6 @@ function frame(): void {
   }
   hud.update();
   hud.updateCooldowns();
-  updateProgressFlash(); // cyan pulse while warfare XP waits to be spent
   // The Crafting Guide button shows whenever a crafting table is open.
   guideBtn.style.display = (invUI.open && invUI.mode === 'table' && !guideOpen) ? 'block' : 'none';
   if (guideOpen && !(invUI.open && invUI.mode === 'table')) hideGuide();
@@ -8201,6 +8349,24 @@ function frame(): void {
     chests.sync(openChest.x, openChest.y, openChest.z, inventory.readChest());
   }
   invUI.update();
+
+  flagModels.setWarActive(warActiveNow);
+  flagModels.update(dt, activeCamera, (id) => {
+    if (id === net.myId) return player.pos;
+    const remote = net.remotes.get(id);
+    return remote ? new THREE.Vector3(remote.tx, remote.ty, remote.tz) : null;
+  });
+  worldMap.setDynamicMarkers(flagState.flags.map((flag) => {
+    const home = flagPosition(flag);
+    const remote = net.remotes.get(flag.carrier);
+    const x = flag.carrier === net.myId ? player.pos.x : remote?.tx ?? home.x;
+    const z = flag.carrier === net.myId ? player.pos.z : remote?.tz ?? home.z;
+    return {
+      x, z,
+      color: factionColor(flag.faction),
+      name: `${factionName(flag.faction)} Flag`,
+    };
+  }));
 
   if (hud.debugVisible) {
     const t = interaction.target;
@@ -8225,7 +8391,9 @@ function frame(): void {
       playing: input.locked && screen === 'playing' && !player.dead &&
         !invUI.open && !worldMap.open,
       gun: !!(hs && ITEMS[hs.id]?.gun),
-      vehicle: !!mySeat,
+      vehicle: !!mySeat || !!myRope || !!nearestRopeInReach(),
+      vehicleLabel: myRope ? 'DROP' : mySeat ? 'F' : 'ROPE',
+      rope: mySeat?.seat === 'pilot' && !!vehicleModels.snapshotOf(mySeat.id)?.ropeWinch,
     });
   }
 
