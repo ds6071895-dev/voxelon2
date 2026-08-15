@@ -10,6 +10,7 @@ import type { Player } from './player';
 import type { Atlas } from './textures';
 import type { World } from './world';
 import { createGunModel, isGunItem, poseGunModel } from './gunmodels';
+import { createGadgetModel, isModeledGadget, poseGadgetModel } from './gadgetmodels';
 
 // Shared mini-block / sprite geometry per item id (held view uses it too).
 const geoCache = new Map<number, THREE.BufferGeometry>();
@@ -143,8 +144,11 @@ export class ItemEntities {
     if (this.list.length >= MAX_ENTITIES) return;
     const mesh = isGunItem(id)
       ? createGunModel(id)
-      : new THREE.Mesh(itemGeometry(this.atlas, id), this.material);
+      : isModeledGadget(id)
+        ? createGadgetModel(id)
+        : new THREE.Mesh(itemGeometry(this.atlas, id), this.material);
     if (isGunItem(id)) poseGunModel(mesh, 'drop');
+    else if (isModeledGadget(id)) poseGadgetModel(mesh, 'drop');
     this.scene.add(mesh);
     this.list.push({
       id, count,

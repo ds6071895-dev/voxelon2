@@ -21,6 +21,7 @@ import { itemGeometry } from './itementity';
 import { ITEMS, Item, ARMOR_SLOT_INDEX } from './items';
 import type { Atlas } from './textures';
 import { createGunModel, isGunItem, poseGunModel } from './gunmodels';
+import { createGadgetModel, isModeledGadget, poseGadgetModel } from './gadgetmodels';
 import {
   GliderRig, RIG_HARNESS_Y, buildGliderRig, disposeGliderRig, glidePose,
   poseGliderRig,
@@ -961,9 +962,13 @@ export class RemotePlayers {
       if (held > 0 && ITEMS[held]) {
         const mesh = isGunItem(held)
           ? createGunModel(held)
-          : new THREE.Mesh(itemGeometry(this.atlas, held), this.itemMat);
+          : isModeledGadget(held)
+            ? createGadgetModel(held)
+            : new THREE.Mesh(itemGeometry(this.atlas, held), this.itemMat);
         if (isGunItem(held)) {
           poseGunModel(mesh, 'avatar');
+        } else if (isModeledGadget(held)) {
+          poseGadgetModel(mesh, 'avatar');
         } else {
           mesh.position.set(0, -LIMB_H + 0.06, -0.2);
           mesh.rotation.set(-0.5, 0, 0);
@@ -1042,6 +1047,7 @@ export class RemotePlayers {
       if (av.swingT < 1) av.swingT = Math.min(1, av.swingT + dt / 0.25);
       const attackSwing = av.swingT < 1 ? Math.sin(av.swingT * Math.PI) : 0;
       const gunHeld = isGunItem(av.heldId);
+      const gadgetHeld = isModeledGadget(av.heldId);
       av.aimT += ((gunHeld && r.aiming ? 1 : 0) - av.aimT) * Math.min(1, dt * 12);
       av.reloadT = r.reloading ? (av.reloadT + dt / 1.1) % 1 : 0;
       const sneakTarget = r.sneaking && !r.boating && !r.gliding ? 1 : 0;
@@ -1151,6 +1157,11 @@ export class RemotePlayers {
               THREE.MathUtils.clamp(av.dpitch, -1.15, 1.15);
             av.heldMesh.rotation.z = -reloadDip * 0.45;
           }
+        } else if (gadgetHeld) {
+          av.parts[2].rotation.x = 0.45 + attackSwing * 0.18;
+          av.parts[3].rotation.x = 0.62 + attackSwing * 0.48;
+          av.parts[2].rotation.z = -0.18;
+          av.parts[3].rotation.z = 0.08;
         }
         if (av.body.cape) av.body.cape.rotation.x = pose.cape;
       }

@@ -101,7 +101,204 @@ function bossName(index: number, fallback: string): string {
   return values[index] ?? fallback;
 }
 
+/** The guide is a route, not an encyclopedia: every section answers "what do I
+ * do next?", what that step unlocks, and when the player is ready to advance. */
+function progressionGuideSections(): FieldGuideSection[] {
+  const bosses = [
+    [bossName(0, 'Bone Warden'), 'Sidestep and fight from its flank; its lanes aim forward.'],
+    [bossName(1, 'Mire Queen'), 'Keep circling; cross tide rings and punish the lunge.'],
+    [bossName(2, 'Ember Colossus'), 'Move as soon as the floor lights; never wait for the impact.'],
+    [bossName(3, 'Crystal Seer'), 'Use small steps out of narrow beams instead of long sprints.'],
+    [bossName(4, 'Gilded Artificer'), 'Watch one machine cycle, count the rhythm, then take its gap.'],
+  ];
+  const ready = (items: string[], next: string): string =>
+    list(items) + tip('Next milestone', next);
+
+  return [
+    {
+      id: 'roadmap', title: '0. Progression Roadmap', icon: icon('target'),
+      summary: 'The complete route from fresh spawn to endgame faction warfare.', entries: [
+        entry('progression-loop', 'How the whole game progresses',
+          ['progression', 'roadmap', 'objective', 'what next', 'beginner'],
+          `<p>Resources make safer gear. Safer gear clears harder vaults. Bosses provide relics, Hearts, and Warfare XP. Automation sustains the supply line. Those supplies fund flag defense, PvP raids, vehicles, and strategic weapons.</p>` +
+          table(['Step', 'Milestone', 'Why it matters'], [
+            ['1', 'Wood, shelter, stone tools', 'Survive and mine safely'],
+            ['2', 'Iron gear and a permanent base', 'Recover from deaths and enter ranged combat'],
+            ['3', 'First Tier I vault clear', 'Start repeatable boss progression'],
+            ['4', 'Diamond gear and Tier II clears', 'Reach advanced resources and sustained combat'],
+            ['5', 'Autominers and Oil Derricks', 'Replace manual supply grinding'],
+            ['6', 'Titanium, Tier III, Greater Runes', 'Finish personal combat progression'],
+            ['7', 'Flag fortification and PvP', 'Turn personal strength into faction control'],
+            ['8', 'Warfare Command hardware', 'Convert boss XP and oil into combined arms'],
+            ['9', 'Wars, Hearts, flags, and seasons', 'Compete for the endgame objective'],
+          ]) + tip('Use this guide in order', 'Open the stage matching your current gear and finish its readiness check before skipping ahead.')),
+      ],
+    },
+    {
+      id: 'first-day', title: '1. First Day', icon: icon('start'),
+      summary: 'Learn the essentials, establish shelter, and reach stone tools.', entries: [
+        entry('spawn-route', 'Fresh spawn route', ['spawn', 'wood', 'stone', 'shelter', 'starter'],
+          steps(['Gather logs and craft planks.', 'Make a workbench and wooden pickaxe.', 'Mine stone and coal before roaming.', 'Upgrade to stone tools and craft at least 16 torches.', 'Build a lit shelter with a furnace, workbench, and chest.', 'Bank spare materials before the first long trip.']) +
+          warning('Your chest is progression', 'Do not carry every resource. A protected spare tool and armor cache turns death into recovery instead of a restart.')),
+        entry('essential-controls', 'Controls needed to progress', ['controls', 'keyboard', 'mobile', 'touch', 'commands'],
+          table(['Action', 'Desktop'], [['Move', 'W A S D'], ['Jump / glide', 'Space'], ['Sprint', 'Q or double-tap W'], ['Sneak', 'Shift'], ['Attack / mine', 'Left click'], ['Place / use / aim', 'Right click'], ['Inventory', 'E'], ['Reload', 'R'], ['Vehicle / rope transfer', 'F'], ['Commands', 'T'], ['Pause', 'Esc']]) +
+          tip('Mobile controls', 'Move with the left joystick, push beyond its rim to sprint, drag the right side to look, long-press to attack or mine, and tap to place or use.')),
+        entry('first-day-ready', 'Stage 1 readiness check', ['checklist', 'ready', 'stone'],
+          ready(['Stone pickaxe and weapon', 'Coal and torches', 'Furnace and workbench', 'Lit shelter and storage', 'Basic recovery supplies'],
+            'Mine iron and turn the shelter into a permanent, recoverable base.')),
+      ],
+    },
+    {
+      id: 'iron-age', title: '2. Iron Age', icon: icon('pickaxe'),
+      summary: 'Build a durable loadout and prepare for the first vault.', entries: [
+        entry('iron-order', 'Spend early iron in progression order', ['iron', 'armor', 'tools', 'gun', 'base'],
+          steps(['Craft an iron pickaxe so mining cannot stall.', 'Complete an iron armor set.', 'Reinforce storage and split valuables across multiple chests.', 'Obtain a pistol, shotgun, or SMG and stock its ammunition.', 'Craft Bandages and keep one emergency Medkit.', 'Place a Respawn Beacon or prepare a spare recovery loadout.']) +
+          tip('Armor is long-term gear', 'Armor gains levels through use, has durability, and accepts one rune per piece. Repair a useful set instead of treating every piece as disposable.')),
+        entry('healing-before-bosses', 'Practice healing now', ['bandage', 'medkit', 'heal', 'recovery'],
+          `<p>Right-click to apply healing. Bandages take about one second and Medkits about two. You may move during the channel, but switching slots interrupts it without spending the item.</p>` +
+          list(['Bandage between encounters.', 'Save Medkits for dangerous phases.', 'Move out of telegraphs before healing.', 'Keep healing in both your active loadout and recovery chest.'])),
+        entry('tier-one-ready', 'Ready for Tier I', ['tier i', 'first vault', 'ammo'],
+          ready(['Full iron armor preferred', 'Reliable firearm', '150 to 250 rounds', '3 to 5 Bandages and 1 Medkit', 'Torches and empty inventory slots'],
+            'Locate a Tier I vault with the map or a Vault Compass and clear it.')),
+      ],
+    },
+    {
+      id: 'first-vault', title: '3. First Vault', icon: icon('vault'),
+      summary: 'Learn the dungeon loop and turn Tier I into repeatable income.', entries: [
+        entry('vault-route', 'The vault progression loop', ['vault', 'dungeon', 'compass', 'loot chest', 'tier i'],
+          steps(['Mark the entrance and set a safe recovery point.', 'Leave spare gear outside the vault.', 'Clear rooms while preserving ammunition and healing.', 'Read arena floor previews and keep damage on the boss.', 'Open your personal chest during its ten-minute window.', 'Return after the 30-minute regrowth period when you can clear it reliably.']) +
+          tip('Do not rush tiers', 'A repeatable Tier I clear progresses you faster than one expensive failed attempt in Tier II.')),
+        entry('tier-one-rewards', 'What the first clear unlocks', ['reward', 'relic', 'warfare xp', 'loot'],
+          `<p>A qualifying Tier I victory grants <strong>300 Warfare XP</strong>. Its personal chest guarantees the boss relic, 3 Bandages, and 32 Bullets, plus eight weighted loot picks.</p>` +
+          list(['Store the relic for Greater Rune crafting.', 'Save Warfare XP for the ordered technology tree.', 'Use the refunded supplies to practice the boss again.', 'Mark a safe road between home and the entrance.'])),
+        entry('first-vault-ready', 'Stage 3 completion check', ['first clear', 'complete', 'diamond'],
+          ready(['Tier I boss defeated', 'Personal chest looted', 'Relic stored safely', 'Supplies available for a repeat clear', 'Safe route marked'],
+            'Mine diamond and build enough ammunition and healing for Tier II.')),
+      ],
+    },
+    {
+      id: 'tier-two', title: '4. Diamond & Tier II', icon: icon('skull'),
+      summary: 'Master boss movement and establish a high-volume combat economy.', entries: [
+        entry('vault-loadouts', 'Gear targets by vault tier', ['tier ii', 'tier iii', 'armor', 'ammo', 'healing'],
+          table(['Tier', 'Armor', 'Weapons', 'Healing', 'Ammo'], [
+            ['I', 'Stone minimum; iron preferred', 'Pistol, shotgun, SMG', '3-5 Bandages, 1 Medkit', '150-250'],
+            ['II', 'Iron minimum; diamond preferred', 'Rifle, SMG, shotgun', '2-3 Medkits', '400-600'],
+            ['III', 'Diamond minimum; titanium preferred', 'Rifle, Burst Rifle, rockets', '4-6 Medkits', '700-1,000'],
+          ]) + warning('Armor does not replace movement', 'Vault hazards increasingly pierce armor: about one quarter in Tier I, just under half in Tier II, and three fifths in Tier III.')),
+        entry('boss-movement', 'One movement rule for every boss', ['boss', 'warden', 'queen', 'colossus', 'seer', 'artificer'],
+          table(['Boss', 'How to beat its arena'], bosses)),
+        entry('tier-two-rewards', 'What Tier II adds', ['tier ii reward', 'titanium', 'rune', 'warfare xp'],
+          `<p>A qualifying Tier II victory grants <strong>750 Warfare XP</strong>. Its chest guarantees the relic, 2 Medkits, 3 Titanium, 48 Bullets, and one rune, plus ten weighted picks.</p>` +
+          ready(['Diamond gear in progress', 'A Tier II boss you can clear repeatedly', 'Titanium and runes stored', 'A safe Wilds supply route'],
+            'Secure cobalt and oil, then automate the supply line before Tier III.')),
+      ],
+    },
+    {
+      id: 'automation', title: '5. Automation', icon: icon('machine'),
+      summary: 'Deploy Autominers and Oil Derricks before endgame demand overwhelms manual gathering.', entries: [
+        entry('autominer-route', 'Autominers replace solid-resource grinding', ['autominer', 'filter', 'production', 'storage', 'cobalt'],
+          steps(['Secure a site near the base but away from the flag room.', 'Place and claim the Autominer.', 'Configure a filter appropriate to its level.', 'Add lighting, walls, defender access, and a nearby supply chest.', 'Collect output before storage caps production.', 'Upgrade production and storage only after the site is defensible.'])),
+        entry('oil-derrick-route', 'Oil Derricks power the late game', ['oil derrick', 'oil', 'fuel', 'turret', 'helicopter'],
+          `<p>Oil fuels advanced faction infrastructure, especially turrets and aviation. Treat a Derrick as strategic hardware, not an exposed crafting station.</p>` +
+          steps(['Claim a defensible Derrick site.', 'Build a guarded route back to the faction.', 'Split oil between more than one protected cache.', 'Reserve fuel for defenses and aircraft before optional spending.', 'Check production before vault expeditions and raids.']) +
+          warning('Distribute critical assets', 'Never cluster the flag, all machines, every oil barrel, and all storage into one raid or blast target.')),
+        entry('automation-ready', 'Stage 5 readiness check', ['machine defense', 'ready', 'titanium'],
+          ready(['Claimed Autominer', 'Claimed Oil Derrick', 'Protected collection routes', 'Distributed resource and fuel caches', 'Replacement ammunition and repair stock'],
+            'Use passive production to finish titanium gear and sustain repeated Tier III runs.')),
+      ],
+    },
+    {
+      id: 'tier-three', title: '6. Tier III Endgame', icon: icon('heart'),
+      summary: 'Finish personal progression with titanium, Hearts, relic farming, and Greater Runes.', entries: [
+        entry('tier-three-plan', 'Plan the Deep-Wilds run', ['tier iii', 'titanium', 'team', 'deep wilds'],
+          steps(['Repair diamond or preferably titanium armor.', 'Socket useful runes and carry 4 to 6 Medkits.', 'Bring roughly 700 to 1,000 rounds.', 'Establish a Respawn Beacon and spare loadout near the vault.', 'Assign damage, summon control, healing, and revive roles.', 'Mark the return route before entering.']) +
+          warning('The journey is part of the encounter', 'Carry map tools and mobility gear, but leave irreplaceable spare items in the recovery cache.')),
+        entry('tier-three-rewards', 'Hearts and the Tier III haul', ['heart', 'lifesteal', 'reward', 'elimination', 'revival'],
+          `<p>A qualifying Tier III victory grants <strong>1,500 Warfare XP</strong>. Its chest guarantees a relic, 1 Heart, 4 Diamonds, 4 Titanium, 64 Bullets, 2 Medkits, and one rune, plus twelve weighted picks.</p>` +
+          list(['A Heart raises maximum health.', 'PvP may transfer Hearts between players.', 'Zero Hearts causes elimination.', 'Protect spare Hearts and Revival Beacons in a faction cache.'])),
+        entry('greater-rune-route', 'Farm and forge Greater Runes', ['greater rune', 'relic', 'socket', 'craft'],
+          `<p>Two matching boss relics, the base rune they improve, and a Diamond forge one Greater Rune. Since each haul contains one relic, every Greater Rune requires at least two clears of that boss.</p>` +
+          table(['Boss', 'Relic', 'Greater Rune'], [
+            [bossName(0, 'Bone Warden'), 'Warden Sigil', 'Iron'],
+            [bossName(1, 'Mire Queen'), 'Mire Bloom', 'Swiftness'],
+            [bossName(2, 'Ember Colossus'), 'Ember Core', 'Fortune'],
+            [bossName(3, 'Crystal Seer'), 'Seer Prism', 'Focus'],
+            [bossName(4, 'Gilded Artificer'), 'Artificer Gear', 'Power'],
+          ]) + table(['Greater Rune', 'Effect while worn'], runeRows([
+            Item.GreaterRuneOfIron, Item.GreaterRuneOfSwiftness, Item.GreaterRuneOfFortune,
+            Item.GreaterRuneOfFocus, Item.GreaterRuneOfPower,
+          ])) + warning('No immunity build', 'Every connected hit still costs at least 1 health. Runes improve good positioning; they never replace it.')),
+        entry('endgame-equipment', 'Live endgame equipment reference', ['weapon', 'gun', 'gadget', 'grapple', 'bounce pad'],
+          table(['Equipment', 'Role / damage', 'Range', 'Live stat'], weaponRows()) +
+          tip('Next milestone', 'Bring endgame resources home and fortify the faction before risking them in PvP.')),
+      ],
+    },
+    {
+      id: 'factions-pvp', title: '7. Factions & PvP', icon: icon('flag'),
+      summary: 'Build layered flag defenses, replacement kits, and organized raid plans.', entries: [
+        entry('flag-defense-route', 'Fortify the faction flag in layers', ['flag', 'defense', 'fortress', 'traps'],
+          steps(['Warning layer: clear sightlines, map approaches, and place floodlights.', 'Delay layer: wire, tar, Bear Traps, barricades, and narrow paths.', 'Damage layer: spikes, landmines, turrets, wall traps, and fall traps.', 'Inner layer: controlled flag-room entrances, defender cover, and an escape route.', 'Recovery layer: distributed armor, gun, ammunition, and healing caches.']) +
+          warning('Keep friendly lanes open', 'Mark safe routes and maintain more than one exit. A defense that traps teammates cannot be repaired under pressure.')),
+        entry('pvp-readiness', 'Enter PvP with a replacement economy', ['pvp', 'guns', 'hearts', 'lifesteal', 'recovery'],
+          list(['Use replaceable gear, not your only loadout.', 'Carry enough ammunition and healing to disengage.', 'Fight from cover and crossfires instead of open ground.', 'Know the nearest recovery cache.', 'Call locations and targets instead of chasing alone.', 'Bank spare Hearts and revival items before roaming.']) +
+          tip('Why PvP comes now', 'A stable base and automated economy make a death recoverable and let the faction answer a counter-raid.')),
+        entry('flag-raid-route', 'Execute an enemy flag raid', ['raid', 'enemy flag', 'scout', 'escape'],
+          steps(['Scout traps, defenders, and alternate entrances.', 'Set a rally point and leave home defenders.', 'Bring Deployable Cover, healing, ammunition, and mobility tools.', 'Open one route and suppress defenders.', 'Take the flag only after confirming the escape route.', 'Return home, repair, restock, and prepare for retaliation.']) +
+          tip('Next milestone', 'Convert accumulated boss XP and oil into Warfare Command hardware.')),
+      ],
+    },
+    {
+      id: 'warfare', title: '8. Warfare Command', icon: icon('machine'),
+      summary: 'Turn boss victories, automation, and oil into missiles, defenses, and aircraft.', entries: [
+        entry('warfare-xp-route', 'Boss victories unlock technology', ['warfare', 'xp', 'tree', 'blueprint'],
+          table(['Boss tier', 'Warfare XP'], [['Tier I', '300'], ['Tier II', '750'], ['Tier III', '1,500']]) +
+          list(['Only meaningful boss participation awards XP.', 'Every qualifying teammate receives the full award.', 'Each account is paid once per boss recharge cycle.', 'PvP, mobs, guards, chests, missiles, and bombs grant no Warfare XP.']) +
+          tip('Open Warfare Command', 'Press T and enter /warfare. Personal blueprints permit construction; completed faction hardware is shared.')),
+        entry('technology-order', 'The technology tree has a fixed progression', ['missile command', 'aegis', 'flight certification', 'operations'],
+          table(['Technology', 'Progression unlock'], [
+            ['Missile Command', 'Tactical Silos, missiles, and map targeting'],
+            ['Aegis Systems', 'Interceptor batteries, radar, and faster reload'],
+            ['Flight Certification', 'Helipads, two-seat helicopters, bombs, and repair'],
+            ['Capstone branches', 'Longer strike reach, stronger air defense, and gunships'],
+            ['Operations modules', '2x/3x fuel tanks and fast-rope winches'],
+          ]) + warning('Blueprints are not supplies', 'Autominers, Oil Derricks, vault loot, and faction logistics still have to build, fuel, arm, and repair every system.')),
+        entry('combined-hardware', 'Operate strategic hardware', ['silo', 'interceptor', 'helicopter', 'fast rope'],
+          table(['Hardware', 'Progression role', 'Key rule'], [
+            ['Tactical Silo', 'Strike exposed enemy infrastructure', 'Target a saved waypoint or flag; protected zones are invalid'],
+            ['Interceptor Battery', 'Defend critical areas from missiles', 'It tracks missiles only and needs ammunition'],
+            ['Helicopter', 'Scout, transport, bomb, and provide gunner pressure', 'Fuel, bombs, hull repair, and two trained occupants matter'],
+            ['Fast-rope Winch', 'Insert or extract infantry without landing', 'Pilot controls the rope; riders transfer with F'],
+          ]) +
+          list(['Missiles can be shot down by accurate gunfire.', 'Friendly players and hardware are immune to friendly strategic damage.', 'Natural terrain is not excavated by strategic strikes.', 'Helicopters cannot enter vault arenas or cross the world boundary.']) +
+          tip('Next milestone', 'Stock every system and assign operators before the faction commits to a war.')),
+      ],
+    },
+    {
+      id: 'wars-victory', title: '9. Wars & Victory', icon: icon('team'),
+      summary: 'Combine flags, Hearts, industry, hardware, and recovery into a season strategy.', entries: [
+        entry('war-preparation', 'Prepare for war', ['war', 'wares', 'season', 'supplies', 'roles'],
+          steps(['Fill distributed ammunition, healing, armor, and fuel caches.', 'Collect Autominers and move Oil Derrick output into protected storage.', 'Refuel turrets, aircraft, silos, and interceptor sites.', 'Assign defenders, scouts, pilots, gunners, operators, and a raid leader.', 'Mark rally points, fallback positions, and recovery routes.', 'Inspect the flag defenses and repair every known breach.']) +
+          tip('Endgame strength is replacement', 'The strongest faction is not the one with one perfect loadout. It is the one that can replace losses and return to the objective fastest.')),
+        entry('combined-arms-loop', 'Use every progression system together', ['combined arms', 'pvp', 'flags', 'machines', 'oil'],
+          table(['System', 'Endgame purpose'], [
+            ['Infantry and guns', 'Hold terrain, escort flags, and finish objectives'],
+            ['Grappling Hook / Bounce Pad', 'Reach flanks, rooftops, and escape routes'],
+            ['Autominers', 'Replace construction, ammunition, and repair materials'],
+            ['Oil Derricks', 'Sustain turrets, aircraft, and fuel logistics'],
+            ['Missiles / Interceptors', 'Threaten or protect strategic infrastructure'],
+            ['Helicopters', 'Scout, transport, bomb, gun, and fast-rope teams'],
+            ['Flags / Hearts', 'Define the objective and the cost of player losses'],
+          ])),
+        entry('repeatable-endgame', 'The repeatable victory loop', ['endgame', 'victory', 'what next', 'loop'],
+          steps(['Farm vaults for replacement supplies, relics, Hearts, and Warfare XP.', 'Feed automation and oil into protected infrastructure.', 'Improve personal blueprints and shared hardware.', 'Defend the flag and deny enemy logistics.', 'Raid with an escape and recovery plan.', 'Repair, restock, and adapt after every fight.']) +
+          warning('Never finish on the attack', 'A successful raid invites retaliation. Return home, account for the team, repair defenses, and replace supplies before starting another objective.')),
+      ],
+    },
+  ];
+}
+
 export function fieldGuideSections(): FieldGuideSection[] {
+  return progressionGuideSections();
   // Every boss is built around ONE dodge habit, and every boss fights in its own
   // room. Learn the habit and the room stops mattering; learn neither and the
   // room will teach you.
@@ -304,7 +501,7 @@ export function fieldGuideSections(): FieldGuideSection[] {
     {
       id: 'travel', title: 'Travel & Exploration', icon: icon('travel'), summary: 'Maps, compasses, waypoints, mobility, and long journeys.', entries: [
         entry('travel-tools', 'Exploration toolkit', ['map', 'vault compass', 'waypoint', 'boat', 'glider', 'grappling hook'],
-          table(['Tool', 'Use'], [['World map', 'Read territory, structures, and travel routes'], ['Vault Compass', 'Reveal a vault of the matching tier'], ['Waypoint Totem', 'Mark a destination'], ['Respawn Beacon', 'Create a recovery point'], ['Boat / Glider', 'Cross water or descend quickly'], ['Grappling Hook / Jump Boost', 'Reach vertical or exposed terrain']]) +
+          table(['Tool', 'Use'], [['World map', 'Read territory, structures, and travel routes'], ['Vault Compass', 'Reveal a vault of the matching tier'], ['Waypoint Totem', 'Mark a destination'], ['Respawn Beacon', 'Create a recovery point'], ['Boat / Glider', 'Cross water or descend quickly'], ['Grappling Hook / Bounce Pad', 'Reach vertical or exposed terrain']]) +
           warning('Long journeys', 'Carry healing, ammunition, food or recovery supplies, and leave valuables in a protected cache before entering the deep Wilds.')),
       ],
     },
@@ -337,14 +534,14 @@ export function createFieldGuide(options: FieldGuideOptions): FieldGuideControll
   overlay.innerHTML = `
     <div class="field-guide-shell">
       <header class="field-guide-header">
-        <div><span class="field-guide-eyebrow">TACTICAL ARCHIVE</span><h1>VOXELON FIELD GUIDE</h1></div>
-        <label class="field-guide-search-label" for="guide-search"><span>Search handbook</span><input id="guide-search" type="search" placeholder="flag, titanium, Bone Warden…" autocomplete="off"></label>
+        <div><span class="field-guide-eyebrow">STEP-BY-STEP CAMPAIGN</span><h1>VOXELON PROGRESSION GUIDE</h1></div>
+        <label class="field-guide-search-label" for="guide-search"><span>Find a progression step</span><input id="guide-search" type="search" placeholder="iron, Tier II, Autominer, flags..." autocomplete="off"></label>
         <div class="field-guide-header-actions"><button id="guide-resume-btn" class="mc-btn">Resume Game</button><button id="guide-close-btn" class="mc-btn" aria-label="Back to pause menu">×</button></div>
       </header>
       <div id="guide-live-warning" class="field-guide-live-warning" hidden>${icon('warning')}Multiplayer continues while the guide is open. Find a safe location first.</div>
       <div class="field-guide-body">
-        <button id="guide-mobile-sections" class="mc-btn field-guide-mobile-sections" aria-expanded="false">Sections</button>
-        <nav id="guide-nav" class="field-guide-nav" aria-label="Guide sections"></nav>
+        <button id="guide-mobile-sections" class="mc-btn field-guide-mobile-sections" aria-expanded="false">Progression Stages</button>
+        <nav id="guide-nav" class="field-guide-nav" aria-label="Progression stages"></nav>
         <main id="guide-content" class="field-guide-content" tabindex="0"></main>
       </div>
       <footer class="field-guide-footer"><span id="guide-current-section"></span><span>/ focuses search · Esc returns to pause</span><button id="guide-back-btn" class="mc-btn">Back to Pause Menu</button></footer>
@@ -398,7 +595,7 @@ export function createFieldGuide(options: FieldGuideOptions): FieldGuideControll
     current.textContent = selected.title;
     content.innerHTML = `<header class="field-guide-article-header"><span>${selected.icon}</span><div><h2>${esc(selected.title)}</h2><p>${esc(selected.summary)}</p></div></header>` +
       (visible.length ? visible.map((e) => `<article id="guide-entry-${e.id}" class="field-guide-entry"><h3>${esc(e.title)}</h3>${e.html}</article>`).join('') :
-        `<div class="field-guide-empty"><h3>No matching articles</h3><p>Try a boss name, weapon, trap, resource, or vault tier.</p></div>`);
+        `<div class="field-guide-empty"><h3>No matching steps</h3><p>Try a resource, vault tier, boss, machine, flag, or warfare system.</p></div>`);
     requestAnimationFrame(() => {
       if (q && entryId) document.getElementById(`guide-entry-${entryId}`)?.scrollIntoView({ block: 'start' });
       else content.scrollTop = scroll.get(sectionId) ?? 0;

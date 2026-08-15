@@ -12,6 +12,7 @@ import { skinColorFor } from './remoteplayers';
 import { Cosmetics, SHIRT_COLORS, defaultCosmetics } from './character';
 import type { Atlas } from './textures';
 import { createGunModel, poseGunModel, gunFeel, GunFeel } from './gunmodels';
+import { createGadgetModel, isModeledGadget, poseGadgetModel } from './gadgetmodels';
 import { HEAL_BEAT } from './healuse';
 
 /** 0..1 ease with flat ends, clamped outside the range. */
@@ -94,11 +95,12 @@ export class HeldItemView {
   private healClock = 0; // seconds into the current heal-item application
   private aimT = 0;
   private isGun = false;
+  private isGadgetModel = false;
   private feel: GunFeel = gunFeel(-1);
   private readonly atlas: Atlas;
 
   // Per-gun scene-graph handles, refreshed on every item change.
-  private gunMats: THREE.MeshBasicMaterial[] = [];
+  private modelMats: THREE.MeshBasicMaterial[] = [];
   private partCycle: THREE.Object3D | null = null;
   private partMag: THREE.Object3D | null = null;
   private partBipod: THREE.Object3D | null = null;
@@ -107,6 +109,9 @@ export class HeldItemView {
   private anchorEject: THREE.Object3D | null = null;
   private anchorSight: THREE.Object3D | null = null;
   private anchorGrip2: THREE.Object3D | null = null;
+  private partSpool: THREE.Object3D | null = null;
+  private partPad: THREE.Object3D | null = null;
+  private partSpring: THREE.Object3D | null = null;
 
   // Animation state.
   private equipT = 1;          // 0..1 draw animation
@@ -134,6 +139,11 @@ export class HeldItemView {
   private lastYaw = 0;
   private lastPitch = 0;
   private reloadStage = -1;    // last reload progress seen, for one-shot cues
+  private gadgetBeat: 'grappleFire' | 'grappleRelease' | 'bounce' | null = null;
+  private gadgetBeatT = 0;
+  private gadgetSpin = 0;
+  private spoolAngle = 0;
+  private grappleReeling = false;
 
   // Muzzle flash: a stretched additive burst plus a two-quad star.
   private readonly flash: THREE.Group;
@@ -265,18 +275,25 @@ export class HeldItemView {
   }
 
   setItem(id: number | null): void {
+    // Keep the final consumed pad in view long enough to finish its spring snap.
+    if (id === null && this.currentItem === Item.JumpBoost && this.gadgetBeat === 'bounce') return;
     if (id === this.currentItem) return;
     this.currentItem = id;
     this.isGun = id !== null && !!ITEMS[id]?.gun;
+    this.isGadgetModel = id !== null && isModeledGadget(id);
     this.feel = gunFeel(id ?? -1);
     if (this.mesh) {
       this.pivot.remove(this.mesh);
       this.mesh = null;
     }
-    for (const m of this.gunMats) m.dispose();
-    this.gunMats = [];
+    for (const m of this.modelMats) m.dispose();
+    this.modelMats = [];
     this.partCycle = this.partMag = this.partBipod = this.partStock = null;
     this.anchorMuzzle = this.anchorEject = this.anchorSight = this.anchorGrip2 = null;
+    this.partSpool = this.partPad = this.partSpring = null;
+    this.gadgetBeat = null;
+    this.gadgetSpin = 0;
+    this.grappleReeling = false;
     this.cycleT = -1;
     this.flashT = 1;
     this.flash.visible = false;
@@ -291,7 +308,7 @@ export class HeldItemView {
           const m = o as THREE.Mesh;
           if (!m.isMesh || m.userData.glow) return;
           const mat = (m.material as THREE.MeshBasicMaterial).clone();
-          this.gunMats.push(mat);
+          this.modelMats.push(mat);
           m.material = mat;
         });
         this.mesh = model;
@@ -303,6 +320,20 @@ export class HeldItemView {
         this.anchorEject = model.getObjectByName('eject') ?? null;
         this.anchorSight = model.getObjectByName('sight') ?? null;
         this.anchorGrip2 = model.getObjectByName('grip2') ?? null;
+      } else if (this.isGadgetModel) {
+        const model = createGadgetModel(id);
+        poseGadgetModel(model, 'firstPerson');
+        model.traverse((o) => {
+          const mesh = o as THREE.Mesh;
+          if (!mesh.isMesh) return;
+          const mat = (mesh.material as THREE.MeshBasicMaterial).clone();
+          this.modelMats.push(mat);
+          mesh.material = mat;
+        });
+        this.mesh = model;
+        this.partSpool = model.getObjectByName('spool') ?? null;
+        this.partPad = model.getObjectByName('pad') ?? null;
+        this.partSpring = model.getObjectByName('spring') ?? null;
       } else {
         const mesh = new THREE.Mesh(itemGeometry(this.atlas, id), this.material);
         mesh.scale.setScalar(1.4);
@@ -316,7 +347,7 @@ export class HeldItemView {
     this.offArm.visible = !!this.anchorGrip2;
     // Hands are sized for an empty fist; a gun is a smaller, finer object, so
     // the grip hand shrinks a little rather than eclipsing the weapon.
-    this.arm.scale.setScalar(this.isGun ? 0.86 : 1);
+    this.arm.scale.setScalar(this.isGun || this.isGadgetModel ? 0.86 : 1);
     // The arm stays visible even with no item; setActive controls POV visibility.
     this.arm.visible = true;
   }
@@ -355,6 +386,33 @@ export class HeldItemView {
     this.chambered = false;
     this.cycleDelay = this.feel.action === 'pump' ? 0.12
       : this.feel.action === 'bolt' ? 0.22 : 0;
+  }
+
+  /** Mobility gadget fired: mechanical motion and a tailored view impulse,
+   * without pretending the gadget has a muzzle flash or firearm action. */
+  gadgetAction(kind: 'grappleFire' | 'grappleRelease' | 'bounce'): void {
+    this.gadgetBeat = kind;
+    this.gadgetBeatT = 0;
+    this.recoilPulse = 1;
+    if (kind === 'grappleFire') {
+      this.gadgetSpin = -30;
+      this.kickVZ += 1.5;
+      this.kickVPitch += 1.5;
+      this.kickVRoll -= 0.55;
+    } else if (kind === 'grappleRelease') {
+      this.gadgetSpin = 22;
+      this.kickVZ += 0.75;
+      this.kickVPitch -= 0.8;
+    } else {
+      this.kickVZ += 1.2;
+      this.kickVY += 1.8;
+      this.kickVPitch += 3.2;
+      this.kickVRoll += (Math.random() - 0.5) * 0.8;
+    }
+  }
+
+  setGrappleReeling(active: boolean): void {
+    this.grappleReeling = active;
   }
 
   /** 0 at rest, 1 immediately after a shot; used by the local third-person body. */
@@ -396,6 +454,7 @@ export class HeldItemView {
     this.stepSway(dt, aim);
     this.stepBob(dt, moveSpeed, grounded);
     if (this.cycleT >= 0) this.stepCycle(dt);
+    this.stepGadgetAction(dt);
     this.stepReloadCues(this.isGun ? reloadProgress : -1);
     if (this.flashT < 1) this.flashT = Math.min(1, this.flashT + dt / 0.075);
 
@@ -456,6 +515,20 @@ export class HeldItemView {
       rx += draw * 0.42 - strike * 1.05;
       rz += -strike * 0.2; // rolls slightly inward as it lands
     }
+    if (this.gadgetBeat) {
+      const duration = this.gadgetBeat === 'bounce' ? 0.42 : 0.28;
+      const u = clamp(this.gadgetBeatT / duration, 0, 1);
+      const pulse = Math.sin(u * Math.PI);
+      if (this.gadgetBeat === 'bounce') {
+        py -= pulse * 0.12;
+        pz += pulse * 0.08;
+        rx += pulse * 0.36;
+      } else {
+        pz += pulse * 0.11;
+        rx += pulse * (this.gadgetBeat === 'grappleFire' ? 0.22 : -0.13);
+        rz -= pulse * 0.08;
+      }
+    }
     // Spring recoil: straight back into the shoulder, with the muzzle climbing.
     // Both are capped so the heaviest weapons throw the gun hard without ever
     // folding it back through the camera.
@@ -510,7 +583,9 @@ export class HeldItemView {
       this.poseFlash(flash);
       // The gun lights itself up for the instant the muzzle is burning.
       const glow = shade * (1 + flash * 0.7);
-      for (const m of this.gunMats) m.color.setScalar(glow);
+      for (const m of this.modelMats) m.color.setScalar(glow);
+    } else if (this.isGadgetModel) {
+      for (const m of this.modelMats) m.color.setScalar(shade);
     } else if (this.flash.visible) {
       this.flash.visible = false;
     }
@@ -544,7 +619,7 @@ export class HeldItemView {
     const dPitch = this.euler.x - this.lastPitch;
     this.lastYaw = this.euler.y;
     this.lastPitch = this.euler.x;
-    const gain = (this.isGun ? 0.09 : 0.055) * (1 - aim * 0.7);
+    const gain = (this.isGun || this.isGadgetModel ? 0.09 : 0.055) * (1 - aim * 0.7);
     this.swayX = clamp(this.swayX + dYaw * gain, -0.055, 0.055);
     this.swayY = clamp(this.swayY - dPitch * gain, -0.055, 0.055);
     const back = Math.min(1, dt * 9);
@@ -558,6 +633,30 @@ export class HeldItemView {
     this.bobWeight += (want - this.bobWeight) * Math.min(1, dt * 8);
     if (this.bobWeight > 0.002) {
       this.bobPhase += dt * (3.2 + Math.min(9, moveSpeed * 1.5));
+    }
+  }
+
+  private stepGadgetAction(dt: number): void {
+    this.gadgetSpin += ((this.grappleReeling ? -12 : 0) - this.gadgetSpin) *
+      Math.min(1, dt * (this.grappleReeling ? 8 : 5));
+    this.spoolAngle += this.gadgetSpin * dt;
+    if (this.partSpool) this.partSpool.rotation.x = this.spoolAngle;
+
+    if (!this.gadgetBeat) return;
+    this.gadgetBeatT += dt;
+    const duration = this.gadgetBeat === 'bounce' ? 0.42 : 0.28;
+    const u = clamp(this.gadgetBeatT / duration, 0, 1);
+    if (this.gadgetBeat === 'bounce') {
+      const compression = u < 0.2
+        ? 1 - smoothstep(u / 0.2) * 0.52
+        : 0.48 + easeOut((u - 0.2) / 0.8) * 0.52;
+      if (this.partSpring) this.partSpring.scale.y = compression;
+      if (this.partPad) this.partPad.position.y = 0.16 + 0.39 * compression;
+    }
+    if (u >= 1) {
+      if (this.partSpring) this.partSpring.scale.y = 1;
+      if (this.partPad) this.partPad.position.y = 0.55;
+      this.gadgetBeat = null;
     }
   }
 

@@ -18,7 +18,7 @@ export type GadgetKind =
   | 'horn'      // war horn — a Commander/Officer triggers a faction combat buff
   | 'oil'       // oil bomb — a bigger AoE that spends oil
   | 'disguise'  // spy disguise — look like the enemy faction for a while
-  | 'jump';     // jump boost — a single-use, ~20-block vertical launch
+  | 'jump';     // bounce pad — a single-use, ~20-block vertical launch
 
 /** Throwable gadget kinds get an in-air tossed item + a detonation point. */
 export const THROWN_KINDS = new Set<GadgetKind>(['frag', 'oil', 'smoke']);
@@ -95,8 +95,8 @@ export const GADGETS: Record<number, GadgetDef> = {
     cooldown: 30, maxStack: 1, consumed: false, duration: 45,
   },
   [Item.JumpBoost]: {
-    item: Item.JumpBoost, tile: Tile.JumpBoost, name: 'Jump Boost', kind: 'jump',
-    desc: 'ONE USE: left-click to launch ~20 blocks straight up. No fall damage.',
+    item: Item.JumpBoost, tile: Tile.JumpBoost, name: 'Bounce Pad', kind: 'jump',
+    desc: 'ONE USE: spring ~20 blocks straight up. No fall damage from the landing.',
     cooldown: 0.5, maxStack: 8, consumed: true,
   },
 };

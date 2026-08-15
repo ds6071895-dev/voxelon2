@@ -2794,6 +2794,7 @@ export class GameServer {
    *  fully server-decided: the client only says "I swung", never at what. */
   private handleFlagHit(p: ServerPlayer): Outbound[] {
     if (p.dead || p.mode !== 'survival') return [];
+    if (!warActive(this.war, this.worldTime)) return [];
     if (this.worldTime - p.lastFlagHit < FLAG_HIT_COOLDOWN) return [];
     const ev = hitFlag(this.flags, p.id, p.faction, p.x, p.z);
     // Only a swing that actually LANDS starts the cooldown — swinging at thin

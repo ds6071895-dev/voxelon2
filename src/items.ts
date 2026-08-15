@@ -547,7 +547,7 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Item.WarHorn]: gadgetItem('War Horn', Tile.WarHorn, 1),
   [Item.OilBomb]: gadgetItem('Oil Bomb', Tile.OilBomb, 8),
   [Item.SpyDisguise]: gadgetItem('Spy Disguise', Tile.SpyDisguise, 1),
-  [Item.JumpBoost]: gadgetItem('Jump Boost', Tile.JumpBoost, 8),
+  [Item.JumpBoost]: gadgetItem('Bounce Pad', Tile.JumpBoost, 8),
 
   // Lifesteal (Milestone A). Hearts stack small (they're precious loot);
   // the Revival Beacon is a one-shot totem.

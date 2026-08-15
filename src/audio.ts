@@ -421,6 +421,15 @@ export class GameAudio {
     this.noise({ freq: 700, dur: 0.42, gain: 0.16, slideTo: 2000, type: 'bandpass', q: 0.5 });
   }
 
+  /** Bounce Pad: spring compression, a rubbery launch note, then air rushing by. */
+  bouncePad(): void {
+    this.noise({ freq: 540, dur: 0.08, gain: 0.2, slideTo: 170, type: 'lowpass', q: 0.8 });
+    this.tone({ type: 'sine', from: 150, to: 640, dur: 0.34, gain: 0.2, attack: 0.015 });
+    this.tone({ type: 'triangle', from: 95, to: 280, dur: 0.22, gain: 0.13 });
+    this.noise({ freq: 320, dur: 0.48, gain: 0.13, slideTo: 1500, type: 'bandpass', q: 0.5,
+      delay: 0.04 });
+  }
+
   /** Glider deploy: sailcloth cracking taut, then the wings catching the air. */
   glide(): void {
     this.noise({ freq: 900, dur: 0.09, gain: 0.3, slideTo: 260, type: 'bandpass', q: 0.8 });

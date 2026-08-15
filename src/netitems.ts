@@ -10,6 +10,7 @@ import { PICKUP_RANGE } from './net/protocol';
 import type { Player } from './player';
 import type { Atlas } from './textures';
 import { createGunModel, isGunItem, poseGunModel } from './gunmodels';
+import { createGadgetModel, isModeledGadget, poseGadgetModel } from './gadgetmodels';
 
 export class NetItems {
   private readonly scene: THREE.Scene;
@@ -52,8 +53,11 @@ export class NetItems {
       if (!mesh) {
         mesh = isGunItem(info.item)
           ? createGunModel(info.item)
-          : new THREE.Mesh(itemGeometry(this.atlas, info.item), this.material);
+          : isModeledGadget(info.item)
+            ? createGadgetModel(info.item)
+            : new THREE.Mesh(itemGeometry(this.atlas, info.item), this.material);
         if (isGunItem(info.item)) poseGunModel(mesh, 'drop');
+        else if (isModeledGadget(info.item)) poseGadgetModel(mesh, 'drop');
         this.scene.add(mesh);
         this.meshes.set(eid, mesh);
         this.age.set(eid, 0);

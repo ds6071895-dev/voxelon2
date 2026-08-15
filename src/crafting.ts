@@ -158,7 +158,7 @@ export const RECIPES: Recipe[] = [
   shaped([[null, null, T], [null, I, I], [I, null, null]], Item.WarHorn),
   shaped([[null, I, null], [I, Item.OilBarrel, I], [null, R, null]], Item.OilBomb),
   shaped([[null, R, null], [I, Cb, I]], Item.SpyDisguise),
-  // Jump Boost: a one-use spring — redstone + a slime-less feather-light frame
+  // Bounce Pad: a one-use spring — redstone + a slime-less feather-light frame
   // (sticks + iron). Cheap-ish but not trivial.
   shaped([[S, R, S], [I, R, I]], Item.JumpBoost, 2),
 

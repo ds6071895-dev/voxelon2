@@ -1,12 +1,72 @@
 // Item icon rendering shared by the hotbar and the inventory UI:
-// isometric mini-blocks for cube blocks, flat sprites for everything else.
+// isometric mini-blocks for cube blocks, 3D gadget previews, and flat sprites
+// for everything else.
 
+import * as THREE from 'three';
 import { BLOCKS, Tile } from './blocks';
+import { createGadgetModel, isModeledGadget } from './gadgetmodels';
 import { Item, ITEMS } from './items';
 import { TILE_PX, ATLAS_TILES } from './textures';
 
 const ICON_GRASS = '#91bd59';
 const ICON_FOLIAGE = '#71a83d';
+
+const gadgetIconCache = new Map<number, HTMLCanvasElement>();
+let gadgetIconRenderer: THREE.WebGLRenderer | null | undefined;
+
+/** Render the existing in-world gadget geometry once, then reuse the resulting
+ * transparent image in every hotbar and inventory slot. */
+function drawGadgetIcon(ctx: CanvasRenderingContext2D, itemId: number): boolean {
+  const cached = gadgetIconCache.get(itemId);
+  if (cached) {
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(cached, 0, 0, 32, 32);
+    return true;
+  }
+  if (gadgetIconRenderer === null) return false;
+  if (gadgetIconRenderer === undefined) {
+    try {
+      gadgetIconRenderer = new THREE.WebGLRenderer({
+        alpha: true, antialias: true, preserveDrawingBuffer: true,
+      });
+      gadgetIconRenderer.setClearColor(0x000000, 0);
+      gadgetIconRenderer.setPixelRatio(1);
+      gadgetIconRenderer.setSize(96, 96, false);
+      gadgetIconRenderer.outputColorSpace = THREE.SRGBColorSpace;
+    } catch {
+      gadgetIconRenderer = null;
+      return false;
+    }
+  }
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 20);
+  camera.position.set(3, 2.5, 4);
+  camera.lookAt(0, 0, 0);
+  const model = createGadgetModel(itemId);
+  model.rotation.set(
+    itemId === Item.JumpBoost ? -0.12 : 0.18,
+    itemId === Item.JumpBoost ? -0.55 : -0.72,
+    itemId === Item.JumpBoost ? -0.08 : 0.12,
+  );
+  model.updateMatrixWorld(true);
+  const bounds = new THREE.Box3().setFromObject(model);
+  const center = bounds.getCenter(new THREE.Vector3());
+  const radius = bounds.getBoundingSphere(new THREE.Sphere()).radius;
+  const scale = 0.84 / Math.max(0.001, radius);
+  model.position.copy(center).multiplyScalar(-scale);
+  model.scale.setScalar(scale);
+  scene.add(model);
+  gadgetIconRenderer.render(scene, camera);
+
+  const image = document.createElement('canvas');
+  image.width = image.height = 96;
+  image.getContext('2d')!.drawImage(gadgetIconRenderer.domElement, 0, 0);
+  gadgetIconCache.set(itemId, image);
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(image, 0, 0, 32, 32);
+  return true;
+}
 
 /** Dimensional low-poly side view matching the in-world gun models. */
 function drawGunIcon(ctx: CanvasRenderingContext2D, itemId: number): void {
@@ -137,6 +197,8 @@ export function renderItemIcon(
   ctx.imageSmoothingEnabled = false;
   const info = ITEMS[itemId];
   if (!info) return;
+
+  if (isModeledGadget(itemId) && drawGadgetIcon(ctx, itemId)) return;
 
   if (info.gun) {
     drawGunIcon(ctx, itemId);

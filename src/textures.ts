@@ -1924,7 +1924,7 @@ function paintSpyDisguise(p: Painter, seed: number): void {
   p.set(6, 13, tache); p.set(9, 13, tache);
 }
 
-/** Jump boost: a coiled launch spring on a plate with a green up arrow. */
+/** Bounce Pad: a coiled launch spring on a plate with a green up arrow. */
 function paintJumpBoost(p: Painter, seed: number): void {
   const steel: RGBA = [198, 204, 212, 255];
   const steelD: RGBA = [122, 128, 138, 255];

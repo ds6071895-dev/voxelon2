@@ -20,6 +20,7 @@ import {
 } from './machines';
 import { ItemEntities, itemGeometry } from './itementity';
 import { createGunModel, gunFeel, isGunItem, poseGunModel } from './gunmodels';
+import { createGadgetModel, isModeledGadget, poseGadgetModel } from './gadgetmodels';
 import { ChatBox } from './chat';
 import { Chests } from './chests';
 import { Mob, Mobs } from './mobs';
@@ -359,7 +360,7 @@ let warWins: number[] = new Array(FACTIONS.length).fill(0);  // war wins this se
 // active spy disguises on remote players (id -> seconds of local time left).
 const gadgetCd = new GadgetCooldowns();
 const disguises = new Map<number, { realFaction: number; left: number }>();
-let jumpImmuneUntil = 0; // suppress fall damage briefly after a Jump Boost
+let jumpImmuneUntil = 0; // suppress fall damage briefly after a Bounce Pad launch
 // --- GRAPPLING HOOK ----------------------------------------------------------
 // A movement TOY, not an elevator. The old hook pinned your velocity to a fixed
 // 28 b/s straight at the anchor and then threw all of it away on arrival, which
@@ -422,15 +423,25 @@ const ropeSegments: THREE.Mesh[] = [];
     ropeGroup.add(seg);
     ropeSegments.push(seg);
   }
-  const head = new THREE.Mesh(
-    new THREE.ConeGeometry(0.13, 0.4, 6),
-    new THREE.MeshBasicMaterial({ color: 0xb6c1d0 }),
-  );
+  const head = new THREE.Group();
+  const hookMat = new THREE.MeshBasicMaterial({ color: 0xb6c1d0 });
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.06, 0.42, 6), hookMat);
+  head.add(shaft);
+  const tip = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.22, 6), hookMat);
+  tip.position.y = 0.3;
+  head.add(tip);
+  for (let i = 0; i < 3; i++) {
+    const claw = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.035, 0.3, 5), hookMat);
+    const a = i * Math.PI * 2 / 3;
+    claw.position.set(Math.cos(a) * 0.1, -0.15, Math.sin(a) * 0.1);
+    claw.rotation.set(Math.sin(a) * 0.72, 0, -Math.cos(a) * 0.72);
+    head.add(claw);
+  }
   head.frustumCulled = false;
   head.name = 'hook';
   ropeGroup.add(head);
 }
-const grappleHookMesh = ropeGroup.getObjectByName('hook') as THREE.Mesh;
+const grappleHookMesh = ropeGroup.getObjectByName('hook') as THREE.Group;
 ropeGroup.visible = false;
 scene.add(ropeGroup);
 const ropeA = new THREE.Vector3();
@@ -522,7 +533,8 @@ function fireGrapple(maxRange: number): boolean {
   grapplePrev.copy(player.pos);
   ropeGroup.visible = true;
   audio.grappleFire();
-  held.recoil();
+  held.gadgetAction('grappleFire');
+  heldSwingSeq = (heldSwingSeq + 1) & 0xffff;
   return true;
 }
 
@@ -593,6 +605,9 @@ function updateGrapple(dt: number): void {
   grappleRopeLen = Math.max(GRAPPLE_ARRIVE, grappleRopeLen - GRAPPLE_REEL_RATE * dt);
   const taut = dist > grappleRopeLen;
   const vel = player.vel;
+  // The reel may limit speed it creates, but must not erase a faster launch
+  // inherited from a Bounce Pad (or a previous grapple).
+  const inheritedSpeed = vel.length();
   vel.x += dx * (taut ? GRAPPLE_PULL : GRAPPLE_SLACK_PULL) * dt;
   vel.y += dy * (taut ? GRAPPLE_PULL : GRAPPLE_SLACK_PULL) * dt;
   vel.z += dz * (taut ? GRAPPLE_PULL : GRAPPLE_SLACK_PULL) * dt;
@@ -607,7 +622,8 @@ function updateGrapple(dt: number): void {
   // Reeling toward a high anchor has to beat gravity or you just dangle.
   if (dy > 0.1) vel.y += GRAPPLE_LIFT * dy * dt;
   const speed = vel.length();
-  if (speed > GRAPPLE_MAX_SPEED) vel.multiplyScalar(GRAPPLE_MAX_SPEED / speed);
+  const speedLimit = Math.max(GRAPPLE_MAX_SPEED, inheritedSpeed);
+  if (speed > speedLimit) vel.multiplyScalar(speedLimit / speed);
   player.fallDistance = 0;
   // Suspend the normal air drag while attached: WASD steers the swing instead
   // of dragging it back to walking pace (see Player.momentumTime).
@@ -637,6 +653,8 @@ function endGrapple(launch = false): void {
     player.vel.y = Math.max(player.vel.y, Math.min(GRAPPLE_LAUNCH_UP, player.vel.y + 6.5));
     player.momentumTime = GRAPPLE_MOMENTUM;
     audio.grappleRelease();
+    held.gadgetAction('grappleRelease');
+    heldSwingSeq = (heldSwingSeq + 1) & 0xffff;
     particles.burst(player.pos.x, player.pos.y + 0.9, player.pos.z, 8, 0xe9e2cf, 2.4, 0.4);
   } else {
     player.momentumTime = 0;
@@ -667,6 +685,7 @@ function updateGrappleAim(controlling: boolean): void {
   const hit = raycastBlocks(world, eye, dir,
     gadgetOf(Item.GrapplingHook)?.radius ?? 48);
   if (!hit) return;
+  if (!isSolid(world.getBlock(hit.x, hit.y, hit.z))) return;
   grappleMarker.visible = true;
   grappleMarker.position.set(hit.hx + hit.nx * 0.03, hit.hy + hit.ny * 0.03,
     hit.hz + hit.nz * 0.03);
@@ -4892,9 +4911,13 @@ function updateSelfAvatar(dt: number): void {
     if (heldId > 0 && ITEMS[heldId]) {
       const mesh = isGunItem(heldId)
         ? createGunModel(heldId)
-        : new THREE.Mesh(itemGeometry(atlas, heldId), selfItemMat);
+        : isModeledGadget(heldId)
+          ? createGadgetModel(heldId)
+          : new THREE.Mesh(itemGeometry(atlas, heldId), selfItemMat);
       if (isGunItem(heldId)) {
         poseGunModel(mesh, 'avatar');
+      } else if (isModeledGadget(heldId)) {
+        poseGadgetModel(mesh, 'avatar');
       } else {
         mesh.position.set(0, -0.68, -0.2);
         mesh.rotation.set(-0.5, 0, 0);
@@ -4973,6 +4996,12 @@ function updateSelfAvatar(dt: number): void {
         selfHeldMesh.rotation.x = -(raise + 0.1) + player.pitch;
         selfHeldMesh.rotation.z = -reloadDip * 0.45;
       }
+    } else if (isModeledGadget(selfHeldId)) {
+      const action = held.recoilAmount();
+      b.parts[2].rotation.x = 0.45 + action * 0.18;
+      b.parts[3].rotation.x = 0.62 + action * 0.48;
+      b.parts[2].rotation.z = -0.18;
+      b.parts[3].rotation.z = 0.08;
     }
     if (b.cape) b.cape.rotation.x = pose.cape;
   }
@@ -7242,10 +7271,19 @@ function useGadget(def: GadgetDef): void {
     case 'jump': {
       gadgetCd.use(def.item, worldTimeLocal); consume();
       player.vel.y = 36; // ~20-block vertical launch (gravity 32)
+      player.onGround = false;
+      player.momentumTime = Math.max(player.momentumTime, GRAPPLE_MOMENTUM);
       player.fallDistance = 0;
       jumpImmuneUntil = worldTimeLocal + 7; // no fall damage from this leap
-      particles.burst(player.pos.x, player.pos.y, player.pos.z, 18, 0x9affb0, 4, 0.6);
-      showNotice('🚀 BOOOOING! One-use jump boost!');
+      held.gadgetAction('bounce');
+      heldSwingSeq = (heldSwingSeq + 1) & 0xffff;
+      audio.bouncePad();
+      triggerEncounterShake(0.22, 0.035);
+      particles.burst(player.pos.x, player.pos.y + 0.08, player.pos.z,
+        24, 0x75ff9b, 7, 0.75, { gravity: 7, spread: 1.15, scale: 1.2 });
+      particles.burst(player.pos.x, player.pos.y + 0.12, player.pos.z,
+        10, 0xffffff, 10, 0.42, { gravity: 9, spread: 0.7, scale: 0.65 });
+      showNotice('BOOOOING! Bounce Pad launched you!');
       break;
     }
     case 'cover':
@@ -7915,8 +7953,8 @@ function frame(): void {
     // Speed FOV: how fast you are actually travelling this frame, eased so a
     // swing blooms the view open and a landing settles it back.
     {
-      const horizontal = Math.hypot(player.vel.x, player.vel.z);
-      const want = Math.max(0, Math.min(13, (horizontal - 12) * 0.85));
+      const speed = player.vel.length();
+      const want = Math.max(0, Math.min(13, (speed - 12) * 0.85));
       speedFov += (want - speedFov) * Math.min(1, dt * 6);
     }
     // World border: keep the player inside the play area (the server clamps
@@ -8210,7 +8248,7 @@ function frame(): void {
     updateFlagVisuals(dt); // flag poles, beacons + the carrier's banner
     tickDisguises(dt); // Phase 8: expire spy disguises on remote avatars
     updateThrownItems(dt); // animate tossed grenades/bombs
-    // Jump Boost: zero fall distance while the immunity window is active.
+    // Bounce Pad: zero fall distance while the immunity window is active.
     if (jumpImmuneUntil > 0) {
       player.fallDistance = 0;
       if (worldTimeLocal >= jumpImmuneUntil || (player.onGround && player.vel.y <= 0)) jumpImmuneUntil = 0;
@@ -8290,6 +8328,7 @@ function frame(): void {
   held.setItem(controlling ? inventory.selectedStack?.id ?? null : null);
   const reloadProgress = reloadTimer > 0 && reloadDuration > 0
     ? 1 - reloadTimer / reloadDuration : -1;
+  held.setGrappleReeling(grappleStage === 'reel');
   held.update(dt, controlling && interaction.breakingActive, sky.sunIntensity,
     aimZoom > 1, reloadProgress, healUse.active ? healUse.progress : -1,
     Math.hypot(player.vel.x, player.vel.z), player.onGround);
