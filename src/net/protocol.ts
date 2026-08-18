@@ -17,6 +17,7 @@ import type {
 import type {
   BombSnapshot, HeliLossReason, HelicopterSnapshot, SeatKind,
 } from '../vehicles';
+import type { DuelArenaBounds, DuelLobbySnapshot, DuelResult } from '../duels';
 
 export const SERVER_PORT = 8080;
 export const SNAPSHOT_HZ = 15;     // server -> clients transform broadcasts
@@ -37,7 +38,9 @@ export function inCore(x: number, z: number): boolean {
 export const MAX_ATTUNED = 4;        // attuned totems per player
 export const TOTEM_COOLDOWN = 60;    // seconds between teleports (server clock)
 export const TOTEM_WINDUP = 3;       // client-side cast time before the port
-export const COMBAT_TAG = 10;        // seconds after ANY damage that block a port
+/** PvP combat window. Every damaging player hit restarts this clock; logging
+ *  out during it is settled as a kill for the last attacker. */
+export const COMBAT_TAG = 30;
 export const MELEE_DAMAGE = 4;     // server-applied fist damage
 // Bloodlust (anti-stalemate): the longer a PvP fight drags on, the harder every
 // hit lands, so no fight can last forever. A fight "starts" on the first PvP
@@ -164,6 +167,15 @@ export type ClientMsg =
   // Resume a saved session (token issued by the server on each successful
   // auth) — lets a returning browser skip the password.
   | { t: 'session'; username: string; token: string }
+  // Private, invite-only Duels. An omitted token creates a lobby; a token joins.
+  | { t: 'duelCreate' }
+  | { t: 'duelJoin'; token: string }
+  | { t: 'duelLeave' }
+  | { t: 'duelReady'; ready: boolean }
+  | { t: 'duelStart' }
+  | { t: 'duelArenaReady' }
+  | { t: 'duelRematch'; vote: boolean }
+  | { t: 'duelReturn' }
   | { t: 'xform'; x: number; y: number; z: number; yaw: number; pitch: number;
       gliding?: boolean; boating?: boolean; seated?: boolean;
       sneaking?: boolean; held?: number; armor?: number[]; swing?: number;
@@ -320,6 +332,19 @@ export type ServerMsg =
   // A fresh session token (sent right after every successful auth); the client
   // stores it in localStorage so the next visit can skip the login form.
   | { t: 'session'; token: string }
+  | { t: 'duelLobby'; snapshot: DuelLobbySnapshot; inviteToken?: string }
+  | { t: 'duelError'; code: 'invalid' | 'full' | 'match_in_progress' |
+      'already_in_lobby' | 'not_host' | 'too_few_players' | 'too_many_players' |
+      'not_everyone_ready' | 'not_in_lobby'; message: string }
+  | { t: 'duelArena'; arena: DuelArenaBounds; spawn: { x: number; y: number; z: number };
+      countdownEndsAt: number }
+  | { t: 'duelLoadout'; slots: (ItemStack | null)[]; armor: (ItemStack | null)[];
+      selected: number; unlimitedReserve: boolean }
+  | { t: 'duelClock'; serverNow: number; endsAt: number; suddenDeath: boolean }
+  | { t: 'duelRespawn'; respawnAt: number; spectating: boolean }
+  | { t: 'duelResult'; result: DuelResult }
+  | { t: 'duelRestored'; x: number; y: number; z: number; yaw: number; pitch: number;
+      health: number; dead: boolean; mode: GameMode; state?: Record<string, unknown> }
   | {
       t: 'welcome'; id: number; seed: number; username: string;
       players: PlayerInfo[]; edits: [string, number][]; items: ItemEntityInfo[];
@@ -354,7 +379,9 @@ export type ServerMsg =
   | { t: 'edit'; x: number; y: number; z: number; block: number }
   | { t: 'editBatch'; edits: { x: number; y: number; z: number; block: number }[] }
   | { t: 'hurt'; health: number; dead: boolean; by: number;
-      kx: number; ky: number; kz: number }
+      kx: number; ky: number; kz: number;
+      /** Remaining PvP combat seconds (0 for environment/self damage). */
+      combat: number }
   // Told to the ATTACKER when one of their direct hits lands: the hitmarker.
   // Sent from the server rather than predicted client-side so it can never lie
   // about a shot the server rejected. `amount` is the health actually removed

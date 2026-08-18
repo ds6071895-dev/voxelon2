@@ -17,7 +17,7 @@ export const COMEBACK_HEARTS = 3;
 /** You can't withdraw (bottle) a heart if it would leave you below this. */
 export const WITHDRAW_FLOOR = 2;
 /** Seconds after a direct player hit in which a death still credits them. */
-export const KILL_CREDIT_WINDOW = 10;
+export const KILL_CREDIT_WINDOW = 30;
 /** Elimination lockout: real wall-clock ms (24 h). */
 export const ELIMINATION_MS = 24 * 60 * 60 * 1000;
 /** A PERMANENT elimination: stored as an `eliminatedUntil` so far out that it

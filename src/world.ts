@@ -47,6 +47,9 @@ function applyLightShader(
         '#include <color_fragment>',
         '#include <color_fragment>\n' +
         'float voxelLight = max(vSkyBlock.y, vSkyBlock.x * uSunLight);\n' +
+        '// Closed Duels rooms have a competitive ambient floor of 12/15.\n' +
+        '// Fixtures still raise nearby surfaces above it, preserving gradients.\n' +
+        'if (vWorldPos.x >= 12288.0) voxelLight = max(voxelLight, 0.8);\n' +
         '// Held-torch point light: bright near field, gentle falloff to ~16 blocks.\n' +
         'float td = distance(vWorldPos, uTorch.xyz);\n' +
         'float fall = clamp(1.0 - td / 16.0, 0.0, 1.0);\n' +

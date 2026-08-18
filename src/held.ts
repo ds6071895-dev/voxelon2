@@ -229,26 +229,26 @@ export class HeldItemView {
     this.sleeveMat = new THREE.MeshBasicMaterial({
       color: this.baseSleeve.clone(), map: avatarTexture('cloth'),
     });
-    this.arm = this.buildArm(1);
+    this.arm = this.buildArm(1, 0.42);
     this.arm.position.set(0.05, -0.16, 0.06);
     this.arm.rotation.set(0.5, -0.32, 0.32);
     this.pivot.add(this.arm);
     // Support hand: a slimmer forearm reaching up from the lower left, so it
     // braces UNDER whatever foregrip the weapon exposes instead of crossing
-    // over the receiver and hiding it.
-    this.offArm = this.buildArm(0.82);
+    // over the receiver and hiding it. Forearm is extended so it stretches
+    // down past the bottom edge of the screen even on forward-gripped guns.
+    this.offArm = this.buildArm(0.82, 1.1);
     this.offArm.rotation.set(0.72, -0.62, 0.24);
     this.offArm.visible = false;
     this.pivot.add(this.offArm);
   }
 
-  private buildArm(scale: number): THREE.Group {
+  private buildArm(scale: number, forearmLength = 0.42): THREE.Group {
     const arm = new THREE.Group();
     const forearm = new THREE.Mesh(
-      new THREE.BoxGeometry(0.17 * scale, 0.17 * scale, 0.42), this.sleeveMat);
-    // Stop before the camera near plane. The old camera-end vertices crossed it,
-    // exposing a clipped sleeve triangle beside held blocks at sprint FOV.
-    forearm.position.set(0, 0, 0.22);
+      new THREE.BoxGeometry(0.17 * scale, 0.17 * scale, forearmLength), this.sleeveMat);
+    // Stop before the camera near plane on the main arm; start just behind wrist and stretch down.
+    forearm.position.set(0, 0, 0.01 + forearmLength * 0.5);
     arm.add(forearm);
     const wrist = new THREE.Mesh(
       new THREE.BoxGeometry(0.185 * scale, 0.185 * scale, 0.1), this.armMat);

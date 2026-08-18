@@ -432,14 +432,14 @@ gains a **Heartland ↔ full-world zoom toggle** with HEARTLAND/WILDS labels
 of pre-rendering 5000² terrain), and craftable **Waypoint Totems** (2 gold +
 5 planks, glowing) shrink the 2.5 km world: right-click to attune (max 4,
 toggle to release, persisted per account), click one on the map to travel —
-3 s wind-up interrupted by damage, 60 s cooldown and a 10 s combat tag, all
+3 s wind-up interrupted by damage, 60 s cooldown and a 30 s combat tag, all
 server-enforced, with a broken totem pruned on use. Full offline parity.
 
 The revision before (Beta 1.4) added **LIFESTEAL** (Milestone A of the
 lifesteal-world plan): every player's max health is a currency of **hearts**
 (start 10, cap 20, 2 HP each). A **PvP kill steals a heart** (killer +1,
 victim −1 — deaths to mobs/falls/lava/unattended turrets move nothing, decided
-by a 10 s direct-damager credit window); hitting **0 hearts ELIMINATES** you
+by a 30 s direct-damager credit window); hitting **0 hearts ELIMINATES** you
 for 24 h real time (login refused with a friendly countdown, full-screen
 banner, comeback at 5 hearts). Hearts are also an economy: craft a **Heart
 item** by bottling one of your own (server-enforced floor of 2 — lootable,

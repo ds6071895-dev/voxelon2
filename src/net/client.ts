@@ -24,6 +24,7 @@ import type {
 import type {
   BombSnapshot, HeliLossReason, HelicopterSnapshot, SeatKind,
 } from '../vehicles';
+import type { DuelArenaBounds, DuelLobbySnapshot, DuelResult } from '../duels';
 
 export interface Remote {
   info: PlayerInfo;
@@ -83,6 +84,17 @@ export class NetClient {
 
   /** Fired once the server welcome arrives (multiplayer is now live). */
   onWelcome?: (info: PlayerInfo) => void;
+  onDuelLobby?: (snapshot: DuelLobbySnapshot, inviteToken?: string) => void;
+  onDuelError?: (code: string, message: string) => void;
+  onDuelArena?: (arena: DuelArenaBounds, spawn: { x: number; y: number; z: number },
+    countdownEndsAt: number) => void;
+  onDuelLoadout?: (slots: (ItemStack | null)[], armor: (ItemStack | null)[],
+    selected: number, unlimitedReserve: boolean) => void;
+  onDuelClock?: (serverNow: number, endsAt: number, suddenDeath: boolean) => void;
+  onDuelRespawn?: (respawnAt: number, spectating: boolean) => void;
+  onDuelResult?: (result: DuelResult) => void;
+  onDuelRestored?: (x: number, y: number, z: number, yaw: number, pitch: number, health: number,
+    dead: boolean, mode: GameMode, state?: Record<string, unknown>) => void;
   /** Saved per-account state to restore (inventory/hotbar), if the account has any. */
   onRestoreState?: (state: Record<string, unknown>) => void;
   /** A block edit from another player (apply without re-broadcasting). */
@@ -92,7 +104,8 @@ export class NetClient {
   /** Server-authoritative health change for the local player. `by` is the id of
    *  whoever dealt it (used for the directional damage indicator; it is the
    *  local id, or an unknown id, for non-player damage). */
-  onHurt?: (health: number, dead: boolean, k: [number, number, number], by: number) => void;
+  onHurt?: (health: number, dead: boolean, k: [number, number, number], by: number,
+    combat: number) => void;
   /** One of OUR direct hits landed: the hitmarker. `amount` is post-armor, so 0
    *  means "connected but fully soaked". */
   onHitConfirm?: (target: number, amount: number, killed: boolean) => void;
@@ -378,7 +391,7 @@ export class NetClient {
         else for (const e of msg.edits) this.onEdit?.(e.x, e.y, e.z, e.block);
         break;
       case 'hurt':
-        this.onHurt?.(msg.health, msg.dead, [msg.kx, msg.ky, msg.kz], msg.by);
+        this.onHurt?.(msg.health, msg.dead, [msg.kx, msg.ky, msg.kz], msg.by, msg.combat ?? 0);
         break;
       case 'hitconfirm':
         this.onHitConfirm?.(msg.target, msg.amount, msg.killed === true);
@@ -522,6 +535,31 @@ export class NetClient {
       case 'session':
         this.onSession?.(msg.token);
         break;
+      case 'duelLobby':
+        this.onDuelLobby?.(msg.snapshot, msg.inviteToken);
+        break;
+      case 'duelError':
+        this.onDuelError?.(msg.code, msg.message);
+        break;
+      case 'duelArena':
+        this.onDuelArena?.(msg.arena, msg.spawn, msg.countdownEndsAt);
+        break;
+      case 'duelLoadout':
+        this.onDuelLoadout?.(msg.slots, msg.armor, msg.selected, msg.unlimitedReserve);
+        break;
+      case 'duelClock':
+        this.onDuelClock?.(msg.serverNow, msg.endsAt, msg.suddenDeath);
+        break;
+      case 'duelRespawn':
+        this.onDuelRespawn?.(msg.respawnAt, msg.spectating);
+        break;
+      case 'duelResult':
+        this.onDuelResult?.(msg.result);
+        break;
+      case 'duelRestored':
+        this.onDuelRestored?.(msg.x, msg.y, msg.z, msg.yaw, msg.pitch, msg.health, msg.dead,
+          msg.mode, msg.state);
+        break;
       case 'hearts':
         this.onHearts?.(msg.hearts, msg.reason, msg.from);
         break;
@@ -616,6 +654,20 @@ export class NetClient {
   sendSession(username: string, token: string): void {
     this.raw({ t: 'session', username, token });
   }
+  sendDuelCreate(): void { if (this.connected) this.raw({ t: 'duelCreate' }); }
+  sendDuelJoin(token: string): void {
+    if (this.connected) this.raw({ t: 'duelJoin', token });
+  }
+  sendDuelLeave(): void { if (this.connected) this.raw({ t: 'duelLeave' }); }
+  sendDuelReady(ready: boolean): void {
+    if (this.connected) this.raw({ t: 'duelReady', ready });
+  }
+  sendDuelStart(): void { if (this.connected) this.raw({ t: 'duelStart' }); }
+  sendDuelArenaReady(): void { if (this.connected) this.raw({ t: 'duelArenaReady' }); }
+  sendDuelRematch(vote: boolean): void {
+    if (this.connected) this.raw({ t: 'duelRematch', vote });
+  }
+  sendDuelReturn(): void { if (this.connected) this.raw({ t: 'duelReturn' }); }
 
   sendEdit(x: number, y: number, z: number, block: number): void {
     if (this.connected) this.raw({ t: 'edit', x, y, z, block });

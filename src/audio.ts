@@ -325,6 +325,40 @@ export class GameAudio {
     }
   }
 
+  /** Head-relative competitive cues for Duels. All route through the effects
+   * bus, so the existing volume slider remains authoritative. */
+  duelCue(kind: 'countdown' | 'fight' | 'lead' | 'final30' | 'sudden' | 'victory' | 'defeat'): void {
+    switch (kind) {
+      case 'countdown':
+        this.tone({ type: 'triangle', from: 420, to: 360, dur: 0.11, gain: 0.1 });
+        break;
+      case 'fight':
+        this.tone({ type: 'square', from: 620, to: 920, dur: 0.18, gain: 0.09 });
+        this.tone({ type: 'triangle', from: 310, to: 620, dur: 0.24, gain: 0.12, delay: 0.05 });
+        break;
+      case 'lead':
+        this.tone({ type: 'triangle', from: 520, to: 760, dur: 0.13, gain: 0.08 });
+        break;
+      case 'final30':
+        this.tone({ type: 'square', from: 250, to: 210, dur: 0.14, gain: 0.08 });
+        this.tone({ type: 'square', from: 250, to: 210, dur: 0.14, gain: 0.08, delay: 0.2 });
+        break;
+      case 'sudden':
+        this.tone({ type: 'sawtooth', from: 190, to: 270, dur: 0.36, gain: 0.08 });
+        this.tone({ type: 'square', from: 420, to: 315, dur: 0.24, gain: 0.07, delay: 0.16 });
+        break;
+      case 'victory':
+        for (const [i, f] of [392, 523, 659, 784].entries()) {
+          this.tone({ type: 'triangle', from: f, to: f * 1.03, dur: 0.28,
+            gain: 0.1, delay: i * 0.11 });
+        }
+        break;
+      case 'defeat':
+        this.tone({ type: 'triangle', from: 330, to: 150, dur: 0.5, gain: 0.13 });
+        break;
+    }
+  }
+
   eatTick(): void {
     this.noise({ freq: 1300, dur: 0.07, gain: 0.3, q: 0.8 });
     this.tone({ type: 'triangle', from: 320, to: 180, dur: 0.06, gain: 0.12 });

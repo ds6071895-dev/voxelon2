@@ -51,7 +51,7 @@ The identity mechanic. Pure server + HUD; no worldgen.
   at 0). ONLY player-vs-player deaths move hearts — deaths to mobs, falls,
   lava, drowning, turrets with no recent player attacker move NOTHING (kids
   must never lose hearts to a zombie). Reuse the existing kill-attribution
-  that feeds the killfeed; a "recent damager" window of 10 s decides credit.
+  that feeds the killfeed; a "recent damager" window of 30 s decides credit.
 - Pure functions: `transferHeart(killer, victim)`, `clampHearts(n)`,
   `maxHealthFor(hearts)`; all smoke-tested including the clamp edges
   (kill at 20 hearts wastes the steal; victim at 1 heart drops to 0 → A2).
@@ -147,7 +147,7 @@ Foundation for C and D. The world grows; society stays concentrated.
   with the pendingTeleport bubble (already built — reuse `onTeleport`
   plumbing + `pendingTeleport` freeze in `main.ts`).
 - Anti-abuse: no teleport while in combat (took player damage in the last
-  10 s); no teleport INTO the core from the Wilds while your faction's
+  30 s); no teleport INTO the core from the Wilds while your faction's
   claim is under attack (optional, note as TODO if fiddly).
 - Smoke: attune cap 4, teleport to a broken totem rejected, cooldown
   enforced server-side, combat-tag blocks the port.

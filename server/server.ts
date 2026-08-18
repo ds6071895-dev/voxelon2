@@ -266,9 +266,11 @@ function send(id: number, msg: ServerMsg): void {
 function dispatch(out: Outbound[]): void {
   for (const o of out) {
     if (o.to === 'all') {
-      for (const cid of sockets.keys()) send(cid, o.msg);
+      for (const cid of sockets.keys()) if (game.receivesWorldBroadcast(cid)) send(cid, o.msg);
     } else if (o.to === 'others') {
-      for (const cid of sockets.keys()) if (cid !== o.from) send(cid, o.msg);
+      for (const cid of sockets.keys()) {
+        if (cid !== o.from && game.receivesWorldBroadcast(cid)) send(cid, o.msg);
+      }
     } else {
       send(o.to, o.msg);
     }
@@ -359,7 +361,17 @@ wss.on('connection', (ws: WebSocket) => {
     sockets.delete(id);
     socketAttempts.delete(String(id)); // free the per-socket auth counter
     if (authed.has(id)) {
-      persistPlayer(id);          // capture final inventory + position
+      // Combat logout must settle BEFORE persistence: the server drops and
+      // clears the quitter's carried inventory, then saves that empty state.
+      const settled = game.settleDisconnect(id);
+      if (settled.length) worldDirty = true;
+      dispatch(settled);
+      // The credited killer's new heart is account currency too; checkpoint
+      // live accounts now rather than leaving that reward until the autosave.
+      if (settled.length) {
+        for (const liveId of authed.keys()) if (liveId !== id) persistPlayer(liveId);
+      }
+      persistPlayer(id);          // capture final inventory + position/heart loss
       authed.delete(id);
       saveAccounts();             // flush the just-updated account state
       dispatch(game.removePlayer(id));
@@ -401,12 +413,14 @@ setInterval(() => {
   const moved = game.tickItems(dt);
   dispatch(game.tickTurrets(dt));
   dispatch(game.tickWar(dt)); // advances worldTime + the shrinking border
+  dispatch(game.tickDuels());
   dispatch(game.tickSeason(dt));
-  const snap: ServerMsg = { t: 'snapshot', players: game.snapshot() };
-  for (const cid of sockets.keys()) send(cid, snap);
+  for (const cid of authed.keys()) {
+    send(cid, { t: 'snapshot', players: game.snapshotFor(cid) });
+  }
   if (moved.length) {
     const mv: ServerMsg = { t: 'itemsmove', items: moved };
-    for (const cid of sockets.keys()) send(cid, mv);
+    for (const cid of authed.keys()) if (game.receivesWorldBroadcast(cid)) send(cid, mv);
   }
 }, 1000 / SNAPSHOT_HZ);
 

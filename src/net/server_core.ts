@@ -74,6 +74,10 @@ import {
   ArenaBounds, EncounterParticipant, VaultAttackIntent, VaultEncounter, bossMaxHp,
   participantHpMultiplier, encounterArmorPierce,
 } from '../vault_encounter';
+import {
+  Duels, DuelArenaBounds, DuelLobbySnapshot, DUEL_MAX_HEALTH, clampToDuelArena, duelArenaBlockAt,
+  duelArenaSolidAt, hasArenaLineOfSight, safestDuelSpawn, secureDuelToken,
+} from '../duels';
 
 // Cosmetic gunshot rebroadcast budget (see handleShot). Sized well above the
 // fastest gun's cadence so it never eats a real shot; it exists to cap a
@@ -93,6 +97,11 @@ const ROCKET_CRATER_RADIUS = 3; // block-destruction radius (= client EXPLOSION_
 /** All arguments are finite numbers (rejects NaN/Infinity/non-numbers). */
 function fin(...ns: number[]): boolean {
   return ns.every((n) => Number.isFinite(n));
+}
+
+function cloneRecord(data: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!data) return undefined;
+  try { return structuredClone(data); } catch { return { ...data }; }
 }
 
 const REGEN_INTERVAL = 2;       // +1 HP every 2s out of combat
@@ -171,6 +180,32 @@ interface ServerPlayer extends PlayerInfo {
   /** Newest pending TPA request AT this player (someone wants to port to
    *  them); expires TPA_EXPIRE seconds after `at` (worldTime). */
   tpaFrom?: { id: number; username: string; at: number };
+  /** Prevents transport cleanup from settling the same combat logout twice. */
+  disconnectSettled: boolean;
+  /** Exact open-world state held aside while the temporary Duels body exists. */
+  duelSaved?: DuelSavedState;
+  duelSpawnIndex: number;
+  duelLastShotAt: number;
+  duelNextBurstAt: number;
+  duelBurstShots: number;
+  duelShotTickets: DuelShotTicket[];
+  duelLoaded: number;
+  duelReloadUntil: number;
+  duelMedkits: number;
+  duelRespawning: boolean;
+}
+
+interface DuelShotTicket {
+  at: number;
+  x: number; y: number; z: number;
+  dx: number; dy: number; dz: number;
+}
+
+interface DuelSavedState {
+  x: number; y: number; z: number; yaw: number; pitch: number;
+  health: number; dead: boolean; mode: GameMode;
+  held: number; armor: number[]; armorPoints: number; toughness: number;
+  savedClientData?: Record<string, unknown>;
 }
 
 const GAME_MODES: GameMode[] = ['survival', 'creative', 'spectator'];
@@ -289,10 +324,15 @@ export class GameServer {
   /** Per-item fall state (server-owned gravity so drops settle to the ground). */
   private readonly itemPhys = new Map<number, { vy: number; resting: boolean }>();
   private nextEid = 1;
+  /** Invite-only minigame state is intentionally ephemeral: never serialized. */
+  private readonly duels: Duels;
+  /** Next whole-server timestamp broadcast for hidden-tab/lag clock recovery. */
+  private duelClockNextAt = 0;
 
   constructor(seed = WORLD_SEED, rng: () => number = Math.random) {
     this.seed = seed;
     this.rng = rng;
+    this.duels = new Duels(secureDuelToken);
     this.terrain = new Terrain(seed);
     this.strategic = new StrategicSim({
       groundY: (x, z) => this.surfaceY(x, z),
@@ -328,6 +368,8 @@ export class GameServer {
     if (!fin(x, y, z)) return true;
     const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
     if (by < 0 || by >= 256) return true;
+    const duelBlock = duelArenaBlockAt(bx, by, bz);
+    if (duelBlock !== null) return duelBlock !== Block.Air && !!BLOCKS[duelBlock]?.solid;
     const e = this.edits.get(`${bx},${by},${bz}`);
     if (e !== undefined) return e !== Block.Air && !!BLOCKS[e]?.solid;
     return by <= this.terrain.height(bx, bz);
@@ -570,6 +612,19 @@ export class GameServer {
       gadgetCd: new GadgetCooldowns(),
       shotTokens: SHOT_BURST, shotRefillAt: 0,
       borderRelocateAt: 0,
+      disconnectSettled: false,
+      duelSpawnIndex: -1,
+      duelLastShotAt: -Infinity,
+      duelNextBurstAt: 0,
+      duelBurstShots: 0,
+      duelShotTickets: [],
+      duelLoaded: 0,
+      duelReloadUntil: 0,
+      duelMedkits: 0,
+      duelRespawning: false,
+      // Until the first client autosave arrives, the authenticated account
+      // snapshot is still the best authoritative copy of carried inventory.
+      savedClientData: saved ? { ...saved } : undefined,
       cosmetics: saved?.cosmetics !== undefined
         ? sanitizeCosmetics(saved.cosmetics, skinSeed(username)) : undefined,
     };
@@ -585,7 +640,9 @@ export class GameServer {
     const warfare = this.warfareOf(username);
     const welcome: ServerMsg = {
       t: 'welcome', id, seed: this.seed, username,
-      players: [...this.players.values()].map(toInfo),
+      // A normal-world login must never learn about players inside an active
+      // Duels scope. Lobby-only players remain ordinary title/world roster.
+      players: [...this.players.values()].filter((v) => !v.duelSaved).map(toInfo),
       edits: [...this.edits.entries()],
       items: [...this.items.values()],
       turrets: [...this.turrets.entries()].map(([k, state]) => {
@@ -613,7 +670,18 @@ export class GameServer {
   removePlayer(id: number): Outbound[] {
     const p = this.players.get(id);
     if (!p) return [];
-    const out = this.cleanupPlayerArenaPlacements(id);
+    const out = this.settleDisconnect(id);
+    const duelLeave = this.duels.leave(id, this.worldTime * 1000);
+    if (duelLeave.snapshot) {
+      out.push(...this.duelSnapshotOutbound(duelLeave.snapshot));
+      if (duelLeave.snapshot.phase === 'lobby') out.push(...this.restoreDuelLobby(duelLeave.snapshot));
+      if (duelLeave.snapshot.phase === 'results' && duelLeave.snapshot.result) {
+        for (const member of duelLeave.snapshot.participants) out.push({
+          to: member.id, msg: { t: 'duelResult', result: duelLeave.snapshot.result },
+        });
+      }
+    }
+    out.push(...this.cleanupPlayerArenaPlacements(id));
     // A disconnect must FREE the seat, or the airframe stays permanently
     // "piloted" and hangs in the sky forever. Once the seat is empty the vehicle
     // sim's own rule takes over: a controlled hover that settles to the ground.
@@ -629,10 +697,82 @@ export class GameServer {
     return out;
   }
 
+  /**
+   * Resolve a transport loss before the account snapshot is persisted. A live
+   * player who leaves during the PvP window dies exactly as if their last
+   * attacker landed the final hit: killfeed, flag return, heart transfer, war
+   * score, and carried-item drops all happen server-side. This is deliberately
+   * idempotent because the websocket shell calls it once before saving and
+   * removePlayer calls it again as a safety net for tests/other transports.
+   */
+  settleDisconnect(id: number): Outbound[] {
+    const victim = this.players.get(id);
+    if (!victim || victim.disconnectSettled) return [];
+    victim.disconnectSettled = true;
+    // Arena disconnects are resolved only by Duels (forfeit/removal). They can
+    // never become open-world combat-log deaths or lifesteal transactions.
+    if (victim.duelSaved) return [];
+    if (victim.dead || victim.mode !== 'survival') return [];
+    const killer = this.players.get(victim.lastHitBy);
+    const tagged = this.worldTime - victim.lastHitTime <= COMBAT_TAG;
+    if (!tagged || !killer || killer.id === victim.id ||
+        sameFaction(killer.faction, victim.faction)) return [];
+
+    victim.health = 0;
+    victim.dead = true;
+    const out: Outbound[] = [{
+      to: 'all', msg: { t: 'killfeed', killer: killer.username, victim: victim.username },
+    }];
+    out.push(...this.dropCarriedFlag(victim));
+    out.push(...this.spillSavedInventory(victim));
+    out.push(...this.settleLifesteal(victim));
+    if (isFaction(killer.faction) && killer.faction !== victim.faction && this.isWarActive()) {
+      this.warKills[killer.faction]++;
+      out.push({ to: 'all', msg: this.warSnapshotMsg() });
+    }
+    return out;
+  }
+
+  /** Spill the last authoritative account snapshot and replace it with empty
+   *  carried/armor arrays so the following account save cannot duplicate loot. */
+  private spillSavedInventory(p: ServerPlayer): Outbound[] {
+    const data = p.savedClientData;
+    if (!data || typeof data !== 'object') return [];
+    const out: Outbound[] = [];
+    let seen = 0;
+    for (const key of ['slots', 'armor'] as const) {
+      const raw = data[key];
+      if (!Array.isArray(raw)) continue;
+      for (const value of raw) {
+        if (seen++ >= 64 || !value || typeof value !== 'object') continue;
+        const stack = value as Partial<ItemStack>;
+        if (!Number.isInteger(stack.id) || !ITEMS[stack.id as number] ||
+            !Number.isFinite(stack.count) || (stack.count as number) <= 0) continue;
+        out.push(this.spawnItem(stack.id as number, Math.floor(stack.count as number),
+          p.x + (this.rng() - 0.5), p.y + 0.35, p.z + (this.rng() - 0.5)));
+      }
+      data[key] = new Array(raw.length).fill(null);
+    }
+    return out;
+  }
+
   /** Handle one client message; returns messages to deliver. */
   handle(id: number, msg: ClientMsg): Outbound[] {
     const p = this.players.get(id);
     if (!p) return [];
+    if (msg.t === 'duelCreate' || msg.t === 'duelJoin' || msg.t === 'duelLeave' ||
+        msg.t === 'duelReady' || msg.t === 'duelStart' || msg.t === 'duelArenaReady' || msg.t === 'duelRematch' ||
+        msg.t === 'duelReturn') return this.handleDuel(p, msg);
+    const duelPhase = this.duels.phaseFor(id);
+    if (duelPhase && duelPhase !== 'lobby') {
+      // A Duels body is isolated from every open-world action/economy system.
+      // Only movement, the normalized rifle, and server-counted Medkits exist.
+      if (msg.t === 'xform') return this.handleDuelTransform(p, msg);
+      if (msg.t === 'shot') return this.handleDuelShot(p, msg);
+      if (msg.t === 'rangedAttack') return this.handleDuelRanged(p, msg.target, msg.amount);
+      if (msg.t === 'useHeal') return this.handleDuelHeal(p, msg.item);
+      return [];
+    }
     // Spectators are non-interacting ghosts: drop any world-mutating / combat
     // message. They may still move (xform), persist (saveState), and respawn.
     if (p.mode === 'spectator' && SPECTATOR_BLOCKED.has(msg.t)) return [];
@@ -1298,6 +1438,394 @@ export class GameServer {
     }
   }
 
+  private duelSnapshotOutbound(snapshot: DuelLobbySnapshot, invite?: { id: number; token: string }): Outbound[] {
+    return snapshot.participants.map((participant) => ({
+      to: participant.id,
+      msg: { t: 'duelLobby', snapshot, inviteToken: invite?.id === participant.id ? invite.token : undefined },
+    }));
+  }
+
+  private duelLoadout(to: number): Outbound {
+    const slots: (ItemStack | null)[] = new Array(36).fill(null);
+    slots[0] = { id: Item.BurstRifle, count: 1, loaded: 24 };
+    slots[1] = { id: Item.Medkit, count: 5 };
+    slots[2] = { id: Item.JumpBoost, count: 5 };
+    return { to, msg: { t: 'duelLoadout', slots, armor: new Array(4).fill(null),
+      selected: 0, unlimitedReserve: true } };
+  }
+
+  private preserveOpenWorldState(p: ServerPlayer): void {
+    if (p.duelSaved) return;
+    p.duelSaved = {
+      x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
+      health: p.health, dead: p.dead, mode: p.mode, held: p.held,
+      armor: p.armor.slice(), armorPoints: p.armorPoints, toughness: p.toughness,
+      savedClientData: cloneRecord(p.savedClientData),
+    };
+  }
+
+  private enterDuelBody(p: ServerPlayer, arena: DuelArenaBounds, spawnIndex: number): Outbound[] {
+    this.preserveOpenWorldState(p);
+    this.vehicles.disconnectPlayer(p.id);
+    this.ropePlayers.delete(p.id);
+    const index = ((spawnIndex % arena.spawns.length) + arena.spawns.length) % arena.spawns.length;
+    const spawn = arena.spawns[index];
+    p.duelSpawnIndex = index;
+    p.x = spawn.x; p.y = spawn.y; p.z = spawn.z; p.yaw = index < 2 ? Math.PI : 0; p.pitch = 0;
+    p.health = DUEL_MAX_HEALTH; p.dead = false; p.mode = 'survival';
+    p.held = Item.BurstRifle; p.armor = [0, 0, 0, 0]; p.armorPoints = 0; p.toughness = 0;
+    p.gliding = false; p.boating = false; p.seated = false; p.sneaking = false;
+    p.regenCooldown = 0; p.regenTimer = 0; p.regenBoostTimer = 0; p.regenBoostInterval = 0;
+    p.duelLastShotAt = -Infinity; p.duelNextBurstAt = 0; p.duelBurstShots = 0;
+    p.duelShotTickets = []; p.duelLoaded = 24; p.duelReloadUntil = 0;
+    p.duelMedkits = 5; p.duelRespawning = false;
+    return [
+      this.duelLoadout(p.id),
+      { to: p.id, msg: { t: 'duelArena', arena, spawn: { ...spawn },
+        countdownEndsAt: this.duels.snapshotFor(p.id, this.worldTime * 1000)?.countdownEndsAt ?? 0 } },
+    ];
+  }
+
+  private restoreOpenWorldState(p: ServerPlayer): Outbound[] {
+    const saved = p.duelSaved;
+    if (!saved) return [];
+    p.x = saved.x; p.y = saved.y; p.z = saved.z; p.yaw = saved.yaw; p.pitch = saved.pitch;
+    p.health = saved.health; p.dead = saved.dead; p.mode = saved.mode;
+    p.held = saved.held; p.armor = saved.armor.slice();
+    p.armorPoints = saved.armorPoints; p.toughness = saved.toughness;
+    p.savedClientData = cloneRecord(saved.savedClientData);
+    p.duelSaved = undefined; p.duelShotTickets = []; p.duelLoaded = 0;
+    p.duelReloadUntil = 0; p.duelMedkits = 0; p.duelRespawning = false;
+    return [{ to: p.id, msg: { t: 'duelRestored', x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
+      health: p.health, dead: p.dead, mode: p.mode, state: cloneRecord(p.savedClientData) } }];
+  }
+
+  private restoreDuelLobby(snapshot: DuelLobbySnapshot): Outbound[] {
+    const out: Outbound[] = [];
+    const restored: number[] = [];
+    for (const member of snapshot.participants) {
+      const p = this.players.get(member.id);
+      if (p?.duelSaved) { out.push(...this.restoreOpenWorldState(p)); restored.push(p.id); }
+    }
+    out.push(...this.announceWorldScope(restored));
+    return out;
+  }
+
+  private announceArenaScope(memberIds: number[]): Outbound[] {
+    const members = new Set(memberIds), out: Outbound[] = [];
+    for (const id of memberIds) {
+      for (const other of this.players.values()) {
+        if (members.has(other.id)) continue;
+        out.push({ to: id, msg: { t: 'leave', id: other.id } });
+        out.push({ to: other.id, msg: { t: 'leave', id } });
+      }
+    }
+    return out;
+  }
+
+  private announceWorldScope(restoredIds: number[]): Outbound[] {
+    const restored = new Set(restoredIds), out: Outbound[] = [];
+    for (const id of restoredIds) {
+      const p = this.players.get(id);
+      if (!p) continue;
+      for (const other of this.players.values()) {
+        if (other.id === id || other.duelSaved) continue;
+        out.push({ to: id, msg: { t: 'join', player: toInfo(other) } });
+        if (!restored.has(other.id)) out.push({ to: other.id, msg: { t: 'join', player: toInfo(p) } });
+      }
+    }
+    return out;
+  }
+
+  private duelBodyClear(x: number, y: number, z: number, arena: DuelArenaBounds): boolean {
+    for (const ox of [-0.28, 0.28]) for (const oz of [-0.28, 0.28]) {
+      for (const oy of [0.05, 0.9, 1.75]) {
+        if (duelArenaSolidAt(x + ox, y + oy, z + oz, arena)) return false;
+      }
+    }
+    return true;
+  }
+
+  private duelBodyPathClear(
+    from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number },
+    arena: DuelArenaBounds,
+  ): boolean {
+    const distance = Math.hypot(to.x - from.x, to.y - from.y, to.z - from.z);
+    const steps = Math.min(512, Math.max(1, Math.ceil(distance * 4)));
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      if (!this.duelBodyClear(from.x + (to.x - from.x) * t,
+        from.y + (to.y - from.y) * t, from.z + (to.z - from.z) * t, arena)) return false;
+    }
+    return true;
+  }
+
+  private handleDuelTransform(p: ServerPlayer, msg: Extract<ClientMsg, { t: 'xform' }>): Outbound[] {
+    const arena = this.duels.arenaFor(p.id), phase = this.duels.phaseFor(p.id);
+    if (!arena || !phase || !fin(msg.x, msg.y, msg.z, msg.yaw, msg.pitch)) return [];
+    const participant = this.duels.participantFor(p.id);
+    if (!participant) return [];
+    const wanted = phase === 'countdown' ? arena.spawns[Math.max(0, p.duelSpawnIndex)]
+      : clampToDuelArena({ x: msg.x, y: msg.y, z: msg.z }, arena);
+    if (participant.spectating || this.duelBodyPathClear(p, wanted, arena)) {
+      p.x = wanted.x; p.y = wanted.y; p.z = wanted.z;
+    }
+    p.yaw = msg.yaw; p.pitch = msg.pitch;
+    p.gliding = false; p.boating = false; p.seated = false; p.sneaking = msg.sneaking === true;
+    p.held = participant.alive && msg.held === Item.BurstRifle ? Item.BurstRifle : 0;
+    p.armor = [0, 0, 0, 0]; p.aiming = participant.alive && msg.aiming === true;
+    if (p.duelReloadUntil > 0 && this.worldTime >= p.duelReloadUntil) {
+      p.duelLoaded = 24; p.duelReloadUntil = 0;
+    }
+    if (participant.alive && msg.reloading === true && p.duelLoaded < 24 &&
+        p.duelReloadUntil === 0) p.duelReloadUntil = this.worldTime + 1.1;
+    p.reloading = participant.alive && p.duelReloadUntil > this.worldTime;
+    if (typeof msg.swing === 'number' && Number.isFinite(msg.swing)) p.swing = Math.floor(msg.swing) & 0xffff;
+    return [];
+  }
+
+  private handleDuelShot(p: ServerPlayer, msg: Extract<ClientMsg, { t: 'shot' }>): Outbound[] {
+    const phase = this.duels.phaseFor(p.id), participant = this.duels.participantFor(p.id);
+    if ((phase !== 'running' && phase !== 'sudden_death') || !participant?.alive ||
+        p.held !== Item.BurstRifle || msg.item !== Item.BurstRifle ||
+        !fin(msg.x, msg.y, msg.z, msg.dx, msg.dy, msg.dz)) return [];
+    if (Math.hypot(msg.x - p.x, msg.y - (p.y + 1.6), msg.z - p.z) > 4) return [];
+    const len = Math.hypot(msg.dx, msg.dy, msg.dz);
+    if (!(len > 1e-3)) return [];
+    const now = this.worldTime;
+    if (p.duelReloadUntil > 0 && now >= p.duelReloadUntil) {
+      p.duelLoaded = 24; p.duelReloadUntil = 0; p.reloading = false;
+    }
+    if (p.duelReloadUntil > now || p.duelLoaded <= 0 || now - p.duelLastShotAt < 0.04) return [];
+    // A trigger opens one three-round burst and a fixed half-second trigger
+    // window. Pausing part-way through cannot be used to reset the limiter.
+    if (p.duelBurstShots === 0 || now - p.duelLastShotAt > 0.18) {
+      if (now < p.duelNextBurstAt) return [];
+      p.duelBurstShots = 1; p.duelNextBurstAt = now + 0.5;
+    } else {
+      p.duelBurstShots++;
+    }
+    p.duelLastShotAt = now;
+    if (p.duelBurstShots >= 3) p.duelBurstShots = 0;
+    p.duelLoaded--;
+    p.duelShotTickets.push({ at: now, x: msg.x, y: msg.y, z: msg.z,
+      dx: msg.dx / len, dy: msg.dy / len, dz: msg.dz / len });
+    p.duelShotTickets = p.duelShotTickets.filter((t) => now - t.at <= 0.4).slice(-3);
+    this.duels.removeSpawnShield(p.id);
+    return this.duels.membersOf(p.id).filter((id) => id !== p.id).map((id) => ({
+      to: id, msg: { t: 'shot', id: p.id, item: Item.BurstRifle,
+        x: msg.x, y: msg.y, z: msg.z, dx: msg.dx / len, dy: msg.dy / len, dz: msg.dz / len },
+    }));
+  }
+
+  private handleDuelRanged(attacker: ServerPlayer, targetId: number, amount: number): Outbound[] {
+    const target = this.players.get(targetId), arena = this.duels.arenaFor(attacker.id);
+    const ap = this.duels.participantFor(attacker.id), tp = this.duels.participantFor(targetId);
+    const phase = this.duels.phaseFor(attacker.id), nowMs = this.worldTime * 1000;
+    if (!target || !arena || !this.duels.sameMatch(attacker.id, targetId) ||
+        (phase !== 'running' && phase !== 'sudden_death') || !ap?.alive || !tp?.alive ||
+        attacker.held !== Item.BurstRifle || amount !== 5 ||
+        (tp.shieldUntil !== undefined && tp.shieldUntil > nowMs)) return [];
+    const ticket = attacker.duelShotTickets.findIndex((t) => {
+      if (this.worldTime - t.at > 0.4) return false;
+      const vx = target.x - t.x, vy = target.y + 0.9 - t.y, vz = target.z - t.z;
+      const along = vx * t.dx + vy * t.dy + vz * t.dz;
+      if (!(along > 0 && along <= 58)) return false;
+      const missSq = vx * vx + vy * vy + vz * vz - along * along;
+      // A little latency allowance around the standing body, but never enough
+      // to turn a shot in another lane into a valid ticket.
+      return missSq <= 2.25 * 2.25;
+    });
+    if (ticket < 0) return [];
+    if (!fin(attacker.x, attacker.y, attacker.z, attacker.yaw, target.x, target.y, target.z)) return [];
+    const dx = target.x - attacker.x, dy = target.y - attacker.y, dz = target.z - attacker.z;
+    const distance = Math.hypot(dx, dy, dz), horiz = Math.hypot(dx, dz);
+    if (!(distance > 0 && distance <= 58)) return [];
+    if (horiz > 0.2) {
+      const dot = (-Math.sin(attacker.yaw) * dx - Math.cos(attacker.yaw) * dz) / horiz;
+      if (dot < 0.2) return [];
+    }
+    if (!hasArenaLineOfSight({ x: attacker.x, y: attacker.y + 1.5, z: attacker.z },
+      { x: target.x, y: target.y + 1.0, z: target.z }, arena)) return [];
+    attacker.duelShotTickets.splice(ticket, 1);
+    const dealt = Math.min(5, target.health);
+    target.health = Math.max(0, target.health - 5);
+    const killed = target.health <= 0;
+    const knockX = horiz > 0 ? dx / horiz : 0, knockZ = horiz > 0 ? dz / horiz : 0;
+    const out: Outbound[] = [
+      { to: target.id, msg: { t: 'hurt', health: killed ? 1 : target.health, dead: false,
+        by: attacker.id, kx: knockX, ky: 0.25, kz: knockZ, combat: 0 } },
+      { to: attacker.id, msg: { t: 'hitconfirm', target: target.id, amount: dealt, killed } },
+    ];
+    if (!killed) return out;
+    target.health = 1; target.held = 0; target.duelRespawning = true;
+    const snapshot = this.duels.recordDeath(target.id, attacker.id, nowMs);
+    if (!snapshot) return out;
+    const dead = snapshot.participants.find((v) => v.id === target.id)!;
+    out.push({ to: target.id, msg: { t: 'duelRespawn', respawnAt: dead.respawnAt ?? nowMs,
+      spectating: true } });
+    out.push(...this.duelSnapshotOutbound(snapshot));
+    for (const id of this.duels.membersOf(attacker.id)) {
+      out.push({ to: id, msg: { t: 'killfeed', killer: attacker.username, victim: target.username } });
+    }
+    if (snapshot.phase === 'results' && snapshot.result) {
+      for (const id of this.duels.membersOf(attacker.id)) out.push({ to: id,
+        msg: { t: 'duelResult', result: snapshot.result } });
+    }
+    return out;
+  }
+
+  private handleDuelHeal(p: ServerPlayer, item: number): Outbound[] {
+    const participant = this.duels.participantFor(p.id), phase = this.duels.phaseFor(p.id);
+    if (item !== Item.Medkit || !participant?.alive ||
+        (phase !== 'running' && phase !== 'sudden_death') || p.duelMedkits <= 0 || p.health >= DUEL_MAX_HEALTH) return [];
+    const heal = ITEMS[Item.Medkit].heal;
+    if (!heal) return [];
+    p.duelMedkits--;
+    p.regenBoostTimer = heal.duration; p.regenBoostInterval = heal.interval; p.regenTimer = 0;
+    return [];
+  }
+
+  private duelError(to: number, code: Extract<ServerMsg, { t: 'duelError' }>['code']): Outbound[] {
+    const messages: Record<Extract<ServerMsg, { t: 'duelError' }>['code'], string> = {
+      invalid: 'That Duels invite is invalid or has expired.',
+      full: 'That Duels lobby is full.',
+      match_in_progress: 'Match in progress — wait for this lobby to reopen.',
+      already_in_lobby: 'Leave your current Duels lobby before joining another.',
+      not_host: 'Only the lobby host can start the match.',
+      too_few_players: 'At least two players are required.',
+      too_many_players: 'Duels supports no more than four players.',
+      not_everyone_ready: 'Every connected player must ready up first.',
+      not_in_lobby: 'You are not in a Duels lobby.',
+    };
+    return [{ to, msg: { t: 'duelError', code, message: messages[code] } }];
+  }
+
+  private handleDuel(p: ServerPlayer, msg: Extract<ClientMsg, { t: `duel${string}` }>): Outbound[] {
+    const now = this.worldTime * 1000;
+    switch (msg.t) {
+      case 'duelCreate': {
+        const result = this.duels.create({ id: p.id, username: p.username, skin: p.skin }, now);
+        if ('reason' in result) return this.duelError(p.id, result.reason);
+        return this.duelSnapshotOutbound(result.snapshot, { id: p.id, token: result.token });
+      }
+      case 'duelJoin': {
+        // Tokens never enter logs/notices; sanitize only for bounded lookup cost.
+        const token = typeof msg.token === 'string' ? msg.token.slice(0, 128) : '';
+        const result = this.duels.join(token, { id: p.id, username: p.username, skin: p.skin }, now);
+        if (!result.ok) return this.duelError(p.id, result.reason);
+        return this.duelSnapshotOutbound(result.snapshot, { id: p.id, token });
+      }
+      case 'duelLeave': {
+        const oldPhase = this.duels.phaseFor(p.id);
+        const result = this.duels.leave(p.id, now);
+        const out = result.snapshot ? this.duelSnapshotOutbound(result.snapshot) : [];
+        if (oldPhase && oldPhase !== 'lobby') {
+          out.push(...this.restoreOpenWorldState(p));
+          out.push(...this.announceWorldScope([p.id]));
+        }
+        if (result.snapshot?.phase === 'lobby') out.push(...this.restoreDuelLobby(result.snapshot));
+        if (result.snapshot?.phase === 'results' && result.snapshot.result) {
+          for (const member of result.snapshot.participants) out.push({
+            to: member.id, msg: { t: 'duelResult', result: result.snapshot.result },
+          });
+        }
+        return out;
+      }
+      case 'duelReady': {
+        const snap = this.duels.setReady(p.id, msg.ready === true, now);
+        return snap ? this.duelSnapshotOutbound(snap) : this.duelError(p.id, 'not_in_lobby');
+      }
+      case 'duelStart': {
+        const result = this.duels.start(p.id, now);
+        if (!result.ok) return this.duelError(p.id, result.reason);
+        const out = this.duelSnapshotOutbound(result.snapshot);
+        if (result.snapshot.arena) {
+          for (let i = 0; i < result.snapshot.participants.length; i++) {
+            const participant = result.snapshot.participants[i];
+            const player = this.players.get(participant.id);
+            if (player) out.push(...this.enterDuelBody(player, result.snapshot.arena, i));
+          }
+          out.push(...this.announceArenaScope(result.snapshot.participants.map((v) => v.id)));
+        }
+        return out;
+      }
+      case 'duelArenaReady': {
+        const snap = this.duels.markArenaReady(p.id, now);
+        return snap ? this.duelSnapshotOutbound(snap) : [];
+      }
+      case 'duelRematch': {
+        const snap = this.duels.voteRematch(p.id, msg.vote === true, now);
+        if (!snap) return this.duelError(p.id, 'not_in_lobby');
+        const out = this.duelSnapshotOutbound(snap);
+        if (snap.phase === 'lobby') out.push(...this.restoreDuelLobby(snap));
+        else if (snap.phase === 'countdown' && snap.arena) {
+          for (let i = 0; i < snap.participants.length; i++) {
+            const player = this.players.get(snap.participants[i].id);
+            if (player) out.push(...this.enterDuelBody(player, snap.arena, i));
+          }
+        }
+        return out;
+      }
+      case 'duelReturn': {
+        const snap = this.duels.requestLobby(p.id, now);
+        if (!snap) return this.duelError(p.id, 'not_in_lobby');
+        return [...this.duelSnapshotOutbound(snap), ...this.restoreDuelLobby(snap)];
+      }
+    }
+  }
+
+  /** Advance authoritative Duels timestamps; called from the transport tick. */
+  tickDuels(): Outbound[] {
+    const out: Outbound[] = [];
+    const nowMs = this.worldTime * 1000;
+    for (const snap of this.duels.tick(nowMs)) {
+      out.push(...this.duelSnapshotOutbound(snap));
+      if (snap.phase === 'lobby') out.push(...this.restoreDuelLobby(snap));
+      if (snap.phase === 'running' || snap.phase === 'sudden_death') {
+        const arena = snap.arena;
+        for (const participant of snap.participants) {
+          const p = this.players.get(participant.id);
+          if (!p || !arena) continue;
+          if (snap.phase === 'sudden_death' && participant.spectating) {
+            p.health = 1; p.held = 0; p.duelRespawning = false; p.duelShotTickets = [];
+            out.push({ to: p.id, msg: { t: 'duelRespawn', respawnAt: 0, spectating: true } });
+            continue;
+          }
+          if (!p.duelRespawning || !participant.alive) continue;
+          const living = snap.participants.filter((v) => v.alive && v.id !== p.id)
+            .map((v) => this.players.get(v.id)).filter((v): v is ServerPlayer => !!v)
+            .map((v) => ({ x: v.x, y: v.y, z: v.z }));
+          p.duelSpawnIndex = safestDuelSpawn(arena, living, p.duelSpawnIndex);
+          const spawn = arena.spawns[p.duelSpawnIndex];
+          p.x = spawn.x; p.y = spawn.y; p.z = spawn.z; p.health = DUEL_MAX_HEALTH; p.held = Item.BurstRifle;
+          p.duelMedkits = 5; p.duelRespawning = false; p.duelShotTickets = [];
+          p.duelLoaded = 24; p.duelReloadUntil = 0; p.duelBurstShots = 0;
+          p.duelNextBurstAt = 0; p.duelLastShotAt = -Infinity; p.reloading = false;
+          out.push(this.duelLoadout(p.id));
+          out.push({ to: p.id, msg: { t: 'respawned', x: spawn.x, y: spawn.y, z: spawn.z, health: DUEL_MAX_HEALTH } });
+          out.push({ to: p.id, msg: { t: 'duelRespawn', respawnAt: 0, spectating: false } });
+        }
+      }
+      if (snap.phase === 'results' && snap.result) {
+        for (const p of snap.participants) out.push({ to: p.id, msg: { t: 'duelResult', result: snap.result } });
+      }
+    }
+    if (this.worldTime >= this.duelClockNextAt) {
+      this.duelClockNextAt = this.worldTime + 1;
+      for (const snap of this.duels.snapshots(nowMs)) {
+        if (snap.phase !== 'countdown' && snap.phase !== 'running' && snap.phase !== 'sudden_death') continue;
+        const endsAt = snap.phase === 'countdown'
+          ? (snap.countdownEndsAt ?? nowMs)
+          : (snap.endsAt ?? nowMs);
+        for (const p of snap.participants) out.push({ to: p.id, msg: {
+          t: 'duelClock', serverNow: nowMs, endsAt, suddenDeath: snap.phase === 'sudden_death',
+        } });
+      }
+    }
+    return out;
+  }
+
   // --- Vaults (Milestone D) ----------------------------------------------------
 
   /** Cached deterministic vault stamp for an anchor chunk (or null). */
@@ -1688,7 +2216,7 @@ export class GameServer {
   ): Outbound[] {
     const out: Outbound[] = [];
     for (const victim of this.players.values()) {
-      if (victim.dead || victim.mode !== 'survival') continue;
+      if (victim.dead || victim.mode !== 'survival' || victim.duelSaved) continue;
       if (sameFaction(victim.faction, faction)) continue;   // friendly fire is off
       const dmg = blastAt(at, { x: victim.x, y: victim.y, z: victim.z }, radius, playerDamage);
       // Pass the RAW blast figure: applyDamage runs armor mitigation itself, so
@@ -1758,6 +2286,7 @@ export class GameServer {
     const out = this.applyStrategicEvents(this.strategic.tick(dt));
     out.push(...this.applyVehicleEvents(this.vehicles.tick(dt)));
     for (const p of this.players.values()) {
+      if (p.duelSaved) continue;
       const rider = this.vehicles.ropeRider(p.id);
       const at = rider ? this.vehicles.ropePosition(p.id) : null;
       if (rider && at) {
@@ -2422,7 +2951,7 @@ export class GameServer {
    *  authoritative-lite trust model (mobs are client-side). */
   private handleRanged(attacker: ServerPlayer, targetId: number, amount: number): Outbound[] {
     const target = this.players.get(targetId);
-    if (!target || target.dead || attacker.dead || target.id === attacker.id) return [];
+    if (!target || target.duelSaved || target.dead || attacker.dead || target.id === attacker.id) return [];
     if (sameFaction(attacker.faction, target.faction)) return []; // no friendly fire
     if (!fin(attacker.x, attacker.y, attacker.z, attacker.yaw,
       target.x, target.y, target.z, amount)) return [];
@@ -2487,7 +3016,10 @@ export class GameServer {
     p: ServerPlayer, amount: number, by: number,
     knock?: { x: number; y: number; z: number }, direct = false, pierce = 0
   ): Outbound[] {
-    if (p.dead || amount <= 0) return [];
+    // Duels has a separate normalized damage path. This fail-closed guard keeps
+    // every world hazard/projectile from crossing the visibility boundary even
+    // if a new subsystem forgets to filter its target list.
+    if (p.duelSaved || p.dead || amount <= 0) return [];
     if (p.mode !== 'survival') return []; // creative/spectator are invulnerable
     // server-authoritative armor reduction
     amount = mitigate(amount, p.armorPoints, p.toughness, pierce);
@@ -2537,6 +3069,7 @@ export class GameServer {
       msg: {
         t: 'hurt', health: p.health, dead: p.health <= 0, by,
         kx: knock?.x ?? 0, ky: knock?.y ?? 0, kz: knock?.z ?? 0,
+        combat: pvp ? COMBAT_TAG : 0,
       },
     });
     // Hitmarker for the attacker. Server-sent (never predicted) so it only ever
@@ -2549,6 +3082,13 @@ export class GameServer {
     }
     if (p.health <= 0 && !p.dead) {
       p.dead = true;
+      // Death never leaves a corpse occupying a helicopter seat. Wreck ejection
+      // already clears its seats before applying damage, so this is harmless on
+      // crashes and essential for every other kill while aboard.
+      if (this.vehicles.dismount(p.id, true).ok) {
+        out.push({ to: p.id, msg: { t: 'heliSeat', id: 0, seat: null } });
+        out.push(...this.heliBroadcast());
+      }
       if (this.vehicles.detachRope(p.id)) {
         this.ropePlayers.delete(p.id);
         out.push({ to: p.id, msg: { t: 'heliRopeState', id: 0, progress: 0 } });
@@ -2666,15 +3206,19 @@ export class GameServer {
   tickRegen(dt: number): void {
     for (const p of this.players.values()) {
       if (p.dead) continue;
-      const max = maxHealthFor(p.hearts);
+      const inDuel = !!p.duelSaved;
+      const max = inDuel ? DUEL_MAX_HEALTH : maxHealthFor(p.hearts);
       // A healing consumable (Bandage/Medkit) grants a window of fast regen that
       // ignores the post-damage delay — patch up mid-fight.
       const boosting = p.regenBoostTimer > 0;
       if (boosting) { p.regenBoostTimer = Math.max(0, p.regenBoostTimer - dt); p.regenCooldown = 0; }
+      // Duels has no passive regeneration. A server-counted Medkit still runs
+      // the normal healing cadence, with progression/bloodlust excluded.
+      if (inDuel && !boosting) { p.regenTimer = 0; continue; }
       p.regenCooldown = Math.max(0, p.regenCooldown - dt);
       // Mid-fight healing is halved (anti-stalemate): while PvP combat-tagged a
       // Bandage/Medkit still works, but can't out-pace incoming fire forever.
-      const inPvp = this.worldTime - p.lastPvpTime < COMBAT_TAG;
+      const inPvp = !inDuel && this.worldTime - p.lastPvpTime < COMBAT_TAG;
       const interval = boosting
         ? p.regenBoostInterval * (inPvp ? 2 : 1) : REGEN_INTERVAL;
       if (p.regenCooldown <= 0 && p.health < max) {
@@ -2739,7 +3283,7 @@ export class GameServer {
       let bestD2 = range * range;
       for (const p of this.players.values()) {
         // Skip the dead, the owner, and anyone in the turret's own faction.
-        if (p.dead || p.username === s.owner || sameFaction(p.faction, s.faction)) continue;
+        if (p.dead || p.duelSaved || p.username === s.owner || sameFaction(p.faction, s.faction)) continue;
         const dx = p.x - cx, dy = p.y - cy, dz = p.z - cz;
         const d2 = dx * dx + dy * dy + dz * dz;
         if (d2 <= bestD2) { bestD2 = d2; best = p; }
@@ -2794,7 +3338,6 @@ export class GameServer {
    *  fully server-decided: the client only says "I swung", never at what. */
   private handleFlagHit(p: ServerPlayer): Outbound[] {
     if (p.dead || p.mode !== 'survival') return [];
-    if (!warActive(this.war, this.worldTime)) return [];
     if (this.worldTime - p.lastFlagHit < FLAG_HIT_COOLDOWN) return [];
     const ev = hitFlag(this.flags, p.id, p.faction, p.x, p.z);
     // Only a swing that actually LANDS starts the cooldown — swinging at thin
@@ -2950,7 +3493,7 @@ export class GameServer {
       const half = this.borderHalf();
       for (const p of this.players.values()) {
         // A live boss fight is exempt — the sealed arena outranks the ring.
-        if (p.dead || this.liveArenaFor(p.id)) continue;
+        if (p.dead || p.duelSaved || this.liveArenaFor(p.id)) continue;
         const clamped = clampInsideBorder(p.x, p.z, half);
         if (clamped.moved <= 0) continue;
         p.x = clamped.x;
@@ -3146,7 +3689,7 @@ export class GameServer {
     if (damage > 0 && dmgRadius > 0) {
       // AoE damage to living enemies in radius (friendly fire stays off).
       for (const t of this.players.values()) {
-        if (t.dead || t.id === by.id || sameFaction(t.faction, by.faction)) continue;
+        if (t.dead || t.duelSaved || t.id === by.id || sameFaction(t.faction, by.faction)) continue;
         const d = Math.hypot(t.x - x, t.y - y, t.z - z);
         const dmg = falloffDamage(damage, d, dmgRadius);
         if (dmg > 0) out.push(...this.applyDamage(t, dmg, by.id,
@@ -3342,8 +3885,10 @@ export class GameServer {
   capturePlayerState(id: number): { username: string; data: Record<string, unknown> } | null {
     const p = this.players.get(id);
     if (!p) return null;
-    const data: Record<string, unknown> = { ...(p.savedClientData ?? {}) };
-    data.x = p.x; data.y = p.y; data.z = p.z; data.yaw = p.yaw; data.mode = p.mode;
+    const saved = p.duelSaved;
+    const data: Record<string, unknown> = { ...(saved?.savedClientData ?? p.savedClientData ?? {}) };
+    data.x = saved?.x ?? p.x; data.y = saved?.y ?? p.y; data.z = saved?.z ?? p.z;
+    data.yaw = saved?.yaw ?? p.yaw; data.mode = saved?.mode ?? p.mode;
     data.hearts = p.hearts; // lifesteal max-health currency survives re-login
     if (p.cosmetics) data.cosmetics = p.cosmetics; // avatar look survives re-login
     data.totems = p.totems.slice(); // attuned Waypoint Totems survive re-login
@@ -3486,6 +4031,35 @@ export class GameServer {
       aiming: p.aiming, reloading: p.reloading,
     }));
   }
+
+  /** Per-recipient visibility snapshot. Normal-world players never receive an
+   * arena transform; an arena player receives only their own match. */
+  snapshotFor(recipientId: number): PlayerSnapshot[] {
+    const recipient = this.players.get(recipientId);
+    if (!recipient) return [];
+    const visible = recipient.duelSaved
+      ? new Set(this.duels.membersOf(recipientId)) : null;
+    return [...this.players.values()]
+      .filter((p) => visible ? visible.has(p.id) : !p.duelSaved)
+      .map((p) => ({
+        id: p.id, x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
+        health: p.health,
+        // A respawn spectator is invisible to opponents, while their own
+        // client stays technically alive to bypass the normal death screen.
+        dead: p.duelSaved
+          ? p.id !== recipientId && this.duels.participantFor(p.id)?.spectating === true
+          : p.dead,
+        gliding: p.duelSaved ? false : p.gliding,
+        boating: p.duelSaved ? false : p.boating,
+        seated: p.duelSaved ? false : p.seated, sneaking: p.sneaking,
+        held: p.held, armor: p.armor, swing: p.swing,
+        aiming: p.aiming, reloading: p.reloading,
+      }));
+  }
+
+  /** Broadcasts are open-world by default. Duels traffic is always addressed
+   * directly to match members, so this single gate prevents world event leaks. */
+  receivesWorldBroadcast(id: number): boolean { return !this.players.get(id)?.duelSaved; }
 }
 
 function toInfo(p: ServerPlayer): PlayerInfo {

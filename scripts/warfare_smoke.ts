@@ -758,11 +758,12 @@ const check = (condition: boolean, message: string): void => {
   const at3 = { x: h3.position.x, y: h3.position.y, z: h3.position.z };
   sim.mount(h3.id, 11, 0, at3, 'pilot');
   sim.mount(h3.id, 12, 0, at3, 'passenger');
-  const boom = sim.damage(h3.id, 9999);
+  const boom: VehicleEvent[] = [];
+  while (h3.hp > 0) boom.push(...sim.damage(h3.id, 5, 'shot'));
   check(boom.filter((e) => e.kind === 'eject').length === 2 &&
     boom.some((e) => e.kind === 'heliDown') &&
     h3.pilotId === null && h3.passengerId === null,
-    'destruction ejects and damages both occupants');
+    'repeated gunshots destroy a helicopter and eject/damage both occupants');
   guard = 0;
   let removed = false;
   while (!removed && guard++ < 400) {

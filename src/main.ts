@@ -83,6 +83,11 @@ import { VehicleHUD } from './vehiclehud';
 import { MissileCam, MissileCamLaunch } from './missilecam';
 import { MissileModels, StrategicModels } from './warfare_models';
 import { VehicleModels } from './vehiclemodels';
+import {
+  DUEL_ROUND_MS, DUEL_MAX_HEALTH, type DuelLobbySnapshot, type DuelParticipant,
+  type DuelResult, type DuelArenaBounds, clampToDuelArena,
+  duelTokenFromUrl, withDuelToken,
+} from './duels';
 
 import { GadgetCooldowns, GadgetDef, gadgetOf } from './gadgets';
 import {
@@ -200,6 +205,7 @@ const touch = isMobile ? new TouchControls(input, {
     if (worldMap.open) { input.mapToggled = true; return; }
     if (warfareUI.open) { input.progressPressed = true; return; }
     if (input.locked) input.unlock();                          // open pause menu
+    enterPause();
   },
 }) : null;
 const inventory = new Inventory();
@@ -788,6 +794,36 @@ killfeedEl.style.cssText =
   'position:absolute;top:28px;right:8px;z-index:10;pointer-events:none;text-align:right;';
 app.appendChild(killfeedEl);
 
+// Combat-log clock. It sits above the tallest possible survival-status stack,
+// so it never covers the hotbar, hearts, armor, energy, bubbles, or ammo.
+const combatTimerEl = document.createElement('div');
+combatTimerEl.className = 'mc-font';
+combatTimerEl.style.cssText =
+  'position:absolute;left:50%;transform:translateX(-50%);z-index:10;' +
+  'pointer-events:none;display:none;padding:4px 9px;border:1px solid rgba(255,95,95,.75);' +
+  'border-radius:4px;background:rgba(35,5,8,.82);color:#ff7777;font-size:12px;' +
+  'white-space:nowrap;text-shadow:0 1px 2px #000;';
+app.appendChild(combatTimerEl);
+let combatTagUntilLocal = 0;
+
+function combatSecondsLeft(): number {
+  return Math.max(0, combatTagUntilLocal - worldTimeLocal);
+}
+
+function updateCombatTimer(): void {
+  const left = combatSecondsLeft();
+  if (left <= 0 || player.dead || screen === 'title') {
+    combatTimerEl.style.display = 'none';
+    return;
+  }
+  combatTimerEl.textContent = `⚔ COMBAT ${Math.ceil(left)}s`;
+  // Two heart rows lift armor/ammo by another 22px.
+  combatTimerEl.style.bottom = localHearts > 10
+    ? 'calc(var(--hotbar-slot) + 108px + var(--safe-bottom))'
+    : 'calc(var(--hotbar-slot) + 86px + var(--safe-bottom))';
+  combatTimerEl.style.display = 'block';
+}
+
 // ─── PvP combat feedback ────────────────────────────────────────────────────
 // A gunfight is only readable if two questions are answered instantly: did MY
 // shot land, and where is the fire coming from? Both are driven by the server
@@ -971,6 +1007,7 @@ function showDamageFrom(x: number, z: number): void {
 
 /** Per-frame decay + re-aim of the combat feedback overlays. */
 function updateCombatFeedback(dt: number): void {
+  updateCombatTimer();
   if (hitmarkerT > 0) {
     hitmarkerT = Math.max(0, hitmarkerT - dt);
     const k = hitmarkerT / HITMARKER_TIME;
@@ -1421,7 +1458,7 @@ for (const el of [musicVolumeInput, effectsVolumeInput, cameraShakeInput,
   el.addEventListener('input', saveAccessUi);
 }
 saveAccessUi();
-type Screen = 'title' | 'playing' | 'paused' | 'guide';
+type Screen = 'title' | 'playing' | 'paused' | 'guide' | 'duel_results';
 let screen: Screen = 'title';
 
 function enterPlaying(): void {
@@ -1430,9 +1467,12 @@ function enterPlaying(): void {
   overlay.classList.add('hidden');
   pauseEl.style.display = 'none';
 }
+const pauseGuideBtn = document.getElementById('pause-guide-btn') as HTMLButtonElement;
+
 function enterPause(): void {
   screen = 'paused';
   pauseEl.style.display = 'flex';
+  if (pauseGuideBtn) pauseGuideBtn.style.display = duelArenaActive ? 'none' : '';
 }
 function enterTitle(): void {
   if (fieldGuide?.open) fieldGuide.closeSilently();
@@ -1454,8 +1494,8 @@ const fieldGuide = createFieldGuide({
   onResume: () => input.lock(),
 });
 
-document.getElementById('pause-guide-btn')!.addEventListener('click', () => {
-  if (player.dead || screen !== 'paused') return;
+pauseGuideBtn.addEventListener('click', () => {
+  if (player.dead || screen !== 'paused' || duelArenaActive) return;
   screen = 'guide';
   pauseEl.style.display = 'none';
   fieldGuide.show();
@@ -1856,6 +1896,531 @@ playBtn.addEventListener('click', () => {
   }
   beginPlay();
 });
+
+// --- Minigames browser + private Duels lobby -------------------------------
+// Keep the deep-link token in the address bar throughout auth; the successful
+// welcome consumes it, while a rejected/full lobby leaves the title intact.
+const initialDuelToken = duelTokenFromUrl(location.href);
+let pendingDuelToken = initialDuelToken;
+let pendingDuelAttempted = false;
+let pendingDuelRetry = 0;
+let duelSnapshot: DuelLobbySnapshot | null = null;
+let duelInviteToken = '';
+
+const minigamesBtn = document.getElementById('minigames-btn') as HTMLButtonElement;
+const minigamesModal = document.getElementById('minigames-modal')!;
+const minigamesClose = document.getElementById('minigames-close') as HTMLButtonElement;
+const minigamesBrowser = document.getElementById('minigames-browser')!;
+const minigamesLobby = document.getElementById('minigames-lobby')!;
+const duelsCardAction = document.getElementById('duels-card-action') as HTMLButtonElement;
+const duelLobbyTitle = document.getElementById('duel-lobby-title')!;
+const duelInvite = document.getElementById('duel-invite') as HTMLInputElement;
+const duelCopy = document.getElementById('duel-copy') as HTMLButtonElement;
+const duelFeedback = document.getElementById('duel-feedback')!;
+const duelRoster = document.getElementById('duel-roster')!;
+const duelReady = document.getElementById('duel-ready') as HTMLButtonElement;
+const duelStart = document.getElementById('duel-start') as HTMLButtonElement;
+const duelLeave = document.getElementById('duel-leave') as HTMLButtonElement;
+let minigamesRestoreFocus: HTMLElement | null = null;
+
+function duelInviteUrl(token: string): string {
+  return withDuelToken(location.href, token);
+}
+
+function setDuelParam(token: string | null): void {
+  history.replaceState(history.state, '', withDuelToken(location.href, token));
+}
+
+function modalFocusable(): HTMLElement[] {
+  return [...minigamesModal.querySelectorAll<HTMLElement>(
+    'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+  )].filter((el) => !el.hasAttribute('hidden') && el.offsetParent !== null);
+}
+
+function refreshDuelsAvailability(): void {
+  const online = net.connected;
+  duelsCardAction.setAttribute('aria-disabled', String(!online));
+  duelsCardAction.textContent = online ? 'Create private lobby' : 'Multiplayer server required';
+}
+
+function openMinigames(focusLobby = false): void {
+  minigamesRestoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : minigamesBtn;
+  refreshDuelsAvailability();
+  minigamesModal.classList.add('open');
+  minigamesModal.setAttribute('aria-hidden', 'false');
+  if (focusLobby && duelSnapshot) showDuelLobby();
+  requestAnimationFrame(() => (focusLobby && duelSnapshot ? duelReady : minigamesClose).focus());
+}
+
+function closeMinigames(): void {
+  minigamesModal.classList.remove('open');
+  minigamesModal.setAttribute('aria-hidden', 'true');
+  minigamesRestoreFocus?.focus();
+  minigamesRestoreFocus = null;
+}
+
+function showDuelBrowser(): void {
+  minigamesBrowser.hidden = false;
+  minigamesLobby.hidden = true;
+}
+
+function showDuelLobby(): void {
+  minigamesBrowser.hidden = true;
+  minigamesLobby.hidden = false;
+}
+
+function renderDuelLobby(): void {
+  const snap = duelSnapshot;
+  if (!snap) { showDuelBrowser(); return; }
+  showDuelLobby();
+  duelLobbyTitle.textContent = `${snap.id} · ${snap.participants.length} / ${snap.capacity} · ${snap.phase.replace('_', ' ')}`;
+  duelInvite.value = duelInviteToken ? duelInviteUrl(duelInviteToken) : '';
+  duelInvite.parentElement!.toggleAttribute('hidden', !duelInviteToken);
+  duelRoster.replaceChildren();
+  for (const p of snap.participants) {
+    const row = document.createElement('div'); row.className = 'duel-player';
+    const avatar = document.createElement('span'); avatar.className = 'duel-avatar';
+    avatar.setAttribute('aria-hidden', 'true');
+    avatar.style.background = `hsl(${((p.skin % 360) + 360) % 360} 68% 54%)`;
+    const name = document.createElement('strong');
+    name.textContent = `${p.username}${p.id === net.myId ? ' (you)' : ''}`;
+    const host = document.createElement('small'); host.textContent = p.host ? 'HOST' : '';
+    const state = document.createElement('span');
+    state.className = p.ready ? 'duel-ready' : 'duel-waiting';
+    state.textContent = !p.connected ? 'Disconnected' : p.ready ? 'Ready' : 'Not ready';
+    row.append(avatar, name, host, state); duelRoster.appendChild(row);
+  }
+  const me = snap.participants.find((p) => p.id === net.myId);
+  duelReady.textContent = me?.ready ? 'Cancel ready' : 'Ready up';
+  duelReady.setAttribute('aria-pressed', String(me?.ready === true));
+  const canReady = snap.phase === 'lobby';
+  duelReady.setAttribute('aria-disabled', String(!canReady));
+  const canStart = !!me?.host && snap.phase === 'lobby' &&
+    snap.participants.length >= 2 && snap.participants.length <= 4 &&
+    snap.participants.every((p) => p.connected && p.ready);
+  duelStart.setAttribute('aria-disabled', String(!canStart));
+  duelStart.textContent = snap.phase === 'results' ? 'Match complete' : 'Start match';
+  if (snap.phase === 'results' && snap.result) {
+    const winner = snap.participants.find((p) => p.id === snap.result!.winner)?.username;
+    duelFeedback.textContent = winner ? `${winner} wins — rematch voting opens for 15 seconds.` : 'Match complete.';
+  }
+}
+
+minigamesBtn.addEventListener('click', () => openMinigames(!!duelSnapshot));
+minigamesClose.addEventListener('click', closeMinigames);
+minigamesModal.addEventListener('mousedown', (event) => {
+  if (event.target === minigamesModal) closeMinigames();
+});
+minigamesModal.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') { event.preventDefault(); closeMinigames(); return; }
+  if (event.key !== 'Tab') return;
+  const focusable = modalFocusable();
+  if (!focusable.length) return;
+  const first = focusable[0], last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+});
+
+for (const card of minigamesModal.querySelectorAll<HTMLElement>('.minigame-card')) {
+  card.addEventListener('pointermove', (event) => {
+    if (accessibility.reducedMotion || accessibility.photosensitivitySafe) return;
+    const rect = card.getBoundingClientRect();
+    card.style.setProperty('--px', `${((event.clientX - rect.left) / rect.width - .5) * -8}px`);
+    card.style.setProperty('--py', `${((event.clientY - rect.top) / rect.height - .5) * -6}px`);
+  });
+  card.addEventListener('pointerleave', () => {
+    card.style.setProperty('--px', '0px'); card.style.setProperty('--py', '0px');
+  });
+}
+for (const disabled of minigamesModal.querySelectorAll<HTMLButtonElement>('[aria-disabled="true"]')) {
+  disabled.addEventListener('click', (event) => {
+    if (disabled.getAttribute('aria-disabled') === 'true') event.preventDefault();
+  });
+}
+duelsCardAction.addEventListener('click', () => {
+  if (!net.connected) {
+    duelFeedback.textContent = 'Duels requires a live multiplayer server.';
+    return;
+  }
+  duelFeedback.textContent = 'Creating private lobby…';
+  net.sendDuelCreate();
+});
+duelReady.addEventListener('click', () => {
+  if (duelReady.getAttribute('aria-disabled') === 'true') return;
+  const me = duelSnapshot?.participants.find((p) => p.id === net.myId);
+  // Checkpoint the exact current open-world inventory before consenting to a
+  // match; match-time autosaves are suppressed on both client and server.
+  if (!me?.ready) {
+    duelLocalFallback = {
+      state: inventory.serialize(), x: player.pos.x, y: player.pos.y, z: player.pos.z,
+      yaw: player.yaw, pitch: player.pitch,
+      health: player.health, dead: player.dead, mode: localMode,
+    };
+    pushStateSave();
+  }
+  net.sendDuelReady(!me?.ready);
+});
+duelStart.addEventListener('click', () => {
+  if (duelStart.getAttribute('aria-disabled') !== 'true') net.sendDuelStart();
+});
+duelLeave.addEventListener('click', () => {
+  net.sendDuelLeave(); duelSnapshot = null; duelInviteToken = ''; pendingDuelToken = '';
+  if (pendingDuelRetry) window.clearTimeout(pendingDuelRetry); pendingDuelRetry = 0;
+  duelLocalFallback = null;
+  setDuelParam(null); showDuelBrowser(); duelFeedback.textContent = '';
+});
+duelCopy.addEventListener('click', async () => {
+  if (!duelInvite.value) return;
+  try {
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(duelInvite.value);
+    else throw new Error('Clipboard API unavailable');
+    duelFeedback.textContent = 'Invite copied.';
+  } catch {
+    duelInvite.focus(); duelInvite.select();
+    let copied = false;
+    try { copied = document.execCommand('copy'); } catch { /* selection remains */ }
+    duelFeedback.textContent = copied ? 'Invite copied.' : 'Copy unavailable — the invite is selected.';
+  }
+});
+
+net.onDuelLobby = (snapshot, inviteToken) => {
+  if (pendingDuelRetry) window.clearTimeout(pendingDuelRetry); pendingDuelRetry = 0;
+  duelSnapshot = snapshot;
+  syncDuelClock(snapshot.serverNow);
+  if (inviteToken) {
+    duelInviteToken = inviteToken;
+    pendingDuelToken = inviteToken;
+    setDuelParam(inviteToken);
+  }
+  if (snapshot.phase === 'lobby') {
+    renderDuelLobby();
+    if (!duelArenaActive) openMinigames(true);
+  } else {
+    renderDuelScoreboard();
+  }
+};
+net.onDuelError = (code, message) => {
+  duelFeedback.textContent = message;
+  if (code === 'invalid' || code === 'full' || code === 'match_in_progress') {
+    duelSnapshot = null; showDuelBrowser(); openMinigames();
+  }
+  if (code === 'match_in_progress' && pendingDuelToken) {
+    duelFeedback.textContent = `${message} Waiting for the lobby to reopen…`;
+    pendingDuelAttempted = false;
+    if (pendingDuelRetry) window.clearTimeout(pendingDuelRetry);
+    pendingDuelRetry = window.setTimeout(() => {
+      pendingDuelRetry = 0;
+      if (!pendingDuelToken || pendingDuelAttempted || !net.connected) return;
+      pendingDuelAttempted = true; net.sendDuelJoin(pendingDuelToken);
+    }, 2_000);
+  }
+};
+
+function joinPendingDuel(): void {
+  if (!pendingDuelToken || pendingDuelAttempted || !net.connected) return;
+  pendingDuelAttempted = true;
+  openMinigames();
+  duelFeedback.textContent = 'Joining private Duels lobby…';
+  net.sendDuelJoin(pendingDuelToken);
+}
+
+let duelArenaActive = false;
+let duelActiveBounds: DuelArenaBounds | null = null;
+let duelArenaReadySent = false;
+let duelCountdownEndsAt = 0;
+let duelRespawnAt = 0;
+let duelSpectating = false;
+let duelUnlimitedReserve = false;
+let duelClockServer = 0;
+let duelClockLocal = performance.now();
+let duelLastCountdownCue = -1;
+let duelLastLeaderKey = '';
+let duelFinalMinuteShown = false;
+let duelFinalThirtyPlayed = false;
+let duelSuddenDeathPlayed = false;
+let duelFightPlayed = false;
+let duelFightCueUntil = 0;
+let duelFinalMinuteCueUntil = 0;
+let duelResultData: DuelResult | null = null;
+let duelScoresHeld = false;
+let duelResultVoteStatus: HTMLElement | null = null;
+let duelResultRematch: HTMLButtonElement | null = null;
+let duelLocalFallback: {
+  state: ReturnType<typeof inventory.serialize>;
+  x: number; y: number; z: number; yaw: number; pitch: number;
+  health: number; dead: boolean; mode: GameMode;
+} | null = null;
+
+const duelMatchHud = document.createElement('div');
+duelMatchHud.className = 'duel-match-hud';
+duelMatchHud.innerHTML =
+  '<div class="duel-hud-cell"><small>Time</small><strong data-duel-time>5:00</strong></div>' +
+  '<div class="duel-hud-cell"><small>Leader</small><strong data-duel-leader>—</strong></div>' +
+  '<div class="duel-hud-cell"><small>Your kills</small><strong data-duel-kills>0</strong></div>';
+app.appendChild(duelMatchHud);
+const duelTimeEl = duelMatchHud.querySelector('[data-duel-time]')!;
+const duelLeaderEl = duelMatchHud.querySelector('[data-duel-leader]')!;
+const duelKillsEl = duelMatchHud.querySelector('[data-duel-kills]')!;
+
+const duelCenterCue = document.createElement('div');
+duelCenterCue.className = 'duel-center-cue';
+app.appendChild(duelCenterCue);
+
+const duelScoreboard = document.createElement('div');
+duelScoreboard.className = 'duel-scoreboard';
+const duelScorePanel = document.createElement('div'); duelScorePanel.className = 'duel-score-panel';
+duelScoreboard.appendChild(duelScorePanel); app.appendChild(duelScoreboard);
+
+const duelScoresTouch = document.createElement('button');
+duelScoresTouch.className = 'duel-scores-touch'; duelScoresTouch.type = 'button';
+duelScoresTouch.textContent = 'Hold scores'; duelScoresTouch.setAttribute('aria-label', 'Hold to see scores');
+app.appendChild(duelScoresTouch);
+
+const duelResultEl = document.createElement('div'); duelResultEl.className = 'duel-result';
+duelResultEl.setAttribute('role', 'dialog'); duelResultEl.setAttribute('aria-modal', 'true');
+duelResultEl.setAttribute('aria-label', 'Duels match result');
+const duelResultCard = document.createElement('div'); duelResultCard.className = 'duel-result-card';
+duelResultEl.appendChild(duelResultCard); app.appendChild(duelResultEl);
+
+function duelNow(): number { return duelClockServer + (performance.now() - duelClockLocal); }
+function syncDuelClock(serverNow: number): void {
+  duelClockServer = serverNow; duelClockLocal = performance.now();
+}
+function formatDuelTime(ms: number): string {
+  const seconds = Math.max(0, Math.ceil(ms / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+function duelStatus(p: DuelParticipant): string {
+  if (!p.connected) return 'Disconnected';
+  if (p.spectating && p.respawnAt) return 'Respawning';
+  if (p.spectating) return 'Spectator';
+  return p.alive ? 'Alive' : 'Respawning';
+}
+function duelScoreRows(players: DuelParticipant[]): HTMLElement {
+  const rows = document.createElement('div');
+  const head = document.createElement('div'); head.className = 'duel-score-row header';
+  head.innerHTML = '<span>#</span><span>Player</span><span>Kills</span><span>Deaths</span><span>K/D</span><span class="duel-score-status">Status</span>';
+  rows.appendChild(head);
+  const topKills = players[0]?.kills ?? 0;
+  players.forEach((p, index) => {
+    const row = document.createElement('div');
+    row.className = `duel-score-row${p.id === net.myId ? ' local' : ''}`;
+    const kd = p.deaths === 0 ? p.kills.toFixed(1) : (p.kills / p.deaths).toFixed(2);
+    const leader = p.kills === topKills && topKills > 0;
+    const status = duelStatus(p);
+    row.innerHTML = `<span>${index + 1}</span><strong>${leader ? '<span class="duel-leader-mark">◆</span> ' : ''}${duelEscapeHtml(p.username)}</strong>` +
+      `<span>${p.kills}</span><span>${p.deaths}</span><span>${kd}</span>` +
+      `<span class="duel-score-status ${p.alive ? 'duel-status-alive' : 'duel-status-out'}">${status}</span>`;
+    rows.appendChild(row);
+  });
+  return rows;
+}
+function duelEscapeHtml(text: string): string {
+  const node = document.createElement('span'); node.textContent = text; return node.innerHTML;
+}
+function renderDuelScoreboard(): void {
+  const players = duelResultData?.scoreboard ?? duelSnapshot?.participants ?? [];
+  duelScorePanel.replaceChildren();
+  const head = document.createElement('div'); head.className = 'duel-score-head';
+  const title = document.createElement('div');
+  title.innerHTML = `<small>${duelSnapshot?.phase === 'sudden_death' ? 'Sudden death' : 'Duels'}</small><h2>Scoreboard</h2>`;
+  const hint = document.createElement('small'); hint.textContent = duelResultData ? 'Final' : 'Release Tab to close';
+  head.append(title, hint); duelScorePanel.append(head, duelScoreRows(players));
+}
+function setDuelScoresVisible(visible: boolean): void {
+  duelScoresHeld = visible;
+  duelScoreboard.classList.toggle('visible', visible && duelArenaActive && !duelResultData);
+  if (visible) renderDuelScoreboard();
+}
+window.addEventListener('keydown', (event) => {
+  if (event.key !== 'Tab' || !duelArenaActive || duelResultData) return;
+  event.preventDefault();
+  if (!event.repeat) setDuelScoresVisible(true);
+});
+window.addEventListener('keyup', (event) => {
+  if (event.key === 'Tab' && duelArenaActive) { event.preventDefault(); setDuelScoresVisible(false); }
+});
+window.addEventListener('blur', () => setDuelScoresVisible(false));
+for (const type of ['pointerdown', 'touchstart'] as const) {
+  duelScoresTouch.addEventListener(type, (event) => { event.preventDefault(); setDuelScoresVisible(true); });
+}
+for (const type of ['pointerup', 'pointercancel', 'touchend', 'touchcancel'] as const) {
+  duelScoresTouch.addEventListener(type, (event) => { event.preventDefault(); setDuelScoresVisible(false); });
+}
+
+function renderDuelResult(result: DuelResult): void {
+  duelResultData = result; screen = 'duel_results'; input.unlock();
+  const winner = result.scoreboard.find((p) => p.id === result.winner);
+  const mine = result.winner === net.myId;
+  audio.duelCue(mine ? 'victory' : 'defeat');
+  duelResultCard.replaceChildren();
+  const kicker = document.createElement('div'); kicker.className = 'duel-result-kicker';
+  kicker.textContent = mine ? 'Victory' : result.winner === null ? 'Match complete' : 'Defeat';
+  const title = document.createElement('h2'); title.textContent = winner ? `${winner.username} wins` : 'No winner';
+  const summary = document.createElement('p'); summary.className = 'duel-result-summary';
+  summary.textContent = `${formatDuelTime(result.durationMs)} · ${result.finishReason.replace('_', ' ')}`;
+  const scores = document.createElement('div'); scores.className = 'duel-result-score';
+  scores.appendChild(duelScoreRows(result.scoreboard));
+  const controls = document.createElement('div'); controls.className = 'duel-result-controls';
+  const rematch = document.createElement('button'); rematch.type = 'button'; rematch.textContent = 'Rematch';
+  const lobby = document.createElement('button'); lobby.type = 'button'; lobby.textContent = 'Return to lobby';
+  rematch.addEventListener('click', () => { rematch.disabled = true; net.sendDuelRematch(true); });
+  lobby.addEventListener('click', () => net.sendDuelReturn());
+  const voteStatus = document.createElement('p'); voteStatus.className = 'duel-result-summary';
+  duelResultVoteStatus = voteStatus; duelResultRematch = rematch;
+  controls.append(rematch, lobby); duelResultCard.append(kicker, title, summary, scores, voteStatus, controls);
+  duelResultEl.classList.add('visible'); duelScoreboard.classList.remove('visible');
+  requestAnimationFrame(() => rematch.focus());
+}
+
+function updateDuelHud(): void {
+  if (!duelArenaActive || !duelSnapshot) {
+    duelMatchHud.classList.remove('visible'); duelScoresTouch.classList.remove('visible');
+    duelCenterCue.style.display = 'none'; return;
+  }
+  duelMatchHud.classList.add('visible'); duelScoresTouch.classList.add('visible');
+  const now = duelNow();
+  const board = duelSnapshot.participants;
+  const me = board.find((p) => p.id === net.myId);
+  duelKillsEl.textContent = String(me?.kills ?? 0);
+  const topKills = board[0]?.kills ?? 0;
+  const leaders = board.filter((p) => p.kills === topKills);
+  duelLeaderEl.textContent = leaders.length > 1
+    ? `Tie · ${topKills}` : board[0] ? `${board[0].username} · ${topKills}` : '—';
+  const leaderKey = leaders.map((p) => p.id).join(',');
+  if (duelSnapshot.phase === 'running' && duelLastLeaderKey &&
+      leaderKey && leaderKey !== duelLastLeaderKey) audio.duelCue('lead');
+  duelLastLeaderKey = leaderKey;
+  if (duelSnapshot.phase === 'sudden_death') duelTimeEl.textContent = 'SUDDEN DEATH';
+  else {
+    const remaining = (duelSnapshot.endsAt ??
+      (duelSnapshot.startedAt ?? now) + DUEL_ROUND_MS) - now;
+    duelTimeEl.textContent = formatDuelTime(remaining);
+    if (duelSnapshot.phase === 'running' && remaining <= 60_000 && remaining > 0 &&
+        !duelFinalMinuteShown) {
+      duelFinalMinuteShown = true; duelFinalMinuteCueUntil = now + 1_500;
+    }
+    if (duelSnapshot.phase === 'running' && remaining <= 30_000 && remaining > 0 &&
+        !duelFinalThirtyPlayed) {
+      duelFinalThirtyPlayed = true; audio.duelCue('final30');
+    }
+  }
+  let cue = '';
+  if (duelSnapshot.phase === 'countdown') {
+    const countdownAt = duelSnapshot.countdownEndsAt ?? duelCountdownEndsAt;
+    if (countdownAt <= 0) cue = 'LOADING ARENA';
+    else {
+      const left = countdownAt - now;
+      const number = Math.max(0, Math.ceil(left / 1000));
+      cue = number > 0 ? String(number) : 'FIGHT';
+      if (number !== duelLastCountdownCue) {
+        duelLastCountdownCue = number;
+        audio.duelCue(number > 0 ? 'countdown' : 'fight');
+        if (number === 0) { duelFightPlayed = true; duelFightCueUntil = now + 900; }
+      }
+    }
+  } else if (duelSpectating && duelRespawnAt > now) {
+    cue = `RESPAWN ${Math.ceil((duelRespawnAt - now) / 1000)}`;
+  } else if (duelSnapshot.phase === 'sudden_death') {
+    cue = 'SUDDEN DEATH';
+    if (!duelSuddenDeathPlayed) { duelSuddenDeathPlayed = true; audio.duelCue('sudden'); }
+  } else if (duelSnapshot.phase === 'running') {
+    if (!duelFightPlayed) {
+      duelFightPlayed = true; duelFightCueUntil = now + 900; audio.duelCue('fight');
+    }
+    if (now < duelFightCueUntil) cue = 'FIGHT';
+  }
+  if (!cue && now < duelFinalMinuteCueUntil) {
+    cue = 'FINAL MINUTE';
+  }
+  duelCenterCue.textContent = cue;
+  duelCenterCue.style.display = cue ? 'block' : 'none';
+  if (duelArenaActive && !duelArenaReadySent && duelSnapshot?.phase === 'countdown' &&
+      (duelSnapshot.countdownEndsAt === undefined || duelSnapshot.countdownEndsAt === 0)) {
+    if (world.isLoaded(player.pos.x, player.pos.z) || (pendingTeleport && worldTimeLocal - pendingTeleport.started > 1.5)) {
+      duelArenaReadySent = true;
+      net.sendDuelArenaReady();
+    }
+  }
+  if (duelResultData && duelResultVoteStatus) {
+    const connected = board.filter((p) => p.connected);
+    const votes = connected.filter((p) => p.rematchVote).length;
+    const left = formatDuelTime(duelResultData.rematchDeadline - now);
+    duelResultVoteStatus.textContent = `${votes}/${connected.length} voted Rematch · ${left}`;
+    const voted = me?.rematchVote === true;
+    if (duelResultRematch) {
+      duelResultRematch.disabled = voted;
+      duelResultRematch.textContent = voted ? 'Rematch voted' : 'Rematch';
+    }
+  }
+  if (duelScoresHeld) renderDuelScoreboard();
+}
+
+function duelControlBlocked(): boolean {
+  if (!duelArenaActive || !duelSnapshot) return false;
+  return duelSnapshot.phase === 'countdown' ||
+    duelSnapshot.phase === 'results' || screen === 'duel_results';
+}
+
+net.onDuelArena = (arena, spawn, countdownEndsAt) => {
+  duelArenaActive = true; duelActiveBounds = arena;
+  duelArenaReadySent = false; duelCountdownEndsAt = countdownEndsAt;
+  duelLastCountdownCue = -1; duelLastLeaderKey = '';
+  duelFinalMinuteShown = false; duelFinalThirtyPlayed = false;
+  duelSuddenDeathPlayed = false; duelFightPlayed = false;
+  duelFightCueUntil = 0; duelFinalMinuteCueUntil = 0;
+  duelResultData = null; duelResultEl.classList.remove('visible'); duelSpectating = false;
+  clearVaultPresentation(true); endGrapple(); setSeat(null); myRope = null;
+  killfeedEl.replaceChildren(); combatTagUntilLocal = 0; combatTimerEl.style.display = 'none';
+  warEl.style.display = 'none'; regionBannerEl.style.display = 'none';
+  worldMap.hide(); worldMap.hideBeacons(); worldMap.setDynamicMarkers([]);
+  flagModels.setState(false, []);
+  if (fieldGuide?.open) fieldGuide.closeSilently();
+  starterEl.style.display = 'none';
+  closeMinigames(); audio.resume();
+  applyLocalMode('survival');
+  player.pos.set(spawn.x, spawn.y, spawn.z); player.vel.set(0, 0, 0); player.fallDistance = 0;
+  player.maxHealth = DUEL_MAX_HEALTH; player.health = DUEL_MAX_HEALTH; player.dead = false;
+  player.flying = false; player.noclip = false; player.gliding = false; player.boating = false;
+  pendingTeleport = { x: spawn.x, y: spawn.y, z: spawn.z, started: worldTimeLocal };
+  // Pre-stream the small arena bubble immediately so ready can be sent without delay
+  if (world.update(spawn.x, spawn.z, 50, 2)) {
+    pendingTeleport = null;
+    duelArenaReadySent = true;
+    net.sendDuelArenaReady();
+  }
+  enterPlaying(); input.lock();
+};
+net.onDuelLoadout = (slots, armor, selected, unlimitedReserve) => {
+  inventory.restore({ slots, armor, selected }); duelUnlimitedReserve = unlimitedReserve;
+  fireCooldown = 0; reloadTimer = 0; burstRemaining = 0; healUse.cancel();
+};
+net.onDuelClock = (serverNow, _endsAt, _suddenDeath) => syncDuelClock(serverNow);
+net.onDuelRespawn = (respawnAt, spectating) => {
+  duelRespawnAt = respawnAt; duelSpectating = spectating;
+  player.flying = spectating; player.noclip = spectating;
+  if (spectating) {
+    burstRemaining = 0; burstStack = null; burstGun = null;
+    reloadTimer = 0; reloadingStack = null; aimZoom = 1; healUse.cancel();
+  }
+  if (!spectating) { player.flying = false; player.noclip = false; player.health = DUEL_MAX_HEALTH; }
+};
+net.onDuelResult = renderDuelResult;
+net.onDuelRestored = (x, y, z, yaw, pitch, health, dead, mode, state) => {
+  duelArenaActive = false; duelUnlimitedReserve = false;
+  duelActiveBounds = null;
+  duelArenaReadySent = false;
+  duelSpectating = false; duelResultData = null; duelResultEl.classList.remove('visible');
+  duelMatchHud.classList.remove('visible'); duelScoresTouch.classList.remove('visible');
+  if (state) inventory.restore(state);
+  flagModels.setState(flagState.breakable, flagState.flags);
+  player.maxHealth = maxHealthFor(localHearts);
+  player.pos.set(x, y, z); player.yaw = yaw; player.pitch = pitch;
+  player.health = health; player.dead = dead;
+  pendingTeleport = { x, y, z, started: worldTimeLocal };
+  applyLocalMode(mode); lastHealth = health; enterTitle(); renderDuelLobby(); openMinigames(true);
+  duelLocalFallback = null;
+};
 
 // First drop-in shows the guided briefing once (tracked in localStorage); after
 // that — or when the briefing is skipped/completed — enter the game directly.
@@ -2522,8 +3087,46 @@ const tutorial = (() => {
   };
 })();
 
-document.getElementById('resume-btn')!.addEventListener('click', () => input.lock());
+document.getElementById('resume-btn')!.addEventListener('click', () => {
+  enterPlaying();
+  input.lock();
+});
 document.getElementById('quit-btn')!.addEventListener('click', () => {
+  // Quitting the play screen must relinquish every helicopter attachment even
+  // though the title shares this page and the network connection stays alive.
+  if (myRope) dropFastRope();
+  if (mySeat) dismountHeli();
+  if (!net.connected) offlineVehicles.disconnectPlayer(0);
+  setSeat(null);
+  myRope = null;
+  vehicleHud.setRope(false);
+  if (duelArenaActive || duelSnapshot) {
+    net.sendDuelLeave();
+    duelArenaActive = false;
+    duelUnlimitedReserve = false;
+    duelActiveBounds = null;
+    duelArenaReadySent = false;
+    duelSpectating = false;
+    duelResultData = null;
+    duelSnapshot = null;
+    duelInviteToken = '';
+    pendingDuelToken = '';
+    duelResultEl.classList.remove('visible');
+    duelMatchHud.classList.remove('visible');
+    duelScoresTouch.classList.remove('visible');
+    duelCenterCue.style.display = 'none';
+    if (duelLocalFallback) {
+      inventory.restore(duelLocalFallback.state);
+      player.pos.set(duelLocalFallback.x, duelLocalFallback.y, duelLocalFallback.z);
+      player.yaw = duelLocalFallback.yaw;
+      player.pitch = duelLocalFallback.pitch;
+      player.health = duelLocalFallback.health;
+      player.dead = duelLocalFallback.dead;
+      applyLocalMode(duelLocalFallback.mode);
+      duelLocalFallback = null;
+    }
+  }
+  pushStateSave();
   enterTitle();
 });
 
@@ -2570,6 +3173,7 @@ document.addEventListener('keydown', (e) => {
   else if (invUI.open) { invUI.hide(); input.lock(); }
   else if (fieldGuide.open) fieldGuide.backToPause();
   else if (screen === 'paused' && !player.dead) input.lock(); // Esc resumes from pause
+  else if (screen === 'playing' && !player.dead) { input.unlock(); enterPause(); }
 });
 
 // Death and respawn.
@@ -2618,6 +3222,7 @@ function checkDeath(): void {
 // (offline). The server is the system of record online; offline we mirror to
 // localStorage keyed by the local account so single-player also persists.
 function pushStateSave(): void {
+  if (duelArenaActive) return; // temporary arena coordinates/loadout never persist
   if (net.connected) {
     // Warfare Command progression is deliberately NOT in this blob: the server
     // stores it on the account, so a client state push can never mint or wipe
@@ -2679,6 +3284,7 @@ net.onWelcome = (me) => {
   }
   held.setSkin(skinSeed(me.username), myCosmetics);
   refreshNetInfo();
+  joinPendingDuel();
 };
 net.onFlags = (breakable, flags) => {
   flagState = { breakable, flags: flags.map((flag) => ({ ...flag })) };
@@ -2712,13 +3318,20 @@ net.onEditBatch = (edits) => {
   for (const e of edits) applyNetworkEdit(e.x, e.y, e.z, e.block);
   world.endBatch();
 };
-net.onHurt = (health, dead, k, by) => {
+net.onHurt = (health, dead, k, by, combat) => {
   player.setHealthFromServer(health, dead);
   player.vel.x += k[0] * 6; player.vel.y += k[1] * 6; player.vel.z += k[2] * 6;
   // Point a wedge back at whoever did it. Only another PLAYER gets one — falls,
   // lava and mobs are self-evident, an unseen sniper is not.
   const attacker = net.remotes.get(by);
   if (attacker && by !== net.myId) showDamageFrom(attacker.tx, attacker.tz);
+  if (combat > 0 && by !== net.myId) {
+    combatTagUntilLocal = worldTimeLocal + Math.max(0, combat);
+    lastDamageLocal = worldTimeLocal;
+    // A grapple already in flight is mobility too: taking a PvP hit cuts it,
+    // and the same timer below prevents firing another one.
+    if (grappleStage) endGrapple();
+  }
   // lastHealth is left alone so the frame loop plays the hurt sound.
 };
 net.onHitConfirm = (_target, amount, killed) => showHitmarker(amount, killed);
@@ -4005,13 +4618,13 @@ function renderGuidePanel(): void {
 /** Per-frame guide upkeep: visibility, periodic detection, live vault hint. */
 function updateGuide(dt: number, controlling: boolean): void {
   loadGuide();
-  const show = controlling && authed && !guideHidden && !guideComplete(guideState);
+  const show = controlling && authed && !guideHidden && !guideComplete(guideState) && !duelArenaActive;
   starterEl.style.display = show ? 'block' : 'none';
   if (!authed) return;
   guideCheckTimer -= dt;
   if (guideCheckTimer <= 0) {
     guideCheckTimer = 0.5;
-    if (!guideComplete(guideState)) detectGuideSteps();
+    if (!guideComplete(guideState) && !duelArenaActive) detectGuideSteps();
     guideDirty = true; // the distance hint ticks along as you walk
   }
   if (show && guideDirty) {
@@ -4353,6 +4966,7 @@ const chatBox = new ChatBox(app, {
         showProgress();
         return null;
       case 'guide':
+        if (duelArenaActive) return 'Guide is disabled during Duels.';
         toggleGuidePanel();
         chatBox.print(guideHidden ? 'Getting Started guide hidden.' : 'Getting Started guide shown.');
         return null;
@@ -4470,6 +5084,26 @@ net.onSeasonEnd = (winner, number) => {
   refreshNetInfo();
 };
 net.onDisconnect = () => {
+  if (pendingDuelRetry) window.clearTimeout(pendingDuelRetry); pendingDuelRetry = 0;
+  pendingDuelAttempted = false;
+  refreshDuelsAvailability();
+  if (duelArenaActive) {
+    const fallback = duelLocalFallback;
+    duelArenaActive = false; duelActiveBounds = null; duelArenaReadySent = false;
+    duelUnlimitedReserve = false; duelSpectating = false;
+    duelResultData = null; duelResultEl.classList.remove('visible');
+    duelMatchHud.classList.remove('visible'); duelScoresTouch.classList.remove('visible');
+    if (fallback) {
+      inventory.restore(fallback.state);
+      player.pos.set(fallback.x, fallback.y, fallback.z);
+      player.yaw = fallback.yaw; player.pitch = fallback.pitch;
+      player.maxHealth = maxHealthFor(localHearts); player.health = fallback.health;
+      player.dead = fallback.dead; applyLocalMode(fallback.mode); lastHealth = fallback.health;
+      pendingTeleport = { x: fallback.x, y: fallback.y, z: fallback.z, started: worldTimeLocal };
+    }
+    duelSnapshot = null; duelLocalFallback = null; input.unlock(); enterTitle();
+    showNotice('Duels connection lost — your open-world state was kept safe.');
+  }
   player.damageSink = undefined;
   survival.enableRegen = true;
   clearVaultPresentation(true);
@@ -4627,7 +5261,7 @@ function fireVolley(stack: ItemStack, gun: GunInfo): boolean {
   const buffs = activeBuffs();
   const spread = (gun.spread ?? 0) * buffs.spreadMult; // Gunslinger + Rune of Focus
   // Gunslinger capstones boost per-round damage (server still clamps PvP hits).
-  const boosted = buffs.gunDamageMult > 1
+  const boosted = !duelArenaActive && buffs.gunDamageMult > 1
     ? { ...gun, damage: Math.max(1, Math.round(gun.damage * buffs.gunDamageMult)) }
     : gun;
   const eye = player.eyePosition;
@@ -4669,8 +5303,9 @@ function reloadGun(): void {
   const gun = stack ? ITEMS[stack.id]?.gun : undefined;
   if (!stack || !gun) return;
   const loaded = stack.loaded ?? gun.mag;
-  if (loaded >= gun.mag || inventory.countItem(gun.ammo) <= 0) return;
-  reloadTimer = RELOAD_TIME * activeBuffs().reloadMult;
+  if (loaded >= gun.mag ||
+      (!duelUnlimitedReserve && inventory.countItem(gun.ammo) <= 0)) return;
+  reloadTimer = RELOAD_TIME * (duelArenaActive ? 1 : activeBuffs().reloadMult);
   reloadDuration = reloadTimer;
   reloadingStack = stack;
 }
@@ -4886,7 +5521,7 @@ function invalidateSelfAvatar(): void {
 
 /** Pose the local avatar for this frame (third person only). */
 function updateSelfAvatar(dt: number): void {
-  if (view === View.First || player.dead || localMode === 'spectator') {
+  if (view === View.First || player.dead || localMode === 'spectator' || duelSpectating) {
     hideSelfAvatar();
     return;
   }
@@ -7230,6 +7865,10 @@ function useGadget(def: GadgetDef): void {
   // Mid-swing the button means RELEASE, not re-fire, so it cannot be gated by
   // the cooldown of the shot that put you on the rope in the first place.
   if (def.kind === 'grapple' && grappleStage) { endGrapple(true); return; }
+  if (def.kind === 'grapple' && combatSecondsLeft() > 0) {
+    showNotice(`Grappling Hook blocked in combat (${Math.ceil(combatSecondsLeft())}s).`);
+    return;
+  }
   if (!gadgetCd.ready(def.item, worldTimeLocal)) {
     showNotice(`${def.name}: ${gadgetCd.remaining(def.item, worldTimeLocal).toFixed(1)}s left`);
     return;
@@ -7269,6 +7908,18 @@ function useGadget(def: GadgetDef): void {
       break;
     }
     case 'jump': {
+      // A second pad high in open air would turn a one-use jump into unlimited
+      // vertical flight. Require a real block in this exact column no more than
+      // ten blocks below the player's feet.
+      let supportY = -1;
+      const bx = Math.floor(player.pos.x), bz = Math.floor(player.pos.z);
+      for (let y = Math.min(255, Math.floor(player.pos.y) - 1); y >= 0; y--) {
+        if (isSolid(world.getBlock(bx, y, bz))) { supportY = y; break; }
+      }
+      if (supportY < 0 || player.pos.y - (supportY + 1) > 10) {
+        showNotice('Bounce Pad blocked — you are more than 10 blocks above solid ground.');
+        return;
+      }
       gadgetCd.use(def.item, worldTimeLocal); consume();
       player.vel.y = 36; // ~20-block vertical launch (gravity 32)
       player.onGround = false;
@@ -7806,6 +8457,7 @@ buildGuide();
 function frame(): void {
   requestAnimationFrame(frame);
   const dt = Math.min(0.05, clock.getDelta());
+  updateDuelHud();
 
   frames++;
   fpsTime += dt;
@@ -7839,10 +8491,19 @@ function frame(): void {
     return;
   }
 
-  if (input.inventoryToggled) toggleInventory();
+  if (input.inventoryToggled) {
+    if (duelArenaActive) showNotice('Inventory management is locked during Duels.');
+    else toggleInventory();
+  }
   if (invUI.open && input.hotbarKey >= 0) invUI.hotbarSwap(input.hotbarKey);
-  if (input.mapToggled) toggleMap();
-  if (input.progressPressed) toggleProgress();
+  if (input.mapToggled) {
+    if (duelArenaActive) showNotice('The world map is unavailable during Duels.');
+    else toggleMap();
+  }
+  if (input.progressPressed) {
+    if (duelArenaActive) showNotice('Progression is suspended during Duels.');
+    else toggleProgress();
+  }
   worldMap.update();
 
   // Gun timers tick regardless of menu state (so a reload finishes even if you
@@ -7868,7 +8529,9 @@ function frame(): void {
       const gun = rs ? ITEMS[rs.id]?.gun : undefined;
       if (rs && gun && rs === inventory.selectedStack) {
         const loaded = rs.loaded ?? gun.mag;
-        rs.loaded = loaded + inventory.removeItem(gun.ammo, gun.mag - loaded);
+        rs.loaded = duelUnlimitedReserve && duelArenaActive
+          ? gun.mag
+          : loaded + inventory.removeItem(gun.ammo, gun.mag - loaded);
         inventory.version++;
       }
       reloadingStack = null;
@@ -7881,8 +8544,8 @@ function frame(): void {
   vaultCinematic.update(dt);
 
   // Direct control only while actively playing (pointer locked, no UI, alive).
-  const controlling = input.locked && !player.dead && !invUI.open && !vaultCinematic.playing &&
-    !missileCam.active;
+  const controlling = input.locked && !player.dead && !duelControlBlocked() &&
+    !invUI.open && !vaultCinematic.playing && !missileCam.active;
   // PLAY-THROUGH: the Warfare panel is a floating card over a live world, so it
   // hands the cursor to the tree WITHOUT taking your legs away. Movement keys
   // still drive the player; look, mining, shooting and hotbar stay suspended
@@ -7895,13 +8558,13 @@ function frame(): void {
   // synced value (clamped server-side). Progression bonuses (Toughness ranks +
   // the faction perk) ride on top of worn gear; speed applies to movement.
   const buffsNow = activeBuffs();
-  player.speedMult = buffsNow.speedMult;
-  player.energyDrainMult = buffsNow.energyMult;   // Windrunner capstones
-  player.fallDamageMult = buffsNow.fallMult;      // Juggernaut capstones
-  interaction.miningSpeedMult = buffsNow.mineMult; // Prospector + Rune of Fortune
-  const armorPts = inventory.armorPoints() + buffsNow.armorBonus;
+  player.speedMult = duelArenaActive ? 1 : buffsNow.speedMult;
+  player.energyDrainMult = duelArenaActive ? 1 : buffsNow.energyMult;   // Windrunner capstones
+  player.fallDamageMult = duelArenaActive ? 1 : buffsNow.fallMult;      // Juggernaut capstones
+  interaction.miningSpeedMult = duelArenaActive ? 1 : buffsNow.mineMult; // Prospector + Rune of Fortune
+  const armorPts = duelArenaActive ? 0 : inventory.armorPoints() + buffsNow.armorBonus;
   player.armorPoints = armorPts;
-  player.toughness = buffsNow.toughness;           // Greater Rune of Iron
+  player.toughness = duelArenaActive ? 0 : buffsNow.toughness;           // Greater Rune of Iron
   if (net.connected &&
       (armorPts !== lastSentArmor || buffsNow.toughness !== lastSentToughness)) {
     lastSentArmor = armorPts;
@@ -7921,7 +8584,9 @@ function frame(): void {
       }
       if (input.hotbarKey >= 0) inventory.select(input.hotbarKey);
       if (input.wheelDelta !== 0) inventory.select(inventory.selected + input.wheelDelta);
-      if (input.dropPressed) dropCurrentItem(input.down('ShiftLeft') || input.down('ShiftRight'));
+      if (input.dropPressed && !duelArenaActive) {
+        dropCurrentItem(input.down('ShiftLeft') || input.down('ShiftRight'));
+      }
       if (input.viewPressed) cycleView();
       // T: the command box. The map, waypoints, Warfare Command, the guide and
       // TPA all live behind it now — none of them has a key of its own.
@@ -7945,11 +8610,25 @@ function frame(): void {
       player.pos.set(tp.x, tp.y, tp.z);
       player.vel.set(0, 0, 0);
       player.fallDistance = 0;
-      const bubbleReady = world.update(tp.x, tp.z, 14, 2);
-      if (bubbleReady || worldTimeLocal - tp.started > 8) pendingTeleport = null;
+      const bubbleReady = world.update(tp.x, tp.z, duelArenaActive ? 20 : 14, 2);
+      if (bubbleReady || (worldTimeLocal - tp.started > (duelArenaActive ? 2 : 8))) {
+        pendingTeleport = null;
+        if (duelArenaActive && !duelArenaReadySent) {
+          duelArenaReadySent = true;
+          net.sendDuelArenaReady();
+        }
+      }
     }
     updateGrapple(dt); // hook flight / reel / swing (sets velocity before the step)
     player.update(dt, moveInput, world);
+    if (duelArenaActive && duelActiveBounds) {
+      const beforeX = player.pos.x, beforeY = player.pos.y, beforeZ = player.pos.z;
+      const bounded = clampToDuelArena(player.pos, duelActiveBounds);
+      player.pos.set(bounded.x, bounded.y, bounded.z);
+      if (bounded.x !== beforeX) player.vel.x = 0;
+      if (bounded.y !== beforeY) player.vel.y = 0;
+      if (bounded.z !== beforeZ) player.vel.z = 0;
+    }
     // Speed FOV: how fast you are actually travelling this frame, eased so a
     // swing blooms the view open and a landing settles it back.
     {
@@ -7961,7 +8640,7 @@ function frame(): void {
     // authoritatively too). During a war this is the CLOSING red ring — but a
     // live boss fight is exempt, matching the server, so a ring closing over a
     // distant vault can never rip you out of a sealed arena mid-encounter.
-    if (!inLiveVaultFight()) {
+    if (!duelArenaActive && !inLiveVaultFight()) {
       const clampHalf = net.connected && warActiveNow ? currentWarBorder() / 2 : WORLD_HALF;
       const clamped = clampInsideBorder(player.pos.x, player.pos.z, clampHalf);
       if (clamped.moved > 0) {
@@ -8029,7 +8708,7 @@ function frame(): void {
 
     // Spectators float freely but never mine/place/fight (the server rejects it
     // anyway; gating here avoids client mispredicts).
-    if (controlling && localMode !== 'spectator') {
+    if (controlling && localMode !== 'spectator' && !duelSpectating) {
       const lookDir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
       const eye = player.eyePosition;
       const heldStack = inventory.selectedStack;
@@ -8039,7 +8718,11 @@ function frame(): void {
       // FLAGS come first: standing at an enemy flag pad, left-click is a swing
       // at the pole (never a mine), because that's the only thing you could
       // possibly mean to be doing there.
-      if (healUse.active) {
+      if (duelArenaActive && !heldGun && heldStack?.id !== Item.Medkit && !heldGadget) {
+        // Empty temporary slots are not mining tools. Suppress client
+        // prediction too, so rejected edits cannot leave a local-only hole.
+        interaction.update(dt, input, camera, true, true);
+      } else if (healUse.active) {
         // Both hands are busy with the wrap: no mining, placing or shooting
         // until it is finished (or interrupted by switching away).
         interaction.update(dt, input, camera, true, true); // suppress mine + use
@@ -8188,13 +8871,15 @@ function frame(): void {
       !!mySeat);                                          // strapped into a vehicle seat
 
     // Simulation never pauses: mobs hunt you and survival ticks in menus too.
-    survival.update(dt, player);
-    mobs.update(dt, player, sky.sunIntensity);
-    updateVaults(dt); // dungeons: bounds/banner, guard anchors, the Brute, sparkle
+    if (!duelArenaActive) {
+      survival.update(dt, player);
+      mobs.update(dt, player, sky.sunIntensity);
+      updateVaults(dt); // dungeons: bounds/banner, guard anchors, the Brute, sparkle
+    }
     // Volcanic lava is a hazard: standing in it burns you (the M21 ashlands
     // doubles as a PvP hazard). Damage routes through the server in MP.
     lavaTimer = Math.max(0, lavaTimer - dt);
-    if (!player.dead) {
+    if (!player.dead && !duelArenaActive) {
       const inLava = world.getBlock(Math.floor(player.pos.x),
         Math.floor(player.pos.y + 0.2), Math.floor(player.pos.z)) === Block.Lava ||
         world.getBlock(Math.floor(player.pos.x),
@@ -8221,8 +8906,8 @@ function frame(): void {
     // Traps: spikes prick anyone standing on them; a landmine detonates; the
     // holding traps (bear trap / tar / barbed wire) grab you where you stand.
     spikeHurtTimer = Math.max(0, spikeHurtTimer - dt);
-    updateTrapGrip(dt);
-    if (!player.dead && localMode === 'survival' && !player.noclip) {
+    if (!duelArenaActive) updateTrapGrip(dt);
+    if (!player.dead && !duelArenaActive && localMode === 'survival' && !player.noclip) {
       const bx = Math.floor(player.pos.x), bz = Math.floor(player.pos.z);
       const by = Math.floor(player.pos.y - 0.05);
       const under = world.getBlock(bx, by, bz);
@@ -8237,17 +8922,19 @@ function frame(): void {
     // Machines run under the same never-pausing sim. Offline this is the
     // authoritative tick; in multiplayer it's a local prediction for the fill
     // bar (the server is authoritative and reconciles on open/collect).
-    machines.update(dt);
-    machineModels.update(dt); // animate drills/pumpjacks
-    turretModels.update(dt);
-    updateWarfare(dt);    // silos, missiles, interceptors, helicopters
-    updateWarHud(dt);     // war clock + border + kill score (MP only, war only)
-    updateGuide(dt, controlling); // getting-started checklist + vault compass
-    updateTpa(dt, controlling);   // TPA accept hold + incoming-request banner
-    updateWarVisuals();   // the closing red ring + everybody-glows halos
-    updateFlagVisuals(dt); // flag poles, beacons + the carrier's banner
-    tickDisguises(dt); // Phase 8: expire spy disguises on remote avatars
-    updateThrownItems(dt); // animate tossed grenades/bombs
+    if (!duelArenaActive) {
+      machines.update(dt);
+      machineModels.update(dt); // animate drills/pumpjacks
+      turretModels.update(dt);
+      updateWarfare(dt);    // silos, missiles, interceptors, helicopters
+      updateWarHud(dt);     // war clock + border + kill score (MP only, war only)
+      updateGuide(dt, controlling); // getting-started checklist + vault compass
+      updateTpa(dt, controlling);   // TPA accept hold + incoming-request banner
+      updateWarVisuals();   // the closing red ring + everybody-glows halos
+      updateFlagVisuals(dt); // flag poles, beacons + the carrier's banner
+      tickDisguises(dt); // Phase 8: expire spy disguises on remote avatars
+      updateThrownItems(dt); // animate tossed grenades/bombs
+    }
     // Bounce Pad: zero fall distance while the immunity window is active.
     if (jumpImmuneUntil > 0) {
       player.fallDistance = 0;
@@ -8274,7 +8961,7 @@ function frame(): void {
 
   // The strike camera streams its own terrain (around the missile, not around
   // us), so leave it alone rather than fighting it chunk for chunk.
-  if (!missileCam.active) world.update(player.pos.x, player.pos.z, 6);
+  if (!missileCam.active) world.update(player.pos.x, player.pos.z, 6, duelArenaActive ? 3 : RENDER_DISTANCE);
   sky.update(dt, activeCamera);
   updateAtmosphere();
   itemEntities.update(dt, player, inventory, sky.sunIntensity);
@@ -8306,7 +8993,7 @@ function frame(): void {
   tickTotemWindup(dt);
   lastHealth = player.health;
   // Bandage/medkit application: advance the channel and its feedback.
-  updateHealFeel(dt, controlling && localMode !== 'spectator' && !mySeat);
+  updateHealFeel(dt, controlling && localMode !== 'spectator' && !duelSpectating && !mySeat);
   if (player.inWater && !lastInWater && Math.abs(player.vel.y) > 1) audio.splash();
   lastInWater = player.inWater;
   ambienceTimer -= dt;
@@ -8320,12 +9007,12 @@ function frame(): void {
   // current in third person so guns do not accidentally trigger punch swings.
   // Both hands are on the control bar while gliding, so the POV arm steps
   // aside for the rig (which draws its own fists on the bar).
-  const firstPersonActive = controlling && view === View.First;
+  const firstPersonActive = controlling && !duelSpectating && view === View.First;
   // A PILOT has both hands on the controls, so the POV arm steps aside. A
   // GUNNER is holding their own weapon and needs to see it — hiding it was why
   // the gunner seat felt like a passenger seat.
   held.setActive(firstPersonActive && !player.gliding && mySeat?.seat !== 'pilot');
-  held.setItem(controlling ? inventory.selectedStack?.id ?? null : null);
+  held.setItem(controlling && !duelSpectating ? inventory.selectedStack?.id ?? null : null);
   const reloadProgress = reloadTimer > 0 && reloadDuration > 0
     ? 1 - reloadTimer / reloadDuration : -1;
   held.setGrappleReeling(grappleStage === 'reel');
@@ -8359,7 +9046,7 @@ function frame(): void {
     const loaded = gunStack!.loaded ?? gunInfo.mag;
     ammoEl.textContent = reloadTimer > 0
       ? 'RELOADING…'
-      : `${loaded} / ${inventory.countItem(gunInfo.ammo)}`;
+      : `${loaded} / ${duelUnlimitedReserve && duelArenaActive ? '∞' : inventory.countItem(gunInfo.ammo)}`;
     ammoEl.style.display = 'block';
   } else {
     ammoEl.style.display = 'none';
@@ -8389,23 +9076,25 @@ function frame(): void {
   }
   invUI.update();
 
-  flagModels.setWarActive(warActiveNow);
-  flagModels.update(dt, activeCamera, (id) => {
-    if (id === net.myId) return player.pos;
-    const remote = net.remotes.get(id);
-    return remote ? new THREE.Vector3(remote.tx, remote.ty, remote.tz) : null;
-  });
-  worldMap.setDynamicMarkers(flagState.flags.map((flag) => {
-    const home = flagPosition(flag);
-    const remote = net.remotes.get(flag.carrier);
-    const x = flag.carrier === net.myId ? player.pos.x : remote?.tx ?? home.x;
-    const z = flag.carrier === net.myId ? player.pos.z : remote?.tz ?? home.z;
-    return {
-      x, z,
-      color: factionColor(flag.faction),
-      name: `${factionName(flag.faction)} Flag`,
-    };
-  }));
+  if (!duelArenaActive) {
+    flagModels.setWarActive(warActiveNow);
+    flagModels.update(dt, activeCamera, (id) => {
+      if (id === net.myId) return player.pos;
+      const remote = net.remotes.get(id);
+      return remote ? new THREE.Vector3(remote.tx, remote.ty, remote.tz) : null;
+    });
+    worldMap.setDynamicMarkers(flagState.flags.map((flag) => {
+      const home = flagPosition(flag);
+      const remote = net.remotes.get(flag.carrier);
+      const x = flag.carrier === net.myId ? player.pos.x : remote?.tx ?? home.x;
+      const z = flag.carrier === net.myId ? player.pos.z : remote?.tz ?? home.z;
+      return {
+        x, z,
+        color: factionColor(flag.faction),
+        name: `${factionName(flag.faction)} Flag`,
+      };
+    }));
+  }
 
   if (hud.debugVisible) {
     const t = interaction.target;
@@ -8429,7 +9118,7 @@ function frame(): void {
       shown: screen === 'playing' && !player.dead,
       playing: input.locked && screen === 'playing' && !player.dead &&
         !invUI.open && !worldMap.open,
-      gun: !!(hs && ITEMS[hs.id]?.gun),
+      gun: !duelSpectating && !!(hs && ITEMS[hs.id]?.gun),
       vehicle: !!mySeat || !!myRope || !!nearestRopeInReach(),
       vehicleLabel: myRope ? 'DROP' : mySeat ? 'F' : 'ROPE',
       rope: mySeat?.seat === 'pilot' && !!vehicleModels.snapshotOf(mySeat.id)?.ropeWinch,

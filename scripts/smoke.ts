@@ -3277,9 +3277,9 @@ check('furnace smelts ore/sand/log but not removed foods',
     .msg as { health: number };
   check('the victim respawns at their reduced max health (9 hearts = 18 HP)',
     re.health === 18);
-  // A death with NO recent direct player damager moves nothing: let the 10s
+  // A death with NO recent direct player damager moves nothing: let the 30s
   // kill-credit window lapse, then die to "the world" (fall/lava/mob path).
-  s.tickWar(11); // advances worldTime past KILL_CREDIT_WINDOW
+  s.tickWar(COMBAT_TAG + 1); // advances worldTime past KILL_CREDIT_WINDOW
   const mobDeath = s.handle(2, { t: 'selfhurt', amount: 9999 });
   check('a mob/fall death moves no hearts',
     mobDeath.some((o) => o.msg.t === 'killfeed') &&
@@ -3293,6 +3293,33 @@ check('furnace smelts ore/sand/log but not removed foods',
   check('a kill at 20 hearts keeps the killer at 20 (victim still loses one)',
     heartsMsg(capKill, 1)?.hearts === MAX_HEARTS &&
     heartsMsg(capKill, 2)?.hearts === 8);
+}
+
+// --- Server: combat logout is a full PvP death -------------------------------
+{
+  const s = new GameServer(1337, mulberry32(771));
+  s.addPlayer(1, { username: 'Tagger', faction: 0 });
+  s.addPlayer(2, { username: 'Quitter', faction: 1, data: {
+    slots: [{ id: Item.Diamond, count: 3 }],
+    armor: [{ id: Item.IronHelmet, count: 1 }], selected: 0,
+  } });
+  s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: Math.PI, pitch: 0 });
+  s.handle(2, { t: 'xform', x: 0, y: 70, z: 10, yaw: 0, pitch: 0 });
+  const hit = s.handle(1, { t: 'rangedAttack', target: 2, amount: 1 });
+  const hurt = hit.find((o) => o.to === 2 && o.msg.t === 'hurt')?.msg as
+    { combat?: number } | undefined;
+  check('a player hit starts the full 30-second combat clock', hurt?.combat === COMBAT_TAG);
+  const logout = s.settleDisconnect(2);
+  const saved = s.capturePlayerState(2)!.data as {
+    slots?: unknown[]; armor?: unknown[]; hearts?: number;
+  };
+  check('combat logout credits the last attacker and transfers a heart',
+    logout.some((o) => o.msg.t === 'killfeed' &&
+      (o.msg as { killer: string }).killer === 'Tagger') && saved.hearts === 9);
+  check('combat logout drops carried items and persists an empty inventory',
+    logout.filter((o) => o.msg.t === 'itemspawn').length === 2 &&
+    saved.slots?.every((v) => v === null) && saved.armor?.every((v) => v === null));
+  check('combat logout settlement is idempotent', s.settleDisconnect(2).length === 0);
 }
 
 // --- Server: 0 hearts eliminates (and only PvP can do it) ----------------------
@@ -3687,7 +3714,7 @@ check('furnace smelts ore/sand/log but not removed foods',
   s.tickWar(TOTEM_COOLDOWN + 1); // advance worldTime past the cooldown
   s.handle(1, { t: 'selfhurt', amount: 2 });
   const tagged = s.handle(1, { t: 'totemTeleport', x: 2, y: 70, z: 2 });
-  check('the combat tag (hit in the last 10s) blocks totem travel',
+  check('the combat tag (hit in the last 30s) blocks totem travel',
     !tagged.some((o) => o.msg.t === 'teleport') && /combat/.test(noticeOf(tagged)));
   s.tickWar(COMBAT_TAG + 1); // let the tag lapse
   // Teleporting to an attuned totem that was BROKEN prunes it instead.
@@ -5015,14 +5042,14 @@ const lairs = new Map<VaultBossKind, VaultStamp>();
   s.handle(1, { t: 'xform', x: 0, y: 70, z: 0, yaw: Math.PI, pitch: 0 }); // faces +z
   s.handle(2, { t: 'xform', x: 0, y: 70, z: 10, yaw: 0, pitch: 0 });
 
-  // PvP damage blocks natural regen for the full combat tag (10s), not the
+  // PvP damage blocks natural regen for the full combat tag (30s), not the
   // 5s environmental delay — trading pot-shots can no longer out-heal a fight.
   s.handle(1, { t: 'rangedAttack', target: 2, amount: 6 });
   const afterHit = hp(2);
-  for (let i = 0; i < 8; i++) s.tickRegen(1); // 8s: past the old 5s delay
+  for (let i = 0; i < COMBAT_TAG - 2; i++) s.tickRegen(1);
   check('natural regen stays blocked through the PvP combat tag',
     hp(2) === afterHit, `hp=${hp(2)} vs ${afterHit}`);
-  for (let i = 0; i < 6; i++) s.tickRegen(1); // 14s total: tag expired
+  for (let i = 0; i < 4; i++) s.tickRegen(1); // tag expired + one regen interval
   check('regen resumes once the fight lapses', hp(2) > afterHit);
 
   // A dragging fight escalates: keep exchanging hits past BLOODLUST_START of

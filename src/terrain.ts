@@ -8,12 +8,15 @@ import { Chunk, CHUNK_X, CHUNK_Z } from './chunk';
 import { Noise2D, Noise3D, hash2, mulberry32 } from './noise';
 import { structureStamp } from './structures';
 import { VAULT_REACH, VaultStamp, vaultStamp } from './vaults';
+import { duelArenaBlockAt, DUEL_ARENA_BASE_X } from './duels';
 
 export const SEA_LEVEL = 63;
 const TREE_MARGIN = 3; // trees up to 3 blocks outside a chunk can reach into it
 const ROCK_LINE = 96;  // mountains expose bare stone above this altitude
 const SNOW_LINE = 120; // mountains get snow caps above this
 const MAX_HEIGHT = 235;
+const DUEL_STAMP_MIN_Y = 95;
+const DUEL_STAMP_MAX_Y = 117;
 
 type Species = 'oak' | 'birch' | 'spruce' | 'jungle' | 'cherry';
 interface Tree {
@@ -233,6 +236,24 @@ export class Terrain {
   fill(chunk: Chunk): void {
     const ox = chunk.cx * CHUNK_X;
     const oz = chunk.cz * CHUNK_Z;
+
+    // Ephemeral Duels arenas are deterministic structures far beyond the normal
+    // border. Fast-path generation by directly stamping authored blocks, bypassing
+    // all open-world 3D cave noise, biome calculation, ores, and structure searches.
+    if (ox >= DUEL_ARENA_BASE_X) {
+      for (let lx = 0; lx < CHUNK_X; lx++) {
+        for (let lz = 0; lz < CHUNK_Z; lz++) {
+          const wx = ox + lx, wz = oz + lz;
+          for (let y = DUEL_STAMP_MIN_Y; y <= DUEL_STAMP_MAX_Y; y++) {
+            const block = duelArenaBlockAt(wx, y, wz);
+            if (block !== null && block !== Block.Air) {
+              chunk.set(lx, y, lz, block);
+            }
+          }
+        }
+      }
+      return;
+    }
 
     for (let lx = 0; lx < CHUNK_X; lx++) {
       for (let lz = 0; lz < CHUNK_Z; lz++) {
