@@ -1127,9 +1127,10 @@ export const VAULT_LOOT: Record<VaultTier, LootEntry[]> = {
     // Pod (~12%/open) rather than losing to it, which is what 0.35 did.
     { id: Item.Heart, min: 1, max: 1, w: 0.9 },
   ],
-  // Tier II (mid Wilds): serious kit + a guaranteed Medkit/titanium base.
+  // Tier II (mid Wilds): serious kit + a guaranteed Medkit/titanium/cobalt base.
   2: [
     { id: Item.TitaniumIngot, min: 2, max: 5, w: 2.5 },
+    { id: Item.CobaltIngot, min: 2, max: 5, w: 2.5 },
     { id: Item.Bullet, min: 20, max: 40, w: 3 },
     { id: Item.Diamond, min: 1, max: 3, w: 2 },
     { id: Item.CrystalShard, min: 2, max: 5, w: 2 },
@@ -1149,6 +1150,7 @@ export const VAULT_LOOT: Record<VaultTier, LootEntry[]> = {
   // guaranteed rune on top — see vaultLoot).
   3: [
     { id: Item.TitaniumIngot, min: 4, max: 8, w: 3 },
+    { id: Item.CobaltIngot, min: 4, max: 8, w: 3 },
     { id: Item.Diamond, min: 3, max: 6, w: 2.5 },
     { id: Item.Sniper, min: 1, max: 1, w: 1.1 },
     { id: Item.BurstRifle, min: 1, max: 1, w: 1.1 },
@@ -1221,6 +1223,7 @@ export function vaultLoot(
   } else if (tier === 2) {
     out.push({ id: Item.Medkit, count: 2 });
     out.push({ id: Item.TitaniumIngot, count: 3 });
+    out.push({ id: Item.CobaltIngot, count: 2 });
     out.push({ id: Item.Bullet, count: 48 });
     // Tier II now guarantees a rune too — without it a Tier II haul could come
     // out flatly worse than a free Crashed Cargo Pod, which rolls runes at a
@@ -1230,6 +1233,7 @@ export function vaultLoot(
     out.push({ id: Item.Heart, count: 1 });
     out.push({ id: Item.Diamond, count: 4 });
     out.push({ id: Item.TitaniumIngot, count: 4 });
+    out.push({ id: Item.CobaltIngot, count: 4 });
     out.push({ id: Item.Bullet, count: 64 });
     out.push({ id: Item.Medkit, count: 2 });
     out.push({ id: RUNE_POOL[Math.floor(rng() * RUNE_POOL.length)], count: 1 });

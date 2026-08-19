@@ -81,7 +81,7 @@ export function raycastBlocks(
       z += stepZ; tMaxZ += tDeltaZ; nx = 0; ny = 0; nz = -stepZ;
     }
     const id = world.getBlock(x, y, z);
-    if (id !== Block.Air && id !== Block.Water) {
+    if (id !== Block.Air && id !== Block.Water && id !== Block.Barrier) {
       return {
         x, y, z, nx, ny, nz,
         hx: origin.x + dir.x * t, hy: origin.y + dir.y * t, hz: origin.z + dir.z * t,

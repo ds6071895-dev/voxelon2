@@ -260,7 +260,7 @@ export function buildChunkGeometry(
 
       for (let y = 0; y < maxY; y++) {
         const id = chunk.get(x, y, z);
-        if (id === Block.Air) continue;
+        if (id === Block.Air || id === Block.Barrier) continue;
         const info = BLOCKS[id];
         const isWater = id === Block.Water;
 

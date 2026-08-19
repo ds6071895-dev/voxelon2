@@ -75,8 +75,8 @@ import {
   participantHpMultiplier, encounterArmorPierce,
 } from '../vault_encounter';
 import {
-  Duels, DuelArenaBounds, DuelLobbySnapshot, DUEL_MAX_HEALTH, clampToDuelArena, duelArenaBlockAt,
-  duelArenaSolidAt, hasArenaLineOfSight, safestDuelSpawn, secureDuelToken,
+  Duels, DuelArenaBounds, DuelLobbySnapshot, DUEL_MAX_HEALTH, DUEL_MAX_PILLAR_HEIGHT, clampToDuelArena, duelArenaBlockAt,
+  duelArenaSolidAt, duelTerrainElevation, hasArenaLineOfSight, safestDuelSpawn, secureDuelToken,
 } from '../duels';
 
 // Cosmetic gunshot rebroadcast budget (see handleShot). Sized well above the
@@ -326,6 +326,8 @@ export class GameServer {
   private nextEid = 1;
   /** Invite-only minigame state is intentionally ephemeral: never serialized. */
   private readonly duels: Duels;
+  /** Placed blocks per active duel arena slot, reset on match end. */
+  private readonly duelArenaEdits = new Map<number, Map<string, number>>();
   /** Next whole-server timestamp broadcast for hidden-tab/lag clock recovery. */
   private duelClockNextAt = 0;
 
@@ -766,11 +768,12 @@ export class GameServer {
     const duelPhase = this.duels.phaseFor(id);
     if (duelPhase && duelPhase !== 'lobby') {
       // A Duels body is isolated from every open-world action/economy system.
-      // Only movement, the normalized rifle, and server-counted Medkits exist.
+      // Movement, combat (rifle + axe), server-counted Medkits, and arena block placement exist.
       if (msg.t === 'xform') return this.handleDuelTransform(p, msg);
       if (msg.t === 'shot') return this.handleDuelShot(p, msg);
       if (msg.t === 'rangedAttack') return this.handleDuelRanged(p, msg.target, msg.amount);
       if (msg.t === 'useHeal') return this.handleDuelHeal(p, msg.item);
+      if (msg.t === 'edit') return this.handleDuelEdit(p, msg.x, msg.y, msg.z, msg.block);
       return [];
     }
     // Spectators are non-interacting ghosts: drop any world-mutating / combat
@@ -849,10 +852,13 @@ export class GameServer {
       }
       case 'tpa': {
         if (p.dead || typeof msg.target !== 'string') return [];
+        if (this.duels.phaseFor(p.id) || p.duelSaved) {
+          return [{ to: id, msg: { t: 'notice', text: 'TPA is disabled during Duels.' } }];
+        }
         const name = msg.target.slice(0, 32).trim();
         const targetId = this.playerIdByName(name);
         const target = targetId !== undefined ? this.players.get(targetId) : undefined;
-        if (!target) {
+        if (!target || this.duels.phaseFor(target.id) || target.duelSaved) {
           return [{ to: id, msg: { t: 'notice', text: `"${name}" is not online.` } }];
         }
         if (target.id === p.id) {
@@ -869,12 +875,16 @@ export class GameServer {
         const req = p.tpaFrom;
         p.tpaFrom = undefined; // one shot, granted or not
         if (p.dead) return [];
+        if (this.duels.phaseFor(p.id) || p.duelSaved) {
+          return [{ to: id, msg: { t: 'notice', text: 'TPA is disabled during Duels.' } }];
+        }
         if (!req || this.worldTime - req.at > TPA_EXPIRE) {
           return [{ to: id, msg: { t: 'notice', text: 'That TPA request has expired.' } }];
         }
         const requester = this.players.get(req.id);
         // The slot id could have been recycled by a reconnect — verify the name.
-        if (!requester || requester.dead || requester.username !== req.username) {
+        if (!requester || requester.dead || requester.username !== req.username ||
+            this.duels.phaseFor(requester.id) || requester.duelSaved) {
           return [{ to: id, msg: { t: 'notice', text: `${req.username} is no longer available.` } }];
         }
         requester.x = p.x; requester.y = p.y; requester.z = p.z;
@@ -1448,10 +1458,30 @@ export class GameServer {
   private duelLoadout(to: number): Outbound {
     const slots: (ItemStack | null)[] = new Array(36).fill(null);
     slots[0] = { id: Item.BurstRifle, count: 1, loaded: 24 };
-    slots[1] = { id: Item.Medkit, count: 5 };
-    slots[2] = { id: Item.JumpBoost, count: 5 };
+    slots[1] = { id: Item.IronAxe, count: 1 };
+    slots[2] = { id: Block.OakPlanks, count: 64 };
+    slots[3] = { id: Item.Medkit, count: 5 };
+    slots[4] = { id: Item.JumpBoost, count: 5 };
     return { to, msg: { t: 'duelLoadout', slots, armor: new Array(4).fill(null),
       selected: 0, unlimitedReserve: true } };
+  }
+
+  private resetDuelArenaEdits(slot: number, memberIds?: number[]): Outbound[] {
+    const slotEdits = this.duelArenaEdits.get(slot);
+    if (!slotEdits || slotEdits.size === 0) return [];
+    const edits: { x: number; y: number; z: number; block: number }[] = [];
+    for (const key of slotEdits.keys()) {
+      const parts = key.split(',').map(Number);
+      this.edits.delete(key);
+      edits.push({ x: parts[0], y: parts[1], z: parts[2], block: Block.Air });
+    }
+    slotEdits.clear();
+    this.duelArenaEdits.delete(slot);
+    if (!memberIds || memberIds.length === 0) return [];
+    return memberIds.map((id) => ({
+      to: id,
+      msg: { t: 'editBatch', edits },
+    }));
   }
 
   private preserveOpenWorldState(p: ServerPlayer): void {
@@ -1503,6 +1533,9 @@ export class GameServer {
   private restoreDuelLobby(snapshot: DuelLobbySnapshot): Outbound[] {
     const out: Outbound[] = [];
     const restored: number[] = [];
+    if (snapshot.arena) {
+      out.push(...this.resetDuelArenaEdits(snapshot.arena.slot, snapshot.participants.map((v) => v.id)));
+    }
     for (const member of snapshot.participants) {
       const p = this.players.get(member.id);
       if (p?.duelSaved) { out.push(...this.restoreOpenWorldState(p)); restored.push(p.id); }
@@ -1540,7 +1573,9 @@ export class GameServer {
   private duelBodyClear(x: number, y: number, z: number, arena: DuelArenaBounds): boolean {
     for (const ox of [-0.28, 0.28]) for (const oz of [-0.28, 0.28]) {
       for (const oy of [0.05, 0.9, 1.75]) {
-        if (duelArenaSolidAt(x + ox, y + oy, z + oz, arena)) return false;
+        const bx = Math.floor(x + ox), by = Math.floor(y + oy), bz = Math.floor(z + oz);
+        if (duelArenaSolidAt(x + ox, y + oy, z + oz, arena) ||
+            this.edits.get(`${bx},${by},${bz}`) === Block.OakPlanks) return false;
       }
     }
     return true;
@@ -1551,7 +1586,7 @@ export class GameServer {
     arena: DuelArenaBounds,
   ): boolean {
     const distance = Math.hypot(to.x - from.x, to.y - from.y, to.z - from.z);
-    const steps = Math.min(512, Math.max(1, Math.ceil(distance * 4)));
+    const steps = Math.max(1, Math.ceil(distance * 3));
     for (let i = 1; i <= steps; i++) {
       const t = i / steps;
       if (!this.duelBodyClear(from.x + (to.x - from.x) * t,
@@ -1572,8 +1607,9 @@ export class GameServer {
     }
     p.yaw = msg.yaw; p.pitch = msg.pitch;
     p.gliding = false; p.boating = false; p.seated = false; p.sneaking = msg.sneaking === true;
-    p.held = participant.alive && msg.held === Item.BurstRifle ? Item.BurstRifle : 0;
-    p.armor = [0, 0, 0, 0]; p.aiming = participant.alive && msg.aiming === true;
+    p.held = participant.alive && (msg.held === Item.BurstRifle || msg.held === Item.IronAxe ||
+      msg.held === Block.OakPlanks || msg.held === Item.Medkit || msg.held === Item.JumpBoost) ? msg.held : 0;
+    p.armor = [0, 0, 0, 0]; p.aiming = participant.alive && msg.aiming === true && p.held === Item.BurstRifle;
     if (p.duelReloadUntil > 0 && this.worldTime >= p.duelReloadUntil) {
       p.duelLoaded = 24; p.duelReloadUntil = 0;
     }
@@ -1624,19 +1660,21 @@ export class GameServer {
     const phase = this.duels.phaseFor(attacker.id), nowMs = this.worldTime * 1000;
     if (!target || !arena || !this.duels.sameMatch(attacker.id, targetId) ||
         (phase !== 'running' && phase !== 'sudden_death') || !ap?.alive || !tp?.alive ||
-        attacker.held !== Item.BurstRifle || amount !== 5 ||
         (tp.shieldUntil !== undefined && tp.shieldUntil > nowMs)) return [];
-    const ticket = attacker.duelShotTickets.findIndex((t) => {
+    const isGun = attacker.held === Item.BurstRifle && amount === 5;
+    if (!isGun) return [];
+
+    let ticket = -1;
+    ticket = attacker.duelShotTickets.findIndex((t) => {
       if (this.worldTime - t.at > 0.4) return false;
       const vx = target.x - t.x, vy = target.y + 0.9 - t.y, vz = target.z - t.z;
       const along = vx * t.dx + vy * t.dy + vz * t.dz;
       if (!(along > 0 && along <= 58)) return false;
       const missSq = vx * vx + vy * vy + vz * vz - along * along;
-      // A little latency allowance around the standing body, but never enough
-      // to turn a shot in another lane into a valid ticket.
       return missSq <= 2.25 * 2.25;
     });
     if (ticket < 0) return [];
+
     if (!fin(attacker.x, attacker.y, attacker.z, attacker.yaw, target.x, target.y, target.z)) return [];
     const dx = target.x - attacker.x, dy = target.y - attacker.y, dz = target.z - attacker.z;
     const distance = Math.hypot(dx, dy, dz), horiz = Math.hypot(dx, dz);
@@ -1646,8 +1684,10 @@ export class GameServer {
       if (dot < 0.2) return [];
     }
     if (!hasArenaLineOfSight({ x: attacker.x, y: attacker.y + 1.5, z: attacker.z },
-      { x: target.x, y: target.y + 1.0, z: target.z }, arena)) return [];
-    attacker.duelShotTickets.splice(ticket, 1);
+      { x: target.x, y: target.y + 1.0, z: target.z }, arena,
+      (x, y, z) => this.edits.get(`${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`) === Block.OakPlanks
+    )) return [];
+    if (ticket >= 0) attacker.duelShotTickets.splice(ticket, 1);
     const dealt = Math.min(5, target.health);
     target.health = Math.max(0, target.health - 5);
     const killed = target.health <= 0;
@@ -1686,6 +1726,51 @@ export class GameServer {
     return [];
   }
 
+  private handleDuelEdit(p: ServerPlayer, x: number, y: number, z: number, block: number): Outbound[] {
+    const arena = this.duels.arenaFor(p.id), phase = this.duels.phaseFor(p.id);
+    const participant = this.duels.participantFor(p.id);
+    if (!arena || !participant?.alive || (phase !== 'running' && phase !== 'sudden_death')) return [];
+    if (!fin(x, y, z)) return [];
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    if (bx < arena.minX || bx >= arena.maxX || bz < arena.minZ || bz >= arena.maxZ) return [];
+    if (by < arena.floor || by >= arena.ceiling - 1) return [];
+
+    const lx = bx - arena.minX, lz = bz - arena.minZ;
+    const groundY = arena.floor + duelTerrainElevation(lx, lz);
+
+    // Natural arena terrain and walls are unbreakable and cannot be replaced
+    if (by <= groundY) return [];
+
+    // Max 5-block pillar height above natural ground
+    if (by > groundY + DUEL_MAX_PILLAR_HEIGHT) return [];
+
+    let slotEdits = this.duelArenaEdits.get(arena.slot);
+    if (!slotEdits) {
+      slotEdits = new Map<string, number>();
+      this.duelArenaEdits.set(arena.slot, slotEdits);
+    }
+    const key = `${bx},${by},${bz}`;
+
+    if (block === Block.OakPlanks) {
+      slotEdits.set(key, Block.OakPlanks);
+      this.edits.set(key, Block.OakPlanks);
+      return this.duels.membersOf(p.id).map((id) => ({
+        to: id,
+        msg: { t: 'edit', x: bx, y: by, z: bz, block: Block.OakPlanks },
+      }));
+    } else if (block === Block.Air || block === 0) {
+      if (!slotEdits.has(key)) return [];
+      slotEdits.delete(key);
+      this.edits.delete(key);
+      return this.duels.membersOf(p.id).map((id) => ({
+        to: id,
+        msg: { t: 'edit', x: bx, y: by, z: bz, block: Block.Air },
+      }));
+    }
+
+    return [];
+  }
+
   private duelError(to: number, code: Extract<ServerMsg, { t: 'duelError' }>['code']): Outbound[] {
     const messages: Record<Extract<ServerMsg, { t: 'duelError' }>['code'], string> = {
       invalid: 'That Duels invite is invalid or has expired.',
@@ -1718,8 +1803,12 @@ export class GameServer {
       }
       case 'duelLeave': {
         const oldPhase = this.duels.phaseFor(p.id);
+        const oldArena = this.duels.arenaFor(p.id);
         const result = this.duels.leave(p.id, now);
         const out = result.snapshot ? this.duelSnapshotOutbound(result.snapshot) : [];
+        if (result.deleted && oldArena) {
+          out.push(...this.resetDuelArenaEdits(oldArena.slot));
+        }
         if (oldPhase && oldPhase !== 'lobby') {
           out.push(...this.restoreOpenWorldState(p));
           out.push(...this.announceWorldScope([p.id]));
@@ -1741,6 +1830,7 @@ export class GameServer {
         if (!result.ok) return this.duelError(p.id, result.reason);
         const out = this.duelSnapshotOutbound(result.snapshot);
         if (result.snapshot.arena) {
+          out.push(...this.resetDuelArenaEdits(result.snapshot.arena.slot, result.snapshot.participants.map((v) => v.id)));
           for (let i = 0; i < result.snapshot.participants.length; i++) {
             const participant = result.snapshot.participants[i];
             const player = this.players.get(participant.id);
@@ -1760,6 +1850,7 @@ export class GameServer {
         const out = this.duelSnapshotOutbound(snap);
         if (snap.phase === 'lobby') out.push(...this.restoreDuelLobby(snap));
         else if (snap.phase === 'countdown' && snap.arena) {
+          out.push(...this.resetDuelArenaEdits(snap.arena.slot, snap.participants.map((v) => v.id)));
           for (let i = 0; i < snap.participants.length; i++) {
             const player = this.players.get(snap.participants[i].id);
             if (player) out.push(...this.enterDuelBody(player, snap.arena, i));
@@ -4037,10 +4128,14 @@ export class GameServer {
   snapshotFor(recipientId: number): PlayerSnapshot[] {
     const recipient = this.players.get(recipientId);
     if (!recipient) return [];
-    const visible = recipient.duelSaved
-      ? new Set(this.duels.membersOf(recipientId)) : null;
+    const inDuel = !!recipient.duelSaved || !!this.duels.phaseFor(recipientId);
+    const visible = inDuel ? new Set(this.duels.membersOf(recipientId)) : null;
     return [...this.players.values()]
-      .filter((p) => visible ? visible.has(p.id) : !p.duelSaved)
+      .filter((p) => {
+        const pInDuel = !!p.duelSaved || !!this.duels.phaseFor(p.id);
+        if (inDuel) return visible!.has(p.id);
+        return !pInDuel;
+      })
       .map((p) => ({
         id: p.id, x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
         health: p.health,
@@ -4059,7 +4154,11 @@ export class GameServer {
 
   /** Broadcasts are open-world by default. Duels traffic is always addressed
    * directly to match members, so this single gate prevents world event leaks. */
-  receivesWorldBroadcast(id: number): boolean { return !this.players.get(id)?.duelSaved; }
+  receivesWorldBroadcast(id: number): boolean {
+    const p = this.players.get(id);
+    if (!p) return false;
+    return !p.duelSaved && !this.duels.phaseFor(id);
+  }
 }
 
 function toInfo(p: ServerPlayer): PlayerInfo {

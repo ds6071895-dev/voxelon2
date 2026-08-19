@@ -164,6 +164,7 @@ export const enum Block {
   SiloPart = 214,
   InterceptorBattery = 215,
   Helipad = 216,
+  Barrier = 217,
 }
 
 export const enum Tile {
@@ -1002,6 +1003,11 @@ export const BLOCKS: Record<number, BlockInfo> = {
     name: 'Helipad', hardness: 3.5, emission: 6, shape: 'slab',
     solid: true, opaque: false, occludes: false,
     top: Tile.HelipadTop, side: Tile.HelipadSide,
+  }),
+  [Block.Barrier]: def({
+    name: 'Barrier', hardness: -1,
+    solid: true, opaque: false, occludes: false,
+    top: Tile.Glass,
   }),
 };
 

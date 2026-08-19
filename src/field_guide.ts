@@ -187,8 +187,8 @@ function progressionGuideSections(): FieldGuideSection[] {
           ]) + warning('Armor does not replace movement', 'Vault hazards increasingly pierce armor: about one quarter in Tier I, just under half in Tier II, and three fifths in Tier III.')),
         entry('boss-movement', 'One movement rule for every boss', ['boss', 'warden', 'queen', 'colossus', 'seer', 'artificer'],
           table(['Boss', 'How to beat its arena'], bosses)),
-        entry('tier-two-rewards', 'What Tier II adds', ['tier ii reward', 'titanium', 'rune', 'warfare xp'],
-          `<p>A qualifying Tier II victory grants <strong>750 Warfare XP</strong>. Its chest guarantees the relic, 2 Medkits, 3 Titanium, 48 Bullets, and one rune, plus ten weighted picks.</p>` +
+        entry('tier-two-rewards', 'What Tier II adds', ['tier ii reward', 'titanium', 'cobalt', 'rune', 'warfare xp'],
+          `<p>A qualifying Tier II victory grants <strong>750 Warfare XP</strong>. Its chest guarantees the relic, 2 Medkits, 3 Titanium, 2 Cobalt, 48 Bullets, and one rune, plus ten weighted picks.</p>` +
           ready(['Diamond gear in progress', 'A Tier II boss you can clear repeatedly', 'Titanium and runes stored', 'A safe Wilds supply route'],
             'Secure cobalt and oil, then automate the supply line before Tier III.')),
       ],
@@ -214,7 +214,7 @@ function progressionGuideSections(): FieldGuideSection[] {
           steps(['Repair diamond or preferably titanium armor.', 'Socket useful runes and carry 4 to 6 Medkits.', 'Bring roughly 700 to 1,000 rounds.', 'Establish a Respawn Beacon and spare loadout near the vault.', 'Assign damage, summon control, healing, and revive roles.', 'Mark the return route before entering.']) +
           warning('The journey is part of the encounter', 'Carry map tools and mobility gear, but leave irreplaceable spare items in the recovery cache.')),
         entry('tier-three-rewards', 'Hearts and the Tier III haul', ['heart', 'lifesteal', 'reward', 'elimination', 'revival'],
-          `<p>A qualifying Tier III victory grants <strong>1,500 Warfare XP</strong>. Its chest guarantees a relic, 1 Heart, 4 Diamonds, 4 Titanium, 64 Bullets, 2 Medkits, and one rune, plus twelve weighted picks.</p>` +
+          `<p>A qualifying Tier III victory grants <strong>1,500 Warfare XP</strong>. Its chest guarantees a relic, 1 Heart, 4 Diamonds, 4 Titanium, 4 Cobalt, 64 Bullets, 2 Medkits, and one rune, plus twelve weighted picks.</p>` +
           list(['A Heart raises maximum health.', 'PvP may transfer Hearts between players.', 'Zero Hearts causes elimination.', 'Protect spare Hearts and Revival Beacons in a faction cache.'])),
         entry('greater-rune-route', 'Farm and forge Greater Runes', ['greater rune', 'relic', 'socket', 'craft'],
           `<p>Two matching boss relics, the base rune they improve, and a Diamond forge one Greater Rune. Since each haul contains one relic, every Greater Rune requires at least two clears of that boss.</p>` +
@@ -385,8 +385,8 @@ export function fieldGuideSections(): FieldGuideSection[] {
           `<p>Every haul is guaranteed to contain that boss's <strong>relic</strong>, plus ammunition, healing and materials scaled to the tier. The guaranteed ammo is deliberate: a boss should always refund more than it costs you to kill it.</p>` +
           table(['Tier', 'Guaranteed on top of the relic', 'Weighted picks'], [
             ['I', '3 Bandages, 32 Bullets', '8'],
-            ['II', '2 Medkits, 3 Titanium, 48 Bullets, 1 rune', '10'],
-            ['III', '1 Heart, 4 Diamonds, 4 Titanium, 64 Bullets, 2 Medkits, 1 rune', '12'],
+            ['II', '2 Medkits, 3 Titanium, 2 Cobalt, 48 Bullets, 1 rune', '10'],
+            ['III', '1 Heart, 4 Diamonds, 4 Titanium, 4 Cobalt, 64 Bullets, 2 Medkits, 1 rune', '12'],
           ]) +
           tip('Hearts', 'A vault boss is the best Heart source in the game — better than a Crashed Cargo Pod, which costs you nothing to open. Tier III guarantees one outright.')),
         entry('greater-runes', 'Relics and Greater Runes', ['relic', 'greater rune', 'socket', 'armor upgrade', 'craft', 'farm'],

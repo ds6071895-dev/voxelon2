@@ -1255,8 +1255,7 @@ check('furnace smelts ore/sand/log but not removed foods',
 
   check('titanium ore smelts to a titanium ingot', SMELT[Block.TitaniumOre] === Item.TitaniumIngot);
 
-  // Titanium ore generates only deep under mountains: find the tallest column
-  // near origin, then confirm it appears in that mountain's chunk cluster.
+  // Titanium and cobalt do not generate naturally in terrain — they come from dungeons/chests
   let bestH = 0, bcx = 0, bcz = 0;
   for (let cx = -64; cx <= 64; cx++) {
     for (let cz = -64; cz <= 64; cz++) {
@@ -1264,19 +1263,21 @@ check('furnace smelts ore/sand/log but not removed foods',
       if (h > bestH) { bestH = h; bcx = cx; bcz = cz; }
     }
   }
-  let titanium = 0;
+  let titanium = 0, cobalt = 0;
   for (let dx = -2; dx <= 2; dx++) {
     for (let dz = -2; dz <= 2; dz++) {
       const c = new Chunk(bcx + dx, bcz + dz);
       terrain.fill(c);
       for (let x = 0; x < 16; x++)
         for (let y = 0; y < 30; y++)
-          for (let z = 0; z < 16; z++)
+          for (let z = 0; z < 16; z++) {
             if (c.get(x, y, z) === Block.TitaniumOre) titanium++;
+            if (c.get(x, y, z) === Block.CobaltOre) cobalt++;
+          }
     }
   }
-  check('titanium ore generates deep under mountains', titanium > 0,
-    `peak height ${bestH}, found ${titanium}`);
+  check('titanium and cobalt ores do not generate naturally in terrain', titanium === 0 && cobalt === 0,
+    `found titanium=${titanium}, cobalt=${cobalt}`);
 }
 
 // --- Guns: recipes + ammo helpers + server-validated ranged PvP --------------------
@@ -1660,9 +1661,7 @@ check('furnace smelts ore/sand/log but not removed foods',
           }
     }
   }
-  check('cobalt ore generates', cobalt > 0, `count=${cobalt}`);
-  check('cobalt stays in its deep band (y<=30)', cobaltDepthViolations === 0);
-  check('cobalt is rarer than iron', cobalt < iron, `cobalt=${cobalt} iron=${iron}`);
+  check('cobalt ore does not generate naturally (dungeon loot ingot progression)', cobalt === 0, `count=${cobalt}`);
   check('cobalt smelts to a cobalt ingot', SMELT[Block.CobaltOre] === Item.CobaltIngot);
   check('cobalt needs an iron pickaxe (tier 2)',
     BLOCKS[Block.CobaltOre].minTier === 2 && BLOCKS[Block.CobaltOre].requiresTool);
@@ -1707,16 +1706,14 @@ check('furnace smelts ore/sand/log but not removed foods',
     const rich = {
       [Block.Stone]: 1, [Block.CoalOre]: 0.5, [Block.IronOre]: 0.4,
       [Block.GoldOre]: 0.9, [Block.RedstoneOre]: 0.9, [Block.DiamondOre]: 0.9,
-      [Block.TitaniumOre]: 0.9,
     };
     const m = newMachine(MachineType.Autominer);
     const r1 = autominerRates(m, rich);
     check('autominer rate is proportional to richness',
       Math.abs(r1[Block.Stone] - productionRate(1) * 1) < 1e-9 &&
       Math.abs(r1[Block.CoalOre] - productionRate(1) * 0.5) < 1e-9);
-    check('level 1 filter gates out gold/redstone/diamond/titanium',
-      r1[Block.GoldOre] === undefined && r1[Block.DiamondOre] === undefined &&
-      r1[Block.TitaniumOre] === undefined);
+    check('level 1 filter gates out gold/redstone/diamond',
+      r1[Block.GoldOre] === undefined && r1[Block.DiamondOre] === undefined);
     // Enabling an ungated ore is rejected (masked to the level tier).
     setFilter(m, 0b1111111);
     check('filter cannot enable an ore above the machine level',
@@ -1730,9 +1727,8 @@ check('furnace smelts ore/sand/log but not removed foods',
       autominerRates(m, rich)[Block.GoldOre] > 0 &&
       autominerRates(m, rich)[Block.DiamondOre] === undefined);
     m.level = 30; setFilter(m, 0b1111111);
-    check('high tier (L30) unlocks diamond + titanium',
-      autominerRates(m, rich)[Block.DiamondOre] > 0 &&
-      autominerRates(m, rich)[Block.TitaniumOre] > 0);
+    check('high tier (L30) unlocks diamond',
+      autominerRates(m, rich)[Block.DiamondOre] > 0);
     check('upgrade cost grows with level (geometric)',
       (upgradeCost(newMachine(MachineType.Autominer), 'production')![Item.IronIngot]) <
       (upgradeCost({ ...newMachine(MachineType.Autominer), level: 30 }, 'production')![Item.IronIngot]));
@@ -4180,7 +4176,11 @@ const lairs = new Map<VaultBossKind, VaultStamp>();
     ([1, 2, 3] as const).every((tier) =>
       VAULT_LOOT[tier].every((e) => e.w > 0 && e.min >= 1 && e.min <= e.max && !!ITEMS[e.id])) &&
     VAULT_LOOT[3].some((e) => e.id === Item.TitaniumIngot) &&
-    !VAULT_LOOT[1].some((e) => e.id === Item.TitaniumIngot));
+    VAULT_LOOT[3].some((e) => e.id === Item.CobaltIngot) &&
+    VAULT_LOOT[2].some((e) => e.id === Item.TitaniumIngot) &&
+    VAULT_LOOT[2].some((e) => e.id === Item.CobaltIngot) &&
+    !VAULT_LOOT[1].some((e) => e.id === Item.TitaniumIngot) &&
+    !VAULT_LOOT[1].some((e) => e.id === Item.CobaltIngot));
   const a = vaultLoot(1337, 9, -16, 2, 'Alice');
   check('vault loot is a pure function of (seed, vault, username)',
     JSON.stringify(a) === JSON.stringify(vaultLoot(1337, 9, -16, 2, 'Alice')) && a.length >= 4);
@@ -4189,6 +4189,15 @@ const lairs = new Map<VaultBossKind, VaultStamp>();
     return users.some((u) =>
       JSON.stringify(vaultLoot(1337, 9, -16, 2, u)) !== JSON.stringify(a));
   })());
+  check('Tier II and III guarantee titanium and cobalt ingots',
+    ['P1', 'P2', 'P3'].every((u) => {
+      const loot2 = vaultLoot(1337, 10, 10, 2, u);
+      const loot3 = vaultLoot(1337, 100, 100, 3, u);
+      return loot2.some((s) => s.id === Item.TitaniumIngot) &&
+        loot2.some((s) => s.id === Item.CobaltIngot) &&
+        loot3.some((s) => s.id === Item.TitaniumIngot) &&
+        loot3.some((s) => s.id === Item.CobaltIngot);
+    }));
   check('Tier III ALWAYS grants a Heart',
     ['P1', 'P2', 'P3', 'P4', 'P5'].every((u) =>
       vaultLoot(1337, 100, 100, 3, u).some((s) => s.id === Item.Heart)));

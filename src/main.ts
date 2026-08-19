@@ -84,7 +84,8 @@ import { MissileCam, MissileCamLaunch } from './missilecam';
 import { MissileModels, StrategicModels } from './warfare_models';
 import { VehicleModels } from './vehiclemodels';
 import {
-  DUEL_ROUND_MS, DUEL_MAX_HEALTH, type DuelLobbySnapshot, type DuelParticipant,
+  DUEL_ROUND_MS, DUEL_MAX_HEALTH, DUEL_MAX_PILLAR_HEIGHT, duelTerrainElevation,
+  type DuelLobbySnapshot, type DuelParticipant,
   type DuelResult, type DuelArenaBounds, clampToDuelArena,
   duelTokenFromUrl, withDuelToken,
 } from './duels';
@@ -1480,6 +1481,7 @@ function enterTitle(): void {
   document.body.classList.remove('in-game');
   overlay.classList.remove('hidden');
   pauseEl.style.display = 'none';
+  cleanupDuelSession(true);
   onVaultTransition(null);
 }
 
@@ -2356,6 +2358,43 @@ function updateDuelHud(): void {
   if (duelScoresHeld) renderDuelScoreboard();
 }
 
+function cleanupDuelSession(restoreState = true): void {
+  duelArenaActive = false;
+  duelActiveBounds = null;
+  duelArenaReadySent = false;
+  duelUnlimitedReserve = false;
+  duelSpectating = false;
+  duelScoresHeld = false;
+  duelResultData = null;
+  duelSnapshot = null;
+  duelInviteToken = '';
+  pendingDuelToken = '';
+
+  duelMatchHud.classList.remove('visible');
+  duelScoresTouch.classList.remove('visible');
+  duelScoreboard.classList.remove('visible');
+  duelResultEl.classList.remove('visible');
+  duelCenterCue.style.display = 'none';
+
+  if (typeof closeMinigames === 'function') closeMinigames();
+
+  if (restoreState && duelLocalFallback) {
+    const fallback = duelLocalFallback;
+    duelLocalFallback = null;
+    inventory.restore(fallback.state);
+    player.pos.set(fallback.x, fallback.y, fallback.z);
+    player.yaw = fallback.yaw;
+    player.pitch = fallback.pitch;
+    player.maxHealth = maxHealthFor(localHearts);
+    player.health = fallback.health;
+    player.dead = fallback.dead;
+    applyLocalMode(fallback.mode);
+    lastHealth = fallback.health;
+  } else {
+    duelLocalFallback = null;
+  }
+}
+
 function duelControlBlocked(): boolean {
   if (!duelArenaActive || !duelSnapshot) return false;
   return duelSnapshot.phase === 'countdown' ||
@@ -2647,9 +2686,9 @@ const titleCharacterPreview = (() => {
   previewRenderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
   host.appendChild(previewRenderer.domElement);
   const previewScene = new THREE.Scene();
-  const previewCam = new THREE.PerspectiveCamera(36, 1, 0.1, 20);
-  previewCam.position.set(0, 1.15, 3.25);
-  previewCam.lookAt(0, 1.02, 0);
+  const previewCam = new THREE.PerspectiveCamera(38, 1, 0.1, 20);
+  previewCam.position.set(0, 1.08, 3.85);
+  previewCam.lookAt(0, 1.0, 0);
   let body: AvatarBody | null = null;
   let pointerX = 0;
   let pointerY = 0;
@@ -3102,29 +3141,7 @@ document.getElementById('quit-btn')!.addEventListener('click', () => {
   vehicleHud.setRope(false);
   if (duelArenaActive || duelSnapshot) {
     net.sendDuelLeave();
-    duelArenaActive = false;
-    duelUnlimitedReserve = false;
-    duelActiveBounds = null;
-    duelArenaReadySent = false;
-    duelSpectating = false;
-    duelResultData = null;
-    duelSnapshot = null;
-    duelInviteToken = '';
-    pendingDuelToken = '';
-    duelResultEl.classList.remove('visible');
-    duelMatchHud.classList.remove('visible');
-    duelScoresTouch.classList.remove('visible');
-    duelCenterCue.style.display = 'none';
-    if (duelLocalFallback) {
-      inventory.restore(duelLocalFallback.state);
-      player.pos.set(duelLocalFallback.x, duelLocalFallback.y, duelLocalFallback.z);
-      player.yaw = duelLocalFallback.yaw;
-      player.pitch = duelLocalFallback.pitch;
-      player.health = duelLocalFallback.health;
-      player.dead = duelLocalFallback.dead;
-      applyLocalMode(duelLocalFallback.mode);
-      duelLocalFallback = null;
-    }
+    cleanupDuelSession(true);
   }
   pushStateSave();
   enterTitle();
@@ -5087,21 +5104,10 @@ net.onDisconnect = () => {
   if (pendingDuelRetry) window.clearTimeout(pendingDuelRetry); pendingDuelRetry = 0;
   pendingDuelAttempted = false;
   refreshDuelsAvailability();
-  if (duelArenaActive) {
-    const fallback = duelLocalFallback;
-    duelArenaActive = false; duelActiveBounds = null; duelArenaReadySent = false;
-    duelUnlimitedReserve = false; duelSpectating = false;
-    duelResultData = null; duelResultEl.classList.remove('visible');
-    duelMatchHud.classList.remove('visible'); duelScoresTouch.classList.remove('visible');
-    if (fallback) {
-      inventory.restore(fallback.state);
-      player.pos.set(fallback.x, fallback.y, fallback.z);
-      player.yaw = fallback.yaw; player.pitch = fallback.pitch;
-      player.maxHealth = maxHealthFor(localHearts); player.health = fallback.health;
-      player.dead = fallback.dead; applyLocalMode(fallback.mode); lastHealth = fallback.health;
-      pendingTeleport = { x: fallback.x, y: fallback.y, z: fallback.z, started: worldTimeLocal };
-    }
-    duelSnapshot = null; duelLocalFallback = null; input.unlock(); enterTitle();
+  if (duelArenaActive || duelSnapshot) {
+    cleanupDuelSession(true);
+    input.unlock();
+    enterTitle();
     showNotice('Duels connection lost — your open-world state was kept safe.');
   }
   player.damageSink = undefined;
@@ -5156,6 +5162,23 @@ interaction.onEdit = (x, y, z, b) => {
   else if (b === Block.InterceptorBattery) placeBattery(x, y, z);
 };
 interaction.canPlace = (x, y, z) => {
+  if (duelArenaActive && duelActiveBounds) {
+    if (duelSnapshot?.phase !== 'running' && duelSnapshot?.phase !== 'sudden_death') return false;
+    const held = inventory.selectedStack;
+    if (held?.id !== Block.OakPlanks) return false;
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    if (bx < duelActiveBounds.minX || bx >= duelActiveBounds.maxX ||
+        bz < duelActiveBounds.minZ || bz >= duelActiveBounds.maxZ) return false;
+    if (by < duelActiveBounds.floor || by >= duelActiveBounds.ceiling - 1) return false;
+    const lx = bx - duelActiveBounds.minX, lz = bz - duelActiveBounds.minZ;
+    const groundY = duelActiveBounds.floor + duelTerrainElevation(lx, lz);
+    if (by <= groundY) return false;
+    if (by > groundY + DUEL_MAX_PILLAR_HEIGHT) {
+      showNotice('Maximum pillar height in Duels is 5 blocks.');
+      return false;
+    }
+    return true;
+  }
   if (localVaultEncounter && curVault && blockInsideArena(curVault, x, y, z)) return false;
   // Strategic hardware is blueprint-gated, faction-capped and spaced apart —
   // refuse the placement here rather than letting a block appear and vanish.
@@ -5186,6 +5209,17 @@ interaction.canPlace = (x, y, z) => {
   return true;
 };
 interaction.canEdit = (x, y, z) => {
+  if (duelArenaActive && duelActiveBounds) {
+    if (duelSnapshot?.phase !== 'running' && duelSnapshot?.phase !== 'sudden_death') return false;
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    if (bx < duelActiveBounds.minX || bx >= duelActiveBounds.maxX ||
+        bz < duelActiveBounds.minZ || bz >= duelActiveBounds.maxZ) return false;
+    const lx = bx - duelActiveBounds.minX, lz = bz - duelActiveBounds.minZ;
+    const groundY = duelActiveBounds.floor + duelTerrainElevation(lx, lz);
+    if (by <= groundY) return false;
+    const block = world.getBlock(x, y, z);
+    return block === Block.OakPlanks;
+  }
   const block = world.getBlock(x, y, z);
   if (block === Block.MobSpawner || block === Block.VaultChest) return false;
   return !(encounterSnapshot && curVault && blockInsideArena(curVault, x, y, z));

@@ -31,15 +31,12 @@ const ORES: [Block, number, number, number, number, number][] = [
   [Block.GoldOre, 4, 4, 32, 4, 6],
   [Block.RedstoneOre, 6, 4, 16, 4, 8],
   [Block.DiamondOre, 2, 4, 16, 4, 7],
-  // Cobalt: a deep, rare ore (rarer than iron — fewer, smaller veins) in its
-  // own low Y band, feeding the oil-derrick crafting chain.
-  [Block.CobaltOre, 3, 4, 30, 3, 6],
 ];
 
 /** Filter ores an Autominer can be configured to drill (matches its UI). */
 export const AUTOMINER_ORES: Block[] = [
   Block.Stone, Block.CoalOre, Block.IronOre, Block.GoldOre,
-  Block.RedstoneOre, Block.DiamondOre, Block.TitaniumOre,
+  Block.RedstoneOre, Block.DiamondOre,
 ];
 
 export class Terrain {
@@ -516,23 +513,6 @@ export class Terrain {
           else if (axis < 0.67) z = Math.min(15, Math.max(0, z + (rng() < 0.5 ? 1 : -1)));
           else y = Math.min(maxY, Math.max(minY, y + (rng() < 0.5 ? 1 : -1)));
         }
-      }
-    }
-
-    // Titanium: the rare end-game armor ore, found deep *under mountains* only
-    // (columns at or above the bare-rock line), so it's worth the climb + dig.
-    for (let a = 0; a < 8; a++) {
-      let x = Math.floor(rng() * 16);
-      let z = Math.floor(rng() * 16);
-      let y = 6 + Math.floor(rng() * 23); // y 6..28
-      const size = 3 + Math.floor(rng() * 4);
-      if (this.height(chunk.cx * CHUNK_X + x, chunk.cz * CHUNK_Z + z) < ROCK_LINE) continue;
-      for (let i = 0; i < size; i++) {
-        if (chunk.get(x, y, z) === Block.Stone) chunk.set(x, y, z, Block.TitaniumOre);
-        const axis = rng();
-        if (axis < 0.34) x = Math.min(15, Math.max(0, x + (rng() < 0.5 ? 1 : -1)));
-        else if (axis < 0.67) z = Math.min(15, Math.max(0, z + (rng() < 0.5 ? 1 : -1)));
-        else y = Math.min(28, Math.max(6, y + (rng() < 0.5 ? 1 : -1)));
       }
     }
   }

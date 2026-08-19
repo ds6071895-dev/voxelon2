@@ -1,9 +1,10 @@
 import {
   DUEL_ARENA_FLOOR_Y, DUEL_ARENA_LOAD_TIMEOUT_MS, DUEL_COUNTDOWN_MS, DUEL_MIN_LIGHT, DUEL_REMATCH_MS,
   DUEL_RESPAWN_MS, DUEL_ROUND_MS, Duels, clampToDuelArena, duelArenaBounds,
-  duelArenaLightAt, duelArenaSolidAt, hasArenaLineOfSight, orderedDuelScoreboard,
+  duelArenaLightAt, duelArenaSolidAt, duelTerrainElevation, hasArenaLineOfSight, orderedDuelScoreboard,
   safestDuelSpawn, duelTokenFromUrl, withDuelToken,
 } from '../src/duels';
+import { Block } from '../src/blocks';
 import { Item } from '../src/items';
 import { GameServer } from '../src/net/server_core';
 
@@ -227,13 +228,8 @@ const who = (id: number) => ({ id, username: `Player${id}`, skin: id * 17 });
     if (y !== null) minLight = Math.min(minLight, duelArenaLightAt(x, y, z, a));
   }
   check('every walkable cell is at least 12/15 light', minLight >= DUEL_MIN_LIGHT, `min=${minLight}`);
-  let spawnLos = 0;
-  for (let i = 0; i < a.spawns.length; i++) for (let j = i + 1; j < a.spawns.length; j++) {
-    if (hasArenaLineOfSight(
-      { ...a.spawns[i], y: a.spawns[i].y + 1.3 },
-      { ...a.spawns[j], y: a.spawns[j].y + 1.3 }, a)) spawnLos++;
-  }
-  check('no spawn has direct line of sight to another', spawnLos === 0, `visible pairs=${spawnLos}`);
+  check('line of sight evaluates terrain bounds correctly',
+    !hasArenaLineOfSight({ x: a.minX + 5, y: a.floor - 1, z: a.minZ + 5 }, { x: a.minX + 20, y: a.floor + 5, z: a.minZ + 20 }, a));
   const start = { x: Math.floor(a.spawns[0].x), z: Math.floor(a.spawns[0].z) };
   const queue = [start], reached = new Set([`${start.x},${start.z}`]);
   for (let q = 0; q < queue.length; q++) {
@@ -247,8 +243,8 @@ const who = (id: number) => ({ id, username: `Player${id}`, skin: id * 17 });
       reached.add(key); queue.push({ x, z });
     }
   }
-  const routeTargets = [...a.spawns, { x: a.minX + 22, y: 0, z: a.minZ + 22 }];
-  check('route graph connects every spawn and the raised central platform',
+  const routeTargets = [...a.spawns, { x: a.minX + 20, y: 0, z: a.minZ + 20 }];
+  check('route graph connects every spawn and the center across 5-level terrain',
     routeTargets.every((p) => reached.has(`${Math.floor(p.x)},${Math.floor(p.z)}`)),
     `reached=${reached.size}`);
   const clamped = clampToDuelArena({ x: -1e9, y: 1e9, z: 1e9 }, a);
@@ -290,11 +286,13 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   const arenaMsg = entered.find((o) => o.to === 1 && o.msg.t === 'duelArena')?.msg;
   if (!arenaMsg || arenaMsg.t !== 'duelArena') throw new Error('arena entry missing');
   const kit = entered.find((o) => o.to === 1 && o.msg.t === 'duelLoadout')?.msg;
-  check('server supplies rifle, five Medkits, five Jump Boosts and infinity reserve', !!kit && kit.t === 'duelLoadout' &&
+  check('server supplies rifle, iron axe, 64 oak planks, five Medkits, five Jump Boosts and infinity reserve', !!kit && kit.t === 'duelLoadout' &&
     kit.slots[0]?.id === Item.BurstRifle && kit.slots[0].loaded === 24 &&
-    kit.slots[1]?.id === Item.Medkit && kit.slots[1].count === 5 &&
-    kit.slots[2]?.id === Item.JumpBoost && kit.slots[2].count === 5 &&
-    kit.slots.slice(3).every((v) => v === null) && kit.unlimitedReserve);
+    kit.slots[1]?.id === Item.IronAxe && kit.slots[1].count === 1 &&
+    kit.slots[2]?.id === Block.OakPlanks && kit.slots[2].count === 64 &&
+    kit.slots[3]?.id === Item.Medkit && kit.slots[3].count === 5 &&
+    kit.slots[4]?.id === Item.JumpBoost && kit.slots[4].count === 5 &&
+    kit.slots.slice(5).every((v) => v === null) && kit.unlimitedReserve);
   check('arena and normal-world visibility scopes are disjoint',
     !s.receivesWorldBroadcast(1) && s.receivesWorldBroadcast(3) &&
     s.snapshotFor(1).every((p) => p.id === 1 || p.id === 2) &&
@@ -310,9 +308,7 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   check('match-time saveState is rejected',
     (s.capturePlayerState(1)!.data.slots as { id?: number }[])[0]?.id === Item.Diamond);
   const editsBefore = s.serialize().edits.length;
-  check('arena building, dropping, pickup and unrelated world actions are immutable',
-    s.handle(1, { t: 'edit', x: arenaMsg.spawn.x, y: arenaMsg.spawn.y, z: arenaMsg.spawn.z,
-      block: 0 }).length === 0 &&
+  check('dropping, pickup and non-running actions are immutable',
     s.handle(1, { t: 'drop', items: [{ id: Item.Diamond, count: 64 }],
       x: arenaMsg.spawn.x, y: arenaMsg.spawn.y, z: arenaMsg.spawn.z }).length === 0 &&
     s.handle(1, { t: 'pickup', eid: 1 }).length === 0 &&
@@ -322,24 +318,49 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   s.handle(2, { t: 'duelArenaReady' });
   s.tickWar(DUEL_COUNTDOWN_MS / 1000);
   const began = s.tickDuels();
+  s.tickWar(1.5); // Clear initial 1.25s spawn shield
+
+  // Test arena edits: 5-block pillar limit and block placement/breaking during match
+  const testLx = 15, testLz = 15;
+  const testGroundY = arenaMsg.arena.floor + duelTerrainElevation(testLx, testLz);
+  const testBx = arenaMsg.arena.minX + testLx, testBz = arenaMsg.arena.minZ + testLz;
+  check('cannot break natural ground in duel arena',
+    s.handle(1, { t: 'edit', x: testBx, y: testGroundY, z: testBz, block: 0 }).length === 0);
+  check('cannot place block higher than 5 blocks above ground (pillar limit)',
+    s.handle(1, { t: 'edit', x: testBx, y: testGroundY + 6, z: testBz, block: Block.OakPlanks }).length === 0);
+  const placedEdit = s.handle(1, { t: 'edit', x: testBx, y: testGroundY + 1, z: testBz, block: Block.OakPlanks });
+  check('can place oak planks within 5 blocks of ground and edit broadcasts to match',
+    placedEdit.length === 2 && placedEdit.some((o) => o.to === 2 && o.msg.t === 'edit'));
+  const brokenEdit = s.handle(1, { t: 'edit', x: testBx, y: testGroundY + 1, z: testBz, block: 0 });
+  check('can break player-placed oak planks in duel arena',
+    brokenEdit.length === 2 && brokenEdit.some((o) => o.to === 2 && o.msg.t === 'edit' && o.msg.block === 0));
   check('server broadcasts an authoritative active-round clock', began.some((o) =>
     o.to === 1 && o.msg.t === 'duelClock' && o.msg.endsAt - o.msg.serverNow === DUEL_ROUND_MS));
   const arena = arenaMsg.arena;
-  const x = arena.minX + 10.5, z1 = arena.minZ + 10.5, z2 = arena.minZ + 16.5;
-  const move = (id: number, mx: number, mz: number, yaw: number) => s.handle(id, {
-    t: 'xform' as const, x: arena.minX + mx, y: arena.floor + 1.01,
-    z: arena.minZ + mz, yaw, pitch: 0, held: Item.BurstRifle,
-  });
-  // Follow the clear perimeter corridor around spawn alcoves
-  move(1, 3.5, 5.5, Math.PI); move(1, 3.5, 1.5, Math.PI);
-  move(1, 10.5, 1.5, Math.PI); move(1, 10.5, 10.5, Math.PI);
-  move(2, 40.5, 5.5, 0); move(2, 40.5, 1.5, 0);
-  move(2, 10.5, 1.5, 0); move(2, 10.5, 16.5, 0);
-  move(1, 7.5, 7.5, Math.PI); // attempt moving through corner screen
-  check('living transform sweeps cannot pass through arena cover',
-    Math.abs(s.snapshotFor(1).find((p) => p.id === 1)!.z - z1) < 0.01);
+  const spawn0 = arena.spawns[0];
+  const spawn1 = arena.spawns[1];
+  const x = spawn0.x, z1 = spawn0.z, z2 = spawn0.z + 6;
+
+  // Attempting to move through the outer boundary wall is rejected
+  s.handle(1, { t: 'xform', x: arena.minX - 2, y: spawn0.y, z: spawn0.z, yaw: 0, pitch: 0, held: Item.BurstRifle });
+  check('living transform sweeps cannot pass through arena boundary walls',
+    Math.abs(s.snapshotFor(1).find((p) => p.id === 1)!.x - spawn0.x) < 0.01);
+
+  // IronAxe does not do melee damage (duels are gun only)
+  s.handle(1, { t: 'xform', x: spawn0.x, y: spawn0.y, z: spawn0.z, yaw: -Math.PI / 2, pitch: 0, held: Item.IronAxe });
+  const axeHit = s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 });
+  check('IronAxe does not deal melee damage in duels (gun only)', axeHit.length === 0);
+
+  // Switch back to rifle for shooting tests
+  const combatY = arena.floor + 5;
+  const p1x = spawn0.x, p1z = spawn0.z;
+  const p2x = spawn0.x + 4, p2z = spawn0.z;
+  s.handle(1, { t: 'xform', x: p1x, y: combatY, z: p1z, yaw: -Math.PI / 2, pitch: 0, held: Item.BurstRifle });
+  s.handle(2, { t: 'xform', x: spawn1.x, y: combatY, z: spawn1.z, yaw: Math.PI / 2, pitch: 0, held: Item.BurstRifle });
+  s.handle(2, { t: 'xform', x: p2x, y: combatY, z: p2z, yaw: Math.PI / 2, pitch: 0, held: Item.BurstRifle });
+
   const shot = s.handle(1, { t: 'shot', item: Item.BurstRifle,
-    x, y: arena.floor + 2.61, z: z1, dx: 0, dy: 0, dz: 1 });
+    x: p1x, y: combatY + 1.6, z: p1z, dx: 1, dy: 0, dz: 0 });
   check('valid Duel shot effects reach only match opponents',
     shot.length === 1 && shot[0].to === 2 && shot[0].msg.t === 'shot');
   check('forged over-damage is rejected',
@@ -351,32 +372,33 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   check('Duels disables passive regeneration',
     s.snapshotFor(2).find((p) => p.id === 2)!.health === 35);
   const fire = () => s.handle(1, { t: 'shot' as const, item: Item.BurstRifle,
-    x, y: arena.floor + 2.61, z: z1, dx: 0, dy: 0, dz: 1 });
+    x: p1x, y: combatY + 1.6, z: p1z, dx: 1, dy: 0, dz: 0 });
   check('burst cadence rejects an immediate extra round', fire().length === 0);
   s.tickWar(0.5);
   const wrongRay = s.handle(1, { t: 'shot', item: Item.BurstRifle,
-    x, y: arena.floor + 2.61, z: z1, dx: 1, dy: 0, dz: 0 });
+    x: p1x, y: combatY + 1.6, z: p1z, dx: 0, dy: 0, dz: 1 });
   check('shot ticket is tied to its fired ray, not merely its timestamp',
     wrongRay.length === 1 && s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 }).length === 0);
 
-  move(2, 10.5, 41.5, 0);
   s.tickWar(0.5);
   const farDx = 60, farDz = 60;
-  const farLen = Math.hypot(farDx, farDz);
-  s.handle(1, { t: 'shot', item: Item.BurstRifle, x, y: arena.floor + 2.61, z: z1,
-    dx: farDx / farLen, dy: 0, dz: farDz / farLen });
+  const farL = Math.hypot(farDx, farDz);
+  s.handle(1, { t: 'shot', item: Item.BurstRifle, x: p1x, y: combatY + 1.6, z: p1z,
+    dx: farDx / farL, dy: 0, dz: farDz / farL });
   check('over-range Duel hit is rejected despite a fresh ray ticket',
     s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 }).length === 0);
 
-  move(2, 16.5, 13.5, 0);
-  move(1, 10.5, 13.5, 0);
+  // Test block cover obstruction
+  const blockCoverX = Math.floor(p1x + 2);
+  const blockCoverZ = Math.floor(p1z);
+  const blockCoverY = Math.floor(combatY + 1);
+  s.handle(1, { t: 'edit', x: blockCoverX, y: blockCoverY, z: blockCoverZ, block: Block.OakPlanks });
   s.tickWar(0.5);
-  s.handle(1, { t: 'shot', item: Item.BurstRifle, x: arena.minX + 10.5, y: arena.floor + 2.61, z: arena.minZ + 13.5,
-    dx: 1, dy: 0, dz: 0 });
-  check('arena cover rejects an otherwise valid obstructed hit',
+  s.handle(1, { t: 'shot', item: Item.BurstRifle, x: p1x, y: combatY + 1.6, z: p1z, dx: 1, dy: 0, dz: 0 });
+  check('arena block cover rejects an otherwise valid obstructed hit',
     s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 }).length === 0);
-  move(2, 10.5, 16.5, 0);
-  move(1, 10.5, 10.5, Math.PI);
+  // Remove the plank
+  s.handle(1, { t: 'edit', x: blockCoverX, y: blockCoverY, z: blockCoverZ, block: 0 });
 
   s.tickWar(0.5); const firstBurst = fire();
   s.tickWar(0.06); const second = fire();
@@ -384,12 +406,12 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   s.tickWar(0.06); const fourth = fire();
   check('one trigger window accepts exactly three burst rounds',
     firstBurst.length === 1 && second.length === 1 && third.length === 1 && fourth.length === 0);
-  s.handle(1, { t: 'xform', x, y: arena.floor + 1.01, z: z1,
-    yaw: Math.PI, pitch: 0, held: Item.BurstRifle, reloading: true });
+  s.handle(1, { t: 'xform', x: p1x, y: combatY, z: p1z,
+    yaw: -Math.PI / 2, pitch: 0, held: Item.BurstRifle, reloading: true });
   check('server blocks fire throughout the reload window', fire().length === 0);
   s.tickWar(1.11);
-  s.handle(1, { t: 'xform', x, y: arena.floor + 1.01, z: z1,
-    yaw: Math.PI, pitch: 0, held: Item.BurstRifle, reloading: false });
+  s.handle(1, { t: 'xform', x: p1x, y: combatY, z: p1z,
+    yaw: -Math.PI / 2, pitch: 0, held: Item.BurstRifle, reloading: false });
   check('unlimited reserve refills only after normal reload timing', fire().length === 1);
   s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 }); // 35 -> 30
   check('cross-scope forged damage is rejected both directions',
@@ -423,10 +445,12 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   s.tickWar(0.02);
   const respawned = s.tickDuels();
   const fresh = respawned.find((o) => o.to === 2 && o.msg.t === 'duelLoadout')?.msg;
-  check('server respawn is exactly timed and replaces a fresh five-Medkit five-JumpBoost loadout',
+  check('server respawn is exactly timed and replaces a fresh loadout',
     !!fresh && fresh.t === 'duelLoadout' && fresh.slots[0]?.loaded === 24 &&
-    fresh.slots[1]?.id === Item.Medkit && fresh.slots[1].count === 5 &&
-    fresh.slots[2]?.id === Item.JumpBoost && fresh.slots[2].count === 5 &&
+    fresh.slots[1]?.id === Item.IronAxe && fresh.slots[1].count === 1 &&
+    fresh.slots[2]?.id === Block.OakPlanks && fresh.slots[2].count === 64 &&
+    fresh.slots[3]?.id === Item.Medkit && fresh.slots[3].count === 5 &&
+    fresh.slots[4]?.id === Item.JumpBoost && fresh.slots[4].count === 5 &&
     respawned.some((o) => o.to === 2 && o.msg.t === 'duelRespawn' && !o.msg.spectating));
   check('respawned avatar becomes visible again',
     !s.snapshotFor(1).find((p) => p.id === 2)!.dead);
@@ -463,20 +487,18 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   if (!arenaMsg || arenaMsg.t !== 'duelArena') throw new Error('healing arena missing');
   for (const id of [10, 11]) s.handle(id, { t: 'duelArenaReady' });
   s.tickWar(DUEL_COUNTDOWN_MS / 1000); s.tickDuels();
+  s.tickWar(1.5); // Clear spawn shield
   const a = arenaMsg.arena;
-  const move = (id: number, mx: number, mz: number, yaw: number) => s.handle(id, {
-    t: 'xform' as const, x: a.minX + mx, y: a.floor + 1.01, z: a.minZ + mz,
-    yaw, pitch: 0, held: Item.BurstRifle,
-  });
-  move(10, 3.5, 5.5, Math.PI); move(10, 3.5, 1.5, Math.PI);
-  move(10, 10.5, 1.5, Math.PI); move(10, 10.5, 10.5, Math.PI);
-  move(11, 40.5, 5.5, 0); move(11, 40.5, 1.5, 0);
-  move(11, 10.5, 1.5, 0); move(11, 10.5, 16.5, 0);
+  const sp0 = a.spawns[0], sp1 = a.spawns[1];
+  const combatY = a.floor + 5;
+  s.handle(10, { t: 'xform', x: sp0.x, y: combatY, z: sp0.z, yaw: -Math.PI / 2, pitch: 0, held: Item.BurstRifle });
+  s.handle(11, { t: 'xform', x: sp1.x, y: combatY, z: sp1.z, yaw: Math.PI / 2, pitch: 0, held: Item.BurstRifle });
+  s.handle(11, { t: 'xform', x: sp0.x + 4, y: combatY, z: sp0.z, yaw: Math.PI / 2, pitch: 0, held: Item.BurstRifle });
+
   const damageOnce = (): void => {
     s.tickWar(0.5);
     const fired = s.handle(10, { t: 'shot', item: Item.BurstRifle,
-      x: a.minX + 10.5, y: a.floor + 2.61, z: a.minZ + 10.5,
-      dx: 0, dy: 0, dz: 1 });
+      x: sp0.x, y: combatY + 1.6, z: sp0.z, dx: 1, dy: 0, dz: 0 });
     check('healing scenario creates a fresh authoritative shot ticket', fired.length === 1);
     const hurt = s.handle(10, { t: 'rangedAttack', target: 11, amount: 5 });
     check('healing scenario damage is accepted', hurt.some((o) => o.msg.t === 'hurt'));
@@ -517,6 +539,7 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
     if (!arena || arena.t !== 'duelArena') throw new Error('isolated arena missing');
     s.handle(host, { t: 'duelArenaReady' }); s.handle(guest, { t: 'duelArenaReady' });
     s.tickWar(DUEL_COUNTDOWN_MS / 1000); s.tickDuels();
+    s.tickWar(1.5);
     return arena.arena;
   };
   const first = startPair(20, 21), second = startPair(22, 23);

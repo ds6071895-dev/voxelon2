@@ -3,6 +3,7 @@
 // the same clocks, score ordering, arena geometry, and lobby rules.
 
 import { Block } from './blocks';
+import { Noise2D } from './noise';
 
 export type DuelPhase = 'lobby' | 'countdown' | 'running' | 'sudden_death' | 'results';
 export type DuelFinishReason = 'time' | 'sudden_death' | 'forfeit' | 'cancelled';
@@ -17,12 +18,22 @@ export const DUEL_SPAWN_SHIELD_MS = 1_250;
 export const DUEL_REMATCH_MS = 15_000;
 export const DUEL_ARENA_BASE_X = 12_288;
 export const DUEL_ARENA_SLOT_SPACING = 512;
-export const DUEL_ARENA_SIZE = 48;
-export const DUEL_ARENA_INTERIOR = 44;
+export const DUEL_ARENA_SIZE = 44;
+export const DUEL_ARENA_INTERIOR = 40;
 export const DUEL_ARENA_FLOOR_Y = 96;
 export const DUEL_ARENA_HEIGHT = 16;
 export const DUEL_MIN_LIGHT = 12;
 export const DUEL_MAX_HEALTH = 40;
+export const DUEL_MAX_PILLAR_HEIGHT = 5;
+
+const duelNoise = new Noise2D(0x4475656c);
+
+/** Deterministic 5-level elevation noise (levels 0..4, representing y = floor + 0..4). */
+export function duelTerrainElevation(lx: number, lz: number): number {
+  if (lx < 0 || lx >= DUEL_ARENA_INTERIOR || lz < 0 || lz >= DUEL_ARENA_INTERIOR) return 0;
+  const n = duelNoise.fbm(lx * 0.08, lz * 0.08, 2);
+  return Math.min(4, Math.max(0, Math.floor((n + 1) * 2.5)));
+}
 
 export interface DuelVec3 { x: number; y: number; z: number }
 
@@ -97,16 +108,20 @@ export function duelArenaBounds(slot: number): DuelArenaBounds {
   const maxZ = minZ + DUEL_ARENA_INTERIOR;
   const floor = DUEL_ARENA_FLOOR_Y;
   const ceiling = floor + DUEL_ARENA_HEIGHT;
-  const inset = 5;
+  const insets: [number, number][] = [
+    [4, 4],
+    [DUEL_ARENA_INTERIOR - 5, 4],
+    [DUEL_ARENA_INTERIOR - 5, DUEL_ARENA_INTERIOR - 5],
+    [4, DUEL_ARENA_INTERIOR - 5],
+  ];
   return {
     slot: safeSlot, originX, originZ, minX, maxX, minY: floor + 1,
     maxY: ceiling - 1, minZ, maxZ, floor, ceiling,
-    spawns: [
-      { x: minX + inset + 0.5, y: floor + 1.01, z: minZ + inset + 0.5 },
-      { x: maxX - inset - 0.5, y: floor + 1.01, z: minZ + inset + 0.5 },
-      { x: maxX - inset - 0.5, y: floor + 1.01, z: maxZ - inset - 0.5 },
-      { x: minX + inset + 0.5, y: floor + 1.01, z: maxZ - inset - 0.5 },
-    ],
+    spawns: insets.map(([lx, lz]) => ({
+      x: minX + lx + 0.5,
+      y: floor + duelTerrainElevation(lx, lz) + 1.01,
+      z: minZ + lz + 0.5,
+    })),
   };
 }
 
@@ -120,6 +135,51 @@ export function duelArenaAt(x: number, z: number): DuelArenaBounds | null {
   return x >= arena.originX && x < arena.originX + DUEL_ARENA_SIZE ? arena : null;
 }
 
+function duelWallBlock(outerLx: number, by: number, outerLz: number, floor: number): number {
+  const relY = by - floor;
+  const isCorner = (outerLx <= 1 || outerLx >= DUEL_ARENA_SIZE - 2) && (outerLz <= 1 || outerLz >= DUEL_ARENA_SIZE - 2);
+  const isPillar = (outerLx % 4 === 0 || outerLz % 4 === 0);
+
+  if (relY === 8) {
+    // Battlements / crenellations
+    if (isCorner) return Block.GildedVaultBrick;
+    if (isPillar) return Block.CarvedVaultBrick;
+    return (outerLx + outerLz) % 2 === 0 ? Block.VaultBrick : Block.CarvedVaultBrick;
+  }
+  if (relY === 7) {
+    if (isCorner) return Block.PrismLamp;
+    if (isPillar) return Block.CarvedVaultBrick;
+    return Block.VaultBrick;
+  }
+  if (relY === 6) {
+    if (isCorner || isPillar) return Block.CarvedVaultBrick;
+    return Block.VaultBrick;
+  }
+  if (relY === 5) {
+    // Mid-height decorative band & lamps
+    if (isPillar) return Block.PrismLamp;
+    return Block.SpectralMarble;
+  }
+  if (relY === 4) {
+    if (isCorner || isPillar) return Block.CarvedVaultBrick;
+    return Block.PearlTile;
+  }
+  if (relY === 3) {
+    if (isCorner || isPillar) return Block.CarvedVaultBrick;
+    return Block.VaultMosaic;
+  }
+  if (relY === 2) {
+    if (isCorner || isPillar) return Block.CarvedVaultBrick;
+    return Block.PearlTile;
+  }
+  if (relY === 1) {
+    if (isCorner || isPillar) return Block.CarvedVaultBrick;
+    return Block.SpectralMarble;
+  }
+  // Plinth / base (relY <= 0)
+  return Block.CarvedVaultBrick;
+}
+
 /** Material stamp corresponding exactly to duelArenaSolidAt. This is called by
  * Terrain.fill on both client and server; no arena cell enters the edit log. */
 export function duelArenaBlockAt(x: number, y: number, z: number): number | null {
@@ -128,168 +188,33 @@ export function duelArenaBlockAt(x: number, y: number, z: number): number | null
   const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
   const inShellY = by >= arena.floor - 1 && by <= arena.ceiling + 1;
   if (!inShellY) return null;
-  const shellSolid = duelArenaSolidAt(bx, by, bz, arena);
-  if (!shellSolid) {
-    if (bx >= arena.minX && bx < arena.maxX && bz >= arena.minZ && bz < arena.maxZ) {
-      return Block.Air;
-    }
-    return null;
-  }
+
   const lx = bx - arena.minX, lz = bz - arena.minZ;
   const outerLx = bx - arena.originX, outerLz = bz - arena.originZ;
   const boundary = outerLx < 2 || outerLx >= DUEL_ARENA_SIZE - 2 || outerLz < 2 || outerLz >= DUEL_ARENA_SIZE - 2;
-  const ry = by - arena.floor;
 
+  // Underside foundation
   if (by === arena.floor - 1) return Block.CarvedVaultBrick;
 
-  // Floor detailing: intricate mosaics, inlaid radiant prisms, pathways and borders
-  if (by === arena.floor) {
-    const mx = Math.min(lx, DUEL_ARENA_INTERIOR - 1 - lx);
-    const mz = Math.min(lz, DUEL_ARENA_INTERIOR - 1 - lz);
-    const dx = Math.abs(lx - 21.5), dz = Math.abs(lz - 21.5);
+  // Overhead ceiling barriers preventing escape/jumping out
+  if (by >= arena.ceiling - 1) return Block.Barrier;
 
-    // Outer perimeter drainage & border trim
-    if (mx <= 1 || mz <= 1) {
-      if (mx <= 1 && mz <= 1) return Block.ClockworkGrate;
-      return (mx === 0 || mz === 0) ? Block.CarvedVaultBrick : Block.OpalBrick;
-    }
-
-    // Corner spawn shrines: luminous star plinth
-    if (mx <= 6 && mz <= 6) {
-      if (mx === 5 && mz === 5) return Block.PrismLamp;
-      if (Math.abs(mx - 5) <= 1 && Math.abs(mz - 5) <= 1) return Block.VaultMosaic;
-      return Block.JadeMosaic;
-    }
-
-    // Central grand dais floor & ring
-    if (dx <= 6.5 && dz <= 6.5) {
-      if (dx <= 1.5 && dz <= 1.5) {
-        return (dx <= 0.5 && dz <= 0.5) ? Block.GildedLamp : Block.VaultMosaic;
-      }
-      if (dx <= 4.5 && dz <= 4.5) {
-        return (Math.floor(dx) + Math.floor(dz)) % 2 === 0 ? Block.SpectralMarble : Block.JadeMosaic;
-      }
-      return Block.GildedVaultBrick;
-    }
-
-    // Cardinal grand promenades
-    if (dx <= 1.5 || dz <= 1.5) {
-      if (dx <= 0.5 || dz <= 0.5) {
-        const coord = dx <= 0.5 ? Math.floor(dz) : Math.floor(dx);
-        return (coord % 4 === 1) ? Block.PrismLamp : Block.SpectralMarble;
-      }
-      return Block.LuminousLimestone;
-    }
-
-    // Quadrant courtyards: checkered pearl & ceramic with lattice lamps
-    if (lx % 6 === 3 && lz % 6 === 3) return Block.PrismLamp;
-    return (lx + lz) % 2 === 0 ? Block.PearlTile : Block.FurnaceCeramic;
-  }
-
-  // Ceiling detailing: coffered vaulting, crystal chandeliers, radiant lamps
-  if (by === arena.ceiling || by === arena.ceiling + 1) {
-    if (by === arena.ceiling + 1) return Block.CarvedVaultBrick;
-    const isBeam = (lx % 6 === 0 || lz % 6 === 0);
-    if (isBeam) {
-      return (lx % 6 === 0 && lz % 6 === 0) ? Block.GildedVaultBrick : Block.CarvedVaultBrick;
-    }
-    return (lx % 6 === 3 && lz % 6 === 3) ? Block.GildedLamp : Block.SpectralMarble;
-  }
-
-  // Grand hanging central chandelier
-  if (ry >= 9 && ry <= 15) {
-    const dx = Math.abs(lx - 21.5), dz = Math.abs(lz - 21.5);
-    if (dx <= 0.5 && dz <= 0.5) {
-      if (ry === 9) return Block.SoulLantern;
-      if (ry === 10) return Block.CrystalBlock;
-      if (ry === 11) return Block.GildedLamp;
-      return Block.IvoryColumn;
-    }
-    if (ry === 11 && dx <= 1.5 && dz <= 1.5) {
-      return (dx > 0.5 && dz > 0.5) ? Block.PrismLamp : Block.GildedVaultBrick;
-    }
-  }
-
-  // Boundary wall architecture: wainscoting, pilasters, glowing rune windows, cornice
+  // Surrounding perimeter walls topped with barriers
   if (boundary) {
-    const isPilaster = (outerLx % 6 === 0 || outerLz % 6 === 0);
-    if (ry <= 2) return ry === 0 ? Block.GildedVaultBrick : Block.CarvedVaultBrick;
-    if (ry >= 13) return ry === 15 ? Block.GildedVaultBrick : Block.CarvedVaultBrick;
-    if (isPilaster) {
-      if (ry === 12) return Block.GoldBlock;
-      if (ry === 5) return Block.SoulLantern;
-      return Block.IvoryColumn;
-    }
-    if (ry >= 5 && ry <= 7) {
-      return ((outerLx + outerLz) % 4 === 0) ? Block.PrismLamp : Block.RuneGlass;
-    }
-    if (ry === 9) return Block.EmberBrazier;
-    return Block.SpectralMarble;
+    if (by <= arena.floor + 8) return duelWallBlock(outerLx, by, outerLz, arena.floor);
+    return Block.Barrier;
   }
 
-  // Interior tactical structures and grand architecture
-  const mx = Math.min(lx, DUEL_ARENA_INTERIOR - 1 - lx);
-  const mz = Math.min(lz, DUEL_ARENA_INTERIOR - 1 - lz);
-  const dx = Math.abs(lx - 21.5), dz = Math.abs(lz - 21.5);
-
-  // Central Altar & Dais features
-  if (dx <= 4.5 && dz <= 4.5) {
-    // 4 Grand Dais Pillars
-    if (dx === 4.5 && dz === 4.5) {
-      if (ry === 5) return Block.EmberBrazier;
-      if (ry === 4) return Block.GoldBlock;
-      return Block.IvoryColumn;
-    }
-    // Center glowing crystal monument
-    if (dx <= 0.5 && dz <= 0.5) {
-      if (ry === 4) return Block.CrystalBlock;
-      if (ry === 3) return Block.GoldBlock;
-      return Block.SpectralMarble;
-    }
-    if (ry === 3) return Block.GildedVaultBrick;
-    if (ry === 2) return Block.SpectralMarble;
-    return Block.PearlTile;
-  }
-  if (dx <= 6.5 && dz <= 6.5) {
-    return ry === 1 ? Block.PearlTile : Block.SpectralMarble;
+  // 40x40 Interior grass terrain with 5 discrete levels of Perlin noise
+  if (lx >= 0 && lx < DUEL_ARENA_INTERIOR && lz >= 0 && lz < DUEL_ARENA_INTERIOR) {
+    const groundY = arena.floor + duelTerrainElevation(lx, lz);
+    if (by === groundY) return Block.Grass;
+    if (by < groundY && by >= arena.floor - 3) return Block.Dirt;
+    if (by < arena.floor - 3) return Block.Stone;
+    return Block.Air;
   }
 
-  // Corner spawn protective screens
-  if (mx <= 8 && mz <= 8) {
-    if (mx === 7 && mz === 7) {
-      if (ry === 4) return Block.SoulLantern;
-      if (ry === 3) return Block.GoldBlock;
-      return Block.IvoryColumn;
-    }
-    if (mx === 8 && mz === 8) return Block.LuminousLimestone;
-    if (ry === 3) return Block.GildedVaultBrick;
-    return (mx + mz) % 2 === 0 ? Block.JadeMosaic : Block.SpectralMarble;
-  }
-
-  // Quadrant tactical shrines & cover
-  if (Math.abs(mx - 13.5) <= 1.5 && Math.abs(mz - 13.5) <= 1.5) {
-    if (mx === 13 && mz === 13) {
-      if (ry === 3) return Block.PrismLamp;
-      return Block.IvoryColumn;
-    }
-    if (ry === 2) return Block.SpectralMarble;
-    return Block.LuminousLimestone;
-  }
-  if ((mx === 15 && mz === 12) || (mx === 12 && mz === 15)) {
-    return Block.OpalBrick;
-  }
-
-  // Mid-lane arches & barricades
-  if ((dx <= 2.5 && mz === 5) || (dz <= 2.5 && mx === 5)) {
-    const isPost = (dx === 2.5 || dz === 2.5);
-    if (isPost) {
-      if (ry === 3) return Block.SoulLantern;
-      return Block.IvoryColumn;
-    }
-    return ry === 2 ? Block.GildedVaultBrick : Block.CarvedVaultBrick;
-  }
-
-  return ry > 1 ? Block.PrismBrick : Block.SpectralMarble;
+  return null;
 }
 
 export function clampToDuelArena(p: DuelVec3, arena: DuelArenaBounds): DuelVec3 {
@@ -302,71 +227,21 @@ export function clampToDuelArena(p: DuelVec3, arena: DuelArenaBounds): DuelVec3 
   };
 }
 
-/** Arena shell/cover occupancy. Symmetrical, balanced, breaking cross-map
- * sightlines while leaving fluid movement corridors and vertical mantle points. */
+/** Arena shell/cover occupancy. 40x40 5-level terrain with perimeter walls & barrier ceiling. */
 export function duelArenaSolidAt(x: number, y: number, z: number, arena: DuelArenaBounds): boolean {
   const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
   const outerMinX = arena.originX, outerMaxX = arena.originX + DUEL_ARENA_SIZE - 1;
   const outerMinZ = arena.originZ, outerMaxZ = arena.originZ + DUEL_ARENA_SIZE - 1;
   if (bx < outerMinX || bx > outerMaxX || bz < outerMinZ || bz > outerMaxZ) return false;
-  if (by === arena.floor || by === arena.floor - 1 || by === arena.ceiling || by === arena.ceiling + 1) return true;
   if (by < arena.floor - 1 || by > arena.ceiling + 1) return false;
+  if (by === arena.floor - 1 || by >= arena.ceiling - 1) return true; // underside and barrier ceiling
+
+  // Boundary walls and barrier columns
   if (bx < arena.minX || bx >= arena.maxX || bz < arena.minZ || bz >= arena.maxZ) return true;
 
   const lx = bx - arena.minX, lz = bz - arena.minZ;
-  const ry = by - arena.floor;
-  const mx = Math.min(lx, DUEL_ARENA_INTERIOR - 1 - lx);
-  const mz = Math.min(lz, DUEL_ARENA_INTERIOR - 1 - lz);
-  const dx = Math.abs(lx - 21.5), dz = Math.abs(lz - 21.5);
-
-  // Central Grand Chandelier (hanging from ceiling)
-  if (ry >= 9 && ry <= 15) {
-    if (dx <= 0.5 && dz <= 0.5) return true;
-    if (ry === 11 && dx <= 1.5 && dz <= 1.5) return true;
-  }
-
-  // Only ground/cover structures remain below ry=6
-  if (ry > 5) return false;
-
-  // Four L-shaped spawn screens (occludes cross-spawn sightlines, dual exits)
-  if (mx <= 8 && mz <= 8) {
-    if (mx === 7 && mz >= 2 && mz <= 8 && ry <= 3) return true;
-    if (mz === 7 && mx >= 2 && mx <= 8 && ry <= 3) return true;
-    if (mx === 7 && mz === 7 && ry <= 4) return true; // corner lantern pillar
-    if (mx === 8 && mz === 8 && ry <= 2) return true; // diagonal wing
-  }
-
-  // Central Raised Dais (Crown Platform)
-  // 4 Grand Dais corner pillars
-  if (dx === 4.5 && dz === 4.5 && ry <= 5) return true;
-
-  // Center Altar & Crystal Spire
-  if (dx <= 0.5 && dz <= 0.5 && ry <= 4) return true;
-  if (dx <= 1.5 && dz <= 1.5 && ry <= 3) return true;
-
-  // Tier 2 Dais (9x9 raised platform, ry=2) with 4 cardinal step entrances
-  if (dx <= 4.5 && dz <= 4.5) {
-    const isStep = (dx <= 1.5 && dz >= 3.5) || (dz <= 1.5 && dx >= 3.5);
-    if (isStep && ry > 1) return false; // stepped down to ry=1
-    if (ry <= 2) return true;
-  }
-
-  // Tier 1 Dais (13x13 outer platform, ry=1) with cardinal step ramps
-  if (dx <= 6.5 && dz <= 6.5 && ry <= 1) return true;
-
-  // Quadrant tactical shrines & cover islands
-  if (Math.abs(mx - 13.5) <= 1.5 && Math.abs(mz - 13.5) <= 1.5) {
-    if (mx === 13 && mz === 13 && ry <= 3) return true;
-    if (ry <= 2) return true;
-  }
-  if (((mx === 15 && mz === 12) || (mx === 12 && mz === 15)) && ry <= 1) return true;
-
-  // Mid-lane tactical barricades & archway posts
-  if ((dx <= 2.5 && mz === 5) || (dz <= 2.5 && mx === 5)) {
-    const isPost = (dx === 2.5 || dz === 2.5);
-    if (isPost && ry <= 3) return true;
-    if (!isPost && ry <= 2) return true;
-  }
+  const groundY = arena.floor + duelTerrainElevation(lx, lz);
+  if (by <= groundY) return true;
 
   return false;
 }
@@ -377,13 +252,17 @@ export function duelArenaLightAt(_x: number, _y: number, _z: number, _arena: Due
   return DUEL_MIN_LIGHT;
 }
 
-export function hasArenaLineOfSight(a: DuelVec3, b: DuelVec3, arena: DuelArenaBounds): boolean {
+export function hasArenaLineOfSight(
+  a: DuelVec3, b: DuelVec3, arena: DuelArenaBounds,
+  isSolidExtra?: (x: number, y: number, z: number) => boolean
+): boolean {
   const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
   const distance = Math.hypot(dx, dy, dz);
   const steps = Math.max(1, Math.ceil(distance * 4));
   for (let i = 1; i < steps; i++) {
     const t = i / steps;
-    if (duelArenaSolidAt(a.x + dx * t, a.y + dy * t, a.z + dz * t, arena)) return false;
+    const px = a.x + dx * t, py = a.y + dy * t, pz = a.z + dz * t;
+    if (duelArenaSolidAt(px, py, pz, arena) || isSolidExtra?.(px, py, pz)) return false;
   }
   return true;
 }

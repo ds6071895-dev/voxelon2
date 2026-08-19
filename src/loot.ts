@@ -40,9 +40,10 @@ export const LOOT_TABLES: Record<LootTier, LootEntry[]> = {
     { id: Item.RuneOfIron, min: 1, max: 1, w: 0.5 },
     { id: Item.RuneOfSwiftness, min: 1, max: 1, w: 0.4 },
   ],
-  // Crashed Cargo Pod: the best surface loot — titanium, gadgets, RARELY a Heart.
+  // Crashed Cargo Pod: the best surface loot — titanium, cobalt, gadgets, RARELY a Heart.
   epic: [
     { id: Item.TitaniumIngot, min: 2, max: 4, w: 3 },
+    { id: Item.CobaltIngot, min: 2, max: 4, w: 2.5 },
     { id: Item.Diamond, min: 2, max: 4, w: 2 },
     { id: Item.CrystalShard, min: 2, max: 5, w: 2 },
     { id: Item.Grenade, min: 2, max: 4, w: 2 },
