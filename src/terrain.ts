@@ -16,7 +16,9 @@ const ROCK_LINE = 96;  // mountains expose bare stone above this altitude
 const SNOW_LINE = 120; // mountains get snow caps above this
 const MAX_HEIGHT = 235;
 const DUEL_STAMP_MIN_Y = 95;
-const DUEL_STAMP_MAX_Y = 117;
+// Duels has no horizontal ceiling; only its invisible perimeter columns need
+// stamping above the authored wall, all the way to the world height limit.
+const DUEL_STAMP_MAX_Y = 255;
 
 type Species = 'oak' | 'birch' | 'spruce' | 'jungle' | 'cherry';
 interface Tree {

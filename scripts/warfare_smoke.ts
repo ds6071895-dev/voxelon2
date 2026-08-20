@@ -23,6 +23,7 @@ import {
 import {
   VehicleSim, sanitizeHelicopter, sanitizeHeliInput, seatPosition, viewYawToHeliYaw,
   DISMOUNT_CLEARANCE, EJECT_DAMAGE, FAST_ROPE_LENGTH, HELI_FUEL_BURN, HELI_FUEL_IDLE, PASSENGER_ARC,
+  fastRopeProgressDelta,
   SEAT_OFFSETS, type VehicleEvent,
 } from '../src/vehicles';
 import { VaultEncounter, type EncounterParticipant } from '../src/vault_encounter';
@@ -1331,6 +1332,9 @@ const check = (condition: boolean, message: string): void => {
   check(sim.toggleRope(77), 'the pilot can deploy an installed fast rope');
   check(h.ropeLength === FAST_ROPE_LENGTH && FAST_ROPE_LENGTH >= 32,
     'the deployed fast rope reaches far below a hovering helicopter');
+  check(fastRopeProgressDelta(1, 1, FAST_ROPE_LENGTH) >
+    Math.abs(fastRopeProgressDelta(-1, 1, FAST_ROPE_LENGTH)),
+  'sliding down the fast rope is quicker than climbing it');
   sim.dismount(77);
   const before = h.fuel, y = h.position.y;
   sim.tick(1);

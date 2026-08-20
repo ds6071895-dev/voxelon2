@@ -1809,7 +1809,7 @@ export class GameServer {
     // Natural arena terrain and walls are unbreakable and cannot be replaced
     if (by <= groundY) return [];
 
-    // Max 5-block pillar height above natural ground
+    // Max 7-block pillar height above natural ground
     if (by > groundY + DUEL_MAX_PILLAR_HEIGHT) return [];
 
     let slotEdits = this.duelArenaEdits.get(arena.slot);

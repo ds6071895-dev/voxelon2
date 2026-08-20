@@ -116,6 +116,16 @@ export interface HelicopterState {
 
 /** Full deployed reach of an installed fast-rope winch. */
 export const FAST_ROPE_LENGTH = 32;
+/** Climbing is deliberate; descending is a quick, satisfying controlled slide. */
+export const FAST_ROPE_CLIMB_SPEED = 4;
+export const FAST_ROPE_SLIDE_SPEED = 10;
+
+export function fastRopeProgressDelta(motion: number, dt: number, ropeLength: number): number {
+  if (!Number.isFinite(motion) || !Number.isFinite(dt) || dt <= 0 || ropeLength <= 0) return 0;
+  const input = Math.max(-1, Math.min(1, motion));
+  const speed = input > 0 ? FAST_ROPE_SLIDE_SPEED : FAST_ROPE_CLIMB_SPEED;
+  return input * speed * dt / ropeLength;
+}
 
 /** One frame of pilot intent. Every field is clamped — a forged input can only
  *  ever ask for full deflection, never for teleportation. */
@@ -623,7 +633,7 @@ export class VehicleSim {
         continue;
       }
       rider.progress = Math.max(0, Math.min(1,
-        rider.progress + rider.motion * 5 * dt / h.ropeLength));
+        rider.progress + fastRopeProgressDelta(rider.motion, dt, h.ropeLength)));
     }
     for (const b of [...this.bombs.values()]) this.stepBomb(b, dt, out);
     return out;

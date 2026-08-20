@@ -80,6 +80,11 @@ interface Waypoint {
   y?: number;
 }
 interface StrikeTarget { x: number; z: number; name: string; kind: 'waypoint' | 'flag' }
+interface DynamicMarker {
+  x: number; z: number; color: number; name: string;
+  /** Optional range for its in-world badge; it remains visible on the map. */
+  beaconRange?: number;
+}
 export interface TotemPos { x: number; y: number; z: number; }
 /** A vault marker for the map (Milestone D). `discovered` vaults (entered once)
  *  render bright with their tier; merely SENSED nearby ones render faint with no
@@ -130,7 +135,7 @@ export class WorldMap {
   private readonly targetBar: HTMLDivElement;
   // Dynamic markers (war flags): server-driven, NOT persisted; shown on the map
   // + as in-world beacons exactly like waypoints. Refreshed each frame by main.
-  private dynamicMarkers: { x: number; z: number; color: number; name: string }[] = [];
+  private dynamicMarkers: DynamicMarker[] = [];
   private readonly markerGroup = new THREE.Group();
   private readonly markerGeo = new THREE.BoxGeometry(1.2, 30, 1.2);
   // In-world MC-mod-style screen markers (one DOM badge per shown waypoint).
@@ -582,7 +587,7 @@ export class WorldMap {
   }
 
   /** Replace the dynamic (war-flag) markers shown on the map + as beacons. */
-  setDynamicMarkers(list: { x: number; z: number; color: number; name: string }[]): void {
+  setDynamicMarkers(list: DynamicMarker[]): void {
     this.dynamicMarkers = list;
     if (this.open) this.draw();
   }
@@ -865,8 +870,10 @@ export class WorldMap {
    *  frame while playing; pass the canvas size. */
   renderBeacons(width: number, height: number): void {
     // War flags always show as beacons; saved waypoints only when toggled on.
+    const p = this.mapCtx.player();
     const shown = this.open ? []
-      : [...this.waypoints.filter((w) => w.show), ...this.dynamicMarkers];
+      : [...this.waypoints.filter((w) => w.show), ...this.dynamicMarkers.filter((m) =>
+        m.beaconRange === undefined || Math.hypot(m.x - p.x, m.z - p.z) <= m.beaconRange)];
     // Grow/shrink the pool of badge elements to match.
     while (this.beaconEls.length > shown.length) {
       this.beaconLayer.removeChild(this.beaconEls.pop()!);
@@ -886,7 +893,6 @@ export class WorldMap {
     const cam = this.camera;
     cam.getWorldPosition(this._camPos);
     cam.getWorldDirection(this._camFwd);
-    const p = this.mapCtx.player();
     const margin = 26;
 
     shown.forEach((w, i) => {

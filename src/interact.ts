@@ -125,6 +125,8 @@ export class Interaction {
   canEdit?: (x: number, y: number, z: number) => boolean;
   /** Veto a PLACEMENT of a specific block. Returning false cancels the place. */
   canPlace?: (x: number, y: number, z: number, block: number) => boolean;
+  /** Override survival placement consumption for mode-specific infinite blocks. */
+  shouldConsumePlacement?: (block: number) => boolean;
   private readonly world: World;
   private readonly player: Player;
   private readonly inventory: Inventory;
@@ -385,7 +387,9 @@ export class Interaction {
         this.onEdit?.(px, py + k, pz, Block.MachinePart);
       }
       this.onBlockSound?.('place', blockId, px, py, pz);
-      if (!this.creative) this.inventory.consumeSelected(1);
+      if (!this.creative && (this.shouldConsumePlacement?.(blockId) ?? true)) {
+        this.inventory.consumeSelected(1);
+      }
       this.placeCooldown = PLACE_REPEAT;
       this.onAction?.();
       return;
@@ -409,7 +413,9 @@ export class Interaction {
     this.world.setBlock(px, py, pz, blockId);
     this.onEdit?.(px, py, pz, blockId);
     this.onBlockSound?.('place', blockId, px, py, pz);
-    if (!this.creative) this.inventory.consumeSelected(1);
+    if (!this.creative && (this.shouldConsumePlacement?.(blockId) ?? true)) {
+      this.inventory.consumeSelected(1);
+    }
     this.placeCooldown = PLACE_REPEAT;
     this.onAction?.();
   }

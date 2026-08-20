@@ -26,10 +26,11 @@ export const DUEL_ARENA_SLOT_SPACING = 512;
 export const DUEL_ARENA_SIZE = 44;
 export const DUEL_ARENA_INTERIOR = 40;
 export const DUEL_ARENA_FLOOR_Y = 96;
-export const DUEL_ARENA_HEIGHT = 16;
+/** The arena is open to the sky. The numeric ceiling is only the world limit. */
+export const DUEL_ARENA_HEIGHT = 256 - DUEL_ARENA_FLOOR_Y;
 export const DUEL_MIN_LIGHT = 12;
 export const DUEL_MAX_HEALTH = 40;
-export const DUEL_MAX_PILLAR_HEIGHT = 5;
+export const DUEL_MAX_PILLAR_HEIGHT = 7;
 
 const duelNoise = new Noise2D(0x4475656c);
 
@@ -191,7 +192,7 @@ export function duelArenaBlockAt(x: number, y: number, z: number): number | null
   const arena = duelArenaAt(x, z);
   if (!arena) return null;
   const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
-  const inShellY = by >= arena.floor - 1 && by <= arena.ceiling + 1;
+  const inShellY = by >= arena.floor - 1 && by < arena.ceiling;
   if (!inShellY) return null;
 
   const lx = bx - arena.minX, lz = bz - arena.minZ;
@@ -201,10 +202,8 @@ export function duelArenaBlockAt(x: number, y: number, z: number): number | null
   // Underside foundation
   if (by === arena.floor - 1) return Block.CarvedVaultBrick;
 
-  // Overhead ceiling barriers preventing escape/jumping out
-  if (by >= arena.ceiling - 1) return Block.Barrier;
-
-  // Surrounding perimeter walls topped with barriers
+  // Surrounding perimeter walls topped by an invisible barrier column that
+  // reaches the world limit. The interior deliberately remains open sky.
   if (boundary) {
     if (by <= arena.floor + 8) return duelWallBlock(outerLx, by, outerLz, arena.floor);
     return Block.Barrier;
@@ -225,21 +224,21 @@ export function duelArenaBlockAt(x: number, y: number, z: number): number | null
 export function clampToDuelArena(p: DuelVec3, arena: DuelArenaBounds): DuelVec3 {
   return {
     x: Math.max(arena.minX + 0.15, Math.min(arena.maxX - 0.15, p.x)),
-    // `y` is the feet position; keep the full 1.8-block body below the solid
-    // ceiling rather than merely keeping the feet inside the numeric bounds.
+    // `y` is the feet position; keep the full body inside the world's vertical
+    // range. The arena itself has no horizontal roof.
     y: Math.max(arena.minY, Math.min(arena.maxY - 0.85, p.y)),
     z: Math.max(arena.minZ + 0.15, Math.min(arena.maxZ - 0.15, p.z)),
   };
 }
 
-/** Arena shell/cover occupancy. 40x40 5-level terrain with perimeter walls & barrier ceiling. */
+/** Arena shell/cover occupancy. 40x40 terrain with world-height perimeter barriers. */
 export function duelArenaSolidAt(x: number, y: number, z: number, arena: DuelArenaBounds): boolean {
   const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
   const outerMinX = arena.originX, outerMaxX = arena.originX + DUEL_ARENA_SIZE - 1;
   const outerMinZ = arena.originZ, outerMaxZ = arena.originZ + DUEL_ARENA_SIZE - 1;
   if (bx < outerMinX || bx > outerMaxX || bz < outerMinZ || bz > outerMaxZ) return false;
-  if (by < arena.floor - 1 || by > arena.ceiling + 1) return false;
-  if (by === arena.floor - 1 || by >= arena.ceiling - 1) return true; // underside and barrier ceiling
+  if (by < arena.floor - 1 || by >= arena.ceiling) return false;
+  if (by === arena.floor - 1) return true;
 
   // Boundary walls and barrier columns
   if (bx < arena.minX || bx >= arena.maxX || bz < arena.minZ || bz >= arena.maxZ) return true;

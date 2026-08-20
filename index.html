@@ -1244,10 +1244,54 @@
     .duel-rating-reveal { background: color-mix(in srgb,var(--rank-color) 9%,#fff); }
     .duel-rating-change.up { color:#21834f; } .duel-rating-change.down { color:#b53b36; }
     .duel-rank-up { color:#8a5708; }
+    .duel-ranks-button { min-height:42px; padding:0 15px; border:1px solid rgba(215,138,12,.28); border-radius:12px; cursor:pointer; color:#704508; background:#fff8e8; box-shadow:0 5px 14px rgba(15,26,36,.08); font:850 9px/1 inherit; letter-spacing:1.3px; text-transform:uppercase; white-space:nowrap; }
+    .duel-ranks-button:hover,.duel-ranks-button:focus-visible { background:#ffedc6; outline:2px solid #d78a0c; outline-offset:2px; }
+    .duel-ranks-view[hidden] { display:none; }
+    .duel-ranks-view { margin-top:26px; }
+    .duel-ranks-toolbar { display:flex; align-items:center; gap:16px; margin-bottom:20px; }
+    .duel-ranks-back { width:42px; height:42px; flex:0 0 42px; border:1px solid var(--line); border-radius:12px; cursor:pointer; color:var(--ink); background:#fff; box-shadow:0 5px 14px rgba(15,26,36,.08); font:900 20px/1 inherit; }
+    .duel-ranks-back:hover,.duel-ranks-back:focus-visible { background:#edf8fb; outline:2px solid #2589a5; }
+    .duel-ranks-toolbar h3 { margin-top:3px; color:var(--ink); font-size:clamp(23px,3.5vw,36px); }
+    .duel-ranks-hero { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:18px; align-items:center; margin-bottom:18px; padding:18px 20px; border:1px solid color-mix(in srgb,var(--rank-color,#b87542) 28%,var(--line)); border-radius:18px; background:linear-gradient(125deg,color-mix(in srgb,var(--rank-color,#b87542) 11%,#fff),#fff 65%); box-shadow:0 11px 26px rgba(15,26,36,.08); }
+    .duel-ranks-hero small { color:var(--ink-mute); font-size:9px; font-weight:850; letter-spacing:1.5px; text-transform:uppercase; }
+    .duel-ranks-hero strong { display:block; margin-top:5px; color:var(--rank-color,#b87542); font-size:clamp(20px,3vw,29px); }
+    .duel-ranks-hero p { margin-top:5px; color:var(--ink-soft); font-size:11px; }
+    .duel-ranks-overall { min-width:170px; text-align:right; }
+    .duel-ranks-overall b { color:var(--ink); font-size:16px; }
+    .duel-ranks-overall-track { width:170px; height:7px; margin-top:8px; overflow:hidden; border-radius:99px; background:#dfe5e9; }
+    .duel-ranks-overall-fill { height:100%; width:0; border-radius:inherit; background:linear-gradient(90deg,#b87542,#d99a18,#308fd8,#d84254); transition:width .8s cubic-bezier(.2,.8,.2,1); }
+    .duel-pyramid-wrap { position:relative; overflow:hidden; padding:28px 18px 22px; border:1px solid var(--line); border-radius:22px; background:radial-gradient(circle at 50% 0,rgba(255,214,116,.16),transparent 42%),linear-gradient(180deg,#f8fbfc,#edf1f3); box-shadow:inset 0 1px #fff,0 16px 34px rgba(15,26,36,.1); }
+    .duel-pyramid-wrap::before { content:''; position:absolute; inset:0; pointer-events:none; opacity:.3; background:linear-gradient(90deg,transparent 49.8%,rgba(52,71,82,.14) 50%,transparent 50.2%); }
+    .duel-pyramid { position:relative; z-index:1; display:flex; flex-direction:column; align-items:center; gap:7px; min-width:560px; }
+    .duel-pyramid-tier { --tier-color:#b87542; position:relative; width:var(--tier-width); min-height:68px; display:grid; grid-template-columns:minmax(118px,1.25fr) repeat(3,minmax(74px,1fr)); align-items:stretch; overflow:hidden; border:1px solid color-mix(in srgb,var(--tier-color) 42%,#fff); border-radius:13px; color:var(--ink); background:color-mix(in srgb,var(--tier-color) 10%,#fff); box-shadow:0 8px 18px color-mix(in srgb,var(--tier-color) 12%,transparent),inset 0 1px rgba(255,255,255,.8); opacity:.72; transition:transform .2s ease,opacity .2s ease,box-shadow .2s ease; }
+    .duel-pyramid-tier:hover { opacity:1; transform:scale(1.012); }
+    .duel-pyramid-tier.current { opacity:1; box-shadow:0 0 0 2px #fff,0 0 0 5px var(--tier-color),0 12px 28px color-mix(in srgb,var(--tier-color) 28%,transparent); }
+    .duel-pyramid-name { display:flex; flex-direction:column; justify-content:center; padding:10px 13px; background:color-mix(in srgb,var(--tier-color) 17%,#fff); }
+    .duel-pyramid-name strong { color:var(--tier-color); font-size:15px; letter-spacing:.5px; text-transform:uppercase; }
+    .duel-pyramid-name small { margin-top:3px; color:var(--ink-soft); font-size:8px; font-weight:750; }
+    .duel-pyramid-division { position:relative; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; border-left:1px solid color-mix(in srgb,var(--tier-color) 20%,#fff); }
+    .duel-pyramid-division b { font-size:13px; }
+    .duel-pyramid-division small { color:var(--ink-mute); font-size:8px; font-weight:750; }
+    .duel-pyramid-division.current { color:#fff; background:linear-gradient(135deg,var(--tier-color),color-mix(in srgb,var(--tier-color) 68%,#17232c)); }
+    .duel-pyramid-division.current small { color:rgba(255,255,255,.8); }
+    .duel-pyramid-you { position:absolute; top:4px; right:5px; padding:3px 5px; border-radius:99px; color:#26180a; background:#ffd36b; box-shadow:0 2px 7px rgba(0,0,0,.2); font-size:7px; font-weight:950; letter-spacing:.8px; }
+    .duel-pyramid-progress { position:absolute; inset:auto 0 0; height:4px; background:rgba(255,255,255,.2); }
+    .duel-pyramid-progress i { display:block; width:var(--division-progress); height:100%; background:#ffe39a; box-shadow:0 0 8px #ffe39a; }
+    .duel-ranks-key { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:15px; }
+    .duel-ranks-key div { padding:13px 14px; border:1px solid var(--line); border-radius:13px; background:#fff; box-shadow:0 7px 16px rgba(15,26,36,.06); }
+    .duel-ranks-key strong { display:block; color:var(--ink); font-size:10px; }
+    .duel-ranks-key span { display:block; margin-top:4px; color:var(--ink-soft); font-size:9px; line-height:1.45; }
     @media (max-width: 700px) {
       .minigames-head { flex-direction: column; }
       .minigames-head-actions { width: 100%; align-items: flex-start; justify-content: space-between; }
       .minigames-head-actions .duel-profile-card { width: min(290px,calc(100vw - 76px)); }
+      .minigames-head-actions { flex-wrap:wrap; }
+      .duel-ranks-button { order:2; margin-left:auto; }
+      .duel-ranks-hero { grid-template-columns:1fr; }
+      .duel-ranks-overall { width:100%; text-align:left; }
+      .duel-ranks-overall-track { width:100%; }
+      .duel-pyramid-wrap { overflow-x:auto; }
+      .duel-ranks-key { grid-template-columns:1fr; }
     }
 
     .faction-reveal {
@@ -1566,9 +1610,24 @@
                 <div id="duel-profile-meta" class="duel-profile-meta"></div>
                 <label class="duel-flair-picker" for="duel-flair">Flair <select id="duel-flair"></select></label>
               </aside>
+              <button id="duel-ranks-button" class="duel-ranks-button" type="button" aria-expanded="false" aria-controls="duel-ranks-view">All ranks</button>
               <button id="minigames-close" class="minigames-close" type="button" aria-label="Close minigames">&times;</button>
             </div>
           </header>
+          <section id="duel-ranks-view" class="duel-ranks-view" aria-labelledby="duel-ranks-title" hidden>
+            <div class="duel-ranks-toolbar">
+              <button id="duel-ranks-back" class="duel-ranks-back" type="button" aria-label="Back to minigames">&#8592;</button>
+              <div><div class="minigames-kicker">Duels competitive ladder</div><h3 id="duel-ranks-title">The rank pyramid</h3></div>
+            </div>
+            <div id="duel-ranks-hero" class="duel-ranks-hero"></div>
+            <div class="duel-pyramid-wrap"><div id="duel-pyramid" class="duel-pyramid" aria-label="All Duels ranks, highest to lowest"></div></div>
+            <div class="duel-ranks-key" aria-label="How Duels ranks work">
+              <div><strong>100 RP per division</strong><span>Climb III, then II, then I before entering the next named rank.</span></div>
+              <div><strong>Five placements</strong><span>Your rank stays Provisional for the first five rated matches, but RP still moves.</span></div>
+              <div><strong>Performance matters</strong><span>RP uses result and opponent strength; wins from a streak can add a small bonus.</span></div>
+              <div><strong>Promotion protection</strong><span>Entering a new named rank grants one shield against dropping straight back out.</span></div>
+            </div>
+          </section>
           <div id="minigames-browser" class="minigames-browser">
             <div class="minigames-grid">
               <article class="minigame-card" data-game="duels">

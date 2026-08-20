@@ -48,10 +48,10 @@ function applyLightShader(
       .replace(
         '#include <color_fragment>',
         '#include <color_fragment>\n' +
-        '// In Duels, discard every terrain fragment outside the sealed room.\n' +
+        '// In Duels, discard every terrain fragment outside the arena perimeter.\n' +
         'if (uDuelBounds.x < uDuelBounds.z && (vWorldPos.x < uDuelBounds.x || vWorldPos.x >= uDuelBounds.z || vWorldPos.z < uDuelBounds.y || vWorldPos.z >= uDuelBounds.w)) discard;\n' +
         'float voxelLight = max(vSkyBlock.y, vSkyBlock.x * uSunLight);\n' +
-        '// Closed Duels rooms have a competitive ambient floor of 12/15.\n' +
+        '// Duels arenas have a competitive ambient floor of 12/15.\n' +
         '// Fixtures still raise nearby surfaces above it, preserving gradients.\n' +
         'if (vWorldPos.x >= 12288.0) voxelLight = max(voxelLight, 0.8);\n' +
         '// Held-torch point light: bright near field, gentle falloff to ~16 blocks.\n' +
@@ -80,7 +80,7 @@ export class World {
   readonly sunUniform = { value: 1 };
   /** Held-torch point light shared with the chunk shaders (xyz pos, w intensity). */
   readonly torchUniform = { value: new THREE.Vector4(0, 0, 0, 0) };
-  /** x/z render crop for sealed Duels rooms. x>=z disables the crop. */
+  /** x/z render crop for Duels arenas. x>=z disables the crop. */
   readonly duelBoundsUniform = { value: new THREE.Vector4(1, 1, 0, 0) };
   /** Probability a broken block drops items (explosions lower it). */
   dropChance = 1;
@@ -146,7 +146,7 @@ export class World {
     this.torchUniform.value.set(x, y, z, intensity);
   }
 
-  /** Hide all terrain outside one temporary sealed arena, including geometry
+  /** Hide all terrain outside one temporary Duels arena, including geometry
    * sharing a chunk mesh with its walls. Passing null restores the open world. */
   setDuelRenderBounds(bounds: { minX: number; minZ: number; maxX: number; maxZ: number } | null): void {
     if (bounds) this.duelBoundsUniform.value.set(bounds.minX, bounds.minZ, bounds.maxX, bounds.maxZ);

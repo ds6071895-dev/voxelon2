@@ -220,10 +220,10 @@ const who = (id: number) => ({ id, username: `Player${id}`, skin: id * 17 });
     b.originX - a.originX === 512);
   check('arena floor is two solid layers', duelArenaSolidAt(a.minX + 20, DUEL_ARENA_FLOOR_Y, a.minZ + 20, a) &&
     duelArenaSolidAt(a.minX + 20, DUEL_ARENA_FLOOR_Y - 1, a.minZ + 20, a));
-  check('arena walls and ceiling are sealed',
+  check('arena is open overhead with world-height perimeter barriers',
     duelArenaSolidAt(a.originX, a.floor + 5, a.originZ + 20, a) &&
-    duelArenaSolidAt(a.originX + 20, a.ceiling, a.originZ + 20, a) &&
-    duelArenaSolidAt(a.originX + 20, a.ceiling + 1, a.originZ + 20, a));
+    duelArenaSolidAt(a.originX, 255, a.originZ + 20, a) &&
+    !duelArenaSolidAt(a.originX + 20, a.floor + 20, a.originZ + 20, a));
   const wallMaterials = new Set<number>();
   for (let y = a.floor; y <= a.floor + 8; y++) {
     wallMaterials.add(duelArenaBlockAt(a.originX, y, a.originZ + 10) ?? Block.Air);
@@ -486,7 +486,7 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   const began = s.tickDuels();
   s.tickWar(1.5); // Clear initial 1.25s spawn shield
 
-  // Test arena edits: 5-block pillar limit and block placement/breaking during match
+  // Test arena edits: 7-block pillar limit and block placement/breaking during match
   const testLx = 15, testLz = 15;
   const testGroundY = arenaMsg.arena.floor + duelTerrainElevation(testLx, testLz);
   const testBx = arenaMsg.arena.minX + testLx, testBz = arenaMsg.arena.minZ + testLz;
@@ -494,16 +494,16 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
     s.handle(1, { t: 'edit', x: testBx, y: testGroundY, z: testBz, block: 0 }).length === 0);
   s.handle(1, { t: 'xform', x: arenaMsg.spawn.x, y: arenaMsg.spawn.y, z: arenaMsg.spawn.z,
     yaw: 0, pitch: 0, held: Block.OakPlanks });
-  check('cannot place block higher than 5 blocks above ground (pillar limit)',
-    s.handle(1, { t: 'edit', x: testBx, y: testGroundY + 6, z: testBz, block: Block.OakPlanks }).length === 0);
+  check('cannot place block higher than 7 blocks above ground (pillar limit)',
+    s.handle(1, { t: 'edit', x: testBx, y: testGroundY + 8, z: testBz, block: Block.OakPlanks }).length === 0);
   const placedEdit = s.handle(1, { t: 'edit', x: testBx, y: testGroundY + 1, z: testBz, block: Block.OakPlanks });
-  check('can place oak planks within 5 blocks of ground and edit broadcasts to match',
+  check('can place oak planks within 7 blocks of ground and edit broadcasts to match',
     placedEdit.length === 2 && placedEdit.some((o) => o.to === 2 && o.msg.t === 'edit'));
   const boostedHeight = clampToDuelArena({
     x: testBx + 0.5, y: testGroundY + 7, z: testBz + 0.5,
   }, arenaMsg.arena);
-  check('five-block restriction applies to edits, not player movement',
-    boostedHeight.y > testGroundY + 5);
+  check('seven-block restriction applies to edits, not player movement',
+    boostedHeight.y >= testGroundY + 7);
   s.handle(1, { t: 'xform', x: arenaMsg.spawn.x, y: arenaMsg.spawn.y, z: arenaMsg.spawn.z,
     yaw: 0, pitch: 0, held: Item.BurstRifle });
   check('rifle cannot break player-placed Duel cover',

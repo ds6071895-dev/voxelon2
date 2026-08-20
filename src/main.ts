@@ -77,7 +77,7 @@ import {
 import {
   HELI_FUEL_BURN, HELI_FUEL_IDLE, HELI_GROUND_CLEARANCE, HeliLossReason,
   HelicopterSnapshot, PASSENGER_ARC, SeatKind, VehicleSim, VehicleEvent,
-  bombBlast, viewYawToHeliYaw,
+  bombBlast, fastRopeProgressDelta, viewYawToHeliYaw,
 } from './vehicles';
 import { VehicleHUD } from './vehiclehud';
 import { MissileCam, MissileCamLaunch } from './missilecam';
@@ -91,7 +91,7 @@ import {
   duelTokenFromUrl, withDuelToken,
 } from './duels';
 import {
-  DuelProgressChange, DuelPublicProfile, duelProfileOf, duelRankProgress,
+  DUEL_DIVISIONS, DuelProgressChange, DuelPublicProfile, duelProfileOf, duelRankProgress,
   duelRevealState, newDuelProgress, unlockedDuelFlairs,
 } from './duels_progression';
 
@@ -1479,6 +1479,13 @@ function enterPlaying(): void {
 const pauseGuideBtn = document.getElementById('pause-guide-btn') as HTMLButtonElement;
 
 function enterPause(): void {
+  // Results/rematch is already a cursor-driven screen. Never put the pause
+  // overlay behind it or recapture the pointer while players are voting.
+  if (screen === 'duel_results') {
+    pauseEl.style.display = 'none';
+    if (input.locked) input.unlock();
+    return;
+  }
   screen = 'paused';
   pauseEl.style.display = 'flex';
   if (pauseGuideBtn) pauseGuideBtn.style.display = duelArenaActive ? 'none' : '';
@@ -1953,7 +1960,69 @@ const duelRankNext = document.getElementById('duel-rank-next')!;
 const duelProfileMeta = document.getElementById('duel-profile-meta')!;
 const duelFlair = document.getElementById('duel-flair') as HTMLSelectElement;
 const duelLeaderboardEl = document.getElementById('duel-leaderboard')!;
+const duelRanksButton = document.getElementById('duel-ranks-button') as HTMLButtonElement;
+const duelRanksView = document.getElementById('duel-ranks-view')!;
+const duelRanksBack = document.getElementById('duel-ranks-back') as HTMLButtonElement;
+const duelRanksHero = document.getElementById('duel-ranks-hero')!;
+const duelPyramid = document.getElementById('duel-pyramid')!;
 let minigamesRestoreFocus: HTMLElement | null = null;
+let duelRanksReturnToLobby = false;
+
+function renderDuelRankPyramid(): void {
+  const { rank: current, next, progress, rpIntoDivision } = duelRankProgress(duelProfile.rp);
+  duelRanksHero.style.setProperty('--rank-color', current.color);
+  const displayedRank = duelProfile.placementsRemaining > 0 ? 'Provisional' : current.label;
+  const detail = duelProfile.placementsRemaining > 0
+    ? `${duelProfile.placementsRemaining} placement match${duelProfile.placementsRemaining === 1 ? '' : 'es'} before your rank is revealed · ${rpIntoDivision}/100 RP through the highlighted division`
+    : next ? `${100 - rpIntoDivision} RP to ${next.label} · ${Math.round(progress * 100)}% through this division`
+      : `${rpIntoDivision}/100 RP through Grandmaster I · no RP ceiling`;
+  const grandmasterFloor = DUEL_DIVISIONS.find((entry) => entry.name === 'Grandmaster')!.min;
+  const overall = Math.min(100, Math.round(duelProfile.rp / grandmasterFloor * 100));
+  duelRanksHero.replaceChildren();
+  const copy = document.createElement('div');
+  const eyebrow = document.createElement('small'); eyebrow.textContent = 'Your position';
+  const title = document.createElement('strong'); title.textContent = `${displayedRank} · ${duelProfile.rp} RP`;
+  const description = document.createElement('p'); description.textContent = detail;
+  copy.append(eyebrow, title, description);
+  const climb = document.createElement('div'); climb.className = 'duel-ranks-overall';
+  const climbLabel = document.createElement('small'); climbLabel.textContent = 'Climb to Grandmaster';
+  const climbValue = document.createElement('b'); climbValue.textContent = ` ${overall}%`;
+  climbLabel.appendChild(climbValue);
+  const climbTrack = document.createElement('div'); climbTrack.className = 'duel-ranks-overall-track';
+  const climbFill = document.createElement('div'); climbFill.className = 'duel-ranks-overall-fill';
+  climbFill.style.width = `${overall}%`; climbTrack.appendChild(climbFill); climb.append(climbLabel, climbTrack);
+  duelRanksHero.append(copy, climb);
+
+  duelPyramid.replaceChildren();
+  for (let namedIndex = 6; namedIndex >= 0; namedIndex--) {
+    const ranks = DUEL_DIVISIONS.filter((entry) => entry.namedIndex === namedIndex).reverse();
+    const tier = document.createElement('div'); tier.className = 'duel-pyramid-tier';
+    tier.style.setProperty('--tier-color', ranks[0].color);
+    tier.style.setProperty('--tier-width', `${64 + (6 - namedIndex) * 6}%`);
+    tier.classList.toggle('current', current.namedIndex === namedIndex);
+    const name = document.createElement('div'); name.className = 'duel-pyramid-name';
+    const nameStrong = document.createElement('strong'); nameStrong.textContent = ranks[0].name;
+    const nameSmall = document.createElement('small'); nameSmall.textContent = `${ranks[0].flair} · ${namedIndex * 300}+ RP`;
+    name.append(nameStrong, nameSmall); tier.appendChild(name);
+    for (const entry of ranks) {
+      const division = document.createElement('div'); division.className = 'duel-pyramid-division';
+      const isCurrent = entry.index === current.index;
+      division.classList.toggle('current', isCurrent);
+      const label = document.createElement('b'); label.textContent = entry.division;
+      const minimum = document.createElement('small'); minimum.textContent = `${entry.min} RP`;
+      division.append(label, minimum);
+      if (isCurrent) {
+        const you = document.createElement('span'); you.className = 'duel-pyramid-you';
+        you.textContent = duelProfile.placementsRemaining > 0 ? 'PROVISIONAL' : 'YOU';
+        const meter = document.createElement('span'); meter.className = 'duel-pyramid-progress';
+        meter.style.setProperty('--division-progress', `${Math.round(progress * 100)}%`);
+        meter.appendChild(document.createElement('i')); division.append(you, meter);
+      }
+      tier.appendChild(division);
+    }
+    duelPyramid.appendChild(tier);
+  }
+}
 
 function renderDuelProgress(): void {
   const { rank, next, progress } = duelRankProgress(duelProfile.rp);
@@ -1973,6 +2042,7 @@ function renderDuelProgress(): void {
     const option = document.createElement('option'); option.value = flair; option.textContent = flair;
     option.selected = flair === duelProfile.equippedFlair; return option;
   }));
+  renderDuelRankPyramid();
   duelLeaderboardEl.replaceChildren();
   if (!duelLeaderboardData.length) {
     const empty = document.createElement('div'); empty.className = 'duel-leaderboard-row';
@@ -2024,18 +2094,35 @@ function openMinigames(focusLobby = false): void {
 function closeMinigames(): void {
   minigamesModal.classList.remove('open');
   minigamesModal.setAttribute('aria-hidden', 'true');
+  if (!duelRanksView.hidden) {
+    if (duelRanksReturnToLobby && duelSnapshot) showDuelLobby(); else showDuelBrowser();
+  }
   minigamesRestoreFocus?.focus();
   minigamesRestoreFocus = null;
 }
 
 function showDuelBrowser(): void {
+  duelRanksView.hidden = true;
+  duelRanksButton.setAttribute('aria-expanded', 'false');
   minigamesBrowser.hidden = false;
   minigamesLobby.hidden = true;
 }
 
 function showDuelLobby(): void {
+  duelRanksView.hidden = true;
+  duelRanksButton.setAttribute('aria-expanded', 'false');
   minigamesBrowser.hidden = true;
   minigamesLobby.hidden = false;
+}
+
+function showDuelRanks(): void {
+  duelRanksReturnToLobby = !minigamesLobby.hidden;
+  renderDuelRankPyramid();
+  minigamesBrowser.hidden = true;
+  minigamesLobby.hidden = true;
+  duelRanksView.hidden = false;
+  duelRanksButton.setAttribute('aria-expanded', 'true');
+  duelRanksBack.focus();
 }
 
 function renderDuelLobby(): void {
@@ -2085,6 +2172,12 @@ function renderDuelLobby(): void {
 }
 
 minigamesBtn.addEventListener('click', () => openMinigames(!!duelSnapshot));
+function leaveDuelRanks(): void {
+  if (duelRanksReturnToLobby && duelSnapshot) showDuelLobby(); else showDuelBrowser();
+  duelRanksButton.focus();
+}
+duelRanksButton.addEventListener('click', () => duelRanksView.hidden ? showDuelRanks() : leaveDuelRanks());
+duelRanksBack.addEventListener('click', leaveDuelRanks);
 minigamesClose.addEventListener('click', closeMinigames);
 minigamesModal.addEventListener('mousedown', (event) => {
   if (event.target === minigamesModal) closeMinigames();
@@ -2362,6 +2455,7 @@ function duelChangeSummary(change: DuelProgressChange): string {
 function renderDuelResult(result: DuelResult): void {
   cancelAnimationFrame(duelRevealFrame);
   duelResultData = result; screen = 'duel_results'; input.unlock();
+  pauseEl.style.display = 'none';
   for (const change of result.progressChanges) if (change.id !== net.myId) remotePlayers.invalidate(change.id);
   const winner = result.scoreboard.find((p) => p.id === result.winner);
   const mine = result.winner === net.myId;
@@ -3373,6 +3467,11 @@ document.getElementById('quit-btn')!.addEventListener('click', () => {
 
 document.addEventListener('pointerlockchange', () => {
   if (!worldReady) return;
+  if (screen === 'duel_results') {
+    pauseEl.style.display = 'none';
+    if (input.locked) input.unlock();
+    return;
+  }
   if (input.locked) {
     enterPlaying(); // entered or returned to the game
   } else if (!player.dead && !invUI.open && !worldMap.open && !chatBox.open &&
@@ -5394,6 +5493,8 @@ interaction.onEdit = (x, y, z, b) => {
   if (b === Block.TacticalSilo) placeSilo(x, y, z);
   else if (b === Block.InterceptorBattery) placeBattery(x, y, z);
 };
+interaction.shouldConsumePlacement = (block) =>
+  !(duelArenaActive && duelUnlimitedReserve && block === Block.OakPlanks);
 interaction.canPlace = (x, y, z) => {
   if (duelArenaActive && duelActiveBounds) {
     if (duelSnapshot?.phase !== 'running' && duelSnapshot?.phase !== 'sudden_death') return false;
@@ -5406,10 +5507,7 @@ interaction.canPlace = (x, y, z) => {
     const lx = bx - duelActiveBounds.minX, lz = bz - duelActiveBounds.minZ;
     const groundY = duelActiveBounds.floor + duelTerrainElevation(lx, lz);
     if (by <= groundY) return false;
-    if (by > groundY + DUEL_MAX_PILLAR_HEIGHT) {
-      showNotice('Maximum pillar height in Duels is 5 blocks.');
-      return false;
-    }
+    if (by > groundY + DUEL_MAX_PILLAR_HEIGHT) return false;
     return true;
   }
   if (localVaultEncounter && curVault && blockInsideArena(curVault, x, y, z)) return false;
@@ -6154,7 +6252,13 @@ let protectedAreasList: ProtectedArea[] = [];
 let liveMissiles: MissileSnapshot[] = [];
 /** The helicopter the local player is riding, and in which seat. */
 let mySeat: { id: number; seat: SeatKind } | null = null;
-let myRope: { id: number; progress: number } | null = null;
+let myRope: {
+  id: number;
+  /** Smooth client-presented position plus the latest server correction. */
+  progress: number;
+  authoritativeProgress: number;
+  motion: number;
+} | null = null;
 let ropeInputAccum = 0;
 let prevRopeJump = false;
 let heliInputSeq = 1;
@@ -6295,7 +6399,16 @@ net.onHeliSeat = (id, seat) => {
       : 'Gunner seat — look around and fire your own weapon inside the forward arc.');
 };
 net.onHeliRopeState = (id, progress) => {
-  myRope = id > 0 ? { id, progress: Math.max(0, Math.min(1, progress)) } : null;
+  const next = Math.max(0, Math.min(1, progress));
+  if (id > 0 && myRope?.id === id) {
+    myRope.authoritativeProgress = next;
+    // Large corrections mean an attach/teleport, not ordinary packet jitter.
+    if (Math.abs(myRope.progress - next) > 0.25) myRope.progress = next;
+  } else {
+    myRope = id > 0
+      ? { id, progress: next, authoritativeProgress: next, motion: 0 }
+      : null;
+  }
   if (myRope) {
     setSeat(null);
     vehicleHud.setRope(true);
@@ -7345,7 +7458,8 @@ function transferOrDismount(): void {
   const attached = offlineVehicles.attachRope(0, localFaction, from, id);
   if (!attached.ok) { showNotice(`⛔ ${attached.reason}`); return; }
   setSeat(null);
-  myRope = { id, progress: attached.rider.progress };
+  myRope = { id, progress: attached.rider.progress,
+    authoritativeProgress: attached.rider.progress, motion: 0 };
   vehicleHud.setRope(true);
 }
 
@@ -7368,7 +7482,8 @@ function tryAttachFastRope(): boolean {
   const attached = offlineVehicles.attachRope(0, localFaction,
     { x: player.pos.x, y: player.pos.y, z: player.pos.z }, h.id);
   if (!attached.ok) { showNotice(`⛔ ${attached.reason}`); return true; }
-  myRope = { id: h.id, progress: attached.rider.progress };
+  myRope = { id: h.id, progress: attached.rider.progress,
+    authoritativeProgress: attached.rider.progress, motion: 0 };
   vehicleHud.setRope(true);
   showNotice('Fast rope attached — W/S climb, Space drops.');
   return true;
@@ -7762,17 +7877,31 @@ function updateWarfare(dt: number): void {
       const rider = offlineVehicles.ropeRider(0);
       if (!rider) { myRope = null; vehicleHud.setRope(false); return; }
       myRope.progress = rider.progress;
+      myRope.authoritativeProgress = rider.progress;
+      myRope.motion = rider.motion;
     }
     const heli = vehicleModels.snapshotOf(myRope.id);
+    if (!heli) { myRope = null; vehicleHud.setRope(false); return; }
+    const motion = (input.back ? 1 : 0) - (input.forward ? 1 : 0);
+    if (net.connected) {
+      // Predict the same asymmetric climb/slide motion as the server, then
+      // softly reconcile. This removes the old 20 Hz vertical hard-snapping.
+      const delta = fastRopeProgressDelta(motion, dt, Math.max(1, heli.ropeLength));
+      myRope.progress = Math.max(0, Math.min(1, myRope.progress + delta));
+      myRope.authoritativeProgress = Math.max(0, Math.min(1,
+        myRope.authoritativeProgress + delta));
+      const correction = 1 - Math.exp(-10 * dt);
+      myRope.progress += (myRope.authoritativeProgress - myRope.progress) * correction;
+      myRope.motion = motion;
+    }
     const at = vehicleModels.ropeWorldPosition(myRope.id, myRope.progress);
-    if (!heli || !at) { myRope = null; vehicleHud.setRope(false); return; }
+    if (!at) { myRope = null; vehicleHud.setRope(false); return; }
     player.pos.copy(at); player.vel.set(0, 0, 0); player.fallDistance = 0;
     vehicleHud.setRope(true);
     vehicleHud.update(dt, heli, 0, heli.y - warfareGroundY(heli.x, heli.z), tierLabel(heli.tier));
     ropeInputAccum += dt;
     if (ropeInputAccum >= 1 / 20) {
       ropeInputAccum = 0;
-      const motion = (input.back ? 1 : 0) - (input.forward ? 1 : 0);
       if (net.connected) net.sendHeliRope('move', motion);
       else offlineVehicles.setRopeMotion(0, motion);
     }
@@ -9391,6 +9520,7 @@ function frame(): void {
         x, z,
         color: factionColor(flag.faction),
         name: `${factionName(flag.faction)} Flag`,
+        beaconRange: 100,
       };
     }));
   }
