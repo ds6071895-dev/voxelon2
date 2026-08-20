@@ -18,6 +18,7 @@ import type {
   BombSnapshot, HeliLossReason, HelicopterSnapshot, SeatKind,
 } from '../vehicles';
 import type { DuelArenaBounds, DuelLobbySnapshot, DuelResult } from '../duels';
+import type { DuelFlair, DuelPublicProfile } from '../duels_progression';
 
 export const SERVER_PORT = 8080;
 export const SNAPSHOT_HZ = 15;     // server -> clients transform broadcasts
@@ -105,17 +106,14 @@ export interface PlayerInfo extends PlayerSnapshot {
   seasonsWon: number; // permanent "Seasons Won" badge rank (Phase 5)
   /** Lifesteal max-health currency (Milestone A): max HP = hearts * 2. */
   hearts: number;
-  /** Persistent competitive Duels rating. */
-  duelElo: number;
+  /** Server-owned competitive Duels progression and cosmetic flair. */
+  duelProfile: DuelPublicProfile;
   /** Avatar customisation (Character screen). Absent = seed-derived default. */
   cosmetics?: Cosmetics;
 }
 
-export interface DuelLeaderboardEntry {
+export interface DuelLeaderboardEntry extends DuelPublicProfile {
   username: string;
-  elo: number;
-  wins: number;
-  losses: number;
 }
 
 /** A dropped item entity owned by the server. */
@@ -186,6 +184,7 @@ export type ClientMsg =
   | { t: 'duelArenaReady' }
   | { t: 'duelRematch'; vote: boolean }
   | { t: 'duelReturn' }
+  | { t: 'duelFlair'; flair: DuelFlair }
   | { t: 'xform'; x: number; y: number; z: number; yaw: number; pitch: number;
       gliding?: boolean; boating?: boolean; seated?: boolean;
       sneaking?: boolean; held?: number; armor?: number[]; swing?: number;
@@ -354,8 +353,10 @@ export type ServerMsg =
   | { t: 'duelClock'; serverNow: number; endsAt: number; suddenDeath: boolean }
   | { t: 'duelRespawn'; respawnAt: number; spectating: boolean }
   | { t: 'duelResult'; result: DuelResult }
-  | { t: 'duelRating'; before: number; after: number; change: number;
-      wins: number; losses: number; leaderboard: DuelLeaderboardEntry[] }
+  | { t: 'duelProgress'; profile: DuelPublicProfile; leaderboard: DuelLeaderboardEntry[] }
+  | { t: 'duelFlairResult'; ok: boolean; profile: DuelPublicProfile; leaderboard: DuelLeaderboardEntry[] }
+  | { t: 'duelLeaderboard'; leaderboard: DuelLeaderboardEntry[] }
+  | { t: 'duelProfileUpdate'; id: number; profile: DuelPublicProfile }
   | { t: 'duelRestored'; x: number; y: number; z: number; yaw: number; pitch: number;
       health: number; dead: boolean; mode: GameMode; state?: Record<string, unknown> }
   | {
@@ -381,7 +382,7 @@ export type ServerMsg =
       /** WARFARE COMMAND: your personal progression, stored on the ACCOUNT
        *  (explicitly — never inside the opaque client `state` blob). */
       warfare: { xp: number; nodes: string[] };
-      duelProfile: { elo: number; wins: number; losses: number };
+      duelProfile: DuelPublicProfile;
       duelLeaderboard: DuelLeaderboardEntry[];
       /** Strategic hardware standing in the world. */
       silos: SiloState[];

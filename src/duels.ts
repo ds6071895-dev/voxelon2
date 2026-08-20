@@ -4,6 +4,11 @@
 
 import { Block } from './blocks';
 import { Noise2D } from './noise';
+import {
+  DuelProgressChange, DuelPublicProfile, duelProfileOf, newDuelProgress,
+  sanitizeDuelProgress,
+} from './duels_progression';
+export { duelRankAt, duelRankProgress } from './duels_progression';
 
 export type DuelPhase = 'lobby' | 'countdown' | 'running' | 'sudden_death' | 'results';
 export type DuelFinishReason = 'time' | 'sudden_death' | 'forfeit' | 'cancelled';
@@ -25,40 +30,6 @@ export const DUEL_ARENA_HEIGHT = 16;
 export const DUEL_MIN_LIGHT = 12;
 export const DUEL_MAX_HEALTH = 40;
 export const DUEL_MAX_PILLAR_HEIGHT = 5;
-export const DUEL_STARTING_ELO = 1000;
-export const DUEL_ELO_K = 32;
-
-export interface DuelRank {
-  name: string;
-  min: number;
-  color: string;
-}
-
-export const DUEL_RANKS: readonly DuelRank[] = [
-  { name: 'Bronze', min: 0, color: '#b87542' },
-  { name: 'Silver', min: 900, color: '#aebbc6' },
-  { name: 'Gold', min: 1100, color: '#f0bd45' },
-  { name: 'Platinum', min: 1300, color: '#65d3c4' },
-  { name: 'Diamond', min: 1500, color: '#64b9ff' },
-  { name: 'Champion', min: 1750, color: '#b988ff' },
-  { name: 'Grandmaster', min: 2000, color: '#ff6d7a' },
-];
-
-export function sanitizeDuelElo(value: unknown): number {
-  return Number.isFinite(value) ? Math.max(0, Math.min(4000, Math.round(value as number))) : DUEL_STARTING_ELO;
-}
-
-export function duelRankAt(elo: number): DuelRank {
-  const rating = sanitizeDuelElo(elo);
-  for (let i = DUEL_RANKS.length - 1; i >= 0; i--) if (rating >= DUEL_RANKS[i].min) return DUEL_RANKS[i];
-  return DUEL_RANKS[0];
-}
-
-export function duelRankProgress(elo: number): { rank: DuelRank; next: DuelRank | null; progress: number } {
-  const rating = sanitizeDuelElo(elo), rank = duelRankAt(rating);
-  const index = DUEL_RANKS.indexOf(rank), next = DUEL_RANKS[index + 1] ?? null;
-  return { rank, next, progress: next ? Math.max(0, Math.min(1, (rating - rank.min) / (next.min - rank.min))) : 1 };
-}
 
 const duelNoise = new Noise2D(0x4475656c);
 
@@ -75,7 +46,7 @@ export interface DuelParticipant {
   id: number;
   username: string;
   skin: number;
-  elo: number;
+  profile: DuelPublicProfile;
   host: boolean;
   ready: boolean;
   connected: boolean;
@@ -111,7 +82,7 @@ export interface DuelResult {
   finishReason: DuelFinishReason;
   durationMs: number;
   rematchDeadline: number;
-  ratingChanges: { id: number; username: string; before: number; after: number; change: number }[];
+  progressChanges: DuelProgressChange[];
 }
 
 export interface DuelLobbySnapshot {
@@ -347,41 +318,7 @@ interface DuelLobby {
   result?: DuelResult;
 }
 
-export interface DuelIdentity { id: number; username: string; skin: number; elo?: number }
-
-/** Pairwise multiplayer Elo. Each player is scored as a win/loss/draw against
- * every other player based on final scoreboard order, then averaged to the
- * familiar chess K-factor. The pool is zero-sum before integer rounding. */
-export function duelRatingChanges(players: Iterable<DuelParticipant>, winner?: number | null): DuelResult['ratingChanges'] {
-  const board = orderedDuelScoreboard(players);
-  if (winner !== undefined && winner !== null) {
-    const index = board.findIndex((p) => p.id === winner);
-    if (index > 0) board.unshift(board.splice(index, 1)[0]);
-  }
-  const scores = new Map(board.map((p, i) => [p.id, i]));
-  const raw = board.map((p) => {
-    let delta = 0;
-    for (const opponent of board) {
-      if (opponent.id === p.id) continue;
-      const actual = scores.get(p.id)! < scores.get(opponent.id)! ? 1 :
-        scores.get(p.id)! > scores.get(opponent.id)! ? 0 : 0.5;
-      const expected = 1 / (1 + Math.pow(10, (opponent.elo - p.elo) / 400));
-      delta += actual - expected;
-    }
-    return delta * DUEL_ELO_K / Math.max(1, board.length - 1);
-  });
-  const rounded = raw.map(Math.round);
-  const drift = rounded.reduce((sum, value) => sum + value, 0);
-  if (drift !== 0 && rounded.length) {
-    const order = raw.map((value, i) => ({ i, error: rounded[i] - value }))
-      .sort((a, b) => drift > 0 ? b.error - a.error : a.error - b.error);
-    for (let i = 0; i < Math.abs(drift); i++) rounded[order[i % order.length].i] -= Math.sign(drift);
-  }
-  return board.map((p, i) => {
-    const before = sanitizeDuelElo(p.elo), after = sanitizeDuelElo(before + rounded[i]);
-    return { id: p.id, username: p.username, before, after, change: after - before };
-  });
-}
+export interface DuelIdentity { id: number; username: string; skin: number; profile?: DuelPublicProfile }
 
 export interface DuelCreateResult { token: string; snapshot: DuelLobbySnapshot }
 export type DuelJoinResult =
@@ -627,10 +564,21 @@ export class Duels {
   participantFor(playerId: number): DuelParticipant | null {
     return this.lobbyByPlayer.get(playerId)?.participants.get(playerId) ?? null;
   }
-  applyRatings(changes: { id: number; after: number }[]): void {
+  updateProfile(playerId: number, profile: DuelPublicProfile): void {
+    const participant = this.lobbyByPlayer.get(playerId)?.participants.get(playerId);
+    if (participant) participant.profile = { ...profile, rank: { ...profile.rank } };
+  }
+  applyProgression(changes: DuelProgressChange[]): void {
     for (const change of changes) {
-      const participant = this.lobbyByPlayer.get(change.id)?.participants.get(change.id);
-      if (participant) participant.elo = sanitizeDuelElo(change.after);
+      const lobby = this.lobbyByPlayer.get(change.id) ??
+        [...this.lobbies.values()].find((value) => value.participants.has(change.id));
+      const participant = lobby?.participants.get(change.id);
+      if (participant) participant.profile = { ...change.profile, rank: { ...change.profile.rank } };
+      if (lobby?.result) {
+        lobby.result.progressChanges = changes.map((value) => ({ ...value }));
+        const scored = lobby.result.scoreboard.find((value) => value.id === change.id);
+        if (scored) scored.profile = { ...change.profile, rank: { ...change.profile.rank } };
+      }
     }
   }
   membersOf(playerId: number): number[] {
@@ -643,7 +591,8 @@ export class Duels {
   }
 
   private newParticipant(identity: DuelIdentity, host: boolean, joinOrder: number): DuelParticipant {
-    return { ...identity, elo: sanitizeDuelElo(identity.elo), host, ready: false, connected: true, kills: 0, deaths: 0,
+    const profile = identity.profile ?? duelProfileOf(sanitizeDuelProgress(newDuelProgress()));
+    return { ...identity, profile: { ...profile, rank: { ...profile.rank } }, host, ready: false, connected: true, kills: 0, deaths: 0,
       alive: true, spectating: false, rematchVote: false, joinOrder };
   }
 
@@ -687,10 +636,19 @@ export class Duels {
   private finish(lobby: DuelLobby, now: number, winner: number | null, reason: DuelFinishReason): void {
     lobby.phase = 'results';
     for (const p of lobby.participants.values()) { p.alive = false; p.spectating = true; p.rematchVote = false; }
-    lobby.result = { winner, scoreboard: orderedDuelScoreboard(lobby.participants.values()),
+    const scoreboard = orderedDuelScoreboard(lobby.participants.values());
+    // Every disconnect is a forfeit placement even if the remaining players
+    // continue to regulation time. The combatant stays visible on the board,
+    // but can never preserve a high-kill finish by leaving early.
+    scoreboard.sort((a, b) => Number(b.connected) - Number(a.connected) || orderDuelScore(a, b));
+    if (winner !== null) {
+      const winnerIndex = scoreboard.findIndex((p) => p.id === winner);
+      if (winnerIndex > 0) scoreboard.unshift(scoreboard.splice(winnerIndex, 1)[0]);
+    }
+    lobby.result = { winner, scoreboard,
       finishReason: reason, durationMs: Math.max(0, now - (lobby.startedAt ?? now)),
       rematchDeadline: now + DUEL_REMATCH_MS,
-      ratingChanges: duelRatingChanges(lobby.participants.values(), winner) };
+      progressChanges: [] };
   }
 
   private returnToLobby(lobby: DuelLobby): void {
@@ -712,6 +670,7 @@ export class Duels {
       serverNow: now, countdownEndsAt: lobby.countdownEndsAt, startedAt: lobby.startedAt,
       endsAt: lobby.endsAt, arena: lobby.arena ? { ...lobby.arena, spawns: lobby.arena.spawns.map((s) => ({ ...s })) } : undefined,
       result: lobby.result ? { ...lobby.result,
-        scoreboard: lobby.result.scoreboard.map((p) => ({ ...p })) } : undefined };
+        scoreboard: lobby.result.scoreboard.map((p) => ({ ...p, profile: { ...p.profile, rank: { ...p.profile.rank } } })),
+        progressChanges: lobby.result.progressChanges.map((change) => ({ ...change })) } : undefined };
   }
 }

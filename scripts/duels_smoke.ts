@@ -2,9 +2,16 @@ import {
   DUEL_ARENA_FLOOR_Y, DUEL_ARENA_LOAD_TIMEOUT_MS, DUEL_COUNTDOWN_MS, DUEL_MIN_LIGHT, DUEL_REMATCH_MS,
   DUEL_RESPAWN_MS, DUEL_ROUND_MS, Duels, clampToDuelArena, duelArenaBounds,
   duelArenaBlockAt, duelArenaLightAt, duelArenaSolidAt, duelTerrainElevation,
-  duelRankAt, duelRatingChanges, hasArenaLineOfSight, orderedDuelScoreboard,
+  hasArenaLineOfSight, orderedDuelScoreboard,
   safestDuelSpawn, duelTokenFromUrl, withDuelToken,
 } from '../src/duels';
+import {
+  DUEL_DIVISIONS, DUEL_FLAIRS, DUEL_MAX_HISTORY_OPPONENTS, DUEL_PLACEMENT_MATCHES,
+  canEquipDuelFlair, duelProfileOf, duelRankAt, duelRankProgress, duelRevealState,
+  loadDuelProgress, migrateLegacyDuelProgress, newDuelProgress, sanitizeDuelProgress,
+  sanitizeDuelRp, settleDuelProgress, unlockedDuelFlairs,
+} from '../src/duels_progression';
+import { Accounts } from '../src/net/accounts';
 import { Block } from '../src/blocks';
 import { Item } from '../src/items';
 import { GameServer } from '../src/net/server_core';
@@ -117,11 +124,14 @@ const who = (id: number) => ({ id, username: `Player${id}`, skin: id * 17 });
   d.start(1, 0); for (const id of [1, 2, 3]) d.markArenaReady(id, 0);
   d.tick(DUEL_COUNTDOWN_MS);
   const continuing = d.leave(3, DUEL_COUNTDOWN_MS + 1).snapshot!;
-  check('three-player disconnect removes leaver and round continues with two',
-    continuing.phase === 'running' && continuing.participants.length === 2);
+  check('three-player disconnect keeps the leaver on the rated board and round continues',
+    continuing.phase === 'running' && continuing.participants.length === 3 &&
+    continuing.participants.find((p) => p.id === 3)?.connected === false);
   const forfeited = d.leave(2, DUEL_COUNTDOWN_MS + 2).snapshot!;
   check('one remaining player wins by forfeit', forfeited.phase === 'results' &&
-    forfeited.result?.winner === 1 && forfeited.result.finishReason === 'forfeit');
+    forfeited.result?.winner === 1 && forfeited.result.finishReason === 'forfeit' &&
+    forfeited.result.scoreboard[0].id === 1 &&
+    !forfeited.result.scoreboard[forfeited.result.scoreboard.length - 1]?.connected);
   const refused = d.voteRematch(1, false, DUEL_COUNTDOWN_MS + 3)!;
   check('one Return/refusal cancels rematch and resets lobby consent', refused.phase === 'lobby' &&
     refused.participants.every((p) => !p.ready));
@@ -266,23 +276,148 @@ const who = (id: number) => ({ id, username: `Player${id}`, skin: id * 17 });
 
 function madeParticipant(id: number, kills: number, deaths: number, joinOrder: number) {
   return { id, username: `P${id}`, skin: id, host: id === 1, ready: true, connected: true,
-    elo: 1000, kills, deaths, alive: true, spectating: false, rematchVote: false, joinOrder };
+    profile: duelProfileOf(newDuelProgress()), kills, deaths, alive: true, spectating: false, rematchVote: false, joinOrder };
 }
 
 {
-  const underdog = { ...madeParticipant(1, 3, 1, 0), elo: 800 };
-  const favourite = { ...madeParticipant(2, 1, 3, 1), elo: 1600 };
-  const upset = duelRatingChanges([underdog, favourite]);
-  check('Elo rewards an underdog upset heavily and remains zero-sum',
-    upset[0].change >= 30 && upset[0].change === -upset[1].change);
-  check('rank tiers resolve from persistent Elo',
-    duelRankAt(1000).name === 'Silver' && duelRankAt(1800).name === 'Champion');
+  check('all 21 rank thresholds resolve exactly', DUEL_DIVISIONS.every((rank, index) =>
+    duelRankAt(index * 100).label === rank.label));
+  check('division tracks span exactly 100 RP', duelRankProgress(649).progress === .49 &&
+    duelRankProgress(650).rank.label === 'Gold III');
+  check('RP sanitization rejects junk without capping Grandmaster progression',
+    sanitizeDuelRp(NaN) === 450 && sanitizeDuelRp(-12) === 0 &&
+    duelRankAt(75_000).label === 'Grandmaster I' && sanitizeDuelRp(75_000) === 75_000);
+
+  const complete = (rp: number) => ({ ...newDuelProgress(), rp, peakRp: rp,
+    rank: duelRankAt(rp), placementsRemaining: 0 });
+  const equal = settleDuelProgress([
+    { id: 1, username: 'EqualOne', state: complete(900) },
+    { id: 2, username: 'EqualTwo', state: complete(900) },
+  ], 1_000);
+  check('equal-rated 1v1 starts at plus/minus 24 RP',
+    equal.changes[0].change === 24 && equal.changes[1].change === -24);
+  const upset = settleDuelProgress([
+    { id: 1, username: 'Underdog', state: complete(500) },
+    { id: 2, username: 'Favourite', state: complete(1300) },
+  ], 2_000);
+  check('underdog upsets are rewarded from authoritative placement', upset.changes[0].change >= 47);
+  const expectedWin = settleDuelProgress([
+    { id: 1, username: 'Certain', state: complete(10_000) },
+    { id: 2, username: 'Longshot', state: complete(0) },
+  ], 2_500);
+  check('negligible expected results may round to a transparent zero change',
+    expectedWin.changes[0].baseSkillDelta === 0 && expectedWin.changes[0].change === 0);
+  const placement = settleDuelProgress([
+    { id: 1, username: 'PlacingOne', state: newDuelProgress() },
+    { id: 2, username: 'PlacingTwo', state: newDuelProgress() },
+  ], 3_000);
+  check('placements use K=72 while keeping RP visible', placement.changes[0].change === 36 &&
+    placement.changes[0].placementsRemaining === DUEL_PLACEMENT_MATCHES - 1);
+  const four = settleDuelProgress([1, 2, 3, 4].map((id) => ({
+    id, username: `Four${id}`, state: newDuelProgress(),
+  })), 4_000);
+  check('four-player placement averages every pairwise result',
+    four.changes[0].baseSkillDelta === 36 && four.changes[3].baseSkillDelta === -36 &&
+    four.changes[1].baseSkillDelta === 12 && four.changes[2].baseSkillDelta === -12);
+
+  let streakState = complete(850); streakState.streak = 2;
+  const streak = settleDuelProgress([
+    { id: 1, username: 'Streaker', state: streakState },
+    { id: 2, username: 'Other', state: complete(850) },
+  ], 5_000);
+  check('third consecutive first place grants +2 streak RP',
+    streak.changes[0].streakBonus === 2 && streak.changes[0].change === 26);
+  let repeated = [complete(900), complete(900)];
+  const multipliers: number[] = [];
+  for (let match = 0; match < 5; match++) {
+    const settled = settleDuelProgress([
+      { id: 1, username: 'RepeatA', state: repeated[0] },
+      { id: 2, username: 'RepeatB', state: repeated[1] },
+    ], 10_000 + match);
+    multipliers.push(settled.changes[0].repeatMultiplier);
+    repeated = settled.states.map((value) => value.state);
+  }
+  check('same-opponent 24h decay is full, full, half, quarter, tenth',
+    multipliers.join(',') === '1,1,0.5,0.25,0.1');
+
+  const shielded = complete(605); shielded.demotionShield = true;
+  const shield = settleDuelProgress([
+    { id: 1, username: 'ShieldWinner', state: complete(605) },
+    { id: 2, username: 'Shielded', state: shielded },
+  ], 20_000);
+  check('named-rank demotion shield consumes and clamps to rank floor',
+    shield.changes[1].shieldUsed && shield.changes[1].afterRp === 600 && !shield.states[1].state.demotionShield);
+  const unshielded = complete(605);
+  const demoted = settleDuelProgress([
+    { id: 1, username: 'DemotionWinner', state: complete(605) },
+    { id: 2, username: 'Unshielded', state: unshielded },
+  ], 20_500);
+  check('ordinary division and named-rank demotions remain possible without a shield',
+    demoted.changes[1].demotion && demoted.changes[1].afterRp < 600);
+  const promoted = settleDuelProgress([
+    { id: 1, username: 'Promoted', state: complete(890) },
+    { id: 2, username: 'PromotionLoss', state: complete(890) },
+  ], 21_000);
+  check('named-rank promotion grants one shield and cosmetic unlock',
+    promoted.changes[0].namedRankPromotion && promoted.states[0].state.demotionShield &&
+    promoted.changes[0].newlyUnlockedFlair === 'Prism Breaker');
+
+  const legacyCases: [number, number][] = [[0, 0], [899, 299], [900, 300], [2000, 1800], [4000, 2100]];
+  check('legacy Elo tier boundaries migrate proportionally', legacyCases.every(([elo, rp]) =>
+    migrateLegacyDuelProgress(elo).rp === rp));
+  check('migrated records are placement-complete and retain record', (() => {
+    const state = loadDuelProgress(undefined, 1100, 12, 7);
+    return state.placementsRemaining === 0 && state.peakRp === 600 && state.wins === 12 && state.losses === 7;
+  })());
+  const revealPlacementState = complete(450); revealPlacementState.placementsRemaining = 1;
+  const revealed = settleDuelProgress([
+    { id: 1, username: 'RevealWinner', state: revealPlacementState },
+    { id: 2, username: 'RevealOther', state: complete(450) },
+  ], 22_000);
+  check('fifth placement flips the provisional badge and emits a reveal',
+    revealed.changes[0].placementReveal && revealed.states[0].state.placementsRemaining === 0);
+
+  const history = newDuelProgress();
+  history.opponentHistory = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`user${i}`, [30_000]]));
+  const bounded = sanitizeDuelProgress(history, 30_000);
+  check('opponent history survives sanitation while remaining bounded',
+    Object.keys(bounded.opponentHistory).length === DUEL_MAX_HISTORY_OPPONENTS);
+  const lockedProfile = duelProfileOf(newDuelProgress());
+  check('flair authorization rejects locked rank rewards',
+    canEquipDuelFlair(lockedProfile, DUEL_FLAIRS[0]) &&
+    !canEquipDuelFlair(lockedProfile, DUEL_FLAIRS[1]) && unlockedDuelFlairs(lockedProfile).length === 1);
+
+  const revealChange = equal.changes[0];
+  check('deterministic reveal visits impact, previous, count, and settled states',
+    duelRevealState(revealChange, 0).phase === 'impact' &&
+    duelRevealState(revealChange, 500).phase === 'previous' &&
+    duelRevealState(revealChange, 1500).phase === 'counting' &&
+    duelRevealState(revealChange, 3000).phase === 'settled');
+  check('skip and reduced-motion settle immediately; safe mode removes dense particles',
+    duelRevealState(revealChange, 0, { skipped: true }).settled &&
+    duelRevealState(revealChange, 0, { reducedMotion: true }).settled &&
+    !duelRevealState(revealChange, 1500, { photosensitivitySafe: true }).denseParticles);
+
+  const accounts = new Accounts([{ username: 'LegacyUser', salt: 's', hash: 'h', faction: 0,
+    duelElo: 1000, duelWins: 9, duelLosses: 4 }]);
+  check('account load performs one-way versioned migration',
+    accounts.duelProfile('LegacyUser').rp === 450 && accounts.toJSON()[0].duelProgress?.version === 1 &&
+    accounts.toJSON()[0].duelElo === undefined);
 }
 
 // Authoritative integration: scope isolation, normalized loadout/state,
 // validated same-faction damage, clock fan-out, forfeit and restoration.
 {
   const s = new GameServer(741, () => 0.5);
+  let settlementCalls = 0;
+  s.onDuelSettlement = (changes) => {
+    settlementCalls++;
+    const profiles = Object.fromEntries(changes.map((change) =>
+      [change.username.toLowerCase(), duelProfileOf(change.state)]));
+    return { profiles, leaderboard: changes.map((change) => ({
+      username: change.username, ...duelProfileOf(change.state),
+    })).sort((a, b) => b.rp - a.rp) };
+  };
   s.addPlayer(1, { username: 'RedOne', faction: 0, data: {
     slots: [{ id: Item.Diamond, count: 7 }], armor: [], selected: 0,
   } });
@@ -290,26 +425,38 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
     slots: [{ id: Item.GoldIngot, count: 4 }], armor: [], selected: 0,
   } });
   s.addPlayer(3, { username: 'WorldOnly', faction: 1 });
+  const lockedFlair = s.handle(1, { t: 'duelFlair', flair: 'Voxel Grandmaster' });
+  check('server rejects a forged locked-flair selection', lockedFlair.some((out) =>
+    out.to === 1 && out.msg.t === 'duelFlairResult' && !out.msg.ok));
   s.handle(1, { t: 'xform', x: 120, y: 70, z: 30, yaw: 0, pitch: 0 });
   s.handle(2, { t: 'xform', x: 125, y: 70, z: 30, yaw: 0, pitch: 0 });
+  // Escape/pointer-unlock is client UI state only: a stationary player's
+  // authoritative body remains in normal-world snapshots for everybody else.
+  check('a stationary paused player remains visible to other players',
+    s.snapshotFor(2).some((p) => p.id === 1 && !p.dead));
   const created = s.handle(1, { t: 'duelCreate' });
   const createdMsg = created.find((o) => o.to === 1 && o.msg.t === 'duelLobby')?.msg;
   if (!createdMsg || createdMsg.t !== 'duelLobby' || !createdMsg.inviteToken) {
     throw new Error('server did not return a private invite');
   }
   s.handle(2, { t: 'duelJoin', token: createdMsg.inviteToken });
+  check('Duel lobby members remain visible and receive normal-world traffic after closing the lobby UI',
+    s.receivesWorldBroadcast(1) && s.receivesWorldBroadcast(2) &&
+    s.snapshotFor(3).some((p) => p.id === 1 && !p.dead) &&
+    s.snapshotFor(3).some((p) => p.id === 2 && !p.dead));
   s.handle(1, { t: 'duelReady', ready: true });
   s.handle(2, { t: 'duelReady', ready: true });
   const entered = s.handle(1, { t: 'duelStart' });
   const arenaMsg = entered.find((o) => o.to === 1 && o.msg.t === 'duelArena')?.msg;
   if (!arenaMsg || arenaMsg.t !== 'duelArena') throw new Error('arena entry missing');
   const kit = entered.find((o) => o.to === 1 && o.msg.t === 'duelLoadout')?.msg;
-  check('server supplies only an iron axe weapon plus build, bounce and healing utility', !!kit && kit.t === 'duelLoadout' &&
-    kit.slots[0]?.id === Item.IronAxe && kit.slots[0].count === 1 &&
+  check('server supplies a rifle plus build-only axe, bounce and healing utility', !!kit && kit.t === 'duelLoadout' &&
+    kit.slots[0]?.id === Item.BurstRifle && kit.slots[0].count === 1 && kit.slots[0].loaded === 24 &&
     kit.slots[1]?.id === Block.OakPlanks && kit.slots[1].count === 64 &&
-    kit.slots[2]?.id === Item.JumpBoost && kit.slots[2].count === 5 &&
-    kit.slots[3]?.id === Item.Medkit && kit.slots[3].count === 5 &&
-    kit.slots.slice(4).every((v) => v === null) && !kit.unlimitedReserve);
+    kit.slots[2]?.id === Item.IronAxe && kit.slots[2].count === 1 &&
+    kit.slots[3]?.id === Item.JumpBoost && kit.slots[3].count === 5 &&
+    kit.slots[4]?.id === Item.Medkit && kit.slots[4].count === 5 &&
+    kit.slots.slice(5).every((v) => v === null) && kit.unlimitedReserve);
   check('arena and normal-world visibility scopes are disjoint',
     !s.receivesWorldBroadcast(1) && s.receivesWorldBroadcast(3) &&
     s.snapshotFor(1).every((p) => p.id === 1 || p.id === 2) &&
@@ -317,6 +464,8 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   check('arena entry emits immediate synthetic roster leaves in both directions',
     entered.some((o) => o.to === 1 && o.msg.t === 'leave' && o.msg.id === 3) &&
     entered.some((o) => o.to === 3 && o.msg.t === 'leave' && o.msg.id === 1));
+  check('a stationary paused arena body remains visible to its opponent',
+    s.snapshotFor(2).some((p) => p.id === 1 && !p.dead));
   const persistedInside = s.capturePlayerState(1)!.data;
   check('disconnect/shutdown capture keeps the open-world position and inventory',
     persistedInside.x === 120 &&
@@ -356,10 +505,16 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   check('five-block restriction applies to edits, not player movement',
     boostedHeight.y > testGroundY + 5);
   s.handle(1, { t: 'xform', x: arenaMsg.spawn.x, y: arenaMsg.spawn.y, z: arenaMsg.spawn.z,
+    yaw: 0, pitch: 0, held: Item.BurstRifle });
+  check('rifle cannot break player-placed Duel cover',
+    s.handle(1, { t: 'edit', x: testBx, y: testGroundY + 1, z: testBz, block: 0 }).length === 0);
+  s.handle(1, { t: 'xform', x: arenaMsg.spawn.x, y: arenaMsg.spawn.y, z: arenaMsg.spawn.z,
     yaw: 0, pitch: 0, held: Item.IronAxe });
   const brokenEdit = s.handle(1, { t: 'edit', x: testBx, y: testGroundY + 1, z: testBz, block: 0 });
-  check('can break player-placed oak planks in duel arena',
+  check('iron axe can break player-placed oak planks in duel arena',
     brokenEdit.length === 2 && brokenEdit.some((o) => o.to === 2 && o.msg.t === 'edit' && o.msg.block === 0));
+  check('iron axe cannot produce Duel PvP damage',
+    s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 }).length === 0);
   check('server broadcasts an authoritative active-round clock', began.some((o) =>
     o.to === 1 && o.msg.t === 'duelClock' && o.msg.endsAt - o.msg.serverNow === DUEL_ROUND_MS));
   const arena = arenaMsg.arena;
@@ -368,7 +523,7 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   const x = spawn0.x, z2 = spawn0.z + 6;
 
   // Attempting to move through the outer boundary wall is rejected
-  s.handle(1, { t: 'xform', x: arena.minX - 2, y: spawn0.y, z: spawn0.z, yaw: 0, pitch: 0, held: Item.IronAxe });
+  s.handle(1, { t: 'xform', x: arena.minX - 2, y: spawn0.y, z: spawn0.z, yaw: 0, pitch: 0, held: Item.BurstRifle });
   check('living transform sweeps cannot pass through arena boundary walls',
     s.snapshotFor(1).find((p) => p.id === 1)!.x >= arena.minX);
 
@@ -380,49 +535,47 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
     blockCoverX - arena.minX, blockCoverZ - arena.minZ);
   const combatY = coverGroundY + 3;
   const blockCoverY = combatY + 1;
-  s.handle(1, { t: 'xform', x: p1x, y: combatY, z: p1z, yaw: -Math.PI / 2, pitch: 0, held: Item.IronAxe });
-  s.handle(2, { t: 'xform', x: spawn1.x, y: combatY, z: spawn1.z, yaw: Math.PI / 2, pitch: 0, held: Item.IronAxe });
-  s.handle(2, { t: 'xform', x: p2x, y: combatY, z: p2z, yaw: Math.PI / 2, pitch: 0, held: Item.IronAxe });
+  s.handle(1, { t: 'xform', x: p1x, y: combatY, z: p1z, yaw: -Math.PI / 2, pitch: 0, held: Item.BurstRifle });
+  s.handle(2, { t: 'xform', x: spawn1.x, y: combatY, z: spawn1.z, yaw: Math.PI / 2, pitch: 0, held: Item.BurstRifle });
+  s.handle(2, { t: 'xform', x: p2x, y: combatY, z: p2z, yaw: Math.PI / 2, pitch: 0, held: Item.BurstRifle });
 
-  check('forged Duel gunfire is rejected because the axe is the only weapon',
-    s.handle(1, { t: 'shot', item: Item.BurstRifle,
-      x: p1x, y: combatY + 1.6, z: p1z, dx: 1, dy: 0, dz: 0 }).length === 0);
+  const fireAtTwo = () => s.handle(1, { t: 'shot' as const, item: Item.BurstRifle,
+    x: p1x, y: combatY + 1.6, z: p1z, dx: p2x - p1x, dy: -0.7, dz: p2z - p1z });
+
+  check('server accepts the equipped Duel Burst Rifle', fireAtTwo().length > 0);
   check('forged over-damage is rejected',
     s.handle(1, { t: 'rangedAttack', target: 2, amount: 6 }).length === 0);
   const hit = s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 });
-  check('same-faction Duel opponents take normalized five-HP axe damage', hit.some((o) =>
+  check('same-faction Duel opponents take normalized five-HP rifle damage', hit.some((o) =>
     o.to === 2 && o.msg.t === 'hurt' && o.msg.health === 35));
   s.tickRegen(30);
   check('Duels disables passive regeneration',
     s.snapshotFor(2).find((p) => p.id === 2)!.health === 35);
-  check('axe cadence rejects an immediate repeated swing',
+  check('a hit without another accepted rifle round is rejected',
     s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 }).length === 0);
-  s.tickWar(0.43);
-  s.handle(2, { t: 'xform', x: p1x + 4.2, y: combatY, z: p1z,
-    yaw: Math.PI / 2, pitch: 0, held: Item.IronAxe });
-  check('axe hit beyond four-block reach is rejected',
-    s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 }).length === 0);
-  s.handle(2, { t: 'xform', x: p2x, y: combatY, z: p2z,
-    yaw: Math.PI / 2, pitch: 0, held: Item.IronAxe });
 
   // Test block cover obstruction
   s.handle(1, { t: 'xform', x: p1x, y: combatY, z: p1z,
     yaw: -Math.PI / 2, pitch: 0, held: Block.OakPlanks });
   s.handle(1, { t: 'edit', x: blockCoverX, y: blockCoverY, z: blockCoverZ, block: Block.OakPlanks });
   s.handle(1, { t: 'xform', x: p1x, y: combatY, z: p1z,
-    yaw: -Math.PI / 2, pitch: 0, held: Item.IronAxe });
-  s.tickWar(0.43);
+    yaw: -Math.PI / 2, pitch: 0, held: Item.BurstRifle });
+  s.tickWar(0.51); fireAtTwo();
   check('arena block cover rejects an otherwise valid obstructed hit',
     s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 }).length === 0);
-  // Remove the plank
+  // Remove the plank with the build-only axe, then re-equip the rifle.
+  s.handle(1, { t: 'xform', x: p1x, y: combatY, z: p1z,
+    yaw: -Math.PI / 2, pitch: 0, held: Item.IronAxe });
   s.handle(1, { t: 'edit', x: blockCoverX, y: blockCoverY, z: blockCoverZ, block: 0 });
+  s.handle(1, { t: 'xform', x: p1x, y: combatY, z: p1z,
+    yaw: -Math.PI / 2, pitch: 0, held: Item.BurstRifle });
   check('cross-scope forged damage is rejected both directions',
     s.handle(1, { t: 'rangedAttack', target: 3, amount: 5 }).length === 0 &&
     s.handle(3, { t: 'rangedAttack', target: 1, amount: 5 }).length === 0);
-  // Seven more valid axe swings: 35 -> 0.
+  // Seven more valid rifle hits: 35 -> 0.
   let lethal: ReturnType<typeof s.handle> = [];
   for (let swing = 0; swing < 7; swing++) {
-    s.tickWar(0.43);
+    s.tickWar(0.51); fireAtTwo();
     lethal = s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 });
   }
   check('lethal Duel hit skips normal death and starts spectator respawn', lethal.some((o) =>
@@ -448,10 +601,11 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   const fresh = respawned.find((o) => o.to === 2 && o.msg.t === 'duelLoadout')?.msg;
   check('server respawn is exactly timed and replaces a fresh loadout',
     !!fresh && fresh.t === 'duelLoadout' &&
-    fresh.slots[0]?.id === Item.IronAxe && fresh.slots[0].count === 1 &&
+    fresh.slots[0]?.id === Item.BurstRifle && fresh.slots[0].count === 1 && fresh.slots[0].loaded === 24 &&
     fresh.slots[1]?.id === Block.OakPlanks && fresh.slots[1].count === 64 &&
-    fresh.slots[2]?.id === Item.JumpBoost && fresh.slots[2].count === 5 &&
-    fresh.slots[3]?.id === Item.Medkit && fresh.slots[3].count === 5 &&
+    fresh.slots[2]?.id === Item.IronAxe && fresh.slots[2].count === 1 &&
+    fresh.slots[3]?.id === Item.JumpBoost && fresh.slots[3].count === 5 &&
+    fresh.slots[4]?.id === Item.Medkit && fresh.slots[4].count === 5 &&
     respawned.some((o) => o.to === 2 && o.msg.t === 'duelRespawn' && !o.msg.spectating));
   check('respawned avatar becomes visible again',
     !s.snapshotFor(1).find((p) => p.id === 2)!.dead);
@@ -459,7 +613,10 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   const forfeited = s.handle(1, { t: 'duelLeave' });
   check('leaving a two-player round yields a scoped forfeit result', forfeited.some((o) =>
     o.to === 2 && o.msg.t === 'duelResult' && o.msg.result.winner === 2 &&
-    o.msg.result.finishReason === 'forfeit'));
+    o.msg.result.finishReason === 'forfeit' && o.msg.result.progressChanges.length === 2));
+  check('server settles and persists a result exactly once before fan-out', settlementCalls === 1);
+  s.handle(2, { t: 'duelFlair', flair: 'Block Rookie' });
+  check('revisiting the result snapshot cannot settle it twice', settlementCalls === 1);
   const restoredOne = forfeited.find((o) => o.to === 1 && o.msg.t === 'duelRestored')?.msg;
   check('leaver receives exact open-world restoration', !!restoredOne &&
     restoredOne.t === 'duelRestored' && restoredOne.x === 120 &&
@@ -492,14 +649,16 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   const a = arenaMsg.arena;
   const sp0 = a.spawns[0], sp1 = a.spawns[1];
   const combatY = a.floor + 5;
-  s.handle(10, { t: 'xform', x: sp0.x, y: combatY, z: sp0.z, yaw: -Math.PI / 2, pitch: 0, held: Item.IronAxe });
-  s.handle(11, { t: 'xform', x: sp1.x, y: combatY, z: sp1.z, yaw: Math.PI / 2, pitch: 0, held: Item.IronAxe });
-  s.handle(11, { t: 'xform', x: sp0.x + 3.5, y: combatY, z: sp0.z, yaw: Math.PI / 2, pitch: 0, held: Item.IronAxe });
+  s.handle(10, { t: 'xform', x: sp0.x, y: combatY, z: sp0.z, yaw: -Math.PI / 2, pitch: 0, held: Item.BurstRifle });
+  s.handle(11, { t: 'xform', x: sp1.x, y: combatY, z: sp1.z, yaw: Math.PI / 2, pitch: 0, held: Item.BurstRifle });
+  s.handle(11, { t: 'xform', x: sp0.x + 3.5, y: combatY, z: sp0.z, yaw: Math.PI / 2, pitch: 0, held: Item.BurstRifle });
 
   const damageOnce = (): void => {
-    s.tickWar(0.43);
+    s.tickWar(0.51);
+    s.handle(10, { t: 'shot', item: Item.BurstRifle,
+      x: sp0.x, y: combatY + 1.6, z: sp0.z, dx: 3.5, dy: -0.7, dz: 0 });
     const hurt = s.handle(10, { t: 'rangedAttack', target: 11, amount: 5 });
-    check('healing scenario accepts a fresh authoritative axe swing', hurt.some((o) => o.msg.t === 'hurt'));
+    check('healing scenario accepts a fresh authoritative rifle hit', hurt.some((o) => o.msg.t === 'hurt'));
   };
   const health = () => s.snapshotFor(11).find((p) => p.id === 11)!.health;
   damageOnce();

@@ -87,15 +87,20 @@ game.onWarfareChange = (username, progress) => {
   saveAccounts();
 };
 
-game.onDuelRatings = (changes) => {
-  for (const change of changes) accounts.applyDuelRating(change.username, change.elo, change.won);
+game.onDuelSettlement = (changes) => {
+  if (!accounts.applyDuelSettlement(changes)) throw new Error('Duels settlement referenced an unknown account');
   saveAccounts();
-  const profiles: Record<string, { wins: number; losses: number }> = {};
+  const profiles: Record<string, ReturnType<typeof accounts.duelProfile>> = {};
   for (const change of changes) {
-    const profile = accounts.duelProfile(change.username);
-    profiles[change.username.toLowerCase()] = { wins: profile.wins, losses: profile.losses };
+    profiles[change.username.toLowerCase()] = accounts.duelProfile(change.username);
   }
   return { leaderboard: accounts.duelLeaderboard(10), profiles };
+};
+game.onDuelFlair = (username, flair) => {
+  const profile = accounts.equipDuelFlair(username, flair);
+  if (!profile) return null;
+  saveAccounts();
+  return { profile, leaderboard: accounts.duelLeaderboard(10) };
 };
 // Lifesteal elimination (Milestone A): record the 24h wall-clock lockout on the
 // account (login is refused until it expires) and boot the victim shortly after
@@ -253,9 +258,7 @@ function handleAuth(id: number, msg: ClientMsg & { t: 'register' | 'login' | 'se
     switchSeason: res.account.switchSeason, forfeitSeason: res.account.forfeitSeason,
     data: res.account.data,
     warfare: accounts.warfareOf(res.account.username),
-    duelElo: accounts.duelProfile(res.account.username).elo,
-    duelWins: accounts.duelProfile(res.account.username).wins,
-    duelLosses: accounts.duelProfile(res.account.username).losses,
+    duelProgress: accounts.duelProgressOf(res.account.username),
     duelLeaderboard: accounts.duelLeaderboard(10),
   }));
   // Issue (rotate) a session token so this browser can resume without the

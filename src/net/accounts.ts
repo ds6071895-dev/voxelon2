@@ -10,7 +10,10 @@ import { FACTIONS, resolveJoinFaction } from '../teams';
 import {
   WarfareProgress, buyWarfareNode, grantWarfareXp, migrateWarfare, sanitizeWarfare,
 } from '../warfare';
-import { DUEL_STARTING_ELO, sanitizeDuelElo } from '../duels';
+import {
+  DuelFlair, DuelProgressState, DuelPublicProfile, canEquipDuelFlair,
+  duelProfileOf, loadDuelProgress, newDuelProgress, sanitizeDuelProgress,
+} from '../duels_progression';
 
 export interface Account {
   username: string;
@@ -45,6 +48,8 @@ export interface Account {
    *  never overwrite (or mint) technology the player did not earn. */
   warfare?: WarfareProgress;
   /** Server-owned competitive Duels progression. */
+  duelProgress?: DuelProgressState;
+  /** Retired fields are accepted only while loading a legacy record. */
   duelElo?: number;
   duelWins?: number;
   duelLosses?: number;
@@ -85,9 +90,7 @@ export class Accounts {
           op: a.op === true,
           data: a.data,
           warfare: sanitizeWarfare(a.warfare),
-          duelElo: sanitizeDuelElo(a.duelElo),
-          duelWins: Number.isFinite(a.duelWins) ? Math.max(0, Math.floor(a.duelWins as number)) : 0,
-          duelLosses: Number.isFinite(a.duelLosses) ? Math.max(0, Math.floor(a.duelLosses as number)) : 0,
+          duelProgress: loadDuelProgress(a.duelProgress, a.duelElo, a.duelWins, a.duelLosses),
         });
       }
     }
@@ -129,7 +132,7 @@ export class Accounts {
       username: name, salt, hash: hash(pass, salt),
       faction: resolveJoinFaction(this.factionCounts(), desired),
       seasonsWon: 0,
-      duelElo: DUEL_STARTING_ELO, duelWins: 0, duelLosses: 0,
+      duelProgress: newDuelProgress(),
     };
     this.byName.set(name.toLowerCase(), account);
     return { ok: true, account };
@@ -167,22 +170,43 @@ export class Accounts {
     if (a) a.data = data;
   }
 
-  duelProfile(name: string): { elo: number; wins: number; losses: number } {
+  duelProgressOf(name: string): DuelProgressState {
     const a = this.get(name);
-    return { elo: sanitizeDuelElo(a?.duelElo), wins: Math.max(0, a?.duelWins ?? 0), losses: Math.max(0, a?.duelLosses ?? 0) };
+    if (!a) return newDuelProgress();
+    a.duelProgress = sanitizeDuelProgress(a.duelProgress);
+    return a.duelProgress;
   }
 
-  applyDuelRating(name: string, elo: number, won: boolean): void {
-    const a = this.get(name);
-    if (!a) return;
-    a.duelElo = sanitizeDuelElo(elo);
-    if (won) a.duelWins = Math.max(0, a.duelWins ?? 0) + 1;
-    else a.duelLosses = Math.max(0, a.duelLosses ?? 0) + 1;
+  duelProfile(name: string): DuelPublicProfile {
+    return duelProfileOf(this.duelProgressOf(name));
   }
 
-  duelLeaderboard(limit = 10): { username: string; elo: number; wins: number; losses: number }[] {
+  /** Validate every member before committing, keeping one match atomic. */
+  applyDuelSettlement(changes: { username: string; state: DuelProgressState }[]): boolean {
+    const prepared: { account: Account; state: DuelProgressState }[] = [];
+    for (const change of changes) {
+      const account = this.get(change.username);
+      if (!account) return false;
+      prepared.push({ account, state: sanitizeDuelProgress(change.state) });
+    }
+    for (const value of prepared) value.account.duelProgress = value.state;
+    return true;
+  }
+
+  equipDuelFlair(name: string, flair: unknown): DuelPublicProfile | null {
+    const a = this.get(name);
+    if (!a) return null;
+    const state = this.duelProgressOf(name);
+    const profile = duelProfileOf(state);
+    if (!canEquipDuelFlair(profile, flair)) return null;
+    state.equippedFlair = flair as DuelFlair;
+    a.duelProgress = state;
+    return duelProfileOf(state);
+  }
+
+  duelLeaderboard(limit = 10): ({ username: string } & DuelPublicProfile)[] {
     return this.list().map((a) => ({ username: a.username, ...this.duelProfile(a.username) }))
-      .sort((a, b) => b.elo - a.elo || b.wins - a.wins || a.username.localeCompare(b.username))
+      .sort((a, b) => b.rp - a.rp || b.wins - a.wins || a.username.localeCompare(b.username))
       .slice(0, Math.max(1, Math.floor(limit)));
   }
 

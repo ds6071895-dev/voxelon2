@@ -25,6 +25,7 @@ import type {
   BombSnapshot, HeliLossReason, HelicopterSnapshot, SeatKind,
 } from '../vehicles';
 import type { DuelArenaBounds, DuelLobbySnapshot, DuelResult } from '../duels';
+import type { DuelFlair, DuelPublicProfile } from '../duels_progression';
 
 export interface Remote {
   info: PlayerInfo;
@@ -97,8 +98,9 @@ export class NetClient {
   onDuelClock?: (serverNow: number, endsAt: number, suddenDeath: boolean) => void;
   onDuelRespawn?: (respawnAt: number, spectating: boolean) => void;
   onDuelResult?: (result: DuelResult) => void;
-  onDuelProfile?: (elo: number, wins: number, losses: number,
-    leaderboard: DuelLeaderboardEntry[], change?: { before: number; after: number; change: number }) => void;
+  onDuelProfile?: (profile: DuelPublicProfile, leaderboard: DuelLeaderboardEntry[]) => void;
+  onDuelLeaderboard?: (leaderboard: DuelLeaderboardEntry[]) => void;
+  onDuelProfileUpdate?: (id: number) => void;
   onDuelRestored?: (x: number, y: number, z: number, yaw: number, pitch: number, health: number,
     dead: boolean, mode: GameMode, state?: Record<string, unknown>) => void;
   /** Saved per-account state to restore (inventory/hotbar), if the account has any. */
@@ -321,8 +323,7 @@ export class NetClient {
         for (const st of msg.batteries) this.onBattery?.(st);
         this.onHelis?.(msg.helis, []);
         this.onProtectedAreas?.(msg.protectedAreas);
-        this.onDuelProfile?.(msg.duelProfile.elo, msg.duelProfile.wins,
-          msg.duelProfile.losses, msg.duelLeaderboard);
+        this.onDuelProfile?.(msg.duelProfile, msg.duelLeaderboard);
         this.onWorldTime?.(msg.worldTime);
         const me = msg.players.find((p) => p.id === this.myId);
         // Restore saved inventory BEFORE onWelcome (which adopts the server
@@ -567,16 +568,27 @@ export class NetClient {
         this.onDuelRespawn?.(msg.respawnAt, msg.spectating);
         break;
       case 'duelResult':
-        for (const change of msg.result.ratingChanges) {
+        for (const change of msg.result.progressChanges) {
           const remote = this.remotes.get(change.id);
-          if (remote) remote.info.duelElo = change.after;
+          if (remote) remote.info.duelProfile = change.profile;
         }
         this.onDuelResult?.(msg.result);
         break;
-      case 'duelRating':
-        this.onDuelProfile?.(msg.after, msg.wins, msg.losses, msg.leaderboard,
-          { before: msg.before, after: msg.after, change: msg.change });
+      case 'duelProgress':
+        this.onDuelProfile?.(msg.profile, msg.leaderboard);
         break;
+      case 'duelFlairResult':
+        this.onDuelProfile?.(msg.profile, msg.leaderboard);
+        break;
+      case 'duelLeaderboard':
+        this.onDuelLeaderboard?.(msg.leaderboard);
+        break;
+      case 'duelProfileUpdate': {
+        const remote = this.remotes.get(msg.id);
+        if (remote) remote.info.duelProfile = msg.profile;
+        this.onDuelProfileUpdate?.(msg.id);
+        break;
+      }
       case 'duelRestored':
         this.onDuelRestored?.(msg.x, msg.y, msg.z, msg.yaw, msg.pitch, msg.health, msg.dead,
           msg.mode, msg.state);
@@ -690,6 +702,7 @@ export class NetClient {
     if (this.connected) this.raw({ t: 'duelRematch', vote });
   }
   sendDuelReturn(): void { if (this.connected) this.raw({ t: 'duelReturn' }); }
+  sendDuelFlair(flair: DuelFlair): void { if (this.connected) this.raw({ t: 'duelFlair', flair }); }
 
   sendEdit(x: number, y: number, z: number, block: number): void {
     if (this.connected) this.raw({ t: 'edit', x, y, z, block });

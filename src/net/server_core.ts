@@ -78,6 +78,10 @@ import {
   Duels, DuelArenaBounds, DuelLobbySnapshot, DUEL_MAX_HEALTH, DUEL_MAX_PILLAR_HEIGHT, clampToDuelArena, duelArenaBlockAt,
   duelArenaSolidAt, duelTerrainElevation, hasArenaLineOfSight, safestDuelSpawn, secureDuelToken,
 } from '../duels';
+import {
+  DuelFlair, DuelProgressState, DuelPublicProfile, canEquipDuelFlair,
+  duelProfileOf, newDuelProgress, sanitizeDuelProgress, settleDuelProgress,
+} from '../duels_progression';
 
 // Cosmetic gunshot rebroadcast budget (see handleShot). Sized well above the
 // fastest gun's cadence so it never eats a real shot; it exists to cap a
@@ -114,8 +118,6 @@ const UNSAFE_RESPAWN_BLOCKS = new Set<number>([
 ]);
 
 interface ServerPlayer extends PlayerInfo {
-  duelWins: number;
-  duelLosses: number;
   regenCooldown: number;
   regenTimer: number;
   /** Healing consumable (Bandage/Medkit): seconds of accelerated regen left +
@@ -286,11 +288,15 @@ export class GameServer {
   /** Set by the shell to persist a player's warfare progression to the account
    *  store (the pure core has no disk). */
   onWarfareChange?: (username: string, progress: WarfareProgress) => void;
-  /** Persist a completed rated match and return fresh public standings. */
-  onDuelRatings?: (changes: { username: string; elo: number; won: boolean }[]) => {
+  /** Atomically persist every account touched by one completed rated match. */
+  onDuelSettlement?: (changes: { username: string; state: DuelProgressState }[]) => {
     leaderboard: DuelLeaderboardEntry[];
-    profiles: Record<string, { wins: number; losses: number }>;
+    profiles: Record<string, DuelPublicProfile>;
   };
+  /** Persist a validated cosmetic-only flair selection. */
+  onDuelFlair?: (username: string, flair: DuelFlair) => {
+    profile: DuelPublicProfile; leaderboard: DuelLeaderboardEntry[];
+  } | null;
   private strategic!: StrategicSim;
   private vehicles!: VehicleSim;
   /** Players known by the transport to be on a rope (for one-shot detach state). */
@@ -333,13 +339,16 @@ export class GameServer {
   private nextEid = 1;
   /** Invite-only minigame state is intentionally ephemeral: never serialized. */
   private readonly duels: Duels;
+  /** Retained through disconnects so forfeits cannot evade progression. */
+  private readonly duelProgress = new Map<number, DuelProgressState>();
   /** Placed blocks per active duel arena slot, reset on match end. */
   private readonly duelArenaEdits = new Map<number, Map<string, number>>();
   private readonly settledDuelResults = new Set<string>();
   /** Next whole-server timestamp broadcast for hidden-tab/lag clock recovery. */
   private duelClockNextAt = 0;
 
-  constructor(seed = WORLD_SEED, rng: () => number = Math.random) {
+  constructor(seed = WORLD_SEED, rng: () => number = Math.random,
+    private readonly wallNow: () => number = Date.now) {
     this.seed = seed;
     this.rng = rng;
     this.duels = new Duels(secureDuelToken);
@@ -575,7 +584,7 @@ export class GameServer {
    *  faction; without them (legacy/tests) it auto-assigns both. */
   addPlayer(id: number, account?: {
     username?: string; faction?: number; seasonsWon?: number;
-    duelElo?: number; duelWins?: number; duelLosses?: number;
+    duelProgress?: DuelProgressState;
     duelLeaderboard?: DuelLeaderboardEntry[];
     switchesUsed?: number; switchSeason?: number; forfeitSeason?: number;
     data?: Record<string, unknown>;
@@ -602,12 +611,11 @@ export class GameServer {
     // Lifesteal: hearts persist in the account data blob; fresh accounts (or
     // junk values) start at START_HEARTS via clampHearts' fail-safe.
     const hearts = clampHearts(saved?.hearts);
+    const progress = sanitizeDuelProgress(account?.duelProgress ?? newDuelProgress(), this.wallNow());
     const player: ServerPlayer = {
       id, username, skin: skinSeed(username), faction, mode: savedMode,
       seasonsWon: Number.isFinite(account?.seasonsWon) ? Math.max(0, Math.floor(account!.seasonsWon!)) : 0,
-      duelElo: Number.isFinite(account?.duelElo) ? Math.max(0, Math.round(account!.duelElo!)) : 1000,
-      duelWins: Number.isFinite(account?.duelWins) ? Math.max(0, Math.floor(account!.duelWins!)) : 0,
-      duelLosses: Number.isFinite(account?.duelLosses) ? Math.max(0, Math.floor(account!.duelLosses!)) : 0,
+      duelProfile: duelProfileOf(progress),
       hearts,
       x: s.x, y: s.y, z: s.z, yaw: fin(syaw as number) ? syaw as number : 0, pitch: 0,
       health: maxHealthFor(hearts), dead: false, regenCooldown: 0, regenTimer: 0,
@@ -650,6 +658,7 @@ export class GameServer {
       player.spawnZ = saved!.spawnZ as number;
     }
     this.players.set(id, player);
+    this.duelProgress.set(id, progress);
     // Warfare Command progression comes off the ACCOUNT, not the client blob.
     if (account && 'warfare' in account) this.setWarfare(username, account.warfare);
     const warfare = this.warfareOf(username);
@@ -670,7 +679,7 @@ export class GameServer {
       flags: this.flagsPayload(),
       state: saved, // opaque per-account blob (inventory/hotbar) for the client to restore
       warfare: { xp: warfare.xp, nodes: warfare.nodes.slice() },
-      duelProfile: { elo: player.duelElo, wins: player.duelWins, losses: player.duelLosses },
+      duelProfile: player.duelProfile,
       duelLeaderboard: account?.duelLeaderboard ?? [],
       silos: [...this.strategic.silos.values()],
       batteries: [...this.strategic.batteries.values()],
@@ -709,6 +718,8 @@ export class GameServer {
     // Logging out never banks a flag run: it goes straight back to its pad.
     const dropped = returnFlag(this.flags, id);
     this.players.delete(id);
+    if (!duelLeave.snapshot || (duelLeave.snapshot.phase !== 'running' &&
+        duelLeave.snapshot.phase !== 'sudden_death')) this.duelProgress.delete(id);
     out.push({ to: 'others', from: id, msg: { t: 'leave', id } });
     if (dropped) out.push(...this.flagBroadcast('returned', dropped.flag, p.username));
     return out;
@@ -779,12 +790,12 @@ export class GameServer {
     if (!p) return [];
     if (msg.t === 'duelCreate' || msg.t === 'duelJoin' || msg.t === 'duelLeave' ||
         msg.t === 'duelReady' || msg.t === 'duelStart' || msg.t === 'duelArenaReady' || msg.t === 'duelRematch' ||
-        msg.t === 'duelReturn') return this.handleDuel(p, msg);
+        msg.t === 'duelReturn' || msg.t === 'duelFlair') return this.handleDuel(p, msg);
     const duelPhase = this.duels.phaseFor(id);
     if (duelPhase && duelPhase !== 'lobby') {
       // A Duels body is isolated from every open-world action/economy system.
-      // Movement, axe combat/mining, server-counted Medkits, bounce launches,
-      // and arena block placement exist.
+      // Movement, rifle combat, axe-only cover breaking, server-counted
+      // Medkits, bounce launches, and arena block placement exist.
       if (msg.t === 'xform') return this.handleDuelTransform(p, msg);
       if (msg.t === 'shot') return this.handleDuelShot(p, msg);
       if (msg.t === 'rangedAttack') return this.handleDuelRanged(p, msg.target, msg.amount);
@@ -1465,56 +1476,68 @@ export class GameServer {
   }
 
   private duelSnapshotOutbound(snapshot: DuelLobbySnapshot, invite?: { id: number; token: string }): Outbound[] {
+    const progression = snapshot.phase === 'results' && snapshot.result
+      ? this.settleDuelProgression(snapshot) : [];
     const out: Outbound[] = snapshot.participants.map((participant) => ({
       to: participant.id,
       msg: { t: 'duelLobby', snapshot, inviteToken: invite?.id === participant.id ? invite.token : undefined },
     }));
-    if (snapshot.phase === 'results' && snapshot.result) out.push(...this.settleDuelRatings(snapshot));
+    out.push(...progression);
     return out;
   }
 
-  private settleDuelRatings(snapshot: DuelLobbySnapshot): Outbound[] {
+  private settleDuelProgression(snapshot: DuelLobbySnapshot): Outbound[] {
     const result = snapshot.result;
     if (!result) return [];
     const key = `${snapshot.id}:${snapshot.startedAt ?? result.rematchDeadline}`;
     if (this.settledDuelResults.has(key)) return [];
     this.settledDuelResults.add(key);
-    const changes = result.ratingChanges.map((change) => ({
-      username: change.username, elo: change.after, won: change.id === result.winner,
-    }));
-    for (const change of result.ratingChanges) {
-      const player = this.players.get(change.id);
-      if (player) {
-        player.duelElo = change.after;
-        if (change.id === result.winner) player.duelWins++;
-        else player.duelLosses++;
-      }
-      const participant = snapshot.participants.find((p) => p.id === change.id);
-      if (participant) participant.elo = change.after;
+    if (result.finishReason === 'cancelled') return [];
+    const settlement = settleDuelProgress(result.scoreboard.map((participant) => ({
+      id: participant.id, username: participant.username,
+      state: this.duelProgress.get(participant.id) ?? newDuelProgress(),
+    })), this.wallNow());
+    // The callback receives the complete account set in one call. It must
+    // finish before the result object is exposed to any outbound message.
+    const persisted = this.onDuelSettlement?.(settlement.states.map((value) => ({
+      username: value.username, state: value.state,
+    })));
+    for (const value of settlement.states) {
+      this.duelProgress.set(value.id, value.state);
+      const player = this.players.get(value.id);
+      if (player) player.duelProfile = persisted?.profiles[value.username.toLowerCase()] ?? duelProfileOf(value.state);
     }
-    this.duels.applyRatings(result.ratingChanges);
-    const persisted = this.onDuelRatings?.(changes);
-    const leaderboard = persisted?.leaderboard ?? changes.map((c) => ({
-      username: c.username, elo: c.elo, wins: c.won ? 1 : 0, losses: c.won ? 0 : 1,
-    })).sort((a, b) => b.elo - a.elo);
-    return result.ratingChanges.map((change) => {
-      const player = this.players.get(change.id);
-      const profile = persisted?.profiles[change.username.toLowerCase()];
-      if (player && profile) { player.duelWins = profile.wins; player.duelLosses = profile.losses; }
-      return { to: change.id, msg: { t: 'duelRating', before: change.before,
-        after: change.after, change: change.change, wins: profile?.wins ?? player?.duelWins ?? 0,
-        losses: profile?.losses ?? player?.duelLosses ?? 0, leaderboard } };
+    result.progressChanges = settlement.changes;
+    this.duels.applyProgression(settlement.changes);
+    for (const participant of snapshot.participants) {
+      const change = settlement.changes.find((value) => value.id === participant.id);
+      if (change) participant.profile = { ...change.profile, rank: { ...change.profile.rank } };
+    }
+    for (const participant of result.scoreboard) {
+      const change = settlement.changes.find((value) => value.id === participant.id);
+      if (change) participant.profile = { ...change.profile, rank: { ...change.profile.rank } };
+    }
+    const leaderboard = persisted?.leaderboard ?? settlement.changes.map((change) => ({
+      username: change.username, ...change.profile,
+    })).sort((a, b) => b.rp - a.rp);
+    for (const value of settlement.states) if (!this.players.has(value.id)) this.duelProgress.delete(value.id);
+    const out: Outbound[] = [{ to: 'all', msg: { t: 'duelLeaderboard', leaderboard } }];
+    for (const change of settlement.changes) out.push({
+      to: change.id, msg: { t: 'duelProgress',
+        profile: persisted?.profiles[change.username.toLowerCase()] ?? change.profile, leaderboard },
     });
+    return out;
   }
 
   private duelLoadout(to: number): Outbound {
     const slots: (ItemStack | null)[] = new Array(36).fill(null);
-    slots[0] = { id: Item.IronAxe, count: 1 };
+    slots[0] = { id: Item.BurstRifle, count: 1, loaded: 24 };
     slots[1] = { id: Block.OakPlanks, count: 64 };
-    slots[2] = { id: Item.JumpBoost, count: 5 };
-    slots[3] = { id: Item.Medkit, count: 5 };
+    slots[2] = { id: Item.IronAxe, count: 1 };
+    slots[3] = { id: Item.JumpBoost, count: 5 };
+    slots[4] = { id: Item.Medkit, count: 5 };
     return { to, msg: { t: 'duelLoadout', slots, armor: new Array(4).fill(null),
-      selected: 0, unlimitedReserve: false } };
+      selected: 0, unlimitedReserve: true } };
   }
 
   private resetDuelArenaEdits(slot: number, memberIds?: number[]): Outbound[] {
@@ -1554,11 +1577,11 @@ export class GameServer {
     p.duelSpawnIndex = index;
     p.x = spawn.x; p.y = spawn.y; p.z = spawn.z; p.yaw = index < 2 ? Math.PI : 0; p.pitch = 0;
     p.health = DUEL_MAX_HEALTH; p.dead = false; p.mode = 'survival';
-    p.held = Item.IronAxe; p.armor = [0, 0, 0, 0]; p.armorPoints = 0; p.toughness = 0;
+    p.held = Item.BurstRifle; p.armor = [0, 0, 0, 0]; p.armorPoints = 0; p.toughness = 0;
     p.gliding = false; p.boating = false; p.seated = false; p.sneaking = false;
     p.regenCooldown = 0; p.regenTimer = 0; p.regenBoostTimer = 0; p.regenBoostInterval = 0;
     p.duelLastShotAt = -Infinity; p.duelNextBurstAt = 0; p.duelBurstShots = 0;
-    p.duelShotTickets = []; p.duelLoaded = 0; p.duelReloadUntil = 0;
+    p.duelShotTickets = []; p.duelLoaded = 24; p.duelReloadUntil = 0;
     p.duelMedkits = 5; p.duelRespawning = false;
     return [
       this.duelLoadout(p.id),
@@ -1658,9 +1681,14 @@ export class GameServer {
     }
     p.yaw = msg.yaw; p.pitch = msg.pitch;
     p.gliding = false; p.boating = false; p.seated = false; p.sneaking = msg.sneaking === true;
-    p.held = participant.alive && (msg.held === Item.IronAxe ||
+    p.held = participant.alive && (msg.held === Item.BurstRifle || msg.held === Item.IronAxe ||
       msg.held === Block.OakPlanks || msg.held === Item.Medkit || msg.held === Item.JumpBoost) ? msg.held : 0;
-    p.armor = [0, 0, 0, 0]; p.aiming = false; p.reloading = false;
+    p.armor = [0, 0, 0, 0]; p.aiming = p.held === Item.BurstRifle && msg.aiming === true;
+    if (p.held === Item.BurstRifle && msg.reloading === true &&
+        p.duelLoaded < 24 && p.duelReloadUntil <= 0) {
+      p.duelReloadUntil = this.worldTime + 1.1;
+    }
+    p.reloading = p.duelReloadUntil > this.worldTime;
     if (typeof msg.swing === 'number' && Number.isFinite(msg.swing)) p.swing = Math.floor(msg.swing) & 0xffff;
     return [];
   }
@@ -1706,26 +1734,28 @@ export class GameServer {
     if (!target || !arena || !this.duels.sameMatch(attacker.id, targetId) ||
         (phase !== 'running' && phase !== 'sudden_death') || !ap?.alive || !tp?.alive ||
         (tp.shieldUntil !== undefined && tp.shieldUntil > nowMs)) return [];
-    // `rangedAttack` is the existing hit-intent wire message, but Duels only
-    // accepts the iron axe. The server independently validates reach, facing,
-    // line of sight and cadence, so changing the client amount cannot create a
-    // gun or extend the axe's range.
-    if (attacker.held !== Item.IronAxe || amount !== 5 ||
-        this.worldTime - attacker.duelLastShotAt < 0.42) return [];
-
-    if (!fin(attacker.x, attacker.y, attacker.z, attacker.yaw, target.x, target.y, target.z)) return [];
+    // Match the hit intent to a recent, server-accepted Burst Rifle round. A
+    // forged `rangedAttack` cannot deal damage without a valid round aimed
+    // through the target's body.
+    if (amount !== 5 || !fin(target.x, target.y, target.z)) return [];
     const dx = target.x - attacker.x, dy = target.y - attacker.y, dz = target.z - attacker.z;
     const distance = Math.hypot(dx, dy, dz), horiz = Math.hypot(dx, dz);
-    if (!(distance > 0 && distance <= 4)) return [];
-    if (horiz > 0.2) {
-      const dot = (-Math.sin(attacker.yaw) * dx - Math.cos(attacker.yaw) * dz) / horiz;
-      if (dot < 0.2) return [];
-    }
+    if (!(distance > 0 && distance <= 60)) return [];
+    const now = this.worldTime;
+    const ticketIndex = attacker.duelShotTickets.findIndex((shot) => {
+      if (now - shot.at > 0.75) return false;
+      const tx = target.x - shot.x, ty = target.y + 0.9 - shot.y, tz = target.z - shot.z;
+      const along = tx * shot.dx + ty * shot.dy + tz * shot.dz;
+      if (along < 0 || along > 58) return false;
+      const missSq = tx * tx + ty * ty + tz * tz - along * along;
+      return missSq <= 1.15 * 1.15;
+    });
+    if (ticketIndex < 0) return [];
     if (!hasArenaLineOfSight({ x: attacker.x, y: attacker.y + 1.5, z: attacker.z },
       { x: target.x, y: target.y + 1.0, z: target.z }, arena,
       (x, y, z) => this.edits.get(`${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`) === Block.OakPlanks
     )) return [];
-    attacker.duelLastShotAt = this.worldTime;
+    attacker.duelShotTickets.splice(ticketIndex, 1);
     const dealt = Math.min(5, target.health);
     target.health = Math.max(0, target.health - 5);
     const killed = target.health <= 0;
@@ -1789,15 +1819,20 @@ export class GameServer {
     }
     const key = `${bx},${by},${bz}`;
 
-    if (block === Block.OakPlanks && p.held === Block.OakPlanks) {
+    // The selected-item transform and the edit travel as separate packets. Do
+    // not reject a legitimate placement merely because the edit arrived first;
+    // the isolated Duel handler already permits only this one build material.
+    if (block === Block.OakPlanks) {
       slotEdits.set(key, Block.OakPlanks);
       this.edits.set(key, Block.OakPlanks);
       return this.duels.membersOf(p.id).map((id) => ({
         to: id,
         msg: { t: 'edit', x: bx, y: by, z: bz, block: Block.OakPlanks },
       }));
-    } else if ((block === Block.Air || block === 0) && p.held === Item.IronAxe) {
-      if (!slotEdits.has(key)) return [];
+    } else if (block === Block.Air || block === 0) {
+      // The axe is utility-only: it authorizes reclaiming player-built cover,
+      // but is never accepted by either Duel damage path.
+      if (p.held !== Item.IronAxe || !slotEdits.has(key)) return [];
       slotEdits.delete(key);
       this.edits.delete(key);
       return this.duels.membersOf(p.id).map((id) => ({
@@ -1828,14 +1863,14 @@ export class GameServer {
     const now = this.worldTime * 1000;
     switch (msg.t) {
       case 'duelCreate': {
-        const result = this.duels.create({ id: p.id, username: p.username, skin: p.skin, elo: p.duelElo }, now);
+        const result = this.duels.create({ id: p.id, username: p.username, skin: p.skin, profile: p.duelProfile }, now);
         if ('reason' in result) return this.duelError(p.id, result.reason);
         return this.duelSnapshotOutbound(result.snapshot, { id: p.id, token: result.token });
       }
       case 'duelJoin': {
         // Tokens never enter logs/notices; sanitize only for bounded lookup cost.
         const token = typeof msg.token === 'string' ? msg.token.slice(0, 128) : '';
-        const result = this.duels.join(token, { id: p.id, username: p.username, skin: p.skin, elo: p.duelElo }, now);
+        const result = this.duels.join(token, { id: p.id, username: p.username, skin: p.skin, profile: p.duelProfile }, now);
         if (!result.ok) return this.duelError(p.id, result.reason);
         return this.duelSnapshotOutbound(result.snapshot, { id: p.id, token });
       }
@@ -1901,7 +1936,35 @@ export class GameServer {
         if (!snap) return this.duelError(p.id, 'not_in_lobby');
         return [...this.duelSnapshotOutbound(snap), ...this.restoreDuelLobby(snap)];
       }
+      case 'duelFlair': {
+        const state = this.duelProgress.get(p.id) ?? newDuelProgress();
+        const profile = duelProfileOf(state);
+        const requested = msg.flair;
+        if (!canEquipDuelFlair(profile, requested)) {
+          return [{ to: p.id, msg: { t: 'duelFlairResult', ok: false, profile,
+            leaderboard: [] } }];
+        }
+        const persisted = this.onDuelFlair?.(p.username, requested);
+        if (this.onDuelFlair && !persisted) {
+          return [{ to: p.id, msg: { t: 'duelFlairResult', ok: false, profile,
+            leaderboard: [] } }];
+        }
+        state.equippedFlair = requested;
+        p.duelProfile = persisted?.profile ?? duelProfileOf(state);
+        this.duelProgress.set(p.id, state);
+        this.duels.updateProfile(p.id, p.duelProfile);
+        const leaderboard = persisted?.leaderboard ?? [];
+        const out: Outbound[] = [
+          { to: p.id, msg: { t: 'duelFlairResult', ok: true, profile: p.duelProfile, leaderboard } },
+          { to: 'all', msg: { t: 'duelProfileUpdate', id: p.id, profile: p.duelProfile } },
+          { to: 'all', msg: { t: 'duelLeaderboard', leaderboard } },
+        ];
+        const snapshot = this.duels.snapshotFor(p.id, now);
+        if (snapshot) out.push(...this.duelSnapshotOutbound(snapshot));
+        return out;
+      }
     }
+    return [];
   }
 
   /** Advance authoritative Duels timestamps; called from the transport tick. */
@@ -1927,9 +1990,9 @@ export class GameServer {
             .map((v) => ({ x: v.x, y: v.y, z: v.z }));
           p.duelSpawnIndex = safestDuelSpawn(arena, living, p.duelSpawnIndex);
           const spawn = arena.spawns[p.duelSpawnIndex];
-          p.x = spawn.x; p.y = spawn.y; p.z = spawn.z; p.health = DUEL_MAX_HEALTH; p.held = Item.IronAxe;
+          p.x = spawn.x; p.y = spawn.y; p.z = spawn.z; p.health = DUEL_MAX_HEALTH; p.held = Item.BurstRifle;
           p.duelMedkits = 5; p.duelRespawning = false; p.duelShotTickets = [];
-          p.duelLoaded = 0; p.duelReloadUntil = 0; p.duelBurstShots = 0;
+          p.duelLoaded = 24; p.duelReloadUntil = 0; p.duelBurstShots = 0;
           p.duelNextBurstAt = 0; p.duelLastShotAt = -Infinity; p.reloading = false;
           out.push(this.duelLoadout(p.id));
           out.push({ to: p.id, msg: { t: 'respawned', x: spawn.x, y: spawn.y, z: spawn.z, health: DUEL_MAX_HEALTH } });
@@ -4173,11 +4236,15 @@ export class GameServer {
   snapshotFor(recipientId: number): PlayerSnapshot[] {
     const recipient = this.players.get(recipientId);
     if (!recipient) return [];
-    const inDuel = !!recipient.duelSaved || !!this.duels.phaseFor(recipientId);
+    // Lobby members still occupy the normal world. `duelSaved` becomes set
+    // only when an arena body is created, and remains set through results.
+    // Using phaseFor here also scoped ordinary lobby members out of snapshots
+    // after they dismissed the lobby with Escape.
+    const inDuel = !!recipient.duelSaved;
     const visible = inDuel ? new Set(this.duels.membersOf(recipientId)) : null;
     return [...this.players.values()]
       .filter((p) => {
-        const pInDuel = !!p.duelSaved || !!this.duels.phaseFor(p.id);
+        const pInDuel = !!p.duelSaved;
         if (inDuel) return visible!.has(p.id);
         return !pInDuel;
       })
@@ -4202,14 +4269,14 @@ export class GameServer {
   receivesWorldBroadcast(id: number): boolean {
     const p = this.players.get(id);
     if (!p) return false;
-    return !p.duelSaved && !this.duels.phaseFor(id);
+    return !p.duelSaved;
   }
 }
 
 function toInfo(p: ServerPlayer): PlayerInfo {
   return {
     id: p.id, username: p.username, skin: p.skin, faction: p.faction, mode: p.mode,
-    seasonsWon: p.seasonsWon, hearts: p.hearts, duelElo: p.duelElo, cosmetics: p.cosmetics,
+    seasonsWon: p.seasonsWon, hearts: p.hearts, duelProfile: p.duelProfile, cosmetics: p.cosmetics,
     x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
     health: p.health, dead: p.dead,
     gliding: p.gliding, boating: p.boating, seated: p.seated, sneaking: p.sneaking,

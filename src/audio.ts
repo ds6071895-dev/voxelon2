@@ -327,7 +327,8 @@ export class GameAudio {
 
   /** Head-relative competitive cues for Duels. All route through the effects
    * bus, so the existing volume slider remains authoritative. */
-  duelCue(kind: 'countdown' | 'fight' | 'lead' | 'final30' | 'sudden' | 'victory' | 'defeat'): void {
+  duelCue(kind: 'countdown' | 'fight' | 'lead' | 'final30' | 'sudden' | 'victory' | 'defeat' |
+    'gain' | 'loss' | 'promotion' | 'rankPromotion' | 'demotion' | 'placement' | 'unlock'): void {
     switch (kind) {
       case 'countdown':
         this.tone({ type: 'triangle', from: 420, to: 360, dur: 0.11, gain: 0.1 });
@@ -355,6 +356,30 @@ export class GameAudio {
         break;
       case 'defeat':
         this.tone({ type: 'triangle', from: 330, to: 150, dur: 0.5, gain: 0.13 });
+        break;
+      case 'gain':
+        this.tone({ type: 'triangle', from: 440, to: 590, dur: 0.13, gain: 0.08 });
+        this.tone({ type: 'triangle', from: 590, to: 740, dur: 0.16, gain: 0.07, delay: 0.1 });
+        break;
+      case 'loss':
+        this.tone({ type: 'triangle', from: 340, to: 225, dur: 0.24, gain: 0.08 });
+        break;
+      case 'promotion':
+        for (const [i, f] of [440, 554, 659].entries()) this.tone({ type: 'triangle', from: f, to: f * 1.04, dur: 0.22, gain: 0.085, delay: i * 0.1 });
+        break;
+      case 'rankPromotion':
+        for (const [i, f] of [330, 440, 554, 740].entries()) this.tone({ type: 'square', from: f, to: f * 1.05, dur: 0.25, gain: 0.065, delay: i * 0.1 });
+        break;
+      case 'demotion':
+        this.tone({ type: 'triangle', from: 410, to: 255, dur: 0.3, gain: 0.075 });
+        this.tone({ type: 'sine', from: 255, to: 220, dur: 0.16, gain: 0.055, delay: 0.2 });
+        break;
+      case 'placement':
+        for (const [i, f] of [294, 392, 523, 698].entries()) this.tone({ type: 'triangle', from: f, to: f * 1.08, dur: 0.28, gain: 0.085, delay: i * 0.13 });
+        break;
+      case 'unlock':
+        this.tone({ type: 'sine', from: 740, to: 980, dur: 0.35, gain: 0.075 });
+        this.tone({ type: 'triangle', from: 494, to: 740, dur: 0.3, gain: 0.07, delay: 0.1 });
         break;
     }
   }

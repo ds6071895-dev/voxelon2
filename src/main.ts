@@ -88,8 +88,12 @@ import {
   duelTerrainElevation,
   type DuelLobbySnapshot, type DuelParticipant,
   type DuelResult, type DuelArenaBounds, clampToDuelArena,
-  duelTokenFromUrl, withDuelToken, duelRankAt, duelRankProgress,
+  duelTokenFromUrl, withDuelToken,
 } from './duels';
+import {
+  DuelProgressChange, DuelPublicProfile, duelProfileOf, duelRankProgress,
+  duelRevealState, newDuelProgress, unlockedDuelFlairs,
+} from './duels_progression';
 
 import { GadgetCooldowns, GadgetDef, gadgetOf } from './gadgets';
 import {
@@ -1912,9 +1916,7 @@ let pendingDuelAttempted = false;
 let pendingDuelRetry = 0;
 let duelSnapshot: DuelLobbySnapshot | null = null;
 let duelInviteToken = '';
-let duelElo = 1000;
-let duelWins = 0;
-let duelLosses = 0;
+let duelProfile: DuelPublicProfile = duelProfileOf(newDuelProgress());
 let duelLeaderboardData: DuelLeaderboardEntry[] = [];
 const duelInviteBanner = document.getElementById('duel-invite-banner')!;
 net.onSocketOpen = () => {
@@ -1943,20 +1945,34 @@ const duelReady = document.getElementById('duel-ready') as HTMLButtonElement;
 const duelStart = document.getElementById('duel-start') as HTMLButtonElement;
 const duelLeave = document.getElementById('duel-leave') as HTMLButtonElement;
 const duelProfileCard = document.getElementById('duel-profile-card')!;
+const duelProfileEmblem = document.getElementById('duel-profile-emblem')!;
 const duelRankName = document.getElementById('duel-rank-name')!;
 const duelEloEl = document.getElementById('duel-elo')!;
 const duelRankFill = document.getElementById('duel-rank-fill') as HTMLElement;
 const duelRankNext = document.getElementById('duel-rank-next')!;
+const duelProfileMeta = document.getElementById('duel-profile-meta')!;
+const duelFlair = document.getElementById('duel-flair') as HTMLSelectElement;
 const duelLeaderboardEl = document.getElementById('duel-leaderboard')!;
 let minigamesRestoreFocus: HTMLElement | null = null;
 
 function renderDuelProgress(): void {
-  const { rank, next, progress } = duelRankProgress(duelElo);
+  const { rank, next, progress } = duelRankProgress(duelProfile.rp);
   duelProfileCard.style.setProperty('--rank-color', rank.color);
-  duelRankName.textContent = rank.name;
-  duelEloEl.textContent = `${duelElo} Elo · ${duelWins}W ${duelLosses}L`;
+  duelRankName.textContent = duelProfile.placementsRemaining > 0 ? 'Provisional' : rank.label;
+  duelEloEl.textContent = `${duelProfile.rp} RP`;
   duelRankFill.style.width = `${Math.round(progress * 100)}%`;
-  duelRankNext.textContent = next ? `${next.min - duelElo} Elo to ${next.name}` : 'Highest rank achieved';
+  duelRankNext.textContent = duelProfile.placementsRemaining > 0
+    ? `${duelProfile.placementsRemaining} placement match${duelProfile.placementsRemaining === 1 ? '' : 'es'} remaining`
+    : next ? `${next.min - duelProfile.rp} RP to ${next.label}` : 'Grandmaster I · RP has no cap';
+  duelProfileMeta.textContent = `${duelProfile.streak} streak · ${duelProfile.wins}W ${duelProfile.losses}L · Peak ${duelRankProgress(duelProfile.peakRp).rank.label}`;
+  duelProfileEmblem.querySelectorAll<HTMLElement>('i').forEach((pip, index) => {
+    pip.style.visibility = index < 7 + (rank.index % 3) ? 'visible' : 'hidden';
+  });
+  const unlocked = unlockedDuelFlairs(duelProfile);
+  duelFlair.replaceChildren(...unlocked.map((flair) => {
+    const option = document.createElement('option'); option.value = flair; option.textContent = flair;
+    option.selected = flair === duelProfile.equippedFlair; return option;
+  }));
   duelLeaderboardEl.replaceChildren();
   if (!duelLeaderboardData.length) {
     const empty = document.createElement('div'); empty.className = 'duel-leaderboard-row';
@@ -1964,15 +1980,17 @@ function renderDuelProgress(): void {
     return;
   }
   duelLeaderboardData.forEach((entry, index) => {
-    const rankInfo = duelRankAt(entry.elo);
+    const rankInfo = entry.rank;
     const row = document.createElement('div');
     row.className = `duel-leaderboard-row${entry.username.toLowerCase() === authedName.toLowerCase() ? ' me' : ''}`;
     row.innerHTML = `<span class="duel-leaderboard-rank">${index + 1}</span><strong>${duelEscapeHtml(entry.username)}</strong>` +
-      `<span style="color:${rankInfo.color}">${rankInfo.name}</span><b>${entry.elo}</b>` +
+      `<span style="color:${rankInfo.color}">${entry.placementsRemaining > 0 ? 'Provisional' : rankInfo.label}<small> · ${duelEscapeHtml(entry.equippedFlair)}</small></span><b>${entry.rp} RP</b>` +
       `<span class="duel-leaderboard-record">${entry.wins}W · ${entry.losses}L</span>`;
     duelLeaderboardEl.appendChild(row);
   });
 }
+
+duelFlair.addEventListener('change', () => net.sendDuelFlair(duelFlair.value as DuelPublicProfile['equippedFlair']));
 
 function duelInviteUrl(token: string): string {
   return withDuelToken(location.href, token);
@@ -2036,8 +2054,8 @@ function renderDuelLobby(): void {
     const name = document.createElement('strong');
     name.textContent = `${p.username}${p.id === net.myId ? ' (you)' : ''}`;
     const host = document.createElement('small'); host.className = 'duel-player-rank';
-    const rank = duelRankAt(p.elo); host.style.setProperty('--rank-color', rank.color);
-    host.textContent = `${rank.name} · ${p.elo} Elo${p.host ? ' · HOST' : ''}`;
+    const rank = p.profile.rank; host.style.setProperty('--rank-color', rank.color);
+    host.textContent = `${p.profile.placementsRemaining > 0 ? 'Provisional' : rank.label} · ${p.profile.rp} RP · ${p.profile.equippedFlair}${p.host ? ' · HOST' : ''}`;
     const state = document.createElement('span');
     state.className = p.ready ? 'duel-ready' : 'duel-waiting';
     state.textContent = !p.connected ? 'Disconnected' : p.ready ? 'Ready' : 'Not ready';
@@ -2317,9 +2335,34 @@ for (const type of ['pointerup', 'pointercancel', 'touchend', 'touchcancel'] as 
   duelScoresTouch.addEventListener(type, (event) => { event.preventDefault(); setDuelScoresVisible(false); });
 }
 
+let duelRevealFrame = 0;
+function makeDuelEmblem(profile: DuelPublicProfile, extraClass = ''): HTMLElement {
+  const emblem = document.createElement('div'); emblem.className = `duel-emblem ${extraClass}`.trim();
+  emblem.setAttribute('aria-hidden', 'true');
+  emblem.style.setProperty('--rank-color', profile.rank.color);
+  for (let i = 0; i < 9; i++) {
+    const block = document.createElement('i');
+    block.style.setProperty('--block-delay', `${i * 25}ms`);
+    block.style.setProperty('--shard-x', `${(i % 3 - 1) * 18}px`);
+    block.style.setProperty('--shard-y', `${(Math.floor(i / 3) - 1) * 16}px`);
+    block.style.visibility = i < 7 + (profile.rank.index % 3) ? 'visible' : 'hidden';
+    emblem.appendChild(block);
+  }
+  return emblem;
+}
+
+function duelChangeSummary(change: DuelProgressChange): string {
+  const direction = change.change >= 0 ? `gained ${change.change}` : `lost ${Math.abs(change.change)}`;
+  const protection = change.shieldUsed ? ` Demotion shield protected ${change.protectedFloor} RP.` : '';
+  const reveal = change.placementReveal ? ` Placement complete: ${change.newRank.label}.` : '';
+  const unlock = change.newlyUnlockedFlair ? ` Unlocked ${change.newlyUnlockedFlair}.` : '';
+  return `${direction} RP, from ${change.beforeRp} to ${change.afterRp}. ${change.newRank.label}.${protection}${reveal}${unlock}`;
+}
+
 function renderDuelResult(result: DuelResult): void {
+  cancelAnimationFrame(duelRevealFrame);
   duelResultData = result; screen = 'duel_results'; input.unlock();
-  for (const change of result.ratingChanges) if (change.id !== net.myId) remotePlayers.invalidate(change.id);
+  for (const change of result.progressChanges) if (change.id !== net.myId) remotePlayers.invalidate(change.id);
   const winner = result.scoreboard.find((p) => p.id === result.winner);
   const mine = result.winner === net.myId;
   audio.duelCue(mine ? 'victory' : 'defeat');
@@ -2331,23 +2374,92 @@ function renderDuelResult(result: DuelResult): void {
   summary.textContent = `${formatDuelTime(result.durationMs)} · ${result.finishReason.replace('_', ' ')}`;
   const scores = document.createElement('div'); scores.className = 'duel-result-score';
   scores.appendChild(duelScoreRows(result.scoreboard));
-  const rating = result.ratingChanges.find((change) => change.id === net.myId);
+  const rating = result.progressChanges.find((change) => change.id === net.myId);
   const ratingReveal = document.createElement('div'); ratingReveal.className = 'duel-rating-reveal';
+  let revealNow: HTMLButtonElement | null = null;
   if (rating) {
-    const beforeRank = duelRankAt(rating.before), afterRank = duelRankAt(rating.after);
-    ratingReveal.style.setProperty('--rank-color', afterRank.color);
+    ratingReveal.classList.toggle('loss', rating.change < 0);
+    ratingReveal.style.setProperty('--rank-color', rating.oldRank.color);
+    const revealEmblem = makeDuelEmblem({ ...rating.profile, rp: rating.beforeRp,
+      rank: rating.oldRank }, 'duel-reveal-emblem');
+    ratingReveal.appendChild(revealEmblem);
     const label = document.createElement('div'); label.className = 'duel-result-kicker';
-    label.textContent = `${afterRank.name} rating`;
+    label.textContent = rating.profile.placementsRemaining > 0
+      ? `Provisional · ${rating.profile.placementsRemaining} placements left` : rating.newRank.label;
     const number = document.createElement('div'); number.className = 'duel-rating-number';
-    number.textContent = String(rating.after);
+    const amount = document.createElement('span'); amount.textContent = String(rating.beforeRp);
     const delta = document.createElement('span');
     delta.className = `duel-rating-change ${rating.change >= 0 ? 'up' : 'down'}`;
     delta.textContent = `${rating.change >= 0 ? '+' : ''}${rating.change}`;
-    number.appendChild(delta); ratingReveal.append(label, number);
-    if (afterRank.name !== beforeRank.name) {
-      const promoted = document.createElement('div'); promoted.className = 'duel-rank-up';
-      promoted.textContent = `◆ Rank up — ${afterRank.name} ◆`; ratingReveal.appendChild(promoted);
+    number.append(amount, document.createTextNode(' RP '), delta);
+    const track = document.createElement('div'); track.className = 'duel-result-track';
+    const trackFill = document.createElement('div'); trackFill.className = 'duel-result-track-fill'; track.appendChild(trackFill);
+    const chips = document.createElement('div'); chips.className = 'duel-change-chips';
+    const chipTexts = [
+      `Skill ${rating.baseSkillDelta >= 0 ? '+' : ''}${rating.baseSkillDelta}`,
+      `Streak ${rating.streakBonus ? `+${rating.streakBonus}` : '—'}`,
+      `Repeat ×${rating.repeatMultiplier}`,
+      rating.shieldUsed ? `Shield · floor ${rating.protectedFloor}` : 'Protection · not used',
+    ];
+    for (const text of chipTexts) { const chip = document.createElement('span'); chip.className = 'duel-change-chip'; chip.textContent = text; chips.appendChild(chip); }
+    const event = document.createElement('div'); event.className = 'duel-rank-up'; event.hidden = true;
+    const particles = document.createElement('div'); particles.className = 'duel-block-particles'; particles.setAttribute('aria-hidden', 'true');
+    for (let i = 0; i < 24; i++) {
+      const block = document.createElement('i'); block.style.setProperty('--x', `${(i * 37) % 96 + 2}%`);
+      block.style.setProperty('--y', `${(i * 53) % 76 + 12}%`); block.style.setProperty('--delay', `${(i % 8) * .05}s`);
+      particles.appendChild(block);
     }
+    const live = document.createElement('div'); live.className = 'duel-reveal-summary';
+    live.setAttribute('role', 'status'); live.setAttribute('aria-live', 'polite');
+    ratingReveal.append(label, number, track, chips, event, particles, live);
+
+    let settled = false;
+    const started = performance.now();
+    const settle = (skipped = false) => {
+      const state = duelRevealState(rating, performance.now() - started, {
+        skipped, reducedMotion: accessibility.reducedMotion,
+        photosensitivitySafe: accessibility.photosensitivitySafe,
+      });
+      ratingReveal.dataset.phase = state.phase;
+      duelResultCard.dataset.revealPhase = state.phase;
+      amount.textContent = String(state.displayedRp);
+      trackFill.style.width = `${Math.round(duelRankProgress(state.displayedRp).progress * 100)}%`;
+      particles.hidden = state.phase !== 'counting' || state.particles === 'none';
+      if (state.settled && !settled) {
+        settled = true; particles.hidden = true;
+        ratingReveal.style.setProperty('--rank-color', rating.newRank.color);
+        revealEmblem.style.setProperty('--rank-color', rating.newRank.color);
+        revealEmblem.querySelectorAll<HTMLElement>('i').forEach((block, index) => {
+          block.style.visibility = index < 7 + (rating.newRank.index % 3) ? 'visible' : 'hidden';
+        });
+        label.textContent = rating.profile.placementsRemaining > 0
+          ? `Provisional · ${rating.profile.placementsRemaining} placements left` : rating.newRank.label;
+        ratingReveal.classList.add(rating.newlyUnlockedFlair ? 'unlock' : rating.promotion ? 'promotion'
+          : rating.demotion ? 'demotion' : 'ordinary');
+        const revealEvents = [
+          rating.placementReveal ? `Placement rank revealed — ${rating.newRank.label}` : '',
+          rating.newlyUnlockedFlair ? `Cosmetic unlocked — ${rating.newlyUnlockedFlair}` : '',
+          !rating.placementReveal && rating.namedRankPromotion ? `Rank promotion — ${rating.newRank.name}` : '',
+          !rating.placementReveal && !rating.namedRankPromotion && rating.promotion ? `Division promotion — ${rating.newRank.label}` : '',
+          rating.demotion ? `Division change — ${rating.newRank.label}` : '',
+        ].filter(Boolean);
+        const eventText = revealEvents.join(' · ');
+        event.textContent = eventText; event.hidden = !eventText;
+        live.textContent = duelChangeSummary(rating);
+        if (revealNow) revealNow.hidden = true;
+        audio.duelCue(rating.placementReveal ? 'placement' : rating.newlyUnlockedFlair ? 'unlock'
+          : rating.namedRankPromotion ? 'rankPromotion' : rating.promotion ? 'promotion'
+          : rating.demotion ? 'demotion' : rating.change >= 0 ? 'gain' : 'loss');
+        if (rating.placementReveal && rating.newlyUnlockedFlair) {
+          window.setTimeout(() => audio.duelCue('unlock'), 420);
+        }
+      }
+      if (!state.settled) duelRevealFrame = requestAnimationFrame(() => settle());
+    };
+    revealNow = document.createElement('button'); revealNow.type = 'button'; revealNow.textContent = 'Reveal now';
+    revealNow.setAttribute('aria-label', 'Skip rank animation and reveal final Rank Points');
+    revealNow.addEventListener('click', () => settle(true));
+    settle(accessibility.reducedMotion);
   }
   const controls = document.createElement('div'); controls.className = 'duel-result-controls';
   const rematch = document.createElement('button'); rematch.type = 'button';
@@ -2366,10 +2478,10 @@ function renderDuelResult(result: DuelResult): void {
   });
   const voteStatus = document.createElement('p'); voteStatus.className = 'duel-result-summary';
   duelResultVoteStatus = voteStatus; duelResultRematch = rematch;
-  controls.append(rematch, lobby); duelResultCard.append(kicker, title, summary, scores,
+  controls.append(...(revealNow ? [revealNow] : []), rematch, lobby); duelResultCard.append(kicker, title, summary, scores,
     ...(rating ? [ratingReveal] : []), voteStatus, controls);
   duelResultEl.classList.add('visible'); duelScoreboard.classList.remove('visible');
-  requestAnimationFrame(() => rematch.focus());
+  requestAnimationFrame(() => (revealNow ?? rematch).focus());
 }
 
 function updateDuelHud(): void {
@@ -2547,10 +2659,15 @@ net.onDuelRespawn = (respawnAt, spectating) => {
   if (!spectating) { player.flying = false; player.noclip = false; player.health = DUEL_MAX_HEALTH; }
 };
 net.onDuelResult = renderDuelResult;
-net.onDuelProfile = (elo, wins, losses, leaderboard) => {
-  duelElo = elo; duelWins = wins; duelLosses = losses;
+net.onDuelProfile = (profile, leaderboard) => {
+  duelProfile = profile;
+  if (leaderboard.length) duelLeaderboardData = leaderboard.slice();
+  renderDuelProgress();
+};
+net.onDuelLeaderboard = (leaderboard) => {
   duelLeaderboardData = leaderboard.slice(); renderDuelProgress();
 };
+net.onDuelProfileUpdate = (id) => remotePlayers.invalidate(id);
 net.onDuelRestored = (x, y, z, yaw, pitch, health, dead, mode, state) => {
   duelArenaActive = false; duelUnlimitedReserve = false;
   duelActiveBounds = null;
@@ -5334,7 +5451,12 @@ interaction.canEdit = (x, y, z) => {
     const groundY = duelActiveBounds.floor + duelTerrainElevation(lx, lz);
     if (by <= groundY) return false;
     const block = world.getBlock(x, y, z);
-    return block === Block.OakPlanks && inventory.selectedStack?.id === Item.IronAxe;
+    const held = inventory.selectedStack?.id;
+    // Interaction asks canEdit about the empty destination before canPlace.
+    // Permit that destination only for the plank stack; existing cover is
+    // reclaimable only with the utility axe.
+    if (isReplaceable(block)) return held === Block.OakPlanks;
+    return block === Block.OakPlanks && held === Item.IronAxe;
   }
   const block = world.getBlock(x, y, z);
   if (block === Block.MobSpawner || block === Block.VaultChest) return false;
@@ -8984,11 +9106,9 @@ function frame(): void {
         pushStateSave();
         interaction.update(dt, input, camera, true, true); // suppress mine + use
       } else {
-        // Open-world melee never hits players, but the intentionally axe-only
-        // Duels rules use the same authoritative hit-intent message as guns.
-        // Priority remains player/mob > the block behind them.
-        const duelPlayerInSights = duelArenaActive && heldStack?.id === Item.IronAxe
-          ? remotePlayers.rayHit(eye, lookDir, 3.8) : -1;
+        // Open-world melee never hits players. Duels PvP is handled exclusively
+        // by the Burst Rifle branch above; the iron axe is block utility only.
+        const duelPlayerInSights = -1;
         const encounterInSights = vaultEncounterVisuals.rayTarget(
           encounterSnapshot, eye, lookDir, 3.5,
         );
