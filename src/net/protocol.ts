@@ -105,8 +105,17 @@ export interface PlayerInfo extends PlayerSnapshot {
   seasonsWon: number; // permanent "Seasons Won" badge rank (Phase 5)
   /** Lifesteal max-health currency (Milestone A): max HP = hearts * 2. */
   hearts: number;
+  /** Persistent competitive Duels rating. */
+  duelElo: number;
   /** Avatar customisation (Character screen). Absent = seed-derived default. */
   cosmetics?: Cosmetics;
+}
+
+export interface DuelLeaderboardEntry {
+  username: string;
+  elo: number;
+  wins: number;
+  losses: number;
 }
 
 /** A dropped item entity owned by the server. */
@@ -161,6 +170,7 @@ export function mitigate(
 // --- client -> server -------------------------------------------------------
 export type ClientMsg =
   | { t: 'hello' }
+  | { t: 'duelInviteInfo'; token: string }
   // Mandatory accounts: a socket must authenticate before it spawns a player.
   | { t: 'register'; username: string; password: string; faction?: number } // faction = picked side
   | { t: 'login'; username: string; password: string }
@@ -332,6 +342,7 @@ export type ServerMsg =
   // A fresh session token (sent right after every successful auth); the client
   // stores it in localStorage so the next visit can skip the login form.
   | { t: 'session'; token: string }
+  | { t: 'duelInviteInfo'; valid: boolean; host?: string; lobbyId?: string }
   | { t: 'duelLobby'; snapshot: DuelLobbySnapshot; inviteToken?: string }
   | { t: 'duelError'; code: 'invalid' | 'full' | 'match_in_progress' |
       'already_in_lobby' | 'not_host' | 'too_few_players' | 'too_many_players' |
@@ -343,10 +354,14 @@ export type ServerMsg =
   | { t: 'duelClock'; serverNow: number; endsAt: number; suddenDeath: boolean }
   | { t: 'duelRespawn'; respawnAt: number; spectating: boolean }
   | { t: 'duelResult'; result: DuelResult }
+  | { t: 'duelRating'; before: number; after: number; change: number;
+      wins: number; losses: number; leaderboard: DuelLeaderboardEntry[] }
   | { t: 'duelRestored'; x: number; y: number; z: number; yaw: number; pitch: number;
       health: number; dead: boolean; mode: GameMode; state?: Record<string, unknown> }
   | {
       t: 'welcome'; id: number; seed: number; username: string;
+      /** Authoritative seconds on the persistent server world clock. */
+      worldTime: number;
       players: PlayerInfo[]; edits: [string, number][]; items: ItemEntityInfo[];
       turrets: { x: number; y: number; z: number; state: TurretState }[];
       /** Current season number + seconds left before the deadline (Phase 5). */
@@ -366,6 +381,8 @@ export type ServerMsg =
       /** WARFARE COMMAND: your personal progression, stored on the ACCOUNT
        *  (explicitly — never inside the opaque client `state` blob). */
       warfare: { xp: number; nodes: string[] };
+      duelProfile: { elo: number; wins: number; losses: number };
+      duelLeaderboard: DuelLeaderboardEntry[];
       /** Strategic hardware standing in the world. */
       silos: SiloState[];
       batteries: BatteryState[];
@@ -375,7 +392,7 @@ export type ServerMsg =
     }
   | { t: 'join'; player: PlayerInfo }
   | { t: 'leave'; id: number }
-  | { t: 'snapshot'; players: PlayerSnapshot[] }
+  | { t: 'snapshot'; players: PlayerSnapshot[]; worldTime: number }
   | { t: 'edit'; x: number; y: number; z: number; block: number }
   | { t: 'editBatch'; edits: { x: number; y: number; z: number; block: number }[] }
   | { t: 'hurt'; health: number; dead: boolean; by: number;

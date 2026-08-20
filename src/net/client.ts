@@ -9,7 +9,7 @@ import type { ItemStack } from '../items';
 import type { MachineState, UpgradeAxis } from '../machines';
 import type { TurretState, TurretAxis } from '../turrets';
 import {
-  ClientMsg, GameMode, ItemEntityInfo, PlayerInfo, SERVER_PORT, ServerMsg,
+  ClientMsg, DuelLeaderboardEntry, GameMode, ItemEntityInfo, PlayerInfo, SERVER_PORT, ServerMsg,
   TRANSFORM_HZ,
 } from './protocol';
 import type { Cosmetics } from '../character';
@@ -84,6 +84,10 @@ export class NetClient {
 
   /** Fired once the server welcome arrives (multiplayer is now live). */
   onWelcome?: (info: PlayerInfo) => void;
+  onSocketOpen?: () => void;
+  onDuelInviteInfo?: (valid: boolean, host?: string, lobbyId?: string) => void;
+  /** Persistent authoritative day/night clock, refreshed with every snapshot. */
+  onWorldTime?: (seconds: number) => void;
   onDuelLobby?: (snapshot: DuelLobbySnapshot, inviteToken?: string) => void;
   onDuelError?: (code: string, message: string) => void;
   onDuelArena?: (arena: DuelArenaBounds, spawn: { x: number; y: number; z: number },
@@ -93,6 +97,8 @@ export class NetClient {
   onDuelClock?: (serverNow: number, endsAt: number, suddenDeath: boolean) => void;
   onDuelRespawn?: (respawnAt: number, spectating: boolean) => void;
   onDuelResult?: (result: DuelResult) => void;
+  onDuelProfile?: (elo: number, wins: number, losses: number,
+    leaderboard: DuelLeaderboardEntry[], change?: { before: number; after: number; change: number }) => void;
   onDuelRestored?: (x: number, y: number, z: number, yaw: number, pitch: number, health: number,
     dead: boolean, mode: GameMode, state?: Record<string, unknown>) => void;
   /** Saved per-account state to restore (inventory/hotbar), if the account has any. */
@@ -263,7 +269,7 @@ export class NetClient {
       if (!this.socketOpen) { this.offline = true; this.close(); }
     }, timeoutMs);
 
-    ws.onopen = () => { this.socketOpen = true; clearTimeout(timer); };
+    ws.onopen = () => { this.socketOpen = true; clearTimeout(timer); this.onSocketOpen?.(); };
     ws.onmessage = (e) => {
       let msg: ServerMsg;
       try { msg = JSON.parse(e.data as string) as ServerMsg; } catch { return; }
@@ -315,6 +321,9 @@ export class NetClient {
         for (const st of msg.batteries) this.onBattery?.(st);
         this.onHelis?.(msg.helis, []);
         this.onProtectedAreas?.(msg.protectedAreas);
+        this.onDuelProfile?.(msg.duelProfile.elo, msg.duelProfile.wins,
+          msg.duelProfile.losses, msg.duelLeaderboard);
+        this.onWorldTime?.(msg.worldTime);
         const me = msg.players.find((p) => p.id === this.myId);
         // Restore saved inventory BEFORE onWelcome (which adopts the server
         // position) so the comeback loadout/inventory is in place from frame one.
@@ -334,6 +343,7 @@ export class NetClient {
         this.onRoster?.();
         break;
       case 'snapshot': {
+        this.onWorldTime?.(msg.worldTime);
         // One receive time for the whole batch: every transform in a snapshot
         // describes the same server instant, so they must share a stamp or the
         // avatars would drift apart from each other.
@@ -538,6 +548,9 @@ export class NetClient {
       case 'duelLobby':
         this.onDuelLobby?.(msg.snapshot, msg.inviteToken);
         break;
+      case 'duelInviteInfo':
+        this.onDuelInviteInfo?.(msg.valid, msg.host, msg.lobbyId);
+        break;
       case 'duelError':
         this.onDuelError?.(msg.code, msg.message);
         break;
@@ -554,7 +567,15 @@ export class NetClient {
         this.onDuelRespawn?.(msg.respawnAt, msg.spectating);
         break;
       case 'duelResult':
+        for (const change of msg.result.ratingChanges) {
+          const remote = this.remotes.get(change.id);
+          if (remote) remote.info.duelElo = change.after;
+        }
         this.onDuelResult?.(msg.result);
+        break;
+      case 'duelRating':
+        this.onDuelProfile?.(msg.after, msg.wins, msg.losses, msg.leaderboard,
+          { before: msg.before, after: msg.after, change: msg.change });
         break;
       case 'duelRestored':
         this.onDuelRestored?.(msg.x, msg.y, msg.z, msg.yaw, msg.pitch, msg.health, msg.dead,
@@ -655,6 +676,7 @@ export class NetClient {
     this.raw({ t: 'session', username, token });
   }
   sendDuelCreate(): void { if (this.connected) this.raw({ t: 'duelCreate' }); }
+  sendDuelInviteInfo(token: string): void { if (this.socketOpen && token) this.raw({ t: 'duelInviteInfo', token }); }
   sendDuelJoin(token: string): void {
     if (this.connected) this.raw({ t: 'duelJoin', token });
   }

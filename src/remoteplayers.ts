@@ -30,6 +30,7 @@ import {
   CAPE_COLORS, Cosmetics, EYE_COLORS, HAIR_COLORS, HAT_COLORS, PANTS_COLORS,
   SHIRT_COLORS, SKIN_TONES, defaultCosmetics, sanitizeCosmetics,
 } from './character';
+import { duelRankAt } from './duels';
 
 // Per-face shading (right/left/top/bottom/front/back) — mimics Minecraft's
 // directional lighting so the model reads as 3D even without real lights.
@@ -755,7 +756,7 @@ function drawHealthBar(canvas: HTMLCanvasElement, frac: number): void {
 }
 
 function makeNameTag(
-  name: string, team: THREE.Color, factioned: boolean
+  name: string, duelElo: number, team: THREE.Color, factioned: boolean
 ): { tex: THREE.CanvasTexture; sprite: THREE.Sprite } {
   const canvas = document.createElement('canvas');
   canvas.width = 320; canvas.height = 72;
@@ -776,14 +777,18 @@ function makeNameTag(
     ctx.fill();
   }
 
-  // Shadow then name text
-  ctx.font = 'bold 28px "Segoe UI", Arial, sans-serif';
+  const rank = duelRankAt(duelElo);
+  // Rank badge + name stay visible together throughout the world and Duels.
+  ctx.font = '900 17px "Segoe UI", Arial, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
+  ctx.fillStyle = rank.color;
+  ctx.fillText(`${rank.name.toUpperCase()} · ${Math.round(duelElo)} ELO`, 160, 23);
+  ctx.font = 'bold 25px "Segoe UI", Arial, sans-serif';
   ctx.fillStyle = 'rgba(0,0,0,0.7)';
-  ctx.fillText(name, 162, 37);  // shadow
+  ctx.fillText(name, 162, 47);  // shadow
   ctx.fillStyle = '#ffffff';
-  ctx.fillText(name, 160, 35);  // main
+  ctx.fillText(name, 160, 45);  // main
 
   const tex = new THREE.CanvasTexture(canvas);
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
@@ -914,7 +919,7 @@ export class RemotePlayers {
     this.scene.add(rig.group);
 
     // ── Name tag ───────────────────────────────────────────────────────────
-    const { tex, sprite } = makeNameTag(remote.info.username, team, isFaction(faction));
+    const { tex, sprite } = makeNameTag(remote.info.username, remote.info.duelElo, team, isFaction(faction));
     sprite.position.y = 2.34;
     group.add(sprite);
 

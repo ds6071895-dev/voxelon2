@@ -19,7 +19,8 @@ export const RENDER_DISTANCE = 8; // chunks
 function applyLightShader(
   mat: THREE.Material,
   sunUniform: { value: number },
-  torchUniform: { value: THREE.Vector4 }
+  torchUniform: { value: THREE.Vector4 },
+  duelBoundsUniform: { value: THREE.Vector4 }
 ): void {
   mat.customProgramCacheKey = () => 'voxel-light';
   mat.onBeforeCompile = (shader) => {
@@ -27,6 +28,7 @@ function applyLightShader(
     // uTorch: a moving point light carried by the player (xyz = world position,
     // w = intensity 0..1). Lets a held torch light the world without remeshing.
     shader.uniforms.uTorch = torchUniform;
+    shader.uniforms.uDuelBounds = duelBoundsUniform;
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
@@ -40,12 +42,14 @@ function applyLightShader(
     shader.fragmentShader = shader.fragmentShader
       .replace(
         '#include <common>',
-        '#include <common>\nuniform float uSunLight;\nuniform vec4 uTorch;\n' +
+        '#include <common>\nuniform float uSunLight;\nuniform vec4 uTorch;\nuniform vec4 uDuelBounds;\n' +
         'varying vec2 vSkyBlock;\nvarying vec3 vWorldPos;'
       )
       .replace(
         '#include <color_fragment>',
         '#include <color_fragment>\n' +
+        '// In Duels, discard every terrain fragment outside the sealed room.\n' +
+        'if (uDuelBounds.x < uDuelBounds.z && (vWorldPos.x < uDuelBounds.x || vWorldPos.x >= uDuelBounds.z || vWorldPos.z < uDuelBounds.y || vWorldPos.z >= uDuelBounds.w)) discard;\n' +
         'float voxelLight = max(vSkyBlock.y, vSkyBlock.x * uSunLight);\n' +
         '// Closed Duels rooms have a competitive ambient floor of 12/15.\n' +
         '// Fixtures still raise nearby surfaces above it, preserving gradients.\n' +
@@ -76,6 +80,8 @@ export class World {
   readonly sunUniform = { value: 1 };
   /** Held-torch point light shared with the chunk shaders (xyz pos, w intensity). */
   readonly torchUniform = { value: new THREE.Vector4(0, 0, 0, 0) };
+  /** x/z render crop for sealed Duels rooms. x>=z disables the crop. */
+  readonly duelBoundsUniform = { value: new THREE.Vector4(1, 1, 0, 0) };
   /** Probability a broken block drops items (explosions lower it). */
   dropChance = 1;
   /** When true, setBlock skips the onBlockBroken hook (remote edits). */
@@ -119,8 +125,8 @@ export class World {
       opacity: 0.8,
       depthWrite: false,
     });
-    applyLightShader(this.opaqueMat, this.sunUniform, this.torchUniform);
-    applyLightShader(this.waterMat, this.sunUniform, this.torchUniform);
+    applyLightShader(this.opaqueMat, this.sunUniform, this.torchUniform, this.duelBoundsUniform);
+    applyLightShader(this.waterMat, this.sunUniform, this.torchUniform, this.duelBoundsUniform);
 
     const r = RENDER_DISTANCE + 1;
     for (let dx = -r; dx <= r; dx++)
@@ -138,6 +144,13 @@ export class World {
    *  Intensity 0 turns it off. */
   setHeldLight(x: number, y: number, z: number, intensity: number): void {
     this.torchUniform.value.set(x, y, z, intensity);
+  }
+
+  /** Hide all terrain outside one temporary sealed arena, including geometry
+   * sharing a chunk mesh with its walls. Passing null restores the open world. */
+  setDuelRenderBounds(bounds: { minX: number; minZ: number; maxX: number; maxZ: number } | null): void {
+    if (bounds) this.duelBoundsUniform.value.set(bounds.minX, bounds.minZ, bounds.maxX, bounds.maxZ);
+    else this.duelBoundsUniform.value.set(1, 1, 0, 0);
   }
 
 

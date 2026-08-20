@@ -42,6 +42,11 @@ export class Sky {
   /** Current sky/fog color, updated each frame. */
   readonly skyColor = new THREE.Color();
 
+  /** Time actually presented by the renderer. It follows the authoritative
+   * clock gradually so server corrections and fixed-time arenas never pop the
+   * whole atmosphere from one lighting state to another. */
+  private visualTime = this.time;
+
   private readonly sun: THREE.Mesh;
   private readonly moon: THREE.Mesh;
   private readonly stars: THREE.Points;
@@ -130,9 +135,22 @@ export class Sky {
     return tex;
   }
 
-  update(dt: number, camera: THREE.Camera): void {
-    this.time += dt / DAY_LENGTH;
-    const tod = this.time % 1;
+  update(
+    dt: number,
+    camera: THREE.Camera,
+    forcedTimeOfDay?: number,
+    advanceClock = true,
+  ): void {
+    if (advanceClock) this.time += dt / DAY_LENGTH;
+    const target = forcedTimeOfDay === undefined ? this.time : forcedTimeOfDay;
+    // Follow the shortest route around the circular clock. Capping the visual
+    // delta prevents a long background-tab frame from defeating the fade.
+    const wrappedTarget = ((target % 1) + 1) % 1;
+    const wrappedVisual = ((this.visualTime % 1) + 1) % 1;
+    const difference = ((wrappedTarget - wrappedVisual + 1.5) % 1) - 0.5;
+    const blend = 1 - Math.exp(-Math.min(Math.max(dt, 0), 0.1) / 2);
+    this.visualTime = wrappedVisual + difference * blend;
+    const tod = ((this.visualTime % 1) + 1) % 1;
     const angle = tod * Math.PI * 2;
     const sunHeight = Math.sin(angle);
     this.sunIntensity = daylight(tod);

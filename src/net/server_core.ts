@@ -62,7 +62,7 @@ import {
 import {
   ClientMsg, EDIT_RANGE, CHEST_SLOTS, PICKUP_RANGE,
   ARMOR_POINT_CAP, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE,
-  mitigate, TOUGHNESS_CAP, ItemEntityInfo, PlayerInfo, PlayerSnapshot, ServerMsg,
+  mitigate, TOUGHNESS_CAP, DuelLeaderboardEntry, ItemEntityInfo, PlayerInfo, PlayerSnapshot, ServerMsg,
   WORLD_SEED, WORLD_HALF, WORLD_BORDER, CORE_HALF, makeUsername, skinSeed, GameMode,
   MAX_ATTUNED, TOTEM_COOLDOWN, COMBAT_TAG, TPA_EXPIRE, bloodlustMult,
 } from './protocol';
@@ -114,6 +114,8 @@ const UNSAFE_RESPAWN_BLOCKS = new Set<number>([
 ]);
 
 interface ServerPlayer extends PlayerInfo {
+  duelWins: number;
+  duelLosses: number;
   regenCooldown: number;
   regenTimer: number;
   /** Healing consumable (Bandage/Medkit): seconds of accelerated regen left +
@@ -284,6 +286,11 @@ export class GameServer {
   /** Set by the shell to persist a player's warfare progression to the account
    *  store (the pure core has no disk). */
   onWarfareChange?: (username: string, progress: WarfareProgress) => void;
+  /** Persist a completed rated match and return fresh public standings. */
+  onDuelRatings?: (changes: { username: string; elo: number; won: boolean }[]) => {
+    leaderboard: DuelLeaderboardEntry[];
+    profiles: Record<string, { wins: number; losses: number }>;
+  };
   private strategic!: StrategicSim;
   private vehicles!: VehicleSim;
   /** Players known by the transport to be on a rope (for one-shot detach state). */
@@ -328,6 +335,7 @@ export class GameServer {
   private readonly duels: Duels;
   /** Placed blocks per active duel arena slot, reset on match end. */
   private readonly duelArenaEdits = new Map<number, Map<string, number>>();
+  private readonly settledDuelResults = new Set<string>();
   /** Next whole-server timestamp broadcast for hidden-tab/lag clock recovery. */
   private duelClockNextAt = 0;
 
@@ -567,6 +575,8 @@ export class GameServer {
    *  faction; without them (legacy/tests) it auto-assigns both. */
   addPlayer(id: number, account?: {
     username?: string; faction?: number; seasonsWon?: number;
+    duelElo?: number; duelWins?: number; duelLosses?: number;
+    duelLeaderboard?: DuelLeaderboardEntry[];
     switchesUsed?: number; switchSeason?: number; forfeitSeason?: number;
     data?: Record<string, unknown>;
     /** Warfare Command progression, straight off the account record. */
@@ -595,6 +605,9 @@ export class GameServer {
     const player: ServerPlayer = {
       id, username, skin: skinSeed(username), faction, mode: savedMode,
       seasonsWon: Number.isFinite(account?.seasonsWon) ? Math.max(0, Math.floor(account!.seasonsWon!)) : 0,
+      duelElo: Number.isFinite(account?.duelElo) ? Math.max(0, Math.round(account!.duelElo!)) : 1000,
+      duelWins: Number.isFinite(account?.duelWins) ? Math.max(0, Math.floor(account!.duelWins!)) : 0,
+      duelLosses: Number.isFinite(account?.duelLosses) ? Math.max(0, Math.floor(account!.duelLosses!)) : 0,
       hearts,
       x: s.x, y: s.y, z: s.z, yaw: fin(syaw as number) ? syaw as number : 0, pitch: 0,
       health: maxHealthFor(hearts), dead: false, regenCooldown: 0, regenTimer: 0,
@@ -641,7 +654,7 @@ export class GameServer {
     if (account && 'warfare' in account) this.setWarfare(username, account.warfare);
     const warfare = this.warfareOf(username);
     const welcome: ServerMsg = {
-      t: 'welcome', id, seed: this.seed, username,
+      t: 'welcome', id, seed: this.seed, username, worldTime: this.worldTime,
       // A normal-world login must never learn about players inside an active
       // Duels scope. Lobby-only players remain ordinary title/world roster.
       players: [...this.players.values()].filter((v) => !v.duelSaved).map(toInfo),
@@ -657,6 +670,8 @@ export class GameServer {
       flags: this.flagsPayload(),
       state: saved, // opaque per-account blob (inventory/hotbar) for the client to restore
       warfare: { xp: warfare.xp, nodes: warfare.nodes.slice() },
+      duelProfile: { elo: player.duelElo, wins: player.duelWins, losses: player.duelLosses },
+      duelLeaderboard: account?.duelLeaderboard ?? [],
       silos: [...this.strategic.silos.values()],
       batteries: [...this.strategic.batteries.values()],
       helis: this.vehicles.snapshot(),
@@ -768,7 +783,8 @@ export class GameServer {
     const duelPhase = this.duels.phaseFor(id);
     if (duelPhase && duelPhase !== 'lobby') {
       // A Duels body is isolated from every open-world action/economy system.
-      // Movement, combat (rifle + axe), server-counted Medkits, and arena block placement exist.
+      // Movement, axe combat/mining, server-counted Medkits, bounce launches,
+      // and arena block placement exist.
       if (msg.t === 'xform') return this.handleDuelTransform(p, msg);
       if (msg.t === 'shot') return this.handleDuelShot(p, msg);
       if (msg.t === 'rangedAttack') return this.handleDuelRanged(p, msg.target, msg.amount);
@@ -1449,21 +1465,56 @@ export class GameServer {
   }
 
   private duelSnapshotOutbound(snapshot: DuelLobbySnapshot, invite?: { id: number; token: string }): Outbound[] {
-    return snapshot.participants.map((participant) => ({
+    const out: Outbound[] = snapshot.participants.map((participant) => ({
       to: participant.id,
       msg: { t: 'duelLobby', snapshot, inviteToken: invite?.id === participant.id ? invite.token : undefined },
     }));
+    if (snapshot.phase === 'results' && snapshot.result) out.push(...this.settleDuelRatings(snapshot));
+    return out;
+  }
+
+  private settleDuelRatings(snapshot: DuelLobbySnapshot): Outbound[] {
+    const result = snapshot.result;
+    if (!result) return [];
+    const key = `${snapshot.id}:${snapshot.startedAt ?? result.rematchDeadline}`;
+    if (this.settledDuelResults.has(key)) return [];
+    this.settledDuelResults.add(key);
+    const changes = result.ratingChanges.map((change) => ({
+      username: change.username, elo: change.after, won: change.id === result.winner,
+    }));
+    for (const change of result.ratingChanges) {
+      const player = this.players.get(change.id);
+      if (player) {
+        player.duelElo = change.after;
+        if (change.id === result.winner) player.duelWins++;
+        else player.duelLosses++;
+      }
+      const participant = snapshot.participants.find((p) => p.id === change.id);
+      if (participant) participant.elo = change.after;
+    }
+    this.duels.applyRatings(result.ratingChanges);
+    const persisted = this.onDuelRatings?.(changes);
+    const leaderboard = persisted?.leaderboard ?? changes.map((c) => ({
+      username: c.username, elo: c.elo, wins: c.won ? 1 : 0, losses: c.won ? 0 : 1,
+    })).sort((a, b) => b.elo - a.elo);
+    return result.ratingChanges.map((change) => {
+      const player = this.players.get(change.id);
+      const profile = persisted?.profiles[change.username.toLowerCase()];
+      if (player && profile) { player.duelWins = profile.wins; player.duelLosses = profile.losses; }
+      return { to: change.id, msg: { t: 'duelRating', before: change.before,
+        after: change.after, change: change.change, wins: profile?.wins ?? player?.duelWins ?? 0,
+        losses: profile?.losses ?? player?.duelLosses ?? 0, leaderboard } };
+    });
   }
 
   private duelLoadout(to: number): Outbound {
     const slots: (ItemStack | null)[] = new Array(36).fill(null);
-    slots[0] = { id: Item.BurstRifle, count: 1, loaded: 24 };
-    slots[1] = { id: Item.IronAxe, count: 1 };
-    slots[2] = { id: Block.OakPlanks, count: 64 };
+    slots[0] = { id: Item.IronAxe, count: 1 };
+    slots[1] = { id: Block.OakPlanks, count: 64 };
+    slots[2] = { id: Item.JumpBoost, count: 5 };
     slots[3] = { id: Item.Medkit, count: 5 };
-    slots[4] = { id: Item.JumpBoost, count: 5 };
     return { to, msg: { t: 'duelLoadout', slots, armor: new Array(4).fill(null),
-      selected: 0, unlimitedReserve: true } };
+      selected: 0, unlimitedReserve: false } };
   }
 
   private resetDuelArenaEdits(slot: number, memberIds?: number[]): Outbound[] {
@@ -1503,11 +1554,11 @@ export class GameServer {
     p.duelSpawnIndex = index;
     p.x = spawn.x; p.y = spawn.y; p.z = spawn.z; p.yaw = index < 2 ? Math.PI : 0; p.pitch = 0;
     p.health = DUEL_MAX_HEALTH; p.dead = false; p.mode = 'survival';
-    p.held = Item.BurstRifle; p.armor = [0, 0, 0, 0]; p.armorPoints = 0; p.toughness = 0;
+    p.held = Item.IronAxe; p.armor = [0, 0, 0, 0]; p.armorPoints = 0; p.toughness = 0;
     p.gliding = false; p.boating = false; p.seated = false; p.sneaking = false;
     p.regenCooldown = 0; p.regenTimer = 0; p.regenBoostTimer = 0; p.regenBoostInterval = 0;
     p.duelLastShotAt = -Infinity; p.duelNextBurstAt = 0; p.duelBurstShots = 0;
-    p.duelShotTickets = []; p.duelLoaded = 24; p.duelReloadUntil = 0;
+    p.duelShotTickets = []; p.duelLoaded = 0; p.duelReloadUntil = 0;
     p.duelMedkits = 5; p.duelRespawning = false;
     return [
       this.duelLoadout(p.id),
@@ -1607,15 +1658,9 @@ export class GameServer {
     }
     p.yaw = msg.yaw; p.pitch = msg.pitch;
     p.gliding = false; p.boating = false; p.seated = false; p.sneaking = msg.sneaking === true;
-    p.held = participant.alive && (msg.held === Item.BurstRifle || msg.held === Item.IronAxe ||
+    p.held = participant.alive && (msg.held === Item.IronAxe ||
       msg.held === Block.OakPlanks || msg.held === Item.Medkit || msg.held === Item.JumpBoost) ? msg.held : 0;
-    p.armor = [0, 0, 0, 0]; p.aiming = participant.alive && msg.aiming === true && p.held === Item.BurstRifle;
-    if (p.duelReloadUntil > 0 && this.worldTime >= p.duelReloadUntil) {
-      p.duelLoaded = 24; p.duelReloadUntil = 0;
-    }
-    if (participant.alive && msg.reloading === true && p.duelLoaded < 24 &&
-        p.duelReloadUntil === 0) p.duelReloadUntil = this.worldTime + 1.1;
-    p.reloading = participant.alive && p.duelReloadUntil > this.worldTime;
+    p.armor = [0, 0, 0, 0]; p.aiming = false; p.reloading = false;
     if (typeof msg.swing === 'number' && Number.isFinite(msg.swing)) p.swing = Math.floor(msg.swing) & 0xffff;
     return [];
   }
@@ -1661,24 +1706,17 @@ export class GameServer {
     if (!target || !arena || !this.duels.sameMatch(attacker.id, targetId) ||
         (phase !== 'running' && phase !== 'sudden_death') || !ap?.alive || !tp?.alive ||
         (tp.shieldUntil !== undefined && tp.shieldUntil > nowMs)) return [];
-    const isGun = attacker.held === Item.BurstRifle && amount === 5;
-    if (!isGun) return [];
-
-    let ticket = -1;
-    ticket = attacker.duelShotTickets.findIndex((t) => {
-      if (this.worldTime - t.at > 0.4) return false;
-      const vx = target.x - t.x, vy = target.y + 0.9 - t.y, vz = target.z - t.z;
-      const along = vx * t.dx + vy * t.dy + vz * t.dz;
-      if (!(along > 0 && along <= 58)) return false;
-      const missSq = vx * vx + vy * vy + vz * vz - along * along;
-      return missSq <= 2.25 * 2.25;
-    });
-    if (ticket < 0) return [];
+    // `rangedAttack` is the existing hit-intent wire message, but Duels only
+    // accepts the iron axe. The server independently validates reach, facing,
+    // line of sight and cadence, so changing the client amount cannot create a
+    // gun or extend the axe's range.
+    if (attacker.held !== Item.IronAxe || amount !== 5 ||
+        this.worldTime - attacker.duelLastShotAt < 0.42) return [];
 
     if (!fin(attacker.x, attacker.y, attacker.z, attacker.yaw, target.x, target.y, target.z)) return [];
     const dx = target.x - attacker.x, dy = target.y - attacker.y, dz = target.z - attacker.z;
     const distance = Math.hypot(dx, dy, dz), horiz = Math.hypot(dx, dz);
-    if (!(distance > 0 && distance <= 58)) return [];
+    if (!(distance > 0 && distance <= 4)) return [];
     if (horiz > 0.2) {
       const dot = (-Math.sin(attacker.yaw) * dx - Math.cos(attacker.yaw) * dz) / horiz;
       if (dot < 0.2) return [];
@@ -1687,7 +1725,7 @@ export class GameServer {
       { x: target.x, y: target.y + 1.0, z: target.z }, arena,
       (x, y, z) => this.edits.get(`${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`) === Block.OakPlanks
     )) return [];
-    if (ticket >= 0) attacker.duelShotTickets.splice(ticket, 1);
+    attacker.duelLastShotAt = this.worldTime;
     const dealt = Math.min(5, target.health);
     target.health = Math.max(0, target.health - 5);
     const killed = target.health <= 0;
@@ -1751,14 +1789,14 @@ export class GameServer {
     }
     const key = `${bx},${by},${bz}`;
 
-    if (block === Block.OakPlanks) {
+    if (block === Block.OakPlanks && p.held === Block.OakPlanks) {
       slotEdits.set(key, Block.OakPlanks);
       this.edits.set(key, Block.OakPlanks);
       return this.duels.membersOf(p.id).map((id) => ({
         to: id,
         msg: { t: 'edit', x: bx, y: by, z: bz, block: Block.OakPlanks },
       }));
-    } else if (block === Block.Air || block === 0) {
+    } else if ((block === Block.Air || block === 0) && p.held === Item.IronAxe) {
       if (!slotEdits.has(key)) return [];
       slotEdits.delete(key);
       this.edits.delete(key);
@@ -1790,14 +1828,14 @@ export class GameServer {
     const now = this.worldTime * 1000;
     switch (msg.t) {
       case 'duelCreate': {
-        const result = this.duels.create({ id: p.id, username: p.username, skin: p.skin }, now);
+        const result = this.duels.create({ id: p.id, username: p.username, skin: p.skin, elo: p.duelElo }, now);
         if ('reason' in result) return this.duelError(p.id, result.reason);
         return this.duelSnapshotOutbound(result.snapshot, { id: p.id, token: result.token });
       }
       case 'duelJoin': {
         // Tokens never enter logs/notices; sanitize only for bounded lookup cost.
         const token = typeof msg.token === 'string' ? msg.token.slice(0, 128) : '';
-        const result = this.duels.join(token, { id: p.id, username: p.username, skin: p.skin }, now);
+        const result = this.duels.join(token, { id: p.id, username: p.username, skin: p.skin, elo: p.duelElo }, now);
         if (!result.ok) return this.duelError(p.id, result.reason);
         return this.duelSnapshotOutbound(result.snapshot, { id: p.id, token });
       }
@@ -1889,9 +1927,9 @@ export class GameServer {
             .map((v) => ({ x: v.x, y: v.y, z: v.z }));
           p.duelSpawnIndex = safestDuelSpawn(arena, living, p.duelSpawnIndex);
           const spawn = arena.spawns[p.duelSpawnIndex];
-          p.x = spawn.x; p.y = spawn.y; p.z = spawn.z; p.health = DUEL_MAX_HEALTH; p.held = Item.BurstRifle;
+          p.x = spawn.x; p.y = spawn.y; p.z = spawn.z; p.health = DUEL_MAX_HEALTH; p.held = Item.IronAxe;
           p.duelMedkits = 5; p.duelRespawning = false; p.duelShotTickets = [];
-          p.duelLoaded = 24; p.duelReloadUntil = 0; p.duelBurstShots = 0;
+          p.duelLoaded = 0; p.duelReloadUntil = 0; p.duelBurstShots = 0;
           p.duelNextBurstAt = 0; p.duelLastShotAt = -Infinity; p.reloading = false;
           out.push(this.duelLoadout(p.id));
           out.push({ to: p.id, msg: { t: 'respawned', x: spawn.x, y: spawn.y, z: spawn.z, health: DUEL_MAX_HEALTH } });
@@ -1915,6 +1953,10 @@ export class GameServer {
       }
     }
     return out;
+  }
+
+  duelInviteInfo(token: string): { host: string; lobbyId: string } | null {
+    return typeof token === 'string' && token.length <= 128 ? this.duels.inviteInfo(token) : null;
   }
 
   // --- Vaults (Milestone D) ----------------------------------------------------
@@ -3516,6 +3558,9 @@ export class GameServer {
   /** Is a war on right now? */
   isWarActive(): boolean { return warActive(this.war, this.worldTime); }
 
+  /** Read-only authoritative clock for transport snapshots and sky sync. */
+  clockTime(): number { return this.worldTime; }
+
   /** The CURRENT border side length: full world in peacetime; during a war it
    *  closes in toward the 100×100 final ring (pure warBorderAt). */
   currentBorder(): number {
@@ -4164,7 +4209,7 @@ export class GameServer {
 function toInfo(p: ServerPlayer): PlayerInfo {
   return {
     id: p.id, username: p.username, skin: p.skin, faction: p.faction, mode: p.mode,
-    seasonsWon: p.seasonsWon, hearts: p.hearts, cosmetics: p.cosmetics,
+    seasonsWon: p.seasonsWon, hearts: p.hearts, duelElo: p.duelElo, cosmetics: p.cosmetics,
     x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
     health: p.health, dead: p.dead,
     gliding: p.gliding, boating: p.boating, seated: p.seated, sneaking: p.sneaking,

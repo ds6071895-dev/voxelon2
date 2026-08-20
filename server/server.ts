@@ -86,6 +86,17 @@ game.onWarfareChange = (username, progress) => {
   a.warfare = progress;
   saveAccounts();
 };
+
+game.onDuelRatings = (changes) => {
+  for (const change of changes) accounts.applyDuelRating(change.username, change.elo, change.won);
+  saveAccounts();
+  const profiles: Record<string, { wins: number; losses: number }> = {};
+  for (const change of changes) {
+    const profile = accounts.duelProfile(change.username);
+    profiles[change.username.toLowerCase()] = { wins: profile.wins, losses: profile.losses };
+  }
+  return { leaderboard: accounts.duelLeaderboard(10), profiles };
+};
 // Lifesteal elimination (Milestone A): record the 24h wall-clock lockout on the
 // account (login is refused until it expires) and boot the victim shortly after
 // so their full-screen banner has time to deliver. Comeback hearts are written
@@ -242,6 +253,10 @@ function handleAuth(id: number, msg: ClientMsg & { t: 'register' | 'login' | 'se
     switchSeason: res.account.switchSeason, forfeitSeason: res.account.forfeitSeason,
     data: res.account.data,
     warfare: accounts.warfareOf(res.account.username),
+    duelElo: accounts.duelProfile(res.account.username).elo,
+    duelWins: accounts.duelProfile(res.account.username).wins,
+    duelLosses: accounts.duelProfile(res.account.username).losses,
+    duelLeaderboard: accounts.duelLeaderboard(10),
   }));
   // Issue (rotate) a session token so this browser can resume without the
   // password next visit — persisted on the account, mirrored in localStorage.
@@ -325,8 +340,12 @@ wss.on('connection', (ws: WebSocket) => {
       return;
     }
     if (!authed.has(id)) {
-      // Unauthenticated: the ONLY accepted messages are register/login/session.
-      if (msg.t === 'register' || msg.t === 'login' || msg.t === 'session') handleAuth(id, msg);
+      // The invite preview is read-only, rate-free metadata for the exact
+      // private token in the URL; every state-changing action still needs auth.
+      if (msg.t === 'duelInviteInfo') {
+        const info = game.duelInviteInfo(msg.token);
+        send(id, { t: 'duelInviteInfo', valid: !!info, host: info?.host, lobbyId: info?.lobbyId });
+      } else if (msg.t === 'register' || msg.t === 'login' || msg.t === 'session') handleAuth(id, msg);
       return;
     }
     // Operator commands typed into the in-game command box. Handled HERE, not
@@ -416,7 +435,7 @@ setInterval(() => {
   dispatch(game.tickDuels());
   dispatch(game.tickSeason(dt));
   for (const cid of authed.keys()) {
-    send(cid, { t: 'snapshot', players: game.snapshotFor(cid) });
+    send(cid, { t: 'snapshot', players: game.snapshotFor(cid), worldTime: game.clockTime() });
   }
   if (moved.length) {
     const mv: ServerMsg = { t: 'itemsmove', items: moved };

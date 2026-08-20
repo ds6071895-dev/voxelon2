@@ -10,6 +10,7 @@ import { FACTIONS, resolveJoinFaction } from '../teams';
 import {
   WarfareProgress, buyWarfareNode, grantWarfareXp, migrateWarfare, sanitizeWarfare,
 } from '../warfare';
+import { DUEL_STARTING_ELO, sanitizeDuelElo } from '../duels';
 
 export interface Account {
   username: string;
@@ -43,6 +44,10 @@ export interface Account {
    *  inside the opaque client-owned `data` blob, so a routine state save can
    *  never overwrite (or mint) technology the player did not earn. */
   warfare?: WarfareProgress;
+  /** Server-owned competitive Duels progression. */
+  duelElo?: number;
+  duelWins?: number;
+  duelLosses?: number;
 }
 
 /** Deterministic password hasher: (password, salt) -> hex digest. */
@@ -80,6 +85,9 @@ export class Accounts {
           op: a.op === true,
           data: a.data,
           warfare: sanitizeWarfare(a.warfare),
+          duelElo: sanitizeDuelElo(a.duelElo),
+          duelWins: Number.isFinite(a.duelWins) ? Math.max(0, Math.floor(a.duelWins as number)) : 0,
+          duelLosses: Number.isFinite(a.duelLosses) ? Math.max(0, Math.floor(a.duelLosses as number)) : 0,
         });
       }
     }
@@ -121,6 +129,7 @@ export class Accounts {
       username: name, salt, hash: hash(pass, salt),
       faction: resolveJoinFaction(this.factionCounts(), desired),
       seasonsWon: 0,
+      duelElo: DUEL_STARTING_ELO, duelWins: 0, duelLosses: 0,
     };
     this.byName.set(name.toLowerCase(), account);
     return { ok: true, account };
@@ -156,6 +165,25 @@ export class Accounts {
   setData(name: string, data: Record<string, unknown>): void {
     const a = this.get(name);
     if (a) a.data = data;
+  }
+
+  duelProfile(name: string): { elo: number; wins: number; losses: number } {
+    const a = this.get(name);
+    return { elo: sanitizeDuelElo(a?.duelElo), wins: Math.max(0, a?.duelWins ?? 0), losses: Math.max(0, a?.duelLosses ?? 0) };
+  }
+
+  applyDuelRating(name: string, elo: number, won: boolean): void {
+    const a = this.get(name);
+    if (!a) return;
+    a.duelElo = sanitizeDuelElo(elo);
+    if (won) a.duelWins = Math.max(0, a.duelWins ?? 0) + 1;
+    else a.duelLosses = Math.max(0, a.duelLosses ?? 0) + 1;
+  }
+
+  duelLeaderboard(limit = 10): { username: string; elo: number; wins: number; losses: number }[] {
+    return this.list().map((a) => ({ username: a.username, ...this.duelProfile(a.username) }))
+      .sort((a, b) => b.elo - a.elo || b.wins - a.wins || a.username.localeCompare(b.username))
+      .slice(0, Math.max(1, Math.floor(limit)));
   }
 
   // --- Operators --------------------------------------------------------------

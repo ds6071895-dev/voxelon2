@@ -25,6 +25,40 @@ export const DUEL_ARENA_HEIGHT = 16;
 export const DUEL_MIN_LIGHT = 12;
 export const DUEL_MAX_HEALTH = 40;
 export const DUEL_MAX_PILLAR_HEIGHT = 5;
+export const DUEL_STARTING_ELO = 1000;
+export const DUEL_ELO_K = 32;
+
+export interface DuelRank {
+  name: string;
+  min: number;
+  color: string;
+}
+
+export const DUEL_RANKS: readonly DuelRank[] = [
+  { name: 'Bronze', min: 0, color: '#b87542' },
+  { name: 'Silver', min: 900, color: '#aebbc6' },
+  { name: 'Gold', min: 1100, color: '#f0bd45' },
+  { name: 'Platinum', min: 1300, color: '#65d3c4' },
+  { name: 'Diamond', min: 1500, color: '#64b9ff' },
+  { name: 'Champion', min: 1750, color: '#b988ff' },
+  { name: 'Grandmaster', min: 2000, color: '#ff6d7a' },
+];
+
+export function sanitizeDuelElo(value: unknown): number {
+  return Number.isFinite(value) ? Math.max(0, Math.min(4000, Math.round(value as number))) : DUEL_STARTING_ELO;
+}
+
+export function duelRankAt(elo: number): DuelRank {
+  const rating = sanitizeDuelElo(elo);
+  for (let i = DUEL_RANKS.length - 1; i >= 0; i--) if (rating >= DUEL_RANKS[i].min) return DUEL_RANKS[i];
+  return DUEL_RANKS[0];
+}
+
+export function duelRankProgress(elo: number): { rank: DuelRank; next: DuelRank | null; progress: number } {
+  const rating = sanitizeDuelElo(elo), rank = duelRankAt(rating);
+  const index = DUEL_RANKS.indexOf(rank), next = DUEL_RANKS[index + 1] ?? null;
+  return { rank, next, progress: next ? Math.max(0, Math.min(1, (rating - rank.min) / (next.min - rank.min))) : 1 };
+}
 
 const duelNoise = new Noise2D(0x4475656c);
 
@@ -41,6 +75,7 @@ export interface DuelParticipant {
   id: number;
   username: string;
   skin: number;
+  elo: number;
   host: boolean;
   ready: boolean;
   connected: boolean;
@@ -76,6 +111,7 @@ export interface DuelResult {
   finishReason: DuelFinishReason;
   durationMs: number;
   rematchDeadline: number;
+  ratingChanges: { id: number; username: string; before: number; after: number; change: number }[];
 }
 
 export interface DuelLobbySnapshot {
@@ -138,46 +174,44 @@ export function duelArenaAt(x: number, z: number): DuelArenaBounds | null {
 function duelWallBlock(outerLx: number, by: number, outerLz: number, floor: number): number {
   const relY = by - floor;
   const isCorner = (outerLx <= 1 || outerLx >= DUEL_ARENA_SIZE - 2) && (outerLz <= 1 || outerLz >= DUEL_ARENA_SIZE - 2);
-  const isPillar = (outerLx % 4 === 0 || outerLz % 4 === 0);
+  const edgeCoordinate = outerLx < 2 || outerLx >= DUEL_ARENA_SIZE - 2 ? outerLz : outerLx;
+  const isPillar = edgeCoordinate % 5 === 0;
 
   if (relY === 8) {
-    // Battlements / crenellations
-    if (isCorner) return Block.GildedVaultBrick;
-    if (isPillar) return Block.CarvedVaultBrick;
-    return (outerLx + outerLz) % 2 === 0 ? Block.VaultBrick : Block.CarvedVaultBrick;
+    // Warm timber crenellations over a textured stone fighting wall. The
+    // sealed Barrier layer above this remains invisible to players.
+    return (edgeCoordinate & 1) === 0 ? Block.SpruceLog : Block.OakPlanks;
   }
   if (relY === 7) {
-    if (isCorner) return Block.PrismLamp;
-    if (isPillar) return Block.CarvedVaultBrick;
-    return Block.VaultBrick;
+    if (isCorner || isPillar) return Block.SpruceLog;
+    return Block.OakPlanks;
   }
   if (relY === 6) {
-    if (isCorner || isPillar) return Block.CarvedVaultBrick;
-    return Block.VaultBrick;
+    if (isCorner || isPillar) return Block.SpruceLog;
+    return (edgeCoordinate & 1) === 0 ? Block.OakPlanks : Block.SprucePlanks;
   }
   if (relY === 5) {
-    // Mid-height decorative band & lamps
-    if (isPillar) return Block.PrismLamp;
-    return Block.SpectralMarble;
+    // A continuous stone string course keeps the silhouette strong and gives
+    // the timber panels a deliberate, hand-built frame.
+    return isPillar ? Block.SpruceLog : Block.Cobblestone;
   }
   if (relY === 4) {
-    if (isCorner || isPillar) return Block.CarvedVaultBrick;
-    return Block.PearlTile;
+    if (isCorner || isPillar) return Block.SpruceLog;
+    return Block.OakPlanks;
   }
   if (relY === 3) {
-    if (isCorner || isPillar) return Block.CarvedVaultBrick;
-    return Block.VaultMosaic;
+    if (isCorner || isPillar) return Block.SpruceLog;
+    return (edgeCoordinate & 1) === 0 ? Block.OakPlanks : Block.SprucePlanks;
   }
   if (relY === 2) {
-    if (isCorner || isPillar) return Block.CarvedVaultBrick;
-    return Block.PearlTile;
+    if (isCorner || isPillar) return Block.SpruceLog;
+    return Block.OakPlanks;
   }
   if (relY === 1) {
-    if (isCorner || isPillar) return Block.CarvedVaultBrick;
-    return Block.SpectralMarble;
+    return isPillar ? Block.SpruceLog : Block.Cobblestone;
   }
-  // Plinth / base (relY <= 0)
-  return Block.CarvedVaultBrick;
+  // Rough stone plinth / foundation.
+  return (edgeCoordinate & 1) === 0 ? Block.Stone : Block.Cobblestone;
 }
 
 /** Material stamp corresponding exactly to duelArenaSolidAt. This is called by
@@ -313,7 +347,41 @@ interface DuelLobby {
   result?: DuelResult;
 }
 
-export interface DuelIdentity { id: number; username: string; skin: number }
+export interface DuelIdentity { id: number; username: string; skin: number; elo?: number }
+
+/** Pairwise multiplayer Elo. Each player is scored as a win/loss/draw against
+ * every other player based on final scoreboard order, then averaged to the
+ * familiar chess K-factor. The pool is zero-sum before integer rounding. */
+export function duelRatingChanges(players: Iterable<DuelParticipant>, winner?: number | null): DuelResult['ratingChanges'] {
+  const board = orderedDuelScoreboard(players);
+  if (winner !== undefined && winner !== null) {
+    const index = board.findIndex((p) => p.id === winner);
+    if (index > 0) board.unshift(board.splice(index, 1)[0]);
+  }
+  const scores = new Map(board.map((p, i) => [p.id, i]));
+  const raw = board.map((p) => {
+    let delta = 0;
+    for (const opponent of board) {
+      if (opponent.id === p.id) continue;
+      const actual = scores.get(p.id)! < scores.get(opponent.id)! ? 1 :
+        scores.get(p.id)! > scores.get(opponent.id)! ? 0 : 0.5;
+      const expected = 1 / (1 + Math.pow(10, (opponent.elo - p.elo) / 400));
+      delta += actual - expected;
+    }
+    return delta * DUEL_ELO_K / Math.max(1, board.length - 1);
+  });
+  const rounded = raw.map(Math.round);
+  const drift = rounded.reduce((sum, value) => sum + value, 0);
+  if (drift !== 0 && rounded.length) {
+    const order = raw.map((value, i) => ({ i, error: rounded[i] - value }))
+      .sort((a, b) => drift > 0 ? b.error - a.error : a.error - b.error);
+    for (let i = 0; i < Math.abs(drift); i++) rounded[order[i % order.length].i] -= Math.sign(drift);
+  }
+  return board.map((p, i) => {
+    const before = sanitizeDuelElo(p.elo), after = sanitizeDuelElo(before + rounded[i]);
+    return { id: p.id, username: p.username, before, after, change: after - before };
+  });
+}
 
 export interface DuelCreateResult { token: string; snapshot: DuelLobbySnapshot }
 export type DuelJoinResult =
@@ -382,8 +450,17 @@ export class Duels {
   leave(playerId: number, now: number): { snapshot?: DuelLobbySnapshot; deleted: boolean; token?: string } {
     const lobby = this.lobbyByPlayer.get(playerId);
     if (!lobby) return { deleted: false };
+    const live = lobby.phase === 'running' || lobby.phase === 'sudden_death';
+    const leaving = lobby.participants.get(playerId);
     this.lobbyByPlayer.delete(playerId);
-    lobby.participants.delete(playerId);
+    if (live && leaving) {
+      // Keep a disconnected combatant on the final board so forfeiting cannot
+      // dodge a rated loss. They are removed when the room returns to lobby.
+      leaving.connected = false; leaving.alive = false; leaving.spectating = true;
+      leaving.respawnAt = undefined;
+    } else {
+      lobby.participants.delete(playerId);
+    }
     lobby.arenaReady?.delete(playerId);
     if (lobby.participants.size === 0) {
       this.releaseArena(lobby);
@@ -391,7 +468,9 @@ export class Duels {
       return { deleted: true, token: lobby.token };
     }
     if (lobby.host === playerId) {
-      const next = [...lobby.participants.values()].sort((a, b) => a.joinOrder - b.joinOrder)[0];
+      const next = [...lobby.participants.values()].filter((p) => p.connected)
+        .sort((a, b) => a.joinOrder - b.joinOrder)[0];
+      if (!next) return { snapshot: this.snapshotLobby(lobby, now), deleted: false };
       lobby.host = next.id;
       for (const p of lobby.participants.values()) p.host = p.id === next.id;
     }
@@ -538,10 +617,21 @@ export class Duels {
   }
 
   tokenFor(playerId: number): string | null { return this.lobbyByPlayer.get(playerId)?.token ?? null; }
+  inviteInfo(token: string): { host: string; lobbyId: string } | null {
+    const lobby = this.lobbies.get(token);
+    const host = lobby?.participants.get(lobby.host);
+    return lobby && host ? { host: host.username, lobbyId: lobby.id } : null;
+  }
   arenaFor(playerId: number): DuelArenaBounds | null { return this.lobbyByPlayer.get(playerId)?.arena ?? null; }
   phaseFor(playerId: number): DuelPhase | null { return this.lobbyByPlayer.get(playerId)?.phase ?? null; }
   participantFor(playerId: number): DuelParticipant | null {
     return this.lobbyByPlayer.get(playerId)?.participants.get(playerId) ?? null;
+  }
+  applyRatings(changes: { id: number; after: number }[]): void {
+    for (const change of changes) {
+      const participant = this.lobbyByPlayer.get(change.id)?.participants.get(change.id);
+      if (participant) participant.elo = sanitizeDuelElo(change.after);
+    }
   }
   membersOf(playerId: number): number[] {
     return [...(this.lobbyByPlayer.get(playerId)?.participants.keys() ?? [])];
@@ -553,7 +643,7 @@ export class Duels {
   }
 
   private newParticipant(identity: DuelIdentity, host: boolean, joinOrder: number): DuelParticipant {
-    return { ...identity, host, ready: false, connected: true, kills: 0, deaths: 0,
+    return { ...identity, elo: sanitizeDuelElo(identity.elo), host, ready: false, connected: true, kills: 0, deaths: 0,
       alive: true, spectating: false, rematchVote: false, joinOrder };
   }
 
@@ -599,13 +689,17 @@ export class Duels {
     for (const p of lobby.participants.values()) { p.alive = false; p.spectating = true; p.rematchVote = false; }
     lobby.result = { winner, scoreboard: orderedDuelScoreboard(lobby.participants.values()),
       finishReason: reason, durationMs: Math.max(0, now - (lobby.startedAt ?? now)),
-      rematchDeadline: now + DUEL_REMATCH_MS };
+      rematchDeadline: now + DUEL_REMATCH_MS,
+      ratingChanges: duelRatingChanges(lobby.participants.values(), winner) };
   }
 
   private returnToLobby(lobby: DuelLobby): void {
     lobby.phase = 'lobby'; lobby.countdownEndsAt = undefined; lobby.startedAt = undefined;
     lobby.endsAt = undefined; lobby.arenaReady = undefined; lobby.arenaLoadDeadline = undefined;
     lobby.result = undefined; this.releaseArena(lobby);
+    for (const [id, participant] of lobby.participants) {
+      if (!participant.connected) lobby.participants.delete(id);
+    }
     for (const p of lobby.participants.values()) {
       p.ready = false; p.kills = 0; p.deaths = 0; p.alive = true; p.spectating = false;
       p.rematchVote = false; p.respawnAt = undefined; p.shieldUntil = undefined;

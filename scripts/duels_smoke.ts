@@ -1,7 +1,8 @@
 import {
   DUEL_ARENA_FLOOR_Y, DUEL_ARENA_LOAD_TIMEOUT_MS, DUEL_COUNTDOWN_MS, DUEL_MIN_LIGHT, DUEL_REMATCH_MS,
   DUEL_RESPAWN_MS, DUEL_ROUND_MS, Duels, clampToDuelArena, duelArenaBounds,
-  duelArenaLightAt, duelArenaSolidAt, duelTerrainElevation, hasArenaLineOfSight, orderedDuelScoreboard,
+  duelArenaBlockAt, duelArenaLightAt, duelArenaSolidAt, duelTerrainElevation,
+  duelRankAt, duelRatingChanges, hasArenaLineOfSight, orderedDuelScoreboard,
   safestDuelSpawn, duelTokenFromUrl, withDuelToken,
 } from '../src/duels';
 import { Block } from '../src/blocks';
@@ -213,6 +214,13 @@ const who = (id: number) => ({ id, username: `Player${id}`, skin: id * 17 });
     duelArenaSolidAt(a.originX, a.floor + 5, a.originZ + 20, a) &&
     duelArenaSolidAt(a.originX + 20, a.ceiling, a.originZ + 20, a) &&
     duelArenaSolidAt(a.originX + 20, a.ceiling + 1, a.originZ + 20, a));
+  const wallMaterials = new Set<number>();
+  for (let y = a.floor; y <= a.floor + 8; y++) {
+    wallMaterials.add(duelArenaBlockAt(a.originX, y, a.originZ + 10) ?? Block.Air);
+  }
+  check('arena wall palette combines textured timber and stone',
+    [...wallMaterials].some((b) => b === Block.OakPlanks || b === Block.SprucePlanks || b === Block.SpruceLog) &&
+    [...wallMaterials].some((b) => b === Block.Stone || b === Block.Cobblestone));
   const standY = (x: number, z: number): number | null => {
     let solid = a.floor;
     for (let y = a.floor + 1; y <= a.floor + 4; y++) {
@@ -258,7 +266,17 @@ const who = (id: number) => ({ id, username: `Player${id}`, skin: id * 17 });
 
 function madeParticipant(id: number, kills: number, deaths: number, joinOrder: number) {
   return { id, username: `P${id}`, skin: id, host: id === 1, ready: true, connected: true,
-    kills, deaths, alive: true, spectating: false, rematchVote: false, joinOrder };
+    elo: 1000, kills, deaths, alive: true, spectating: false, rematchVote: false, joinOrder };
+}
+
+{
+  const underdog = { ...madeParticipant(1, 3, 1, 0), elo: 800 };
+  const favourite = { ...madeParticipant(2, 1, 3, 1), elo: 1600 };
+  const upset = duelRatingChanges([underdog, favourite]);
+  check('Elo rewards an underdog upset heavily and remains zero-sum',
+    upset[0].change >= 30 && upset[0].change === -upset[1].change);
+  check('rank tiers resolve from persistent Elo',
+    duelRankAt(1000).name === 'Silver' && duelRankAt(1800).name === 'Champion');
 }
 
 // Authoritative integration: scope isolation, normalized loadout/state,
@@ -286,13 +304,12 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   const arenaMsg = entered.find((o) => o.to === 1 && o.msg.t === 'duelArena')?.msg;
   if (!arenaMsg || arenaMsg.t !== 'duelArena') throw new Error('arena entry missing');
   const kit = entered.find((o) => o.to === 1 && o.msg.t === 'duelLoadout')?.msg;
-  check('server supplies rifle, iron axe, 64 oak planks, five Medkits, five Jump Boosts and infinity reserve', !!kit && kit.t === 'duelLoadout' &&
-    kit.slots[0]?.id === Item.BurstRifle && kit.slots[0].loaded === 24 &&
-    kit.slots[1]?.id === Item.IronAxe && kit.slots[1].count === 1 &&
-    kit.slots[2]?.id === Block.OakPlanks && kit.slots[2].count === 64 &&
+  check('server supplies only an iron axe weapon plus build, bounce and healing utility', !!kit && kit.t === 'duelLoadout' &&
+    kit.slots[0]?.id === Item.IronAxe && kit.slots[0].count === 1 &&
+    kit.slots[1]?.id === Block.OakPlanks && kit.slots[1].count === 64 &&
+    kit.slots[2]?.id === Item.JumpBoost && kit.slots[2].count === 5 &&
     kit.slots[3]?.id === Item.Medkit && kit.slots[3].count === 5 &&
-    kit.slots[4]?.id === Item.JumpBoost && kit.slots[4].count === 5 &&
-    kit.slots.slice(5).every((v) => v === null) && kit.unlimitedReserve);
+    kit.slots.slice(4).every((v) => v === null) && !kit.unlimitedReserve);
   check('arena and normal-world visibility scopes are disjoint',
     !s.receivesWorldBroadcast(1) && s.receivesWorldBroadcast(3) &&
     s.snapshotFor(1).every((p) => p.id === 1 || p.id === 2) &&
@@ -326,11 +343,20 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   const testBx = arenaMsg.arena.minX + testLx, testBz = arenaMsg.arena.minZ + testLz;
   check('cannot break natural ground in duel arena',
     s.handle(1, { t: 'edit', x: testBx, y: testGroundY, z: testBz, block: 0 }).length === 0);
+  s.handle(1, { t: 'xform', x: arenaMsg.spawn.x, y: arenaMsg.spawn.y, z: arenaMsg.spawn.z,
+    yaw: 0, pitch: 0, held: Block.OakPlanks });
   check('cannot place block higher than 5 blocks above ground (pillar limit)',
     s.handle(1, { t: 'edit', x: testBx, y: testGroundY + 6, z: testBz, block: Block.OakPlanks }).length === 0);
   const placedEdit = s.handle(1, { t: 'edit', x: testBx, y: testGroundY + 1, z: testBz, block: Block.OakPlanks });
   check('can place oak planks within 5 blocks of ground and edit broadcasts to match',
     placedEdit.length === 2 && placedEdit.some((o) => o.to === 2 && o.msg.t === 'edit'));
+  const boostedHeight = clampToDuelArena({
+    x: testBx + 0.5, y: testGroundY + 7, z: testBz + 0.5,
+  }, arenaMsg.arena);
+  check('five-block restriction applies to edits, not player movement',
+    boostedHeight.y > testGroundY + 5);
+  s.handle(1, { t: 'xform', x: arenaMsg.spawn.x, y: arenaMsg.spawn.y, z: arenaMsg.spawn.z,
+    yaw: 0, pitch: 0, held: Item.IronAxe });
   const brokenEdit = s.handle(1, { t: 'edit', x: testBx, y: testGroundY + 1, z: testBz, block: 0 });
   check('can break player-placed oak planks in duel arena',
     brokenEdit.length === 2 && brokenEdit.some((o) => o.to === 2 && o.msg.t === 'edit' && o.msg.block === 0));
@@ -339,91 +365,66 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   const arena = arenaMsg.arena;
   const spawn0 = arena.spawns[0];
   const spawn1 = arena.spawns[1];
-  const x = spawn0.x, z1 = spawn0.z, z2 = spawn0.z + 6;
+  const x = spawn0.x, z2 = spawn0.z + 6;
 
   // Attempting to move through the outer boundary wall is rejected
-  s.handle(1, { t: 'xform', x: arena.minX - 2, y: spawn0.y, z: spawn0.z, yaw: 0, pitch: 0, held: Item.BurstRifle });
+  s.handle(1, { t: 'xform', x: arena.minX - 2, y: spawn0.y, z: spawn0.z, yaw: 0, pitch: 0, held: Item.IronAxe });
   check('living transform sweeps cannot pass through arena boundary walls',
-    Math.abs(s.snapshotFor(1).find((p) => p.id === 1)!.x - spawn0.x) < 0.01);
+    s.snapshotFor(1).find((p) => p.id === 1)!.x >= arena.minX);
 
-  // IronAxe does not do melee damage (duels are gun only)
-  s.handle(1, { t: 'xform', x: spawn0.x, y: spawn0.y, z: spawn0.z, yaw: -Math.PI / 2, pitch: 0, held: Item.IronAxe });
-  const axeHit = s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 });
-  check('IronAxe does not deal melee damage in duels (gun only)', axeHit.length === 0);
-
-  // Switch back to rifle for shooting tests
-  const combatY = arena.floor + 5;
   const p1x = spawn0.x, p1z = spawn0.z;
-  const p2x = spawn0.x + 4, p2z = spawn0.z;
-  s.handle(1, { t: 'xform', x: p1x, y: combatY, z: p1z, yaw: -Math.PI / 2, pitch: 0, held: Item.BurstRifle });
-  s.handle(2, { t: 'xform', x: spawn1.x, y: combatY, z: spawn1.z, yaw: Math.PI / 2, pitch: 0, held: Item.BurstRifle });
-  s.handle(2, { t: 'xform', x: p2x, y: combatY, z: p2z, yaw: Math.PI / 2, pitch: 0, held: Item.BurstRifle });
+  const p2x = spawn0.x + 3.5, p2z = spawn0.z;
+  const blockCoverX = Math.floor(p1x + 2);
+  const blockCoverZ = Math.floor(p1z);
+  const coverGroundY = arena.floor + duelTerrainElevation(
+    blockCoverX - arena.minX, blockCoverZ - arena.minZ);
+  const combatY = coverGroundY + 3;
+  const blockCoverY = combatY + 1;
+  s.handle(1, { t: 'xform', x: p1x, y: combatY, z: p1z, yaw: -Math.PI / 2, pitch: 0, held: Item.IronAxe });
+  s.handle(2, { t: 'xform', x: spawn1.x, y: combatY, z: spawn1.z, yaw: Math.PI / 2, pitch: 0, held: Item.IronAxe });
+  s.handle(2, { t: 'xform', x: p2x, y: combatY, z: p2z, yaw: Math.PI / 2, pitch: 0, held: Item.IronAxe });
 
-  const shot = s.handle(1, { t: 'shot', item: Item.BurstRifle,
-    x: p1x, y: combatY + 1.6, z: p1z, dx: 1, dy: 0, dz: 0 });
-  check('valid Duel shot effects reach only match opponents',
-    shot.length === 1 && shot[0].to === 2 && shot[0].msg.t === 'shot');
+  check('forged Duel gunfire is rejected because the axe is the only weapon',
+    s.handle(1, { t: 'shot', item: Item.BurstRifle,
+      x: p1x, y: combatY + 1.6, z: p1z, dx: 1, dy: 0, dz: 0 }).length === 0);
   check('forged over-damage is rejected',
     s.handle(1, { t: 'rangedAttack', target: 2, amount: 6 }).length === 0);
   const hit = s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 });
-  check('same-faction Duel opponents take normalized five-HP damage', hit.some((o) =>
+  check('same-faction Duel opponents take normalized five-HP axe damage', hit.some((o) =>
     o.to === 2 && o.msg.t === 'hurt' && o.msg.health === 35));
   s.tickRegen(30);
   check('Duels disables passive regeneration',
     s.snapshotFor(2).find((p) => p.id === 2)!.health === 35);
-  const fire = () => s.handle(1, { t: 'shot' as const, item: Item.BurstRifle,
-    x: p1x, y: combatY + 1.6, z: p1z, dx: 1, dy: 0, dz: 0 });
-  check('burst cadence rejects an immediate extra round', fire().length === 0);
-  s.tickWar(0.5);
-  const wrongRay = s.handle(1, { t: 'shot', item: Item.BurstRifle,
-    x: p1x, y: combatY + 1.6, z: p1z, dx: 0, dy: 0, dz: 1 });
-  check('shot ticket is tied to its fired ray, not merely its timestamp',
-    wrongRay.length === 1 && s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 }).length === 0);
-
-  s.tickWar(0.5);
-  const farDx = 60, farDz = 60;
-  const farL = Math.hypot(farDx, farDz);
-  s.handle(1, { t: 'shot', item: Item.BurstRifle, x: p1x, y: combatY + 1.6, z: p1z,
-    dx: farDx / farL, dy: 0, dz: farDz / farL });
-  check('over-range Duel hit is rejected despite a fresh ray ticket',
+  check('axe cadence rejects an immediate repeated swing',
     s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 }).length === 0);
+  s.tickWar(0.43);
+  s.handle(2, { t: 'xform', x: p1x + 4.2, y: combatY, z: p1z,
+    yaw: Math.PI / 2, pitch: 0, held: Item.IronAxe });
+  check('axe hit beyond four-block reach is rejected',
+    s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 }).length === 0);
+  s.handle(2, { t: 'xform', x: p2x, y: combatY, z: p2z,
+    yaw: Math.PI / 2, pitch: 0, held: Item.IronAxe });
 
   // Test block cover obstruction
-  const blockCoverX = Math.floor(p1x + 2);
-  const blockCoverZ = Math.floor(p1z);
-  const blockCoverY = Math.floor(combatY + 1);
+  s.handle(1, { t: 'xform', x: p1x, y: combatY, z: p1z,
+    yaw: -Math.PI / 2, pitch: 0, held: Block.OakPlanks });
   s.handle(1, { t: 'edit', x: blockCoverX, y: blockCoverY, z: blockCoverZ, block: Block.OakPlanks });
-  s.tickWar(0.5);
-  s.handle(1, { t: 'shot', item: Item.BurstRifle, x: p1x, y: combatY + 1.6, z: p1z, dx: 1, dy: 0, dz: 0 });
+  s.handle(1, { t: 'xform', x: p1x, y: combatY, z: p1z,
+    yaw: -Math.PI / 2, pitch: 0, held: Item.IronAxe });
+  s.tickWar(0.43);
   check('arena block cover rejects an otherwise valid obstructed hit',
     s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 }).length === 0);
   // Remove the plank
   s.handle(1, { t: 'edit', x: blockCoverX, y: blockCoverY, z: blockCoverZ, block: 0 });
-
-  s.tickWar(0.5); const firstBurst = fire();
-  s.tickWar(0.06); const second = fire();
-  s.tickWar(0.06); const third = fire();
-  s.tickWar(0.06); const fourth = fire();
-  check('one trigger window accepts exactly three burst rounds',
-    firstBurst.length === 1 && second.length === 1 && third.length === 1 && fourth.length === 0);
-  s.handle(1, { t: 'xform', x: p1x, y: combatY, z: p1z,
-    yaw: -Math.PI / 2, pitch: 0, held: Item.BurstRifle, reloading: true });
-  check('server blocks fire throughout the reload window', fire().length === 0);
-  s.tickWar(1.11);
-  s.handle(1, { t: 'xform', x: p1x, y: combatY, z: p1z,
-    yaw: -Math.PI / 2, pitch: 0, held: Item.BurstRifle, reloading: false });
-  check('unlimited reserve refills only after normal reload timing', fire().length === 1);
-  s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 }); // 35 -> 30
   check('cross-scope forged damage is rejected both directions',
     s.handle(1, { t: 'rangedAttack', target: 3, amount: 5 }).length === 0 &&
     s.handle(3, { t: 'rangedAttack', target: 1, amount: 5 }).length === 0);
-  s.tickWar(0.06); fire(); s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 }); // 30 -> 25
-  s.tickWar(0.06); fire(); s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 }); // 25 -> 20
-  s.tickWar(0.5); fire(); s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 });  // 20 -> 15
-  s.tickWar(0.06); fire(); s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 }); // 15 -> 10
-  s.tickWar(0.06); fire(); s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 }); // 10 -> 5
-  s.tickWar(0.5); fire();
-  const lethal = s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 });           // 5 -> 0
+  // Seven more valid axe swings: 35 -> 0.
+  let lethal: ReturnType<typeof s.handle> = [];
+  for (let swing = 0; swing < 7; swing++) {
+    s.tickWar(0.43);
+    lethal = s.handle(1, { t: 'rangedAttack', target: 2, amount: 5 });
+  }
   check('lethal Duel hit skips normal death and starts spectator respawn', lethal.some((o) =>
     o.to === 2 && o.msg.t === 'duelRespawn' && o.msg.spectating));
   check('Duel kill creates no drops, hearts, XP, war score or combat tag',
@@ -446,11 +447,11 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   const respawned = s.tickDuels();
   const fresh = respawned.find((o) => o.to === 2 && o.msg.t === 'duelLoadout')?.msg;
   check('server respawn is exactly timed and replaces a fresh loadout',
-    !!fresh && fresh.t === 'duelLoadout' && fresh.slots[0]?.loaded === 24 &&
-    fresh.slots[1]?.id === Item.IronAxe && fresh.slots[1].count === 1 &&
-    fresh.slots[2]?.id === Block.OakPlanks && fresh.slots[2].count === 64 &&
+    !!fresh && fresh.t === 'duelLoadout' &&
+    fresh.slots[0]?.id === Item.IronAxe && fresh.slots[0].count === 1 &&
+    fresh.slots[1]?.id === Block.OakPlanks && fresh.slots[1].count === 64 &&
+    fresh.slots[2]?.id === Item.JumpBoost && fresh.slots[2].count === 5 &&
     fresh.slots[3]?.id === Item.Medkit && fresh.slots[3].count === 5 &&
-    fresh.slots[4]?.id === Item.JumpBoost && fresh.slots[4].count === 5 &&
     respawned.some((o) => o.to === 2 && o.msg.t === 'duelRespawn' && !o.msg.spectating));
   check('respawned avatar becomes visible again',
     !s.snapshotFor(1).find((p) => p.id === 2)!.dead);
@@ -491,17 +492,14 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   const a = arenaMsg.arena;
   const sp0 = a.spawns[0], sp1 = a.spawns[1];
   const combatY = a.floor + 5;
-  s.handle(10, { t: 'xform', x: sp0.x, y: combatY, z: sp0.z, yaw: -Math.PI / 2, pitch: 0, held: Item.BurstRifle });
-  s.handle(11, { t: 'xform', x: sp1.x, y: combatY, z: sp1.z, yaw: Math.PI / 2, pitch: 0, held: Item.BurstRifle });
-  s.handle(11, { t: 'xform', x: sp0.x + 4, y: combatY, z: sp0.z, yaw: Math.PI / 2, pitch: 0, held: Item.BurstRifle });
+  s.handle(10, { t: 'xform', x: sp0.x, y: combatY, z: sp0.z, yaw: -Math.PI / 2, pitch: 0, held: Item.IronAxe });
+  s.handle(11, { t: 'xform', x: sp1.x, y: combatY, z: sp1.z, yaw: Math.PI / 2, pitch: 0, held: Item.IronAxe });
+  s.handle(11, { t: 'xform', x: sp0.x + 3.5, y: combatY, z: sp0.z, yaw: Math.PI / 2, pitch: 0, held: Item.IronAxe });
 
   const damageOnce = (): void => {
-    s.tickWar(0.5);
-    const fired = s.handle(10, { t: 'shot', item: Item.BurstRifle,
-      x: sp0.x, y: combatY + 1.6, z: sp0.z, dx: 1, dy: 0, dz: 0 });
-    check('healing scenario creates a fresh authoritative shot ticket', fired.length === 1);
+    s.tickWar(0.43);
     const hurt = s.handle(10, { t: 'rangedAttack', target: 11, amount: 5 });
-    check('healing scenario damage is accepted', hurt.some((o) => o.msg.t === 'hurt'));
+    check('healing scenario accepts a fresh authoritative axe swing', hurt.some((o) => o.msg.t === 'hurt'));
   };
   const health = () => s.snapshotFor(11).find((p) => p.id === 11)!.health;
   damageOnce();
