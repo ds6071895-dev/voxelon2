@@ -186,27 +186,27 @@ export class Terrain {
     let species: Species;
     switch (biome) {
       case Biome.Forest:
-        p = 0.025;
+        p = 0.04;
         species = hash2(this.seed ^ 0x5b, x, z) < 0.85 ? 'oak' : 'birch';
         break;
       case Biome.BirchForest:
-        p = 0.02;
+        p = 0.035;
         species = 'birch';
         break;
       case Biome.Snowy:
-        p = 0.012;
+        p = 0.02;
         species = 'spruce';
         break;
       case Biome.Plains:
-        p = 0.0015;
+        p = 0.003;
         species = 'oak';
         break;
       case Biome.Jungle:
-        p = 0.03;
+        p = 0.05;
         species = 'jungle';
         break;
       case Biome.CherryGrove:
-        p = 0.02;
+        p = 0.04;
         species = 'cherry';
         break;
       default:
@@ -397,12 +397,12 @@ export class Terrain {
     const r = hash2(this.seed ^ 0xdec0, wx, wz);
 
     if (biome === Biome.Desert) {
-      if (r < 0.004) {
+      if (r < 0.007) {
         const tall = 1 + Math.floor(hash2(this.seed ^ 0xcac, wx, wz) * 3);
         for (let i = 1; i <= tall; i++) chunk.set(lx, h + i, lz, Block.Cactus);
-      } else if (r < 0.012) {
+      } else if (r < 0.025) {
         chunk.set(lx, h + 1, lz, Block.DeadBush);
-      } else if (r < 0.0135) {
+      } else if (r < 0.029) {
         // A weathered sandstone slab poking out of the dunes.
         chunk.set(lx, h + 1, lz, Block.Sandstone);
       }
@@ -411,9 +411,9 @@ export class Terrain {
 
     // Mesa: dead bushes + occasional terracotta HOODOOS (2–5 tall pillars).
     if (biome === Biome.Mesa) {
-      if (r < 0.01) {
+      if (r < 0.022) {
         chunk.set(lx, h + 1, lz, Block.DeadBush);
-      } else if (r < 0.0125) {
+      } else if (r < 0.026) {
         const tall = 2 + Math.floor(hash2(this.seed ^ 0x40d0, wx, wz) * 4);
         for (let i = 1; i <= tall; i++) chunk.set(lx, h + i, lz, Block.Terracotta);
       }
@@ -422,7 +422,7 @@ export class Terrain {
 
     // Ashlands: jagged basalt spikes rising from the flats.
     if (biome === Biome.Ashlands) {
-      if (r < 0.006) {
+      if (r < 0.012) {
         const tall = 2 + Math.floor(hash2(this.seed ^ 0xba51, wx, wz) * 4);
         for (let i = 1; i <= tall; i++) chunk.set(lx, h + i, lz, Block.Basalt);
       }
@@ -431,7 +431,7 @@ export class Terrain {
 
     // Crystalfields: scattered glowing crystal spikes, 1-4 blocks tall.
     if (biome === Biome.Crystalfields) {
-      if (r < 0.012) {
+      if (r < 0.025) {
         const tall = 1 + Math.floor(hash2(this.seed ^ 0xc59, wx, wz) * 4);
         for (let i = 1; i <= tall; i++) chunk.set(lx, h + i, lz, Block.CrystalBlock);
       }
@@ -440,8 +440,9 @@ export class Terrain {
     // Swamps: dead bushes on the mud + sparse murky grass.
     if (biome === Biome.Swamp) {
       if (chunk.get(lx, h, lz) === Block.Water) return; // no plants on pools
-      if (r < 0.02) chunk.set(lx, h + 1, lz, Block.DeadBush);
-      else if (r < 0.05) chunk.set(lx, h + 1, lz, Block.TallGrass);
+      if (r < 0.012) chunk.set(lx, h + 1, lz, Block.GlowFungus);
+      else if (r < 0.04) chunk.set(lx, h + 1, lz, Block.DeadBush);
+      else if (r < 0.11) chunk.set(lx, h + 1, lz, Block.TallGrass);
       return;
     }
 
@@ -454,16 +455,16 @@ export class Terrain {
     if (!grassy) return;
     // Jungle floors are DENSE with tall grass; cherry groves scatter petals
     // (poppy-heavy flowers) through lighter grass.
-    const pGrass = biome === Biome.Jungle ? 0.14
-      : biome === Biome.Plains ? 0.06
-      : biome === Biome.CherryGrove ? 0.05
-      : 0.035;
+    const pGrass = biome === Biome.Jungle ? 0.24
+      : biome === Biome.Plains ? 0.12
+      : biome === Biome.CherryGrove ? 0.13
+      : 0.085;
     // Flowers cluster into MEADOW PATCHES (a coarse 8×8 mask) so plains read as
     // fields with drifts of color instead of uniform speckle.
     const meadow = hash2(this.seed ^ 0xf10a, wx >> 3, wz >> 3) < 0.22;
-    const pFlower = biome === Biome.CherryGrove ? 0.02
-      : meadow ? 0.055
-      : 0.004;
+    const pFlower = biome === Biome.CherryGrove ? 0.05
+      : meadow ? 0.09
+      : 0.008;
     if (r < pGrass) {
       chunk.set(lx, h + 1, lz, Block.TallGrass);
     } else if (r < pGrass + pFlower) {

@@ -31,10 +31,13 @@ export interface StructureStamp {
   chest: { x: number; y: number; z: number };
 }
 
-// Anchor density: roughly 1 per 40×40 chunks in the Heartland, denser out in
-// the Wilds (discovery is the Wilds' reward).
-const DENSITY_CORE = 1 / 1600;
-const DENSITY_WILDS = 1 / 550;
+// Surface landmarks need to appear during ordinary travel, not only on a long
+// map sweep. At these rates a full render bubble usually contains a candidate
+// in the Heartland and one or two in the Wilds; terrain suitability still
+// rejects water, ravines and extreme peaks. Cargo pods keep their Wilds bias,
+// so the extra density is primarily ruins and bunkers rather than free epics.
+const DENSITY_CORE = 1 / 420;
+const DENSITY_WILDS = 1 / 220;
 /** Ground outside this band can't host a structure (water / absurd peaks). */
 const MIN_GROUND = 65, MAX_GROUND = 150;
 

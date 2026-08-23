@@ -2920,8 +2920,8 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
 // moves stone. That's why this pass pairs the chroma boost with a real midtone
 // GAMMA lift (which does brighten greys), and why the base palette constants
 // below were pushed richer at the source.
-const SAT = 1.6;    // chroma multiplier around luma (hue preserved)
-const GAMMA = 0.86; // <1 lifts midtones — the "brighter, fresher" half
+const SAT = 1.78;   // chroma multiplier around luma (hue preserved)
+const GAMMA = 0.82; // <1 lifts midtones — the "brighter, fresher" half
 
 /** Saturate + lift a painted tile in place. Transparent pixels are skipped. */
 function vibrance(p: Painter): void {

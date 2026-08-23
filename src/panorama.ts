@@ -11,10 +11,13 @@ import type { Atlas } from './textures';
 import { World } from './world';
 
 const PANO_SEED = 0x5ca1ab1e;   // fixed -> identical panorama every launch
-const PANO_DIST = 9;            // chunk render radius (enough that fog hides the edge)
+// This is decorative scenery behind an opaque-heavy menu. A 9-chunk radius
+// used to generate 361 fully lit meshes alongside the real startup world;
+// four chunks are ample once the edge is hidden by fog.
+const PANO_DIST = 4;
 // Fog tuned to the render edge so distant chunks fade into the sky instead of
 // popping out of existence at the cutoff.
-const PANO_FOG_NEAR = PANO_DIST * 16 - 70;
+const PANO_FOG_NEAR = PANO_DIST * 16 - 30;
 const PANO_FOG_FAR = PANO_DIST * 16 - 12;
 
 export class Panorama {

@@ -34,6 +34,7 @@ import { leverFlips } from './traps';
 import { MachineModels } from './machinemodels';
 import { NetItems } from './netitems';
 import { Particles } from './particles';
+import { AmbientWorld } from './ambient_world';
 import { Projectiles } from './projectiles';
 import { Player, MAX_AIR } from './player';
 import {
@@ -130,6 +131,12 @@ import { VaultEncounterVisuals } from './vault_visuals';
 
 const FOG_NEAR = RENDER_DISTANCE * 16 - 38;
 const FOG_FAR = RENDER_DISTANCE * 16 - 6;
+// Only this nearby bubble blocks entry. The old startup path waited for the
+// complete 17x17 render area (289 expensive light+mesh jobs) before Play could
+// proceed, even though collision only needs the chunks immediately around the
+// player. Distant chunks continue streaming in once play starts.
+const INITIAL_LOAD_DISTANCE = 2;
+const TITLE_WORLD_BUDGET_MS = 12;
 const FOV = 70;
 const SPRINT_FOV = 80.5;
 
@@ -333,6 +340,7 @@ const particles = new Particles(scene);
 const mobs = new Mobs(scene, world, atlas, itemEntities, particles);
 const audio = new GameAudio();
 const accessibility = loadAccessibility();
+const ambientWorld = new AmbientWorld(scene, world.terrain);
 audio.setMusicVolume(accessibility.musicVolume);
 audio.setEffectsVolume(accessibility.effectsVolume);
 mobs.onSound = (name, pos) => audio.mob(name, pos.clone());
@@ -3610,6 +3618,11 @@ net.onWelcome = (me) => {
   if (justRegistered) { justRegistered = false; announceSide(localFaction); }
   player.pos.set(me.x, me.y, me.z);
   player.vel.set(0, 0, 0);
+  // Startup may already have prepared the default spawn while authentication
+  // was in flight. A returning player can be thousands of blocks away, so the
+  // readiness gate must follow the restored position instead of doing work at
+  // a location they will never see.
+  worldReady = false;
   applyHearts(me.hearts ?? START_HEARTS); // hearts first so max HP is right
   player.health = me.health;
   player.dead = false;
@@ -6096,6 +6109,7 @@ function updateGliderRig(dt: number): void {
 
 function updateAtmosphere(): void {
   world.sunUniform.value = sky.sunIntensity;
+  world.auroraUniform.value = sky.auroraIntensity;
   const fog = scene.fog as THREE.Fog;
   if (player.eyeUnderwater) {
     fog.color.copy(WATER_FOG_COLOR).multiplyScalar(0.3 + 0.7 * sky.sunIntensity);
@@ -6118,8 +6132,16 @@ function updateAtmosphere(): void {
     fog.far = Math.min(92, FOG_FAR);
   } else {
     fog.color.copy(sky.skyColor);
-    fog.near = FOG_NEAR;
-    fog.far = FOG_FAR;
+    // While the outer world is still streaming, pull the fog edge in to the
+    // generated bubble. Since chunks are built nearest-first, sqrt(progress)
+    // closely tracks the currently available radius. This prevents holes or
+    // pop-in without making the player wait for the full view distance.
+    const loadedRadius = Math.max(
+      INITIAL_LOAD_DISTANCE,
+      Math.sqrt(world.progress(player.pos.x, player.pos.z)) * RENDER_DISTANCE
+    );
+    fog.far = Math.min(FOG_FAR, loadedRadius * 16 - 6);
+    fog.near = Math.min(FOG_NEAR, Math.max(8, fog.far - 32));
   }
   (scene.background as THREE.Color).copy(fog.color);
 }
@@ -8880,9 +8902,14 @@ function frame(): void {
     fpsTime = 0;
   }
 
-  // The spawn area streams in quietly in the background (no loading screen) —
-  // generously while we're still on the title, lightly once you're in.
-  if (!worldReady && world.update(spawn.x, spawn.z, screen === 'title' ? 20 : 6)) {
+  // Build only a collision-safe player bubble before allowing entry. The old
+  // full-distance gate generated 289 chunks here; this needs just 25, while
+  // the ordinary in-game streamer below fills the remaining view outward.
+  if (!worldReady && world.update(
+    player.pos.x, player.pos.z,
+    screen === 'title' ? TITLE_WORLD_BUDGET_MS : 6,
+    INITIAL_LOAD_DISTANCE
+  )) {
     worldReady = true;
   }
 
@@ -9389,6 +9416,11 @@ function frame(): void {
   sky.update(dt, activeCamera, duelArenaActive ? 0.25 : undefined,
     !(net.connected && hasServerWorldTime));
   updateAtmosphere();
+  ambientWorld.update(
+    dt, player.pos, sky.sunIntensity,
+    !player.eyeUnderwater && !curVault && !duelArenaActive,
+    accessibility.reducedMotion,
+  );
   itemEntities.update(dt, player, inventory, sky.sunIntensity);
   particles.update(dt, activeCamera);
   // Hover health bar: the player the crosshair is over shows their health.
