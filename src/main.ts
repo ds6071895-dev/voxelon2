@@ -340,7 +340,7 @@ const particles = new Particles(scene);
 const mobs = new Mobs(scene, world, atlas, itemEntities, particles);
 const audio = new GameAudio();
 const accessibility = loadAccessibility();
-const ambientWorld = new AmbientWorld(scene, world.terrain);
+const ambientWorld = new AmbientWorld(scene, world);
 audio.setMusicVolume(accessibility.musicVolume);
 audio.setEffectsVolume(accessibility.effectsVolume);
 mobs.onSound = (name, pos) => audio.mob(name, pos.clone());
