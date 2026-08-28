@@ -7,6 +7,7 @@ import { BLOCKS } from './blocks';
 import { craftResult, consumeCraft } from './crafting';
 import { COOK_TIME, FUEL, SMELT, FurnaceState } from './furnace';
 import { renderItemIcon } from './icons';
+import { iconSvg } from './emoji_icons';
 import type { Inventory } from './inventory';
 import {
   HOTBAR_SIZE, INV_SIZE, CRAFT_START, CHEST_START, CHEST_SIZE,
@@ -232,8 +233,8 @@ export class InventoryUI {
       const stack = getStack();
       if (stack && !this.inventory.cursor) {
         const runeName = stack.rune !== undefined ? ITEMS[stack.rune]?.name : undefined;
-        this.tooltip.textContent =
-          (ITEMS[stack.id]?.name ?? '') + (runeName ? ` ✨ ${runeName}` : '');
+        this.tooltip.innerHTML =
+          (ITEMS[stack.id]?.name ?? '') + (runeName ? ` ${iconSvg('sparkle')} ${runeName}` : '');
         this.tooltip.style.display = 'block';
         this.tooltip.style.left = `${e.clientX + 14}px`;
         this.tooltip.style.top = `${e.clientY - 6}px`;
@@ -535,7 +536,7 @@ export class InventoryUI {
     glyph.style.cssText =
       'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;' +
       'font-size:20px;pointer-events:none;text-shadow:none;';
-    glyph.textContent = '🗑';
+    glyph.innerHTML = iconSvg('trash');
     view.el.appendChild(glyph);
     view.el.addEventListener('mousedown', (e) => {
       e.preventDefault();
@@ -854,7 +855,7 @@ export class InventoryUI {
     // re-place the whole rig (keeping its level/storage/filter/stored).
     const moveBtn = mkBtn();
     moveBtn.style.background = '#7a5a3b';
-    moveBtn.textContent = '✋ Move (right-click a new spot)';
+    moveBtn.innerHTML = `${iconSvg('hand')} Move (right-click a new spot)`;
     moveBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.move(); });
     wrap.appendChild(moveBtn);
 

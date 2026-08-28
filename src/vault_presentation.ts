@@ -5,6 +5,7 @@ import {
 } from './vault_encounter';
 import { BOSS_SCORE_PROFILES, bossScoreLoopSeconds } from './boss_music';
 import { DEFAULT_MUSIC_VOLUME } from './audio';
+import { iconSvg } from './emoji_icons';
 
 /** "Ossuary Oath · 5:03" — the score a vault family fights to. Announcing it
  *  in the intro is what makes the encounter read as a set piece with a
@@ -12,7 +13,7 @@ import { DEFAULT_MUSIC_VOLUME } from './audio';
 function scoreCredit(family: EncounterSnapshot['family']): string {
   const seconds = Math.round(bossScoreLoopSeconds(family));
   const clock = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
-  return `♪ ${BOSS_SCORE_PROFILES[family].title.toUpperCase()} · ${clock}`;
+  return `${iconSvg('music')} ${BOSS_SCORE_PROFILES[family].title.toUpperCase()} · ${clock}`;
 }
 
 export interface AccessibilitySettings {
@@ -115,15 +116,15 @@ export function encounterCoach(
   }
   if (soonest) {
     const name = (soonest.attack || snapshot.cast?.name || 'INCOMING').toUpperCase();
-    return { text: `⚠ ${name} — ${hazardAdvice(soonest.shape)}!`, tone: 'danger' };
+    return { text: `${iconSvg('warning')} ${name} — ${hazardAdvice(soonest.shape)}!`, tone: 'danger' };
   }
 
   if (snapshot.enrage) {
-    return { text: '☠ ENRAGED — attacks and movement are accelerating. Finish the fight.', tone: 'danger' };
+    return { text: `${iconSvg('skull')} ENRAGED — attacks and movement are accelerating. Finish the fight.`, tone: 'danger' };
   }
   if (snapshot.wave.alive >= 6) {
     return {
-      text: `⚔ ${snapshot.wave.alive} summons on you — thin them out before you push the boss.`,
+      text: `${iconSvg('swords')} ${snapshot.wave.alive} summons on you — thin them out before you push the boss.`,
       tone: 'warn',
     };
   }
@@ -219,7 +220,7 @@ export class VaultBossHUD {
     this.root.style.display = visible ? 'block' : 'none';
     if (!snapshot || !visible) return;
     const def = BOSS_DEFINITIONS[snapshot.kind];
-    this.name.textContent = `${familyIcon(snapshot.family)} ${def.name} — ${def.title}`;
+    this.name.innerHTML = `${familyIcon(snapshot.family)} ${def.name} — ${def.title}`;
     this.name.style.color = def.color;
     this.hpFill.style.background =
       `linear-gradient(90deg,${def.color},color-mix(in srgb,${def.color} 62%,white))`;
@@ -263,10 +264,10 @@ export class VaultBossHUD {
       this.root.style.filter = 'none';
       this.root.style.transform = 'translateX(-50%)';
     }
-    this.cast.textContent = snapshot.status === 'reset_grace'
+    this.cast.innerHTML = snapshot.status === 'reset_grace'
       ? 'ARENA EMPTY — RESETTING…'
       : snapshot.status === 'intro' ? def.introLine.toUpperCase()
-        : snapshot.cast ? `⚠ ${snapshot.cast.name.toUpperCase()}` : '';
+        : snapshot.cast ? `${iconSvg('warning')} ${snapshot.cast.name.toUpperCase()}` : '';
 
     // Coaching. The strip is live every frame; the brief is raised for a few
     // seconds whenever the fight changes shape, which is exactly when a player
@@ -274,7 +275,7 @@ export class VaultBossHUD {
     const coach = encounterCoach(snapshot);
     this.coach.style.display = coach.text ? 'block' : 'none';
     if (coach.text) {
-      this.coach.textContent = coach.text;
+      this.coach.innerHTML = coach.text;
       this.coach.style.color = TONE_COLOR[coach.tone];
       this.coach.style.borderLeftColor = TONE_COLOR[coach.tone];
     }
@@ -437,13 +438,13 @@ export class VaultCinematic {
     this.subtitle.style.transform = `translateY(${(1 - reveal) * 12}px)`;
 
     if (this.modeValue === 'intro') {
-      this.sigil.textContent = familyIcon(snapshot.family);
+      this.sigil.innerHTML = familyIcon(snapshot.family);
       this.eyebrow.textContent = progress < 0.3
         ? `VAULT TIER ${['I', 'II', 'III'][snapshot.tier - 1]}`
         : def.title.toUpperCase();
       this.title.textContent = progress < 0.24 ? 'THE VAULT AWAKENS' : def.name.toUpperCase();
       // Three beats: the threat, then the score credit, then the call to arms.
-      this.subtitle.textContent = progress < 0.44
+      this.subtitle.innerHTML = progress < 0.44
         ? def.introLine
         : progress < 0.62
           ? scoreCredit(snapshot.family)
@@ -452,7 +453,7 @@ export class VaultCinematic {
             : `${def.phaseTitles[0].toUpperCase()}  •  PREPARE YOURSELF`;
     } else if (this.modeValue === 'phase') {
       const p = this.phaseValue;
-      this.sigil.textContent = p === 2 ? 'Ⅱ' : 'Ⅲ';
+      this.sigil.innerHTML = p === 2 ? 'Ⅱ' : 'Ⅲ';
       this.eyebrow.textContent = `${def.name.toUpperCase()} TRANSFORMS`;
       this.title.textContent = `PHASE ${['I', 'II', 'III'][p - 1]}`;
       // The transform is the moment the rules change, so the card says what the
@@ -461,7 +462,7 @@ export class VaultCinematic {
         ? def.phaseTitles[p - 1].toUpperCase()
         : def.phaseBriefs[p - 1];
     } else {
-      this.sigil.textContent = '✦';
+      this.sigil.innerHTML = iconSvg('star');
       this.eyebrow.textContent = `${def.name.toUpperCase()} HAS FALLEN`;
       this.title.textContent = progress < 0.4 ? 'THE FINAL BLOW' : 'VAULT CONQUERED';
       this.subtitle.textContent = `${def.victoryLine}  •  THE TREASURE AWAKENS`;
@@ -500,6 +501,6 @@ function smoothstep(a: number, b: number, x: number): number {
 }
 
 function familyIcon(family: EncounterSnapshot['family']): string {
-  return family === 'crypt' ? '☠' : family === 'mire' ? '♨'
-    : family === 'ember' ? '🔥' : family === 'crystal' ? '◆' : '⚙';
+  return family === 'crypt' ? iconSvg('skull') : family === 'mire' ? iconSvg('droplet')
+    : family === 'ember' ? iconSvg('flame') : family === 'crystal' ? '◆' : iconSvg('gear');
 }

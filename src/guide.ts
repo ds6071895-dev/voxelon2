@@ -4,6 +4,8 @@
 // helpers live here; detection (inventory scans, vault discovery) and the HUD
 // panel live in main.ts. State persists per-account in localStorage.
 
+import { iconSvg } from './emoji_icons';
+
 export interface GuideStep {
   id: string;
   icon: string;
@@ -12,16 +14,16 @@ export interface GuideStep {
 }
 
 export const GUIDE_STEPS: GuideStep[] = [
-  { id: 'wood', icon: '🌲', text: 'Punch a tree — collect a log' },
-  { id: 'planks', icon: '🪵', text: 'Craft planks from your log (E)' },
-  { id: 'table', icon: '🛠', text: 'Craft a Crafting Table' },
-  { id: 'pickaxe', icon: '⛏', text: 'Craft a pickaxe (planks + sticks)' },
-  { id: 'stone', icon: '🪨', text: 'Mine some stone' },
-  { id: 'gun', icon: '🔫', text: 'Get a gun (iron + redstone → pistol)' },
-  { id: 'bullets', icon: '🔸', text: 'Craft bullets (1 iron + 1 redstone = 24)' },
-  { id: 'armor', icon: '🛡', text: 'Craft armor (wood or stone to start)' },
-  { id: 'vault', icon: '☠', text: 'Find a vault (check the map — M)' },
-  { id: 'loot', icon: '💰', text: 'Slay the Vault Brute + loot its chest' },
+  { id: 'wood', icon: iconSvg('tree'), text: 'Punch a tree — collect a log' },
+  { id: 'planks', icon: iconSvg('log'), text: 'Craft planks from your log (E)' },
+  { id: 'table', icon: iconSvg('tools'), text: 'Craft a Crafting Table' },
+  { id: 'pickaxe', icon: iconSvg('pickaxe'), text: 'Craft a pickaxe (planks + sticks)' },
+  { id: 'stone', icon: iconSvg('gem'), text: 'Mine some stone' },
+  { id: 'gun', icon: iconSvg('gun'), text: 'Get a gun (iron + redstone → pistol)' },
+  { id: 'bullets', icon: iconSvg('bolt'), text: 'Craft bullets (1 iron + 1 redstone = 24)' },
+  { id: 'armor', icon: iconSvg('shield'), text: 'Craft armor (wood or stone to start)' },
+  { id: 'vault', icon: iconSvg('skull'), text: 'Find a vault (check the map — M)' },
+  { id: 'loot', icon: iconSvg('coinbag'), text: 'Slay the Vault Brute + loot its chest' },
 ];
 
 /** Done-flags keyed by step id. Steps are STICKY: once true, always true. */

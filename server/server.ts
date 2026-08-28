@@ -112,7 +112,7 @@ game.onEliminate = (username, by, permanent) => {
   const until = permanent ? PERMANENT_UNTIL : Date.now() + ELIMINATION_MS;
   accounts.eliminate(username, until, COMEBACK_HEARTS);
   saveAccounts();
-  console.log(`☠ ${username} was ELIMINATED by ${by} ` +
+  console.log(`[KILL] ${username} was ELIMINATED by ${by} ` +
     `(${permanent ? 'PERMANENTLY — their faction has no flag' : 'locked out 24h'})`);
   const pid = game.playerIdByName(username);
   if (pid !== undefined) {
@@ -128,7 +128,7 @@ game.onRevive = (target, faction, by) => {
   const a = accounts.get(target);
   if (!a || a.faction !== faction) return false; // faction-mates only
   const ok = accounts.clearElimination(target, Date.now(), by);
-  if (ok) { saveAccounts(); console.log(`✨ ${by} revived ${target}`); }
+  if (ok) { saveAccounts(); console.log(`[REVIVE] ${by} revived ${target}`); }
   return ok;
 };
 let worldDirty = false;
@@ -242,8 +242,8 @@ function handleAuth(id: number, msg: ClientMsg & { t: 'register' | 'login' | 'se
     send(id, {
       t: 'authErr',
       error: forever
-        ? '💀 Eliminated FOREVER — your faction had no flag when you fell.'
-        : `💀 Eliminated — back in ${formatRemaining(lockMs)}`,
+        ? 'Eliminated FOREVER — your faction had no flag when you fell.'
+        : `Eliminated — back in ${formatRemaining(lockMs)}`,
       lockMs, permanent: forever,
     });
     return;
@@ -271,7 +271,7 @@ function handleAuth(id: number, msg: ClientMsg & { t: 'register' | 'login' | 'se
   // server still re-checks it on every command it actually receives).
   send(id, { t: 'op', op: accounts.isOp(res.account.username) });
   if (revivedBy) {
-    send(id, { t: 'notice', text: `✨ ${revivedBy} revived you — welcome back at ${COMEBACK_HEARTS} ❤!` });
+    send(id, { t: 'notice', text: `${revivedBy} revived you — welcome back at ${COMEBACK_HEARTS} hearts!` });
   }
   console.log(`+ ${res.account.username} authed (${game.playerCount} online)`);
 }
@@ -605,8 +605,8 @@ function runCommand(line: string, out: (text: string) => void = console.log,
         if (opId !== undefined) {
           send(opId, { t: 'op', op: grant });
           send(opId, { t: 'notice', text: grant
-            ? '🛡 You are now a server operator — press T and type a command.'
-            : '🛡 Your operator status was revoked.' });
+            ? 'You are now a server operator — press T and type a command.'
+            : 'Your operator status was revoked.' });
         }
         log(`${name} is ${grant ? 'now' : 'no longer'} an operator`);
         break;

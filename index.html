@@ -209,6 +209,73 @@
       opacity: 0; pointer-events: none; z-index: 15;
     }
 
+    /* ── PVP FEEL ──────────────────────────────────────────────────────
+       Landing a shot has to be LOUD. The number that pops off whoever you hit
+       is world-anchored (pvp_feedback.ts projects it every frame) so it stays
+       on the target while you strafe; the slam is the elimination call and the
+       streak beats that ride on it. Both live in and out of Duels. */
+    .dmg-num {
+      position: absolute; left: 0; top: 0; z-index: 13; pointer-events: none;
+      will-change: transform, opacity; white-space: nowrap;
+      font-family: ui-sans-serif, -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif;
+      font-weight: 950; letter-spacing: -.5px;
+      text-shadow: 0 2px 6px rgba(0,0,0,.85), 0 0 14px rgba(0,0,0,.5);
+    }
+    /* Armor ate it: dull and small, so "landed but did nothing" is instantly
+       distinguishable from a clean bite without reading the digits. */
+    .dmg-num.soak  { color: #9db3c6; font-size: 15px; opacity: .9; }
+    .dmg-num.hit   { color: #ffffff; font-size: 20px; }
+    .dmg-num.heavy { color: #ffd25e; font-size: 26px; text-shadow: 0 0 18px rgba(255,180,40,.65), 0 2px 6px rgba(0,0,0,.85); }
+    .dmg-num.kill  { color: #ff5566; font-size: 31px; text-shadow: 0 0 24px rgba(255,60,80,.7), 0 2px 8px rgba(0,0,0,.9); }
+
+    .pvp-slam {
+      position: absolute; left: 50%; top: 21%; z-index: 13; display: none;
+      transform: translateX(-50%); pointer-events: none; text-align: center; width: max-content;
+      font-family: ui-sans-serif, -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif;
+    }
+    .pvp-slam.visible { display: block; }
+    .pvp-slam b {
+      display: block; color: var(--slam, #ff6d80);
+      font: 950 clamp(21px,4.4vw,42px)/1 inherit; letter-spacing: 2px;
+      text-shadow: 0 0 38px color-mix(in srgb, var(--slam,#ff6d80) 70%, transparent), 0 6px 22px rgba(0,0,0,.8);
+      animation: pvp-slam-in .5s cubic-bezier(.16,.95,.3,1) both;
+    }
+    .pvp-slam small {
+      display: block; margin-top: 5px; color: #d6e5f5; font: 800 10px/1 inherit;
+      letter-spacing: 3px; text-transform: uppercase; text-shadow: 0 2px 10px rgba(0,0,0,.85);
+      animation: pvp-slam-sub .45s .1s cubic-bezier(.2,.9,.25,1) both;
+    }
+    @keyframes pvp-slam-in { from { opacity: 0; transform: scale(1.55) skewX(-8deg); filter: blur(5px); } 60% { opacity: 1; transform: scale(.96); filter: blur(0); } to { transform: scale(1); } }
+    @keyframes pvp-slam-sub { from { opacity: 0; letter-spacing: 9px; } }
+    @media (prefers-reduced-motion: reduce) {
+      .pvp-slam b, .pvp-slam small { animation: none; }
+    }
+
+    /* Kill confirm. It sits just under the crosshair — where the eye already
+       is at the moment of the kill — so you learn WHO you dropped without
+       looking away to the feed. */
+    .pvp-killchip {
+      position: absolute; left: 50%; top: calc(50% + 34px); z-index: 13;
+      display: none; transform: translateX(-50%); pointer-events: none;
+      padding: 5px 12px; border-radius: 8px; white-space: nowrap;
+      border: 1px solid rgba(255,110,130,.4); color: #ffd9de;
+      background: rgba(28,6,12,.72); backdrop-filter: blur(6px);
+      font: 900 10.5px/1 ui-sans-serif, -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif;
+      letter-spacing: 1.6px; text-transform: uppercase;
+      text-shadow: 0 1px 6px rgba(0,0,0,.9);
+    }
+    .pvp-killchip.visible { display: block; animation: pvp-chip .34s cubic-bezier(.2,.9,.25,1.5) both; }
+    @keyframes pvp-chip { from { opacity: 0; transform: translateX(-50%) translateY(-8px) scale(.85); } }
+    @media (prefers-reduced-motion: reduce) { .pvp-killchip.visible { animation: none; } }
+
+    /* Taking fire: a red rim that bites in from the EDGES rather than washing
+       the whole screen, so a firefight stays readable while it hurts. */
+    #hurt-vignette {
+      position: absolute; inset: 0; opacity: 0; pointer-events: none; z-index: 14;
+      background: radial-gradient(ellipse at center,
+        rgba(255,0,0,0) 34%, rgba(220,10,25,0.34) 74%, rgba(150,0,12,0.72) 100%);
+    }
+
     /* Healing: a soft green vignette that breathes while a bandage/medkit
        buff is running (never a full-screen flash — see photosensitivity-safe). */
     #heal-glow {
@@ -911,7 +978,7 @@
       --ar-panel: rgba(255,255,255,.9); --ar-panel-2: rgba(247,251,253,.94);
       --rank: #43c2f5; --rank-accent: #c4efff; --rank-shade: #0b2836;
       position: fixed; inset: 0; z-index: 70; display: none; align-items: center;
-      justify-content: center; overflow-y: auto; overscroll-behavior: contain;
+      justify-content: center; overflow: hidden; overscroll-behavior: none;
       padding: calc(18px + var(--safe-top)) calc(18px + var(--safe-right))
                calc(18px + var(--safe-bottom)) calc(18px + var(--safe-left));
       color: var(--ar-ink);
@@ -941,7 +1008,7 @@
 
     .minigames-shell {
       position: relative; z-index: 1; width: min(1160px, 100%);
-      max-height: min(880px, 100%); display: flex; flex-direction: column;
+      height: min(880px, 100%); min-height: 0; display: flex; flex-direction: column;
       overflow: hidden; border-radius: 22px; border: 1px solid var(--ar-line);
       background: linear-gradient(168deg, rgba(255,255,255,.98), rgba(239,247,250,.98));
       box-shadow: 0 36px 100px rgba(31,75,94,.22), inset 0 1px rgba(255,255,255,.9);
@@ -1066,7 +1133,7 @@
     @keyframes ar-blink { 50% { opacity: .25; } }
 
     .arena-body {
-      flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain;
+      flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain;
       padding: clamp(16px,2.4vw,24px) clamp(18px,3vw,32px) clamp(20px,3vw,30px);
       border-top: 1px solid var(--ar-line);
     }
@@ -1131,13 +1198,6 @@
     .minigame-title-row h3 { font-size: 19px; font-weight: 900; letter-spacing: -.3px; }
     .minigame-count { color: var(--card); font: 800 9px/1 inherit; letter-spacing: 1.3px; text-transform: uppercase; white-space: nowrap; }
     .minigame-copy p { color: var(--ar-dim); font-size: 11.5px; line-height: 1.5; }
-    .minigame-rules { display: flex; flex-wrap: wrap; gap: 5px; }
-    .minigame-rules span {
-      padding: 5px 8px; border: 1px solid color-mix(in srgb, var(--card) 30%, transparent);
-      border-radius: 6px; color: color-mix(in srgb, var(--card) 78%, #fff);
-      background: color-mix(in srgb, var(--card) 11%, transparent);
-      font: 800 8px/1 inherit; letter-spacing: 1px; text-transform: uppercase;
-    }
     .minigame-action {
       width: 100%; min-height: 44px; margin-top: auto; cursor: pointer; border-radius: 11px;
       border: 1px solid color-mix(in srgb, var(--card) 48%, transparent); color: #08131f;
@@ -1153,35 +1213,155 @@
       cursor: not-allowed; color: var(--ar-mute); border-color: var(--ar-line);
       background: rgba(31,73,93,.055); filter: none;
     }
+    .duel-card-actions { display: grid; gap: 7px; margin-top: auto; }
+    .duel-card-actions .minigame-action { margin-top: 0; }
+    .duel-private-action {
+      min-height: 32px; cursor: pointer; border: 0; border-radius: 9px;
+      color: var(--ar-dim); background: transparent;
+      font: 850 9px/1 inherit; letter-spacing: 1.1px; text-transform: uppercase;
+      transition: color .16s ease, background .16s ease;
+    }
+    .duel-private-action:hover:not([aria-disabled="true"]), .duel-private-action:focus-visible {
+      color: var(--ar-ink); background: rgba(31,73,93,.07); outline: none;
+    }
+    .duel-private-action[aria-disabled="true"] { cursor: not-allowed; opacity: .4; }
+    .duel-queue-status {
+      min-height: 14px; color: var(--ar-dim); font-size: 9.5px; font-weight: 750;
+      line-height: 1.4; text-align: center;
+    }
 
-    /* ── Leaderboard ──────────────────────────────────────────────────── */
+    /* ── Leaderboard: the hall of fame ────────────────────────────────
+       Every row renders that account's REAL character as a live 3D bust. The
+       whole board shares one WebGL canvas stretched across the panel (see
+       avatar_bust.ts) which draws each bust into its row's box, so the rows
+       below only have to supply the medallion behind it and the metal around
+       it. Podium colours ride on --medal/--glow; everything else inherits the
+       viewer's own rank colour through --rank. */
     .duel-leaderboard {
-      margin-top: 16px; overflow: hidden; border: 1px solid var(--ar-line);
-      border-radius: 17px; background: var(--ar-panel);
+      position: relative; margin-top: 16px; overflow: hidden;
+      border: 1px solid var(--ar-line); border-radius: 17px; background: var(--ar-panel);
     }
     .duel-leaderboard-head {
-      display: flex; align-items: baseline; justify-content: space-between;
-      padding: 14px 17px; border-bottom: 1px solid var(--ar-line);
+      position: relative; z-index: 2; display: flex; align-items: baseline;
+      justify-content: space-between; padding: 14px 17px; border-bottom: 1px solid var(--ar-line);
     }
     .duel-leaderboard-head h3 { font-size: 14px; font-weight: 900; letter-spacing: -.2px; }
     .duel-leaderboard-head span { color: var(--ar-mute); font: 800 8.5px/1 inherit; letter-spacing: 1.6px; text-transform: uppercase; }
-    .duel-leaderboard-row {
-      display: grid; grid-template-columns: 28px 32px minmax(90px,1fr) 124px 66px 72px;
-      gap: 9px; align-items: center; padding: 9px 17px; color: var(--ar-dim); font-size: 11.5px;
-      border-top: 1px solid rgba(40,79,101,.08);
+    #duel-leaderboard { position: relative; z-index: 2; }
+
+    .duel-lb-row {
+      --medal: rgba(120,146,163,.5); --medal-2: rgba(226,236,243,.9); --glow: transparent;
+      position: relative; display: grid;
+      grid-template-columns: 34px 58px minmax(84px,1fr) 32px 118px;
+      gap: 11px; align-items: center; padding: 8px 16px; color: var(--ar-dim);
+      font-size: 11.5px; border-top: 1px solid rgba(40,79,101,.08);
+      transition: transform .2s cubic-bezier(.2,.85,.3,1.25), background .2s ease, box-shadow .2s ease;
     }
-    .duel-leaderboard-row:first-child { border-top: 0; }
-    .duel-leaderboard-row.me { color: var(--ar-ink); background: color-mix(in srgb, var(--rank) 16%, transparent); box-shadow: inset 3px 0 var(--rank); }
-    .duel-leaderboard-rank { color: var(--ar-mute); font-weight: 900; font-size: 12px; }
-    .duel-leaderboard-row.top1 .duel-leaderboard-rank { color: #ffd45e; text-shadow: 0 0 12px #ffd45e; }
-    .duel-leaderboard-row.top2 .duel-leaderboard-rank { color: #d6e2f0; }
-    .duel-leaderboard-row.top3 .duel-leaderboard-rank { color: #e09a5c; }
-    .duel-leaderboard-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ar-ink); }
-    .duel-leaderboard-tier { color: var(--rank); font-weight: 850; font-size: 10.5px; }
-    .duel-leaderboard-tier small { display: block; color: var(--ar-mute); font-size: 8.5px; font-weight: 750; }
-    .duel-leaderboard-row b { color: var(--ar-ink); font-size: 12px; }
-    .duel-leaderboard-record { color: var(--ar-mute); font-size: 10px; }
+    .duel-lb-row:first-child { border-top: 0; }
+    .duel-lb-row:hover {
+      transform: translateY(-3px); background: color-mix(in srgb, var(--rank) 8%, transparent);
+      box-shadow: 0 10px 26px rgba(31,75,94,.14);
+    }
+    .duel-lb-row.me {
+      color: var(--ar-ink); background: color-mix(in srgb, var(--rank) 15%, transparent);
+      box-shadow: inset 3px 0 var(--rank);
+    }
+    .duel-lb-row.me:hover { box-shadow: inset 3px 0 var(--rank), 0 10px 26px rgba(31,75,94,.14); }
+
+    /* The podium. Gold, silver and bronze are real metal gradients rather than
+       flat swatches — on a white panel a flat ochre just reads as "brown". */
+    .duel-lb-row.top1 { --medal: #eab308; --medal-2: #fff2bd; --glow: rgba(234,179,8,.42); }
+    .duel-lb-row.top2 { --medal: #9fb3c8; --medal-2: #f2f7fb; --glow: rgba(159,179,200,.4); }
+    .duel-lb-row.top3 { --medal: #c07c43; --medal-2: #f8ddc1; --glow: rgba(192,124,67,.4); }
+    .duel-lb-row.podium { padding: 11px 16px; }
+    .duel-lb-row.podium::before {
+      content: ''; position: absolute; inset: 0; z-index: 0; pointer-events: none;
+      background: linear-gradient(100deg,
+        color-mix(in srgb, var(--medal) 15%, transparent), transparent 46%);
+    }
+
+    .duel-lb-place {
+      position: relative; z-index: 1; display: grid; place-items: center;
+      width: 32px; height: 32px; border-radius: 11px; color: var(--ar-mute);
+      font: 900 13px/1 inherit; border: 1px solid var(--ar-line);
+      background: rgba(31,73,93,.055);
+    }
+    .duel-lb-row.podium .duel-lb-place {
+      color: #2b1f04; border-color: color-mix(in srgb, var(--medal) 65%, #fff);
+      background: linear-gradient(155deg, var(--medal-2), var(--medal) 55%,
+        color-mix(in srgb, var(--medal) 58%, #3a2a06));
+      box-shadow: 0 4px 14px var(--glow), inset 0 1px rgba(255,255,255,.85);
+    }
+    .duel-lb-place small {
+      position: absolute; bottom: -7px; padding: 1px 4px; border-radius: 5px;
+      color: #2b1f04; background: var(--medal-2); font: 900 6.5px/1 inherit;
+      letter-spacing: .6px; text-transform: uppercase;
+      box-shadow: 0 2px 6px var(--glow);
+    }
+
+    /* The medallion the bust is rendered into. The canvas sits ABOVE this
+       plate (z-index 3) and is transparent everywhere the avatar isn't. */
+    .duel-lb-bust { position: relative; z-index: 1; width: 54px; height: 54px; justify-self: center; }
+    .duel-lb-row.podium .duel-lb-bust { width: 60px; height: 60px; }
+    .duel-lb-bust::before {
+      content: ''; position: absolute; inset: 0; border-radius: 50%;
+      border: 1.5px solid color-mix(in srgb, var(--medal) 62%, transparent);
+      background:
+        radial-gradient(circle at 50% 118%, color-mix(in srgb, var(--rank) 34%, #fff), transparent 62%),
+        radial-gradient(circle at 50% 30%, #fff, color-mix(in srgb, var(--rank) 12%, #eef6fa) 70%);
+      box-shadow: inset 0 1px rgba(255,255,255,.95), 0 4px 13px var(--glow);
+      transition: box-shadow .2s ease, border-color .2s ease;
+    }
+    .duel-lb-row:hover .duel-lb-bust::before {
+      box-shadow: inset 0 1px rgba(255,255,255,.95),
+        0 8px 22px color-mix(in srgb, var(--medal) 55%, transparent);
+    }
+    /* #1 gets a slowly turning ring of light. Nothing else on the board moves
+       on its own, so it reads as the champion's spot from across the panel. */
+    .duel-lb-row.top1 .duel-lb-bust::after {
+      content: ''; position: absolute; inset: -4px; border-radius: 50%;
+      background: conic-gradient(from 0deg, transparent, rgba(234,179,8,.75), transparent 42%);
+      -webkit-mask: radial-gradient(circle, transparent 62%, #000 64%);
+      mask: radial-gradient(circle, transparent 62%, #000 64%);
+      animation: lb-halo 5.5s linear infinite;
+    }
+    @keyframes lb-halo { to { transform: rotate(360deg); } }
+    /* The rectangle the renderer actually scissors into. */
+    .duel-lb-slot { position: absolute; inset: 1px; }
+
+    .duel-lb-row .duel-emblem { position: relative; z-index: 1; }
+    .duel-lb-id { position: relative; z-index: 1; min-width: 0; }
+    .duel-lb-id strong {
+      display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      color: var(--ar-ink); font-size: 13px; font-weight: 900; letter-spacing: -.2px;
+    }
+    .duel-lb-row.podium .duel-lb-id strong {
+      font-size: 14.5px;
+      text-shadow: 0 0 18px color-mix(in srgb, var(--medal) 42%, transparent);
+    }
+    .duel-lb-id span {
+      display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; color: var(--rank); font: 800 9.5px/1.35 inherit; letter-spacing: .3px;
+    }
+    .duel-lb-id span em { color: var(--ar-mute); font-style: normal; }
+
+    .duel-lb-score { position: relative; z-index: 1; text-align: right; }
+    .duel-lb-score b { display: block; color: var(--ar-ink); font-size: 13px; font-weight: 900; }
+    .duel-lb-row.podium .duel-lb-score b {
+      font-size: 15px; color: color-mix(in srgb, var(--medal) 66%, #23404f);
+    }
+    .duel-lb-score small { display: block; margin-top: 2px; color: var(--ar-mute); font-size: 9.5px; font-weight: 750; }
+    .duel-lb-winrate { margin-top: 5px; height: 3px; border-radius: 2px; background: rgba(31,73,93,.13); overflow: hidden; }
+    .duel-lb-winrate i {
+      display: block; height: 100%; border-radius: 2px;
+      background: linear-gradient(90deg, color-mix(in srgb, var(--rank) 45%, #fff), var(--rank));
+    }
     .duel-leaderboard-empty { padding: 26px 17px; color: var(--ar-mute); font-size: 11.5px; text-align: center; }
+    @media (prefers-reduced-motion: reduce) {
+      .duel-lb-row, .duel-lb-bust::before { transition: none; }
+      .duel-lb-row:hover { transform: none; }
+      .duel-lb-row.top1 .duel-lb-bust::after { animation: none; }
+    }
 
     /* ── The ladder ───────────────────────────────────────────────────── */
     .duel-ranks-view[hidden], .minigames-browser[hidden], .minigames-lobby[hidden] { display: none; }
@@ -1365,8 +1545,10 @@
       .minigames-grid { grid-template-columns: 1fr; }
       .minigame-card[data-game="duels"] { grid-column: auto; }
       .duel-ranks-key { grid-template-columns: repeat(2, minmax(0,1fr)); }
-      .duel-leaderboard-row { grid-template-columns: 24px 32px minmax(70px,1fr) 64px; padding: 9px 13px; }
-      .duel-leaderboard-tier, .duel-leaderboard-record { display: none; }
+      /* Narrow: the bust and the name stay, the emblem and the win-rate go. */
+      .duel-lb-row { grid-template-columns: 28px 50px minmax(70px,1fr) 78px; gap: 9px; padding: 8px 13px; }
+      .duel-lb-row .duel-emblem { display: none; }
+      .duel-lb-winrate { display: none; }
     }
     @media (max-width: 700px) {
       .minigames-head { flex-wrap: wrap; }
@@ -1430,7 +1612,11 @@
     .duel-pill span { max-width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .duel-pill.me { color: #fff; border-color: rgba(160,230,255,.55); background: rgba(20,52,74,.75); }
     .duel-pill.leader { border-color: rgba(255,212,94,.65); box-shadow: 0 0 18px rgba(255,212,94,.22); }
-    .duel-pill.leader::after { content: '\1F451'; font-size: 10px; }
+    .duel-pill.leader::after {
+      content: ''; display: inline-block; width: 11px; height: 11px; background: #ffd45e;
+      -webkit-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 18h16l1-9-5 3-4-6-4 6-5-3 1 9Z"/></svg>') center / contain no-repeat;
+      mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 18h16l1-9-5 3-4-6-4 6-5-3 1 9Z"/></svg>') center / contain no-repeat;
+    }
     .duel-pill.down { opacity: .42; filter: grayscale(.55); }
     .duel-pill.bump { animation: ar-bump .34s cubic-bezier(.2,1.5,.4,1); }
     @keyframes ar-bump { 40% { transform: translateY(-6px) scale(1.09); } }
@@ -1528,12 +1714,20 @@
     .duel-status-alive { color: #55e8a6; } .duel-status-out { color: #ffc76a; }
     .duel-score-spree { color: #ff9a5c; font-weight: 900; }
     .duel-scores-touch {
-      position: absolute; right: calc(12px + var(--safe-right)); bottom: calc(150px + var(--safe-bottom));
-      z-index: 12; display: none; padding: 11px 15px; border-radius: 11px;
+      position: absolute; right: calc(12px + var(--safe-right)); top: calc(96px + var(--safe-top));
+      z-index: 12; display: none; padding: 8px 13px; border-radius: 11px;
       border: 1px solid rgba(150,200,255,.24); color: #e6f3ff; background: rgba(6,12,22,.75);
       font: 850 9px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: 1.4px; text-transform: uppercase;
     }
-    @media (pointer: coarse) { .duel-scores-touch.visible { display: block; } }
+    @media (pointer: coarse) {
+      .duel-scores-touch.visible { display: block; }
+      /* Coarse pointer = the on-screen movement/fire buttons are always on
+         screen too. The kill feed says the same thing the centre-screen kill
+         banner and this compact score readout already say, and its top-right
+         corner is exactly where the touch utility buttons live — dropping it
+         on touch keeps Duels from stacking three overlapping HUDs on a phone. */
+      .duel-killfeed { display: none; }
+    }
 
     /* ── Result screen ───────────────────────────────────────────────── */
     .duel-result {
@@ -1626,10 +1820,19 @@
 
     @media (max-width: 560px) {
       .duel-clock strong { font-size: 18px; }
+      .duel-clock { padding: 6px 14px; gap: 6px; }
       .duel-pill span { max-width: 58px; }
       .duel-score-row { grid-template-columns: 28px minmax(80px,1fr) 34px 34px 46px; padding: 10px 13px; }
       .duel-score-status { display: none; }
       .duel-killfeed { top: calc(120px + var(--safe-top)); }
+      /* Small phone + Duels: the match HUD and the always-on touch controls
+         are both fighting for the same sliver of screen, so the pills drop
+         their per-player rank glow and streak label — the score number is
+         the only thing that matters mid-round; full detail still shows on
+         the hold-scoreboard. */
+      .duel-match-hud { gap: 4px; }
+      .duel-pill { padding: 4px 9px 4px 5px; gap: 5px; }
+      .duel-pill-spree { display: none; }
     }
 
     /* Accessibility: both comfort modes strip motion; the photosensitivity
@@ -1880,6 +2083,7 @@
       <div id="ammo" class="mc-font"></div>
     </div>
     <div id="heal-glow"></div>
+    <div id="hurt-vignette"></div>
     <div id="damage-flash"></div>
     <div id="use-bar">
       <div class="use-label mc-font"></div>
@@ -1973,7 +2177,7 @@
         <section class="minigames-shell">
           <header class="minigames-head">
             <div>
-              <div class="minigames-kicker">Competitive · invite only</div>
+              <div class="minigames-kicker">Competitive · matchmaking & private parties</div>
               <h2 id="minigames-heading">The Arena</h2>
               <p id="minigames-description">Ranked, server-authoritative fights. Everyone drops with the same kit — the only edge is you.</p>
             </div>
@@ -2007,8 +2211,11 @@
                   <div class="minigame-copy">
                     <div class="minigame-title-row"><h3>Duels</h3><span class="minigame-count">2–4 players · ranked</span></div>
                     <p>Five minutes in the Prism Colosseum. Burst Rifle, four identical spawn corners, first to fifteen kills takes it early. Build your own cover, hold the altar, climb the ladder.</p>
-                    <div class="minigame-rules" aria-label="Duels rules"><span>Burst Rifle</span><span>15 kills</span><span>Build cover</span><span>Sudden death</span><span>Rank Points</span></div>
-                    <button id="duels-card-action" class="minigame-action" type="button">Create private lobby</button>
+                    <div class="duel-card-actions">
+                      <button id="duels-card-action" class="minigame-action" type="button">Play</button>
+                      <button id="duels-private-action" class="duel-private-action" type="button">Invite Friends</button>
+                      <div id="duel-queue-status" class="duel-queue-status" role="status" aria-live="polite"></div>
+                    </div>
                   </div>
                 </article>
                 <article class="minigame-card" data-game="bedwars">

@@ -544,6 +544,33 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
 // Authoritative integration: scope isolation, normalized loadout/state,
 // validated same-faction damage, clock fan-out, forfeit and restoration.
 {
+  const s = new GameServer(740, () => 0.5);
+  s.addPlayer(101, { username: 'QueueOne', faction: 0 });
+  s.addPlayer(102, { username: 'QueueTwo', faction: 1 });
+  const waiting = s.handle(101, { t: 'duelQueue', join: true });
+  check('PLAY enters the matchmaking queue without creating a visible lobby',
+    waiting.some((out) => out.to === 101 && out.msg.t === 'duelQueue' && out.msg.queued) &&
+    !waiting.some((out) => out.msg.t === 'duelLobby'));
+  const matched = s.handle(102, { t: 'duelQueue', join: true });
+  const matchLobby = matched.find((out) => out.to === 101 && out.msg.t === 'duelLobby')?.msg;
+  check('the next queued player creates an automatically-started 1v1',
+    !!matchLobby && matchLobby.t === 'duelLobby' && matchLobby.snapshot.phase === 'countdown' &&
+    matchLobby.snapshot.participants.length === 2 &&
+    matched.filter((out) => out.msg.t === 'duelArena').length === 2);
+  check('matchmaking clears queued state for both players and exposes no private invite',
+    matched.filter((out) => out.msg.t === 'duelQueue' && !out.msg.queued).length === 2 &&
+    matched.filter((out) => out.msg.t === 'duelLobby').every((out) =>
+      out.msg.t === 'duelLobby' && !out.msg.inviteToken));
+
+  const spare = new GameServer(739, () => 0.5);
+  spare.addPlayer(103, { username: 'QueueCancel', faction: 0 });
+  spare.handle(103, { t: 'duelQueue', join: true });
+  const cancelled = spare.handle(103, { t: 'duelQueue', join: false });
+  check('a waiting player can cancel matchmaking cleanly', cancelled.some((out) =>
+    out.to === 103 && out.msg.t === 'duelQueue' && !out.msg.queued));
+}
+
+{
   const s = new GameServer(741, () => 0.5);
   let settlementCalls = 0;
   s.onDuelSettlement = (changes) => {

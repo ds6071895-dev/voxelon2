@@ -69,7 +69,7 @@ export class Projectiles {
   /** A round of ours hit a LOCAL target (mob/encounter actor). PvP hitmarkers
    *  come from the server instead, but a shot is a shot — the crosshair should
    *  answer "did that land?" the same way whatever you were shooting at. */
-  localHitSink?: (damage: number) => void;
+  localHitSink?: (damage: number, at: THREE.Vector3) => void;
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -153,13 +153,13 @@ export class Projectiles {
     if (this.encounterSink?.(
       p.pos, p.gun.damage, p.gun.rocket === true ? 'rocket' : 'bullet',
     )) {
-      if (p.gun.rocket !== true) this.localHitSink?.(p.gun.damage);
+      if (p.gun.rocket !== true) this.localHitSink?.(p.gun.damage, p.pos);
       this.despawn(p, true);
       return;
     }
     // Local mob.
     if (this.mobs.shootPoint(p.pos, p.gun.damage, p.dir)) {
-      if (p.gun.rocket !== true) this.localHitSink?.(p.gun.damage);
+      if (p.gun.rocket !== true) this.localHitSink?.(p.gun.damage, p.pos);
       this.despawn(p, true);
       return;
     }

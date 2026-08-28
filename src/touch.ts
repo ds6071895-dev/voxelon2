@@ -16,6 +16,7 @@
 // The whole overlay only exists on touch devices (isTouchDevice()).
 
 import { Input } from './input';
+import { iconSvg } from './emoji_icons';
 
 export function isTouchDevice(): boolean {
   return typeof window !== 'undefined' &&
@@ -190,11 +191,11 @@ export class TouchControls {
 
     // --- action buttons ---
     // JUMP: hold-to-hold (swimming, glider deploy, boat hop-out all read it).
-    const jumpBtn = this.mkBtn(this.pads, '⬆', 'right:24px;bottom:104px;width:88px;height:88px;font-size:30px;');
+    const jumpBtn = this.mkBtn(this.pads, iconSvg('chevronUp'), 'right:24px;bottom:104px;width:88px;height:88px;font-size:30px;');
     jumpBtn.classList.add('t-jump');
     this.hold(jumpBtn, (down) => { this.input.tJump = down; });
     // SNEAK: a toggle (holding a toggle AND moving is awkward on glass).
-    this.sneakBtn = this.mkBtn(this.pads, '⇩', 'right:134px;bottom:40px;width:56px;height:56px;');
+    this.sneakBtn = this.mkBtn(this.pads, iconSvg('chevronDown'), 'right:134px;bottom:40px;width:56px;height:56px;');
     this.sneakBtn.classList.add('t-sneak');
     this.tap(this.sneakBtn, () => {
       this.input.tSneak = !this.input.tSneak;
@@ -238,7 +239,7 @@ export class TouchControls {
       b.classList.add('t-sq');
       this.tap(b, fn);
     };
-    util('🎒', cb.onInventory);
+    util(iconSvg('backpack'), cb.onInventory);
     util('/', cb.onChat);       // command box (/map, /warfare, /tpa, /guide…)
     util('⏸', cb.onPause);
 
@@ -366,7 +367,7 @@ export class TouchControls {
     const b = document.createElement('div');
     b.className = 't-btn';
     b.style.cssText = css;
-    b.textContent = label;
+    b.innerHTML = label;
     parent.appendChild(b);
     return b;
   }

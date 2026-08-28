@@ -63,10 +63,10 @@ import {
   CORE_BORDER, CORE_HALF, inCore, MAX_ATTUNED, TOTEM_COOLDOWN, COMBAT_TAG,
   TPA_EXPIRE, TPA_HOLD,
   bloodlustMult, BLOODLUST_START, BLOODLUST_STEP, BLOODLUST_PER_STEP, BLOODLUST_CAP,
-  mitigate, TOUGHNESS_CAP, ARMOR_POINT_CAP,
+  mitigate, TOUGHNESS_CAP, ARMOR_POINT_CAP, skinSeed,
 } from '../src/net/protocol';
 import {
-  COSMETIC_KEYS, COSMETIC_RANGES, Cosmetics, defaultCosmetics, randomCosmetics,
+  COSMETIC_KEYS, COSMETIC_RANGES, Cosmetics, HATS, defaultCosmetics, randomCosmetics,
   sanitizeCosmetics,
 } from '../src/character';
 import { LEVER_RADIUS, flippedTrap, isLeverBlock, leverFlips } from '../src/traps';
@@ -2882,6 +2882,25 @@ check('furnace smelts ore/sand/log but not removed foods',
     reloaded.get('Alice')!.faction === accs.get('Alice')!.faction);
   check('session tokens survive the JSON round-trip',
     reloaded.sessionLogin('Alice', 'tok-alice-rotated9').ok);
+
+  // The Duels ladder ships each account's avatar so the leaderboard can render
+  // the player's real character. It is read out of the CLIENT-owned state blob,
+  // so it must be sanitized on the way out: a hand-edited save cannot push junk
+  // palette indices (or a non-object) at every other client.
+  accs.setData('Alice', { cosmetics: { skin: 2, hair: 3, shirt: 4, hat: 999, cape: -1 } });
+  accs.setData('Bob', { cosmetics: 'not-an-object' });
+  const board = accs.duelLeaderboard(10);
+  const alice = board.find((e) => e.username === 'Alice')!;
+  const bob = board.find((e) => e.username === 'Bob')!;
+  check('the leaderboard carries each account\'s saved avatar',
+    !!alice.cosmetics && alice.cosmetics.skin === 2 && alice.cosmetics.shirt === 4);
+  check('out-of-range and junk cosmetics are clamped to a valid look, never leaked',
+    !!alice.cosmetics && alice.cosmetics.hat >= 0 && alice.cosmetics.hat < HATS.length &&
+    alice.cosmetics.cape >= 0 && !!bob.cosmetics &&
+    Object.values(bob.cosmetics).every((v) => Number.isInteger(v) && v >= 0));
+  check('a never-customised account still gets a stable seed-derived avatar',
+    JSON.stringify(bob.cosmetics) ===
+      JSON.stringify(defaultCosmetics(skinSeed(bob.username))));
 }
 
 // --- World + per-account persistence ----------------------------------------

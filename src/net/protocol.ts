@@ -114,6 +114,11 @@ export interface PlayerInfo extends PlayerSnapshot {
 
 export interface DuelLeaderboardEntry extends DuelPublicProfile {
   username: string;
+  /** The account's saved avatar, so the ladder can render the player's actual
+   *  character rather than a generic silhouette. Absent = never customised;
+   *  the client falls back to `defaultCosmetics(skinSeed(username))`, which is
+   *  exactly the avatar that account is already wearing in the world. */
+  cosmetics?: Cosmetics;
 }
 
 /** A dropped item entity owned by the server. */
@@ -175,8 +180,9 @@ export type ClientMsg =
   // Resume a saved session (token issued by the server on each successful
   // auth) — lets a returning browser skip the password.
   | { t: 'session'; username: string; token: string }
-  // Private, invite-only Duels. An omitted token creates a lobby; a token joins.
+  // Duels matchmaking plus private, invite-only parties.
   | { t: 'duelCreate' }
+  | { t: 'duelQueue'; join: boolean }
   | { t: 'duelJoin'; token: string }
   | { t: 'duelLeave' }
   | { t: 'duelReady'; ready: boolean }
@@ -342,6 +348,7 @@ export type ServerMsg =
   // stores it in localStorage so the next visit can skip the login form.
   | { t: 'session'; token: string }
   | { t: 'duelInviteInfo'; valid: boolean; host?: string; lobbyId?: string }
+  | { t: 'duelQueue'; queued: boolean }
   | { t: 'duelLobby'; snapshot: DuelLobbySnapshot; inviteToken?: string }
   | { t: 'duelError'; code: 'invalid' | 'full' | 'match_in_progress' |
       'already_in_lobby' | 'not_host' | 'too_few_players' | 'too_many_players' |

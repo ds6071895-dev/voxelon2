@@ -14,6 +14,8 @@ import {
   DuelFlair, DuelProgressState, DuelPublicProfile, canEquipDuelFlair,
   duelProfileOf, loadDuelProgress, newDuelProgress, sanitizeDuelProgress,
 } from '../duels_progression';
+import { sanitizeCosmetics } from '../character';
+import { skinSeed, type DuelLeaderboardEntry } from './protocol';
 
 export interface Account {
   username: string;
@@ -204,8 +206,16 @@ export class Accounts {
     return duelProfileOf(state);
   }
 
-  duelLeaderboard(limit = 10): ({ username: string } & DuelPublicProfile)[] {
-    return this.list().map((a) => ({ username: a.username, ...this.duelProfile(a.username) }))
+  /** The public ladder. Each row carries the account's saved avatar so the
+   *  client can render the player's real character next to their name — read
+   *  out of the client-owned `data` blob and sanitised, because a hand-edited
+   *  save must never be able to push junk indices at every other client. */
+  duelLeaderboard(limit = 10): DuelLeaderboardEntry[] {
+    return this.list().map((a) => ({
+      username: a.username,
+      ...this.duelProfile(a.username),
+      cosmetics: sanitizeCosmetics(a.data?.cosmetics, skinSeed(a.username)),
+    }))
       .sort((a, b) => b.rp - a.rp || b.wins - a.wins || a.username.localeCompare(b.username))
       .slice(0, Math.max(1, Math.floor(limit)));
   }

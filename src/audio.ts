@@ -307,6 +307,16 @@ export class GameAudio {
     this.noise({ freq: 260, dur: 0.1, gain: 0.06, slideTo: 120, type: 'lowpass', q: 0.6 });
   }
 
+  /** LOW HEALTH: a chest-thump pair, felt more than heard. `urgency` (0..1)
+   *  tightens and hardens it as the bar empties, so how close you are to dying
+   *  is audible while your eyes stay on the fight rather than the hearts. */
+  heartbeat(urgency = 0): void {
+    const u = Math.max(0, Math.min(1, urgency));
+    const gain = 0.05 + u * 0.06;
+    this.tone({ type: 'sine', from: 74 + u * 12, to: 40, dur: 0.16, gain });
+    this.tone({ type: 'sine', from: 64 + u * 10, to: 36, dur: 0.19, gain: gain * 0.78, delay: 0.17 });
+  }
+
   /** Hit confirmation for the SHOOTER: a crisp, tiny tick that cuts through
    *  sustained fire. Deliberately dry and short (under 60ms) so an SMG burst
    *  reads as a run of distinct hits instead of a smear. A kill drops a second,

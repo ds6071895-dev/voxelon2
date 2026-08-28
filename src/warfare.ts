@@ -16,6 +16,8 @@
 // the authoritative server, the online client and offline single-player all run
 // these exact numbers, so a silo behaves identically everywhere.
 
+import { iconSvg } from './emoji_icons';
+
 // --- The progression blob ----------------------------------------------------
 
 export const WARFARE_VERSION = 1;
@@ -147,68 +149,68 @@ function node(
 export const WARFARE_TREE: WarfareNode[] = [
   // --- Main trunk (2,750 XP) ---
   node('missile_command', 'trunk', 'Missile Command',
-    'The first warhead your faction is allowed to own.', 100, '', '🚀', 'silo', 1, 0, [
+    'The first warhead your faction is allowed to own.', 100, '', iconSvg('rocket'), 'silo', 1, 0, [
       'Blueprint: Tactical Silo (2×2 launch pad)',
       'Blueprint: Tactical Missile',
       'Map targeting mode with range circle and reticle',
     ]),
   node('guidance_vanes', 'trunk', 'Guidance Vanes',
-    'Steerable fins turn a lob into a strike.', 150, 'missile_command', '🪽', 'silo', 2, 1, [
+    'Steerable fins turn a lob into a strike.', 150, 'missile_command', iconSvg('wing'), 'silo', 2, 1, [
       'Target range 900 → 1,200',
       'Improved cruise speed and flatter trajectory',
     ]),
   node('hardened_silo', 'trunk', 'Hardened Silo',
-    'Armour plate and a second tube.', 250, 'guidance_vanes', '🛡', 'silo', 3, 2, [
+    'Armour plate and a second tube.', 250, 'guidance_vanes', iconSvg('shield'), 'silo', 3, 2, [
       'Silo HP 500 → 600',
       'Magazine 1 → 2 missiles',
     ]),
   node('aegis_systems', 'trunk', 'Aegis Systems',
-    'Everything you just built, someone can now shoot down.', 250, 'hardened_silo', '📡', 'battery', 1, 3, [
+    'Everything you just built, someone can now shoot down.', 250, 'hardened_silo', iconSvg('dish'), 'battery', 1, 3, [
       'Blueprint: Interceptor Turret',
       'Blueprint: Interceptor Missile',
       'Inbound-missile warnings and tracks',
     ]),
   node('radar_sweep', 'trunk', 'Radar Sweep',
-    'A wider bowl sees them coming sooner.', 300, 'aegis_systems', '🛰', 'battery', 2, 4, [
+    'A wider bowl sees them coming sooner.', 300, 'aegis_systems', iconSvg('satellite'), 'battery', 2, 4, [
       'Defense radius 110 → 140',
     ]),
   node('fast_intercept', 'trunk', 'Fast Intercept',
-    'Lock, launch, reload — all of it faster.', 350, 'radar_sweep', '⚡', 'battery', 3, 5, [
+    'Lock, launch, reload — all of it faster.', 350, 'radar_sweep', iconSvg('bolt'), 'battery', 3, 5, [
       'Acquisition 0.70s → 0.45s',
       'Reload 12s → 10s',
     ]),
   node('flight_certification', 'trunk', 'Flight Certification',
-    'Two seats, one rotor, no more walking to the fight.', 400, 'fast_intercept', '🚁', 'helicopter', 1, 6, [
+    'Two seats, one rotor, no more walking to the fight.', 400, 'fast_intercept', iconSvg('heli'), 'helicopter', 1, 6, [
       'Blueprint: Helipad',
       'Blueprint: Helicopter Mk I (pilot + passenger)',
       'Basic gravity bombs',
     ]),
   node('bomb_rack', 'trunk', 'Bomb Rack',
-    'More to drop, less time between drops.', 450, 'flight_certification', '💣', 'helicopter', 2, 7, [
+    'More to drop, less time between drops.', 450, 'flight_certification', iconSvg('bomb'), 'helicopter', 2, 7, [
       'Bomb capacity 2 → 3',
       'Bomb cooldown 6s → 5s',
     ]),
   node('reinforced_airframe', 'trunk', 'Reinforced Airframe',
-    'Survive the turret you flew over.', 500, 'bomb_rack', '🔩', 'helicopter', 3, 8, [
+    'Survive the turret you flew over.', 500, 'bomb_rack', iconSvg('nut'), 'helicopter', 3, 8, [
       'Helicopter HP 140 → 170',
       'Fuel capacity 12 → 16 oil',
     ]),
 
   // --- Strike branch (1,700 XP) ---
   node('strike_guidance', 'strike', 'Guidance II',
-    'Reach across the map.', 450, 'reinforced_airframe', '🎯', 'silo', 4, 9, [
+    'Reach across the map.', 450, 'reinforced_airframe', iconSvg('target'), 'silo', 4, 9, [
       'Missile range 1,200 → 1,700',
       'Faster cruise — shorter warning for the target',
     ]),
   node('strike_warhead', 'strike', 'Warhead II',
-    'A bigger hole in whatever they built.', 550, 'strike_guidance', '☢', 'silo', 5, 10, [
+    'A bigger hole in whatever they built.', 550, 'strike_guidance', iconSvg('radioactive'), 'silo', 5, 10, [
       'Blast radius 7 → 8',
       'Centre player damage 14 → 16',
       'Centre hardware damage 180 → 240',
       'Player-built blocks removed 8 → 12',
     ]),
   node('strike_precision', 'strike', 'Precision Strike III',
-    'Anywhere, sooner, harder.', 700, 'strike_warhead', '💥', 'silo', 6, 11, [
+    'Anywhere, sooner, harder.', 700, 'strike_warhead', iconSvg('explosion'), 'silo', 6, 11, [
       'Missile range 1,700 → 2,300',
       'Blast radius 9 · player damage 18 · hardware damage 300',
       'Player-built blocks removed 16',
@@ -216,18 +218,18 @@ export const WARFARE_TREE: WarfareNode[] = [
     ], true),
   // --- Aegis branch (1,700 XP) ---
   node('aegis_network', 'aegis', 'Network Radar',
-    'Batteries stop working alone.', 450, 'reinforced_airframe', '🌐', 'battery', 4, 9, [
+    'Batteries stop working alone.', 450, 'reinforced_airframe', iconSvg('globe'), 'battery', 4, 9, [
       'Defense radius 140 → 170',
       'Nearby friendly batteries share tracks',
       'Battery HP 200 → 240 · acquisition 0.35s',
     ]),
   node('aegis_twin_rack', 'aegis', 'Twin Rack',
-    'Two tubes beat one saturation wave.', 550, 'aegis_network', '🎇', 'battery', 5, 10, [
+    'Two tubes beat one saturation wave.', 550, 'aegis_network', iconSvg('burst'), 'battery', 5, 10, [
       'Interceptor capacity 4 → 7',
       'Intercept reload 10s → 8s',
     ]),
   node('aegis_sky_shield', 'aegis', 'Sky Shield',
-    'Nothing crosses this airspace uninvited.', 700, 'aegis_twin_rack', '🕸', 'battery', 6, 11, [
+    'Nothing crosses this airspace uninvited.', 700, 'aegis_twin_rack', iconSvg('web'), 'battery', 6, 11, [
       'Defense radius 200 · capacity 8',
       'Acquisition 0.25s · reload 6s',
       'Battery HP 300',
@@ -235,36 +237,36 @@ export const WARFARE_TREE: WarfareNode[] = [
 
   // --- Aviation branch (2,050 XP) ---
   node('air_turbine', 'air', 'Turbine II',
-    'Climb out of small-arms range.', 500, 'reinforced_airframe', '🌀', 'helicopter', 4, 9, [
+    'Climb out of small-arms range.', 500, 'reinforced_airframe', iconSvg('vortex'), 'helicopter', 4, 9, [
       'Cruise speed 16 → 20 blocks/s',
       'Higher climb rate',
       'Altitude allowance 64 → 96 blocks',
       'HP 170 → 190 · fuel 16 → 18',
     ]),
   node('air_heavy_bay', 'air', 'Heavy Bomb Bay',
-    'Four in the rack, and they bite.', 650, 'air_turbine', '🧨', 'helicopter', 5, 10, [
+    'Four in the rack, and they bite.', 650, 'air_turbine', iconSvg('dynamite'), 'helicopter', 5, 10, [
       'Bomb capacity 3 → 4',
       'Bomb radius 4 → 5',
       'Bomb hardware damage 80 → 100 · player damage 12',
     ]),
   node('air_command', 'air', 'Air Command III',
-    'The gunship the whole server plans around.', 900, 'air_heavy_bay', '👑', 'helicopter', 6, 11, [
+    'The gunship the whole server plans around.', 900, 'air_heavy_bay', iconSvg('crown'), 'helicopter', 6, 11, [
       'HP 220 · cruise speed 24 blocks/s',
       'Five bombs · radius 6 · cooldown 4s',
       'Altitude allowance 128 blocks · fuel 24 oil',
     ], true),
   node('air_aux_tanks', 'air', 'Auxiliary Tanks',
-    'A second fuel circuit doubles sortie endurance.', 450, 'air_command', '⛽', 'helicopter', 6, 12, [
+    'A second fuel circuit doubles sortie endurance.', 450, 'air_command', iconSvg('fuel'), 'helicopter', 6, 12, [
       'Blueprint: Auxiliary Tank Module',
       'Installed helicopter fuel capacity ×2',
     ]),
   node('air_long_range_tanks', 'air', 'Long-Range Tanks',
-    'Triple-range tanks turn a raid into an expedition.', 650, 'air_aux_tanks', '🛢', 'helicopter', 6, 13, [
+    'Triple-range tanks turn a raid into an expedition.', 650, 'air_aux_tanks', iconSvg('drum'), 'helicopter', 6, 13, [
       'Blueprint: Long-Range Tank Module',
       'Installed helicopter fuel capacity ×3',
     ]),
   node('air_fast_rope', 'air', 'Fast-Rope Operations',
-    'Hold the hover, throw the line, own the vertical.', 500, 'air_long_range_tanks', '🪢', 'helicopter', 6, 14, [
+    'Hold the hover, throw the line, own the vertical.', 500, 'air_long_range_tanks', iconSvg('link'), 'helicopter', 6, 14, [
       'Blueprint: Fast-Rope Winch',
       'R lowers or retracts a rope while piloting',
       'The helicopter holds position while people climb',
@@ -284,13 +286,13 @@ export function warfareBranchNodes(branch: WarfareBranch): WarfareNode[] {
 export const WARFARE_TREE_COST = WARFARE_TREE.reduce((s, n) => s + n.cost, 0);
 
 export const WARFARE_BRANCH_META: Record<WarfareBranch, { name: string; icon: string; blurb: string }> = {
-  trunk: { name: 'Command Trunk', icon: '⌘',
+  trunk: { name: 'Command Trunk', icon: iconSvg('command'),
     blurb: 'Missiles, then the defense that answers them, then the air wing.' },
-  strike: { name: 'Strike', icon: '🎯',
+  strike: { name: 'Strike', icon: iconSvg('target'),
     blurb: 'Longer reach, heavier warheads, shorter silo cooldowns.' },
-  aegis: { name: 'Aegis', icon: '🛰',
+  aegis: { name: 'Aegis', icon: iconSvg('satellite'),
     blurb: 'Wider radar, deeper magazines, an airspace nothing crosses.' },
-  air: { name: 'Aviation', icon: '🚁',
+  air: { name: 'Aviation', icon: iconSvg('heli'),
     blurb: 'Faster gunships that fly higher and drop more.' },
 };
 

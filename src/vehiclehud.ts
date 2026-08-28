@@ -11,6 +11,7 @@
 // changes it.
 
 import type { HelicopterSnapshot, SeatKind } from './vehicles';
+import { iconSvg } from './emoji_icons';
 
 /** Below this fraction of a full tank the gauge goes amber and pulses. */
 const FUEL_WARN = 0.28;
@@ -136,8 +137,8 @@ export class VehicleHUD {
 
   /** Repaint the corner card for whichever seat is occupied. */
   private buildControls(seat: SeatKind | 'rope'): void {
-    this.controlsTitle.textContent = seat === 'pilot' ? '🚁 PILOT CONTROLS'
-      : seat === 'passenger' ? '🎯 GUNNER CONTROLS' : 'FAST ROPE';
+    this.controlsTitle.innerHTML = seat === 'pilot' ? `${iconSvg('heli')} PILOT CONTROLS`
+      : seat === 'passenger' ? `${iconSvg('target')} GUNNER CONTROLS` : 'FAST ROPE';
     this.controlsBody.textContent = '';
     const controls = seat === 'pilot' ? PILOT_CONTROLS
       : seat === 'passenger' ? GUNNER_CONTROLS : ROPE_CONTROLS;
@@ -212,7 +213,7 @@ export class VehicleHUD {
     this.controls.style.display = 'flex';
     this.clock += dt;
 
-    this.title.textContent = `🚁 ${markLabel} AIRFRAME`;
+    this.title.innerHTML = `${iconSvg('heli')} ${markLabel} AIRFRAME`;
     this.role.textContent = this.seat === 'pilot' ? 'PILOT'
       : this.seat === 'passenger' ? 'GUNNER' : 'ROPE RIDER';
 
@@ -264,10 +265,10 @@ export class VehicleHUD {
     // --- Caption: one line, the most urgent thing true right now ---
     // Nothing but the urgent thing: the bindings live on the corner card now,
     // so this line is free to stay silent until something is actually wrong.
-    this.caption.textContent = critical
-      ? '⛽ BINGO FUEL — LAND NOW'
-      : warn ? '⛽ Low oil — head for the ground'
-      : hullFrac <= 0.3 ? '⚠ Hull critical'
+    this.caption.innerHTML = critical
+      ? `${iconSvg('fuel')} BINGO FUEL — LAND NOW`
+      : warn ? `${iconSvg('fuel')} Low oil — head for the ground`
+      : hullFrac <= 0.3 ? `${iconSvg('warning')} Hull critical`
       : '';
     this.caption.style.color = critical || hullFrac <= 0.3 ? '#ff5c4d'
       : warn ? '#ffd24a' : '#54637d';

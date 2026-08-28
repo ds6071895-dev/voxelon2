@@ -846,6 +846,13 @@ interface Avatar {
    *  avatar isn't holding a gun), and its 1→0 burn-down. */
   flash: THREE.Mesh | null;
   flashT: number;
+  /** 0..1 HIT FLASH: the whole avatar tints red for a moment when one of our
+   *  rounds lands on them. Every avatar material is a per-body instance, so
+   *  writing `material.color` here tints exactly one player. */
+  hurtT: number;
+  /** How hard the flash hit (0..1) — a killing blow burns brighter and longer
+   *  than a graze, so a finishing shot is unmistakable at a glance. */
+  hurtPeak: number;
 }
 
 // ─── main class ───────────────────────────────────────────────────────────
@@ -884,6 +891,20 @@ export class RemotePlayers {
   muzzleFlash(id: number): void {
     const av = this.avatars.get(id);
     if (av?.flash) av.flashT = 1;
+  }
+
+  /**
+   * One of our rounds landed on this player: tint them red for a beat.
+   *
+   * A hitmarker answers "did that land?" on OUR screen; this answers it on
+   * THEIRS, in the world, where the eye already is. `strength` runs 0..1 —
+   * a soaked hit barely blushes, a kill goes full crimson.
+   */
+  hurtFlash(id: number, strength = 1): void {
+    const av = this.avatars.get(id);
+    if (!av) return;
+    av.hurtPeak = Math.max(av.hurtPeak * av.hurtT, Math.max(0.25, Math.min(1, strength)));
+    av.hurtT = 1;
   }
 
   private build(remote: Remote): Avatar {
@@ -949,7 +970,7 @@ export class RemotePlayers {
       walkPhase: 0, lastX: remote.tx, lastZ: remote.tz,
       heldId: 0, heldMesh: null, armorKey: '', armorMeshes: [],
       lastSwing: remote.swing | 0, swingT: 1, sneakT: 0, aimT: 0, reloadT: 0,
-      flash: null, flashT: 0,
+      flash: null, flashT: 0, hurtT: 0, hurtPeak: 0,
     };
   }
 
@@ -1039,6 +1060,19 @@ export class RemotePlayers {
       av.group.visible = !r.dead && r.info.mode !== 'spectator';
 
       this.syncEquip(av, r); // held item + worn armor follow the synced state
+      if (av.hurtT > 0) {
+        // A heavier hit holds the tint longer, so sustained fire on one target
+        // keeps them visibly lit instead of flickering back to normal.
+        av.hurtT = Math.max(0, av.hurtT - dt / (0.12 + av.hurtPeak * 0.16));
+        const tint = av.hurtT * av.hurtPeak;
+        for (const mat of av.body.materials) {
+          // The materials are pure white multipliers at rest (the avatar's real
+          // colours live in vertex colours), so pulling green/blue down is a
+          // clean red tint that survives every cosmetic palette.
+          mat.color.setRGB(1, 1 - tint * 0.78, 1 - tint * 0.8);
+        }
+        if (av.hurtT <= 0) av.hurtPeak = 0;
+      }
       if (av.flash) {
         // ~70ms burn-down: long enough to catch out of the corner of an eye,
         // short enough that automatic fire strobes rather than glows.

@@ -97,6 +97,10 @@ import {
   type DuelRank, duelProfileOf, duelRankAt, duelRankProgress,
   duelRevealState, newDuelProgress, unlockedDuelFlairs,
 } from './duels_progression';
+import { AvatarBustBoard, BUST_POSES, type BustEntry } from './avatar_bust';
+import {
+  DamageNumbers, KillBanner, StreakTracker, hitFlavor, type HitFlavor,
+} from './pvp_feedback';
 
 import { GadgetCooldowns, GadgetDef, gadgetOf } from './gadgets';
 import {
@@ -865,7 +869,34 @@ for (const [x, y, rot] of [
 }
 app.appendChild(hitmarkerEl);
 let hitmarkerT = 0;               // seconds of marker left to play
+let hitmarkerKill = false;        // the marker currently playing is a kill
 const HITMARKER_TIME = 0.4;
+
+// ── The payoff layer ────────────────────────────────────────────────────────
+// A number off the target, a slam for the elimination, and a chip under the
+// crosshair naming who you just dropped. Everything below is driven ONLY by
+// server messages (`hitconfirm` / `hurt` / `killfeed`); none of it can invent
+// a hit the server rejected. See pvp_feedback.ts.
+const damageNumbers = new DamageNumbers(app);
+const pvpSlamEl = document.createElement('div');
+pvpSlamEl.className = 'pvp-slam';
+pvpSlamEl.setAttribute('role', 'status');
+pvpSlamEl.setAttribute('aria-live', 'polite');
+app.appendChild(pvpSlamEl);
+const killBanner = new KillBanner(pvpSlamEl);
+const killChipEl = document.createElement('div');
+killChipEl.className = 'pvp-killchip';
+app.appendChild(killChipEl);
+let killChipT = 0;
+const KILL_CHIP_TIME = 2.2;
+/** Local kills-without-dying. Duels takes its announcer from the server; this
+ *  is what gives the OPEN WORLD the same streak vocabulary. */
+const pvpStreak = new StreakTracker();
+/** 0..1 red-rim intensity from the last hit taken (decays every frame). */
+let hurtPulse = 0;
+/** Seconds until the next low-health heartbeat. */
+let heartbeatTimer = 0;
+const hurtVignetteEl = document.getElementById('hurt-vignette') as HTMLDivElement;
 
 // Directional damage arcs: a red wedge around the crosshair pointing back at
 // whoever shot you, held in world space so it keeps pointing at them as you
@@ -990,9 +1021,84 @@ function showKill(killer: string, victim: string): void {
  *  crosshair is indistinguishable from a miss. */
 function showHitmarker(amount: number, killed: boolean): void {
   hitmarkerT = HITMARKER_TIME;
+  hitmarkerKill = killed;
   const color = killed ? '#ff5555' : amount > 0 ? '#ffffff' : '#9fb4c7';
-  for (const tick of hitmarkerTicks) tick.style.background = color;
+  for (const tick of hitmarkerTicks) {
+    tick.style.background = color;
+    // A kill throws the ticks wide: the shape itself says "that was the last
+    // one", so you know to move on to the next target without reading a number.
+    tick.style.width = killed ? '16px' : '11px';
+    tick.style.boxShadow = killed
+      ? '0 0 6px rgba(255,60,80,.9), 0 0 2px rgba(0,0,0,.9)'
+      : '0 0 2px rgba(0,0,0,0.9)';
+  }
   audio.hitmarker(killed, amount <= 0);
+}
+
+/**
+ * One of our rounds landed on a PLAYER. `hitconfirm` only carries the target id
+ * and the post-armor number, so the world position comes from the avatar we are
+ * already rendering — what you shot is what you saw.
+ */
+function showPvpHit(targetId: number, amount: number, killed: boolean): void {
+  showHitmarker(amount, killed);
+  const flavor: HitFlavor = hitFlavor(
+    amount, killed, duelArenaActive ? DUEL_MAX_HEALTH : 20);
+  const remote = net.remotes.get(targetId);
+  if (remote) {
+    const x = remote.tx, y = remote.ty + 1.15, z = remote.tz;
+    damageNumbers.spawn(x, y, z, amount, flavor);
+    // Impact spray at the body: red for damage that got through, a dull gray
+    // spall for a round the target's kit ate.
+    if (flavor === 'soak') {
+      particles.burst(x, y, z, 4, 0xc6d6e4, 2.2, 0.3, { gravity: 3, spread: 0.35, scale: 0.4 });
+    } else {
+      particles.burst(x, y, z, killed ? 16 : 6, killed ? 0xff4356 : 0xf4626f,
+        killed ? 5 : 2.8, killed ? 0.6 : 0.36,
+        { gravity: 3.2, spread: 0.42, scale: killed ? 0.62 : 0.46 });
+    }
+    // Tint the victim's model. This is the feedback that reads from the hip,
+    // without ever looking at the crosshair.
+    remotePlayers.hurtFlash(targetId,
+      killed ? 1 : flavor === 'soak' ? 0.28 : flavor === 'heavy' ? 0.8 : 0.55);
+  }
+  // A tiny kick on every landed round — enough for the hand to feel the
+  // connection, far below the shake a boss stomp uses.
+  if (flavor !== 'soak') {
+    triggerEncounterShake(killed ? 0.14 : 0.06,
+      killed ? 0.019 : 0.0035 + Math.min(0.007, amount * 0.0005));
+  }
+  if (killed) onPvpKill(targetId);
+}
+
+/** Colour for a streak beat. Shared with the Duels announcer so an open-world
+ *  RAMPAGE and a ranked one are the same colour as well as the same word. */
+function pvpBeatColor(kind: DuelEventKind): string {
+  return DUEL_EVENT_COLORS[kind];
+}
+
+/** We dropped someone: name them under the crosshair, then play whatever
+ *  streak beats the kill earned. In Duels the SERVER owns the big announcer
+ *  calls (they must match for every client), so only the chip plays there. */
+function onPvpKill(targetId: number): void {
+  const victim = net.remotes.get(targetId)?.info.username ?? 'Enemy';
+  killChipEl.textContent = `✖ ELIMINATED ${victim}`;
+  killChipEl.classList.remove('visible');
+  void killChipEl.offsetWidth; // restart the pop
+  killChipEl.style.opacity = '1'; // clear any fade left from the previous kill
+  killChipEl.classList.add('visible');
+  killChipT = KILL_CHIP_TIME;
+  if (duelArenaActive) return;
+  const beats = pvpStreak.kill(targetId, performance.now());
+  killBanner.push('ELIMINATED', victim, '#ff5f76', 1.15);
+  for (const kind of beats) {
+    const copy = duelEventCopy({
+      seq: 0, kind, actor: net.myId, actorName: 'You',
+      victim: targetId, victimName: victim, count: pvpStreak.streak, at: 0,
+    });
+    killBanner.push(copy.title, copy.sub, pvpBeatColor(kind), 1.45);
+    audio.duelAnnounce(kind);
+  }
 }
 
 /** We took a hit from `(x, z)`: raise a wedge pointing that way. Recorded in
@@ -1032,9 +1138,45 @@ function updateCombatFeedback(dt: number): void {
     const k = hitmarkerT / HITMARKER_TIME;
     hitmarkerEl.style.opacity = String(Math.min(1, k * 2.2));
     // Punches out slightly then settles, so rapid hits still read individually.
-    hitmarkerEl.style.transform = `scale(${1.35 - 0.35 * Math.min(1, k * 1.6)})`;
+    // A kill also spins the ticks a few degrees as it blows out.
+    const scale = (hitmarkerKill ? 1.75 : 1.35) - 0.35 * Math.min(1, k * 1.6);
+    const spin = hitmarkerKill ? k * 26 : 0;
+    hitmarkerEl.style.transform = `rotate(${spin.toFixed(1)}deg) scale(${scale.toFixed(3)})`;
   } else if (hitmarkerEl.style.opacity !== '0') {
     hitmarkerEl.style.opacity = '0';
+  }
+
+  // "✖ ELIMINATED <name>" holds, then fades.
+  if (killChipT > 0) {
+    killChipT = Math.max(0, killChipT - dt);
+    if (killChipT <= 0) killChipEl.classList.remove('visible');
+    else killChipEl.style.opacity = String(Math.min(1, killChipT / 0.45));
+  }
+  killBanner.update(dt);
+
+  // The red rim from the last hit taken, plus a permanent low-health bed under
+  // it. Both are capped hard when photosensitivity-safe mode is on.
+  hurtPulse = Math.max(0, hurtPulse - dt * 2.4);
+  const healthFrac = player.maxHealth > 0 ? player.health / player.maxHealth : 1;
+  const critical = !player.dead && healthFrac < 0.32
+    ? (1 - healthFrac / 0.32) * (accessibility.reducedMotion
+      ? 0.3 : 0.24 + Math.sin(worldTimeLocal * 5.4) * 0.07)
+    : 0;
+  const cap = accessibility.photosensitivitySafe ? 0.24 : 0.62;
+  hurtVignetteEl.style.opacity = String(Math.min(cap, hurtPulse * 0.62 + critical));
+
+  // The heartbeat under it. It quickens as the bar empties, which is the whole
+  // point: in a duel you can hear how close your opponent is to finishing you
+  // without ever taking your eyes off them.
+  if (critical > 0 && screen !== 'title' && !player.dead) {
+    const urgency = Math.min(1, (1 - healthFrac / 0.32));
+    heartbeatTimer -= dt;
+    if (heartbeatTimer <= 0) {
+      audio.heartbeat(urgency);
+      heartbeatTimer = 1.15 - urgency * 0.45;
+    }
+  } else {
+    heartbeatTimer = 0;
   }
 
   if (!dmgArcs.length) return;
@@ -1958,6 +2100,8 @@ const minigamesClose = document.getElementById('minigames-close') as HTMLButtonE
 const minigamesBrowser = document.getElementById('minigames-browser')!;
 const minigamesLobby = document.getElementById('minigames-lobby')!;
 const duelsCardAction = document.getElementById('duels-card-action') as HTMLButtonElement;
+const duelsPrivateAction = document.getElementById('duels-private-action') as HTMLButtonElement;
+const duelQueueStatus = document.getElementById('duel-queue-status')!;
 const duelLobbyTitle = document.getElementById('duel-lobby-title')!;
 const duelInvite = document.getElementById('duel-invite') as HTMLInputElement;
 const duelCopy = document.getElementById('duel-copy') as HTMLButtonElement;
@@ -1983,6 +2127,7 @@ const arenaTabGames = document.getElementById('tab-games') as HTMLButtonElement;
 const arenaTabLobby = document.getElementById('tab-lobby') as HTMLButtonElement;
 const arenaTabLadder = document.getElementById('duel-ranks-button') as HTMLButtonElement;
 let minigamesRestoreFocus: HTMLElement | null = null;
+let duelQueued = false;
 
 /** Every tier owns a 3x3 silhouette. The number of lit blocks is exactly the
  * tier's `facets`, so the emblem visibly densifies as you climb. */
@@ -2125,35 +2270,118 @@ function renderDuelLadder(): void {
   }));
 }
 
+// ── The hall of fame ───────────────────────────────────────────────────────
+// The ladder renders every listed account's REAL character as a live 3D bust:
+// one shared WebGL canvas stretched over the panel draws each avatar into its
+// own row (avatar_bust.ts), and pointing at a row makes that player salute.
+// The board is built lazily — a player who never opens the Arena never pays
+// for a second GL context — and degrades to a plain (still good-looking)
+// medallion if the context can't be had.
+let bustBoard: AvatarBustBoard | null = null;
+let bustBoardFailed = false;
+const DUEL_MEDALS = ['1st', '2nd', '3rd'];
+
+function ensureBustBoard(): AvatarBustBoard | null {
+  if (bustBoard || bustBoardFailed) return bustBoard;
+  try {
+    bustBoard = new AvatarBustBoard();
+    bustBoard.mount(duelLeaderboardEl.parentElement ?? duelLeaderboardEl);
+  } catch {
+    bustBoardFailed = true; // no context to spare — the CSS medallions carry it
+    bustBoard = null;
+  }
+  return bustBoard;
+}
+
+/** The ladder animates on its own clock: it is a title-screen panel, so it
+ *  runs only while the Arena is actually open and showing the board. */
+let bustLast = 0;
+// One draw per bust per frame is a real cost on a long board, and nothing here
+// benefits from 60Hz, so the ladder runs at ~30 and leaves the rest of the
+// frame to the panorama behind it.
+const BUST_FRAME = 1 / 30;
+function bustFrame(now: number): void {
+  requestAnimationFrame(bustFrame);
+  if (!bustBoard || !minigamesModal.classList.contains('open')) { bustLast = now; return; }
+  const dt = Math.min(0.1, bustLast ? (now - bustLast) / 1000 : 0);
+  if (dt < BUST_FRAME) return;
+  bustLast = now;
+  bustBoard.render(dt);
+}
+requestAnimationFrame(bustFrame);
+
 function renderDuelLeaderboard(): void {
   duelLeaderboardEl.replaceChildren();
   if (!duelLeaderboardData.length) {
     const empty = document.createElement('div'); empty.className = 'duel-leaderboard-empty';
     empty.textContent = 'Nobody has posted a rated result yet. Be the first name on the board.';
     duelLeaderboardEl.appendChild(empty);
+    bustBoard?.setRoster([]);
     return;
   }
+  const busts: BustEntry[] = [];
   duelLeaderboardData.forEach((entry, index) => {
     const row = document.createElement('div');
-    row.className = 'duel-leaderboard-row';
-    if (index < 3) row.classList.add(`top${index + 1}`);
+    row.className = 'duel-lb-row';
+    if (index < 3) row.classList.add('podium', `top${index + 1}`);
     if (entry.username.toLowerCase() === authedName.toLowerCase()) row.classList.add('me');
     applyRankTheme(row, entry.rank);
+
     const place = document.createElement('span');
-    place.className = 'duel-leaderboard-rank'; place.textContent = String(index + 1);
-    const emblem = makeDuelEmblem(entry.rank, 'sm');
+    place.className = 'duel-lb-place';
+    place.append(String(index + 1));
+    if (index < 3) {
+      const medal = document.createElement('small');
+      medal.textContent = DUEL_MEDALS[index];
+      place.appendChild(medal);
+    }
+
+    // The bust: a CSS medallion, plus the box the renderer scissors into.
+    const bust = document.createElement('div'); bust.className = 'duel-lb-bust';
+    const slot = document.createElement('div'); slot.className = 'duel-lb-slot';
+    bust.appendChild(slot);
+    busts.push({
+      key: entry.username.toLowerCase(),
+      cosmetics: entry.cosmetics ?? defaultCosmetics(skinSeed(entry.username)),
+      slot,
+      // Each podium place gets its own salute, so the top of the board never
+      // plays the same animation three times running.
+      pose: BUST_POSES[index % BUST_POSES.length],
+    });
+
+    const id = document.createElement('div'); id.className = 'duel-lb-id';
     const name = document.createElement('strong'); name.textContent = entry.username;
-    const tier = document.createElement('span'); tier.className = 'duel-leaderboard-tier';
-    tier.textContent = duelRankLabel(entry);
-    const flair = document.createElement('small'); flair.textContent = entry.equippedFlair;
-    tier.appendChild(flair);
+    const sub = document.createElement('span');
+    sub.textContent = duelRankLabel(entry);
+    const flair = document.createElement('em');
+    flair.textContent = ` · ${entry.equippedFlair}`;
+    sub.appendChild(flair);
+    id.append(name, sub);
+
+    const emblem = makeDuelEmblem(entry.rank, 'sm');
+
+    const score = document.createElement('div'); score.className = 'duel-lb-score';
     const rp = document.createElement('b'); rp.textContent = `${entry.rp} RP`;
-    const record = document.createElement('span');
-    record.className = 'duel-leaderboard-record';
-    record.textContent = `${entry.wins}W · ${entry.losses}L`;
-    row.append(place, emblem, name, tier, rp, record);
+    const played = entry.wins + entry.losses;
+    const winRate = played > 0 ? Math.round(entry.wins / played * 100) : 0;
+    const record = document.createElement('small');
+    record.textContent = played > 0
+      ? `${entry.wins}W · ${entry.losses}L · ${winRate}%`
+      : `${entry.wins}W · ${entry.losses}L`;
+    const track = document.createElement('div'); track.className = 'duel-lb-winrate';
+    const fill = document.createElement('i'); fill.style.width = `${winRate}%`;
+    track.appendChild(fill);
+    score.append(rp, record, track);
+
+    row.append(place, bust, id, emblem, score);
+    // Pointing at a row is the whole invitation: the avatar dollies out and
+    // throws its pose for as long as you stay on it.
+    const key = entry.username.toLowerCase();
+    row.addEventListener('pointerenter', () => bustBoard?.setHover(key));
+    row.addEventListener('pointerleave', () => bustBoard?.setHover(null));
     duelLeaderboardEl.appendChild(row);
   });
+  ensureBustBoard()?.setRoster(busts);
 }
 
 function renderDuelProgress(): void {
@@ -2193,7 +2421,12 @@ function modalFocusable(): HTMLElement[] {
 function refreshDuelsAvailability(): void {
   const online = net.connected;
   duelsCardAction.setAttribute('aria-disabled', String(!online));
-  duelsCardAction.textContent = online ? 'Create private lobby' : 'Multiplayer server required';
+  duelsCardAction.setAttribute('aria-pressed', String(duelQueued));
+  duelsPrivateAction.setAttribute('aria-disabled', String(!online || duelQueued));
+  duelsCardAction.textContent = online ? (duelQueued ? 'Cancel Queue' : 'Play') : 'Multiplayer server required';
+  if (!online) duelQueueStatus.textContent = 'Connect to multiplayer to play Duels.';
+  else if (duelQueued) duelQueueStatus.textContent = 'Finding you an opponent…';
+  else duelQueueStatus.textContent = '';
 }
 
 // ── View switching ─────────────────────────────────────────────────────────
@@ -2360,10 +2593,28 @@ for (const disabled of minigamesModal.querySelectorAll<HTMLButtonElement>('[aria
 }
 duelsCardAction.addEventListener('click', () => {
   if (!net.connected) {
-    duelFeedback.textContent = 'Duels requires a live multiplayer server.';
+    duelQueueStatus.textContent = 'Duels requires a live multiplayer server.';
     return;
   }
-  duelFeedback.textContent = 'Opening a private arena…';
+  if (!duelQueued) {
+    // Matchmaking can launch as soon as another player arrives, so checkpoint
+    // the open-world body before entering the queue rather than waiting for a
+    // private-lobby Ready click.
+    duelLocalFallback = {
+      state: inventory.serialize(), x: player.pos.x, y: player.pos.y, z: player.pos.z,
+      yaw: player.yaw, pitch: player.pitch,
+      health: player.health, dead: player.dead, mode: localMode,
+    };
+    pushStateSave();
+  } else {
+    duelLocalFallback = null;
+  }
+  net.sendDuelQueue(!duelQueued);
+});
+duelsPrivateAction.addEventListener('click', () => {
+  if (!net.connected || duelsPrivateAction.getAttribute('aria-disabled') === 'true') return;
+  duelQueueStatus.textContent = 'Creating your private party…';
+  duelFeedback.textContent = 'Opening a private party…';
   net.sendDuelCreate();
 });
 duelReady.addEventListener('click', () => {
@@ -2405,6 +2656,7 @@ duelCopy.addEventListener('click', async () => {
 });
 
 net.onDuelLobby = (snapshot, inviteToken) => {
+  duelQueued = false;
   if (pendingDuelRetry) window.clearTimeout(pendingDuelRetry); pendingDuelRetry = 0;
   duelSnapshot = snapshot;
   syncDuelClock(snapshot.serverNow);
@@ -2425,7 +2677,15 @@ net.onDuelLobby = (snapshot, inviteToken) => {
     }
   }
 };
+net.onDuelQueue = (queued) => {
+  duelQueued = queued;
+  refreshDuelsAvailability();
+};
 net.onDuelError = (code, message) => {
+  if (duelQueued) {
+    duelQueued = false;
+    refreshDuelsAvailability();
+  }
   duelFeedback.textContent = message;
   if (code === 'invalid' || code === 'full' || code === 'match_in_progress') {
     duelSnapshot = null; showDuelBrowser(); openMinigames();
@@ -3034,6 +3294,12 @@ function cleanupDuelSession(restoreState = true): void {
   duelResultEl.classList.remove('visible');
   duelAnnounceEl.classList.remove('visible', 'out');
   duelKillFeedEl.replaceChildren();
+  killChipEl.classList.remove('visible');
+  killChipT = 0;
+  damageNumbers.clear();
+  killBanner.clear();
+  pvpStreak.reset();
+  hurtPulse = 0;
   setDuelCue('');
 
   if (typeof closeMinigames === 'function') closeMinigames();
@@ -3105,6 +3371,9 @@ net.onDuelLoadout = (slots, armor, selected, unlimitedReserve) => {
 net.onDuelClock = (serverNow, _endsAt, _suddenDeath) => syncDuelClock(serverNow);
 net.onDuelRespawn = (respawnAt, spectating) => {
   duelRespawnAt = respawnAt; duelSpectating = spectating;
+  // Dying wipes the floating numbers left over from the fight that killed you,
+  // so the respawn view is clean.
+  if (spectating) { damageNumbers.clear(); hurtPulse = 0; }
   player.flying = spectating; player.noclip = spectating;
   if (spectating) {
     burstRemaining = 0; burstStack = null; burstGun = null;
@@ -4035,8 +4304,14 @@ net.onEditBatch = (edits) => {
   world.endBatch();
 };
 net.onHurt = (health, dead, k, by, combat) => {
+  const bite = Math.max(0, player.health - health);
   player.setHealthFromServer(health, dead);
   player.vel.x += k[0] * 6; player.vel.y += k[1] * 6; player.vel.z += k[2] * 6;
+  // How hard it bit drives the rim and the kick, so a graze and a near-death
+  // hit are told apart before the health bar is ever read.
+  hurtPulse = Math.min(1, Math.max(hurtPulse, 0.34 + bite / 13));
+  triggerEncounterShake(0.13, Math.min(0.05, 0.006 + bite * 0.0016));
+  if (dead) { pvpStreak.died(by !== net.myId ? by : -1); damageNumbers.clear(); }
   // Point a wedge back at whoever did it. Only another PLAYER gets one — falls,
   // lava and mobs are self-evident, an unseen sniper is not.
   const attacker = net.remotes.get(by);
@@ -4050,7 +4325,7 @@ net.onHurt = (health, dead, k, by, combat) => {
   }
   // lastHealth is left alone so the frame loop plays the hurt sound.
 };
-net.onHitConfirm = (_target, amount, killed) => showHitmarker(amount, killed);
+net.onHitConfirm = (target, amount, killed) => showPvpHit(target, amount, killed);
 // Someone else pulled a trigger: replay it as ghost tracers + a positional
 // report. This is what stops enemy fire being invisible and silent — you can
 // now see the streaks, hear the direction, and take cover.
@@ -4086,6 +4361,9 @@ net.onRespawned = (x, y, z, h) => {
   player.respawn({ x, y, z });
   player.health = h;
   lastHealth = h;
+  hurtPulse = 0;
+  damageNumbers.clear();
+  killBanner.clear();
   deathShown = false;
   deathEl.style.display = 'none';
   pushStateSave();
@@ -5368,7 +5646,12 @@ mobs.onBruteDown = () => {
 };
 // Mobs and dungeon actors are simulated locally, so their hitmarker is local
 // too. PvP markers deliberately still come from the server (`onHitConfirm`).
-projectiles.localHitSink = (damage) => showHitmarker(damage, false);
+projectiles.localHitSink = (damage, at) => {
+  showHitmarker(damage, false);
+  // The same number a PvP hit pops, so "did that land, and how hard?" reads
+  // identically whatever you are shooting at.
+  damageNumbers.spawn(at.x, at.y, at.z, damage, hitFlavor(damage, false));
+};
 projectiles.encounterSink = (point, damage, source) => {
   const seal = encounterSnapshot?.seal;
   if (seal?.sealed && seal.geometry && sealContains(seal.geometry, point, 0.08)) {
@@ -5802,6 +6085,7 @@ net.onSeasonEnd = (winner, number) => {
 net.onDisconnect = () => {
   if (pendingDuelRetry) window.clearTimeout(pendingDuelRetry); pendingDuelRetry = 0;
   pendingDuelAttempted = false;
+  duelQueued = false;
   refreshDuelsAvailability();
   if (duelArenaActive || duelSnapshot) {
     cleanupDuelSession(true);
@@ -9790,6 +10074,7 @@ function frame(): void {
     projectiles.update(dt); // in-flight rounds keep travelling even in a menu
   }
   updateCombatFeedback(dt); // hitmarker burn-down + re-aim the damage arcs
+  damageNumbers.update(dt, activeCamera); // re-project the floating hit numbers
 
   // State-driven sounds.
   audio.updateListener(activeCamera);

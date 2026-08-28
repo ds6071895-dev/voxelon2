@@ -13,6 +13,7 @@
 
 import * as THREE from 'three';
 import { arcAt } from './strategic';
+import { iconSvg } from './emoji_icons';
 
 /** Seconds we linger on the fireball before the cam bows out on its own. */
 const HOLD_AFTER_IMPACT = 3.4;
@@ -117,7 +118,7 @@ export class MissileCam {
     this.closeBtn = document.createElement('button');
     this.closeBtn.type = 'button';
     this.closeBtn.className = 'mc-font';
-    this.closeBtn.textContent = '✕ CLOSE (ESC)';
+    this.closeBtn.innerHTML = `${iconSvg('close')} CLOSE (ESC)`;
     this.closeBtn.style.cssText =
       'min-height:34px;padding:0 12px;border-radius:7px;font-family:inherit;font-size:11px;' +
       'letter-spacing:1.2px;cursor:pointer;border:2px solid rgba(220,230,245,0.45);' +
@@ -161,7 +162,7 @@ export class MissileCam {
     this.holding = 0;
     this.haveLast = false;
     this.root.style.display = 'block';
-    this.titleEl.textContent = '🚀 STRIKE CAMERA';
+    this.titleEl.innerHTML = `${iconSvg('rocket')} STRIKE CAMERA`;
     this.titleEl.style.color = launch.accent;
     this.barFill.style.background = launch.accent;
     this.closeBtn.style.borderColor = launch.accent;
@@ -282,11 +283,11 @@ export class MissileCam {
     if (this.outcome) {
       const text: Record<MissileCamOutcome, string> = {
         impact: '● IMPACT',
-        intercepted: '🛡 INTERCEPTED',
-        shot: '✖ SHOT DOWN',
+        intercepted: `${iconSvg('shield')} INTERCEPTED`,
+        shot: `${iconSvg('close')} SHOT DOWN`,
         expired: '… LOST',
       };
-      this.statusEl.textContent = text[this.outcome];
+      this.statusEl.innerHTML = text[this.outcome];
       this.statusEl.style.color = this.outcome === 'impact' ? '#ff8a4a' : '#9ff0ff';
     } else {
       this.statusEl.textContent = progress < 0.12 ? '▲ BOOST'

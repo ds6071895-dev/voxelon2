@@ -14,6 +14,7 @@ import { Terrain } from './terrain';
 import { CORE_BORDER, CORE_HALF, WORLD_BORDER } from './net/protocol';
 import type { ProtectedArea } from './strategic';
 import { missileFlightTime } from './warfare';
+import { iconSvg } from './emoji_icons';
 
 /** One fire-control session: everything the targeting overlay needs to draw,
  *  plus the two callbacks that end it. */
@@ -185,7 +186,7 @@ export class WorldMap {
       'border-color:#fff #555 #555 #fff;background:#6b6b6b;color:#fff;text-shadow:none;';
     const syncZoom = (): void => {
       title.textContent = this.view === 'core' ? 'WORLD MAP — HEARTLAND' : 'WORLD MAP — FULL WORLD';
-      zoomBtn.textContent = this.view === 'core' ? '🔍 Full world' : '🔍 Heartland';
+      zoomBtn.innerHTML = this.view === 'core' ? `${iconSvg('search')} Full world` : `${iconSvg('search')} Heartland`;
     };
     zoomBtn.addEventListener('click', () => {
       this.view = this.view === 'core' ? 'world' : 'core';
@@ -195,7 +196,7 @@ export class WorldMap {
     syncZoom();
     const closeBtn = document.createElement('button');
     closeBtn.className = 'mc-font';
-    closeBtn.textContent = '✕';
+    closeBtn.innerHTML = iconSvg('close');
     closeBtn.style.cssText =
       'margin-left:auto;font-size:14px;width:28px;height:28px;cursor:pointer;border:2px solid;' +
       'border-color:#fff #555 #555 #fff;background:#6b6b6b;color:#fff;text-shadow:none;';
@@ -227,7 +228,7 @@ export class WorldMap {
     const hint = document.createElement('div');
     hint.className = 'mc-font';
     hint.style.cssText = 'font-size:11px;color:#8da0c0;text-shadow:none;';
-    hint.textContent = 'Tap a gold totem: travel there  ·  Tap: add waypoint  ·  Right-click a marker: remove  ·  B in-game: waypoint at your feet  ·  ✕ / M / Esc: close';
+    hint.textContent = 'Tap a gold totem: travel there  ·  Tap: add waypoint  ·  Right-click a marker: remove  ·  B in-game: waypoint at your feet  ·  X / M / Esc: close';
     // Fire-control bar — hidden until select-target mode is entered.
     this.targetBar = document.createElement('div');
     this.targetBar.className = 'mc-font';
@@ -347,8 +348,17 @@ export class WorldMap {
       ctx.beginPath(); ctx.arc(px, py, 9, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
       ctx.shadowBlur = 0;
       ctx.fillStyle = v.discovered ? '#efe6ff' : '#a898e0';
-      ctx.font = 'bold 11px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(v.discovered ? '☠' : '?', px, py);
+      if (v.discovered) {
+        // Tiny drawn skull glyph (canvas can't render SVG/emoji fonts here).
+        ctx.beginPath(); ctx.arc(px, py - 1, 4.5, Math.PI, 0); ctx.lineTo(px + 4.5, py + 2);
+        ctx.quadraticCurveTo(px, py + 5, px - 4.5, py + 2); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = '#171224';
+        ctx.beginPath(); ctx.arc(px - 1.8, py - 1, 1, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(px + 1.8, py - 1, 1, 0, Math.PI * 2); ctx.fill();
+      } else {
+        ctx.font = 'bold 11px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('?', px, py);
+      }
       if (v.discovered) {
         ctx.fillStyle = '#c9b8ff';
         ctx.font = 'bold 9px monospace';
@@ -485,7 +495,7 @@ export class WorldMap {
     const lines: string[] = [];
     // Vault collection line (Milestone D): dungeon-hunting pressure.
     if (this.vaultTotal > 0) {
-      lines.push(`<b>☠ VAULTS</b> — found ${this.vaults.length}/${this.vaultTotal}`);
+      lines.push(`<b>${iconSvg('skull')} VAULTS</b> — found ${this.vaults.length}/${this.vaultTotal}`);
       lines.push('');
     }
     // Surface structures legend (icon key + total).
@@ -516,13 +526,13 @@ export class WorldMap {
     this.waypoints.forEach((w, i) => {
       const dist = Math.round(Math.hypot(w.x - p.x, w.z - p.z));
       const alt = w.y !== undefined ? ` · Y${w.y}` : '';
-      const eye = w.show ? '👁' : '–';
+      const eye = w.show ? iconSvg('eye') : '–';
       lines.push(
         `<span style="color:${this.rgba(w.color, 1)}">■</span> ` +
         `${this.escape(w.name)} <span style="color:#8da0c0">${dist}m${alt}</span> ` +
         `<a data-eye="${i}" title="Show in world" ` +
         `style="cursor:pointer;text-decoration:none">${eye}</a> ` +
-        `<a data-del="${i}" title="Delete" style="cursor:pointer;color:#ff8a7a">✕</a>`);
+        `<a data-del="${i}" title="Delete" style="cursor:pointer;color:#ff8a7a">${iconSvg('close')}</a>`);
     });
     if (!this.waypoints.length) lines.push('<span style="color:#8da0c0">none yet — click the map</span>');
     this.legend.innerHTML = lines.join('<br>');
@@ -741,7 +751,7 @@ export class WorldMap {
           (near > 0 ? ` · <span style="color:#ff5c4d">${near} ally in blast</span>` : '') +
           `</div>`
         : '<div>Click a saved waypoint or flag inside the cyan circle.</div>') +
-      (reject ? `<div style="color:#ff5c4d">⛔ ${reject}</div>` : '') +
+      (reject ? `<div style="color:#ff5c4d">${iconSvg('blocked')} ${reject}</div>` : '') +
       `</div>` +
       `<div data-tbtns style="display:flex;gap:8px"></div>`;
     const btns = this.targetBar.querySelector('[data-tbtns]') as HTMLElement;

@@ -337,8 +337,10 @@ export class GameServer {
   /** Per-item fall state (server-owned gravity so drops settle to the ground). */
   private readonly itemPhys = new Map<number, { vy: number; resting: boolean }>();
   private nextEid = 1;
-  /** Invite-only minigame state is intentionally ephemeral: never serialized. */
+  /** Competitive minigame state is intentionally ephemeral: never serialized. */
   private readonly duels: Duels;
+  /** FIFO 1v1 matchmaking. IDs only; identities are read fresh when paired. */
+  private duelQueue: number[] = [];
   /** Retained through disconnects so forfeits cannot evade progression. */
   private readonly duelProgress = new Map<number, DuelProgressState>();
   /** Placed blocks per active duel arena slot, reset on match end. */
@@ -697,6 +699,7 @@ export class GameServer {
     const p = this.players.get(id);
     if (!p) return [];
     const out = this.settleDisconnect(id);
+    this.removeFromDuelQueue(id);
     const duelLeave = this.duels.leave(id, this.worldTime * 1000);
     if (duelLeave.snapshot) {
       out.push(...this.duelSnapshotOutbound(duelLeave.snapshot));
@@ -788,7 +791,7 @@ export class GameServer {
   handle(id: number, msg: ClientMsg): Outbound[] {
     const p = this.players.get(id);
     if (!p) return [];
-    if (msg.t === 'duelCreate' || msg.t === 'duelJoin' || msg.t === 'duelLeave' ||
+    if (msg.t === 'duelCreate' || msg.t === 'duelQueue' || msg.t === 'duelJoin' || msg.t === 'duelLeave' ||
         msg.t === 'duelReady' || msg.t === 'duelStart' || msg.t === 'duelArenaReady' || msg.t === 'duelRematch' ||
         msg.t === 'duelReturn' || msg.t === 'duelFlair') return this.handleDuel(p, msg);
     const duelPhase = this.duels.phaseFor(id);
@@ -895,7 +898,7 @@ export class GameServer {
         return [
           { to: target.id, msg: { t: 'tpaRequest', from: p.username } },
           { to: id, msg: { t: 'notice',
-            text: `📨 TPA sent to ${target.username} — if they accept, you teleport to them.` } },
+            text: `TPA sent to ${target.username} — if they accept, you teleport to them.` } },
         ];
       }
       case 'tpaAccept': {
@@ -917,8 +920,8 @@ export class GameServer {
         requester.x = p.x; requester.y = p.y; requester.z = p.z;
         return [
           { to: requester.id, msg: { t: 'teleport', x: p.x, y: p.y, z: p.z } },
-          { to: requester.id, msg: { t: 'notice', text: `🌀 ${p.username} accepted your TPA!` } },
-          { to: id, msg: { t: 'notice', text: `🌀 ${requester.username} teleported to you.` } },
+          { to: requester.id, msg: { t: 'notice', text: `${p.username} accepted your TPA!` } },
+          { to: id, msg: { t: 'notice', text: `${requester.username} teleported to you.` } },
         ];
       }
       case 'selfhurt':
@@ -1372,7 +1375,7 @@ export class GameServer {
         const ok = this.onRevive?.(target, p.faction, p.username) === true;
         const out: Outbound[] = [{ to: id, msg: { t: 'revived', target, ok } }];
         out.push({ to: id, msg: { t: 'notice', text: ok
-          ? `✨ You revived ${target}!`
+          ? `You revived ${target}!`
           : `Can't revive ${target} (not an eliminated teammate).` } });
         return out;
       }
@@ -1393,7 +1396,7 @@ export class GameServer {
         } else {
           p.totems.push({ x, y, z });
           out.push({ to: id, msg: { t: 'notice',
-            text: `🗿 Totem attuned (${p.totems.length}/${MAX_ATTUNED}) — open the map (M) to travel!` } });
+            text: `Totem attuned (${p.totems.length}/${MAX_ATTUNED}) — open the map (M) to travel!` } });
         }
         out.push({ to: id, msg: { t: 'attuned', totems: p.totems.slice() } });
         return out;
@@ -1859,15 +1862,88 @@ export class GameServer {
     return [{ to, msg: { t: 'duelError', code, message: messages[code] } }];
   }
 
+  private removeFromDuelQueue(id: number): boolean {
+    const before = this.duelQueue.length;
+    this.duelQueue = this.duelQueue.filter((queuedId) => queuedId !== id);
+    return this.duelQueue.length !== before;
+  }
+
+  /** Shared launch path for host-started and matchmade Duels. */
+  private launchDuel(snapshot: DuelLobbySnapshot): Outbound[] {
+    const out = this.duelSnapshotOutbound(snapshot);
+    if (!snapshot.arena) return out;
+    const ids = snapshot.participants.map((participant) => participant.id);
+    out.push(...this.resetDuelArenaEdits(snapshot.arena.slot, ids));
+    for (let i = 0; i < snapshot.participants.length; i++) {
+      const player = this.players.get(snapshot.participants[i].id);
+      if (player) out.push(...this.enterDuelBody(player, snapshot.arena, i));
+    }
+    out.push(...this.announceArenaScope(ids));
+    return out;
+  }
+
   private handleDuel(p: ServerPlayer, msg: Extract<ClientMsg, { t: `duel${string}` }>): Outbound[] {
     const now = this.worldTime * 1000;
     switch (msg.t) {
       case 'duelCreate': {
+        this.removeFromDuelQueue(p.id);
         const result = this.duels.create({ id: p.id, username: p.username, skin: p.skin, profile: p.duelProfile }, now);
         if ('reason' in result) return this.duelError(p.id, result.reason);
-        return this.duelSnapshotOutbound(result.snapshot, { id: p.id, token: result.token });
+        return [
+          { to: p.id, msg: { t: 'duelQueue', queued: false } },
+          ...this.duelSnapshotOutbound(result.snapshot, { id: p.id, token: result.token }),
+        ];
+      }
+      case 'duelQueue': {
+        if (!msg.join) {
+          this.removeFromDuelQueue(p.id);
+          return [{ to: p.id, msg: { t: 'duelQueue', queued: false } }];
+        }
+        if (this.duels.phaseFor(p.id)) return this.duelError(p.id, 'already_in_lobby');
+        if (this.duelQueue.includes(p.id)) {
+          return [{ to: p.id, msg: { t: 'duelQueue', queued: true } }];
+        }
+        // Drop stale/disconnected/busy entries before selecting the oldest
+        // compatible challenger.
+        this.duelQueue = this.duelQueue.filter((id) =>
+          this.players.has(id) && !this.duels.phaseFor(id) && id !== p.id);
+        const opponentId = this.duelQueue.shift();
+        if (opponentId === undefined) {
+          this.duelQueue.push(p.id);
+          return [{ to: p.id, msg: { t: 'duelQueue', queued: true } }];
+        }
+        const opponent = this.players.get(opponentId);
+        if (!opponent) {
+          this.duelQueue.push(p.id);
+          return [{ to: p.id, msg: { t: 'duelQueue', queued: true } }];
+        }
+        const made = this.duels.create({
+          id: opponent.id, username: opponent.username, skin: opponent.skin, profile: opponent.duelProfile,
+        }, now);
+        if ('reason' in made) {
+          this.duelQueue.push(p.id);
+          return [{ to: p.id, msg: { t: 'duelQueue', queued: true } }];
+        }
+        const joined = this.duels.join(made.token, {
+          id: p.id, username: p.username, skin: p.skin, profile: p.duelProfile,
+        }, now);
+        if (!joined.ok) {
+          this.duels.leave(opponent.id, now);
+          this.duelQueue.push(p.id);
+          return [{ to: p.id, msg: { t: 'duelQueue', queued: true } }];
+        }
+        this.duels.setReady(opponent.id, true, now);
+        this.duels.setReady(p.id, true, now);
+        const started = this.duels.start(opponent.id, now);
+        if (!started.ok) return this.duelError(p.id, started.reason);
+        return [
+          { to: opponent.id, msg: { t: 'duelQueue', queued: false } },
+          { to: p.id, msg: { t: 'duelQueue', queued: false } },
+          ...this.launchDuel(started.snapshot),
+        ];
       }
       case 'duelJoin': {
+        this.removeFromDuelQueue(p.id);
         // Tokens never enter logs/notices; sanitize only for bounded lookup cost.
         const token = typeof msg.token === 'string' ? msg.token.slice(0, 128) : '';
         const result = this.duels.join(token, { id: p.id, username: p.username, skin: p.skin, profile: p.duelProfile }, now);
@@ -1875,6 +1951,9 @@ export class GameServer {
         return this.duelSnapshotOutbound(result.snapshot, { id: p.id, token });
       }
       case 'duelLeave': {
+        if (this.removeFromDuelQueue(p.id) && !this.duels.phaseFor(p.id)) {
+          return [{ to: p.id, msg: { t: 'duelQueue', queued: false } }];
+        }
         const oldPhase = this.duels.phaseFor(p.id);
         const oldArena = this.duels.arenaFor(p.id);
         const result = this.duels.leave(p.id, now);
@@ -1901,17 +1980,7 @@ export class GameServer {
       case 'duelStart': {
         const result = this.duels.start(p.id, now);
         if (!result.ok) return this.duelError(p.id, result.reason);
-        const out = this.duelSnapshotOutbound(result.snapshot);
-        if (result.snapshot.arena) {
-          out.push(...this.resetDuelArenaEdits(result.snapshot.arena.slot, result.snapshot.participants.map((v) => v.id)));
-          for (let i = 0; i < result.snapshot.participants.length; i++) {
-            const participant = result.snapshot.participants[i];
-            const player = this.players.get(participant.id);
-            if (player) out.push(...this.enterDuelBody(player, result.snapshot.arena, i));
-          }
-          out.push(...this.announceArenaScope(result.snapshot.participants.map((v) => v.id)));
-        }
-        return out;
+        return this.launchDuel(result.snapshot);
       }
       case 'duelArenaReady': {
         const snap = this.duels.markArenaReady(p.id, now);
@@ -2612,7 +2681,7 @@ export class GameServer {
       hp: 0, maxHp: active.engine.maxHp, alive: false } });
     out.push({ to: 'all', msg: { t: 'vaultCleared', cx: st.cx, cz: st.cz, by: credited } });
     out.push({ to: 'all', msg: { t: 'killfeed',
-      killer: credited, victim: `Tier ${st.tier} ${VAULT_BOSS_NAMES[st.bossKind]} ☠` } });
+      killer: credited, victim: `Tier ${st.tier} ${VAULT_BOSS_NAMES[st.bossKind]} [DEFEATED]` } });
     this.vaultEncounters.delete(`${st.cx},${st.cz}`);
     return out;
   }
@@ -2711,8 +2780,8 @@ export class GameServer {
     const v = this.ensureVault(st);
     if (!vaultLootable(v, this.worldTime)) {
       return [{ to: p.id, msg: { t: 'notice', text: v.hp > 0
-        ? `☠ The ${VAULT_BOSS_NAMES[st.bossKind]} guards this chest — defeat it first!`
-        : '🔒 The vault has resealed — the Brute will return to guard it.' } }];
+        ? `The ${VAULT_BOSS_NAMES[st.bossKind]} guards this chest — defeat it first!`
+        : 'The vault has resealed — the Brute will return to guard it.' } }];
     }
     const cd = vaultLootCooldownLeft(v, p.username, this.worldTime);
     if (cd > 0) {
@@ -2726,7 +2795,7 @@ export class GameServer {
       out.push({ to: p.id, msg: { t: 'gotitem', item: s.id, count: Math.floor(s.count) } });
     }
     out.push({ to: p.id, msg: { t: 'vaultLooted', cx: st.cx, cz: st.cz } });
-    out.push({ to: p.id, msg: { t: 'notice', text: `✨ Tier ${st.tier} vault treasure claimed!` } });
+    out.push({ to: p.id, msg: { t: 'notice', text: `[VAULT] Tier ${st.tier} vault treasure claimed!` } });
     return out;
   }
 
@@ -3236,7 +3305,7 @@ export class GameServer {
         if (!p.bloodlustWarned) {
           p.bloodlustWarned = true;
           out.push({ to: p.id, msg: { t: 'notice',
-            text: '⚔ Bloodlust — this fight has raged too long, damage is ramping up!' } });
+            text: 'Bloodlust — this fight has raged too long, damage is ramping up!' } });
         }
       }
     }
@@ -3337,7 +3406,7 @@ export class GameServer {
     ];
     if (wasted) {
       out.push({ to: killer.id, msg: { t: 'notice',
-        text: `❤ full (${MAX_HEARTS}) — the stolen heart was wasted!` } });
+        text: `Hearts full (${MAX_HEARTS}) — the stolen heart was wasted!` } });
     }
     if (victim.hearts <= 0) {
       victim.eliminated = true; // blocks respawn until the shell disconnects
@@ -3353,10 +3422,10 @@ export class GameServer {
       out.push({ to: victim.id, msg: { t: 'eliminated', by: killer.username, until } });
       out.push({ to: 'all', msg: { t: 'killfeed',
         killer: killer.username,
-        victim: `☠ ${victim.username} (${permanent ? 'ELIMINATED FOREVER' : 'ELIMINATED'})` } });
+        victim: `${victim.username} (${permanent ? 'ELIMINATED FOREVER' : 'ELIMINATED'})` } });
       if (permanent) {
         out.push({ to: 'all', msg: { t: 'notice',
-          text: `💀 ${victim.username} is gone FOREVER — ${factionName(victim.faction)} has no flag to bring them back.` } });
+          text: `${victim.username} is gone FOREVER — ${factionName(victim.faction)} has no flag to bring them back.` } });
       }
     }
     return out;
@@ -3544,7 +3613,7 @@ export class GameServer {
       return [
         ...this.flagBroadcast('taken', ev.flag, p.username),
         { to: 'all', msg: { t: 'notice',
-          text: `🚩 ${p.username} has taken the ${factionName(ev.flag.faction)} flag!` } },
+          text: `${p.username} has taken the ${factionName(ev.flag.faction)} flag!` } },
       ];
     }
     // Progress ticks are cheap and frequent — send the state only to the raider
@@ -3561,7 +3630,7 @@ export class GameServer {
     return [
       ...this.flagBroadcast('captured', ev.flag, p.username),
       { to: 'all', msg: { t: 'notice',
-        text: `🏴 ${factionName(ev.faction)} CAPTURED the ${factionName(ev.flag.faction)} flag! ` +
+        text: `${factionName(ev.faction)} CAPTURED the ${factionName(ev.flag.faction)} flag! ` +
           `${factionName(ev.flag.faction)} now fights with no flag — their deaths are FOREVER.` } },
     ];
   }
@@ -3573,7 +3642,7 @@ export class GameServer {
     return [
       ...this.flagBroadcast('returned', ev.flag, p.username),
       { to: 'all', msg: { t: 'notice',
-        text: `🚩 The ${factionName(ev.flag.faction)} flag returned home.` } },
+        text: `The ${factionName(ev.flag.faction)} flag returned home.` } },
     ];
   }
 
@@ -3583,8 +3652,8 @@ export class GameServer {
     return [
       { to: 'all', msg: this.flagsSnapshotMsg() },
       { to: 'all', msg: { t: 'notice', text: on
-        ? '🚩 FLAGS ARE ARMED — enemy flags can now be prised loose. Defend yours!'
-        : '🛡 Flags are locked again — nobody can take a flag.' } },
+        ? 'FLAGS ARE ARMED — enemy flags can now be prised loose. Defend yours!'
+        : 'Flags are locked again — nobody can take a flag.' } },
     ];
   }
 
@@ -3595,7 +3664,7 @@ export class GameServer {
     this.flags.breakable = breakable;
     return [
       { to: 'all', msg: this.flagsSnapshotMsg() },
-      { to: 'all', msg: { t: 'notice', text: '🚩 All flags reset to their home pads.' } },
+      { to: 'all', msg: { t: 'notice', text: '[FLAGS] All flags reset to their home pads.' } },
     ];
   }
 
@@ -3610,7 +3679,7 @@ export class GameServer {
     }
     for (const id of FACTIONS.map((f) => f.id)) {
       if (!factionHasFlag(this.flags, id)) {
-        lines.push(`  ⚠ ${factionName(id)} holds NO flag — their deaths are permanent`);
+        lines.push(`  ${factionName(id)} holds NO flag — their deaths are permanent`);
       }
     }
     return lines.join('\n');
@@ -3667,7 +3736,7 @@ export class GameServer {
     return [
       { to: p.id, msg: { t: 'teleport', x: s.x, y: s.y, z: s.z } },
       { to: p.id, msg: { t: 'notice',
-        text: '⚠️ The war border closed over you — moved to safe ground inside the ring.' } },
+        text: 'The war border closed over you — moved to safe ground inside the ring.' } },
     ];
   }
 
@@ -3729,8 +3798,8 @@ export class GameServer {
     if (winner !== NO_FACTION) this.warWins[winner]++;
     out.push({ to: 'all', msg: { t: 'warEnd', winner, score: this.warKills.slice() } });
     out.push({ to: 'all', msg: { t: 'notice', text: winner === NO_FACTION
-      ? '🕊️ The war ends in a DRAW.'
-      : `🏆 ${factionName(winner)} wins the war with ${best} kill${best === 1 ? '' : 's'}!` } });
+      ? 'The war ends in a DRAW.'
+      : `${factionName(winner)} wins the war with ${best} kill${best === 1 ? '' : 's'}!` } });
     this.warKills = new Array(FACTIONS.length).fill(0);
     return out;
   }
@@ -3989,7 +4058,7 @@ export class GameServer {
     p.health = Math.min(p.health, maxHealthFor(p.hearts));
     return [
       { to: id, msg: { t: 'hearts', hearts: p.hearts, reason: 'admin' } },
-      { to: id, msg: { t: 'notice', text: `An admin set your hearts to ${p.hearts} ❤` } },
+      { to: id, msg: { t: 'notice', text: `An admin set your hearts to ${p.hearts} hearts` } },
     ];
   }
 
@@ -4048,8 +4117,8 @@ export class GameServer {
     this.warKills = new Array(FACTIONS.length).fill(0); // fresh scoreboard
     const out: Outbound[] = [{ to: 'all', msg: this.warSnapshotMsg() }];
     const banner = delaySec <= 0
-      ? '⚔️ WAR! The border is closing — fight!'
-      : `⚔️ A war is scheduled — get ready!`;
+      ? 'WAR! The border is closing — fight!'
+      : `A war is scheduled — get ready!`;
     out.push({ to: 'all', msg: { t: 'notice', text: banner } });
     return out;
   }
@@ -4065,7 +4134,7 @@ export class GameServer {
     this.warKills = new Array(FACTIONS.length).fill(0);
     return [
       { to: 'all', msg: this.warSnapshotMsg() },
-      { to: 'all', msg: { t: 'notice', text: '🕊️ The war is over — peacetime.' } },
+      { to: 'all', msg: { t: 'notice', text: 'The war is over — peacetime.' } },
     ];
   }
 

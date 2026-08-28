@@ -87,6 +87,7 @@ export class NetClient {
   onWelcome?: (info: PlayerInfo) => void;
   onSocketOpen?: () => void;
   onDuelInviteInfo?: (valid: boolean, host?: string, lobbyId?: string) => void;
+  onDuelQueue?: (queued: boolean) => void;
   /** Persistent authoritative day/night clock, refreshed with every snapshot. */
   onWorldTime?: (seconds: number) => void;
   onDuelLobby?: (snapshot: DuelLobbySnapshot, inviteToken?: string) => void;
@@ -552,6 +553,9 @@ export class NetClient {
       case 'duelInviteInfo':
         this.onDuelInviteInfo?.(msg.valid, msg.host, msg.lobbyId);
         break;
+      case 'duelQueue':
+        this.onDuelQueue?.(msg.queued);
+        break;
       case 'duelError':
         this.onDuelError?.(msg.code, msg.message);
         break;
@@ -688,6 +692,7 @@ export class NetClient {
     this.raw({ t: 'session', username, token });
   }
   sendDuelCreate(): void { if (this.connected) this.raw({ t: 'duelCreate' }); }
+  sendDuelQueue(join: boolean): void { if (this.connected) this.raw({ t: 'duelQueue', join }); }
   sendDuelInviteInfo(token: string): void { if (this.socketOpen && token) this.raw({ t: 'duelInviteInfo', token }); }
   sendDuelJoin(token: string): void {
     if (this.connected) this.raw({ t: 'duelJoin', token });
