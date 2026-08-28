@@ -741,17 +741,30 @@ check('materialOf maps blocks to sound classes',
 
 // --- Mobs (hostile only): models, physics, AI, combat, explosion ------------------
 {
+  // The AI checks below walk a mob ~7 blocks along +X, so the test site needs a
+  // flat, clear CORRIDOR — not just one clear column. Picking a single column
+  // used to leave the chaser spawned inside a neighbouring hillside, which made
+  // the chase assertion depend on wherever findSpawn happened to land.
+  const MOB_RUN = 8;
   let mx = Math.floor(spawn.x), mz = Math.floor(spawn.z);
-  outerM: for (let dx = 0; dx < 20; dx++)
-    for (let dz = 0; dz < 20; dz++) {
+  outerM: for (let dz = 0; dz < 40; dz++)
+    for (let dx = 0; dx < 40; dx++) {
       const x = Math.floor(spawn.x) + dx, z = Math.floor(spawn.z) + dz;
       const h = world.terrain.height(x, z);
       if (h <= SEA_LEVEL + 1) continue;
       let clear = true;
-      for (let y = h + 1; y <= h + 10; y++) if (world.getBlock(x, y, z) !== Block.Air) clear = false;
+      for (let step = 0; step < MOB_RUN && clear; step++) {
+        if (world.terrain.height(x + step, z) !== h) { clear = false; break; }
+        for (let y = h + 1; y <= h + 10; y++) {
+          if (world.getBlock(x + step, y, z) !== Block.Air) { clear = false; break; }
+        }
+      }
       if (clear) { mx = x; mz = z; break outerM; }
     }
   const ground = world.terrain.height(mx, mz);
+  check('mob test site is a flat, clear corridor',
+    Array.from({ length: MOB_RUN }, (_, step) => world.terrain.height(mx + step, mz))
+      .every((h) => h === ground));
   const newMobs = () => {
     const m = new Mobs(scene, world, fakeAtlas,
       new ItemEntities(scene, world, fakeAtlas), new Particles(scene));

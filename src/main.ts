@@ -86,13 +86,15 @@ import { MissileModels, StrategicModels } from './warfare_models';
 import { VehicleModels } from './vehiclemodels';
 import {
   DUEL_ROUND_MS, DUEL_MAX_HEALTH, DUEL_MAX_PILLAR_HEIGHT, DUEL_ARENA_SIZE,
-  duelTerrainElevation,
+  DUEL_MIN_PLAYERS, DUEL_SCORE_LIMIT, duelEventCopy, duelTerrainElevation,
+  type DuelEvent, type DuelEventKind,
   type DuelLobbySnapshot, type DuelParticipant,
   type DuelResult, type DuelArenaBounds, clampToDuelArena,
   duelTokenFromUrl, withDuelToken,
 } from './duels';
 import {
-  DUEL_DIVISIONS, DuelProgressChange, DuelPublicProfile, duelProfileOf, duelRankProgress,
+  DUEL_DIVISIONS, DUEL_FLAIRS, DUEL_TIER_THEMES, DuelProgressChange, DuelPublicProfile,
+  type DuelRank, duelProfileOf, duelRankAt, duelRankProgress,
   duelRevealState, newDuelProgress, unlockedDuelFlairs,
 } from './duels_progression';
 
@@ -1922,7 +1924,12 @@ playBtn.addEventListener('click', () => {
   beginPlay();
 });
 
-// --- Minigames browser + private Duels lobby -------------------------------
+// --- THE ARENA: minigames browser, ranked ladder, Duels lobby and match -----
+// One screen, three views, one colour system. Every accent on this screen is
+// the player's own tier colour (from duels_progression.ts), pushed onto the
+// DOM as --rank/--rank-accent/--rank-shade so the chip, the ladder, the lobby,
+// the HUD and the result reveal can never disagree about what Gold looks like.
+//
 // Keep the deep-link token in the address bar throughout auth; the successful
 // welcome consumes it, while a rejected/full lobby leaves the title intact.
 const initialDuelToken = duelTokenFromUrl(location.href);
@@ -1956,6 +1963,7 @@ const duelInvite = document.getElementById('duel-invite') as HTMLInputElement;
 const duelCopy = document.getElementById('duel-copy') as HTMLButtonElement;
 const duelFeedback = document.getElementById('duel-feedback')!;
 const duelRoster = document.getElementById('duel-roster')!;
+const duelReadyBarFill = document.getElementById('duel-readybar-fill') as HTMLElement;
 const duelReady = document.getElementById('duel-ready') as HTMLButtonElement;
 const duelStart = document.getElementById('duel-start') as HTMLButtonElement;
 const duelLeave = document.getElementById('duel-leave') as HTMLButtonElement;
@@ -1966,109 +1974,207 @@ const duelEloEl = document.getElementById('duel-elo')!;
 const duelRankFill = document.getElementById('duel-rank-fill') as HTMLElement;
 const duelRankNext = document.getElementById('duel-rank-next')!;
 const duelProfileMeta = document.getElementById('duel-profile-meta')!;
-const duelFlair = document.getElementById('duel-flair') as HTMLSelectElement;
+const duelFlairList = document.getElementById('duel-flair')!;
 const duelLeaderboardEl = document.getElementById('duel-leaderboard')!;
-const duelRanksButton = document.getElementById('duel-ranks-button') as HTMLButtonElement;
 const duelRanksView = document.getElementById('duel-ranks-view')!;
-const duelRanksBack = document.getElementById('duel-ranks-back') as HTMLButtonElement;
 const duelRanksHero = document.getElementById('duel-ranks-hero')!;
-const duelPyramid = document.getElementById('duel-pyramid')!;
+const duelLadder = document.getElementById('duel-ladder')!;
+const arenaTabGames = document.getElementById('tab-games') as HTMLButtonElement;
+const arenaTabLobby = document.getElementById('tab-lobby') as HTMLButtonElement;
+const arenaTabLadder = document.getElementById('duel-ranks-button') as HTMLButtonElement;
 let minigamesRestoreFocus: HTMLElement | null = null;
-let duelRanksReturnToLobby = false;
 
-function renderDuelRankPyramid(): void {
+/** Every tier owns a 3x3 silhouette. The number of lit blocks is exactly the
+ * tier's `facets`, so the emblem visibly densifies as you climb. */
+const DUEL_EMBLEM_MASKS: Record<string, string> = {
+  chip: '000111000', shield: '010101010', crest: '010111010', blade: '111000111',
+  star: '101111101', spire: '111101111', crown: '111111111',
+};
+
+/** Push a rank's palette onto an element as CSS variables. */
+function applyRankTheme(el: HTMLElement, rank: DuelRank): void {
+  el.style.setProperty('--rank', rank.color);
+  el.style.setProperty('--rank-accent', rank.accent);
+  el.style.setProperty('--rank-shade', rank.shade);
+}
+
+function paintDuelEmblem(emblem: HTMLElement, rank: DuelRank): void {
+  applyRankTheme(emblem, rank);
+  emblem.classList.remove('tier-5', 'tier-6');
+  if (rank.namedIndex >= 5) emblem.classList.add(`tier-${Math.min(6, rank.namedIndex)}`);
+  const mask = DUEL_EMBLEM_MASKS[rank.emblem] ?? DUEL_EMBLEM_MASKS.crown;
+  emblem.querySelectorAll<HTMLElement>('i').forEach((block, index) => {
+    const lit = mask[index] === '1';
+    block.classList.toggle('lit', lit);
+    block.classList.toggle('dim', !lit);
+  });
+}
+
+function makeDuelEmblem(rank: DuelRank, extraClass = ''): HTMLElement {
+  const emblem = document.createElement('div');
+  emblem.className = `duel-emblem ${extraClass}`.trim();
+  emblem.setAttribute('aria-hidden', 'true');
+  for (let i = 0; i < 9; i++) {
+    const block = document.createElement('i');
+    block.style.setProperty('--block-delay', `${i * 28}ms`);
+    block.style.setProperty('--shard-x', `${(i % 3 - 1) * 20}px`);
+    block.style.setProperty('--shard-y', `${(Math.floor(i / 3) - 1) * 18}px`);
+    emblem.appendChild(block);
+  }
+  paintDuelEmblem(emblem, rank);
+  return emblem;
+}
+
+/** The label a profile shows publicly: Provisional hides the tier until the
+ * five placement matches are done, exactly like the server's own reveal. */
+function duelRankLabel(profile: { placementsRemaining: number; rank: DuelRank }): string {
+  return profile.placementsRemaining > 0 ? 'Provisional' : profile.rank.label;
+}
+
+// ── The ladder ─────────────────────────────────────────────────────────────
+function renderDuelLadder(): void {
   const { rank: current, next, progress, rpIntoDivision } = duelRankProgress(duelProfile.rp);
-  duelRanksHero.style.setProperty('--rank-color', current.color);
-  const displayedRank = duelProfile.placementsRemaining > 0 ? 'Provisional' : current.label;
-  const detail = duelProfile.placementsRemaining > 0
-    ? `${duelProfile.placementsRemaining} placement match${duelProfile.placementsRemaining === 1 ? '' : 'es'} before your rank is revealed · ${rpIntoDivision}/100 RP through the highlighted division`
-    : next ? `${100 - rpIntoDivision} RP to ${next.label} · ${Math.round(progress * 100)}% through this division`
-      : `${rpIntoDivision}/100 RP through Grandmaster I · no RP ceiling`;
-  const grandmasterFloor = DUEL_DIVISIONS.find((entry) => entry.name === 'Grandmaster')!.min;
-  const overall = Math.min(100, Math.round(duelProfile.rp / grandmasterFloor * 100));
+  const peakNamed = duelRankAt(duelProfile.peakRp).namedIndex;
+  applyRankTheme(duelRanksHero, current);
+
+  const provisional = duelProfile.placementsRemaining > 0;
+  const detail = provisional
+    ? `${duelProfile.placementsRemaining} placement match${duelProfile.placementsRemaining === 1 ? '' : 'es'} before your tier is revealed. RP is already moving: ${rpIntoDivision}/100 through the highlighted division.`
+    : next ? `${100 - rpIntoDivision} RP to ${next.label} — ${Math.round(progress * 100)}% of the way through this division.`
+      : `${rpIntoDivision}/100 through Voxelon I. There is no ceiling above this.`;
+  const voxelonFloor = DUEL_DIVISIONS.find((entry) => entry.name === 'Voxelon')!.min;
+  const overall = Math.min(100, Math.round(duelProfile.rp / voxelonFloor * 100));
+
   duelRanksHero.replaceChildren();
+  duelRanksHero.append(makeDuelEmblem(current, 'lg'));
   const copy = document.createElement('div');
-  const eyebrow = document.createElement('small'); eyebrow.textContent = 'Your position';
-  const title = document.createElement('strong'); title.textContent = `${displayedRank} · ${duelProfile.rp} RP`;
+  const eyebrow = document.createElement('small'); eyebrow.textContent = 'Your standing';
+  const title = document.createElement('strong');
+  title.textContent = `${provisional ? 'Provisional' : current.label} · ${duelProfile.rp} RP`;
   const description = document.createElement('p'); description.textContent = detail;
-  copy.append(eyebrow, title, description);
+  const motto = document.createElement('em'); motto.textContent = `“${current.motto}”`;
+  copy.append(eyebrow, title, description, motto);
   const climb = document.createElement('div'); climb.className = 'duel-ranks-overall';
-  const climbLabel = document.createElement('small'); climbLabel.textContent = 'Climb to Grandmaster';
+  const climbLabel = document.createElement('small'); climbLabel.textContent = 'Climb to Voxelon';
   const climbValue = document.createElement('b'); climbValue.textContent = ` ${overall}%`;
   climbLabel.appendChild(climbValue);
   const climbTrack = document.createElement('div'); climbTrack.className = 'duel-ranks-overall-track';
   const climbFill = document.createElement('div'); climbFill.className = 'duel-ranks-overall-fill';
-  climbFill.style.width = `${overall}%`; climbTrack.appendChild(climbFill); climb.append(climbLabel, climbTrack);
+  climbFill.style.width = `${overall}%`;
+  climbTrack.appendChild(climbFill); climb.append(climbLabel, climbTrack);
   duelRanksHero.append(copy, climb);
 
-  duelPyramid.replaceChildren();
-  for (let namedIndex = 6; namedIndex >= 0; namedIndex--) {
-    const ranks = DUEL_DIVISIONS.filter((entry) => entry.namedIndex === namedIndex).reverse();
-    const tier = document.createElement('div'); tier.className = 'duel-pyramid-tier';
-    tier.style.setProperty('--tier-color', ranks[0].color);
-    tier.style.setProperty('--tier-width', `${64 + (6 - namedIndex) * 6}%`);
-    tier.classList.toggle('current', current.namedIndex === namedIndex);
-    const name = document.createElement('div'); name.className = 'duel-pyramid-name';
-    const nameStrong = document.createElement('strong'); nameStrong.textContent = ranks[0].name;
-    const nameSmall = document.createElement('small'); nameSmall.textContent = `${ranks[0].flair} · ${namedIndex * 300}+ RP`;
-    name.append(nameStrong, nameSmall); tier.appendChild(name);
+  // The ladder is laid out column-reverse, so Copper is appended first and
+  // Voxelon ends up on top — you read it as a climb.
+  duelLadder.replaceChildren();
+  for (const [namedIndex, theme] of DUEL_TIER_THEMES.entries()) {
+    const ranks = DUEL_DIVISIONS.filter((entry) => entry.namedIndex === namedIndex);
+    const tier = document.createElement('div'); tier.className = 'duel-tier';
+    tier.style.setProperty('--tier', theme.color);
+    tier.style.setProperty('--tier-accent', theme.accent);
+    tier.classList.toggle('current', current.namedIndex === namedIndex && !provisional);
+    tier.classList.toggle('cleared', namedIndex < peakNamed);
+    tier.classList.toggle('locked', namedIndex > peakNamed);
+    tier.append(makeDuelEmblem(ranks[2]));
+
+    const copyCell = document.createElement('div'); copyCell.className = 'duel-tier-copy';
+    const name = document.createElement('strong'); name.textContent = theme.name;
+    const line = document.createElement('em'); line.textContent = theme.motto;
+    const meta = document.createElement('small');
+    meta.textContent = `${ranks[0].min}+ RP · Title: ${theme.flair}`;
+    copyCell.append(name, line, meta); tier.append(copyCell);
+
+    const divisions = document.createElement('div'); divisions.className = 'duel-tier-divisions';
+    // Divisions read left-to-right as III, II, I — the order you clear them.
     for (const entry of ranks) {
-      const division = document.createElement('div'); division.className = 'duel-pyramid-division';
-      const isCurrent = entry.index === current.index;
-      division.classList.toggle('current', isCurrent);
+      const cell = document.createElement('div'); cell.className = 'duel-division';
+      const isCurrent = entry.index === current.index && !provisional;
+      cell.classList.toggle('current', isCurrent);
+      cell.classList.toggle('done', entry.index < current.index);
       const label = document.createElement('b'); label.textContent = entry.division;
       const minimum = document.createElement('small'); minimum.textContent = `${entry.min} RP`;
-      division.append(label, minimum);
+      cell.append(label, minimum);
       if (isCurrent) {
-        const you = document.createElement('span'); you.className = 'duel-pyramid-you';
-        you.textContent = duelProfile.placementsRemaining > 0 ? 'PROVISIONAL' : 'YOU';
-        const meter = document.createElement('span'); meter.className = 'duel-pyramid-progress';
+        const meter = document.createElement('span'); meter.className = 'duel-division-progress';
         meter.style.setProperty('--division-progress', `${Math.round(progress * 100)}%`);
-        meter.appendChild(document.createElement('i')); division.append(you, meter);
+        meter.appendChild(document.createElement('i'));
+        cell.appendChild(meter);
       }
-      tier.appendChild(division);
+      divisions.appendChild(cell);
     }
-    duelPyramid.appendChild(tier);
+    tier.appendChild(divisions);
+    if (current.namedIndex === namedIndex) {
+      const you = document.createElement('span'); you.className = 'duel-tier-you';
+      you.textContent = provisional ? 'PLACING' : 'YOU ARE HERE';
+      tier.appendChild(you);
+    }
+    duelLadder.appendChild(tier);
   }
+
+  const unlocked = unlockedDuelFlairs(duelProfile);
+  duelFlairList.replaceChildren(...DUEL_FLAIRS.map((flair, index) => {
+    const chip = document.createElement('button');
+    chip.type = 'button'; chip.className = 'duel-flair-chip'; chip.textContent = flair;
+    chip.style.setProperty('--tier', DUEL_TIER_THEMES[index].color);
+    const owned = unlocked.includes(flair);
+    chip.disabled = !owned;
+    chip.setAttribute('aria-pressed', String(flair === duelProfile.equippedFlair));
+    chip.title = owned ? `Equip ${flair}` : `Reach ${DUEL_TIER_THEMES[index].name} to unlock ${flair}`;
+    chip.addEventListener('click', () => { if (owned) net.sendDuelFlair(flair); });
+    return chip;
+  }));
 }
 
-function renderDuelProgress(): void {
-  const { rank, next, progress } = duelRankProgress(duelProfile.rp);
-  duelProfileCard.style.setProperty('--rank-color', rank.color);
-  duelRankName.textContent = duelProfile.placementsRemaining > 0 ? 'Provisional' : rank.label;
-  duelEloEl.textContent = `${duelProfile.rp} RP`;
-  duelRankFill.style.width = `${Math.round(progress * 100)}%`;
-  duelRankNext.textContent = duelProfile.placementsRemaining > 0
-    ? `${duelProfile.placementsRemaining} placement match${duelProfile.placementsRemaining === 1 ? '' : 'es'} remaining`
-    : next ? `${next.min - duelProfile.rp} RP to ${next.label}` : 'Grandmaster I · RP has no cap';
-  duelProfileMeta.textContent = `${duelProfile.streak} streak · ${duelProfile.wins}W ${duelProfile.losses}L · Peak ${duelRankProgress(duelProfile.peakRp).rank.label}`;
-  duelProfileEmblem.querySelectorAll<HTMLElement>('i').forEach((pip, index) => {
-    pip.style.visibility = index < 7 + (rank.index % 3) ? 'visible' : 'hidden';
-  });
-  const unlocked = unlockedDuelFlairs(duelProfile);
-  duelFlair.replaceChildren(...unlocked.map((flair) => {
-    const option = document.createElement('option'); option.value = flair; option.textContent = flair;
-    option.selected = flair === duelProfile.equippedFlair; return option;
-  }));
-  renderDuelRankPyramid();
+function renderDuelLeaderboard(): void {
   duelLeaderboardEl.replaceChildren();
   if (!duelLeaderboardData.length) {
-    const empty = document.createElement('div'); empty.className = 'duel-leaderboard-row';
-    empty.textContent = 'Play a rated Duel to enter the standings.'; duelLeaderboardEl.appendChild(empty);
+    const empty = document.createElement('div'); empty.className = 'duel-leaderboard-empty';
+    empty.textContent = 'Nobody has posted a rated result yet. Be the first name on the board.';
+    duelLeaderboardEl.appendChild(empty);
     return;
   }
   duelLeaderboardData.forEach((entry, index) => {
-    const rankInfo = entry.rank;
     const row = document.createElement('div');
-    row.className = `duel-leaderboard-row${entry.username.toLowerCase() === authedName.toLowerCase() ? ' me' : ''}`;
-    row.innerHTML = `<span class="duel-leaderboard-rank">${index + 1}</span><strong>${duelEscapeHtml(entry.username)}</strong>` +
-      `<span style="color:${rankInfo.color}">${entry.placementsRemaining > 0 ? 'Provisional' : rankInfo.label}<small> · ${duelEscapeHtml(entry.equippedFlair)}</small></span><b>${entry.rp} RP</b>` +
-      `<span class="duel-leaderboard-record">${entry.wins}W · ${entry.losses}L</span>`;
+    row.className = 'duel-leaderboard-row';
+    if (index < 3) row.classList.add(`top${index + 1}`);
+    if (entry.username.toLowerCase() === authedName.toLowerCase()) row.classList.add('me');
+    applyRankTheme(row, entry.rank);
+    const place = document.createElement('span');
+    place.className = 'duel-leaderboard-rank'; place.textContent = String(index + 1);
+    const emblem = makeDuelEmblem(entry.rank, 'sm');
+    const name = document.createElement('strong'); name.textContent = entry.username;
+    const tier = document.createElement('span'); tier.className = 'duel-leaderboard-tier';
+    tier.textContent = duelRankLabel(entry);
+    const flair = document.createElement('small'); flair.textContent = entry.equippedFlair;
+    tier.appendChild(flair);
+    const rp = document.createElement('b'); rp.textContent = `${entry.rp} RP`;
+    const record = document.createElement('span');
+    record.className = 'duel-leaderboard-record';
+    record.textContent = `${entry.wins}W · ${entry.losses}L`;
+    row.append(place, emblem, name, tier, rp, record);
     duelLeaderboardEl.appendChild(row);
   });
 }
 
-duelFlair.addEventListener('change', () => net.sendDuelFlair(duelFlair.value as DuelPublicProfile['equippedFlair']));
+function renderDuelProgress(): void {
+  const { rank, next, progress } = duelRankProgress(duelProfile.rp);
+  // The whole Arena — and the result screen — wears the local player's colours.
+  applyRankTheme(duelProfileCard, rank);
+  applyRankTheme(minigamesModal, rank);
+  applyRankTheme(duelResultEl, rank);
+  paintDuelEmblem(duelProfileEmblem, rank);
+  duelRankName.textContent = duelRankLabel(duelProfile);
+  duelEloEl.textContent = `${duelProfile.rp} RP`;
+  duelRankFill.style.width = `${Math.round(progress * 100)}%`;
+  duelRankNext.textContent = duelProfile.placementsRemaining > 0
+    ? `${duelProfile.placementsRemaining} placement match${duelProfile.placementsRemaining === 1 ? '' : 'es'} left`
+    : next ? `${next.min - duelProfile.rp} RP to ${next.label}` : 'Voxelon I · no ceiling';
+  duelProfileMeta.textContent = duelProfile.streak > 1
+    ? `${duelProfile.streak} win streak · ${duelProfile.wins}W ${duelProfile.losses}L · ${duelProfile.equippedFlair}`
+    : `${duelProfile.wins}W ${duelProfile.losses}L · Peak ${duelRankAt(duelProfile.peakRp).label} · ${duelProfile.equippedFlair}`;
+  renderDuelLadder();
+  renderDuelLeaderboard();
+}
 
 function duelInviteUrl(token: string): string {
   return withDuelToken(location.href, token);
@@ -2090,9 +2196,41 @@ function refreshDuelsAvailability(): void {
   duelsCardAction.textContent = online ? 'Create private lobby' : 'Multiplayer server required';
 }
 
+// ── View switching ─────────────────────────────────────────────────────────
+type ArenaView = 'games' | 'lobby' | 'ladder';
+let arenaView: ArenaView = 'games';
+
+function showArenaView(view: ArenaView): void {
+  // The Lobby tab only exists while you are actually in one.
+  if (view === 'lobby' && !duelSnapshot) view = 'games';
+  arenaView = view;
+  minigamesBrowser.hidden = view !== 'games';
+  minigamesLobby.hidden = view !== 'lobby';
+  duelRanksView.hidden = view !== 'ladder';
+  const tabs: [HTMLButtonElement, ArenaView][] =
+    [[arenaTabGames, 'games'], [arenaTabLobby, 'lobby'], [arenaTabLadder, 'ladder']];
+  for (const [tab, id] of tabs) tab.setAttribute('aria-selected', String(id === view));
+  if (view === 'ladder') renderDuelLadder();
+}
+
+function refreshArenaTabs(): void {
+  const inLobby = !!duelSnapshot;
+  arenaTabLobby.disabled = !inLobby;
+  arenaTabLobby.replaceChildren(document.createTextNode('Lobby'));
+  if (inLobby) {
+    const dot = document.createElement('span'); dot.className = 'arena-tab-dot';
+    arenaTabLobby.appendChild(dot);
+  }
+  if (!inLobby && arenaView === 'lobby') showArenaView('games');
+}
+
+function showDuelBrowser(): void { refreshArenaTabs(); showArenaView('games'); }
+function showDuelLobby(): void { refreshArenaTabs(); showArenaView('lobby'); }
+
 function openMinigames(focusLobby = false): void {
   minigamesRestoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : minigamesBtn;
   refreshDuelsAvailability();
+  refreshArenaTabs();
   minigamesModal.classList.add('open');
   minigamesModal.setAttribute('aria-hidden', 'false');
   if (focusLobby && duelSnapshot) showDuelLobby();
@@ -2102,90 +2240,88 @@ function openMinigames(focusLobby = false): void {
 function closeMinigames(): void {
   minigamesModal.classList.remove('open');
   minigamesModal.setAttribute('aria-hidden', 'true');
-  if (!duelRanksView.hidden) {
-    if (duelRanksReturnToLobby && duelSnapshot) showDuelLobby(); else showDuelBrowser();
-  }
   minigamesRestoreFocus?.focus();
   minigamesRestoreFocus = null;
 }
 
-function showDuelBrowser(): void {
-  duelRanksView.hidden = true;
-  duelRanksButton.setAttribute('aria-expanded', 'false');
-  minigamesBrowser.hidden = false;
-  minigamesLobby.hidden = true;
-}
-
-function showDuelLobby(): void {
-  duelRanksView.hidden = true;
-  duelRanksButton.setAttribute('aria-expanded', 'false');
-  minigamesBrowser.hidden = true;
-  minigamesLobby.hidden = false;
-}
-
-function showDuelRanks(): void {
-  duelRanksReturnToLobby = !minigamesLobby.hidden;
-  renderDuelRankPyramid();
-  minigamesBrowser.hidden = true;
-  minigamesLobby.hidden = true;
-  duelRanksView.hidden = false;
-  duelRanksButton.setAttribute('aria-expanded', 'true');
-  duelRanksBack.focus();
+// ── Lobby ──────────────────────────────────────────────────────────────────
+/** Stable per-player colour, shared by the lobby avatar and the match pills. */
+function duelSkinColor(skin: number): string {
+  return `hsl(${((skin % 360) + 360) % 360} 68% 56%)`;
 }
 
 function renderDuelLobby(): void {
   const snap = duelSnapshot;
+  refreshArenaTabs();
   if (!snap) { showDuelBrowser(); return; }
   showDuelLobby();
-  duelLobbyTitle.textContent = `${snap.id} · ${snap.participants.length}/${snap.capacity} players`;
+  duelLobbyTitle.textContent = `Lobby ${snap.id}`;
   duelInvite.value = duelInviteToken ? duelInviteUrl(duelInviteToken) : '';
   duelInvite.parentElement!.toggleAttribute('hidden', !duelInviteToken);
+
   duelRoster.replaceChildren();
   for (const p of snap.participants) {
-    const row = document.createElement('div'); row.className = 'duel-player';
+    const row = document.createElement('div'); row.className = 'duel-slot';
+    if (p.ready && p.connected) row.classList.add('ready');
+    if (p.id === net.myId) { row.classList.add('me'); applyRankTheme(row, p.profile.rank); }
     const avatar = document.createElement('span'); avatar.className = 'duel-avatar';
     avatar.setAttribute('aria-hidden', 'true');
-    avatar.style.background = `hsl(${((p.skin % 360) + 360) % 360} 68% 54%)`;
+    avatar.style.background = duelSkinColor(p.skin);
     const name = document.createElement('strong');
-    name.textContent = `${p.username}${p.id === net.myId ? ' (you)' : ''}`;
-    const host = document.createElement('small'); host.className = 'duel-player-rank';
-    const rank = p.profile.rank; host.style.setProperty('--rank-color', rank.color);
-    host.textContent = `${p.profile.placementsRemaining > 0 ? 'Provisional' : rank.label} · ${p.profile.rp} RP · ${p.profile.equippedFlair}${p.host ? ' · HOST' : ''}`;
+    name.textContent = p.id === net.myId ? `${p.username} (you)` : p.username;
+    if (p.host) {
+      const host = document.createElement('span');
+      host.className = 'duel-slot-host'; host.textContent = 'HOST';
+      name.appendChild(host);
+    }
+    const rankLine = document.createElement('small'); rankLine.className = 'duel-player-rank';
+    rankLine.style.setProperty('--slot-rank', p.profile.rank.color);
+    rankLine.textContent = `${duelRankLabel(p.profile)} · ${p.profile.rp} RP`;
+    const flair = document.createElement('span'); flair.textContent = p.profile.equippedFlair;
+    rankLine.appendChild(flair);
     const state = document.createElement('span');
-    state.className = p.ready ? 'duel-ready' : 'duel-waiting';
-    state.textContent = !p.connected ? 'Disconnected' : p.ready ? 'Ready' : 'Not ready';
-    row.append(avatar, name, host, state); duelRoster.appendChild(row);
+    state.className = `duel-slot-state ${!p.connected ? 'duel-gone' : p.ready ? 'duel-ready' : 'duel-waiting'}`;
+    state.textContent = !p.connected ? 'Gone' : p.ready ? 'Ready' : 'Waiting';
+    row.append(avatar, name, rankLine, state); duelRoster.appendChild(row);
   }
+  // Empty seats are shown, not hidden: the room visibly has space for more.
+  for (let i = snap.participants.length; i < snap.capacity; i++) {
+    const slot = document.createElement('div');
+    slot.className = 'duel-slot empty';
+    slot.textContent = i < DUEL_MIN_PLAYERS ? 'Waiting for a challenger' : 'Open seat';
+    duelRoster.appendChild(slot);
+  }
+
   const me = snap.participants.find((p) => p.id === net.myId);
+  const readyCount = snap.participants.filter((p) => p.ready && p.connected).length;
+  // The bar tracks readiness of the people actually here, not of four seats.
+  duelReadyBarFill.style.width = snap.participants.length
+    ? `${Math.round(readyCount / snap.participants.length * 100)}%` : '0%';
   duelReady.textContent = me?.ready ? 'Cancel ready' : 'Ready up';
   duelReady.setAttribute('aria-pressed', String(me?.ready === true));
-  const canReady = snap.phase === 'lobby';
-  duelReady.setAttribute('aria-disabled', String(!canReady));
+  duelReady.setAttribute('aria-disabled', String(snap.phase !== 'lobby'));
   const canStart = !!me?.host && snap.phase === 'lobby' &&
-    snap.participants.length >= 2 && snap.participants.length <= 4 &&
+    snap.participants.length >= DUEL_MIN_PLAYERS && snap.participants.length <= snap.capacity &&
     snap.participants.every((p) => p.connected && p.ready);
   duelStart.setAttribute('aria-disabled', String(!canStart));
   duelStart.textContent = snap.phase === 'results' ? 'Match complete' : 'Start match';
   if (snap.phase === 'lobby' && !duelFeedback.textContent?.includes('copied')) {
     duelFeedback.textContent = canStart
-      ? 'Everyone is ready. The host can start instantly.'
-      : snap.participants.length < 2
-        ? 'Share the invite link to bring in at least one opponent.'
-        : 'Ready up when your loadout is set.';
+      ? 'Everyone is ready. Drop them in.'
+      : snap.participants.length < DUEL_MIN_PLAYERS
+        ? 'Send the invite link — you need at least one opponent.'
+        : `${readyCount}/${snap.participants.length} ready. Lock in when your loadout is set.`;
   }
   if (snap.phase === 'results' && snap.result) {
     const winner = snap.participants.find((p) => p.id === snap.result!.winner)?.username;
-    duelFeedback.textContent = winner ? `${winner} wins — rematch voting opens for 15 seconds.` : 'Match complete.';
+    duelFeedback.textContent = winner ? `${winner} took it — rematch voting is open for 15 seconds.` : 'Match complete.';
   }
 }
 
 minigamesBtn.addEventListener('click', () => openMinigames(!!duelSnapshot));
-function leaveDuelRanks(): void {
-  if (duelRanksReturnToLobby && duelSnapshot) showDuelLobby(); else showDuelBrowser();
-  duelRanksButton.focus();
-}
-duelRanksButton.addEventListener('click', () => duelRanksView.hidden ? showDuelRanks() : leaveDuelRanks());
-duelRanksBack.addEventListener('click', leaveDuelRanks);
+arenaTabGames.addEventListener('click', () => showArenaView('games'));
+arenaTabLobby.addEventListener('click', () => showArenaView('lobby'));
+arenaTabLadder.addEventListener('click', () => showArenaView('ladder'));
 minigamesClose.addEventListener('click', closeMinigames);
 minigamesModal.addEventListener('mousedown', (event) => {
   if (event.target === minigamesModal) closeMinigames();
@@ -2205,12 +2341,13 @@ minigamesModal.addEventListener('keydown', (event) => {
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
 });
 
+// Parallax on the card art: the pointer nudges the image inside its frame.
 for (const card of minigamesModal.querySelectorAll<HTMLElement>('.minigame-card')) {
   card.addEventListener('pointermove', (event) => {
     if (accessibility.reducedMotion || accessibility.photosensitivitySafe) return;
     const rect = card.getBoundingClientRect();
-    card.style.setProperty('--px', `${((event.clientX - rect.left) / rect.width - .5) * -8}px`);
-    card.style.setProperty('--py', `${((event.clientY - rect.top) / rect.height - .5) * -6}px`);
+    card.style.setProperty('--px', `${((event.clientX - rect.left) / rect.width - .5) * -10}px`);
+    card.style.setProperty('--py', `${((event.clientY - rect.top) / rect.height - .5) * -8}px`);
   });
   card.addEventListener('pointerleave', () => {
     card.style.setProperty('--px', '0px'); card.style.setProperty('--py', '0px');
@@ -2226,7 +2363,7 @@ duelsCardAction.addEventListener('click', () => {
     duelFeedback.textContent = 'Duels requires a live multiplayer server.';
     return;
   }
-  duelFeedback.textContent = 'Creating private lobby…';
+  duelFeedback.textContent = 'Opening a private arena…';
   net.sendDuelCreate();
 });
 duelReady.addEventListener('click', () => {
@@ -2258,7 +2395,7 @@ duelCopy.addEventListener('click', async () => {
   try {
     if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(duelInvite.value);
     else throw new Error('Clipboard API unavailable');
-    duelFeedback.textContent = 'Invite copied.';
+    duelFeedback.textContent = 'Invite copied. Send it to whoever you want to beat.';
   } catch {
     duelInvite.focus(); duelInvite.select();
     let copied = false;
@@ -2280,6 +2417,7 @@ net.onDuelLobby = (snapshot, inviteToken) => {
     renderDuelLobby();
     if (!duelArenaActive) openMinigames(true);
   } else {
+    playDuelFeed(snapshot.feed);
     renderDuelScoreboard();
     if (snapshot.phase === 'countdown' && duelResultData && duelResultVoteStatus) {
       duelResultVoteStatus.textContent = 'Rematch accepted · preparing the arena…';
@@ -2312,6 +2450,7 @@ function joinPendingDuel(): void {
   net.sendDuelJoin(pendingDuelToken);
 }
 
+// ── Match state ────────────────────────────────────────────────────────────
 let duelArenaActive = false;
 let duelActiveBounds: DuelArenaBounds | null = null;
 let duelArenaReadySent = false;
@@ -2339,20 +2478,38 @@ let duelLocalFallback: {
   health: number; dead: boolean; mode: GameMode;
 } | null = null;
 
+// Top-centre clock + one score pill per fighter.
 const duelMatchHud = document.createElement('div');
 duelMatchHud.className = 'duel-match-hud';
-duelMatchHud.innerHTML =
-  '<div class="duel-hud-cell"><small>Time</small><strong data-duel-time>5:00</strong></div>' +
-  '<div class="duel-hud-cell"><small>Leader</small><strong data-duel-leader>—</strong></div>' +
-  '<div class="duel-hud-cell"><small>Your kills</small><strong data-duel-kills>0</strong></div>';
+const duelClockEl = document.createElement('div'); duelClockEl.className = 'duel-clock';
+const duelClockLabel = document.createElement('small'); duelClockLabel.textContent = 'Round';
+const duelTimeEl = document.createElement('strong'); duelTimeEl.textContent = '5:00';
+const duelClockBar = document.createElement('div'); duelClockBar.className = 'duel-clock-bar';
+const duelClockBarFill = document.createElement('i'); duelClockBar.appendChild(duelClockBarFill);
+duelClockEl.append(duelClockLabel, duelTimeEl, duelClockBar);
+const duelPillsEl = document.createElement('div'); duelPillsEl.className = 'duel-score-pills';
+duelMatchHud.append(duelClockEl, duelPillsEl);
 app.appendChild(duelMatchHud);
-const duelTimeEl = duelMatchHud.querySelector('[data-duel-time]')!;
-const duelLeaderEl = duelMatchHud.querySelector('[data-duel-leader]')!;
-const duelKillsEl = duelMatchHud.querySelector('[data-duel-kills]')!;
 
 const duelCenterCue = document.createElement('div');
 duelCenterCue.className = 'duel-center-cue';
 app.appendChild(duelCenterCue);
+
+// The announcer slam and the kill feed both replay from the authoritative
+// snapshot feed, so every client sees the same call at the same moment.
+const duelAnnounceEl = document.createElement('div');
+duelAnnounceEl.className = 'duel-announce';
+duelAnnounceEl.setAttribute('role', 'status');
+duelAnnounceEl.setAttribute('aria-live', 'polite');
+const duelAnnounceTitle = document.createElement('b');
+const duelAnnounceSub = document.createElement('small');
+duelAnnounceEl.append(duelAnnounceTitle, duelAnnounceSub);
+app.appendChild(duelAnnounceEl);
+
+const duelKillFeedEl = document.createElement('div');
+duelKillFeedEl.className = 'duel-killfeed';
+duelKillFeedEl.setAttribute('aria-hidden', 'true');
+app.appendChild(duelKillFeedEl);
 
 const duelScoreboard = document.createElement('div');
 duelScoreboard.className = 'duel-scoreboard';
@@ -2361,7 +2518,7 @@ duelScoreboard.appendChild(duelScorePanel); app.appendChild(duelScoreboard);
 
 const duelScoresTouch = document.createElement('button');
 duelScoresTouch.className = 'duel-scores-touch'; duelScoresTouch.type = 'button';
-duelScoresTouch.textContent = 'Hold scores'; duelScoresTouch.setAttribute('aria-label', 'Hold to see scores');
+duelScoresTouch.textContent = 'Scores'; duelScoresTouch.setAttribute('aria-label', 'Hold to see scores');
 app.appendChild(duelScoresTouch);
 
 const duelResultEl = document.createElement('div'); duelResultEl.className = 'duel-result';
@@ -2384,37 +2541,118 @@ function duelStatus(p: DuelParticipant): string {
   if (p.spectating) return 'Spectator';
   return p.alive ? 'Alive' : 'Respawning';
 }
+
+// ── The announcer ──────────────────────────────────────────────────────────
+const DUEL_EVENT_COLORS: Record<DuelEventKind, string> = {
+  first_blood: '#ff6d80', double_kill: '#7fd3f5', triple_kill: '#5ad0ff',
+  quad_kill: '#a273f7', spree: '#ffd45e', rampage: '#ff9a3c',
+  unstoppable: '#ff5f76', godlike: '#ff4f6e', shutdown: '#55e8a6',
+  revenge: '#c08cff', match_point: '#ffe6a4',
+};
+let duelFeedSeen = 0;
+let duelAnnounceUntil = 0;
+
+function pushDuelKillFeed(event: DuelEvent): void {
+  const copy = duelEventCopy(event);
+  const row = document.createElement('div');
+  row.style.setProperty('--feed', DUEL_EVENT_COLORS[event.kind]);
+  const tag = document.createElement('b'); tag.textContent = copy.title;
+  const text = document.createElement('span'); text.textContent = copy.sub;
+  row.append(tag, text);
+  duelKillFeedEl.appendChild(row);
+  while (duelKillFeedEl.childElementCount > 4) duelKillFeedEl.firstElementChild!.remove();
+  window.setTimeout(() => row.remove(), 4_600);
+}
+
+/** Replay any announcer beats this client has not shown yet. Beats are
+ * idempotent by `seq`, so a dropped snapshot never loses or repeats a call. */
+function playDuelFeed(feed: DuelEvent[]): void {
+  if (!duelArenaActive) { duelFeedSeen = Math.max(duelFeedSeen, ...feed.map((e) => e.seq), 0); return; }
+  const fresh = feed.filter((event) => event.seq > duelFeedSeen).sort((a, b) => a.seq - b.seq);
+  if (!fresh.length) return;
+  duelFeedSeen = fresh[fresh.length - 1].seq;
+  for (const event of fresh) pushDuelKillFeed(event);
+  // Only the biggest beat of the batch takes the centre of the screen.
+  const headline = fresh[fresh.length - 1];
+  const copy = duelEventCopy(headline);
+  duelAnnounceEl.style.setProperty('--announce', DUEL_EVENT_COLORS[headline.kind]);
+  duelAnnounceTitle.textContent = copy.title;
+  duelAnnounceSub.textContent = copy.sub;
+  duelAnnounceEl.classList.remove('visible', 'out');
+  void duelAnnounceEl.offsetWidth;  // restart the slam animation
+  duelAnnounceEl.classList.add('visible');
+  duelAnnounceUntil = duelNow() + 2_200;
+  audio.duelAnnounce(headline.kind);
+}
+
+function updateDuelAnnounce(now: number): void {
+  if (!duelAnnounceEl.classList.contains('visible')) return;
+  if (now < duelAnnounceUntil) return;
+  if (!duelAnnounceEl.classList.contains('out')) {
+    duelAnnounceEl.classList.add('out');
+    duelAnnounceUntil = now + 400;
+    return;
+  }
+  duelAnnounceEl.classList.remove('visible', 'out');
+}
+
+// ── Scoreboard ─────────────────────────────────────────────────────────────
 function duelScoreRows(players: DuelParticipant[]): HTMLElement {
   const rows = document.createElement('div');
   const head = document.createElement('div'); head.className = 'duel-score-row header';
-  head.innerHTML = '<span>#</span><span>Player</span><span>Kills</span><span>Deaths</span><span>K/D</span><span class="duel-score-status">Status</span>';
+  for (const label of ['#', 'Player', 'Kills', 'Deaths', 'K/D']) {
+    const cell = document.createElement('span'); cell.textContent = label; head.appendChild(cell);
+  }
+  const statusHead = document.createElement('span');
+  statusHead.className = 'duel-score-status'; statusHead.textContent = 'Status';
+  head.appendChild(statusHead);
   rows.appendChild(head);
   const topKills = players[0]?.kills ?? 0;
   players.forEach((p, index) => {
     const row = document.createElement('div');
     row.className = `duel-score-row${p.id === net.myId ? ' local' : ''}`;
-    const kd = p.deaths === 0 ? p.kills.toFixed(1) : (p.kills / p.deaths).toFixed(2);
-    const leader = p.kills === topKills && topKills > 0;
-    const status = duelStatus(p);
-    row.innerHTML = `<span>${index + 1}</span><strong>${leader ? '<span class="duel-leader-mark">◆</span> ' : ''}${duelEscapeHtml(p.username)}</strong>` +
-      `<span>${p.kills}</span><span>${p.deaths}</span><span>${kd}</span>` +
-      `<span class="duel-score-status ${p.alive ? 'duel-status-alive' : 'duel-status-out'}">${status}</span>`;
+    const place = document.createElement('span'); place.textContent = String(index + 1);
+    const name = document.createElement('strong');
+    if (p.kills === topKills && topKills > 0) {
+      const mark = document.createElement('span');
+      mark.className = 'duel-leader-mark'; mark.textContent = '◆';
+      name.appendChild(mark);
+    }
+    const who = document.createElement('span'); who.textContent = p.username;
+    name.appendChild(who);
+    if (p.spree >= 3) {
+      const spree = document.createElement('span');
+      spree.className = 'duel-score-spree'; spree.textContent = `${p.spree}×`;
+      name.appendChild(spree);
+    }
+    const kills = document.createElement('span');
+    kills.className = 'duel-score-kills'; kills.textContent = String(p.kills);
+    const deaths = document.createElement('span'); deaths.textContent = String(p.deaths);
+    const kd = document.createElement('span');
+    kd.textContent = p.deaths === 0 ? p.kills.toFixed(1) : (p.kills / p.deaths).toFixed(2);
+    const status = document.createElement('span');
+    status.className = `duel-score-status ${p.alive ? 'duel-status-alive' : 'duel-status-out'}`;
+    status.textContent = duelStatus(p);
+    row.append(place, name, kills, deaths, kd, status);
     rows.appendChild(row);
   });
   return rows;
 }
-function duelEscapeHtml(text: string): string {
-  const node = document.createElement('span'); node.textContent = text; return node.innerHTML;
-}
+
 function renderDuelScoreboard(): void {
   const players = duelResultData?.scoreboard ?? duelSnapshot?.participants ?? [];
   duelScorePanel.replaceChildren();
   const head = document.createElement('div'); head.className = 'duel-score-head';
   const title = document.createElement('div');
-  title.innerHTML = `<small>${duelSnapshot?.phase === 'sudden_death' ? 'Sudden death' : 'Duels'}</small><h2>Scoreboard</h2>`;
-  const hint = document.createElement('small'); hint.textContent = duelResultData ? 'Final' : 'Release Tab to close';
+  const kicker = document.createElement('small');
+  kicker.textContent = duelSnapshot?.phase === 'sudden_death' ? 'Sudden death' : 'Prism Colosseum';
+  const heading = document.createElement('h2'); heading.textContent = 'Scoreboard';
+  title.append(kicker, heading);
+  const hint = document.createElement('small');
+  hint.textContent = duelResultData ? 'Final' : `First to ${DUEL_SCORE_LIMIT}`;
   head.append(title, hint); duelScorePanel.append(head, duelScoreRows(players));
 }
+
 function setDuelScoresVisible(visible: boolean): void {
   duelScoresHeld = visible;
   duelScoreboard.classList.toggle('visible', visible && duelArenaActive && !duelResultData);
@@ -2436,34 +2674,38 @@ for (const type of ['pointerup', 'pointercancel', 'touchend', 'touchcancel'] as 
   duelScoresTouch.addEventListener(type, (event) => { event.preventDefault(); setDuelScoresVisible(false); });
 }
 
+// ── Result reveal ──────────────────────────────────────────────────────────
 let duelRevealFrame = 0;
-function makeDuelEmblem(profile: DuelPublicProfile, extraClass = ''): HTMLElement {
-  const emblem = document.createElement('div'); emblem.className = `duel-emblem ${extraClass}`.trim();
-  emblem.setAttribute('aria-hidden', 'true');
-  emblem.style.setProperty('--rank-color', profile.rank.color);
-  for (let i = 0; i < 9; i++) {
-    const block = document.createElement('i');
-    block.style.setProperty('--block-delay', `${i * 25}ms`);
-    block.style.setProperty('--shard-x', `${(i % 3 - 1) * 18}px`);
-    block.style.setProperty('--shard-y', `${(Math.floor(i / 3) - 1) * 16}px`);
-    block.style.visibility = i < 7 + (profile.rank.index % 3) ? 'visible' : 'hidden';
-    emblem.appendChild(block);
-  }
-  return emblem;
-}
 
 function duelChangeSummary(change: DuelProgressChange): string {
   const direction = change.change >= 0 ? `gained ${change.change}` : `lost ${Math.abs(change.change)}`;
-  const protection = change.shieldUsed ? ` Demotion shield protected ${change.protectedFloor} RP.` : '';
+  const protection = change.shieldUsed ? ` Promotion shield held the floor at ${change.protectedFloor} RP.` : '';
   const reveal = change.placementReveal ? ` Placement complete: ${change.newRank.label}.` : '';
-  const unlock = change.newlyUnlockedFlair ? ` Unlocked ${change.newlyUnlockedFlair}.` : '';
+  const unlock = change.newlyUnlockedFlair ? ` Unlocked the title ${change.newlyUnlockedFlair}.` : '';
   return `${direction} RP, from ${change.beforeRp} to ${change.afterRp}. ${change.newRank.label}.${protection}${reveal}${unlock}`;
+}
+
+/** Headline chips under the result title: the moments worth remembering. */
+function duelResultRecap(result: DuelResult): string[] {
+  const chips: string[] = [];
+  const best = [...result.scoreboard].sort((a, b) => b.bestSpree - a.bestSpree)[0];
+  if (best && best.bestSpree >= 3) chips.push(`Best spree · ${best.username} ×${best.bestSpree}`);
+  const firstBlood = result.feed.find((event) => event.kind === 'first_blood');
+  if (firstBlood) chips.push(`First blood · ${firstBlood.actorName}`);
+  const biggest = result.feed.filter((event) => event.kind === 'godlike' ||
+    event.kind === 'unstoppable' || event.kind === 'quad_kill').pop();
+  if (biggest) chips.push(duelEventCopy(biggest).title);
+  const total = result.scoreboard.reduce((sum, p) => sum + p.kills, 0);
+  chips.push(`${total} total kills`);
+  return chips;
 }
 
 function renderDuelResult(result: DuelResult): void {
   cancelAnimationFrame(duelRevealFrame);
   duelResultData = result; screen = 'duel_results'; input.unlock();
   pauseEl.style.display = 'none';
+  duelAnnounceEl.classList.remove('visible', 'out');
+  duelKillFeedEl.replaceChildren();
   for (const change of result.progressChanges) if (change.id !== net.myId) remotePlayers.invalidate(change.id);
   const winner = result.scoreboard.find((p) => p.id === result.winner);
   const mine = result.winner === net.myId;
@@ -2471,51 +2713,69 @@ function renderDuelResult(result: DuelResult): void {
   duelResultCard.replaceChildren();
   const kicker = document.createElement('div'); kicker.className = 'duel-result-kicker';
   kicker.textContent = mine ? 'Victory' : result.winner === null ? 'Match complete' : 'Defeat';
-  const title = document.createElement('h2'); title.textContent = winner ? `${winner.username} wins` : 'No winner';
+  const title = document.createElement('h2');
+  title.textContent = winner ? (mine ? 'You win' : `${winner.username} wins`) : 'No winner';
   const summary = document.createElement('p'); summary.className = 'duel-result-summary';
-  summary.textContent = `${formatDuelTime(result.durationMs)} · ${result.finishReason.replace('_', ' ')}`;
+  const reasonText: Record<DuelResult['finishReason'], string> = {
+    time: 'full time', score: `score limit — ${DUEL_SCORE_LIMIT} kills`,
+    sudden_death: 'sudden death', forfeit: 'forfeit', cancelled: 'cancelled',
+  };
+  summary.textContent = `${formatDuelTime(result.durationMs)} · ${reasonText[result.finishReason]}`;
+  const recap = document.createElement('div'); recap.className = 'duel-result-recap';
+  for (const text of duelResultRecap(result)) {
+    const chip = document.createElement('span'); chip.textContent = text; recap.appendChild(chip);
+  }
   const scores = document.createElement('div'); scores.className = 'duel-result-score';
   scores.appendChild(duelScoreRows(result.scoreboard));
+
   const rating = result.progressChanges.find((change) => change.id === net.myId);
   const ratingReveal = document.createElement('div'); ratingReveal.className = 'duel-rating-reveal';
   let revealNow: HTMLButtonElement | null = null;
   if (rating) {
+    applyRankTheme(duelResultEl, rating.oldRank);
+    applyRankTheme(ratingReveal, rating.oldRank);
     ratingReveal.classList.toggle('loss', rating.change < 0);
-    ratingReveal.style.setProperty('--rank-color', rating.oldRank.color);
-    const revealEmblem = makeDuelEmblem({ ...rating.profile, rp: rating.beforeRp,
-      rank: rating.oldRank }, 'duel-reveal-emblem');
+    const revealEmblem = makeDuelEmblem(rating.oldRank, 'lg duel-reveal-emblem');
     ratingReveal.appendChild(revealEmblem);
     const label = document.createElement('div'); label.className = 'duel-result-kicker';
     label.textContent = rating.profile.placementsRemaining > 0
-      ? `Provisional · ${rating.profile.placementsRemaining} placements left` : rating.newRank.label;
+      ? `Provisional · ${rating.profile.placementsRemaining} placements left` : rating.oldRank.label;
     const number = document.createElement('div'); number.className = 'duel-rating-number';
     const amount = document.createElement('span'); amount.textContent = String(rating.beforeRp);
+    const unit = document.createElement('em'); unit.textContent = 'RP';
     const delta = document.createElement('span');
     delta.className = `duel-rating-change ${rating.change >= 0 ? 'up' : 'down'}`;
     delta.textContent = `${rating.change >= 0 ? '+' : ''}${rating.change}`;
-    number.append(amount, document.createTextNode(' RP '), delta);
+    number.append(amount, unit, delta);
     const track = document.createElement('div'); track.className = 'duel-result-track';
-    const trackFill = document.createElement('div'); trackFill.className = 'duel-result-track-fill'; track.appendChild(trackFill);
+    const trackFill = document.createElement('div'); trackFill.className = 'duel-result-track-fill';
+    track.appendChild(trackFill);
     const chips = document.createElement('div'); chips.className = 'duel-change-chips';
     const chipTexts = [
       `Skill ${rating.baseSkillDelta >= 0 ? '+' : ''}${rating.baseSkillDelta}`,
       `Streak ${rating.streakBonus ? `+${rating.streakBonus}` : '—'}`,
       `Repeat ×${rating.repeatMultiplier}`,
-      rating.shieldUsed ? `Shield · floor ${rating.protectedFloor}` : 'Protection · not used',
+      rating.shieldUsed ? `Shield · floor ${rating.protectedFloor}` : 'Shield · not used',
     ];
-    for (const text of chipTexts) { const chip = document.createElement('span'); chip.className = 'duel-change-chip'; chip.textContent = text; chips.appendChild(chip); }
+    for (const text of chipTexts) {
+      const chip = document.createElement('span'); chip.className = 'duel-change-chip';
+      chip.textContent = text; chips.appendChild(chip);
+    }
     const event = document.createElement('div'); event.className = 'duel-rank-up'; event.hidden = true;
-    const particles = document.createElement('div'); particles.className = 'duel-block-particles'; particles.setAttribute('aria-hidden', 'true');
-    for (let i = 0; i < 24; i++) {
-      const block = document.createElement('i'); block.style.setProperty('--x', `${(i * 37) % 96 + 2}%`);
-      block.style.setProperty('--y', `${(i * 53) % 76 + 12}%`); block.style.setProperty('--delay', `${(i % 8) * .05}s`);
+    const particles = document.createElement('div'); particles.className = 'duel-block-particles';
+    particles.setAttribute('aria-hidden', 'true');
+    for (let i = 0; i < 26; i++) {
+      const block = document.createElement('i');
+      block.style.setProperty('--x', `${(i * 37) % 96 + 2}%`);
+      block.style.setProperty('--y', `${(i * 53) % 76 + 12}%`);
+      block.style.setProperty('--delay', `${(i % 8) * .06}s`);
       particles.appendChild(block);
     }
     const live = document.createElement('div'); live.className = 'duel-reveal-summary';
     live.setAttribute('role', 'status'); live.setAttribute('aria-live', 'polite');
     ratingReveal.append(label, number, track, chips, event, particles, live);
 
-    let settled = false;
+    let ascended = false, finished = false;
     const started = performance.now();
     const settle = (skipped = false) => {
       const state = duelRevealState(rating, performance.now() - started, {
@@ -2525,30 +2785,36 @@ function renderDuelResult(result: DuelResult): void {
       ratingReveal.dataset.phase = state.phase;
       duelResultCard.dataset.revealPhase = state.phase;
       amount.textContent = String(state.displayedRp);
-      trackFill.style.width = `${Math.round(duelRankProgress(state.displayedRp).progress * 100)}%`;
+      trackFill.style.width = `${Math.round(state.barProgress * 100)}%`;
       particles.hidden = state.phase !== 'counting' || state.particles === 'none';
-      if (state.settled && !settled) {
-        settled = true; particles.hidden = true;
-        ratingReveal.style.setProperty('--rank-color', rating.newRank.color);
-        revealEmblem.style.setProperty('--rank-color', rating.newRank.color);
-        revealEmblem.querySelectorAll<HTMLElement>('i').forEach((block, index) => {
-          block.style.visibility = index < 7 + (rating.newRank.index % 3) ? 'visible' : 'hidden';
-        });
+      if (state.shake > 0 && !accessibility.reducedMotion) {
+        const kick = state.shake * 6;
+        duelResultCard.style.transform =
+          `translate(${(Math.random() - .5) * kick}px, ${(Math.random() - .5) * kick}px)`;
+      } else if (duelResultCard.style.transform) {
+        duelResultCard.style.transform = '';
+      }
+      // The ascension beat: the emblem, the colour and the sound all change
+      // together, the moment the count-up lands on the final number.
+      if (state.revealed && !ascended) {
+        ascended = true; particles.hidden = true;
+        applyRankTheme(ratingReveal, rating.newRank);
+        applyRankTheme(duelResultEl, rating.newRank);
+        paintDuelEmblem(revealEmblem, rating.newRank);
         label.textContent = rating.profile.placementsRemaining > 0
           ? `Provisional · ${rating.profile.placementsRemaining} placements left` : rating.newRank.label;
         ratingReveal.classList.add(rating.newlyUnlockedFlair ? 'unlock' : rating.promotion ? 'promotion'
           : rating.demotion ? 'demotion' : 'ordinary');
         const revealEvents = [
-          rating.placementReveal ? `Placement rank revealed — ${rating.newRank.label}` : '',
-          rating.newlyUnlockedFlair ? `Cosmetic unlocked — ${rating.newlyUnlockedFlair}` : '',
-          !rating.placementReveal && rating.namedRankPromotion ? `Rank promotion — ${rating.newRank.name}` : '',
-          !rating.placementReveal && !rating.namedRankPromotion && rating.promotion ? `Division promotion — ${rating.newRank.label}` : '',
-          rating.demotion ? `Division change — ${rating.newRank.label}` : '',
+          rating.placementReveal ? `Placed — ${rating.newRank.label}` : '',
+          rating.newlyUnlockedFlair ? `Title unlocked — ${rating.newlyUnlockedFlair}` : '',
+          !rating.placementReveal && rating.namedRankPromotion ? `${rating.newRank.name.toUpperCase()} TIER` : '',
+          !rating.placementReveal && !rating.namedRankPromotion && rating.promotion ? `Promoted — ${rating.newRank.label}` : '',
+          rating.demotion ? `Demoted — ${rating.newRank.label}` : '',
         ].filter(Boolean);
         const eventText = revealEvents.join(' · ');
         event.textContent = eventText; event.hidden = !eventText;
         live.textContent = duelChangeSummary(rating);
-        if (revealNow) revealNow.hidden = true;
         audio.duelCue(rating.placementReveal ? 'placement' : rating.newlyUnlockedFlair ? 'unlock'
           : rating.namedRankPromotion ? 'rankPromotion' : rating.promotion ? 'promotion'
           : rating.demotion ? 'demotion' : rating.change >= 0 ? 'gain' : 'loss');
@@ -2556,16 +2822,21 @@ function renderDuelResult(result: DuelResult): void {
           window.setTimeout(() => audio.duelCue('unlock'), 420);
         }
       }
+      if (state.settled && !finished) {
+        finished = true;
+        duelResultCard.style.transform = '';
+        if (revealNow) revealNow.hidden = true;
+      }
       if (!state.settled) duelRevealFrame = requestAnimationFrame(() => settle());
     };
-    revealNow = document.createElement('button'); revealNow.type = 'button'; revealNow.textContent = 'Reveal now';
+    revealNow = document.createElement('button'); revealNow.type = 'button'; revealNow.textContent = 'Skip';
     revealNow.setAttribute('aria-label', 'Skip rank animation and reveal final Rank Points');
     revealNow.addEventListener('click', () => settle(true));
     settle(accessibility.reducedMotion);
   }
   const controls = document.createElement('div'); controls.className = 'duel-result-controls';
   const rematch = document.createElement('button'); rematch.type = 'button';
-  rematch.className = 'primary'; rematch.textContent = 'Play again';
+  rematch.className = 'primary'; rematch.textContent = 'Run it back';
   const lobby = document.createElement('button'); lobby.type = 'button'; lobby.textContent = 'Return to lobby';
   rematch.addEventListener('click', () => {
     rematch.disabled = true;
@@ -2580,52 +2851,125 @@ function renderDuelResult(result: DuelResult): void {
   });
   const voteStatus = document.createElement('p'); voteStatus.className = 'duel-result-summary';
   duelResultVoteStatus = voteStatus; duelResultRematch = rematch;
-  controls.append(...(revealNow ? [revealNow] : []), rematch, lobby); duelResultCard.append(kicker, title, summary, scores,
+  controls.append(...(revealNow ? [revealNow] : []), rematch, lobby);
+  duelResultCard.append(kicker, title, summary, recap, scores,
     ...(rating ? [ratingReveal] : []), voteStatus, controls);
   duelResultEl.classList.add('visible'); duelScoreboard.classList.remove('visible');
   requestAnimationFrame(() => (revealNow ?? rematch).focus());
 }
 
+// ── Match HUD ──────────────────────────────────────────────────────────────
+let duelPillNodes = new Map<number, { root: HTMLElement; score: HTMLElement; spree: HTMLElement }>();
+let duelPillKey = '';
+const duelLastKills = new Map<number, number>();
+
+function renderDuelPills(board: DuelParticipant[]): void {
+  const key = board.map((p) => p.id).join(',');
+  if (key !== duelPillKey) {
+    duelPillKey = key;
+    duelPillNodes = new Map();
+    duelPillsEl.replaceChildren();
+    for (const p of board) {
+      const pill = document.createElement('div'); pill.className = 'duel-pill';
+      const swatch = document.createElement('i'); swatch.style.background = duelSkinColor(p.skin);
+      const name = document.createElement('span'); name.textContent = p.username;
+      const score = document.createElement('b');
+      const spree = document.createElement('span'); spree.className = 'duel-pill-spree';
+      pill.append(swatch, name, score, spree);
+      duelPillsEl.appendChild(pill);
+      duelPillNodes.set(p.id, { root: pill, score, spree });
+    }
+  }
+  const topKills = Math.max(0, ...board.map((p) => p.kills));
+  for (const p of board) {
+    const node = duelPillNodes.get(p.id);
+    if (!node) continue;
+    node.score.textContent = String(p.kills);
+    node.spree.textContent = p.spree >= 3 ? `${p.spree}×` : '';
+    node.root.classList.toggle('me', p.id === net.myId);
+    node.root.classList.toggle('leader', p.kills === topKills && topKills > 0);
+    node.root.classList.toggle('down', !p.alive || !p.connected);
+    // A score change bumps the pill so you feel the point land.
+    if ((duelLastKills.get(p.id) ?? p.kills) !== p.kills) {
+      node.root.classList.remove('bump');
+      void node.root.offsetWidth;
+      if (!accessibility.reducedMotion) node.root.classList.add('bump');
+    }
+    duelLastKills.set(p.id, p.kills);
+  }
+}
+
+/** Swap the centre cue, restarting its slam animation only when the text
+ * actually changes so a held cue does not strobe. */
+let duelCueText = '';
+function setDuelCue(text: string, tone: '' | 'go' | 'danger' = ''): void {
+  if (text === duelCueText) return;
+  duelCueText = text;
+  duelCenterCue.textContent = text;
+  duelCenterCue.style.display = text ? 'block' : 'none';
+  duelCenterCue.className = 'duel-center-cue';
+  if (!text) return;
+  if (text.length > 2) duelCenterCue.classList.add('text');
+  if (tone) duelCenterCue.classList.add(tone);
+  if (!accessibility.reducedMotion) {
+    void duelCenterCue.offsetWidth;
+    duelCenterCue.classList.add('slam');
+  }
+}
+
 function updateDuelHud(): void {
   if (!duelArenaActive || !duelSnapshot) {
     duelMatchHud.classList.remove('visible'); duelScoresTouch.classList.remove('visible');
-    duelCenterCue.style.display = 'none'; return;
+    duelAnnounceEl.classList.remove('visible', 'out');
+    if (duelKillFeedEl.childElementCount) duelKillFeedEl.replaceChildren();
+    setDuelCue('');
+    return;
   }
   duelMatchHud.classList.add('visible'); duelScoresTouch.classList.add('visible');
   const now = duelNow();
   const board = duelSnapshot.participants;
   const me = board.find((p) => p.id === net.myId);
-  duelKillsEl.textContent = String(me?.kills ?? 0);
-  const topKills = board[0]?.kills ?? 0;
-  const leaders = board.filter((p) => p.kills === topKills);
-  duelLeaderEl.textContent = leaders.length > 1
-    ? `Tie · ${topKills}` : board[0] ? `${board[0].username} · ${topKills}` : '—';
-  const leaderKey = leaders.map((p) => p.id).join(',');
-  if (duelSnapshot.phase === 'running' && duelLastLeaderKey &&
+  renderDuelPills(board);
+  updateDuelAnnounce(now);
+  // A change at the top of the board gets its own small sting.
+  const topKills = Math.max(0, ...board.map((p) => p.kills));
+  const leaderKey = board.filter((p) => p.kills === topKills).map((p) => p.id).join(',');
+  if (duelSnapshot.phase === 'running' && duelLastLeaderKey && topKills > 0 &&
       leaderKey && leaderKey !== duelLastLeaderKey) audio.duelCue('lead');
   duelLastLeaderKey = leaderKey;
-  if (duelSnapshot.phase === 'sudden_death') duelTimeEl.textContent = 'SUDDEN DEATH';
-  else {
-    const remaining = (duelSnapshot.endsAt ??
-      (duelSnapshot.startedAt ?? now) + DUEL_ROUND_MS) - now;
+
+  duelClockEl.classList.remove('warn', 'critical', 'sudden');
+  if (duelSnapshot.phase === 'sudden_death') {
+    duelClockLabel.textContent = 'Next kill wins';
+    duelTimeEl.textContent = 'SUDDEN DEATH';
+    duelClockEl.classList.add('sudden');
+    duelClockBarFill.style.transform = 'scaleX(1)';
+  } else {
+    const endsAt = duelSnapshot.endsAt ?? (duelSnapshot.startedAt ?? now) + DUEL_ROUND_MS;
+    const remaining = endsAt - now;
+    duelClockLabel.textContent = `First to ${DUEL_SCORE_LIMIT}`;
     duelTimeEl.textContent = formatDuelTime(remaining);
+    duelClockBarFill.style.transform = `scaleX(${Math.max(0, Math.min(1, remaining / DUEL_ROUND_MS))})`;
+    if (remaining <= 30_000) duelClockEl.classList.add('critical');
+    else if (remaining <= 60_000) duelClockEl.classList.add('warn');
     if (duelSnapshot.phase === 'running' && remaining <= 60_000 && remaining > 0 &&
         !duelFinalMinuteShown) {
-      duelFinalMinuteShown = true; duelFinalMinuteCueUntil = now + 1_500;
+      duelFinalMinuteShown = true; duelFinalMinuteCueUntil = now + 1_600;
     }
     if (duelSnapshot.phase === 'running' && remaining <= 30_000 && remaining > 0 &&
         !duelFinalThirtyPlayed) {
       duelFinalThirtyPlayed = true; audio.duelCue('final30');
     }
   }
-  let cue = '';
+
+  let cue = '', tone: '' | 'go' | 'danger' = '';
   if (duelSnapshot.phase === 'countdown') {
     const countdownAt = duelSnapshot.countdownEndsAt ?? duelCountdownEndsAt;
-    if (countdownAt <= 0) cue = 'LOADING ARENA';
+    if (countdownAt <= 0) { cue = 'BUILDING ARENA'; }
     else {
-      const left = countdownAt - now;
-      const number = Math.max(0, Math.ceil(left / 1000));
+      const number = Math.max(0, Math.ceil((countdownAt - now) / 1000));
       cue = number > 0 ? String(number) : 'FIGHT';
+      if (number === 0) tone = 'go';
       if (number !== duelLastCountdownCue) {
         duelLastCountdownCue = number;
         audio.duelCue(number > 0 ? 'countdown' : 'fight');
@@ -2635,19 +2979,18 @@ function updateDuelHud(): void {
   } else if (duelSpectating && duelRespawnAt > now) {
     cue = `RESPAWN ${Math.ceil((duelRespawnAt - now) / 1000)}`;
   } else if (duelSnapshot.phase === 'sudden_death') {
-    cue = 'SUDDEN DEATH';
+    cue = 'SUDDEN DEATH'; tone = 'danger';
     if (!duelSuddenDeathPlayed) { duelSuddenDeathPlayed = true; audio.duelCue('sudden'); }
   } else if (duelSnapshot.phase === 'running') {
     if (!duelFightPlayed) {
       duelFightPlayed = true; duelFightCueUntil = now + 900; audio.duelCue('fight');
     }
-    if (now < duelFightCueUntil) cue = 'FIGHT';
+    if (now < duelFightCueUntil) { cue = 'FIGHT'; tone = 'go'; }
   }
-  if (!cue && now < duelFinalMinuteCueUntil) {
-    cue = 'FINAL MINUTE';
-  }
-  duelCenterCue.textContent = cue;
-  duelCenterCue.style.display = cue ? 'block' : 'none';
+  if (!cue && now < duelFinalMinuteCueUntil) { cue = 'FINAL MINUTE'; tone = 'danger'; }
+  // The announcer owns the centre of the screen while it is up.
+  setDuelCue(duelAnnounceEl.classList.contains('visible') && cue.length > 2 ? '' : cue, tone);
+
   if (duelArenaActive && !duelArenaReadySent && duelSnapshot?.phase === 'countdown' &&
       (duelSnapshot.countdownEndsAt === undefined || duelSnapshot.countdownEndsAt === 0)) {
     if (world.isLoaded(player.pos.x, player.pos.z) || (pendingTeleport && worldTimeLocal - pendingTeleport.started > 1.5)) {
@@ -2659,11 +3002,11 @@ function updateDuelHud(): void {
     const connected = board.filter((p) => p.connected);
     const votes = connected.filter((p) => p.rematchVote).length;
     const left = formatDuelTime(duelResultData.rematchDeadline - now);
-    duelResultVoteStatus.textContent = `${votes}/${connected.length} voted Rematch · ${left}`;
+    duelResultVoteStatus.textContent = `${votes}/${connected.length} voted to run it back · ${left}`;
     const voted = me?.rematchVote === true;
     if (duelResultRematch) {
       duelResultRematch.disabled = voted;
-      duelResultRematch.textContent = voted ? 'Vote sent' : 'Play again';
+      duelResultRematch.textContent = voted ? 'Vote sent' : 'Run it back';
     }
   }
   if (duelScoresHeld) renderDuelScoreboard();
@@ -2681,12 +3024,17 @@ function cleanupDuelSession(restoreState = true): void {
   duelSnapshot = null;
   duelInviteToken = '';
   pendingDuelToken = '';
+  duelFeedSeen = 0;
+  duelLastKills.clear();
+  duelPillKey = '';
 
   duelMatchHud.classList.remove('visible');
   duelScoresTouch.classList.remove('visible');
   duelScoreboard.classList.remove('visible');
   duelResultEl.classList.remove('visible');
-  duelCenterCue.style.display = 'none';
+  duelAnnounceEl.classList.remove('visible', 'out');
+  duelKillFeedEl.replaceChildren();
+  setDuelCue('');
 
   if (typeof closeMinigames === 'function') closeMinigames();
 
@@ -2720,10 +3068,14 @@ net.onDuelArena = (arena, spawn, countdownEndsAt) => {
     maxX: arena.originX + DUEL_ARENA_SIZE, maxZ: arena.originZ + DUEL_ARENA_SIZE,
   });
   duelArenaReadySent = false; duelCountdownEndsAt = countdownEndsAt;
-  duelLastCountdownCue = -1; duelLastLeaderKey = '';
+  duelLastCountdownCue = -1; duelCueText = ''; duelLastLeaderKey = '';
   duelFinalMinuteShown = false; duelFinalThirtyPlayed = false;
   duelSuddenDeathPlayed = false; duelFightPlayed = false;
   duelFightCueUntil = 0; duelFinalMinuteCueUntil = 0;
+  duelFeedSeen = duelSnapshot?.feed.reduce((max, e) => Math.max(max, e.seq), 0) ?? 0;
+  duelLastKills.clear(); duelPillKey = '';
+  duelKillFeedEl.replaceChildren();
+  duelAnnounceEl.classList.remove('visible', 'out');
   duelResultData = null; duelResultEl.classList.remove('visible'); duelSpectating = false;
   clearVaultPresentation(true); endGrapple(); setSeat(null); myRope = null;
   killfeedEl.replaceChildren(); combatTagUntilLocal = 0; combatTimerEl.style.display = 'none';
@@ -2767,7 +3119,7 @@ net.onDuelProfile = (profile, leaderboard) => {
   renderDuelProgress();
 };
 net.onDuelLeaderboard = (leaderboard) => {
-  duelLeaderboardData = leaderboard.slice(); renderDuelProgress();
+  duelLeaderboardData = leaderboard.slice(); renderDuelLeaderboard();
 };
 net.onDuelProfileUpdate = (id) => remotePlayers.invalidate(id);
 net.onDuelRestored = (x, y, z, yaw, pitch, health, dead, mode, state) => {
@@ -2777,6 +3129,8 @@ net.onDuelRestored = (x, y, z, yaw, pitch, health, dead, mode, state) => {
   duelArenaReadySent = false;
   duelSpectating = false; duelResultData = null; duelResultEl.classList.remove('visible');
   duelMatchHud.classList.remove('visible'); duelScoresTouch.classList.remove('visible');
+  duelKillFeedEl.replaceChildren(); duelAnnounceEl.classList.remove('visible', 'out');
+  setDuelCue('');
   if (state) inventory.restore(state);
   flagModels.setState(flagState.breakable, flagState.flags);
   player.maxHealth = maxHealthFor(localHearts);

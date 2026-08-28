@@ -609,9 +609,23 @@ export class Terrain {
     }
   }
 
+  /** True if any tree could stamp a trunk or canopy into this column. Trees
+   *  reach at most TREE_MARGIN blocks sideways — the exact window plantTrees
+   *  itself scans — so testing that neighbourhood is complete by construction,
+   *  and stays correct if the canopy shapes are ever retuned. */
+  private underFoliage(x: number, z: number): boolean {
+    for (let dx = -TREE_MARGIN; dx <= TREE_MARGIN; dx++) {
+      for (let dz = -TREE_MARGIN; dz <= TREE_MARGIN; dz++) {
+        if (this.treeAt(x + dx, z + dz)) return true;
+      }
+    }
+    return false;
+  }
+
   /** A column is safe to stand on at spawn: solid ground comfortably above sea
    *  level, NOT carved open by a ravine (which would leave you in mid-air), NOT
-   *  a water/beach biome, NOT ashlands (surface lava), and surrounded by dry
+   *  a water/beach biome, NOT ashlands (surface lava), NOT under a tree (the
+   *  ground is clear but your head is inside the canopy), and surrounded by dry
    *  land so you don't land on a lone spike at the water's edge. */
   private safeSpawnColumn(x: number, z: number): boolean {
     const h = this.height(x, z);
@@ -619,6 +633,9 @@ export class Terrain {
     if (this.ravineDepth(x, z) > 0) return false;   // surface carved -> air/fall
     const biome = this.biomeWithWater(x, z, h);
     if (biome === Biome.Ocean || biome === Biome.Beach || biome === Biome.Ashlands) return false;
+    // A canopy overhead leaves no headroom, which the server's respawn-safety
+    // check rejects — so a "spawn" here would silently relocate the player.
+    if (this.underFoliage(x, z)) return false;
     // Neighbours must also be dry land (no spawning on a 1-wide pillar in water).
     for (const [dx, dz] of [[2, 0], [-2, 0], [0, 2], [0, -2]] as [number, number][]) {
       if (this.height(x + dx, z + dz) < SEA_LEVEL + 1) return false;

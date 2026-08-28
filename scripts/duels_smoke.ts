@@ -1,12 +1,15 @@
 import {
-  DUEL_ARENA_FLOOR_Y, DUEL_ARENA_LOAD_TIMEOUT_MS, DUEL_COUNTDOWN_MS, DUEL_MIN_LIGHT, DUEL_REMATCH_MS,
-  DUEL_RESPAWN_MS, DUEL_ROUND_MS, Duels, clampToDuelArena, duelArenaBounds,
-  duelArenaBlockAt, duelArenaLightAt, duelArenaSolidAt, duelTerrainElevation,
-  hasArenaLineOfSight, orderedDuelScoreboard,
+  DUEL_ARENA_FLOOR_Y, DUEL_ARENA_LOAD_TIMEOUT_MS, DUEL_ARENA_SIZE, DUEL_COUNTDOWN_MS,
+  DUEL_MAX_ELEVATION, DUEL_MIN_LIGHT, DUEL_MULTI_KILL_MS, DUEL_REMATCH_MS,
+  DUEL_RESPAWN_MS, DUEL_ROUND_MS, DUEL_SCORE_LIMIT, DUEL_WALL_ROWS,
+  Duels, clampToDuelArena, duelArenaBounds,
+  duelArenaBlockAt, duelArenaLightAt, duelArenaSolidAt, duelEventCopy, duelKillEvents,
+  duelTerrainElevation, hasArenaLineOfSight, orderedDuelScoreboard,
   safestDuelSpawn, duelTokenFromUrl, withDuelToken,
 } from '../src/duels';
 import {
   DUEL_DIVISIONS, DUEL_FLAIRS, DUEL_MAX_HISTORY_OPPONENTS, DUEL_PLACEMENT_MATCHES,
+  DUEL_RANK_NAMES, DUEL_REVEAL_ASCEND_MS, DUEL_TIER_THEMES,
   canEquipDuelFlair, duelProfileOf, duelRankAt, duelRankProgress, duelRevealState,
   loadDuelProgress, migrateLegacyDuelProgress, newDuelProgress, sanitizeDuelProgress,
   sanitizeDuelRp, settleDuelProgress, unlockedDuelFlairs,
@@ -225,15 +228,42 @@ const who = (id: number) => ({ id, username: `Player${id}`, skin: id * 17 });
     duelArenaSolidAt(a.originX, 255, a.originZ + 20, a) &&
     !duelArenaSolidAt(a.originX + 20, a.floor + 20, a.originZ + 20, a));
   const wallMaterials = new Set<number>();
-  for (let y = a.floor; y <= a.floor + 8; y++) {
-    wallMaterials.add(duelArenaBlockAt(a.originX, y, a.originZ + 10) ?? Block.Air);
+  for (let y = a.floor; y < a.floor + DUEL_WALL_ROWS; y++) {
+    for (const z of [10, 12]) wallMaterials.add(duelArenaBlockAt(a.originX, y, a.originZ + z) ?? Block.Air);
   }
-  check('arena wall palette combines textured timber and stone',
-    [...wallMaterials].some((b) => b === Block.OakPlanks || b === Block.SprucePlanks || b === Block.SpruceLog) &&
-    [...wallMaterials].some((b) => b === Block.Stone || b === Block.Cobblestone));
+  check('colosseum wall stacks ivory pilasters, glowing rune bands and a cornice',
+    wallMaterials.has(Block.IvoryColumn) && wallMaterials.has(Block.RuneGlass) &&
+    wallMaterials.has(Block.LuminousLimestone) && wallMaterials.has(Block.CarvedVaultBrick));
+  check('the wall seals every column above the crenellations',
+    duelArenaBlockAt(a.originX, a.floor + DUEL_WALL_ROWS, a.originZ + 10) === Block.Barrier &&
+    duelArenaBlockAt(a.originX, a.ceiling - 1, a.originZ + 10) === Block.Barrier);
+  // Every wall cell duelArenaSolidAt calls solid must actually be stamped with
+  // a block: an Air/null hole in the shell would be a shootable gap.
+  let shellHoles = 0;
+  for (let x = a.originX; x < a.originX + DUEL_ARENA_SIZE; x++) {
+    for (let z = a.originZ; z < a.originZ + DUEL_ARENA_SIZE; z++) {
+      for (let y = a.floor - 1; y < a.floor + DUEL_WALL_ROWS + 2; y++) {
+        if (!duelArenaSolidAt(x, y, z, a)) continue;
+        const block = duelArenaBlockAt(x, y, z);
+        if (block === null || block === Block.Air) shellHoles++;
+      }
+    }
+  }
+  check('solidity and the block stamp agree on every arena cell', shellHoles === 0, `holes=${shellHoles}`);
+  // The four spawn platforms are rotations of one authored corner, so the
+  // whole interior must be invariant under a 90-degree turn about its centre.
+  let asymmetric = 0;
+  for (let lx = 0; lx < 40; lx++) for (let lz = 0; lz < 40; lz++) {
+    if (duelTerrainElevation(lx, lz) !== duelTerrainElevation(39 - lz, lx)) asymmetric++;
+  }
+  check('the arena is exactly four-fold rotationally symmetric', asymmetric === 0, `cells=${asymmetric}`);
+  check('spawn corners are colour-coded with four different platform materials',
+    new Set(a.spawns.map((spawn) => duelArenaBlockAt(spawn.x, spawn.y - 1, spawn.z))).size === 4);
+  check('the altar is the highest natural stand in the arena',
+    duelTerrainElevation(19, 19) === 4 && duelTerrainElevation(20, 20) === 4);
   const standY = (x: number, z: number): number | null => {
     let solid = a.floor;
-    for (let y = a.floor + 1; y <= a.floor + 4; y++) {
+    for (let y = a.floor + 1; y <= a.floor + DUEL_MAX_ELEVATION; y++) {
       if (duelArenaSolidAt(x, y, z, a)) solid = y;
     }
     const stand = solid + 1;
@@ -262,7 +292,7 @@ const who = (id: number) => ({ id, username: `Player${id}`, skin: id * 17 });
     }
   }
   const routeTargets = [...a.spawns, { x: a.minX + 20, y: 0, z: a.minZ + 20 }];
-  check('route graph connects every spawn and the center across 5-level terrain',
+  check('route graph connects every spawn platform and the central altar',
     routeTargets.every((p) => reached.has(`${Math.floor(p.x)},${Math.floor(p.z)}`)),
     `reached=${reached.size}`);
   const clamped = clampToDuelArena({ x: -1e9, y: 1e9, z: 1e9 }, a);
@@ -274,9 +304,93 @@ const who = (id: number) => ({ id, username: `Player${id}`, skin: id * 17 });
   check('score sorts kills desc then deaths asc', board[0].id === 2);
 }
 
+// Announcer beats: multi-kills, sprees, shutdowns, revenge and the score
+// limit are all derived from the authoritative kill feed.
+{
+  check('first blood is only ever called once, on the opening kill',
+    duelKillEvents({ firstKillOfMatch: true, killerSpree: 1, victimSpree: 0, multi: 1,
+      revenge: false, killerScore: 1 }).includes('first_blood') &&
+    !duelKillEvents({ firstKillOfMatch: false, killerSpree: 1, victimSpree: 0, multi: 1,
+      revenge: false, killerScore: 2 }).includes('first_blood'));
+  const multi = (n: number) => duelKillEvents({ firstKillOfMatch: false, killerSpree: n,
+    victimSpree: 0, multi: n, revenge: false, killerScore: n });
+  check('multi-kill names escalate to a quad and then stop escalating',
+    multi(2).includes('double_kill') && multi(3).includes('triple_kill') &&
+    multi(4).includes('quad_kill') && multi(6).includes('quad_kill'));
+  const spree = (n: number) => duelKillEvents({ firstKillOfMatch: false, killerSpree: n,
+    victimSpree: 0, multi: 1, revenge: false, killerScore: n });
+  check('spree beats fire exactly on 3, 5, 7 and 10 and never in between',
+    spree(3).includes('spree') && spree(5).includes('rampage') &&
+    spree(7).includes('unstoppable') && spree(10).includes('godlike') &&
+    spree(4).length === 0 && spree(11).length === 0);
+  check('ending someone else\u2019s spree is a shutdown, and paying back is revenge',
+    duelKillEvents({ firstKillOfMatch: false, killerSpree: 1, victimSpree: 4, multi: 1,
+      revenge: false, killerScore: 1 }).includes('shutdown') &&
+    duelKillEvents({ firstKillOfMatch: false, killerSpree: 1, victimSpree: 0, multi: 1,
+      revenge: true, killerScore: 1 }).includes('revenge'));
+  check('match point is called one kill before the score limit',
+    duelKillEvents({ firstKillOfMatch: false, killerSpree: 1, victimSpree: 0, multi: 1,
+      revenge: false, killerScore: DUEL_SCORE_LIMIT - 1 }).includes('match_point') &&
+    !duelKillEvents({ firstKillOfMatch: false, killerSpree: 1, victimSpree: 0, multi: 1,
+      revenge: false, killerScore: DUEL_SCORE_LIMIT - 2 }).includes('match_point'));
+  check('every beat has announcer copy naming who did it',
+    duelEventCopy({ seq: 1, kind: 'shutdown', actor: 1, actorName: 'Ana', victim: 2,
+      victimName: 'Bo', count: 5, at: 0 }).sub === 'Ana ended Bo');
+
+  const d = new Duels(token);
+  const made = d.create(who(1), 0); if ('reason' in made) throw new Error('create failed');
+  d.join(made.token, who(2), 0);
+  d.setReady(1, true, 0); d.setReady(2, true, 0); d.start(1, 0);
+  d.markArenaReady(1, 0); d.markArenaReady(2, 0); d.tick(DUEL_COUNTDOWN_MS);
+  const t = DUEL_COUNTDOWN_MS;
+  const first = d.recordDeath(2, 1, t)!;
+  check('the opening kill lands first blood in the shared feed',
+    first.feed.length === 1 && first.feed[0].kind === 'first_blood' && first.feed[0].seq === 1);
+  d.tick(t + DUEL_RESPAWN_MS);
+  const second = d.recordDeath(2, 1, t + DUEL_RESPAWN_MS + 1)!;
+  check('a second kill inside the window is a double kill for the same player',
+    second.feed.some((e) => e.kind === 'double_kill' && e.actor === 1 && e.count === 2));
+  d.tick(t + DUEL_RESPAWN_MS * 2 + 1);
+  const late = d.recordDeath(2, 1, t + DUEL_MULTI_KILL_MS + 5_000)!;
+  check('the multi-kill window closes but the spree keeps counting',
+    !late.feed.some((e) => e.kind === 'double_kill' && e.seq > second.feed[second.feed.length - 1].seq) &&
+    late.participants.find((p) => p.id === 1)!.spree === 3 &&
+    late.feed.some((e) => e.kind === 'spree' && e.count === 3));
+  check('dying resets the spree but never the best spree on the board',
+    (() => {
+      d.tick(t + DUEL_MULTI_KILL_MS + 5_000 + DUEL_RESPAWN_MS);
+      const snap = d.recordDeath(1, 2, t + DUEL_MULTI_KILL_MS + 6_000)!;
+      const killer = snap.participants.find((p) => p.id === 1)!;
+      return killer.spree === 0 && killer.bestSpree === 3 &&
+        snap.feed.some((e) => e.kind === 'shutdown' && e.actor === 2);
+    })());
+}
+
+{
+  // Reaching the score limit ends the round immediately, ahead of the clock.
+  const d = new Duels(token);
+  const made = d.create(who(1), 0); if ('reason' in made) throw new Error('create failed');
+  d.join(made.token, who(2), 0);
+  d.setReady(1, true, 0); d.setReady(2, true, 0); d.start(1, 0);
+  d.markArenaReady(1, 0); d.markArenaReady(2, 0); d.tick(DUEL_COUNTDOWN_MS);
+  let now = DUEL_COUNTDOWN_MS, last = null as ReturnType<Duels['recordDeath']>;
+  for (let kill = 0; kill < DUEL_SCORE_LIMIT; kill++) {
+    last = d.recordDeath(2, 1, now);
+    now += DUEL_RESPAWN_MS + 1;
+    d.tick(now);
+  }
+  check('the score limit finishes the round early and names the winner',
+    last?.phase === 'results' && last.result?.finishReason === 'score' &&
+    last.result.winner === 1 && last.result.durationMs < DUEL_ROUND_MS);
+  check('the result carries the announcer recap for the summary screen',
+    (last!.result!.feed.length > 0) &&
+    last!.result!.scoreboard.some((p) => p.bestSpree >= 3));
+}
+
 function madeParticipant(id: number, kills: number, deaths: number, joinOrder: number) {
   return { id, username: `P${id}`, skin: id, host: id === 1, ready: true, connected: true,
-    profile: duelProfileOf(newDuelProgress()), kills, deaths, alive: true, spectating: false, rematchVote: false, joinOrder };
+    profile: duelProfileOf(newDuelProgress()), kills, deaths, alive: true, spectating: false,
+    rematchVote: false, joinOrder, spree: 0, bestSpree: 0, multi: 0, multiUntil: 0, lastKilledBy: 0 };
 }
 
 {
@@ -284,9 +398,18 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
     duelRankAt(index * 100).label === rank.label));
   check('division tracks span exactly 100 RP', duelRankProgress(649).progress === .49 &&
     duelRankProgress(650).rank.label === 'Gold III');
-  check('RP sanitization rejects junk without capping Grandmaster progression',
+  check('RP sanitization rejects junk without capping top-tier progression',
     sanitizeDuelRp(NaN) === 450 && sanitizeDuelRp(-12) === 0 &&
-    duelRankAt(75_000).label === 'Grandmaster I' && sanitizeDuelRp(75_000) === 75_000);
+    duelRankAt(75_000).label === 'Voxelon I' && sanitizeDuelRp(75_000) === 75_000);
+  check('every named tier owns a distinct theme, emblem and title',
+    DUEL_TIER_THEMES.length === DUEL_RANK_NAMES.length &&
+    new Set(DUEL_TIER_THEMES.map((t) => t.color)).size === 7 &&
+    new Set(DUEL_TIER_THEMES.map((t) => t.emblem)).size === 7 &&
+    new Set(DUEL_TIER_THEMES.map((t) => t.flair)).size === 7 &&
+    DUEL_TIER_THEMES.every((t, i) => t.facets === i + 3 && t.flair === DUEL_FLAIRS[i]));
+  check('a rank carries its whole look, not just a colour',
+    DUEL_DIVISIONS.every((rank) => !!rank.accent && !!rank.shade && !!rank.motto &&
+      rank.color === DUEL_TIER_THEMES[rank.namedIndex].color));
 
   const complete = (rp: number) => ({ ...newDuelProgress(), rp, peakRp: rp,
     rank: duelRankAt(rp), placementsRemaining: 0 });
@@ -360,7 +483,7 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   ], 21_000);
   check('named-rank promotion grants one shield and cosmetic unlock',
     promoted.changes[0].namedRankPromotion && promoted.states[0].state.demotionShield &&
-    promoted.changes[0].newlyUnlockedFlair === 'Prism Breaker');
+    promoted.changes[0].newlyUnlockedFlair === 'Emerald Blade');
 
   const legacyCases: [number, number][] = [[0, 0], [899, 299], [900, 300], [2000, 1800], [4000, 2100]];
   check('legacy Elo tier boundaries migrate proportionally', legacyCases.every(([elo, rp]) =>
@@ -388,14 +511,27 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
     !canEquipDuelFlair(lockedProfile, DUEL_FLAIRS[1]) && unlockedDuelFlairs(lockedProfile).length === 1);
 
   const revealChange = equal.changes[0];
-  check('deterministic reveal visits impact, previous, count, and settled states',
+  check('deterministic reveal visits impact, hold, count, ascend and settled',
     duelRevealState(revealChange, 0).phase === 'impact' &&
-    duelRevealState(revealChange, 500).phase === 'previous' &&
+    duelRevealState(revealChange, 600).phase === 'previous' &&
     duelRevealState(revealChange, 1500).phase === 'counting' &&
-    duelRevealState(revealChange, 3000).phase === 'settled');
+    duelRevealState(revealChange, 2800).phase === 'ascend' &&
+    duelRevealState(revealChange, DUEL_REVEAL_ASCEND_MS).phase === 'settled');
+  check('the new rank appears at the ascend beat, before the choreography ends',
+    !duelRevealState(revealChange, 1500).revealed &&
+    duelRevealState(revealChange, 2800).revealed &&
+    !duelRevealState(revealChange, 2800).settled);
+  check('the count-up is monotonic and lands exactly on the final RP',
+    duelRevealState(revealChange, 1080).displayedRp === revealChange.beforeRp &&
+    duelRevealState(revealChange, 2449).displayedRp <= revealChange.afterRp &&
+    duelRevealState(revealChange, 2500).displayedRp === revealChange.afterRp);
+  check('the division bar tracks the counted number, not the final one',
+    Math.abs(duelRevealState(revealChange, 1080).barProgress -
+      duelRankProgress(revealChange.beforeRp).progress) < 1e-9);
   check('skip and reduced-motion settle immediately; safe mode removes dense particles',
     duelRevealState(revealChange, 0, { skipped: true }).settled &&
     duelRevealState(revealChange, 0, { reducedMotion: true }).settled &&
+    duelRevealState(revealChange, 0, { skipped: true }).revealed &&
     !duelRevealState(revealChange, 1500, { photosensitivitySafe: true }).denseParticles);
 
   const accounts = new Accounts([{ username: 'LegacyUser', salt: 's', hash: 'h', faction: 0,
@@ -425,7 +561,7 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
     slots: [{ id: Item.GoldIngot, count: 4 }], armor: [], selected: 0,
   } });
   s.addPlayer(3, { username: 'WorldOnly', faction: 1 });
-  const lockedFlair = s.handle(1, { t: 'duelFlair', flair: 'Voxel Grandmaster' });
+  const lockedFlair = s.handle(1, { t: 'duelFlair', flair: 'Voxelon Mythic' });
   check('server rejects a forged locked-flair selection', lockedFlair.some((out) =>
     out.to === 1 && out.msg.t === 'duelFlairResult' && !out.msg.ok));
   s.handle(1, { t: 'xform', x: 120, y: 70, z: 30, yaw: 0, pitch: 0 });
@@ -615,7 +751,7 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
     o.to === 2 && o.msg.t === 'duelResult' && o.msg.result.winner === 2 &&
     o.msg.result.finishReason === 'forfeit' && o.msg.result.progressChanges.length === 2));
   check('server settles and persists a result exactly once before fan-out', settlementCalls === 1);
-  s.handle(2, { t: 'duelFlair', flair: 'Block Rookie' });
+  s.handle(2, { t: 'duelFlair', flair: 'Scrapper' });
   check('revisiting the result snapshot cannot settle it twice', settlementCalls === 1);
   const restoredOne = forfeited.find((o) => o.to === 1 && o.msg.t === 'duelRestored')?.msg;
   check('leaver receives exact open-world restoration', !!restoredOne &&

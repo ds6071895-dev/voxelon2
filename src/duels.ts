@@ -3,7 +3,6 @@
 // the same clocks, score ordering, arena geometry, and lobby rules.
 
 import { Block } from './blocks';
-import { Noise2D } from './noise';
 import {
   DuelProgressChange, DuelPublicProfile, duelProfileOf, newDuelProgress,
   sanitizeDuelProgress,
@@ -11,7 +10,88 @@ import {
 export { duelRankAt, duelRankProgress } from './duels_progression';
 
 export type DuelPhase = 'lobby' | 'countdown' | 'running' | 'sudden_death' | 'results';
-export type DuelFinishReason = 'time' | 'sudden_death' | 'forfeit' | 'cancelled';
+export type DuelFinishReason = 'time' | 'score' | 'sudden_death' | 'forfeit' | 'cancelled';
+
+/** Announcer beats. The server derives these from the authoritative kill feed
+ * so every client shows the same call at the same moment. */
+export type DuelEventKind =
+  | 'first_blood' | 'double_kill' | 'triple_kill' | 'quad_kill'
+  | 'spree' | 'rampage' | 'unstoppable' | 'godlike'
+  | 'shutdown' | 'revenge' | 'match_point';
+
+export interface DuelEvent {
+  /** Monotonic per-lobby id. Clients play each beat exactly once. */
+  seq: number;
+  kind: DuelEventKind;
+  actor: number;
+  actorName: string;
+  victim: number;
+  victimName: string;
+  /** Streak length or multi-kill size, whichever the beat is about. */
+  count: number;
+  at: number;
+}
+
+/** Consecutive kills land as one multi-kill while they stay inside this gap. */
+export const DUEL_MULTI_KILL_MS = 8_000;
+/** Killing spree thresholds, in kills without dying. */
+export const DUEL_SPREE_STEPS: readonly { at: number; kind: DuelEventKind }[] = [
+  { at: 3, kind: 'spree' }, { at: 5, kind: 'rampage' },
+  { at: 7, kind: 'unstoppable' }, { at: 10, kind: 'godlike' },
+];
+/** Reaching this many kills wins the round outright, before the clock. */
+export const DUEL_SCORE_LIMIT = 15;
+/** How many announcer beats a snapshot carries back. */
+export const DUEL_FEED_LENGTH = 6;
+
+const DUEL_EVENT_COPY: Record<DuelEventKind, { title: string; sub: (e: DuelEvent) => string }> = {
+  first_blood: { title: 'FIRST BLOOD', sub: (e) => `${e.actorName} drew it` },
+  double_kill: { title: 'DOUBLE KILL', sub: (e) => `${e.actorName} \u00d72` },
+  triple_kill: { title: 'TRIPLE KILL', sub: (e) => `${e.actorName} \u00d73` },
+  quad_kill: { title: 'QUAD KILL', sub: (e) => `${e.actorName} \u00d74` },
+  spree: { title: 'KILLING SPREE', sub: (e) => `${e.actorName} on ${e.count}` },
+  rampage: { title: 'RAMPAGE', sub: (e) => `${e.actorName} on ${e.count}` },
+  unstoppable: { title: 'UNSTOPPABLE', sub: (e) => `${e.actorName} on ${e.count}` },
+  godlike: { title: 'GODLIKE', sub: (e) => `${e.actorName} on ${e.count}` },
+  shutdown: { title: 'SHUTDOWN', sub: (e) => `${e.actorName} ended ${e.victimName}` },
+  revenge: { title: 'REVENGE', sub: (e) => `${e.actorName} paid ${e.victimName} back` },
+  match_point: { title: 'MATCH POINT', sub: (e) => `${e.actorName} needs one more` },
+};
+
+/** Presentation text for an announcer beat. Pure so the banner, the kill feed
+ * and the smoke tests never drift apart. */
+export function duelEventCopy(event: DuelEvent): { title: string; sub: string } {
+  const copy = DUEL_EVENT_COPY[event.kind];
+  return { title: copy.title, sub: copy.sub(event) };
+}
+
+/** Which announcer beats a single kill produces, most important last (the
+ * client banners the last one and files the rest into the feed). */
+export function duelKillEvents(state: {
+  firstKillOfMatch: boolean;
+  /** Killer's kills-without-dying AFTER this kill. */
+  killerSpree: number;
+  /** Victim's kills-without-dying BEFORE they died. */
+  victimSpree: number;
+  /** Kills the killer has landed inside the multi-kill window, this one included. */
+  multi: number;
+  /** The victim was the killer's most recent killer. */
+  revenge: boolean;
+  /** Killer's total kills AFTER this kill. */
+  killerScore: number;
+}): DuelEventKind[] {
+  const beats: DuelEventKind[] = [];
+  if (state.firstKillOfMatch) beats.push('first_blood');
+  if (state.revenge) beats.push('revenge');
+  if (state.victimSpree >= DUEL_SPREE_STEPS[0].at) beats.push('shutdown');
+  const spree = [...DUEL_SPREE_STEPS].reverse().find((step) => step.at === state.killerSpree);
+  if (spree) beats.push(spree.kind);
+  if (state.multi === 2) beats.push('double_kill');
+  else if (state.multi === 3) beats.push('triple_kill');
+  else if (state.multi >= 4) beats.push('quad_kill');
+  if (state.killerScore === DUEL_SCORE_LIMIT - 1) beats.push('match_point');
+  return beats;
+}
 
 export const DUEL_MIN_PLAYERS = 2;
 export const DUEL_CAPACITY = 4;
@@ -26,20 +106,153 @@ export const DUEL_ARENA_SLOT_SPACING = 512;
 export const DUEL_ARENA_SIZE = 44;
 export const DUEL_ARENA_INTERIOR = 40;
 export const DUEL_ARENA_FLOOR_Y = 96;
+/** Rows of colosseum wall above the floor before the invisible barrier takes
+ * over. The interior itself stays open to the sky. */
+export const DUEL_WALL_ROWS = 11;
 /** The arena is open to the sky. The numeric ceiling is only the world limit. */
 export const DUEL_ARENA_HEIGHT = 256 - DUEL_ARENA_FLOOR_Y;
 export const DUEL_MIN_LIGHT = 12;
 export const DUEL_MAX_HEALTH = 40;
 export const DUEL_MAX_PILLAR_HEIGHT = 7;
 
-const duelNoise = new Noise2D(0x4475656c);
+// ── The Prism Colosseum ────────────────────────────────────────────────────
+// The arena is hand-sculpted rather than noise-generated, and every feature is
+// stamped with four-fold rotational symmetry so all four spawn corners are
+// exactly equivalent. It is authored once into a heightmap + a role map: the
+// heightmap is the single source of truth for solidity, build limits, spawn
+// heights and pathing on both the client and the server, and the role map only
+// decides which block is stamped where.
 
-/** Deterministic 5-level elevation noise (levels 0..4, representing y = floor + 0..4). */
-export function duelTerrainElevation(lx: number, lz: number): number {
-  if (lx < 0 || lx >= DUEL_ARENA_INTERIOR || lz < 0 || lz >= DUEL_ARENA_INTERIOR) return 0;
-  const n = duelNoise.fbm(lx * 0.08, lz * 0.08, 2);
-  return Math.min(4, Math.max(0, Math.floor((n + 1) * 2.5)));
+/** What a column is, which decides its palette (never its collision). */
+const enum DuelCell {
+  Field, Inlay, Step, Dais, Rim, Obelisk,
+  PadA, PadB, PadC, PadD,
+  BeaconA, BeaconB, BeaconC, BeaconD,
+  Bunker, Pylon,
 }
+
+interface DuelArenaMap { height: Uint8Array; role: Uint8Array }
+
+let arenaMapCache: DuelArenaMap | null = null;
+
+/** Deterministic sculpt of the 40x40 interior. Built once, then shared. */
+function buildDuelArenaMap(): DuelArenaMap {
+  const n = DUEL_ARENA_INTERIOR;
+  const height = new Uint8Array(n * n);
+  const role = new Uint8Array(n * n).fill(DuelCell.Field);
+  const at = (x: number, z: number) => z * n + x;
+  const inside = (x: number, z: number) => x >= 0 && x < n && z >= 0 && z < n;
+
+  /** Stamp a cell and its three 90-degree rotations about the arena centre.
+   * The four rotations of a corner feature land on the four spawn corners,
+   * which is what makes the map provably fair. */
+  const stamp = (x: number, z: number, h: number, cell: DuelCell, rotateRole = true) => {
+    let px = x, pz = z;
+    for (let turn = 0; turn < 4; turn++) {
+      if (inside(px, pz)) {
+        const i = at(px, pz);
+        height[i] = h;
+        // Corner-coded features advance their palette with the rotation so the
+        // four spawns read as four different colours at a glance.
+        role[i] = rotateRole ? cell + turn : cell;
+      }
+      const nx = n - 1 - pz, nz = px;
+      px = nx; pz = nz;
+    }
+  };
+
+  const centre = (n - 1) / 2;
+
+  // 1. The central ziggurat: a three-step dais crowned with a glowing rim.
+  //    Every step is exactly one block, so it is climbable from any bearing.
+  for (let z = 0; z < n; z++) for (let x = 0; x < n; x++) {
+    const rad = Math.hypot(x - centre, z - centre);
+    const i = at(x, z);
+    if (rad <= 4.2) { height[i] = 3; role[i] = DuelCell.Dais; }
+    else if (rad <= 5.4) { height[i] = 3; role[i] = DuelCell.Rim; }
+    else if (rad <= 7.0) { height[i] = 2; role[i] = DuelCell.Step; }
+    else if (rad <= 8.6) { height[i] = 1; role[i] = DuelCell.Step; }
+    else {
+      // Decorative floor inlay: diagonal approach lanes and an outer ring.
+      const ax = Math.abs(x - centre), az = Math.abs(z - centre);
+      const onDiagonal = Math.abs(ax - az) <= 1.2;
+      const onRing = Math.abs(rad - 13.5) <= 0.7;
+      role[i] = onDiagonal || onRing ? DuelCell.Inlay : DuelCell.Field;
+    }
+  }
+
+  // 2. The Altar: a 2x2 pedestal one block above the crown. Standing on it is
+  //    the highest natural ground in the arena, and four ivory spires around
+  //    it break the centre into a fight you circle instead of one long lane.
+  for (const [x, z] of [[19, 19], [20, 19], [19, 20], [20, 20]]) {
+    const i = at(x, z); height[i] = 4; role[i] = DuelCell.Obelisk;
+  }
+  stamp(16, 16, 6, DuelCell.Pylon, false);
+
+  // 3. Four colour-coded spawn platforms, one per corner.
+  for (let dz = -3; dz <= 3; dz++) for (let dx = -3; dx <= 3; dx++) {
+    const reach = Math.max(Math.abs(dx), Math.abs(dz));
+    stamp(8 + dx, 8 + dz, reach <= 2 ? 2 : 1, DuelCell.PadA);
+  }
+  // A beacon spire on the outer corner of each pad: a landmark you can find
+  // from anywhere in the arena, and hard cover the moment you respawn.
+  stamp(6, 6, 6, DuelCell.BeaconA);
+
+  // 4. Mid-edge bunkers: a grate wall with a central doorway, plus a low
+  //    step in front of it to slide behind.
+  for (let x = 14; x <= 25; x++) {
+    if (x === 19 || x === 20) continue;
+    stamp(x, 6, 3, DuelCell.Bunker, false);
+    stamp(x, 5, 1, DuelCell.Bunker, false);
+  }
+
+  // 5. Cover pylons: on each spawn-to-centre diagonal, and flanking each of
+  //    the four dais approaches.
+  for (const [dx, dz] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+    stamp(13 + dx, 13 + dz, 4, DuelCell.Pylon, false);
+  }
+  stamp(19, 11, 3, DuelCell.Pylon, false);
+  stamp(20, 11, 3, DuelCell.Pylon, false);
+
+  return { height, role };
+}
+
+function duelArenaMap(): DuelArenaMap {
+  return (arenaMapCache ??= buildDuelArenaMap());
+}
+
+/** Height of the sculpted column at an interior cell: the surface sits at
+ * `floor + duelTerrainElevation(lx, lz)`. Everything from the floor up to and
+ * including that block is solid. */
+export function duelTerrainElevation(lx: number, lz: number): number {
+  const x = Math.floor(lx), z = Math.floor(lz);
+  if (x < 0 || x >= DUEL_ARENA_INTERIOR || z < 0 || z >= DUEL_ARENA_INTERIOR) return 0;
+  return duelArenaMap().height[z * DUEL_ARENA_INTERIOR + x];
+}
+
+/** Tallest sculpted column in the arena, used to bound pathing/mesh scans. */
+export const DUEL_MAX_ELEVATION = 6;
+
+interface DuelPalette { top: number; body: number }
+
+const DUEL_PALETTES: Record<number, DuelPalette> = {
+  [DuelCell.Field]: { top: Block.SpectralMarble, body: Block.CarvedVaultBrick },
+  [DuelCell.Inlay]: { top: Block.PearlTile, body: Block.CarvedVaultBrick },
+  [DuelCell.Step]: { top: Block.LuminousLimestone, body: Block.LuminousLimestone },
+  [DuelCell.Dais]: { top: Block.VaultMosaic, body: Block.LuminousLimestone },
+  [DuelCell.Rim]: { top: Block.RuneGlass, body: Block.LuminousLimestone },
+  [DuelCell.Obelisk]: { top: Block.RuneGlass, body: Block.IvoryColumn },
+  [DuelCell.PadA]: { top: Block.EmberBrick, body: Block.EmberBrick },
+  [DuelCell.PadB]: { top: Block.PrismBrick, body: Block.PrismBrick },
+  [DuelCell.PadC]: { top: Block.GildedVaultBrick, body: Block.GildedVaultBrick },
+  [DuelCell.PadD]: { top: Block.CarvedVaultBrick, body: Block.CarvedVaultBrick },
+  [DuelCell.BeaconA]: { top: Block.EmberBrazier, body: Block.EmberBrick },
+  [DuelCell.BeaconB]: { top: Block.PrismLamp, body: Block.PrismBrick },
+  [DuelCell.BeaconC]: { top: Block.GildedLamp, body: Block.GildedVaultBrick },
+  [DuelCell.BeaconD]: { top: Block.SoulLantern, body: Block.CarvedVaultBrick },
+  [DuelCell.Bunker]: { top: Block.ClockworkGrate, body: Block.ClockworkGrate },
+  [DuelCell.Pylon]: { top: Block.RuneGlass, body: Block.OpalBrick },
+};
 
 export interface DuelVec3 { x: number; y: number; z: number }
 
@@ -60,6 +273,15 @@ export interface DuelParticipant {
   joinOrder: number;
   respawnAt?: number;
   shieldUntil?: number;
+  /** Kills since last death; the number the announcer shouts about. */
+  spree: number;
+  /** Best spree this round, kept on the final scoreboard. */
+  bestSpree: number;
+  /** Kills inside the live multi-kill window, and when it closes. */
+  multi: number;
+  multiUntil: number;
+  /** Who killed this player last, so a payback reads as Revenge. */
+  lastKilledBy: number;
 }
 
 export interface DuelArenaBounds {
@@ -80,6 +302,8 @@ export interface DuelArenaBounds {
 export interface DuelResult {
   winner: number | null;
   scoreboard: DuelParticipant[];
+  /** Everything the announcer called this round, for the result recap. */
+  feed: DuelEvent[];
   finishReason: DuelFinishReason;
   durationMs: number;
   rematchDeadline: number;
@@ -100,6 +324,9 @@ export interface DuelLobbySnapshot {
   endsAt?: number;
   arena?: DuelArenaBounds;
   arenaReady?: Set<number>;
+  /** Announcer beats, oldest first. Clients replay anything above the last
+   * `seq` they have seen, so a dropped frame never loses a call. */
+  feed: DuelEvent[];
   result?: DuelResult;
 }
 
@@ -116,11 +343,13 @@ export function duelArenaBounds(slot: number): DuelArenaBounds {
   const maxZ = minZ + DUEL_ARENA_INTERIOR;
   const floor = DUEL_ARENA_FLOOR_Y;
   const ceiling = floor + DUEL_ARENA_HEIGHT;
+  // The four spawn platforms are the four rotations of one authored corner, so
+  // every seat in the arena is geometrically identical.
   const insets: [number, number][] = [
-    [4, 4],
-    [DUEL_ARENA_INTERIOR - 5, 4],
-    [DUEL_ARENA_INTERIOR - 5, DUEL_ARENA_INTERIOR - 5],
-    [4, DUEL_ARENA_INTERIOR - 5],
+    [8, 8],
+    [DUEL_ARENA_INTERIOR - 9, 8],
+    [DUEL_ARENA_INTERIOR - 9, DUEL_ARENA_INTERIOR - 9],
+    [8, DUEL_ARENA_INTERIOR - 9],
   ];
   return {
     slot: safeSlot, originX, originZ, minX, maxX, minY: floor + 1,
@@ -143,47 +372,34 @@ export function duelArenaAt(x: number, z: number): DuelArenaBounds | null {
   return x >= arena.originX && x < arena.originX + DUEL_ARENA_SIZE ? arena : null;
 }
 
+/** One row of the colosseum wall. Ivory pilasters every five blocks carry two
+ * bands of glowing rune glass; the crenellated top is capped with lamps and
+ * open (invisible-barrier) embrasures between them. */
 function duelWallBlock(outerLx: number, by: number, outerLz: number, floor: number): number {
   const relY = by - floor;
-  const isCorner = (outerLx <= 1 || outerLx >= DUEL_ARENA_SIZE - 2) && (outerLz <= 1 || outerLz >= DUEL_ARENA_SIZE - 2);
-  const edgeCoordinate = outerLx < 2 || outerLx >= DUEL_ARENA_SIZE - 2 ? outerLz : outerLx;
-  const isPillar = edgeCoordinate % 5 === 0;
+  const isCorner = (outerLx <= 1 || outerLx >= DUEL_ARENA_SIZE - 2) &&
+    (outerLz <= 1 || outerLz >= DUEL_ARENA_SIZE - 2);
+  const edge = outerLx < 2 || outerLx >= DUEL_ARENA_SIZE - 2 ? outerLz : outerLx;
+  const isPillar = isCorner || edge % 5 === 0;
 
-  if (relY === 8) {
-    // Warm timber crenellations over a textured stone fighting wall. The
-    // sealed Barrier layer above this remains invisible to players.
-    return (edgeCoordinate & 1) === 0 ? Block.SpruceLog : Block.OakPlanks;
+  switch (relY) {
+    case 0: return Block.CarvedVaultBrick;                         // plinth
+    case 1: case 2: return isPillar ? Block.IvoryColumn : Block.SpectralMarble;
+    case 3: return isPillar ? Block.IvoryColumn : Block.RuneGlass;  // lower glow band
+    case 4: return isPillar ? Block.IvoryColumn : Block.PearlTile;
+    case 5: return isPillar ? Block.IvoryColumn : Block.LuminousLimestone;
+    case 6: return isPillar ? Block.IvoryColumn : Block.PearlTile;
+    case 7: return isPillar ? Block.IvoryColumn : Block.RuneGlass;  // upper glow band
+    case 8: return isPillar ? Block.IvoryColumn : Block.SpectralMarble;
+    case 9: return Block.LuminousLimestone;                         // cornice
+    case 10:
+      // Crenellations. The embrasures between the merlons are sealed with the
+      // invisible Barrier, so the silhouette reads open without being open.
+      if (isCorner) return Block.PrismLamp;
+      if (isPillar) return Block.GildedLamp;
+      return (edge & 1) === 0 ? Block.VaultMosaic : Block.Barrier;
+    default: return Block.Barrier;
   }
-  if (relY === 7) {
-    if (isCorner || isPillar) return Block.SpruceLog;
-    return Block.OakPlanks;
-  }
-  if (relY === 6) {
-    if (isCorner || isPillar) return Block.SpruceLog;
-    return (edgeCoordinate & 1) === 0 ? Block.OakPlanks : Block.SprucePlanks;
-  }
-  if (relY === 5) {
-    // A continuous stone string course keeps the silhouette strong and gives
-    // the timber panels a deliberate, hand-built frame.
-    return isPillar ? Block.SpruceLog : Block.Cobblestone;
-  }
-  if (relY === 4) {
-    if (isCorner || isPillar) return Block.SpruceLog;
-    return Block.OakPlanks;
-  }
-  if (relY === 3) {
-    if (isCorner || isPillar) return Block.SpruceLog;
-    return (edgeCoordinate & 1) === 0 ? Block.OakPlanks : Block.SprucePlanks;
-  }
-  if (relY === 2) {
-    if (isCorner || isPillar) return Block.SpruceLog;
-    return Block.OakPlanks;
-  }
-  if (relY === 1) {
-    return isPillar ? Block.SpruceLog : Block.Cobblestone;
-  }
-  // Rough stone plinth / foundation.
-  return (edgeCoordinate & 1) === 0 ? Block.Stone : Block.Cobblestone;
 }
 
 /** Material stamp corresponding exactly to duelArenaSolidAt. This is called by
@@ -202,20 +418,22 @@ export function duelArenaBlockAt(x: number, y: number, z: number): number | null
   // Underside foundation
   if (by === arena.floor - 1) return Block.CarvedVaultBrick;
 
-  // Surrounding perimeter walls topped by an invisible barrier column that
-  // reaches the world limit. The interior deliberately remains open sky.
+  // The colosseum wall, topped by an invisible barrier column that reaches the
+  // world limit. The interior deliberately remains open sky.
   if (boundary) {
-    if (by <= arena.floor + 8) return duelWallBlock(outerLx, by, outerLz, arena.floor);
+    if (by < arena.floor + DUEL_WALL_ROWS) return duelWallBlock(outerLx, by, outerLz, arena.floor);
     return Block.Barrier;
   }
 
-  // 40x40 Interior grass terrain with 5 discrete levels of Perlin noise
+  // The sculpted 40x40 interior: one palette per column role, stamped from the
+  // same heightmap that drives collision, pathing and build limits.
   if (lx >= 0 && lx < DUEL_ARENA_INTERIOR && lz >= 0 && lz < DUEL_ARENA_INTERIOR) {
-    const groundY = arena.floor + duelTerrainElevation(lx, lz);
-    if (by === groundY) return Block.Grass;
-    if (by < groundY && by >= arena.floor - 3) return Block.Dirt;
-    if (by < arena.floor - 3) return Block.Stone;
-    return Block.Air;
+    const map = duelArenaMap();
+    const cell = lz * DUEL_ARENA_INTERIOR + lx;
+    const groundY = arena.floor + map.height[cell];
+    if (by > groundY) return Block.Air;
+    const palette = DUEL_PALETTES[map.role[cell]] ?? DUEL_PALETTES[DuelCell.Field];
+    return by === groundY ? palette.top : palette.body;
   }
 
   return null;
@@ -314,6 +532,9 @@ interface DuelLobby {
   startedAt?: number;
   endsAt?: number;
   arena?: DuelArenaBounds;
+  feed: DuelEvent[];
+  nextEventSeq: number;
+  firstBloodTaken: boolean;
   result?: DuelResult;
 }
 
@@ -363,7 +584,7 @@ export class Duels {
     const p = this.newParticipant(identity, true, 0);
     const lobby: DuelLobby = {
       id: `D${this.nextLobbyId++}`, token, phase: 'lobby', participants: new Map([[p.id, p]]),
-      host: p.id, nextJoinOrder: 1,
+      host: p.id, nextJoinOrder: 1, feed: [], nextEventSeq: 1, firstBloodTaken: false,
     };
     this.lobbies.set(token, lobby);
     this.lobbyByPlayer.set(p.id, lobby);
@@ -463,7 +684,33 @@ export class Duels {
     victim.spectating = true;
     victim.respawnAt = now + DUEL_RESPAWN_MS;
     victim.shieldUntil = undefined;
+
+    // Announcer bookkeeping. All of it lives on the authoritative participant
+    // records, so a reconnecting client inherits the same streak state.
+    killer.multi = now < killer.multiUntil ? killer.multi + 1 : 1;
+    killer.multiUntil = now + DUEL_MULTI_KILL_MS;
+    killer.spree++;
+    killer.bestSpree = Math.max(killer.bestSpree, killer.spree);
+    const victimSpree = victim.spree;
+    victim.spree = 0; victim.multi = 0; victim.multiUntil = 0;
+    const revenge = victim.lastKilledBy === killer.id && killer.lastKilledBy === victim.id;
+    victim.lastKilledBy = killer.id;
+    const firstKillOfMatch = !lobby.firstBloodTaken;
+    lobby.firstBloodTaken = true;
+    for (const kind of duelKillEvents({
+      firstKillOfMatch, killerSpree: killer.spree, victimSpree,
+      multi: killer.multi, revenge, killerScore: killer.kills,
+    })) {
+      lobby.feed.push({ seq: lobby.nextEventSeq++, kind, actor: killer.id,
+        actorName: killer.username, victim: victim.id, victimName: victim.username,
+        count: kind === 'double_kill' || kind === 'triple_kill' || kind === 'quad_kill'
+          ? killer.multi : killer.spree,
+        at: now });
+    }
+    if (lobby.feed.length > DUEL_FEED_LENGTH) lobby.feed.splice(0, lobby.feed.length - DUEL_FEED_LENGTH);
+
     if (lobby.phase === 'sudden_death') this.finish(lobby, now, killer.id, 'sudden_death');
+    else if (killer.kills >= DUEL_SCORE_LIMIT) this.finish(lobby, now, killer.id, 'score');
     return this.snapshotLobby(lobby, now);
   }
 
@@ -592,7 +839,8 @@ export class Duels {
   private newParticipant(identity: DuelIdentity, host: boolean, joinOrder: number): DuelParticipant {
     const profile = identity.profile ?? duelProfileOf(sanitizeDuelProgress(newDuelProgress()));
     return { ...identity, profile: { ...profile, rank: { ...profile.rank } }, host, ready: false, connected: true, kills: 0, deaths: 0,
-      alive: true, spectating: false, rematchVote: false, joinOrder };
+      alive: true, spectating: false, rematchVote: false, joinOrder,
+      spree: 0, bestSpree: 0, multi: 0, multiUntil: 0, lastKilledBy: 0 };
   }
 
   private resetReady(lobby: DuelLobby): void {
@@ -617,9 +865,11 @@ export class Duels {
     lobby.arenaReady = new Set();
     lobby.arenaLoadDeadline = now + DUEL_ARENA_LOAD_TIMEOUT_MS;
     lobby.startedAt = undefined; lobby.endsAt = undefined; lobby.result = undefined;
+    lobby.feed = []; lobby.firstBloodTaken = false;
     for (const p of lobby.participants.values()) {
       p.kills = 0; p.deaths = 0; p.alive = true; p.spectating = false;
       p.rematchVote = false; p.respawnAt = undefined; p.shieldUntil = undefined;
+      p.spree = 0; p.bestSpree = 0; p.multi = 0; p.multiUntil = 0; p.lastKilledBy = 0;
     }
   }
 
@@ -644,7 +894,7 @@ export class Duels {
       const winnerIndex = scoreboard.findIndex((p) => p.id === winner);
       if (winnerIndex > 0) scoreboard.unshift(scoreboard.splice(winnerIndex, 1)[0]);
     }
-    lobby.result = { winner, scoreboard,
+    lobby.result = { winner, scoreboard, feed: lobby.feed.map((event) => ({ ...event })),
       finishReason: reason, durationMs: Math.max(0, now - (lobby.startedAt ?? now)),
       rematchDeadline: now + DUEL_REMATCH_MS,
       progressChanges: [] };
@@ -657,18 +907,22 @@ export class Duels {
     for (const [id, participant] of lobby.participants) {
       if (!participant.connected) lobby.participants.delete(id);
     }
+    lobby.feed = []; lobby.firstBloodTaken = false;
     for (const p of lobby.participants.values()) {
       p.ready = false; p.kills = 0; p.deaths = 0; p.alive = true; p.spectating = false;
       p.rematchVote = false; p.respawnAt = undefined; p.shieldUntil = undefined;
+      p.spree = 0; p.bestSpree = 0; p.multi = 0; p.multiUntil = 0; p.lastKilledBy = 0;
     }
   }
 
   private snapshotLobby(lobby: DuelLobby, now: number): DuelLobbySnapshot {
     return { id: lobby.id, phase: lobby.phase, capacity: DUEL_CAPACITY,
       participants: orderedDuelScoreboard(lobby.participants.values()), host: lobby.host,
-      serverNow: now, countdownEndsAt: lobby.countdownEndsAt, startedAt: lobby.startedAt,
+      serverNow: now, feed: lobby.feed.map((event) => ({ ...event })),
+      countdownEndsAt: lobby.countdownEndsAt, startedAt: lobby.startedAt,
       endsAt: lobby.endsAt, arena: lobby.arena ? { ...lobby.arena, spawns: lobby.arena.spawns.map((s) => ({ ...s })) } : undefined,
       result: lobby.result ? { ...lobby.result,
+        feed: lobby.result.feed.map((event) => ({ ...event })),
         scoreboard: lobby.result.scoreboard.map((p) => ({ ...p, profile: { ...p.profile, rank: { ...p.profile.rank } } })),
         progressChanges: lobby.result.progressChanges.map((change) => ({ ...change })) } : undefined };
   }

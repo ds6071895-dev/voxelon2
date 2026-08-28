@@ -331,11 +331,17 @@ export class GameAudio {
     'gain' | 'loss' | 'promotion' | 'rankPromotion' | 'demotion' | 'placement' | 'unlock'): void {
     switch (kind) {
       case 'countdown':
-        this.tone({ type: 'triangle', from: 420, to: 360, dur: 0.11, gain: 0.1 });
+        // A struck-metal beat, not a beep: a short bright ping over a low thud.
+        this.tone({ type: 'triangle', from: 520, to: 420, dur: 0.13, gain: 0.1 });
+        this.tone({ type: 'sine', from: 150, to: 96, dur: 0.2, gain: 0.11 });
+        this.noise({ freq: 2400, dur: 0.06, gain: 0.1, q: 1.4 });
         break;
       case 'fight':
-        this.tone({ type: 'square', from: 620, to: 920, dur: 0.18, gain: 0.09 });
-        this.tone({ type: 'triangle', from: 310, to: 620, dur: 0.24, gain: 0.12, delay: 0.05 });
+        // The gate drops: a rising stab, a sub hit and a wash of air.
+        this.tone({ type: 'square', from: 620, to: 980, dur: 0.2, gain: 0.09 });
+        this.tone({ type: 'sawtooth', from: 310, to: 660, dur: 0.28, gain: 0.1, delay: 0.04 });
+        this.tone({ type: 'sine', from: 120, to: 55, dur: 0.55, gain: 0.13 });
+        this.noise({ freq: 1600, dur: 0.35, gain: 0.16, q: 0.5, slideTo: 300 });
         break;
       case 'lead':
         this.tone({ type: 'triangle', from: 520, to: 760, dur: 0.13, gain: 0.08 });
@@ -347,12 +353,16 @@ export class GameAudio {
       case 'sudden':
         this.tone({ type: 'sawtooth', from: 190, to: 270, dur: 0.36, gain: 0.08 });
         this.tone({ type: 'square', from: 420, to: 315, dur: 0.24, gain: 0.07, delay: 0.16 });
+        this.tone({ type: 'sine', from: 90, to: 62, dur: 0.9, gain: 0.09 });
         break;
       case 'victory':
-        for (const [i, f] of [392, 523, 659, 784].entries()) {
-          this.tone({ type: 'triangle', from: f, to: f * 1.03, dur: 0.28,
-            gain: 0.1, delay: i * 0.11 });
+        for (const [i, f] of [392, 523, 659, 784, 1047].entries()) {
+          this.tone({ type: 'triangle', from: f, to: f * 1.03, dur: 0.3,
+            gain: 0.1, delay: i * 0.1 });
+          this.tone({ type: 'square', from: f * 2, to: f * 2.03, dur: 0.22,
+            gain: 0.035, delay: i * 0.1 });
         }
+        this.noise({ freq: 3200, dur: 0.7, gain: 0.1, q: 0.5 });
         break;
       case 'defeat':
         this.tone({ type: 'triangle', from: 330, to: 150, dur: 0.5, gain: 0.13 });
@@ -380,6 +390,53 @@ export class GameAudio {
       case 'unlock':
         this.tone({ type: 'sine', from: 740, to: 980, dur: 0.35, gain: 0.075 });
         this.tone({ type: 'triangle', from: 494, to: 740, dur: 0.3, gain: 0.07, delay: 0.1 });
+        break;
+    }
+  }
+
+  /** Announcer stingers. Each beat is a short arpeggio whose interval and
+   * timbre climb with how big a deal the call is, so a Godlike never sounds
+   * like a Double Kill even with the music up. */
+  duelAnnounce(kind: 'first_blood' | 'double_kill' | 'triple_kill' | 'quad_kill' |
+    'spree' | 'rampage' | 'unstoppable' | 'godlike' | 'shutdown' | 'revenge' |
+    'match_point'): void {
+    const fanfare = (notes: number[], type: OscillatorType, gain: number, step = 0.075) => {
+      for (const [i, f] of notes.entries()) {
+        this.tone({ type, from: f, to: f * 1.02, dur: 0.2, gain, delay: i * step });
+      }
+    };
+    switch (kind) {
+      case 'first_blood':
+        this.noise({ freq: 900, dur: 0.16, gain: 0.24, q: 1.1 });
+        fanfare([294, 440], 'sawtooth', 0.085, 0.09);
+        break;
+      case 'double_kill': fanfare([440, 587], 'square', 0.075); break;
+      case 'triple_kill': fanfare([440, 587, 740], 'square', 0.078); break;
+      case 'quad_kill': fanfare([440, 587, 740, 880], 'square', 0.08); break;
+      case 'spree': fanfare([392, 523, 659], 'triangle', 0.08); break;
+      case 'rampage':
+        fanfare([349, 523, 698], 'sawtooth', 0.075, 0.08);
+        this.tone({ type: 'square', from: 110, to: 165, dur: 0.4, gain: 0.06 });
+        break;
+      case 'unstoppable':
+        fanfare([330, 494, 659, 831], 'sawtooth', 0.07, 0.075);
+        this.tone({ type: 'sine', from: 82, to: 123, dur: 0.55, gain: 0.075 });
+        break;
+      case 'godlike':
+        fanfare([262, 392, 523, 784, 1047], 'sawtooth', 0.07, 0.08);
+        this.tone({ type: 'sine', from: 65, to: 131, dur: 0.8, gain: 0.09 });
+        this.noise({ freq: 2200, dur: 0.5, gain: 0.14, q: 0.6 });
+        break;
+      case 'shutdown':
+        this.tone({ type: 'sawtooth', from: 520, to: 180, dur: 0.34, gain: 0.09 });
+        this.noise({ freq: 480, dur: 0.22, gain: 0.2, q: 0.9 });
+        break;
+      case 'revenge':
+        this.tone({ type: 'square', from: 210, to: 420, dur: 0.22, gain: 0.08 });
+        this.tone({ type: 'triangle', from: 420, to: 630, dur: 0.24, gain: 0.07, delay: 0.14 });
+        break;
+      case 'match_point':
+        fanfare([523, 523, 784], 'triangle', 0.08, 0.11);
         break;
     }
   }

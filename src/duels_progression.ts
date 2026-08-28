@@ -11,21 +11,65 @@ export const DUEL_MAX_HISTORY_OPPONENTS = 64;
 export const DUEL_MAX_HISTORY_TIMESTAMPS = 8;
 
 export const DUEL_RANK_NAMES = [
-  'Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond', 'Champion', 'Grandmaster',
+  'Copper', 'Iron', 'Gold', 'Emerald', 'Diamond', 'Obsidian', 'Voxelon',
 ] as const;
 export type DuelRankName = typeof DUEL_RANK_NAMES[number];
 export type DuelDivisionName = 'III' | 'II' | 'I';
 
 export const DUEL_FLAIRS = [
-  'Block Rookie', 'Arena Smith', 'Golden Gunner', 'Prism Breaker',
-  'Diamond Duelist', 'Arena Champion', 'Voxel Grandmaster',
+  'Scrapper', 'Ironclad', 'Goldbreaker', 'Emerald Blade',
+  'Diamond Sentinel', 'Obsidian Warlord', 'Voxelon Mythic',
 ] as const;
 export type DuelFlair = typeof DUEL_FLAIRS[number];
 
-const RANK_COLORS: Record<DuelRankName, string> = {
-  Bronze: '#b87542', Silver: '#8c9eac', Gold: '#d99a18', Platinum: '#24a99b',
-  Diamond: '#308fd8', Champion: '#8d55d4', Grandmaster: '#d84254',
+/** Cosmetics from the retired Bronze..Grandmaster ladder map onto the closest
+ * seat on the new one so nobody silently loses the title they earned. */
+const LEGACY_FLAIR_ALIASES: Record<string, DuelFlair> = {
+  'block rookie': 'Scrapper', 'arena smith': 'Ironclad', 'golden gunner': 'Goldbreaker',
+  'prism breaker': 'Emerald Blade', 'diamond duelist': 'Diamond Sentinel',
+  'arena champion': 'Obsidian Warlord', 'voxel grandmaster': 'Voxelon Mythic',
 };
+
+/** Every named tier owns a full look: a core colour, the accent it gradients
+ * into, the glow used for auras/particles, an emblem silhouette, and a motto.
+ * The client never invents Duels colours — it reads them from here, so the
+ * lobby, the ladder, the match HUD and the result reveal always agree. */
+export interface DuelTierTheme {
+  name: DuelRankName;
+  /** Primary rank colour (text, emblem blocks, progress fill). */
+  color: string;
+  /** Secondary colour; every rank gradient runs color -> accent. */
+  accent: string;
+  /** Deep shade used behind the tier on dark surfaces. */
+  shade: string;
+  /** How many of the 9 emblem blocks are lit at this tier (5..9 + crown). */
+  facets: number;
+  /** Emblem silhouette drawn on the ladder and the reveal. */
+  emblem: 'chip' | 'shield' | 'crest' | 'blade' | 'star' | 'spire' | 'crown';
+  motto: string;
+  flair: DuelFlair;
+}
+
+export const DUEL_TIER_THEMES: readonly DuelTierTheme[] = [
+  { name: 'Copper', color: '#e08a4a', accent: '#ffcf9a', shade: '#3a2113',
+    facets: 3, emblem: 'chip', motto: 'Everyone starts by swinging first.', flair: 'Scrapper' },
+  { name: 'Iron', color: '#a8b6c4', accent: '#e8f1f8', shade: '#1e2733',
+    facets: 4, emblem: 'shield', motto: 'You stopped panicking. Now you aim.', flair: 'Ironclad' },
+  { name: 'Gold', color: '#f2b62c', accent: '#ffe9a0', shade: '#3a2c07',
+    facets: 5, emblem: 'crest', motto: 'Cover, angle, burst. In that order.', flair: 'Goldbreaker' },
+  { name: 'Emerald', color: '#2fd08a', accent: '#a8ffd8', shade: '#0c2f21',
+    facets: 6, emblem: 'blade', motto: 'You take the high ground before they do.', flair: 'Emerald Blade' },
+  { name: 'Diamond', color: '#43c2f5', accent: '#c4efff', shade: '#0b2836',
+    facets: 7, emblem: 'star', motto: 'Reading the arena, not just the crosshair.', flair: 'Diamond Sentinel' },
+  { name: 'Obsidian', color: '#a273f7', accent: '#e2ccff', shade: '#1e1236',
+    facets: 8, emblem: 'spire', motto: 'The rest of the lobby plays around you.', flair: 'Obsidian Warlord' },
+  { name: 'Voxelon', color: '#ff4f6e', accent: '#ffd0d9', shade: '#3a0b17',
+    facets: 9, emblem: 'crown', motto: 'There is no tier above this one.', flair: 'Voxelon Mythic' },
+];
+
+export function duelTierTheme(namedIndex: number): DuelTierTheme {
+  return DUEL_TIER_THEMES[Math.max(0, Math.min(DUEL_TIER_THEMES.length - 1, namedIndex))];
+}
 
 export interface DuelRank {
   index: number;
@@ -35,6 +79,11 @@ export interface DuelRank {
   label: string;
   min: number;
   color: string;
+  accent: string;
+  shade: string;
+  facets: number;
+  emblem: DuelTierTheme['emblem'];
+  motto: string;
   flair: DuelFlair;
 }
 
@@ -42,10 +91,12 @@ const DIVISION_NAMES: DuelDivisionName[] = ['III', 'II', 'I'];
 export const DUEL_DIVISIONS: readonly DuelRank[] = DUEL_RANK_NAMES.flatMap((name, namedIndex) =>
   DIVISION_NAMES.map((division, divisionIndex) => {
     const index = namedIndex * 3 + divisionIndex;
+    const theme = DUEL_TIER_THEMES[namedIndex];
     return {
       index, namedIndex, name, division, label: `${name} ${division}`,
-      min: index * DUEL_RP_PER_DIVISION, color: RANK_COLORS[name],
-      flair: DUEL_FLAIRS[namedIndex],
+      min: index * DUEL_RP_PER_DIVISION, color: theme.color, accent: theme.accent,
+      shade: theme.shade, facets: theme.facets, emblem: theme.emblem,
+      motto: theme.motto, flair: theme.flair,
     };
   }));
 
@@ -182,7 +233,9 @@ export function sanitizeDuelProgress(raw: unknown, now = Date.now()): DuelProgre
     equippedFlair: DUEL_FLAIRS[0], demotionShield: value.demotionShield === true,
     opponentHistory: cleanHistory(value.opponentHistory, now),
   };
-  const requested = value.equippedFlair;
+  const requested = typeof value.equippedFlair === 'string'
+    ? LEGACY_FLAIR_ALIASES[value.equippedFlair.trim().toLowerCase()] ?? value.equippedFlair
+    : value.equippedFlair;
   base.equippedFlair = canEquipDuelFlair(duelProfileOf(base), requested) ? requested : DUEL_FLAIRS[0];
   return base;
 }
@@ -306,34 +359,66 @@ export function settleDuelProgress(players: readonly DuelSettlementPlayer[], now
   return { changes, states: players.map((p, i) => ({ id: p.id, username: p.username, state: states[i] })) };
 }
 
-export type DuelRevealPhase = 'impact' | 'previous' | 'counting' | 'settled';
+export type DuelRevealPhase = 'impact' | 'previous' | 'counting' | 'ascend' | 'settled';
+
+/** Choreography beats, in ms from the moment the result card mounts. */
+export const DUEL_REVEAL_IMPACT_MS = 380;
+export const DUEL_REVEAL_HOLD_MS = 1_080;
+export const DUEL_REVEAL_COUNT_MS = 2_450;
+export const DUEL_REVEAL_ASCEND_MS = 3_300;
+
 export interface DuelRevealState {
   phase: DuelRevealPhase;
   displayedRp: number;
+  /** 0..1 through the RP count-up ramp. */
   progress: number;
+  /** 0..1 fill of the division track at `displayedRp`; wraps on promotion. */
+  barProgress: number;
+  /** The final rank, colour and emblem are on screen from here on. */
+  revealed: boolean;
+  /** The whole choreography has finished. */
   settled: boolean;
   particles: 'rise' | 'fall' | 'none';
   denseParticles: boolean;
+  /** 0..1 impact shake for the card. */
+  shake: number;
 }
 
-/** Deterministic 0..3000ms result choreography used by UI and smoke tests. */
+function revealAt(phase: DuelRevealPhase, rp: number, over: Partial<DuelRevealState> = {}): DuelRevealState {
+  return {
+    phase, displayedRp: rp, progress: 0, barProgress: duelRankProgress(rp).progress,
+    revealed: phase === 'ascend' || phase === 'settled', settled: phase === 'settled',
+    particles: 'none', denseParticles: false, shake: 0, ...over,
+  };
+}
+
+/** Deterministic result choreography shared by the UI and the smoke tests:
+ * a landing impact, a beat on the old number, an RP count-up with block
+ * particles, then the rank ascension itself. */
 export function duelRevealState(change: DuelProgressChange, elapsedMs: number, options: {
   skipped?: boolean; reducedMotion?: boolean; photosensitivitySafe?: boolean;
 } = {}): DuelRevealState {
-  if (options.skipped || options.reducedMotion || elapsedMs >= 3000) {
-    return { phase: 'settled', displayedRp: change.afterRp, progress: 1, settled: true,
-      particles: 'none', denseParticles: false };
+  if (options.skipped || options.reducedMotion || elapsedMs >= DUEL_REVEAL_ASCEND_MS) {
+    return revealAt('settled', change.afterRp, { progress: 1 });
   }
-  if (elapsedMs < 350) return { phase: 'impact', displayedRp: change.beforeRp,
-    progress: 0, settled: false, particles: 'none', denseParticles: false };
-  if (elapsedMs < 1050) return { phase: 'previous', displayedRp: change.beforeRp,
-    progress: 0, settled: false, particles: 'none', denseParticles: false };
-  if (elapsedMs < 2200) {
-    const progress = Math.max(0, Math.min(1, (elapsedMs - 1050) / 1150));
-    return { phase: 'counting', displayedRp: Math.round(change.beforeRp + change.change * progress),
-      progress, settled: false, particles: change.change >= 0 ? 'rise' : 'fall',
-      denseParticles: !options.photosensitivitySafe };
+  if (elapsedMs < DUEL_REVEAL_IMPACT_MS) {
+    return revealAt('impact', change.beforeRp, {
+      shake: 1 - elapsedMs / DUEL_REVEAL_IMPACT_MS,
+    });
   }
-  return { phase: 'settled', displayedRp: change.afterRp, progress: 1, settled: true,
-    particles: 'none', denseParticles: false };
+  if (elapsedMs < DUEL_REVEAL_HOLD_MS) return revealAt('previous', change.beforeRp);
+  if (elapsedMs < DUEL_REVEAL_COUNT_MS) {
+    const span = DUEL_REVEAL_COUNT_MS - DUEL_REVEAL_HOLD_MS;
+    const progress = Math.max(0, Math.min(1, (elapsedMs - DUEL_REVEAL_HOLD_MS) / span));
+    // Ease out so the last few RP tick over slowly and the number lands.
+    const eased = 1 - Math.pow(1 - progress, 2);
+    return revealAt('counting', Math.round(change.beforeRp + change.change * eased), {
+      progress, particles: change.change >= 0 ? 'rise' : 'fall',
+      denseParticles: !options.photosensitivitySafe,
+    });
+  }
+  const into = (elapsedMs - DUEL_REVEAL_COUNT_MS) / (DUEL_REVEAL_ASCEND_MS - DUEL_REVEAL_COUNT_MS);
+  return revealAt('ascend', change.afterRp, {
+    progress: 1, shake: Math.max(0, 1 - into * 3.2),
+  });
 }
