@@ -502,5 +502,5 @@ function smoothstep(a: number, b: number, x: number): number {
 
 function familyIcon(family: EncounterSnapshot['family']): string {
   return family === 'crypt' ? iconSvg('skull') : family === 'mire' ? iconSvg('droplet')
-    : family === 'ember' ? iconSvg('flame') : family === 'crystal' ? '◆' : iconSvg('gear');
+    : family === 'ember' ? iconSvg('flame') : family === 'crystal' ? iconSvg('diamond') : iconSvg('gear');
 }

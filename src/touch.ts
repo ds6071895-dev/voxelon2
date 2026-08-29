@@ -215,7 +215,7 @@ export class TouchControls {
     this.gunBox = document.createElement('div');
     this.gunBox.style.cssText = 'position:absolute;inset:0;pointer-events:none;display:none;';
     this.pads.appendChild(this.gunBox);
-    const fireBtn = this.mkBtn(this.gunBox, '◉', 'right:126px;bottom:128px;width:78px;height:78px;font-size:28px;');
+    const fireBtn = this.mkBtn(this.gunBox, iconSvg('reticle'), 'right:126px;bottom:128px;width:78px;height:78px;font-size:28px;');
     fireBtn.classList.add('t-fire');
     this.hold(fireBtn, (down) => {
         if (down) { this.input.leftClicked = true; this.input.leftDown = true; }
@@ -241,7 +241,7 @@ export class TouchControls {
     };
     util(iconSvg('backpack'), cb.onInventory);
     util('/', cb.onChat);       // command box (/map, /warfare, /tpa, /guide…)
-    util('⏸', cb.onPause);
+    util(iconSvg('pause'), cb.onPause);
 
     // --- hotbar: tap a slot to select it ---
     const hotbar = document.getElementById('hotbar');

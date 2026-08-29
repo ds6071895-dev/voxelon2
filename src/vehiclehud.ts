@@ -11,7 +11,7 @@
 // changes it.
 
 import type { HelicopterSnapshot, SeatKind } from './vehicles';
-import { iconSvg } from './emoji_icons';
+import { iconSvg, setIconText } from './emoji_icons';
 
 /** Below this fraction of a full tank the gauge goes amber and pulses. */
 const FUEL_WARN = 0.28;
@@ -151,7 +151,7 @@ export class VehicleHUD {
         'background:rgba(4,8,14,0.8);color:#ffd24a;letter-spacing:0.6px;',
       ].join(''), row);
       chip.textContent = keys;
-      el('span', 'color:#a8b8ce;letter-spacing:0.4px;', row).textContent = what;
+      setIconText(el('span', 'color:#a8b8ce;letter-spacing:0.4px;', row), what);
     }
   }
 

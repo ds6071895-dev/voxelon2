@@ -75,8 +75,9 @@ import {
   participantHpMultiplier, encounterArmorPierce,
 } from '../vault_encounter';
 import {
-  Duels, DuelArenaBounds, DuelLobbySnapshot, DUEL_MAX_HEALTH, DUEL_MAX_PILLAR_HEIGHT, clampToDuelArena, duelArenaBlockAt,
-  duelArenaSolidAt, duelTerrainElevation, hasArenaLineOfSight, safestDuelSpawn, secureDuelToken,
+  Duels, DuelArenaBounds, DuelLobbySnapshot, DUEL_ARENA_SIZE, DUEL_MAX_HEALTH, DUEL_MAX_PILLAR_HEIGHT,
+  clampToDuelArena, duelArenaBlockAt, duelArenaBounds, duelArenaSolidAt, duelTerrainElevation,
+  hasArenaLineOfSight, safestDuelSpawn, secureDuelToken,
 } from '../duels';
 import {
   DuelFlair, DuelProgressState, DuelPublicProfile, canEquipDuelFlair,
@@ -193,6 +194,8 @@ interface ServerPlayer extends PlayerInfo {
   duelNextBurstAt: number;
   duelBurstShots: number;
   duelShotTickets: DuelShotTicket[];
+  /** Recent authoritative positions, oldest first, for lag compensation. */
+  duelTrack: DuelTrackSample[];
   duelLoaded: number;
   duelReloadUntil: number;
   duelMedkits: number;
@@ -204,6 +207,16 @@ interface DuelShotTicket {
   x: number; y: number; z: number;
   dx: number; dy: number; dz: number;
 }
+
+/** One timestamped feet position, kept so a hit can be judged against where a
+ *  target USED to be. See `duelTrack` / `handleDuelRanged`. */
+interface DuelTrackSample { at: number; x: number; y: number; z: number; }
+
+/** How far back the duel position history reaches, in seconds. Covers the
+ *  worst honest case a hit report has to survive: a Burst Rifle round crossing
+ *  its full 58-block range (0.5s at speed 115), the 0.1s the shooter's client
+ *  renders every opponent behind live, and a slow round trip on top. */
+const DUEL_TRACK_WINDOW = 1.2;
 
 interface DuelSavedState {
   x: number; y: number; z: number; yaw: number; pitch: number;
@@ -643,6 +656,7 @@ export class GameServer {
       duelNextBurstAt: 0,
       duelBurstShots: 0,
       duelShotTickets: [],
+      duelTrack: [],
       duelLoaded: 0,
       duelReloadUntil: 0,
       duelMedkits: 0,
@@ -1532,6 +1546,21 @@ export class GameServer {
     return out;
   }
 
+  /** Everything that must happen the instant a match reaches its result: the
+   *  final card to every member, and a wipe of the cover they built. Clearing
+   *  the arena HERE rather than at the next match start means the results
+   *  screen already looks out over a clean floor, and means a rematch, a fresh
+   *  start from the lobby and a forfeit all inherit the same reset arena. */
+  private duelResultOutbound(snapshot: DuelLobbySnapshot): Outbound[] {
+    if (snapshot.phase !== 'results' || !snapshot.result) return [];
+    const ids = snapshot.participants.map((participant) => participant.id);
+    const out: Outbound[] = ids.map((id) => ({
+      to: id, msg: { t: 'duelResult', result: snapshot.result! },
+    }));
+    if (snapshot.arena) out.push(...this.resetDuelArenaEdits(snapshot.arena.slot, ids));
+    return out;
+  }
+
   private duelLoadout(to: number): Outbound {
     const slots: (ItemStack | null)[] = new Array(36).fill(null);
     slots[0] = { id: Item.BurstRifle, count: 1, loaded: 24 };
@@ -1543,18 +1572,36 @@ export class GameServer {
       selected: 0, unlimitedReserve: true } };
   }
 
+  /** Strip an arena back to its authored geometry.
+   *
+   *  This sweeps the whole edit log over the arena's footprint rather than
+   *  only the planks this slot happens to still be TRACKING. The tracking map
+   *  is per-lobby state and every path that loses it — a forfeit, a host
+   *  disconnect, a server restart with a persisted world, a slot handed to a
+   *  different lobby — used to leave real planks standing in an arena nobody
+   *  had a record of. The footprint is authoritative and cannot go stale, so
+   *  a match now always opens on the bare colosseum. */
   private resetDuelArenaEdits(slot: number, memberIds?: number[]): Outbound[] {
-    const slotEdits = this.duelArenaEdits.get(slot);
-    if (!slotEdits || slotEdits.size === 0) return [];
+    const arena = duelArenaBounds(slot);
+    const minX = arena.originX, maxX = arena.originX + DUEL_ARENA_SIZE;
+    const minZ = arena.originZ, maxZ = arena.originZ + DUEL_ARENA_SIZE;
     const edits: { x: number; y: number; z: number; block: number }[] = [];
-    for (const key of slotEdits.keys()) {
-      const parts = key.split(',').map(Number);
+    for (const key of [...this.edits.keys()]) {
+      const first = key.indexOf(',');
+      const x = Number(key.slice(0, first));
+      // The overwhelming majority of world edits are nowhere near an arena;
+      // reject on x before paying for the rest of the key.
+      if (!(x >= minX && x < maxX)) continue;
+      const second = key.indexOf(',', first + 1);
+      const z = Number(key.slice(second + 1));
+      if (!(z >= minZ && z < maxZ)) continue;
+      const y = Number(key.slice(first + 1, second));
+      if (y < arena.floor - 1 || y >= arena.ceiling) continue;
       this.edits.delete(key);
-      edits.push({ x: parts[0], y: parts[1], z: parts[2], block: Block.Air });
+      edits.push({ x, y, z, block: Block.Air });
     }
-    slotEdits.clear();
     this.duelArenaEdits.delete(slot);
-    if (!memberIds || memberIds.length === 0) return [];
+    if (edits.length === 0 || !memberIds || memberIds.length === 0) return [];
     return memberIds.map((id) => ({
       to: id,
       msg: { t: 'editBatch', edits },
@@ -1586,6 +1633,10 @@ export class GameServer {
     p.duelLastShotAt = -Infinity; p.duelNextBurstAt = 0; p.duelBurstShots = 0;
     p.duelShotTickets = []; p.duelLoaded = 24; p.duelReloadUntil = 0;
     p.duelMedkits = 5; p.duelRespawning = false;
+    // A teleport is not motion. Starting the history at the spawn stops a
+    // rewind from interpolating the player back across the whole arena.
+    p.duelTrack = [];
+    this.recordDuelTrack(p);
     return [
       this.duelLoadout(p.id),
       { to: p.id, msg: { t: 'duelArena', arena, spawn: { ...spawn },
@@ -1601,7 +1652,7 @@ export class GameServer {
     p.held = saved.held; p.armor = saved.armor.slice();
     p.armorPoints = saved.armorPoints; p.toughness = saved.toughness;
     p.savedClientData = cloneRecord(saved.savedClientData);
-    p.duelSaved = undefined; p.duelShotTickets = []; p.duelLoaded = 0;
+    p.duelSaved = undefined; p.duelShotTickets = []; p.duelTrack = []; p.duelLoaded = 0;
     p.duelReloadUntil = 0; p.duelMedkits = 0; p.duelRespawning = false;
     return [{ to: p.id, msg: { t: 'duelRestored', x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
       health: p.health, dead: p.dead, mode: p.mode, state: cloneRecord(p.savedClientData) } }];
@@ -1693,7 +1744,17 @@ export class GameServer {
     }
     p.reloading = p.duelReloadUntil > this.worldTime;
     if (typeof msg.swing === 'number' && Number.isFinite(msg.swing)) p.swing = Math.floor(msg.swing) & 0xffff;
+    this.recordDuelTrack(p);
     return [];
+  }
+
+  /** Append this player's accepted position to their rewind history. */
+  private recordDuelTrack(p: ServerPlayer): void {
+    const now = this.worldTime;
+    p.duelTrack.push({ at: now, x: p.x, y: p.y, z: p.z });
+    let drop = 0;
+    while (drop < p.duelTrack.length && now - p.duelTrack[drop].at > DUEL_TRACK_WINDOW) drop++;
+    if (drop > 0) p.duelTrack.splice(0, drop);
   }
 
   private handleDuelShot(p: ServerPlayer, msg: Extract<ClientMsg, { t: 'shot' }>): Outbound[] {
@@ -1722,7 +1783,13 @@ export class GameServer {
     p.duelLoaded--;
     p.duelShotTickets.push({ at: now, x: msg.x, y: msg.y, z: msg.z,
       dx: msg.dx / len, dy: msg.dy / len, dz: msg.dz / len });
-    p.duelShotTickets = p.duelShotTickets.filter((t) => now - t.at <= 0.4).slice(-3);
+    // Rounds are projectiles, not hitscan: a shot fired at the far wall is
+    // still in the air most of a second later, and the hit report for it comes
+    // back after the NEXT burst has already been fired. Retiring tickets after
+    // 0.4s (barely one burst) is what threw those hits away. Hold a full flight
+    // time, and enough tickets for two overlapping bursts.
+    p.duelShotTickets = p.duelShotTickets
+      .filter((t) => now - t.at <= DUEL_TRACK_WINDOW).slice(-6);
     this.duels.removeSpawnShield(p.id);
     return this.duels.membersOf(p.id).filter((id) => id !== p.id).map((id) => ({
       to: id, msg: { t: 'shot', id: p.id, item: Item.BurstRifle,
@@ -1745,20 +1812,49 @@ export class GameServer {
     const distance = Math.hypot(dx, dy, dz), horiz = Math.hypot(dx, dz);
     if (!(distance > 0 && distance <= 60)) return [];
     const now = this.worldTime;
-    const ticketIndex = attacker.duelShotTickets.findIndex((shot) => {
-      if (now - shot.at > 0.75) return false;
-      const tx = target.x - shot.x, ty = target.y + 0.9 - shot.y, tz = target.z - shot.z;
-      const along = tx * shot.dx + ty * shot.dy + tz * shot.dz;
-      if (along < 0 || along > 58) return false;
-      const missSq = tx * tx + ty * ty + tz * tz - along * along;
-      return missSq <= 1.15 * 1.15;
-    });
-    if (ticketIndex < 0) return [];
-    if (!hasArenaLineOfSight({ x: attacker.x, y: attacker.y + 1.5, z: attacker.z },
-      { x: target.x, y: target.y + 1.0, z: target.z }, arena,
-      (x, y, z) => this.edits.get(`${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`) === Block.OakPlanks
-    )) return [];
+    // Lag compensation. The shooter aimed at the opponent as their own client
+    // drew them — one interpolation delay behind live — and the round then
+    // spent up to half a second in the air before the hit was reported. Judging
+    // that report against where the target is RIGHT NOW rejected almost every
+    // honest shot at a strafing opponent, which is what "fighting doesn't feel
+    // good" was: the shots landed on screen and the server threw them away.
+    // So rewind: a ticket counts if its ray passed through the target at ANY
+    // point in the target's recorded history from the moment it was fired.
+    let ticketIndex = -1, hitAt: DuelTrackSample | null = null;
+    // The live position is ALWAYS a candidate — this check is a strict superset
+    // of the old "where are they now" test, never a narrower one — and the
+    // recorded history is what a hit on a target who has since moved needs.
+    const candidates: DuelTrackSample[] = [{ at: now, x: target.x, y: target.y, z: target.z }];
+    for (const sample of target.duelTrack) candidates.push(sample);
+    for (let i = attacker.duelShotTickets.length - 1; i >= 0 && ticketIndex < 0; i--) {
+      const shot = attacker.duelShotTickets[i];
+      if (now - shot.at > DUEL_TRACK_WINDOW) continue;
+      for (const sample of candidates) {
+        // Only where the target was from the trigger pull onwards; a position
+        // they had left before the round existed can never have been hit.
+        if (sample.at < shot.at - 0.15) continue;
+        const tx = sample.x - shot.x, ty = sample.y + 0.9 - shot.y, tz = sample.z - shot.z;
+        const along = tx * shot.dx + ty * shot.dy + tz * shot.dz;
+        if (along < 0 || along > 58) continue;
+        const missSq = tx * tx + ty * ty + tz * tz - along * along;
+        if (missSq > 1.15 * 1.15) continue;
+        ticketIndex = i; hitAt = sample; break;
+      }
+    }
+    if (ticketIndex < 0 || !hitAt) return [];
+    // Cover is judged at the same rewound instant, from the muzzle the round
+    // actually left — otherwise a target who ran behind a wall after being hit
+    // would erase the hit, and one who ran OUT from behind cover would grant a
+    // shot that never had a line.
+    const shotFrom = attacker.duelShotTickets[ticketIndex];
+    const clear = hasArenaLineOfSight({ x: shotFrom.x, y: shotFrom.y, z: shotFrom.z },
+      { x: hitAt.x, y: hitAt.y + 1.0, z: hitAt.z }, arena,
+      (x, y, z) => this.edits.get(`${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`) === Block.OakPlanks);
+    // The round is spent either way. It was aimed through the target's body, so
+    // if cover stopped it, it stopped THERE — leaving the ticket alive would
+    // let a blocked round be re-reported the moment the target steps out.
     attacker.duelShotTickets.splice(ticketIndex, 1);
+    if (!clear) return [];
     const dealt = Math.min(5, target.health);
     target.health = Math.max(0, target.health - 5);
     const killed = target.health <= 0;
@@ -1779,10 +1875,7 @@ export class GameServer {
     for (const id of this.duels.membersOf(attacker.id)) {
       out.push({ to: id, msg: { t: 'killfeed', killer: attacker.username, victim: target.username } });
     }
-    if (snapshot.phase === 'results' && snapshot.result) {
-      for (const id of this.duels.membersOf(attacker.id)) out.push({ to: id,
-        msg: { t: 'duelResult', result: snapshot.result } });
-    }
+    out.push(...this.duelResultOutbound(snapshot));
     return out;
   }
 
@@ -1966,11 +2059,7 @@ export class GameServer {
           out.push(...this.announceWorldScope([p.id]));
         }
         if (result.snapshot?.phase === 'lobby') out.push(...this.restoreDuelLobby(result.snapshot));
-        if (result.snapshot?.phase === 'results' && result.snapshot.result) {
-          for (const member of result.snapshot.participants) out.push({
-            to: member.id, msg: { t: 'duelResult', result: result.snapshot.result },
-          });
-        }
+        if (result.snapshot) out.push(...this.duelResultOutbound(result.snapshot));
         return out;
       }
       case 'duelReady': {
@@ -2063,14 +2152,13 @@ export class GameServer {
           p.duelMedkits = 5; p.duelRespawning = false; p.duelShotTickets = [];
           p.duelLoaded = 24; p.duelReloadUntil = 0; p.duelBurstShots = 0;
           p.duelNextBurstAt = 0; p.duelLastShotAt = -Infinity; p.reloading = false;
+          p.duelTrack = []; this.recordDuelTrack(p);
           out.push(this.duelLoadout(p.id));
           out.push({ to: p.id, msg: { t: 'respawned', x: spawn.x, y: spawn.y, z: spawn.z, health: DUEL_MAX_HEALTH } });
           out.push({ to: p.id, msg: { t: 'duelRespawn', respawnAt: 0, spectating: false } });
         }
       }
-      if (snap.phase === 'results' && snap.result) {
-        for (const p of snap.participants) out.push({ to: p.id, msg: { t: 'duelResult', result: snap.result } });
-      }
+      out.push(...this.duelResultOutbound(snap));
     }
     if (this.worldTime >= this.duelClockNextAt) {
       this.duelClockNextAt = this.worldTime + 1;

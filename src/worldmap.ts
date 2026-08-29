@@ -502,11 +502,12 @@ export class WorldMap {
     if (this.structures.length) {
       const c = (k: string): number =>
         this.structures.reduce((n, s) => n + (s.kind === k ? 1 : 0), 0);
-      lines.push(`<b>◼ STRUCTURES</b> (${this.structures.length})`);
+      const chip = iconSvg('square');
+      lines.push(`<b>${chip} STRUCTURES</b> (${this.structures.length})`);
       lines.push(
-        `<span style="color:${STRUCT_COLOR.tower}">◼</span> Towers ${c('tower')} · ` +
-        `<span style="color:${STRUCT_COLOR.bunker}">◼</span> Bunkers ${c('bunker')} · ` +
-        `<span style="color:${STRUCT_COLOR.pod}">◼</span> Pods ${c('pod')}`);
+        `<span style="color:${STRUCT_COLOR.tower}">${chip}</span> Towers ${c('tower')} · ` +
+        `<span style="color:${STRUCT_COLOR.bunker}">${chip}</span> Bunkers ${c('bunker')} · ` +
+        `<span style="color:${STRUCT_COLOR.pod}">${chip}</span> Pods ${c('pod')}`);
       lines.push('');
     }
     const p = this.mapCtx.player();
@@ -517,7 +518,7 @@ export class WorldMap {
       for (const m of this.dynamicMarkers) {
         const dist = Math.round(Math.hypot(m.x - p.x, m.z - p.z));
         lines.push(
-          `<span style="color:${this.rgba(m.color, 1)}">■</span> ` +
+          `<span style="color:${this.rgba(m.color, 1)}">${iconSvg('square')}</span> ` +
           `${this.escape(m.name)} <span style="color:#8da0c0">${dist}m</span>`);
       }
       lines.push('');
@@ -528,7 +529,7 @@ export class WorldMap {
       const alt = w.y !== undefined ? ` · Y${w.y}` : '';
       const eye = w.show ? iconSvg('eye') : '–';
       lines.push(
-        `<span style="color:${this.rgba(w.color, 1)}">■</span> ` +
+        `<span style="color:${this.rgba(w.color, 1)}">${iconSvg('square')}</span> ` +
         `${this.escape(w.name)} <span style="color:#8da0c0">${dist}m${alt}</span> ` +
         `<a data-eye="${i}" title="Show in world" ` +
         `style="cursor:pointer;text-decoration:none">${eye}</a> ` +

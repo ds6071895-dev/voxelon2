@@ -1241,6 +1241,29 @@ export class RemotePlayers {
     return -1;
   }
 
+  /** Nearest living avatar crossed by the segment `from`->`to`, else -1.
+   *
+   *  A projectile advances in fixed sub-steps and used to test only the point
+   *  it landed on. A body is 0.7 blocks wide, so a round clipping a shoulder
+   *  could step straight over it and fly on — the shot that visibly went
+   *  through someone and did nothing. Sweeping the segment cannot miss. */
+  avatarAtSegment(from: THREE.Vector3, to: THREE.Vector3): number {
+    SEG_DIR.subVectors(to, from);
+    const length = SEG_DIR.length();
+    if (length < 1e-9) return this.avatarAtPoint(to);
+    SEG_DIR.multiplyScalar(1 / length);
+    let best = -1, bestT = length;
+    for (const [id, av] of this.avatars) {
+      const r = this.net.remotes.get(id);
+      if (!r || r.dead) continue;
+      SEG_MIN.set(av.dx - 0.35, av.dy, av.dz - 0.35);
+      SEG_MAX.set(av.dx + 0.35, av.dy + 2.0, av.dz + 0.35);
+      const tHit = rayBox(from, SEG_DIR, SEG_MIN, SEG_MAX);
+      if (tHit !== null && tHit <= bestT) { bestT = tHit; best = id; }
+    }
+    return best;
+  }
+
   /** Nearest living avatar hit by the ray within maxDist, else -1. */
   rayHit(origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number): number {
     let best = -1, bestT = maxDist;
@@ -1282,6 +1305,11 @@ function wrap(a: number): number {
   while (a < -Math.PI) a += Math.PI * 2;
   return a;
 }
+
+// Scratch vectors for avatarAtSegment — it runs once per projectile sub-step.
+const SEG_DIR = new THREE.Vector3();
+const SEG_MIN = new THREE.Vector3();
+const SEG_MAX = new THREE.Vector3();
 
 function rayBox(
   origin: THREE.Vector3, dir: THREE.Vector3,

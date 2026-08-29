@@ -116,12 +116,43 @@ export class Input {
     document.addEventListener('pointerlockchange', () => {
       if (this.touchMode) return; // virtual lock — the OS pointer is not involved
       this.locked = document.pointerLockElement === this.canvas;
+      if (this.locked) this.wantLock = false;
       if (!this.locked) {
         this.keys.clear();
         this.leftDown = this.rightDown = false;
       }
     });
+    // A refused request is normal, not exceptional: the browser turns pointer
+    // lock down whenever the document is not focused, while a previous exit is
+    // still settling, or (WrongDocumentError) when the page is not the active
+    // document — an embedded/preview frame, or a tab that lost the foreground
+    // between the request and the browser acting on it. Losing the lock must
+    // never leave the game unplayable, so a refusal simply keeps `wantLock`
+    // armed and the next real user gesture re-asks. Nothing reaches the console.
+    document.addEventListener('pointerlockerror', () => { this.pending = false; }, true);
+    for (const type of ['mousedown', 'keydown', 'touchend'] as const) {
+      document.addEventListener(type, () => this.retryLock(), true);
+    }
+    // The refusal that actually bites is WrongDocumentError: the browser will
+    // not hand the pointer to a document that is not the focused one, and the
+    // game asks for it from a NETWORK callback (a Duels rematch drops you into
+    // the arena while your attention — or a second test window, or DevTools —
+    // is somewhere else). Regaining focus is the moment that request becomes
+    // grantable again, so re-ask there instead of waiting for a click.
+    window.addEventListener('focus', () => this.retryLock());
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) this.retryLock();
+    });
   }
+
+  /** True while the game wants the pointer but the browser has not granted it
+   *  — what the "click to take control" hint watches. */
+  get lockPending(): boolean { return this.wantLock && !this.locked; }
+
+  /** Set while the game wants the pointer but the browser has not granted it.
+   *  Cleared by a successful lock or by an explicit unlock(). */
+  private wantLock = false;
+  private pending = false;
 
   lock(): void {
     if (this.touchMode) {
@@ -132,11 +163,42 @@ export class Input {
       document.dispatchEvent(new Event('pointerlockchange'));
       return;
     }
-    this.canvas.requestPointerLock();
+    this.wantLock = true;
+    this.request();
+  }
+
+  private request(): void {
+    if (this.locked || this.pending || !this.canvas.isConnected) return;
+    this.pending = true;
+    let result: unknown;
+    try {
+      result = this.canvas.requestPointerLock();
+    } catch {
+      this.pending = false;
+      return;
+    }
+    // Older engines return void here; newer ones return a promise that REJECTS
+    // rather than throwing, which is where the unhandled rejection came from.
+    if (result && typeof (result as Promise<void>).then === 'function') {
+      (result as Promise<void>).then(
+        () => { this.pending = false; },
+        () => { this.pending = false; },
+      );
+    } else {
+      this.pending = false;
+    }
+  }
+
+  /** Re-ask for the pointer from inside a user gesture, which is the only
+   *  moment a browser reliably grants it. */
+  private retryLock(): void {
+    if (this.touchMode || !this.wantLock || this.locked) return;
+    this.request();
   }
 
   /** Release the (real or virtual) pointer lock. */
   unlock(): void {
+    this.wantLock = false;
     if (this.touchMode) {
       if (!this.locked) return;
       this.locked = false;
@@ -145,7 +207,7 @@ export class Input {
       document.dispatchEvent(new Event('pointerlockchange'));
       return;
     }
-    document.exitPointerLock();
+    try { document.exitPointerLock(); } catch { /* already released */ }
   }
 
   down(code: string): boolean {

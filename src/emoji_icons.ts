@@ -12,7 +12,16 @@ export type IconName =
   | 'crown' | 'bomb' | 'explosion' | 'dish' | 'nut' | 'web' | 'heli'
   | 'drum' | 'satellite' | 'dynamite' | 'link' | 'wing' | 'trophy' | 'flag'
   | 'mail' | 'lock' | 'dove' | 'statue' | 'eye' | 'search' | 'blocked'
-  | 'command' | 'close' | 'log' | 'chevronUp' | 'chevronDown' | 'droplet';
+  | 'command' | 'close' | 'log' | 'chevronUp' | 'chevronDown' | 'droplet'
+  | 'map' | 'check' | 'trap' | 'pin' | 'camera' | 'book' | 'boat' | 'party'
+  | 'compass' | 'mute' | 'plane' | 'brick' | 'horn' | 'arrowRight'
+  // Geometric/technical glyphs. Several of these (pause, hourglass, the medium
+  // square) carry an emoji presentation and render in the platform's colour
+  // emoji font; the rest are text-font shapes whose weight and size vary just
+  // as much. Drawing them keeps every mark on the HUD the game's own.
+  | 'diamond' | 'square' | 'triangleUp' | 'triangleDown' | 'triangleRight'
+  | 'disc' | 'reticle' | 'pause' | 'hourglass' | 'arrowUp' | 'arrowDown'
+  | 'arrowsHorizontal';
 
 const PATHS: Record<IconName, string> = {
   skull: '<path d="M12 2C7 2 3 5.6 3 10c0 2.9 1.6 5.2 4 6.6V19a1 1 0 0 0 1 1h1.2l.8 2h4l.8-2H16a1 1 0 0 0 1-1v-2.4c2.4-1.4 4-3.7 4-6.6 0-4.4-4-8-9-8Z" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="9" cy="10" r="1.3" fill="currentColor"/><circle cx="15" cy="10" r="1.3" fill="currentColor"/><path d="M11 13h2l-1 2z" fill="currentColor"/>',
@@ -70,7 +79,95 @@ const PATHS: Record<IconName, string> = {
   chevronUp: '<path d="M5 15l7-7 7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>',
   chevronDown: '<path d="M5 9l7 7 7-7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>',
   droplet: '<path d="M12 2c4 5 7 9.5 7 13a7 7 0 0 1-14 0c0-3.5 3-8 7-13Z" fill="currentColor"/>',
+  map: '<path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M9 4v14M15 6v14" stroke="currentColor" stroke-width="1.3"/>',
+  check: '<path d="M4 12.5 9.5 18 20 6.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>',
+  trap: '<path d="M3 17h18M5 17l1.5-5M19 17l-1.5-5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M6.5 12l1.6 2.4M9.5 11l1 3.4M14.5 11l-1 3.4M17.5 12l-1.6 2.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>',
+  pin: '<path d="M12 21s7-6.4 7-11.5A7 7 0 0 0 5 9.5C5 14.6 12 21 12 21Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><circle cx="12" cy="9.5" r="2.6" fill="currentColor"/>',
+  camera: '<rect x="2" y="7" width="13" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M15 11.5 22 8v8l-7-3.5v-1Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>',
+  book: '<path d="M4 4h6a2 2 0 0 1 2 2v14a2 2 0 0 0-2-2H4V4Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M20 4h-6a2 2 0 0 0-2 2v14a2 2 0 0 1 2-2h6V4Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>',
+  boat: '<path d="M3 16h18l-2.5 4h-13L3 16Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M12 3v13M12 5l6 4-6 2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>',
+  party: '<path d="m3 21 5-13 8 8-13 5Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M14 3.5v2M18.5 6l1.4-1.4M20 11h2M16.5 9.5 18 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
+  compass: '<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m15.5 8.5-2 5.5-5.5 2 2-5.5 5.5-2Z" fill="currentColor"/>',
+  mute: '<path d="M4 9h3l4-3v12l-4-3H4V9Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="m15 9.5 5 5M20 9.5l-5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
+  plane: '<path d="M2 13.5 22 4l-4.5 16-4-6.5-6.5-2 3.5 8-2 1-2.5-6L2 13.5Z" fill="currentColor"/>',
+  brick: '<rect x="2.5" y="5" width="19" height="14" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M2.5 9.7h19M2.5 14.3h19M9 5v4.7M15 9.7v4.6M9 14.3V19" stroke="currentColor" stroke-width="1.3"/>',
+  horn: '<path d="M4 10v4l4 1 11 5V4L8 9 4 10Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M8 9v6" stroke="currentColor" stroke-width="1.3"/>',
+  diamond: '<path d="M12 2.6 21.4 12 12 21.4 2.6 12 12 2.6Z" fill="currentColor"/>',
+  square: '<rect x="4" y="4" width="16" height="16" rx="2" fill="currentColor"/>',
+  triangleUp: '<path d="M12 4.5 21 19H3l9-14.5Z" fill="currentColor"/>',
+  triangleDown: '<path d="M12 19.5 3 5h18l-9 14.5Z" fill="currentColor"/>',
+  triangleRight: '<path d="M19.5 12 5 21V3l14.5 9Z" fill="currentColor"/>',
+  disc: '<circle cx="12" cy="12" r="8" fill="currentColor"/>',
+  reticle: '<circle cx="12" cy="12" r="8.4" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="12" r="3.4" fill="currentColor"/>',
+  pause: '<rect x="6" y="4.5" width="4.2" height="15" rx="1.3" fill="currentColor"/><rect x="13.8" y="4.5" width="4.2" height="15" rx="1.3" fill="currentColor"/>',
+  hourglass: '<path d="M6 3h12M6 21h12M7 3v3.2c0 2 5 3.9 5 5.8 0 1.9-5 3.8-5 5.8V21M17 3v3.2c0 2-5 3.9-5 5.8 0 1.9 5 3.8 5 5.8V21" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
+  arrowUp: '<path d="M12 19V5M6 11l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+  arrowDown: '<path d="M12 5v14M6 13l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+  arrowsHorizontal: '<path d="M3 12h18M7 8l-4 4 4 4M17 8l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>',
+  arrowRight: '<path d="M4 12h15M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>',
 };
+
+// --- Emoji substitution ---------------------------------------------------
+// The game speaks to the player through a lot of one-line notices, banners and
+// chat lines that were written with an emoji at the front. Those glyphs come
+// from the platform's emoji font, which is a different weight, a different
+// palette and a different era of design on every OS — the one part of the HUD
+// the game does not draw. Everything below turns them into the icon set above
+// at the point of display, so nothing has to remember to do it by hand.
+
+/** Every emoji the UI writes, mapped to the icon that replaces it. */
+const EMOJI_ICONS: Record<string, IconName> = {
+  '⛔': 'blocked', '❌': 'close', '✕': 'close', '✖': 'close',
+  '⚔': 'swords', '❤': 'heart', '☠': 'skull', '💀': 'skull',
+  '🚩': 'flag', '🏴': 'flag', '⚑': 'flag',
+  '★': 'star', '✦': 'sparkle', '✨': 'sparkle',
+  '💥': 'explosion', '💣': 'bomb', '🧱': 'brick',
+  '⬆': 'chevronUp', '⇩': 'chevronDown', '➜': 'arrowRight',
+  '🏆': 'trophy', '🌀': 'vortex', '🛡': 'shield', '🎒': 'backpack',
+  '🗺': 'map', '📨': 'mail', '✓': 'check', '✔': 'check', '✅': 'check',
+  '🚀': 'rocket', '🚁': 'heli', '🪤': 'trap', '🎲': 'dice',
+  '⛏': 'pickaxe', '🗿': 'statue', '📍': 'pin', '🎥': 'camera',
+  '⚠': 'warning', '🛰': 'satellite', '📖': 'book', '⛵': 'boat',
+  '✋': 'hand', '🎉': 'party', '🧭': 'compass', '🔒': 'lock',
+  '🤫': 'mute', '✈': 'plane', '⛽': 'fuel', '🔫': 'gun',
+  '📯': 'horn', '🕵': 'search', '⌘': 'command',
+  '◆': 'diamond', '◇': 'diamond', '■': 'square', '◼': 'square', '▪': 'square',
+  '▲': 'triangleUp', '▼': 'triangleDown', '▶': 'triangleRight', '▸': 'triangleRight',
+  '●': 'disc', '◉': 'reticle', '◎': 'reticle',
+  '⏸': 'pause', '⏳': 'hourglass', '⌛': 'hourglass',
+  '↑': 'arrowUp', '↓': 'arrowDown', '↔': 'arrowsHorizontal',
+  // NOT '→': it is typography, not an icon — it reads as "becomes" in dozens of
+  // upgrade and recipe lines ("Silo HP 500 → 600"), where a glyph is right.
+};
+
+/** Matches any mapped emoji, plus the variation selector and zero-width joiner
+ *  that trail some of them, plus anything left in the pictographic ranges so a
+ *  glyph nobody mapped is dropped rather than shown in the wrong font. */
+const EMOJI_RE = new RegExp(
+  `(?:${Object.keys(EMOJI_ICONS).map((e) => e.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})[\uFE0F\u200D]*` +
+  '|[\u{1F300}-\u{1FAFF}][\uFE0F\u200D]*',
+  'gu',
+);
+
+/** Swap emoji for inline SVG inside a string that is ALREADY html. */
+export function iconifyHtml(html: string): string {
+  return html.replace(EMOJI_RE, (match) => {
+    const name = EMOJI_ICONS[match.replace(/[\uFE0F\u200D]/gu, '')];
+    return name ? iconSvg(name) : '';
+  });
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+}
+
+/** Render PLAIN text (a notice, a banner, a chat line) into an element with its
+ *  emoji swapped for icons. The text is escaped first, so a player-supplied
+ *  name inside it can never become markup. */
+export function setIconText(el: HTMLElement, text: string): void {
+  el.innerHTML = iconifyHtml(escapeHtml(text)).trim();
+}
 
 /** Inline SVG markup for `name`, sized to sit inline with surrounding text. */
 export function iconSvg(name: IconName, className = ''): string {

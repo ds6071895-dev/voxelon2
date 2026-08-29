@@ -100,7 +100,10 @@ export const DUEL_ARENA_LOAD_TIMEOUT_MS = 30_000;
 export const DUEL_ROUND_MS = 5 * 60_000;
 export const DUEL_RESPAWN_MS = 3_000;
 export const DUEL_SPAWN_SHIELD_MS = 1_250;
-export const DUEL_REMATCH_MS = 15_000;
+// The results screen plays a rank-reveal animation before the vote buttons are
+// worth reading. Fifteen seconds meant the window could close while the RP was
+// still counting up, so "Run it back" regularly expired unanswered.
+export const DUEL_REMATCH_MS = 30_000;
 export const DUEL_ARENA_BASE_X = 12_288;
 export const DUEL_ARENA_SLOT_SPACING = 512;
 export const DUEL_ARENA_SIZE = 44;

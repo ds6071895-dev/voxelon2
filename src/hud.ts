@@ -39,8 +39,12 @@ function drawIcon(
 
 export interface StatusInfo {
   health: number;
-  /** Lifesteal max-health hearts (1 heart = 2 HP); sizes the heart row. */
+  /** Lifesteal max-health hearts; sizes the heart row. */
   hearts: number;
+  /** HP one heart icon is worth. 2 everywhere except Duels, whose 40 HP pool
+   *  would otherwise draw twenty icons in two stacked rows — a wall of hearts
+   *  that is harder to read at a glance than the ten it replaces. */
+  hpPerHeart?: number;
   /** Stamina, 0..1. */
   energy: number;
   /** True when energy is depleted and sprinting is locked out. */
@@ -169,7 +173,7 @@ export class HUD {
 
   /** Hearts (left), blue energy bar (right), bubbles when submerged. */
   updateStatus(s: StatusInfo): void {
-    const key = `${s.health}|${s.hearts}|${Math.round(s.energy * 40)}|${s.exhausted}|` +
+    const key = `${s.health}|${s.hearts}|${s.hpPerHeart ?? 2}|${Math.round(s.energy * 40)}|${s.exhausted}|` +
       `${Math.ceil(s.air)}|${s.underwater}|${Math.round(s.armor * 2)}`;
     if (key === this.lastStatus) return;
     this.lastStatus = key;
@@ -181,9 +185,10 @@ export class HUD {
       .getContext('2d')!;
     hearts.clearRect(0, 0, 202, 40);
     const maxHearts = Math.max(1, Math.round(s.hearts));
+    const per = Math.max(1, s.hpPerHeart ?? 2);
     const heartFill = (v: number) => (px: number): string => {
-      if (v >= 2) return px % 6 === 1 ? '#ff6a6a' : '#e02020';
-      if (v >= 1) return px < 3 ? '#e02020' : '#3b3b3b';
+      if (v >= per) return px % 6 === 1 ? '#ff6a6a' : '#e02020';
+      if (v >= per / 2) return px < 3 ? '#e02020' : '#3b3b3b';
       return '#3b3b3b';
     };
     const rows = maxHearts > 10 ? 2 : 1; // MAX_HEARTS is 20, so at most 2 rows
@@ -192,7 +197,7 @@ export class HUD {
       const col = i - row * 10;
       // Bottom row ALWAYS sits on the canvas floor (y=20); extra hearts stack
       // in the upper half (y=0) — so a single row keeps its usual position.
-      drawIcon(hearts, col * 20, HEART_MASK, heartFill(s.health - i * 2), (1 - row) * 20);
+      drawIcon(hearts, col * 20, HEART_MASK, heartFill(s.health - i * per), (1 - row) * 20);
     }
     // The armor bar sits just above the (possibly two-row) heart stack.
     const armorEl = document.getElementById('armor') as HTMLCanvasElement;

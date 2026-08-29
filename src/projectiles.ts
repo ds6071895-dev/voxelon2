@@ -22,6 +22,8 @@ import type { RemotePlayers } from './remoteplayers';
 import type { World } from './world';
 
 const STEP = 0.2;          // collision sub-step (blocks)
+/** Start of the current sub-step, so player collision can sweep it. */
+const SWEEP_FROM = new THREE.Vector3();
 const SPAWN_OFFSET = 0.6;  // start ahead of the eye so it can't hit the shooter
 // Tracer length in blocks per (block/second) of muzzle velocity: a 100 b/s
 // round draws a ~1.2-block streak. Without this a bullet is a 7cm dot crossing
@@ -112,10 +114,11 @@ export class Projectiles {
       let remaining = p.gun.speed * dt;
       while (remaining > 0 && p.alive) {
         const step = Math.min(STEP, remaining);
+        SWEEP_FROM.copy(p.pos);
         p.pos.addScaledVector(p.dir, step);
         p.traveled += step;
         remaining -= step;
-        this.collideAt(p);
+        this.collideAt(p, SWEEP_FROM);
         if (p.alive && p.traveled >= p.gun.range) {
           this.despawn(p, p.gun.rocket === true); // rockets airburst at max range
         }
@@ -127,12 +130,13 @@ export class Projectiles {
     }
   }
 
-  /** Test the projectile's current point against players, mobs, then blocks. */
-  private collideAt(p: Projectile): void {
+  /** Test this sub-step against players, mobs, then blocks. Players are swept
+   *  over the whole `from`->`p.pos` segment; the rest test the end point. */
+  private collideAt(p: Projectile, from: THREE.Vector3): void {
     // A ghost round only needs to know WHERE to stop, so it tests geometry and
     // nothing else: no damage, no hit report, no encounter/mob interaction.
     if (p.ghost) {
-      if (this.remotePlayers.avatarAtPoint(p.pos) >= 0 || this.hitsLocalPlayer(p.pos) ||
+      if (this.remotePlayers.avatarAtSegment(from, p.pos) >= 0 || this.hitsLocalPlayer(p.pos) ||
           isSolid(this.world.getBlock(
             Math.floor(p.pos.x), Math.floor(p.pos.y), Math.floor(p.pos.z)))) {
         this.despawn(p, true);
@@ -142,7 +146,7 @@ export class Projectiles {
     // Remote player (PvP): the server validates + applies the damage. Rockets
     // deal NO direct hit — they detonate and damage via the server-side splash
     // (sent from despawn), so a near-miss still hurts and there's no double-count.
-    const pid = this.remotePlayers.avatarAtPoint(p.pos);
+    const pid = this.remotePlayers.avatarAtSegment(from, p.pos);
     if (pid >= 0) {
       if (p.gun.rocket !== true) this.net.sendRangedAttack(pid, p.gun.damage);
       this.despawn(p, true);

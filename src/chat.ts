@@ -14,6 +14,8 @@
 // below — the registry, the parser, the suggestion matcher — import cleanly
 // into the headless smoke tests.
 
+import { setIconText } from './emoji_icons';
+
 export interface CommandSpec {
   /** Bare name, no slash. */
   name: string;
@@ -189,7 +191,8 @@ export class ChatBox {
 
     const hint = document.createElement('div');
     hint.id = 'chat-hint';
-    hint.textContent = 'Enter = run · Tab = complete · ↑ ↓ = pick · Esc = close · commands only, no chat';
+    setIconText(hint,
+      'Enter = run · Tab = complete · ↑ ↓ = pick · Esc = close · commands only, no chat');
 
     this.root.append(this.logEl, this.suggestEl, entry, hint);
     parent.appendChild(this.root);
@@ -241,7 +244,7 @@ export class ChatBox {
     for (const part of String(text).split('\n')) {
       const line = document.createElement('div');
       line.className = `chat-line${kind === 'info' ? '' : ` ${kind}`}`;
-      line.textContent = part;
+      setIconText(line, part);
       this.logEl.appendChild(line);
       window.setTimeout(() => {
         line.classList.add('faded');

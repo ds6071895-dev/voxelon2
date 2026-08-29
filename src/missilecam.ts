@@ -282,7 +282,7 @@ export class MissileCam {
 
     if (this.outcome) {
       const text: Record<MissileCamOutcome, string> = {
-        impact: '● IMPACT',
+        impact: `${iconSvg('disc')} IMPACT`,
         intercepted: `${iconSvg('shield')} INTERCEPTED`,
         shot: `${iconSvg('close')} SHOT DOWN`,
         expired: '… LOST',
@@ -290,8 +290,9 @@ export class MissileCam {
       this.statusEl.innerHTML = text[this.outcome];
       this.statusEl.style.color = this.outcome === 'impact' ? '#ff8a4a' : '#9ff0ff';
     } else {
-      this.statusEl.textContent = progress < 0.12 ? '▲ BOOST'
-        : progress < 0.74 ? '➜ CRUISE' : '▼ TERMINAL';
+      this.statusEl.innerHTML = progress < 0.12 ? `${iconSvg('triangleUp')} BOOST`
+        : progress < 0.74 ? `${iconSvg('triangleRight')} CRUISE`
+        : `${iconSvg('triangleDown')} TERMINAL`;
       this.statusEl.style.color = L.accent;
     }
 

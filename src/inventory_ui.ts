@@ -7,7 +7,7 @@ import { BLOCKS } from './blocks';
 import { craftResult, consumeCraft } from './crafting';
 import { COOK_TIME, FUEL, SMELT, FurnaceState } from './furnace';
 import { renderItemIcon } from './icons';
-import { iconSvg } from './emoji_icons';
+import { iconSvg, setIconText } from './emoji_icons';
 import type { Inventory } from './inventory';
 import {
   HOTBAR_SIZE, INV_SIZE, CRAFT_START, CHEST_START, CHEST_SIZE,
@@ -930,7 +930,7 @@ export class InventoryUI {
     const costStr = cost
       ? Object.entries(cost).map(([id, n]) => `${n} ${ITEMS[Number(id)]?.name ?? '?'}`).join(', ')
       : '';
-    btn.textContent = `▲ ${label}\n${costStr}`;
+    setIconText(btn, `▲ ${label}\n${costStr}`);
     btn.style.whiteSpace = 'pre-line';
     const afford = ctx.canAfford(axis);
     btn.disabled = !afford;
@@ -1043,7 +1043,8 @@ export class InventoryUI {
     const cost = turretUpgradeCost(s, axis);
     const costStr = cost
       ? Object.entries(cost).map(([id, n]) => `${n} ${ITEMS[Number(id)]?.name ?? '?'}`).join(', ') : '';
-    btn.textContent = `▲ ${label} ${s.level[axis]}\n${costStr}`;
+    setIconText(btn, `▲ ${label} ${s.level[axis]}\n${costStr}`);
+    btn.style.whiteSpace = 'pre-line';
     const afford = ctx.canAfford(axis);
     btn.disabled = !afford; btn.style.opacity = afford ? '1' : '0.5';
   }

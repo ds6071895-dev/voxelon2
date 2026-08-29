@@ -792,6 +792,57 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
     o.to === 3 && o.msg.t === 'join' && o.msg.player.id === 2));
 }
 
+// Every match opens on a bare arena. The per-lobby record of what was placed
+// is not the thing that gets cleared — the arena's FOOTPRINT is — so a plank
+// nobody is tracking any more (a forfeit, a crash, a world reloaded off disk)
+// cannot be standing there when the next fight starts.
+{
+  const seed = 913;
+  const s = new GameServer(seed, () => 0.5);
+  const a0 = duelArenaBounds(0);
+  const lx = 20, lz = 20;
+  const bx = a0.minX + lx, bz = a0.minZ + lz;
+  const by = a0.floor + duelTerrainElevation(lx, lz) + 2;
+  const key = `${bx},${by},${bz}`;
+  // A world that comes back from disk with cover still standing in the arena.
+  s.restore({ v: 2, seed, edits: [[key, Block.OakPlanks]] });
+  check('a stale arena plank survives a world reload',
+    s.serialize().edits.some(([k, b]) => k === key && b === Block.OakPlanks));
+
+  s.addPlayer(1, { username: 'Stale', faction: 0 });
+  s.addPlayer(2, { username: 'Fresh', faction: 0 });
+  const created = s.handle(1, { t: 'duelCreate' });
+  const lobby = created.find((o) => o.to === 1 && o.msg.t === 'duelLobby')?.msg;
+  if (!lobby || lobby.t !== 'duelLobby' || !lobby.inviteToken) throw new Error('sweep lobby missing');
+  s.handle(2, { t: 'duelJoin', token: lobby.inviteToken });
+  for (const id of [1, 2]) s.handle(id, { t: 'duelReady', ready: true });
+  const entered = s.handle(1, { t: 'duelStart' });
+  const arenaMsg = entered.find((o) => o.to === 1 && o.msg.t === 'duelArena')?.msg;
+  if (!arenaMsg || arenaMsg.t !== 'duelArena') throw new Error('sweep arena missing');
+  check('the swept arena is the one the match was actually given',
+    arenaMsg.arena.slot === 0);
+  check('starting a match clears untracked oak planks from the arena',
+    !s.serialize().edits.some(([k]) => k === key));
+  const cleared = (id: number) => entered.some((o) => o.to === id && o.msg.t === 'editBatch' &&
+    o.msg.edits.some((e) => e.x === bx && e.y === by && e.z === bz && e.block === Block.Air));
+  check('and both clients are told to remove it', cleared(1) && cleared(2));
+
+  // The sweep is scoped to the arena: the open world is never touched.
+  const s2 = new GameServer(seed, () => 0.5);
+  s2.restore({ v: 2, seed, edits: [['40,80,40', Block.OakPlanks], [key, Block.OakPlanks]] });
+  s2.addPlayer(1, { username: 'Stale', faction: 0 });
+  s2.addPlayer(2, { username: 'Fresh', faction: 0 });
+  const made = s2.handle(1, { t: 'duelCreate' })
+    .find((o) => o.to === 1 && o.msg.t === 'duelLobby')?.msg;
+  if (!made || made.t !== 'duelLobby' || !made.inviteToken) throw new Error('scope lobby missing');
+  s2.handle(2, { t: 'duelJoin', token: made.inviteToken });
+  for (const id of [1, 2]) s2.handle(id, { t: 'duelReady', ready: true });
+  s2.handle(1, { t: 'duelStart' });
+  const after = s2.serialize().edits;
+  check('the sweep never reaches outside the arena footprint',
+    after.some(([k]) => k === '40,80,40') && !after.some(([k]) => k === key));
+}
+
 // Healing is server-counted: no passive regeneration, normal Medkit healing,
 // and exactly five consumptions per life even if a client forges extra uses.
 {

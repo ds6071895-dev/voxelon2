@@ -12,6 +12,7 @@ import { InventoryUI, MachineUIContext, TurretUIContext } from './inventory_ui';
 import { dropFor, gunVolley, GunInfo, Item, ItemStack, ITEMS } from './items';
 import { RECIPES, Recipe, WARFARE_BLUEPRINTS, setBlueprintCheck } from './crafting';
 import { renderItemIcon } from './icons';
+import { iconSvg, iconifyHtml, setIconText } from './emoji_icons';
 import { itemDescription } from './itemdesc';
 import {
   Machines, MachineType, allowedFilterMask, applyUpgrade, claimMachine,
@@ -161,7 +162,12 @@ const vaultCinematic = new VaultCinematic(app);
 // server (the ?seed override was removed).
 const seed = WORLD_SEED;
 
-const renderer = new THREE.WebGLRenderer({ antialias: false });
+// MSAA is on. A voxel world is nothing but hard silhouettes, and every one of
+// them crawls a pixel at a time as you walk when the edges are not resolved —
+// which is what "the distance doesn't look smooth, it looks like the
+// resolution" actually is. Multisampling costs fill rate, not texture memory,
+// and it is the only thing that fixes geometry aliasing; mipmaps cannot.
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.domElement.className = 'game';
@@ -201,6 +207,12 @@ const viewCamera = new THREE.PerspectiveCamera(
 viewCamera.rotation.order = 'YXZ';
 scene.add(viewCamera);
 
+// The atlas is sampled with NearestFilter and no mip chain, on purpose. Every
+// smoothing stage we tried — trilinear minification, a hand-built mip chain,
+// forced anisotropy — buys a calmer horizon by softening the near field, and
+// softening the near field is exactly what "the pixel art went blurry" is.
+// Geometry aliasing is the renderer's MSAA to solve (see above), not the
+// texture filter's.
 const atlas = createAtlas(seed);
 const cracks = createCrackTextures();
 const world = new World(scene, atlas, seed);
@@ -254,49 +266,168 @@ const interaction = new Interaction(scene, world, player, cracks, inventory);
 // Fixed "fake" title-screen panorama (its own world + seed; same every launch).
 const panoramaView = new Panorama(atlas, window.innerWidth / window.innerHeight);
 
-// Visual world border: four translucent cyan walls at ±WORLD_HALF so players
-// can see the edge of the 5000×5000 play area (movement is clamped to it), plus
-// a subtler faction-gold ring at ±CORE_HALF marking the HEARTLAND core — the
-// inner 1000×1000 where claims/war/spawns live (outside = the Wilds).
-(() => {
-  const ring = (half: number, color: number, opacity: number, height: number): void => {
-    const mat = new THREE.MeshBasicMaterial({
-      color, transparent: true, opacity,
-      side: THREE.DoubleSide, depthWrite: false,
-    });
-    const geoNS = new THREE.PlaneGeometry(half * 2, height);
-    for (const z of [-half, half]) {
-      const w = new THREE.Mesh(geoNS, mat);
-      w.position.set(0, height / 2, z); scene.add(w);
-    }
-    for (const x of [-half, half]) {
-      const w = new THREE.Mesh(geoNS, mat);
-      w.position.set(x, height / 2, 0); w.rotation.y = Math.PI / 2; scene.add(w);
-    }
-  };
-  ring(WORLD_HALF, 0x5ad0ff, 0.42, 160); // hard outer border (cyan)
-  ring(CORE_HALF, 0xffd84a, 0.14, 120);  // Heartland boundary (soft gold)
-})();
+// Visual boundaries: the hard outer edge of the 5000×5000 play area, the
+// Heartland ring at ±CORE_HALF, and the war's closing ring.
+//
+// These used to be four quads as wide as the boundary itself, and that is what
+// made them glitch. A 5000-unit plane parked at ±2500 lies almost entirely
+// beyond the camera's 2000-unit far plane, so a moving, invisible cut ran
+// across it; its bounding sphere sits thousands of units from anything you can
+// see, so the transparent pass sorted it against water, clouds and particles
+// essentially at random; and standing on the boundary — which is exactly where
+// movement clamps you — put the camera inside the plane, where DoubleSide and
+// the near plane fought each other frame by frame.
+//
+// A wall is now a SHORT panel that slides along the boundary to stay in front
+// of you. It is always well inside the far plane, always near the camera for
+// sorting, and never contains it. The pattern is a function of WORLD position,
+// not of the panel, so the panel's own motion is invisible; the ends fade out,
+// and the whole thing fades in with distance the way the terrain fog does, so
+// it still only appears as you approach.
+const BOUNDARY_PANEL = 340;  // units of wall drawn either side of you
+const BOUNDARY_TOP = 256;    // the full world column
+/** How far OUTSIDE the clamp the sheet is hung. Movement clamps you to exactly
+ *  ±half, so a sheet drawn at ±half is coplanar with your own eye the moment
+ *  you walk into it — the degenerate case a two-sided plane cannot resolve.
+ *  A quarter of a block is invisible as a position and enough to stay clear of
+ *  the 0.08 near plane, so the wall is still solid when you are up against it. */
+const BOUNDARY_MARGIN = 0.25;
 
-// WAR BORDER: a closing ring of red walls, shown only during a war. The four
-// walls reposition/rescale every frame from the pure shrink curve so every
-// client renders the identical ring the server clamps movement to.
-const warWallGroup = new THREE.Group();
-warWallGroup.visible = false;
-scene.add(warWallGroup);
-const warWallMat = new THREE.MeshBasicMaterial({
-  color: 0xff4a3a, transparent: true, opacity: 0.4,
-  side: THREE.DoubleSide, depthWrite: false,
-});
-const warWallGeo = new THREE.PlaneGeometry(1, 240);
-const warWalls = [0, 1, 2, 3].map(() => {
-  const m = new THREE.Mesh(warWallGeo, warWallMat);
-  m.frustumCulled = false;
-  warWallGroup.add(m);
-  return m;
-});
-warWalls[2].rotation.y = Math.PI / 2;
-warWalls[3].rotation.y = Math.PI / 2;
+interface BoundaryRing {
+  /** `half` is the ring's current half-extent; visible=false hides it. */
+  update(half: number, visible: boolean): void;
+  material: THREE.ShaderMaterial;
+}
+
+function makeBoundaryRing(color: number, opacity: number, band: number): BoundaryRing {
+  const material = new THREE.ShaderMaterial({
+    uniforms: {
+      uColor: { value: new THREE.Color(color) },
+      uOpacity: { value: opacity },
+      uBand: { value: band },      // world-unit spacing of the field lines
+      uTime: { value: 0 },
+      uFog: { value: new THREE.Vector2(FOG_NEAR, FOG_FAR) },
+    },
+    vertexShader: `
+      varying vec3 vWorld;
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        vec4 world = modelMatrix * vec4(position, 1.0);
+        vWorld = world.xyz;
+        gl_Position = projectionMatrix * viewMatrix * world;
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 uColor;
+      uniform float uOpacity;
+      uniform float uBand;
+      uniform float uTime;
+      uniform vec2 uFog;
+      varying vec3 vWorld;
+      varying vec2 vUv;
+
+      /** Distance to the nearest multiple of period, in world units. */
+      float grid(float v, float period) {
+        return abs(fract(v / period) - 0.5) * period;
+      }
+
+      void main() {
+        // The panel slides; the pattern must not. Everything below is keyed to
+        // the WORLD position of the fragment, so the wall reads as a fixed
+        // structure you walk along.
+        float along = abs(vWorld.x) > abs(vWorld.z) ? vWorld.z : vWorld.x;
+
+        // Field lines: verticals on the world grid, plus a slow rising pulse.
+        float posts = 1.0 - smoothstep(0.0, 1.1, grid(along, uBand));
+        float rungs = 1.0 - smoothstep(0.0, 0.7, grid(vWorld.y, uBand * 0.5));
+        float pulse = pow(0.5 + 0.5 * sin(vWorld.y * 0.25 - uTime * 1.6), 6.0);
+
+        // A sheet that is densest at the ground and thins out overhead, so the
+        // boundary reads as rising out of the world rather than hanging in it.
+        float sheet = 1.0 - smoothstep(0.0, 1.0, vUv.y);
+        sheet = 0.16 + sheet * 0.5;
+
+        float body = sheet + posts * 0.55 + rungs * 0.18 + pulse * 0.22;
+
+        // Feather the sliding ends so the panel never shows an edge, and fade
+        // with distance on the same curve the terrain fog uses.
+        float ends = smoothstep(0.0, 0.14, vUv.x) * (1.0 - smoothstep(0.86, 1.0, vUv.x));
+        float away = 1.0 - smoothstep(uFog.x, uFog.y, distance(vWorld, cameraPosition));
+
+        float alpha = uOpacity * body * ends * away;
+        if (alpha < 0.004) discard;
+        gl_FragColor = vec4(uColor * (0.85 + posts * 0.5 + pulse * 0.4), alpha);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    fog: false, // the shader fades on the same curve by hand
+  });
+
+  const geometry = new THREE.PlaneGeometry(1, 1);
+  const group = new THREE.Group();
+  const walls = [0, 1, 2, 3].map((i) => {
+    const wall = new THREE.Mesh(geometry, material);
+    wall.frustumCulled = false; // it is always in view by construction
+    // No renderOrder on purpose: a panel now sits a few dozen units from the
+    // camera, so three's ordinary back-to-front sort finally puts it in the
+    // right place against water and particles. Forcing an order would undo
+    // exactly the thing this rewrite fixed.
+    if (i >= 2) wall.rotation.y = Math.PI / 2;
+    group.add(wall);
+    return wall;
+  });
+  scene.add(group);
+
+  return {
+    material,
+    update(half: number, visible: boolean): void {
+      group.visible = visible;
+      if (!visible) return;
+      // Slide each panel to sit in front of the camera, clamped so it never
+      // hangs off the end of its own side.
+      const width = Math.min(BOUNDARY_PANEL, half * 2);
+      const limit = Math.max(0, half - width / 2);
+      const alongX = THREE.MathUtils.clamp(camera.position.x, -limit, limit);
+      const alongZ = THREE.MathUtils.clamp(camera.position.z, -limit, limit);
+      const y = BOUNDARY_TOP / 2;
+      const edge = half + BOUNDARY_MARGIN;
+      walls[0].position.set(alongX, y, -edge);
+      walls[1].position.set(alongX, y, edge);
+      walls[2].position.set(-edge, y, alongZ);
+      walls[3].position.set(edge, y, alongZ);
+      for (const wall of walls) wall.scale.set(width, BOUNDARY_TOP, 1);
+      material.uniforms.uFog.value.set(
+        scene.fog instanceof THREE.Fog ? scene.fog.near : FOG_NEAR,
+        scene.fog instanceof THREE.Fog ? scene.fog.far : FOG_FAR,
+      );
+    },
+  };
+}
+
+const worldBoundary = makeBoundaryRing(0x5ad0ff, 0.62, 16); // hard outer edge
+const coreBoundary = makeBoundaryRing(0xffd84a, 0.22, 32);  // Heartland ring
+// WAR BORDER: a closing ring, shown only during a war. It repositions every
+// frame from the pure shrink curve, so every client renders the identical ring
+// the server clamps movement to.
+const warBoundary = makeBoundaryRing(0xff4a3a, 0.72, 8);
+
+/** Re-seat the rings on the camera. Cheap, and must run every frame: the
+ *  panels only look like continuous walls because they follow you. */
+function updateBoundaryRings(): void {
+  // Inside a Duels arena the open world is cropped away entirely, so its
+  // boundaries have nothing left to mark.
+  const show = !duelArenaActive;
+  worldBoundary.update(WORLD_HALF, show);
+  coreBoundary.update(CORE_HALF, show);
+  if (!show) warBoundary.update(0, false);
+  const t = worldTimeLocal;
+  worldBoundary.material.uniforms.uTime.value = t;
+  coreBoundary.material.uniforms.uTime.value = t;
+  warBoundary.material.uniforms.uTime.value = t * 2.4;
+}
 
 // EVERYBODY GLOWS during a war: an additive faction-colored halo floats on
 // every player (depth-test off, so it shows through walls) — nobody hides.
@@ -836,7 +967,7 @@ function updateCombatTimer(): void {
     combatTimerEl.style.display = 'none';
     return;
   }
-  combatTimerEl.textContent = `⚔ COMBAT ${Math.ceil(left)}s`;
+  combatTimerEl.innerHTML = iconifyHtml(`⚔ COMBAT ${Math.ceil(left)}s`);
   // Two heart rows lift armor/ammo by another 22px.
   combatTimerEl.style.bottom = localHearts > 10
     ? 'calc(var(--hotbar-slot) + 108px + var(--safe-bottom))'
@@ -930,7 +1061,7 @@ regionBannerEl.style.cssText =
 app.appendChild(regionBannerEl);
 let regionBannerTimer = 0;
 function showRegionBanner(text: string, color: string): void {
-  regionBannerEl.textContent = text;
+  setIconText(regionBannerEl, text);
   regionBannerEl.style.color = color;
   regionBannerEl.style.display = 'block';
   regionBannerTimer = 3.2;
@@ -989,15 +1120,16 @@ function factionCss(id: number): string {
 }
 function refreshNetInfo(): void {
   const badge = localFaction === NO_FACTION ? '' :
-    `<span style="color:${factionCss(localFaction)}">■ ${factionName(localFaction)}</span>  `;
+    `<span style="color:${factionCss(localFaction)}">${iconSvg('square')} ${factionName(localFaction)}</span>  `;
   const modeBadge = localMode === 'survival' ? '' :
     `<span style="color:#ffe27a">[${localMode.toUpperCase()}]</span>  `;
   // Permanent "Seasons Won" badge (Phase 5): a gold star + count.
-  const wonBadge = localSeasonsWon > 0 ? `<span style="color:#ffd84a">★${localSeasonsWon}</span>  ` : '';
+  const wonBadge = localSeasonsWon > 0
+    ? `<span style="color:#ffd84a">${iconSvg('star')}${localSeasonsWon}</span>  ` : '';
   // No flag = no comeback: your faction's deaths are permanent until you take
   // one back. It rides in the status line so it's impossible to miss.
   const flagBadge = myFactionFlagless && net.connected
-    ? '<span style="color:#ff5c5c">💀 NO FLAG — deaths are FOREVER</span>  ' : '';
+    ? `<span style="color:#ff5c5c">${iconSvg('skull')} NO FLAG — deaths are FOREVER</span>  ` : '';
   if (net.connected) {
     netinfoEl.innerHTML =
       `${flagBadge}${wonBadge}${modeBadge}${badge}${net.username}   ${net.remotes.size + 1} online`;
@@ -1011,7 +1143,7 @@ function showKill(killer: string, victim: string): void {
   const line = document.createElement('div');
   line.className = 'mc-font';
   line.style.cssText = 'font-size:13px;text-shadow:1px 1px 0 #000;';
-  line.textContent = killer ? `${killer}  »  ${victim}` : `${victim} died`;
+  setIconText(line, killer ? `${killer}  »  ${victim}` : `${victim} died`);
   killfeedEl.appendChild(line);
   window.setTimeout(() => line.remove(), 5000);
 }
@@ -1082,7 +1214,10 @@ function pvpBeatColor(kind: DuelEventKind): string {
  *  calls (they must match for every client), so only the chip plays there. */
 function onPvpKill(targetId: number): void {
   const victim = net.remotes.get(targetId)?.info.username ?? 'Enemy';
-  killChipEl.textContent = `✖ ELIMINATED ${victim}`;
+  // In a match the announcer slam sits in the same place and says the same
+  // thing with more force; the chip is the quiet version for when it is not up.
+  if (duelArenaActive && duelAnnounceEl.classList.contains('visible')) return;
+  setIconText(killChipEl, `✖ ELIMINATED ${victim}`);
   killChipEl.classList.remove('visible');
   void killChipEl.offsetWidth; // restart the pop
   killChipEl.style.opacity = '1'; // clear any fade left from the previous kill
@@ -1201,7 +1336,7 @@ function showNotice(text: string): void {
   const line = document.createElement('div');
   line.className = 'mc-font';
   line.style.cssText = 'font-size:14px;color:#ffe27a;text-shadow:1px 1px 0 #000;';
-  line.textContent = text;
+  setIconText(line, text);
   killfeedEl.appendChild(line);
   window.setTimeout(() => line.remove(), 4000);
 }
@@ -1645,6 +1780,10 @@ function enterPause(): void {
 function enterTitle(): void {
   if (fieldGuide?.open) fieldGuide.closeSilently();
   screen = 'title';
+  // Disarm any outstanding pointer request. Input re-asks for the pointer on
+  // the next click or window focus now, and a stale "we still want it" flag
+  // would grab the cursor back the moment you tabbed to the title screen.
+  input.unlock();
   document.body.classList.remove('in-game');
   overlay.classList.remove('hidden');
   pauseEl.style.display = 'none';
@@ -1716,7 +1855,7 @@ const factionReveal = (() => {
   const eyebrow = document.createElement('div'); eyebrow.className = 'faction-eyebrow';
   eyebrow.textContent = 'Balance protocol complete · Identity assigned';
   const crest = document.createElement('div'); crest.className = 'faction-crest';
-  const crestMark = document.createElement('span'); crestMark.textContent = '⚔'; crest.appendChild(crestMark);
+  const crestMark = document.createElement('span'); crestMark.innerHTML = iconSvg('swords'); crest.appendChild(crestMark);
   const lead = document.createElement('div'); lead.className = 'faction-lead'; lead.textContent = 'You fight for';
   const name = document.createElement('h1'); name.className = 'faction-name';
   const rule = document.createElement('div'); rule.className = 'faction-rule';
@@ -1984,7 +2123,7 @@ function clearElimination(): void {
 function renderElimination(): void {
   if (elimPermanent) {
     elimPanel.innerHTML =
-      '<b style="font-size:17px">💀 ELIMINATED — FOREVER</b><br>' +
+      `<b style="font-size:17px">${iconSvg('skull')} ELIMINATED — FOREVER</b><br>` +
       'You ran out of hearts while your faction held no flag.<br>' +
       'There is no comeback from this one. Ask an admin for a fresh start.';
     elimPanel.style.display = 'block';
@@ -1994,7 +2133,7 @@ function renderElimination(): void {
   const left = elimUntilMs - Date.now();
   if (left <= 0) {
     elimPanel.innerHTML =
-      '<b style="font-size:17px">✨ You\'re back!</b><br>Log in to rejoin the war with 3 hearts.';
+      `<b style="font-size:17px">${iconSvg('sparkle')} You're back!</b><br>Log in to rejoin the war with 3 hearts.`;
     elimPanel.style.display = 'block';
     return;
   }
@@ -2003,7 +2142,7 @@ function renderElimination(): void {
   const sec = Math.floor(left / 1000) % 60;
   const clock = `${h}h ${String(m).padStart(2, '0')}m ${String(sec).padStart(2, '0')}s`;
   elimPanel.innerHTML =
-    '<b style="font-size:17px">💀 ELIMINATED</b><br>' +
+    `<b style="font-size:17px">${iconSvg('skull')} ELIMINATED</b><br>` +
     `You come back in <b style="font-size:18px">${clock}</b> — with 3 hearts.<br>` +
     'A teammate with a Revival Beacon can bring you back sooner.';
   elimPanel.style.display = 'block';
@@ -2711,9 +2850,44 @@ function joinPendingDuel(): void {
 }
 
 // ── Match state ────────────────────────────────────────────────────────────
+/** Duels health is a 40 HP pool. Drawn at the open world's 2 HP per icon that
+ *  is twenty hearts in two stacked rows; at 4 it is the same familiar ten-icon
+ *  row everything else uses, and reads at a glance mid-fight. */
+const DUEL_HP_PER_HEART = 4;
 let duelArenaActive = false;
 let duelActiveBounds: DuelArenaBounds | null = null;
 let duelArenaReadySent = false;
+let duelReadyWatchdog = 0;
+
+/** Confirm to the server that this client has the arena streamed.
+ *
+ *  This deliberately does NOT live only in the render loop. A Duels client
+ *  whose window is in the background gets its animation frames throttled to
+ *  nothing, so the ready never left, and the server's arena-load gate timed the
+ *  whole match back to the lobby — which is what "Run it back does nothing"
+ *  looked like from the other window. The watchdog below is a plain interval,
+ *  and timers keep firing when frames do not. */
+function markDuelArenaReady(): void {
+  if (!duelArenaActive || duelArenaReadySent) return;
+  duelArenaReadySent = true;
+  net.sendDuelArenaReady();
+  stopDuelReadyWatchdog();
+}
+function stopDuelReadyWatchdog(): void {
+  if (duelReadyWatchdog) window.clearInterval(duelReadyWatchdog);
+  duelReadyWatchdog = 0;
+}
+function startDuelReadyWatchdog(x: number, z: number): void {
+  stopDuelReadyWatchdog();
+  const started = Date.now();
+  duelReadyWatchdog = window.setInterval(() => {
+    if (!duelArenaActive || duelArenaReadySent) { stopDuelReadyWatchdog(); return; }
+    // Well inside the server's 30s gate. The frame loop still pins the player
+    // at the spawn until the collision bubble is genuinely built, so readying
+    // early costs nothing but never strands the match.
+    if (world.isLoaded(x, z) || Date.now() - started > 5_000) markDuelArenaReady();
+  }, 250);
+}
 let duelCountdownEndsAt = 0;
 let duelRespawnAt = 0;
 let duelSpectating = false;
@@ -2727,11 +2901,12 @@ let duelFinalThirtyPlayed = false;
 let duelSuddenDeathPlayed = false;
 let duelFightPlayed = false;
 let duelFightCueUntil = 0;
-let duelFinalMinuteCueUntil = 0;
 let duelResultData: DuelResult | null = null;
 let duelScoresHeld = false;
 let duelResultVoteStatus: HTMLElement | null = null;
 let duelResultRematch: HTMLButtonElement | null = null;
+/** Our own "run it back" click, held until the server snapshot agrees. */
+let duelRematchVoteSent = false;
 let duelLocalFallback: {
   state: ReturnType<typeof inventory.serialize>;
   x: number; y: number; z: number; yaw: number; pitch: number;
@@ -2781,6 +2956,14 @@ duelScoresTouch.className = 'duel-scores-touch'; duelScoresTouch.type = 'button'
 duelScoresTouch.textContent = 'Scores'; duelScoresTouch.setAttribute('aria-label', 'Hold to see scores');
 app.appendChild(duelScoresTouch);
 
+// Shown whenever the game is live but the browser is holding on to the mouse.
+// It is `pointer-events: none` on purpose: the click that dismisses it is the
+// same click the canvas re-locks on, so there is nothing to aim at.
+const clickResumeEl = document.createElement('div');
+clickResumeEl.className = 'click-resume';
+clickResumeEl.textContent = 'Click to take control';
+app.appendChild(clickResumeEl);
+
 const duelResultEl = document.createElement('div'); duelResultEl.className = 'duel-result';
 duelResultEl.setAttribute('role', 'dialog'); duelResultEl.setAttribute('aria-modal', 'true');
 duelResultEl.setAttribute('aria-label', 'Duels match result');
@@ -2812,16 +2995,27 @@ const DUEL_EVENT_COLORS: Record<DuelEventKind, string> = {
 let duelFeedSeen = 0;
 let duelAnnounceUntil = 0;
 
-function pushDuelKillFeed(event: DuelEvent): void {
-  const copy = duelEventCopy(event);
+function pushDuelFeedRow(title: string, sub: string, color: string): void {
   const row = document.createElement('div');
-  row.style.setProperty('--feed', DUEL_EVENT_COLORS[event.kind]);
-  const tag = document.createElement('b'); tag.textContent = copy.title;
-  const text = document.createElement('span'); text.textContent = copy.sub;
+  row.style.setProperty('--feed', color);
+  const tag = document.createElement('b'); tag.textContent = title;
+  const text = document.createElement('span'); text.textContent = sub;
   row.append(tag, text);
   duelKillFeedEl.appendChild(row);
-  while (duelKillFeedEl.childElementCount > 4) duelKillFeedEl.firstElementChild!.remove();
-  window.setTimeout(() => row.remove(), 4_600);
+  while (duelKillFeedEl.childElementCount > 3) duelKillFeedEl.firstElementChild!.remove();
+  window.setTimeout(() => row.remove(), 3_800);
+}
+
+function pushDuelKillFeed(event: DuelEvent): void {
+  const copy = duelEventCopy(event);
+  pushDuelFeedRow(copy.title, copy.sub, DUEL_EVENT_COLORS[event.kind]);
+}
+
+/** Every ordinary kill in a match, in the ONE corner Duels uses for them.
+ *  The open-world kill feed draws in the same corner 70px higher, so letting
+ *  both run put two different renderings of the same kill on screen at once. */
+function pushDuelKill(killer: string, victim: string): void {
+  pushDuelFeedRow(killer || 'ELIMINATED', victim, '#9fb6cc');
 }
 
 /** Replay any announcer beats this client has not shown yet. Beats are
@@ -2831,9 +3025,21 @@ function playDuelFeed(feed: DuelEvent[]): void {
   const fresh = feed.filter((event) => event.seq > duelFeedSeen).sort((a, b) => a.seq - b.seq);
   if (!fresh.length) return;
   duelFeedSeen = fresh[fresh.length - 1].seq;
-  for (const event of fresh) pushDuelKillFeed(event);
-  // Only the biggest beat of the batch takes the centre of the screen.
-  const headline = fresh[fresh.length - 1];
+  for (const event of fresh) {
+    // Yours are slammed over the crosshair a few lines below. Printing them in
+    // the side feed as well is the same call twice, two inches apart.
+    if (event.actor === net.myId || event.victim === net.myId) continue;
+    pushDuelKillFeed(event);
+  }
+  // The centre of the screen belongs to beats YOU are part of. A four-player
+  // arena generates a call every few seconds, and slamming every one of them
+  // over the crosshair meant the loudest surface on screen was mostly other
+  // people's business — the single biggest reason a match reads as noisy. A
+  // rival's killing spree still reaches you the moment it involves you, which
+  // is when you die to it; until then it is one line in the side feed.
+  const mine = fresh.filter((event) => event.actor === net.myId || event.victim === net.myId);
+  if (!mine.length) return;
+  const headline = mine[mine.length - 1];
   const copy = duelEventCopy(headline);
   duelAnnounceEl.style.setProperty('--announce', DUEL_EVENT_COLORS[headline.kind]);
   duelAnnounceTitle.textContent = copy.title;
@@ -2875,7 +3081,7 @@ function duelScoreRows(players: DuelParticipant[]): HTMLElement {
     const name = document.createElement('strong');
     if (p.kills === topKills && topKills > 0) {
       const mark = document.createElement('span');
-      mark.className = 'duel-leader-mark'; mark.textContent = '◆';
+      mark.className = 'duel-leader-mark'; mark.innerHTML = iconSvg('diamond');
       name.appendChild(mark);
     }
     const who = document.createElement('span'); who.textContent = p.username;
@@ -2962,7 +3168,8 @@ function duelResultRecap(result: DuelResult): string[] {
 
 function renderDuelResult(result: DuelResult): void {
   cancelAnimationFrame(duelRevealFrame);
-  duelResultData = result; screen = 'duel_results'; input.unlock();
+  duelResultData = result; duelRematchVoteSent = false;
+  screen = 'duel_results'; input.unlock();
   pauseEl.style.display = 'none';
   duelAnnounceEl.classList.remove('visible', 'out');
   duelKillFeedEl.replaceChildren();
@@ -3099,6 +3306,11 @@ function renderDuelResult(result: DuelResult): void {
   rematch.className = 'primary'; rematch.textContent = 'Run it back';
   const lobby = document.createElement('button'); lobby.type = 'button'; lobby.textContent = 'Return to lobby';
   rematch.addEventListener('click', () => {
+    // Latch it locally. updateDuelHud repaints this button every frame from the
+    // authoritative snapshot, and until the vote round-trips that snapshot
+    // still says "has not voted" — which un-pressed the button under the
+    // player's cursor and invited a second click.
+    duelRematchVoteSent = true;
     rematch.disabled = true;
     rematch.textContent = 'Vote sent';
     voteStatus.textContent = 'Waiting for the other players…';
@@ -3145,7 +3357,9 @@ function renderDuelPills(board: DuelParticipant[]): void {
     const node = duelPillNodes.get(p.id);
     if (!node) continue;
     node.score.textContent = String(p.kills);
-    node.spree.textContent = p.spree >= 3 ? `${p.spree}×` : '';
+    // Sprees are already called out loud by the announcer and written in the
+    // side feed. A third copy riding on every pill is noise, not information.
+    node.spree.textContent = '';
     node.root.classList.toggle('me', p.id === net.myId);
     node.root.classList.toggle('leader', p.kills === topKills && topKills > 0);
     node.root.classList.toggle('down', !p.alive || !p.connected);
@@ -3214,7 +3428,10 @@ function updateDuelHud(): void {
     else if (remaining <= 60_000) duelClockEl.classList.add('warn');
     if (duelSnapshot.phase === 'running' && remaining <= 60_000 && remaining > 0 &&
         !duelFinalMinuteShown) {
-      duelFinalMinuteShown = true; duelFinalMinuteCueUntil = now + 1_600;
+      // The clock has already gone amber and the announcer has already played
+      // the sting. Slamming FINAL MINUTE over the crosshair as well is a third
+      // copy of the same fact, dropped on the one place you are looking.
+      duelFinalMinuteShown = true;
     }
     if (duelSnapshot.phase === 'running' && remaining <= 30_000 && remaining > 0 &&
         !duelFinalThirtyPlayed) {
@@ -3247,15 +3464,14 @@ function updateDuelHud(): void {
     }
     if (now < duelFightCueUntil) { cue = 'FIGHT'; tone = 'go'; }
   }
-  if (!cue && now < duelFinalMinuteCueUntil) { cue = 'FINAL MINUTE'; tone = 'danger'; }
+
   // The announcer owns the centre of the screen while it is up.
   setDuelCue(duelAnnounceEl.classList.contains('visible') && cue.length > 2 ? '' : cue, tone);
 
   if (duelArenaActive && !duelArenaReadySent && duelSnapshot?.phase === 'countdown' &&
       (duelSnapshot.countdownEndsAt === undefined || duelSnapshot.countdownEndsAt === 0)) {
     if (world.isLoaded(player.pos.x, player.pos.z) || (pendingTeleport && worldTimeLocal - pendingTeleport.started > 1.5)) {
-      duelArenaReadySent = true;
-      net.sendDuelArenaReady();
+      markDuelArenaReady();
     }
   }
   if (duelResultData && duelResultVoteStatus) {
@@ -3263,7 +3479,7 @@ function updateDuelHud(): void {
     const votes = connected.filter((p) => p.rematchVote).length;
     const left = formatDuelTime(duelResultData.rematchDeadline - now);
     duelResultVoteStatus.textContent = `${votes}/${connected.length} voted to run it back · ${left}`;
-    const voted = me?.rematchVote === true;
+    const voted = me?.rematchVote === true || duelRematchVoteSent;
     if (duelResultRematch) {
       duelResultRematch.disabled = voted;
       duelResultRematch.textContent = voted ? 'Vote sent' : 'Run it back';
@@ -3273,6 +3489,7 @@ function updateDuelHud(): void {
 }
 
 function cleanupDuelSession(restoreState = true): void {
+  stopDuelReadyWatchdog();
   duelArenaActive = false;
   duelActiveBounds = null;
   world.setDuelRenderBounds(null);
@@ -3281,6 +3498,7 @@ function cleanupDuelSession(restoreState = true): void {
   duelSpectating = false;
   duelScoresHeld = false;
   duelResultData = null;
+  duelRematchVoteSent = false;
   duelSnapshot = null;
   duelInviteToken = '';
   pendingDuelToken = '';
@@ -3337,12 +3555,13 @@ net.onDuelArena = (arena, spawn, countdownEndsAt) => {
   duelLastCountdownCue = -1; duelCueText = ''; duelLastLeaderKey = '';
   duelFinalMinuteShown = false; duelFinalThirtyPlayed = false;
   duelSuddenDeathPlayed = false; duelFightPlayed = false;
-  duelFightCueUntil = 0; duelFinalMinuteCueUntil = 0;
+  duelFightCueUntil = 0;
   duelFeedSeen = duelSnapshot?.feed.reduce((max, e) => Math.max(max, e.seq), 0) ?? 0;
   duelLastKills.clear(); duelPillKey = '';
   duelKillFeedEl.replaceChildren();
   duelAnnounceEl.classList.remove('visible', 'out');
-  duelResultData = null; duelResultEl.classList.remove('visible'); duelSpectating = false;
+  duelResultData = null; duelRematchVoteSent = false;
+  duelResultEl.classList.remove('visible'); duelSpectating = false;
   clearVaultPresentation(true); endGrapple(); setSeat(null); myRope = null;
   killfeedEl.replaceChildren(); combatTagUntilLocal = 0; combatTimerEl.style.display = 'none';
   warEl.style.display = 'none'; regionBannerEl.style.display = 'none';
@@ -3359,8 +3578,9 @@ net.onDuelArena = (arena, spawn, countdownEndsAt) => {
   // Pre-stream the small arena bubble immediately so ready can be sent without delay
   if (world.update(spawn.x, spawn.z, 50, 2)) {
     pendingTeleport = null;
-    duelArenaReadySent = true;
-    net.sendDuelArenaReady();
+    markDuelArenaReady();
+  } else {
+    startDuelReadyWatchdog(spawn.x, spawn.z);
   }
   enterPlaying(); input.lock();
 };
@@ -3392,6 +3612,7 @@ net.onDuelLeaderboard = (leaderboard) => {
 };
 net.onDuelProfileUpdate = (id) => remotePlayers.invalidate(id);
 net.onDuelRestored = (x, y, z, yaw, pitch, health, dead, mode, state) => {
+  stopDuelReadyWatchdog();
   duelArenaActive = false; duelUnlimitedReserve = false;
   duelActiveBounds = null;
   world.setDuelRenderBounds(null);
@@ -3535,7 +3756,7 @@ const controlsPanel = (() => {
         set.className = 'keyrow-combo';
         for (const key of combo) {
           const chip = document.createElement('kbd');
-          chip.textContent = key;
+          setIconText(chip, key);
           set.appendChild(chip);
         }
         chips.appendChild(set);
@@ -3543,7 +3764,7 @@ const controlsPanel = (() => {
       if (hint) {
         const note = document.createElement('i');
         note.className = 'keyrow-hint';
-        note.textContent = hint;
+        setIconText(note, hint);
         chips.appendChild(note);
       }
       row.append(name, chips);
@@ -4029,7 +4250,7 @@ const tutorial = (() => {
     panel.style.setProperty('--brief-accent', step.accent);
     panel.dataset.step = String(i + 1);
     chapter.textContent = step.chapter;
-    icon.textContent = step.icon;
+    setIconText(icon, step.icon);
     number.textContent = 'BRIEF ' + String(i + 1).padStart(2, '0');
     title.textContent = step.title;
     summary.textContent = step.summary;
@@ -4040,7 +4261,7 @@ const tutorial = (() => {
     for (const detail of step.items) {
       const row = document.createElement('div'); row.className = 'brief-item';
       const label = document.createElement('div'); label.className = 'brief-item-label'; label.textContent = detail.label;
-      const value = document.createElement('div'); value.className = 'brief-item-value'; value.textContent = detail.value;
+      const value = document.createElement('div'); value.className = 'brief-item-value'; setIconText(value, detail.value);
       row.append(label, value); items.appendChild(row);
     }
     back.disabled = i === 0;
@@ -4369,7 +4590,10 @@ net.onRespawned = (x, y, z, h) => {
   pushStateSave();
   if (worldReady) input.lock();
 };
-net.onKillfeed = showKill;
+net.onKillfeed = (killer, victim) => {
+  if (duelArenaActive) pushDuelKill(killer, victim);
+  else showKill(killer, victim);
+};
 net.onRoster = refreshNetInfo;
 // Admin gamemode/teleport/notice (driven from the server console).
 net.onGamemode = (mode) => { applyLocalMode(mode); showNotice(`Gamemode: ${mode}`); };
@@ -4509,7 +4733,7 @@ net.onEliminated = (by, until) => {
   deathEl.style.display = 'none'; // the elimination banner replaces the death screen
   const ms = Math.max(0, until - Date.now());
   elimEl.innerHTML =
-    '<div style="font-size:44px;color:#ff5a5a;text-shadow:3px 3px 0 #000;letter-spacing:3px;">💀 ELIMINATED</div>' +
+    `<div style="font-size:44px;color:#ff5a5a;text-shadow:3px 3px 0 #000;letter-spacing:3px;">${iconSvg('skull')} ELIMINATED</div>` +
     `<div style="font-size:18px;color:#ffd0d0;">${by} took your last heart!</div>` +
     '<div style="font-size:14px;color:#cfe0ff;max-width:460px;line-height:1.7;">' +
     `You can come back in <b>${formatRemaining(ms)}</b> — or a teammate can bring you back early with a Revival Beacon. ` +
@@ -4548,7 +4772,7 @@ net.onReviveList = (targets) => {
   revivePanel.innerHTML = '';
   const title = document.createElement('div');
   title.className = 'mc-font';
-  title.textContent = '✨ REVIVE A TEAMMATE';
+  title.innerHTML = iconifyHtml('✨ REVIVE A TEAMMATE');
   title.style.cssText = 'font-size:26px;color:#ffd84a;letter-spacing:2px;text-shadow:2px 2px 0 #000;';
   revivePanel.appendChild(title);
   for (const t of targets.slice(0, 12)) {
@@ -5463,7 +5687,7 @@ starterCount.className = 'guide-hud-count';
 // A tappable ✕ so touch devices (no H key) can dismiss the checklist too.
 const starterCloseBtn = document.createElement('div');
 starterCloseBtn.className = 'guide-hud-close';
-starterCloseBtn.textContent = '✕';
+starterCloseBtn.innerHTML = iconSvg('close');
 starterCloseBtn.title = 'Hide (/guide shows it again)';
 starterCloseBtn.addEventListener('pointerdown', (e) => { e.stopPropagation(); toggleGuidePanel(); });
 starterHead.append(starterTitle, starterCount, starterCloseBtn);
@@ -5502,7 +5726,7 @@ function guideMark(id: string): void {
   saveGuide();
   guideDirty = true;
   const step = GUIDE_STEPS.find((s) => s.id === id);
-  if (step) showNotice(`✅ ${step.icon} ${step.text}`);
+  if (step) showNotice(`✅ ${step.text}`); // step.icon is already SVG markup — the tick carries it
   if (guideComplete(guideState)) {
     showRegionBanner('🎉 GETTING STARTED — COMPLETE!', '#9affb0');
   }
@@ -5553,7 +5777,7 @@ function nearestVaultHint(): string {
   }
   if (!best) return '';
   const glyph = compassGlyph(best.x - player.pos.x, best.z - player.pos.z);
-  return `☠ Nearest vault: <b>${Math.round(bestD)}m ${glyph}</b>`;
+  return `${iconSvg('skull')} Nearest vault: <b>${Math.round(bestD)}m ${glyph}</b>`;
 }
 /** A one-use Vault Compass: find the nearest vault of the compass's tier,
  *  drop a named waypoint on its entrance (with the terrain height, so the
@@ -5570,7 +5794,7 @@ function useVaultCompass(item: number): void {
   if (!best) { showNotice(`No Tier ${['I', 'II', 'III'][tier - 1]} vault exists in this world.`); return; }
   const glyph = compassGlyph(best.x - player.pos.x, best.z - player.pos.z);
   worldMap.addWaypointAt(best.x, world.terrain.height(best.x, best.z) + 1, best.z,
-    `☠ Vault ${['I', 'II', 'III'][tier - 1]}`);
+    `Vault ${['I', 'II', 'III'][tier - 1]}`);
   inventory.consumeSelected(1);
   audio.heartSteal();
   showNotice(`🧭 Tier ${['I', 'II', 'III'][tier - 1]} vault: ${Math.round(bestD)}m ${glyph} — waypoint set!`);
@@ -5595,10 +5819,10 @@ function renderGuidePanel(): void {
     row.className = `guide-hud-step${stepDone ? ' done' : active ? ' active' : ''}`;
     const tick = document.createElement('span');
     tick.className = 'guide-hud-step-tick';
-    tick.textContent = stepDone ? '✔' : step.icon;
+    tick.innerHTML = iconifyHtml(stepDone ? '✔' : step.icon);
     const label = document.createElement('span');
     label.className = 'guide-hud-step-text';
-    label.textContent = text;
+    setIconText(label, text);
     row.append(tick, label);
     starterBody.appendChild(row);
   }
@@ -5924,11 +6148,11 @@ function updateTpa(dt: number, controlling: boolean): void {
   }
   tpaBannerEl.style.display = 'block';
   const bar = '█'.repeat(Math.round((tpaHold / TPA_HOLD) * 10)).padEnd(10, '░');
-  tpaBannerEl.textContent =
+  setIconText(tpaBannerEl,
     `📨 ${tpaIncomingFrom} wants to teleport to you\n` +
     (tpaAccepting
       ? `accepting… ${bar} ${Math.max(0, TPA_HOLD - tpaHold).toFixed(1)}s — don't move!`
-      : `run /tpaccept to allow it (${Math.ceil(TPA_EXPIRE - ageSec)}s left)`);
+      : `run /tpaccept to allow it (${Math.ceil(TPA_EXPIRE - ageSec)}s left)`));
 }
 
 // --- The command box ---------------------------------------------------------
@@ -7281,7 +7505,8 @@ function actionButton(
   const b = document.createElement('button');
   b.type = 'button';
   b.className = 'mc-font';
-  b.textContent = label;
+  // Labels here carry inline icon markup (setIconText would escape it away).
+  b.innerHTML = iconifyHtml(label);
   b.disabled = !enabled;
   b.style.cssText =
     `min-height:44px;padding:0 14px;border-radius:7px;font-family:inherit;font-size:12px;` +
@@ -7448,7 +7673,7 @@ function renderSiloPanel(): void {
   title.style.cssText = 'flex:1;';
   title.innerHTML =
     `<div style="font-size:17px;letter-spacing:2.4px;color:${accent}">` +
-    `🚀 TACTICAL SILO</div>` +
+    `${iconSvg('rocket')} TACTICAL SILO</div>` +
     `<div style="font-size:10px;letter-spacing:1.6px;color:#5b6b83;margin-top:3px">` +
     `${tierLabel(s.tier)} · UNIT #${s.id} · ` +
     `${escapeHtml(s.owner || 'unclaimed')}</div>`;
@@ -7544,7 +7769,7 @@ function renderSiloPanel(): void {
         renderSiloPanel();
       }
     }, '#5ff09a');
-  const launchBtn = actionButton(row, '◎ SELECT TARGET',
+  const launchBtn = actionButton(row, `${iconSvg('reticle')} SELECT TARGET`,
     mine && s.ammo > 0 && s.cooldown <= 0, () => {
       strategicPanel.style.display = 'none';
       beginTargeting(s);
@@ -7636,7 +7861,7 @@ function renderBatteryPanel(): void {
   const room = stats.capacity - b.ammo;
   strategicCard.innerHTML =
     `<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">` +
-    `<div style="flex:1;font-size:15px;color:#5ce2ec;letter-spacing:1px">🛰 INTERCEPTOR BATTERY · ${tierLabel(b.tier)}</div>` +
+    `<div style="flex:1;font-size:15px;color:#5ce2ec;letter-spacing:1px">${iconSvg('satellite')} INTERCEPTOR BATTERY · ${tierLabel(b.tier)}</div>` +
     `<div style="font-size:11px;color:#7f93b3">${b.owner || 'unclaimed'}</div></div>` +
     statLine('Integrity', `${Math.round(b.hp)} / ${b.maxHp}`,
       b.hp / b.maxHp > 0.5 ? '#5ff09a' : b.hp / b.maxHp > 0.25 ? '#ffd24a' : '#ff5c4d') +
@@ -7748,7 +7973,7 @@ function renderHelipadPanel(): void {
   const title = document.createElement('div');
   title.style.cssText = 'position:relative;';
   title.innerHTML =
-    `<div style="font-size:17px;letter-spacing:2.4px;color:${accent}">🚁 AIRFRAME BAY</div>` +
+    `<div style="font-size:17px;letter-spacing:2.4px;color:${accent}">${iconSvg('heli')} AIRFRAME BAY</div>` +
     `<div style="font-size:10px;letter-spacing:1.6px;color:#5b6b83;margin-top:3px">` +
     (heli
       ? `${tierLabel(heli.tier)} · UNIT #${heli.id} · ${escapeHtml(heli.owner || 'unclaimed')}`
@@ -7968,9 +8193,9 @@ function refreshAirframeLive(): void {
   L.bombText.textContent = h.maxBombs > 0 ? `${h.bombs} / ${h.maxBombs}` : 'no rack';
 
   const parked = serviceable(h);
-  L.status.textContent = h.dying > 0 ? '💥 Airframe destroyed'
+  setIconText(L.status, h.dying > 0 ? '💥 Airframe destroyed'
     : parked ? '✓ On the ground — servicing available'
-    : '✈ Airborne — land and stop to service';
+    : '✈ Airborne — land and stop to service');
   L.status.style.color = h.dying > 0 ? '#ff5c4d' : parked ? '#5ff09a' : '#ffd24a';
 
   for (const b of L.buttons) setButtonEnabled(b.node, b.enabled(), b.accent);
@@ -8787,7 +9012,7 @@ function updateWarHud(dt: number): void {
   const border = Math.round(currentWarBorder());
   const shrinking = border > WAR_MIN_BORDER;
   warEl.innerHTML =
-    `<span style="color:#ff6a6a">⚔️ WAR · ${formatClock(warLeft)}</span> ` +
+    `<span style="color:#ff6a6a">${iconSvg('swords')} WAR · ${formatClock(warLeft)}</span> ` +
     `<span style="color:${shrinking ? '#ffb86a' : '#ff5a5a'}">· border ${border}m${shrinking ? ' ⤵' : ' — FINAL RING'}</span><br>` +
     `<span style="color:${factionCss(a.id)}">${a.name} ${warScore[a.id] ?? 0}</span>` +
     ` <span style="color:#8da0c0">kills</span> ` +
@@ -9137,7 +9362,7 @@ function updateTrapGrip(dt: number): void {
       showNotice('🪤 You wrenched the trap open!');
     } else {
       trapHudEl.innerHTML =
-        `🪤 <b>CAUGHT IN A BEAR TRAP</b><br>Mash <b>JUMP</b> to break free — ${left} more`;
+        `${iconSvg('trap')} <b>CAUGHT IN A BEAR TRAP</b><br>Mash <b>JUMP</b> to break free — ${left} more`;
       trapHudEl.style.display = 'block';
     }
     return;
@@ -9197,7 +9422,7 @@ function flagSwingUpdate(dt: number, leftDown: boolean): boolean {
     // server does the actual capture check off your transform).
     const d = flagModels.distanceToOwnPad(localFaction, px, pz);
     showFlagHud(
-      `🚩 <b>You are carrying the ${factionName(mine.faction)} flag!</b><br>` +
+      `${iconSvg('flag')} <b>You are carrying the ${factionName(mine.faction)} flag!</b><br>` +
       `Run it to your own flag — <b>${Math.round(d)}m</b> away. Die and it goes home.`,
       factionCss(mine.faction));
     return false; // carrying doesn't consume clicks — you still need to fight
@@ -9208,13 +9433,13 @@ function flagSwingUpdate(dt: number, leftDown: boolean): boolean {
 
   if (!flagState.breakable) {
     showFlagHud(
-      `🛡 The ${factionName(target.faction)} flag is <b>protected</b> — it can't be taken right now.`,
+      `${iconSvg('shield')} The ${factionName(target.faction)} flag is <b>protected</b> — it can't be taken right now.`,
       '#7a8090');
     return false;
   }
   const pct = Math.round(100 - (target.hp / FLAG_MAX_HP) * 100);
   showFlagHud(
-    `🚩 <b>Hold left-click</b> to prise the ${factionName(target.faction)} flag loose — ${pct}%`,
+    `${iconSvg('flag')} <b>Hold left-click</b> to prise the ${factionName(target.faction)} flag loose — ${pct}%`,
     factionCss(target.faction));
   if (!leftDown || player.dead) return true;
   if (flagHitTimer <= 0) {
@@ -9304,7 +9529,7 @@ function updateFlagMarkers(): void {
       markers.push({
         x: Math.round(pos.x), z: Math.round(pos.z),
         color: factionColor(f.faction),
-        name: `🚩 ${owner} flag — ${who}`,
+        name: `${owner} flag — ${who}`,
       });
       continue;
     }
@@ -9314,8 +9539,8 @@ function updateFlagMarkers(): void {
       x: home.x, z: home.z,
       color: factionColor(f.faction),
       name: stolen
-        ? `🏴 ${owner} flag — held by ${factionName(f.holder)}`
-        : `🚩 ${owner} flag`,
+        ? `${owner} flag — held by ${factionName(f.holder)}`
+        : `${owner} flag`,
     });
   }
   const key = markers.map((m) => `${m.x},${m.z},${m.color},${m.name}`).join('|');
@@ -9327,18 +9552,11 @@ function updateFlagMarkers(): void {
 /** Reposition the closing war ring + reconcile the everybody-glows halos. */
 function updateWarVisuals(): void {
   const active = net.connected && warActiveNow;
-  warWallGroup.visible = active;
+  warBoundary.update(currentWarBorder() / 2, active);
   if (active) {
-    const half = currentWarBorder() / 2;
-    const size = half * 2;
-    const y = 120;
-    warWalls[0].position.set(0, y, -half);
-    warWalls[1].position.set(0, y, half);
-    warWalls[2].position.set(-half, y, 0);
-    warWalls[3].position.set(half, y, 0);
-    for (const w of warWalls) w.scale.x = size;
     // Pulse the ring so it reads as dangerous.
-    warWallMat.opacity = 0.32 + 0.12 * Math.abs(Math.sin(worldTimeLocal * 2.2));
+    warBoundary.material.uniforms.uOpacity.value =
+      0.6 + 0.22 * Math.abs(Math.sin(worldTimeLocal * 2.2));
   }
   // Faction-colored halos over every living remote player while the war is on.
   const live = new Set<number>();
@@ -9404,7 +9622,7 @@ guideEl.addEventListener('mousedown', (e) => { if (e.target === guideEl) hideGui
 
 const guideBtn = document.createElement('button');
 guideBtn.className = 'mc-font';
-guideBtn.textContent = '📖 Crafting Guide';
+guideBtn.innerHTML = iconifyHtml('📖 Crafting Guide');
 guideBtn.style.cssText =
   'position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:25;display:none;' +
   'font-size:13px;padding:7px 14px;cursor:pointer;border:2px solid;border-color:#fff #555 #555 #fff;' +
@@ -9480,9 +9698,9 @@ function buildGuide(): void {
   header.style.cssText =
     'position:sticky;top:0;background:#10131c;display:flex;align-items:center;gap:10px;' +
     'padding:12px 16px;border-bottom:1px solid #232a40;z-index:1';
-  header.innerHTML = `<div style="flex:1;font-size:15px;color:#ffd84a;letter-spacing:1px">📖 CRAFTING GUIDE</div>`;
+  header.innerHTML = `<div style="flex:1;font-size:15px;color:#ffd84a;letter-spacing:1px">${iconSvg('book')} CRAFTING GUIDE</div>`;
   const close = document.createElement('button');
-  close.textContent = '✕';
+  close.innerHTML = iconSvg('close');
   close.style.cssText = 'width:26px;height:26px;cursor:pointer;border:1px solid #3a4666;border-radius:5px;background:#1c2335;color:#cdd6ee;font-size:13px';
   close.addEventListener('click', hideGuide);
   header.appendChild(close);
@@ -9531,6 +9749,10 @@ function frame(): void {
   requestAnimationFrame(frame);
   const dt = Math.min(0.05, clock.getDelta());
   updateDuelHud();
+  clickResumeEl.classList.toggle('visible',
+    input.lockPending && !input.touchMode && screen === 'playing' &&
+    !player.dead && !invUI.open && !worldMap.open && !chatBox.open &&
+    !warfareUI.open && !missileCam.active);
 
   frames++;
   fpsTime += dt;
@@ -9691,10 +9913,7 @@ function frame(): void {
       const bubbleReady = world.update(tp.x, tp.z, duelArenaActive ? 20 : 14, 2);
       if (bubbleReady || (worldTimeLocal - tp.started > (duelArenaActive ? 2 : 8))) {
         pendingTeleport = null;
-        if (duelArenaActive && !duelArenaReadySent) {
-          duelArenaReadySent = true;
-          net.sendDuelArenaReady();
-        }
+        markDuelArenaReady();
       }
     }
     updateGrapple(dt); // hook flight / reel / swing (sets velocity before the step)
@@ -10017,6 +10236,7 @@ function frame(): void {
       tickDisguises(dt); // Phase 8: expire spy disguises on remote avatars
       updateThrownItems(dt); // animate tossed grenades/bombs
     }
+    updateBoundaryRings(); // world edge, Heartland ring and the war ring
     // Bounce Pad: zero fall distance while the immunity window is active.
     if (jumpImmuneUntil > 0) {
       player.fallDistance = 0;
@@ -10157,7 +10377,12 @@ function frame(): void {
   if (guideOpen && !(invUI.open && invUI.mode === 'table')) hideGuide();
   hud.updateStatus({
     health: player.health,
-    hearts: localHearts,
+    // Size the row from the pool the health number is actually measured
+    // against. In the open world that is localHearts; inside a Duels body the
+    // bar is DUEL_MAX_HEALTH, and passing the open-world count there drew a
+    // permanently full row — you could not read your own health in a match.
+    hearts: duelArenaActive ? DUEL_MAX_HEALTH / DUEL_HP_PER_HEART : player.maxHealth / 2,
+    hpPerHeart: duelArenaActive ? DUEL_HP_PER_HEART : 2,
     energy: player.energy,
     exhausted: player.exhausted,
     air: player.air,
