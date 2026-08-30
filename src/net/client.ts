@@ -651,8 +651,13 @@ export class NetClient {
     }
   }
 
-  private raw(msg: ClientMsg): void {
+  private raw(msg: ClientMsg, volatile = false): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      // Transforms are disposable: if a slow tunnel is already carrying an
+      // older packet, queuing more only makes the opponent see where we were
+      // seconds ago. Reliable actions (shots, edits, lobby commands, etc.) are
+      // never dropped.
+      if (volatile && this.ws.bufferedAmount > 32 * 1024) return;
       this.ws.send(JSON.stringify(msg));
     }
   }
@@ -677,7 +682,7 @@ export class NetClient {
     // TRANSFORM_HZ; clamp to avoid a burst after a long stall.
     this.xformAcc = Math.min(this.xformAcc - interval, interval);
     this.raw({ t: 'xform', x, y, z, yaw, pitch, gliding, boating, seated, sneaking, held, armor,
-      swing, aiming, reloading });
+      swing, aiming, reloading }, true);
   }
 
   /** Send register/login over the open socket (before `welcome`/connected). */

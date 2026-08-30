@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as http from 'http';
 import * as path from 'path';
 import * as readline from 'readline';
+import * as zlib from 'zlib';
 import { ClientMsg, GameMode, SERVER_PORT, SNAPSHOT_HZ, ServerMsg } from '../src/net/protocol';
 import { GameServer, Outbound, WorldSave } from '../src/net/server_core';
 import { Accounts, Account } from '../src/net/accounts';
@@ -276,9 +277,14 @@ function handleAuth(id: number, msg: ClientMsg & { t: 'register' | 'login' | 'se
   console.log(`+ ${res.account.username} authed (${game.playerCount} online)`);
 }
 
-function send(id: number, msg: ServerMsg): void {
+function send(id: number, msg: ServerMsg, volatile = false): void {
   const ws = sockets.get(id);
-  if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
+  if (!ws || ws.readyState !== ws.OPEN) return;
+  // A snapshot supersedes every older snapshot. On a constrained tunnel,
+  // dropping one is much better than allowing stale positions to accumulate
+  // behind static downloads or a temporarily slow connection.
+  if (volatile && ws.bufferedAmount > 64 * 1024) return;
+  ws.send(JSON.stringify(msg));
 }
 
 function dispatch(out: Outbound[]): void {
@@ -309,6 +315,7 @@ const MIME: Record<string, string> = {
   '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.webp': 'image/webp',
   '.woff': 'font/woff', '.woff2': 'font/woff2', '.map': 'application/json',
 };
+const COMPRESSIBLE = new Set(['.html', '.js', '.css', '.json', '.svg']);
 const httpServer = http.createServer((req, res) => {
   let urlPath = decodeURIComponent((req.url || '/').split('?')[0]);
   if (urlPath === '/') urlPath = '/index.html';
@@ -320,15 +327,53 @@ const httpServer = http.createServer((req, res) => {
       // Fall back to index.html so refreshes work; a clear hint if not built.
       fs.readFile(path.join(DIST, 'index.html'), (e2, idx) => {
         if (e2) { res.writeHead(404); res.end('Client not built — run `npm run build` first.'); }
-        else { res.writeHead(200, { 'content-type': 'text/html' }); res.end(idx); }
+        else {
+          res.writeHead(200, { 'content-type': 'text/html', 'cache-control': 'no-cache' });
+          res.end(idx);
+        }
       });
       return;
     }
-    res.writeHead(200, { 'content-type': MIME[path.extname(filePath)] || 'application/octet-stream' });
+    const ext = path.extname(filePath);
+    const immutable = urlPath.startsWith('/assets/');
+    const headers: Record<string, string> = {
+      'content-type': MIME[ext] || 'application/octet-stream',
+      'cache-control': immutable
+        ? 'public, max-age=31536000, immutable'
+        : ext === '.html' ? 'no-cache' : 'public, max-age=86400',
+    };
+    const encodings = String(req.headers['accept-encoding'] || '');
+    if (COMPRESSIBLE.has(ext) && encodings.includes('br')) {
+      // Brotli's default maximum quality costs seconds on the 1.4 MB game
+      // bundle for a tiny size win. Quality 5 keeps it compact while letting a
+      // modest host begin responding almost immediately.
+      zlib.brotliCompress(data, {
+        params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 5 },
+      }, (zipErr, compressed) => {
+        if (zipErr) { res.writeHead(200, headers); res.end(data); return; }
+        res.writeHead(200, { ...headers, 'content-encoding': 'br', vary: 'accept-encoding' });
+        res.end(compressed);
+      });
+      return;
+    }
+    if (COMPRESSIBLE.has(ext) && encodings.includes('gzip')) {
+      zlib.gzip(data, (zipErr, compressed) => {
+        if (zipErr) { res.writeHead(200, headers); res.end(data); return; }
+        res.writeHead(200, { ...headers, 'content-encoding': 'gzip', vary: 'accept-encoding' });
+        res.end(compressed);
+      });
+      return;
+    }
+    res.writeHead(200, headers);
     res.end(data);
   });
 });
-const wss = new WebSocketServer({ server: httpServer });
+const wss = new WebSocketServer({
+  server: httpServer,
+  // Tunnel bandwidth is scarcer than local CPU. Context takeover makes the
+  // repetitive transform keys especially cheap after the first snapshot.
+  perMessageDeflate: { threshold: 256 },
+});
 
 wss.on('connection', (ws: WebSocket) => {
   const id = nextId++;
@@ -438,7 +483,7 @@ setInterval(() => {
   dispatch(game.tickDuels());
   dispatch(game.tickSeason(dt));
   for (const cid of authed.keys()) {
-    send(cid, { t: 'snapshot', players: game.snapshotFor(cid), worldTime: game.clockTime() });
+    send(cid, { t: 'snapshot', players: game.snapshotFor(cid), worldTime: game.clockTime() }, true);
   }
   if (moved.length) {
     const mv: ServerMsg = { t: 'itemsmove', items: moved };
