@@ -94,7 +94,8 @@ import {
   duelTokenFromUrl, withDuelToken,
 } from './duels';
 import {
-  DUEL_DIVISIONS, DUEL_FLAIRS, DUEL_TIER_THEMES, DuelProgressChange, DuelPublicProfile,
+  DUEL_DIVISIONS, DUEL_FLAIRS, DUEL_SIGILS, DUEL_SIGIL_SIZE, DUEL_TIER_THEMES,
+  DuelProgressChange, DuelPublicProfile,
   type DuelRank, duelProfileOf, duelRankAt, duelRankProgress,
   duelRevealState, newDuelProgress, unlockedDuelFlairs,
 } from './duels_progression';
@@ -2275,7 +2276,7 @@ net.onAuthErr = (error, lockMs, permanent) => {
 submitBtn.addEventListener('click', () => attemptAuth(authMode));
 authPass.addEventListener('keydown', (e) => { if (e.key === 'Enter') attemptAuth(authMode); });
 // Returning players land on a prefilled login; first-timers get register.
-// A #register / #login hash (the War Report site links straight at one) wins
+// A #register / #login hash (a deep link directly to either tab) wins
 // over both — the visitor already told us which door they wanted.
 const hashMode = location.hash.toLowerCase();
 setAuthMode(hashMode === '#register' ? 'register'
@@ -2376,27 +2377,26 @@ const arenaTabLadder = document.getElementById('duel-ranks-button') as HTMLButto
 let minigamesRestoreFocus: HTMLElement | null = null;
 let duelQueued = false;
 
-/** Every tier owns a 3x3 silhouette. The number of lit blocks is exactly the
- * tier's `facets`, so the emblem visibly densifies as you climb. */
-const DUEL_EMBLEM_MASKS: Record<string, string> = {
-  chip: '000111000', shield: '010101010', crest: '010111010', blade: '111000111',
-  star: '101111101', spire: '111101111', crown: '111111111',
-};
+/** The emblem grid. Every tier's silhouette lives in `duels_progression`
+ * (DUEL_SIGILS) so the Arena and the reveal all draw the
+ * same mark from the same 5x5 string — nothing here invents a shape. */
+const DUEL_EMBLEM_CELLS = DUEL_SIGIL_SIZE * DUEL_SIGIL_SIZE;
 
 /** Push a rank's palette onto an element as CSS variables. */
 function applyRankTheme(el: HTMLElement, rank: DuelRank): void {
   el.style.setProperty('--rank', rank.color);
   el.style.setProperty('--rank-accent', rank.accent);
   el.style.setProperty('--rank-shade', rank.shade);
+  el.style.setProperty('--rank-weight', String(rank.facets));
 }
 
 function paintDuelEmblem(emblem: HTMLElement, rank: DuelRank): void {
   applyRankTheme(emblem, rank);
   emblem.classList.remove('tier-5', 'tier-6');
   if (rank.namedIndex >= 5) emblem.classList.add(`tier-${Math.min(6, rank.namedIndex)}`);
-  const mask = DUEL_EMBLEM_MASKS[rank.emblem] ?? DUEL_EMBLEM_MASKS.crown;
+  const mask = rank.sigil || DUEL_SIGILS.crown;
   emblem.querySelectorAll<HTMLElement>('i').forEach((block, index) => {
-    const lit = mask[index] === '1';
+    const lit = mask[index] === '#';
     block.classList.toggle('lit', lit);
     block.classList.toggle('dim', !lit);
   });
@@ -2406,11 +2406,15 @@ function makeDuelEmblem(rank: DuelRank, extraClass = ''): HTMLElement {
   const emblem = document.createElement('div');
   emblem.className = `duel-emblem ${extraClass}`.trim();
   emblem.setAttribute('aria-hidden', 'true');
-  for (let i = 0; i < 9; i++) {
+  const n = DUEL_SIGIL_SIZE;
+  for (let i = 0; i < DUEL_EMBLEM_CELLS; i++) {
+    const col = i % n, row = Math.floor(i / n);
     const block = document.createElement('i');
-    block.style.setProperty('--block-delay', `${i * 28}ms`);
-    block.style.setProperty('--shard-x', `${(i % 3 - 1) * 20}px`);
-    block.style.setProperty('--shard-y', `${(Math.floor(i / 3) - 1) * 18}px`);
+    // Blocks assemble outward from the centre, so the mark builds itself.
+    const ring = Math.max(Math.abs(col - (n - 1) / 2), Math.abs(row - (n - 1) / 2));
+    block.style.setProperty('--block-delay', `${ring * 46 + ((col + row) % 3) * 12}ms`);
+    block.style.setProperty('--shard-x', `${(col - (n - 1) / 2) * 15}px`);
+    block.style.setProperty('--shard-y', `${(row - (n - 1) / 2) * 14}px`);
     emblem.appendChild(block);
   }
   paintDuelEmblem(emblem, rank);

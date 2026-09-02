@@ -9,7 +9,7 @@ import {
 } from '../src/duels';
 import {
   DUEL_DIVISIONS, DUEL_FLAIRS, DUEL_MAX_HISTORY_OPPONENTS, DUEL_PLACEMENT_MATCHES,
-  DUEL_RANK_NAMES, DUEL_REVEAL_ASCEND_MS, DUEL_TIER_THEMES,
+  DUEL_RANK_NAMES, DUEL_REVEAL_ASCEND_MS, DUEL_SIGILS, DUEL_SIGIL_SIZE, DUEL_TIER_THEMES,
   canEquipDuelFlair, duelProfileOf, duelRankAt, duelRankProgress, duelRevealState,
   loadDuelProgress, migrateLegacyDuelProgress, newDuelProgress, sanitizeDuelProgress,
   sanitizeDuelRp, settleDuelProgress, unlockedDuelFlairs,
@@ -409,7 +409,19 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
     DUEL_TIER_THEMES.every((t, i) => t.facets === i + 3 && t.flair === DUEL_FLAIRS[i]));
   check('a rank carries its whole look, not just a colour',
     DUEL_DIVISIONS.every((rank) => !!rank.accent && !!rank.shade && !!rank.motto &&
-      rank.color === DUEL_TIER_THEMES[rank.namedIndex].color));
+      rank.color === DUEL_TIER_THEMES[rank.namedIndex].color &&
+      rank.sigil === DUEL_TIER_THEMES[rank.namedIndex].sigil));
+  // The sigil is the one shape the Arena and the reveal
+  // both draw from. A malformed mask would silently render a broken emblem,
+  // so it is checked here rather than by eye.
+  check('every tier sigil is a distinct, well-formed 5x5 voxel mask',
+    Object.keys(DUEL_SIGILS).length === 7 &&
+    new Set(Object.values(DUEL_SIGILS)).size === 7 &&
+    DUEL_TIER_THEMES.every((t) => DUEL_SIGILS[t.emblem] === t.sigil) &&
+    Object.values(DUEL_SIGILS).every((mask) =>
+      mask.length === DUEL_SIGIL_SIZE * DUEL_SIGIL_SIZE &&
+      /^[#.]+$/.test(mask) &&
+      mask.split('').filter((c) => c === '#').length >= 9));
 
   const complete = (rp: number) => ({ ...newDuelProgress(), rp, peakRp: rp,
     rank: duelRankAt(rp), placementsRemaining: 0 });

@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="VOXELON">
+  <!-- THE VOXELON MARK. One block, lit from above, split down the front edge:
+       a crimson face and an azure face with a gold seam between them — the war,
+       the prize and the material the whole world is made of, in one shape.
+       This file is the ONLY definition of the mark. The favicon, the app icon,
+       the site rail, the title screen and the OG card all render this geometry,
+       so the game and the War Report can never wear two different logos. -->
+  <defs>
+    <linearGradient id="v-top" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffe6a8"/><stop offset="1" stop-color="#f0a825"/>
+    </linearGradient>
+    <linearGradient id="v-left" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff5c64"/><stop offset="1" stop-color="#a91f26"/>
+    </linearGradient>
+    <linearGradient id="v-right" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5ea6ff"/><stop offset="1" stop-color="#1b4a8c"/>
+    </linearGradient>
+    <linearGradient id="v-plate" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#111a28"/><stop offset="1" stop-color="#05070c"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#v-plate)"/>
+  <rect x="1" y="1" width="62" height="62" rx="13" fill="none" stroke="#8cacd6" stroke-opacity=".18"/>
+  <!-- Three faces of one cube: top, left, right. -->
+  <path d="M32 7 53 18 32 29 11 18Z" fill="url(#v-top)"/>
+  <path d="M11 18 32 29v22L11 40Z" fill="url(#v-left)"/>
+  <path d="M53 18 32 29v22l21-11Z" fill="url(#v-right)"/>
+  <!-- The front line: where the two sides meet, held open in gold. -->
+  <path d="M32 29v22" stroke="#ffd977" stroke-width="2.6" stroke-linecap="round"/>
+  <path d="M32 7 53 18 32 29 11 18Z" fill="none" stroke="#ffe6a8" stroke-opacity=".55" stroke-width="1.1" stroke-linejoin="round"/>
+</svg>

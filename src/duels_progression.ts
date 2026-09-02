@@ -42,29 +42,52 @@ export interface DuelTierTheme {
   accent: string;
   /** Deep shade used behind the tier on dark surfaces. */
   shade: string;
-  /** How many of the 9 emblem blocks are lit at this tier (5..9 + crown). */
+  /** Tier weight 3..9. Drives how hard the emblem's aura burns, so the mark
+   * gets louder as you climb even when two sigils have the same block count. */
   facets: number;
   /** Emblem silhouette drawn on the ladder and the reveal. */
-  emblem: 'chip' | 'shield' | 'crest' | 'blade' | 'star' | 'spire' | 'crown';
+  emblem: DuelEmblem;
+  /** The sigil itself: a 5x5 voxel mask, rows top to bottom, '#' lit and '.'
+   * dark. Every surface that draws a rank — the Arena emblem and the reveal —
+   * builds it from THIS string, so a tier can never wear two different marks.
+   * See DUEL_SIGILS. */
+  sigil: string;
   motto: string;
   flair: DuelFlair;
 }
 
+export type DuelEmblem = 'chip' | 'shield' | 'crest' | 'blade' | 'star' | 'spire' | 'crown';
+
+export const DUEL_SIGIL_SIZE = 5;
+
+/** Seven marks on one 5x5 voxel grid. They are silhouettes, not density ramps:
+ * an ingot, a shield, a winged crest, a blade, a starburst, a spire, a crown —
+ * each readable at 32px, all built from the same square block. */
+export const DUEL_SIGILS: Record<DuelEmblem, string> = {
+  chip:   '.....' + '.###.' + '.###.' + '.###.' + '.....',
+  shield: '.....' + '#####' + '#####' + '.###.' + '..#..',
+  crest:  '#...#' + '##.##' + '#####' + '.###.' + '..#..',
+  blade:  '..#..' + '.###.' + '.###.' + '#####' + '..#..',
+  star:   '#.#.#' + '.###.' + '#####' + '.###.' + '#.#.#',
+  spire:  '..#..' + '.###.' + '.###.' + '#####' + '#####',
+  crown:  '#.#.#' + '#####' + '#####' + '#####' + '.###.',
+};
+
 export const DUEL_TIER_THEMES: readonly DuelTierTheme[] = [
   { name: 'Copper', color: '#e08a4a', accent: '#ffcf9a', shade: '#3a2113',
-    facets: 3, emblem: 'chip', motto: 'Everyone starts by swinging first.', flair: 'Scrapper' },
+    facets: 3, emblem: 'chip', sigil: DUEL_SIGILS.chip, motto: 'Everyone starts by swinging first.', flair: 'Scrapper' },
   { name: 'Iron', color: '#a8b6c4', accent: '#e8f1f8', shade: '#1e2733',
-    facets: 4, emblem: 'shield', motto: 'You stopped panicking. Now you aim.', flair: 'Ironclad' },
+    facets: 4, emblem: 'shield', sigil: DUEL_SIGILS.shield, motto: 'You stopped panicking. Now you aim.', flair: 'Ironclad' },
   { name: 'Gold', color: '#f2b62c', accent: '#ffe9a0', shade: '#3a2c07',
-    facets: 5, emblem: 'crest', motto: 'Cover, angle, burst. In that order.', flair: 'Goldbreaker' },
+    facets: 5, emblem: 'crest', sigil: DUEL_SIGILS.crest, motto: 'Cover, angle, burst. In that order.', flair: 'Goldbreaker' },
   { name: 'Emerald', color: '#2fd08a', accent: '#a8ffd8', shade: '#0c2f21',
-    facets: 6, emblem: 'blade', motto: 'You take the high ground before they do.', flair: 'Emerald Blade' },
+    facets: 6, emblem: 'blade', sigil: DUEL_SIGILS.blade, motto: 'You take the high ground before they do.', flair: 'Emerald Blade' },
   { name: 'Diamond', color: '#43c2f5', accent: '#c4efff', shade: '#0b2836',
-    facets: 7, emblem: 'star', motto: 'Reading the arena, not just the crosshair.', flair: 'Diamond Sentinel' },
+    facets: 7, emblem: 'star', sigil: DUEL_SIGILS.star, motto: 'Reading the arena, not just the crosshair.', flair: 'Diamond Sentinel' },
   { name: 'Obsidian', color: '#a273f7', accent: '#e2ccff', shade: '#1e1236',
-    facets: 8, emblem: 'spire', motto: 'The rest of the lobby plays around you.', flair: 'Obsidian Warlord' },
+    facets: 8, emblem: 'spire', sigil: DUEL_SIGILS.spire, motto: 'The rest of the lobby plays around you.', flair: 'Obsidian Warlord' },
   { name: 'Voxelon', color: '#ff4f6e', accent: '#ffd0d9', shade: '#3a0b17',
-    facets: 9, emblem: 'crown', motto: 'There is no tier above this one.', flair: 'Voxelon Mythic' },
+    facets: 9, emblem: 'crown', sigil: DUEL_SIGILS.crown, motto: 'There is no tier above this one.', flair: 'Voxelon Mythic' },
 ];
 
 export function duelTierTheme(namedIndex: number): DuelTierTheme {
@@ -82,7 +105,8 @@ export interface DuelRank {
   accent: string;
   shade: string;
   facets: number;
-  emblem: DuelTierTheme['emblem'];
+  emblem: DuelEmblem;
+  sigil: string;
   motto: string;
   flair: DuelFlair;
 }
@@ -96,7 +120,7 @@ export const DUEL_DIVISIONS: readonly DuelRank[] = DUEL_RANK_NAMES.flatMap((name
       index, namedIndex, name, division, label: `${name} ${division}`,
       min: index * DUEL_RP_PER_DIVISION, color: theme.color, accent: theme.accent,
       shade: theme.shade, facets: theme.facets, emblem: theme.emblem,
-      motto: theme.motto, flair: theme.flair,
+      sigil: theme.sigil, motto: theme.motto, flair: theme.flair,
     };
   }));
 

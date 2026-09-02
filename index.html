@@ -5,12 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>VOXELON</title>
   <meta name="description" content="A browser voxel war game: mine deep, build high and take ground on one shared 5000-block map that never resets. Two factions, vault bosses and server-authoritative PvP — no download, no plugins." />
-  <meta name="theme-color" content="#0f1a24" />
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%230f1a24'/><path d='M16 4 28 10 16 16 4 10Z' fill='%23f0a825'/><path d='M4 10 16 16 16 28 4 22Z' fill='%238a5806'/><path d='M28 10 16 16 16 28 28 22Z' fill='%23d78a0c'/></svg>" />
+  <meta name="theme-color" content="#05070c" />
+  <!-- One mark, everywhere. public/favicon.svg is the definition; the PNGs are
+       rasterised from the same geometry by `npm run brand` for the browsers and
+       home screens that won't take an SVG. -->
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="manifest" href="/site.webmanifest" />
   <!-- Link previews. og:image must be an ABSOLUTE url for Facebook/Twitter/Discord
        crawlers to fetch it, so rewrite these two to your real origin at deploy
        time (e.g. https://play.voxelon.gg/og.png). The card itself is generated
-       procedurally by `npm run og-image` -> public/og.png. -->
+       procedurally by `npm run brand` -> public/og.png. -->
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="VOXELON" />
   <meta property="og:title" content="VOXELON — a browser voxel war game" />
@@ -690,8 +696,7 @@
        and an azure one from the other, so the two factions are the first thing
        the screen says. Everything else — the wordmark, the entry card, the
        status plates — is dark glass with exactly one warm-gold accent for the
-       thing you are meant to press. This palette is shared verbatim with the
-       War Report site (public/site.html), so the front door and the game agree. */
+       thing you are meant to press. */
     #overlay {
       --ink: #eaf1fa;
       --ink-soft: #aec1d8;
@@ -1040,12 +1045,15 @@
       display: flex; width: min(390px, 100%); margin-top: clamp(24px, 4vh, 38px);
     }
     .menu-profile { display: flex; align-items: center; gap: 12px; }
+    /* The signed-in plate wears the product mark itself rather than a glyph —
+       the same cube as the favicon and the app icon. */
     .menu-mark {
       flex: 0 0 auto; width: 44px; height: 44px; border-radius: 13px;
-      display: grid; place-items: center; color: #241703; font-size: 15px;
-      background: linear-gradient(140deg, var(--gold-lit), var(--gold-deep));
-      box-shadow: 0 8px 20px rgba(255,192,67,.3);
+      display: grid; place-items: center; padding: 4px;
+      background: linear-gradient(150deg, rgba(150,182,224,.14), rgba(6,10,17,.7));
+      box-shadow: inset 0 0 0 1px var(--line), 0 8px 20px rgba(0,0,0,.45);
     }
+    .menu-mark img { width: 100%; height: 100%; display: block; }
     .menu-eyebrow { color: var(--ink-mute); font-size: 9px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; }
     #menu-user {
       margin-top: 4px; color: var(--ink); font-family: 'Lucida Console', Monaco, monospace;
@@ -1114,12 +1122,6 @@
       letter-spacing: 1.2px; text-align: center;
     }
     #overlay .title-footer strong { color: var(--ink-soft); font-weight: 700; }
-    /* The one way off the title screen that isn't into the world. */
-    #overlay .title-footer a {
-      color: var(--gold); text-decoration: none; font-weight: 700;
-      border-bottom: 1px solid rgba(255,192,67,.35); padding-bottom: 1px;
-    }
-    #overlay .title-footer a:hover { color: var(--gold-lit); border-bottom-color: var(--gold-lit); }
 
     /* ── THE ARENA: Duels browser, ladder, lobby and match ────────────────
        A bright, daylight palette for every competitive surface. Every accent
@@ -1238,30 +1240,55 @@
     }
     .duel-profile-meta { display: flex; flex-wrap: wrap; gap: 3px 10px; margin-top: 3px; color: var(--ar-dim); font-size: 9px; font-weight: 750; }
 
-    /* ── Rank emblem: a lit voxel cluster, denser at every tier ───────── */
+    /* ── Rank sigil: a 5x5 voxel mark, one silhouette per tier ─────────
+       The mask itself comes from DUEL_SIGILS in duels_progression.ts, so this
+       emblem and the promotion reveal are literally the same seven marks. --rank-weight (3..9) is the tier's index up the
+       ladder: it drives how hard the plate burns, so Voxelon glows and Copper
+       barely does without either needing a special case. */
     .duel-emblem {
-      position: relative; display: grid; grid-template-columns: repeat(3, 12px);
-      grid-template-rows: repeat(3, 12px); place-content: center; gap: 2px;
-      width: 54px; height: 54px; border-radius: 14px;
-      background: radial-gradient(circle at 50% 30%, color-mix(in srgb, var(--rank) 34%, transparent), color-mix(in srgb, var(--rank-shade,#0b2836) 88%, transparent));
+      --cell: 8px; --gap: 2px; --plate: 54px;
+      position: relative; display: grid; place-content: center;
+      grid-template-columns: repeat(5, var(--cell));
+      grid-template-rows: repeat(5, var(--cell)); gap: var(--gap);
+      width: var(--plate); height: var(--plate); border-radius: calc(var(--plate) * .26);
+      background:
+        radial-gradient(circle at 50% 26%, color-mix(in srgb, var(--rank) calc(14% + var(--rank-weight,4) * 3%), transparent), transparent 72%),
+        linear-gradient(160deg, color-mix(in srgb, var(--rank) 15%, #080c14), color-mix(in srgb, var(--rank-shade,#0b2836) 92%, transparent));
       box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--rank) 42%, transparent),
-                  inset 0 -4px color-mix(in srgb, var(--rank) 22%, transparent);
+                  inset 0 -4px color-mix(in srgb, var(--rank) 22%, transparent),
+                  0 0 calc(var(--rank-weight,4) * 2px) color-mix(in srgb, var(--rank) calc(var(--rank-weight,4) * 4%), transparent);
+    }
+    /* A faint dark lattice under the mark: the blocks sit in a socket grid, so
+       an unlit cell reads as an empty slot rather than as nothing at all. */
+    .duel-emblem::before {
+      content: ''; position: absolute; inset: 10%; border-radius: 12%; pointer-events: none;
+      background:
+        repeating-linear-gradient(90deg, rgba(0,0,0,.28) 0 1px, transparent 1px calc(var(--cell) + var(--gap))),
+        repeating-linear-gradient(rgba(0,0,0,.28) 0 1px, transparent 1px calc(var(--cell) + var(--gap)));
+      opacity: .5;
     }
     .duel-emblem i {
-      display: block; border-radius: 2px; background: var(--rank);
-      box-shadow: inset -3px -3px rgba(0,0,0,.28), inset 2px 2px rgba(255,255,255,.4);
+      display: block; border-radius: 1.5px; background: var(--rank); position: relative;
+      box-shadow: inset -1px -1px rgba(0,0,0,.42), inset 1px 1px rgba(255,255,255,.34);
     }
-    .duel-emblem i.lit { box-shadow: inset -3px -3px rgba(0,0,0,.22), inset 2px 2px rgba(255,255,255,.5), 0 0 9px var(--rank); }
-    .duel-emblem i.dim { background: rgba(255,255,255,.09); box-shadow: none; }
+    .duel-emblem i.lit {
+      background: linear-gradient(150deg, color-mix(in srgb, var(--rank-accent,#fff) 62%, var(--rank)), var(--rank) 58%);
+      box-shadow: inset -1px -1px rgba(0,0,0,.42), inset 1px 1px rgba(255,255,255,.42),
+                  0 0 6px color-mix(in srgb, var(--rank) 55%, transparent);
+    }
+    /* An unlit cell is an EMPTY SOCKET, not a pale block. Anything brighter and
+       all seven sigils collapse into the same grey grid. */
+    .duel-emblem i.dim { background: rgba(0,0,0,.55); box-shadow: inset 0 0 0 1px rgba(255,255,255,.035); }
     /* The top tiers get a halo so Voxelon reads instantly across the room. */
     .duel-emblem.tier-5::after, .duel-emblem.tier-6::after {
-      content: ''; position: absolute; inset: -3px; border-radius: 17px; pointer-events: none;
+      content: ''; position: absolute; inset: -3px; border-radius: calc(var(--plate) * .26 + 3px); pointer-events: none;
       box-shadow: 0 0 20px color-mix(in srgb, var(--rank) 65%, transparent);
       animation: ar-halo 2.6s ease-in-out infinite alternate;
     }
     @keyframes ar-halo { to { box-shadow: 0 0 34px color-mix(in srgb, var(--rank) 90%, transparent); } }
-    .duel-emblem.lg { grid-template-columns: repeat(3, 18px); grid-template-rows: repeat(3, 18px); gap: 3px; width: 78px; height: 78px; border-radius: 20px; }
-    .duel-emblem.sm { grid-template-columns: repeat(3, 7px); grid-template-rows: repeat(3, 7px); gap: 1px; width: 32px; height: 32px; border-radius: 9px; }
+    .duel-emblem.lg { --cell: 12px; --gap: 3px; --plate: 78px; }
+    .duel-emblem.sm { --cell: 5px; --gap: 1px; --plate: 36px; }
+    .duel-emblem.sm::before { display: none; }
 
     /* ── View switcher ────────────────────────────────────────────────── */
     .arena-tabs {
@@ -2312,7 +2339,7 @@
           </ul>
           <div id="menu-btns">
             <div class="menu-profile mc-font">
-              <div class="menu-mark" aria-hidden="true">&#9670;</div>
+              <div class="menu-mark" aria-hidden="true"><img src="/favicon.svg" alt="" width="36" height="36" /></div>
               <div>
                 <div class="menu-eyebrow">Signed in as</div>
                 <h2 id="menu-user">traveller</h2>
@@ -2370,7 +2397,7 @@
             </div>
             <div class="minigames-head-actions">
               <aside id="duel-profile-card" class="duel-profile-card" aria-label="Your Duels rank">
-                <div id="duel-profile-emblem" class="duel-emblem" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+                <div id="duel-profile-emblem" class="duel-emblem" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
                 <div class="duel-profile-top duel-profile-main"><span id="duel-rank-name" class="duel-rank-name">Provisional</span><span id="duel-elo" class="duel-elo">450 RP</span></div>
                 <div class="duel-rank-track"><div id="duel-rank-fill" class="duel-rank-fill"></div></div>
                 <div id="duel-rank-next" class="duel-rank-next">5 placement matches remaining</div>
@@ -2497,7 +2524,7 @@
           <b id="tstat-wins">0 &#183; 0</b>
         </div>
       </div>
-      <p class="title-footer mc-font">Every block original <strong>&#183;</strong> No password is ever stored in this browser <strong>&#183;</strong> <a href="/war" target="_blank" rel="noopener">Live war report &amp; tier list &#8599;</a></p>
+      <p class="title-footer mc-font">Every block original <strong>&#183;</strong> No password is ever stored in this browser</p>
     </div>
   </div>
   <script type="module" src="/src/main.ts"></script>
