@@ -14,7 +14,7 @@ export type IconName =
   | 'mail' | 'lock' | 'dove' | 'statue' | 'eye' | 'search' | 'blocked'
   | 'command' | 'close' | 'log' | 'chevronUp' | 'chevronDown' | 'droplet'
   | 'map' | 'check' | 'trap' | 'pin' | 'camera' | 'book' | 'boat' | 'party'
-  | 'compass' | 'mute' | 'plane' | 'brick' | 'horn' | 'arrowRight'
+  | 'compass' | 'mute' | 'plane' | 'brick' | 'horn' | 'arrowRight' | 'bell'
   // Geometric/technical glyphs. Several of these (pause, hourglass, the medium
   // square) carry an emoji presentation and render in the platform's colour
   // emoji font; the rest are text-font shapes whose weight and size vary just
@@ -105,6 +105,7 @@ const PATHS: Record<IconName, string> = {
   arrowDown: '<path d="M12 5v14M6 13l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
   arrowsHorizontal: '<path d="M3 12h18M7 8l-4 4 4 4M17 8l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>',
   arrowRight: '<path d="M4 12h15M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>',
+  bell: '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M13.73 21a2 2 0 0 1-3.46 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
 };
 
 // --- Emoji substitution ---------------------------------------------------
@@ -130,7 +131,7 @@ const EMOJI_ICONS: Record<string, IconName> = {
   '⚠': 'warning', '🛰': 'satellite', '📖': 'book', '⛵': 'boat',
   '✋': 'hand', '🎉': 'party', '🧭': 'compass', '🔒': 'lock',
   '🤫': 'mute', '✈': 'plane', '⛽': 'fuel', '🔫': 'gun',
-  '📯': 'horn', '🕵': 'search', '⌘': 'command',
+  '📯': 'horn', '🕵': 'search', '⌘': 'command', '🔔': 'bell',
   '◆': 'diamond', '◇': 'diamond', '■': 'square', '◼': 'square', '▪': 'square',
   '▲': 'triangleUp', '▼': 'triangleDown', '▶': 'triangleRight', '▸': 'triangleRight',
   '●': 'disc', '◉': 'reticle', '◎': 'reticle',
@@ -157,7 +158,10 @@ export function iconifyHtml(html: string): string {
   });
 }
 
-function escapeHtml(text: string): string {
+/** Escape text for safe interpolation into an innerHTML template. Any string a
+ *  PLAYER controls — a username, a party name, a campaign slogan — must pass
+ *  through here before it is concatenated into markup. */
+export function escapeHtml(text: string): string {
   return text.replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 }

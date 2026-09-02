@@ -6,7 +6,7 @@
 // >20% imbalance forces the weaker side), and carries the player's saved state
 // (position/inventory).
 
-import { FACTIONS, resolveJoinFaction } from '../teams';
+import { FACTIONS, NO_FACTION, isFaction, resolveJoinFaction } from '../teams';
 import {
   WarfareProgress, buyWarfareNode, grantWarfareXp, migrateWarfare, sanitizeWarfare,
 } from '../warfare';
@@ -22,6 +22,8 @@ export interface Account {
   salt: string;
   hash: string;
   faction: number;
+  /** Whether allegiance has been permanently sealed on the Faction Selection screen. */
+  allegiancePledged?: boolean;
   /** Permanent "Seasons Won" badge rank, kept across seasons (Phase 5). */
   seasonsWon?: number;
   /** Secret-switch bookkeeping (Phase 7). */
@@ -81,7 +83,8 @@ export class Accounts {
           typeof a.hash === 'string') {
         this.byName.set(a.username.toLowerCase(), {
           username: a.username, salt: a.salt, hash: a.hash,
-          faction: Number.isFinite(a.faction) ? a.faction : 0,
+          faction: Number.isFinite(a.faction) ? a.faction : NO_FACTION,
+          allegiancePledged: a.allegiancePledged === true,
           seasonsWon: Number.isFinite(a.seasonsWon) ? Math.max(0, Math.floor(a.seasonsWon as number)) : 0,
           switchesUsed: Number.isFinite(a.switchesUsed) ? Math.max(0, Math.floor(a.switchesUsed as number)) : 0,
           switchSeason: Number.isFinite(a.switchSeason) ? Math.floor(a.switchSeason as number) : 0,
@@ -109,7 +112,7 @@ export class Accounts {
 
   /** Member count per faction across ALL registered accounts (so teams stay
    *  balanced over the whole playerbase, not just who's currently online). */
-  private factionCounts(): Record<number, number> {
+  factionCounts(): Record<number, number> {
     const counts: Record<number, number> = {};
     for (const f of FACTIONS) counts[f.id] = 0;
     for (const a of this.byName.values()) {
@@ -119,9 +122,16 @@ export class Accounts {
   }
 
   /** Register a new account. `salt` is supplied by the caller (the shell uses a
-   *  cryptographic random; tests a fixed value). `desired` is the side the
-   *  player PICKED; it's honoured only while the teams are balanced — a >20%
-   *  imbalance forces the weaker side. Fail-closed on bad input/dup. */
+   *  cryptographic random; tests a fixed value). Fail-closed on bad input/dup.
+   *
+   *  `desired` now means three different things, so read it carefully:
+   *  - NO_FACTION: the account starts unaligned and picks a side on the
+   *    allegiance screen. This is the normal path.
+   *  - a real faction id: HONOURED AS GIVEN. Auto-balancing is deliberately
+   *    skipped, because allegiance is the player's permanent choice now — with
+   *    the consequence that the sides can drift apart, where the old
+   *    >20%-imbalance rule used to force the weaker side.
+   *  - undefined: legacy callers still get the balanced assignment. */
   register(name: string, pass: string, hash: Hasher, salt: string, desired?: number): AuthResult {
     if (!validUsername(name)) {
       return { ok: false, error: 'Username must be 3–16 letters, numbers or _' };
@@ -130,14 +140,38 @@ export class Accounts {
       return { ok: false, error: `Password must be ${MIN_PASS}–${MAX_PASS} characters` };
     }
     if (this.has(name)) return { ok: false, error: 'That username is taken' };
+    const chosen = desired !== undefined && isFaction(desired);
+    const assignedFaction = desired === NO_FACTION
+      ? NO_FACTION
+      : (chosen ? desired : resolveJoinFaction(this.factionCounts(), desired));
     const account: Account = {
       username: name, salt, hash: hash(pass, salt),
-      faction: resolveJoinFaction(this.factionCounts(), desired),
+      faction: assignedFaction,
       seasonsWon: 0,
+      allegiancePledged: chosen,
       duelProgress: newDuelProgress(),
     };
     this.byName.set(name.toLowerCase(), account);
     return { ok: true, account };
+  }
+
+  /**
+   * Permanently commit a player's faction choice.
+   * Once chosen, faction allegiance cannot be changed.
+   */
+  chooseFaction(name: string, faction: number): boolean {
+    const a = this.get(name);
+    if (!a) return false;
+    if (!isFaction(faction)) return false;
+    // Any account that ALREADY holds a real faction is settled, whether or not
+    // it carries the pledge flag. Accounts created before this system have a
+    // faction but no flag, and without this check they could re-pledge to the
+    // other side for free — a way around the season-limited /switchFaction
+    // path entirely.
+    if (isFaction(a.faction)) return false;
+    a.faction = faction;
+    a.allegiancePledged = true;
+    return true;
   }
 
   /** Verify credentials. Returns the account on success. */

@@ -125,8 +125,8 @@ export function switchesRemaining(s: SwitchState, currentSeason: number): number
 export function canSwitchFaction(
   s: SwitchState, currentSeason: number, current: number, target: number, seasonTimeLeft: number,
 ): boolean {
-  if (!isFaction(target) || target === current) return false;
-  if (seasonTimeLeft <= SWITCH_LOCK_SECONDS) return false; // final-week lock
+  if (!isFaction(current) || !isFaction(target) || current === target) return false;
+  if (seasonTimeLeft <= SWITCH_LOCK_SECONDS) return false;
   return switchesRemaining(s, currentSeason) > 0;
 }
 

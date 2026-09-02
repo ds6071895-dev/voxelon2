@@ -19,6 +19,18 @@ import type {
 } from '../vehicles';
 import type { DuelArenaBounds, DuelLobbySnapshot, DuelResult } from '../duels';
 import type { DuelFlair, DuelPublicProfile } from '../duels_progression';
+import type { PoliticsState } from '../politics';
+
+export type NotificationType = 'broadcast' | 'election' | 'raid' | 'tax' | 'kit' | 'system';
+export interface ProtocolNotification {
+  id: string;
+  type: NotificationType;
+  title: string;
+  message: string;
+  timestamp: number;
+  read: boolean;
+  faction?: number;
+}
 
 export const SERVER_PORT = 8080;
 export const SNAPSHOT_HZ = 15;     // server -> clients transform broadcasts
@@ -258,6 +270,14 @@ export type ClientMsg =
   // announcement — others keep seeing your old colors (a spy), but the server
   // treats you as your new faction. Max 2/season, locked in the final week.
   | { t: 'switchFaction'; faction: number }
+  // President System & Democratic Governance
+  | { t: 'chooseFaction'; faction: number }
+  | { t: 'createParty'; name: string; slogan: string; promises: string[] }
+  | { t: 'voteParty'; partyId: string }
+  | { t: 'presidentBroadcast'; text: string }
+  | { t: 'setTaxRate'; rate: number }
+  | { t: 'allocateKits'; count: number }
+  | { t: 'treasurySteal'; faction: number }
   // RETIRED (Warfare Command): the old mob-kill XP report. Kept in the union so
   // an older client's message is accepted and ignored rather than desyncing.
   | { t: 'xp'; amount: number }
@@ -397,6 +417,12 @@ export type ServerMsg =
       helis: HelicopterSnapshot[];
       /** Locations a tactical strike may never be aimed into. */
       protectedAreas: ProtectedArea[];
+      /** President System & Faction Politics state, redacted per recipient:
+       *  party `voters` lists carry only the recipient's own ballot. */
+      politics?: PoliticsState;
+      /** Item count in each faction treasury. The COUNT is public (the pledge
+       *  screen advertises it); the contents are not. */
+      treasuries?: Record<number, number>;
     }
   | { t: 'join'; player: PlayerInfo }
   | { t: 'leave'; id: number }
@@ -448,6 +474,10 @@ export type ServerMsg =
       faction: number; by: string; holder: number }
   // Private confirmation of a secret faction switch (only to the defector).
   | { t: 'factionSwitched'; faction: number; remaining: number }
+  // President System & Democratic Governance
+  | { t: 'politicsSync'; state: PoliticsState; treasuries?: Record<number, number> }
+  | { t: 'notificationMsg'; notif: ProtocolNotification }
+  | { t: 'treasuryAlert'; text: string; faction: number }
   // Gadget visual effect to play everywhere (frag/oil blast, smoke cloud).
   | { t: 'gadgetFx'; kind: GadgetKind; x: number; y: number; z: number }
   // Spy disguise (Phase 8): render player `id` as `faction` until `until`
