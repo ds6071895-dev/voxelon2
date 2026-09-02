@@ -1,0 +1,1018 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Summit Descent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;900&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;700&display=swap">
+<style>
+  :root {
+    --snow:      #e9edf0;
+    --paper:     #f6f8f9;
+    --ink:       #12171b;
+    --ink-soft:  #47535c;
+    --granite:   #6b757e;
+    --hair:      #ccd5db;
+    --raise:     #ffffff;
+    --ember:     #c1401f;
+    --ember-dim: #e8d3cc;
+
+    --combat:   #c1401f;
+    --mining:   #2f7fb5;
+    --foraging: #3f8a4c;
+    --farming:  #a8801b;
+
+    --shadow: 0 1px 2px rgba(18,23,27,.06);
+
+    --f-display: 'Archivo', 'Helvetica Neue', Arial, sans-serif;
+    --f-body: 'Source Sans 3', -apple-system, 'Segoe UI', sans-serif;
+    --f-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Consolas, monospace;
+
+    --col: 68ch;
+    color-scheme: light;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --snow:      #0f1418;
+      --paper:     #151b21;
+      --ink:       #e4eaee;
+      --ink-soft:  #9aa7b1;
+      --granite:   #7d8a94;
+      --hair:      #2a343c;
+      --raise:     #1b232a;
+      --ember:     #f0714b;
+      --ember-dim: #3a201a;
+
+      --combat:   #f0714b;
+      --mining:   #64b6e8;
+      --foraging: #63bd74;
+      --farming:  #ddb443;
+
+      --shadow: 0 1px 2px rgba(0,0,0,.4);
+      color-scheme: dark;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --snow:      #0f1418;
+    --paper:     #151b21;
+    --ink:       #e4eaee;
+    --ink-soft:  #9aa7b1;
+    --granite:   #7d8a94;
+    --hair:      #2a343c;
+    --raise:     #1b232a;
+    --ember:     #f0714b;
+    --ember-dim: #3a201a;
+
+    --combat:   #f0714b;
+    --mining:   #64b6e8;
+    --foraging: #63bd74;
+    --farming:  #ddb443;
+
+    --shadow: 0 1px 2px rgba(0,0,0,.4);
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--snow);
+    color: var(--ink);
+    font-family: var(--f-body);
+    font-size: 16.5px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 0 24px 96px;
+  }
+
+  /* ---- masthead ---------------------------------------------------- */
+
+  .masthead {
+    padding: 56px 0 32px;
+    border-bottom: 3px solid var(--ink);
+  }
+  .eyebrow {
+    font-family: var(--f-mono);
+    font-size: 11.5px;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--granite);
+    margin: 0 0 18px;
+  }
+  .eyebrow b { color: var(--ember); font-weight: 700; }
+  h1 {
+    font-family: var(--f-display);
+    font-weight: 900;
+    font-size: clamp(40px, 7.5vw, 76px);
+    line-height: .94;
+    letter-spacing: -.032em;
+    margin: 0 0 20px;
+    text-wrap: balance;
+  }
+  .thesis {
+    max-width: var(--col);
+    font-size: 19px;
+    line-height: 1.5;
+    color: var(--ink-soft);
+    margin: 0;
+  }
+  .thesis b { color: var(--ink); font-weight: 600; }
+
+  /* ---- decision strip ---------------------------------------------- */
+
+  .decisions {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(158px, 1fr));
+    gap: 1px;
+    background: var(--hair);
+    border: 1px solid var(--hair);
+    margin: 0 0 56px;
+  }
+  .dec {
+    background: var(--paper);
+    padding: 13px 15px 15px;
+  }
+  .dec dt {
+    font-family: var(--f-mono);
+    font-size: 10.5px;
+    letter-spacing: .11em;
+    text-transform: uppercase;
+    color: var(--granite);
+    margin: 0 0 5px;
+  }
+  .dec dd {
+    margin: 0;
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: 15.5px;
+    letter-spacing: -.012em;
+    line-height: 1.25;
+  }
+
+  /* ---- generic sections -------------------------------------------- */
+
+  section { margin: 0 0 60px; }
+
+  h2 {
+    font-family: var(--f-display);
+    font-weight: 900;
+    font-size: 27px;
+    letter-spacing: -.022em;
+    margin: 0 0 6px;
+    text-wrap: balance;
+  }
+  .sec-note {
+    max-width: var(--col);
+    color: var(--ink-soft);
+    margin: 0 0 24px;
+  }
+  h3 {
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: 17px;
+    letter-spacing: -.008em;
+    margin: 32px 0 8px;
+  }
+  p { max-width: var(--col); }
+  p, ul, ol { margin: 0 0 14px; }
+  ul, ol { padding-left: 20px; max-width: var(--col); }
+  li { margin: 0 0 6px; }
+  a { color: var(--ember); }
+
+  code, .mono {
+    font-family: var(--f-mono);
+    font-size: .855em;
+  }
+  code {
+    background: var(--raise);
+    border: 1px solid var(--hair);
+    border-radius: 3px;
+    padding: .08em .34em;
+    white-space: nowrap;
+  }
+
+  .rule {
+    border: 0;
+    border-top: 1px solid var(--hair);
+    margin: 0 0 40px;
+  }
+
+  /* ---- tables ------------------------------------------------------- */
+
+  .tw { overflow-x: auto; margin: 0 0 18px; }
+  table {
+    width: 100%;
+    min-width: 560px;
+    border-collapse: collapse;
+    font-size: 15px;
+  }
+  th {
+    font-family: var(--f-mono);
+    font-size: 10.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--granite);
+    text-align: left;
+    font-weight: 400;
+    padding: 0 14px 7px 0;
+    border-bottom: 1px solid var(--ink);
+    vertical-align: bottom;
+  }
+  td {
+    padding: 11px 14px 11px 0;
+    border-bottom: 1px solid var(--hair);
+    vertical-align: top;
+  }
+  td:last-child, th:last-child { padding-right: 0; }
+  tbody tr:last-child td { border-bottom: 1px solid var(--ink); }
+  .num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .skillcell {
+    font-family: var(--f-display);
+    font-weight: 700;
+    white-space: nowrap;
+    border-left: 3px solid var(--sk, var(--hair));
+    padding-left: 11px;
+  }
+  .r-combat   { --sk: var(--combat); }
+  .r-mining   { --sk: var(--mining); }
+  .r-foraging { --sk: var(--foraging); }
+  .r-farming  { --sk: var(--farming); }
+
+  /* ---- module ledger ------------------------------------------------ */
+
+  .ledger {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 28px;
+  }
+  .ledger h3 { margin-top: 0; }
+  .files { list-style: none; padding: 0; margin: 0; max-width: none; }
+  .files li {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--hair);
+    margin: 0;
+  }
+  .files .fp {
+    font-family: var(--f-mono);
+    font-size: 12.5px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  .files .fd { font-size: 13.5px; color: var(--ink-soft); line-height: 1.4; }
+  .new .fp { color: var(--ember); }
+
+  /* ---- phases: the descent rail ------------------------------------- */
+
+  .phase {
+    display: grid;
+    grid-template-columns: 62px 1fr;
+    gap: 0 22px;
+    position: relative;
+  }
+  .phase-mark {
+    position: relative;
+    display: flex;
+    justify-content: center;
+  }
+  /* the descent line runs the whole rail, behind every marker */
+  .phase-mark::before {
+    content: "";
+    position: absolute;
+    top: 0; bottom: -1px;
+    width: 2px;
+    background: var(--hair);
+  }
+  .phase:last-child .phase-mark::before { bottom: auto; height: 30px; }
+  .phase-num {
+    position: relative;
+    font-family: var(--f-mono);
+    font-weight: 700;
+    font-size: 13px;
+    line-height: 1;
+    color: var(--snow);
+    background: var(--ink);
+    width: 30px; height: 30px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    margin-top: 2px;
+  }
+  .phase-body { padding: 0 0 34px; }
+  .phase-body h3 {
+    margin: 0 0 4px;
+    font-size: 19px;
+    font-weight: 900;
+    letter-spacing: -.018em;
+  }
+  .ships {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    color: var(--granite);
+    margin: 0 0 10px;
+  }
+  .phase-body p { margin-bottom: 10px; }
+  .phase-body ul { margin-bottom: 10px; }
+  .done {
+    font-size: 14px;
+    color: var(--ink-soft);
+    border-left: 3px solid var(--ember);
+    padding: 2px 0 2px 13px;
+    max-width: var(--col);
+  }
+  .done b {
+    font-family: var(--f-mono);
+    font-size: 10.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--ember);
+    display: block;
+  }
+
+  /* ---- callouts ------------------------------------------------------ */
+
+  .flag {
+    background: var(--paper);
+    border: 1px solid var(--hair);
+    border-left: 4px solid var(--ember);
+    padding: 16px 18px;
+    margin: 0 0 16px;
+    max-width: var(--col);
+  }
+  .flag h4 {
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: 15px;
+    margin: 0 0 5px;
+  }
+  .flag p { margin: 0; font-size: 15px; }
+  .flag p + p { margin-top: 9px; }
+
+  .risks { list-style: none; padding: 0; max-width: none; }
+  .risks li {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 3px;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--hair);
+    margin: 0;
+  }
+  .risks .rt {
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: 15.5px;
+  }
+  .risks .rb { color: var(--ink-soft); font-size: 15px; max-width: var(--col); }
+
+  footer {
+    border-top: 3px solid var(--ink);
+    padding-top: 20px;
+    font-family: var(--f-mono);
+    font-size: 12px;
+    letter-spacing: .04em;
+    color: var(--granite);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 20px;
+  }
+
+  @media (max-width: 620px) {
+    .wrap { padding: 0 18px 72px; }
+    .phase { grid-template-columns: 40px 1fr; gap: 0 14px; }
+    .phase-num { width: 26px; height: 26px; font-size: 11.5px; }
+  }
+</style>
+<style>
+  html { color-scheme: light dark; }
+  body { margin: 0; }
+  img { max-width: 100%; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">VOXELON &middot; Build plan &middot; <b>RPG mode</b></p>
+    <h1>The Summit Descent</h1>
+    <p class="thesis">
+      A second world beside Warfare: one shared 1500&#178; map with a mountain at the
+      centre. You spawn on the peak and work downward &mdash; four skills, four
+      levelable spawners on a private plot, and instanced boss lairs holding the
+      encounters the engine already runs. <b>Roughly 70% of this ships on systems
+      that are already in the repo.</b>
+    </p>
+  </header>
+
+  <dl class="decisions">
+    <div class="dec"><dt>World</dt><dd>Shared MMO<br>~1500&#178;</dd></div>
+    <div class="dec"><dt>Skills</dt><dd>Combat · Mining<br>Foraging · Farming</dd></div>
+    <div class="dec"><dt>Combat</dt><dd>Melee + magic<br>no guns</dd></div>
+    <div class="dec"><dt>Bosses</dt><dd>Instanced<br>respawning</dd></div>
+    <div class="dec"><dt>Unlocks</dt><dd>Automatic<br>no loadout</dd></div>
+    <div class="dec"><dt>Building</dt><dd>Private plots<br>only</dd></div>
+    <div class="dec"><dt>Spawners</dt><dd>Autocollect<br>online only</dd></div>
+    <div class="dec"><dt>Death</dt><dd>0 coins lost<br>combo resets</dd></div>
+  </dl>
+
+  <!-- ============================================================ -->
+  <section>
+    <h2>1 &nbsp;The split</h2>
+    <p class="sec-note">
+      The existing game becomes a named mode rather than the only thing behind
+      the Play button.
+    </p>
+
+    <p>
+      <b>Warfare</b> is the current 5000&#178; faction world: territory, machines,
+      vehicles, silos, seasons, the boss-powered tech tree. The word is already
+      the right one &mdash; <code>src/warfare.ts</code> and <code>src/warfare_ui.ts</code> own it, and
+      &ldquo;Warfare Command&rdquo; (G) becomes that mode's progression screen instead of an
+      oddly-named subsystem inside a mode with no name.
+    </p>
+    <p>
+      <b>RPG</b> is new. <b>The Arena</b> (Duels, Bedwars, CTF) is untouched.
+    </p>
+    <p>
+      On the title screen, <code>#play-btn</code> stops dropping straight into the faction
+      world and opens a two-card mode picker above the existing Minigames button.
+      Everything else on that screen &mdash; auth, character preview, the Arena modal &mdash;
+      stays exactly where it is.
+    </p>
+
+    <h3>Rename surface</h3>
+    <ul>
+      <li>Title copy in <code>index.html</code> (subtitle, <code>.title-facts</code>) moves onto the Warfare card.</li>
+      <li>The pause menu, world map and HUD gain a mode label.</li>
+      <li>No module renames. <code>warfare.ts</code> keeps its name and meaning; it simply becomes mode-scoped.</li>
+    </ul>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ============================================================ -->
+  <section>
+    <h2>2 &nbsp;What already exists</h2>
+    <p class="sec-note">
+      The build is small because the content isn't. This is the honest ledger of
+      what gets reused versus what gets written.
+    </p>
+
+    <div class="ledger">
+      <div>
+        <h3>Reused as-is</h3>
+        <ul class="files">
+          <li><span class="fp">vault_encounter.ts</span><span class="fd">3-phase <code>BossDefinition</code>, six hazard shapes, add-waves, sealed arenas, contribution tracking</span></li>
+          <li><span class="fp">vaults.ts</span><span class="fd">Five finished bosses &mdash; Bone Warden, Mire Queen, Ember Colossus, Crystal Seer, Gilded Artificer</span></li>
+          <li><span class="fp">boss_music.ts</span><span class="fd">Per-family soundtracks with phase transitions, driven by <code>audio.startVaultMusic</code></span></li>
+          <li><span class="fp">pvp_feedback.ts</span><span class="fd">DamageNumbers, KillBanner, StreakTracker &mdash; documented as reusable outside Duels</span></li>
+          <li><span class="fp">terrain.ts</span><span class="fd"><code>mountainFactor</code>, rock line y=96, snow line y=120, peaks to y&asymp;235</span></li>
+          <li><span class="fp">runes.ts</span><span class="fd">Socketed affixes: armor, toughness, speed, mine, spread</span></li>
+          <li><span class="fp">mobs.ts</span><span class="fd">Five mob types incl. brute; <code>Block.MobSpawner</code> proximity spawning</span></li>
+          <li><span class="fp">duels.ts</span><span class="fd">The instancing precedent: bounded arena, server-pushed entry, clamped movement</span></li>
+          <li><span class="fp">warfare_ui.ts</span><span class="fd">Branching tree renderer to reskin for the skill panel</span></li>
+          <li><span class="fp">accounts.ts</span><span class="fd">Explicit per-mode progression blobs, kept out of the client-owned <code>data</code></span></li>
+        </ul>
+      </div>
+      <div class="new">
+        <h3>Written new</h3>
+        <ul class="files">
+          <li><span class="fp">rpg.ts</span><span class="fd">Pure: skill XP curves, level tables, automatic unlocks, area gates, sanitize/migrate</span></li>
+          <li><span class="fp">rpg_spawners.ts</span><span class="fd">Pure: spawner types, levels I&ndash;X, rates, storage caps, upgrade costs</span></li>
+          <li><span class="fp">rpg_shop.ts</span><span class="fd">Pure: four vendor catalogues, coin prices, level requirements</span></li>
+          <li><span class="fp">rpg_world.ts</span><span class="fd">Area bounds, summit spawn, gate checks, plot allocation</span></li>
+          <li><span class="fp">feel.ts</span><span class="fd">The universal feedback layer &mdash; vacuum, XP splash, combo meter, level-up slam</span></li>
+          <li><span class="fp">crops.ts</span><span class="fd">Crop blocks and growth stages (nothing farming-shaped exists today)</span></li>
+          <li><span class="fp">rpg_ui.ts</span><span class="fd">Skill panel, shop, plot manager, area cards</span></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="flag" style="margin-top:28px">
+      <h4>The architectural rule this inherits</h4>
+      <p>
+        Every new pure module follows <code>warfare.ts</code> and <code>duels_progression.ts</code>:
+        no THREE, no DOM, no Node. The authoritative server and the client run the
+        identical numbers, so a spawner tick or a skill level means the same thing
+        everywhere. Protocol changes stay additive on <code>ClientMsg</code>/<code>ServerMsg</code>.
+      </p>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ============================================================ -->
+  <section>
+    <h2>3 &nbsp;The four skills</h2>
+    <p class="sec-note">
+      Levels 1&ndash;50 each. Every level grants a small passive automatically; every
+      fifth level grants a real unlock, also automatically &mdash; nothing to equip,
+      nothing to choose. <b>Skill Average</b> is the mean of the four and gates the
+      late areas, so nobody reaches the end on Combat alone.
+    </p>
+
+    <div class="tw">
+      <table>
+        <thead>
+          <tr><th>Skill</th><th>XP from</th><th>Per level</th><th>The AoE unlock</th><th>Feeds</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="skillcell r-combat">Combat</td>
+            <td>Kills, weighted by mob tier</td>
+            <td>Crit chance &amp; damage</td>
+            <td><b>Cleave</b> &mdash; one swing hits the whole pack</td>
+            <td>Access to high-tier resource areas</td>
+          </tr>
+          <tr>
+            <td class="skillcell r-mining">Mining</td>
+            <td>Ore and stone broken</td>
+            <td>Mine speed</td>
+            <td><b>Vein Miner</b> &mdash; the whole vein in one hit</td>
+            <td>Every weapon and tool tier</td>
+          </tr>
+          <tr>
+            <td class="skillcell r-foraging">Foraging</td>
+            <td>Logs chopped, by wood type</td>
+            <td>Extra log drops</td>
+            <td><b>Treefeller</b> &mdash; the entire tree falls</td>
+            <td>Wands and rune catalysts</td>
+          </tr>
+          <tr>
+            <td class="skillcell r-farming">Farming</td>
+            <td>Crops harvested</td>
+            <td>Max health</td>
+            <td><b>Field Sweep</b> &mdash; 3&times;3 &rarr; 5&times;5 &rarr; full row, self-replanting</td>
+            <td>Food buffs and potions &mdash; boss prep</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      The cross-dependency column is the load-bearing one. Mining gates gear,
+      Farming gates survival, Foraging gates magic, Combat gates access. A player
+      who grinds one hits a wall and has to go play another &mdash; that pressure is
+      what stops four parallel bars from feeling like four chores.
+    </p>
+
+    <h3>The engine reality per skill</h3>
+    <ul>
+      <li><b>Mining</b> has a ready-made 7-step ladder: Coal &rarr; Iron &rarr; Gold &rarr; Redstone &rarr; Diamond &rarr; Titanium &rarr; Cobalt, with per-block hardness and tool tiers already in <code>blocks.ts</code>.</li>
+      <li><b>Foraging</b> has five wood types (Oak, Birch, Spruce, Jungle, Cherry). Rarer woods live behind gates and are the magic supply line.</li>
+      <li><b>Combat</b> has <code>Item.Sword</code>, already mobs-only because PvP in Warfare is guns-only &mdash; a melee world is the path of least resistance.</li>
+      <li><b>Farming</b> has nothing. Crops are the single largest net-new content lift in the mode.</li>
+    </ul>
+
+    <h3>Melee and magic</h3>
+    <p>
+      Guns are removed from the RPG world entirely &mdash; the cleanest way to make the
+      two modes feel like different games, and it's a subtraction rather than a
+      build. Melee runs on sword tiers off Mining, with a charged heavy swing.
+      Magic runs on <b>wands with mana</b>, built on <code>runes.ts</code>: a wand fires an
+      element (ember / frost / prism / venom) that maps onto the existing boss
+      families. The build axis is melee &harr; magic &harr; hybrid, expressed through gear,
+      never through a class picked at character creation.
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ============================================================ -->
+  <section>
+    <h2>4 &nbsp;Plots and spawners</h2>
+    <p class="sec-note">
+      The second pillar. Every player gets a private walled plot off the Summit hub &mdash;
+      the only place in the mode where blocks can be placed. Friends can visit.
+    </p>
+
+    <div class="tw">
+      <table>
+        <thead>
+          <tr><th>Spawner</th><th>Produces</th><th>Serves</th><th>Breakpoints (III / VI / X)</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="skillcell r-combat">Mob Spawner</td>
+            <td>Mob drops &rarr; coins</td><td>Combat</td>
+            <td>Zombie &rarr; Spitter &rarr; Brute</td>
+          </tr>
+          <tr>
+            <td class="skillcell r-mining">Ore Node</td>
+            <td>Ore, by tier</td><td>Mining</td>
+            <td>Iron &rarr; Diamond &rarr; Titanium</td>
+          </tr>
+          <tr>
+            <td class="skillcell r-foraging">Grove</td>
+            <td>Logs, by wood type</td><td>Foraging</td>
+            <td>Oak &rarr; Spruce &rarr; Cherry</td>
+          </tr>
+          <tr>
+            <td class="skillcell r-farming">Crop Bed</td>
+            <td>Crops &rarr; food and potion mats</td><td>Farming</td>
+            <td>Wheat &rarr; Gourd &rarr; Emberroot</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      Each level improves <b>rate</b>, <b>yield</b> and <b>storage cap</b>; the three
+      breakpoints change the output outright, so upgrading has a visible payoff
+      rather than a number crawling upward. Output <b>autocollects</b> into the
+      spawner's storage &mdash; no standing there swinging.
+    </p>
+
+    <h3>Three rules that keep this from eating the game</h3>
+    <ol>
+      <li>
+        <b>Spawners give resources and coins &mdash; never skill XP.</b> If a spawner
+        levels Combat, the skill system becomes an idle bar and the world empties
+        out. Spawners fund you; playing levels you. This is the single most
+        important balance call in the mode.
+      </li>
+      <li>
+        <b>They tick whenever you are online, anywhere in the world &mdash; not only on
+        the plot.</b> Online-only accrual with autocollect would otherwise reward
+        standing on your plot watching numbers. This way you play the Quarry while
+        the plot fills, and drop by to empty it. Plots reward being logged in, not
+        being AFK.
+      </li>
+      <li>
+        <b>Placement capacity grows with Skill Average</b> &mdash; roughly 4 slots at the
+        start, ~15 at the end. Plot capacity becomes a progression reward, and the
+        plot never becomes an infinite factory.
+      </li>
+    </ol>
+
+    <p>
+      Upgrade costs are paid in <em>the spawner's own output plus something from a
+      different skill</em>, so plots enforce the cross-dependency instead of letting
+      each line self-fund. Storage borrows the <code>chests.ts</code> pattern: server is the
+      source of truth, client keeps a display cache.
+    </p>
+
+    <div class="flag">
+      <h4>Death, with zero coins dropped</h4>
+      <p>
+        Death currently costs nothing at all, which is a defensible call for a
+        kids' game &mdash; but it also means dying to a boss reads as nothing happening.
+        The plan assumes one soft cost that needs no new systems: <b>you lose your
+        combo multiplier and get run back to the last shrine.</b> Felt immediately,
+        permanent damage nowhere. Say the word and it comes out.
+      </p>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ============================================================ -->
+  <section>
+    <h2>5 &nbsp;The shop</h2>
+    <p class="sec-note">
+      Four vendors at the Summit, roughly six items each &mdash; every one unlocked by a
+      skill level and bought with coins. The shop <em>is</em> the skill reward screen.
+    </p>
+
+    <div class="tw">
+      <table>
+        <thead>
+          <tr><th>Vendor</th><th>Stock</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="skillcell r-combat">Combat</td><td>Three sword tiers · two wands (ember, frost) · one armour set</td></tr>
+          <tr><td class="skillcell r-mining">Mining</td><td>Three pickaxe tiers · the Drill (3&times;3 continuous) · two mining consumables</td></tr>
+          <tr><td class="skillcell r-foraging">Foraging</td><td>Three axe tiers · the Treefeller axe · two rune catalysts</td></tr>
+          <tr><td class="skillcell r-farming">Farming</td><td>Three hoe tiers · seed packs · two food and potion recipes</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      Plus the <b>spawner shop</b>: buy spawner types, buy upgrade levels, buy plot
+      capacity. Deliberately absent &mdash; rarities, random stat rolls, an auction
+      house. Every item is a known, named thing a kid can save toward. Runes stay
+      as the customisation layer on top.
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ============================================================ -->
+  <section>
+    <h2>6 &nbsp;Areas and bosses</h2>
+    <p class="sec-note">
+      A mountain at the centre of ~1500&#178;. Everything is a walk down and outward
+      from a landmark visible from anywhere, so nobody gets lost.
+    </p>
+
+    <div class="tw">
+      <table>
+        <thead>
+          <tr><th>Area</th><th>Gate</th><th>Boss</th><th>Holds</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="skillcell">The Summit</td><td>&mdash;</td><td>&mdash;</td>
+            <td>Spawn, four vendors, bank, skill shrine, plot portal. Safe.</td>
+          </tr>
+          <tr>
+            <td class="skillcell">Pine Slopes</td><td>none</td><td>mini-boss</td>
+            <td>First trees, first mobs, first crop bed. The tutorial in terrain form.</td>
+          </tr>
+          <tr>
+            <td class="skillcell r-mining">The Quarry</td><td class="num">Mining 5 · hard</td><td>Bone Warden</td>
+            <td>Exposed veins, crypt mobs, the first real gear tier.</td>
+          </tr>
+          <tr>
+            <td class="skillcell r-farming">Sunken Mire</td><td class="num">Farming 8 · hard</td><td>Mire Queen</td>
+            <td>Wet farmland, potion crops, the consumable economy opens.</td>
+          </tr>
+          <tr>
+            <td class="skillcell r-combat">Ashfell</td><td class="num">Combat 15 · soft</td><td>Ember Colossus</td>
+            <td>Door is open; the mobs will flatten you. Titanium and rare wood.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      <b>Hard gates</b> are doors you physically cannot pass &mdash; used only where
+      skipping would break progression. <b>Soft gates</b> are level pressure: walk in
+      and die, if you like. Ashfell is deliberately soft so brave players can push.
+    </p>
+
+    <h3>Instanced lairs</h3>
+    <p>
+      The overworld is public; boss lairs are not. You walk into the door with your
+      party and the server hands back a private copy of the fight &mdash; the same shape
+      as <code>net.onDuelArena</code>, which already ships a bounded arena, a spawn point and
+      clamped movement. Respawn becomes trivial: the instance closes, the next
+      party gets a fresh boss. Party XP credit is already solved by the
+      contribution rules in <code>warfare.ts</code> (<code>qualifiesForWarfareXp</code>, damage and time
+      fractions), which explicitly keep credit for players who died before the kill.
+    </p>
+
+    <h3>Shared-world resources</h3>
+    <p>
+      Ore veins, trees and crops in the public world need timed regrowth so one
+      player can't strip an area &mdash; <code>VAULT_RECHARGE</code>'s 30-minute regrow already
+      establishes that pattern.
+    </p>
+
+    <p>
+      <b>The widening pass</b> &mdash; Prism Hollows / Crystal Seer, Clockwork Foundry /
+      Gilded Artificer, and an endgame boss <em>inside the mountain you spawned on</em>,
+      opened once all five are down. You climb back up to where you started for the
+      last door. Build the area and gate systems as data tables from day one so
+      this is content, not a refactor.
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ============================================================ -->
+  <section>
+    <h2>7 &nbsp;The feel layer</h2>
+    <p class="sec-note">
+      Built once, skinned four times. This is what decides whether the mode is
+      loved or merely finished, so it lands early &mdash; before the content that
+      depends on it.
+    </p>
+
+    <p>
+      <b>The unifying rule:</b> every skill gets a moment where one action produces
+      many results. A whole tree, a whole vein, a whole field, a whole pack. It is
+      the difference between doing a chore forty times and erasing a forest. Each
+      is gated as that skill's mid-tier tool, and the tools below it are tuned to
+      feel deliberately hungry for it.
+    </p>
+
+    <h3>Six shared systems in <code>feel.ts</code></h3>
+    <ol>
+      <li><b>The vacuum.</b> Drops fly to the player. Never make anyone walk over forty items. The single biggest satisfaction upgrade in the mode.</li>
+      <li><b>XP splash.</b> Every action pops a floating <span class="mono">+12 Foraging</span> and fills a bar segment with a click that pitches up as you chain.</li>
+      <li><b>Combo meter.</b> Chain actions inside a window &rarr; multiplier tiers, each with its own colour, sound and screen-edge glow. One system, four palettes.</li>
+      <li><b>The level-up slam.</b> Full-screen banner, a chord, a pillar of light &mdash; and the unlock card shown right there: <span class="mono">MINING 10 &mdash; VEIN MINER UNLOCKED</span>. Never make them open a menu to find out what they won.</li>
+      <li><b>Milestone tiers</b> at 5 / 10 / 25 / 50 get a louder version: fireworks, a title, a nameplate tag other players can see.</li>
+      <li><b>Escalating pitch</b> on every repeated action, reset after a pause. Nearly free, and it is most of why chaining feels good.</li>
+    </ol>
+
+    <h3>Per-skill staging</h3>
+    <ul>
+      <li><b>Foraging</b> &mdash; the tree <em>topples</em> rather than blinking out: trunk tips, canopy shudders, a low rumble. Chops pitch up, then a crack and a timber whoosh. Leaves burst, logs erupt and vacuum in, a sapling auto-plants in the stump. Chain trees for <span class="mono">LUMBER RUSH &times;2 &times;3 &times;4</span>.</li>
+      <li><b>Mining</b> &mdash; the whole vein detonates and arcs toward you; ten diamonds at once is a jackpot, ten swings is a job. Ore-sense makes nearby veins glow faintly through stone, because the joy of mining is finding. The Drill carves a continuous 3&times;3 with shake, sparks and a rising whine, slightly out of control.</li>
+      <li><b>Farming</b> &mdash; harvest ripples outward from you as a visible wave, replanting behind itself. Golden sweep, a crunchy snap, and the fastest XP tick in the game. It should feel like mowing a perfect lawn.</li>
+      <li><b>Combat</b> &mdash; hit-stop of 50&ndash;80ms on heavy hits, mobs bursting into scattering voxel chunks instead of a flat poof, an execute finisher under 20% health. <code>DamageNumbers</code> and <code>KillBanner</code> already exist and only need pointing at mobs; <code>StreakTracker</code> hands Combat a full announcer vocabulary for free.</li>
+    </ul>
+
+    <div class="flag">
+      <h4>Two constraints to respect from the first line of code</h4>
+      <p>
+        <b>Particle budget.</b> <code>particles.ts</code> caps at 250 particles of 0.18-unit
+        planes &mdash; sized for death poofs, not for a whole tree exploding. That budget
+        needs raising and probably an instanced or pooled path, or the fifth tree
+        in a Lumber Rush will look weaker than the first.
+      </p>
+      <p>
+        <b>Accessibility.</b> <code>index.html</code> already carries comfort modes that strip
+        motion and a photosensitivity mode that removes strobing particles
+        outright. Every shake, hit-stop, flash and vignette here routes through
+        those switches from the start &mdash; retrofitting it later is miserable.
+      </p>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ============================================================ -->
+  <section>
+    <h2>8 &nbsp;Build order</h2>
+    <p class="sec-note">
+      Phase by phase, each one green before the next starts: <code>npx tsc --noEmit</code>
+      clean, smoke tests for new pure logic, <code>noUnusedLocals</code> means unused imports
+      are hard errors. Source has multibyte characters, so grep with <code>-a</code>.
+    </p>
+
+    <div class="phase">
+      <div class="phase-mark"><span class="phase-num">1</span></div>
+      <div class="phase-body">
+        <h3>Mode split</h3>
+        <p class="ships">index.html · main.ts · protocol.ts · server_core.ts</p>
+        <p>
+          Introduce a mode concept and a two-card picker behind <code>#play-btn</code>. The
+          existing world becomes Warfare with no behavioural change. RPG is a stub
+          realm that loads an empty bounded world.
+        </p>
+        <p class="done"><b>Done when</b> Warfare plays exactly as it does today, reached through one extra click, and RPG loads without errors.</p>
+      </div>
+    </div>
+
+    <div class="phase">
+      <div class="phase-mark"><span class="phase-num">2</span></div>
+      <div class="phase-body">
+        <h3>The realm and the summit</h3>
+        <p class="ships">rpg_world.ts · terrain.ts · server_core.ts</p>
+        <p>
+          A 1500&#178; bounded world with a central peak, seeded separately from
+          Warfare. Spawn on the summit. Faction, territory, machine, vehicle,
+          silo, turret and gun systems are all switched off &mdash; RPG opts in, it
+          does not opt out.
+        </p>
+        <p class="done"><b>Done when</b> you spawn on a peak, can walk down in any direction, and none of Warfare's systems are reachable.</p>
+      </div>
+    </div>
+
+    <div class="phase">
+      <div class="phase-mark"><span class="phase-num">3</span></div>
+      <div class="phase-body">
+        <h3>Skills, XP and persistence</h3>
+        <p class="ships">rpg.ts (new, pure) · accounts.ts · protocol.ts</p>
+        <p>
+          Four skills, XP curves, level tables, automatic unlock application, and
+          an <code>rpg</code> blob on <code>Account</code> stored explicitly beside <code>warfare</code> and
+          <code>duelProgress</code> &mdash; never inside the client-owned <code>data</code>, so a state save
+          can't mint levels. XP awards are server-authoritative with an offline
+          parity path.
+        </p>
+        <p class="done"><b>Done when</b> chopping, mining, killing and harvesting each move the right bar, and levels survive a relog.</p>
+      </div>
+    </div>
+
+    <div class="phase">
+      <div class="phase-mark"><span class="phase-num">4</span></div>
+      <div class="phase-body">
+        <h3>The feel layer</h3>
+        <p class="ships">feel.ts (new) · particles.ts · audio.ts · pvp_feedback.ts</p>
+        <p>
+          All six shared systems, plus the particle budget raise and the
+          accessibility routing. Deliberately ahead of the content: every later
+          phase plugs into this rather than growing its own feedback.
+        </p>
+        <p class="done"><b>Done when</b> a single ore break already feels good with no AoE tool involved, and comfort modes visibly quiet it.</p>
+      </div>
+    </div>
+
+    <div class="phase">
+      <div class="phase-mark"><span class="phase-num">5</span></div>
+      <div class="phase-body">
+        <h3>Farming from nothing</h3>
+        <p class="ships">crops.ts (new) · blocks.ts · textures.ts</p>
+        <p>
+          Crop blocks as <code>shape: 'cross'</code> billboards on the existing <code>plant()</code>
+          helper, with growth stages, seeds, and procedural tile art in the same
+          style as <code>paintTallGrass</code>. The largest net-new content lift in the mode,
+          so it lands before the systems that depend on it.
+        </p>
+        <p class="done"><b>Done when</b> a crop plants, grows through visible stages, harvests, and feeds the Farming bar.</p>
+      </div>
+    </div>
+
+    <div class="phase">
+      <div class="phase-mark"><span class="phase-num">6</span></div>
+      <div class="phase-body">
+        <h3>The AoE verbs</h3>
+        <p class="ships">rpg.ts · main.ts · feel.ts · world.ts</p>
+        <p>
+          Treefeller, Vein Miner, Field Sweep and Cleave &mdash; each server-validated
+          (a multi-block break is one authoritative action, not a burst of
+          client edits) and each staged through the feel layer.
+        </p>
+        <p class="done"><b>Done when</b> one swing fells a tree, one hit clears a vein, and both feel better than four swings did.</p>
+      </div>
+    </div>
+
+    <div class="phase">
+      <div class="phase-mark"><span class="phase-num">7</span></div>
+      <div class="phase-body">
+        <h3>Plots, spawners, coins and the shop</h3>
+        <p class="ships">rpg_spawners.ts · rpg_shop.ts (both new, pure) · chests.ts · rpg_ui.ts</p>
+        <p>
+          Private plots as the only buildable space, four spawner types with
+          levels I&ndash;X, autocollect into server-owned storage, world-wide online
+          ticking, capacity from Skill Average &mdash; then coins and the four vendors
+          to spend them at.
+        </p>
+        <p class="done"><b>Done when</b> a spawner fills while you play elsewhere, empties into your inventory, and pays for the next tool tier.</p>
+      </div>
+    </div>
+
+    <div class="phase">
+      <div class="phase-mark"><span class="phase-num">8</span></div>
+      <div class="phase-body">
+        <h3>Areas, gates and instanced bosses</h3>
+        <p class="ships">rpg_world.ts · vault_encounter.ts · server_core.ts</p>
+        <p>
+          Five areas as data, hard and soft gates, resource regrowth, and lair
+          doors that hand a party its own encounter instance on the
+          <code>onDuelArena</code> pattern. Three bosses wired: Bone Warden, Mire Queen,
+          Ember Colossus &mdash; unchanged encounters, new staging.
+        </p>
+        <p class="done"><b>Done when</b> two parties can fight the same boss simultaneously without seeing each other, and both get credit.</p>
+      </div>
+    </div>
+
+    <div class="phase">
+      <div class="phase-mark"><span class="phase-num">9</span></div>
+      <div class="phase-body">
+        <h3>Balance and the loop</h3>
+        <p class="ships">rpg.ts tuning tables · smoke tests</p>
+        <p>
+          Tune the full session: collect, sell, upgrade, descend, level, clear,
+          return. Verify that no single skill can carry a player to the end, and
+          that spawner income never outpaces active play.
+        </p>
+        <p class="done"><b>Done when</b> a fresh account can reach the Bone Warden in one sitting and wants a second.</p>
+      </div>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ============================================================ -->
+  <section>
+    <h2>9 &nbsp;Known risks</h2>
+    <ul class="risks">
+      <li>
+        <span class="rt">Spawner income outrunning play</span>
+        <span class="rb">The failure mode is a plot that pays better than the world. Keep spawners on resources and coins only, never skill XP, and tune income to trail active play at every tier.</span>
+      </li>
+      <li>
+        <span class="rt">Farming as the weak fourth skill</span>
+        <span class="rb">It is the only skill built from scratch and the easiest to ship thin. Its cross-dependency &mdash; no food, no boss &mdash; has to be real, or players will skip it and hit the Sunken Mire gate resenting it.</span>
+      </li>
+      <li>
+        <span class="rt">Particle and audio budget</span>
+        <span class="rb">Four AoE verbs firing into a 250-particle cap will visibly starve during combos. Raise it in phase 4, before anything depends on how it looks.</span>
+      </li>
+      <li>
+        <span class="rt">Shared-world resource stripping</span>
+        <span class="rb">A public 1500&#178; map is small. Regrowth timers need tuning against real concurrency, and per-player node instancing is the fallback if timers aren't enough.</span>
+      </li>
+      <li>
+        <span class="rt">Mode bleed</span>
+        <span class="rb">Warfare and RPG must not share progression, gear or currency. The account blobs are separate by design; the discipline is keeping every new system mode-scoped from the first commit rather than retrofitting a split later.</span>
+      </li>
+    </ul>
+  </section>
+
+  <footer>
+    <span>VOXELON v0.39</span>
+    <span>RPG mode &mdash; build plan</span>
+    <span>4 skills · 5 areas · 3 bosses at launch</span>
+  </footer>
+
+</div>
+</body>
+</html>

@@ -345,8 +345,8 @@ export class TouchControls {
     const dy = e.clientY - this.lookLastY;
     this.lookLastX = e.clientX; this.lookLastY = e.clientY;
     this.lookDist += Math.abs(dx) + Math.abs(dy);
-    this.input.mouseDX += dx * LOOK_SENS;
-    this.input.mouseDY += dy * LOOK_SENS;
+    this.input.mouseDX += dx * LOOK_SENS * this.input.lookSensitivity;
+    this.input.mouseDY += dy * LOOK_SENS * this.input.lookSensitivity;
     e.preventDefault();
   }
 

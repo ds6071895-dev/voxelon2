@@ -10,6 +10,7 @@
     "server": "esbuild server/server.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/server.cjs --external:ws --log-level=error && node node_modules/.tmp/server.cjs",
     "host": "npm run build && npm run server",
     "optimize-images": "node scripts/optimize_minigame_images.mjs",
+    "og-image": "node scripts/make_og_image.mjs",
     "smoke": "esbuild scripts/smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/smoke.cjs --log-level=error && node node_modules/.tmp/smoke.cjs",
     "boss-smoke": "esbuild scripts/boss_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/boss-smoke.cjs --log-level=error && node node_modules/.tmp/boss-smoke.cjs",
     "music-smoke": "esbuild scripts/boss_music_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/boss-music-smoke.cjs --log-level=error && node node_modules/.tmp/boss-music-smoke.cjs",

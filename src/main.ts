@@ -132,12 +132,17 @@ import {
   ENCOUNTER_VICTORY_CINEMATIC_SECONDS, bossMaxHp, sealContains,
 } from './vault_encounter';
 import {
+  GRAPHICS_PRESETS, MAX_LOOK_SENSITIVITY, MIN_LOOK_SENSITIVITY,
   VaultBossHUD, VaultCinematic, loadAccessibility, saveAccessibility,
 } from './vault_presentation';
+import type { GraphicsQuality } from './vault_presentation';
 import { VaultEncounterVisuals } from './vault_visuals';
 
-const FOG_NEAR = RENDER_DISTANCE * 16 - 38;
-const FOG_FAR = RENDER_DISTANCE * 16 - 6;
+// Fog is pinned to the live render distance so lowering graphics quality hides
+// the shorter view behind fog instead of behind a hard edge of missing chunks.
+// Recomputed by applyGraphicsQuality().
+let FOG_NEAR = RENDER_DISTANCE * 16 - 38;
+let FOG_FAR = RENDER_DISTANCE * 16 - 6;
 // Only this nearby bubble blocks entry. The old startup path waited for the
 // complete 17x17 render area (289 expensive light+mesh jobs) before Play could
 // proceed, even though collision only needs the chunks immediately around the
@@ -167,11 +172,77 @@ const seed = WORLD_SEED;
 // which is what "the distance doesn't look smooth, it looks like the
 // resolution" actually is. Multisampling costs fill rate, not texture memory,
 // and it is the only thing that fixes geometry aliasing; mipmaps cannot.
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+// Settings are read here, before the context exists, because `antialias` is a
+// context-creation attribute — it cannot be toggled on a live renderer. Render
+// distance and pixel ratio DO apply live (applyGraphicsQuality below); only the
+// MSAA half of a quality change waits for the next reload.
+const accessibility = loadAccessibility();
+
+/** Replace the whole page with a readable explanation. Used when there is no
+ *  GPU path at all — a crash-to-black-canvas is the single worst first
+ *  impression a browser game can make, and "your browser can't do this" is a
+ *  thing the player can actually act on. */
+function fatalScreen(heading: string, detail: string): void {
+  document.body.innerHTML =
+    `<div style="position:fixed;inset:0;display:grid;place-content:center;gap:14px;
+      padding:32px;text-align:center;background:#0f1a24;color:#e8eefc;
+      font:14px/1.6 ui-sans-serif,-apple-system,'Segoe UI',Roboto,system-ui,sans-serif">
+      <h1 style="font-size:26px;color:#d78a0c;letter-spacing:1px">VOXELON</h1>
+      <p style="font-size:17px;font-weight:600">${heading}</p>
+      <p style="max-width:46ch;color:#9fb0cc;margin:0 auto">${detail}</p>
+    </div>`;
+}
+
+let renderer: THREE.WebGLRenderer;
+try {
+  renderer = new THREE.WebGLRenderer({
+    antialias: GRAPHICS_PRESETS[accessibility.graphicsQuality].antialias,
+    powerPreference: 'high-performance',
+  });
+} catch (err) {
+  fatalScreen(
+    'This browser can\u2019t run VOXELON.',
+    'The game needs WebGL, and this browser either doesn\u2019t support it or has it '
+    + 'disabled. Try an up-to-date Chrome, Edge, Firefox or Safari, and make sure '
+    + 'hardware acceleration is turned on in your browser settings.');
+  throw err;
+}
+renderer.setPixelRatio(Math.min(
+  window.devicePixelRatio, GRAPHICS_PRESETS[accessibility.graphicsQuality].pixelRatioCap));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.domElement.className = 'game';
 app.prepend(renderer.domElement);
+
+// GPU context loss: a driver reset, a laptop switching GPUs, or the browser
+// reclaiming memory from a backgrounded tab all kill the WebGL context out from
+// under us. three.js re-initialises itself on 'webglcontextrestored', but
+// without this the player just sees a frozen or black canvas and assumes the
+// game crashed. Freeze the loop, say what happened, and pick back up on restore.
+let contextLost = false;
+const contextLostEl = document.createElement('div');
+contextLostEl.id = 'context-lost';
+contextLostEl.innerHTML =
+  '<div><b>Graphics context lost</b>'
+  + '<p>The browser reset the GPU connection. Waiting for it to come back\u2026</p>'
+  + '<p class="hint">If nothing happens in a few seconds, reload the page \u2014 '
+  + 'your account and the world are saved on the server.</p></div>';
+app.appendChild(contextLostEl);
+renderer.domElement.addEventListener('webglcontextlost', (e) => {
+  // Must be prevented for the context to ever be restored. (three.js also does
+  // this in its own listener; calling it twice is harmless.)
+  e.preventDefault();
+  contextLost = true;
+  contextLostEl.classList.add('visible');
+  if (input.locked) input.unlock();   // never leave the pointer captured
+  audio.setMusicVolume(0);
+});
+renderer.domElement.addEventListener('webglcontextrestored', () => {
+  contextLost = false;
+  contextLostEl.classList.remove('visible');
+  audio.setMusicVolume(accessibility.musicVolume);
+  // Re-apply everything that lives on the context rather than in three's cache.
+  applyGraphicsQuality(accessibility.graphicsQuality);
+});
 
 const scene = new THREE.Scene();
 const vaultEncounterVisuals = new VaultEncounterVisuals(scene);
@@ -476,7 +547,6 @@ const survival = new Survival();
 const particles = new Particles(scene);
 const mobs = new Mobs(scene, world, atlas, itemEntities, particles);
 const audio = new GameAudio();
-const accessibility = loadAccessibility();
 const ambientWorld = new AmbientWorld(scene, world);
 audio.setMusicVolume(accessibility.musicVolume);
 audio.setEffectsVolume(accessibility.effectsVolume);
@@ -1717,8 +1787,21 @@ window.addEventListener('resize', () => {
   viewCamera.aspect = aspect;
   viewCamera.updateProjectionMatrix();
   panoramaView.resize(aspect);
+  renderer.setPixelRatio(Math.min(
+    window.devicePixelRatio, GRAPHICS_PRESETS[accessibility.graphicsQuality].pixelRatioCap));
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
+
+/** Push the chosen graphics preset into the renderer, the streamer and the fog.
+ *  Everything here is live except MSAA, which is bound to the GL context. */
+function applyGraphicsQuality(quality: GraphicsQuality): void {
+  const preset = GRAPHICS_PRESETS[quality];
+  world.renderDistance = Math.max(2, Math.min(RENDER_DISTANCE, preset.renderDistance));
+  FOG_NEAR = world.renderDistance * 16 - 38;
+  FOG_FAR = world.renderDistance * 16 - 6;
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, preset.pixelRatioCap));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}
 
 // Screen state: 'title' shows the orbiting panorama + Play; 'paused' shows
 // the pause menu over the frozen first-person view; 'playing' is locked.
@@ -1729,12 +1812,18 @@ const cameraShakeInput = document.getElementById('camera-shake') as HTMLInputEle
 const reducedMotionInput = document.getElementById('reduced-motion') as HTMLInputElement;
 const contrastInput = document.getElementById('contrast-telegraphs') as HTMLInputElement;
 const safeEffectsInput = document.getElementById('safe-effects') as HTMLInputElement;
+const lookSensInput = document.getElementById('look-sensitivity') as HTMLInputElement;
+const lookSensValue = document.getElementById('look-sensitivity-value')!;
+const graphicsInput = document.getElementById('graphics-quality') as HTMLSelectElement;
+lookSensInput.value = String(accessibility.lookSensitivity);
+graphicsInput.value = accessibility.graphicsQuality;
 musicVolumeInput.value = String(accessibility.musicVolume);
 effectsVolumeInput.value = String(accessibility.effectsVolume);
 cameraShakeInput.value = String(accessibility.cameraShake);
 reducedMotionInput.checked = accessibility.reducedMotion;
 contrastInput.checked = accessibility.highContrastTelegraphs;
 safeEffectsInput.checked = accessibility.photosensitivitySafe;
+let graphicsApplied = false;
 const saveAccessUi = (): void => {
   accessibility.musicVolume = Number(musicVolumeInput.value);
   accessibility.effectsVolume = Number(effectsVolumeInput.value);
@@ -1742,6 +1831,18 @@ const saveAccessUi = (): void => {
   accessibility.reducedMotion = reducedMotionInput.checked;
   accessibility.highContrastTelegraphs = contrastInput.checked;
   accessibility.photosensitivitySafe = safeEffectsInput.checked;
+  accessibility.lookSensitivity = Math.max(MIN_LOOK_SENSITIVITY,
+    Math.min(MAX_LOOK_SENSITIVITY, Number(lookSensInput.value)));
+  const quality = graphicsInput.value as GraphicsQuality;
+  input.lookSensitivity = accessibility.lookSensitivity;
+  lookSensValue.textContent = `${accessibility.lookSensitivity.toFixed(2)}\u00d7`;
+  // Only on a real change: this reallocates the drawing buffer, and saveAccessUi
+  // fires on every tick of every slider in the panel.
+  if (quality !== accessibility.graphicsQuality || !graphicsApplied) {
+    accessibility.graphicsQuality = quality;
+    graphicsApplied = true;
+    applyGraphicsQuality(quality);
+  }
   saveAccessibility(accessibility);
   audio.setMusicVolume(accessibility.musicVolume);
   audio.setEffectsVolume(accessibility.effectsVolume);
@@ -1750,7 +1851,7 @@ const saveAccessUi = (): void => {
   document.body.classList.toggle('photosensitivity-safe', accessibility.photosensitivitySafe);
 };
 for (const el of [musicVolumeInput, effectsVolumeInput, cameraShakeInput,
-  reducedMotionInput, contrastInput, safeEffectsInput]) {
+  reducedMotionInput, contrastInput, safeEffectsInput, lookSensInput, graphicsInput]) {
   el.addEventListener('input', saveAccessUi);
 }
 saveAccessUi();
@@ -2101,12 +2202,14 @@ tabLogin.addEventListener('click', () => {
 // had no flag) says so plainly instead of counting toward a date in 2286.
 const elimPanel = document.createElement('div');
 elimPanel.className = 'mc-font';
-// Light-theme alert to match the title screen it sits on: warm paper, red ink.
+// Matches the title screen it sits on: dark glass, crimson ink.
 elimPanel.style.cssText =
   'display:none;position:absolute;left:50%;bottom:26px;transform:translateX(-50%);z-index:8;' +
-  'width:min(430px,calc(100vw - 36px));padding:14px 18px;background:#fff6f4;border-radius:14px;' +
-  'border:1px solid rgba(169,30,20,.28);color:#7d1b13;font-size:12px;text-align:center;' +
-  'line-height:1.55;text-shadow:none;box-shadow:0 18px 40px rgba(15,26,36,.16);';
+  'width:min(430px,calc(100vw - 36px));padding:14px 18px;border-radius:14px;' +
+  'background:linear-gradient(180deg,rgba(48,14,17,.94),rgba(24,8,11,.94));' +
+  'border:1px solid rgba(255,77,85,.4);color:#ffb3b7;font-size:12px;text-align:center;' +
+  'line-height:1.55;text-shadow:none;backdrop-filter:blur(10px);' +
+  'box-shadow:0 22px 48px rgba(0,0,0,.5),inset 0 1px rgba(255,255,255,.06);';
 overlay.appendChild(elimPanel);
 let elimUntilMs = 0;        // wall-clock ms when the lockout lifts (0 = none)
 let elimPermanent = false;
@@ -2172,7 +2275,12 @@ net.onAuthErr = (error, lockMs, permanent) => {
 submitBtn.addEventListener('click', () => attemptAuth(authMode));
 authPass.addEventListener('keydown', (e) => { if (e.key === 'Enter') attemptAuth(authMode); });
 // Returning players land on a prefilled login; first-timers get register.
-setAuthMode(lastUser ? 'login' : 'register');
+// A #register / #login hash (the War Report site links straight at one) wins
+// over both — the visitor already told us which door they wanted.
+const hashMode = location.hash.toLowerCase();
+setAuthMode(hashMode === '#register' ? 'register'
+  : hashMode === '#login' ? 'login'
+  : lastUser ? 'login' : 'register');
 // A saved session skips the form entirely (resume as soon as we know whether
 // the server is reachable; a stale token falls back to the login form).
 {
@@ -7000,7 +7108,7 @@ function updateAtmosphere(): void {
     // pop-in without making the player wait for the full view distance.
     const loadedRadius = Math.max(
       INITIAL_LOAD_DISTANCE,
-      Math.sqrt(world.progress(player.pos.x, player.pos.z)) * RENDER_DISTANCE
+      Math.sqrt(world.progress(player.pos.x, player.pos.z)) * world.renderDistance
     );
     fog.far = Math.min(FOG_FAR, loadedRadius * 16 - 6);
     fog.near = Math.min(FOG_NEAR, Math.max(8, fog.far - 32));
@@ -9747,6 +9855,9 @@ buildGuide();
 
 function frame(): void {
   requestAnimationFrame(frame);
+  // Nothing to simulate or draw without a GPU context — and rendering into a
+  // lost context throws. The clamp on `dt` below absorbs the gap on resume.
+  if (contextLost) return;
   const dt = Math.min(0.05, clock.getDelta());
   updateDuelHud();
   clickResumeEl.classList.toggle('visible',

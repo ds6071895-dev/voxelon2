@@ -9,7 +9,9 @@ import * as http from 'http';
 import * as path from 'path';
 import * as readline from 'readline';
 import * as zlib from 'zlib';
-import { ClientMsg, GameMode, SERVER_PORT, SNAPSHOT_HZ, ServerMsg } from '../src/net/protocol';
+import {
+  ClientMsg, GameMode, SERVER_PORT, SNAPSHOT_HZ, ServerMsg, WORLD_BORDER,
+} from '../src/net/protocol';
 import { GameServer, Outbound, WorldSave } from '../src/net/server_core';
 import { Accounts, Account } from '../src/net/accounts';
 import { WARFARE_TREE, sanitizeWarfare, warfareAvailable } from '../src/warfare';
@@ -18,6 +20,12 @@ import {
   COMEBACK_HEARTS, ELIMINATION_MS, PERMANENT_UNTIL, formatRemaining,
   isPermanentElimination,
 } from '../src/hearts';
+import { FACTIONS } from '../src/teams';
+import { SEASON_LENGTH } from '../src/season';
+import { WAR_MIN_BORDER } from '../src/war';
+import {
+  DUEL_PLACEMENT_MATCHES, DUEL_RP_PER_DIVISION, DUEL_STARTING_RP, DUEL_TIER_THEMES,
+} from '../src/duels_progression';
 
 const port = Number(process.env.PORT) || SERVER_PORT;
 const sockets = new Map<number, WebSocket>();
@@ -163,6 +171,44 @@ interface Throttle { fails: number; first: number; lockedUntil: number; }
 const loginFails = new Map<string, Throttle>();      // keyed by username
 const socketAttempts = new Map<string, Throttle>();  // keyed by String(socket id)
 
+// --- Connection & flood limits ----------------------------------------------
+// The login throttle above stops password guessing; these stop the cheaper
+// attacks a public port invites — opening sockets until the process runs out of
+// descriptors, or firing messages/huge frames as fast as the pipe allows.
+const MAX_FRAME_BYTES = 64 * 1024;   // biggest single client frame we will parse
+const MAX_SOCKETS = 400;             // total concurrent connections
+const MAX_SOCKETS_PER_IP = 8;        // concurrent connections from one address
+const MSG_RATE_BURST = 240;          // messages a socket may bank...
+const MSG_RATE_PER_SEC = 120;        // ...refilling at this rate
+// Trust X-Forwarded-For ONLY when the operator says a proxy sits in front. If
+// we trusted it unconditionally, any client could forge the header and walk
+// straight past MAX_SOCKETS_PER_IP.
+const TRUST_PROXY = process.env.TRUST_PROXY === '1';
+const socketIps = new Map<number, string>();
+const ipCounts = new Map<string, number>();
+
+function clientIp(req: http.IncomingMessage): string {
+  if (TRUST_PROXY) {
+    const fwd = req.headers['x-forwarded-for'];
+    const first = (Array.isArray(fwd) ? fwd[0] : fwd)?.split(',')[0]?.trim();
+    if (first) return first;
+  }
+  return req.socket.remoteAddress ?? 'unknown';
+}
+
+/** Token bucket per socket. Returns false when the socket is over its budget. */
+interface RateBucket { tokens: number; last: number; }
+const msgBuckets = new Map<number, RateBucket>();
+function allowMessage(id: number, now: number): boolean {
+  let b = msgBuckets.get(id);
+  if (!b) { b = { tokens: MSG_RATE_BURST, last: now }; msgBuckets.set(id, b); }
+  b.tokens = Math.min(MSG_RATE_BURST, b.tokens + ((now - b.last) / 1000) * MSG_RATE_PER_SEC);
+  b.last = now;
+  if (b.tokens < 1) return false;
+  b.tokens -= 1;
+  return true;
+}
+
 const throttleKey = (username: string): string => username.trim().toLowerCase();
 
 /** Remaining lockout for `key` in `bucket` (ms; 0 = clear), pruning stale rows. */
@@ -301,6 +347,135 @@ function dispatch(out: Outbound[]): void {
   }
 }
 
+// --- Public war report API --------------------------------------------------
+// `GET /api/stats` is the ONE read-only window a browser gets onto the live
+// world: the war clock, the faction standings, the season, and the whole Duels
+// ladder. The War Report site (`public/site.html`) is nothing but a renderer
+// for this payload, so the numbers on the site can never drift from the ones
+// the game itself is playing by. Nothing here is authenticated because nothing
+// here is private — no tokens, no hashes, no positions, no saved inventories.
+
+const BOOT_MS = Date.now();
+
+function hexColor(c: number): string {
+  return `#${(c >>> 0).toString(16).padStart(6, '0')}`;
+}
+
+function statsPayload(): Record<string, unknown> {
+  const war = game.warSnapshotMsg() as Extract<ServerMsg, { t: 'war' }>;
+  const season = game.seasonSnapshot() as Extract<ServerMsg, { t: 'season' }>;
+  const flags = game.flagsSnapshotMsg() as Extract<ServerMsg, { t: 'flags' }>;
+  const roster = game.playerList();
+  const all = accounts.list();
+
+  const onlineBySide = new Map<number, number>();
+  for (const p of roster) onlineBySide.set(p.faction, (onlineBySide.get(p.faction) ?? 0) + 1);
+
+  const factions = FACTIONS.map((f) => {
+    const members = all.filter((a) => a.faction === f.id);
+    const flag = flags.flags.find((fl) => fl.faction === f.id);
+    return {
+      id: f.id,
+      name: f.name,
+      color: hexColor(f.color),
+      members: members.length,
+      online: onlineBySide.get(f.id) ?? 0,
+      warWins: war.wins[f.id] ?? 0,
+      warScore: war.score[f.id] ?? 0,
+      seasonsWon: members.reduce((n, a) => n + (a.seasonsWon ?? 0), 0),
+      // A faction that has lost its flag can no longer respawn its fallen —
+      // the single most consequential fact about the state of the war.
+      flagHeld: flag ? flag.holder === f.id : false,
+      flagCarried: flag ? flag.carrier >= 0 : false,
+      flagHp: flag?.hp ?? 0,
+    };
+  });
+
+  // The ladder, computed over EVERY account (not just the top ten the game HUD
+  // shows) so the site can report tier population honestly.
+  const profiles = all.map((a) => ({ username: a.username, profile: accounts.duelProfile(a.username) }))
+    .sort((a, b) => b.profile.rp - a.profile.rp
+      || b.profile.wins - a.profile.wins
+      || a.username.localeCompare(b.username));
+
+  const population = new Array(DUEL_TIER_THEMES.length).fill(0) as number[];
+  let rated = 0, matches = 0;
+  for (const row of profiles) {
+    const played = row.profile.wins + row.profile.losses;
+    matches += played;
+    if (played > 0) { rated++; population[row.profile.rank.namedIndex]++; }
+  }
+
+  const perTier = DUEL_TIER_THEMES.length;
+  const tiers = DUEL_TIER_THEMES.map((t, i) => ({
+    index: i, name: t.name, color: t.color, accent: t.accent, shade: t.shade,
+    motto: t.motto, emblem: t.emblem, facets: t.facets, flair: t.flair,
+    minRp: i * 3 * DUEL_RP_PER_DIVISION,
+    maxRp: i === perTier - 1 ? null : (i + 1) * 3 * DUEL_RP_PER_DIVISION - 1,
+    players: population[i],
+    share: rated > 0 ? population[i] / rated : 0,
+  }));
+
+  const leaderboard = profiles.slice(0, 25).map((row, i) => ({
+    position: i + 1,
+    username: row.username,
+    rp: row.profile.rp,
+    peakRp: row.profile.peakRp,
+    wins: row.profile.wins,
+    losses: row.profile.losses,
+    streak: row.profile.streak,
+    placementsRemaining: row.profile.placementsRemaining,
+    flair: row.profile.equippedFlair,
+    tier: row.profile.rank.namedIndex,
+    label: row.profile.rank.label,
+    color: row.profile.rank.color,
+    accent: row.profile.rank.accent,
+  }));
+
+  // The permanent hall of fame: seasons are month-long, so a badge here is the
+  // rarest thing an account can carry.
+  const veterans = all.filter((a) => (a.seasonsWon ?? 0) > 0)
+    .sort((a, b) => (b.seasonsWon ?? 0) - (a.seasonsWon ?? 0) || a.username.localeCompare(b.username))
+    .slice(0, 8)
+    .map((a) => ({ username: a.username, seasonsWon: a.seasonsWon ?? 0, faction: a.faction }));
+
+  return {
+    generatedAt: Date.now(),
+    server: {
+      online: game.playerCount,
+      enlisted: all.length,
+      uptimeSeconds: Math.floor((Date.now() - BOOT_MS) / 1000),
+      worldTime: Math.floor(game.clockTime()),
+    },
+    world: { border: WORLD_BORDER, finalRing: WAR_MIN_BORDER },
+    season: {
+      number: season.number,
+      timeLeft: Math.floor(season.timeLeft),
+      length: SEASON_LENGTH,
+    },
+    war: {
+      active: war.active,
+      timeLeft: Math.floor(war.timeLeft),
+      nextIn: Math.floor(war.nextIn),
+      duration: Math.floor(war.duration),
+      score: war.score.slice(),
+      wins: war.wins.slice(),
+    },
+    flagsArmed: flags.breakable,
+    factions,
+    duels: {
+      startingRp: DUEL_STARTING_RP,
+      rpPerDivision: DUEL_RP_PER_DIVISION,
+      placementMatches: DUEL_PLACEMENT_MATCHES,
+      ranked: rated,
+      matchesPlayed: Math.floor(matches / 2),
+      tiers,
+      leaderboard,
+    },
+    veterans,
+  };
+}
+
 // --- Static client hosting --------------------------------------------------
 // We serve the built client (`dist/`, made by `npm run build`) from the SAME
 // HTTP server the WebSocket attaches to, so the whole game lives on ONE port.
@@ -319,6 +494,21 @@ const COMPRESSIBLE = new Set(['.html', '.js', '.css', '.json', '.svg']);
 const httpServer = http.createServer((req, res) => {
   let urlPath = decodeURIComponent((req.url || '/').split('?')[0]);
   if (urlPath === '/') urlPath = '/index.html';
+  // The live war report the site renders. Never cached — it is a clock.
+  if (urlPath === '/api/stats') {
+    const body = Buffer.from(JSON.stringify(statsPayload()));
+    res.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'access-control-allow-origin': '*',
+    });
+    res.end(req.method === 'HEAD' ? undefined : body);
+    return;
+  }
+  // Pretty URLs for the War Report site (the file itself lives in public/).
+  if (urlPath === '/war' || urlPath === '/war/' || urlPath === '/site' || urlPath === '/site/') {
+    urlPath = '/site.html';
+  }
   // Resolve inside DIST only (no path traversal out of the build dir).
   const filePath = path.join(DIST, path.normalize(urlPath));
   if (!filePath.startsWith(DIST)) { res.writeHead(403); res.end(); return; }
@@ -373,20 +563,46 @@ const wss = new WebSocketServer({
   // Tunnel bandwidth is scarcer than local CPU. Context takeover makes the
   // repetitive transform keys especially cheap after the first snapshot.
   perMessageDeflate: { threshold: 256 },
+  // Nothing the protocol sends comes close to this; anything bigger is either a
+  // bug or an attempt to make the process allocate. ws closes such sockets for
+  // us instead of buffering the frame.
+  maxPayload: MAX_FRAME_BYTES,
 });
 
-wss.on('connection', (ws: WebSocket) => {
+wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
+  const ip = clientIp(req);
+  const perIp = ipCounts.get(ip) ?? 0;
+  if (sockets.size >= MAX_SOCKETS || perIp >= MAX_SOCKETS_PER_IP) {
+    // Refused before an id is issued, so it costs nothing to track.
+    console.log(`! refused connection from ${ip} (${sockets.size} total, ${perIp} from this ip)`);
+    // This socket never reaches the handlers registered below, so it needs its
+    // own 'error' listener: an unhandled 'error' on a ws socket is fatal to the
+    // whole process.
+    ws.on('error', () => { /* refused; nothing to clean up */ });
+    ws.close(1013, 'Server busy');
+    return;
+  }
   const id = nextId++;
   sockets.set(id, ws);
+  socketIps.set(id, ip);
+  ipCounts.set(ip, perIp + 1);
   // No player yet — the socket must authenticate (register/login) first.
 
   ws.on('message', (data: unknown) => {
+    if (!allowMessage(id, Date.now())) {
+      // Sustained flooding. Drop the socket rather than let one client burn the
+      // tick budget every other player shares.
+      console.log(`! ${authed.get(id) ?? `socket ${id}`} (${ip}) exceeded the message rate`);
+      ws.close(1008, 'Message rate exceeded');
+      return;
+    }
     let msg: ClientMsg;
     try {
       msg = JSON.parse(String(data)) as ClientMsg;
     } catch {
       return;
     }
+    if (!msg || typeof msg !== 'object' || typeof msg.t !== 'string') return;
     if (!authed.has(id)) {
       // The invite preview is read-only, rate-free metadata for the exact
       // private token in the URL; every state-changing action still needs auth.
@@ -427,6 +643,13 @@ wss.on('connection', (ws: WebSocket) => {
   ws.on('close', () => {
     sockets.delete(id);
     socketAttempts.delete(String(id)); // free the per-socket auth counter
+    msgBuckets.delete(id);
+    const addr = socketIps.get(id);
+    if (addr !== undefined) {
+      const left = (ipCounts.get(addr) ?? 1) - 1;
+      if (left > 0) ipCounts.set(addr, left); else ipCounts.delete(addr);
+      socketIps.delete(id);
+    }
     if (authed.has(id)) {
       // Combat logout must settle BEFORE persistence: the server drops and
       // clears the quitter's carried inventory, then saves that empty state.

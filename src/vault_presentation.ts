@@ -16,6 +16,33 @@ function scoreCredit(family: EncounterSnapshot['family']): string {
   return `${iconSvg('music')} ${BOSS_SCORE_PROFILES[family].title.toUpperCase()} · ${clock}`;
 }
 
+/** Graphics presets. A browser voxel game runs on whatever hardware opens the
+ *  tab, and render distance is by far the most expensive dial (chunk meshing +
+ *  draw calls + fog depth), with device pixel ratio second. `antialias` is
+ *  fixed when the WebGL context is created, so it is read at boot only — see
+ *  the note on the renderer in main.ts. */
+export type GraphicsQuality = 'low' | 'medium' | 'high';
+
+export interface GraphicsPreset {
+  /** Chunks streamed around the player. Must never exceed world.ts's
+   *  RENDER_DISTANCE, which sizes the precomputed streaming spiral. */
+  renderDistance: number;
+  /** Upper bound on devicePixelRatio (hidpi screens cost 4x fill rate). */
+  pixelRatioCap: number;
+  /** MSAA. Applied on the next reload, not live. */
+  antialias: boolean;
+  label: string;
+}
+
+export const GRAPHICS_PRESETS: Record<GraphicsQuality, GraphicsPreset> = {
+  low: { renderDistance: 4, pixelRatioCap: 1, antialias: false, label: 'Low' },
+  medium: { renderDistance: 6, pixelRatioCap: 1.5, antialias: true, label: 'Medium' },
+  high: { renderDistance: 8, pixelRatioCap: 2, antialias: true, label: 'High' },
+};
+
+export const MIN_LOOK_SENSITIVITY = 0.25;
+export const MAX_LOOK_SENSITIVITY = 3;
+
 export interface AccessibilitySettings {
   musicVolume: number;
   effectsVolume: number;
@@ -23,6 +50,9 @@ export interface AccessibilitySettings {
   reducedMotion: boolean;
   highContrastTelegraphs: boolean;
   photosensitivitySafe: boolean;
+  /** Multiplier on raw mouse/touch look deltas. 1 = the historical feel. */
+  lookSensitivity: number;
+  graphicsQuality: GraphicsQuality;
 }
 
 export const DEFAULT_ACCESSIBILITY: AccessibilitySettings = {
@@ -32,6 +62,8 @@ export const DEFAULT_ACCESSIBILITY: AccessibilitySettings = {
   reducedMotion: false,
   highContrastTelegraphs: false,
   photosensitivitySafe: false,
+  lookSensitivity: 1,
+  graphicsQuality: 'high',
 };
 
 export function sanitizeAccessibility(raw: unknown): AccessibilitySettings {
@@ -45,6 +77,13 @@ export function sanitizeAccessibility(raw: unknown): AccessibilitySettings {
     reducedMotion: x.reducedMotion === true,
     highContrastTelegraphs: x.highContrastTelegraphs === true,
     photosensitivitySafe: x.photosensitivitySafe === true,
+    lookSensitivity: typeof x.lookSensitivity === 'number' && Number.isFinite(x.lookSensitivity)
+      ? Math.max(MIN_LOOK_SENSITIVITY, Math.min(MAX_LOOK_SENSITIVITY, x.lookSensitivity))
+      : DEFAULT_ACCESSIBILITY.lookSensitivity,
+    graphicsQuality: x.graphicsQuality === 'low' || x.graphicsQuality === 'medium'
+      || x.graphicsQuality === 'high'
+      ? x.graphicsQuality
+      : DEFAULT_ACCESSIBILITY.graphicsQuality,
   };
 }
 

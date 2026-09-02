@@ -9,6 +9,10 @@ import { buildChunkGeometry, BlockSampler } from './mesher';
 import { Terrain } from './terrain';
 import type { Atlas } from './textures';
 
+/** MAXIMUM chunks streamed around the player. The graphics-quality preset can
+ *  lower the *live* distance (see `World.renderDistance`), but never raise it
+ *  past this: the streaming spiral is precomputed once at this radius so that
+ *  changing quality mid-game costs nothing. */
 export const RENDER_DISTANCE = 8; // chunks
 
 /**
@@ -82,6 +86,9 @@ export class World {
   private readonly waterMat: THREE.Material;
   /** Chunk offsets sorted by distance, out to data radius. */
   private readonly spiral: [number, number][] = [];
+  /** Live streaming radius, driven by the graphics-quality setting. Clamped to
+   *  [2, RENDER_DISTANCE] — the spiral holds nothing beyond RENDER_DISTANCE+1. */
+  renderDistance = RENDER_DISTANCE;
 
   /** Day-night sunlight factor shared with the chunk shaders. */
   readonly sunUniform = { value: 1 };
@@ -406,7 +413,7 @@ export class World {
     const pcz = Math.floor(pz) >> 4;
     let meshed = 0, total = 0;
     for (const [dx, dz] of this.spiral) {
-      if (Math.max(Math.abs(dx), Math.abs(dz)) > RENDER_DISTANCE) continue;
+      if (Math.max(Math.abs(dx), Math.abs(dz)) > this.renderDistance) continue;
       total++;
       const chunk = this.getChunk(pcx + dx, pcz + dz);
       if (chunk && chunk.opaqueMesh) meshed++;
@@ -419,7 +426,7 @@ export class World {
    * Returns true if every chunk in render distance is meshed (used by the
    * loading screen).
    */
-  update(px: number, pz: number, budgetMs: number, maxDist = RENDER_DISTANCE): boolean {
+  update(px: number, pz: number, budgetMs: number, maxDist = this.renderDistance): boolean {
     const start = performance.now();
     const pcx = Math.floor(px) >> 4;
     const pcz = Math.floor(pz) >> 4;

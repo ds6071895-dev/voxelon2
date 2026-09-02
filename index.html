@@ -4,6 +4,24 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>VOXELON</title>
+  <meta name="description" content="A browser voxel war game: mine deep, build high and take ground on one shared 5000-block map that never resets. Two factions, vault bosses and server-authoritative PvP — no download, no plugins." />
+  <meta name="theme-color" content="#0f1a24" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%230f1a24'/><path d='M16 4 28 10 16 16 4 10Z' fill='%23f0a825'/><path d='M4 10 16 16 16 28 4 22Z' fill='%238a5806'/><path d='M28 10 16 16 16 28 28 22Z' fill='%23d78a0c'/></svg>" />
+  <!-- Link previews. og:image must be an ABSOLUTE url for Facebook/Twitter/Discord
+       crawlers to fetch it, so rewrite these two to your real origin at deploy
+       time (e.g. https://play.voxelon.gg/og.png). The card itself is generated
+       procedurally by `npm run og-image` -> public/og.png. -->
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="VOXELON" />
+  <meta property="og:title" content="VOXELON — a browser voxel war game" />
+  <meta property="og:description" content="A browser voxel war game: mine deep, build high and take ground on one shared 5000-block map that never resets. Two factions, vault bosses and server-authoritative PvP — no download, no plugins." />
+  <meta property="og:image" content="/og.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="VOXELON — a browser voxel war game" />
+  <meta name="twitter:description" content="A browser voxel war game: mine deep, build high and take ground on one shared 5000-block map that never resets. Two factions, vault bosses and server-authoritative PvP — no download, no plugins." />
+  <meta name="twitter:image" content="/og.png" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     :root {
@@ -339,7 +357,11 @@
     #pause {
       position: absolute; inset: 0; background: rgba(8, 8, 14, 0.55);
       display: none; flex-direction: column; align-items: center;
-      justify-content: center; gap: 18px; z-index: 60;
+      /* `safe center` + scroll: the settings block grew, and on a short
+         viewport plain `center` would clip the Resume/Quit buttons off the
+         bottom with no way to reach them. */
+      justify-content: safe center; gap: 18px; z-index: 60;
+      overflow-y: auto; padding: 20px 0;
     }
     #pause h1 { font-size: 48px; letter-spacing: 4px; }
     #vault-accessibility {
@@ -350,6 +372,34 @@
     #vault-accessibility label { display: contents; }
     #vault-accessibility input[type="range"] { width: 150px; }
     #vault-accessibility input[type="checkbox"] { justify-self: start; }
+    /* Shown only while the WebGL context is lost (see main.ts). */
+    #context-lost {
+      position: absolute; inset: 0; z-index: 90; display: none;
+      place-content: center; text-align: center; padding: 28px;
+      background: rgba(9,14,20,.9); color: #e8eefc;
+      font-family: ui-sans-serif, -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif;
+    }
+    #context-lost.visible { display: grid; }
+    #context-lost b { display: block; font-size: 19px; color: #d78a0c; margin-bottom: 10px; }
+    #context-lost p { max-width: 44ch; margin: 6px auto 0; font-size: 13px; line-height: 1.6; }
+    #context-lost .hint { color: #8b9ab5; font-size: 12px; }
+    #vault-accessibility select {
+      width: 150px; font: inherit; color: #e8eefc; background: #161b28;
+      border: 1px solid #45506a; padding: 2px 4px;
+    }
+    /* Slider + its live readout occupy ONE grid cell (the panel is a strict
+       two-column grid and labels are display:contents). */
+    #vault-accessibility .setting-pair {
+      display: flex; align-items: center; gap: 6px;
+    }
+    #vault-accessibility .setting-pair input[type="range"] { width: 104px; }
+    #look-sensitivity-value {
+      min-width: 34px; text-align: right; color: #9fb0cc; font-variant-numeric: tabular-nums;
+    }
+    #vault-accessibility .setting-note {
+      grid-column: 1 / -1; margin: -2px 0 2px; max-width: 280px;
+      font-size: 9px; line-height: 1.45; color: #8b9ab5; text-shadow: none;
+    }
     body.reduced-motion *, body.photosensitivity-safe * {
       animation-duration: .001ms !important; animation-iteration-count: 1 !important;
     }
@@ -635,21 +685,26 @@
     }
 
     /* ── Title screen ─────────────────────────────────────────────────────
-       Daylight redesign. The live panorama reads through a warm paper wash
-       instead of a black ink bath, and the screen is laid out as an editorial
-       spread: a wordmark + pitch column beside one focused entry card, rather
-       than a single stack of boxes down the middle. Light theme throughout —
-       ink type on paper with exactly one warm-gold accent. */
+       WAR ROOM. The live panorama is no longer washed out behind paper: it
+       reads through a dark scrim with a crimson glow leaning in from one edge
+       and an azure one from the other, so the two factions are the first thing
+       the screen says. Everything else — the wordmark, the entry card, the
+       status plates — is dark glass with exactly one warm-gold accent for the
+       thing you are meant to press. This palette is shared verbatim with the
+       War Report site (public/site.html), so the front door and the game agree. */
     #overlay {
-      --paper: #fff;
-      --paper-soft: #f3f0e9;
-      --ink: #0f1a24;
-      --ink-soft: #3f5364;
-      --ink-mute: #78899a;
-      --line: rgba(15,26,36,.13);
-      --gold: #d78a0c;
-      --gold-lit: #f7bd45;
-      --gold-tint: rgba(215,138,12,.13);
+      --ink: #eaf1fa;
+      --ink-soft: #aec1d8;
+      --ink-mute: #8398b2;
+      --line: rgba(150,182,224,.16);
+      --line-lit: rgba(150,182,224,.38);
+      --glass: rgba(11,17,28,.66);
+      --gold: #ffc043;
+      --gold-lit: #ffdb87;
+      --gold-deep: #b87908;
+      --gold-tint: rgba(255,192,67,.16);
+      --crimson: #ff4d55;
+      --azure: #4d9bff;
       position: absolute; inset: 0; z-index: 20; overflow-y: auto; overscroll-behavior: contain;
       display: flex; flex-direction: column; align-items: center;
       justify-content: center;
@@ -658,36 +713,39 @@
       gap: clamp(16px, 2.8vh, 32px);
       padding: calc(30px + var(--safe-top)) calc(22px + var(--safe-right))
                calc(24px + var(--safe-bottom)) calc(22px + var(--safe-left));
+      /* Dark enough to read type over, sheer enough at the top that the world
+         you are about to enter is still visibly out there. */
       background:
-        radial-gradient(120% 74% at 50% 122%, rgba(255,255,255,.96), rgba(255,255,255,0) 66%),
-        linear-gradient(180deg, rgba(232,243,255,.30) 0%, rgba(252,250,245,.62) 44%,
-          rgba(255,253,250,.9) 100%);
-      backdrop-filter: blur(5px) saturate(1.06);
+        radial-gradient(ellipse 62% 52% at 1% -4%, rgba(255,77,85,.34), transparent 60%),
+        radial-gradient(ellipse 62% 52% at 99% 4%, rgba(77,155,255,.34), transparent 60%),
+        radial-gradient(ellipse 118% 92% at 50% 42%, transparent 28%, rgba(2,4,8,.7) 100%),
+        linear-gradient(180deg, rgba(4,7,12,.5) 0%, rgba(4,7,12,.82) 54%, rgba(3,5,9,.95) 100%);
+      backdrop-filter: blur(3px) saturate(1.12);
       font-family: ui-sans-serif, -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif;
       color: var(--ink); -webkit-tap-highlight-color: transparent;
     }
     #overlay.hidden { display: none; }
     /* The game font is a heavy white mono meant for reading over a 3D scene —
-       on paper it inherits the sheet's type and ink instead. */
+       up here it inherits the screen's own type and ink instead. */
     #overlay .mc-font { font-family: inherit; color: inherit; text-shadow: none; letter-spacing: normal; }
-    /* One slow sweep of morning light — the only ambient motion up here. */
+    /* One slow searchlight sweep — the only ambient motion up here. */
     #overlay::before {
       content: ''; position: absolute; inset: 0; z-index: -1; pointer-events: none;
-      background: radial-gradient(ellipse 46% 54% at 26% 16%, rgba(255,196,102,.32), transparent 70%);
-      background-size: 160% 160%; background-position: 0% 0%;
+      background: radial-gradient(ellipse 48% 56% at 24% 14%, rgba(255,192,67,.16), transparent 70%);
+      background-size: 170% 170%; background-position: 0% 0%;
       animation: title-drift 34s ease-in-out infinite alternate;
     }
-    @keyframes title-drift { to { background-position: 46% 34%; opacity: .5; } }
-    /* A faint blueprint grid low on the page: a voxel nod that stays well out
-       of the way of the type. */
+    @keyframes title-drift { to { background-position: 52% 38%; opacity: .55; } }
+    /* A faint voxel grid low on the screen: a nod to what the world is made of
+       that stays well out of the way of the type. */
     #overlay::after {
       content: ''; position: absolute; inset: 0; z-index: -1; pointer-events: none;
       background:
-        linear-gradient(rgba(15,26,36,.07) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(15,26,36,.07) 1px, transparent 1px);
-      background-size: 34px 34px;
-      -webkit-mask-image: linear-gradient(180deg, transparent 50%, #000 100%);
-      mask-image: linear-gradient(180deg, transparent 50%, #000 100%);
+        linear-gradient(rgba(150,190,240,.09) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(150,190,240,.09) 1px, transparent 1px);
+      background-size: 38px 38px;
+      -webkit-mask-image: linear-gradient(180deg, transparent 42%, #000 100%);
+      mask-image: linear-gradient(180deg, transparent 42%, #000 100%);
     }
 
     .title-stage {
@@ -695,22 +753,36 @@
       display: grid; grid-template-columns: minmax(0, 1fr) minmax(336px, 416px);
       align-items: center; gap: clamp(26px, 5vw, 68px);
     }
+    /* SIGNED OUT: one centred column — wordmark first, then the form. The old
+       layout pinned the card dead centre of the viewport, which parked it right
+       on top of the wordmark and left the front door looking like a login box
+       floating on a screenshot. The name of the game gets to go first. */
     #overlay:not(.authenticated) .title-stage {
-      width: min(460px, 100%); grid-template-columns: 1fr; justify-items: center;
-      gap: clamp(18px, 3vh, 28px); text-align: center;
+      width: min(500px, 100%); grid-template-columns: 1fr; justify-items: center;
+      gap: clamp(16px, 2.6vh, 26px); text-align: center;
     }
     #overlay:not(.authenticated) .entry-card {
-      position: fixed; top: 50%; left: 50%; width: min(460px, calc(100% - 44px));
-      transform: translate(-50%, -50%); animation: none;
+      width: min(460px, 100%); justify-self: center;
     }
     #overlay:not(.authenticated) .title-hero { display: grid; justify-items: center; }
-    #overlay:not(.authenticated) .title-badge,
-    #overlay:not(.authenticated) .title-rule,
-    #overlay:not(.authenticated) .subtitle,
+    #overlay:not(.authenticated) #title { font-size: clamp(46px, 8.4vw, 96px); }
+    #overlay:not(.authenticated) .subtitle { max-width: 40ch; }
     #overlay:not(.authenticated) .title-facts,
     #overlay:not(.authenticated) #menu-btns,
-    #overlay:not(.authenticated) .character-card,
-    #overlay:not(.authenticated) .title-footer { display: none; }
+    #overlay:not(.authenticated) .character-card { display: none; }
+    /* The pitch tiles are the first thing to go when the screen is short — the
+       form has to stay above the fold — so they only appear when there is real
+       room for them. */
+    @media (min-height: 940px) and (min-width: 800px) {
+      /* Widen the column so the three tiles sit on one line rather than 2 + 1;
+         the form keeps its own width and stays centred inside it. */
+      #overlay:not(.authenticated) .title-stage { width: min(780px, 100%); }
+      #overlay:not(.authenticated) .title-facts {
+        display: flex; flex-wrap: nowrap; justify-content: center;
+        margin-top: clamp(16px, 2.2vh, 22px);
+      }
+      #overlay:not(.authenticated) .subtitle { max-width: 52ch; }
+    }
     #overlay.authenticated #auth { display: none; }
     #overlay.authenticated .entry-card { display: none; }
     #overlay.authenticated .title-badge,
@@ -729,37 +801,56 @@
     .title-badge {
       display: inline-flex; align-items: center; gap: 9px;
       padding: 7px 15px 7px 11px; border-radius: 999px;
-      border: 1px solid var(--line); background: rgba(255,255,255,.9);
-      box-shadow: 0 6px 18px rgba(15,26,36,.07);
+      border: 1px solid var(--line); background: rgba(150,182,224,.08);
+      box-shadow: 0 8px 22px rgba(0,0,0,.4), inset 0 1px rgba(255,255,255,.06);
       color: var(--ink-soft); font-size: 10px; font-weight: 600;
       letter-spacing: 1.6px; text-transform: uppercase;
     }
     .title-badge span {
       width: 7px; height: 7px; border-radius: 50%; background: var(--gold);
-      box-shadow: 0 0 0 4px var(--gold-tint);
+      box-shadow: 0 0 0 4px var(--gold-tint), 0 0 12px var(--gold);
+      animation: badge-throb 2.6s ease-in-out infinite;
     }
+    @keyframes badge-throb { 50% { box-shadow: 0 0 0 7px rgba(255,192,67,0), 0 0 18px var(--gold); } }
+    /* The wordmark is extruded like a stack of blocks, then split down the
+       middle: a crimson half and an azure half — the war, in two syllables. */
     #overlay #title {
       margin: clamp(13px, 2.2vh, 20px) 0 0;
       font-family: 'Lucida Console', Monaco, monospace; font-weight: 700;
       color: var(--ink);
-      font-size: clamp(52px, 9.6vw, 124px); line-height: .9;
-      letter-spacing: clamp(1px, .5vw, 7px);
-      text-shadow: 0 1px 0 rgba(255,255,255,.85), 0 16px 34px rgba(15,26,36,.13);
+      font-size: clamp(54px, 10vw, 132px); line-height: .88;
+      letter-spacing: clamp(1px, .55vw, 8px);
+      text-shadow: none;
+      /* Extruded like a stack of blocks. A text-shadow can't do this here: the
+         glyph fill is a transparent gradient clip, so a shadow behind it shows
+         straight through. drop-shadow shadows what was actually painted. */
+      filter:
+        drop-shadow(0 3px 0 rgba(7,11,18,.95))
+        drop-shadow(0 6px 0 rgba(7,11,18,.7))
+        drop-shadow(0 16px 30px rgba(0,0,0,.6));
     }
-    /* The accent half is a slow gold sheen rather than a flat fill. */
-    #title .accent {
-      color: var(--gold); text-shadow: none;
-      background: linear-gradient(100deg, #b5720b 8%, #f7bd45 42%, #b5720b 76%);
-      background-size: 240% 100%;
+    #title span { display: inline-block; }
+    #title .accent, #title span:not(.accent) {
+      background-size: 250% 100%;
       -webkit-background-clip: text; background-clip: text;
       -webkit-text-fill-color: transparent;
-      animation: title-sheen 8s ease-in-out infinite;
+      animation: title-sheen 7s ease-in-out infinite;
+    }
+    #title .accent {
+      background-image: linear-gradient(100deg, #e0424b 6%, var(--crimson) 28%, #ffe6e7 46%, var(--crimson) 64%, #e0424b 92%);
+    }
+    #title span:not(.accent) {
+      background-image: linear-gradient(100deg, #3d80dd 6%, var(--azure) 28%, #e2efff 46%, var(--azure) 64%, #3d80dd 92%);
+      animation-delay: .5s;
     }
     @keyframes title-sheen { 0%, 100% { background-position: 0% 0; } 50% { background-position: 100% 0; } }
+    /* Not a rule any more — a front line. Crimson pushes from one end, azure
+       from the other, and a single sweep of light runs the length of it. */
     .title-rule {
-      position: relative; width: min(320px, 76%); height: 3px; margin: clamp(14px, 2vh, 20px) 0 0;
-      border-radius: 2px; overflow: hidden;
-      background: linear-gradient(90deg, var(--gold), rgba(215,138,12,0));
+      position: relative; width: min(340px, 80%); height: 4px; margin: clamp(14px, 2vh, 20px) 0 0;
+      border-radius: 3px; overflow: hidden;
+      background: linear-gradient(90deg, var(--crimson) 0 47%, rgba(255,255,255,.55) 47% 53%, var(--azure) 53% 100%);
+      box-shadow: 0 0 20px rgba(255,77,85,.35), 0 0 20px rgba(77,155,255,.3);
     }
     .title-rule::after {
       content: ''; position: absolute; inset: 0; transform: translateX(-100%);
@@ -773,15 +864,24 @@
     }
     #overlay .subtitle b { color: var(--ink); font-weight: 700; }
     .title-facts {
-      display: flex; flex-wrap: wrap; gap: clamp(14px, 2.6vw, 32px);
+      display: flex; flex-wrap: wrap; gap: clamp(10px, 1.6vw, 14px);
       margin: clamp(18px, 2.8vh, 28px) 0 0; padding: 0; list-style: none;
     }
-    .title-facts li { position: relative; display: grid; gap: 3px; padding-left: 15px; }
-    .title-facts li::before {
-      content: ''; position: absolute; left: 0; top: 3px; bottom: 3px; width: 2px;
-      border-radius: 1px; background: linear-gradient(180deg, var(--gold-lit), var(--gold));
+    .title-facts li {
+      position: relative; display: grid; gap: 3px; padding: 10px 15px 10px 17px;
+      border: 1px solid var(--line); border-radius: 13px;
+      background: var(--glass); backdrop-filter: blur(8px);
+      box-shadow: 0 10px 26px rgba(0,0,0,.34), inset 0 1px rgba(255,255,255,.05);
     }
-    .title-facts b { color: var(--ink); font-size: clamp(16px, 1.9vw, 20px); letter-spacing: .2px; }
+    .title-facts li::before {
+      content: ''; position: absolute; left: 7px; top: 11px; bottom: 11px; width: 3px;
+      border-radius: 2px; background: linear-gradient(180deg, var(--gold-lit), var(--gold-deep));
+      box-shadow: 0 0 10px rgba(255,192,67,.5);
+    }
+    .title-facts b {
+      color: var(--ink); font-family: 'Lucida Console', Monaco, monospace;
+      font-size: clamp(16px, 1.9vw, 20px); letter-spacing: .2px;
+    }
     .title-facts span {
       color: var(--ink-mute); font-size: 9.5px; font-weight: 600;
       letter-spacing: 1.5px; text-transform: uppercase;
@@ -793,24 +893,33 @@
       animation: card-rise .8s .1s cubic-bezier(.16,.84,.28,1) both;
     }
     @keyframes card-rise { from { transform: translateY(22px); opacity: 0; } }
-    .entry-card::before { /* gold hairline capping the card */
-      content: ''; position: absolute; left: 30px; right: 30px; top: -1px; height: 2px;
-      z-index: 2; pointer-events: none; border-radius: 2px;
-      background: linear-gradient(90deg, transparent, var(--gold-lit), transparent);
+    /* A slow gold arc travelling the card's edge — the one thing on the screen
+       that says "start here" without shouting a word. */
+    @property --entry-arc { syntax: '<angle>'; initial-value: 0deg; inherits: false; }
+    .entry-card::before {
+      content: ''; position: absolute; inset: -1px; z-index: 2; pointer-events: none;
+      border-radius: 19px; padding: 1px;
+      background: conic-gradient(from var(--entry-arc), transparent 0 58%,
+        rgba(255,192,67,.85) 72%, transparent 86% 100%);
+      -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+      mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+      -webkit-mask-composite: xor; mask-composite: exclude;
+      animation: entry-arc 9s linear infinite;
     }
+    @keyframes entry-arc { to { --entry-arc: 360deg; } }
     #auth, #menu-btns {
       flex-direction: column; gap: 14px;
       padding: clamp(20px, 3.4vw, 28px);
       border: 1px solid var(--line); border-radius: 18px;
-      background: linear-gradient(180deg, rgba(255,255,255,.98), rgba(255,255,255,.93));
-      box-shadow: 0 26px 58px rgba(15,26,36,.16), inset 0 1px rgba(255,255,255,.9);
-      backdrop-filter: blur(14px);
+      background: linear-gradient(180deg, rgba(18,26,40,.9), rgba(9,14,23,.88));
+      box-shadow: 0 30px 66px rgba(0,0,0,.6), inset 0 1px rgba(255,255,255,.07);
+      backdrop-filter: blur(16px);
     }
     #auth { display: flex; }
 
     .auth-tabs {
       display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px;
-      border: 1px solid rgba(15,26,36,.06); border-radius: 13px; background: var(--paper-soft);
+      border: 1px solid var(--line); border-radius: 13px; background: rgba(4,8,14,.6);
     }
     #overlay .auth-tab {
       appearance: none; border: 0; border-radius: 10px; cursor: pointer;
@@ -819,10 +928,10 @@
       color: var(--ink-mute); background: transparent;
       transition: color .15s, background .15s, box-shadow .15s;
     }
-    #overlay .auth-tab:hover { color: var(--ink); }
+    #overlay .auth-tab:hover { color: var(--ink); background: rgba(150,182,224,.08); }
     #overlay .auth-tab.active {
-      color: var(--ink); background: var(--paper);
-      box-shadow: 0 3px 10px rgba(15,26,36,.13), inset 0 -2px 0 var(--gold);
+      color: var(--ink); background: rgba(150,182,224,.15);
+      box-shadow: inset 0 -2px 0 var(--gold), 0 4px 14px rgba(0,0,0,.4);
     }
     #overlay .auth-tab:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
 
@@ -836,18 +945,22 @@
     #auth-user-row #auth-user { flex: 1; min-width: 0; }
     #overlay #auth input {
       width: 100%; min-height: 48px; padding: 12px 14px; border-radius: 11px; outline: none;
-      color: var(--ink); background: #f6f7f9; border: 1px solid var(--line);
-      font-family: inherit; font-size: 14px; font-weight: 600; letter-spacing: .4px;
+      color: var(--ink); background: rgba(4,8,14,.72); border: 1px solid var(--line);
+      font-family: 'Lucida Console', Monaco, monospace; font-size: 14px; font-weight: 600;
+      letter-spacing: 1px;
       transition: border-color .15s, box-shadow .15s, background .15s;
     }
-    #overlay #auth input::placeholder { color: #9aa9b4; font-weight: 500; letter-spacing: .6px; }
-    #overlay #auth input:focus {
-      border-color: var(--gold); background: #fff;
-      box-shadow: 0 0 0 4px var(--gold-tint);
+    #overlay #auth input::placeholder {
+      color: #6d819a; font-family: inherit; font-weight: 500; letter-spacing: .6px;
     }
+    #overlay #auth input:focus {
+      border-color: var(--gold); background: rgba(8,13,21,.9);
+      box-shadow: 0 0 0 4px var(--gold-tint), 0 0 26px rgba(255,192,67,.18);
+    }
+    /* The rolled callsign is not a field you type into — it reads as minted. */
     #overlay #auth input[readonly] {
-      color: #6b4405; background: #fffaf0; border-color: rgba(215,138,12,.34);
-      letter-spacing: 1.5px; cursor: default;
+      color: var(--gold-lit); background: rgba(255,192,67,.07);
+      border-color: rgba(255,192,67,.32); letter-spacing: 1.6px; cursor: default;
     }
 
     .mc-btn {
@@ -859,51 +972,68 @@
     .mc-btn:hover { filter: brightness(1.14); transform: translateY(-1px); }
     .mc-btn:active { transform: translateY(1px); }
 
-    /* The title screen drops the chiselled bevel for flat, legible buttons. */
+    /* The title screen drops the chiselled bevel for flat, lit buttons. */
     #overlay .mc-btn {
+      position: relative; overflow: hidden;
       min-height: 48px; padding: 12px 18px; border: 1px solid var(--line); border-radius: 12px;
       font-size: 12px; font-weight: 700; letter-spacing: 1.6px; text-transform: uppercase;
-      color: var(--ink); background: #fff; box-shadow: 0 4px 12px rgba(15,26,36,.07);
-      transition: transform .1s, background .14s, box-shadow .14s, color .14s;
+      color: var(--ink); background: rgba(150,182,224,.08);
+      box-shadow: 0 6px 18px rgba(0,0,0,.34), inset 0 1px rgba(255,255,255,.06);
+      transition: transform .1s, background .14s, box-shadow .14s, color .14s, border-color .14s;
     }
     #overlay .mc-btn:hover {
-      filter: none; background: var(--paper-soft); box-shadow: 0 9px 20px rgba(15,26,36,.11);
+      filter: none; transform: translateY(-2px);
+      background: rgba(150,182,224,.16); border-color: var(--line-lit);
+      box-shadow: 0 12px 26px rgba(0,0,0,.42), inset 0 1px rgba(255,255,255,.09);
     }
+    #overlay .mc-btn:active { transform: translateY(0); }
     #overlay .mc-btn:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
     #overlay #submit-btn, #overlay #play-btn {
-      border-color: transparent; color: #26180a;
-      background: linear-gradient(180deg, #ffd06a, #eda01a);
-      box-shadow: 0 10px 26px rgba(215,138,12,.34);
+      border-color: transparent; color: #241703;
+      background: linear-gradient(180deg, var(--gold-lit), var(--gold));
+      box-shadow: 0 14px 34px rgba(255,192,67,.3);
     }
     #overlay #submit-btn:hover, #overlay #play-btn:hover {
-      background: linear-gradient(180deg, #ffdb87, #f4ac26);
-      box-shadow: 0 14px 32px rgba(215,138,12,.42);
+      background: linear-gradient(180deg, #ffe7ab, #ffcb5e);
+      box-shadow: 0 18px 42px rgba(255,192,67,.42);
     }
+    /* One pass of light across whichever button is the way forward. */
+    #overlay #submit-btn::after, #overlay #play-btn::after {
+      content: ''; position: absolute; top: 0; bottom: 0; left: -70%; width: 55%;
+      pointer-events: none;
+      background: linear-gradient(100deg, transparent, rgba(255,255,255,.6), transparent);
+      animation: btn-swipe 4.6s ease-in-out infinite;
+    }
+    @keyframes btn-swipe { 0% { left: -70%; } 45%, 100% { left: 130%; } }
     #overlay #play-btn { min-height: 62px; font-size: 15px; letter-spacing: 4px; }
     #overlay #minigames-btn {
-      min-height: 54px; color: #115b70; border-color: rgba(24,128,157,.3);
-      background: linear-gradient(180deg, #f3fbfd, #d9f1f7);
-      box-shadow: 0 9px 24px rgba(15,105,130,.16);
+      min-height: 54px; color: #cfe6ff; border-color: rgba(77,155,255,.38);
+      background: linear-gradient(180deg, rgba(77,155,255,.2), rgba(77,155,255,.09));
+      box-shadow: 0 10px 26px rgba(20,70,140,.34), inset 0 1px rgba(255,255,255,.08);
     }
-    #overlay #minigames-btn:hover { background: linear-gradient(180deg, #fff, #ccebf3); }
+    #overlay #minigames-btn:hover {
+      background: linear-gradient(180deg, rgba(77,155,255,.3), rgba(77,155,255,.15));
+      border-color: rgba(77,155,255,.6);
+    }
     #overlay #roll-btn {
       flex: 0 0 52px; padding: 0; font-size: 19px; letter-spacing: 0; color: var(--gold);
-      background: #fffaf0; border-color: rgba(215,138,12,.3);
+      background: rgba(255,192,67,.09); border-color: rgba(255,192,67,.3);
     }
+    #overlay #roll-btn:hover { background: rgba(255,192,67,.18); border-color: rgba(255,192,67,.55); }
     #overlay #logout-btn {
       min-height: 38px; font-size: 10px; letter-spacing: 1.8px; color: var(--ink-mute);
       background: transparent; border-color: transparent; box-shadow: none;
     }
     #overlay #logout-btn:hover {
-      color: var(--ink); background: rgba(15,26,36,.045); box-shadow: none; transform: none;
+      color: var(--ink); background: rgba(150,182,224,.09); box-shadow: none; transform: none;
     }
     #overlay #auth-err, #overlay #auth-status { font-size: 11px; font-weight: 600; line-height: 1.45; text-align: center; }
     #overlay #auth-err:empty, #overlay #auth-status:empty { display: none; }
     #overlay #auth-err {
-      color: #a91e14; background: rgba(169,30,20,.07);
-      border: 1px solid rgba(169,30,20,.16); border-radius: 10px; padding: 8px 10px;
+      color: #ff9ea2; background: rgba(255,77,85,.12);
+      border: 1px solid rgba(255,77,85,.34); border-radius: 10px; padding: 8px 10px;
     }
-    #overlay #auth-status { color: #1a6b86; }
+    #overlay #auth-status { color: #8fd0ff; }
 
     #menu-btns { display: none; } /* revealed as flex once authenticated */
     #overlay.authenticated #menu-btns {
@@ -912,28 +1042,36 @@
     .menu-profile { display: flex; align-items: center; gap: 12px; }
     .menu-mark {
       flex: 0 0 auto; width: 44px; height: 44px; border-radius: 13px;
-      display: grid; place-items: center; color: #26180a; font-size: 15px;
-      background: linear-gradient(140deg, #ffd06a, #eda01a);
-      box-shadow: 0 7px 16px rgba(215,138,12,.3);
+      display: grid; place-items: center; color: #241703; font-size: 15px;
+      background: linear-gradient(140deg, var(--gold-lit), var(--gold-deep));
+      box-shadow: 0 8px 20px rgba(255,192,67,.3);
     }
     .menu-eyebrow { color: var(--ink-mute); font-size: 9px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; }
     #menu-user {
-      margin-top: 4px; color: var(--ink); font-size: clamp(17px, 3.6vw, 22px);
-      letter-spacing: .2px; overflow-wrap: anywhere;
+      margin-top: 4px; color: var(--ink); font-family: 'Lucida Console', Monaco, monospace;
+      font-size: clamp(17px, 3.6vw, 22px); letter-spacing: .2px; overflow-wrap: anywhere;
     }
     .menu-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .character-card {
       min-height: 540px; display: flex; flex-direction: column; align-items: center;
       padding: clamp(22px, 3vw, 30px); border: 1px solid var(--line); border-radius: 18px;
-      background: linear-gradient(180deg, rgba(255,255,255,.98), rgba(255,255,255,.91));
-      box-shadow: 0 26px 58px rgba(15,26,36,.16); overflow: hidden;
+      background: linear-gradient(180deg, rgba(18,26,40,.86), rgba(9,14,23,.84));
+      box-shadow: 0 30px 66px rgba(0,0,0,.55), inset 0 1px rgba(255,255,255,.06);
+      backdrop-filter: blur(14px); overflow: hidden;
     }
-    .character-card h2 { color: var(--ink); font-size: 20px; letter-spacing: .3px; }
+    .character-card h2 {
+      color: var(--ink); font-family: 'Lucida Console', Monaco, monospace;
+      font-size: 18px; letter-spacing: 1.4px;
+    }
     #title-character-preview {
       width: 100%; min-height: 390px; flex: 1; cursor: default; touch-action: none;
     }
     #title-character-preview canvas { display: block; width: 100%; height: 100%; background: transparent; }
-    #overlay #character-btn { width: 100%; border-color: transparent; color: #26180a; background: linear-gradient(180deg,#ffd06a,#eda01a); }
+    #overlay #character-btn {
+      width: 100%; border-color: transparent; color: #241703;
+      background: linear-gradient(180deg, var(--gold-lit), var(--gold));
+      box-shadow: 0 12px 28px rgba(255,192,67,.26);
+    }
 
     /* World status: three plates across the foot of the title screen. */
     .title-status {
@@ -944,7 +1082,8 @@
     .tstat {
       display: grid; gap: 4px; min-width: 152px; padding: 9px 15px;
       border: 1px solid var(--line); border-radius: 13px;
-      background: rgba(255,255,255,.86); box-shadow: 0 6px 18px rgba(15,26,36,.06);
+      background: var(--glass); backdrop-filter: blur(8px);
+      box-shadow: 0 8px 22px rgba(0,0,0,.34), inset 0 1px rgba(255,255,255,.05);
     }
     .tstat-k {
       color: var(--ink-mute); font-size: 9px; font-weight: 700;
@@ -952,25 +1091,35 @@
     }
     .tstat b {
       display: flex; align-items: center; gap: 7px;
-      color: var(--ink); font-size: 14px; font-weight: 700; letter-spacing: .2px;
+      color: var(--ink); font-family: 'Lucida Console', Monaco, monospace;
+      font-size: 13px; font-weight: 700; letter-spacing: .4px;
     }
     .tstat-dot {
       width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto;
       background: var(--side-color, #9a9a9a);
-      box-shadow: 0 0 0 3px color-mix(in srgb, var(--side-color, #9a9a9a) 20%, transparent);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--side-color, #9a9a9a) 24%, transparent),
+                  0 0 14px var(--side-color, #9a9a9a);
     }
     /* A war actually running is the one thing here worth shouting about. */
     .tstat.live {
-      border-color: rgba(226,59,59,.45); background: rgba(255,243,242,.94);
-      box-shadow: 0 6px 20px rgba(226,59,59,.14);
+      border-color: rgba(255,77,85,.5); background: rgba(255,77,85,.12);
+      box-shadow: 0 8px 26px rgba(255,77,85,.22);
+      animation: tstat-alarm 2.4s ease-in-out infinite;
     }
-    .tstat.live b { color: #b32b22; }
+    .tstat.live b { color: #ff9ea2; }
+    @keyframes tstat-alarm { 50% { border-color: rgba(255,77,85,.85); box-shadow: 0 8px 30px rgba(255,77,85,.4); } }
 
     #overlay .title-footer {
       margin: 0; color: var(--ink-mute); font-size: 10px; font-weight: 500;
       letter-spacing: 1.2px; text-align: center;
     }
     #overlay .title-footer strong { color: var(--ink-soft); font-weight: 700; }
+    /* The one way off the title screen that isn't into the world. */
+    #overlay .title-footer a {
+      color: var(--gold); text-decoration: none; font-weight: 700;
+      border-bottom: 1px solid rgba(255,192,67,.35); padding-bottom: 1px;
+    }
+    #overlay .title-footer a:hover { color: var(--gold-lit); border-bottom-color: var(--gold-lit); }
 
     /* ── THE ARENA: Duels browser, ladder, lobby and match ────────────────
        A bright, daylight palette for every competitive surface. Every accent
@@ -1539,9 +1688,10 @@
 
     .duel-invite-banner {
       display: none; margin-bottom: 14px; padding: 13px 15px; border-radius: 13px;
-      border: 1px solid rgba(214,145,46,.3); color: #5b3a0a; font-size: 11px;
-      font-weight: 750; line-height: 1.45; background: linear-gradient(135deg,#fff4d8,#ffe4ab);
-      box-shadow: 0 8px 22px rgba(178,112,21,.12);
+      border: 1px solid rgba(255,192,67,.34); color: #ffdb87; font-size: 11px;
+      font-weight: 750; line-height: 1.45;
+      background: linear-gradient(135deg, rgba(255,192,67,.16), rgba(255,192,67,.07));
+      box-shadow: 0 10px 26px rgba(0,0,0,.4), inset 0 1px rgba(255,255,255,.06);
     }
     .duel-invite-banner.visible { display: block; animation: invite-arrive .45s cubic-bezier(.2,.8,.2,1); }
     @keyframes invite-arrive { from { opacity: 0; transform: translateY(-8px); } }
@@ -2041,7 +2191,7 @@
         padding: calc(18px + var(--safe-top)) calc(16px + var(--safe-right))
                  calc(18px + var(--safe-bottom)) calc(16px + var(--safe-left));
       }
-      #overlay:not(.authenticated) .entry-card { width: min(460px, calc(100% - 32px)); }
+      #overlay:not(.authenticated) .entry-card { width: 100%; }
       .title-badge { padding: 6px 12px 6px 9px; font-size: 9px; letter-spacing: 1.2px; }
       #overlay #title { font-size: clamp(46px, 16vw, 76px); }
       .title-rule { width: 150px; margin-top: 12px; }
@@ -2080,7 +2230,10 @@
       #overlay { justify-content: flex-start; }
     }
     @media (prefers-reduced-motion: reduce) {
-      #overlay::before, #title .accent, .title-rule::after { animation: none; }
+      #overlay::before, #title .accent, #title span:not(.accent),
+      .title-rule::after, .title-badge span, .entry-card::before,
+      #overlay #submit-btn::after, #overlay #play-btn::after,
+      .tstat.live { animation: none; }
       .title-hero, .entry-card { animation: none; }
       .brief-progress-fill { transition: none; }
     }
@@ -2121,6 +2274,15 @@
     <div id="pause">
       <h1 class="mc-font">Paused</h1>
       <div id="vault-accessibility" class="mc-font">
+        <label>Look sensitivity <span class="setting-pair"><input id="look-sensitivity" type="range" min="0.25" max="3" step="0.05" /><span id="look-sensitivity-value">1.00&#215;</span></span></label>
+        <label>Graphics
+          <select id="graphics-quality">
+            <option value="low">Low &#8212; fastest</option>
+            <option value="medium">Medium</option>
+            <option value="high">High &#8212; best looking</option>
+          </select>
+        </label>
+        <p class="setting-note">Lower this if the game stutters. View distance applies instantly; anti-aliasing changes on reload.</p>
         <label>Music <input id="music-volume" type="range" min="0" max="1" step="0.05" /></label>
         <label>Effects <input id="effects-volume" type="range" min="0" max="1" step="0.05" /></label>
         <label>Camera shake <input id="camera-shake" type="range" min="0" max="1" step="0.1" /></label>
@@ -2145,7 +2307,7 @@
           </p>
           <ul class="title-facts mc-font">
             <li><b>5000&#178;</b><span>blocks of open world</span></li>
-            <li><b>3</b><span>warring factions</span></li>
+            <li><b>2</b><span>warring factions</span></li>
             <li><b>Vaults</b><span>seeded loot &amp; bosses</span></li>
           </ul>
           <div id="menu-btns">
@@ -2335,7 +2497,7 @@
           <b id="tstat-wins">0 &#183; 0</b>
         </div>
       </div>
-      <p class="title-footer mc-font">Every block original <strong>&#183;</strong> No password is ever stored in this browser</p>
+      <p class="title-footer mc-font">Every block original <strong>&#183;</strong> No password is ever stored in this browser <strong>&#183;</strong> <a href="/war" target="_blank" rel="noopener">Live war report &amp; tier list &#8599;</a></p>
     </div>
   </div>
   <script type="module" src="/src/main.ts"></script>
