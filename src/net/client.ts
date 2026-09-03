@@ -26,6 +26,8 @@ import type {
 } from '../vehicles';
 import type { DuelArenaBounds, DuelLobbySnapshot, DuelResult } from '../duels';
 import type { DuelFlair, DuelPublicProfile } from '../duels_progression';
+import type { FactionPublic, Notification } from './protocol';
+import type { PoliticsState } from '../politics';
 
 export interface Remote {
   info: PlayerInfo;
@@ -213,6 +215,20 @@ export class NetClient {
   ) => void;
   /** Private confirmation of YOUR secret faction switch (Phase 7). */
   onFactionSwitched?: (faction: number, remaining: number) => void;
+  // --- FACTION GOVERNMENT ----------------------------------------------------
+  /** The whole politics state. `treasury` is only present for your own faction. */
+  onPolitics?: (state: PoliticsState, factions: FactionPublic[],
+    treasury?: (ItemStack | null)[]) => void;
+  /** Your allegiance landed — you are a citizen of `faction` from now on. */
+  onPledged?: (faction: number) => void;
+  /** A governance action was refused. */
+  onGovErr?: (reason: string) => void;
+  /** One entry for the notifications inbox. */
+  onNotify?: (notif: Notification) => void;
+  /** Somebody is in a treasury — drives the alarm horn for its defenders. */
+  onTreasuryRaided?: (faction: number, by: string, stacks: number) => void;
+  /** Everything the pledge screen and the inbox need, straight off `welcome`. */
+  onGovWelcome?: (inbox: Notification[], kitClaimed: boolean) => void;
   /** Play a gadget visual effect (frag/oil blast, smoke cloud) at a point. */
   onGadgetFx?: (kind: string, x: number, y: number, z: number) => void;
   /** A player is disguised as `faction` until `until` (server worldTime). */
@@ -324,6 +340,8 @@ export class NetClient {
         for (const st of msg.batteries) this.onBattery?.(st);
         this.onHelis?.(msg.helis, []);
         this.onProtectedAreas?.(msg.protectedAreas);
+        this.onPolitics?.(msg.politics, msg.factions, msg.treasury);
+        this.onGovWelcome?.(msg.inbox ?? [], msg.kitClaimed === true);
         this.onDuelProfile?.(msg.duelProfile, msg.duelLeaderboard);
         this.onWorldTime?.(msg.worldTime);
         const me = msg.players.find((p) => p.id === this.myId);
@@ -529,6 +547,21 @@ export class NetClient {
       case 'factionSwitched':
         this.onFactionSwitched?.(msg.faction, msg.remaining);
         break;
+      case 'politics':
+        this.onPolitics?.(msg.state, msg.factions, msg.treasury);
+        break;
+      case 'pledged':
+        this.onPledged?.(msg.faction);
+        break;
+      case 'govErr':
+        this.onGovErr?.(msg.reason);
+        break;
+      case 'notify':
+        this.onNotify?.(msg.notif);
+        break;
+      case 'treasuryRaided':
+        this.onTreasuryRaided?.(msg.faction, msg.by, msg.stacks);
+        break;
       case 'gadgetFx':
         this.onGadgetFx?.(msg.kind, msg.x, msg.y, msg.z);
         break;
@@ -686,8 +719,8 @@ export class NetClient {
   }
 
   /** Send register/login over the open socket (before `welcome`/connected). */
-  sendRegister(username: string, password: string, faction?: number): void {
-    this.raw({ t: 'register', username, password, faction });
+  sendRegister(username: string, password: string): void {
+    this.raw({ t: 'register', username, password });
   }
   sendLogin(username: string, password: string): void {
     this.raw({ t: 'login', username, password });
@@ -749,8 +782,38 @@ export class NetClient {
   sendRespawn(): void {
     if (this.connected) this.raw({ t: 'respawn' });
   }
-  sendDrop(items: { id: number; count: number }[], x: number, y: number, z: number): void {
-    if (this.connected && items.length) this.raw({ t: 'drop', items, x, y, z });
+  /** `reason` tells the server whether this is a HARVEST (taxable — a block you
+   *  just broke) or a player emptying their own pockets (never taxed). */
+  sendDrop(
+    items: { id: number; count: number }[], x: number, y: number, z: number,
+    reason: 'harvest' | 'manual' = 'manual'
+  ): void {
+    if (this.connected && items.length) this.raw({ t: 'drop', items, x, y, z, reason });
+  }
+
+  // --- FACTION GOVERNMENT ------------------------------------------------------
+  sendPledge(faction: number): void {
+    if (this.connected) this.raw({ t: 'pledgeFaction', faction });
+  }
+  sendFoundParty(name: string, slogan: string, promises: number[]): void {
+    if (this.connected) this.raw({ t: 'foundParty', name, slogan, promises });
+  }
+  sendDisbandParty(): void { if (this.connected) this.raw({ t: 'disbandParty' }); }
+  sendVote(partyId: string): void {
+    if (this.connected) this.raw({ t: 'castVote', partyId });
+  }
+  sendGovBroadcast(text: string): void {
+    if (this.connected) this.raw({ t: 'govBroadcast', text });
+  }
+  sendGovTax(rate: number): void {
+    if (this.connected) this.raw({ t: 'govTax', rate });
+  }
+  sendFundKits(count: number): void {
+    if (this.connected) this.raw({ t: 'govFundKits', count });
+  }
+  sendClaimKit(): void { if (this.connected) this.raw({ t: 'claimKit' }); }
+  sendTreasuryRaid(faction: number): void {
+    if (this.connected) this.raw({ t: 'treasuryRaid', faction });
   }
   sendPickup(eid: number): void {
     if (this.connected) this.raw({ t: 'pickup', eid });

@@ -133,6 +133,13 @@ export class World {
       map: atlas.texture,
       vertexColors: true,
       alphaTest: 0.5, // cutout for leaves/glass
+      // The atlas is mipmapped, and a mip level averages a cutout's alpha along
+      // with its colour — so a distant leaf block's alpha slides under the 0.5
+      // test and the canopy dissolves. Alpha-to-coverage resolves the cutout
+      // against the MSAA samples instead of a hard threshold, which keeps the
+      // foliage whole. It needs a multisampled target: on the `low` preset
+      // (antialias: false) it is inert and alphaTest alone behaves as before.
+      alphaToCoverage: true,
     });
     this.waterMat = new THREE.MeshBasicMaterial({
       map: atlas.texture,

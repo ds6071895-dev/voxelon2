@@ -30,6 +30,7 @@ import {
   WORLD_SEED, WORLD_HALF, WORLD_BORDER, CORE_HALF, makeUsername, skinSeed,
   GameMode, MAX_ATTUNED, TOTEM_COOLDOWN, TOTEM_WINDUP, COMBAT_TAG,
   TPA_HOLD, TPA_EXPIRE, type DuelLeaderboardEntry,
+  type FactionPublic, type Notification,
 } from './net/protocol';
 import { leverFlips } from './traps';
 import { MachineModels } from './machinemodels';
@@ -64,6 +65,21 @@ import {
 import { warBorderAt, clampInsideBorder, WAR_MIN_BORDER } from './war';
 import { Flag, FLAG_REACH, FLAG_MAX_HP, newFlags, flagPosition } from './flags';
 import { FlagModels } from './flagmodels';
+import { TreasuryModels } from './treasury_models';
+import { NotificationsUI } from './notifications_ui';
+import { FactionPicker } from './faction_picker';
+import {
+  PresidentUI, type GovernActions, type GovernData, type PresidentView,
+} from './president_ui';
+import {
+  type PoliticsState, castVote, disbandParty, electionOf, foundParty,
+  governmentOf, isPresident, newPolitics, pushBroadcast, rollCycle,
+  sanitizePolitics, setTaxRate, tallyElection,
+} from './politics';
+import {
+  STARTER_KIT, deposit, fundKits, levy, newTreasuries, newTreasury,
+  sanitizeTreasury, treasuryCount, treasuryCounts,
+} from './treasury';
 import {
   WarfareProgress, buyWarfareNode, grantWarfareXp, migrateWarfare, newWarfare,
   sanitizeWarfare, settleWarfareXp, warfareAvailable, warfareOwns, warfareTier,
@@ -172,7 +188,11 @@ const seed = WORLD_SEED;
 // them crawls a pixel at a time as you walk when the edges are not resolved —
 // which is what "the distance doesn't look smooth, it looks like the
 // resolution" actually is. Multisampling costs fill rate, not texture memory,
-// and it is the only thing that fixes geometry aliasing; mipmaps cannot.
+// and it is the only thing that fixes GEOMETRY aliasing; mipmaps cannot.
+// TEXTURE aliasing is the other half of that sentence and the opposite is true
+// there: MSAA does nothing for it (it samples coverage, not the texture), and
+// mipmaps plus anisotropy are the only fix. That is why the atlas is built
+// mipmapped (textures.ts) even though the edges are left to MSAA.
 // Settings are read here, before the context exists, because `antialias` is a
 // context-creation attribute — it cannot be toggled on a live renderer. Render
 // distance and pixel ratio DO apply live (applyGraphicsQuality below); only the
@@ -279,13 +299,23 @@ const viewCamera = new THREE.PerspectiveCamera(
 viewCamera.rotation.order = 'YXZ';
 scene.add(viewCamera);
 
-// The atlas is sampled with NearestFilter and no mip chain, on purpose. Every
-// smoothing stage we tried — trilinear minification, a hand-built mip chain,
-// forced anisotropy — buys a calmer horizon by softening the near field, and
-// softening the near field is exactly what "the pixel art went blurry" is.
-// Geometry aliasing is the renderer's MSAA to solve (see above), not the
-// texture filter's.
-const atlas = createAtlas(seed);
+// The atlas IS mipmapped now, which reverses an earlier call. The note that
+// used to sit here said every smoothing stage tried — trilinear minification, a
+// hand-built mip chain, forced anisotropy — bought a calmer horizon by making
+// the near field blurry, so the chain was dropped and the horizon was left to
+// swim. Two things make that trade unnecessary:
+//   · Magnification is still NearestFilter. Mip levels are a MINIFICATION
+//     concept; a surface at arm's length samples level 0 and is pixel-for-pixel
+//     what it always was. Only surfaces already smaller than their texture can
+//     reach level 1, and those were the ones shimmering.
+//   · The tiles are now PADDED (ATLAS_PAD in textures.ts). Mipmapping an
+//     unpadded tile atlas averages each tile against its NEIGHBOUR in the grid,
+//     which smears unrelated colours across the whole sheet — that haze is very
+//     probably what read as "the pixel art went blurry" the first time round.
+// Geometry aliasing is still MSAA's job, not the texture filter's (see above).
+// Built AFTER the renderer, because the atlas needs the context's anisotropy
+// limit to filter grazing-angle ground properly.
+const atlas = createAtlas(seed, renderer.capabilities.getMaxAnisotropy());
 const cracks = createCrackTextures();
 const world = new World(scene, atlas, seed);
 // Offline single-player gets a random dry spawn too (MP uses the server's).
@@ -568,6 +598,10 @@ let flagState = newFlags();
 const flagModels = new FlagModels(scene);
 flagModels.setGroundProbe((x, z) => world.terrain.height(Math.floor(x), Math.floor(z)) + 1);
 flagModels.setState(flagState.breakable, flagState.flags);
+// The faction strongbox stands beside each flag pole — presentation only, over a
+// position treasury.ts derives from flagHome(). Never a block, never a chest.
+const treasuryModels = new TreasuryModels(scene);
+treasuryModels.setGroundProbe((x, z) => world.terrain.height(Math.floor(x), Math.floor(z)) + 1);
 /** Seconds until the client may send another flag swing (matches the server). */
 let flagHitTimer = 0;
 /** Local mirror of "my faction holds no flag" — drives the danger banner. */
@@ -1137,9 +1171,24 @@ function showRegionBanner(text: string, color: string): void {
   regionBannerEl.style.display = 'block';
   regionBannerTimer = 3.2;
 }
-// The local player's faction: server-assigned in MP (onWelcome), or a single
-// local faction offline so shields/ownership/colors still work in single-player.
-let localFaction = FACTIONS[0].id;
+// The local player's faction. NO_FACTION until allegiance is sworn on the
+// pledge screen — nothing assigns a side any more, online or off. Everything
+// downstream already treats NO_FACTION as neutral by design (factionColor,
+// factionName, sameFaction and isFaction all handle it), so an unpledged player
+// simply renders grey and is friendly with nobody.
+let localFaction = NO_FACTION;
+// --- FACTION GOVERNMENT (mirrors of the server's authoritative state) --------
+let politicsState: PoliticsState = newPolitics(Date.now());
+/** Per-faction public dossiers for the pledge screen. */
+let factionPublics: FactionPublic[] = [];
+/** YOUR faction's treasury contents (empty while unpledged). */
+let myTreasury: (ItemStack | null)[] = [];
+/** Has this account taken its one recruit kit? */
+let kitClaimed = false;
+/** Offline single-player runs its own government so the panels are live rather
+ *  than dead: you can found a party, hold an election against yourself, and
+ *  watch the levy fill a local strongbox. */
+const offlineTreasuries = newTreasuries();
 // Local gamemode (admin-set via the server console). Drives flight/noclip/
 // invulnerability + the creative build conveniences.
 let localMode: GameMode = 'survival';
@@ -1414,13 +1463,44 @@ function showNotice(text: string): void {
 
 // Drop routing: in multiplayer drops are server-owned (everyone sees them);
 // offline they are local item entities.
-function spawnDrop(x: number, y: number, z: number, id: number, count: number): void {
-  if (net.connected) net.sendDrop([{ id, count }], x, y, z);
-  else itemEntities.spawn(x, y, z, id, count);
+/**
+ * Put an item on the ground.
+ *
+ * `reason` is what the faction TAX keys off: a HARVEST (a block you just broke,
+ * a machine spilling its output) is taxable, and a player emptying their own
+ * pockets is not. It is levied here — on the way out of the world — rather than
+ * on pickup, because a harvest passes this way exactly once, while dropping and
+ * re-collecting your own stack would be taxed on every pass.
+ */
+function spawnDrop(
+  x: number, y: number, z: number, id: number, count: number,
+  reason: 'harvest' | 'manual' = 'harvest'
+): void {
+  if (net.connected) { net.sendDrop([{ id, count }], x, y, z, reason); return; }
+  // Offline the levy is applied locally against the local strongbox, so the
+  // single-player treasury fills exactly the way the server's would.
+  itemEntities.spawn(x, y, z, id, reason === 'harvest' ? offlineLevy(id, count) : count);
+}
+
+/** Offline mirror of the server's levy: bank the faction's cut in the local
+ *  strongbox and return what the player actually gets to keep. */
+function offlineLevy(id: number, count: number): number {
+  const g = governmentOf(politicsState, localFaction);
+  const t = offlineTreasuries.get(localFaction);
+  if (!g || !t || g.taxRate <= 0) return count;
+  const cut = levy(count, g.taxRate, Math.random());
+  if (cut <= 0) return count;
+  const leftOver = deposit(t, id, cut);
+  const banked = cut - leftOver;
+  t.taken += banked;
+  if (banked > 0) { saveOfflinePolitics(); refreshGovernment(); }
+  return count - banked;
 }
 function spillStacks(stacks: ItemStack[], x: number, y: number, z: number): void {
   if (!stacks.length) return;
-  if (net.connected) net.sendDrop(stacks.map((s) => ({ id: s.id, count: s.count })), x, y, z);
+  if (net.connected) {
+    net.sendDrop(stacks.map((s) => ({ id: s.id, count: s.count })), x, y, z, 'harvest');
+  }
   else for (const s of stacks) itemEntities.spawn(x, y, z, s.id, s.count);
 }
 function dropCurrentItem(entireStack = false): void {
@@ -1430,7 +1510,7 @@ function dropCurrentItem(entireStack = false): void {
   const d = new THREE.Vector3(-Math.sin(player.yaw), 0.3, -Math.cos(player.yaw)).normalize();
   const dropPos = player.pos.clone().addScaledVector(d, 1.0);
   dropPos.y += 1.2;
-  spawnDrop(dropPos.x, dropPos.y, dropPos.z, stack.id, count);
+  spawnDrop(dropPos.x, dropPos.y, dropPos.z, stack.id, count, 'manual');
   inventory.consumeSelected(count);
   pushStateSave();
 }
@@ -1676,8 +1756,11 @@ function destroyMachineLocal(ax: number, ay: number, az: number): void {
   const type = s.type;
   const stored = machines.remove(ax, ay, az);
   spillStacks(recordToStacks(stored), ax + 0.5, ay + 0.3, az + 0.5);
+  // The machine BLOCK is hardware coming back to its owner, not something
+  // pulled out of the world — the levy does not touch it. (Its stored OUTPUT,
+  // spilled just above, is taxed like any other harvest.)
   spawnDrop(ax + 0.5, ay + 0.3, az + 0.5,
-    type === MachineType.OilDerrick ? Block.OilDerrick : Block.Autominer, 1);
+    type === MachineType.OilDerrick ? Block.OilDerrick : Block.Autominer, 1, 'manual');
   for (let k = 0; k < machineHeight(type); k++) world.applyRemoteEdit(ax, ay + k, az, Block.Air);
   if (openMachine && openMachine.x === ax && openMachine.y === ay && openMachine.z === az) {
     forceCloseMachine();
@@ -1702,8 +1785,12 @@ interaction.onSabotage = (x, y, z) => {
       const s = turretStates.get(key);
       if (s && damageTurret(s, dmg)) {
         turretStates.delete(key);
-        spawnDrop(x + 0.5, y + 0.3, z + 0.5, Block.Turret, 1);
-        if (s.ammo > 0) spawnDrop(x + 0.5, y + 0.3, z + 0.5, Item.Cannonball, Math.min(64, s.ammo));
+        // Hardware and the ammunition its owner loaded into it: their property
+        // coming back, so no levy.
+        spawnDrop(x + 0.5, y + 0.3, z + 0.5, Block.Turret, 1, 'manual');
+        if (s.ammo > 0) {
+          spawnDrop(x + 0.5, y + 0.3, z + 0.5, Item.Cannonball, Math.min(64, s.ammo), 'manual');
+        }
         world.applyRemoteEdit(x, y, z, Block.Air);
         if (openTurret && openTurret.x === x && openTurret.y === y && openTurret.z === z) {
           openTurret = null;
@@ -1864,6 +1951,9 @@ function enterPlaying(): void {
   document.body.classList.add('in-game');
   overlay.classList.add('hidden');
   pauseEl.style.display = 'none';
+  // The title bell rides inside #overlay and hides with it; the HUD bell has to
+  // be toggled by hand, or it would sit over the title screen too.
+  hudBell.hidden = !authed;
 }
 const pauseGuideBtn = document.getElementById('pause-guide-btn') as HTMLButtonElement;
 
@@ -1889,6 +1979,7 @@ function enterTitle(): void {
   document.body.classList.remove('in-game');
   overlay.classList.remove('hidden');
   pauseEl.style.display = 'none';
+  hudBell.hidden = true;
   cleanupDuelSession(true);
   onVaultTransition(null);
 }
@@ -1942,44 +2033,313 @@ function saveLocalAccounts(): void {
   try { localStorage.setItem('voxelon.accounts', JSON.stringify(localAccounts.toJSON())); } catch { /* ignore */ }
 }
 
-// Registration auto-assigns the balanced (50/50) side — no picking. We flag a
-// fresh registration so the assigned side is revealed once the faction is known
-// (immediately offline; on `welcome` online) on a dedicated full-screen reveal
-// shown right after Register — not as a banner shouted over the game.
-let justRegistered = false;
-const factionReveal = (() => {
-  const panel = document.createElement('div');
-  panel.className = 'faction-reveal mc-font';
-  panel.setAttribute('role', 'dialog');
-  panel.setAttribute('aria-modal', 'true');
-  panel.setAttribute('aria-label', 'Faction assignment');
-  const card = document.createElement('div'); card.className = 'faction-card';
-  const eyebrow = document.createElement('div'); eyebrow.className = 'faction-eyebrow';
-  eyebrow.textContent = 'Balance protocol complete · Identity assigned';
-  const crest = document.createElement('div'); crest.className = 'faction-crest';
-  const crestMark = document.createElement('span'); crestMark.innerHTML = iconSvg('swords'); crest.appendChild(crestMark);
-  const lead = document.createElement('div'); lead.className = 'faction-lead'; lead.textContent = 'You fight for';
-  const name = document.createElement('h1'); name.className = 'faction-name';
-  const rule = document.createElement('div'); rule.className = 'faction-rule';
-  rule.innerHTML = 'Sides are assigned automatically to preserve a fair <strong>50 / 50 conflict</strong>.<br>' +
-    'Build leverage, defend your flag, and win the season with your faction.';
-  const go = document.createElement('button'); go.className = 'mc-btn faction-continue'; go.textContent = 'Accept assignment';
-  go.addEventListener('click', () => { panel.style.display = 'none'; });
-  card.append(eyebrow, crest, lead, name, rule, go);
-  panel.appendChild(card);
-  app.appendChild(panel);
+// --- FACTION GOVERNMENT ------------------------------------------------------
+// Registration used to assign your side to keep the war 50/50 and announce it on
+// a card you could only accept. That whole path is gone: an account is created
+// with NO faction, and the first time you press Play you get the ALLEGIANCE
+// PLEDGE (faction_picker.ts) — both sides laid out with their sitting president,
+// their tax rate and their roster — and the choice you make there is permanent.
+//
+// Three panels, each self-contained (its own injected stylesheet, its own class
+// prefix, nothing in index.html) and each sharing ONE WebGL bust board through
+// gov_ui.ts, because the page has a hard ceiling on GL contexts and the world
+// and the Duels ladder already spend two.
+const notifications = new NotificationsUI(app);
+const factionPicker = new FactionPicker(app);
+const presidentUI = new PresidentUI(app);
+// Two bells, one unread count: one on the title screen (so a broadcast is
+// visible before you drop in) and one on the HUD. Both stay hidden until an
+// account is actually logged in — there is nothing to read before that.
+const titleBell = notifications.mountBell(overlay, 'title');
+const hudBell = notifications.mountBell(app, 'hud');
+titleBell.hidden = true;
+hudBell.hidden = true;
+
+/** Any government panel taking the screen wants the pointer back. */
+function govPanelOpened(): void {
+  if (input.locked) input.unlock();
+}
+/** ...and hands it back on the way out, on the same terms the command box uses. */
+function govPanelClosed(): void {
+  if (worldReady && screen === 'playing' && !player.dead && !invUI.open &&
+      !worldMap.open && !warfareUI.open && !chatBox.open &&
+      !factionPicker.open && !presidentUI.open && !notifications.open) {
+    input.lock();
+  }
+}
+for (const panel of [notifications, factionPicker, presidentUI]) {
+  panel.onOpen = govPanelOpened;
+  panel.onClose = govPanelClosed;
+}
+
+/** The avatar to put on a party's plinth: their live look if they are online,
+ *  your own if it is you, otherwise the seed-derived default the bust board
+ *  falls back to anyway. */
+function cosmeticsFor(username: string): Cosmetics | undefined {
+  const key = username.toLowerCase();
+  if (authedName && key === authedName.toLowerCase()) return myCosmetics;
+  for (const r of net.remotes.values()) {
+    if (r.info.username.toLowerCase() === key) return r.info.cosmetics;
+  }
+  return undefined;
+}
+
+/** Item counts per faction treasury — online from the public dossiers, offline
+ *  from the local strongboxes. Drives the in-world fill gauge. */
+function treasuryCountsNow(): Record<number, number> {
+  if (!net.connected) return treasuryCounts(offlineTreasuries);
+  const out: Record<number, number> = {};
+  for (const info of factionPublics) out[info.faction] = info.treasuryCount;
+  return out;
+}
+
+/** Build the dossiers the pledge screen reads. Offline they are derived from
+ *  the local government so single-player still gets a real screen. */
+function pledgeDossiers(): FactionPublic[] {
+  if (net.connected && factionPublics.length) return factionPublics;
+  return FACTIONS.map((f) => {
+    const e = politicsState.elections[f.id];
+    const g = politicsState.governments[f.id];
+    const party = e?.presidentPartyId
+      ? e.parties.find((q) => q.id === e.presidentPartyId) : undefined;
+    const info: FactionPublic = {
+      faction: f.id,
+      members: localFaction === f.id && authedName ? [authedName] : [],
+      memberCount: localFaction === f.id ? 1 : 0,
+      taxRate: g?.taxRate ?? 0,
+      kitStock: g?.kitStock ?? 0,
+      treasuryCount: treasuryCount(offlineTreasuries.get(f.id)!),
+    };
+    if (e?.president) {
+      info.president = {
+        username: e.president,
+        partyName: party?.name ?? 'Independent',
+        slogan: party?.slogan ?? '',
+        promises: party?.promises ?? [],
+        cosmetics: cosmeticsFor(e.president),
+        held: inventory.selectedStack ?? null,
+        armor: inventory.wornArmor(),
+      };
+    }
+    return info;
+  });
+}
+
+function governData(): GovernData {
   return {
-    show(faction: number): void {
-      const color = factionCss(faction);
-      name.textContent = factionName(faction).toUpperCase();
-      panel.style.setProperty('--faction-color', color);
-      panel.style.display = 'flex';
-      go.focus();
-    },
+    state: politicsState,
+    faction: localFaction,
+    username: authedName || 'Citizen',
+    treasury: net.connected
+      ? myTreasury
+      : (offlineTreasuries.get(localFaction)?.slots ?? []),
+    cosmeticsOf: cosmeticsFor,
+    atlasCanvas: atlas.canvas,
+    kitClaimed,
   };
-})();
-function announceSide(faction: number): void {
-  factionReveal.show(faction);
+}
+
+// --- Offline government persistence ------------------------------------------
+// Single-player runs the SAME pure rules the server runs (politics.ts /
+// treasury.ts), so the panels are live rather than dead. It is stored per
+// account beside the other offline saves; a malformed blob is dropped by the
+// same fail-closed sanitizers the server's disk load uses.
+function offlinePoliticsKey(): string {
+  return `voxelon.politics.${(authedName || 'guest').toLowerCase()}`;
+}
+
+function saveOfflinePolitics(): void {
+  if (net.connected || !authedName) return;
+  try {
+    localStorage.setItem(offlinePoliticsKey(), JSON.stringify({
+      politics: politicsState,
+      treasuries: [...offlineTreasuries.entries()],
+    }));
+  } catch { /* storage disabled — the session still works, it just won't keep */ }
+}
+
+function loadOfflinePolitics(): void {
+  politicsState = newPolitics(Date.now());
+  for (const f of FACTIONS) offlineTreasuries.set(f.id, newTreasury(f.id));
+  try {
+    const raw = JSON.parse(localStorage.getItem(offlinePoliticsKey()) || 'null');
+    if (!raw || typeof raw !== 'object') return;
+    politicsState = sanitizePolitics(raw.politics, Date.now());
+    for (const entry of Array.isArray(raw.treasuries) ? raw.treasuries : []) {
+      if (!Array.isArray(entry) || entry.length !== 2) continue;
+      const [faction, blob] = entry;
+      if (isFaction(faction)) offlineTreasuries.set(faction, sanitizeTreasury(blob, faction));
+    }
+  } catch { /* keep the fresh state */ }
+}
+
+/**
+ * Offline elections resolve the moment you vote.
+ *
+ * The rule is unchanged — it is the same `tallyElection` the server runs — but
+ * with an electorate of exactly one there is nothing a week of waiting could
+ * change about the result, and a single-player government you cannot actually
+ * form is just a disabled menu.
+ */
+function settleOfflineElection(): void {
+  const e = electionOf(politicsState, localFaction);
+  if (!e) return;
+  const before = e.president;
+  const { president, party } = tallyElection(e);
+  rollCycle(e, Date.now());
+  if (party && president !== before) {
+    pushNotification({
+      id: `local-election-${e.cycle}-${localFaction}`, kind: 'election',
+      title: `${party.name} wins the election`,
+      body: `${president} takes office for term ${e.cycle}.`,
+      at: Date.now(),
+    });
+  }
+}
+
+/**
+ * Offline government. Single-player runs the SAME pure rules the server runs
+ * (politics.ts / treasury.ts), so the panels are live instead of dead: you can
+ * found a party, win an unopposed election, set a levy and watch it fill the
+ * strongbox beside your flag.
+ */
+const governActions: GovernActions = {
+  onFoundParty: (name, slogan, promises) => {
+    if (net.connected) { net.sendFoundParty(name, slogan, promises); return; }
+    const res = foundParty(politicsState, localFaction, authedName,
+      name, slogan, promises, Date.now());
+    if (!res.ok) { presidentUI.setError(res.error ?? 'That party cannot stand.'); return; }
+    saveOfflinePolitics();
+    refreshGovernment();
+  },
+  onDisbandParty: () => {
+    if (net.connected) { net.sendDisbandParty(); return; }
+    const res = disbandParty(politicsState, localFaction, authedName);
+    if (!res.ok) { presidentUI.setError(res.error ?? 'You do not lead a party.'); return; }
+    saveOfflinePolitics();
+    refreshGovernment();
+  },
+  onVote: (partyId) => {
+    if (net.connected) { net.sendVote(partyId); return; }
+    const res = castVote(politicsState, localFaction, authedName, partyId);
+    if (!res.ok) { presidentUI.setError(res.error ?? 'That vote cannot be cast.'); return; }
+    settleOfflineElection();
+    saveOfflinePolitics();
+    refreshGovernment();
+  },
+  onBroadcast: (text) => {
+    if (net.connected) { net.sendGovBroadcast(text); return; }
+    const g = governmentOf(politicsState, localFaction);
+    if (!g || !isPresident(politicsState, localFaction, authedName)) {
+      presidentUI.setError('Only your faction\'s president can do that.');
+      return;
+    }
+    const res = pushBroadcast(g, authedName, text, Date.now(), politicsState.serial++);
+    if (!res.ok) { presidentUI.setError(res.error ?? 'Say something first.'); return; }
+    pushNotification({
+      id: `local-${res.broadcast!.id}`, kind: 'broadcast',
+      title: `${factionName(localFaction)} broadcast · ${authedName}`,
+      body: res.broadcast!.text, at: res.broadcast!.at,
+    });
+    saveOfflinePolitics();
+    refreshGovernment();
+  },
+  onSetTax: (rate) => {
+    if (net.connected) { net.sendGovTax(rate); return; }
+    const g = governmentOf(politicsState, localFaction);
+    if (!g || !isPresident(politicsState, localFaction, authedName)) {
+      presidentUI.setError('Only your faction\'s president can do that.');
+      return;
+    }
+    setTaxRate(g, rate);
+    saveOfflinePolitics();
+    refreshGovernment();
+  },
+  onFundKits: (count) => {
+    if (net.connected) { net.sendFundKits(count); return; }
+    const g = governmentOf(politicsState, localFaction);
+    const t = offlineTreasuries.get(localFaction);
+    if (!g || !t || !isPresident(politicsState, localFaction, authedName)) {
+      presidentUI.setError('Only your faction\'s president can do that.');
+      return;
+    }
+    if (!fundKits(t, count)) {
+      presidentUI.setError('The treasury cannot afford that many kits.');
+      return;
+    }
+    g.kitStock += count;
+    saveOfflinePolitics();
+    refreshGovernment();
+  },
+  onClaimKit: () => {
+    if (net.connected) { net.sendClaimKit(); return; }
+    const g = governmentOf(politicsState, localFaction);
+    if (!g || g.kitStock <= 0 || kitClaimed) {
+      presidentUI.setError('There is no kit waiting for you.');
+      return;
+    }
+    g.kitStock--;
+    kitClaimed = true;
+    localAccounts.claimKit(authedName);
+    saveLocalAccounts();
+    for (const line of STARTER_KIT) inventory.add(line.id, line.count);
+    showNotice('[KIT] Your faction funded this. Go build something.');
+    saveOfflinePolitics();
+    refreshGovernment();
+  },
+};
+
+/** Push the latest state into whatever government surface is on screen, and
+ *  into the in-world strongboxes. Called on every politics sync. */
+function refreshGovernment(): void {
+  treasuryModels.setCounts(treasuryCountsNow());
+  if (presidentUI.open) presidentUI.update(governData());
+  if (factionPicker.open) factionPicker.update({
+    factions: pledgeDossiers(), atlasCanvas: atlas.canvas,
+  });
+}
+
+function openPresidentUI(view: PresidentView = 'election'): void {
+  presidentUI.show(governData(), governActions, view);
+}
+
+/** One dispatch into the inbox, with the cue that matches its weight. */
+function pushNotification(notif: Notification): void {
+  if (!notifications.push(notif)) return;   // a re-sync must never re-alarm
+  if (notif.kind === 'raid') {
+    audio.raidHorn();
+    showNotice(`🚨 ${notif.title}`);
+  } else {
+    audio.dispatchChime();
+    showNotice(`🔔 ${notif.title}`);
+  }
+}
+
+/** Show the allegiance pledge. Everything else waits behind it — an unpledged
+ *  player has no side, no treasury and no vote. */
+function openFactionPicker(): void {
+  factionPicker.show({ factions: pledgeDossiers(), atlasCanvas: atlas.canvas });
+}
+factionPicker.onPledge = (faction) => {
+  if (net.connected) { net.sendPledge(faction); return; }
+  // Offline we are our own authority, but the choice is just as permanent.
+  const account = localAccounts.get(authedName);
+  if (account && !isFaction(account.faction)) {
+    localAccounts.pledge(authedName, faction, Date.now());
+    saveLocalAccounts();
+  }
+  adoptFaction(faction);
+  factionPicker.hide();
+  spawnInOwnTerritory();
+  startPlaying();
+};
+
+/** Adopt a faction everywhere it is mirrored on the client. */
+function adoptFaction(faction: number): void {
+  localFaction = faction;
+  invalidateSelfAvatar();  // your body wears the new side's shirt
+  refreshNetInfo();
+  refreshGovernment();
 }
 
 // All surface structures shown on the world map as icons (one cached sweep —
@@ -2016,6 +2376,9 @@ function onAuthSuccess(username: string): void {
   clearElimination(); // you're in — no lockout panel hanging around
   refreshNetInfo();
   titleStatusTimer = 0; // your side + the war clock appear with the menu
+  // Dispatches are per-account: the read-marks and the badge follow the login.
+  notifications.setAccount(username);
+  titleBell.hidden = false;
 }
 
 // --- Saved session (skip the login form on return visits) -------------------
@@ -2072,12 +2435,17 @@ function issueOfflineSession(username: string): void {
 
 /** Everything a fresh OFFLINE auth needs after the account checks out. */
 function finishOfflineAuth(account: Account, freshRegister: boolean): void {
+  // May be NO_FACTION: an offline account swears allegiance on the pledge screen
+  // exactly like an online one, and the choice is just as permanent.
   localFaction = account.faction;
+  kitClaimed = account.kitClaimed === true;
   invalidateSelfAvatar(); // your third-person body reflects the new look/side
   onAuthSuccess(account.username);
+  loadOfflinePolitics();
+  refreshGovernment();
   spawnInOwnTerritory(); // never drop into enemy land (offline)
-  if (freshRegister) announceSide(localFaction);
-  else restoreOfflineInventory(); // bring back saved single-player stuff
+  // A fresh account has no side yet — the pledge screen comes up on Play.
+  if (!freshRegister) restoreOfflineInventory(); // bring back saved single-player stuff
   restoreOfflineHearts(); // fresh accounts fall back to the 10-heart start
   restoreOfflineTotems(); // attuned Waypoint Totems (fast travel)
   restoreOfflineWarfare(); // Warfare Command technology (offline mirror)
@@ -2114,7 +2482,7 @@ function attemptAuth(mode: 'login' | 'register', retries = 12): void {
   if (net.socketOpen) {
     // Online: the server is the authority. No side pick — the server balances.
     authStatus.textContent = mode === 'register' ? 'Registering…' : 'Logging in…';
-    if (mode === 'register') { justRegistered = true; net.sendRegister(username, password); }
+    if (mode === 'register') { net.sendRegister(username, password); }
     else net.sendLogin(username, password);
   } else if (net.offline) {
     // Offline single-player: verify against the local account store.
@@ -2297,21 +2665,30 @@ document.getElementById('logout-btn')!.addEventListener('click', () => {
   location.reload();
 });
 
+/** Drop into the world once it has streamed in. The wait is shared by the Play
+ *  button and the pledge screen's hand-off, so swearing allegiance can never
+ *  drop somebody into chunks that do not exist yet. */
+function startPlaying(): void {
+  if (worldReady) { beginPlay(); return; }
+  // World usually finished streaming during the title; if not, wait briefly
+  // (still no full-screen loading screen) before dropping in.
+  playBtn.textContent = 'Preparing…';
+  const wait = (): void => {
+    if (worldReady) { playBtn.textContent = 'Play'; beginPlay(); }
+    else setTimeout(wait, 100);
+  };
+  wait();
+}
+
 playBtn.addEventListener('click', () => {
   if (!authed) return;
   audio.resume();
-  // World usually finished streaming during the title; if not, wait briefly
-  // (still no full-screen loading screen) before dropping in.
-  if (!worldReady) {
-    playBtn.textContent = 'Preparing…';
-    const wait = (): void => {
-      if (worldReady) { playBtn.textContent = 'Play'; beginPlay(); }
-      else setTimeout(wait, 100);
-    };
-    wait();
-    return;
-  }
-  beginPlay();
+  // No side yet? Then Play means CHOOSE ONE first. The pledge screen is the only
+  // way onto a faction, and it is shown before the world rather than over it, so
+  // the decision is made with the dossiers in front of you and nothing else
+  // happening. It hands off to startPlaying() itself once you swear.
+  if (!isFaction(localFaction)) { openFactionPicker(); return; }
+  startPlaying();
 });
 
 // --- THE ARENA: minigames browser, ranked ladder, Duels lobby and match -----
@@ -4571,7 +4948,6 @@ net.onWelcome = (me) => {
   localFaction = me.faction;
   invalidateSelfAvatar(); // your third-person body reflects the new look/side
   localSeasonsWon = me.seasonsWon ?? 0; // authoritative badge from the account
-  if (justRegistered) { justRegistered = false; announceSide(localFaction); }
   player.pos.set(me.x, me.y, me.z);
   player.vel.set(0, 0, 0);
   // Startup may already have prepared the default spawn while authentication
@@ -6300,6 +6676,15 @@ const chatBox = new ChatBox(app, {
         if (player.dead) return "You can't do that while dead.";
         showProgress();
         return null;
+      case 'president':
+        if (player.dead) return "You can't do that while dead.";
+        if (!isFaction(localFaction)) return 'Swear allegiance first — press Play and choose a side.';
+        if (invUI.open) invUI.hide();
+        openPresidentUI();
+        return null;
+      case 'notifications':
+        notifications.show();
+        return null;
       case 'guide':
         if (duelArenaActive) return 'Guide is disabled during Duels.';
         toggleGuidePanel();
@@ -6341,7 +6726,9 @@ net.onGotItem = (id, count) => {
   // offline path likewise leaves the leftover on the ground). After a partial
   // add the inventory has no room left, so the re-drop won't be re-requested.
   const left = inventory.add(id, count);
-  if (left > 0) net.sendDrop([{ id, count: left }], player.pos.x, player.pos.y, player.pos.z);
+  if (left > 0) {
+    net.sendDrop([{ id, count: left }], player.pos.x, player.pos.y, player.pos.z, 'manual');
+  }
 };
 net.onChest = (x, y, z, slots) => {
   chests.store(x, y, z, slots);
@@ -6409,6 +6796,43 @@ net.onFactionSwitched = (faction, remaining) => {
   invalidateSelfAvatar(); // your third-person body reflects the new look/side
   refreshNetInfo();
   showNotice(`🤫 You secretly joined ${factionName(faction)}. Switches left: ${remaining}.`);
+};
+
+// --- FACTION GOVERNMENT: the wire ---------------------------------------------
+net.onPolitics = (state, factions, treasury) => {
+  politicsState = state;
+  factionPublics = factions;
+  if (treasury) myTreasury = treasury;
+  refreshGovernment();
+};
+net.onGovWelcome = (inbox, claimed) => {
+  kitClaimed = claimed;
+  // NOT setAccount here: this fires from inside the `welcome` handler, before
+  // onWelcome -> onAuthSuccess has adopted the username, so it would file the
+  // read-marks under the previous account. onAuthSuccess owns that call.
+  // Broadcasts the government stored while you were away, so logging in after a
+  // week still shows you what your president has been saying.
+  notifications.seed(inbox);
+};
+net.onPledged = (faction) => {
+  adoptFaction(faction);
+  factionPicker.hide();
+  showRegionBanner(`YOU FIGHT FOR ${factionName(faction).toUpperCase()}`, factionCss(faction));
+  // The pledge screen is the last thing between the title and the world.
+  startPlaying();
+};
+net.onGovErr = (reason) => {
+  // Shown IN the panel that asked, not as a toast over the world — the player
+  // is looking at the form that was refused.
+  if (presidentUI.open) presidentUI.setError(reason);
+  else showNotice(`⚠ ${reason}`);
+};
+net.onNotify = (notif) => pushNotification(notif);
+net.onTreasuryRaided = (faction, by, stacks) => {
+  treasuryModels.setCounts(treasuryCountsNow());
+  if (faction === localFaction) return; // the raid alarm already came as a notify
+  showNotice(`💰 ${by} hauled ${stacks} stack${stacks === 1 ? '' : 's'} out of the ` +
+    `${factionName(faction)} treasury.`);
 };
 net.onSeasonEnd = (winner, number) => {
   // The winning side's badge is refreshed on the next welcome, but bump it now
@@ -7507,7 +7931,10 @@ function removeOfflineBattery(b: BatteryState): void {
   if (world.getBlock(b.x, b.y, b.z) === Block.InterceptorBattery) {
     world.setBlock(b.x, b.y, b.z, Block.Air);
   }
-  if (b.ammo > 0) spawnDrop(b.x + 0.5, b.y + 0.3, b.z + 0.5, Item.InterceptorMissile, b.ammo);
+  // Loaded interceptors coming back out of a wrecked battery: the owner's, untaxed.
+  if (b.ammo > 0) {
+    spawnDrop(b.x + 0.5, b.y + 0.3, b.z + 0.5, Item.InterceptorMissile, b.ammo, 'manual');
+  }
   if (openBattery?.id === b.id) closeStrategicPanel();
 }
 
@@ -9517,6 +9944,84 @@ function showFlagHud(html: string, border: string): void {
   flagHudEl.style.display = 'block';
 }
 
+// --- THE STRONGBOX in the world ---------------------------------------------
+// Right-click at your own faction's strongbox to open the Treasury tab of the
+// government menu; right-click at the ENEMY's, while a war window is open, to
+// force it. Right-click rather than left so it never competes with beating on
+// the flag pole three blocks away.
+const treasuryHudEl = document.createElement('div');
+treasuryHudEl.className = 'mc-font';
+treasuryHudEl.style.cssText =
+  'position:absolute;top:140px;left:50%;transform:translateX(-50%);z-index:22;' +
+  'display:none;padding:7px 16px;border-radius:8px;font-size:14px;color:#fff;' +
+  'background:rgba(10,12,20,0.72);border:2px solid #d8b64a;text-align:center;';
+app.appendChild(treasuryHudEl);
+
+/** The faction strongbox the player is standing at right now, or null. */
+function treasuryUnderfoot(): number | null {
+  if (!isFaction(localFaction) || player.dead) return null;
+  return treasuryModels.inReach(player.pos.x, player.pos.z);
+}
+
+// Right-click only acts on the strongbox when you are actually LOOKING at it.
+// Without this, standing anywhere inside the reach radius would swallow every
+// right-click — no placing blocks, no opening a chest, no eating — which is a
+// four-block dead zone around each flag site.
+const treasuryAim = new THREE.Vector3();
+const treasuryToBox = new THREE.Vector3();
+/** Roughly the crosshair plus a forgiving margin. */
+const TREASURY_AIM_DOT = Math.cos(0.6);
+
+function lookingAtTreasury(faction: number): boolean {
+  camera.getWorldDirection(treasuryAim);
+  treasuryToBox.copy(treasuryModels.centre(faction)).sub(camera.position);
+  if (treasuryToBox.lengthSq() < 1e-6) return true;
+  return treasuryAim.dot(treasuryToBox.normalize()) >= TREASURY_AIM_DOT;
+}
+
+function updateTreasuryPrompt(): void {
+  const at = treasuryUnderfoot();
+  if (at === null) { treasuryHudEl.style.display = 'none'; return; }
+  const g = governmentOf(politicsState, at);
+  const stored = treasuryCountsNow()[at] ?? 0;
+  if (at === localFaction) {
+    treasuryHudEl.innerHTML =
+      `${iconSvg('coinbag')} <b>${factionName(at)} treasury</b> — ${stored} items · ` +
+      `levy ${Math.round((g?.taxRate ?? 0) * 100)}% · ${g?.kitStock ?? 0} kits funded<br>` +
+      '<b>Look at it and right-click</b> to open the ledger.';
+    treasuryHudEl.style.borderColor = '#d8b64a';
+  } else if (!warActiveNow) {
+    treasuryHudEl.innerHTML =
+      `${iconSvg('lock')} The ${factionName(at)} strongbox is <b>sealed</b> — ` +
+      'it can only be forced during a war.';
+    treasuryHudEl.style.borderColor = '#7a8090';
+  } else {
+    treasuryHudEl.innerHTML =
+      `${iconSvg('warning')} <b>Look at it and right-click</b> to force the ` +
+      `${factionName(at)} strongbox — ${stored} items inside. They will hear it.`;
+    treasuryHudEl.style.borderColor = factionCss(at);
+  }
+  treasuryHudEl.style.display = 'block';
+}
+
+/** Right-click at a strongbox. Returns true when it consumed the click. */
+function treasuryUse(): boolean {
+  const at = treasuryUnderfoot();
+  if (at === null || !lookingAtTreasury(at)) return false;
+  if (at === localFaction) { openPresidentUI('treasury'); return true; }
+  if (!net.connected) {
+    showNotice('There is nobody to rob in single-player.');
+    return true;
+  }
+  if (!warActiveNow) {
+    showNotice('🔒 The strongbox is sealed. It can only be forced during a war.');
+    return true;
+  }
+  net.sendTreasuryRaid(at);
+  held.swing();
+  return true;
+}
+
 /**
  * Swing at the flag pad you're standing on. Returns true when the flag layer
  * has claimed this frame's left-click (so mining stays suppressed).
@@ -10174,6 +10679,8 @@ function frame(): void {
           tryBoardHelicopter()) {
         // Stood beside a parked airframe: right-click climbs in.
         interaction.update(dt, input, camera, true, true); // suppress mine + use
+      } else if (input.rightClicked && !interaction.armedMove && treasuryUse()) {
+        interaction.update(dt, input, camera, true, true); // suppress mine + use
       } else if (flagSwingUpdate(dt, input.leftDown)) {
         interaction.update(dt, input, camera, true, true); // suppress mine + use
       } else if (heldGadget) {
@@ -10348,6 +10855,7 @@ function frame(): void {
       updateTpa(dt, controlling);   // TPA accept hold + incoming-request banner
       updateWarVisuals();   // the closing red ring + everybody-glows halos
       updateFlagVisuals(dt); // flag poles, beacons + the carrier's banner
+      updateTreasuryPrompt(); // the strongbox prompt beside each flag pad
       tickDisguises(dt); // Phase 8: expire spy disguises on remote avatars
       updateThrownItems(dt); // animate tossed grenades/bombs
     }
@@ -10517,6 +11025,10 @@ function frame(): void {
 
   if (!duelArenaActive) {
     flagModels.setWarActive(warActiveNow);
+    // Driven here rather than in updateFlagVisuals: that one is multiplayer-only
+    // and the strongbox has to keep breathing in single-player too.
+    treasuryModels.setWarActive(warActiveNow);
+    treasuryModels.update(dt);
     flagModels.update(dt, activeCamera, (id) => {
       if (id === net.myId) return player.pos;
       const remote = net.remotes.get(id);

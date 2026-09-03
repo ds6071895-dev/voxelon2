@@ -134,6 +134,26 @@ game.onRevive = (target, faction, by) => {
   if (ok) { saveAccounts(); console.log(`[REVIVE] ${by} revived ${target}`); }
   return ok;
 };
+// FACTION GOVERNMENT: the pure core has no account store, so allegiance and the
+// one-per-account recruit kit are written here. Both are PERMANENT flags, which
+// is exactly why they live on the account record and not in the client blob.
+game.onPledge = (username, faction) => {
+  const res = accounts.pledge(username, faction, Date.now());
+  if (res.ok) {
+    saveAccounts();
+    console.log(`[PLEDGE] ${username} swore to faction ${faction}`);
+  }
+  return res.ok;
+};
+game.factionRoster = (faction, limit) => accounts.factionMembers(faction, limit);
+game.factionCitizens = (faction) => accounts.factionCounts()[faction] ?? 0;
+game.kitClaimed = (username) => accounts.kitClaimed(username);
+game.onClaimKit = (username) => {
+  const ok = accounts.claimKit(username);
+  if (ok) saveAccounts();
+  return ok;
+};
+
 let worldDirty = false;
 function saveWorld(): void {
   try {
@@ -240,7 +260,7 @@ function handleAuth(id: number, msg: ClientMsg & { t: 'register' | 'login' | 'se
     return;
   }
   const res = msg.t === 'register'
-    ? accounts.register(username, msg.password, hasher, randomSalt(), msg.faction)
+    ? accounts.register(username, msg.password, hasher, randomSalt())
     : msg.t === 'login'
       ? accounts.login(username, msg.password, hasher)
       : accounts.sessionLogin(username, msg.token);
@@ -555,6 +575,7 @@ setInterval(() => {
   dispatch(game.tickWar(dt)); // advances worldTime + the shrinking border
   dispatch(game.tickDuels());
   dispatch(game.tickSeason(dt));
+  dispatch(game.tickPolitics(dt)); // weekly elections + the coalesced treasury sync
   for (const cid of authed.keys()) {
     send(cid, { t: 'snapshot', players: game.snapshotFor(cid), worldTime: game.clockTime() }, true);
   }

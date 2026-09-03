@@ -34,6 +34,16 @@ import {
   factionHasFlag, carriedBy, flagHome, FLAG_HIT_COOLDOWN,
 } from '../flags';
 import {
+  Broadcast, PoliticsState, castVote, disbandParty, electionOf, foundParty,
+  governmentOf, isPresident, newPolitics, partyById, pushBroadcast, rollCycle,
+  sanitizePolitics, setTaxRate, tallyElection, termExpired, voteCounts,
+} from '../politics';
+import {
+  STARTER_KIT, Treasury, canFundKits, deposit, fundKits, levy, newTreasuries,
+  raid, sanitizeTreasury, treasuryCount, treasuryInReach, RAID_COOLDOWN,
+  RAID_STACKS,
+} from '../treasury';
+import {
   ContributionRecord, WarfareProgress, buyWarfareNode, grantWarfareXp,
   newWarfare, sanitizeWarfare, settleWarfareXp,
   warfareOwns, warfareTier, MAX_HARDWARE_TIER, PROTECTED_RADIUS,
@@ -65,6 +75,7 @@ import {
   mitigate, TOUGHNESS_CAP, DuelLeaderboardEntry, ItemEntityInfo, PlayerInfo, PlayerSnapshot, ServerMsg,
   WORLD_SEED, WORLD_HALF, WORLD_BORDER, CORE_HALF, makeUsername, skinSeed, GameMode,
   MAX_ATTUNED, TOTEM_COOLDOWN, COMBAT_TAG, TPA_EXPIRE, bloodlustMult,
+  FACTION_ROSTER_LIMIT, type FactionPublic, type Notification,
 } from './protocol';
 import {
   COMEBACK_HEARTS, KILL_CREDIT_WINDOW, MAX_HEARTS, canConsume, canWithdraw,
@@ -119,6 +130,9 @@ const UNSAFE_RESPAWN_BLOCKS = new Set<number>([
 ]);
 
 interface ServerPlayer extends PlayerInfo {
+  /** World-clock seconds of this player's last successful treasury raid, so one
+   *  raider cannot empty a strongbox by spamming the key. */
+  lastTreasuryRaid?: number;
   regenCooldown: number;
   regenTimer: number;
   /** Healing consumable (Bandage/Medkit): seconds of accelerated regen left +
@@ -242,6 +256,10 @@ const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
   'heartConsume', 'heartWithdraw', 'beaconRevive', 'useHeal',
   'attune', 'totemTeleport',
   'vaultAttack', 'vaultChestOpen',
+  // Government: a spectator may watch an election, never take part in one or
+  // touch a treasury. Reading (the politics sync) is unaffected.
+  'pledgeFaction', 'foundParty', 'disbandParty', 'castVote',
+  'govBroadcast', 'govTax', 'govFundKits', 'claimKit', 'treasuryRaid',
 ]);
 
 /** One message the transport should deliver. `to` is a client id, or a
@@ -337,6 +355,28 @@ export class GameServer {
    *  member of `faction`; returns success. `by` is credited in the target's
    *  next-login notice. */
   onRevive?: (target: string, faction: number, by: string) => boolean;
+  // --- FACTION GOVERNMENT ----------------------------------------------------
+  /** Elections + governments for every faction (politics.ts). Persisted. */
+  private politics: PoliticsState = newPolitics(0);
+  /** One strongbox per faction, standing beside its flag pad (treasury.ts). */
+  private treasuries = newTreasuries();
+  /** Seconds since the election clock was last checked (it only needs to tick
+   *  about once a second — a weekly deadline does not need 20Hz). */
+  private politicsAccum = 0;
+  /** A treasury changed and the clients have not been told yet. Coalesced so a
+   *  faction mining flat out costs one sync a second, not one per block. */
+  private politicsDirty = false;
+  /** Set by the shell to write a pledge onto the ACCOUNT. Returns false when
+   *  the store refuses it — which is what makes the choice permanent across a
+   *  reconnect, not just for the length of one session. */
+  onPledge?: (username: string, faction: number) => boolean;
+  /** Set by the shell: the whole registered playerbase per faction, not just
+   *  who is online. The allegiance screen shows both. */
+  factionRoster?: (faction: number, limit: number) => string[];
+  factionCitizens?: (faction: number) => number;
+  /** Set by the shell: has this account taken its one recruit kit / take it. */
+  kitClaimed?: (username: string) => boolean;
+  onClaimKit?: (username: string) => boolean;
   // Vaults (Milestone D): per-vault boss HP + per-player loot ledger, keyed
   // by the anchor chunk "cx,cz". Persisted in the world save.
   private readonly vaults = new Map<string, VaultServerState>();
@@ -368,6 +408,9 @@ export class GameServer {
     this.rng = rng;
     this.duels = new Duels(secureDuelToken);
     this.terrain = new Terrain(seed);
+    // Elections run on the WALL clock, not the world clock: a term is a week of
+    // real time whether or not the server was up for all of it.
+    this.politics = newPolitics(this.wallNow());
     this.strategic = new StrategicSim({
       groundY: (x, z) => this.surfaceY(x, z),
       worldHalf: WORLD_HALF,
@@ -526,6 +569,11 @@ export class GameServer {
   }
 
   private spawn(faction: number): { x: number; y: number; z: number } {
+    // Not sworn to anyone yet: stand in the neutral middle of the Heartland,
+    // between the two pads, rather than inside somebody's base. `inFactionHalf`
+    // rejects NO_FACTION for everything, so without this branch the search below
+    // finds nothing and drops the player out of the sky over Crimson's flag.
+    if (!isFaction(faction)) return this.neutralSpawn();
     const home = flagHome(faction);
     // Respawns cluster around their own flag and never cross the faction-half
     // boundary. Retry because edits may have trapped an otherwise-safe column.
@@ -560,6 +608,27 @@ export class GameServer {
     // This is only reachable if every checked column has been deliberately
     // trapped. Spawning above them remains collision- and hazard-free.
     return { x: home.x + 0.5, y: 257, z: home.z + 0.5 };
+  }
+
+  /** A safe, faction-neutral landing spot near world centre, for a player who
+   *  has not sworn allegiance yet. Spirals outward from the origin so a built-up
+   *  or trapped centre still resolves. */
+  private neutralSpawn(): { x: number; y: number; z: number } {
+    for (let r = 0; r <= 96; r++) {
+      for (let dx = -r; dx <= r; dx++) {
+        for (const dz of r === 0 ? [0] : [-r, r]) {
+          const s = this.terrain.safeSpawnAt(dx, dz);
+          if (s && this.safeRespawnPoint(s.x, s.y, s.z)) return s;
+        }
+      }
+      for (let dz = -r + 1; dz < r; dz++) {
+        for (const dx of [-r, r]) {
+          const s = this.terrain.safeSpawnAt(dx, dz);
+          if (s && this.safeRespawnPoint(s.x, s.y, s.z)) return s;
+        }
+      }
+    }
+    return { x: 0.5, y: 257, z: 0.5 };
   }
 
   private blockEditAt(x: number, y: number, z: number): number | undefined {
@@ -608,8 +677,14 @@ export class GameServer {
   }): Outbound[] {
     const username = account?.username && !this.usernameOnline(account.username)
       ? account.username : this.uniqueUsername();
-    const faction = account?.faction !== undefined && FACTIONS.some((f) => f.id === account.faction)
-      ? account.faction : this.assignFaction();
+    // An account that carries a faction field is AUTHORITATIVE, including when
+    // it says NO_FACTION: a player who has not sworn allegiance yet stays
+    // factionless until they pledge, and nothing auto-assigns them a side any
+    // more. Only a caller with no account at all (legacy transports, tests)
+    // still gets one picked for them.
+    const faction = account?.faction !== undefined && Number.isFinite(account.faction)
+      ? (isFaction(account.faction) ? account.faction : NO_FACTION)
+      : this.assignFaction();
     // Restore the saved horizontal column, but always join on its surface. This
     // prevents accounts saved in caves (or mid-air) from spawning there again.
     const saved = account?.data;
@@ -701,6 +776,11 @@ export class GameServer {
       batteries: [...this.strategic.batteries.values()],
       helis: this.vehicles.snapshot(),
       protectedAreas: this.protectedAreas(),
+      politics: this.politics,
+      factions: this.factionPublics(),
+      treasury: isFaction(faction) ? this.treasuryOf(faction).slots : undefined,
+      inbox: this.inboxFor(faction),
+      kitClaimed: this.kitClaimed?.(username) ?? false,
     };
     return [
       { to: id, msg: welcome },
@@ -966,7 +1046,26 @@ export class GameServer {
         if (msg.data && typeof msg.data === 'object') p.savedClientData = msg.data;
         return [];
       case 'drop':
-        return this.handleDrop(p, msg.items, msg.x, msg.y, msg.z);
+        return this.handleDrop(p, msg.items, msg.x, msg.y, msg.z, msg.reason);
+      // --- FACTION GOVERNMENT --------------------------------------------------
+      case 'pledgeFaction':
+        return this.handlePledge(p, msg.faction);
+      case 'foundParty':
+        return this.handleFoundParty(p, msg.name, msg.slogan, msg.promises);
+      case 'disbandParty':
+        return this.handleDisbandParty(p);
+      case 'castVote':
+        return this.handleVote(p, msg.partyId);
+      case 'govBroadcast':
+        return this.handleGovBroadcast(p, msg.text);
+      case 'govTax':
+        return this.handleGovTax(p, msg.rate);
+      case 'govFundKits':
+        return this.handleFundKits(p, msg.count);
+      case 'claimKit':
+        return this.handleClaimKit(p);
+      case 'treasuryRaid':
+        return this.handleTreasuryRaid(p, msg.faction);
       case 'pickup':
         return this.handlePickup(p, msg.eid);
       case 'armor': {
@@ -1046,8 +1145,12 @@ export class GameServer {
         for (const [idStr, count] of Object.entries(taken)) {
           const itemId = Number(idStr);
           if (!ITEMS[itemId] || !fin(count) || count <= 0) continue;
-          out.push({ to: id, msg: { t: 'gotitem', item: itemId, count: Math.floor(count) } });
+          // Automated output is faction income too — the server mints it here,
+          // so unlike a harvest drop there is nothing a client could mislabel.
+          const net = Math.floor(count) - this.levyInto(p.faction, itemId, Math.floor(count));
+          if (net > 0) out.push({ to: id, msg: { t: 'gotitem', item: itemId, count: net } });
         }
+        this.politicsDirty = true;
         out.push({ to: 'all', msg: { t: 'machine', x: msg.x, y: msg.y, z: msg.z, state: s } });
         return out;
       }
@@ -2880,8 +2983,11 @@ export class GameServer {
     const out: Outbound[] = [];
     for (const s of vaultLoot(this.seed, st.cx, st.cz, st.tier, p.username, roll)) {
       if (!ITEMS[s.id] || !fin(s.count) || s.count <= 0) continue;
-      out.push({ to: p.id, msg: { t: 'gotitem', item: s.id, count: Math.floor(s.count) } });
+      // Vault haul is taxed like any other take from the world.
+      const net = Math.floor(s.count) - this.levyInto(p.faction, s.id, Math.floor(s.count));
+      if (net > 0) out.push({ to: p.id, msg: { t: 'gotitem', item: s.id, count: net } });
     }
+    this.politicsDirty = true;
     out.push({ to: p.id, msg: { t: 'vaultLooted', cx: st.cx, cz: st.cz } });
     out.push({ to: p.id, msg: { t: 'notice', text: `[VAULT] Tier ${st.tier} vault treasure claimed!` } });
     return out;
@@ -3074,18 +3180,33 @@ export class GameServer {
   }
 
   private handleDrop(
-    _p: ServerPlayer, items: { id: number; count: number }[],
-    x: number, y: number, z: number
+    p: ServerPlayer, items: { id: number; count: number }[],
+    x: number, y: number, z: number, reason?: 'harvest' | 'manual'
   ): Outbound[] {
     // Dead players DO drop (death spill), so no alive-guard here.
     if (!fin(x, y, z) || !Array.isArray(items)) return [];
     const out: Outbound[] = [];
     let n = 0;
+    // The faction TAX is levied here, on the way OUT of the world, rather than
+    // on pickup: a harvest passes through this path exactly once, whereas a
+    // player who drops and re-collects their own stack passes through pickup
+    // every time and would be taxed again on each pass.
+    const taxable = reason === 'harvest';
+    let levied = 0;
     for (const it of items) {
       if (n++ >= 64) break; // sanity cap per request
       if (!it || !ITEMS[it.id] || !fin(it.count) || it.count <= 0) continue;
-      out.push(this.spawnItem(it.id, it.count, x + (this.rng() - 0.5), y, z + (this.rng() - 0.5)));
+      // levy() never takes a whole stack, so `count` stays >= 1 here.
+      const count = taxable
+        ? Math.floor(it.count) - this.levyInto(p.faction, it.id, Math.floor(it.count))
+        : Math.floor(it.count);
+      if (count !== Math.floor(it.count)) levied++;
+      out.push(this.spawnItem(it.id, count, x + (this.rng() - 0.5), y, z + (this.rng() - 0.5)));
     }
+    // Mining is the highest-frequency message on the server, so a levy must NOT
+    // fan a politics message out to everybody per broken block. Mark it dirty
+    // and let the once-a-second election tick flush it.
+    if (levied > 0) this.politicsDirty = true;
     return out;
   }
 
@@ -3899,6 +4020,409 @@ export class GameServer {
     return counts;
   }
 
+  // --- FACTION GOVERNMENT: elections, the treasury, and the powers of office --
+  //
+  // Rules live in politics.ts / treasury.ts (pure, shared with the offline
+  // client and the smoke tests). Everything below is AUTHORITY: who is allowed
+  // to ask for what, and who gets told about it.
+
+  private notifySerial = 1;
+
+  private treasuryOf(faction: number): Treasury {
+    let t = this.treasuries.get(faction);
+    if (!t) { t = newTreasuries().get(faction)!; this.treasuries.set(faction, t); }
+    return t;
+  }
+
+  /** Live (online) player count per faction — folded into the citizen count so
+   *  a transport with no account store still shows something real. */
+  private onlineFactionCounts(): Record<number, number> {
+    const counts: Record<number, number> = {};
+    for (const f of FACTIONS) counts[f.id] = 0;
+    for (const p of this.players.values()) {
+      if (counts[p.faction] !== undefined) counts[p.faction]++;
+    }
+    return counts;
+  }
+
+  /**
+   * The per-faction dossiers the allegiance screen reads. Deliberately built
+   * from scratch rather than sliced off internal state: a player inspecting a
+   * side they have not joined gets its president, its roster and its headline
+   * numbers, and NOT what its treasury is holding.
+   */
+  private factionPublics(): FactionPublic[] {
+    const online = this.onlineFactionCounts();
+    return FACTIONS.map((f) => {
+      const e = this.politics.elections[f.id];
+      const g = this.politics.governments[f.id];
+      const roster = this.factionRoster?.(f.id, FACTION_ROSTER_LIMIT);
+      const members = roster ?? [...this.players.values()]
+        .filter((p) => p.faction === f.id).map((p) => p.username)
+        .sort((a, b) => a.localeCompare(b)).slice(0, FACTION_ROSTER_LIMIT);
+      const out: FactionPublic = {
+        faction: f.id,
+        members,
+        memberCount: this.factionCitizens?.(f.id) ?? online[f.id] ?? 0,
+        taxRate: g.taxRate,
+        kitStock: g.kitStock,
+        treasuryCount: treasuryCount(this.treasuryOf(f.id)),
+      };
+      if (e.president) {
+        const party = e.presidentPartyId ? partyById(e, e.presidentPartyId) : undefined;
+        // Their gear is only knowable while they are online; an absent president
+        // still shows their party and their face.
+        const live = [...this.players.values()]
+          .find((p) => p.username.toLowerCase() === e.president!.toLowerCase());
+        out.president = {
+          username: e.president,
+          partyName: party?.name ?? 'Independent',
+          slogan: party?.slogan ?? '',
+          promises: party?.promises ?? [],
+          cosmetics: live?.cosmetics,
+          held: live?.held ? { id: live.held, count: 1 } : null,
+          armor: (live?.armor ?? []).map((id) => (id ? { id, count: 1 } : null)),
+        };
+      }
+      return out;
+    });
+  }
+
+  /** The politics message for ONE recipient: shared state plus, if they have a
+   *  faction, that faction's treasury contents. */
+  private politicsMsgFor(p: ServerPlayer | undefined): ServerMsg {
+    const msg: Extract<ServerMsg, { t: 'politics' }> = {
+      t: 'politics', state: this.politics, factions: this.factionPublics(),
+    };
+    if (p && isFaction(p.faction)) msg.treasury = this.treasuryOf(p.faction).slots;
+    return msg;
+  }
+
+  /** Push the whole politics state to everyone. One message per player, because
+   *  the treasury half of it is faction-private. */
+  private broadcastPolitics(): Outbound[] {
+    const out: Outbound[] = [];
+    for (const p of this.players.values()) {
+      out.push({ to: p.id, msg: this.politicsMsgFor(p) });
+    }
+    return out;
+  }
+
+  private makeNotification(
+    kind: Notification['kind'], title: string, body: string
+  ): Notification {
+    return {
+      id: `n${this.notifySerial++}`, kind, title, body, at: this.wallNow(),
+    };
+  }
+
+  /** Deliver one notification to every online member of a faction. */
+  private notifyFaction(
+    faction: number, kind: Notification['kind'], title: string, body: string,
+    except?: number
+  ): Outbound[] {
+    if (!isFaction(faction)) return [];
+    const notif = this.makeNotification(kind, title, body);
+    const out: Outbound[] = [];
+    for (const p of this.players.values()) {
+      if (p.faction !== faction || p.id === except) continue;
+      out.push({ to: p.id, msg: { t: 'notify', notif } });
+    }
+    return out;
+  }
+
+  private govErr(to: number, reason: string): Outbound[] {
+    return [{ to, msg: { t: 'govErr', reason } }];
+  }
+
+  /** The inbox a player is handed on login: their faction's stored broadcasts,
+   *  oldest first, so somebody who was away still hears what was said. */
+  private inboxFor(faction: number): Notification[] {
+    const g = governmentOf(this.politics, faction);
+    if (!g) return [];
+    return g.broadcasts.map((b: Broadcast) => ({
+      id: `b${b.id}`, kind: 'broadcast' as const,
+      title: `${factionName(faction)} broadcast · ${b.from}`,
+      body: b.text, at: b.at,
+    }));
+  }
+
+  /**
+   * Levy the faction tax on items a citizen just pulled out of the world, and
+   * bank it. Returns how many were taken (0 when there is no tax, no faction, or
+   * the treasury is full — a full treasury must never eat somebody's ore, so
+   * anything that does not fit is left with the player).
+   */
+  private levyInto(faction: number, id: number, count: number): number {
+    if (!isFaction(faction)) return 0;
+    const g = governmentOf(this.politics, faction);
+    if (!g || g.taxRate <= 0) return 0;
+    const want = levy(count, g.taxRate, this.rng());
+    if (want <= 0) return 0;
+    const t = this.treasuryOf(faction);
+    const leftOver = deposit(t, id, want);
+    const banked = want - leftOver;
+    t.taken += banked;
+    return banked;
+  }
+
+  /** Swear allegiance. One-shot: the account store owns "permanent", and this
+   *  refuses anything it refuses. */
+  private handlePledge(p: ServerPlayer, faction: number): Outbound[] {
+    if (isFaction(p.faction)) {
+      return this.govErr(p.id, 'You have already sworn allegiance — that choice is permanent.');
+    }
+    if (!isFaction(faction)) return this.govErr(p.id, 'That is not a faction.');
+    // The account store is the authority; without one (tests/offline transports)
+    // the in-memory player is.
+    if (this.onPledge && !this.onPledge(p.username, faction)) {
+      return this.govErr(p.id, 'You have already sworn allegiance — that choice is permanent.');
+    }
+    p.faction = faction;
+    const s = this.spawn(faction);
+    p.x = s.x; p.y = s.y; p.z = s.z;
+    p.dead = false;
+    p.health = maxHealthFor(p.hearts);
+    const out: Outbound[] = [
+      { to: p.id, msg: { t: 'pledged', faction } },
+      { to: p.id, msg: { t: 'teleport', x: s.x, y: s.y, z: s.z } },
+      // Everyone re-reads the newcomer: their nameplate and shirt just changed.
+      { to: 'all', msg: { t: 'join', player: toInfo(p) } },
+    ];
+    out.push(...this.notifyFaction(faction, 'system', 'A new citizen',
+      `${p.username} has sworn allegiance to ${factionName(faction)}.`, p.id));
+    const g = governmentOf(this.politics, faction);
+    if (g && g.kitStock > 0 && !this.kitClaimed?.(p.username)) {
+      out.push({ to: p.id, msg: { t: 'notify', notif: this.makeNotification(
+        'kit', 'A recruit kit is waiting',
+        `${factionName(faction)} has funded ${g.kitStock} starter kit${g.kitStock === 1 ? '' : 's'}. ` +
+        'Open /president to claim yours.') } });
+    }
+    out.push(...this.broadcastPolitics());
+    return out;
+  }
+
+  private handleFoundParty(
+    p: ServerPlayer, name: unknown, slogan: unknown, promises: unknown
+  ): Outbound[] {
+    const res = foundParty(this.politics, p.faction, p.username,
+      name, slogan, promises, this.wallNow());
+    if (!res.ok) return this.govErr(p.id, res.error ?? 'That party cannot stand.');
+    return [
+      ...this.notifyFaction(p.faction, 'election', 'A new party stands',
+        `${res.party!.name} — "${res.party!.slogan}" — led by ${p.username}.`),
+      ...this.broadcastPolitics(),
+    ];
+  }
+
+  private handleDisbandParty(p: ServerPlayer): Outbound[] {
+    const res = disbandParty(this.politics, p.faction, p.username);
+    if (!res.ok) return this.govErr(p.id, res.error ?? 'You do not lead a party.');
+    return this.broadcastPolitics();
+  }
+
+  private handleVote(p: ServerPlayer, partyId: unknown): Outbound[] {
+    if (typeof partyId !== 'string') return this.govErr(p.id, 'No such party.');
+    const res = castVote(this.politics, p.faction, p.username, partyId);
+    if (!res.ok) return this.govErr(p.id, res.error ?? 'That vote cannot be cast.');
+    return this.broadcastPolitics();
+  }
+
+  /** Guard shared by every power of office. */
+  private requirePresident(p: ServerPlayer): string | null {
+    if (!isFaction(p.faction)) return 'You have no faction.';
+    if (!isPresident(this.politics, p.faction, p.username)) {
+      return 'Only your faction\'s president can do that.';
+    }
+    return null;
+  }
+
+  private handleGovBroadcast(p: ServerPlayer, text: unknown): Outbound[] {
+    const denied = this.requirePresident(p);
+    if (denied) return this.govErr(p.id, denied);
+    const g = governmentOf(this.politics, p.faction)!;
+    const res = pushBroadcast(g, p.username, text, this.wallNow(), this.politics.serial++);
+    if (!res.ok) return this.govErr(p.id, res.error ?? 'Say something first.');
+    const notif = this.makeNotification('broadcast',
+      `${factionName(p.faction)} broadcast · ${p.username}`, res.broadcast!.text);
+    const out: Outbound[] = [];
+    for (const other of this.players.values()) {
+      if (other.faction !== p.faction) continue;
+      out.push({ to: other.id, msg: { t: 'notify', notif } });
+    }
+    out.push(...this.broadcastPolitics());
+    return out;
+  }
+
+  private handleGovTax(p: ServerPlayer, rate: unknown): Outbound[] {
+    const denied = this.requirePresident(p);
+    if (denied) return this.govErr(p.id, denied);
+    const g = governmentOf(this.politics, p.faction)!;
+    const before = g.taxRate;
+    const res = setTaxRate(g, rate);
+    if (!res.ok) return this.govErr(p.id, res.error ?? 'Not a tax rate.');
+    if (g.taxRate === before) return this.broadcastPolitics();
+    return [
+      ...this.notifyFaction(p.faction, 'tax', 'The tax rate changed',
+        `${p.username} set the levy to ${Math.round(g.taxRate * 100)}% ` +
+        `(was ${Math.round(before * 100)}%).`),
+      ...this.broadcastPolitics(),
+    ];
+  }
+
+  private handleFundKits(p: ServerPlayer, count: unknown): Outbound[] {
+    const denied = this.requirePresident(p);
+    if (denied) return this.govErr(p.id, denied);
+    const n = Number.isFinite(count) ? Math.floor(count as number) : 0;
+    if (n <= 0 || n > 100) return this.govErr(p.id, 'Fund between 1 and 100 kits.');
+    const t = this.treasuryOf(p.faction);
+    if (!canFundKits(t, n)) {
+      return this.govErr(p.id, 'The treasury cannot afford that many kits.');
+    }
+    if (!fundKits(t, n)) return this.govErr(p.id, 'The treasury cannot afford that many kits.');
+    const g = governmentOf(this.politics, p.faction)!;
+    g.kitStock += n;
+    return [
+      ...this.notifyFaction(p.faction, 'kit', 'Recruit kits funded',
+        `${p.username} funded ${n} starter kit${n === 1 ? '' : 's'} — ${g.kitStock} now waiting.`),
+      ...this.broadcastPolitics(),
+    ];
+  }
+
+  /** Take the one recruit kit this account is entitled to, ever. */
+  private handleClaimKit(p: ServerPlayer): Outbound[] {
+    if (!isFaction(p.faction)) return this.govErr(p.id, 'You have no faction.');
+    const g = governmentOf(this.politics, p.faction)!;
+    if (g.kitStock <= 0) {
+      return this.govErr(p.id, 'Your faction has no kits funded right now.');
+    }
+    if (this.kitClaimed?.(p.username)) {
+      return this.govErr(p.id, 'You have already taken your recruit kit.');
+    }
+    // Claim on the ACCOUNT first: if that refuses, no stock is spent and no
+    // items are minted.
+    if (this.onClaimKit && !this.onClaimKit(p.username)) {
+      return this.govErr(p.id, 'You have already taken your recruit kit.');
+    }
+    g.kitStock--;
+    const out: Outbound[] = [];
+    for (const line of STARTER_KIT) {
+      out.push({ to: p.id, msg: { t: 'gotitem', item: line.id, count: line.count } });
+    }
+    out.push({ to: p.id, msg: { t: 'notice', text: '[KIT] Your faction funded this. Go build something.' } });
+    out.push(...this.broadcastPolitics());
+    return out;
+  }
+
+  /**
+   * Haul stacks out of the ENEMY treasury. Only during a war window, only from
+   * inside reach of their pad, and never from your own — so this is a reason to
+   * defend the flag site during a war, not a permanent grief button.
+   */
+  private handleTreasuryRaid(p: ServerPlayer, faction: unknown): Outbound[] {
+    if (p.dead || p.mode !== 'survival') return [];
+    if (!isFaction(p.faction)) return this.govErr(p.id, 'You have no faction.');
+    if (!isFaction(faction as number) || faction === p.faction) {
+      return this.govErr(p.id, 'That is not an enemy treasury.');
+    }
+    if (!this.isWarActive()) {
+      return this.govErr(p.id, 'The strongbox is sealed. It can only be forced during a war.');
+    }
+    if (treasuryInReach(p.x, p.z) !== faction) {
+      return this.govErr(p.id, 'Stand at their treasury first.');
+    }
+    if (this.worldTime - (p.lastTreasuryRaid ?? -Infinity) < RAID_COOLDOWN) {
+      return this.govErr(p.id, 'You are still hauling the last load — wait a moment.');
+    }
+    const t = this.treasuryOf(faction as number);
+    const loot = raid(t, p.username, this.wallNow(), RAID_STACKS);
+    if (!loot.length) return this.govErr(p.id, 'The strongbox is empty.');
+    p.lastTreasuryRaid = this.worldTime;
+    const out: Outbound[] = [];
+    for (const stack of loot) {
+      out.push({ to: p.id, msg: { t: 'gotitem', item: stack.id, count: stack.count } });
+    }
+    out.push({ to: 'all', msg: {
+      t: 'treasuryRaided', faction: faction as number, by: p.username, stacks: loot.length } });
+    out.push(...this.notifyFaction(faction as number, 'raid', 'THE TREASURY IS BEING ROBBED',
+      `${p.username} hauled ${loot.length} stack${loot.length === 1 ? '' : 's'} out of the ` +
+      `${factionName(faction as number)} strongbox. Get to the flag.`));
+    out.push(...this.broadcastPolitics());
+    return out;
+  }
+
+  /**
+   * Advance the election clock. Weekly terms on the WALL clock, checked about
+   * once a second — a seven-day deadline does not need the tick rate.
+   */
+  tickPolitics(dt: number): Outbound[] {
+    if (!fin(dt) || dt <= 0) return [];
+    this.politicsAccum += dt;
+    if (this.politicsAccum < 1) return [];
+    this.politicsAccum = 0;
+    const now = this.wallNow();
+    const out: Outbound[] = [];
+    let changed = this.politicsDirty;
+    this.politicsDirty = false;
+    for (const f of FACTIONS) {
+      const e = this.politics.elections[f.id];
+      if (!termExpired(e, now)) continue;
+      const before = e.president;
+      const { president, party } = tallyElection(e);
+      const counts = voteCounts(e);
+      rollCycle(e, now);
+      changed = true;
+      if (party) {
+        out.push(...this.notifyFaction(f.id, 'election',
+          `${party.name} wins the election`,
+          `${president} takes office for term ${e.cycle} with ${counts[party.id]} vote` +
+          `${counts[party.id] === 1 ? '' : 's'}${before && before !== president
+            ? `, unseating ${before}` : ''}.`));
+      } else {
+        out.push(...this.notifyFaction(f.id, 'election', 'Nobody voted',
+          before
+            ? `${before} stays in office by default. Term ${e.cycle} is open — stand a party.`
+            : `The presidency is still vacant. Term ${e.cycle} is open — stand a party.`));
+      }
+    }
+    if (changed) out.push(...this.broadcastPolitics());
+    return out;
+  }
+
+  /** Console/report: one line per faction. */
+  politicsStatusText(): string {
+    const now = this.wallNow();
+    const lines: string[] = [];
+    for (const f of FACTIONS) {
+      const e = this.politics.elections[f.id];
+      const g = this.politics.governments[f.id];
+      const days = Math.max(0, (e.endsAt - now) / 86400000);
+      lines.push(`${factionName(f.id)}: president ${e.president ?? '(vacant)'} · ` +
+        `term ${e.cycle}, ${days.toFixed(1)}d left · ${e.parties.length} part` +
+        `${e.parties.length === 1 ? 'y' : 'ies'} · tax ${Math.round(g.taxRate * 100)}% · ` +
+        `treasury ${treasuryCount(this.treasuryOf(f.id))} items · ${g.kitStock} kits`);
+    }
+    return lines.join('\n');
+  }
+
+  /** Admin: force this faction's term to end now (console `election tally`). */
+  adminTallyElection(faction: number): Outbound[] {
+    const e = electionOf(this.politics, faction);
+    if (!e) return [];
+    e.endsAt = this.wallNow() - 1;
+    this.politicsAccum = 1;
+    return this.tickPolitics(1);
+  }
+
+  /** Admin: put items straight into a faction treasury (console `treasury give`). */
+  adminDepositTreasury(faction: number, item: number, count: number): boolean {
+    if (!isFaction(faction) || !ITEMS[item] || !fin(count) || count <= 0) return false;
+    const t = this.treasuryOf(faction);
+    const left = deposit(t, item, Math.floor(count));
+    t.taken += Math.floor(count) - left;
+    return left < Math.floor(count);
+  }
+
   // --- Seasons (Phase 5) -----------------------------------------------------
 
   /** Live season state for the HUD (number + seconds left). */
@@ -4262,7 +4786,7 @@ export class GameServer {
 
   serialize(): WorldSave {
     return {
-      v: 2,
+      v: 3,
       seed: this.seed,
       worldTime: this.worldTime,
       edits: [...this.edits.entries()],
@@ -4273,6 +4797,8 @@ export class GameServer {
       war: this.war,
       warWins: this.warWins.slice(),
       flags: this.flags,
+      politics: this.politics,
+      treasuries: [...this.treasuries.entries()],
       vaults: [...this.vaults.entries()],
       silos: [...this.strategic.silos.values()],
       batteries: [...this.strategic.batteries.values()],
@@ -4374,6 +4900,17 @@ export class GameServer {
     this.vehicles.seedIds(highestId);
     this.vehicles.clearOccupants();   // occupants never survive a restart
     this.flags = sanitizeFlags(s.flags); // carriers never survive a reboot
+    // Government. A v2 save carries neither key and simply comes back with a
+    // fresh election clock and empty strongboxes — fail-closed, like every other
+    // record here, rather than refusing the whole world.
+    this.politics = sanitizePolitics(s.politics, this.wallNow());
+    this.treasuries = newTreasuries();
+    for (const entry of Array.isArray(s.treasuries) ? s.treasuries : []) {
+      if (!Array.isArray(entry) || entry.length !== 2) continue;
+      const [faction, raw] = entry as [unknown, unknown];
+      if (!isFaction(faction as number)) continue;
+      this.treasuries.set(faction as number, sanitizeTreasury(raw, faction as number));
+    }
     return true;
   }
 
@@ -4464,6 +5001,10 @@ export interface WorldSave {
   strategicNextId?: number;
   /** Capture-the-flag state: who holds which flag + the armed switch. */
   flags?: FlagsState;
+  /** Elections, parties and governments (politics.ts). Absent in a v2 save. */
+  politics?: PoliticsState;
+  /** One strongbox per faction (treasury.ts). Absent in a v2 save. */
+  treasuries?: [number, Treasury][];
   /** Vault boss HP + per-player openedBy ledgers (Milestone D). */
   vaults?: [string, VaultServerState][];
 }

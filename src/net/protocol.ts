@@ -19,6 +19,53 @@ import type {
 } from '../vehicles';
 import type { DuelArenaBounds, DuelLobbySnapshot, DuelResult } from '../duels';
 import type { DuelFlair, DuelPublicProfile } from '../duels_progression';
+import type { PoliticsState } from '../politics';
+
+/** One entry in a player's notification inbox (notifications_ui.ts). Kinds drive
+ *  the icon and the accent, nothing else. */
+export type NotificationKind =
+  'broadcast' | 'election' | 'raid' | 'tax' | 'kit' | 'system';
+
+export interface Notification {
+  id: string;
+  kind: NotificationKind;
+  title: string;
+  body: string;
+  /** Wall-clock ms. */
+  at: number;
+}
+
+/**
+ * Everything the allegiance screen needs to show about a faction you have NOT
+ * joined. Deliberately a separate, narrow shape rather than a slice of the
+ * server's state: a side you are only inspecting gets its president, its roster
+ * and its headline numbers, and nothing that would leak what it is holding.
+ */
+export interface FactionPublic {
+  faction: number;
+  /** Roster sample, capped — a long server must not put 5,000 names on the wire. */
+  members: string[];
+  memberCount: number;
+  taxRate: number;
+  kitStock: number;
+  /** COUNT only. The treasury's contents are for its own members. */
+  treasuryCount: number;
+  /** The sitting president, absent while the seat is vacant. */
+  president?: {
+    username: string;
+    partyName: string;
+    slogan: string;
+    /** Indices into PRESET_PROMISES (politics.ts). */
+    promises: number[];
+    cosmetics?: Cosmetics;
+    /** What they are actually carrying — rendered as hoverable item chips. */
+    held?: ItemStack | null;
+    armor?: (ItemStack | null)[];
+  };
+}
+
+/** Roster names sent per faction on the pledge screen. */
+export const FACTION_ROSTER_LIMIT = 40;
 
 export const SERVER_PORT = 8080;
 export const SNAPSHOT_HZ = 15;     // server -> clients transform broadcasts
@@ -175,7 +222,9 @@ export type ClientMsg =
   | { t: 'hello' }
   | { t: 'duelInviteInfo'; token: string }
   // Mandatory accounts: a socket must authenticate before it spawns a player.
-  | { t: 'register'; username: string; password: string; faction?: number } // faction = picked side
+  // A fresh account has NO side: allegiance is sworn later, once, on the
+  // pledge screen (see `pledgeFaction`).
+  | { t: 'register'; username: string; password: string }
   | { t: 'login'; username: string; password: string }
   // Resume a saved session (token issued by the server on each successful
   // auth) — lets a returning browser skip the password.
@@ -216,7 +265,13 @@ export type ClientMsg =
   | { t: 'command'; text: string }
   | { t: 'selfhurt'; amount: number }   // fall/drown damage, applied by server
   | { t: 'respawn' }
-  | { t: 'drop'; items: { id: number; count: number }[]; x: number; y: number; z: number }
+  // `reason` separates a HARVEST (a block you just broke, a machine spilling)
+  // from a player emptying their own inventory. Only a harvest is taxed, so
+  // dropping and re-collecting your own stack can never be levied twice. Same
+  // trust model as the client-reported armor points: a client could mislabel
+  // one, and the cost of that is a dodged tax, not a duped item.
+  | { t: 'drop'; items: { id: number; count: number }[]; x: number; y: number; z: number;
+      reason?: 'harvest' | 'manual' }
   | { t: 'pickup'; eid: number }
   | { t: 'chestOpen'; x: number; y: number; z: number }
   | { t: 'chestSet'; x: number; y: number; z: number; slots: (ItemStack | null)[] }
@@ -258,6 +313,24 @@ export type ClientMsg =
   // announcement — others keep seeing your old colors (a spy), but the server
   // treats you as your new faction. Max 2/season, locked in the final week.
   | { t: 'switchFaction'; faction: number }
+  // --- FACTION GOVERNMENT (politics.ts / treasury.ts) ------------------------
+  // Swear allegiance. PERMANENT: the server refuses a second pledge, so this is
+  // the one and only time a player chooses a side.
+  | { t: 'pledgeFaction'; faction: number }
+  // Stand for election / withdraw / vote. One party and one vote per citizen
+  // per cycle; the server owns both rules.
+  | { t: 'foundParty'; name: string; slogan: string; promises: number[] }
+  | { t: 'disbandParty' }
+  | { t: 'castVote'; partyId: string }
+  // Powers of office. Every one is re-checked against the sitting presidency
+  // server-side — the client only hides the controls.
+  | { t: 'govBroadcast'; text: string }
+  | { t: 'govTax'; rate: number }
+  | { t: 'govFundKits'; count: number }
+  // Claim the recruit kit your faction funded (once per account, ever).
+  | { t: 'claimKit' }
+  // Haul stacks out of the ENEMY treasury. Refused outside a war window.
+  | { t: 'treasuryRaid'; faction: number }
   // RETIRED (Warfare Command): the old mob-kill XP report. Kept in the union so
   // an older client's message is accepted and ignored rather than desyncing.
   | { t: 'xp'; amount: number }
@@ -397,6 +470,17 @@ export type ServerMsg =
       helis: HelicopterSnapshot[];
       /** Locations a tactical strike may never be aimed into. */
       protectedAreas: ProtectedArea[];
+      /** FACTION GOVERNMENT: elections + governments for every faction. Present
+       *  even for an unpledged player — the allegiance screen reads it. */
+      politics: PoliticsState;
+      /** Per-faction public dossiers for the allegiance screen. */
+      factions: FactionPublic[];
+      /** YOUR faction's treasury contents (omitted while unpledged). */
+      treasury?: (ItemStack | null)[];
+      /** Stored broadcasts waiting in your inbox, oldest first. */
+      inbox: Notification[];
+      /** Have you already claimed your recruit kit? */
+      kitClaimed: boolean;
     }
   | { t: 'join'; player: PlayerInfo }
   | { t: 'leave'; id: number }
@@ -448,6 +532,20 @@ export type ServerMsg =
       faction: number; by: string; holder: number }
   // Private confirmation of a secret faction switch (only to the defector).
   | { t: 'factionSwitched'; faction: number; remaining: number }
+  // --- FACTION GOVERNMENT ----------------------------------------------------
+  // The whole politics state plus the public dossiers, rebroadcast on every
+  // change (it is small: two elections, at most 12 parties each). `treasury` is
+  // per-recipient — you only ever see your OWN faction's contents.
+  | { t: 'politics'; state: PoliticsState; factions: FactionPublic[];
+      treasury?: (ItemStack | null)[] }
+  // Your pledge landed: you are a citizen of `faction` from now on.
+  | { t: 'pledged'; faction: number }
+  // A governance action was refused, with the reason to show.
+  | { t: 'govErr'; reason: string }
+  // One entry for the notifications inbox.
+  | { t: 'notify'; notif: Notification }
+  // Somebody is in the vault. Drives the alarm horn for the defenders.
+  | { t: 'treasuryRaided'; faction: number; by: string; stacks: number }
   // Gadget visual effect to play everywhere (frag/oil blast, smoke cloud).
   | { t: 'gadgetFx'; kind: GadgetKind; x: number; y: number; z: number }
   // Spy disguise (Phase 8): render player `id` as `faction` until `until`

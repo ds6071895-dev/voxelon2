@@ -548,6 +548,25 @@ export class GameAudio {
   }
 
   /** Bounce Pad: spring compression, a rubbery launch note, then air rushing by. */
+  /** TREASURY ALARM: two low war horns over a swell of air. Deliberately the
+   *  lowest, longest cue in the game — it has to carry from underground and read
+   *  as "come home now", not as another pickup chime. */
+  raidHorn(): void {
+    this.tone({ type: 'sawtooth', from: 108, to: 114, dur: 0.9, gain: 0.19, attack: 0.09 });
+    this.tone({ type: 'triangle', from: 163, to: 169, dur: 0.85, gain: 0.14, attack: 0.09 });
+    this.tone({ type: 'square', from: 218, to: 226, dur: 0.7, gain: 0.08, attack: 0.07 });
+    this.tone({ type: 'sawtooth', from: 146, to: 153, dur: 0.95, gain: 0.17, attack: 0.09, delay: 0.48 });
+    this.tone({ type: 'triangle', from: 219, to: 226, dur: 0.9, gain: 0.12, attack: 0.09, delay: 0.48 });
+    this.noise({ freq: 280, dur: 1.3, gain: 0.09, slideTo: 155, type: 'lowpass', q: 0.8 });
+  }
+
+  /** A short civic chime for a broadcast or an election result landing in the
+   *  inbox. Bright and brief — it must never be mistaken for the raid horn. */
+  dispatchChime(): void {
+    this.tone({ type: 'triangle', from: 784, to: 1046, dur: 0.16, gain: 0.1, attack: 0.01 });
+    this.tone({ type: 'sine', from: 1046, to: 1318, dur: 0.22, gain: 0.08, delay: 0.1 });
+  }
+
   bouncePad(): void {
     this.noise({ freq: 540, dur: 0.08, gain: 0.2, slideTo: 170, type: 'lowpass', q: 0.8 });
     this.tone({ type: 'sine', from: 150, to: 640, dur: 0.34, gain: 0.2, attack: 0.015 });

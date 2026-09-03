@@ -7,7 +7,27 @@ import { mulberry32, hash2 } from './noise';
 
 export const TILE_PX = 16;
 export const ATLAS_TILES = 16; // 16x16 grid of tiles
-const ATLAS_PX = TILE_PX * ATLAS_TILES;
+/** Gutter around every tile's art inside its atlas cell.
+ *
+ *  The atlas is MIPMAPPED (see createAtlas), and a mipmap averages neighbouring
+ *  texels — so without a gutter, tile N's colour leaks into tile N+1 the moment
+ *  the sampler drops to a smaller level. Each 16px tile therefore sits in the
+ *  middle of a 32px cell whose border repeats the tile's own edge pixels, which
+ *  keeps the average honest all the way down to a 4x4 level (2x2 of art). */
+export const ATLAS_PAD = 8;
+/** Full cell footprint: art plus its gutter on both sides. */
+export const CELL_PX = TILE_PX + ATLAS_PAD * 2;
+const ATLAS_PX = CELL_PX * ATLAS_TILES;
+
+/** Top-left pixel of a tile's ART (not its cell) inside the atlas canvas.
+ *  Anything reading the atlas canvas directly — the item icons in icons.ts —
+ *  must go through this rather than multiplying by TILE_PX. */
+export function tileOrigin(tile: number): { x: number; y: number } {
+  return {
+    x: (tile % ATLAS_TILES) * CELL_PX + ATLAS_PAD,
+    y: Math.floor(tile / ATLAS_TILES) * CELL_PX + ATLAS_PAD,
+  };
+}
 
 export interface Atlas {
   texture: THREE.CanvasTexture;
@@ -2947,40 +2967,77 @@ function vibrance(p: Painter): void {
   }
 }
 
-export function createAtlas(seed = 1337): Atlas {
+/** Repeat a tile's outermost pixels outward across its gutter, so a mipmap
+ *  level averages the tile against ITSELF instead of against its neighbour.
+ *  The horizontal pass runs first and the vertical pass then spans the full
+ *  padded width, which fills the four corners for free. */
+function extrudeCell(
+  ctx: CanvasRenderingContext2D, ox: number, oy: number
+): void {
+  const P = ATLAS_PAD, T = TILE_PX, W = T + P * 2;
+  const src = ctx.canvas;
+  ctx.drawImage(src, ox, oy, 1, T, ox - P, oy, P, T);               // left
+  ctx.drawImage(src, ox + T - 1, oy, 1, T, ox + T, oy, P, T);       // right
+  ctx.drawImage(src, ox - P, oy, W, 1, ox - P, oy - P, W, P);       // top + corners
+  ctx.drawImage(src, ox - P, oy + T - 1, W, 1, ox - P, oy + T, W, P); // bottom + corners
+}
+
+/**
+ * Paint every block/item tile into one mipmapped atlas.
+ *
+ * `maxAnisotropy` comes from the live renderer (`capabilities.getMaxAnisotropy()`).
+ * Terrain is mostly viewed at a grazing angle — the ground stretching away to the
+ * horizon — and that is the one case an isotropic mip chain over-blurs and then
+ * aliases anyway. Anisotropic filtering is what actually settles it; passing 1
+ * (the default) simply leaves the texture isotropic.
+ */
+export function createAtlas(seed = 1337, maxAnisotropy = 1): Atlas {
   const canvas = document.createElement('canvas');
   canvas.width = ATLAS_PX;
   canvas.height = ATLAS_PX;
   const ctx = canvas.getContext('2d')!;
+  // The gutter is built by scaling 1px slices; smoothing would blend them.
+  ctx.imageSmoothingEnabled = false;
 
+  const painted: number[] = [];
   for (const [tileStr, paint] of Object.entries(PAINTERS)) {
     const tile = Number(tileStr);
     const p = new Painter();
     paint(p, seed ^ (tile * 7919));
     vibrance(p);
     const img = new ImageData(p.data, TILE_PX, TILE_PX);
-    const col = tile % ATLAS_TILES;
-    const row = Math.floor(tile / ATLAS_TILES);
-    ctx.putImageData(img, col * TILE_PX, row * TILE_PX);
+    const { x, y } = tileOrigin(tile);
+    ctx.putImageData(img, x, y);
+    painted.push(tile);
+  }
+  // Extrusion has to happen after EVERY tile is down: putImageData overwrites
+  // the destination rectangle wholesale, so a gutter written first would be
+  // punched back out by the neighbouring tile's art.
+  for (const tile of painted) {
+    const { x, y } = tileOrigin(tile);
+    extrudeCell(ctx, x, y);
   }
 
   const texture = new THREE.CanvasTexture(canvas);
+  // Crunchy up close, filtered at distance. NearestFilter magnification keeps
+  // the pixel art pixel-art; the mip chain is what stops far-off terrain from
+  // swimming with moire as one screen pixel starts covering many texels.
   texture.magFilter = THREE.NearestFilter;
-  texture.minFilter = THREE.NearestFilter;
-  texture.generateMipmaps = false;
+  texture.minFilter = THREE.NearestMipmapLinearFilter;
+  texture.generateMipmaps = true;
+  texture.anisotropy = Math.max(1, Math.floor(maxAnisotropy));
   texture.colorSpace = THREE.SRGBColorSpace;
 
-  const inset = 0.25 / ATLAS_PX; // quarter-texel inset against bleeding
+  const inset = 0.25; // quarter-texel inset against bleeding, in atlas pixels
   return {
     texture,
     canvas,
     uvRect(tile: Tile) {
-      const col = tile % ATLAS_TILES;
-      const row = Math.floor(tile / ATLAS_TILES);
-      const u0 = col / ATLAS_TILES + inset;
-      const u1 = (col + 1) / ATLAS_TILES - inset;
-      const v1 = 1 - row / ATLAS_TILES - inset;
-      const v0 = 1 - (row + 1) / ATLAS_TILES + inset;
+      const { x, y } = tileOrigin(tile);
+      const u0 = (x + inset) / ATLAS_PX;
+      const u1 = (x + TILE_PX - inset) / ATLAS_PX;
+      const v1 = 1 - (y + inset) / ATLAS_PX;
+      const v0 = 1 - (y + TILE_PX - inset) / ATLAS_PX;
       return [u0, v0, u1, v1];
     },
   };

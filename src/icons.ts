@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { BLOCKS, Tile } from './blocks';
 import { createGadgetModel, isModeledGadget } from './gadgetmodels';
 import { Item, ITEMS } from './items';
-import { TILE_PX, ATLAS_TILES } from './textures';
+import { TILE_PX, tileOrigin } from './textures';
 
 const ICON_GRASS = '#91bd59';
 const ICON_FOLIAGE = '#71a83d';
@@ -143,8 +143,9 @@ function drawGunIcon(ctx: CanvasRenderingContext2D, itemId: number): void {
 function tileSource(
   atlasCanvas: HTMLCanvasElement, tile: number, tint: string | null
 ): CanvasImageSource {
-  const sx = (tile % ATLAS_TILES) * TILE_PX;
-  const sy = Math.floor(tile / ATLAS_TILES) * TILE_PX;
+  // The atlas pads every tile with a gutter, so the art's origin is NOT
+  // tile * TILE_PX — ask the atlas where it actually put it.
+  const { x: sx, y: sy } = tileOrigin(tile);
   const off = document.createElement('canvas');
   off.width = off.height = TILE_PX;
   const octx = off.getContext('2d')!;

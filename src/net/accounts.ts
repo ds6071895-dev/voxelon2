@@ -2,11 +2,13 @@
 // agnostic: password HASHING is INJECTED (the ws shell supplies Node's built-in
 // scrypt; tests supply a fake), so this is headlessly unit-testable and carries
 // no Node/DOM deps. The shell persists/loads records via fs as JSON. Each
-// account is bound to a faction at registration (the player's pick, unless a
-// >20% imbalance forces the weaker side), and carries the player's saved state
-// (position/inventory).
+// An account is created with NO faction: a player swears allegiance on the
+// pledge screen, once, permanently (see `pledge`). Registration no longer picks
+// a side and no longer auto-balances the two — choosing your own faction after
+// inspecting its president, its roster and its tax rate IS the feature. Each
+// account also carries the player's saved state (position/inventory).
 
-import { FACTIONS, resolveJoinFaction } from '../teams';
+import { FACTIONS, NO_FACTION, isFaction } from '../teams';
 import {
   WarfareProgress, buyWarfareNode, grantWarfareXp, migrateWarfare, sanitizeWarfare,
 } from '../warfare';
@@ -21,7 +23,15 @@ export interface Account {
   username: string;
   salt: string;
   hash: string;
+  /** The side this account swore to, or NO_FACTION until it has pledged. */
   faction: number;
+  /** Wall-clock ms of the pledge. Present == pledged; the choice is permanent,
+   *  so this is what makes a second pledge refusable. */
+  pledgedAt?: number;
+  /** Has this account already taken the recruit kit its faction funded? Stored
+   *  top-level (like `op`/`eliminatedUntil`), never inside the client-owned
+   *  `data` blob, so a hand-edited state save cannot re-arm a free kit. */
+  kitClaimed?: boolean;
   /** Permanent "Seasons Won" badge rank, kept across seasons (Phase 5). */
   seasonsWon?: number;
   /** Secret-switch bookkeeping (Phase 7). */
@@ -81,7 +91,9 @@ export class Accounts {
           typeof a.hash === 'string') {
         this.byName.set(a.username.toLowerCase(), {
           username: a.username, salt: a.salt, hash: a.hash,
-          faction: Number.isFinite(a.faction) ? a.faction : 0,
+          faction: Number.isFinite(a.faction) ? a.faction : NO_FACTION,
+          pledgedAt: Number.isFinite(a.pledgedAt) ? Math.max(0, a.pledgedAt as number) : undefined,
+          kitClaimed: a.kitClaimed === true,
           seasonsWon: Number.isFinite(a.seasonsWon) ? Math.max(0, Math.floor(a.seasonsWon as number)) : 0,
           switchesUsed: Number.isFinite(a.switchesUsed) ? Math.max(0, Math.floor(a.switchesUsed as number)) : 0,
           switchSeason: Number.isFinite(a.switchSeason) ? Math.floor(a.switchSeason as number) : 0,
@@ -107,9 +119,10 @@ export class Accounts {
   list(): Account[] { return [...this.byName.values()]; }
   get size(): number { return this.byName.size; }
 
-  /** Member count per faction across ALL registered accounts (so teams stay
-   *  balanced over the whole playerbase, not just who's currently online). */
-  private factionCounts(): Record<number, number> {
+  /** Citizen count per faction across ALL registered accounts (not just who is
+   *  online) — the number the allegiance screen puts on each card. Unpledged
+   *  accounts count toward nobody. */
+  factionCounts(): Record<number, number> {
     const counts: Record<number, number> = {};
     for (const f of FACTIONS) counts[f.id] = 0;
     for (const a of this.byName.values()) {
@@ -118,11 +131,23 @@ export class Accounts {
     return counts;
   }
 
+  /** A sample of a faction's roster, alphabetical, capped. Shown on the pledge
+   *  screen so you can see who you would be fighting alongside. */
+  factionMembers(faction: number, limit = 40): string[] {
+    if (!isFaction(faction)) return [];
+    const names: string[] = [];
+    for (const a of this.byName.values()) {
+      if (a.faction === faction) names.push(a.username);
+    }
+    names.sort((a, b) => a.localeCompare(b));
+    return names.slice(0, Math.max(0, Math.floor(limit)));
+  }
+
   /** Register a new account. `salt` is supplied by the caller (the shell uses a
-   *  cryptographic random; tests a fixed value). `desired` is the side the
-   *  player PICKED; it's honoured only while the teams are balanced — a >20%
-   *  imbalance forces the weaker side. Fail-closed on bad input/dup. */
-  register(name: string, pass: string, hash: Hasher, salt: string, desired?: number): AuthResult {
+   *  cryptographic random; tests a fixed value). The account starts with NO
+   *  faction — the player swears allegiance on the pledge screen. Fail-closed on
+   *  bad input/dup. */
+  register(name: string, pass: string, hash: Hasher, salt: string): AuthResult {
     if (!validUsername(name)) {
       return { ok: false, error: 'Username must be 3–16 letters, numbers or _' };
     }
@@ -132,12 +157,41 @@ export class Accounts {
     if (this.has(name)) return { ok: false, error: 'That username is taken' };
     const account: Account = {
       username: name, salt, hash: hash(pass, salt),
-      faction: resolveJoinFaction(this.factionCounts(), desired),
+      faction: NO_FACTION,
       seasonsWon: 0,
       duelProgress: newDuelProgress(),
     };
     this.byName.set(name.toLowerCase(), account);
     return { ok: true, account };
+  }
+
+  /** Swear allegiance. PERMANENT and one-shot: an account that already carries a
+   *  faction is refused, which is what makes "you cannot switch later" true at
+   *  the storage layer rather than only in the UI. (The Phase 7 spy defection is
+   *  a separate, budgeted path — see `applySwitch`.) */
+  pledge(name: string, faction: number, now: number): AuthResult {
+    const a = this.get(name);
+    if (!a) return { ok: false, error: 'No such account.' };
+    if (!isFaction(faction)) return { ok: false, error: 'That is not a faction.' };
+    if (isFaction(a.faction)) {
+      return { ok: false, error: 'You have already sworn allegiance — that choice is permanent.' };
+    }
+    a.faction = faction;
+    a.pledgedAt = now;
+    return { ok: true, account: a };
+  }
+
+  /** Has this account taken its one recruit kit? */
+  kitClaimed(name: string): boolean {
+    return this.get(name)?.kitClaimed === true;
+  }
+
+  /** Mark the recruit kit as taken. Returns false if it already was. */
+  claimKit(name: string): boolean {
+    const a = this.get(name);
+    if (!a || a.kitClaimed) return false;
+    a.kitClaimed = true;
+    return true;
   }
 
   /** Verify credentials. Returns the account on success. */

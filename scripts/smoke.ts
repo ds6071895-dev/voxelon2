@@ -2353,7 +2353,10 @@ check('furnace smelts ore/sand/log but not removed foods',
 
   // Accounts: the "Seasons Won" badge goes to exactly the winning faction.
   const accs = new Accounts();
-  for (const n of ['Acc1', 'Acc2', 'Acc3', 'Acc4']) accs.register(n, 'password', hash, 'sa');
+  for (const [i, n] of ['Acc1', 'Acc2', 'Acc3', 'Acc4'].entries()) {
+    accs.register(n, 'password', hash, 'sa');
+    accs.pledge(n, i % 2 === 0 ? FACTION_A : FACTION_B, 1);
+  }
   const f0 = accs.list().filter((a) => a.faction === FACTION_A);
   const f1 = accs.list().filter((a) => a.faction === FACTION_B);
   const awarded = accs.awardSeasonWin(FACTION_A);
@@ -2586,6 +2589,8 @@ check('furnace smelts ore/sand/log but not removed foods',
   const accs = new Accounts();
   accs.register('Loyal', 'password', hash, 's');
   accs.register('Traitor', 'password', hash, 's');
+  accs.pledge('Loyal', 0, 1);
+  accs.pledge('Traitor', 0, 1);
   accs.applySwitch('Loyal', 0, 0, 1, 0);   // on faction 0, never forfeited
   accs.applySwitch('Traitor', 0, 1, 1, 1); // on faction 0, forfeited in season 1
   const won = accs.awardSeasonWin(0, 1);
@@ -2829,29 +2834,42 @@ check('furnace smelts ore/sand/log but not removed foods',
 
   const accs = new Accounts();
   const r1 = accs.register('Alice', 'hunter2', hash, 'saltA');
-  check('register creates an account with a faction',
-    r1.ok && !!r1.account && FACTIONS.some((f) => f.id === r1.account!.faction));
+  check('register creates an UNPLEDGED account (no faction is assigned)',
+    r1.ok && !!r1.account && r1.account!.faction === NO_FACTION);
   check('register rejects a short password',
     !accs.register('Bob', 'xy', hash, 's').ok);
   check('register rejects a duplicate (case-insensitive) name',
     !accs.register('alice', 'whatever', hash, 's').ok);
 
-  // With no pick, registrations auto-balance across the 2 teams.
-  for (const n of ['Bob', 'Cara', 'Dan', 'Eve', 'Fin']) accs.register(n, 'password', hash, 's');
-  const counts = [0, 0];
-  for (const a of accs.list()) counts[a.faction]++;
-  check('registrations auto-balance across factions (max-min <= 1)',
-    Math.max(...counts) - Math.min(...counts) <= 1);
+  // Swearing allegiance is the ONLY way onto a side, and it is one-shot.
+  check('a pledge sets the faction and stamps the time',
+    accs.pledge('Alice', FACTION_B, 1000).ok &&
+    accs.get('Alice')!.faction === FACTION_B &&
+    accs.get('Alice')!.pledgedAt === 1000);
+  check('a second pledge is refused — the choice is permanent',
+    !accs.pledge('Alice', FACTION_A, 2000).ok &&
+    accs.get('Alice')!.faction === FACTION_B);
+  check('a pledge to a junk faction is refused',
+    !accs.pledge('Alice', 99, 3000).ok);
+  check('a pledge for an unknown account is refused',
+    !accs.pledge('Ghost', FACTION_A, 3000).ok);
 
-  // A registration PICK is honoured while the teams are balanced. (The >20%
-  // imbalance override is unit-tested above on resolveJoinFaction; register
-  // self-balances so the store rarely reaches imbalance on its own.) Seed one
-  // account per side first so the store is balanced and non-empty, then pick.
-  const accs2 = new Accounts();
-  accs2.register('Seed0', 'password', hash, 's', 0);
-  accs2.register('Seed1', 'password', hash, 's', 1);
-  check('a picked faction is honoured at register time when balanced',
-    accs2.register('PickB', 'password', hash, 's', 1).account!.faction === 1);
+  // Nothing balances the sides any more: everyone may pile onto one faction.
+  for (const n of ['Bob', 'Cara', 'Dan', 'Eve', 'Fin']) {
+    accs.register(n, 'password', hash, 's');
+    accs.pledge(n, FACTION_A, 4000);
+  }
+  check('citizens are counted per faction, unpledged accounts count for nobody',
+    accs.factionCounts()[FACTION_A] === 5 && accs.factionCounts()[FACTION_B] === 1);
+  check('the roster lists a faction\'s members alphabetically, capped',
+    accs.factionMembers(FACTION_A).join(',') === 'Bob,Cara,Dan,Eve,Fin' &&
+    accs.factionMembers(FACTION_A, 2).length === 2 &&
+    accs.factionMembers(NO_FACTION).length === 0);
+
+  // The recruit kit is one per account, ever.
+  check('a recruit kit can be claimed exactly once',
+    !accs.kitClaimed('Bob') && accs.claimKit('Bob') &&
+    accs.kitClaimed('Bob') && !accs.claimKit('Bob'));
 
   // Login verifies the password; wrong password + unknown user are rejected.
   check('login succeeds with the right password',

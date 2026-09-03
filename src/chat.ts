@@ -31,6 +31,8 @@ export const PLAYER_COMMANDS: CommandSpec[] = [
   { name: 'waypoint', args: '[name]', desc: 'Drop a waypoint where you stand' },
   { name: 'warfare', desc: 'Open the Warfare Command tree' },
   { name: 'guide', desc: 'Show or hide the Getting Started guide' },
+  { name: 'president', desc: 'Elections, your party, the treasury and the tax' },
+  { name: 'notifications', desc: 'Read your faction dispatches' },
   { name: 'tpa', args: '<player>', desc: 'Ask a player to teleport to them' },
   { name: 'tpaccept', desc: 'Accept a teleport request — then stand still' },
   { name: 'tpdeny', desc: 'Refuse the pending teleport request' },

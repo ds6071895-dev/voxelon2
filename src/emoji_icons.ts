@@ -14,7 +14,8 @@ export type IconName =
   | 'mail' | 'lock' | 'dove' | 'statue' | 'eye' | 'search' | 'blocked'
   | 'command' | 'close' | 'log' | 'chevronUp' | 'chevronDown' | 'droplet'
   | 'map' | 'check' | 'trap' | 'pin' | 'camera' | 'book' | 'boat' | 'party'
-  | 'compass' | 'mute' | 'plane' | 'brick' | 'horn' | 'arrowRight'
+  | 'compass' | 'mute' | 'plane' | 'brick' | 'horn' | 'arrowRight' | 'bell'
+  | 'ballot' | 'scales'
   // Geometric/technical glyphs. Several of these (pause, hourglass, the medium
   // square) carry an emoji presentation and render in the platform's colour
   // emoji font; the rest are text-font shapes whose weight and size vary just
@@ -105,6 +106,9 @@ const PATHS: Record<IconName, string> = {
   arrowDown: '<path d="M12 5v14M6 13l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
   arrowsHorizontal: '<path d="M3 12h18M7 8l-4 4 4 4M17 8l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>',
   arrowRight: '<path d="M4 12h15M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>',
+  bell: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M13.7 21a2 2 0 0 1-3.4 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
+  ballot: '<path d="M4 9h16v11H4z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M9 9V3h6v6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M10 13.5l1.6 1.6L14.5 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+  scales: '<path d="M12 3v17M7 20h10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M4 7h16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M6.5 7L4 13h5zM17.5 7L15 13h5z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>',
 };
 
 // --- Emoji substitution ---------------------------------------------------
@@ -130,7 +134,8 @@ const EMOJI_ICONS: Record<string, IconName> = {
   '⚠': 'warning', '🛰': 'satellite', '📖': 'book', '⛵': 'boat',
   '✋': 'hand', '🎉': 'party', '🧭': 'compass', '🔒': 'lock',
   '🤫': 'mute', '✈': 'plane', '⛽': 'fuel', '🔫': 'gun',
-  '📯': 'horn', '🕵': 'search', '⌘': 'command',
+  '📯': 'horn', '🕵': 'search', '⌘': 'command', '🔔': 'bell', '🗳': 'ballot',
+  '⚖': 'scales',
   '◆': 'diamond', '◇': 'diamond', '■': 'square', '◼': 'square', '▪': 'square',
   '▲': 'triangleUp', '▼': 'triangleDown', '▶': 'triangleRight', '▸': 'triangleRight',
   '●': 'disc', '◉': 'reticle', '◎': 'reticle',

@@ -16,7 +16,8 @@
     "boss-smoke": "esbuild scripts/boss_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/boss-smoke.cjs --log-level=error && node node_modules/.tmp/boss-smoke.cjs",
     "music-smoke": "esbuild scripts/boss_music_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/boss-music-smoke.cjs --log-level=error && node node_modules/.tmp/boss-music-smoke.cjs",
     "warfare-smoke": "esbuild scripts/warfare_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/warfare-smoke.cjs --log-level=error && node node_modules/.tmp/warfare-smoke.cjs",
-    "duels-smoke": "esbuild scripts/duels_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/duels-smoke.cjs --log-level=error && node node_modules/.tmp/duels-smoke.cjs"
+    "duels-smoke": "esbuild scripts/duels_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/duels-smoke.cjs --log-level=error && node node_modules/.tmp/duels-smoke.cjs",
+    "politics-smoke": "esbuild scripts/politics_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/politics-smoke.cjs --log-level=error && node node_modules/.tmp/politics-smoke.cjs"
   },
   "dependencies": {
     "three": "^0.165.0",
