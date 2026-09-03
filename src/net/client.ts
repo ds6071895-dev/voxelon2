@@ -10,9 +10,8 @@ import type { MachineState, UpgradeAxis } from '../machines';
 import type { TurretState, TurretAxis } from '../turrets';
 import {
   ClientMsg, DuelLeaderboardEntry, GameMode, ItemEntityInfo, PlayerInfo, SERVER_PORT, ServerMsg,
-  TRANSFORM_HZ, ProtocolNotification,
+  TRANSFORM_HZ,
 } from './protocol';
-import type { PoliticsState } from '../politics';
 import type { Cosmetics } from '../character';
 import type {
   EncounterEvent, EncounterSnapshot, VaultAttackIntent,
@@ -214,13 +213,6 @@ export class NetClient {
   ) => void;
   /** Private confirmation of YOUR secret faction switch (Phase 7). */
   onFactionSwitched?: (faction: number, remaining: number) => void;
-  /** President System & Faction Politics state sync. `treasuries` carries the
-   *  item count held by each faction, for the pledge screen. */
-  onPoliticsSync?: (state: PoliticsState, treasuries?: Record<number, number>) => void;
-  /** Player notification message. */
-  onNotificationMsg?: (notif: ProtocolNotification) => void;
-  /** Treasury alarm alert (emergency horn + raid text). */
-  onTreasuryAlert?: (text: string, faction: number) => void;
   /** Play a gadget visual effect (frag/oil blast, smoke cloud) at a point. */
   onGadgetFx?: (kind: string, x: number, y: number, z: number) => void;
   /** A player is disguised as `faction` until `until` (server worldTime). */
@@ -338,7 +330,6 @@ export class NetClient {
         // Restore saved inventory BEFORE onWelcome (which adopts the server
         // position) so the comeback loadout/inventory is in place from frame one.
         if (msg.state) this.onRestoreState?.(msg.state);
-        if (msg.politics) this.onPoliticsSync?.(msg.politics, msg.treasuries);
         if (me) this.onWelcome?.(me);
         this.onRoster?.();
         break;
@@ -537,15 +528,6 @@ export class NetClient {
         break;
       case 'factionSwitched':
         this.onFactionSwitched?.(msg.faction, msg.remaining);
-        break;
-      case 'politicsSync':
-        this.onPoliticsSync?.(msg.state, msg.treasuries);
-        break;
-      case 'notificationMsg':
-        this.onNotificationMsg?.(msg.notif);
-        break;
-      case 'treasuryAlert':
-        this.onTreasuryAlert?.(msg.text, msg.faction);
         break;
       case 'gadgetFx':
         this.onGadgetFx?.(msg.kind, msg.x, msg.y, msg.z);
@@ -840,15 +822,6 @@ export class NetClient {
   }
 
   sendSwitchFaction(faction: number): void { if (this.connected) this.raw({ t: 'switchFaction', faction }); }
-  sendChooseFaction(faction: number): void { if (this.connected) this.raw({ t: 'chooseFaction', faction }); }
-  sendCreateParty(name: string, slogan: string, promises: string[]): void {
-    if (this.connected) this.raw({ t: 'createParty', name, slogan, promises });
-  }
-  sendVoteParty(partyId: string): void { if (this.connected) this.raw({ t: 'voteParty', partyId }); }
-  sendPresidentBroadcast(text: string): void { if (this.connected) this.raw({ t: 'presidentBroadcast', text }); }
-  sendSetTaxRate(rate: number): void { if (this.connected) this.raw({ t: 'setTaxRate', rate }); }
-  sendAllocateKits(count: number): void { if (this.connected) this.raw({ t: 'allocateKits', count }); }
-  sendTreasurySteal(faction: number): void { if (this.connected) this.raw({ t: 'treasurySteal', faction }); }
   /** Report mob-kill XP (server clamps + feeds the faction pool). */
   // --- WARFARE COMMAND ---
   sendWarfareBuy(node: string): void { if (this.connected) this.raw({ t: 'warfareBuy', node }); }

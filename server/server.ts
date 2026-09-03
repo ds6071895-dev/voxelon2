@@ -81,17 +81,6 @@ game.onFactionSwitch = (username, faction, switchesUsed, switchSeason, forfeitSe
   saveAccounts();
   worldDirty = true;
 };
-// Permanent allegiance selection
-game.onFactionChosen = (username, faction) => {
-  accounts.chooseFaction(username, faction);
-  saveAccounts();
-  worldDirty = true;
-  console.log(`[FACTION] ${username} permanently pledged allegiance to faction ${faction}`);
-};
-// Save world when politics state updates
-game.onPoliticsChange = () => {
-  worldDirty = true;
-};
 // WARFARE COMMAND: persist a player's technology to the ACCOUNT record (not the
 // opaque client state blob), so a routine state save can never mint or wipe it.
 game.onWarfareChange = (username, progress) => {

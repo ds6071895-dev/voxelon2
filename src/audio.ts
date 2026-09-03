@@ -547,16 +547,6 @@ export class GameAudio {
     this.noise({ freq: 700, dur: 0.42, gain: 0.16, slideTo: 2000, type: 'bandpass', q: 0.5 });
   }
 
-  /** Treasury Raid Alarm Horn: deep brassy resonant war horns sounding an emergency alarm. */
-  raidHorn(): void {
-    this.tone({ type: 'sawtooth', from: 110, to: 115, dur: 0.85, gain: 0.18, attack: 0.08 });
-    this.tone({ type: 'triangle', from: 165, to: 168, dur: 0.8, gain: 0.14, attack: 0.08 });
-    this.tone({ type: 'square', from: 220, to: 226, dur: 0.75, gain: 0.09, attack: 0.06 });
-    this.tone({ type: 'sawtooth', from: 147, to: 152, dur: 0.9, gain: 0.16, attack: 0.08, delay: 0.45 });
-    this.tone({ type: 'triangle', from: 220, to: 225, dur: 0.85, gain: 0.12, attack: 0.08, delay: 0.45 });
-    this.noise({ freq: 280, dur: 1.2, gain: 0.1, slideTo: 160, type: 'lowpass', q: 0.8 });
-  }
-
   /** Bounce Pad: spring compression, a rubbery launch note, then air rushing by. */
   bouncePad(): void {
     this.noise({ freq: 540, dur: 0.08, gain: 0.2, slideTo: 170, type: 'lowpass', q: 0.8 });

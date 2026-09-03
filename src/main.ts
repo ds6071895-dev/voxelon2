@@ -48,11 +48,6 @@ import {
   RemotePlayers, SEAT_SINK, anchorTiltedBody, applyAvatarSneak, buildAvatarBody,
   buildArmorOverlay, disposeAvatarBody, stridePose, AvatarBody,
 } from './remoteplayers';
-import { NotificationsManager } from './notifications_ui';
-import { FactionPicker } from './faction_picker';
-import { PresidentUI } from './president_ui';
-import { createInitialPoliticsState, type PoliticsState } from './politics';
-import { treasuryAt } from './treasury';
 import {
   GliderRig, RIG_HARNESS_Y, buildGliderRig, glidePose, poseGliderRig,
 } from './glidermodels';
@@ -1142,55 +1137,9 @@ function showRegionBanner(text: string, color: string): void {
   regionBannerEl.style.display = 'block';
   regionBannerTimer = 3.2;
 }
-// The local player's faction: NO_FACTION until chosen on the Faction Selection screen
-let localFaction = NO_FACTION;
-let politicsState: PoliticsState = createInitialPoliticsState();
-/** Item count in each faction treasury, from the server's politics sync. */
-let treasuryCounts: Record<number, number> = { 0: 0, 1: 0 };
-const notificationsManager = new NotificationsManager(app);
-const factionPicker = new FactionPicker(app);
-const presidentUI = new PresidentUI(app);
-
-function openPresidentUI(): void {
-  if (input.locked) input.unlock();
-  presidentUI.show(politicsState, localFaction, authedName || 'Citizen', {
-    onCreateParty: (name, slogan, promises) => {
-      if (net.connected) net.sendCreateParty(name, slogan, promises);
-      else showNotice('Offline candidacy registered!');
-    },
-    onVote: (partyId) => {
-      if (net.connected) net.sendVoteParty(partyId);
-      else showNotice('Offline ballot cast!');
-    },
-    onBroadcast: (text) => {
-      if (net.connected) net.sendPresidentBroadcast(text);
-      else showNotice('Broadcast dispatched!');
-    },
-    onSetTaxRate: (rate) => {
-      if (net.connected) net.sendSetTaxRate(rate);
-      else showNotice(`Tax rate set to ${Math.round(rate * 100)}%!`);
-    },
-    onAllocateKits: (count) => {
-      if (net.connected) net.sendAllocateKits(count);
-      else showNotice(`Allocated ${count} recruit starter kits!`);
-    },
-  });
-}
-
-// Mount the two dispatch bells: one on the title screen, one in the HUD. They
-// share a single unread count and open the same centre.
-notificationsManager.mountBell(overlay, 'title');
-const hudBell = notificationsManager.mountBell(app, 'hud');
-hudBell.hidden = true;
-
-notificationsManager.setCallbacks(
-  () => { if (input.locked) input.unlock(); },
-  () => {
-    if (worldReady && screen === 'playing' && !player.dead && !invUI.open && !worldMap.open && !chatBox.open) {
-      input.lock();
-    }
-  }
-);
+// The local player's faction: server-assigned in MP (onWelcome), or a single
+// local faction offline so shields/ownership/colors still work in single-player.
+let localFaction = FACTIONS[0].id;
 // Local gamemode (admin-set via the server console). Drives flight/noclip/
 // invulnerability + the creative build conveniences.
 let localMode: GameMode = 'survival';
@@ -1542,26 +1491,6 @@ function ensureOfflineStructureLoot(x: number, y: number, z: number): void {
 
 interaction.onOpenContainer = (kind, x, y, z) => {
   if (kind === 'chest') {
-    // A chest standing on the treasury pad is the Faction Treasury. Reach is
-    // decided by treasuryAt() rather than a second hand-rolled box here, so the
-    // client can never think it is in range while the server disagrees.
-    const treasuryFaction = treasuryAt(x, z);
-    if (treasuryFaction !== null) {
-      if (isFaction(localFaction) && treasuryFaction !== localFaction) {
-        if (net.connected) {
-          net.sendTreasurySteal(treasuryFaction);
-        } else if (warActiveNow) {
-          showNotice('Enemy Faction Treasury raided!');
-          audio.raidHorn();
-        } else {
-          showNotice('Treasury is sealed — it can only be raided during a war window.');
-        }
-      } else {
-        openPresidentUI();
-      }
-      return;
-    }
-
     openChest = { x, y, z };
     ensureOfflineStructureLoot(x, y, z);
     inventory.loadChest(chests.open(x, y, z));
@@ -1935,7 +1864,6 @@ function enterPlaying(): void {
   document.body.classList.add('in-game');
   overlay.classList.add('hidden');
   pauseEl.style.display = 'none';
-  if (hudBell) hudBell.hidden = false;
 }
 const pauseGuideBtn = document.getElementById('pause-guide-btn') as HTMLButtonElement;
 
@@ -1949,7 +1877,6 @@ function enterPause(): void {
   }
   screen = 'paused';
   pauseEl.style.display = 'flex';
-  if (hudBell) hudBell.hidden = true;
   if (pauseGuideBtn) pauseGuideBtn.style.display = duelArenaActive ? 'none' : '';
 }
 function enterTitle(): void {
@@ -1962,7 +1889,6 @@ function enterTitle(): void {
   document.body.classList.remove('in-game');
   overlay.classList.remove('hidden');
   pauseEl.style.display = 'none';
-  if (hudBell) hudBell.hidden = true;
   cleanupDuelSession(true);
   onVaultTransition(null);
 }
@@ -2077,7 +2003,6 @@ function onAuthSuccess(username: string): void {
   // password is never stored).
   try { localStorage.setItem('voxelon.lastUser', username); } catch { /* ignore */ }
   discoveredVaults = null; // vault discoveries are per-account — reload lazily
-  notificationsManager.setAccount(username); // dispatches are per-account too
   loadCosmetics(username); // per-account avatar look (Character screen)
   held.setSkin(skinSeed(username), myCosmetics); // first-person hand matches avatar
   overlay.classList.add('authenticated');
@@ -2375,34 +2300,6 @@ document.getElementById('logout-btn')!.addEventListener('click', () => {
 playBtn.addEventListener('click', () => {
   if (!authed) return;
   audio.resume();
-
-  // If player has not yet pledged allegiance to a faction, show Faction Selection screen
-  if (localFaction === NO_FACTION || !isFaction(localFaction)) {
-    const list = localAccounts.list();
-    factionPicker.show({
-      politicsState,
-      memberCounts: {
-        0: list.filter((a) => a.faction === 0).length,
-        1: list.filter((a) => a.faction === 1).length,
-      },
-      treasuryCounts,
-      onSelect: (chosen) => {
-        localFaction = chosen;
-        announceSide(chosen);
-        if (net.connected) {
-          net.sendChooseFaction(chosen);
-        } else if (authedName) {
-          localAccounts.chooseFaction(authedName, chosen);
-          saveLocalAccounts();
-        }
-        spawnInOwnTerritory();
-        invalidateSelfAvatar();
-        beginPlay();
-      },
-    });
-    return;
-  }
-
   // World usually finished streaming during the title; if not, wait briefly
   // (still no full-screen loading screen) before dropping in.
   if (!worldReady) {
@@ -3846,7 +3743,10 @@ net.onDuelRestored = (x, y, z, yaw, pitch, health, dead, mode, state) => {
   duelLocalFallback = null;
 };
 
+// First drop-in shows the guided briefing once (tracked in localStorage); after
+// that — or when the briefing is skipped/completed — enter the game directly.
 function beginPlay(): void {
+  if (!tutorialSeen) { tutorial.show(); return; }
   input.lock();
 }
 
@@ -4315,9 +4215,198 @@ characterBtn.addEventListener('click', () => {
   charUI.open();
 });
 
-// The first-play briefing was replaced by the allegiance pledge screen, which
-// now carries the onboarding: it explains both factions, the permanence of the
-// choice, and what a recruit is handed on arrival.
+// --- First-play onboarding: guided mission briefing, shown once ---------------
+let tutorialSeen = false;
+try { tutorialSeen = localStorage.getItem('voxelon.tutorialSeen') === '1'; } catch { /* ignore */ }
+
+type TutorialStep = {
+  chapter: string;
+  icon: string;
+  title: string;
+  summary: string;
+  tip: string;
+  accent: string;
+  items: { label: string; value: string }[];
+};
+
+const tutorial = (() => {
+  const steps: TutorialStep[] = isMobile ? [
+    {
+      chapter: 'Orientation 01 · Movement', icon: '✦', title: 'Claim your first ground', accent: '#65dcff',
+      summary: 'Explore with the left joystick, look by dragging the world, and learn the rhythm of movement before night closes in.',
+      tip: 'Push the joystick beyond its rim to sprint. The jump control also deploys your glider while airborne.',
+      items: [
+        { label: 'Move', value: 'Use the left joystick · push farther to sprint' },
+        { label: 'Look', value: 'Drag anywhere on the right side of the screen' },
+        { label: 'Jump / glide', value: 'Hold the ⬆ control' },
+      ],
+    },
+    {
+      chapter: 'Orientation 02 · Survival', icon: '⛏', title: 'Turn the world into tools', accent: '#f7c95d',
+      summary: 'Mine your first tree, shape raw blocks into equipment, and build a shelter that can survive the frontier.',
+      tip: 'Your getting-started guide remains available in-game and tracks the path from bare hands to your first vault.',
+      items: [
+        { label: 'Break / attack', value: 'Long-press a block or target' },
+        { label: 'Place / use', value: 'Tap a block face or interactable object' },
+        { label: 'Inventory', value: 'Tap 🎒 to craft and manage items' },
+      ],
+    },
+    {
+      chapter: 'Orientation 03 · Civilization', icon: '◆', title: 'Build power, not just shelter', accent: '#a98cff',
+      summary: 'Automate resources, customize your character, unlock progression branches, and turn a camp into a functioning civilization.',
+      tip: 'Open the recipe guide from crafting screens whenever you need a complete production path.',
+      items: [
+        { label: 'World map', value: 'Tap 🗺 to inspect territory and travel points' },
+        { label: 'Progress', value: 'Tap ⚑ to spend upgrades and view faction growth' },
+        { label: 'Machines', value: 'Build autominers, derricks, defenses, and transport' },
+      ],
+    },
+    {
+      chapter: 'Orientation 04 · War', icon: '⚔', title: 'Every heart changes the war', accent: '#ff6b52',
+      summary: 'You are assigned to a balanced faction. Fight for territory, protect your flag, and remember that defeat can cost more than gear.',
+      tip: 'During war the border contracts and every player glows. Stay with your faction and watch the map.',
+      items: [
+        { label: 'Lifesteal', value: 'Kills can transfer hearts between players' },
+        { label: 'Faction war', value: 'The side with the strongest season performance wins' },
+        { label: 'Your objective', value: 'Survive, build leverage, and fight as a team' },
+      ],
+    },
+  ] : [
+    {
+      chapter: 'Orientation 01 · Movement', icon: '✦', title: 'Claim your first ground', accent: '#65dcff',
+      summary: 'Learn the movement language of the frontier before you commit to a direction. The world is large, persistent, and dangerous after dark.',
+      tip: 'Double-tap W or press Q to sprint. Press V later to cycle first- and third-person views.',
+      items: [
+        { label: 'Move', value: 'W A S D · Space to jump · Shift to sneak' },
+        { label: 'Sprint', value: 'Q or double-tap W' },
+        { label: 'Look', value: 'Move the mouse after entering the world' },
+      ],
+    },
+    {
+      chapter: 'Orientation 02 · Survival', icon: '⛏', title: 'Turn the world into tools', accent: '#f7c95d',
+      summary: 'Mine your first tree, convert raw blocks into equipment, and build a shelter that can survive the frontier.',
+      tip: 'Press T at any time and type /guide for the getting-started checklist. It tracks the path from bare hands to your first vault.',
+      items: [
+        { label: 'Break / attack', value: 'Left click' },
+        { label: 'Place / use', value: 'Right click' },
+        { label: 'Inventory', value: 'Press E to craft and manage items' },
+      ],
+    },
+    {
+      chapter: 'Orientation 03 · Civilization', icon: '◆', title: 'Build power, not just shelter', accent: '#a98cff',
+      summary: 'Automate resources, unlock progression branches, and turn a temporary camp into a functioning civilization.',
+      tip: 'Crafting screens include a recipe guide. Use it to trace complete production chains for machines, weapons, and defenses.',
+      items: [
+        { label: 'World map', value: '/map · inspect territory, structures, and travel points' },
+        { label: 'Progress', value: '/warfare · spend upgrades and view faction growth' },
+        { label: 'Machines', value: 'Build autominers, derricks, defenses, and transport' },
+      ],
+    },
+    {
+      chapter: 'Orientation 04 · War', icon: '⚔', title: 'Every heart changes the war', accent: '#ff6b52',
+      summary: 'You are assigned to a balanced faction. Fight for territory, protect your flag, and remember that defeat can cost more than gear.',
+      tip: 'During war the border contracts and every player glows. Stay close to allies, watch the map, and choose fights carefully.',
+      items: [
+        { label: 'Lifesteal', value: 'Kills can transfer hearts between players' },
+        { label: 'Faction war', value: 'The side with the strongest season performance wins' },
+        { label: 'Your objective', value: 'Survive, build leverage, and fight as a team' },
+      ],
+    },
+  ];
+
+  let i = 0;
+  const panel = document.createElement('div');
+  panel.className = 'onboarding-shell mc-font';
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-modal', 'true');
+  panel.setAttribute('aria-label', 'First-play briefing');
+  panel.tabIndex = -1;
+
+  const frame = document.createElement('div');
+  frame.className = 'onboarding-frame';
+  const visual = document.createElement('section');
+  visual.className = 'onboarding-visual';
+  const visualTop = document.createElement('div');
+  const chapter = document.createElement('div'); chapter.className = 'brief-chapter';
+  const icon = document.createElement('div'); icon.className = 'brief-icon';
+  const number = document.createElement('div'); number.className = 'brief-number';
+  const title = document.createElement('h2'); title.className = 'brief-title';
+  const summary = document.createElement('p'); summary.className = 'brief-summary';
+  visualTop.append(chapter, icon, number, title, summary);
+  const tip = document.createElement('div'); tip.className = 'brief-tip';
+  visual.append(visualTop, tip);
+
+  const content = document.createElement('section');
+  content.className = 'onboarding-content';
+  const progress = document.createElement('div'); progress.className = 'brief-progress';
+  const track = document.createElement('div'); track.className = 'brief-progress-track';
+  const fill = document.createElement('div'); fill.className = 'brief-progress-fill';
+  track.appendChild(fill);
+  const count = document.createElement('div'); count.className = 'brief-progress-count';
+  progress.append(track, count);
+  const contentLabel = document.createElement('div'); contentLabel.className = 'brief-content-label';
+  contentLabel.textContent = 'Field essentials';
+  const items = document.createElement('div'); items.className = 'brief-items';
+  const actions = document.createElement('div'); actions.className = 'brief-actions';
+  const back = document.createElement('button'); back.className = 'mc-btn brief-back'; back.textContent = '← Back';
+  const skip = document.createElement('button'); skip.className = 'mc-btn brief-skip'; skip.textContent = 'Skip briefing';
+  const next = document.createElement('button'); next.className = 'mc-btn brief-next';
+  actions.append(back, skip, next);
+  content.append(progress, contentLabel, items, actions);
+  frame.append(visual, content);
+  panel.appendChild(frame);
+  app.appendChild(panel);
+
+  function render(): void {
+    const step = steps[i];
+    panel.style.setProperty('--brief-accent', step.accent);
+    panel.dataset.step = String(i + 1);
+    chapter.textContent = step.chapter;
+    setIconText(icon, step.icon);
+    number.textContent = 'BRIEF ' + String(i + 1).padStart(2, '0');
+    title.textContent = step.title;
+    summary.textContent = step.summary;
+    tip.textContent = step.tip;
+    count.textContent = String(i + 1).padStart(2, '0') + ' / ' + String(steps.length).padStart(2, '0');
+    fill.style.width = (((i + 1) / steps.length) * 100) + '%';
+    items.replaceChildren();
+    for (const detail of step.items) {
+      const row = document.createElement('div'); row.className = 'brief-item';
+      const label = document.createElement('div'); label.className = 'brief-item-label'; label.textContent = detail.label;
+      const value = document.createElement('div'); value.className = 'brief-item-value'; setIconText(value, detail.value);
+      row.append(label, value); items.appendChild(row);
+    }
+    back.disabled = i === 0;
+    next.textContent = i === steps.length - 1 ? 'Enter the world →' : 'Continue →';
+  }
+
+  function finish(): void {
+    panel.style.display = 'none';
+    tutorialSeen = true;
+    try { localStorage.setItem('voxelon.tutorialSeen', '1'); } catch { /* ignore */ }
+    if (worldReady) input.lock();
+  }
+
+  back.addEventListener('click', () => { if (i > 0) { i--; render(); } });
+  skip.addEventListener('click', finish);
+  next.addEventListener('click', () => {
+    if (i >= steps.length - 1) finish();
+    else { i++; render(); }
+  });
+  panel.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowLeft' && i > 0) { e.preventDefault(); i--; render(); }
+    if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      if (i >= steps.length - 1) finish(); else { i++; render(); }
+    }
+  });
+
+  return {
+    get open(): boolean { return panel.style.display === 'flex'; },
+    show(): void { i = 0; render(); panel.style.display = 'flex'; panel.focus(); },
+    finish,
+  };
+})();
 
 document.getElementById('resume-btn')!.addEventListener('click', () => {
   enterPlaying();
@@ -4380,9 +4469,7 @@ document.addEventListener('keydown', (e) => {
   // watching with the pointer already unlocked, and "closeable at any time" has
   // to include the key everyone reaches for first.
   if (missileCam.active) { missileCam.close(); }
-  // The governance surfaces handle Escape on their own element; bail out so
-  // this handler does not also re-lock the pointer behind them.
-  else if (factionPicker.open || presidentUI.open || notificationsManager.isOpen) { return; }
+  else if (tutorial.open) { tutorial.finish(); }
   else if (chatBox.open) { chatBox.hide(); }
   else if (warfareUI.open) { hideProgress(); }
   else if (guideOpen) { hideGuide(); }
@@ -4525,18 +4612,6 @@ net.onFlags = (breakable, flags) => {
 };
 // Someone (possibly us) changed their look: rebuild that avatar.
 net.onCosmetics = (id) => remotePlayers.invalidate(id);
-net.onPoliticsSync = (state, treasuries) => {
-  politicsState = state;
-  if (treasuries) treasuryCounts = treasuries;
-  presidentUI.updateState(state);
-};
-net.onNotificationMsg = (notif) => {
-  notificationsManager.pushNotification(notif);
-};
-net.onTreasuryAlert = (text, _faction) => {
-  audio.raidHorn();
-  showNotice(text);
-};
 function applyNetworkEdit(x: number, y: number, z: number, b: number): void {
   world.applyRemoteEdit(x, y, z, b);
   // If someone removed/replaced the chest block we have open, stop viewing it.
@@ -6243,17 +6318,6 @@ const chatBox = new ChatBox(app, {
       case 'tpa': return sendTpaTo(args[0] ?? '');
       case 'tpaccept': return acceptTpa();
       case 'tpdeny': return denyTpa();
-      case 'president':
-      case 'party':
-      case 'politics':
-        if (player.dead) return "You can't do that while dead.";
-        openPresidentUI();
-        return null;
-      case 'notifications':
-      case 'inbox':
-      case 'notices':
-        notificationsManager.toggle();
-        return null;
       default: return `"/${name}" isn't wired up yet.`;
     }
   },
