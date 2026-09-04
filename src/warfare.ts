@@ -1,12 +1,11 @@
 // WARFARE COMMAND — the boss-powered technology tree that replaces the old
 // generic stat-based Progress system.
 //
-// One trunk, three branches, plus optional operations modules.
+// One trunk, one branch, plus optional operations modules.
 //
-//        TACTICAL MISSILES  →  MISSILE DEFENSE  →  HELICOPTER AVIATION
-//                                      │
-//                    ┌─────────────────┼─────────────────┐
-//                  STRIKE            AEGIS              AIR
+//                        HELICOPTER AVIATION
+//                                 │
+//                                AIR
 //
 // Warfare XP comes from ONE place: beating a dungeon boss you actually helped
 // kill. No mob grinding, no PvP farming, no chest-opening trickle — the whole
@@ -14,7 +13,7 @@
 //
 // PURE + transport-agnostic (no THREE/DOM/Node), like machines.ts/turrets.ts:
 // the authoritative server, the online client and offline single-player all run
-// these exact numbers, so a silo behaves identically everywhere.
+// these exact numbers, so a helicopter behaves identically everywhere.
 
 import { iconSvg } from './emoji_icons';
 
@@ -105,10 +104,10 @@ export function settleWarfareXp(
 
 // --- The tree ----------------------------------------------------------------
 
-export type WarfareBranch = 'trunk' | 'strike' | 'aegis' | 'air';
+export type WarfareBranch = 'trunk' | 'air';
 
 /** Which hardware family a node advances (drives the 3D preview + stat diff). */
-export type WarfareHardware = 'silo' | 'battery' | 'helicopter';
+export type WarfareHardware = 'helicopter';
 
 export interface WarfareNode {
   id: string;
@@ -141,132 +140,61 @@ function node(
 }
 
 /**
- * The trunk guarantees the requested order — missiles, then missile defense,
- * then helicopters — because every node names the one before it as prerequisite.
- * The three branches all hang off the last trunk node, so the endgame opens
- * only once all three systems are online.
+ * The trunk is the aviation certification ladder — airframe, ordnance, armour —
+ * and the single Aviation branch hangs off its last node, so the endgame opens
+ * only once the basic air wing is flying.
  */
 export const WARFARE_TREE: WarfareNode[] = [
-  // --- Main trunk (2,750 XP) ---
-  node('missile_command', 'trunk', 'Missile Command',
-    'The first warhead your faction is allowed to own.', 100, '', iconSvg('rocket'), 'silo', 1, 0, [
-      'Blueprint: Tactical Silo (2×2 launch pad)',
-      'Blueprint: Tactical Missile',
-      'Map targeting mode with range circle and reticle',
-    ]),
-  node('guidance_vanes', 'trunk', 'Guidance Vanes',
-    'Steerable fins turn a lob into a strike.', 150, 'missile_command', iconSvg('wing'), 'silo', 2, 1, [
-      'Target range 900 → 1,200',
-      'Improved cruise speed and flatter trajectory',
-    ]),
-  node('hardened_silo', 'trunk', 'Hardened Silo',
-    'Armour plate and a second tube.', 250, 'guidance_vanes', iconSvg('shield'), 'silo', 3, 2, [
-      'Silo HP 500 → 600',
-      'Magazine 1 → 2 missiles',
-    ]),
-  node('aegis_systems', 'trunk', 'Aegis Systems',
-    'Everything you just built, someone can now shoot down.', 250, 'hardened_silo', iconSvg('dish'), 'battery', 1, 3, [
-      'Blueprint: Interceptor Turret',
-      'Blueprint: Interceptor Missile',
-      'Inbound-missile warnings and tracks',
-    ]),
-  node('radar_sweep', 'trunk', 'Radar Sweep',
-    'A wider bowl sees them coming sooner.', 300, 'aegis_systems', iconSvg('satellite'), 'battery', 2, 4, [
-      'Defense radius 110 → 140',
-    ]),
-  node('fast_intercept', 'trunk', 'Fast Intercept',
-    'Lock, launch, reload — all of it faster.', 350, 'radar_sweep', iconSvg('bolt'), 'battery', 3, 5, [
-      'Acquisition 0.70s → 0.45s',
-      'Reload 12s → 10s',
-    ]),
+  // --- Main trunk (600 XP) ---
   node('flight_certification', 'trunk', 'Flight Certification',
-    'Two seats, one rotor, no more walking to the fight.', 400, 'fast_intercept', iconSvg('heli'), 'helicopter', 1, 6, [
+    'Two seats, one rotor, no more walking to the fight.', 100, '', iconSvg('heli'), 'helicopter', 1, 0, [
       'Blueprint: Helipad',
       'Blueprint: Helicopter Mk I (pilot + passenger)',
       'Basic gravity bombs',
     ]),
   node('bomb_rack', 'trunk', 'Bomb Rack',
-    'More to drop, less time between drops.', 450, 'flight_certification', iconSvg('bomb'), 'helicopter', 2, 7, [
+    'More to drop, less time between drops.', 200, 'flight_certification', iconSvg('bomb'), 'helicopter', 2, 1, [
       'Bomb capacity 2 → 3',
       'Bomb cooldown 6s → 5s',
     ]),
   node('reinforced_airframe', 'trunk', 'Reinforced Airframe',
-    'Survive the turret you flew over.', 500, 'bomb_rack', iconSvg('nut'), 'helicopter', 3, 8, [
+    'Survive the turret you flew over.', 300, 'bomb_rack', iconSvg('nut'), 'helicopter', 3, 2, [
       'Helicopter HP 140 → 170',
       'Fuel capacity 12 → 16 oil',
     ]),
 
-  // --- Strike branch (1,700 XP) ---
-  node('strike_guidance', 'strike', 'Guidance II',
-    'Reach across the map.', 450, 'reinforced_airframe', iconSvg('target'), 'silo', 4, 9, [
-      'Missile range 1,200 → 1,700',
-      'Faster cruise — shorter warning for the target',
-    ]),
-  node('strike_warhead', 'strike', 'Warhead II',
-    'A bigger hole in whatever they built.', 550, 'strike_guidance', iconSvg('radioactive'), 'silo', 5, 10, [
-      'Blast radius 7 → 8',
-      'Centre player damage 14 → 16',
-      'Centre hardware damage 180 → 240',
-      'Player-built blocks removed 8 → 12',
-    ]),
-  node('strike_precision', 'strike', 'Precision Strike III',
-    'Anywhere, sooner, harder.', 700, 'strike_warhead', iconSvg('explosion'), 'silo', 6, 11, [
-      'Missile range 1,700 → 2,300',
-      'Blast radius 9 · player damage 18 · hardware damage 300',
-      'Player-built blocks removed 16',
-      'Silo cooldown 105s → 90s · magazine 3',
-    ], true),
-  // --- Aegis branch (1,700 XP) ---
-  node('aegis_network', 'aegis', 'Network Radar',
-    'Batteries stop working alone.', 450, 'reinforced_airframe', iconSvg('globe'), 'battery', 4, 9, [
-      'Defense radius 140 → 170',
-      'Nearby friendly batteries share tracks',
-      'Battery HP 200 → 240 · acquisition 0.35s',
-    ]),
-  node('aegis_twin_rack', 'aegis', 'Twin Rack',
-    'Two tubes beat one saturation wave.', 550, 'aegis_network', iconSvg('burst'), 'battery', 5, 10, [
-      'Interceptor capacity 4 → 7',
-      'Intercept reload 10s → 8s',
-    ]),
-  node('aegis_sky_shield', 'aegis', 'Sky Shield',
-    'Nothing crosses this airspace uninvited.', 700, 'aegis_twin_rack', iconSvg('web'), 'battery', 6, 11, [
-      'Defense radius 200 · capacity 8',
-      'Acquisition 0.25s · reload 6s',
-      'Battery HP 300',
-    ], true),
-
-  // --- Aviation branch (2,050 XP) ---
+  // --- Aviation branch (3,300 XP) ---
   node('air_turbine', 'air', 'Turbine II',
-    'Climb out of small-arms range.', 500, 'reinforced_airframe', iconSvg('vortex'), 'helicopter', 4, 9, [
+    'Climb out of small-arms range.', 400, 'reinforced_airframe', iconSvg('vortex'), 'helicopter', 4, 3, [
       'Cruise speed 16 → 20 blocks/s',
       'Higher climb rate',
       'Altitude allowance 64 → 96 blocks',
       'HP 170 → 190 · fuel 16 → 18',
     ]),
   node('air_heavy_bay', 'air', 'Heavy Bomb Bay',
-    'Four in the rack, and they bite.', 650, 'air_turbine', iconSvg('dynamite'), 'helicopter', 5, 10, [
+    'Four in the rack, and they bite.', 550, 'air_turbine', iconSvg('dynamite'), 'helicopter', 5, 4, [
       'Bomb capacity 3 → 4',
       'Bomb radius 4 → 5',
       'Bomb hardware damage 80 → 100 · player damage 12',
     ]),
   node('air_command', 'air', 'Air Command III',
-    'The gunship the whole server plans around.', 900, 'air_heavy_bay', iconSvg('crown'), 'helicopter', 6, 11, [
+    'The gunship the whole server plans around.', 750, 'air_heavy_bay', iconSvg('crown'), 'helicopter', 6, 5, [
       'HP 220 · cruise speed 24 blocks/s',
       'Five bombs · radius 6 · cooldown 4s',
       'Altitude allowance 128 blocks · fuel 24 oil',
     ], true),
   node('air_aux_tanks', 'air', 'Auxiliary Tanks',
-    'A second fuel circuit doubles sortie endurance.', 450, 'air_command', iconSvg('fuel'), 'helicopter', 6, 12, [
+    'A second fuel circuit doubles sortie endurance.', 450, 'air_command', iconSvg('fuel'), 'helicopter', 6, 6, [
       'Blueprint: Auxiliary Tank Module',
       'Installed helicopter fuel capacity ×2',
     ]),
   node('air_long_range_tanks', 'air', 'Long-Range Tanks',
-    'Triple-range tanks turn a raid into an expedition.', 650, 'air_aux_tanks', iconSvg('drum'), 'helicopter', 6, 13, [
+    'Triple-range tanks turn a raid into an expedition.', 650, 'air_aux_tanks', iconSvg('drum'), 'helicopter', 6, 7, [
       'Blueprint: Long-Range Tank Module',
       'Installed helicopter fuel capacity ×3',
     ]),
   node('air_fast_rope', 'air', 'Fast-Rope Operations',
-    'Hold the hover, throw the line, own the vertical.', 500, 'air_long_range_tanks', iconSvg('link'), 'helicopter', 6, 14, [
+    'Hold the hover, throw the line, own the vertical.', 500, 'air_long_range_tanks', iconSvg('link'), 'helicopter', 6, 8, [
       'Blueprint: Fast-Rope Winch',
       'R lowers or retracts a rope while piloting',
       'The helicopter holds position while people climb',
@@ -282,18 +210,14 @@ export function warfareBranchNodes(branch: WarfareBranch): WarfareNode[] {
   return WARFARE_TREE.filter((n) => n.branch === branch);
 }
 
-/** Total XP to own the entire tree (9,800). */
+/** Total XP to own the entire tree (3,900). */
 export const WARFARE_TREE_COST = WARFARE_TREE.reduce((s, n) => s + n.cost, 0);
 
 export const WARFARE_BRANCH_META: Record<WarfareBranch, { name: string; icon: string; blurb: string }> = {
   trunk: { name: 'Command Trunk', icon: iconSvg('command'),
-    blurb: 'Missiles, then the defense that answers them, then the air wing.' },
-  strike: { name: 'Strike', icon: iconSvg('target'),
-    blurb: 'Longer reach, heavier warheads, shorter silo cooldowns.' },
-  aegis: { name: 'Aegis', icon: iconSvg('satellite'),
-    blurb: 'Wider radar, deeper magazines, an airspace nothing crosses.' },
+    blurb: 'Certify the airframe, hang ordnance on it, then armour it.' },
   air: { name: 'Aviation', icon: iconSvg('heli'),
-    blurb: 'Faster gunships that fly higher and drop more.' },
+    blurb: 'Faster gunships that fly higher, drop more and stay up longer.' },
 };
 
 // --- Spending ----------------------------------------------------------------
@@ -359,8 +283,8 @@ export function grantWarfareXp(s: WarfareProgress, amount: number): number {
 }
 
 // --- Hardware capability ------------------------------------------------------
-// Every hardware family climbs the SAME six-rung ladder: rungs 1–3 come off the
-// trunk, 4–6 off that family's branch. A blueprint node lets you BUILD or
+// Hardware climbs a six-rung ladder: rungs 1–3 come off the trunk, 4–6 off the
+// Aviation branch. A blueprint node lets you BUILD or
 // RETROFIT to that rung; the physical object then records its installed tier and
 // works for any teammate, whether or not they own the node.
 
@@ -381,85 +305,6 @@ export function clampTier(t: number): number {
   if (!Number.isFinite(t)) return 1;
   return Math.max(1, Math.min(MAX_HARDWARE_TIER, Math.floor(t)));
 }
-
-// --- Silo + tactical missile stats -------------------------------------------
-
-export interface SiloStats {
-  /** Max target distance from the silo, in blocks. */
-  range: number;
-  /** Cruise speed, blocks/s. */
-  speed: number;
-  hp: number;
-  magazine: number;
-  /** Seconds the silo is locked after a launch. */
-  cooldown: number;
-  /** Blast radius in blocks. */
-  blastRadius: number;
-  /** Damage at the exact centre to a player (linear falloff to 0 at the rim). */
-  playerDamage: number;
-  /** Damage at the centre to hardware (silos/batteries/helicopters/machines). */
-  hardwareDamage: number;
-  /** Maximum player-PLACED blocks removed by one impact. */
-  blocks: number;
-}
-
-const SILO_TABLE: SiloStats[] = [
-  // Mk I — "Initial" column.
-  { range: 900, speed: 55, hp: 500, magazine: 1, cooldown: 120,
-    blastRadius: 7, playerDamage: 14, hardwareDamage: 180, blocks: 8 },
-  // Mk II — Guidance Vanes.
-  { range: 1200, speed: 70, hp: 500, magazine: 1, cooldown: 120,
-    blastRadius: 7, playerDamage: 14, hardwareDamage: 180, blocks: 8 },
-  // Mk III — Hardened Silo.
-  { range: 1200, speed: 70, hp: 600, magazine: 2, cooldown: 120,
-    blastRadius: 7, playerDamage: 14, hardwareDamage: 180, blocks: 8 },
-  // Mk IV — Guidance II.
-  { range: 1700, speed: 88, hp: 700, magazine: 2, cooldown: 105,
-    blastRadius: 7, playerDamage: 14, hardwareDamage: 180, blocks: 8 },
-  // Mk V — Warhead II ("Mid" column).
-  { range: 1700, speed: 88, hp: 700, magazine: 2, cooldown: 105,
-    blastRadius: 8, playerDamage: 16, hardwareDamage: 240, blocks: 12 },
-  // Mk VI — Precision Strike III ("Maximum" column).
-  { range: 2300, speed: 104, hp: 800, magazine: 3, cooldown: 90,
-    blastRadius: 9, playerDamage: 18, hardwareDamage: 300, blocks: 16 },
-];
-
-export function siloStats(tier: number): SiloStats {
-  return { ...SILO_TABLE[clampTier(tier) - 1] };
-}
-
-// --- Interceptor battery stats ------------------------------------------------
-
-export interface BatteryStats {
-  hp: number;
-  /** Radius (blocks) inside which inbound missiles are engaged. */
-  radius: number;
-  /** Seconds of lock-on before the interceptor leaves the rail. */
-  acquire: number;
-  /** Seconds between interceptor launches. */
-  reload: number;
-  /** Loaded interceptor capacity. */
-  capacity: number;
-  /** Batteries at this tier share tracks with nearby friendly batteries. */
-  networked: boolean;
-}
-
-const BATTERY_TABLE: BatteryStats[] = [
-  { hp: 180, radius: 110, acquire: 0.70, reload: 12, capacity: 4, networked: false },
-  { hp: 180, radius: 140, acquire: 0.70, reload: 12, capacity: 4, networked: false },
-  { hp: 200, radius: 140, acquire: 0.45, reload: 10, capacity: 4, networked: false },
-  { hp: 240, radius: 170, acquire: 0.35, reload: 10, capacity: 4, networked: true },
-  { hp: 240, radius: 170, acquire: 0.35, reload: 8, capacity: 7, networked: true },
-  { hp: 300, radius: 200, acquire: 0.25, reload: 6, capacity: 8, networked: true },
-];
-
-export function batteryStats(tier: number): BatteryStats {
-  return { ...BATTERY_TABLE[clampTier(tier) - 1] };
-}
-
-/** Interceptor flight speed (blocks/s) — deliberately much faster than any
- *  offensive missile, so reaching the track is a geometry problem, not a race. */
-export const INTERCEPTOR_SPEED = 170;
 
 // --- Helicopter stats ---------------------------------------------------------
 
@@ -518,29 +363,7 @@ export function tierLabel(tier: number): string {
   return `Mk ${['I', 'II', 'III', 'IV', 'V', 'VI'][clampTier(tier) - 1]}`;
 }
 
-// --- Strategic rules shared by every layer ------------------------------------
-
-/** Faction-wide hardware caps and spacing (blocks). */
-export const MAX_SILOS_PER_FACTION = 2;
-export const MIN_SILO_SPACING = 48;
-export const MAX_BATTERIES_PER_FACTION = 4;
-export const MIN_BATTERY_SPACING = 24;
-/** Offensive missiles in flight per faction. */
-export const MAX_MISSILES_IN_FLIGHT = 2;
-/** Seconds between launches ACROSS a whole faction. */
-export const FACTION_LAUNCH_SPACING = 30;
-/** Every strike gives the target at least this long to react. */
-export const MIN_MISSILE_FLIGHT = 8;
-/** The missile hull itself can be shot down by accurate gunfire. */
-export const MISSILE_HULL_HP = 24;
-/** Radius (blocks) around a protected point that a strike may not target. */
-export const PROTECTED_RADIUS = 40;
-
-/** Flight time for a strike: distance/speed, but never under the warning floor. */
-export function missileFlightTime(distance: number, speed: number): number {
-  if (!Number.isFinite(distance) || !Number.isFinite(speed) || speed <= 0) return MIN_MISSILE_FLIGHT;
-  return Math.max(MIN_MISSILE_FLIGHT, distance / speed);
-}
+// --- Blast rules shared by every layer ----------------------------------------
 
 /** Linear falloff from the centre of a blast, applied once per target. */
 export function blastFalloff(distance: number, radius: number): number {
@@ -551,6 +374,38 @@ export function blastFalloff(distance: number, radius: number): number {
 
 export function blastDamage(centre: number, distance: number, radius: number): number {
   return Math.round(centre * blastFalloff(distance, radius));
+}
+
+/** Damage one target from a blast centre — linear falloff, applied ONCE. */
+export function blastAt(
+  centre: { x: number; y: number; z: number },
+  target: { x: number; y: number; z: number },
+  radius: number, centreDamage: number,
+): number {
+  const d = Math.hypot(centre.x - target.x, centre.y - target.y, centre.z - target.z);
+  return blastDamage(centreDamage, d, radius);
+}
+
+/** Blocks a blast may consider, nearest first. The caller keeps only the ones
+ *  that are player-PLACED and destructible, then stops at the ordnance's cap —
+ *  so natural terrain is never permanently excavated. */
+export function blastBlockCandidates(
+  cx: number, cy: number, cz: number, radius: number,
+): { x: number; y: number; z: number; d: number }[] {
+  const r = Math.max(0, Math.ceil(radius));
+  const out: { x: number; y: number; z: number; d: number }[] = [];
+  const ox = Math.floor(cx), oy = Math.floor(cy), oz = Math.floor(cz);
+  for (let dx = -r; dx <= r; dx++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dz = -r; dz <= r; dz++) {
+        const d = Math.hypot(dx, dy, dz);
+        if (d > radius) continue;
+        out.push({ x: ox + dx, y: oy + dy, z: oz + dz, d });
+      }
+    }
+  }
+  out.sort((a, b) => a.d - b.d);
+  return out;
 }
 
 // --- Sanitization + migration -------------------------------------------------

@@ -22,7 +22,7 @@
 // usernames) are written with textContent and never reach innerHTML.
 
 import { BUST_POSES, type BustEntry } from './avatar_bust';
-import { defaultCosmetics } from './character';
+import { sanitizeCosmetics } from './character';
 import { iconSvg } from './emoji_icons';
 import { PRESET_PROMISES } from './politics';
 import type { FactionPublic } from './net/protocol';
@@ -82,6 +82,20 @@ const CSS = `
     rgba(0, 0, 0, .28);
 }
 .vx-pledge-slot { position: absolute; inset: 12px 0 26px; }
+/* THE FALLBACK PORTRAIT. A browser hands out a limited number of WebGL contexts
+   and the world already spends one, so "no context to spare" is a state a real
+   player can land in — and it used to present as a plinth that simply stayed
+   empty. When the bust board cannot draw, this monogram stands there instead,
+   so a faction's president always has a face on the pledge screen. */
+.vx-pledge-mug {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -58%);
+  display: flex; align-items: center; justify-content: center;
+  width: 86px; height: 86px; border-radius: 50%;
+  font: 800 34px/1 inherit; letter-spacing: -1px; color: #fff;
+  background: linear-gradient(160deg, color-mix(in srgb, var(--side) 62%, #fff), var(--side));
+  box-shadow: 0 14px 30px color-mix(in srgb, var(--side) 46%, transparent),
+    inset 0 2px 0 rgba(255, 255, 255, .4);
+}
 .vx-pledge-plinth {
   width: 74%; height: 12px; margin-bottom: 12px; border-radius: 50%;
   background: radial-gradient(50% 100% at 50% 50%, color-mix(in srgb, var(--side) 60%, transparent), transparent 76%);
@@ -278,7 +292,7 @@ export class FactionPicker {
     this.isOpen = false;
     delete this.surface.dataset.open;
     hideTip();
-    bustStage.release();
+    bustStage.release(this.viewport);
     this.onClose?.();
   }
 
@@ -329,11 +343,18 @@ export class FactionPicker {
       stage.append(slot, plinth);
 
       const prez = info.president;
-      if (prez) {
+      if (prez && !bustStage.available) {
+        // No GL context to spare: a monogram medallion rather than a bare plinth.
+        const mug = document.createElement('div');
+        mug.className = 'vx-pledge-mug';
+        const ch = [...prez.username].find((c) => /\S/.test(c)) ?? '?';
+        mug.textContent = ch.toUpperCase();
+        slot.appendChild(mug);
+      } else if (prez) {
         const key = `pledge:${prez.username.toLowerCase()}`;
         busts.push({
           key,
-          cosmetics: prez.cosmetics ?? defaultCosmetics(skinSeed(prez.username)),
+          cosmetics: sanitizeCosmetics(prez.cosmetics, skinSeed(prez.username)),
           slot,
           // The two plinths get different salutes so the screen never plays the
           // same animation twice side by side.

@@ -262,6 +262,10 @@ export function buildChunkGeometry(
         const id = chunk.get(x, y, z);
         if (id === Block.Air || id === Block.Barrier) continue;
         const info = BLOCKS[id];
+        // An id with no definition is a block this build no longer knows (a
+        // world saved by an older build). Skip it rather than dereferencing
+        // undefined and taking the whole chunk mesh down with it.
+        if (!info) continue;
         const isWater = id === Block.Water;
 
         if (info.shape === 'cross') {

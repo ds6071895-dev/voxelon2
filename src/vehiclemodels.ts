@@ -2,7 +2,7 @@
 // the bombs it drops.
 //
 // Built entirely in code like the rest of the project's art, unlit with baked
-// shading (see warfare_models.ts for the shading toolkit rationale). The model
+// shading like the rest of the project. The model
 // is authored so that everything the server simulates is VISIBLE: the rotors
 // spin, the airframe banks with the flight state, both seats are real positions
 // with avatars in them, the bomb rack empties as bombs are released, damage
@@ -136,10 +136,34 @@ export interface HelicopterModel {
   interior: THREE.Object3D[];
   /** Optional field modules, driven directly from authoritative snapshots. */
   winch: THREE.Object3D;
+  /** The spinning drum inside the winch housing, so paying rope out LOOKS like
+   *  paying rope out rather than a line appearing from nowhere. */
+  winchDrum: THREE.Object3D;
   fuelTanks: THREE.Object3D[];
-  rope: THREE.Mesh;
+  rope: RopeRig;
   tier: number;
 }
+
+/**
+ * The fast rope, as a rig rather than a stick.
+ *
+ * It hangs from a PIVOT at the winch head — outside the hull group, so the line
+ * stays plumb however hard the airframe banks — and everything that sells the
+ * descent hangs off that pivot: the line itself, evenly spaced rungs that give
+ * your eye something to measure speed against on the way down, and a weighted
+ * end that swings. The pivot is what sways, so a rider parented to a point on
+ * the line sways with it.
+ */
+export interface RopeRig {
+  pivot: THREE.Group;
+  line: THREE.Mesh;
+  rungs: THREE.Mesh[];
+  weight: THREE.Object3D;
+}
+
+/** Blocks between the rungs woven into the line. */
+const ROPE_RUNG_SPACING = 3.2;
+const ROPE_RUNGS = Math.ceil(48 / ROPE_RUNG_SPACING);
 
 /**
  * The airframe. +Z is the nose, and because Y is up that means the model's own
@@ -382,8 +406,19 @@ export function buildHelicopterModel(tier: number, markingHex: number): Helicopt
   // avoids rebuilding the airframe when a mechanic bolts one on.
   const winch = new THREE.Group();
   box(winch, STEEL_DARK, 0.48, 0.34, 0.44, 0, -0.68, -0.15);
-  round(winch, new THREE.CylinderGeometry(0.16, 0.16, 0.42, 8), STEEL,
-    0, -0.68, -0.15).rotation.z = Math.PI / 2;
+  // The drum is a separate object so it can SPIN while the rope pays out.
+  const winchDrum = new THREE.Group();
+  winchDrum.position.set(0, -0.68, -0.15);
+  const drum = round(winchDrum, new THREE.CylinderGeometry(0.16, 0.16, 0.42, 8), STEEL, 0, 0, 0);
+  drum.rotation.z = Math.PI / 2;
+  // Two crossed spokes standing proud of the drum face: a bare cylinder spinning
+  // on its own axis is invisible, and the spinning drum is the tell that the
+  // rope is running out.
+  for (const a of [0, Math.PI / 2]) {
+    const spoke = box(winchDrum, AMBER, 0.46, 0.3, 0.05, 0, 0, 0);
+    spoke.rotation.x = a;
+  }
+  winch.add(winchDrum);
   hull.add(winch);
   winch.visible = false;
   const fuelTanks = [
@@ -393,16 +428,41 @@ export function buildHelicopterModel(tier: number, markingHex: number): Helicopt
       -1.18, -0.38, -0.1),
   ];
   for (const tank of fuelTanks) { tank.rotation.x = Math.PI / 2; tank.visible = false; }
-  const rope = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.035, 0.035, 1, 6),
-    new THREE.MeshBasicMaterial({ color: 0x8e6535 }),
+  // --- Fast rope -------------------------------------------------------------
+  // A visibly BRAIDED line: a fatter core than the old hairline cylinder, plus
+  // rungs and a weighted end. Sliding past a rung every third of a second is
+  // what turns "my altitude number is changing" into "I am moving".
+  const ropePivot = new THREE.Group();
+  ropePivot.position.set(0, -0.75, -0.15);
+  const ropeMat = new THREE.MeshBasicMaterial({ color: 0x8e6535 });
+  const ropeLine = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.075, 0.075, 1, 7), ropeMat,
   );
-  rope.visible = false;
-  group.add(rope);
+  // Unit cylinder is centred; anchor it at the top so scale.y IS the length.
+  ropeLine.position.y = -0.5;
+  ropePivot.add(ropeLine);
+  const rungs: THREE.Mesh[] = [];
+  for (let i = 0; i < ROPE_RUNGS; i++) {
+    const rung = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.115, 0.115, 0.1, 7),
+      new THREE.MeshBasicMaterial({ color: i % 2 ? 0x6a4a26 : 0xc4a05c }),
+    );
+    ropePivot.add(rung);
+    rungs.push(rung);
+  }
+  const weight = new THREE.Group();
+  box(weight, 0x4b3a22, 0.3, 0.34, 0.3, 0, -0.17, 0);
+  box(weight, NEAR_BLACK, 0.34, 0.06, 0.34, 0, -0.34, 0);
+  round(weight, new THREE.TorusGeometry(0.1, 0.03, 5, 8), STEEL, 0, 0.02, 0)
+    .rotation.x = Math.PI / 2;
+  ropePivot.add(weight);
+  ropePivot.visible = false;
+  group.add(ropePivot);
+  const rope: RopeRig = { pivot: ropePivot, line: ropeLine, rungs, weight };
 
   return {
     group, hull, mainRotor, tailRotor, seats, bombs, lights, glazing, interior,
-    winch, fuelTanks, rope, tier,
+    winch, winchDrum, fuelTanks, rope, tier,
   };
 }
 
@@ -426,9 +486,115 @@ export function buildBombModel(): THREE.Group {
 
 function disposeTree(root: THREE.Object3D): void {
   root.traverse((o) => {
+    // Sprites share ONE module-level geometry inside three.js — disposing it
+    // here would pull the buffers out from under every other sprite in the
+    // scene. Their own canvas texture + material are released by the caller.
+    if ((o as THREE.Sprite).isSprite) return;
     const m = o as THREE.Mesh;
     if (m.geometry) m.geometry.dispose();
   });
+}
+
+/**
+ * The overhead hull bar.
+ *
+ * A helicopter is the one thing in the world you fight from the ground with no
+ * idea whether you are achieving anything: it is far away, it is moving, and
+ * the only feedback used to be the smoke that starts at 55% hull. So every
+ * airframe now carries its own bar, drawn on a canvas sprite exactly like the
+ * player nameplates, with three things a shooter actually needs — how much hull
+ * is left, how much the last burst took off (the white ghost that drains a beat
+ * behind the fill), and whose it is.
+ */
+interface HeliBar {
+  canvas: HTMLCanvasElement;
+  tex: THREE.CanvasTexture;
+  sprite: THREE.Sprite;
+  /** Fraction currently drawn, and the ghost tail left by the last hit. */
+  shown: number;
+  ghost: number;
+  ghostHold: number;
+  /** Seconds of hit-flash left on the bar frame. */
+  flash: number;
+  lastKey: string;
+}
+
+const BAR_W = 256;
+const BAR_H = 68;
+/** Bars fade out past this range; beyond `BAR_FAR` they are not drawn at all. */
+const BAR_FADE = 110;
+const BAR_FAR = 170;
+
+function drawHeliBar(
+  bar: HeliBar, snap: HelicopterSnapshot, tint: string, mark: string,
+): void {
+  const frac = snap.maxHp > 0 ? Math.max(0, Math.min(1, snap.hp / snap.maxHp)) : 0;
+  const key = `${Math.round(bar.shown * 400)}|${Math.round(bar.ghost * 400)}|` +
+    `${snap.hp}|${snap.maxHp}|${bar.flash > 0 ? 1 : 0}|${snap.owner}|${mark}`;
+  if (key === bar.lastKey) return;
+  bar.lastKey = key;
+  const ctx = bar.canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, BAR_W, BAR_H);
+
+  // Caption: mark + owner, so a contact reads as "whose Mk III is that".
+  ctx.font = '600 19px system-ui, sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = tint;
+  ctx.fillText(mark, 6, 14);
+  const markW = ctx.measureText(mark).width;
+  if (snap.owner) {
+    ctx.fillStyle = 'rgba(214,226,242,0.85)';
+    ctx.fillText(snap.owner.slice(0, 14), 12 + markW, 14);
+  }
+  ctx.fillStyle = 'rgba(214,226,242,0.9)';
+  ctx.textAlign = 'right';
+  ctx.fillText(`${Math.ceil(snap.hp)}`, BAR_W - 6, 14);
+  ctx.textAlign = 'left';
+
+  // Track.
+  const y = 28, h = 26, r = 7;
+  ctx.fillStyle = 'rgba(4,8,14,0.82)';
+  ctx.beginPath();
+  ctx.roundRect(0, y, BAR_W, h, r);
+  ctx.fill();
+  ctx.strokeStyle = bar.flash > 0 ? 'rgba(255,255,255,0.95)' : 'rgba(140,170,205,0.45)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.roundRect(1, y + 1, BAR_W - 2, h - 2, r - 1);
+  ctx.stroke();
+
+  const inner = BAR_W - 8;
+  // Ghost first: the chunk the last burst took, draining a beat behind.
+  if (bar.ghost > frac) {
+    ctx.fillStyle = 'rgba(255,236,180,0.85)';
+    ctx.beginPath();
+    ctx.roundRect(4, y + 4, Math.max(2, inner * bar.ghost), h - 8, 4);
+    ctx.fill();
+  }
+  if (bar.shown > 0) {
+    ctx.fillStyle = frac > 0.5 ? '#4ad9a0' : frac > 0.25 ? '#ffd24a' : '#ff5c4d';
+    ctx.beginPath();
+    ctx.roundRect(4, y + 4, Math.max(2, inner * bar.shown), h - 8, 4);
+    ctx.fill();
+  }
+  // Quarter ticks, so "one more burst" is readable without doing arithmetic.
+  ctx.fillStyle = 'rgba(4,8,14,0.55)';
+  for (let i = 1; i < 4; i++) ctx.fillRect(4 + inner * (i / 4), y + 4, 2, h - 8);
+  bar.tex.needsUpdate = true;
+}
+
+function makeHeliBar(): HeliBar {
+  const canvas = document.createElement('canvas');
+  canvas.width = BAR_W; canvas.height = BAR_H;
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.magFilter = THREE.LinearFilter;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: tex, transparent: true, depthTest: true, depthWrite: false,
+  }));
+  sprite.scale.set(3.2, 0.85, 1);
+  sprite.position.set(0, 2.6, 0);
+  sprite.renderOrder = 3;
+  return { canvas, tex, sprite, shown: 1, ghost: 1, ghostHold: 0, flash: 0, lastKey: '' };
 }
 
 /**
@@ -452,6 +618,19 @@ function disposeTree(root: THREE.Object3D): void {
 interface HeliEntry {
   model: HelicopterModel;
   snap: HelicopterSnapshot;
+  /** Overhead hull bar and its animation state. */
+  bar: HeliBar;
+  /** Faction tint and mark caption, kept for the bar.
+   *  Tiers run past three; the MARK is what the airframe is called. */
+  tint: string;
+  markLabel: string;
+  /** Length of rope actually drawn — it pays out and reels in over time. */
+  ropeDrawn: number;
+  /** Pendulum state for the hanging line (radians + radians/s, per axis). */
+  swayX: number;
+  swayZ: number;
+  swayVX: number;
+  swayVZ: number;
   /** Last authoritative position + the pose drawn this frame. */
   target: THREE.Vector3;
   pos: THREE.Vector3;
@@ -488,12 +667,18 @@ interface Smoke { mesh: THREE.Mesh; ttl: number; life: number; drift: THREE.Vect
 /** Scratch vectors — sync/update run every frame for every airframe. */
 const _tmp = new THREE.Vector3();
 const _predict = new THREE.Vector3();
+/** Camera position for the frame, so every bar sizes itself off one read. */
+const _eye = new THREE.Vector3();
+/** Scratch for the hull point test (worldToLocal mutates what it is given). */
+const _hit = new THREE.Vector3();
 
 export class VehicleModels {
   private readonly helis = new Map<number, HeliEntry>();
   private readonly bombs = new Map<number, { mesh: THREE.Group; snap: BombSnapshot }>();
   private readonly smoke: Smoke[] = [];
   private clock = 0;
+  /** The airframe the local player is aboard (its own bar stays hidden). */
+  private localRide: number | null = null;
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -513,8 +698,15 @@ export class VehicleModels {
         const model = buildHelicopterModel(snap.tier, tint.getHex());
         model.group.position.set(snap.x, snap.y, snap.z);
         this.scene.add(model.group);
+        const bar = makeHeliBar();
+        const frac = snap.maxHp > 0 ? snap.hp / snap.maxHp : 1;
+        bar.shown = frac; bar.ghost = frac;
+        model.group.add(bar.sprite);
         e = {
-          model, snap,
+          model, snap, bar, tint: `#${tint.getHexString()}`,
+          markLabel: `MK ${'I'.repeat(helicopterStats(snap.tier).mark)}`,
+          ropeDrawn: snap.ropeDeployed ? snap.ropeLength : 0,
+          swayX: 0, swayZ: 0, swayVX: 0, swayVZ: 0,
           target: new THREE.Vector3(snap.x, snap.y, snap.z),
           pos: new THREE.Vector3(snap.x, snap.y, snap.z),
           vel: new THREE.Vector3(),
@@ -544,6 +736,19 @@ export class VehicleModels {
           e.vel.lerp(_tmp, 0.5);
           e.yawRate += (angleDelta(e.snap.yaw, snap.yaw) / dt - e.yawRate) * 0.5;
         }
+      }
+      // A hull LOSS is the loudest thing an airframe can tell a bystander, and
+      // the snapshot is the one place every viewer agrees it happened — the
+      // shooter, the crew being shot at and anyone watching from the ground all
+      // get the same ghost tail, the same flash and the same shower of spall.
+      if (snap.hp < e.snap.hp) {
+        e.bar.ghost = Math.max(e.bar.ghost, e.bar.shown);
+        e.bar.ghostHold = 0.45;
+        e.bar.flash = 0.16;
+        this.spall(e, e.snap.hp - snap.hp);
+      } else if (snap.hp > e.snap.hp) {
+        // Repaired on the pad: no ghost, the bar just grows back.
+        e.bar.ghost = snap.maxHp > 0 ? snap.hp / snap.maxHp : 1;
       }
       e.target.set(snap.x, snap.y, snap.z);
       e.sinceSnap = 0;
@@ -650,15 +855,84 @@ export class VehicleModels {
     return this.helis.get(id)?.model.group.position ?? null;
   }
 
-  /** Render-space point along a deployed rope (0 winch, 1 free end). */
+  /**
+   * Render-space point along a deployed rope (0 winch, 1 free end).
+   *
+   * Read off the rope's OWN pivot rather than computed straight down from the
+   * hub, so a rider hangs on the line that is actually drawn: the sway, the
+   * trail behind the airframe's travel and the part of the rope that has
+   * physically paid out all move them.
+   */
   ropeWorldPosition(id: number, progress: number): THREE.Vector3 | null {
     const e = this.helis.get(id);
     if (!e || !e.snap.ropeDeployed) return null;
-    return new THREE.Vector3(
-      e.model.group.position.x,
-      e.model.group.position.y - 0.75 - Math.max(0, Math.min(1, progress)) * e.snap.ropeLength,
-      e.model.group.position.z,
-    );
+    const pivot = e.model.rope.pivot;
+    pivot.updateWorldMatrix(true, false);
+    const p = Math.max(0, Math.min(1, progress));
+    return pivot.localToWorld(new THREE.Vector3(0, -p * e.ropeDrawn, 0));
+  }
+
+  /**
+   * Is this point inside an airframe's skin?
+   *
+   * Presentation only: it is what stops a tracer ON the hull instead of letting
+   * it sail through the cabin and out the other side. The damage a round does
+   * was already reported when the trigger was pulled, so a miss here costs
+   * nothing but a visual. Tested in the hull's OWN space, so a banking
+   * helicopter is hit where it looks like it is.
+   */
+  pointInHull(point: THREE.Vector3): boolean {
+    for (const e of this.helis.values()) {
+      if (e.snap.dying > 0) continue;
+      // Cheap reject first — the local test needs a matrix inverse.
+      if (e.model.group.position.distanceToSquared(point) > 16) continue;
+      _hit.copy(point);
+      e.model.hull.worldToLocal(_hit);
+      if (Math.abs(_hit.x) <= 1.15 && _hit.y >= -1.15 && _hit.y <= 1.1 &&
+          Math.abs(_hit.z) <= 2.4) return true;
+    }
+    return false;
+  }
+
+  /** Estimated velocity of an airframe (blocks/s), for anything that wants to
+   *  inherit its momentum — stepping off the rope, mostly. */
+  velocityOf(id: number): THREE.Vector3 | null {
+    const e = this.helis.get(id);
+    return e ? e.vel.clone() : null;
+  }
+
+  /**
+   * The airframe the local player is riding. Its own overhead bar is hidden —
+   * the cockpit HUD already carries the hull gauge, and a nameplate floating in
+   * the middle of your own windscreen is just clutter.
+   */
+  setLocalRide(id: number | null): void { this.localRide = id; }
+
+  /**
+   * Spall thrown off a hull that just took a hit. Called from the snapshot
+   * diff for everyone, and directly by the shooter so their own feedback lands
+   * on the frame they pulled the trigger instead of a round trip later.
+   */
+  private spall(e: HeliEntry, amount: number): void {
+    const n = Math.max(2, Math.min(9, Math.round(amount / 3) + 2));
+    const p = e.model.group.position;
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      this.puff(
+        p.x + (Math.random() - 0.5) * 1.6, p.y + (Math.random() - 0.5) * 1.2,
+        p.z + (Math.random() - 0.5) * 1.6,
+        0.12 + Math.random() * 0.1, i % 3 ? 0xffc864 : 0xfff0c0, 0.34,
+        new THREE.Vector3(Math.cos(a) * 3.4, 1.4 + Math.random() * 2, Math.sin(a) * 3.4),
+        0.85);
+    }
+  }
+
+  /** Immediate local feedback for a round the shooter knows connected. */
+  hitFlash(id: number, amount: number): void {
+    const e = this.helis.get(id);
+    if (!e) return;
+    e.bar.flash = 0.16;
+    this.spall(e, amount);
   }
 
   remove(id: number): void {
@@ -669,6 +943,9 @@ export class VehicleModels {
       const r = e.riders[seat];
       if (r) e.model.seats[seat].remove(r);
     }
+    e.model.group.remove(e.bar.sprite);
+    e.bar.tex.dispose();
+    (e.bar.sprite.material as THREE.SpriteMaterial).dispose();
     this.scene.remove(e.model.group);
     disposeTree(e.model.group);
     this.helis.delete(id);
@@ -705,9 +982,72 @@ export class VehicleModels {
     }
   }
 
-  update(dt: number): void {
+  /**
+   * Animate the hanging rope.
+   *
+   * Three things it does that a stick could not:
+   *   PAYS OUT   the line falls to length instead of appearing at length, with
+   *              the winch drum spinning while it runs and the weighted end
+   *              leading the way down.
+   *   TRAILS     the line lags behind the airframe's travel, so a rope dropped
+   *              from a moving helicopter streams backwards the way one would.
+   *   SWINGS     a real (if heavily damped) pendulum on both axes, kicked by
+   *              the aircraft's own acceleration, so the whole line — and
+   *              anyone riding it — sways instead of hanging like a plumb line.
+   */
+  private updateRope(e: HeliEntry, dt: number): void {
+    const { model, snap } = e;
+    const want = snap.ropeDeployed ? snap.ropeLength : 0;
+    // Out fast (it is thrown, then falls), back in on the winch's own time.
+    const rate = want > e.ropeDrawn ? 34 : 14;
+    const before = e.ropeDrawn;
+    e.ropeDrawn = Math.abs(want - e.ropeDrawn) < 0.05 ? want
+      : e.ropeDrawn + Math.sign(want - e.ropeDrawn) * Math.min(Math.abs(want - e.ropeDrawn), rate * dt);
+    const running = Math.abs(e.ropeDrawn - before) > 1e-4;
+    if (snap.ropeWinch) model.winchDrum.rotation.x += running ? dt * 26 * Math.sign(e.ropeDrawn - before) : 0;
+
+    const rope = model.rope;
+    const len = e.ropeDrawn;
+    rope.pivot.visible = len > 0.05;
+    if (!rope.pivot.visible) { e.swayVX = e.swayVZ = e.swayX = e.swayZ = 0; return; }
+
+    // Pendulum. The airframe's velocity is the drive (drag on the line), the
+    // spring pulls back to plumb, and the damping keeps it from oscillating
+    // forever. Someone is STANDING on this, so it is deliberately a restrained
+    // one: the lean is capped at about 20°, which is a line that visibly
+    // streams behind a moving helicopter without slinging its rider a dozen
+    // blocks out into the nearest hillside.
+    const drive = 0.02;
+    const spring = 26 / Math.max(6, len);
+    const damp = 2.6;
+    // A slow idle breath from the rotor wash, so a hovering rope is never a
+    // dead plumb line.
+    const wash = Math.sin(this.clock * 1.7) * 0.006;
+    e.swayVX += (-e.vel.z * drive + wash - e.swayX * spring - e.swayVX * damp) * dt * 6;
+    e.swayVZ += (e.vel.x * drive - wash - e.swayZ * spring - e.swayVZ * damp) * dt * 6;
+    e.swayX = THREE.MathUtils.clamp(e.swayX + e.swayVX * dt, -0.35, 0.35);
+    e.swayZ = THREE.MathUtils.clamp(e.swayZ + e.swayVZ * dt, -0.35, 0.35);
+    rope.pivot.rotation.set(e.swayX, 0, e.swayZ, 'YXZ');
+
+    rope.line.scale.y = len;
+    rope.line.position.y = -len * 0.5;
+    rope.weight.position.y = -len;
+    // Rungs every few blocks, only as many as the paid-out line can carry.
+    for (let i = 0; i < rope.rungs.length; i++) {
+      const at = (i + 1) * ROPE_RUNG_SPACING;
+      const on = at < len - 0.4;
+      rope.rungs[i].visible = on;
+      if (on) {
+        rope.rungs[i].position.y = -at;
+        rope.rungs[i].rotation.y = at * 0.9;   // a visible twist down the braid
+      }
+    }
+  }
+
+  update(dt: number, camera?: THREE.Camera): void {
     this.clock += dt;
-    for (const e of this.helis.values()) {
+    if (camera) camera.getWorldPosition(_eye);
+    for (const [id, e] of this.helis) {
       const { model, snap } = e;
       e.sinceSnap += dt;
 
@@ -752,15 +1092,38 @@ export class VehicleModels {
       model.winch.visible = snap.ropeWinch;
       model.fuelTanks[0].visible = snap.fuelModule >= 2;
       model.fuelTanks[1].visible = snap.fuelModule >= 3;
-      model.rope.visible = snap.ropeDeployed && snap.ropeLength > 0;
-      if (model.rope.visible) {
-        model.rope.scale.y = snap.ropeLength;
-        model.rope.position.set(0, -snap.ropeLength * 0.5 - 0.75, -0.15);
-      }
+      this.updateRope(e, dt);
 
       // Running lights: a slow strobe on the belly beacon, steady nav lights.
       const strobe = (Math.sin(this.clock * 6) > 0.7) ? 1.5 : 0.7;
       model.lights[3].scale.setScalar(strobe);
+
+      // --- Overhead hull bar ---
+      const bar = e.bar;
+      const frac = snap.maxHp > 0 ? Math.max(0, Math.min(1, snap.hp / snap.maxHp)) : 0;
+      // The fill chases the truth quickly; the ghost holds, then drains slowly
+      // behind it, which is what makes a burst read as a bite out of the bar.
+      bar.shown += (frac - bar.shown) * Math.min(1, dt * 14);
+      if (Math.abs(bar.shown - frac) < 0.002) bar.shown = frac;
+      if (bar.ghostHold > 0) bar.ghostHold = Math.max(0, bar.ghostHold - dt);
+      else if (bar.ghost > bar.shown) bar.ghost = Math.max(bar.shown, bar.ghost - dt * 0.55);
+      else bar.ghost = bar.shown;
+      bar.flash = Math.max(0, bar.flash - dt);
+      const dist = camera ? _eye.distanceTo(model.group.position) : 0;
+      const visible = !dying && snap.maxHp > 0 && id !== this.localRide && dist < BAR_FAR;
+      bar.sprite.visible = visible;
+      if (visible) {
+        drawHeliBar(bar, snap, e.tint, e.markLabel);
+        // Grow with range so the bar stays readable on a contact at altitude,
+        // and fade out entirely before it becomes litter on the horizon.
+        const grow = THREE.MathUtils.clamp(dist / 34, 1, 2.6);
+        const punch = bar.flash > 0 ? 1.1 : 1;
+        bar.sprite.scale.set(3.2 * grow * punch, 0.85 * grow * punch, 1);
+        bar.sprite.position.y = 2.5 + grow * 0.35;
+        const mat = bar.sprite.material as THREE.SpriteMaterial;
+        mat.opacity = dist > BAR_FADE
+          ? Math.max(0, 1 - (dist - BAR_FADE) / (BAR_FAR - BAR_FADE)) : 1;
+      }
 
       // Damage smoke: starts as a wisp below half HP and becomes a black column.
       const health = snap.maxHp > 0 ? snap.hp / snap.maxHp : 1;

@@ -1,6 +1,6 @@
 // CHARACTER cosmetics: a pure, compact model of every avatar customisation
-// option (skin tone, hair style/colour, eyes, outfit colours, hats, capes and
-// face accessories). Everything is a small palette INDEX so the whole look
+// option (skin tone, hair style/colour, eyes, outfit colours, hats and face
+// accessories). Everything is a small palette INDEX so the whole look
 // serialises as a handful of ints — trivial to sanitize server-side, persist
 // in account data and mirror to localStorage offline. Rendering lives in
 // remoteplayers.ts (avatars) and the character screen (preview); this module
@@ -18,8 +18,6 @@ export interface Cosmetics {
   pants: number;     // PANTS_COLORS
   hat: number;       // HATS
   hatColor: number;  // HAT_COLORS
-  cape: number;      // CAPES
-  capeColor: number; // CAPE_COLORS
   face: number;      // FACE_ACCESSORIES
 }
 
@@ -114,23 +112,6 @@ export const HAT_COLORS: Swatch[] = [
   { name: 'Brown',    hex: 0x6a4a2e },
 ];
 
-export const CAPES: string[] = [
-  'None', 'Plain', 'Trimmed', 'Two-Tone', 'Royal', 'Tattered',
-];
-
-export const CAPE_COLORS: Swatch[] = [
-  { name: 'Crimson', hex: 0x8e2430 },
-  { name: 'Scarlet', hex: 0xc03a2a },
-  { name: 'Gold',    hex: 0xc99a18 },
-  { name: 'Emerald', hex: 0x2e7d4a },
-  { name: 'Ocean',   hex: 0x2a5e9a },
-  { name: 'Midnight', hex: 0x232c4a },
-  { name: 'Violet',  hex: 0x6a3fb0 },
-  { name: 'Rose',    hex: 0xc45a8a },
-  { name: 'Onyx',    hex: 0x22242a },
-  { name: 'Ivory',   hex: 0xdcd8cc },
-];
-
 export const FACE_ACCESSORIES: string[] = [
   'None', 'Glasses', 'Sunglasses', 'Eyepatch', 'Mask', 'Moustache', 'Monocle',
 ];
@@ -145,8 +126,6 @@ export const COSMETIC_RANGES: Record<keyof Cosmetics, number> = {
   pants: PANTS_COLORS.length,
   hat: HATS.length,
   hatColor: HAT_COLORS.length,
-  cape: CAPES.length,
-  capeColor: CAPE_COLORS.length,
   face: FACE_ACCESSORIES.length,
 };
 
@@ -154,7 +133,7 @@ export const COSMETIC_KEYS = Object.keys(COSMETIC_RANGES) as (keyof Cosmetics)[]
 
 /** The look every player starts with when they never customised: derived
  *  deterministically from their skin seed, so a player renders the same on
- *  every client — no hat/cape/accessory until they pick one. */
+ *  every client — no hat or accessory until they pick one. */
 export function defaultCosmetics(seed: number): Cosmetics {
   const rng = mulberry32(seed);
   return {
@@ -165,7 +144,6 @@ export function defaultCosmetics(seed: number): Cosmetics {
     shirt: Math.floor(rng() * SHIRT_COLORS.length),
     pants: Math.floor(rng() * 4),
     hat: 0, hatColor: Math.floor(rng() * HAT_COLORS.length),
-    cape: 0, capeColor: Math.floor(rng() * CAPE_COLORS.length),
     face: 0,
   };
 }

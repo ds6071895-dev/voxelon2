@@ -142,7 +142,7 @@ const EMOJI_ICONS: Record<string, IconName> = {
   '⏸': 'pause', '⏳': 'hourglass', '⌛': 'hourglass',
   '↑': 'arrowUp', '↓': 'arrowDown', '↔': 'arrowsHorizontal',
   // NOT '→': it is typography, not an icon — it reads as "becomes" in dozens of
-  // upgrade and recipe lines ("Silo HP 500 → 600"), where a glyph is right.
+  // upgrade and recipe lines ("Helicopter HP 140 → 170"), where a glyph is right.
 };
 
 /** Matches any mapped emoji, plus the variation selector and zero-width joiner

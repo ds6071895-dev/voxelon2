@@ -118,12 +118,42 @@ export interface HelicopterState {
 export const FAST_ROPE_LENGTH = 32;
 /** Climbing is deliberate; descending is a quick, satisfying controlled slide. */
 export const FAST_ROPE_CLIMB_SPEED = 4;
-export const FAST_ROPE_SLIDE_SPEED = 10;
+/**
+ * A slide ACCELERATES. Roping in used to run down the line at one flat speed,
+ * which reads as being lowered on a winch rather than as letting go — the whole
+ * point of a fast rope is that gravity is doing the work and your gloves are
+ * only deciding how much of it to give back. So the descent starts at a
+ * controlled `FAST_ROPE_SLIDE_SPEED`, winds up to `FAST_ROPE_SLIDE_MAX` over
+ * `FAST_ROPE_SLIDE_RAMP` seconds of held descent, and resets the moment you
+ * grab back on. Everything downstream (camera shake, wind, friction sparks)
+ * keys off the SAME curve, so the noise and the speed are always in agreement.
+ */
+export const FAST_ROPE_SLIDE_SPEED = 7;
+export const FAST_ROPE_SLIDE_MAX = 20;
+export const FAST_ROPE_SLIDE_RAMP = 1.1;
 
-export function fastRopeProgressDelta(motion: number, dt: number, ropeLength: number): number {
+/** Blocks/s of descent after `held` seconds of continuously holding the slide. */
+export function fastRopeSlideSpeed(held: number): number {
+  const t = Number.isFinite(held) ? Math.max(0, held) : 0;
+  const k = Math.min(1, t / FAST_ROPE_SLIDE_RAMP);
+  return FAST_ROPE_SLIDE_SPEED + (FAST_ROPE_SLIDE_MAX - FAST_ROPE_SLIDE_SPEED) * k;
+}
+
+/** Advance the "how long have they been sliding" clock that drives the ramp.
+ *  Climbing or holding station kills it outright — momentum is earned, never
+ *  banked — so the client and the server can never disagree about the speed. */
+export function fastRopeHeld(held: number, motion: number, dt: number): number {
+  if (!Number.isFinite(dt) || dt <= 0) return held;
+  if (!Number.isFinite(motion) || motion <= 0) return 0;
+  return (Number.isFinite(held) ? Math.max(0, held) : 0) + dt;
+}
+
+export function fastRopeProgressDelta(
+  motion: number, dt: number, ropeLength: number, held = 0,
+): number {
   if (!Number.isFinite(motion) || !Number.isFinite(dt) || dt <= 0 || ropeLength <= 0) return 0;
   const input = Math.max(-1, Math.min(1, motion));
-  const speed = input > 0 ? FAST_ROPE_SLIDE_SPEED : FAST_ROPE_CLIMB_SPEED;
+  const speed = input > 0 ? fastRopeSlideSpeed(held) : FAST_ROPE_CLIMB_SPEED;
   return input * speed * dt / ropeLength;
 }
 
@@ -149,6 +179,8 @@ export interface RopeRiderState {
   progress: number;
   /** -1 climbs, +1 slides, 0 holds. */
   motion: number;
+  /** Seconds of uninterrupted descent, which is what the slide ramp reads. */
+  held: number;
 }
 
 export function sanitizeHeliInput(raw: unknown): HeliInput | null {
@@ -560,7 +592,7 @@ export class VehicleSim {
     }
     if (!best) return { ok: false, reason: 'Move closer to a deployed friendly rope.' };
     const rider: RopeRiderState = {
-      playerId, heliId: best.h.id, progress: best.progress, motion: 0,
+      playerId, heliId: best.h.id, progress: best.progress, motion: 0, held: 0,
     };
     this.ropeRiders.set(playerId, rider);
     return { ok: true, rider: { ...rider } };
@@ -632,8 +664,12 @@ export class VehicleSim {
         this.ropeRiders.delete(playerId);
         continue;
       }
+      rider.held = fastRopeHeld(rider.held, rider.motion, dt);
       rider.progress = Math.max(0, Math.min(1,
-        rider.progress + fastRopeProgressDelta(rider.motion, dt, h.ropeLength)));
+        rider.progress + fastRopeProgressDelta(rider.motion, dt, h.ropeLength, rider.held)));
+      // Bottomed out: the ramp resets so stepping off and grabbing back on
+      // always starts the slide from a controlled speed again.
+      if (rider.progress >= 1) rider.held = 0;
     }
     for (const b of [...this.bombs.values()]) this.stepBomb(b, dt, out);
     return out;
@@ -864,7 +900,7 @@ export class VehicleSim {
   }
 }
 
-/** Blast damage helper shared with the missile layer (linear falloff, once). */
+/** Blast damage helper for bombs (linear falloff, applied once). */
 export function bombBlast(
   centre: Vec3, target: Vec3, radius: number, centreDamage: number,
 ): number {

@@ -122,16 +122,15 @@ export const enum Item {
   // --- Warfare Command --------------------------------------------------------
   // Intermediate components. The crafting grid cannot express "32 iron" in one
   // recipe, so heavy hardware is assembled from sub-assemblies instead — which
-  // also makes the raw cost of a silo readable at a glance.
+  // also makes the raw cost of an airframe readable at a glance.
+  // 219 is a retired strategic-missile component id and is not reused.
   ReinforcedFrame = 217,
   GuidanceUnit = 218,
-  Warhead = 219,
   RotorAssembly = 220,
   FuelTank = 221,
   BombCasing = 222,
   // Ordnance loaded into hardware (the hardware owns it once loaded).
-  TacticalMissile = 223,
-  InterceptorMissile = 224,
+  // 223-224 are retired strategic-missile ordnance ids and are not reused.
   AerialBomb = 225,
   RepairKit = 226,
   /** Right-click a Helipad with this to assemble a helicopter on it. */
@@ -604,19 +603,14 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Item.GreaterRuneOfPower]: pureItem('Greater Rune of Power', Tile.GreaterRuneOfPower),
 
   // --- Warfare Command --------------------------------------------------------
-  [Block.TacticalSilo]: blockItem(Block.TacticalSilo),
-  [Block.InterceptorBattery]: blockItem(Block.InterceptorBattery),
   [Block.Helipad]: blockItem(Block.Helipad),
   // Components (stack small — they are heavy assemblies, not screws).
   [Item.ReinforcedFrame]: { name: 'Reinforced Frame', kind: 'item', sprite: Tile.ReinforcedFrame, maxStack: 16 },
   [Item.GuidanceUnit]: { name: 'Guidance Unit', kind: 'item', sprite: Tile.GuidanceUnit, maxStack: 16 },
-  [Item.Warhead]: { name: 'Warhead', kind: 'item', sprite: Tile.WarheadSprite, maxStack: 16 },
   [Item.RotorAssembly]: { name: 'Rotor Assembly', kind: 'item', sprite: Tile.RotorAssembly, maxStack: 16 },
   [Item.FuelTank]: { name: 'Fuel Tank', kind: 'item', sprite: Tile.FuelTank, maxStack: 16 },
   [Item.BombCasing]: { name: 'Bomb Casing', kind: 'item', sprite: Tile.BombCasingSprite, maxStack: 16 },
   // Ordnance.
-  [Item.TacticalMissile]: { name: 'Tactical Missile', kind: 'item', sprite: Tile.TacticalMissileSprite, maxStack: 8 },
-  [Item.InterceptorMissile]: { name: 'Interceptor Missile', kind: 'item', sprite: Tile.InterceptorSprite, maxStack: 16 },
   [Item.AerialBomb]: { name: 'Aerial Bomb', kind: 'item', sprite: Tile.AerialBombSprite, maxStack: 16 },
   [Item.RepairKit]: { name: 'Hardware Repair Kit', kind: 'item', sprite: Tile.RepairKitSprite, maxStack: 16 },
   [Item.HelicopterKit]: { name: 'Helicopter Airframe', kind: 'item', sprite: Tile.HelicopterKitSprite, maxStack: 1 },

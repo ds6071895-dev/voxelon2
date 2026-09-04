@@ -12,9 +12,6 @@ import type {
 } from '../vault_encounter';
 import type { VaultBossKind, VaultFamily, VaultTier } from '../vaults';
 import type {
-  BatteryState, LaunchReject, MissileSnapshot, ProtectedArea, SiloState,
-} from '../strategic';
-import type {
   BombSnapshot, HeliLossReason, HelicopterSnapshot, SeatKind,
 } from '../vehicles';
 import type { DuelArenaBounds, DuelLobbySnapshot, DuelResult } from '../duels';
@@ -326,7 +323,15 @@ export type ClientMsg =
   // server-side — the client only hides the controls.
   | { t: 'govBroadcast'; text: string }
   | { t: 'govTax'; rate: number }
-  | { t: 'govFundKits'; count: number }
+  // Rewrite the recruit loadout: 4 armor slots then 9 hotbar slots, nulls for
+  // the gaps (treasury.ts owns the layout and re-validates every slot).
+  | { t: 'govSetKit'; slots: (ItemStack | null)[] }
+  // Fund kits. `source` says who pays: the treasury, or the president's own
+  // pockets — in which case the CLIENT has already removed the bill from its
+  // inventory and the server banks it before spending it, so the treasury nets
+  // out unchanged and the stock still comes from something real. Same trust
+  // model as `drop`, which is also the client declaring what it just had.
+  | { t: 'govFundKits'; count: number; source?: 'treasury' | 'inventory' }
   // Claim the recruit kit your faction funded (once per account, ever).
   | { t: 'claimKit' }
   // Haul stacks out of the ENEMY treasury. Refused outside a war window.
@@ -378,23 +383,6 @@ export type ClientMsg =
   // Progression. XP itself is NEVER client-reported: the server settles it from
   // its own boss-contribution ledger. The client may only ask to SPEND.
   | { t: 'warfareBuy'; node: string }
-  // Tactical silos (block-entities; placement is a normal edit).
-  | { t: 'siloOpen'; x: number; y: number; z: number }
-  | { t: 'siloLoad'; x: number; y: number; z: number; count: number }
-  | { t: 'siloUpgrade'; x: number; y: number; z: number }
-  // Fire. `tx/tz` is the map reticle; the server revalidates EVERYTHING
-  // (ownership, faction, range, ammunition, protected areas, cooldown, finite
-  // coordinates, in-flight caps) before a single missile is consumed.
-  | { t: 'siloLaunch'; x: number; y: number; z: number; tx: number; tz: number }
-  // Interceptor batteries.
-  | { t: 'batteryOpen'; x: number; y: number; z: number }
-  | { t: 'batteryLoad'; x: number; y: number; z: number; count: number }
-  | { t: 'batteryUpgrade'; x: number; y: number; z: number }
-  // Sabotage/raid damage against strategic hardware (same trust model as
-  // `machineHit`/`turretHit`: the server clamps the amount).
-  | { t: 'strategicHit'; kind: 'silo' | 'battery'; x: number; y: number; z: number; amount: number }
-  // Accurate gunfire against a missile hull in flight.
-  | { t: 'missileHit'; id: number; amount: number }
   // Helicopters. The client sends INPUT, never positions.
   | { t: 'heliSpawn'; x: number; y: number; z: number }
   // Field-assemble an airframe from a carried Helicopter Airframe kit. A
@@ -464,12 +452,8 @@ export type ServerMsg =
       warfare: { xp: number; nodes: string[] };
       duelProfile: DuelPublicProfile;
       duelLeaderboard: DuelLeaderboardEntry[];
-      /** Strategic hardware standing in the world. */
-      silos: SiloState[];
-      batteries: BatteryState[];
+      /** Aviation hardware standing in the world. */
       helis: HelicopterSnapshot[];
-      /** Locations a tactical strike may never be aimed into. */
-      protectedAreas: ProtectedArea[];
       /** FACTION GOVERNMENT: elections + governments for every faction. Present
        *  even for an unpledged player — the allegiance screen reads it. */
       politics: PoliticsState;
@@ -617,23 +601,6 @@ export type ServerMsg =
   | { t: 'warfareXp'; amount: number; tier: number; total: number; boss: string }
   // A purchase or a hardware action was refused, with the reason to show.
   | { t: 'warfareErr'; reason: string }
-  // Strategic hardware state (broadcast on every change; also in `welcome`).
-  | { t: 'silo'; state: SiloState }
-  | { t: 'siloGone'; id: number; x: number; y: number; z: number }
-  | { t: 'battery'; state: BatteryState }
-  | { t: 'batteryGone'; id: number; x: number; y: number; z: number }
-  // Periodic missile snapshots + the discrete events worth an effect/sound.
-  | { t: 'missiles'; list: MissileSnapshot[] }
-  | { t: 'missileLaunch'; missile: MissileSnapshot; siloId: number }
-  | { t: 'interceptorLaunch'; missile: MissileSnapshot; batteryId: number }
-  | { t: 'missileEnd'; id: number; reason: 'impact' | 'intercepted' | 'shot' | 'expired';
-      x: number; y: number; z: number; radius: number }
-  // An inbound strike is on its way to `x/z`, landing in `eta` seconds.
-  | { t: 'strikeWarning'; faction: number; x: number; z: number; eta: number; radius: number }
-  // Areas a strike may never be aimed into (drawn on the targeting map).
-  | { t: 'protectedAreas'; areas: ProtectedArea[] }
-  // A launch request was rejected — the reticle turns red and explains why.
-  | { t: 'launchRejected'; reason: LaunchReject; text: string }
   // Helicopters + their bombs.
   | { t: 'helis'; list: HelicopterSnapshot[]; bombs: BombSnapshot[] }
   | { t: 'heliSeat'; id: number; seat: SeatKind | null }

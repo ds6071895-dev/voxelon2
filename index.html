@@ -1075,11 +1075,15 @@
       width: 100%; min-height: 390px; flex: 1; cursor: default; touch-action: none;
     }
     #title-character-preview canvas { display: block; width: 100%; height: 100%; background: transparent; }
+    /* Two actions under the preview: edit the look you wear, open the capes
+       you own. The gold one is the primary, so it takes the free space. */
+    .character-actions { display: grid; grid-template-columns: 1fr auto; gap: 10px; width: 100%; }
     #overlay #character-btn {
       width: 100%; border-color: transparent; color: #241703;
       background: linear-gradient(180deg, var(--gold-lit), var(--gold));
       box-shadow: 0 12px 28px rgba(255,192,67,.26);
     }
+    #overlay #capes-btn { padding: 12px 22px; }
 
     /* World status: three plates across the foot of the title screen. */
     .title-status {
@@ -2379,7 +2383,10 @@
         <section class="character-card" aria-label="Your character">
           <h2 class="mc-font">Your Character:</h2>
           <div id="title-character-preview" aria-label="Your character preview"></div>
-          <button id="character-btn" class="mc-btn">Edit Character</button>
+          <div class="character-actions">
+            <button id="character-btn" class="mc-btn">Edit Character</button>
+            <button id="capes-btn" class="mc-btn">Capes</button>
+          </div>
         </section>
       </div>
 

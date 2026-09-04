@@ -27,7 +27,7 @@ import {
   poseGliderRig,
 } from './glidermodels';
 import {
-  CAPE_COLORS, Cosmetics, EYE_COLORS, HAIR_COLORS, HAT_COLORS, PANTS_COLORS,
+  Cosmetics, EYE_COLORS, HAIR_COLORS, HAT_COLORS, PANTS_COLORS,
   SHIRT_COLORS, SKIN_TONES, defaultCosmetics, sanitizeCosmetics,
 } from './character';
 import type { DuelPublicProfile } from './duels_progression';
@@ -236,7 +236,7 @@ function buildFace(
   }
 }
 
-// ─── hair + hat + cape builders ────────────────────────────────────────────
+// ─── hair + hat builders ───────────────────────────────────────────────────
 
 const HEAD = 0.5;
 
@@ -371,51 +371,6 @@ function buildHat(
   }
 }
 
-/** Capes (CAPES order: None, Plain, Trimmed, Two-Tone, Royal, Tattered).
- *  Returns the cape group (pivot at the shoulders) for sway animation. */
-function buildCape(
-  parent: THREE.Group, mat: THREE.Material, color: THREE.Color, style: number,
-  shoulderY: number
-): THREE.Group | null {
-  if (style === 0) return null;
-  const g = new THREE.Group();
-  const dark = new THREE.Color(color).multiplyScalar(0.72);
-  const trim = style === 4 ? new THREE.Color(0xd8b32a) : dark;
-  const W = 0.52, T = 0.05, L = 0.92;
-  // Main sheet hangs from the pivot (top edge at the shoulders).
-  const sheet = (w: number, l: number, c: THREE.Color, x: number, drop: number): void => {
-    addBoxTo(g, mat, w, l, T, c, x, -l / 2 - drop, 0);
-  };
-  switch (style) {
-    case 1: // Plain
-      sheet(W, L, color, 0, 0);
-      break;
-    case 2: // Trimmed: darker border strip at the bottom
-      sheet(W, L - 0.14, color, 0, 0);
-      sheet(W, 0.14, trim, 0, L - 0.14);
-      break;
-    case 3: // Two-Tone: split down the middle
-      sheet(W / 2, L, color, -W / 4, 0);
-      sheet(W / 2, L, dark, W / 4, 0);
-      break;
-    case 4: // Royal: gold trim down both edges + the hem
-      sheet(W - 0.16, L, color, 0, 0);
-      sheet(0.08, L, trim, -(W / 2 - 0.04), 0);
-      sheet(0.08, L, trim, W / 2 - 0.04, 0);
-      break;
-    case 5: // Tattered: ragged bottom (three uneven tails)
-      sheet(W, L - 0.26, color, 0, 0);
-      sheet(0.14, 0.26, color, -0.17, L - 0.26);
-      sheet(0.12, 0.16, color, 0.02, L - 0.26);
-      sheet(0.13, 0.22, color, 0.19, L - 0.26);
-      break;
-  }
-  g.position.set(0, shoulderY + 0.04, 0.17);
-  g.rotation.x = -0.12; // resting drape angle away from the back
-  parent.add(g);
-  return g;
-}
-
 // ─── full body builder (shared with the Character screen preview) ─────────
 
 export interface AvatarBody {
@@ -423,8 +378,6 @@ export interface AvatarBody {
   head: THREE.Group;
   /** [leftLeg, rightLeg, leftArm, rightArm] — each pivots at its hip/shoulder. */
   parts: THREE.Group[];
-  /** Cape group (pivot at the shoulders) for sway animation, if worn. */
-  cape: THREE.Group | null;
   /** Wood-grained base material for solid avatar-adjacent props (the boat). */
   material: THREE.MeshBasicMaterial;
   /** Strongest depth-biased layer (brushed plate), used by worn armor. */
@@ -459,8 +412,6 @@ export interface StridePose {
   arms: [number, number];
   /** rotation.z for the right arm — the strike crosses slightly inward. */
   rightArmRoll: number;
-  /** rotation.x for the cape, if worn. */
-  cape: number;
 }
 
 /**
@@ -478,7 +429,6 @@ export function stridePose(
   attackSwing: number
 ): StridePose {
   const amp = Math.sin(walkPhase) * Math.min(1, hspeed / 4.5) * 0.8;
-  const billow = Math.min(1, hspeed / 5) * 0.55;
   return {
     legs: [amp + sneak * 0.28, -amp + sneak * 0.28],
     arms: [
@@ -488,7 +438,6 @@ export function stridePose(
       amp + (holding ? 0.4 : 0) + attackSwing * 1.25 + sneak * 0.18,
     ],
     rightArmRoll: -attackSwing * 0.12,
-    cape: -0.12 - billow - Math.sin(walkPhase * 0.5) * 0.06,
   };
 }
 
@@ -498,7 +447,11 @@ export function stridePose(
 export function buildAvatarBody(
   cosmetics: Cosmetics, shirtOverride?: THREE.Color
 ): AvatarBody {
-  const c = cosmetics;
+  // Sanitize on the way in. Cosmetics reach here straight off the wire on the
+  // bust paths (duel ladder, election plinths), and a blob written by an older
+  // build can be missing a field or carry an index the palette no longer has —
+  // an unguarded `PALETTE[i].hex` would take the whole handler down with it.
+  const c = sanitizeCosmetics(cosmetics);
   const skin  = new THREE.Color(SKIN_TONES[c.skin].hex);
   const eye   = new THREE.Color(EYE_COLORS[c.eyes].hex);
   const hair  = new THREE.Color(HAIR_COLORS[c.hair].hex);
@@ -517,14 +470,13 @@ export function buildAvatarBody(
   const handMat  = layeredAvatarMaterial(1, 'skin');    // hands
   const trimMat  = layeredAvatarMaterial(1, 'leather'); // belt, shoes
   const hairMat  = layeredAvatarMaterial(2, 'hair');
-  const capeMat  = layeredAvatarMaterial(2, 'cloth');
   const detailMat = layeredAvatarMaterial(3, 'none');   // face pixels stay crisp
   const accessoryMat = layeredAvatarMaterial(4, 'none');
   const hatMat   = layeredAvatarMaterial(4, 'cloth');
   const armorMat = layeredAvatarMaterial(6, 'metal');
   const materials = [
     skinMat, clothMat, denimMat, propMat, handMat, trimMat,
-    hairMat, capeMat, detailMat, accessoryMat, hatMat, armorMat,
+    hairMat, detailMat, accessoryMat, hatMat, armorMat,
   ];
   const group = new THREE.Group();
   group.rotation.order = 'YXZ';
@@ -595,12 +547,8 @@ export function buildAvatarBody(
 
   group.add(ll, rl, la, ra);
 
-  // ── Cape ───────────────────────────────────────────────────────────────
-  const cape = buildCape(group, capeMat,
-    new THREE.Color(CAPE_COLORS[c.capeColor].hex), c.cape, SHOULDER_Y);
-
   return {
-    group, head: headGroup, parts: [ll, rl, la, ra], cape,
+    group, head: headGroup, parts: [ll, rl, la, ra],
     material: propMat, armorMaterial: armorMat, materials,
   };
 }
@@ -1144,7 +1092,6 @@ export class RemotePlayers {
         av.parts[2].rotation.x = r.seated ? 0.95 : 0.55;
         av.parts[3].rotation.x = r.seated ? 0.95 : 0.55;
         av.parts[2].rotation.z = 0; av.parts[3].rotation.z = 0;
-        if (av.body.cape) av.body.cape.rotation.x = -0.25;
       } else if (av.glideT > 0.01) {
         // Hanging under the wing: prone along the flight path, hands on the
         // control bar, banked into the turn.
@@ -1161,7 +1108,6 @@ export class RemotePlayers {
         av.parts[2].rotation.z = -pose.armRoll;
         av.parts[3].rotation.z = pose.armRoll;
         av.head.rotation.x = pose.head;
-        if (av.body.cape) av.body.cape.rotation.x = pose.cape;
         // Name tag and health bar belong overhead, not slung out behind.
         placeOverhead(av.group, av.sprite, 2.34);
         placeOverhead(av.group, av.healthSprite, 2.62);
@@ -1203,7 +1149,6 @@ export class RemotePlayers {
           av.parts[2].rotation.z = -0.18;
           av.parts[3].rotation.z = 0.08;
         }
-        if (av.body.cape) av.body.cape.rotation.x = pose.cape;
       }
 
       // ── The wing ───────────────────────────────────────────────────────

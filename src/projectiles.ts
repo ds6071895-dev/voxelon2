@@ -68,6 +68,16 @@ export class Projectiles {
   encounterSink?: (
     point: THREE.Vector3, damage: number, source: 'bullet' | 'rocket',
   ) => boolean;
+  /**
+   * Does this point sit inside a vehicle hull? Set by main.
+   *
+   * Rounds — ours and other people's ghosts — STOP there, so fire at a
+   * helicopter visibly terminates on the airframe instead of streaming through
+   * the cabin. Deliberately presentation-only: the damage a round does to an
+   * aircraft is reported when the trigger is pulled (see `reportAirTargetHit`),
+   * exactly like the PvP path, so nothing here can double-count it.
+   */
+  hullSink?: (point: THREE.Vector3) => boolean;
   /** A round of ours hit a LOCAL target (mob/encounter actor). PvP hitmarkers
    *  come from the server instead, but a shot is a shot — the crosshair should
    *  answer "did that land?" the same way whatever you were shooting at. */
@@ -137,6 +147,7 @@ export class Projectiles {
     // nothing else: no damage, no hit report, no encounter/mob interaction.
     if (p.ghost) {
       if (this.remotePlayers.avatarAtSegment(from, p.pos) >= 0 || this.hitsLocalPlayer(p.pos) ||
+          this.hitsHull(p) ||
           isSolid(this.world.getBlock(
             Math.floor(p.pos.x), Math.floor(p.pos.y), Math.floor(p.pos.z)))) {
         this.despawn(p, true);
@@ -167,12 +178,27 @@ export class Projectiles {
       this.despawn(p, true);
       return;
     }
+    // Airframe hull (visual stop; the hit was reported at the trigger pull).
+    if (this.hitsHull(p)) { this.despawn(p, true); return; }
     // Block.
     if (isSolid(this.world.getBlock(
       Math.floor(p.pos.x), Math.floor(p.pos.y), Math.floor(p.pos.z)
     ))) {
       this.despawn(p, true);
     }
+  }
+
+  /**
+   * Hull test, skipped for the first few blocks of flight.
+   *
+   * A gunner leaning out of a door — ours or, for a ghost round, someone
+   * else's — starts their rounds INSIDE the aircraft they are riding. Ignoring
+   * the hull until the round has cleared it is what keeps door-gunning from
+   * shooting the floor, and costs nothing at any range you could actually
+   * engage another airframe from.
+   */
+  private hitsHull(p: Projectile): boolean {
+    return p.traveled > 3.5 && this.hullSink?.(p.pos) === true;
   }
 
   /** Does this point sit inside the local player's body? Ghost rounds stop on

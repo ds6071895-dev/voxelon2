@@ -12,34 +12,7 @@ import { Biome } from './biomes';
 import { factionColor } from './teams';
 import { Terrain } from './terrain';
 import { CORE_BORDER, CORE_HALF, WORLD_BORDER } from './net/protocol';
-import type { ProtectedArea } from './strategic';
-import { missileFlightTime } from './warfare';
 import { iconSvg } from './emoji_icons';
-
-/** One fire-control session: everything the targeting overlay needs to draw,
- *  plus the two callbacks that end it. */
-export interface TargetingSession {
-  origin: { x: number; z: number };
-  /** Maximum target distance, in blocks. */
-  range: number;
-  /** Blast radius of the loaded warhead, in blocks. */
-  radius: number;
-  /** Rounds currently in the silo. */
-  ammo: number;
-  /** Seconds the silo still has to wait. */
-  cooldown: number;
-  /** Cruise speed, for the ETA readout. */
-  speed: number;
-  /** Zones a strike may never be aimed into. */
-  areas: readonly ProtectedArea[];
-  /** Friendly players near the reticle, recomputed on each redraw. */
-  allies: () => { x: number; z: number; name: string }[];
-  /** Fire. Only reached via the explicit Confirm Launch button. `label` is the
-   *  human name of the waypoint/flag that was picked, so the launch-side UI can
-   *  name what it is shooting at without re-deriving it. */
-  confirm: (tx: number, tz: number, label: string) => void;
-  cancel: () => void;
-}
 
 const CANVAS_PX = 700;
 type MapView = 'core' | 'world';
@@ -80,7 +53,6 @@ interface Waypoint {
   /** Altitude of the waypoint (older saved points have none). */
   y?: number;
 }
-interface StrikeTarget { x: number; z: number; name: string; kind: 'waypoint' | 'flag' }
 interface DynamicMarker {
   x: number; z: number; color: number; name: string;
   /** Optional range for its in-world badge; it remains visible on the map. */
@@ -125,15 +97,6 @@ export class WorldMap {
    *  wind-up + the actual teleport). */
   onTotemTravel?: (t: TotemPos) => void;
 
-  // --- WARFARE COMMAND: explicit SELECT-TARGET mode --------------------------
-  // The map has two modes. `browse` is everything it has always done. `target`
-  // turns it into a fire-control display: silo origin, range circle, protected
-  // exclusion zones, nearby allies and the loaded payload are all drawn, a
-  // click only PLACES A RETICLE, and nothing launches until Confirm Launch is
-  // pressed (which the server then revalidates from scratch).
-  private targeting: TargetingSession | null = null;
-  private reticle: StrikeTarget | null = null;
-  private readonly targetBar: HTMLDivElement;
   // Dynamic markers (war flags): server-driven, NOT persisted; shown on the map
   // + as in-world beacons exactly like waypoints. Refreshed each frame by main.
   private dynamicMarkers: DynamicMarker[] = [];
@@ -229,14 +192,7 @@ export class WorldMap {
     hint.className = 'mc-font';
     hint.style.cssText = 'font-size:11px;color:#8da0c0;text-shadow:none;';
     hint.textContent = 'Tap a gold totem: travel there  ·  Tap: add waypoint  ·  Right-click a marker: remove  ·  B in-game: waypoint at your feet  ·  X / M / Esc: close';
-    // Fire-control bar — hidden until select-target mode is entered.
-    this.targetBar = document.createElement('div');
-    this.targetBar.className = 'mc-font';
-    this.targetBar.style.cssText =
-      'display:none;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 12px;' +
-      'border:2px solid #26374f;border-radius:8px;background:#0d1524;color:#dce6f5;' +
-      'text-shadow:none;font-size:12px;';
-    panel.append(header, row, this.targetBar, hint);
+    panel.append(header, row, hint);
     this.el.appendChild(panel);
     app.appendChild(this.el);
 
@@ -252,31 +208,6 @@ export class WorldMap {
   hide(): void {
     this.open = false;
     this.el.style.display = 'none';
-    if (this.targeting) this.endTargeting(true);
-  }
-
-  /** Is the map currently a fire-control display rather than an atlas? */
-  get targetingActive(): boolean { return !!this.targeting; }
-
-  /** Enter select-target mode for one silo. */
-  beginTargeting(session: TargetingSession): void {
-    this.targeting = session;
-    this.reticle = null;
-    this.targetBarKey = '';   // force one rebuild for the new session
-    // Always show the widest view that contains the whole reachable circle.
-    this.view = session.range > 700 ? 'world' : 'core';
-    this.targetBar.style.display = 'flex';
-    this.draw();
-  }
-
-  /** Leave select-target mode. `cancelled` fires the session's cancel hook. */
-  endTargeting(cancelled: boolean): void {
-    const s = this.targeting;
-    this.targeting = null;
-    this.reticle = null;
-    this.targetBar.style.display = 'none';
-    if (cancelled) s?.cancel();
-    if (this.open) this.draw();
   }
 
   /** Redraw while open (player + claims + nodes move). */
@@ -315,7 +246,6 @@ export class WorldMap {
   private draw(): void {
     const ctx = this.ctx;
     ctx.drawImage(this.renderBase(), 0, 0);
-    if (this.targeting) { this.drawTargeting(); return; }
 
     // The HEARTLAND boundary: a gold square at ±CORE_HALF. In the full-world
     // view, label the two societies so kids can read the geography at a glance.
@@ -405,7 +335,7 @@ export class WorldMap {
     this.syncMarkers();
   }
 
-  /** Saved waypoints remain visible while choosing a missile target. */
+  /** The player's saved waypoints. */
   private drawWaypoints(): void {
     const ctx = this.ctx;
     for (const w of this.waypoints) {
@@ -427,7 +357,7 @@ export class WorldMap {
     }
   }
 
-  /** Live war flags remain visible while choosing a missile target. */
+  /** Live war flags, pushed each frame by the game. */
   private drawDynamicMarkers(): void {
     const ctx = this.ctx;
     for (const m of this.dynamicMarkers) {
@@ -603,205 +533,11 @@ export class WorldMap {
     if (this.open) this.draw();
   }
 
-  /**
-   * FIRE CONTROL. Drawn instead of the usual atlas furniture so the display is
-   * unambiguous: this is a weapon, not a map. Everything the server will check
-   * is drawn — the silo origin, the reachable circle, every protected exclusion
-   * zone, friendly players, and the blast footprint at the reticle.
-   */
-  private drawTargeting(): void {
-    const t = this.targeting!;
-    const ctx = this.ctx;
-    // Dim the world so the overlay reads first.
-    ctx.fillStyle = 'rgba(6,10,20,0.45)';
-    ctx.fillRect(0, 0, CANVAS_PX, CANVAS_PX);
-
-    // Range circle.
-    const ox = this.cx(t.origin.x), oy = this.cy(t.origin.z);
-    ctx.setLineDash([]);
-    ctx.strokeStyle = 'rgba(92,226,236,0.85)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(ox, oy, t.range * this.scale, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.fillStyle = 'rgba(92,226,236,0.06)';
-    ctx.fill();
-
-    // Protected exclusion zones — red, because they BLOCK the action.
-    for (const area of t.areas) {
-      const ax = this.cx(area.x), ay = this.cy(area.z);
-      const r = (area.radius + t.radius) * this.scale;
-      ctx.setLineDash([6, 5]);
-      ctx.strokeStyle = 'rgba(255,92,77,0.9)';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.arc(ax, ay, r, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.fillStyle = 'rgba(255,92,77,0.12)';
-      ctx.fill();
-    }
-    ctx.setLineDash([]);
-
-    // These are the only valid strike targets, so keep them visible above the
-    // dimmed atlas and exclusion overlays.
-    this.drawWaypoints();
-    this.drawDynamicMarkers();
-
-    // Friendly players — you should be able to see who you are about to hit.
-    const allies = t.allies();
-    for (const a of allies) {
-      const px = this.cx(a.x), py = this.cy(a.z);
-      ctx.fillStyle = '#5ff09a';
-      ctx.beginPath();
-      ctx.arc(px, py, 4, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.font = 'bold 10px monospace';
-      ctx.textAlign = 'center';
-      ctx.fillStyle = 'rgba(160,255,200,0.95)';
-      ctx.fillText(a.name, px, py - 7);
-    }
-
-    // The silo itself.
-    ctx.fillStyle = '#5ce2ec';
-    ctx.fillRect(ox - 5, oy - 5, 10, 10);
-    ctx.font = 'bold 11px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('SILO', ox, oy - 10);
-
-    // The reticle + its blast footprint.
-    if (this.reticle) {
-      const rx = this.cx(this.reticle.x), ry = this.cy(this.reticle.z);
-      const reject = this.targetReject(this.reticle.x, this.reticle.z);
-      const col = reject ? '#ff5c4d' : '#ffd24a';
-      ctx.strokeStyle = col;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(rx, ry, Math.max(4, t.radius * this.scale), 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(rx - 14, ry); ctx.lineTo(rx - 4, ry);
-      ctx.moveTo(rx + 4, ry); ctx.lineTo(rx + 14, ry);
-      ctx.moveTo(rx, ry - 14); ctx.lineTo(rx, ry - 4);
-      ctx.moveTo(rx, ry + 4); ctx.lineTo(rx, ry + 14);
-      ctx.stroke();
-      // The flight line from silo to impact.
-      ctx.setLineDash([4, 6]);
-      ctx.strokeStyle = reject ? 'rgba(255,92,77,0.6)' : 'rgba(255,210,74,0.6)';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(ox, oy); ctx.lineTo(rx, ry);
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
-    this.refreshTargetBar();
-  }
-
-  /** Client-side preview of the server's launch validation (the server still
-   *  revalidates everything — this only keeps the reticle honest). */
-  private targetReject(tx: number, tz: number): string | null {
-    const t = this.targeting;
-    if (!t) return null;
-    if (!this.strikeTargets().some((m) => m.x === tx && m.z === tz)) {
-      return 'Target must be a waypoint or flag';
-    }
-    if (!Number.isFinite(tx) || !Number.isFinite(tz)) return 'Invalid coordinates';
-    if (Math.abs(tx) > WORLD_BORDER / 2 || Math.abs(tz) > WORLD_BORDER / 2) {
-      return 'Outside the world boundary';
-    }
-    const d = Math.hypot(tx - t.origin.x, tz - t.origin.z);
-    if (d > t.range) return `Out of range — ${Math.round(d)} of ${t.range} blocks`;
-    for (const area of t.areas) {
-      if (Math.hypot(area.x - tx, area.z - tz) <= area.radius + t.radius) {
-        return `Protected: ${area.label}`;
-      }
-    }
-    if (t.ammo < 1) return 'Silo magazine is empty';
-    if (t.cooldown > 0) return `Silo cycling — ${Math.ceil(t.cooldown)}s`;
-    return null;
-  }
-
-  /** The readout + the two explicit buttons under the map.
-   *
-   *  `draw()` runs every frame while the map is open, so this MUST be a no-op
-   *  unless something actually changed: rebuilding the buttons at 60 Hz meant a
-   *  mousedown landed on a node that was destroyed before the matching mouseup,
-   *  so CONFIRM LAUNCH could never fire a click at all. */
-  private targetBarKey = '';
-
-  private refreshTargetBar(): void {
-    const t = this.targeting;
-    if (!t) return;
-    const r = this.reticle;
-    const reject = r ? this.targetReject(r.x, r.z) : 'Select a waypoint or flag';
-    const key = `${r ? `${r.x},${r.z},${r.name}` : 'none'}|${reject}|${t.ammo}|${Math.ceil(t.cooldown)}|${t.range}|${t.radius}`;
-    if (key === this.targetBarKey) return;
-    this.targetBarKey = key;
-    const d = r ? Math.hypot(r.x - t.origin.x, r.z - t.origin.z) : 0;
-    const eta = r ? missileFlightTime(d, t.speed) : 0;
-    const near = r
-      ? t.allies().filter((a) => Math.hypot(a.x - r.x, a.z - r.z) <= t.radius * 2).length
-      : 0;
-    this.targetBar.innerHTML =
-      `<div style="flex:1 1 260px;line-height:1.7">` +
-      `<div style="color:#5ce2ec;letter-spacing:1px;font-size:11px">SELECT TARGET</div>` +
-      (r
-        ? `<div>Target <b>${this.escape(r.name)}</b> · impact <b>${Math.round(r.x)}, ${Math.round(r.z)}</b> · ` +
-          `distance <b>${Math.round(d)}</b> blocks · ETA <b>${eta.toFixed(1)}s</b></div>` +
-          `<div>Blast radius <b>${t.radius}</b> · ammunition <b>${t.ammo}</b> · ` +
-          `cooldown <b>${t.cooldown > 0 ? Math.ceil(t.cooldown) + 's' : 'ready'}</b>` +
-          (near > 0 ? ` · <span style="color:#ff5c4d">${near} ally in blast</span>` : '') +
-          `</div>`
-        : '<div>Click a saved waypoint or flag inside the cyan circle.</div>') +
-      (reject ? `<div style="color:#ff5c4d">${iconSvg('blocked')} ${reject}</div>` : '') +
-      `</div>` +
-      `<div data-tbtns style="display:flex;gap:8px"></div>`;
-    const btns = this.targetBar.querySelector('[data-tbtns]') as HTMLElement;
-    const mk = (label: string, enabled: boolean, accent: string, fn: () => void): void => {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'mc-font';
-      b.textContent = label;
-      b.disabled = !enabled;
-      b.style.cssText =
-        `min-height:48px;padding:0 16px;border-radius:8px;font-family:inherit;font-size:12px;` +
-        `letter-spacing:1px;cursor:${enabled ? 'pointer' : 'not-allowed'};` +
-        `border:2px solid ${enabled ? accent : '#2a3346'};` +
-        `background:${enabled ? 'rgba(255,210,74,0.12)' : '#131a28'};` +
-        `color:${enabled ? '#fff3cf' : '#5a6880'};`;
-      if (enabled) b.addEventListener('click', fn);
-      btns.appendChild(b);
-    };
-    mk('CONFIRM LAUNCH', !!r && !reject, '#ffd24a', () => {
-      const target = this.reticle!;
-      const session = this.targeting!;
-      this.endTargeting(false);
-      session.confirm(target.x, target.z, target.name);
-      this.hide();
-      this.mapCtx.onClose?.();
-    });
-    mk('Cancel', true, '#7f93b3', () => {
-      this.endTargeting(true);
-      this.hide();
-      this.mapCtx.onClose?.();
-    });
-  }
-
   private onClick(e: MouseEvent): void {
     const rect = this.canvas.getBoundingClientRect();
     const px = (e.clientX - rect.left) * (CANVAS_PX / rect.width);
     const py = (e.clientY - rect.top) * (CANVAS_PX / rect.height);
     const wx = Math.round(this.worldX(px)), wz = Math.round(this.worldZ(py));
-    // SELECT-TARGET mode: a click places the reticle and NEVER launches. The
-    // player must press Confirm Launch, which is a separate, deliberate action.
-    if (this.targeting) {
-      if (e.button === 0) {
-        this.reticle = this.nearestStrikeTarget(wx, wz);
-        this.targetBarKey = '';
-        this.draw();
-      }
-      else this.endTargeting(true);
-      return;
-    }
     if (e.button === 0) {
       // An attuned totem within click radius wins over dropping a waypoint.
       let bestT: TotemPos | null = null, bestTD = 14 / this.scale;
@@ -830,29 +566,6 @@ export class WorldMap {
     });
     this.saveWaypoints();
     this.draw();
-  }
-
-  private strikeTargets(): StrikeTarget[] {
-    return [
-      ...this.waypoints.map((w) => ({
-        x: w.x, z: w.z, name: w.name, kind: 'waypoint' as const,
-      })),
-      ...this.dynamicMarkers.map((m) => ({
-        x: m.x, z: m.z, name: m.name, kind: 'flag' as const,
-      })),
-    ];
-  }
-
-  /** Marker selection uses a fixed screen-space radius, so it remains usable
-   * at both Heartland and full-world zoom levels. */
-  private nearestStrikeTarget(x: number, z: number): StrikeTarget | null {
-    let best: StrikeTarget | null = null;
-    let bestDistance = 18 / this.scale;
-    for (const target of this.strikeTargets()) {
-      const distance = Math.hypot(target.x - x, target.z - z);
-      if (distance < bestDistance) { best = target; bestDistance = distance; }
-    }
-    return best;
   }
 
   /** Keep the in-world waypoint pillars in sync with the list (only the ones the

@@ -156,13 +156,8 @@ export const enum Block {
   OpalBrick = 210,
   ClockworkGrate = 211,
   VaultMosaic = 212,
-  // --- Warfare Command: strategic hardware (block-entities) -----------------
-  // TacticalSilo is the ANCHOR of a 2×2 launch pad; the other three cells are
-  // SiloPart, exactly like a machine's MachinePart footprint. Both are
-  // sabotaged (HP), never mined.
-  TacticalSilo = 213,
-  SiloPart = 214,
-  InterceptorBattery = 215,
+  // --- Warfare Command: aviation hardware (block-entities) ------------------
+  // 213-215 are retired strategic-missile ids and are deliberately not reused.
   Helipad = 216,
   Barrier = 217,
 }
@@ -432,21 +427,16 @@ export const enum Tile {
   GreaterRuneFocus = 235,
   GreaterRuneOfPower = 236,
   // --- Warfare Command ---
-  SiloSide = 237,
-  SiloTop = 238,
-  SiloPart = 239,
-  BatterySide = 240,
-  BatteryTop = 241,
+  // 237-241 are retired strategic-missile tiles and are not reused.
   HelipadTop = 242,
   HelipadSide = 243,
   ReinforcedFrame = 244,
   GuidanceUnit = 245,
-  WarheadSprite = 246,
+  // 246 is a retired strategic-missile sprite and is not reused.
   RotorAssembly = 247,
   FuelTank = 248,
   BombCasingSprite = 249,
-  TacticalMissileSprite = 250,
-  InterceptorSprite = 251,
+  // 250-251 are retired strategic-missile sprites and are not reused.
   AerialBombSprite = 252,
   RepairKitSprite = 253,
   HelicopterKitSprite = 254,
@@ -982,21 +972,9 @@ export const BLOCKS: Record<number, BlockInfo> = {
   ...woodSet('Spruce', Tile.SprucePlanks, Block.SpruceSlab, Block.SpruceStairsN, Block.SpruceSlabTop),
 
   // --- Warfare Command (strategic hardware) ---------------------------------
-  // Every one of these is a block-entity: placed as a normal edit, tracked by
-  // the authoritative strategic sim, and taken down by SHOOTING it (HP), never
-  // by mining. The hardness values only matter for the visual break animation.
-  [Block.TacticalSilo]: def({
-    name: 'Tactical Silo', hardness: 6.0, emission: 4,
-    top: Tile.SiloTop, bottom: Tile.AutominerTop, side: Tile.SiloSide,
-  }),
-  [Block.SiloPart]: def({
-    name: 'Silo Housing', hardness: 5.0,
-    top: Tile.SiloPart, opaque: false, occludes: false,
-  }),
-  [Block.InterceptorBattery]: def({
-    name: 'Interceptor Battery', hardness: 5.0, emission: 5,
-    top: Tile.BatteryTop, bottom: Tile.AutominerTop, side: Tile.BatterySide,
-  }),
+  // The Helipad is a block-entity: placed as a normal edit and taken down by
+  // SHOOTING it (HP), never by mining. The hardness value only matters for the
+  // visual break animation.
   // The Helipad is a flat, walkable landing plate — a slab so a helicopter can
   // sit on it and a pilot can stand next to it without jumping.
   [Block.Helipad]: def({
@@ -1021,8 +999,7 @@ const PICKAXE_TIERS: [Block, number][] = [
   [Block.Furnace, 0], [Block.FurnaceLit, 0],
   [Block.Autominer, 0], [Block.OilDerrick, 0],
   [Block.Turret, 1], // metal war machines need a stone+ pick
-  [Block.TacticalSilo, 2], [Block.SiloPart, 2],
-  [Block.InterceptorBattery, 2], [Block.Helipad, 1],
+  [Block.Helipad, 1],
   [Block.Core, 1], // the claim Core is pickaxe-mineable (owner-only, server-gated)
   [Block.VaultBrick, 2], [Block.VaultChest, 2], // dungeon walls need an iron pick
   [Block.CarvedVaultBrick, 2], [Block.MossyVaultBrick, 2],
@@ -1056,6 +1033,20 @@ BLOCKS[Block.ReinforcedStone].tool = 'pickaxe';
 BLOCKS[Block.ReinforcedStone].requiresTool = true;
 BLOCKS[Block.ReinforcedStone].minTier = 2;
 BLOCKS[Block.Barricade].tool = 'axe';
+
+/**
+ * Block ids that once existed and no longer do — the retired strategic-missile
+ * hardware. A world saved while a silo or battery stood in it still names these
+ * ids, so every load path maps them to Air rather than handing the mesher a
+ * block with no definition.
+ */
+const RETIRED_BLOCKS = new Set<number>([213, 214, 215]);
+
+/** A saved block id, migrated: retired hardware becomes Air, everything else
+ *  passes through unchanged. */
+export function migrateBlockId(id: number): number {
+  return RETIRED_BLOCKS.has(id) ? Block.Air : id;
+}
 
 export function isSolid(id: number): boolean {
   return id !== Block.Air && (BLOCKS[id]?.solid ?? false);

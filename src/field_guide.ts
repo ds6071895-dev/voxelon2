@@ -249,27 +249,26 @@ function progressionGuideSections(): FieldGuideSection[] {
     },
     {
       id: 'warfare', title: '8. Warfare Command', icon: icon('machine'),
-      summary: 'Turn boss victories, automation, and oil into missiles, defenses, and aircraft.', entries: [
+      summary: 'Turn boss victories, automation, and oil into an air wing.', entries: [
         entry('warfare-xp-route', 'Boss victories unlock technology', ['warfare', 'xp', 'tree', 'blueprint'],
           table(['Boss tier', 'Warfare XP'], [['Tier I', '300'], ['Tier II', '750'], ['Tier III', '1,500']]) +
-          list(['Only meaningful boss participation awards XP.', 'Every qualifying teammate receives the full award.', 'Each account is paid once per boss recharge cycle.', 'PvP, mobs, guards, chests, missiles, and bombs grant no Warfare XP.']) +
+          list(['Only meaningful boss participation awards XP.', 'Every qualifying teammate receives the full award.', 'Each account is paid once per boss recharge cycle.', 'PvP, mobs, guards, chests, and bombs grant no Warfare XP.']) +
           tip('Open Warfare Command', 'Press T and enter /warfare. Personal blueprints permit construction; completed faction hardware is shared.')),
-        entry('technology-order', 'The technology tree has a fixed progression', ['missile command', 'aegis', 'flight certification', 'operations'],
+        entry('technology-order', 'The technology tree has a fixed progression', ['flight certification', 'bomb rack', 'aviation', 'operations'],
           table(['Technology', 'Progression unlock'], [
-            ['Missile Command', 'Tactical Silos, missiles, and map targeting'],
-            ['Aegis Systems', 'Interceptor batteries, radar, and faster reload'],
             ['Flight Certification', 'Helipads, two-seat helicopters, bombs, and repair'],
-            ['Capstone branches', 'Longer strike reach, stronger air defense, and gunships'],
+            ['Bomb Rack', 'A deeper bomb bay and a shorter drop cycle'],
+            ['Reinforced Airframe', 'A tougher hull and a bigger fuel tank'],
+            ['Aviation branch', 'Faster gunships that fly higher and drop more'],
             ['Operations modules', '2x/3x fuel tanks and fast-rope winches'],
           ]) + warning('Blueprints are not supplies', 'Autominers, Oil Derricks, vault loot, and faction logistics still have to build, fuel, arm, and repair every system.')),
-        entry('combined-hardware', 'Operate strategic hardware', ['silo', 'interceptor', 'helicopter', 'fast rope'],
+        entry('combined-hardware', 'Operate aviation hardware', ['helipad', 'helicopter', 'bomb', 'fast rope'],
           table(['Hardware', 'Progression role', 'Key rule'], [
-            ['Tactical Silo', 'Strike exposed enemy infrastructure', 'Target a saved waypoint or flag; protected zones are invalid'],
-            ['Interceptor Battery', 'Defend critical areas from missiles', 'It tracks missiles only and needs ammunition'],
+            ['Helipad', 'Assemble, refuel, rearm and repair an airframe', 'Any faction teammate can service a shared pad'],
             ['Helicopter', 'Scout, transport, bomb, and provide gunner pressure', 'Fuel, bombs, hull repair, and two trained occupants matter'],
             ['Fast-rope Winch', 'Insert or extract infantry without landing', 'Pilot controls the rope; riders transfer with F'],
           ]) +
-          list(['Missiles can be shot down by accurate gunfire.', 'Friendly players and hardware are immune to friendly strategic damage.', 'Natural terrain is not excavated by strategic strikes.', 'Helicopters cannot enter vault arenas or cross the world boundary.']) +
+          list(['Helicopters can be shot down by accurate gunfire — every airframe carries a hull bar overhead so you can see the damage landing.', 'Friendly players and hardware are immune to friendly blast damage.', 'Helicopters cannot enter vault arenas or cross the world boundary.']) +
           tip('Next milestone', 'Stock every system and assign operators before the faction commits to a war.')),
       ],
     },
@@ -277,7 +276,7 @@ function progressionGuideSections(): FieldGuideSection[] {
       id: 'wars-victory', title: '9. Wars & Victory', icon: icon('team'),
       summary: 'Combine flags, Hearts, industry, hardware, and recovery into a season strategy.', entries: [
         entry('war-preparation', 'Prepare for war', ['war', 'wares', 'season', 'supplies', 'roles'],
-          steps(['Fill distributed ammunition, healing, armor, and fuel caches.', 'Collect Autominers and move Oil Derrick output into protected storage.', 'Refuel turrets, aircraft, silos, and interceptor sites.', 'Assign defenders, scouts, pilots, gunners, operators, and a raid leader.', 'Mark rally points, fallback positions, and recovery routes.', 'Inspect the flag defenses and repair every known breach.']) +
+          steps(['Fill distributed ammunition, healing, armor, and fuel caches.', 'Collect Autominers and move Oil Derrick output into protected storage.', 'Refuel turrets and aircraft.', 'Assign defenders, scouts, pilots, gunners, operators, and a raid leader.', 'Mark rally points, fallback positions, and recovery routes.', 'Inspect the flag defenses and repair every known breach.']) +
           tip('Endgame strength is replacement', 'The strongest faction is not the one with one perfect loadout. It is the one that can replace losses and return to the objective fastest.')),
         entry('combined-arms-loop', 'Use every progression system together', ['combined arms', 'pvp', 'flags', 'machines', 'oil'],
           table(['System', 'Endgame purpose'], [
@@ -285,7 +284,6 @@ function progressionGuideSections(): FieldGuideSection[] {
             ['Grappling Hook / Bounce Pad', 'Reach flanks, rooftops, and escape routes'],
             ['Autominers', 'Replace construction, ammunition, and repair materials'],
             ['Oil Derricks', 'Sustain turrets, aircraft, and fuel logistics'],
-            ['Missiles / Interceptors', 'Threaten or protect strategic infrastructure'],
             ['Helicopters', 'Scout, transport, bomb, gun, and fast-rope teams'],
             ['Flags / Hearts', 'Define the objective and the cost of player losses'],
           ])),
@@ -434,9 +432,9 @@ export function fieldGuideSections(): FieldGuideSection[] {
       ],
     },
     {
-      id: 'warfare', title: 'Warfare Command', icon: icon('machine'), summary: 'Boss-powered technology: tactical missiles, missile defense, and helicopters.', entries: [
+      id: 'warfare', title: 'Warfare Command', icon: icon('machine'), summary: 'Boss-powered technology: the helicopter air wing.', entries: [
         entry('warfare-xp', 'Where warfare XP comes from', ['warfare', 'xp', 'boss', 'vault', 'technology'],
-          `<p>Warfare XP has exactly one source: <b>dungeon-boss victories you actually helped win</b>. Mobs, PvP, guards, chests, missiles and bombs grant none of it.</p>` +
+          `<p>Warfare XP has exactly one source: <b>dungeon-boss victories you actually helped win</b>. Mobs, PvP, guards, chests and bombs grant none of it.</p>` +
           table(['Boss tier', 'Warfare XP'], [['Tier I', '300'], ['Tier II', '750'], ['Tier III', '1,500']]) +
           list(['Every qualifying participant is paid in full — the award is never divided by party size.',
             'You qualify by dealing at least 2% of the boss\'s scaled health and being present for at least a quarter of the fight, or by dealing 10% regardless of how long you stayed.',
@@ -445,41 +443,20 @@ export function fieldGuideSections(): FieldGuideSection[] {
             'Each account is paid once per boss recharge cycle.']) +
           tip('Type /warfare', 'The Warfare Command tree opens from the command box (press T). Purchases are permanent, personal, and cost XP directly.')),
         entry('warfare-tree', 'The technology tree', ['tree', 'nodes', 'blueprint', 'trunk', 'branch'],
-          `<p>One trunk of nine nodes, then three endgame branches and three operations modules. The trunk forces the order: <b>missiles, then missile defense, then helicopters</b>. The complete tree costs 9,800 Warfare XP.</p>` +
+          `<p>A trunk of three nodes, then the Aviation branch and its operations modules. The complete tree costs 3,900 Warfare XP.</p>` +
           table(['Stage', 'What it opens'], [
-            ['Missile Command → Hardened Silo', 'Tactical Silo, Tactical Missile, map targeting, range and magazine'],
-            ['Aegis Systems → Fast Intercept', 'Interceptor Turret, Interceptor Missiles, radar and reload'],
              ['Flight Certification → Reinforced Airframe', 'Helipad, two-seat helicopter, bombs, hull and fuel'],
-             ['Strike / Aegis / Aviation', 'The three capstone branches: reach, airspace denial, and gunships'],
+             ['Aviation branch', 'Turbine, heavy bomb bay and the Air Command gunship'],
              ['Operations modules', '2×/3× fuel tanks and fast-rope winches']]) +
           tip('Blueprints are personal, hardware is shared', 'You need the node to BUILD or RETROFIT. Once it exists, any faction teammate can load, operate and fly it.')),
-        entry('warfare-missiles', 'Tactical missiles', ['missile', 'silo', 'launch', 'targeting', 'blast'],
-          steps(['Build a Tactical Silo — it needs a clear 2×2 pad.',
-            'Load a Tactical Missile into it.',
-            'Right-click the silo and choose Select Target. Missiles can only lock onto a saved waypoint or a flag.',
-            'Click the map to place a reticle; check distance, ETA, blast radius and nearby allies.',
-            'Press Confirm Launch. The server revalidates everything before a round is spent.']) +
-          list(['Two silos per faction, at least 48 blocks apart.',
-            'Two offensive missiles in the air per faction, and a 30-second faction-wide gap between launches.',
-            'Every strike gives its target at least eight seconds of warning.',
-            'Vaults, spawn, faction cores and shielded bases can never be targeted.',
-            'Only player-PLACED blocks are destroyed — natural terrain is never excavated.',
-            'Friendly players and friendly hardware are immune. Strategic explosions grant no lifesteal.']) +
-          warning('It can be shot down', 'A missile hull has about 24 HP. Accurate gunfire can burst one in flight.')),
-        entry('warfare-defense', 'Missile defense', ['interceptor', 'battery', 'radar', 'saturation'],
-          list(['Interceptor batteries only ever shoot at MISSILES — never at players, and they deal no player damage.',
-            'A battery picks the hostile missile with the shortest impact ETA, and only one battery claims a track, so ammunition is never spent twice.',
-            'Interception is certain if the interceptor physically reaches the missile.',
-            'Four batteries per faction, at least 24 blocks apart.',
-            'Any teammate can load and operate a shared battery.']) +
-          tip('Saturation still works', 'More missiles than the reload window allows will get through. Defense buys you time, not immunity.')),
         entry('warfare-air', 'Helicopters', ['helicopter', 'helipad', 'pilot', 'gunner', 'bomb'],
           steps(['Build a Helipad and assemble a Helicopter Airframe.',
             'Deploy the airframe on the pad, then refuel, load bombs and repair there.',
             'Board as pilot or gunner. Only faction members can board.',
             'Pilot: W A S D flies, the camera steers, Space climbs, Shift descends, right-click drops a bomb.',
              'Gunner: look around and fire your own weapon within a sensible side arc.',
-             'With a winch installed, the pilot presses R to deploy/retract the rope; F transfers or attaches, W/S climbs or slides, and Space drops.',
+             'With a winch installed, the pilot presses R to deploy/retract the rope; F transfers or attaches, W climbs, S slides and Space drops.',
+             'A held slide ACCELERATES — 7 blocks/s at the top of the line, 20 by the bottom — and running out of rope over the deck puts you straight on your feet.',
              'Press F to step off — near the ground, or as an emergency ejection.']) +
           list(['Two seats per helicopter, with no faction-wide airframe limit.',
             'Guns, rockets, turrets, explosions and collisions all damage the airframe.',

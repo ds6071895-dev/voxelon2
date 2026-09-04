@@ -247,8 +247,6 @@ export const RECIPES: Recipe[] = [
   shaped([[I, I, I], [I, null, I], [I, I, I]], Item.ReinforcedFrame),
   // Guidance Unit — 6 Redstone, 1 Cobalt, 2 Iron.
   shaped([[R, R, R], [R, Cb, R], [I, R, I]], Item.GuidanceUnit),
-  // Warhead — 2 Cobalt, 1 Oil, 4 Iron.
-  shaped([[null, Cb, null], [I, Item.OilBarrel, I], [I, Cb, I]], Item.Warhead),
   // Rotor Assembly — 4 Titanium, 1 Cobalt, 2 Iron.
   shaped([[T, T, T], [I, Cb, I], [null, T, null]], Item.RotorAssembly),
   // Fuel Tank — 4 Iron, 2 Oil.
@@ -256,30 +254,6 @@ export const RECIPES: Recipe[] = [
   // Bomb Casing — 2 Iron, 1 Coal.
   shaped([[I], [ANY_COAL], [I]], Item.BombCasing),
 
-  // Tactical Silo — ≈38 Iron, 8 Redstone, 3 Cobalt, 2 Oil.
-  shaped([
-    [Item.ReinforcedFrame, Item.GuidanceUnit, Item.ReinforcedFrame],
-    [Item.ReinforcedFrame, Item.Warhead, Item.ReinforcedFrame],
-    [R, Item.OilBarrel, R],
-  ], Block.TacticalSilo),
-  // Tactical Missile — ≈8 Iron, 6 Redstone, 3 Cobalt, 2 Oil.
-  shaped([
-    [null, Item.Warhead, null],
-    [I, Item.GuidanceUnit, I],
-    [null, Item.OilBarrel, null],
-  ], Item.TacticalMissile),
-  // Interceptor Battery — ≈20 Iron, 6 Redstone, 2 Cobalt, 1 Oil.
-  shaped([
-    [null, Item.GuidanceUnit, null],
-    [Item.ReinforcedFrame, Cb, Item.ReinforcedFrame],
-    [I, Item.OilBarrel, I],
-  ], Block.InterceptorBattery),
-  // Two Interceptor Missiles — 4 Iron, 2 Redstone, 1 Cobalt, 1 Oil.
-  shaped([
-    [R, null, R],
-    [I, Cb, I],
-    [I, Item.OilBarrel, I],
-  ], Item.InterceptorMissile, 2),
   // Helipad — 8 Iron, 6 Cobblestone, 2 Redstone. Deliberately the cheap piece:
   // the pad is where an air wing LIVES, not what makes it expensive.
   shaped([
@@ -288,8 +262,8 @@ export const RECIPES: Recipe[] = [
     [C, C, C],
   ], Block.Helipad),
   // Helicopter Airframe — ≈38 Iron, 6 Redstone, 3 Cobalt, 8 Titanium, 4 Oil.
-  // Titanium lands here and in the retrofits, never in the first missile, so
-  // the very first unlock is usable long before a titanium run.
+  // Titanium lands here and in the retrofits, never in the components, so the
+  // very first unlock is usable long before a titanium run.
   shaped([
     [Item.RotorAssembly, Item.RotorAssembly, null],
     [Item.ReinforcedFrame, Item.GuidanceUnit, Item.ReinforcedFrame],
@@ -323,19 +297,15 @@ export const RECIPES: Recipe[] = [
 /**
  * BLUEPRINT GATING — crafting these requires the matching Warfare Command node.
  *
- * Both the hardware AND its ordnance are gated: knowing how to build a silo and
- * knowing how to build the warhead it fires are the same blueprint. The
- * intermediate COMPONENTS (frames, guidance units, warheads, rotors, tanks,
- * casings) stay open, which is what lets an un-authorized teammate still do the
- * heavy lifting for a faction's war effort — and *loading* already-built
- * ordnance into shared hardware is never gated at all (see server_core's
- * siloLoad/batteryLoad, which check faction, not blueprints).
+ * Both the hardware AND its ordnance are gated: knowing how to build an
+ * airframe and knowing how to build the bombs it drops are the same blueprint.
+ * The intermediate COMPONENTS (frames, guidance units, rotors, tanks, casings)
+ * stay open, which is what lets an un-authorized teammate still do the heavy
+ * lifting for a faction's war effort — and *loading* already-built ordnance
+ * into shared hardware is never gated at all (the server checks faction there,
+ * not blueprints).
  */
 export const WARFARE_BLUEPRINTS: Record<number, string> = {
-  [Block.TacticalSilo]: 'missile_command',
-  [Item.TacticalMissile]: 'missile_command',
-  [Block.InterceptorBattery]: 'aegis_systems',
-  [Item.InterceptorMissile]: 'aegis_systems',
   [Block.Helipad]: 'flight_certification',
   [Item.HelicopterKit]: 'flight_certification',
   [Item.AerialBomb]: 'flight_certification',

@@ -2905,7 +2905,7 @@ check('furnace smelts ore/sand/log but not removed foods',
   // the player's real character. It is read out of the CLIENT-owned state blob,
   // so it must be sanitized on the way out: a hand-edited save cannot push junk
   // palette indices (or a non-object) at every other client.
-  accs.setData('Alice', { cosmetics: { skin: 2, hair: 3, shirt: 4, hat: 999, cape: -1 } });
+  accs.setData('Alice', { cosmetics: { skin: 2, hair: 3, shirt: 4, hat: 999, face: -1 } });
   accs.setData('Bob', { cosmetics: 'not-an-object' });
   const board = accs.duelLeaderboard(10);
   const alice = board.find((e) => e.username === 'Alice')!;
@@ -2914,7 +2914,7 @@ check('furnace smelts ore/sand/log but not removed foods',
     !!alice.cosmetics && alice.cosmetics.skin === 2 && alice.cosmetics.shirt === 4);
   check('out-of-range and junk cosmetics are clamped to a valid look, never leaked',
     !!alice.cosmetics && alice.cosmetics.hat >= 0 && alice.cosmetics.hat < HATS.length &&
-    alice.cosmetics.cape >= 0 && !!bob.cosmetics &&
+    alice.cosmetics.face >= 0 && !!bob.cosmetics &&
     Object.values(bob.cosmetics).every((v) => Number.isInteger(v) && v >= 0));
   check('a never-customised account still gets a stable seed-derived avatar',
     JSON.stringify(bob.cosmetics) ===
@@ -4922,19 +4922,19 @@ const lairs = new Map<VaultBossKind, VaultStamp>();
   const d1 = defaultCosmetics(12345), d2 = defaultCosmetics(12345);
   check('defaultCosmetics is deterministic per seed',
     JSON.stringify(d1) === JSON.stringify(d2));
-  check('defaults start bare (no hat/cape/accessory, classic hair)',
-    d1.hat === 0 && d1.cape === 0 && d1.face === 0 && d1.hairStyle === 0);
+  check('defaults start bare (no hat/accessory, classic hair)',
+    d1.hat === 0 && d1.face === 0 && d1.hairStyle === 0);
   check('every default field is inside its catalog range',
     COSMETIC_KEYS.every((k) => d1[k] >= 0 && d1[k] < COSMETIC_RANGES[k]));
 
   // Sanitize clamps garbage: out-of-range / negative / non-numeric fall back.
-  const dirty = { skin: 999, hair: -3, hat: 'crown', cape: 2.9, face: NaN };
+  const dirty = { skin: 999, hair: -3, hat: 'crown', hatColor: 2.9, face: NaN };
   const clean = sanitizeCosmetics(dirty as unknown, 777);
   const base = defaultCosmetics(777);
   check('sanitizeCosmetics clamps garbage back to the seed default',
     clean.skin === base.skin && clean.hair === base.hair &&
     clean.hat === base.hat && clean.face === base.face);
-  check('sanitizeCosmetics floors fractional in-range values', clean.cape === 2);
+  check('sanitizeCosmetics floors fractional in-range values', clean.hatColor === 2);
   check('sanitizeCosmetics survives null / non-objects',
     JSON.stringify(sanitizeCosmetics(null, 5)) === JSON.stringify(defaultCosmetics(5)) &&
     JSON.stringify(sanitizeCosmetics('junk', 5)) === JSON.stringify(defaultCosmetics(5)));
@@ -4949,20 +4949,20 @@ const lairs = new Map<VaultBossKind, VaultStamp>();
   const s = new GameServer(1337, mulberry32(21));
   s.addPlayer(1, { username: 'Styler', faction: 0 });
   s.addPlayer(2, { username: 'Watcher', faction: 0 });
-  const look: Cosmetics = { ...defaultCosmetics(1), hat: 3, hatColor: 2, cape: 4,
-    capeColor: 1, hairStyle: 2, face: 2 };
+  const look: Cosmetics = { ...defaultCosmetics(1), hat: 3, hatColor: 2,
+    hairStyle: 2, face: 2 };
   const out = s.handle(1, { t: 'cosmetics', c: look });
   const bc = out.find((o) => o.to === 'all' && o.msg.t === 'cosmetics')?.msg as
     { id: number; c: Cosmetics } | undefined;
   check('a cosmetics push broadcasts the sanitized look to everyone',
-    !!bc && bc.id === 1 && bc.c.hat === 3 && bc.c.cape === 4 && bc.c.face === 2);
+    !!bc && bc.id === 1 && bc.c.hat === 3 && bc.c.hatColor === 2 && bc.c.face === 2);
   const w3 = s.addPlayer(3).find((o) => o.to === 3)!.msg as
     { players: { id: number; cosmetics?: Cosmetics }[] };
   check('the welcome roster carries saved cosmetics to late joiners',
     w3.players.find((p) => p.id === 1)?.cosmetics?.hat === 3);
   const cap = s.capturePlayerState(1);
   check('cosmetics persist into the account blob (survive re-login)',
-    (cap?.data.cosmetics as Cosmetics | undefined)?.cape === 4);
+    (cap?.data.cosmetics as Cosmetics | undefined)?.hatColor === 2);
   const hacked = s.handle(2, { t: 'cosmetics', c: { hat: 99999 } as unknown as Cosmetics });
   const hbc = hacked.find((o) => o.msg.t === 'cosmetics')?.msg as { c: Cosmetics };
   check('a hacked out-of-range look is clamped server-side',
@@ -5064,7 +5064,7 @@ const lairs = new Map<VaultBossKind, VaultStamp>();
     const stowed = glidePose(0, 0, 0, 0);
     check('glide pose: an undeployed wing leaves the standing pose untouched',
       stowed.tilt === 0 && stowed.head === 0 && stowed.arms[0] === 0 &&
-      stowed.legs[0] === 0 && stowed.cape === 0);
+      stowed.legs[0] === 0);
   }
 
   {

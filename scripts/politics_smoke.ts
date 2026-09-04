@@ -7,13 +7,15 @@ import {
   MAX_BROADCASTS, MAX_PARTIES_PER_FACTION, MAX_PROMISES, MAX_TAX,
   PRESET_PROMISES, TERM_MS, ballotOf, castVote, disbandParty, foundParty,
   governmentOf, isPresident, newPolitics, partyOfFounder, pushBroadcast,
-  rollCycle, sanitizeLabel, sanitizePolitics, sanitizePromises, setTaxRate,
+  rollCycle, sanitizeLabel, sanitizePolitics, sanitizePromises, setKit, setTaxRate,
   tallyElection, termExpired, voteCounts,
 } from '../src/politics';
 import {
-  RAID_STACKS, STARTER_KIT, TREASURY_SLOTS, canFundKits, countOf, deposit,
-  fundKits, kitCost, levy, newTreasury, raid, sanitizeTreasury, treasuryCount,
-  treasuryInReach, treasuryLocation, withdraw,
+  KIT_ARMOR_SLOTS, KIT_SLOTS, MAX_KIT_STACK, RAID_STACKS, STARTER_KIT,
+  TREASURY_PEDESTALS, TREASURY_RING_RADIUS, TREASURY_SLOTS, canFundKits, countOf,
+  deposit, fundKits, kitCost, kitItemCount, kitSlotAccepts, kitStacks, levy,
+  newKit, newTreasury, pedestalLocation, raid, sanitizeKit, sanitizeTreasury,
+  treasuryCount, treasuryInReach, treasuryLocation, withdraw,
 } from '../src/treasury';
 import { flagHome } from '../src/flags';
 import { Accounts } from '../src/net/accounts';
@@ -240,6 +242,63 @@ const CONTROL = '\u0007';
     !fundKits(partial, 2) && treasuryCount(partial) === before);
   check('the starter kit is made of real items',
     STARTER_KIT.every((line) => !!ITEMS[line.id] && line.count > 0));
+
+  // --- The editable loadout --------------------------------------------------
+  const kit = newKit();
+  check('a fresh loadout is the classic starter kit, laid into the hotbar',
+    kit.length === KIT_SLOTS &&
+    kit.slice(0, KIT_ARMOR_SLOTS).every((s) => s === null) &&
+    kitItemCount(kit) === STARTER_KIT.reduce((n, l) => n + l.count, 0));
+  check('the default loadout costs exactly what the old fixed kit cost',
+    kitCost(kitStacks(kit)).every((line) =>
+      kitCost().some((l) => l.id === line.id && l.count === line.count)));
+
+  check('an armor slot takes only the piece that belongs in it',
+    kitSlotAccepts(0, Item.IronHelmet) && !kitSlotAccepts(0, Item.IronBoots) &&
+    !kitSlotAccepts(0, Block.Torch) && kitSlotAccepts(KIT_ARMOR_SLOTS, Block.Torch));
+  check('a slot outside the loadout is refused outright',
+    !kitSlotAccepts(-1, Block.Torch) && !kitSlotAccepts(KIT_SLOTS, Block.Torch));
+
+  // The sanitizer is what stands between the wire and the loadout, so it has to
+  // DROP a bad line rather than relocate it or take the whole array down.
+  const dirty = sanitizeKit([
+    { id: Item.IronBoots, count: 1 },              // wrong armor slot -> dropped
+    { id: Item.IronChestplate, count: 1 },         // right slot -> kept
+    null, 'nonsense',
+    { id: Block.Torch, count: 9999 },              // over the cap -> clamped
+    { id: 999999, count: 1 },                      // not an item -> dropped
+    { id: Block.Torch, count: 0 },                 // empty -> dropped
+  ]);
+  check('a malformed loadout line becomes a gap, never a crash or a move',
+    dirty.length === KIT_SLOTS && dirty[0] === null &&
+    dirty[1]?.id === Item.IronChestplate && dirty[2] === null && dirty[3] === null &&
+    dirty[4]?.id === Block.Torch && dirty[5] === null && dirty[6] === null);
+  check('a loadout line is capped at the kit ceiling',
+    (dirty[4]?.count ?? 0) <= MAX_KIT_STACK);
+  check('a loadout off a pre-kit save falls back to the starter kit',
+    kitItemCount(sanitizeKit(undefined)) === kitItemCount(newKit()));
+
+  const gov = governmentOf(newPolitics(T0), A)!;
+  check('an empty loadout is refused — kitStock would count nothing',
+    !setKit(gov, new Array(KIT_SLOTS).fill(null)).ok &&
+    !setKit(gov, 'not an array').ok &&
+    !setKit(gov, new Array(KIT_SLOTS + 1).fill(null)).ok);
+  check('a valid loadout is adopted whole',
+    setKit(gov, [{ id: Item.IronHelmet, count: 1 }]).ok &&
+    gov.kit[0]?.id === Item.IronHelmet && kitItemCount(gov.kit) === 1);
+
+  // --- The hoard ring --------------------------------------------------------
+  check('every pedestal stands on the ring, and none on the strongbox axis',
+    Array.from({ length: TREASURY_PEDESTALS }, (_, i) => pedestalLocation(A, i))
+      .every((at) => {
+        const home = flagHome(A);
+        const r = Math.hypot(at.x - home.x, at.z - home.z);
+        return Math.abs(r - TREASURY_RING_RADIUS) < 1e-6 &&
+          Math.abs(at.z - home.z) > 0.4;   // never on the +/-X axis
+      }));
+  check('the whole ring is inside the reach the raid test uses',
+    Array.from({ length: TREASURY_PEDESTALS }, (_, i) => pedestalLocation(A, i))
+      .every((at) => treasuryInReach(at.x, at.z) === A));
 
   // Raiding.
   const victim = newTreasury(B);

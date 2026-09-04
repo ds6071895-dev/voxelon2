@@ -2,24 +2,18 @@
 //
 // Covers the progression tree, boss-XP settlement (contribution, death, late
 // join, spectators, reconnect, exactly-once), the offline/online parity of that
-// settlement, the retirement of the old progression, missile/silo rules,
-// interceptor behaviour, the vehicle layer, and serialization/sanitization.
+// settlement, the retirement of the old progression, the vehicle layer, and
+// serialization/sanitization.
 
 import {
   WARFARE_TREE, WARFARE_TREE_COST, WARFARE_MIGRATION_KEY, MAX_HARDWARE_TIER,
-  MAX_SILOS_PER_FACTION, MIN_SILO_SPACING, MAX_BATTERIES_PER_FACTION,
-  MIN_BATTERY_SPACING, MAX_MISSILES_IN_FLIGHT, FACTION_LAUNCH_SPACING,
-  MIN_MISSILE_FLIGHT, MISSILE_HULL_HP, batteryStats, buyWarfareNode,
+  buyWarfareNode,
   canBuyWarfareNode, grantWarfareXp, helicopterStats, migrateWarfare, newWarfare,
   newContribution, qualifiesForWarfareXp, sanitizeWarfare, settleWarfareXp,
-  siloStats, tierLabel, warfareAvailable, warfareBlockReason, warfareCompletion,
+  tierLabel, warfareAvailable, warfareBlockReason, warfareCompletion,
   warfareNode, warfareOwns, warfareSpent, warfareTier, warfareXpForTier,
-  blastDamage, missileFlightTime, type ContributionRecord,
+  blastDamage, blastBlockCandidates, type ContributionRecord,
 } from '../src/warfare';
-import {
-  StrategicSim, arcAt, blastBlockCandidates, protectedArea, sanitizeBattery,
-  sanitizeSilo, type ProtectedArea, type StrategicEvent,
-} from '../src/strategic';
 import {
   VehicleSim, sanitizeHelicopter, sanitizeHeliInput, seatPosition, viewYawToHeliYaw,
   DISMOUNT_CLEARANCE, EJECT_DAMAGE, FAST_ROPE_LENGTH, HELI_FUEL_BURN, HELI_FUEL_IDLE, PASSENGER_ARC,
@@ -43,18 +37,16 @@ const check = (condition: boolean, message: string): void => {
 
 // --- The tree ---------------------------------------------------------------------
 {
-  check(WARFARE_TREE_COST === 9800,
-    `the complete tree costs exactly 9,800 XP (got ${WARFARE_TREE_COST})`);
-  check(WARFARE_TREE.length === 21 &&
-    new Set(WARFARE_TREE.map((n) => n.id)).size === 21,
-    'the tree is 21 uniquely-identified nodes');
+  check(WARFARE_TREE_COST === 3900,
+    `the complete tree costs exactly 3,900 XP (got ${WARFARE_TREE_COST})`);
+  check(WARFARE_TREE.length === 9 &&
+    new Set(WARFARE_TREE.map((n) => n.id)).size === 9,
+    'the tree is 9 uniquely-identified nodes');
 
   const branchCost = (b: string): number =>
     WARFARE_TREE.filter((n) => n.branch === b).reduce((a, n) => a + n.cost, 0);
-  check(branchCost('trunk') === 2750, `the trunk costs 2,750 XP (got ${branchCost('trunk')})`);
-  check(branchCost('strike') === 1700, `Strike costs 1,700 XP (got ${branchCost('strike')})`);
-  check(branchCost('aegis') === 1700, `Aegis costs 1,700 XP (got ${branchCost('aegis')})`);
-  check(branchCost('air') === 3650, `Aviation costs 3,650 XP (got ${branchCost('air')})`);
+  check(branchCost('trunk') === 600, `the trunk costs 600 XP (got ${branchCost('trunk')})`);
+  check(branchCost('air') === 3300, `Aviation costs 3,300 XP (got ${branchCost('air')})`);
 
   // Every prerequisite exists and points strictly shallower — no cycles.
   check(WARFARE_TREE.every((n) =>
@@ -63,56 +55,46 @@ const check = (condition: boolean, message: string): void => {
   check(WARFARE_TREE.filter((n) => n.prereq === '').length === 1,
     'the tree has exactly one root');
 
-  // The requested ORDER: missiles, then missile defense, then helicopters.
+  // The certification ladder runs airframe, then ordnance, then armour.
   const s = newWarfare();
   grantWarfareXp(s, WARFARE_TREE_COST);
-  check(canBuyWarfareNode(s, 'missile_command') &&
-    !canBuyWarfareNode(s, 'aegis_systems') &&
-    !canBuyWarfareNode(s, 'flight_certification'),
-    'missiles must be unlocked before defense, and defense before helicopters');
-  buyWarfareNode(s, 'missile_command');
-  buyWarfareNode(s, 'guidance_vanes');
-  buyWarfareNode(s, 'hardened_silo');
-  check(canBuyWarfareNode(s, 'aegis_systems') && !canBuyWarfareNode(s, 'flight_certification'),
-    'missile defense opens only after the whole missile stage');
-  for (const id of ['aegis_systems', 'radar_sweep', 'fast_intercept']) buyWarfareNode(s, id);
-  check(canBuyWarfareNode(s, 'flight_certification'),
-    'helicopters open only after the whole defense stage');
-  for (const id of ['flight_certification', 'bomb_rack', 'reinforced_airframe']) {
-    buyWarfareNode(s, id);
-  }
-  check(canBuyWarfareNode(s, 'strike_guidance') && canBuyWarfareNode(s, 'aegis_network') &&
-    canBuyWarfareNode(s, 'air_turbine'),
-    'all three endgame branches open together, at the end of the trunk');
+  check(canBuyWarfareNode(s, 'flight_certification') &&
+    !canBuyWarfareNode(s, 'bomb_rack') &&
+    !canBuyWarfareNode(s, 'air_turbine'),
+    'the airframe must be certified before anything hangs off it');
+  buyWarfareNode(s, 'flight_certification');
+  check(canBuyWarfareNode(s, 'bomb_rack') && !canBuyWarfareNode(s, 'air_turbine'),
+    'the bomb rack opens next, and the branch stays shut');
+  for (const id of ['bomb_rack', 'reinforced_airframe']) buyWarfareNode(s, id);
+  check(canBuyWarfareNode(s, 'air_turbine'),
+    'the Aviation branch opens at the end of the trunk');
 
   // Buying the whole tree spends exactly the tree cost, and nothing is left.
   for (const n of WARFARE_TREE) buyWarfareNode(s, n.id);
-  check(s.nodes.length === 21 && warfareSpent(s) === WARFARE_TREE_COST &&
+  check(s.nodes.length === 9 && warfareSpent(s) === WARFARE_TREE_COST &&
     warfareAvailable(s) === 0 && warfareCompletion(s) === 1,
     'the exact tree budget buys the exact tree — no change left over');
 
   // Spending is gated on XP, not just prerequisites.
   const poor = newWarfare();
   grantWarfareXp(poor, 99);
-  check(!canBuyWarfareNode(poor, 'missile_command') &&
-    (warfareBlockReason(poor, 'missile_command') ?? '').includes('more warfare XP'),
+  check(!canBuyWarfareNode(poor, 'flight_certification') &&
+    (warfareBlockReason(poor, 'flight_certification') ?? '').includes('more warfare XP'),
     'a node you cannot afford is blocked with a clear reason');
   grantWarfareXp(poor, 1);
-  check(canBuyWarfareNode(poor, 'missile_command') &&
-    warfareBlockReason(poor, 'missile_command') === null,
+  check(canBuyWarfareNode(poor, 'flight_certification') &&
+    warfareBlockReason(poor, 'flight_certification') === null,
     'the exact cost is enough');
-  check((warfareBlockReason(poor, 'strike_precision') ?? '').startsWith('Requires'),
+  check((warfareBlockReason(poor, 'air_command') ?? '').startsWith('Requires'),
     'a node whose prerequisite is missing says so');
 
   // Hardware tiers are derived from owned nodes.
   const full = newWarfare();
   grantWarfareXp(full, WARFARE_TREE_COST);
   for (const n of WARFARE_TREE) buyWarfareNode(full, n.id);
-  check(warfareTier(full, 'silo') === MAX_HARDWARE_TIER &&
-    warfareTier(full, 'battery') === MAX_HARDWARE_TIER &&
-    warfareTier(full, 'helicopter') === MAX_HARDWARE_TIER,
-    'a complete tree authorizes every hardware family to its top tier');
-  check(warfareTier(newWarfare(), 'silo') === 0,
+  check(warfareTier(full, 'helicopter') === MAX_HARDWARE_TIER,
+    'a complete tree authorizes the airframe to its top tier');
+  check(warfareTier(newWarfare(), 'helicopter') === 0,
     'a fresh player may build nothing');
 
   // No filler: every node changes a real number or unlocks a system.
@@ -122,31 +104,6 @@ const check = (condition: boolean, message: string): void => {
 
 // --- Stat ladders match the design table --------------------------------------------
 {
-  const a = siloStats(1), mid = siloStats(5), max = siloStats(6);
-  check(a.range === 900 && a.blastRadius === 7 && a.playerDamage === 14 &&
-    a.hardwareDamage === 180 && a.blocks === 8 && a.hp === 500 &&
-    a.magazine === 1 && a.cooldown === 120,
-    'the initial silo matches the design table');
-  check(mid.range === 1700 && mid.blastRadius === 8 && mid.playerDamage === 16 &&
-    mid.hardwareDamage === 240 && mid.blocks === 12 && mid.hp === 700 &&
-    mid.magazine === 2 && mid.cooldown === 105,
-    'the mid silo matches the design table');
-  check(max.range === 2300 && max.blastRadius === 9 && max.playerDamage === 18 &&
-    max.hardwareDamage === 300 && max.blocks === 16 && max.hp === 800 &&
-    max.magazine === 3 && max.cooldown === 90,
-    'the maximum silo matches the design table');
-
-  const b1 = batteryStats(1), b5 = batteryStats(5), b6 = batteryStats(6);
-  check(b1.hp === 180 && b1.radius === 110 && b1.acquire === 0.70 &&
-    b1.reload === 12 && b1.capacity === 4,
-    'the initial battery matches the design table');
-  check(b5.hp === 240 && b5.radius === 170 && b5.acquire === 0.35 &&
-    b5.reload === 8 && b5.capacity === 7,
-    'the mid battery matches the design table');
-  check(b6.hp === 300 && b6.radius === 200 && b6.acquire === 0.25 &&
-    b6.reload === 6 && b6.capacity === 8,
-    'the maximum battery matches the design table');
-
   const h1 = helicopterStats(1), h5 = helicopterStats(5), h6 = helicopterStats(6);
   check(h1.hp === 140 && h1.speed === 16 && h1.fuel === 48 && h1.bombs === 2 &&
     h1.bombRadius === 7 && h1.bombBlocks === 40 && h1.bombPlayerDamage === 30 &&
@@ -164,9 +121,9 @@ const check = (condition: boolean, message: string): void => {
   check(tierLabel(1) === 'Mk I' && tierLabel(6) === 'Mk VI' && tierLabel(99) === 'Mk VI',
     'tier labels are stable and clamped');
   // Stats are copies, never the shared table.
-  const mutated = siloStats(1);
-  mutated.range = 1;
-  check(siloStats(1).range === 900, 'stat lookups hand back copies, not the table');
+  const mutated = helicopterStats(1);
+  mutated.hp = 1;
+  check(helicopterStats(1).hp === 140, 'stat lookups hand back copies, not the table');
 }
 
 // --- Boss XP: tiers, qualification, exactly-once ---------------------------------
@@ -336,15 +293,15 @@ const check = (condition: boolean, message: string): void => {
     sanitizeWarfare('nope').nodes.length === 0,
     'sanitizeWarfare fail-closes on garbage');
   const forged = sanitizeWarfare({
-    xp: 100, nodes: ['missile_command', 'strike_precision', 'not_a_node'],
+    xp: 100, nodes: ['flight_certification', 'air_command', 'not_a_node'],
   });
-  check(forged.nodes.length === 1 && forged.nodes[0] === 'missile_command',
+  check(forged.nodes.length === 1 && forged.nodes[0] === 'flight_certification',
     'a hand-edited save cannot mint an unaffordable or prerequisite-less node');
-  const chainless = sanitizeWarfare({ xp: 99999, nodes: ['strike_precision'] });
+  const chainless = sanitizeWarfare({ xp: 99999, nodes: ['air_command'] });
   check(chainless.nodes.length === 0,
     'a node whose whole prerequisite chain is missing is dropped');
-  const legit = sanitizeWarfare({ xp: 500, nodes: ['missile_command', 'guidance_vanes'] });
-  check(legit.nodes.length === 2 && warfareSpent(legit) === 250,
+  const legit = sanitizeWarfare({ xp: 500, nodes: ['flight_certification', 'bomb_rack'] });
+  check(legit.nodes.length === 2 && warfareSpent(legit) === 300,
     'a legitimate save round-trips exactly');
 }
 
@@ -369,14 +326,14 @@ const check = (condition: boolean, message: string): void => {
     'a fresh account starts with no warfare technology');
   accounts.awardWarfareXp('Pilot', 300);
   check(accounts.warfareOf('Pilot').xp === 300 &&
-    accounts.buyWarfare('Pilot', 'missile_command') &&
-    warfareOwns(accounts.warfareOf('Pilot'), 'missile_command'),
+    accounts.buyWarfare('Pilot', 'flight_certification') &&
+    warfareOwns(accounts.warfareOf('Pilot'), 'flight_certification'),
     'the account store earns and spends warfare XP');
-  check(!accounts.buyWarfare('Pilot', 'strike_precision'),
+  check(!accounts.buyWarfare('Pilot', 'air_command'),
     'the account store refuses an unaffordable purchase');
   const roundTrip = new Accounts(JSON.parse(JSON.stringify(accounts.toJSON())));
   check(roundTrip.warfareOf('Pilot').xp === 300 &&
-    warfareOwns(roundTrip.warfareOf('Pilot'), 'missile_command'),
+    warfareOwns(roundTrip.warfareOf('Pilot'), 'flight_certification'),
     'warfare progression survives an account serialize round-trip');
 
   // The server exposes it on the welcome and honours purchases.
@@ -386,9 +343,9 @@ const check = (condition: boolean, message: string): void => {
     .find((o) => o.msg.t === 'welcome')!.msg as { warfare: { xp: number; nodes: string[] } };
   check(welcome.warfare.xp === 400 && welcome.warfare.nodes.length === 0,
     'the welcome carries the account\'s authoritative warfare state');
-  const bought = g.handle(1, { t: 'warfareBuy', node: 'missile_command' });
+  const bought = g.handle(1, { t: 'warfareBuy', node: 'flight_certification' });
   check(bought.some((o) => o.msg.t === 'warfare' &&
-    (o.msg as { nodes: string[] }).nodes.includes('missile_command')),
+    (o.msg as { nodes: string[] }).nodes.includes('flight_certification')),
     'a valid purchase is applied and echoed back');
   const refused = g.handle(1, { t: 'warfareBuy', node: 'air_command' });
   check(refused.some((o) => o.msg.t === 'warfareErr'),
@@ -412,221 +369,6 @@ const check = (condition: boolean, message: string): void => {
     'no mob kill — brute included — can produce warfare XP through the wire');
   check(g.warfareOf('Grunt').xp === 0,
     'the account gained nothing from mob kills');
-}
-
-// --- Missiles: range, protected zones, cooldowns, caps ----------------------------
-{
-  const areas: ProtectedArea[] = [protectedArea('vault', 400, 0, 'Tier II vault', 60)];
-  const sim = new StrategicSim({
-    groundY: () => 64, worldHalf: 2500, protectedAreas: () => areas,
-  });
-  const silo = sim.addSilo('Ana', 0, 0, 64, 0, 1);
-  const stats = siloStats(1);
-
-  check(sim.validateLaunch({ siloId: silo.id, faction: 0, tx: 100, tz: 0 }).ok === false,
-    'an empty silo cannot fire');
-  sim.loadSilo(silo, 5);
-  check(silo.ammo === stats.magazine,
-    'loading is capped at the installed magazine size');
-
-  const far = sim.validateLaunch({ siloId: silo.id, faction: 0, tx: stats.range + 10, tz: 0 });
-  check(!far.ok && far.reason === 'out-of-range', 'a target beyond range is refused');
-  const prot = sim.validateLaunch({ siloId: silo.id, faction: 0, tx: 400, tz: 0 });
-  check(!prot.ok && prot.reason === 'protected', 'a protected zone cannot be targeted');
-  const alien = sim.validateLaunch({ siloId: silo.id, faction: 1, tx: 100, tz: 0 });
-  check(!alien.ok && alien.reason === 'not-yours', 'another faction cannot fire your silo');
-  const junk = sim.validateLaunch({ siloId: silo.id, faction: 0, tx: NaN, tz: 0 });
-  check(!junk.ok && junk.reason === 'bad-target', 'non-finite coordinates are refused');
-  const offMap = sim.validateLaunch({ siloId: silo.id, faction: 0, tx: 99999, tz: 0 });
-  check(!offMap.ok, 'a target outside the world boundary is refused');
-
-  const events = sim.launch({ siloId: silo.id, faction: 0, tx: 300, tz: 0 });
-  check(events.some((e) => e.kind === 'launch') && events.some((e) => e.kind === 'warning'),
-    'a valid launch emits both the missile and its warning');
-  check(silo.ammo === stats.magazine - 1 && silo.cooldown === stats.cooldown,
-    'ammunition is consumed only after validation, and the cooldown starts');
-  check(!sim.validateLaunch({ siloId: silo.id, faction: 0, tx: 300, tz: 0 }).ok,
-    'a spent magazine blocks the next launch');
-  sim.loadSilo(silo, 1);   // reload, so the COOLDOWN is what is left to prove
-  const cooling = sim.validateLaunch({ siloId: silo.id, faction: 0, tx: 300, tz: 0 });
-  check(!cooling.ok && cooling.reason === 'cooldown', 'the silo cannot fire while cycling');
-
-  // Faction spacing + in-flight cap use a SECOND silo, far enough away.
-  const silo2 = sim.addSilo('Ben', 0, 200, 64, 0, 1);
-  sim.loadSilo(silo2, 1);
-  const spaced = sim.validateLaunch({ siloId: silo2.id, faction: 0, tx: 300, tz: 0 });
-  check(!spaced.ok && spaced.reason === 'faction-spacing',
-    `a faction may not fire twice inside ${FACTION_LAUNCH_SPACING}s`);
-  sim.now += FACTION_LAUNCH_SPACING + 1;
-  sim.launch({ siloId: silo2.id, faction: 0, tx: 300, tz: 0 });
-  check(sim.missilesInFlight(0) === MAX_MISSILES_IN_FLIGHT,
-    'the faction now has its maximum missiles in the air');
-  const silo3 = sim.addSilo('Cai', 0, 400, 64, 0, 1);
-  sim.loadSilo(silo3, 1);
-  sim.now += FACTION_LAUNCH_SPACING + 1;
-  const capped = sim.validateLaunch({ siloId: silo3.id, faction: 0, tx: 300, tz: 0 });
-  check(!capped.ok && capped.reason === 'in-flight-cap',
-    'the in-flight cap blocks a third missile');
-
-  // Placement caps + spacing.
-  const p = new StrategicSim({ groundY: () => 64, worldHalf: 2500, protectedAreas: () => [] });
-  p.addSilo('A', 0, 0, 64, 0);
-  check((p.siloPlacementError(0, 10, 64, 0) ?? '').includes(String(MIN_SILO_SPACING)),
-    `silos must stand ${MIN_SILO_SPACING} blocks apart`);
-  p.addSilo('A', 0, 500, 64, 0);
-  check(p.siloPlacementError(0, 1000, 64, 0) !== null &&
-    p.siloPlacementError(1, 1000, 64, 0) === null,
-    `a faction may field only ${MAX_SILOS_PER_FACTION} silos`);
-  p.addBattery('A', 0, 0, 64, 200);
-  check((p.batteryPlacementError(0, 0, 64, 210) ?? '').includes(String(MIN_BATTERY_SPACING)),
-    `batteries must stand ${MIN_BATTERY_SPACING} blocks apart`);
-  for (let i = 1; i < MAX_BATTERIES_PER_FACTION; i++) p.addBattery('A', 0, i * 100, 64, 900);
-  check(p.batteryPlacementError(0, 3000, 64, 3000) !== null,
-    `a faction may field only ${MAX_BATTERIES_PER_FACTION} batteries`);
-}
-
-// --- Deterministic flight, minimum warning, one-time damage ------------------------
-{
-  const sim = new StrategicSim({ groundY: () => 64, worldHalf: 2500, protectedAreas: () => [] });
-  const silo = sim.addSilo('Ana', 0, 0, 64, 0, 1);
-  sim.loadSilo(silo, 1);
-  sim.launch({ siloId: silo.id, faction: 0, tx: 20, tz: 0 });
-  const m = [...sim.missiles.values()][0];
-  check(m.flight >= MIN_MISSILE_FLIGHT,
-    'even a target 20 blocks away gets the full warning window');
-  check(missileFlightTime(100000, 55) > MIN_MISSILE_FLIGHT,
-    'a long shot takes proportionally longer');
-
-  // The arc is a pure function of its four endpoints — both ends agree.
-  const at = (p: number) => arcAt(m, p);
-  check(at(0).x === m.sx && at(1).x === m.tx && at(0.5).y > Math.max(m.sy, m.ty),
-    'the trajectory is a deterministic arc that starts, peaks and lands correctly');
-  check(JSON.stringify(at(0.37)) === JSON.stringify(arcAt(m, 0.37)),
-    'the same progress always yields the same position');
-
-  // Fly it to impact and confirm exactly ONE impact event.
-  let impacts = 0;
-  let guard = 0;
-  while (sim.missiles.size && guard++ < 4000) {
-    for (const ev of sim.tick(0.05)) if (ev.kind === 'impact') impacts++;
-  }
-  check(impacts === 1, 'a missile produces exactly one impact event, then ceases to exist');
-  check(sim.missiles.size === 0, 'the missile is removed on impact');
-
-  // Falloff is linear and applied from the centre out.
-  check(blastDamage(18, 0, 9) === 18 && blastDamage(18, 9, 9) === 0 &&
-    blastDamage(18, 4.5, 9) === 9,
-    'blast damage falls off linearly to zero at the rim');
-  check(blastDamage(18, 100, 9) === 0, 'nothing outside the radius is touched');
-
-  // Block candidates are bounded and nearest-first.
-  const cands = blastBlockCandidates(0, 64, 0, 7);
-  check(cands.length > 0 && cands[0].d === 0 &&
-    cands.every((c) => c.d <= 7) &&
-    cands.every((c, i) => i === 0 || c.d >= cands[i - 1].d),
-    'blast block candidates are inside the radius and sorted nearest-first');
-
-  // Hull HP: gunfire can burst a missile, and the event fires once.
-  const sim2 = new StrategicSim({ groundY: () => 64, worldHalf: 2500, protectedAreas: () => [] });
-  const s2 = sim2.addSilo('Ana', 0, 0, 64, 0, 1);
-  sim2.loadSilo(s2, 1);
-  sim2.launch({ siloId: s2.id, faction: 0, tx: 900, tz: 0 });
-  const id = [...sim2.missiles.keys()][0];
-  check(sim2.damageMissile(id, MISSILE_HULL_HP - 1) === null,
-    'a missile hull survives a glancing hit');
-  const down = sim2.damageMissile(id, 1);
-  check(down?.kind === 'shotDown' && sim2.damageMissile(id, 50) === null,
-    'the killing shot bursts the hull exactly once');
-}
-
-// --- Interceptors: selection, ammunition, saturation, no duplicate claims ----------
-{
-  const sim = new StrategicSim({ groundY: () => 64, worldHalf: 2500, protectedAreas: () => [] });
-  // Two attacker silos, far apart, both aimed at the defender.
-  const a1 = sim.addSilo('Red', 0, -800, 64, 0, 6);
-  const a2 = sim.addSilo('Red', 0, -800, 64, 200, 6);
-  sim.loadSilo(a1, 3); sim.loadSilo(a2, 3);
-  const bat = sim.addBattery('Blue', 1, 0, 64, 0, 6);
-  sim.loadBattery(bat, 8);
-
-  sim.launch({ siloId: a1.id, faction: 0, tx: 0, tz: 0 });
-  sim.now += FACTION_LAUNCH_SPACING + 1;
-  sim.launch({ siloId: a2.id, faction: 0, tx: 20, tz: 0 });
-  check(sim.missilesInFlight(0) === 2, 'two hostile missiles are inbound');
-
-  let intercepts = 0;
-  let launched = 0;
-  let guard = 0;
-  const seenClaims: number[] = [];
-  while (sim.missilesInFlight(0) > 0 && guard++ < 4000) {
-    for (const ev of sim.tick(0.05) as StrategicEvent[]) {
-      if (ev.kind === 'interceptorLaunch') { launched++; seenClaims.push(ev.missile.id); }
-      if (ev.kind === 'intercepted') intercepts++;
-    }
-  }
-  check(intercepts >= 1, 'a loaded battery physically intercepts an inbound missile');
-  check(launched <= 3,
-    `a single battery cannot spam interceptors (fired ${launched} for 2 tracks)`);
-  check(new Set(seenClaims).size === seenClaims.length,
-    'no two interceptors are launched against the same track');
-  check(bat.ammo === batteryStats(6).capacity - launched,
-    'each interceptor costs exactly one round');
-
-  // Saturation: an EMPTY battery stops everything getting through.
-  const sim3 = new StrategicSim({ groundY: () => 64, worldHalf: 2500, protectedAreas: () => [] });
-  const atk = sim3.addSilo('Red', 0, -800, 64, 0, 6);
-  sim3.loadSilo(atk, 3);
-  const dry = sim3.addBattery('Blue', 1, 0, 64, 0, 6);  // zero ammo on purpose
-  sim3.launch({ siloId: atk.id, faction: 0, tx: 0, tz: 0 });
-  let got = 0;
-  guard = 0;
-  while (sim3.missiles.size && guard++ < 4000) {
-    for (const ev of sim3.tick(0.05)) if (ev.kind === 'impact') got++;
-  }
-  check(got === 1 && dry.ammo === 0,
-    'an unloaded battery cannot stop anything — saturation is real');
-
-  // Interceptors never harm players: they carry no warhead at all.
-  const zero = sim.snapshotMissiles().filter((m) => m.kind === 'interceptor');
-  check(zero.every((m) => m.radius === 0),
-    'interceptors carry no blast radius, so they can never damage a player');
-}
-
-// --- Retrofits + damage + serialization -------------------------------------------
-{
-  const sim = new StrategicSim({ groundY: () => 64, worldHalf: 2500, protectedAreas: () => [] });
-  const s = sim.addSilo('Ana', 0, 0, 64, 0, 1);
-  check(sim.retrofitSilo(s, 3) && s.tier === 3 && s.maxHp === siloStats(3).hp,
-    'a retrofit raises the installed tier and the hull');
-  check(!sim.retrofitSilo(s, 2), 'a retrofit never goes backwards');
-  check(!sim.damageSilo(s, s.hp - 1) && sim.damageSilo(s, 5),
-    'silo HP depletes and reports its own destruction');
-
-  const b = sim.addBattery('Ana', 0, 400, 64, 0, 1);
-  sim.loadBattery(b, 99);
-  check(b.ammo === batteryStats(1).capacity, 'battery loading is capped at capacity');
-  sim.retrofitBattery(b, 6);
-  check(b.ammo <= batteryStats(6).capacity, 'a retrofit never spills loaded rounds');
-
-  // Sanitizers are fail-closed and clamp to the installed tier.
-  check(sanitizeSilo(null) === null && sanitizeSilo({ x: NaN, y: 1, z: 1 }) === null,
-    'sanitizeSilo fail-closes on junk');
-  const forged = sanitizeSilo({
-    id: 5, x: 1, y: 2, z: 3, owner: 'x'.repeat(200), faction: 0,
-    tier: 99, hp: 1e9, ammo: 1e9, cooldown: 1e9,
-  })!;
-  check(forged.tier === MAX_HARDWARE_TIER && forged.hp === siloStats(6).hp &&
-    forged.ammo === siloStats(6).magazine && forged.owner.length <= 24 &&
-    forged.cooldown <= siloStats(6).cooldown,
-    'a forged silo record is clamped to legal values');
-  check(sanitizeBattery({ id: 2, x: 0, y: 0, z: 0, tier: -4, ammo: 99 })!.tier === 1,
-    'a forged battery record is clamped too');
-  // A record with no usable id is DROPPED, so two corrupted rows can never
-  // overwrite each other (or a legitimate entity) on id 1 during a restore.
-  check(sanitizeSilo({ x: 1, y: 2, z: 3 }) === null &&
-    sanitizeBattery({ x: 1, y: 2, z: 3 }) === null &&
-    sanitizeSilo({ id: 0, x: 1, y: 2, z: 3 }) === null,
-    'hardware with no usable id is dropped rather than collapsed onto id 1');
 }
 
 // --- Vehicles: seats, input, fuel, collision, bombs, disconnect, restart ----------
@@ -813,20 +555,18 @@ const check = (condition: boolean, message: string): void => {
     warfare: { version: 1, xp: WARFARE_TREE_COST, nodes: [] } });
   // Authorize everything so the player may build.
   for (const n of WARFARE_TREE) g.handle(1, { t: 'warfareBuy', node: n.id });
-  check(warfareTier(g.warfareOf('Ana'), 'silo') === MAX_HARDWARE_TIER,
+  check(warfareTier(g.warfareOf('Ana'), 'helicopter') === MAX_HARDWARE_TIER,
     'the whole tree can be bought against a sufficient XP balance');
 
   const save = JSON.parse(JSON.stringify(g.serialize())) as Record<string, unknown>;
-  check(Array.isArray(save.silos) && Array.isArray(save.batteries) &&
-    Array.isArray(save.helis),
-    'the world save carries silos, batteries and helicopters');
+  check(Array.isArray(save.helis), 'the world save carries helicopters');
   check(save.factionXp === undefined,
     'the retired faction XP pool is no longer serialized');
   const g2 = new GameServer(1337, mulberry32(24));
   check(g2.restore(save), 'a warfare-era world save restores cleanly');
 
   // Junk records are skipped, never fatal.
-  const dirty = { ...save, silos: [null, 'x', { x: NaN }], batteries: ['nope'], helis: [7] };
+  const dirty = { ...save, helis: [7, null, 'x', { x: NaN }] };
   const g3 = new GameServer(1337, mulberry32(25));
   check(g3.restore(dirty), 'a save with malformed hardware records still loads');
 }
@@ -896,82 +636,52 @@ const check = (condition: boolean, message: string): void => {
 {
   // The server's applyDamage() runs armor mitigation itself, so the blast path
   // must hand it the RAW figure. An unarmoured player at the centre of a
-  // maximum warhead should therefore lose exactly its centre damage.
-  const g = new GameServer(1337, mulberry32(41));
-  g.addPlayer(1, { username: 'Red', faction: 0, warfare: { version: 1, xp: 9000, nodes: [] } });
-  g.addPlayer(2, { username: 'Blue', faction: 1 });
-  for (const n of WARFARE_TREE) g.handle(1, { t: 'warfareBuy', node: n.id });
-  g.handle(1, { t: 'xform', x: 600, y: 80, z: 600, yaw: 0, pitch: 0 });
-  // The defender must stand ON the ground the warhead actually lands on — a
-  // strike detonates at the surface, and the falloff is genuinely 3D.
-  g.handle(2, { t: 'xform', x: 900, y: 63, z: 900, yaw: 0, pitch: 0 }); // surface
-  g.handle(1, { t: 'edit', x: 601, y: 80, z: 601, block: Block.TacticalSilo });
-  g.handle(1, { t: 'siloLoad', x: 601, y: 80, z: 601, count: 3 });
-  const before = g.playerList().find((p) => p.username === 'Blue');
-  g.handle(1, { t: 'siloLaunch', x: 601, y: 80, z: 601, tx: 900, tz: 900 });
-  let guard = 0;
-  let hurt = 0;
-  while (guard++ < 4000) {
-    const out = g.tickWarfare(0.05);
-    for (const o of out) {
-      if (o.msg.t === 'hurt' && o.to === 2) hurt = (o.msg as { health: number }).health;
-    }
-    if (out.some((o) => o.msg.t === 'missileEnd' &&
-      (o.msg as { reason: string }).reason === 'impact')) break;
-  }
-  check(!!before && hurt > 0 && hurt < 20,
-    `a direct hit hurts an enemy standing on the impact point (health ${hurt})`);
-  check(20 - hurt === siloStats(6).playerDamage,
-    `an unarmoured player takes the centre damage exactly ONCE — not mitigated ` +
-    `twice (${20 - hurt} vs ${siloStats(6).playerDamage})`);
-}
+  // maximum bomb should therefore lose exactly its centre damage.
+  const max = helicopterStats(MAX_HARDWARE_TIER);
+  check(blastDamage(max.bombPlayerDamage, 0, max.bombRadius) === max.bombPlayerDamage,
+    'a target at the exact centre takes the full centre damage');
+  check(blastDamage(max.bombPlayerDamage, max.bombRadius, max.bombRadius) === 0,
+    'a target on the rim takes nothing');
+  check(blastDamage(max.bombPlayerDamage, max.bombRadius / 2, max.bombRadius) ===
+    Math.round(max.bombPlayerDamage / 2),
+    'falloff from the centre is linear');
+  check(blastDamage(max.bombPlayerDamage, 500, max.bombRadius) === 0,
+    'nothing outside the radius is touched');
 
-// --- Protected areas are cached, not re-enumerated per launch ----------------------
-{
-  // `worldVaults` walks the entire 5000x5000 world. Launch validation calls
-  // protectedAreas() every time, so an uncached implementation stalls the
-  // server for the best part of a second per silo interaction — which is
-  // exactly the bug this guards against.
-  const g = new GameServer(1337, mulberry32(31));
-  const t0 = Date.now();
-  const first = g.protectedAreas();
-  const firstMs = Date.now() - t0;
-  const t1 = Date.now();
-  for (let i = 0; i < 200; i++) g.protectedAreas();
-  const repeatMs = Date.now() - t1;
-  check(first.length > 1 && first.some((a) => a.kind === 'spawn') &&
-    first.some((a) => a.kind === 'vault'),
-    `protected areas cover spawn and every vault (${first.length} zones)`);
-  check(repeatMs < Math.max(50, firstMs),
-    `200 repeat lookups are cheap (${repeatMs}ms vs ${firstMs}ms to build)`);
+  // The candidate sphere is ordered nearest-first and never leaves the radius,
+  // so a bounded block cap always removes the blocks closest to the impact.
+  const cands = blastBlockCandidates(0, 64, 0, 7);
+  check(cands.length > 0 && cands.every((c) => c.d <= 7),
+    'every blast candidate lies inside the radius');
+  check(cands.every((c, i) => i === 0 || c.d >= cands[i - 1].d),
+    'blast candidates come back nearest-first, so the cap bites at the rim');
 }
 
 // --- Economy: recipes exist and are blueprint-gated ---------------------------------
 {
   const results = new Set(RECIPES.map((r) => r.result.id));
   for (const id of [
-    Item.ReinforcedFrame, Item.GuidanceUnit, Item.Warhead, Item.RotorAssembly,
-    Item.FuelTank, Item.BombCasing, Item.TacticalMissile, Item.InterceptorMissile,
+    Item.ReinforcedFrame, Item.GuidanceUnit, Item.RotorAssembly,
+    Item.FuelTank, Item.BombCasing,
     Item.AerialBomb, Item.RepairKit, Item.HelicopterKit,
     Item.RopeWinch, Item.AuxiliaryTank, Item.LongRangeTank,
-    Block.TacticalSilo, Block.InterceptorBattery, Block.Helipad,
+    Block.Helipad,
   ]) {
     check(results.has(id), `${ITEMS[id]?.name ?? id} is craftable`);
   }
-  check(Object.keys(WARFARE_BLUEPRINTS).length === 10,
-    'exactly ten pieces of hardware, modules and ordnance are blueprint-gated');
-  check(WARFARE_BLUEPRINTS[Block.TacticalSilo] === 'missile_command' &&
-    WARFARE_BLUEPRINTS[Block.InterceptorBattery] === 'aegis_systems' &&
-    WARFARE_BLUEPRINTS[Item.HelicopterKit] === 'flight_certification',
+  check(Object.keys(WARFARE_BLUEPRINTS).length === 6,
+    'exactly six pieces of hardware, modules and ordnance are blueprint-gated');
+  check(WARFARE_BLUEPRINTS[Block.Helipad] === 'flight_certification' &&
+    WARFARE_BLUEPRINTS[Item.HelicopterKit] === 'flight_certification' &&
+    WARFARE_BLUEPRINTS[Item.AerialBomb] === 'flight_certification',
     'each blueprint names the node that unlocks it');
   check(WARFARE_BLUEPRINTS[Item.ReinforcedFrame] === undefined &&
     WARFARE_BLUEPRINTS[Item.OilBarrel] === undefined,
     'components stay open so a teammate without the node can still resupply');
-  // Titanium belongs to the air wing, not the first missile.
-  const missile = RECIPES.find((r) => r.result.id === Item.TacticalMissile)!;
-  const flat = JSON.stringify(missile);
-  check(!flat.includes(String(Item.TitaniumIngot)),
-    'the first tactical missile needs no titanium — the first unlock is usable');
+  // Titanium belongs to the airframe itself, not to its consumable ordnance.
+  const bomb = RECIPES.find((r) => r.result.id === Item.AerialBomb)!;
+  check(!JSON.stringify(bomb).includes(String(Item.TitaniumIngot)),
+    'an aerial bomb needs no titanium — resupply never waits on a titanium run');
 }
 
 // --- Presentation: the tree screen is emoji-free and fully iconed ------------------
@@ -980,11 +690,11 @@ const check = (condition: boolean, message: string): void => {
 // player's screen — and the fallback would hide it from a visual check.
 {
   const known = new Set(warfareIconNames());
-  check(known.size >= 20, 'the icon set defines a mark for every kind of hardware');
+  check(known.size >= 14, 'the icon set defines a mark for every kind of hardware');
   for (const node of WARFARE_TREE) {
     check(known.has(nodeIconName(node)), `${node.name} draws a defined SVG icon`);
   }
-  for (const branch of ['trunk', 'strike', 'aegis', 'air'] as const) {
+  for (const branch of ['trunk', 'air'] as const) {
     check(known.has(branchIconName(branch)), `the ${branch} branch draws a defined SVG icon`);
   }
   // Distinct marks: two technologies wearing the same icon is a design bug, not

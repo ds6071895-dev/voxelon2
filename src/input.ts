@@ -19,7 +19,7 @@ export class Input {
   mouseDY = 0;
   /** Look-speed multiplier from the settings panel. Applied where raw pointer
    *  deltas are accumulated, so every consumer of mouseDX/mouseDY (camera,
-   *  vehicles, the missile cam) inherits it without knowing it exists. Touch
+   *  vehicles, the vault cinematic) inherits it without knowing it exists. Touch
    *  scales by this too, on top of its own px->delta calibration. */
   lookSensitivity = 1;
   leftDown = false;

@@ -192,8 +192,6 @@ export interface GlidePose {
   arms: [number, number];
   /** ± rotation.z spreading the hands out to the grips (left gets the minus). */
   armRoll: number;
-  /** rotation.x for the cape, streaming flat behind. */
-  cape: number;
 }
 
 /**
@@ -218,6 +216,5 @@ export function glidePose(
     legs: [(-0.1 + flutter) * d, (-0.1 - flutter) * d],
     arms: [2.55 * d, 2.55 * d],
     armRoll: 0.2 * d,
-    cape: (-0.3 + Math.sin(phase * 2.2) * 0.1) * d,
   };
 }

@@ -547,6 +547,53 @@ export class GameAudio {
     this.noise({ freq: 700, dur: 0.42, gain: 0.16, slideTo: 2000, type: 'bandpass', q: 0.5 });
   }
 
+  // --- Helicopters: hull hits and the fast rope --------------------------------
+
+  /** A round bites the airframe: a hard metal slap with a short ring on top.
+   *  `armorish` is for a graze that mostly skidded off. */
+  heliHit(pos?: THREE.Vector3, heavy = false): void {
+    this.noise({ freq: 900, dur: 0.07, gain: heavy ? 0.24 : 0.16, slideTo: 200,
+      type: 'lowpass', q: 0.8, pos });
+    this.tone({ type: 'square', from: heavy ? 340 : 420, to: 120, dur: 0.09,
+      gain: heavy ? 0.13 : 0.09, pos });
+    this.tone({ type: 'sine', from: 1900, to: 1200, dur: 0.16, gain: 0.04, pos });
+  }
+
+  /** The rope goes out of the door: a winch clatter, then the line falling. */
+  ropeDeploy(pos?: THREE.Vector3): void {
+    this.tone({ type: 'square', from: 190, to: 130, dur: 0.09, gain: 0.1, pos });
+    this.noise({ freq: 520, dur: 0.5, gain: 0.16, slideTo: 130, type: 'lowpass', q: 0.7, pos });
+    this.noise({ freq: 260, dur: 0.7, gain: 0.07, slideTo: 900, type: 'bandpass',
+      q: 0.5, delay: 0.06, pos });
+  }
+
+  /** Gloves close on the line. Short, dry, and it has to land on the frame you
+   *  attached — this is the "I'm on" confirmation. */
+  ropeGrab(): void {
+    this.noise({ freq: 420, dur: 0.1, gain: 0.2, slideTo: 130, type: 'lowpass', q: 0.7 });
+    this.tone({ type: 'triangle', from: 300, to: 150, dur: 0.1, gain: 0.11 });
+  }
+
+  /** One tick of the descent bed, called on a short repeat while sliding.
+   *  `level` is 0..1 of the slide's ramp, so the friction hiss and the wind
+   *  both wind up exactly as the descent does. */
+  ropeSlide(level: number): void {
+    const l = Math.max(0, Math.min(1, level));
+    // Rope-through-gloves friction: mid-band hiss that opens up with speed.
+    this.noise({ freq: 700 + l * 900, dur: 0.2, gain: 0.05 + l * 0.1,
+      slideTo: 380 + l * 700, type: 'bandpass', q: 0.7 });
+    // Air past the ears underneath it.
+    this.noise({ freq: 300 + l * 260, dur: 0.24, gain: 0.03 + l * 0.06,
+      slideTo: 170 + l * 220, type: 'lowpass', q: 0.5 });
+  }
+
+  /** Boots hit the deck at the bottom of the line. */
+  ropeLand(pos?: THREE.Vector3): void {
+    this.noise({ freq: 300, dur: 0.16, gain: 0.24, slideTo: 90, type: 'lowpass', q: 0.7, pos });
+    this.tone({ type: 'triangle', from: 150, to: 62, dur: 0.16, gain: 0.16, pos });
+    this.noise({ freq: 1400, dur: 0.09, gain: 0.05, slideTo: 700, type: 'bandpass', q: 0.9, pos });
+  }
+
   /** Bounce Pad: spring compression, a rubbery launch note, then air rushing by. */
   /** TREASURY ALARM: two low war horns over a swell of air. Deliberately the
    *  lowest, longest cue in the game — it has to carry from underground and read

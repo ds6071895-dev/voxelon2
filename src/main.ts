@@ -28,7 +28,7 @@ import { Mob, Mobs } from './mobs';
 import { NetClient } from './net/client';
 import {
   WORLD_SEED, WORLD_HALF, WORLD_BORDER, CORE_HALF, makeUsername, skinSeed,
-  GameMode, MAX_ATTUNED, TOTEM_COOLDOWN, TOTEM_WINDUP, COMBAT_TAG,
+  GameMode, MAX_ATTUNED, RANGED_MAX_DAMAGE, TOTEM_COOLDOWN, TOTEM_WINDUP, COMBAT_TAG,
   TPA_HOLD, TPA_EXPIRE, type DuelLeaderboardEntry,
   type FactionPublic, type Notification,
 } from './net/protocol';
@@ -53,10 +53,14 @@ import {
   GliderRig, RIG_HARNESS_Y, buildGliderRig, glidePose, poseGliderRig,
 } from './glidermodels';
 import {
-  CAPES, CAPE_COLORS, COSMETIC_RANGES, Cosmetics, EYE_COLORS, FACE_ACCESSORIES,
+  COSMETIC_RANGES, Cosmetics, EYE_COLORS, FACE_ACCESSORIES,
   HAIR_COLORS, HAIR_STYLES, HATS, HAT_COLORS, PANTS_COLORS, SHIRT_COLORS,
   SKIN_TONES, Swatch, defaultCosmetics, randomCosmetics, sanitizeCosmetics,
 } from './character';
+import {
+  NO_CAPE, type Wardrobe, emptyWardrobe, equipCape, sanitizeWardrobe,
+} from './capes';
+import { CapesUI } from './capes_ui';
 import { WorldMap } from './worldmap';
 import { Accounts, Account } from './net/accounts';
 import {
@@ -74,32 +78,25 @@ import {
 import {
   type PoliticsState, castVote, disbandParty, electionOf, foundParty,
   governmentOf, isPresident, newPolitics, pushBroadcast, rollCycle,
-  sanitizePolitics, setTaxRate, tallyElection,
+  sanitizePolitics, setKit, setTaxRate, tallyElection,
 } from './politics';
 import {
-  STARTER_KIT, deposit, fundKits, levy, newTreasuries, newTreasury,
+  deposit, fundKits, kitCost, kitStacks, levy, newTreasuries, newTreasury,
   sanitizeTreasury, treasuryCount, treasuryCounts,
 } from './treasury';
 import {
   WarfareProgress, buyWarfareNode, grantWarfareXp, migrateWarfare, newWarfare,
   sanitizeWarfare, settleWarfareXp, warfareAvailable, warfareOwns, warfareTier,
-  ContributionRecord, PROTECTED_RADIUS, helicopterStats, siloStats, batteryStats, tierLabel,
-  MAX_SILOS_PER_FACTION, MIN_SILO_SPACING, MAX_BATTERIES_PER_FACTION,
-  MIN_BATTERY_SPACING, missileFlightTime,
+  ContributionRecord, helicopterStats, tierLabel, blastAt, blastBlockCandidates,
 } from './warfare';
 import { WarfareUI } from './warfare_ui';
 import {
-  BatteryState, MissileSnapshot, ProtectedArea, SiloState, StrategicSim,
-  StrategicEvent, LAUNCH_REJECT_TEXT, blastAt, blastBlockCandidates, protectedArea,
-} from './strategic';
-import {
+  FAST_ROPE_SLIDE_MAX, FAST_ROPE_SLIDE_SPEED,
   HELI_FUEL_BURN, HELI_FUEL_IDLE, HELI_GROUND_CLEARANCE, HeliLossReason,
   HelicopterSnapshot, PASSENGER_ARC, SeatKind, VehicleSim, VehicleEvent,
-  bombBlast, fastRopeProgressDelta, viewYawToHeliYaw,
+  bombBlast, fastRopeHeld, fastRopeProgressDelta, fastRopeSlideSpeed, viewYawToHeliYaw,
 } from './vehicles';
 import { VehicleHUD } from './vehiclehud';
-import { MissileCam, MissileCamLaunch } from './missilecam';
-import { MissileModels, StrategicModels } from './warfare_models';
 import { VehicleModels } from './vehiclemodels';
 import {
   DUEL_ROUND_MS, DUEL_MAX_HEALTH, DUEL_MAX_PILLAR_HEIGHT, DUEL_ARENA_SIZE,
@@ -333,7 +330,7 @@ const touch = isMobile ? new TouchControls(input, {
   onPause: () => {
     if (player.dead) return;
     if (screen === 'guide') { fieldGuide.backToPause(); return; }
-    if (screen === 'paused') { input.lock(); return; }        // resume
+    if (screen === 'paused') { resumePlay(); return; }         // resume
     if (invUI.open) { input.inventoryToggled = true; return; } // close menu first
     if (worldMap.open) { input.mapToggled = true; return; }
     if (warfareUI.open) { input.progressPressed = true; return; }
@@ -598,14 +595,41 @@ let flagState = newFlags();
 const flagModels = new FlagModels(scene);
 flagModels.setGroundProbe((x, z) => world.terrain.height(Math.floor(x), Math.floor(z)) + 1);
 flagModels.setState(flagState.breakable, flagState.flags);
-// The faction strongbox stands beside each flag pole — presentation only, over a
-// position treasury.ts derives from flagHome(). Never a block, never a chest.
-const treasuryModels = new TreasuryModels(scene);
+// The faction HOARD stands at each flag pole — the strongbox beside the banner
+// and a ring of loot pedestals around it, one per slice of what is banked, all
+// presentation only over positions treasury.ts derives from flagHome(). Never a
+// block, never a chest. What the enemy can see of it is what the wire publishes:
+// your own ring shows the real stacks, everybody else's shows generic bullion.
+const treasuryModels = new TreasuryModels(scene, atlas);
 treasuryModels.setGroundProbe((x, z) => world.terrain.height(Math.floor(x), Math.floor(z)) + 1);
 /** Seconds until the client may send another flag swing (matches the server). */
 let flagHitTimer = 0;
-/** Local mirror of "my faction holds no flag" — drives the danger banner. */
+/** Local mirror of "my faction holds no flag" — drives the danger banner.
+ *  Never assigned directly: `refreshFlagless()` is the ONE place that decides
+ *  it, because the answer depends on TWO things that arrive independently (the
+ *  flag sync and your own faction) and reading it off only one of them is how
+ *  the badge used to get stuck. */
 let myFactionFlagless = false;
+
+/**
+ * Recompute the flagless badge from the two live facts, and repaint if it moved.
+ *
+ * Called from BOTH sides: every flag sync, and every point where `localFaction`
+ * changes (welcome, pledge, offline auth, a spy's secret switch). The flag sync
+ * usually lands BEFORE the welcome that tells us which side we are on — at that
+ * moment nothing holds a flag for NO_FACTION, so a one-shot check at sync time
+ * latched "NO FLAG — deaths are FOREVER" on and left it on until the next flag
+ * event, which in a quiet week never comes.
+ *
+ * An unpledged player is never flagless: they have no side to lose one with.
+ */
+function refreshFlagless(): void {
+  const flagless = isFaction(localFaction)
+    && !flagState.flags.some((f) => f.holder === localFaction);
+  if (flagless === myFactionFlagless) return;
+  myFactionFlagless = flagless;
+  refreshNetInfo();
+}
 // Seasons: server-authoritative. Only the permanent ★ badge is shown — the
 // old top-centre "Season N · time" HUD line was cut as clutter.
 let localSeasonsWon = 0;
@@ -1592,10 +1616,6 @@ interaction.onOpenContainer = (kind, x, y, z) => {
     if (!turretStates.has(key)) turretStates.set(key, newTurret()); // local predict
     if (net.connected) net.sendTurretOpen(x, y, z);
     invUI.show('turret', undefined, undefined, turretCtxFor(x, y, z));
-  } else if (kind === 'silo') {
-    openSiloPanel(x, y, z);
-  } else if (kind === 'battery') {
-    openBatteryPanel(x, y, z);
   } else if (kind === 'helipad') {
     openHelipadPanel(x, y, z);
   } else {
@@ -1774,8 +1794,6 @@ interaction.onSabotage = (x, y, z) => {
   const held = inventory.selectedStack;
   const tool = held ? ITEMS[held.id]?.tool : undefined;
   const dmg = (tool?.damage ?? 1) + 3; // fists chip away; tools hit harder
-  // Warfare Command hardware (silo pad / interceptor battery)?
-  if (sabotageStrategic(x, y, z, dmg)) return;
   // Turret? (single-block entity)
   if (world.getBlock(x, y, z) === Block.Turret) {
     const key = `${x},${y},${z}`;
@@ -1992,7 +2010,7 @@ const fieldGuide = createFieldGuide({
     screen = 'paused';
     pauseEl.style.display = 'flex';
   },
-  onResume: () => input.lock(),
+  onResume: () => resumePlay(),
 });
 
 pauseGuideBtn.addEventListener('click', () => {
@@ -2047,6 +2065,9 @@ function saveLocalAccounts(): void {
 const notifications = new NotificationsUI(app);
 const factionPicker = new FactionPicker(app);
 const presidentUI = new PresidentUI(app);
+// The cape wardrobe rides with the government panels for pointer-lock etiquette:
+// it opens from the title screen today, but it is a full-screen modal either way.
+const capesUI = new CapesUI(app);
 // Two bells, one unread count: one on the title screen (so a broadcast is
 // visible before you drop in) and one on the HUD. Both stay hidden until an
 // account is actually logged in — there is nothing to read before that.
@@ -2055,21 +2076,74 @@ const hudBell = notifications.mountBell(app, 'hud');
 titleBell.hidden = true;
 hudBell.hidden = true;
 
-/** Any government panel taking the screen wants the pointer back. */
-function govPanelOpened(): void {
-  if (input.locked) input.unlock();
+// --- THE POINTER-LOCK ARBITER ------------------------------------------------
+// One question, asked in one place: does anything on screen need a cursor?
+//
+// Every panel used to answer that for itself, each carrying its own hand-copied
+// list of the other panels — which is why the lists had drifted apart, and why
+// opening the government menu released the pointer and then slammed the PAUSE
+// menu up behind it (the pointer-lock listener's list had never heard of it).
+// `cursorPanelOpen` is now the ONLY list. Add a panel to it and locking,
+// unlocking, the pause fallback, the click-to-resume hint and the click-the-
+// world safety net all learn about it at once.
+
+/** Every overlay that needs a mouse. The class-based panels expose `.open`; the
+ *  three hand-rolled full-screen cards are read straight off their display. */
+function cursorPanelOpen(): boolean {
+  return invUI.open || worldMap.open || warfareUI.open || chatBox.open
+    || presidentUI.open || factionPicker.open || notifications.open
+    || capesUI.open || fieldGuide.open || tutorial.open || guideOpen
+    || strategicPanel.style.display !== 'none'   // helipad bay
+    || revivePanel.style.display !== 'none'      // teammate revival picker
+    || elimEl.style.display !== 'none';          // elimination banner
 }
-/** ...and hands it back on the way out, on the same terms the command box uses. */
-function govPanelClosed(): void {
-  if (worldReady && screen === 'playing' && !player.dead && !invUI.open &&
-      !worldMap.open && !warfareUI.open && !chatBox.open &&
-      !factionPicker.open && !presidentUI.open && !notifications.open) {
-    input.lock();
+
+/** True when the WORLD should be holding the pointer: in play, alive, and with
+ *  nothing over the top of it that you would need to click. */
+function shouldHoldPointer(): boolean {
+  return worldReady && screen === 'playing' && !player.dead && !cursorPanelOpen();
+}
+
+/**
+ * Take the pointer, or hand it back, so the lock matches what is on screen.
+ *
+ * Safe to call every frame — which is exactly what `frame()` does, and what
+ * makes this automatic rather than something each new panel has to remember.
+ * The pointer is only re-asked for when the browser is neither holding it nor
+ * still considering an earlier request, so a refused lock waits for the next
+ * real gesture (input.ts re-asks on click / keypress / focus) instead of being
+ * re-fired sixty times a second.
+ */
+function syncPointerLock(): void {
+  if (shouldHoldPointer()) {
+    if (!input.locked && !input.lockPending) input.lock();
+  } else if (input.locked || input.lockPending) {
+    input.unlock();
   }
 }
-for (const panel of [notifications, factionPicker, presidentUI]) {
-  panel.onOpen = govPanelOpened;
-  panel.onClose = govPanelClosed;
+
+/**
+ * Drop into the world and take the pointer — the pause menu's Resume, the
+ * briefing's Skip, the Play button, a duel arena opening under you.
+ *
+ * The order matters. These used to ask for the lock while `screen` still said
+ * 'paused'/'guide'/'title' and let the resulting pointerlockchange call
+ * `enterPlaying`. With the arbiter running every frame that race is lost: a
+ * frame landing between the request and the browser granting it would see a
+ * screen that is not 'playing', decide the world should not have the pointer,
+ * and cancel the request. So the screen state moves FIRST, and the arbiter then
+ * agrees with it.
+ */
+function resumePlay(): void {
+  enterPlaying();
+  syncPointerLock();
+}
+
+for (const panel of [notifications, factionPicker, presidentUI, capesUI]) {
+  // The arbiter would catch these on the next frame anyway; running it on the
+  // open/close edge means the cursor is already there when the panel paints.
+  panel.onOpen = syncPointerLock;
+  panel.onClose = syncPointerLock;
 }
 
 /** The avatar to put on a party's plinth: their live look if they are online,
@@ -2133,6 +2207,10 @@ function governData(): GovernData {
     treasury: net.connected
       ? myTreasury
       : (offlineTreasuries.get(localFaction)?.slots ?? []),
+    // The kit workshop builds a loadout out of what the president is actually
+    // carrying, and prices funding against it — so it needs the real pockets,
+    // hotbar included, not a summary.
+    pocket: inventory.serialize().slots,
     cosmeticsOf: cosmeticsFor,
     atlasCanvas: atlas.canvas,
     kitClaimed,
@@ -2198,11 +2276,49 @@ function settleOfflineElection(): void {
 }
 
 /**
+ * THE OFFICE GATE. The three powers of office — addressing the faction, setting
+ * the levy and funding kits — are refused here for anyone who has not won the
+ * seat, on BOTH paths: offline, where this client is the only authority, and
+ * online, where refusing before `net.send*` means an unelected citizen's request
+ * never leaves the machine. The server re-checks the presidency on every
+ * govern-* message either way (server_core.requirePresident), so this is the
+ * screen refusing honestly and instantly rather than the thing that makes it
+ * safe. Returns false — and says why in the panel — when the seat is not yours.
+ */
+function holdsOffice(): boolean {
+  if (!isFaction(localFaction)) {
+    presidentUI.setError('Swear allegiance to a faction first.');
+    return false;
+  }
+  if (!isPresident(politicsState, localFaction, authedName)) {
+    presidentUI.setError('Only your faction\'s president can do that. Win the election first.');
+    return false;
+  }
+  return true;
+}
+
+/**
  * Offline government. Single-player runs the SAME pure rules the server runs
  * (politics.ts / treasury.ts), so the panels are live instead of dead: you can
  * found a party, win an unopposed election, set a levy and watch it fill the
  * strongbox beside your flag.
  */
+/**
+ * Take `n` kits' worth of `bill` out of the player's own inventory, or nothing.
+ *
+ * Checked in full before a single item moves: a half-paid bill would leave the
+ * president short AND unfunded, with no way to tell which lines were taken.
+ * Returns false and changes nothing when the pockets cannot cover it.
+ */
+function takeKitBill(bill: ItemStack[], n: number): boolean {
+  if (!Number.isFinite(n) || n <= 0) return false;
+  for (const line of bill) {
+    if (inventory.countItem(line.id) < line.count * n) return false;
+  }
+  for (const line of bill) inventory.removeItem(line.id, line.count * n);
+  return true;
+}
+
 const governActions: GovernActions = {
   onFoundParty: (name, slogan, promises) => {
     if (net.connected) { net.sendFoundParty(name, slogan, promises); return; }
@@ -2228,12 +2344,10 @@ const governActions: GovernActions = {
     refreshGovernment();
   },
   onBroadcast: (text) => {
+    if (!holdsOffice()) return;
     if (net.connected) { net.sendGovBroadcast(text); return; }
     const g = governmentOf(politicsState, localFaction);
-    if (!g || !isPresident(politicsState, localFaction, authedName)) {
-      presidentUI.setError('Only your faction\'s president can do that.');
-      return;
-    }
+    if (!g) return;
     const res = pushBroadcast(g, authedName, text, Date.now(), politicsState.serial++);
     if (!res.ok) { presidentUI.setError(res.error ?? 'Say something first.'); return; }
     pushNotification({
@@ -2245,25 +2359,55 @@ const governActions: GovernActions = {
     refreshGovernment();
   },
   onSetTax: (rate) => {
+    if (!holdsOffice()) return;
     if (net.connected) { net.sendGovTax(rate); return; }
     const g = governmentOf(politicsState, localFaction);
-    if (!g || !isPresident(politicsState, localFaction, authedName)) {
-      presidentUI.setError('Only your faction\'s president can do that.');
-      return;
-    }
+    if (!g) return;
     setTaxRate(g, rate);
     saveOfflinePolitics();
     refreshGovernment();
   },
-  onFundKits: (count) => {
-    if (net.connected) { net.sendFundKits(count); return; }
+  onSetKit: (slots) => {
+    if (!holdsOffice()) return;
+    if (net.connected) { net.sendSetKit(slots); return; }
     const g = governmentOf(politicsState, localFaction);
-    const t = offlineTreasuries.get(localFaction);
-    if (!g || !t || !isPresident(politicsState, localFaction, authedName)) {
-      presidentUI.setError('Only your faction\'s president can do that.');
+    if (!g) return;
+    const res = setKit(g, slots);
+    if (!res.ok) { presidentUI.setError(res.error ?? 'That is not a kit layout.'); return; }
+    saveOfflinePolitics();
+    refreshGovernment();
+  },
+  /**
+   * Fund `count` kits out of `source`.
+   *
+   * When the president pays out of their OWN POCKETS the bill leaves this
+   * client's inventory here, before anything is sent — so a refused or dropped
+   * message can never cost items without producing kits, and the server (which
+   * holds no inventory of its own) is told about a transfer that has already
+   * happened. `takeKitBill` is all-or-nothing for exactly that reason.
+   */
+  onFundKits: (count, source) => {
+    if (!holdsOffice()) return;
+    const g = governmentOf(politicsState, localFaction);
+    if (!g) return;
+    const bill = kitCost(kitStacks(g.kit));
+    if (!bill.length) {
+      presidentUI.setError('The recruit kit is empty — build one first.');
       return;
     }
-    if (!fundKits(t, count)) {
+    if (source === 'inventory' && !takeKitBill(bill, count)) {
+      presidentUI.setError('You are not carrying enough to fund that many.');
+      return;
+    }
+    if (net.connected) { net.sendFundKits(count, source); return; }
+    const t = offlineTreasuries.get(localFaction);
+    if (!t) return;
+    // Offline mirrors the server exactly: pocket money is banked first, then
+    // spent, so there is one affordability rule rather than two.
+    if (source === 'inventory') {
+      for (const line of bill) deposit(t, line.id, line.count * count);
+    }
+    if (!fundKits(t, count, kitStacks(g.kit))) {
       presidentUI.setError('The treasury cannot afford that many kits.');
       return;
     }
@@ -2282,7 +2426,7 @@ const governActions: GovernActions = {
     kitClaimed = true;
     localAccounts.claimKit(authedName);
     saveLocalAccounts();
-    for (const line of STARTER_KIT) inventory.add(line.id, line.count);
+    for (const line of kitStacks(g.kit)) inventory.add(line.id, line.count);
     showNotice('[KIT] Your faction funded this. Go build something.');
     saveOfflinePolitics();
     refreshGovernment();
@@ -2293,6 +2437,11 @@ const governActions: GovernActions = {
  *  into the in-world strongboxes. Called on every politics sync. */
 function refreshGovernment(): void {
   treasuryModels.setCounts(treasuryCountsNow());
+  // Only YOUR ring shows the real stacks. The wire publishes a bare count for
+  // everybody else, and the models must never show more than the wire does.
+  treasuryModels.setOwnContents(localFaction, net.connected
+    ? myTreasury
+    : (offlineTreasuries.get(localFaction)?.slots ?? []));
   if (presidentUI.open) presidentUI.update(governData());
   if (factionPicker.open) factionPicker.update({
     factions: pledgeDossiers(), atlasCanvas: atlas.canvas,
@@ -2338,6 +2487,7 @@ factionPicker.onPledge = (faction) => {
 function adoptFaction(faction: number): void {
   localFaction = faction;
   invalidateSelfAvatar();  // your body wears the new side's shirt
+  refreshFlagless();       // the badge is about the side we just joined
   refreshNetInfo();
   refreshGovernment();
 }
@@ -2364,6 +2514,7 @@ function onAuthSuccess(username: string): void {
   try { localStorage.setItem('voxelon.lastUser', username); } catch { /* ignore */ }
   discoveredVaults = null; // vault discoveries are per-account — reload lazily
   loadCosmetics(username); // per-account avatar look (Character screen)
+  loadWardrobe(username);  // per-account cape collection (Capes screen)
   held.setSkin(skinSeed(username), myCosmetics); // first-person hand matches avatar
   overlay.classList.add('authenticated');
   titleCharacterPreview.setCosmetics(myCosmetics);
@@ -2440,6 +2591,7 @@ function finishOfflineAuth(account: Account, freshRegister: boolean): void {
   localFaction = account.faction;
   kitClaimed = account.kitClaimed === true;
   invalidateSelfAvatar(); // your third-person body reflects the new look/side
+  refreshFlagless();
   onAuthSuccess(account.username);
   loadOfflinePolitics();
   refreshGovernment();
@@ -2970,7 +3122,7 @@ function renderDuelLeaderboard(): void {
     bust.appendChild(slot);
     busts.push({
       key: entry.username.toLowerCase(),
-      cosmetics: entry.cosmetics ?? defaultCosmetics(skinSeed(entry.username)),
+      cosmetics: sanitizeCosmetics(entry.cosmetics, skinSeed(entry.username)),
       slot,
       // Each podium place gets its own salute, so the top of the board never
       // plays the same animation three times running.
@@ -4071,7 +4223,7 @@ net.onDuelArena = (arena, spawn, countdownEndsAt) => {
   } else {
     startDuelReadyWatchdog(spawn.x, spawn.z);
   }
-  enterPlaying(); input.lock();
+  resumePlay();
 };
 net.onDuelLoadout = (slots, armor, selected, unlimitedReserve) => {
   inventory.restore({ slots, armor, selected }); duelUnlimitedReserve = unlimitedReserve;
@@ -4124,7 +4276,7 @@ net.onDuelRestored = (x, y, z, yaw, pitch, health, dead, mode, state) => {
 // that — or when the briefing is skipped/completed — enter the game directly.
 function beginPlay(): void {
   if (!tutorialSeen) { tutorial.show(); return; }
-  input.lock();
+  resumePlay();
 }
 
 // Controls / keybindings panel (Controls button). Grouped by what you are
@@ -4284,10 +4436,11 @@ const controlsPanel = (() => {
 
 controlsBtn.addEventListener('click', () => {
   charUI.close();
+  capesUI.hide();
   controlsPanel.style.display = controlsPanel.style.display === 'flex' ? 'none' : 'flex';
 });
 
-// --- CHARACTER: customise your avatar (skin, hair, hats, capes, face…) --------
+// --- CHARACTER: customise your avatar (skin, hair, hats, face…) --------------
 // Opens from the title menu. A live draggable 3D preview of the same avatar
 // model other players see, plus ‹ › cyclers for every cosmetic category.
 // Saved per-account: localStorage always, plus the server (which sanitizes,
@@ -4333,8 +4486,6 @@ const CHAR_OPTIONS: { key: keyof Cosmetics; label: string; names: string[];
   { key: 'pants', label: 'Trousers', names: PANTS_COLORS.map((s) => s.name), swatches: PANTS_COLORS },
   { key: 'hat', label: 'Hat', names: HATS },
   { key: 'hatColor', label: 'Hat Colour', names: HAT_COLORS.map((s) => s.name), swatches: HAT_COLORS },
-  { key: 'cape', label: 'Cape', names: CAPES },
-  { key: 'capeColor', label: 'Cape Colour', names: CAPE_COLORS.map((s) => s.name), swatches: CAPE_COLORS },
   { key: 'face', label: 'Face', names: FACE_ACCESSORIES },
 ];
 
@@ -4589,7 +4740,49 @@ characterBtn.addEventListener('click', () => {
   if (!authed) return;
   audio.resume();
   controlsPanel.style.display = 'none';
+  capesUI.hide();
   charUI.open();
+});
+
+// --- CAPES: the wardrobe you collect into, and the one you wear --------------
+// Deliberately NOT part of Cosmetics: a cosmetic index is something you cycle
+// to, and a cape is meant to be something you earn. The collection lives here
+// as its own per-account blob (localStorage today; the account and the wire
+// when the earned-cape system lands), and capes.ts holds the empty catalog.
+const capesBtn = document.getElementById('capes-btn')!;
+let myWardrobe: Wardrobe = emptyWardrobe();
+
+function wardrobeKey(user: string): string { return `voxelon.capes.${user}`; }
+function loadWardrobe(user: string): void {
+  myWardrobe = emptyWardrobe();
+  try {
+    const raw = localStorage.getItem(wardrobeKey(user));
+    if (raw) myWardrobe = sanitizeWardrobe(JSON.parse(raw));
+  } catch { /* ignore */ }
+  capesUI.update(myWardrobe);
+}
+function saveWardrobe(): void {
+  if (!authedName) return;
+  try {
+    localStorage.setItem(wardrobeKey(authedName), JSON.stringify(myWardrobe));
+  } catch { /* ignore */ }
+}
+
+capesUI.onEquip = (id) => {
+  const next = equipCape(myWardrobe, id);
+  if (next === myWardrobe) return; // not yours — sanitize already refused it
+  myWardrobe = next;
+  saveWardrobe();
+  capesUI.update(myWardrobe);
+  showNotice(id === NO_CAPE ? 'Cape stowed.' : 'Cape equipped.');
+};
+
+capesBtn.addEventListener('click', () => {
+  if (!authed) return;
+  audio.resume();
+  controlsPanel.style.display = 'none';
+  charUI.close();
+  capesUI.show(myWardrobe);
 });
 
 // --- First-play onboarding: guided mission briefing, shown once ---------------
@@ -4761,7 +4954,7 @@ const tutorial = (() => {
     panel.style.display = 'none';
     tutorialSeen = true;
     try { localStorage.setItem('voxelon.tutorialSeen', '1'); } catch { /* ignore */ }
-    if (worldReady) input.lock();
+    if (worldReady) resumePlay();
   }
 
   back.addEventListener('click', () => { if (i > 0) { i--; render(); } });
@@ -4786,8 +4979,7 @@ const tutorial = (() => {
 })();
 
 document.getElementById('resume-btn')!.addEventListener('click', () => {
-  enterPlaying();
-  input.lock();
+  resumePlay();
 });
 document.getElementById('quit-btn')!.addEventListener('click', () => {
   // Quitting the play screen must relinquish every helicopter attachment even
@@ -4815,12 +5007,13 @@ document.addEventListener('pointerlockchange', () => {
   }
   if (input.locked) {
     enterPlaying(); // entered or returned to the game
-  } else if (!player.dead && !invUI.open && !worldMap.open && !chatBox.open &&
-      !warfareUI.open && !missileCam.active && screen === 'playing') {
-    // Warfare Command is deliberately NOT in the pause path: it frees the cursor
-    // for the tree while the world keeps running, so unlocking for it must not
-    // slam the pause menu up behind it (which would also strand `screen` on
-    // 'paused' and stop the panel re-locking on close).
+  } else if (!player.dead && screen === 'playing' && !cursorPanelOpen()) {
+    // A panel that asked for the cursor is deliberately NOT in the pause path:
+    // it frees the mouse while the world keeps running, so unlocking for it must
+    // not slam the pause menu up behind it (which would also strand `screen` on
+    // 'paused' and stop the arbiter re-locking when the panel closes). That is
+    // exactly what `cursorPanelOpen` is for — one list, so a panel added there
+    // can never fall through to the pause menu again.
     enterPause(); // Esc / lost focus while playing -> pause, not the title
   }
 });
@@ -4835,18 +5028,11 @@ renderer.domElement.addEventListener('mousedown', () => {
     warfareUI.hide();
     return;
   }
-  if (screen === 'playing' && !input.locked && !player.dead &&
-      !invUI.open && !worldMap.open && !chatBox.open && !missileCam.active) {
-    input.lock();
-  }
+  if (!input.locked) syncPointerLock();
 });
 document.addEventListener('keydown', (e) => {
   if (e.code !== 'Escape' || e.defaultPrevented) return;
-  // The strike camera outranks everything: it is the one overlay you may be
-  // watching with the pointer already unlocked, and "closeable at any time" has
-  // to include the key everyone reaches for first.
-  if (missileCam.active) { missileCam.close(); }
-  else if (tutorial.open) { tutorial.finish(); }
+  if (tutorial.open) { tutorial.finish(); }
   else if (chatBox.open) { chatBox.hide(); }
   else if (warfareUI.open) { hideProgress(); }
   else if (guideOpen) { hideGuide(); }
@@ -4947,6 +5133,9 @@ net.onWelcome = (me) => {
   // Adopt the server-assigned spawn so we line up with the server's record.
   localFaction = me.faction;
   invalidateSelfAvatar(); // your third-person body reflects the new look/side
+  // The flag sync normally arrives BEFORE this, when we had no side to judge it
+  // against — re-decide the badge now that we know which one we are on.
+  refreshFlagless();
   localSeasonsWon = me.seasonsWon ?? 0; // authoritative badge from the account
   player.pos.set(me.x, me.y, me.z);
   player.vel.set(0, 0, 0);
@@ -4983,8 +5172,7 @@ net.onWorldTime = (seconds) => {
 net.onFlags = (breakable, flags) => {
   flagState = { breakable, flags: flags.map((flag) => ({ ...flag })) };
   flagModels.setState(breakable, flagState.flags);
-  myFactionFlagless = !flagState.flags.some((flag) => flag.holder === localFaction);
-  refreshNetInfo();
+  refreshFlagless();
 };
 // Someone (possibly us) changed their look: rebuild that avatar.
 net.onCosmetics = (id) => remotePlayers.invalidate(id);
@@ -6364,6 +6552,10 @@ projectiles.localHitSink = (damage, at) => {
   // identically whatever you are shooting at.
   damageNumbers.spawn(at.x, at.y, at.z, damage, hitFlavor(damage, false));
 };
+// Rounds stop ON an airframe rather than sailing through the cabin. The damage
+// itself is reported at the trigger pull (reportAirTargetHit) — this is purely
+// what makes shooting at a helicopter LOOK like shooting at a helicopter.
+projectiles.hullSink = (point) => vehicleModels.pointInHull(point);
 projectiles.encounterSink = (point, damage, source) => {
   const seal = encounterSnapshot?.seal;
   if (seal?.sealed && seal.geometry && sealContains(seal.geometry, point, 0.08)) {
@@ -6794,6 +6986,7 @@ net.onFactionSwitched = (faction, remaining) => {
   // to everyone else (a spy) — only the server knows your true side.
   localFaction = faction;
   invalidateSelfAvatar(); // your third-person body reflects the new look/side
+  refreshFlagless();      // you inherit the new side's flag situation with it
   refreshNetInfo();
   showNotice(`🤫 You secretly joined ${factionName(faction)}. Switches left: ${remaining}.`);
 };
@@ -6830,6 +7023,9 @@ net.onGovErr = (reason) => {
 net.onNotify = (notif) => pushNotification(notif);
 net.onTreasuryRaided = (faction, by, stacks) => {
   treasuryModels.setCounts(treasuryCountsNow());
+  // Scorch the ring. A robbery is a thing that happened to a PLACE, so anyone
+  // who walks past in the next few seconds can see it happened.
+  treasuryModels.markRaided(faction);
   if (faction === localFaction) return; // the raid alarm already came as a notify
   showNotice(`💰 ${by} hauled ${stacks} stack${stacks === 1 ? '' : 's'} out of the ` +
     `${factionName(faction)} treasury.`);
@@ -6859,24 +7055,18 @@ net.onDisconnect = () => {
   // Drop all server-owned warfare state so its meshes/markers don't linger
   // (turretModels reconciles to the now-empty set).
   turretStates.clear();
-  // Warfare Command hardware is server-owned too: drop it so no ghost silo,
-  // battery, missile or helicopter lingers over an offline world.
-  siloStates.clear();
-  batteryStates.clear();
-  liveMissiles = [];
+  // Warfare Command hardware is server-owned too: drop it so no ghost
+  // helicopter lingers over an offline world.
   setSeat(null);
-  strategicModels.clear();
-  missileModels.clear();
   vehicleModels.clear();
-  inboundStrikes.length = 0;
   warActiveNow = false;
   // Flags are server state: drop the markers so a stale pole/beacon can't linger
   // over an offline world.
   flagState = newFlags();
   flagModels.setState(false, flagState.flags);
+  refreshFlagless();
   lastFlagMarkerKey = '';
   worldMap.setDynamicMarkers([]);
-  myFactionFlagless = false;
   refreshNetInfo();
 };
 interaction.onEdit = (x, y, z, b) => {
@@ -6899,10 +7089,6 @@ interaction.onEdit = (x, y, z, b) => {
   const mt = machineTypeForBlock(b);
   if (mt !== null) machines.place(x, y, z, mt);
   net.sendEdit(x, y, z, b);
-  // Warfare Command hardware: a silo stamps its 2×2 housing, and offline the
-  // local simulation gains the entity straight away.
-  if (b === Block.TacticalSilo) placeSilo(x, y, z);
-  else if (b === Block.InterceptorBattery) placeBattery(x, y, z);
 };
 interaction.shouldConsumePlacement = (block) =>
   !(duelArenaActive && duelUnlimitedReserve && block === Block.OakPlanks);
@@ -6922,31 +7108,15 @@ interaction.canPlace = (x, y, z) => {
     return true;
   }
   if (localVaultEncounter && curVault && blockInsideArena(curVault, x, y, z)) return false;
-  // Strategic hardware is blueprint-gated, faction-capped and spaced apart —
-  // refuse the placement here rather than letting a block appear and vanish.
+  // Warfare hardware is blueprint-gated — refuse the placement here rather
+  // than letting a block appear and vanish.
   const held = inventory.selectedStack;
   const id = held?.id ?? 0;
-  if (id === Block.TacticalSilo || id === Block.InterceptorBattery ||
-      id === Block.Helipad || id === Item.HelicopterKit) {
+  if (id === Block.Helipad || id === Item.HelicopterKit) {
     if (!hasBlueprint(id)) {
       warfarePlaceHint(`${ITEMS[id]?.name ?? 'That'} needs a Warfare Command authorization (/warfare).`);
       return false;
     }
-  }
-  if (id === Block.TacticalSilo) {
-    // The pad occupies (x,z)..(x+1,z+1); every cell must be free.
-    for (const [dx, dz] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
-      if (!isReplaceable(world.getBlock(x + dx, y, z + dz))) {
-        warfarePlaceHint('A silo needs a clear 2×2 pad.');
-        return false;
-      }
-    }
-    const err = siloPlacementError(x, z);
-    if (err) { warfarePlaceHint(err); return false; }
-  }
-  if (id === Block.InterceptorBattery) {
-    const err = batteryPlacementError(x, z);
-    if (err) { warfarePlaceHint(err); return false; }
   }
   return true;
 };
@@ -7016,6 +7186,9 @@ let burstTimer = 0;
 let burstStack: ItemStack | null = null;
 let burstGun: GunInfo | null = null;
 
+/** The directions of the rounds in the volley just fired (reused every shot). */
+const volleyDirs: THREE.Vector3[] = [];
+
 /** Jitter an aim direction within a cone of the given half-angle (radians). */
 function spreadDir(dir: THREE.Vector3, spread: number): THREE.Vector3 {
   if (spread <= 0) return dir.clone();
@@ -7046,9 +7219,17 @@ function fireVolley(stack: ItemStack, gun: GunInfo): boolean {
     ? { ...gun, damage: Math.max(1, Math.round(gun.damage * buffs.gunDamageMult)) }
     : gun;
   const eye = player.eyePosition;
+  // The pellet directions are kept so the air-target test can run down the
+  // rounds that were ACTUALLY fired rather than down the crosshair: a shotgun
+  // that puts four pellets through a cabin should take four pellets' worth of
+  // hull off it, and a wide pattern that mostly missed should not.
+  volleyDirs.length = 0;
   for (let i = 0; i < pellets; i++) {
-    projectiles.fire(eye, spreadDir(base, spread), boosted);
+    const dir = spreadDir(base, spread);
+    volleyDirs.push(dir);
+    projectiles.fire(eye, dir, boosted);
   }
+  reportAirTargetHit(boosted, volleyDirs);
   // Tell everyone else we fired (cosmetic only — hits are reported separately
   // and validated server-side). One message per trigger pull, not per pellet.
   net.sendShot(eye.x, eye.y, eye.z, base.x, base.y, base.z, stack.id);
@@ -7065,10 +7246,6 @@ function fireVolley(stack: ItemStack, gun: GunInfo): boolean {
 function tryFire(stack: ItemStack, gun: GunInfo): void {
   fireCooldown = gun.cooldown;
   if (!fireVolley(stack, gun)) { fireCooldown = 0; reloadGun(); return; } // empty -> reload
-  // Air targets: a missile hull and a helicopter are both legitimate (and hard)
-  // gunfire targets. The projectile itself still flies for the visuals; this is
-  // the authoritative hit report, exactly like the PvP ranged path.
-  reportAirTargetHit(gun);
   const burst = Math.max(1, gun.burst ?? 1);
   if (burst > 1) {
     burstRemaining = burst - 1;
@@ -7362,7 +7539,6 @@ function updateSelfAvatar(dt: number): void {
     const arms = mySeat ? 0.95 : 0.55;
     b.parts[2].rotation.x = arms; b.parts[3].rotation.x = arms;
     b.parts[2].rotation.z = 0; b.parts[3].rotation.z = 0;
-    if (b.cape) b.cape.rotation.x = -0.25;
     // The seat banks and pitches with the helicopter. Inheriting its complete
     // attitude keeps the rider inside the cabin when A/D rolls the airframe.
     if (mySeat) {
@@ -7380,7 +7556,6 @@ function updateSelfAvatar(dt: number): void {
     b.parts[2].rotation.x = pose.arms[0]; b.parts[3].rotation.x = pose.arms[1];
     b.parts[2].rotation.z = -pose.armRoll; b.parts[3].rotation.z = pose.armRoll;
     b.head.rotation.x = pose.head;
-    if (b.cape) b.cape.rotation.x = pose.cape;
   } else {
     applyAvatarSneak(b, selfSneakT);
     b.group.rotation.x = 0;
@@ -7420,7 +7595,6 @@ function updateSelfAvatar(dt: number): void {
       b.parts[2].rotation.z = -0.18;
       b.parts[3].rotation.z = 0.08;
     }
-    if (b.cape) b.cape.rotation.x = pose.cape;
   }
 }
 
@@ -7617,13 +7791,12 @@ function turretCtxFor(x: number, y: number, z: number): TurretUIContext {
   };
 }
 
-// --- WARFARE COMMAND: strategic hardware + vehicles (client) -----------------
-// Online the server owns silos, batteries, missiles and helicopters and pushes
-// snapshots; the client renders them and predicts nothing that matters.
-// Offline the SAME pure simulations run locally, so single-player behaves
-// identically to a server.
+// --- WARFARE COMMAND: vehicles (client) --------------------------------------
+// Online the server owns helicopters and pushes snapshots; the client renders
+// them and predicts nothing that matters. Offline the SAME pure simulation runs
+// locally, so single-player behaves identically to a server.
 
-/** Highest solid cell in a column, edits included (impact + heli floor/ceiling). */
+/** Highest solid cell in a column, edits included (bombs + heli floor/ceiling). */
 function warfareGroundY(x: number, z: number): number {
   const bx = Math.floor(x), bz = Math.floor(z);
   let top = world.terrain.height(bx, bz);
@@ -7633,20 +7806,6 @@ function warfareGroundY(x: number, z: number): number {
   return top;
 }
 
-/** Areas a strike may never be aimed into (mirrors the server's list offline). */
-function offlineProtectedAreas(): ProtectedArea[] {
-  const out: ProtectedArea[] = [protectedArea('spawn', 0, 0, 'Spawn safety zone', 120)];
-  for (const v of worldVaults(seed, world.terrain)) {
-    out.push(protectedArea('vault', v.x, v.z, `Tier ${v.tier} vault`, PROTECTED_RADIUS + 24));
-  }
-  return out;
-}
-
-const offlineStrategic = new StrategicSim({
-  groundY: warfareGroundY,
-  worldHalf: WORLD_HALF,
-  protectedAreas: offlineProtectedAreas,
-});
 const offlineVehicles = new VehicleSim({
   solid: (x, y, z) => isSolid(world.getBlock(Math.floor(x), Math.floor(y), Math.floor(z))),
   groundY: warfareGroundY,
@@ -7660,16 +7819,8 @@ const offlineVehicles = new VehicleSim({
   },
 });
 
-const strategicModels = new StrategicModels(scene, (f) => factionCss(f));
-const missileModels = new MissileModels(scene, (f) => factionCss(f));
 const vehicleModels = new VehicleModels(scene, (f) => factionCss(f));
 
-/** Server-pushed hardware (online). Offline the sim's own maps are the truth. */
-const siloStates = new Map<number, SiloState>();
-const batteryStates = new Map<number, BatteryState>();
-let protectedAreasList: ProtectedArea[] = [];
-/** Live missile snapshots, for the HUD and for shooting a hull down. */
-let liveMissiles: MissileSnapshot[] = [];
 /** The helicopter the local player is riding, and in which seat. */
 let mySeat: { id: number; seat: SeatKind } | null = null;
 let myRope: {
@@ -7678,9 +7829,41 @@ let myRope: {
   progress: number;
   authoritativeProgress: number;
   motion: number;
+  /** Seconds of uninterrupted slide — the ramp the sim runs, mirrored here so
+   *  the shake, the wind and the friction sparks agree with the speed. */
+  held: number;
+  /** Blocks/s actually descending, smoothed for the instrument line. */
+  descent: number;
+  /** Repeat timers for the wind bed and the friction sparks. */
+  wind: number;
+  spark: number;
 } | null = null;
 let ropeInputAccum = 0;
 let prevRopeJump = false;
+
+/**
+ * Grab the line.
+ *
+ * Everything that says "you are ON it now" lives here rather than at the three
+ * places you can end up attached (offline attach, the pilot transferring out of
+ * a seat, the server confirming either), so the feel can never go missing from
+ * one route in.
+ */
+function beginRope(id: number, progress: number): void {
+  const fresh = myRope?.id !== id;
+  myRope = {
+    id, progress, authoritativeProgress: progress, motion: 0,
+    held: 0, descent: 0, wind: 0, spark: 0,
+  };
+  vehicleHud.setRope(true);
+  vehicleHud.setRopeTelemetry(progress, 0);
+  if (!fresh) return;
+  audio.ropeGrab();
+  triggerEncounterShake(0.14, 0.045);
+  const at = vehicleModels.ropeWorldPosition(id, progress);
+  if (at) particles.burst(at.x, at.y, at.z, 5, 0xd8c090, 1.6, 0.32,
+    { gravity: 2.4, spread: 0.4, scale: 0.3 });
+}
 let heliInputSeq = 1;
 let heliInputAccum = 0;
 let heliBombCooldown = 0;
@@ -7689,30 +7872,13 @@ const HELI_BOARD_RANGE = 5.5;
 /** Last-known airspeed of the ridden airframe, for the cockpit readout. */
 let heliSpeedSmoothed = 0;
 const vehicleHud = new VehicleHUD(app);
-/** Inbound strikes we are counting down (drives the HUD warning line). */
-const inboundStrikes: { x: number; z: number; at: number; radius: number; hostile: boolean }[] = [];
-
-function allSilos(): SiloState[] {
-  return net.connected ? [...siloStates.values()] : [...offlineStrategic.silos.values()];
-}
-function allBatteries(): BatteryState[] {
-  return net.connected ? [...batteryStates.values()] : [...offlineStrategic.batteries.values()];
-}
-/** Any of a silo's four footprint cells resolves to its anchor. */
-function siloAtBlock(x: number, y: number, z: number): SiloState | undefined {
-  return allSilos().find((s) =>
-    y === s.y && x >= s.x && x <= s.x + 1 && z >= s.z && z <= s.z + 1);
-}
-function batteryAtBlock(x: number, y: number, z: number): BatteryState | undefined {
-  return allBatteries().find((b) => b.x === x && b.y === y && b.z === z);
-}
 
 /** Does the local player hold the blueprint needed to build/retrofit this? */
 function hasBlueprint(id: number): boolean {
   const node = WARFARE_BLUEPRINTS[id];
   return !node || warfareOwns(warfare, node);
 }
-// The crafting grid refuses to produce strategic hardware you have not
+// The crafting grid refuses to produce warfare hardware you have not
 // authorized — the recipe is visible in the guide, but the bench stays empty.
 setBlueprintCheck(hasBlueprint);
 
@@ -7731,7 +7897,7 @@ net.onWarfareXp = (amount, tier, total, boss) => {
  * Items debited client-side for an action the SERVER still has to approve.
  * The inventory model is client-trusted, so the debit has to happen locally —
  * but a refusal (faction cap, missing blueprint, out of range, wrong faction)
- * must not silently destroy a 38-iron airframe or a stack of missiles. Every
+ * must not silently destroy a 38-iron airframe or a stack of bombs. Every
  * such payment is parked here and refunded on the next `warfareErr`.
  */
 let pendingWarfarePayment: { id: number; count: number }[] = [];
@@ -7755,58 +7921,6 @@ net.onWarfareErr = (reason) => {
   refundWarfarePayment();
   showNotice(`⛔ ${reason}`);
 };
-net.onSilo = (state) => {
-  settleWarfarePayment();
-  siloStates.set(state.id, state);
-  strategicModels.setSilo(state);
-  if (openSilo?.id === state.id) { openSilo = state; renderSiloPanel(); }
-};
-net.onSiloGone = (id) => {
-  siloStates.delete(id);
-  strategicModels.removeSilo(id);
-  if (openSilo?.id === id) closeStrategicPanel();
-};
-net.onBattery = (state) => {
-  settleWarfarePayment();
-  batteryStates.set(state.id, state);
-  strategicModels.setBattery(state);
-  if (openBattery?.id === state.id) { openBattery = state; renderBatteryPanel(); }
-};
-net.onBatteryGone = (id) => {
-  batteryStates.delete(id);
-  strategicModels.removeBattery(id);
-  if (openBattery?.id === id) closeStrategicPanel();
-};
-net.onMissiles = (list) => { liveMissiles = list; missileModels.sync(list); };
-net.onMissileLaunch = (m) => {
-  missileModels.launch(m);
-  audio.explosion(new THREE.Vector3(m.x, m.y, m.z));
-  adoptMissileCam(m);
-};
-net.onInterceptorLaunch = (m) => missileModels.launch(m);
-net.onMissileEnd = (id, reason, x, y, z, radius) => {
-  missileModels.remove(id);
-  liveMissiles = liveMissiles.filter((m) => m.id !== id);
-  if (missileCam.missileId === id) missileCam.finish(reason, x, y, z);
-  if (reason === 'impact') {
-    missileModels.impact(x, y, z, radius);
-    audio.explosion(new THREE.Vector3(x, y, z));
-    triggerEncounterShake(0.6, 0.05);
-  } else if (reason === 'intercepted') {
-    missileModels.flash(x, y, z, 3.2, 0x9ff0ff);
-    showNotice('🛡 Missile intercepted.');
-  } else if (reason === 'shot') {
-    missileModels.flash(x, y, z, 2.4, 0xffc46a);
-  }
-};
-net.onStrikeWarning = (faction, x, z, eta, radius) =>
-  registerInboundStrike(faction, x, z, eta, radius);
-net.onProtectedAreas = (areas) => { protectedAreasList = areas; };
-net.onLaunchRejected = (_reason, text) => {
-  // Nothing left the rail, so there is nothing to watch.
-  missileCam.close();
-  showNotice(`⛔ ${text}`);
-};
 net.onHelis = (list, bombs) => {
   settleWarfarePayment();
   vehicleModels.sync(list, bombs);
@@ -7824,14 +7938,13 @@ net.onHeliRopeState = (id, progress) => {
     myRope.authoritativeProgress = next;
     // Large corrections mean an attach/teleport, not ordinary packet jitter.
     if (Math.abs(myRope.progress - next) > 0.25) myRope.progress = next;
+  } else if (id > 0) {
+    beginRope(id, next);
   } else {
-    myRope = id > 0
-      ? { id, progress: next, authoritativeProgress: next, motion: 0 }
-      : null;
+    myRope = null;
   }
   if (myRope) {
     setSeat(null);
-    vehicleHud.setRope(true);
   } else {
     vehicleHud.setRope(false);
     prevRopeJump = input.jump;
@@ -7844,23 +7957,6 @@ net.onHeliModuleInstalled = (_id, item) => {
 net.onHeliDown = (_id, x, y, z, _faction, reason) => heliLossEffect(x, y, z, reason);
 net.onHeliGone = (id) => { if (mySeat?.id === id) setSeat(null); };
 net.onEjected = (x, y, z, vx, vy, vz, reason) => applyEject(x, y, z, vx, vy, vz, reason);
-
-/** An inbound strike: banner, countdown, and a map ping. */
-function registerInboundStrike(
-  faction: number, x: number, z: number, eta: number, radius: number,
-): void {
-  const hostile = !(isFaction(faction) && faction === localFaction);
-  inboundStrikes.push({ x, z, at: worldTimeLocal + eta, radius, hostile });
-  if (!hostile) {
-    showNotice(`🚀 Strike away — impact in ${Math.round(eta)}s.`);
-    return;
-  }
-  const d = Math.hypot(player.pos.x - x, player.pos.z - z);
-  showRegionBanner('⚠ INBOUND MISSILE', '#ff5c4d');
-  showNotice(d < 240
-    ? `Impact ${Math.round(d)} blocks away in ${Math.round(eta)}s — MOVE.`
-    : `Impact in ${Math.round(eta)}s at ${Math.round(x)}, ${Math.round(z)}.`);
-}
 
 // --- Offline simulation -----------------------------------------------------------
 
@@ -7875,23 +7971,12 @@ function offlineBlast(
       radius, playerDamage);
     if (dmg > 0) player.damage(dmg);
   }
-  for (const s of [...offlineStrategic.silos.values()]) {
-    if (s.faction === faction) continue;
-    const dmg = blastAt(at, { x: s.x + 0.5, y: s.y + 1, z: s.z + 0.5 }, radius, hardwareDamage);
-    if (dmg > 0 && offlineStrategic.damageSilo(s, dmg)) removeOfflineSilo(s);
-  }
-  for (const b of [...offlineStrategic.batteries.values()]) {
-    if (b.faction === faction) continue;
-    const dmg = blastAt(at, { x: b.x + 0.5, y: b.y + 1, z: b.z + 0.5 }, radius, hardwareDamage);
-    if (dmg > 0 && offlineStrategic.damageBattery(b, dmg)) removeOfflineBattery(b);
-  }
   for (const h of [...offlineVehicles.helicopters.values()]) {
     if (h.faction === faction || h.dying > 0) continue;
     const dmg = bombBlast(at, h.position, radius, hardwareDamage);
     if (dmg > 0) applyOfflineVehicleEvents(offlineVehicles.damage(h.id, dmg));
   }
-  // Strategic missiles preserve untouched terrain; helicopter bombs pass
-  // `breakNatural` so their impact makes a real crater.
+  // Helicopter bombs pass `breakNatural` so their impact makes a real crater.
   let removed = 0;
   world.beginBatch();
   try {
@@ -7902,8 +7987,7 @@ function offlineBlast(
       if (block === undefined || block === Block.Air) continue;
       const info = BLOCKS[block];
       if (!info || info.hardness < 0 || isVaultMasonry(block)) continue;
-      if (block === Block.TacticalSilo || block === Block.SiloPart ||
-          block === Block.InterceptorBattery || block === Block.Core) continue;
+      if (block === Block.Core) continue;
       world.setBlock(c.x, c.y, c.z, Block.Air);
       removed++;
     }
@@ -7911,72 +7995,6 @@ function offlineBlast(
     world.endBatch();
   }
   particles.burst(at.x, at.y + 1, at.z, 40, 0xff8a3a, 8, 1.1);
-}
-
-function removeOfflineSilo(s: SiloState): void {
-  offlineStrategic.removeSilo(s.id);
-  strategicModels.removeSilo(s.id);
-  for (const [dx, dz] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
-    const id = world.getBlock(s.x + dx, s.y, s.z + dz);
-    if (id === Block.TacticalSilo || id === Block.SiloPart) {
-      world.setBlock(s.x + dx, s.y, s.z + dz, Block.Air);
-    }
-  }
-  if (openSilo?.id === s.id) closeStrategicPanel();
-}
-
-function removeOfflineBattery(b: BatteryState): void {
-  offlineStrategic.removeBattery(b.id);
-  strategicModels.removeBattery(b.id);
-  if (world.getBlock(b.x, b.y, b.z) === Block.InterceptorBattery) {
-    world.setBlock(b.x, b.y, b.z, Block.Air);
-  }
-  // Loaded interceptors coming back out of a wrecked battery: the owner's, untaxed.
-  if (b.ammo > 0) {
-    spawnDrop(b.x + 0.5, b.y + 0.3, b.z + 0.5, Item.InterceptorMissile, b.ammo, 'manual');
-  }
-  if (openBattery?.id === b.id) closeStrategicPanel();
-}
-
-function applyOfflineStrategicEvents(events: readonly StrategicEvent[]): void {
-  for (const ev of events) {
-    switch (ev.kind) {
-      case 'launch':
-      case 'interceptorLaunch':
-        missileModels.launch(ev.missile);
-        adoptMissileCam(ev.missile);
-        break;
-      case 'warning':
-        registerInboundStrike(ev.faction, ev.x, ev.z, ev.eta, ev.radius);
-        break;
-      case 'intercepted':
-        missileModels.remove(ev.id);
-        missileModels.flash(ev.x, ev.y, ev.z, 3.2, 0x9ff0ff);
-        if (missileCam.missileId === ev.id) missileCam.finish('intercepted', ev.x, ev.y, ev.z);
-        showNotice('🛡 Missile intercepted.');
-        break;
-      case 'shotDown':
-        missileModels.remove(ev.id);
-        missileModels.flash(ev.x, ev.y, ev.z, 2.4, 0xffc46a);
-        if (missileCam.missileId === ev.id) missileCam.finish('shot', ev.x, ev.y, ev.z);
-        break;
-      case 'expired':
-        missileModels.remove(ev.id);
-        // An expired missile has no impact point to hold on, so the cam simply
-        // bows out rather than staring at the origin.
-        if (missileCam.missileId === ev.id) missileCam.close();
-        break;
-      case 'impact':
-        missileModels.remove(ev.id);
-        if (missileCam.missileId === ev.id) missileCam.finish('impact', ev.x, ev.y, ev.z);
-        missileModels.impact(ev.x, ev.y, ev.z, ev.radius);
-        audio.explosion(new THREE.Vector3(ev.x, ev.y, ev.z));
-        triggerEncounterShake(0.6, 0.05);
-        offlineBlast(ev.faction, { x: ev.x, y: ev.y, z: ev.z }, ev.radius,
-          ev.playerDamage, ev.hardwareDamage, ev.blocks);
-        break;
-    }
-  }
 }
 
 function applyOfflineVehicleEvents(events: readonly VehicleEvent[]): void {
@@ -8003,10 +8021,8 @@ function applyOfflineVehicleEvents(events: readonly VehicleEvent[]): void {
   }
 }
 
-// --- The strategic panels ------------------------------------------------------
+// --- The hangar panels ---------------------------------------------------------
 
-let openSilo: SiloState | null = null;
-let openBattery: BatteryState | null = null;
 let openHelipad: { x: number; y: number; z: number } | null = null;
 /** When the bay was opened on a specific parked airframe rather than a pad. */
 let openAirframeId = 0;
@@ -8029,9 +8045,8 @@ strategicPanel.addEventListener('mousedown', (e) => {
 
 function closeStrategicPanel(): void {
   strategicPanel.style.display = 'none';
-  openSilo = null; openBattery = null; openHelipad = null;
+  openHelipad = null;
   openAirframeId = 0;
-  siloLive = null;
   airframeLive = null;
   if (worldReady && !player.dead && screen === 'playing' && !worldMap.open) input.lock();
 }
@@ -8080,63 +8095,7 @@ function setButtonEnabled(
   b.style.color = enabled ? '#e6faff' : '#5a6880';
 }
 
-function statLine(label: string, value: string, accent = '#dce6f5'): string {
-  return `<div style="display:flex;gap:10px;font-size:12px;padding:3px 0">` +
-    `<span style="flex:1;color:#7f93b3">${label}</span>` +
-    `<span style="color:${accent}">${value}</span></div>`;
-}
-
-function openSiloPanel(x: number, y: number, z: number): void {
-  const s = siloAtBlock(x, y, z);
-  if (!s) return;
-  openSilo = s; openBattery = null; openHelipad = null;
-  if (net.connected) net.sendSiloOpen(s.x, s.y, s.z);
-  strategicPanel.style.display = 'flex';
-  input.unlock();
-  renderSiloPanel();
-}
-
-// --- The launch console --------------------------------------------------------
-//
-// A silo is the most consequential button in the game, so it gets a console
-// rather than a list of stats: a faction-tinted header, live gauges for the
-// things that actually gate a launch (rounds, integrity, launch cycle), the
-// warhead card, and an ARMED/SAFE lamp that tells you at a glance whether
-// pressing the next button will put a missile in the air.
-//
-// The structure is built once per state change; the LIVE parts (cycle timer,
-// bars, lamp) are repainted every frame from `refreshSiloLive`, because
-// rebuilding the buttons at 60 Hz destroys the node a mousedown landed on before
-// the matching mouseup can turn it into a click.
-
-/** Injected once: the console's animations. Everything else is inline. */
-let siloCssInjected = false;
-function injectSiloCss(): void {
-  if (siloCssInjected) return;
-  siloCssInjected = true;
-  const style = document.createElement('style');
-  style.textContent =
-    '@keyframes vx-silo-sweep{0%{transform:translateX(-120%)}100%{transform:translateX(320%)}}' +
-    '@keyframes vx-silo-lamp{0%,100%{opacity:1}50%{opacity:0.35}}' +
-    '@keyframes vx-silo-grid{0%{background-position:0 0}100%{background-position:0 26px}}';
-  document.head.appendChild(style);
-}
-
-interface SiloConsoleLive {
-  lamp: HTMLDivElement;
-  lampText: HTMLSpanElement;
-  rounds: HTMLDivElement;
-  roundsText: HTMLSpanElement;
-  hullFill: HTMLDivElement;
-  hullText: HTMLSpanElement;
-  cycleFill: HTMLDivElement;
-  cycleText: HTMLSpanElement;
-  launchBtn: HTMLButtonElement | null;
-  loadBtn: HTMLButtonElement | null;
-}
-let siloLive: SiloConsoleLive | null = null;
-
-/** A labelled horizontal gauge. Returns the fill + value nodes to repaint. */
+/** A labelled progress bar for the hangar bay's live readouts. */
 function consoleGauge(
   parent: HTMLElement, label: string, color: string,
 ): { fill: HTMLDivElement; text: HTMLSpanElement } {
@@ -8165,287 +8124,34 @@ function consoleGauge(
   return { fill, text };
 }
 
-/** One line of the warhead card. */
+/** One label/value pair in the spec grid. */
 function specCell(label: string, value: string): string {
   return `<div style="display:flex;flex-direction:column;gap:2px;min-width:92px">` +
     `<span style="font-size:9px;letter-spacing:1.2px;color:#5b6b83">${label}</span>` +
     `<span style="font-size:12px;color:#dce6f5">${value}</span></div>`;
 }
 
-/**
- * Build the console. Only called when the silo's STATE changes (or the panel is
- * opened) — `refreshSiloLive` handles the per-frame numbers.
- */
-function renderSiloPanel(): void {
-  const s = openSilo;
-  if (!s) return;
-  injectSiloCss();
-  const stats = siloStats(s.tier);
-  const mine = !isFaction(s.faction) || s.faction === localFaction;
-  const canRetrofit = mine && s.tier < warfareTier(warfare, 'silo');
-  const have = inventory.countItem(Item.TacticalMissile);
-  const room = stats.magazine - s.ammo;
-  const accent = isFaction(s.faction) ? factionCss(s.faction) : '#5ce2ec';
-
-  strategicCard.innerHTML = '';
-  strategicCard.style.width = '620px';
-  siloLive = null;
-
-  // --- Header: accent bar, designation, operator, and a scanning sweep -------
-  const header = document.createElement('div');
-  header.style.cssText =
-    'position:relative;overflow:hidden;border-radius:8px;padding:12px 14px;' +
-    `margin:-4px -4px 12px;border:1px solid ${accent}55;` +
-    'background:linear-gradient(120deg,rgba(12,22,36,0.95),rgba(8,13,22,0.9));';
-  strategicCard.appendChild(header);
-  const sweep = document.createElement('div');
-  sweep.style.cssText =
-    'position:absolute;top:0;bottom:0;width:26%;pointer-events:none;' +
-    `background:linear-gradient(90deg,transparent,${accent}22,transparent);` +
-    'transform:skewX(-16deg);animation:vx-silo-sweep 4.2s linear infinite;';
-  header.appendChild(sweep);
-  const headRow = document.createElement('div');
-  headRow.style.cssText =
-    'position:relative;display:flex;align-items:center;gap:12px;';
-  header.appendChild(headRow);
-  const title = document.createElement('div');
-  title.style.cssText = 'flex:1;';
-  title.innerHTML =
-    `<div style="font-size:17px;letter-spacing:2.4px;color:${accent}">` +
-    `${iconSvg('rocket')} TACTICAL SILO</div>` +
-    `<div style="font-size:10px;letter-spacing:1.6px;color:#5b6b83;margin-top:3px">` +
-    `${tierLabel(s.tier)} · UNIT #${s.id} · ` +
-    `${escapeHtml(s.owner || 'unclaimed')}</div>`;
-  headRow.appendChild(title);
-  // The ARMED/SAFE lamp: the one thing you should be able to read instantly.
-  const lamp = document.createElement('div');
-  lamp.style.cssText =
-    'display:flex;align-items:center;gap:7px;padding:7px 12px;border-radius:6px;' +
-    'font-size:11px;letter-spacing:1.6px;border:1px solid #2a3346;';
-  headRow.appendChild(lamp);
-  const dot = document.createElement('div');
-  dot.style.cssText = 'width:9px;height:9px;border-radius:50%;background:#2a3346;';
-  lamp.appendChild(dot);
-  const lampText = document.createElement('span');
-  lamp.appendChild(lampText);
-
-  // --- Live gauges -----------------------------------------------------------
-  const gauges = document.createElement('div');
-  gauges.style.cssText =
-    'padding:10px 12px;border-radius:8px;border:1px solid #1e2a3d;' +
-    'background:rgba(6,10,17,0.6);';
-  strategicCard.appendChild(gauges);
-
-  // Magazine as discrete pips: rounds are countable, so count them.
-  const roundsRow = document.createElement('div');
-  roundsRow.style.cssText = 'display:flex;align-items:center;gap:9px;margin:2px 0 7px;';
-  gauges.appendChild(roundsRow);
-  const roundsLabel = document.createElement('span');
-  roundsLabel.style.cssText =
-    'font-size:10px;letter-spacing:1.3px;color:#63758f;min-width:104px;';
-  roundsLabel.textContent = 'ROUNDS';
-  roundsRow.appendChild(roundsLabel);
-  const rounds = document.createElement('div');
-  rounds.style.cssText = 'flex:1;display:flex;gap:5px;';
-  roundsRow.appendChild(rounds);
-  for (let i = 0; i < stats.magazine; i++) {
-    const pip = document.createElement('div');
-    pip.style.cssText =
-      'width:15px;height:24px;border-radius:3px;border:1px solid rgba(120,150,190,0.35);';
-    rounds.appendChild(pip);
-  }
-  const roundsText = document.createElement('span');
-  roundsText.style.cssText = 'font-size:10px;color:#c6d3e6;min-width:96px;text-align:right;';
-  roundsRow.appendChild(roundsText);
-
-  const hull = consoleGauge(gauges, 'INTEGRITY', '#5ff09a');
-  const cycle = consoleGauge(gauges, 'LAUNCH CYCLE', '#5ce2ec');
-
-  // --- Warhead card ----------------------------------------------------------
-  const spec = document.createElement('div');
-  spec.style.cssText =
-    'margin-top:10px;padding:11px 12px;border-radius:8px;border:1px solid #1e2a3d;' +
-    'background:repeating-linear-gradient(0deg,rgba(8,13,22,0.75) 0 12px,' +
-    'rgba(11,18,30,0.75) 12px 13px);animation:vx-silo-grid 9s linear infinite;';
-  strategicCard.appendChild(spec);
-  spec.innerHTML =
-    `<div style="font-size:10px;letter-spacing:1.6px;color:${accent};margin-bottom:9px">` +
-    `WARHEAD &amp; GUIDANCE</div>` +
-    `<div style="display:flex;flex-wrap:wrap;gap:16px 22px">` +
-    specCell('BLAST RADIUS', `${stats.blastRadius} blocks`) +
-    specCell('PLAYER DMG', `${stats.playerDamage}`) +
-    specCell('HARDWARE DMG', `${stats.hardwareDamage}`) +
-    specCell('REACH', `${stats.range} blocks`) +
-    specCell('CRUISE', `${stats.speed} b/s`) +
-    specCell('CYCLE TIME', `${stats.cooldown}s`) +
-    specCell('DEMOLITION', `${stats.blocks} blocks`) +
-    `</div>`;
-
-  const note = document.createElement('div');
-  note.style.cssText =
-    'margin-top:10px;font-size:11px;color:#63758f;line-height:1.65;';
-  note.innerHTML =
-    `Any faction teammate can load and fire this silo — only the operator's own ` +
-    `Warfare Command authorizations decide how far it can be <b>retrofitted</b>. ` +
-    `Targets must be a saved waypoint or a war flag inside the reach circle, and ` +
-    `the server revalidates every rule at the moment of launch.`;
-  strategicCard.appendChild(note);
-
-  // --- Actions ---------------------------------------------------------------
-  const row = document.createElement('div');
-  row.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;';
-  strategicCard.appendChild(row);
-
-  const loadBtn = actionButton(row, `Load missile (${have} held)`,
-    mine && have > 0 && room > 0, () => {
-      const n = Math.min(have, room);
-      if (net.connected) {
-        payWarfare([{ id: Item.TacticalMissile, count: n }]);
-        net.sendSiloLoad(s.x, s.y, s.z, n);
-      } else {
-        inventory.removeItem(Item.TacticalMissile, n);
-        offlineStrategic.loadSilo(s, n);
-        renderSiloPanel();
-      }
-    }, '#5ff09a');
-  const launchBtn = actionButton(row, `${iconSvg('reticle')} SELECT TARGET`,
-    mine && s.ammo > 0 && s.cooldown <= 0, () => {
-      strategicPanel.style.display = 'none';
-      beginTargeting(s);
-    }, '#ffd24a');
-  launchBtn.style.fontSize = '13px';
-  launchBtn.style.letterSpacing = '1.6px';
-  actionButton(row, canRetrofit ? `Retrofit → ${tierLabel(s.tier + 1)}` : 'Retrofit locked',
-    canRetrofit, () => {
-      if (net.connected) net.sendSiloUpgrade(s.x, s.y, s.z);
-      else {
-        offlineStrategic.retrofitSilo(s, s.tier + 1);
-        strategicModels.setSilo(s);
-        renderSiloPanel();
-      }
-    });
-  actionButton(row, 'Close', true, closeStrategicPanel, '#7f93b3');
-
-  siloLive = {
-    lamp, lampText, rounds, roundsText,
-    hullFill: hull.fill, hullText: hull.text,
-    cycleFill: cycle.fill, cycleText: cycle.text,
-    launchBtn, loadBtn,
-  };
-  refreshSiloLive();
+/** The hangar bay's chrome: a scanning header sweep and a drifting spec grid. */
+let hangarCssInjected = false;
+function injectHangarCss(): void {
+  if (hangarCssInjected) return;
+  hangarCssInjected = true;
+  const el = document.createElement('style');
+  el.textContent =
+    '@keyframes vx-bay-sweep{0%{transform:translateX(-120%)}100%{transform:translateX(320%)}}' +
+    '@keyframes vx-bay-grid{0%{background-position:0 0}100%{background-position:0 26px}}';
+  document.head.appendChild(el);
 }
 
-/**
- * Repaint the console's live numbers. Called every frame the panel is open so a
- * ticking launch cycle actually ticks — and so the ARMED lamp lights the instant
- * the silo becomes able to fire, without a state message having to arrive.
- */
-function refreshSiloLive(): void {
-  const s = openSilo;
-  const L = siloLive;
-  if (!s || !L) return;
-  const stats = siloStats(s.tier);
-  const mine = !isFaction(s.faction) || s.faction === localFaction;
-  const armed = s.ammo > 0 && s.cooldown <= 0;
-
-  L.lampText.textContent = armed ? 'ARMED' : s.ammo <= 0 ? 'EMPTY' : 'CYCLING';
-  const lampColor = armed ? '#ff5c4d' : s.ammo <= 0 ? '#5b6b83' : '#ffd24a';
-  L.lampText.style.color = lampColor;
-  L.lamp.style.borderColor = `${lampColor}66`;
-  L.lamp.style.background = `${lampColor}12`;
-  const dot = L.lamp.firstElementChild as HTMLDivElement;
-  dot.style.background = lampColor;
-  dot.style.animation = armed ? 'vx-silo-lamp 1.1s ease-in-out infinite' : 'none';
-
-  for (let i = 0; i < L.rounds.children.length; i++) {
-    const pip = L.rounds.children[i] as HTMLDivElement;
-    pip.style.background = i < s.ammo ? '#5ff09a' : 'rgba(6,11,18,0.8)';
-  }
-  L.roundsText.textContent = `${s.ammo} / ${stats.magazine}`;
-
-  const hullFrac = s.maxHp > 0 ? Math.max(0, Math.min(1, s.hp / s.maxHp)) : 0;
-  L.hullFill.style.width = `${hullFrac * 100}%`;
-  L.hullFill.style.background =
-    hullFrac > 0.5 ? '#5ff09a' : hullFrac > 0.25 ? '#ffd24a' : '#ff5c4d';
-  L.hullText.textContent = `${Math.round(s.hp)} / ${s.maxHp}`;
-
-  // The cycle bar fills as the silo RECOVERS, so a full bar means ready.
-  const ready = stats.cooldown > 0
-    ? Math.max(0, Math.min(1, 1 - s.cooldown / stats.cooldown)) : 1;
-  L.cycleFill.style.width = `${ready * 100}%`;
-  L.cycleFill.style.background = s.cooldown > 0 ? '#ffd24a' : '#5ce2ec';
-  L.cycleText.textContent = s.cooldown > 0 ? `${Math.ceil(s.cooldown)}s` : 'READY';
-
-  if (L.launchBtn) setButtonEnabled(L.launchBtn, mine && armed, '#ffd24a');
+function statLine(label: string, value: string, accent = '#dce6f5'): string {
+  return `<div style="display:flex;gap:10px;font-size:12px;padding:3px 0">` +
+    `<span style="flex:1;color:#7f93b3">${label}</span>` +
+    `<span style="color:${accent}">${value}</span></div>`;
 }
 
-
-function openBatteryPanel(x: number, y: number, z: number): void {
-  const b = batteryAtBlock(x, y, z);
-  if (!b) return;
-  openBattery = b; openSilo = null; openHelipad = null;
-  if (net.connected) net.sendBatteryOpen(b.x, b.y, b.z);
-  strategicPanel.style.display = 'flex';
-  input.unlock();
-  renderBatteryPanel();
-}
-
-function renderBatteryPanel(): void {
-  const b = openBattery;
-  if (!b) return;
-  const stats = batteryStats(b.tier);
-  const mine = !isFaction(b.faction) || b.faction === localFaction;
-  const canRetrofit = mine && b.tier < warfareTier(warfare, 'battery');
-  const have = inventory.countItem(Item.InterceptorMissile);
-  const room = stats.capacity - b.ammo;
-  strategicCard.innerHTML =
-    `<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">` +
-    `<div style="flex:1;font-size:15px;color:#5ce2ec;letter-spacing:1px">${iconSvg('satellite')} INTERCEPTOR BATTERY · ${tierLabel(b.tier)}</div>` +
-    `<div style="font-size:11px;color:#7f93b3">${b.owner || 'unclaimed'}</div></div>` +
-    statLine('Integrity', `${Math.round(b.hp)} / ${b.maxHp}`,
-      b.hp / b.maxHp > 0.5 ? '#5ff09a' : b.hp / b.maxHp > 0.25 ? '#ffd24a' : '#ff5c4d') +
-    statLine('Interceptors', `${b.ammo} / ${stats.capacity}`, b.ammo > 0 ? '#5ff09a' : '#ff5c4d') +
-    statLine('Defense radius', `${stats.radius} blocks`) +
-    statLine('Acquisition', `${stats.acquire.toFixed(2)}s`) +
-    statLine('Reload', `${stats.reload}s`) +
-    statLine('Networked', stats.networked ? 'shares tracks with nearby batteries' : 'standalone') +
-    statLine('Track', b.target ? `engaging missile #${b.target}` : 'clear',
-      b.target ? '#ff5c4d' : '#5ff09a') +
-    `<div style="margin-top:8px;font-size:11px;color:#7f93b3;line-height:1.6">` +
-    `A battery only ever shoots at MISSILES — never at players. Interception is ` +
-    `certain if the interceptor physically reaches the track, so saturation (more ` +
-    `missiles than the reload window allows) is the way past it.</div>` +
-    `<div data-row style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px"></div>`;
-  const row = strategicCard.querySelector('[data-row]') as HTMLElement;
-  actionButton(row, `Load interceptors (${have} held)`, mine && have > 0 && room > 0, () => {
-    const n = Math.min(have, room);
-    if (net.connected) {
-      payWarfare([{ id: Item.InterceptorMissile, count: n }]);
-      net.sendBatteryLoad(b.x, b.y, b.z, n);
-    } else {
-      inventory.removeItem(Item.InterceptorMissile, n);
-      offlineStrategic.loadBattery(b, n);
-      renderBatteryPanel();
-    }
-  }, '#5ff09a');
-  actionButton(row, canRetrofit ? `Retrofit → ${tierLabel(b.tier + 1)}` : 'Retrofit locked',
-    canRetrofit, () => {
-      if (net.connected) net.sendBatteryUpgrade(b.x, b.y, b.z);
-      else { offlineStrategic.retrofitBattery(b, b.tier + 1); strategicModels.setBattery(b); renderBatteryPanel(); }
-    });
-  actionButton(row, 'Close', true, closeStrategicPanel, '#7f93b3');
-}
-
-/**
- * Open the airframe bay. Either anchored to a HELIPAD (which may be empty, and
- * can therefore deploy) or to a specific parked helicopter you walked up to and
- * sneak-clicked. Servicing is no longer pad-only, so the second form is the one
- * most people will use.
- */
 function openHelipadPanel(x: number, y: number, z: number): void {
   openHelipad = { x, y, z };
   openAirframeId = 0;
-  openSilo = null; openBattery = null;
   strategicPanel.style.display = 'flex';
   input.unlock();
   renderHelipadPanel();
@@ -8455,7 +8161,6 @@ function openHelipadPanel(x: number, y: number, z: number): void {
 function openAirframePanel(id: number): void {
   openHelipad = { x: 0, y: 0, z: 0 };
   openAirframeId = id;
-  openSilo = null; openBattery = null;
   strategicPanel.style.display = 'flex';
   input.unlock();
   renderHelipadPanel();
@@ -8488,7 +8193,7 @@ let airframeLive: AirframeLive | null = null;
 
 function renderHelipadPanel(): void {
   if (!openHelipad) return;
-  injectSiloCss();
+  injectHangarCss();
   const heli = bayHeli();
   const kit = inventory.countItem(Item.HelicopterKit);
   const myTier = warfareTier(warfare, 'helicopter');
@@ -8507,7 +8212,7 @@ function renderHelipadPanel(): void {
   sweep.style.cssText =
     'position:absolute;top:0;bottom:0;width:26%;pointer-events:none;' +
     `background:linear-gradient(90deg,transparent,${accent}22,transparent);` +
-    'transform:skewX(-16deg);animation:vx-silo-sweep 4.2s linear infinite;';
+    'transform:skewX(-16deg);animation:vx-bay-sweep 4.2s linear infinite;';
   header.appendChild(sweep);
   const title = document.createElement('div');
   title.style.cssText = 'position:relative;';
@@ -8578,7 +8283,7 @@ function renderHelipadPanel(): void {
   spec.style.cssText =
     'margin-top:10px;padding:11px 12px;border-radius:8px;border:1px solid #1e2a3d;' +
     'background:repeating-linear-gradient(0deg,rgba(8,13,22,0.75) 0 12px,' +
-    'rgba(11,18,30,0.75) 12px 13px);animation:vx-silo-grid 9s linear infinite;';
+    'rgba(11,18,30,0.75) 12px 13px);animation:vx-bay-grid 9s linear infinite;';
   strategicCard.appendChild(spec);
   const burn = HELI_FUEL_IDLE + HELI_FUEL_BURN;
   spec.innerHTML =
@@ -8817,7 +8522,6 @@ function heliLossEffect(x: number, y: number, z: number, reason: HeliLossReason)
   vehicleModels.explode(x, y, z);
   audio.explosion(new THREE.Vector3(x, y, z));
   triggerEncounterShake(reason === 'flameout' ? 0.25 : 0.45, 0.045);
-  if (reason === 'crash') missileModels.impact(x, y, z, 4);
 }
 
 /** Thrown clear of a bursting airframe: land where the sim says, carrying the
@@ -8865,7 +8569,14 @@ function toggleFastRope(): void {
   const h = vehicleModels.snapshotOf(mySeat.id);
   if (!h?.ropeWinch) { showNotice('⛔ This airframe has no fast-rope winch.'); return; }
   if (net.connected) net.sendHeliRope('toggle');
-  else if (!offlineVehicles.toggleRope(0)) showNotice('⛔ Fast-rope control unavailable.');
+  else if (!offlineVehicles.toggleRope(0)) { showNotice('⛔ Fast-rope control unavailable.'); return; }
+  // The line takes a second to pay out, and the winch is under the floor where
+  // the pilot cannot see it — so the deployment gets its own cue.
+  const out = !h.ropeDeployed;
+  audio.ropeDeploy(new THREE.Vector3(h.x, h.y, h.z));
+  showNotice(out
+    ? '🪢 Fast rope away — crew can transfer with F.'
+    : 'Winch reeling the rope in.');
 }
 
 /** F transfers crew to a deployed rope; without one it remains ordinary exit. */
@@ -8882,9 +8593,7 @@ function transferOrDismount(): void {
   const attached = offlineVehicles.attachRope(0, localFaction, from, id);
   if (!attached.ok) { showNotice(`⛔ ${attached.reason}`); return; }
   setSeat(null);
-  myRope = { id, progress: attached.rider.progress,
-    authoritativeProgress: attached.rider.progress, motion: 0 };
-  vehicleHud.setRope(true);
+  beginRope(id, attached.rider.progress);
 }
 
 function nearestRopeInReach(): HelicopterSnapshot | null {
@@ -8906,21 +8615,49 @@ function tryAttachFastRope(): boolean {
   const attached = offlineVehicles.attachRope(0, localFaction,
     { x: player.pos.x, y: player.pos.y, z: player.pos.z }, h.id);
   if (!attached.ok) { showNotice(`⛔ ${attached.reason}`); return true; }
-  myRope = { id: h.id, progress: attached.rider.progress,
-    authoritativeProgress: attached.rider.progress, motion: 0 };
-  vehicleHud.setRope(true);
-  showNotice('Fast rope attached — W/S climb, Space drops.');
+  beginRope(h.id, attached.rider.progress);
+  showNotice('Fast rope attached — S slides, W climbs, Space drops.');
   return true;
 }
 
-function dropFastRope(): void {
+/**
+ * Let go of the line.
+ *
+ * Two very different things share this button, and they should not feel the
+ * same. Reaching the deck is an ARRIVAL: the fall is cancelled, boots thump,
+ * dust goes up. Letting go at altitude is a CHOICE: you keep the aircraft's
+ * momentum and whatever speed the slide had built, and the ground is now your
+ * problem — which is exactly the tradeoff that makes riding the line all the
+ * way down worth doing.
+ */
+function dropFastRope(mode: 'manual' | 'deck' = 'manual'): void {
   if (!myRope) return;
+  const id = myRope.id;
+  const slide = myRope.motion > 0 ? fastRopeSlideSpeed(myRope.held) : 0;
   if (net.connected) net.sendHeliRope('drop');
   else offlineVehicles.detachRope(0);
   myRope = null;
   vehicleHud.setRope(false);
-  player.fallDistance = 0;
-  showNotice('Released fast rope.');
+  vehicleHud.setRopeTelemetry(0, 0);
+  const ground = warfareGroundY(player.pos.x, player.pos.z);
+  const drop = player.pos.y - (ground + 1);
+  if (mode === 'deck' || drop <= 2.6) {
+    player.vel.set(0, 0, 0);
+    player.fallDistance = 0;
+    audio.ropeLand(player.pos);
+    particles.burst(player.pos.x, ground + 1.05, player.pos.z, 14, 0xbfae90, 3.4, 0.5,
+      { gravity: 5, spread: 1.0, scale: 0.42 });
+    triggerEncounterShake(0.18, 0.075);
+    showNotice('✓ Boots down.');
+  } else {
+    // Inherit the airframe's travel so stepping off a moving helicopter throws
+    // you along its track instead of dropping you out of a stationary hole.
+    const vel = vehicleModels.velocityOf(id);
+    player.vel.set(vel ? vel.x * 0.6 : 0, -Math.min(6, slide * 0.35), vel ? vel.z * 0.6 : 0);
+    player.fallDistance = 0;
+    audio.grappleRelease();
+    showNotice(`Off the rope — ${drop.toFixed(0)} b to the ground.`);
+  }
 }
 
 /**
@@ -9013,304 +8750,148 @@ function warfarePlaceHint(text: string): void {
   showNotice(`⛔ ${text}`);
 }
 
-/** Faction cap + minimum spacing for a new silo (null = fine). Checked on BOTH
- *  ends — this is the client's honest preview of the same rule. */
-function siloPlacementError(x: number, z: number): string | null {
-  let count = 0;
-  for (const s of allSilos()) {
-    if (isFaction(s.faction) && s.faction !== localFaction) continue;
-    count++;
-    if (Math.hypot(s.x - x, s.z - z) < MIN_SILO_SPACING) {
-      return `Silos must stand ${MIN_SILO_SPACING} blocks apart.`;
-    }
-  }
-  return count >= MAX_SILOS_PER_FACTION
-    ? `Your faction already fields ${MAX_SILOS_PER_FACTION} silos.` : null;
-}
-
-function batteryPlacementError(x: number, z: number): string | null {
-  let count = 0;
-  for (const b of allBatteries()) {
-    if (isFaction(b.faction) && b.faction !== localFaction) continue;
-    count++;
-    if (Math.hypot(b.x - x, b.z - z) < MIN_BATTERY_SPACING) {
-      return `Interceptor batteries must stand ${MIN_BATTERY_SPACING} blocks apart.`;
-    }
-  }
-  return count >= MAX_BATTERIES_PER_FACTION
-    ? `Your faction already fields ${MAX_BATTERIES_PER_FACTION} batteries.` : null;
-}
-
-/** Offline: stamp the silo's 2×2 housing and create the entity. ONLINE the
- *  server owns both — it stamps the housing and broadcasts the entity, so the
- *  client must not send competing edits. */
-function placeSilo(x: number, y: number, z: number): void {
-  if (!net.connected) {
-    for (const [dx, dz] of [[1, 0], [0, 1], [1, 1]]) {
-      world.setBlock(x + dx, y, z + dz, Block.SiloPart);
-    }
-    const s = offlineStrategic.addSilo(authedName || 'You', localFaction, x, y, z,
-      Math.max(1, warfareTier(warfare, 'silo')));
-    strategicModels.setSilo(s);
-  }
-  showNotice('🚀 Silo built — load a Tactical Missile, then Choose Target.');
-}
-
-function placeBattery(x: number, y: number, z: number): void {
-  if (!net.connected) {
-    const b = offlineStrategic.addBattery(authedName || 'You', localFaction, x, y, z,
-      Math.max(1, warfareTier(warfare, 'battery')));
-    strategicModels.setBattery(b);
-  }
-  showNotice('🛰 Interceptor battery online — load Interceptor Missiles.');
-}
-
-/** Sabotage a strategic block-entity (left-click). Returns true if handled. */
-function sabotageStrategic(x: number, y: number, z: number, dmg: number): boolean {
-  const s = siloAtBlock(x, y, z);
-  if (s) {
-    if (net.connected) net.sendStrategicHit('silo', s.x, s.y, s.z, dmg);
-    else if (offlineStrategic.damageSilo(s, dmg)) removeOfflineSilo(s);
-    return true;
-  }
-  const b = batteryAtBlock(x, y, z);
-  if (b) {
-    if (net.connected) net.sendStrategicHit('battery', b.x, b.y, b.z, dmg);
-    else if (offlineStrategic.damageBattery(b, dmg)) removeOfflineBattery(b);
-    return true;
-  }
-  return false;
-}
-
-// --- Air targets (missiles + helicopters) ------------------------------------------
+// --- Air targets (helicopters) -----------------------------------------------------
 
 const _airOrigin = new THREE.Vector3();
 const _airDir = new THREE.Vector3();
 const _airTo = new THREE.Vector3();
+const _airPoint = new THREE.Vector3();
+/** Hull radius used for the shot test. The cabin's own half-extents are
+ *  2.2 × 0.95 × 1.05, so a single sphere a shade over the longest of those is
+ *  the honest cheap stand-in — generous side-on, tight head-on. */
+const AIR_HIT_RADIUS = 2.3;
 
 /**
- * Report a gunshot that lines up with a missile hull or a helicopter.
+ * Report a gunshot that lines up with an enemy helicopter — the authoritative
+ * hit report, exactly like the PvP ranged path, with the projectile itself
+ * still flying for the visuals.
  *
- * A strike missile has ~24 hull HP and is small and fast, so this is genuinely
- * hard — but it means a defender with no interceptor battery is not helpless.
- * The test is a cheap ray/sphere: the target has to be close to the aim line
- * AND in front of the shooter.
+ * Three things it is careful about:
+ *   EVERY PELLET   a shotgun that puts six pellets through a cabin should hurt
+ *                  six times as much as one that puts one through, so the test
+ *                  runs per pellet on the SAME directions the rounds were fired
+ *                  with rather than once down the crosshair.
+ *   TERRAIN        a helicopter behind a ridge is behind a ridge. The block
+ *                  raycast runs first and anything closer than the hull wins.
+ *   YOUR OWN RIDE  a gunner leaning out of the door sits inside their own
+ *                  aircraft's hit sphere; shooting the airframe you are
+ *                  strapped into is never what you meant.
  */
-function reportAirTargetHit(gun: GunInfo): void {
+function reportAirTargetHit(gun: GunInfo, dirs: readonly THREE.Vector3[]): void {
+  if (!dirs.length) return;
   _airOrigin.copy(player.eyePosition);
-  _airDir.set(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
   const range = Math.min(gun.range, 140);
-  const damage = Math.max(1, Math.round(gun.damage));
+  const perRound = Math.max(1, Math.round(gun.damage));
+  const mine = mySeat?.id ?? myRope?.id ?? 0;
 
-  let bestKind: 'missile' | 'heli' | null = null;
-  let bestId = 0;
-  let bestT = Infinity;
-  const test = (pos: THREE.Vector3, radius: number, id: number, kind: 'missile' | 'heli'): void => {
-    _airTo.copy(pos).sub(_airOrigin);
-    const t = _airTo.dot(_airDir);
-    if (t <= 0 || t > range || t >= bestT) return;
-    // Perpendicular distance from the aim line.
-    const perp = Math.sqrt(Math.max(0, _airTo.lengthSq() - t * t));
-    if (perp > radius) return;
-    bestT = t; bestId = id; bestKind = kind;
-  };
-  for (const m of liveMissiles) {
-    if (m.kind !== 'strike') continue;
-    if (isFaction(m.faction) && m.faction === localFaction) continue;
-    const p = missileModels.positionOf(m.id);
-    if (p) test(p, 1.1, m.id, 'missile');
-  }
+  // Snapshot the candidates once — the same list serves every pellet.
+  const targets: { id: number; pos: THREE.Vector3 }[] = [];
   for (const h of vehicleModels.snapshots()) {
+    if (h.id === mine || h.dying > 0) continue;
     if (isFaction(h.faction) && h.faction === localFaction) continue;
-    if (h.dying > 0) continue;
     const p = vehicleModels.positionOf(h.id);
-    if (p) test(p, 2.0, h.id, 'heli');
+    if (p) targets.push({ id: h.id, pos: p });
   }
-  if (!bestKind) return;
-  if (bestKind === 'missile') {
-    if (net.connected) net.sendMissileHit(bestId, damage);
-    else applyOfflineStrategicEvents(
-      [offlineStrategic.damageMissile(bestId, damage)].filter(Boolean) as StrategicEvent[]);
-  } else if (net.connected) {
-    net.sendHeliHit(bestId, damage);
-  } else {
-    applyOfflineVehicleEvents(offlineVehicles.damage(bestId, damage));
+  if (!targets.length) return;
+
+  /** Total damage and an impact point per airframe this trigger pull. */
+  const landed = new Map<number, { damage: number; at: THREE.Vector3 }>();
+  for (const dir of dirs) {
+    _airDir.copy(dir).normalize();
+    let bestId = 0;
+    let bestT = Infinity;
+    for (const target of targets) {
+      _airTo.copy(target.pos).sub(_airOrigin);
+      const t = _airTo.dot(_airDir);
+      if (t <= 0 || t > range || t >= bestT) continue;
+      // Perpendicular distance from the aim line.
+      const perp = Math.sqrt(Math.max(0, _airTo.lengthSq() - t * t));
+      if (perp > AIR_HIT_RADIUS) continue;
+      bestT = t; bestId = target.id;
+    }
+    if (!bestId) continue;
+    // The round has to actually get there: a block in the way stops it.
+    const blocked = raycastBlocks(world, _airOrigin, _airDir, Math.min(bestT, range));
+    if (blocked) continue;
+    // Impact point: where the ray crosses the hull sphere, so the sparks and
+    // the damage number land on the skin rather than at the rotor hub.
+    _airPoint.copy(_airOrigin).addScaledVector(_airDir, Math.max(0, bestT - AIR_HIT_RADIUS * 0.6));
+    const prev = landed.get(bestId);
+    if (prev) prev.damage += perRound;
+    else landed.set(bestId, { damage: perRound, at: _airPoint.clone() });
   }
-}
 
-// --- Map targeting ----------------------------------------------------------------
-
-let targetingSilo: SiloState | null = null;
-
-// --- The strike camera ---------------------------------------------------------
-//
-// Pressing CONFIRM LAUNCH hands you an optional ride-along on the missile you
-// just fired. It is presentation only: the flight, the validation and the damage
-// all belong to the simulation, and closing the camera changes nothing about any
-// of them. While it runs, terrain streams around the CAMERA rather than the
-// player, because a missile 900 blocks downrange is otherwise flying over void.
-
-/** Chunk radius streamed around the strike camera. Wide enough that the ground
- *  under a missile at apex still reads as ground, cheap enough to be worth it. */
-const MISSILE_CAM_CHUNKS = 8;
-
-const missileCam = new MissileCam(app);
-/** Restored when the cam closes, so the player's own surroundings come back. */
-let missileCamWasLocked = false;
-
-missileCam.onClose = () => {
-  // Snap the world back to the player and hand control over.
-  world.update(player.pos.x, player.pos.z, 12);
-  if (missileCamWasLocked && worldReady && !player.dead && screen === 'playing' &&
-      !worldMap.open && !invUI.open && strategicPanel.style.display === 'none') {
-    input.lock();
-  }
-  missileCamWasLocked = false;
-};
-
-/** Open the strike camera on a launch we just ordered. */
-function beginMissileCam(launch: MissileCamLaunch): void {
-  missileCamWasLocked = input.locked;
-  missileCam.begin(launch);
-  input.unlock();
-}
-
-/**
- * Bind the camera to the actual missile once the authoritative layer names it.
- * Only OUR faction's strike missiles are adopted — an interceptor or an enemy
- * launch arriving in the same tick must never hijack the shot.
- */
-function adoptMissileCam(m: MissileSnapshot): void {
-  if (!missileCam.active || missileCam.missileId !== 0) return;
-  if (m.kind !== 'strike') return;
-  if (isFaction(m.faction) && isFaction(localFaction) && m.faction !== localFaction) return;
-  missileCam.adopt(m.id, m.eta);
-}
-
-/** Drive the strike camera: stream terrain around it and pose both cameras. */
-function updateMissileCam(dt: number): void {
-  if (!missileCam.active) return;
-  const live = missileCam.missileId ? missileModels.positionOf(missileCam.missileId) : null;
-  const pose = missileCam.update(dt, live ? live.clone() : null);
-  if (!pose) return;
-  // Terrain around the shot, on a small budget — a missile cam must never cost
-  // the frame rate of everyone standing next to the silo.
-  world.update(pose.eye.x, pose.eye.z, 5, MISSILE_CAM_CHUNKS);
-  camera.position.copy(pose.eye);
-  camera.lookAt(pose.look);
-  if (Math.abs(camera.fov - pose.fov) > 0.01) {
-    camera.fov += (pose.fov - camera.fov) * 0.25;
-    camera.updateProjectionMatrix();
-  }
-  viewCamera.position.copy(camera.position);
-  viewCamera.quaternion.copy(camera.quaternion);
-  viewCamera.fov = camera.fov;
-  viewCamera.updateProjectionMatrix();
-}
-
-/** Enter the map's select-target mode for `silo`. */
-function beginTargeting(silo: SiloState): void {
-  targetingSilo = silo;
-  const stats = siloStats(silo.tier);
-  worldMap.beginTargeting({
-    origin: { x: silo.x + 0.5, z: silo.z + 0.5 },
-    range: stats.range,
-    radius: stats.blastRadius,
-    ammo: silo.ammo,
-    cooldown: silo.cooldown,
-    speed: stats.speed,
-    areas: net.connected ? protectedAreasList : offlineProtectedAreas(),
-    allies: () => {
-      const out: { x: number; z: number; name: string }[] = [];
-      for (const r of net.remotes.values()) {
-        if (isFaction(r.info.faction) && r.info.faction === localFaction) {
-          out.push({ x: r.info.x, z: r.info.z, name: r.info.username });
-        }
+  for (const [id, hit] of landed) {
+    const snap = vehicleModels.snapshotOf(id);
+    // The bar is authoritative, but the shooter should not wait a round trip to
+    // learn their burst was the last one — a hull already at or below the
+    // damage they just dealt reads as a kill marker straight away.
+    const killed = !!snap && snap.hp <= hit.damage;
+    showHitmarker(hit.damage, killed);
+    damageNumbers.spawn(hit.at.x, hit.at.y, hit.at.z, hit.damage,
+      hitFlavor(hit.damage, killed, snap?.maxHp ?? 100));
+    particles.burst(hit.at.x, hit.at.y, hit.at.z, killed ? 14 : 6,
+      killed ? 0xffa03a : 0xffd98a, killed ? 5 : 2.6, killed ? 0.55 : 0.3,
+      { gravity: 3.4, spread: 0.5, scale: killed ? 0.5 : 0.34 });
+    vehicleModels.hitFlash(id, hit.damage);
+    audio.heliHit(hit.at, hit.damage >= 12 || killed);
+    if (net.connected) {
+      // The server caps a single report at the ranged ceiling, so a volley that
+      // legitimately beat that (a shotgun with every pellet in the cabin) goes
+      // as several reports rather than being quietly clipped to one round.
+      let left = hit.damage;
+      for (let i = 0; i < 6 && left > 0; i++) {
+        const chunk = Math.min(left, RANGED_MAX_DAMAGE);
+        net.sendHeliHit(id, chunk);
+        left -= chunk;
       }
-      out.push({ x: player.pos.x, z: player.pos.z, name: 'You' });
-      return out;
-    },
-    confirm: (tx, tz, label) => {
-      const s = targetingSilo;
-      targetingSilo = null;
-      if (!s) return;
-      const st = siloStats(s.tier);
-      const flight = missileFlightTime(Math.hypot(tx - (s.x + 0.5), tz - (s.z + 0.5)), st.speed);
-      // The camera opens BEFORE the launch is acknowledged and flies the planned
-      // arc until the real missile is named, so there is never a blank beat
-      // between pressing the button and seeing the rocket.
-      beginMissileCam({
-        id: 0,
-        from: { x: s.x + 0.5, y: s.y + 2, z: s.z + 0.5 },
-        to: { x: tx, y: warfareGroundY(tx, tz), z: tz },
-        eta: flight, radius: st.blastRadius,
-        label, accent: factionCss(localFaction),
-      });
-      if (net.connected) { net.sendSiloLaunch(s.x, s.y, s.z, tx, tz); return; }
-      const check = offlineStrategic.validateLaunch({ siloId: s.id, faction: localFaction, tx, tz });
-      if (!check.ok) {
-        missileCam.close();
-        showNotice(`⛔ ${LAUNCH_REJECT_TEXT[check.reason]}`);
-        return;
-      }
-      applyOfflineStrategicEvents(
-        offlineStrategic.launch({ siloId: s.id, faction: localFaction, tx, tz }));
-      strategicModels.setSilo(s);
-    },
-    cancel: () => { targetingSilo = null; },
-  });
-  worldMap.show();
-  input.unlock();
+    } else {
+      applyOfflineVehicleEvents(offlineVehicles.damage(id, hit.damage));
+    }
+  }
 }
 
 // --- Per-frame upkeep ---------------------------------------------------------------
 
-/** Drive the offline sims, the models, the seat camera and the pilot input. */
+/** Drive the offline sim, the models, the seat camera and the pilot input. */
 function updateWarfare(dt: number): void {
-  // Offline: tick the authoritative simulations locally.
+  // Offline: tick the authoritative simulation locally.
   if (!net.connected) {
-    offlineStrategic.now = worldTimeLocal;
-    applyOfflineStrategicEvents(offlineStrategic.tick(dt));
     applyOfflineVehicleEvents(offlineVehicles.tick(dt));
-    for (const s of offlineStrategic.silos.values()) strategicModels.setSilo(s);
-    for (const b of offlineStrategic.batteries.values()) strategicModels.setBattery(b);
-    liveMissiles = offlineStrategic.snapshotMissiles();
-    missileModels.sync(liveMissiles);
     vehicleModels.sync(offlineVehicles.snapshot(), offlineVehicles.bombSnapshots());
   }
-  strategicModels.update(dt);
-  missileModels.update(dt);
-  vehicleModels.update(dt);
+  // The camera drives how the overhead hull bars are sized and faded, so the
+  // same one the frame will render through is handed over here.
+  vehicleModels.update(dt, view === View.First ? camera : viewCamera);
+  vehicleModels.setLocalRide(mySeat?.id ?? myRope?.id ?? null);
   heliBombCooldown = Math.max(0, heliBombCooldown - dt);
-  // The launch console shows a ticking cycle timer and an ARMED lamp, so it has
-  // to repaint continuously rather than only when a state message lands.
-  if (openSilo) refreshSiloLive();
   if (openHelipad) refreshAirframeLive();
-
-  // Expire finished strike warnings.
-  for (let i = inboundStrikes.length - 1; i >= 0; i--) {
-    if (inboundStrikes[i].at < worldTimeLocal - 1) inboundStrikes.splice(i, 1);
-  }
 
   if (!mySeat) {
     if (!myRope) {
       if (vehicleHud.active) vehicleHud.setSeat(null);
       return;
     }
+    const heli = vehicleModels.snapshotOf(myRope.id);
+    if (!heli) { myRope = null; vehicleHud.setRope(false); return; }
+    const motion = (input.back ? 1 : 0) - (input.forward ? 1 : 0);
+    const ropeLen = Math.max(1, heli.ropeLength);
+    const wasProgress = myRope.progress;
+    // The slide ramp runs on the client too — the sim's own curve, so the
+    // shake, the wind and the sparks below are always describing the speed the
+    // server is actually moving you at.
+    myRope.held = fastRopeHeld(myRope.held, motion, dt);
     if (!net.connected) {
       const rider = offlineVehicles.ropeRider(0);
       if (!rider) { myRope = null; vehicleHud.setRope(false); return; }
       myRope.progress = rider.progress;
       myRope.authoritativeProgress = rider.progress;
       myRope.motion = rider.motion;
-    }
-    const heli = vehicleModels.snapshotOf(myRope.id);
-    if (!heli) { myRope = null; vehicleHud.setRope(false); return; }
-    const motion = (input.back ? 1 : 0) - (input.forward ? 1 : 0);
-    if (net.connected) {
+      myRope.held = rider.held;
+    } else {
       // Predict the same asymmetric climb/slide motion as the server, then
       // softly reconcile. This removes the old 20 Hz vertical hard-snapping.
-      const delta = fastRopeProgressDelta(motion, dt, Math.max(1, heli.ropeLength));
+      const delta = fastRopeProgressDelta(motion, dt, ropeLen, myRope.held);
       myRope.progress = Math.max(0, Math.min(1, myRope.progress + delta));
       myRope.authoritativeProgress = Math.max(0, Math.min(1,
         myRope.authoritativeProgress + delta));
@@ -9321,13 +8902,61 @@ function updateWarfare(dt: number): void {
     const at = vehicleModels.ropeWorldPosition(myRope.id, myRope.progress);
     if (!at) { myRope = null; vehicleHud.setRope(false); return; }
     player.pos.copy(at); player.vel.set(0, 0, 0); player.fallDistance = 0;
+
+    // --- Descent feel ---------------------------------------------------------
+    // Everything here reads the SAME slide ramp the simulation is running, so
+    // the noise, the shake and the sparks wind up exactly as you pick up speed
+    // and stop dead the instant you grab back on.
+    const rate = dt > 0
+      ? (myRope.progress - wasProgress) * ropeLen / dt : 0;
+    myRope.descent += (rate - myRope.descent) * Math.min(1, dt * 8);
+    const sliding = motion > 0 && myRope.progress < 0.999;
+    const ramp = sliding
+      ? THREE.MathUtils.clamp(
+        (fastRopeSlideSpeed(myRope.held) - FAST_ROPE_SLIDE_SPEED) /
+        (FAST_ROPE_SLIDE_MAX - FAST_ROPE_SLIDE_SPEED), 0, 1)
+      : 0;
+    if (sliding) {
+      // A constant low rumble that grows into a real shake at full chat.
+      triggerEncounterShake(0.12, 0.012 + ramp * 0.05);
+      myRope.wind -= dt;
+      if (myRope.wind <= 0) {
+        myRope.wind = 0.16;
+        audio.ropeSlide(ramp);
+      }
+      myRope.spark -= dt;
+      if (myRope.spark <= 0) {
+        myRope.spark = 0.05;
+        // Friction off the gloves, thrown UP past you as you drop.
+        particles.burst(at.x, at.y + 1.35, at.z, 1 + Math.round(ramp * 2),
+          ramp > 0.6 ? 0xffb347 : 0xd8c090, 1.2 + ramp * 2.2, 0.26,
+          { gravity: -1.6, spread: 0.22, scale: 0.16 + ramp * 0.1 });
+      }
+    } else {
+      myRope.wind = 0;
+      myRope.spark = 0;
+    }
+
+    const riderGround = warfareGroundY(at.x, at.z);
+    const above = at.y - (riderGround + 1);
     vehicleHud.setRope(true);
-    vehicleHud.update(dt, heli, 0, heli.y - warfareGroundY(heli.x, heli.z), tierLabel(heli.tier));
+    vehicleHud.setRopeTelemetry(myRope.progress, myRope.descent);
+    vehicleHud.update(dt, heli, 0, above, tierLabel(heli.tier));
     ropeInputAccum += dt;
     if (ropeInputAccum >= 1 / 20) {
       ropeInputAccum = 0;
       if (net.connected) net.sendHeliRope('move', motion);
       else offlineVehicles.setRopeMotion(0, motion);
+    }
+    // Run out of line with the deck under you and you are simply THERE. Making
+    // a player press a second button to finish an insertion they have already
+    // committed to is the least satisfying possible end to the ride. It takes
+    // holding the slide, so someone who attached at the bottom of the line to
+    // climb UP is never bounced straight back off it.
+    if (motion > 0 && myRope.progress >= 0.999 && above <= 2.6) {
+      dropFastRope('deck');
+      prevRopeJump = input.jump;
+      return;
     }
     const jump = input.jump;
     if (jump && !prevRopeJump) dropFastRope();
@@ -9386,11 +9015,11 @@ function updateWarfare(dt: number): void {
  * Put the camera back on the seat after the airframe has been advanced for this
  * frame. Mirrors what updateCamera() does for the seat case, and re-applies the
  * shake this frame already added, so nothing is lost by running later. The two
- * cameras that deliberately take the whole screen — a missile's nose and a
+ * cameras that deliberately take the whole screen — a
  * vault cutscene — are never overridden.
  */
 function refreshSeatCamera(): void {
-  if (!mySeat || missileCam.active || vaultCinematic.frame) return;
+  if (!mySeat || vaultCinematic.frame) return;
   const eye = vehicleModels.cockpitWorldPosition(mySeat.id, mySeat.seat);
   if (!eye) return;
   camera.position.copy(eye);
@@ -9945,10 +9574,10 @@ function showFlagHud(html: string, border: string): void {
 }
 
 // --- THE STRONGBOX in the world ---------------------------------------------
-// Right-click at your own faction's strongbox to open the Treasury tab of the
+// Right-click at your own faction's hoard to open the Treasury tab of the
 // government menu; right-click at the ENEMY's, while a war window is open, to
-// force it. Right-click rather than left so it never competes with beating on
-// the flag pole three blocks away.
+// strip its ring. Right-click rather than left so it never competes with beating
+// on the flag pole standing in the middle of it.
 const treasuryHudEl = document.createElement('div');
 treasuryHudEl.className = 'mc-font';
 treasuryHudEl.style.cssText =
@@ -9963,20 +9592,24 @@ function treasuryUnderfoot(): number | null {
   return treasuryModels.inReach(player.pos.x, player.pos.z);
 }
 
-// Right-click only acts on the strongbox when you are actually LOOKING at it.
+// Right-click only acts on the hoard when you are actually LOOKING at it.
 // Without this, standing anywhere inside the reach radius would swallow every
 // right-click — no placing blocks, no opening a chest, no eating — which is a
-// four-block dead zone around each flag site.
+// five-block dead zone around each flag site.
+//
+// The test asks the models, because the hoard is not a point any more: the
+// strongbox AND every pedestal in the ring count, so walking up to the side of
+// the ring and looking at the nearest pile works the way it looks like it should.
 const treasuryAim = new THREE.Vector3();
-const treasuryToBox = new THREE.Vector3();
 /** Roughly the crosshair plus a forgiving margin. */
 const TREASURY_AIM_DOT = Math.cos(0.6);
 
 function lookingAtTreasury(faction: number): boolean {
   camera.getWorldDirection(treasuryAim);
-  treasuryToBox.copy(treasuryModels.centre(faction)).sub(camera.position);
-  if (treasuryToBox.lengthSq() < 1e-6) return true;
-  return treasuryAim.dot(treasuryToBox.normalize()) >= TREASURY_AIM_DOT;
+  // Your own ledger opens off the strongbox alone; an enemy ring can be stripped
+  // by looking at any pile on it. See `TreasuryModels.lookingAt` for why.
+  return treasuryModels.lookingAt(
+    faction, camera.position, treasuryAim, TREASURY_AIM_DOT, faction !== localFaction);
 }
 
 function updateTreasuryPrompt(): void {
@@ -9986,19 +9619,19 @@ function updateTreasuryPrompt(): void {
   const stored = treasuryCountsNow()[at] ?? 0;
   if (at === localFaction) {
     treasuryHudEl.innerHTML =
-      `${iconSvg('coinbag')} <b>${factionName(at)} treasury</b> — ${stored} items · ` +
+      `${iconSvg('coinbag')} <b>${factionName(at)} hoard</b> — ${stored} items on the ring · ` +
       `levy ${Math.round((g?.taxRate ?? 0) * 100)}% · ${g?.kitStock ?? 0} kits funded<br>` +
-      '<b>Look at it and right-click</b> to open the ledger.';
+      '<b>Look at the strongbox and right-click</b> to open the ledger.';
     treasuryHudEl.style.borderColor = '#d8b64a';
   } else if (!warActiveNow) {
     treasuryHudEl.innerHTML =
-      `${iconSvg('lock')} The ${factionName(at)} strongbox is <b>sealed</b> — ` +
-      'it can only be forced during a war.';
+      `${iconSvg('lock')} The ${factionName(at)} hoard is <b>sealed</b> — ${stored} items ` +
+      'behind the shields. It can only be forced during a war.';
     treasuryHudEl.style.borderColor = '#7a8090';
   } else {
     treasuryHudEl.innerHTML =
-      `${iconSvg('warning')} <b>Look at it and right-click</b> to force the ` +
-      `${factionName(at)} strongbox — ${stored} items inside. They will hear it.`;
+      `${iconSvg('warning')} The shields are <b>down</b>. <b>Look at the hoard and right-click</b> ` +
+      `to strip the ${factionName(at)} ring — ${stored} items on it. They will hear it.`;
     treasuryHudEl.style.borderColor = factionCss(at);
   }
   treasuryHudEl.style.display = 'block';
@@ -10014,7 +9647,7 @@ function treasuryUse(): boolean {
     return true;
   }
   if (!warActiveNow) {
-    showNotice('🔒 The strongbox is sealed. It can only be forced during a war.');
+    showNotice('🔒 The hoard is sealed. Its shields only drop during a war.');
     return true;
   }
   net.sendTreasuryRaid(at);
@@ -10070,11 +9703,7 @@ function flagSwingUpdate(dt: number, leftDown: boolean): boolean {
 net.onFlags = (breakable, flags) => {
   flagState = { breakable, flags: flags.map((f) => ({ ...f })) };
   flagModels.setState(breakable, flagState.flags as Flag[]);
-  const flagless = !flagState.flags.some((f) => f.holder === localFaction);
-  if (flagless !== myFactionFlagless) {
-    myFactionFlagless = flagless;
-    refreshNetInfo();
-  }
+  refreshFlagless();
 };
 
 net.onFlagEvent = (kind, faction, by, holder) => {
@@ -10369,10 +9998,11 @@ function frame(): void {
   if (contextLost) return;
   const dt = Math.min(0.05, clock.getDelta());
   updateDuelHud();
+  // Hand the mouse to whatever is on screen, every frame. A panel that opens or
+  // closes never has to do this itself — and a panel added later cannot forget.
+  syncPointerLock();
   clickResumeEl.classList.toggle('visible',
-    input.lockPending && !input.touchMode && screen === 'playing' &&
-    !player.dead && !invUI.open && !worldMap.open && !chatBox.open &&
-    !warfareUI.open && !missileCam.active);
+    input.lockPending && !input.touchMode && shouldHoldPointer());
 
   frames++;
   fpsTime += dt;
@@ -10465,7 +10095,7 @@ function frame(): void {
 
   // Direct control only while actively playing (pointer locked, no UI, alive).
   const controlling = input.locked && !player.dead && !duelControlBlocked() &&
-    !invUI.open && !vaultCinematic.playing && !missileCam.active;
+    !invUI.open && !vaultCinematic.playing;
   // PLAY-THROUGH: the Warfare panel is a floating card over a live world, so it
   // hands the cursor to the tree WITHOUT taking your legs away. Movement keys
   // still drive the player; look, mining, shooting and hotbar stay suspended
@@ -10581,9 +10211,7 @@ function frame(): void {
     }
     updateCamera();
     updateVaultCinematicCamera();
-    // The strike camera runs LAST so it wins over both: while you are watching a
-    // missile fly, nothing else gets to decide where the camera is.
-    updateMissileCam(dt);
+
     updateEncounterShake(dt);
 
     // Held-torch dynamic light: holding a torch lights the world around you
@@ -10849,7 +10477,7 @@ function frame(): void {
       machines.update(dt);
       machineModels.update(dt); // animate drills/pumpjacks
       turretModels.update(dt);
-      updateWarfare(dt);    // silos, missiles, interceptors, helicopters
+      updateWarfare(dt);    // helicopters
       updateWarHud(dt);     // war clock + border + kill score (MP only, war only)
       updateGuide(dt, controlling); // getting-started checklist + vault compass
       updateTpa(dt, controlling);   // TPA accept hold + incoming-request banner
@@ -10884,9 +10512,7 @@ function frame(): void {
   updateGliderRig(dt); // the wing first: the pilot pose hangs off its state
   updateSelfAvatar(dt);
 
-  // The strike camera streams its own terrain (around the missile, not around
-  // us), so leave it alone rather than fighting it chunk for chunk.
-  if (!missileCam.active) world.update(player.pos.x, player.pos.z, 6, duelArenaActive ? 3 : RENDER_DISTANCE);
+  world.update(player.pos.x, player.pos.z, 6, duelArenaActive ? 3 : RENDER_DISTANCE);
   if (net.connected && hasServerWorldTime) {
     const extrapolated = serverWorldTime + (performance.now() - serverWorldTimeAt) / 1000;
     sky.time = 0.04 + extrapolated / DAY_LENGTH;

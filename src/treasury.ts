@@ -1,22 +1,25 @@
 // THE FACTION TREASURY — where the tax goes, and what the enemy comes for.
 //
-// Each faction owns one strongbox standing beside its flag pad. It fills with
-// the LEVY: a slice of everything the faction's citizens pull out of the ground,
-// at whatever rate their elected president has set (politics.ts). The president
-// is the only one who can spend it, and the only thing it buys is starter kits
-// for recruits — so a treasury is a faction investing in its own newcomers, not
-// a personal wallet.
+// Each faction's hoard stands at its flag pad, IN THE OPEN: a strongbox beside
+// the pole and a ring of pedestals around it, one per slice of what is banked
+// (treasury_models.ts draws them). It fills with the LEVY: a slice of everything
+// the faction's citizens pull out of the ground, at whatever rate their elected
+// president has set (politics.ts). The president is the only one who can spend
+// it, and the only thing it buys is starter kits for recruits — so a treasury is
+// a faction investing in its own newcomers, not a personal wallet.
 //
-// It is also a target. While a WAR window is open the enemy can walk up to it
-// and haul stacks out. Outside a war it is sealed, so the strongbox is a reason
-// to defend the flag pad during a war rather than a permanent grief button.
+// IT IS MEANT TO BE SEEN. A hoard you can count from the ridgeline is a raid
+// somebody plans; a number in a menu is not. While a WAR window is open the
+// enemy can walk into the ring and haul stacks off it. Outside a war it is
+// sealed, so the hoard is a reason to defend the flag pad during a war rather
+// than a permanent grief button.
 //
 // PURE + transport-agnostic (no THREE/DOM/Node): the server runs these rules to
 // decide, the offline client runs them to simulate, and the smoke tests run them
 // headless — same discipline as flags.ts / politics.ts.
 
 import { flagHome } from './flags';
-import { ITEMS, type ItemStack } from './items';
+import { ARMOR_SLOT_INDEX, ITEMS, type ItemStack } from './items';
 import { Item } from './items';
 import { Block } from './blocks';
 import { FACTIONS, isFaction } from './teams';
@@ -24,9 +27,18 @@ import { FACTIONS, isFaction } from './teams';
 /** A chest's worth of room. A treasury that fills up simply stops accepting the
  *  levy — which is a visible signal to spend it, not a silent item sink. */
 export const TREASURY_SLOTS = 27;
-/** How close you must stand to open or raid one (blocks). Matches FLAG_REACH's
- *  spirit: close enough that you are standing at the pad, in the open. */
-export const TREASURY_REACH = 4;
+/** How close you must stand to open or raid one (blocks). Measured from the
+ *  FLAG POLE, not from the strongbox, because the hoard is not one box any more:
+ *  the levy stands out in the open on a ring of pedestals around the banner
+ *  (treasury_models.ts), and every one of them is part of the same site. The
+ *  radius covers that whole ring with a step to spare. */
+export const TREASURY_REACH = 5;
+/** Radius of the ring of hoard pedestals around the flag pole, in blocks. Kept
+ *  here rather than in the model so the reach test above and the thing you can
+ *  actually walk up to are derived from ONE number. */
+export const TREASURY_RING_RADIUS = 3.4;
+/** How many pedestals stand in that ring — one per visible slice of the hoard. */
+export const TREASURY_PEDESTALS = 8;
 /** Blocks from the flag pole, so the strongbox and the banner read as one site. */
 export const TREASURY_OFFSET_X = 3;
 export const TREASURY_OFFSET_Z = 0;
@@ -36,8 +48,10 @@ export const RAID_STACKS = 6;
 /** Seconds one raider must wait between raids on the same treasury. */
 export const RAID_COOLDOWN = 30;
 
-/** What a funded recruit kit contains. Deliberately a leg-up, not an endgame
- *  loadout: enough to mine, build, light a hole and defend yourself. */
+/** What a funded recruit kit contains OUT OF THE BOX. Deliberately a leg-up,
+ *  not an endgame loadout: enough to mine, build, light a hole and defend
+ *  yourself. A president can rewrite it (see `newKit` below) — this is only
+ *  where every faction starts. */
 export const STARTER_KIT: readonly ItemStack[] = [
   { id: Item.StonePickaxe, count: 1 },
   { id: Item.StoneAxe, count: 1 },
@@ -46,6 +60,86 @@ export const STARTER_KIT: readonly ItemStack[] = [
   { id: Item.Pistol, count: 1 },
   { id: Item.Bullet, count: 32 },
 ];
+
+// --- The kit LOADOUT ---------------------------------------------------------
+// A recruit kit is not a fixed list any more: it is a loadout its president
+// lays out slot by slot, shaped exactly like the thing a recruit will be
+// looking at ten seconds later — four armor slots and a hotbar. The layout IS
+// the contract: index 0..3 are helmet/chestplate/leggings/boots in Inventory's
+// own ARMOR_SLOT_INDEX order, and 4.. are the hotbar left to right.
+//
+// Why a layout instead of a bag: a kit that arrives as an unordered pile makes
+// a new player stop and sort it. A kit laid out by a president arrives WORN and
+// in the right hand, and the panel that builds it looks like the inventory it
+// will become.
+
+/** Armor slots on a kit: helmet, chestplate, leggings, boots. */
+export const KIT_ARMOR_SLOTS = 4;
+/** Hotbar slots on a kit — the same nine the player actually carries. */
+export const KIT_HOTBAR_SLOTS = 9;
+export const KIT_SLOTS = KIT_ARMOR_SLOTS + KIT_HOTBAR_SLOTS;
+/** Ceiling on one kit line. A kit is a leg-up, not a warehouse transfer, and
+ *  this is also what stops a president writing a bill nobody could ever pay. */
+export const MAX_KIT_STACK = 64;
+
+/** A kit slot laid out for editing: 4 armor + 9 hotbar, nulls for empty. */
+export type KitLoadout = (ItemStack | null)[];
+
+/** The default loadout: the classic STARTER_KIT dropped into the hotbar. */
+export function newKit(): KitLoadout {
+  const kit: KitLoadout = new Array(KIT_SLOTS).fill(null);
+  STARTER_KIT.forEach((line, i) => {
+    if (i < KIT_HOTBAR_SLOTS) kit[KIT_ARMOR_SLOTS + i] = { ...line };
+  });
+  return kit;
+}
+
+/** Is `index` one of the four armor slots? */
+export function isKitArmorSlot(index: number): boolean {
+  return index >= 0 && index < KIT_ARMOR_SLOTS;
+}
+
+/**
+ * May `id` go in kit slot `index`? Armor slots take only the armor piece that
+ * belongs there (a helmet cannot be worn as boots), and the hotbar takes
+ * anything. Enforced on BOTH sides: the panel greys the slot out, the server
+ * refuses the message.
+ */
+export function kitSlotAccepts(index: number, id: number): boolean {
+  const info = ITEMS[id];
+  if (!info) return false;
+  if (!isKitArmorSlot(index)) return index >= 0 && index < KIT_SLOTS;
+  const armor = info.armor;
+  return !!armor && ARMOR_SLOT_INDEX[armor.slot] === index;
+}
+
+/** The non-empty lines of a loadout — what a claim actually hands over. */
+export function kitStacks(kit: KitLoadout): ItemStack[] {
+  return kit.filter((s): s is ItemStack => !!s && !!ITEMS[s.id] && s.count > 0);
+}
+
+/** Total items in one kit (the number the editor shows per recruit). */
+export function kitItemCount(kit: KitLoadout): number {
+  return kitStacks(kit).reduce((n, s) => n + s.count, 0);
+}
+
+/** Fail-closed load of a loadout off the wire or the disk. Anything malformed
+ *  becomes an empty slot; anything in the wrong armor slot is dropped rather
+ *  than relocated, because silently moving a president's layout is worse than
+ *  showing them the gap they left. */
+export function sanitizeKit(raw: unknown): KitLoadout {
+  const kit: KitLoadout = new Array(KIT_SLOTS).fill(null);
+  if (!Array.isArray(raw)) return newKit();
+  for (let i = 0; i < Math.min(raw.length, KIT_SLOTS); i++) {
+    const s = raw[i] as Partial<ItemStack> | null;
+    if (!s || !Number.isInteger(s.id) || !ITEMS[s.id as number]) continue;
+    if (!Number.isFinite(s.count) || (s.count as number) <= 0) continue;
+    if (!kitSlotAccepts(i, s.id as number)) continue;
+    const max = Math.min(MAX_KIT_STACK, Math.max(1, ITEMS[s.id as number].maxStack));
+    kit[i] = { id: s.id as number, count: Math.min(max, Math.floor(s.count as number)) };
+  }
+  return kit;
+}
 
 export interface Treasury {
   faction: number;
@@ -73,14 +167,35 @@ export function treasuryLocation(faction: number): { x: number; z: number } {
   return { x: home.x + TREASURY_OFFSET_X, z: home.z + TREASURY_OFFSET_Z };
 }
 
+/**
+ * Where the `i`th hoard pedestal stands: evenly spaced around the flag pole and
+ * offset by HALF a step, so no pedestal ever lands on the +X axis where the
+ * strongbox stands — with an even count and no offset, one of them would be
+ * built straight through the box. Deterministic like everything else here, so
+ * the raid test, the models and the panel that draws the ring cannot drift.
+ */
+export function pedestalLocation(
+  faction: number, i: number, n: number = TREASURY_PEDESTALS
+): { x: number; z: number } {
+  const home = flagHome(faction);
+  const a = (Math.PI * 2 * (i + 0.5)) / Math.max(1, n);
+  return {
+    x: home.x + Math.cos(a) * TREASURY_RING_RADIUS,
+    z: home.z + Math.sin(a) * TREASURY_RING_RADIUS,
+  };
+}
+
 /** The faction whose treasury a player at (x, z) is standing at, or null.
- *  Measured to the BLOCK CENTRE, which is where the model actually stands — the
+ *
+ *  Measured from the FLAG POLE's block centre, which is the centre of the whole
+ *  hoard site — the strongbox and every pedestal in the ring sit inside this
+ *  radius, so walking up to any part of the hoard counts as being at it. The
  *  server and the client's prompt both call this, so they cannot disagree about
  *  the edge of the radius. */
 export function treasuryInReach(x: number, z: number): number | null {
   for (const f of FACTIONS) {
-    const loc = treasuryLocation(f.id);
-    const dx = loc.x + 0.5 - x, dz = loc.z + 0.5 - z;
+    const home = flagHome(f.id);
+    const dx = home.x + 0.5 - x, dz = home.z + 0.5 - z;
     if (dx * dx + dz * dz <= TREASURY_REACH * TREASURY_REACH) return f.id;
   }
   return null;

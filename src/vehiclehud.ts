@@ -19,6 +19,8 @@ const FUEL_WARN = 0.28;
 const FUEL_CRITICAL = 0.12;
 
 interface Gauge {
+  /** The whole label+bar line, so a gauge can be hidden as a unit. */
+  row: HTMLDivElement;
   wrap: HTMLDivElement;
   fill: HTMLDivElement;
   label: HTMLSpanElement;
@@ -58,8 +60,9 @@ const GUNNER_CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ['F', 'Transfer to rope / step down'],
 ];
 const ROPE_CONTROLS: ReadonlyArray<readonly [string, string]> = [
-  ['W / S', 'Climb / slide'],
-  ['Space', 'Drop from rope'],
+  ['S (hold)', 'Slide — it builds speed'],
+  ['W', 'Climb back up'],
+  ['Space', 'Let go of the line'],
   ['Mouse', 'Look around'],
 ];
 
@@ -78,6 +81,7 @@ export class VehicleHUD {
   private readonly role: HTMLSpanElement;
   private readonly fuel: Gauge;
   private readonly hull: Gauge;
+  private readonly line: Gauge;
   private readonly bombRow: HTMLDivElement;
   private readonly bombPips: HTMLDivElement[] = [];
   private readonly readout: HTMLDivElement;
@@ -87,6 +91,10 @@ export class VehicleHUD {
   private readonly controlsBody: HTMLDivElement;
   private seat: SeatKind | 'rope' | null = null;
   private clock = 0;
+  /** Rope rider telemetry: 0 at the winch, 1 at the free end, and the descent
+   *  rate in blocks/s that the rider is currently making. */
+  private ropeProgress = 0;
+  private ropeDescent = 0;
   private lastBombCount = -1;
 
   constructor(parent: HTMLElement) {
@@ -107,6 +115,11 @@ export class VehicleHUD {
 
     this.fuel = this.gauge('OIL', '#4ad9a0');
     this.hull = this.gauge('HULL', '#8fb4ff');
+    // Rope only: how much line is still below you. On the way down this is the
+    // number you actually care about — the hull and the rack are someone
+    // else's problem while you are hanging off the side of the aircraft.
+    this.line = this.gauge('ROPE', '#e6a83a');
+    this.line.row.style.display = 'none';
 
     this.bombRow = el('div',
       'display:flex;align-items:center;gap:6px;font-size:10px;color:#7f93b3;', this.root);
@@ -170,7 +183,7 @@ export class VehicleHUD {
     ].join(''), wrap);
     const value = el('span',
       'font-size:10px;color:#dce6f5;min-width:72px;text-align:right;', row);
-    return { wrap, fill, label: name, value };
+    return { row, wrap, fill, label: name, value };
   }
 
   /** Enter/leave a seat. Passing null hides the whole strip. */
@@ -190,6 +203,12 @@ export class VehicleHUD {
     this.root.style.display = active ? 'flex' : 'none';
     this.controls.style.display = active ? 'flex' : 'none';
     if (active && changed) this.buildControls('rope');
+  }
+
+  /** Feed the rope gauge. Called every frame while riding a line. */
+  setRopeTelemetry(progress: number, descent: number): void {
+    this.ropeProgress = Math.max(0, Math.min(1, progress));
+    this.ropeDescent = descent;
   }
 
   get active(): boolean { return this.seat !== null; }
@@ -257,20 +276,40 @@ export class VehicleHUD {
     }
     this.bombRow.style.display = snap.maxBombs > 0 ? 'flex' : 'none';
 
+    // --- Rope gauge (rope riders only) ---
+    const onRope = this.seat === 'rope';
+    this.line.row.style.display = onRope ? 'flex' : 'none';
+    if (onRope) {
+      const left = (1 - this.ropeProgress) * Math.max(0, snap.ropeLength);
+      const atEnd = this.ropeProgress >= 0.999;
+      this.line.fill.style.width = `${(1 - this.ropeProgress) * 100}%`;
+      this.line.fill.style.background = atEnd ? '#ff5c4d'
+        : this.ropeProgress > 0.75 ? '#ffd24a' : '#e6a83a';
+      this.line.value.textContent = `${left.toFixed(0)} b left`;
+    }
+
     // --- Flight readout ---
-    this.readout.textContent =
-      `SPD ${speed.toFixed(0)} b/s     ALT ${Math.max(0, altitude).toFixed(0)} b     ` +
-      `CREW ${snap.pilot ? 'pilot' : '—'} · ${snap.passenger ? 'gunner' : '—'}`;
+    this.readout.textContent = onRope
+      ? `DESCENT ${Math.abs(this.ropeDescent).toFixed(0)} b/s     ` +
+        `DROP ${Math.max(0, altitude).toFixed(0)} b     ` +
+        `CREW ${snap.pilot ? 'pilot' : '—'} · ${snap.passenger ? 'gunner' : '—'}`
+      : `SPD ${speed.toFixed(0)} b/s     ALT ${Math.max(0, altitude).toFixed(0)} b     ` +
+        `CREW ${snap.pilot ? 'pilot' : '—'} · ${snap.passenger ? 'gunner' : '—'}`;
 
     // --- Caption: one line, the most urgent thing true right now ---
     // Nothing but the urgent thing: the bindings live on the corner card now,
     // so this line is free to stay silent until something is actually wrong.
-    this.caption.innerHTML = critical
+    this.caption.innerHTML = onRope && altitude > 6 && this.ropeProgress >= 0.999
+      ? `${iconSvg('warning')} END OF LINE — ${altitude.toFixed(0)} b TO GROUND`
+      : onRope && altitude <= 3
+      ? `${iconSvg('heli')} CLEAR TO DROP`
+      : critical
       ? `${iconSvg('fuel')} BINGO FUEL — LAND NOW`
       : warn ? `${iconSvg('fuel')} Low oil — head for the ground`
       : hullFrac <= 0.3 ? `${iconSvg('warning')} Hull critical`
       : '';
-    this.caption.style.color = critical || hullFrac <= 0.3 ? '#ff5c4d'
+    this.caption.style.color = onRope && altitude <= 3 ? '#4ad9a0'
+      : critical || hullFrac <= 0.3 ? '#ff5c4d'
       : warn ? '#ffd24a' : '#54637d';
   }
 

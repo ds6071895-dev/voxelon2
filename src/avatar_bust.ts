@@ -85,12 +85,25 @@ export class AvatarBustBoard {
     this.scene.add(this.stage);
   }
 
-  /** Hang the shared canvas over the leaderboard panel. */
+  /** Hang the shared canvas over the leaderboard panel.
+   *
+   *  The parent check is not redundant with the host check: a panel that rebuilt
+   *  the subtree its canvas lived in leaves `host` pointing at an element the
+   *  canvas is no longer inside, and a host-only test would then refuse to put
+   *  it back — busts that silently never return on a second open. Ask where the
+   *  canvas ACTUALLY is, not where we last put it. */
   mount(host: HTMLElement): void {
-    if (this.host === host) return;
+    if (this.host === host && this.renderer.domElement.parentElement === host) return;
     this.host = host;
     host.appendChild(this.renderer.domElement);
+    // A re-mount lands in a box of a different size; force the next frame to
+    // re-measure rather than trusting the size we pushed to the old host.
+    this.sized.w = this.sized.h = 0;
   }
+
+  /** False once the context has gone away for good, so a panel can put a static
+   *  portrait where the live bust would have been instead of an empty plinth. */
+  get alive(): boolean { return !this.lost; }
 
   /**
    * Rebuild the board for a fresh leaderboard. Bodies are keyed by account, so

@@ -5,8 +5,9 @@
 // ONE vote per weekly cycle, and the party with the most votes seats its founder
 // as PRESIDENT. The office is not ceremonial — a sitting president sets the
 // faction's TAX RATE (levied on everything its citizens pull out of the ground,
-// see treasury.ts), spends the treasury on STARTER KITS for new recruits, and
-// BROADCASTS to every member's inbox.
+// see treasury.ts), LAYS OUT the recruit kit slot by slot and pays for a stock
+// of them out of the treasury or their own pockets, and BROADCASTS to every
+// member's inbox.
 //
 // PURE + transport-agnostic (no THREE/DOM/Node) so the authoritative server, the
 // offline client and the smoke tests share one rule set — same discipline as
@@ -19,6 +20,7 @@
 // presidency on every govern-* message.
 
 import { FACTIONS, isFaction } from './teams';
+import { KIT_SLOTS, type KitLoadout, newKit, sanitizeKit } from './treasury';
 
 /** One term. Elections are weekly — short enough that a bad president is a
  *  week-long problem, long enough that governing means something. */
@@ -48,7 +50,7 @@ export const PRESET_PROMISES: readonly string[] = [
   'Fund 100 recruit kits — nobody starts this war empty-handed',
   'Treasury first — bank every levy against a siege',
   'Fund vault expeditions and split the boss relics',
-  'Subsidise silos — answer every strike with two',
+  'Subsidise the bomb bays — answer every raid in kind',
   'Air superiority — a helicopter for every squad',
 ];
 
@@ -94,6 +96,11 @@ export interface Government {
   taxRate: number;
   /** Starter kits currently funded and waiting for a recruit to claim. */
   kitStock: number;
+  /** The LOADOUT one of those kits hands over — 4 armor slots then 9 hotbar
+   *  slots (treasury.ts owns the layout). A president rewrites it; everyone
+   *  else reads it, because what your faction issues its recruits is a public
+   *  fact about the faction, not a secret of the office. */
+  kit: KitLoadout;
   broadcasts: Broadcast[];
 }
 
@@ -115,7 +122,7 @@ export function newElection(faction: number, now: number): Election {
 }
 
 export function newGovernment(faction: number): Government {
-  return { faction, taxRate: DEFAULT_TAX, kitStock: 0, broadcasts: [] };
+  return { faction, taxRate: DEFAULT_TAX, kitStock: 0, kit: newKit(), broadcasts: [] };
 }
 
 export function newPolitics(now: number): PoliticsState {
@@ -325,6 +332,26 @@ export function termExpired(e: Election, now: number): boolean {
   return now >= e.endsAt;
 }
 
+/**
+ * Rewrite the recruit loadout. Fail-closed through `sanitizeKit`, which drops
+ * anything malformed or in an armor slot it does not belong in — so a refused
+ * line becomes a visible gap rather than a silently relocated item.
+ *
+ * An entirely empty loadout is refused: `kitStock` would then be a counter of
+ * nothing, and a recruit would claim their one-and-only kit and get air.
+ */
+export function setKit(g: Government, slots: unknown): GovResult {
+  if (!Array.isArray(slots) || slots.length > KIT_SLOTS) {
+    return { ok: false, error: 'That is not a kit layout.' };
+  }
+  const kit = sanitizeKit(slots);
+  if (!kit.some((s) => s)) {
+    return { ok: false, error: 'A kit needs at least one item in it.' };
+  }
+  g.kit = kit;
+  return { ok: true };
+}
+
 export function setTaxRate(g: Government, rate: unknown): GovResult {
   if (!Number.isFinite(rate)) return { ok: false, error: 'Not a tax rate.' };
   g.taxRate = Math.max(0, Math.min(MAX_TAX, rate as number));
@@ -418,6 +445,9 @@ function sanitizeGovernment(raw: unknown, faction: number): Government {
       ? Math.max(0, Math.min(MAX_TAX, r.taxRate as number)) : DEFAULT_TAX,
     kitStock: Number.isFinite(r.kitStock)
       ? Math.max(0, Math.floor(r.kitStock as number)) : 0,
+    // A save from before kits were editable has no `kit` at all: those factions
+    // come back issuing the classic STARTER_KIT rather than issuing nothing.
+    kit: r.kit === undefined ? newKit() : sanitizeKit(r.kit),
     broadcasts,
   };
 }

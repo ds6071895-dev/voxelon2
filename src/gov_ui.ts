@@ -92,6 +92,59 @@ const CSS = `
 }
 .vx-gov-tip b { color: #ffd98a; }
 .vx-gov-tip i { display: block; margin-top: 3px; font-style: normal; color: #c79bff; }
+
+/* --- THE DAYLIGHT SKIN ------------------------------------------------------
+   The government menu (president_ui.ts) and the dispatch inbox run on paper
+   rather than slate. Only the SHARED chrome is re-tinted here, and every rule
+   is scoped to [data-theme="light"] on the surface — so the allegiance pledge
+   (faction_picker.ts), which shares these same classes, is untouched. */
+.vx-gov-surface[data-theme="light"] {
+  color: #0f1826;
+  background:
+    radial-gradient(120% 120% at 50% -12%, rgba(255, 255, 255, .93), rgba(203, 217, 236, .9)),
+    rgba(224, 232, 245, .55);
+  backdrop-filter: blur(7px) saturate(1.08);
+}
+.vx-gov-surface[data-theme="light"] .vx-gov-eyebrow { color: #a8720d; }
+.vx-gov-surface[data-theme="light"] .vx-gov-scroll::-webkit-scrollbar-thumb {
+  background: rgba(15, 26, 44, .17);
+}
+.vx-gov-surface[data-theme="light"] .vx-gov-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(15, 26, 44, .3);
+}
+.vx-gov-surface[data-theme="light"] .vx-gov-btn {
+  color: #2b3a4f; background: #fff;
+  box-shadow: inset 0 0 0 1px rgba(15, 26, 44, .13), 0 1px 2px rgba(15, 26, 44, .07);
+}
+.vx-gov-surface[data-theme="light"] .vx-gov-btn:hover:not(:disabled) {
+  background: #fff;
+  box-shadow: inset 0 0 0 1px rgba(15, 26, 44, .22), 0 8px 20px rgba(15, 26, 44, .14);
+}
+.vx-gov-surface[data-theme="light"] .vx-gov-btn[data-kind="primary"] {
+  color: #3b2708; background: linear-gradient(180deg, #ffd77a, #f0a521);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .55), 0 8px 20px rgba(237, 160, 26, .34);
+}
+.vx-gov-surface[data-theme="light"] .vx-gov-btn[data-kind="danger"] {
+  color: #8c1f10; background: #ffe7e2; box-shadow: inset 0 0 0 1px rgba(200, 60, 40, .28);
+}
+.vx-gov-surface[data-theme="light"] .vx-gov-chip {
+  background: linear-gradient(180deg, #fff, #eef3fa);
+  box-shadow: inset 0 0 0 1px rgba(15, 26, 44, .12);
+}
+.vx-gov-surface[data-theme="light"] .vx-gov-chip[data-runed="1"] {
+  box-shadow: inset 0 0 0 1px rgba(122, 63, 214, .6);
+}
+.vx-gov-surface[data-theme="light"] .vx-gov-chip-count { color: #0f1826; }
+.vx-gov-surface[data-theme="light"] .vx-gov-chip-rune { color: #7a3fd6; }
+
+/* The tooltip lives on <body>, outside any surface, so it carries the theme on
+   itself — set from whichever chip the pointer is actually over. */
+.vx-gov-tip[data-theme="light"] {
+  color: #0f1826; background: #fff;
+  box-shadow: 0 12px 30px rgba(15, 26, 44, .22), inset 0 0 0 1px rgba(15, 26, 44, .12);
+}
+.vx-gov-tip[data-theme="light"] b { color: #9a6a0c; }
+.vx-gov-tip[data-theme="light"] i { color: #7a3fd6; }
 `;
 
 let styleInjected = false;
@@ -117,9 +170,17 @@ function tooltip(): HTMLElement {
   return tipEl;
 }
 
+/** The skin of the panel an element sits in, so body-level chrome (the floating
+ *  tooltip) matches the screen the pointer is actually over rather than picking
+ *  one theme and being wrong on the other. */
+export function govThemeOf(el: HTMLElement): string {
+  return (el.closest('.vx-gov-surface') as HTMLElement | null)?.dataset.theme ?? 'dark';
+}
+
 /** Show the floating tooltip at the pointer. `title` and `sub` are TEXT. */
-export function showTip(e: MouseEvent, title: string, sub?: string): void {
+export function showTip(e: MouseEvent, title: string, sub?: string, theme = 'dark'): void {
   const tip = tooltip();
+  tip.dataset.theme = theme;
   tip.replaceChildren();
   const b = document.createElement('b');
   b.textContent = title;
@@ -160,7 +221,7 @@ export function itemChip(
   chip.className = 'vx-gov-chip';
   if (!stack || !ITEMS[stack.id]) {
     chip.dataset.empty = '1';
-    chip.addEventListener('mousemove', (e) => showTip(e, emptyLabel));
+    chip.addEventListener('mousemove', (e) => showTip(e, emptyLabel, undefined, govThemeOf(chip)));
     chip.addEventListener('mouseleave', hideTip);
     return chip;
   }
@@ -184,7 +245,7 @@ export function itemChip(
     chip.appendChild(count);
   }
   const name = ITEMS[stack.id].name;
-  chip.addEventListener('mousemove', (e) => showTip(e, name, runeName));
+  chip.addEventListener('mousemove', (e) => showTip(e, name, runeName, govThemeOf(chip)));
   chip.addEventListener('mouseleave', hideTip);
   return chip;
 }
@@ -233,9 +294,37 @@ export class BustStage {
     }
   }
 
-  /** Stop drawing and release every avatar. Called when a panel closes, so a
-   *  closed screen costs nothing per frame. */
-  release(): void {
+  /**
+   * Can this page actually draw live busts right now?
+   *
+   * A browser hands out a limited number of WebGL contexts and the world, the
+   * icon renderer and the character preview already spend several of them, so
+   * "no context to spare" is a REAL state a player can land in — and it used to
+   * present as plinths that stayed permanently empty with nothing on screen
+   * saying why. Panels ask this and put a static portrait in the slot instead.
+   *
+   * Answering it forces the board to exist, which is what we want: the caller is
+   * about to render slots either way, and a lazy board would report `true` and
+   * then fail on the first frame.
+   */
+  get available(): boolean {
+    const board = this.ensure();
+    return !!board && board.alive;
+  }
+
+  /**
+   * Stop drawing and release every avatar. Called when a panel closes, so a
+   * closed screen costs nothing per frame.
+   *
+   * `owner` is the container that panel parked the stage in. A panel that no
+   * longer HOLDS the stage must not switch it off: the government menu can be
+   * opened over the pledge screen, which moves the layer, and the pledge screen
+   * closing behind it would otherwise kill the render loop under a panel that is
+   * still on screen — busts that freeze for no visible reason. Passing the
+   * owner makes the release a no-op in exactly that case.
+   */
+  release(owner?: HTMLElement): void {
+    if (owner && this.layer.parentElement !== owner) return;
     this.running = false;
     this.board?.setRoster([]);
   }

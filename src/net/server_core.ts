@@ -4,7 +4,7 @@
 // assignment, spawns (via the shared deterministic Terrain), PvP hit
 // validation, regen, and snapshots.
 
-import { BLOCKS, Block, isVaultMasonry } from '../blocks';
+import { BLOCKS, Block, isVaultMasonry, migrateBlockId } from '../blocks';
 import { ITEMS, ItemStack, gunVolley } from '../items';
 import {
   MachineState, MachineType, applyUpgrade, claimMachine, collectMachine,
@@ -36,23 +36,19 @@ import {
 import {
   Broadcast, PoliticsState, castVote, disbandParty, electionOf, foundParty,
   governmentOf, isPresident, newPolitics, partyById, pushBroadcast, rollCycle,
-  sanitizePolitics, setTaxRate, tallyElection, termExpired, voteCounts,
+  sanitizePolitics, setKit, setTaxRate, tallyElection, termExpired, voteCounts,
 } from '../politics';
 import {
-  STARTER_KIT, Treasury, canFundKits, deposit, fundKits, levy, newTreasuries,
-  raid, sanitizeTreasury, treasuryCount, treasuryInReach, RAID_COOLDOWN,
-  RAID_STACKS,
+  Treasury, canFundKits, deposit, fundKits, kitCost, kitItemCount, kitStacks,
+  levy, newTreasuries, raid, sanitizeTreasury, treasuryCount, treasuryInReach,
+  RAID_COOLDOWN, RAID_STACKS,
 } from '../treasury';
 import {
   ContributionRecord, WarfareProgress, buyWarfareNode, grantWarfareXp,
   newWarfare, sanitizeWarfare, settleWarfareXp,
-  warfareOwns, warfareTier, MAX_HARDWARE_TIER, PROTECTED_RADIUS,
+  warfareOwns, warfareTier, MAX_HARDWARE_TIER,
+  blastAt, blastBlockCandidates,
 } from '../warfare';
-import {
-  BatteryState, LAUNCH_REJECT_TEXT, ProtectedArea, SiloState, StrategicSim,
-  StrategicEvent, blastAt, blastBlockCandidates, protectedArea,
-  sanitizeBattery, sanitizeSilo,
-} from '../strategic';
 import {
   HelicopterState, VehicleSim, VehicleEvent, bombBlast, sanitizeHelicopter,
 } from '../vehicles';
@@ -249,8 +245,7 @@ const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
   'turretUpgrade', 'turretClaim', 'turretHit', 'turretLoad',
   'gadgetUse', 'rocketBlast', 'xp',
   // Warfare Command: a spectator may never build, fire, fly or sabotage.
-  'warfareBuy', 'siloLoad', 'siloUpgrade', 'siloLaunch',
-  'batteryLoad', 'batteryUpgrade', 'strategicHit', 'missileHit',
+  'warfareBuy',
   'heliSpawn', 'heliDeploy', 'heliMount', 'heliInput', 'heliBomb', 'heliService',
   'heliUpgrade', 'heliModule', 'heliRope', 'heliHit',
   'heartConsume', 'heartWithdraw', 'beaconRevive', 'useHeal',
@@ -259,7 +254,7 @@ const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
   // Government: a spectator may watch an election, never take part in one or
   // touch a treasury. Reading (the politics sync) is unaffected.
   'pledgeFaction', 'foundParty', 'disbandParty', 'castVote',
-  'govBroadcast', 'govTax', 'govFundKits', 'claimKit', 'treasuryRaid',
+  'govBroadcast', 'govTax', 'govSetKit', 'govFundKits', 'claimKit', 'treasuryRaid',
 ]);
 
 /** One message the transport should deliver. `to` is a client id, or a
@@ -314,7 +309,7 @@ export class GameServer {
   /** War wins per faction id THIS SEASON (most wins takes the season). */
   private warWins: number[] = new Array(FACTIONS.length).fill(0);
   // Warfare Command (replaces the retired Progress system): per-account
-  // technology, plus the server-owned strategic + vehicle simulations.
+  // technology, plus the server-owned vehicle simulation.
   private readonly warfare = new Map<string, WarfareProgress>();
   /** Set by the shell to persist a player's warfare progression to the account
    *  store (the pure core has no disk). */
@@ -328,12 +323,9 @@ export class GameServer {
   onDuelFlair?: (username: string, flair: DuelFlair) => {
     profile: DuelPublicProfile; leaderboard: DuelLeaderboardEntry[];
   } | null;
-  private strategic!: StrategicSim;
   private vehicles!: VehicleSim;
   /** Players known by the transport to be on a rope (for one-shot detach state). */
   private readonly ropePlayers = new Set<number>();
-  /** Accumulates toward the periodic missile/helicopter snapshot broadcast. */
-  private strategicSnapAccum = 0;
   // Seasons (Phase 5): month-long war cycles with reset + a "Seasons Won" badge.
   private season = newSeason();
   private seasonAccum = 0;
@@ -411,11 +403,6 @@ export class GameServer {
     // Elections run on the WALL clock, not the world clock: a term is a week of
     // real time whether or not the server was up for all of it.
     this.politics = newPolitics(this.wallNow());
-    this.strategic = new StrategicSim({
-      groundY: (x, z) => this.surfaceY(x, z),
-      worldHalf: WORLD_HALF,
-      protectedAreas: () => this.protectedAreas(),
-    });
     this.vehicles = new VehicleSim({
       solid: (x, y, z) => this.solidAt(x, y, z),
       groundY: (x, z) => this.surfaceY(x, z),
@@ -427,7 +414,7 @@ export class GameServer {
   // --- Warfare Command: shared world queries ---------------------------------
 
   /** Height of the highest solid cell in a column, edits included. Used as the
-   *  ground reference for missile impacts, helicopter floors and ceilings. */
+   *  ground reference for bomb impacts, helicopter floors and ceilings. */
   private surfaceY(x: number, z: number): number {
     if (!fin(x, z)) return 0;
     const bx = Math.floor(x), bz = Math.floor(z);
@@ -461,46 +448,6 @@ export class GameServer {
       y >= b.minY && y <= b.maxY;
   }
 
-  /**
-   * Everywhere a tactical strike may NEVER be aimed, sent to the client so the
-   * targeting map draws exactly the exclusion circles the server enforces.
-   *
-   * The static half (spawn + every seeded vault) is enumerated ONCE and cached:
-   * `worldVaults` walks the whole 5000×5000 world, and this is called on every
-   * single launch validation, so recomputing it would stall the server for the
-   * best part of a second each time someone opens a silo. The dynamic half
-   * (faction cores, which appear and vanish with edits) is cheap and is rebuilt
-   * whenever a Core block is placed or broken.
-   */
-  private staticProtected: ProtectedArea[] | null = null;
-  private coreProtected: ProtectedArea[] = [];
-  private coreProtectedDirty = true;
-
-  protectedAreas(): ProtectedArea[] {
-    if (!this.staticProtected) {
-      const out: ProtectedArea[] = [
-        // The spawn island: a fresh player must never land under a warhead.
-        protectedArea('spawn', 0, 0, 'Spawn safety zone', 120),
-      ];
-      // Every seeded vault: dungeons are shared content, not siege targets.
-      for (const v of worldVaults(this.seed, this.terrain)) {
-        out.push(protectedArea('vault', v.x, v.z, `Tier ${v.tier} vault`, PROTECTED_RADIUS + 24));
-      }
-      this.staticProtected = out;
-    }
-    if (this.coreProtectedDirty) {
-      this.coreProtectedDirty = false;
-      this.coreProtected = [];
-      for (const [key, block] of this.edits) {
-        if (block !== Block.Core) continue;
-        const [x, , z] = key.split(',').map(Number);
-        if (!fin(x, z)) continue;
-        this.coreProtected.push(
-          protectedArea('core', x, z, 'Faction core', PROTECTED_RADIUS + 16));
-      }
-    }
-    return [...this.staticProtected, ...this.coreProtected];
-  }
 
   /** A player's warfare progression (created on demand, keyed by account). */
   warfareOf(username: string): WarfareProgress {
@@ -772,10 +719,7 @@ export class GameServer {
       warfare: { xp: warfare.xp, nodes: warfare.nodes.slice() },
       duelProfile: player.duelProfile,
       duelLeaderboard: account?.duelLeaderboard ?? [],
-      silos: [...this.strategic.silos.values()],
-      batteries: [...this.strategic.batteries.values()],
       helis: this.vehicles.snapshot(),
-      protectedAreas: this.protectedAreas(),
       politics: this.politics,
       factions: this.factionPublics(),
       treasury: isFaction(faction) ? this.treasuryOf(faction).slots : undefined,
@@ -1060,8 +1004,10 @@ export class GameServer {
         return this.handleGovBroadcast(p, msg.text);
       case 'govTax':
         return this.handleGovTax(p, msg.rate);
+      case 'govSetKit':
+        return this.handleSetKit(p, msg.slots);
       case 'govFundKits':
-        return this.handleFundKits(p, msg.count);
+        return this.handleFundKits(p, msg.count, msg.source);
       case 'claimKit':
         return this.handleClaimKit(p);
       case 'treasuryRaid':
@@ -1240,88 +1186,6 @@ export class GameServer {
         this.saveWarfare(p);
         return [this.warfareMsg(p)];
       }
-      case 'siloOpen': {
-        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
-        const s = this.strategic.siloAt(Math.floor(msg.x), Math.floor(msg.y), Math.floor(msg.z));
-        if (!s) return [];
-        return [
-          { to: id, msg: { t: 'silo', state: s } },
-          { to: id, msg: { t: 'protectedAreas', areas: this.protectedAreas() } },
-        ];
-      }
-      case 'siloLoad': {
-        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
-        const s = this.strategic.siloAt(Math.floor(msg.x), Math.floor(msg.y), Math.floor(msg.z));
-        // Any faction teammate can keep a shared silo fed — loading is not
-        // blueprint-gated, only BUILDING and RETROFITTING are.
-        if (!s || !sameFaction(s.faction, p.faction)) return [];
-        if (!fin(msg.count)) return [];
-        this.strategic.loadSilo(s, msg.count);
-        return [{ to: 'all', msg: { t: 'silo', state: s } }];
-      }
-      case 'siloUpgrade': {
-        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
-        const s = this.strategic.siloAt(Math.floor(msg.x), Math.floor(msg.y), Math.floor(msg.z));
-        if (!s || !sameFaction(s.faction, p.faction)) return [];
-        const cap = warfareTier(this.warfareOf(p.username), 'silo');
-        if (s.tier >= Math.min(cap, MAX_HARDWARE_TIER)) {
-          return [{ to: id, msg: { t: 'warfareErr',
-            reason: 'You have not authorized the next silo retrofit.' } }];
-        }
-        this.strategic.retrofitSilo(s, s.tier + 1);
-        return [{ to: 'all', msg: { t: 'silo', state: s } }];
-      }
-      case 'siloLaunch':
-        return this.handleLaunch(p, msg.x, msg.y, msg.z, msg.tx, msg.tz);
-      case 'batteryOpen': {
-        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
-        const b = this.strategic.batteryAt(Math.floor(msg.x), Math.floor(msg.y), Math.floor(msg.z));
-        return b ? [{ to: id, msg: { t: 'battery', state: b } }] : [];
-      }
-      case 'batteryLoad': {
-        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
-        const b = this.strategic.batteryAt(Math.floor(msg.x), Math.floor(msg.y), Math.floor(msg.z));
-        if (!b || !sameFaction(b.faction, p.faction) || !fin(msg.count)) return [];
-        this.strategic.loadBattery(b, msg.count);
-        return [{ to: 'all', msg: { t: 'battery', state: b } }];
-      }
-      case 'batteryUpgrade': {
-        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
-        const b = this.strategic.batteryAt(Math.floor(msg.x), Math.floor(msg.y), Math.floor(msg.z));
-        if (!b || !sameFaction(b.faction, p.faction)) return [];
-        const cap = warfareTier(this.warfareOf(p.username), 'battery');
-        if (b.tier >= Math.min(cap, MAX_HARDWARE_TIER)) {
-          return [{ to: id, msg: { t: 'warfareErr',
-            reason: 'You have not authorized the next battery retrofit.' } }];
-        }
-        this.strategic.retrofitBattery(b, b.tier + 1);
-        return [{ to: 'all', msg: { t: 'battery', state: b } }];
-      }
-      case 'strategicHit': {
-        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
-        const dmg = fin(msg.amount) ? Math.max(0, Math.min(1000, msg.amount)) : 0;
-        if (dmg <= 0) return [];
-        const bx = Math.floor(msg.x), by = Math.floor(msg.y), bz = Math.floor(msg.z);
-        if (msg.kind === 'silo') {
-          const s = this.strategic.siloAt(bx, by, bz);
-          if (!s || sameFaction(s.faction, p.faction)) return [];
-          if (this.strategic.damageSilo(s, dmg)) return this.destroySilo(s);
-          return [{ to: 'all', msg: { t: 'silo', state: s } }];
-        }
-        const b = this.strategic.batteryAt(bx, by, bz);
-        if (!b || sameFaction(b.faction, p.faction)) return [];
-        if (this.strategic.damageBattery(b, dmg)) return this.destroyBattery(b);
-        return [{ to: 'all', msg: { t: 'battery', state: b } }];
-      }
-      case 'missileHit': {
-        // A missile hull is a legitimate (very hard) gunfire target.
-        const m = this.strategic.missiles.get(msg.id);
-        if (!m || sameFaction(m.faction, p.faction)) return [];
-        const dmg = fin(msg.amount) ? Math.max(0, Math.min(RANGED_MAX_DAMAGE, msg.amount)) : 0;
-        const ev = this.strategic.damageMissile(msg.id, dmg);
-        return ev ? this.applyStrategicEvents([ev]) : [];
-      }
-      // --- Helicopters ---
       case 'heliSpawn':
         return this.handleHeliSpawn(p, msg.x, msg.y, msg.z);
       case 'heliDeploy':
@@ -2456,35 +2320,7 @@ export class GameServer {
     return out;
   }
 
-  // --- WARFARE COMMAND: strategic + vehicle authority ------------------------
-
-  /**
-   * Fire a tactical missile. The server revalidates EVERYTHING — ownership,
-   * faction, range, ammunition, protected areas, cooldown, finite coordinates
-   * and the in-flight cap — and only then consumes a round.
-   */
-  private handleLaunch(
-    p: ServerPlayer, x: number, y: number, z: number, tx: number, tz: number,
-  ): Outbound[] {
-    if (!this.nearMachine(p, x, y, z)) return [];
-    const silo = this.strategic.siloAt(Math.floor(x), Math.floor(y), Math.floor(z));
-    if (!silo) return [];
-    if (!sameFaction(silo.faction, p.faction)) {
-      return [{ to: p.id, msg: { t: 'launchRejected', reason: 'not-yours',
-        text: 'This silo belongs to another faction.' } }];
-    }
-    const req = { siloId: silo.id, faction: p.faction, tx, tz };
-    const check = this.strategic.validateLaunch(req);
-    if (!check.ok) {
-      return [{ to: p.id, msg: { t: 'launchRejected', reason: check.reason,
-        text: LAUNCH_REJECT_TEXT[check.reason] } }];
-    }
-    const events = this.strategic.launch(req);
-    return [
-      { to: 'all', msg: { t: 'silo', state: silo } },
-      ...this.applyStrategicEvents(events),
-    ];
-  }
+  // --- WARFARE COMMAND: vehicle authority ------------------------------------
 
   private handleHeliSpawn(p: ServerPlayer, x: number, y: number, z: number): Outbound[] {
     if (!this.nearMachine(p, x, y, z)) return [];
@@ -2543,81 +2379,6 @@ export class GameServer {
     } }];
   }
 
-  private destroySilo(s: SiloState): Outbound[] {
-    this.strategic.removeSilo(s.id);
-    const out: Outbound[] = this.clearHardwareFootprint(s.x, s.y, s.z, Block.TacticalSilo);
-    // Loaded ordnance cooks off with the silo — it is never recovered.
-    out.push({ to: 'all', msg: { t: 'siloGone', id: s.id, x: s.x, y: s.y, z: s.z } });
-    return out;
-  }
-
-  private destroyBattery(b: BatteryState): Outbound[] {
-    this.strategic.removeBattery(b.id);
-    const out: Outbound[] = this.clearHardwareFootprint(b.x, b.y, b.z, Block.InterceptorBattery);
-    if (b.ammo > 0) {
-      out.push(this.spawnItem(Item.InterceptorMissile, Math.min(64, b.ammo),
-        b.x + 0.5, b.y + 0.3, b.z + 0.5));
-    }
-    out.push({ to: 'all', msg: { t: 'batteryGone', id: b.id, x: b.x, y: b.y, z: b.z } });
-    return out;
-  }
-
-  /** Clear a strategic block-entity's cells (anchor + any 2×2 SiloPart). */
-  private clearHardwareFootprint(x: number, y: number, z: number, anchor: number): Outbound[] {
-    const out: Outbound[] = [];
-    const cells: [number, number][] = anchor === Block.TacticalSilo
-      ? [[0, 0], [1, 0], [0, 1], [1, 1]] : [[0, 0]];
-    for (const [dx, dz] of cells) {
-      const key = `${x + dx},${y},${z + dz}`;
-      const cur = this.edits.get(key);
-      if (cur !== anchor && cur !== Block.SiloPart) continue;
-      this.edits.set(key, Block.Air);
-      out.push({ to: 'all', msg: { t: 'edit', x: x + dx, y, z: z + dz, block: Block.Air } });
-    }
-    return out;
-  }
-
-  /** Turn simulation events into wire traffic + world damage. */
-  private applyStrategicEvents(events: readonly StrategicEvent[]): Outbound[] {
-    const out: Outbound[] = [];
-    for (const ev of events) {
-      switch (ev.kind) {
-        case 'launch':
-          out.push({ to: 'all', msg: { t: 'missileLaunch', missile: ev.missile, siloId: ev.siloId } });
-          break;
-        case 'interceptorLaunch':
-          out.push({ to: 'all', msg: {
-            t: 'interceptorLaunch', missile: ev.missile, batteryId: ev.batteryId } });
-          break;
-        case 'warning':
-          out.push({ to: 'all', msg: {
-            t: 'strikeWarning', faction: ev.faction, x: ev.x, z: ev.z,
-            eta: ev.eta, radius: ev.radius } });
-          break;
-        case 'intercepted':
-          out.push({ to: 'all', msg: { t: 'missileEnd', id: ev.id, reason: 'intercepted',
-            x: ev.x, y: ev.y, z: ev.z, radius: 0 } });
-          break;
-        case 'shotDown':
-          out.push({ to: 'all', msg: { t: 'missileEnd', id: ev.id, reason: 'shot',
-            x: ev.x, y: ev.y, z: ev.z, radius: 0 } });
-          break;
-        case 'expired':
-          out.push({ to: 'all', msg: { t: 'missileEnd', id: ev.id, reason: 'expired',
-            x: 0, y: 0, z: 0, radius: 0 } });
-          break;
-        case 'impact': {
-          out.push({ to: 'all', msg: { t: 'missileEnd', id: ev.id, reason: 'impact',
-            x: ev.x, y: ev.y, z: ev.z, radius: ev.radius } });
-          out.push(...this.applyBlast(ev.faction, { x: ev.x, y: ev.y, z: ev.z },
-            ev.radius, ev.playerDamage, ev.hardwareDamage, ev.blocks));
-          break;
-        }
-      }
-    }
-    return out;
-  }
-
   private applyVehicleEvents(events: readonly VehicleEvent[]): Outbound[] {
     const out: Outbound[] = [];
     for (const ev of events) {
@@ -2657,13 +2418,13 @@ export class GameServer {
   }
 
   /**
-   * The shared explosion profile for missiles AND bombs.
+   * The shared explosion profile for every piece of ordnance.
    *
    * Enemies and enemy hardware take LINEAR-falloff damage, applied exactly once
    * per target. Friendly players and friendly hardware are immune. Only a
    * bounded number of player-PLACED, destructible blocks are removed — natural
    * terrain is never permanently excavated, so a war can't erase the map.
-   * No lifesteal credit is taken from a strategic explosion.
+   * No lifesteal credit is taken from an explosion.
    */
   private applyBlast(
     faction: number, at: { x: number; y: number; z: number },
@@ -2676,23 +2437,9 @@ export class GameServer {
       if (sameFaction(victim.faction, faction)) continue;   // friendly fire is off
       const dmg = blastAt(at, { x: victim.x, y: victim.y, z: victim.z }, radius, playerDamage);
       // Pass the RAW blast figure: applyDamage runs armor mitigation itself, so
-      // mitigating here as well would halve every warhead twice over.
-      // `-1` attacker: a strategic explosion is never a lifesteal kill credit.
+      // mitigating here as well would halve every payload twice over.
+      // `-1` attacker: an explosion is never a lifesteal kill credit.
       if (dmg > 0) out.push(...this.applyDamage(victim, dmg, -1));
-    }
-    for (const s of [...this.strategic.silos.values()]) {
-      if (sameFaction(s.faction, faction)) continue;
-      const dmg = blastAt(at, { x: s.x + 0.5, y: s.y + 1, z: s.z + 0.5 }, radius, hardwareDamage);
-      if (dmg <= 0) continue;
-      if (this.strategic.damageSilo(s, dmg)) out.push(...this.destroySilo(s));
-      else out.push({ to: 'all', msg: { t: 'silo', state: s } });
-    }
-    for (const b of [...this.strategic.batteries.values()]) {
-      if (sameFaction(b.faction, faction)) continue;
-      const dmg = blastAt(at, { x: b.x + 0.5, y: b.y + 1, z: b.z + 0.5 }, radius, hardwareDamage);
-      if (dmg <= 0) continue;
-      if (this.strategic.damageBattery(b, dmg)) out.push(...this.destroyBattery(b));
-      else out.push({ to: 'all', msg: { t: 'battery', state: b } });
     }
     for (const h of [...this.vehicles.helicopters.values()]) {
       if (sameFaction(h.faction, faction) || h.dying > 0) continue;
@@ -2719,14 +2466,12 @@ export class GameServer {
       const key = `${c.x},${c.y},${c.z}`;
       const edited = this.edits.get(key);
       const block = edited ?? (breakNatural ? natural[i] : undefined);
-      // Strategic missiles preserve natural terrain. Helicopter bombs may
-      // crater it, but air, indestructible masonry and block-entity anchors
-      // are still protected here.
+      // Helicopter bombs may crater natural terrain, but air, indestructible
+      // masonry and block-entity anchors are still protected here.
       if (block === undefined || block === Block.Air) continue;
       const info = BLOCKS[block];
       if (!info || info.hardness < 0) continue;
-      if (isVaultMasonry(block) || block === Block.Core || block === Block.TacticalSilo ||
-          block === Block.SiloPart || block === Block.InterceptorBattery) continue;
+      if (isVaultMasonry(block) || block === Block.Core) continue;
       this.edits.set(key, Block.Air);
       edits.push({ x: c.x, y: c.y, z: c.z, block: Block.Air });
       removed++;
@@ -2735,12 +2480,10 @@ export class GameServer {
     return out;
   }
 
-  /** Fixed-step strategic + vehicle tick. The WS shell calls this at 20 Hz. */
+  /** Fixed-step vehicle tick. The WS shell calls this at 20 Hz. */
   tickWarfare(dt: number): Outbound[] {
     if (!fin(dt) || dt <= 0) return [];
-    this.strategic.now = this.worldTime;
-    const out = this.applyStrategicEvents(this.strategic.tick(dt));
-    out.push(...this.applyVehicleEvents(this.vehicles.tick(dt)));
+    const out = this.applyVehicleEvents(this.vehicles.tick(dt));
     for (const p of this.players.values()) {
       if (p.duelSaved) continue;
       const rider = this.vehicles.ropeRider(p.id);
@@ -2755,19 +2498,12 @@ export class GameServer {
         out.push({ to: p.id, msg: { t: 'heliRopeState', id: 0, progress: 0 } });
       }
     }
-    this.strategicSnapAccum += dt;
-    if (this.strategicSnapAccum >= 1 / 10) {
-      this.strategicSnapAccum = 0;
-      if (this.strategic.missiles.size) {
-        out.push({ to: 'all', msg: { t: 'missiles', list: this.strategic.snapshotMissiles() } });
-      }
-    }
-    // Aircraft go out on EVERY tick (20 Hz), not on the 10 Hz strategic beat a
-    // missile is happy with. A helicopter carries the camera of whoever is
-    // flying it, so its update rate is a framerate as far as that player is
-    // concerned — at 10 Hz the client had to invent a tenth of a second of
-    // motion between packets and the ride felt like a slideshow. The payload is
-    // a handful of small poses and only exists while something is airborne.
+    // Aircraft go out on EVERY tick (20 Hz). A helicopter carries the camera of
+    // whoever is flying it, so its update rate is a framerate as far as that
+    // player is concerned — at 10 Hz the client had to invent a tenth of a
+    // second of motion between packets and the ride felt like a slideshow. The
+    // payload is a handful of small poses and only exists while something is
+    // airborne.
     if (this.vehicles.helicopters.size || this.vehicles.bombs.size) {
       out.push(...this.heliBroadcast());
     }
@@ -3275,18 +3011,6 @@ export class GameServer {
       out.push(...this.spillMachine(key, x, y, z));
       out.push(...this.clearFootprint(x, y, z, prevType, false));
     }
-    // WARFARE COMMAND hardware. Removing an anchor (or any silo housing cell)
-    // takes the whole entity down, so no orphan cells or ghost entities survive
-    // an explosion or a hacked direct edit.
-    if ((prev === Block.TacticalSilo || prev === Block.SiloPart) &&
-        block !== prev) {
-      const owner = this.siloCoveringCell(x, y, z);
-      if (owner) out.push(...this.destroySilo(owner));
-    }
-    if (prev === Block.InterceptorBattery && block !== Block.InterceptorBattery) {
-      const b = this.strategic.batteryAt(x, y, z);
-      if (b) out.push(...this.destroyBattery(b));
-    }
     // Turrets are single-block entities: removing/replacing one spills its
     // loaded ammo and deletes the entity (the block drop comes from the normal
     // break path, like machines).
@@ -3297,7 +3021,6 @@ export class GameServer {
         out.push(this.spawnItem(Item.Cannonball, Math.min(64, ts.ammo), x + 0.5, y + 0.3, z + 0.5));
       }
     }
-    if (prev === Block.Core || block === Block.Core) this.coreProtectedDirty = true;
     this.edits.set(key, block);
     // Placing a machine block creates its server entity, which then ticks even
     // with no chunk loaded and no one viewing it.
@@ -3309,27 +3032,13 @@ export class GameServer {
       this.turrets.set(key, newTurret());
     }
     out.push({ to: 'all', msg: { t: 'edit', x, y, z, block } });
-    // Placing warfare hardware creates its server entity — the ONLY place a
-    // silo or battery can come into existence. Blueprint ownership, faction
-    // caps and minimum spacing are all revalidated here, because the client
-    // that sent the edit cannot be trusted about any of them.
-    if (block === Block.TacticalSilo && !this.strategic.siloAt(x, y, z)) {
-      out.push(...this.createSilo(p, x, y, z));
-    } else if (block === Block.InterceptorBattery && !this.strategic.batteryAt(x, y, z)) {
-      out.push(...this.createBattery(p, x, y, z));
-    } else if (block === Block.Helipad && !this.hasBlueprint(p, Block.Helipad)) {
+    // Placing warfare hardware is revalidated here, because the client that
+    // sent the edit cannot be trusted about its own blueprints.
+    if (block === Block.Helipad && !this.hasBlueprint(p, Block.Helipad)) {
       out.push(...this.revokePlacement(p, x, y, z,
         'Flight Certification is not authorized.'));
     }
     return out;
-  }
-
-  /** The silo whose 2×2 footprint covers this cell, if any. */
-  private siloCoveringCell(x: number, y: number, z: number): SiloState | undefined {
-    for (const s of this.strategic.silos.values()) {
-      if (y === s.y && x >= s.x && x <= s.x + 1 && z >= s.z && z <= s.z + 1) return s;
-    }
-    return undefined;
   }
 
   /** Undo a placement the player was not entitled to make. */
@@ -3341,46 +3050,6 @@ export class GameServer {
       { to: 'all', msg: { t: 'edit', x, y, z, block: Block.Air } },
       { to: p.id, msg: { t: 'warfareErr', reason } },
     ];
-  }
-
-  private createSilo(p: ServerPlayer, x: number, y: number, z: number): Outbound[] {
-    if (!this.hasBlueprint(p, Block.TacticalSilo)) {
-      return this.revokePlacement(p, x, y, z, 'Missile Command is not authorized.');
-    }
-    const err = this.strategic.siloPlacementError(p.faction, x, y, z);
-    if (err) return this.revokePlacement(p, x, y, z, err);
-    // The pad's other three cells must be free before the housing is stamped.
-    // Test the RESOLVED block (edit ?? terrain): `edits` is undefined for
-    // untouched world, so checking it alone would bulldoze natural stone — and
-    // `clearHardwareFootprint` would later carve permanent holes in terrain the
-    // player never placed.
-    const cells: [number, number][] = [[1, 0], [0, 1], [1, 1]];
-    for (const [dx, dz] of cells) {
-      if (this.solidAt(x + dx, y, z + dz)) {
-        return this.revokePlacement(p, x, y, z, 'A silo needs a clear 2×2 pad.');
-      }
-    }
-    const tier = Math.max(1, warfareTier(this.warfareOf(p.username), 'silo'));
-    const s = this.strategic.addSilo(p.username, p.faction, x, y, z, tier);
-    const out: Outbound[] = [];
-    for (const [dx, dz] of cells) {
-      this.edits.set(`${x + dx},${y},${z + dz}`, Block.SiloPart);
-      out.push({ to: 'all', msg: {
-        t: 'edit', x: x + dx, y, z: z + dz, block: Block.SiloPart } });
-    }
-    out.push({ to: 'all', msg: { t: 'silo', state: s } });
-    return out;
-  }
-
-  private createBattery(p: ServerPlayer, x: number, y: number, z: number): Outbound[] {
-    if (!this.hasBlueprint(p, Block.InterceptorBattery)) {
-      return this.revokePlacement(p, x, y, z, 'Aegis Systems is not authorized.');
-    }
-    const err = this.strategic.batteryPlacementError(p.faction, x, y, z);
-    if (err) return this.revokePlacement(p, x, y, z, err);
-    const tier = Math.max(1, warfareTier(this.warfareOf(p.username), 'battery'));
-    const b = this.strategic.addBattery(p.username, p.faction, x, y, z, tier);
-    return [{ to: 'all', msg: { t: 'battery', state: b } }];
   }
 
   /** The loot tier if (x,y,z) is a structure chest position (fail-closed on
@@ -4270,21 +3939,65 @@ export class GameServer {
     ];
   }
 
-  private handleFundKits(p: ServerPlayer, count: unknown): Outbound[] {
+  /** Rewrite the recruit loadout. President-only, and re-validated slot by slot
+   *  in politics.ts — a helmet in the boots slot is dropped here, not worn. */
+  private handleSetKit(p: ServerPlayer, slots: unknown): Outbound[] {
+    const denied = this.requirePresident(p);
+    if (denied) return this.govErr(p.id, denied);
+    const g = governmentOf(this.politics, p.faction)!;
+    const res = setKit(g, slots);
+    if (!res.ok) return this.govErr(p.id, res.error ?? 'That is not a kit layout.');
+    return [
+      ...this.notifyFaction(p.faction, 'kit', 'The recruit kit changed',
+        `${p.username} re-issued the standard loadout — ` +
+        `${kitItemCount(g.kit)} items per recruit.`),
+      ...this.broadcastPolitics(),
+    ];
+  }
+
+  /**
+   * Fund `n` recruit kits at whatever the loadout currently costs.
+   *
+   * Two purses. `treasury` spends the faction's banked levy. `inventory` is the
+   * president paying out of their own pockets: the CLIENT has already removed
+   * the bill from its inventory, so the server banks that bill into the treasury
+   * and immediately spends it again — the treasury nets out unchanged, the stock
+   * still comes from items that existed, and there is exactly ONE code path that
+   * can mint a kit. That is the same trust model `drop` runs on (the client
+   * declaring what it just had), and it keeps the affordability rule in one place.
+   */
+  private handleFundKits(
+    p: ServerPlayer, count: unknown, source?: 'treasury' | 'inventory'
+  ): Outbound[] {
     const denied = this.requirePresident(p);
     if (denied) return this.govErr(p.id, denied);
     const n = Number.isFinite(count) ? Math.floor(count as number) : 0;
     if (n <= 0 || n > 100) return this.govErr(p.id, 'Fund between 1 and 100 kits.');
+    const g = governmentOf(this.politics, p.faction)!;
+    const kit = kitStacks(g.kit);
+    if (!kit.length) return this.govErr(p.id, 'The recruit kit is empty — build one first.');
     const t = this.treasuryOf(p.faction);
-    if (!canFundKits(t, n)) {
+    if (source === 'inventory') {
+      // Bank what the president just handed over, then pay for the kits out of
+      // it. `deposit` returns the overflow, and a treasury too full to hold the
+      // bill cannot be charged for it either — so refuse before spending.
+      let spilled = 0;
+      for (const line of kitCost(kit)) spilled += deposit(t, line.id, line.count * n);
+      if (spilled > 0 || !canFundKits(t, n, kit)) {
+        return this.govErr(p.id, 'The treasury is too full to route that many kits.');
+      }
+    } else if (!canFundKits(t, n, kit)) {
       return this.govErr(p.id, 'The treasury cannot afford that many kits.');
     }
-    if (!fundKits(t, n)) return this.govErr(p.id, 'The treasury cannot afford that many kits.');
-    const g = governmentOf(this.politics, p.faction)!;
+    if (!fundKits(t, n, kit)) {
+      return this.govErr(p.id, 'The treasury cannot afford that many kits.');
+    }
     g.kitStock += n;
+    const paid = source === 'inventory' ? 'out of their own pockets' : 'from the treasury';
     return [
       ...this.notifyFaction(p.faction, 'kit', 'Recruit kits funded',
-        `${p.username} funded ${n} starter kit${n === 1 ? '' : 's'} — ${g.kitStock} now waiting.`),
+        `${p.username} funded ${n} starter kit${n === 1 ? '' : 's'} ${paid} — ` +
+        `${g.kitStock} now waiting.`),
       ...this.broadcastPolitics(),
     ];
   }
@@ -4306,7 +4019,8 @@ export class GameServer {
     }
     g.kitStock--;
     const out: Outbound[] = [];
-    for (const line of STARTER_KIT) {
+    // Whatever THIS faction's president laid out, not the stock starter kit.
+    for (const line of kitStacks(g.kit)) {
       out.push({ to: p.id, msg: { t: 'gotitem', item: line.id, count: line.count } });
     }
     out.push({ to: p.id, msg: { t: 'notice', text: '[KIT] Your faction funded this. Go build something.' } });
@@ -4800,12 +4514,10 @@ export class GameServer {
       politics: this.politics,
       treasuries: [...this.treasuries.entries()],
       vaults: [...this.vaults.entries()],
-      silos: [...this.strategic.silos.values()],
-      batteries: [...this.strategic.batteries.values()],
       helis: [...this.vehicles.helicopters.values()].filter((h) => h.dying <= 0),
       // peekNextId, NOT allocId: a serializer must be read-only, or every
       // autosave would permanently burn an entity id.
-      strategicNextId: Math.max(this.strategic.peekNextId(), this.vehicles.peekNextId()),
+      strategicNextId: this.vehicles.peekNextId(),
     };
   }
 
@@ -4826,7 +4538,9 @@ export class GameServer {
         if (!Array.isArray(e) || e.length !== 2) continue;
         const [k, b] = e as [unknown, unknown];
         if (validBlockKey(k) && Number.isInteger(b) && (b as number) >= 0 && (b as number) <= 255) {
-          this.edits.set(k as string, b as number);
+          // Retired hardware ids become Air, so a world saved with a silo in it
+          // still loads (and renders) after that hardware was removed.
+          this.edits.set(k as string, migrateBlockId(b as number));
         }
       }
     }
@@ -4869,21 +4583,9 @@ export class GameServer {
     this.war = sanitizeWar(s.war);
     this.warWasActive = this.isWarActive();
     this.warWins = sanitizeCounterArray(s.warWins, FACTIONS.length);
-    // Warfare Command hardware. Active missiles are deliberately NOT restored —
-    // a restart cancels anything mid-arc rather than resuming a stale arc.
+    // Warfare Command hardware. Bombs in the air are deliberately NOT restored —
+    // a restart cancels anything mid-fall rather than resuming a stale arc.
     let highestId = 0;
-    for (const raw of Array.isArray(s.silos) ? s.silos : []) {
-      const st = sanitizeSilo(raw);
-      if (!st) continue;
-      this.strategic.silos.set(st.id, st);
-      highestId = Math.max(highestId, st.id);
-    }
-    for (const raw of Array.isArray(s.batteries) ? s.batteries : []) {
-      const st = sanitizeBattery(raw);
-      if (!st) continue;
-      this.strategic.batteries.set(st.id, st);
-      highestId = Math.max(highestId, st.id);
-    }
     for (const raw of Array.isArray(s.helis) ? s.helis : []) {
       const h = sanitizeHelicopter(raw);
       if (!h) continue;
@@ -4893,10 +4595,6 @@ export class GameServer {
     if (Number.isFinite(s.strategicNextId)) {
       highestId = Math.max(highestId, Math.floor(s.strategicNextId as number) - 1);
     }
-    this.coreProtectedDirty = true;
-    // Both sims are seeded from the same floor so a silo and a helicopter can
-    // never be handed the same id by independent counters after a restart.
-    this.strategic.seedIds(highestId);
     this.vehicles.seedIds(highestId);
     this.vehicles.clearOccupants();   // occupants never survive a restart
     this.flags = sanitizeFlags(s.flags); // carriers never survive a reboot
@@ -4992,12 +4690,10 @@ export interface WorldSave {
   war?: WarState;
   /** War wins per faction id this season (the season scoreboard). */
   warWins?: number[];
-  /** Warfare Command strategic hardware (silos / interceptor batteries /
-   *  helicopters). Active missiles are deliberately NOT saved — a restart
-   *  cancels anything in flight rather than restoring it mid-arc. */
-  silos?: SiloState[];
-  batteries?: BatteryState[];
+  /** Warfare Command aviation hardware. Bombs in the air are deliberately NOT
+   *  saved — a restart cancels anything falling rather than restoring it. */
   helis?: HelicopterState[];
+  /** Entity-id floor (legacy key name, kept so old saves still seed it). */
   strategicNextId?: number;
   /** Capture-the-flag state: who holds which flag + the armed switch. */
   flags?: FlagsState;

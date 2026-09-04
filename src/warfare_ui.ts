@@ -19,11 +19,10 @@
 import * as THREE from 'three';
 import {
   WARFARE_BRANCH_META, WARFARE_TREE, WARFARE_TREE_COST, WarfareBranch,
-  WarfareNode, WarfareProgress, batteryStats, canBuyWarfareNode, helicopterStats,
-  siloStats, tierLabel, warfareAvailable, warfareBlockReason, warfareCompletion,
+  WarfareNode, WarfareProgress, canBuyWarfareNode, helicopterStats,
+  tierLabel, warfareAvailable, warfareBlockReason, warfareCompletion,
   warfareOwns, warfareSpent, warfareUnlocked,
 } from './warfare';
-import { buildBatteryModel, buildMissileModel, buildSiloModel } from './warfare_models';
 import { buildHelicopterModel } from './vehiclemodels';
 
 // --- Palette (light) ----------------------------------------------------------
@@ -68,8 +67,9 @@ const ORIGIN_Y = 90;
  *  the floating zoom stack both derive from it, so they can't disagree. */
 const SHEET_PCT = 58;
 
+// One trunk and one branch: the whole tree is a single straight column.
 const BRANCH_X: Record<WarfareBranch, number> = {
-  trunk: 0, strike: -1.18, aegis: 0, air: 1.18,
+  trunk: 0, air: 0,
 };
 
 /** Does the viewer want reduced motion? Previews stop auto-rotating if so. */
@@ -86,43 +86,16 @@ function reducedMotion(): boolean {
 const STROKE_ICONS: Record<string, string> = {
   // Branch marks
   branch: 'M12 21v-7M12 14 5.5 9.5M12 14l6.5-4.5M12 14V4M5.5 9.5v-2M18.5 9.5v-2',
-  target: 'M12 2v3.5M12 18.5V22M2 12h3.5M18.5 12H22' +
-    '|circle:12,12,7|circle:12,12,2.6',
-  satellite: 'M4 20h6M7 20v-3.4M7 16.6 3.6 9.9A8.4 8.4 0 0 1 15.6 6L7 16.6Z' +
-    'M13.4 13.6 19 20M16.5 4.5 20 8',
   rotor: 'M3 7.5h18M11.4 7.5v3.6M6 16.4a3.4 3.4 0 0 1 3.4-3.4h4.2l4 3.4h1.2' +
     'a2 2 0 0 1 0 4H9.4A3.4 3.4 0 0 1 6 16.4ZM17.6 16.4h3.6',
 
   // Node marks — trunk
-  missile: 'M12 2.2c2.3 2.4 3.5 5.3 3.5 8.6v3.9h-7v-3.9c0-3.3 1.2-6.2 3.5-8.6Z' +
-    'M8.5 12.4 5.4 15.6v3.6l3.1-2.4M15.5 12.4l3.1 3.2v3.6l-3.1-2.4' +
-    'M10.4 18.3 12 21.8l1.6-3.5',
-  vanes: 'M12 2.6v18.8M12 7.6 5.2 11.7v4.1L12 12M12 7.6l6.8 4.1v4.1L12 12',
-  silo: 'M4 20.5h16M6.2 20.5v-7.2a5.8 5.8 0 0 1 11.6 0v7.2M9.4 20.5v-5.3h5.2v5.3' +
-    'M12 7.3V3.2M9.6 4.6 12 3.2l2.4 1.4',
-  dish: 'M4.5 20.5h7M8 20.5v-3.7M8 16.8 4.3 9.6A8.6 8.6 0 0 1 16.6 5.7L8 16.8Z' +
-    'M13.6 13.9 18.5 20.5',
-  sweep: 'M12 12 19.4 7.3|arc:12,12,9,-90,20|arc:12,12,5.6,-90,20' +
-    '|circle:12,12,1.6',
-  bolt: 'M13.4 2.4 5.6 13.6h5.2l-1.6 8 8-11.4h-5.2l1.4-7.8Z',
   bomb: 'M15.6 10.6 18 8.2M18 8.2V5M18 8.2h3.2|circle:10.6,14.8,6.2' +
     '|M7.6 12.2a4.2 4.2 0 0 1 2.4-1.6',
   plate: 'M3.8 5.6h16.4v12.8H3.8zM8.6 5.6v12.8M15.4 5.6v12.8' +
     '|circle:6.2,8.4,0.9|circle:6.2,15.6,0.9|circle:17.8,8.4,0.9|circle:17.8,15.6,0.9',
 
   // Node marks — branches
-  crosshair: 'M12 2.4v4.2M12 17.4v4.2M2.4 12h4.2M17.4 12h4.2' +
-    '|circle:12,12,6|circle:12,12,1.4',
-  warhead: 'M12 2.6 17 12.4H7L12 2.6ZM7.4 12.4h9.2v6.2H7.4zM7.4 15.6h9.2' +
-    'M9.6 18.6v2.6M14.4 18.6v2.6',
-  burst: 'M12 2.2 14 8l5.6-2.4-2.6 5.4 5.2 1.4-5.2 1.6 1.6 5.6-4.8-3-3.2 4.4' +
-    '-1.4-5.2-5.4 1 3.2-4.4L2 10l5.6-.6L7 3.8l4 3Z',
-  network: 'M12 6.6v4.4M8 15.2l2.6-2.6M16 15.2l-2.6-2.6' +
-    '|circle:12,4.4,2.2|circle:6.2,17.4,2.2|circle:17.8,17.4,2.2',
-  twin: 'M6.6 20.8V8.4a2.4 2.4 0 0 1 4.8 0v12.4M12.6 20.8V8.4a2.4 2.4 0 0 1 4.8 0' +
-    'v12.4M9 8.4 9 4.4M15 8.4V4.4M7.4 16.4h3.2M13.4 16.4h3.2',
-  dome: 'M2.8 19.6h18.4|arc:12,19.6,8.6,180,180|arc:12,19.6,4.6,180,180' +
-    '|M12 19.6V6.8M9.6 8.6 12 6.4l2.4 2.2',
   turbine: 'M12 10.6V3.8M13.8 13.2 19.6 16.6M10.2 13.2 4.4 16.6' +
     '|circle:12,12,1.8',
   rack: 'M3.8 4.8h16.4v3.2H3.8zM7.4 8v2.8M12 8v2.8M16.6 8v2.8' +
@@ -192,21 +165,9 @@ function icon(name: string, size = 18, weight = 1.6): string {
 /** Which icon each technology wears. Keyed by node id so the pure warfare model
  *  stays free of presentation concerns. */
 const NODE_ICON: Record<string, string> = {
-  missile_command: 'missile',
-  guidance_vanes: 'vanes',
-  hardened_silo: 'silo',
-  aegis_systems: 'dish',
-  radar_sweep: 'sweep',
-  fast_intercept: 'bolt',
   flight_certification: 'rotor',
   bomb_rack: 'bomb',
   reinforced_airframe: 'plate',
-  strike_guidance: 'crosshair',
-  strike_warhead: 'warhead',
-  strike_precision: 'burst',
-  aegis_network: 'network',
-  aegis_twin_rack: 'twin',
-  aegis_sky_shield: 'dome',
   air_turbine: 'turbine',
   air_heavy_bay: 'rack',
   air_command: 'star',
@@ -216,7 +177,7 @@ const NODE_ICON: Record<string, string> = {
 };
 
 const BRANCH_ICON: Record<WarfareBranch, string> = {
-  trunk: 'branch', strike: 'target', aegis: 'satellite', air: 'rotor',
+  trunk: 'branch', air: 'rotor',
 };
 
 // --- Authorization celebration --------------------------------------------------
@@ -276,8 +237,7 @@ function injectCelebrationCss(): void {
 
 /** The icon for a node, falling back to its hardware family. */
 export function nodeIconName(node: WarfareNode): string {
-  return NODE_ICON[node.id] ??
-    (node.hardware === 'silo' ? 'missile' : node.hardware === 'battery' ? 'dish' : 'rotor');
+  return NODE_ICON[node.id] ?? 'rotor';
 }
 
 /** Every icon name the set actually draws — exported so a test can prove no
@@ -409,19 +369,6 @@ class PreviewRenderer {
 function previewFor(node: WarfareNode, tint: number): {
   object: THREE.Object3D; distance: number; lift: number;
 } {
-  if (node.hardware === 'silo') {
-    // A silo node previews the pad — except the very first, where the point of
-    // the unlock is the missile itself.
-    if (node.id === 'missile_command' || node.id === 'strike_warhead') {
-      const m = buildMissileModel(tint);
-      m.flame.visible = false; m.flameCore.visible = false;
-      return { object: m.group, distance: 5.2, lift: 0 };
-    }
-    return { object: buildSiloModel(node.tier, tint).group, distance: 6.4, lift: 1.1 };
-  }
-  if (node.hardware === 'battery') {
-    return { object: buildBatteryModel(node.tier, tint).group, distance: 3.6, lift: 0.55 };
-  }
   return { object: buildHelicopterModel(node.tier, tint).group, distance: 7.6, lift: 0 };
 }
 
@@ -445,34 +392,7 @@ function statDiff(node: WarfareNode): StatRow[] {
   const round = (n: number): string =>
     Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
 
-  if (node.hardware === 'silo') {
-    const a = siloStats(Math.max(1, node.tier - 1)), b = siloStats(node.tier);
-    if (node.tier === 1) {
-      rows.push({ label: 'Tactical Silo', from: 'locked', to: 'unlocked', better: true });
-    }
-    push('Target range', a.range, b.range, ' blocks');
-    push('Cruise speed', a.speed, b.speed, ' b/s');
-    push('Silo HP', a.hp, b.hp);
-    push('Magazine', a.magazine, b.magazine);
-    push('Silo cooldown', a.cooldown, b.cooldown, 's', true);
-    push('Blast radius', a.blastRadius, b.blastRadius, ' blocks');
-    push('Centre player damage', a.playerDamage, b.playerDamage);
-    push('Centre hardware damage', a.hardwareDamage, b.hardwareDamage);
-    push('Player-built blocks removed', a.blocks, b.blocks);
-  } else if (node.hardware === 'battery') {
-    const a = batteryStats(Math.max(1, node.tier - 1)), b = batteryStats(node.tier);
-    if (node.tier === 1) {
-      rows.push({ label: 'Interceptor Turret', from: 'locked', to: 'unlocked', better: true });
-    }
-    push('Battery HP', a.hp, b.hp);
-    push('Defense radius', a.radius, b.radius, ' blocks');
-    push('Acquisition', a.acquire, b.acquire, 's', true);
-    push('Reload', a.reload, b.reload, 's', true);
-    push('Capacity', a.capacity, b.capacity);
-    if (a.networked !== b.networked) {
-      rows.push({ label: 'Shared tracks', from: 'no', to: 'yes', better: true });
-    }
-  } else {
+  {
     const a = helicopterStats(Math.max(1, node.tier - 1)), b = helicopterStats(node.tier);
     if (node.tier === 1) {
       rows.push({ label: 'Helicopter', from: 'locked', to: 'unlocked', better: true });
@@ -807,7 +727,7 @@ export class WarfareUI {
       this.chips.appendChild(b);
     };
     mk('all', 'spark', 'All');
-    for (const key of ['trunk', 'strike', 'aegis', 'air'] as WarfareBranch[]) {
+    for (const key of ['trunk', 'air'] as WarfareBranch[]) {
       mk(key, BRANCH_ICON[key], WARFARE_BRANCH_META[key].name.replace('Command ', ''));
     }
   }
@@ -1285,8 +1205,7 @@ export class WarfareUI {
     caption.style.cssText =
       `font-size:10px;color:${INK_DIM};text-align:center;margin-bottom:14px;` +
       'letter-spacing:0.7px;text-transform:uppercase';
-    caption.textContent = node.hardware === 'silo' ? 'Tactical missile system'
-      : node.hardware === 'battery' ? 'Interceptor battery' : 'Rotary-wing gunship';
+    caption.textContent = 'Rotary-wing gunship';
     host.appendChild(caption);
 
     const eyebrow = (text: string): string =>
