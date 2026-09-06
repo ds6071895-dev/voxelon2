@@ -59,6 +59,8 @@ export class Panorama {
     this.camera.rotation.set(-0.26, this.yaw, 0);
     this.sky.update(dt, this.camera);
     this.world.sunUniform.value = this.sky.sunIntensity;
+    this.world.sunTintUniform.value.copy(this.sky.sunTint);
+    this.world.skyTintUniform.value.copy(this.sky.ambientTint);
     // Track the live sky colour so the background + fog blend into the horizon.
     (this.scene.background as THREE.Color).copy(this.sky.skyColor);
     (this.scene.fog as THREE.Fog).color.copy(this.sky.skyColor);

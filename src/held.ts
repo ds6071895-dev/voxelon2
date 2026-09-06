@@ -96,6 +96,8 @@ export class HeldItemView {
   private aimT = 0;
   private isGun = false;
   private isGadgetModel = false;
+  /** A placeable block: shown as a bare mini-cube, with no fist behind it. */
+  private isBlockItem = false;
   private feel: GunFeel = gunFeel(-1);
   private readonly atlas: Atlas;
 
@@ -281,6 +283,7 @@ export class HeldItemView {
     this.currentItem = id;
     this.isGun = id !== null && !!ITEMS[id]?.gun;
     this.isGadgetModel = id !== null && isModeledGadget(id);
+    this.isBlockItem = id !== null && ITEMS[id]?.kind === 'block';
     this.feel = gunFeel(id ?? -1);
     if (this.mesh) {
       this.pivot.remove(this.mesh);
@@ -348,8 +351,11 @@ export class HeldItemView {
     // Hands are sized for an empty fist; a gun is a smaller, finer object, so
     // the grip hand shrinks a little rather than eclipsing the weapon.
     this.arm.scale.setScalar(this.isGun || this.isGadgetModel ? 0.86 : 1);
-    // The arm stays visible even with no item; setActive controls POV visibility.
-    this.arm.visible = true;
+    // A held block is drawn as a floating mini-cube: the fist reads as a second
+    // block stuck to the first, so the arm steps aside and the cube stands
+    // alone. The arm stays visible with no item at all (the bare fist) and for
+    // every sprite/model item; setActive controls POV visibility.
+    this.arm.visible = !this.isBlockItem;
   }
 
   /** Generic mining/placing swing (tools, blocks). */

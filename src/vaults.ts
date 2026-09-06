@@ -3,8 +3,9 @@
 // per-player loot rolls all derive ONLY from the world seed + a terrain
 // context, so the server and the offline client compute the identical dungeon.
 //
-// A vault is: a ruined surface entrance (stone arch + torch pair) over a
-// walk-down staircase into a MASSIVE carved complex — 8–15 themed wings
+// A vault is: a monumental surface GATE (paved forecourt, brazier avenue, lit
+// pylons and a glowing transom) over a sleeved walk-down staircase into a
+// MASSIVE carved complex — 8–15 themed wings
 // (great pillared halls, sunken spike pits, cramped crypts) linked by an
 // L-corridor network, a MOB SPAWNER cage at the heart of every guarded room,
 // a Vault Brute boss lair with a dais chest, and per-player treasure that
@@ -155,7 +156,9 @@ export interface VaultStamp {
   rooms: VaultRoom[];
   /** The per-player VaultChest position (inside the boss room). */
   chest: { x: number; y: number; z: number };
-  /** Entrance mouth (where the staircase breaks the surface — the arch). */
+  /** Entrance mouth (where the staircase breaks the surface — the gate). The
+   *  gatehouse stands within 4 blocks of this point; nothing else a vault
+   *  stamps is ever allowed above ground. */
   mouth: { x: number; y: number; z: number };
   /** Underground bounding box: "you are inside the vault" test. */
   bounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number };
@@ -971,39 +974,128 @@ export function vaultStamp(
     }
   }
 
-  // 6) Entrance staircase: a walk-down tunnel from the hall's -u wall, rising
-  //    1 block per step until it breaks the surface (deterministic: ctx.height).
+  // 6) THE GATE: the entrance is a piece of ARCHITECTURE, not a hole in a hill.
+  //    On the surface: a paved forecourt on a foundation skirt, a brazier
+  //    avenue whose length reads the tier, two lit pylons and a glowing transom
+  //    over a four-wide door. Below it: a sleeved processional staircase with
+  //    masonry treads, jamb sconces and rune ribs, walking down into the hall.
+  //    Everything here is family-coloured and derives ONLY from ctx.height /
+  //    ctx.ravineDepth — it consumes NO layout rng, so old worlds keep their
+  //    exact room plan and only the way in changes.
   let mouth = { x: ax, y: g, z: az };
   {
     const SEA = 63; // terrain SEA_LEVEL (not imported — would be a module cycle)
+    /** Effective surface of a column (ravine floors count) — the burial line. */
+    const surfaceAt = (px: number, pz: number): number => {
+      const h = ctx.height(px, pz);
+      const rd = ctx.ravineDepth(px, pz);
+      return rd > 0 ? Math.max(10, h - rd) : h;
+    };
+    /** Stamp only where the cell stays underground. The stair runs for up to
+     *  40 blocks through open terrain, so its masonry MUST NOT break the
+     *  surface anywhere: only the gate itself (a 4-block radius around the
+     *  mouth) is allowed to stand above ground. */
+    const buried = (px: number, y: number, pz: number, id: number): void => {
+      if (y <= surfaceAt(px, pz)) mark(px, y, pz, id);
+    };
+    // A four-wide processional lane between two masonry jambs. The lane is
+    // centred on the hall doorway (hall interior spans v = -3..3) and the
+    // gate's outer pylons sit at v = -4 / 3, so the whole entrance is
+    // symmetric about the stair axis.
+    const LANE = [-2, -1, 0, 1], JAMB_L = -3, JAMB_R = 2;
+    const WIDE = [-4, -3, -2, -1, 0, 1, 2, 3];
+
+    /** The surface gatehouse at the mouth (u0), sill level `my`. */
+    const buildGate = (u0: number, my: number): void => {
+      // Forecourt: a flat paved terrace at the sill on a short foundation
+      // skirt (so it never floats where the ground falls away), cut five
+      // blocks clear overhead so the door is walk-in from any approach.
+      for (let du = 1; du <= 4; du++) {
+        for (const s of WIDE) {
+          const px = wx(u0 - du, s), pz = wz(u0 - du, s);
+          const base = Math.max(my - 5, Math.min(my - 1, surfaceAt(px, pz)));
+          for (let y = base; y < my - 1; y++) mark(px, y, pz, shellBlock);
+          const edge = du === 4 || s === -4 || s === 3;
+          mark(px, my - 1, pz, edge || s === -1 || s === 0 ? trimBlock : floorBlock);
+          for (let y = my; y <= my + 4; y++) mark(px, y, pz, Block.Air);
+        }
+      }
+      // A brazier avenue down both edges of the court — one pair per tier, so
+      // you can count a vault's tier from the ridge before you commit to it.
+      for (let k = 0; k < tier; k++) {
+        for (const s of [-4, 3]) {
+          const px = wx(u0 - 2 - k, s), pz = wz(u0 - 2 - k, s);
+          mark(px, my, pz, trimBlock);
+          mark(px, my + 1, pz, family === 'gilded' ? Block.GoldBlock : trimBlock);
+          mark(px, my + 2, pz, lightBlock);
+        }
+      }
+      // Jambs either side of the door, with a rune inset at eye height.
+      for (const s of [JAMB_L, JAMB_R]) {
+        const px = wx(u0, s), pz = wz(u0, s);
+        for (let y = my - 3; y <= my + 3; y++) mark(px, y, pz, shellBlock);
+        mark(px, my + 2, pz, Block.RuneGlass);
+      }
+      // Lintel, glowing transom and cornice spanning the opening.
+      for (const s of [JAMB_L, -2, -1, 0, 1, JAMB_R]) {
+        const px = wx(u0, s), pz = wz(u0, s);
+        mark(px, my + 4, pz, trimBlock);
+        mark(px, my + 5, pz, s === -1 || s === 0 ? lightBlock
+          : s === JAMB_L || s === JAMB_R ? shellBlock : Block.RuneGlass);
+        mark(px, my + 6, pz, trimBlock);
+      }
+      // Two banded pylons crowned with a beacon — the landmark. Tier sets the
+      // height, so a Tier III gate towers over a Tier I one and both are
+      // legible from a ridge away.
+      const ht = 7 + tier * 2;
+      for (const s of [-4, 3]) {
+        const px = wx(u0, s), pz = wz(u0, s);
+        for (let y = my - 3; y < my + ht; y++) {
+          mark(px, y, pz, (y - my) % 3 === 2 ? trimBlock : shellBlock);
+        }
+        mark(px, my + 2, pz, Block.RuneGlass);
+        mark(px, my + ht - 1, pz, Block.RuneGlass);
+        mark(px, my + ht, pz, lightBlock);
+      }
+    };
+
     let surfaced = false;
     // Deeper burial means a longer climb: up to 40 steps (u stays ≤ 44 ≈ reach).
     for (let i = 0; i <= 40 && !surfaced; i++) {
       const u = -(hall.hw + i);
       const stepY = fy + 1 + i;
       const colH = ctx.height(wx(u, 0), wz(u, 0));
-      for (const s of [-1, 0]) {
-        for (let y = stepY; y <= stepY + 2; y++) {
-          mark(wx(u, s), y, wz(u, s), Block.Air);
-        }
+      // The walk lane: a masonry tread underfoot, four blocks of headroom and
+      // a vaulted ceiling that ribs every sixth step.
+      for (const s of LANE) {
+        const px = wx(u, s), pz = wz(u, s);
+        for (let y = stepY; y <= stepY + 3; y++) mark(px, y, pz, Block.Air);
+        buried(px, stepY - 1, pz, s === -1 || s === 0 ? trimBlock : floorBlock);
+        buried(px, stepY + 4, pz, i % 6 === 3 ? trimBlock : shellBlock);
+      }
+      // Jamb walls, sconced every fourth step so the descent is never dark.
+      for (const s of [JAMB_L, JAMB_R]) {
+        const px = wx(u, s), pz = wz(u, s);
+        for (let y = stepY - 1; y <= stepY + 4; y++) buried(px, y, pz, shellBlock);
+        if (i % 4 === 2) buried(px, stepY + 2, pz, lightBlock);
+        else if (i % 6 === 3) buried(px, stepY + 2, pz, Block.RuneGlass);
       }
       // Never surface below sea level — keep climbing until the mouth is dry.
       if (stepY >= colH && stepY > SEA) {
         surfaced = true;
-        mouth = { x: wx(u, 0), y: Math.max(stepY, colH), z: wz(u, 0) };
-        // Ruined arch: two cobble pillars either side of the mouth + a beam +
-        // a torch pair, so the entrance reads as man-made from a distance.
-        for (const s of [-2, 1]) {
-          const px = wx(u, s), pz = wz(u, s);
-          for (let k = 0; k < 3; k++) mark(px, mouth.y + k, pz, Block.Cobblestone);
-          mark(px, mouth.y + 3, pz, Block.Torch);
-        }
-        for (const s of [-1, 0]) mark(wx(u, s), mouth.y + 3, wz(u, s), Block.Cobblestone);
+        mouth = { x: wx(u, 0), y: stepY, z: wz(u, 0) };
+        buildGate(u, stepY);
       }
     }
     // No dry surfacing point within reach — the site can't host a reachable
     // vault, so reject it outright (every vault MUST have a walk-in mouth).
     if (!surfaced) return null;
+    // Threshold columns just inside the hall, framing the arrival from below.
+    for (const s of [JAMB_L, JAMB_R]) {
+      const px = wx(-(hall.hw - 1), s), pz = wz(-(hall.hw - 1), s);
+      for (let y = fy + 1; y <= fy + 3; y++) mark(px, y, pz, Block.IvoryColumn);
+      mark(px, fy + 4, pz, lightBlock);
+    }
   }
 
   // Emit blocks + compute rooms/bounds in world space.

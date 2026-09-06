@@ -38,7 +38,7 @@ import {
   ballotOf, electionOf, governmentOf, isPresident, partyOfFounder, voteCounts,
 } from './politics';
 import {
-  KIT_ARMOR_SLOTS, KIT_SLOTS, MAX_KIT_STACK, TREASURY_PEDESTALS,
+  KIT_ARMOR_SLOTS, KIT_SLOTS, MAX_KIT_STACK, TREASURY_PAGES, TREASURY_PEDESTALS,
   type KitLoadout, kitCost, kitItemCount, kitSlotAccepts, kitStacks, newKit,
 } from './treasury';
 import { skinSeed } from './net/protocol';
@@ -234,6 +234,11 @@ const CSS = `
 }
 .vx-prez-legend span { display: flex; align-items: center; gap: 6px; }
 .vx-prez-legend i { width: 9px; height: 9px; border-radius: 3px; flex: none; }
+/* The key to the majority line: the same dashes, stood up as a swatch. */
+.vx-prez-legend i[data-major="1"] {
+  width: 2px; height: 12px; border-radius: 1px; margin: 0 3px;
+  background: repeating-linear-gradient(180deg, rgba(15, 26, 44, .55) 0 3px, transparent 3px 6px);
+}
 
 /* The front-runner. One wide card, because the projected president is not just
    the first row of a list — it is the answer to the question the screen exists
@@ -520,9 +525,9 @@ const CSS = `
 
 /* --- the kit workshop ----------------------------------------------------- */
 /* The loadout is edited in the SHAPE IT WILL ARRIVE IN: four armor slots down
-   the side, nine hotbar slots across the bottom, exactly like the inventory the
-   recruit opens ten seconds later. Editing a kit as a list of lines is how you
-   ship a kit nobody can picture. */
+   the side, nine hotbar slots across in a SINGLE row, exactly like the inventory
+   the recruit opens ten seconds later. Editing a kit as a list of lines is how
+   you ship a kit nobody can picture. */
 .vx-prez-kit { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; align-items: start; }
 .vx-prez-mannequin {
   display: grid; grid-template-columns: auto 1fr; gap: 14px; align-items: center;
@@ -531,7 +536,13 @@ const CSS = `
   box-shadow: inset 0 0 0 1px var(--line);
 }
 .vx-prez-armorcol { display: flex; flex-direction: column; gap: 6px; }
-.vx-prez-hotbar { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+/* NINE ACROSS, ALWAYS ONE ROW. The hotbar a recruit opens is one line of nine,
+   so the preview that promises it has to be one line of nine too — a kit that
+   wraps onto a second row is a picture of an inventory that does not exist.
+   The slots give up their fixed width inside it and ride the track instead, so
+   the row narrows with the panel rather than spilling out of it. */
+.vx-prez-hotbar { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 5px; }
+.vx-prez-hotbar .vx-prez-slotbtn { width: 100%; height: auto; aspect-ratio: 1; }
 .vx-prez-kitfoot { margin-top: 12px; }
 /* One slot in the workshop: an inventory square that also takes a click. */
 .vx-prez-slotbtn {
@@ -666,7 +677,6 @@ const CSS = `
   .vx-prez-party, .vx-prez-spot { grid-template-columns: 1fr; }
   .vx-prez-stage, .vx-prez-spot-stage { min-height: 186px; }
   .vx-prez-vault { grid-template-columns: repeat(5, 1fr); }
-  .vx-prez-hotbar { grid-template-columns: repeat(5, 1fr); }
 }
 @media (prefers-reduced-motion: reduce) {
   .vx-prez-bar::after { animation: none; display: none; }
@@ -697,8 +707,8 @@ export interface GovernActions {
   onSetTax: (rate: number) => void;
   /** Rewrite the recruit loadout (4 armor slots then 9 hotbar slots). */
   onSetKit: (slots: KitLoadout) => void;
-  /** `source` says which purse pays — the treasury, or the president's pockets. */
-  onFundKits: (count: number, source: 'treasury' | 'inventory') => void;
+  /** Fund `count` kits out of the president's OWN inventory — the only purse. */
+  onFundKits: (count: number) => void;
   onClaimKit: () => void;
 }
 
@@ -709,7 +719,7 @@ export interface GovernData {
   /** Your faction's treasury contents (server-sent; empty while unpledged). */
   treasury: (ItemStack | null)[];
   /** What YOU are carrying — the shelf the kit workshop builds a loadout from,
-   *  and the purse the "fund from my pockets" button spends. */
+   *  and the one purse that funding a kit spends. */
   pocket: (ItemStack | null)[];
   /** Avatars for the party founders who are currently online. */
   cosmeticsOf: (username: string) => Cosmetics | undefined;
@@ -1149,6 +1159,13 @@ export class PresidentUI {
     head.append(h3, sub);
     race.appendChild(head);
 
+    // The majority mark only earns its place while it still separates somebody.
+    // With one party holding every vote the threshold is behind the entire race
+    // AND the line lands squarely through that party's own centred "100%", which
+    // reads as a stray hairline drawn across the count for no reason.
+    const lead = standings.length ? (counts[standings[0].id] ?? 0) : 0;
+    const showMajor = total > 0 && lead < total;
+
     const strip = document.createElement('div');
     strip.className = 'vx-prez-strip';
     if (total > 0) {
@@ -1171,9 +1188,11 @@ export class PresidentUI {
         seg.addEventListener('mouseleave', hideTip);
         strip.appendChild(seg);
       }
-      const major = document.createElement('div');
-      major.className = 'vx-prez-major';
-      strip.appendChild(major);
+      if (showMajor) {
+        const major = document.createElement('div');
+        major.className = 'vx-prez-major';
+        strip.appendChild(major);
+      }
     }
     race.appendChild(strip);
 
@@ -1189,6 +1208,17 @@ export class PresidentUI {
         const label = document.createElement('span');
         label.textContent = `${party.name} · ${n}`;   // player-authored: text node
         item.append(swatch, label);
+        legend.appendChild(item);
+      }
+      // An unlabelled hairline down the middle of the count is a mystery. It
+      // costs one legend entry to say what it marks.
+      if (showMajor) {
+        const item = document.createElement('span');
+        const mark = document.createElement('i');
+        mark.dataset.major = '1';
+        const label = document.createElement('span');
+        label.textContent = 'majority — past this, a party wins outright';
+        item.append(mark, label);
         legend.appendChild(item);
       }
     } else {
@@ -1700,7 +1730,8 @@ export class PresidentUI {
     panel.append(panelHead('scales', 'The levy', `${Math.round(rate * 100)}% today`));
     const copy = document.createElement('p');
     copy.textContent = 'A share of everything your citizens mine, farm from machines and haul '
-      + 'out of vaults goes to the treasury. The treasury is the only thing that pays for recruit kits.';
+      + 'out of vaults goes to the treasury — a hoard the enemy can raid during a war, and '
+      + 'the reason your flag pad is worth defending.';
     const row = document.createElement('div');
     row.className = 'vx-prez-taxrow';
     const value = document.createElement('div');
@@ -1790,9 +1821,11 @@ export class PresidentUI {
       `${g.kitStock} stashed`));
     const copy = document.createElement('p');
     copy.textContent = inOffice
-      ? 'Lay out what a new citizen is handed. Every recruit can claim exactly one, '
-        + 'ever — so a well-stocked faction is one that new players actually want to join.'
-      : 'What your faction hands a new citizen. Every recruit can claim exactly one, ever.';
+      ? 'Lay out what a new citizen is handed, then fund a stock of it OUT OF YOUR OWN '
+        + 'INVENTORY. Every recruit can claim exactly one, ever — so a well-stocked faction '
+        + 'is one somebody paid for out of their own pockets.'
+      : 'What your faction hands a new citizen, funded out of the president\'s own pockets. '
+        + 'Every recruit can claim exactly one, ever.';
     panel.appendChild(copy);
 
     const kit = this.kitOnBench(data);
@@ -2006,12 +2039,12 @@ export class PresidentUI {
   }
 
   /**
-   * What funding costs and who can pay it.
+   * What funding costs, and whether the president can pay it.
    *
-   * Priced against BOTH purses at once, line by line: what the treasury holds
-   * and what the president is carrying. A president with a full backpack and an
-   * empty treasury can still equip the faction, and the panel says so before
-   * they press anything.
+   * ONE purse: their own pockets. Kits are armed out of what the president
+   * personally dug up, not out of the levy, so the bill is priced line by line
+   * against what they are carrying — and the button says which line is short
+   * before they press anything.
    */
   private buildKitBill(data: GovernData, kit: KitLoadout, inOffice: boolean): HTMLElement {
     const wrap = document.createElement('div');
@@ -2045,11 +2078,7 @@ export class PresidentUI {
       return wrap;
     }
 
-    // How much of each purse there is, per item.
-    const inBank = new Map<number, number>();
-    for (const slot of data.treasury) {
-      if (slot) inBank.set(slot.id, (inBank.get(slot.id) ?? 0) + slot.count);
-    }
+    // What the president is actually carrying, per item.
     const inPocket = new Map<number, number>();
     for (const slot of data.pocket) {
       if (slot) inPocket.set(slot.id, (inPocket.get(slot.id) ?? 0) + slot.count);
@@ -2075,22 +2104,24 @@ export class PresidentUI {
     const buttons = document.createElement('div');
     buttons.className = 'vx-prez-row';
     buttons.style.marginTop = '12px';
-    const fromBank = document.createElement('button');
-    fromBank.type = 'button';
-    fromBank.className = 'vx-gov-btn';
-    fromBank.dataset.kind = 'primary';
-    fromBank.textContent = 'Fund from the treasury';
     const fromPocket = document.createElement('button');
     fromPocket.type = 'button';
     fromPocket.className = 'vx-gov-btn';
-    fromPocket.textContent = 'Fund from my pockets';
-    buttons.append(fromBank, fromPocket);
+    fromPocket.dataset.kind = 'primary';
+    fromPocket.textContent = 'Fund from my inventory';
+    buttons.appendChild(fromPocket);
+
+    const note = document.createElement('div');
+    note.className = 'vx-prez-votes';
+    note.style.marginTop = '9px';
+    note.textContent = 'Kits come out of YOUR pockets — the items leave your inventory '
+      + 'the moment you fund them.';
 
     const refresh = (): void => {
       const n = Math.max(1, Math.min(100, Math.floor(Number(count.value) || 1)));
       this.draftKits = n;
       bill.replaceChildren();
-      let bankOk = true, pocketOk = true;
+      let pocketOk = true;
       const header = document.createElement('div');
       header.className = 'vx-prez-billline';
       header.style.cssText = 'font-size:9px;letter-spacing:1.3px;text-transform:uppercase;'
@@ -2098,36 +2129,31 @@ export class PresidentUI {
       const hLeft = document.createElement('span');
       hLeft.textContent = `Bill for ${n} kit${n === 1 ? '' : 's'}`;
       const hRight = document.createElement('span');
-      hRight.textContent = 'Treasury / pockets / needed';
+      hRight.textContent = 'Carrying / needed';
       header.append(hLeft, hRight);
       bill.appendChild(header);
       for (const line of lines) {
         const need = line.count * n;
-        const bank = inBank.get(line.id) ?? 0;
         const pocket = inPocket.get(line.id) ?? 0;
-        if (bank < need) bankOk = false;
         if (pocket < need) pocketOk = false;
         const el = document.createElement('div');
         el.className = 'vx-prez-billline';
-        if (bank < need && pocket < need) el.dataset.short = '1';
+        if (pocket < need) el.dataset.short = '1';
         const label = document.createElement('span');
         label.textContent = ITEMS[line.id]?.name ?? `#${line.id}`;
         const amount = document.createElement('span');
-        amount.textContent = `${bank} / ${pocket} / ${need}`;
+        amount.textContent = `${pocket} / ${need}`;
         el.append(label, amount);
         bill.appendChild(el);
       }
-      fromBank.disabled = !bankOk;
       fromPocket.disabled = !pocketOk;
-      fromBank.textContent = bankOk ? 'Fund from the treasury' : 'Treasury cannot cover it';
-      fromPocket.textContent = pocketOk ? 'Fund from my pockets' : 'Not carrying enough';
+      fromPocket.textContent = pocketOk ? 'Fund from my inventory' : 'Not carrying enough';
     };
     count.addEventListener('input', refresh);
     refresh();
-    fromBank.addEventListener('click', () => this.actions?.onFundKits(this.draftKits, 'treasury'));
-    fromPocket.addEventListener('click', () => this.actions?.onFundKits(this.draftKits, 'inventory'));
+    fromPocket.addEventListener('click', () => this.actions?.onFundKits(this.draftKits));
 
-    wrap.append(row, bill, buttons);
+    wrap.append(row, bill, buttons, note);
     return wrap;
   }
 
@@ -2219,9 +2245,10 @@ export class PresidentUI {
     const note = document.createElement('div');
     note.className = 'vx-prez-note';
     note.textContent = 'Your hoard stands in the open at the flag: a strongbox beside the pole '
-      + 'and a ring of pedestals around it, one per slice of what is banked. While a war window '
-      + 'is open the shields drop and the enemy can walk in and haul stacks off it, so what is '
-      + 'out there is worth defending.';
+      + 'and a ring of pedestals around it, one per slice of what is banked. This page is the '
+      + 'ledger — to actually open it, the president walks to the flag and right-clicks the '
+      + 'strongbox. While a war window is open the shields drop and the enemy can walk in and '
+      + 'haul stacks off it, so what is out there is worth defending.';
     this.body.appendChild(note);
 
     const ledger = document.createElement('div');
@@ -2237,7 +2264,8 @@ export class PresidentUI {
     this.body.appendChild(sectionRule('The ring, as it stands at the flag'));
     this.body.appendChild(this.buildRingMap(data));
 
-    this.body.appendChild(sectionRule('Every slot in the strongbox'));
+    this.body.appendChild(sectionRule(
+      `Every slot in the strongbox · ${TREASURY_PAGES} pages`));
     const vault = document.createElement('div');
     vault.className = 'vx-prez-vault';
     for (let i = 0; i < Math.max(27, data.treasury.length); i++) {

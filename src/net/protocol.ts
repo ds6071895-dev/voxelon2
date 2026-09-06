@@ -47,6 +47,14 @@ export interface FactionPublic {
   kitStock: number;
   /** COUNT only. The treasury's contents are for its own members. */
   treasuryCount: number;
+  /**
+   * Live citizens whose looks the server actually knows (they are online), so a
+   * faction with a VACANT SEAT still has real people standing on its card
+   * instead of an empty plinth. Capped at FACTION_FACES_LIMIT. Anybody in
+   * `members` who is not in here is drawn from `defaultCosmetics(skinSeed(name))`
+   * — the same avatar they wear in the world when the client has never seen them.
+   */
+  faces?: { username: string; cosmetics?: Cosmetics }[];
   /** The sitting president, absent while the seat is vacant. */
   president?: {
     username: string;
@@ -63,6 +71,9 @@ export interface FactionPublic {
 
 /** Roster names sent per faction on the pledge screen. */
 export const FACTION_ROSTER_LIMIT = 40;
+/** Citizens drawn as live 3D busts on a faction's card. Three fits the plinth
+ *  at every card width and costs three avatars, not forty. */
+export const FACTION_FACES_LIMIT = 3;
 
 export const SERVER_PORT = 8080;
 export const SNAPSHOT_HZ = 15;     // server -> clients transform broadcasts
@@ -326,16 +337,24 @@ export type ClientMsg =
   // Rewrite the recruit loadout: 4 armor slots then 9 hotbar slots, nulls for
   // the gaps (treasury.ts owns the layout and re-validates every slot).
   | { t: 'govSetKit'; slots: (ItemStack | null)[] }
-  // Fund kits. `source` says who pays: the treasury, or the president's own
-  // pockets — in which case the CLIENT has already removed the bill from its
-  // inventory and the server banks it before spending it, so the treasury nets
-  // out unchanged and the stock still comes from something real. Same trust
-  // model as `drop`, which is also the client declaring what it just had.
-  | { t: 'govFundKits'; count: number; source?: 'treasury' | 'inventory' }
+  // Fund kits. The president pays out of their OWN POCKETS, always: the CLIENT
+  // has already removed the bill from its inventory and the server banks it
+  // before spending it, so the treasury nets out unchanged and the stock still
+  // comes from something real. Same trust model as `drop`, which is also the
+  // client declaring what it just had. `source` is carried so a build that
+  // still knows about the old treasury purse is REFUSED rather than handed free
+  // kits it never paid for.
+  | { t: 'govFundKits'; count: number; source?: 'inventory' }
   // Claim the recruit kit your faction funded (once per account, ever).
   | { t: 'claimKit' }
   // Haul stacks out of the ENEMY treasury. Refused outside a war window.
   | { t: 'treasuryRaid'; faction: number }
+  // Open YOUR OWN hoard as a chest. President-only, and only while standing at
+  // the flag — the server answers with a `treasury` message or refuses.
+  | { t: 'treasuryOpen'; faction: number }
+  // Write one PAGE of that hoard back (the chest panel holds one page at a
+  // time). Same president + in-reach check, and every slot is re-validated.
+  | { t: 'treasurySet'; faction: number; page: number; slots: (ItemStack | null)[] }
   // RETIRED (Warfare Command): the old mob-kill XP report. Kept in the union so
   // an older client's message is accepted and ignored rather than desyncing.
   | { t: 'xp'; amount: number }
@@ -433,7 +452,9 @@ export type ServerMsg =
       worldTime: number;
       players: PlayerInfo[]; edits: [string, number][]; items: ItemEntityInfo[];
       turrets: { x: number; y: number; z: number; state: TurretState }[];
-      /** Current season number + seconds left before the deadline (Phase 5). */
+      /** Current season number + seconds left before the deadline (Phase 5), or
+       *  SEASON_ENDLESS (-1) for a season that has no deadline — which is every
+       *  season now: one ends when a capital falls, not on a clock. */
       season: { number: number; timeLeft: number };
       /** War window: the shrinking-border battle. While `active` the border is
        *  closing (derive it from timeLeft+duration via warBorderAt); else a
@@ -499,6 +520,8 @@ export type ServerMsg =
   | { t: 'turret'; x: number; y: number; z: number; state: TurretState }
   | { t: 'turretFire'; x: number; y: number; z: number; tx: number; ty: number; tz: number }
   // Season clock (Phase 5): number + seconds left (periodic HUD broadcast).
+  // `timeLeft` is seconds to the deadline, or -1 (SEASON_ENDLESS) when the
+  // season has no deadline at all.
   | { t: 'season'; number: number; timeLeft: number }
   // War clock: the shrinking-border battle. `score` = kills per faction in the
   // current war; `wins` = war wins per faction this season. Broadcast
@@ -530,6 +553,9 @@ export type ServerMsg =
   | { t: 'notify'; notif: Notification }
   // Somebody is in the vault. Drives the alarm horn for the defenders.
   | { t: 'treasuryRaided'; faction: number; by: string; stacks: number }
+  // The hoard, in full, in answer to `treasuryOpen` — the president's live copy
+  // to open the chest panel on.
+  | { t: 'treasury'; faction: number; slots: (ItemStack | null)[] }
   // Gadget visual effect to play everywhere (frag/oil blast, smoke cloud).
   | { t: 'gadgetFx'; kind: GadgetKind; x: number; y: number; z: number }
   // Spy disguise (Phase 8): render player `id` as `faction` until `until`

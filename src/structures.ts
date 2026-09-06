@@ -10,6 +10,7 @@ import { Block } from './blocks';
 import type { LootTier } from './loot';
 import { inCore } from './net/protocol';
 import { hash2, mulberry32 } from './noise';
+import { PLAZA_CLEAR, plazaDistance } from './plaza';
 
 export type StructureKind = 'tower' | 'bunker' | 'pod';
 
@@ -55,6 +56,15 @@ export function structureKindAt(seed: number, cx: number, cz: number): Structure
 
 /** The full deterministic stamp for the structure anchored in (cx, cz), or
  *  null (no anchor, or the terrain there can't host one). */
+// Ground a bunker will dig into: open, flat and treeless. The v0.45 biome grid
+// added several more biomes of that kind, and without listing them a bunker
+// would have become a rarity purely because Plains lost ground to its new
+// neighbours.
+const OPEN_GROUND: Biome[] = [
+  Biome.Plains, Biome.Desert, Biome.Snowy, Biome.Steppe, Biome.Savanna,
+  Biome.Meadow, Biome.SunflowerPlains, Biome.Mesa, Biome.Heath,
+];
+
 export function structureStamp(
   seed: number, cx: number, cz: number, ctx: StructureCtx
 ): StructureStamp | null {
@@ -64,14 +74,17 @@ export function structureStamp(
     (seed ^ Math.imul(cx, 0x27d4eb2f) ^ Math.imul(cz, 0x165667b1) ^ 0x517) >>> 0);
   const ax = cx * 16 + 3 + Math.floor(rng() * 10);
   const az = cz * 16 + 3 + Math.floor(rng() * 10);
+  // Faction monuments own their ground: a ruin or a bunker hatch landing on a
+  // flag plaza would be stamped over levelled paving. Keep a wide berth — a
+  // stamp reaches ~4 blocks from its anchor and the site wants breathing room.
+  if (plazaDistance(ax, az) <= PLAZA_CLEAR + 8) return null;
   const g = ctx.height(ax, az);
   if (g < MIN_GROUND || g > MAX_GROUND) return null;   // underwater / extreme peak
   if (ctx.ravineDepth(ax, az) > 0) return null;        // never straddle a canyon
   const biome = ctx.biomeWithWater(ax, az, g);
   if (biome === Biome.Ocean || biome === Biome.Beach) return null;
   // Bunkers dig into open flat country; anywhere else the site gets a tower.
-  if (kind === 'bunker' &&
-      biome !== Biome.Plains && biome !== Biome.Desert && biome !== Biome.Snowy) {
+  if (kind === 'bunker' && !OPEN_GROUND.includes(biome)) {
     kind = 'tower';
   }
   const blocks: StructureStamp['blocks'][number][] = [];

@@ -14,17 +14,38 @@ import { mulberry32, wrappedValueNoise } from './noise';
 export const DAY_LENGTH = 1200; // seconds: vanilla 20-minute day
 export const WATER_FOG_COLOR = new THREE.Color(0x16335f);
 
-const DAY_HORIZON = new THREE.Color(0xa9d7ff);
-const DAY_ZENITH = new THREE.Color(0x397de0);
-const NIGHT_HORIZON = new THREE.Color(0x172440);
+const DAY_HORIZON = new THREE.Color(0xa8dcff);
+const DAY_ZENITH = new THREE.Color(0x1f66e6);
+const NIGHT_HORIZON = new THREE.Color(0x182748);
 const NIGHT_ZENITH = new THREE.Color(0x03050d);
-const SUNSET = new THREE.Color(0xe8853c);
+// Dawn and dusk are not the same colour. Sunrise runs cool-pink into gold;
+// sunset runs gold into a deep ember red. Having two makes the day feel like
+// it has a direction instead of playing the same twenty seconds backwards.
+const DAWN = new THREE.Color(0xff9d7a);
+const DUSK = new THREE.Color(0xf2652a);
+const DAY_HAZE = new THREE.Color(0xdcefff);   // atmospheric pile-up at the skyline
+const SUN_HIGH_GLOW = new THREE.Color(0xfff0cf);  // halo colour once the sun is up
+const SUN_DISC = new THREE.Color(0xfffee8);
+const SUN_DISC_HIGH = new THREE.Color(0xffe8bd);
+const NIGHT_HAZE = new THREE.Color(0x1b2c4e);
 const AURORA_HORIZON = new THREE.Color(0x164b55);
+
+// Direct-sun and ambient-sky colours handed to the terrain shader.
+const SUN_NOON = new THREE.Color(1.06, 1.03, 0.96);
+const SUN_LOW = new THREE.Color(1.32, 0.84, 0.54);
+const SUN_NIGHT = new THREE.Color(0.72, 0.82, 1.08);
+const AMBIENT_DAY = new THREE.Color(0.84, 0.93, 1.14);
+const AMBIENT_LOW = new THREE.Color(1.02, 0.86, 0.86);
+const AMBIENT_NIGHT = new THREE.Color(0.66, 0.78, 1.14);
 
 const CLOUD_Y = 192;
 const CLOUD_TEX = 64;     // texels per repeat
 const CLOUD_PLANE = 4096; // world units
 const CLOUD_REPEAT = 4;   // -> one cloud cell = 16 blocks, like vanilla
+// A second, higher and sparser deck. Two layers drifting at different speeds
+// give the sky PARALLAX, which is most of what makes it read as deep.
+const HIGH_CLOUD_Y = 244;
+const HIGH_CLOUD_REPEAT = 2;
 
 /** Moonlit-night skylight floor. Higher than vanilla so the world stays
  *  PLAYABLE at night (you can still see) while reading clearly as night —
@@ -43,6 +64,24 @@ export function daylight(tod: number): number {
   return NIGHT_FLOOR + (1 - NIGHT_FLOOR) * s;
 }
 
+/** Soft radial falloff used for the sun and moon halos. */
+function radialGlowTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 128;
+  const ctx = canvas.getContext('2d')!;
+  const g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+  g.addColorStop(0, 'rgba(255,255,255,1)');
+  g.addColorStop(0.18, 'rgba(255,255,255,0.62)');
+  g.addColorStop(0.45, 'rgba(255,255,255,0.16)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 128, 128);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.generateMipmaps = false;
+  tex.minFilter = THREE.LinearFilter;
+  return tex;
+}
+
 export class Sky {
   /** Time in days; fractional part is the time of day (0 = sunrise). */
   time = 0.04; // start shortly after sunrise
@@ -52,6 +91,13 @@ export class Sky {
   readonly skyColor = new THREE.Color();
   /** Night-only aurora strength. Also drives its subtle light on terrain. */
   auroraIntensity = 0;
+  /** Colour of direct sunlight right now — white at noon, deep gold at the
+   *  horizon crossings, moon-blue at night. The terrain shader multiplies its
+   *  sunlit pixels by this. */
+  readonly sunTint = new THREE.Color(1, 1, 1);
+  /** Colour of the ambient sky bounce that fills shadow. Cool blue by day,
+   *  which is what stops shaded voxel faces reading as flat grey. */
+  readonly ambientTint = new THREE.Color(1, 1, 1);
 
   /** Time actually presented by the renderer. It follows the authoritative
    * clock gradually so server corrections and fixed-time arenas never pop the
@@ -67,6 +113,13 @@ export class Sky {
   private readonly clouds: THREE.Mesh;
   private readonly cloudsMat: THREE.MeshBasicMaterial;
   private readonly cloudTexture: THREE.CanvasTexture;
+  private readonly highClouds: THREE.Mesh;
+  private readonly highCloudsMat: THREE.MeshBasicMaterial;
+  private readonly highCloudTexture: THREE.CanvasTexture;
+  private readonly sunGlow: THREE.Mesh;
+  private readonly sunGlowMat: THREE.MeshBasicMaterial;
+  private readonly moonGlow: THREE.Mesh;
+  private readonly moonGlowMat: THREE.MeshBasicMaterial;
   private readonly auroraPhase: number;
   private auroraTime = 0;
 
@@ -79,6 +132,9 @@ export class Sky {
       uniforms: {
         uHorizon: { value: DAY_HORIZON.clone() },
         uZenith: { value: DAY_ZENITH.clone() },
+        uHaze: { value: DAY_HAZE.clone() },
+        uSunDir: { value: new THREE.Vector3(1, 0, 0) },
+        uSunGlow: { value: new THREE.Color(0, 0, 0) },
         uAurora: { value: 0 },
         uAuroraTime: { value: 0 },
         uAuroraPhase: { value: this.auroraPhase },
@@ -96,6 +152,9 @@ export class Sky {
       fragmentShader: `
         uniform vec3 uHorizon;
         uniform vec3 uZenith;
+        uniform vec3 uHaze;
+        uniform vec3 uSunDir;
+        uniform vec3 uSunGlow;
         uniform float uAurora;
         uniform float uAuroraTime;
         uniform float uAuroraPhase;
@@ -162,19 +221,32 @@ export class Sky {
         }
 
         void main() {
-          float blend = smoothstep(-0.12, 0.86, vDir.y);
+          vec3 dir = normalize(vDir);
+          float blend = smoothstep(-0.12, 0.86, dir.y);
           blend = pow(blend, 0.72);
           vec3 color = mix(uHorizon, uZenith, blend);
 
+          // Horizon haze: the air column is longest along the skyline, so the
+          // band just above it washes out pale and bright. Without it the dome
+          // reads as a painted gradient rather than an atmosphere.
+          float haze = pow(1.0 - clamp(abs(dir.y), 0.0, 1.0), 5.0);
+          color = mix(color, uHaze, haze * 0.55);
+
+          // Forward scattering around the sun. A broad halo plus a tight core:
+          // this is the single cheapest thing that makes a sunset look like
+          // light arriving from a place instead of a colour ramp.
+          float sd = max(dot(dir, uSunDir), 0.0);
+          color += uSunGlow * (pow(sd, 5.0) * 0.5 + pow(sd, 48.0) * 1.4);
+
           // Sky only, and only once night has actually taken hold. Everything
           // below the skyline skips the whole thing.
-          if (uAurora > 0.004 && vDir.y > -0.05) {
+          if (uAurora > 0.004 && dir.y > -0.05) {
             // atan() of the bearing would seam at +/-PI; the bearing vector
             // itself never does, so every lookup uses it directly.
-            vec2 ground = vec2(vDir.x, vDir.z);
+            vec2 ground = vec2(dir.x, dir.z);
             vec2 bearing = ground / max(length(ground), 1e-4);
             float azim = atan(bearing.y, bearing.x);
-            float elev = vDir.y;
+            float elev = dir.y;
             float ph = uAuroraPhase;
 
             vec3 light =
@@ -207,11 +279,31 @@ export class Sky {
     this.dome.renderOrder = -100;
     scene.add(this.dome);
 
+    // A soft additive halo behind each body. The sun used to be a flat white
+    // square pasted on the sky; a bloom around it is what sells it as the
+    // brightest thing in the world.
+    const glowTexture = radialGlowTexture();
+    this.sunGlowMat = new THREE.MeshBasicMaterial({
+      map: glowTexture, color: 0xffd9a0, transparent: true, opacity: 0.75,
+      blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+    });
+    this.sunGlow = new THREE.Mesh(new THREE.PlaneGeometry(330, 330), this.sunGlowMat);
+    this.sunGlow.renderOrder = -90;
+    scene.add(this.sunGlow);
+
     this.sun = new THREE.Mesh(
       new THREE.PlaneGeometry(64, 64),
       new THREE.MeshBasicMaterial({ color: 0xfffee8, fog: false })
     );
     scene.add(this.sun);
+
+    this.moonGlowMat = new THREE.MeshBasicMaterial({
+      map: glowTexture, color: 0xaec4ff, transparent: true, opacity: 0.5,
+      blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+    });
+    this.moonGlow = new THREE.Mesh(new THREE.PlaneGeometry(180, 180), this.moonGlowMat);
+    this.moonGlow.renderOrder = -90;
+    scene.add(this.moonGlow);
 
     this.moon = new THREE.Mesh(
       new THREE.PlaneGeometry(44, 44),
@@ -257,9 +349,25 @@ export class Sky {
     this.clouds.position.y = CLOUD_Y;
     this.clouds.renderOrder = -1;
     scene.add(this.clouds);
+
+    // High deck: sparser, softer, drifting faster on its own heading.
+    this.highCloudTexture = this.makeCloudTexture(seed ^ 0x77ab, 0.72);
+    this.highCloudTexture.repeat.set(HIGH_CLOUD_REPEAT, HIGH_CLOUD_REPEAT);
+    this.highCloudsMat = new THREE.MeshBasicMaterial({
+      map: this.highCloudTexture,
+      transparent: true, opacity: 0.42, depthWrite: false,
+      side: THREE.DoubleSide, fog: false,
+    });
+    this.highClouds = new THREE.Mesh(
+      new THREE.PlaneGeometry(CLOUD_PLANE, CLOUD_PLANE), this.highCloudsMat
+    );
+    this.highClouds.rotation.x = -Math.PI / 2;
+    this.highClouds.position.y = HIGH_CLOUD_Y;
+    this.highClouds.renderOrder = -2;
+    scene.add(this.highClouds);
   }
 
-  private makeCloudTexture(seed: number): THREE.CanvasTexture {
+  private makeCloudTexture(seed: number, cover = 0.62): THREE.CanvasTexture {
     const canvas = document.createElement('canvas');
     canvas.width = CLOUD_TEX;
     canvas.height = CLOUD_TEX;
@@ -273,7 +381,7 @@ export class Sky {
           wrappedValueNoise(seed ^ 99, x * 0.5, y * 0.5, period * 2) * 0.3;
         const i = (y * CLOUD_TEX + x) * 4;
         img.data[i] = img.data[i + 1] = img.data[i + 2] = 255;
-        img.data[i + 3] = n > 0.62 ? 255 : 0;
+        img.data[i + 3] = n > cover ? 255 : 0;
       }
     }
     ctx.putImageData(img, 0, 0);
@@ -320,14 +428,20 @@ export class Sky {
     this.auroraIntensity = night * activity;
     const horizon = NIGHT_HORIZON.clone().lerp(DAY_HORIZON, s);
     const zenith = NIGHT_ZENITH.clone().lerp(DAY_ZENITH, s);
+    const haze = NIGHT_HAZE.clone().lerp(DAY_HAZE, s);
     const sunsetAmount =
-      Math.max(0, 1 - Math.abs(sunHeight) / 0.22) * (sunHeight > -0.15 ? 1 : 0);
-    horizon.lerp(SUNSET, sunsetAmount * 0.62);
-    zenith.lerp(SUNSET, sunsetAmount * 0.12);
+      Math.max(0, 1 - Math.abs(sunHeight) / 0.28) * (sunHeight > -0.2 ? 1 : 0);
+    // tod < 0.5 is the rising half of the arc, so morning gets DAWN and the
+    // evening crossing gets DUSK.
+    const twilight = tod < 0.5 ? DAWN : DUSK;
+    horizon.lerp(twilight, sunsetAmount * 0.7);
+    zenith.lerp(twilight, sunsetAmount * 0.2);
+    haze.lerp(twilight, sunsetAmount * 0.62);
     horizon.lerp(AURORA_HORIZON, this.auroraIntensity * 0.18);
     this.skyColor.copy(horizon);
     (this.domeMat.uniforms.uHorizon.value as THREE.Color).copy(horizon);
     (this.domeMat.uniforms.uZenith.value as THREE.Color).copy(zenith);
+    (this.domeMat.uniforms.uHaze.value as THREE.Color).copy(haze);
     this.domeMat.uniforms.uAurora.value = this.auroraIntensity;
     this.domeMat.uniforms.uAuroraTime.value = this.auroraTime;
     this.dome.position.copy(camera.position);
@@ -338,6 +452,37 @@ export class Sky {
     this.sun.lookAt(camera.position);
     this.moon.position.copy(camera.position).addScaledVector(sunDir, -700);
     this.moon.lookAt(camera.position);
+
+    // Scattering halo in the dome shader, aimed at whichever body is up.
+    const above = Math.max(0, sunHeight);
+    (this.domeMat.uniforms.uSunDir.value as THREE.Vector3).copy(sunDir);
+    (this.domeMat.uniforms.uSunGlow.value as THREE.Color)
+      .copy(twilight)
+      .lerp(SUN_HIGH_GLOW, THREE.MathUtils.smoothstep(above, 0.1, 0.7))
+      .multiplyScalar(0.16 + 0.5 * sunsetAmount + 0.24 * above);
+
+    // Body halos. The sun's swells and reddens as it touches the horizon.
+    this.sunGlow.position.copy(this.sun.position);
+    this.sunGlow.quaternion.copy(this.sun.quaternion);
+    this.sunGlow.scale.setScalar(0.8 + 0.9 * sunsetAmount);
+    this.sunGlowMat.color.copy(twilight).lerp(
+      SUN_DISC_HIGH, THREE.MathUtils.smoothstep(above, 0.05, 0.55));
+    this.sunGlowMat.opacity = 0.28 + 0.55 * Math.max(sunsetAmount, above);
+    this.sunGlow.visible = sunHeight > -0.25;
+    this.moonGlow.position.copy(this.moon.position);
+    this.moonGlow.quaternion.copy(this.moon.quaternion);
+    this.moonGlowMat.opacity = 0.55 * (1 - s);
+    this.moonGlow.visible = sunHeight < 0.1;
+    // The sun disc itself takes the light's own colour as it sets.
+    (this.sun.material as THREE.MeshBasicMaterial).color
+      .copy(SUN_DISC).lerp(twilight, sunsetAmount * 0.8);
+
+    // Light colours handed to the terrain shader: warm direct sun, cool sky
+    // fill, both swinging through gold at the horizon crossings.
+    this.sunTint.copy(SUN_NIGHT).lerp(SUN_NOON, s);
+    this.sunTint.lerp(SUN_LOW, sunsetAmount * 0.85);
+    this.ambientTint.copy(AMBIENT_NIGHT).lerp(AMBIENT_DAY, s);
+    this.ambientTint.lerp(AMBIENT_LOW, sunsetAmount * 0.7);
 
     this.starsMat.opacity = Math.max(0, 1 - s * 1.6) * 0.9;
     this.stars.position.copy(camera.position);
@@ -355,6 +500,23 @@ export class Sky {
         (camera.position.x - prevX + drift) * uPerUnit) % 1;
     this.cloudTexture.offset.y =
       (this.cloudTexture.offset.y - (camera.position.z - prevZ) * uPerUnit) % 1;
+    // Clouds catch the sunset before the ground does — they are up where the
+    // light still reaches. Tinting them is most of a good dusk.
     this.cloudsMat.color.setScalar(0.35 + 0.65 * s);
+    this.cloudsMat.color.lerp(twilight, sunsetAmount * 0.6);
+
+    // High deck: its own heading and a faster drift, so the two layers slide
+    // past each other and the sky gains depth.
+    this.highClouds.position.x = camera.position.x;
+    this.highClouds.position.z = camera.position.z;
+    const hPerUnit = HIGH_CLOUD_REPEAT / CLOUD_PLANE;
+    this.highCloudTexture.offset.x =
+      (this.highCloudTexture.offset.x +
+        (camera.position.x - prevX + dt * 1.9) * hPerUnit) % 1;
+    this.highCloudTexture.offset.y =
+      (this.highCloudTexture.offset.y -
+        (camera.position.z - prevZ - dt * 0.7) * hPerUnit) % 1;
+    this.highCloudsMat.color.setScalar(0.4 + 0.6 * s);
+    this.highCloudsMat.color.lerp(twilight, sunsetAmount * 0.75);
   }
 }

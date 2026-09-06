@@ -57,6 +57,7 @@ export const ADMIN_COMMANDS: CommandSpec[] = [
   { name: 'revive', args: '<player>', desc: 'OP · Clear an elimination lockout' },
   { name: 'war', args: '<start|schedule|cancel|status>', desc: 'OP · Control the war window' },
   { name: 'flags', args: '<on|off|reset|status>', desc: 'OP · Control flag breaking' },
+  { name: 'election', args: '<tally|status> [faction]', desc: 'OP · Count the vote NOW' },
   { name: 'xp', args: '<player|all> <n>', desc: 'OP · Grant warfare XP' },
   { name: 'ops', desc: 'OP · List the server operators' },
   { name: 'save', desc: 'OP · Force-save the world + accounts' },

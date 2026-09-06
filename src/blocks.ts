@@ -160,6 +160,11 @@ export const enum Block {
   // 213-215 are retired strategic-missile ids and are deliberately not reused.
   Helipad = 216,
   Barrier = 217,
+  // Packed snow: the frozen barrens' own building block. Ice spikes used to be
+  // stacked out of SnowyGrass, whose sides are DIRT — a spire read as a tower
+  // of grass blocks someone had left standing. This is snow on every face.
+  // (Ids skip the crowded 218-230 stretch, which the Item enum shares.)
+  PackedSnow = 231,
 }
 
 export const enum Tile {
@@ -445,7 +450,7 @@ export const enum Tile {
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel' | 'sword';
 
 export type BlockShape = 'cube' | 'cross' | 'torch' | 'slab' | 'stairs';
-export type TintKind = 'grass' | 'foliage' | null;
+export type TintKind = 'grass' | 'foliage' | 'water' | null;
 
 export interface BlockInfo {
   /** Block light emitted (torch = 14). */
@@ -663,7 +668,9 @@ export const BLOCKS: Record<number, BlockInfo> = {
     name: 'Glass', hardness: 0.3, top: Tile.Glass, opaque: false, occludes: false,
   }),
   [Block.Water]: def({
-    name: 'Water', hardness: -1, top: Tile.Water,
+    // Water takes a biome tint too: polar blue in the north, turquoise in the
+    // tropics, murky green in swamps. One flat blue read as a placeholder.
+    name: 'Water', hardness: -1, top: Tile.Water, tint: 'water',
     solid: false, opaque: false, occludes: false,
   }),
   [Block.Bedrock]: def({ name: 'Bedrock', hardness: -1, top: Tile.Bedrock }),
@@ -676,6 +683,7 @@ export const BLOCKS: Record<number, BlockInfo> = {
     name: 'Snowy Grass Block', hardness: 0.6,
     top: Tile.Snow, bottom: Tile.Dirt, side: Tile.SnowySide,
   }),
+  [Block.PackedSnow]: def({ name: 'Packed Snow', hardness: 0.5, top: Tile.Snow }),
   [Block.BirchLog]: def({
     name: 'Birch Log', hardness: 2.0,
     top: Tile.BirchLogTop, side: Tile.BirchLogSide,
@@ -1024,7 +1032,8 @@ for (const b of [
 // All slabs (bottom + top) + stairs are wood: axe-mineable like planks.
 for (let b = Block.OakSlab; b <= Block.SpruceSlabTop; b++) BLOCKS[b].tool = 'axe';
 for (const b of [
-  Block.Dirt, Block.Grass, Block.SnowyGrass, Block.Sand, Block.RedSand,
+  Block.Dirt, Block.Grass, Block.SnowyGrass, Block.PackedSnow,
+  Block.Sand, Block.RedSand,
 ]) BLOCKS[b].tool = 'shovel';
 for (const b of [Block.Terracotta, Block.Basalt]) BLOCKS[b].tool = 'pickaxe';
 // Defenses: Reinforced Stone needs an IRON pick (a wooden-tool raider simply

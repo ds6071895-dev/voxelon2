@@ -104,7 +104,9 @@ export function resolveJoinFaction(counts: Record<number, number>, desired?: num
 
 // --- Secret faction switching / betrayals (Phase 7) --------------------------
 export const MAX_SWITCHES_PER_SEASON = 2;
-/** Switching is locked in the final week of a season (no last-minute flips). */
+/** Switching is locked in the final week of a season (no last-minute flips).
+ *  A season with no deadline (season.ts) never reaches a final week, so the
+ *  lock simply never applies while seasons are endless. */
 export const SWITCH_LOCK_SECONDS = 7 * 24 * 3600;
 
 /** Per-account switch budget (resets each season). */

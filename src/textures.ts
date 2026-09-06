@@ -82,12 +82,19 @@ function speckle(seed: number, x: number, y: number, amount: number): number {
 
 const STONE: RGBA = [130, 132, 138, 255];
 const DIRT: RGBA = [143, 99, 62, 255];
-const GRASS_GREEN: RGBA = [110, 205, 76, 255];
+// The grass-block side fringe. Deliberately desaturated: since v0.45 the mesher
+// fades the column's biome tint across this face, so the paint only has to
+// supply the texture and a neutral base for that colour to land on.
+const GRASS_GREEN: RGBA = [150, 190, 120, 255];
 const SAND: RGBA = [227, 214, 148, 255];
 const WOOD_BARK: RGBA = [107, 82, 43, 255];
 const WOOD_INNER: RGBA = [185, 147, 78, 255];
 const PLANKS: RGBA = [193, 152, 86, 255];
-const WATER: RGBA = [42, 105, 233, 200];
+// Water is painted almost neutral on purpose: since v0.45 its colour comes from
+// the per-column biome tint (polar blue -> ocean blue -> tropical turquoise ->
+// swamp green), and a strongly blue tile would multiply that down into mud.
+// The tile now carries only the surface texture and a faint cool cast.
+const WATER: RGBA = [214, 232, 246, 200];
 
 function paintStone(p: Painter, seed: number): void {
   p.fill((x, y) => shade(STONE, speckle(seed, x, y, 0.12)));

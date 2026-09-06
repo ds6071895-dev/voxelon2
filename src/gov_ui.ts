@@ -348,7 +348,13 @@ export class BustStage {
   private readonly frame = (now: number): void => {
     if (!this.running) return;
     requestAnimationFrame(this.frame);
-    const dt = this.last ? (now - this.last) / 1000 : 0;
+    // The FIRST frame after an attach has no previous timestamp to measure
+    // against, and it must still count as a full one: treating it as dt=0 makes
+    // it fall under the 30Hz gate, which then never updates `last` — so `last`
+    // stayed 0 forever, every following frame measured 0 too, and the board was
+    // never asked to draw a single time. That is why the election plinths stood
+    // empty: the busts existed, nothing ever rendered them.
+    const dt = this.last ? (now - this.last) / 1000 : BustStage.FRAME;
     if (dt < BustStage.FRAME) return;
     this.last = now;
     this.board?.render(Math.min(0.1, dt));

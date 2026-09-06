@@ -69,6 +69,7 @@ import {
   COSMETIC_KEYS, COSMETIC_RANGES, Cosmetics, HATS, defaultCosmetics, randomCosmetics,
   sanitizeCosmetics,
 } from '../src/character';
+import { newDuelProgress } from '../src/duels_progression';
 import { LEVER_RADIUS, flippedTrap, isLeverBlock, leverFlips } from '../src/traps';
 import {
   Machines, MachineType, MAX_LEVEL, allowedFilterMask, applyUpgrade,
@@ -88,8 +89,9 @@ import {
   MAX_SWITCHES_PER_SEASON, canSwitchFaction, switchesRemaining, otherFaction,
 } from '../src/teams';
 import {
-  SEASON_LENGTH, newSeason, seasonTimeLeft, seasonExpired, tickSeasonClock,
-  advanceSeason, deadlineWinner, sanitizeSeason,
+  SEASON_ENDLESS, SEASON_LENGTH, newSeason, seasonHasDeadline, seasonTimeLeft,
+  seasonWireTimeLeft, seasonExpired, tickSeasonClock, advanceSeason,
+  deadlineWinner, sanitizeSeason,
 } from '../src/season';
 import {
   newWar, warActive, warPending, warTimeLeft, warStartsIn, scheduleWar,
@@ -140,7 +142,8 @@ const fakeAtlas: Atlas = {
   canvas: null as unknown as HTMLCanvasElement,
   uvRect: () => [0, 0, 1, 1],
 };
-const whiteTints: TintSampler = () => ({ grass: [1, 1, 1], foliage: [1, 1, 1] });
+const whiteTints: TintSampler = () =>
+  ({ grass: [1, 1, 1], foliage: [1, 1, 1], water: [1, 1, 1] });
 const fullbright = { sky: () => 15, block: () => 0 };
 
 const IDLE_INPUT = {
@@ -427,14 +430,16 @@ check('daylight: noon full, midnight moonlit floor, dawn between',
 const biomeChunk = new Map<Biome, [number, number]>();
 for (let cx = -120; cx <= 120; cx++) {
   for (let cz = -120; cz <= 120; cz++) {
-    if (biomeChunk.size >= 15) break; // all biome kinds incl. Milestone C's four
+    if (biomeChunk.size >= 27) break; // every biome kind, incl. v0.45's twelve
     const x = cx * 16 + 8, z = cz * 16 + 8;
     const b = terrain.biomeWithWater(x, z, terrain.height(x, z));
     if (!biomeChunk.has(b)) biomeChunk.set(b, [cx, cz]);
   }
 }
-check('biome map produces >= 5 biomes',
-  biomeChunk.size >= 5,
+// v0.45 widened the climate grid to 27 biomes and spread the climate fields so
+// none of them is a rarity. A scan this size should meet most of them.
+check('biome map produces >= 18 biomes',
+  biomeChunk.size >= 18,
   [...biomeChunk.keys()].map((b) => BIOME_NAMES[b]).join(', '));
 check('desert and snowy biomes exist',
   biomeChunk.has(Biome.Desert) && biomeChunk.has(Biome.Snowy));
@@ -443,18 +448,27 @@ check('mountain biome(s) exist',
 check('height function bounded to the new range', (() => {
   for (let i = 0; i < 4000; i++) {
     const h = terrain.height(i * 37 - 60000, i * 91 - 90000);
-    if (h < 12 || h > 235) return false;
+    if (h < 12 || h > 243) return false;
   }
   return true;
 })());
-check('mountains actually rise tall (some column > 150)', (() => {
+check('mountains actually rise tall (some column > 200)', (() => {
   let max = 0;
   for (let i = 0; i < 60000; i++) {
     max = Math.max(max, terrain.height((i * 53) % 4000 - 2000, (i * 97) % 4000 - 2000));
-    if (max > 150) return true;
+    if (max > 200) return true;
   }
-  return max > 150;
+  return max > 200;
 })());
+const V45_BIOMES: Biome[] = [
+  Biome.Savanna, Biome.Taiga, Biome.SnowyTaiga, Biome.AutumnForest,
+  Biome.Meadow, Biome.SunflowerPlains, Biome.IceSpikes, Biome.Highlands,
+  Biome.RedwoodForest, Biome.TropicalCoast, Biome.Steppe, Biome.Heath,
+];
+check('the twelve v0.45 biomes all generate for the seed',
+  V45_BIOMES.every((b) => biomeChunk.has(b)),
+  'missing: ' + (V45_BIOMES.filter((b) => !biomeChunk.has(b))
+    .map((b) => BIOME_NAMES[b]).join(', ') || 'none'));
 
 function scanBiome(b: Biome): Map<number, number> | null {
   const home = biomeChunk.get(b);
@@ -2331,17 +2345,20 @@ check('furnace smelts ore/sand/log but not removed foods',
     s.tickTurrets(2).some((o) => o.msg.t === 'turretFire'));
 }
 
-// --- Seasons (Phase 5): clock + deadline from WAR WINS + reset + badge --------
+// --- Seasons (Phase 5): endless clock + reset + badge -------------------------
 {
   const hash: (p: string, s: string) => string = (p, s) => `${s}:${p}`;
 
-  // Pure season clock.
+  // Pure season clock. A season has NO deadline any more: the clock only counts
+  // how long it has run, and nothing about it ever reads as "over".
   const s = newSeason();
-  check('a fresh season starts at #1 with the full clock',
-    s.number === 1 && seasonTimeLeft(s) === SEASON_LENGTH && !seasonExpired(s));
-  tickSeasonClock(s, SEASON_LENGTH + 5);
-  check('the season clock expires past the deadline',
-    seasonExpired(s) && seasonTimeLeft(s) === 0);
+  check('a fresh season starts at #1 with no deadline',
+    s.number === 1 && !seasonHasDeadline() && seasonTimeLeft(s) === SEASON_LENGTH &&
+    seasonWireTimeLeft(s) === SEASON_ENDLESS && !seasonExpired(s));
+  tickSeasonClock(s, 400 * 24 * 3600); // over a year in
+  check('the season clock never expires — a season has no end',
+    !seasonExpired(s) && s.elapsed === 400 * 24 * 3600 &&
+    seasonWireTimeLeft(s) === SEASON_ENDLESS);
   advanceSeason(s);
   check('advanceSeason bumps the number + resets the clock', s.number === 2 && s.elapsed === 0);
   check('sanitizeSeason fail-closes junk to season #1',
@@ -2370,9 +2387,10 @@ check('furnace smelts ore/sand/log but not removed foods',
     .find((o) => o.msg.t === 'welcome')!.msg as
       { season: { number: number; timeLeft: number }; players: { seasonsWon: number }[] };
   check('the welcome carries the season clock + the player badge',
-    wel.season.number === 1 && wel.season.timeLeft > 0 && wel.players[0].seasonsWon === 3);
+    wel.season.number === 1 && wel.season.timeLeft === SEASON_ENDLESS &&
+    wel.players[0].seasonsWon === 3);
 
-  // Server deadline: the faction with more WAR WINS takes the season.
+  // The season no longer ends on the clock — only a deliberate endSeason does.
   const gd = new GameServer(1337, mulberry32(7));
   gd.addPlayer(1, { username: 'A', faction: FACTION_A });
   gd.addPlayer(2, { username: 'B', faction: FACTION_B });
@@ -2387,8 +2405,10 @@ check('furnace smelts ore/sand/log but not removed foods',
   check('a finished war resolves to the most-kills faction (warEnd)',
     endOut.some((o) => o.msg.t === 'warEnd' &&
       (o.msg as { winner: number }).winner === FACTION_A));
-  const de = gd.tickSeason(SEASON_LENGTH + 1);
-  check('the season ends at the deadline → the war-wins leader takes it',
+  check('a year on the clock does NOT end the season',
+    !gd.tickSeason(365 * 24 * 3600).some((o) => o.msg.t === 'seasonEnd') && dWinner === -2);
+  const de = gd.endSeason(FACTION_A); // the war-wins leader, resolved above
+  check('ending a season deliberately still announces the winner + badges them',
     de.some((o) => o.msg.t === 'seasonEnd') && dWinner === FACTION_A && dNum === 1);
   const wAfter = gd.addPlayer(3).find((o) => o.msg.t === 'welcome')!.msg as
     { war: { wins: number[] } };
@@ -2409,8 +2429,11 @@ check('furnace smelts ore/sand/log but not removed foods',
   const reloaded = new GameServer(1337, mulberry32(2));
   reloaded.restore(JSON.parse(JSON.stringify(gp.serialize())));
   const rs = reloaded.seasonSnapshot() as { number: number; timeLeft: number };
+  const rsSave = JSON.parse(JSON.stringify(reloaded.serialize())) as
+    { season: { elapsed: number } };
   check('the season clock survives a serialize round-trip',
-    Math.abs(rs.timeLeft - (SEASON_LENGTH - 12345)) < 1);
+    rs.number === 1 && rs.timeLeft === SEASON_ENDLESS &&
+    Math.abs(rsSave.season.elapsed - 12345) < 1);
 }
 
 // --- WAR: shrinking-border battle royale ---------------------------------------
@@ -2581,6 +2604,7 @@ check('furnace smelts ore/sand/log but not removed foods',
     canSwitchFaction({ switchesUsed: 0, switchSeason: 1 }, 1, 0, 1, SEASON_LENGTH) &&
     !canSwitchFaction({ switchesUsed: 0, switchSeason: 1 }, 1, 0, 0, SEASON_LENGTH) && // same side
     !canSwitchFaction({ switchesUsed: 2, switchSeason: 1 }, 1, 0, 1, SEASON_LENGTH) && // exhausted
+    canSwitchFaction({ switchesUsed: 0, switchSeason: 1 }, 1, 0, 1, Infinity) && // endless
     !canSwitchFaction({ switchesUsed: 0, switchSeason: 1 }, 1, 0, 1, 3600));           // final week
   check('otherFaction flips between the two sides',
     otherFaction(FACTION_A) === FACTION_B && otherFaction(FACTION_B) === FACTION_A);
@@ -2619,13 +2643,15 @@ check('furnace smelts ore/sand/log but not removed foods',
   check('switching is capped at 2 per season',
     third.some((o) => o.msg.t === 'notice') && !third.some((o) => o.msg.t === 'factionSwitched'));
 
-  // Final-week lock.
+  // The final-week lock is a pure rule (exercised above) that the server can no
+  // longer reach: a season has no deadline, so it never has a final week and a
+  // defector is never blocked by the clock however long the season has run.
   const gl = new GameServer(1337, mulberry32(16));
   gl.addPlayer(1, { username: 'Late', faction: 0 });
-  gl.tickSeason(SEASON_LENGTH - 3 * 24 * 3600); // 3 days left -> inside the lock
+  gl.tickSeason(400 * 24 * 3600); // over a year in, and still not a final week
   const lk = gl.handle(1, { t: 'switchFaction', faction: 1 });
-  check('switching is locked in the final week',
-    lk.some((o) => o.msg.t === 'notice') && !lk.some((o) => o.msg.t === 'factionSwitched'));
+  check('an endless season never reaches the final-week lock',
+    lk.some((o) => o.msg.t === 'factionSwitched'));
 }
 
 // --- Gadgets (Phase 8): registry, cooldowns, AoE, server effects -------------
@@ -2907,9 +2933,19 @@ check('furnace smelts ore/sand/log but not removed foods',
   // palette indices (or a non-object) at every other client.
   accs.setData('Alice', { cosmetics: { skin: 2, hair: 3, shirt: 4, hat: 999, face: -1 } });
   accs.setData('Bob', { cosmetics: 'not-an-object' });
+  // The ladder is settled ratings only: a fresh account is provisional, so it
+  // stays off the board until its five placements are behind it.
+  check('a provisional account is not on the public ladder',
+    accs.duelLeaderboard(10).every((e) => e.username !== 'Alice'));
+  accs.applyDuelSettlement([
+    { username: 'Alice', state: { ...newDuelProgress(), placementsRemaining: 0, wins: 3, losses: 2 } },
+    { username: 'Bob', state: { ...newDuelProgress(), placementsRemaining: 0, wins: 1, losses: 4 } },
+  ]);
   const board = accs.duelLeaderboard(10);
   const alice = board.find((e) => e.username === 'Alice')!;
   const bob = board.find((e) => e.username === 'Bob')!;
+  check('placed accounts appear once their placements are done',
+    !!alice && !!bob && board.every((e) => e.placementsRemaining === 0));
   check('the leaderboard carries each account\'s saved avatar',
     !!alice.cosmetics && alice.cosmetics.skin === 2 && alice.cosmetics.shirt === 4);
   check('out-of-range and junk cosmetics are clamped to a valid look, never leaked',
@@ -4864,8 +4900,9 @@ const lairs = new Map<VaultBossKind, VaultStamp>();
   check('BURIAL: no vault block breaks any surface (valleys + ravine floors count)',
     stamps.every((st) => st.blocks.every((b) => {
       if (b.id === Block.Air) return true;
-      // The ruined arch at the mouth is the ONE intentional surface feature.
-      if (Math.abs(b.x - st.mouth.x) <= 3 && Math.abs(b.z - st.mouth.z) <= 3) return true;
+      // The GATE at the mouth (forecourt, braziers, jambs, pylons) is the ONE
+      // intentional surface feature, and it stays inside a 4-block radius.
+      if (Math.abs(b.x - st.mouth.x) <= 4 && Math.abs(b.z - st.mouth.z) <= 4) return true;
       const h = terrain.height(b.x, b.z);
       const rd = terrain.ravineDepth(b.x, b.z);
       const eff = rd > 0 ? Math.max(10, h - rd) : h;

@@ -22,8 +22,8 @@ import {
   canSwitchFaction, switchesRemaining,
 } from '../teams';
 import {
-  SeasonState, newSeason, sanitizeSeason, seasonTimeLeft, seasonExpired,
-  tickSeasonClock, advanceSeason, deadlineWinner,
+  SeasonState, newSeason, sanitizeSeason, seasonTimeLeft, seasonWireTimeLeft,
+  seasonExpired, tickSeasonClock, advanceSeason, deadlineWinner,
 } from '../season';
 import {
   WarState, newWar, warActive, warSnapshot, scheduleWar, sanitizeWar,
@@ -39,7 +39,7 @@ import {
   sanitizePolitics, setKit, setTaxRate, tallyElection, termExpired, voteCounts,
 } from '../politics';
 import {
-  Treasury, canFundKits, deposit, fundKits, kitCost, kitItemCount, kitStacks,
+  Treasury, deposit, kitItemCount, kitStacks, setTreasuryPage,
   levy, newTreasuries, raid, sanitizeTreasury, treasuryCount, treasuryInReach,
   RAID_COOLDOWN, RAID_STACKS,
 } from '../treasury';
@@ -71,7 +71,7 @@ import {
   mitigate, TOUGHNESS_CAP, DuelLeaderboardEntry, ItemEntityInfo, PlayerInfo, PlayerSnapshot, ServerMsg,
   WORLD_SEED, WORLD_HALF, WORLD_BORDER, CORE_HALF, makeUsername, skinSeed, GameMode,
   MAX_ATTUNED, TOTEM_COOLDOWN, COMBAT_TAG, TPA_EXPIRE, bloodlustMult,
-  FACTION_ROSTER_LIMIT, type FactionPublic, type Notification,
+  FACTION_FACES_LIMIT, FACTION_ROSTER_LIMIT, type FactionPublic, type Notification,
 } from './protocol';
 import {
   COMEBACK_HEARTS, KILL_CREDIT_WINDOW, MAX_HEARTS, canConsume, canWithdraw,
@@ -255,6 +255,7 @@ const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
   // touch a treasury. Reading (the politics sync) is unaffected.
   'pledgeFaction', 'foundParty', 'disbandParty', 'castVote',
   'govBroadcast', 'govTax', 'govSetKit', 'govFundKits', 'claimKit', 'treasuryRaid',
+  'treasuryOpen', 'treasurySet',
 ]);
 
 /** One message the transport should deliver. `to` is a client id, or a
@@ -326,7 +327,8 @@ export class GameServer {
   private vehicles!: VehicleSim;
   /** Players known by the transport to be on a rope (for one-shot detach state). */
   private readonly ropePlayers = new Set<number>();
-  // Seasons (Phase 5): month-long war cycles with reset + a "Seasons Won" badge.
+  // Seasons (Phase 5): endless war cycles — nothing ends a season on a clock any
+  // more, so this counter moves only when `endSeason` is called deliberately.
   private season = newSeason();
   private seasonAccum = 0;
   /** Set by the shell to persist "Seasons Won" badges to all winning accounts
@@ -711,7 +713,7 @@ export class GameServer {
         const [x, y, z] = k.split(',').map(Number);
         return { x, y, z, state };
       }),
-      season: { number: this.season.number, timeLeft: seasonTimeLeft(this.season) },
+      season: { number: this.season.number, timeLeft: seasonWireTimeLeft(this.season) },
       war: { ...warSnapshot(this.war, this.worldTime),
         score: this.warKills.slice(), wins: this.warWins.slice() },
       flags: this.flagsPayload(),
@@ -1008,6 +1010,10 @@ export class GameServer {
         return this.handleSetKit(p, msg.slots);
       case 'govFundKits':
         return this.handleFundKits(p, msg.count, msg.source);
+      case 'treasuryOpen':
+        return this.handleTreasuryOpen(p, msg.faction);
+      case 'treasurySet':
+        return this.handleTreasurySet(p, msg.faction, msg.page, msg.slots);
       case 'claimKit':
         return this.handleClaimKit(p);
       case 'treasuryRaid':
@@ -1501,9 +1507,13 @@ export class GameServer {
       const change = settlement.changes.find((value) => value.id === participant.id);
       if (change) participant.profile = { ...change.profile, rank: { ...change.profile.rank } };
     }
-    const leaderboard = persisted?.leaderboard ?? settlement.changes.map((change) => ({
-      username: change.username, ...change.profile,
-    })).sort((a, b) => b.rp - a.rp);
+    // No shell persistence (tests, standalone): build the board from this
+    // match alone — still skipping anyone who is mid-placements, exactly as
+    // the account store does.
+    const leaderboard = persisted?.leaderboard ?? settlement.changes
+      .filter((change) => change.profile.placementsRemaining <= 0)
+      .map((change) => ({ username: change.username, ...change.profile }))
+      .sort((a, b) => b.rp - a.rp);
     for (const value of settlement.states) if (!this.players.has(value.id)) this.duelProgress.delete(value.id);
     const out: Outbound[] = [{ to: 'all', msg: { t: 'duelLeaderboard', leaderboard } }];
     for (const change of settlement.changes) out.push({
@@ -3729,6 +3739,17 @@ export class GameServer {
       const members = roster ?? [...this.players.values()]
         .filter((p) => p.faction === f.id).map((p) => p.username)
         .sort((a, b) => a.localeCompare(b)).slice(0, FACTION_ROSTER_LIMIT);
+      // Faces for the card's plinth. Only ONLINE members can supply real
+      // cosmetics, and the president has their own portrait, so they are left
+      // out of the crowd. A faction whose seat is vacant is what these are for:
+      // its card shows the citizens you would be fighting alongside rather than
+      // an empty stage.
+      const faces = [...this.players.values()]
+        .filter((p) => p.faction === f.id &&
+          p.username.toLowerCase() !== (e.president ?? '').toLowerCase())
+        .sort((a, b) => a.username.localeCompare(b.username))
+        .slice(0, FACTION_FACES_LIMIT)
+        .map((p) => ({ username: p.username, cosmetics: p.cosmetics }));
       const out: FactionPublic = {
         faction: f.id,
         members,
@@ -3736,6 +3757,7 @@ export class GameServer {
         taxRate: g.taxRate,
         kitStock: g.kitStock,
         treasuryCount: treasuryCount(this.treasuryOf(f.id)),
+        faces,
       };
       if (e.president) {
         const party = e.presidentPartyId ? partyById(e, e.presidentPartyId) : undefined;
@@ -3958,46 +3980,44 @@ export class GameServer {
   /**
    * Fund `n` recruit kits at whatever the loadout currently costs.
    *
-   * Two purses. `treasury` spends the faction's banked levy. `inventory` is the
-   * president paying out of their own pockets: the CLIENT has already removed
-   * the bill from its inventory, so the server banks that bill into the treasury
-   * and immediately spends it again — the treasury nets out unchanged, the stock
-   * still comes from items that existed, and there is exactly ONE code path that
-   * can mint a kit. That is the same trust model `drop` runs on (the client
-   * declaring what it just had), and it keeps the affordability rule in one place.
+   * ONE purse: the president's own pockets. The treasury no longer buys kits —
+   * arming your faction's newcomers is something a president does out of what
+   * they personally dug up, so the stock waiting for recruits is a bill somebody
+   * actually paid rather than a number spent out of a hoard the levy filled.
+   *
+   * The CLIENT has already removed the bill from its inventory by the time this
+   * arrives, so the stock still comes from items that existed and the server
+   * only has to record it. That is the same trust model `drop` runs on — the
+   * client declaring what it just had.
+   *
+   * The bill deliberately does NOT pass through the treasury on its way. It used
+   * to, so that one code path minted every kit; but nothing spends the hoard any
+   * more, so a treasury that has filled up would start refusing to route kits it
+   * was never paying for — a president unable to arm recruits out of their own
+   * backpack because the levy box is full.
+   *
+   * `source` only ever arrives as 'inventory'. A build that still asks for the
+   * retired treasury purse took nothing out of its own pockets, so honouring it
+   * would mint free kits — it is refused.
    */
   private handleFundKits(
-    p: ServerPlayer, count: unknown, source?: 'treasury' | 'inventory'
+    p: ServerPlayer, count: unknown, source?: 'inventory'
   ): Outbound[] {
     const denied = this.requirePresident(p);
     if (denied) return this.govErr(p.id, denied);
+    if (source !== undefined && source !== 'inventory') {
+      return this.govErr(p.id, 'Recruit kits are funded from your own inventory now.');
+    }
     const n = Number.isFinite(count) ? Math.floor(count as number) : 0;
     if (n <= 0 || n > 100) return this.govErr(p.id, 'Fund between 1 and 100 kits.');
     const g = governmentOf(this.politics, p.faction)!;
     const kit = kitStacks(g.kit);
     if (!kit.length) return this.govErr(p.id, 'The recruit kit is empty — build one first.');
-    const t = this.treasuryOf(p.faction);
-    if (source === 'inventory') {
-      // Bank what the president just handed over, then pay for the kits out of
-      // it. `deposit` returns the overflow, and a treasury too full to hold the
-      // bill cannot be charged for it either — so refuse before spending.
-      let spilled = 0;
-      for (const line of kitCost(kit)) spilled += deposit(t, line.id, line.count * n);
-      if (spilled > 0 || !canFundKits(t, n, kit)) {
-        return this.govErr(p.id, 'The treasury is too full to route that many kits.');
-      }
-    } else if (!canFundKits(t, n, kit)) {
-      return this.govErr(p.id, 'The treasury cannot afford that many kits.');
-    }
-    if (!fundKits(t, n, kit)) {
-      return this.govErr(p.id, 'The treasury cannot afford that many kits.');
-    }
     g.kitStock += n;
-    const paid = source === 'inventory' ? 'out of their own pockets' : 'from the treasury';
     return [
       ...this.notifyFaction(p.faction, 'kit', 'Recruit kits funded',
-        `${p.username} funded ${n} starter kit${n === 1 ? '' : 's'} ${paid} — ` +
-        `${g.kitStock} now waiting.`),
+        `${p.username} funded ${n} starter kit${n === 1 ? '' : 's'} out of their own ` +
+        `pockets — ${g.kitStock} now waiting.`),
       ...this.broadcastPolitics(),
     ];
   }
@@ -4026,6 +4046,66 @@ export class GameServer {
     out.push({ to: p.id, msg: { t: 'notice', text: '[KIT] Your faction funded this. Go build something.' } });
     out.push(...this.broadcastPolitics());
     return out;
+  }
+
+  /**
+   * The gate on your own hoard: the sitting PRESIDENT, standing AT THE FLAG.
+   *
+   * Both halves matter. Office alone would make the treasury a menu a president
+   * empties from the other side of the map; proximity alone would make the levy
+   * a self-service counter for whoever wandered past. Together they put the
+   * faction's savings somewhere a rival has to physically go — and somewhere the
+   * enemy already knows to look for them during a war.
+   *
+   * Returns a refusal string, or null when the hoard may be opened.
+   */
+  private treasuryDenial(p: ServerPlayer, faction: unknown): string | null {
+    // A spectator is already refused upstream (SPECTATOR_BLOCKED); creative is
+    // deliberately allowed, because banking the levy is not a combat action and
+    // an operator testing a government should not have to respawn to do it.
+    if (p.dead) return 'Not right now.';
+    if (!isFaction(p.faction)) return 'You have no faction.';
+    if (faction !== p.faction) return 'That is not your hoard.';
+    if (!isPresident(this.politics, p.faction, p.username)) {
+      return 'Only your faction\'s president can open the hoard.';
+    }
+    if (treasuryInReach(p.x, p.z) !== p.faction) {
+      return 'Walk to your flag — the hoard is only open where it stands.';
+    }
+    return null;
+  }
+
+  /** Open your own hoard: hands the president its live contents to fill the
+   *  chest panel with. Read-only in itself; `treasurySet` does the writing. */
+  private handleTreasuryOpen(p: ServerPlayer, faction: unknown): Outbound[] {
+    const denied = this.treasuryDenial(p, faction);
+    if (denied) return this.govErr(p.id, denied);
+    const t = this.treasuryOf(p.faction);
+    return [{ to: p.id, msg: {
+      t: 'treasury', faction: p.faction, slots: t.slots.map((s) => (s ? { ...s } : null)),
+    } }];
+  }
+
+  /**
+   * Write one page of the hoard back after the president rearranged it.
+   *
+   * The client declares the page's contents, exactly as `chestSet` does — the
+   * president can already carry the whole hoard away by hand, so trusting the
+   * arrangement they hand back costs nothing that the take does not already
+   * cost. Every slot is still re-validated (`setTreasuryPage`), and the write is
+   * scoped to ONE page so a raid landing on another page during the edit is not
+   * undone by it.
+   */
+  private handleTreasurySet(
+    p: ServerPlayer, faction: unknown, page: unknown, slots: unknown
+  ): Outbound[] {
+    const denied = this.treasuryDenial(p, faction);
+    if (denied) return this.govErr(p.id, denied);
+    const t = this.treasuryOf(p.faction);
+    if (!setTreasuryPage(t.slots, page as number, slots)) {
+      return this.govErr(p.id, 'That is not a page of the hoard.');
+    }
+    return this.broadcastPolitics();
   }
 
   /**
@@ -4139,14 +4219,19 @@ export class GameServer {
 
   // --- Seasons (Phase 5) -----------------------------------------------------
 
-  /** Live season state for the HUD (number + seconds left). */
+  /** Live season state for the HUD (number + seconds left, or -1 for a season
+   *  with no deadline — which is every season now). */
   seasonSnapshot(): ServerMsg {
-    return { t: 'season', number: this.season.number, timeLeft: seasonTimeLeft(this.season) };
+    return {
+      t: 'season', number: this.season.number, timeLeft: seasonWireTimeLeft(this.season),
+    };
   }
 
-  /** Advance the season clock; at the deadline the faction with the most WAR
-   *  WINS takes the season (a tie is a stalemate — fresh season either way).
-   *  Periodically broadcasts the clock for the HUD. */
+  /** Advance the season clock. Seasons are ENDLESS (season.ts), so the deadline
+   *  branch below never fires and the clock is now only a record of how long the
+   *  season has run. It is kept exact so a finite SEASON_LENGTH brings timed
+   *  seasons straight back, where the faction with the most WAR WINS takes it
+   *  (a tie is a stalemate). Periodically broadcasts the clock for the HUD. */
   tickSeason(dt: number): Outbound[] {
     if (!fin(dt) || dt <= 0) return [];
     tickSeasonClock(this.season, dt);

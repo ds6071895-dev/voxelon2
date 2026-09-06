@@ -90,6 +90,19 @@ export class InventoryUI {
   /** Fired once per successful craft of `result` (e.g. a Heart withdrawal
    *  tells the server to deduct the bottled heart). */
   onCrafted?: (result: ItemStack) => void;
+  /**
+   * Set before `show('chest')` to open the chest panel on something that is not
+   * a chest: a different title, and — for a container deeper than one grid —
+   * a page strip across the header.
+   *
+   * The panel never holds more than one page: `onPage` hands the page change
+   * back to the owner, which flushes what is on screen and re-opens on the page
+   * asked for. That keeps this class ignorant of what it is paging through (the
+   * faction hoard, today) and keeps a write scoped to one page.
+   */
+  chestPager: {
+    title: string; pages: number; page: number; onPage: (page: number) => void;
+  } | null = null;
   private chestCells: number[] = [];
   private armorCells: number[] = [];
 
@@ -1123,7 +1136,7 @@ export class InventoryUI {
       this.titleEl.textContent = 'Furnace';
       this.buildFurnaceTop(furnace);
     } else if (mode === 'chest') {
-      this.titleEl.textContent = 'Chest';
+      this.titleEl.textContent = this.chestPager?.title ?? 'Chest';
       this.buildChestTop();
     } else if (mode === 'table') {
       this.titleEl.textContent = 'Crafting Workbench';
@@ -1153,6 +1166,22 @@ export class InventoryUI {
       this.animateChestSort(before);
     });
     this.headerEl.appendChild(sort);
+    const pager = this.chestPager;
+    if (pager && pager.pages > 1) {
+      const strip = document.createElement('div');
+      strip.className = 'chest-pages';
+      for (let i = 0; i < pager.pages; i++) {
+        const tab = document.createElement('button');
+        tab.type = 'button';
+        tab.className = 'war-btn mc-font';
+        tab.textContent = String(i + 1);
+        tab.disabled = i === pager.page;
+        tab.title = `Page ${i + 1} of ${pager.pages}`;
+        tab.addEventListener('click', () => pager.onPage(i));
+        strip.appendChild(tab);
+      }
+      this.headerEl.appendChild(strip);
+    }
     const grid = document.createElement('div');
     grid.className = 'inv-grid';
     for (let i = 0; i < CHEST_SIZE; i++) {

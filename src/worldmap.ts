@@ -39,6 +39,18 @@ const BIOME_COLOR: Record<number, string> = {
   [Biome.Swamp]: '#4a5c38',
   [Biome.CherryGrove]: '#d98cb0',
   [Biome.Crystalfields]: '#b9c6e8',
+  [Biome.Savanna]: '#cbb04a',
+  [Biome.Taiga]: '#2f7d5c',
+  [Biome.SnowyTaiga]: '#a7c4bd',
+  [Biome.AutumnForest]: '#c9722a',
+  [Biome.Meadow]: '#8ed44a',
+  [Biome.SunflowerPlains]: '#d9d24e',
+  [Biome.IceSpikes]: '#d6f0f7',
+  [Biome.Highlands]: '#6f9a5a',
+  [Biome.RedwoodForest]: '#2a5c3c',
+  [Biome.TropicalCoast]: '#efe3b4',
+  [Biome.Steppe]: '#b6b165',
+  [Biome.Heath]: '#8d7fa0',
 };
 
 /** Map-icon color per surface-structure kind. */

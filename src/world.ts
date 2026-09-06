@@ -25,7 +25,9 @@ function applyLightShader(
   sunUniform: { value: number },
   auroraUniform: { value: number },
   torchUniform: { value: THREE.Vector4 },
-  duelBoundsUniform: { value: THREE.Vector4 }
+  duelBoundsUniform: { value: THREE.Vector4 },
+  sunTintUniform: { value: THREE.Color },
+  skyTintUniform: { value: THREE.Color }
 ): void {
   mat.customProgramCacheKey = () => 'voxel-light';
   mat.onBeforeCompile = (shader) => {
@@ -35,6 +37,9 @@ function applyLightShader(
     // w = intensity 0..1). Lets a held torch light the world without remeshing.
     shader.uniforms.uTorch = torchUniform;
     shader.uniforms.uDuelBounds = duelBoundsUniform;
+    // Colour of direct sun and of the ambient sky, both driven by the clock.
+    shader.uniforms.uSunTint = sunTintUniform;
+    shader.uniforms.uSkyTint = skyTintUniform;
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
@@ -49,6 +54,7 @@ function applyLightShader(
       .replace(
         '#include <common>',
         '#include <common>\nuniform float uSunLight;\nuniform float uAuroraLight;\nuniform vec4 uTorch;\nuniform vec4 uDuelBounds;\n' +
+        'uniform vec3 uSunTint;\nuniform vec3 uSkyTint;\n' +
         'varying vec2 vSkyBlock;\nvarying vec3 vWorldPos;'
       )
       .replace(
@@ -69,6 +75,18 @@ function applyLightShader(
         'float torch = uTorch.w * (0.45 * fall + 0.55 * fall * fall);\n' +
         'voxelLight = min(1.0, max(voxelLight, torch));\n' +
         'diffuseColor.rgb *= pow(0.8, 15.0 * (1.0 - voxelLight));\n' +
+        '// Ambient colour grading. Faces the sun can reach take its warm hue;\n' +
+        '// faces that only see the sky take the cool blue bounce off it. This\n' +
+        '// is what gives a voxel world SHADOW COLOUR instead of plain grey\n' +
+        '// darkening, and it costs one mix per fragment.\n' +
+        'float sunlit = clamp(vSkyBlock.x * uSunLight, 0.0, 1.0);\n' +
+        'vec3 grade = mix(uSkyTint, uSunTint, sunlit * sunlit);\n' +
+        'diffuseColor.rgb *= mix(vec3(1.0), grade, 0.4);\n' +
+        '// Vibrance: push colour away from its own luminance. The atlas art is\n' +
+        '// deliberately low-saturation so that the biome tints do the talking,\n' +
+        '// which leaves the lit result flat unless it is opened up here.\n' +
+        'float lum = dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722));\n' +
+        'diffuseColor.rgb = clamp(mix(vec3(lum), diffuseColor.rgb, 1.28), 0.0, 1.0);\n' +
         '// A restrained cyan-green cast makes the curtains visibly shine on land.\n' +
         'diffuseColor.rgb *= mix(vec3(1.0), vec3(0.86, 1.08, 1.10), aurora * 0.34);\n' +
         '// Warm the torch-lit pixels (firelight tint).\n' +
@@ -94,6 +112,10 @@ export class World {
   readonly sunUniform = { value: 1 };
   /** Cool skylight cast by the night aurora. */
   readonly auroraUniform = { value: 0 };
+  /** Colour of direct sunlight right now (gold at dawn/dusk, white at noon). */
+  readonly sunTintUniform = { value: new THREE.Color(1, 1, 1) };
+  /** Colour of the ambient sky bounce that fills shadow. */
+  readonly skyTintUniform = { value: new THREE.Color(1, 1, 1) };
   /** Held-torch point light shared with the chunk shaders (xyz pos, w intensity). */
   readonly torchUniform = { value: new THREE.Vector4(0, 0, 0, 0) };
   /** x/z render crop for Duels arenas. x>=z disables the crop. */
@@ -148,8 +170,10 @@ export class World {
       opacity: 0.8,
       depthWrite: false,
     });
-    applyLightShader(this.opaqueMat, this.sunUniform, this.auroraUniform, this.torchUniform, this.duelBoundsUniform);
-    applyLightShader(this.waterMat, this.sunUniform, this.auroraUniform, this.torchUniform, this.duelBoundsUniform);
+    applyLightShader(this.opaqueMat, this.sunUniform, this.auroraUniform,
+      this.torchUniform, this.duelBoundsUniform, this.sunTintUniform, this.skyTintUniform);
+    applyLightShader(this.waterMat, this.sunUniform, this.auroraUniform,
+      this.torchUniform, this.duelBoundsUniform, this.sunTintUniform, this.skyTintUniform);
 
     const r = RENDER_DISTANCE + 1;
     for (let dx = -r; dx <= r; dx++)

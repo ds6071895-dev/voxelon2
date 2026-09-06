@@ -135,6 +135,11 @@
     .inv-hotbar { margin-top: 8px; }
     .chest-layout { display: flex; flex-direction: column; gap: 8px; }
     .chest-sort-btn { flex: none; min-width: 112px; }
+    /* Page tabs for a container deeper than one grid (the faction hoard). The
+       page you are on is the disabled one — it is where you already are. */
+    .chest-pages { display: flex; gap: 4px; flex: none; }
+    .chest-pages .war-btn { min-width: 34px; padding: 4px 6px; }
+    .chest-pages .war-btn:disabled { background: #d8b64a; color: #23200f; }
     .inv-transfer-item {
       position: fixed; width: 32px; height: 32px; z-index: 50;
       pointer-events: none; image-rendering: pixelated;
@@ -1343,17 +1348,19 @@
     }
     .minigame-card:hover, .minigame-card:focus-within { transform: translateY(-6px); }
     .minigame-card:hover::before, .minigame-card:focus-within::before { opacity: 1; }
+    .minigame-card[data-game="party"] { --card: #ff5ea8; }
     .minigame-card[data-game="duels"] {
       --card: #f0a33a;
       background: linear-gradient(140deg, rgba(255,238,207,.96), rgba(255,255,255,.96) 58%);
       border-color: rgba(255,180,77,.34);
     }
     .minigame-art { position: relative; aspect-ratio: 16/9; overflow: hidden; background: #dcecf2; }
-    .minigame-art img {
+    .minigame-art img, .minigame-icon {
       width: 100%; height: 100%; display: block; object-fit: cover;
       transform: translate(var(--px), var(--py)) scale(1.06);
       transition: transform .3s cubic-bezier(.2,.9,.25,1); filter: saturate(1.05) contrast(1.05);
     }
+    .minigame-card:hover .minigame-icon, .minigame-card:focus-within .minigame-icon { transform: translate(var(--px), var(--py)) scale(1.12); }
     .minigame-art::after {
       content: ''; position: absolute; inset: 0; pointer-events: none;
       background:
@@ -2425,7 +2432,67 @@
               <div class="minigames-grid">
                 <article class="minigame-card" data-game="duels">
                   <div class="minigame-art">
-                    <img src="/minigames/duels-v2.png" loading="lazy" decoding="async" fetchpriority="low" alt="Two voxel fighters battling in a bright enclosed arena" />
+                    <svg class="minigame-icon" viewBox="0 0 320 180" role="img" aria-label="Two voxel duellists clashing swords above the arena altar at sunset">
+                      <defs>
+                        <linearGradient id="mg-duel-sky" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0" stop-color="#3c1c6d" /><stop offset=".5" stop-color="#ff6f43" /><stop offset="1" stop-color="#ffd472" />
+                        </linearGradient>
+                        <linearGradient id="mg-duel-floor" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0" stop-color="#ffca77" /><stop offset="1" stop-color="#c4681a" />
+                        </linearGradient>
+                        <linearGradient id="mg-duel-blade" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0" stop-color="#ffffff" /><stop offset="1" stop-color="#9fc4d8" />
+                        </linearGradient>
+                      </defs>
+                      <rect width="320" height="180" fill="url(#mg-duel-sky)" />
+                      <circle cx="160" cy="116" r="48" fill="#ffe9ad" opacity=".5" />
+                      <g fill="#38195c" opacity=".42">
+                        <rect x="4" y="66" width="26" height="56" rx="13" /><rect x="40" y="66" width="26" height="56" rx="13" />
+                        <rect x="76" y="66" width="26" height="56" rx="13" /><rect x="112" y="66" width="26" height="56" rx="13" />
+                        <rect x="182" y="66" width="26" height="56" rx="13" /><rect x="218" y="66" width="26" height="56" rx="13" />
+                        <rect x="254" y="66" width="26" height="56" rx="13" /><rect x="290" y="66" width="26" height="56" rx="13" />
+                      </g>
+                      <rect x="0" y="112" width="320" height="10" fill="#4a2170" opacity=".5" />
+                      <polygon points="0,180 320,180 288,118 32,118" fill="url(#mg-duel-floor)" />
+                      <g stroke="#a8551a" stroke-width="2" opacity=".35">
+                        <path d="M46 134H274M34 156H286" /><path d="M96 118 78 180M224 118 242 180M160 118V180" />
+                      </g>
+                      <polygon points="160,102 190,113 160,124 130,113" fill="#ffeec2" />
+                      <polygon points="130,113 160,124 160,142 130,131" fill="#e0a44a" />
+                      <polygon points="190,113 160,124 160,142 190,131" fill="#b9761f" />
+                      <g>
+                        <rect x="76" y="92" width="22" height="15" rx="3" fill="#ff5470" />
+                        <rect x="80" y="102" width="14" height="8" fill="#2b1533" />
+                        <rect x="76" y="110" width="22" height="25" rx="3" fill="#ff7d90" />
+                        <rect x="80" y="116" width="14" height="8" rx="2" fill="#ffd9df" />
+                        <rect x="78" y="135" width="8" height="17" rx="2" fill="#c9304c" />
+                        <rect x="89" y="135" width="8" height="17" rx="2" fill="#e8455f" />
+                        <g transform="rotate(-40 100 116)">
+                          <rect x="94" y="112" width="16" height="9" rx="2" fill="#8a5a2b" />
+                          <rect x="110" y="110" width="7" height="13" rx="2" fill="#ffd166" />
+                          <rect x="117" y="113" width="54" height="7" rx="3" fill="url(#mg-duel-blade)" />
+                        </g>
+                      </g>
+                      <g>
+                        <rect x="222" y="92" width="22" height="15" rx="3" fill="#2fbcf0" />
+                        <rect x="226" y="102" width="14" height="8" fill="#0d2a3a" />
+                        <rect x="222" y="110" width="22" height="25" rx="3" fill="#5ad0ff" />
+                        <rect x="226" y="116" width="14" height="8" rx="2" fill="#d6f4ff" />
+                        <rect x="224" y="135" width="8" height="17" rx="2" fill="#1a86b8" />
+                        <rect x="235" y="135" width="8" height="17" rx="2" fill="#23a3d8" />
+                        <g transform="rotate(40 220 116)">
+                          <rect x="210" y="112" width="16" height="9" rx="2" fill="#8a5a2b" />
+                          <rect x="203" y="110" width="7" height="13" rx="2" fill="#ffd166" />
+                          <rect x="149" y="113" width="54" height="7" rx="3" fill="url(#mg-duel-blade)" />
+                        </g>
+                      </g>
+                      <g fill="#fff8dc">
+                        <polygon points="160,54 166,72 184,78 166,84 160,102 154,84 136,78 154,72" opacity=".92" />
+                        <rect x="126" y="60" width="7" height="7" rx="2" opacity=".8" />
+                        <rect x="190" y="66" width="6" height="6" rx="2" opacity=".7" />
+                        <rect x="176" y="44" width="5" height="5" rx="2" opacity=".6" />
+                      </g>
+                    </svg>
                     <span class="minigame-status">Playable</span>
                     <span class="minigame-particles" aria-hidden="true"><i></i><i></i><i></i></span>
                   </div>
@@ -2441,7 +2508,54 @@
                 </article>
                 <article class="minigame-card" data-game="bedwars">
                   <div class="minigame-art">
-                    <img src="/minigames/bedwars-v2.png" loading="lazy" decoding="async" fetchpriority="low" alt="Red and blue voxel teams defending beds on bright floating sky islands" />
+                    <svg class="minigame-icon" viewBox="0 0 320 180" role="img" aria-label="Red and blue beds on floating voxel sky islands joined by a bridge">
+                      <defs>
+                        <linearGradient id="mg-bed-sky" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0" stop-color="#3aa9f5" /><stop offset=".62" stop-color="#8fdcff" /><stop offset="1" stop-color="#dff6ff" />
+                        </linearGradient>
+                        <linearGradient id="mg-bed-dirt" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0" stop-color="#a9754a" /><stop offset="1" stop-color="#6c4526" />
+                        </linearGradient>
+                      </defs>
+                      <rect width="320" height="180" fill="url(#mg-bed-sky)" />
+                      <g fill="#ffffff" opacity=".85">
+                        <rect x="18" y="26" width="54" height="14" rx="7" /><rect x="32" y="16" width="30" height="14" rx="7" />
+                        <rect x="238" y="42" width="62" height="15" rx="7.5" /><rect x="256" y="32" width="32" height="14" rx="7" />
+                        <rect x="128" y="18" width="40" height="12" rx="6" opacity=".7" />
+                      </g>
+                      <g>
+                        <polygon points="20,120 112,120 94,152 42,152" fill="url(#mg-bed-dirt)" />
+                        <polygon points="48,152 88,152 74,168 60,168" fill="#5b3a20" />
+                        <rect x="20" y="108" width="92" height="13" rx="3" fill="#57c94f" />
+                        <rect x="20" y="117" width="92" height="5" fill="#3ba336" />
+                        <rect x="34" y="88" width="56" height="18" rx="4" fill="#e0344c" />
+                        <rect x="34" y="84" width="20" height="14" rx="4" fill="#fff2f4" />
+                        <rect x="56" y="82" width="34" height="16" rx="4" fill="#ff6b7f" />
+                        <rect x="62" y="86" width="22" height="4" rx="2" fill="#ffd0d7" />
+                      </g>
+                      <g>
+                        <polygon points="208,120 300,120 282,152 230,152" fill="url(#mg-bed-dirt)" />
+                        <polygon points="236,152 276,152 262,168 248,168" fill="#5b3a20" />
+                        <rect x="208" y="108" width="92" height="13" rx="3" fill="#57c94f" />
+                        <rect x="208" y="117" width="92" height="5" fill="#3ba336" />
+                        <rect x="230" y="88" width="56" height="18" rx="4" fill="#2f63d8" />
+                        <rect x="266" y="84" width="20" height="14" rx="4" fill="#f2f7ff" />
+                        <rect x="230" y="82" width="34" height="16" rx="4" fill="#5f92ff" />
+                        <rect x="236" y="86" width="22" height="4" rx="2" fill="#cfe0ff" />
+                      </g>
+                      <g fill="#f6ead6">
+                        <rect x="116" y="110" width="14" height="12" rx="2" /><rect x="132" y="110" width="14" height="12" rx="2" />
+                        <rect x="148" y="110" width="14" height="12" rx="2" /><rect x="164" y="110" width="14" height="12" rx="2" />
+                        <rect x="180" y="110" width="14" height="12" rx="2" /><rect x="196" y="110" width="8" height="12" rx="2" />
+                      </g>
+                      <g>
+                        <polygon points="160,58 176,80 160,102 144,80" fill="#4fe6d2" />
+                        <polygon points="160,58 176,80 160,80" fill="#25c3ae" />
+                        <polygon points="160,80 176,80 160,102" fill="#12a795" />
+                        <rect x="146" y="46" width="6" height="6" rx="2" fill="#ffffff" opacity=".85" />
+                        <rect x="176" y="60" width="5" height="5" rx="2" fill="#ffffff" opacity=".7" />
+                      </g>
+                    </svg>
                     <span class="minigame-status soon">Coming soon</span>
                   </div>
                   <div class="minigame-copy">
@@ -2450,14 +2564,71 @@
                     <button class="minigame-action" type="button" aria-disabled="true">Coming soon</button>
                   </div>
                 </article>
-                <article class="minigame-card" data-game="ctf">
+                <article class="minigame-card" data-game="party">
                   <div class="minigame-art">
-                    <img src="/minigames/capture-the-flag-v2.png" loading="lazy" decoding="async" fetchpriority="low" alt="Red and blue voxel runners carrying flags through a bright symmetric indoor arena" />
+                    <svg class="minigame-icon" viewBox="0 0 320 180" role="img" aria-label="Confetti, balloons and a giant die above a winners' podium">
+                      <defs>
+                        <linearGradient id="mg-party-sky" x1="0" y1="0" x2="1" y2="1">
+                          <stop offset="0" stop-color="#4a1cb0" /><stop offset=".55" stop-color="#a734df" /><stop offset="1" stop-color="#ff77c8" />
+                        </linearGradient>
+                        <radialGradient id="mg-party-glow" cx=".5" cy=".48" r=".6">
+                          <stop offset="0" stop-color="#ffffff" stop-opacity=".38" /><stop offset="1" stop-color="#ffffff" stop-opacity="0" />
+                        </radialGradient>
+                        <linearGradient id="mg-party-die" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0" stop-color="#ffffff" /><stop offset="1" stop-color="#ffe4f4" />
+                        </linearGradient>
+                      </defs>
+                      <rect width="320" height="180" fill="url(#mg-party-sky)" />
+                      <rect width="320" height="180" fill="url(#mg-party-glow)" />
+                      <g fill="none" stroke-width="5" stroke-linecap="round" opacity=".75">
+                        <path d="M-4 30q18 16 36 0t36 0" stroke="#ffd166" />
+                        <path d="M212 20q18 16 36 0t36 0t36 0" stroke="#4de1c1" />
+                      </g>
+                      <g>
+                        <ellipse cx="44" cy="70" rx="21" ry="25" fill="#ff5ea8" />
+                        <ellipse cx="37" cy="62" rx="6" ry="8" fill="#ffffff" opacity=".55" />
+                        <polygon points="40,94 48,94 44,101" fill="#ff5ea8" />
+                        <path d="M44 101q10 14 0 28t2 22" stroke="#ffe1f0" stroke-width="2" fill="none" opacity=".8" />
+                        <ellipse cx="276" cy="58" rx="19" ry="23" fill="#6ee7ff" />
+                        <ellipse cx="270" cy="51" rx="5" ry="7" fill="#ffffff" opacity=".55" />
+                        <polygon points="272,80 280,80 276,87" fill="#6ee7ff" />
+                        <path d="M276 87q-10 14 0 27t-2 20" stroke="#d9f6ff" stroke-width="2" fill="none" opacity=".8" />
+                      </g>
+                      <g transform="rotate(-12 160 84)">
+                        <rect x="126" y="50" width="68" height="68" rx="14" fill="url(#mg-party-die)" />
+                        <rect x="126" y="50" width="68" height="68" rx="14" fill="none" stroke="#ffb3e0" stroke-width="3" />
+                        <g fill="#3a1470">
+                          <circle cx="145" cy="69" r="6" /><circle cx="175" cy="69" r="6" />
+                          <circle cx="160" cy="84" r="6" />
+                          <circle cx="145" cy="99" r="6" /><circle cx="175" cy="99" r="6" />
+                        </g>
+                      </g>
+                      <g>
+                        <rect x="92" y="146" width="46" height="34" rx="3" fill="#dbe6f2" />
+                        <rect x="92" y="146" width="46" height="7" rx="3" fill="#f4f9ff" />
+                        <rect x="182" y="152" width="46" height="28" rx="3" fill="#e79a5e" />
+                        <rect x="182" y="152" width="46" height="7" rx="3" fill="#f7bd8b" />
+                        <rect x="137" y="134" width="46" height="46" rx="3" fill="#ffc93c" />
+                        <rect x="137" y="134" width="46" height="7" rx="3" fill="#ffe38a" />
+                      </g>
+                      <g opacity=".95">
+                        <rect x="16" y="118" width="10" height="10" rx="2" fill="#ffd166" transform="rotate(24 21 123)" />
+                        <rect x="66" y="30" width="9" height="9" rx="2" fill="#4de1c1" transform="rotate(-18 70 34)" />
+                        <rect x="104" y="14" width="8" height="8" rx="2" fill="#ff5ea8" transform="rotate(32 108 18)" />
+                        <rect x="200" y="46" width="9" height="9" rx="2" fill="#ffd166" transform="rotate(-28 204 50)" />
+                        <rect x="236" y="104" width="10" height="10" rx="2" fill="#b6ff6e" transform="rotate(18 241 109)" />
+                        <rect x="298" y="96" width="9" height="9" rx="2" fill="#ff5ea8" transform="rotate(-22 302 100)" />
+                        <rect x="58" y="128" width="8" height="8" rx="2" fill="#6ee7ff" transform="rotate(40 62 132)" />
+                        <rect x="256" y="130" width="8" height="8" rx="2" fill="#ffd166" transform="rotate(-36 260 134)" />
+                        <rect x="12" y="60" width="7" height="7" rx="2" fill="#b6ff6e" transform="rotate(14 15 63)" />
+                        <rect x="304" y="24" width="8" height="8" rx="2" fill="#6ee7ff" transform="rotate(-14 308 28)" />
+                      </g>
+                    </svg>
                     <span class="minigame-status soon">Coming soon</span>
                   </div>
                   <div class="minigame-copy">
-                    <div class="minigame-title-row"><h3>Capture the Flag</h3><span class="minigame-count">Teams</span></div>
-                    <p>Break through readable team lanes, steal the opposing flag, and race it home.</p>
+                    <div class="minigame-title-row"><h3>Party Games</h3><span class="minigame-count">Free-for-all</span></div>
+                    <p>A rotating playlist of quick-fire rounds. Dodge, race and survive the chaos until one player is left standing.</p>
                     <button class="minigame-action" type="button" aria-disabled="true">Coming soon</button>
                   </div>
                 </article>
@@ -2504,7 +2675,7 @@
               </div>
               <div class="duel-ranks-key" aria-label="How Duels ranks work">
                 <div><strong>100 RP a division</strong><span>Clear III, then II, then I to break into the next tier.</span></div>
-                <div><strong>Five placements</strong><span>You stay Provisional for five rated matches — but RP moves from the very first one.</span></div>
+                <div><strong>Five placements</strong><span>You stay Provisional for five rated matches — RP moves from the very first one, but you only appear on the ladder once they are done.</span></div>
                 <div><strong>Who you beat matters</strong><span>RP weighs the result against the field you beat it out of. Win streaks pay a bonus.</span></div>
                 <div><strong>Promotion shield</strong><span>Breaking into a new tier grants one save against dropping straight back out.</span></div>
               </div>

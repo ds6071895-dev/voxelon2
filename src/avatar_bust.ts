@@ -62,6 +62,8 @@ export class AvatarBustBoard {
   private host: HTMLElement | null = null;
   private clock = 0;
   private lost = false;
+  /** The canvas is holding a frame the current roster did not draw. */
+  private needsClear = true;
   /** Last canvas size pushed to the renderer. Re-assigning canvas.width resets
    *  the drawing buffer, so it must only happen when the panel really moved. */
   private sized = { w: 0, h: 0 };
@@ -135,6 +137,8 @@ export class AvatarBustBoard {
     }
     this.busts.length = 0;
     this.busts.push(...next);
+    // Whatever is on the canvas belongs to the roster we just replaced.
+    this.needsClear = true;
   }
 
   /** Point at a row (or `null` for none). Only one bust poses at a time. */
@@ -142,17 +146,31 @@ export class AvatarBustBoard {
     for (const bust of this.busts) bust.target = bust.key === key ? 1 : 0;
   }
 
-  /** Draw one frame. Cheap no-op while the panel is hidden or empty. */
+  /** Draw one frame. Cheap no-op while the panel is hidden or idle. */
   render(dt: number): void {
     const host = this.host;
-    if (!host || this.lost || !this.busts.length) return;
+    if (!host || this.lost) return;
     const width = host.clientWidth, height = host.clientHeight;
     if (width < 4 || height < 4 || host.offsetParent === null) return;
-    this.clock += dt;
     if (width !== this.sized.w || height !== this.sized.h) {
       this.sized.w = width; this.sized.h = height;
       this.renderer.setSize(width, height, false);
     }
+    // An emptied roster still owes the canvas ONE clear. Drawing nothing is not
+    // the same as showing nothing: the last frame stays on the canvas, so a
+    // panel that swapped to a page with no busts on it (any tab but the ballot)
+    // kept the ballot's characters floating over the new content. The flag
+    // survives until a frame actually runs, because the roster is usually
+    // emptied while the loop is stopped.
+    if (!this.busts.length) {
+      if (!this.needsClear) return;
+      this.needsClear = false;
+      this.renderer.setScissorTest(false);
+      this.renderer.clear();
+      return;
+    }
+    this.needsClear = false;
+    this.clock += dt;
     // Clear the whole canvas with the scissor OFF, or last frame's busts stay
     // burned in wherever a row has since moved or gone away.
     this.renderer.setScissorTest(false);

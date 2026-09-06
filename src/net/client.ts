@@ -207,6 +207,9 @@ export class NetClient {
   onNotify?: (notif: Notification) => void;
   /** Somebody is in a treasury — drives the alarm horn for its defenders. */
   onTreasuryRaided?: (faction: number, by: string, stacks: number) => void;
+  /** Your hoard's live contents, in answer to `sendTreasuryOpen` — the president
+   *  standing at their own flag. Opens the chest panel on it. */
+  onTreasury?: (faction: number, slots: (ItemStack | null)[]) => void;
   /** Everything the pledge screen and the inbox need, straight off `welcome`. */
   onGovWelcome?: (inbox: Notification[], kitClaimed: boolean) => void;
   /** Play a gadget visual effect (frag/oil blast, smoke cloud) at a point. */
@@ -506,6 +509,9 @@ export class NetClient {
       case 'treasuryRaided':
         this.onTreasuryRaided?.(msg.faction, msg.by, msg.stacks);
         break;
+      case 'treasury':
+        this.onTreasury?.(msg.faction, msg.slots);
+        break;
       case 'gadgetFx':
         this.onGadgetFx?.(msg.kind, msg.x, msg.y, msg.z);
         break;
@@ -755,12 +761,22 @@ export class NetClient {
   sendSetKit(slots: (ItemStack | null)[]): void {
     if (this.connected) this.raw({ t: 'govSetKit', slots });
   }
-  sendFundKits(count: number, source: 'treasury' | 'inventory' = 'treasury'): void {
-    if (this.connected) this.raw({ t: 'govFundKits', count, source });
+  /** Fund `count` kits. The bill has ALREADY left this client's inventory by the
+   *  time this is sent — the president's pockets are the only purse. */
+  sendFundKits(count: number): void {
+    if (this.connected) this.raw({ t: 'govFundKits', count, source: 'inventory' });
   }
   sendClaimKit(): void { if (this.connected) this.raw({ t: 'claimKit' }); }
   sendTreasuryRaid(faction: number): void {
     if (this.connected) this.raw({ t: 'treasuryRaid', faction });
+  }
+  /** Ask for your own hoard's contents (president, at the flag). */
+  sendTreasuryOpen(faction: number): void {
+    if (this.connected) this.raw({ t: 'treasuryOpen', faction });
+  }
+  /** Push back the one page the chest panel is holding. */
+  sendTreasurySet(faction: number, page: number, slots: (ItemStack | null)[]): void {
+    if (this.connected) this.raw({ t: 'treasurySet', faction, page, slots });
   }
   sendPickup(eid: number): void {
     if (this.connected) this.raw({ t: 'pickup', eid });

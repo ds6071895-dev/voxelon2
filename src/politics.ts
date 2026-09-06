@@ -5,9 +5,8 @@
 // ONE vote per weekly cycle, and the party with the most votes seats its founder
 // as PRESIDENT. The office is not ceremonial — a sitting president sets the
 // faction's TAX RATE (levied on everything its citizens pull out of the ground,
-// see treasury.ts), LAYS OUT the recruit kit slot by slot and pays for a stock
-// of them out of the treasury or their own pockets, and BROADCASTS to every
-// member's inbox.
+// see treasury.ts), LAYS OUT the recruit kit slot by slot and funds a stock of
+// them OUT OF THEIR OWN INVENTORY, and BROADCASTS to every member's inbox.
 //
 // PURE + transport-agnostic (no THREE/DOM/Node) so the authoritative server, the
 // offline client and the smoke tests share one rule set — same discipline as
@@ -94,7 +93,8 @@ export interface Broadcast {
 export interface Government {
   faction: number;
   taxRate: number;
-  /** Starter kits currently funded and waiting for a recruit to claim. */
+  /** Starter kits the president has paid for out of their own pockets, waiting
+   *  for a recruit to claim one. */
   kitStock: number;
   /** The LOADOUT one of those kits hands over — 4 armor slots then 9 hotbar
    *  slots (treasury.ts owns the layout). A president rewrites it; everyone

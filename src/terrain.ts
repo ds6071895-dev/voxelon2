@@ -5,22 +5,36 @@
 import { Biome, Biomes, ColumnTints } from './biomes';
 import { Block } from './blocks';
 import { Chunk, CHUNK_X, CHUNK_Z } from './chunk';
+import { flagHome } from './flags';
 import { Noise2D, Noise3D, hash2, mulberry32 } from './noise';
+import {
+  PLAZA_BLEND, PLAZA_EDGE, PLAZA_FLAT, PLAZA_FOUNDATION, plazaAt, plazaSurface,
+} from './plaza';
 import { structureStamp } from './structures';
 import { VAULT_REACH, VaultStamp, vaultStamp } from './vaults';
 import { duelArenaBlockAt, DUEL_ARENA_BASE_X } from './duels';
 
 export const SEA_LEVEL = 63;
-const TREE_MARGIN = 3; // trees up to 3 blocks outside a chunk can reach into it
-const ROCK_LINE = 96;  // mountains expose bare stone above this altitude
-const SNOW_LINE = 120; // mountains get snow caps above this
-const MAX_HEIGHT = 235;
+// Redwoods reach ~26 blocks over their stump, so the tree margin has to cover
+// the widest canopy any species can throw across a chunk border.
+const TREE_MARGIN = 4;
+// Rock and snow lines are climate-driven now (see rockLine / snowLine): a range
+// in the tropics keeps its forest and its bare granite far higher than one in
+// the north, which is what makes two ranges on opposite sides of the map read
+// as different places instead of two copies of the same mountain.
+// Peaks now build most of the way to the chunk ceiling (256). The extra ~13
+// blocks of headroom leave room for snow, spires and structures on a summit.
+const MAX_HEIGHT = 243;
+// Above this the height curve compresses instead of clipping, so the tallest
+// summits taper to points rather than all shearing off at one flat altitude.
+const SOFT_CEILING = 196;
 const DUEL_STAMP_MIN_Y = 95;
 // Duels has no horizontal ceiling; only its invisible perimeter columns need
 // stamping above the authored wall, all the way to the world height limit.
 const DUEL_STAMP_MAX_Y = 255;
 
-type Species = 'oak' | 'birch' | 'spruce' | 'jungle' | 'cherry';
+type Species = 'oak' | 'birch' | 'spruce' | 'jungle' | 'cherry'
+  | 'acacia' | 'redwood';
 interface Tree {
   species: Species;
   trunk: number;
@@ -35,6 +49,19 @@ const ORES: [Block, number, number, number, number, number][] = [
   [Block.DiamondOre, 2, 4, 16, 4, 7],
 ];
 
+// Direct-mapped memo for height(). Generating one chunk asks for the same
+// column from three separate places (surface build, tree test, tree stamp), and
+// the streamer re-asks for every neighbour when it meshes the chunk next door.
+// height() is pure, so caching it changes nothing about the world and is by far
+// the biggest lever on generation time — which matters more now that a column
+// costs a ridged multifractal and an erosion field.
+const HEIGHT_CACHE = 1 << 14;
+
+function smoothstep(a: number, b: number, x: number): number {
+  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+}
+
 /** Filter ores an Autominer can be configured to drill (matches its UI). */
 export const AUTOMINER_ORES: Block[] = [
   Block.Stone, Block.CoalOre, Block.IronOre, Block.GoldOre,
@@ -47,6 +74,11 @@ export class Terrain {
   private readonly continental: Noise2D;
   private readonly hills: Noise2D;
   private readonly ravine: Noise2D;
+  /** Broad "how eroded is this range" field: high = worn plateaus and shoulders,
+   *  low = raw spires. It is what stops every mountain being the same cone. */
+  private readonly erosion: Noise2D;
+  /** Fine surface field for scree patches, snow drifts and podzol. */
+  private readonly surfaceField: Noise2D;
   private readonly caves1: Noise3D;
   private readonly caves2: Noise3D;
   private readonly caverns: Noise3D;
@@ -54,6 +86,15 @@ export class Terrain {
   private readonly oilField: Noise2D;
   /** Vault stamps cached per anchor chunk (see vaultStampCached). */
   private readonly vaultStampCache = new Map<string, VaultStamp | null>();
+  /** One levelled pad height per faction monument, solved on first use from the
+   *  NATURAL surface around that flag (see padHeight). */
+  private readonly padHeights = new Map<number, number>();
+  // Open-addressed, no eviction policy beyond "last writer wins" — a generation
+  // pass works over a contiguous patch of columns, so collisions are rare and a
+  // miss just recomputes. hv 0 is the empty sentinel (height is always >= 12).
+  private readonly hx = new Int32Array(HEIGHT_CACHE);
+  private readonly hz = new Int32Array(HEIGHT_CACHE);
+  private readonly hv = new Int16Array(HEIGHT_CACHE);
 
   constructor(seed: number) {
     this.seed = seed;
@@ -61,6 +102,8 @@ export class Terrain {
     this.continental = new Noise2D(seed);
     this.hills = new Noise2D(seed ^ 0x51ab);
     this.ravine = new Noise2D(seed ^ 0xaa11);
+    this.erosion = new Noise2D(seed ^ 0xe705);
+    this.surfaceField = new Noise2D(seed ^ 0x5a4f);
     this.caves1 = new Noise3D(seed ^ 0xcafe);
     this.caves2 = new Noise3D(seed ^ 0xbeef);
     this.caverns = new Noise3D(seed ^ 0x0caf);
@@ -109,8 +152,103 @@ export class Terrain {
     return r < 0 ? 0 : r > 1 ? 1 : r;
   }
 
+  /**
+   * Ridged multifractal in [0,1]: the crest-shaped cousin of fbm. Each octave
+   * is 1-|noise| (so its maximum lies along a LINE, not at a point), squared to
+   * sharpen it, and weighted by the octave above it — which is why detail only
+   * accumulates on ground that is already high. That single property is the
+   * difference between a mountain with knife-edge arêtes running off its summit
+   * and the smooth dome a plain fbm gives you.
+   */
+  private ridged(x: number, z: number): number {
+    let sum = 0, norm = 0, amp = 1, freq = 0.0055, weight = 1;
+    for (let i = 0; i < 5; i++) {
+      let n = 1 - Math.abs(this.hills.noise(x * freq + i * 37.1, z * freq - i * 19.7));
+      n *= n;
+      n *= weight;
+      weight = Math.min(1, n * 2.1);
+      sum += n * amp;
+      norm += amp;
+      amp *= 0.52;
+      freq *= 2.07;
+    }
+    return sum / norm;
+  }
+
+  /** Altitude at which mountains shed their soil for bare rock. Warm ranges
+   *  keep their green far higher than cold ones. */
+  rockLine(t: number): number {
+    return 78 + t * 34;
+  }
+
+  /** Altitude of permanent snow. Same idea, wider swing: a polar range is white
+   *  from its shoulders up, an equatorial one only at the very summit. */
+  snowLine(t: number): number {
+    return 96 + t * 74;
+  }
+
   /** Surface height at world (x, z). Pure function, safe across chunks. */
   height(x: number, z: number): number {
+    // Only whole columns are memoised; that is every call generation makes.
+    // (Ambient effects sample fractional positions and simply skip the cache.)
+    const xi = x | 0, zi = z | 0;
+    if (xi !== x || zi !== z) return this.computeHeight(x, z);
+    const slot =
+      (Math.imul(xi, 0x9e3779b1) ^ Math.imul(zi, 0x85ebca77)) & (HEIGHT_CACHE - 1);
+    if (this.hv[slot] !== 0 && this.hx[slot] === xi && this.hz[slot] === zi) {
+      return this.hv[slot];
+    }
+    const h = this.computeHeight(x, z);
+    this.hx[slot] = xi;
+    this.hz[slot] = zi;
+    this.hv[slot] = h;
+    return h;
+  }
+
+  /**
+   * Surface height with the faction monuments levelled in: inside a flag plaza
+   * the ground IS the pad, outside the rim it is the natural landscape, and
+   * across the rim it ramps smoothly between the two. Doing this in the
+   * heightmap rather than as a stamp is what makes every consumer agree — the
+   * surface fill, trees, structures, spawn searches and the client's model
+   * ground probes all end up on the same level (see plaza.ts).
+   */
+  private computeHeight(x: number, z: number): number {
+    const natural = this.naturalHeight(x, z);
+    const plaza = plazaAt(x, z);
+    if (!plaza || plaza.d > PLAZA_EDGE) return natural;
+    const pad = this.padHeight(plaza.faction);
+    if (plaza.d <= PLAZA_FLAT) return pad;
+    // Smoothstep rather than a straight lerp: the rim leaves the court level
+    // and meets the hillside at its own slope, so there is no visible seam at
+    // either end of the ramp.
+    const t = smoothstep(PLAZA_FLAT, PLAZA_FLAT + PLAZA_BLEND, plaza.d);
+    return Math.round(pad + (natural - pad) * t);
+  }
+
+  /**
+   * The level one faction's monument stands on: the mean NATURAL surface over
+   * its court, never below the waterline (a flag pad is dry land even when the
+   * pole happens to sit on a lake shore). Pure in the seed, so the server and
+   * every client solve the same number; memoised because it costs ~50 columns.
+   */
+  private padHeight(faction: number): number {
+    const cached = this.padHeights.get(faction);
+    if (cached !== undefined) return cached;
+    const home = flagHome(faction);
+    let sum = 0, n = 0;
+    for (let dz = -PLAZA_FLAT; dz <= PLAZA_FLAT; dz += 4) {
+      for (let dx = -PLAZA_FLAT; dx <= PLAZA_FLAT; dx += 4) {
+        sum += this.naturalHeight(home.x + dx, home.z + dz);
+        n++;
+      }
+    }
+    const y = Math.max(SEA_LEVEL + 2, Math.round(sum / n));
+    this.padHeights.set(faction, y);
+    return y;
+  }
+
+  private naturalHeight(x: number, z: number): number {
     // Wider continental swing (×30 vs 24) so lows dip below sea level over more
     // area — bigger ocean basins with room for ships to sail and fight.
     const base = this.continental.fbm(x * 0.004, z * 0.004, 4) * 30;
@@ -122,17 +260,44 @@ export class Terrain {
       h = Math.max(SEA_LEVEL - 30, SEA_LEVEL - ((SEA_LEVEL - h) * 1.7 + 4));
     }
     // Mountains rise smoothly via the (smooth) mountain factor, so there are
-    // no cliffs at biome borders. A ridged term makes the peaks jagged.
-    const m = this.biomes.mountainFactor(x, z);
+    // no cliffs at biome borders.
+    let m = this.biomes.mountainFactor(x, z);
+    // Ranges grow out of LAND. Fading the lift away over deep water keeps the
+    // ocean basins oceanic (nothing shoulders up out of the abyss) while still
+    // letting a range climb straight off a shoreline into a coastal wall.
+    m *= smoothstep(SEA_LEVEL - 30, SEA_LEVEL - 6, h);
     if (m > 0) {
-      const ridge = 1 - Math.abs(this.hills.fbm(x * 0.01, z * 0.01, 3));
-      h += m * (50 + 90 * m) * (0.55 + 0.45 * ridge);
+      const ridge = this.ridged(x, z);
+      // Erosion decides the *character* of a range: worn ranges get broad
+      // shoulders and shelves, young ones get raw spires off the same field.
+      const erosion = 0.5 + 0.5 * this.erosion.fbm(x * 0.0034, z * 0.0034, 3);
+      const spiky = 1 - erosion;
+      // Cubed in m, so the tallest ground gets disproportionately taller —
+      // ranges have real summits instead of one uniform plateau altitude.
+      let lift = m * (74 + 212 * m * m) * (0.3 + 0.7 * ridge);
+      lift *= 0.72 + 0.5 * spiky;
+      // Worn ranges terrace: rounding the upper part of the lift to 6-block
+      // steps carves the cliff bands and shelves you get on real massifs.
+      const terrace = smoothstep(0.55, 0.9, erosion) * smoothstep(30, 70, lift);
+      if (terrace > 0) {
+        const stepped = Math.round(lift / 6) * 6;
+        lift += (stepped - lift) * terrace * 0.8;
+      }
+      h += lift;
     }
     // Swamps flatten toward just-above-sea-level lowlands (mask-driven +
     // continuous; damped where mountains dominate so ranges stay ranges).
     const sf = this.biomes.swampFlat(x, z) * (1 - m);
     if (sf > 0 && h > SEA_LEVEL) {
       h += (SEA_LEVEL + 1.4 - h) * sf;
+    }
+    // Soft ceiling instead of a hard clamp: without it every peak tall enough to
+    // reach the limit would be sheared off at exactly the same altitude, and a
+    // skyline of identical flat tops is the one thing that instantly reads as
+    // generated. This compresses asymptotically, so summits stay pointed.
+    if (h > SOFT_CEILING) {
+      const span = MAX_HEIGHT - SOFT_CEILING;
+      h = SOFT_CEILING + span * (1 - Math.exp(-(h - SOFT_CEILING) / span));
     }
     return Math.min(MAX_HEIGHT, Math.max(12, Math.round(h)));
   }
@@ -149,11 +314,20 @@ export class Terrain {
     // mountain (the flattening is damped there too).
     if (h >= SEA_LEVEL - 1 && h <= SEA_LEVEL + 4 && this.biomes.swampFlat(x, z) > 0.5 &&
         this.biomes.biomeAt(x, z) === Biome.Swamp) return Biome.Swamp;
-    if (h <= SEA_LEVEL + 1) return Biome.Beach;
-    if (this.biomes.mountainFactor(x, z) > 0.45 || h >= ROCK_LINE) {
-      const [t] = this.biomes.climate(x, z);
-      return t < 0.45 || h >= SNOW_LINE
-        ? Biome.SnowyMountains : Biome.Mountains;
+    const [t, m] = this.biomes.climate(x, z);
+    if (h <= SEA_LEVEL + 1) {
+      // Warm, humid shorelines are white sand over turquoise shallows rather
+      // than the same grey-tan beach the poles get.
+      return t > 0.6 && m > 0.34 ? Biome.TropicalCoast : Biome.Beach;
+    }
+    const rock = this.rockLine(t);
+    const snow = this.snowLine(t);
+    if (this.biomes.mountainFactor(x, z) > 0.46 || h >= rock) {
+      // Below the rock line a mountain is still green: HIGHLANDS, the alpine
+      // shoulder where the meadows and the last stunted conifers live. The old
+      // code jumped straight from grassland to grey rock at a fixed altitude.
+      if (h < rock - 4 && t >= 0.34) return Biome.Highlands;
+      return t < 0.26 || h >= snow ? Biome.SnowyMountains : Biome.Mountains;
     }
     return this.biomes.biomeAt(x, z);
   }
@@ -164,6 +338,7 @@ export class Terrain {
    *  rather than threading the whole world. Public so determinism/rarity is
    *  unit-testable. */
   ravineDepth(x: number, z: number): number {
+    if (plazaAt(x, z)) return 0; // a canyon never opens under a flag plaza
     const mask = this.ravine.noise(x * 0.0012 + 500, z * 0.0012 - 500);
     if (mask < 0.25) return 0; // only inside the occasional "ravine country" regions
     const rv = this.ravine.noise(x * 0.006, z * 0.006);
@@ -175,42 +350,88 @@ export class Terrain {
 
   private treeAt(x: number, z: number): Tree | null {
     const h = this.height(x, z);
-    if (h <= SEA_LEVEL + 1 || h > 118) return null;
-    // No trees on bare mountain rock. Surfaces render as bare Stone for any
-    // mountain column at/above ROCK_LINE, so guard on h alone to match the
-    // surface logic (lower grassy slopes below ROCK_LINE still get trees).
-    if (h >= ROCK_LINE) return null;
-    const biome = this.biomes.biomeAt(x, z);
+    if (h <= SEA_LEVEL + 1) return null;
+    if (plazaAt(x, z)) return null; // monument grounds are kept clear
+    const [t] = this.biomes.climate(x, z);
+    // The treeline is the rock line: nothing roots in bare granite, and where
+    // that sits now depends on how warm the range is.
+    if (h >= this.rockLine(t)) return null;
+    const biome = this.biomeWithWater(x, z, h);
 
     let p: number;
     let species: Species;
     switch (biome) {
       case Biome.Forest:
-        p = 0.04;
+        p = 0.06;
         species = hash2(this.seed ^ 0x5b, x, z) < 0.85 ? 'oak' : 'birch';
         break;
       case Biome.BirchForest:
-        p = 0.035;
+        p = 0.055;
         species = 'birch';
+        break;
+      case Biome.AutumnForest:
+        p = 0.06;
+        species = hash2(this.seed ^ 0x5b, x, z) < 0.6 ? 'oak' : 'birch';
+        break;
+      case Biome.Taiga:
+        p = 0.055;
+        species = 'spruce';
+        break;
+      case Biome.SnowyTaiga:
+        p = 0.045;
+        species = 'spruce';
+        break;
+      case Biome.RedwoodForest:
+        // Fewer stems, but each one is a landmark you can see over the canopy.
+        p = 0.03;
+        species = 'redwood';
         break;
       case Biome.Snowy:
         p = 0.02;
         species = 'spruce';
         break;
+      case Biome.Highlands:
+        p = 0.018;
+        species = 'spruce';
+        break;
       case Biome.Plains:
-        p = 0.003;
+        p = 0.005;
+        species = 'oak';
+        break;
+      case Biome.SunflowerPlains:
+        p = 0.004;
+        species = 'oak';
+        break;
+      case Biome.Meadow:
+        p = 0.006;
+        species = 'oak';
+        break;
+      case Biome.Heath:
+        p = 0.006;
+        species = 'birch';
+        break;
+      case Biome.Savanna:
+        p = 0.009;
+        species = 'acacia';
+        break;
+      case Biome.Steppe:
+        p = 0.002;
+        species = 'acacia';
+        break;
+      case Biome.Swamp:
+        p = 0.012;
         species = 'oak';
         break;
       case Biome.Jungle:
-        p = 0.05;
+        p = 0.07;
         species = 'jungle';
         break;
       case Biome.CherryGrove:
-        p = 0.04;
+        p = 0.055;
         species = 'cherry';
         break;
       default:
-        return null; // desert/beach/ocean: no trees
+        return null; // desert/mesa/beach/ocean/ashlands/crystalfields: no trees
     }
 
     const r = hash2(this.seed ^ 0x7ee5, x, z);
@@ -224,9 +445,11 @@ export class Terrain {
       }
     }
     const v = hash2(this.seed ^ 0x33, x, z);
-    const trunk = species === 'jungle' ? 8 + Math.floor(v * 4)
-      : species === 'spruce' ? 6 + Math.floor(v * 3)
-      : species === 'birch' ? 5 + Math.floor(v * 2)
+    const trunk = species === 'redwood' ? 15 + Math.floor(v * 10)
+      : species === 'jungle' ? 9 + Math.floor(v * 5)
+      : species === 'spruce' ? 6 + Math.floor(v * 4)
+      : species === 'birch' ? 5 + Math.floor(v * 3)
+      : species === 'acacia' ? 4 + Math.floor(v * 3)
       : species === 'cherry' ? 4 + Math.floor(v * 3)
       : 4 + Math.floor(v * 3);
     return { species, trunk };
@@ -259,12 +482,37 @@ export class Terrain {
         const wx = ox + lx, wz = oz + lz;
         const h = this.height(wx, wz);
         const biome = this.biomeWithWater(wx, wz, h);
+        const [temp] = this.biomes.climate(wx, wz);
+        const rockLine = this.rockLine(temp);
+        const snowLine = this.snowLine(temp);
         const sandy = biome === Biome.Beach || biome === Biome.Ocean ||
-          biome === Biome.Desert;
+          biome === Biome.Desert || biome === Biome.TropicalCoast;
         const mountain = biome === Biome.Mountains ||
-          biome === Biome.SnowyMountains;
-        const snowy = biome === Biome.Snowy || biome === Biome.SnowyMountains;
-        const bareRock = mountain && h >= ROCK_LINE && h < SNOW_LINE;
+          biome === Biome.SnowyMountains || biome === Biome.Highlands;
+        const snowy = biome === Biome.Snowy || biome === Biome.SnowyMountains ||
+          biome === Biome.SnowyTaiga || biome === Biome.IceSpikes;
+        // Snow does not begin on a ruled line. Over the 12 blocks below the
+        // snow line it DITHERS in — drifts catching in the lee of the rock —
+        // so a peak wears a broken frost collar instead of a painted stripe.
+        const snowDither = h >= snowLine ? 1
+          : h > snowLine - 12
+            ? (h - (snowLine - 12)) / 12 > hash2(this.seed ^ 0x5017, wx, wz) ? 1 : 0
+            : 0;
+        const capped = (mountain || snowy) && snowDither === 1;
+        const bareRock = mountain && h >= rockLine && !capped;
+        // Scree: patches of loose broken rock across the bare faces, so a
+        // mountainside is two materials rather than one flat grey.
+        const scree = bareRock &&
+          this.surfaceField.fbm(wx * 0.055, wz * 0.055, 2) > 0.24;
+        // Podzol: bare needle-litter under old conifers. Cheap, and it is what
+        // makes a redwood stand read as a forest floor instead of a lawn.
+        const podzol = (biome === Biome.RedwoodForest || biome === Biome.Taiga) &&
+          this.surfaceField.fbm(wx * 0.07 + 40, wz * 0.07 - 40, 2) > 0.12;
+        // Steppe dries out into sand scrapes; heath breaks through to stone.
+        const scrape = biome === Biome.Steppe &&
+          this.surfaceField.fbm(wx * 0.06 - 80, wz * 0.06 + 80, 2) > 0.34;
+        const outcrop = biome === Biome.Heath &&
+          this.surfaceField.fbm(wx * 0.08 + 15, wz * 0.08 + 15, 2) > 0.42;
         const mesa = biome === Biome.Mesa;
         const ashen = biome === Biome.Ashlands;
         const swamp = biome === Biome.Swamp;
@@ -281,6 +529,12 @@ export class Terrain {
         const rd = h > SEA_LEVEL + 2 ? this.ravineDepth(wx, wz) : 0;
         const ravineFloor = rd > 0 ? Math.max(10, h - rd) : 256;
 
+        // Flag plaza: the court is PAVED, over a stone foundation deep enough
+        // that its kerb reads as a platform where the rim cuts into a slope.
+        const plaza = plazaAt(wx, wz);
+        const paving = plaza && plaza.d <= PLAZA_FLAT
+          ? plazaSurface(this.seed, wx, wz, plaza.d) : 0;
+
         for (let y = 0; y <= h; y++) {
           let id: number;
           if (y === 0 || (y < 3 && hash2(this.seed ^ 0xbed, wx * 256 + y, wz) < 0.5)) {
@@ -293,9 +547,12 @@ export class Terrain {
               : ashen ? Block.Basalt
               : mesa ? Block.RedSand
               : sandy ? Block.Sand
-              : h >= SNOW_LINE ? Block.SnowyGrass    // snow cap
-              : bareRock ? Block.Stone               // exposed rock
+              : capped ? Block.SnowyGrass            // dithered snow cap
+              : bareRock ? (scree ? Block.Cobblestone : Block.Stone)
               : snowy ? Block.SnowyGrass
+              : podzol ? Block.Dirt                  // conifer needle litter
+              : scrape ? Block.Sand                  // dry steppe scrape
+              : outcrop ? Block.Stone                // heath outcrop
               : Block.Grass;
           } else if (y >= h - 3) {
             id = swampPool || (swamp && y >= h - 1) ? Block.Mud // muddy swamp bed
@@ -303,7 +560,7 @@ export class Terrain {
               : ashen ? Block.Basalt
               : mesa ? Block.Terracotta
               : sandy ? Block.Sand
-              : bareRock || h >= SNOW_LINE ? Block.Stone // rocky mountainside
+              : bareRock || capped ? Block.Stone // rocky mountainside
               : Block.Dirt;
           } else if (mesa && y >= h - 9) {
             // BANDED badlands rock: alternating strata read as painted cliffs.
@@ -316,9 +573,16 @@ export class Terrain {
             id = Block.Stone;
           }
 
+          if (paving !== 0 && y > h - PLAZA_FOUNDATION) {
+            id = y === h ? paving : Block.Stone; // paving + its footing
+          }
+
           if (id !== Block.Bedrock && y >= ravineFloor) continue; // ravine
 
-          if (id !== Block.Bedrock && y > 4 && y < h - 3) {
+          // Nothing hollows out the ground under a monument: a cave mouth in
+          // the plaza floor would put the treasury over a hole.
+          if (id !== Block.Bedrock && y > 4 && y < h - 3 &&
+              !(paving !== 0 && y > h - PLAZA_FOUNDATION - 4)) {
             // Layered caves: two connected worm-tunnel networks (union, so they
             // join up) PLUS occasional large CAVERNS — a low-freq 3D blob in a
             // deep band — so spelunking actually opens into rooms.
@@ -394,6 +658,10 @@ export class Terrain {
     h: number, biome: Biome
   ): void {
     if (h <= SEA_LEVEL + 1 || chunk.get(lx, h, lz) === Block.Air) return;
+    // Monument grounds stay swept: no tall grass, no boulders, and above all no
+    // ice spikes — a 10-block snow-grass tower beside the flag was the single
+    // ugliest thing generation could put there.
+    if (plazaAt(wx, wz)) return;
     const r = hash2(this.seed ^ 0xdec0, wx, wz);
 
     if (biome === Biome.Desert) {
@@ -446,34 +714,88 @@ export class Terrain {
       return;
     }
 
-    // Snowy plains: nothing but the snow (no stray boulders/shrubs).
+    // Ice spikes: tall frozen spires, the whole reason to visit the biome.
+    // Built from PACKED SNOW, not snowy grass: the latter's sides are dirt, so
+    // a twelve-block spire read as a tower of grass blocks rather than ice.
+    if (biome === Biome.IceSpikes) {
+      if (r < 0.02) {
+        const tall = 4 + Math.floor(hash2(this.seed ^ 0x1ce5, wx, wz) * 8);
+        for (let i = 1; i <= tall; i++) chunk.set(lx, h + i, lz, Block.PackedSnow);
+        // A shoulder against the taller spires so they read as a frozen mass
+        // rather than a row of fence posts. Clamped to the chunk: decorate only
+        // owns this column, and a spike is not worth a cross-chunk stamp.
+        if (tall > 7 && lx + 1 < CHUNK_X) {
+          for (let i = 1; i <= tall - 3; i++) chunk.set(lx + 1, h + i, lz, Block.PackedSnow);
+        }
+      }
+      return;
+    }
+
+    // Snowy plains / snowy taiga: only the odd shrub breaking the drifts.
     if (biome === Biome.Snowy) return;
+    if (biome === Biome.SnowyTaiga) {
+      if (r < 0.012) chunk.set(lx, h + 1, lz, Block.DeadBush);
+      return;
+    }
+
+    // Bare alpine rock still gets the occasional boulder to break the slope.
+    if (biome === Biome.Mountains || biome === Biome.SnowyMountains) {
+      if (r < 0.004) chunk.set(lx, h + 1, lz, Block.Cobblestone);
+      return;
+    }
 
     const grassy = biome === Biome.Plains || biome === Biome.Forest ||
       biome === Biome.BirchForest || biome === Biome.Jungle ||
-      biome === Biome.CherryGrove;
+      biome === Biome.CherryGrove || biome === Biome.Savanna ||
+      biome === Biome.Taiga || biome === Biome.AutumnForest ||
+      biome === Biome.Meadow || biome === Biome.SunflowerPlains ||
+      biome === Biome.Highlands || biome === Biome.RedwoodForest ||
+      biome === Biome.Steppe || biome === Biome.Heath;
     if (!grassy) return;
-    // Jungle floors are DENSE with tall grass; cherry groves scatter petals
-    // (poppy-heavy flowers) through lighter grass.
-    const pGrass = biome === Biome.Jungle ? 0.24
-      : biome === Biome.Plains ? 0.12
-      : biome === Biome.CherryGrove ? 0.13
-      : 0.085;
+    // How thickly the ground cover grows is a big part of a biome's identity:
+    // a jungle floor you have to wade through, a steppe you can see across.
+    const pGrass = biome === Biome.Jungle ? 0.3
+      : biome === Biome.Meadow ? 0.26
+      : biome === Biome.Savanna ? 0.22
+      : biome === Biome.SunflowerPlains ? 0.2
+      : biome === Biome.Heath ? 0.18
+      : biome === Biome.Plains ? 0.16
+      : biome === Biome.Highlands ? 0.15
+      : biome === Biome.CherryGrove ? 0.14
+      : biome === Biome.Taiga || biome === Biome.RedwoodForest ? 0.1
+      : biome === Biome.Steppe ? 0.05
+      : 0.1;
     // Flowers cluster into MEADOW PATCHES (a coarse 8×8 mask) so plains read as
-    // fields with drifts of color instead of uniform speckle.
-    const meadow = hash2(this.seed ^ 0xf10a, wx >> 3, wz >> 3) < 0.22;
-    const pFlower = biome === Biome.CherryGrove ? 0.05
-      : meadow ? 0.09
-      : 0.008;
+    // fields with drifts of color instead of uniform speckle. Meadows and
+    // sunflower plains ARE the drift, so they skip the mask entirely.
+    const meadow = hash2(this.seed ^ 0xf10a, wx >> 3, wz >> 3) < 0.3;
+    const pFlower = biome === Biome.Meadow ? 0.3
+      : biome === Biome.SunflowerPlains ? 0.26
+      : biome === Biome.Heath ? 0.16
+      : biome === Biome.CherryGrove ? 0.06
+      : biome === Biome.Highlands ? 0.08
+      : biome === Biome.Savanna ? (meadow ? 0.04 : 0.01)
+      : meadow ? 0.12
+      : 0.01;
     if (r < pGrass) {
       chunk.set(lx, h + 1, lz, Block.TallGrass);
     } else if (r < pGrass + pFlower) {
-      // Meadow patches lean one color per patch (real drifts, not confetti).
-      const poppyBias = biome === Biome.CherryGrove ? 0.85
+      // Patches lean one color at a time (real drifts, not confetti).
+      const poppyBias = biome === Biome.SunflowerPlains ? 0.05 // a yellow sea
+        : biome === Biome.Heath ? 0.9   // heather moor: near-solid red-purple
+        : biome === Biome.CherryGrove ? 0.85
+        : biome === Biome.Meadow
+          ? (hash2(this.seed ^ 0xf1f1, wx >> 3, wz >> 3) < 0.5 ? 0.8 : 0.2)
         : meadow ? (hash2(this.seed ^ 0xf1f1, wx >> 3, wz >> 3) < 0.5 ? 0.85 : 0.15)
         : 0.4;
       chunk.set(lx, h + 1, lz,
         hash2(this.seed ^ 0xf1, wx, wz) < poppyBias ? Block.Poppy : Block.Dandelion);
+    } else if (biome === Biome.RedwoodForest && r < pGrass + pFlower + 0.006) {
+      chunk.set(lx, h + 1, lz, Block.GlowFungus); // damp old-growth understory
+    } else if (biome === Biome.Steppe && r < pGrass + pFlower + 0.02) {
+      chunk.set(lx, h + 1, lz, Block.DeadBush);
+    } else if (biome === Biome.Jungle && r < pGrass + pFlower + 0.008) {
+      chunk.set(lx, h + 1, lz, Block.GlowFungus); // luminous jungle floor
     }
     // No ground-level boulders or leaf bushes: stray cobblestone/leaf blocks on
     // the surface read as litter, not decoration, so grass + flowers are it.
@@ -536,12 +858,12 @@ export class Terrain {
         const ground = this.height(tx, tz);
         const top = ground + tree.trunk;
         const log = tree.species === 'birch' ? Block.BirchLog
-          : tree.species === 'spruce' ? Block.SpruceLog
+          : tree.species === 'spruce' || tree.species === 'redwood' ? Block.SpruceLog
           : tree.species === 'jungle' ? Block.JungleLog
           : tree.species === 'cherry' ? Block.CherryLog
           : Block.OakLog;
         const leaves = tree.species === 'birch' ? Block.BirchLeaves
-          : tree.species === 'spruce' ? Block.SpruceLeaves
+          : tree.species === 'spruce' || tree.species === 'redwood' ? Block.SpruceLeaves
           : tree.species === 'jungle' ? Block.JungleLeaves
           : tree.species === 'cherry' ? Block.CherryLeaves
           : Block.Leaves;
@@ -551,6 +873,10 @@ export class Terrain {
 
         if (tree.species === 'spruce') {
           this.spruceCanopy(stamp, tx, tz, top, tree.trunk, leaves);
+        } else if (tree.species === 'redwood') {
+          this.redwoodCanopy(stamp, tx, tz, ground, top, leaves);
+        } else if (tree.species === 'acacia') {
+          this.acaciaCanopy(stamp, tx, tz, top, leaves);
         } else if (tree.species === 'jungle') {
           // Tall jungle giants wear TWO canopies: the crown + a mid-trunk skirt.
           this.oakCanopy(stamp, tx, tz, top, leaves);
@@ -586,6 +912,56 @@ export class Terrain {
     for (const [dx, dz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
       stamp(tx + dx, top + 1, tz + dz, leaves, true);
     }
+  }
+
+  /** Acacia: a bare trunk under one wide, FLAT crown. The silhouette is the
+   *  whole point of a savanna — a plain of umbrellas against a gold horizon. */
+  private acaciaCanopy(
+    stamp: (x: number, y: number, z: number, id: number, keep?: boolean) => void,
+    tx: number, tz: number, top: number, leaves: Block
+  ): void {
+    for (let layer = 0; layer < 2; layer++) {
+      const y = top + layer;
+      const r = layer === 0 ? 3 : 2;
+      for (let dx = -r; dx <= r; dx++) {
+        for (let dz = -r; dz <= r; dz++) {
+          if (Math.abs(dx) + Math.abs(dz) > r + 1) continue; // rounded plate
+          if (layer === 0 && dx === 0 && dz === 0) continue; // trunk pokes through
+          stamp(tx + dx, y, tz + dz, leaves, true);
+        }
+      }
+    }
+  }
+
+  /** Redwood: a very tall bare column carrying a narrow crown, with a few
+   *  boughs breaking out of the shaft on the way up. Standing under one and
+   *  looking for the top is the entire experience of an old-growth stand. */
+  private redwoodCanopy(
+    stamp: (x: number, y: number, z: number, id: number, keep?: boolean) => void,
+    tx: number, tz: number, ground: number, top: number, leaves: Block
+  ): void {
+    // Scattered boughs over the upper half of the shaft.
+    const boughStart = ground + Math.floor((top - ground) * 0.55);
+    for (let y = boughStart; y < top - 3; y += 3) {
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        if (hash2(this.seed ^ 0xb041, tx + dx, tz + dz + y) < 0.45) continue;
+        stamp(tx + dx, y, tz + dz, leaves, true);
+        stamp(tx + dx * 2, y, tz + dz * 2, leaves, true);
+      }
+    }
+    // The crown: three tapering rings and a cap.
+    for (let i = 0; i < 4; i++) {
+      const y = top - 3 + i;
+      const r = i === 0 ? 3 : i === 1 ? 2 : 1;
+      for (let dx = -r; dx <= r; dx++) {
+        for (let dz = -r; dz <= r; dz++) {
+          if (dx * dx + dz * dz > r * r + 1) continue;
+          if (dx === 0 && dz === 0 && y <= top) continue;
+          stamp(tx + dx, y, tz + dz, leaves, true);
+        }
+      }
+    }
+    stamp(tx, top + 1, tz, leaves, true);
   }
 
   /** Conical spruce: narrow rings that widen down the trunk. */

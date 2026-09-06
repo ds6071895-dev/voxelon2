@@ -12,16 +12,18 @@ import {
 } from '../src/politics';
 import {
   KIT_ARMOR_SLOTS, KIT_SLOTS, MAX_KIT_STACK, RAID_STACKS, STARTER_KIT,
-  TREASURY_PEDESTALS, TREASURY_RING_RADIUS, TREASURY_SLOTS, canFundKits, countOf,
-  deposit, fundKits, kitCost, kitItemCount, kitSlotAccepts, kitStacks, levy,
-  newKit, newTreasury, pedestalLocation, raid, sanitizeKit, sanitizeTreasury,
-  treasuryCount, treasuryInReach, treasuryLocation, withdraw,
+  TREASURY_PAGES, TREASURY_PAGE_SLOTS, TREASURY_PEDESTALS, TREASURY_RING_RADIUS,
+  TREASURY_SLOTS, canFundKits, countOf, deposit, fundKits, isTreasuryPage,
+  kitCost, kitItemCount, kitSlotAccepts, kitStacks, levy, newKit, newTreasury,
+  pedestalLocation, raid, sanitizeKit, sanitizeTreasury, setTreasuryPage,
+  treasuryCount, treasuryInReach, treasuryLocation, treasuryPage, withdraw,
 } from '../src/treasury';
 import { flagHome } from '../src/flags';
 import { Accounts } from '../src/net/accounts';
 import { GameServer } from '../src/net/server_core';
+import type { ClientMsg } from '../src/net/protocol';
 import { FACTIONS, NO_FACTION } from '../src/teams';
-import { ITEMS, Item } from '../src/items';
+import { ITEMS, Item, type ItemStack } from '../src/items';
 import { Block } from '../src/blocks';
 
 let passed = 0;
@@ -243,6 +245,34 @@ const CONTROL = '\u0007';
   check('the starter kit is made of real items',
     STARTER_KIT.every((line) => !!ITEMS[line.id] && line.count > 0));
 
+  // --- The hoard as PAGES ----------------------------------------------------
+  check('the hoard is a whole number of chest-shaped pages',
+    TREASURY_SLOTS === TREASURY_PAGE_SLOTS * TREASURY_PAGES &&
+    isTreasuryPage(0) && isTreasuryPage(TREASURY_PAGES - 1) &&
+    !isTreasuryPage(-1) && !isTreasuryPage(TREASURY_PAGES) && !isTreasuryPage(0.5));
+  const pt = newTreasury(A);
+  deposit(pt, Item.CobaltIngot, 5);
+  check('a page is always chest-shaped, and an unreal page is empty',
+    treasuryPage(pt.slots, 0).length === TREASURY_PAGE_SLOTS &&
+    treasuryPage(pt.slots, 0)[0]?.count === 5 &&
+    treasuryPage(pt.slots, 1).every((s) => s === null) &&
+    treasuryPage(pt.slots, TREASURY_PAGES).every((s) => s === null));
+  const edited = treasuryPage(pt.slots, 0);
+  edited[0] = null;                                  // the president took it
+  edited[4] = { id: Item.Bullet, count: 12 };        // and put this in
+  edited[5] = { id: 123456, count: 3 } as ItemStack; // junk: never lands
+  check('writing a page takes, gives and fail-closes line by line',
+    setTreasuryPage(pt.slots, 0, edited) &&
+    pt.slots[0] === null && pt.slots[4]?.id === Item.Bullet && pt.slots[5] === null &&
+    treasuryCount(pt) === 12);
+  check('a page write never reaches another page, and a bad page changes nothing',
+    !setTreasuryPage(pt.slots, TREASURY_PAGES, edited) &&
+    !setTreasuryPage(pt.slots, 0, 'not a page') &&
+    pt.slots[TREASURY_PAGE_SLOTS] === null && treasuryCount(pt) === 12);
+  check('a page write caps a line at the item\'s own stack limit',
+    setTreasuryPage(pt.slots, 2, [{ id: Item.Bullet, count: 9999 }]) &&
+    (pt.slots[TREASURY_PAGE_SLOTS * 2]?.count ?? 0) === ITEMS[Item.Bullet].maxStack);
+
   // --- The editable loadout --------------------------------------------------
   const kit = newKit();
   check('a fresh loadout is the classic starter kit, laid into the hotbar',
@@ -397,7 +427,18 @@ const CONTROL = '\u0007';
     s.handle(1, { t: 'pledgeFaction', faction: B }).some((o) => o.msg.t === 'govErr'));
   check('a junk faction is refused',
     s.handle(2, { t: 'pledgeFaction', faction: 99 }).some((o) => o.msg.t === 'govErr'));
-  s.handle(2, { t: 'pledgeFaction', faction: A });
+  // A VACANT SEAT IS STILL JOINABLE. No election has been tallied at this point,
+  // so neither faction has a president — the pledge must go through anyway, and
+  // the dossiers must still carry citizens for the card's plinth to stand up.
+  const vacantJoin = s.handle(2, { t: 'pledgeFaction', faction: A });
+  const vacantSync = vacantJoin.find((o) => o.msg.t === 'politics')!.msg as
+    Extract<typeof vacantJoin[number]['msg'], { t: 'politics' }>;
+  check('a faction with no president is still joinable',
+    vacantJoin.some((o) => o.msg.t === 'pledged') &&
+    vacantSync.factions.every((f) => !f.president));
+  check('a presidentless faction still publishes faces for its plinth',
+    (vacantSync.factions.find((f) => f.faction === A)!.faces ?? [])
+      .some((face) => face.username === 'Bo'));
 
   const founded = s.handle(1, {
     t: 'foundParty', name: 'Reds', slogan: 'Deep tunnels', promises: [0, 1],
@@ -438,12 +479,71 @@ const CONTROL = '\u0007';
   check('emptying your own pockets is never taxed',
     manual.t === 'itemspawn' && manual.item.count === 64);
 
-  // Kits: funded from the treasury, one per account.
+  // Kits: funded OUT OF THE PRESIDENT'S OWN INVENTORY, one per account. The
+  // client has already taken the bill out of its pockets by the time the message
+  // arrives, so the server only records the stock — the hoard is not a purse and
+  // is not touched on the way, which is what the before/after count proves. A
+  // stocked treasury here also stands in for the raid test further down.
   for (const line of kitCost()) s.adminDepositTreasury(A, line.id, line.count * 2);
-  check('the president funds kits and a citizen claims exactly one',
-    s.handle(1, { t: 'govFundKits', count: 2 }).some((o) => o.msg.t === 'politics') &&
+  const bankedBefore = (s.addPlayer(8, { username: 'Obs', faction: A })
+    .find((o) => o.msg.t === 'welcome')!.msg as { factions: { faction: number;
+      treasuryCount: number }[] }).factions.find((f) => f.faction === A)!.treasuryCount;
+  check('the president funds kits from their pockets and a citizen claims one',
+    s.handle(1, { t: 'govFundKits', count: 2, source: 'inventory' })
+      .some((o) => o.msg.t === 'politics') &&
     s.handle(2, { t: 'claimKit' }).some((o) => o.msg.t === 'gotitem') &&
     s.handle(2, { t: 'claimKit' }).some((o) => o.msg.t === 'govErr'));
+  const bankedAfter = (s.addPlayer(10, { username: 'Obs2', faction: A })
+    .find((o) => o.msg.t === 'welcome')!.msg as { factions: { faction: number;
+      treasuryCount: number }[] }).factions.find((f) => f.faction === A)!.treasuryCount;
+  check('funding kits never spends (or fills) the treasury', bankedAfter === bankedBefore);
+  check('the retired treasury purse is refused rather than minting free kits',
+    s.handle(1, { t: 'govFundKits', count: 1, source: 'treasury' } as unknown as ClientMsg)
+      .some((o) => o.msg.t === 'govErr'));
+
+  // The hoard opens as a CHEST, for the president, at the flag, and nowhere or
+  // nobody else. `Ada` is the sitting president of A; `Bo` is a citizen of A.
+  const padA = treasuryLocation(A);
+  const atPad = (id: number): void => {
+    s.handle(id, { t: 'xform', x: padA.x, y: 70, z: padA.z, yaw: 0, pitch: 0 });
+  };
+  atPad(2);
+  check('a citizen standing at the flag cannot open the hoard',
+    s.handle(2, { t: 'treasuryOpen', faction: A }).some((o) => o.msg.t === 'govErr'));
+  s.handle(1, { t: 'xform', x: padA.x + 40, y: 70, z: padA.z, yaw: 0, pitch: 0 });
+  check('the president cannot open it from a walk away',
+    s.handle(1, { t: 'treasuryOpen', faction: A }).some((o) => o.msg.t === 'govErr'));
+  atPad(1);
+  const opened = s.handle(1, { t: 'treasuryOpen', faction: A })
+    .find((o) => o.msg.t === 'treasury')?.msg;
+  check('the president at the flag is handed the whole hoard',
+    !!opened && opened.t === 'treasury' && opened.faction === A &&
+    opened.slots.length === TREASURY_SLOTS);
+  check('a president may not open the ENEMY hoard through this door',
+    s.handle(1, { t: 'treasuryOpen', faction: B }).some((o) => o.msg.t === 'govErr'));
+
+  // Writing a page back: president + in reach, one page at a time, fail-closed.
+  const page1: (ItemStack | null)[] = new Array(TREASURY_PAGE_SLOTS).fill(null);
+  page1[0] = { id: Item.CobaltIngot, count: 9 };
+  page1[1] = { id: 999999, count: 4 } as ItemStack;       // junk id -> empty slot
+  page1[2] = { id: Item.CobaltIngot, count: 0 } as ItemStack; // no count -> empty
+  check('the president writes one page of the hoard and junk lines fail closed',
+    s.handle(1, { t: 'treasurySet', faction: A, page: 1, slots: page1 })
+      .some((o) => o.msg.t === 'politics'));
+  const reread = s.handle(1, { t: 'treasuryOpen', faction: A })
+    .find((o) => o.msg.t === 'treasury')!.msg as { slots: (ItemStack | null)[] };
+  check('the write landed on page 1 only, one valid line of it',
+    reread.slots[TREASURY_PAGE_SLOTS]?.id === Item.CobaltIngot &&
+    reread.slots[TREASURY_PAGE_SLOTS]?.count === 9 &&
+    reread.slots[TREASURY_PAGE_SLOTS + 1] === null &&
+    reread.slots[TREASURY_PAGE_SLOTS + 2] === null);
+  check('a page that does not exist is refused',
+    s.handle(1, { t: 'treasurySet', faction: A, page: TREASURY_PAGES, slots: page1 })
+      .some((o) => o.msg.t === 'govErr'));
+  atPad(2);
+  check('a citizen cannot write to the hoard at all',
+    s.handle(2, { t: 'treasurySet', faction: A, page: 0, slots: page1 })
+      .some((o) => o.msg.t === 'govErr'));
 
   // Raiding is war-only, enemy-only and in-reach-only.
   s.handle(3, { t: 'pledgeFaction', faction: B });

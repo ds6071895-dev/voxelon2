@@ -11,6 +11,14 @@ import type { Atlas } from './textures';
 
 const WHITE: Tint = [1, 1, 1];
 
+/** Halfway between white and a tint. The grass-block side is mostly dirt, so
+ *  its top vertices take a softened version of the biome colour — enough for
+ *  the fringe to read as savanna gold or jungle emerald, gentle enough that the
+ *  soil under it never turns green. */
+function halfTint(t: Tint): Tint {
+  return [1 - (1 - t[0]) * 0.62, 1 - (1 - t[1]) * 0.62, 1 - (1 - t[2]) * 0.62];
+}
+
 // Vanilla face brightness: top 1.0, bottom 0.5, N/S 0.8, E/W 0.6.
 interface FaceDef {
   dir: [number, number, number];
@@ -104,7 +112,12 @@ class GeoBuffer {
   quad(
     face: FaceDef, bx: number, by: number, bz: number,
     uvRect: [number, number, number, number], ao: number[],
-    topOffset: number, tint: Tint, skyL: number, blockL: number
+    topOffset: number, tint: Tint, skyL: number, blockL: number,
+    /** Optional tint for the BOTTOM two vertices, producing a vertical
+     *  gradient across the face. Used for the grass-block side: the fringe
+     *  along its top edge takes the biome colour and fades out into plain
+     *  dirt below, instead of every biome sharing one hard-coded green. */
+    tintBottom?: Tint
   ): void {
     const base = this.positions.length / 3;
     const [u0, v0, u1, v1] = uvRect;
@@ -114,7 +127,8 @@ class GeoBuffer {
       if (topOffset && c.pos[1] === 1) y -= topOffset;
       this.positions.push(bx + c.pos[0], y, bz + c.pos[2]);
       const b = face.shade * AO_CURVE[ao[i]];
-      this.colors.push(b * tint[0], b * tint[1], b * tint[2]);
+      const vt = tintBottom && c.pos[1] === 0 ? tintBottom : tint;
+      this.colors.push(b * vt[0], b * vt[1], b * vt[2]);
       this.uvs.push(u0 + (u1 - u0) * c.uv[0], v0 + (v1 - v0) * c.uv[1]);
       this.lights.push(skyL / 15, blockL / 15);
     }
@@ -253,7 +267,7 @@ export function buildChunkGeometry(
     for (let z = 0; z < CHUNK_Z; z++) {
       const wx = ox + x, wz = oz + z;
       let columnTints: ColumnTints | null = null; // computed lazily per column
-      const tintFor = (kind: 'grass' | 'foliage'): Tint => {
+      const tintFor = (kind: 'grass' | 'foliage' | 'water'): Tint => {
         columnTints ??= tints(wx, wz);
         return columnTints[kind];
       };
@@ -329,11 +343,16 @@ export function buildChunkGeometry(
           const topOffset =
             isWater && sample(wx, y + 1, wz) !== Block.Water ? 0.125 : 0;
 
-          // Biome tint: foliage tints every face; grass only the top face
-          // (the side fringe is baked into the texture).
+          // Biome tint: foliage and water tint every face; grass tints the top
+          // face fully and the side face as a top-down gradient over its fringe.
+          const grassSide = info.tint === 'grass' && dy === 0;
           const tint: Tint =
             info.tint === 'foliage' ? tintFor('foliage')
+            : info.tint === 'water' ? tintFor('water')
             : info.tint === 'grass' && dy > 0 ? tintFor('grass')
+            // Side faces: the biome colour at the top edge (where the grass
+            // fringe is painted) easing off into untinted dirt at the bottom.
+            : grassSide ? halfTint(tintFor('grass'))
             : WHITE;
 
           // Faces are lit by the cell they are exposed to.
@@ -342,7 +361,8 @@ export function buildChunkGeometry(
           const blockL = light.block(wx + dx, ly, wz + dz);
 
           (isWater ? water : opaque).quad(
-            face, x, y, z, atlas.uvRect(tile), ao, topOffset, tint, skyL, blockL
+            face, x, y, z, atlas.uvRect(tile), ao, topOffset, tint, skyL, blockL,
+            grassSide ? WHITE : undefined
           );
         }
       }

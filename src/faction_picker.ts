@@ -7,7 +7,10 @@
 // to make sure you are choosing with the facts in front of you:
 //
 //   · the sitting president, as a live 3D character who poses when you point at
-//     them (the same board the Duels ladder uses)
+//     them (the same board the Duels ladder uses), named on the plinth they
+//     stand on — or, where the seat is VACANT, the plinth stays empty and says
+//     so, because a character standing on an open seat is a president that does
+//     not exist
 //   · their party, their slogan and the promises they were elected on
 //   · the gear they are actually carrying, hoverable for names and runes
 //   · the tax you would pay, the kits waiting for recruits, what the treasury
@@ -22,18 +25,29 @@
 // usernames) are written with textContent and never reach innerHTML.
 
 import { BUST_POSES, type BustEntry } from './avatar_bust';
-import { sanitizeCosmetics } from './character';
+import { type Cosmetics, sanitizeCosmetics } from './character';
 import { iconSvg } from './emoji_icons';
 import { PRESET_PROMISES } from './politics';
 import type { FactionPublic } from './net/protocol';
 import { skinSeed } from './net/protocol';
-import { factionColor, factionName } from './teams';
+import { FACTIONS, factionColor, factionName } from './teams';
 import { bustStage, hideTip, injectGovStyle, itemChip } from './gov_ui';
 
 const CSS = `
+/* A DEFINITE HEIGHT, not just a cap.
+ *
+ * The cards live in .vx-gov-scroll, which is position:absolute — so it adds
+ * NOTHING to its parent's content height. With only max-height here the shell
+ * had no height of its own to cap, so it sized to its content: header + footer,
+ * with a flex: 1 viewport that resolved to ZERO between them. The cards were
+ * built and rendered correctly into a scrollport 0px tall, which is why the
+ * pledge screen came up reading "Swear allegiance / Choose your side" with
+ * nothing under it to press — and why joining looked like something you had to
+ * wait for an election to unlock. The government panel gets this right by
+ * stating its height outright (see .vx-prez-shell); so does this one now. */
 .vx-pledge-shell {
   position: relative; display: flex; flex-direction: column; gap: 18px;
-  width: min(1120px, 100%); max-height: 100%; padding: 4px;
+  width: min(1120px, 100%); height: min(860px, 100%); padding: 4px;
 }
 .vx-pledge-head { text-align: center; }
 .vx-pledge-head h1 {
@@ -44,10 +58,20 @@ const CSS = `
 }
 .vx-pledge-head b { color: #ffd98a; }
 
-.vx-pledge-cards { display: grid; gap: 18px; grid-template-columns: 1fr 1fr; padding: 2px; }
+/* The pan fills the scrollport exactly, so each card is a known height and can
+   scroll its own dossier instead of pushing its JOIN BUTTON off the bottom of
+   the screen. That is not a polish detail: swearing allegiance is the only way
+   into the world, and a card whose crest, plinth, stats and roster all fit while
+   its button sits 200px below the fold reads as a side you are not allowed to
+   join. Nothing about the pledge screen may ever require scrolling to find the
+   thing you came here to press. */
+.vx-pledge-cards {
+  display: grid; gap: 18px; grid-template-columns: 1fr 1fr; padding: 2px;
+  height: 100%; align-items: stretch;
+}
 
 .vx-pledge-card {
-  position: relative; display: flex; flex-direction: column;
+  position: relative; display: flex; flex-direction: column; min-height: 0;
   border-radius: 16px; overflow: hidden; background: rgba(12, 20, 30, .88);
   box-shadow: inset 0 0 0 1px rgba(232, 238, 252, .12), 0 20px 48px rgba(0, 0, 0, .45);
   transition: box-shadow .18s, transform .18s;
@@ -57,7 +81,7 @@ const CSS = `
   box-shadow: inset 0 0 0 1px var(--side), 0 26px 60px rgba(0, 0, 0, .55);
 }
 .vx-pledge-crest {
-  display: flex; align-items: center; gap: 11px; padding: 15px 18px;
+  flex: none; display: flex; align-items: center; gap: 11px; padding: 15px 18px;
   background: linear-gradient(180deg, color-mix(in srgb, var(--side) 34%, transparent), transparent);
 }
 .vx-pledge-crest-mark {
@@ -77,11 +101,11 @@ const CSS = `
    renderer, so it must keep its size whether or not a bust lands in it. */
 .vx-pledge-stage {
   position: relative; display: flex; align-items: flex-end; justify-content: center;
-  height: 210px; margin: 0 18px; border-radius: 13px;
+  flex: none; height: clamp(132px, 21vh, 210px); margin: 0 18px; border-radius: 13px;
   background: radial-gradient(70% 90% at 50% 12%, color-mix(in srgb, var(--side) 26%, transparent), transparent 72%),
     rgba(0, 0, 0, .28);
 }
-.vx-pledge-slot { position: absolute; inset: 12px 0 26px; }
+.vx-pledge-slot { position: absolute; inset: 12px 0 32px; }
 /* THE FALLBACK PORTRAIT. A browser hands out a limited number of WebGL contexts
    and the world already spends one, so "no context to spare" is a state a real
    player can land in — and it used to present as a plinth that simply stayed
@@ -100,15 +124,44 @@ const CSS = `
   width: 74%; height: 12px; margin-bottom: 12px; border-radius: 50%;
   background: radial-gradient(50% 100% at 50% 50%, color-mix(in srgb, var(--side) 60%, transparent), transparent 76%);
 }
-.vx-pledge-vacant {
-  position: absolute; inset: 0; display: flex; flex-direction: column;
-  align-items: center; justify-content: center; gap: 7px; text-align: center; padding: 0 24px;
+/* THE NAMEPLATE. The president's own name, on the plinth they are standing on,
+   so the character and the name are one object rather than a portrait with a
+   caption somewhere below it. It sits UNDER the bust slot, never behind it —
+   the bust canvas paints over anything inside its own rectangle, so text that
+   overlaps it is text with a character drawn through it. */
+.vx-pledge-stage .vx-pledge-stage-name {
+  position: absolute; left: 10px; right: 10px; bottom: 5px;
+  font: 700 13px/1.25 inherit; letter-spacing: .6px; text-align: center; color: #fff;
+  text-shadow: 0 2px 7px rgba(0, 0, 0, .7);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.vx-pledge-vacant span { font-size: 27px; color: rgba(232, 238, 252, .3); }
-.vx-pledge-vacant b { font-size: 12px; letter-spacing: 1.6px; text-transform: uppercase; color: #9fb0cc; }
-.vx-pledge-vacant small { font-size: 11.5px; line-height: 1.5; color: #77879f; }
 
-.vx-pledge-body { display: flex; flex-direction: column; gap: 13px; padding: 15px 18px 18px; }
+/* THE OPEN SEAT. An unheld faction stands NOBODY on its plinth: the citizens
+   who used to fill it read as a government that was there, and they were drawn
+   by the bust canvas, which paints over the whole slot — so the very banner
+   saying the seat was open had characters standing through it. An empty plinth
+   with the vacancy written across the middle of it is the honest picture, and
+   the reason to pick that side is spelled out in the card body underneath. */
+.vx-pledge-openseat {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  display: flex; align-items: center; gap: 7px; padding: 7px 14px; border-radius: 999px;
+  font: 700 10.5px/1 inherit; letter-spacing: 1.6px; text-transform: uppercase;
+  color: #ffd0a0; background: rgba(9, 15, 23, .82);
+  box-shadow: inset 0 0 0 1px rgba(237, 160, 26, .35);
+}
+.vx-pledge-openseat svg { width: 13px; height: 13px; }
+.vx-pledge-open-note {
+  margin-top: 6px; font-size: 11.5px; line-height: 1.5; color: #9fb0cc;
+}
+
+/* The only scrolling part of a card. Everything here is reading material; the
+   crest above it and the button below it stay put. */
+.vx-pledge-body {
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 13px; padding: 15px 18px 18px;
+}
+.vx-pledge-body::-webkit-scrollbar { width: 7px; }
+.vx-pledge-body::-webkit-scrollbar-thumb { border-radius: 4px; background: rgba(232, 238, 252, .18); }
 .vx-pledge-prez { text-align: center; }
 .vx-pledge-prez-name { font-size: 16px; font-weight: 700; letter-spacing: .5px; }
 .vx-pledge-prez-party { margin-top: 3px; font-size: 11px; letter-spacing: 1.6px; text-transform: uppercase; color: var(--side); }
@@ -146,7 +199,11 @@ const CSS = `
 }
 .vx-pledge-roster-empty { margin-top: 8px; font-size: 11.5px; color: #77879f; }
 
-.vx-pledge-join { margin-top: auto; padding: 0 18px 18px; }
+.vx-pledge-join {
+  flex: none; padding: 14px 18px 18px;
+  background: linear-gradient(180deg, transparent, rgba(6, 11, 17, .55) 40%);
+  box-shadow: inset 0 1px 0 rgba(232, 238, 252, .1);
+}
 .vx-pledge-join .vx-gov-btn { width: 100%; min-height: 46px; font-size: 11.5px; }
 .vx-pledge-join[data-confirming="1"] .vx-gov-btn { background: linear-gradient(180deg, #ff9a6a, #e2503b); color: #fff; }
 .vx-pledge-warn {
@@ -166,8 +223,12 @@ const CSS = `
 .vx-pledge-back:focus-visible { outline: 2px solid #eda01a; outline-offset: 2px; }
 
 @media (max-width: 860px) {
-  .vx-pledge-cards { grid-template-columns: 1fr; }
+  /* Stacked, the two cards cannot both fill the screen — the pan goes back to
+     scrolling, and each card sizes to its own content with the button at its
+     foot rather than a screen away from it. */
+  .vx-pledge-cards { grid-template-columns: 1fr; height: auto; }
   .vx-pledge-stage { height: 180px; }
+  .vx-pledge-body { overflow-y: visible; }
 }
 `;
 
@@ -186,6 +247,61 @@ export interface PledgeData {
   factions: FactionPublic[];
   /** Item icons are drawn out of the live block atlas. */
   atlasCanvas: HTMLCanvasElement;
+  /** The player doing the choosing. Nothing on a card is drawn from them — only
+   *  a sitting president ever stands on a plinth — but callers still pass it. */
+  viewer?: { username: string; cosmetics?: Cosmetics };
+}
+
+/** The one person drawn on a card's stage: its sitting president. */
+interface Face {
+  username: string;
+  cosmetics: Cosmetics;
+}
+
+/**
+ * ONE CARD PER FACTION, ALWAYS.
+ *
+ * FACTIONS is the source of truth for which sides exist; the dossiers only
+ * decorate them. Building the screen straight off the dossier list meant a
+ * faction the server had not described yet simply had no card — and since
+ * swearing allegiance is the only way into the world, a screen with a missing
+ * card is a screen a new player cannot get off. An unelected presidency is the
+ * ordinary case at the start of a season, not an error: a side with no
+ * government, no citizens and no treasury is still Crimson or Azure, and is
+ * joined by the same button as a side with all three.
+ *
+ * So every field is defaulted rather than trusted, and `president` stays absent
+ * unless a real one was sent — which is exactly what puts the card into its
+ * "seat vacant" shape.
+ */
+function dossiersFor(list: readonly FactionPublic[] | undefined): FactionPublic[] {
+  const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  return FACTIONS.map((f) => {
+    const d = list?.find((i) => i && i.faction === f.id);
+    const out: FactionPublic = {
+      faction: f.id,
+      members: Array.isArray(d?.members) ? d!.members.filter((m) => typeof m === 'string') : [],
+      memberCount: num(d?.memberCount),
+      taxRate: num(d?.taxRate),
+      kitStock: num(d?.kitStock),
+      treasuryCount: num(d?.treasuryCount),
+      faces: Array.isArray(d?.faces) ? d!.faces : [],
+    };
+    // A president is only ever half-known: an offline one has no gear, an
+    // unparsed one has no promises. Fill the holes here so the card below can
+    // read every field without a guard of its own.
+    const p = d?.president;
+    if (p?.username) {
+      out.president = {
+        ...p,
+        partyName: p.partyName || 'Independent',
+        slogan: typeof p.slogan === 'string' ? p.slogan : '',
+        promises: Array.isArray(p.promises) ? p.promises : [],
+        armor: Array.isArray(p.armor) ? p.armor : [],
+      };
+    }
+    return out;
+  });
 }
 
 export class FactionPicker {
@@ -195,6 +311,9 @@ export class FactionPicker {
   private readonly cards: HTMLElement;
   /** The positioned box the cards scroll in and the bust canvas covers. */
   private readonly viewport: HTMLElement;
+  /** The hint under the cards. It names whoever is actually standing on the
+   *  plinths, which is not always a president. */
+  private readonly footText: HTMLElement;
   private isOpen = false;
   private data: PledgeData | null = null;
   /** The card awaiting its second click. A permanent choice gets two. */
@@ -249,7 +368,7 @@ export class FactionPicker {
     const foot = document.createElement('div');
     foot.className = 'vx-pledge-foot';
     const footText = document.createElement('span');
-    footText.textContent = 'Point at a president to get their attention.';
+    this.footText = footText;
     // A way out. The choice is permanent, so somebody who opened this to read
     // the dossiers — or who wants to set their character up first — must be able
     // to leave without committing to anything.
@@ -302,9 +421,18 @@ export class FactionPicker {
     const busts: BustEntry[] = [];
     this.cards.replaceChildren();
 
-    const total = data.factions.reduce((n, f) => n + f.memberCount, 0);
+    // Never the wire's list directly — see dossiersFor. Both sides get a card
+    // whether or not anyone has been elected on either of them.
+    const dossiers = dossiersFor(data.factions);
+    const total = dossiers.reduce((n, f) => n + f.memberCount, 0);
+    // Before the first election nobody is a president, and telling the player to
+    // point at one is telling them the screen is broken. Name who is really up
+    // there instead.
+    this.footText.textContent = dossiers.some((f) => f.president)
+      ? 'Point at a president to get their attention.'
+      : 'No elections have been held yet — either side is yours to join.';
 
-    data.factions.forEach((info, index) => {
+    dossiers.forEach((info, index) => {
       const card = document.createElement('div');
       card.className = 'vx-pledge-card';
       const side = `#${factionColor(info.faction).toString(16).padStart(6, '0')}`;
@@ -333,46 +461,50 @@ export class FactionPicker {
       }
       crest.append(mark, name, strength);
 
-      // --- the president's plinth -------------------------------------------
+      // --- the plinth --------------------------------------------------------
+      // A president stands on it, named. A VACANT seat stands NOBODY: the
+      // plinth says the office is open and nothing else, because any character
+      // drawn there is a president the faction has not got.
       const stage = document.createElement('div');
       stage.className = 'vx-pledge-stage';
-      const slot = document.createElement('div');
-      slot.className = 'vx-pledge-slot';
       const plinth = document.createElement('div');
       plinth.className = 'vx-pledge-plinth';
-      stage.append(slot, plinth);
+      stage.appendChild(plinth);
 
       const prez = info.president;
-      if (prez && !bustStage.available) {
-        // No GL context to spare: a monogram medallion rather than a bare plinth.
-        const mug = document.createElement('div');
-        mug.className = 'vx-pledge-mug';
-        const ch = [...prez.username].find((c) => /\S/.test(c)) ?? '?';
-        mug.textContent = ch.toUpperCase();
-        slot.appendChild(mug);
-      } else if (prez) {
-        const key = `pledge:${prez.username.toLowerCase()}`;
-        busts.push({
-          key,
-          cosmetics: sanitizeCosmetics(prez.cosmetics, skinSeed(prez.username)),
-          slot,
+      if (prez) {
+        const slot = document.createElement('div');
+        slot.className = 'vx-pledge-slot';
+        stage.insertBefore(slot, plinth);
+        const key = `pledge:${info.faction}:${prez.username.toLowerCase()}`;
+        this.standUp(busts, {
+          key, slot,
+          face: {
+            username: prez.username,
+            cosmetics: sanitizeCosmetics(prez.cosmetics, skinSeed(prez.username)),
+          },
           // The two plinths get different salutes so the screen never plays the
           // same animation twice side by side.
           pose: BUST_POSES[index % BUST_POSES.length],
         });
+        // The name belongs to the figure, so it goes on the plinth rather than
+        // in the body — and it is the ONLY text on the stage, sitting under the
+        // bust slot instead of inside it, where the canvas would paint over it.
+        const nameplate = document.createElement('div');
+        nameplate.className = 'vx-pledge-stage-name';
+        nameplate.textContent = prez.username;
+        stage.appendChild(nameplate);
         stage.addEventListener('mouseenter', () => bustStage.setHover(key));
         stage.addEventListener('mouseleave', () => bustStage.setHover(null));
       } else {
-        const vacant = document.createElement('div');
-        vacant.className = 'vx-pledge-vacant';
-        const glyph = document.createElement('span');
-        glyph.innerHTML = iconSvg('crown');
-        const label = document.createElement('b');
-        label.textContent = 'The seat is vacant';
-        const hint = document.createElement('small');
-        hint.textContent = 'Nobody has won an election here yet. Join, stand a party, and it could be you inside the week.';
-        vacant.append(glyph, label, hint);
-        stage.appendChild(vacant);
+        const seat = document.createElement('div');
+        seat.className = 'vx-pledge-openseat';
+        const seatGlyph = document.createElement('span');
+        seatGlyph.innerHTML = iconSvg('crown');
+        const seatLabel = document.createElement('span');
+        seatLabel.textContent = 'Seat vacant';
+        seat.append(seatGlyph, seatLabel);
+        stage.appendChild(seat);
       }
 
       // --- body --------------------------------------------------------------
@@ -381,18 +513,34 @@ export class FactionPicker {
 
       const who = document.createElement('div');
       who.className = 'vx-pledge-prez';
-      const whoName = document.createElement('div');
-      whoName.className = 'vx-pledge-prez-name';
-      whoName.textContent = prez ? prez.username : 'No president';
       const whoParty = document.createElement('div');
       whoParty.className = 'vx-pledge-prez-party';
-      whoParty.textContent = prez ? prez.partyName : 'Awaiting a candidate';
-      who.append(whoName, whoParty);
+      whoParty.textContent = prez ? prez.partyName : 'The office is open';
+      // A president is named on their own plinth; repeating it as a heading here
+      // said the same word twice, an inch apart.
+      if (!prez) {
+        const whoName = document.createElement('div');
+        whoName.className = 'vx-pledge-prez-name';
+        whoName.textContent = 'No president';
+        who.appendChild(whoName);
+      }
+      who.appendChild(whoParty);
       if (prez?.slogan) {
         const slogan = document.createElement('div');
         slogan.className = 'vx-pledge-prez-slogan';
         slogan.textContent = `“${prez.slogan}”`;
         who.appendChild(slogan);
+      }
+      if (!prez) {
+        // Said plainly, because an empty plinth used to read as a side that was
+        // shut: an unheld faction is joined like any other, and the vacancy is
+        // the reason to pick it rather than a reason not to.
+        const note = document.createElement('div');
+        note.className = 'vx-pledge-open-note';
+        note.textContent = info.memberCount
+          ? 'Nobody has won an election here yet. Join now, stand a party, and the presidency could be yours inside the week.'
+          : 'Nobody has pledged here yet. Join and you are its first citizen — and its first candidate.';
+        who.appendChild(note);
       }
       body.appendChild(who);
 
@@ -515,5 +663,29 @@ export class FactionPicker {
 
     // Roster last: the slots have to be in the DOM before the board measures them.
     bustStage.setRoster(busts);
+  }
+
+  /**
+   * Put one person on a plinth: a live bust when the board can draw, and the
+   * monogram medallion when it cannot (a browser hands out a limited number of
+   * WebGL contexts and the world already spends one, so "no context to spare"
+   * is a state a real player lands in — it must never present as an empty box).
+   */
+  private standUp(
+    busts: BustEntry[],
+    entry: { key: string; slot: HTMLElement; face: Face; pose: BustEntry['pose'] }
+  ): void {
+    if (!bustStage.available) {
+      const mug = document.createElement('div');
+      mug.className = 'vx-pledge-mug';
+      const ch = [...entry.face.username].find((c) => /\S/.test(c)) ?? '?';
+      mug.textContent = ch.toUpperCase();
+      entry.slot.appendChild(mug);
+      return;
+    }
+    busts.push({
+      key: entry.key, slot: entry.slot, pose: entry.pose,
+      cosmetics: entry.face.cosmetics,
+    });
   }
 }

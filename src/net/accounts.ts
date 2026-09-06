@@ -263,13 +263,19 @@ export class Accounts {
   /** The public ladder. Each row carries the account's saved avatar so the
    *  client can render the player's real character next to their name — read
    *  out of the client-owned `data` blob and sanitised, because a hand-edited
-   *  save must never be able to push junk indices at every other client. */
+   *  save must never be able to push junk indices at every other client.
+   *
+   *  Provisional accounts are left off entirely: until the five placements are
+   *  done a rating is a guess, and every account that has never queued would
+   *  otherwise sit on the board at its starting RP. You appear the moment your
+   *  placements finish. */
   duelLeaderboard(limit = 10): DuelLeaderboardEntry[] {
-    return this.list().map((a) => ({
-      username: a.username,
-      ...this.duelProfile(a.username),
-      cosmetics: sanitizeCosmetics(a.data?.cosmetics, skinSeed(a.username)),
-    }))
+    return this.list().filter((a) => this.duelProfile(a.username).placementsRemaining <= 0)
+      .map((a) => ({
+        username: a.username,
+        ...this.duelProfile(a.username),
+        cosmetics: sanitizeCosmetics(a.data?.cosmetics, skinSeed(a.username)),
+      }))
       .sort((a, b) => b.rp - a.rp || b.wins - a.wins || a.username.localeCompare(b.username))
       .slice(0, Math.max(1, Math.floor(limit)));
   }

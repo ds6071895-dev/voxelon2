@@ -9,6 +9,12 @@ import { BossMusicEngine, type BossMusicCue } from './boss_music';
 
 export type Material = 'stone' | 'wood' | 'grass' | 'sand' | 'glass' | 'wool';
 
+/** Ambience families. Several biomes share one voice — a snowy taiga and a
+ *  snowy plain sound the same, and there is no reason to write both. */
+export type BiomeSound =
+  | 'forest' | 'jungle' | 'plains' | 'swamp' | 'desert'
+  | 'mountain' | 'snow' | 'ocean' | 'ashlands' | 'crystal' | 'none';
+
 /** Sound material category for a block id. */
 export function materialOf(block: number): Material {
   switch (block) {
@@ -736,6 +742,107 @@ export class GameAudio {
     // A soft sine pad an octave down gives the chord some body.
     this.tone({ type: 'sine', from: 147, to: 220, dur: 0.55, gain: 0.07, delay: 0.20, attack: 0.08 });
     this.noise({ freq: 600, dur: 0.4, gain: 0.04, slideTo: 1400, type: 'bandpass', q: 0.8, delay: 0.31 });
+  }
+
+  /**
+   * Surface ambience for a biome. Called on the same slow timer that plays the
+   * cave pad, but for columns that CAN see the sky — so the open world stops
+   * being silent between footsteps. Everything here is synthesised from the
+   * same tone/noise primitives as the rest of the game's audio; there are no
+   * assets to load.
+   *
+   * `night` swaps the daytime voice of a place for its nocturnal one: birdsong
+   * becomes owls and crickets, and the wind on a summit keeps blowing either
+   * way.
+   */
+  biomeAmbience(biome: BiomeSound, night: boolean): void {
+    const rand = (a: number, b: number) => a + Math.random() * (b - a);
+    /** Two or three quick notes: a bird call, a frog, a chime. */
+    const call = (
+      type: OscillatorType, f: number, spread: number, count: number,
+      gain: number, dur: number
+    ) => {
+      for (let i = 0; i < count; i++) {
+        const up = Math.random() < 0.55;
+        const a = f * rand(0.92, 1.08);
+        const b = a * (up ? rand(1.15, 1.5) : rand(0.66, 0.87));
+        this.tone({
+          type, from: a, to: b, dur, gain, attack: 0.02,
+          delay: i * rand(0.1, 0.26) + Math.random() * spread,
+        });
+      }
+    };
+    /** A long filtered hiss: wind, surf, rustling leaves. */
+    const bed = (freq: number, slideTo: number, gain: number, dur: number,
+                 q = 0.6, type: BiquadFilterType = 'bandpass') =>
+      this.noise({ freq, dur, gain, slideTo, q, type });
+
+    switch (biome) {
+      case 'forest':
+        if (night) {
+          // Owl: two soft low hoots, then crickets.
+          call('sine', 420, 0.1, 2, 0.07, 0.34);
+          call('square', 2600, 0.7, 4, 0.012, 0.05);
+        } else {
+          call('sine', 1900, 0.5, 3, 0.05, 0.14);
+          bed(900, 1500, 0.03, 2.6, 0.5);
+        }
+        break;
+      case 'jungle':
+        if (night) call('square', 3100, 0.9, 6, 0.014, 0.06);
+        else {
+          call('triangle', 1250, 0.4, 4, 0.055, 0.2); // whooping bird
+          call('sawtooth', 2400, 0.8, 3, 0.012, 0.09);
+        }
+        bed(700, 1100, 0.035, 3.2, 0.5);
+        break;
+      case 'plains':
+        if (night) call('square', 2800, 0.8, 5, 0.012, 0.05);
+        else {
+          call('sine', 2300, 0.6, 3, 0.04, 0.11);
+          bed(600, 900, 0.03, 3.0, 0.4);
+        }
+        break;
+      case 'swamp':
+        // Frogs: short descending croaks, plus a low wet drone.
+        call('sawtooth', 190, 0.5, 3, 0.07, 0.16);
+        this.tone({ type: 'sine', from: 74, to: 62, dur: 3.4, gain: 0.05, attack: 1.4 });
+        if (night) call('square', 2500, 0.9, 4, 0.01, 0.06);
+        break;
+      case 'desert':
+        bed(480, 300, 0.05, 3.8, 0.4, 'lowpass');
+        if (night) this.tone({ type: 'sine', from: 130, to: 110, dur: 3.0, gain: 0.04, attack: 1.2 });
+        break;
+      case 'mountain':
+        // Thin, cold, high wind — the loudest bed in the game.
+        bed(1400, 700, 0.07, 4.5, 0.35);
+        bed(320, 220, 0.045, 4.0, 0.5, 'lowpass');
+        break;
+      case 'snow':
+        bed(900, 500, 0.045, 4.2, 0.4);
+        break;
+      case 'ocean':
+        // Surf: a slow swell that rises and falls.
+        bed(400, 900, 0.055, 2.4, 0.35);
+        bed(900, 350, 0.05, 2.8, 0.35);
+        break;
+      case 'ashlands':
+        // Low volcanic rumble with the odd sputter of a lava pool.
+        this.tone({ type: 'sine', from: 48, to: 38, dur: 4.0, gain: 0.09, attack: 1.6 });
+        this.noise({ freq: 260, dur: 0.7, gain: 0.035, slideTo: 90, type: 'lowpass', q: 0.7,
+          delay: rand(0.3, 1.8) });
+        break;
+      case 'crystal': {
+        // Struck glass: a bell chord out of a pentatonic scale.
+        const root = [523, 587, 659, 784, 880][(Math.random() * 5) | 0];
+        for (let i = 0; i < 3; i++) {
+          this.tone({ type: 'sine', from: root * (i === 0 ? 1 : i === 1 ? 1.5 : 2),
+            to: root * (i === 0 ? 1 : i === 1 ? 1.5 : 2) * 0.998,
+            dur: rand(1.6, 2.6), gain: 0.035, attack: 0.01, delay: i * rand(0.1, 0.4) });
+        }
+        break;
+      }
+    }
   }
 
   caveAmbience(): void {

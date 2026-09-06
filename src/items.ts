@@ -342,6 +342,7 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Block.Leaves]: blockItem(Block.Leaves),
   [Block.Glass]: blockItem(Block.Glass),
   [Block.Sandstone]: blockItem(Block.Sandstone),
+  [Block.PackedSnow]: blockItem(Block.PackedSnow),
   [Block.BirchLog]: blockItem(Block.BirchLog),
   [Block.BirchLeaves]: blockItem(Block.BirchLeaves),
   [Block.SpruceLog]: blockItem(Block.SpruceLog),

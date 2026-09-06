@@ -12,7 +12,7 @@ import { InventoryUI, MachineUIContext, TurretUIContext } from './inventory_ui';
 import { dropFor, gunVolley, GunInfo, Item, ItemStack, ITEMS } from './items';
 import { RECIPES, Recipe, WARFARE_BLUEPRINTS, setBlueprintCheck } from './crafting';
 import { renderItemIcon } from './icons';
-import { iconSvg, iconifyHtml, setIconText } from './emoji_icons';
+import { iconSvg, iconifyHtml, setIconText, type IconName } from './emoji_icons';
 import { itemDescription } from './itemdesc';
 import {
   Machines, MachineType, allowedFilterMask, applyUpgrade, claimMachine,
@@ -37,6 +37,7 @@ import { MachineModels } from './machinemodels';
 import { NetItems } from './netitems';
 import { Particles } from './particles';
 import { AmbientWorld } from './ambient_world';
+import { BIOME_SOUND } from './biomes';
 import { Projectiles } from './projectiles';
 import { Player, MAX_AIR } from './player';
 import {
@@ -71,7 +72,7 @@ import { Flag, FLAG_REACH, FLAG_MAX_HP, newFlags, flagPosition } from './flags';
 import { FlagModels } from './flagmodels';
 import { TreasuryModels } from './treasury_models';
 import { NotificationsUI } from './notifications_ui';
-import { FactionPicker } from './faction_picker';
+import { FactionPicker, type PledgeData } from './faction_picker';
 import {
   PresidentUI, type GovernActions, type GovernData, type PresidentView,
 } from './president_ui';
@@ -81,8 +82,9 @@ import {
   sanitizePolitics, setKit, setTaxRate, tallyElection,
 } from './politics';
 import {
-  deposit, fundKits, kitCost, kitStacks, levy, newTreasuries, newTreasury,
-  sanitizeTreasury, treasuryCount, treasuryCounts,
+  deposit, kitCost, kitStacks, levy, newTreasuries, newTreasury,
+  sanitizeTreasury, setTreasuryPage, treasuryCount, treasuryCounts, treasuryPage,
+  TREASURY_PAGES,
 } from './treasury';
 import {
   WarfareProgress, buyWarfareNode, grantWarfareXp, migrateWarfare, newWarfare,
@@ -1061,6 +1063,10 @@ let openMachine: { x: number; y: number; z: number } | null = null;
 let openChest: { x: number; y: number; z: number } | null = null;
 let lastChestVersion = -1;   // last version pushed/loaded — gates the live sync
 let chestBaseVersion = -1;   // version as of the last load FROM the server
+/** The faction hoard open in the chest panel, and which PAGE of it. Only ever
+ *  set for a sitting president standing at their own flag. */
+let openTreasury: { faction: number; page: number } | null = null;
+let lastTreasuryVersion = -1; // gates the live push, exactly like a chest
 
 // Multiplayer HUD: connection/roster line + a small kill feed (top-right).
 const netinfoEl = document.createElement('div');
@@ -1596,6 +1602,7 @@ function ensureOfflineStructureLoot(x: number, y: number, z: number): void {
 interaction.onOpenContainer = (kind, x, y, z) => {
   if (kind === 'chest') {
     openChest = { x, y, z };
+    invUI.chestPager = null; // an ordinary chest is one page, and is called Chest
     ensureOfflineStructureLoot(x, y, z);
     inventory.loadChest(chests.open(x, y, z));
     lastChestVersion = chestBaseVersion = inventory.version;
@@ -1843,6 +1850,7 @@ invUI.onClose = () => {
     chests.sync(openChest.x, openChest.y, openChest.z, inventory.saveChest());
     openChest = null;
   }
+  closeTreasuryChest(); // flushes the open page, then hands the region back
   openMachine = null; // machine actions sync immediately; nothing to flush
   openTurret = null;  // turret actions also sync immediately
 };
@@ -2176,13 +2184,22 @@ function pledgeDossiers(): FactionPublic[] {
     const g = politicsState.governments[f.id];
     const party = e?.presidentPartyId
       ? e.parties.find((q) => q.id === e.presidentPartyId) : undefined;
+    const mine = localFaction === f.id && !!authedName;
     const info: FactionPublic = {
       faction: f.id,
-      members: localFaction === f.id && authedName ? [authedName] : [],
+      members: mine ? [authedName] : [],
       memberCount: localFaction === f.id ? 1 : 0,
       taxRate: g?.taxRate ?? 0,
       kitStock: g?.kitStock ?? 0,
-      treasuryCount: treasuryCount(offlineTreasuries.get(f.id)!),
+      // Never assert here. The pledge screen is the ONLY way onto a faction,
+      // so a strongbox that has not been built yet must not be able to throw
+      // and take the whole screen — and with it the player's way into the
+      // world — down with it.
+      treasuryCount: treasuryCount(offlineTreasuries.get(f.id) ?? newTreasury(f.id)),
+      // Single-player has exactly one citizen, and the screen knows what they
+      // look like — so an unheld side still has somebody on its plinth.
+      faces: mine && e?.president !== authedName
+        ? [{ username: authedName, cosmetics: myCosmetics }] : [],
     };
     if (e?.president) {
       info.president = {
@@ -2197,6 +2214,17 @@ function pledgeDossiers(): FactionPublic[] {
     }
     return info;
   });
+}
+
+/** Everything the pledge screen renders from: the dossiers plus the player
+ *  doing the choosing, who stands in on a faction nobody has joined yet. */
+function pledgeData(): PledgeData {
+  return {
+    factions: pledgeDossiers(),
+    atlasCanvas: atlas.canvas,
+    viewer: authedName
+      ? { username: authedName, cosmetics: cosmeticsFor(authedName) } : undefined,
+  };
 }
 
 function governData(): GovernData {
@@ -2378,15 +2406,15 @@ const governActions: GovernActions = {
     refreshGovernment();
   },
   /**
-   * Fund `count` kits out of `source`.
+   * Fund `count` kits out of the president's OWN inventory — the only purse.
    *
-   * When the president pays out of their OWN POCKETS the bill leaves this
-   * client's inventory here, before anything is sent — so a refused or dropped
-   * message can never cost items without producing kits, and the server (which
-   * holds no inventory of its own) is told about a transfer that has already
-   * happened. `takeKitBill` is all-or-nothing for exactly that reason.
+   * The bill leaves this client's inventory HERE, before anything is sent, so a
+   * refused or dropped message can never cost items without producing kits, and
+   * the server (which holds no inventory of its own) is told about a transfer
+   * that has already happened. `takeKitBill` is all-or-nothing for exactly that
+   * reason.
    */
-  onFundKits: (count, source) => {
+  onFundKits: (count) => {
     if (!holdsOffice()) return;
     const g = governmentOf(politicsState, localFaction);
     if (!g) return;
@@ -2395,22 +2423,13 @@ const governActions: GovernActions = {
       presidentUI.setError('The recruit kit is empty — build one first.');
       return;
     }
-    if (source === 'inventory' && !takeKitBill(bill, count)) {
+    if (!takeKitBill(bill, count)) {
       presidentUI.setError('You are not carrying enough to fund that many.');
       return;
     }
-    if (net.connected) { net.sendFundKits(count, source); return; }
-    const t = offlineTreasuries.get(localFaction);
-    if (!t) return;
-    // Offline mirrors the server exactly: pocket money is banked first, then
-    // spent, so there is one affordability rule rather than two.
-    if (source === 'inventory') {
-      for (const line of bill) deposit(t, line.id, line.count * count);
-    }
-    if (!fundKits(t, count, kitStacks(g.kit))) {
-      presidentUI.setError('The treasury cannot afford that many kits.');
-      return;
-    }
+    if (net.connected) { net.sendFundKits(count); return; }
+    // Offline mirrors the server exactly: the bill has already left the pockets
+    // above, and the treasury is not involved on the way.
     g.kitStock += count;
     saveOfflinePolitics();
     refreshGovernment();
@@ -2443,9 +2462,7 @@ function refreshGovernment(): void {
     ? myTreasury
     : (offlineTreasuries.get(localFaction)?.slots ?? []));
   if (presidentUI.open) presidentUI.update(governData());
-  if (factionPicker.open) factionPicker.update({
-    factions: pledgeDossiers(), atlasCanvas: atlas.canvas,
-  });
+  if (factionPicker.open) factionPicker.update(safePledgeData());
 }
 
 function openPresidentUI(view: PresidentView = 'election'): void {
@@ -2467,7 +2484,27 @@ function pushNotification(notif: Notification): void {
 /** Show the allegiance pledge. Everything else waits behind it — an unpledged
  *  player has no side, no treasury and no vote. */
 function openFactionPicker(): void {
-  factionPicker.show({ factions: pledgeDossiers(), atlasCanvas: atlas.canvas });
+  factionPicker.show(safePledgeData());
+}
+
+/** The dossiers, or an empty set of them. Everything the cards show — the
+ *  president, the tax, the treasury, the roster — is DECORATION around a choice
+ *  that has to be makeable regardless: the screen renders one card per faction
+ *  out of FACTIONS whether or not any dossier arrived, so a politics sync that
+ *  is late (or a strongbox that failed to load) can never be what stands between
+ *  a new player and the world. */
+function safePledgeData(): PledgeData {
+  try {
+    return pledgeData();
+  } catch (e) {
+    console.error('[PLEDGE] dossiers unavailable — showing the bare screen', e);
+    return {
+      factions: [],
+      atlasCanvas: atlas.canvas,
+      viewer: authedName
+        ? { username: authedName, cosmetics: cosmeticsFor(authedName) } : undefined,
+    };
+  }
 }
 factionPicker.onPledge = (faction) => {
   if (net.connected) { net.sendPledge(faction); return; }
@@ -3092,15 +3129,19 @@ requestAnimationFrame(bustFrame);
 
 function renderDuelLeaderboard(): void {
   duelLeaderboardEl.replaceChildren();
-  if (!duelLeaderboardData.length) {
+  // The board is for settled ratings only: nobody still in placements shows up
+  // here. The server already filters them out; we filter again so an older
+  // server can never put a provisional row on the ladder.
+  const ranked = duelLeaderboardData.filter((entry) => entry.placementsRemaining <= 0);
+  if (!ranked.length) {
     const empty = document.createElement('div'); empty.className = 'duel-leaderboard-empty';
-    empty.textContent = 'Nobody has posted a rated result yet. Be the first name on the board.';
+    empty.textContent = 'Nobody has finished their placements yet. Be the first name on the board.';
     duelLeaderboardEl.appendChild(empty);
     bustBoard?.setRoster([]);
     return;
   }
   const busts: BustEntry[] = [];
-  duelLeaderboardData.forEach((entry, index) => {
+  ranked.forEach((entry, index) => {
     const row = document.createElement('div');
     row.className = 'duel-lb-row';
     if (index < 3) row.classList.add('podium', `top${index + 1}`);
@@ -4541,38 +4582,264 @@ const titleCharacterPreview = (() => {
   };
 })();
 
+// THE DRESSING ROOM. A lit stage rather than a settings dialog: the avatar
+// stands on a lit podium under a spotlight, and every cosmetic category is
+// a glass row you can walk with the arrow keys. Styled from one injected
+// `vx-dress-` sheet so the markup below stays readable, and painted in the
+// title screen's own black-glass-and-gold palette (it opens from there, and
+// the old daylight card looked bolted on).
+const DRESS_CSS = `
+.vx-dress {
+  --ink: #eaf1fa; --ink-soft: #aec1d8; --ink-mute: #8398b2;
+  --line: rgba(150,182,224,.16); --plate: rgba(255,255,255,.05);
+  --gold: #ffc043; --gold-lit: #ffdb87; --gold-deep: #b87908;
+  position: absolute; inset: 0; z-index: 24; display: none;
+  flex-direction: column; align-items: center; justify-content: center;
+  gap: clamp(10px, 2vh, 20px); padding: 22px; overflow-y: auto;
+  color: var(--ink);
+  font-family: ui-sans-serif, -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif;
+  background:
+    radial-gradient(ellipse 55% 45% at 50% -8%, rgba(255,192,67,.18), transparent 62%),
+    radial-gradient(ellipse 70% 60% at 8% 100%, rgba(77,155,255,.12), transparent 66%),
+    radial-gradient(ellipse 120% 95% at 50% 45%, rgba(4,7,12,.86) 30%, rgba(2,3,6,.97) 100%),
+    linear-gradient(180deg, #0a0f18, #05080e);
+}
+.vx-dress * { box-sizing: border-box; text-shadow: none; font-family: inherit; }
+/* The same voxel grid the title screen wears, low on the wall. */
+.vx-dress::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background:
+    linear-gradient(rgba(150,190,240,.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(150,190,240,.07) 1px, transparent 1px);
+  background-size: 38px 38px;
+  -webkit-mask-image: linear-gradient(180deg, transparent 38%, #000 100%);
+  mask-image: linear-gradient(180deg, transparent 38%, #000 100%);
+}
+.vx-dress > * { position: relative; z-index: 1; }
+
+.vx-dress-head { display: grid; justify-items: center; gap: 5px; }
+.vx-dress-eyebrow {
+  display: flex; align-items: center; gap: 9px;
+  font-size: 9px; font-weight: 700; letter-spacing: 3px;
+  text-transform: uppercase; color: var(--gold);
+}
+.vx-dress-eyebrow::before, .vx-dress-eyebrow::after {
+  content: ''; width: 34px; height: 1px; background: rgba(255,192,67,.5);
+}
+.vx-dress h2 {
+  margin: 0; font-family: 'Lucida Console', Monaco, monospace;
+  font-size: clamp(22px, 3.4vw, 30px); font-weight: 700; letter-spacing: 2px;
+  color: var(--ink);
+}
+
+.vx-dress-cols { display: flex; gap: 30px; align-items: center; }
+
+/* LEFT: the stage. A cone of light, the model, and a turning podium. */
+.vx-dress-stage {
+  position: relative; width: 320px; padding-bottom: 26px; flex: none;
+}
+.vx-dress-preview {
+  position: relative; width: 300px; height: 430px; margin: 0 auto;
+  border-radius: 20px; overflow: hidden; cursor: grab; touch-action: none;
+  background:
+    radial-gradient(ellipse 70% 46% at 50% 96%, rgba(255,192,67,.16), transparent 70%),
+    linear-gradient(180deg, rgba(24,34,52,.9), rgba(7,11,18,.95));
+  box-shadow: inset 0 0 0 1px var(--line), 0 30px 60px rgba(0,0,0,.55),
+    inset 0 1px 0 rgba(255,255,255,.06);
+}
+.vx-dress-preview canvas { position: relative; z-index: 2; display: block; }
+/* The spotlight: a cone widening down the stage, with dust drifting through. */
+.vx-dress-beam {
+  position: absolute; inset: -14% 0 32%; z-index: 1; pointer-events: none;
+  clip-path: polygon(41% 0, 59% 0, 96% 100%, 4% 100%);
+  background: linear-gradient(180deg, rgba(255,222,158,.24), rgba(255,192,67,.05) 62%, transparent);
+  animation: vx-dress-flicker 6s ease-in-out infinite;
+}
+@keyframes vx-dress-flicker { 50% { opacity: .74; } }
+.vx-dress-motes {
+  position: absolute; inset: 0; z-index: 1; pointer-events: none; opacity: .5;
+  background:
+    radial-gradient(1.6px 1.6px at 22% 30%, rgba(255,236,196,.9), transparent),
+    radial-gradient(1.4px 1.4px at 68% 18%, rgba(255,236,196,.7), transparent),
+    radial-gradient(1.8px 1.8px at 46% 62%, rgba(255,236,196,.6), transparent),
+    radial-gradient(1.3px 1.3px at 78% 74%, rgba(255,236,196,.75), transparent),
+    radial-gradient(1.5px 1.5px at 14% 84%, rgba(255,236,196,.55), transparent);
+  animation: vx-dress-motes 14s linear infinite;
+}
+@keyframes vx-dress-motes { to { transform: translateY(-46px); opacity: .18; } }
+/* The podium: a still ellipse of light under the model's feet. Blended as
+   light so it never smears over the boots. */
+.vx-dress-podium {
+  position: absolute; left: 50%; bottom: 14px; z-index: 3;
+  width: 210px; height: 46px; transform: translateX(-50%); pointer-events: none;
+  mix-blend-mode: screen;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(255,192,67,.3), rgba(255,192,67,.05) 70%, transparent);
+}
+.vx-dress-drag {
+  position: absolute; left: 0; right: 0; bottom: 0; text-align: center;
+  font-size: 9px; font-weight: 700; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--ink-mute);
+}
+
+/* RIGHT: the wardrobe rack — one glass row per cosmetic category. */
+.vx-dress-panel {
+  display: flex; flex-direction: column; gap: 6px; min-width: 400px;
+  padding: 16px; border-radius: 20px;
+  background: linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.015));
+  box-shadow: inset 0 0 0 1px var(--line), 0 26px 56px rgba(0,0,0,.5);
+}
+.vx-dress-row {
+  display: flex; align-items: center; gap: 9px; padding: 5px 6px 5px 10px;
+  border-radius: 13px; background: var(--plate);
+  box-shadow: inset 0 0 0 1px var(--line);
+  transition: box-shadow .16s ease, background .16s ease, transform .16s ease;
+}
+.vx-dress-row:hover, .vx-dress-row:focus-within {
+  background: rgba(255,192,67,.07); transform: translateX(2px);
+  box-shadow: inset 0 0 0 1px rgba(255,192,67,.3), 0 0 22px rgba(255,192,67,.08);
+}
+.vx-dress-row:focus { outline: none; }
+.vx-dress-row.is-hit { animation: vx-dress-hit .3s ease; }
+@keyframes vx-dress-hit {
+  0% { box-shadow: inset 0 0 0 1px rgba(255,192,67,.75), 0 0 26px rgba(255,192,67,.3); }
+}
+.vx-dress-icon {
+  display: grid; place-items: center; width: 26px; height: 26px; flex: none;
+  border-radius: 8px; font-size: 14px; color: var(--gold);
+  background: rgba(255,192,67,.1); box-shadow: inset 0 0 0 1px rgba(255,192,67,.2);
+}
+.vx-dress-label {
+  flex: 0 0 104px; font-size: 9px; font-weight: 700; letter-spacing: 1.5px;
+  text-transform: uppercase; color: var(--ink-mute);
+}
+.vx-dress-arrow {
+  flex: none; width: 28px; height: 28px; display: grid; place-items: center;
+  border: 0; border-radius: 9px; cursor: pointer; font-size: 15px; line-height: 1;
+  color: var(--ink-soft); background: rgba(150,182,224,.1);
+  box-shadow: inset 0 0 0 1px var(--line);
+  transition: color .12s ease, background .12s ease, transform .12s ease;
+}
+.vx-dress-arrow:hover {
+  color: #241703; background: linear-gradient(180deg, var(--gold-lit), var(--gold));
+  box-shadow: 0 6px 16px rgba(255,192,67,.3);
+}
+.vx-dress-arrow:active { transform: scale(.9); }
+.vx-dress-value {
+  flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px;
+  min-width: 0; font-size: 13px; font-weight: 600; letter-spacing: .3px; color: var(--ink);
+}
+.vx-dress-value span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vx-dress-dot {
+  width: 16px; height: 16px; flex: none; border-radius: 5px;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.35), 0 0 12px var(--dot-glow, transparent);
+}
+.vx-dress-count {
+  flex: none; min-width: 46px; text-align: right; padding-right: 4px;
+  font-family: 'Lucida Console', Monaco, monospace; font-size: 10px;
+  font-variant-numeric: tabular-nums; color: var(--ink-mute);
+}
+
+/* Foot: randomise, save, back. */
+.vx-dress-foot { display: flex; gap: 12px; align-items: center; }
+.vx-dress-btn {
+  display: inline-flex; align-items: center; gap: 8px; cursor: pointer;
+  padding: 12px 22px; border: 0; border-radius: 13px;
+  font-size: 10px; font-weight: 700; letter-spacing: 1.7px; text-transform: uppercase;
+  color: var(--ink-soft); background: var(--plate);
+  box-shadow: inset 0 0 0 1px var(--line);
+  transition: color .14s ease, background .14s ease, transform .14s ease, box-shadow .14s ease;
+}
+.vx-dress-btn:hover {
+  color: var(--ink); background: rgba(150,182,224,.14); transform: translateY(-1px);
+}
+.vx-dress-btn:active { transform: translateY(1px); }
+/* The glyphs size off their own font-size (width/height are 1em), so they need
+   lifting away from the button's 10px label type. */
+.vx-dress-btn svg { font-size: 14px; }
+.vx-dress-btn.is-primary {
+  padding: 13px 30px; color: #241703;
+  background: linear-gradient(180deg, var(--gold-lit), var(--gold));
+  box-shadow: 0 14px 30px rgba(255,192,67,.28);
+}
+.vx-dress-btn.is-primary:hover {
+  color: #241703; filter: brightness(1.07);
+  background: linear-gradient(180deg, var(--gold-lit), var(--gold));
+  box-shadow: 0 18px 36px rgba(255,192,67,.36);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vx-dress-beam, .vx-dress-motes, .vx-dress-row.is-hit {
+    animation: none;
+  }
+}
+@media (max-width: 900px), (max-height: 780px) {
+  .vx-dress-cols { flex-direction: column; gap: 18px; }
+  .vx-dress-stage { width: 240px; padding-bottom: 20px; }
+  .vx-dress-preview { width: 220px; height: 315px; } /* keeps the 300x430 aspect */
+  .vx-dress-preview canvas { width: 100% !important; height: 100% !important; }
+  .vx-dress-podium { width: 156px; height: 34px; }
+  .vx-dress-panel { min-width: 0; width: min(430px, 100%); }
+}
+`;
+
+/** Which glyph rides each cosmetic row, so the rack reads at a glance. */
+const CHAR_ICONS: Record<string, IconName> = {
+  skin: 'hand', hairStyle: 'sparkle', hair: 'droplet', eyes: 'eye',
+  shirt: 'shield', pants: 'brick', hat: 'crown', hatColor: 'gem', face: 'star',
+};
+
 const charUI = (() => {
-  // Daylight palette, same as the title screen this opens from.
+  const style = document.createElement('style');
+  style.textContent = DRESS_CSS;
+  document.head.appendChild(style);
+
   const panel = document.createElement('div');
-  panel.style.cssText = 'position:absolute;inset:0;display:none;flex-direction:column;' +
-    'align-items:center;justify-content:center;gap:16px;z-index:24;' +
-    'background:linear-gradient(180deg,#f7f9fc,#fffdfa);' +
-    'font-family:ui-sans-serif,-apple-system,"Segoe UI",Roboto,system-ui,sans-serif;';
+  panel.className = 'vx-dress';
+  panel.style.display = 'none';
+
+  const head = document.createElement('div');
+  head.className = 'vx-dress-head';
+  const eyebrow = document.createElement('div');
+  eyebrow.className = 'vx-dress-eyebrow';
+  eyebrow.textContent = 'Dressing Room';
   const h = document.createElement('h2');
-  h.className = 'mc-font';
-  h.textContent = 'Character';
-  h.style.cssText = 'font-size:30px;letter-spacing:.5px;color:#0f1a24;text-shadow:none;' +
-    'font-family:inherit;';
-  panel.appendChild(h);
+  h.textContent = 'Your Character';
+  head.append(eyebrow, h);
+  panel.appendChild(head);
 
   const cols = document.createElement('div');
-  cols.style.cssText = 'display:flex;gap:34px;align-items:center;';
+  cols.className = 'vx-dress-cols';
   panel.appendChild(cols);
 
-  // Left: the live 3D preview (renderer created lazily on first open).
+  // Left: the lit stage. The renderer is created lazily on first open; the
+  // beam, motes and podium are pure CSS layered around its canvas.
+  const stage = document.createElement('div');
+  stage.className = 'vx-dress-stage';
   const previewWrap = document.createElement('div');
-  previewWrap.style.cssText = 'width:280px;height:400px;border-radius:16px;overflow:hidden;' +
-    'background:linear-gradient(180deg,#eaf1f8,#fdfbf7);border:1px solid rgba(15,26,36,.13);' +
-    'box-shadow:0 22px 48px rgba(15,26,36,.14);cursor:grab;touch-action:none;';
-  cols.appendChild(previewWrap);
+  previewWrap.className = 'vx-dress-preview';
+  const beam = document.createElement('div');
+  beam.className = 'vx-dress-beam';
+  const motes = document.createElement('div');
+  motes.className = 'vx-dress-motes';
+  const podium = document.createElement('div');
+  podium.className = 'vx-dress-podium';
+  const dragHint = document.createElement('div');
+  dragHint.className = 'vx-dress-drag';
+  dragHint.textContent = 'Drag to spin';
+  previewWrap.append(beam, motes, podium);
+  stage.append(previewWrap, dragHint);
+  cols.appendChild(stage);
 
   // Right: one ‹ value › cycler row per cosmetic category.
   const rows = document.createElement('div');
-  rows.style.cssText = 'display:flex;flex-direction:column;gap:7px;min-width:360px;';
+  rows.className = 'vx-dress-panel';
   cols.appendChild(rows);
 
   const editing: Cosmetics = defaultCosmetics(0);
-  const valueEls = new Map<keyof Cosmetics, { text: HTMLSpanElement; dot: HTMLSpanElement }>();
+  const valueEls = new Map<keyof Cosmetics, {
+    row: HTMLElement; text: HTMLSpanElement; dot: HTMLSpanElement; count: HTMLSpanElement;
+  }>();
 
   let previewRenderer: THREE.WebGLRenderer | null = null;
   let previewScene: THREE.Scene | null = null;
@@ -4623,70 +4890,87 @@ const charUI = (() => {
       if (!el) continue;
       const i = editing[opt.key];
       el.text.textContent = opt.names[i] ?? '—';
+      el.count.textContent = `${i + 1}/${COSMETIC_RANGES[opt.key]}`;
       if (opt.swatches) {
+        const hex = `#${opt.swatches[i].hex.toString(16).padStart(6, '0')}`;
         el.dot.style.display = '';
-        el.dot.style.background = `#${opt.swatches[i].hex.toString(16).padStart(6, '0')}`;
+        el.dot.style.background = hex;
+        el.dot.style.setProperty('--dot-glow', `${hex}88`);
       } else {
         el.dot.style.display = 'none';
       }
     }
   }
 
+  /** Step one category and light its row, so the change is visible on the rack
+   *  as well as on the model. */
+  function cycle(key: keyof Cosmetics, d: number): void {
+    const n = COSMETIC_RANGES[key];
+    editing[key] = (editing[key] + d + n) % n;
+    refreshRows();
+    rebuildPreview();
+    const row = valueEls.get(key)?.row;
+    if (row) { row.classList.remove('is-hit'); void row.offsetWidth; row.classList.add('is-hit'); }
+  }
+
   for (const opt of CHAR_OPTIONS) {
     const row = document.createElement('div');
-    row.className = 'mc-font';
-    row.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:14px;' +
-      'font-family:inherit;text-shadow:none;padding:3px 8px;border-radius:11px;' +
-      'background:#fff;border:1px solid rgba(15,26,36,.1);box-shadow:0 3px 10px rgba(15,26,36,.05);';
+    row.className = 'vx-dress-row';
+    row.tabIndex = 0;
+    row.setAttribute('role', 'group');
+    row.setAttribute('aria-label', opt.label);
+    const icon = document.createElement('span');
+    icon.className = 'vx-dress-icon';
+    icon.innerHTML = iconSvg(CHAR_ICONS[opt.key] ?? 'sparkle');
     const label = document.createElement('span');
+    label.className = 'vx-dress-label';
     label.textContent = opt.label;
-    label.style.cssText = 'flex:0 0 110px;color:#78899a;font-size:10px;font-weight:700;' +
-      'letter-spacing:1.4px;text-transform:uppercase;';
     const mkArrow = (txt: string, d: number): HTMLButtonElement => {
       const b = document.createElement('button');
-      b.className = 'mc-btn';
+      b.className = 'vx-dress-arrow';
+      b.type = 'button';
       b.textContent = txt;
-      b.style.cssText = 'font-size:14px;padding:5px 12px;border:1px solid rgba(15,26,36,.12);' +
-        'border-radius:9px;background:#f6f7f9;color:#0f1a24;box-shadow:none;';
-      b.addEventListener('click', () => {
-        const n = COSMETIC_RANGES[opt.key];
-        editing[opt.key] = (editing[opt.key] + d + n) % n;
-        refreshRows();
-        rebuildPreview();
-      });
+      b.tabIndex = -1; // the row itself is the tab stop; ← → walk the values
+      b.setAttribute('aria-label', `${d < 0 ? 'Previous' : 'Next'} ${opt.label}`);
+      b.addEventListener('click', () => cycle(opt.key, d));
       return b;
     };
     const dot = document.createElement('span');
-    dot.style.cssText = 'width:14px;height:14px;border:1px solid rgba(15,26,36,0.25);' +
-      'border-radius:4px;display:none;';
+    dot.className = 'vx-dress-dot';
+    dot.style.display = 'none';
     const value = document.createElement('span');
-    value.style.cssText = 'flex:1;text-align:center;color:#0f1a24;font-weight:600;';
-    row.append(label, mkArrow('‹', -1), dot, value, mkArrow('›', 1));
+    value.className = 'vx-dress-value';
+    const valueText = document.createElement('span');
+    value.append(dot, valueText);
+    const count = document.createElement('span');
+    count.className = 'vx-dress-count';
+    row.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      e.preventDefault();
+      cycle(opt.key, e.key === 'ArrowLeft' ? -1 : 1);
+    });
+    row.append(icon, label, mkArrow('‹', -1), value, mkArrow('›', 1), count);
     rows.appendChild(row);
-    valueEls.set(opt.key, { text: value, dot });
+    valueEls.set(opt.key, { row, text: valueText, dot, count });
   }
 
   // Bottom buttons: randomise / save / back.
   const btnRow = document.createElement('div');
-  btnRow.style.cssText = 'display:flex;gap:12px;';
-  const randomBtn = document.createElement('button');
-  randomBtn.className = 'mc-btn';
-  randomBtn.textContent = 'Randomise';
-  randomBtn.style.cssText = 'font-size:12px;font-weight:700;letter-spacing:1.4px;' +
-    'text-transform:uppercase;padding:11px 20px;border:1px solid rgba(15,26,36,.12);' +
-    'border-radius:12px;background:#fff;color:#0f1a24;box-shadow:0 4px 12px rgba(15,26,36,.07);';
+  btnRow.className = 'vx-dress-foot';
+  const mkBtn = (text: string, icon: IconName, primary = false): HTMLButtonElement => {
+    const b = document.createElement('button');
+    b.className = primary ? 'vx-dress-btn is-primary' : 'vx-dress-btn';
+    b.type = 'button';
+    b.innerHTML = `${iconSvg(icon)}<span>${text}</span>`;
+    return b;
+  };
+  const randomBtn = mkBtn('Randomise', 'dice');
   randomBtn.addEventListener('click', () => {
     Object.assign(editing, randomCosmetics());
     refreshRows();
     rebuildPreview();
   });
-  const saveBtn = document.createElement('button');
-  saveBtn.className = 'mc-btn';
-  saveBtn.textContent = 'Save Look';
-  saveBtn.style.cssText = 'font-size:12px;font-weight:700;letter-spacing:1.4px;' +
-    'text-transform:uppercase;padding:11px 26px;border:1px solid transparent;border-radius:12px;' +
-    'background:linear-gradient(180deg,#ffd06a,#eda01a);color:#26180a;text-shadow:none;' +
-    'box-shadow:0 10px 24px rgba(215,138,12,.32);';
+  const saveBtn = mkBtn('Save Look', 'check', true);
   saveBtn.addEventListener('click', () => {
     myCosmetics = { ...editing };
     invalidateSelfAvatar(); // your third-person body reflects the new look/side
@@ -4694,20 +4978,27 @@ const charUI = (() => {
     showNotice('New look saved — everyone sees it!');
     close();
   });
-  const backBtn = document.createElement('button');
-  backBtn.className = 'mc-btn';
-  backBtn.textContent = 'Back';
-  backBtn.style.cssText = 'font-size:12px;font-weight:700;letter-spacing:1.4px;' +
-    'text-transform:uppercase;padding:11px 20px;border:1px solid rgba(15,26,36,.12);' +
-    'border-radius:12px;background:#fff;color:#0f1a24;box-shadow:0 4px 12px rgba(15,26,36,.07);';
+  const backBtn = mkBtn('Back', 'close');
   backBtn.addEventListener('click', () => close());
   btnRow.append(randomBtn, saveBtn, backBtn);
   panel.appendChild(btnRow);
   app.appendChild(panel);
 
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && panel.style.display === 'flex') {
+      e.stopPropagation();
+      close();
+    }
+  });
+
   function animatePreview(): void {
     previewRAF = requestAnimationFrame(animatePreview);
     if (!previewRenderer || !previewScene || !previewCam) return;
+    // Slow turntable while you are not holding the model yourself.
+    if (dragPointer === null && previewBody) {
+      previewSpin += 0.0035;
+      previewBody.group.rotation.y = previewSpin;
+    }
     previewRenderer.render(previewScene, previewCam);
   }
 
@@ -4715,11 +5006,11 @@ const charUI = (() => {
     Object.assign(editing, myCosmetics);
     if (!previewRenderer) {
       previewRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-      previewRenderer.setSize(280, 400);
+      previewRenderer.setSize(300, 430);
       previewRenderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
       previewWrap.appendChild(previewRenderer.domElement);
       previewScene = new THREE.Scene();
-      previewCam = new THREE.PerspectiveCamera(38, 280 / 400, 0.1, 20);
+      previewCam = new THREE.PerspectiveCamera(38, 300 / 430, 0.1, 20);
       previewCam.position.set(0, 1.25, 3.4);
       previewCam.lookAt(0, 1.0, 0);
     }
@@ -7021,6 +7312,14 @@ net.onGovErr = (reason) => {
   else showNotice(`⚠ ${reason}`);
 };
 net.onNotify = (notif) => pushNotification(notif);
+net.onTreasury = (faction, slots) => {
+  // The president asked for their hoard and the server allowed it: this IS the
+  // open. Nothing else opens the panel in multiplayer, so office and distance
+  // are checked by the authority rather than by the button that was pressed.
+  myTreasury = slots;
+  refreshGovernment();
+  if (faction === localFaction) openTreasuryChest(faction, openTreasury?.page ?? 0);
+};
 net.onTreasuryRaided = (faction, by, stacks) => {
   treasuryModels.setCounts(treasuryCountsNow());
   // Scorch the ring. A robbery is a thing that happened to a PLACE, so anyone
@@ -7679,12 +7978,24 @@ function updateGliderRig(dt: number): void {
   }
 }
 
+/** Scratch colour for the underwater fog tint (per-frame; not allocated). */
+const waterFogTint = new THREE.Color();
+
 function updateAtmosphere(): void {
   world.sunUniform.value = sky.sunIntensity;
   world.auroraUniform.value = sky.auroraIntensity;
+  // Direct-sun and ambient-sky colour, so terrain is graded by the same light
+  // the sky is showing rather than by a flat brightness scalar.
+  world.sunTintUniform.value.copy(sky.sunTint);
+  world.skyTintUniform.value.copy(sky.ambientTint);
   const fog = scene.fog as THREE.Fog;
   if (player.eyeUnderwater) {
-    fog.color.copy(WATER_FOG_COLOR).multiplyScalar(0.3 + 0.7 * sky.sunIntensity);
+    // Underwater haze takes the local water colour, so surfacing in a tropical
+    // lagoon looks nothing like surfacing under polar ice.
+    const wt = world.terrain.tints(Math.floor(player.pos.x), Math.floor(player.pos.z)).water;
+    waterFogTint.setRGB(0.4 + wt[0], 0.4 + wt[1], 0.4 + wt[2]);
+    fog.color.copy(WATER_FOG_COLOR).multiply(waterFogTint)
+      .multiplyScalar(0.3 + 0.7 * sky.sunIntensity);
     fog.near = 0;
     fog.far = 24;
   } else if (duelArenaActive) {
@@ -9618,10 +9929,17 @@ function updateTreasuryPrompt(): void {
   const g = governmentOf(politicsState, at);
   const stored = treasuryCountsNow()[at] ?? 0;
   if (at === localFaction) {
+    // Two different prompts, because there are two different rights here: the
+    // president can take the levy out, and everybody else can only read it.
+    const mine = isPresident(politicsState, localFaction, authedName);
     treasuryHudEl.innerHTML =
       `${iconSvg('coinbag')} <b>${factionName(at)} hoard</b> — ${stored} items on the ring · ` +
       `levy ${Math.round((g?.taxRate ?? 0) * 100)}% · ${g?.kitStock ?? 0} kits funded<br>` +
-      '<b>Look at the strongbox and right-click</b> to open the ledger.';
+      (mine
+        ? '<b>Look at the strongbox and right-click</b> to open it — '
+          + `${TREASURY_PAGES} pages, take what the faction needs.`
+        : '<b>Look at the strongbox and right-click</b> to read the ledger. '
+          + 'Only the president can open it.');
     treasuryHudEl.style.borderColor = '#d8b64a';
   } else if (!warActiveNow) {
     treasuryHudEl.innerHTML =
@@ -9637,11 +9955,85 @@ function updateTreasuryPrompt(): void {
   treasuryHudEl.style.display = 'block';
 }
 
+/**
+ * The live slot array of a hoard the local player is allowed to hold: the
+ * server's synced copy of YOUR faction's in multiplayer, the local strongbox
+ * offline. Mutating it is the local mirror of a page write — in multiplayer the
+ * next politics sync overwrites it with the server's word anyway, which is what
+ * makes the mirror safe to keep rather than authoritative.
+ */
+function treasurySlotsNow(faction: number): (ItemStack | null)[] {
+  if (net.connected) return myTreasury;
+  return offlineTreasuries.get(faction)?.slots ?? [];
+}
+
+/**
+ * Open the faction hoard AS A CHEST, on `page`.
+ *
+ * The hoard used to be a ledger you could read and nothing else — the levy went
+ * in and never came out, which made a treasury a scoreboard rather than a bank.
+ * Now its president walks to the flag and opens it like any other container:
+ * drag stacks out into your inventory, drop your own stacks in, page through the
+ * three grids it holds.
+ *
+ * Only ONE page is ever in the panel. Flipping pages flushes the one on screen
+ * first, so a write can only ever say what a president was actually looking at.
+ */
+function openTreasuryChest(faction: number, page: number): void {
+  openTreasury = { faction, page };
+  invUI.chestPager = {
+    title: `${factionName(faction)} hoard`,
+    pages: TREASURY_PAGES,
+    page,
+    onPage: (next) => {
+      if (!openTreasury || next === openTreasury.page) return;
+      pushTreasuryPage(inventory.readChest());
+      openTreasuryChest(faction, next);
+    },
+  };
+  inventory.loadChest(treasuryPage(treasurySlotsNow(faction), page));
+  lastTreasuryVersion = inventory.version;
+  invUI.show('chest');
+}
+
+/** Write the page on screen back: into the local mirror, and (MP) to the server
+ *  which re-checks the office and the distance before believing a word of it. */
+function pushTreasuryPage(slots: (ItemStack | null)[]): void {
+  if (!openTreasury) return;
+  const { faction, page } = openTreasury;
+  setTreasuryPage(treasurySlotsNow(faction), page, slots);
+  if (net.connected) net.sendTreasurySet(faction, page, slots);
+  else saveOfflinePolitics();
+  lastTreasuryVersion = inventory.version;
+  refreshGovernment();
+}
+
+/** Close the hoard: flush the open page and hand the chest region back. */
+function closeTreasuryChest(): void {
+  if (!openTreasury) return;
+  pushTreasuryPage(inventory.saveChest());
+  openTreasury = null;
+  invUI.chestPager = null;
+}
+
 /** Right-click at a strongbox. Returns true when it consumed the click. */
 function treasuryUse(): boolean {
   const at = treasuryUnderfoot();
   if (at === null || !lookingAtTreasury(at)) return false;
-  if (at === localFaction) { openPresidentUI('treasury'); return true; }
+  if (at === localFaction) {
+    // The hoard OPENS for one person only, and only here. Everyone else gets the
+    // ledger — what their faction has banked is public to its own citizens; the
+    // key to it is not.
+    if (!isPresident(politicsState, localFaction, authedName)) {
+      showNotice('🔒 Only the president can open the hoard. Opening the ledger instead.');
+      openPresidentUI('treasury');
+      return true;
+    }
+    if (net.connected) net.sendTreasuryOpen(at); // the reply opens the panel
+    else openTreasuryChest(at, 0);
+    held.swing();
+    return true;
+  }
   if (!net.connected) {
     showNotice('There is nobody to rob in single-player.');
     return true;
@@ -10563,10 +10955,21 @@ function frame(): void {
   lastInWater = player.inWater;
   ambienceTimer -= dt;
   if (ambienceTimer <= 0) {
-    ambienceTimer = 25 + Math.random() * 35;
-    if (!world.hasSkyAccess(
-      Math.floor(player.pos.x), Math.floor(player.pos.y + 1), Math.floor(player.pos.z)
-    )) audio.caveAmbience();
+    // Underground gets the cave pad; open sky gets the voice of whichever biome
+    // the player is standing in — birdsong, frogs, alpine wind, surf, the
+    // rumble of the ashlands. It used to be silence everywhere above ground.
+    const px = Math.floor(player.pos.x), pz = Math.floor(player.pos.z);
+    if (!world.hasSkyAccess(px, Math.floor(player.pos.y + 1), pz)) {
+      ambienceTimer = 25 + Math.random() * 35;
+      audio.caveAmbience();
+    } else {
+      ambienceTimer = 13 + Math.random() * 20;
+      const b = world.terrain.biomeWithWater(px, pz, world.terrain.height(px, pz));
+      const family = BIOME_SOUND[b];
+      if (family !== 'none') {
+        audio.biomeAmbience(family, sky.sunIntensity < 0.55);
+      }
+    }
   }
   // The POV arm only renders in first person, but selected-item state remains
   // current in third person so guns do not accidentally trigger punch swings.
@@ -10646,6 +11049,11 @@ function frame(): void {
   if (openChest && inventory.version !== lastChestVersion) {
     lastChestVersion = inventory.version;
     chests.sync(openChest.x, openChest.y, openChest.z, inventory.readChest());
+  }
+  // The hoard rides the same rail: every rearrangement lands on the server as it
+  // happens, so a president who alt-F4s mid-shuffle loses nothing.
+  if (openTreasury && inventory.version !== lastTreasuryVersion) {
+    pushTreasuryPage(inventory.readChest());
   }
   invUI.update();
 

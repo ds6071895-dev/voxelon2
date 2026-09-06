@@ -4,9 +4,13 @@
 // the pole and a ring of pedestals around it, one per slice of what is banked
 // (treasury_models.ts draws them). It fills with the LEVY: a slice of everything
 // the faction's citizens pull out of the ground, at whatever rate their elected
-// president has set (politics.ts). The president is the only one who can spend
-// it, and the only thing it buys is starter kits for recruits — so a treasury is
-// a faction investing in its own newcomers, not a personal wallet.
+// president has set (politics.ts). NOTHING is spent out of it: recruit kits are
+// funded out of the president's own inventory now, and the levy simply piles up
+// where the enemy can come and take it. A treasury is a target, not a wallet.
+//
+// (`canFundKits`/`fundKits` below are the treasury-purse rule and are kept exact
+// — they are what re-arming the treasury as a purse would use — but no live
+// caller spends the hoard on kits any more.)
 //
 // IT IS MEANT TO BE SEEN. A hoard you can count from the ridgeline is a raid
 // somebody plans; a number in a menu is not. While a WAR window is open the
@@ -24,9 +28,19 @@ import { Item } from './items';
 import { Block } from './blocks';
 import { FACTIONS, isFaction } from './teams';
 
-/** A chest's worth of room. A treasury that fills up simply stops accepting the
- *  levy — which is a visible signal to spend it, not a silent item sink. */
-export const TREASURY_SLOTS = 27;
+/** Slots on ONE PAGE of the hoard: exactly a chest's worth, because the hoard
+ *  opens in the chest panel and a page has to be the shape that panel draws
+ *  (CHEST_SLOTS in protocol.ts is the same 27 — kept as a plain number here so
+ *  this module stays free of the wire layer). */
+export const TREASURY_PAGE_SLOTS = 27;
+/** Pages in the hoard. A faction's whole levy never fitted in one chest, and a
+ *  president who has to choose what to leave behind is not managing a treasury —
+ *  they are fighting the furniture. */
+export const TREASURY_PAGES = 3;
+/** Total room. A treasury that fills up simply stops accepting the levy — the
+ *  overflow is handed back to the citizen rather than eaten, so a full hoard is
+ *  a visible signal to go and spend it, not a silent item sink. */
+export const TREASURY_SLOTS = TREASURY_PAGE_SLOTS * TREASURY_PAGES;
 /** How close you must stand to open or raid one (blocks). Measured from the
  *  FLAG POLE, not from the strongbox, because the hoard is not one box any more:
  *  the levy stands out in the open on a ring of pedestals around the banner
@@ -280,24 +294,90 @@ export function withdraw(t: Treasury, id: number, count: number): number {
   return taken;
 }
 
-/** What one recruit kit costs the treasury (its contents, as a bill). */
+/** What one recruit kit costs whoever is paying for it (its contents, as a
+ *  bill). Priced against the president's pockets by the panel, and against the
+ *  treasury by `fundKits` — the same bill either way. */
 export function kitCost(kit: readonly ItemStack[] = STARTER_KIT): ItemStack[] {
   const bill = new Map<number, number>();
   for (const s of kit) bill.set(s.id, (bill.get(s.id) ?? 0) + s.count);
   return [...bill].map(([id, count]) => ({ id, count }));
 }
 
-/** Can the treasury afford `n` kits right now? */
+/** Can the treasury afford `n` kits right now? (Retained rule: kits are funded
+ *  from the president's own inventory, so nothing live asks this.) */
 export function canFundKits(t: Treasury, n: number, kit: readonly ItemStack[] = STARTER_KIT): boolean {
   if (!Number.isFinite(n) || n <= 0) return false;
   return kitCost(kit).every((line) => countOf(t, line.id) >= line.count * n);
 }
 
-/** Pay for `n` kits. Returns false and changes NOTHING if it cannot afford them
- *  — a partial withdrawal would leave the treasury robbed and the stock unfunded. */
+/** Pay for `n` kits out of the treasury. Returns false and changes NOTHING if it
+ *  cannot afford them — a partial withdrawal would leave the treasury robbed and
+ *  the stock unfunded. (Retained rule, as above: no live caller spends here.) */
 export function fundKits(t: Treasury, n: number, kit: readonly ItemStack[] = STARTER_KIT): boolean {
   if (!canFundKits(t, n, kit)) return false;
   for (const line of kitCost(kit)) withdraw(t, line.id, line.count * n);
+  return true;
+}
+
+// --- Pages: the hoard as a chest a president can actually reach into ----------
+// The treasury is not a read-only ledger any more. Its PRESIDENT can walk to the
+// flag and open it like a chest — take the levy out, put their own stacks in —
+// and because it is three chests deep it is handed over one page at a time: the
+// panel only ever holds the page you are looking at, so a write can only ever
+// clobber that page and a raid on another one survives it.
+
+/** Is `page` a real page of the hoard? */
+export function isTreasuryPage(page: unknown): boolean {
+  return Number.isInteger(page) && (page as number) >= 0 && (page as number) < TREASURY_PAGES;
+}
+
+/** One page of a hoard, chest-shaped: always exactly TREASURY_PAGE_SLOTS long,
+ *  nulls for the gaps, copies rather than live references (the caller is about
+ *  to hand it to a panel that will rearrange it).
+ *
+ *  Takes the SLOT ARRAY rather than a Treasury so the server (which holds the
+ *  real thing) and the client (which holds the synced copy of its own hoard)
+ *  page it with the same function instead of two that could drift. */
+export function treasuryPage(
+  slots: readonly (ItemStack | null)[], page: number
+): (ItemStack | null)[] {
+  const out: (ItemStack | null)[] = new Array(TREASURY_PAGE_SLOTS).fill(null);
+  if (!isTreasuryPage(page)) return out;
+  const base = page * TREASURY_PAGE_SLOTS;
+  for (let i = 0; i < TREASURY_PAGE_SLOTS; i++) {
+    const s = slots[base + i];
+    out[i] = s ? { ...s } : null;
+  }
+  return out;
+}
+
+/**
+ * Write one page back. Fail-closed slot by slot — a junk id, a zero count or an
+ * over-stacked line becomes an empty slot rather than a refusal, exactly like
+ * `sanitizeTreasury` treats a bad line on disk. Returns false (and changes
+ * nothing) only for a page that does not exist.
+ */
+export function setTreasuryPage(
+  slots: (ItemStack | null)[], page: number, incoming: unknown
+): boolean {
+  if (!isTreasuryPage(page) || !Array.isArray(incoming)) return false;
+  const base = page * TREASURY_PAGE_SLOTS;
+  for (let i = 0; i < TREASURY_PAGE_SLOTS; i++) {
+    const raw = incoming[i] as Partial<ItemStack> | null | undefined;
+    const info = raw && Number.isInteger(raw.id) ? ITEMS[raw.id as number] : undefined;
+    if (!raw || !info || !Number.isFinite(raw.count) || (raw.count as number) <= 0) {
+      slots[base + i] = null;
+      continue;
+    }
+    const stack: ItemStack = {
+      id: raw.id as number,
+      count: Math.min(Math.max(1, info.maxStack), Math.floor(raw.count as number)),
+    };
+    if (Number.isInteger(raw.rune) && ITEMS[raw.rune as number]) {
+      stack.rune = raw.rune as number;
+    }
+    slots[base + i] = stack;
+  }
   return true;
 }
 
