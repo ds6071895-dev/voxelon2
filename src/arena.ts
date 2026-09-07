@@ -12,6 +12,10 @@
 // consults the registry instead of hard-coding Duels.
 
 import { DUEL_ARENA_BASE_X, DUEL_ARENA_SLOT_SPACING, DUEL_ARENA_SIZE, duelArenaBlockAt } from './duels';
+import {
+  BEDWARS_BASE_X, BEDWARS_SLOT_SPACING, BEDWARS_ARENA_SIZE,
+  BEDWARS_STAMP_MIN_Y, BEDWARS_STAMP_MAX_Y, bedwarsBlockAt,
+} from './bedwars';
 
 export type ArenaKind = 'duel' | 'bedwars' | 'party';
 
@@ -53,10 +57,28 @@ const DUEL_BAND: ArenaBand = {
   blockAt: duelArenaBlockAt,
 };
 
+const BEDWARS_BAND: ArenaBand = {
+  kind: 'bedwars',
+  baseX: BEDWARS_BASE_X,
+  spacing: BEDWARS_SLOT_SPACING,
+  sizeX: BEDWARS_ARENA_SIZE,
+  sizeZ: BEDWARS_ARENA_SIZE,
+  // A far narrower y band than Duels', which makes a Bedwars chunk CHEAPER to
+  // stamp despite the larger footprint.
+  stampMinY: BEDWARS_STAMP_MIN_Y,
+  stampMaxY: BEDWARS_STAMP_MAX_Y,
+  blockAt: bedwarsBlockAt,
+};
+
 /** Registered bands, ascending by `baseX`. Bands never overlap: each one owns
- *  `[baseX, nextBaseX)` outright, so a chunk belongs to at most one mode. */
+ *  `[baseX, nextBaseX)` outright, so a chunk belongs to at most one mode.
+ *
+ *  Duels' slot counter only ever increments, so the gap before the next base is
+ *  a real budget: 65_536 leaves 104 duel slots of headroom. `Chunk.key` is a
+ *  plain string, so large x costs nothing. */
 export const ARENA_BANDS: readonly ArenaBand[] = [
   DUEL_BAND,
+  BEDWARS_BAND,
 ];
 
 /**
