@@ -509,25 +509,206 @@
       border: 3px solid; border-color: #fff #555 #555 #fff;
     }
 
-    /* Pause menu (over the frozen first-person view; not the title panorama) */
+    /* ── Pause menu ───────────────────────────────────────────────────────
+       Sits over the frozen first-person view (not the title panorama), and
+       speaks the title screen's language: one dark-glass card, a header, the
+       settings as label-left / control-right rows under section headings, and
+       an action block where Resume is the only lit button. The old screen was
+       a loose stack — a 48px headline, a cramped 10px two-column settings
+       grid and four bevelled buttons all floating separately on the scrim. */
     #pause {
-      position: absolute; inset: 0; background: rgba(8, 8, 14, 0.55);
-      display: none; flex-direction: column; align-items: center;
-      /* `safe center` + scroll: the settings block grew, and on a short
-         viewport plain `center` would clip the Resume/Quit buttons off the
-         bottom with no way to reach them. */
-      justify-content: safe center; gap: 18px; z-index: 60;
-      overflow-y: auto; padding: 20px 0;
+      --p-ink: #eaf1fa;
+      --p-ink-soft: #aec1d8;
+      --p-ink-mute: #8398b2;
+      --p-line: rgba(150,182,224,.16);
+      --p-line-lit: rgba(150,182,224,.36);
+      --p-gold: #ffc043;
+      position: absolute; inset: 0; z-index: 60;
+      display: none;                     /* -> flex, from main.ts */
+      flex-direction: column; align-items: center;
+      /* `safe center` + scroll: the card is taller than a short viewport, and
+         plain `center` would clip Resume/Quit off the bottom unreachably. */
+      justify-content: safe center;
+      overflow-y: auto; overscroll-behavior: contain;
+      padding: calc(18px + var(--safe-top)) calc(16px + var(--safe-right))
+               calc(18px + var(--safe-bottom)) calc(16px + var(--safe-left));
+      background:
+        radial-gradient(ellipse 96% 74% at 50% 0%, rgba(16,24,38,.5), transparent 72%),
+        rgba(5, 7, 12, .66);
+      backdrop-filter: blur(5px) saturate(1.06);
+      font-family: ui-sans-serif, -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif;
+      color: var(--p-ink); -webkit-tap-highlight-color: transparent;
     }
-    #pause h1 { font-size: 48px; letter-spacing: 4px; }
+    /* The game font is a heavy white mono for reading over a 3D scene; inside
+       the card the panel's own type takes over (the headline opts back in). */
+    #pause .mc-font { font-family: inherit; color: inherit; text-shadow: none; letter-spacing: normal; }
+    .pause-card {
+      /* flex:none — the scrim is a column flex container, and without it a card
+         taller than the viewport gets squashed instead of scrolling. */
+      flex: none; width: min(452px, 100%); display: flex; flex-direction: column;
+      border: 1px solid var(--p-line); border-radius: 18px; overflow: hidden;
+      background: linear-gradient(180deg, rgba(18,26,40,.94), rgba(9,14,23,.94));
+      box-shadow: 0 30px 66px rgba(0,0,0,.6), inset 0 1px rgba(255,255,255,.07);
+      backdrop-filter: blur(16px);
+      animation: pause-rise .24s cubic-bezier(.16,.84,.28,1) both;
+    }
+    @keyframes pause-rise { from { transform: translateY(12px); opacity: 0; } }
+    .pause-head { padding: 20px 22px 17px; border-bottom: 1px solid var(--p-line); }
+    .pause-eyebrow {
+      display: flex; align-items: center; gap: 9px;
+      color: var(--p-ink-mute); font-size: 9px; font-weight: 700;
+      letter-spacing: 1.8px; text-transform: uppercase;
+    }
+    .pause-eyebrow::before {
+      content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--p-gold);
+      box-shadow: 0 0 0 4px rgba(255,192,67,.16), 0 0 12px var(--p-gold);
+    }
+    #pause h1.mc-font {
+      margin: 10px 0 0; font-family: 'Lucida Console', Monaco, monospace;
+      font-size: 30px; line-height: 1; letter-spacing: 3px; text-transform: uppercase;
+    }
+    .pause-hint {
+      margin: 9px 0 0; max-width: 42ch; color: var(--p-ink-mute);
+      font-size: 11.5px; font-weight: 500; line-height: 1.55;
+    }
+
+    /* Settings. Scrolls on its own so the action block never leaves the card. */
     #vault-accessibility {
-      display: grid; grid-template-columns: auto 150px; gap: 7px 12px;
-      padding: 10px 14px; background: rgba(8,10,16,.72);
-      border: 1px solid #45506a; font-size: 10px; align-items: center;
+      padding: 4px 22px 12px; max-height: min(54vh, 460px);
+      overflow-y: auto; overscroll-behavior: contain;
+      scrollbar-width: thin; scrollbar-color: rgba(150,182,224,.24) transparent;
     }
-    #vault-accessibility label { display: contents; }
-    #vault-accessibility input[type="range"] { width: 150px; }
-    #vault-accessibility input[type="checkbox"] { justify-self: start; }
+    #vault-accessibility::-webkit-scrollbar { width: 8px; }
+    #vault-accessibility::-webkit-scrollbar-track { background: transparent; }
+    #vault-accessibility::-webkit-scrollbar-thumb {
+      background: rgba(150,182,224,.22); border-radius: 5px;
+    }
+    .pause-group {
+      margin: 15px 0 3px; color: var(--p-ink-mute);
+      font-size: 9px; font-weight: 700; letter-spacing: 1.8px; text-transform: uppercase;
+    }
+    .pause-group:first-child { margin-top: 9px; }
+    #vault-accessibility label {
+      display: flex; align-items: center; justify-content: space-between; gap: 14px;
+      min-height: 40px; color: var(--p-ink-soft);
+      font-size: 12px; font-weight: 600; line-height: 1.35;
+    }
+    #vault-accessibility label + label { border-top: 1px solid rgba(150,182,224,.08); }
+    #vault-accessibility select {
+      flex: none; min-width: 168px; height: 32px; padding: 0 9px;
+      border: 1px solid var(--p-line); border-radius: 9px; cursor: pointer;
+      background: rgba(4,8,14,.72); color: var(--p-ink); font: inherit; font-size: 12px;
+      transition: border-color .14s, background .14s;
+    }
+    #vault-accessibility select:hover { border-color: var(--p-line-lit); }
+    #vault-accessibility option { background: #121a28; color: var(--p-ink); }
+    /* Sliders: a hairline track with one gold thumb, in place of the browser's
+       default chrome (which is a different shape and colour per platform). */
+    #pause input[type="range"] {
+      -webkit-appearance: none; appearance: none; flex: none;
+      width: 168px; height: 18px; background: transparent; cursor: pointer;
+    }
+    #pause input[type="range"]::-webkit-slider-runnable-track {
+      height: 4px; border-radius: 3px; background: rgba(150,182,224,.22);
+    }
+    #pause input[type="range"]::-moz-range-track {
+      height: 4px; border-radius: 3px; background: rgba(150,182,224,.22);
+    }
+    #pause input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 14px; height: 14px; margin-top: -5px;
+      border-radius: 50%; background: var(--p-gold);
+      box-shadow: 0 0 0 3px rgba(255,192,67,.15), 0 2px 6px rgba(0,0,0,.5);
+    }
+    #pause input[type="range"]::-moz-range-thumb {
+      width: 14px; height: 14px; border: 0; border-radius: 50%; background: var(--p-gold);
+      box-shadow: 0 0 0 3px rgba(255,192,67,.15), 0 2px 6px rgba(0,0,0,.5);
+    }
+    /* Checkboxes read as switches — the same on/off affordance HUD Settings
+       uses, so the two panels do not disagree about what a toggle looks like. */
+    #pause input[type="checkbox"] {
+      -webkit-appearance: none; appearance: none; position: relative; flex: none;
+      width: 40px; height: 22px; margin: 0; border-radius: 999px; cursor: pointer;
+      border: 1px solid var(--p-line); background: rgba(150,182,224,.14);
+      transition: background .15s, border-color .15s;
+    }
+    #pause input[type="checkbox"]::after {
+      content: ''; position: absolute; top: 50%; left: 3px; margin-top: -7px;
+      width: 14px; height: 14px; border-radius: 50%; background: #8398b2;
+      transition: transform .15s, background .15s;
+    }
+    #pause input[type="checkbox"]:checked {
+      background: rgba(255,192,67,.26); border-color: rgba(255,192,67,.44);
+    }
+    #pause input[type="checkbox"]:checked::after { transform: translateX(17px); background: var(--p-gold); }
+    #pause input:focus-visible, #pause select:focus-visible {
+      outline: 2px solid var(--p-gold); outline-offset: 2px;
+    }
+    /* Slider + its live readout share one row cell. */
+    #vault-accessibility .setting-pair { display: flex; align-items: center; gap: 10px; }
+    #vault-accessibility .setting-pair input[type="range"] { width: 124px; }
+    #look-sensitivity-value {
+      min-width: 44px; text-align: right; color: var(--p-ink);
+      font-family: 'Lucida Console', Monaco, monospace; font-size: 11px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* Actions. Resume and Quit take a full row each; the two panel buttons
+       share the middle one — and because they FLEX rather than sit in fixed
+       grid columns, hiding Field Guide (duels) leaves no hole behind it. */
+    .pause-actions {
+      display: flex; flex-wrap: wrap; gap: 10px;
+      padding: 16px 22px 18px; border-top: 1px solid var(--p-line);
+    }
+    #pause .mc-btn {
+      flex: 1 1 132px; min-height: 44px; padding: 11px 14px;
+      border: 1px solid var(--p-line); border-radius: 12px;
+      font-family: inherit; font-size: 11px; font-weight: 700;
+      letter-spacing: 1.6px; text-transform: uppercase;
+      color: var(--p-ink); background: rgba(150,182,224,.08); text-shadow: none;
+      box-shadow: 0 6px 18px rgba(0,0,0,.34), inset 0 1px rgba(255,255,255,.06);
+      transition: transform .1s, background .14s, border-color .14s, box-shadow .14s, color .14s;
+    }
+    #pause .mc-btn:hover {
+      filter: none; transform: translateY(-1px);
+      background: rgba(150,182,224,.16); border-color: var(--p-line-lit);
+      box-shadow: 0 12px 26px rgba(0,0,0,.42), inset 0 1px rgba(255,255,255,.09);
+    }
+    #pause .mc-btn:active { transform: translateY(0); }
+    #pause .mc-btn:focus-visible { outline: 2px solid var(--p-gold); outline-offset: 2px; }
+    #pause #resume-btn, #pause #quit-btn { flex: 1 0 100%; }
+    #pause #resume-btn {
+      min-height: 50px; border-color: transparent; color: #241703; font-size: 12px;
+      background: linear-gradient(180deg, #ffdb87, var(--p-gold));
+      box-shadow: 0 14px 32px rgba(255,192,67,.26);
+    }
+    #pause #resume-btn:hover {
+      background: linear-gradient(180deg, #ffe7ab, #ffcb5e);
+      box-shadow: 0 18px 40px rgba(255,192,67,.36);
+    }
+    #pause #quit-btn {
+      min-height: 40px; color: #ffb3b7;
+      border-color: rgba(255,77,85,.22); background: rgba(255,77,85,.07);
+      box-shadow: none;
+    }
+    #pause #quit-btn:hover {
+      color: #ffd7d9; border-color: rgba(255,77,85,.44); background: rgba(255,77,85,.15);
+      box-shadow: 0 10px 24px rgba(255,77,85,.16);
+    }
+    /* Phones / short viewports: tighten the card rather than shrink the hit
+       targets, and let the whole thing scroll as one instead of nesting a
+       scroller inside a scroller on a 500px-tall screen. */
+    @media (max-width: 640px), (max-height: 720px) {
+      .pause-card { width: min(420px, 100%); }
+      .pause-head { padding: 16px 17px 14px; }
+      #pause h1.mc-font { font-size: 25px; letter-spacing: 2px; }
+      .pause-hint { font-size: 11px; }
+      #vault-accessibility { padding: 2px 17px 10px; max-height: none; overflow: visible; }
+      #vault-accessibility label { min-height: 38px; font-size: 11.5px; }
+      #vault-accessibility select { min-width: 140px; }
+      #pause input[type="range"] { width: 140px; }
+      #vault-accessibility .setting-pair input[type="range"] { width: 104px; }
+      .pause-actions { padding: 13px 17px 15px; gap: 9px; }
+    }
     /* Shown only while the WebGL context is lost (see main.ts). */
     #context-lost {
       position: absolute; inset: 0; z-index: 90; display: none;
@@ -2452,8 +2633,8 @@
        Those are the surfaces that actually hurt at night, and most of them were
        deliberately lit like paper.
 
-       Panels that already ship a dark palette (the pause settings block, the
-       HUD Settings card, the title screen, the chat) are left alone. */
+       Panels that already ship a dark palette (the pause menu, the HUD
+       Settings card, the title screen, the chat) are left alone. */
 
     /* Inventory, chests, crafting — the Minecraft-grey family. */
     html[data-ui-dark] #inventory {
@@ -2482,10 +2663,15 @@
     html[data-ui-dark] .chest-pages .war-btn:disabled { background: #8a6f22; color: #f6ecc9; }
 
     /* Menus that sit over the frozen world. */
-    html[data-ui-dark] #pause { background: rgba(4, 6, 11, .74); }
+    /* The pause card is dark glass already; dark mode only deepens the scrim
+       behind it, so the frozen world reads as further away at night. */
+    html[data-ui-dark] #pause {
+      background:
+        radial-gradient(ellipse 96% 74% at 50% 0%, rgba(10,16,26,.5), transparent 72%),
+        rgba(2, 4, 8, .8);
+    }
     html[data-ui-dark] #death { background: rgba(58, 0, 0, .68); }
-    html[data-ui-dark] #death button,
-    html[data-ui-dark] #pause .mc-btn {
+    html[data-ui-dark] #death button {
       background: linear-gradient(#333b46, #222831); color: #dbe4f0;
       border-color: #4b5666 #12161d #12161d #4b5666;
     }
@@ -2656,29 +2842,40 @@
       <button id="respawn" class="mc-font">Respawn</button>
     </div>
     <div id="pause">
-      <h1 class="mc-font">Paused</h1>
-      <div id="vault-accessibility" class="mc-font">
-        <label>Look sensitivity <span class="setting-pair"><input id="look-sensitivity" type="range" min="0.25" max="3" step="0.05" /><span id="look-sensitivity-value">1.00&#215;</span></span></label>
-        <label>Graphics
-          <select id="graphics-quality">
-            <option value="low">Low (fastest)</option>
-            <option value="medium">Medium</option>
-            <option value="high">High</option>
-            <option value="ultra">Extra High (smooth lighting)</option>
-            <option value="max">Max (Shaders)</option>
-          </select>
-        </label>
-        <label>Music <input id="music-volume" type="range" min="0" max="1" step="0.05" /></label>
-        <label>Effects <input id="effects-volume" type="range" min="0" max="1" step="0.05" /></label>
-        <label>Camera shake <input id="camera-shake" type="range" min="0" max="1" step="0.1" /></label>
-        <label>Reduced motion <input id="reduced-motion" type="checkbox" /></label>
-        <label>High-contrast telegraphs <input id="contrast-telegraphs" type="checkbox" /></label>
-        <label>Photosensitivity safe <input id="safe-effects" type="checkbox" /></label>
+      <div class="pause-card">
+        <header class="pause-head">
+          <div class="pause-eyebrow">Voxelon &middot; paused</div>
+          <h1 class="mc-font">Paused</h1>
+          <p class="pause-hint">The world does not stop: mobs still hunt and survival still ticks while you are in here.</p>
+        </header>
+        <div id="vault-accessibility" class="mc-font">
+          <div class="pause-group">Controls &amp; display</div>
+          <label>Look sensitivity <span class="setting-pair"><input id="look-sensitivity" type="range" min="0.25" max="3" step="0.05" /><span id="look-sensitivity-value">1.00&#215;</span></span></label>
+          <label>Graphics
+            <select id="graphics-quality">
+              <option value="low">Low (fastest)</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+              <option value="ultra">Extra High (smooth lighting)</option>
+              <option value="max">Max (Shaders)</option>
+            </select>
+          </label>
+          <div class="pause-group">Audio</div>
+          <label>Music <input id="music-volume" type="range" min="0" max="1" step="0.05" /></label>
+          <label>Effects <input id="effects-volume" type="range" min="0" max="1" step="0.05" /></label>
+          <div class="pause-group">Accessibility</div>
+          <label>Camera shake <input id="camera-shake" type="range" min="0" max="1" step="0.1" /></label>
+          <label>Reduced motion <input id="reduced-motion" type="checkbox" /></label>
+          <label>High-contrast telegraphs <input id="contrast-telegraphs" type="checkbox" /></label>
+          <label>Photosensitivity safe <input id="safe-effects" type="checkbox" /></label>
+        </div>
+        <div class="pause-actions">
+          <button id="resume-btn" class="mc-btn">Resume</button>
+          <button id="hud-settings-btn" class="mc-btn">HUD Settings</button>
+          <button id="pause-guide-btn" class="mc-btn">Field Guide</button>
+          <button id="quit-btn" class="mc-btn">Quit to Title</button>
+        </div>
       </div>
-      <button id="resume-btn" class="mc-btn">Resume</button>
-      <button id="hud-settings-btn" class="mc-btn">HUD Settings</button>
-      <button id="pause-guide-btn" class="mc-btn">Field Guide</button>
-      <button id="quit-btn" class="mc-btn">Quit to Title</button>
     </div>
     <div id="debug" class="mc-font"></div>
     <div id="overlay" class="hidden">
