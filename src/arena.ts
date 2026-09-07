@@ -16,6 +16,10 @@ import {
   BEDWARS_BASE_X, BEDWARS_SLOT_SPACING, BEDWARS_ARENA_SIZE,
   BEDWARS_STAMP_MIN_Y, BEDWARS_STAMP_MAX_Y, bedwarsBlockAt,
 } from './bedwars';
+import {
+  PARTY_BASE_X, PARTY_SLOT_SPACING, PARTY_ARENA_SIZE_X, PARTY_ARENA_SIZE_Z,
+  PARTY_STAMP_MIN_Y, PARTY_STAMP_MAX_Y, partyArenaBlockAt,
+} from './partygames';
 
 export type ArenaKind = 'duel' | 'bedwars' | 'party';
 
@@ -76,9 +80,24 @@ const BEDWARS_BAND: ArenaBand = {
  *  Duels' slot counter only ever increments, so the gap before the next base is
  *  a real budget: 65_536 leaves 104 duel slots of headroom. `Chunk.key` is a
  *  plain string, so large x costs nothing. */
+const PARTY_BAND: ArenaBand = {
+  kind: 'party',
+  baseX: PARTY_BASE_X,
+  spacing: PARTY_SLOT_SPACING,
+  // A TALL footprint, not a square: all four microgame arenas are stamped side
+  // by side in one slot, because terrain is cached per chunk and cannot be
+  // re-stamped between rounds. See the header of partygames.ts.
+  sizeX: PARTY_ARENA_SIZE_X,
+  sizeZ: PARTY_ARENA_SIZE_Z,
+  stampMinY: PARTY_STAMP_MIN_Y,
+  stampMaxY: PARTY_STAMP_MAX_Y,
+  blockAt: partyArenaBlockAt,
+};
+
 export const ARENA_BANDS: readonly ArenaBand[] = [
   DUEL_BAND,
   BEDWARS_BAND,
+  PARTY_BAND,
 ];
 
 /**
