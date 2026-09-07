@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { GameAudio, materialOf } from './audio';
 import { Block, BLOCKS, isReplaceable, isSolid, isVaultMasonry } from './blocks';
+import { ArenaKind } from './arena';
 import { Furnaces } from './furnace';
 import { HeldItemView } from './held';
 import { HUD } from './hud';
@@ -548,7 +549,7 @@ const warBoundary = makeBoundaryRing(0xff4a3a, 0.72, 8);
 function updateBoundaryRings(): void {
   // Inside a Duels arena the open world is cropped away entirely, so its
   // boundaries have nothing left to mark.
-  const show = !duelArenaActive;
+  const show = !arenaActive;
   worldBoundary.update(WORLD_HALF, show);
   coreBoundary.update(CORE_HALF, show);
   if (!show) warBoundary.update(0, false);
@@ -1361,7 +1362,7 @@ function showHitmarker(amount: number, killed: boolean): void {
 function showPvpHit(targetId: number, amount: number, killed: boolean): void {
   showHitmarker(amount, killed);
   const flavor: HitFlavor = hitFlavor(
-    amount, killed, duelArenaActive ? DUEL_MAX_HEALTH : 20);
+    amount, killed, arenaActive ? arenaMaxHealth : 20);
   const remote = net.remotes.get(targetId);
   if (remote) {
     const x = remote.tx, y = remote.ty + 1.15, z = remote.tz;
@@ -1402,14 +1403,14 @@ function onPvpKill(targetId: number): void {
   const victim = net.remotes.get(targetId)?.info.username ?? 'Enemy';
   // In a match the announcer slam sits in the same place and says the same
   // thing with more force; the chip is the quiet version for when it is not up.
-  if (duelArenaActive && duelAnnounceEl.classList.contains('visible')) return;
+  if (arenaActive && duelAnnounceEl.classList.contains('visible')) return;
   setIconText(killChipEl, `✖ ELIMINATED ${victim}`);
   killChipEl.classList.remove('visible');
   void killChipEl.offsetWidth; // restart the pop
   killChipEl.style.opacity = '1'; // clear any fade left from the previous kill
   killChipEl.classList.add('visible');
   killChipT = KILL_CHIP_TIME;
-  if (duelArenaActive) return;
+  if (arenaActive) return;
   const beats = pvpStreak.kill(targetId, performance.now());
   killBanner.push('ELIMINATED', victim, '#ff5f76', 1.15);
   for (const kind of beats) {
@@ -2040,7 +2041,7 @@ function enterPause(): void {
   }
   screen = 'paused';
   pauseEl.style.display = 'flex';
-  if (pauseGuideBtn) pauseGuideBtn.style.display = duelArenaActive ? 'none' : '';
+  if (pauseGuideBtn) pauseGuideBtn.style.display = arenaActive ? 'none' : '';
 }
 function enterTitle(): void {
   if (fieldGuide?.open) fieldGuide.closeSilently();
@@ -2069,7 +2070,7 @@ const fieldGuide = createFieldGuide({
 });
 
 pauseGuideBtn.addEventListener('click', () => {
-  if (player.dead || screen !== 'paused' || duelArenaActive) return;
+  if (player.dead || screen !== 'paused' || arenaActive) return;
   screen = 'guide';
   pauseEl.style.display = 'none';
   fieldGuide.show();
@@ -3535,7 +3536,7 @@ net.onDuelLobby = (snapshot, inviteToken) => {
   }
   if (snapshot.phase === 'lobby') {
     renderDuelLobby();
-    if (!duelArenaActive) openMinigames(true);
+    if (!arenaActive) openMinigames(true);
   } else {
     playDuelFeed(snapshot.feed);
     renderDuelScoreboard();
@@ -3583,7 +3584,27 @@ function joinPendingDuel(): void {
  *  is twenty hearts in two stacked rows; at 4 it is the same familiar ten-icon
  *  row everything else uses, and reads at a glance mid-fight. */
 const DUEL_HP_PER_HEART = 4;
-let duelArenaActive = false;
+// Generic arena state. The FLAG is shared by every minigame ("this client's
+// body is temporary"); everything that used to be a `duelArenaActive &&
+// <duel-specific thing>` conjunction is now a data lookup, so a third mode
+// costs zero new gate sites.
+let arenaActive = false;
+let arenaKind: ArenaKind | null = null;
+/** Display name of the mode currently borrowing this client's body. */
+function arenaModeName(): string {
+  return arenaKind === 'bedwars' ? 'Bedwars'
+    : arenaKind === 'party' ? 'Party Games'
+    : 'Duels';
+}
+let arenaMaxHealth = 20;
+let arenaHpPerHeart = 2;
+/** Item ids whose reserve is infinite inside the current arena. */
+let arenaUnlimited: ReadonlySet<number> = new Set<number>();
+/** Per-mode build/break rules and containment. Null = use the world path. */
+let arenaCanPlaceAt: ((x: number, y: number, z: number, held: number) => boolean) | null = null;
+let arenaCanEditAt: ((x: number, y: number, z: number, held: number) => boolean) | null = null;
+let arenaClampPos:
+  ((p: { x: number; y: number; z: number }) => { x: number; y: number; z: number }) | null = null;
 let duelActiveBounds: DuelArenaBounds | null = null;
 let duelArenaReadySent = false;
 let duelReadyWatchdog = 0;
@@ -3597,7 +3618,7 @@ let duelReadyWatchdog = 0;
  *  looked like from the other window. The watchdog below is a plain interval,
  *  and timers keep firing when frames do not. */
 function markDuelArenaReady(): void {
-  if (!duelArenaActive || duelArenaReadySent) return;
+  if (!arenaActive || duelArenaReadySent) return;
   duelArenaReadySent = true;
   net.sendDuelArenaReady();
   stopDuelReadyWatchdog();
@@ -3610,7 +3631,7 @@ function startDuelReadyWatchdog(x: number, z: number): void {
   stopDuelReadyWatchdog();
   const started = Date.now();
   duelReadyWatchdog = window.setInterval(() => {
-    if (!duelArenaActive || duelArenaReadySent) { stopDuelReadyWatchdog(); return; }
+    if (!arenaActive || duelArenaReadySent) { stopDuelReadyWatchdog(); return; }
     // Well inside the server's 30s gate. The frame loop still pins the player
     // at the spawn until the collision bubble is genuinely built, so readying
     // early costs nothing but never strands the match.
@@ -3620,7 +3641,6 @@ function startDuelReadyWatchdog(x: number, z: number): void {
 let duelCountdownEndsAt = 0;
 let duelRespawnAt = 0;
 let duelSpectating = false;
-let duelUnlimitedReserve = false;
 let duelClockServer = 0;
 let duelClockLocal = performance.now();
 let duelLastCountdownCue = -1;
@@ -3750,7 +3770,7 @@ function pushDuelKill(killer: string, victim: string): void {
 /** Replay any announcer beats this client has not shown yet. Beats are
  * idempotent by `seq`, so a dropped snapshot never loses or repeats a call. */
 function playDuelFeed(feed: DuelEvent[]): void {
-  if (!duelArenaActive) { duelFeedSeen = Math.max(duelFeedSeen, ...feed.map((e) => e.seq), 0); return; }
+  if (!arenaActive) { duelFeedSeen = Math.max(duelFeedSeen, ...feed.map((e) => e.seq), 0); return; }
   const fresh = feed.filter((event) => event.seq > duelFeedSeen).sort((a, b) => a.seq - b.seq);
   if (!fresh.length) return;
   duelFeedSeen = fresh[fresh.length - 1].seq;
@@ -3850,16 +3870,16 @@ function renderDuelScoreboard(): void {
 
 function setDuelScoresVisible(visible: boolean): void {
   duelScoresHeld = visible;
-  duelScoreboard.classList.toggle('visible', visible && duelArenaActive && !duelResultData);
+  duelScoreboard.classList.toggle('visible', visible && arenaActive && !duelResultData);
   if (visible) renderDuelScoreboard();
 }
 window.addEventListener('keydown', (event) => {
-  if (event.key !== 'Tab' || !duelArenaActive || duelResultData) return;
+  if (event.key !== 'Tab' || !arenaActive || duelResultData) return;
   event.preventDefault();
   if (!event.repeat) setDuelScoresVisible(true);
 });
 window.addEventListener('keyup', (event) => {
-  if (event.key === 'Tab' && duelArenaActive) { event.preventDefault(); setDuelScoresVisible(false); }
+  if (event.key === 'Tab' && arenaActive) { event.preventDefault(); setDuelScoresVisible(false); }
 });
 window.addEventListener('blur', () => setDuelScoresVisible(false));
 for (const type of ['pointerdown', 'touchstart'] as const) {
@@ -4121,7 +4141,7 @@ function setDuelCue(text: string, tone: '' | 'go' | 'danger' = ''): void {
 }
 
 function updateDuelHud(): void {
-  if (!duelArenaActive || !duelSnapshot) {
+  if (!arenaActive || !duelSnapshot) {
     duelMatchHud.classList.remove('visible'); duelScoresTouch.classList.remove('visible');
     duelAnnounceEl.classList.remove('visible', 'out');
     if (duelKillFeedEl.childElementCount) duelKillFeedEl.replaceChildren();
@@ -4197,7 +4217,7 @@ function updateDuelHud(): void {
   // The announcer owns the centre of the screen while it is up.
   setDuelCue(duelAnnounceEl.classList.contains('visible') && cue.length > 2 ? '' : cue, tone);
 
-  if (duelArenaActive && !duelArenaReadySent && duelSnapshot?.phase === 'countdown' &&
+  if (arenaActive && !duelArenaReadySent && duelSnapshot?.phase === 'countdown' &&
       (duelSnapshot.countdownEndsAt === undefined || duelSnapshot.countdownEndsAt === 0)) {
     if (world.isLoaded(player.pos.x, player.pos.z) || (pendingTeleport && worldTimeLocal - pendingTeleport.started > 1.5)) {
       markDuelArenaReady();
@@ -4217,13 +4237,25 @@ function updateDuelHud(): void {
   if (duelScoresHeld) renderDuelScoreboard();
 }
 
+/** Drop every generic arena hook back to open-world defaults. Called by every
+ *  exit path so no mode's rules can outlive its match. */
+function clearArenaState(): void {
+  arenaActive = false;
+  arenaKind = null;
+  arenaMaxHealth = 20;
+  arenaHpPerHeart = 2;
+  arenaUnlimited = new Set<number>();
+  arenaCanPlaceAt = null;
+  arenaCanEditAt = null;
+  arenaClampPos = null;
+  world.setArenaRenderBounds(null);
+}
+
 function cleanupDuelSession(restoreState = true): void {
   stopDuelReadyWatchdog();
-  duelArenaActive = false;
+  clearArenaState();
   duelActiveBounds = null;
-  world.setDuelRenderBounds(null);
   duelArenaReadySent = false;
-  duelUnlimitedReserve = false;
   duelSpectating = false;
   duelScoresHeld = false;
   duelResultData = null;
@@ -4269,17 +4301,23 @@ function cleanupDuelSession(restoreState = true): void {
 }
 
 function duelControlBlocked(): boolean {
-  if (!duelArenaActive || !duelSnapshot) return false;
+  if (!arenaActive || !duelSnapshot) return false;
   return duelSnapshot.phase === 'countdown' ||
     duelSnapshot.phase === 'results' || screen === 'duel_results';
 }
 
 net.onDuelArena = (arena, spawn, countdownEndsAt) => {
-  duelArenaActive = true; duelActiveBounds = arena;
-  world.setDuelRenderBounds({
+  arenaActive = true; arenaKind = 'duel'; duelActiveBounds = arena;
+  arenaMaxHealth = DUEL_MAX_HEALTH; arenaHpPerHeart = DUEL_HP_PER_HEART;
+  arenaCanPlaceAt = duelArenaRules.canPlaceAt;
+  arenaCanEditAt = duelArenaRules.canEditAt;
+  arenaClampPos = (pos) => clampToDuelArena(pos, arena);
+  // Duels arenas are lit to a competitive floor of 12/15 so nobody wins on a
+  // dark corner.
+  world.setArenaRenderBounds({
     minX: arena.originX, minZ: arena.originZ,
     maxX: arena.originX + DUEL_ARENA_SIZE, maxZ: arena.originZ + DUEL_ARENA_SIZE,
-  });
+  }, 0.8);
   duelArenaReadySent = false; duelCountdownEndsAt = countdownEndsAt;
   duelLastCountdownCue = -1; duelCueText = ''; duelLastLeaderKey = '';
   duelFinalMinuteShown = false; duelFinalThirtyPlayed = false;
@@ -4301,7 +4339,7 @@ net.onDuelArena = (arena, spawn, countdownEndsAt) => {
   closeMinigames(); audio.resume();
   applyLocalMode('survival');
   player.pos.set(spawn.x, spawn.y, spawn.z); player.vel.set(0, 0, 0); player.fallDistance = 0;
-  player.maxHealth = DUEL_MAX_HEALTH; player.health = DUEL_MAX_HEALTH; player.dead = false;
+  player.maxHealth = arenaMaxHealth; player.health = arenaMaxHealth; player.dead = false;
   player.flying = false; player.noclip = false; player.gliding = false; player.boating = false;
   pendingTeleport = { x: spawn.x, y: spawn.y, z: spawn.z, started: worldTimeLocal };
   // Pre-stream the small arena bubble immediately so ready can be sent without delay
@@ -4314,7 +4352,9 @@ net.onDuelArena = (arena, spawn, countdownEndsAt) => {
   resumePlay();
 };
 net.onDuelLoadout = (slots, armor, selected, unlimitedReserve) => {
-  inventory.restore({ slots, armor, selected }); duelUnlimitedReserve = unlimitedReserve;
+  inventory.restore({ slots, armor, selected });
+  arenaUnlimited = unlimitedReserve
+    ? new Set<number>([Block.OakPlanks, Item.Bullet]) : new Set<number>();
   fireCooldown = 0; reloadTimer = 0; burstRemaining = 0; healUse.cancel();
 };
 net.onDuelClock = (serverNow, _endsAt, _suddenDeath) => syncDuelClock(serverNow);
@@ -4328,7 +4368,7 @@ net.onDuelRespawn = (respawnAt, spectating) => {
     burstRemaining = 0; burstStack = null; burstGun = null;
     reloadTimer = 0; reloadingStack = null; aimZoom = 1; healUse.cancel();
   }
-  if (!spectating) { player.flying = false; player.noclip = false; player.health = DUEL_MAX_HEALTH; }
+  if (!spectating) { player.flying = false; player.noclip = false; player.health = arenaMaxHealth; }
 };
 net.onDuelResult = renderDuelResult;
 net.onDuelProfile = (profile, leaderboard) => {
@@ -4342,9 +4382,8 @@ net.onDuelLeaderboard = (leaderboard) => {
 net.onDuelProfileUpdate = (id) => remotePlayers.invalidate(id);
 net.onDuelRestored = (x, y, z, yaw, pitch, health, dead, mode, state) => {
   stopDuelReadyWatchdog();
-  duelArenaActive = false; duelUnlimitedReserve = false;
+  clearArenaState();
   duelActiveBounds = null;
-  world.setDuelRenderBounds(null);
   duelArenaReadySent = false;
   duelSpectating = false; duelResultData = null; duelResultEl.classList.remove('visible');
   duelMatchHud.classList.remove('visible'); duelScoresTouch.classList.remove('visible');
@@ -5394,7 +5433,7 @@ document.getElementById('quit-btn')!.addEventListener('click', () => {
   setSeat(null);
   myRope = null;
   vehicleHud.setRope(false);
-  if (duelArenaActive || duelSnapshot) {
+  if (arenaActive || duelSnapshot) {
     net.sendDuelLeave();
     cleanupDuelSession(true);
   }
@@ -5496,7 +5535,7 @@ function checkDeath(): void {
 // (offline). The server is the system of record online; offline we mirror to
 // localStorage keyed by the local account so single-player also persists.
 function pushStateSave(): void {
-  if (duelArenaActive) return; // temporary arena coordinates/loadout never persist
+  if (arenaActive) return; // temporary arena coordinates/loadout never persist
   if (net.connected) {
     // Warfare Command progression is deliberately NOT in this blob: the server
     // stores it on the account, so a client state push can never mint or wipe
@@ -5671,7 +5710,7 @@ net.onRespawned = (x, y, z, h) => {
   if (worldReady) input.lock();
 };
 net.onKillfeed = (killer, victim) => {
-  if (duelArenaActive) pushDuelKill(killer, victim);
+  if (arenaActive) pushDuelKill(killer, victim);
   else showKill(killer, victim);
 };
 net.onRoster = refreshNetInfo;
@@ -6916,13 +6955,13 @@ function renderGuidePanel(): void {
 /** Per-frame guide upkeep: visibility, periodic detection, live vault hint. */
 function updateGuide(dt: number, controlling: boolean): void {
   loadGuide();
-  const show = controlling && authed && !guideHidden && !guideComplete(guideState) && !duelArenaActive;
+  const show = controlling && authed && !guideHidden && !guideComplete(guideState) && !arenaActive;
   starterEl.style.display = show ? 'block' : 'none';
   if (!authed) return;
   guideCheckTimer -= dt;
   if (guideCheckTimer <= 0) {
     guideCheckTimer = 0.5;
-    if (!guideComplete(guideState) && !duelArenaActive) detectGuideSteps();
+    if (!guideComplete(guideState) && !arenaActive) detectGuideSteps();
     guideDirty = true; // the distance hint ticks along as you walk
   }
   if (show && guideDirty) {
@@ -7282,7 +7321,7 @@ const chatBox = new ChatBox(app, {
         notifications.show();
         return null;
       case 'guide':
-        if (duelArenaActive) return 'Guide is disabled during Duels.';
+        if (arenaActive) return `Guide is disabled during ${arenaModeName()}.`;
         toggleGuidePanel();
         chatBox.print(guideHidden ? 'Getting Started guide hidden.' : 'Getting Started guide shown.');
         return null;
@@ -7455,7 +7494,7 @@ net.onDisconnect = () => {
   pendingDuelAttempted = false;
   duelQueued = false;
   refreshDuelsAvailability();
-  if (duelArenaActive || duelSnapshot) {
+  if (arenaActive || duelSnapshot) {
     cleanupDuelSession(true);
     input.unlock();
     enterTitle();
@@ -7502,13 +7541,14 @@ interaction.onEdit = (x, y, z, b) => {
   if (mt !== null) machines.place(x, y, z, mt);
   net.sendEdit(x, y, z, b);
 };
-interaction.shouldConsumePlacement = (block) =>
-  !(duelArenaActive && duelUnlimitedReserve && block === Block.OakPlanks);
-interaction.canPlace = (x, y, z) => {
-  if (duelArenaActive && duelActiveBounds) {
+/** The Duels build rules, as a data object behind the generic arena hooks.
+ *  Moved verbatim out of `interaction.canPlace`/`canEdit`; a new mode supplies
+ *  its own object instead of adding another branch to those two functions. */
+const duelArenaRules = {
+  canPlaceAt(x: number, y: number, z: number, held: number): boolean {
+    if (!duelActiveBounds) return false;
     if (duelSnapshot?.phase !== 'running' && duelSnapshot?.phase !== 'sudden_death') return false;
-    const held = inventory.selectedStack;
-    if (held?.id !== Block.OakPlanks) return false;
+    if (held !== Block.OakPlanks) return false;
     const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
     if (bx < duelActiveBounds.minX || bx >= duelActiveBounds.maxX ||
         bz < duelActiveBounds.minZ || bz >= duelActiveBounds.maxZ) return false;
@@ -7518,6 +7558,29 @@ interaction.canPlace = (x, y, z) => {
     if (by <= groundY) return false;
     if (by > groundY + DUEL_MAX_PILLAR_HEIGHT) return false;
     return true;
+  },
+  canEditAt(x: number, y: number, z: number, held: number): boolean {
+    if (!duelActiveBounds) return false;
+    if (duelSnapshot?.phase !== 'running' && duelSnapshot?.phase !== 'sudden_death') return false;
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    if (bx < duelActiveBounds.minX || bx >= duelActiveBounds.maxX ||
+        bz < duelActiveBounds.minZ || bz >= duelActiveBounds.maxZ) return false;
+    const lx = bx - duelActiveBounds.minX, lz = bz - duelActiveBounds.minZ;
+    const groundY = duelActiveBounds.floor + duelTerrainElevation(lx, lz);
+    if (by <= groundY) return false;
+    const block = world.getBlock(x, y, z);
+    // Interaction asks canEdit about the empty destination before canPlace.
+    // Permit that destination only for the plank stack; existing cover is
+    // reclaimable only with the utility axe.
+    if (isReplaceable(block)) return held === Block.OakPlanks;
+    return block === Block.OakPlanks && held === Item.IronAxe;
+  },
+};
+
+interaction.shouldConsumePlacement = (block) => !arenaUnlimited.has(block);
+interaction.canPlace = (x, y, z) => {
+  if (arenaActive && arenaCanPlaceAt) {
+    return arenaCanPlaceAt(x, y, z, inventory.selectedStack?.id ?? 0);
   }
   if (localVaultEncounter && curVault && blockInsideArena(curVault, x, y, z)) return false;
   // Warfare hardware is blueprint-gated — refuse the placement here rather
@@ -7533,21 +7596,8 @@ interaction.canPlace = (x, y, z) => {
   return true;
 };
 interaction.canEdit = (x, y, z) => {
-  if (duelArenaActive && duelActiveBounds) {
-    if (duelSnapshot?.phase !== 'running' && duelSnapshot?.phase !== 'sudden_death') return false;
-    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
-    if (bx < duelActiveBounds.minX || bx >= duelActiveBounds.maxX ||
-        bz < duelActiveBounds.minZ || bz >= duelActiveBounds.maxZ) return false;
-    const lx = bx - duelActiveBounds.minX, lz = bz - duelActiveBounds.minZ;
-    const groundY = duelActiveBounds.floor + duelTerrainElevation(lx, lz);
-    if (by <= groundY) return false;
-    const block = world.getBlock(x, y, z);
-    const held = inventory.selectedStack?.id;
-    // Interaction asks canEdit about the empty destination before canPlace.
-    // Permit that destination only for the plank stack; existing cover is
-    // reclaimable only with the utility axe.
-    if (isReplaceable(block)) return held === Block.OakPlanks;
-    return block === Block.OakPlanks && held === Item.IronAxe;
+  if (arenaActive && arenaCanEditAt) {
+    return arenaCanEditAt(x, y, z, inventory.selectedStack?.id ?? 0);
   }
   const block = world.getBlock(x, y, z);
   if (block === Block.MobSpawner || block === Block.VaultChest) return false;
@@ -7627,7 +7677,7 @@ function fireVolley(stack: ItemStack, gun: GunInfo): boolean {
   const buffs = activeBuffs();
   const spread = (gun.spread ?? 0) * buffs.spreadMult; // Gunslinger + Rune of Focus
   // Gunslinger capstones boost per-round damage (server still clamps PvP hits).
-  const boosted = !duelArenaActive && buffs.gunDamageMult > 1
+  const boosted = !arenaActive && buffs.gunDamageMult > 1
     ? { ...gun, damage: Math.max(1, Math.round(gun.damage * buffs.gunDamageMult)) }
     : gun;
   const eye = player.eyePosition;
@@ -7674,8 +7724,8 @@ function reloadGun(): void {
   if (!stack || !gun) return;
   const loaded = stack.loaded ?? gun.mag;
   if (loaded >= gun.mag ||
-      (!duelUnlimitedReserve && inventory.countItem(gun.ammo) <= 0)) return;
-  reloadTimer = RELOAD_TIME * (duelArenaActive ? 1 : activeBuffs().reloadMult);
+      (!arenaUnlimited.has(gun.ammo) && inventory.countItem(gun.ammo) <= 0)) return;
+  reloadTimer = RELOAD_TIME * (arenaActive ? 1 : activeBuffs().reloadMult);
   reloadDuration = reloadTimer;
   reloadingStack = stack;
 }
@@ -8139,7 +8189,7 @@ function updateAtmosphere(): void {
       .multiplyScalar(0.3 + 0.7 * sky.sunIntensity);
     fog.near = 0;
     fog.far = 24;
-  } else if (duelArenaActive) {
+  } else if (arenaActive) {
     // The sealed room has its own clear daytime presentation. A shorter bright
     // haze softens the wall line and guarantees no distant open-world terrain
     // can become legible through a missed angle.
@@ -10575,16 +10625,16 @@ function frame(): void {
   }
 
   if (input.inventoryToggled) {
-    if (duelArenaActive) showNotice('Inventory management is locked during Duels.');
+    if (arenaActive) showNotice(`Inventory management is locked during ${arenaModeName()}.`);
     else toggleInventory();
   }
   if (invUI.open && input.hotbarKey >= 0) invUI.hotbarSwap(input.hotbarKey);
   if (input.mapToggled) {
-    if (duelArenaActive) showNotice('The world map is unavailable during Duels.');
+    if (arenaActive) showNotice(`The world map is unavailable during ${arenaModeName()}.`);
     else toggleMap();
   }
   if (input.progressPressed) {
-    if (duelArenaActive) showNotice('Progression is suspended during Duels.');
+    if (arenaActive) showNotice(`Progression is suspended during ${arenaModeName()}.`);
     else toggleProgress();
   }
   worldMap.update();
@@ -10612,7 +10662,7 @@ function frame(): void {
       const gun = rs ? ITEMS[rs.id]?.gun : undefined;
       if (rs && gun && rs === inventory.selectedStack) {
         const loaded = rs.loaded ?? gun.mag;
-        rs.loaded = duelUnlimitedReserve && duelArenaActive
+        rs.loaded = arenaUnlimited.has(gun.ammo)
           ? gun.mag
           : loaded + inventory.removeItem(gun.ammo, gun.mag - loaded);
         inventory.version++;
@@ -10641,13 +10691,13 @@ function frame(): void {
   // synced value (clamped server-side). Progression bonuses (Toughness ranks +
   // the faction perk) ride on top of worn gear; speed applies to movement.
   const buffsNow = activeBuffs();
-  player.speedMult = duelArenaActive ? 1 : buffsNow.speedMult;
-  player.energyDrainMult = duelArenaActive ? 1 : buffsNow.energyMult;   // Windrunner capstones
-  player.fallDamageMult = duelArenaActive ? 1 : buffsNow.fallMult;      // Juggernaut capstones
-  interaction.miningSpeedMult = duelArenaActive ? 1 : buffsNow.mineMult; // Prospector + Rune of Fortune
-  const armorPts = duelArenaActive ? 0 : inventory.armorPoints() + buffsNow.armorBonus;
+  player.speedMult = arenaActive ? 1 : buffsNow.speedMult;
+  player.energyDrainMult = arenaActive ? 1 : buffsNow.energyMult;   // Windrunner capstones
+  player.fallDamageMult = arenaActive ? 1 : buffsNow.fallMult;      // Juggernaut capstones
+  interaction.miningSpeedMult = arenaActive ? 1 : buffsNow.mineMult; // Prospector + Rune of Fortune
+  const armorPts = arenaActive ? 0 : inventory.armorPoints() + buffsNow.armorBonus;
   player.armorPoints = armorPts;
-  player.toughness = duelArenaActive ? 0 : buffsNow.toughness;           // Greater Rune of Iron
+  player.toughness = arenaActive ? 0 : buffsNow.toughness;           // Greater Rune of Iron
   if (net.connected &&
       (armorPts !== lastSentArmor || buffsNow.toughness !== lastSentToughness)) {
     lastSentArmor = armorPts;
@@ -10677,7 +10727,7 @@ function frame(): void {
           inventory.select(inventory.selected + input.wheelDelta);
         }
       }
-      if (input.dropPressed && !duelArenaActive) {
+      if (input.dropPressed && !arenaActive) {
         dropCurrentItem(input.down('ShiftLeft') || input.down('ShiftRight'));
       }
       if (input.viewPressed) cycleView();
@@ -10703,17 +10753,17 @@ function frame(): void {
       player.pos.set(tp.x, tp.y, tp.z);
       player.vel.set(0, 0, 0);
       player.fallDistance = 0;
-      const bubbleReady = world.update(tp.x, tp.z, duelArenaActive ? 20 : 14, 2);
-      if (bubbleReady || (worldTimeLocal - tp.started > (duelArenaActive ? 2 : 8))) {
+      const bubbleReady = world.update(tp.x, tp.z, arenaActive ? 20 : 14, 2);
+      if (bubbleReady || (worldTimeLocal - tp.started > (arenaActive ? 2 : 8))) {
         pendingTeleport = null;
         markDuelArenaReady();
       }
     }
     updateGrapple(dt); // hook flight / reel / swing (sets velocity before the step)
     player.update(dt, moveInput, world);
-    if (duelArenaActive && duelActiveBounds) {
+    if (arenaActive && arenaClampPos) {
       const beforeX = player.pos.x, beforeY = player.pos.y, beforeZ = player.pos.z;
-      const bounded = clampToDuelArena(player.pos, duelActiveBounds);
+      const bounded = arenaClampPos(player.pos);
       player.pos.set(bounded.x, bounded.y, bounded.z);
       if (bounded.x !== beforeX) player.vel.x = 0;
       if (bounded.y !== beforeY) player.vel.y = 0;
@@ -10741,7 +10791,7 @@ function frame(): void {
     // authoritatively too). During a war this is the CLOSING red ring — but a
     // live boss fight is exempt, matching the server, so a ring closing over a
     // distant vault can never rip you out of a sealed arena mid-encounter.
-    if (!duelArenaActive && !inLiveVaultFight()) {
+    if (!arenaActive && !inLiveVaultFight()) {
       const clampHalf = net.connected && warActiveNow ? currentWarBorder() / 2 : WORLD_HALF;
       const clamped = clampInsideBorder(player.pos.x, player.pos.z, clampHalf);
       if (clamped.moved > 0) {
@@ -10817,7 +10867,7 @@ function frame(): void {
       // FLAGS come first: standing at an enemy flag pad, left-click is a swing
       // at the pole (never a mine), because that's the only thing you could
       // possibly mean to be doing there.
-      if (duelArenaActive && !heldStack) {
+      if (arenaActive && !heldStack) {
         // Empty temporary slots are not mining tools. Suppress client
         // prediction too, so rejected edits cannot leave a local-only hole.
         interaction.update(dt, input, camera, true, true);
@@ -10976,7 +11026,7 @@ function frame(): void {
       !!mySeat);                                          // strapped into a vehicle seat
 
     // Simulation never pauses: mobs hunt you and survival ticks in menus too.
-    if (!duelArenaActive) {
+    if (!arenaActive) {
       survival.update(dt, player);
       mobs.update(dt, player, sky.sunIntensity);
       updateVaults(dt); // dungeons: bounds/banner, guard anchors, the Brute, sparkle
@@ -10984,7 +11034,7 @@ function frame(): void {
     // Volcanic lava is a hazard: standing in it burns you (the M21 ashlands
     // doubles as a PvP hazard). Damage routes through the server in MP.
     lavaTimer = Math.max(0, lavaTimer - dt);
-    if (!player.dead && !duelArenaActive) {
+    if (!player.dead && !arenaActive) {
       const inLava = world.getBlock(Math.floor(player.pos.x),
         Math.floor(player.pos.y + 0.2), Math.floor(player.pos.z)) === Block.Lava ||
         world.getBlock(Math.floor(player.pos.x),
@@ -11011,8 +11061,8 @@ function frame(): void {
     // Traps: spikes prick anyone standing on them; a landmine detonates; the
     // holding traps (bear trap / tar / barbed wire) grab you where you stand.
     spikeHurtTimer = Math.max(0, spikeHurtTimer - dt);
-    if (!duelArenaActive) updateTrapGrip(dt);
-    if (!player.dead && !duelArenaActive && localMode === 'survival' && !player.noclip) {
+    if (!arenaActive) updateTrapGrip(dt);
+    if (!player.dead && !arenaActive && localMode === 'survival' && !player.noclip) {
       const bx = Math.floor(player.pos.x), bz = Math.floor(player.pos.z);
       const by = Math.floor(player.pos.y - 0.05);
       const under = world.getBlock(bx, by, bz);
@@ -11027,7 +11077,7 @@ function frame(): void {
     // Machines run under the same never-pausing sim. Offline this is the
     // authoritative tick; in multiplayer it's a local prediction for the fill
     // bar (the server is authoritative and reconciles on open/collect).
-    if (!duelArenaActive) {
+    if (!arenaActive) {
       machines.update(dt);
       machineModels.update(dt); // animate drills/pumpjacks
       turretModels.update(dt);
@@ -11070,7 +11120,7 @@ function frame(): void {
   // RENDER_DISTANCE ceiling: passing the ceiling here would mesh every chunk
   // out to the `max` radius no matter which preset the player picked.
   world.update(player.pos.x, player.pos.z, 6,
-    duelArenaActive ? 3 : world.renderDistance);
+    arenaActive ? 3 : world.renderDistance);
   if (net.connected && hasServerWorldTime) {
     const extrapolated = serverWorldTime + (performance.now() - serverWorldTimeAt) / 1000;
     sky.time = 0.04 + extrapolated / DAY_LENGTH;
@@ -11078,12 +11128,12 @@ function frame(): void {
   // Duels presents a fixed noon sky while the persistent server clock keeps
   // advancing underneath. The sky eases both into noon and back to the live
   // clock, and also absorbs small authoritative clock corrections smoothly.
-  sky.update(dt, activeCamera, duelArenaActive ? 0.25 : undefined,
+  sky.update(dt, activeCamera, arenaActive ? 0.25 : undefined,
     !(net.connected && hasServerWorldTime));
   updateAtmosphere();
   ambientWorld.update(
     dt, player.pos, sky.sunIntensity,
-    !player.eyeUnderwater && !curVault && !duelArenaActive,
+    !player.eyeUnderwater && !curVault && !arenaActive,
     accessibility.reducedMotion,
   );
   itemEntities.update(dt, player, inventory, sky.sunIntensity);
@@ -11183,7 +11233,7 @@ function frame(): void {
     const loaded = gunStack!.loaded ?? gunInfo.mag;
     ammoEl.textContent = reloadTimer > 0
       ? 'RELOADING…'
-      : `${loaded} / ${duelUnlimitedReserve && duelArenaActive ? '∞' : inventory.countItem(gunInfo.ammo)}`;
+      : `${loaded} / ${arenaUnlimited.has(gunInfo.ammo) ? '∞' : inventory.countItem(gunInfo.ammo)}`;
     ammoEl.style.display = 'block';
   } else {
     ammoEl.style.display = 'none';
@@ -11199,8 +11249,8 @@ function frame(): void {
     // against. In the open world that is localHearts; inside a Duels body the
     // bar is DUEL_MAX_HEALTH, and passing the open-world count there drew a
     // permanently full row — you could not read your own health in a match.
-    hearts: duelArenaActive ? DUEL_MAX_HEALTH / DUEL_HP_PER_HEART : player.maxHealth / 2,
-    hpPerHeart: duelArenaActive ? DUEL_HP_PER_HEART : 2,
+    hearts: arenaActive ? arenaMaxHealth / arenaHpPerHeart : player.maxHealth / 2,
+    hpPerHeart: arenaActive ? arenaHpPerHeart : 2,
     energy: player.energy,
     exhausted: player.exhausted,
     air: player.air,
@@ -11223,7 +11273,7 @@ function frame(): void {
   }
   invUI.update();
 
-  if (!duelArenaActive) {
+  if (!arenaActive) {
     flagModels.setWarActive(warActiveNow);
     // Driven here rather than in updateFlagVisuals: that one is multiplayer-only
     // and the strongbox has to keep breathing in single-player too.
@@ -11279,7 +11329,7 @@ function frame(): void {
       players: net.connected ? net.remotes.size + 1 : 1,
       armor: armorPts,
       health: player.health,
-      maxHealth: duelArenaActive ? DUEL_MAX_HEALTH : player.maxHealth,
+      maxHealth: arenaActive ? arenaMaxHealth : player.maxHealth,
     };
     hudMods.update(modData);
   }

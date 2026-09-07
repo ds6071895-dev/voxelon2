@@ -444,7 +444,7 @@ export type ServerMsg =
   | { t: 'duelFlairResult'; ok: boolean; profile: DuelPublicProfile; leaderboard: DuelLeaderboardEntry[] }
   | { t: 'duelLeaderboard'; leaderboard: DuelLeaderboardEntry[] }
   | { t: 'duelProfileUpdate'; id: number; profile: DuelPublicProfile }
-  | { t: 'duelRestored'; x: number; y: number; z: number; yaw: number; pitch: number;
+  | { t: 'arenaRestored'; x: number; y: number; z: number; yaw: number; pitch: number;
       health: number; dead: boolean; mode: GameMode; state?: Record<string, unknown> }
   | {
       t: 'welcome'; id: number; seed: number; username: string;

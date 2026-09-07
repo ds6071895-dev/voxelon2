@@ -576,7 +576,7 @@ export class NetClient {
         this.onDuelProfileUpdate?.(msg.id);
         break;
       }
-      case 'duelRestored':
+      case 'arenaRestored':
         this.onDuelRestored?.(msg.x, msg.y, msg.z, msg.yaw, msg.pitch, msg.health, msg.dead,
           msg.mode, msg.state);
         break;

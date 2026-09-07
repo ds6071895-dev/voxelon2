@@ -86,6 +86,7 @@ import {
   clampToDuelArena, duelArenaBlockAt, duelArenaBounds, duelArenaSolidAt, duelTerrainElevation,
   hasArenaLineOfSight, safestDuelSpawn, secureDuelToken,
 } from '../duels';
+import { ArenaAABB, ArenaKind } from '../arena';
 import {
   DuelFlair, DuelProgressState, DuelPublicProfile, canEquipDuelFlair,
   duelProfileOf, newDuelProgress, sanitizeDuelProgress, settleDuelProgress,
@@ -197,15 +198,24 @@ interface ServerPlayer extends PlayerInfo {
   tpaFrom?: { id: number; username: string; at: number };
   /** Prevents transport cleanup from settling the same combat logout twice. */
   disconnectSettled: boolean;
-  /** Exact open-world state held aside while the temporary Duels body exists. */
-  duelSaved?: DuelSavedState;
+  /** Exact open-world state held aside while a temporary MINIGAME body exists.
+   *
+   *  There is deliberately ONE slot rather than one per mode. Every predicate
+   *  that keeps an arena player out of the open world — `snapshotFor`,
+   *  `receivesWorldBroadcast`, the welcome roster — reads this single field, so
+   *  a new mode cannot leak a player into the world by forgetting a disjunct.
+   *  It also makes "in two minigames at once" unrepresentable, because
+   *  `preserveOpenWorldState` refuses to overwrite an occupied slot. */
+  arenaSaved?: ArenaSavedState;
+  /** Which mode owns the temporary body. Set with `arenaSaved`, cleared with it. */
+  arenaKind?: ArenaKind;
   duelSpawnIndex: number;
   duelLastShotAt: number;
   duelNextBurstAt: number;
   duelBurstShots: number;
   duelShotTickets: DuelShotTicket[];
   /** Recent authoritative positions, oldest first, for lag compensation. */
-  duelTrack: DuelTrackSample[];
+  arenaTrack: ArenaTrackSample[];
   duelLoaded: number;
   duelReloadUntil: number;
   duelMedkits: number;
@@ -219,8 +229,8 @@ interface DuelShotTicket {
 }
 
 /** One timestamped feet position, kept so a hit can be judged against where a
- *  target USED to be. See `duelTrack` / `handleDuelRanged`. */
-interface DuelTrackSample { at: number; x: number; y: number; z: number; }
+ *  target USED to be. See `arenaTrack` / `handleDuelRanged`. */
+interface ArenaTrackSample { at: number; x: number; y: number; z: number; }
 
 /** How far back the duel position history reaches, in seconds. Covers the
  *  worst honest case a hit report has to survive: a Burst Rifle round crossing
@@ -228,7 +238,7 @@ interface DuelTrackSample { at: number; x: number; y: number; z: number; }
  *  renders every opponent behind live, and a slow round trip on top. */
 const DUEL_TRACK_WINDOW = 1.2;
 
-interface DuelSavedState {
+interface ArenaSavedState {
   x: number; y: number; z: number; yaw: number; pitch: number;
   health: number; dead: boolean; mode: GameMode;
   held: number; armor: number[]; armorPoints: number; toughness: number;
@@ -390,8 +400,8 @@ export class GameServer {
   private duelQueue: number[] = [];
   /** Retained through disconnects so forfeits cannot evade progression. */
   private readonly duelProgress = new Map<number, DuelProgressState>();
-  /** Placed blocks per active duel arena slot, reset on match end. */
-  private readonly duelArenaEdits = new Map<number, Map<string, number>>();
+  /** Placed blocks per active arena, keyed `${kind}:${slot}`, reset on match end. */
+  private readonly arenaEdits = new Map<string, Map<string, number>>();
   private readonly settledDuelResults = new Set<string>();
   /** Next whole-server timestamp broadcast for hidden-tab/lag clock recovery. */
   private duelClockNextAt = 0;
@@ -680,7 +690,7 @@ export class GameServer {
       duelNextBurstAt: 0,
       duelBurstShots: 0,
       duelShotTickets: [],
-      duelTrack: [],
+      arenaTrack: [],
       duelLoaded: 0,
       duelReloadUntil: 0,
       duelMedkits: 0,
@@ -706,7 +716,7 @@ export class GameServer {
       t: 'welcome', id, seed: this.seed, username, worldTime: this.worldTime,
       // A normal-world login must never learn about players inside an active
       // Duels scope. Lobby-only players remain ordinary title/world roster.
-      players: [...this.players.values()].filter((v) => !v.duelSaved).map(toInfo),
+      players: [...this.players.values()].filter((v) => !v.arenaSaved).map(toInfo),
       edits: [...this.edits.entries()],
       items: [...this.items.values()],
       turrets: [...this.turrets.entries()].map(([k, state]) => {
@@ -782,7 +792,7 @@ export class GameServer {
     victim.disconnectSettled = true;
     // Arena disconnects are resolved only by Duels (forfeit/removal). They can
     // never become open-world combat-log deaths or lifesteal transactions.
-    if (victim.duelSaved) return [];
+    if (victim.arenaSaved) return [];
     if (victim.dead || victim.mode !== 'survival') return [];
     const killer = this.players.get(victim.lastHitBy);
     const tagged = this.worldTime - victim.lastHitTime <= COMBAT_TAG;
@@ -827,6 +837,27 @@ export class GameServer {
     return out;
   }
 
+  /** Which mode's in-match whitelist owns this player's messages, or null for
+   *  the open world. Lobby members are still open-world citizens — only a live
+   *  match (countdown onward) captures the message stream. */
+  private arenaRouteFor(id: number): ArenaKind | null {
+    const duelPhase = this.duels.phaseFor(id);
+    if (duelPhase && duelPhase !== 'lobby') return 'duel';
+    return null;
+  }
+
+  /** A Duels body is isolated from every open-world action/economy system.
+   *  Movement, rifle combat, axe-only cover breaking, server-counted Medkits,
+   *  bounce launches, and arena block placement exist. Nothing else does. */
+  private routeDuelInMatch(p: ServerPlayer, msg: ClientMsg): Outbound[] {
+    if (msg.t === 'xform') return this.handleDuelTransform(p, msg);
+    if (msg.t === 'shot') return this.handleDuelShot(p, msg);
+    if (msg.t === 'rangedAttack') return this.handleDuelRanged(p, msg.target, msg.amount);
+    if (msg.t === 'useHeal') return this.handleDuelHeal(p, msg.item);
+    if (msg.t === 'edit') return this.handleDuelEdit(p, msg.x, msg.y, msg.z, msg.block);
+    return [];
+  }
+
   /** Handle one client message; returns messages to deliver. */
   handle(id: number, msg: ClientMsg): Outbound[] {
     const p = this.players.get(id);
@@ -834,17 +865,14 @@ export class GameServer {
     if (msg.t === 'duelCreate' || msg.t === 'duelQueue' || msg.t === 'duelJoin' || msg.t === 'duelLeave' ||
         msg.t === 'duelReady' || msg.t === 'duelStart' || msg.t === 'duelArenaReady' || msg.t === 'duelRematch' ||
         msg.t === 'duelReturn' || msg.t === 'duelFlair') return this.handleDuel(p, msg);
-    const duelPhase = this.duels.phaseFor(id);
-    if (duelPhase && duelPhase !== 'lobby') {
-      // A Duels body is isolated from every open-world action/economy system.
-      // Movement, rifle combat, axe-only cover breaking, server-counted
-      // Medkits, bounce launches, and arena block placement exist.
-      if (msg.t === 'xform') return this.handleDuelTransform(p, msg);
-      if (msg.t === 'shot') return this.handleDuelShot(p, msg);
-      if (msg.t === 'rangedAttack') return this.handleDuelRanged(p, msg.target, msg.amount);
-      if (msg.t === 'useHeal') return this.handleDuelHeal(p, msg.item);
-      if (msg.t === 'edit') return this.handleDuelEdit(p, msg.x, msg.y, msg.z, msg.block);
-      return [];
+    // A player inside a live arena is routed to that mode's whitelist and
+    // NOTHING else. Every `route*InMatch` ends in `return []`, so any message
+    // the mode does not explicitly name is dropped rather than falling through
+    // to the open-world switch. That whitelist-and-drop is the entire security
+    // model per mode: it is what makes arena-only verbs (and the weapons that
+    // use them) unreachable from the open world.
+    switch (this.arenaRouteFor(id)) {
+      case 'duel': return this.routeDuelInMatch(p, msg);
     }
     // Spectators are non-interacting ghosts: drop any world-mutating / combat
     // message. They may still move (xform), persist (saveState), and respawn.
@@ -922,13 +950,13 @@ export class GameServer {
       }
       case 'tpa': {
         if (p.dead || typeof msg.target !== 'string') return [];
-        if (this.duels.phaseFor(p.id) || p.duelSaved) {
-          return [{ to: id, msg: { t: 'notice', text: 'TPA is disabled during Duels.' } }];
+        if (this.duels.phaseFor(p.id) || p.arenaSaved) {
+          return [{ to: id, msg: { t: 'notice', text: 'TPA is disabled during a minigame.' } }];
         }
         const name = msg.target.slice(0, 32).trim();
         const targetId = this.playerIdByName(name);
         const target = targetId !== undefined ? this.players.get(targetId) : undefined;
-        if (!target || this.duels.phaseFor(target.id) || target.duelSaved) {
+        if (!target || this.duels.phaseFor(target.id) || target.arenaSaved) {
           return [{ to: id, msg: { t: 'notice', text: `"${name}" is not online.` } }];
         }
         if (target.id === p.id) {
@@ -945,8 +973,8 @@ export class GameServer {
         const req = p.tpaFrom;
         p.tpaFrom = undefined; // one shot, granted or not
         if (p.dead) return [];
-        if (this.duels.phaseFor(p.id) || p.duelSaved) {
-          return [{ to: id, msg: { t: 'notice', text: 'TPA is disabled during Duels.' } }];
+        if (this.duels.phaseFor(p.id) || p.arenaSaved) {
+          return [{ to: id, msg: { t: 'notice', text: 'TPA is disabled during a minigame.' } }];
         }
         if (!req || this.worldTime - req.at > TPA_EXPIRE) {
           return [{ to: id, msg: { t: 'notice', text: 'That TPA request has expired.' } }];
@@ -954,7 +982,7 @@ export class GameServer {
         const requester = this.players.get(req.id);
         // The slot id could have been recycled by a reconnect — verify the name.
         if (!requester || requester.dead || requester.username !== req.username ||
-            this.duels.phaseFor(requester.id) || requester.duelSaved) {
+            this.duels.phaseFor(requester.id) || requester.arenaSaved) {
           return [{ to: id, msg: { t: 'notice', text: `${req.username} is no longer available.` } }];
         }
         requester.x = p.x; requester.y = p.y; requester.z = p.z;
@@ -1558,10 +1586,10 @@ export class GameServer {
    *  different lobby — used to leave real planks standing in an arena nobody
    *  had a record of. The footprint is authoritative and cannot go stale, so
    *  a match now always opens on the bare colosseum. */
-  private resetDuelArenaEdits(slot: number, memberIds?: number[]): Outbound[] {
-    const arena = duelArenaBounds(slot);
-    const minX = arena.originX, maxX = arena.originX + DUEL_ARENA_SIZE;
-    const minZ = arena.originZ, maxZ = arena.originZ + DUEL_ARENA_SIZE;
+  private resetArenaEdits(
+    trackKey: string, bounds: ArenaAABB, memberIds?: number[],
+  ): Outbound[] {
+    const { minX, maxX, minZ, maxZ, minY, maxY } = bounds;
     const edits: { x: number; y: number; z: number; block: number }[] = [];
     for (const key of [...this.edits.keys()]) {
       const first = key.indexOf(',');
@@ -1573,11 +1601,11 @@ export class GameServer {
       const z = Number(key.slice(second + 1));
       if (!(z >= minZ && z < maxZ)) continue;
       const y = Number(key.slice(first + 1, second));
-      if (y < arena.floor - 1 || y >= arena.ceiling) continue;
+      if (y < minY || y >= maxY) continue;
       this.edits.delete(key);
       edits.push({ x, y, z, block: Block.Air });
     }
-    this.duelArenaEdits.delete(slot);
+    this.arenaEdits.delete(trackKey);
     if (edits.length === 0 || !memberIds || memberIds.length === 0) return [];
     return memberIds.map((id) => ({
       to: id,
@@ -1585,9 +1613,18 @@ export class GameServer {
     }));
   }
 
+  private resetDuelArenaEdits(slot: number, memberIds?: number[]): Outbound[] {
+    const arena = duelArenaBounds(slot);
+    return this.resetArenaEdits(`duel:${slot}`, {
+      minX: arena.originX, maxX: arena.originX + DUEL_ARENA_SIZE,
+      minZ: arena.originZ, maxZ: arena.originZ + DUEL_ARENA_SIZE,
+      minY: arena.floor - 1, maxY: arena.ceiling,
+    }, memberIds);
+  }
+
   private preserveOpenWorldState(p: ServerPlayer): void {
-    if (p.duelSaved) return;
-    p.duelSaved = {
+    if (p.arenaSaved) return;
+    p.arenaSaved = {
       x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
       health: p.health, dead: p.dead, mode: p.mode, held: p.held,
       armor: p.armor.slice(), armorPoints: p.armorPoints, toughness: p.toughness,
@@ -1595,25 +1632,38 @@ export class GameServer {
     };
   }
 
-  private enterDuelBody(p: ServerPlayer, arena: DuelArenaBounds, spawnIndex: number): Outbound[] {
+  /** Move a player into a temporary arena body: their open-world state is held
+   *  aside, every world attachment (vehicle, rope) is severed, and the body is
+   *  reset to a clean competitive baseline. Mode-specific loadout is the
+   *  caller's job. */
+  private enterArenaBody(
+    p: ServerPlayer, kind: ArenaKind,
+    spawn: { x: number; y: number; z: number }, yaw: number, maxHealth: number,
+  ): void {
     this.preserveOpenWorldState(p);
+    p.arenaKind = kind;
     this.vehicles.disconnectPlayer(p.id);
     this.ropePlayers.delete(p.id);
-    const index = ((spawnIndex % arena.spawns.length) + arena.spawns.length) % arena.spawns.length;
-    const spawn = arena.spawns[index];
-    p.duelSpawnIndex = index;
-    p.x = spawn.x; p.y = spawn.y; p.z = spawn.z; p.yaw = index < 2 ? Math.PI : 0; p.pitch = 0;
-    p.health = DUEL_MAX_HEALTH; p.dead = false; p.mode = 'survival';
-    p.held = Item.BurstRifle; p.armor = [0, 0, 0, 0]; p.armorPoints = 0; p.toughness = 0;
+    p.x = spawn.x; p.y = spawn.y; p.z = spawn.z; p.yaw = yaw; p.pitch = 0;
+    p.health = maxHealth; p.dead = false; p.mode = 'survival';
+    p.armor = [0, 0, 0, 0]; p.armorPoints = 0; p.toughness = 0;
     p.gliding = false; p.boating = false; p.seated = false; p.sneaking = false;
     p.regenCooldown = 0; p.regenTimer = 0; p.regenBoostTimer = 0; p.regenBoostInterval = 0;
+    // A teleport is not motion. Starting the history at the spawn stops a
+    // rewind from interpolating the player back across the whole arena.
+    p.arenaTrack = [];
+    this.recordArenaTrack(p);
+  }
+
+  private enterDuelBody(p: ServerPlayer, arena: DuelArenaBounds, spawnIndex: number): Outbound[] {
+    const index = ((spawnIndex % arena.spawns.length) + arena.spawns.length) % arena.spawns.length;
+    const spawn = arena.spawns[index];
+    this.enterArenaBody(p, 'duel', spawn, index < 2 ? Math.PI : 0, DUEL_MAX_HEALTH);
+    p.duelSpawnIndex = index;
+    p.held = Item.BurstRifle;
     p.duelLastShotAt = -Infinity; p.duelNextBurstAt = 0; p.duelBurstShots = 0;
     p.duelShotTickets = []; p.duelLoaded = 24; p.duelReloadUntil = 0;
     p.duelMedkits = 5; p.duelRespawning = false;
-    // A teleport is not motion. Starting the history at the spawn stops a
-    // rewind from interpolating the player back across the whole arena.
-    p.duelTrack = [];
-    this.recordDuelTrack(p);
     return [
       this.duelLoadout(p.id),
       { to: p.id, msg: { t: 'duelArena', arena, spawn: { ...spawn },
@@ -1622,16 +1672,17 @@ export class GameServer {
   }
 
   private restoreOpenWorldState(p: ServerPlayer): Outbound[] {
-    const saved = p.duelSaved;
+    const saved = p.arenaSaved;
     if (!saved) return [];
     p.x = saved.x; p.y = saved.y; p.z = saved.z; p.yaw = saved.yaw; p.pitch = saved.pitch;
     p.health = saved.health; p.dead = saved.dead; p.mode = saved.mode;
     p.held = saved.held; p.armor = saved.armor.slice();
     p.armorPoints = saved.armorPoints; p.toughness = saved.toughness;
     p.savedClientData = cloneRecord(saved.savedClientData);
-    p.duelSaved = undefined; p.duelShotTickets = []; p.duelTrack = []; p.duelLoaded = 0;
+    p.arenaSaved = undefined; p.arenaKind = undefined;
+    p.duelShotTickets = []; p.arenaTrack = []; p.duelLoaded = 0;
     p.duelReloadUntil = 0; p.duelMedkits = 0; p.duelRespawning = false;
-    return [{ to: p.id, msg: { t: 'duelRestored', x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
+    return [{ to: p.id, msg: { t: 'arenaRestored', x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
       health: p.health, dead: p.dead, mode: p.mode, state: cloneRecord(p.savedClientData) } }];
   }
 
@@ -1643,7 +1694,7 @@ export class GameServer {
     }
     for (const member of snapshot.participants) {
       const p = this.players.get(member.id);
-      if (p?.duelSaved) { out.push(...this.restoreOpenWorldState(p)); restored.push(p.id); }
+      if (p?.arenaSaved) { out.push(...this.restoreOpenWorldState(p)); restored.push(p.id); }
     }
     out.push(...this.announceWorldScope(restored));
     return out;
@@ -1667,7 +1718,7 @@ export class GameServer {
       const p = this.players.get(id);
       if (!p) continue;
       for (const other of this.players.values()) {
-        if (other.id === id || other.duelSaved) continue;
+        if (other.id === id || other.arenaSaved) continue;
         out.push({ to: id, msg: { t: 'join', player: toInfo(other) } });
         if (!restored.has(other.id)) out.push({ to: other.id, msg: { t: 'join', player: toInfo(p) } });
       }
@@ -1721,17 +1772,17 @@ export class GameServer {
     }
     p.reloading = p.duelReloadUntil > this.worldTime;
     if (typeof msg.swing === 'number' && Number.isFinite(msg.swing)) p.swing = Math.floor(msg.swing) & 0xffff;
-    this.recordDuelTrack(p);
+    this.recordArenaTrack(p);
     return [];
   }
 
   /** Append this player's accepted position to their rewind history. */
-  private recordDuelTrack(p: ServerPlayer): void {
+  private recordArenaTrack(p: ServerPlayer): void {
     const now = this.worldTime;
-    p.duelTrack.push({ at: now, x: p.x, y: p.y, z: p.z });
+    p.arenaTrack.push({ at: now, x: p.x, y: p.y, z: p.z });
     let drop = 0;
-    while (drop < p.duelTrack.length && now - p.duelTrack[drop].at > DUEL_TRACK_WINDOW) drop++;
-    if (drop > 0) p.duelTrack.splice(0, drop);
+    while (drop < p.arenaTrack.length && now - p.arenaTrack[drop].at > DUEL_TRACK_WINDOW) drop++;
+    if (drop > 0) p.arenaTrack.splice(0, drop);
   }
 
   private handleDuelShot(p: ServerPlayer, msg: Extract<ClientMsg, { t: 'shot' }>): Outbound[] {
@@ -1797,12 +1848,12 @@ export class GameServer {
     // good" was: the shots landed on screen and the server threw them away.
     // So rewind: a ticket counts if its ray passed through the target at ANY
     // point in the target's recorded history from the moment it was fired.
-    let ticketIndex = -1, hitAt: DuelTrackSample | null = null;
+    let ticketIndex = -1, hitAt: ArenaTrackSample | null = null;
     // The live position is ALWAYS a candidate — this check is a strict superset
     // of the old "where are they now" test, never a narrower one — and the
     // recorded history is what a hit on a target who has since moved needs.
-    const candidates: DuelTrackSample[] = [{ at: now, x: target.x, y: target.y, z: target.z }];
-    for (const sample of target.duelTrack) candidates.push(sample);
+    const candidates: ArenaTrackSample[] = [{ at: now, x: target.x, y: target.y, z: target.z }];
+    for (const sample of target.arenaTrack) candidates.push(sample);
     for (let i = attacker.duelShotTickets.length - 1; i >= 0 && ticketIndex < 0; i--) {
       const shot = attacker.duelShotTickets[i];
       if (now - shot.at > DUEL_TRACK_WINDOW) continue;
@@ -1885,10 +1936,10 @@ export class GameServer {
     // Max 7-block pillar height above natural ground
     if (by > groundY + DUEL_MAX_PILLAR_HEIGHT) return [];
 
-    let slotEdits = this.duelArenaEdits.get(arena.slot);
+    let slotEdits = this.arenaEdits.get(`duel:${arena.slot}`);
     if (!slotEdits) {
       slotEdits = new Map<string, number>();
-      this.duelArenaEdits.set(arena.slot, slotEdits);
+      this.arenaEdits.set(`duel:${arena.slot}`, slotEdits);
     }
     const key = `${bx},${by},${bz}`;
 
@@ -2129,7 +2180,7 @@ export class GameServer {
           p.duelMedkits = 5; p.duelRespawning = false; p.duelShotTickets = [];
           p.duelLoaded = 24; p.duelReloadUntil = 0; p.duelBurstShots = 0;
           p.duelNextBurstAt = 0; p.duelLastShotAt = -Infinity; p.reloading = false;
-          p.duelTrack = []; this.recordDuelTrack(p);
+          p.arenaTrack = []; this.recordArenaTrack(p);
           out.push(this.duelLoadout(p.id));
           out.push({ to: p.id, msg: { t: 'respawned', x: spawn.x, y: spawn.y, z: spawn.z, health: DUEL_MAX_HEALTH } });
           out.push({ to: p.id, msg: { t: 'duelRespawn', respawnAt: 0, spectating: false } });
@@ -2443,7 +2494,7 @@ export class GameServer {
   ): Outbound[] {
     const out: Outbound[] = [];
     for (const victim of this.players.values()) {
-      if (victim.dead || victim.mode !== 'survival' || victim.duelSaved) continue;
+      if (victim.dead || victim.mode !== 'survival' || victim.arenaSaved) continue;
       if (sameFaction(victim.faction, faction)) continue;   // friendly fire is off
       const dmg = blastAt(at, { x: victim.x, y: victim.y, z: victim.z }, radius, playerDamage);
       // Pass the RAW blast figure: applyDamage runs armor mitigation itself, so
@@ -2495,7 +2546,7 @@ export class GameServer {
     if (!fin(dt) || dt <= 0) return [];
     const out = this.applyVehicleEvents(this.vehicles.tick(dt));
     for (const p of this.players.values()) {
-      if (p.duelSaved) continue;
+      if (p.arenaSaved) continue;
       const rider = this.vehicles.ropeRider(p.id);
       const at = rider ? this.vehicles.ropePosition(p.id) : null;
       if (rider && at) {
@@ -3104,7 +3155,7 @@ export class GameServer {
    *  authoritative-lite trust model (mobs are client-side). */
   private handleRanged(attacker: ServerPlayer, targetId: number, amount: number): Outbound[] {
     const target = this.players.get(targetId);
-    if (!target || target.duelSaved || target.dead || attacker.dead || target.id === attacker.id) return [];
+    if (!target || target.arenaSaved || target.dead || attacker.dead || target.id === attacker.id) return [];
     if (sameFaction(attacker.faction, target.faction)) return []; // no friendly fire
     if (!fin(attacker.x, attacker.y, attacker.z, attacker.yaw,
       target.x, target.y, target.z, amount)) return [];
@@ -3172,7 +3223,7 @@ export class GameServer {
     // Duels has a separate normalized damage path. This fail-closed guard keeps
     // every world hazard/projectile from crossing the visibility boundary even
     // if a new subsystem forgets to filter its target list.
-    if (p.duelSaved || p.dead || amount <= 0) return [];
+    if (p.arenaSaved || p.dead || amount <= 0) return [];
     if (p.mode !== 'survival') return []; // creative/spectator are invulnerable
     // server-authoritative armor reduction
     amount = mitigate(amount, p.armorPoints, p.toughness, pierce);
@@ -3359,7 +3410,7 @@ export class GameServer {
   tickRegen(dt: number): void {
     for (const p of this.players.values()) {
       if (p.dead) continue;
-      const inDuel = !!p.duelSaved;
+      const inDuel = !!p.arenaSaved;
       const max = inDuel ? DUEL_MAX_HEALTH : maxHealthFor(p.hearts);
       // A healing consumable (Bandage/Medkit) grants a window of fast regen that
       // ignores the post-damage delay — patch up mid-fight.
@@ -3436,7 +3487,7 @@ export class GameServer {
       let bestD2 = range * range;
       for (const p of this.players.values()) {
         // Skip the dead, the owner, and anyone in the turret's own faction.
-        if (p.dead || p.duelSaved || p.username === s.owner || sameFaction(p.faction, s.faction)) continue;
+        if (p.dead || p.arenaSaved || p.username === s.owner || sameFaction(p.faction, s.faction)) continue;
         const dx = p.x - cx, dy = p.y - cy, dz = p.z - cz;
         const d2 = dx * dx + dy * dy + dz * dz;
         if (d2 <= bestD2) { bestD2 = d2; best = p; }
@@ -3649,7 +3700,7 @@ export class GameServer {
       const half = this.borderHalf();
       for (const p of this.players.values()) {
         // A live boss fight is exempt — the sealed arena outranks the ring.
-        if (p.dead || p.duelSaved || this.liveArenaFor(p.id)) continue;
+        if (p.dead || p.arenaSaved || this.liveArenaFor(p.id)) continue;
         const clamped = clampInsideBorder(p.x, p.z, half);
         if (clamped.moved <= 0) continue;
         p.x = clamped.x;
@@ -4368,7 +4419,7 @@ export class GameServer {
     if (damage > 0 && dmgRadius > 0) {
       // AoE damage to living enemies in radius (friendly fire stays off).
       for (const t of this.players.values()) {
-        if (t.dead || t.duelSaved || t.id === by.id || sameFaction(t.faction, by.faction)) continue;
+        if (t.dead || t.arenaSaved || t.id === by.id || sameFaction(t.faction, by.faction)) continue;
         const d = Math.hypot(t.x - x, t.y - y, t.z - z);
         const dmg = falloffDamage(damage, d, dmgRadius);
         if (dmg > 0) out.push(...this.applyDamage(t, dmg, by.id,
@@ -4564,7 +4615,7 @@ export class GameServer {
   capturePlayerState(id: number): { username: string; data: Record<string, unknown> } | null {
     const p = this.players.get(id);
     if (!p) return null;
-    const saved = p.duelSaved;
+    const saved = p.arenaSaved;
     const data: Record<string, unknown> = { ...(saved?.savedClientData ?? p.savedClientData ?? {}) };
     data.x = saved?.x ?? p.x; data.y = saved?.y ?? p.y; data.z = saved?.z ?? p.z;
     data.yaw = saved?.yaw ?? p.yaw; data.mode = saved?.mode ?? p.mode;
@@ -4713,15 +4764,15 @@ export class GameServer {
   snapshotFor(recipientId: number): PlayerSnapshot[] {
     const recipient = this.players.get(recipientId);
     if (!recipient) return [];
-    // Lobby members still occupy the normal world. `duelSaved` becomes set
+    // Lobby members still occupy the normal world. `arenaSaved` becomes set
     // only when an arena body is created, and remains set through results.
     // Using phaseFor here also scoped ordinary lobby members out of snapshots
     // after they dismissed the lobby with Escape.
-    const inDuel = !!recipient.duelSaved;
+    const inDuel = !!recipient.arenaSaved;
     const visible = inDuel ? new Set(this.duels.membersOf(recipientId)) : null;
     return [...this.players.values()]
       .filter((p) => {
-        const pInDuel = !!p.duelSaved;
+        const pInDuel = !!p.arenaSaved;
         if (inDuel) return visible!.has(p.id);
         return !pInDuel;
       })
@@ -4730,12 +4781,12 @@ export class GameServer {
         health: p.health,
         // A respawn spectator is invisible to opponents, while their own
         // client stays technically alive to bypass the normal death screen.
-        dead: p.duelSaved
+        dead: p.arenaSaved
           ? p.id !== recipientId && this.duels.participantFor(p.id)?.spectating === true
           : p.dead,
-        gliding: p.duelSaved ? false : p.gliding,
-        boating: p.duelSaved ? false : p.boating,
-        seated: p.duelSaved ? false : p.seated, sneaking: p.sneaking,
+        gliding: p.arenaSaved ? false : p.gliding,
+        boating: p.arenaSaved ? false : p.boating,
+        seated: p.arenaSaved ? false : p.seated, sneaking: p.sneaking,
         held: p.held, armor: p.armor, swing: p.swing,
         aiming: p.aiming, reloading: p.reloading,
       }));
@@ -4746,7 +4797,7 @@ export class GameServer {
   receivesWorldBroadcast(id: number): boolean {
     const p = this.players.get(id);
     if (!p) return false;
-    return !p.duelSaved;
+    return !p.arenaSaved;
   }
 }
 

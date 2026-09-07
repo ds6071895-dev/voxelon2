@@ -6,7 +6,11 @@ import { Tile } from './blocks';
 import { mulberry32, hash2 } from './noise';
 
 export const TILE_PX = 16;
-export const ATLAS_TILES = 16; // 16x16 grid of tiles
+// 20x20 grid. Bumped from 16 when the minigame block/item set needed 15 tiles
+// and only 13 cells were free. All tile addressing goes through tileOrigin /
+// uvRect, so widening the grid is a pure data change — there is no hand-rolled
+// `% 16` arithmetic anywhere in the codebase.
+export const ATLAS_TILES = 20;
 /** Gutter around every tile's art inside its atlas cell.
  *
  *  The atlas is MIPMAPPED (see createAtlas), and a mipmap averages neighbouring

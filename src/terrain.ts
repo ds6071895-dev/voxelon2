@@ -12,7 +12,7 @@ import {
 } from './plaza';
 import { structureStamp } from './structures';
 import { VAULT_REACH, VaultStamp, vaultStamp } from './vaults';
-import { duelArenaBlockAt, DUEL_ARENA_BASE_X } from './duels';
+import { ARENA_BAND_MIN_X, arenaBandForX } from './arena';
 
 export const SEA_LEVEL = 63;
 // Redwoods reach ~26 blocks over their stump, so the tree margin has to cover
@@ -28,10 +28,6 @@ const MAX_HEIGHT = 243;
 // Above this the height curve compresses instead of clipping, so the tallest
 // summits taper to points rather than all shearing off at one flat altitude.
 const SOFT_CEILING = 196;
-const DUEL_STAMP_MIN_Y = 95;
-// Duels has no horizontal ceiling; only its invisible perimeter columns need
-// stamping above the authored wall, all the way to the world height limit.
-const DUEL_STAMP_MAX_Y = 255;
 
 type Species = 'oak' | 'birch' | 'spruce' | 'jungle' | 'cherry'
   | 'acacia' | 'redwood';
@@ -459,15 +455,18 @@ export class Terrain {
     const ox = chunk.cx * CHUNK_X;
     const oz = chunk.cz * CHUNK_Z;
 
-    // Ephemeral Duels arenas are deterministic structures far beyond the normal
-    // border. Fast-path generation by directly stamping authored blocks, bypassing
-    // all open-world 3D cave noise, biome calculation, ores, and structure searches.
-    if (ox >= DUEL_ARENA_BASE_X) {
+    // Ephemeral minigame arenas are deterministic structures far beyond the
+    // normal border. Fast-path generation by directly stamping authored blocks,
+    // bypassing all open-world 3D cave noise, biome calculation, ores, and
+    // structure searches. Which mode owns this band is arena.ts's business; the
+    // per-band y range keeps the sky-island modes cheaper than Duels.
+    const band = ox >= ARENA_BAND_MIN_X ? arenaBandForX(ox) : null;
+    if (band) {
       for (let lx = 0; lx < CHUNK_X; lx++) {
         for (let lz = 0; lz < CHUNK_Z; lz++) {
           const wx = ox + lx, wz = oz + lz;
-          for (let y = DUEL_STAMP_MIN_Y; y <= DUEL_STAMP_MAX_Y; y++) {
-            const block = duelArenaBlockAt(wx, y, wz);
+          for (let y = band.stampMinY; y <= band.stampMaxY; y++) {
+            const block = band.blockAt(wx, y, wz);
             if (block !== null && block !== Block.Air) {
               chunk.set(lx, y, lz, block);
             }

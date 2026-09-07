@@ -29,7 +29,9 @@ export interface ChunkShaderUniforms {
   sun: { value: number };
   aurora: { value: number };
   torch: { value: THREE.Vector4 };
-  duelBounds: { value: THREE.Vector4 };
+  arenaBounds: { value: THREE.Vector4 };
+  /** Ambient light floor inside an arena; 0 disables it. */
+  arenaLight: { value: number };
   sunTint: { value: THREE.Color };
   skyTint: { value: THREE.Color };
   /** Seconds since the world loaded, for the water animation. */
@@ -50,7 +52,8 @@ const CHUNK_COMMON = /* glsl */`
 uniform float uSunLight;
 uniform float uAuroraLight;
 uniform vec4 uTorch;
-uniform vec4 uDuelBounds;
+uniform vec4 uArenaBounds;
+uniform float uArenaLight;
 uniform vec3 uSunTint;
 uniform vec3 uSkyTint;
 uniform float uTime;
@@ -151,7 +154,8 @@ function applyLightShader(
     // uTorch: a moving point light carried by the player (xyz = world position,
     // w = intensity 0..1). Lets a held torch light the world without remeshing.
     shader.uniforms.uTorch = u.torch;
-    shader.uniforms.uDuelBounds = u.duelBounds;
+    shader.uniforms.uArenaBounds = u.arenaBounds;
+    shader.uniforms.uArenaLight = u.arenaLight;
     // Colour of direct sun and of the ambient sky, both driven by the clock.
     shader.uniforms.uSunTint = u.sunTint;
     shader.uniforms.uSkyTint = u.skyTint;
@@ -242,10 +246,11 @@ function applyLightShader(
       .replace(
         '#include <color_fragment>',
         '#include <color_fragment>\n' + /* glsl */`
-        // In Duels, discard every terrain fragment outside the arena perimeter.
-        if (uDuelBounds.x < uDuelBounds.z && (vWorldPos.x < uDuelBounds.x
-          || vWorldPos.x >= uDuelBounds.z || vWorldPos.z < uDuelBounds.y
-          || vWorldPos.z >= uDuelBounds.w)) discard;
+        // Inside a minigame arena, discard every terrain fragment outside its
+        // perimeter — including geometry that shares a chunk mesh with it.
+        if (uArenaBounds.x < uArenaBounds.z && (vWorldPos.x < uArenaBounds.x
+          || vWorldPos.x >= uArenaBounds.z || vWorldPos.z < uArenaBounds.y
+          || vWorldPos.z >= uArenaBounds.w)) discard;
 
         vec3 faceN = voxFaceNormal();
         float sunVis = voxSunVisibility(vWorldPos, faceN);
@@ -257,9 +262,11 @@ function applyLightShader(
         // Aurora adds a cool night skylight only where the sky field reaches.
         float aurora = uAuroraLight * smoothstep(0.35, 1.0, vSkyBlock.x);
         voxelLight = min(1.0, voxelLight + aurora * 0.11);
-        // Duels arenas have a competitive ambient floor of 12/15.
+        // Arenas have a competitive ambient floor, so nobody wins on a dark
+        // corner. It is a UNIFORM, not an x threshold: each mode picks its own
+        // (Duels 12/15, Bedwars a duskier 0.55) and the open world passes 0.
         // Fixtures still raise nearby surfaces above it, preserving gradients.
-        if (vWorldPos.x >= 12288.0) voxelLight = max(voxelLight, 0.8);
+        if (uArenaLight > 0.0) voxelLight = max(voxelLight, uArenaLight);
         // Held-torch point light: bright near field, gentle falloff to ~16 blocks.
         float td = distance(vWorldPos, uTorch.xyz);
         float fall = clamp(1.0 - td / 16.0, 0.0, 1.0);
@@ -317,8 +324,10 @@ export class World {
   readonly skyTintUniform = { value: new THREE.Color(1, 1, 1) };
   /** Held-torch point light shared with the chunk shaders (xyz pos, w intensity). */
   readonly torchUniform = { value: new THREE.Vector4(0, 0, 0, 0) };
-  /** x/z render crop for Duels arenas. x>=z disables the crop. */
-  readonly duelBoundsUniform = { value: new THREE.Vector4(1, 1, 0, 0) };
+  /** x/z render crop for minigame arenas. x>=z disables the crop. */
+  readonly arenaBoundsUniform = { value: new THREE.Vector4(1, 1, 0, 0) };
+  /** Ambient light floor inside the cropped arena; 0 in the open world. */
+  readonly arenaLightUniform = { value: 0 };
   /** Seconds since load, driving the water animation. */
   readonly timeUniform = { value: 0 };
   /** Unit vector toward the sun, shared with the shadow pass. */
@@ -388,7 +397,8 @@ export class World {
     });
     const shaderUniforms: ChunkShaderUniforms = {
       sun: this.sunUniform, aurora: this.auroraUniform, torch: this.torchUniform,
-      duelBounds: this.duelBoundsUniform, sunTint: this.sunTintUniform,
+      arenaBounds: this.arenaBoundsUniform, arenaLight: this.arenaLightUniform,
+      sunTint: this.sunTintUniform,
       skyTint: this.skyTintUniform, time: this.timeUniform,
       sunDir: this.sunDirUniform, skyColor: this.skyColorUniform,
       shaderMode: this.shaderModeUniform, shadow: this.shadowUniforms,
@@ -424,11 +434,16 @@ export class World {
     for (const chunk of this.chunks.values()) chunk.dirty = true;
   }
 
-  /** Hide all terrain outside one temporary Duels arena, including geometry
-   * sharing a chunk mesh with its walls. Passing null restores the open world. */
-  setDuelRenderBounds(bounds: { minX: number; minZ: number; maxX: number; maxZ: number } | null): void {
-    if (bounds) this.duelBoundsUniform.value.set(bounds.minX, bounds.minZ, bounds.maxX, bounds.maxZ);
-    else this.duelBoundsUniform.value.set(1, 1, 0, 0);
+  /** Hide all terrain outside one temporary minigame arena, including geometry
+   * sharing a chunk mesh with its walls, and apply that mode's ambient floor.
+   * Passing null restores the open world. */
+  setArenaRenderBounds(
+    bounds: { minX: number; minZ: number; maxX: number; maxZ: number } | null,
+    ambientFloor = 0,
+  ): void {
+    if (bounds) this.arenaBoundsUniform.value.set(bounds.minX, bounds.minZ, bounds.maxX, bounds.maxZ);
+    else this.arenaBoundsUniform.value.set(1, 1, 0, 0);
+    this.arenaLightUniform.value = bounds ? ambientFloor : 0;
   }
 
 

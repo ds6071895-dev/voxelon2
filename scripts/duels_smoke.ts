@@ -18,6 +18,9 @@ import { Accounts } from '../src/net/accounts';
 import { Block } from '../src/blocks';
 import { Item } from '../src/items';
 import { GameServer } from '../src/net/server_core';
+import {
+  ARENA_BANDS, ARENA_BAND_MIN_X, arenaBandForX, arenaBandsDisjoint,
+} from '../src/arena';
 
 let passed = 0;
 function check(name: string, ok: unknown, detail = ''): void {
@@ -792,13 +795,13 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   check('server settles and persists a result exactly once before fan-out', settlementCalls === 1);
   s.handle(2, { t: 'duelFlair', flair: 'Scrapper' });
   check('revisiting the result snapshot cannot settle it twice', settlementCalls === 1);
-  const restoredOne = forfeited.find((o) => o.to === 1 && o.msg.t === 'duelRestored')?.msg;
+  const restoredOne = forfeited.find((o) => o.to === 1 && o.msg.t === 'arenaRestored')?.msg;
   check('leaver receives exact open-world restoration', !!restoredOne &&
-    restoredOne.t === 'duelRestored' && restoredOne.x === 120 &&
+    restoredOne.t === 'arenaRestored' && restoredOne.x === 120 &&
     (restoredOne.state?.slots as { id?: number }[])[0]?.id === Item.Diamond);
   const returned = s.handle(2, { t: 'duelReturn' });
   check('winner returns to the same lobby with exact state', returned.some((o) =>
-    o.to === 2 && o.msg.t === 'duelRestored' && o.msg.x === 125 &&
+    o.to === 2 && o.msg.t === 'arenaRestored' && o.msg.x === 125 &&
     (o.msg.state?.slots as { id?: number }[])[0]?.id === Item.GoldIngot));
   check('returning to the world emits synthetic roster joins', returned.some((o) =>
     o.to === 3 && o.msg.t === 'join' && o.msg.player.id === 2));
@@ -959,8 +962,85 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   s.tickWar(DUEL_REMATCH_MS / 1000);
   const timedOut = s.tickDuels();
   check('result timeout restores the survivor and original account state', timedOut.some((o) =>
-    o.to === 31 && o.msg.t === 'duelRestored' && o.msg.x === 302 &&
+    o.to === 31 && o.msg.t === 'arenaRestored' && o.msg.x === 302 &&
     (o.msg.state?.slots as { id?: number }[])[0]?.id === Item.Diamond));
+}
+
+// ── The shared arena band layer (Phase 0) ──────────────────────────────────
+// Every minigame stamps into the same coordinate space, so the ONE thing they
+// must agree on is that their x bands never touch. A Duels slot counter that
+// only ever increments makes that a live risk rather than a theoretical one.
+{
+  check('every registered band is self-disjoint and ordered by base x',
+    ARENA_BANDS.every((b, i) => b.spacing >= b.sizeX &&
+      (i === 0 || b.baseX > ARENA_BANDS[i - 1].baseX)));
+  check('band footprints stay disjoint out to 96 slots each', arenaBandsDisjoint(96));
+  check('the duel band still owns its historical base',
+    ARENA_BAND_MIN_X === 12_288 && arenaBandForX(12_288)?.kind === 'duel');
+  check('a band claims every x from its base up to the next band',
+    arenaBandForX(12_288 + 511)?.kind === 'duel' &&
+    arenaBandForX(12_288 + 512)?.kind === 'duel');
+  check('open-world columns belong to no band',
+    arenaBandForX(0) === null && arenaBandForX(4_096) === null &&
+    arenaBandForX(ARENA_BAND_MIN_X - 16) === null);
+  check('a band stamps a narrower y range than the whole world where it can',
+    ARENA_BANDS.every((b) => b.stampMinY <= b.stampMaxY && b.stampMinY >= 0 && b.stampMaxY <= 255));
+  check('band lookup is total and finite-guarded',
+    arenaBandForX(Number.NaN) === null && arenaBandForX(Number.POSITIVE_INFINITY) !== undefined);
+}
+
+// The footprint sweep that resets an arena must clear exactly its own AABB and
+// nothing else. A world edit made by an uninvolved player is the control: if
+// the sweep ever widened, THAT is what silently disappears.
+{
+  const s = new GameServer(1234, token);
+  s.addPlayer(1, { username: 'Sweeper', faction: 0 });
+  s.addPlayer(2, { username: 'Swept', faction: 0 });
+  s.addPlayer(3, { username: 'Bystander', faction: 1 });
+  for (const id of [1, 2]) s.handle(id, { t: 'xform', x: 40, y: 70, z: 40, yaw: 0, pitch: 0 });
+  s.handle(3, { t: 'xform', x: 60, y: 70, z: 60, yaw: 0, pitch: 0 });
+  // An ordinary world edit, and a second one at the arena's y/z but a world x.
+  s.handle(3, { t: 'edit', x: 60, y: 70, z: 60, block: Block.OakPlanks });
+  const worldEdits = s.serialize().edits.length;
+  check('the control world edit landed, so the sweep has something to spare',
+    worldEdits === 1);
+
+  const made = s.handle(1, { t: 'duelCreate' })
+    .find((o) => o.to === 1 && o.msg.t === 'duelLobby')?.msg;
+  if (!made || made.t !== 'duelLobby' || !made.inviteToken) throw new Error('no invite');
+  s.handle(2, { t: 'duelJoin', token: made.inviteToken });
+  s.handle(1, { t: 'duelReady', ready: true });
+  s.handle(2, { t: 'duelReady', ready: true });
+  const started = s.handle(1, { t: 'duelStart' });
+  const arenaMsg = started.find((o) => o.to === 1 && o.msg.t === 'duelArena')?.msg;
+  if (!arenaMsg || arenaMsg.t !== 'duelArena') throw new Error('no arena');
+  const arena = arenaMsg.arena;
+  for (const id of [1, 2]) s.handle(id, { t: 'duelArenaReady' });
+  s.tickWar(DUEL_COUNTDOWN_MS / 1000); s.tickDuels();
+
+  // Build one plank tower cell inside the arena.
+  const px = Math.floor(arenaMsg.spawn.x), pz = Math.floor(arenaMsg.spawn.z);
+  const py = arena.floor + DUEL_MAX_ELEVATION + 1;
+  s.handle(1, { t: 'xform', x: px + 0.5, y: py, z: pz + 0.5, yaw: 0, pitch: 0 });
+  s.handle(1, { t: 'edit', x: px, y: py, z: pz, block: Block.OakPlanks });
+  const withArenaEdit = s.serialize().edits.length;
+  check('an in-match arena placement does land in the edit log',
+    withArenaEdit === worldEdits + 1);
+
+  // Forfeit: player 1 leaves, which resets the arena footprint.
+  const left = s.handle(1, { t: 'duelLeave' });
+  const after = s.serialize().edits;
+  check('the arena sweep clears exactly the arena AABB',
+    after.length === worldEdits);
+  check('the sweep leaves an uninvolved world edit untouched',
+    after.some(([key, block]) => key === '60,70,60' && block === Block.OakPlanks));
+  check('the sweep is announced to arena members only, never to the world',
+    left.every((o) => o.msg.t !== 'editBatch' || o.to === 1 || o.to === 2));
+  check('no swept cell lies outside the arena footprint',
+    left.every((o) => o.msg.t !== 'editBatch' || o.msg.edits.every((e) =>
+      e.x >= arena.originX && e.x < arena.originX + DUEL_ARENA_SIZE &&
+      e.z >= arena.originZ && e.z < arena.originZ + DUEL_ARENA_SIZE)));
+  check('the bystander never saw arena traffic', s.receivesWorldBroadcast(3));
 }
 
 console.log(`Duels smoke: ${passed} checks passed`);
