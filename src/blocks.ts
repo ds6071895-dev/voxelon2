@@ -165,6 +165,24 @@ export const enum Block {
   // of grass blocks someone had left standing. This is snow on every face.
   // (Ids skip the crowded 218-230 stretch, which the Item enum shares.)
   PackedSnow = 231,
+  // --- Minigame-only blocks -------------------------------------------------
+  // These exist ONLY inside a minigame arena. 232-236 are registered here and
+  // deliberately NOT in ITEMS: with no item form, `dropFor` returns null,
+  // `interact.ts` refuses to place them, the creative palette cannot list them
+  // and `/give` cannot name them. That is complete unobtainability for free —
+  // the same trick Block.Barrier already uses. See src/minigame_items.ts.
+  BwBedA = 232,
+  BwBedB = 233,
+  BwGenerator = 234,
+  BwShop = 235,
+  ArenaRim = 236,
+  // 237-241 stay free.
+  // Placeable inside an arena, so these DO get an item form — and therefore
+  // need the explicit MINIGAME_ONLY gate rather than getting it for free.
+  TeamWoolA = 242,
+  TeamWoolB = 243,
+  PartyTileC = 244,
+  PartyTileD = 245,
 }
 
 export const enum Tile {
@@ -445,6 +463,25 @@ export const enum Tile {
   AerialBombSprite = 252,
   RepairKitSprite = 253,
   HelicopterKitSprite = 254,
+  // --- Minigame-only art ----------------------------------------------------
+  // Fresh cells opened by widening the atlas from 16x16 to 20x20. Kept in one
+  // contiguous run rather than scattered into the old grid's holes so the
+  // minigame set is visually obvious in the baked atlas.
+  BwBedTopA = 256,
+  BwBedSideA = 257,
+  BwBedTopB = 258,
+  BwBedSideB = 259,
+  BwGeneratorTop = 260,
+  BwGeneratorSide = 261,
+  BwShopTop = 262,
+  BwShopSide = 263,
+  ArenaRim = 264,
+  TeamWoolA = 265,
+  TeamWoolB = 266,
+  PartyTileC = 267,
+  PartyTileD = 268,
+  VoidCleaver = 269,
+  KnockbackStick = 270,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel' | 'sword';
@@ -995,6 +1032,35 @@ export const BLOCKS: Record<number, BlockInfo> = {
     solid: true, opaque: false, occludes: false,
     top: Tile.Glass,
   }),
+
+  // --- Minigame-only blocks -------------------------------------------------
+  // Every one is `hardness: -1`, so the ordinary mining path can never touch
+  // it. A bed is destroyed only by the Bedwars melee handler's bed branch, and
+  // fixtures are never destroyed at all.
+  [Block.BwBedA]: def({
+    name: 'Crimson Bed', hardness: -1, emission: 3,
+    top: Tile.BwBedTopA, side: Tile.BwBedSideA, bottom: Tile.BwBedSideA,
+  }),
+  [Block.BwBedB]: def({
+    name: 'Cobalt Bed', hardness: -1, emission: 3,
+    top: Tile.BwBedTopB, side: Tile.BwBedSideB, bottom: Tile.BwBedSideB,
+  }),
+  [Block.BwGenerator]: def({
+    name: 'Resource Forge', hardness: -1, emission: 11,
+    top: Tile.BwGeneratorTop, side: Tile.BwGeneratorSide,
+  }),
+  [Block.BwShop]: def({
+    name: 'Quartermaster', hardness: -1, emission: 7,
+    top: Tile.BwShopTop, side: Tile.BwShopSide,
+  }),
+  [Block.ArenaRim]: def({
+    name: 'Void Rim', hardness: -1, emission: 4, top: Tile.ArenaRim,
+  }),
+  // Player-placeable arena blocks. Cheap to break so a bridge fight stays fast.
+  [Block.TeamWoolA]: def({ name: 'Crimson Wool', hardness: 0.8, top: Tile.TeamWoolA }),
+  [Block.TeamWoolB]: def({ name: 'Cobalt Wool', hardness: 0.8, top: Tile.TeamWoolB }),
+  [Block.PartyTileC]: def({ name: 'Amber Tile', hardness: 0.8, top: Tile.PartyTileC }),
+  [Block.PartyTileD]: def({ name: 'Verdant Tile', hardness: 0.8, top: Tile.PartyTileD }),
 };
 
 // Vanilla tool effectiveness and harvest tiers (wood 0, stone 1, iron 2).

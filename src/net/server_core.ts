@@ -87,6 +87,7 @@ import {
   hasArenaLineOfSight, safestDuelSpawn, secureDuelToken,
 } from '../duels';
 import { ArenaAABB, ArenaKind } from '../arena';
+import { isMinigameOnly, stripMinigameItems } from '../minigame_items';
 import {
   DuelFlair, DuelProgressState, DuelPublicProfile, canEquipDuelFlair,
   duelProfileOf, newDuelProgress, sanitizeDuelProgress, settleDuelProgress,
@@ -829,7 +830,7 @@ export class GameServer {
         const stack = value as Partial<ItemStack>;
         if (!Number.isInteger(stack.id) || !ITEMS[stack.id as number] ||
             !Number.isFinite(stack.count) || (stack.count as number) <= 0) continue;
-        out.push(this.spawnItem(stack.id as number, Math.floor(stack.count as number),
+        out.push(...this.spawnItem(stack.id as number, Math.floor(stack.count as number),
           p.x + (this.rng() - 0.5), p.y + 0.35, p.z + (this.rng() - 0.5)));
       }
       data[key] = new Array(raw.length).fill(null);
@@ -1080,6 +1081,8 @@ export class GameServer {
         if (editAt !== Block.Chest &&
             !(editAt === undefined &&
               this.structureChestTierAt(msg.x, msg.y, msg.z) !== null)) return [];
+        // A minigame stack cannot be parked in world storage.
+        if (msg.slots.some((v) => v && isMinigameOnly((v as ItemStack).id))) return [];
         const slots = msg.slots.slice(0, CHEST_SLOTS);
         while (slots.length < CHEST_SLOTS) slots.push(null);
         this.chests.set(`${msg.x},${msg.y},${msg.z}`, slots);
@@ -1678,7 +1681,10 @@ export class GameServer {
     p.health = saved.health; p.dead = saved.dead; p.mode = saved.mode;
     p.held = saved.held; p.armor = saved.armor.slice();
     p.armorPoints = saved.armorPoints; p.toughness = saved.toughness;
-    p.savedClientData = cloneRecord(saved.savedClientData);
+    // The saved blob predates the arena, so it should already be clean — but a
+    // crash mid-match, or a future mode that writes through, would make this
+    // the moment an arena item entered the world for good. Strip it anyway.
+    p.savedClientData = stripMinigameItems(cloneRecord(saved.savedClientData) ?? {});
     p.arenaSaved = undefined; p.arenaKind = undefined;
     p.duelShotTickets = []; p.arenaTrack = []; p.duelLoaded = 0;
     p.duelReloadUntil = 0; p.duelMedkits = 0; p.duelRespawning = false;
@@ -2799,7 +2805,7 @@ export class GameServer {
     const type = s ? s.type : MachineType.Autominer;
     if (s) {
       const blockId = type === MachineType.OilDerrick ? Block.OilDerrick : Block.Autominer;
-      out.push(this.spawnItem(blockId, 1,
+      out.push(...this.spawnItem(blockId, 1,
         x + 0.5 + (this.rng() - 0.5), y + 0.3, z + 0.5 + (this.rng() - 0.5)));
     }
     out.push(...this.clearFootprint(x, y, z, type, true));
@@ -2903,7 +2909,7 @@ export class GameServer {
         const c = Math.min(64, remaining);
         remaining -= c;
         entities++;
-        out.push(this.spawnItem(item, c,
+        out.push(...this.spawnItem(item, c,
           x + 0.5 + (this.rng() - 0.5), y + 0.3, z + 0.5 + (this.rng() - 0.5)));
       }
     }
@@ -2926,12 +2932,16 @@ export class GameServer {
 
   /** Create a server-owned item entity (registered for gravity) and return the
    *  itemspawn broadcast for it. */
-  private spawnItem(item: number, count: number, x: number, y: number, z: number): Outbound {
+  private spawnItem(item: number, count: number, x: number, y: number, z: number): Outbound[] {
+    // A minigame item must never become a world entity. Guarding the FACTORY
+    // rather than its callers covers the manual drop, the death spill, the
+    // chest spill, the block break and the turret teardown in one line.
+    if (isMinigameOnly(item)) return [];
     const eid = this.nextEid++;
     const info: ItemEntityInfo = { eid, item, count: Math.min(64, Math.floor(count)), x, y, z };
     this.items.set(eid, info);
     this.itemPhys.set(eid, { vy: 0, resting: false });
-    return { to: 'all', msg: { t: 'itemspawn', item: info } };
+    return [{ to: 'all', msg: { t: 'itemspawn', item: info } }];
   }
 
   /** Is the cell solid from the server's view (player edits win; otherwise the
@@ -2993,12 +3003,13 @@ export class GameServer {
     for (const it of items) {
       if (n++ >= 64) break; // sanity cap per request
       if (!it || !ITEMS[it.id] || !fin(it.count) || it.count <= 0) continue;
+      if (isMinigameOnly(it.id)) continue; // redundant with spawnItem, deliberately
       // levy() never takes a whole stack, so `count` stays >= 1 here.
       const count = taxable
         ? Math.floor(it.count) - this.levyInto(p.faction, it.id, Math.floor(it.count))
         : Math.floor(it.count);
       if (count !== Math.floor(it.count)) levied++;
-      out.push(this.spawnItem(it.id, count, x + (this.rng() - 0.5), y, z + (this.rng() - 0.5)));
+      out.push(...this.spawnItem(it.id, count, x + (this.rng() - 0.5), y, z + (this.rng() - 0.5)));
     }
     // Mining is the highest-frequency message on the server, so a levy must NOT
     // fan a politics message out to everybody per broken block. Mark it dirty
@@ -3030,6 +3041,10 @@ export class GameServer {
     // Validate the block id so a hacked client can't broadcast an id that
     // crashes every other client's mesher (BLOCKS[bad] === undefined).
     if (block !== 0 && !BLOCKS[block]) return [];
+    // Minigame blocks are arena-only. Arena edits never reach this handler —
+    // each mode has its own — so refusing here means no OPEN-WORLD cell can
+    // ever hold one, whatever a client claims to be placing.
+    if (isMinigameOnly(block)) return [];
     const dx = x + 0.5 - p.x, dy = y + 0.5 - p.y, dz = z + 0.5 - p.z;
     const d2 = dx * dx + dy * dy + dz * dz;
     if (!(d2 <= EDIT_RANGE * EDIT_RANGE)) return []; // fail-closed (NaN -> reject)
@@ -3079,7 +3094,7 @@ export class GameServer {
       const ts = this.turrets.get(key);
       this.turrets.delete(key);
       if (ts && ts.ammo > 0) {
-        out.push(this.spawnItem(Item.Cannonball, Math.min(64, ts.ammo), x + 0.5, y + 0.3, z + 0.5));
+        out.push(...this.spawnItem(Item.Cannonball, Math.min(64, ts.ammo), x + 0.5, y + 0.3, z + 0.5));
       }
     }
     this.edits.set(key, block);
@@ -3143,7 +3158,7 @@ export class GameServer {
     const out: Outbound[] = [];
     for (const s of contents) {
       if (!s || !ITEMS[s.id] || !fin(s.count) || s.count <= 0) continue;
-      out.push(this.spawnItem(s.id, s.count,
+      out.push(...this.spawnItem(s.id, s.count,
         x + 0.5 + (this.rng() - 0.5), y + 0.3, z + 0.5 + (this.rng() - 0.5)));
     }
     return out;
@@ -3461,9 +3476,9 @@ export class GameServer {
     this.turrets.delete(key);
     const out: Outbound[] = [];
     if (s) {
-      if (s.ammo > 0) out.push(this.spawnItem(Item.Cannonball, Math.min(64, s.ammo),
+      if (s.ammo > 0) out.push(...this.spawnItem(Item.Cannonball, Math.min(64, s.ammo),
         x + 0.5, y + 0.3, z + 0.5));
-      out.push(this.spawnItem(Block.Turret, 1,
+      out.push(...this.spawnItem(Block.Turret, 1,
         x + 0.5 + (this.rng() - 0.5), y + 0.3, z + 0.5 + (this.rng() - 0.5)));
     }
     this.edits.set(key, Block.Air);
@@ -4616,7 +4631,8 @@ export class GameServer {
     const p = this.players.get(id);
     if (!p) return null;
     const saved = p.arenaSaved;
-    const data: Record<string, unknown> = { ...(saved?.savedClientData ?? p.savedClientData ?? {}) };
+    const data: Record<string, unknown> =
+      stripMinigameItems({ ...(saved?.savedClientData ?? p.savedClientData ?? {}) });
     data.x = saved?.x ?? p.x; data.y = saved?.y ?? p.y; data.z = saved?.z ?? p.z;
     data.yaw = saved?.yaw ?? p.yaw; data.mode = saved?.mode ?? p.mode;
     data.hearts = p.hearts; // lifesteal max-health currency survives re-login

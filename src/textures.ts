@@ -2485,6 +2485,162 @@ function paintFloodlightSide(p: Painter, seed: number): void {
   for (let x = 3; x <= 12; x++) p.set(x, 12, shade(glow, 0.7));
 }
 
+// ── Minigame-only art ──────────────────────────────────────────────────────
+// Deliberately loud and synthetic. These tiles only ever appear inside a sky
+// arena, so they are allowed to read as game furniture rather than as terrain.
+
+/** Flat felted wool in one team colour: a tight weave with a soft slub. */
+function paintTeamWool(base: RGBA) {
+  return (p: Painter, seed: number): void => {
+    p.fill((x, y) => {
+      // Two interleaved thread directions give the weave without a grid look.
+      const warp = ((x + (y >> 1)) & 3) === 0 ? 0.92 : 1;
+      const weft = ((y + (x >> 1)) & 3) === 0 ? 0.95 : 1;
+      return shade(base, speckle(seed, x, y, 0.10) * warp * weft);
+    });
+  };
+}
+
+/** The top of a bed: a pillow band at one end, a blanket over the rest, with a
+ *  bright hem so the two cells read as one object from above. */
+function paintBedTop(cloth: RGBA, trim: RGBA) {
+  return (p: Painter, seed: number): void => {
+    p.fill((x, y) => {
+      if (y <= 3) return shade([238, 238, 244, 255], speckle(seed, x, y, 0.10)); // pillow
+      if (y === 4) return trim;                                                  // hem
+      const fold = (y & 3) === 1 ? 0.9 : 1;
+      return shade(cloth, speckle(seed ^ 0x2b, x, y, 0.12) * fold);
+    });
+    for (let x = 1; x < 15; x += 4) p.set(x, 10, shade(trim, 1.1));
+  };
+}
+
+/** The side of a bed: cloth over a dark timber frame with pale corner feet. */
+function paintBedSide(cloth: RGBA, trim: RGBA) {
+  return (p: Painter, seed: number): void => {
+    const frame: RGBA = [72, 58, 48, 255];
+    p.fill((x, y) => {
+      if (y >= 13) return (x <= 2 || x >= 13)
+        ? [206, 198, 186, 255] : shade(frame, speckle(seed, x, y, 0.12));
+      if (y === 12) return trim;
+      return shade(cloth, speckle(seed ^ 0x71, x, y, 0.12));
+    });
+  };
+}
+
+/** The Resource Forge: a hot metal crucible whose glow pulses out of a slot. */
+function paintGeneratorSide(p: Painter, seed: number): void {
+  const shell: RGBA = [78, 84, 96, 255];
+  const glow: RGBA = [255, 206, 92, 255];
+  p.fill((x, y) => {
+    const rivet = (x === 2 || x === 13) && (y === 3 || y === 8 || y === 12);
+    if (rivet) return [180, 188, 200, 255];
+    const slot = x >= 4 && x <= 11 && y >= 5 && y <= 9;
+    if (slot) {
+      // Heat falls off toward the slot's rim, so it reads as depth not paint.
+      const d = Math.max(Math.abs(x - 7.5) / 4, Math.abs(y - 7) / 2.5);
+      return shade(glow, 1.15 - d * 0.45);
+    }
+    const band = (y & 7) === 0 ? 0.82 : 1;
+    return shade(shell, speckle(seed, x, y, 0.14) * band);
+  });
+}
+
+function paintGeneratorTop(p: Painter, seed: number): void {
+  const shell: RGBA = [92, 98, 110, 255];
+  const glow: RGBA = [255, 226, 140, 255];
+  p.fill((x, y) => {
+    const r = Math.hypot(x - 7.5, y - 7.5);
+    if (r < 3.2) return shade(glow, 1.1 - r * 0.08);
+    if (r < 4.2) return [188, 150, 72, 255];
+    return shade(shell, speckle(seed, x, y, 0.12));
+  });
+}
+
+/** The Quartermaster: a shop crate stencilled with a coin. */
+function paintShopSide(p: Painter, seed: number): void {
+  const crate: RGBA = [126, 92, 56, 255];
+  const iron: RGBA = [168, 176, 190, 255];
+  p.fill((x, y) => {
+    const strap = y === 2 || y === 13 || x === 2 || x === 13;
+    if (strap) return shade(iron, speckle(seed, x, y, 0.10));
+    const r = Math.hypot(x - 7.5, y - 8);
+    if (r < 3.4) return r < 2.3 ? [255, 214, 92, 255] : [196, 152, 48, 255]; // coin
+    const plank = (y & 3) === 0 ? 0.86 : 1;
+    return shade(crate, speckle(seed ^ 0x19, x, y, 0.14) * plank);
+  });
+}
+
+function paintShopTop(p: Painter, seed: number): void {
+  const crate: RGBA = [146, 108, 66, 255];
+  p.fill((x, y) => {
+    const lid = x === 7 || x === 8;
+    if (lid) return [168, 176, 190, 255];
+    return shade(crate, speckle(seed, x, y, 0.13) * ((x & 3) === 0 ? 0.88 : 1));
+  });
+}
+
+/** The Void Rim: the glowing lip that tells you where the island stops. */
+function paintArenaRim(p: Painter, seed: number): void {
+  const stone: RGBA = [46, 50, 66, 255];
+  const lit: RGBA = [122, 214, 255, 255];
+  p.fill((x, y) => {
+    const edge = x <= 1 || x >= 14 || y <= 1 || y >= 14;
+    if (edge) return shade(lit, 0.85 + hash2(seed, x, y) * 0.3);
+    const hatch = ((x + y) & 5) === 0 ? 1.25 : 1;
+    return shade(stone, speckle(seed, x, y, 0.16) * hatch);
+  });
+}
+
+/** A Party Games floor tile: a bold flat colour with a bevelled border, so a
+ *  called colour is unmistakable at a glance from across the arena. */
+function paintPartyTile(base: RGBA) {
+  return (p: Painter, seed: number): void => {
+    p.fill((x, y) => {
+      const border = x === 0 || x === 15 || y === 0 || y === 15;
+      if (border) return shade(base, 0.62);
+      const bevel = x === 1 || y === 1;
+      if (bevel) return shade(base, 1.18);
+      return shade(base, speckle(seed, x, y, 0.07));
+    });
+  };
+}
+
+/** The Void Cleaver: a dark broad-bladed axe with a violet edge glow. */
+function paintVoidCleaver(p: Painter, seed: number): void {
+  p.fill(() => [0, 0, 0, 0]);
+  const haft: RGBA = [58, 48, 62, 255];
+  const blade: RGBA = [120, 108, 150, 255];
+  const edge: RGBA = [214, 158, 255, 255];
+  for (let i = 0; i < 11; i++) p.set(5 + i, 13 - i, shade(haft, 0.9 + hash2(seed, i, 0) * 0.2));
+  for (let i = 0; i < 11; i++) p.set(4 + i, 13 - i, haft);
+  // The head: a wedge hung off the top of the haft, edge on the outside.
+  for (let y = 1; y <= 7; y++) {
+    const w = y <= 4 ? y + 2 : 10 - y;
+    for (let x = 0; x < w; x++) {
+      const px = 4 - x, py = y + 1;
+      p.set(px, py, x >= w - 2 ? edge : shade(blade, 0.85 + hash2(seed, px, py) * 0.25));
+    }
+  }
+  for (let y = 2; y <= 7; y++) p.set(2, y, edge);
+}
+
+/** The Knockback Stick: a wrapped baton crackling at the tip. */
+function paintKnockbackStick(p: Painter, seed: number): void {
+  p.fill(() => [0, 0, 0, 0]);
+  const wood: RGBA = [148, 112, 66, 255];
+  const wrap: RGBA = [64, 78, 104, 255];
+  const spark: RGBA = [156, 232, 255, 255];
+  for (let i = 0; i < 13; i++) {
+    const x = 3 + i, y = 13 - i;
+    p.set(x, y, shade(i < 5 ? wrap : wood, 0.88 + hash2(seed, i, 1) * 0.24));
+    p.set(x, y - 1, shade(i < 5 ? wrap : wood, 0.78 + hash2(seed, i, 2) * 0.24));
+  }
+  for (const [dx, dy] of [[0, 0], [2, 1], [1, 3], [3, 2], [-1, 2]]) {
+    p.set(13 + dx - 1, 1 + dy, spark);
+  }
+}
+
 const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.GrassTop]: paintGrassTop,
   [Tile.GrassSide]: paintGrassSide,
@@ -2711,6 +2867,22 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.AerialBombSprite]: paintAerialBomb,
   [Tile.RepairKitSprite]: paintRepairKit,
   [Tile.HelicopterKitSprite]: paintHelicopterKit,
+  // --- Minigame-only art ---
+  [Tile.BwBedTopA]: paintBedTop([196, 62, 68, 255], [255, 146, 132, 255]),
+  [Tile.BwBedSideA]: paintBedSide([196, 62, 68, 255], [255, 146, 132, 255]),
+  [Tile.BwBedTopB]: paintBedTop([56, 104, 196, 255], [126, 186, 255, 255]),
+  [Tile.BwBedSideB]: paintBedSide([56, 104, 196, 255], [126, 186, 255, 255]),
+  [Tile.BwGeneratorTop]: paintGeneratorTop,
+  [Tile.BwGeneratorSide]: paintGeneratorSide,
+  [Tile.BwShopTop]: paintShopTop,
+  [Tile.BwShopSide]: paintShopSide,
+  [Tile.ArenaRim]: paintArenaRim,
+  [Tile.TeamWoolA]: paintTeamWool([198, 66, 72, 255]),
+  [Tile.TeamWoolB]: paintTeamWool([62, 110, 200, 255]),
+  [Tile.PartyTileC]: paintPartyTile([232, 168, 48, 255]),
+  [Tile.PartyTileD]: paintPartyTile([74, 182, 96, 255]),
+  [Tile.VoidCleaver]: paintVoidCleaver,
+  [Tile.KnockbackStick]: paintKnockbackStick,
   // Vault Brute: a hulking mossy-stone zombie — pale glowing eyes, heavy jaw.
   [Tile.BruteSkin]: paintSkin([98, 112, 86, 255], 0.18, [72, 84, 62, 255]),
   [Tile.BruteFace]: paintFace([98, 112, 86, 255], [235, 245, 170, 255],

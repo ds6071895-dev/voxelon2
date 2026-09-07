@@ -16,6 +16,7 @@ import { GameServer, Outbound, WorldSave } from '../src/net/server_core';
 import { Accounts, Account } from '../src/net/accounts';
 import { WARFARE_TREE, sanitizeWarfare, warfareAvailable } from '../src/warfare';
 import { ITEMS, Item } from '../src/items';
+import { isMinigameOnly } from '../src/minigame_items';
 import { FACTIONS, type Faction, factionName } from '../src/teams';
 import {
   COMEBACK_HEARTS, ELIMINATION_MS, PERMANENT_UNTIL, formatRemaining,
@@ -621,24 +622,30 @@ const MODE_ALIASES: Record<string, GameMode> = {
 };
 
 // Item name -> id, built once from ITEMS (normalized: lowercased, no spaces).
+// Minigame-only ids are skipped in BOTH loops, so they are unnameable, and
+// `resolveItem` refuses them again by id — which is what closes `/give <player>
+// 242`, the one route a name index alone would leave open.
 const ITEM_BY_NAME = new Map<string, number>();
 for (const key of Object.keys(ITEMS)) {
   const id = Number(key);
+  if (isMinigameOnly(id)) continue;
   const norm = ITEMS[id].name.toLowerCase().replace(/[^a-z0-9]/g, '');
   ITEM_BY_NAME.set(norm, id);
 }
 // Also accept the Item enum keys (e.g. "RocketLauncher", "OilBarrel").
 for (const k of Object.keys(Item)) {
   const id = (Item as Record<string, number>)[k];
-  if (typeof id === 'number') ITEM_BY_NAME.set(k.toLowerCase(), id);
+  if (typeof id === 'number' && !isMinigameOnly(id)) ITEM_BY_NAME.set(k.toLowerCase(), id);
 }
 /** Resolve a `give` item token: a numeric id, an enum key, or an item name. */
 function resolveItem(token: string): number | null {
   if (/^\d+$/.test(token)) {
     const id = Number(token);
+    if (isMinigameOnly(id)) return null;
     return ITEMS[id] ? id : null;
   }
   const id = ITEM_BY_NAME.get(token.toLowerCase().replace(/[^a-z0-9]/g, ''));
+  if (id !== undefined && isMinigameOnly(id)) return null;
   return id !== undefined ? id : null;
 }
 

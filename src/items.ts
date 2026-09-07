@@ -4,6 +4,7 @@
 import {
   Block, BLOCKS, BlockInfo, isTopSlab, slabBottomId, stairsBaseOf, Tile, ToolKind,
 } from './blocks';
+import { isMinigameOnly } from './minigame_items';
 
 export const enum Item {
   // Blocks are items with id === Block id (wall torch variants are not items).
@@ -138,6 +139,21 @@ export const enum Item {
   RopeWinch = 228,
   AuxiliaryTank = 229,
   LongRangeTank = 230,
+  // --- Minigame-only items --------------------------------------------------
+  // 242-245 mirror their Block ids so the arena wool/tiles are placeable.
+  // 247-248 are pure weapons. EVERY id here is in MINIGAME_ONLY
+  // (src/minigame_items.ts) and is therefore excluded from the creative
+  // palette, `/give`, drops, chests, loot, recipes and persistence.
+  //
+  // The names are deliberately arena-flavoured rather than material-flavoured
+  // ("Void Cleaver", not "Diamond Axe") so no future crafting recipe ever looks
+  // like it ought to produce one.
+  TeamWoolA = 242,
+  TeamWoolB = 243,
+  PartyTileC = 244,
+  PartyTileD = 245,
+  VoidCleaver = 247,
+  KnockbackStick = 248,
 }
 
 export interface ToolInfo {
@@ -618,7 +634,38 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Item.RopeWinch]: { name: 'Fast-Rope Winch', kind: 'item', sprite: Tile.GrapplingHook, maxStack: 1 },
   [Item.AuxiliaryTank]: { name: 'Auxiliary Tank Module', kind: 'item', sprite: Tile.FuelTank, maxStack: 4 },
   [Item.LongRangeTank]: { name: 'Long-Range Tank Module', kind: 'item', sprite: Tile.OilBarrel, maxStack: 4 },
+
+  // --- Minigame-only items (see src/minigame_items.ts) ----------------------
+  [Block.TeamWoolA]: blockItem(Block.TeamWoolA),
+  [Block.TeamWoolB]: blockItem(Block.TeamWoolB),
+  [Block.PartyTileC]: blockItem(Block.PartyTileC),
+  [Block.PartyTileD]: blockItem(Block.PartyTileD),
+  /** Bedwars tier-3 axe. Its damage is read from BW_AXE_TIERS server-side —
+   *  this `tool` entry exists only so the item renders and swings like an axe. */
+  [Item.VoidCleaver]: {
+    name: 'Void Cleaver', kind: 'item', sprite: Tile.VoidCleaver, maxStack: 1,
+    tool: { type: 'axe', tier: 2, speed: 6, durability: 2000, damage: 6 },
+  },
+  /** Party Games' Knockback Arena weapon: zero damage, enormous knockback. */
+  [Item.KnockbackStick]: {
+    name: 'Knockback Stick', kind: 'item', sprite: Tile.KnockbackStick, maxStack: 1,
+    tool: { type: 'axe', tier: 0, speed: 1, durability: 2000, damage: 0 },
+  },
 };
+
+/**
+ * Every item the creative palette may show, ascending.
+ *
+ * This is the ONLY full walk of the registry on the client, so it is also the
+ * only place a minigame-only id could reach a player's hands through the UI.
+ * Pure and exported so the isolation smoke test can assert on it directly
+ * rather than reaching into inventory_ui's DOM.
+ */
+export function creativePaletteIds(): number[] {
+  return Object.keys(ITEMS).map(Number)
+    .filter((id) => ITEMS[id] && !isMinigameOnly(id))
+    .sort((a, b) => a - b);
+}
 
 /**
  * Vanilla mining: effective tools divide `hardness * 1.5` by their speed;
@@ -648,6 +695,12 @@ export function miningStats(
 export function dropFor(
   block: number, rng: number, harvested = true
 ): ItemStack | null {
+  // Arena blocks never enter the generic drop table, in either direction: a
+  // minigame block cannot legally occupy a world cell in the first place, and
+  // inside an arena the mode hands out its own materials (the Bedwars shop,
+  // the Party loadouts) through server-authoritative paths. Returning null
+  // here means no prediction path — client or server — can mint one.
+  if (isMinigameOnly(block)) return null;
   if (!harvested && BLOCKS[block]?.requiresTool) return null;
   switch (block) {
     case Block.FurnaceLit:

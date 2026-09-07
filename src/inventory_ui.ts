@@ -13,7 +13,7 @@ import {
   HOTBAR_SIZE, INV_SIZE, CRAFT_START, CHEST_START, CHEST_SIZE,
   ARMOR_START, ARMOR_SIZE,
 } from './inventory';
-import { ArmorSlot, Item, ITEMS, ItemStack } from './items';
+import { ArmorSlot, creativePaletteIds, Item, ITEMS, ItemStack } from './items';
 import {
   MachineState, MachineType, UpgradeAxis, MAX_LEVEL, MAX_STORAGE_LEVEL,
   allowedFilterMask, machineMaxHp, storageCap, totalStored, upgradeCost,
@@ -516,7 +516,7 @@ export class InventoryUI {
       'display:flex;flex-wrap:wrap;gap:2px;width:536px;max-height:256px;' +
       'overflow-y:auto;padding:5px;background:#0d111b;' +
       'border:2px solid;border-color:#2a3550 #4a5775 #4a5775 #2a3550;';
-    const ids = Object.keys(ITEMS).map(Number).filter((id) => ITEMS[id]).sort((a, b) => a - b);
+    const ids = creativePaletteIds();
     for (const id of ids) {
       const view = this.makeSlotView();
       renderItemIcon(view.icon, this.atlasCanvas, id);
