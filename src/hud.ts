@@ -112,13 +112,14 @@ export class HUD {
       this.cooldowns.push(cd);
     }
 
-    // Item name popup above the hotbar, like vanilla.
+    // Item name popup above the hotbar, like vanilla. `hud-themed` puts it on
+    // the same font and colour as the rest of the HUD (Pause -> HUD Settings).
     this.nameEl = document.createElement('div');
-    this.nameEl.className = 'mc-font';
+    this.nameEl.className = 'mc-font hud-themed';
     this.nameEl.style.cssText =
       'position:absolute;bottom:70px;left:50%;transform:translateX(-50%);' +
-      'font-size:16px;z-index:10;pointer-events:none;transition:opacity 0.5s;' +
-      'opacity:0;';
+      'font-size:calc(16px * var(--hud-scale));z-index:10;pointer-events:none;' +
+      'transition:opacity 0.5s;opacity:0;';
     document.getElementById('app')!.appendChild(this.nameEl);
 
     this.refresh();

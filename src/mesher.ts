@@ -1,5 +1,7 @@
 // Chunk mesher: culled faces, vanilla directional shading, per-vertex
-// ambient occlusion (the classic 0-3 corner test), AO-aware quad flipping.
+// ambient occlusion (the classic 0-3 corner test), AO-aware quad flipping,
+// and optional smooth lighting (per-vertex light averaged over the four cells
+// touching each corner instead of one flat level per face).
 
 import * as THREE from 'three';
 import type { ColumnTints, Tint } from './biomes';
@@ -117,7 +119,10 @@ class GeoBuffer {
      *  gradient across the face. Used for the grass-block side: the fringe
      *  along its top edge takes the biome colour and fades out into plain
      *  dirt below, instead of every biome sharing one hard-coded green. */
-    tintBottom?: Tint
+    tintBottom?: Tint,
+    /** Smooth lighting: per-corner (sky, block) levels replacing the flat
+     *  skyL/blockL. Both arrays are indexed like `face.corners`. */
+    cornerSky?: number[], cornerBlock?: number[]
   ): void {
     const base = this.positions.length / 3;
     const [u0, v0, u1, v1] = uvRect;
@@ -130,7 +135,10 @@ class GeoBuffer {
       const vt = tintBottom && c.pos[1] === 0 ? tintBottom : tint;
       this.colors.push(b * vt[0], b * vt[1], b * vt[2]);
       this.uvs.push(u0 + (u1 - u0) * c.uv[0], v0 + (v1 - v0) * c.uv[1]);
-      this.lights.push(skyL / 15, blockL / 15);
+      this.lights.push(
+        (cornerSky ? cornerSky[i] : skyL) / 15,
+        (cornerBlock ? cornerBlock[i] : blockL) / 15
+      );
     }
     // Flip the quad diagonal when needed so AO interpolates correctly.
     if (ao[0] + ao[3] > ao[1] + ao[2]) {
@@ -254,7 +262,7 @@ export interface ChunkGeometry {
 
 export function buildChunkGeometry(
   chunk: Chunk, sample: BlockSampler, atlas: Atlas, tints: TintSampler,
-  light: LightField
+  light: LightField, smoothLighting = false
 ): ChunkGeometry {
   const opaque = new GeoBuffer();
   const water = new GeoBuffer();
@@ -262,6 +270,8 @@ export function buildChunkGeometry(
   const oz = chunk.cz * CHUNK_Z;
   const maxY = Math.min(chunk.maxY, 256);
   const ao = [0, 0, 0, 0];
+  const cornerSky = [0, 0, 0, 0];
+  const cornerBlock = [0, 0, 0, 0];
 
   for (let x = 0; x < CHUNK_X; x++) {
     for (let z = 0; z < CHUNK_Z; z++) {
@@ -359,10 +369,16 @@ export function buildChunkGeometry(
           const ly = Math.max(0, ny);
           const skyL = light.sky(wx + dx, ly, wz + dz);
           const blockL = light.block(wx + dx, ly, wz + dz);
+          if (smoothLighting) {
+            computeSmoothLight(
+              face, wx, y, wz, sample, light, skyL, blockL, cornerSky, cornerBlock);
+          }
 
           (isWater ? water : opaque).quad(
             face, x, y, z, atlas.uvRect(tile), ao, topOffset, tint, skyL, blockL,
-            grassSide ? WHITE : undefined
+            grassSide ? WHITE : undefined,
+            smoothLighting ? cornerSky : undefined,
+            smoothLighting ? cornerBlock : undefined
           );
         }
       }
@@ -398,5 +414,63 @@ function computeAO(
     const corner = occludesAO(sample(q3[0], q3[1], q3[2])) ? 1 : 0;
 
     out[i] = side1 && side2 ? 0 : 3 - (side1 + side2 + corner);
+  }
+}
+
+/**
+ * Smooth lighting, the other half of the vanilla look that per-vertex AO only
+ * hints at. A flat face takes ONE light level, so a torch on a wall lights the
+ * whole block face evenly and the falloff between blocks is a visible staircase.
+ * Here each of the four corners instead averages the light of the four cells
+ * that touch it on the exposed side of the face, and the rasteriser interpolates
+ * between them — the same neighbourhood `computeAO` already walks, so lighting
+ * and occlusion agree on where a corner is.
+ *
+ * Opaque neighbours are skipped rather than counted as darkness: an unlit solid
+ * cell holds level 0 and averaging it in would ring every inside corner with a
+ * dark halo that vanilla does not have. When every contributing cell is opaque
+ * (a fully enclosed corner) the face's own flat level is used, so a vertex can
+ * never fall to black on its own.
+ */
+function computeSmoothLight(
+  face: FaceDef, wx: number, wy: number, wz: number,
+  sample: BlockSampler, light: LightField,
+  flatSky: number, flatBlock: number,
+  outSky: number[], outBlock: number[]
+): void {
+  const [dx, dy, dz] = face.dir;
+  // Tangent axes = the two axes perpendicular to the face normal.
+  const axis = dx !== 0 ? 0 : dy !== 0 ? 1 : 2;
+  const t1 = axis === 0 ? 1 : 0;
+  const t2 = axis === 2 ? 1 : 2;
+  // The cell the face is exposed to; always sampled, always non-opaque.
+  const p = [wx + dx, wy + dy, wz + dz];
+  const q = [0, 0, 0];
+
+  for (let i = 0; i < 4; i++) {
+    const c = face.corners[i].pos;
+    const s1 = c[t1] === 1 ? 1 : -1;
+    const s2 = c[t2] === 1 ? 1 : -1;
+
+    let sky = 0, block = 0, n = 0;
+    // k as a 2-bit mask over the two tangent offsets: p, p+t1, p+t2, p+t1+t2.
+    for (let k = 0; k < 4; k++) {
+      q[0] = p[0]; q[1] = p[1]; q[2] = p[2];
+      if (k & 1) q[t1] += s1;
+      if (k & 2) q[t2] += s2;
+      if (q[1] < 0 || q[1] >= 256) continue;
+      if (isOpaque(sample(q[0], q[1], q[2]))) continue;
+      sky += light.sky(q[0], q[1], q[2]);
+      block += light.block(q[0], q[1], q[2]);
+      n++;
+    }
+
+    if (n === 0) {
+      outSky[i] = flatSky;
+      outBlock[i] = flatBlock;
+    } else {
+      outSky[i] = sky / n;
+      outBlock[i] = block / n;
+    }
   }
 }

@@ -36,6 +36,21 @@
       --safe-bottom: env(safe-area-inset-bottom, 0px);
       --safe-left: env(safe-area-inset-left, 0px);
       --hotbar-slot: clamp(32px, 10.2vw, 48px);
+      /* ── HUD THEME ────────────────────────────────────────────────────
+         Written live by src/hud_settings.ts (Pause -> HUD Settings). Every
+         HUD surface reads these instead of hard-coding a colour, which is
+         what keeps the hotbar, the item name, the ammo readout, the F3
+         overlay and the command box looking like one HUD. The values here
+         are the defaults, and must match DEFAULT_HUD_THEME. */
+      --hud-font: 'Lucida Console', Monaco, monospace;
+      --hud-scale: 1;
+      --hud-text: #ffffff;
+      --hud-text-dim: rgba(255, 255, 255, 0.62);
+      --hud-bg: rgba(0, 0, 0, 0.55);
+      --hud-bg-solid: rgba(0, 0, 0, 0.78);
+      --hud-accent: #4db8ff;
+      --hud-accent-soft: rgba(77, 184, 255, 0.4);
+      --hud-text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
     }
     html, body { width: 100%; height: 100%; min-height: 100dvh; overflow: hidden; background: #000; }
     /* Touch devices: no pinch-zoom/scroll gestures, no long-press callouts or
@@ -54,6 +69,15 @@
          pixel drop-shadow). Panels on solid backgrounds override to none. */
       text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
       letter-spacing: 0.5px;
+    }
+    /* Text that floats over the world and therefore follows the HUD theme.
+       Menus (title, pause, Controls) deliberately do NOT: a player who picks
+       black-on-transparent for their HUD still has to be able to read the
+       menu that would let them change it back. */
+    .hud-themed {
+      font-family: var(--hud-font);
+      color: var(--hud-text);
+      text-shadow: var(--hud-text-shadow);
     }
 
     /* Crosshair: vanilla-style plus with difference blending */
@@ -76,9 +100,9 @@
       position: absolute; bottom: calc(8px + var(--safe-bottom)); left: 50%;
       transform: translateX(-50%);
       display: flex;
-      background: rgba(0,0,0,0.55);
+      background: var(--hud-bg);
       border: 2px solid #000;
-      outline: 2px solid rgba(255,255,255,0.25);
+      outline: 2px solid var(--hud-accent-soft);
       z-index: 10;
       pointer-events: none;
     }
@@ -91,14 +115,16 @@
     }
     .slot.selected::after {
       content: ''; position: absolute; inset: -4px;
-      border: 4px solid #fff;
+      border: 4px solid var(--hud-accent);
       outline: 2px solid #000;
       z-index: 2;
     }
     .slot canvas { width: calc(var(--hotbar-slot) * .75); height: calc(var(--hotbar-slot) * .75); image-rendering: pixelated; }
     .slot .count {
       position: absolute; right: 2px; bottom: 0;
-      font-size: 14px; pointer-events: none; z-index: 3;
+      font-family: var(--hud-font); color: var(--hud-text);
+      text-shadow: var(--hud-text-shadow);
+      font-size: calc(14px * var(--hud-scale)); pointer-events: none; z-index: 3;
     }
 
     /* Inventory panel */
@@ -229,8 +255,9 @@
     #armor { position: absolute; left: 0; bottom: 22px; }
     #ammo {
       position: absolute; left: 0; bottom: 44px; width: 202px; text-align: center;
-      z-index: 10; pointer-events: none; font-size: 18px; display: none;
-      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6); color: #fff;
+      z-index: 10; pointer-events: none; display: none;
+      font-family: var(--hud-font); font-size: calc(18px * var(--hud-scale));
+      text-shadow: var(--hud-text-shadow); color: var(--hud-text);
     }
 
     #damage-flash {
@@ -578,11 +605,13 @@
     /* Debug overlay (F3) */
     #debug {
       position: absolute; top: 4px; left: 4px;
-      font-size: 14px; line-height: 19px;
+      font-family: var(--hud-font); color: var(--hud-text);
+      text-shadow: var(--hud-text-shadow);
+      font-size: calc(14px * var(--hud-scale)); line-height: 1.36;
       display: none; z-index: 10; pointer-events: none;
       white-space: pre;
     }
-    #debug .line { background: rgba(80,80,80,0.45); padding: 0 4px; display: inline-block; }
+    #debug .line { background: var(--hud-bg); padding: 0 4px; display: inline-block; }
 
     /* ── Sheet: the full-screen card used by Controls ─────────────────────
        Opens straight off the title screen, so it wears the same daylight
@@ -2222,7 +2251,7 @@
     @media (max-width: 640px), (max-height: 720px) {
       :root { --hotbar-slot: clamp(30px, 10.4vw, 40px); }
       #status { transform: translateX(-50%) scale(.84); }
-      #ammo { font-size: 14px; }
+      #ammo { font-size: calc(14px * var(--hud-scale)); }
       .vault-boss-hud > div:nth-child(3) { gap: 4px !important; }
       #overlay {
         gap: 16px;
@@ -2315,12 +2344,14 @@
         <label>Look sensitivity <span class="setting-pair"><input id="look-sensitivity" type="range" min="0.25" max="3" step="0.05" /><span id="look-sensitivity-value">1.00&#215;</span></span></label>
         <label>Graphics
           <select id="graphics-quality">
-            <option value="low">Low &#8212; fastest</option>
+            <option value="low">Low (fastest)</option>
             <option value="medium">Medium</option>
-            <option value="high">High &#8212; best looking</option>
+            <option value="high">High</option>
+            <option value="ultra">Extra High (smooth lighting)</option>
+            <option value="max">Max (Shaders)</option>
           </select>
         </label>
-        <p class="setting-note">Lower this if the game stutters. View distance applies instantly; anti-aliasing changes on reload.</p>
+        <p class="setting-note">Lower this if the game stutters. Extra High adds smooth lighting and a longer view. Max is the shader preset: the sun casts real shadows, water gains waves, reflections and glitter, the clouds gain depth, and the whole frame goes through a filmic grade. View distance applies instantly; anti-aliasing changes on reload.</p>
         <label>Music <input id="music-volume" type="range" min="0" max="1" step="0.05" /></label>
         <label>Effects <input id="effects-volume" type="range" min="0" max="1" step="0.05" /></label>
         <label>Camera shake <input id="camera-shake" type="range" min="0" max="1" step="0.1" /></label>
@@ -2329,6 +2360,7 @@
         <label>Photosensitivity safe <input id="safe-effects" type="checkbox" /></label>
       </div>
       <button id="resume-btn" class="mc-btn">Resume</button>
+      <button id="hud-settings-btn" class="mc-btn">HUD Settings</button>
       <button id="pause-guide-btn" class="mc-btn">Field Guide</button>
       <button id="quit-btn" class="mc-btn">Quit to Title</button>
     </div>

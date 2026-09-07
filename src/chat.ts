@@ -120,14 +120,18 @@ const CSS = `
 #chat-root { position:absolute; left:8px; bottom:76px; z-index:22; width:min(560px, calc(100% - 16px));
   display:flex; flex-direction:column; gap:4px; align-items:stretch; pointer-events:none; }
 #chat-log { display:flex; flex-direction:column; gap:2px; align-items:flex-start; }
-.chat-line { font-size:12px; line-height:1.5; color:#e8eeff; text-shadow:1px 1px 0 #000;
-  background:rgba(8,10,16,0.55); border-left:3px solid #3a4790; padding:2px 8px;
+/* The log rides the HUD theme (Pause -> HUD Settings) so it matches the hotbar
+   and the F3 overlay; only the error/ok rules keep a colour of their own,
+   because "this went wrong" has to read as red whatever the accent is. */
+.chat-line { font-size:calc(12px * var(--hud-scale)); line-height:1.5;
+  font-family:var(--hud-font); color:var(--hud-text); text-shadow:var(--hud-text-shadow);
+  background:var(--hud-bg); border-left:3px solid var(--hud-accent); padding:2px 8px;
   max-width:100%; word-break:break-word; white-space:pre-wrap; transition:opacity 0.6s; }
 .chat-line.err { border-left-color:#c2453f; color:#ffbdb8; }
 .chat-line.ok { border-left-color:#4a9d5b; }
 .chat-line.faded { opacity:0; }
 #chat-root.open .chat-line { opacity:1; }
-#chat-suggest { display:none; flex-direction:column; background:rgba(8,10,16,0.92);
+#chat-suggest { display:none; flex-direction:column; background:var(--hud-bg-solid);
   border:2px solid; border-color:#2a3550 #4a5775 #4a5775 #2a3550; max-height:186px;
   overflow-y:auto; pointer-events:auto; }
 #chat-root.open #chat-suggest { display:flex; }
@@ -136,14 +140,16 @@ const CSS = `
 .chat-sugg b { color:#ffd84a; font-weight:normal; }
 .chat-sugg:hover { background:#1b2440; }
 .chat-sugg.sel { background:#2b3a68; color:#e8eeff; }
-#chat-entry { display:none; align-items:center; gap:0; background:rgba(8,10,16,0.92);
+#chat-entry { display:none; align-items:center; gap:0; background:var(--hud-bg-solid);
   border:2px solid; border-color:#2a3550 #4a5775 #4a5775 #2a3550; padding:5px 8px;
   pointer-events:auto; }
 #chat-root.open #chat-entry { display:flex; }
-#chat-slash { font-size:14px; color:#ffd84a; text-shadow:none; padding-right:1px; }
+#chat-slash { font-size:calc(14px * var(--hud-scale)); color:var(--hud-accent);
+  text-shadow:none; padding-right:1px; }
 #chat-input { flex:1; min-width:0; background:transparent; border:none; outline:none;
-  font-size:14px; color:#fff; text-shadow:none; }
-#chat-hint { display:none; font-size:10px; color:#6d7ea6; text-shadow:none;
+  font-family:var(--hud-font); font-size:calc(14px * var(--hud-scale));
+  color:var(--hud-text); text-shadow:none; }
+#chat-hint { display:none; font-size:10px; color:var(--hud-text-dim); text-shadow:none;
   padding:2px 2px 0; pointer-events:none; }
 #chat-root.open #chat-hint { display:block; }
 `;

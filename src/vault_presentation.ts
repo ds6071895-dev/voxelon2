@@ -20,8 +20,11 @@ function scoreCredit(family: EncounterSnapshot['family']): string {
  *  tab, and render distance is by far the most expensive dial (chunk meshing +
  *  draw calls + fog depth), with device pixel ratio second. `antialias` is
  *  fixed when the WebGL context is created, so it is read at boot only — see
- *  the note on the renderer in main.ts. */
-export type GraphicsQuality = 'low' | 'medium' | 'high';
+ *  the note on the renderer in main.ts.
+ *
+ *  The ladder is ordered cheapest-first and every rung is a superset of the one
+ *  below it, so `GRAPHICS_ORDER` can be used to compare two settings. */
+export type GraphicsQuality = 'low' | 'medium' | 'high' | 'ultra' | 'max';
 
 export interface GraphicsPreset {
   /** Chunks streamed around the player. Must never exceed world.ts's
@@ -31,14 +34,41 @@ export interface GraphicsPreset {
   pixelRatioCap: number;
   /** MSAA. Applied on the next reload, not live. */
   antialias: boolean;
+  /** Per-vertex light averaged over the four cells touching each corner
+   *  instead of one flat level per face. Costs meshing time (a full remesh on
+   *  toggle), nothing at all per frame. */
+  smoothLighting: boolean;
+  /** Post-processing stack: bloom + filmic grade. Costs fill rate per frame. */
+  shaders: boolean;
   label: string;
 }
 
 export const GRAPHICS_PRESETS: Record<GraphicsQuality, GraphicsPreset> = {
-  low: { renderDistance: 4, pixelRatioCap: 1, antialias: false, label: 'Low' },
-  medium: { renderDistance: 6, pixelRatioCap: 1.5, antialias: true, label: 'Medium' },
-  high: { renderDistance: 8, pixelRatioCap: 2, antialias: true, label: 'High' },
+  low: {
+    renderDistance: 4, pixelRatioCap: 1, antialias: false,
+    smoothLighting: false, shaders: false, label: 'Low',
+  },
+  medium: {
+    renderDistance: 6, pixelRatioCap: 1.5, antialias: true,
+    smoothLighting: false, shaders: false, label: 'Medium',
+  },
+  high: {
+    renderDistance: 8, pixelRatioCap: 2, antialias: true,
+    smoothLighting: false, shaders: false, label: 'High',
+  },
+  ultra: {
+    renderDistance: 10, pixelRatioCap: 2, antialias: true,
+    smoothLighting: true, shaders: false, label: 'Extra High',
+  },
+  max: {
+    renderDistance: 12, pixelRatioCap: 2, antialias: true,
+    smoothLighting: true, shaders: true, label: 'Max',
+  },
 };
+
+/** Cheapest to most expensive. */
+export const GRAPHICS_ORDER: GraphicsQuality[] =
+  ['low', 'medium', 'high', 'ultra', 'max'];
 
 export const MIN_LOOK_SENSITIVITY = 0.25;
 export const MAX_LOOK_SENSITIVITY = 3;
@@ -80,10 +110,11 @@ export function sanitizeAccessibility(raw: unknown): AccessibilitySettings {
     lookSensitivity: typeof x.lookSensitivity === 'number' && Number.isFinite(x.lookSensitivity)
       ? Math.max(MIN_LOOK_SENSITIVITY, Math.min(MAX_LOOK_SENSITIVITY, x.lookSensitivity))
       : DEFAULT_ACCESSIBILITY.lookSensitivity,
-    graphicsQuality: x.graphicsQuality === 'low' || x.graphicsQuality === 'medium'
-      || x.graphicsQuality === 'high'
-      ? x.graphicsQuality
-      : DEFAULT_ACCESSIBILITY.graphicsQuality,
+    graphicsQuality:
+      typeof x.graphicsQuality === 'string'
+        && (GRAPHICS_ORDER as string[]).includes(x.graphicsQuality)
+        ? x.graphicsQuality as GraphicsQuality
+        : DEFAULT_ACCESSIBILITY.graphicsQuality,
   };
 }
 

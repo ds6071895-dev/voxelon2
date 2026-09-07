@@ -82,11 +82,118 @@ function radialGlowTexture(): THREE.CanvasTexture {
   return tex;
 }
 
+
+/**
+ * The `max` preset's cloud material.
+ *
+ * The geometry is still one flat plane, but the fragment shader marches a few
+ * samples along the view ray through the cloud texture before it decides how
+ * opaque a pixel is. That is enough to buy the two things a flat cutout plane
+ * can never have: the deck THICKENS as you look along it toward the horizon
+ * instead of thinning to a line, and the edges of a cloud go soft because the
+ * samples disagree there. A second sample taken toward the sun shades the far
+ * side of each cloud, and the rim facing the sun keeps the silver lining.
+ */
+const CLOUD_SHADER = {
+  vertexShader: /* glsl */`
+    varying vec2 vUv;
+    varying vec3 vWorld;
+    void main() {
+      vUv = uv;
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      vWorld = wp.xyz;
+      gl_Position = projectionMatrix * viewMatrix * wp;
+    }
+  `,
+  fragmentShader: /* glsl */`
+    uniform sampler2D uMap;
+    uniform vec2 uOffset;
+    uniform float uRepeat;
+    uniform float uPlane;
+    uniform float uOpacity;
+    uniform float uThickness;
+    uniform vec3 uColor;
+    uniform vec3 uSunDir;
+    uniform vec3 uSunColor;
+    varying vec2 vUv;
+    varying vec3 vWorld;
+
+    void main() {
+      vec3 viewDir = normalize(vWorld - cameraPosition);
+      vec2 base = vUv * uRepeat + uOffset;
+      float uvPerUnit = uRepeat / uPlane;
+
+      // One step climbs a slice of the deck's thickness; grazing views take
+      // long steps and so pass through much more cloud, which is exactly the
+      // behaviour that makes the horizon pile up.
+      vec2 duv = (viewDir.xz / max(abs(viewDir.y), 0.12))
+        * uvPerUnit * (uThickness / 6.0);
+      float acc = 0.0;
+      vec2 uv = base;
+      for (int i = 0; i < 6; i++) {
+        acc += texture2D(uMap, uv).a;
+        uv += duv;
+      }
+      acc /= 6.0;
+      if (acc <= 0.004) discard;
+
+      // Shade the side of the cloud the sun cannot reach.
+      vec2 sunStep = (uSunDir.xz / max(abs(uSunDir.y), 0.28))
+        * uvPerUnit * uThickness * 0.85;
+      float occl = texture2D(uMap, base + sunStep).a;
+      float lit = 1.0 - 0.42 * occl;
+
+      // Silver lining: thin cloud in front of the sun scatters straight through.
+      float toSun = max(dot(-viewDir, uSunDir), 0.0);
+      float rim = pow(toSun, 8.0) * (1.0 - acc) * 1.35;
+
+      float alpha = smoothstep(0.02, 0.45, acc) * uOpacity;
+      // Fade the deck out well before its own edge, so the plane the whole
+      // thing is drawn on never shows itself as a square.
+      float dist = length(vWorld.xz - cameraPosition.xz);
+      alpha *= 1.0 - smoothstep(uPlane * 0.22, uPlane * 0.46, dist);
+      if (alpha <= 0.002) discard;
+
+      gl_FragColor = vec4(uColor * lit + uSunColor * rim, alpha);
+    }
+  `,
+};
+
+/** One cloud deck's shader material. */
+function makeCloudShaderMaterial(
+  map: THREE.Texture, repeat: number, opacity: number, thickness: number
+): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uMap: { value: map },
+      uOffset: { value: new THREE.Vector2() },
+      uRepeat: { value: repeat },
+      uPlane: { value: CLOUD_PLANE },
+      uOpacity: { value: opacity },
+      uThickness: { value: thickness },
+      uColor: { value: new THREE.Color(1, 1, 1) },
+      uSunDir: { value: new THREE.Vector3(0, 1, 0) },
+      uSunColor: { value: new THREE.Color(1, 1, 1) },
+    },
+    vertexShader: CLOUD_SHADER.vertexShader,
+    fragmentShader: CLOUD_SHADER.fragmentShader,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    fog: false,
+  });
+}
+
 export class Sky {
   /** Time in days; fractional part is the time of day (0 = sunrise). */
   time = 0.04; // start shortly after sunrise
   /** Current sunlight factor (drives the chunk shader uniform). */
   sunIntensity = 1;
+  /** Unit vector from the world toward the sun. The shadow pass aims its
+   *  camera down this, and the water shader puts its glitter on it. */
+  readonly sunDir = new THREE.Vector3(0, 1, 0);
+  /** Height of the sun on its arc, -1..1. Shadows fade out below the horizon. */
+  sunHeight = 1;
   /** Current sky/fog color, updated each frame. */
   readonly skyColor = new THREE.Color();
   /** Night-only aurora strength. Also drives its subtle light on terrain. */
@@ -116,6 +223,11 @@ export class Sky {
   private readonly highClouds: THREE.Mesh;
   private readonly highCloudsMat: THREE.MeshBasicMaterial;
   private readonly highCloudTexture: THREE.CanvasTexture;
+  /** The `max` preset's cloud materials. Built up front (they are two small
+   *  programs) and swapped in by setShaders. */
+  private readonly cloudShaderMat: THREE.ShaderMaterial;
+  private readonly highCloudShaderMat: THREE.ShaderMaterial;
+  private shadersOn = false;
   private readonly sunGlow: THREE.Mesh;
   private readonly sunGlowMat: THREE.MeshBasicMaterial;
   private readonly moonGlow: THREE.Mesh;
@@ -365,6 +477,20 @@ export class Sky {
     this.highClouds.position.y = HIGH_CLOUD_Y;
     this.highClouds.renderOrder = -2;
     scene.add(this.highClouds);
+
+    this.cloudShaderMat = makeCloudShaderMaterial(
+      this.cloudTexture, CLOUD_REPEAT, 0.9, 44);
+    this.highCloudShaderMat = makeCloudShaderMaterial(
+      this.highCloudTexture, HIGH_CLOUD_REPEAT, 0.5, 30);
+  }
+
+  /** Turn the volumetric cloud shading on (the `max` graphics preset) or back
+   *  off. Everything else about the sky is the same either way. */
+  setShaders(on: boolean): void {
+    if (on === this.shadersOn) return;
+    this.shadersOn = on;
+    this.clouds.material = on ? this.cloudShaderMat : this.cloudsMat;
+    this.highClouds.material = on ? this.highCloudShaderMat : this.highCloudsMat;
   }
 
   private makeCloudTexture(seed: number, cover = 0.62): THREE.CanvasTexture {
@@ -412,6 +538,7 @@ export class Sky {
     const tod = ((this.visualTime % 1) + 1) % 1;
     const angle = tod * Math.PI * 2;
     const sunHeight = Math.sin(angle);
+    this.sunHeight = sunHeight;
     this.sunIntensity = daylight(tod);
 
     // Sky/fog color: night <-> day, blended toward orange near the horizon
@@ -447,7 +574,7 @@ export class Sky {
     this.dome.position.copy(camera.position);
 
     // Sun rises in the +x, sets in the -x; moon is opposite.
-    const sunDir = new THREE.Vector3(Math.cos(angle), sunHeight, 0.18).normalize();
+    const sunDir = this.sunDir.set(Math.cos(angle), sunHeight, 0.18).normalize();
     this.sun.position.copy(camera.position).addScaledVector(sunDir, 700);
     this.sun.lookAt(camera.position);
     this.moon.position.copy(camera.position).addScaledVector(sunDir, -700);
@@ -518,5 +645,24 @@ export class Sky {
         (camera.position.z - prevZ - dt * 0.7) * hPerUnit) % 1;
     this.highCloudsMat.color.setScalar(0.4 + 0.6 * s);
     this.highCloudsMat.color.lerp(twilight, sunsetAmount * 0.75);
+
+    // The shader decks reuse the colours and the drift worked out above; only
+    // the texture transform has to be handed over by hand, because a
+    // ShaderMaterial does not apply Texture.offset for us.
+    if (this.shadersOn) {
+      const sunLightColor = twilight.clone()
+        .lerp(SUN_HIGH_GLOW, THREE.MathUtils.smoothstep(above, 0.05, 0.6))
+        .multiplyScalar(0.35 + 0.65 * s);
+      const feed = (
+        mat: THREE.ShaderMaterial, tex: THREE.Texture, color: THREE.Color
+      ): void => {
+        (mat.uniforms.uOffset.value as THREE.Vector2).copy(tex.offset);
+        (mat.uniforms.uColor.value as THREE.Color).copy(color);
+        (mat.uniforms.uSunDir.value as THREE.Vector3).copy(sunDir);
+        (mat.uniforms.uSunColor.value as THREE.Color).copy(sunLightColor);
+      };
+      feed(this.cloudShaderMat, this.cloudTexture, this.cloudsMat.color);
+      feed(this.highCloudShaderMat, this.highCloudTexture, this.highCloudsMat.color);
+    }
   }
 }

@@ -1,5 +1,17 @@
 // Keyboard / mouse / pointer-lock input.
 
+import { DEFAULT_KEYBINDS } from './hud_settings';
+import type { BindAction, Keybinds } from './hud_settings';
+
+/** Modifier keys come in pairs. A bind on one side answers to the other too —
+ *  every game does this, and "Sneak = L Shift" refusing the right-hand Shift
+ *  reads as a broken keyboard rather than a setting. */
+const SIDE_PAIR: Record<string, string> = {
+  ShiftLeft: 'ShiftRight', ShiftRight: 'ShiftLeft',
+  ControlLeft: 'ControlRight', ControlRight: 'ControlLeft',
+  AltLeft: 'AltRight', AltRight: 'AltLeft',
+};
+
 /** The movement/look fields the player reads. A frozen instance (all
  *  false/0) lets physics keep running with no control while a menu is open. */
 export interface PlayerInput {
@@ -15,6 +27,10 @@ export const FROZEN_INPUT: PlayerInput = {
 
 export class Input {
   private keys = new Set<string>();
+  /** Live keybinds, owned by the HUD settings panel (setBinds). Read on every
+   *  keydown rather than baked into the listener, so a rebind takes effect the
+   *  moment it is made. */
+  private binds: Keybinds = { ...DEFAULT_KEYBINDS };
   mouseDX = 0;
   mouseDY = 0;
   /** Look-speed multiplier from the settings panel. Applied where raw pointer
@@ -37,12 +53,14 @@ export class Input {
   // flags survive only so the mobile pause button can close an open map or
   // Warfare panel (they toggle, so setting them is all main.ts needs).
   mapToggled = false;
-  reloadPressed = false; // R pressed this frame (gun reload)
-  dropPressed = false;   // Q pressed this frame (item drop)
-  chatPressed = false;   // T pressed this frame (open the command box)
+  // The five edges below fire on their BOUND key (see hud_settings.ts), not a
+  // fixed one; the defaults are R / O / T / F / V.
+  reloadPressed = false;   // gun reload
+  dropPressed = false;     // drop the held item
+  chatPressed = false;     // open the command box
   progressPressed = false; // tapped on touch — Warfare Command
-  dismountPressed = false; // F pressed this frame (leave a vehicle seat)
-  viewPressed = false;     // V pressed this frame (cycle the camera view)
+  dismountPressed = false; // leave a vehicle seat
+  viewPressed = false;     // cycle the camera view
   locked = false;
 
   // Touch controls (mobile): when true, "pointer lock" is virtual — lock()
@@ -53,11 +71,40 @@ export class Input {
   tForward = false; tBack = false; tLeft = false; tRight = false;
   tJump = false; tSneak = false; tSprint = false;
 
-  private kbSprint = false; // via double-tap W, persists until W released
+  private kbSprint = false; // via double-tapping forward; held until it releases
   get sprintHeld(): boolean { return this.kbSprint || this.tSprint; }
 
-  private lastWDown = 0;
+  private lastForwardDown = 0;
   private readonly canvas: HTMLCanvasElement;
+
+  /** Replace the whole bind set (from the HUD settings panel). On a real
+   *  change held keys are dropped: a key that was down under the old binding
+   *  would otherwise stay "pressed" for an action nothing releases. The panel
+   *  calls this on every tick of every slider, so an unchanged set is a no-op
+   *  rather than a keyboard reset. */
+  setBinds(binds: Keybinds): void {
+    let changed = false;
+    for (const action of Object.keys(this.binds) as BindAction[]) {
+      if (this.binds[action] === binds[action]) continue;
+      this.binds[action] = binds[action];
+      changed = true;
+    }
+    if (!changed) return;
+    this.keys.clear();
+    this.kbSprint = false;
+  }
+
+  /** Does this KeyboardEvent.code drive `action` right now? */
+  private isBind(code: string, action: BindAction): boolean {
+    const bound = this.binds[action];
+    return code === bound || SIDE_PAIR[bound] === code;
+  }
+
+  /** Is the key bound to `action` currently held? */
+  private heldBind(action: BindAction): boolean {
+    const bound = this.binds[action];
+    return this.keys.has(bound) || this.keys.has(SIDE_PAIR[bound] ?? '\0');
+  }
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -75,18 +122,18 @@ export class Input {
       }
       if (e.repeat) return;
       this.keys.add(e.code);
-      if (e.code === 'KeyE') this.inventoryToggled = true;
-      if (e.code === 'KeyR') this.reloadPressed = true;
-      if (e.code === 'KeyO') this.dropPressed = true;
-      // T is the ONE key for everything that used to have its own binding
-      // (map/waypoint/warfare/guide/tpa/tpa-accept): it opens the command box.
-      if (e.code === 'KeyT') this.chatPressed = true;
-      if (e.code === 'KeyF') this.dismountPressed = true;
-      if (e.code === 'KeyV') this.viewPressed = true;
-      if (e.code === 'KeyW') {
+      if (this.isBind(e.code, 'inventory')) this.inventoryToggled = true;
+      if (this.isBind(e.code, 'reload')) this.reloadPressed = true;
+      if (this.isBind(e.code, 'drop')) this.dropPressed = true;
+      // The command-box key is the ONE key for everything that used to have its
+      // own binding (map/waypoint/warfare/guide/tpa/tpa-accept).
+      if (this.isBind(e.code, 'chat')) this.chatPressed = true;
+      if (this.isBind(e.code, 'dismount')) this.dismountPressed = true;
+      if (this.isBind(e.code, 'view')) this.viewPressed = true;
+      if (this.isBind(e.code, 'forward')) {
         const now = performance.now();
-        if (now - this.lastWDown < 250) this.kbSprint = true;
-        this.lastWDown = now;
+        if (now - this.lastForwardDown < 250) this.kbSprint = true;
+        this.lastForwardDown = now;
       }
       if (e.code.startsWith('Digit')) {
         const n = Number(e.code.slice(5));
@@ -95,7 +142,7 @@ export class Input {
     });
     document.addEventListener('keyup', (e) => {
       this.keys.delete(e.code);
-      if (e.code === 'KeyW') this.kbSprint = false;
+      if (this.isBind(e.code, 'forward')) this.kbSprint = false;
     });
 
     document.addEventListener('mousemove', (e) => {
@@ -219,13 +266,16 @@ export class Input {
     return this.keys.has(code);
   }
 
-  get forward(): boolean { return this.down('KeyW') || this.tForward; }
-  get back(): boolean { return this.down('KeyS') || this.tBack; }
-  get left(): boolean { return this.down('KeyA') || this.tLeft; }
-  get right(): boolean { return this.down('KeyD') || this.tRight; }
-  get jump(): boolean { return this.down('Space') || this.tJump; }
-  get sneak(): boolean { return this.down('ShiftLeft') || this.down('ShiftRight') || this.tSneak; }
-  get sprintKey(): boolean { return this.down('KeyQ'); }
+  get forward(): boolean { return this.heldBind('forward') || this.tForward; }
+  get back(): boolean { return this.heldBind('back') || this.tBack; }
+  get left(): boolean { return this.heldBind('left') || this.tLeft; }
+  get right(): boolean { return this.heldBind('right') || this.tRight; }
+  get jump(): boolean { return this.heldBind('jump') || this.tJump; }
+  get sneak(): boolean { return this.heldBind('sneak') || this.tSneak; }
+  get sprintKey(): boolean { return this.heldBind('sprint'); }
+  /** Hold-to-zoom (the spyglass-style smooth zoom). Keyboard only: the
+   *  on-screen controls have no key to hold and no wheel to scale it with. */
+  get zoomHeld(): boolean { return !this.touchMode && this.heldBind('zoom'); }
 
   /** Consume per-frame deltas/edges; call once at the end of each frame. */
   endFrame(): void {

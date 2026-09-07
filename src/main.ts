@@ -37,7 +37,7 @@ import { MachineModels } from './machinemodels';
 import { NetItems } from './netitems';
 import { Particles } from './particles';
 import { AmbientWorld } from './ambient_world';
-import { BIOME_SOUND } from './biomes';
+import { BIOME_NAMES, BIOME_SOUND } from './biomes';
 import { Projectiles } from './projectiles';
 import { Player, MAX_AIR } from './player';
 import {
@@ -134,8 +134,12 @@ import {
 import { DAY_LENGTH, Sky, WATER_FOG_COLOR } from './sky';
 import { Survival } from './survival';
 import { createAtlas, createCrackTextures } from './textures';
-import { World, RENDER_DISTANCE } from './world';
+import { World, RENDER_DISTANCE, DEFAULT_RENDER_DISTANCE } from './world';
 import { Panorama } from './panorama';
+import { PostFX } from './postfx';
+import { SunShadow } from './shadows';
+import { createHudMods } from './hud_mods';
+import type { HudModData } from './hud_mods';
 import { structureChestTier, worldStructures } from './structures';
 import { chestLootSlots } from './loot';
 import {
@@ -153,12 +157,15 @@ import {
 } from './vault_presentation';
 import type { GraphicsQuality } from './vault_presentation';
 import { VaultEncounterVisuals } from './vault_visuals';
+import {
+  applyHudTheme, createHudSettingsPanel, keyLabel, loadHudSettings, saveHudSettings,
+} from './hud_settings';
 
 // Fog is pinned to the live render distance so lowering graphics quality hides
 // the shorter view behind fog instead of behind a hard edge of missing chunks.
 // Recomputed by applyGraphicsQuality().
-let FOG_NEAR = RENDER_DISTANCE * 16 - 38;
-let FOG_FAR = RENDER_DISTANCE * 16 - 6;
+let FOG_NEAR = DEFAULT_RENDER_DISTANCE * 16 - 38;
+let FOG_FAR = DEFAULT_RENDER_DISTANCE * 16 - 6;
 // Only this nearby bubble blocks entry. The old startup path waited for the
 // complete 17x17 render area (289 expensive light+mesh jobs) before Play could
 // proceed, even though collision only needs the chunks immediately around the
@@ -167,6 +174,14 @@ const INITIAL_LOAD_DISTANCE = 2;
 const TITLE_WORLD_BUDGET_MS = 12;
 const FOV = 70;
 const SPRINT_FOV = 80.5;
+// Hold-to-zoom (default C), scroll to change the magnification while held —
+// the spyglass/"smooth zoom" feel: the FOV eases in and out rather than
+// snapping, and the look speed scales with it so a 10x view is still aimable.
+const ZOOM_MIN = 1.5;
+const ZOOM_MAX = 12;
+const ZOOM_DEFAULT = 4;
+const ZOOM_STEP = 1.22;   // per wheel notch (multiplicative — even in log terms)
+const ZOOM_EASE = 11;     // e-folds per second toward the target magnification
 
 const app = document.getElementById('app')!;
 const overlay = document.getElementById('overlay')!;
@@ -265,6 +280,9 @@ renderer.domElement.addEventListener('webglcontextrestored', () => {
 });
 
 const scene = new THREE.Scene();
+// The `max` preset's shader stack. Inert (and holding no buffers) until a
+// preset with `shaders: true` is applied — see applyGraphicsQuality.
+const postfx = new PostFX(renderer, scene);
 const vaultEncounterVisuals = new VaultEncounterVisuals(scene);
 scene.background = new THREE.Color();
 scene.fog = new THREE.Fog(new THREE.Color(), FOG_NEAR, FOG_FAR);
@@ -317,10 +335,20 @@ scene.add(viewCamera);
 const atlas = createAtlas(seed, renderer.capabilities.getMaxAnisotropy());
 const cracks = createCrackTextures();
 const world = new World(scene, atlas, seed);
+// The sun's shadow map. Like PostFX it belongs to the `max` preset and holds
+// no buffers until that preset is applied; it writes into uniforms World owns,
+// because those are bound into the chunk shaders when they first compile.
+const sunShadow = new SunShadow(renderer, scene, atlas.texture, world.shadowUniforms);
 // Offline single-player gets a random dry spawn too (MP uses the server's).
 const spawn = world.terrain.randomDrySpawn(Math.random, CORE_HALF);
 const player = new Player(spawn);
+// HUD look + keybinds (Pause -> HUD Settings). Applied before the first frame
+// and before Input reads a key, so nothing ever renders or listens with the
+// defaults when the player has chosen otherwise.
+const hudSettings = loadHudSettings();
+applyHudTheme(hudSettings.theme);
 const input = new Input(renderer.domElement);
+input.setBinds(hudSettings.binds);
 // Phones/tablets get on-screen controls (joystick + buttons) that feed the
 // exact same Input fields the keyboard/mouse write — pointer lock is virtual
 // in touch mode. Callbacks close over UI declared further down; they only run
@@ -689,6 +717,14 @@ let grappleTrailAt = 0;         // next speed-trail particle (local seconds)
 let grapplePrevJump = false;    // rising-edge detach on SPACE
 let glideBlockedUntil = 0;      // the detach keypress must not also open wings
 let speedFov = 0;               // extra FOV from raw speed (the camera "kick")
+/** Magnification the zoom key is asking for; kept between presses so the level
+ *  you scrolled to last time is the one you get back. */
+let zoomTarget = ZOOM_DEFAULT;
+/** The eased magnification actually applied to the camera (1 = not zoomed). */
+let zoomAmount = 1;
+/** Gameplay FOV before the zoom key divides it — what the sprint/sights/speed
+ *  easing runs on, so a cutscene's own FOV can never become its starting point. */
+let fovNoZoom = FOV;
 /** A server teleport waiting for the destination chunks to stream in. While
  *  set, the player is pinned at the target (no gravity fall into ungenerated
  *  world); cleared once the near bubble is meshed (or after a timeout). */
@@ -1904,6 +1940,7 @@ window.addEventListener('resize', () => {
   renderer.setPixelRatio(Math.min(
     window.devicePixelRatio, GRAPHICS_PRESETS[accessibility.graphicsQuality].pixelRatioCap));
   renderer.setSize(window.innerWidth, window.innerHeight);
+  postfx.setSize(window.innerWidth, window.innerHeight);
 });
 
 /** Push the chosen graphics preset into the renderer, the streamer and the fog.
@@ -1915,6 +1952,16 @@ function applyGraphicsQuality(quality: GraphicsQuality): void {
   FOG_FAR = world.renderDistance * 16 - 6;
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, preset.pixelRatioCap));
   renderer.setSize(window.innerWidth, window.innerHeight);
+  // Smooth lighting is baked into the chunk geometry, so this queues a remesh
+  // of everything loaded; the streamer works through it a few chunks a frame.
+  world.setSmoothLighting(preset.smoothLighting);
+  postfx.setEnabled(preset.shaders);
+  postfx.setSize(window.innerWidth, window.innerHeight);
+  // The rest of the shader preset: cast sun shadows and give the cloud decks
+  // their volumetric shading. Both are inert on every preset below `max`.
+  sunShadow.setEnabled(preset.shaders);
+  sky.setShaders(preset.shaders);
+  world.shaderModeUniform.value = preset.shaders ? 1 : 0;
 }
 
 // Screen state: 'title' shows the orbiting panorama + Play; 'paused' shows
@@ -4324,76 +4371,85 @@ function beginPlay(): void {
 // doing rather than one long alphabet soup, with the keys as chips so they can
 // be picked out at a glance. The card scrolls internally: the old centred
 // column silently clipped its first and last rows on shorter windows.
+// Rebuilt from the live keybinds every time the sheet opens (see below), so
+// Controls and HUD Settings can never disagree about which key does what.
+let renderControlsBody = (): void => { /* assigned by the IIFE */ };
 const controlsPanel = (() => {
   // [action, alternatives, hint]. An alternative is a list of chips shown
   // adjacent (W A S D is one combo, not four choices); alternatives are joined
   // by "or"; the hint is prose ("in mid-air"), never a key.
   type Bind = [string, string[][], string?];
   type Group = { title: string; binds: Bind[] };
-  const groups: Group[] = isMobile ? [
-    { title: 'Moving', binds: [
-      ['Move', [['left joystick']]],
-      ['Sprint', [['left joystick']], 'push past the rim'],
-      ['Jump', [['⬆']], 'hold'], ['Sneak', [['⇩']], 'toggle'],
-      ['Deploy glider', [['⬆']], 'in mid-air'],
-      ['Fire grappling hook', [['tap']], 'holding the hook'],
-      ['Let go and launch', [['⬆']], 'mid-swing — you keep the speed'],
-      ['Launch boat', [['tap']], 'on water'], ['Hop out of boat', [['⬆']]],
-    ] },
-    { title: 'Fighting', binds: [
-      ['Break block / attack', [['long-press']]], ['Place / use', [['tap']]],
-      ['Aim down sights', [['⊕']]], ['Reload gun', [['R']]],
-    ] },
-    { title: 'Items', binds: [
-      ['Hotbar slot', [['tap a slot']]], ['Inventory', [['🎒']]],
-    ] },
-    { title: 'The world', binds: [
-      ['World map', [['🗺']]], ['Your progress', [['⚑']]],
-      ['Command box', [['/']], 'commands only — there is no chat'],
-    ] },
-    { title: 'Commands', binds: [
-      ['Open the world map', [['/map']]], ['Drop a waypoint here', [['/waypoint']]],
-      ['Warfare Command', [['/warfare']]], ['Getting-started guide', [['/guide']]],
-      ['Teleport to a player', [['/tpa']]], ['Accept a request', [['/tpaccept']], 'then stand still'],
-      ['Every command you can run', [['/help']]],
-    ] },
-    { title: 'Screens', binds: [
-      ['Getting-started guide', [['✕']], 'starts open — tap to hide'],
-      ['Pause / back', [['⏸']]],
-    ] },
-  ] : [
-    { title: 'Moving', binds: [
-      ['Move', [['W', 'A', 'S', 'D']]],
-      ['Sprint', [['Q'], ['W', 'W']], 'double-tap'],
-      ['Jump', [['Space']]], ['Sneak', [['Shift']]],
-      ['Deploy glider', [['Space']], 'in mid-air'],
-      ['Fire grappling hook', [['Left click']], 'holding the hook'],
-      ['Let go and launch', [['Space']], 'mid-swing — you keep the speed'],
-      ['Steer the swing', [['W', 'A', 'S', 'D']], 'while hooked'],
-      ['Launch boat', [['Right click']], 'on water'], ['Hop out of boat', [['Space']]],
-    ] },
-    { title: 'Fighting', binds: [
-      ['Break block / attack', [['Left click']]], ['Place / use', [['Right click']]],
-      ['Aim down sights', [['Right click']], 'hold'], ['Reload gun', [['R']]],
-    ] },
-    { title: 'Items', binds: [
-      ['Hotbar slot', [['1'], ['9'], ['scroll']]], ['Inventory', [['E']]],
-      ['Drop item', [['O']], 'Shift + O drops the stack'],
-    ] },
-    { title: 'The world', binds: [
-      ['Command box', [['T']], 'commands only — there is no chat'],
-    ] },
-    { title: 'Commands', binds: [
-      ['Open the world map', [['/map']]], ['Set waypoint here', [['/waypoint']]],
-      ['Warfare Command', [['/warfare']]], ['Getting-started guide', [['/guide']]],
-      ['Teleport to a player', [['/tpa']]], ['Accept a request', [['/tpaccept']], 'then stand still'],
-      ['Every command you can run', [['/help']]],
-    ] },
-    { title: 'Screens', binds: [
-      ['Camera view (1st / 3rd)', [['V']]],
-      ['Debug overlay', [['F3']]], ['Pause / back', [['Esc']]],
-    ] },
-  ];
+  const buildGroups = (): Group[] => {
+    const k = hudSettings.binds;
+    const move = [keyLabel(k.forward), keyLabel(k.left), keyLabel(k.back), keyLabel(k.right)];
+    return isMobile ? [
+      { title: 'Moving', binds: [
+        ['Move', [['left joystick']]],
+        ['Sprint', [['left joystick']], 'push past the rim'],
+        ['Jump', [['⬆']], 'hold'], ['Sneak', [['⇩']], 'toggle'],
+        ['Deploy glider', [['⬆']], 'in mid-air'],
+        ['Fire grappling hook', [['tap']], 'holding the hook'],
+        ['Let go and launch', [['⬆']], 'mid-swing — you keep the speed'],
+        ['Launch boat', [['tap']], 'on water'], ['Hop out of boat', [['⬆']]],
+      ] },
+      { title: 'Fighting', binds: [
+        ['Break block / attack', [['long-press']]], ['Place / use', [['tap']]],
+        ['Aim down sights', [['⊕']]], ['Reload gun', [['R']]],
+      ] },
+      { title: 'Items', binds: [
+        ['Hotbar slot', [['tap a slot']]], ['Inventory', [['🎒']]],
+      ] },
+      { title: 'The world', binds: [
+        ['World map', [['🗺']]], ['Your progress', [['⚑']]],
+        ['Command box', [['/']], 'commands only — there is no chat'],
+      ] },
+      { title: 'Commands', binds: [
+        ['Open the world map', [['/map']]], ['Drop a waypoint here', [['/waypoint']]],
+        ['Warfare Command', [['/warfare']]], ['Getting-started guide', [['/guide']]],
+        ['Teleport to a player', [['/tpa']]], ['Accept a request', [['/tpaccept']], 'then stand still'],
+        ['Every command you can run', [['/help']]],
+      ] },
+      { title: 'Screens', binds: [
+        ['Getting-started guide', [['✕']], 'starts open — tap to hide'],
+        ['Pause / back', [['⏸']]],
+      ] },
+    ] : [
+      { title: 'Moving', binds: [
+        ['Move', [move]],
+        ['Sprint', [[keyLabel(k.sprint)], [keyLabel(k.forward), keyLabel(k.forward)]], 'double-tap'],
+        ['Jump', [[keyLabel(k.jump)]]], ['Sneak', [[keyLabel(k.sneak)]]],
+        ['Deploy glider', [[keyLabel(k.jump)]], 'in mid-air'],
+        ['Fire grappling hook', [['Left click']], 'holding the hook'],
+        ['Let go and launch', [[keyLabel(k.jump)]], 'mid-swing — you keep the speed'],
+        ['Steer the swing', [move], 'while hooked'],
+        ['Launch boat', [['Right click']], 'on water'],
+        ['Hop out of boat', [[keyLabel(k.jump)]]],
+      ] },
+      { title: 'Fighting', binds: [
+        ['Break block / attack', [['Left click']]], ['Place / use', [['Right click']]],
+        ['Aim down sights', [['Right click']], 'hold'], ['Reload gun', [[keyLabel(k.reload)]]],
+      ] },
+      { title: 'Items', binds: [
+        ['Hotbar slot', [['1'], ['9'], ['scroll']]], ['Inventory', [[keyLabel(k.inventory)]]],
+        ['Drop item', [[keyLabel(k.drop)]], `Shift + ${keyLabel(k.drop)} drops the stack`],
+      ] },
+      { title: 'The world', binds: [
+        ['Command box', [[keyLabel(k.chat)]], 'commands only — there is no chat'],
+      ] },
+      { title: 'Commands', binds: [
+        ['Open the world map', [['/map']]], ['Set waypoint here', [['/waypoint']]],
+        ['Warfare Command', [['/warfare']]], ['Getting-started guide', [['/guide']]],
+        ['Teleport to a player', [['/tpa']]], ['Accept a request', [['/tpaccept']], 'then stand still'],
+        ['Every command you can run', [['/help']]],
+      ] },
+      { title: 'Screens', binds: [
+        ['Camera view (1st / 3rd)', [[keyLabel(k.view)]]],
+        ['Zoom', [[keyLabel(k.zoom)]], 'hold; scroll to change the magnification'],
+        ['Debug overlay', [['F3']]], ['Pause / back', [['Esc']]],
+      ] },
+    ];
+  };
 
   const panel = document.createElement('div');
   panel.className = 'sheet-scrim';
@@ -4412,48 +4468,52 @@ const controlsPanel = (() => {
 
   const body = document.createElement('div');
   body.className = 'sheet-body';
-  for (const group of groups) {
-    const section = document.createElement('section');
-    section.className = 'keygroup';
-    const label = document.createElement('h3');
-    label.className = 'keygroup-title';
-    label.textContent = group.title;
-    section.appendChild(label);
-    for (const [action, alternatives, hint] of group.binds) {
-      const row = document.createElement('div');
-      row.className = 'keyrow';
-      const name = document.createElement('span');
-      name.className = 'keyrow-action';
-      name.textContent = action;
-      const chips = document.createElement('span');
-      chips.className = 'keyrow-keys';
-      alternatives.forEach((combo, i) => {
-        if (i > 0) {
-          const sep = document.createElement('i');
-          sep.className = 'keyrow-sep';
-          sep.textContent = 'or';
-          chips.appendChild(sep);
+  renderControlsBody = (): void => {
+    body.textContent = '';
+    for (const group of buildGroups()) {
+      const section = document.createElement('section');
+      section.className = 'keygroup';
+      const label = document.createElement('h3');
+      label.className = 'keygroup-title';
+      label.textContent = group.title;
+      section.appendChild(label);
+      for (const [action, alternatives, hint] of group.binds) {
+        const row = document.createElement('div');
+        row.className = 'keyrow';
+        const name = document.createElement('span');
+        name.className = 'keyrow-action';
+        name.textContent = action;
+        const chips = document.createElement('span');
+        chips.className = 'keyrow-keys';
+        alternatives.forEach((combo, i) => {
+          if (i > 0) {
+            const sep = document.createElement('i');
+            sep.className = 'keyrow-sep';
+            sep.textContent = 'or';
+            chips.appendChild(sep);
+          }
+          const set = document.createElement('span');
+          set.className = 'keyrow-combo';
+          for (const key of combo) {
+            const chip = document.createElement('kbd');
+            setIconText(chip, key);
+            set.appendChild(chip);
+          }
+          chips.appendChild(set);
+        });
+        if (hint) {
+          const note = document.createElement('i');
+          note.className = 'keyrow-hint';
+          setIconText(note, hint);
+          chips.appendChild(note);
         }
-        const set = document.createElement('span');
-        set.className = 'keyrow-combo';
-        for (const key of combo) {
-          const chip = document.createElement('kbd');
-          setIconText(chip, key);
-          set.appendChild(chip);
-        }
-        chips.appendChild(set);
-      });
-      if (hint) {
-        const note = document.createElement('i');
-        note.className = 'keyrow-hint';
-        setIconText(note, hint);
-        chips.appendChild(note);
+        row.append(name, chips);
+        section.appendChild(row);
       }
-      row.append(name, chips);
-      section.appendChild(row);
+      body.appendChild(section);
     }
-    body.appendChild(section);
-  }
+  };
+  renderControlsBody();
 
   const back = document.createElement('button');
   back.className = 'mc-btn sheet-close';
@@ -4478,7 +4538,9 @@ const controlsPanel = (() => {
 controlsBtn.addEventListener('click', () => {
   charUI.close();
   capesUI.hide();
-  controlsPanel.style.display = controlsPanel.style.display === 'flex' ? 'none' : 'flex';
+  const opening = controlsPanel.style.display !== 'flex';
+  if (opening) renderControlsBody(); // pick up any rebinds since it last opened
+  controlsPanel.style.display = opening ? 'flex' : 'none';
 });
 
 // --- CHARACTER: customise your avatar (skin, hair, hats, face…) --------------
@@ -5271,6 +5333,57 @@ const tutorial = (() => {
 
 document.getElementById('resume-btn')!.addEventListener('click', () => {
   resumePlay();
+});
+
+let hudSaveTimer = 0;
+/** Coalesced save. Every control in the HUD panel and every pixel of a drag
+ *  lands here, and a localStorage write is synchronous. */
+function saveHudSoon(): void {
+  window.clearTimeout(hudSaveTimer);
+  hudSaveTimer = window.setTimeout(() => saveHudSettings(hudSettings), 200);
+}
+
+// The always-on readouts (FPS, CPS, coordinates, keystrokes). They are their
+// own overlay rather than part of the HUD class because the player can drag
+// each one anywhere on screen, so nothing about where they sit is fixed.
+const hudMods = createHudMods(app, {
+  layout: hudSettings.layout,
+  binds: hudSettings.binds,
+  onChange: saveHudSoon,
+  // Leaving the drag editor puts the player back where they opened it from:
+  // the HUD Settings panel, over the pause menu.
+  onEditDone: () => {
+    if (screen === 'paused') {
+      pauseEl.style.display = 'flex';
+      hudSettingsPanel.show();
+    }
+  },
+});
+
+// HUD Settings sits over the pause menu rather than replacing it: the panel
+// previews the theme against a stand-in sky, so there is nothing to see behind
+// it and closing it should land you back where you opened it.
+const hudSettingsPanel = createHudSettingsPanel(app, {
+  settings: hudSettings,
+  touch: isMobile,
+  onChange: () => {
+    input.setBinds(hudSettings.binds);
+    hudMods.setBinds(hudSettings.binds);
+    // Toggling a module or resizing it in the panel has to reach the live
+    // overlay, which is reading the same layout object.
+    hudMods.sync();
+    saveHudSoon();
+  },
+  onClose: () => { if (screen === 'paused') pauseEl.style.display = 'flex'; },
+  // Hand the whole screen over to the drag editor: the pause menu behind the
+  // panel would otherwise sit on top of the very readouts being arranged.
+  onEditLayout: () => {
+    pauseEl.style.display = 'none';
+    hudMods.beginEdit();
+  },
+});
+document.getElementById('hud-settings-btn')!.addEventListener('click', () => {
+  hudSettingsPanel.show();
 });
 document.getElementById('quit-btn')!.addEventListener('click', () => {
   // Quitting the play screen must relinquish every helicopter attachment even
@@ -7568,6 +7681,10 @@ function reloadGun(): void {
 }
 let stepAccum = 0;
 let ambienceTimer = 20;
+// Biome name for the draggable readout, resampled on a timer rather than every
+// frame: naming a biome means sampling the terrain height first.
+let hudBiomeName = '';
+let hudBiomeTimer = 0;
 let torchTime = 0; // flame-flicker clock for the held-torch light
 let wasGliding = false; // edge-detect glider deploy for the whoosh/notice
 
@@ -7577,6 +7694,17 @@ function facingString(): string {
     return dx > 0 ? 'east (+X)' : 'west (-X)';
   }
   return dz > 0 ? 'south (+Z)' : 'north (-Z)';
+}
+
+/** Cardinal name and world axis, for the draggable direction readout. The F3
+ *  overlay's facingString() packs both into one string; this keeps them apart
+ *  so the module can style them differently. */
+function facingParts(): { name: string; axis: string } {
+  const dx = -Math.sin(player.yaw), dz = -Math.cos(player.yaw);
+  if (Math.abs(dx) > Math.abs(dz)) {
+    return dx > 0 ? { name: 'East', axis: '+X' } : { name: 'West', axis: '-X' };
+  }
+  return dz > 0 ? { name: 'South', axis: '+Z' } : { name: 'North', axis: '-Z' };
 }
 
 function clockString(): string {
@@ -7603,9 +7731,18 @@ function updateCamera(): void {
   // eases toward the target, so no extra smoothing is needed here.)
   const base = player.sprinting ? SPRINT_FOV : FOV;
   const targetFov = base / aimZoom + (aimZoom > 1 ? 0 : speedFov);
-  player.lookScale = aimZoom > 1 ? Math.max(0.3, 1 / aimZoom) : 1;
-  if (Math.abs(camera.fov - targetFov) > 0.01) {
-    camera.fov += (targetFov - camera.fov) * 0.3;
+  // Sights and the zoom key stack: scoping a rifle while zoomed magnifies both.
+  player.lookScale = aimZoom * zoomAmount > 1
+    ? Math.max(0.1, 1 / (aimZoom * zoomAmount)) : 1;
+  // `fovNoZoom` is the gameplay FOV the game has always eased toward (sprint,
+  // sights, speed kick); the zoom key divides it afterwards. Keeping the two
+  // apart means the ramp is not smoothed twice — its own easing already is
+  // frame-rate independent — while sprinting or scoping mid-zoom still eases.
+  const settled = Math.abs(fovNoZoom - targetFov) <= 0.01;
+  if (!settled) fovNoZoom += (targetFov - fovNoZoom) * 0.3;
+  const want = fovNoZoom / zoomAmount;
+  if (!settled || camera.fov !== want) {
+    camera.fov = want;
     camera.updateProjectionMatrix();
   }
   if (view !== View.First) updateViewCamera();
@@ -7988,6 +8125,10 @@ function updateAtmosphere(): void {
   // the sky is showing rather than by a flat brightness scalar.
   world.sunTintUniform.value.copy(sky.sunTint);
   world.skyTintUniform.value.copy(sky.ambientTint);
+  // Where the sun is, and what the water reflects when it looks up at the sky.
+  world.sunDirUniform.value.copy(sky.sunDir);
+  world.skyColorUniform.value.copy(sky.skyColor);
+  world.timeUniform.value = sky.time * DAY_LENGTH;
   const fog = scene.fog as THREE.Fog;
   if (player.eyeUnderwater) {
     // Underwater haze takes the local water colour, so surfacing in a tropical
@@ -10525,7 +10666,17 @@ function frame(): void {
         net.sendCommand(`gamemode ${mode} ${net.username}`);
       }
       if (input.hotbarKey >= 0) inventory.select(input.hotbarKey);
-      if (input.wheelDelta !== 0) inventory.select(inventory.selected + input.wheelDelta);
+      // While the zoom key is held the wheel drives the magnification instead
+      // of the hotbar — scrolling off your held item mid-zoom is never what the
+      // scroll was meant for.
+      if (input.wheelDelta !== 0) {
+        if (input.zoomHeld) {
+          zoomTarget = THREE.MathUtils.clamp(
+            zoomTarget * ZOOM_STEP ** -input.wheelDelta, ZOOM_MIN, ZOOM_MAX);
+        } else {
+          inventory.select(inventory.selected + input.wheelDelta);
+        }
+      }
       if (input.dropPressed && !duelArenaActive) {
         dropCurrentItem(input.down('ShiftLeft') || input.down('ShiftRight'));
       }
@@ -10574,6 +10725,17 @@ function frame(): void {
       const speed = player.vel.length();
       const want = Math.max(0, Math.min(13, (speed - 12) * 0.85));
       speedFov += (want - speedFov) * Math.min(1, dt * 6);
+    }
+    // Smooth zoom: ease in LOG space so every step of the ramp changes the view
+    // by the same proportion — a linear FOV ramp crawls at 10x and lurches at
+    // 2x. Snapping the last sliver keeps `zoomAmount === 1` exactly when idle,
+    // so an un-zoomed camera is bit-for-bit what it was before this existed.
+    {
+      const want = controlling && input.zoomHeld ? zoomTarget : 1;
+      const k = 1 - Math.exp(-dt * ZOOM_EASE);
+      zoomAmount = Math.exp(THREE.MathUtils.lerp(
+        Math.log(zoomAmount), Math.log(want), k));
+      if (Math.abs(zoomAmount - want) < 0.002) zoomAmount = want;
     }
     // World border: keep the player inside the play area (the server clamps
     // authoritatively too). During a war this is the CLOSING red ring — but a
@@ -10904,7 +11066,11 @@ function frame(): void {
   updateGliderRig(dt); // the wing first: the pilot pose hangs off its state
   updateSelfAvatar(dt);
 
-  world.update(player.pos.x, player.pos.z, 6, duelArenaActive ? 3 : RENDER_DISTANCE);
+  // The streaming radius is the one the graphics preset chose, not the
+  // RENDER_DISTANCE ceiling: passing the ceiling here would mesh every chunk
+  // out to the `max` radius no matter which preset the player picked.
+  world.update(player.pos.x, player.pos.z, 6,
+    duelArenaActive ? 3 : world.renderDistance);
   if (net.connected && hasServerWorldTime) {
     const extrapolated = serverWorldTime + (performance.now() - serverWorldTimeAt) / 1000;
     sky.time = 0.04 + extrapolated / DAY_LENGTH;
@@ -11082,6 +11248,42 @@ function frame(): void {
     }));
   }
 
+  // The always-on readouts. They stay up for the whole session, so this runs
+  // every frame; each module only touches the DOM when its own text changes.
+  // Playing only. The pause menu is a dark scrim ABOVE this overlay, so
+  // leaving the readouts up there would show them dimmed and unreachable
+  // behind it; the drag editor is how they are reached from the pause menu.
+  const modsVisible = worldReady && screen === 'playing';
+  hudMods.setVisible(modsVisible);
+  if (modsVisible || hudMods.editing) {
+    hudBiomeTimer -= dt;
+    if (hudBiomeTimer <= 0 && hudSettings.layout.biome.on) {
+      hudBiomeTimer = 0.5;
+      const bx = Math.floor(player.pos.x), bz = Math.floor(player.pos.z);
+      hudBiomeName = BIOME_NAMES[
+        world.terrain.biomeWithWater(bx, bz, world.terrain.height(bx, bz))];
+    }
+    const facing = facingParts();
+    const heldStack = inventory.selectedStack;
+    const modData: HudModData = {
+      fps,
+      x: player.pos.x, y: player.pos.y, z: player.pos.z,
+      facing: facing.name, axis: facing.axis,
+      // clockString() appends the day in brackets; the modules keep the two
+      // apart so a player can have one without the other.
+      time: clockString().slice(0, 5),
+      day: Math.floor(sky.time) + 1,
+      speed: Math.hypot(player.vel.x, player.vel.z),
+      biome: hudBiomeName,
+      held: heldStack ? ITEMS[heldStack.id]?.name ?? '' : '',
+      players: net.connected ? net.remotes.size + 1 : 1,
+      armor: armorPts,
+      health: player.health,
+      maxHealth: duelArenaActive ? DUEL_MAX_HEALTH : player.maxHealth,
+    };
+    hudMods.update(modData);
+  }
+
   if (hud.debugVisible) {
     const t = interaction.target;
     hud.updateDebug({
@@ -11112,7 +11314,12 @@ function frame(): void {
   }
 
   input.endFrame();
-  renderer.render(scene, activeCamera);
+  // Redraw the sun's shadow map from the eye's neighbourhood immediately before
+  // the frame that samples it, so it can never be a frame behind the world it
+  // is shading. `camera` is the eye even in third person, which keeps the box
+  // centred on the player rather than on the trailing camera.
+  sunShadow.update(sky.sunDir, camera.position, sky.sunHeight);
+  postfx.render(activeCamera);
   // Floating waypoint badges (skip the title panorama — wrong camera + covered).
   worldMap.renderBeacons(window.innerWidth, window.innerHeight);
 }
