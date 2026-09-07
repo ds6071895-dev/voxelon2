@@ -283,6 +283,73 @@
     .dmg-num.hit   { color: #ffffff; font-size: 20px; }
     .dmg-num.heavy { color: #ffd25e; font-size: 26px; text-shadow: 0 0 18px rgba(255,180,40,.65), 0 2px 6px rgba(0,0,0,.85); }
     .dmg-num.kill  { color: #ff5566; font-size: 31px; text-shadow: 0 0 24px rgba(255,60,80,.7), 0 2px 8px rgba(0,0,0,.9); }
+    /* A jump-crit is a thing the player DID, so it gets its own read rather
+       than just being a bigger `heavy`: gold, larger, with a hard rim. */
+    .dmg-num.crit  { color: #ffe066; font-size: 34px; letter-spacing: .5px;
+      text-shadow: 0 0 26px rgba(255,205,60,.85), 0 0 6px rgba(255,255,255,.9), 0 2px 8px rgba(0,0,0,.9); }
+
+    /* ── Bedwars HUD ─────────────────────────────────────────────────────── */
+    .bw-hud { position: absolute; inset: 0; pointer-events: none; z-index: 42;
+      --bw-team: #e0555f; font: 800 11px/1 'Segoe UI', system-ui, sans-serif; }
+    .bw-hud[hidden] { display: none !important; }
+
+    .bw-resources { position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+      display: flex; gap: 10px; padding: 7px 12px; border-radius: 10px;
+      background: rgba(8,10,18,.62); border: 1px solid rgba(150,182,224,.18);
+      backdrop-filter: blur(6px); }
+    .bw-res-cell { display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 46px; }
+    .bw-res-label { font: 800 8px/1 inherit; letter-spacing: 1.2px; color: #8398b2; }
+    .bw-res { font: 900 17px/1 inherit; }
+    .bw-res.iron { color: #d8e2ec; } .bw-res.gold { color: #ffc043; } .bw-res.diamond { color: #6ee7f2; }
+
+    .bw-beds { position: absolute; top: 14px; left: 14px; display: flex; flex-direction: column; gap: 5px; }
+    .bw-bed { display: flex; align-items: center; gap: 8px; padding: 5px 10px; border-radius: 8px;
+      background: rgba(8,10,18,.58); border-left: 3px solid var(--bw-bed-color, #888); }
+    .bw-bed.mine { box-shadow: inset 0 0 0 1px rgba(255,255,255,.14); }
+    .bw-bed-name { color: var(--bw-bed-color, #ccc); min-width: 58px; }
+    .bw-bed-state { font: 800 9px/1 inherit; letter-spacing: 1.1px; color: #7fe0a0; }
+    .bw-bed.gone .bw-bed-state { color: #ff6b78; }
+    .bw-bed-count { margin-left: auto; color: #aec1d8; }
+
+    .bw-stage { position: absolute; top: 62px; left: 50%; transform: translateX(-50%);
+      padding: 6px 16px; border-radius: 8px; font: 900 12px/1 inherit; letter-spacing: 2px;
+      background: rgba(8,10,18,.72); }
+    .bw-stage.warn { color: #ffc043; box-shadow: 0 0 24px rgba(255,192,67,.35); }
+    .bw-stage.danger { color: #ff6b78; box-shadow: 0 0 24px rgba(255,107,120,.4); }
+
+    .bw-combo { position: absolute; left: 50%; top: calc(50% + 42px); transform: translateX(-50%);
+      display: flex; align-items: center; gap: 5px; }
+    .bw-combo-x { font: 900 15px/1 inherit; color: #ffd25e; text-shadow: 0 0 12px rgba(255,200,70,.6); }
+    .bw-pip { width: 7px; height: 7px; border-radius: 50%; background: rgba(255,255,255,.18); }
+    .bw-pip.lit { background: #ffd25e; box-shadow: 0 0 8px rgba(255,210,94,.8); }
+    .bw-combo.max .bw-combo-x { color: #ff8a4c; text-shadow: 0 0 16px rgba(255,138,76,.8); }
+
+    /* Charge arc: a thin ring under the crosshair that fills as the swing
+       recharges. Hidden at full, so a ready axe leaves the screen clean. */
+    .bw-charge { position: absolute; left: 50%; top: 50%; width: 46px; height: 46px;
+      transform: translate(-50%,-50%); }
+    .bw-charge-fill { width: 100%; height: 100%; border-radius: 50%;
+      background: conic-gradient(#ffd25e calc(var(--charge, 0) * 360deg), rgba(255,255,255,.10) 0);
+      -webkit-mask: radial-gradient(circle, transparent 62%, #000 64%);
+      mask: radial-gradient(circle, transparent 62%, #000 64%); }
+
+    .bw-shop { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+      width: 340px; padding: 14px; border-radius: 12px; pointer-events: auto;
+      background: rgba(10,13,22,.94); border: 1px solid rgba(150,182,224,.22);
+      box-shadow: 0 24px 60px rgba(0,0,0,.6); }
+    .bw-shop-title { font: 900 13px/1 inherit; letter-spacing: 2.4px; color: var(--bw-team); }
+    .bw-shop-hint { margin: 6px 0 10px; font: 600 9px/1.4 inherit; color: #8398b2; }
+    .bw-shop-list { display: flex; flex-direction: column; gap: 4px; }
+    .bw-shop-row { display: flex; align-items: center; gap: 9px; width: 100%; padding: 7px 9px;
+      border: 1px solid rgba(150,182,224,.14); border-radius: 7px; cursor: pointer;
+      background: rgba(255,255,255,.03); color: #eaf1fa; font: inherit; text-align: left; }
+    .bw-shop-row:hover { background: rgba(255,255,255,.08); }
+    .bw-shop-key { width: 16px; height: 16px; display: grid; place-items: center; border-radius: 4px;
+      background: rgba(255,255,255,.10); font: 800 9px/1 inherit; color: #aec1d8; }
+    .bw-shop-name { flex: 1; }
+    .bw-shop-cost { font: 700 9px/1 inherit; color: #8398b2; }
+    .bw-shop-row.afford .bw-shop-cost { color: #7fe0a0; }
+    .bw-shop-row.locked { opacity: .45; cursor: not-allowed; }
 
     .pvp-slam {
       position: absolute; left: 50%; top: 21%; z-index: 13; display: none;
@@ -2786,12 +2853,15 @@
                         <rect x="176" y="60" width="5" height="5" rx="2" fill="#ffffff" opacity=".7" />
                       </g>
                     </svg>
-                    <span class="minigame-status soon">Coming soon</span>
                   </div>
                   <div class="minigame-copy">
-                    <div class="minigame-title-row"><h3>Bedwars</h3><span class="minigame-count">Teams</span></div>
-                    <p>Defend your island’s bed, bridge into enemy territory, and outlast the opposing team.</p>
-                    <button class="minigame-action" type="button" aria-disabled="true">Coming soon</button>
+                    <div class="minigame-title-row"><h3>Bedwars</h3><span class="minigame-count">1v1 · teams · unranked</span></div>
+                    <p>Sky islands over the void. Mine iron at your forge, buy an axe from the Quartermaster, bridge the fourteen-block gap — and knock them off it. Break the bed and the next kill is the last one.</p>
+                    <div class="duel-card-actions">
+                      <button id="bedwars-card-action" class="minigame-action" type="button">Play</button>
+                      <button id="bedwars-private-action" class="duel-private-action" type="button">Invite Friends</button>
+                      <div id="bedwars-queue-status" class="duel-queue-status" role="status" aria-live="polite"></div>
+                    </div>
                   </div>
                 </article>
                 <article class="minigame-card" data-game="party">

@@ -88,6 +88,8 @@ export class HeldItemView {
   private mesh: THREE.Object3D | null = null;
   private currentItem: number | null = null;
   private swingT = 1; // 0..1, animating while < 1
+  /** The current swing is a full-charge axe release (a wider, heavier arc). */
+  private heavySwing = false;
   /** Fires once whenever a new hand/tool swing begins. */
   onSwing?: () => void;
   /** Fires when the weapon's action makes a noise worth hearing. */
@@ -366,9 +368,22 @@ export class HeldItemView {
     }
   }
 
+  /** A full-charge axe release. Reuses the same `swingT` spring as `swing()`
+   *  — it is the ARC that differs, not the machinery — so a heavy hit reads as
+   *  a bigger, slower commitment without a second animation system. */
+  swingHeavy(): void {
+    if (this.swingT >= 1) {
+      this.swingT = 0;
+      this.heavySwing = true;
+      this.onSwing?.();
+    }
+  }
+
   /** 0 at rest, 1 at the middle of the current swing. */
   swingAmount(): number {
-    return this.swingT < 1 ? Math.sin(this.swingT * Math.PI) : 0;
+    if (this.swingT >= 1) return 0;
+    // The heavy arc overshoots and lingers: same phase, wider reach.
+    return Math.sin(this.swingT * Math.PI) * (this.heavySwing ? 1.45 : 1);
   }
 
   /** Gun fired: punch the recoil springs, pop the flash, work the action. */
@@ -448,7 +463,12 @@ export class HeldItemView {
     // here when Interaction is actually working a block target.
     if (mining) this.swing();
 
-    if (this.swingT < 1) this.swingT = Math.min(1, this.swingT + dt / 0.25);
+    if (this.swingT < 1) {
+      // A heavy swing takes longer to come round, which is what makes it read
+      // as a commitment rather than a flick.
+      this.swingT = Math.min(1, this.swingT + dt / (this.heavySwing ? 0.32 : 0.25));
+      if (this.swingT >= 1) this.heavySwing = false;
+    }
     if (this.equipT < 1) this.equipT = Math.min(1, this.equipT + dt / 0.34);
     this.recoilPulse = Math.max(0, this.recoilPulse - dt * 5);
     this.idleT += dt;

@@ -712,6 +712,47 @@ export class GameAudio {
     this.noise({ freq: 300, dur: 0.12, gain: 0.04, slideTo: 130, type: 'lowpass', q: 0.6 });
   }
 
+  // --- Bedwars axe melee -----------------------------------------------------
+  // Four beats that carry the whole combat read by ear: how charged the swing
+  // was, whether it connected, whether it crit, and — the one that matters
+  // most over a fourteen-block gap — that somebody is falling.
+
+  /** The swing itself. Pitch rises with charge, so a patient full-charge cut
+   *  sounds different from a spammed flick BEFORE it lands. */
+  axeSwing(charge: number): void {
+    const c = Math.max(0, Math.min(1, charge));
+    this.noise({ freq: 420 + 520 * c, dur: 0.10 + 0.06 * c, gain: 0.10 + 0.10 * c,
+      slideTo: 180, type: 'bandpass', q: 0.9 });
+    this.tone({ type: 'triangle', from: 180 + 120 * c, to: 90, dur: 0.09, gain: 0.06 + 0.05 * c });
+  }
+
+  /** Contact. A crit adds a bright upper ring over the same thud, so the two
+   *  read as the same weapon rather than two different ones. */
+  axeHit(crit: boolean, pos?: THREE.Vector3): void {
+    this.noise({ freq: 900, dur: 0.07, gain: 0.24, slideTo: 150, type: 'lowpass', q: 0.8, pos });
+    this.tone({ type: 'triangle', from: 300, to: 96, dur: 0.14, gain: 0.19, pos });
+    if (crit) {
+      this.tone({ type: 'sine', from: 1720, to: 1180, dur: 0.20, gain: 0.09, pos });
+      this.tone({ type: 'sine', from: 2400, to: 1900, dur: 0.12, gain: 0.05, pos });
+    }
+  }
+
+  /** A bed goes down. The loudest thing in the mode, because it is the moment
+   *  the match changes shape: a splintering crack over a falling sub-bass. */
+  bedBreak(pos?: THREE.Vector3): void {
+    this.noise({ freq: 1600, dur: 0.22, gain: 0.30, slideTo: 260, type: 'bandpass', q: 0.6, pos });
+    this.noise({ freq: 320, dur: 0.5, gain: 0.20, slideTo: 70, type: 'lowpass', q: 0.7, pos });
+    this.tone({ type: 'triangle', from: 220, to: 55, dur: 0.7, gain: 0.20, pos });
+    this.tone({ type: 'sine', from: 110, to: 40, dur: 1.1, gain: 0.14, attack: 0.02, pos });
+  }
+
+  /** Falling past the island bottom: a doppler-down whistle. Deliberately long
+   *  — the 22-block drop is a beat the player is meant to feel end. */
+  voidFall(): void {
+    this.tone({ type: 'sine', from: 900, to: 120, dur: 1.1, gain: 0.12, attack: 0.03 });
+    this.noise({ freq: 700, dur: 1.1, gain: 0.09, slideTo: 90, type: 'bandpass', q: 1.1 });
+  }
+
   /** Entering a vault (Milestone D): a low, ominous synth pad — soft attack,
    *  gentle gain, nothing shrill (same kid-safe recipe as the rest). */
   vaultSting(): void {

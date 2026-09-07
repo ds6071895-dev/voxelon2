@@ -22,6 +22,7 @@ import type {
   BombSnapshot, HeliLossReason, HelicopterSnapshot, SeatKind,
 } from '../vehicles';
 import type { DuelArenaBounds, DuelLobbySnapshot, DuelResult } from '../duels';
+import type { BwArenaBounds, BwLobbySnapshot, BwResult, BwStage } from '../bedwars';
 import type { DuelFlair, DuelPublicProfile } from '../duels_progression';
 import type { FactionPublic, Notification } from './protocol';
 import type { PoliticsState } from '../politics';
@@ -103,6 +104,21 @@ export class NetClient {
   onDuelProfileUpdate?: (id: number) => void;
   onDuelRestored?: (x: number, y: number, z: number, yaw: number, pitch: number, health: number,
     dead: boolean, mode: GameMode, state?: Record<string, unknown>) => void;
+  // --- Bedwars ---
+  onBwQueue?: (queued: boolean) => void;
+  onBwLobby?: (snapshot: BwLobbySnapshot, inviteToken?: string) => void;
+  onBwError?: (code: string, message: string) => void;
+  onBwArena?: (arena: BwArenaBounds, spawn: { x: number; y: number; z: number },
+    team: number, countdownEndsAt: number) => void;
+  onBwLoadout?: (slots: (ItemStack | null)[], selected: number, axe: number) => void;
+  onBwGrant?: (items: ItemStack[]) => void;
+  onBwResources?: (iron: number, gold: number, diamond: number) => void;
+  onBwHit?: (target: number, amount: number, combo: number, charge: number,
+    crit: boolean, killed: boolean) => void;
+  onBwBedBroken?: (team: number, by: number) => void;
+  onBwClock?: (serverNow: number, endsAt: number, stage: BwStage) => void;
+  onBwRespawn?: (respawnAt: number, spectating: boolean) => void;
+  onBwResult?: (result: BwResult) => void;
   /** Saved per-account state to restore (inventory/hotbar), if the account has any. */
   onRestoreState?: (state: Record<string, unknown>) => void;
   /** A block edit from another player (apply without re-broadcasting). */
@@ -533,6 +549,42 @@ export class NetClient {
       case 'duelLobby':
         this.onDuelLobby?.(msg.snapshot, msg.inviteToken);
         break;
+      case 'bwLobby':
+        this.onBwLobby?.(msg.snapshot, msg.inviteToken);
+        break;
+      case 'bwQueue':
+        this.onBwQueue?.(msg.queued);
+        break;
+      case 'bwError':
+        this.onBwError?.(msg.code, msg.message);
+        break;
+      case 'bwArena':
+        this.onBwArena?.(msg.arena, msg.spawn, msg.team, msg.countdownEndsAt);
+        break;
+      case 'bwLoadout':
+        this.onBwLoadout?.(msg.slots, msg.selected, msg.axe);
+        break;
+      case 'bwGrant':
+        this.onBwGrant?.(msg.items);
+        break;
+      case 'bwResources':
+        this.onBwResources?.(msg.iron, msg.gold, msg.diamond);
+        break;
+      case 'bwHit':
+        this.onBwHit?.(msg.target, msg.amount, msg.combo, msg.charge, msg.crit, msg.killed);
+        break;
+      case 'bwBedBroken':
+        this.onBwBedBroken?.(msg.team, msg.by);
+        break;
+      case 'bwClock':
+        this.onBwClock?.(msg.serverNow, msg.endsAt, msg.stage);
+        break;
+      case 'bwRespawn':
+        this.onBwRespawn?.(msg.respawnAt, msg.spectating);
+        break;
+      case 'bwResult':
+        this.onBwResult?.(msg.result);
+        break;
       case 'duelInviteInfo':
         this.onDuelInviteInfo?.(msg.valid, msg.host, msg.lobbyId);
         break;
@@ -696,6 +748,21 @@ export class NetClient {
   }
   sendDuelReturn(): void { if (this.connected) this.raw({ t: 'duelReturn' }); }
   sendDuelFlair(flair: DuelFlair): void { if (this.connected) this.raw({ t: 'duelFlair', flair }); }
+
+  sendBwCreate(): void { if (this.connected) this.raw({ t: 'bwCreate' }); }
+  sendBwQueue(join: boolean): void { if (this.connected) this.raw({ t: 'bwQueue', join }); }
+  sendBwJoin(token: string): void { if (this.connected) this.raw({ t: 'bwJoin', token }); }
+  sendBwLeave(): void { if (this.connected) this.raw({ t: 'bwLeave' }); }
+  sendBwReady(ready: boolean): void { if (this.connected) this.raw({ t: 'bwReady', ready }); }
+  sendBwStart(): void { if (this.connected) this.raw({ t: 'bwStart' }); }
+  sendBwArenaReady(): void { if (this.connected) this.raw({ t: 'bwArenaReady' }); }
+  /** The whole melee wire format: one target id. Damage, charge, crit, combo
+   *  and knockback are all decided by the server. */
+  sendBwMelee(target: number): void { if (this.connected) this.raw({ t: 'bwMelee', target }); }
+  sendBwBed(x: number, y: number, z: number): void {
+    if (this.connected) this.raw({ t: 'bwBed', x, y, z });
+  }
+  sendBwShopBuy(entry: number): void { if (this.connected) this.raw({ t: 'bwShopBuy', entry }); }
 
   sendEdit(x: number, y: number, z: number, block: number): void {
     if (this.connected) this.raw({ t: 'edit', x, y, z, block });

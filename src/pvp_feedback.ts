@@ -25,17 +25,22 @@ import * as THREE from 'three';
 import { DUEL_MULTI_KILL_MS, DUEL_SPREE_STEPS, type DuelEventKind } from './duels';
 import { iconSvg } from './emoji_icons';
 
-/** How a landed hit reads: soaked by armor, ordinary, heavy, or the kill. */
-export type HitFlavor = 'soak' | 'hit' | 'heavy' | 'kill';
+/** How a landed hit reads: soaked by armor, ordinary, heavy, a CRIT, or the
+ *  kill. `crit` outranks `heavy` because a jump-crit is a thing the player
+ *  DID, not merely a big number — it deserves its own read. */
+export type HitFlavor = 'soak' | 'hit' | 'heavy' | 'crit' | 'kill';
 
 /** Damage at or above this fraction of a full health bar reads as HEAVY. */
 const HEAVY_FRACTION = 0.22;
 
 /** Classify one landed hit for presentation. `maxHealth` is the target's bar
  *  where known (Duels normalises to 40), else the standard 20. */
-export function hitFlavor(amount: number, killed: boolean, maxHealth = 20): HitFlavor {
+export function hitFlavor(
+  amount: number, killed: boolean, maxHealth = 20, crit = false,
+): HitFlavor {
   if (killed) return 'kill';
   if (amount <= 0) return 'soak';
+  if (crit) return 'crit';
   return amount >= maxHealth * HEAVY_FRACTION ? 'heavy' : 'hit';
 }
 
@@ -92,10 +97,10 @@ export class DamageNumbers {
     this.live.push({
       el,
       pos: new THREE.Vector3(x + (Math.random() - 0.5) * 0.24, y, z + (Math.random() - 0.5) * 0.24),
-      vel: new THREE.Vector3(0, flavor === 'kill' ? 1.6 : 1.15, 0),
+      vel: new THREE.Vector3(0, flavor === 'kill' ? 1.6 : flavor === 'crit' ? 1.35 : 1.15, 0),
       driftX: side * 34,
       life: 0,
-      max: flavor === 'kill' ? 1.25 : 0.85,
+      max: flavor === 'kill' ? 1.25 : flavor === 'crit' ? 1.0 : 0.85,
     });
   }
 

@@ -110,6 +110,13 @@ import {
   duelTokenFromUrl, withDuelToken,
 } from './duels';
 import {
+  BEDWARS_AMBIENT_LIGHT, BEDWARS_ARENA_SIZE, BEDWARS_CEILING_Y, BEDWARS_HP_PER_HEART,
+  BEDWARS_MAX_HEALTH, BEDWARS_VOID_Y, BW_AXE_TIERS, BW_MELEE_RANGE,
+  bedwarsBedTeamAt, bedwarsBlockAt, bedwarsShopCells, bedwarsTeamWool, clampToBedwarsArena,
+  type BwArenaBounds, type BwLobbySnapshot,
+} from './bedwars';
+import { BedwarsUI, bedwarsResultCopy } from './bedwars_ui';
+import {
   DUEL_DIVISIONS, DUEL_FLAIRS, DUEL_SIGILS, DUEL_SIGIL_SIZE, DUEL_TIER_THEMES,
   DuelProgressChange, DuelPublicProfile,
   type DuelRank, duelProfileOf, duelRankAt, duelRankProgress,
@@ -1475,6 +1482,7 @@ function updateCombatFeedback(dt: number): void {
     else killChipEl.style.opacity = String(Math.min(1, killChipT / 0.45));
   }
   killBanner.update(dt);
+  updateBedwarsFrame();
 
   // The red rim from the last hit taken, plus a permanent low-health bed under
   // it. Both are capped hard when photosensitivity-safe mode is on.
@@ -4249,6 +4257,7 @@ function clearArenaState(): void {
   arenaCanEditAt = null;
   arenaClampPos = null;
   world.setArenaRenderBounds(null);
+  clearBedwarsSession();
 }
 
 function cleanupDuelSession(restoreState = true): void {
@@ -4397,6 +4406,9 @@ net.onDuelRestored = (x, y, z, yaw, pitch, health, dead, mode, state) => {
   pendingTeleport = { x, y, z, started: worldTimeLocal };
   applyLocalMode(mode); lastHealth = health; enterTitle(); renderDuelLobby(); openMinigames(true);
   duelLocalFallback = null;
+  bwLocalFallback = null; bwSnapshot = null; bwQueued = false; bwInviteToken = '';
+  bedwarsQueueStatus.textContent = '';
+  refreshBedwarsAvailability();
 };
 
 // First drop-in shows the guided briefing once (tracked in localStorage); after
@@ -7494,12 +7506,16 @@ net.onDisconnect = () => {
   pendingDuelAttempted = false;
   duelQueued = false;
   refreshDuelsAvailability();
-  if (arenaActive || duelSnapshot) {
+  const wasBedwars = arenaKind === 'bedwars' || !!bwSnapshot;
+  if (arenaActive || duelSnapshot || bwSnapshot) {
+    if (wasBedwars) restoreBedwarsFallback();
     cleanupDuelSession(true);
     input.unlock();
     enterTitle();
-    showNotice('Duels connection lost — your open-world state was kept safe.');
+    showNotice(`${wasBedwars ? 'Bedwars' : 'Duels'} connection lost — your open-world state was kept safe.`);
   }
+  bwQueued = false; bwSnapshot = null; bwInviteToken = '';
+  refreshBedwarsAvailability();
   player.damageSink = undefined;
   survival.enableRegen = true;
   clearVaultPresentation(true);
@@ -7603,6 +7619,368 @@ interaction.canEdit = (x, y, z) => {
   if (block === Block.MobSpawner || block === Block.VaultChest) return false;
   return !(encounterSnapshot && curVault && blockInsideArena(curVault, x, y, z));
 };
+
+// ── Bedwars ────────────────────────────────────────────────────────────────
+// Everything below mirrors the Duels client, with one structural difference:
+// combat is a single `bwMelee` send and the server answers with `bwHit`. The
+// client never computes damage, knockback, charge or crit — it only DRAWS them.
+
+const bedwarsCardAction = document.getElementById('bedwars-card-action') as HTMLButtonElement;
+const bedwarsPrivateAction = document.getElementById('bedwars-private-action') as HTMLButtonElement;
+const bedwarsQueueStatus = document.getElementById('bedwars-queue-status')!;
+const bedwarsUI = new BedwarsUI(document.body);
+
+let bwSnapshot: BwLobbySnapshot | null = null;
+let bwActiveBounds: BwArenaBounds | null = null;
+let bwTeam = 0;
+let bwQueued = false;
+let bwArenaReadySent = false;
+let bwInviteToken = '';
+let bwLocalFallback: {
+  state: ReturnType<typeof inventory.serialize>;
+  x: number; y: number; z: number; yaw: number; pitch: number;
+  health: number; dead: boolean; mode: GameMode;
+} | null = null;
+/** When the local axe next reaches full charge, for the crosshair arc. */
+let bwSwingReadyAt = 0;
+let bwSwingCooldownMs: number = BW_AXE_TIERS[0].cooldownMs;
+let bwAxe = Item.WoodenAxe;
+let bwSpectating = false;
+let bwWasBelowIslands = false;
+
+function bwCooldownFor(axe: number): number {
+  return (BW_AXE_TIERS.find((t) => t.item === axe) ?? BW_AXE_TIERS[0]).cooldownMs;
+}
+
+/** 0..1 charge of the local swing right now. Purely cosmetic — the server
+ *  recomputes it from its own clock when the swing actually lands. */
+function bwCharge(): number {
+  if (bwSwingCooldownMs <= 0) return 1;
+  const remaining = bwSwingReadyAt - performance.now();
+  if (remaining <= 0) return 1;
+  return Math.max(0, Math.min(1, 1 - remaining / bwSwingCooldownMs));
+}
+
+/** The Bedwars build rules, behind the generic arena hooks. Placement is
+ *  limited to the mode's own materials above the island surface; breaking is
+ *  limited to blocks a player placed, so no authored geometry — and no bed —
+ *  can be mined away. The server re-checks all of this. */
+const bedwarsArenaRules = {
+  canPlaceAt(x: number, y: number, z: number, held: number): boolean {
+    if (!bwActiveBounds || bwSnapshot?.phase !== 'running') return false;
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    if (bx < bwActiveBounds.minX || bx >= bwActiveBounds.maxX ||
+        bz < bwActiveBounds.minZ || bz >= bwActiveBounds.maxZ) return false;
+    if (by <= BEDWARS_VOID_Y || by >= BEDWARS_CEILING_Y) return false;
+    if (held !== bedwarsTeamWool(bwTeam) && held !== Block.OakPlanks &&
+        held !== Block.Glass) return false;
+    return bedwarsBlockAt(bx, by, bz) === null;
+  },
+  canEditAt(x: number, y: number, z: number, held: number): boolean {
+    if (!bwActiveBounds || bwSnapshot?.phase !== 'running') return false;
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    if (bx < bwActiveBounds.minX || bx >= bwActiveBounds.maxX ||
+        bz < bwActiveBounds.minZ || bz >= bwActiveBounds.maxZ) return false;
+    if (by <= BEDWARS_VOID_Y || by >= BEDWARS_CEILING_Y) return false;
+    // Authored island, fixtures and beds are all untouchable through mining.
+    if (bedwarsBlockAt(bx, by, bz) !== null) return false;
+    const block = world.getBlock(x, y, z);
+    if (isReplaceable(block)) return bedwarsArenaRules.canPlaceAt(x, y, z, held);
+    return true;
+  },
+};
+
+/** Put the open-world body back from the checkpoint taken when the player
+ *  entered the queue. Only used when the SERVER never got to send
+ *  `arenaRestored` — a dropped connection — since the server copy is always
+ *  the better one when it arrives. */
+function restoreBedwarsFallback(): void {
+  const fallback = bwLocalFallback;
+  bwLocalFallback = null;
+  if (!fallback) return;
+  inventory.restore(fallback.state);
+  player.pos.set(fallback.x, fallback.y, fallback.z);
+  player.yaw = fallback.yaw;
+  player.pitch = fallback.pitch;
+  player.maxHealth = maxHealthFor(localHearts);
+  player.health = fallback.health;
+  player.dead = fallback.dead;
+  applyLocalMode(fallback.mode);
+  lastHealth = fallback.health;
+}
+
+function clearBedwarsSession(): void {
+  bwActiveBounds = null;
+  bwArenaReadySent = false;
+  bwSpectating = false;
+  bwWasBelowIslands = false;
+  bwSwingReadyAt = 0;
+  bwAxe = Item.WoodenAxe;
+  bedwarsUI.setVisible(false);
+  bedwarsUI.clearCombo();
+  damageNumbers.clear();
+  killBanner.clear();
+}
+
+function refreshBedwarsAvailability(): void {
+  const online = net.connected;
+  bedwarsCardAction.setAttribute('aria-disabled', String(!online));
+  bedwarsCardAction.setAttribute('aria-pressed', String(bwQueued));
+  bedwarsPrivateAction.setAttribute('aria-disabled', String(!online));
+  bedwarsCardAction.textContent = online
+    ? (bwQueued ? 'Cancel Queue' : 'Play') : 'Multiplayer server required';
+  // A private party's link stays on screen until the match starts, so the host
+  // can still copy it after clicking elsewhere in the modal.
+  bedwarsPrivateAction.textContent = bwInviteToken && bwSnapshot?.phase === 'lobby'
+    ? 'Copy Invite' : 'Invite Friends';
+}
+
+bedwarsCardAction.addEventListener('click', () => {
+  if (!net.connected) {
+    bedwarsQueueStatus.textContent = 'Bedwars requires a live multiplayer server.';
+    return;
+  }
+  if (!bwQueued) {
+    // Matchmaking can launch the moment another player arrives, so checkpoint
+    // the open-world body on entering the queue, exactly as Duels does.
+    bwLocalFallback = {
+      state: inventory.serialize(), x: player.pos.x, y: player.pos.y, z: player.pos.z,
+      yaw: player.yaw, pitch: player.pitch,
+      health: player.health, dead: player.dead, mode: localMode,
+    };
+    pushStateSave();
+  } else {
+    bwLocalFallback = null;
+  }
+  net.sendBwQueue(!bwQueued);
+});
+bedwarsPrivateAction.addEventListener('click', () => {
+  if (!net.connected || bedwarsPrivateAction.getAttribute('aria-disabled') === 'true') return;
+  if (bwInviteToken && bwSnapshot?.phase === 'lobby') {
+    void navigator.clipboard?.writeText(duelInviteUrl(bwInviteToken));
+    bedwarsQueueStatus.textContent = 'Invite link copied.';
+    return;
+  }
+  bedwarsQueueStatus.textContent = 'Opening a private Bedwars party…';
+  net.sendBwCreate();
+});
+
+bedwarsUI.onBuy = (entry) => net.sendBwShopBuy(entry);
+
+net.onBwQueue = (queued) => {
+  bwQueued = queued;
+  bedwarsQueueStatus.textContent = queued
+    ? 'Searching for an opponent…' : '';
+  refreshBedwarsAvailability();
+};
+net.onBwError = (_code, message) => {
+  bedwarsQueueStatus.textContent = message;
+  showNotice(message);
+};
+net.onBwLobby = (snapshot, inviteToken) => {
+  bwSnapshot = snapshot;
+  if (inviteToken) {
+    bwInviteToken = inviteToken;
+    bedwarsQueueStatus.textContent = `Private party open — share ${duelInviteUrl(inviteToken)}`;
+  }
+  const me = snapshot.participants.find((v) => v.id === net.myId);
+  if (me) { bwTeam = me.team; bedwarsUI.setTeam(me.team); }
+  bedwarsUI.setSnapshot(snapshot);
+  if (snapshot.phase === 'lobby') {
+    bedwarsQueueStatus.textContent = snapshot.participants.length >= 2
+      ? 'Opponent found — ready up.' : 'Waiting for an opponent…';
+    // Auto-ready in a matchmade room: the queue click WAS the consent.
+    if (me && !me.ready && bwQueued) net.sendBwReady(true);
+    if (me?.host && snapshot.participants.length >= 2 &&
+        snapshot.participants.every((v) => v.ready)) net.sendBwStart();
+  }
+  refreshBedwarsAvailability();
+};
+net.onBwArena = (arena, spawn, team, countdownEndsAt) => {
+  arenaActive = true; arenaKind = 'bedwars';
+  bwActiveBounds = arena; bwTeam = team;
+  arenaMaxHealth = BEDWARS_MAX_HEALTH; arenaHpPerHeart = BEDWARS_HP_PER_HEART;
+  arenaCanPlaceAt = bedwarsArenaRules.canPlaceAt;
+  arenaCanEditAt = bedwarsArenaRules.canEditAt;
+  arenaClampPos = (pos) => clampToBedwarsArena(pos, arena);
+  arenaUnlimited = new Set<number>();
+  // A duskier floor than Duels' 0.8: sky islands at last light.
+  world.setArenaRenderBounds({
+    minX: arena.originX, minZ: arena.originZ,
+    maxX: arena.originX + BEDWARS_ARENA_SIZE, maxZ: arena.originZ + BEDWARS_ARENA_SIZE,
+  }, BEDWARS_AMBIENT_LIGHT);
+  bwArenaReadySent = false;
+  bwSpectating = false; bwWasBelowIslands = false;
+  bwSwingReadyAt = 0;
+  bedwarsUI.setTeam(team);
+  bedwarsUI.setVisible(true);
+  bedwarsUI.setSnapshot(bwSnapshot);
+  bedwarsUI.clearCombo();
+
+  clearVaultPresentation(true); endGrapple(); setSeat(null); myRope = null;
+  killfeedEl.replaceChildren(); combatTagUntilLocal = 0; combatTimerEl.style.display = 'none';
+  warEl.style.display = 'none'; regionBannerEl.style.display = 'none';
+  worldMap.hide(); worldMap.hideBeacons(); worldMap.setDynamicMarkers([]);
+  flagModels.setState(false, []);
+  if (fieldGuide?.open) fieldGuide.closeSilently();
+  starterEl.style.display = 'none';
+  closeMinigames(); audio.resume();
+  applyLocalMode('survival');
+  player.pos.set(spawn.x, spawn.y, spawn.z); player.vel.set(0, 0, 0); player.fallDistance = 0;
+  player.maxHealth = BEDWARS_MAX_HEALTH; player.health = BEDWARS_MAX_HEALTH; player.dead = false;
+  player.flying = false; player.noclip = false; player.gliding = false; player.boating = false;
+  pendingTeleport = { x: spawn.x, y: spawn.y, z: spawn.z, started: worldTimeLocal };
+  void countdownEndsAt;
+  if (world.update(spawn.x, spawn.z, 50, 2)) {
+    pendingTeleport = null;
+    markBedwarsArenaReady();
+  } else {
+    startBedwarsReadyWatchdog(spawn.x, spawn.z);
+  }
+  resumePlay();
+};
+net.onBwLoadout = (slots, selected, axe) => {
+  inventory.restore({ slots, armor: new Array(4).fill(null), selected });
+  const upgraded = axe !== bwAxe && bwAxe !== Item.WoodenAxe;
+  bwAxe = axe;
+  bwSwingCooldownMs = bwCooldownFor(axe);
+  // A fresh axe starts CHARGED. Making a purchase also cost you your next
+  // swing would punish buying, which is the opposite of the intent.
+  bwSwingReadyAt = 0;
+  if (upgraded) showNotice(`${ITEMS[axe]?.name ?? 'Axe'} equipped — faster, heavier, more knockback.`);
+  fireCooldown = 0; reloadTimer = 0; burstRemaining = 0; healUse.cancel();
+};
+net.onBwGrant = (items) => {
+  for (const stack of items) inventory.add(stack.id, stack.count);
+  audio.hitmarker(false, false);
+};
+net.onBwResources = (iron, gold, diamond) => bedwarsUI.setResources(iron, gold, diamond);
+net.onBwHit = (target, amount, combo, charge, crit, killed) => {
+  showHitmarker(amount, killed);
+  // `bwHit` carries no position — the world anchor comes from the avatar we
+  // are already drawing, exactly as `hitconfirm` does. What you hit is what
+  // you saw.
+  const remote = net.remotes.get(target);
+  if (remote) {
+    const at = new THREE.Vector3(remote.tx, remote.ty + 1.15, remote.tz);
+    damageNumbers.spawn(at.x, at.y, at.z, amount,
+      hitFlavor(amount, killed, BEDWARS_MAX_HEALTH, crit));
+    particles.burst(at.x, at.y, at.z, killed ? 16 : crit ? 9 : 6,
+      killed ? 0xff4356 : crit ? 0xffd25e : 0xf4626f, 2.6, 0.34,
+      { gravity: 4, spread: 0.4, scale: 0.45 });
+    audio.axeHit(crit, at);
+    remotePlayers.hurtFlash(target, crit ? 1.4 : 1);
+  } else {
+    audio.axeHit(crit);
+  }
+  if (crit) triggerEncounterShake(0.10, 0.02);
+  if (combo > 0) bedwarsUI.setCombo(combo, performance.now());
+  else bedwarsUI.clearCombo();
+  if (killed) onPvpKill(target);
+  // The server's charge is authoritative; re-arm the local arc from it so the
+  // crosshair and the damage never disagree about how charged the next one is.
+  bwSwingReadyAt = performance.now() + bwSwingCooldownMs;
+  void charge;
+};
+net.onBwBedBroken = (team, by) => {
+  audio.bedBreak();
+  const mine = team === bwTeam;
+  killBanner.push(bedwarsUI.bedBrokenText(team, mine),
+    by === net.myId ? 'You broke it' : mine ? 'Your next death is your last' : '',
+    mine ? '#ff5f76' : '#ffd25e', 2.0);
+  triggerEncounterShake(0.18, 0.05);
+  bedwarsUI.setSnapshot(bwSnapshot);
+};
+net.onBwClock = (serverNow, endsAt, stage) => {
+  void serverNow; void endsAt; void stage;
+  bedwarsUI.setSnapshot(bwSnapshot);
+};
+net.onBwRespawn = (respawnAt, spectating) => {
+  bwSpectating = spectating;
+  if (spectating) { damageNumbers.clear(); hurtPulse = 0; bedwarsUI.clearCombo(); }
+  player.flying = spectating; player.noclip = spectating;
+  if (!spectating) {
+    player.flying = false; player.noclip = false;
+    player.health = BEDWARS_MAX_HEALTH;
+    bwWasBelowIslands = false;
+    bwSwingReadyAt = 0;
+  }
+  void respawnAt;
+};
+net.onBwResult = (result) => {
+  const winner = result.winner !== null
+    ? bwSnapshot?.participants.find((v) => v.id === result.winner)?.username ?? null : null;
+  const copy = bedwarsResultCopy(winner, result.finishReason);
+  killBanner.push(copy.title, copy.sub,
+    result.winner === net.myId ? '#7fe0a0' : '#aec1d8', 3.2);
+  bedwarsUI.clearCombo();
+};
+
+/** The enemy bed cell the crosshair is on, or null. */
+function bedwarsEnemyBedAt(hit: { x: number; y: number; z: number }):
+{ x: number; y: number; z: number } | null {
+  if (!bwActiveBounds) return null;
+  const team = bedwarsBedTeamAt(hit.x, hit.y, hit.z, bwActiveBounds);
+  return team >= 0 && team !== bwTeam ? { x: hit.x, y: hit.y, z: hit.z } : null;
+}
+
+/** Right-clicking the Quartermaster opens the shop. Right-click-on-block is
+ *  the EXISTING interaction path (chests and crafting tables already use it),
+ *  so this is one branch rather than a stand-on pad — which would open a modal
+ *  because you walked somewhere — or a floating button with its own plumbing. */
+function bedwarsTryOpenShop(hit: { x: number; y: number; z: number } | null): boolean {
+  if (arenaKind !== 'bedwars' || !bwActiveBounds || !hit) return false;
+  if (bedwarsBlockAt(hit.x, hit.y, hit.z) !== Block.BwShop) return false;
+  // Only your OWN Quartermaster. The server checks this again on every buy.
+  const mine = bedwarsShopCells(bwActiveBounds, bwTeam)
+    .some((c) => c.x === hit.x && c.y === hit.y && c.z === hit.z);
+  if (!mine) { showNotice('That is the enemy Quartermaster.'); return true; }
+  bedwarsUI.toggleShop();
+  return true;
+}
+
+/** Per-frame Bedwars presentation: the charge arc, the combo timer, and the
+ *  falling-into-the-void whistle. */
+function updateBedwarsFrame(): void {
+  if (arenaKind !== 'bedwars') return;
+  const now = performance.now();
+  bedwarsUI.setCharge(bwCharge());
+  bedwarsUI.update(now);
+  // One whistle per fall, armed the moment the player drops past the islands.
+  const below = player.pos.y < BEDWARS_VOID_Y + 16 && player.vel.y < -4;
+  if (below && !bwWasBelowIslands) audio.voidFall();
+  bwWasBelowIslands = below;
+  // Walking away closes the shop, so the panel can never hang over a fight.
+  if (bedwarsUI.isShopOpen && bwActiveBounds) {
+    const near = bedwarsShopCells(bwActiveBounds, bwTeam).some((c) =>
+      Math.hypot(c.x + 0.5 - player.pos.x, c.z + 0.5 - player.pos.z) <= 4.5);
+    if (!near) bedwarsUI.closeShop();
+  }
+}
+
+let bwReadyWatchdog = 0;
+function markBedwarsArenaReady(): void {
+  if (arenaKind !== 'bedwars' || bwArenaReadySent) return;
+  bwArenaReadySent = true;
+  net.sendBwArenaReady();
+  stopBedwarsReadyWatchdog();
+}
+function stopBedwarsReadyWatchdog(): void {
+  if (bwReadyWatchdog) window.clearInterval(bwReadyWatchdog);
+  bwReadyWatchdog = 0;
+}
+function startBedwarsReadyWatchdog(x: number, z: number): void {
+  stopBedwarsReadyWatchdog();
+  const started = Date.now();
+  // A plain interval, not the frame loop: a backgrounded tab gets no frames,
+  // and the server's arena-load gate would then time the match back to the
+  // lobby. Timers keep firing when frames do not. (Same fix as Duels.)
+  bwReadyWatchdog = window.setInterval(() => {
+    if (arenaKind !== 'bedwars' || bwArenaReadySent) { stopBedwarsReadyWatchdog(); return; }
+    if (world.isLoaded(x, z) || Date.now() - started > 5_000) markBedwarsArenaReady();
+  }, 250);
+}
+
 net.connect();
 
 let worldReady = false;
@@ -10903,6 +11281,9 @@ function frame(): void {
         interaction.update(dt, input, camera, true, true); // suppress mine + use
       } else if (input.dismountPressed && tryAttachFastRope()) {
         interaction.update(dt, input, camera, true, true);
+      } else if (input.rightClicked && !interaction.armedMove &&
+          bedwarsTryOpenShop(interaction.target)) {
+        interaction.update(dt, input, camera, true, true); // suppress mine + use
       } else if (input.rightClicked && !interaction.armedMove && heldStack &&
           heldStack.id === Item.HelicopterKit && tryDeployHelicopter()) {
         // Field-assemble an airframe wherever you are standing.
@@ -10973,16 +11354,34 @@ function frame(): void {
         pushStateSave();
         interaction.update(dt, input, camera, true, true); // suppress mine + use
       } else {
-        // Open-world melee never hits players. Duels PvP is handled exclusively
-        // by the Burst Rifle branch above; the iron axe is block utility only.
-        const duelPlayerInSights = -1;
+        // Open-world melee never hits players, and Duels PvP is handled
+        // exclusively by the Burst Rifle branch above (its iron axe is block
+        // utility only). The ONE place an axe may hit a player is inside a
+        // live Bedwars match, and the server re-validates every swing.
+        const duelPlayerInSights = arenaKind === 'bedwars' && !bwSpectating &&
+          bwSnapshot?.phase === 'running'
+          ? remotePlayers.rayHit(eye, lookDir, BW_MELEE_RANGE) : -1;
+        // A bed is a block, not a body, so it needs its own aim test. Beds are
+        // `hardness: -1`, so the ordinary mining path can never touch one.
+        const bedInSights = arenaKind === 'bedwars' && bwActiveBounds &&
+          !bwSpectating && bwSnapshot?.phase === 'running' && interaction.target
+          ? bedwarsEnemyBedAt(interaction.target) : null;
         const encounterInSights = vaultEncounterVisuals.rayTarget(
           encounterSnapshot, eye, lookDir, 3.5,
         );
         const mobInSights = encounterInSights ? null : mobs.rayHit(eye, lookDir, 3.5);
         if (input.leftClicked && duelPlayerInSights >= 0) {
-          net.sendRangedAttack(duelPlayerInSights, 5);
-          held.swing();
+          const charge = bwCharge();
+          net.sendBwMelee(duelPlayerInSights);
+          audio.axeSwing(charge);
+          // A full-charge release gets the wider, slower arc. Anything less is
+          // an ordinary swing, so the animation itself tells you what you did.
+          if (charge >= 0.999) held.swingHeavy(); else held.swing();
+          bwSwingReadyAt = performance.now() + bwSwingCooldownMs;
+        } else if (input.leftClicked && bedInSights) {
+          net.sendBwBed(bedInSights.x, bedInSights.y, bedInSights.z);
+          audio.axeSwing(1);
+          held.swingHeavy();
         } else if (input.leftClicked && encounterInSights) {
           const tool = heldStack ? ITEMS[heldStack.id]?.tool : undefined;
           hitEncounterTarget(encounterInSights.id, encounterInSights.hit,
@@ -10997,7 +11396,8 @@ function frame(): void {
           held.swing();
         }
         interaction.update(dt, input, camera,
-          duelPlayerInSights >= 0 || encounterInSights !== null || mobInSights !== null);
+          duelPlayerInSights >= 0 || bedInSights !== null ||
+          encounterInSights !== null || mobInSights !== null);
       }
 
       // Footsteps.
