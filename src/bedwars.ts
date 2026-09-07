@@ -346,6 +346,28 @@ export function bedwarsSolidAt(x: number, y: number, z: number, arena: BwArenaBo
   return block !== null && block !== Block.Air;
 }
 
+/**
+ * Line of sight between two points inside one arena.
+ *
+ * `isSolidExtra` is how player-placed cover enters the test: you cannot swing
+ * an axe through a wool wall. Sampled at four steps per block, matching the
+ * Duels version, so cover behaves identically in both modes.
+ */
+export function hasBedwarsLineOfSight(
+  a: BwVec3, b: BwVec3, arena: BwArenaBounds,
+  isSolidExtra?: (x: number, y: number, z: number) => boolean,
+): boolean {
+  const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+  const distance = Math.hypot(dx, dy, dz);
+  const steps = Math.max(1, Math.ceil(distance * 4));
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps;
+    const px = a.x + dx * t, py = a.y + dy * t, pz = a.z + dz * t;
+    if (bedwarsSolidAt(px, py, pz, arena) || isSolidExtra?.(px, py, pz)) return false;
+  }
+  return true;
+}
+
 /** Which team's bed cell sits here, or -1. Used by the bed-break branch, which
  *  is the ONLY thing that may destroy one. */
 export function bedwarsBedTeamAt(x: number, y: number, z: number, arena: BwArenaBounds): number {

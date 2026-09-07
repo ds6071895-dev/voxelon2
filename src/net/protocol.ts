@@ -15,6 +15,7 @@ import type {
   BombSnapshot, HeliLossReason, HelicopterSnapshot, SeatKind,
 } from '../vehicles';
 import type { DuelArenaBounds, DuelLobbySnapshot, DuelResult } from '../duels';
+import type { BwArenaBounds, BwLobbySnapshot, BwResult, BwStage } from '../bedwars';
 import type { DuelFlair, DuelPublicProfile } from '../duels_progression';
 import type { PoliticsState } from '../politics';
 
@@ -248,6 +249,21 @@ export type ClientMsg =
   | { t: 'duelRematch'; vote: boolean }
   | { t: 'duelReturn' }
   | { t: 'duelFlair'; flair: DuelFlair }
+  // Bedwars. Lobby verbs mirror Duels; the in-match verbs are reachable ONLY
+  // through `routeBedwarsInMatch`, so `bwMelee` is inert everywhere else.
+  | { t: 'bwCreate' }
+  | { t: 'bwQueue'; join: boolean }
+  | { t: 'bwJoin'; token: string }
+  | { t: 'bwLeave' }
+  | { t: 'bwReady'; ready: boolean }
+  | { t: 'bwStart' }
+  | { t: 'bwArenaReady' }
+  /** The attacker sends a target id and NOTHING else. Damage, charge, crit,
+   *  combo and knockback are all computed server-side from `p.bwAxe` and the
+   *  server's own position history. */
+  | { t: 'bwMelee'; target: number }
+  | { t: 'bwBed'; x: number; y: number; z: number }
+  | { t: 'bwShopBuy'; entry: number }
   | { t: 'xform'; x: number; y: number; z: number; yaw: number; pitch: number;
       gliding?: boolean; boating?: boolean; seated?: boolean;
       sneaking?: boolean; held?: number; armor?: number[]; swing?: number;
@@ -444,6 +460,28 @@ export type ServerMsg =
   | { t: 'duelFlairResult'; ok: boolean; profile: DuelPublicProfile; leaderboard: DuelLeaderboardEntry[] }
   | { t: 'duelLeaderboard'; leaderboard: DuelLeaderboardEntry[] }
   | { t: 'duelProfileUpdate'; id: number; profile: DuelPublicProfile }
+  | { t: 'bwQueue'; queued: boolean }
+  | { t: 'bwLobby'; snapshot: BwLobbySnapshot; inviteToken?: string }
+  | { t: 'bwError'; code: 'invalid' | 'full' | 'match_in_progress' |
+      'already_in_lobby' | 'not_host' | 'too_few_players' | 'too_many_players' |
+      'not_everyone_ready' | 'not_in_lobby' | 'cannot_afford' | 'too_far'; message: string }
+  | { t: 'bwArena'; arena: BwArenaBounds; spawn: { x: number; y: number; z: number };
+      team: number; countdownEndsAt: number }
+  | { t: 'bwLoadout'; slots: (ItemStack | null)[]; selected: number; axe: number }
+  | { t: 'bwResources'; iron: number; gold: number; diamond: number }
+  /** Attacker-only feedback. `hitconfirm` cannot carry crit/combo/charge, and
+   *  those three are what the swing UI is made of. */
+  | { t: 'bwHit'; target: number; amount: number; combo: number; charge: number;
+      crit: boolean; killed: boolean }
+  | { t: 'bwBedBroken'; team: number; by: number }
+  | { t: 'bwClock'; serverNow: number; endsAt: number; stage: BwStage }
+  | { t: 'bwRespawn'; respawnAt: number; spectating: boolean }
+  | { t: 'bwResult'; result: BwResult }
+  /** Shop purchase payout. The SCARCE half of a purchase — the resource debit
+   *  and the axe tier — is server-authoritative; these consumable stacks are
+   *  handed to the client's own inventory, which is safe because every id
+   *  involved is MINIGAME_ONLY and cannot leave the arena. */
+  | { t: 'bwGrant'; items: ItemStack[] }
   | { t: 'arenaRestored'; x: number; y: number; z: number; yaw: number; pitch: number;
       health: number; dead: boolean; mode: GameMode; state?: Record<string, unknown> }
   | {

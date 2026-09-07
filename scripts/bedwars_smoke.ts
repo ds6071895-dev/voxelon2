@@ -20,6 +20,8 @@ import {
 import { Block } from '../src/blocks';
 import { Item } from '../src/items';
 import { isMinigameOnly } from '../src/minigame_items';
+import { GameServer } from '../src/net/server_core';
+import { DUEL_COUNTDOWN_MS } from '../src/duels';
 
 let passed = 0;
 function check(name: string, ok: unknown, detail = ''): void {
@@ -556,6 +558,317 @@ for (const opening of ['both beds intact', 'one bed broken'] as const) {
   check('a cross-lobby death is refused', bw.recordDeath(1, 3, 100, 'melee')?.killer !== 3);
   check('membership never spans lobbies',
     bw.membersOf(1).sort().join() === '1,2' && bw.membersOf(3).sort().join() === '3,4');
+}
+
+// ── Server: the melee handler's fail-closed validation ────────────────────
+// Everything below drives the real GameServer, because the point of these
+// checks is the ROUTE, not the math.
+
+/** Two players in a live Bedwars match, standing next to each other at mid. */
+function liveServer(): { s: GameServer; arenaOf: (id: number) => { x: number; y: number; z: number } } {
+  const s = new GameServer(7, token);
+  s.addPlayer(1, { username: 'Red', faction: 0 });
+  s.addPlayer(2, { username: 'Blue', faction: 1 });
+  s.addPlayer(3, { username: 'Bystander', faction: 1 });
+  for (const id of [1, 2, 3]) s.handle(id, { t: 'xform', x: 40, y: 70, z: 40, yaw: 0, pitch: 0 });
+  const made = s.handle(1, { t: 'bwCreate' }).find((o) => o.to === 1 && o.msg.t === 'bwLobby')?.msg;
+  if (!made || made.t !== 'bwLobby' || !made.inviteToken) throw new Error('no bedwars invite');
+  s.handle(2, { t: 'bwJoin', token: made.inviteToken });
+  s.handle(1, { t: 'bwReady', ready: true });
+  s.handle(2, { t: 'bwReady', ready: true });
+  const started = s.handle(1, { t: 'bwStart' });
+  const arenaMsg = started.find((o) => o.to === 1 && o.msg.t === 'bwArena')?.msg;
+  if (!arenaMsg || arenaMsg.t !== 'bwArena') throw new Error('no bwArena');
+  for (const id of [1, 2]) s.handle(id, { t: 'bwArenaReady' });
+  s.tickWar(6); s.tickBedwars(6);
+  const mid = { x: arenaMsg.arena.originX + 48.5, y: BEDWARS_FLOOR_Y + 1.01, z: arenaMsg.arena.originZ + 48.5 };
+  return { s, arenaOf: () => mid };
+}
+
+/** Place both fighters at mid, one block apart on x, both facing +x. */
+function faceOff(s: GameServer, mid: { x: number; y: number; z: number }, gap = 1.5): void {
+  // yaw = -PI/2 looks toward +x (main.ts: dx = -sin(yaw)).
+  s.handle(1, { t: 'xform', x: mid.x - gap / 2, y: mid.y, z: mid.z, yaw: -Math.PI / 2, pitch: 0 });
+  s.handle(2, { t: 'xform', x: mid.x + gap / 2, y: mid.y, z: mid.z, yaw: Math.PI / 2, pitch: 0 });
+}
+
+{
+  const { s, arenaOf } = liveServer();
+  const mid = arenaOf(1);
+  faceOff(s, mid);
+  const hit = s.handle(1, { t: 'bwMelee', target: 2 });
+  check('a legitimate melee lands and reports back to the attacker only',
+    hit.some((o) => o.to === 1 && o.msg.t === 'bwHit' && o.msg.amount > 0) &&
+    hit.some((o) => o.to === 2 && o.msg.t === 'hurt') &&
+    !hit.some((o) => o.to === 3));
+  const bwHit = hit.find((o) => o.msg.t === 'bwHit')!.msg as Extract<typeof hit[0]['msg'], { t: 'bwHit' }>;
+  check('the attacker gets crit/combo/charge, which hitconfirm cannot carry',
+    typeof bwHit.crit === 'boolean' && typeof bwHit.combo === 'number' &&
+    bwHit.charge >= 0 && bwHit.charge <= 1);
+  check('the hurt arm carries a real knockback impulse',
+    hit.some((o) => o.msg.t === 'hurt' && Math.hypot(o.msg.kx, o.msg.kz) > 0 && o.msg.ky > 0));
+  check('a Bedwars hit never tags open-world combat',
+    hit.every((o) => o.msg.t !== 'hurt' || o.msg.combat === 0));
+}
+{
+  const { s, arenaOf } = liveServer();
+  const mid = arenaOf(1);
+  // A Wooden-Axe player claiming to hold a Void Cleaver deals WOODEN damage.
+  faceOff(s, mid);
+  s.handle(1, { t: 'xform', x: mid.x - 0.75, y: mid.y, z: mid.z, yaw: -Math.PI / 2, pitch: 0,
+    held: Item.VoidCleaver } as never);
+  const hit = s.handle(1, { t: 'bwMelee', target: 2 });
+  const amount = hit.find((o) => o.msg.t === 'bwHit')?.msg;
+  check('no client-supplied number enters the damage math',
+    amount?.t === 'bwHit' && amount.amount === BW_AXE_TIERS[0].damage,
+    `${amount?.t === 'bwHit' ? amount.amount : '?'}`);
+}
+{
+  const { s, arenaOf } = liveServer();
+  const mid = arenaOf(1);
+
+  // Out of range.
+  s.handle(1, { t: 'xform', x: mid.x - 4.4, y: mid.y, z: mid.z, yaw: -Math.PI / 2, pitch: 0 });
+  s.handle(2, { t: 'xform', x: mid.x + 0.5, y: mid.y, z: mid.z, yaw: Math.PI / 2, pitch: 0 });
+  check('a hit beyond melee range is refused', s.handle(1, { t: 'bwMelee', target: 2 }).length === 0);
+
+  // Outside the facing cone: attacker looks -x, target is +x.
+  s.handle(1, { t: 'xform', x: mid.x - 0.75, y: mid.y, z: mid.z, yaw: Math.PI / 2, pitch: 0 });
+  check('a hit outside the facing cone is refused',
+    s.handle(1, { t: 'bwMelee', target: 2 }).length === 0);
+
+  // Faster than the cadence floor: land one, then immediately swing again.
+  faceOff(s, mid);
+  check('the first swing of a pair lands', s.handle(1, { t: 'bwMelee', target: 2 }).length > 0);
+  check('a swing faster than the cadence floor is DROPPED, not scaled',
+    s.handle(1, { t: 'bwMelee', target: 2 }).length === 0);
+
+  // Against yourself, and against a non-participant.
+  check('a self-hit is refused', s.handle(1, { t: 'bwMelee', target: 1 }).length === 0);
+  check('a hit on a non-participant is refused', s.handle(1, { t: 'bwMelee', target: 3 }).length === 0);
+  check('a hit on an unknown id is refused', s.handle(1, { t: 'bwMelee', target: 9_999 }).length === 0);
+  check('a non-integer target is refused',
+    s.handle(1, { t: 'bwMelee', target: 1.5 as number }).length === 0);
+}
+{
+  // Through a placed wool wall.
+  const { s, arenaOf } = liveServer();
+  const mid = arenaOf(1);
+  faceOff(s, mid, 2.5);
+  const wallX = Math.floor(mid.x), wallZ = Math.floor(mid.z), wallY = Math.floor(mid.y);
+  // TWO rows: the swing runs from eye height down to chest height, so a
+  // one-block parapet is correctly swung straight over.
+  const placed = [
+    s.handle(1, { t: 'edit', x: wallX, y: wallY, z: wallZ, block: Block.TeamWoolA }),
+    s.handle(1, { t: 'edit', x: wallX, y: wallY + 1, z: wallZ, block: Block.TeamWoolA }),
+  ];
+  check('arena wool can be placed inside the arena', placed.every((o) => o.length > 0));
+  check('you cannot swing through a wool wall',
+    s.handle(1, { t: 'bwMelee', target: 2 }).length === 0);
+  check('...but a one-block parapet is swung straight over',
+    (() => {
+      const s2 = liveServer();
+      const m = s2.arenaOf(1);
+      faceOff(s2.s, m, 2.5);
+      s2.s.handle(1, { t: 'edit', x: Math.floor(m.x), y: Math.floor(m.y), z: Math.floor(m.z),
+        block: Block.TeamWoolA });
+      return s2.s.handle(1, { t: 'bwMelee', target: 2 }).length > 0;
+    })());
+}
+{
+  // A shielded target.
+  const { s, arenaOf } = liveServer();
+  const mid = arenaOf(1);
+  faceOff(s, mid);
+  // Beat player 2 down until they die, then catch them in the spawn shield.
+  let died = false;
+  for (let i = 0; i < 20 && !died; i++) {
+    s.tickWar(1); s.tickBedwars(1);
+    faceOff(s, mid);
+    died = s.handle(1, { t: 'bwMelee', target: 2 })
+      .some((o) => o.msg.t === 'bwRespawn' && o.msg.spectating);
+  }
+  check('sustained melee eventually kills through the full health pool', died);
+  // Advance just past the respawn so the shield is freshly armed.
+  s.tickWar(BEDWARS_RESPAWN_MS / 1000 + 0.2);
+  s.tickBedwars(BEDWARS_RESPAWN_MS / 1000 + 0.2);
+  faceOff(s, mid);
+  check('a spawn-shielded target cannot be hit',
+    s.handle(1, { t: 'bwMelee', target: 2 }).length === 0);
+  // ...and is hittable again once the shield lapses.
+  s.tickWar(BEDWARS_SPAWN_SHIELD_MS / 1000 + 0.5);
+  s.tickBedwars(BEDWARS_SPAWN_SHIELD_MS / 1000 + 0.5);
+  faceOff(s, mid);
+  check('the shield lapses rather than lasting forever',
+    s.handle(1, { t: 'bwMelee', target: 2 }).length > 0);
+}
+
+// ── Melee is unreachable outside a live Bedwars match ─────────────────────
+{
+  const s = new GameServer(7, token);
+  s.addPlayer(1, { username: 'A', faction: 0 });
+  s.addPlayer(2, { username: 'B', faction: 1 });
+  for (const id of [1, 2]) s.handle(id, { t: 'xform', x: 40, y: 70, z: 41, yaw: 0, pitch: 0 });
+  const before = s.snapshotFor(1).find((v) => v.id === 2);
+  check('bwMelee is inert in the open world',
+    s.handle(1, { t: 'bwMelee', target: 2 }).length === 0 && !!before);
+  check('bwBed and bwShopBuy are inert in the open world',
+    s.handle(1, { t: 'bwBed', x: 40, y: 70, z: 41 }).length === 0 &&
+    s.handle(1, { t: 'bwShopBuy', entry: 1 }).length === 0);
+}
+{
+  // Inside a live DUELS match: bwMelee hits the Duels whitelist and is dropped.
+  const s = new GameServer(7, token);
+  s.addPlayer(1, { username: 'A', faction: 0 });
+  s.addPlayer(2, { username: 'B', faction: 1 });
+  for (const id of [1, 2]) s.handle(id, { t: 'xform', x: 40, y: 70, z: 41, yaw: 0, pitch: 0 });
+  const made = s.handle(1, { t: 'duelCreate' }).find((o) => o.msg.t === 'duelLobby')?.msg;
+  if (!made || made.t !== 'duelLobby' || !made.inviteToken) throw new Error('no duel invite');
+  s.handle(2, { t: 'duelJoin', token: made.inviteToken });
+  s.handle(1, { t: 'duelReady', ready: true }); s.handle(2, { t: 'duelReady', ready: true });
+  s.handle(1, { t: 'duelStart' });
+  for (const id of [1, 2]) s.handle(id, { t: 'duelArenaReady' });
+  s.tickWar(DUEL_COUNTDOWN_MS / 1000); s.tickDuels();
+  check('bwMelee is inert inside a live Duels match',
+    s.handle(1, { t: 'bwMelee', target: 2 }).length === 0);
+  check('Duels bodies are unaffected by the Bedwars route',
+    s.handle(1, { t: 'bwBed', x: 0, y: 0, z: 0 }).length === 0);
+}
+{
+  // In a Bedwars LOBBY, pre-countdown: the match is not running yet.
+  const s = new GameServer(7, token);
+  s.addPlayer(1, { username: 'A', faction: 0 });
+  s.addPlayer(2, { username: 'B', faction: 1 });
+  for (const id of [1, 2]) s.handle(id, { t: 'xform', x: 40, y: 70, z: 41, yaw: 0, pitch: 0 });
+  const made = s.handle(1, { t: 'bwCreate' }).find((o) => o.msg.t === 'bwLobby')?.msg;
+  if (!made || made.t !== 'bwLobby' || !made.inviteToken) throw new Error('no invite');
+  s.handle(2, { t: 'bwJoin', token: made.inviteToken });
+  check('bwMelee is inert in a Bedwars lobby before the countdown',
+    s.handle(1, { t: 'bwMelee', target: 2 }).length === 0);
+  check('lobby members remain ordinary open-world citizens',
+    s.receivesWorldBroadcast(1) && s.receivesWorldBroadcast(2));
+}
+
+// ── World isolation ────────────────────────────────────────────────────────
+{
+  const { s } = liveServer();
+  check('arena and open-world visibility scopes are disjoint',
+    !s.receivesWorldBroadcast(1) && !s.receivesWorldBroadcast(2) &&
+    s.receivesWorldBroadcast(3) &&
+    s.snapshotFor(1).every((v) => v.id === 1 || v.id === 2) &&
+    s.snapshotFor(3).every((v) => v.id === 3));
+  // The welcome PLAYERS roster is the presence list a joining client renders
+  // bodies from. (The politics faction roster is a citizenship list and does
+  // still name arena members — pre-existing, and identical for Duels.)
+  const welcome = s.addPlayer(4, { username: 'Late', faction: 0 })
+    .find((o) => o.msg.t === 'welcome')?.msg;
+  check('the welcome roster omits arena bodies',
+    welcome?.t === 'welcome' && welcome.players.every((v) => v.username !== 'Red' && v.username !== 'Blue') &&
+    welcome.players.some((v) => v.username === 'Bystander'));
+}
+{
+  // Arena state must never persist.
+  const s = new GameServer(7, token);
+  s.addPlayer(1, { username: 'Red', faction: 0 });
+  s.addPlayer(2, { username: 'Blue', faction: 1 });
+  s.handle(1, { t: 'xform', x: 120, y: 70, z: 30, yaw: 0, pitch: 0 });
+  s.handle(2, { t: 'xform', x: 125, y: 70, z: 30, yaw: 0, pitch: 0 });
+  s.handle(1, { t: 'saveState', data: { x: 120, y: 70, z: 30,
+    slots: [{ id: Item.Diamond, count: 5 }] } });
+  const made = s.handle(1, { t: 'bwCreate' }).find((o) => o.msg.t === 'bwLobby')?.msg;
+  if (!made || made.t !== 'bwLobby' || !made.inviteToken) throw new Error('no invite');
+  s.handle(2, { t: 'bwJoin', token: made.inviteToken });
+  s.handle(1, { t: 'bwReady', ready: true }); s.handle(2, { t: 'bwReady', ready: true });
+  s.handle(1, { t: 'bwStart' });
+  const captured = s.capturePlayerState(1)!.data;
+  check('mid-match capture returns the PRE-match position and inventory',
+    captured.x === 120 && (captured.slots as { id?: number }[])[0]?.id === Item.Diamond);
+  s.handle(1, { t: 'saveState', data: { x: 99_999, slots: [{ id: Item.VoidCleaver, count: 1 }] } });
+  check('a match-time saveState is rejected outright',
+    s.capturePlayerState(1)!.data.x === 120 &&
+    (s.capturePlayerState(1)!.data.slots as { id?: number }[])[0]?.id === Item.Diamond);
+  const restored = s.handle(1, { t: 'bwLeave' });
+  check('leaving restores the exact pre-match body',
+    restored.some((o) => o.to === 1 && o.msg.t === 'arenaRestored' && o.msg.x === 120));
+  check('no Void Cleaver or wool survives the restore',
+    !JSON.stringify(restored.filter((o) => o.msg.t === 'arenaRestored'))
+      .includes(`"id":${Item.VoidCleaver}`));
+}
+
+// ── Shop ───────────────────────────────────────────────────────────────────
+{
+  const { s, arenaOf } = liveServer();
+  const mid = arenaOf(1);
+  s.handle(1, { t: 'xform', x: mid.x, y: mid.y, z: mid.z, yaw: 0, pitch: 0 });
+  const far = s.handle(1, { t: 'bwShopBuy', entry: 1 });
+  check('buying away from your own Quartermaster is refused',
+    far.some((o) => o.msg.t === 'bwError' && o.msg.code === 'too_far'));
+}
+
+// ── Cross-match isolation, on the real server ─────────────────────────────
+{
+  const s = new GameServer(7, token);
+  for (const id of [1, 2, 3, 4]) {
+    s.addPlayer(id, { username: `P${id}`, faction: id % 2 });
+    s.handle(id, { t: 'xform', x: 40 + id, y: 70, z: 40, yaw: 0, pitch: 0 });
+  }
+  const mk = (host: number, guest: number) => {
+    const made = s.handle(host, { t: 'bwCreate' }).find((o) => o.msg.t === 'bwLobby')?.msg;
+    if (!made || made.t !== 'bwLobby' || !made.inviteToken) throw new Error('no invite');
+    s.handle(guest, { t: 'bwJoin', token: made.inviteToken });
+    s.handle(host, { t: 'bwReady', ready: true });
+    s.handle(guest, { t: 'bwReady', ready: true });
+    const out = s.handle(host, { t: 'bwStart' });
+    for (const id of [host, guest]) s.handle(id, { t: 'bwArenaReady' });
+    return out.find((o) => o.to === host && o.msg.t === 'bwArena')?.msg;
+  };
+  const a = mk(1, 2), b = mk(3, 4);
+  if (a?.t !== 'bwArena' || b?.t !== 'bwArena') throw new Error('arenas missing');
+  s.tickWar(6); s.tickBedwars(6);
+  check('two live matches occupy different, non-overlapping slots',
+    a.arena.slot !== b.arena.slot &&
+    (a.arena.maxX <= b.arena.minX || b.arena.maxX <= a.arena.minX));
+  check('a cross-lobby hit is refused', s.handle(1, { t: 'bwMelee', target: 3 }).length === 0);
+  check('neither lobby ever appears in the other snapshot',
+    s.snapshotFor(1).every((v) => v.id === 1 || v.id === 2) &&
+    s.snapshotFor(3).every((v) => v.id === 3 || v.id === 4));
+  // A lobby-A edit must never appear in lobby B's traffic.
+  const midA = { x: a.arena.originX + 48, y: BEDWARS_FLOOR_Y + 1, z: a.arena.originZ + 48 };
+  s.handle(1, { t: 'xform', x: midA.x + 0.5, y: midA.y, z: midA.z + 0.5, yaw: 0, pitch: 0 });
+  const edited = s.handle(1, { t: 'edit', x: midA.x, y: midA.y + 1, z: midA.z, block: Block.TeamWoolA });
+  check('an arena edit is broadcast to that match only, never to the world',
+    edited.length > 0 && edited.every((o) => o.to === 1 || o.to === 2));
+}
+
+// ── Arena building rules ───────────────────────────────────────────────────
+{
+  const { s, arenaOf } = liveServer();
+  const mid = arenaOf(1);
+  const bx = Math.floor(mid.x), by = Math.floor(mid.y), bz = Math.floor(mid.z);
+  s.handle(1, { t: 'xform', x: mid.x, y: mid.y, z: mid.z, yaw: 0, pitch: 0 });
+  check('an open-world block is refused inside the arena',
+    s.handle(1, { t: 'edit', x: bx, y: by, z: bz, block: Block.Stone }).length === 0);
+  check('the ENEMY team wool is refused',
+    s.handle(1, { t: 'edit', x: bx, y: by, z: bz, block: Block.TeamWoolB }).length === 0);
+  check('your own wool, planks and glass are all allowed',
+    s.handle(1, { t: 'edit', x: bx, y: by, z: bz, block: Block.TeamWoolA }).length > 0 &&
+    s.handle(1, { t: 'edit', x: bx, y: by + 1, z: bz, block: Block.OakPlanks }).length > 0 &&
+    s.handle(1, { t: 'edit', x: bx, y: by + 2, z: bz, block: Block.Glass }).length > 0);
+  check('a cell already occupied cannot be stacked into',
+    s.handle(1, { t: 'edit', x: bx, y: by, z: bz, block: Block.TeamWoolA }).length === 0);
+  check('a placed block can be broken back out',
+    s.handle(1, { t: 'edit', x: bx, y: by, z: bz, block: Block.Air }).length > 0);
+  check('authored island geometry cannot be broken',
+    s.handle(1, { t: 'edit', x: bx, y: BEDWARS_FLOOR_Y, z: bz, block: Block.Air }).length === 0);
+  check('a bed cell cannot be mined away through the edit path',
+    (() => {
+      const bed = bedwarsBedCells({ ...A0, originX: mid.x - 48.5, originZ: mid.z - 48.5 } as never, 0);
+      return bed.every((c) =>
+        s.handle(1, { t: 'edit', x: c.x, y: c.y, z: c.z, block: Block.Air }).length === 0);
+    })());
+  check('nothing may be built below the kill plane or above the ceiling',
+    s.handle(1, { t: 'edit', x: bx, y: BEDWARS_VOID_Y - 1, z: bz, block: Block.TeamWoolA }).length === 0 &&
+    s.handle(1, { t: 'edit', x: bx, y: BEDWARS_CEILING_Y, z: bz, block: Block.TeamWoolA }).length === 0);
 }
 
 console.log(`Bedwars smoke: ${passed} checks passed`);

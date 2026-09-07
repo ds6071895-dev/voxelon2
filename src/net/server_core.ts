@@ -87,6 +87,16 @@ import {
   hasArenaLineOfSight, safestDuelSpawn, secureDuelToken,
 } from '../duels';
 import { ArenaAABB, ArenaKind } from '../arena';
+import {
+  BEDWARS_ARENA_SIZE, BEDWARS_CEILING_Y, BEDWARS_CLAMP_RADIUS, BEDWARS_FLOOR_Y,
+  BEDWARS_MAX_HEALTH, BEDWARS_VOID_Y,
+  BW_GEN_GOLD_MS, BW_GEN_IRON_MS, BW_MELEE_FACING_DOT, BW_MELEE_RANGE,
+  BW_MELEE_REWIND_S, BW_PICKUP_RADIUS, BW_SWING_FLOOR, BW_COMBO_WINDOW_MS,
+  Bedwars, BwArenaBounds, BwLobbySnapshot, bedwarsAxeTier,
+  bedwarsBedTeamAt, bedwarsBlockAt, bedwarsDiamondPeriod, bedwarsGenCells,
+  bedwarsShopCells, bedwarsShopEntry, bedwarsSolidAt, bedwarsSwing, bedwarsTeamWool,
+  clampToBedwarsArena, collapsedBedwarsArena, hasBedwarsLineOfSight,
+} from '../bedwars';
 import { isMinigameOnly, stripMinigameItems } from '../minigame_items';
 import {
   DuelFlair, DuelProgressState, DuelPublicProfile, canEquipDuelFlair,
@@ -221,6 +231,20 @@ interface ServerPlayer extends PlayerInfo {
   duelReloadUntil: number;
   duelMedkits: number;
   duelRespawning: boolean;
+  // --- Bedwars ---
+  /** The purchased axe tier. The melee math reads THIS, never `p.held`, so no
+   *  client-supplied number ever enters the damage calculation. */
+  bwAxe: number;
+  bwLastSwingAt: number;
+  /** Consecutive landed hits on `bwComboTarget` inside the combo window. */
+  bwCombo: number;
+  bwComboTarget: number;
+  bwComboUntil: number;
+  bwRespawning: boolean;
+  /** Milliseconds of generator credit carried between ticks, so a slow tick
+   *  cannot silently drop production. */
+  bwIronAccum: number;
+  bwGoldAccum: number;
 }
 
 interface DuelShotTicket {
@@ -403,6 +427,10 @@ export class GameServer {
   private readonly duelProgress = new Map<number, DuelProgressState>();
   /** Placed blocks per active arena, keyed `${kind}:${slot}`, reset on match end. */
   private readonly arenaEdits = new Map<string, Map<string, number>>();
+  readonly bedwars = new Bedwars(secureDuelToken);
+  private bwQueue: number[] = [];
+  /** Next diamond payout per live Bedwars lobby id. */
+  private readonly bwDiamondNextAt = new Map<string, number>();
   private readonly settledDuelResults = new Set<string>();
   /** Next whole-server timestamp broadcast for hidden-tab/lag clock recovery. */
   private duelClockNextAt = 0;
@@ -692,6 +720,8 @@ export class GameServer {
       duelBurstShots: 0,
       duelShotTickets: [],
       arenaTrack: [],
+      bwAxe: 0, bwLastSwingAt: -Infinity, bwCombo: 0, bwComboTarget: 0, bwComboUntil: 0,
+      bwRespawning: false, bwIronAccum: 0, bwGoldAccum: 0,
       duelLoaded: 0,
       duelReloadUntil: 0,
       duelMedkits: 0,
@@ -761,6 +791,16 @@ export class GameServer {
         });
       }
     }
+    this.removeFromBwQueue(id);
+    const bwLeave = this.bedwars.leave(id, this.worldTime * 1000);
+    if (bwLeave.snapshot) {
+      out.push(...this.bwSnapshotOutbound(bwLeave.snapshot));
+      if (bwLeave.snapshot.phase === 'lobby') out.push(...this.restoreBedwarsLobby(bwLeave.snapshot));
+      out.push(...this.bwResultOutbound(bwLeave.snapshot));
+    } else if (bwLeave.deleted && this.bwDiamondNextAt.size) {
+      // The room went away with the last member; drop its generator clock.
+      this.bwDiamondNextAt.clear();
+    }
     out.push(...this.cleanupPlayerArenaPlacements(id));
     // A disconnect must FREE the seat, or the airframe stays permanently
     // "piloted" and hangs in the sky forever. Once the seat is empty the vehicle
@@ -791,7 +831,8 @@ export class GameServer {
     const victim = this.players.get(id);
     if (!victim || victim.disconnectSettled) return [];
     victim.disconnectSettled = true;
-    // Arena disconnects are resolved only by Duels (forfeit/removal). They can
+    // Arena disconnects are resolved only by the owning minigame (forfeit or
+    // removal). They can
     // never become open-world combat-log deaths or lifesteal transactions.
     if (victim.arenaSaved) return [];
     if (victim.dead || victim.mode !== 'survival') return [];
@@ -844,6 +885,8 @@ export class GameServer {
   private arenaRouteFor(id: number): ArenaKind | null {
     const duelPhase = this.duels.phaseFor(id);
     if (duelPhase && duelPhase !== 'lobby') return 'duel';
+    const bwPhase = this.bedwars.phaseFor(id);
+    if (bwPhase && bwPhase !== 'lobby') return 'bedwars';
     return null;
   }
 
@@ -866,6 +909,10 @@ export class GameServer {
     if (msg.t === 'duelCreate' || msg.t === 'duelQueue' || msg.t === 'duelJoin' || msg.t === 'duelLeave' ||
         msg.t === 'duelReady' || msg.t === 'duelStart' || msg.t === 'duelArenaReady' || msg.t === 'duelRematch' ||
         msg.t === 'duelReturn' || msg.t === 'duelFlair') return this.handleDuel(p, msg);
+    if (msg.t === 'bwCreate' || msg.t === 'bwQueue' || msg.t === 'bwJoin' || msg.t === 'bwLeave' ||
+        msg.t === 'bwReady' || msg.t === 'bwStart' || msg.t === 'bwArenaReady') {
+      return this.handleBedwarsLobby(p, msg);
+    }
     // A player inside a live arena is routed to that mode's whitelist and
     // NOTHING else. Every `route*InMatch` ends in `return []`, so any message
     // the mode does not explicitly name is dropped rather than falling through
@@ -874,6 +921,7 @@ export class GameServer {
     // use them) unreachable from the open world.
     switch (this.arenaRouteFor(id)) {
       case 'duel': return this.routeDuelInMatch(p, msg);
+      case 'bedwars': return this.routeBedwarsInMatch(p, msg);
     }
     // Spectators are non-interacting ghosts: drop any world-mutating / combat
     // message. They may still move (xform), persist (saveState), and respawn.
@@ -2160,6 +2208,630 @@ export class GameServer {
   }
 
   /** Advance authoritative Duels timestamps; called from the transport tick. */
+
+  // ── Bedwars ───────────────────────────────────────────────────────────────
+
+  private bwError(to: number, code: Extract<ServerMsg, { t: 'bwError' }>['code']): Outbound[] {
+    const messages: Record<Extract<ServerMsg, { t: 'bwError' }>['code'], string> = {
+      invalid: 'That Bedwars invite is invalid or has expired.',
+      full: 'That Bedwars lobby is full.',
+      match_in_progress: 'Match in progress — wait for this lobby to reopen.',
+      already_in_lobby: 'Leave your current minigame lobby before joining another.',
+      not_host: 'Only the lobby host can start the match.',
+      too_few_players: 'At least two players are required.',
+      too_many_players: 'This map has no room for another player.',
+      not_everyone_ready: 'Every connected player must ready up first.',
+      not_in_lobby: 'You are not in a Bedwars lobby.',
+      cannot_afford: "You can't afford that yet.",
+      too_far: 'Stand at your own Quartermaster to buy.',
+    };
+    return [{ to, msg: { t: 'bwError', code, message: messages[code] } }];
+  }
+
+  private bwSnapshotOutbound(
+    snapshot: BwLobbySnapshot, invite?: { id: number; token: string },
+  ): Outbound[] {
+    // No progression settlement, deliberately: Bedwars is UNRANKED. Compare
+    // `duelSnapshotOutbound`, which settles RP here.
+    return snapshot.participants.map((participant) => ({
+      to: participant.id,
+      msg: { t: 'bwLobby', snapshot, inviteToken: invite?.id === participant.id ? invite.token : undefined },
+    }));
+  }
+
+  private bwArenaBoundsAABB(arena: BwArenaBounds): ArenaAABB {
+    return {
+      minX: arena.originX, maxX: arena.originX + BEDWARS_ARENA_SIZE,
+      minZ: arena.originZ, maxZ: arena.originZ + BEDWARS_ARENA_SIZE,
+      // The sweep must reach the ceiling: a tower of wool is the thing being
+      // reset, and it can legally stand well above the island surface.
+      minY: BEDWARS_FLOOR_Y - 8, maxY: BEDWARS_CEILING_Y,
+    };
+  }
+
+  private resetBedwarsArenaEdits(arena: BwArenaBounds, memberIds?: number[]): Outbound[] {
+    return this.resetArenaEdits(`bedwars:${arena.slot}`, this.bwArenaBoundsAABB(arena), memberIds);
+  }
+
+  /** Player-placed cover inside a Bedwars arena. Consulted by the melee
+   *  line-of-sight test, so you cannot swing through a wool wall. */
+  private bwPlacedSolid(x: number, y: number, z: number): boolean {
+    const block = this.edits.get(`${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`);
+    return block !== undefined && block !== Block.Air && (BLOCKS[block]?.solid ?? false);
+  }
+
+  private bwLoadout(p: ServerPlayer, team: number): Outbound {
+    const slots: (ItemStack | null)[] = new Array(36).fill(null);
+    slots[0] = { id: p.bwAxe, count: 1 };
+    slots[1] = { id: bedwarsTeamWool(team), count: 16 };
+    return { to: p.id, msg: { t: 'bwLoadout', slots, selected: 0, axe: p.bwAxe } };
+  }
+
+  private bwResourcesOutbound(id: number): Outbound[] {
+    const p = this.bedwars.participantFor(id);
+    if (!p) return [];
+    return [{ to: id, msg: { t: 'bwResources', ...p.resources } }];
+  }
+
+  private enterBedwarsBody(p: ServerPlayer, arena: BwArenaBounds, team: number): Outbound[] {
+    const spawn = arena.spawns.find((s) => s.team === team) ?? arena.spawns[0];
+    this.enterArenaBody(p, 'bedwars', spawn, spawn.yaw, BEDWARS_MAX_HEALTH);
+    p.bwAxe = this.bedwars.participantFor(p.id)?.axe ?? Item.WoodenAxe;
+    p.held = p.bwAxe;
+    p.bwLastSwingAt = -Infinity; p.bwCombo = 0; p.bwComboTarget = 0; p.bwComboUntil = 0;
+    p.bwRespawning = false; p.bwIronAccum = 0; p.bwGoldAccum = 0;
+    return [
+      this.bwLoadout(p, team),
+      ...this.bwResourcesOutbound(p.id),
+      { to: p.id, msg: { t: 'bwArena', arena, spawn: { x: spawn.x, y: spawn.y, z: spawn.z },
+        team, countdownEndsAt: this.bedwars.snapshotFor(p.id, this.worldTime * 1000)?.countdownEndsAt ?? 0 } },
+    ];
+  }
+
+  private launchBedwars(snapshot: BwLobbySnapshot): Outbound[] {
+    const out = this.bwSnapshotOutbound(snapshot);
+    if (!snapshot.arena) return out;
+    const ids = snapshot.participants.map((v) => v.id);
+    out.push(...this.resetBedwarsArenaEdits(snapshot.arena, ids));
+    for (const participant of snapshot.participants) {
+      const player = this.players.get(participant.id);
+      if (player) out.push(...this.enterBedwarsBody(player, snapshot.arena, participant.team));
+    }
+    out.push(...this.announceArenaScope(ids));
+    return out;
+  }
+
+  private bwResultOutbound(snapshot: BwLobbySnapshot): Outbound[] {
+    if (snapshot.phase !== 'results' || !snapshot.result) return [];
+    const ids = snapshot.participants.map((v) => v.id);
+    const out: Outbound[] = ids.map((id) => ({
+      to: id, msg: { t: 'bwResult', result: snapshot.result! },
+    }));
+    if (snapshot.arena) out.push(...this.resetBedwarsArenaEdits(snapshot.arena, ids));
+    return out;
+  }
+
+  private restoreBedwarsLobby(snapshot: BwLobbySnapshot): Outbound[] {
+    const out: Outbound[] = [];
+    const restored: number[] = [];
+    if (snapshot.arena) {
+      out.push(...this.resetBedwarsArenaEdits(snapshot.arena, snapshot.participants.map((v) => v.id)));
+    }
+    for (const member of snapshot.participants) {
+      const p = this.players.get(member.id);
+      if (p?.arenaSaved) { out.push(...this.restoreOpenWorldState(p)); restored.push(p.id); }
+    }
+    out.push(...this.announceWorldScope(restored));
+    return out;
+  }
+
+  /**
+   * The in-match whitelist.
+   *
+   * Every branch is explicit and the function ends in `return []`, so anything
+   * a Bedwars body sends that is not named here is dropped rather than falling
+   * through to the open-world switch.
+   */
+  private routeBedwarsInMatch(p: ServerPlayer, msg: ClientMsg): Outbound[] {
+    if (msg.t === 'xform') return this.handleBedwarsTransform(p, msg);
+    if (msg.t === 'bwMelee') return this.handleBedwarsMelee(p, msg.target);
+    if (msg.t === 'bwBed') return this.handleBedwarsBed(p, msg.x, msg.y, msg.z);
+    if (msg.t === 'bwShopBuy') return this.handleBedwarsShopBuy(p, msg.entry);
+    if (msg.t === 'useHeal') return this.handleBedwarsHeal(p, msg.item);
+    if (msg.t === 'edit') return this.handleBedwarsEdit(p, msg.x, msg.y, msg.z, msg.block);
+    return [];
+  }
+
+  private handleBedwarsTransform(p: ServerPlayer, msg: Extract<ClientMsg, { t: 'xform' }>): Outbound[] {
+    const arena = this.bedwars.arenaFor(p.id), phase = this.bedwars.phaseFor(p.id);
+    if (!arena || !phase || !fin(msg.x, msg.y, msg.z, msg.yaw, msg.pitch)) return [];
+    const participant = this.bedwars.participantFor(p.id);
+    if (!participant) return [];
+    const spawn = arena.spawns.find((s) => s.team === participant.team) ?? arena.spawns[0];
+    if (phase === 'countdown') {
+      p.x = spawn.x; p.y = spawn.y; p.z = spawn.z;
+    } else {
+      // The stalemate ladder's third rung drags stragglers toward mid by
+      // shrinking the containment box rather than by teleporting anyone.
+      const box = this.bedwars.stageFor(p.id) === 'collapse'
+        ? collapsedBedwarsArena(arena, BEDWARS_CLAMP_RADIUS) : arena;
+      const bounded = clampToBedwarsArena({ x: msg.x, y: msg.y, z: msg.z }, box);
+      p.x = bounded.x; p.y = bounded.y; p.z = bounded.z;
+    }
+    p.yaw = msg.yaw; p.pitch = msg.pitch;
+    p.gliding = false; p.boating = false; p.seated = false; p.sneaking = msg.sneaking === true;
+    // The held item is cosmetic here: the damage math reads `p.bwAxe`.
+    p.held = participant.alive && (msg.held === p.bwAxe ||
+      msg.held === bedwarsTeamWool(participant.team) || msg.held === Block.OakPlanks ||
+      msg.held === Block.Glass || msg.held === Item.Bandage ||
+      msg.held === Item.JumpBoost) ? msg.held : 0;
+    p.armor = [0, 0, 0, 0]; p.aiming = false; p.reloading = false;
+    if (typeof msg.swing === 'number' && Number.isFinite(msg.swing)) p.swing = Math.floor(msg.swing) & 0xffff;
+    this.recordArenaTrack(p);
+
+    // The void. Detected HERE rather than in the tick loop so the death lands
+    // on the frame the player actually passes the plane.
+    if (participant.alive && p.y < BEDWARS_VOID_Y) return this.bedwarsVoidDeath(p);
+    return [];
+  }
+
+  /**
+   * A player crossed the kill plane.
+   *
+   * Attribution is the whole reason the mode's signature kill scores: the pure
+   * module resolves the last-hit window, so the rule lives in exactly one
+   * place and is testable without a server.
+   */
+  private bedwarsVoidDeath(p: ServerPlayer): Outbound[] {
+    const nowMs = this.worldTime * 1000;
+    const recorded = this.bedwars.recordDeath(p.id, 0, nowMs, 'void');
+    if (!recorded) return [];
+    p.health = 1; p.held = 0; p.bwRespawning = true;
+    p.bwCombo = 0; p.bwComboTarget = 0;
+    const out: Outbound[] = [];
+    const victim = recorded.snapshot.participants.find((v) => v.id === p.id)!;
+    out.push({ to: p.id, msg: { t: 'bwRespawn',
+      respawnAt: victim.respawnAt ?? nowMs, spectating: true } });
+    const killerName = recorded.killer !== null
+      ? this.players.get(recorded.killer)?.username : undefined;
+    for (const id of this.bedwars.membersOf(p.id)) {
+      out.push({ to: id, msg: { t: 'killfeed',
+        killer: killerName ?? '', victim: p.username } });
+    }
+    out.push(...this.bwSnapshotOutbound(recorded.snapshot));
+    out.push(...this.bwResultOutbound(recorded.snapshot));
+    return out;
+  }
+
+  /**
+   * Axe melee. Every branch returns [] — the handler is fail-closed at each
+   * step, in the order a cheap check should come before an expensive one.
+   *
+   * Nothing the client sends beyond the target id is consulted. Damage comes
+   * from `p.bwAxe` (the server's own record of the purchased tier) and from
+   * the server's own velocity/ground state derived from `arenaTrack`.
+   */
+  private handleBedwarsMelee(p: ServerPlayer, targetId: number): Outbound[] {
+    const nowMs = this.worldTime * 1000;
+    // 1. One live match, both parties in it.
+    if (!Number.isInteger(targetId) || !this.bedwars.sameMatch(p.id, targetId)) return [];
+    const target = this.players.get(targetId), arena = this.bedwars.arenaFor(p.id);
+    const ap = this.bedwars.participantFor(p.id), tp = this.bedwars.participantFor(targetId);
+    if (!target || !arena || !ap || !tp) return [];
+    // 2. No friendly fire. (Matters the moment a 2v2 map is added.)
+    if (ap.team === tp.team) return [];
+    // 3. Both alive, and the target's spawn shield has expired.
+    if (!ap.alive || !tp.alive || (tp.shieldUntil !== undefined && tp.shieldUntil > nowMs)) return [];
+    // 4. Cadence. Under the floor the swing is DROPPED, not scaled down — a
+    //    macro that spams at 10x speed accomplishes nothing at all.
+    const tier = bedwarsAxeTier(p.bwAxe);
+    const sinceLast = nowMs - p.bwLastSwingAt;
+    if (sinceLast < tier.cooldownMs * BW_SWING_FLOOR) return [];
+
+    // 5. Range and facing, lag-compensated against the target's own history.
+    const eye = { x: p.x, y: p.y + 1.6, z: p.z };
+    const lookLen = Math.hypot(-Math.sin(p.yaw), -Math.cos(p.yaw)) || 1;
+    const lookX = -Math.sin(p.yaw) / lookLen, lookZ = -Math.cos(p.yaw) / lookLen;
+    const now = this.worldTime;
+    const candidates: ArenaTrackSample[] = [{ at: now, x: target.x, y: target.y, z: target.z }];
+    for (const sample of target.arenaTrack) {
+      if (now - sample.at <= BW_MELEE_REWIND_S) candidates.push(sample);
+    }
+    let hitAt: ArenaTrackSample | null = null;
+    for (const sample of candidates) {
+      const cx = sample.x, cy = sample.y + 0.9, cz = sample.z;
+      if (Math.hypot(cx - eye.x, cy - eye.y, cz - eye.z) > BW_MELEE_RANGE) continue;
+      const hx = cx - eye.x, hz = cz - eye.z;
+      const hlen = Math.hypot(hx, hz);
+      if (hlen < 1e-6) { hitAt = sample; break; }
+      if ((hx / hlen) * lookX + (hz / hlen) * lookZ < BW_MELEE_FACING_DOT) continue;
+      hitAt = sample; break;
+    }
+    if (!hitAt) return [];
+
+    // 6. Cover. You cannot swing through a wool wall.
+    if (!hasBedwarsLineOfSight(eye, { x: hitAt.x, y: hitAt.y + 0.9, z: hitAt.z }, arena,
+      (x, y, z) => this.bwPlacedSolid(x, y, z))) return [];
+
+    // 7. Damage — server numbers only.
+    const motion = this.bwMotionOf(p);
+    const dxh = hitAt.x - p.x, dzh = hitAt.z - p.z;
+    const dlen = Math.hypot(dxh, dzh) || 1;
+    const combo = (p.bwComboTarget === targetId && nowMs < p.bwComboUntil) ? p.bwCombo : 0;
+    const swing = bedwarsSwing({
+      tier, sinceLastSwingMs: sinceLast, combo,
+      onGround: motion.onGround, vy: motion.vy, speed: motion.speed,
+      toTargetX: dxh / dlen, toTargetZ: dzh / dlen, lookX, lookZ,
+    });
+
+    p.bwLastSwingAt = nowMs;
+    p.bwCombo = Math.min(combo + 1, 99);
+    p.bwComboTarget = targetId;
+    p.bwComboUntil = nowMs + BW_COMBO_WINDOW_MS;
+    // Being hit breaks YOUR combo, which is what makes trading a real cost.
+    target.bwCombo = 0; target.bwComboTarget = 0; target.bwComboUntil = 0;
+
+    const dealt = Math.min(swing.damage, target.health);
+    target.health = Math.max(0, target.health - swing.damage);
+    const killed = target.health <= 0;
+    this.bedwars.recordHit(targetId, p.id, nowMs);
+
+    const out: Outbound[] = [
+      { to: target.id, msg: { t: 'hurt', health: killed ? 1 : target.health, dead: false,
+        by: p.id, kx: swing.kx, ky: swing.ky, kz: swing.kz, combat: 0 } },
+      { to: p.id, msg: { t: 'bwHit', target: target.id, amount: dealt, combo: swing.combo,
+        charge: swing.charge, crit: swing.crit, killed } },
+    ];
+    if (!killed) return out;
+
+    target.health = 1; target.held = 0; target.bwRespawning = true;
+    target.bwCombo = 0; target.bwComboTarget = 0;
+    const recorded = this.bedwars.recordDeath(target.id, p.id, nowMs, 'melee');
+    if (!recorded) return out;
+    const dead = recorded.snapshot.participants.find((v) => v.id === target.id)!;
+    out.push({ to: target.id, msg: { t: 'bwRespawn',
+      respawnAt: dead.respawnAt ?? nowMs, spectating: true } });
+    for (const id of this.bedwars.membersOf(p.id)) {
+      out.push({ to: id, msg: { t: 'killfeed', killer: p.username, victim: target.username } });
+    }
+    out.push(...this.bwSnapshotOutbound(recorded.snapshot));
+    out.push(...this.bwResultOutbound(recorded.snapshot));
+    return out;
+  }
+
+  /** Server-derived motion, from the position history the server itself
+   *  accepted. Never from anything the client asserts. */
+  private bwMotionOf(p: ServerPlayer): { vy: number; speed: number; onGround: boolean } {
+    const track = p.arenaTrack;
+    const last = track[track.length - 1], prev = track[track.length - 2];
+    let vy = 0, speed = 0;
+    if (last && prev) {
+      const dt = Math.max(1e-3, last.at - prev.at);
+      vy = (last.y - prev.y) / Math.max(1, dt * 20); // per-tick, matching the client
+      speed = Math.hypot(last.x - prev.x, last.z - prev.z) / dt;
+    }
+    const arena = this.bedwars.arenaFor(p.id);
+    const onGround = !arena ? true
+      : bedwarsSolidAt(p.x, p.y - 0.1, p.z, arena) || this.bwPlacedSolid(p.x, p.y - 0.1, p.z);
+    return { vy, speed, onGround };
+  }
+
+  /**
+   * Break an enemy bed.
+   *
+   * Beds are `hardness: -1`, so the ordinary mining path can never touch one.
+   * This branch is the only thing in the codebase that may destroy a bed, and
+   * it refuses your own team's.
+   */
+  private handleBedwarsBed(p: ServerPlayer, x: number, y: number, z: number): Outbound[] {
+    const arena = this.bedwars.arenaFor(p.id), ap = this.bedwars.participantFor(p.id);
+    const nowMs = this.worldTime * 1000;
+    if (!arena || !ap?.alive || this.bedwars.phaseFor(p.id) !== 'running') return [];
+    if (!fin(x, y, z)) return [];
+    const team = bedwarsBedTeamAt(x, y, z, arena);
+    if (team < 0 || team === ap.team) return [];
+    const eye = { x: p.x, y: p.y + 1.6, z: p.z };
+    const cell = { x: Math.floor(x) + 0.5, y: Math.floor(y) + 0.5, z: Math.floor(z) + 0.5 };
+    if (Math.hypot(cell.x - eye.x, cell.y - eye.y, cell.z - eye.z) > BW_MELEE_RANGE) return [];
+    const lookX = -Math.sin(p.yaw), lookZ = -Math.cos(p.yaw);
+    const hx = cell.x - eye.x, hz = cell.z - eye.z, hlen = Math.hypot(hx, hz);
+    if (hlen > 1e-6 && (hx / hlen) * lookX + (hz / hlen) * lookZ < BW_MELEE_FACING_DOT) return [];
+    if (!hasBedwarsLineOfSight(eye, cell, arena, (bx, by, bz) => {
+      // The bed's own cells must not count as cover against breaking it.
+      if (bedwarsBedTeamAt(bx, by, bz, arena) === team) return false;
+      return this.bwPlacedSolid(bx, by, bz);
+    })) return [];
+
+    const broke = this.bedwars.breakBed(p.id, team, nowMs);
+    if (!broke) return [];
+    const out: Outbound[] = [];
+    for (const id of this.bedwars.membersOf(p.id)) {
+      out.push({ to: id, msg: { t: 'bwBedBroken', team, by: p.id } });
+    }
+    out.push(...this.bwSnapshotOutbound(broke.snapshot));
+    out.push(...this.bwResultOutbound(broke.snapshot));
+    return out;
+  }
+
+  /** Right-click the Quartermaster. Validated: alive, running, and standing at
+   *  a shop cell belonging to YOUR OWN team. */
+  private handleBedwarsShopBuy(p: ServerPlayer, entry: number): Outbound[] {
+    const arena = this.bedwars.arenaFor(p.id), ap = this.bedwars.participantFor(p.id);
+    if (!arena || !ap?.alive || this.bedwars.phaseFor(p.id) !== 'running') return [];
+    const shopEntry = bedwarsShopEntry(entry);
+    if (!shopEntry) return [];
+    const near = bedwarsShopCells(arena, ap.team).some((c) =>
+      Math.hypot(c.x + 0.5 - p.x, c.y - p.y, c.z + 0.5 - p.z) <= 4.5);
+    if (!near) return this.bwError(p.id, 'too_far');
+    if (!this.bedwars.spendResources(p.id, shopEntry.cost)) {
+      return this.bwError(p.id, 'cannot_afford');
+    }
+    const out: Outbound[] = [];
+    if (shopEntry.axe !== undefined) {
+      this.bedwars.setAxe(p.id, shopEntry.axe);
+      p.bwAxe = this.bedwars.participantFor(p.id)?.axe ?? p.bwAxe;
+      out.push(this.bwLoadout(p, ap.team));
+    } else {
+      const stacks: ItemStack[] = shopEntry.teamBlock !== undefined
+        ? [{ id: bedwarsTeamWool(ap.team), count: shopEntry.teamBlock }]
+        : (shopEntry.grants ?? []).map((g) => ({ id: g.id, count: g.count }));
+      out.push({ to: p.id, msg: { t: 'bwGrant', items: stacks } });
+    }
+    out.push(...this.bwResourcesOutbound(p.id));
+    out.push(...this.bwSnapshotOutbound(this.bedwars.snapshotFor(p.id, this.worldTime * 1000)!));
+    return out;
+  }
+
+  private handleBedwarsHeal(p: ServerPlayer, item: number): Outbound[] {
+    const participant = this.bedwars.participantFor(p.id);
+    if (item !== Item.Bandage || !participant?.alive ||
+        this.bedwars.phaseFor(p.id) !== 'running' || p.health >= BEDWARS_MAX_HEALTH) return [];
+    const heal = ITEMS[Item.Bandage].heal;
+    if (!heal) return [];
+    p.regenBoostTimer = heal.duration; p.regenBoostInterval = heal.interval; p.regenTimer = 0;
+    return [];
+  }
+
+  /**
+   * Arena building. Only the mode's own materials, only above the island
+   * surface, only below the ceiling — and breaking is limited to blocks a
+   * PLAYER placed, so no authored geometry (and no bed) can be mined away.
+   */
+  private handleBedwarsEdit(
+    p: ServerPlayer, x: number, y: number, z: number, block: number,
+  ): Outbound[] {
+    const arena = this.bedwars.arenaFor(p.id), ap = this.bedwars.participantFor(p.id);
+    if (!arena || !ap?.alive || this.bedwars.phaseFor(p.id) !== 'running') return [];
+    if (!fin(x, y, z) || !fin(p.x, p.y, p.z)) return [];
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    if (bx < arena.minX || bx >= arena.maxX || bz < arena.minZ || bz >= arena.maxZ) return [];
+    if (by <= BEDWARS_VOID_Y || by >= BEDWARS_CEILING_Y) return [];
+    if (Math.hypot(bx + 0.5 - p.x, by + 0.5 - p.y, bz + 0.5 - p.z) > EDIT_RANGE) return [];
+
+    const key = `${bx},${by},${bz}`;
+    const placeable = new Set<number>([
+      bedwarsTeamWool(ap.team), Block.OakPlanks, Block.Glass,
+    ]);
+    let slotEdits = this.arenaEdits.get(`bedwars:${arena.slot}`);
+    if (!slotEdits) {
+      slotEdits = new Map<string, number>();
+      this.arenaEdits.set(`bedwars:${arena.slot}`, slotEdits);
+    }
+
+    if (block === Block.Air) {
+      // Breaking: only ever a block someone placed this match. Authored island,
+      // fixtures and beds are all untouchable here by construction.
+      if (!slotEdits.has(key)) return [];
+      slotEdits.delete(key);
+      this.edits.set(key, Block.Air);
+      return this.bedwars.membersOf(p.id).map((id) => ({
+        to: id, msg: { t: 'edit', x: bx, y: by, z: bz, block: Block.Air },
+      }));
+    }
+    if (!placeable.has(block)) return [];
+    // Never overwrite authored geometry, and never stack into an occupied cell.
+    if (bedwarsBlockAt(bx, by, bz) !== null) return [];
+    const existing = this.edits.get(key);
+    if (existing !== undefined && existing !== Block.Air) return [];
+    slotEdits.set(key, block);
+    this.edits.set(key, block);
+    return this.bedwars.membersOf(p.id).map((id) => ({
+      to: id, msg: { t: 'edit', x: bx, y: by, z: bz, block },
+    }));
+  }
+
+  private removeFromBwQueue(id: number): boolean {
+    const before = this.bwQueue.length;
+    this.bwQueue = this.bwQueue.filter((queuedId) => queuedId !== id);
+    return this.bwQueue.length !== before;
+  }
+
+  private handleBedwarsLobby(p: ServerPlayer, msg: Extract<ClientMsg, { t: `bw${string}` }>): Outbound[] {
+    const now = this.worldTime * 1000;
+    switch (msg.t) {
+      case 'bwCreate': {
+        this.removeFromBwQueue(p.id);
+        const result = this.bedwars.create({ id: p.id, username: p.username, skin: p.skin }, now);
+        if ('reason' in result) return this.bwError(p.id, result.reason);
+        return [
+          { to: p.id, msg: { t: 'bwQueue', queued: false } },
+          ...this.bwSnapshotOutbound(result.snapshot, { id: p.id, token: result.token }),
+        ];
+      }
+      case 'bwQueue': {
+        if (!msg.join) {
+          this.removeFromBwQueue(p.id);
+          return [{ to: p.id, msg: { t: 'bwQueue', queued: false } }];
+        }
+        if (this.bedwars.phaseFor(p.id)) return this.bwError(p.id, 'already_in_lobby');
+        if (!this.bwQueue.includes(p.id)) this.bwQueue.push(p.id);
+        const out: Outbound[] = [{ to: p.id, msg: { t: 'bwQueue', queued: true } }];
+        // Pair the two longest-waiting players into a fresh private lobby.
+        while (this.bwQueue.length >= 2) {
+          const [aId, bId] = this.bwQueue.splice(0, 2);
+          const a = this.players.get(aId), b = this.players.get(bId);
+          if (!a || !b) continue;
+          const made = this.bedwars.create({ id: a.id, username: a.username, skin: a.skin }, now);
+          if ('reason' in made) continue;
+          const joined = this.bedwars.join(made.token,
+            { id: b.id, username: b.username, skin: b.skin }, now);
+          if (!joined.ok) continue;
+          this.bedwars.setReady(a.id, true, now);
+          const ready = this.bedwars.setReady(b.id, true, now);
+          out.push({ to: a.id, msg: { t: 'bwQueue', queued: false } });
+          out.push({ to: b.id, msg: { t: 'bwQueue', queued: false } });
+          if (ready) out.push(...this.bwSnapshotOutbound(ready));
+        }
+        return out;
+      }
+      case 'bwJoin': {
+        if (typeof msg.token !== 'string') return this.bwError(p.id, 'invalid');
+        this.removeFromBwQueue(p.id);
+        const result = this.bedwars.join(msg.token,
+          { id: p.id, username: p.username, skin: p.skin }, now);
+        if (!result.ok) return this.bwError(p.id, result.reason);
+        return this.bwSnapshotOutbound(result.snapshot);
+      }
+      case 'bwLeave': {
+        if (this.removeFromBwQueue(p.id) && !this.bedwars.phaseFor(p.id)) {
+          return [{ to: p.id, msg: { t: 'bwQueue', queued: false } }];
+        }
+        const oldPhase = this.bedwars.phaseFor(p.id);
+        const oldArena = this.bedwars.arenaFor(p.id);
+        const result = this.bedwars.leave(p.id, now);
+        const out = result.snapshot ? this.bwSnapshotOutbound(result.snapshot) : [];
+        if (result.deleted && oldArena) out.push(...this.resetBedwarsArenaEdits(oldArena));
+        if (oldPhase && oldPhase !== 'lobby') {
+          out.push(...this.restoreOpenWorldState(p));
+          out.push(...this.announceWorldScope([p.id]));
+        }
+        if (result.snapshot?.phase === 'lobby') out.push(...this.restoreBedwarsLobby(result.snapshot));
+        if (result.snapshot) out.push(...this.bwResultOutbound(result.snapshot));
+        return out;
+      }
+      case 'bwReady': {
+        const snap = this.bedwars.setReady(p.id, msg.ready === true, now);
+        return snap ? this.bwSnapshotOutbound(snap) : this.bwError(p.id, 'not_in_lobby');
+      }
+      case 'bwStart': {
+        const result = this.bedwars.start(p.id, now);
+        if (!result.ok) return this.bwError(p.id, result.reason);
+        return this.launchBedwars(result.snapshot);
+      }
+      case 'bwArenaReady': {
+        const snap = this.bedwars.markArenaReady(p.id, now);
+        return snap ? this.bwSnapshotOutbound(snap) : [];
+      }
+      default:
+        return [];
+    }
+  }
+
+  /**
+   * One Bedwars server tick: phase transitions, respawns, and the resource
+   * generators.
+   *
+   * Generators are pure counters. `itemspawn`/`itemsmove` are world-broadcast
+   * and gated only by `receivesWorldBroadcast`, so real item entities would be
+   * visible to the open world; counters sidestep that entirely and make the
+   * shop trivially server-authoritative.
+   */
+  tickBedwars(dt: number): Outbound[] {
+    const out: Outbound[] = [];
+    const nowMs = this.worldTime * 1000;
+
+    for (const snap of this.bedwars.tick(nowMs)) {
+      out.push(...this.bwSnapshotOutbound(snap));
+      if (snap.phase === 'lobby') out.push(...this.restoreBedwarsLobby(snap));
+      if (snap.phase === 'results') this.bwDiamondNextAt.delete(snap.id);
+      if (snap.phase === 'running' && snap.arena) {
+        for (const participant of snap.participants) {
+          const p = this.players.get(participant.id);
+          if (!p) continue;
+          if (!p.bwRespawning || !participant.alive) continue;
+          const spawn = snap.arena.spawns.find((s) => s.team === participant.team) ?? snap.arena.spawns[0];
+          p.x = spawn.x; p.y = spawn.y; p.z = spawn.z; p.yaw = spawn.yaw;
+          p.health = BEDWARS_MAX_HEALTH;
+          // The purchased tier survives death — that is what makes a Void
+          // Cleaver worth four diamonds.
+          p.bwAxe = participant.axe; p.held = participant.axe;
+          p.bwRespawning = false; p.bwCombo = 0; p.bwComboTarget = 0;
+          p.bwLastSwingAt = -Infinity;
+          p.arenaTrack = []; this.recordArenaTrack(p);
+          out.push(this.bwLoadout(p, participant.team));
+          out.push({ to: p.id, msg: { t: 'respawned',
+            x: spawn.x, y: spawn.y, z: spawn.z, health: BEDWARS_MAX_HEALTH } });
+          out.push({ to: p.id, msg: { t: 'bwRespawn', respawnAt: 0, spectating: false } });
+        }
+      }
+      out.push(...this.bwResultOutbound(snap));
+    }
+
+    for (const snap of this.bedwars.snapshots(nowMs)) {
+      if (snap.phase !== 'running' || !snap.arena) continue;
+      out.push(...this.tickBedwarsGenerators(snap, nowMs, Math.max(0, dt) * 1000));
+      if (this.worldTime >= this.duelClockNextAt) {
+        for (const participant of snap.participants) {
+          out.push({ to: participant.id, msg: { t: 'bwClock',
+            serverNow: nowMs, endsAt: snap.endsAt ?? nowMs, stage: snap.stage } });
+        }
+      }
+    }
+    return out;
+  }
+
+  private tickBedwarsGenerators(snap: BwLobbySnapshot, nowMs: number, dtMs: number): Outbound[] {
+    const arena = snap.arena;
+    if (!arena) return [];
+    const out: Outbound[] = [];
+
+    const gens = bedwarsGenCells(arena);
+    const changed = new Set<number>();
+
+    // Team generators credit their own team, whether or not anybody is
+    // standing there — a base keeps earning while its owner fights at mid.
+    for (const participant of snap.participants) {
+      if (!participant.connected) continue;
+      const p = this.players.get(participant.id);
+      if (!p) continue;
+      if (!gens.some((g) => !g.diamond && g.team === participant.team)) continue;
+      p.bwIronAccum += dtMs;
+      p.bwGoldAccum += dtMs;
+      let iron = 0, gold = 0;
+      while (p.bwIronAccum >= BW_GEN_IRON_MS) { p.bwIronAccum -= BW_GEN_IRON_MS; iron++; }
+      while (p.bwGoldAccum >= BW_GEN_GOLD_MS) { p.bwGoldAccum -= BW_GEN_GOLD_MS; gold++; }
+      if (iron || gold) {
+        this.bedwars.grantResources(participant.id, { iron, gold });
+        changed.add(participant.id);
+      }
+    }
+
+    // The diamond generator credits EVERY player standing near it at the tick,
+    // so contesting mid is the point rather than a race to a pickup.
+    const elapsed = nowMs - (snap.startedAt ?? nowMs);
+    const period = bedwarsDiamondPeriod(elapsed);
+    const next = this.bwDiamondNextAt.get(snap.id) ?? (nowMs + period);
+    if (nowMs >= next) {
+      this.bwDiamondNextAt.set(snap.id, nowMs + period);
+      for (const gen of gens.filter((g) => g.diamond)) {
+        for (const participant of snap.participants) {
+          if (!participant.alive) continue;
+          const p = this.players.get(participant.id);
+          if (!p) continue;
+          if (Math.hypot(p.x - gen.x, p.z - gen.z) > BW_PICKUP_RADIUS) continue;
+          if (Math.abs(p.y - gen.y) > BW_PICKUP_RADIUS) continue;
+          this.bedwars.grantResources(participant.id, { diamond: 1 });
+          changed.add(participant.id);
+        }
+      }
+    } else {
+      this.bwDiamondNextAt.set(snap.id, next);
+    }
+
+    for (const id of changed) out.push(...this.bwResourcesOutbound(id));
+    return out;
+  }
+
   tickDuels(): Outbound[] {
     const out: Outbound[] = [];
     const nowMs = this.worldTime * 1000;
