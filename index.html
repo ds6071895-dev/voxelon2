@@ -351,6 +351,57 @@
     .bw-shop-row.afford .bw-shop-cost { color: #7fe0a0; }
     .bw-shop-row.locked { opacity: .45; cursor: not-allowed; }
 
+    /* ── Party Games HUD ─────────────────────────────────────────────────── */
+    .pg-hud { position: absolute; inset: 0; pointer-events: none; z-index: 42;
+      font: 800 11px/1 'Segoe UI', system-ui, sans-serif; }
+    .pg-hud[hidden] { display: none !important; }
+
+    .pg-progress { position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+      display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 9px;
+      background: rgba(8,10,18,.62); border: 1px solid rgba(150,182,224,.18); }
+    .pg-progress-label { font: 800 9px/1 inherit; letter-spacing: 1.4px; color: #aec1d8; }
+    .pg-progress-pip { width: 8px; height: 8px; border-radius: 2px; background: rgba(255,255,255,.16); }
+    .pg-progress-pip.done { background: #7fe0a0; }
+    .pg-progress-pip.live { background: #ff5ea8; box-shadow: 0 0 9px rgba(255,94,168,.85); }
+
+    .pg-standings { position: absolute; top: 14px; left: 14px; display: flex;
+      flex-direction: column; gap: 3px; min-width: 132px; }
+    .pg-row { display: flex; gap: 10px; padding: 4px 9px; border-radius: 6px;
+      background: rgba(8,10,18,.55); color: #d8e2ec; }
+    .pg-row.me { box-shadow: inset 0 0 0 1px rgba(255,94,168,.5); color: #fff; }
+    .pg-row.out { opacity: .42; text-decoration: line-through; }
+    .pg-row-name { flex: 1; }
+    .pg-row-points { color: #ffd25e; }
+
+    .pg-banner { position: absolute; left: 50%; top: 26%; transform: translateX(-50%);
+      text-align: center; }
+    .pg-banner-title { font: 900 34px/1 inherit; letter-spacing: 4px; color: #ff5ea8;
+      text-shadow: 0 0 28px rgba(255,94,168,.6), 0 3px 10px rgba(0,0,0,.9); }
+    .pg-banner-rule { margin-top: 8px; font: 700 12px/1.4 inherit; color: #eaf1fa;
+      text-shadow: 0 2px 8px rgba(0,0,0,.9); }
+
+    .pg-call { position: absolute; left: 50%; top: 38%; transform: translateX(-50%);
+      display: flex; flex-direction: column; align-items: center; gap: 5px;
+      padding: 10px 22px; border-radius: 11px; background: rgba(8,10,18,.72);
+      box-shadow: 0 0 34px color-mix(in srgb, var(--pg-call, #fff) 45%, transparent); }
+    .pg-call-label { font: 800 9px/1 inherit; letter-spacing: 2.2px; color: #8398b2; }
+    .pg-call-name { font: 900 28px/1 inherit; letter-spacing: 3px; color: var(--pg-call, #fff); }
+
+    .pg-card { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+      min-width: 260px; padding: 16px 18px; border-radius: 12px;
+      background: rgba(10,13,22,.94); border: 1px solid rgba(150,182,224,.22);
+      box-shadow: 0 24px 60px rgba(0,0,0,.6); }
+    .pg-card-title { font: 900 15px/1 inherit; letter-spacing: 2.4px; color: #ff5ea8;
+      margin-bottom: 12px; text-align: center; }
+    .pg-card-row { display: flex; align-items: center; gap: 10px; padding: 5px 0;
+      color: #d8e2ec; }
+    .pg-card-row.me { color: #fff; }
+    .pg-card-place { width: 18px; height: 18px; display: grid; place-items: center;
+      border-radius: 4px; background: rgba(255,255,255,.08); font: 800 9px/1 inherit; }
+    .pg-card-row:first-of-type .pg-card-place { background: #ffd25e; color: #1a1408; }
+    .pg-card-name { flex: 1; }
+    .pg-card-points { color: #ffd25e; font: 800 10px/1 inherit; }
+
     .pvp-slam {
       position: absolute; left: 50%; top: 21%; z-index: 13; display: none;
       transform: translateX(-50%); pointer-events: none; text-align: center; width: max-content;
@@ -2924,12 +2975,15 @@
                         <rect x="304" y="24" width="8" height="8" rx="2" fill="#6ee7ff" transform="rotate(-14 308 28)" />
                       </g>
                     </svg>
-                    <span class="minigame-status soon">Coming soon</span>
                   </div>
                   <div class="minigame-copy">
-                    <div class="minigame-title-row"><h3>Party Games</h3><span class="minigame-count">Free-for-all</span></div>
-                    <p>A rotating playlist of quick-fire rounds. Dodge, race and survive the chaos until one player is left standing.</p>
-                    <button class="minigame-action" type="button" aria-disabled="true">Coming soon</button>
+                    <div class="minigame-title-row"><h3>Party Games</h3><span class="minigame-count">3–8 players · FFA · unranked</span></div>
+                    <p>Four microgames, back to back: Spleef, Color Chaos, Rising Sludge and the Knockback Arena. Points every round, and the Crown to whoever has the most when the playlist runs out.</p>
+                    <div class="duel-card-actions">
+                      <button id="party-card-action" class="minigame-action" type="button">Play</button>
+                      <button id="party-private-action" class="duel-private-action" type="button">Invite Friends</button>
+                      <div id="party-queue-status" class="duel-queue-status" role="status" aria-live="polite"></div>
+                    </div>
                   </div>
                 </article>
               </div>

@@ -16,6 +16,9 @@ import type {
 } from '../vehicles';
 import type { DuelArenaBounds, DuelLobbySnapshot, DuelResult } from '../duels';
 import type { BwArenaBounds, BwLobbySnapshot, BwResult, BwStage } from '../bedwars';
+import type {
+  PartyArenaBounds, PartyGameId, PartyLobbySnapshot, PartyResult, PartySubBounds,
+} from '../partygames';
 import type { DuelFlair, DuelPublicProfile } from '../duels_progression';
 import type { PoliticsState } from '../politics';
 
@@ -264,6 +267,17 @@ export type ClientMsg =
   | { t: 'bwMelee'; target: number }
   | { t: 'bwBed'; x: number; y: number; z: number }
   | { t: 'bwShopBuy'; entry: number }
+  // Party Games. Same shape as the other two: lobby verbs are always routable,
+  // the in-match verbs exist only behind `routePartyInMatch`.
+  | { t: 'partyCreate' }
+  | { t: 'partyQueue'; join: boolean }
+  | { t: 'partyJoin'; token: string }
+  | { t: 'partyLeave' }
+  | { t: 'partyReady'; ready: boolean }
+  | { t: 'partyStart' }
+  | { t: 'partyArenaReady' }
+  /** Knockback Arena only. Like `bwMelee`, one target id and nothing else. */
+  | { t: 'partyMelee'; target: number }
   | { t: 'xform'; x: number; y: number; z: number; yaw: number; pitch: number;
       gliding?: boolean; boating?: boolean; seated?: boolean;
       sneaking?: boolean; held?: number; armor?: number[]; swing?: number;
@@ -482,6 +496,22 @@ export type ServerMsg =
    *  handed to the client's own inventory, which is safe because every id
    *  involved is MINIGAME_ONLY and cannot leave the arena. */
   | { t: 'bwGrant'; items: ItemStack[] }
+  | { t: 'partyQueue'; queued: boolean }
+  | { t: 'partyLobby'; snapshot: PartyLobbySnapshot; inviteToken?: string }
+  | { t: 'partyError'; code: 'invalid' | 'full' | 'match_in_progress' |
+      'already_in_lobby' | 'not_host' | 'too_few_players' | 'too_many_players' |
+      'not_everyone_ready' | 'not_in_lobby'; message: string }
+  | { t: 'partyArena'; arena: PartyArenaBounds; sub: PartySubBounds;
+      spawn: { x: number; y: number; z: number }; countdownEndsAt: number }
+  | { t: 'partyRound'; game: PartyGameId; index: number; title: string; rule: string;
+      sub: PartySubBounds; spawn: { x: number; y: number; z: number }; endsAt: number }
+  | { t: 'partyLoadout'; slots: (ItemStack | null)[]; selected: number }
+  /** Color Chaos: the colour being called, and when the rest of the floor drops. */
+  | { t: 'partyCall'; colour: number; vanishAt: number; restoreAt: number }
+  | { t: 'partyEliminated'; id: number; place: number; reason: 'void' | 'sludge' | 'left' }
+  | { t: 'partyIntermission'; endsAt: number; nextGame?: PartyGameId;
+      standings: { id: number; username: string; points: number }[] }
+  | { t: 'partyResult'; result: PartyResult }
   | { t: 'arenaRestored'; x: number; y: number; z: number; yaw: number; pitch: number;
       health: number; dead: boolean; mode: GameMode; state?: Record<string, unknown> }
   | {

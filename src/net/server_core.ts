@@ -92,11 +92,19 @@ import {
   BEDWARS_MAX_HEALTH, BEDWARS_VOID_Y,
   BW_GEN_GOLD_MS, BW_GEN_IRON_MS, BW_MELEE_FACING_DOT, BW_MELEE_RANGE,
   BW_MELEE_REWIND_S, BW_PICKUP_RADIUS, BW_SWING_FLOOR, BW_COMBO_WINDOW_MS,
-  Bedwars, BwArenaBounds, BwLobbySnapshot, bedwarsAxeTier,
+  Bedwars, BwArenaBounds, BwLobbySnapshot, BwSwingResult, BwSwingTier, BwVec3, bedwarsAxeTier,
   bedwarsBedTeamAt, bedwarsBlockAt, bedwarsDiamondPeriod, bedwarsGenCells,
   bedwarsShopCells, bedwarsShopEntry, bedwarsSolidAt, bedwarsSwing, bedwarsTeamWool,
   clampToBedwarsArena, collapsedBedwarsArena, hasBedwarsLineOfSight,
 } from '../bedwars';
+import {
+  COLORS_PALETTE, COLORS_VANISH_MS, COLORS_WARN_MS, PARTY_CEILING_Y, PARTY_FLOOR_Y,
+  PARTY_GAMES, PARTY_KNOCKBACK_TIER, PARTY_MAX_HEALTH, PARTY_MIN_PLAYERS,
+  PARTY_SUB_SIZE, PARTY_VOID_Y,
+  PartyArenaBounds, PartyGameId, PartyGamesEngine, PartyLobbySnapshot, PartySubBounds,
+  PartyVec3, clampToPartySub, colorsColorAt, colorsInterval, partyCanBreak, partyGame,
+  partySolidAt, partySpawns, partySubBounds, sludgeLevel,
+} from '../partygames';
 import { isMinigameOnly, stripMinigameItems } from '../minigame_items';
 import {
   DuelFlair, DuelProgressState, DuelPublicProfile, canEquipDuelFlair,
@@ -235,12 +243,14 @@ interface ServerPlayer extends PlayerInfo {
   /** The purchased axe tier. The melee math reads THIS, never `p.held`, so no
    *  client-supplied number ever enters the damage calculation. */
   bwAxe: number;
-  bwLastSwingAt: number;
-  /** Consecutive landed hits on `bwComboTarget` inside the combo window. */
-  bwCombo: number;
-  bwComboTarget: number;
-  bwComboUntil: number;
+  arenaLastSwingAt: number;
+  /** Consecutive landed hits on `arenaComboTarget` inside the combo window. */
+  arenaCombo: number;
+  arenaComboTarget: number;
+  arenaComboUntil: number;
   bwRespawning: boolean;
+  /** Knocked out of the CURRENT Party microgame. Cleared on each round start. */
+  partyEliminated: boolean;
   /** Milliseconds of generator credit carried between ticks, so a slow tick
    *  cannot silently drop production. */
   bwIronAccum: number;
@@ -431,6 +441,13 @@ export class GameServer {
   private bwQueue: number[] = [];
   /** Next diamond payout per live Bedwars lobby id. */
   private readonly bwDiamondNextAt = new Map<string, number>();
+  readonly party = new PartyGamesEngine(secureDuelToken);
+  private partyQueue: number[] = [];
+  /** Color Chaos call state per live party lobby. */
+  private readonly partyCalls = new Map<string, {
+    call: number; colour: number; vanishAt: number; restoreAt: number;
+    phase: 'idle' | 'called' | 'vanished';
+  }>();
   private readonly settledDuelResults = new Set<string>();
   /** Next whole-server timestamp broadcast for hidden-tab/lag clock recovery. */
   private duelClockNextAt = 0;
@@ -720,8 +737,9 @@ export class GameServer {
       duelBurstShots: 0,
       duelShotTickets: [],
       arenaTrack: [],
-      bwAxe: 0, bwLastSwingAt: -Infinity, bwCombo: 0, bwComboTarget: 0, bwComboUntil: 0,
+      bwAxe: 0, arenaLastSwingAt: -Infinity, arenaCombo: 0, arenaComboTarget: 0, arenaComboUntil: 0,
       bwRespawning: false, bwIronAccum: 0, bwGoldAccum: 0,
+      partyEliminated: false,
       duelLoaded: 0,
       duelReloadUntil: 0,
       duelMedkits: 0,
@@ -800,6 +818,16 @@ export class GameServer {
     } else if (bwLeave.deleted && this.bwDiamondNextAt.size) {
       // The room went away with the last member; drop its generator clock.
       this.bwDiamondNextAt.clear();
+    }
+    this.removeFromPartyQueue(id);
+    const partyLeave = this.party.leave(id, this.worldTime * 1000);
+    if (partyLeave.snapshot) {
+      out.push(...this.partySnapshotOutbound(partyLeave.snapshot));
+      if (partyLeave.snapshot.phase === 'lobby') {
+        out.push(...this.restorePartyLobby(partyLeave.snapshot));
+      }
+      out.push(...this.partyRoundTransition(partyLeave.snapshot));
+      out.push(...this.partyResultOutbound(partyLeave.snapshot));
     }
     out.push(...this.cleanupPlayerArenaPlacements(id));
     // A disconnect must FREE the seat, or the airframe stays permanently
@@ -887,6 +915,8 @@ export class GameServer {
     if (duelPhase && duelPhase !== 'lobby') return 'duel';
     const bwPhase = this.bedwars.phaseFor(id);
     if (bwPhase && bwPhase !== 'lobby') return 'bedwars';
+    const partyPhase = this.party.phaseFor(id);
+    if (partyPhase && partyPhase !== 'lobby') return 'party';
     return null;
   }
 
@@ -913,6 +943,11 @@ export class GameServer {
         msg.t === 'bwReady' || msg.t === 'bwStart' || msg.t === 'bwArenaReady') {
       return this.handleBedwarsLobby(p, msg);
     }
+    if (msg.t === 'partyCreate' || msg.t === 'partyQueue' || msg.t === 'partyJoin' ||
+        msg.t === 'partyLeave' || msg.t === 'partyReady' || msg.t === 'partyStart' ||
+        msg.t === 'partyArenaReady') {
+      return this.handlePartyLobby(p, msg);
+    }
     // A player inside a live arena is routed to that mode's whitelist and
     // NOTHING else. Every `route*InMatch` ends in `return []`, so any message
     // the mode does not explicitly name is dropped rather than falling through
@@ -922,6 +957,7 @@ export class GameServer {
     switch (this.arenaRouteFor(id)) {
       case 'duel': return this.routeDuelInMatch(p, msg);
       case 'bedwars': return this.routeBedwarsInMatch(p, msg);
+      case 'party': return this.routePartyInMatch(p, msg);
     }
     // Spectators are non-interacting ghosts: drop any world-mutating / combat
     // message. They may still move (xform), persist (saveState), and respawn.
@@ -2278,7 +2314,7 @@ export class GameServer {
     this.enterArenaBody(p, 'bedwars', spawn, spawn.yaw, BEDWARS_MAX_HEALTH);
     p.bwAxe = this.bedwars.participantFor(p.id)?.axe ?? Item.WoodenAxe;
     p.held = p.bwAxe;
-    p.bwLastSwingAt = -Infinity; p.bwCombo = 0; p.bwComboTarget = 0; p.bwComboUntil = 0;
+    p.arenaLastSwingAt = -Infinity; p.arenaCombo = 0; p.arenaComboTarget = 0; p.arenaComboUntil = 0;
     p.bwRespawning = false; p.bwIronAccum = 0; p.bwGoldAccum = 0;
     return [
       this.bwLoadout(p, team),
@@ -2387,7 +2423,7 @@ export class GameServer {
     const recorded = this.bedwars.recordDeath(p.id, 0, nowMs, 'void');
     if (!recorded) return [];
     p.health = 1; p.held = 0; p.bwRespawning = true;
-    p.bwCombo = 0; p.bwComboTarget = 0;
+    p.arenaCombo = 0; p.arenaComboTarget = 0;
     const out: Outbound[] = [];
     const victim = recorded.snapshot.participants.find((v) => v.id === p.id)!;
     out.push({ to: p.id, msg: { t: 'bwRespawn',
@@ -2411,24 +2447,32 @@ export class GameServer {
    * from `p.bwAxe` (the server's own record of the purchased tier) and from
    * the server's own velocity/ground state derived from `arenaTrack`.
    */
-  private handleBedwarsMelee(p: ServerPlayer, targetId: number): Outbound[] {
+  /**
+   * The shared, mode-independent half of an arena melee swing.
+   *
+   * Extracted so the Knockback Stick is a TIER, not a second implementation of
+   * the same six validations. Returns null for every rejection — cadence,
+   * range, facing, cover — and otherwise applies the swing's bookkeeping
+   * (cadence stamp, combo advance, the victim's combo break) and hands the
+   * caller the computed result. The caller owns only the mode's outbounds.
+   *
+   * Nothing the client sends beyond the target id is consulted: the tier comes
+   * from the caller's own record and the motion from `arenaTrack`.
+   */
+  private arenaMeleeSwing(
+    p: ServerPlayer, target: ServerPlayer, tier: BwSwingTier,
+    losClear: (from: BwVec3, to: BwVec3) => boolean,
+    onGround: (x: number, y: number, z: number) => boolean,
+  ): BwSwingResult | null {
     const nowMs = this.worldTime * 1000;
-    // 1. One live match, both parties in it.
-    if (!Number.isInteger(targetId) || !this.bedwars.sameMatch(p.id, targetId)) return [];
-    const target = this.players.get(targetId), arena = this.bedwars.arenaFor(p.id);
-    const ap = this.bedwars.participantFor(p.id), tp = this.bedwars.participantFor(targetId);
-    if (!target || !arena || !ap || !tp) return [];
-    // 2. No friendly fire. (Matters the moment a 2v2 map is added.)
-    if (ap.team === tp.team) return [];
-    // 3. Both alive, and the target's spawn shield has expired.
-    if (!ap.alive || !tp.alive || (tp.shieldUntil !== undefined && tp.shieldUntil > nowMs)) return [];
-    // 4. Cadence. Under the floor the swing is DROPPED, not scaled down — a
-    //    macro that spams at 10x speed accomplishes nothing at all.
-    const tier = bedwarsAxeTier(p.bwAxe);
-    const sinceLast = nowMs - p.bwLastSwingAt;
-    if (sinceLast < tier.cooldownMs * BW_SWING_FLOOR) return [];
+    // Cadence. Under the floor the swing is DROPPED, not scaled down — a macro
+    // that spams at 10x speed accomplishes nothing at all.
+    const sinceLast = nowMs - p.arenaLastSwingAt;
+    if (sinceLast < tier.cooldownMs * BW_SWING_FLOOR) return null;
 
-    // 5. Range and facing, lag-compensated against the target's own history.
+    // Range and facing, lag-compensated against the target's own history. The
+    // window is deliberately short: melee has no travel time, so a wide one
+    // would let a laggy client hit someone who already sprinted clear.
     const eye = { x: p.x, y: p.y + 1.6, z: p.z };
     const lookLen = Math.hypot(-Math.sin(p.yaw), -Math.cos(p.yaw)) || 1;
     const lookX = -Math.sin(p.yaw) / lookLen, lookZ = -Math.cos(p.yaw) / lookLen;
@@ -2447,29 +2491,54 @@ export class GameServer {
       if ((hx / hlen) * lookX + (hz / hlen) * lookZ < BW_MELEE_FACING_DOT) continue;
       hitAt = sample; break;
     }
-    if (!hitAt) return [];
+    if (!hitAt) return null;
 
-    // 6. Cover. You cannot swing through a wool wall.
-    if (!hasBedwarsLineOfSight(eye, { x: hitAt.x, y: hitAt.y + 0.9, z: hitAt.z }, arena,
-      (x, y, z) => this.bwPlacedSolid(x, y, z))) return [];
+    // Cover. You cannot swing through a wall.
+    if (!losClear(eye, { x: hitAt.x, y: hitAt.y + 0.9, z: hitAt.z })) return null;
 
-    // 7. Damage — server numbers only.
-    const motion = this.bwMotionOf(p);
+    const track = p.arenaTrack;
+    const last = track[track.length - 1], prev = track[track.length - 2];
+    let vy = 0, speed = 0;
+    if (last && prev) {
+      const dt = Math.max(1e-3, last.at - prev.at);
+      vy = (last.y - prev.y) / Math.max(1, dt * 20); // per-tick, matching the client
+      speed = Math.hypot(last.x - prev.x, last.z - prev.z) / dt;
+    }
     const dxh = hitAt.x - p.x, dzh = hitAt.z - p.z;
     const dlen = Math.hypot(dxh, dzh) || 1;
-    const combo = (p.bwComboTarget === targetId && nowMs < p.bwComboUntil) ? p.bwCombo : 0;
+    const combo = (p.arenaComboTarget === target.id && nowMs < p.arenaComboUntil)
+      ? p.arenaCombo : 0;
     const swing = bedwarsSwing({
       tier, sinceLastSwingMs: sinceLast, combo,
-      onGround: motion.onGround, vy: motion.vy, speed: motion.speed,
+      onGround: onGround(p.x, p.y - 0.1, p.z), vy, speed,
       toTargetX: dxh / dlen, toTargetZ: dzh / dlen, lookX, lookZ,
     });
 
-    p.bwLastSwingAt = nowMs;
-    p.bwCombo = Math.min(combo + 1, 99);
-    p.bwComboTarget = targetId;
-    p.bwComboUntil = nowMs + BW_COMBO_WINDOW_MS;
+    p.arenaLastSwingAt = nowMs;
+    p.arenaCombo = Math.min(combo + 1, 99);
+    p.arenaComboTarget = target.id;
+    p.arenaComboUntil = nowMs + BW_COMBO_WINDOW_MS;
     // Being hit breaks YOUR combo, which is what makes trading a real cost.
-    target.bwCombo = 0; target.bwComboTarget = 0; target.bwComboUntil = 0;
+    target.arenaCombo = 0; target.arenaComboTarget = 0; target.arenaComboUntil = 0;
+    return swing;
+  }
+
+  private handleBedwarsMelee(p: ServerPlayer, targetId: number): Outbound[] {
+    const nowMs = this.worldTime * 1000;
+    // 1. One live match, both parties in it.
+    if (!Number.isInteger(targetId) || !this.bedwars.sameMatch(p.id, targetId)) return [];
+    const target = this.players.get(targetId), arena = this.bedwars.arenaFor(p.id);
+    const ap = this.bedwars.participantFor(p.id), tp = this.bedwars.participantFor(targetId);
+    if (!target || !arena || !ap || !tp) return [];
+    // 2. No friendly fire. (Matters the moment a 2v2 map is added.)
+    if (ap.team === tp.team) return [];
+    // 3. Both alive, and the target's spawn shield has expired.
+    if (!ap.alive || !tp.alive || (tp.shieldUntil !== undefined && tp.shieldUntil > nowMs)) return [];
+    // 4-7. Cadence, range, facing, cover and the swing math are shared.
+    const swing = this.arenaMeleeSwing(p, target, bedwarsAxeTier(p.bwAxe),
+      (from, to) => hasBedwarsLineOfSight(from, to, arena, (x, y, z) => this.bwPlacedSolid(x, y, z)),
+      (x, y, z) => bedwarsSolidAt(x, y, z, arena) || this.bwPlacedSolid(x, y, z));
+    if (!swing) return [];
 
     const dealt = Math.min(swing.damage, target.health);
     target.health = Math.max(0, target.health - swing.damage);
@@ -2485,7 +2554,7 @@ export class GameServer {
     if (!killed) return out;
 
     target.health = 1; target.held = 0; target.bwRespawning = true;
-    target.bwCombo = 0; target.bwComboTarget = 0;
+    target.arenaCombo = 0; target.arenaComboTarget = 0;
     const recorded = this.bedwars.recordDeath(target.id, p.id, nowMs, 'melee');
     if (!recorded) return out;
     const dead = recorded.snapshot.participants.find((v) => v.id === target.id)!;
@@ -2497,23 +2566,6 @@ export class GameServer {
     out.push(...this.bwSnapshotOutbound(recorded.snapshot));
     out.push(...this.bwResultOutbound(recorded.snapshot));
     return out;
-  }
-
-  /** Server-derived motion, from the position history the server itself
-   *  accepted. Never from anything the client asserts. */
-  private bwMotionOf(p: ServerPlayer): { vy: number; speed: number; onGround: boolean } {
-    const track = p.arenaTrack;
-    const last = track[track.length - 1], prev = track[track.length - 2];
-    let vy = 0, speed = 0;
-    if (last && prev) {
-      const dt = Math.max(1e-3, last.at - prev.at);
-      vy = (last.y - prev.y) / Math.max(1, dt * 20); // per-tick, matching the client
-      speed = Math.hypot(last.x - prev.x, last.z - prev.z) / dt;
-    }
-    const arena = this.bedwars.arenaFor(p.id);
-    const onGround = !arena ? true
-      : bedwarsSolidAt(p.x, p.y - 0.1, p.z, arena) || this.bwPlacedSolid(p.x, p.y - 0.1, p.z);
-    return { vy, speed, onGround };
   }
 
   /**
@@ -2755,8 +2807,8 @@ export class GameServer {
           // The purchased tier survives death — that is what makes a Void
           // Cleaver worth four diamonds.
           p.bwAxe = participant.axe; p.held = participant.axe;
-          p.bwRespawning = false; p.bwCombo = 0; p.bwComboTarget = 0;
-          p.bwLastSwingAt = -Infinity;
+          p.bwRespawning = false; p.arenaCombo = 0; p.arenaComboTarget = 0;
+          p.arenaLastSwingAt = -Infinity;
           p.arenaTrack = []; this.recordArenaTrack(p);
           out.push(this.bwLoadout(p, participant.team));
           out.push({ to: p.id, msg: { t: 'respawned',
@@ -2829,6 +2881,475 @@ export class GameServer {
     }
 
     for (const id of changed) out.push(...this.bwResourcesOutbound(id));
+    return out;
+  }
+
+
+  // ── Party Games ───────────────────────────────────────────────────────────
+
+  private partyError(to: number, code: Extract<ServerMsg, { t: 'partyError' }>['code']): Outbound[] {
+    const messages: Record<Extract<ServerMsg, { t: 'partyError' }>['code'], string> = {
+      invalid: 'That Party Games invite is invalid or has expired.',
+      full: 'That party is full.',
+      match_in_progress: 'Match in progress — wait for this party to reopen.',
+      already_in_lobby: 'Leave your current minigame lobby before joining another.',
+      not_host: 'Only the host can start the party.',
+      too_few_players: 'Party Games needs at least three players.',
+      too_many_players: 'That party is full.',
+      not_everyone_ready: 'Every connected player must ready up first.',
+      not_in_lobby: 'You are not in a party.',
+    };
+    return [{ to, msg: { t: 'partyError', code, message: messages[code] } }];
+  }
+
+  private partySnapshotOutbound(
+    snapshot: PartyLobbySnapshot, invite?: { id: number; token: string },
+  ): Outbound[] {
+    // No settlement step: Party Games is UNRANKED, exactly like Bedwars.
+    return snapshot.participants.map((participant) => ({
+      to: participant.id,
+      msg: { t: 'partyLobby', snapshot, inviteToken: invite?.id === participant.id ? invite.token : undefined },
+    }));
+  }
+
+  /** The AABB of ONE sub-arena, for the footprint sweep. */
+  private partySubAABB(sub: PartySubBounds): ArenaAABB {
+    return {
+      minX: sub.minX, maxX: sub.maxX,
+      minZ: sub.minZ, maxZ: sub.maxZ,
+      minY: PARTY_FLOOR_Y - 2, maxY: PARTY_CEILING_Y,
+    };
+  }
+
+  /**
+   * Restore one sub-arena to its authored stamp.
+   *
+   * This is a SWEEP of the footprint — "delete every edit key inside this
+   * box" — never a paired inverse batch. That makes leaving a floor broken
+   * structurally impossible: whatever happened, however many times, one sweep
+   * puts the authored geometry back. Colour Chaos leans on this every call.
+   */
+  private resetPartySubEdits(sub: PartySubBounds, memberIds?: number[]): Outbound[] {
+    return this.resetArenaEdits(
+      `party:${sub.slot}:${sub.index}`, this.partySubAABB(sub), memberIds);
+  }
+
+  private resetPartyArenaEdits(arena: PartyArenaBounds, memberIds?: number[]): Outbound[] {
+    const out: Outbound[] = [];
+    for (let i = 0; i < PARTY_GAMES.length; i++) {
+      out.push(...this.resetPartySubEdits(partySubBounds(arena.slot, i), memberIds));
+    }
+    return out;
+  }
+
+  /** Authored geometry MINUS anything a player has since broken. */
+  private partyStandingAt(x: number, y: number, z: number): boolean {
+    const key = `${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`;
+    const edit = this.edits.get(key);
+    if (edit !== undefined) return edit !== Block.Air && (BLOCKS[edit]?.solid ?? false);
+    return partySolidAt(x, y, z);
+  }
+
+  private partyLoadout(p: ServerPlayer, game: PartyGameId): Outbound {
+    const slots: (ItemStack | null)[] = new Array(36).fill(null);
+    const loadout = partyGame(game).loadout;
+    if (loadout === 'shovel') slots[0] = { id: Item.IronShovel, count: 1 };
+    else if (loadout === 'stick') slots[0] = { id: Item.KnockbackStick, count: 1 };
+    p.held = slots[0]?.id ?? 0;
+    return { to: p.id, msg: { t: 'partyLoadout', slots, selected: 0 } };
+  }
+
+  private enterPartyBody(
+    p: ServerPlayer, sub: PartySubBounds, spawn: PartyVec3, game: PartyGameId,
+  ): Outbound[] {
+    this.enterArenaBody(p, 'party', spawn, 0, PARTY_MAX_HEALTH);
+    p.arenaLastSwingAt = -Infinity; p.arenaCombo = 0;
+    p.arenaComboTarget = 0; p.arenaComboUntil = 0;
+    p.partyEliminated = false;
+    void sub;
+    return [this.partyLoadout(p, game)];
+  }
+
+  private launchParty(snapshot: PartyLobbySnapshot): Outbound[] {
+    const out = this.partySnapshotOutbound(snapshot);
+    if (!snapshot.arena) return out;
+    const ids = snapshot.participants.map((v) => v.id);
+    out.push(...this.resetPartyArenaEdits(snapshot.arena, ids));
+    // The countdown always opens on the FIRST sub-arena; `tickParty` moves
+    // everyone on each round transition.
+    const sub = partySubBounds(snapshot.arena.slot, 0);
+    const spawns = partySpawns(sub, snapshot.participants.length);
+    snapshot.participants.forEach((participant, i) => {
+      const player = this.players.get(participant.id);
+      if (!player) return;
+      out.push(...this.enterPartyBody(player, sub, spawns[i], PARTY_GAMES[0].id));
+      out.push({ to: player.id, msg: { t: 'partyArena', arena: snapshot.arena!, sub,
+        spawn: { ...spawns[i] },
+        countdownEndsAt: snapshot.countdownEndsAt ?? 0 } });
+    });
+    out.push(...this.announceArenaScope(ids));
+    return out;
+  }
+
+  private partyResultOutbound(snapshot: PartyLobbySnapshot): Outbound[] {
+    if (snapshot.phase !== 'results' || !snapshot.result) return [];
+    const ids = snapshot.participants.map((v) => v.id);
+    const out: Outbound[] = ids.map((id) => ({
+      to: id, msg: { t: 'partyResult', result: snapshot.result! },
+    }));
+    if (snapshot.arena) out.push(...this.resetPartyArenaEdits(snapshot.arena, ids));
+    return out;
+  }
+
+  private restorePartyLobby(snapshot: PartyLobbySnapshot): Outbound[] {
+    const out: Outbound[] = [];
+    const restored: number[] = [];
+    if (snapshot.arena) {
+      out.push(...this.resetPartyArenaEdits(snapshot.arena, snapshot.participants.map((v) => v.id)));
+    }
+    for (const member of snapshot.participants) {
+      const p = this.players.get(member.id);
+      if (p?.arenaSaved) { out.push(...this.restoreOpenWorldState(p)); restored.push(p.id); }
+    }
+    out.push(...this.announceWorldScope(restored));
+    return out;
+  }
+
+  /** The in-match whitelist. Ends in `return []`, like every other mode's. */
+  private routePartyInMatch(p: ServerPlayer, msg: ClientMsg): Outbound[] {
+    if (msg.t === 'xform') return this.handlePartyTransform(p, msg);
+    if (msg.t === 'partyMelee') return this.handlePartyMelee(p, msg.target);
+    if (msg.t === 'edit') return this.handlePartyEdit(p, msg.x, msg.y, msg.z, msg.block);
+    return [];
+  }
+
+  private handlePartyTransform(p: ServerPlayer, msg: Extract<ClientMsg, { t: 'xform' }>): Outbound[] {
+    const sub = this.party.subFor(p.id), phase = this.party.phaseFor(p.id);
+    const participant = this.party.participantFor(p.id);
+    if (!phase || !participant || !fin(msg.x, msg.y, msg.z, msg.yaw, msg.pitch)) return [];
+    if (sub) {
+      const bounded = clampToPartySub({ x: msg.x, y: msg.y, z: msg.z }, sub);
+      p.x = bounded.x; p.y = bounded.y; p.z = bounded.z;
+    } else {
+      p.x = msg.x; p.y = msg.y; p.z = msg.z;
+    }
+    p.yaw = msg.yaw; p.pitch = msg.pitch;
+    p.gliding = false; p.boating = false; p.seated = false; p.sneaking = msg.sneaking === true;
+    const game = this.party.roundFor(p.id)?.game;
+    const allowed = game === undefined ? 0
+      : partyGame(game).loadout === 'shovel' ? Item.IronShovel
+      : partyGame(game).loadout === 'stick' ? Item.KnockbackStick : 0;
+    p.held = participant.alive && msg.held === allowed ? allowed : 0;
+    p.armor = [0, 0, 0, 0]; p.aiming = false; p.reloading = false;
+    if (typeof msg.swing === 'number' && Number.isFinite(msg.swing)) p.swing = Math.floor(msg.swing) & 0xffff;
+    this.recordArenaTrack(p);
+
+    // Elimination. Both conditions are pure y comparisons with no fluid
+    // semantics anywhere — the whole reason Rising Sludge is opaque rock.
+    if (!participant.alive || p.partyEliminated) return [];
+    if (p.y < PARTY_VOID_Y) return this.partyEliminate(p, 'void');
+    const round = this.party.roundFor(p.id);
+    if (round?.game === 'lava') {
+      const level = sludgeLevel(this.worldTime * 1000 - round.startedAt, PARTY_FLOOR_Y);
+      if (p.y <= level) return this.partyEliminate(p, 'sludge');
+    }
+    return [];
+  }
+
+  private partyEliminate(p: ServerPlayer, reason: 'void' | 'sludge' | 'left'): Outbound[] {
+    const nowMs = this.worldTime * 1000;
+    const before = this.party.snapshotFor(p.id, nowMs);
+    const snapshot = this.party.recordElimination(p.id, nowMs);
+    if (!snapshot) return [];
+    p.partyEliminated = true;
+    p.health = PARTY_MAX_HEALTH; p.held = 0;
+    p.arenaCombo = 0; p.arenaComboTarget = 0;
+    const place = (before?.participants.filter((v) => v.alive).length ?? 1) - 1;
+    const out: Outbound[] = [];
+    for (const id of this.party.membersOf(p.id)) {
+      out.push({ to: id, msg: { t: 'partyEliminated', id: p.id, place, reason } });
+    }
+    out.push(...this.partySnapshotOutbound(snapshot));
+    out.push(...this.partyRoundTransition(snapshot));
+    return out;
+  }
+
+  /**
+   * The Knockback Stick.
+   *
+   * Structurally identical to `handleBedwarsMelee`, minus the team check (this
+   * is FFA) and with `PARTY_KNOCKBACK_TIER` in place of a purchased axe: zero
+   * damage, huge launch. It is live ONLY while the knockback microgame is the
+   * running round, so the stick is inert during the other three.
+   */
+  private handlePartyMelee(p: ServerPlayer, targetId: number): Outbound[] {
+    if (!Number.isInteger(targetId) || !this.party.sameMatch(p.id, targetId)) return [];
+    if (!this.party.knockbackLive(p.id)) return [];
+    const target = this.players.get(targetId), sub = this.party.subFor(p.id);
+    const ap = this.party.participantFor(p.id), tp = this.party.participantFor(targetId);
+    if (!target || !sub || !ap?.alive || !tp?.alive) return [];
+    const swing = this.arenaMeleeSwing(p, target, PARTY_KNOCKBACK_TIER,
+      (from, to) => this.partyLineOfSight(from, to),
+      (x, y, z) => this.partyStandingAt(x, y, z));
+    if (!swing) return [];
+    // Damage is zero by design: the platform edge does the killing.
+    return [
+      { to: target.id, msg: { t: 'hurt', health: target.health, dead: false,
+        by: p.id, kx: swing.kx, ky: swing.ky, kz: swing.kz, combat: 0 } },
+      { to: p.id, msg: { t: 'bwHit', target: target.id, amount: 0, combo: swing.combo,
+        charge: swing.charge, crit: false, killed: false } },
+    ];
+  }
+
+  private partyLineOfSight(a: BwVec3, b: BwVec3): boolean {
+    const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+    const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy, dz) * 4));
+    for (let i = 1; i < steps; i++) {
+      const t = i / steps;
+      if (this.partyStandingAt(a.x + dx * t, a.y + dy * t, a.z + dz * t)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Spleef, and nothing else.
+   *
+   * The entire editable surface of Party Games is `partyCanBreak`: Air, onto a
+   * cell whose AUTHORED block is packed snow, in a sub-arena whose microgame
+   * declares `break_floor`. Everything else — placing, the rim, another
+   * microgame's floor — falls out as false.
+   */
+  private handlePartyEdit(
+    p: ServerPlayer, x: number, y: number, z: number, block: number,
+  ): Outbound[] {
+    const sub = this.party.subFor(p.id), participant = this.party.participantFor(p.id);
+    if (!sub || !participant?.alive || this.party.phaseFor(p.id) !== 'running') return [];
+    if (!fin(x, y, z) || !fin(p.x, p.y, p.z)) return [];
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    if (bx < sub.minX || bx >= sub.maxX || bz < sub.minZ || bz >= sub.maxZ) return [];
+    if (Math.hypot(bx + 0.5 - p.x, by + 0.5 - p.y, bz + 0.5 - p.z) > EDIT_RANGE) return [];
+    if (!partyCanBreak(sub, bx, by, bz, block)) return [];
+    const key = `${bx},${by},${bz}`;
+    if (this.edits.get(key) === Block.Air) return []; // already dug
+    this.edits.set(key, Block.Air);
+    return this.party.membersOf(p.id).map((id) => ({
+      to: id, msg: { t: 'edit', x: bx, y: by, z: bz, block: Block.Air },
+    }));
+  }
+
+  private removeFromPartyQueue(id: number): boolean {
+    const before = this.partyQueue.length;
+    this.partyQueue = this.partyQueue.filter((queuedId) => queuedId !== id);
+    return this.partyQueue.length !== before;
+  }
+
+  private handlePartyLobby(
+    p: ServerPlayer, msg: Extract<ClientMsg, { t: `party${string}` }>,
+  ): Outbound[] {
+    const now = this.worldTime * 1000;
+    switch (msg.t) {
+      case 'partyCreate': {
+        this.removeFromPartyQueue(p.id);
+        const result = this.party.create({ id: p.id, username: p.username, skin: p.skin }, now);
+        if ('reason' in result) return this.partyError(p.id, result.reason);
+        return [
+          { to: p.id, msg: { t: 'partyQueue', queued: false } },
+          ...this.partySnapshotOutbound(result.snapshot, { id: p.id, token: result.token }),
+        ];
+      }
+      case 'partyQueue': {
+        if (!msg.join) {
+          this.removeFromPartyQueue(p.id);
+          return [{ to: p.id, msg: { t: 'partyQueue', queued: false } }];
+        }
+        if (this.party.phaseFor(p.id)) return this.partyError(p.id, 'already_in_lobby');
+        if (!this.partyQueue.includes(p.id)) this.partyQueue.push(p.id);
+        const out: Outbound[] = [{ to: p.id, msg: { t: 'partyQueue', queued: true } }];
+        // An FFA needs three, so the queue pairs in threes rather than twos.
+        while (this.partyQueue.length >= PARTY_MIN_PLAYERS) {
+          const batch = this.partyQueue.splice(0, PARTY_MIN_PLAYERS)
+            .map((id) => this.players.get(id))
+            .filter((v): v is ServerPlayer => !!v);
+          if (batch.length < PARTY_MIN_PLAYERS) continue;
+          const [host, ...rest] = batch;
+          const made = this.party.create(
+            { id: host.id, username: host.username, skin: host.skin }, now);
+          if ('reason' in made) continue;
+          for (const other of rest) {
+            this.party.join(made.token,
+              { id: other.id, username: other.username, skin: other.skin }, now);
+          }
+          let snap: PartyLobbySnapshot | null = null;
+          for (const member of batch) {
+            out.push({ to: member.id, msg: { t: 'partyQueue', queued: false } });
+            snap = this.party.setReady(member.id, true, now) ?? snap;
+          }
+          if (snap) out.push(...this.partySnapshotOutbound(snap));
+        }
+        return out;
+      }
+      case 'partyJoin': {
+        if (typeof msg.token !== 'string') return this.partyError(p.id, 'invalid');
+        this.removeFromPartyQueue(p.id);
+        const result = this.party.join(msg.token,
+          { id: p.id, username: p.username, skin: p.skin }, now);
+        if (!result.ok) return this.partyError(p.id, result.reason);
+        return this.partySnapshotOutbound(result.snapshot);
+      }
+      case 'partyLeave': {
+        if (this.removeFromPartyQueue(p.id) && !this.party.phaseFor(p.id)) {
+          return [{ to: p.id, msg: { t: 'partyQueue', queued: false } }];
+        }
+        const oldPhase = this.party.phaseFor(p.id);
+        const oldArena = this.party.arenaFor(p.id);
+        const result = this.party.leave(p.id, now);
+        const out = result.snapshot ? this.partySnapshotOutbound(result.snapshot) : [];
+        if (result.deleted && oldArena) out.push(...this.resetPartyArenaEdits(oldArena));
+        if (oldPhase && oldPhase !== 'lobby') {
+          out.push(...this.restoreOpenWorldState(p));
+          out.push(...this.announceWorldScope([p.id]));
+        }
+        if (result.snapshot?.phase === 'lobby') out.push(...this.restorePartyLobby(result.snapshot));
+        if (result.snapshot) out.push(...this.partyResultOutbound(result.snapshot));
+        return out;
+      }
+      case 'partyReady': {
+        const snap = this.party.setReady(p.id, msg.ready === true, now);
+        return snap ? this.partySnapshotOutbound(snap) : this.partyError(p.id, 'not_in_lobby');
+      }
+      case 'partyStart': {
+        const result = this.party.start(p.id, now);
+        if (!result.ok) return this.partyError(p.id, result.reason);
+        return this.launchParty(result.snapshot);
+      }
+      case 'partyArenaReady': {
+        const snap = this.party.markArenaReady(p.id, now);
+        return snap ? this.partySnapshotOutbound(snap) : [];
+      }
+      default:
+        return [];
+    }
+  }
+
+  /**
+   * Move everyone into the sub-arena of whatever round is now running.
+   *
+   * This is what makes the four permanently-stamped arenas work: nothing is
+   * ever re-stamped, players are TELEPORTED between fixed geometry and the
+   * client re-crops its render bounds to the new box.
+   */
+  private partyRoundTransition(snapshot: PartyLobbySnapshot): Outbound[] {
+    const out: Outbound[] = [];
+    if (snapshot.phase === 'intermission') {
+      const standings = snapshot.participants.map((v) => ({
+        id: v.id, username: v.username, points: v.points,
+      })).sort((a, b) => b.points - a.points);
+      for (const participant of snapshot.participants) {
+        out.push({ to: participant.id, msg: { t: 'partyIntermission',
+          endsAt: snapshot.intermissionEndsAt ?? 0, nextGame: snapshot.nextGame, standings } });
+      }
+      return out;
+    }
+    if (snapshot.phase !== 'running' || !snapshot.arena || !snapshot.round) return out;
+    const sub = partySubBounds(snapshot.arena.slot, snapshot.round.index);
+    const def = partyGame(snapshot.round.game);
+    // Wipe whatever the previous occupants of this sub-arena did to it. The
+    // sweep is idempotent, so running it on every entry is free and safe.
+    out.push(...this.resetPartySubEdits(sub, snapshot.participants.map((v) => v.id)));
+    const spawns = partySpawns(sub, snapshot.participants.length);
+    snapshot.participants.forEach((participant, i) => {
+      const player = this.players.get(participant.id);
+      if (!player) return;
+      const spawn = spawns[i];
+      player.x = spawn.x; player.y = spawn.y; player.z = spawn.z;
+      player.health = PARTY_MAX_HEALTH; player.dead = false;
+      player.partyEliminated = false;
+      player.arenaCombo = 0; player.arenaComboTarget = 0;
+      player.arenaLastSwingAt = -Infinity;
+      player.arenaTrack = []; this.recordArenaTrack(player);
+      out.push(this.partyLoadout(player, def.id));
+      out.push({ to: player.id, msg: { t: 'respawned',
+        x: spawn.x, y: spawn.y, z: spawn.z, health: PARTY_MAX_HEALTH } });
+      out.push({ to: player.id, msg: { t: 'partyRound', game: def.id, index: def.index,
+        title: def.title, rule: def.rule, sub, spawn: { ...spawn },
+        endsAt: snapshot.round!.endsAt } });
+    });
+    return out;
+  }
+
+  /**
+   * One Party Games tick: phase transitions, round transitions, and Color
+   * Chaos's call cycle.
+   */
+  tickParty(): Outbound[] {
+    const out: Outbound[] = [];
+    const nowMs = this.worldTime * 1000;
+    for (const snap of this.party.tick(nowMs)) {
+      out.push(...this.partySnapshotOutbound(snap));
+      if (snap.phase === 'lobby') out.push(...this.restorePartyLobby(snap));
+      if (snap.phase === 'results') this.partyCalls.delete(snap.id);
+      out.push(...this.partyRoundTransition(snap));
+      out.push(...this.partyResultOutbound(snap));
+    }
+    for (const snap of this.party.snapshots(nowMs)) {
+      if (snap.phase !== 'running' || !snap.round || !snap.arena) continue;
+      if (snap.round.game === 'colors') out.push(...this.tickColorChaos(snap, nowMs));
+    }
+    return out;
+  }
+
+  /**
+   * Color Chaos.
+   *
+   * A colour is called; COLORS_WARN_MS later every OTHER colour becomes Air for
+   * COLORS_VANISH_MS, then the floor returns. The restore is a SWEEP of the
+   * sub-arena footprint rather than an inverse of the vanish batch, so a
+   * dropped tick, an overlapping call or a mid-vanish disconnect can never
+   * leave a hole behind.
+   */
+  private tickColorChaos(snap: PartyLobbySnapshot, nowMs: number): Outbound[] {
+    if (!snap.arena || !snap.round) return [];
+    const sub = partySubBounds(snap.arena.slot, snap.round.index);
+    const ids = snap.participants.map((v) => v.id);
+    let state = this.partyCalls.get(snap.id);
+    if (!state) {
+      state = { call: 0, colour: 0, vanishAt: nowMs + colorsInterval(0), restoreAt: 0, phase: 'idle' };
+      this.partyCalls.set(snap.id, state);
+      return [];
+    }
+    const out: Outbound[] = [];
+    if (state.phase === 'idle' && nowMs >= state.vanishAt - COLORS_WARN_MS) {
+      state.phase = 'called';
+      state.colour = Math.floor(this.rng() * COLORS_PALETTE.length) % COLORS_PALETTE.length;
+      state.restoreAt = state.vanishAt + COLORS_VANISH_MS;
+      for (const id of ids) {
+        out.push({ to: id, msg: { t: 'partyCall', colour: state.colour,
+          vanishAt: state.vanishAt, restoreAt: state.restoreAt } });
+      }
+      return out;
+    }
+    if (state.phase === 'called' && nowMs >= state.vanishAt) {
+      state.phase = 'vanished';
+      const edits: { x: number; y: number; z: number; block: number }[] = [];
+      for (let lx = 0; lx < PARTY_SUB_SIZE; lx++) {
+        for (let lz = 0; lz < PARTY_SUB_SIZE; lz++) {
+          const colour = colorsColorAt(lx, lz);
+          if (colour < 0 || colour === state.colour) continue;
+          const x = sub.minX + lx, z = sub.minZ + lz;
+          this.edits.set(`${x},${PARTY_FLOOR_Y},${z}`, Block.Air);
+          edits.push({ x, y: PARTY_FLOOR_Y, z, block: Block.Air });
+        }
+      }
+      for (const id of ids) out.push({ to: id, msg: { t: 'editBatch', edits } });
+      return out;
+    }
+    if (state.phase === 'vanished' && nowMs >= state.restoreAt) {
+      state.phase = 'idle';
+      state.call++;
+      state.vanishAt = nowMs + colorsInterval(state.call);
+      // The sweep, not an inverse batch. This is the whole safety property.
+      out.push(...this.resetPartySubEdits(sub, ids));
+    }
     return out;
   }
 

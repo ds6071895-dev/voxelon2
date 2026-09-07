@@ -24,6 +24,8 @@ import { Block } from '../src/blocks';
 import { Item } from '../src/items';
 import { isMinigameOnly } from '../src/minigame_items';
 import { arenaBandsDisjoint, arenaBandForX } from '../src/arena';
+import { GameServer } from '../src/net/server_core';
+import { DUEL_COUNTDOWN_MS } from '../src/duels';
 
 let passed = 0;
 function check(name: string, ok: unknown, detail = ''): void {
@@ -600,6 +602,118 @@ function liveParty(n = 4, now = 1_000): { pg: PartyGamesEngine; t: number; ids: 
   check('membership never spans parties',
     pg.membersOf(1).sort((x, y) => x - y).join() === '1,2,3' &&
     !pg.sameMatch(1, 4));
+}
+
+// ── Server: the route is the security model ───────────────────────────────
+/** Three players in a live party, sitting in the first microgame (Spleef). */
+function liveServer(): { s: GameServer; sub: ReturnType<typeof partySubBounds> } {
+  const s = new GameServer(11, token);
+  for (const id of [1, 2, 3, 4]) {
+    s.addPlayer(id, { username: `P${id}`, faction: id % 2 });
+    s.handle(id, { t: 'xform', x: 40 + id, y: 70, z: 40, yaw: 0, pitch: 0 });
+  }
+  const made = s.handle(1, { t: 'partyCreate' }).find((o) => o.msg.t === 'partyLobby')?.msg;
+  if (!made || made.t !== 'partyLobby' || !made.inviteToken) throw new Error('no party invite');
+  s.handle(2, { t: 'partyJoin', token: made.inviteToken });
+  s.handle(3, { t: 'partyJoin', token: made.inviteToken });
+  for (const id of [1, 2, 3]) s.handle(id, { t: 'partyReady', ready: true });
+  const started = s.handle(1, { t: 'partyStart' });
+  const arenaMsg = started.find((o) => o.to === 1 && o.msg.t === 'partyArena')?.msg;
+  if (!arenaMsg || arenaMsg.t !== 'partyArena') throw new Error('no partyArena');
+  for (const id of [1, 2, 3]) s.handle(id, { t: 'partyArenaReady' });
+  s.tickWar(6); s.tickParty();
+  return { s, sub: arenaMsg.sub };
+}
+
+{
+  const { s, sub } = liveServer();
+  check('the party is running the first microgame',
+    s.party.phaseFor(1) === 'running' && s.party.roundFor(1)?.game === PARTY_PLAYLIST[0]);
+  check('party bodies leave the open world, the bystander stays in it',
+    !s.receivesWorldBroadcast(1) && !s.receivesWorldBroadcast(2) &&
+    !s.receivesWorldBroadcast(3) && s.receivesWorldBroadcast(4) &&
+    s.snapshotFor(4).every((v) => v.id === 4));
+
+  // Spleef's edit rule, through the real handler.
+  const cx = Math.floor(sub.minX + PARTY_SUB_SIZE / 2);
+  const cz = Math.floor(sub.minZ + PARTY_SUB_SIZE / 2);
+  s.handle(1, { t: 'xform', x: cx + 0.5, y: PARTY_FLOOR_Y + 1.01, z: cz + 0.5, yaw: 0, pitch: 0 });
+  check('digging the snow floor is accepted',
+    s.handle(1, { t: 'edit', x: cx, y: PARTY_FLOOR_Y, z: cz, block: Block.Air }).length > 0);
+  check('digging the same cell twice is a no-op',
+    s.handle(1, { t: 'edit', x: cx, y: PARTY_FLOOR_Y, z: cz, block: Block.Air }).length === 0);
+  check('placing ANYTHING is refused',
+    s.handle(1, { t: 'edit', x: cx, y: PARTY_FLOOR_Y, z: cz, block: Block.PackedSnow }).length === 0 &&
+    s.handle(1, { t: 'edit', x: cx, y: PARTY_FLOOR_Y + 1, z: cz, block: Block.OakPlanks }).length === 0 &&
+    s.handle(1, { t: 'edit', x: cx, y: PARTY_FLOOR_Y + 1, z: cz, block: Block.TeamWoolA }).length === 0);
+  check('a spleef edit reaches the party and nobody else',
+    (() => {
+      const out = s.handle(1, { t: 'edit', x: cx + 1, y: PARTY_FLOOR_Y, z: cz, block: Block.Air });
+      return out.length > 0 && out.every((o) => [1, 2, 3].includes(o.to as number));
+    })());
+  check('the world edit log never gains a party block',
+    s.serialize().edits.every(([, b]) => b === Block.Air));
+
+  // The stick is inert while a non-knockback microgame runs.
+  check('partyMelee is inert during Spleef', s.handle(1, { t: 'partyMelee', target: 2 }).length === 0);
+  check('a Bedwars verb is inert inside a party',
+    s.handle(1, { t: 'bwMelee', target: 2 }).length === 0 &&
+    s.handle(1, { t: 'bwShopBuy', entry: 1 }).length === 0);
+  check('a self-hit and an unknown target are both refused',
+    s.handle(1, { t: 'partyMelee', target: 1 }).length === 0 &&
+    s.handle(1, { t: 'partyMelee', target: 9_999 }).length === 0);
+  check('a hit on a non-participant is refused',
+    s.handle(1, { t: 'partyMelee', target: 4 }).length === 0);
+}
+
+{
+  // In the open world and inside other minigames, every party verb is inert.
+  const s = new GameServer(11, token);
+  s.addPlayer(1, { username: 'A', faction: 0 });
+  s.addPlayer(2, { username: 'B', faction: 1 });
+  for (const id of [1, 2]) s.handle(id, { t: 'xform', x: 40, y: 70, z: 41, yaw: 0, pitch: 0 });
+  check('partyMelee is inert in the open world',
+    s.handle(1, { t: 'partyMelee', target: 2 }).length === 0);
+  const before = s.serialize().edits.length;
+  check('the open world is untouched by it', s.serialize().edits.length === before);
+
+  const made = s.handle(1, { t: 'duelCreate' }).find((o) => o.msg.t === 'duelLobby')?.msg;
+  if (!made || made.t !== 'duelLobby' || !made.inviteToken) throw new Error('no duel invite');
+  s.handle(2, { t: 'duelJoin', token: made.inviteToken });
+  s.handle(1, { t: 'duelReady', ready: true }); s.handle(2, { t: 'duelReady', ready: true });
+  s.handle(1, { t: 'duelStart' });
+  for (const id of [1, 2]) s.handle(id, { t: 'duelArenaReady' });
+  s.tickWar(DUEL_COUNTDOWN_MS / 1000); s.tickDuels();
+  check('partyMelee is inert inside a live Duels match',
+    s.handle(1, { t: 'partyMelee', target: 2 }).length === 0);
+}
+
+{
+  // Arena state must never persist out of a party.
+  const s = new GameServer(11, token);
+  for (const id of [1, 2, 3]) {
+    s.addPlayer(id, { username: `P${id}`, faction: 0 });
+    s.handle(id, { t: 'xform', x: 200 + id, y: 70, z: 30, yaw: 0, pitch: 0 });
+  }
+  s.handle(1, { t: 'saveState', data: { x: 201, y: 70, z: 30,
+    slots: [{ id: Item.Diamond, count: 2 }] } });
+  const made = s.handle(1, { t: 'partyCreate' }).find((o) => o.msg.t === 'partyLobby')?.msg;
+  if (!made || made.t !== 'partyLobby' || !made.inviteToken) throw new Error('no invite');
+  s.handle(2, { t: 'partyJoin', token: made.inviteToken });
+  s.handle(3, { t: 'partyJoin', token: made.inviteToken });
+  for (const id of [1, 2, 3]) s.handle(id, { t: 'partyReady', ready: true });
+  s.handle(1, { t: 'partyStart' });
+  const captured = s.capturePlayerState(1)!.data;
+  check('mid-party capture returns the pre-match body',
+    captured.x === 201 && (captured.slots as { id?: number }[])[0]?.id === Item.Diamond);
+  s.handle(1, { t: 'saveState', data: { x: 9_999, slots: [{ id: Item.KnockbackStick, count: 1 }] } });
+  check('a match-time saveState is rejected', s.capturePlayerState(1)!.data.x === 201);
+  const left = s.handle(1, { t: 'partyLeave' });
+  check('leaving restores the exact pre-match body',
+    left.some((o) => o.to === 1 && o.msg.t === 'arenaRestored' && o.msg.x === 201));
+  check('no Knockback Stick survives the restore',
+    !JSON.stringify(left.filter((o) => o.msg.t === 'arenaRestored'))
+      .includes(`"id":${Item.KnockbackStick}`));
 }
 
 console.log(`Party Games smoke: ${passed} checks passed`);

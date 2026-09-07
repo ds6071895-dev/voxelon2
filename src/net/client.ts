@@ -23,6 +23,9 @@ import type {
 } from '../vehicles';
 import type { DuelArenaBounds, DuelLobbySnapshot, DuelResult } from '../duels';
 import type { BwArenaBounds, BwLobbySnapshot, BwResult, BwStage } from '../bedwars';
+import type {
+  PartyArenaBounds, PartyGameId, PartyLobbySnapshot, PartyResult, PartySubBounds,
+} from '../partygames';
 import type { DuelFlair, DuelPublicProfile } from '../duels_progression';
 import type { FactionPublic, Notification } from './protocol';
 import type { PoliticsState } from '../politics';
@@ -119,6 +122,20 @@ export class NetClient {
   onBwClock?: (serverNow: number, endsAt: number, stage: BwStage) => void;
   onBwRespawn?: (respawnAt: number, spectating: boolean) => void;
   onBwResult?: (result: BwResult) => void;
+  // --- Party Games ---
+  onPartyQueue?: (queued: boolean) => void;
+  onPartyLobby?: (snapshot: PartyLobbySnapshot, inviteToken?: string) => void;
+  onPartyError?: (code: string, message: string) => void;
+  onPartyArena?: (arena: PartyArenaBounds, sub: PartySubBounds,
+    spawn: { x: number; y: number; z: number }, countdownEndsAt: number) => void;
+  onPartyRound?: (game: PartyGameId, index: number, title: string, rule: string,
+    sub: PartySubBounds, spawn: { x: number; y: number; z: number }, endsAt: number) => void;
+  onPartyLoadout?: (slots: (ItemStack | null)[], selected: number) => void;
+  onPartyCall?: (colour: number, vanishAt: number, restoreAt: number) => void;
+  onPartyEliminated?: (id: number, place: number, reason: 'void' | 'sludge' | 'left') => void;
+  onPartyIntermission?: (endsAt: number, nextGame: PartyGameId | undefined,
+    standings: { id: number; username: string; points: number }[]) => void;
+  onPartyResult?: (result: PartyResult) => void;
   /** Saved per-account state to restore (inventory/hotbar), if the account has any. */
   onRestoreState?: (state: Record<string, unknown>) => void;
   /** A block edit from another player (apply without re-broadcasting). */
@@ -585,6 +602,36 @@ export class NetClient {
       case 'bwResult':
         this.onBwResult?.(msg.result);
         break;
+      case 'partyLobby':
+        this.onPartyLobby?.(msg.snapshot, msg.inviteToken);
+        break;
+      case 'partyQueue':
+        this.onPartyQueue?.(msg.queued);
+        break;
+      case 'partyError':
+        this.onPartyError?.(msg.code, msg.message);
+        break;
+      case 'partyArena':
+        this.onPartyArena?.(msg.arena, msg.sub, msg.spawn, msg.countdownEndsAt);
+        break;
+      case 'partyRound':
+        this.onPartyRound?.(msg.game, msg.index, msg.title, msg.rule, msg.sub, msg.spawn, msg.endsAt);
+        break;
+      case 'partyLoadout':
+        this.onPartyLoadout?.(msg.slots, msg.selected);
+        break;
+      case 'partyCall':
+        this.onPartyCall?.(msg.colour, msg.vanishAt, msg.restoreAt);
+        break;
+      case 'partyEliminated':
+        this.onPartyEliminated?.(msg.id, msg.place, msg.reason);
+        break;
+      case 'partyIntermission':
+        this.onPartyIntermission?.(msg.endsAt, msg.nextGame, msg.standings);
+        break;
+      case 'partyResult':
+        this.onPartyResult?.(msg.result);
+        break;
       case 'duelInviteInfo':
         this.onDuelInviteInfo?.(msg.valid, msg.host, msg.lobbyId);
         break;
@@ -763,6 +810,15 @@ export class NetClient {
     if (this.connected) this.raw({ t: 'bwBed', x, y, z });
   }
   sendBwShopBuy(entry: number): void { if (this.connected) this.raw({ t: 'bwShopBuy', entry }); }
+
+  sendPartyCreate(): void { if (this.connected) this.raw({ t: 'partyCreate' }); }
+  sendPartyQueue(join: boolean): void { if (this.connected) this.raw({ t: 'partyQueue', join }); }
+  sendPartyJoin(token: string): void { if (this.connected) this.raw({ t: 'partyJoin', token }); }
+  sendPartyLeave(): void { if (this.connected) this.raw({ t: 'partyLeave' }); }
+  sendPartyReady(ready: boolean): void { if (this.connected) this.raw({ t: 'partyReady', ready }); }
+  sendPartyStart(): void { if (this.connected) this.raw({ t: 'partyStart' }); }
+  sendPartyArenaReady(): void { if (this.connected) this.raw({ t: 'partyArenaReady' }); }
+  sendPartyMelee(target: number): void { if (this.connected) this.raw({ t: 'partyMelee', target }); }
 
   sendEdit(x: number, y: number, z: number, block: number): void {
     if (this.connected) this.raw({ t: 'edit', x, y, z, block });

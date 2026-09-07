@@ -535,6 +535,16 @@ export const BW_AXE_TIERS = [
 
 export type BwAxeTier = typeof BW_AXE_TIERS[number];
 
+/** The structural shape `bedwarsSwing` actually needs. Widened past the axe
+ *  union so another mode can supply its own entry — Party Games' Knockback
+ *  Stick is exactly this and nothing more. */
+export interface BwSwingTier {
+  readonly item: number;
+  readonly damage: number;
+  readonly cooldownMs: number;
+  readonly kbBonus: number;
+}
+
 export function bedwarsAxeTier(item: number): BwAxeTier {
   return BW_AXE_TIERS.find((t) => t.item === item) ?? BW_AXE_TIERS[0];
 }
@@ -570,7 +580,7 @@ export const BW_MELEE_FACING_DOT = 0.55;
 export const BW_MELEE_REWIND_S = 0.25;
 
 export interface BwSwingInput {
-  tier: BwAxeTier;
+  tier: BwSwingTier;
   /** Milliseconds since this attacker's last LANDED swing. */
   sinceLastSwingMs: number;
   /** Consecutive prior hits on this same target inside the combo window. */
