@@ -80,14 +80,23 @@ const GRADE_SHADER = {
         texture2D(tDiffuse, vUv + fromCentre * ca).b
       );
 
-      // Slightly UNDER one. The scene is authored to look right unfiltered, so
-      // the shader preset has no business handing back a brighter world than
-      // the preset below it; it has to hand back a better lit one.
-      vec3 graded = aces(color * 0.92);
+      // Exposure, ABOVE one. ACES is a shoulder curve: it spends most of its
+      // range compressing the top end, so feeding it a scene at 0.92 hands back
+      // midtones darker than the preset one rung down and the shader mode ends
+      // up the gloomiest setting in the menu. Over-exposing into the curve puts
+      // the light back where the eye expects it while the shoulder still keeps
+      // the sun and the lava from clipping flat.
+      vec3 graded = aces(color * 1.16);
 
-      // Contrast around mid grey. ACES already rolls the ends off, so this is
-      // a gentle push, not an S-curve of its own.
-      graded = clamp((graded - 0.5) * 1.085 + 0.5, 0.0, 1.0);
+      // A small lift, then a gentle contrast pivoted just under mid grey.
+      // The lift opens the bottom of the range so deep shade reads as shade
+      // rather than as a hole, and it is kept small on purpose: push it far
+      // enough to raise TRUE black off zero and the whole frame turns milky,
+      // which is the opposite of the brighter picture it is there to buy. The
+      // contrast then takes the last of it back out at the very bottom, so
+      // black is still black and only the near-blacks keep the gain.
+      graded = graded * 0.97 + 0.03;
+      graded = clamp((graded - 0.46) * 1.06 + 0.46, 0.0, 1.0);
 
       // Split tone: cool shadows, warm highlights. The single biggest reason
       // sunlight in a shader pack reads as sunlight.
@@ -97,14 +106,23 @@ const GRADE_SHADER = {
 
       // Vibrance rather than flat saturation: colour that is already vivid is
       // left alone and the muted majority of a voxel palette is opened up, so
-      // grass and water gain without the lava and the flags going neon.
+      // grass and water gain without the lava and the flags going neon. The
+      // curve stays weighted towards the muted end - what makes the world read
+      // as more colourful is the grass and the sea moving, not the few things
+      // that were already saturated moving further.
+      // Luma is re-read here rather than reused from the split tone above:
+      // this is an EXTRAPOLATION away from grey, so it pushes any error in the
+      // grey it measures from straight into the result, and the split tone has
+      // moved every channel since l was taken.
       float mx = max(graded.r, max(graded.g, graded.b));
       float mn = min(graded.r, min(graded.g, graded.b));
-      graded = clamp(mix(vec3(l), graded, 1.0 + 0.45 * (1.0 - (mx - mn))),
+      graded = clamp(mix(vec3(luma(graded)), graded, 1.0 + 0.82 * (1.0 - (mx - mn))),
                      0.0, 1.0);
 
-      // Vignette: a gentle darkening that only bites past the halfway mark.
-      graded *= 1.0 - 0.24 * smoothstep(0.45, 1.25, r);
+      // Vignette: a hint of one. Past a certain depth it stops reading as a
+      // lens and starts reading as the corners of the world being unlit, which
+      // fights everything above.
+      graded *= 1.0 - 0.13 * smoothstep(0.5, 1.3, r);
 
       gl_FragColor = vec4(graded, 1.0);
     }

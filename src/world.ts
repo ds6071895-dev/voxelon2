@@ -64,9 +64,19 @@ varying vec2 vSkyBlock;
 varying vec3 vWorldPos;
 
 // Matches three.js's packDepthToRGBA, which is what the shadow pass writes.
+//
+// The channel ORDER matters and is easy to get backwards. packDepthToRGBA puts
+// the FINEST bits in .r (fract(depth * 256^3)) and the coarsest in .a (depth
+// itself), so the weights descend the other way: .r is worth 255/2^32 and .a
+// 255/256. Swapping .r and .b - the obvious mistake, since the numbers look
+// symmetric - gives the fastest-changing byte a weight of 255/65536, which is
+// a depth error of roughly a fifth of a percent that flips sign from texel to
+// texel. That is far larger than any sane depth bias, so the comparison below
+// lands on the wrong side of the surface at random and the world comes back
+// covered in thousands of speckled shadow dots.
 float voxUnpackDepth(const in vec4 v) {
-  return dot(v, vec4(255.0 / 65536.0, 255.0 / 16777216.0,
-                     255.0 / 4294967296.0, 255.0 / 256.0));
+  return dot(v, vec4(255.0 / 4294967296.0, 255.0 / 16777216.0,
+                     255.0 / 65536.0, 255.0 / 256.0));
 }
 
 /**
@@ -95,7 +105,10 @@ float voxSunVisibility(vec3 worldPos, vec3 n) {
   // player's neighbourhood and the world carries on past it.
   if (c.x <= 0.002 || c.x >= 0.998 || c.y <= 0.002 || c.y >= 0.998
     || c.z >= 0.999) return facing;
-  float bias = 0.0006 + 0.0030 * (1.0 - ndl);
+  // Tight, because the depth in the map is now exact to a part in 2^24. The
+  // old margin was set wide enough to ride over the unpacking error above it
+  // and cost the shadow its contact with the foot of whatever cast it.
+  float bias = 0.0004 + 0.0016 * (1.0 - ndl);
   float texel = uShadowParams.y;
   float sum = 0.0;
   for (int i = -1; i <= 1; i++) {

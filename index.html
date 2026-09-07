@@ -434,10 +434,6 @@
     #look-sensitivity-value {
       min-width: 34px; text-align: right; color: #9fb0cc; font-variant-numeric: tabular-nums;
     }
-    #vault-accessibility .setting-note {
-      grid-column: 1 / -1; margin: -2px 0 2px; max-width: 280px;
-      font-size: 9px; line-height: 1.45; color: #8b9ab5; text-shadow: none;
-    }
     body.reduced-motion *, body.photosensitivity-safe * {
       animation-duration: .001ms !important; animation-iteration-count: 1 !important;
     }
@@ -2313,6 +2309,209 @@
       }
     }
 
+    /* ── Pixel HUD font ───────────────────────────────────────────────────
+       Picking "Pixel (blocky)" in HUD Settings sets [data-hud-pixel] on <html>
+       (see applyHudTheme). Half of a pixel face's look is the RENDERING: with
+       antialiasing on, a one-pixel stroke is smeared across two pixels in three
+       shades of grey and the crispest bitmap font comes out looking like every
+       other font. Switching smoothing off puts each stroke back on whole
+       pixels. The settings panel's own chrome is exempt - it is not part of the
+       HUD and should stay legible while the option is being tried - but its
+       live preview is not, or the one place the choice is being judged would be
+       the one place it does not apply. */
+    html[data-hud-pixel] #app > *:not(#hud-settings),
+    html[data-hud-pixel] #hud-settings .hs-preview .hs-pv-stack {
+      -webkit-font-smoothing: none;
+      -moz-osx-font-smoothing: grayscale;
+      font-smooth: never;
+    }
+
+    /* ── Dark mode ────────────────────────────────────────────────────────
+       HUD Settings › Appearance › Dark mode sets [data-ui-dark] on <html>.
+       The HUD theme above styles marks that FLOAT over the world; this styles
+       the opaque sheets that open on top of it — the inventory and its slots,
+       the Field Guide, the notification tray, the warfare tree, the menus.
+       Those are the surfaces that actually hurt at night, and most of them were
+       deliberately lit like paper.
+
+       Panels that already ship a dark palette (the pause settings block, the
+       HUD Settings card, the title screen, the chat) are left alone. */
+
+    /* Inventory, chests, crafting — the Minecraft-grey family. */
+    html[data-ui-dark] #inventory {
+      background: #1b202a;
+      border-color: #3c4553 #0a0d13 #0a0d13 #3c4553;
+    }
+    html[data-ui-dark] .inv-title { color: #aab6c8; }
+    html[data-ui-dark] .slot {
+      border-color: #3c4553;
+      border-right-color: #12161d; border-bottom-color: #12161d;
+    }
+    html[data-ui-dark] .inv-slot {
+      background: #2c323f;
+      border-color: #151a23 #414a5b #414a5b #151a23;
+    }
+    html[data-ui-dark] .craft-row .inv-slot {
+      background: radial-gradient(circle at 45% 40%, #414b57, #262d36);
+      border-color: #161d24 #55636f #55636f #161d24;
+    }
+    html[data-ui-dark] .flame { background: #2c323f; }
+    html[data-ui-dark] .war-btn {
+      background: #2c3446; color: #dbe4f0;
+      border-color: #434e63 #10151d #10151d #434e63;
+    }
+    html[data-ui-dark] .war-btn:hover:enabled { background: #3a4559; }
+    html[data-ui-dark] .chest-pages .war-btn:disabled { background: #8a6f22; color: #f6ecc9; }
+
+    /* Menus that sit over the frozen world. */
+    html[data-ui-dark] #pause { background: rgba(4, 6, 11, .74); }
+    html[data-ui-dark] #death { background: rgba(58, 0, 0, .68); }
+    html[data-ui-dark] #death button,
+    html[data-ui-dark] #pause .mc-btn {
+      background: linear-gradient(#333b46, #222831); color: #dbe4f0;
+      border-color: #4b5666 #12161d #12161d #4b5666;
+    }
+
+    /* Field Guide (also the Controls sheet): a full paper UI, inverted card by
+       card so the gold accent survives rather than being washed to brown. */
+    html[data-ui-dark] .field-guide { background: rgba(8, 11, 16, .84); color: #e4ebf5; }
+    html[data-ui-dark] .field-guide-shell {
+      background: #141923; border-color: rgba(150, 178, 216, .14);
+      box-shadow: 0 30px 72px rgba(0, 0, 0, .62), inset 0 1px rgba(255, 255, 255, .05);
+    }
+    html[data-ui-dark] .field-guide-header,
+    html[data-ui-dark] .field-guide-nav,
+    html[data-ui-dark] .field-guide-article-header,
+    html[data-ui-dark] .field-guide-footer,
+    html[data-ui-dark] .field-guide-table-wrap,
+    html[data-ui-dark] .field-guide th,
+    html[data-ui-dark] .field-guide td { border-color: rgba(150, 178, 216, .13); }
+    html[data-ui-dark] .field-guide-header h1,
+    html[data-ui-dark] .field-guide-article-header h2,
+    html[data-ui-dark] .field-guide-entry h3,
+    html[data-ui-dark] .field-guide-boss h3,
+    html[data-ui-dark] .field-guide-boss p strong,
+    html[data-ui-dark] .field-guide-empty h3 { color: #eaf1fa; }
+    html[data-ui-dark] .field-guide-eyebrow,
+    html[data-ui-dark] .field-guide-nav-item small,
+    html[data-ui-dark] .field-guide-nav-item span:first-child,
+    html[data-ui-dark] .field-guide-nav-item[data-active="true"] span:first-child,
+    html[data-ui-dark] .field-guide-article-header > span { color: #ffc043; }
+    html[data-ui-dark] .field-guide-search-label { color: #8fa2b8; }
+    html[data-ui-dark] .field-guide-search-label input {
+      color: #e4ebf5; background: #1b2130; border-color: rgba(150, 178, 216, .18);
+    }
+    html[data-ui-dark] .field-guide-search-label input::placeholder { color: #6f7f95; }
+    html[data-ui-dark] .field-guide-search-label input:focus {
+      border-color: #eda01a; background: #212838; box-shadow: 0 0 0 3px rgba(237, 160, 26, .22);
+    }
+    html[data-ui-dark] .field-guide-header-actions .mc-btn,
+    html[data-ui-dark] .field-guide-footer .mc-btn {
+      color: #dbe4f0; background: #222a39;
+      box-shadow: inset 0 0 0 1px rgba(150, 178, 216, .16);
+    }
+    html[data-ui-dark] .field-guide-header-actions .mc-btn:hover,
+    html[data-ui-dark] .field-guide-footer .mc-btn:hover { background: #2c3648; }
+    html[data-ui-dark] .field-guide-live-warning {
+      color: #ffd88a; background: #2a2113; border-bottom-color: rgba(237, 160, 26, .32);
+    }
+    html[data-ui-dark] .field-guide-nav { background: #10151e; }
+    html[data-ui-dark] .field-guide-nav-item { color: #9fb0c4; }
+    html[data-ui-dark] .field-guide-nav-item:hover,
+    html[data-ui-dark] .field-guide-nav-item:focus-visible { color: #eaf1fa; background: #1c2333; }
+    html[data-ui-dark] .field-guide-nav-item[data-active="true"] {
+      color: #eaf1fa; background: rgba(237, 160, 26, .15); border-color: rgba(237, 160, 26, .34);
+    }
+    html[data-ui-dark] .field-guide-article-header p,
+    html[data-ui-dark] .field-guide-footer,
+    html[data-ui-dark] .field-guide-empty { color: #8fa2b8; }
+    html[data-ui-dark] .field-guide-entry {
+      background: #1a2030; border-color: rgba(150, 178, 216, .12);
+      box-shadow: 0 6px 18px rgba(0, 0, 0, .3);
+    }
+    html[data-ui-dark] .field-guide-entry p,
+    html[data-ui-dark] .field-guide-entry li,
+    html[data-ui-dark] .field-guide td { color: #c3cfdf; }
+    html[data-ui-dark] .field-guide-entry ul li::before { background: #ffc043; }
+    html[data-ui-dark] .field-guide-steps li {
+      background: #1b2130; border-color: rgba(150, 178, 216, .1);
+    }
+    html[data-ui-dark] .field-guide-steps li::before {
+      background: rgba(237, 160, 26, .18); color: #ffc043;
+    }
+    html[data-ui-dark] .field-guide-callout.tip {
+      background: rgba(237, 160, 26, .12); border-color: rgba(237, 160, 26, .3); color: #f0d49a;
+    }
+    html[data-ui-dark] .field-guide-callout.tip strong { color: #ffc043; }
+    html[data-ui-dark] .field-guide-callout.warning {
+      background: rgba(198, 58, 48, .14); border-color: rgba(198, 58, 48, .32); color: #f3aaa2;
+    }
+    html[data-ui-dark] .field-guide-callout.warning strong { color: #ff8b7f; }
+    html[data-ui-dark] .field-guide table { background: #1a2030; }
+    html[data-ui-dark] .field-guide th { color: #ffc043; background: #10151e; }
+    html[data-ui-dark] .field-guide tbody tr:hover td { background: #202737; }
+    html[data-ui-dark] .field-guide-boss {
+      background: #1b2130; border-color: rgba(150, 178, 216, .12);
+    }
+    html[data-ui-dark] .field-guide-boss p { color: #9fb0c4; }
+    html[data-ui-dark] .field-guide-nav.mobile-open { background: #141923; }
+
+    /* Notification tray. */
+    html[data-ui-dark] .vx-notif-panel { background: linear-gradient(180deg, #1a2030, #141923); }
+    html[data-ui-dark] .vx-notif-head { background: linear-gradient(180deg, #1f2637, rgba(31, 38, 55, .4)); }
+    html[data-ui-dark] .vx-notif-head h2 { color: #eaf1fa; }
+    html[data-ui-dark] .vx-notif-crest { color: #ffc043; background: linear-gradient(180deg, #2b2416, #221c11); }
+    html[data-ui-dark] .vx-notif-act,
+    html[data-ui-dark] .vx-notif-act:hover { color: #dbe4f0; background: #232b3b; }
+    html[data-ui-dark] .vx-notif-item { background: #1e2534; }
+    html[data-ui-dark] .vx-notif-item[data-unread="1"] {
+      background: linear-gradient(100deg,
+        color-mix(in srgb, var(--tone, #8593a7) 20%, #1e2534), #1e2534 62%);
+    }
+    html[data-ui-dark] .vx-notif-mark {
+      background: color-mix(in srgb, var(--tone, #8593a7) 24%, #1e2534);
+    }
+    html[data-ui-dark] .vx-notif-body { color: #a9b8cc; }
+    html[data-ui-dark] .vx-notif-bell:hover { background: #232b3b; }
+
+    /* President / cabinet menu: every colour there is already a token on the
+       shell, so the whole four-view menu turns over in one block. */
+    html[data-ui-dark] .vx-prez-shell {
+      --paper: #1a2030;
+      --ink: #eaf1fa;
+      --muted: #a3b2c6;
+      --faint: #7c8ca2;
+      --line: rgba(150, 178, 216, .14);
+      --tint: #202839;
+      --gold: #ffc043;
+      --gold-lit: #f0a521;
+      background: linear-gradient(180deg, #161c28 0%, #10151e 100%);
+      box-shadow: 0 40px 90px rgba(0, 0, 0, .55), 0 0 0 1px rgba(150, 178, 216, .12),
+        inset 0 1px 0 rgba(255, 255, 255, .05);
+    }
+
+    /* Warfare tree. Built from inline styles, so it is themed through the
+       tokens its palette constants resolve against (see warfare_ui.ts). */
+    :root {
+      --wf-paper: #f6f8fc; --wf-card: #ffffff;
+      --wf-ink: #152234; --wf-ink-mid: #48586d; --wf-ink-dim: #8494a8;
+      --wf-hair: #dde4ee; --wf-hair-soft: #eef2f8;
+      --wf-blue: #1f6fd0; --wf-blue-soft: #e9f1fd; --wf-blue-deep: #144a91;
+      --wf-gold: #9a6c0b; --wf-gold-soft: #fdf4de;
+      --wf-green: #0f7444; --wf-green-soft: #e5f5ec;
+      --wf-red: #b02a20; --wf-red-soft: #fdecea;
+      --wf-slate-soft: #f0f3f8;
+    }
+    html[data-ui-dark] {
+      --wf-paper: #10151e; --wf-card: #1a2030;
+      --wf-ink: #eaf1fa; --wf-ink-mid: #a3b2c6; --wf-ink-dim: #78899f;
+      --wf-hair: #2a3345; --wf-hair-soft: #212939;
+      --wf-blue: #5aa4f5; --wf-blue-soft: #1c2c44; --wf-blue-deep: #9cc9ff;
+      --wf-gold: #ffc043; --wf-gold-soft: #2b2416;
+      --wf-green: #55d69a; --wf-green-soft: #16301f;
+      --wf-red: #ff8b7f; --wf-red-soft: #33191a;
+      --wf-slate-soft: #1c2331;
+    }
 
   </style>
 </head>
@@ -2351,7 +2550,6 @@
             <option value="max">Max (Shaders)</option>
           </select>
         </label>
-        <p class="setting-note">Lower this if the game stutters. Extra High adds smooth lighting and a longer view. Max is the shader preset: the sun casts real shadows, water gains waves, reflections and glitter, the clouds gain depth, and the whole frame goes through a filmic grade. View distance applies instantly; anti-aliasing changes on reload.</p>
         <label>Music <input id="music-volume" type="range" min="0" max="1" step="0.05" /></label>
         <label>Effects <input id="effects-volume" type="range" min="0" max="1" step="0.05" /></label>
         <label>Camera shake <input id="camera-shake" type="range" min="0" max="1" step="0.1" /></label>

@@ -18,10 +18,12 @@
 //
 // Two details are what make it look right rather than merely present:
 //
-// - The camera's centre is SNAPPED to whole shadow texels every frame. Without
-//   it, moving the player slides the sampling grid under the world and every
-//   shadow edge crawls and fizzes. This is the single most important line in
-//   the file.
+// - The camera's centre is SNAPPED to whole shadow texels every frame, against
+//   a basis built from the sun rather than from the player. Without that, the
+//   sampling grid slides under the world as the player walks and every shadow
+//   edge crawls and fizzes along with them. It is the most important thing in
+//   the file, and the easiest to write in a way that silently does nothing -
+//   see the long note in `update`.
 // - Depth is packed into RGBA rather than read from a depth texture, so the
 //   pass works the same on every GPU and driver this game is likely to meet.
 
@@ -74,6 +76,10 @@ export class SunShadow {
   private readonly centre = new THREE.Vector3();
   private readonly prevClear = new THREE.Color();
   private readonly scratch = new THREE.Vector3();
+  // The light's own axes, rebuilt each frame from the sun direction alone.
+  private readonly lightUp = new THREE.Vector3();
+  private readonly lightX = new THREE.Vector3();
+  private readonly lightY = new THREE.Vector3();
   private enabled = false;
 
   constructor(
@@ -140,7 +146,11 @@ export class SunShadow {
   update(sunDir: THREE.Vector3, focus: THREE.Vector3, sunUp: number): void {
     if (!this.enabled || !this.target || !this.depthMat) return;
 
-    const strength = 0.62 * THREE.MathUtils.smoothstep(sunUp, 0.03, 0.22);
+    // How much light a shadow takes away. Deliberately well under half: a voxel
+    // world already has strong per-face shading, so a heavy cast on top of it
+    // reads as a black hole rather than as shade, and the sky bounce in the
+    // chunk shader is what should be filling it.
+    const strength = 0.42 * THREE.MathUtils.smoothstep(sunUp, 0.03, 0.22);
     this.out.params.value.z = strength;
     this.out.params.value.x = strength > 0.004 ? 1 : 0;
     if (strength <= 0.004) return;   // night: nothing to draw, nothing to read
@@ -148,22 +158,38 @@ export class SunShadow {
     this.centre.copy(focus);
 
     const cam = this.camera;
-    cam.position.copy(this.centre).addScaledVector(sunDir, BACK_OFF);
     // A sun straight overhead makes the default up vector degenerate.
-    cam.up.set(0, 1, 0);
-    if (Math.abs(sunDir.y) > 0.999) cam.up.set(0, 0, 1);
-    cam.lookAt(this.centre);
-    cam.updateMatrixWorld(true);
+    const up = this.lightUp.set(0, 1, 0);
+    if (Math.abs(sunDir.y) > 0.999) up.set(0, 0, 1);
 
-    // Texel snapping. Take the centre into light space, round it onto the
-    // shadow-map grid, and take it back out. Everything the map covers then
-    // moves in whole-texel steps as the player walks, so a shadow edge stays
-    // welded to the block it belongs to instead of shimmering along it.
+    // TEXEL SNAPPING, and it has to be done against a basis that does not
+    // itself depend on where the box is centred. Aiming the camera at the
+    // player and THEN rounding the player's own light-space position is
+    // circular: `lookAt` puts the target on the light-space origin by
+    // definition, so the coordinates being rounded are already (0, 0) and the
+    // rounding does nothing at all. The grid then slides continuously under
+    // the world as the player walks and every shadow in the frame creeps along
+    // with them, which is exactly the artefact snapping exists to remove.
+    //
+    // Build the axes from the SUN instead - they turn over the course of the
+    // day but not with the player - measure the centre along them, round those
+    // two numbers onto the shadow-map grid, and rebuild the point. The map's
+    // sampling grid is then welded to the world and steps a whole texel at a
+    // time, so a shadow edge stays put on the block that casts it.
+    const ax = this.lightX.crossVectors(up, sunDir).normalize();
+    const ay = this.lightY.crossVectors(sunDir, ax);
     const texel = (EXTENT * 2) / MAP_SIZE;
-    const snapped = this.scratch.copy(this.centre).applyMatrix4(cam.matrixWorldInverse);
-    snapped.x = Math.round(snapped.x / texel) * texel;
-    snapped.y = Math.round(snapped.y / texel) * texel;
-    snapped.applyMatrix4(cam.matrixWorld);
+    const snapped = this.scratch
+      .setScalar(0)
+      .addScaledVector(ax, Math.round(this.centre.dot(ax) / texel) * texel)
+      .addScaledVector(ay, Math.round(this.centre.dot(ay) / texel) * texel)
+      // Depth along the sun ray is not sampled on a grid, so it is kept exact.
+      .addScaledVector(sunDir, this.centre.dot(sunDir));
+
+    // lookAt with this same `up` reproduces (ax, ay, sunDir) as the camera's
+    // own axes, so the snap above lands on the grid the projection actually
+    // uses rather than on a near-miss of it.
+    cam.up.copy(up);
     cam.position.copy(snapped).addScaledVector(sunDir, BACK_OFF);
     cam.lookAt(snapped);
     cam.updateMatrixWorld(true);

@@ -25,25 +25,34 @@ import {
 } from './warfare';
 import { buildHelicopterModel } from './vehiclemodels';
 
-// --- Palette (light) ----------------------------------------------------------
+// --- Palette ------------------------------------------------------------------
+//
+// Every colour here is a CSS custom property with its light value as the
+// fallback, not a bare hex. The panel is built almost entirely from inline
+// `style` strings, and an inline style is the one place a stylesheet cannot
+// reach - so a hex baked in here would be a surface no theme could ever
+// restyle. Going through a variable hands the whole tree to whoever defines
+// the tokens: index.html sets the light values on :root and swaps them under
+// [data-ui-dark], and the fallbacks mean the tree still looks right even if
+// that stylesheet never loads.
 
-const PAPER = '#f6f8fc';        // the tree surface
-const CARD = '#ffffff';         // panels, node cards
-const INK = '#152234';          // primary text
-const INK_MID = '#48586d';      // secondary text
-const INK_DIM = '#8494a8';      // captions, disabled
-const HAIR = '#dde4ee';         // hairline rules + card borders
-const HAIR_SOFT = '#eef2f8';
-const BLUE = '#1f6fd0';         // accent: unlocked / selected
-const BLUE_SOFT = '#e9f1fd';
-const BLUE_DEEP = '#144a91';
-const GOLD = '#9a6c0b';         // owned
-const GOLD_SOFT = '#fdf4de';
-const GREEN = '#0f7444';        // affordable right now
-const GREEN_SOFT = '#e5f5ec';
-const RED = '#b02a20';          // blocked
-const RED_SOFT = '#fdecea';
-const SLATE_SOFT = '#f0f3f8';   // locked
+const PAPER = 'var(--wf-paper, #f6f8fc)';       // the tree surface
+const CARD = 'var(--wf-card, #ffffff)';         // panels, node cards
+const INK = 'var(--wf-ink, #152234)';           // primary text
+const INK_MID = 'var(--wf-ink-mid, #48586d)';   // secondary text
+const INK_DIM = 'var(--wf-ink-dim, #8494a8)';   // captions, disabled
+const HAIR = 'var(--wf-hair, #dde4ee)';         // hairline rules + card borders
+const HAIR_SOFT = 'var(--wf-hair-soft, #eef2f8)';
+const BLUE = 'var(--wf-blue, #1f6fd0)';         // accent: unlocked / selected
+const BLUE_SOFT = 'var(--wf-blue-soft, #e9f1fd)';
+const BLUE_DEEP = 'var(--wf-blue-deep, #144a91)';
+const GOLD = 'var(--wf-gold, #9a6c0b)';         // owned
+const GOLD_SOFT = 'var(--wf-gold-soft, #fdf4de)';
+const GREEN = 'var(--wf-green, #0f7444)';       // affordable right now
+const GREEN_SOFT = 'var(--wf-green-soft, #e5f5ec)';
+const RED = 'var(--wf-red, #b02a20)';           // blocked
+const RED_SOFT = 'var(--wf-red-soft, #fdecea)';
+const SLATE_SOFT = 'var(--wf-slate-soft, #f0f3f8)';  // locked
 
 const SANS = "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, " +
   "Helvetica, Arial, sans-serif";

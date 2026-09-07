@@ -15,7 +15,7 @@ export type IconName =
   | 'command' | 'close' | 'log' | 'chevronUp' | 'chevronDown' | 'droplet'
   | 'map' | 'check' | 'trap' | 'pin' | 'camera' | 'book' | 'boat' | 'party'
   | 'compass' | 'mute' | 'plane' | 'brick' | 'horn' | 'arrowRight' | 'bell'
-  | 'ballot' | 'scales'
+  | 'ballot' | 'scales' | 'palette' | 'layout' | 'keyboard'
   // Geometric/technical glyphs. Several of these (pause, hourglass, the medium
   // square) carry an emoji presentation and render in the platform's colour
   // emoji font; the rest are text-font shapes whose weight and size vary just
@@ -108,6 +108,9 @@ const PATHS: Record<IconName, string> = {
   arrowRight: '<path d="M4 12h15M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>',
   bell: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M13.7 21a2 2 0 0 1-3.4 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
   ballot: '<path d="M4 9h16v11H4z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M9 9V3h6v6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M10 13.5l1.6 1.6L14.5 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+  palette: '<path d="M12 3a9 9 0 0 0 0 18c1.1 0 1.8-.8 1.8-1.7 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.2 0-1 .8-1.7 1.8-1.7H16a5 5 0 0 0 5-5c0-4-4-7.2-9-7.2Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><circle cx="7.8" cy="12" r="1.15" fill="currentColor"/><circle cx="9.6" cy="8.2" r="1.15" fill="currentColor"/><circle cx="14" cy="7.6" r="1.15" fill="currentColor"/><circle cx="17.2" cy="10.4" r="1.15" fill="currentColor"/>',
+  layout: '<rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="5.6" y="6.6" width="5.2" height="3.4" rx="1" fill="currentColor"/><rect x="5.6" y="12" width="5.2" height="5.4" rx="1" fill="currentColor" opacity=".55"/><rect x="13.2" y="6.6" width="5.2" height="10.8" rx="1" fill="currentColor" opacity=".3"/>',
+  keyboard: '<rect x="2" y="6" width="20" height="12" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M6 9.5h.01M9.5 9.5h.01M13 9.5h.01M16.5 9.5h.01M6 12.6h.01M9.5 12.6h.01M13 12.6h.01M16.5 12.6h.01" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><path d="M7.6 15.6h8.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>',
   scales: '<path d="M12 3v17M7 20h10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M4 7h16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M6.5 7L4 13h5zM17.5 7L15 13h5z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>',
 };
 

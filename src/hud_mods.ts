@@ -55,21 +55,24 @@ interface ModuleDef {
   def: Omit<HudModConfig, 'scale' | 'bg'>;
 }
 
-/** The catalogue, in the order the settings panel lists them. The defaults lay
- *  the on-by-default readouts down the top-left corner (where a Minecraft
- *  player already looks for them) and park the keystroke display on the left
- *  edge, clear of the hotbar and the heart row. */
+/** The catalogue, in the order the settings panel lists them. Every module
+ *  starts OFF: a first session should show the world and nothing else, and a
+ *  readout the player never asked for is clutter rather than a feature. The
+ *  stored corners are where each one lands the moment it IS switched on - the
+ *  readouts a Minecraft player already looks for stack down the top-left, and
+ *  the keystroke display parks on the left edge, clear of the hotbar and the
+ *  heart row. */
 export const HUD_MODULES: readonly ModuleDef[] = [
   { id: 'fps', name: 'FPS', desc: 'Frames per second, averaged over one second.',
-    def: { on: true, ax: 'l', ay: 't', x: 0.010, y: 0.016 } },
+    def: { on: false, ax: 'l', ay: 't', x: 0.010, y: 0.016 } },
   { id: 'cps', name: 'CPS', desc: 'Left and right clicks over the last second.',
-    def: { on: true, ax: 'l', ay: 't', x: 0.010, y: 0.052 } },
+    def: { on: false, ax: 'l', ay: 't', x: 0.010, y: 0.052 } },
   { id: 'coords', name: 'Coordinates', desc: 'Your block position.',
-    def: { on: true, ax: 'l', ay: 't', x: 0.010, y: 0.088 } },
+    def: { on: false, ax: 'l', ay: 't', x: 0.010, y: 0.088 } },
   { id: 'direction', name: 'Direction', desc: 'The way you are facing, and the axis it runs along.',
-    def: { on: true, ax: 'l', ay: 't', x: 0.010, y: 0.124 } },
+    def: { on: false, ax: 'l', ay: 't', x: 0.010, y: 0.124 } },
   { id: 'keystrokes', name: 'Keystrokes', desc: 'Your movement keys and mouse buttons, lit as you press them.',
-    def: { on: true, ax: 'l', ay: 'b', x: 0.014, y: 0.140 } },
+    def: { on: false, ax: 'l', ay: 'b', x: 0.014, y: 0.140 } },
   { id: 'clock', name: 'Real time', desc: 'The clock on your own machine.',
     def: { on: false, ax: 'r', ay: 't', x: 0.010, y: 0.016 } },
   { id: 'gametime', name: 'World time', desc: 'The in-game day and clock.',
@@ -207,6 +210,7 @@ const CSS = `
 .hm-guide.h { left:0; right:0; height:1px; }
 .hm-guide.on { display:block; }
 
+.hm-bar[hidden] { display:none; }
 .hm-bar { position:absolute; left:50%; top:14px; transform:translateX(-50%);
   display:flex; align-items:center; gap:10px; padding:9px 11px;
   border-radius:11px; background:#11141b; border:1px solid #232a37;

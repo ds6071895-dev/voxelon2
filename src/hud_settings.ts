@@ -12,7 +12,8 @@
 // a category rail down the left, one row per setting with the control pinned
 // right, and a live preview of the HUD sitting above the controls.
 
-import { setIconText } from './emoji_icons';
+import { setIconText, iconSvg } from './emoji_icons';
+import type { IconName } from './emoji_icons';
 import { HUD_MODULES, defaultHudLayout, sanitizeHudLayout } from './hud_mods';
 import type { HudLayout, HudModId } from './hud_mods';
 
@@ -100,6 +101,12 @@ export function keyLabel(code: string): string {
  *  the world every time it opened. */
 export const HUD_FONTS: { id: string; name: string; stack: string }[] = [
   { id: 'console', name: 'Console (default)', stack: "'Lucida Console', Monaco, monospace" },
+  // The blocky one. Half of the look is the face and half is the RENDERING:
+  // `pixel` is the only font here that also switches text antialiasing off (see
+  // applyHudTheme and the [data-hud-pixel] rules in index.html), so strokes
+  // land on whole pixels instead of being smeared across two of them. Without
+  // that the crispest bitmap face still comes out looking like every other one.
+  { id: 'pixel', name: 'Pixel (blocky)', stack: "'Silkscreen', 'Press Start 2P', 'Pixel Operator', 'Perfect DOS VGA 437', 'Small Fonts', Fixedsys, Terminal, Terminus, 'MS Gothic', 'Andale Mono', Monaco, monospace" },
   { id: 'system', name: 'System Sans', stack: "ui-sans-serif, -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif" },
   { id: 'mono', name: 'Typewriter', stack: "'Courier New', Courier, monospace" },
   { id: 'trebuchet', name: 'Trebuchet', stack: "'Trebuchet MS', 'Segoe UI', sans-serif" },
@@ -124,6 +131,11 @@ export interface HudTheme {
   accentColor: string;
   /** Drop shadow under HUD text (off reads cleaner on a bright HUD). */
   textShadow: boolean;
+  /** Dark chrome for the game's PANELS - inventory, crafting, the Field Guide,
+   *  the pause menu, every menu button. Separate from the HUD colours above:
+   *  those style text floating over the world, this restyles the opaque
+   *  surfaces you open on top of it. */
+  darkUi: boolean;
 }
 
 export const DEFAULT_HUD_THEME: HudTheme = {
@@ -134,6 +146,7 @@ export const DEFAULT_HUD_THEME: HudTheme = {
   bgOpacity: 0.55,
   accentColor: '#4db8ff',
   textShadow: true,
+  darkUi: false,
 };
 
 /** Ready-made palettes, so a player who wants a different HUD but no fiddling
@@ -163,6 +176,7 @@ export function sanitizeHudTheme(raw: unknown): HudTheme {
     bgOpacity: num(x.bgOpacity, 0, 1, DEFAULT_HUD_THEME.bgOpacity),
     accentColor: hex(x.accentColor, DEFAULT_HUD_THEME.accentColor),
     textShadow: x.textShadow !== false,
+    darkUi: x.darkUi === true,
   };
 }
 
@@ -239,6 +253,12 @@ export function applyHudTheme(theme: HudTheme): void {
   const halo = luminance(theme.textColor) > 0.55 ? '0, 0, 0' : '255, 255, 255';
   root.setProperty('--hud-text-shadow',
     theme.textShadow ? `0 1px 2px rgba(${halo}, 0.55)` : 'none');
+  // Two switches that CSS variables cannot carry, because both change how a
+  // rule renders rather than what value it holds. They live on <html> so the
+  // stylesheet in index.html can key whole blocks off them.
+  const html = document.documentElement;
+  html.toggleAttribute('data-hud-pixel', theme.font === 'pixel');
+  html.toggleAttribute('data-ui-dark', theme.darkUi);
 }
 
 // --- The panel --------------------------------------------------------------
@@ -275,7 +295,10 @@ const CSS = `
 .hs-tab.sel { background:rgba(79,158,255,.13); color:#eaf1ff; }
 .hs-tab.sel::before { content:''; position:absolute; left:0; top:8px; bottom:8px;
   width:3px; border-radius:2px; background:#4f9eff; }
-.hs-tab i { width:15px; font-style:normal; text-align:center; opacity:.85; }
+.hs-tab i { display:flex; align-items:center; justify-content:center; flex:0 0 auto;
+  width:18px; height:18px; font-style:normal; }
+.hs-tab i svg { width:16px; height:16px; vertical-align:middle; }
+.hs-tab.sel i { color:#4f9eff; }
 .hs-rail-note { margin-top:auto; padding:9px 11px; color:#5b6579; font-size:10.5px;
   line-height:1.5; }
 .hs-pane { flex:1 1 auto; min-width:0; overflow-y:auto; padding:18px 20px 22px; }
@@ -451,12 +474,12 @@ export function createHudSettingsPanel(
   // --- panes, built by the helpers below
   const panes: HTMLDivElement[] = [];
   const tabs: HTMLButtonElement[] = [];
-  function addTab(icon: string, name: string): HTMLDivElement {
+  function addTab(icon: IconName, name: string): HTMLDivElement {
     const tab = document.createElement('button');
     tab.className = 'hs-tab';
     tab.type = 'button';
     const ic = document.createElement('i');
-    setIconText(ic, icon);
+    ic.innerHTML = iconSvg(icon);
     const lbl = document.createElement('span');
     lbl.textContent = name;
     tab.append(ic, lbl);
@@ -510,7 +533,7 @@ export function createHudSettingsPanel(
   }
 
   // ── Pane 1: Appearance ────────────────────────────────────────────────────
-  const lookPane = addTab('✦', 'Appearance');
+  const lookPane = addTab('palette', 'Appearance');
 
   // Live preview, pinned above the controls so a colour change is legible
   // against something world-like rather than against the dark panel.
@@ -604,6 +627,16 @@ export function createHudSettingsPanel(
   row(lookPane, 'Accent colour', 'Selected hotbar slot, hotbar edge, chat rule.')
     .append(...accentSwatch.nodes);
 
+  // Panels, not HUD text. Everything above restyles marks that float over the
+  // world; this restyles the opaque sheets that open on top of it, which are
+  // the surfaces that are actually painful at night.
+  group(lookPane, 'Interface');
+  const darkSw = switchControl(
+    () => settings.theme.darkUi, (v) => { settings.theme.darkUi = v; changed(); });
+  row(lookPane, 'Dark mode',
+    'Dark chrome for the inventory, crafting, chests, the Field Guide and the menus.')
+    .appendChild(darkSw.el);
+
   for (const preset of PRESETS) {
     const btn = document.createElement('button');
     btn.className = 'hs-preset';
@@ -626,7 +659,7 @@ export function createHudSettingsPanel(
   // The modules that stay on screen for the whole session. This pane owns which
   // ones are on and how big they are; WHERE each one sits is set by dragging it
   // around the real game, which is the one thing a settings list cannot do well.
-  const layoutPane = addTab('\u25a6', 'HUD Layout');
+  const layoutPane = addTab('layout', 'HUD Layout');
 
   const dragCard = document.createElement('div');
   dragCard.className = 'hs-dragcard';
@@ -685,7 +718,7 @@ export function createHudSettingsPanel(
   }
 
   // -- Pane 3: Keybinds -------------------------------------------------------
-  const bindPane = addTab('⌘', 'Keybinds');
+  const bindPane = addTab('keyboard', 'Keybinds');
   const keyButtons = new Map<BindAction, HTMLButtonElement>();
   let listening: BindAction | null = null;
   // Assigned only on pointer devices; touch has no bind rows to refresh.
@@ -889,6 +922,7 @@ export function createHudSettingsPanel(
     bgSwatch.sync();
     accentSwatch.sync();
     shadowSw.sync();
+    darkSw.sync();
   }
 
   function close(): void {
