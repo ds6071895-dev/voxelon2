@@ -1,719 +1,420 @@
-// Party Games: the four permanently-stamped sub-arenas, each microgame's own
-// rule, and the playlist state machine.
-//
-// The highest-value checks here are the ones guarding the constraint that
-// shaped the whole module: terrain is cached per chunk, so all four arenas are
-// stamped side by side and NONE may bleed into another's z slot.
-
 import {
-  COLORS_CALLS, COLORS_END_INTERVAL_MS, COLORS_FIELD, COLORS_PALETTE,
-  COLORS_START_INTERVAL_MS, KNOCKBACK_HALF, PARTY_ARENA_SIZE_X, PARTY_ARENA_SIZE_Z,
-  PARTY_BASE_X, PARTY_CAPACITY, PARTY_CEILING_Y, PARTY_COUNTDOWN_MS, PARTY_FLOOR_Y,
-  PARTY_GAMES, PARTY_INTERMISSION_MS, PARTY_KNOCKBACK_TIER, PARTY_MIN_PLAYERS,
-  PARTY_PLACEMENT_POINTS, PARTY_PLAYLIST, PARTY_SLOT_SPACING, PARTY_STAMP_MIN_Y,
-  PARTY_SUB_SIZE, PARTY_SUB_STRIDE, PARTY_VOID_Y, PartyGamesEngine,
-  SLUDGE_BASE_HALF, SLUDGE_MAX_MS, SLUDGE_STEP_MS, SLUDGE_TIERS, SPLEEF_RADIUS,
-  clampToPartySub, colorsColorAt, colorsInterval, colorsTileIndex,
-  orderPartyOverall, orderPartyRound, partyArenaAt, partyArenaBlockAt,
-  partyArenaBounds, partyCanBreak, partyGame, partyPointsFor, partySolidAt,
-  partySpawns, partySubBounds, partySubOriginZ, sludgeHeightAt, sludgeLevel,
-  type PartyParticipant,
+  BRIDGE_GOALS, BRIDGE_GOAL_LIMIT, BRIDGE_SIZE_X, BRIDGE_SIZE_Z, BRIDGE_TEAM_BLOCK,
+  PARKOUR_CHECKPOINT_EVERY, PARKOUR_PLATFORMS,
+  PARTY_ARENA_LOAD_TIMEOUT_MS, PARTY_CAPACITY, PARTY_COUNTDOWN_MS, PARTY_FLOOR_Y,
+  PARTY_MAX_HEALTH, PARTY_RESULT_MS, PARTY_STAMP_MAX_Y, PARTY_STAMP_MIN_Y, PARTY_VOID_Y,
+  PartyGamesEngine, bridgeGoalGuard, bridgeSpawn, parkourCourse, partyArenaBlockAt,
+  partySpawns, type PartyLobbySnapshot, type PartyMode,
 } from '../src/partygames';
-import { bedwarsSwing, BW_AXE_TIERS } from '../src/bedwars';
-import { Block } from '../src/blocks';
+import { GameServer, type Outbound } from '../src/net/server_core';
+import { Block, BLOCKS } from '../src/blocks';
 import { Item } from '../src/items';
-import { isMinigameOnly } from '../src/minigame_items';
-import { arenaBandsDisjoint, arenaBandForX } from '../src/arena';
-import { GameServer } from '../src/net/server_core';
-import { DUEL_COUNTDOWN_MS } from '../src/duels';
+import type { ClientMsg } from '../src/net/protocol';
 
 let passed = 0;
-function check(name: string, ok: unknown, detail = ''): void {
-  if (!ok) throw new Error(`FAIL: ${name}${detail ? ` (${detail})` : ''}`);
-  passed++;
+function check(name: string, ok: unknown): asserts ok { if (!ok)
+  throw new Error(`FAIL: ${name}`); passed++; }
+let serial = 0;
+const token = () => `${String(++serial).padStart(24, 'c')}0123456789abcdef01234567`;
+const who = (id: number) => ({ id, username: `Racer${id}`, skin: id });
+function prepared(mode: PartyMode = 'bridge', count = 2) {
+  const e = new PartyGamesEngine(token), made = e.create(who(1), 0, mode);
+  if ('reason' in made)
+    throw Error('create');
+  for (let i = 2; i <= count; i++)
+    check('invite joins', e.join(made.token, who(i), 0).ok);
+  for (let i = 1; i <= count; i++)
+    e.setReady(i, true, 0);
+  const start = e.start(1, 0);
+  check('host starts', start.ok);
+  return { e, snap: start.snapshot, token: made.token };
+}
+function run(e: PartyGamesEngine, snap: PartyLobbySnapshot, now: number) {
+  for (const p of snap.participants.filter(p => p.connected))
+    e.markArenaReady(p.id, now, snap.revision);
+  const out = e.tick(now + PARTY_COUNTDOWN_MS);
+  check('barrier starts the match', out[0]?.phase === 'running');
+  return out[0];
 }
 
-let tokenN = 0;
-const token = () => `${String(++tokenN).padStart(24, 'd')}0123456789abcdef01234567`;
-const who = (id: number) => ({ id, username: `Player${id}`, skin: id * 7 });
-
-const A0 = partyArenaBounds(0);
-
-// ── The playlist table ─────────────────────────────────────────────────────
+// ── The Bridge arena ───────────────────────────────────────────────────────
 {
-  check('every game sits at its own array index',
-    PARTY_GAMES.every((g, i) => g.index === i));
-  check('the playlist is four microgames and every id resolves',
-    PARTY_PLAYLIST.length === 4 &&
-    PARTY_PLAYLIST.every((id) => partyGame(id).id === id));
-  check('the playlist has no duplicates', new Set(PARTY_PLAYLIST).size === PARTY_PLAYLIST.length);
-  check('the footprint has room for exactly the registered games',
-    PARTY_GAMES.length * PARTY_SUB_STRIDE <= PARTY_ARENA_SIZE_Z);
-  check('every microgame declares a real duration and a legal rule set',
-    PARTY_GAMES.every((g) => g.durationMs >= 30_000 && g.durationMs <= 120_000 &&
-      ['none', 'break_floor'].includes(g.editable) &&
-      ['shovel', 'stick', 'none'].includes(g.loadout)));
-  check('placement points are strictly non-increasing and cover the capacity',
-    PARTY_PLACEMENT_POINTS.length === PARTY_CAPACITY &&
-    PARTY_PLACEMENT_POINTS.every((v, i) => i === 0 || v <= PARTY_PLACEMENT_POINTS[i - 1]));
-  check('a placement past the table scores zero rather than undefined',
-    partyPointsFor(99) === 0 && partyPointsFor(0) === PARTY_PLACEMENT_POINTS[0]);
-}
-
-// ── Sub-arena stamping: the constraint that shaped the module ─────────────
-{
-  check('the party band is registered and still disjoint from the others',
-    arenaBandForX(PARTY_BASE_X)?.kind === 'party' && arenaBandsDisjoint(96));
-  check('the arena addresses only its own band',
-    partyArenaAt(A0.originX + 5, 5)?.slot === 0 &&
-    partyArenaAt(A0.originX - 1, 5) === null &&
-    partyArenaAt(A0.originX + PARTY_ARENA_SIZE_X, 5) === null &&
-    partyArenaAt(A0.originX + 5, PARTY_ARENA_SIZE_Z) === null &&
-    partyArenaAt(PARTY_BASE_X + PARTY_SLOT_SPACING + 5, 5)?.slot === 1);
-
-  // Every sub-arena's geometry must be confined to its own z slot, with a real
-  // gutter of void between slots. If this ever fails, one microgame's floor is
-  // visible (or reachable) from another's.
-  for (let i = 0; i < PARTY_GAMES.length; i++) {
-    const sub = partySubBounds(0, i);
-    check(`sub-arena ${i} maps to game ${PARTY_GAMES[i].id}`,
-      sub.index === i && sub.game === PARTY_GAMES[i].id &&
-      sub.minZ === partySubOriginZ(i));
-    let stamped = 0, strayed = false;
-    for (let z = 0; z < PARTY_ARENA_SIZE_Z; z++) {
-      for (let lx = 0; lx < PARTY_ARENA_SIZE_X; lx++) {
-        for (let y = PARTY_STAMP_MIN_Y; y <= PARTY_CEILING_Y; y++) {
-          if (partyArenaBlockAt(A0.originX + lx, y, z) === null) continue;
-          const owner = Math.floor(z / PARTY_SUB_STRIDE);
-          if (owner === i) stamped++;
-          if (owner !== i && z >= sub.minZ && z < sub.maxZ) strayed = true;
-        }
-      }
-    }
-    check(`sub-arena ${i} actually stamps geometry`, stamped > 100, `${stamped} cells`);
-    check(`sub-arena ${i} stays inside its own z slot`, !strayed);
+  const { e, snap } = prepared('bridge', 2);
+  check('a Bridge lobby is 1v1, private or not', snap.capacity === PARTY_CAPACITY && PARTY_CAPACITY === 2);
+  check('teams are drawn evenly', snap.participants.filter(p => p.team === 0).length === 1 &&
+    snap.participants.filter(p => p.team === 1).length === 1);
+  check('teams follow join order', snap.participants.every(p => p.team === (p.joinOrder % 2)));
+  const s = run(e, snap, 0), sub = s.sub!;
+  check('the Bridge venue is the whole island chain',
+    sub.maxX - sub.minX === BRIDGE_SIZE_X && sub.maxZ - sub.minZ === BRIDGE_SIZE_Z);
+  const spawns = partySpawns(sub, s.participants);
+  for (const [i, p] of spawns.entries()) {
+    check('everyone spawns on solid ground', !!BLOCKS[partyArenaBlockAt(p.x, p.y - .1, p.z)!]?.solid);
+    check('nobody spawns inside a wall',
+      !BLOCKS[partyArenaBlockAt(p.x, p.y, p.z)!]?.solid && !BLOCKS[partyArenaBlockAt(p.x, p.y + 1, p.z)!]?.solid);
+    const lz = p.z - sub.minZ;
+    check('each side spawns behind its own portal', s.participants[i].team === 0 ? lz < BRIDGE_SIZE_Z / 2 : lz > BRIDGE_SIZE_Z / 2);
   }
-
-  // The gutter.
-  let gutterClean = true;
-  const gutter = PARTY_SUB_STRIDE - PARTY_SUB_SIZE;
-  for (let i = 0; i < PARTY_GAMES.length; i++) {
-    for (let z = partySubOriginZ(i) + PARTY_SUB_SIZE; z < partySubOriginZ(i + 1); z++) {
-      for (let lx = 0; lx < PARTY_ARENA_SIZE_X; lx++) {
-        for (let y = PARTY_STAMP_MIN_Y; y <= PARTY_CEILING_Y; y++) {
-          if (partyArenaBlockAt(A0.originX + lx, y, z) !== null) gutterClean = false;
-        }
-      }
-    }
-  }
-  check('there is a real void gutter of at least 16 blocks between sub-arenas',
-    gutterClean && gutter >= 16, `${gutter}`);
-
-  check('nothing is stamped below the stamp floor',
-    (() => {
-      for (let z = 0; z < PARTY_ARENA_SIZE_Z; z += 3) {
-        for (let lx = 0; lx < PARTY_ARENA_SIZE_X; lx += 3) {
-          for (let y = PARTY_VOID_Y - 4; y < PARTY_STAMP_MIN_Y; y++) {
-            if (partyArenaBlockAt(A0.originX + lx, y, z) !== null) return false;
-          }
-        }
-      }
-      return true;
-    })());
-  check('partyArenaBlockAt is pure across a resample',
-    (() => {
-      for (let i = 0; i < 20_000; i++) {
-        const lx = i % PARTY_ARENA_SIZE_X;
-        const z = (i * 7) % PARTY_ARENA_SIZE_Z;
-        const y = PARTY_FLOOR_Y + (i % 10) - 2;
-        const a = partyArenaBlockAt(A0.originX + lx, y, z);
-        if (a !== partyArenaBlockAt(A0.originX + lx, y, z)) return false;
-      }
-      return true;
-    })());
+  check('the two sides spawn apart', Math.abs(spawns[0].z - spawns[1].z) > 100);
 }
-
-// ── Spawns ─────────────────────────────────────────────────────────────────
+// The map cannot favour a side: it is its own mirror with the wool swapped.
 {
-  for (let i = 0; i < PARTY_GAMES.length; i++) {
-    const sub = partySubBounds(0, i);
-    for (let n = PARTY_MIN_PLAYERS; n <= PARTY_CAPACITY; n++) {
-      const spawns = partySpawns(sub, n);
-      check(`${PARTY_GAMES[i].id} gives ${n} spawns`, spawns.length === n);
-      check(`${PARTY_GAMES[i].id} spawns all stand on solid ground (n=${n})`,
-        spawns.every((s) => partySolidAt(s.x, s.y - 1, s.z)),
-        spawns.map((s) => `${s.x.toFixed(1)},${s.y.toFixed(1)},${s.z.toFixed(1)}`).join(' '));
-      check(`${PARTY_GAMES[i].id} spawns have headroom (n=${n})`,
-        spawns.every((s) => !partySolidAt(s.x, s.y + 0.1, s.z) &&
-          !partySolidAt(s.x, s.y + 1.1, s.z)));
-      check(`${PARTY_GAMES[i].id} spawns are inside their own sub-arena (n=${n})`,
-        spawns.every((s) => s.x >= sub.minX && s.x < sub.maxX &&
-          s.z >= sub.minZ && s.z < sub.maxZ));
-      if (n >= 4) {
-        let minGap = Infinity;
-        for (let a = 0; a < spawns.length; a++) {
-          for (let b = a + 1; b < spawns.length; b++) {
-            minGap = Math.min(minGap, Math.hypot(spawns[a].x - spawns[b].x, spawns[a].z - spawns[b].z));
-          }
-        }
-        check(`${PARTY_GAMES[i].id} keeps ${n} spawns at least 4 blocks apart`,
-          minGap >= 4, minGap.toFixed(2));
+  const { e, snap } = prepared('bridge');
+  const sub = run(e, snap, 0).sub!;
+  const swap = (v: number | null) => v === Block.TeamWoolA ? Block.TeamWoolB : v === Block.TeamWoolB ? Block.TeamWoolA : v;
+  let mismatched = 0, stamped = 0;
+  for (let lz = 0; lz < BRIDGE_SIZE_Z; lz++)
+    for (let lx = 0; lx < BRIDGE_SIZE_X; lx++)
+      for (let y = PARTY_STAMP_MIN_Y; y <= PARTY_STAMP_MAX_Y; y++) {
+        const a = partyArenaBlockAt(sub.minX + lx, y, sub.minZ + lz);
+        if (swap(a) !== partyArenaBlockAt(sub.minX + lx, y, sub.minZ + BRIDGE_SIZE_Z - 1 - lz))
+          mismatched++;
+        if (a !== null && a !== Block.Air)
+          stamped++;
       }
-    }
-  }
+  check('the two bases are exact mirrors', mismatched === 0);
+  check('the bases are actually built', stamped > 8000);
+  // Every portal is an open shaft with a floor you land on, not a hole to the void.
+  for (const g of BRIDGE_GOALS)
+    for (let lx = g.minX; lx < g.maxX; lx++)
+      for (let lz = g.minZ; lz < g.maxZ; lz++) {
+        for (let y = PARTY_FLOOR_Y - 7; y <= PARTY_FLOOR_Y; y++)
+          check('portal shaft is open', !BLOCKS[partyArenaBlockAt(sub.minX + lx + .5, y, sub.minZ + lz + .5)!]?.solid);
+        check('portal has a landing floor', !!BLOCKS[partyArenaBlockAt(sub.minX + lx + .5, PARTY_FLOOR_Y - 8, sub.minZ + lz + .5)!]?.solid);
+      }
+  // There has to be something to build across, or the mode has no verb.
+  let void_ = 0;
+  for (let lz = 44; lz < BRIDGE_SIZE_Z - 44; lz++)
+    if (!BLOCKS[partyArenaBlockAt(sub.minX + 12.5, PARTY_FLOOR_Y, sub.minZ + lz + .5)!]?.solid) void_++;
+  check('the catwalks stop short of the middle', void_ >= 16);
 }
-
-// ── Containment ────────────────────────────────────────────────────────────
-{
-  const sub = partySubBounds(0, 0);
-  const out = clampToPartySub({ x: sub.minX - 900, y: 150, z: sub.maxZ + 900 }, sub);
-  check('x/z are clamped into the CURRENT sub-arena',
-    out.x > sub.minX && out.x < sub.maxX && out.z > sub.minZ && out.z < sub.maxZ);
-  check('the ceiling is capped',
-    clampToPartySub({ x: sub.minX + 5, y: 9_000, z: sub.minZ + 5 }, sub).y < PARTY_CEILING_Y);
-  check('y is NOT floored — falling must stay an elimination',
-    clampToPartySub({ x: sub.minX + 5, y: 40, z: sub.minZ + 5 }, sub).y === 40);
-}
-
-// ── 1. Spleef ──────────────────────────────────────────────────────────────
-{
-  const sub = partySubBounds(0, 0);
-  const cx = sub.minX + PARTY_SUB_SIZE / 2, cz = sub.minZ + PARTY_SUB_SIZE / 2;
-  check('the spleef floor is one row of packed snow',
-    partyArenaBlockAt(cx, PARTY_FLOOR_Y, cz) === Block.PackedSnow &&
-    partyArenaBlockAt(cx, PARTY_FLOOR_Y - 1, cz) === null &&
-    partyArenaBlockAt(cx, PARTY_FLOOR_Y + 1, cz) === null);
-  // The real property, rather than an approximation of the circle: no SNOW
-  // cell may touch the void, so the diggable field is always ringed by rim and
-  // nobody can stand on an undiggable edge tile.
-  check('a Void Rim lip stops anyone riding the edge',
-    (() => {
-      let rim = 0;
-      for (let lx = 0; lx < PARTY_SUB_SIZE; lx++) {
-        for (let lz = 0; lz < PARTY_SUB_SIZE; lz++) {
-          const here = partyArenaBlockAt(sub.minX + lx, PARTY_FLOOR_Y, sub.minZ + lz);
-          if (here === Block.ArenaRim) rim++;
-          if (here !== Block.PackedSnow) continue;
-          for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-            if (partyArenaBlockAt(sub.minX + lx + dx, PARTY_FLOOR_Y, sub.minZ + lz + dz) === null) {
-              return false;
-            }
-          }
-        }
-      }
-      return rim > 20;
-    })());
-  check('the diggable field is a real disc, not a token patch',
-    (() => {
-      let snow = 0;
-      for (let lx = 0; lx < PARTY_SUB_SIZE; lx++) {
-        for (let lz = 0; lz < PARTY_SUB_SIZE; lz++) {
-          if (partyArenaBlockAt(sub.minX + lx, PARTY_FLOOR_Y, sub.minZ + lz) === Block.PackedSnow) snow++;
-        }
-      }
-      return snow > 300 && snow < Math.PI * SPLEEF_RADIUS * SPLEEF_RADIUS;
-    })());
-
-  // The whole rule, as one predicate.
-  check('breaking snow to Air is the only legal edit',
-    partyCanBreak(sub, cx, PARTY_FLOOR_Y, cz, Block.Air));
-  check('placing anything is refused',
-    !partyCanBreak(sub, cx, PARTY_FLOOR_Y, cz, Block.PackedSnow) &&
-    !partyCanBreak(sub, cx, PARTY_FLOOR_Y, cz, Block.Stone) &&
-    !partyCanBreak(sub, cx, PARTY_FLOOR_Y, cz, Block.TeamWoolA));
-  check('breaking the rim is refused',
-    !partyCanBreak(sub, sub.minX + 1, PARTY_FLOOR_Y, cz, Block.Air));
-  check('breaking empty air is refused',
-    !partyCanBreak(sub, cx, PARTY_FLOOR_Y + 3, cz, Block.Air));
-  for (let i = 1; i < PARTY_GAMES.length; i++) {
-    const other = partySubBounds(0, i);
-    check(`no edit is legal in the ${PARTY_GAMES[i].id} sub-arena`,
-      !partyCanBreak(other, other.minX + PARTY_SUB_SIZE / 2, PARTY_FLOOR_Y,
-        other.minZ + PARTY_SUB_SIZE / 2, Block.Air));
-  }
-}
-
-// ── 2. Color Chaos ─────────────────────────────────────────────────────────
-{
-  const sub = partySubBounds(0, 1);
-  check('the palette is four distinct colours, two of them the team wools',
-    new Set(COLORS_PALETTE).size === 4 &&
-    COLORS_PALETTE.includes(Block.TeamWoolA) && COLORS_PALETTE.includes(Block.TeamWoolB));
-  check('every palette colour is minigame-only',
-    COLORS_PALETTE.every((id) => isMinigameOnly(id)));
-  check('the tile hash is deterministic and total',
-    (() => {
-      for (let i = 0; i < 4_000; i++) {
-        const tx = i % 40, tz = Math.floor(i / 40);
-        const v = colorsTileIndex(tx, tz);
-        if (!Number.isInteger(v) || v < 0 || v >= COLORS_PALETTE.length) return false;
-        if (v !== colorsTileIndex(tx, tz)) return false;
-      }
-      return true;
-    })());
-  check('the hash actually uses all four colours',
-    (() => {
-      const seen = new Set<number>();
-      for (let tx = 0; tx < 12; tx++) for (let tz = 0; tz < 12; tz++) seen.add(colorsTileIndex(tx, tz));
-      return seen.size === COLORS_PALETTE.length;
-    })());
-  check('a tile is a solid 3x3 block of one colour',
-    (() => {
-      const base = COLORS_FIELD / 2;
-      for (let tx = 0; tx < 4; tx++) {
-        for (let tz = 0; tz < 4; tz++) {
-          const lx0 = PARTY_SUB_SIZE / 2 - base + tx * 3;
-          const lz0 = PARTY_SUB_SIZE / 2 - base + tz * 3;
-          const want = colorsColorAt(lx0, lz0);
-          for (let dx = 0; dx < 3; dx++) {
-            for (let dz = 0; dz < 3; dz++) {
-              if (colorsColorAt(lx0 + dx, lz0 + dz) !== want) return false;
-            }
-          }
-        }
-      }
-      return true;
-    })());
-  check('off the field there is no colour',
-    colorsColorAt(0, 0) === -1 && colorsColorAt(PARTY_SUB_SIZE - 1, PARTY_SUB_SIZE - 1) === -1);
-  check('the stamped floor matches the colour function everywhere',
-    (() => {
-      for (let lx = 0; lx < PARTY_SUB_SIZE; lx++) {
-        for (let lz = 0; lz < PARTY_SUB_SIZE; lz++) {
-          const colour = colorsColorAt(lx, lz);
-          const want = colour < 0 ? null : COLORS_PALETTE[colour];
-          if (partyArenaBlockAt(sub.minX + lx, PARTY_FLOOR_Y, sub.minZ + lz) !== want) return false;
-        }
-      }
-      return true;
-    })());
-  check('the call interval tightens monotonically to its floor',
-    colorsInterval(0) === COLORS_START_INTERVAL_MS &&
-    colorsInterval(COLORS_CALLS - 1) === COLORS_END_INTERVAL_MS &&
-    Array.from({ length: COLORS_CALLS }, (_, i) => colorsInterval(i))
-      .every((v, i, a) => i === 0 || v <= a[i - 1]));
-
-  // The flagged risk: the restore must be IDEMPOTENT. The implementation is a
-  // footprint sweep ("delete every edit inside this sub-arena"), never a paired
-  // inverse batch, so vanishing twice and restoring once still leaves it whole.
-  const edits = new Map<string, number>();
-  const vanish = (keep: number): void => {
-    for (let lx = 0; lx < PARTY_SUB_SIZE; lx++) {
-      for (let lz = 0; lz < PARTY_SUB_SIZE; lz++) {
-        const colour = colorsColorAt(lx, lz);
-        if (colour < 0 || colour === keep) continue;
-        edits.set(`${sub.minX + lx},${PARTY_FLOOR_Y},${sub.minZ + lz}`, Block.Air);
-      }
-    }
-  };
-  const sweepRestore = (): void => {
-    for (const key of [...edits.keys()]) {
-      const [x, , z] = key.split(',').map(Number);
-      if (x >= sub.minX && x < sub.maxX && z >= sub.minZ && z < sub.maxZ) edits.delete(key);
-    }
-  };
-  vanish(0); vanish(1);
-  check('a double vanish really did remove floor', edits.size > 100);
-  sweepRestore();
-  check('one sweep restores the whole floor, however many vanishes preceded it',
-    edits.size === 0);
-  check('the floor is whole again by the authored stamp',
-    (() => {
-      for (let lx = 0; lx < PARTY_SUB_SIZE; lx++) {
-        for (let lz = 0; lz < PARTY_SUB_SIZE; lz++) {
-          const colour = colorsColorAt(lx, lz);
-          if (colour < 0) continue;
-          const key = `${sub.minX + lx},${PARTY_FLOOR_Y},${sub.minZ + lz}`;
-          if (edits.has(key)) return false;
-          if (partyArenaBlockAt(sub.minX + lx, PARTY_FLOOR_Y, sub.minZ + lz) === null) return false;
-        }
-      }
-      return true;
-    })());
-}
-
-// ── 3. Rising Sludge ───────────────────────────────────────────────────────
-{
-  const sub = partySubBounds(0, 2);
-  const c = PARTY_SUB_SIZE / 2;
-  check('the pyramid is stepped, tallest at the centre',
-    sludgeHeightAt(c, c, PARTY_FLOOR_Y) > sludgeHeightAt(c + SLUDGE_BASE_HALF, c, PARTY_FLOOR_Y) &&
-    sludgeHeightAt(c + SLUDGE_BASE_HALF + 1, c, PARTY_FLOOR_Y) === -1);
-  check('height never exceeds the tier count',
-    (() => {
-      for (let lx = 0; lx < PARTY_SUB_SIZE; lx++) {
-        for (let lz = 0; lz < PARTY_SUB_SIZE; lz++) {
-          const h = sludgeHeightAt(lx, lz, PARTY_FLOOR_Y);
-          if (h >= 0 && h > PARTY_FLOOR_Y + SLUDGE_TIERS) return false;
-        }
-      }
-      return true;
-    })());
-  check('the summit is reachable as a staircase, one tier at a time',
-    (() => {
-      let prev = sludgeHeightAt(c + SLUDGE_BASE_HALF, c, PARTY_FLOOR_Y);
-      for (let d = SLUDGE_BASE_HALF - 1; d >= 0; d--) {
-        const h = sludgeHeightAt(c + d, c, PARTY_FLOOR_Y);
-        if (h - prev > 1) return false;
-        prev = h;
-      }
-      return true;
-    })());
-  check('step caps read differently from the body',
-    (() => {
-      const h = sludgeHeightAt(c, c, PARTY_FLOOR_Y);
-      return partyArenaBlockAt(sub.minX + c, h, sub.minZ + c) === Block.Terracotta &&
-        partyArenaBlockAt(sub.minX + c, h - 1, sub.minZ + c) === Block.Basalt;
-    })());
-  check('it is opaque rock, not a fluid — no lava semantics anywhere',
-    (() => {
-      for (let lx = 0; lx < PARTY_SUB_SIZE; lx++) {
-        for (let y = PARTY_FLOOR_Y; y <= PARTY_FLOOR_Y + SLUDGE_TIERS; y++) {
-          const b = partyArenaBlockAt(sub.minX + lx, y, sub.minZ + c);
-          if (b !== null && b !== Block.Terracotta && b !== Block.Basalt) return false;
-        }
-      }
-      return true;
-    })());
-  check('the sludge rises one row per step and stops at the summit',
-    sludgeLevel(0, PARTY_FLOOR_Y) === PARTY_FLOOR_Y &&
-    sludgeLevel(SLUDGE_STEP_MS, PARTY_FLOOR_Y) === PARTY_FLOOR_Y + 1 &&
-    sludgeLevel(SLUDGE_MAX_MS, PARTY_FLOOR_Y) === PARTY_FLOOR_Y + SLUDGE_TIERS &&
-    sludgeLevel(999_999, PARTY_FLOOR_Y) === PARTY_FLOOR_Y + SLUDGE_TIERS);
-  check('the climb is BOUNDED BY CONSTRUCTION, well inside the round limit',
-    SLUDGE_MAX_MS === 28_000 && SLUDGE_MAX_MS < partyGame('lava').durationMs);
-  check('the sludge eventually covers every standable cell',
-    (() => {
-      const top = sludgeLevel(SLUDGE_MAX_MS, PARTY_FLOOR_Y);
-      for (let lx = 0; lx < PARTY_SUB_SIZE; lx++) {
-        for (let lz = 0; lz < PARTY_SUB_SIZE; lz++) {
-          const h = sludgeHeightAt(lx, lz, PARTY_FLOOR_Y);
-          if (h >= 0 && h > top) return false;
-        }
-      }
-      return true;
-    })());
-}
-
-// ── 4. Knockback Arena ─────────────────────────────────────────────────────
-{
-  const sub = partySubBounds(0, 3);
-  const c = PARTY_SUB_SIZE / 2;
-  check('a flat platform over void',
-    partyArenaBlockAt(sub.minX + c, PARTY_FLOOR_Y, sub.minZ + c) === Block.SpectralMarble &&
-    partyArenaBlockAt(sub.minX + c, PARTY_FLOOR_Y - 1, sub.minZ + c) === null);
-  check('a glass rim on the OUTER ring only, so corners bounce you back in',
-    partyArenaBlockAt(sub.minX + c + KNOCKBACK_HALF, PARTY_FLOOR_Y + 1,
-      sub.minZ + c) === Block.Glass &&
-    partyArenaBlockAt(sub.minX + c + KNOCKBACK_HALF - 1, PARTY_FLOOR_Y + 1,
-      sub.minZ + c) === null);
-  check('past the platform there is nothing at all',
-    partyArenaBlockAt(sub.minX + c + KNOCKBACK_HALF + 1, PARTY_FLOOR_Y, sub.minZ + c) === null);
-
-  // The stick is one more tier-table entry fed to the SAME pure swing function.
-  check('the knockback stick is minigame-only', isMinigameOnly(Item.KnockbackStick));
-  const swung = bedwarsSwing({
-    tier: PARTY_KNOCKBACK_TIER, sinceLastSwingMs: 10_000, combo: 0,
-    onGround: true, vy: 0, speed: 0, toTargetX: 1, toTargetZ: 0, lookX: 1, lookZ: 0,
-  });
-  check('the stick launches far harder than any Bedwars axe',
-    Math.hypot(swung.kx, swung.kz) > Math.hypot(
-      ...(() => {
-        const a = bedwarsSwing({
-          tier: BW_AXE_TIERS[3], sinceLastSwingMs: 10_000, combo: 0, onGround: true,
-          vy: 0, speed: 0, toTargetX: 1, toTargetZ: 0, lookX: 1, lookZ: 0,
-        });
-        return [a.kx, a.kz];
-      })()));
-  check('the stick still gives vertical lift, so a hit leaves the floor', swung.ky > 0);
-  check('the tier is faster than every axe', PARTY_KNOCKBACK_TIER.cooldownMs <
-    Math.min(...BW_AXE_TIERS.map((t) => t.cooldownMs)));
-}
-
 // ── Scoring ────────────────────────────────────────────────────────────────
 {
-  const mk = (id: number, alive: boolean, elim: number, joinOrder: number,
-    points = 0, placements: number[] = []) =>
-    ({ id, username: `P${id}`, skin: 0, host: false, ready: false, connected: true,
-      joinOrder, points, placements, alive, eliminatedAt: elim }) as PartyParticipant;
-
-  const round = orderPartyRound([
-    mk(1, false, 100, 0), mk(2, true, Infinity, 1), mk(3, false, 500, 2), mk(4, true, Infinity, 3),
-  ]);
-  check('survivors rank ahead of everyone eliminated',
-    round[0].alive && round[1].alive && !round[2].alive && !round[3].alive);
-  check('among survivors, join order decides', round[0].id === 2 && round[1].id === 4);
-  check('among the eliminated, surviving LONGER is better',
-    round[2].id === 3 && round[3].id === 1);
-  check('the round order is total — reversing the input never changes it',
-    (() => {
-      const rows = [mk(1, false, 100, 0), mk(2, true, Infinity, 1), mk(3, false, 500, 2)];
-      return orderPartyRound(rows).map((p) => p.id).join() ===
-        orderPartyRound([...rows].reverse()).map((p) => p.id).join();
-    })());
-
-  const overall = orderPartyOverall([
-    mk(1, true, Infinity, 0, 20, [1, 1]),
-    mk(2, true, Infinity, 1, 20, [0, 3]),
-    mk(3, true, Infinity, 2, 25, [0, 0]),
-  ]);
-  check('points win first', overall[0].id === 3);
-  check('a points tie breaks on most FIRSTS', overall[1].id === 2);
-  check('the overall order is total',
-    (() => {
-      const rows = [mk(1, true, Infinity, 0, 9, [2]), mk(2, true, Infinity, 1, 9, [2])];
-      return orderPartyOverall(rows).map((p) => p.id).join() === '1,2' &&
-        orderPartyOverall([...rows].reverse()).map((p) => p.id).join() === '1,2';
-    })());
+  const { e, snap } = prepared('bridge');
+  const s = run(e, snap, 0), sub = s.sub!;
+  const enemy = BRIDGE_GOALS[1], own = BRIDGE_GOALS[0];
+  const into = (g: typeof enemy) => ({
+    x: sub.minX + (g.minX + g.maxX) / 2, y: PARTY_FLOOR_Y - 6, z: sub.minZ + (g.minZ + g.maxZ) / 2,
+  });
+  const me = e.participantFor(1)!;
+  check('team one attacks the far portal', me.team === 0);
+  check('standing on your own deck is not a goal', !e.evaluate(1, { ...into(own), y: PARTY_FLOOR_Y + 1 }, 4000).changed);
+  const own_ = e.evaluate(1, into(own), 4100);
+  check('falling in your own portal only costs you a trip', me.score === 0 && me.falls === 1 && !!own_.spawn);
+  const scored = e.evaluate(1, into(enemy), 5000);
+  check('reaching the far side scores', me.score === 1 && !!scored.spawn);
+  check('the scoreline is on the wire', e.snapshotFor(1, 5000)!.teamScores[0] === 1);
+  check('a goal is announced', e.snapshotFor(1, 5000)!.lastGoal?.id === 1);
+  check('a goal sends the other side home too', !!e.evaluate(2, { x: sub.minX + 24, y: PARTY_FLOOR_Y + 1, z: sub.minZ + 88 }, 5001).spawn);
+  const fell = e.evaluate(1, { x: sub.minX + 24, y: PARTY_VOID_Y - 3, z: sub.minZ + 88 }, 6000);
+  check('the void returns you to your own base', fell.spawn!.z === bridgeSpawn(sub, 0, 0).z && me.falls === 2);
+  for (let goal = 2; goal <= BRIDGE_GOAL_LIMIT; goal++)
+    e.evaluate(1, into(enemy), 6000 + goal * 1000);
+  const done = e.snapshotFor(1, 20000)!;
+  check(`first to ${BRIDGE_GOAL_LIMIT} ends it`, done.phase === 'results' && done.result?.winnerTeam === 0);
+  check('the winning side is named, not just a player', done.result?.teamScores[0] === BRIDGE_GOAL_LIMIT && done.result?.winner === 1);
+  check('further scoring after the whistle is ignored', !e.evaluate(1, into(enemy), 21000).changed);
 }
-
-// ── The playlist state machine ─────────────────────────────────────────────
-function liveParty(n = 4, now = 1_000): { pg: PartyGamesEngine; t: number; ids: number[] } {
-  const pg = new PartyGamesEngine(token);
-  const made = pg.create(who(1), now);
-  if ('reason' in made) throw new Error('create failed');
-  const ids = [1];
-  for (let i = 2; i <= n; i++) { pg.join(made.token, who(i), now); ids.push(i); }
-  for (const id of ids) pg.setReady(id, true, now);
-  const started = pg.start(1, now);
-  if (!started.ok) throw new Error(`start failed: ${started.reason}`);
-  for (const id of ids) pg.markArenaReady(id, now);
-  const t = now + PARTY_COUNTDOWN_MS + 1;
-  pg.tick(t);
-  return { pg, t, ids };
-}
-
+// Nobody can plug a portal with wool.
 {
-  const pg = new PartyGamesEngine(token);
-  const made = pg.create(who(1), 0);
-  if ('reason' in made) throw new Error('create failed');
-  check('a lobby declares itself UNRANKED', made.snapshot.ranked === false);
-  check('the invite token stays out of the public snapshot',
-    !JSON.stringify(made.snapshot).includes(made.token));
-  for (let i = 2; i <= PARTY_CAPACITY; i++) {
-    check(`player ${i} joins`, pg.join(made.token, who(i), 0).ok);
+  for (const g of BRIDGE_GOALS) {
+    check('the portal mouth refuses blocks', bridgeGoalGuard((g.minX + g.maxX) / 2, (g.minZ + g.maxZ) / 2));
+    check('its rim refuses blocks', bridgeGoalGuard(g.minX - 1, g.minZ - 1));
   }
-  const over = pg.join(made.token, who(99), 0);
-  check('the ninth player is refused', !over.ok && over.reason === 'full');
-  check('an FFA needs three bodies before it can start',
-    (() => {
-      const small = new PartyGamesEngine(token);
-      const m = small.create(who(1), 0);
-      if ('reason' in m) throw new Error('create failed');
-      small.join(m.token, who(2), 0);
-      small.setReady(1, true, 0); small.setReady(2, true, 0);
-      const r = small.start(1, 0);
-      return !r.ok && r.reason === 'too_few_players';
-    })());
+  check('the open deck still accepts blocks', !bridgeGoalGuard(12, 50));
 }
-
+// ── Lobby lifecycle ────────────────────────────────────────────────────────
 {
-  const { pg, t, ids } = liveParty(4);
-  check('the first microgame is the first playlist entry',
-    pg.phaseFor(1) === 'running' && pg.roundFor(1)?.game === PARTY_PLAYLIST[0]);
-  check('everybody starts alive with nothing scored',
-    ids.every((id) => pg.participantFor(id)!.alive && pg.participantFor(id)!.points === 0));
-  check('the sub-arena tracks the running microgame', pg.subFor(1)?.index === 0);
-  check('sameMatch holds inside the room and nowhere else',
-    pg.sameMatch(1, 2) && !pg.sameMatch(1, 99));
-  check('the knockback stick is inert while a different microgame runs',
-    !pg.knockbackLive(1));
-
-  // Eliminate three; the last one standing ends the round early.
-  pg.recordElimination(2, t + 100);
-  check('an elimination is recorded once and is idempotent',
-    !pg.participantFor(2)!.alive && pg.recordElimination(2, t + 200) === null);
-  pg.recordElimination(3, t + 300);
-  check('the round is still live with two alive', pg.phaseFor(1) === 'running');
-  pg.recordElimination(4, t + 400);
-  check('the last one standing ends the round immediately',
-    pg.phaseFor(1) === 'intermission');
-  check('the survivor took first and the points ladder was applied',
-    pg.participantFor(1)!.points === PARTY_PLACEMENT_POINTS[0] &&
-    pg.participantFor(4)!.points === PARTY_PLACEMENT_POINTS[1] &&
-    pg.participantFor(2)!.points === PARTY_PLACEMENT_POINTS[3]);
-  check('the intermission names the microgame it is counting down TO',
-    pg.snapshotFor(1, t)!.nextGame === PARTY_PLAYLIST[1]);
-  check('everybody is alive again for the next round',
-    ids.every((id) => pg.participantFor(id)!.alive));
-
-  pg.tick(t + 500 + PARTY_INTERMISSION_MS);
-  check('the intermission hands over to the second microgame',
-    pg.phaseFor(1) === 'running' && pg.roundFor(1)?.game === PARTY_PLAYLIST[1] &&
-    pg.subFor(1)?.index === 1);
+  const { e, snap } = prepared('bridge', 2);
+  check('invites cap at two', !e.join(e.tokenFor(1)!, who(3), 0).ok);
+  e.markArenaReady(1, 0, snap.revision);
+  check('one ready client cannot start the clock', e.tick(5000).length === 0 && e.snapshotFor(1, 5000)?.countdownEndsAt === undefined);
+  check('wrong round ready is rejected', e.markArenaReady(2, 5000, snap.revision + 1) === null);
+  const running = run(e, snap, 6000);
+  check('both share a start and end', running.participants.length === 2 && running.round!.endsAt > running.round!.startedAt);
+  check('wire snapshot contains finite numbers', !JSON.stringify(running).includes('null'));
 }
-
 {
-  // A full playlist driven PURELY by tick() must always crown exactly one winner.
-  const { pg, t, ids } = liveParty(5);
-  let now = t;
-  let guard = 0;
-  while (pg.phaseFor(1) !== 'results' && guard++ < 10_000) {
-    now += 1_000;
-    pg.tick(now);
+  const { e, snap } = prepared();
+  e.markArenaReady(1, 0, snap.revision);
+  const timed = e.tick(PARTY_ARENA_LOAD_TIMEOUT_MS)[0];
+  check('slow loading cancels explicitly', timed.phase === 'results' && timed.result?.finishReason === 'cancelled');
+  check('cancelled match awards nobody', timed.result?.winner === null && timed.participants.every(p => p.score === 0));
+}
+{
+  // Time runs out with the game level: nobody is handed a win.
+  const { e, snap } = prepared('bridge');
+  const s = run(e, snap, 0);
+  const end = e.tick(s.round!.endsAt)[0];
+  check('a level game at full time is a draw', end.phase === 'results' && end.result?.winnerTeam === null);
+  const oldSeed = end.arena!.seed;
+  e.tick(s.round!.endsAt + PARTY_RESULT_MS);
+  e.setReady(1, true, 999999);
+  e.setReady(2, true, 999999);
+  const replay = e.start(1, 999999);
+  check('rematch makes a fresh seed', replay.ok && replay.snapshot.arena?.seed !== oldSeed);
+  check('rematch resets the scoreline', replay.ok && replay.snapshot.teamScores.every(v => v === 0));
+}
+// ── Parkour ────────────────────────────────────────────────────────────────
+{
+  const { e, snap } = prepared('parkour');
+  check('parkour caps at two', snap.capacity === 2 && !e.join(e.tokenFor(1)!, who(3), 0).ok);
+  const s = run(e, snap, 0), sub = s.sub!, course = parkourCourse(sub.seed);
+  for (const p of partySpawns(sub, s.participants))
+    check('both racers spawn on solid platforms', !!BLOCKS[partyArenaBlockAt(p.x, p.y - .1, p.z)!]?.solid);
+  const at = (i: number) => ({ x: sub.minX + course[i].x, y: course[i].y + .01, z: sub.minZ + course[i].z });
+  e.evaluate(1, at(PARKOUR_PLATFORMS - 1), 4000);
+  check('finish cannot skip the course', e.participantFor(1)!.progress === 0);
+  // Far enough in to have banked exactly one checkpoint, and no further: what
+  // a fall costs is the whole leg since that checkpoint, not the last jump.
+  const banked = PARKOUR_CHECKPOINT_EVERY;
+  for (let i = 1; i <= banked + 2; i++)
+    e.evaluate(1, at(i), 4000 + i * 1000);
+  const fall = e.evaluate(1, { x: sub.minX + 16, y: PARTY_VOID_Y - 1, z: sub.minZ + 40 }, 60000);
+  check('fall restores last saved checkpoint', fall.spawn?.z === at(banked).z &&
+    e.participantFor(1)!.progress === banked && e.participantFor(1)!.falls === 1);
+  for (let i = banked + 1; i < PARKOUR_PLATFORMS; i++)
+    e.evaluate(1, at(i), 70000 + i * 1000);
+  check('first finisher wins immediately', e.snapshotFor(1, 60000)?.result?.winner === 1);
+  const left = e.leave(1, 60000);
+  check('leaving detaches player from engine', e.phaseFor(1) === null && left.snapshot?.participants.find(p => p.id === 1)?.connected === false);
+  check('last departure deletes the lobby', e.leave(2, 60000).deleted && e.snapshots(60000).length === 0);
+}
+// ── Server integration ─────────────────────────────────────────────────────
+function serverMatch(mode: PartyMode = 'parkour') {
+  const s = new GameServer(42);
+  for (let id = 1; id <= 3; id++)
+    s.addPlayer(id, { username: `Tester${id}`, faction: 0 });
+  s.handle(1, { t: 'saveState', data: { slots: [{ id: Item.Diamond, count: 5 }] } });
+  s.handle(1, { t: 'partyQueue', join: true, mode });
+  const launch = s.handle(2, { t: 'partyQueue', join: true, mode });
+  const snap = s.party.snapshotFor(1, s.worldTime * 1000)!;
+  check('public matchmaking launches automatically', snap.phase === 'countdown' && snap.capacity === 2);
+  const sends = (id: number, msg: ClientMsg) => JSON.parse(JSON.stringify(s.handle(id, JSON.parse(JSON.stringify(msg))))) as Outbound[];
+  return { s, snap, launch, sends };
+}
+{
+  const { s, snap, sends } = serverMatch();
+  const spawn = { ...s.players.get(1)! };
+  sends(1, { t: 'xform', x: spawn.x + 10, y: spawn.y, z: spawn.z, yaw: 0, pitch: 0, arenaRevision: snap.revision });
+  check('countdown movement stays pinned', s.players.get(1)!.x === spawn.x);
+  sends(1, { t: 'partyArenaReady', revision: snap.revision });
+  s.tickWar(4);
+  s.tickParty();
+  check('server waits for opponent arena', s.party.phaseFor(1) === 'countdown');
+  sends(2, { t: 'partyArenaReady', revision: snap.revision });
+  s.tickWar(3);
+  s.tickParty();
+  check('both ready start together', s.party.phaseFor(1) === 'running');
+  const sub = s.party.subFor(1)!, player = s.players.get(1)!;
+  const before = player.x;
+  sends(1, { t: 'xform', x: before + 20, y: player.y, z: player.z, yaw: 0, pitch: 0, arenaRevision: snap.revision });
+  check('teleport cheating rejected', player.x === before);
+  sends(1, { t: 'xform', x: before + .1, y: player.y, z: player.z, yaw: 0, pitch: 0, arenaRevision: snap.revision - 1 });
+  check('stale round movement rejected', player.x === before);
+  const cross = sends(1, { t: 'duelQueue', join: true });
+  check('arena player cannot enter another mode', cross.some(o => o.msg.t === 'duelError'));
+  const point = { x: Math.floor(player.x), y: Math.floor(player.y) - 1, z: Math.floor(player.z) };
+  sends(1, { t: 'edit', ...point, block: Block.Air });
+  check('authored parkour cannot be broken', !s.serialize().edits.some(([key, b]) => key === `${point.x},${point.y},${point.z}` && b === Block.Air));
+  // Find a legal adjacent bridge cell close enough to the actual spawn.
+  let wool: { x: number; y: number; z: number } | undefined;
+  for (let dx = -3; dx <= 3 && !wool; dx++)
+    for (let dz = -3; dz <= 3 && !wool; dz++) {
+      const v = { x: point.x + dx, y: point.y, z: point.z + dz };
+      if (partyArenaBlockAt(v.x, v.y, v.z) !== Block.Air)
+        continue;
+      const out = sends(1, { t: 'edit', ...v, block: Block.TeamWoolA });
+      if (out.some(o => o.to === 2 && o.msg.t === 'edit' && o.msg.block === Block.TeamWoolA))
+        wool = v;
+    }
+  check('infinite wool can bridge and broadcasts to rival', !!wool);
+  const removed = sends(1, { t: 'edit', ...wool!, block: Block.Air });
+  check('parkour wool cannot be taken back', removed.some(o => o.msg.t === 'edit' && o.msg.block === Block.TeamWoolA));
+  check('arena items cannot be dropped into world', sends(1, { t: 'drop', items: [{ id: Block.TeamWoolA, count: 64 }], x: player.x, y: player.y, z: player.z }).length === 0);
+  const leave = sends(1, { t: 'partyLeave' });
+  check('departed socket gets no old party lobby or result', !leave.some(o => o.to === 1 && (o.msg.t === 'partyLobby' || o.msg.t === 'partyResult')));
+  check('world inventory restores intact', leave.some(o => o.to === 1 && o.msg.t === 'arenaRestored' && (o.msg.state?.slots as any[])?.[0]?.id === Item.Diamond));
+  check('opponent receives a forfeit', leave.some(o => o.to === 2 && o.msg.t === 'partyResult' && o.msg.result.winner === 2));
+  sends(2, { t: 'partyLeave' });
+  check('placed wool clears when match closes', !s.serialize().edits.some(([k]) => k === `${wool!.x},${wool!.y},${wool!.z}`));
+  check('replay can queue immediately', sends(1, { t: 'partyQueue', join: true, mode: 'parkour' }).some(o => o.msg.t === 'partyQueue' && o.msg.queued));
+  const next = sends(2, { t: 'partyQueue', join: true, mode: 'parkour' });
+  check('replay loads a completely fresh course', next.some(o => o.msg.t === 'partyArena' && o.msg.arena.seed !== sub.seed));
+}
+// The Bridge, over the wire: team wool, building out over the void, taking it
+// back again, and never being handed the other side's colour.
+{
+  const { s, snap, launch, sends } = serverMatch('bridge');
+  const teams = new Map(snap.participants.map(p => [p.id, p.team]));
+  for (const id of [1, 2]) {
+    const loadout = launch.concat(s.handle(id, { t: 'partyArenaReady', revision: snap.revision }))
+      .find(o => o.to === id && o.msg.t === 'partyLoadout');
+    check('each side gets its own wool', loadout && (loadout.msg as { slots: { id: number }[] }).slots[0].id === BRIDGE_TEAM_BLOCK[teams.get(id)!]);
+    const arena = launch.find(o => o.to === id && o.msg.t === 'partyArena');
+    check('the client is told which side it is on', arena && (arena.msg as { team: number }).team === teams.get(id));
   }
-  const snap = pg.snapshotFor(1, now)!;
-  check('a full four-round playlist terminates on the clock alone',
-    snap.phase === 'results', `${guard} ticks`);
-  check('it crowns exactly one winner',
-    snap.result !== undefined && snap.result.winner !== null &&
-    snap.result.scoreboard.length === ids.length);
-  check('every player played every round',
-    snap.result!.scoreboard.every((p) => p.placements.length === PARTY_PLAYLIST.length));
-  check('the winner really does top the board',
-    snap.result!.winner === snap.result!.scoreboard[0].id);
-  check('the result is unranked and carries no progression',
-    snap.result!.ranked === false && !('progressChanges' in snap.result!));
-  check('a whole match runs to roughly six minutes',
-    snap.result!.durationMs > 4 * 60_000 && snap.result!.durationMs < 8 * 60_000,
-    `${Math.round(snap.result!.durationMs / 1000)}s`);
+  s.tickWar(4);
+  s.tickParty();
+  check('the Bridge starts once both are loaded', s.party.phaseFor(1) === 'running');
+  const sub = s.party.subFor(1)!, player = s.players.get(1)!;
+  const mine = BRIDGE_TEAM_BLOCK[teams.get(1)!], theirs = BRIDGE_TEAM_BLOCK[teams.get(2)!];
+  let wool: { x: number; y: number; z: number } | undefined;
+  for (let dx = -3; dx <= 3 && !wool; dx++)
+    for (let dz = -3; dz <= 3 && !wool; dz++) {
+      const v = { x: Math.floor(player.x) + dx, y: Math.floor(player.y), z: Math.floor(player.z) + dz };
+      if (partyArenaBlockAt(v.x, v.y, v.z) !== Block.Air)
+        continue;
+      if (sends(1, { t: 'edit', ...v, block: mine }).some(o => o.to === 2 && o.msg.t === 'edit' && o.msg.block === mine))
+        wool = v;
+    }
+  check('you can build out from your own base', !!wool);
+  check('you cannot build in the other side\'s colour',
+    sends(1, { t: 'edit', x: wool!.x, y: wool!.y + 1, z: wool!.z, block: theirs })
+      .every(o => !(o.to === 2 && o.msg.t === 'edit')));
+  const back = sends(1, { t: 'edit', ...wool!, block: Block.Air });
+  check('you can take your own wool back', back.some(o => o.to === 2 && o.msg.t === 'edit' && o.msg.block === Block.Air));
+  const deck = { x: Math.floor(player.x), y: Math.floor(player.y) - 1, z: Math.floor(player.z) };
+  sends(1, { t: 'edit', ...deck, block: Block.Air });
+  check('the base itself cannot be dismantled', !s.serialize().edits.some(([k, b]) => k === `${deck.x},${deck.y},${deck.z}` && b === Block.Air));
+  const g = BRIDGE_GOALS.find(v => v.team !== teams.get(1)!)!;
+  const plug = { x: sub.minX + g.minX, y: PARTY_FLOOR_Y, z: sub.minZ + g.minZ };
+  Object.assign(player, { x: plug.x + .5, y: PARTY_FLOOR_Y + 1, z: plug.z + .5 });
+  check('the enemy portal cannot be plugged',
+    sends(1, { t: 'edit', ...plug, block: mine }).every(o => !(o.to === 2 && o.msg.t === 'edit')));
 }
-
+// Fighting for the span: the cleaver, the bow, and the movement gate that has
+// to let a fight happen without ever freezing anybody in mid-air.
 {
-  // Dropping to one connected player forfeits rather than hanging.
-  const { pg, t } = liveParty(3);
-  pg.leave(2, t + 10);
-  check('losing one of three keeps the match alive', pg.phaseFor(1) === 'running');
-  pg.leave(3, t + 20);
-  check('dropping to a single player forfeits', pg.phaseFor(1) === 'results');
-  const gone = pg.leave(1, t + 30);
-  check('the last member out deletes the lobby and frees its slot', gone.deleted);
-  const again = pg.create(who(9), t + 40);
-  if ('reason' in again) throw new Error('recreate failed');
-  pg.join(again.token, who(10), t + 40); pg.join(again.token, who(11), t + 40);
-  for (const id of [9, 10, 11]) pg.setReady(id, true, t + 40);
-  pg.start(9, t + 40);
-  check('the freed slot is reused', pg.arenaFor(9)?.slot === 0);
-}
-
-{
-  // Two concurrent parties must not share geometry.
-  const pg = new PartyGamesEngine(token);
-  const a = pg.create(who(1), 0), b = pg.create(who(4), 0);
-  if ('reason' in a || 'reason' in b) throw new Error('create failed');
-  for (const id of [2, 3]) pg.join(a.token, who(id), 0);
-  for (const id of [5, 6]) pg.join(b.token, who(id), 0);
-  for (const id of [1, 2, 3, 4, 5, 6]) pg.setReady(id, true, 0);
-  pg.start(1, 0); pg.start(4, 0);
-  check('concurrent parties get different slots', pg.arenaFor(1)!.slot !== pg.arenaFor(4)!.slot);
-  check('their footprints do not overlap',
-    pg.arenaFor(1)!.maxX <= pg.arenaFor(4)!.minX ||
-    pg.arenaFor(4)!.maxX <= pg.arenaFor(1)!.minX);
-  check('membership never spans parties',
-    pg.membersOf(1).sort((x, y) => x - y).join() === '1,2,3' &&
-    !pg.sameMatch(1, 4));
-}
-
-// ── Server: the route is the security model ───────────────────────────────
-/** Three players in a live party, sitting in the first microgame (Spleef). */
-function liveServer(): { s: GameServer; sub: ReturnType<typeof partySubBounds> } {
-  const s = new GameServer(11, token);
-  for (const id of [1, 2, 3, 4]) {
-    s.addPlayer(id, { username: `P${id}`, faction: id % 2 });
-    s.handle(id, { t: 'xform', x: 40 + id, y: 70, z: 40, yaw: 0, pitch: 0 });
+  const { s, snap, sends } = serverMatch('bridge');
+  s.handle(1, { t: 'partyArenaReady', revision: snap.revision });
+  s.handle(2, { t: 'partyArenaReady', revision: snap.revision });
+  s.tickWar(4);
+  s.tickParty();
+  check('the Bridge arms both sides', s.party.phaseFor(1) === 'running');
+  const a = s.players.get(1)!, b = s.players.get(2)!;
+  const spawn = { x: a.x, y: a.y, z: a.z };
+  // Past the spawn shield, and within arm's reach of each other.
+  s.tickWar(3);
+  s.tickParty();
+  Object.assign(b, { x: a.x + 1.4, y: a.y, z: a.z });
+  a.yaw = Math.atan2(-(b.x - a.x), -(b.z - a.z));
+  a.held = Item.VoidCleaver;
+  const swing = sends(1, { t: 'partyMelee', target: 2 });
+  const landed = swing.find(o => o.to === 1 && o.msg.t === 'partyHit')?.msg as { amount: number } | undefined;
+  check('a cleaver swing hurts the rival', swing.some(o => o.to === 2 && o.msg.t === 'hurt'));
+  check('the swing reports back to the attacker', !!landed && landed.amount > 0);
+  check('the damage is server-side, not claimed', b.health === PARTY_MAX_HEALTH - landed!.amount);
+  check('spam is dropped rather than scaled', sends(1, { t: 'partyMelee', target: 2 }).length === 0);
+  s.tickWar(1);
+  a.yaw += Math.PI;
+  check('a swing with your back turned misses', sends(1, { t: 'partyMelee', target: 2 }).length === 0);
+  a.yaw -= Math.PI;
+  a.held = 0;
+  check('an empty hand cannot swing', sends(1, { t: 'partyMelee', target: 2 }).length === 0);
+  a.held = Item.VoidCleaver;
+  let killed = false;
+  for (let i = 0; i < 40 && !killed; i++) {
+    s.tickWar(1);
+    const out = sends(1, { t: 'partyMelee', target: 2 });
+    Object.assign(b, { x: a.x + 1.4, y: a.y, z: a.z });
+    killed = out.some(o => o.to === 1 && o.msg.t === 'partyHit' && (o.msg as { killed: boolean }).killed);
+    if (killed)
+      check('a kill sends the body home at full health',
+        out.some(o => o.to === 2 && o.msg.t === 'respawned') && b.health === PARTY_MAX_HEALTH);
   }
-  const made = s.handle(1, { t: 'partyCreate' }).find((o) => o.msg.t === 'partyLobby')?.msg;
-  if (!made || made.t !== 'partyLobby' || !made.inviteToken) throw new Error('no party invite');
-  s.handle(2, { t: 'partyJoin', token: made.inviteToken });
-  s.handle(3, { t: 'partyJoin', token: made.inviteToken });
-  for (const id of [1, 2, 3]) s.handle(id, { t: 'partyReady', ready: true });
-  const started = s.handle(1, { t: 'partyStart' });
-  const arenaMsg = started.find((o) => o.to === 1 && o.msg.t === 'partyArena')?.msg;
-  if (!arenaMsg || arenaMsg.t !== 'partyArena') throw new Error('no partyArena');
-  for (const id of [1, 2, 3]) s.handle(id, { t: 'partyArenaReady' });
-  s.tickWar(6); s.tickParty();
-  return { s, sub: arenaMsg.sub };
-}
-
-{
-  const { s, sub } = liveServer();
-  check('the party is running the first microgame',
-    s.party.phaseFor(1) === 'running' && s.party.roundFor(1)?.game === PARTY_PLAYLIST[0]);
-  check('party bodies leave the open world, the bystander stays in it',
-    !s.receivesWorldBroadcast(1) && !s.receivesWorldBroadcast(2) &&
-    !s.receivesWorldBroadcast(3) && s.receivesWorldBroadcast(4) &&
-    s.snapshotFor(4).every((v) => v.id === 4));
-
-  // Spleef's edit rule, through the real handler.
-  const cx = Math.floor(sub.minX + PARTY_SUB_SIZE / 2);
-  const cz = Math.floor(sub.minZ + PARTY_SUB_SIZE / 2);
-  s.handle(1, { t: 'xform', x: cx + 0.5, y: PARTY_FLOOR_Y + 1.01, z: cz + 0.5, yaw: 0, pitch: 0 });
-  check('digging the snow floor is accepted',
-    s.handle(1, { t: 'edit', x: cx, y: PARTY_FLOOR_Y, z: cz, block: Block.Air }).length > 0);
-  check('digging the same cell twice is a no-op',
-    s.handle(1, { t: 'edit', x: cx, y: PARTY_FLOOR_Y, z: cz, block: Block.Air }).length === 0);
-  check('placing ANYTHING is refused',
-    s.handle(1, { t: 'edit', x: cx, y: PARTY_FLOOR_Y, z: cz, block: Block.PackedSnow }).length === 0 &&
-    s.handle(1, { t: 'edit', x: cx, y: PARTY_FLOOR_Y + 1, z: cz, block: Block.OakPlanks }).length === 0 &&
-    s.handle(1, { t: 'edit', x: cx, y: PARTY_FLOOR_Y + 1, z: cz, block: Block.TeamWoolA }).length === 0);
-  check('a spleef edit reaches the party and nobody else',
-    (() => {
-      const out = s.handle(1, { t: 'edit', x: cx + 1, y: PARTY_FLOOR_Y, z: cz, block: Block.Air });
-      return out.length > 0 && out.every((o) => [1, 2, 3].includes(o.to as number));
-    })());
-  check('the world edit log never gains a party block',
-    s.serialize().edits.every(([, b]) => b === Block.Air));
-
-  // The stick is inert while a non-knockback microgame runs.
-  check('partyMelee is inert during Spleef', s.handle(1, { t: 'partyMelee', target: 2 }).length === 0);
-  check('a Bedwars verb is inert inside a party',
-    s.handle(1, { t: 'bwMelee', target: 2 }).length === 0 &&
-    s.handle(1, { t: 'bwShopBuy', entry: 1 }).length === 0);
-  check('a self-hit and an unknown target are both refused',
-    s.handle(1, { t: 'partyMelee', target: 1 }).length === 0 &&
-    s.handle(1, { t: 'partyMelee', target: 9_999 }).length === 0);
-  check('a hit on a non-participant is refused',
-    s.handle(1, { t: 'partyMelee', target: 4 }).length === 0);
-}
-
-{
-  // In the open world and inside other minigames, every party verb is inert.
-  const s = new GameServer(11, token);
-  s.addPlayer(1, { username: 'A', faction: 0 });
-  s.addPlayer(2, { username: 'B', faction: 1 });
-  for (const id of [1, 2]) s.handle(id, { t: 'xform', x: 40, y: 70, z: 41, yaw: 0, pitch: 0 });
-  check('partyMelee is inert in the open world',
-    s.handle(1, { t: 'partyMelee', target: 2 }).length === 0);
-  const before = s.serialize().edits.length;
-  check('the open world is untouched by it', s.serialize().edits.length === before);
-
-  const made = s.handle(1, { t: 'duelCreate' }).find((o) => o.msg.t === 'duelLobby')?.msg;
-  if (!made || made.t !== 'duelLobby' || !made.inviteToken) throw new Error('no duel invite');
-  s.handle(2, { t: 'duelJoin', token: made.inviteToken });
-  s.handle(1, { t: 'duelReady', ready: true }); s.handle(2, { t: 'duelReady', ready: true });
-  s.handle(1, { t: 'duelStart' });
-  for (const id of [1, 2]) s.handle(id, { t: 'duelArenaReady' });
-  s.tickWar(DUEL_COUNTDOWN_MS / 1000); s.tickDuels();
-  check('partyMelee is inert inside a live Duels match',
-    s.handle(1, { t: 'partyMelee', target: 2 }).length === 0);
-}
-
-{
-  // Arena state must never persist out of a party.
-  const s = new GameServer(11, token);
-  for (const id of [1, 2, 3]) {
-    s.addPlayer(id, { username: `P${id}`, faction: 0 });
-    s.handle(id, { t: 'xform', x: 200 + id, y: 70, z: 30, yaw: 0, pitch: 0 });
+  check('the cleaver can finish a fight', killed);
+  check('kills and deaths are on the scoreboard',
+    s.party.participantFor(1)!.kills === 1 && s.party.participantFor(2)!.deaths === 1);
+  // The bow. A full draw is only ever available to somebody who waited for it.
+  a.held = Item.BridgeBow;
+  s.tickWar(2);
+  const shot = sends(1, { t: 'partyShoot', dx: 0, dy: 0, dz: 1, power: 1 });
+  check('a released arrow reaches BOTH clients', shot.filter(o => o.msg.t === 'partyArrow').length === 2);
+  check('a second shot in the same instant is refused', sends(1, { t: 'partyShoot', dx: 0, dy: 0, dz: 1, power: 1 }).length === 0);
+  s.tickWar(2);
+  const full = sends(1, { t: 'partyShoot', dx: 0, dy: 0, dz: 1, power: 1 })
+    .find(o => o.msg.t === 'partyArrow')!.msg as { power: number };
+  check('waiting for the draw buys the full draw', full.power === 1);
+  s.tickWar(2);
+  const cheated = sends(1, { t: 'partyShoot', dx: 0, dy: 0, dz: 1, power: 9 })
+    .find(o => o.msg.t === 'partyArrow')!.msg as { power: number };
+  check('a claimed draw is capped at a real one', cheated.power === 1);
+  // Point blank into the rival: the arrow is the server's, and it lands.
+  s.party.participantFor(2)!.immuneUntil = 0;
+  Object.assign(b, { x: a.x, y: a.y, z: a.z + 3, health: PARTY_MAX_HEALTH });
+  s.tickWar(2);
+  sends(1, { t: 'partyShoot', dx: 0, dy: 0, dz: 1, power: 1 });
+  let arrow: { amount: number; crit: boolean; ranged: boolean } | null = null;
+  for (let i = 0; i < 30 && !arrow; i++) {
+    s.tickWar(1 / 20);
+    const hit = s.tickParty().find(o => o.to === 1 && o.msg.t === 'partyHit');
+    if (hit) arrow = hit.msg as unknown as { amount: number; crit: boolean; ranged: boolean };
   }
-  s.handle(1, { t: 'saveState', data: { x: 201, y: 70, z: 30,
-    slots: [{ id: Item.Diamond, count: 2 }] } });
-  const made = s.handle(1, { t: 'partyCreate' }).find((o) => o.msg.t === 'partyLobby')?.msg;
-  if (!made || made.t !== 'partyLobby' || !made.inviteToken) throw new Error('no invite');
-  s.handle(2, { t: 'partyJoin', token: made.inviteToken });
-  s.handle(3, { t: 'partyJoin', token: made.inviteToken });
-  for (const id of [1, 2, 3]) s.handle(id, { t: 'partyReady', ready: true });
-  s.handle(1, { t: 'partyStart' });
-  const captured = s.capturePlayerState(1)!.data;
-  check('mid-party capture returns the pre-match body',
-    captured.x === 201 && (captured.slots as { id?: number }[])[0]?.id === Item.Diamond);
-  s.handle(1, { t: 'saveState', data: { x: 9_999, slots: [{ id: Item.KnockbackStick, count: 1 }] } });
-  check('a match-time saveState is rejected', s.capturePlayerState(1)!.data.x === 201);
-  const left = s.handle(1, { t: 'partyLeave' });
-  check('leaving restores the exact pre-match body',
-    left.some((o) => o.to === 1 && o.msg.t === 'arenaRestored' && o.msg.x === 201));
-  check('no Knockback Stick survives the restore',
-    !JSON.stringify(left.filter((o) => o.msg.t === 'arenaRestored'))
-      .includes(`"id":${Item.KnockbackStick}`));
+  check('an arrow that reaches a body damages it', !!arrow && arrow.amount > 0);
+  check('a full draw reports as a ranged crit', arrow!.ranged && arrow!.crit);
+  // ── The movement gate ────────────────────────────────────────────────────
+  // Standing still, and then four seconds of sprint-jumping whose touchdowns
+  // fall BETWEEN packets. Neither may ever produce a correction: a false
+  // correction here is the mid-air freeze this gate exists to avoid.
+  const rev = s.party.roundFor(1)!.revision;
+  Object.assign(a, spawn);
+  const xf = (x: number, y: number, z: number) =>
+    sends(1, { t: 'xform', x, y, z, yaw: 0, pitch: 0, arenaRevision: rev });
+  let corrections = 0;
+  for (let i = 0; i < 40; i++) {
+    s.tickWar(1 / 20);
+    if (xf(spawn.x, spawn.y, spawn.z).some(o => o.msg.t === 'teleport')) corrections++;
+  }
+  check('standing still is never corrected', corrections === 0);
+  for (let i = 0, t = 0; i < 80; i++) {
+    s.tickWar(1 / 20);
+    t += 1 / 20;
+    const y = spawn.y + Math.sin(((t % .6) / .6) * Math.PI) * 1.2;
+    if (xf(spawn.x, y, spawn.z).some(o => o.msg.t === 'teleport')) corrections++;
+  }
+  check('a long string of sprint-jumps is never corrected', corrections === 0);
+  // A real hover IS refused — and the refusal resolves onto solid ground
+  // instead of arguing with the client forever.
+  for (let i = 0; i < 30; i++) {
+    s.tickWar(1 / 20);
+    xf(spawn.x, spawn.y + 4, spawn.z);
+  }
+  check('hovering is refused', a.y < spawn.y + 3);
+  check('a refused player is settled onto solid ground, never frozen in the air',
+    !!BLOCKS[partyArenaBlockAt(a.x, a.y - .5, a.z) ?? Block.Air]?.solid);
+  s.tickWar(1 / 20);
+  check('and can move again the moment they are settled',
+    !xf(a.x + .3, a.y, a.z).some(o => o.msg.t === 'teleport') && a.x !== spawn.x);
 }
-
-console.log(`Party Games smoke: ${passed} checks passed`);
+{
+  const s = new GameServer(123);
+  for (let id = 1; id <= 4; id++)
+    s.addPlayer(id, { username: `Mixed${id}`, faction: 0 });
+  s.handle(1, { t: 'partyQueue', join: true, mode: 'parkour' });
+  s.handle(2, { t: 'partyQueue', join: true, mode: 'bridge' });
+  check('parkour and Bridge queues never match each other', s.party.phaseFor(1) === null && s.party.phaseFor(2) === null);
+  s.removePlayer(1);
+  s.handle(3, { t: 'partyQueue', join: true, mode: 'parkour' });
+  check('stale queued disconnect does not swallow next player', s.party.phaseFor(3) === null);
+  s.handle(4, { t: 'partyQueue', join: true, mode: 'parkour' });
+  check('replacement opponent matches', s.party.phaseFor(3) === 'countdown');
+  check('retired Bedwars cannot launch', s.handle(2, { t: 'bwCreate' }).every(o => o.msg.t !== 'bwLobby'));
+}
+// Duels regression: a forfeit result must never reattach the departed socket.
+{
+  const s = new GameServer(99);
+  for (let id = 1; id <= 3; id++)
+    s.addPlayer(id, { username: `Duel${id}`, faction: 0 });
+  s.handle(1, { t: 'duelQueue', join: true });
+  s.handle(2, { t: 'duelQueue', join: true });
+  s.handle(1, { t: 'duelArenaReady' });
+  s.handle(2, { t: 'duelArenaReady' });
+  s.tickWar(3);
+  s.tickDuels();
+  const left = s.handle(1, { t: 'duelLeave' });
+  check('duels exit does not receive stale lobby/results', !left.some(o => o.to === 1 && (o.msg.t === 'duelLobby' || o.msg.t === 'duelResult')));
+  check('duels Play queues again', s.handle(1, { t: 'duelQueue', join: true }).some(o => o.msg.t === 'duelQueue' && o.msg.queued));
+  check('duels replay finds a new opponent', s.handle(3, { t: 'duelQueue', join: true }).some(o => o.to === 1 && o.msg.t === 'duelArena'));
+}
+console.log(`Bridge / Parkour / replay smoke: ${passed} checks passed`);

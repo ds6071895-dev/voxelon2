@@ -198,6 +198,19 @@ export class Sky {
   readonly skyColor = new THREE.Color();
   /** Night-only aurora strength. Also drives its subtle light on terrain. */
   auroraIntensity = 0;
+  /** How night it is, 0..1 — 0 in daylight, 1 once the sky has gone properly
+   *  dark. The shader preset grades the world and the frame off this. */
+  nightAmount = 0;
+  /** Unit vector toward the body that is actually lighting the ground: the sun
+   *  while it is up, the MOON once it is not. The two are opposite ends of the
+   *  same arc, so this is `sunDir` with the sign of the half-cycle folded in.
+   *  The shadow pass casts down it, and the water puts its glitter on it. */
+  readonly lightDir = new THREE.Vector3(0, 1, 0);
+  /** Height of whichever body `lightDir` points at, 0..1. Shadows fade out as
+   *  it touches the horizon, so dusk hands over to dawn without a pop. */
+  lightHeight = 1;
+  /** True while `lightDir` is the moon rather than the sun. */
+  moonlit = false;
   /** Colour of direct sunlight right now — white at noon, deep gold at the
    *  horizon crossings, moon-blue at night. The terrain shader multiplies its
    *  sunlit pixels by this. */
@@ -553,6 +566,7 @@ export class Sky {
     const activity = 0.78 + 0.22 *
       Math.sin(this.auroraTime * 0.075 + this.auroraPhase);
     this.auroraIntensity = night * activity;
+    this.nightAmount = night;
     const horizon = NIGHT_HORIZON.clone().lerp(DAY_HORIZON, s);
     const zenith = NIGHT_ZENITH.clone().lerp(DAY_ZENITH, s);
     const haze = NIGHT_HAZE.clone().lerp(DAY_HAZE, s);
@@ -579,6 +593,16 @@ export class Sky {
     this.sun.lookAt(camera.position);
     this.moon.position.copy(camera.position).addScaledVector(sunDir, -700);
     this.moon.lookAt(camera.position);
+
+    // Which body is casting. The handover happens exactly at the horizon, where
+    // BOTH are at height 0 and every consumer of `lightHeight` has already
+    // faded itself out — so the vector flipping end for end at that instant is
+    // invisible rather than a pop, and the world gets a directional moon
+    // instead of the flat, sourceless night it had before.
+    this.moonlit = sunHeight < 0;
+    this.lightDir.copy(sunDir);
+    if (this.moonlit) this.lightDir.negate();
+    this.lightHeight = Math.abs(sunHeight);
 
     // Scattering halo in the dome shader, aimed at whichever body is up.
     const above = Math.max(0, sunHeight);

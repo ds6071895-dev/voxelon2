@@ -334,24 +334,31 @@
       mask: radial-gradient(circle, transparent 62%, #000 64%); }
 
     .bw-shop { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
-      width: 340px; padding: 14px; border-radius: 12px; pointer-events: auto;
-      background: rgba(10,13,22,.94); border: 1px solid rgba(150,182,224,.22);
+      width: min(680px, calc(100vw - 32px)); max-height: calc(100dvh - 48px); overflow-y: auto;
+      box-sizing: border-box; padding: 26px; border-radius: 18px; pointer-events: auto;
+      background: linear-gradient(145deg, #203248, #101824 65%); border: 1px solid rgba(150,182,224,.4);
       box-shadow: 0 24px 60px rgba(0,0,0,.6); }
-    .bw-shop-title { font: 900 13px/1 inherit; letter-spacing: 2.4px; color: var(--bw-team); }
-    .bw-shop-hint { margin: 6px 0 10px; font: 600 9px/1.4 inherit; color: #8398b2; }
-    .bw-shop-list { display: flex; flex-direction: column; gap: 4px; }
-    .bw-shop-row { display: flex; align-items: center; gap: 9px; width: 100%; padding: 7px 9px;
+    .bw-shop-title { font-size: 22px; font-weight: 900; letter-spacing: 2px; color: #fff; padding-right: 72px; }
+    .bw-shop-hint { margin: 10px 0 16px; font-size: 12px; line-height: 1.5; color: #aec1d8; }
+    .bw-shop-close { position: absolute; top: 20px; right: 20px; padding: 8px; border: 1px solid #637b96; border-radius: 8px; background: #203248; color: white; cursor: pointer; }
+    .bw-shop-wallet { padding: 12px; margin-bottom: 16px; border-radius: 8px; background: #0c141f; color: #ffe0a0; font-size: 12px; font-weight: 800; }
+    .bw-shop-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .bw-shop-row { display: grid; grid-template-columns: 48px minmax(0, 1fr); align-items: center; gap: 5px 12px; width: 100%; padding: 14px;
       border: 1px solid rgba(150,182,224,.14); border-radius: 7px; cursor: pointer;
       background: rgba(255,255,255,.03); color: #eaf1fa; font: inherit; text-align: left; }
     .bw-shop-row:hover { background: rgba(255,255,255,.08); }
     .bw-shop-key { width: 16px; height: 16px; display: grid; place-items: center; border-radius: 4px;
       background: rgba(255,255,255,.10); font: 800 9px/1 inherit; color: #aec1d8; }
-    .bw-shop-name { flex: 1; }
-    .bw-shop-cost { font: 700 9px/1 inherit; color: #8398b2; }
+    .bw-shop-icon { width: 48px; height: 48px; image-rendering: pixelated; grid-row: span 3; }
+    .bw-shop-name { font-size: 13px; font-weight: 800; }
+    .bw-shop-desc { font-size: 10px; color: #aec1d8; }
+    .bw-shop-cost { grid-column: 2; font-size: 11px; font-weight: 700; color: #aec1d8; }
+    .bw-shop-row:focus-visible, .bw-shop-close:focus-visible { outline: 2px solid #ffe0a0; outline-offset: 2px; }
+    @media (max-width: 540px) { .bw-shop-list { grid-template-columns: 1fr; } .bw-shop { padding: 18px; } }
     .bw-shop-row.afford .bw-shop-cost { color: #7fe0a0; }
     .bw-shop-row.locked { opacity: .45; cursor: not-allowed; }
 
-    /* ── Party Games HUD ─────────────────────────────────────────────────── */
+    /* ── The Bridge / Parkour HUD ───────────────────────────────────────── */
     .pg-hud { position: absolute; inset: 0; pointer-events: none; z-index: 42;
       font: 800 11px/1 'Segoe UI', system-ui, sans-serif; }
     .pg-hud[hidden] { display: none !important; }
@@ -386,6 +393,15 @@
       box-shadow: 0 0 34px color-mix(in srgb, var(--pg-call, #fff) 45%, transparent); }
     .pg-call-label { font: 800 9px/1 inherit; letter-spacing: 2.2px; color: #8398b2; }
     .pg-call-name { font: 900 28px/1 inherit; letter-spacing: 3px; color: var(--pg-call, #fff); }
+
+    /* Bow draw. Sits just under the crosshair, because that is where you are
+       looking while you decide whether to let go. */
+    .pg-draw { position: absolute; left: 50%; top: calc(50% + 26px); transform: translateX(-50%);
+      width: 104px; height: 5px; border-radius: 3px; background: rgba(8,10,18,.7);
+      border: 1px solid rgba(150,182,224,.22); overflow: hidden; }
+    .pg-draw[hidden] { display: none !important; }
+    .pg-draw > i { display: block; height: 100%; width: 0; background: #ffd25e; }
+    .pg-draw.full > i { background: #72ffcb; box-shadow: 0 0 12px rgba(114,255,203,.9); }
 
     .pg-card { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
       min-width: 260px; padding: 16px 18px; border-radius: 12px;
@@ -1672,35 +1688,45 @@
     }
     .minigame-card:hover, .minigame-card:focus-within { transform: translateY(-6px); }
     .minigame-card:hover::before, .minigame-card:focus-within::before { opacity: 1; }
-    .minigame-card[data-game="party"] { --card: #ff5ea8; }
+    .minigame-card[data-game="party"] { --card: #8a6bff; }
+    .minigame-card[data-game="parkour"] { --card: #4fd6a6; }
     .minigame-card[data-game="duels"] {
       --card: #f0a33a;
       background: linear-gradient(140deg, rgba(255,238,207,.96), rgba(255,255,255,.96) 58%);
       border-color: rgba(255,180,77,.34);
     }
-    .minigame-art { position: relative; aspect-ratio: 16/9; overflow: hidden; background: #dcecf2; }
+    /* Compact generated key art keeps the game browser vivid without letting
+       the artwork overpower the card copy and actions. */
+    .minigame-art {
+      position: relative; height: 112px; overflow: hidden; isolation: isolate;
+      background: #0c1524; box-shadow: inset 0 -1px 0 rgba(10,28,40,.16);
+    }
+    .minigame-art > svg { display: none; }
     .minigame-art img, .minigame-icon {
       width: 100%; height: 100%; display: block; object-fit: cover;
-      transform: translate(var(--px), var(--py)) scale(1.06);
-      transition: transform .3s cubic-bezier(.2,.9,.25,1); filter: saturate(1.05) contrast(1.05);
+      transform: translate(var(--px), var(--py)) scale(1.04);
+      transition: transform .45s cubic-bezier(.2,.9,.25,1); filter: saturate(1.04);
     }
-    .minigame-card:hover .minigame-icon, .minigame-card:focus-within .minigame-icon { transform: translate(var(--px), var(--py)) scale(1.12); }
-    .minigame-art::after {
-      content: ''; position: absolute; inset: 0; pointer-events: none;
+    .minigame-card:hover .minigame-icon, .minigame-card:focus-within .minigame-icon { transform: translate(var(--px), var(--py)) scale(1.11); }
+    /* Vignette + a breath of the card's own colour, so the scene sits in the
+       card instead of floating as a rectangle pasted on top of it. */
+    .minigame-art::before {
+      content: ''; position: absolute; inset: 0; z-index: 1; pointer-events: none;
       background:
-        linear-gradient(112deg, transparent 26%, rgba(255,255,255,.2) 45%, transparent 62%),
-        linear-gradient(0deg, rgba(22,51,66,.18), transparent 58%);
-      background-size: 260% 100%, 100% 100%;
-      background-position: -60% 0, 0 0; transition: background-position .75s ease;
+        radial-gradient(120% 96% at 50% 34%, transparent 48%, rgba(6,14,26,.42) 100%),
+        linear-gradient(0deg, rgba(6,14,26,.34), transparent 42%),
+        linear-gradient(180deg, rgba(6,14,26,.3), transparent 26%),
+        radial-gradient(90% 70% at 50% 100%, color-mix(in srgb, var(--card) 22%, transparent), transparent 70%);
+      opacity: .9; transition: opacity .3s ease;
     }
-    .minigame-card:hover .minigame-art::after, .minigame-card:focus-within .minigame-art::after { background-position: 160% 0, 0 0; }
-    .minigame-status {
-      position: absolute; top: 11px; left: 11px; z-index: 2; padding: 5px 9px; border-radius: 7px;
-      font: 900 8px/1 inherit; letter-spacing: 1.6px; text-transform: uppercase;
-      color: #04121a; background: var(--card); box-shadow: 0 5px 16px rgba(0,0,0,.45);
+    .minigame-card:hover .minigame-art::before, .minigame-card:focus-within .minigame-art::before { opacity: .68; }
+    .minigame-art::after {
+      content: ''; position: absolute; inset: 0; z-index: 1; pointer-events: none;
+      background: linear-gradient(112deg, transparent 26%, rgba(255,255,255,.22) 45%, transparent 62%);
+      background-size: 260% 100%; background-position: -60% 0; transition: background-position .75s ease;
     }
-    .minigame-status.soon { color: #526a79; background: rgba(255,255,255,.88); box-shadow: 0 4px 14px rgba(33,79,98,.12); }
-    .minigame-particles { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+    .minigame-card:hover .minigame-art::after, .minigame-card:focus-within .minigame-art::after { background-position: 160% 0; }
+    .minigame-particles { position: absolute; inset: 0; z-index: 1; pointer-events: none; overflow: hidden; }
     .minigame-particles i {
       position: absolute; width: 4px; height: 4px; border-radius: 1px;
       background: var(--card); opacity: .5; animation: ar-ember 5.4s linear infinite;
@@ -1709,10 +1735,10 @@
     .minigame-particles i:nth-child(2) { left: 48%; top: 84%; animation-delay: -2.6s; }
     .minigame-particles i:nth-child(3) { left: 74%; top: 94%; animation-delay: -4.1s; }
     @keyframes ar-ember { to { transform: translateY(-120px) rotate(220deg); opacity: 0; } }
-    .minigame-copy { position: relative; z-index: 2; display: grid; flex: 1; gap: 9px; padding: 16px 17px 17px; }
-    .minigame-title-row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+    .minigame-copy { position: relative; z-index: 2; display: flex; flex-direction: column; min-width: 0; flex: 1; gap: 9px; padding: 16px 17px 17px; }
+    .minigame-title-row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 10px; }
     .minigame-title-row h3 { font-size: 19px; font-weight: 900; letter-spacing: -.3px; }
-    .minigame-count { color: var(--card); font: 800 9px/1 inherit; letter-spacing: 1.3px; text-transform: uppercase; white-space: nowrap; }
+    .minigame-count { color: var(--card); font-size: 9px; font-weight: 800; line-height: 1.4; letter-spacing: .8px; text-transform: uppercase; white-space: normal; }
     .minigame-copy p { color: var(--ar-dim); font-size: 11.5px; line-height: 1.5; }
     .minigame-action {
       width: 100%; min-height: 44px; margin-top: auto; cursor: pointer; border-radius: 11px;
@@ -2817,6 +2843,32 @@
       --wf-slate-soft: #1c2331;
     }
 
+
+    .pg-hud[hidden], .pg-card[hidden], .pg-banner[hidden], .pg-call[hidden], .pg-lobby[hidden] { display:none !important; }
+    .pg-result-actions { display:flex; gap:12px; justify-content:center; pointer-events:auto; margin-top:20px; }
+    .pg-result-note { color:#aec1d8; line-height:1.6; }
+    .pg-lobby { padding:24px; margin:0 0 20px; border:1px solid #61dbb855; border-radius:16px; background:#102331; color:#eaf1fa; }
+    .pg-lobby p { color:#aec1d8; }
+    .pg-lobby-roster { display:grid; gap:10px; margin:18px 0; }
+    .pg-invite-link { width:100%; box-sizing:border-box; margin-top:16px; padding:12px; color:#b6fce4; background:#091923; border:1px solid #61dbb855; border-radius:8px; }
+    .pg-call { top:auto; bottom:100px; max-width:min(90vw,800px); font-size:12px; line-height:1.5; text-align:center; }
+    .pg-progress { color:#b6fce4; max-width:65vw; line-height:1.4; text-align:center; }
+    @media(max-width:650px) { .pg-standings { top:55px; } .pg-banner { width:90vw; } .pg-banner-title { font-size:24px; } .pg-card { width:80vw; min-width:0; } .pg-call { bottom:140px; } }
+    .pg-banner-rule { max-width:650px; line-height:1.6; }
+    .pg-banner-title { font-size:clamp(22px,3vw,38px); font-weight:900; line-height:1.1; }
+    .pg-score { position:absolute; top:44px; left:50%; transform:translateX(-50%);
+      display:flex; align-items:center; gap:10px; padding:7px 12px; border-radius:10px;
+      background:rgba(6,12,22,.62); border:1px solid rgba(255,255,255,.1); backdrop-filter:blur(5px); }
+    .pg-score[hidden] { display:none !important; }
+    .pg-team { display:flex; align-items:center; gap:9px; padding:3px 10px; border-radius:7px;
+      background:color-mix(in srgb, var(--team) 18%, transparent);
+      box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--team) 55%, transparent); }
+    .pg-team.me { box-shadow:inset 0 0 0 2px var(--team); }
+    .pg-team-name { font:800 9px/1 inherit; letter-spacing:1.8px; color:var(--team); }
+    .pg-team-goals { font:900 19px/1 inherit; color:#fff; }
+    .pg-team-split { font:800 8px/1 inherit; letter-spacing:1.6px; color:#8398b2; }
+    @media(max-width:650px) { .pg-score { top:38px; padding:5px 9px; } .pg-team-goals { font-size:16px; } }
+    .pg-call { color:#eaf1fa; }
   </style>
 </head>
 <body>
@@ -2952,7 +3004,7 @@
             <div>
               <div class="minigames-kicker">Competitive · matchmaking & private parties</div>
               <h2 id="minigames-heading">The Arena</h2>
-              <p id="minigames-description">Ranked, server-authoritative fights. Everyone drops with the same kit — the only edge is you.</p>
+              <p id="minigames-description">Ranked Duels, fresh Parkour races and The Bridge. Find a rival or bring your friends.</p>
             </div>
             <div class="minigames-head-actions">
               <aside id="duel-profile-card" class="duel-profile-card" aria-label="Your Duels rank">
@@ -2977,68 +3029,53 @@
               <div class="minigames-grid">
                 <article class="minigame-card" data-game="duels">
                   <div class="minigame-art">
-                    <svg class="minigame-icon" viewBox="0 0 320 180" role="img" aria-label="Two voxel duellists clashing swords above the arena altar at sunset">
+                    <img class="minigame-icon" src="/minigames/duels.webp" alt="Two voxel fighters clashing swords in a sunset colosseum" width="640" height="360" loading="lazy" decoding="async" />
+                    <svg class="minigame-icon" viewBox="0 0 320 180" preserveAspectRatio="xMidYMid slice" role="img" aria-label="Two voxel duellists clashing swords over the glowing altar of a sunset colosseum">
                       <defs>
-                        <linearGradient id="mg-duel-sky" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="0" stop-color="#3c1c6d" /><stop offset=".5" stop-color="#ff6f43" /><stop offset="1" stop-color="#ffd472" />
-                        </linearGradient>
-                        <linearGradient id="mg-duel-floor" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="0" stop-color="#ffca77" /><stop offset="1" stop-color="#c4681a" />
-                        </linearGradient>
-                        <linearGradient id="mg-duel-blade" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="0" stop-color="#ffffff" /><stop offset="1" stop-color="#9fc4d8" />
-                        </linearGradient>
+                      <linearGradient id="dl-sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#241046"/><stop offset=".34" stop-color="#6d2a63"/><stop offset=".66" stop-color="#e9613f"/><stop offset="1" stop-color="#ffc879"/></linearGradient>
+                      <radialGradient id="dl-sun" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#fff3c4" stop-opacity=".95"/><stop offset=".45" stop-color="#ffb765" stop-opacity=".45"/><stop offset="1" stop-color="#ff8a4a" stop-opacity="0"/></radialGradient>
+                      <linearGradient id="dl-arch" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffb066"/><stop offset="1" stop-color="#6b2f66"/></linearGradient>
+                      <linearGradient id="dl-sand" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffd894"/><stop offset=".55" stop-color="#e0994a"/><stop offset="1" stop-color="#9c4f1d"/></linearGradient>
+                      <linearGradient id="dl-blade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset=".5" stop-color="#dff1ff"/><stop offset="1" stop-color="#7fa6bd"/></linearGradient>
+                      <radialGradient id="dl-spark" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#ffffff" stop-opacity=".95"/><stop offset=".4" stop-color="#ffe9a8" stop-opacity=".6"/><stop offset="1" stop-color="#ffb24a" stop-opacity="0"/></radialGradient>
+                      <linearGradient id="dl-haze" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff9a52" stop-opacity="0"/><stop offset="1" stop-color="#ffbb6e" stop-opacity=".5"/></linearGradient>
                       </defs>
-                      <rect width="320" height="180" fill="url(#mg-duel-sky)" />
-                      <circle cx="160" cy="116" r="48" fill="#ffe9ad" opacity=".5" />
-                      <g fill="#38195c" opacity=".42">
-                        <rect x="4" y="66" width="26" height="56" rx="13" /><rect x="40" y="66" width="26" height="56" rx="13" />
-                        <rect x="76" y="66" width="26" height="56" rx="13" /><rect x="112" y="66" width="26" height="56" rx="13" />
-                        <rect x="182" y="66" width="26" height="56" rx="13" /><rect x="218" y="66" width="26" height="56" rx="13" />
-                        <rect x="254" y="66" width="26" height="56" rx="13" /><rect x="290" y="66" width="26" height="56" rx="13" />
-                      </g>
-                      <rect x="0" y="112" width="320" height="10" fill="#4a2170" opacity=".5" />
-                      <polygon points="0,180 320,180 288,118 32,118" fill="url(#mg-duel-floor)" />
-                      <g stroke="#a8551a" stroke-width="2" opacity=".35">
-                        <path d="M46 134H274M34 156H286" /><path d="M96 118 78 180M224 118 242 180M160 118V180" />
-                      </g>
-                      <polygon points="160,102 190,113 160,124 130,113" fill="#ffeec2" />
-                      <polygon points="130,113 160,124 160,142 130,131" fill="#e0a44a" />
-                      <polygon points="190,113 160,124 160,142 190,131" fill="#b9761f" />
-                      <g>
-                        <rect x="76" y="92" width="22" height="15" rx="3" fill="#ff5470" />
-                        <rect x="80" y="102" width="14" height="8" fill="#2b1533" />
-                        <rect x="76" y="110" width="22" height="25" rx="3" fill="#ff7d90" />
-                        <rect x="80" y="116" width="14" height="8" rx="2" fill="#ffd9df" />
-                        <rect x="78" y="135" width="8" height="17" rx="2" fill="#c9304c" />
-                        <rect x="89" y="135" width="8" height="17" rx="2" fill="#e8455f" />
-                        <g transform="rotate(-40 100 116)">
-                          <rect x="94" y="112" width="16" height="9" rx="2" fill="#8a5a2b" />
-                          <rect x="110" y="110" width="7" height="13" rx="2" fill="#ffd166" />
-                          <rect x="117" y="113" width="54" height="7" rx="3" fill="url(#mg-duel-blade)" />
-                        </g>
-                      </g>
-                      <g>
-                        <rect x="222" y="92" width="22" height="15" rx="3" fill="#2fbcf0" />
-                        <rect x="226" y="102" width="14" height="8" fill="#0d2a3a" />
-                        <rect x="222" y="110" width="22" height="25" rx="3" fill="#5ad0ff" />
-                        <rect x="226" y="116" width="14" height="8" rx="2" fill="#d6f4ff" />
-                        <rect x="224" y="135" width="8" height="17" rx="2" fill="#1a86b8" />
-                        <rect x="235" y="135" width="8" height="17" rx="2" fill="#23a3d8" />
-                        <g transform="rotate(40 220 116)">
-                          <rect x="210" y="112" width="16" height="9" rx="2" fill="#8a5a2b" />
-                          <rect x="203" y="110" width="7" height="13" rx="2" fill="#ffd166" />
-                          <rect x="149" y="113" width="54" height="7" rx="3" fill="url(#mg-duel-blade)" />
-                        </g>
-                      </g>
-                      <g fill="#fff8dc">
-                        <polygon points="160,54 166,72 184,78 166,84 160,102 154,84 136,78 154,72" opacity=".92" />
-                        <rect x="126" y="60" width="7" height="7" rx="2" opacity=".8" />
-                        <rect x="190" y="66" width="6" height="6" rx="2" opacity=".7" />
-                        <rect x="176" y="44" width="5" height="5" rx="2" opacity=".6" />
-                      </g>
+                      <rect width="320" height="180" fill="url(#dl-sky)"/>
+                      <circle cx="160" cy="96" r="96" fill="url(#dl-sun)"/>
+                      <circle cx="160" cy="92" r="34" fill="#ffe6ab" opacity=".85"/>
+                      <g fill="#ffd79a" opacity=".35"><rect x="96" y="70" width="128" height="3" rx="1.5"/><rect x="112" y="80" width="96" height="2.5" rx="1.2"/><rect x="88" y="60" width="70" height="2" rx="1"/></g>
+                      <g fill="#ffeccb"><circle cx="191" cy="17" r="1.1" opacity="0.72"/><circle cx="318" cy="6" r="2.1" opacity="0.88"/><circle cx="78" cy="19" r="1.1" opacity="0.76"/><circle cx="289" cy="44" r="0.6" opacity="0.31"/><circle cx="139" cy="40" r="1.5" opacity="0.44"/><circle cx="2" cy="32" r="0.8" opacity="0.84"/><circle cx="176" cy="25" r="2.0" opacity="0.63"/><circle cx="259" cy="26" r="1.2" opacity="0.54"/><circle cx="262" cy="8" r="1.9" opacity="0.74"/><circle cx="203" cy="6" r="1.1" opacity="0.85"/><circle cx="196" cy="23" r="0.6" opacity="0.83"/><circle cx="47" cy="27" r="1.2" opacity="0.43"/><circle cx="53" cy="6" r="1.0" opacity="0.79"/><circle cx="76" cy="33" r="1.5" opacity="0.83"/><circle cx="207" cy="19" r="0.6" opacity="0.61"/><circle cx="87" cy="54" r="1.3" opacity="0.69"/><circle cx="191" cy="26" r="1.4" opacity="0.54"/><circle cx="237" cy="7" r="1.0" opacity="0.74"/><circle cx="247" cy="0" r="1.4" opacity="0.61"/><circle cx="84" cy="42" r="2.0" opacity="0.81"/><circle cx="102" cy="12" r="0.7" opacity="0.67"/><circle cx="316" cy="53" r="1.9" opacity="0.49"/><circle cx="120" cy="46" r="1.8" opacity="0.34"/><circle cx="105" cy="10" r="0.7" opacity="0.79"/><circle cx="319" cy="22" r="1.4" opacity="0.71"/><circle cx="42" cy="15" r="2.0" opacity="0.46"/></g>
+                      <path d="M0 48h320v18H0z" fill="#2a1145" opacity=".92"/>
+                      <g><rect x="3" y="58" width="3" height="3" rx="1" fill="#ff7a8f" opacity=".55"/><rect x="8" y="57" width="3" height="3" rx="1" fill="#7fd6ff" opacity=".55"/><rect x="13" y="54" width="3" height="3" rx="1" fill="#ffd166" opacity=".55"/><rect x="18" y="54" width="3" height="3" rx="1" fill="#c39bff" opacity=".55"/><rect x="23" y="52" width="3" height="3" rx="1" fill="#ff7a8f" opacity=".55"/><rect x="28" y="58" width="3" height="3" rx="1" fill="#7fd6ff" opacity=".55"/><rect x="33" y="52" width="3" height="3" rx="1" fill="#ffd166" opacity=".55"/><rect x="38" y="59" width="3" height="3" rx="1" fill="#c39bff" opacity=".55"/><rect x="43" y="53" width="3" height="3" rx="1" fill="#ff7a8f" opacity=".55"/><rect x="48" y="52" width="3" height="3" rx="1" fill="#7fd6ff" opacity=".55"/><rect x="52" y="54" width="3" height="3" rx="1" fill="#ffd166" opacity=".55"/><rect x="57" y="53" width="3" height="3" rx="1" fill="#c39bff" opacity=".55"/><rect x="62" y="54" width="3" height="3" rx="1" fill="#ff7a8f" opacity=".55"/><rect x="67" y="55" width="3" height="3" rx="1" fill="#7fd6ff" opacity=".55"/><rect x="72" y="52" width="3" height="3" rx="1" fill="#ffd166" opacity=".55"/><rect x="77" y="58" width="3" height="3" rx="1" fill="#c39bff" opacity=".55"/><rect x="82" y="52" width="3" height="3" rx="1" fill="#ff7a8f" opacity=".55"/><rect x="87" y="51" width="3" height="3" rx="1" fill="#7fd6ff" opacity=".55"/><rect x="92" y="58" width="3" height="3" rx="1" fill="#ffd166" opacity=".55"/><rect x="97" y="51" width="3" height="3" rx="1" fill="#c39bff" opacity=".55"/><rect x="102" y="57" width="3" height="3" rx="1" fill="#ff7a8f" opacity=".55"/><rect x="107" y="53" width="3" height="3" rx="1" fill="#7fd6ff" opacity=".55"/><rect x="112" y="53" width="3" height="3" rx="1" fill="#ffd166" opacity=".55"/><rect x="117" y="53" width="3" height="3" rx="1" fill="#c39bff" opacity=".55"/><rect x="122" y="54" width="3" height="3" rx="1" fill="#ff7a8f" opacity=".55"/><rect x="127" y="56" width="3" height="3" rx="1" fill="#7fd6ff" opacity=".55"/><rect x="132" y="57" width="3" height="3" rx="1" fill="#ffd166" opacity=".55"/><rect x="137" y="52" width="3" height="3" rx="1" fill="#c39bff" opacity=".55"/><rect x="142" y="56" width="3" height="3" rx="1" fill="#ff7a8f" opacity=".55"/><rect x="147" y="52" width="3" height="3" rx="1" fill="#7fd6ff" opacity=".55"/><rect x="152" y="54" width="3" height="3" rx="1" fill="#ffd166" opacity=".55"/><rect x="156" y="55" width="3" height="3" rx="1" fill="#c39bff" opacity=".55"/><rect x="161" y="56" width="3" height="3" rx="1" fill="#ff7a8f" opacity=".55"/><rect x="166" y="59" width="3" height="3" rx="1" fill="#7fd6ff" opacity=".55"/><rect x="171" y="52" width="3" height="3" rx="1" fill="#ffd166" opacity=".55"/><rect x="176" y="54" width="3" height="3" rx="1" fill="#c39bff" opacity=".55"/><rect x="181" y="56" width="3" height="3" rx="1" fill="#ff7a8f" opacity=".55"/><rect x="186" y="52" width="3" height="3" rx="1" fill="#7fd6ff" opacity=".55"/><rect x="191" y="57" width="3" height="3" rx="1" fill="#ffd166" opacity=".55"/><rect x="196" y="53" width="3" height="3" rx="1" fill="#c39bff" opacity=".55"/><rect x="201" y="54" width="3" height="3" rx="1" fill="#ff7a8f" opacity=".55"/><rect x="206" y="53" width="3" height="3" rx="1" fill="#7fd6ff" opacity=".55"/><rect x="211" y="53" width="3" height="3" rx="1" fill="#ffd166" opacity=".55"/><rect x="216" y="58" width="3" height="3" rx="1" fill="#c39bff" opacity=".55"/><rect x="221" y="58" width="3" height="3" rx="1" fill="#ff7a8f" opacity=".55"/><rect x="226" y="56" width="3" height="3" rx="1" fill="#7fd6ff" opacity=".55"/><rect x="231" y="52" width="3" height="3" rx="1" fill="#ffd166" opacity=".55"/><rect x="236" y="55" width="3" height="3" rx="1" fill="#c39bff" opacity=".55"/><rect x="241" y="57" width="3" height="3" rx="1" fill="#ff7a8f" opacity=".55"/><rect x="246" y="55" width="3" height="3" rx="1" fill="#7fd6ff" opacity=".55"/><rect x="250" y="55" width="3" height="3" rx="1" fill="#ffd166" opacity=".55"/><rect x="255" y="59" width="3" height="3" rx="1" fill="#c39bff" opacity=".55"/><rect x="260" y="58" width="3" height="3" rx="1" fill="#ff7a8f" opacity=".55"/><rect x="265" y="58" width="3" height="3" rx="1" fill="#7fd6ff" opacity=".55"/><rect x="270" y="51" width="3" height="3" rx="1" fill="#ffd166" opacity=".55"/><rect x="275" y="51" width="3" height="3" rx="1" fill="#c39bff" opacity=".55"/><rect x="280" y="51" width="3" height="3" rx="1" fill="#ff7a8f" opacity=".55"/><rect x="285" y="58" width="3" height="3" rx="1" fill="#7fd6ff" opacity=".55"/><rect x="290" y="57" width="3" height="3" rx="1" fill="#ffd166" opacity=".55"/><rect x="295" y="54" width="3" height="3" rx="1" fill="#c39bff" opacity=".55"/><rect x="300" y="56" width="3" height="3" rx="1" fill="#ff7a8f" opacity=".55"/><rect x="305" y="53" width="3" height="3" rx="1" fill="#7fd6ff" opacity=".55"/><rect x="310" y="52" width="3" height="3" rx="1" fill="#ffd166" opacity=".55"/><rect x="315" y="57" width="3" height="3" rx="1" fill="#c39bff" opacity=".55"/></g>
+                      <path d="M0 64h320v5H0z" fill="#43205f"/>
+                      <path d="M0 69h320v33H0z" fill="#331653"/>
+                      <g><path d="M6 100V80a11 11 0 0 1 22 0v20z" fill="url(#dl-arch)" opacity=".9"/><path d="M41 100V80a11 11 0 0 1 22 0v20z" fill="url(#dl-arch)" opacity=".9"/><path d="M76 100V80a11 11 0 0 1 22 0v20z" fill="url(#dl-arch)" opacity=".9"/><path d="M111 100V80a11 11 0 0 1 22 0v20z" fill="url(#dl-arch)" opacity=".9"/><path d="M146 100V80a11 11 0 0 1 22 0v20z" fill="url(#dl-arch)" opacity=".9"/><path d="M181 100V80a11 11 0 0 1 22 0v20z" fill="url(#dl-arch)" opacity=".9"/><path d="M216 100V80a11 11 0 0 1 22 0v20z" fill="url(#dl-arch)" opacity=".9"/><path d="M251 100V80a11 11 0 0 1 22 0v20z" fill="url(#dl-arch)" opacity=".9"/><path d="M286 100V80a11 11 0 0 1 22 0v20z" fill="url(#dl-arch)" opacity=".9"/></g>
+                      <g fill="#4d2470"><rect x="28" y="69" width="13" height="33"/><rect x="63" y="69" width="13" height="33"/><rect x="98" y="69" width="13" height="33"/><rect x="133" y="69" width="13" height="33"/><rect x="168" y="69" width="13" height="33"/><rect x="203" y="69" width="13" height="33"/><rect x="238" y="69" width="13" height="33"/><rect x="273" y="69" width="13" height="33"/></g>
+                      <g><path d="M30 70h9v18l-4.5-5-4.5 5z" fill="#ff5470" opacity=".9"/><path d="M65 70h9v18l-4.5-5-4.5 5z" fill="#3fb8ef" opacity=".9"/><path d="M100 70h9v18l-4.5-5-4.5 5z" fill="#ff5470" opacity=".9"/><path d="M135 70h9v18l-4.5-5-4.5 5z" fill="#3fb8ef" opacity=".9"/><path d="M170 70h9v18l-4.5-5-4.5 5z" fill="#ff5470" opacity=".9"/><path d="M205 70h9v18l-4.5-5-4.5 5z" fill="#3fb8ef" opacity=".9"/><path d="M240 70h9v18l-4.5-5-4.5 5z" fill="#ff5470" opacity=".9"/><path d="M275 70h9v18l-4.5-5-4.5 5z" fill="#3fb8ef" opacity=".9"/></g>
+                      <path d="M0 100h320v6H0z" fill="#5a2c78"/><path d="M0 100h320v2H0z" fill="#ffc98a" opacity=".5"/>
+                      <path d="M0 180V106h320v74z" fill="url(#dl-sand)"/>
+                      <ellipse cx="160" cy="168" rx="188" ry="62" fill="#ffe0a4" opacity=".22"/>
+                      <g fill="none" stroke="#8f4a19" opacity=".28" stroke-width="2"><ellipse cx="160" cy="166" rx="150" ry="46"/><ellipse cx="160" cy="160" rx="96" ry="30"/></g>
+                      <g stroke="#8f4a19" opacity=".16" stroke-width="2"><path d="M160 122v58M74 116 40 180M246 116l34 64M14 132h292"/></g>
+                      <ellipse cx="160" cy="140" rx="34" ry="11" fill="#7a3a12" opacity=".35"/>
+                      <g><polygon points="134,128 160,139 160,149 134,138" fill="#948672"/><polygon points="186,128 160,139 160,149 186,138" fill="#5d554c"/><polygon points="134,128 160,117 186,128 160,139" fill="#f3e1c1"/></g>
+                      <g><polygon points="145,120 160,126 160,133 145,127" fill="#9d9382"/><polygon points="175,120 160,126 160,133 175,127" fill="#625c56"/><polygon points="145,120 160,114 175,120 160,126" fill="#fff2d6"/></g>
+                      <rect x="156" y="104" width="8" height="14" rx="2" fill="#ffd166"/>
+                      <circle cx="160" cy="102" r="16" fill="url(#dl-spark)"/>
+                      <ellipse cx="88" cy="155" rx="20" ry="6" fill="#7a3a12" opacity=".4"/><rect x="78" y="132" width="9" height="21" rx="2" fill="#b63e54"/><rect x="89" y="132" width="9" height="21" rx="2" fill="#d84861"/><path d="M76 106h24l-4 30-16 4z" fill="#c2263f" opacity=".85"/><rect x="76" y="106" width="24" height="27" rx="4" fill="#ff5470"/><rect x="76" y="106" width="7" height="27" rx="3" fill="#ff8498" opacity=".8"/><rect x="81" y="114" width="14" height="9" rx="2" fill="#ffb2bf"/><rect x="76" y="130" width="24" height="4" fill="#a93a50"/><rect x="78" y="88" width="20" height="18" rx="4" fill="#ff6981"/><rect x="78" y="94" width="20" height="7" fill="#1b0f26"/><rect x="86" y="95" width="6" height="4" rx="1" fill="#ffccd4"/><rect x="77" y="85" width="22" height="4" rx="2" fill="#ffd166"/>
+                      <ellipse cx="232" cy="155" rx="20" ry="6" fill="#7a3a12" opacity=".4"/><rect x="222" y="132" width="9" height="21" rx="2" fill="#2f84ad"/><rect x="233" y="132" width="9" height="21" rx="2" fill="#379ccc"/><path d="M244 106h-24l4 30--16 4z" fill="#1b6fa8" opacity=".85"/><rect x="220" y="106" width="24" height="27" rx="4" fill="#3fb8ef"/><rect x="220" y="106" width="7" height="27" rx="3" fill="#75ccf3" opacity=".8"/><rect x="225" y="114" width="14" height="9" rx="2" fill="#a9dff8"/><rect x="220" y="130" width="24" height="4" fill="#2c7ba2"/><rect x="222" y="88" width="20" height="18" rx="4" fill="#56c1f1"/><rect x="222" y="94" width="20" height="7" fill="#1b0f26"/><rect x="224" y="95" width="6" height="4" rx="1" fill="#c5eafa"/><rect x="221" y="85" width="22" height="4" rx="2" fill="#bff0ff"/>
+                      <rect x="70" y="112" width="10" height="19" rx="5" fill="#e03a58"/>
+                      <rect x="240" y="112" width="10" height="19" rx="5" fill="#2b93c6"/>
+                      <g transform="rotate(26 100 112)"><rect x="96" y="107" width="20" height="10" rx="5" fill="#ff7188"/></g>
+                      <g transform="rotate(-26 220 112)"><rect x="204" y="107" width="20" height="10" rx="5" fill="#63cbf6"/></g>
+                      <g transform="rotate(-38 104 118)"><rect x="98" y="113" width="18" height="10" rx="3" fill="#6f4522"/><rect x="116" y="110" width="8" height="16" rx="2" fill="#ffd166"/><path d="M124 114h48l10 4-10 4h-48z" fill="url(#dl-blade)"/></g>
+                      <g transform="rotate(38 216 118)"><rect x="204" y="113" width="18" height="10" rx="3" fill="#6f4522"/><rect x="196" y="110" width="8" height="16" rx="2" fill="#ffd166"/><path d="M196 114h-48l-10 4 10 4h48z" fill="url(#dl-blade)"/></g>
+                      <circle cx="160" cy="96" r="26" fill="url(#dl-spark)"/>
+                      <g fill="#fff8dc"><polygon points="160,74 165,90 181,96 165,102 160,118 155,102 139,96 155,90"/></g>
+                      <g fill="#ffe9a8"><rect x="189" y="102" width="2" height="2" rx="1" opacity="0.90"/><rect x="179" y="84" width="3" height="3" rx="1" opacity="0.83"/><rect x="132" y="107" width="2" height="2" rx="1" opacity="0.76"/><rect x="142" y="85" width="3" height="3" rx="1" opacity="0.69"/><rect x="168" y="110" width="2" height="2" rx="1" opacity="0.62"/><rect x="156" y="72" width="3" height="3" rx="1" opacity="0.55"/><rect x="139" y="91" width="2" height="2" rx="1" opacity="0.48"/><rect x="197" y="90" width="3" height="3" rx="1" opacity="0.41"/></g>
+                      <g fill="#ffe6b8" opacity=".5"><rect x="42" y="150" width="3" height="3" rx="1"/><rect x="278" y="140" width="3" height="3" rx="1"/><rect x="196" y="164" width="2" height="2"/><rect x="118" y="158" width="2" height="2"/></g>
+                      <rect y="118" width="320" height="62" fill="url(#dl-haze)" opacity=".35"/>
                     </svg>
-                    <span class="minigame-status">Playable</span>
                     <span class="minigame-particles" aria-hidden="true"><i></i><i></i><i></i></span>
                   </div>
                   <div class="minigame-copy">
@@ -3051,131 +3088,106 @@
                     </div>
                   </div>
                 </article>
-                <article class="minigame-card" data-game="bedwars">
+                <article class="minigame-card" data-game="parkour">
                   <div class="minigame-art">
-                    <svg class="minigame-icon" viewBox="0 0 320 180" role="img" aria-label="Red and blue beds on floating voxel sky islands joined by a bridge">
+                    <img class="minigame-icon" src="/minigames/parkour.webp" alt="A voxel runner leaping across floating islands toward a golden gate" width="640" height="360" loading="lazy" decoding="async" />
+                    <svg class="minigame-icon" viewBox="0 0 320 180" preserveAspectRatio="xMidYMid slice" role="img" aria-label="A rising line of glowing voxel platforms with a runner leaping between them toward a finish gate">
                       <defs>
-                        <linearGradient id="mg-bed-sky" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="0" stop-color="#3aa9f5" /><stop offset=".62" stop-color="#8fdcff" /><stop offset="1" stop-color="#dff6ff" />
-                        </linearGradient>
-                        <linearGradient id="mg-bed-dirt" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="0" stop-color="#a9754a" /><stop offset="1" stop-color="#6c4526" />
-                        </linearGradient>
+                      <linearGradient id="pk-sky" x1="0" y1="0" x2=".3" y2="1"><stop offset="0" stop-color="#0d1638"/><stop offset=".45" stop-color="#3a2a6b"/><stop offset=".78" stop-color="#8a4a86"/><stop offset="1" stop-color="#e0857f"/></linearGradient>
+                      <radialGradient id="pk-moon" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#fff4d2" stop-opacity=".7"/><stop offset="1" stop-color="#fff4d2" stop-opacity="0"/></radialGradient>
+                      <linearGradient id="pk-fade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0d1638" stop-opacity="0"/><stop offset="1" stop-color="#0b1030" stop-opacity=".75"/></linearGradient>
+                      <radialGradient id="pk-glow" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#8ff0cd" stop-opacity=".5"/><stop offset="1" stop-color="#8ff0cd" stop-opacity="0"/></radialGradient>
                       </defs>
-                      <rect width="320" height="180" fill="url(#mg-bed-sky)" />
-                      <g fill="#ffffff" opacity=".85">
-                        <rect x="18" y="26" width="54" height="14" rx="7" /><rect x="32" y="16" width="30" height="14" rx="7" />
-                        <rect x="238" y="42" width="62" height="15" rx="7.5" /><rect x="256" y="32" width="32" height="14" rx="7" />
-                        <rect x="128" y="18" width="40" height="12" rx="6" opacity=".7" />
-                      </g>
-                      <g>
-                        <polygon points="20,120 112,120 94,152 42,152" fill="url(#mg-bed-dirt)" />
-                        <polygon points="48,152 88,152 74,168 60,168" fill="#5b3a20" />
-                        <rect x="20" y="108" width="92" height="13" rx="3" fill="#57c94f" />
-                        <rect x="20" y="117" width="92" height="5" fill="#3ba336" />
-                        <rect x="34" y="88" width="56" height="18" rx="4" fill="#e0344c" />
-                        <rect x="34" y="84" width="20" height="14" rx="4" fill="#fff2f4" />
-                        <rect x="56" y="82" width="34" height="16" rx="4" fill="#ff6b7f" />
-                        <rect x="62" y="86" width="22" height="4" rx="2" fill="#ffd0d7" />
-                      </g>
-                      <g>
-                        <polygon points="208,120 300,120 282,152 230,152" fill="url(#mg-bed-dirt)" />
-                        <polygon points="236,152 276,152 262,168 248,168" fill="#5b3a20" />
-                        <rect x="208" y="108" width="92" height="13" rx="3" fill="#57c94f" />
-                        <rect x="208" y="117" width="92" height="5" fill="#3ba336" />
-                        <rect x="230" y="88" width="56" height="18" rx="4" fill="#2f63d8" />
-                        <rect x="266" y="84" width="20" height="14" rx="4" fill="#f2f7ff" />
-                        <rect x="230" y="82" width="34" height="16" rx="4" fill="#5f92ff" />
-                        <rect x="236" y="86" width="22" height="4" rx="2" fill="#cfe0ff" />
-                      </g>
-                      <g fill="#f6ead6">
-                        <rect x="116" y="110" width="14" height="12" rx="2" /><rect x="132" y="110" width="14" height="12" rx="2" />
-                        <rect x="148" y="110" width="14" height="12" rx="2" /><rect x="164" y="110" width="14" height="12" rx="2" />
-                        <rect x="180" y="110" width="14" height="12" rx="2" /><rect x="196" y="110" width="8" height="12" rx="2" />
-                      </g>
-                      <g>
-                        <polygon points="160,58 176,80 160,102 144,80" fill="#4fe6d2" />
-                        <polygon points="160,58 176,80 160,80" fill="#25c3ae" />
-                        <polygon points="160,80 176,80 160,102" fill="#12a795" />
-                        <rect x="146" y="46" width="6" height="6" rx="2" fill="#ffffff" opacity=".85" />
-                        <rect x="176" y="60" width="5" height="5" rx="2" fill="#ffffff" opacity=".7" />
-                      </g>
+                      <rect width="320" height="180" fill="url(#pk-sky)"/>
+                      <g fill="#ffffff"><circle cx="244" cy="66" r="1.2" opacity="0.30"/><circle cx="27" cy="116" r="1.4" opacity="0.57"/><circle cx="237" cy="90" r="1.9" opacity="0.63"/><circle cx="51" cy="76" r="0.8" opacity="0.88"/><circle cx="246" cy="105" r="0.9" opacity="0.37"/><circle cx="121" cy="46" r="0.9" opacity="0.35"/><circle cx="307" cy="61" r="1.9" opacity="0.82"/><circle cx="67" cy="98" r="1.2" opacity="0.57"/><circle cx="231" cy="7" r="2.1" opacity="0.32"/><circle cx="39" cy="72" r="1.4" opacity="0.35"/><circle cx="1" cy="38" r="0.8" opacity="0.53"/><circle cx="6" cy="63" r="1.7" opacity="0.80"/><circle cx="300" cy="96" r="2.0" opacity="0.53"/><circle cx="24" cy="30" r="1.1" opacity="0.57"/><circle cx="273" cy="10" r="1.2" opacity="0.56"/><circle cx="297" cy="10" r="1.1" opacity="0.73"/><circle cx="210" cy="108" r="1.5" opacity="0.74"/><circle cx="84" cy="67" r="0.7" opacity="0.49"/><circle cx="191" cy="29" r="1.4" opacity="0.44"/><circle cx="239" cy="103" r="1.4" opacity="0.75"/><circle cx="132" cy="21" r="1.4" opacity="0.54"/><circle cx="117" cy="26" r="2.0" opacity="0.81"/><circle cx="263" cy="82" r="2.0" opacity="0.74"/><circle cx="36" cy="10" r="1.2" opacity="0.62"/><circle cx="138" cy="36" r="1.0" opacity="0.54"/><circle cx="24" cy="31" r="1.4" opacity="0.35"/><circle cx="312" cy="74" r="1.7" opacity="0.60"/><circle cx="279" cy="98" r="1.9" opacity="0.61"/><circle cx="313" cy="85" r="2.0" opacity="0.50"/><circle cx="156" cy="115" r="2.0" opacity="0.78"/><circle cx="239" cy="49" r="1.1" opacity="0.63"/><circle cx="147" cy="88" r="0.7" opacity="0.81"/><circle cx="243" cy="54" r="1.5" opacity="0.39"/><circle cx="150" cy="77" r="1.3" opacity="0.58"/><circle cx="140" cy="60" r="1.7" opacity="0.48"/><circle cx="86" cy="7" r="0.6" opacity="0.43"/><circle cx="87" cy="9" r="1.4" opacity="0.38"/><circle cx="8" cy="75" r="1.4" opacity="0.32"/><circle cx="110" cy="34" r="2.0" opacity="0.51"/><circle cx="6" cy="50" r="1.7" opacity="0.79"/></g>
+                      <circle cx="58" cy="36" r="36" fill="url(#pk-moon)"/>
+                      <circle cx="58" cy="36" r="18" fill="#fdf0c4"/>
+                      <g fill="#e7d5a4" opacity=".7"><circle cx="52" cy="32" r="4.5"/><circle cx="64" cy="42" r="2.8"/><circle cx="61" cy="27" r="2"/></g>
+                      <g fill="#1b2450" opacity=".85"><path d="M0 128h34v-26h14v26h26v-40h18v40h22v14H0z"/><path d="M236 122h20V96h12v26h30v-18h22v18v16H236z"/></g>
+                      <g fill="#2b3768" opacity=".28"><path d="M92 138h30v-16h9v16h23v11H92z"/><path d="M182 136h20v-12h8v12h18v12h-46z"/></g>
+                      <g fill="#c9b6f0" opacity=".18"><rect y="118" width="320" height="4" rx="2"/><rect x="40" y="96" width="180" height="3" rx="1.5"/></g>
+                      <path d="M44 130 Q76 96 104 110 Q136 74 162 90 Q192 60 214 72 Q244 44 266 54" fill="none" stroke="#8ff0cd" stroke-width="7" stroke-linecap="round" opacity=".12"/>
+                      <path d="M44 130 Q76 96 104 110 Q136 74 162 90 Q192 60 214 72 Q244 44 266 54" fill="none" stroke="#a8ffdd" stroke-width="2" stroke-dasharray="5 7" stroke-linecap="round" opacity=".8"/>
+                      <ellipse cx="44" cy="162" rx="30" ry="12" fill="url(#pk-glow)"/>
+                      <g><polygon points="14,138 44,151 44,165 14,152" fill="#47856a"/><polygon points="74,138 44,151 44,165 74,152" fill="#2e5448"/><polygon points="14,138 44,125 74,138 44,151" fill="#8fe0b8"/></g>
+                      <polygon points="14,138 44,125 74,138 44,151" fill="none" stroke="#beedd6" stroke-width="1" opacity=".5"/>
+                      <ellipse cx="104" cy="140" rx="26" ry="10" fill="url(#pk-glow)"/>
+                      <g><polygon points="78,118 104,129 104,141 78,130" fill="#3f7d8a"/><polygon points="130,118 104,129 104,141 130,130" fill="#2a4f5b"/><polygon points="78,118 104,107 130,118 104,129" fill="#85d5e1"/></g>
+                      <polygon points="78,118 104,107 130,118 104,129" fill="none" stroke="#b9e7ed" stroke-width="1" opacity=".5"/>
+                      <ellipse cx="162" cy="119" rx="24" ry="9" fill="url(#pk-glow)"/>
+                      <g><polygon points="138,98 162,108 162,119 138,109" fill="#8c6486"/><polygon points="186,98 162,108 162,119 186,109" fill="#584058"/><polygon points="138,98 162,88 186,98 162,108" fill="#e9b5dc"/></g>
+                      <polygon points="138,98 162,88 186,98 162,108" fill="none" stroke="#f2d4eb" stroke-width="1" opacity=".5"/>
+                      <ellipse cx="214" cy="100" rx="21" ry="8" fill="url(#pk-glow)"/>
+                      <g><polygon points="193,80 214,89 214,99 193,90" fill="#506998"/><polygon points="235,80 214,89 214,99 235,90" fill="#344363"/><polygon points="193,80 214,71 235,80 214,89" fill="#9bbbf3"/></g>
+                      <polygon points="193,80 214,71 235,80 214,89" fill="none" stroke="#c5d8f8" stroke-width="1" opacity=".5"/>
+                      <ellipse cx="268" cy="84" rx="25" ry="10" fill="url(#pk-glow)"/>
+                      <g><polygon points="243,62 268,73 268,85 243,74" fill="#9d8145"/><polygon points="293,62 268,73 268,85 293,74" fill="#625232"/><polygon points="243,62 268,51 293,62 268,73" fill="#ffdb88"/></g>
+                      <polygon points="243,62 268,51 293,62 268,73" fill="none" stroke="#ffeaba" stroke-width="1" opacity=".5"/>
+                      <rect x="176" y="72" width="3" height="27" rx="1.5" fill="#d7c07a"/>
+                      <path d="M179 73h20l-5 7 5 7h-20z" fill="#ffd166"/>
+                      <circle cx="177" cy="70" r="3" fill="#fff0b8"/>
+                      <g fill="#efe3c2"><rect x="246" y="24" width="4" height="34" rx="1.5"/><rect x="286" y="24" width="4" height="34" rx="1.5"/></g>
+                      <rect x="244" y="18" width="48" height="10" rx="2" fill="#ffd166"/>
+                      <g fill="#2a2140"><rect x="246" y="24" width="8" height="4"/><rect x="254" y="20" width="8" height="4"/><rect x="262" y="24" width="8" height="4"/><rect x="270" y="20" width="8" height="4"/><rect x="278" y="24" width="8" height="4"/><rect x="286" y="20" width="8" height="4"/></g>
+                      <g opacity=".45" fill="#9ef3d4"><rect x="112" y="96" width="7" height="7" rx="2" opacity=".5"/><rect x="120" y="90" width="6" height="6" rx="2" opacity=".7"/><rect x="127" y="85" width="5" height="5" rx="2"/></g>
+                      <g transform="rotate(-18 138 84)"><rect x="133" y="88" width="6" height="13" rx="2" fill="#2f7fbc"/><g transform="rotate(24 144 88)"><rect x="141" y="88" width="6" height="14" rx="2" fill="#3c9ad8"/></g><rect x="132" y="72" width="16" height="18" rx="4" fill="#5ad0ff"/><rect x="132" y="72" width="5" height="18" rx="2.5" fill="#a8ecff" opacity=".85"/><rect x="129" y="61" width="14" height="12" rx="3" fill="#ffd9c0"/><rect x="129" y="65" width="14" height="4" fill="#221733"/><g transform="rotate(-28 148 76)"><rect x="146" y="73" width="13" height="5" rx="2.5" fill="#ffd9c0"/></g><g transform="rotate(22 132 80)"><rect x="121" y="78" width="12" height="5" rx="2.5" fill="#ffd9c0"/></g></g>
+                      <g stroke="#bff6e0" stroke-width="1.5" stroke-linecap="round" opacity=".45"><path d="M112 96h10M106 104h8M118 88h7"/></g>
+                      <g fill="#cfe9ff" opacity=".5"><rect x="98" y="104" width="4" height="4" rx="1"/><rect x="90" y="112" width="3" height="3" rx="1"/><rect x="112" y="110" width="2" height="2"/></g>
+                      <g fill="#8ff0cd" opacity=".35"><rect x="60" y="60" width="5" height="5" rx="1"/><rect x="196" y="42" width="4" height="4" rx="1"/><rect x="30" y="86" width="4" height="4" rx="1"/><rect x="238" y="126" width="5" height="5" rx="1"/></g>
+                      <rect y="120" width="320" height="60" fill="url(#pk-fade)"/>
+                      <g fill="#0b1030" opacity=".55"><path d="M0 180v-26l30 8v18z"/><path d="M320 180v-34l-26 12v22z"/></g>
                     </svg>
+                    <span class="minigame-particles" aria-hidden="true"><i></i><i></i><i></i></span>
                   </div>
                   <div class="minigame-copy">
-                    <div class="minigame-title-row"><h3>Bedwars</h3><span class="minigame-count">1v1 · teams · unranked</span></div>
-                    <p>Sky islands over the void. Mine iron at your forge, buy an axe from the Quartermaster, bridge the fourteen-block gap — and knock them off it. Break the bed and the next kill is the last one.</p>
+                    <div class="minigame-title-row"><h3>Parkour</h3><span class="minigame-count">1v1 · fresh course · unranked</span></div>
+                    <p>Eight worlds, one straight line. Fifty-six jumps run dead ahead: stepping stones, narrow beams, doorway walls, covered tunnels, weaving slaloms, gaps punched through the pad, hurdles, arches, long drops and climbs — never a maze. Golden checkpoints are rare and infinite wool bails you out. First to the finish wins; all wool clears next race.</p>
                     <div class="duel-card-actions">
-                      <button id="bedwars-card-action" class="minigame-action" type="button">Play</button>
-                      <button id="bedwars-private-action" class="duel-private-action" type="button">Invite Friends</button>
-                      <div id="bedwars-queue-status" class="duel-queue-status" role="status" aria-live="polite"></div>
+                      <button id="parkour-card-action" class="minigame-action" type="button">Play</button>
+                      <button id="parkour-private-action" class="duel-private-action" type="button">Invite Friends</button>
+                      <div id="parkour-queue-status" class="duel-queue-status" role="status" aria-live="polite"></div>
                     </div>
                   </div>
                 </article>
                 <article class="minigame-card" data-game="party">
                   <div class="minigame-art">
-                    <svg class="minigame-icon" viewBox="0 0 320 180" role="img" aria-label="Confetti, balloons and a giant die above a winners' podium">
+                    <img class="minigame-icon" src="/minigames/the-bridge.webp" alt="Blue and red voxel fortresses connected by a narrow bridge over space" width="640" height="360" loading="lazy" decoding="async" />
+                    <svg class="minigame-icon" viewBox="0 0 320 180" preserveAspectRatio="xMidYMid slice" role="img" aria-label="Two voxel fortresses facing each other across a starlit void, joined by an unfinished wool bridge">
                       <defs>
-                        <linearGradient id="mg-party-sky" x1="0" y1="0" x2="1" y2="1">
-                          <stop offset="0" stop-color="#4a1cb0" /><stop offset=".55" stop-color="#a734df" /><stop offset="1" stop-color="#ff77c8" />
-                        </linearGradient>
-                        <radialGradient id="mg-party-glow" cx=".5" cy=".48" r=".6">
-                          <stop offset="0" stop-color="#ffffff" stop-opacity=".38" /><stop offset="1" stop-color="#ffffff" stop-opacity="0" />
-                        </radialGradient>
-                        <linearGradient id="mg-party-die" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="0" stop-color="#ffffff" /><stop offset="1" stop-color="#ffe4f4" />
-                        </linearGradient>
+                      <linearGradient id="br-sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0b0722"/><stop offset=".42" stop-color="#2d1a5c"/><stop offset=".78" stop-color="#7a3580"/><stop offset="1" stop-color="#43205c"/></linearGradient>
+                      <radialGradient id="br-neb" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#ff9ad2" stop-opacity=".3"/><stop offset="1" stop-color="#ff9ad2" stop-opacity="0"/></radialGradient>
+                      <radialGradient id="br-red" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#ffd2dc" stop-opacity=".95"/><stop offset=".45" stop-color="#ff5f76" stop-opacity=".7"/><stop offset="1" stop-color="#ff5f76" stop-opacity="0"/></radialGradient>
+                      <radialGradient id="br-blue" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#d8ecff" stop-opacity=".95"/><stop offset=".45" stop-color="#5aa8ff" stop-opacity=".7"/><stop offset="1" stop-color="#5aa8ff" stop-opacity="0"/></radialGradient>
+                      <linearGradient id="br-void" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#150c33" stop-opacity="0"/><stop offset=".55" stop-color="#0a0620" stop-opacity=".8"/><stop offset="1" stop-color="#05030f"/></linearGradient>
                       </defs>
-                      <rect width="320" height="180" fill="url(#mg-party-sky)" />
-                      <rect width="320" height="180" fill="url(#mg-party-glow)" />
-                      <g fill="none" stroke-width="5" stroke-linecap="round" opacity=".75">
-                        <path d="M-4 30q18 16 36 0t36 0" stroke="#ffd166" />
-                        <path d="M212 20q18 16 36 0t36 0t36 0" stroke="#4de1c1" />
-                      </g>
-                      <g>
-                        <ellipse cx="44" cy="70" rx="21" ry="25" fill="#ff5ea8" />
-                        <ellipse cx="37" cy="62" rx="6" ry="8" fill="#ffffff" opacity=".55" />
-                        <polygon points="40,94 48,94 44,101" fill="#ff5ea8" />
-                        <path d="M44 101q10 14 0 28t2 22" stroke="#ffe1f0" stroke-width="2" fill="none" opacity=".8" />
-                        <ellipse cx="276" cy="58" rx="19" ry="23" fill="#6ee7ff" />
-                        <ellipse cx="270" cy="51" rx="5" ry="7" fill="#ffffff" opacity=".55" />
-                        <polygon points="272,80 280,80 276,87" fill="#6ee7ff" />
-                        <path d="M276 87q-10 14 0 27t-2 20" stroke="#d9f6ff" stroke-width="2" fill="none" opacity=".8" />
-                      </g>
-                      <g transform="rotate(-12 160 84)">
-                        <rect x="126" y="50" width="68" height="68" rx="14" fill="url(#mg-party-die)" />
-                        <rect x="126" y="50" width="68" height="68" rx="14" fill="none" stroke="#ffb3e0" stroke-width="3" />
-                        <g fill="#3a1470">
-                          <circle cx="145" cy="69" r="6" /><circle cx="175" cy="69" r="6" />
-                          <circle cx="160" cy="84" r="6" />
-                          <circle cx="145" cy="99" r="6" /><circle cx="175" cy="99" r="6" />
-                        </g>
-                      </g>
-                      <g>
-                        <rect x="92" y="146" width="46" height="34" rx="3" fill="#dbe6f2" />
-                        <rect x="92" y="146" width="46" height="7" rx="3" fill="#f4f9ff" />
-                        <rect x="182" y="152" width="46" height="28" rx="3" fill="#e79a5e" />
-                        <rect x="182" y="152" width="46" height="7" rx="3" fill="#f7bd8b" />
-                        <rect x="137" y="134" width="46" height="46" rx="3" fill="#ffc93c" />
-                        <rect x="137" y="134" width="46" height="7" rx="3" fill="#ffe38a" />
-                      </g>
-                      <g opacity=".95">
-                        <rect x="16" y="118" width="10" height="10" rx="2" fill="#ffd166" transform="rotate(24 21 123)" />
-                        <rect x="66" y="30" width="9" height="9" rx="2" fill="#4de1c1" transform="rotate(-18 70 34)" />
-                        <rect x="104" y="14" width="8" height="8" rx="2" fill="#ff5ea8" transform="rotate(32 108 18)" />
-                        <rect x="200" y="46" width="9" height="9" rx="2" fill="#ffd166" transform="rotate(-28 204 50)" />
-                        <rect x="236" y="104" width="10" height="10" rx="2" fill="#b6ff6e" transform="rotate(18 241 109)" />
-                        <rect x="298" y="96" width="9" height="9" rx="2" fill="#ff5ea8" transform="rotate(-22 302 100)" />
-                        <rect x="58" y="128" width="8" height="8" rx="2" fill="#6ee7ff" transform="rotate(40 62 132)" />
-                        <rect x="256" y="130" width="8" height="8" rx="2" fill="#ffd166" transform="rotate(-36 260 134)" />
-                        <rect x="12" y="60" width="7" height="7" rx="2" fill="#b6ff6e" transform="rotate(14 15 63)" />
-                        <rect x="304" y="24" width="8" height="8" rx="2" fill="#6ee7ff" transform="rotate(-14 308 28)" />
-                      </g>
+                      <rect width="320" height="180" fill="url(#br-sky)"/>
+                      <ellipse cx="96" cy="52" rx="110" ry="56" fill="url(#br-neb)"/>
+                      <ellipse cx="248" cy="34" rx="88" ry="44" fill="url(#br-neb)" opacity=".7"/>
+                      <g fill="#ffffff"><circle cx="75" cy="37" r="1.4" opacity="0.44"/><circle cx="215" cy="36" r="1.7" opacity="0.70"/><circle cx="315" cy="40" r="2.1" opacity="0.73"/><circle cx="228" cy="3" r="1.6" opacity="0.49"/><circle cx="69" cy="95" r="1.4" opacity="0.49"/><circle cx="29" cy="8" r="1.4" opacity="0.56"/><circle cx="144" cy="75" r="1.2" opacity="0.55"/><circle cx="219" cy="96" r="1.4" opacity="0.55"/><circle cx="251" cy="102" r="1.2" opacity="0.84"/><circle cx="268" cy="27" r="0.8" opacity="0.44"/><circle cx="250" cy="106" r="1.2" opacity="0.48"/><circle cx="315" cy="22" r="1.4" opacity="0.35"/><circle cx="254" cy="116" r="1.7" opacity="0.81"/><circle cx="196" cy="144" r="0.7" opacity="0.75"/><circle cx="193" cy="80" r="1.6" opacity="0.51"/><circle cx="201" cy="112" r="1.9" opacity="0.33"/><circle cx="155" cy="120" r="1.9" opacity="0.89"/><circle cx="26" cy="142" r="0.9" opacity="0.31"/><circle cx="194" cy="13" r="0.8" opacity="0.86"/><circle cx="91" cy="123" r="0.9" opacity="0.87"/><circle cx="270" cy="7" r="1.7" opacity="0.85"/><circle cx="86" cy="123" r="1.1" opacity="0.54"/><circle cx="296" cy="118" r="0.8" opacity="0.68"/><circle cx="213" cy="121" r="0.9" opacity="0.33"/><circle cx="318" cy="7" r="1.9" opacity="0.89"/><circle cx="293" cy="34" r="2.1" opacity="0.53"/><circle cx="165" cy="40" r="0.7" opacity="0.43"/><circle cx="286" cy="8" r="1.7" opacity="0.46"/><circle cx="182" cy="75" r="0.7" opacity="0.32"/><circle cx="279" cy="103" r="1.2" opacity="0.59"/><circle cx="167" cy="36" r="1.5" opacity="0.54"/><circle cx="282" cy="105" r="1.1" opacity="0.89"/><circle cx="22" cy="15" r="1.2" opacity="0.54"/><circle cx="144" cy="66" r="1.5" opacity="0.38"/><circle cx="211" cy="54" r="0.6" opacity="0.78"/><circle cx="224" cy="84" r="1.4" opacity="0.82"/><circle cx="86" cy="63" r="0.6" opacity="0.70"/><circle cx="264" cy="51" r="1.7" opacity="0.63"/><circle cx="188" cy="16" r="1.7" opacity="0.74"/><circle cx="306" cy="149" r="1.1" opacity="0.83"/><circle cx="178" cy="124" r="0.9" opacity="0.70"/><circle cx="124" cy="108" r="1.6" opacity="0.66"/><circle cx="90" cy="100" r="1.4" opacity="0.43"/><circle cx="56" cy="116" r="1.2" opacity="0.32"/><circle cx="108" cy="45" r="1.8" opacity="0.45"/><circle cx="42" cy="41" r="0.7" opacity="0.69"/></g>
+                      <g opacity=".4"><g><polygon points="62,40 78,47 78,53 62,46" fill="#3b3058"/><polygon points="94,40 78,47 78,53 94,46" fill="#27213d"/><polygon points="62,40 78,33 94,40 78,47" fill="#7f72a1"/></g><g><polygon points="224,58 236,63 236,68 224,63" fill="#3b3058"/><polygon points="248,58 236,63 236,68 248,63" fill="#27213d"/><polygon points="224,58 236,53 248,58 236,63" fill="#7f72a1"/></g></g>
+                      <g opacity=".25"><g><polygon points="161,30 170,34 170,38 161,34" fill="#453a64"/><polygon points="179,30 170,34 170,38 179,34" fill="#2e2744"/><polygon points="161,30 170,26 179,30 170,34" fill="#8d7eaf"/></g></g>
+                      <rect y="96" width="320" height="84" fill="url(#br-void)"/>
+                      <g><polygon points="-12,108 50,132 50,152 -12,128" fill="#773446"/><polygon points="112,108 50,132 50,152 112,128" fill="#4c2332"/><polygon points="-12,108 50,84 112,108 50,132" fill="#ce7689"/></g><polygon points="-12,128 50,132 112,128 76,168 20,166" fill="#4f2534"/><polygon points="50,132 112,128 76,168" fill="#391c2a"/><polygon points="-12,108 50,84 112,108" fill="#e3b0bb" opacity=".16"/><g><polygon points="-9,88 4,94 4,112 -9,106" fill="#773446"/><polygon points="17,88 4,94 4,112 17,106" fill="#4c2332"/><polygon points="-9,88 4,82 17,88 4,94" fill="#ce7689"/></g><g><polygon points="-12,80 4,87 4,93 -12,86" fill="#7e4757"/><polygon points="20,80 4,87 4,93 20,86" fill="#4f2f3c"/><polygon points="-12,80 4,73 20,80 4,87" fill="#d68f9e"/></g><rect x="2" y="62" width="4" height="18" fill="#c9b28a"/><path d="M6 62h16l-4 5 4 5h-16z" fill="#ff5f76"/><g><polygon points="83,88 96,94 96,112 83,106" fill="#773446"/><polygon points="109,88 96,94 96,112 109,106" fill="#4c2332"/><polygon points="83,88 96,82 109,88 96,94" fill="#ce7689"/></g><g><polygon points="80,80 96,87 96,93 80,86" fill="#7e4757"/><polygon points="112,80 96,87 96,93 112,86" fill="#4f2f3c"/><polygon points="80,80 96,73 112,80 96,87" fill="#d68f9e"/></g><rect x="94" y="62" width="4" height="18" fill="#c9b28a"/><path d="M98 62h16l-4 5 4 5h-16z" fill="#ff5f76"/><ellipse cx="50" cy="96" rx="34" ry="26" fill="url(#br-red)"/><path d="M35 108V92a15 15 0 0 1 30 0v16z" fill="#0d0722" opacity=".85"/><path d="M35 108V92a15 15 0 0 1 30 0v16" fill="none" stroke="#e0a8b4" stroke-width="3"/><path d="M42 108V93a8 8 0 0 1 16 0v15z" fill="url(#br-red)"/><g><polygon points="110,112 124,118 124,127 110,121" fill="#7b3f4f"/><polygon points="138,112 124,118 124,127 138,121" fill="#4e2a38"/><polygon points="110,112 124,106 138,112 124,118" fill="#d38595"/></g>
+                      <g><polygon points="208,108 270,132 270,152 208,128" fill="#2a5085"/><polygon points="332,108 270,132 270,152 332,128" fill="#1d3458"/><polygon points="208,108 270,84 332,108 270,132" fill="#699bda"/></g><polygon points="208,128 270,132 332,128 296,168 240,166" fill="#1e365b"/><polygon points="270,132 332,128 296,168" fill="#182845"/><polygon points="208,108 270,84 332,108" fill="#a9c5ea" opacity=".16"/><g><polygon points="211,88 224,94 224,112 211,106" fill="#2a5085"/><polygon points="237,88 224,94 224,112 237,106" fill="#1d3458"/><polygon points="211,88 224,82 237,88 224,94" fill="#699bda"/></g><g><polygon points="208,80 224,87 224,93 208,86" fill="#3f5e8a"/><polygon points="240,80 224,87 224,93 240,86" fill="#2a3c5b"/><polygon points="208,80 224,73 240,80 224,87" fill="#85ade1"/></g><rect x="222" y="62" width="4" height="18" fill="#c9b28a"/><path d="M226 62h16l-4 5 4 5h-16z" fill="#5aa8ff"/><g><polygon points="303,88 316,94 316,112 303,106" fill="#2a5085"/><polygon points="329,88 316,94 316,112 329,106" fill="#1d3458"/><polygon points="303,88 316,82 329,88 316,94" fill="#699bda"/></g><g><polygon points="300,80 316,87 316,93 300,86" fill="#3f5e8a"/><polygon points="332,80 316,87 316,93 332,86" fill="#2a3c5b"/><polygon points="300,80 316,73 332,80 316,87" fill="#85ade1"/></g><rect x="314" y="62" width="4" height="18" fill="#c9b28a"/><path d="M318 62h16l-4 5 4 5h-16z" fill="#5aa8ff"/><ellipse cx="270" cy="96" rx="34" ry="26" fill="url(#br-blue)"/><path d="M255 108V92a15 15 0 0 1 30 0v16z" fill="#0d0722" opacity=".85"/><path d="M255 108V92a15 15 0 0 1 30 0v16" fill="none" stroke="#9fbfe8" stroke-width="3"/><path d="M262 108V93a8 8 0 0 1 16 0v15z" fill="url(#br-blue)"/><g><polygon points="182,112 196,118 196,127 182,121" fill="#355888"/><polygon points="210,112 196,118 196,127 210,121" fill="#243959"/><polygon points="182,112 196,106 210,112 196,118" fill="#78a5de"/></g>
+                      <g><polygon points="90,112 100,116 100,125 90,121" fill="#9d3d4f"/><polygon points="110,112 100,116 100,125 110,121" fill="#622937"/><polygon points="90,112 100,108 110,112 100,116" fill="#ff8294"/></g>
+                      <g><polygon points="108,112 118,116 118,125 108,121" fill="#9d3d4f"/><polygon points="128,112 118,116 118,125 128,121" fill="#622937"/><polygon points="108,112 118,108 128,112 118,116" fill="#ff8294"/></g>
+                      <g><polygon points="126,112 136,116 136,125 126,121" fill="#9d3d4f"/><polygon points="146,112 136,116 136,125 146,121" fill="#622937"/><polygon points="126,112 136,108 146,112 136,116" fill="#ff8294"/></g>
+                      <g opacity=".4"><polygon points="140,112 150,116 150,125 140,121" fill="#9d3d4f"/><polygon points="160,112 150,116 150,125 160,121" fill="#622937"/><polygon points="140,112 150,108 160,112 150,116" fill="#ff8294"/></g>
+                      <g><polygon points="210,112 220,116 220,125 210,121" fill="#3a69a1"/><polygon points="230,112 220,116 220,125 230,121" fill="#274369"/><polygon points="210,112 220,108 230,112 220,116" fill="#7ebbff"/></g>
+                      <g><polygon points="192,112 202,116 202,125 192,121" fill="#3a69a1"/><polygon points="212,112 202,116 202,125 212,121" fill="#274369"/><polygon points="192,112 202,108 212,112 202,116" fill="#7ebbff"/></g>
+                      <g><polygon points="174,112 184,116 184,125 174,121" fill="#3a69a1"/><polygon points="194,112 184,116 184,125 194,121" fill="#274369"/><polygon points="174,112 184,108 194,112 184,116" fill="#7ebbff"/></g>
+                      <g opacity=".4"><polygon points="160,112 170,116 170,125 160,121" fill="#3a69a1"/><polygon points="180,112 170,116 170,125 180,121" fill="#274369"/><polygon points="160,112 170,108 180,112 170,116" fill="#7ebbff"/></g>
+                      <g fill="#9ed3ff"><rect x="200" y="54" width="7" height="7" rx="2" opacity=".22"/><rect x="190" y="58" width="6" height="6" rx="2" opacity=".34"/><rect x="181" y="62" width="5" height="5" rx="2" opacity=".5"/></g>
+                      <g transform="rotate(-28 164 74)"><g transform="rotate(18 166 86)"><rect x="163" y="82" width="6" height="14" rx="2" fill="#2f6fb0"/></g><rect x="171" y="82" width="6" height="14" rx="2" fill="#3c86cc"/><rect x="160" y="64" width="17" height="19" rx="4" fill="#5aa8ff"/><rect x="160" y="64" width="5" height="19" rx="2.5" fill="#a8d8ff" opacity=".85"/><rect x="157" y="52" width="15" height="13" rx="3" fill="#ffd9c0"/><rect x="157" y="56" width="15" height="4" fill="#1a1030"/><g transform="rotate(-32 156 70)"><rect x="145" y="67" width="13" height="5" rx="2.5" fill="#ffd9c0"/></g><g transform="rotate(26 178 70)"><rect x="176" y="67" width="13" height="5" rx="2.5" fill="#ffd9c0"/></g></g>
+                      <g opacity=".55"><g><polygon points="107,148 112,150 112,154 107,152" fill="#9d3d4f"/><polygon points="117,148 112,150 112,154 117,152" fill="#622937"/><polygon points="107,148 112,146 117,148 112,150" fill="#ff8294"/></g><g><polygon points="210,158 214,160 214,163 210,161" fill="#3a69a1"/><polygon points="218,158 214,160 214,163 218,161" fill="#274369"/><polygon points="210,158 214,156 218,158 214,160" fill="#7ebbff"/></g><g><polygon points="142,166 146,168 146,171 142,169" fill="#737b8b"/><polygon points="150,166 146,168 146,171 150,169" fill="#494e5b"/><polygon points="142,166 146,164 150,166 146,168" fill="#c8d3e2"/></g></g>
+                      <rect y="136" width="320" height="44" fill="#0a0524" opacity=".38"/>
+                      <ellipse cx="160" cy="180" rx="150" ry="34" fill="#6a2f86" opacity=".18"/>
                     </svg>
+                    <span class="minigame-particles" aria-hidden="true"><i></i><i></i><i></i></span>
                   </div>
                   <div class="minigame-copy">
-                    <div class="minigame-title-row"><h3>Party Games</h3><span class="minigame-count">3–8 players · FFA · unranked</span></div>
-                    <p>Four microgames, back to back: Spleef, Color Chaos, Rising Sludge and the Knockback Arena. Points every round, and the Crown to whoever has the most when the playlist runs out.</p>
+                    <div class="minigame-title-row"><h3>The Bridge</h3><span class="minigame-count">1v1 · PvP · unranked</span></div>
+                    <p>Two fortresses, one span between them — a single block wide, the whole way. Fight for it with a Void Cleaver and a bow, repair it with infinite team wool, and dive into the enemy portal to score. Knock your rival off and they start again at their own base. First to five goals takes it.</p>
                     <div class="duel-card-actions">
                       <button id="party-card-action" class="minigame-action" type="button">Play</button>
                       <button id="party-private-action" class="duel-private-action" type="button">Invite Friends</button>

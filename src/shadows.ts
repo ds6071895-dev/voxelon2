@@ -50,9 +50,32 @@ export const SHADOW_CASTER_LAYER = 1;
  */
 export interface ShadowUniforms {
   map: { value: THREE.Texture | null };
+  /** World -> shadow texture space, with a translation by `origin` already
+   *  folded in, so the shader feeds it ORIGIN-RELATIVE positions. See `origin`. */
   matrix: { value: THREE.Matrix4 };
   /** x: on (0/1), y: one texel in UV, z: how much light a shadow takes away. */
   params: { value: THREE.Vector3 };
+  /**
+   * THE SHADING ORIGIN, and the reason arenas stopped fizzing.
+   *
+   * A minigame arena is stamped at x = 262 144 (`PARTY_BASE_X`), and a float32
+   * near 2^18 has a spacing of 1/32 of a block. Every chunk fragment's world
+   * position is therefore QUANTIZED to 1/32 there — which is invisible for a
+   * distance test, and fatal for the two places the chunk shader differentiates
+   * or cancels one: `dFdx(worldPos)` (the face normal, recovered from the
+   * screen-space derivative of a value that steps in 1/32 jumps rather than
+   * varying smoothly across a pixel) and the shadow lookup (a matrix multiply
+   * whose 1.6e3-sized intermediates cancel down to a 0..1 coordinate). Both come
+   * back as noise, which is what the grainy daylight ground in Parkour was.
+   *
+   * So the shader never handles an absolute position in those paths. It works
+   * relative to this point — the eye, rounded to whole blocks, which are exact
+   * in float32 to 2^24 — and everything it measures stays within a few hundred
+   * blocks of zero, where float32 has room to spare. Written every frame by
+   * `update`, INCLUDING when the pass itself is off: the face normal needs it
+   * on every preset.
+   */
+  origin: { value: THREE.Vector3 };
 }
 
 export class SunShadow {
@@ -74,6 +97,8 @@ export class SunShadow {
     0, 0, 0, 1
   );
   private readonly centre = new THREE.Vector3();
+  /** Translation by `out.origin`, folded into the matrix handed to the shader. */
+  private readonly originShift = new THREE.Matrix4();
   private readonly prevClear = new THREE.Color();
   private readonly scratch = new THREE.Vector3();
   // The light's own axes, rebuilt each frame from the sun direction alone.
@@ -137,23 +162,42 @@ export class SunShadow {
   /**
    * Redraw the map for this frame.
    *
-   * @param sunDir  Unit vector from the world toward the sun.
+   * @param sunDir  Unit vector from the world toward the CASTING BODY — the
+   *                sun by day, the moon by night.
    * @param focus   Where to centre the box (the player's eye).
-   * @param sunUp   Sun height, -1..1. Shadows fade out as it touches the
-   *                horizon and are gone at night: a hard-edged shadow cast by
-   *                a sun that is not visible is the classic shader-pack bug.
+   * @param sunUp   How high that body sits, -1..1. Shadows fade out as it
+   *                touches the horizon: a hard-edged shadow cast by something
+   *                that is not visible is the classic shader-pack bug.
+   * @param moon    True while the moon is the caster. Moonlight is a fraction
+   *                of a sunbeam and its shadows have to read like it — present,
+   *                soft, and nowhere near as deep as noon's.
    */
-  update(sunDir: THREE.Vector3, focus: THREE.Vector3, sunUp: number): void {
+  update(
+    sunDir: THREE.Vector3, focus: THREE.Vector3, sunUp: number, moon = false
+  ): void {
+    // The shading origin is NOT gated on the pass being enabled: every preset's
+    // chunk shader measures from it, shadows or no shadows. See ShadowUniforms.
+    // A non-finite focus would take the whole terrain shader down with it, so a
+    // bad frame keeps the last good origin instead — it only has to be NEAR the
+    // player to do its job, never exact.
+    if (Number.isFinite(focus.x) && Number.isFinite(focus.y)
+      && Number.isFinite(focus.z)) {
+      this.out.origin.value.set(
+        Math.round(focus.x), Math.round(focus.y), Math.round(focus.z));
+    }
     if (!this.enabled || !this.target || !this.depthMat) return;
 
     // How much light a shadow takes away. Deliberately well under half: a voxel
     // world already has strong per-face shading, so a heavy cast on top of it
     // reads as a black hole rather than as shade, and the sky bounce in the
     // chunk shader is what should be filling it.
-    const strength = 0.42 * THREE.MathUtils.smoothstep(sunUp, 0.03, 0.22);
+    const strength = (moon ? 0.17 : 0.42)
+      * THREE.MathUtils.smoothstep(sunUp, 0.03, 0.22);
     this.out.params.value.z = strength;
     this.out.params.value.x = strength > 0.004 ? 1 : 0;
-    if (strength <= 0.004) return;   // night: nothing to draw, nothing to read
+    // Both bodies at the horizon, or the moon too low: nothing worth drawing,
+    // and the shader reads uShadowParams.x and skips the lookup entirely.
+    if (strength <= 0.004) return;
 
     this.centre.copy(focus);
 
@@ -195,10 +239,17 @@ export class SunShadow {
     cam.updateMatrixWorld(true);
     cam.updateProjectionMatrix();
 
+    // World -> shadow UV, then a translation by the shading origin folded onto
+    // the RIGHT so the shader can hand it an origin-relative position: the
+    // product is exactly what `M * vec4(rel + origin, 1)` would have been, but
+    // with the huge cancelling intermediates done here in float64 instead of in
+    // a float32 fragment shader. See ShadowUniforms.origin.
     this.out.matrix.value
       .copy(this.bias)
       .multiply(cam.projectionMatrix)
-      .multiply(cam.matrixWorldInverse);
+      .multiply(cam.matrixWorldInverse)
+      .multiply(this.originShift.makeTranslation(
+        this.out.origin.value.x, this.out.origin.value.y, this.out.origin.value.z));
 
     // Draw. Only layer 1 is in this camera's view, so the sky dome, the clouds,
     // the water and every UI-side mesh sit this pass out.

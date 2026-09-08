@@ -33,6 +33,55 @@ energy, mobs, armor/guns, and authoritative server-core logic),
 `npm run warfare-smoke` (the Warfare Command tree, boss-XP settlement, missiles,
 interceptors and vehicles — 170+ checks).
 
+## Minigames
+
+Open **Minigames** with the multiplayer server running. Duels, Parkour and
+The Bridge use separate matchmaking queues; exiting restores your world
+position and inventory, and you can queue again immediately.
+
+- **Parkour:** a two-player, seven-minute race down a freshly generated
+  56-jump lane. The route always runs dead ahead — the variety is in the
+  jumps and in what you land on, not in the layout: stepping stones, narrow
+  beams, thin ledges, hurdles, arches, climbs, long drops, and obstacle pads
+  you have to get ACROSS after landing on them — a wall with a single
+  doorway, a covered tunnel too low to jump inside, a staggered slalom, a
+  gap punched through the middle of the pad, staggered rows of teeth.
+  Checkpoints are deliberately rare (every fourteenth pad), so a fall costs
+  you a leg of the run rather than a single jump. Sprint and jump, or bail
+  yourself out with infinite wool. Breaking blocks is disabled; placed wool
+  is cleared between races. Press **R** to retry from your checkpoint. Eight
+  rotating themes add gardens, clockwork towers, lunar ruins, coral temples,
+  candy islands, neon rooftops, ice palaces and volcanic fortresses.
+- **The Bridge:** 1v1 PvP. Two fortress bases face each other across an open
+  void, each with a lit goal portal sunk into its deck, corner beacon towers
+  and a keep. Between them runs ONE span — a single block wide, dead centre,
+  unbroken from base to base, with nothing whatsoever to stand on either
+  side of it. You are armed for it: a **Void Cleaver** (hold left-click
+  range; charge, combo and crit all decided server-side, with knockback
+  blended toward where you are looking) and a **bow** (hold right-click to
+  draw, release to loose — a full draw is faster, hits far harder, and the
+  server times the draw itself so rapid fire and full power are mutually
+  exclusive). Infinite team wool repairs the span and gets you back onto it.
+  Dive into the enemy portal to score; the void, or your own portal, sends
+  you home — and knocking a rival into the void credits you the kill for ten
+  seconds after your last hit. First side to five goals wins. Quick play and
+  **Invite friends** both open a 1v1 lobby. The map is authored as one half
+  and mirrored, so neither side can have an advantage, and no block may be
+  placed in a portal mouth.
+
+The server controls courses, spawns, scores and deadlines. Each match waits
+for every connected player to load before starting a shared countdown.
+Parkour and The Bridge have unlimited sprint stamina.
+
+Run `npm run party-smoke`, `npm run parkour-smoke`, `npm run duels-smoke`
+and `npm run minigame-smoke` for multiplayer regressions and generated-course
+physics checks. `scripts/minigame_browser_smoke.mjs` additionally exercises
+two real browser clients against a disposable server; its header documents
+the external Playwright dependency and test URL.
+
+Restart the game server and refresh clients after updating: both ends must
+use the new arena protocol.
+
 ## Controls
 
 | Input | Action |

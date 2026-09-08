@@ -30,6 +30,9 @@ export class Inventory {
   cursor: ItemStack | null = null;
   /** Bumped on every mutation; UIs redraw when it changes. */
   version = 0;
+  /** Temporary automatic-insertion reservations (Bedwars currency hotbar).
+   * Inventory management is locked while these arena reservations are active. */
+  readonly reservedSlots = new Map<number, number>();
 
   get selectedStack(): ItemStack | null {
     return this.slots[this.selected];
@@ -68,7 +71,7 @@ export class Inventory {
     }
     // then empty slots
     for (let i = 0; i < INV_SIZE && left > 0; i++) {
-      if (!this.slots[i]) {
+      if (!this.slots[i] && (!this.reservedSlots.has(i) || this.reservedSlots.get(i) === id)) {
         const take = Math.min(left, maxStack(id));
         this.slots[i] = meta ? { ...meta, id, count: take } : { id, count: take };
         left -= take;
@@ -81,7 +84,8 @@ export class Inventory {
   /** Room for at least one item of this id (storage slots only)? */
   canAccept(id: number): boolean {
     return this.slots.slice(0, INV_SIZE).some(
-      (s) => !s || (s.id === id && s.count < maxStack(id))
+      (s, i) => (!s && (!this.reservedSlots.has(i) || this.reservedSlots.get(i) === id)) ||
+        (!!s && s.id === id && s.count < maxStack(id))
     );
   }
 

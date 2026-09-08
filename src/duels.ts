@@ -622,7 +622,7 @@ export class Duels {
       lobby.participants.delete(playerId);
     }
     lobby.arenaReady?.delete(playerId);
-    if (lobby.participants.size === 0) {
+    if (![...lobby.participants.values()].some(p => p.connected)) {
       this.releaseArena(lobby);
       this.lobbies.delete(lobby.token);
       return { deleted: true, token: lobby.token };
@@ -831,7 +831,7 @@ export class Duels {
     }
   }
   membersOf(playerId: number): number[] {
-    return [...(this.lobbyByPlayer.get(playerId)?.participants.keys() ?? [])];
+    return [...(this.lobbyByPlayer.get(playerId)?.participants.values() ?? [])].filter(p=>p.connected).map(p=>p.id);
   }
   sameMatch(a: number, b: number): boolean {
     const lobby = this.lobbyByPlayer.get(a);

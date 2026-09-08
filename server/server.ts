@@ -576,7 +576,6 @@ setInterval(() => {
   dispatch(game.tickTurrets(dt));
   dispatch(game.tickWar(dt)); // advances worldTime + the shrinking border
   dispatch(game.tickDuels());
-  dispatch(game.tickBedwars(dt)); // inherits the worldTime tickWar just advanced
   dispatch(game.tickParty());
   dispatch(game.tickSeason(dt));
   dispatch(game.tickPolitics(dt)); // weekly elections + the coalesced treasury sync

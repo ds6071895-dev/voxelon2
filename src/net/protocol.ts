@@ -17,7 +17,7 @@ import type {
 import type { DuelArenaBounds, DuelLobbySnapshot, DuelResult } from '../duels';
 import type { BwArenaBounds, BwLobbySnapshot, BwResult, BwStage } from '../bedwars';
 import type {
-  PartyArenaBounds, PartyGameId, PartyLobbySnapshot, PartyResult, PartySubBounds,
+  PartyArenaBounds, PartyLobbySnapshot, PartyMode, PartyResult, PartySubBounds,
 } from '../partygames';
 import type { DuelFlair, DuelPublicProfile } from '../duels_progression';
 import type { PoliticsState } from '../politics';
@@ -267,18 +267,27 @@ export type ClientMsg =
   | { t: 'bwMelee'; target: number }
   | { t: 'bwBed'; x: number; y: number; z: number }
   | { t: 'bwShopBuy'; entry: number }
-  // Party Games. Same shape as the other two: lobby verbs are always routable,
-  // the in-match verbs exist only behind `routePartyInMatch`.
-  | { t: 'partyCreate' }
-  | { t: 'partyQueue'; join: boolean }
+  // The Bridge and Parkour share this session family. Same shape as the other
+  // two modes: lobby verbs are always routable, the in-match verbs exist only
+  // behind `routePartyInMatch`.
+  | { t: 'partyCreate'; mode?: PartyMode }
+  | { t: 'partyQueue'; join: boolean; mode?: PartyMode }
   | { t: 'partyJoin'; token: string }
   | { t: 'partyLeave' }
   | { t: 'partyReady'; ready: boolean }
   | { t: 'partyStart' }
-  | { t: 'partyArenaReady' }
-  /** Knockback Arena only. Like `bwMelee`, one target id and nothing else. */
+  | { t: 'partyArenaReady'; revision: number }
+  /** Parkour only: give up on the current jump and return to your checkpoint. */
+  | { t: 'partyRetry' }
+  /** The Bridge only. Like `bwMelee`, the attacker sends a target id and
+   *  NOTHING else: charge, combo, crit, damage and knockback are all computed
+   *  server-side from the swing clock and the server's own positions. */
   | { t: 'partyMelee'; target: number }
-  | { t: 'xform'; x: number; y: number; z: number; yaw: number; pitch: number;
+  /** The Bridge only: release the bow. `power` is the client's own draw, and
+   *  the server independently caps it by how long the bow was actually down —
+   *  a client claiming a full draw it did not wait for gets the draw it did. */
+  | { t: 'partyShoot'; dx: number; dy: number; dz: number; power: number }
+  | { t: 'xform'; arenaRevision?: number; x: number; y: number; z: number; yaw: number; pitch: number;
       gliding?: boolean; boating?: boolean; seated?: boolean;
       sneaking?: boolean; held?: number; armor?: number[]; swing?: number;
       aiming?: boolean; reloading?: boolean }
@@ -481,7 +490,7 @@ export type ServerMsg =
       'not_everyone_ready' | 'not_in_lobby' | 'cannot_afford' | 'too_far'; message: string }
   | { t: 'bwArena'; arena: BwArenaBounds; spawn: { x: number; y: number; z: number };
       team: number; countdownEndsAt: number }
-  | { t: 'bwLoadout'; slots: (ItemStack | null)[]; selected: number; axe: number }
+  | { t: 'bwLoadout'; slots: (ItemStack | null)[]; selected: number; axe: number; upgrade?: boolean }
   | { t: 'bwResources'; iron: number; gold: number; diamond: number }
   /** Attacker-only feedback. `hitconfirm` cannot carry crit/combo/charge, and
    *  those three are what the swing UI is made of. */
@@ -501,16 +510,20 @@ export type ServerMsg =
   | { t: 'partyError'; code: 'invalid' | 'full' | 'match_in_progress' |
       'already_in_lobby' | 'not_host' | 'too_few_players' | 'too_many_players' |
       'not_everyone_ready' | 'not_in_lobby'; message: string }
-  | { t: 'partyArena'; arena: PartyArenaBounds; sub: PartySubBounds;
+  | { t: 'partyArena'; arena: PartyArenaBounds; sub: PartySubBounds; team: number;
       spawn: { x: number; y: number; z: number }; countdownEndsAt: number }
-  | { t: 'partyRound'; game: PartyGameId; index: number; title: string; rule: string;
-      sub: PartySubBounds; spawn: { x: number; y: number; z: number }; endsAt: number }
   | { t: 'partyLoadout'; slots: (ItemStack | null)[]; selected: number }
-  /** Color Chaos: the colour being called, and when the rest of the floor drops. */
-  | { t: 'partyCall'; colour: number; vanishAt: number; restoreAt: number }
-  | { t: 'partyEliminated'; id: number; place: number; reason: 'void' | 'sludge' | 'left' }
-  | { t: 'partyIntermission'; endsAt: number; nextGame?: PartyGameId;
-      standings: { id: number; username: string; points: number }[] }
+  /** Attacker-only feedback, the same shape as `bwHit`: `hitconfirm` cannot
+   *  carry crit/combo/charge, and those three are what the swing UI is. */
+  | { t: 'partyHit'; target: number; amount: number; combo: number; charge: number;
+      crit: boolean; killed: boolean; ranged: boolean }
+  /** An arrow left a bow. The flight is deterministic from this payload, so
+   *  every client draws the same arc; the server flies its own copy and is the
+   *  only thing that decides what the arrow hits. */
+  | { t: 'partyArrow'; id: number; by: number; x: number; y: number; z: number;
+      dx: number; dy: number; dz: number; speed: number; power: number }
+  /** That arrow is finished — it hit somebody, hit the world, or timed out. */
+  | { t: 'partyArrowEnd'; id: number; x: number; y: number; z: number; hit: boolean }
   | { t: 'partyResult'; result: PartyResult }
   | { t: 'arenaRestored'; x: number; y: number; z: number; yaw: number; pitch: number;
       health: number; dead: boolean; mode: GameMode; state?: Record<string, unknown> }

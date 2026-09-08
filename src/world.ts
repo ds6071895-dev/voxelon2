@@ -36,8 +36,12 @@ export interface ChunkShaderUniforms {
   skyTint: { value: THREE.Color };
   /** Seconds since the world loaded, for the water animation. */
   time: { value: number };
-  /** Unit vector toward the sun, in world space. */
-  sunDir: { value: THREE.Vector3 };
+  /** Unit vector toward whichever body is lighting the world — the sun by day,
+   *  the MOON by night. The shadow pass casts down this same vector, and the
+   *  water puts its glitter on it, so a moonlit lake gets a moon trail. */
+  lightDir: { value: THREE.Vector3 };
+  /** How night it is, 0..1. Drives the night treatment in the chunk shader. */
+  night: { value: number };
   /** The sky colour at the horizon, which is what water reflects. */
   skyColor: { value: THREE.Color };
   /** 1 on the `max` preset, 0 below it. Gates the water treatment, which is
@@ -57,14 +61,17 @@ uniform float uArenaLight;
 uniform vec3 uSunTint;
 uniform vec3 uSkyTint;
 uniform float uTime;
-uniform vec3 uSunDir;
+uniform vec3 uLightDir;
+uniform float uNight;
 uniform vec3 uWaterSky;
 uniform float uShaderMode;
 uniform sampler2D uShadowMap;
 uniform mat4 uShadowMatrix;
 uniform vec3 uShadowParams;
+uniform vec3 uShadeOrigin;
 varying vec2 vSkyBlock;
 varying vec3 vWorldPos;
+varying vec3 vRelPos;
 
 // Matches three.js's packDepthToRGBA, which is what the shadow pass writes.
 //
@@ -83,16 +90,20 @@ float voxUnpackDepth(const in vec4 v) {
 }
 
 /**
- * How much of the sun reaches this fragment: 1 in the open, 0 in full shade.
+ * How much of the LIGHT reaches this fragment: 1 in the open, 0 in full shade.
+ * The light is the sun by day and the moon by night — same maths, same map,
+ * and uShadowParams.z is what makes a moon shadow a fraction as deep.
  *
- * Two things are folded in. A face turned away from the sun cannot be lit by
+ * Two things are folded in. A face turned away from the light cannot be lit by
  * it however clear the sky is, which is the cheap half. The other half is the
  * shadow map, sampled nine times in a small square so the edge is a soft
  * gradient over a few texels instead of a staircase.
+ *
+ * relPos is measured from uShadeOrigin, never absolute — see below.
  */
-float voxSunVisibility(vec3 worldPos, vec3 n) {
+float voxSunVisibility(vec3 relPos, vec3 n) {
   if (uShadowParams.x < 0.5) return 1.0;
-  float ndl = dot(n, uSunDir);
+  float ndl = dot(n, uLightDir);
   float facing = smoothstep(0.0, 0.32, ndl);
   if (facing <= 0.0) return 0.0;
   // Normal offset. A voxel face is exactly flat, so its own depth sits right
@@ -101,7 +112,13 @@ float voxSunVisibility(vec3 worldPos, vec3 n) {
   // lookup a third of a block off the surface along its own normal moves the
   // whole face clear of that in one step, and unlike a plain depth bias it
   // does not detach the shadow from the foot of what casts it.
-  vec3 p = worldPos + n * 0.30 + uSunDir * 0.05;
+  //
+  // The point stays ORIGIN-RELATIVE through the projection: uShadowMatrix
+  // carries the shift back to world space, folded in on the CPU in float64.
+  // Feeding this multiply an absolute x of 262 144 — a Parkour arena — makes
+  // its intermediates cancel from ~1.6e3 down to a 0..1 coordinate, and float32
+  // has nothing left at that scale. See ShadowUniforms.origin in shadows.ts.
+  vec3 p = relPos + n * 0.30 + uLightDir * 0.05;
   vec4 sc = uShadowMatrix * vec4(p, 1.0);
   vec3 c = sc.xyz;
   // Outside the map is "unshadowed", not "black": the box only covers the
@@ -123,12 +140,26 @@ float voxSunVisibility(vec3 worldPos, vec3 n) {
   return facing * (sum / 9.0);
 }
 
-/** The face normal, recovered from how world position changes across the
- *  screen. Voxel faces are flat, so this is exact, and it saves carrying a
- *  normal attribute on every vertex of every chunk. */
+/** Direction from this fragment to the eye, measured in the origin-relative
+ *  frame so it is not a difference of two six-figure numbers. */
+vec3 voxViewDir() {
+  return normalize((cameraPosition - uShadeOrigin) - vRelPos);
+}
+
+/** The face normal, recovered from how position changes across the screen.
+ *  Voxel faces are flat, so this is exact, and it saves carrying a normal
+ *  attribute on every vertex of every chunk.
+ *
+ *  It differentiates the ORIGIN-RELATIVE position, not the world one. A
+ *  derivative is the difference between two neighbouring pixels' values, and
+ *  one pixel of ground is a hundredth of a block wide — smaller than the 1/32
+ *  spacing float32 has left at an arena's x = 262 144. Differentiating the
+ *  absolute position there returns quantization steps instead of a slope, the
+ *  cross product of two of those is a random vector, and the whole lit surface
+ *  breaks into grain. Relative to the eye the same value is small and smooth. */
 vec3 voxFaceNormal() {
-  vec3 n = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos)));
-  return dot(n, cameraPosition - vWorldPos) < 0.0 ? -n : n;
+  vec3 n = normalize(cross(dFdx(vRelPos), dFdy(vRelPos)));
+  return dot(n, (cameraPosition - uShadeOrigin) - vRelPos) < 0.0 ? -n : n;
 }
 `;
 
@@ -160,12 +191,14 @@ function applyLightShader(
     shader.uniforms.uSunTint = u.sunTint;
     shader.uniforms.uSkyTint = u.skyTint;
     shader.uniforms.uTime = u.time;
-    shader.uniforms.uSunDir = u.sunDir;
+    shader.uniforms.uLightDir = u.lightDir;
+    shader.uniforms.uNight = u.night;
     shader.uniforms.uWaterSky = u.skyColor;
     shader.uniforms.uShaderMode = u.shaderMode;
     shader.uniforms.uShadowMap = u.shadow.map;
     shader.uniforms.uShadowMatrix = u.shadow.matrix;
     shader.uniforms.uShadowParams = u.shadow.params;
+    shader.uniforms.uShadeOrigin = u.shadow.origin;
 
     // --- vertex
     const wave = water ? /* glsl */`
@@ -185,21 +218,32 @@ function applyLightShader(
       .replace(
         '#include <common>',
         '#include <common>\nattribute vec2 skyblock;\nvarying vec2 vSkyBlock;\n'
-        + 'varying vec3 vWorldPos;\nuniform float uTime;\nuniform float uShaderMode;'
+        + 'varying vec3 vWorldPos;\nvarying vec3 vRelPos;\nuniform vec3 uShadeOrigin;\n'
+        + 'uniform float uTime;\nuniform float uShaderMode;'
       )
       .replace(
         '#include <begin_vertex>',
         '#include <begin_vertex>\nvSkyBlock = skyblock;\n'
         + 'vec3 worldSeed = (modelMatrix * vec4(transformed, 1.0)).xyz;\n'
         + wave
-        + 'vWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;'
+        + 'vWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\n'
+        // The same point, measured from the shading origin — and measured that
+        // way from the START rather than by subtracting the line above, which
+        // would only hand on the precision that line has already lost. The
+        // chunk's own origin is a whole number of blocks and so is uShadeOrigin,
+        // so their difference is exact in float32 (both are well under 2^24),
+        // and adding a chunk-local offset to it costs nothing either. Measured
+        // at 262 144 the absolute value has a spacing of 1/32 of a block; a few
+        // hundred blocks from the eye it is 3e-5. See shadows.ts, ShadowUniforms.
+        + 'vRelPos = mat3(modelMatrix) * transformed'
+        + ' + (modelMatrix[3].xyz - uShadeOrigin);'
       );
 
     // --- fragment
     const waterBody = water ? /* glsl */`
       // WATER. Everything above shaded it as though it were another solid
       // block; this turns that flat pane into a surface with a sky in it.
-      vec3 viewDir = normalize(cameraPosition - vWorldPos);
+      vec3 viewDir = voxViewDir();
       // Only the (near) horizontal top gets the treatment. The vertical sides
       // of a waterfall keep the plain look, which is also what stops the
       // reflection appearing on a wall of falling water. Below the shader
@@ -230,7 +274,7 @@ function applyLightShader(
 
       // Sun glitter: a tight specular lobe that the ripples break into moving
       // sparkles, and which the shadow map can put out under a cliff.
-      vec3 halfDir = normalize(viewDir + uSunDir);
+      vec3 halfDir = normalize(viewDir + uLightDir);
       float spec = pow(max(dot(wetN, halfDir), 0.0), 96.0)
         * surf * uSunLight * sunVis;
       diffuseColor.rgb += uSunTint * spec * 1.7;
@@ -253,7 +297,7 @@ function applyLightShader(
           || vWorldPos.z >= uArenaBounds.w)) discard;
 
         vec3 faceN = voxFaceNormal();
-        float sunVis = voxSunVisibility(vWorldPos, faceN);
+        float sunVis = voxSunVisibility(vRelPos, faceN);
 
         // Direct sunlight, minus whatever the shadow map says is in the way.
         float direct = vSkyBlock.x * uSunLight
@@ -292,6 +336,17 @@ function applyLightShader(
         diffuseColor.rgb *= mix(vec3(1.0), vec3(0.86, 1.08, 1.10), aurora * 0.34);
         // Warm the torch-lit pixels (firelight tint).
         diffuseColor.rgb *= mix(vec3(1.0), vec3(1.15, 1.05, 0.85), clamp(torch, 0.0, 1.0));
+        // NIGHT. Moonlight is not the day with the brightness turned down. In
+        // the dark the eye's colour cones give out (the Purkinje shift): what
+        // is left drains toward silver-blue, while anything ACTUALLY bright —
+        // a torch, lava, a lit window — keeps its warmth and becomes the only
+        // real colour in the frame. Keying it on darkness rather than on the
+        // clock is what separates the two instead of washing everything blue.
+        float nightLum = dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722));
+        float scotopic = uNight
+          * (1.0 - smoothstep(0.10, 0.52, max(nightLum, clamp(torch, 0.0, 1.0))));
+        diffuseColor.rgb = mix(diffuseColor.rgb,
+          vec3(nightLum) * vec3(0.74, 0.92, 1.34), scotopic * 0.5);
         ` + waterBody
       );
   };
@@ -330,8 +385,11 @@ export class World {
   readonly arenaLightUniform = { value: 0 };
   /** Seconds since load, driving the water animation. */
   readonly timeUniform = { value: 0 };
-  /** Unit vector toward the sun, shared with the shadow pass. */
-  readonly sunDirUniform = { value: new THREE.Vector3(0, 1, 0) };
+  /** Unit vector toward the body that is lighting the world — the sun by day,
+   *  the moon by night. Shared with the shadow pass, which casts down it. */
+  readonly lightDirUniform = { value: new THREE.Vector3(0, 1, 0) };
+  /** How night it is, 0..1. Drives the night treatment in the chunk shader. */
+  readonly nightUniform = { value: 0 };
   /** Horizon colour, which is what the water surface reflects. */
   readonly skyColorUniform = { value: new THREE.Color(0.55, 0.72, 0.95) };
   /** 1 while the `max` preset is on; see ChunkShaderUniforms.shaderMode. */
@@ -344,6 +402,7 @@ export class World {
     map: { value: null },
     matrix: { value: new THREE.Matrix4() },
     params: { value: new THREE.Vector3(0, 1 / 2048, 0) },
+    origin: { value: new THREE.Vector3() },
   };
   /** Probability a broken block drops items (explosions lower it). */
   dropChance = 1;
@@ -400,7 +459,8 @@ export class World {
       arenaBounds: this.arenaBoundsUniform, arenaLight: this.arenaLightUniform,
       sunTint: this.sunTintUniform,
       skyTint: this.skyTintUniform, time: this.timeUniform,
-      sunDir: this.sunDirUniform, skyColor: this.skyColorUniform,
+      lightDir: this.lightDirUniform, night: this.nightUniform,
+      skyColor: this.skyColorUniform,
       shaderMode: this.shaderModeUniform, shadow: this.shadowUniforms,
     };
     applyLightShader(this.opaqueMat, shaderUniforms, false);
@@ -446,6 +506,16 @@ export class World {
     this.arenaLightUniform.value = bounds ? ambientFloor : 0;
   }
 
+
+  /** Drop a retired procedural arena, including its placed-block overlay. */
+  invalidateArena(bounds: { minX:number; maxX:number; minZ:number; maxZ:number }): void {
+    for(let cx=Math.floor(bounds.minX/16);cx<=Math.floor((bounds.maxX-1)/16);cx++)
+      for(let cz=Math.floor(bounds.minZ/16);cz<=Math.floor((bounds.maxZ-1)/16);cz++){
+        const key=Chunk.key(cx,cz),chunk=this.chunks.get(key);
+        if(chunk){this.disposeMeshes(chunk);this.chunks.delete(key);}
+        this.editOverlay.delete(key);
+      }
+  }
 
   private ensureData(cx: number, cz: number): Chunk {
     const key = Chunk.key(cx, cz);

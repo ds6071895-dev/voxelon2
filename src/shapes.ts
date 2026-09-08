@@ -22,6 +22,7 @@ const BOTTOM: Box[] = [SLAB_BOTTOM];
 const TOP: Box[] = [SLAB_TOP];
 const PLATE: Box[] = [PLATE_BOX];
 const NONE: Box[] = [];
+const BED: Box[] = [[[0, 0, 0], [1, 0.62, 1]]];
 
 /** The sub-boxes that make up a stairs block facing dir (0=N 1=E 2=S 3=W): a
  *  bottom slab plus a top quarter on the `facing` side (the tall step). */
@@ -38,6 +39,7 @@ export function stairBoxes(facing: number): Box[] {
  *  non-solid blocks (air/water/plants/torches). */
 export function collisionBoxes(id: number): Box[] {
   if (!isSolid(id)) return NONE;
+  if (id === Block.BwBedA || id === Block.BwBedB) return BED;
   const shape = BLOCKS[id].shape;
   if (shape === 'slab') {
     // Thin pressure/spring plates: the landmine and the retracted wall trap.

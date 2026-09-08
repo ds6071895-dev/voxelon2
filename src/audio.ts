@@ -737,6 +737,31 @@ export class GameAudio {
     }
   }
 
+  // --- The Bridge: bow ------------------------------------------------------
+
+  /** The draw. A short creak per step of the pull, rising in pitch, so a full
+   *  draw is something you HEAR arrive rather than something you time. */
+  bowDraw(step: number): void {
+    const t = Math.max(0, Math.min(1, step));
+    this.noise({ freq: 300 + 900 * t, dur: 0.05, gain: 0.05 + 0.03 * t, slideTo: 240, type: 'bandpass', q: 2.2 });
+  }
+
+  /** The release. A string snap over the shaft leaving; a full draw adds the
+   *  low whump that says the shot was worth waiting for. */
+  bowRelease(power: number): void {
+    const p = Math.max(0, Math.min(1, power));
+    this.noise({ freq: 1400 + 900 * p, dur: 0.09, gain: 0.12 + 0.12 * p, slideTo: 300, type: 'bandpass', q: 1.4 });
+    this.tone({ type: 'triangle', from: 420 + 260 * p, to: 150, dur: 0.13, gain: 0.10 + 0.06 * p });
+    if (p > 0.9) this.tone({ type: 'sine', from: 150, to: 62, dur: 0.3, gain: 0.12 });
+  }
+
+  /** An arrow arriving: a hard tock, brighter when it was a full-draw hit. */
+  arrowHit(crit: boolean, pos?: THREE.Vector3): void {
+    this.noise({ freq: 1100, dur: 0.06, gain: 0.2, slideTo: 200, type: 'bandpass', q: 1.1, pos });
+    this.tone({ type: 'triangle', from: 520, to: 180, dur: 0.1, gain: 0.16, pos });
+    if (crit) this.tone({ type: 'sine', from: 2100, to: 1500, dur: 0.18, gain: 0.08, pos });
+  }
+
   /** A bed goes down. The loudest thing in the mode, because it is the moment
    *  the match changes shape: a splintering crack over a falling sub-bass. */
   bedBreak(pos?: THREE.Vector3): void {

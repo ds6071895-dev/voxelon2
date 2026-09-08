@@ -2592,7 +2592,7 @@ function paintArenaRim(p: Painter, seed: number): void {
   });
 }
 
-/** A Party Games floor tile: a bold flat colour with a bevelled border, so a
+/** A minigame floor tile: a bold flat colour with a bevelled border, so a
  *  called colour is unmistakable at a glance from across the arena. */
 function paintPartyTile(base: RGBA) {
   return (p: Painter, seed: number): void => {
@@ -2638,6 +2638,46 @@ function paintKnockbackStick(p: Painter, seed: number): void {
   }
   for (const [dx, dy] of [[0, 0], [2, 1], [1, 3], [3, 2], [-1, 2]]) {
     p.set(13 + dx - 1, 1 + dy, spark);
+  }
+}
+
+/** The Bridge's bow: a curved limb, a taut string and a nocked shaft. */
+function paintBridgeBow(p: Painter, seed: number): void {
+  p.fill(() => [0, 0, 0, 0]);
+  const limb: RGBA = [146, 100, 58, 255];
+  const horn: RGBA = [206, 168, 96, 255];
+  const string: RGBA = [230, 236, 244, 255];
+  const shaft: RGBA = [176, 150, 116, 255];
+  const head: RGBA = [206, 220, 238, 255];
+  const fletch: RGBA = [232, 96, 118, 255];
+  // Limb: a C opening to the right, deepest at the grip.
+  for (let y = 2; y <= 13; y++) {
+    const t = (y - 7.5) / 5.5;
+    const x = 9 - Math.round(4 * (1 - t * t));
+    p.set(x, y, shade(limb, 0.86 + hash2(seed, x, y) * 0.26));
+    p.set(x + 1, y, shade(limb, 0.66));
+  }
+  for (const y of [2, 13]) p.set(9, y, horn);
+  for (let y = 3; y <= 12; y++) p.set(9, y, string);   // the string, drawn taut
+  for (let x = 9; x <= 14; x++) p.set(x, 7, shade(shaft, 0.9 + hash2(seed, x, 7) * 0.2));
+  for (const [x, y] of [[15, 7], [14, 6], [14, 8]]) p.set(x, y, head);
+  for (const [x, y] of [[9, 6], [9, 8], [10, 6], [10, 8]]) p.set(x, y, fletch);
+}
+
+/** A quiver arrow: shaft, fletching, glinting head. */
+function paintBridgeArrow(p: Painter, seed: number): void {
+  p.fill(() => [0, 0, 0, 0]);
+  const shaft: RGBA = [176, 150, 116, 255];
+  const head: RGBA = [206, 220, 238, 255];
+  const fletch: RGBA = [232, 96, 118, 255];
+  for (let i = 0; i < 13; i++) {
+    const x = 2 + i, y = 13 - i;
+    p.set(x, y, shade(shaft, 0.88 + hash2(seed, x, y) * 0.24));
+  }
+  for (const [dx, dy] of [[14, 1], [13, 1], [14, 2], [15, 1], [14, 0]]) p.set(dx, dy, head);
+  for (let i = 0; i < 4; i++) {
+    p.set(2 + i, 14 - i, fletch);
+    p.set(1 + i, 13 - i, shade(fletch, 0.8));
   }
 }
 
@@ -2883,6 +2923,8 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.PartyTileD]: paintPartyTile([74, 182, 96, 255]),
   [Tile.VoidCleaver]: paintVoidCleaver,
   [Tile.KnockbackStick]: paintKnockbackStick,
+  [Tile.BridgeBow]: paintBridgeBow,
+  [Tile.BridgeArrow]: paintBridgeArrow,
   // Vault Brute: a hulking mossy-stone zombie — pale glowing eyes, heavy jaw.
   [Tile.BruteSkin]: paintSkin([98, 112, 86, 255], 0.18, [72, 84, 62, 255]),
   [Tile.BruteFace]: paintFace([98, 112, 86, 255], [235, 245, 170, 255],

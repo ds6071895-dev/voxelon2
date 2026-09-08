@@ -18,8 +18,8 @@
     "duels-smoke": "esbuild scripts/duels_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/duels-smoke.cjs --log-level=error && node node_modules/.tmp/duels-smoke.cjs",
     "politics-smoke": "esbuild scripts/politics_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/politics-smoke.cjs --log-level=error && node node_modules/.tmp/politics-smoke.cjs",
     "minigame-smoke": "esbuild scripts/minigame_isolation_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/minigame-smoke.cjs --log-level=error && node node_modules/.tmp/minigame-smoke.cjs",
-    "bedwars-smoke": "esbuild scripts/bedwars_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/bedwars-smoke.cjs --log-level=error && node node_modules/.tmp/bedwars-smoke.cjs",
-    "party-smoke": "esbuild scripts/partygames_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/party-smoke.cjs --log-level=error && node node_modules/.tmp/party-smoke.cjs"
+    "party-smoke": "esbuild scripts/partygames_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/party-smoke.cjs --log-level=error && node node_modules/.tmp/party-smoke.cjs",
+    "parkour-smoke": "esbuild scripts/parkour_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/parkour-smoke.cjs --log-level=error && node node_modules/.tmp/parkour-smoke.cjs"
   },
   "dependencies": {
     "three": "^0.165.0",

@@ -18,7 +18,7 @@
 // asserts the consequences rather than trusting anyone to remember them.
 
 import { Block } from './blocks';
-import { Item } from './items';
+import { MinigameItemId } from './minigame_item_ids';
 
 /** Ids that exist ONLY inside a minigame arena. */
 export const MINIGAME_ONLY: ReadonlySet<number> = new Set<number>([
@@ -35,11 +35,15 @@ export const MINIGAME_ONLY: ReadonlySet<number> = new Set<number>([
   Block.TeamWoolB,
   Block.PartyTileC,
   Block.PartyTileD,
-  // Arena weapons. Neither may ever reach an open-world inventory: the Void
-  // Cleaver because melee PvP does not exist outside Bedwars, the Knockback
-  // Stick because nothing in the world should launch a player 9 m/s sideways.
-  Item.VoidCleaver,
-  Item.KnockbackStick,
+  // Arena weapons. None may ever reach an open-world inventory: the Void
+  // Cleaver and the Bridge Bow because hand-to-hand and arrow PvP exist only
+  // inside The Bridge, the Knockback Stick because nothing in the world should
+  // launch a player 9 m/s sideways.
+  MinigameItemId.VoidCleaver,
+  MinigameItemId.KnockbackStick,
+  // The Bridge's bow and its arrows. Ranged PvP exists in exactly one venue.
+  MinigameItemId.BridgeBow,
+  MinigameItemId.BridgeArrow,
 ]);
 
 export function isMinigameOnly(id: number): boolean {

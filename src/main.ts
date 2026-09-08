@@ -78,9 +78,9 @@ import {
   PresidentUI, type GovernActions, type GovernData, type PresidentView,
 } from './president_ui';
 import {
-  type PoliticsState, castVote, disbandParty, electionOf, foundParty,
-  governmentOf, isPresident, newPolitics, pushBroadcast, rollCycle,
-  sanitizePolitics, setKit, setTaxRate, tallyElection,
+  type PoliticsState, OFFLINE_TERM_MS, castVote, disbandParty, electionOf,
+  foundParty, governmentOf, isPresident, newPolitics, pushBroadcast, rollCycle,
+  sanitizePolitics, setKit, setTaxRate, tallyElection, termExpired, voteCounts,
 } from './politics';
 import {
   deposit, kitCost, kitStacks, levy, newTreasuries, newTreasury,
@@ -110,18 +110,14 @@ import {
   duelTokenFromUrl, withDuelToken,
 } from './duels';
 import {
-  BEDWARS_AMBIENT_LIGHT, BEDWARS_ARENA_SIZE, BEDWARS_CEILING_Y, BEDWARS_HP_PER_HEART,
-  BEDWARS_MAX_HEALTH, BEDWARS_VOID_Y, BW_AXE_TIERS, BW_MELEE_RANGE,
-  bedwarsBedTeamAt, bedwarsBlockAt, bedwarsShopCells, bedwarsTeamWool, clampToBedwarsArena,
-  type BwArenaBounds, type BwLobbySnapshot,
-} from './bedwars';
-import { BedwarsUI, bedwarsResultCopy } from './bedwars_ui';
-import {
-  PARTY_AMBIENT_LIGHT, PARTY_KNOCKBACK_TIER, PARTY_MAX_HEALTH, PARTY_MIN_PLAYERS,
-  clampToPartySub, partyCanBreak,
-  type PartyGameId, type PartyLobbySnapshot, type PartySubBounds,
+  PARTY_AMBIENT_LIGHT, PARTY_MAX_HEALTH, PARTY_FLOOR_Y, PARTY_VOID_Y,
+  BRIDGE_TEAM_BLOCK, BRIDGE_TEAM_NAME, BRIDGE_BOW_MIN_POWER, bridgeBowPower,
+  bridgeGoalGuard, clampToPartySub, registerPartyArena, parkourCourse,
+  type PartyLobbySnapshot, type PartyMode, type PartySubBounds,
 } from './partygames';
-import { PartyUI, partyEliminationText, partyResultCopy } from './party_ui';
+import { PartyUI } from './party_ui';
+import { PartyVisuals } from './party_visuals';
+import { parkourTheme } from './parkour_themes';
 import {
   DUEL_DIVISIONS, DUEL_FLAIRS, DUEL_SIGILS, DUEL_SIGIL_SIZE, DUEL_TIER_THEMES,
   DuelProgressChange, DuelPublicProfile,
@@ -1488,8 +1484,7 @@ function updateCombatFeedback(dt: number): void {
     else killChipEl.style.opacity = String(Math.min(1, killChipT / 0.45));
   }
   killBanner.update(dt);
-  updateBedwarsFrame();
-  updatePartyFrame();
+  updatePartyFrame(dt);
 
   // The red rim from the last hit taken, plus a permanent low-health bed under
   // it. Both are capped hard when photosensitivity-safe mode is on.
@@ -1578,12 +1573,23 @@ function offlineLevy(id: number, count: number): number {
   if (banked > 0) { saveOfflinePolitics(); refreshGovernment(); }
   return count - banked;
 }
-function spillStacks(stacks: ItemStack[], x: number, y: number, z: number): void {
-  if (!stacks.length) return;
+/**
+ * Tip a set of stacks onto the ground. Returns whether they actually got there:
+ * a caller that has already taken the items out of the inventory (the death
+ * spill) has to know, because a socket that closed a moment ago accepts the
+ * send and discards it — see `NetClient.raw`.
+ */
+function spillStacks(
+  stacks: ItemStack[], x: number, y: number, z: number,
+  reason: 'harvest' | 'manual' = 'harvest'
+): boolean {
+  if (!stacks.length) return true;
   if (net.connected) {
-    net.sendDrop(stacks.map((s) => ({ id: s.id, count: s.count })), x, y, z, 'harvest');
+    return net.sendDrop(
+      stacks.map((s) => ({ id: s.id, count: s.count })), x, y, z, reason);
   }
-  else for (const s of stacks) itemEntities.spawn(x, y, z, s.id, s.count);
+  for (const s of stacks) itemEntities.spawn(x, y, z, s.id, s.count);
+  return true;
 }
 function dropCurrentItem(entireStack = false): void {
   const stack = inventory.selectedStack;
@@ -1906,8 +1912,9 @@ invUI.onClose = () => {
   openMachine = null; // machine actions sync immediately; nothing to flush
   openTurret = null;  // turret actions also sync immediately
 };
-const spillAtPlayer = (stacks: ItemStack[]) =>
-  spillStacks(stacks, player.pos.x, player.pos.y + 1, player.pos.z);
+const spillAtPlayer = (
+  stacks: ItemStack[], reason: 'harvest' | 'manual' = 'harvest'
+) => spillStacks(stacks, player.pos.x, player.pos.y + 1, player.pos.z, reason);
 invUI.onOverflow = spillAtPlayer;
 // Lifesteal: crafting a Heart item bottles one of YOUR hearts. Veto the craft
 // at the withdrawal floor; a successful craft tells the server to deduct the
@@ -2328,12 +2335,14 @@ function saveOfflinePolitics(): void {
 }
 
 function loadOfflinePolitics(): void {
-  politicsState = newPolitics(Date.now());
+  politicsState = newPolitics(Date.now(), OFFLINE_TERM_MS);
   for (const f of FACTIONS) offlineTreasuries.set(f.id, newTreasury(f.id));
   try {
     const raw = JSON.parse(localStorage.getItem(offlinePoliticsKey()) || 'null');
     if (!raw || typeof raw !== 'object') return;
-    politicsState = sanitizePolitics(raw.politics, Date.now());
+    // OFFLINE_TERM_MS also re-clamps a save written before offline elections ran
+    // on a clock, whose deadline is a week out and would never be reached.
+    politicsState = sanitizePolitics(raw.politics, Date.now(), OFFLINE_TERM_MS);
     for (const entry of Array.isArray(raw.treasuries) ? raw.treasuries : []) {
       if (!Array.isArray(entry) || entry.length !== 2) continue;
       const [faction, blob] = entry;
@@ -2342,28 +2351,46 @@ function loadOfflinePolitics(): void {
   } catch { /* keep the fresh state */ }
 }
 
+/** Seconds until the next offline election check; see the frame loop. */
+let offlineElectionTick = 1;
+
 /**
- * Offline elections resolve the moment you vote.
+ * The single-player election clock — offline's copy of `tickPolitics`.
  *
- * The rule is unchanged — it is the same `tallyElection` the server runs — but
- * with an electorate of exactly one there is nothing a week of waiting could
- * change about the result, and a single-player government you cannot actually
- * form is just a disabled menu.
+ * This used to resolve the instant a vote was cast, which put the player in
+ * office while the ballot was still open and the countdown still running: the
+ * screen said the election had not happened and the title bar said they had
+ * won it. Nobody takes the seat before the term ends now. The rules are the
+ * server's own, unchanged — `termExpired`, then `tallyElection`, then
+ * `rollCycle` — run on the short offline term so a week of real time is not
+ * standing between a single player and their own government.
+ *
+ * A term that expires with an EMPTY ballot box just gets extended. Rolling it
+ * would burn a cycle number every ninety seconds and have single-player open
+ * on "Term 412" of an election nobody has ever contested.
  */
-function settleOfflineElection(): void {
+function tickOfflineElection(): void {
+  if (net.connected || !isFaction(localFaction)) return;
   const e = electionOf(politicsState, localFaction);
-  if (!e) return;
+  const now = Date.now();
+  if (!e || !termExpired(e, now)) return;
+  if (!Object.keys(e.votes).length) { e.endsAt = now + OFFLINE_TERM_MS; return; }
   const before = e.president;
+  const counts = voteCounts(e);
   const { president, party } = tallyElection(e);
-  rollCycle(e, Date.now());
-  if (party && president !== before) {
-    pushNotification({
-      id: `local-election-${e.cycle}-${localFaction}`, kind: 'election',
-      title: `${party.name} wins the election`,
-      body: `${president} takes office for term ${e.cycle}.`,
-      at: Date.now(),
-    });
-  }
+  rollCycle(e, now, OFFLINE_TERM_MS);
+  saveOfflinePolitics();
+  refreshGovernment();
+  if (!party) return;
+  const votes = counts[party.id] ?? 0;
+  pushNotification({
+    id: `local-election-${e.cycle}-${localFaction}`, kind: 'election',
+    title: `${party.name} wins the election`,
+    body: `${president} takes office for term ${e.cycle} with ${votes} vote`
+      + `${votes === 1 ? '' : 's'}`
+      + `${before && before !== president ? `, unseating ${before}` : ''}.`,
+    at: now,
+  });
 }
 
 /**
@@ -2430,7 +2457,8 @@ const governActions: GovernActions = {
     if (net.connected) { net.sendVote(partyId); return; }
     const res = castVote(politicsState, localFaction, authedName, partyId);
     if (!res.ok) { presidentUI.setError(res.error ?? 'That vote cannot be cast.'); return; }
-    settleOfflineElection();
+    // The ballot goes in the box; `tickOfflineElection` opens it when the term
+    // runs out, exactly as the server does.
     saveOfflinePolitics();
     refreshGovernment();
   },
@@ -3347,6 +3375,7 @@ function showDuelLobby(): void { refreshArenaTabs(); showArenaView('lobby'); }
 function openMinigames(focusLobby = false): void {
   minigamesRestoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : minigamesBtn;
   refreshDuelsAvailability();
+  refreshPartyAvailability();
   refreshArenaTabs();
   minigamesModal.classList.add('open');
   minigamesModal.setAttribute('aria-hidden', 'false');
@@ -3481,6 +3510,7 @@ duelsCardAction.addEventListener('click', () => {
     return;
   }
   if (!duelQueued) {
+    if (duelSnapshot) { net.sendDuelLeave(); duelSnapshot = null; duelInviteToken = ''; setDuelParam(null); }
     // Matchmaking can launch as soon as another player arrives, so checkpoint
     // the open-world body before entering the queue rather than waiting for a
     // private-lobby Ready click.
@@ -3607,8 +3637,7 @@ let arenaActive = false;
 let arenaKind: ArenaKind | null = null;
 /** Display name of the mode currently borrowing this client's body. */
 function arenaModeName(): string {
-  return arenaKind === 'bedwars' ? 'Bedwars'
-    : arenaKind === 'party' ? 'Party Games'
+  return arenaKind === 'party' ? (partySnapshot?.mode === 'parkour' ? 'Parkour' : 'The Bridge')
     : 'Duels';
 }
 let arenaMaxHealth = 20;
@@ -3633,7 +3662,7 @@ let duelReadyWatchdog = 0;
  *  looked like from the other window. The watchdog below is a plain interval,
  *  and timers keep firing when frames do not. */
 function markDuelArenaReady(): void {
-  if (!arenaActive || duelArenaReadySent) return;
+  if (arenaKind !== 'duel' || duelArenaReadySent) return;
   duelArenaReadySent = true;
   net.sendDuelArenaReady();
   stopDuelReadyWatchdog();
@@ -3644,13 +3673,12 @@ function stopDuelReadyWatchdog(): void {
 }
 function startDuelReadyWatchdog(x: number, z: number): void {
   stopDuelReadyWatchdog();
-  const started = Date.now();
   duelReadyWatchdog = window.setInterval(() => {
     if (!arenaActive || duelArenaReadySent) { stopDuelReadyWatchdog(); return; }
     // Well inside the server's 30s gate. The frame loop still pins the player
     // at the spawn until the collision bubble is genuinely built, so readying
     // early costs nothing but never strands the match.
-    if (world.isLoaded(x, z) || Date.now() - started > 5_000) markDuelArenaReady();
+    if (world.update(x,z,30,2)) markDuelArenaReady();
   }, 250);
 }
 let duelCountdownEndsAt = 0;
@@ -3671,6 +3699,11 @@ let duelResultVoteStatus: HTMLElement | null = null;
 let duelResultRematch: HTMLButtonElement | null = null;
 /** Our own "run it back" click, held until the server snapshot agrees. */
 let duelRematchVoteSent = false;
+/** "Queue again" was pressed; re-enter matchmaking once the body comes back. */
+let duelRequeueOnReturn = false;
+/** True while this duel came from an invite link rather than matchmaking. Only
+ *  an invite lobby survives the match, so only it can offer a rematch vote. */
+function duelFromInvite(): boolean { return duelInviteToken !== ''; }
 let duelLocalFallback: {
   state: ReturnType<typeof inventory.serialize>;
   x: number; y: number; z: number; yaw: number; pitch: number;
@@ -4066,32 +4099,50 @@ function renderDuelResult(result: DuelResult): void {
     settle(accessibility.reducedMotion);
   }
   const controls = document.createElement('div'); controls.className = 'duel-result-controls';
-  const rematch = document.createElement('button'); rematch.type = 'button';
-  rematch.className = 'primary'; rematch.textContent = 'Run it back';
-  const lobby = document.createElement('button'); lobby.type = 'button'; lobby.textContent = 'Return to lobby';
-  rematch.addEventListener('click', () => {
+  // A private lobby has somewhere to go back TO, so it gets the rematch vote.
+  // A matchmade duel has no lobby and no one to vote with: the only two things
+  // you can do with that opponent gone are queue for another or walk away.
+  const invited = duelFromInvite();
+  const primary = document.createElement('button'); primary.type = 'button';
+  primary.className = 'primary'; primary.textContent = invited ? 'Run it back' : 'Queue again';
+  const leave = document.createElement('button'); leave.type = 'button';
+  leave.textContent = invited ? 'Return to lobby' : 'Go back';
+  primary.addEventListener('click', () => {
+    if (!invited) {
+      // The queue can only be joined from the open world, so the requeue is
+      // latched and fired by onDuelRestored once the server hands the body back.
+      primary.disabled = true; leave.disabled = true;
+      duelRequeueOnReturn = true;
+      voteStatus.textContent = 'Back to the queue\u2026';
+      net.sendDuelReturn();
+      return;
+    }
     // Latch it locally. updateDuelHud repaints this button every frame from the
     // authoritative snapshot, and until the vote round-trips that snapshot
     // still says "has not voted" — which un-pressed the button under the
     // player's cursor and invited a second click.
     duelRematchVoteSent = true;
-    rematch.disabled = true;
-    rematch.textContent = 'Vote sent';
+    primary.disabled = true;
+    primary.textContent = 'Vote sent';
     voteStatus.textContent = 'Waiting for the other players…';
     net.sendDuelRematch(true);
   });
-  lobby.addEventListener('click', () => {
-    rematch.disabled = true; lobby.disabled = true;
-    voteStatus.textContent = 'Returning to your lobby…';
+  leave.addEventListener('click', () => {
+    primary.disabled = true; leave.disabled = true;
+    duelRequeueOnReturn = false;
+    voteStatus.textContent = invited ? 'Returning to your lobby\u2026' : 'Leaving the arena\u2026';
     net.sendDuelReturn();
   });
   const voteStatus = document.createElement('p'); voteStatus.className = 'duel-result-summary';
-  duelResultVoteStatus = voteStatus; duelResultRematch = rematch;
-  controls.append(...(revealNow ? [revealNow] : []), rematch, lobby);
+  // Only an invite lobby has a live vote for updateDuelHud to count down; a
+  // matchmade result says what the two buttons do and then stays put.
+  if (!invited) voteStatus.textContent = 'Queue again for a new opponent, or go back to your world.';
+  duelResultVoteStatus = voteStatus; duelResultRematch = invited ? primary : null;
+  controls.append(...(revealNow ? [revealNow] : []), primary, leave);
   duelResultCard.append(kicker, title, summary, recap, scores,
     ...(rating ? [ratingReveal] : []), voteStatus, controls);
   duelResultEl.classList.add('visible'); duelScoreboard.classList.remove('visible');
-  requestAnimationFrame(() => (revealNow ?? rematch).focus());
+  requestAnimationFrame(() => (revealNow ?? primary).focus());
 }
 
 // ── Match HUD ──────────────────────────────────────────────────────────────
@@ -4234,20 +4285,18 @@ function updateDuelHud(): void {
 
   if (arenaActive && !duelArenaReadySent && duelSnapshot?.phase === 'countdown' &&
       (duelSnapshot.countdownEndsAt === undefined || duelSnapshot.countdownEndsAt === 0)) {
-    if (world.isLoaded(player.pos.x, player.pos.z) || (pendingTeleport && worldTimeLocal - pendingTeleport.started > 1.5)) {
+    if (world.update(player.pos.x, player.pos.z, 20, 2)) {
       markDuelArenaReady();
     }
   }
-  if (duelResultData && duelResultVoteStatus) {
+  if (duelResultData && duelResultVoteStatus && duelResultRematch) {
     const connected = board.filter((p) => p.connected);
     const votes = connected.filter((p) => p.rematchVote).length;
     const left = formatDuelTime(duelResultData.rematchDeadline - now);
     duelResultVoteStatus.textContent = `${votes}/${connected.length} voted to run it back · ${left}`;
     const voted = me?.rematchVote === true || duelRematchVoteSent;
-    if (duelResultRematch) {
-      duelResultRematch.disabled = voted;
-      duelResultRematch.textContent = voted ? 'Vote sent' : 'Run it back';
-    }
+    duelResultRematch.disabled = voted;
+    duelResultRematch.textContent = voted ? 'Vote sent' : 'Run it back';
   }
   if (duelScoresHeld) renderDuelScoreboard();
 }
@@ -4264,11 +4313,12 @@ function clearArenaState(): void {
   arenaCanEditAt = null;
   arenaClampPos = null;
   world.setArenaRenderBounds(null);
-  clearBedwarsSession();
   clearPartySession();
+  net.arenaRevision = undefined;
 }
 
 function cleanupDuelSession(restoreState = true): void {
+  duelRequeueOnReturn = false;
   stopDuelReadyWatchdog();
   clearArenaState();
   duelActiveBounds = null;
@@ -4277,7 +4327,11 @@ function cleanupDuelSession(restoreState = true): void {
   duelScoresHeld = false;
   duelResultData = null;
   duelRematchVoteSent = false;
+  duelResultRematch = null;
+  duelResultVoteStatus = null;
   duelSnapshot = null;
+  duelQueued = false;
+  refreshDuelsAvailability();
   duelInviteToken = '';
   pendingDuelToken = '';
   duelFeedSeen = 0;
@@ -4318,6 +4372,7 @@ function cleanupDuelSession(restoreState = true): void {
 }
 
 function duelControlBlocked(): boolean {
+  if (arenaKind === 'party') return partySnapshot?.phase !== 'running';
   if (!arenaActive || !duelSnapshot) return false;
   return duelSnapshot.phase === 'countdown' ||
     duelSnapshot.phase === 'results' || screen === 'duel_results';
@@ -4398,6 +4453,11 @@ net.onDuelLeaderboard = (leaderboard) => {
 };
 net.onDuelProfileUpdate = (id) => remotePlayers.invalidate(id);
 net.onDuelRestored = (x, y, z, yaw, pitch, health, dead, mode, state) => {
+  const reopenedDuel=duelSnapshot?.phase==='lobby'?duelSnapshot:null;
+  // enterTitle() below runs cleanupDuelSession, which disarms the latch, so
+  // read it before the teardown rather than after it.
+  const requeue = duelRequeueOnReturn;
+  duelRequeueOnReturn = false;
   stopDuelReadyWatchdog();
   clearArenaState();
   duelActiveBounds = null;
@@ -4412,13 +4472,28 @@ net.onDuelRestored = (x, y, z, yaw, pitch, health, dead, mode, state) => {
   player.pos.set(x, y, z); player.yaw = yaw; player.pitch = pitch;
   player.health = health; player.dead = dead;
   pendingTeleport = { x, y, z, started: worldTimeLocal };
-  applyLocalMode(mode); lastHealth = health; enterTitle(); renderDuelLobby(); openMinigames(true);
+  applyLocalMode(mode); lastHealth = health; enterTitle(); duelSnapshot=reopenedDuel; renderDuelLobby(); openMinigames(true);
   duelLocalFallback = null;
-  bwLocalFallback = null; bwSnapshot = null; bwQueued = false; bwInviteToken = '';
-  partyLocalFallback = null; partySnapshot = null; partyQueued = false; partyInviteToken = '';
-  bedwarsQueueStatus.textContent = ''; partyQueueStatus.textContent = '';
-  refreshBedwarsAvailability();
+  partyLocalFallback = null;
+  if (partySnapshot?.phase !== 'lobby') { partySnapshot = null; partyInviteToken = ''; }
+  partyQueued = false;
+  renderPartyLobby();
+  parkourQueueStatus.textContent = ''; partyQueueStatus.textContent = '';
   refreshPartyAvailability();
+  // "Queue again" from a matchmade result: the server has just handed the
+  // open-world body back, which is the first moment the queue will accept us.
+  if (requeue) {
+    if (net.connected && !duelSnapshot) {
+      duelLocalFallback = {
+        state: inventory.serialize(), x: player.pos.x, y: player.pos.y, z: player.pos.z,
+        yaw: player.yaw, pitch: player.pitch,
+        health: player.health, dead: player.dead, mode: localMode,
+      };
+      pushStateSave();
+      net.sendDuelQueue(true);
+      showDuelBrowser();
+    }
+  }
 };
 
 // First drop-in shows the guided briefing once (tracked in localStorage); after
@@ -5455,9 +5530,11 @@ document.getElementById('quit-btn')!.addEventListener('click', () => {
   setSeat(null);
   myRope = null;
   vehicleHud.setRope(false);
-  if (arenaActive || duelSnapshot) {
-    net.sendDuelLeave();
-    cleanupDuelSession(true);
+  if (arenaKind === 'party' || partySnapshot || partyQueued) {
+    leaveParty();
+
+  } else if (arenaActive || duelSnapshot || duelQueued) {
+    net.sendDuelLeave(); cleanupDuelSession(true);
   }
   pushStateSave();
   enterTitle();
@@ -5497,7 +5574,7 @@ renderer.domElement.addEventListener('mousedown', () => {
 });
 document.addEventListener('keydown', (e) => {
   if (e.code !== 'Escape' || e.defaultPrevented) return;
-  if (tutorial.open) { tutorial.finish(); }
+  else if (tutorial.open) { tutorial.finish(); }
   else if (chatBox.open) { chatBox.hide(); }
   else if (warfareUI.open) { hideProgress(); }
   else if (guideOpen) { hideGuide(); }
@@ -5529,8 +5606,50 @@ document.getElementById('respawn')!.addEventListener('click', () => {
   }
 });
 
+/**
+ * Tip everything we were carrying onto the ground where we died.
+ *
+ * Three things this has to get right, each of which has cost somebody their
+ * pockets:
+ *
+ * - It must not DELETE the loot when it cannot drop it. `spillAll` empties the
+ *   inventory first, and a socket that closed a moment ago still accepts sends
+ *   and discards them, so a death during a connection blip erased everything
+ *   the player was carrying and dropped nothing. The stacks go back where they
+ *   were if the drop did not reach the wire; keeping them is a far smaller
+ *   wrong than erasing them, and the server's own copy still has them anyway.
+ * - It must not be TAXED. The levy is on what you pull out of the ground, and
+ *   `spillStacks` defaults to that; a corpse is not a harvest, so the faction
+ *   does not get a cut of the worst moment of somebody's week.
+ * - It must not land somewhere unreachable. A death in the void spilled at the
+ *   death height, which on the server rests the stack below the world where
+ *   nothing can ever pick it up. Anything below the surface goes on top of it.
+ */
+function spillDeathLoot(): void {
+  const carried = inventory.serialize();
+  const loot = inventory.spillAll();
+  if (!loot.length) return;
+  const x = player.pos.x, z = player.pos.z;
+  const surface = world.terrain.height(Math.floor(x), Math.floor(z)) + 2;
+  const y = player.pos.y + 1 < 1 ? surface : player.pos.y + 1;
+  if (!spillStacks(loot, x, y, z, 'manual')) {
+    inventory.restore(carried);
+    showNotice('⚠ Connection lost — your items stayed with you.');
+  }
+}
+
 function checkDeath(): void {
-  if (!player.dead || deathShown) return;
+  // Rearm on every return to life. `deathShown` used to be cleared only by the
+  // server's `respawned` message, but several paths hand a live body back
+  // without one — entering an arena, and both arena-exit restores, all assign
+  // `player.dead` directly. Any of them left the latch stuck ON, and the NEXT
+  // real death then hit the early return below: no death screen, and no spill.
+  // Deriving it from the state it is latching cannot drift out of step.
+  if (!player.dead) {
+    if (deathShown) { deathShown = false; deathEl.style.display = 'none'; }
+    return;
+  }
+  if (deathShown) return;
   deathShown = true;
   if (myRope) {
     if (!net.connected) offlineVehicles.detachRope(0);
@@ -5539,9 +5658,10 @@ function checkDeath(): void {
   }
   clearVaultPresentation(true, 0.35);
   invUI.hide(); // closes (and saves) an open chest BEFORE we spill the inventory
-  // Drop everything where we died — networked so others can grab it (MP) or
-  // local item entities (offline). We can't pick anything up while dead.
-  spillAtPlayer(inventory.spillAll());
+  // An arena body carries an arena loadout, which does not belong to the world
+  // economy and must never be tipped into it. The modes run their own death
+  // and respawn; the open-world spill below is for the open world only.
+  if (!arenaActive) spillDeathLoot();
   pushStateSave(); // persist the now-empty inventory so a reconnect can't dupe it
   // We can die while the pause menu is up (the sim never pauses). Normalize to
   // 'playing' and drop the pause menu so the death screen is the only overlay
@@ -5627,6 +5747,7 @@ net.onWelcome = (me) => {
   held.setSkin(skinSeed(me.username), myCosmetics);
   refreshNetInfo();
   joinPendingDuel();
+  joinPendingParty();
 };
 net.onWorldTime = (seconds) => {
   if (!Number.isFinite(seconds)) return;
@@ -5729,7 +5850,7 @@ net.onRespawned = (x, y, z, h) => {
   deathShown = false;
   deathEl.style.display = 'none';
   pushStateSave();
-  if (worldReady) input.lock();
+  if (worldReady && screen === 'playing') input.lock();
 };
 net.onKillfeed = (killer, victim) => {
   if (arenaActive) pushDuelKill(killer, victim);
@@ -5747,7 +5868,7 @@ net.onTeleport = (x, y, z) => {
   // hold the player in place until a bubble of chunks loads — otherwise they
   // free-fall into the not-yet-generated void and die on arrival.
   pendingTeleport = { x, y, z, started: worldTimeLocal };
-  showNotice('Teleporting…');
+  if (!arenaActive) showNotice('Teleporting…');
 };
 net.onNotice = (text) => showNotice(text);
 
@@ -5837,7 +5958,7 @@ function tickTotemWindup(dt: number): void {
   player.vel.set(0, 0, 0);
   player.fallDistance = 0;
   pendingTeleport = { x: x + 0.5, y: y + 1, z: z + 0.5, started: worldTimeLocal };
-  showNotice('Teleporting…');
+  if (!arenaActive) showNotice('Teleporting…');
 }
 
 // --- Lifesteal (Milestone A) -------------------------------------------------
@@ -7516,20 +7637,17 @@ net.onDisconnect = () => {
   pendingDuelAttempted = false;
   duelQueued = false;
   refreshDuelsAvailability();
-  const wasBedwars = arenaKind === 'bedwars' || !!bwSnapshot;
   const wasParty = arenaKind === 'party' || !!partySnapshot;
-  if (arenaActive || duelSnapshot || bwSnapshot || partySnapshot) {
-    if (wasBedwars) restoreBedwarsFallback();
+  if (arenaActive || duelSnapshot || partySnapshot) {
     if (wasParty) restorePartyFallback();
     cleanupDuelSession(true);
     input.unlock();
     enterTitle();
-    const mode = wasBedwars ? 'Bedwars' : wasParty ? 'Party Games' : 'Duels';
+    const mode = wasParty ? (partySnapshot?.mode === 'parkour' ? 'Parkour' : 'The Bridge') : 'Duels';
     showNotice(`${mode} connection lost — your open-world state was kept safe.`);
   }
-  bwQueued = false; bwSnapshot = null; bwInviteToken = '';
   partyQueued = false; partySnapshot = null; partyInviteToken = '';
-  refreshBedwarsAvailability();
+  partyInviteAttempted = false; renderPartyLobby();
   refreshPartyAvailability();
   player.damageSink = undefined;
   survival.enableRegen = true;
@@ -7635,625 +7753,467 @@ interaction.canEdit = (x, y, z) => {
   return !(encounterSnapshot && curVault && blockInsideArena(curVault, x, y, z));
 };
 
-// ── Bedwars ────────────────────────────────────────────────────────────────
-// Everything below mirrors the Duels client, with one structural difference:
-// combat is a single `bwMelee` send and the server answers with `bwHit`. The
-// client never computes damage, knockback, charge or crit — it only DRAWS them.
-
-const bedwarsCardAction = document.getElementById('bedwars-card-action') as HTMLButtonElement;
-const bedwarsPrivateAction = document.getElementById('bedwars-private-action') as HTMLButtonElement;
-const bedwarsQueueStatus = document.getElementById('bedwars-queue-status')!;
-const bedwarsUI = new BedwarsUI(document.body);
-
-let bwSnapshot: BwLobbySnapshot | null = null;
-let bwActiveBounds: BwArenaBounds | null = null;
-let bwTeam = 0;
-let bwQueued = false;
-let bwArenaReadySent = false;
-let bwInviteToken = '';
-let bwLocalFallback: {
-  state: ReturnType<typeof inventory.serialize>;
-  x: number; y: number; z: number; yaw: number; pitch: number;
-  health: number; dead: boolean; mode: GameMode;
-} | null = null;
-/** When the local axe next reaches full charge, for the crosshair arc. */
-let bwSwingReadyAt = 0;
-let bwSwingCooldownMs: number = BW_AXE_TIERS[0].cooldownMs;
-let bwAxe = Item.WoodenAxe;
-let bwSpectating = false;
-let bwWasBelowIslands = false;
-
-function bwCooldownFor(axe: number): number {
-  return (BW_AXE_TIERS.find((t) => t.item === axe) ?? BW_AXE_TIERS[0]).cooldownMs;
-}
-
-/** 0..1 charge of the local swing right now. Purely cosmetic — the server
- *  recomputes it from its own clock when the swing actually lands. */
-function bwCharge(): number {
-  if (bwSwingCooldownMs <= 0) return 1;
-  const remaining = bwSwingReadyAt - performance.now();
-  if (remaining <= 0) return 1;
-  return Math.max(0, Math.min(1, 1 - remaining / bwSwingCooldownMs));
-}
-
-/** The Bedwars build rules, behind the generic arena hooks. Placement is
- *  limited to the mode's own materials above the island surface; breaking is
- *  limited to blocks a player placed, so no authored geometry — and no bed —
- *  can be mined away. The server re-checks all of this. */
-const bedwarsArenaRules = {
-  canPlaceAt(x: number, y: number, z: number, held: number): boolean {
-    if (!bwActiveBounds || bwSnapshot?.phase !== 'running') return false;
-    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
-    if (bx < bwActiveBounds.minX || bx >= bwActiveBounds.maxX ||
-        bz < bwActiveBounds.minZ || bz >= bwActiveBounds.maxZ) return false;
-    if (by <= BEDWARS_VOID_Y || by >= BEDWARS_CEILING_Y) return false;
-    if (held !== bedwarsTeamWool(bwTeam) && held !== Block.OakPlanks &&
-        held !== Block.Glass) return false;
-    return bedwarsBlockAt(bx, by, bz) === null;
-  },
-  canEditAt(x: number, y: number, z: number, held: number): boolean {
-    if (!bwActiveBounds || bwSnapshot?.phase !== 'running') return false;
-    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
-    if (bx < bwActiveBounds.minX || bx >= bwActiveBounds.maxX ||
-        bz < bwActiveBounds.minZ || bz >= bwActiveBounds.maxZ) return false;
-    if (by <= BEDWARS_VOID_Y || by >= BEDWARS_CEILING_Y) return false;
-    // Authored island, fixtures and beds are all untouchable through mining.
-    if (bedwarsBlockAt(bx, by, bz) !== null) return false;
-    const block = world.getBlock(x, y, z);
-    if (isReplaceable(block)) return bedwarsArenaRules.canPlaceAt(x, y, z, held);
-    return true;
-  },
-};
-
-/** Put the open-world body back from the checkpoint taken when the player
- *  entered the queue. Only used when the SERVER never got to send
- *  `arenaRestored` — a dropped connection — since the server copy is always
- *  the better one when it arrives. */
-function restoreBedwarsFallback(): void {
-  const fallback = bwLocalFallback;
-  bwLocalFallback = null;
-  if (!fallback) return;
-  inventory.restore(fallback.state);
-  player.pos.set(fallback.x, fallback.y, fallback.z);
-  player.yaw = fallback.yaw;
-  player.pitch = fallback.pitch;
-  player.maxHealth = maxHealthFor(localHearts);
-  player.health = fallback.health;
-  player.dead = fallback.dead;
-  applyLocalMode(fallback.mode);
-  lastHealth = fallback.health;
-}
-
-function clearBedwarsSession(): void {
-  bwActiveBounds = null;
-  bwArenaReadySent = false;
-  bwSpectating = false;
-  bwWasBelowIslands = false;
-  bwSwingReadyAt = 0;
-  bwAxe = Item.WoodenAxe;
-  bedwarsUI.setVisible(false);
-  bedwarsUI.clearCombo();
-  damageNumbers.clear();
-  killBanner.clear();
-}
-
-function refreshBedwarsAvailability(): void {
-  const online = net.connected;
-  bedwarsCardAction.setAttribute('aria-disabled', String(!online));
-  bedwarsCardAction.setAttribute('aria-pressed', String(bwQueued));
-  bedwarsPrivateAction.setAttribute('aria-disabled', String(!online));
-  bedwarsCardAction.textContent = online
-    ? (bwQueued ? 'Cancel Queue' : 'Play') : 'Multiplayer server required';
-  // A private party's link stays on screen until the match starts, so the host
-  // can still copy it after clicking elsewhere in the modal.
-  bedwarsPrivateAction.textContent = bwInviteToken && bwSnapshot?.phase === 'lobby'
-    ? 'Copy Invite' : 'Invite Friends';
-}
-
-bedwarsCardAction.addEventListener('click', () => {
-  if (!net.connected) {
-    bedwarsQueueStatus.textContent = 'Bedwars requires a live multiplayer server.';
-    return;
-  }
-  if (!bwQueued) {
-    // Matchmaking can launch the moment another player arrives, so checkpoint
-    // the open-world body on entering the queue, exactly as Duels does.
-    bwLocalFallback = {
-      state: inventory.serialize(), x: player.pos.x, y: player.pos.y, z: player.pos.z,
-      yaw: player.yaw, pitch: player.pitch,
-      health: player.health, dead: player.dead, mode: localMode,
-    };
-    pushStateSave();
-  } else {
-    bwLocalFallback = null;
-  }
-  net.sendBwQueue(!bwQueued);
-});
-bedwarsPrivateAction.addEventListener('click', () => {
-  if (!net.connected || bedwarsPrivateAction.getAttribute('aria-disabled') === 'true') return;
-  if (bwInviteToken && bwSnapshot?.phase === 'lobby') {
-    void navigator.clipboard?.writeText(duelInviteUrl(bwInviteToken));
-    bedwarsQueueStatus.textContent = 'Invite link copied.';
-    return;
-  }
-  bedwarsQueueStatus.textContent = 'Opening a private Bedwars party…';
-  net.sendBwCreate();
-});
-
-bedwarsUI.onBuy = (entry) => net.sendBwShopBuy(entry);
-
-net.onBwQueue = (queued) => {
-  bwQueued = queued;
-  bedwarsQueueStatus.textContent = queued
-    ? 'Searching for an opponent…' : '';
-  refreshBedwarsAvailability();
-};
-net.onBwError = (_code, message) => {
-  bedwarsQueueStatus.textContent = message;
-  showNotice(message);
-};
-net.onBwLobby = (snapshot, inviteToken) => {
-  bwSnapshot = snapshot;
-  if (inviteToken) {
-    bwInviteToken = inviteToken;
-    bedwarsQueueStatus.textContent = `Private party open — share ${duelInviteUrl(inviteToken)}`;
-  }
-  const me = snapshot.participants.find((v) => v.id === net.myId);
-  if (me) { bwTeam = me.team; bedwarsUI.setTeam(me.team); }
-  bedwarsUI.setSnapshot(snapshot);
-  if (snapshot.phase === 'lobby') {
-    bedwarsQueueStatus.textContent = snapshot.participants.length >= 2
-      ? 'Opponent found — ready up.' : 'Waiting for an opponent…';
-    // Auto-ready in a matchmade room: the queue click WAS the consent.
-    if (me && !me.ready && bwQueued) net.sendBwReady(true);
-    if (me?.host && snapshot.participants.length >= 2 &&
-        snapshot.participants.every((v) => v.ready)) net.sendBwStart();
-  }
-  refreshBedwarsAvailability();
-};
-net.onBwArena = (arena, spawn, team, countdownEndsAt) => {
-  arenaActive = true; arenaKind = 'bedwars';
-  bwActiveBounds = arena; bwTeam = team;
-  arenaMaxHealth = BEDWARS_MAX_HEALTH; arenaHpPerHeart = BEDWARS_HP_PER_HEART;
-  arenaCanPlaceAt = bedwarsArenaRules.canPlaceAt;
-  arenaCanEditAt = bedwarsArenaRules.canEditAt;
-  arenaClampPos = (pos) => clampToBedwarsArena(pos, arena);
-  arenaUnlimited = new Set<number>();
-  // A duskier floor than Duels' 0.8: sky islands at last light.
-  world.setArenaRenderBounds({
-    minX: arena.originX, minZ: arena.originZ,
-    maxX: arena.originX + BEDWARS_ARENA_SIZE, maxZ: arena.originZ + BEDWARS_ARENA_SIZE,
-  }, BEDWARS_AMBIENT_LIGHT);
-  bwArenaReadySent = false;
-  bwSpectating = false; bwWasBelowIslands = false;
-  bwSwingReadyAt = 0;
-  bedwarsUI.setTeam(team);
-  bedwarsUI.setVisible(true);
-  bedwarsUI.setSnapshot(bwSnapshot);
-  bedwarsUI.clearCombo();
-
-  clearVaultPresentation(true); endGrapple(); setSeat(null); myRope = null;
-  killfeedEl.replaceChildren(); combatTagUntilLocal = 0; combatTimerEl.style.display = 'none';
-  warEl.style.display = 'none'; regionBannerEl.style.display = 'none';
-  worldMap.hide(); worldMap.hideBeacons(); worldMap.setDynamicMarkers([]);
-  flagModels.setState(false, []);
-  if (fieldGuide?.open) fieldGuide.closeSilently();
-  starterEl.style.display = 'none';
-  closeMinigames(); audio.resume();
-  applyLocalMode('survival');
-  player.pos.set(spawn.x, spawn.y, spawn.z); player.vel.set(0, 0, 0); player.fallDistance = 0;
-  player.maxHealth = BEDWARS_MAX_HEALTH; player.health = BEDWARS_MAX_HEALTH; player.dead = false;
-  player.flying = false; player.noclip = false; player.gliding = false; player.boating = false;
-  pendingTeleport = { x: spawn.x, y: spawn.y, z: spawn.z, started: worldTimeLocal };
-  void countdownEndsAt;
-  if (world.update(spawn.x, spawn.z, 50, 2)) {
-    pendingTeleport = null;
-    markBedwarsArenaReady();
-  } else {
-    startBedwarsReadyWatchdog(spawn.x, spawn.z);
-  }
-  resumePlay();
-};
-net.onBwLoadout = (slots, selected, axe) => {
-  inventory.restore({ slots, armor: new Array(4).fill(null), selected });
-  const upgraded = axe !== bwAxe && bwAxe !== Item.WoodenAxe;
-  bwAxe = axe;
-  bwSwingCooldownMs = bwCooldownFor(axe);
-  // A fresh axe starts CHARGED. Making a purchase also cost you your next
-  // swing would punish buying, which is the opposite of the intent.
-  bwSwingReadyAt = 0;
-  if (upgraded) showNotice(`${ITEMS[axe]?.name ?? 'Axe'} equipped — faster, heavier, more knockback.`);
-  fireCooldown = 0; reloadTimer = 0; burstRemaining = 0; healUse.cancel();
-};
-net.onBwGrant = (items) => {
-  for (const stack of items) inventory.add(stack.id, stack.count);
-  audio.hitmarker(false, false);
-};
-net.onBwResources = (iron, gold, diamond) => bedwarsUI.setResources(iron, gold, diamond);
-net.onBwHit = (target, amount, combo, charge, crit, killed) => {
-  showHitmarker(amount, killed);
-  // `bwHit` carries no position — the world anchor comes from the avatar we
-  // are already drawing, exactly as `hitconfirm` does. What you hit is what
-  // you saw.
-  const remote = net.remotes.get(target);
-  if (remote) {
-    const at = new THREE.Vector3(remote.tx, remote.ty + 1.15, remote.tz);
-    damageNumbers.spawn(at.x, at.y, at.z, amount,
-      hitFlavor(amount, killed, BEDWARS_MAX_HEALTH, crit));
-    particles.burst(at.x, at.y, at.z, killed ? 16 : crit ? 9 : 6,
-      killed ? 0xff4356 : crit ? 0xffd25e : 0xf4626f, 2.6, 0.34,
-      { gravity: 4, spread: 0.4, scale: 0.45 });
-    audio.axeHit(crit, at);
-    remotePlayers.hurtFlash(target, crit ? 1.4 : 1);
-  } else {
-    audio.axeHit(crit);
-  }
-  if (crit) triggerEncounterShake(0.10, 0.02);
-  if (combo > 0) bedwarsUI.setCombo(combo, performance.now());
-  else bedwarsUI.clearCombo();
-  if (killed) onPvpKill(target);
-  // The server's charge is authoritative; re-arm the local arc from it so the
-  // crosshair and the damage never disagree about how charged the next one is.
-  bwSwingReadyAt = performance.now() + bwSwingCooldownMs;
-  void charge;
-};
-net.onBwBedBroken = (team, by) => {
-  audio.bedBreak();
-  const mine = team === bwTeam;
-  killBanner.push(bedwarsUI.bedBrokenText(team, mine),
-    by === net.myId ? 'You broke it' : mine ? 'Your next death is your last' : '',
-    mine ? '#ff5f76' : '#ffd25e', 2.0);
-  triggerEncounterShake(0.18, 0.05);
-  bedwarsUI.setSnapshot(bwSnapshot);
-};
-net.onBwClock = (serverNow, endsAt, stage) => {
-  void serverNow; void endsAt; void stage;
-  bedwarsUI.setSnapshot(bwSnapshot);
-};
-net.onBwRespawn = (respawnAt, spectating) => {
-  bwSpectating = spectating;
-  if (spectating) { damageNumbers.clear(); hurtPulse = 0; bedwarsUI.clearCombo(); }
-  player.flying = spectating; player.noclip = spectating;
-  if (!spectating) {
-    player.flying = false; player.noclip = false;
-    player.health = BEDWARS_MAX_HEALTH;
-    bwWasBelowIslands = false;
-    bwSwingReadyAt = 0;
-  }
-  void respawnAt;
-};
-net.onBwResult = (result) => {
-  const winner = result.winner !== null
-    ? bwSnapshot?.participants.find((v) => v.id === result.winner)?.username ?? null : null;
-  const copy = bedwarsResultCopy(winner, result.finishReason);
-  killBanner.push(copy.title, copy.sub,
-    result.winner === net.myId ? '#7fe0a0' : '#aec1d8', 3.2);
-  bedwarsUI.clearCombo();
-};
-
-/** The enemy bed cell the crosshair is on, or null. */
-function bedwarsEnemyBedAt(hit: { x: number; y: number; z: number }):
-{ x: number; y: number; z: number } | null {
-  if (!bwActiveBounds) return null;
-  const team = bedwarsBedTeamAt(hit.x, hit.y, hit.z, bwActiveBounds);
-  return team >= 0 && team !== bwTeam ? { x: hit.x, y: hit.y, z: hit.z } : null;
-}
-
-/** Right-clicking the Quartermaster opens the shop. Right-click-on-block is
- *  the EXISTING interaction path (chests and crafting tables already use it),
- *  so this is one branch rather than a stand-on pad — which would open a modal
- *  because you walked somewhere — or a floating button with its own plumbing. */
-function bedwarsTryOpenShop(hit: { x: number; y: number; z: number } | null): boolean {
-  if (arenaKind !== 'bedwars' || !bwActiveBounds || !hit) return false;
-  if (bedwarsBlockAt(hit.x, hit.y, hit.z) !== Block.BwShop) return false;
-  // Only your OWN Quartermaster. The server checks this again on every buy.
-  const mine = bedwarsShopCells(bwActiveBounds, bwTeam)
-    .some((c) => c.x === hit.x && c.y === hit.y && c.z === hit.z);
-  if (!mine) { showNotice('That is the enemy Quartermaster.'); return true; }
-  bedwarsUI.toggleShop();
-  return true;
-}
-
-/** Per-frame Bedwars presentation: the charge arc, the combo timer, and the
- *  falling-into-the-void whistle. */
-function updateBedwarsFrame(): void {
-  if (arenaKind !== 'bedwars') return;
-  const now = performance.now();
-  bedwarsUI.setCharge(bwCharge());
-  bedwarsUI.update(now);
-  // One whistle per fall, armed the moment the player drops past the islands.
-  const below = player.pos.y < BEDWARS_VOID_Y + 16 && player.vel.y < -4;
-  if (below && !bwWasBelowIslands) audio.voidFall();
-  bwWasBelowIslands = below;
-  // Walking away closes the shop, so the panel can never hang over a fight.
-  if (bedwarsUI.isShopOpen && bwActiveBounds) {
-    const near = bedwarsShopCells(bwActiveBounds, bwTeam).some((c) =>
-      Math.hypot(c.x + 0.5 - player.pos.x, c.z + 0.5 - player.pos.z) <= 4.5);
-    if (!near) bedwarsUI.closeShop();
-  }
-}
-
-let bwReadyWatchdog = 0;
-function markBedwarsArenaReady(): void {
-  if (arenaKind !== 'bedwars' || bwArenaReadySent) return;
-  bwArenaReadySent = true;
-  net.sendBwArenaReady();
-  stopBedwarsReadyWatchdog();
-}
-function stopBedwarsReadyWatchdog(): void {
-  if (bwReadyWatchdog) window.clearInterval(bwReadyWatchdog);
-  bwReadyWatchdog = 0;
-}
-function startBedwarsReadyWatchdog(x: number, z: number): void {
-  stopBedwarsReadyWatchdog();
-  const started = Date.now();
-  // A plain interval, not the frame loop: a backgrounded tab gets no frames,
-  // and the server's arena-load gate would then time the match back to the
-  // lobby. Timers keep firing when frames do not. (Same fix as Duels.)
-  bwReadyWatchdog = window.setInterval(() => {
-    if (arenaKind !== 'bedwars' || bwArenaReadySent) { stopBedwarsReadyWatchdog(); return; }
-    if (world.isLoaded(x, z) || Date.now() - started > 5_000) markBedwarsArenaReady();
-  }, 250);
-}
-
-
-// ── Party Games ────────────────────────────────────────────────────────────
-// Mirrors the Bedwars client. The one structural difference is the ROUND
-// transition: the four microgame arenas are permanently stamped side by side,
-// so changing microgame means a teleport plus a new render crop, never a
-// re-stamp. See the header of partygames.ts.
-
+const parkourCardAction = document.getElementById('parkour-card-action') as HTMLButtonElement;
+const parkourPrivateAction = document.getElementById('parkour-private-action') as HTMLButtonElement;
+const parkourQueueStatus = document.getElementById('parkour-queue-status')!;
+parkourCardAction.addEventListener('click', () => queuePartyMode('parkour'));
+parkourPrivateAction.addEventListener('click', () => createPartyMode('parkour'));
+// Party Games and Parkour: snapshots own every phase, timer and target.
 const partyCardAction = document.getElementById('party-card-action') as HTMLButtonElement;
 const partyPrivateAction = document.getElementById('party-private-action') as HTMLButtonElement;
 const partyQueueStatus = document.getElementById('party-queue-status')!;
 const partyUI = new PartyUI(document.body);
-
+const partyVisuals = new PartyVisuals(scene);
 let partySnapshot: PartyLobbySnapshot | null = null;
 let partySub: PartySubBounds | null = null;
-let partyGameId: PartyGameId | null = null;
 let partyQueued = false;
+let partyQueuedMode: PartyMode = 'bridge';
 let partyInviteToken = '';
 let partyArenaReadySent = false;
-let partyEliminated = false;
+let partyClockServer = 0, partyClockLocal = 0;
+let partyReadyWatchdog = 0;
 let partyLocalFallback: {
   state: ReturnType<typeof inventory.serialize>;
-  x: number; y: number; z: number; yaw: number; pitch: number;
-  health: number; dead: boolean; mode: GameMode;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  pitch: number;
+  health: number;
+  dead: boolean;
+  mode: GameMode;
 } | null = null;
-let partySwingReadyAt = 0;
-
-function partyCharge(): number {
-  const remaining = partySwingReadyAt - performance.now();
-  if (remaining <= 0) return 1;
-  return Math.max(0, Math.min(1, 1 - remaining / PARTY_KNOCKBACK_TIER.cooldownMs));
-}
-
-/** Spleef's rule, client-side. The server re-checks it; this only stops the
- *  local prediction from digging a hole the server will refuse. */
-const partyArenaRules = {
-  canPlaceAt(): boolean { return false; }, // nothing is ever placeable
-  canEditAt(x: number, y: number, z: number): boolean {
-    if (!partySub || partySnapshot?.phase !== 'running') return false;
-    return partyCanBreak(partySub, Math.floor(x), Math.floor(y), Math.floor(z), Block.Air);
-  },
-};
-
-function partyCropTo(sub: PartySubBounds): void {
-  world.setArenaRenderBounds({
-    minX: sub.minX, minZ: sub.minZ, maxX: sub.maxX, maxZ: sub.maxZ,
-  }, PARTY_AMBIENT_LIGHT);
-}
-
-function clearPartySession(): void {
-  partySub = null;
-  partyGameId = null;
-  partyArenaReadySent = false;
-  partyEliminated = false;
-  partySwingReadyAt = 0;
-  partyUI.setVisible(false);
-}
-
-function refreshPartyAvailability(): void {
-  const online = net.connected;
-  partyCardAction.setAttribute('aria-disabled', String(!online));
-  partyCardAction.setAttribute('aria-pressed', String(partyQueued));
-  partyPrivateAction.setAttribute('aria-disabled', String(!online));
-  partyCardAction.textContent = online
-    ? (partyQueued ? 'Cancel Queue' : 'Play') : 'Multiplayer server required';
-  partyPrivateAction.textContent = partyInviteToken && partySnapshot?.phase === 'lobby'
-    ? 'Copy Invite' : 'Invite Friends';
-}
-
-partyCardAction.addEventListener('click', () => {
-  if (!net.connected) {
-    partyQueueStatus.textContent = 'Party Games requires a live multiplayer server.';
+const partyLobbyPanel = document.createElement('section');
+partyLobbyPanel.className = 'pg-lobby';
+partyLobbyPanel.hidden = true;
+minigamesBrowser.prepend(partyLobbyPanel);
+let pendingPartyInvite = new URL(location.href).searchParams.get('party') ?? '';
+let partyInviteAttempted = false;
+function joinPendingParty(): void {
+  if (!pendingPartyInvite || partyInviteAttempted || !net.connected)
     return;
-  }
-  if (!partyQueued) {
-    partyLocalFallback = {
-      state: inventory.serialize(), x: player.pos.x, y: player.pos.y, z: player.pos.z,
-      yaw: player.yaw, pitch: player.pitch,
-      health: player.health, dead: player.dead, mode: localMode,
-    };
-    pushStateSave();
-  } else {
-    partyLocalFallback = null;
-  }
-  net.sendPartyQueue(!partyQueued);
-});
-partyPrivateAction.addEventListener('click', () => {
-  if (!net.connected || partyPrivateAction.getAttribute('aria-disabled') === 'true') return;
-  if (partyInviteToken && partySnapshot?.phase === 'lobby') {
-    void navigator.clipboard?.writeText(duelInviteUrl(partyInviteToken));
-    partyQueueStatus.textContent = 'Invite link copied.';
+  partyInviteAttempted = true;
+  savePartyFallback();
+  net.sendPartyJoin(pendingPartyInvite);
+  openMinigames();
+}
+function partyInviteUrl(token: string): string {
+  const url = new URL(location.href);
+  url.searchParams.delete('duel');
+  url.searchParams.set('party', token);
+  return url.toString();
+}
+function clearPartyInviteUrl(): void { const url = new URL(location.href); url.searchParams.delete('party'); history.replaceState(history.state, '', url); }
+function partyNow(): number { return partyClockServer + performance.now() - partyClockLocal; }
+function savePartyFallback(): void {
+  if (arenaActive || partyLocalFallback)
     return;
-  }
-  partyQueueStatus.textContent = 'Opening a private party…';
-  net.sendPartyCreate();
-});
-
+  partyLocalFallback = { state: inventory.serialize(), x: player.pos.x, y: player.pos.y, z: player.pos.z, yaw: player.yaw, pitch: player.pitch, health: player.health, dead: player.dead, mode: localMode };
+  pushStateSave();
+}
 function restorePartyFallback(): void {
-  const fallback = partyLocalFallback;
+  const f = partyLocalFallback;
   partyLocalFallback = null;
-  if (!fallback) return;
-  inventory.restore(fallback.state);
-  player.pos.set(fallback.x, fallback.y, fallback.z);
-  player.yaw = fallback.yaw; player.pitch = fallback.pitch;
+  if (!f)
+    return;
+  inventory.restore(f.state);
+  player.pos.set(f.x, f.y, f.z);
+  player.yaw = f.yaw;
+  player.pitch = f.pitch;
   player.maxHealth = maxHealthFor(localHearts);
-  player.health = fallback.health; player.dead = fallback.dead;
-  applyLocalMode(fallback.mode);
-  lastHealth = fallback.health;
+  player.health = f.health;
+  player.dead = f.dead;
+  applyLocalMode(f.mode);
+  lastHealth = f.health;
 }
-
-net.onPartyQueue = (queued) => {
+function clearPartySession(): void {
+  stopPartyReadyWatchdog();
+  partySub = null;
+  partyArenaReadySent = false;
+  partyUI.setVisible(false);
+  partyVisuals.clear();
+}
+function refreshPartyAvailability(): void {
+  for (const [button, mode] of [[partyCardAction, 'bridge'], [parkourCardAction, 'parkour']] as const) {
+    button.setAttribute('aria-disabled', String(!net.connected));
+    button.textContent = !net.connected ? 'Multiplayer server required' : partyQueued && partyQueuedMode === mode ? 'Cancel Queue' : 'Play';
+    button.setAttribute('aria-pressed', String(partyQueued && partyQueuedMode === mode));
+  }
+  partyPrivateAction.setAttribute('aria-disabled', String(!net.connected));
+  parkourPrivateAction.setAttribute('aria-disabled', String(!net.connected));
+}
+function queuePartyMode(mode: PartyMode): void {
+  if (!net.connected) {
+    showNotice('Connect to multiplayer to play.');
+    return;
+  }
+  if (arenaActive)
+    return;
+  if (partyQueued && partyQueuedMode === mode) {
+    net.sendPartyQueue(false, mode);
+    return;
+  }
+  if (partySnapshot) {
+    net.sendPartyLeave();
+    partySnapshot = null;
+    partyInviteToken = '';
+    renderPartyLobby();
+  }
+  if (duelSnapshot) {
+    net.sendDuelLeave();
+    duelSnapshot = null;
+    duelInviteToken = '';
+    setDuelParam(null);
+    showDuelBrowser();
+  }
+  savePartyFallback();
+  partyQueuedMode = mode;
+  net.sendPartyQueue(true, mode);
+}
+function createPartyMode(mode: PartyMode): void {
+  if (!net.connected || arenaActive)
+    return;
+  if (partySnapshot) {
+    renderPartyLobby();
+    return;
+  }
+  if (duelSnapshot) {
+    net.sendDuelLeave();
+    duelSnapshot = null;
+    showDuelBrowser();
+  }
+  savePartyFallback();
+  partyQueuedMode = mode;
+  net.sendPartyCreate(mode);
+}
+function leaveParty(): void {
+  net.sendPartyLeave();
+  pendingPartyInvite = '';
+  partySnapshot = null;
+  partyQueued = false;
+  partyInviteToken = '';
+  clearPartyInviteUrl();
+  restorePartyFallback();
+  clearArenaState();
+  renderPartyLobby();
+  refreshPartyAvailability();
+  setDuelCue('');
+}
+function renderPartyLobby(): void {
+  const s = partySnapshot;
+  partyLobbyPanel.hidden = !s || s.phase !== 'lobby';
+  partyLobbyPanel.replaceChildren();
+  if (!s || s.phase !== 'lobby')
+    return;
+  const title = document.createElement('h3');
+  title.textContent = `${s.mode === 'parkour' ? 'Parkour Duel' : 'The Bridge'} · ${s.participants.length}/${s.capacity}`;
+  const rule = document.createElement('p');
+  rule.textContent = s.mode === 'parkour'
+    ? 'A fresh course, infinite wool and one rival.'
+    : 'Two bases, one span between them — a single block wide, the whole way. Cleaver, bow and infinite wool; dive into the enemy portal, first to five.';
+  const roster = document.createElement('div');
+  roster.className = 'pg-lobby-roster';
+  for (const p of s.participants) {
+    const row = document.createElement('div');
+    const side = s.mode === 'bridge' ? ` · ${BRIDGE_TEAM_NAME[p.team]}` : '';
+    row.textContent = `${p.username}${p.host ? ' · HOST' : ''}${side} · ${p.ready ? 'Ready' : 'Not ready'}`;
+    roster.append(row);
+  }
+  const actions = document.createElement('div');
+  actions.className = 'duel-card-actions';
+  const me = s.participants.find(p => p.id === net.myId);
+  const button = (text: string, action: () => void, disabled = false) => { const b = document.createElement('button'); b.className = 'minigame-action'; b.textContent = text; b.disabled = disabled; b.onclick = action; actions.append(b); };
+  button(me?.ready ? 'Cancel ready' : 'Ready up', () => net.sendPartyReady(!me?.ready));
+  if (me?.host)
+    button('Start match', () => net.sendPartyStart(), s.participants.length < 2 || s.participants.some(p => !p.ready));
+  if (partyInviteToken)
+    button('Copy invite', () => { void navigator.clipboard?.writeText(partyInviteUrl(partyInviteToken)).then(() => showNotice('Invite copied.')).catch(() => showNotice('Select and copy the invite link below.')); });
+  button('Leave lobby', () => leaveParty());
+  partyLobbyPanel.append(title, rule, roster, actions);
+  if (partyInviteToken) {
+    const link = document.createElement('input');
+    link.className = 'pg-invite-link';
+    link.readOnly = true;
+    link.value = partyInviteUrl(partyInviteToken);
+    link.onclick = () => link.select();
+    partyLobbyPanel.append(link);
+  }
+}
+partyCardAction.addEventListener('click', () => queuePartyMode('bridge'));
+partyPrivateAction.addEventListener('click', () => createPartyMode('bridge'));
+partyUI.onLeave = () => { leaveParty(); enterTitle(); openMinigames(); };
+partyUI.onReplay = () => {
+  const mode = partySnapshot?.mode ?? 'bridge';
+  leaveParty();
+  enterTitle();
+  openMinigames();
+  queuePartyMode(mode);
+};
+net.onPartyQueue = queued => {
   partyQueued = queued;
-  partyQueueStatus.textContent = queued ? 'Waiting for two more players…' : '';
+  partyQueueStatus.textContent = queued && partyQueuedMode === 'bridge' ? 'Finding an opponent…' : '';
+  parkourQueueStatus.textContent = queued && partyQueuedMode === 'parkour' ? 'Finding a racer…' : '';
   refreshPartyAvailability();
 };
-net.onPartyError = (_code, message) => {
-  partyQueueStatus.textContent = message;
-  showNotice(message);
-};
+net.onPartyError = (_code, message) => { partyQueued = false; refreshPartyAvailability(); showNotice(message); partyQueueStatus.textContent = message; };
 net.onPartyLobby = (snapshot, inviteToken) => {
+  if (!snapshot.participants.some(p => p.id === net.myId && p.connected))
+    return;
   partySnapshot = snapshot;
-  if (inviteToken) {
+  partyClockServer = snapshot.serverNow;
+  partyClockLocal = performance.now();
+  if (inviteToken)
     partyInviteToken = inviteToken;
-    partyQueueStatus.textContent = `Private party open — share ${duelInviteUrl(inviteToken)}`;
+  if (snapshot.phase === 'lobby') {
+    renderPartyLobby();
+    if (!arenaActive) {
+      showDuelBrowser();
+      openMinigames();
+    }
+  }
+  if (snapshot.phase === 'results' && arenaKind === 'party') {
+    screen = 'duel_results';
+    input.unlock();
+    pauseEl.style.display = 'none';
   }
   partyUI.setSnapshot(snapshot, net.myId);
-  const me = snapshot.participants.find((v) => v.id === net.myId);
-  if (snapshot.phase === 'lobby') {
-    partyQueueStatus.textContent = snapshot.participants.length >= PARTY_MIN_PLAYERS
-      ? 'Party full enough — ready up.'
-      : `Waiting for ${PARTY_MIN_PLAYERS - snapshot.participants.length} more…`;
-    if (me && !me.ready && partyQueued) net.sendPartyReady(true);
-    if (me?.host && snapshot.participants.length >= PARTY_MIN_PLAYERS &&
-        snapshot.participants.every((v) => v.ready)) net.sendPartyStart();
-  }
   refreshPartyAvailability();
 };
-net.onPartyArena = (arena, sub, spawn, countdownEndsAt) => {
-  arenaActive = true; arenaKind = 'party';
-  partySub = sub; partyGameId = sub.game;
-  arenaMaxHealth = PARTY_MAX_HEALTH; arenaHpPerHeart = 2;
-  arenaCanPlaceAt = partyArenaRules.canPlaceAt;
-  arenaCanEditAt = partyArenaRules.canEditAt;
-  arenaClampPos = (pos) => clampToPartySub(pos, partySub ?? sub);
-  arenaUnlimited = new Set<number>();
-  partyCropTo(sub);
+net.onPartyArena = (arena, sub, team, spawn, _countdown) => {
+  savePartyFallback();
+  registerPartyArena(arena);
+  world.invalidateArena(arena);
+  arenaActive = true;
+  arenaKind = 'party';
+  partySub = sub;
+  net.arenaRevision = partySnapshot!.revision;
+  arenaMaxHealth = PARTY_MAX_HEALTH;
+  arenaHpPerHeart = 2;
+  // Local prediction of the server's build rules (server_core.handlePartyEdit
+  // is still the authority). The Bridge builds out over the void, so its box
+  // reaches below the deck; Parkour keeps the tighter one.
+  const wool = BRIDGE_TEAM_BLOCK[team] ?? Block.TeamWoolA;
+  const bridge = sub.game === 'bridge';
+  arenaCanPlaceAt = (x, y, z, held) => partySnapshot?.phase === 'running' && held === wool &&
+    x >= sub.minX && x < sub.maxX && z >= sub.minZ && z < sub.maxZ &&
+    y >= (bridge ? PARTY_VOID_Y : PARTY_FLOOR_Y - 3) && y < (bridge ? PARTY_FLOOR_Y + 16 : PARTY_FLOOR_Y + 12) &&
+    !(bridge && bridgeGoalGuard(Math.floor(x) - sub.minX, Math.floor(z) - sub.minZ));
+  arenaCanEditAt = (x, y, z, held) => {
+    const block = world.getBlock(x, y, z);
+    // Taking your own wool back out of the bridge you just built is part of
+    // crossing; everything the venue itself is made of stays put.
+    if (bridge && (block === Block.TeamWoolA || block === Block.TeamWoolB))
+      return x >= sub.minX && x < sub.maxX && z >= sub.minZ && z < sub.maxZ;
+    return block === Block.Air && !!arenaCanPlaceAt?.(x, y, z, held);
+  };
+  arenaClampPos = pos => clampToPartySub(pos, sub);
+  // Wool and arrows are both unlimited: the count on the hotbar is scenery,
+  // and the server never reads either of them.
+  arenaUnlimited = new Set([wool, Item.BridgeArrow]);
+  world.setArenaRenderBounds(sub, PARTY_AMBIENT_LIGHT);
   partyArenaReadySent = false;
-  partyEliminated = false;
   partyUI.setVisible(true);
   partyUI.setSnapshot(partySnapshot, net.myId);
-
-  clearVaultPresentation(true); endGrapple(); setSeat(null); myRope = null;
-  killfeedEl.replaceChildren(); combatTagUntilLocal = 0; combatTimerEl.style.display = 'none';
-  warEl.style.display = 'none'; regionBannerEl.style.display = 'none';
-  worldMap.hide(); worldMap.hideBeacons(); worldMap.setDynamicMarkers([]);
+  partyUI.showRound(sub.game, performance.now());
+  clearVaultPresentation(true);
+  endGrapple();
+  setSeat(null);
+  myRope = null;
+  killfeedEl.replaceChildren();
+  combatTagUntilLocal = 0;
+  combatTimerEl.style.display = 'none';
+  warEl.style.display = 'none';
+  regionBannerEl.style.display = 'none';
+  worldMap.hide();
+  worldMap.hideBeacons();
+  worldMap.setDynamicMarkers([]);
   flagModels.setState(false, []);
-  if (fieldGuide?.open) fieldGuide.closeSilently();
+  if (fieldGuide?.open)
+    fieldGuide.closeSilently();
   starterEl.style.display = 'none';
-  closeMinigames(); audio.resume();
+  closeMinigames();
+  audio.resume();
   applyLocalMode('survival');
-  player.pos.set(spawn.x, spawn.y, spawn.z); player.vel.set(0, 0, 0); player.fallDistance = 0;
-  player.maxHealth = PARTY_MAX_HEALTH; player.health = PARTY_MAX_HEALTH; player.dead = false;
-  player.flying = false; player.noclip = false; player.gliding = false; player.boating = false;
-  pendingTeleport = { x: spawn.x, y: spawn.y, z: spawn.z, started: worldTimeLocal };
-  void countdownEndsAt; void arena;
-  if (world.update(spawn.x, spawn.z, 50, 2)) {
-    pendingTeleport = null;
-    markPartyArenaReady();
+  player.pos.set(spawn.x, spawn.y, spawn.z);
+  player.vel.set(0, 0, 0);
+  player.fallDistance = 0;
+  player.maxHealth = PARTY_MAX_HEALTH;
+  player.health = PARTY_MAX_HEALTH;
+  player.dead = false;
+  player.flying = false;
+  player.noclip = false;
+  player.gliding = false;
+  player.boating = false;
+  // Start facing the thing you are trying to reach: the first jump, or the
+  // far end of the chasm.
+  if (sub.game === 'parkour') {
+    const target = parkourCourse(sub.seed)[1];
+    player.yaw = Math.atan2(-(sub.minX + target.x - spawn.x), -(sub.minZ + target.z - spawn.z));
   } else {
-    startPartyReadyWatchdog(spawn.x, spawn.z);
+    player.yaw = Math.atan2(0, -((team === 0 ? sub.maxZ : sub.minZ) - spawn.z));
   }
+  pendingTeleport = { ...spawn, started: worldTimeLocal };
+  world.update(spawn.x, spawn.z, 50, 4);
+  startPartyReadyWatchdog(spawn.x, spawn.z);
   resumePlay();
-};
-net.onPartyRound = (game, _index, _title, _rule, sub, spawn, _endsAt) => {
-  // A round change is a TELEPORT plus a new crop. Nothing is ever re-stamped:
-  // all four arenas already exist, side by side, in this same slot.
-  partySub = sub; partyGameId = game;
-  partyEliminated = false;
-  partySwingReadyAt = 0;
-  arenaClampPos = (pos) => clampToPartySub(pos, sub);
-  partyCropTo(sub);
-  player.pos.set(spawn.x, spawn.y, spawn.z); player.vel.set(0, 0, 0); player.fallDistance = 0;
-  player.health = PARTY_MAX_HEALTH; player.dead = false;
-  player.flying = false; player.noclip = false;
-  pendingTeleport = { x: spawn.x, y: spawn.y, z: spawn.z, started: worldTimeLocal };
-  world.update(spawn.x, spawn.z, 50, 2);
-  partyUI.hideCard();
-  partyUI.hideCall();
-  partyUI.showRound(game, performance.now());
-  partyUI.setSnapshot(partySnapshot, net.myId);
-  audio.hitmarker(false, false);
 };
 net.onPartyLoadout = (slots, selected) => {
   inventory.restore({ slots, armor: new Array(4).fill(null), selected });
-  fireCooldown = 0; reloadTimer = 0; burstRemaining = 0; healUse.cancel();
+  fireCooldown = 0;
+  reloadTimer = 0;
+  burstRemaining = 0;
+  healUse.cancel();
 };
-net.onPartyCall = (colour, vanishAt, restoreAt) => {
-  partyUI.showCall(colour, vanishAt, Date.now(), performance.now());
-  audio.hitmarker(false, true);
-  void restoreAt;
+net.onPartyHit = (target, amount, combo, charge, crit, killed, ranged) => {
+  showPvpHit(target, amount, killed);
+  const remote = net.remotes.get(target);
+  const at = remote ? new THREE.Vector3(remote.tx, remote.ty + 1.1, remote.tz) : undefined;
+  if (ranged) audio.arrowHit(crit, at);
+  else audio.axeHit(crit, at);
+  // The three things the swing model decides that a plain hitmarker cannot
+  // show: how long you charged, whether it crit, and how deep the combo is.
+  if (!killed && (crit || combo > 0))
+    killBanner.push(crit ? 'CRIT' : `COMBO ×${combo + 1}`,
+      ranged ? 'Full draw' : `${Math.round(charge * 100)}% charge`,
+      crit ? '#ffd25e' : '#72ffcb', 1.1);
 };
-net.onPartyEliminated = (id, place, reason) => {
-  const name = id === net.myId ? 'You'
-    : net.remotes.get(id)?.info.username ?? 'Someone';
-  killBanner.push(partyEliminationText(name, reason).toUpperCase(),
-    `#${place + 1}`, id === net.myId ? '#ff5f76' : '#aec1d8', 1.6);
-  if (id === net.myId) {
-    partyEliminated = true;
-    damageNumbers.clear();
-    // Eliminated players spectate the rest of the microgame from above rather
-    // than being yanked out of it.
-    player.flying = true; player.noclip = true;
-    audio.voidFall();
-  }
-  partyUI.setSnapshot(partySnapshot, net.myId);
+net.onPartyArrow = a => {
+  partyVisuals.spawnArrow(a);
+  if (a.by !== net.myId) audio.bowRelease(a.power);
 };
-net.onPartyIntermission = (endsAt, nextGame, standings) => {
-  partyUI.showIntermission(nextGame, standings, net.myId);
-  partyEliminated = false;
-  player.flying = false; player.noclip = false;
-  void endsAt;
+net.onPartyArrowEnd = (id, x, y, z, hit) => {
+  partyVisuals.endArrow(id);
+  particles.burst(x, y, z, hit ? 8 : 4, hit ? 0xff8f9c : 0xd8cba4, hit ? 3 : 1.8, .3,
+    { gravity: 6, spread: .3, scale: .32 });
 };
-net.onPartyResult = (result) => {
-  const winner = result.winner !== null
-    ? partySnapshot?.participants.find((v) => v.id === result.winner)?.username ?? null : null;
-  const copy = partyResultCopy(winner, result.finishReason);
-  killBanner.push(copy.title, copy.sub,
-    result.winner === net.myId ? '#ffd25e' : '#aec1d8', 3.2);
-  partyUI.showIntermission(undefined,
-    result.scoreboard.map((p) => ({ id: p.id, username: p.username, points: p.points })),
-    net.myId);
-};
-
-let partyReadyWatchdog = 0;
+net.onPartyResult = () => { if (arenaKind === 'party') {
+  screen = 'duel_results';
+  input.unlock();
+  pauseEl.style.display = 'none';
+} };
 function markPartyArenaReady(): void {
-  if (arenaKind !== 'party' || partyArenaReadySent) return;
+  if (arenaKind !== 'party' || partyArenaReadySent || !partySnapshot)
+    return;
   partyArenaReadySent = true;
-  net.sendPartyArenaReady();
+  net.sendPartyArenaReady(partySnapshot.revision);
   stopPartyReadyWatchdog();
 }
-function stopPartyReadyWatchdog(): void {
-  if (partyReadyWatchdog) window.clearInterval(partyReadyWatchdog);
-  partyReadyWatchdog = 0;
-}
+function stopPartyReadyWatchdog(): void { if (partyReadyWatchdog)
+  window.clearInterval(partyReadyWatchdog); partyReadyWatchdog = 0; }
 function startPartyReadyWatchdog(x: number, z: number): void {
   stopPartyReadyWatchdog();
-  const started = Date.now();
-  // A timer, not the frame loop — a backgrounded tab gets no frames and would
-  // time the whole party back to the lobby. Same fix as Duels and Bedwars.
   partyReadyWatchdog = window.setInterval(() => {
-    if (arenaKind !== 'party' || partyArenaReadySent) { stopPartyReadyWatchdog(); return; }
-    if (world.isLoaded(x, z) || Date.now() - started > 5_000) markPartyArenaReady();
-  }, 250);
+    if (arenaKind !== 'party' || partyArenaReadySent) {
+      stopPartyReadyWatchdog();
+      return;
+    }
+    // Readiness means the ground you start on is real. The venues are now
+    // hundreds of blocks long — waiting for the far end of a Parkour lane or
+    // the enemy Bridge base would never finish inside the load barrier — so
+    // the barrier covers the spawn bubble and the rest streams as you go.
+    const complete = world.update(x, z, 30, 4);
+    if (complete && world.isLoaded(x, z)) {
+      pendingTeleport = null;
+      markPartyArenaReady();
+    }
+  }, 100);
 }
-
-/** Per-frame Party presentation. */
-function updatePartyFrame(): void {
-  if (arenaKind !== 'party') return;
-  partyUI.update(performance.now());
+/** The Bridge's two weapons, client side. Neither decides anything: the melee
+ *  branch reports a target id, the bow branch reports a direction and a draw,
+ *  and the server does the rest. What lives here is the FEEL — the swing arc,
+ *  the rising creak of a draw, and the meter that tells you when to let go. */
+const PARTY_MELEE_REACH = 4.2;
+let bowDrawStart = 0;
+let bowDrawTicks = 0;
+let partySwingAt = -1e9;
+function partyWeaponsActive(): boolean {
+  return arenaKind === 'party' && partySub?.game === 'bridge' &&
+    partySnapshot?.phase === 'running';
+}
+function cancelBowDraw(): void {
+  bowDrawStart = 0;
+  bowDrawTicks = 0;
+  partyUI.setDraw(0);
+}
+function updatePartyWeapon(heldId: number, lookDir: THREE.Vector3, eye: THREE.Vector3): void {
+  const now = performance.now();
+  if (heldId === Item.VoidCleaver) {
+    cancelBowDraw();
+    if (!input.leftClicked)
+      return;
+    // The swing plays whether or not it lands: a miss you can see is what
+    // makes the next one a decision.
+    const charge = Math.max(0, Math.min(1, (now - partySwingAt) / 560));
+    partySwingAt = now;
+    if (charge > .9) held.swingHeavy(); else held.swing();
+    audio.axeSwing(charge);
+    // Report the ray target if there is one, and otherwise the nearest body
+    // inside the reach and the facing cone. Being GENEROUS here costs nothing:
+    // the server re-checks range, facing and cooldown against its own
+    // positions, so the only thing a loose client test can do is stop a swing
+    // that would have landed from never being sent at all.
+    let target = remotePlayers.rayHit(eye, lookDir, PARTY_MELEE_REACH);
+    if (target < 0) {
+      // The cone is measured flat, the way the server measures it: looking
+      // steeply down at somebody is still looking at them.
+      const look = Math.hypot(lookDir.x, lookDir.z) || 1e-3;
+      const lx = lookDir.x / look, lz = lookDir.z / look;
+      let best = PARTY_MELEE_REACH;
+      for (const [id, r] of net.remotes) {
+        if (r.dead)
+          continue;
+        const dx = r.tx - eye.x, dy = r.ty + .9 - eye.y, dz = r.tz - eye.z;
+        const dist = Math.hypot(dx, dy, dz), flat = Math.hypot(dx, dz) || 1e-3;
+        if (dist > best || (dx / flat) * lx + (dz / flat) * lz < .55)
+          continue;
+        best = dist;
+        target = id;
+      }
+    }
+    if (target >= 0)
+      net.sendPartyMelee(target);
+    return;
+  }
+  if (heldId !== Item.BridgeBow) {
+    cancelBowDraw();
+    return;
+  }
+  // Hold to draw, release to loose — and a draw that never reached the minimum
+  // is simply let down, so an accidental click costs nothing.
+  if (input.rightDown) {
+    if (!bowDrawStart)
+      bowDrawStart = now;
+    const power = bridgeBowPower(now - bowDrawStart);
+    partyUI.setDraw(power);
+    const tick = Math.floor(power * 6);
+    if (tick > bowDrawTicks) {
+      bowDrawTicks = tick;
+      audio.bowDraw(power);
+    }
+    return;
+  }
+  if (!bowDrawStart)
+    return;
+  const power = bridgeBowPower(now - bowDrawStart);
+  cancelBowDraw();
+  if (power < BRIDGE_BOW_MIN_POWER)
+    return;
+  audio.bowRelease(power);
+  held.swing();
+  net.sendPartyShoot(lookDir.x, lookDir.y, lookDir.z, power);
+}
+function updatePartyFrame(dt: number): void {
+  // A half-drawn bow does not survive the thing that interrupted it.
+  if (bowDrawStart && (!partyWeaponsActive() || screen !== 'playing'))
+    cancelBowDraw();
+  if (arenaKind !== 'party' || !partySnapshot) {
+    partyVisuals.updateArrows(dt);
+    return;
+  }
+  const now = partyNow();
+  partyUI.update(performance.now(), now);
+  partyVisuals.update(partySnapshot, net.myId, now);
+  partyVisuals.updateArrows(dt);
 }
 
 net.connect();
@@ -8828,9 +8788,12 @@ function updateAtmosphere(): void {
   // the sky is showing rather than by a flat brightness scalar.
   world.sunTintUniform.value.copy(sky.sunTint);
   world.skyTintUniform.value.copy(sky.ambientTint);
-  // Where the sun is, and what the water reflects when it looks up at the sky.
-  world.sunDirUniform.value.copy(sky.sunDir);
+  // Where the LIGHT is — the sun by day, the moon once it sets — and what the
+  // water reflects when it looks up at the sky.
+  world.lightDirUniform.value.copy(sky.lightDir);
+  world.nightUniform.value = sky.nightAmount;
   world.skyColorUniform.value.copy(sky.skyColor);
+  postfx.setNight(sky.nightAmount);
   world.timeUniform.value = sky.time * DAY_LENGTH;
   const fog = scene.fog as THREE.Fog;
   if (player.eyeUnderwater) {
@@ -11345,7 +11308,8 @@ function frame(): void {
   // the faction perk) ride on top of worn gear; speed applies to movement.
   const buffsNow = activeBuffs();
   player.speedMult = arenaActive ? 1 : buffsNow.speedMult;
-  player.energyDrainMult = arenaActive ? 1 : buffsNow.energyMult;   // Windrunner capstones
+  player.energyDrainMult = arenaKind === 'party' ? 0 : arenaActive ? 1 : buffsNow.energyMult;
+  if(arenaKind === 'party'){player.energy=1;player.exhausted=false;}   // Windrunner capstones
   player.fallDamageMult = arenaActive ? 1 : buffsNow.fallMult;      // Juggernaut capstones
   interaction.miningSpeedMult = arenaActive ? 1 : buffsNow.mineMult; // Prospector + Rune of Fortune
   const armorPts = arenaActive ? 0 : inventory.armorPoints() + buffsNow.armorBonus;
@@ -11409,11 +11373,14 @@ function frame(): void {
       const bubbleReady = world.update(tp.x, tp.z, arenaActive ? 20 : 14, 2);
       if (bubbleReady || (worldTimeLocal - tp.started > (arenaActive ? 2 : 8))) {
         pendingTeleport = null;
-        markDuelArenaReady();
+        if (arenaKind === 'duel' && bubbleReady) markDuelArenaReady();
       }
     }
     updateGrapple(dt); // hook flight / reel / swing (sets velocity before the step)
     player.update(dt, moveInput, world);
+    // R gives up on the current jump. The Bridge has checkpoints of its own
+    // (the portals) and nothing to retry, so the key is Parkour's alone.
+    if (controlling && arenaKind === 'party' && partySub?.game === 'parkour' && input.reloadPressed) net.sendPartyRetry();
     if (arenaActive && arenaClampPos) {
       const beforeX = player.pos.x, beforeY = player.pos.y, beforeZ = player.pos.z;
       const bounded = arenaClampPos(player.pos);
@@ -11556,9 +11523,12 @@ function frame(): void {
         interaction.update(dt, input, camera, true, true); // suppress mine + use
       } else if (input.dismountPressed && tryAttachFastRope()) {
         interaction.update(dt, input, camera, true, true);
-      } else if (input.rightClicked && !interaction.armedMove &&
-          bedwarsTryOpenShop(interaction.target)) {
-        interaction.update(dt, input, camera, true, true); // suppress mine + use
+      } else if (partyWeaponsActive() && heldStack &&
+          (heldStack.id === Item.VoidCleaver || heldStack.id === Item.BridgeBow)) {
+        // The Bridge's weapons own both buttons while one is in hand: no
+        // mining, no placing, and no block use behind the bow's draw.
+        updatePartyWeapon(heldStack.id, lookDir, eye);
+        interaction.update(dt, input, camera, true, true);
       } else if (input.rightClicked && !interaction.armedMove && heldStack &&
           heldStack.id === Item.HelicopterKit && tryDeployHelicopter()) {
         // Field-assemble an airframe wherever you are standing.
@@ -11629,45 +11599,11 @@ function frame(): void {
         pushStateSave();
         interaction.update(dt, input, camera, true, true); // suppress mine + use
       } else {
-        // Open-world melee never hits players, and Duels PvP is handled
-        // exclusively by the Burst Rifle branch above (its iron axe is block
-        // utility only). The ONE place an axe may hit a player is inside a
-        // live Bedwars match, and the server re-validates every swing.
-        // Bedwars' axe and the Party Knockback Stick are the same ray with a
-        // different send; both are gated on being inside that mode's live
-        // match, and both are re-validated server-side.
-        const meleeLive =
-          (arenaKind === 'bedwars' && !bwSpectating && bwSnapshot?.phase === 'running') ||
-          (arenaKind === 'party' && !partyEliminated && partyGameId === 'knockback' &&
-            partySnapshot?.phase === 'running');
-        const duelPlayerInSights = meleeLive
-          ? remotePlayers.rayHit(eye, lookDir, BW_MELEE_RANGE) : -1;
-        // A bed is a block, not a body, so it needs its own aim test. Beds are
-        // `hardness: -1`, so the ordinary mining path can never touch one.
-        const bedInSights = arenaKind === 'bedwars' && bwActiveBounds &&
-          !bwSpectating && bwSnapshot?.phase === 'running' && interaction.target
-          ? bedwarsEnemyBedAt(interaction.target) : null;
         const encounterInSights = vaultEncounterVisuals.rayTarget(
           encounterSnapshot, eye, lookDir, 3.5,
         );
         const mobInSights = encounterInSights ? null : mobs.rayHit(eye, lookDir, 3.5);
-        if (input.leftClicked && duelPlayerInSights >= 0) {
-          const party = arenaKind === 'party';
-          const charge = party ? partyCharge() : bwCharge();
-          if (party) net.sendPartyMelee(duelPlayerInSights);
-          else net.sendBwMelee(duelPlayerInSights);
-          audio.axeSwing(charge);
-          // A full-charge release gets the wider, slower arc. Anything less is
-          // an ordinary swing, so the animation itself tells you what you did.
-          if (charge >= 0.999) held.swingHeavy(); else held.swing();
-          const now = performance.now();
-          if (party) partySwingReadyAt = now + PARTY_KNOCKBACK_TIER.cooldownMs;
-          else bwSwingReadyAt = now + bwSwingCooldownMs;
-        } else if (input.leftClicked && bedInSights) {
-          net.sendBwBed(bedInSights.x, bedInSights.y, bedInSights.z);
-          audio.axeSwing(1);
-          held.swingHeavy();
-        } else if (input.leftClicked && encounterInSights) {
+        if (input.leftClicked && encounterInSights) {
           const tool = heldStack ? ITEMS[heldStack.id]?.tool : undefined;
           hitEncounterTarget(encounterInSights.id, encounterInSights.hit,
             (tool?.damage ?? 1) + activeBuffs().meleeBonus, 'melee');
@@ -11681,7 +11617,6 @@ function frame(): void {
           held.swing();
         }
         interaction.update(dt, input, camera,
-          duelPlayerInSights >= 0 || bedInSights !== null ||
           encounterInSights !== null || mobInSights !== null);
       }
 
@@ -11792,6 +11727,11 @@ function frame(): void {
   }
 
   checkDeath();
+  // The single-player election clock. Once a second is plenty for a deadline
+  // measured in tens of seconds, and it keeps a per-frame Date.now() and a
+  // politics walk out of the frame budget.
+  offlineElectionTick -= dt;
+  if (offlineElectionTick <= 0) { offlineElectionTick = 1; tickOfflineElection(); }
   furnaces.update(dt);
 
   // Past this point we're always in-game (title returns early above).
@@ -11804,8 +11744,11 @@ function frame(): void {
   // The streaming radius is the one the graphics preset chose, not the
   // RENDER_DISTANCE ceiling: passing the ceiling here would mesh every chunk
   // out to the `max` radius no matter which preset the player picked.
+  // A Duels colosseum is 44 blocks across, so three chunks covers it. The
+  // Bridge and the Parkour lane are hundreds of blocks long and the far end is
+  // the thing you are aiming at, so they get a much deeper bubble.
   world.update(player.pos.x, player.pos.z, 6,
-    arenaActive ? 3 : world.renderDistance);
+    arenaKind === 'party' ? 10 : arenaActive ? 3 : world.renderDistance);
   if (net.connected && hasServerWorldTime) {
     const extrapolated = serverWorldTime + (performance.now() - serverWorldTimeAt) / 1000;
     sky.time = 0.04 + extrapolated / DAY_LENGTH;
@@ -11813,7 +11756,7 @@ function frame(): void {
   // Duels presents a fixed noon sky while the persistent server clock keeps
   // advancing underneath. The sky eases both into noon and back to the live
   // clock, and also absorbs small authoritative clock corrections smoothly.
-  sky.update(dt, activeCamera, arenaActive ? 0.25 : undefined,
+  sky.update(dt, activeCamera, arenaKind==='party' && partySub ? parkourTheme(partySub.seed).time : arenaActive ? 0.25 : undefined,
     !(net.connected && hasServerWorldTime));
   updateAtmosphere();
   ambientWorld.update(
@@ -12053,7 +11996,7 @@ function frame(): void {
   // the frame that samples it, so it can never be a frame behind the world it
   // is shading. `camera` is the eye even in third person, which keeps the box
   // centred on the player rather than on the trailing camera.
-  sunShadow.update(sky.sunDir, camera.position, sky.sunHeight);
+  sunShadow.update(sky.lightDir, camera.position, sky.lightHeight, sky.moonlit);
   postfx.render(activeCamera);
   // Floating waypoint badges (skip the title panorama — wrong camera + covered).
   worldMap.renderBeacons(window.innerWidth, window.innerHeight);

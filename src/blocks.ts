@@ -482,6 +482,8 @@ export const enum Tile {
   PartyTileD = 268,
   VoidCleaver = 269,
   KnockbackStick = 270,
+  BridgeBow = 271,
+  BridgeArrow = 272,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel' | 'sword';
@@ -1039,10 +1041,12 @@ export const BLOCKS: Record<number, BlockInfo> = {
   // fixtures are never destroyed at all.
   [Block.BwBedA]: def({
     name: 'Crimson Bed', hardness: -1, emission: 3,
+    opaque: false, occludes: false,
     top: Tile.BwBedTopA, side: Tile.BwBedSideA, bottom: Tile.BwBedSideA,
   }),
   [Block.BwBedB]: def({
     name: 'Cobalt Bed', hardness: -1, emission: 3,
+    opaque: false, occludes: false,
     top: Tile.BwBedTopB, side: Tile.BwBedSideB, bottom: Tile.BwBedSideB,
   }),
   [Block.BwGenerator]: def({

@@ -4,6 +4,7 @@
 import {
   Block, BLOCKS, BlockInfo, isTopSlab, slabBottomId, stairsBaseOf, Tile, ToolKind,
 } from './blocks';
+import { MinigameItemId } from './minigame_item_ids';
 import { isMinigameOnly } from './minigame_items';
 
 export const enum Item {
@@ -152,8 +153,10 @@ export const enum Item {
   TeamWoolB = 243,
   PartyTileC = 244,
   PartyTileD = 245,
-  VoidCleaver = 247,
-  KnockbackStick = 248,
+  VoidCleaver = MinigameItemId.VoidCleaver,
+  KnockbackStick = MinigameItemId.KnockbackStick,
+  BridgeBow = MinigameItemId.BridgeBow,
+  BridgeArrow = MinigameItemId.BridgeArrow,
 }
 
 export interface ToolInfo {
@@ -646,11 +649,19 @@ export const ITEMS: Record<number, ItemInfo> = {
     name: 'Void Cleaver', kind: 'item', sprite: Tile.VoidCleaver, maxStack: 1,
     tool: { type: 'axe', tier: 2, speed: 6, durability: 2000, damage: 6 },
   },
-  /** Party Games' Knockback Arena weapon: zero damage, enormous knockback. */
+  /** Minigame-only knockback weapon: zero damage, enormous knockback. No
+   *  mode grants it today; it stays registered so the id is never reused. */
   [Item.KnockbackStick]: {
     name: 'Knockback Stick', kind: 'item', sprite: Tile.KnockbackStick, maxStack: 1,
     tool: { type: 'axe', tier: 0, speed: 1, durability: 2000, damage: 0 },
   },
+  /** The Bridge's bow. Deliberately NOT a `gun`: guns fire hitscan rounds the
+   *  client reports, and this fires a server-simulated arrow with an arc. The
+   *  registry entry exists so it renders, names and stacks like an item. */
+  [Item.BridgeBow]: { name: 'Bridge Bow', kind: 'item', sprite: Tile.BridgeBow, maxStack: 1 },
+  /** Ammunition. The Bridge hands out an unlimited stack, so the count on the
+   *  hotbar is decoration — the server never reads it. */
+  [Item.BridgeArrow]: { name: 'Arrow', kind: 'item', sprite: Tile.BridgeArrow, maxStack: 64 },
 };
 
 /**

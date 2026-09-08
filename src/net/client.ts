@@ -24,7 +24,7 @@ import type {
 import type { DuelArenaBounds, DuelLobbySnapshot, DuelResult } from '../duels';
 import type { BwArenaBounds, BwLobbySnapshot, BwResult, BwStage } from '../bedwars';
 import type {
-  PartyArenaBounds, PartyGameId, PartyLobbySnapshot, PartyResult, PartySubBounds,
+  PartyArenaBounds, PartyLobbySnapshot, PartyMode, PartyResult, PartySubBounds,
 } from '../partygames';
 import type { DuelFlair, DuelPublicProfile } from '../duels_progression';
 import type { FactionPublic, Notification } from './protocol';
@@ -113,7 +113,7 @@ export class NetClient {
   onBwError?: (code: string, message: string) => void;
   onBwArena?: (arena: BwArenaBounds, spawn: { x: number; y: number; z: number },
     team: number, countdownEndsAt: number) => void;
-  onBwLoadout?: (slots: (ItemStack | null)[], selected: number, axe: number) => void;
+  onBwLoadout?: (slots: (ItemStack | null)[], selected: number, axe: number, upgrade: boolean) => void;
   onBwGrant?: (items: ItemStack[]) => void;
   onBwResources?: (iron: number, gold: number, diamond: number) => void;
   onBwHit?: (target: number, amount: number, combo: number, charge: number,
@@ -122,19 +122,18 @@ export class NetClient {
   onBwClock?: (serverNow: number, endsAt: number, stage: BwStage) => void;
   onBwRespawn?: (respawnAt: number, spectating: boolean) => void;
   onBwResult?: (result: BwResult) => void;
-  // --- Party Games ---
+  // --- The Bridge / Parkour ---
   onPartyQueue?: (queued: boolean) => void;
   onPartyLobby?: (snapshot: PartyLobbySnapshot, inviteToken?: string) => void;
   onPartyError?: (code: string, message: string) => void;
-  onPartyArena?: (arena: PartyArenaBounds, sub: PartySubBounds,
+  onPartyArena?: (arena: PartyArenaBounds, sub: PartySubBounds, team: number,
     spawn: { x: number; y: number; z: number }, countdownEndsAt: number) => void;
-  onPartyRound?: (game: PartyGameId, index: number, title: string, rule: string,
-    sub: PartySubBounds, spawn: { x: number; y: number; z: number }, endsAt: number) => void;
   onPartyLoadout?: (slots: (ItemStack | null)[], selected: number) => void;
-  onPartyCall?: (colour: number, vanishAt: number, restoreAt: number) => void;
-  onPartyEliminated?: (id: number, place: number, reason: 'void' | 'sludge' | 'left') => void;
-  onPartyIntermission?: (endsAt: number, nextGame: PartyGameId | undefined,
-    standings: { id: number; username: string; points: number }[]) => void;
+  onPartyHit?: (target: number, amount: number, combo: number, charge: number,
+    crit: boolean, killed: boolean, ranged: boolean) => void;
+  onPartyArrow?: (a: { id: number; by: number; x: number; y: number; z: number;
+    dx: number; dy: number; dz: number; speed: number; power: number }) => void;
+  onPartyArrowEnd?: (id: number, x: number, y: number, z: number, hit: boolean) => void;
   onPartyResult?: (result: PartyResult) => void;
   /** Saved per-account state to restore (inventory/hotbar), if the account has any. */
   onRestoreState?: (state: Record<string, unknown>) => void;
@@ -286,6 +285,7 @@ export class NetClient {
 
   private ws: WebSocket | null = null;
   private xformAcc = 0;
+  arenaRevision: number | undefined;
 
   /** Begin connecting. Falls back to offline after `timeoutMs`. */
   connect(timeoutMs = 2500): void {
@@ -579,7 +579,7 @@ export class NetClient {
         this.onBwArena?.(msg.arena, msg.spawn, msg.team, msg.countdownEndsAt);
         break;
       case 'bwLoadout':
-        this.onBwLoadout?.(msg.slots, msg.selected, msg.axe);
+        this.onBwLoadout?.(msg.slots, msg.selected, msg.axe, msg.upgrade ?? false);
         break;
       case 'bwGrant':
         this.onBwGrant?.(msg.items);
@@ -612,22 +612,19 @@ export class NetClient {
         this.onPartyError?.(msg.code, msg.message);
         break;
       case 'partyArena':
-        this.onPartyArena?.(msg.arena, msg.sub, msg.spawn, msg.countdownEndsAt);
-        break;
-      case 'partyRound':
-        this.onPartyRound?.(msg.game, msg.index, msg.title, msg.rule, msg.sub, msg.spawn, msg.endsAt);
+        this.onPartyArena?.(msg.arena, msg.sub, msg.team, msg.spawn, msg.countdownEndsAt);
         break;
       case 'partyLoadout':
         this.onPartyLoadout?.(msg.slots, msg.selected);
         break;
-      case 'partyCall':
-        this.onPartyCall?.(msg.colour, msg.vanishAt, msg.restoreAt);
+      case 'partyHit':
+        this.onPartyHit?.(msg.target, msg.amount, msg.combo, msg.charge, msg.crit, msg.killed, msg.ranged);
         break;
-      case 'partyEliminated':
-        this.onPartyEliminated?.(msg.id, msg.place, msg.reason);
+      case 'partyArrow':
+        this.onPartyArrow?.(msg);
         break;
-      case 'partyIntermission':
-        this.onPartyIntermission?.(msg.endsAt, msg.nextGame, msg.standings);
+      case 'partyArrowEnd':
+        this.onPartyArrowEnd?.(msg.id, msg.x, msg.y, msg.z, msg.hit);
         break;
       case 'partyResult':
         this.onPartyResult?.(msg.result);
@@ -733,15 +730,29 @@ export class NetClient {
     }
   }
 
-  private raw(msg: ClientMsg, volatile = false): void {
+  /**
+   * Put one message on the wire. Returns whether it actually went — which is
+   * NOT the same as `connected`.
+   *
+   * `connected` is cleared by the socket's `close` EVENT, and that event fires
+   * some time after the socket itself has moved to CLOSING/CLOSED. In between,
+   * every send here is discarded in silence while callers still believe they
+   * are online. That window is harmless for a transform and destructive for a
+   * message the caller has already paid for locally — the death spill empties
+   * the inventory before the drop is sent — so the answer is reported rather
+   * than swallowed, and those callers can put the loot back.
+   */
+  private raw(msg: ClientMsg, volatile = false): boolean {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       // Transforms are disposable: if a slow tunnel is already carrying an
       // older packet, queuing more only makes the opponent see where we were
       // seconds ago. Reliable actions (shots, edits, lobby commands, etc.) are
       // never dropped.
-      if (volatile && this.ws.bufferedAmount > 32 * 1024) return;
+      if (volatile && this.ws.bufferedAmount > 32 * 1024) return false;
       this.ws.send(JSON.stringify(msg));
+      return true;
     }
+    return false;
   }
 
   private close(): void {
@@ -763,7 +774,7 @@ export class NetClient {
     // Subtract the interval (don't zero) so the long-run rate matches
     // TRANSFORM_HZ; clamp to avoid a burst after a long stall.
     this.xformAcc = Math.min(this.xformAcc - interval, interval);
-    this.raw({ t: 'xform', x, y, z, yaw, pitch, gliding, boating, seated, sneaking, held, armor,
+    this.raw({ t: 'xform', arenaRevision: this.arenaRevision, x, y, z, yaw, pitch, gliding, boating, seated, sneaking, held, armor,
       swing, aiming, reloading }, true);
   }
 
@@ -811,14 +822,18 @@ export class NetClient {
   }
   sendBwShopBuy(entry: number): void { if (this.connected) this.raw({ t: 'bwShopBuy', entry }); }
 
-  sendPartyCreate(): void { if (this.connected) this.raw({ t: 'partyCreate' }); }
-  sendPartyQueue(join: boolean): void { if (this.connected) this.raw({ t: 'partyQueue', join }); }
+  sendPartyCreate(mode: PartyMode = 'bridge'): void { if (this.connected) this.raw({ t: 'partyCreate', mode }); }
+  sendPartyQueue(join: boolean, mode: PartyMode = 'bridge'): void { if (this.connected) this.raw({ t: 'partyQueue', join, mode }); }
   sendPartyJoin(token: string): void { if (this.connected) this.raw({ t: 'partyJoin', token }); }
   sendPartyLeave(): void { if (this.connected) this.raw({ t: 'partyLeave' }); }
   sendPartyReady(ready: boolean): void { if (this.connected) this.raw({ t: 'partyReady', ready }); }
   sendPartyStart(): void { if (this.connected) this.raw({ t: 'partyStart' }); }
-  sendPartyArenaReady(): void { if (this.connected) this.raw({ t: 'partyArenaReady' }); }
+  sendPartyArenaReady(revision: number): void { if (this.connected) this.raw({ t: 'partyArenaReady', revision }); }
+  sendPartyRetry(): void { if (this.connected) this.raw({ t: 'partyRetry' }); }
   sendPartyMelee(target: number): void { if (this.connected) this.raw({ t: 'partyMelee', target }); }
+  sendPartyShoot(dx: number, dy: number, dz: number, power: number): void {
+    if (this.connected) this.raw({ t: 'partyShoot', dx, dy, dz, power });
+  }
 
   sendEdit(x: number, y: number, z: number, block: number): void {
     if (this.connected) this.raw({ t: 'edit', x, y, z, block });
@@ -855,13 +870,22 @@ export class NetClient {
   sendRespawn(): void {
     if (this.connected) this.raw({ t: 'respawn' });
   }
-  /** `reason` tells the server whether this is a HARVEST (taxable — a block you
-   *  just broke) or a player emptying their own pockets (never taxed). */
+  /**
+   * Hand stacks to the server as world item entities.
+   *
+   * `reason` tells the server whether this is a HARVEST (taxable — a block you
+   * just broke) or a player emptying their own pockets (never taxed).
+   *
+   * Returns whether the message actually reached the wire; see `raw`. A caller
+   * that has ALREADY removed the items locally must check it, or a send that
+   * lands in the closing-socket window deletes them instead of dropping them.
+   */
   sendDrop(
     items: { id: number; count: number }[], x: number, y: number, z: number,
     reason: 'harvest' | 'manual' = 'manual'
-  ): void {
-    if (this.connected && items.length) this.raw({ t: 'drop', items, x, y, z, reason });
+  ): boolean {
+    if (!items.length) return true;
+    return this.connected && this.raw({ t: 'drop', items, x, y, z, reason });
   }
 
   // --- FACTION GOVERNMENT ------------------------------------------------------

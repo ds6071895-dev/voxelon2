@@ -44,6 +44,8 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 const GRADE_SHADER = {
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
+    /** How night it is, 0..1. See the night block in the fragment shader. */
+    uNight: { value: 0 },
   },
   vertexShader: /* glsl */`
     varying vec2 vUv;
@@ -54,6 +56,7 @@ const GRADE_SHADER = {
   `,
   fragmentShader: /* glsl */`
     uniform sampler2D tDiffuse;
+    uniform float uNight;
     varying vec2 vUv;
 
     // Narkowicz's fit of the ACES filmic curve - one polynomial, no LUT.
@@ -119,6 +122,35 @@ const GRADE_SHADER = {
       graded = clamp(mix(vec3(luma(graded)), graded, 1.0 + 0.82 * (1.0 - (mx - mn))),
                      0.0, 1.0);
 
+      // NIGHT, and it is a different picture rather than a darker one.
+      //
+      // Three things happen to a real night frame, and only the first is
+      // brightness. The eye goes scotopic — the colour cones stop reporting, so
+      // everything dim drains toward silver-blue while the few genuinely bright
+      // things (a torch, lava, the moon) keep their colour and become the whole
+      // subject of the shot. Contrast collapses in the darks, because there is
+      // no light down there to separate anything with. And the frame reads
+      // COOL, top to bottom, in a way daylight's split tone never does.
+      //
+      // Keyed on luminance so the two halves separate: the more of the frame
+      // that is dark, the more of it goes blue, and a torch-lit face stays warm
+      // in the middle of it. That contrast is the whole effect — a uniform blue
+      // wash over everything would just be a filter.
+      if (uNight > 0.002) {
+        float nl = luma(graded);
+        float dim = 1.0 - smoothstep(0.05, 0.46, nl);
+        vec3 scotopic = vec3(nl) * vec3(0.72, 0.91, 1.36);
+        graded = mix(graded, scotopic, uNight * dim * 0.62);
+        // Flatten the very bottom of the range and lift it off true black, so
+        // shade at night reads as depth you could walk into rather than as a
+        // hole punched in the frame.
+        graded = mix(graded, graded * 0.88 + vec3(0.014, 0.019, 0.032),
+                     uNight * dim);
+        // A touch more falloff at the corners: night has no fill light, and the
+        // eye reads the darker frame edge as the dark going on past the screen.
+        graded *= 1.0 - 0.10 * uNight * smoothstep(0.25, 1.2, r);
+      }
+
       // Vignette: a hint of one. Past a certain depth it stops reading as a
       // lens and starts reading as the corners of the world being unlit, which
       // fights everything above.
@@ -134,7 +166,10 @@ export class PostFX {
   private readonly scene: THREE.Scene;
   private composer: EffectComposer | null = null;
   private renderPass: RenderPass | null = null;
+  private bloomPass: UnrealBloomPass | null = null;
+  private gradePass: ShaderPass | null = null;
   private enabled = false;
+  private night = 0;
 
   constructor(renderer: THREE.WebGLRenderer, scene: THREE.Scene) {
     this.renderer = renderer;
@@ -158,6 +193,26 @@ export class PostFX {
     // The active camera swaps between first and third person mid-game.
     this.renderPass.camera = camera;
     this.composer.render();
+  }
+
+  /**
+   * How night it is, 0..1. Drives the grade's night block AND the bloom, which
+   * is where most of the beauty actually comes from: by day the threshold sits
+   * deliberately above a sunlit grass block so only the sun and the lava glow,
+   * but at night nothing in the world reaches that, and a night with no bloom
+   * at all is the flattest frame the renderer ever produces. Lowering the bar
+   * after dark hands the glow to the things that own the night — the moon, the
+   * aurora, a torch, a lava fall — and to nothing else.
+   *
+   * Safe to call every frame and when the stack is off; both are cheap.
+   */
+  setNight(night: number): void {
+    this.night = Number.isFinite(night) ? Math.max(0, Math.min(1, night)) : 0;
+    if (this.gradePass) this.gradePass.uniforms.uNight.value = this.night;
+    if (this.bloomPass) {
+      this.bloomPass.threshold = 0.86 - 0.30 * this.night;
+      this.bloomPass.strength = 0.22 + 0.16 * this.night;
+    }
   }
 
   /** Match a new viewport or pixel-ratio cap. Safe to call when off. */
@@ -188,17 +243,22 @@ export class PostFX {
     // most of the rest of it and the whole world came back washed out and
     // over-bright. Raising the threshold above ordinary lit surfaces puts the
     // glow back where it belongs.
-    composer.addPass(new UnrealBloomPass(
+    this.bloomPass = new UnrealBloomPass(
       new THREE.Vector2(size.x, size.y),
       0.22,  // strength
       0.55,  // radius
       0.86   // threshold, in linear light
-    ));
-    composer.addPass(new ShaderPass(GRADE_SHADER));
+    );
+    composer.addPass(this.bloomPass);
+    this.gradePass = new ShaderPass(GRADE_SHADER);
+    composer.addPass(this.gradePass);
     // Converts the linear HDR buffer back to the renderer's output colour
     // space. Without it the whole frame renders washed out.
     composer.addPass(new OutputPass());
     this.composer = composer;
+    // The stack can be switched on at any hour, so it starts at whatever the
+    // clock last reported rather than at noon.
+    this.setNight(this.night);
     // The constructor sizes itself from the target, which is already in device
     // pixels; re-state it in CSS pixels so the pixel ratio is not applied twice.
     this.setSize(window.innerWidth, window.innerHeight);
@@ -211,5 +271,7 @@ export class PostFX {
     this.composer?.dispose();
     this.composer = null;
     this.renderPass = null;
+    this.bloomPass = null;
+    this.gradePass = null;
   }
 }

@@ -318,6 +318,26 @@ export function buildChunkGeometry(
           continue;
         }
 
+        if (id === Block.BwBedA || id === Block.BwBedB) {
+          const skyL = light.sky(wx, y + 1, wz), blockL = light.block(wx, y + 1, wz);
+          const wool = BLOCKS[id === Block.BwBedA ? Block.TeamWoolA : Block.TeamWoolB].top;
+          const wood = atlas.uvRect(BLOCKS[Block.OakPlanks].side);
+          opaque.subBox(x, y, z, [0, .16, 0], [1, .3, 1], wood, WHITE, skyL, blockL);
+          opaque.subBox(x, y, z, [.03, .3, 0], [.97, .56, 1], atlas.uvRect(wool), WHITE, skyL, blockL);
+          for (const dx of [.06, .8]) for (const dz of [.06, .8]) {
+            opaque.subBox(x, y, z, [dx, 0, dz], [dx + .14, .2, dz + .14], wood, WHITE, skyL, blockL);
+          }
+          // The anchor half alone has a pillow. Works across chunk boundaries
+          // and along either bed axis without giving each half a head texture.
+          if (sample(wx - 1, y, wz) !== id && sample(wx, y, wz - 1) !== id) {
+            const alongX = sample(wx + 1, y, wz) === id;
+            opaque.subBox(x, y, z, [.09, .56, .09],
+              alongX ? [.4, .62, .91] : [.91, .62, .4],
+              atlas.uvRect(BLOCKS[Block.PearlTile].top), WHITE, skyL, blockL);
+          }
+          continue;
+        }
+
         if (info.shape === 'slab' || info.shape === 'stairs') {
           const uvRect = atlas.uvRect(info.side);
           const skyL = light.sky(wx, y, wz), blockL = light.block(wx, y, wz);

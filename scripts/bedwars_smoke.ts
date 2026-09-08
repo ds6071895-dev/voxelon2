@@ -10,7 +10,7 @@ import {
   BEDWARS_STAMP_MIN_Y, BEDWARS_VOID_CREDIT_MS, BEDWARS_VOID_Y,
   BW_AXE_TIERS, BW_CAP_IRON, BW_COMBO_MAX, BW_CRIT_MULT, BW_KB_BASE,
   BW_LOOK_BLEND, BW_SPRINT_KB_MULT, BW_SPRINT_SPEED,
-  Bedwars, bedwarsArenaAt, bedwarsArenaBounds, bedwarsAxeRank, bedwarsAxeTier,
+  Bedwars, BedwarsForge, bedwarsArenaAt, bedwarsArenaBounds, bedwarsAxeRank, bedwarsAxeTier,
   bedwarsBedCells, bedwarsBedTeamAt, bedwarsBlockAt, bedwarsCanAfford,
   bedwarsDiamondPeriod, bedwarsGenCells, bedwarsMap, bedwarsShopCells,
   bedwarsShopEntry, bedwarsSolidAt, bedwarsSwing, bedwarsTeamWool, bedwarsArenaCenter,
@@ -22,6 +22,7 @@ import { Item } from '../src/items';
 import { isMinigameOnly } from '../src/minigame_items';
 import { GameServer } from '../src/net/server_core';
 import { DUEL_COUNTDOWN_MS } from '../src/duels';
+import { Inventory } from '../src/inventory';
 
 let passed = 0;
 function check(name: string, ok: unknown, detail = ''): void {
@@ -796,6 +797,70 @@ function faceOff(s: GameServer, mid: { x: number; y: number; z: number }, gap = 
 }
 
 // ── Shop ───────────────────────────────────────────────────────────────────
+{
+  const inv = new Inventory();
+  [Item.IronIngot, Item.GoldIngot, Item.Diamond].forEach((id, i) => inv.reservedSlots.set(6 + i, id));
+  inv.add(Block.TeamWoolA, 64 * 33);
+  check('bulk purchases leave all three currency hotbar slots available', inv.slots.slice(6, 9).every((s) => s === null));
+  check('only currency fits when normal storage is full', !inv.canAccept(Block.OakPlanks) && inv.canAccept(Item.GoldIngot));
+  inv.add(Item.IronIngot, 64); inv.add(Item.GoldIngot, 16); inv.add(Item.Diamond, 8);
+  check('all currencies remain actual hotbar stacks even with full storage',
+    inv.slots[6]?.id === Item.IronIngot && inv.slots[7]?.id === Item.GoldIngot && inv.slots[8]?.id === Item.Diamond);
+  inv.reservedSlots.clear();
+  inv.slots[7] = null;
+  check('leaving Bedwars releases the reserved slots', inv.add(Block.OakPlanks, 1) === 0 && inv.slots[7]?.id === Block.OakPlanks);
+}
+{
+  const forge = new BedwarsForge(A0, 0);
+  forge.tick(A0, 30_000, 30_000);
+  check('unattended generators accumulate physical stock', forge.stock[0].iron === 20 && forge.stock[0].gold === 3);
+  check('diamonds spawn without requiring a player on the pad', forge.stock[2].diamond === 1);
+  const gen = bedwarsGenCells(A0)[0];
+  const empty = { iron: 0, gold: 0, diamond: 0 };
+  check('distant players receive no resources', forge.collect({ ...gen, x: gen.x + 8 }, empty).iron === 0);
+  check('players below the island cannot collect through the floor', forge.collect({ ...gen, y: gen.y - 5 }, empty).iron === 0);
+  const first = forge.collect(gen, empty);
+  check('walking to the generator collects its stock', first.iron === 20 && first.gold === 3);
+  check('the same stack cannot be collected twice', forge.collect(gen, empty).iron === 0);
+  forge.tick(A0, 60_000, 60_000);
+  const capped = forge.collect(gen, { iron: BW_CAP_IRON, gold: 16, diamond: 8 });
+  check('full wallets leave the stock for other players', capped.iron === 0 && forge.stock[0].iron === 20);
+  check('a fresh match starts with no old stock', new BedwarsForge(A0, 60_000).stock.every((p) => p.iron === 0 && p.diamond === 0));
+}
+{
+  const { s } = liveServer();
+  const arena = s.bedwars.arenaFor(1)!;
+  const gen = bedwarsGenCells(arena)[0];
+  s.tickWar(16);
+  const spawned = s.tickBedwars(16);
+  check('being away from a base no longer earns passive iron', s.bedwars.participantFor(1)!.resources.iron === 0);
+  check('generator stock is sent to the match, never a world bystander', spawned.some((o) =>
+    o.msg.t === 'bwLobby' && (o.msg.snapshot.generators?.[0].iron ?? 0) > 0) && !spawned.some((o) => o.to === 3));
+  s.handle(1, { t: 'xform', x: gen.x, y: gen.y, z: gen.z, yaw: 0, pitch: 0 });
+  const picked = s.tickBedwars(0);
+  const iron = s.bedwars.participantFor(1)!.resources.iron;
+  check('server validates pickup and sends the authoritative inventory count', iron >= 10 && picked.some((o) =>
+    o.to === 1 && o.msg.t === 'bwResources' && o.msg.iron === iron));
+  const shop = bedwarsShopCells(arena, 0)[0];
+  s.handle(1, { t: 'xform', x: shop.x + .5, y: shop.y, z: shop.z + .5, yaw: 0, pitch: 0 });
+  const bought = s.handle(1, { t: 'bwShopBuy', entry: 4 });
+  check('a weapon purchase marks an upgrade instead of replacing inventory', bought.some((o) =>
+    o.msg.t === 'bwLoadout' && o.msg.upgrade === true && o.msg.axe === Item.StoneAxe));
+  check('buying consumes exactly the displayed cost', s.bedwars.participantFor(1)!.resources.iron === iron - 10);
+  s.handle(1, { t: 'bwShopBuy', entry: 4 });
+  check('an owned weapon cannot charge twice', s.bedwars.participantFor(1)!.resources.iron === iron - 10);
+}
+{
+  const { s } = liveServer();
+  const arena = s.bedwars.arenaFor(1)!;
+  const bed = bedwarsBedCells(arena, 1)[0];
+  s.handle(1, { t: 'xform', x: bed.x - 1, y: bed.y, z: bed.z + .5, yaw: -Math.PI / 2, pitch: 0 });
+  const broken = s.handle(1, { t: 'bwBed', ...bed });
+  check('an exposed enemy bed does not occlude its own break ray', broken.some((o) => o.msg.t === 'bwBedBroken'));
+  check('both bed halves share the destroyed state', s.bedwars.teamStateOf(1, 1)?.bedAlive === false);
+  check('breaking a bed removes both world cells for both players', broken.filter((o) =>
+    o.msg.t === 'editBatch' && o.msg.edits.filter((e) => e.block === Block.Air).length === 2).length === 2);
+}
 {
   const { s, arenaOf } = liveServer();
   const mid = arenaOf(1);

@@ -1,6 +1,6 @@
 // Shared minigame-arena layer. Pure: no DOM, no THREE, no Node.
 //
-// Every minigame (Duels, Bedwars, Party Games) lives in the SAME coordinate
+// Every minigame (Duels, Parkour, The Bridge) lives in the SAME coordinate
 // space as the open world, stamped far beyond the world border and hidden by a
 // render crop. There is no dimension system and none is needed — what isolates
 // an arena is (a) its x band being unreachable by ordinary movement, (b) the
@@ -12,16 +12,13 @@
 // consults the registry instead of hard-coding Duels.
 
 import { DUEL_ARENA_BASE_X, DUEL_ARENA_SLOT_SPACING, DUEL_ARENA_SIZE, duelArenaBlockAt } from './duels';
-import {
-  BEDWARS_BASE_X, BEDWARS_SLOT_SPACING, BEDWARS_ARENA_SIZE,
-  BEDWARS_STAMP_MIN_Y, BEDWARS_STAMP_MAX_Y, bedwarsBlockAt,
-} from './bedwars';
+
 import {
   PARTY_BASE_X, PARTY_SLOT_SPACING, PARTY_ARENA_SIZE_X, PARTY_ARENA_SIZE_Z,
   PARTY_STAMP_MIN_Y, PARTY_STAMP_MAX_Y, partyArenaBlockAt,
 } from './partygames';
 
-export type ArenaKind = 'duel' | 'bedwars' | 'party';
+export type ArenaKind = 'duel' | 'party';
 
 /** An axis-aligned arena footprint. Half-open on max, like every other bounds
  *  box in the codebase. */
@@ -61,32 +58,18 @@ const DUEL_BAND: ArenaBand = {
   blockAt: duelArenaBlockAt,
 };
 
-const BEDWARS_BAND: ArenaBand = {
-  kind: 'bedwars',
-  baseX: BEDWARS_BASE_X,
-  spacing: BEDWARS_SLOT_SPACING,
-  sizeX: BEDWARS_ARENA_SIZE,
-  sizeZ: BEDWARS_ARENA_SIZE,
-  // A far narrower y band than Duels', which makes a Bedwars chunk CHEAPER to
-  // stamp despite the larger footprint.
-  stampMinY: BEDWARS_STAMP_MIN_Y,
-  stampMaxY: BEDWARS_STAMP_MAX_Y,
-  blockAt: bedwarsBlockAt,
-};
-
 /** Registered bands, ascending by `baseX`. Bands never overlap: each one owns
  *  `[baseX, nextBaseX)` outright, so a chunk belongs to at most one mode.
  *
- *  Duels' slot counter only ever increments, so the gap before the next base is
- *  a real budget: 65_536 leaves 104 duel slots of headroom. `Chunk.key` is a
- *  plain string, so large x costs nothing. */
+ *  Duels and the shared Bridge/Parkour band have separate slot allocators.
+ *  `Chunk.key` is a plain string, so large x costs nothing. */
 const PARTY_BAND: ArenaBand = {
   kind: 'party',
   baseX: PARTY_BASE_X,
   spacing: PARTY_SLOT_SPACING,
-  // A TALL footprint, not a square: all four microgame arenas are stamped side
-  // by side in one slot, because terrain is cached per chunk and cannot be
-  // re-stamped between rounds. See the header of partygames.ts.
+  // The Bridge and a Parkour lane share a slot, side by side in z. Arena
+  // snapshots install the course seed before streaming; every match waits for
+  // every client to have it loaded.
   sizeX: PARTY_ARENA_SIZE_X,
   sizeZ: PARTY_ARENA_SIZE_Z,
   stampMinY: PARTY_STAMP_MIN_Y,
@@ -96,7 +79,6 @@ const PARTY_BAND: ArenaBand = {
 
 export const ARENA_BANDS: readonly ArenaBand[] = [
   DUEL_BAND,
-  BEDWARS_BAND,
   PARTY_BAND,
 ];
 

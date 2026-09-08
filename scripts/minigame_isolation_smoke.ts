@@ -35,7 +35,7 @@ const BLOCK_ONLY = [
 /** Ids that DO have an item form, so their gate is load-bearing rather than free. */
 const ITEM_FORMED = [
   Block.TeamWoolA, Block.TeamWoolB, Block.PartyTileC, Block.PartyTileD,
-  Item.VoidCleaver, Item.KnockbackStick,
+  Item.VoidCleaver, Item.KnockbackStick, Item.BridgeBow, Item.BridgeArrow,
 ];
 
 // ── The registry itself ────────────────────────────────────────────────────

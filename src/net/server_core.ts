@@ -87,24 +87,23 @@ import {
   hasArenaLineOfSight, safestDuelSpawn, secureDuelToken,
 } from '../duels';
 import { ArenaAABB, ArenaKind } from '../arena';
+
 import {
-  BEDWARS_ARENA_SIZE, BEDWARS_CEILING_Y, BEDWARS_CLAMP_RADIUS, BEDWARS_FLOOR_Y,
-  BEDWARS_MAX_HEALTH, BEDWARS_VOID_Y,
-  BW_GEN_GOLD_MS, BW_GEN_IRON_MS, BW_MELEE_FACING_DOT, BW_MELEE_RANGE,
-  BW_MELEE_REWIND_S, BW_PICKUP_RADIUS, BW_SWING_FLOOR, BW_COMBO_WINDOW_MS,
-  Bedwars, BwArenaBounds, BwLobbySnapshot, BwSwingResult, BwSwingTier, BwVec3, bedwarsAxeTier,
-  bedwarsBedTeamAt, bedwarsBlockAt, bedwarsDiamondPeriod, bedwarsGenCells,
-  bedwarsShopCells, bedwarsShopEntry, bedwarsSolidAt, bedwarsSwing, bedwarsTeamWool,
-  clampToBedwarsArena, collapsedBedwarsArena, hasBedwarsLineOfSight,
-} from '../bedwars';
-import {
-  COLORS_PALETTE, COLORS_VANISH_MS, COLORS_WARN_MS, PARTY_CEILING_Y, PARTY_FLOOR_Y,
-  PARTY_GAMES, PARTY_KNOCKBACK_TIER, PARTY_MAX_HEALTH, PARTY_MIN_PLAYERS,
-  PARTY_SUB_SIZE, PARTY_VOID_Y,
-  PartyArenaBounds, PartyGameId, PartyGamesEngine, PartyLobbySnapshot, PartySubBounds,
-  PartyVec3, clampToPartySub, colorsColorAt, colorsInterval, partyCanBreak, partyGame,
-  partySolidAt, partySpawns, partySubBounds, sludgeLevel,
+  PARTY_CEILING_Y, PARTY_FLOOR_Y, PARTY_MAX_HEALTH, PARTY_ARENA_SIZE_Z, PARTY_VOID_Y,
+  BRIDGE_TEAM_BLOCK, PartyArenaBounds, PartyGamesEngine, PartyLobbySnapshot,
+  PartyMode, PartyParticipant, PartySubBounds,
+  BRIDGE_ARROW_GRAVITY, BRIDGE_ARROW_KB_VERT, BRIDGE_ARROW_LIFE_MS,
+  BRIDGE_BOW_COOLDOWN_MS, BRIDGE_BOW_DRAW_MS, BRIDGE_BOW_MIN_POWER,
+  bridgeArrowShot, bridgeGoalGuard, clampToPartySub, partyArenaBlockAt,
+  partySpawns, parkourCourse,
 } from '../partygames';
+// The Bridge fights with the Bedwars swing model: charge, combo, crit,
+// look-blended knockback. It is a pure function over one weapon tier, and
+// reusing it keeps ONE definition of what a hit feels like in this game.
+import {
+  BW_COMBO_MAX, BW_COMBO_WINDOW_MS, BW_MELEE_FACING_DOT, BW_MELEE_RANGE,
+  BW_MELEE_REWIND_S, BW_SWING_FLOOR, bedwarsAxeTier, bedwarsSwing,
+} from '../bedwars';
 import { isMinigameOnly, stripMinigameItems } from '../minigame_items';
 import {
   DuelFlair, DuelProgressState, DuelPublicProfile, canEquipDuelFlair,
@@ -239,22 +238,53 @@ interface ServerPlayer extends PlayerInfo {
   duelReloadUntil: number;
   duelMedkits: number;
   duelRespawning: boolean;
-  // --- Bedwars ---
-  /** The purchased axe tier. The melee math reads THIS, never `p.held`, so no
-   *  client-supplied number ever enters the damage calculation. */
-  bwAxe: number;
-  arenaLastSwingAt: number;
-  /** Consecutive landed hits on `arenaComboTarget` inside the combo window. */
-  arenaCombo: number;
-  arenaComboTarget: number;
-  arenaComboUntil: number;
-  bwRespawning: boolean;
-  /** Knocked out of the CURRENT Party microgame. Cleared on each round start. */
-  partyEliminated: boolean;
-  /** Milliseconds of generator credit carried between ticks, so a slow tick
-   *  cannot silently drop production. */
-  bwIronAccum: number;
-  bwGoldAccum: number;
+
+}
+
+/** What the party movement gate remembers between packets.
+ *
+ *  `groundX/Y/Z` is the last footing this player is KNOWN to have stood on, and
+ *  it exists for exactly one reason: a movement correction has to have
+ *  somewhere honest to send a player who has got themselves wedged. `stuck`
+ *  counts consecutive rejections so that resolution can actually happen —
+ *  see `handlePartyTransform`. */
+interface PartyMoveState {
+  at: number;
+  allowance: number;
+  revision: number;
+  groundX: number;
+  groundY: number;
+  groundZ: number;
+  groundedAt: number;
+  stuck: number;
+  /** worldTime until which this player is under a server-applied impulse
+   *  (knockback), so the anti-flight rules stand down: the server itself is
+   *  the thing that threw them into the air. */
+  launchUntil: number;
+}
+
+/** Bridge combat clocks. Kept off ServerPlayer: nothing outside a live Bridge
+ *  match may read or write them. */
+interface PartyCombatState {
+  /** Server ms of the last LANDED swing (the charge clock). */
+  lastSwingAt: number;
+  /** Consecutive landed hits on `comboTarget` inside the combo window. */
+  combo: number;
+  comboTarget: number;
+  /** Server ms of the last released arrow (the draw clock). */
+  lastShotAt: number;
+}
+
+/** One arrow in flight. Simulated on the server; the clients draw the same
+ *  arc from the spawn message and stop when the server says it stopped. */
+interface PartyArrow {
+  id: number;
+  owner: number;
+  x: number; y: number; z: number;
+  vx: number; vy: number; vz: number;
+  power: number;
+  /** worldTime seconds at which this arrow expires. */
+  diesAt: number;
 }
 
 interface DuelShotTicket {
@@ -437,17 +467,17 @@ export class GameServer {
   private readonly duelProgress = new Map<number, DuelProgressState>();
   /** Placed blocks per active arena, keyed `${kind}:${slot}`, reset on match end. */
   private readonly arenaEdits = new Map<string, Map<string, number>>();
-  readonly bedwars = new Bedwars(secureDuelToken);
-  private bwQueue: number[] = [];
-  /** Next diamond payout per live Bedwars lobby id. */
-  private readonly bwDiamondNextAt = new Map<string, number>();
   readonly party = new PartyGamesEngine(secureDuelToken);
   private partyQueue: number[] = [];
-  /** Color Chaos call state per live party lobby. */
-  private readonly partyCalls = new Map<string, {
-    call: number; colour: number; vanishAt: number; restoreAt: number;
-    phase: 'idle' | 'called' | 'vanished';
-  }>();
+  private readonly partyQueueModes = new Map<number, PartyMode>();
+  private partyClockNextAt = 0;
+  private readonly partyMoves = new Map<number, PartyMoveState>();
+  /** Per-player Bridge combat clocks: the swing model needs to know how long
+   *  you waited, who you have been hitting, and when you last let an arrow go. */
+  private readonly partyCombat = new Map<number, PartyCombatState>();
+  private partyArrows: PartyArrow[] = [];
+  private partyArrowSeq = 1;
+  private partyArrowClock = 0;
   private readonly settledDuelResults = new Set<string>();
   /** Next whole-server timestamp broadcast for hidden-tab/lag clock recovery. */
   private duelClockNextAt = 0;
@@ -737,9 +767,6 @@ export class GameServer {
       duelBurstShots: 0,
       duelShotTickets: [],
       arenaTrack: [],
-      bwAxe: 0, arenaLastSwingAt: -Infinity, arenaCombo: 0, arenaComboTarget: 0, arenaComboUntil: 0,
-      bwRespawning: false, bwIronAccum: 0, bwGoldAccum: 0,
-      partyEliminated: false,
       duelLoaded: 0,
       duelReloadUntil: 0,
       duelMedkits: 0,
@@ -804,23 +831,18 @@ export class GameServer {
       out.push(...this.duelSnapshotOutbound(duelLeave.snapshot));
       if (duelLeave.snapshot.phase === 'lobby') out.push(...this.restoreDuelLobby(duelLeave.snapshot));
       if (duelLeave.snapshot.phase === 'results' && duelLeave.snapshot.result) {
-        for (const member of duelLeave.snapshot.participants) out.push({
+        for (const member of duelLeave.snapshot.participants.filter(p => p.connected)) out.push({
           to: member.id, msg: { t: 'duelResult', result: duelLeave.snapshot.result },
         });
       }
     }
-    this.removeFromBwQueue(id);
-    const bwLeave = this.bedwars.leave(id, this.worldTime * 1000);
-    if (bwLeave.snapshot) {
-      out.push(...this.bwSnapshotOutbound(bwLeave.snapshot));
-      if (bwLeave.snapshot.phase === 'lobby') out.push(...this.restoreBedwarsLobby(bwLeave.snapshot));
-      out.push(...this.bwResultOutbound(bwLeave.snapshot));
-    } else if (bwLeave.deleted && this.bwDiamondNextAt.size) {
-      // The room went away with the last member; drop its generator clock.
-      this.bwDiamondNextAt.clear();
-    }
     this.removeFromPartyQueue(id);
+    const oldPartyArena = this.party.arenaFor(id);
     const partyLeave = this.party.leave(id, this.worldTime * 1000);
+    this.partyMoves.delete(id);
+    this.partyCombat.delete(id);
+    this.partyArrows = this.partyArrows.filter(a => a.owner !== id);
+    if (partyLeave.deleted && oldPartyArena) out.push(...this.resetPartyArenaEdits(oldPartyArena));
     if (partyLeave.snapshot) {
       out.push(...this.partySnapshotOutbound(partyLeave.snapshot));
       if (partyLeave.snapshot.phase === 'lobby') {
@@ -913,8 +935,6 @@ export class GameServer {
   private arenaRouteFor(id: number): ArenaKind | null {
     const duelPhase = this.duels.phaseFor(id);
     if (duelPhase && duelPhase !== 'lobby') return 'duel';
-    const bwPhase = this.bedwars.phaseFor(id);
-    if (bwPhase && bwPhase !== 'lobby') return 'bedwars';
     const partyPhase = this.party.phaseFor(id);
     if (partyPhase && partyPhase !== 'lobby') return 'party';
     return null;
@@ -936,12 +956,25 @@ export class GameServer {
   handle(id: number, msg: ClientMsg): Outbound[] {
     const p = this.players.get(id);
     if (!p) return [];
+    if (['duelCreate', 'duelJoin', 'duelQueue', 'partyCreate', 'partyJoin', 'partyQueue'].includes(msg.t)) {
+      const entering = !('join' in msg) || msg.join === true;
+      const wantsDuel = msg.t.startsWith('duel');
+      if (entering && (p.arenaSaved || (wantsDuel ? this.party.phaseFor(id) : this.duels.phaseFor(id)))) {
+        return wantsDuel ? this.duelError(id, 'already_in_lobby') : this.partyError(id, 'already_in_lobby');
+      }
+      if (entering) {
+        if (wantsDuel && this.removeFromPartyQueue(id)) return [
+          { to: id, msg: { t: 'partyQueue', queued: false } }, ...this.handleDuel(p, msg as Extract<ClientMsg, {t: `duel${string}`}>)];
+        if (!wantsDuel && this.removeFromDuelQueue(id)) return [
+          { to: id, msg: { t: 'duelQueue', queued: false } }, ...this.handlePartyLobby(p, msg as Extract<ClientMsg, {t: `party${string}`}>)];
+      }
+    }
     if (msg.t === 'duelCreate' || msg.t === 'duelQueue' || msg.t === 'duelJoin' || msg.t === 'duelLeave' ||
         msg.t === 'duelReady' || msg.t === 'duelStart' || msg.t === 'duelArenaReady' || msg.t === 'duelRematch' ||
         msg.t === 'duelReturn' || msg.t === 'duelFlair') return this.handleDuel(p, msg);
     if (msg.t === 'bwCreate' || msg.t === 'bwQueue' || msg.t === 'bwJoin' || msg.t === 'bwLeave' ||
         msg.t === 'bwReady' || msg.t === 'bwStart' || msg.t === 'bwArenaReady') {
-      return this.handleBedwarsLobby(p, msg);
+      return [{ to: id, msg: { t: 'notice', text: 'Bedwars has been replaced by Parkour. Refresh to play.' } }];
     }
     if (msg.t === 'partyCreate' || msg.t === 'partyQueue' || msg.t === 'partyJoin' ||
         msg.t === 'partyLeave' || msg.t === 'partyReady' || msg.t === 'partyStart' ||
@@ -956,7 +989,6 @@ export class GameServer {
     // use them) unreachable from the open world.
     switch (this.arenaRouteFor(id)) {
       case 'duel': return this.routeDuelInMatch(p, msg);
-      case 'bedwars': return this.routeBedwarsInMatch(p, msg);
       case 'party': return this.routePartyInMatch(p, msg);
     }
     // Spectators are non-interacting ghosts: drop any world-mutating / combat
@@ -1583,7 +1615,7 @@ export class GameServer {
   private duelSnapshotOutbound(snapshot: DuelLobbySnapshot, invite?: { id: number; token: string }): Outbound[] {
     const progression = snapshot.phase === 'results' && snapshot.result
       ? this.settleDuelProgression(snapshot) : [];
-    const out: Outbound[] = snapshot.participants.map((participant) => ({
+    const out: Outbound[] = snapshot.participants.filter(p => p.connected).map((participant) => ({
       to: participant.id,
       msg: { t: 'duelLobby', snapshot, inviteToken: invite?.id === participant.id ? invite.token : undefined },
     }));
@@ -1645,7 +1677,7 @@ export class GameServer {
    *  start from the lobby and a forfeit all inherit the same reset arena. */
   private duelResultOutbound(snapshot: DuelLobbySnapshot): Outbound[] {
     if (snapshot.phase !== 'results' || !snapshot.result) return [];
-    const ids = snapshot.participants.map((participant) => participant.id);
+    const ids = snapshot.participants.filter(p => p.connected).map((participant) => participant.id);
     const out: Outbound[] = ids.map((id) => ({
       to: id, msg: { t: 'duelResult', result: snapshot.result! },
     }));
@@ -1690,7 +1722,7 @@ export class GameServer {
       const y = Number(key.slice(first + 1, second));
       if (y < minY || y >= maxY) continue;
       this.edits.delete(key);
-      edits.push({ x, y, z, block: Block.Air });
+      edits.push({ x, y, z, block: trackKey.startsWith('party:') ? partyArenaBlockAt(x, y, z) ?? Block.Air : Block.Air });
     }
     this.arenaEdits.delete(trackKey);
     if (edits.length === 0 || !memberIds || memberIds.length === 0) return [];
@@ -1782,7 +1814,7 @@ export class GameServer {
     if (snapshot.arena) {
       out.push(...this.resetDuelArenaEdits(snapshot.arena.slot, snapshot.participants.map((v) => v.id)));
     }
-    for (const member of snapshot.participants) {
+    for (const member of snapshot.participants.filter(p => p.connected)) {
       const p = this.players.get(member.id);
       if (p?.arenaSaved) { out.push(...this.restoreOpenWorldState(p)); restored.push(p.id); }
     }
@@ -2110,6 +2142,7 @@ export class GameServer {
           this.removeFromDuelQueue(p.id);
           return [{ to: p.id, msg: { t: 'duelQueue', queued: false } }];
         }
+        if(this.duels.phaseFor(p.id)==='lobby')return [...this.handleDuel(p,{t:'duelLeave'}),...this.handleDuel(p,msg)];
         if (this.duels.phaseFor(p.id)) return this.duelError(p.id, 'already_in_lobby');
         if (this.duelQueue.includes(p.id)) {
           return [{ to: p.id, msg: { t: 'duelQueue', queued: true } }];
@@ -2245,972 +2278,561 @@ export class GameServer {
 
   /** Advance authoritative Duels timestamps; called from the transport tick. */
 
-  // ── Bedwars ───────────────────────────────────────────────────────────────
-
-  private bwError(to: number, code: Extract<ServerMsg, { t: 'bwError' }>['code']): Outbound[] {
-    const messages: Record<Extract<ServerMsg, { t: 'bwError' }>['code'], string> = {
-      invalid: 'That Bedwars invite is invalid or has expired.',
-      full: 'That Bedwars lobby is full.',
-      match_in_progress: 'Match in progress — wait for this lobby to reopen.',
-      already_in_lobby: 'Leave your current minigame lobby before joining another.',
-      not_host: 'Only the lobby host can start the match.',
-      too_few_players: 'At least two players are required.',
-      too_many_players: 'This map has no room for another player.',
-      not_everyone_ready: 'Every connected player must ready up first.',
-      not_in_lobby: 'You are not in a Bedwars lobby.',
-      cannot_afford: "You can't afford that yet.",
-      too_far: 'Stand at your own Quartermaster to buy.',
-    };
-    return [{ to, msg: { t: 'bwError', code, message: messages[code] } }];
-  }
-
-  private bwSnapshotOutbound(
-    snapshot: BwLobbySnapshot, invite?: { id: number; token: string },
-  ): Outbound[] {
-    // No progression settlement, deliberately: Bedwars is UNRANKED. Compare
-    // `duelSnapshotOutbound`, which settles RP here.
-    return snapshot.participants.map((participant) => ({
-      to: participant.id,
-      msg: { t: 'bwLobby', snapshot, inviteToken: invite?.id === participant.id ? invite.token : undefined },
-    }));
-  }
-
-  private bwArenaBoundsAABB(arena: BwArenaBounds): ArenaAABB {
-    return {
-      minX: arena.originX, maxX: arena.originX + BEDWARS_ARENA_SIZE,
-      minZ: arena.originZ, maxZ: arena.originZ + BEDWARS_ARENA_SIZE,
-      // The sweep must reach the ceiling: a tower of wool is the thing being
-      // reset, and it can legally stand well above the island surface.
-      minY: BEDWARS_FLOOR_Y - 8, maxY: BEDWARS_CEILING_Y,
-    };
-  }
-
-  private resetBedwarsArenaEdits(arena: BwArenaBounds, memberIds?: number[]): Outbound[] {
-    return this.resetArenaEdits(`bedwars:${arena.slot}`, this.bwArenaBoundsAABB(arena), memberIds);
-  }
-
-  /** Player-placed cover inside a Bedwars arena. Consulted by the melee
-   *  line-of-sight test, so you cannot swing through a wool wall. */
-  private bwPlacedSolid(x: number, y: number, z: number): boolean {
-    const block = this.edits.get(`${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`);
-    return block !== undefined && block !== Block.Air && (BLOCKS[block]?.solid ?? false);
-  }
-
-  private bwLoadout(p: ServerPlayer, team: number): Outbound {
-    const slots: (ItemStack | null)[] = new Array(36).fill(null);
-    slots[0] = { id: p.bwAxe, count: 1 };
-    slots[1] = { id: bedwarsTeamWool(team), count: 16 };
-    return { to: p.id, msg: { t: 'bwLoadout', slots, selected: 0, axe: p.bwAxe } };
-  }
-
-  private bwResourcesOutbound(id: number): Outbound[] {
-    const p = this.bedwars.participantFor(id);
-    if (!p) return [];
-    return [{ to: id, msg: { t: 'bwResources', ...p.resources } }];
-  }
-
-  private enterBedwarsBody(p: ServerPlayer, arena: BwArenaBounds, team: number): Outbound[] {
-    const spawn = arena.spawns.find((s) => s.team === team) ?? arena.spawns[0];
-    this.enterArenaBody(p, 'bedwars', spawn, spawn.yaw, BEDWARS_MAX_HEALTH);
-    p.bwAxe = this.bedwars.participantFor(p.id)?.axe ?? Item.WoodenAxe;
-    p.held = p.bwAxe;
-    p.arenaLastSwingAt = -Infinity; p.arenaCombo = 0; p.arenaComboTarget = 0; p.arenaComboUntil = 0;
-    p.bwRespawning = false; p.bwIronAccum = 0; p.bwGoldAccum = 0;
-    return [
-      this.bwLoadout(p, team),
-      ...this.bwResourcesOutbound(p.id),
-      { to: p.id, msg: { t: 'bwArena', arena, spawn: { x: spawn.x, y: spawn.y, z: spawn.z },
-        team, countdownEndsAt: this.bedwars.snapshotFor(p.id, this.worldTime * 1000)?.countdownEndsAt ?? 0 } },
-    ];
-  }
-
-  private launchBedwars(snapshot: BwLobbySnapshot): Outbound[] {
-    const out = this.bwSnapshotOutbound(snapshot);
-    if (!snapshot.arena) return out;
-    const ids = snapshot.participants.map((v) => v.id);
-    out.push(...this.resetBedwarsArenaEdits(snapshot.arena, ids));
-    for (const participant of snapshot.participants) {
-      const player = this.players.get(participant.id);
-      if (player) out.push(...this.enterBedwarsBody(player, snapshot.arena, participant.team));
-    }
-    out.push(...this.announceArenaScope(ids));
-    return out;
-  }
-
-  private bwResultOutbound(snapshot: BwLobbySnapshot): Outbound[] {
-    if (snapshot.phase !== 'results' || !snapshot.result) return [];
-    const ids = snapshot.participants.map((v) => v.id);
-    const out: Outbound[] = ids.map((id) => ({
-      to: id, msg: { t: 'bwResult', result: snapshot.result! },
-    }));
-    if (snapshot.arena) out.push(...this.resetBedwarsArenaEdits(snapshot.arena, ids));
-    return out;
-  }
-
-  private restoreBedwarsLobby(snapshot: BwLobbySnapshot): Outbound[] {
-    const out: Outbound[] = [];
-    const restored: number[] = [];
-    if (snapshot.arena) {
-      out.push(...this.resetBedwarsArenaEdits(snapshot.arena, snapshot.participants.map((v) => v.id)));
-    }
-    for (const member of snapshot.participants) {
-      const p = this.players.get(member.id);
-      if (p?.arenaSaved) { out.push(...this.restoreOpenWorldState(p)); restored.push(p.id); }
-    }
-    out.push(...this.announceWorldScope(restored));
-    return out;
-  }
-
-  /**
-   * The in-match whitelist.
-   *
-   * Every branch is explicit and the function ends in `return []`, so anything
-   * a Bedwars body sends that is not named here is dropped rather than falling
-   * through to the open-world switch.
-   */
-  private routeBedwarsInMatch(p: ServerPlayer, msg: ClientMsg): Outbound[] {
-    if (msg.t === 'xform') return this.handleBedwarsTransform(p, msg);
-    if (msg.t === 'bwMelee') return this.handleBedwarsMelee(p, msg.target);
-    if (msg.t === 'bwBed') return this.handleBedwarsBed(p, msg.x, msg.y, msg.z);
-    if (msg.t === 'bwShopBuy') return this.handleBedwarsShopBuy(p, msg.entry);
-    if (msg.t === 'useHeal') return this.handleBedwarsHeal(p, msg.item);
-    if (msg.t === 'edit') return this.handleBedwarsEdit(p, msg.x, msg.y, msg.z, msg.block);
-    return [];
-  }
-
-  private handleBedwarsTransform(p: ServerPlayer, msg: Extract<ClientMsg, { t: 'xform' }>): Outbound[] {
-    const arena = this.bedwars.arenaFor(p.id), phase = this.bedwars.phaseFor(p.id);
-    if (!arena || !phase || !fin(msg.x, msg.y, msg.z, msg.yaw, msg.pitch)) return [];
-    const participant = this.bedwars.participantFor(p.id);
-    if (!participant) return [];
-    const spawn = arena.spawns.find((s) => s.team === participant.team) ?? arena.spawns[0];
-    if (phase === 'countdown') {
-      p.x = spawn.x; p.y = spawn.y; p.z = spawn.z;
-    } else {
-      // The stalemate ladder's third rung drags stragglers toward mid by
-      // shrinking the containment box rather than by teleporting anyone.
-      const box = this.bedwars.stageFor(p.id) === 'collapse'
-        ? collapsedBedwarsArena(arena, BEDWARS_CLAMP_RADIUS) : arena;
-      const bounded = clampToBedwarsArena({ x: msg.x, y: msg.y, z: msg.z }, box);
-      p.x = bounded.x; p.y = bounded.y; p.z = bounded.z;
-    }
-    p.yaw = msg.yaw; p.pitch = msg.pitch;
-    p.gliding = false; p.boating = false; p.seated = false; p.sneaking = msg.sneaking === true;
-    // The held item is cosmetic here: the damage math reads `p.bwAxe`.
-    p.held = participant.alive && (msg.held === p.bwAxe ||
-      msg.held === bedwarsTeamWool(participant.team) || msg.held === Block.OakPlanks ||
-      msg.held === Block.Glass || msg.held === Item.Bandage ||
-      msg.held === Item.JumpBoost) ? msg.held : 0;
-    p.armor = [0, 0, 0, 0]; p.aiming = false; p.reloading = false;
-    if (typeof msg.swing === 'number' && Number.isFinite(msg.swing)) p.swing = Math.floor(msg.swing) & 0xffff;
-    this.recordArenaTrack(p);
-
-    // The void. Detected HERE rather than in the tick loop so the death lands
-    // on the frame the player actually passes the plane.
-    if (participant.alive && p.y < BEDWARS_VOID_Y) return this.bedwarsVoidDeath(p);
-    return [];
-  }
-
-  /**
-   * A player crossed the kill plane.
-   *
-   * Attribution is the whole reason the mode's signature kill scores: the pure
-   * module resolves the last-hit window, so the rule lives in exactly one
-   * place and is testable without a server.
-   */
-  private bedwarsVoidDeath(p: ServerPlayer): Outbound[] {
-    const nowMs = this.worldTime * 1000;
-    const recorded = this.bedwars.recordDeath(p.id, 0, nowMs, 'void');
-    if (!recorded) return [];
-    p.health = 1; p.held = 0; p.bwRespawning = true;
-    p.arenaCombo = 0; p.arenaComboTarget = 0;
-    const out: Outbound[] = [];
-    const victim = recorded.snapshot.participants.find((v) => v.id === p.id)!;
-    out.push({ to: p.id, msg: { t: 'bwRespawn',
-      respawnAt: victim.respawnAt ?? nowMs, spectating: true } });
-    const killerName = recorded.killer !== null
-      ? this.players.get(recorded.killer)?.username : undefined;
-    for (const id of this.bedwars.membersOf(p.id)) {
-      out.push({ to: id, msg: { t: 'killfeed',
-        killer: killerName ?? '', victim: p.username } });
-    }
-    out.push(...this.bwSnapshotOutbound(recorded.snapshot));
-    out.push(...this.bwResultOutbound(recorded.snapshot));
-    return out;
-  }
-
-  /**
-   * Axe melee. Every branch returns [] — the handler is fail-closed at each
-   * step, in the order a cheap check should come before an expensive one.
-   *
-   * Nothing the client sends beyond the target id is consulted. Damage comes
-   * from `p.bwAxe` (the server's own record of the purchased tier) and from
-   * the server's own velocity/ground state derived from `arenaTrack`.
-   */
-  /**
-   * The shared, mode-independent half of an arena melee swing.
-   *
-   * Extracted so the Knockback Stick is a TIER, not a second implementation of
-   * the same six validations. Returns null for every rejection — cadence,
-   * range, facing, cover — and otherwise applies the swing's bookkeeping
-   * (cadence stamp, combo advance, the victim's combo break) and hands the
-   * caller the computed result. The caller owns only the mode's outbounds.
-   *
-   * Nothing the client sends beyond the target id is consulted: the tier comes
-   * from the caller's own record and the motion from `arenaTrack`.
-   */
-  private arenaMeleeSwing(
-    p: ServerPlayer, target: ServerPlayer, tier: BwSwingTier,
-    losClear: (from: BwVec3, to: BwVec3) => boolean,
-    onGround: (x: number, y: number, z: number) => boolean,
-  ): BwSwingResult | null {
-    const nowMs = this.worldTime * 1000;
-    // Cadence. Under the floor the swing is DROPPED, not scaled down — a macro
-    // that spams at 10x speed accomplishes nothing at all.
-    const sinceLast = nowMs - p.arenaLastSwingAt;
-    if (sinceLast < tier.cooldownMs * BW_SWING_FLOOR) return null;
-
-    // Range and facing, lag-compensated against the target's own history. The
-    // window is deliberately short: melee has no travel time, so a wide one
-    // would let a laggy client hit someone who already sprinted clear.
-    const eye = { x: p.x, y: p.y + 1.6, z: p.z };
-    const lookLen = Math.hypot(-Math.sin(p.yaw), -Math.cos(p.yaw)) || 1;
-    const lookX = -Math.sin(p.yaw) / lookLen, lookZ = -Math.cos(p.yaw) / lookLen;
-    const now = this.worldTime;
-    const candidates: ArenaTrackSample[] = [{ at: now, x: target.x, y: target.y, z: target.z }];
-    for (const sample of target.arenaTrack) {
-      if (now - sample.at <= BW_MELEE_REWIND_S) candidates.push(sample);
-    }
-    let hitAt: ArenaTrackSample | null = null;
-    for (const sample of candidates) {
-      const cx = sample.x, cy = sample.y + 0.9, cz = sample.z;
-      if (Math.hypot(cx - eye.x, cy - eye.y, cz - eye.z) > BW_MELEE_RANGE) continue;
-      const hx = cx - eye.x, hz = cz - eye.z;
-      const hlen = Math.hypot(hx, hz);
-      if (hlen < 1e-6) { hitAt = sample; break; }
-      if ((hx / hlen) * lookX + (hz / hlen) * lookZ < BW_MELEE_FACING_DOT) continue;
-      hitAt = sample; break;
-    }
-    if (!hitAt) return null;
-
-    // Cover. You cannot swing through a wall.
-    if (!losClear(eye, { x: hitAt.x, y: hitAt.y + 0.9, z: hitAt.z })) return null;
-
-    const track = p.arenaTrack;
-    const last = track[track.length - 1], prev = track[track.length - 2];
-    let vy = 0, speed = 0;
-    if (last && prev) {
-      const dt = Math.max(1e-3, last.at - prev.at);
-      vy = (last.y - prev.y) / Math.max(1, dt * 20); // per-tick, matching the client
-      speed = Math.hypot(last.x - prev.x, last.z - prev.z) / dt;
-    }
-    const dxh = hitAt.x - p.x, dzh = hitAt.z - p.z;
-    const dlen = Math.hypot(dxh, dzh) || 1;
-    const combo = (p.arenaComboTarget === target.id && nowMs < p.arenaComboUntil)
-      ? p.arenaCombo : 0;
-    const swing = bedwarsSwing({
-      tier, sinceLastSwingMs: sinceLast, combo,
-      onGround: onGround(p.x, p.y - 0.1, p.z), vy, speed,
-      toTargetX: dxh / dlen, toTargetZ: dzh / dlen, lookX, lookZ,
-    });
-
-    p.arenaLastSwingAt = nowMs;
-    p.arenaCombo = Math.min(combo + 1, 99);
-    p.arenaComboTarget = target.id;
-    p.arenaComboUntil = nowMs + BW_COMBO_WINDOW_MS;
-    // Being hit breaks YOUR combo, which is what makes trading a real cost.
-    target.arenaCombo = 0; target.arenaComboTarget = 0; target.arenaComboUntil = 0;
-    return swing;
-  }
-
-  private handleBedwarsMelee(p: ServerPlayer, targetId: number): Outbound[] {
-    const nowMs = this.worldTime * 1000;
-    // 1. One live match, both parties in it.
-    if (!Number.isInteger(targetId) || !this.bedwars.sameMatch(p.id, targetId)) return [];
-    const target = this.players.get(targetId), arena = this.bedwars.arenaFor(p.id);
-    const ap = this.bedwars.participantFor(p.id), tp = this.bedwars.participantFor(targetId);
-    if (!target || !arena || !ap || !tp) return [];
-    // 2. No friendly fire. (Matters the moment a 2v2 map is added.)
-    if (ap.team === tp.team) return [];
-    // 3. Both alive, and the target's spawn shield has expired.
-    if (!ap.alive || !tp.alive || (tp.shieldUntil !== undefined && tp.shieldUntil > nowMs)) return [];
-    // 4-7. Cadence, range, facing, cover and the swing math are shared.
-    const swing = this.arenaMeleeSwing(p, target, bedwarsAxeTier(p.bwAxe),
-      (from, to) => hasBedwarsLineOfSight(from, to, arena, (x, y, z) => this.bwPlacedSolid(x, y, z)),
-      (x, y, z) => bedwarsSolidAt(x, y, z, arena) || this.bwPlacedSolid(x, y, z));
-    if (!swing) return [];
-
-    const dealt = Math.min(swing.damage, target.health);
-    target.health = Math.max(0, target.health - swing.damage);
-    const killed = target.health <= 0;
-    this.bedwars.recordHit(targetId, p.id, nowMs);
-
-    const out: Outbound[] = [
-      { to: target.id, msg: { t: 'hurt', health: killed ? 1 : target.health, dead: false,
-        by: p.id, kx: swing.kx, ky: swing.ky, kz: swing.kz, combat: 0 } },
-      { to: p.id, msg: { t: 'bwHit', target: target.id, amount: dealt, combo: swing.combo,
-        charge: swing.charge, crit: swing.crit, killed } },
-    ];
-    if (!killed) return out;
-
-    target.health = 1; target.held = 0; target.bwRespawning = true;
-    target.arenaCombo = 0; target.arenaComboTarget = 0;
-    const recorded = this.bedwars.recordDeath(target.id, p.id, nowMs, 'melee');
-    if (!recorded) return out;
-    const dead = recorded.snapshot.participants.find((v) => v.id === target.id)!;
-    out.push({ to: target.id, msg: { t: 'bwRespawn',
-      respawnAt: dead.respawnAt ?? nowMs, spectating: true } });
-    for (const id of this.bedwars.membersOf(p.id)) {
-      out.push({ to: id, msg: { t: 'killfeed', killer: p.username, victim: target.username } });
-    }
-    out.push(...this.bwSnapshotOutbound(recorded.snapshot));
-    out.push(...this.bwResultOutbound(recorded.snapshot));
-    return out;
-  }
-
-  /**
-   * Break an enemy bed.
-   *
-   * Beds are `hardness: -1`, so the ordinary mining path can never touch one.
-   * This branch is the only thing in the codebase that may destroy a bed, and
-   * it refuses your own team's.
-   */
-  private handleBedwarsBed(p: ServerPlayer, x: number, y: number, z: number): Outbound[] {
-    const arena = this.bedwars.arenaFor(p.id), ap = this.bedwars.participantFor(p.id);
-    const nowMs = this.worldTime * 1000;
-    if (!arena || !ap?.alive || this.bedwars.phaseFor(p.id) !== 'running') return [];
-    if (!fin(x, y, z)) return [];
-    const team = bedwarsBedTeamAt(x, y, z, arena);
-    if (team < 0 || team === ap.team) return [];
-    const eye = { x: p.x, y: p.y + 1.6, z: p.z };
-    const cell = { x: Math.floor(x) + 0.5, y: Math.floor(y) + 0.5, z: Math.floor(z) + 0.5 };
-    if (Math.hypot(cell.x - eye.x, cell.y - eye.y, cell.z - eye.z) > BW_MELEE_RANGE) return [];
-    const lookX = -Math.sin(p.yaw), lookZ = -Math.cos(p.yaw);
-    const hx = cell.x - eye.x, hz = cell.z - eye.z, hlen = Math.hypot(hx, hz);
-    if (hlen > 1e-6 && (hx / hlen) * lookX + (hz / hlen) * lookZ < BW_MELEE_FACING_DOT) return [];
-    if (!hasBedwarsLineOfSight(eye, cell, arena, (bx, by, bz) => {
-      // The bed's own cells must not count as cover against breaking it.
-      if (bedwarsBedTeamAt(bx, by, bz, arena) === team) return false;
-      return this.bwPlacedSolid(bx, by, bz);
-    })) return [];
-
-    const broke = this.bedwars.breakBed(p.id, team, nowMs);
-    if (!broke) return [];
-    const out: Outbound[] = [];
-    for (const id of this.bedwars.membersOf(p.id)) {
-      out.push({ to: id, msg: { t: 'bwBedBroken', team, by: p.id } });
-    }
-    out.push(...this.bwSnapshotOutbound(broke.snapshot));
-    out.push(...this.bwResultOutbound(broke.snapshot));
-    return out;
-  }
-
-  /** Right-click the Quartermaster. Validated: alive, running, and standing at
-   *  a shop cell belonging to YOUR OWN team. */
-  private handleBedwarsShopBuy(p: ServerPlayer, entry: number): Outbound[] {
-    const arena = this.bedwars.arenaFor(p.id), ap = this.bedwars.participantFor(p.id);
-    if (!arena || !ap?.alive || this.bedwars.phaseFor(p.id) !== 'running') return [];
-    const shopEntry = bedwarsShopEntry(entry);
-    if (!shopEntry) return [];
-    const near = bedwarsShopCells(arena, ap.team).some((c) =>
-      Math.hypot(c.x + 0.5 - p.x, c.y - p.y, c.z + 0.5 - p.z) <= 4.5);
-    if (!near) return this.bwError(p.id, 'too_far');
-    if (!this.bedwars.spendResources(p.id, shopEntry.cost)) {
-      return this.bwError(p.id, 'cannot_afford');
-    }
-    const out: Outbound[] = [];
-    if (shopEntry.axe !== undefined) {
-      this.bedwars.setAxe(p.id, shopEntry.axe);
-      p.bwAxe = this.bedwars.participantFor(p.id)?.axe ?? p.bwAxe;
-      out.push(this.bwLoadout(p, ap.team));
-    } else {
-      const stacks: ItemStack[] = shopEntry.teamBlock !== undefined
-        ? [{ id: bedwarsTeamWool(ap.team), count: shopEntry.teamBlock }]
-        : (shopEntry.grants ?? []).map((g) => ({ id: g.id, count: g.count }));
-      out.push({ to: p.id, msg: { t: 'bwGrant', items: stacks } });
-    }
-    out.push(...this.bwResourcesOutbound(p.id));
-    out.push(...this.bwSnapshotOutbound(this.bedwars.snapshotFor(p.id, this.worldTime * 1000)!));
-    return out;
-  }
-
-  private handleBedwarsHeal(p: ServerPlayer, item: number): Outbound[] {
-    const participant = this.bedwars.participantFor(p.id);
-    if (item !== Item.Bandage || !participant?.alive ||
-        this.bedwars.phaseFor(p.id) !== 'running' || p.health >= BEDWARS_MAX_HEALTH) return [];
-    const heal = ITEMS[Item.Bandage].heal;
-    if (!heal) return [];
-    p.regenBoostTimer = heal.duration; p.regenBoostInterval = heal.interval; p.regenTimer = 0;
-    return [];
-  }
-
-  /**
-   * Arena building. Only the mode's own materials, only above the island
-   * surface, only below the ceiling — and breaking is limited to blocks a
-   * PLAYER placed, so no authored geometry (and no bed) can be mined away.
-   */
-  private handleBedwarsEdit(
-    p: ServerPlayer, x: number, y: number, z: number, block: number,
-  ): Outbound[] {
-    const arena = this.bedwars.arenaFor(p.id), ap = this.bedwars.participantFor(p.id);
-    if (!arena || !ap?.alive || this.bedwars.phaseFor(p.id) !== 'running') return [];
-    if (!fin(x, y, z) || !fin(p.x, p.y, p.z)) return [];
-    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
-    if (bx < arena.minX || bx >= arena.maxX || bz < arena.minZ || bz >= arena.maxZ) return [];
-    if (by <= BEDWARS_VOID_Y || by >= BEDWARS_CEILING_Y) return [];
-    if (Math.hypot(bx + 0.5 - p.x, by + 0.5 - p.y, bz + 0.5 - p.z) > EDIT_RANGE) return [];
-
-    const key = `${bx},${by},${bz}`;
-    const placeable = new Set<number>([
-      bedwarsTeamWool(ap.team), Block.OakPlanks, Block.Glass,
-    ]);
-    let slotEdits = this.arenaEdits.get(`bedwars:${arena.slot}`);
-    if (!slotEdits) {
-      slotEdits = new Map<string, number>();
-      this.arenaEdits.set(`bedwars:${arena.slot}`, slotEdits);
-    }
-
-    if (block === Block.Air) {
-      // Breaking: only ever a block someone placed this match. Authored island,
-      // fixtures and beds are all untouchable here by construction.
-      if (!slotEdits.has(key)) return [];
-      slotEdits.delete(key);
-      this.edits.set(key, Block.Air);
-      return this.bedwars.membersOf(p.id).map((id) => ({
-        to: id, msg: { t: 'edit', x: bx, y: by, z: bz, block: Block.Air },
-      }));
-    }
-    if (!placeable.has(block)) return [];
-    // Never overwrite authored geometry, and never stack into an occupied cell.
-    if (bedwarsBlockAt(bx, by, bz) !== null) return [];
-    const existing = this.edits.get(key);
-    if (existing !== undefined && existing !== Block.Air) return [];
-    slotEdits.set(key, block);
-    this.edits.set(key, block);
-    return this.bedwars.membersOf(p.id).map((id) => ({
-      to: id, msg: { t: 'edit', x: bx, y: by, z: bz, block },
-    }));
-  }
-
-  private removeFromBwQueue(id: number): boolean {
-    const before = this.bwQueue.length;
-    this.bwQueue = this.bwQueue.filter((queuedId) => queuedId !== id);
-    return this.bwQueue.length !== before;
-  }
-
-  private handleBedwarsLobby(p: ServerPlayer, msg: Extract<ClientMsg, { t: `bw${string}` }>): Outbound[] {
-    const now = this.worldTime * 1000;
-    switch (msg.t) {
-      case 'bwCreate': {
-        this.removeFromBwQueue(p.id);
-        const result = this.bedwars.create({ id: p.id, username: p.username, skin: p.skin }, now);
-        if ('reason' in result) return this.bwError(p.id, result.reason);
-        return [
-          { to: p.id, msg: { t: 'bwQueue', queued: false } },
-          ...this.bwSnapshotOutbound(result.snapshot, { id: p.id, token: result.token }),
-        ];
-      }
-      case 'bwQueue': {
-        if (!msg.join) {
-          this.removeFromBwQueue(p.id);
-          return [{ to: p.id, msg: { t: 'bwQueue', queued: false } }];
-        }
-        if (this.bedwars.phaseFor(p.id)) return this.bwError(p.id, 'already_in_lobby');
-        if (!this.bwQueue.includes(p.id)) this.bwQueue.push(p.id);
-        const out: Outbound[] = [{ to: p.id, msg: { t: 'bwQueue', queued: true } }];
-        // Pair the two longest-waiting players into a fresh private lobby.
-        while (this.bwQueue.length >= 2) {
-          const [aId, bId] = this.bwQueue.splice(0, 2);
-          const a = this.players.get(aId), b = this.players.get(bId);
-          if (!a || !b) continue;
-          const made = this.bedwars.create({ id: a.id, username: a.username, skin: a.skin }, now);
-          if ('reason' in made) continue;
-          const joined = this.bedwars.join(made.token,
-            { id: b.id, username: b.username, skin: b.skin }, now);
-          if (!joined.ok) continue;
-          this.bedwars.setReady(a.id, true, now);
-          const ready = this.bedwars.setReady(b.id, true, now);
-          out.push({ to: a.id, msg: { t: 'bwQueue', queued: false } });
-          out.push({ to: b.id, msg: { t: 'bwQueue', queued: false } });
-          if (ready) out.push(...this.bwSnapshotOutbound(ready));
-        }
-        return out;
-      }
-      case 'bwJoin': {
-        if (typeof msg.token !== 'string') return this.bwError(p.id, 'invalid');
-        this.removeFromBwQueue(p.id);
-        const result = this.bedwars.join(msg.token,
-          { id: p.id, username: p.username, skin: p.skin }, now);
-        if (!result.ok) return this.bwError(p.id, result.reason);
-        return this.bwSnapshotOutbound(result.snapshot);
-      }
-      case 'bwLeave': {
-        if (this.removeFromBwQueue(p.id) && !this.bedwars.phaseFor(p.id)) {
-          return [{ to: p.id, msg: { t: 'bwQueue', queued: false } }];
-        }
-        const oldPhase = this.bedwars.phaseFor(p.id);
-        const oldArena = this.bedwars.arenaFor(p.id);
-        const result = this.bedwars.leave(p.id, now);
-        const out = result.snapshot ? this.bwSnapshotOutbound(result.snapshot) : [];
-        if (result.deleted && oldArena) out.push(...this.resetBedwarsArenaEdits(oldArena));
-        if (oldPhase && oldPhase !== 'lobby') {
-          out.push(...this.restoreOpenWorldState(p));
-          out.push(...this.announceWorldScope([p.id]));
-        }
-        if (result.snapshot?.phase === 'lobby') out.push(...this.restoreBedwarsLobby(result.snapshot));
-        if (result.snapshot) out.push(...this.bwResultOutbound(result.snapshot));
-        return out;
-      }
-      case 'bwReady': {
-        const snap = this.bedwars.setReady(p.id, msg.ready === true, now);
-        return snap ? this.bwSnapshotOutbound(snap) : this.bwError(p.id, 'not_in_lobby');
-      }
-      case 'bwStart': {
-        const result = this.bedwars.start(p.id, now);
-        if (!result.ok) return this.bwError(p.id, result.reason);
-        return this.launchBedwars(result.snapshot);
-      }
-      case 'bwArenaReady': {
-        const snap = this.bedwars.markArenaReady(p.id, now);
-        return snap ? this.bwSnapshotOutbound(snap) : [];
-      }
-      default:
-        return [];
-    }
-  }
-
-  /**
-   * One Bedwars server tick: phase transitions, respawns, and the resource
-   * generators.
-   *
-   * Generators are pure counters. `itemspawn`/`itemsmove` are world-broadcast
-   * and gated only by `receivesWorldBroadcast`, so real item entities would be
-   * visible to the open world; counters sidestep that entirely and make the
-   * shop trivially server-authoritative.
-   */
-  tickBedwars(dt: number): Outbound[] {
-    const out: Outbound[] = [];
-    const nowMs = this.worldTime * 1000;
-
-    for (const snap of this.bedwars.tick(nowMs)) {
-      out.push(...this.bwSnapshotOutbound(snap));
-      if (snap.phase === 'lobby') out.push(...this.restoreBedwarsLobby(snap));
-      if (snap.phase === 'results') this.bwDiamondNextAt.delete(snap.id);
-      if (snap.phase === 'running' && snap.arena) {
-        for (const participant of snap.participants) {
-          const p = this.players.get(participant.id);
-          if (!p) continue;
-          if (!p.bwRespawning || !participant.alive) continue;
-          const spawn = snap.arena.spawns.find((s) => s.team === participant.team) ?? snap.arena.spawns[0];
-          p.x = spawn.x; p.y = spawn.y; p.z = spawn.z; p.yaw = spawn.yaw;
-          p.health = BEDWARS_MAX_HEALTH;
-          // The purchased tier survives death — that is what makes a Void
-          // Cleaver worth four diamonds.
-          p.bwAxe = participant.axe; p.held = participant.axe;
-          p.bwRespawning = false; p.arenaCombo = 0; p.arenaComboTarget = 0;
-          p.arenaLastSwingAt = -Infinity;
-          p.arenaTrack = []; this.recordArenaTrack(p);
-          out.push(this.bwLoadout(p, participant.team));
-          out.push({ to: p.id, msg: { t: 'respawned',
-            x: spawn.x, y: spawn.y, z: spawn.z, health: BEDWARS_MAX_HEALTH } });
-          out.push({ to: p.id, msg: { t: 'bwRespawn', respawnAt: 0, spectating: false } });
-        }
-      }
-      out.push(...this.bwResultOutbound(snap));
-    }
-
-    for (const snap of this.bedwars.snapshots(nowMs)) {
-      if (snap.phase !== 'running' || !snap.arena) continue;
-      out.push(...this.tickBedwarsGenerators(snap, nowMs, Math.max(0, dt) * 1000));
-      if (this.worldTime >= this.duelClockNextAt) {
-        for (const participant of snap.participants) {
-          out.push({ to: participant.id, msg: { t: 'bwClock',
-            serverNow: nowMs, endsAt: snap.endsAt ?? nowMs, stage: snap.stage } });
-        }
-      }
-    }
-    return out;
-  }
-
-  private tickBedwarsGenerators(snap: BwLobbySnapshot, nowMs: number, dtMs: number): Outbound[] {
-    const arena = snap.arena;
-    if (!arena) return [];
-    const out: Outbound[] = [];
-
-    const gens = bedwarsGenCells(arena);
-    const changed = new Set<number>();
-
-    // Team generators credit their own team, whether or not anybody is
-    // standing there — a base keeps earning while its owner fights at mid.
-    for (const participant of snap.participants) {
-      if (!participant.connected) continue;
-      const p = this.players.get(participant.id);
-      if (!p) continue;
-      if (!gens.some((g) => !g.diamond && g.team === participant.team)) continue;
-      p.bwIronAccum += dtMs;
-      p.bwGoldAccum += dtMs;
-      let iron = 0, gold = 0;
-      while (p.bwIronAccum >= BW_GEN_IRON_MS) { p.bwIronAccum -= BW_GEN_IRON_MS; iron++; }
-      while (p.bwGoldAccum >= BW_GEN_GOLD_MS) { p.bwGoldAccum -= BW_GEN_GOLD_MS; gold++; }
-      if (iron || gold) {
-        this.bedwars.grantResources(participant.id, { iron, gold });
-        changed.add(participant.id);
-      }
-    }
-
-    // The diamond generator credits EVERY player standing near it at the tick,
-    // so contesting mid is the point rather than a race to a pickup.
-    const elapsed = nowMs - (snap.startedAt ?? nowMs);
-    const period = bedwarsDiamondPeriod(elapsed);
-    const next = this.bwDiamondNextAt.get(snap.id) ?? (nowMs + period);
-    if (nowMs >= next) {
-      this.bwDiamondNextAt.set(snap.id, nowMs + period);
-      for (const gen of gens.filter((g) => g.diamond)) {
-        for (const participant of snap.participants) {
-          if (!participant.alive) continue;
-          const p = this.players.get(participant.id);
-          if (!p) continue;
-          if (Math.hypot(p.x - gen.x, p.z - gen.z) > BW_PICKUP_RADIUS) continue;
-          if (Math.abs(p.y - gen.y) > BW_PICKUP_RADIUS) continue;
-          this.bedwars.grantResources(participant.id, { diamond: 1 });
-          changed.add(participant.id);
-        }
-      }
-    } else {
-      this.bwDiamondNextAt.set(snap.id, next);
-    }
-
-    for (const id of changed) out.push(...this.bwResourcesOutbound(id));
-    return out;
-  }
-
-
-  // ── Party Games ───────────────────────────────────────────────────────────
-
-  private partyError(to: number, code: Extract<ServerMsg, { t: 'partyError' }>['code']): Outbound[] {
-    const messages: Record<Extract<ServerMsg, { t: 'partyError' }>['code'], string> = {
-      invalid: 'That Party Games invite is invalid or has expired.',
-      full: 'That party is full.',
-      match_in_progress: 'Match in progress — wait for this party to reopen.',
-      already_in_lobby: 'Leave your current minigame lobby before joining another.',
-      not_host: 'Only the host can start the party.',
-      too_few_players: 'Party Games needs at least three players.',
-      too_many_players: 'That party is full.',
-      not_everyone_ready: 'Every connected player must ready up first.',
-      not_in_lobby: 'You are not in a party.',
+  // Party and Parkour share one isolated session transport and loading barrier.
+  private partyError(to: number, code: Extract<ServerMsg, {
+    t: 'partyError';
+  }>['code']): Outbound[] {
+    const messages = {
+      invalid: 'That invite has expired.', full: 'That lobby is full.',
+      match_in_progress: 'That match is already playing.', already_in_lobby: 'Leave your current lobby first.',
+      not_host: 'Only the host can start.', too_few_players: 'You need two players.',
+      too_many_players: 'That lobby is full.', not_everyone_ready: 'Everyone needs to ready up.', not_in_lobby: 'You are not in a lobby.',
     };
     return [{ to, msg: { t: 'partyError', code, message: messages[code] } }];
   }
-
-  private partySnapshotOutbound(
-    snapshot: PartyLobbySnapshot, invite?: { id: number; token: string },
-  ): Outbound[] {
-    // No settlement step: Party Games is UNRANKED, exactly like Bedwars.
-    return snapshot.participants.map((participant) => ({
-      to: participant.id,
-      msg: { t: 'partyLobby', snapshot, inviteToken: invite?.id === participant.id ? invite.token : undefined },
-    }));
+  private partySnapshotOutbound(snapshot: PartyLobbySnapshot, invite?: {
+    id: number;
+    token: string;
+  }): Outbound[] {
+    return snapshot.participants.filter(p => p.connected).map(p => ({ to: p.id, msg: { t: 'partyLobby', snapshot, inviteToken: invite?.id === p.id ? invite.token : undefined } }));
   }
-
-  /** The AABB of ONE sub-arena, for the footprint sweep. */
-  private partySubAABB(sub: PartySubBounds): ArenaAABB {
-    return {
-      minX: sub.minX, maxX: sub.maxX,
-      minZ: sub.minZ, maxZ: sub.maxZ,
-      minY: PARTY_FLOOR_Y - 2, maxY: PARTY_CEILING_Y,
-    };
+  private resetPartyArenaEdits(arena: PartyArenaBounds, ids?: number[]): Outbound[] {
+    return this.resetArenaEdits(`party:${arena.slot}`, { minX: arena.minX, maxX: arena.maxX, minZ: 0, maxZ: PARTY_ARENA_SIZE_Z, minY: PARTY_VOID_Y - 4, maxY: PARTY_CEILING_Y }, ids);
   }
-
-  /**
-   * Restore one sub-arena to its authored stamp.
-   *
-   * This is a SWEEP of the footprint — "delete every edit key inside this
-   * box" — never a paired inverse batch. That makes leaving a floor broken
-   * structurally impossible: whatever happened, however many times, one sweep
-   * puts the authored geometry back. Colour Chaos leans on this every call.
-   */
-  private resetPartySubEdits(sub: PartySubBounds, memberIds?: number[]): Outbound[] {
-    return this.resetArenaEdits(
-      `party:${sub.slot}:${sub.index}`, this.partySubAABB(sub), memberIds);
-  }
-
-  private resetPartyArenaEdits(arena: PartyArenaBounds, memberIds?: number[]): Outbound[] {
-    const out: Outbound[] = [];
-    for (let i = 0; i < PARTY_GAMES.length; i++) {
-      out.push(...this.resetPartySubEdits(partySubBounds(arena.slot, i), memberIds));
-    }
-    return out;
-  }
-
-  /** Authored geometry MINUS anything a player has since broken. */
-  private partyStandingAt(x: number, y: number, z: number): boolean {
-    const key = `${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`;
-    const edit = this.edits.get(key);
-    if (edit !== undefined) return edit !== Block.Air && (BLOCKS[edit]?.solid ?? false);
-    return partySolidAt(x, y, z);
-  }
-
-  private partyLoadout(p: ServerPlayer, game: PartyGameId): Outbound {
+  /** Both modes hand out one infinite stack of your own team's wool — the only
+   *  block either lets you place. The Bridge adds the two weapons the span is
+   *  fought with: a Void Cleaver for the moment somebody is next to you on a
+   *  one-block walkway, and a bow for the long look down it. Neither is ever
+   *  consumed and neither exists anywhere else in the game. */
+  private partyLoadout(p: ServerPlayer, member: PartyParticipant, sub: PartySubBounds): Outbound {
     const slots: (ItemStack | null)[] = new Array(36).fill(null);
-    const loadout = partyGame(game).loadout;
-    if (loadout === 'shovel') slots[0] = { id: Item.IronShovel, count: 1 };
-    else if (loadout === 'stick') slots[0] = { id: Item.KnockbackStick, count: 1 };
+    slots[0] = { id: BRIDGE_TEAM_BLOCK[member.team] ?? Block.TeamWoolA, count: 64 };
+    if (sub.game === 'bridge') {
+      slots[1] = { id: Item.VoidCleaver, count: 1 };
+      slots[2] = { id: Item.BridgeBow, count: 1 };
+      slots[3] = { id: Item.BridgeArrow, count: 64 };
+    }
     p.held = slots[0]?.id ?? 0;
     return { to: p.id, msg: { t: 'partyLoadout', slots, selected: 0 } };
   }
-
-  private enterPartyBody(
-    p: ServerPlayer, sub: PartySubBounds, spawn: PartyVec3, game: PartyGameId,
-  ): Outbound[] {
-    this.enterArenaBody(p, 'party', spawn, 0, PARTY_MAX_HEALTH);
-    p.arenaLastSwingAt = -Infinity; p.arenaCombo = 0;
-    p.arenaComboTarget = 0; p.arenaComboUntil = 0;
-    p.partyEliminated = false;
-    void sub;
-    return [this.partyLoadout(p, game)];
-  }
-
   private launchParty(snapshot: PartyLobbySnapshot): Outbound[] {
+    if (!snapshot.arena || !snapshot.sub || !snapshot.round)
+      return [];
+    const ids = snapshot.participants.filter(p => p.connected).map(p => p.id);
     const out = this.partySnapshotOutbound(snapshot);
-    if (!snapshot.arena) return out;
-    const ids = snapshot.participants.map((v) => v.id);
     out.push(...this.resetPartyArenaEdits(snapshot.arena, ids));
-    // The countdown always opens on the FIRST sub-arena; `tickParty` moves
-    // everyone on each round transition.
-    const sub = partySubBounds(snapshot.arena.slot, 0);
-    const spawns = partySpawns(sub, snapshot.participants.length);
-    snapshot.participants.forEach((participant, i) => {
-      const player = this.players.get(participant.id);
-      if (!player) return;
-      out.push(...this.enterPartyBody(player, sub, spawns[i], PARTY_GAMES[0].id));
-      out.push({ to: player.id, msg: { t: 'partyArena', arena: snapshot.arena!, sub,
-        spawn: { ...spawns[i] },
-        countdownEndsAt: snapshot.countdownEndsAt ?? 0 } });
+    const spawns = partySpawns(snapshot.sub, snapshot.participants);
+    snapshot.participants.forEach((member, i) => {
+      const p = this.players.get(member.id);
+      if (!p || !member.connected)
+        return;
+      // Face the way the mode wants you pointed: down the lane, or across the
+      // chasm at the portal you are attacking.
+      const yaw = snapshot.sub!.game === 'bridge' ? (member.team === 0 ? Math.PI : 0) : Math.PI;
+      this.enterArenaBody(p, 'party', spawns[i], yaw, PARTY_MAX_HEALTH);
+      this.partyMoves.set(p.id, this.freshPartyMove(spawns[i], snapshot.revision));
+      this.partyCombat.delete(p.id);
+      out.push(this.partyLoadout(p, member, snapshot.sub!));
+      out.push({ to: p.id, msg: { t: 'partyArena', arena: snapshot.arena!, sub: snapshot.sub!, team: member.team, spawn: spawns[i], countdownEndsAt: snapshot.countdownEndsAt ?? 0 } });
     });
     out.push(...this.announceArenaScope(ids));
     return out;
   }
-
   private partyResultOutbound(snapshot: PartyLobbySnapshot): Outbound[] {
-    if (snapshot.phase !== 'results' || !snapshot.result) return [];
-    const ids = snapshot.participants.map((v) => v.id);
-    const out: Outbound[] = ids.map((id) => ({
-      to: id, msg: { t: 'partyResult', result: snapshot.result! },
-    }));
-    if (snapshot.arena) out.push(...this.resetPartyArenaEdits(snapshot.arena, ids));
-    return out;
+    if (snapshot.phase !== 'results' || !snapshot.result)
+      return [];
+    return snapshot.participants.filter(p => p.connected).map(p => ({ to: p.id, msg: { t: 'partyResult', result: snapshot.result! } }));
   }
-
   private restorePartyLobby(snapshot: PartyLobbySnapshot): Outbound[] {
-    const out: Outbound[] = [];
-    const restored: number[] = [];
-    if (snapshot.arena) {
-      out.push(...this.resetPartyArenaEdits(snapshot.arena, snapshot.participants.map((v) => v.id)));
-    }
+    const out: Outbound[] = [], ids: number[] = [];
     for (const member of snapshot.participants) {
       const p = this.players.get(member.id);
-      if (p?.arenaSaved) { out.push(...this.restoreOpenWorldState(p)); restored.push(p.id); }
+      if (!p || !member.connected)
+        continue;
+      if (p.arenaSaved) {
+        out.push(...this.restoreOpenWorldState(p));
+        ids.push(p.id);
+      }
+      this.partyMoves.delete(p.id);
+      this.partyCombat.delete(p.id);
+      this.partyArrows = this.partyArrows.filter(a => a.owner !== p.id);
     }
-    out.push(...this.announceWorldScope(restored));
+    out.push(...this.announceWorldScope(ids));
     return out;
   }
-
-  /** The in-match whitelist. Ends in `return []`, like every other mode's. */
   private routePartyInMatch(p: ServerPlayer, msg: ClientMsg): Outbound[] {
-    if (msg.t === 'xform') return this.handlePartyTransform(p, msg);
+    if (msg.t === 'xform')
+      return this.handlePartyTransform(p, msg);
+    // Retry is Parkour's. Honouring it on The Bridge would let a client claim
+    // a position under the deck — which is exactly where the portals are.
+    if (msg.t === 'partyRetry' && this.party.subFor(p.id)?.game === 'parkour' &&
+      this.party.phaseFor(p.id) === 'running' && this.worldTime * 1000 >= (this.party.participantFor(p.id)?.immuneUntil ?? Infinity))
+      return this.evaluatePartyPlayer(p, true);
+    // Combat is The Bridge's. Both handlers re-check the venue themselves, so
+    // neither can be reached from a Parkour lane by a forged message.
     if (msg.t === 'partyMelee') return this.handlePartyMelee(p, msg.target);
-    if (msg.t === 'edit') return this.handlePartyEdit(p, msg.x, msg.y, msg.z, msg.block);
+    if (msg.t === 'partyShoot') return this.handlePartyShoot(p, msg);
+    if (msg.t === 'edit')
+      return this.handlePartyEdit(p, msg.x, msg.y, msg.z, msg.block);
     return [];
   }
-
-  private handlePartyTransform(p: ServerPlayer, msg: Extract<ClientMsg, { t: 'xform' }>): Outbound[] {
-    const sub = this.party.subFor(p.id), phase = this.party.phaseFor(p.id);
-    const participant = this.party.participantFor(p.id);
-    if (!phase || !participant || !fin(msg.x, msg.y, msg.z, msg.yaw, msg.pitch)) return [];
-    if (sub) {
-      const bounded = clampToPartySub({ x: msg.x, y: msg.y, z: msg.z }, sub);
-      p.x = bounded.x; p.y = bounded.y; p.z = bounded.z;
-    } else {
-      p.x = msg.x; p.y = msg.y; p.z = msg.z;
-    }
-    p.yaw = msg.yaw; p.pitch = msg.pitch;
-    p.gliding = false; p.boating = false; p.seated = false; p.sneaking = msg.sneaking === true;
-    const game = this.party.roundFor(p.id)?.game;
-    const allowed = game === undefined ? 0
-      : partyGame(game).loadout === 'shovel' ? Item.IronShovel
-      : partyGame(game).loadout === 'stick' ? Item.KnockbackStick : 0;
-    p.held = participant.alive && msg.held === allowed ? allowed : 0;
-    p.armor = [0, 0, 0, 0]; p.aiming = false; p.reloading = false;
-    if (typeof msg.swing === 'number' && Number.isFinite(msg.swing)) p.swing = Math.floor(msg.swing) & 0xffff;
-    this.recordArenaTrack(p);
-
-    // Elimination. Both conditions are pure y comparisons with no fluid
-    // semantics anywhere — the whole reason Rising Sludge is opaque rock.
-    if (!participant.alive || p.partyEliminated) return [];
-    if (p.y < PARTY_VOID_Y) return this.partyEliminate(p, 'void');
-    const round = this.party.roundFor(p.id);
-    if (round?.game === 'lava') {
-      const level = sludgeLevel(this.worldTime * 1000 - round.startedAt, PARTY_FLOOR_Y);
-      if (p.y <= level) return this.partyEliminate(p, 'sludge');
-    }
-    return [];
+  private freshPartyMove(p: { x: number; y: number; z: number }, revision: number): PartyMoveState {
+    return {
+      at: this.worldTime, allowance: 1, revision, groundX: p.x, groundY: p.y, groundZ: p.z,
+      groundedAt: this.worldTime, stuck: 0, launchUntil: 0,
+    };
   }
-
-  private partyEliminate(p: ServerPlayer, reason: 'void' | 'sludge' | 'left'): Outbound[] {
-    const nowMs = this.worldTime * 1000;
-    const before = this.party.snapshotFor(p.id, nowMs);
-    const snapshot = this.party.recordElimination(p.id, nowMs);
-    if (!snapshot) return [];
-    p.partyEliminated = true;
-    p.health = PARTY_MAX_HEALTH; p.held = 0;
-    p.arenaCombo = 0; p.arenaComboTarget = 0;
-    const place = (before?.participants.filter((v) => v.alive).length ?? 1) - 1;
-    const out: Outbound[] = [];
-    for (const id of this.party.membersOf(p.id)) {
-      out.push({ to: id, msg: { t: 'partyEliminated', id: p.id, place, reason } });
-    }
-    out.push(...this.partySnapshotOutbound(snapshot));
-    out.push(...this.partyRoundTransition(snapshot));
-    return out;
+  private markPartyGround(move: PartyMoveState, x: number, y: number, z: number): void {
+    move.groundX = x;
+    move.groundY = y;
+    move.groundZ = z;
+    move.groundedAt = this.worldTime;
   }
-
-  /**
-   * The Knockback Stick.
+  /** Is a body at (x, y, z) resting on something solid?
    *
-   * Structurally identical to `handleBedwarsMelee`, minus the team check (this
-   * is FFA) and with `PARTY_KNOCKBACK_TIER` in place of a purchased axe: zero
-   * damage, huge launch. It is live ONLY while the knockback microgame is the
-   * running round, so the stick is inert during the other three.
-   */
-  private handlePartyMelee(p: ServerPlayer, targetId: number): Outbound[] {
-    if (!Number.isInteger(targetId) || !this.party.sameMatch(p.id, targetId)) return [];
-    if (!this.party.knockbackLive(p.id)) return [];
-    const target = this.players.get(targetId), sub = this.party.subFor(p.id);
-    const ap = this.party.participantFor(p.id), tp = this.party.participantFor(targetId);
-    if (!target || !sub || !ap?.alive || !tp?.alive) return [];
-    const swing = this.arenaMeleeSwing(p, target, PARTY_KNOCKBACK_TIER,
-      (from, to) => this.partyLineOfSight(from, to),
-      (x, y, z) => this.partyStandingAt(x, y, z));
-    if (!swing) return [];
-    // Damage is zero by design: the platform edge does the killing.
-    return [
-      { to: target.id, msg: { t: 'hurt', health: target.health, dead: false,
-        by: p.id, kx: swing.kx, ky: swing.ky, kz: swing.kz, combat: 0 } },
-      { to: p.id, msg: { t: 'bwHit', target: target.id, amount: 0, combo: swing.combo,
-        charge: swing.charge, crit: false, killed: false } },
-    ];
-  }
-
-  private partyLineOfSight(a: BwVec3, b: BwVec3): boolean {
-    const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
-    const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy, dz) * 4));
-    for (let i = 1; i < steps; i++) {
-      const t = i / steps;
-      if (this.partyStandingAt(a.x + dx * t, a.y + dy * t, a.z + dz * t)) return false;
-    }
-    return true;
-  }
-
-  /**
-   * Spleef, and nothing else.
-   *
-   * The entire editable surface of Party Games is `partyCanBreak`: Air, onto a
-   * cell whose AUTHORED block is packed snow, in a sub-arena whose microgame
-   * declares `break_floor`. Everything else — placing, the rim, another
-   * microgame's floor — falls out as false.
-   */
-  private handlePartyEdit(
-    p: ServerPlayer, x: number, y: number, z: number, block: number,
-  ): Outbound[] {
-    const sub = this.party.subFor(p.id), participant = this.party.participantFor(p.id);
-    if (!sub || !participant?.alive || this.party.phaseFor(p.id) !== 'running') return [];
-    if (!fin(x, y, z) || !fin(p.x, p.y, p.z)) return [];
-    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
-    if (bx < sub.minX || bx >= sub.maxX || bz < sub.minZ || bz >= sub.maxZ) return [];
-    if (Math.hypot(bx + 0.5 - p.x, by + 0.5 - p.y, bz + 0.5 - p.z) > EDIT_RANGE) return [];
-    if (!partyCanBreak(sub, bx, by, bz, block)) return [];
-    const key = `${bx},${by},${bz}`;
-    if (this.edits.get(key) === Block.Air) return []; // already dug
-    this.edits.set(key, Block.Air);
-    return this.party.membersOf(p.id).map((id) => ({
-      to: id, msg: { t: 'edit', x: bx, y: by, z: bz, block: Block.Air },
+   *  The tolerance is the whole point. Judging "standing" by an exact block
+   *  boundary only ever holds for a player who is standing STILL: a sample
+   *  taken a frame after a landing, or one interpolated along a sprint-jump,
+   *  sits a few centimetres off it and would read as airborne. So the block
+   *  under the feet is the one the feet round to, and any resting height
+   *  within a third of a block of its surface counts. */
+  private partyGrounded(x: number, y: number, z: number): boolean {
+    const by = Math.round(y) - 1;
+    if (Math.abs(y - by - 1) > .3) return false;
+    return [-.25, .25].some(ox => [-.25, .25].some(oz => {
+      const bx = Math.floor(x + ox), bz = Math.floor(z + oz);
+      const b = this.edits.get(`${bx},${by},${bz}`) ?? partyArenaBlockAt(bx, by, bz) ?? Block.Air;
+      return !!BLOCKS[b]?.solid;
     }));
   }
-
+  private partySolid(x: number, y: number, z: number): boolean {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    const b = this.edits.get(`${bx},${by},${bz}`) ?? partyArenaBlockAt(bx, by, bz) ?? Block.Air;
+    return !!BLOCKS[b]?.solid;
+  }
+  private handlePartyTransform(p: ServerPlayer, msg: Extract<ClientMsg, {
+    t: 'xform';
+  }>): Outbound[] {
+    const sub = this.party.subFor(p.id), phase = this.party.phaseFor(p.id), participant = this.party.participantFor(p.id);
+    const round = this.party.roundFor(p.id);
+    if (!sub || !participant || !round || !fin(msg.x, msg.y, msg.z, msg.yaw, msg.pitch))
+      return [];
+    if (msg.arenaRevision !== round.revision)
+      return [];
+    p.yaw = msg.yaw;
+    p.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, msg.pitch));
+    if (phase !== 'running')
+      return [];
+    const wanted = clampToPartySub(msg, sub);
+    const move = this.partyMoves.get(p.id) ?? this.freshPartyMove(p, round.revision);
+    // Token budget permits packet jitter, but cannot be refilled by sending
+    // more packets. Collision is checked along the whole travelled segment.
+    move.allowance = Math.min(4, move.allowance + Math.max(0, this.worldTime - move.at) * 6.5);
+    move.at = this.worldTime;
+    if (this.partyGrounded(p.x, p.y, p.z))
+      this.markPartyGround(move, p.x, p.y, p.z);
+    // Knockback is the server throwing this player through the air. While an
+    // impulse is settling, the flight rules stand down entirely — otherwise
+    // the mode's signature (hitting somebody off the span) would be corrected
+    // away as cheating the instant it worked.
+    const launched = this.worldTime < move.launchUntil;
+    const distance = Math.hypot(wanted.x - p.x, wanted.z - p.z);
+    let clear = distance <= move.allowance && (launched || wanted.y - move.groundY <= 1.6);
+    // Anti-flight: hanging at or above your last footing for seconds on end is
+    // not a jump. The window is generous on purpose — a tight one turns a
+    // string of sprint-jumps, where a touchdown can fall between two packets,
+    // into a false positive, and a false positive here is a frozen player.
+    if (!launched && this.worldTime - move.groundedAt > 2.2 && wanted.y >= move.groundY - .15)
+      clear = false;
+    const steps = Math.max(1, Math.ceil(Math.hypot(wanted.x - p.x, wanted.y - p.y, wanted.z - p.z) * 4));
+    for (let i = 1; clear && i <= steps; i++) {
+      const t = i / steps, x = p.x + (wanted.x - p.x) * t, y = p.y + (wanted.y - p.y) * t, z = p.z + (wanted.z - p.z) * t;
+      for (const ox of [-.26, .26])
+        for (const oz of [-.26, .26])
+          for (const oy of [.06, .9, 1.7]) {
+            const bx = Math.floor(x + ox), by = Math.floor(y + oy), bz = Math.floor(z + oz);
+            const b = this.edits.get(`${bx},${by},${bz}`) ?? partyArenaBlockAt(bx, by, bz) ?? Block.Air;
+            if (BLOCKS[b]?.solid)
+              clear = false;
+          }
+      // A landing that happens BETWEEN two packets is still a landing. Reading
+      // the ground along the travelled segment — not only at its ends — is what
+      // keeps a bunny-hopped crossing from ever looking like flight.
+      if (clear && this.partyGrounded(x, y, z))
+        this.markPartyGround(move, x, y, z);
+    }
+    this.partyMoves.set(p.id, move);
+    if (!clear) {
+      // A correction that cannot resolve is worse than the cheat it is aimed
+      // at: bouncing a player back to the position the rule objects to leaves
+      // them stuck in the air forever, unable to move, with nothing they can
+      // do about it. So an argument the client keeps losing gets SETTLED —
+      // back onto the last footing this player is known to have stood on.
+      if (++move.stuck < 12)
+        return [{ to: p.id, msg: { t: 'teleport', x: p.x, y: p.y, z: p.z } }];
+      move.stuck = 0;
+      move.allowance = 1;
+      move.groundedAt = this.worldTime;
+      move.launchUntil = 0;
+      p.x = move.groundX;
+      p.y = move.groundY;
+      p.z = move.groundZ;
+      p.arenaTrack = [];
+      this.recordArenaTrack(p);
+      return [{ to: p.id, msg: { t: 'teleport', x: p.x, y: p.y, z: p.z } }];
+    }
+    move.stuck = 0;
+    move.allowance -= distance;
+    p.x = wanted.x;
+    p.y = wanted.y;
+    p.z = wanted.z;
+    if (this.partyGrounded(p.x, p.y, p.z))
+      this.markPartyGround(move, p.x, p.y, p.z);
+    p.gliding = false;
+    p.boating = false;
+    p.seated = false;
+    p.armor = [0, 0, 0, 0];
+    p.aiming = false;
+    p.reloading = false;
+    // Cosmetic hand contents, whitelisted: the mode's own wool and its two
+    // weapons and nothing else, so no open-world item can be worn into a venue.
+    const wool = BRIDGE_TEAM_BLOCK[participant.team] ?? Block.TeamWoolA;
+    const holdable = sub.game === 'bridge'
+      ? [wool, Item.VoidCleaver, Item.BridgeBow, Item.BridgeArrow]
+      : [wool];
+    p.held = holdable.includes(msg.held as number) ? msg.held as number : 0;
+    p.sneaking = msg.sneaking === true;
+    if (Number.isFinite(msg.swing))
+      p.swing = Number(msg.swing) & 0xffff;
+    this.recordArenaTrack(p);
+    return this.evaluatePartyPlayer(p);
+  }
+  private evaluatePartyPlayer(p: ServerPlayer, retry = false): Outbound[] {
+    const now = this.worldTime * 1000, before = this.party.phaseFor(p.id);
+    const evaluated = this.party.evaluate(p.id, retry ? { x: p.x, y: PARTY_FLOOR_Y - 30, z: p.z } : p, now), out: Outbound[] = [];
+    if (evaluated.spawn) {
+      Object.assign(p, evaluated.spawn);
+      p.health = PARTY_MAX_HEALTH;
+      const move = this.partyMoves.get(p.id);
+      if (move) {
+        move.allowance = 1;
+        move.at = this.worldTime;
+        move.stuck = 0;
+        move.launchUntil = 0;
+        // The spawn pad is the new footing — all three axes of it. Leaving the
+        // old x/z here would aim a later correction at wherever this player
+        // last stood, which after a void death is thin air.
+        this.markPartyGround(move, p.x, p.y, p.z);
+      }
+      p.arenaTrack = [];
+      this.recordArenaTrack(p);
+      out.push({ to: p.id, msg: { t: 'respawned', ...evaluated.spawn, health: PARTY_MAX_HEALTH } });
+    }
+    if (evaluated.changed) {
+      const snap = this.party.snapshotFor(p.id, now)!;
+      out.push(...this.partySnapshotOutbound(snap));
+      if (before !== snap.phase) {
+        out.push(...this.partyRoundTransition(snap), ...this.partyResultOutbound(snap));
+      }
+    }
+    return out;
+  }
+  private partyCombatOf(id: number): PartyCombatState {
+    let combat = this.partyCombat.get(id);
+    if (!combat) {
+      combat = { lastSwingAt: -1e9, combo: 0, comboTarget: 0, lastShotAt: -1e9 };
+      this.partyCombat.set(id, combat);
+    }
+    return combat;
+  }
+  /** Ground speed and climb rate, read from the position history rather than
+   *  asked of the client — a sprint bonus you can claim is not a bonus. */
+  private partyMotion(p: ServerPlayer): { speed: number; vy: number } {
+    const track = p.arenaTrack;
+    if (track.length < 2) return { speed: 0, vy: 0 };
+    const a = track[track.length - 2], b = track[track.length - 1];
+    const dt = Math.max(1 / 60, b.at - a.at);
+    // `vy` is in the swing model's units (blocks per 60Hz tick).
+    return { speed: Math.hypot(b.x - a.x, b.z - a.z) / dt, vy: (b.y - a.y) / dt / 60 };
+  }
+  /**
+   * One landed hit: damage, knockback, feedback, and — if it was the last one
+   * — the death. Every Bridge weapon ends here, so there is exactly one place
+   * that decides what a hit does to a body.
+   */
+  private landPartyHit(
+    attacker: ServerPlayer, target: ServerPlayer, now: number,
+    hit: {
+      damage: number; kx: number; ky: number; kz: number;
+      charge: number; combo: number; crit: boolean; ranged: boolean;
+    },
+  ): Outbound[] {
+    const dealt = Math.min(hit.damage, target.health);
+    target.health = Math.max(0, target.health - hit.damage);
+    const killed = target.health <= 0;
+    this.party.recordHit(target.id, attacker.id, now);
+    this.partyCombatOf(target.id).combo = 0; // taking a hit breaks your own combo
+    const move = this.partyMoves.get(target.id);
+    if (move) {
+      // The server just threw this body through the air; it must not then
+      // correct it for being through the air. Knocking somebody off the span
+      // is the whole mode.
+      move.launchUntil = this.worldTime + 1.5;
+      move.allowance = 4;
+      move.groundedAt = this.worldTime;
+      move.stuck = 0;
+    }
+    const out: Outbound[] = [
+      { to: target.id, msg: { t: 'hurt', health: killed ? 1 : target.health, dead: false,
+        by: attacker.id, kx: hit.kx, ky: hit.ky, kz: hit.kz, combat: 0 } },
+      { to: attacker.id, msg: { t: 'partyHit', target: target.id, amount: dealt,
+        combo: hit.combo, charge: hit.charge, crit: hit.crit, killed, ranged: hit.ranged } },
+    ];
+    if (!killed) return out;
+    target.health = PARTY_MAX_HEALTH;
+    const snapshot = this.party.recordDeath(target.id, attacker.id, now, hit.ranged ? 'bow' : 'cleaver');
+    if (snapshot) out.push(...this.partySnapshotOutbound(snapshot));
+    // `pendingSpawn` is set; evaluating the corpse is what sends it home.
+    out.push(...this.evaluatePartyPlayer(target));
+    return out;
+  }
+  /** A Void Cleaver swing. The client sends a target id and nothing else. */
+  private handlePartyMelee(p: ServerPlayer, targetId: number): Outbound[] {
+    const now = this.worldTime * 1000, target = this.players.get(targetId);
+    const sub = this.party.subFor(p.id);
+    if (!target || !sub || sub.game !== 'bridge' || p.held !== Item.VoidCleaver ||
+      !this.party.canFight(p.id, targetId, now)) return [];
+    const combat = this.partyCombatOf(p.id), tier = bedwarsAxeTier(Item.VoidCleaver);
+    const since = now - combat.lastSwingAt;
+    // A swing thrown faster than the charge floor is DROPPED, not scaled:
+    // spamming the button has to be a loss, not a break-even.
+    if (since < tier.cooldownMs * BW_SWING_FLOOR) return [];
+    // Judge the swing against where the target was when it was thrown. Melee
+    // has no travel time, so the window is a quarter-second and no more.
+    const lookX = -Math.sin(p.yaw), lookZ = -Math.cos(p.yaw);
+    let best: { dx: number; dz: number; dist: number } | null = null;
+    for (const c of [{ at: this.worldTime, x: target.x, y: target.y, z: target.z }, ...target.arenaTrack]) {
+      if (this.worldTime - c.at > BW_MELEE_REWIND_S) continue;
+      const dx = c.x - p.x, dy = c.y - p.y, dz = c.z - p.z;
+      const dist = Math.hypot(dx, dy, dz), horiz = Math.hypot(dx, dz) || 1e-3;
+      if (dist > BW_MELEE_RANGE) continue;
+      if ((dx / horiz) * lookX + (dz / horiz) * lookZ < BW_MELEE_FACING_DOT) continue;
+      if (!best || dist < best.dist) best = { dx: dx / horiz, dz: dz / horiz, dist };
+    }
+    if (!best) return [];
+    const motion = this.partyMotion(p);
+    const combo = combat.comboTarget === targetId && since <= BW_COMBO_WINDOW_MS ? combat.combo : 0;
+    const swing = bedwarsSwing({
+      tier, sinceLastSwingMs: since, combo,
+      onGround: this.partyGrounded(p.x, p.y, p.z), vy: motion.vy, speed: motion.speed,
+      toTargetX: best.dx, toTargetZ: best.dz, lookX, lookZ,
+    });
+    combat.lastSwingAt = now;
+    combat.comboTarget = targetId;
+    combat.combo = Math.min(BW_COMBO_MAX, combo + 1);
+    return this.landPartyHit(p, target, now, {
+      damage: swing.damage, kx: swing.kx, ky: swing.ky, kz: swing.kz,
+      charge: swing.charge, combo: swing.combo, crit: swing.crit, ranged: false,
+    });
+  }
+  /** Release the bow. The arrow is the server's from here on. */
+  private handlePartyShoot(p: ServerPlayer, msg: Extract<ClientMsg, { t: 'partyShoot' }>): Outbound[] {
+    const now = this.worldTime * 1000, sub = this.party.subFor(p.id);
+    const member = this.party.participantFor(p.id);
+    if (!sub || !member || sub.game !== 'bridge' || this.party.phaseFor(p.id) !== 'running' ||
+      p.held !== Item.BridgeBow || !fin(msg.dx, msg.dy, msg.dz, msg.power)) return [];
+    const len = Math.hypot(msg.dx, msg.dy, msg.dz);
+    if (!(len > 1e-3)) return [];
+    const combat = this.partyCombatOf(p.id);
+    // The draw is TIMED, never trusted. Whatever the client claims it pulled,
+    // a shot can only be as strong as the gap since the last one paid for —
+    // which makes rapid fire and full power mutually exclusive by arithmetic
+    // rather than by a rule anybody has to enforce.
+    const earned = (now - combat.lastShotAt - BRIDGE_BOW_COOLDOWN_MS) / BRIDGE_BOW_DRAW_MS;
+    const power = Math.max(0, Math.min(1, Math.min(msg.power, earned)));
+    if (power < BRIDGE_BOW_MIN_POWER) return [];
+    combat.lastShotAt = now;
+    const shot = bridgeArrowShot(power);
+    const dx = msg.dx / len, dy = msg.dy / len, dz = msg.dz / len;
+    const arrow: PartyArrow = {
+      id: this.partyArrowSeq++, owner: p.id,
+      x: p.x + dx * .8, y: p.y + 1.55 + dy * .8, z: p.z + dz * .8,
+      vx: dx * shot.speed, vy: dy * shot.speed, vz: dz * shot.speed,
+      power, diesAt: this.worldTime + BRIDGE_ARROW_LIFE_MS / 1000,
+    };
+    this.partyArrows.push(arrow);
+    return this.party.membersOf(p.id).map(id => ({
+      to: id, msg: {
+        t: 'partyArrow', id: arrow.id, by: p.id,
+        x: arrow.x, y: arrow.y, z: arrow.z, dx, dy, dz, speed: shot.speed, power,
+      },
+    }));
+  }
+  /** Fly every live arrow one server tick. Sub-stepped, so a fast arrow cannot
+   *  tunnel through a one-block span or through a body standing on it. */
+  private tickPartyArrows(dt: number): Outbound[] {
+    if (!this.partyArrows.length) return [];
+    const out: Outbound[] = [], now = this.worldTime * 1000, alive: PartyArrow[] = [];
+    for (const a of this.partyArrows) {
+      const owner = this.players.get(a.owner);
+      if (!owner || this.party.phaseFor(a.owner) !== 'running') continue; // arena gone
+      const members = this.party.membersOf(a.owner);
+      let victim: ServerPlayer | null = null, spent = this.worldTime >= a.diesAt;
+      const steps = Math.max(1, Math.min(24, Math.ceil(Math.hypot(a.vx, a.vy, a.vz) * dt / .3)));
+      const step = dt / steps;
+      for (let i = 0; i < steps && !spent && !victim; i++) {
+        a.vy -= BRIDGE_ARROW_GRAVITY * step;
+        a.x += a.vx * step;
+        a.y += a.vy * step;
+        a.z += a.vz * step;
+        if (a.y < PARTY_VOID_Y || a.y > PARTY_CEILING_Y || this.partySolid(a.x, a.y, a.z)) {
+          spent = true;
+          break;
+        }
+        for (const id of members) {
+          if (id === a.owner) continue;
+          const v = this.players.get(id);
+          if (!v || !this.party.canFight(a.owner, id, now)) continue;
+          if (Math.abs(a.x - v.x) < .42 && Math.abs(a.z - v.z) < .42 &&
+            a.y > v.y - .1 && a.y < v.y + 1.9) {
+            victim = v;
+            break;
+          }
+        }
+      }
+      if (victim) {
+        const shot = bridgeArrowShot(a.power), flat = Math.hypot(a.vx, a.vz) || 1;
+        out.push(...this.landPartyHit(owner, victim, now, {
+          damage: shot.damage, kx: a.vx / flat * shot.knockback, ky: BRIDGE_ARROW_KB_VERT,
+          kz: a.vz / flat * shot.knockback, charge: a.power, combo: 0, crit: shot.crit, ranged: true,
+        }));
+      }
+      if (victim || spent) {
+        for (const id of members)
+          out.push({ to: id, msg: { t: 'partyArrowEnd', id: a.id, x: a.x, y: a.y, z: a.z, hit: !!victim } });
+        continue;
+      }
+      alive.push(a);
+    }
+    this.partyArrows = alive;
+    return out;
+  }
+  private handlePartyEdit(p: ServerPlayer, x: number, y: number, z: number, block: number): Outbound[] {
+    const sub = this.party.subFor(p.id), member = this.party.participantFor(p.id);
+    if (!sub || !member || this.party.phaseFor(p.id) !== 'running' || !fin(x, y, z))
+      return [];
+    const bridge = sub.game === 'bridge';
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z), key = `${bx},${by},${bz}`;
+    const current = this.edits.get(key) ?? partyArenaBlockAt(bx, by, bz) ?? Block.Air;
+    const reject = (): Outbound[] => [{ to: p.id, msg: { t: 'edit', x: bx, y: by, z: bz, block: current } }];
+    const inRange = Math.hypot(bx + .5 - p.x, by + .5 - p.y, bz + .5 - p.z) <= EDIT_RANGE;
+    const inSub = bx >= sub.minX && bx < sub.maxX && bz >= sub.minZ && bz < sub.maxZ;
+    // Building out over the void is the whole of The Bridge, so its build box
+    // reaches down past the deck; Parkour keeps its tighter one.
+    const minY = bridge ? PARTY_VOID_Y : PARTY_FLOOR_Y - 3;
+    const maxY = bridge ? PARTY_FLOOR_Y + 16 : PARTY_FLOOR_Y + 12;
+    if (!inSub || !inRange || by < minY || by >= maxY)
+      return reject();
+    // Taking your own wool back is how you get across a second time, so a
+    // break is allowed — but only of a block a player put there.
+    if (block === Block.Air) {
+      if (!bridge || !this.edits.has(key) || !BRIDGE_TEAM_BLOCK.includes(current as typeof BRIDGE_TEAM_BLOCK[number]))
+        return reject();
+      this.edits.set(key, Block.Air);
+      return this.party.membersOf(p.id).map(id => ({ to: id, msg: { t: 'edit', x: bx, y: by, z: bz, block: Block.Air } }));
+    }
+    if (block !== BRIDGE_TEAM_BLOCK[member.team] || current !== Block.Air)
+      return reject();
+    // A build must attach to something, and cannot suffocate anybody.
+    const attached = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].some(([dx, dy, dz]) => {
+      const b = this.edits.get(`${bx + dx},${by + dy},${bz + dz}`) ?? partyArenaBlockAt(bx + dx, by + dy, bz + dz) ?? Block.Air;
+      return !!BLOCKS[b]?.solid;
+    });
+    // Neither mode lets you wall off the thing everybody is racing for: a
+    // Parkour checkpoint, or the mouth of either Bridge portal.
+    const blocked = bridge
+      ? bridgeGoalGuard(bx - sub.minX, bz - sub.minZ)
+      : parkourCourse(sub.seed).some(c => c.checkpoint &&
+        bx + 1 > sub.minX + c.x - c.width / 2 && bx < sub.minX + c.x + c.width / 2 &&
+        bz + 1 > sub.minZ + c.z - c.depth / 2 && bz < sub.minZ + c.z + c.depth / 2 &&
+        by >= c.y && by < c.y + 2);
+    if (blocked || !attached || this.party.membersOf(p.id).some(id => { const v = this.players.get(id)!; return v.x + .3 > bx && v.x - .3 < bx + 1 && v.z + .3 > bz && v.z - .3 < bz + 1 && v.y + 1.8 > by && v.y < by + 1; }))
+      return reject();
+    this.edits.set(key, block);
+    return this.party.membersOf(p.id).map(id => ({ to: id, msg: { t: 'edit', x: bx, y: by, z: bz, block } }));
+  }
   private removeFromPartyQueue(id: number): boolean {
     const before = this.partyQueue.length;
-    this.partyQueue = this.partyQueue.filter((queuedId) => queuedId !== id);
-    return this.partyQueue.length !== before;
+    this.partyQueue = this.partyQueue.filter(v => v !== id);
+    this.partyQueueModes.delete(id);
+    return before !== this.partyQueue.length;
   }
-
-  private handlePartyLobby(
-    p: ServerPlayer, msg: Extract<ClientMsg, { t: `party${string}` }>,
-  ): Outbound[] {
+  private handlePartyLobby(p: ServerPlayer, msg: Extract<ClientMsg, {
+    t: `party${string}`;
+  }>): Outbound[] {
     const now = this.worldTime * 1000;
     switch (msg.t) {
       case 'partyCreate': {
         this.removeFromPartyQueue(p.id);
-        const result = this.party.create({ id: p.id, username: p.username, skin: p.skin }, now);
-        if ('reason' in result) return this.partyError(p.id, result.reason);
-        return [
-          { to: p.id, msg: { t: 'partyQueue', queued: false } },
-          ...this.partySnapshotOutbound(result.snapshot, { id: p.id, token: result.token }),
-        ];
+        const result = this.party.create({ id: p.id, username: p.username, skin: p.skin }, now, msg.mode === 'parkour' ? 'parkour' : 'bridge');
+        if ('reason' in result)
+          return this.partyError(p.id, result.reason);
+        return [{ to: p.id, msg: { t: 'partyQueue', queued: false } }, ...this.partySnapshotOutbound(result.snapshot, { id: p.id, token: result.token })];
       }
       case 'partyQueue': {
         if (!msg.join) {
           this.removeFromPartyQueue(p.id);
           return [{ to: p.id, msg: { t: 'partyQueue', queued: false } }];
         }
-        if (this.party.phaseFor(p.id)) return this.partyError(p.id, 'already_in_lobby');
-        if (!this.partyQueue.includes(p.id)) this.partyQueue.push(p.id);
-        const out: Outbound[] = [{ to: p.id, msg: { t: 'partyQueue', queued: true } }];
-        // An FFA needs three, so the queue pairs in threes rather than twos.
-        while (this.partyQueue.length >= PARTY_MIN_PLAYERS) {
-          const batch = this.partyQueue.splice(0, PARTY_MIN_PLAYERS)
-            .map((id) => this.players.get(id))
-            .filter((v): v is ServerPlayer => !!v);
-          if (batch.length < PARTY_MIN_PLAYERS) continue;
-          const [host, ...rest] = batch;
-          const made = this.party.create(
-            { id: host.id, username: host.username, skin: host.skin }, now);
-          if ('reason' in made) continue;
-          for (const other of rest) {
-            this.party.join(made.token,
-              { id: other.id, username: other.username, skin: other.skin }, now);
-          }
-          let snap: PartyLobbySnapshot | null = null;
-          for (const member of batch) {
-            out.push({ to: member.id, msg: { t: 'partyQueue', queued: false } });
-            snap = this.party.setReady(member.id, true, now) ?? snap;
-          }
-          if (snap) out.push(...this.partySnapshotOutbound(snap));
+        if (this.party.phaseFor(p.id) === 'lobby')
+          return [...this.handlePartyLobby(p, { t: 'partyLeave' }), ...this.handlePartyLobby(p, msg)];
+        if (this.party.phaseFor(p.id))
+          return this.partyError(p.id, 'already_in_lobby');
+        const mode: PartyMode = msg.mode === 'parkour' ? 'parkour' : 'bridge';
+        this.removeFromPartyQueue(p.id);
+        this.partyQueue = this.partyQueue.filter(id => this.players.has(id) && !this.party.phaseFor(id) && !this.duels.phaseFor(id) && !this.players.get(id)?.arenaSaved);
+        const opponentId = this.partyQueue.find(id => this.partyQueueModes.get(id) === mode);
+        if (opponentId === undefined) {
+          this.partyQueue.push(p.id);
+          this.partyQueueModes.set(p.id, mode);
+          return [{ to: p.id, msg: { t: 'partyQueue', queued: true } }];
         }
-        return out;
+        this.removeFromPartyQueue(opponentId);
+        const opponent = this.players.get(opponentId)!;
+        const made = this.party.create({ id: opponent.id, username: opponent.username, skin: opponent.skin }, now, mode);
+        if ('reason' in made)
+          return this.partyError(p.id, made.reason);
+        const joined = this.party.join(made.token, { id: p.id, username: p.username, skin: p.skin }, now);
+        if (!joined.ok) {
+          this.party.leave(opponent.id, now);
+          return this.partyError(p.id, joined.reason);
+        }
+        this.party.setReady(opponent.id, true, now);
+        this.party.setReady(p.id, true, now);
+        const started = this.party.start(opponent.id, now);
+        if (!started.ok)
+          return this.partyError(p.id, started.reason);
+        return [{ to: opponent.id, msg: { t: 'partyQueue', queued: false } }, { to: p.id, msg: { t: 'partyQueue', queued: false } }, ...this.launchParty(started.snapshot)];
       }
       case 'partyJoin': {
-        if (typeof msg.token !== 'string') return this.partyError(p.id, 'invalid');
         this.removeFromPartyQueue(p.id);
-        const result = this.party.join(msg.token,
-          { id: p.id, username: p.username, skin: p.skin }, now);
-        if (!result.ok) return this.partyError(p.id, result.reason);
-        return this.partySnapshotOutbound(result.snapshot);
+        const result = this.party.join(typeof msg.token === 'string' ? msg.token.slice(0, 128) : '', { id: p.id, username: p.username, skin: p.skin }, now);
+        return result.ok ? this.partySnapshotOutbound(result.snapshot, { id: p.id, token: msg.token }) : this.partyError(p.id, result.reason);
       }
       case 'partyLeave': {
-        if (this.removeFromPartyQueue(p.id) && !this.party.phaseFor(p.id)) {
-          return [{ to: p.id, msg: { t: 'partyQueue', queued: false } }];
+        this.removeFromPartyQueue(p.id);
+        this.partyMoves.delete(p.id);
+        this.partyCombat.delete(p.id);
+        this.partyArrows = this.partyArrows.filter(a => a.owner !== p.id);
+        const arena = this.party.arenaFor(p.id), result = this.party.leave(p.id, now);
+        const out: Outbound[] = [{ to: p.id, msg: { t: 'partyQueue', queued: false } }];
+        if (result.deleted && arena)
+          out.push(...this.resetPartyArenaEdits(arena));
+        if (p.arenaSaved) {
+          out.push(...this.restoreOpenWorldState(p), ...this.announceWorldScope([p.id]));
         }
-        const oldPhase = this.party.phaseFor(p.id);
-        const oldArena = this.party.arenaFor(p.id);
-        const result = this.party.leave(p.id, now);
-        const out = result.snapshot ? this.partySnapshotOutbound(result.snapshot) : [];
-        if (result.deleted && oldArena) out.push(...this.resetPartyArenaEdits(oldArena));
-        if (oldPhase && oldPhase !== 'lobby') {
-          out.push(...this.restoreOpenWorldState(p));
-          out.push(...this.announceWorldScope([p.id]));
-        }
-        if (result.snapshot?.phase === 'lobby') out.push(...this.restorePartyLobby(result.snapshot));
-        if (result.snapshot) out.push(...this.partyResultOutbound(result.snapshot));
+        if (result.snapshot)
+          out.push(...this.partySnapshotOutbound(result.snapshot), ...this.partyResultOutbound(result.snapshot));
         return out;
       }
       case 'partyReady': {
@@ -3219,136 +2841,52 @@ export class GameServer {
       }
       case 'partyStart': {
         const result = this.party.start(p.id, now);
-        if (!result.ok) return this.partyError(p.id, result.reason);
-        return this.launchParty(result.snapshot);
+        return result.ok ? this.launchParty(result.snapshot) : this.partyError(p.id, result.reason);
       }
       case 'partyArenaReady': {
-        const snap = this.party.markArenaReady(p.id, now);
+        const snap = this.party.markArenaReady(p.id, now, msg.revision);
         return snap ? this.partySnapshotOutbound(snap) : [];
       }
-      default:
-        return [];
+      default: return [];
     }
   }
-
-  /**
-   * Move everyone into the sub-arena of whatever round is now running.
-   *
-   * This is what makes the four permanently-stamped arenas work: nothing is
-   * ever re-stamped, players are TELEPORTED between fixed geometry and the
-   * client re-crops its render bounds to the new box.
-   */
-  private partyRoundTransition(snapshot: PartyLobbySnapshot): Outbound[] {
-    const out: Outbound[] = [];
-    if (snapshot.phase === 'intermission') {
-      const standings = snapshot.participants.map((v) => ({
-        id: v.id, username: v.username, points: v.points,
-      })).sort((a, b) => b.points - a.points);
-      for (const participant of snapshot.participants) {
-        out.push({ to: participant.id, msg: { t: 'partyIntermission',
-          endsAt: snapshot.intermissionEndsAt ?? 0, nextGame: snapshot.nextGame, standings } });
-      }
-      return out;
-    }
-    if (snapshot.phase !== 'running' || !snapshot.arena || !snapshot.round) return out;
-    const sub = partySubBounds(snapshot.arena.slot, snapshot.round.index);
-    const def = partyGame(snapshot.round.game);
-    // Wipe whatever the previous occupants of this sub-arena did to it. The
-    // sweep is idempotent, so running it on every entry is free and safe.
-    out.push(...this.resetPartySubEdits(sub, snapshot.participants.map((v) => v.id)));
-    const spawns = partySpawns(sub, snapshot.participants.length);
-    snapshot.participants.forEach((participant, i) => {
-      const player = this.players.get(participant.id);
-      if (!player) return;
-      const spawn = spawns[i];
-      player.x = spawn.x; player.y = spawn.y; player.z = spawn.z;
-      player.health = PARTY_MAX_HEALTH; player.dead = false;
-      player.partyEliminated = false;
-      player.arenaCombo = 0; player.arenaComboTarget = 0;
-      player.arenaLastSwingAt = -Infinity;
-      player.arenaTrack = []; this.recordArenaTrack(player);
-      out.push(this.partyLoadout(player, def.id));
-      out.push({ to: player.id, msg: { t: 'respawned',
-        x: spawn.x, y: spawn.y, z: spawn.z, health: PARTY_MAX_HEALTH } });
-      out.push({ to: player.id, msg: { t: 'partyRound', game: def.id, index: def.index,
-        title: def.title, rule: def.rule, sub, spawn: { ...spawn },
-        endsAt: snapshot.round!.endsAt } });
-    });
-    return out;
+  private partyRoundTransition(snap: PartyLobbySnapshot): Outbound[] {
+    return snap.phase === 'countdown' ? this.launchParty(snap) : [];
   }
-
-  /**
-   * One Party Games tick: phase transitions, round transitions, and Color
-   * Chaos's call cycle.
-   */
   tickParty(): Outbound[] {
-    const out: Outbound[] = [];
-    const nowMs = this.worldTime * 1000;
-    for (const snap of this.party.tick(nowMs)) {
-      out.push(...this.partySnapshotOutbound(snap));
-      if (snap.phase === 'lobby') out.push(...this.restorePartyLobby(snap));
-      if (snap.phase === 'results') this.partyCalls.delete(snap.id);
-      out.push(...this.partyRoundTransition(snap));
-      out.push(...this.partyResultOutbound(snap));
-    }
-    for (const snap of this.party.snapshots(nowMs)) {
-      if (snap.phase !== 'running' || !snap.round || !snap.arena) continue;
-      if (snap.round.game === 'colors') out.push(...this.tickColorChaos(snap, nowMs));
-    }
-    return out;
-  }
-
-  /**
-   * Color Chaos.
-   *
-   * A colour is called; COLORS_WARN_MS later every OTHER colour becomes Air for
-   * COLORS_VANISH_MS, then the floor returns. The restore is a SWEEP of the
-   * sub-arena footprint rather than an inverse of the vanish batch, so a
-   * dropped tick, an overlapping call or a mid-vanish disconnect can never
-   * leave a hole behind.
-   */
-  private tickColorChaos(snap: PartyLobbySnapshot, nowMs: number): Outbound[] {
-    if (!snap.arena || !snap.round) return [];
-    const sub = partySubBounds(snap.arena.slot, snap.round.index);
-    const ids = snap.participants.map((v) => v.id);
-    let state = this.partyCalls.get(snap.id);
-    if (!state) {
-      state = { call: 0, colour: 0, vanishAt: nowMs + colorsInterval(0), restoreAt: 0, phase: 'idle' };
-      this.partyCalls.set(snap.id, state);
-      return [];
-    }
-    const out: Outbound[] = [];
-    if (state.phase === 'idle' && nowMs >= state.vanishAt - COLORS_WARN_MS) {
-      state.phase = 'called';
-      state.colour = Math.floor(this.rng() * COLORS_PALETTE.length) % COLORS_PALETTE.length;
-      state.restoreAt = state.vanishAt + COLORS_VANISH_MS;
-      for (const id of ids) {
-        out.push({ to: id, msg: { t: 'partyCall', colour: state.colour,
-          vanishAt: state.vanishAt, restoreAt: state.restoreAt } });
-      }
-      return out;
-    }
-    if (state.phase === 'called' && nowMs >= state.vanishAt) {
-      state.phase = 'vanished';
-      const edits: { x: number; y: number; z: number; block: number }[] = [];
-      for (let lx = 0; lx < PARTY_SUB_SIZE; lx++) {
-        for (let lz = 0; lz < PARTY_SUB_SIZE; lz++) {
-          const colour = colorsColorAt(lx, lz);
-          if (colour < 0 || colour === state.colour) continue;
-          const x = sub.minX + lx, z = sub.minZ + lz;
-          this.edits.set(`${x},${PARTY_FLOOR_Y},${z}`, Block.Air);
-          edits.push({ x, y: PARTY_FLOOR_Y, z, block: Block.Air });
+    const now = this.worldTime * 1000, out: Outbound[] = [];
+    // Arrows are the only thing in either venue that moves on its own, so this
+    // is the only place the party layer needs a real dt.
+    const dt = this.partyArrowClock > 0 ? Math.min(.25, Math.max(0, this.worldTime - this.partyArrowClock)) : 0;
+    this.partyArrowClock = this.worldTime;
+    if (dt > 0) out.push(...this.tickPartyArrows(dt));
+    // Resolve all hazards together on the server, even when a tab stops sending movement.
+    for (const snap of this.party.snapshots(now))
+      if (snap.phase === 'running')
+        for (const member of snap.participants) {
+          const p = this.players.get(member.id);
+          if (p && member.connected)
+            out.push(...this.evaluatePartyPlayer(p));
         }
-      }
-      for (const id of ids) out.push({ to: id, msg: { t: 'editBatch', edits } });
-      return out;
+    for (const snap of this.party.tick(now)) {
+      out.push(...this.partySnapshotOutbound(snap));
+      if (snap.phase === 'lobby')
+        out.push(...this.restorePartyLobby(snap));
+      if (snap.phase === 'running')
+        for (const p of snap.participants) {
+          const move = this.partyMoves.get(p.id);
+          if (move) {
+            move.groundedAt = this.worldTime;
+            move.at = this.worldTime;
+          }
+        }
+      out.push(...this.partyRoundTransition(snap), ...this.partyResultOutbound(snap));
     }
-    if (state.phase === 'vanished' && nowMs >= state.restoreAt) {
-      state.phase = 'idle';
-      state.call++;
-      state.vanishAt = nowMs + colorsInterval(state.call);
-      // The sweep, not an inverse batch. This is the whole safety property.
-      out.push(...this.resetPartySubEdits(sub, ids));
+    if (this.worldTime >= this.partyClockNextAt) {
+      this.partyClockNextAt = this.worldTime + .5;
+      for (const snap of this.party.snapshots(now))
+        if (snap.phase !== 'lobby')
+          out.push(...this.partySnapshotOutbound(snap));
     }
     return out;
   }
@@ -3361,7 +2899,7 @@ export class GameServer {
       if (snap.phase === 'lobby') out.push(...this.restoreDuelLobby(snap));
       if (snap.phase === 'running' || snap.phase === 'sudden_death') {
         const arena = snap.arena;
-        for (const participant of snap.participants) {
+        for (const participant of snap.participants.filter(p=>p.connected)) {
           const p = this.players.get(participant.id);
           if (!p || !arena) continue;
           if (snap.phase === 'sudden_death' && participant.spectating) {
@@ -3394,7 +2932,7 @@ export class GameServer {
         const endsAt = snap.phase === 'countdown'
           ? (snap.countdownEndsAt ?? nowMs)
           : (snap.endsAt ?? nowMs);
-        for (const p of snap.participants) out.push({ to: p.id, msg: {
+        for (const p of snap.participants.filter(p=>p.connected)) out.push({ to: p.id, msg: {
           t: 'duelClock', serverNow: nowMs, endsAt, suddenDeath: snap.phase === 'sudden_death',
         } });
       }

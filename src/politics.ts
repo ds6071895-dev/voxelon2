@@ -24,6 +24,21 @@ import { KIT_SLOTS, type KitLoadout, newKit, sanitizeKit } from './treasury';
 /** One term. Elections are weekly — short enough that a bad president is a
  *  week-long problem, long enough that governing means something. */
 export const TERM_MS = 7 * 24 * 3600 * 1000;
+/**
+ * The SINGLE-PLAYER term.
+ *
+ * Offline the electorate is one person, so a week of waiting cannot change the
+ * result — but the old shortcut, seating the winner the instant the vote was
+ * cast, could not be shown honestly: the ballot was still open, the clock was
+ * still running, and the player was already president. Nothing on screen said
+ * a count had happened, because on the screen's own terms none had.
+ *
+ * So offline runs the SAME rules on a shorter clock rather than on no clock.
+ * You stand, you vote, the countdown means what it says, and when it runs out
+ * the count comes in and the winner takes office — the sequence the online game
+ * plays out over a week, in a minute and a half.
+ */
+export const OFFLINE_TERM_MS = 90 * 1000;
 /** Tax ceiling. A president cannot confiscate a faction's whole economy: at 15%
  *  a citizen always keeps the large majority of what they mine. */
 export const MAX_TAX = 0.15;
@@ -114,9 +129,11 @@ export interface PoliticsState {
 
 export interface GovResult { ok: boolean; error?: string; }
 
-export function newElection(faction: number, now: number): Election {
+export function newElection(
+  faction: number, now: number, termMs: number = TERM_MS
+): Election {
   return {
-    faction, cycle: 1, endsAt: now + TERM_MS, parties: [], votes: {},
+    faction, cycle: 1, endsAt: now + termMs, parties: [], votes: {},
     president: null, presidentPartyId: null,
   };
 }
@@ -125,11 +142,11 @@ export function newGovernment(faction: number): Government {
   return { faction, taxRate: DEFAULT_TAX, kitStock: 0, kit: newKit(), broadcasts: [] };
 }
 
-export function newPolitics(now: number): PoliticsState {
+export function newPolitics(now: number, termMs: number = TERM_MS): PoliticsState {
   const elections: Record<number, Election> = {};
   const governments: Record<number, Government> = {};
   for (const f of FACTIONS) {
-    elections[f.id] = newElection(f.id, now);
+    elections[f.id] = newElection(f.id, now, termMs);
     governments[f.id] = newGovernment(f.id);
   }
   return { elections, governments, serial: 1 };
@@ -321,10 +338,12 @@ export function tallyElection(e: Election): { president: string | null; party: P
 }
 
 /** Open the next cycle: ballots cleared, parties kept, clock reset. */
-export function rollCycle(e: Election, now: number): void {
+export function rollCycle(
+  e: Election, now: number, termMs: number = TERM_MS
+): void {
   e.cycle = Math.max(1, e.cycle) + 1;
   e.votes = {};
-  e.endsAt = now + TERM_MS;
+  e.endsAt = now + termMs;
 }
 
 /** Has this cycle's clock run out? */
@@ -388,8 +407,10 @@ function sanitizeParty(raw: unknown, faction: number): Party | null {
   };
 }
 
-function sanitizeElection(raw: unknown, faction: number, now: number): Election {
-  const fresh = newElection(faction, now);
+function sanitizeElection(
+  raw: unknown, faction: number, now: number, termMs: number
+): Election {
+  const fresh = newElection(faction, now, termMs);
   if (!raw || typeof raw !== 'object') return fresh;
   const r = raw as Record<string, unknown>;
   const parties: Party[] = [];
@@ -414,9 +435,12 @@ function sanitizeElection(raw: unknown, faction: number, now: number): Election 
     faction,
     cycle: Number.isFinite(r.cycle) ? Math.max(1, Math.floor(r.cycle as number)) : 1,
     // A saved deadline in the past is fine: the next tick tallies it. A deadline
-    // absurdly far in the future is not, so it is clamped to one full term.
+    // absurdly far in the future is not, so it is clamped to one full term —
+    // which is also what pulls a blob written under the OTHER term length (a
+    // single-player save from before offline elections ran on a clock) back
+    // onto a deadline this session can actually reach.
     endsAt: Number.isFinite(r.endsAt)
-      ? Math.min(r.endsAt as number, now + TERM_MS) : now + TERM_MS,
+      ? Math.min(r.endsAt as number, now + termMs) : now + termMs,
     parties, votes, president, presidentPartyId,
   };
 }
@@ -454,15 +478,17 @@ function sanitizeGovernment(raw: unknown, faction: number): Government {
 
 /** Fail-closed load of a persisted/wire politics blob. Every faction always
  *  comes back present, so no caller has to handle a missing government. */
-export function sanitizePolitics(raw: unknown, now: number): PoliticsState {
-  const state = newPolitics(now);
+export function sanitizePolitics(
+  raw: unknown, now: number, termMs: number = TERM_MS
+): PoliticsState {
+  const state = newPolitics(now, termMs);
   if (!raw || typeof raw !== 'object') return state;
   const r = raw as Record<string, unknown>;
   const elections = (r.elections ?? {}) as Record<string, unknown>;
   const governments = (r.governments ?? {}) as Record<string, unknown>;
   let serial = Number.isFinite(r.serial) ? Math.max(1, Math.floor(r.serial as number)) : 1;
   for (const f of FACTIONS) {
-    state.elections[f.id] = sanitizeElection(elections[f.id], f.id, now);
+    state.elections[f.id] = sanitizeElection(elections[f.id], f.id, now, termMs);
     state.governments[f.id] = sanitizeGovernment(governments[f.id], f.id);
     // Never hand out an id a restored party already owns.
     for (const p of state.elections[f.id].parties) {

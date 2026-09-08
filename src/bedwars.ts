@@ -356,6 +356,7 @@ export function bedwarsSolidAt(x: number, y: number, z: number, arena: BwArenaBo
 export function hasBedwarsLineOfSight(
   a: BwVec3, b: BwVec3, arena: BwArenaBounds,
   isSolidExtra?: (x: number, y: number, z: number) => boolean,
+  ignoreCell?: (x: number, y: number, z: number) => boolean,
 ): boolean {
   const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
   const distance = Math.hypot(dx, dy, dz);
@@ -363,6 +364,7 @@ export function hasBedwarsLineOfSight(
   for (let i = 1; i < steps; i++) {
     const t = i / steps;
     const px = a.x + dx * t, py = a.y + dy * t, pz = a.z + dz * t;
+    if (ignoreCell?.(px, py, pz)) continue;
     if (bedwarsSolidAt(px, py, pz, arena) || isSolidExtra?.(px, py, pz)) return false;
   }
   return true;
@@ -536,7 +538,7 @@ export const BW_AXE_TIERS = [
 export type BwAxeTier = typeof BW_AXE_TIERS[number];
 
 /** The structural shape `bedwarsSwing` actually needs. Widened past the axe
- *  union so another mode can supply its own entry — Party Games' Knockback
+ *  union so another mode can supply its own entry — the Knockback
  *  Stick is exactly this and nothing more. */
 export interface BwSwingTier {
   readonly item: number;
@@ -747,6 +749,62 @@ export interface BwLobbySnapshot {
   /** Always false. Bedwars is unranked; the client reads this rather than
    *  hard-coding the assumption. */
   ranked: false;
+  /** Collectible stacks at each generator, scoped to this match. */
+  generators?: BwGeneratorStock[];
+}
+
+export interface BwGeneratorStock extends BwVec3 {
+  iron: number;
+  gold: number;
+  diamond: number;
+}
+
+/** Shared generator piles: production continues while bases are unattended,
+ * but only a living player in pickup range can take the actual stock. */
+export class BedwarsForge {
+  readonly stock: BwGeneratorStock[];
+  private ironAt: number;
+  private goldAt: number;
+  private diamondAt: number;
+
+  constructor(arena: BwArenaBounds, startedAt: number) {
+    this.stock = bedwarsGenCells(arena).map((g) => ({
+      x: g.x, y: g.y + 1.5, z: g.z, iron: 0, gold: 0, diamond: 0,
+    }));
+    this.ironAt = startedAt + BW_GEN_IRON_MS;
+    this.goldAt = startedAt + BW_GEN_GOLD_MS;
+    this.diamondAt = startedAt + bedwarsDiamondPeriod(0);
+  }
+
+  tick(arena: BwArenaBounds, now: number, elapsed: number): void {
+    const periods = [BW_GEN_IRON_MS, BW_GEN_GOLD_MS, bedwarsDiamondPeriod(elapsed)];
+    const next = [this.ironAt, this.goldAt, this.diamondAt];
+    const produced = next.map((at, i) => now < at ? 0 : Math.floor((now - at) / periods[i]) + 1);
+    [this.ironAt, this.goldAt, this.diamondAt] = next.map((at, i) => at + produced[i] * periods[i]);
+    bedwarsGenCells(arena).forEach((g, i) => {
+      const pile = this.stock[i];
+      if (g.diamond) pile.diamond = Math.min(BW_CAP_DIAMOND, pile.diamond + produced[2]);
+      else {
+        pile.iron = Math.min(BW_CAP_IRON, pile.iron + produced[0]);
+        pile.gold = Math.min(BW_CAP_GOLD, pile.gold + produced[1]);
+      }
+    });
+  }
+
+  collect(pos: BwVec3, have: BwResources): BwResources {
+    const collected: BwResources = { iron: 0, gold: 0, diamond: 0 };
+    const caps: BwResources = { iron: BW_CAP_IRON, gold: BW_CAP_GOLD, diamond: BW_CAP_DIAMOND };
+    for (const pile of this.stock) {
+      if (Math.hypot(pos.x - pile.x, pos.z - pile.z) > BW_PICKUP_RADIUS ||
+          Math.abs(pos.y + 1 - pile.y) > BW_PICKUP_RADIUS) continue;
+      for (const kind of ['iron', 'gold', 'diamond'] as const) {
+        const count = Math.min(pile[kind], Math.max(0, caps[kind] - have[kind] - collected[kind]));
+        pile[kind] -= count;
+        collected[kind] += count;
+      }
+    }
+    return collected;
+  }
 }
 
 interface BwLobby {
