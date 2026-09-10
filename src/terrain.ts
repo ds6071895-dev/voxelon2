@@ -10,9 +10,10 @@ import { Noise2D, Noise3D, hash2, mulberry32 } from './noise';
 import {
   PLAZA_BLEND, PLAZA_EDGE, PLAZA_FLAT, PLAZA_FOUNDATION, plazaAt, plazaSurface,
 } from './plaza';
-import { structureStamp } from './structures';
+import { structureSite, structureStamp, StructureStamp } from './structures';
+import { Caves } from './caves';
 import { VAULT_REACH, VaultStamp, vaultStamp } from './vaults';
-import { ARENA_BAND_MIN_X, arenaBandForX } from './arena';
+import { ARENA_BAND_MIN_X, ARENA_VOID_MIN_X, arenaBandForX } from './arena';
 
 export const SEA_LEVEL = 63;
 // Redwoods reach ~26 blocks over their stump, so the tree margin has to cover
@@ -78,6 +79,8 @@ export class Terrain {
   private readonly caves1: Noise3D;
   private readonly caves2: Noise3D;
   private readonly caverns: Noise3D;
+  readonly caveLandscape: Caves;
+  private readonly structureStampCache = new Map<string, StructureStamp | null>();
   private readonly oreField: Noise2D;
   private readonly oilField: Noise2D;
   /** Vault stamps cached per anchor chunk (see vaultStampCached). */
@@ -103,6 +106,7 @@ export class Terrain {
     this.caves1 = new Noise3D(seed ^ 0xcafe);
     this.caves2 = new Noise3D(seed ^ 0xbeef);
     this.caverns = new Noise3D(seed ^ 0x0caf);
+    this.caveLandscape = new Caves(seed, this);
     this.oreField = new Noise2D(seed ^ 0x0fe0);
     this.oilField = new Noise2D(seed ^ 0x011a);
   }
@@ -432,6 +436,7 @@ export class Terrain {
 
     const r = hash2(this.seed ^ 0x7ee5, x, z);
     if (r > p) return null;
+    if (this.caveEntranceAt(x, z)) return null;
     // keep trees from spawning adjacent to each other
     for (let dx = -2; dx <= 2; dx++) {
       for (let dz = -2; dz <= 2; dz++) {
@@ -460,8 +465,14 @@ export class Terrain {
     // bypassing all open-world 3D cave noise, biome calculation, ores, and
     // structure searches. Which mode owns this band is arena.ts's business; the
     // per-band y range keeps the sky-island modes cheaper than Duels.
-    const band = ox >= ARENA_BAND_MIN_X ? arenaBandForX(ox) : null;
-    if (band) {
+    if (ox >= ARENA_VOID_MIN_X) {
+      // Past the border there is arena geometry or there is NOTHING. Falling
+      // through to the open-world generator here used to grow real hills,
+      // caves and ore in the gaps between arenas — world terrain a competitor
+      // could see over an arena wall, in a place the world is not supposed to
+      // reach. An unclaimed column beyond the border is now honest air.
+      const band = ox >= ARENA_BAND_MIN_X ? arenaBandForX(ox) : null;
+      if (!band) return;
       for (let lx = 0; lx < CHUNK_X; lx++) {
         for (let lz = 0; lz < CHUNK_Z; lz++) {
           const wx = ox + lx, wz = oz + lz;
@@ -533,6 +544,7 @@ export class Terrain {
         const plaza = plazaAt(wx, wz);
         const paving = plaza && plaza.d <= PLAZA_FLAT
           ? plazaSurface(this.seed, wx, wz, plaza.d) : 0;
+        const caveSlices = this.caveLandscape.column(wx, wz);
 
         for (let y = 0; y <= h; y++) {
           let id: number;
@@ -578,18 +590,22 @@ export class Terrain {
 
           if (id !== Block.Bedrock && y >= ravineFloor) continue; // ravine
 
+          if (y > 4 && caveSlices.some(s => y > s.floor && y <= s.ceiling)) continue;
+
           // Nothing hollows out the ground under a monument: a cave mouth in
           // the plaza floor would put the treasury over a hole.
-          if (id !== Block.Bedrock && y > 4 && y < h - 3 &&
+          if (id !== Block.Bedrock && y > 4 && y < h - 5 &&
+              !caveSlices.some(s => y >= s.floor - 3 && y <= s.ceiling + 3) &&
               !(paving !== 0 && y > h - PLAZA_FOUNDATION - 4)) {
             // Layered caves: two connected worm-tunnel networks (union, so they
             // join up) PLUS occasional large CAVERNS — a low-freq 3D blob in a
             // deep band — so spelunking actually opens into rooms.
             const t1 = this.caves1.noise(wx * 0.022, y * 0.05, wz * 0.022);
             const t2 = this.caves2.noise(wx * 0.022 + 30, y * 0.05 - 30, wz * 0.022 + 30);
-            if (Math.abs(t1) < 0.026 || Math.abs(t2) < 0.026) continue; // tunnels
-            if (y > 8 && y < 40 &&
-                this.caverns.noise(wx * 0.016, y * 0.03, wz * 0.016) > 0.66) continue; // caverns
+            if (Math.abs(t1) < 0.044 || Math.abs(t2) < 0.044) continue; // connecting galleries
+            const depthFade = Math.min(1, (y - 7) / 12, (h - y - 5) / 16);
+            if (y > 8 && depthFade > 0 &&
+                this.caverns.noise(wx * 0.012, y * 0.023, wz * 0.012) > 0.56 + (1 - depthFade) * 0.35) continue;
           }
 
           chunk.set(lx, y, lz, id);
@@ -600,14 +616,22 @@ export class Terrain {
           chunk.set(lx, y, lz, Block.Water);
         }
 
+        this.caveLandscape.decorate(wx, wz, caveSlices,
+          y => chunk.get(lx, y, lz), (y, id) => chunk.set(lx, y, lz, id));
+
         this.decorate(chunk, lx, lz, wx, wz, h, biome);
         this.oilSeep(chunk, lx, lz, wx, wz, h, biome);
       }
     }
 
     this.placeOres(chunk);
+    this.placeCaveOres(chunk);
     this.plantTrees(chunk, ox, oz);
     this.placeStructures(chunk, ox, oz);
+  }
+
+  caveEntranceAt(x: number, z: number): boolean {
+    return this.caveLandscape.entranceAt(x, z);
   }
 
   /** Stamp any structures whose anchor chunk is this one or a neighbour
@@ -625,7 +649,13 @@ export class Terrain {
     };
     for (let dx = -1; dx <= 1; dx++) {
       for (let dz = -1; dz <= 1; dz++) {
-        const st = structureStamp(this.seed, chunk.cx + dx, chunk.cz + dz, this);
+        const key = `${chunk.cx + dx},${chunk.cz + dz}`;
+        let st = this.structureStampCache.get(key);
+        if (st === undefined) {
+          st = structureStamp(this.seed, chunk.cx + dx, chunk.cz + dz, this);
+          if (this.structureStampCache.size >= 256) this.structureStampCache.clear();
+          this.structureStampCache.set(key, st);
+        }
         if (st) apply(st.blocks);
       }
     }
@@ -841,6 +871,60 @@ export class Terrain {
     }
   }
 
+  /** One exposed vein per occupied 8×8×16 cave region. Sampling actual rock
+   * faces avoids wasting veins in air, and stratification prevents long barren
+   * stretches. Deep ores keep their depth limits and relative rarity. */
+  private placeCaveOres(chunk: Chunk): void {
+    const ox = chunk.cx * CHUNK_X, oz = chunk.cz * CHUNK_Z;
+    const rock = (id: number) => id === Block.Stone || id === Block.Sandstone;
+    const faces = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+    const heights = new Int16Array(256);
+    for (let x = 0; x < 16; x++) for (let z = 0; z < 16; z++) {
+      heights[x * 16 + z] = this.height(ox + x, oz + z) - 5;
+    }
+    for (let sx = 0; sx < 16; sx += 8) for (let sz = 0; sz < 16; sz += 8) {
+      for (let sy = 4; sy < Math.min(240, chunk.maxY); sy += 16) {
+        let best = Infinity;
+        let seed: number[] | null = null;
+        for (let x = sx; x < sx + 8; x++) for (let z = sz; z < sz + 8; z++) {
+          for (let y = sy; y < Math.min(sy + 16, heights[x * 16 + z]); y++) {
+            if (!rock(chunk.get(x, y, z))) continue;
+            // Neighbour chunks need not exist yet. Only inspect real cells;
+            // out-of-chunk reads must never masquerade as cave air.
+            if (!faces.some(([dx, dy, dz]) => x + dx >= 0 && x + dx < 16 &&
+              z + dz >= 0 && z + dz < 16 && chunk.get(x + dx, y + dy, z + dz) === Block.Air)) continue;
+            const score = hash2(this.seed ^ 0xc0a7, (ox + x) * 256 + y, oz + z);
+            if (score < best) { best = score; seed = [x, y, z]; }
+          }
+        }
+        if (!seed) continue;
+        const rng = mulberry32((hash2(this.seed ^ 0x0ae5, (ox + sx) * 256 + sy, oz + sz) * 0x100000000) >>> 0);
+        // Coal continues through high mountain caves; precious ores stay deep.
+        const eligible = ORES.filter(([id, , min, max]) => seed![1] >= min &&
+          (id === Block.CoalOre || seed![1] <= max));
+        if (!eligible.length) continue;
+        let roll = rng() * eligible.reduce((sum, spec) => sum + spec[1], 0);
+        const spec = eligible.find(s => (roll -= s[1]) < 0) ?? eligible[0];
+        const [id, , minY, maxY] = spec;
+        const pending = [seed];
+        const visited = new Set<number>();
+        const size = 3 + Math.floor(rng() * 4);
+        let placed = 0;
+        while (pending.length && placed < size) {
+          const [x, y, z] = pending.splice(Math.floor(rng() * pending.length), 1)[0];
+          if (x < sx || x >= sx + 8 || z < sz || z >= sz + 8 || y < sy || y >= sy + 16 ||
+              y < minY || (id !== Block.CoalOre && y > maxY) || y >= heights[x * 16 + z]) continue;
+          const key = x * 4096 + z * 256 + y;
+          if (visited.has(key)) continue;
+          visited.add(key);
+          if (!rock(chunk.get(x, y, z))) continue;
+          chunk.set(x, y, z, id); placed++;
+          for (const [dx, dy, dz] of faces) pending.push([x + dx, y + dy, z + dz]);
+        }
+      }
+    }
+  }
+
   private plantTrees(chunk: Chunk, ox: number, oz: number): void {
     const stamp = (wx: number, y: number, wz: number, id: number, keepSolid = false) => {
       const lx = wx - ox, lz = wz - oz;
@@ -1006,6 +1090,12 @@ export class Terrain {
     const h = this.height(x, z);
     if (h < SEA_LEVEL + 3) return false;            // would be at/near water
     if (this.ravineDepth(x, z) > 0) return false;   // surface carved -> air/fall
+    if (this.caveEntranceAt(x, z)) return false;
+    const cx = Math.floor(x / 16), cz = Math.floor(z / 16);
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+      const site = structureSite(this.seed, cx + dx, cz + dz, this);
+      if (site && Math.abs(x - site.x) <= 15 && Math.abs(z - site.z) <= 15) return false;
+    }
     const biome = this.biomeWithWater(x, z, h);
     if (biome === Biome.Ocean || biome === Biome.Beach || biome === Biome.Ashlands) return false;
     // A canopy overhead leaves no headroom, which the server's respawn-safety

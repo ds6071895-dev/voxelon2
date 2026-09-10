@@ -2,7 +2,7 @@ import type { VaultFamily } from './vaults';
 
 export type BossMusicPhase = 1 | 2 | 3;
 export type BossMusicCue = 'summon' | 'poise' | 'phase' | 'enrage' | 'victory' | 'reset'
-  | 'door' | 'movement' | 'army' | 'healing' | 'interrupt' | 'combo';
+  | 'door' | 'movement' | 'army' | 'healing' | 'interrupt' | 'combo' | 'engage';
 
 type Degree = number | null;
 type Timbre = 'choir' | 'reed' | 'brass' | 'glass' | 'clock' | 'bass'
@@ -193,6 +193,7 @@ export class BossMusicEngine {
   private readonly delayFeedback: GainNode;
   private readonly delayReturn: GainNode;
   private readonly compressor: DynamicsCompressorNode;
+  private readonly peakGuard: WaveShaperNode;
   private readonly noiseBuffer: AudioBuffer;
   private readonly sources = new Set<AudioScheduledSourceNode>();
 
@@ -211,6 +212,7 @@ export class BossMusicEngine {
   private arcFrom = 0;
   private readonly lastCueAt: Partial<Record<BossMusicCue, number>> = {};
   private victoryEnding = false;
+  private engaged = false;
 
   constructor(
     private readonly ctx: AudioContext,
@@ -245,12 +247,22 @@ export class BossMusicEngine {
     this.compressor.release.value = 0.28;
     this.makeup = ctx.createGain();
     this.makeup.gain.value = MUSIC_MAKEUP_GAIN;
+    // Catch the brief glass/impact transients after makeup gain. Leave the
+    // quiet passages linear and reserve headroom for oversampling reconstruction.
+    this.peakGuard = ctx.createWaveShaper();
+    const curve = new Float32Array(4097);
+    for (let i = 0; i < curve.length; i++) {
+      const x = i / (curve.length - 1) * 2 - 1, a = Math.abs(x);
+      curve[i] = Math.sign(x) * (a <= 0.45 ? a : 0.45 + 0.19 * Math.tanh((a - 0.45) / 0.19));
+    }
+    this.peakGuard.curve = curve;
+    this.peakGuard.oversample = '2x';
 
     this.dryGain.connect(this.scoreGain);
     this.reverb.connect(this.reverbReturn).connect(this.scoreGain);
     this.delay.connect(this.delayReturn).connect(this.scoreGain);
     this.delay.connect(this.delayFeedback).connect(this.delay);
-    this.scoreGain.connect(this.compressor).connect(this.makeup).connect(destination);
+    this.scoreGain.connect(this.compressor).connect(this.makeup).connect(this.peakGuard).connect(destination);
 
     this.noiseBuffer = this.createNoiseBuffer(2);
   }
@@ -262,6 +274,7 @@ export class BossMusicEngine {
     this.phase = phase;
     this.lowHealth = false;
     this.victoryEnding = false;
+    this.engaged = false;
     for (const key of Object.keys(this.lastCueAt) as BossMusicCue[]) delete this.lastCueAt[key];
     this.running = true;
     this.absoluteStep = 0;
@@ -302,6 +315,10 @@ export class BossMusicEngine {
       return;
     }
     if (!this.running) return;
+    if (kind === 'engage') {
+      if (this.engaged || this.victoryEnding) return;
+      this.engaged = true;
+    }
 
     const musicalKind: BossMusicCue = kind === 'army' ? 'summon'
       : kind === 'door' || kind === 'combo' ? 'phase'
@@ -319,7 +336,18 @@ export class BossMusicEngine {
     const now = cueTime + 0.025;
     const root = midiToHz(profile.rootMidi + 12);
 
-    if (musicalKind === 'summon') {
+    if (musicalKind === 'engage') {
+      // The camera hands control back: land the battle downbeat immediately,
+      // then hand the horn call to the continuing, uninterrupted score.
+      this.impactHit(now, 0.19);
+      for (const [i, degree] of [0, 4, 2, 7].entries()) {
+        this.playTimbre('horn', midiToHz(degreeToMidi(profile, degree, 0)), {
+          at: now + i * 0.21, duration: i === 3 ? 1.4 : 0.42,
+          gain: 0.055, attack: 0.018, release: 0.16, wet: 0.5,
+          pan: i % 2 ? 0.2 : -0.2, cutoff: 2400,
+        });
+      }
+    } else if (musicalKind === 'summon') {
       this.lowBoom(now, 0.2, 1.2);
       this.playTimbre(this.family === 'crystal' ? 'glass' : 'choir', root, {
         at: now + 0.04, duration: 0.7, gain: 0.11, wet: 0.65,
@@ -409,7 +437,7 @@ export class BossMusicEngine {
   }
 
   private schedule(): void {
-    if (!this.running || this.ctx.state !== 'running') return;
+    if (!this.running || this.victoryEnding || this.ctx.state !== 'running') return;
     const profile = BOSS_SCORE_PROFILES[this.family];
     const stepSeconds = 60 / profile.bpm / 4;
     if (this.nextStepAt < this.ctx.currentTime - stepSeconds) {
@@ -440,7 +468,9 @@ export class BossMusicEngine {
     this.currentSection = Math.floor(bar / SECTION_BARS);
     this.currentSectionBar = bar % SECTION_BARS;
 
-    const shape = ARRANGEMENT[this.currentSection];
+    const baseShape = ARRANGEMENT[this.currentSection];
+    const shape = this.engaged && this.currentSection === 0
+      ? { ...baseShape, energy: 0.86, rhythm: 0.9, breakdown: false } : baseShape;
     const phase = this.phase;
     const phaseEnergy = phase === 1 ? 0.78 : phase === 2 ? 0.98 : 1.13;
     const healthEnergy = this.lowHealth ? 1.10 : 1;
@@ -476,6 +506,7 @@ export class BossMusicEngine {
 
     this.epicPercussion(shape, at, step, stepSeconds, intensity);
     this.scheduleLongFormLayers(profile, shape, at, step, stepSeconds, motifDegree, intensity);
+    this.battleStrings(profile, shape, at, step, stepSeconds, intensity);
     if (step === 0) this.applyDynamicArc(at);
 
     if (this.lowHealth) {
@@ -487,6 +518,35 @@ export class BossMusicEngine {
           gain: 0.030, pan: step % 4 ? 0.32 : -0.32, wet: profile.reverb,
         });
       }
+    }
+  }
+
+  /** Bowed eighth notes make the first combat minute feel like a battle.
+   * The family harmony and accents remain distinct; later phases add octave
+   * answers, while breakdowns leave space for choir and the signature voice. */
+  private battleStrings(
+    profile: BossScoreProfile, shape: ArrangementShape, at: number,
+    step: number, stepSeconds: number, intensity: number,
+  ): void {
+    if (!this.engaged && this.currentBar < 4 && this.phase === 1) return;
+    const sparse = shape.breakdown && this.phase === 1;
+    if (step % (sparse ? 4 : 2) !== 0) return;
+    const chord = profile.chords[HARMONY_PATHS[this.family][
+      Math.floor(this.currentBar / 2) % HARMONY_PATHS[this.family].length]];
+    const pattern = this.family === 'mire' ? [0,2,1,2,0,1,2,1]
+      : this.family === 'gilded' ? [0,1,2,0,2,1,0,2] : [0,2,1,2,0,2,1,2];
+    const degree = chord[pattern[step / 2] % chord.length];
+    const accent = step % 8 === 0 ? 1.35 : step % 4 === 0 ? 1 : 0.75;
+    this.playTimbre('strings', midiToHz(degreeToMidi(profile,degree,1)), {
+      at, duration: stepSeconds * 1.65, gain: 0.018 * intensity * accent,
+      attack: 0.009, release: 0.07, pan: step % 4 ? -0.38 : 0.38,
+      wet: 0.23, cutoff: 1900 + this.phase * 450,
+    });
+    if (this.phase === 3 && step % 8 === 4) {
+      this.playTimbre('horn', midiToHz(degreeToMidi(profile,degree,0)), {
+        at, duration: stepSeconds * 3.6, gain: 0.027 * intensity,
+        attack: 0.025, release: 0.18, pan: -0.15, wet: 0.4, cutoff: 2400,
+      });
     }
   }
 
@@ -611,8 +671,8 @@ export class BossMusicEngine {
     // The hero line: one long, soaring horn note per two bars in the widest
     // sections. It is the melody you remember after the fight, and it only
     // exists where the arrangement can carry it — never in a breakdown.
-    if (step === 0 && shape.energy >= 0.94 && !shape.breakdown &&
-        this.phase >= 2 && (this.currentSectionBar & 1) === 0) {
+    if (step === 0 && (shape.energy >= 0.78 || this.phase >= 2) &&
+        (!shape.breakdown || this.phase === 3) && (this.currentSectionBar & 1) === 0) {
       const anchor = profile.chords[
         HARMONY_PATHS[this.family][Math.floor(this.currentBar / 2) %
           HARMONY_PATHS[this.family].length] % profile.chords.length];
@@ -944,7 +1004,7 @@ export class BossMusicEngine {
         ? [['sawtooth', 1, -13, 0.4], ['sawtooth', 1, 12, 0.4], ['sawtooth', 1, -4, 0.3],
            ['sawtooth', 2, 6, 0.16], ['triangle', 0.5, 0, 0.22]]
         : timbre === 'horn'
-          ? [['sawtooth', 1, -7, 0.5], ['sawtooth', 1, 7, 0.5], ['sawtooth', 1.5, 3, 0.24],
+          ? [['sawtooth', 1, -7, 0.5], ['sawtooth', 1, 7, 0.5], ['sawtooth', 3, 3, 0.12],
              ['triangle', 2, -3, 0.14], ['sine', 0.5, 0, 0.26]]
           : timbre === 'reed'
             ? [['sawtooth', 1, -4, 0.58], ['triangle', 1, 5, 0.42], ['sine', 2, 0, 0.12]]

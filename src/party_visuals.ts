@@ -2,9 +2,11 @@ import * as THREE from 'three';
 import { ParkourScenery } from './parkour_scenery';
 import {
   BRIDGE_ARROW_GRAVITY, BRIDGE_ARROW_LIFE_MS, BRIDGE_GOALS, PARTY_FLOOR_Y,
-  parkourCourse, type PartyLobbySnapshot,
+  bridgeSpawn, parkourCourse, type PartyLobbySnapshot,
 } from './partygames';
 
+/** The unit torus (tube included) is scaled by the marker radius. */
+const RING_TUBE = .08;
 /** One arrow being drawn. The server owns whether it hit anything; this is the
  *  same launch integrated with the same gravity, purely so the shot is a thing
  *  you can watch, lead and duck. */
@@ -23,7 +25,7 @@ export class PartyVisuals {
   private readonly boxes: THREE.Mesh[] = [];
   private readonly rings: THREE.Mesh[] = [];
   private readonly boxGeometry = new THREE.BoxGeometry(1, 1, 1);
-  private readonly ringGeometry = new THREE.TorusGeometry(1, .08, 8, 32);
+  private readonly ringGeometry = new THREE.TorusGeometry(1, RING_TUBE, 8, 32);
   /** Crimson and cobalt, matching the wool each side builds with. */
   static readonly TEAM_COLOR = [0xff5f76, 0x5aa8ff];
   private readonly arrows: DrawnArrow[] = [];
@@ -124,9 +126,18 @@ export class PartyVisuals {
       course.forEach((p, i) => {
         if (i < next || (!p.checkpoint && i !== next))
           return;
-        ring(i, p.x, p.y + .12, p.z, i === next ? 1.2 : .8, i === next ? 0x72ffcb : 0xffd25e);
+        // The ring has to stay ON the pad it is marking. A one-block stepping
+        // stone is narrower than the marker used to be, so a fixed radius drew
+        // a circle hanging out over the void — which reads as somewhere you
+        // could land. Fit it inside the footprint (the torus' own tube included)
+        // and it always describes real ground.
+        const x = Math.floor(p.x - p.width / 2) + p.width / 2;
+        const z = Math.floor(p.z - p.depth / 2) + p.depth / 2;
+        const fit = (Math.min(p.width, p.depth) / 2 - .08) / (1 + RING_TUBE);
+        ring(i, x, p.y + .12, z, Math.min(i === next ? 1.2 : .8, fit),
+          i === next ? 0x72ffcb : 0xffd25e);
         if (i === next)
-          box(0, p.x, p.y + 2, p.z, .18, 4, .18, 0x72ffcb, pulse);
+          box(0, x, p.y + 2, z, .18, 4, .18, 0x72ffcb, pulse);
       });
       return;
     }
@@ -137,19 +148,22 @@ export class PartyVisuals {
       const x = (g.minX + g.maxX) / 2, z = (g.minZ + g.maxZ) / 2;
       const target = g.team !== team;
       const color = PartyVisuals.TEAM_COLOR[g.team];
-      ring(i, x, PARTY_FLOOR_Y + .12, z, target ? 3.4 : 2.6, color, target ? .95 : .45);
-      box(i, x, PARTY_FLOOR_Y + (target ? 13 : 5), z, target ? .5 : .25, target ? 26 : 10, target ? .5 : .25,
+      // Sized to the portal collar, not to the old venue: the ring has to sit
+      // on the gilded rim rather than out over the deck around it.
+      ring(i, x, PARTY_FLOOR_Y + .12, z, target ? 2.4 : 1.8, color, target ? .95 : .45);
+      box(i, x, PARTY_FLOOR_Y + (target ? 11 : 4), z, target ? .5 : .25, target ? 22 : 8, target ? .5 : .25,
         color, target ? pulse : .2);
       if (target)
-        ring(2 + i, x, PARTY_FLOOR_Y + .12, z, 3.4 + (now % 1400) / 1400 * 2.4, color, .5 - (now % 1400) / 2800);
+        ring(2 + i, x, PARTY_FLOOR_Y + .12, z, 2.4 + (now % 1400) / 1400 * 1.8, color, .5 - (now % 1400) / 2800);
     });
     // Your own base glows underfoot while a goal is being reset, so the pause
     // reads as "everyone is home" rather than "the game stopped".
     if (s.goalResetAt && now < s.goalResetAt) {
       const home = BRIDGE_GOALS.find(g => g.team === team);
       if (home)
-        box(4, (home.minX + home.maxX) / 2, PARTY_FLOOR_Y + 1.04, team === 0 ? 21.5 : 153.5,
-          15, .08, 6, PartyVisuals.TEAM_COLOR[team], .4);
+        box(4, (home.minX + home.maxX) / 2, PARTY_FLOOR_Y + 1.04,
+          bridgeSpawn(sub, team, 0).z - sub.minZ, 9, .08, 5,
+          PartyVisuals.TEAM_COLOR[team], .4);
     }
   }
 }

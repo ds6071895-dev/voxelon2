@@ -171,6 +171,14 @@ export interface PlayerInfo extends PlayerSnapshot {
   cosmetics?: Cosmetics;
 }
 
+/** Live number of connected players currently using each mode. */
+export interface PlayerCounts {
+  play: number;
+  duels: number;
+  parkour: number;
+  bridge: number;
+}
+
 export interface DuelLeaderboardEntry extends DuelPublicProfile {
   username: string;
   /** The account's saved avatar, so the ladder can render the player's actual
@@ -467,11 +475,12 @@ export type ServerMsg =
   // stores it in localStorage so the next visit can skip the login form.
   | { t: 'session'; token: string }
   | { t: 'duelInviteInfo'; valid: boolean; host?: string; lobbyId?: string }
+  | { t: 'playerCounts'; play: number; duels: number; parkour: number; bridge: number }
   | { t: 'duelQueue'; queued: boolean }
   | { t: 'duelLobby'; snapshot: DuelLobbySnapshot; inviteToken?: string }
   | { t: 'duelError'; code: 'invalid' | 'full' | 'match_in_progress' |
       'already_in_lobby' | 'not_host' | 'too_few_players' | 'too_many_players' |
-      'not_everyone_ready' | 'not_in_lobby'; message: string }
+      'not_everyone_ready' | 'not_in_lobby' | 'no_arena'; message: string }
   | { t: 'duelArena'; arena: DuelArenaBounds; spawn: { x: number; y: number; z: number };
       countdownEndsAt: number }
   | { t: 'duelLoadout'; slots: (ItemStack | null)[]; armor: (ItemStack | null)[];
@@ -509,7 +518,7 @@ export type ServerMsg =
   | { t: 'partyLobby'; snapshot: PartyLobbySnapshot; inviteToken?: string }
   | { t: 'partyError'; code: 'invalid' | 'full' | 'match_in_progress' |
       'already_in_lobby' | 'not_host' | 'too_few_players' | 'too_many_players' |
-      'not_everyone_ready' | 'not_in_lobby'; message: string }
+      'not_everyone_ready' | 'not_in_lobby' | 'no_arena'; message: string }
   | { t: 'partyArena'; arena: PartyArenaBounds; sub: PartySubBounds; team: number;
       spawn: { x: number; y: number; z: number }; countdownEndsAt: number }
   | { t: 'partyLoadout'; slots: (ItemStack | null)[]; selected: number }
@@ -713,6 +722,7 @@ export type ServerMsg =
   | { t: 'heliSeat'; id: number; seat: SeatKind | null }
   | { t: 'heliRopeState'; id: number; progress: number }
   | { t: 'heliModuleInstalled'; id: number; item: number }
+  | { t: 'heliCrash'; id: number; x: number; y: number; z: number }
   | { t: 'heliDown'; id: number; x: number; y: number; z: number; faction: number;
       reason: HeliLossReason }
   | { t: 'heliGone'; id: number };

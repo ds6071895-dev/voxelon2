@@ -22,6 +22,7 @@ import { ITEMS, Item, ARMOR_SLOT_INDEX } from './items';
 import type { Atlas } from './textures';
 import { createGunModel, isGunItem, poseGunModel } from './gunmodels';
 import { createGadgetModel, isModeledGadget, poseGadgetModel } from './gadgetmodels';
+import { createBowModel, poseBowModel } from './bowmodel';
 import {
   GliderRig, RIG_HARNESS_Y, buildGliderRig, disposeGliderRig, glidePose,
   poseGliderRig,
@@ -615,9 +616,9 @@ export function buildArmorOverlay(body: AvatarBody, armor: number[]): THREE.Mesh
     // at a glance who can fly. Tagged because the deployed rig hides it — you
     // cannot be wearing the wing you are hanging underneath.
     const packY = HIP_Y + TORSO_H - 0.26, packZ = TORSO_D / 2 + 0.09;
-    add(body.group, 0.46, 0.19, 0.16, new THREE.Color(0xe4884a), 0, packY, packZ);
-    add(body.group, 0.5, 0.11, 0.13, new THREE.Color(0xf2e3c8), 0, packY - 0.17, packZ);
-    add(body.group, 0.64, 0.06, 0.06, new THREE.Color(0x5b431f), 0, packY + 0.13, packZ);
+    add(body.group, 0.46, 0.19, 0.16, new THREE.Color(0x217d91), 0, packY, packZ);
+    add(body.group, 0.5, 0.11, 0.13, new THREE.Color(0x123749), 0, packY - 0.17, packZ);
+    add(body.group, 0.64, 0.06, 0.06, new THREE.Color(0xffc775), 0, packY + 0.13, packZ);
     for (const m of added.slice(-3)) m.userData.gliderPack = true;
   } else if (chest && ITEMS[chest]?.armor) {
     const c = armorColorFor(chest);
@@ -939,11 +940,14 @@ export class RemotePlayers {
           ? createGunModel(held)
           : isModeledGadget(held)
             ? createGadgetModel(held)
+            : held === Item.BridgeBow ? createBowModel()
             : new THREE.Mesh(itemGeometry(this.atlas, held), this.itemMat);
         if (isGunItem(held)) {
           poseGunModel(mesh, 'avatar');
         } else if (isModeledGadget(held)) {
           poseGadgetModel(mesh, 'avatar');
+        } else if (held === Item.BridgeBow) {
+          poseBowModel(mesh, 'avatar');
         } else {
           mesh.position.set(0, -LIMB_H + 0.06, -0.2);
           mesh.rotation.set(-0.5, 0, 0);

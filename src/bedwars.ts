@@ -590,6 +590,8 @@ export interface BwSwingInput {
   onGround: boolean;
   /** Attacker's vertical velocity, blocks/tick. */
   vy: number;
+  /** Mode-specific descent threshold, in blocks per tick. */
+  critFallVy?: number;
   /** Attacker's horizontal speed, blocks/second. */
   speed: number;
   /** Unit vector from attacker to target, horizontal. */
@@ -630,7 +632,7 @@ export function bedwarsSwing(input: BwSwingInput): BwSwingResult {
   const charged = 0.25 + 0.75 * c * c;
   const comboSteps = Math.max(0, Math.min(BW_COMBO_MAX, Math.floor(input.combo)));
   const comboMult = 1 + BW_COMBO_STEP * comboSteps;
-  const crit = !input.onGround && input.vy < BW_CRIT_FALL_VY;
+  const crit = !input.onGround && input.vy < (input.critFallVy ?? BW_CRIT_FALL_VY);
   const sprint = input.speed >= BW_SPRINT_SPEED;
   const damage = Math.round(
     input.tier.damage * charged * comboMult * (crit ? BW_CRIT_MULT : 1),

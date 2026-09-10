@@ -27,8 +27,24 @@ export const HELI_FUEL_BURN = 1.00;
 export const DISMOUNT_CLEARANCE = 3.5;
 /** Damage each occupant takes when the airframe bursts under them. */
 export const EJECT_DAMAGE = 8;
-/** Seconds of dying rotor-down before the wreck is removed. */
-export const WRECK_SECONDS = 2.4;
+/** Safety lifetime; normal wrecks end on terrain impact, even from full altitude. */
+export const WRECK_SECONDS = 12;
+/** Small arms can bring down a Mk I in twelve rifle rounds. */
+export function helicopterGunDamage(amount: number): number { return amount * 3; }
+
+/** Shared hover/shot volume. Returns the near surface, so cover behind the
+ * cabin cannot incorrectly swallow a hit. Direction must be normalized. */
+export function helicopterRayDistance(origin: Vec3, direction: Vec3, center: Vec3, range: number): number | null {
+  const x = center.x - origin.x, y = center.y - origin.y, z = center.z - origin.z;
+  const along = x * direction.x + y * direction.y + z * direction.z;
+  const acrossSq = x * x + y * y + z * z - along * along;
+  const radiusSq = 2.6 * 2.6;
+  if (acrossSq > radiusSq) return null;
+  const half = Math.sqrt(Math.max(0, radiusSq - acrossSq));
+  if (along + half < 0) return null;
+  const distance = Math.max(0, along - half);
+  return distance <= range ? distance : null;
+}
 /** Blocks/s the airframe sinks on its own after the pilot disconnects. */
 export const AUTOLAND_DESCENT = 3.5;
 /**
@@ -272,6 +288,7 @@ export type VehicleEvent =
   /** An occupant is thrown clear. `v*` is the impulse to give their body. */
   | { kind: 'eject'; heliId: number; playerId: number; x: number; y: number; z: number;
       vx: number; vy: number; vz: number; damage: number; reason: HeliLossReason }
+  | { kind: 'heliCrash'; id: number; x: number; y: number; z: number }
   | { kind: 'heliRemoved'; id: number };
 
 export interface VehicleEnv {
@@ -477,6 +494,10 @@ export class VehicleSim {
     return this.destroy(h, reason);
   }
 
+  damageFromGun(id: number, amount: number): VehicleEvent[] {
+    return this.damage(id, helicopterGunDamage(amount));
+  }
+
   /**
    * The airframe stops being an aircraft: everyone aboard is thrown clear along
    * the airframe's own momentum (a crash genuinely launches you, and lands you
@@ -510,6 +531,7 @@ export class VehicleSim {
     h.pilotId = null;
     h.passengerId = null;
     h.dying = WRECK_SECONDS;
+    h.ropeDeployed = false;
     this.inputs.delete(h.id);
     return out;
   }
@@ -681,13 +703,20 @@ export class VehicleSim {
 
     if (h.dying > 0) {
       // Emergency rotor slowdown, nose over, and drop.
-      h.dying = Math.max(0, h.dying - dt);
+      h.dying = Math.max(0.001, h.dying - dt);
       h.rotor += dt * 6 * (h.dying / WRECK_SECONDS);
       h.rotation.z += dt * 1.6;
+      h.rotation.y += dt * 1.9;
       h.rotation.x = Math.max(-0.9, h.rotation.x - dt * 0.7);
-      h.velocity.y -= 18 * dt;
-      this.integrate(h, dt, out);
-      if (h.dying === 0) {
+      // Short collision steps keep a fast falling hull from skipping a roof.
+      const steps = Math.ceil(dt / 0.025);
+      let collided = false;
+      for (let i = 0; i < steps && !collided; i++) {
+        h.velocity.y -= 18 * dt / steps;
+        collided = this.integrate(h, dt / steps, out);
+      }
+      if (collided || h.dying <= 0.001) {
+        if (collided) out.push({ kind: 'heliCrash', id: h.id, ...h.position });
         this.remove(h.id);
         out.push({ kind: 'heliRemoved', id: h.id });
       }
@@ -813,7 +842,7 @@ export class VehicleSim {
    * and a genuine crash — cruising into a mountain — destroys the airframe
    * outright and throws the crew through the windscreen.
    */
-  private integrate(h: HelicopterState, dt: number, out: VehicleEvent[]): void {
+  private integrate(h: HelicopterState, dt: number, out: VehicleEvent[]): boolean {
     const half = this.env.worldHalf;
     const pre: Vec3 = { x: h.velocity.x, y: h.velocity.y, z: h.velocity.z };
     let { x, y, z } = h.position;
@@ -849,16 +878,17 @@ export class VehicleSim {
     }
     h.position = { x, y, z };
 
-    if (h.dying > 0) return;
+    if (h.dying > 0) return hit > 0 || groundHit > 0;
     // Terrain gets a much larger grace than a wall does: setting down firmly is
     // landing, and flying into a cliff face is not.
     const impact = Math.max(
       hit - HELI_CRASH_FLOOR, groundHit - HELI_LAND_FLOOR, 0);
-    if (impact <= 0) return;
+    if (impact <= 0) return false;
     h.hp = Math.max(0, h.hp - impact * HELI_CRASH_DAMAGE);
     if (h.hp <= 0) {
       out.push(...this.destroy(h, 'crash', impact * CRASH_EJECT_DAMAGE, pre));
     }
+    return false;
   }
 
   private stepBomb(b: BombState, dt: number, out: VehicleEvent[]): void {

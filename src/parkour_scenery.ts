@@ -279,35 +279,43 @@ export class ParkourScenery {
   }
 
   /** The Bridge is stamped in real blocks, so the scenery only has to build a
-   *  world around it: buttresses under each base and a chasm you can read. */
+   *  world around it: buttresses under each base and a chasm you can read.
+   *
+   *  Everything here is measured off the venue's own footprint rather than
+   *  written out in absolute blocks — the venue is half the size it once was,
+   *  and a chasm authored in fixed numbers would have hung out past both ends
+   *  of it. `base` is the depth of one base, which is what every landmark on
+   *  this side is actually anchored to. */
   private buildBridge(sub: PartySubBounds, theme: ParkourTheme): void {
     const b = this.box.bind(this), width = sub.maxX - sub.minX, length = sub.maxZ - sub.minZ;
+    const base = 17, mid = length / 2;
     for (const front of [0, 1]) {
       const flip = front ? -1 : 1, edge = front ? length : 0;
       // A buttressed cliff falling away under each base.
       for (let i = 0; i < 7; i++) {
-        const inset = i * 2.4;
-        b(width / 2, sub.floor - 9 - i * 3, edge + flip * (16 + i * 2),
-          width - 6 - inset * 2, 3, 34 - inset * 3, i < 3 ? theme.stone : theme.trim);
+        const inset = i * 1.3;
+        b(width / 2, sub.floor - 7 - i * 2.6, edge + flip * (base / 2 + i),
+          width - 4 - inset * 2, 2.6, base + 2 - inset * 3, i < 3 ? theme.stone : theme.trim);
       }
-      b(width / 2, sub.floor - 32, edge + flip * 20, 5, 12, 5, theme.accent);
+      b(width / 2, sub.floor - 27, edge + flip * (base / 2), 4, 11, 4, theme.accent);
       for (const dx of [-1, 1])
-        this.tower(width / 2 + dx * (width / 2 + 7), sub.floor - 3, edge + flip * 12, theme, 12);
+        this.tower(width / 2 + dx * (width / 2 + 5), sub.floor - 3, edge + flip * (base / 2), theme, 11);
       // Braziers flanking the mouth of the span — set well back from the
       // walkway, because nothing beside it may ever look like a foothold.
       for (const dx of [-1, 1])
-        for (const dz of [30, 44])
-          this.lantern(width / 2 + dx * 6, sub.floor + 3, edge + flip * dz, theme);
+        for (const dz of [base + 3, base + 12])
+          this.lantern(width / 2 + dx * 5, sub.floor + 3, edge + flip * dz, theme);
     }
     // A lit spine under the middle island, so the crossing has a bottom to it.
     for (let i = 0; i < 9; i++)
-      b(width / 2, sub.floor - 16 - i * 2.6, length / 2, 10 - i, 2.4, 10 - i, i % 2 ? theme.stone : theme.trim);
-    b(width / 2, sub.floor - 44, length / 2, 1.6, 14, 1.6, theme.light);
+      b(width / 2, sub.floor - 13 - i * 2.2, mid, 9 - i, 2, 9 - i, i % 2 ? theme.stone : theme.trim);
+    b(width / 2, sub.floor - 36, mid, 1.4, 12, 1.4, theme.light);
     // Chains hanging off the span itself. They are scenery — never blocks —
     // so the walkway stays exactly one block wide with nothing beside it, and
     // they give the drop under your feet something to fall past.
-    for (let i = 0; i < 26; i++) {
-      const z = 46 + i * (length - 92) / 25;
+    const span = length - 2 * (base + 3);
+    for (let i = 0; i < 18; i++) {
+      const z = base + 3 + i * span / 17;
       b(width / 2, sub.floor - 2.2, z, .25, 1.6, .25, theme.trim);
       if (i % 3 === 0) this.lantern(width / 2, sub.floor - 6, z, theme);
     }

@@ -110,7 +110,7 @@ import {
   suggestCommands,
 } from '../src/chat';
 import {
-  structureKindAt, structureStamp, structureChestTier, worldStructures,
+  structureKindAt, structureStamp, structureChestTier, worldStructures, STRUCTURE_NAMES,
 } from '../src/structures';
 import {
   VAULT_LOOT, VAULT_LOOT_COOLDOWN, VAULT_LOOT_WINDOW, VAULT_RECHARGE,
@@ -4588,8 +4588,8 @@ const lairs = new Map<VaultBossKind, VaultStamp>();
 {
   const list = worldStructures(1337, terrain);
   check('worldStructures enumerates the whole map (sane count + kinds)',
-    list.length > 40 && list.length < 400 &&
-    list.every((s) => ['tower', 'bunker', 'pod'].includes(s.kind) &&
+    list.length > 450 && list.length < 2500 &&
+    list.every((s) => s.kind in STRUCTURE_NAMES &&
       Number.isFinite(s.x) && Number.isFinite(s.z)),
     `count=${list.length}`);
   check('worldStructures is a pure function of the seed',

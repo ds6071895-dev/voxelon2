@@ -120,8 +120,10 @@ export class Input {
         if (!e.repeat) this.operatorModeTogglePressed = true;
         return;
       }
-      if (e.repeat) return;
       this.keys.add(e.code);
+      // Losing pointer lock clears held keys. A key still physically held
+      // must resume movement on its next repeat after control returns.
+      if (e.repeat) return;
       if (this.isBind(e.code, 'inventory')) this.inventoryToggled = true;
       if (this.isBind(e.code, 'reload')) this.reloadPressed = true;
       if (this.isBind(e.code, 'drop')) this.dropPressed = true;

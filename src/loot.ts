@@ -24,6 +24,9 @@ export const LOOT_TABLES: Record<LootTier, LootEntry[]> = {
     { id: Item.Bullet, min: 4, max: 10, w: 2 },
     { id: Item.IronIngot, min: 1, max: 3, w: 2 },
     { id: Item.GoldIngot, min: 1, max: 2, w: 1 },
+    { id: Item.Bandage, min: 2, max: 4, w: 2 },
+    { id: Item.IronPickaxe, min: 1, max: 1, w: 0.8 },
+    { id: Item.IronBoots, min: 1, max: 1, w: 0.5 },
   ],
   // Bunker: military stores — ammo, gadgets, the occasional sidearm.
   rare: [
@@ -39,6 +42,8 @@ export const LOOT_TABLES: Record<LootTier, LootEntry[]> = {
     { id: Item.Shotgun, min: 1, max: 1, w: 0.5 },
     { id: Item.RuneOfIron, min: 1, max: 1, w: 0.5 },
     { id: Item.RuneOfSwiftness, min: 1, max: 1, w: 0.4 },
+    { id: Item.Medkit, min: 1, max: 2, w: 2 },
+    { id: Item.IronPickaxe, min: 1, max: 1, w: 1 },
   ],
   // Crashed Cargo Pod: the best surface loot — titanium, cobalt, gadgets, RARELY a Heart.
   epic: [
@@ -62,7 +67,7 @@ export const LOOT_TABLES: Record<LootTier, LootEntry[]> = {
 
 /** Rolls per chest by tier (better tiers hold a little more). */
 const ROLLS: Record<LootTier, [number, number]> = {
-  common: [3, 5], rare: [3, 6], epic: [4, 6],
+  common: [4, 6], rare: [5, 7], epic: [4, 6],
 };
 
 /** Deterministic per-chest rng seed from the world seed + chest position. */
@@ -83,7 +88,11 @@ export function chestLoot(
   const totalW = table.reduce((a, e) => a + e.w, 0);
   const [lo, hi] = ROLLS[tier];
   const n = lo + Math.floor(rng() * (hi - lo + 1));
-  const out: ItemStack[] = [];
+  // A discovery always gives useful travel supplies, even on an unlucky roll.
+  const out: ItemStack[] = tier === 'epic' ? [] : [
+    { id: Item.IronIngot, count: tier === 'rare' ? 4 : 2 },
+    { id: Block.Torch, count: tier === 'rare' ? 8 : 5 },
+  ];
   for (let i = 0; i < n; i++) {
     let pick = rng() * totalW;
     let entry = table[table.length - 1];

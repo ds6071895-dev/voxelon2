@@ -786,6 +786,25 @@ export class GameAudio {
     this.noise({ freq: 180, dur: 1.6, gain: 0.05, slideTo: 70, type: 'lowpass', q: 0.6 });
   }
 
+  /** Spatial attack payoff, separate from the score so an eruption sounds
+   * like it landed in the arena. Layered but quieter than the player's weapon. */
+  vaultImpact(family: VaultFamily, pos: THREE.Vector3, weight = 1): void {
+    const gain = Math.max(0.35, Math.min(1.25, weight));
+    this.tone({type:'sine',from:family==='ember' ? 96 : 135,to:34,
+      dur:0.48,gain:0.17*gain,pos});
+    this.noise({freq:family==='mire' ? 620 : 380,slideTo:85,dur:0.55,
+      gain:0.13*gain,type:'lowpass',q:0.7,pos});
+    if (family==='crystal' || family==='gilded') {
+      for (const [i,ratio] of [1,1.51,2.03].entries()) this.tone({
+        type:'sine',from:540*ratio,to:480*ratio,dur:0.45-i*0.08,
+        gain:0.055*gain/(i+1),delay:i*0.018,pos,
+      });
+    } else {
+      this.noise({freq:family==='crypt' ? 1700 : 950,slideTo:280,dur:0.23,
+        gain:0.055*gain,q:0.8,pos});
+    }
+  }
+
   /** VAULT CLEARED: a warm rising triangle fanfare (triumphant, still soft). */
   vaultClear(): void {
     this.tone({ type: 'triangle', from: 330, to: 440, dur: 0.16, gain: 0.12 });

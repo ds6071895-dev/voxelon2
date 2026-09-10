@@ -14,6 +14,7 @@ import type { Atlas } from './textures';
 import { createGunModel, poseGunModel, gunFeel, GunFeel } from './gunmodels';
 import { createGadgetModel, isModeledGadget, poseGadgetModel } from './gadgetmodels';
 import { HEAL_BEAT } from './healuse';
+import { createBowModel, poseBowModel, poseBowDraw } from './bowmodel';
 
 /** 0..1 ease with flat ends, clamped outside the range. */
 function smoothstep(x: number): number {
@@ -97,6 +98,8 @@ export class HeldItemView {
   private healClock = 0; // seconds into the current heal-item application
   private aimT = 0;
   private isGun = false;
+  private bowPower = 0;
+  private bowReleaseT = 1;
   private isGadgetModel = false;
   /** A placeable block: shown as a bare mini-cube, with no fist behind it. */
   private isBlockItem = false;
@@ -283,6 +286,8 @@ export class HeldItemView {
     if (id === null && this.currentItem === Item.JumpBoost && this.gadgetBeat === 'bounce') return;
     if (id === this.currentItem) return;
     this.currentItem = id;
+    this.bowPower = 0;
+    this.bowReleaseT = 1;
     this.isGun = id !== null && !!ITEMS[id]?.gun;
     this.isGadgetModel = id !== null && isModeledGadget(id);
     this.isBlockItem = id !== null && ITEMS[id]?.kind === 'block';
@@ -325,6 +330,16 @@ export class HeldItemView {
         this.anchorEject = model.getObjectByName('eject') ?? null;
         this.anchorSight = model.getObjectByName('sight') ?? null;
         this.anchorGrip2 = model.getObjectByName('grip2') ?? null;
+      } else if (id === Item.BridgeBow) {
+        this.mesh = createBowModel();
+        poseBowModel(this.mesh, 'firstPerson');
+        this.mesh.traverse(o => {
+          if (!(o instanceof THREE.Mesh)) return;
+          const mat = (o.material as THREE.MeshBasicMaterial).clone();
+          mat.userData.bowColor = mat.color.getHex();
+          this.modelMats.push(mat);
+          o.material = mat;
+        });
       } else if (this.isGadgetModel) {
         const model = createGadgetModel(id);
         poseGadgetModel(model, 'firstPerson');
@@ -350,6 +365,9 @@ export class HeldItemView {
       this.equipT = 0; // draw it: a swap should look like a swap
     }
     this.offArm.visible = !!this.anchorGrip2;
+    this.offArm.scale.setScalar(1);
+    this.arm.position.set(0.05, -0.16, 0.06);
+    this.offArm.rotation.set(0.72, -0.62, 0.24);
     // Hands are sized for an empty fist; a gun is a smaller, finer object, so
     // the grip hand shrinks a little rather than eclipsing the weapon.
     this.arm.scale.setScalar(this.isGun || this.isGadgetModel ? 0.86 : 1);
@@ -358,6 +376,24 @@ export class HeldItemView {
     // alone. The arm stays visible with no item at all (the bare fist) and for
     // every sprite/model item; setActive controls POV visibility.
     this.arm.visible = !this.isBlockItem;
+  }
+
+  /** Set the bow pose; ordinary tools never enter it. */
+  setBowDraw(power: number): void { this.bowPower = clamp(power, 0, 1); }
+
+  releaseBow(power: number): void {
+    this.bowPower = 0;
+    this.bowReleaseT = 0;
+    this.onSwing?.();
+    this.kickVZ += .7 + power * 1.2;
+    this.kickVPitch += .3 + power * .5;
+    this.kickVRoll -= .4 * power;
+  }
+
+  /** Only called on a server-confirmed minigame melee hit. */
+  meleeImpact(crit: boolean): void {
+    this.kickVZ += crit ? 1.5 : .9;
+    this.kickVRoll += crit ? 1.0 : .5;
   }
 
   /** Generic mining/placing swing (tools, blocks). */
@@ -472,7 +508,8 @@ export class HeldItemView {
     if (this.equipT < 1) this.equipT = Math.min(1, this.equipT + dt / 0.34);
     this.recoilPulse = Math.max(0, this.recoilPulse - dt * 5);
     this.idleT += dt;
-    const aimTarget = this.isGun && aiming && reloadProgress < 0 ? 1 : 0;
+    const aimTarget = this.currentItem === Item.BridgeBow ? this.bowPower
+      : this.isGun && aiming && reloadProgress < 0 ? 1 : 0;
     this.aimT += (aimTarget - this.aimT) * Math.min(1, dt * 14);
     const aim = smoothstep(this.aimT);
 
@@ -485,6 +522,28 @@ export class HeldItemView {
     if (this.flashT < 1) this.flashT = Math.min(1, this.flashT + dt / 0.075);
 
     let px = BASE_X, py = BASE_Y, pz = BASE_Z, rx = 0, ry = 0, rz = 0;
+    if (this.currentItem === Item.BridgeBow && this.mesh) {
+      this.bowReleaseT = Math.min(1, this.bowReleaseT + dt / .3);
+      // A snap shot visibly plucks and settles the string after firing.
+      // This animation never delays the arrow or changes its strength.
+      const visualDraw = Math.max(this.bowPower, Math.pow(1 - this.bowReleaseT, 3));
+      poseBowDraw(this.mesh, visualDraw, 1 - this.bowReleaseT, this.idleT);
+      px -= aim * .16;
+      py += .10 + aim * .07;
+      pz -= aim * .06;
+      rz += aim * .12;
+      this.arm.position.set(0, -.025, .06);
+      this.arm.scale.setScalar(.65);
+      this.offArm.visible = visualDraw > .02;
+      this.offArm.scale.setScalar(.55);
+      const nock = this.mesh.getObjectByName('nock')!;
+      this.offArm.position.copy(this.pointInPivot(nock, this.scratch));
+      this.offArm.position.x += .045;
+      this.offArm.position.y -= .035;
+      this.offArm.rotation.set(.15, -.7, 0);
+      for (const mat of this.modelMats)
+        mat.color.setHex(mat.userData.bowColor).multiplyScalar(shade);
+    }
     if (this.isGun && this.mesh) {
       // Aiming squares the weapon up with the view; hip fire keeps the relaxed
       // canted pose the model ships with.
@@ -533,13 +592,14 @@ export class HeldItemView {
       const strike = t < WIND
         ? 0
         : Math.sin(((t - WIND) / (1 - WIND)) * Math.PI);
-      px += draw * 0.05 - strike * 0.10;
-      py += draw * 0.09 - strike * 0.15;
+      const weight = this.heavySwing ? 1.35 : 1;
+      px += draw * 0.05 - strike * 0.10 * weight;
+      py += draw * 0.09 - strike * 0.15 * weight;
       pz += draw * 0.13 - strike * 0.27;
       // Negative pitch drops the item's nose (it points at -z), so the wind-up
       // raises it and the strike chops down through the swing.
       rx += draw * 0.42 - strike * 1.05;
-      rz += -strike * 0.2; // rolls slightly inward as it lands
+      rz += -strike * 0.2 * weight; // rolls slightly inward as it lands
     }
     if (this.gadgetBeat) {
       const duration = this.gadgetBeat === 'bounce' ? 0.42 : 0.28;

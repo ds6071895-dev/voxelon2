@@ -11,14 +11,24 @@ import type { LootTier } from './loot';
 import { inCore } from './net/protocol';
 import { hash2, mulberry32 } from './noise';
 import { PLAZA_CLEAR, plazaDistance } from './plaza';
+import { vaultAnchorAt, VAULT_REACH } from './vaults';
+import { buildSettlement } from './settlements';
 
-export type StructureKind = 'tower' | 'bunker' | 'pod';
+export type StructureKind = 'tower' | 'bunker' | 'pod' | 'village' | 'cottage'
+  | 'inn' | 'windmill' | 'shrine' | 'ruins' | 'camp' | 'greenhouse';
+
+export const STRUCTURE_NAMES: Record<StructureKind, string> = {
+  tower: 'Watchtowers', bunker: 'Bunkers', pod: 'Cargo pods', village: 'Villages',
+  cottage: 'Cottages', inn: 'Wayside inns', windmill: 'Windmills', shrine: 'Shrines',
+  ruins: 'Overgrown ruins', camp: 'Traveller camps', greenhouse: 'Glass gardens',
+};
 
 /** Terrain queries a stamp needs (the Terrain class satisfies this shape). */
 export interface StructureCtx {
   height(x: number, z: number): number;
   ravineDepth(x: number, z: number): number;
   biomeWithWater(x: number, z: number, h: number): Biome;
+  caveEntranceAt?(x: number, z: number): boolean;
 }
 
 export interface StructureStamp {
@@ -30,28 +40,33 @@ export interface StructureStamp {
   blocks: { x: number; y: number; z: number; id: number }[];
   /** The loot chest's block position (also present in `blocks`). */
   chest: { x: number; y: number; z: number };
+  /** Settlements may have several independently seeded supplies caches. */
+  chests?: { x: number; y: number; z: number; tier: LootTier }[];
 }
 
-// Surface landmarks need to appear during ordinary travel, not only on a long
-// map sweep. At these rates a full render bubble usually contains a candidate
-// in the Heartland and one or two in the Wilds; terrain suitability still
-// rejects water, ravines and extreme peaks. Cargo pods keep their Wilds bias,
-// so the extra density is primarily ruins and bunkers rather than free epics.
-const DENSITY_CORE = 1 / 420;
-const DENSITY_WILDS = 1 / 220;
 /** Ground outside this band can't host a structure (water / absurd peaks). */
-const MIN_GROUND = 65, MAX_GROUND = 150;
+const MIN_GROUND = 65, MAX_GROUND = 185;
 
 /** Which structure kind (if any) anchors in chunk (cx, cz)? Cheap hash test —
  *  layout/terrain suitability is checked later by structureStamp. */
 export function structureKindAt(seed: number, cx: number, cz: number): StructureKind | null {
-  const wx = cx * 16 + 8, wz = cz * 16 + 8;
-  const core = inCore(wx, wz);
-  if (hash2(seed ^ 0x57a1, cx, cz) > (core ? DENSITY_CORE : DENSITY_WILDS)) return null;
+  // One jittered candidate per 80m district; at least 48m between centres.
+  // Unlike independent dense hashes, neighbouring villages cannot overlap.
+  const gx = Math.floor(cx / 5), gz = Math.floor(cz / 5);
+  if (cx !== gx * 5 + 1 + Math.floor(hash2(seed ^ 0x57a0, gx, gz) * 3) ||
+      cz !== gz * 5 + 1 + Math.floor(hash2(seed ^ 0x57a1, gx, gz) * 3)) return null;
   const k = hash2(seed ^ 0x57a2, cx, cz);
-  // Crashed pods are Wilds-biased: common out there, a rarity in the core.
-  if (!core) return k < 0.4 ? 'pod' : k < 0.75 ? 'tower' : 'bunker';
-  return k < 0.6 ? 'tower' : k < 0.95 ? 'bunker' : 'pod';
+  if (k < 0.23) return 'village';
+  if (k < 0.43) return 'cottage';
+  if (k < 0.54) return 'inn';
+  if (k < 0.64) return 'windmill';
+  if (k < 0.73) return 'shrine';
+  if (k < 0.81) return 'ruins';
+  if (k < 0.88) return 'camp';
+  if (k < 0.94) return 'greenhouse';
+  if (k < 0.975) return 'tower';
+  if (k < 0.994 || inCore(cx * 16 + 8, cz * 16 + 8)) return 'bunker';
+  return 'pod';
 }
 
 /** The full deterministic stamp for the structure anchored in (cx, cz), or
@@ -65,27 +80,62 @@ const OPEN_GROUND: Biome[] = [
   Biome.Meadow, Biome.SunflowerPlains, Biome.Mesa, Biome.Heath,
 ];
 
+interface StructureSite {
+  kind: StructureKind; x: number; y: number; z: number; biome: Biome; tier: LootTier;
+}
+const siteCaches = new WeakMap<StructureCtx, Map<string, StructureSite | null>>();
+
+/** Lightweight discovery metadata; map sweeps never construct block arrays. */
+export function structureSite(seed: number, cx: number, cz: number, ctx: StructureCtx): StructureSite | null {
+  const candidate = structureKindAt(seed, cx, cz);
+  if (!candidate) return null;
+  let cache = siteCaches.get(ctx);
+  if (!cache) { cache = new Map(); siteCaches.set(ctx, cache); }
+  const key = `${seed}:${cx},${cz}`;
+  if (cache.has(key)) return cache.get(key)!;
+  const site = (): StructureSite | null => {
+    let kind = candidate;
+    const ax = cx * 16 + 8, az = cz * 16 + 8;
+    if (plazaDistance(ax, az) <= PLAZA_CLEAR + 23) return null;
+    const g = ctx.height(ax, az);
+    if (g < MIN_GROUND || g > MAX_GROUND) return null;
+    const biome = ctx.biomeWithWater(ax, az, g);
+    if (biome === Biome.Ocean || biome === Biome.Beach || biome === Biome.Ashlands) return null;
+    const radius = kind === 'village' ? 14 : kind === 'inn' ? 11 : 9;
+    for (let dx = -radius; dx <= radius; dx += radius) {
+      for (let dz = -radius; dz <= radius; dz += radius) {
+        const h = ctx.height(ax + dx, az + dz);
+        if (h < MIN_GROUND || Math.abs(h - g) > (kind === 'village' ? 6 : 9) ||
+            ctx.ravineDepth(ax + dx, az + dz) > 0 || ctx.caveEntranceAt?.(ax + dx, az + dz)) return null;
+      }
+    }
+    // Vaults own their complete footprint, including their buried wings.
+    for (let dx = -VAULT_REACH - 1; dx <= VAULT_REACH + 1; dx++) {
+      for (let dz = -VAULT_REACH - 1; dz <= VAULT_REACH + 1; dz++) {
+        if (vaultAnchorAt(seed, cx + dx, cz + dz, ctx)) return null;
+      }
+    }
+    if (kind === 'bunker' && !OPEN_GROUND.includes(biome)) kind = 'tower';
+    const tier: LootTier = kind === 'pod' ? 'epic'
+      : ['bunker', 'inn', 'shrine', 'ruins', 'village'].includes(kind) ? 'rare' : 'common';
+    return { kind, x: ax, y: g, z: az, biome, tier };
+  };
+  const result = site();
+  if (cache.size >= 8192) cache.clear();
+  cache.set(key, result);
+  return result;
+}
+
 export function structureStamp(
   seed: number, cx: number, cz: number, ctx: StructureCtx
 ): StructureStamp | null {
-  let kind = structureKindAt(seed, cx, cz);
-  if (!kind) return null;
+  const site = structureSite(seed, cx, cz, ctx);
+  if (!site) return null;
+  const { kind, x: ax, y: g, z: az, biome } = site;
   const rng = mulberry32(
     (seed ^ Math.imul(cx, 0x27d4eb2f) ^ Math.imul(cz, 0x165667b1) ^ 0x517) >>> 0);
-  const ax = cx * 16 + 3 + Math.floor(rng() * 10);
-  const az = cz * 16 + 3 + Math.floor(rng() * 10);
-  // Faction monuments own their ground: a ruin or a bunker hatch landing on a
-  // flag plaza would be stamped over levelled paving. Keep a wide berth — a
-  // stamp reaches ~4 blocks from its anchor and the site wants breathing room.
-  if (plazaDistance(ax, az) <= PLAZA_CLEAR + 8) return null;
-  const g = ctx.height(ax, az);
-  if (g < MIN_GROUND || g > MAX_GROUND) return null;   // underwater / extreme peak
-  if (ctx.ravineDepth(ax, az) > 0) return null;        // never straddle a canyon
-  const biome = ctx.biomeWithWater(ax, az, g);
-  if (biome === Biome.Ocean || biome === Biome.Beach) return null;
-  // Bunkers dig into open flat country; anywhere else the site gets a tower.
-  if (kind === 'bunker' && !OPEN_GROUND.includes(biome)) {
-    kind = 'tower';
+  if (kind !== 'tower' && kind !== 'bunker' && kind !== 'pod') {
+    return buildSettlement(kind, ax, g, az, biome, rng, ctx);
   }
   const blocks: StructureStamp['blocks'][number][] = [];
   const put = (x: number, y: number, z: number, id: number): void => {
@@ -121,6 +171,14 @@ export function structureStamp(
     for (const [dx, dz] of [[-2, -2], [2, -2], [-2, 2], [2, 2]]) {
       put(ax + dx, g + h + 1, az + dz, Block.Cobblestone); // corner crenels
     }
+    // An open spiral stair gives the lookout a real route to its treasure.
+    const steps = [[-1, -1], [0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0]];
+    for (let y = 0; y < h; y++) {
+      const [dx, dz] = steps[y % steps.length];
+      put(ax + dx, g + y, az + dz, Block.OakPlanks);
+      for (let head = 1; head <= 3; head++) put(ax + dx, g + y + head, az + dz, Block.Air);
+    }
+    put(ax, g + h, az, Block.OakPlanks);
     put(ax, g + h + 1, az, Block.Chest);
     chest = { x: ax, y: g + h + 1, z: az };
   } else if (kind === 'bunker') {
@@ -151,6 +209,16 @@ export function structureStamp(
     put(ax, floorY + 1, az, Block.Air); // landing stays clear
     put(ax - 3, floorY + 1, az - 2, Block.Chest);
     put(ax - 3, floorY + 1, az + 2, Block.Torch);
+    // A roofed walk-down stair replaces the old inescapable nine-block drop.
+    for (let step = 0; step <= 9; step++) {
+      const z = az - 11 + step, y = g - step;
+      for (let dx = -1; dx <= 1; dx++) {
+        put(ax + dx, y, z, Block.Cobblestone);
+        for (let head = 1; head <= 3; head++) put(ax + dx, y + head, z, Block.Air);
+      }
+      if (step % 3 === 0) put(ax + 2, y + 1, z, Block.Torch);
+    }
+    put(ax, g, az, Block.Glass); // sealed skylight above the old hatch
     if (rng() < 0.5) put(ax + 3, floorY + 1, az + 2, Block.Turret); // dormant sentry
     chest = { x: ax - 3, y: floorY + 1, z: az - 2 };
   } else {
@@ -187,8 +255,8 @@ export function structureStamp(
 }
 
 /** Every surface structure in the world (a one-time full sweep for the map).
- *  Cheap: `structureKindAt` is a hash reject, so only the ~1/500 candidate
- *  chunks pay for a full `structureStamp`. Pure — the same on server + client. */
+ *  Cheap: only district candidates pay for site checks, and no block stamps
+ *  are built. Pure — the same on server + client. */
 export function worldStructures(
   seed: number, ctx: StructureCtx, half = 2500
 ): { x: number; z: number; kind: StructureKind; tier: LootTier }[] {
@@ -197,7 +265,7 @@ export function worldStructures(
   for (let cx = -cmax; cx <= cmax; cx++) {
     for (let cz = -cmax; cz <= cmax; cz++) {
       if (!structureKindAt(seed, cx, cz)) continue;
-      const st = structureStamp(seed, cx, cz, ctx);
+      const st = structureSite(seed, cx, cz, ctx);
       if (st) out.push({ x: st.x, z: st.z, kind: st.kind, tier: st.tier });
     }
   }
@@ -214,6 +282,8 @@ export function structureChestTier(
   for (let dx = -1; dx <= 1; dx++) {
     for (let dz = -1; dz <= 1; dz++) {
       const st = structureStamp(seed, cx + dx, cz + dz, ctx);
+      const extra = st?.chests?.find(c => c.x === x && c.y === y && c.z === z);
+      if (extra) return extra.tier;
       if (st && st.chest.x === x && st.chest.y === y && st.chest.z === z) return st.tier;
     }
   }

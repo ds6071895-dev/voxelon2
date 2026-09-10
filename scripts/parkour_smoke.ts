@@ -101,7 +101,7 @@ console.log('Parkour shape smoke: 400 seeds are all straight, forward-only, non-
 
 // Render-state regression: all themes and both venues can be built, updated,
 // reused and cleared without needing a WebGL context or leaking old geometry.
-import { Scene } from 'three';
+import { Box3, Scene } from 'three';
 import { PartyVisuals } from '../src/party_visuals';
 import { PARTY_RESULT_MS, PartyGamesEngine, partyGame } from '../src/partygames';
 import { PARKOUR_THEMES } from '../src/parkour_themes';
@@ -133,6 +133,28 @@ for (let match = 0; match < 16; match++) {
     throw Error('theme shuffle bag missed a world');
   visuals.update(snap, 1, now);
   visuals.update(snap, 1, now + 100);
+  for (let progress = 0; progress < parkourCourse(snap.sub!.seed).length - 1; progress++) {
+    const mine = snap.participants.find(p => p.id === 1)!;
+    mine.progress = progress;
+    visuals.update(snap, 1, now + 100);
+    scene.updateMatrixWorld(true);
+    const pad = parkourCourse(snap.sub!.seed)[progress + 1];
+    const left = snap.sub!.minX + Math.floor(pad.x - pad.width / 2);
+    const front = snap.sub!.minZ + Math.floor(pad.z - pad.depth / 2);
+    let found = false;
+    scene.traverse(object => {
+      const mesh = object as import('three').Mesh;
+      if (!mesh.visible || mesh.geometry?.type !== 'TorusGeometry') return;
+      const material = mesh.material as import('three').MeshBasicMaterial;
+      if (material.color.getHex() !== 0x72ffcb) return;
+      found = true;
+      const bounds = new Box3().setFromObject(mesh);
+      if (bounds.min.x < left + .07 || bounds.max.x > left + pad.width - .07 ||
+          bounds.min.z < front + .07 || bounds.max.z > front + pad.depth - .07)
+        throw Error(`marker leaves platform ${progress + 1} in theme ${theme}`);
+    });
+    if (!found) throw Error('missing next-platform ring');
+  }
   visuals.clear();
   engine.markArenaReady(1, now, snap.revision);
   engine.markArenaReady(2, now, snap.revision);
@@ -181,6 +203,7 @@ for (let i = 1; i < course.length; i++) {
   for (let frame = 0; frame < 140; frame++) {
     p.update(1 / 120, input, world);
     server.tickWar(1 / 120);
+    if ((frame + 1) % 6 !== 0 && !(frame > 3 && p.onGround)) continue;
     const out = server.handle(1, { t: 'xform', x: p.pos.x, y: p.pos.y, z: p.pos.z, yaw: p.yaw, pitch: 0, arenaRevision: match.revision });
     if (out.some(o => o.to === 1 && o.msg.t === 'teleport'))
       throw Error(`Server rejected valid jump ${i}, frame ${frame}`);
@@ -190,3 +213,40 @@ for (let i = 1; i < course.length; i++) {
   }
 }
 console.log(`Parkour network physics smoke: ${accepted} valid movement samples accepted without corrections`);
+
+// Resting on the last few centimetres of a platform is supported by the real
+// 0.6-block player body. It must not become an anti-flight violation after idle.
+const edgeServer = new GameServer(92);
+edgeServer.addPlayer(1, { username: 'EdgeA', faction: 0 });
+edgeServer.addPlayer(2, { username: 'EdgeB', faction: 0 });
+edgeServer.handle(1, { t: 'partyQueue', join: true, mode: 'parkour' });
+edgeServer.handle(2, { t: 'partyQueue', join: true, mode: 'parkour' });
+const edgeMatch = edgeServer.party.snapshotFor(1, 0)!;
+edgeServer.handle(1, { t: 'partyArenaReady', revision: edgeMatch.revision });
+edgeServer.handle(2, { t: 'partyArenaReady', revision: edgeMatch.revision });
+edgeServer.tickWar(3);
+edgeServer.tickParty();
+const edgeSub = edgeMatch.sub!, edgeRemote = edgeServer.players.get(1)!;
+for (const axis of ['x', 'z'] as const) {
+  const pad = parkourCourse(edgeSub.seed)[14], c = centre(pad);
+  const edge = new Player({ x: edgeSub.minX + c.x, y: pad.y + .001, z: edgeSub.minZ + c.z });
+  // Stay away from the checkpoint's posts on the middle row.
+  edge.pos.z -= 1.5;
+  edge.pos[axis] = (axis === 'x' ? edgeSub.minX + c.x + pad.width / 2 : edgeSub.minZ + c.z - pad.depth / 2) + (axis === 'x' ? .28 : -.28);
+  const still = { ...input, forward: false, jump: false, sprintHeld: false, sprintKey: false };
+  edge.update(1 / 120, still, world);
+  if (!edge.onGround) throw Error(`edge fixture is not standing on ${axis} edge`);
+  // Establish a real, recent footing at this pad's height first.
+  Object.assign(edgeRemote, { x: edgeSub.minX + c.x, y: pad.y, z: edgeSub.minZ + c.z - 1.5 });
+  edgeServer.handle(1, { t: 'xform', x: edgeRemote.x, y: edgeRemote.y, z: edgeRemote.z, yaw: 0, pitch: 0, arenaRevision: edgeMatch.revision });
+  Object.assign(edgeRemote, { x: edge.pos.x, y: edge.pos.y, z: edge.pos.z });
+  edgeServer.tickWar(3);
+  for (let frame = 0; frame < 20; frame++) {
+    edgeServer.tickWar(.05);
+    edge.pos[axis === 'x' ? 'z' : 'x'] += .01;
+    const out = edgeServer.handle(1, { t: 'xform', x: edge.pos.x, y: edge.pos.y, z: edge.pos.z, yaw: 0, pitch: 0, arenaRevision: edgeMatch.revision });
+    if (out.some(o => o.to === 1 && o.msg.t === 'teleport')) throw Error(`grounded ${axis}-edge movement was frozen`);
+    if (edgeRemote.x !== edge.pos.x || edgeRemote.z !== edge.pos.z) throw Error('edge movement was not accepted');
+  }
+}
+console.log('Parkour edge regression: supported edge landings stay movable after idle');

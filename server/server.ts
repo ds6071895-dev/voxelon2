@@ -68,6 +68,15 @@ const game = new GameServer(savedWorld && Number.isFinite(savedWorld.seed) ? sav
 if (savedWorld && game.restore(savedWorld)) {
   console.log(`restored world from ${WORLD_FILE}`);
 }
+let lastPlayerCountsKey = '';
+function broadcastPlayerCounts(): void {
+  const counts = game.activePlayerCounts();
+  const key = `${counts.play}:${counts.duels}:${counts.parkour}:${counts.bridge}`;
+  if (key === lastPlayerCountsKey) return;
+  lastPlayerCountsKey = key;
+  const msg: ServerMsg = { t: 'playerCounts', ...counts };
+  for (const cid of authed.keys()) send(cid, msg);
+}
 // When a season ends, persist the "Seasons Won" badge to every winning account
 // (including offline members) and notify whoever's online (Phase 5).
 game.onSeasonEnd = (winner, season) => {
@@ -324,6 +333,7 @@ function handleAuth(id: number, msg: ClientMsg & { t: 'register' | 'login' | 'se
     duelProgress: accounts.duelProgressOf(res.account.username),
     duelLeaderboard: accounts.duelLeaderboard(10),
   }));
+  broadcastPlayerCounts();
   // Issue (rotate) a session token so this browser can resume without the
   // password next visit — persisted on the account, mirrored in localStorage.
   const token = crypto.randomBytes(24).toString('hex');
@@ -506,6 +516,7 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
       return;
     }
     dispatch(game.handle(id, msg));
+    if (msg.t !== 'xform') broadcastPlayerCounts();
     // A pushed state blob is persisted to the account right away (cheap, and
     // means an unclean disconnect still keeps the last save). Any non-transform
     // message can mutate the world, so flag it for the next autosave.
@@ -537,6 +548,7 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
       authed.delete(id);
       saveAccounts();             // flush the just-updated account state
       dispatch(game.removePlayer(id));
+      broadcastPlayerCounts();
       console.log(`- player left (${game.playerCount} online)`);
     }
   });
@@ -579,6 +591,7 @@ setInterval(() => {
   dispatch(game.tickParty());
   dispatch(game.tickSeason(dt));
   dispatch(game.tickPolitics(dt)); // weekly elections + the coalesced treasury sync
+  broadcastPlayerCounts();
   for (const cid of authed.keys()) {
     send(cid, { t: 'snapshot', players: game.snapshotFor(cid), worldTime: game.clockTime() }, true);
   }

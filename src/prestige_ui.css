@@ -1,0 +1,157 @@
+/* Light wardrobe studio. Explicit surfaces keep text and controls in one theme. */
+body .vx-dress {
+  color-scheme: light; justify-content: flex-start;
+  padding: clamp(22px, 4vh, 48px) 24px;
+  background: radial-gradient(ellipse at 5% 0%, #fff0d4, transparent 45%), #f3f6fa;
+}
+body .vx-dress::after { display: none; }
+body .vx-dress-head { width: min(1020px, 100%); justify-items: start; gap: 10px; }
+body .vx-dress h2 { font: 750 clamp(30px, 5vw, 48px)/1.1 ui-sans-serif, system-ui, sans-serif; letter-spacing: -1.8px; color: #16202e; }
+body .vx-dress-eyebrow { font-size: 10px; letter-spacing: 2px; }
+body .vx-dress-eyebrow::before { display: none; }
+.vx-dress-subtitle { margin: 0; color: #52657c; font-size: 13px; line-height: 1.6; }
+body .vx-dress-cols { width: min(1020px, 100%); gap: 24px; align-items: stretch; flex-direction: row; flex-shrink: 0; }
+body .vx-dress-stage { display: grid; place-content: center; width: 40%; min-width: 300px; padding: 34px 0 40px; border: 1px solid #d8e1ec; border-radius: 20px; background: linear-gradient(160deg, #fff, #e6edf6); overflow: hidden; }
+body .vx-dress-stage::before { content: 'YOUR LOOK'; position: absolute; top: 20px; left: 22px; color: #52657c; font-size: 10px; letter-spacing: 1.8px; }
+body .vx-dress-preview { width: 300px; height: 430px; border-radius: 0; background: none; box-shadow: none; }
+body .vx-dress-beam, body .vx-dress-motes { display: none; }
+body .vx-dress-drag { bottom: 19px; color: #52657c; }
+body .vx-dress-panel { flex: 1; width: auto; min-width: 0; padding: 20px; gap: 8px; background: #fff; border: 1px solid #d8e1ec; box-shadow: 0 8px 26px #233b5510; }
+.vx-dress-rack-title { font-size: 10px; font-weight: 700; letter-spacing: 1.8px; color: #52657c; padding: 0 4px 12px; }
+body .vx-dress-row { min-height: 44px; padding: 5px 8px; border-radius: 10px; background: #f7f9fc; box-shadow: inset 0 0 0 1px #e2e8f0; }
+body .vx-dress-row:hover, body .vx-dress-row:focus-within { background: #fff7e7; box-shadow: inset 0 0 0 1px #d7b66d; }
+body .vx-dress-icon { background: #edf2f8; color: #526b89; box-shadow: none; }
+body .vx-dress-label { flex-basis: 83px; font-size: 9px; letter-spacing: .6px; color: #52657c; }
+body .vx-dress-arrow { width: 32px; height: 32px; border-radius: 8px; color: #344b65; background: #fff; }
+body .vx-dress-foot { width: min(1020px, 100%); justify-content: flex-end; flex-wrap: wrap; padding: 15px 0 0; border-top: 1px solid #d8e1ec; }
+body .vx-dress-btn { min-height: 44px; }
+body .vx-dress-btn:focus-visible, body .vx-dress-arrow:focus-visible,
+body .vx-cape-x:focus-visible, body .vx-cape-done:focus-visible,
+body .vx-cape-tile:focus-visible { outline: 2px solid #326cb1; outline-offset: 3px; }
+
+/* Cape collection: a compact equipped summary and a full-width gallery. */
+body .vx-cape-surface { color-scheme: light; background: #e8eef5ed; }
+body .vx-cape-shell { width: min(960px, 100%); height: min(740px, 100%); border-radius: 22px; background: #fff; }
+body .vx-cape-shell::before, body .vx-cape-shell::after { display: none; }
+body .vx-cape-head { padding: 24px 28px; border-bottom: 1px solid #d8e1ec; }
+body .vx-cape-titles h1 { font: 750 32px/1.2 ui-sans-serif, system-ui, sans-serif; letter-spacing: -1px; }
+body .vx-cape-body { padding: 26px 28px; }
+.vx-cape-collection { min-width: 0; }
+body .vx-cape-grid { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; }
+body .vx-cape-tile { border-radius: 14px; }
+body .vx-cape-swatch { height: 150px; background: #edf2f8; }
+body .vx-cape-cloth { clip-path: polygon(25% 0, 75% 0, 94% 95%, 72% 100%, 50% 94%, 28% 100%, 6% 95%); }
+body .vx-cape-cloth::before { clip-path: inherit; }
+body .vx-cape-soon { margin-top: 18px; padding: 20px; align-items: flex-start; background: #f7f9fc; box-shadow: inset 0 0 0 1px #d8e1ec; }
+body .vx-cape-soon-icon { animation: none; background: #eaf0f7; color: #526b89; box-shadow: none; }
+body .vx-cape-foot { background: #f7f9fc; }
+
+/* The summit: tier colours glow against an ink-blue ranked chamber. */
+#duel-ranks-view { --ar-ink: #edf5ff; --ar-dim: #b0c3db; --ar-mute: #91a9c5; --ar-line: #adcfff24; --ar-panel: #132033; padding: clamp(14px, 3vw, 28px); border-radius: 22px; background: radial-gradient(ellipse at 85% 0%, #35568155, transparent 48%), #0b1320; }
+#duel-ranks-view .duel-ranks-hero { position: relative; overflow: hidden; padding: 26px; margin-bottom: 26px; background: radial-gradient(ellipse at 0 0, color-mix(in srgb, var(--rank) 24%, transparent), transparent 65%), #111f31; box-shadow: inset 0 1px #ffffff10, 0 16px 35px #0003; }
+#duel-ranks-view .duel-ranks-hero strong { color: var(--rank-accent); }
+#duel-ranks-view .duel-ranks-overall-track { background: #0005; height: 8px; }
+#duel-ranks-view .duel-ladder { gap: 15px; position: relative; padding-left: 18px; }
+#duel-ranks-view .duel-ladder::before { content: ''; position: absolute; top: 35px; bottom: 35px; left: 0; width: 2px; background: linear-gradient(#ff5f90, #aa85fc, #73d7ff, #4edab0, #efd981, #c4b7a1, #d98651); box-shadow: 0 0 14px #8cbcff44; }
+#duel-ranks-view .duel-tier { min-height: 112px; padding: 20px; background: linear-gradient(115deg, color-mix(in srgb, var(--tier) 14%, #142033), #111d2e 65%); animation: prestige-tier-enter .6s cubic-bezier(.16,1,.3,1) both; animation-delay: calc(var(--tier-order) * 65ms); }
+#duel-ranks-view .duel-tier::after { content: '0' attr(data-tier); position: absolute; right: 235px; top: 5px; font-size: 78px; font-weight: 950; letter-spacing: -8px; color: var(--tier); opacity: .055; pointer-events: none; }
+#duel-ranks-view .duel-tier::before { left: -24px; top: calc(50% - 5px); bottom: auto; width: 10px; height: 10px; transform: rotate(45deg); opacity: .7; border-radius: 1px; }
+#duel-ranks-view .duel-tier.locked { opacity: .78; }
+#duel-ranks-view .duel-tier.current { border-color: var(--tier); box-shadow: 0 0 0 1px color-mix(in srgb, var(--tier) 30%, transparent), 0 12px 35px #0004, inset 0 0 35px color-mix(in srgb, var(--tier) 8%, transparent); }
+#duel-ranks-view .duel-tier-copy strong { color: var(--tier-accent); font-size: 20px; letter-spacing: 1px; }
+#duel-ranks-view .duel-tier-copy small { font-size: 9px; letter-spacing: .6px; line-height: 1.5; }
+#duel-ranks-view .duel-division { width: 65px; min-height: 61px; background: #030a1544; }
+#duel-ranks-view .duel-division.done { background: color-mix(in srgb, var(--tier) 16%, #111d2e); }
+#duel-ranks-view .duel-division.current { background: linear-gradient(140deg, var(--tier-accent), var(--tier)); }
+#duel-ranks-view .duel-tier-you { top: -9px; padding: 5px 10px; font-size: 8px; letter-spacing: 1.5px; }
+@keyframes prestige-tier-enter { from { opacity: 0; transform: translateY(20px); } }
+
+/* Reward choreography: charge, count, then an outward release on promotion. */
+body .duel-result-card { width: min(800px, 100%); }
+body .duel-rating-reveal { max-width: 640px; padding: 22px 30px; border-radius: 22px; isolation: isolate; background: radial-gradient(ellipse at 50% 25%, color-mix(in srgb, var(--rank) 20%, transparent), transparent 65%), #080f1bdd; }
+body .duel-rating-reveal > :not(.duel-block-particles, .duel-reveal-summary) { position: relative; z-index: 1; }
+.duel-reward-headline { min-height: 20px; color: var(--rank-accent); font-size: 11px; font-weight: 850; letter-spacing: 4px; }
+.duel-crest-stage { display: grid; place-items: center; height: 158px; margin: 5px 0 9px; }
+body .duel-crest-stage .duel-reveal-emblem { margin: 0; width: 100px; height: 100px; transform: rotate(-5deg); box-shadow: 0 16px 36px #0006, 0 0 40px color-mix(in srgb, var(--rank) 25%, transparent); }
+.duel-ascension-fx { position: absolute; inset: 0; pointer-events: none; }
+.duel-orbit { position: absolute; width: 148px; height: 148px; left: calc(50% - 74px); top: calc(50% - 74px); border-radius: 50%; border: 1px solid color-mix(in srgb, var(--rank) 30%, transparent); border-top: 2px solid var(--rank-accent); border-bottom: 2px solid var(--rank); transform: rotate(-35deg); }
+.duel-orbit.inner { width: 128px; height: 128px; left: calc(50% - 64px); top: calc(50% - 64px); transform: rotate(60deg); border-style: dashed; opacity: .5; }
+.duel-rating-reveal[data-phase="counting"] .duel-orbit { animation: prestige-orbit 1.8s linear infinite; }
+.duel-rating-reveal[data-phase="counting"] .duel-orbit.inner { animation-direction: reverse; }
+@keyframes prestige-orbit { to { transform: rotate(325deg); } }
+body .duel-rating-number { font-size: clamp(42px, 7vw, 68px); line-height: 1.1; margin-top: 10px; color: #f1f8ff; letter-spacing: -2px; }
+body .duel-rating-change { margin-left: 6px; padding: 5px 9px; border: 1px solid currentColor; border-radius: 8px; font-size: 20px; letter-spacing: -.5px; background: #0003; }
+.duel-rating-reveal[data-phase="counting"] .duel-rating-change { animation: prestige-gain-in .4s cubic-bezier(.2,1.4,.3,1) both; }
+@keyframes prestige-gain-in { from { opacity: 0; transform: translateY(14px) scale(.7); } }
+.duel-track-labels { display: flex; justify-content: space-between; gap: 12px; margin-top: 18px; font-size: 9px; color: #b2c7df; letter-spacing: .5px; }
+.duel-track-labels span:last-child { text-align: right; }
+body .duel-result-track { height: 12px; margin: 8px 0 15px; border: 1px solid #ffffff14; background: #0006; }
+body .duel-result-track-fill { position: relative; background: linear-gradient(90deg, var(--rank-shade), var(--rank) 55%, var(--rank-accent)); }
+body .duel-result-track-fill::after { content: ''; position: absolute; right: 0; top: 0; bottom: 0; width: 3px; background: #fff; box-shadow: 0 0 14px 4px var(--rank); }
+body .duel-rating-reveal[data-phase="counting"] .duel-block-particles i { animation-iteration-count: infinite; }
+.duel-shockwave { position: absolute; top: calc(50% - 55px); left: calc(50% - 55px); width: 110px; height: 110px; border-radius: 50%; border: 2px solid var(--rank-accent); opacity: 0; }
+.duel-ascension-fx b { position: absolute; left: calc(50% - 3px); top: calc(50% - 3px); width: 6px; height: 6px; background: var(--rank-accent); opacity: 0; border-radius: 1px; }
+.duel-rating-reveal.celebrate[data-phase="ascend"] .duel-shockwave { animation: prestige-wave .85s cubic-bezier(.1,.5,.2,1) both; }
+.duel-rating-reveal.celebrate[data-phase="ascend"] .duel-shockwave.second { animation-delay: .12s; }
+.duel-rating-reveal.celebrate[data-phase="ascend"] .duel-ascension-fx b { animation: prestige-sparks .8s ease-out var(--spark-delay) both; }
+.duel-rating-reveal.celebrate[data-phase="ascend"] .duel-reveal-emblem { animation: prestige-crest-land .8s cubic-bezier(.2,.9,.25,1) both; }
+.duel-rating-reveal.celebrate[data-phase="ascend"] .duel-reward-headline { animation: prestige-headline .65s cubic-bezier(.2,.9,.25,1) both; }
+.duel-rating-reveal.promotion .duel-reward-headline, .duel-rating-reveal.unlock .duel-reward-headline { font-size: clamp(22px, 4vw, 34px); letter-spacing: 5px; font-weight: 950; text-shadow: 0 0 30px color-mix(in srgb, var(--rank) 60%, transparent); }
+body .duel-rank-up { animation-iteration-count: 2; font-size: 11px; line-height: 1.6; }
+@keyframes prestige-wave { 0% { opacity: .7; transform: scale(.75); } 100% { opacity: 0; transform: scale(3.5); } }
+@keyframes prestige-sparks { 0% { opacity: 0; transform: rotate(var(--angle)) translateX(48px); } 15% { opacity: .9; } 100% { opacity: 0; transform: rotate(var(--angle)) translateX(var(--distance)) rotate(140deg); } }
+@keyframes prestige-crest-land { 0% { transform: scale(.85) rotate(-12deg); } 45% { transform: scale(1.18) rotate(3deg); } 100% { transform: scale(1) rotate(-5deg); } }
+@keyframes prestige-headline { from { opacity: 0; transform: translateY(10px) scale(.85); letter-spacing: 8px; } }
+
+@media (max-width: 900px) {
+  #duel-ranks-view .duel-ranks-hero { grid-template-columns: auto minmax(0, 1fr); }
+  #duel-ranks-view .duel-ranks-overall { grid-column: 1 / -1; text-align: left; }
+  #duel-ranks-view .duel-ranks-overall-track { width: 100%; }
+  body .vx-dress-cols { gap: 18px; flex-direction: row; }
+  body .vx-dress-stage { min-width: 240px; width: 35%; }
+  body .vx-dress-preview { width: 220px; height: 315px; }
+  body .vx-dress-panel { width: auto; }
+  body .vx-dress-count { display: none; }
+}
+@media (max-width: 760px) {
+  body .vx-dress-cols { flex-direction: column; }
+  body .vx-dress-stage { width: 100%; min-width: 0; }
+  body .vx-dress-preview { width: 180px; height: 258px; }
+  body .vx-dress-preview canvas { width: 100% !important; height: 100% !important; }
+}
+@media (max-width: 620px) {
+  body .vx-dress { padding: 24px 14px; }
+  body .vx-dress-cols { flex-direction: column; align-items: stretch; }
+  body .vx-dress-stage { width: 100%; min-width: 0; }
+  body .vx-dress-preview { width: 180px; height: 258px; }
+  body .vx-dress-preview canvas { width: 100% !important; height: 100% !important; }
+  body .vx-dress-panel { padding: 14px; }
+  body .vx-dress-foot { justify-content: center; gap: 8px; }
+  body .vx-dress-btn { padding: 12px; font-size: 9px; }
+  body .vx-cape-shell { border-radius: 0; height: 100%; }
+  body .vx-cape-body { grid-template-columns: 1fr; padding: 16px; gap: 20px; }
+  body .vx-cape-head { padding: 18px; }
+  #duel-ranks-view .duel-ranks-hero { padding: 18px; gap: 12px; }
+  #duel-ranks-view .duel-tier { padding: 18px 13px; grid-template-columns: 54px minmax(0, 1fr); gap: 12px; }
+  #duel-ranks-view .duel-tier-divisions { grid-column: 1 / -1; }
+  #duel-ranks-view .duel-division { flex: 1; }
+  #duel-ranks-view .duel-tier::after { right: 18px; }
+  body .duel-result-card { padding: 20px 14px; }
+  body .duel-rating-reveal { padding: 20px 14px; }
+  .duel-reward-headline { letter-spacing: 2px; }
+}
+/* Comfort modes cover pseudo-elements and skip-triggered animations as well. */
+body.reduced-motion :is(.vx-dress, .vx-cape-surface, .duel-rating-reveal, #duel-ranks-view) *,
+body.photosensitivity-safe :is(.vx-dress, .vx-cape-surface, .duel-rating-reveal, #duel-ranks-view) *,
+body .duel-rating-reveal.instant *,
+body.reduced-motion .duel-result-card, body.photosensitivity-safe .duel-result-card {
+  animation: none !important; transition: none !important;
+}
+body.photosensitivity-safe .duel-ascension-fx, body.reduced-motion .duel-ascension-fx,
+body .duel-rating-reveal.instant .duel-ascension-fx { display: none; }
+body.reduced-motion :is(.vx-dress, .vx-cape-surface) *::after,
+body.photosensitivity-safe :is(.vx-dress, .vx-cape-surface) *::after { animation: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  body :is(.vx-dress, .vx-cape-surface, .duel-rating-reveal, #duel-ranks-view) *, body .duel-result-card { animation: none !important; transition: none !important; }
+  .duel-ascension-fx { display: none; }
+}

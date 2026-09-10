@@ -5,7 +5,8 @@
 import * as THREE from 'three';
 import { BLOCKS, BlockInfo, isSolid, Tile } from './blocks';
 import type { Inventory } from './inventory';
-import { ITEMS } from './items';
+import { Item, ITEMS } from './items';
+import { createBowModel, poseBowModel } from './bowmodel';
 import type { Player } from './player';
 import type { Atlas } from './textures';
 import type { World } from './world';
@@ -146,9 +147,11 @@ export class ItemEntities {
       ? createGunModel(id)
       : isModeledGadget(id)
         ? createGadgetModel(id)
+        : id === Item.BridgeBow ? createBowModel()
         : new THREE.Mesh(itemGeometry(this.atlas, id), this.material);
     if (isGunItem(id)) poseGunModel(mesh, 'drop');
     else if (isModeledGadget(id)) poseGadgetModel(mesh, 'drop');
+    else if (id === Item.BridgeBow) poseBowModel(mesh, 'drop');
     this.scene.add(mesh);
     this.list.push({
       id, count,

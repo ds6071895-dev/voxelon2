@@ -1,9 +1,12 @@
 import {
-  BRIDGE_GOALS, BRIDGE_GOAL_LIMIT, BRIDGE_SIZE_X, BRIDGE_SIZE_Z, BRIDGE_TEAM_BLOCK,
+  BRIDGE_CAGE_FLOOR, BRIDGE_GOALS, BRIDGE_GOAL_LIMIT, BRIDGE_GOAL_RESET_MS,
+  BRIDGE_LANE_X, BRIDGE_SIZE_X, BRIDGE_SIZE_Z, BRIDGE_TEAM_BLOCK,
+  BRIDGE_MELEE_TIER, BRIDGE_BOW_COOLDOWN_MS, bridgeSwing,
   PARKOUR_CHECKPOINT_EVERY, PARKOUR_PLATFORMS,
   PARTY_ARENA_LOAD_TIMEOUT_MS, PARTY_CAPACITY, PARTY_COUNTDOWN_MS, PARTY_FLOOR_Y,
   PARTY_MAX_HEALTH, PARTY_RESULT_MS, PARTY_STAMP_MAX_Y, PARTY_STAMP_MIN_Y, PARTY_VOID_Y,
-  PartyGamesEngine, bridgeGoalGuard, bridgeSpawn, parkourCourse, partyArenaBlockAt,
+  PartyGamesEngine, bridgeCageHatch, bridgeCageSpawn, bridgeGoalGuard, bridgeSpawn,
+  parkourCourse, partyArenaBlockAt,
   partySpawns, type PartyLobbySnapshot, type PartyMode,
 } from '../src/partygames';
 import { GameServer, type Outbound } from '../src/net/server_core';
@@ -54,8 +57,25 @@ function run(e: PartyGamesEngine, snap: PartyLobbySnapshot, now: number) {
       !BLOCKS[partyArenaBlockAt(p.x, p.y, p.z)!]?.solid && !BLOCKS[partyArenaBlockAt(p.x, p.y + 1, p.z)!]?.solid);
     const lz = p.z - sub.minZ;
     check('each side spawns behind its own portal', s.participants[i].team === 0 ? lz < BRIDGE_SIZE_Z / 2 : lz > BRIDGE_SIZE_Z / 2);
+    // A round opens inside the drop cage, standing on its hatch, directly over
+    // the pad the hatch drops you onto.
+    const team = s.participants[i].team;
+    check('a round opens inside the cage', p.y === bridgeCageSpawn(sub, team, 0).y);
+    const pad = bridgeSpawn(sub, team, 0);
+    check('the cage stands over its own pad', p.x === pad.x && p.z === pad.z);
+    check('the drop is three blocks — never enough to hurt', p.y - pad.y === BRIDGE_CAGE_FLOOR);
+    check('the pad below is real ground', !!BLOCKS[partyArenaBlockAt(pad.x, pad.y - .1, pad.z)!]?.solid);
   }
-  check('the two sides spawn apart', Math.abs(spawns[0].z - spawns[1].z) > 100);
+  check('the two sides spawn apart', Math.abs(spawns[0].z - spawns[1].z) > 40);
+  // Every hatch cell is solid before the server opens it, and every one of them
+  // has clear air the whole way down to the pad.
+  for (const cell of bridgeCageHatch()) {
+    const x = sub.minX + cell.lx + .5, z = sub.minZ + cell.lz + .5;
+    check('the hatch is shut to begin with', !!BLOCKS[partyArenaBlockAt(x, cell.y, z)!]?.solid);
+    for (let y = PARTY_FLOOR_Y + 1; y < cell.y; y++)
+      check('the drop shaft is clear', !BLOCKS[partyArenaBlockAt(x, y, z)!]?.solid);
+    check('the drop lands on deck', !!BLOCKS[partyArenaBlockAt(x, PARTY_FLOOR_Y, z)!]?.solid);
+  }
 }
 // The map cannot favour a side: it is its own mirror with the wool swapped.
 {
@@ -73,7 +93,7 @@ function run(e: PartyGamesEngine, snap: PartyLobbySnapshot, now: number) {
           stamped++;
       }
   check('the two bases are exact mirrors', mismatched === 0);
-  check('the bases are actually built', stamped > 8000);
+  check('the bases are actually built', stamped > 4000);
   // Every portal is an open shaft with a floor you land on, not a hole to the void.
   for (const g of BRIDGE_GOALS)
     for (let lx = g.minX; lx < g.maxX; lx++)
@@ -83,10 +103,25 @@ function run(e: PartyGamesEngine, snap: PartyLobbySnapshot, now: number) {
         check('portal has a landing floor', !!BLOCKS[partyArenaBlockAt(sub.minX + lx + .5, PARTY_FLOOR_Y - 8, sub.minZ + lz + .5)!]?.solid);
       }
   // There has to be something to build across, or the mode has no verb.
+  // Sampled OFF the lane: everything either side of the span is a drop.
   let void_ = 0;
-  for (let lz = 44; lz < BRIDGE_SIZE_Z - 44; lz++)
-    if (!BLOCKS[partyArenaBlockAt(sub.minX + 12.5, PARTY_FLOOR_Y, sub.minZ + lz + .5)!]?.solid) void_++;
+  for (let lz = 19; lz < BRIDGE_SIZE_Z - 19; lz++)
+    if (!BLOCKS[partyArenaBlockAt(sub.minX + BRIDGE_LANE_X - 4.5, PARTY_FLOOR_Y, sub.minZ + lz + .5)!]?.solid) void_++;
   check('the catwalks stop short of the middle', void_ >= 16);
+  // And the lane itself is one unbroken block-wide walkway with nothing beside
+  // it and nothing over it, from one portal apron to the other.
+  for (let lz = 9; lz <= BRIDGE_SIZE_Z - 10; lz++) {
+    const x = sub.minX + BRIDGE_LANE_X + .5, z = sub.minZ + lz + .5;
+    check('the span is unbroken', !!BLOCKS[partyArenaBlockAt(x, PARTY_FLOOR_Y, z)!]?.solid);
+    check('the span is walkable', !BLOCKS[partyArenaBlockAt(x, PARTY_FLOOR_Y + 1, z)!]?.solid &&
+      !BLOCKS[partyArenaBlockAt(x, PARTY_FLOOR_Y + 2, z)!]?.solid);
+    // Both base decks and the middle island deliberately widen the route.
+    // Only the suspended span between them must stay one block wide.
+    if (lz < 19 || lz >= BRIDGE_SIZE_Z - 19 || (lz >= 36 && lz <= 43)) continue;
+    for (const dx of [-1, 1])
+      check('nothing beside the span is a footing',
+        !BLOCKS[partyArenaBlockAt(x + dx, PARTY_FLOOR_Y, z)!]?.solid);
+  }
 }
 // ── Scoring ────────────────────────────────────────────────────────────────
 {
@@ -105,9 +140,17 @@ function run(e: PartyGamesEngine, snap: PartyLobbySnapshot, now: number) {
   check('reaching the far side scores', me.score === 1 && !!scored.spawn);
   check('the scoreline is on the wire', e.snapshotFor(1, 5000)!.teamScores[0] === 1);
   check('a goal is announced', e.snapshotFor(1, 5000)!.lastGoal?.id === 1);
-  check('a goal sends the other side home too', !!e.evaluate(2, { x: sub.minX + 24, y: PARTY_FLOOR_Y + 1, z: sub.minZ + 88 }, 5001).spawn);
-  const fell = e.evaluate(1, { x: sub.minX + 24, y: PARTY_VOID_Y - 3, z: sub.minZ + 88 }, 6000);
+  const middle = { x: sub.minX + BRIDGE_LANE_X + .5, z: sub.minZ + BRIDGE_SIZE_Z / 2 };
+  const sent = e.evaluate(2, { ...middle, y: PARTY_FLOOR_Y + 1 }, 5001);
+  check('a goal sends the other side home too', !!sent.spawn);
+  // A goal is a restart: both sides go back into a cage, and the hatch does not
+  // open again for three seconds.
+  check('a goal cages the rival too', sent.spawn!.y === bridgeCageSpawn(sub, 1, 0).y);
+  check('a goal cages the scorer', scored.spawn!.y === bridgeCageSpawn(sub, 0, 0).y);
+  check('the cage is held for three seconds', e.snapshotFor(1, 5000)!.goalResetAt === 5000 + BRIDGE_GOAL_RESET_MS);
+  const fell = e.evaluate(1, { ...middle, y: PARTY_VOID_Y - 3 }, 9000);
   check('the void returns you to your own base', fell.spawn!.z === bridgeSpawn(sub, 0, 0).z && me.falls === 2);
+  check('an ordinary void death is not a cage', fell.spawn!.y === bridgeSpawn(sub, 0, 0).y);
   for (let goal = 2; goal <= BRIDGE_GOAL_LIMIT; goal++)
     e.evaluate(1, into(enemy), 6000 + goal * 1000);
   const done = e.snapshotFor(1, 20000)!;
@@ -251,6 +294,9 @@ function serverMatch(mode: PartyMode = 'parkour') {
     const loadout = launch.concat(s.handle(id, { t: 'partyArenaReady', revision: snap.revision }))
       .find(o => o.to === id && o.msg.t === 'partyLoadout');
     check('each side gets its own wool', loadout && (loadout.msg as { slots: { id: number }[] }).slots[0].id === BRIDGE_TEAM_BLOCK[teams.get(id)!]);
+    const slots = (loadout!.msg as { slots: ({ id: number } | null)[] }).slots;
+    check('each Bridge loadout equips iron instead of the cleaver',
+      slots[1]?.id === Item.IronAxe && !slots.some(slot => slot?.id === Item.VoidCleaver));
     const arena = launch.find(o => o.to === id && o.msg.t === 'partyArena');
     check('the client is told which side it is on', arena && (arena.msg as { team: number }).team === teams.get(id));
   }
@@ -283,7 +329,88 @@ function serverMatch(mode: PartyMode = 'parkour') {
   check('the enemy portal cannot be plugged',
     sends(1, { t: 'edit', ...plug, block: mine }).every(o => !(o.to === 2 && o.msg.t === 'edit')));
 }
-// Fighting for the span: the cleaver, the bow, and the movement gate that has
+// Movement and aim determine melee outcomes, independently of a charge clock.
+{
+  const input = { combo: 0, onGround: true, vy: 0, speed: 0,
+    toTargetX: 1, toTargetZ: 0, lookX: 1, lookZ: 0 };
+  const base = bridgeSwing(input);
+  const crit = bridgeSwing({ ...input, onGround: false, vy: -3 / 60 });
+  const sprint = bridgeSwing({ ...input, speed: 7 });
+  const combo = bridgeSwing({ ...input, combo: 3 });
+  check('normal falling jump attacks earn crit damage', crit.crit && crit.damage > base.damage);
+  check('rising and grounded attacks do not earn jump crits',
+    !bridgeSwing({ ...input, onGround: false, vy: 3 / 60 }).crit && !base.crit);
+  check('sprinting earns stronger directional knockback', sprint.kx > base.kx);
+  check('consecutive contact rewards combos', combo.damage > base.damage);
+  check('aim steers the knockback line', bridgeSwing({ ...input, lookX: 0, lookZ: 1 }).kz > 0);
+}
+// Real server traffic with two Bridges, Parkour and gun Duels all live.
+// Ending/reusing one arena must preserve everybody else's bodies and edits.
+{
+  const s = new GameServer(43);
+  for (let id = 10; id <= 21; id++) s.addPlayer(id, { username: `Concurrent${id}`, faction: 0 });
+  const startParty = (host: number, guest: number, mode: PartyMode) => {
+    s.handle(host, { t: 'partyQueue', join: true, mode });
+    s.handle(guest, { t: 'partyQueue', join: true, mode });
+    const snap = s.party.snapshotFor(host, s.worldTime * 1000)!;
+    check('concurrent queue creates the intended pair', snap.participants.map(p => p.id).sort().join(',') === `${host},${guest}`);
+    for (const id of [host, guest]) s.handle(id, { t: 'partyArenaReady', revision: snap.revision });
+    return snap;
+  };
+  const first = startParty(10, 11, 'bridge');
+  const second = startParty(12, 13, 'bridge');
+  const parkour = startParty(14, 15, 'parkour');
+  s.handle(16, { t: 'duelQueue', join: true });
+  s.handle(17, { t: 'duelQueue', join: true });
+  for (const id of [16, 17]) s.handle(id, { t: 'duelArenaReady' });
+  s.tickWar(7); s.tickParty(); s.tickDuels();
+  check('three party venues occupy distinct slots', new Set([first.arena!.slot, second.arena!.slot, parkour.arena!.slot]).size === 3);
+  for (const host of [10, 12, 14, 16]) {
+    check('each active match sees exactly its own pair',
+      s.snapshotFor(host).map(p => p.id).sort().join(',') === `${host},${host + 1}`);
+    check('each active match stays out of world snapshots', !s.snapshotFor(18).some(p => p.id === host));
+  }
+  const stageFight = (host: number, snap: PartyLobbySnapshot) => {
+    const a = s.players.get(host)!, b = s.players.get(host + 1)!;
+    Object.assign(a, { x: snap.sub!.minX + BRIDGE_LANE_X + .5, y: PARTY_FLOOR_Y + 1,
+      z: snap.sub!.minZ + BRIDGE_SIZE_Z / 2, yaw: Math.PI, held: Item.BridgeBow });
+    Object.assign(b, { x: a.x, y: a.y, z: a.z + 3 });
+    s.party.participantFor(host + 1)!.immuneUntil = 0;
+  };
+  stageFight(10, first); stageFight(12, second);
+  s.players.get(10)!.held = Item.IronAxe;
+  check('Bridge cannot melee a different Bridge or a gun duel',
+    s.handle(10, { t: 'partyMelee', target: 12 }).length === 0 &&
+    s.handle(10, { t: 'partyMelee', target: 16 }).length === 0);
+  s.players.get(10)!.held = Item.BridgeBow;
+  for (const host of [10, 12]) {
+    const out = s.handle(host, { t: 'partyShoot', dx: 0, dy: 0, dz: 1, power: 1 });
+    check('arrows are sent only to the firing match', out.length === 2 && out.every(o => o.to === host || o.to === host + 1));
+  }
+  const key = (snap: PartyLobbySnapshot) => `${snap.sub!.minX + 5},${PARTY_FLOOR_Y + 3},${snap.sub!.minZ + 5}`;
+  s.edits.set(key(first), Block.TeamWoolA);
+  s.edits.set(key(second), Block.TeamWoolB);
+  s.handle(10, { t: 'partyLeave' });
+  s.handle(11, { t: 'partyLeave' });
+  check('ending one Bridge clears only its edits', !s.edits.has(key(first)) && s.edits.has(key(second)));
+  check('other modes and matches keep running', s.party.phaseFor(12) === 'running' &&
+    s.party.phaseFor(14) === 'running' && s.duels.phaseFor(16) === 'running');
+  s.tickWar(.06);
+  const tick = s.tickParty();
+  check('the other Bridge arrow still lands after the first match leaves',
+    tick.some(o => o.to === 12 && o.msg.t === 'partyHit' && o.msg.ranged));
+  check('departed arrows never leak hits into other matches',
+    tick.filter(o => o.msg.t === 'partyHit').every(o => o.to === 12));
+  const reused = startParty(20, 21, 'bridge');
+  check('a new pair safely reuses the vacant arena', reused.arena!.slot === first.arena!.slot && !s.edits.has(key(first)));
+  check('slot reuse preserves active opponents and cover',
+    s.snapshotFor(12).map(p => p.id).sort().join(',') === '12,13' && s.edits.has(key(second)));
+  // Countdown packets cannot preload arrows into a new round.
+  s.players.get(20)!.held = Item.BridgeBow;
+  check('no arrows may fire while the next pair is staged',
+    s.handle(20, { t: 'partyShoot', dx: 0, dy: 0, dz: 1, power: 1 }).length === 0);
+}
+// Fighting for the span: the iron axe, the bow, and the movement gate that has
 // to let a fight happen without ever freezing anybody in mid-air.
 {
   const { s, snap, sends } = serverMatch('bridge');
@@ -293,26 +420,42 @@ function serverMatch(mode: PartyMode = 'parkour') {
   s.tickParty();
   check('the Bridge arms both sides', s.party.phaseFor(1) === 'running');
   const a = s.players.get(1)!, b = s.players.get(2)!;
-  const spawn = { x: a.x, y: a.y, z: a.z };
+  // Fight on the central island after leaving the now-open spawn cage.
+  const spawn = { x: snap.sub!.minX + BRIDGE_LANE_X + .5, y: PARTY_FLOOR_Y + 1, z: snap.sub!.minZ + BRIDGE_SIZE_Z / 2 };
   // Past the spawn shield, and within arm's reach of each other.
   s.tickWar(3);
   s.tickParty();
+  Object.assign(a, spawn);
   Object.assign(b, { x: a.x + 1.4, y: a.y, z: a.z });
   a.yaw = Math.atan2(-(b.x - a.x), -(b.z - a.z));
   a.held = Item.VoidCleaver;
+  check('the old cleaver cannot attack in the Bridge', sends(1, { t: 'partyMelee', target: 2 }).length === 0);
+  sends(1, { t: 'xform', ...spawn, yaw: a.yaw, pitch: 0,
+    arenaRevision: snap.revision, held: Item.IronAxe });
+  check('the Bridge accepts equipping the iron axe over the wire', a.held === Item.IronAxe);
   const swing = sends(1, { t: 'partyMelee', target: 2 });
   const landed = swing.find(o => o.to === 1 && o.msg.t === 'partyHit')?.msg as { amount: number } | undefined;
-  check('a cleaver swing hurts the rival', swing.some(o => o.to === 2 && o.msg.t === 'hurt'));
+  check('an iron axe swing hurts the rival', swing.some(o => o.to === 2 && o.msg.t === 'hurt'));
   check('the swing reports back to the attacker', !!landed && landed.amount > 0);
+  check('the Bridge axe hits immediately for its fixed damage', landed?.amount === BRIDGE_MELEE_TIER.damage);
   check('the damage is server-side, not claimed', b.health === PARTY_MAX_HEALTH - landed!.amount);
   check('spam is dropped rather than scaled', sends(1, { t: 'partyMelee', target: 2 }).length === 0);
+  s.tickWar(BRIDGE_MELEE_TIER.cooldownMs / 1000 + .001);
+  const followup = sends(1, { t: 'partyMelee', target: 2 })
+    .find(o => o.to === 1 && o.msg.t === 'partyHit')?.msg;
+  check('a fast follow-up has full damage and an earned combo',
+    !!followup && followup.t === 'partyHit' && followup.amount >= landed!.amount && followup.combo === 1);
   s.tickWar(1);
+  const coverKey = `${Math.floor(a.x + .7)},${Math.floor(a.y + 1.35)},${Math.floor(a.z)}`;
+  s.edits.set(coverKey, Block.TeamWoolB);
+  check('wool cover blocks axe contact', sends(1, { t: 'partyMelee', target: 2 }).length === 0);
+  s.edits.delete(coverKey);
   a.yaw += Math.PI;
   check('a swing with your back turned misses', sends(1, { t: 'partyMelee', target: 2 }).length === 0);
   a.yaw -= Math.PI;
   a.held = 0;
   check('an empty hand cannot swing', sends(1, { t: 'partyMelee', target: 2 }).length === 0);
-  a.held = Item.VoidCleaver;
+  a.held = Item.IronAxe;
   let killed = false;
   for (let i = 0; i < 40 && !killed; i++) {
     s.tickWar(1);
@@ -323,23 +466,23 @@ function serverMatch(mode: PartyMode = 'parkour') {
       check('a kill sends the body home at full health',
         out.some(o => o.to === 2 && o.msg.t === 'respawned') && b.health === PARTY_MAX_HEALTH);
   }
-  check('the cleaver can finish a fight', killed);
+  check('the iron axe can finish a fight', killed);
   check('kills and deaths are on the scoreboard',
     s.party.participantFor(1)!.kills === 1 && s.party.participantFor(2)!.deaths === 1);
-  // The bow. A full draw is only ever available to somebody who waited for it.
+  // The bow fires instantly with consistent strength at its action interval.
   a.held = Item.BridgeBow;
   s.tickWar(2);
   const shot = sends(1, { t: 'partyShoot', dx: 0, dy: 0, dz: 1, power: 1 });
   check('a released arrow reaches BOTH clients', shot.filter(o => o.msg.t === 'partyArrow').length === 2);
   check('a second shot in the same instant is refused', sends(1, { t: 'partyShoot', dx: 0, dy: 0, dz: 1, power: 1 }).length === 0);
-  s.tickWar(2);
+  s.tickWar(BRIDGE_BOW_COOLDOWN_MS / 1000 + .001);
   const full = sends(1, { t: 'partyShoot', dx: 0, dy: 0, dz: 1, power: 1 })
     .find(o => o.msg.t === 'partyArrow')!.msg as { power: number };
-  check('waiting for the draw buys the full draw', full.power === 1);
+  check('the next arrow needs no additional draw time', full.power === 1);
   s.tickWar(2);
   const cheated = sends(1, { t: 'partyShoot', dx: 0, dy: 0, dz: 1, power: 9 })
     .find(o => o.msg.t === 'partyArrow')!.msg as { power: number };
-  check('a claimed draw is capped at a real one', cheated.power === 1);
+  check('a forged power cannot increase arrow strength', cheated.power === 1);
   // Point blank into the rival: the arrow is the server's, and it lands.
   s.party.participantFor(2)!.immuneUntil = 0;
   Object.assign(b, { x: a.x, y: a.y, z: a.z + 3, health: PARTY_MAX_HEALTH });
@@ -352,7 +495,7 @@ function serverMatch(mode: PartyMode = 'parkour') {
     if (hit) arrow = hit.msg as unknown as { amount: number; crit: boolean; ranged: boolean };
   }
   check('an arrow that reaches a body damages it', !!arrow && arrow.amount > 0);
-  check('a full draw reports as a ranged crit', arrow!.ranged && arrow!.crit);
+  check('instant arrows deal fixed damage without automatic charge crits', arrow!.ranged && !arrow!.crit && arrow!.amount === 7);
   // ── The movement gate ────────────────────────────────────────────────────
   // Standing still, and then four seconds of sprint-jumping whose touchdowns
   // fall BETWEEN packets. Neither may ever produce a correction: a false

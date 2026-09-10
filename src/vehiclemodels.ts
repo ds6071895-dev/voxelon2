@@ -11,7 +11,7 @@
 
 import * as THREE from 'three';
 import type { BombSnapshot, HelicopterSnapshot } from './vehicles';
-import { SEAT_OFFSETS } from './vehicles';
+import { SEAT_OFFSETS, WRECK_SECONDS } from './vehicles';
 import { helicopterStats } from './warfare';
 
 const FACE_SHADE = [0.80, 0.62, 1.0, 0.46, 0.90, 0.70];
@@ -662,7 +662,11 @@ function angleDelta(a: number, b: number): number {
   return Math.atan2(Math.sin(b - a), Math.cos(b - a));
 }
 
-interface Smoke { mesh: THREE.Mesh; ttl: number; life: number; drift: THREE.Vector3 }
+interface Smoke {
+  mesh: THREE.Mesh; ttl: number; life: number; drift: THREE.Vector3;
+  opacity: number; gravity?: number; floor?: number; spin?: THREE.Vector3;
+  fixedSize?: boolean;
+}
 
 /** Scratch vectors — sync/update run every frame for every airframe. */
 const _tmp = new THREE.Vector3();
@@ -679,6 +683,7 @@ export class VehicleModels {
   private clock = 0;
   /** The airframe the local player is aboard (its own bar stays hidden). */
   private localRide: number | null = null;
+  private hovered: number | null = null;
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -907,6 +912,7 @@ export class VehicleModels {
    * the middle of your own windscreen is just clutter.
    */
   setLocalRide(id: number | null): void { this.localRide = id; }
+  setHovered(id: number | null): void { this.hovered = id; }
 
   /**
    * Spall thrown off a hull that just took a hit. Called from the snapshot
@@ -958,18 +964,25 @@ export class VehicleModels {
       disposeTree(entry.mesh);
     }
     this.bombs.clear();
+    for (const s of this.smoke) {
+      this.scene.remove(s.mesh);
+      s.mesh.geometry.dispose();
+      (s.mesh.material as THREE.Material).dispose();
+    }
+    this.smoke.length = 0;
   }
 
   private puff(
     x: number, y: number, z: number, size: number, hex: number, life: number,
     drift: THREE.Vector3, opacity = 0.5,
   ): void {
+    if (this.smoke.length >= 500) return;
     const mesh = new THREE.Mesh(
       paintRound(new THREE.SphereGeometry(size, 6, 5), hex, 0.1),
       new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity, depthWrite: false }));
     mesh.position.set(x, y, z);
     this.scene.add(mesh);
-    this.smoke.push({ mesh, ttl: life, life, drift });
+    this.smoke.push({ mesh, ttl: life, life, drift, opacity });
   }
 
   /** The wreck explosion when an airframe hits zero HP. */
@@ -979,6 +992,43 @@ export class VehicleModels {
       this.puff(x + Math.cos(a) * 0.8, y + Math.random() * 1.2, z + Math.sin(a) * 0.8,
         0.5 + Math.random() * 0.7, i % 3 ? 0x3c3a38 : 0xff7a2a, 1.8,
         new THREE.Vector3(Math.cos(a) * 2, 1.8 + Math.random(), Math.sin(a) * 2), 0.7);
+    }
+  }
+
+  /** Impact payoff: ripped panels and rotor blades tumble through a fireball,
+   * then bounce to rest while dust spreads and a smoke plume climbs. */
+  crash(id: number, x: number, y: number, z: number): void {
+    this.remove(id);
+    this.explode(x, y, z);
+    for (let i = 0; i < 32; i++) {
+      const angle = i * Math.PI * 2 / 32;
+      const speed = 3 + Math.random() * 6;
+      const fire = i < 12;
+      this.puff(x, y - 0.6, z, fire ? 0.8 : 0.65,
+        fire ? (i % 2 ? 0xffb32c : 0xff5020) : 0x827669,
+        fire ? 0.7 : 2.6,
+        new THREE.Vector3(Math.cos(angle) * speed, fire ? 3 : 0.4, Math.sin(angle) * speed),
+        fire ? 0.95 : 0.55);
+    }
+    for (let i = 0; i < 12; i++) {
+      this.puff(x + (Math.random() - 0.5) * 2, y + i * 0.4, z + (Math.random() - 0.5) * 2,
+        1 + Math.random(), 0x302d2b, 4.5,
+        new THREE.Vector3(0.4, 1.5 + Math.random(), 0.2), 0.8);
+    }
+    for (let i = 0; i < 18; i++) {
+      const blade = i < 4;
+      const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(blade ? 2.6 : 0.35 + Math.random() * 0.7, 0.12, blade ? 0.22 : 0.6),
+        new THREE.MeshBasicMaterial({ color: blade ? STEEL_DARK : i % 2 ? OLIVE : STEEL,
+          transparent: true }));
+      mesh.position.set(x, y, z);
+      this.scene.add(mesh);
+      const angle = i * 2.4;
+      const speed = 3 + Math.random() * 6;
+      this.smoke.push({ mesh, ttl: 5, life: 5, opacity: 1, fixedSize: true,
+        gravity: 18, floor: y - 1,
+        drift: new THREE.Vector3(Math.cos(angle) * speed, 5 + Math.random() * 8, Math.sin(angle) * speed),
+        spin: new THREE.Vector3(Math.random() * 7, Math.random() * 5, Math.random() * 9) });
     }
   }
 
@@ -1078,7 +1128,8 @@ export class VehicleModels {
 
       // Rotor speed: full while flown, winding DOWN once the wreck is falling.
       const dying = snap.dying > 0;
-      const spin = dying ? 4 + snap.dying * 8 : (snap.pilot || snap.ropeDeployed) ? 34 : 6;
+      const spin = dying ? 3 + 25 * Math.exp(-(WRECK_SECONDS - snap.dying) * 1.1)
+        : (snap.pilot || snap.ropeDeployed) ? 34 : 6;
       e.rotorPhase += dt * spin;
       model.mainRotor.rotation.y = e.rotorPhase;
       model.tailRotor.rotation.x = -e.rotorPhase * 2.4;
@@ -1110,7 +1161,9 @@ export class VehicleModels {
       else bar.ghost = bar.shown;
       bar.flash = Math.max(0, bar.flash - dt);
       const dist = camera ? _eye.distanceTo(model.group.position) : 0;
-      const visible = !dying && snap.maxHp > 0 && id !== this.localRide && dist < BAR_FAR;
+      const hovered = id === this.hovered;
+      const visible = !dying && snap.maxHp > 0 && id !== this.localRide && dist < BAR_FAR &&
+        (hovered || bar.flash > 0 || bar.ghost > frac + 0.01);
       bar.sprite.visible = visible;
       if (visible) {
         drawHeliBar(bar, snap, e.tint, e.markLabel);
@@ -1121,7 +1174,7 @@ export class VehicleModels {
         bar.sprite.scale.set(3.2 * grow * punch, 0.85 * grow * punch, 1);
         bar.sprite.position.y = 2.5 + grow * 0.35;
         const mat = bar.sprite.material as THREE.SpriteMaterial;
-        mat.opacity = dist > BAR_FADE
+        mat.opacity = !hovered && dist > BAR_FADE
           ? Math.max(0, 1 - (dist - BAR_FADE) / (BAR_FAR - BAR_FADE)) : 1;
       }
 
@@ -1138,6 +1191,9 @@ export class VehicleModels {
             dying ? 0.45 : 0.28, dying ? 0x2e2c2a : 0x6a6a6c, dying ? 2 : 1.4,
             new THREE.Vector3((Math.random() - 0.5) * 0.6, 1.1, (Math.random() - 0.5) * 0.6),
             dying ? 0.6 : 0.35);
+          if (dying) this.puff(p.x, p.y - 0.1, p.z, 0.35 + Math.random() * 0.3,
+            Math.random() > 0.5 ? 0xff8620 : 0xffd04a, 0.35,
+            new THREE.Vector3(0, 2, 0), 0.9);
         }
       }
     }
@@ -1145,9 +1201,21 @@ export class VehicleModels {
       const s = this.smoke[i];
       s.ttl -= dt;
       const k = Math.max(0, s.ttl / s.life);
+      if (s.gravity) s.drift.y -= s.gravity * dt;
       s.mesh.position.addScaledVector(s.drift, dt);
-      s.mesh.scale.setScalar(0.6 + (1 - k) * 1.6);
-      (s.mesh.material as THREE.MeshBasicMaterial).opacity = 0.5 * k;
+      if (s.floor !== undefined && s.mesh.position.y < s.floor) {
+        s.mesh.position.y = s.floor;
+        s.drift.y = Math.abs(s.drift.y) * 0.25;
+        s.drift.x *= 0.65; s.drift.z *= 0.65;
+        s.spin?.multiplyScalar(0.55);
+      }
+      if (s.spin) {
+        s.mesh.rotation.x += s.spin.x * dt;
+        s.mesh.rotation.y += s.spin.y * dt;
+        s.mesh.rotation.z += s.spin.z * dt;
+      }
+      if (!s.fixedSize) s.mesh.scale.setScalar(0.6 + (1 - k) * 1.6);
+      (s.mesh.material as THREE.MeshBasicMaterial).opacity = s.opacity * (s.fixedSize ? Math.min(1, s.ttl) : k);
       if (s.ttl <= 0) {
         this.scene.remove(s.mesh);
         s.mesh.geometry.dispose();

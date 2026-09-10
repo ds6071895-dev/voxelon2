@@ -17,7 +17,7 @@ import {
 import {
   VehicleSim, sanitizeHelicopter, sanitizeHeliInput, seatPosition, viewYawToHeliYaw,
   DISMOUNT_CLEARANCE, EJECT_DAMAGE, FAST_ROPE_LENGTH, HELI_FUEL_BURN, HELI_FUEL_IDLE, PASSENGER_ARC,
-  fastRopeProgressDelta,
+  fastRopeProgressDelta, helicopterRayDistance, HELI_GROUND_CLEARANCE,
   SEAT_OFFSETS, type VehicleEvent,
 } from '../src/vehicles';
 import { VaultEncounter, type EncounterParticipant } from '../src/vault_encounter';
@@ -28,6 +28,8 @@ import { Block } from '../src/blocks';
 import { Item, ITEMS } from '../src/items';
 import { mulberry32 } from '../src/noise';
 import { branchIconName, nodeIconName, warfareIconNames } from '../src/warfare_ui';
+import * as THREE from 'three';
+import { VehicleModels } from '../src/vehiclemodels';
 
 const failures: string[] = [];
 const check = (condition: boolean, message: string): void => {
@@ -1063,6 +1065,104 @@ const check = (condition: boolean, message: string): void => {
     check(sim.ropePosition(88) === null, 'dropping removes the rope position immediately');
   }
 
+}
+
+// Shoot-downs persist to actual impact, including from the maximum flight band.
+{
+  const origin = { x: 0, y: 0, z: 0 }, dir = { x: 0, y: 0, z: 1 };
+  const hit = helicopterRayDistance(origin, dir, { x: 0, y: 0, z: 10 }, 8);
+  check(hit !== null && Math.abs(hit - 7.4) < 0.001,
+    'hover and bullets reach the near hull surface, even with cover behind it');
+  check(helicopterRayDistance(origin, dir, { x: 3, y: 0, z: 10 }, 80) === null &&
+    helicopterRayDistance(origin, dir, { x: 0, y: 0, z: -10 }, 80) === null &&
+    helicopterRayDistance(origin, dir, { x: 0, y: 0, z: 10 }, 7) === null,
+    'air targeting rejects misses, targets behind the shooter and out-of-range hulls');
+  for (const tier of [1, 6]) for (const dt of [0.05, 0.25]) {
+    const sim = new VehicleSim({ solid: () => false, groundY: () => 64,
+      worldHalf: 2500, vaultArena: () => false });
+    const h = sim.spawn('Target', 1, { x: 0, y: 64, z: 0 }, tier);
+    h.position.y = 64 + 128;
+    h.velocity = { x: 5, y: 8, z: 2 };
+    let shots = 0;
+    const events: VehicleEvent[] = [];
+    while (h.hp > 0 && shots < 30) { events.push(...sim.damageFromGun(h.id, 4)); shots++; }
+    check(shots === (tier === 1 ? 12 : 19), `tier ${tier} falls to ${shots} rifle hits`);
+    check(events.filter(e => e.kind === 'heliDown').length === 1,
+      'lethal fire reports one shoot-down');
+    for (let elapsed = 0; elapsed < 2.5; elapsed += dt) events.push(...sim.tick(dt));
+    check(sim.helicopters.has(h.id) && h.position.y > 64 + HELI_GROUND_CLEARANCE,
+      'high-altitude wreck remains visible past the old 2.4-second timeout');
+    for (let elapsed = 0; elapsed < 12; elapsed += dt) events.push(...sim.tick(dt));
+    const impacts = events.filter(e => e.kind === 'heliCrash');
+    check(impacts.length === 1 && Math.abs(impacts[0].y - 64 - HELI_GROUND_CLEARANCE) < 0.01 &&
+      events.filter(e => e.kind === 'heliRemoved').length === 1 && !sim.helicopters.has(h.id),
+      `wreck reaches ground and crashes exactly once at ${dt}s steps`);
+  }
+  const roof = new VehicleSim({ solid: (_x, y) => y >= 100 && y < 101,
+    groundY: () => 64, worldHalf: 2500, vaultArena: () => false });
+  const h = roof.spawn('Roof target', 1, { x: 0, y: 140, z: 0 }, 1);
+  roof.damageFromGun(h.id, 100);
+  const events: VehicleEvent[] = [];
+  for (let i = 0; i < 40; i++) events.push(...roof.tick(0.25));
+  check(events.some(e => e.kind === 'heliCrash' && e.y >= 101),
+    'a falling wreck hits a one-block roof instead of tunnelling to the terrain below');
+
+  const server = new GameServer(1337, mulberry32(72));
+  server.addPlayer(1, { username: 'Shooter', faction: 0 });
+  const target = server.vehicles.spawn('Enemy', 1, { x: 400, y: 160, z: 400 }, 1);
+  const initial = target.hp;
+  server.handle(1, { t: 'heliHit', id: target.id, amount: 4 });
+  check(target.hp === initial - 12, 'online gunfire uses the same hull damage as offline');
+  const friendly = server.vehicles.spawn('Friendly', 0, { x: 404, y: 160, z: 400 }, 1);
+  server.handle(1, { t: 'heliHit', id: friendly.id, amount: 4 });
+  check(friendly.hp === friendly.maxHp, 'friendly airframes remain protected from gunfire');
+  for (let i = 0; i < 11; i++) server.handle(1, { t: 'heliHit', id: target.id, amount: 4 });
+  let impacts = 0;
+  for (let i = 0; i < 240; i++) impacts += server.tickWarfare(0.05).filter(o => o.msg.t === 'heliCrash').length;
+  check(impacts === 1, 'server broadcasts one ground-impact effect to all clients');
+}
+
+// Exercise the actual scene graph without requiring a WebGL context. Only the
+// canvas drawing surface is stubbed; bar visibility and effect lifetimes run live.
+{
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  const noop = () => {};
+  const context = { clearRect: noop, fillText: noop, beginPath: noop, roundRect: noop,
+    fill: noop, stroke: noop, fillRect: noop, measureText: () => ({ width: 30 }) };
+  Object.defineProperty(globalThis, 'document', { configurable: true,
+    value: { createElement: () => ({ width: 0, height: 0, getContext: () => context }) } });
+  try {
+    const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera();
+    const visuals = new VehicleModels(scene, () => '#4499ff');
+    const sim = new VehicleSim({ solid: () => false, groundY: () => 0,
+      worldHalf: 2500, vaultArena: () => false });
+    const h = sim.spawn('Hover target', 1, { x: 0, y: 0, z: -150 }, 1);
+    visuals.sync(sim.snapshot(), []);
+    let bar: THREE.Sprite | undefined;
+    scene.traverse(o => { if (o instanceof THREE.Sprite) bar = o; });
+    visuals.update(0.05, camera);
+    check(!!bar && !bar.visible, 'unhovered healthy helicopters do not clutter the HUD');
+    visuals.setHovered(h.id); visuals.update(0.05, camera);
+    check(!!bar?.visible && (bar.material as THREE.SpriteMaterial).opacity === 1,
+      'hover reveals a fully readable health bar even at long range');
+    visuals.setLocalRide(h.id); visuals.update(0.05, camera);
+    check(!bar?.visible, 'the local ride uses its cockpit gauge instead of an overhead bar');
+    visuals.setLocalRide(null); visuals.setHovered(null);
+    sim.damageFromGun(h.id, 4); visuals.sync(sim.snapshot(), []); visuals.update(0.05, camera);
+    check(!!bar?.visible, 'taking a hit briefly reveals the authoritative hull bar');
+    sim.damageFromGun(h.id, 100); visuals.sync(sim.snapshot(), []); visuals.update(0.05, camera);
+    check(!bar?.visible, 'a falling wreck hides its empty health bar');
+    visuals.crash(h.id, 0, 1.25, -150);
+    check(visuals.snapshotOf(h.id) === null && scene.children.length >= 60,
+      'impact replaces the airframe with fire, dust, smoke and tumbling debris');
+    for (let i = 0; i < 360; i++) visuals.update(1 / 60, camera);
+    check(scene.children.length === 0, 'all crash effects expire and leave no scene objects behind');
+    visuals.explode(0, 0, 0); visuals.clear();
+    check(scene.children.length === 0, 'leaving the world clears active effects immediately');
+  } finally {
+    if (previous) Object.defineProperty(globalThis, 'document', previous);
+    else Reflect.deleteProperty(globalThis, 'document');
+  }
 }
 
 if (failures.length) throw new Error(`${failures.length} warfare smoke check(s) failed`);

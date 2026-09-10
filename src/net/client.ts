@@ -12,6 +12,7 @@ import {
   ClientMsg, DuelLeaderboardEntry, GameMode, ItemEntityInfo, PlayerInfo, SERVER_PORT, ServerMsg,
   TRANSFORM_HZ,
 } from './protocol';
+import type { PlayerCounts } from './protocol';
 import type { Cosmetics } from '../character';
 import type {
   EncounterEvent, EncounterSnapshot, VaultAttackIntent,
@@ -85,11 +86,14 @@ export class NetClient {
   readonly remotes = new Map<number, Remote>();
   /** Server-owned dropped items, keyed by entity id (for the renderer). */
   readonly netItems = new Map<number, ItemEntityInfo>();
+  /** Latest server-authoritative population by mode. */
+  playerCounts: PlayerCounts | null = null;
 
   /** Fired once the server welcome arrives (multiplayer is now live). */
   onWelcome?: (info: PlayerInfo) => void;
   onSocketOpen?: () => void;
   onDuelInviteInfo?: (valid: boolean, host?: string, lobbyId?: string) => void;
+  onPlayerCounts?: (counts: PlayerCounts) => void;
   onDuelQueue?: (queued: boolean) => void;
   /** Persistent authoritative day/night clock, refreshed with every snapshot. */
   onWorldTime?: (seconds: number) => void;
@@ -220,6 +224,7 @@ export class NetClient {
     id: number, x: number, y: number, z: number, faction: number, reason: HeliLossReason,
   ) => void;
   onHeliGone?: (id: number) => void;
+  onHeliCrash?: (id: number, x: number, y: number, z: number) => void;
   /** You were thrown clear of a bursting airframe, with an impulse to match. */
   onEjected?: (
     x: number, y: number, z: number, vx: number, vy: number, vz: number,
@@ -322,6 +327,7 @@ export class NetClient {
         this.isOp = false; // re-granted by the server on the next successful auth
         this.remotes.clear();
         this.netItems.clear();
+        this.playerCounts = null;
         this.onDisconnect?.();
         this.onRoster?.();
       } else {
@@ -363,6 +369,13 @@ export class NetClient {
         if (msg.state) this.onRestoreState?.(msg.state);
         if (me) this.onWelcome?.(me);
         this.onRoster?.();
+        break;
+      }
+      case 'playerCounts': {
+        this.playerCounts = {
+          play: msg.play, duels: msg.duels, parkour: msg.parkour, bridge: msg.bridge,
+        };
+        this.onPlayerCounts?.(this.playerCounts);
         break;
       }
       case 'join':
@@ -520,6 +533,9 @@ export class NetClient {
         break;
       case 'heliGone':
         this.onHeliGone?.(msg.id);
+        break;
+      case 'heliCrash':
+        this.onHeliCrash?.(msg.id, msg.x, msg.y, msg.z);
         break;
       case 'seasonEnd':
         this.onSeasonEnd?.(msg.winner, msg.number);

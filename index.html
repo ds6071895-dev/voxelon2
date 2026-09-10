@@ -394,15 +394,6 @@
     .pg-call-label { font: 800 9px/1 inherit; letter-spacing: 2.2px; color: #8398b2; }
     .pg-call-name { font: 900 28px/1 inherit; letter-spacing: 3px; color: var(--pg-call, #fff); }
 
-    /* Bow draw. Sits just under the crosshair, because that is where you are
-       looking while you decide whether to let go. */
-    .pg-draw { position: absolute; left: 50%; top: calc(50% + 26px); transform: translateX(-50%);
-      width: 104px; height: 5px; border-radius: 3px; background: rgba(8,10,18,.7);
-      border: 1px solid rgba(150,182,224,.22); overflow: hidden; }
-    .pg-draw[hidden] { display: none !important; }
-    .pg-draw > i { display: block; height: 100%; width: 0; background: #ffd25e; }
-    .pg-draw.full > i { background: #72ffcb; box-shadow: 0 0 12px rgba(114,255,203,.9); }
-
     .pg-card { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
       min-width: 260px; padding: 16px 18px; border-radius: 12px;
       background: rgba(10,13,22,.94); border: 1px solid rgba(150,182,224,.22);
@@ -1355,7 +1346,27 @@
       animation: btn-swipe 4.6s ease-in-out infinite;
     }
     @keyframes btn-swipe { 0% { left: -70%; } 45%, 100% { left: 130%; } }
-    #overlay #play-btn { min-height: 62px; font-size: 15px; letter-spacing: 4px; }
+    #overlay #play-btn { min-height: 62px; font-size: 15px; letter-spacing: 4px; display: flex; align-items: center; justify-content: center; }
+    #overlay #play-player-count {
+      position: absolute; right: 14px; display: inline-flex; align-items: center; gap: 5px;
+      color: rgba(36,23,3,.7); font-size: 8px; font-weight: 800; letter-spacing: .8px;
+      line-height: 1.2; text-transform: uppercase; white-space: nowrap;
+    }
+    #overlay #play-player-count::before,
+    .minigame-live-count::before {
+      content: ''; width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%;
+      background: #2f9b68; box-shadow: 0 0 0 3px rgba(47,155,104,.16), 0 0 9px rgba(47,155,104,.7);
+    }
+    #overlay #play-player-count[data-state="syncing"]::before,
+    .minigame-live-count[data-state="syncing"]::before {
+      background: #9a6c1c; box-shadow: 0 0 0 3px rgba(154,108,28,.14), 0 0 8px rgba(154,108,28,.5);
+    }
+    #overlay #play-player-count[data-state="offline"],
+    .minigame-live-count[data-state="offline"] { opacity: .58; }
+    #overlay #play-player-count[data-state="offline"]::before,
+    .minigame-live-count[data-state="offline"]::before {
+      background: #7c8792; box-shadow: 0 0 0 3px rgba(124,135,146,.14);
+    }
     #overlay #minigames-btn {
       min-height: 54px; color: #cfe6ff; border-color: rgba(77,155,255,.38);
       background: linear-gradient(180deg, rgba(77,155,255,.2), rgba(77,155,255,.09));
@@ -1738,7 +1749,15 @@
     .minigame-copy { position: relative; z-index: 2; display: flex; flex-direction: column; min-width: 0; flex: 1; gap: 9px; padding: 16px 17px 17px; }
     .minigame-title-row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 10px; }
     .minigame-title-row h3 { font-size: 19px; font-weight: 900; letter-spacing: -.3px; }
-    .minigame-count { color: var(--card); font-size: 9px; font-weight: 800; line-height: 1.4; letter-spacing: .8px; text-transform: uppercase; white-space: normal; }
+    .minigame-count {
+      display: grid; justify-items: end; gap: 4px; color: var(--card); font-size: 9px;
+      font-weight: 800; line-height: 1.4; letter-spacing: .8px; text-transform: uppercase;
+      text-align: right; white-space: normal;
+    }
+    .minigame-live-count {
+      display: inline-flex; align-items: center; gap: 5px; color: #287e63; font-size: 8px;
+      font-weight: 850; letter-spacing: .7px; line-height: 1.2; white-space: nowrap;
+    }
     .minigame-copy p { color: var(--ar-dim); font-size: 11.5px; line-height: 1.5; }
     .minigame-action {
       width: 100%; min-height: 44px; margin-top: auto; cursor: pointer; border-radius: 11px;
@@ -2953,7 +2972,10 @@
                 <h2 id="menu-user">traveller</h2>
               </div>
             </div>
-            <button id="play-btn" class="mc-btn">Play</button>
+            <button id="play-btn" class="mc-btn">
+              <span id="play-btn-label">Play</span>
+              <span id="play-player-count" data-state="syncing" aria-live="polite">Syncing…</span>
+            </button>
             <button id="minigames-btn" class="mc-btn">Minigames</button>
             <button id="controls-btn" class="mc-btn">Controls</button>
             <button id="logout-btn" class="mc-btn">Log out</button>
@@ -3079,7 +3101,7 @@
                     <span class="minigame-particles" aria-hidden="true"><i></i><i></i><i></i></span>
                   </div>
                   <div class="minigame-copy">
-                    <div class="minigame-title-row"><h3>Duels</h3><span class="minigame-count">2–4 players · ranked</span></div>
+                    <div class="minigame-title-row"><h3>Duels</h3><span class="minigame-count"><span>2–4 players · ranked</span><span id="duels-live-count" class="minigame-live-count" data-state="syncing" aria-live="polite">Syncing…</span></span></div>
                     <p>Five minutes in the Prism Colosseum. Burst Rifle, four identical spawn corners, first to fifteen kills takes it early. Build your own cover, hold the altar, climb the ladder.</p>
                     <div class="duel-card-actions">
                       <button id="duels-card-action" class="minigame-action" type="button">Play</button>
@@ -3140,7 +3162,7 @@
                     <span class="minigame-particles" aria-hidden="true"><i></i><i></i><i></i></span>
                   </div>
                   <div class="minigame-copy">
-                    <div class="minigame-title-row"><h3>Parkour</h3><span class="minigame-count">1v1 · fresh course · unranked</span></div>
+                    <div class="minigame-title-row"><h3>Parkour</h3><span class="minigame-count"><span>1v1 · fresh course · unranked</span><span id="parkour-live-count" class="minigame-live-count" data-state="syncing" aria-live="polite">Syncing…</span></span></div>
                     <p>Eight worlds, one straight line. Fifty-six jumps run dead ahead: stepping stones, narrow beams, doorway walls, covered tunnels, weaving slaloms, gaps punched through the pad, hurdles, arches, long drops and climbs — never a maze. Golden checkpoints are rare and infinite wool bails you out. First to the finish wins; all wool clears next race.</p>
                     <div class="duel-card-actions">
                       <button id="parkour-card-action" class="minigame-action" type="button">Play</button>
@@ -3186,8 +3208,8 @@
                     <span class="minigame-particles" aria-hidden="true"><i></i><i></i><i></i></span>
                   </div>
                   <div class="minigame-copy">
-                    <div class="minigame-title-row"><h3>The Bridge</h3><span class="minigame-count">1v1 · PvP · unranked</span></div>
-                    <p>Two fortresses, one span between them — a single block wide, the whole way. Fight for it with a Void Cleaver and a bow, repair it with infinite team wool, and dive into the enemy portal to score. Knock your rival off and they start again at their own base. First to five goals takes it.</p>
+                    <div class="minigame-title-row"><h3>The Bridge</h3><span class="minigame-count"><span>1v1 · PvP · unranked</span><span id="bridge-live-count" class="minigame-live-count" data-state="syncing" aria-live="polite">Syncing…</span></span></div>
+                    <p>Two fortresses, one span between them — a single block wide, the whole way. Fight for it with an iron axe and a bow, repair it with infinite team wool, and dive into the enemy portal to score. Knock your rival off and they start again at their own base. First to five goals takes it.</p>
                     <div class="duel-card-actions">
                       <button id="party-card-action" class="minigame-action" type="button">Play</button>
                       <button id="party-private-action" class="duel-private-action" type="button">Invite Friends</button>

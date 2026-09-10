@@ -4,6 +4,9 @@
 // knockback combat, drops and death poofs.
 
 import * as THREE from 'three';
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
+import { bossSurface } from './boss_surface';
+import { detailBoss } from './boss_detail';
 import { Block, BLOCKS, isSolid, isVaultMasonry, Tile } from './blocks';
 import type { ItemEntities } from './itementity';
 import { Item, ItemStack } from './items';
@@ -294,6 +297,8 @@ export class Mob {
  * model still uses the normal mob root, head and leg pivots, and every shape is
  * built above y=0 so encounter snapshot positions remain feet positions. */
 export function buildBossModel(mob: Mob, kind: VaultBossKind, atlas: Atlas): void {
+  const rounded = (w: number, h: number, d: number): THREE.BufferGeometry =>
+    new RoundedBoxGeometry(w, h, d, 3, Math.min(w, h, d) * 0.2);
   const root = mob.model.group;
   root.traverse((object) => {
     const mesh = object as THREE.Mesh;
@@ -305,10 +310,10 @@ export function buildBossModel(mob: Mob, kind: VaultBossKind, atlas: Atlas): voi
   mob.bossParts.length = 0;
   root.userData.bossKind = kind;
 
-  const primary = kind === 'bone_warden' ? 0x2b2138
-    : kind === 'mire_queen' ? 0x173c30
-    : kind === 'ember_colossus' ? 0x241b1a
-    : kind === 'crystal_seer' ? 0x17334a : 0x302819;
+  const primary = kind === 'bone_warden' ? 0x71617e
+    : kind === 'mire_queen' ? 0x39765c
+    : kind === 'ember_colossus' ? 0x534d4c
+    : kind === 'crystal_seer' ? 0x376f93 : 0x635038;
   const accentColor = kind === 'bone_warden' ? 0xd9cfad
     : kind === 'mire_queen' ? 0x6f8b45
     : kind === 'ember_colossus' ? 0x5d514b
@@ -317,8 +322,8 @@ export function buildBossModel(mob: Mob, kind: VaultBossKind, atlas: Atlas): voi
     : kind === 'mire_queen' ? 0x7cffc6
     : kind === 'ember_colossus' ? 0xff7a2f
     : kind === 'crystal_seer' ? 0xbdefff : 0xffdf72;
-  const armor = new THREE.MeshBasicMaterial({ color: primary });
-  const accent = new THREE.MeshBasicMaterial({ color: accentColor });
+  const armor = bossSurface(primary, false, kind);
+  const accent = bossSurface(accentColor, true, kind);
   const glow = new THREE.MeshBasicMaterial({
     color: secondary, transparent: true, opacity: 0.9,
     blending: THREE.AdditiveBlending, depthWrite: false,
@@ -340,18 +345,18 @@ export function buildBossModel(mob: Mob, kind: VaultBossKind, atlas: Atlas): voi
   const box = (
     w: number, h: number, d: number, x: number, y: number, z: number,
     material: THREE.Material = armor, animate = false,
-  ): THREE.Mesh => add(new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material),
+  ): THREE.Mesh => add(new THREE.Mesh(rounded(w, h, d), material),
     x, y, z, animate);
   const sphere = (
     radius: number, x: number, y: number, z: number,
     material: THREE.Material = armor, animate = false,
-  ): THREE.Mesh => add(new THREE.Mesh(new THREE.SphereGeometry(radius, 8, 6), material),
+  ): THREE.Mesh => add(new THREE.Mesh(new THREE.SphereGeometry(radius, 32, 20), material),
     x, y, z, animate);
   const cylinder = (
     top: number, bottom: number, height: number, x: number, y: number, z: number,
     material: THREE.Material = armor, animate = false, sides = 8,
   ): THREE.Mesh => add(new THREE.Mesh(
-    new THREE.CylinderGeometry(top, bottom, height, sides), material), x, y, z, animate);
+    new THREE.CylinderGeometry(top, bottom, height, Math.max(24, sides), 3), material), x, y, z, animate);
   const octa = (
     radius: number, x: number, y: number, z: number,
     material: THREE.Material = armor, animate = false,
@@ -402,17 +407,17 @@ export function buildBossModel(mob: Mob, kind: VaultBossKind, atlas: Atlas): voi
     for (const sx of [-1, 1]) {
       box(0.3, 0.26, 0.36, sx * 0.5, 2.06, 0, armor);                // pauldrons
       const arm = new THREE.Group();
-      const upper = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.8, 0.19), armor);
+      const upper = new THREE.Mesh(rounded(0.17, 0.8, 0.19), armor);
       upper.position.y = -0.4;
       arm.add(upper);
-      const fist = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.24, 0.26), accent);
+      const fist = new THREE.Mesh(rounded(0.24, 0.24, 0.26), accent);
       fist.position.y = -0.9;
       arm.add(fist);
       arm.rotation.x = -0.25;
       tag(add(arm, sx * 0.54, 1.98, 0, true), 'fist', sx);
       const chain = new THREE.Group();                               // hanging chains
       for (let i = 0; i < 5; i++) {
-        const link = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.15, 0.11),
+        const link = new THREE.Mesh(rounded(0.15, 0.15, 0.11),
           i === 4 ? glow : accent);
         link.position.set(sx * i * 0.05, -i * 0.2, 0);
         link.rotation.z = i * Math.PI / 4;
@@ -424,12 +429,12 @@ export function buildBossModel(mob: Mob, kind: VaultBossKind, atlas: Atlas): voi
     box(0.1, 0.5, 0.1, 0, 1.36, 0.3, accent);
     tag(cylinder(0.2, 0.36, 0.5, 0, 0.95, 0.3, glow, true), 'bell');
     const head = new THREE.Group();
-    head.add(new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.42, 0.32), armor));
-    const cowl = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.2, 0.42), accent);
+    head.add(new THREE.Mesh(rounded(0.36, 0.42, 0.32), armor));
+    const cowl = new THREE.Mesh(rounded(0.46, 0.2, 0.42), accent);
     cowl.position.y = 0.24;
     head.add(cowl);
     for (const sx of [-1, 1]) {
-      const eye = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.06, 0.05), glow);
+      const eye = new THREE.Mesh(rounded(0.1, 0.06, 0.05), glow);
       eye.position.set(sx * 0.09, 0.03, 0.16);
       head.add(eye);
     }
@@ -470,12 +475,12 @@ export function buildBossModel(mob: Mob, kind: VaultBossKind, atlas: Atlas): voi
       tag(frond, 'frond', i);
     }
     const head = new THREE.Group();
-    head.add(new THREE.Mesh(new THREE.BoxGeometry(0.88, 0.42, 0.82), armor));
-    const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.18, 0.76), accent);
+    head.add(new THREE.Mesh(rounded(0.88, 0.42, 0.82), armor));
+    const jaw = new THREE.Mesh(rounded(0.8, 0.18, 0.76), accent);
     jaw.position.set(0, -0.28, -0.04);
     head.add(jaw);
     for (const sx of [-1, 1]) {
-      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.09, 6, 4), glow);
+      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.09, 24, 16), glow);
       eye.position.set(sx * 0.28, 0.12, 0.36);
       head.add(eye);
     }
@@ -511,7 +516,7 @@ export function buildBossModel(mob: Mob, kind: VaultBossKind, atlas: Atlas): voi
       const spike = box(0.24, 0.5, 0.26, sx * 1.16, 1.72, -0.2, accent);
       spike.rotation.z = sx * -0.5;
     }
-    const crater = new THREE.Mesh(new THREE.TorusGeometry(0.56, 0.16, 6, 16), accent);
+    const crater = new THREE.Mesh(new THREE.TorusGeometry(0.56, 0.16, 16, 64), accent);
     crater.rotation.x = Math.PI / 2;
     tag(add(crater, 0, 1.94, 0.05, true), 'crater');
     tag(cylinder(0, 0.26, 0.66, 0, 2.28, 0.05, glow, true, 6), 'flame');
@@ -521,14 +526,14 @@ export function buildBossModel(mob: Mob, kind: VaultBossKind, atlas: Atlas): voi
       tag(stack, 'chimney', i);
     }
     const head = new THREE.Group();
-    head.add(new THREE.Mesh(new THREE.BoxGeometry(0.86, 0.54, 0.72), armor));
-    const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.2, 0.64), accent);
+    head.add(new THREE.Mesh(rounded(0.86, 0.54, 0.72), armor));
+    const jaw = new THREE.Mesh(rounded(0.8, 0.2, 0.64), accent);
     jaw.position.set(0, -0.32, -0.06);
     head.add(jaw);
-    const brow = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.14, 0.2), accent);
+    const brow = new THREE.Mesh(rounded(0.9, 0.14, 0.2), accent);
     brow.position.set(0, 0.28, 0.24);
     head.add(brow);
-    const eye = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.1, 0.06), glow);
+    const eye = new THREE.Mesh(rounded(0.5, 0.1, 0.06), glow);
     eye.position.set(0, 0.06, 0.37);
     head.add(eye);
     tag(add(head, 0, 1.02, 1.36, true), 'caldera_head');
@@ -545,11 +550,11 @@ export function buildBossModel(mob: Mob, kind: VaultBossKind, atlas: Atlas): voi
     const core = octa(0.58, 0, 1.5, 0, armor, true);
     core.scale.set(0.82, 1.32, 0.82);
     tag(core, 'core');
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.22, 12, 8), glow);
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.22, 32, 20), glow);
     eye.scale.set(1.45, 0.72, 0.5);
     tag(add(eye, 0, 1.56, 0.44, true), 'eye');
     mob.model.head = eye;
-    const halo = new THREE.Mesh(new THREE.TorusGeometry(0.92, 0.06, 6, 28), accent);
+    const halo = new THREE.Mesh(new THREE.TorusGeometry(0.92, 0.06, 12, 80), accent);
     halo.rotation.x = Math.PI / 2.4;
     tag(add(halo, 0, 1.5, 0, true), 'halo');
     for (const sx of [-1, 1]) {                                      // refracting wings
@@ -591,7 +596,7 @@ export function buildBossModel(mob: Mob, kind: VaultBossKind, atlas: Atlas): voi
     cylinder(0.6, 0.78, 0.52, 0, 1.32, 0, armor);
     tag(octa(0.3, 0, 1.34, 0.02, glow, true), 'core');
     for (const sx of [-1, 1]) {                                      // drive gears
-      const gear = new THREE.Mesh(new THREE.TorusGeometry(0.26, 0.08, 5, 12), accent);
+      const gear = new THREE.Mesh(new THREE.TorusGeometry(0.26, 0.08, 12, 40), accent);
       gear.userData.spin = sx;
       tag(add(gear, sx * 0.56, 1.5, 0.16, true), 'gear', sx);
       const piston = box(0.14, 0.42, 0.14, sx * 0.34, 1.62, -0.34, accent, true);
@@ -599,20 +604,20 @@ export function buildBossModel(mob: Mob, kind: VaultBossKind, atlas: Atlas): voi
     }
     box(0.28, 0.86, 0.28, 0, 1.94, 0, armor);
     const head = new THREE.Group();
-    const clock = new THREE.Mesh(new THREE.SphereGeometry(0.52, 10, 7), armor);
+    const clock = new THREE.Mesh(new THREE.SphereGeometry(0.52, 32, 24), armor);
     clock.scale.set(1, 1, 0.3);
     head.add(clock);
-    const rim = new THREE.Mesh(new THREE.TorusGeometry(0.48, 0.07, 6, 20), accent);
+    const rim = new THREE.Mesh(new THREE.TorusGeometry(0.48, 0.07, 12, 64), accent);
     rim.position.z = 0.14;
     head.add(rim);
     for (let i = 0; i < 8; i++) {
-      const mark = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.13, 0.04), glow);
+      const mark = new THREE.Mesh(rounded(0.06, 0.13, 0.04), glow);
       const a = i * Math.PI / 4;
       mark.position.set(Math.sin(a) * 0.35, Math.cos(a) * 0.35, 0.2);
       mark.rotation.z = -a;
       head.add(mark);
     }
-    const hand = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.44, 0.05), glow);
+    const hand = new THREE.Mesh(rounded(0.07, 0.44, 0.05), glow);
     hand.position.set(0, 0.15, 0.22);
     head.add(hand);
     tag(add(head, 0, 2.5, -0.02, true), 'clock');
@@ -620,12 +625,12 @@ export function buildBossModel(mob: Mob, kind: VaultBossKind, atlas: Atlas): voi
     for (let i = 0; i < 3; i++) {                                    // tool arms
       const a = i * Math.PI * 2 / 3;
       const arm = new THREE.Group();
-      const beam = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.15, 1.05), accent);
+      const beam = new THREE.Mesh(rounded(0.15, 0.15, 1.05), accent);
       beam.position.z = -0.5;
       arm.add(beam);
       const tool = new THREE.Mesh(i === 0
         ? new THREE.ConeGeometry(0.2, 0.46, 6)
-        : i === 1 ? new THREE.BoxGeometry(0.46, 0.17, 0.32)
+        : i === 1 ? rounded(0.46, 0.17, 0.32)
           : new THREE.OctahedronGeometry(0.23, 0), i === 2 ? glow : armor);
       tool.position.set(0, 0, -0.98);
       tool.rotation.x = i === 0 ? Math.PI / 2 : 0;
@@ -639,6 +644,7 @@ export function buildBossModel(mob: Mob, kind: VaultBossKind, atlas: Atlas): voi
       tag(stack, 'chimney', i);
     }
   }
+  detailBoss(root, kind, armor, accent, glow);
 }
 
 // --- mob manager ---------------------------------------------------------------
@@ -1446,7 +1452,7 @@ export class Mobs {
       if (!base) continue;
       if (mob.hurtTime > 0) mat.color.setRGB(1, 0.22, 0.16);
       else if (mat.userData.glow) mat.color.copy(base);
-      else mat.color.setRGB(base.r * b, base.g * b, base.b * b);
+      else mat.color.copy(base).multiplyScalar(0.72 + b * 0.28);
     }
   }
 

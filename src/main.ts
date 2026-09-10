@@ -1,3 +1,4 @@
+import './prestige_ui.css';
 import * as THREE from 'three';
 import { GameAudio, materialOf } from './audio';
 import { Block, BLOCKS, isReplaceable, isSolid, isVaultMasonry } from './blocks';
@@ -30,7 +31,7 @@ import { NetClient } from './net/client';
 import {
   WORLD_SEED, WORLD_HALF, WORLD_BORDER, CORE_HALF, makeUsername, skinSeed,
   GameMode, MAX_ATTUNED, RANGED_MAX_DAMAGE, TOTEM_COOLDOWN, TOTEM_WINDUP, COMBAT_TAG,
-  TPA_HOLD, TPA_EXPIRE, type DuelLeaderboardEntry,
+  TPA_HOLD, TPA_EXPIRE, type DuelLeaderboardEntry, type PlayerCounts,
   type FactionPublic, type Notification,
 } from './net/protocol';
 import { leverFlips } from './traps';
@@ -94,7 +95,7 @@ import {
 } from './warfare';
 import { WarfareUI } from './warfare_ui';
 import {
-  FAST_ROPE_SLIDE_MAX, FAST_ROPE_SLIDE_SPEED,
+  FAST_ROPE_SLIDE_MAX, FAST_ROPE_SLIDE_SPEED, helicopterGunDamage, helicopterRayDistance,
   HELI_FUEL_BURN, HELI_FUEL_IDLE, HELI_GROUND_CLEARANCE, HeliLossReason,
   HelicopterSnapshot, PASSENGER_ARC, SeatKind, VehicleSim, VehicleEvent,
   bombBlast, fastRopeHeld, fastRopeProgressDelta, fastRopeSlideSpeed, viewYawToHeliYaw,
@@ -111,7 +112,8 @@ import {
 } from './duels';
 import {
   PARTY_AMBIENT_LIGHT, PARTY_MAX_HEALTH, PARTY_FLOOR_Y, PARTY_VOID_Y,
-  BRIDGE_TEAM_BLOCK, BRIDGE_TEAM_NAME, BRIDGE_BOW_MIN_POWER, bridgeBowPower,
+  BRIDGE_TEAM_BLOCK, BRIDGE_TEAM_NAME,
+  BRIDGE_MELEE_TIER, BRIDGE_BOW_COOLDOWN_MS,
   bridgeGoalGuard, clampToPartySub, registerPartyArena, parkourCourse,
   type PartyLobbySnapshot, type PartyMode, type PartySubBounds,
 } from './partygames';
@@ -1272,6 +1274,8 @@ let localMode: GameMode = 'survival';
 // read it; the form + flow are wired further down.
 let authed = false;
 let authedName = '';
+/** Live population reported by the server, split by the mode players chose. */
+let livePlayerCounts: PlayerCounts | null = null;
 
 /** Apply a gamemode to the local player (flight/noclip/creative build). */
 function applyLocalMode(mode: GameMode): void {
@@ -2108,10 +2112,41 @@ const authPass = document.getElementById('auth-pass') as HTMLInputElement;
 const authErr = document.getElementById('auth-err')!;
 const authStatus = document.getElementById('auth-status')!;
 const playBtn = document.getElementById('play-btn')!;
+const playBtnLabel = document.getElementById('play-btn-label')!;
+const playPlayerCountEl = document.getElementById('play-player-count')!;
 const controlsBtn = document.getElementById('controls-btn')!;
 const menuBtns = document.getElementById('menu-btns')!;
 const menuUser = document.getElementById('menu-user')!;
 const authModeLabel = document.getElementById('auth-mode-label')!;
+
+const livePlayerCountEls: Record<keyof Omit<PlayerCounts, 'play'>, HTMLElement> = {
+  duels: document.getElementById('duels-live-count')!,
+  parkour: document.getElementById('parkour-live-count')!,
+  bridge: document.getElementById('bridge-live-count')!,
+};
+
+function renderLivePlayerCounts(): void {
+  const connected = net.connected;
+  const counts = livePlayerCounts;
+  const setCount = (element: HTMLElement, count: number | null, context: string): void => {
+    const state = connected ? count === null ? 'syncing' : 'live' : 'offline';
+    const text = count === null
+      ? connected ? 'Syncing…' : 'Offline'
+      : `${count} ${count === 1 ? 'player' : 'players'} ${context}`;
+    element.textContent = text;
+    element.dataset.state = state;
+    element.setAttribute('aria-label', count === null
+      ? text : `${text} currently`);
+  };
+
+  // Offline single-player has one local participant. Minigames require the
+  // multiplayer server, so their cards stay explicit about unavailable data.
+  setCount(playPlayerCountEl, connected ? counts?.play ?? null : authed ? 1 : null,
+    connected ? 'online' : 'local');
+  for (const mode of ['duels', 'parkour', 'bridge'] as const) {
+    setCount(livePlayerCountEls[mode], connected ? counts?.[mode] ?? null : null, 'active');
+  }
+}
 
 /** Non-cryptographic salted hash for OFFLINE local accounts (identity gate only;
  *  real security is the server's scrypt). FNV-1a over salt+password. */
@@ -2654,6 +2689,7 @@ function onAuthSuccess(username: string): void {
   authStatus.textContent = '';
   clearElimination(); // you're in — no lockout panel hanging around
   refreshNetInfo();
+  renderLivePlayerCounts();
   titleStatusTimer = 0; // your side + the war clock appear with the menu
   // Dispatches are per-account: the read-marks and the badge follow the login.
   notifications.setAccount(username);
@@ -2952,9 +2988,9 @@ function startPlaying(): void {
   if (worldReady) { beginPlay(); return; }
   // World usually finished streaming during the title; if not, wait briefly
   // (still no full-screen loading screen) before dropping in.
-  playBtn.textContent = 'Preparing…';
+  playBtnLabel.textContent = 'Preparing…';
   const wait = (): void => {
-    if (worldReady) { playBtn.textContent = 'Play'; beginPlay(); }
+    if (worldReady) { playBtnLabel.textContent = 'Play'; beginPlay(); }
     else setTimeout(wait, 100);
   };
   wait();
@@ -3124,6 +3160,8 @@ function renderDuelLadder(): void {
     const ranks = DUEL_DIVISIONS.filter((entry) => entry.namedIndex === namedIndex);
     const tier = document.createElement('div'); tier.className = 'duel-tier';
     tier.style.setProperty('--tier', theme.color);
+    tier.style.setProperty('--tier-order', String(DUEL_TIER_THEMES.length - namedIndex - 1));
+    tier.dataset.tier = String(namedIndex + 1);
     tier.style.setProperty('--tier-accent', theme.accent);
     tier.classList.toggle('current', current.namedIndex === namedIndex && !provisional);
     tier.classList.toggle('cleared', namedIndex < peakNamed);
@@ -3144,6 +3182,7 @@ function renderDuelLadder(): void {
       const isCurrent = entry.index === current.index && !provisional;
       cell.classList.toggle('current', isCurrent);
       cell.classList.toggle('done', entry.index < current.index);
+      if (isCurrent) cell.setAttribute('aria-current', 'step');
       const label = document.createElement('b'); label.textContent = entry.division;
       const minimum = document.createElement('small'); minimum.textContent = `${entry.min} RP`;
       cell.append(label, minimum);
@@ -3381,6 +3420,35 @@ function openMinigames(focusLobby = false): void {
   minigamesModal.setAttribute('aria-hidden', 'false');
   if (focusLobby && duelSnapshot) showDuelLobby();
   requestAnimationFrame(() => (focusLobby && duelSnapshot ? duelReady : minigamesClose).focus());
+}
+
+/** Land on the GAMES tab of the arena browser and touch nothing else.
+ *
+ *  Coming out of a match, the browser is where every next decision is made —
+ *  a different mode, a rematch, the ladder — so leaving a match always shows
+ *  the board of games rather than the lobby of the room you just left. The
+ *  Lobby tab is still one click away (and still wears its dot) whenever a
+ *  private lobby actually survived the match. */
+function openGamesTab(): void {
+  openMinigames();
+  showDuelBrowser();
+}
+
+/** Land on the Games tab and press one card's Play button, exactly as if the
+ *  player had done it themselves — same queue path, same aria state, same
+ *  "Cancel Queue" affordance to back out with. Used by every "play again"
+ *  control so the result screen never has a private route into matchmaking
+ *  that the board itself does not have. */
+function pressMinigamePlay(mode: 'duels' | 'bridge' | 'parkour'): void {
+  openGamesTab();
+  const card = mode === 'duels' ? duelsCardAction
+    : mode === 'bridge' ? partyCardAction : parkourCardAction;
+  if (card.getAttribute('aria-disabled') === 'true') return;
+  card.click();
+  // `openMinigames` parks focus on the close button from inside a rAF. Ours is
+  // queued after it, so the pressed card keeps the focus ring rather than
+  // losing it a frame later.
+  requestAnimationFrame(() => card.focus());
 }
 
 function closeMinigames(): void {
@@ -4000,7 +4068,21 @@ function renderDuelResult(result: DuelResult): void {
     applyRankTheme(ratingReveal, rating.oldRank);
     ratingReveal.classList.toggle('loss', rating.change < 0);
     const revealEmblem = makeDuelEmblem(rating.oldRank, 'lg duel-reveal-emblem');
-    ratingReveal.appendChild(revealEmblem);
+    const crestStage = document.createElement('div'); crestStage.className = 'duel-crest-stage';
+    const effects = document.createElement('div'); effects.className = 'duel-ascension-fx';
+    effects.setAttribute('aria-hidden', 'true');
+    effects.innerHTML = '<i class="duel-orbit"></i><i class="duel-orbit inner"></i><i class="duel-shockwave"></i><i class="duel-shockwave second"></i>';
+    for (let i = 0; i < 24; i++) {
+      const spark = document.createElement('b');
+      spark.style.setProperty('--angle', `${i * 15}deg`);
+      spark.style.setProperty('--distance', `${90 + (i % 4) * 17}px`);
+      spark.style.setProperty('--spark-delay', `${(i % 3) * 45}ms`);
+      effects.appendChild(spark);
+    }
+    crestStage.append(effects, revealEmblem);
+    const headline = document.createElement('div'); headline.className = 'duel-reward-headline';
+    headline.textContent = 'RANK PROGRESS';
+    ratingReveal.append(headline, crestStage);
     const label = document.createElement('div'); label.className = 'duel-result-kicker';
     label.textContent = rating.profile.placementsRemaining > 0
       ? `Provisional · ${rating.profile.placementsRemaining} placements left` : rating.oldRank.label;
@@ -4011,7 +4093,14 @@ function renderDuelResult(result: DuelResult): void {
     delta.className = `duel-rating-change ${rating.change >= 0 ? 'up' : 'down'}`;
     delta.textContent = `${rating.change >= 0 ? '+' : ''}${rating.change}`;
     number.append(amount, unit, delta);
+    const trackLabels = document.createElement('div'); trackLabels.className = 'duel-track-labels';
+    const trackRank = document.createElement('span');
+    const trackNext = document.createElement('span');
+    trackLabels.append(trackRank, trackNext);
     const track = document.createElement('div'); track.className = 'duel-result-track';
+    track.setAttribute('role', 'progressbar');
+    track.setAttribute('aria-label', 'Rank division progress');
+    track.setAttribute('aria-valuemin', '0'); track.setAttribute('aria-valuemax', '100');
     const trackFill = document.createElement('div'); trackFill.className = 'duel-result-track-fill';
     track.appendChild(trackFill);
     const chips = document.createElement('div'); chips.className = 'duel-change-chips';
@@ -4037,21 +4126,34 @@ function renderDuelResult(result: DuelResult): void {
     }
     const live = document.createElement('div'); live.className = 'duel-reveal-summary';
     live.setAttribute('role', 'status'); live.setAttribute('aria-live', 'polite');
-    ratingReveal.append(label, number, track, chips, event, particles, live);
+    ratingReveal.append(label, number, trackLabels, track, chips, event, particles, live);
 
     let ascended = false, finished = false;
     const started = performance.now();
     const settle = (skipped = false) => {
+      cancelAnimationFrame(duelRevealFrame);
+      if (finished || duelResultData !== result) return;
+      const reduceMotion = accessibility.reducedMotion || window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      ratingReveal.classList.toggle('instant', skipped || reduceMotion);
       const state = duelRevealState(rating, performance.now() - started, {
-        skipped, reducedMotion: accessibility.reducedMotion,
+        skipped, reducedMotion: reduceMotion,
         photosensitivitySafe: accessibility.photosensitivitySafe,
       });
       ratingReveal.dataset.phase = state.phase;
       duelResultCard.dataset.revealPhase = state.phase;
-      amount.textContent = String(state.displayedRp);
+      amount.textContent = state.displayedRp.toLocaleString();
+      const displayed = duelRankProgress(state.displayedRp);
+      trackRank.textContent = rating.profile.placementsRemaining > 0 ? 'Provisional' : displayed.rank.label;
+      trackNext.textContent = displayed.next ? `${100 - displayed.rpIntoDivision} RP to ${rating.profile.placementsRemaining > 0 ? 'next division' : displayed.next.label}` : 'MAX TIER · KEEP CLIMBING';
+      track.setAttribute('aria-valuenow', String(Math.round(state.barProgress * 100)));
+      const earned = state.displayedRp - rating.beforeRp;
+      delta.textContent = `${earned >= 0 ? '+' : ''}${earned}`;
+      if (!state.revealed) headline.textContent = state.phase === 'counting'
+        ? rating.change > 0 ? 'RP GAINED' : rating.change < 0 ? 'RP ADJUSTMENT' : 'RANK HELD'
+        : 'RANK PROGRESS';
       trackFill.style.width = `${Math.round(state.barProgress * 100)}%`;
       particles.hidden = state.phase !== 'counting' || state.particles === 'none';
-      if (state.shake > 0 && !accessibility.reducedMotion) {
+      if (state.shake > 0 && !reduceMotion && !accessibility.photosensitivitySafe) {
         const kick = state.shake * 6;
         duelResultCard.style.transform =
           `translate(${(Math.random() - .5) * kick}px, ${(Math.random() - .5) * kick}px)`;
@@ -4062,6 +4164,10 @@ function renderDuelResult(result: DuelResult): void {
       // together, the moment the count-up lands on the final number.
       if (state.revealed && !ascended) {
         ascended = true; particles.hidden = true;
+        headline.textContent = rating.placementReveal ? 'RANK REVEALED' : rating.namedRankPromotion ? 'TIER UP'
+          : rating.promotion ? 'LEVEL UP' : rating.demotion ? 'RANK ADJUSTED'
+          : rating.change > 0 ? 'RP SECURED' : rating.change < 0 ? 'NEXT ROUND. NEW CHANCE.' : 'RANK HELD';
+        ratingReveal.classList.toggle('celebrate', rating.promotion || rating.placementReveal || rating.change > 0);
         applyRankTheme(ratingReveal, rating.newRank);
         applyRankTheme(duelResultEl, rating.newRank);
         paintDuelEmblem(revealEmblem, rating.newRank);
@@ -4083,13 +4189,17 @@ function renderDuelResult(result: DuelResult): void {
           : rating.namedRankPromotion ? 'rankPromotion' : rating.promotion ? 'promotion'
           : rating.demotion ? 'demotion' : rating.change >= 0 ? 'gain' : 'loss');
         if (rating.placementReveal && rating.newlyUnlockedFlair) {
-          window.setTimeout(() => audio.duelCue('unlock'), 420);
+          window.setTimeout(() => { if (duelResultData === result) audio.duelCue('unlock'); }, 420);
         }
       }
       if (state.settled && !finished) {
         finished = true;
         duelResultCard.style.transform = '';
-        if (revealNow) revealNow.hidden = true;
+        if (revealNow) {
+          const hadFocus = document.activeElement === revealNow;
+          revealNow.hidden = true;
+          if (hadFocus) duelResultCard.querySelector<HTMLButtonElement>('.duel-result-controls .primary')?.focus();
+        }
       }
       if (!state.settled) duelRevealFrame = requestAnimationFrame(() => settle());
     };
@@ -4105,8 +4215,12 @@ function renderDuelResult(result: DuelResult): void {
   const invited = duelFromInvite();
   const primary = document.createElement('button'); primary.type = 'button';
   primary.className = 'primary'; primary.textContent = invited ? 'Run it back' : 'Queue again';
+  // Both destinations are the games board now, so the label says so. A private
+  // lobby that survived the match is still one click away on the Lobby tab —
+  // which wears its dot — rather than the place you land whether you wanted it
+  // or not.
   const leave = document.createElement('button'); leave.type = 'button';
-  leave.textContent = invited ? 'Return to lobby' : 'Go back';
+  leave.textContent = 'Back to games';
   primary.addEventListener('click', () => {
     if (!invited) {
       // The queue can only be joined from the open world, so the requeue is
@@ -4130,19 +4244,19 @@ function renderDuelResult(result: DuelResult): void {
   leave.addEventListener('click', () => {
     primary.disabled = true; leave.disabled = true;
     duelRequeueOnReturn = false;
-    voteStatus.textContent = invited ? 'Returning to your lobby\u2026' : 'Leaving the arena\u2026';
+    voteStatus.textContent = 'Back to the games board\u2026';
     net.sendDuelReturn();
   });
   const voteStatus = document.createElement('p'); voteStatus.className = 'duel-result-summary';
   // Only an invite lobby has a live vote for updateDuelHud to count down; a
   // matchmade result says what the two buttons do and then stays put.
-  if (!invited) voteStatus.textContent = 'Queue again for a new opponent, or go back to your world.';
+  if (!invited) voteStatus.textContent = 'Queue again for a new opponent, or go back to the games board.';
   duelResultVoteStatus = voteStatus; duelResultRematch = invited ? primary : null;
   controls.append(...(revealNow ? [revealNow] : []), primary, leave);
-  duelResultCard.append(kicker, title, summary, recap, scores,
-    ...(rating ? [ratingReveal] : []), voteStatus, controls);
+  duelResultCard.append(kicker, title, summary,
+    ...(rating ? [ratingReveal] : []), recap, scores, voteStatus, controls);
   duelResultEl.classList.add('visible'); duelScoreboard.classList.remove('visible');
-  requestAnimationFrame(() => (revealNow ?? primary).focus());
+  requestAnimationFrame(() => (revealNow && !revealNow.hidden ? revealNow : primary).focus());
 }
 
 // ── Match HUD ──────────────────────────────────────────────────────────────
@@ -4303,7 +4417,25 @@ function updateDuelHud(): void {
 
 /** Drop every generic arena hook back to open-world defaults. Called by every
  *  exit path so no mode's rules can outlive its match. */
+/** The FULL duel footprint — walls included. `DuelArenaBounds.min/max` are the
+ *  playable interior, which is two columns short of the colosseum on every
+ *  side; anything that has to cover the whole structure (the render crop, the
+ *  chunk invalidation) needs the outer box. */
+function duelArenaFootprint(arena: DuelArenaBounds): {
+  minX: number; minZ: number; maxX: number; maxZ: number;
+} {
+  return {
+    minX: arena.originX, minZ: arena.originZ,
+    maxX: arena.originX + DUEL_ARENA_SIZE, maxZ: arena.originZ + DUEL_ARENA_SIZE,
+  };
+}
+
 function clearArenaState(): void {
+  // Drop the arena's chunks on the way OUT too, so a colosseum or a venue is
+  // never left sitting in the client's chunk cache holding one match's blocks
+  // while the open world streams back in around it.
+  if (arenaKind === 'duel' && duelActiveBounds) world.invalidateArena(duelArenaFootprint(duelActiveBounds));
+  else if (arenaKind === 'party' && partyActiveBounds) world.invalidateArena(partyActiveBounds);
   arenaActive = false;
   arenaKind = null;
   arenaMaxHealth = 20;
@@ -4372,13 +4504,23 @@ function cleanupDuelSession(restoreState = true): void {
 }
 
 function duelControlBlocked(): boolean {
-  if (arenaKind === 'party') return partySnapshot?.phase !== 'running';
+  if (arenaKind === 'party') return partySnapshot?.phase !== 'running' || partyCaged();
   if (!arenaActive || !duelSnapshot) return false;
   return duelSnapshot.phase === 'countdown' ||
     duelSnapshot.phase === 'results' || screen === 'duel_results';
 }
 
 net.onDuelArena = (arena, spawn, countdownEndsAt) => {
+  // Throw away everything this client thinks it knows about the colosseum
+  // before streaming it. Arena slots are recycled from 0 the moment a match
+  // ends, so the NEXT duel in this slot inherited whatever was left in the
+  // edit overlay from the last one — a plank the server's reset batch never
+  // reached this client for, or a placement the client predicted and the
+  // server refused. Those survived as a few floating blocks standing in an
+  // otherwise pristine arena. Rebuilding the footprint from authored geometry
+  // makes that impossible rather than unlikely. (The Bridge and Parkour have
+  // always done this; Duels never did.)
+  world.invalidateArena(duelArenaFootprint(arena));
   arenaActive = true; arenaKind = 'duel'; duelActiveBounds = arena;
   arenaMaxHealth = DUEL_MAX_HEALTH; arenaHpPerHeart = DUEL_HP_PER_HEART;
   arenaCanPlaceAt = duelArenaRules.canPlaceAt;
@@ -4386,10 +4528,7 @@ net.onDuelArena = (arena, spawn, countdownEndsAt) => {
   arenaClampPos = (pos) => clampToDuelArena(pos, arena);
   // Duels arenas are lit to a competitive floor of 12/15 so nobody wins on a
   // dark corner.
-  world.setArenaRenderBounds({
-    minX: arena.originX, minZ: arena.originZ,
-    maxX: arena.originX + DUEL_ARENA_SIZE, maxZ: arena.originZ + DUEL_ARENA_SIZE,
-  }, 0.8);
+  world.setArenaRenderBounds(duelArenaFootprint(arena), 0.8);
   duelArenaReadySent = false; duelCountdownEndsAt = countdownEndsAt;
   duelLastCountdownCue = -1; duelCueText = ''; duelLastLeaderKey = '';
   duelFinalMinuteShown = false; duelFinalThirtyPlayed = false;
@@ -4472,7 +4611,7 @@ net.onDuelRestored = (x, y, z, yaw, pitch, health, dead, mode, state) => {
   player.pos.set(x, y, z); player.yaw = yaw; player.pitch = pitch;
   player.health = health; player.dead = dead;
   pendingTeleport = { x, y, z, started: worldTimeLocal };
-  applyLocalMode(mode); lastHealth = health; enterTitle(); duelSnapshot=reopenedDuel; renderDuelLobby(); openMinigames(true);
+  applyLocalMode(mode); lastHealth = health; enterTitle(); duelSnapshot=reopenedDuel; renderDuelLobby(); openGamesTab();
   duelLocalFallback = null;
   partyLocalFallback = null;
   if (partySnapshot?.phase !== 'lobby') { partySnapshot = null; partyInviteToken = ''; }
@@ -4490,8 +4629,10 @@ net.onDuelRestored = (x, y, z, yaw, pitch, health, dead, mode, state) => {
         health: player.health, dead: player.dead, mode: localMode,
       };
       pushStateSave();
-      net.sendDuelQueue(true);
-      showDuelBrowser();
+      // Press the board's own Play button rather than queueing behind its
+      // back: the card then shows "Cancel Queue" and "Finding you an
+      // opponent…" exactly as it would have if the click were real.
+      pressMinigamePlay('duels');
     }
   }
 };
@@ -4781,34 +4922,37 @@ const titleCharacterPreview = (() => {
 })();
 
 // THE DRESSING ROOM. A lit stage rather than a settings dialog: the avatar
-// stands on a lit podium under a spotlight, and every cosmetic category is
-// a glass row you can walk with the arrow keys. Styled from one injected
-// `vx-dress-` sheet so the markup below stays readable, and painted in the
-// title screen's own black-glass-and-gold palette (it opens from there, and
-// the old daylight card looked bolted on).
+// stands on a podium under a spotlight, and every cosmetic category is a row
+// you can walk with the arrow keys. Styled from one injected `vx-dress-` sheet
+// so the markup below stays readable.
+//
+// Painted in DAYLIGHT, matching the cape wardrobe it sits beside. Both screens
+// exist to judge colour — a skin tone, a shirt, a cape — and colour cannot be
+// judged against near-black: on the old dark stage every swatch read as a dark
+// version of itself and neighbouring shades were indistinguishable. The
+// spotlight and podium survive the move; they are just cast onto paper now.
 const DRESS_CSS = `
 .vx-dress {
-  --ink: #eaf1fa; --ink-soft: #aec1d8; --ink-mute: #8398b2;
-  --line: rgba(150,182,224,.16); --plate: rgba(255,255,255,.05);
-  --gold: #ffc043; --gold-lit: #ffdb87; --gold-deep: #b87908;
+  --ink: #16202e; --ink-soft: #435771; --ink-mute: #6f8298;
+  --line: rgba(22,42,70,.14); --plate: #ffffff;
+  --gold: #b07c14; --gold-lit: #e5a72b; --gold-deep: #855a06;
   position: absolute; inset: 0; z-index: 24; display: none;
   flex-direction: column; align-items: center; justify-content: center;
   gap: clamp(10px, 2vh, 20px); padding: 22px; overflow-y: auto;
   color: var(--ink);
   font-family: ui-sans-serif, -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif;
   background:
-    radial-gradient(ellipse 55% 45% at 50% -8%, rgba(255,192,67,.18), transparent 62%),
-    radial-gradient(ellipse 70% 60% at 8% 100%, rgba(77,155,255,.12), transparent 66%),
-    radial-gradient(ellipse 120% 95% at 50% 45%, rgba(4,7,12,.86) 30%, rgba(2,3,6,.97) 100%),
-    linear-gradient(180deg, #0a0f18, #05080e);
+    radial-gradient(ellipse 55% 45% at 50% -8%, rgba(255,214,148,.55), transparent 62%),
+    radial-gradient(ellipse 70% 60% at 8% 100%, rgba(168,205,255,.4), transparent 66%),
+    linear-gradient(180deg, #ffffff, #eef2f8 55%, #e2e8f2);
 }
 .vx-dress * { box-sizing: border-box; text-shadow: none; font-family: inherit; }
 /* The same voxel grid the title screen wears, low on the wall. */
 .vx-dress::after {
   content: ''; position: absolute; inset: 0; pointer-events: none;
   background:
-    linear-gradient(rgba(150,190,240,.07) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(150,190,240,.07) 1px, transparent 1px);
+    linear-gradient(rgba(40,70,110,.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(40,70,110,.05) 1px, transparent 1px);
   background-size: 38px 38px;
   -webkit-mask-image: linear-gradient(180deg, transparent 38%, #000 100%);
   mask-image: linear-gradient(180deg, transparent 38%, #000 100%);
@@ -4822,7 +4966,7 @@ const DRESS_CSS = `
   text-transform: uppercase; color: var(--gold);
 }
 .vx-dress-eyebrow::before, .vx-dress-eyebrow::after {
-  content: ''; width: 34px; height: 1px; background: rgba(255,192,67,.5);
+  content: ''; width: 34px; height: 1px; background: rgba(176,124,20,.45);
 }
 .vx-dress h2 {
   margin: 0; font-family: 'Lucida Console', Monaco, monospace;
@@ -4840,39 +4984,41 @@ const DRESS_CSS = `
   position: relative; width: 300px; height: 430px; margin: 0 auto;
   border-radius: 20px; overflow: hidden; cursor: grab; touch-action: none;
   background:
-    radial-gradient(ellipse 70% 46% at 50% 96%, rgba(255,192,67,.16), transparent 70%),
-    linear-gradient(180deg, rgba(24,34,52,.9), rgba(7,11,18,.95));
-  box-shadow: inset 0 0 0 1px var(--line), 0 30px 60px rgba(0,0,0,.55),
-    inset 0 1px 0 rgba(255,255,255,.06);
+    radial-gradient(ellipse 70% 46% at 50% 96%, rgba(176,124,20,.16), transparent 70%),
+    linear-gradient(180deg, #eef3fa 0%, #dfe7f2 62%, #d3dcea 100%);
+  box-shadow: inset 0 0 0 1px var(--line), 0 24px 48px rgba(24,40,66,.18),
+    inset 0 12px 26px rgba(255,255,255,.8);
 }
 .vx-dress-preview canvas { position: relative; z-index: 2; display: block; }
 /* The spotlight: a cone widening down the stage, with dust drifting through. */
 .vx-dress-beam {
   position: absolute; inset: -14% 0 32%; z-index: 1; pointer-events: none;
   clip-path: polygon(41% 0, 59% 0, 96% 100%, 4% 100%);
-  background: linear-gradient(180deg, rgba(255,222,158,.24), rgba(255,192,67,.05) 62%, transparent);
+  background: linear-gradient(180deg, rgba(255,236,190,.85), rgba(255,214,133,.3) 62%, transparent);
   animation: vx-dress-flicker 6s ease-in-out infinite;
 }
 @keyframes vx-dress-flicker { 50% { opacity: .74; } }
 .vx-dress-motes {
   position: absolute; inset: 0; z-index: 1; pointer-events: none; opacity: .5;
   background:
-    radial-gradient(1.6px 1.6px at 22% 30%, rgba(255,236,196,.9), transparent),
-    radial-gradient(1.4px 1.4px at 68% 18%, rgba(255,236,196,.7), transparent),
-    radial-gradient(1.8px 1.8px at 46% 62%, rgba(255,236,196,.6), transparent),
-    radial-gradient(1.3px 1.3px at 78% 74%, rgba(255,236,196,.75), transparent),
-    radial-gradient(1.5px 1.5px at 14% 84%, rgba(255,236,196,.55), transparent);
+    radial-gradient(1.6px 1.6px at 22% 30%, rgba(120,96,42,.5), transparent),
+    radial-gradient(1.4px 1.4px at 68% 18%, rgba(120,96,42,.4), transparent),
+    radial-gradient(1.8px 1.8px at 46% 62%, rgba(120,96,42,.34), transparent),
+    radial-gradient(1.3px 1.3px at 78% 74%, rgba(120,96,42,.42), transparent),
+    radial-gradient(1.5px 1.5px at 14% 84%, rgba(120,96,42,.3), transparent);
   animation: vx-dress-motes 14s linear infinite;
 }
 @keyframes vx-dress-motes { to { transform: translateY(-46px); opacity: .18; } }
-/* The podium: a still ellipse of light under the model's feet. Blended as
-   light so it never smears over the boots. */
+/* The podium: a still ellipse under the model's feet. On a lit stage this is
+   the SHADOW the character casts rather than a pool of light — a screen blend
+   comes to nothing against paper — so it multiplies, and so never smears over
+   the boots. */
 .vx-dress-podium {
   position: absolute; left: 50%; bottom: 14px; z-index: 3;
   width: 210px; height: 46px; transform: translateX(-50%); pointer-events: none;
-  mix-blend-mode: screen;
+  mix-blend-mode: multiply;
   border-radius: 50%;
-  background: radial-gradient(closest-side, rgba(255,192,67,.3), rgba(255,192,67,.05) 70%, transparent);
+  background: radial-gradient(closest-side, rgba(48,62,88,.34), rgba(48,62,88,.1) 70%, transparent);
 }
 .vx-dress-drag {
   position: absolute; left: 0; right: 0; bottom: 0; text-align: center;
@@ -4884,8 +5030,8 @@ const DRESS_CSS = `
 .vx-dress-panel {
   display: flex; flex-direction: column; gap: 6px; min-width: 400px;
   padding: 16px; border-radius: 20px;
-  background: linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.015));
-  box-shadow: inset 0 0 0 1px var(--line), 0 26px 56px rgba(0,0,0,.5);
+  background: linear-gradient(180deg, #ffffff, #f4f7fb);
+  box-shadow: inset 0 0 0 1px var(--line), 0 20px 44px rgba(24,40,66,.14);
 }
 .vx-dress-row {
   display: flex; align-items: center; gap: 9px; padding: 5px 6px 5px 10px;
@@ -4894,18 +5040,18 @@ const DRESS_CSS = `
   transition: box-shadow .16s ease, background .16s ease, transform .16s ease;
 }
 .vx-dress-row:hover, .vx-dress-row:focus-within {
-  background: rgba(255,192,67,.07); transform: translateX(2px);
-  box-shadow: inset 0 0 0 1px rgba(255,192,67,.3), 0 0 22px rgba(255,192,67,.08);
+  background: #fff9ec; transform: translateX(2px);
+  box-shadow: inset 0 0 0 1px rgba(176,124,20,.35), 0 4px 14px rgba(24,40,66,.08);
 }
 .vx-dress-row:focus { outline: none; }
 .vx-dress-row.is-hit { animation: vx-dress-hit .3s ease; }
 @keyframes vx-dress-hit {
-  0% { box-shadow: inset 0 0 0 1px rgba(255,192,67,.75), 0 0 26px rgba(255,192,67,.3); }
+  0% { box-shadow: inset 0 0 0 2px rgba(176,124,20,.8), 0 0 20px rgba(229,167,43,.45); }
 }
 .vx-dress-icon {
   display: grid; place-items: center; width: 26px; height: 26px; flex: none;
   border-radius: 8px; font-size: 14px; color: var(--gold);
-  background: rgba(255,192,67,.1); box-shadow: inset 0 0 0 1px rgba(255,192,67,.2);
+  background: rgba(229,167,43,.16); box-shadow: inset 0 0 0 1px rgba(176,124,20,.28);
 }
 .vx-dress-label {
   flex: 0 0 104px; font-size: 9px; font-weight: 700; letter-spacing: 1.5px;
@@ -4914,13 +5060,13 @@ const DRESS_CSS = `
 .vx-dress-arrow {
   flex: none; width: 28px; height: 28px; display: grid; place-items: center;
   border: 0; border-radius: 9px; cursor: pointer; font-size: 15px; line-height: 1;
-  color: var(--ink-soft); background: rgba(150,182,224,.1);
+  color: var(--ink-soft); background: rgba(24,46,78,.05);
   box-shadow: inset 0 0 0 1px var(--line);
   transition: color .12s ease, background .12s ease, transform .12s ease;
 }
 .vx-dress-arrow:hover {
-  color: #241703; background: linear-gradient(180deg, var(--gold-lit), var(--gold));
-  box-shadow: 0 6px 16px rgba(255,192,67,.3);
+  color: #241703; background: linear-gradient(180deg, #ffd980, var(--gold-lit));
+  box-shadow: 0 6px 16px rgba(176,124,20,.32);
 }
 .vx-dress-arrow:active { transform: scale(.9); }
 .vx-dress-value {
@@ -4930,7 +5076,7 @@ const DRESS_CSS = `
 .vx-dress-value span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vx-dress-dot {
   width: 16px; height: 16px; flex: none; border-radius: 5px;
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,.35), 0 0 12px var(--dot-glow, transparent);
+  box-shadow: inset 0 0 0 1px rgba(16,28,46,.3), 0 0 12px var(--dot-glow, transparent);
 }
 .vx-dress-count {
   flex: none; min-width: 46px; text-align: right; padding-right: 4px;
@@ -4949,7 +5095,8 @@ const DRESS_CSS = `
   transition: color .14s ease, background .14s ease, transform .14s ease, box-shadow .14s ease;
 }
 .vx-dress-btn:hover {
-  color: var(--ink); background: rgba(150,182,224,.14); transform: translateY(-1px);
+  color: var(--ink); background: #eef2f8; transform: translateY(-1px);
+  box-shadow: inset 0 0 0 1px rgba(22,42,70,.22);
 }
 .vx-dress-btn:active { transform: translateY(1px); }
 /* The glyphs size off their own font-size (width/height are 1em), so they need
@@ -4957,13 +5104,13 @@ const DRESS_CSS = `
 .vx-dress-btn svg { font-size: 14px; }
 .vx-dress-btn.is-primary {
   padding: 13px 30px; color: #241703;
-  background: linear-gradient(180deg, var(--gold-lit), var(--gold));
-  box-shadow: 0 14px 30px rgba(255,192,67,.28);
+  background: linear-gradient(180deg, #ffd980, var(--gold-lit));
+  box-shadow: 0 10px 24px rgba(176,124,20,.3);
 }
 .vx-dress-btn.is-primary:hover {
-  color: #241703; filter: brightness(1.07);
-  background: linear-gradient(180deg, var(--gold-lit), var(--gold));
-  box-shadow: 0 18px 36px rgba(255,192,67,.36);
+  color: #241703; filter: brightness(1.05);
+  background: linear-gradient(180deg, #ffd980, var(--gold-lit));
+  box-shadow: 0 14px 30px rgba(176,124,20,.38);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -5000,10 +5147,13 @@ const charUI = (() => {
   head.className = 'vx-dress-head';
   const eyebrow = document.createElement('div');
   eyebrow.className = 'vx-dress-eyebrow';
-  eyebrow.textContent = 'Dressing Room';
+  eyebrow.textContent = 'Wardrobe / Character studio';
   const h = document.createElement('h2');
-  h.textContent = 'Your Character';
-  head.append(eyebrow, h);
+  h.textContent = 'Make it yours.';
+  const subtitle = document.createElement('p');
+  subtitle.className = 'vx-dress-subtitle';
+  subtitle.textContent = 'Your style. Every detail. Out there for everyone to see.';
+  head.append(eyebrow, h, subtitle);
   panel.appendChild(head);
 
   const cols = document.createElement('div');
@@ -5032,6 +5182,10 @@ const charUI = (() => {
   // Right: one ‹ value › cycler row per cosmetic category.
   const rows = document.createElement('div');
   rows.className = 'vx-dress-panel';
+  const rackTitle = document.createElement('div');
+  rackTitle.className = 'vx-dress-rack-title';
+  rackTitle.textContent = 'THE DETAILS';
+  rows.appendChild(rackTitle);
   cols.appendChild(rows);
 
   const editing: Cosmetics = defaultCosmetics(0);
@@ -5193,7 +5347,8 @@ const charUI = (() => {
     previewRAF = requestAnimationFrame(animatePreview);
     if (!previewRenderer || !previewScene || !previewCam) return;
     // Slow turntable while you are not holding the model yourself.
-    if (dragPointer === null && previewBody) {
+    if (dragPointer === null && previewBody && !accessibility.reducedMotion &&
+        !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
       previewSpin += 0.0035;
       previewBody.group.rotation.y = previewSpin;
     }
@@ -5749,6 +5904,10 @@ net.onWelcome = (me) => {
   joinPendingDuel();
   joinPendingParty();
 };
+net.onPlayerCounts = (counts) => {
+  livePlayerCounts = counts;
+  renderLivePlayerCounts();
+};
 net.onWorldTime = (seconds) => {
   if (!Number.isFinite(seconds)) return;
   serverWorldTime = seconds;
@@ -5841,6 +6000,7 @@ net.onSelfHealth = (health, dead) => {
   player.setHealthFromServer(health, dead);
 };
 net.onRespawned = (x, y, z, h) => {
+  if (arenaKind === 'party') resetPartyWeaponPose();
   player.respawn({ x, y, z });
   player.health = h;
   lastHealth = h;
@@ -5864,10 +6024,11 @@ net.onTeleport = (x, y, z) => {
   player.pos.set(x, y, z);
   player.vel.set(0, 0, 0);
   player.fallDistance = 0;
-  // The destination is usually unstreamed world (getBlock reads air there), so
-  // hold the player in place until a bubble of chunks loads — otherwise they
-  // free-fall into the not-yet-generated void and die on arrival.
-  pendingTeleport = { x, y, z, started: worldTimeLocal };
+  // Corrections inside a loaded arena are immediate. Waiting for meshes on
+  // every correction repeatedly pins the player, even though collision data
+  // is already present. Check every column the body can occupy on arrival.
+  const loaded = [-.3, .3].every(dx => [-.3, .3].every(dz => world.isLoaded(x + dx, z + dz)));
+  pendingTeleport = arenaActive && loaded ? null : { x, y, z, started: worldTimeLocal };
   if (!arenaActive) showNotice('Teleporting…');
 };
 net.onNotice = (text) => showNotice(text);
@@ -6692,8 +6853,35 @@ function encounterEvent(event: EncounterEvent): void {
   }
 }
 
+const seenBossImpacts = new Set<number>();
+let bossImpactEncounter = '';
+const bossImpactPosition = new THREE.Vector3();
+function updateBossImpacts(snapshot: EncounterSnapshot | null): void {
+  if (!snapshot || snapshot.encounterId !== bossImpactEncounter) {
+    seenBossImpacts.clear(); bossImpactEncounter = snapshot?.encounterId ?? '';
+  }
+  if (!snapshot || snapshot.status !== 'active') return;
+  let strongest: EncounterSnapshot['hazards'][number] | undefined;
+  for (const hazard of snapshot.hazards) {
+    if (snapshot.time < hazard.executeAt || snapshot.time > hazard.expiresAt ||
+        seenBossImpacts.has(hazard.id)) continue;
+    seenBossImpacts.add(hazard.id);
+    if (!strongest || hazard.damage > strongest.damage) strongest = hazard;
+  }
+  if (seenBossImpacts.size > 128) {
+    const active = new Set(snapshot.hazards.map(h => h.id));
+    for (const id of seenBossImpacts) if (!active.has(id)) seenBossImpacts.delete(id);
+  }
+  if (!strongest) return;
+  bossImpactPosition.set(strongest.origin.x, strongest.origin.y + 0.5, strongest.origin.z);
+  audio.vaultImpact(snapshot.family, bossImpactPosition, strongest.damage / 7);
+  const distance = bossImpactPosition.distanceTo(player.pos);
+  if (distance < strongest.radius + 9) triggerEncounterShake(0.2,
+    Math.min(0.07, strongest.damage * 0.007) * Math.max(0, 1 - distance / 28));
+}
+
 function triggerEncounterShake(duration: number, strength: number): void {
-  if (accessibility.reducedMotion || accessibility.cameraShake <= 0) return;
+  if (accessibility.reducedMotion || accessibility.photosensitivitySafe || accessibility.cameraShake <= 0) return;
   encounterShakeTime = Math.max(encounterShakeTime, duration);
   encounterShakeStrength = Math.max(encounterShakeStrength,
     strength * accessibility.cameraShake);
@@ -6928,7 +7116,14 @@ function updateVaults(dt: number): void {
     }
   }
   vaultBossHud.update(encounterSnapshot);
-  vaultEncounterVisuals.update(encounterSnapshot, accessibility.highContrastTelegraphs,
+  updateBossImpacts(encounterSnapshot);
+  if (encounterSnapshot?.status === 'active') audio.vaultMusicCue('engage');
+  const closingShot = vaultCinematic.frame;
+  const visualSnapshot = encounterSnapshot ?? (closingShot?.mode === 'victory'
+    ? { ...closingShot.snapshot, status: 'victory' as const,
+      time: closingShot.snapshot.time + closingShot.progress * ENCOUNTER_VICTORY_CINEMATIC_SECONDS }
+    : null);
+  vaultEncounterVisuals.update(visualSnapshot, accessibility.highContrastTelegraphs,
     accessibility.reducedMotion || accessibility.photosensitivitySafe);
 }
 
@@ -7633,6 +7828,8 @@ net.onSeasonEnd = (winner, number) => {
   refreshNetInfo();
 };
 net.onDisconnect = () => {
+  livePlayerCounts = null;
+  renderLivePlayerCounts();
   if (pendingDuelRetry) window.clearTimeout(pendingDuelRetry); pendingDuelRetry = 0;
   pendingDuelAttempted = false;
   duelQueued = false;
@@ -7766,6 +7963,9 @@ const partyUI = new PartyUI(document.body);
 const partyVisuals = new PartyVisuals(scene);
 let partySnapshot: PartyLobbySnapshot | null = null;
 let partySub: PartySubBounds | null = null;
+/** Footprint of the venue currently streamed in, kept so the chunks can be
+ *  dropped again on the way out (see `clearArenaState`). */
+let partyActiveBounds: { minX: number; minZ: number; maxX: number; maxZ: number } | null = null;
 let partyQueued = false;
 let partyQueuedMode: PartyMode = 'bridge';
 let partyInviteToken = '';
@@ -7829,6 +8029,7 @@ function restorePartyFallback(): void {
 function clearPartySession(): void {
   stopPartyReadyWatchdog();
   partySub = null;
+  partyActiveBounds = null;
   partyArenaReadySent = false;
   partyUI.setVisible(false);
   partyVisuals.clear();
@@ -7941,13 +8142,14 @@ function renderPartyLobby(): void {
 }
 partyCardAction.addEventListener('click', () => queuePartyMode('bridge'));
 partyPrivateAction.addEventListener('click', () => createPartyMode('bridge'));
-partyUI.onLeave = () => { leaveParty(); enterTitle(); openMinigames(); };
+// "Back to games" goes to the board and stops there. "Play again" goes to the
+// board and presses the same card the player would have.
+partyUI.onLeave = () => { leaveParty(); enterTitle(); openGamesTab(); };
 partyUI.onReplay = () => {
   const mode = partySnapshot?.mode ?? 'bridge';
   leaveParty();
   enterTitle();
-  openMinigames();
-  queuePartyMode(mode);
+  pressMinigamePlay(mode);
 };
 net.onPartyQueue = queued => {
   partyQueued = queued;
@@ -7983,6 +8185,7 @@ net.onPartyArena = (arena, sub, team, spawn, _countdown) => {
   savePartyFallback();
   registerPartyArena(arena);
   world.invalidateArena(arena);
+  partyActiveBounds = { minX: arena.minX, minZ: arena.minZ, maxX: arena.maxX, maxZ: arena.maxZ };
   arenaActive = true;
   arenaKind = 'party';
   partySub = sub;
@@ -8058,23 +8261,31 @@ net.onPartyArena = (arena, sub, team, spawn, _countdown) => {
   resumePlay();
 };
 net.onPartyLoadout = (slots, selected) => {
+  resetPartyWeaponPose();
+  partySwingAt = -1e9;
+  partyShotAt = -1e9;
   inventory.restore({ slots, armor: new Array(4).fill(null), selected });
   fireCooldown = 0;
   reloadTimer = 0;
   burstRemaining = 0;
   healUse.cancel();
 };
-net.onPartyHit = (target, amount, combo, charge, crit, killed, ranged) => {
+net.onPartyHit = (target, amount, combo, _charge, crit, killed, ranged) => {
   showPvpHit(target, amount, killed);
   const remote = net.remotes.get(target);
   const at = remote ? new THREE.Vector3(remote.tx, remote.ty + 1.1, remote.tz) : undefined;
   if (ranged) audio.arrowHit(crit, at);
-  else audio.axeHit(crit, at);
-  // The three things the swing model decides that a plain hitmarker cannot
-  // show: how long you charged, whether it crit, and how deep the combo is.
+  else {
+    audio.axeHit(crit, at);
+    held.meleeImpact(crit);
+    if (at) particles.burst(at.x, at.y, at.z, crit ? 16 : 8,
+      crit ? 0xffd25e : 0xd8edf5, crit ? 3 : 2, .25,
+      { gravity: 4, spread: .3, scale: .25 });
+  }
+  // Confirm movement crits and consecutive hits without a recharge meter.
   if (!killed && (crit || combo > 0))
     killBanner.push(crit ? 'CRIT' : `COMBO ×${combo + 1}`,
-      ranged ? 'Full draw' : `${Math.round(charge * 100)}% charge`,
+      ranged ? 'On target' : crit ? 'Jump strike' : 'Keep the pressure',
       crit ? '#ffd25e' : '#72ffcb', 1.1);
 };
 net.onPartyArrow = a => {
@@ -8118,35 +8329,34 @@ function startPartyReadyWatchdog(x: number, z: number): void {
     }
   }, 100);
 }
-/** The Bridge's two weapons, client side. Neither decides anything: the melee
- *  branch reports a target id, the bow branch reports a direction and a draw,
- *  and the server does the rest. What lives here is the FEEL — the swing arc,
- *  the rising creak of a draw, and the meter that tells you when to let go. */
+/** Predict responsive weapon motion; the server validates every contact and
+ * flies every arrow. Neither weapon gains power from waiting. */
 const PARTY_MELEE_REACH = 4.2;
-let bowDrawStart = 0;
-let bowDrawTicks = 0;
 let partySwingAt = -1e9;
+let partyShotAt = -1e9;
+/** Shut in the drop cage: the opening countdown, and the three seconds after
+ *  every goal. Nothing the player does with the keyboard counts while the
+ *  hatch is closed — the server is holding everybody at their own base. */
+function partyCaged(): boolean {
+  const s = partySnapshot;
+  return !!s && s.mode === 'bridge' && s.goalResetAt !== undefined && partyNow() < s.goalResetAt;
+}
 function partyWeaponsActive(): boolean {
   return arenaKind === 'party' && partySub?.game === 'bridge' &&
-    partySnapshot?.phase === 'running';
+    partySnapshot?.phase === 'running' && !partyCaged();
 }
-function cancelBowDraw(): void {
-  bowDrawStart = 0;
-  bowDrawTicks = 0;
-  partyUI.setDraw(0);
+function resetPartyWeaponPose(): void {
+  held.setBowDraw(0);
 }
 function updatePartyWeapon(heldId: number, lookDir: THREE.Vector3, eye: THREE.Vector3): void {
   const now = performance.now();
-  if (heldId === Item.VoidCleaver) {
-    cancelBowDraw();
-    if (!input.leftClicked)
-      return;
-    // The swing plays whether or not it lands: a miss you can see is what
-    // makes the next one a decision.
-    const charge = Math.max(0, Math.min(1, (now - partySwingAt) / 560));
+  if (heldId === Item.IronAxe) {
+    resetPartyWeaponPose();
+    if ((!input.leftClicked && !input.leftDown) ||
+        now - partySwingAt < BRIDGE_MELEE_TIER.cooldownMs) return;
     partySwingAt = now;
-    if (charge > .9) held.swingHeavy(); else held.swing();
-    audio.axeSwing(charge);
+    held.swing();
+    audio.axeSwing(1);
     // Report the ray target if there is one, and otherwise the nearest body
     // inside the reach and the facing cone. Being GENEROUS here costs nothing:
     // the server re-checks range, facing and cooldown against its own
@@ -8175,37 +8385,21 @@ function updatePartyWeapon(heldId: number, lookDir: THREE.Vector3, eye: THREE.Ve
     return;
   }
   if (heldId !== Item.BridgeBow) {
-    cancelBowDraw();
+    resetPartyWeaponPose();
     return;
   }
-  // Hold to draw, release to loose — and a draw that never reached the minimum
-  // is simply let down, so an accidental click costs nothing.
-  if (input.rightDown) {
-    if (!bowDrawStart)
-      bowDrawStart = now;
-    const power = bridgeBowPower(now - bowDrawStart);
-    partyUI.setDraw(power);
-    const tick = Math.floor(power * 6);
-    if (tick > bowDrawTicks) {
-      bowDrawTicks = tick;
-      audio.bowDraw(power);
-    }
-    return;
-  }
-  if (!bowDrawStart)
-    return;
-  const power = bridgeBowPower(now - bowDrawStart);
-  cancelBowDraw();
-  if (power < BRIDGE_BOW_MIN_POWER)
-    return;
-  audio.bowRelease(power);
-  held.swing();
-  net.sendPartyShoot(lookDir.x, lookDir.y, lookDir.z, power);
+  // One click, one arrow. No draw, release gate, or charge slider.
+  if (!input.rightClicked || now - partyShotAt < BRIDGE_BOW_COOLDOWN_MS) return;
+  audio.bowRelease(1);
+  held.releaseBow(1);
+  partyShotAt = now;
+  net.sendPartyShoot(lookDir.x, lookDir.y, lookDir.z, 1);
 }
 function updatePartyFrame(dt: number): void {
-  // A half-drawn bow does not survive the thing that interrupted it.
-  if (bowDrawStart && (!partyWeaponsActive() || screen !== 'playing'))
-    cancelBowDraw();
+  // Clear the held pose whenever combat is interrupted.
+  if (!partyWeaponsActive() || screen !== 'playing' ||
+      (inventory.selectedStack?.id !== Item.BridgeBow && inventory.selectedStack?.id !== Item.IronAxe))
+    resetPartyWeaponPose();
   if (arenaKind !== 'party' || !partySnapshot) {
     partyVisuals.updateArrows(dt);
     return;
@@ -8422,7 +8616,7 @@ const cinematicGameplayQuat = new THREE.Quaternion();
  * final section so control returns without a hard snap. */
 function updateVaultCinematicCamera(): void {
   const frame = vaultCinematic.frame;
-  if (!frame || !curVault) return;
+  if (!frame || !curVault || accessibility.reducedMotion || accessibility.photosensitivitySafe) return;
   const p = frame.progress;
   const boss = frame.snapshot.boss.position;
   const anchors = curVault.arena.cameraAnchors;
@@ -8438,23 +8632,33 @@ function updateVaultCinematicCamera(): void {
   let cinematicFov = 54;
   if (frame.mode === 'intro') {
     const sweep = THREE.MathUtils.smoothstep(p, 0.02, 0.55);
-    cinematicShotPos.copy(cinematicShotA).lerp(cinematicShotB, sweep);
+    // Follow an arc around the creature. A straight interpolation between
+    // opposite room anchors passed directly through the boss's body.
+    const startAngle = Math.atan2(a.z - boss.z, a.x - boss.x);
+    const endAngle = Math.atan2(b.z - boss.z, b.x - boss.x);
+    const deltaAngle = Math.atan2(Math.sin(endAngle - startAngle), Math.cos(endAngle - startAngle));
+    const shotAngle = startAngle + deltaAngle * sweep;
+    const shotRadius = Math.max(5.8, THREE.MathUtils.lerp(
+      Math.hypot(a.x - boss.x, a.z - boss.z), Math.hypot(b.x - boss.x, b.z - boss.z), sweep));
+    cinematicShotPos.set(boss.x + Math.cos(shotAngle) * shotRadius,
+      THREE.MathUtils.lerp(a.y, b.y, sweep), boss.z + Math.sin(shotAngle) * shotRadius);
     // The second half pushes close to the boss before retreating into gameplay.
     const close = THREE.MathUtils.smoothstep(p, 0.42, 0.72);
-    const orbit = p * Math.PI * 1.2;
-    cinematicShotPos.lerp(cinematicShotA.set(
-      boss.x + Math.cos(orbit) * 4.8,
-      boss.y + 2.2 + Math.sin(p * Math.PI) * 1.3,
-      boss.z + Math.sin(orbit) * 4.8,
-    ), close);
+    const orbit = shotAngle + close * 0.65;
+    const closeRadius = THREE.MathUtils.lerp(shotRadius, 5.4, close);
+    cinematicShotPos.set(
+      boss.x + Math.cos(orbit) * closeRadius,
+      THREE.MathUtils.lerp(cinematicShotPos.y, boss.y + 2.2 + Math.sin(p * Math.PI) * 1.3, close),
+      boss.z + Math.sin(orbit) * closeRadius,
+    );
     returnMix = THREE.MathUtils.smoothstep(p, 0.73, 1);
     cinematicFov = THREE.MathUtils.lerp(62, 42, close);
   } else if (frame.mode === 'phase') {
-    const angle = -0.7 + p * Math.PI * 1.35;
+    const angle = -0.7 + p * Math.PI * 0.65;
     cinematicShotPos.set(
-      boss.x + Math.cos(angle) * 5.2,
+      boss.x + Math.cos(angle) * 6.2,
       boss.y + 2.8 + Math.sin(p * Math.PI) * 0.7,
-      boss.z + Math.sin(angle) * 5.2,
+      boss.z + Math.sin(angle) * 6.2,
     );
     returnMix = THREE.MathUtils.smoothstep(p, 0.62, 1);
     cinematicFov = 48;
@@ -8467,8 +8671,14 @@ function updateVaultCinematicCamera(): void {
     cinematicFov = THREE.MathUtils.lerp(52, 64, rise);
   }
 
+  const bounds = curVault.arena.bounds;
+  cinematicShotPos.x = THREE.MathUtils.clamp(cinematicShotPos.x, bounds.minX + 0.7, bounds.maxX - 0.7);
+  cinematicShotPos.y = THREE.MathUtils.clamp(cinematicShotPos.y, boss.y + 0.8, bounds.maxY - 0.7);
+  cinematicShotPos.z = THREE.MathUtils.clamp(cinematicShotPos.z, bounds.minZ + 0.7, bounds.maxZ - 0.7);
+  const focusHeight = frame.snapshot.kind === 'mire_queen' ? 1.3
+    : frame.snapshot.kind === 'ember_colossus' ? 2.3 : 3;
   camera.position.copy(cinematicShotPos).lerp(cinematicGameplayPos, returnMix);
-  camera.lookAt(boss.x, boss.y + (frame.mode === 'victory' ? 1.1 : 1.8), boss.z);
+  camera.lookAt(boss.x, boss.y + (frame.mode === 'victory' ? 1.1 : focusHeight), boss.z);
   camera.quaternion.slerp(cinematicGameplayQuat, returnMix);
   camera.fov = THREE.MathUtils.lerp(cinematicFov, gameplayFov, returnMix);
   camera.updateProjectionMatrix();
@@ -9073,6 +9283,7 @@ net.onHeliModuleInstalled = (_id, item) => {
   showNotice(`✓ ${ITEMS[item]?.name ?? 'Airframe module'} installed.`);
 };
 net.onHeliDown = (_id, x, y, z, _faction, reason) => heliLossEffect(x, y, z, reason);
+net.onHeliCrash = (id, x, y, z) => heliCrashEffect(id, x, y, z);
 net.onHeliGone = (id) => { if (mySeat?.id === id) setSeat(null); };
 net.onEjected = (x, y, z, vx, vy, vz, reason) => applyEject(x, y, z, vx, vy, vz, reason);
 
@@ -9129,6 +9340,9 @@ function applyOfflineVehicleEvents(events: readonly VehicleEvent[]): void {
       case 'eject':
         player.damage(ev.damage);
         applyEject(ev.x, ev.y, ev.z, ev.vx, ev.vy, ev.vz, ev.reason);
+        break;
+      case 'heliCrash':
+        heliCrashEffect(ev.id, ev.x, ev.y, ev.z);
         break;
       case 'heliRemoved':
         if (mySeat?.id === ev.id) setSeat(null);
@@ -9642,6 +9856,15 @@ function heliLossEffect(x: number, y: number, z: number, reason: HeliLossReason)
   triggerEncounterShake(reason === 'flameout' ? 0.25 : 0.45, 0.045);
 }
 
+/** Ground impact is a separate beat from the engine bursting in flight. */
+function heliCrashEffect(id: number, x: number, y: number, z: number): void {
+  vehicleModels.crash(id, x, y, z);
+  audio.explosion(new THREE.Vector3(x, y, z));
+  const distance = player.pos.distanceTo(new THREE.Vector3(x, y, z));
+  const strength = Math.max(0, 1 - distance / 90);
+  if (strength > 0) triggerEncounterShake(0.8 * strength, 0.08 * strength);
+}
+
 /** Thrown clear of a bursting airframe: land where the sim says, carrying the
  *  impulse it gave us, so a crash flings the crew instead of parking them. */
 function applyEject(
@@ -9872,12 +10095,8 @@ function warfarePlaceHint(text: string): void {
 
 const _airOrigin = new THREE.Vector3();
 const _airDir = new THREE.Vector3();
-const _airTo = new THREE.Vector3();
 const _airPoint = new THREE.Vector3();
-/** Hull radius used for the shot test. The cabin's own half-extents are
- *  2.2 × 0.95 × 1.05, so a single sphere a shade over the longest of those is
- *  the honest cheap stand-in — generous side-on, tight head-on. */
-const AIR_HIT_RADIUS = 2.3;
+
 
 /**
  * Report a gunshot that lines up with an enemy helicopter — the authoritative
@@ -9919,12 +10138,8 @@ function reportAirTargetHit(gun: GunInfo, dirs: readonly THREE.Vector3[]): void 
     let bestId = 0;
     let bestT = Infinity;
     for (const target of targets) {
-      _airTo.copy(target.pos).sub(_airOrigin);
-      const t = _airTo.dot(_airDir);
-      if (t <= 0 || t > range || t >= bestT) continue;
-      // Perpendicular distance from the aim line.
-      const perp = Math.sqrt(Math.max(0, _airTo.lengthSq() - t * t));
-      if (perp > AIR_HIT_RADIUS) continue;
+      const t = helicopterRayDistance(_airOrigin, _airDir, target.pos, range);
+      if (t === null || t >= bestT) continue;
       bestT = t; bestId = target.id;
     }
     if (!bestId) continue;
@@ -9933,7 +10148,7 @@ function reportAirTargetHit(gun: GunInfo, dirs: readonly THREE.Vector3[]): void 
     if (blocked) continue;
     // Impact point: where the ray crosses the hull sphere, so the sparks and
     // the damage number land on the skin rather than at the rotor hub.
-    _airPoint.copy(_airOrigin).addScaledVector(_airDir, Math.max(0, bestT - AIR_HIT_RADIUS * 0.6));
+    _airPoint.copy(_airOrigin).addScaledVector(_airDir, bestT);
     const prev = landed.get(bestId);
     if (prev) prev.damage += perRound;
     else landed.set(bestId, { damage: perRound, at: _airPoint.clone() });
@@ -9944,6 +10159,8 @@ function reportAirTargetHit(gun: GunInfo, dirs: readonly THREE.Vector3[]): void 
     // The bar is authoritative, but the shooter should not wait a round trip to
     // learn their burst was the last one — a hull already at or below the
     // damage they just dealt reads as a kill marker straight away.
+    const rawDamage = hit.damage;
+    hit.damage = helicopterGunDamage(rawDamage);
     const killed = !!snap && snap.hp <= hit.damage;
     showHitmarker(hit.damage, killed);
     damageNumbers.spawn(hit.at.x, hit.at.y, hit.at.z, hit.damage,
@@ -9957,14 +10174,14 @@ function reportAirTargetHit(gun: GunInfo, dirs: readonly THREE.Vector3[]): void 
       // The server caps a single report at the ranged ceiling, so a volley that
       // legitimately beat that (a shotgun with every pellet in the cabin) goes
       // as several reports rather than being quietly clipped to one round.
-      let left = hit.damage;
+      let left = rawDamage;
       for (let i = 0; i < 6 && left > 0; i++) {
         const chunk = Math.min(left, RANGED_MAX_DAMAGE);
         net.sendHeliHit(id, chunk);
         left -= chunk;
       }
     } else {
-      applyOfflineVehicleEvents(offlineVehicles.damage(id, hit.damage));
+      applyOfflineVehicleEvents(offlineVehicles.damageFromGun(id, rawDamage));
     }
   }
 }
@@ -9980,8 +10197,23 @@ function updateWarfare(dt: number): void {
   }
   // The camera drives how the overhead hull bars are sized and faded, so the
   // same one the frame will render through is handed over here.
-  vehicleModels.update(dt, view === View.First ? camera : viewCamera);
   vehicleModels.setLocalRide(mySeat?.id ?? myRope?.id ?? null);
+  let hovered: number | null = null;
+  if (input.locked && !player.dead) {
+    camera.getWorldDirection(_airDir);
+    let nearest = 170;
+    for (const h of vehicleModels.snapshots()) {
+      if (h.dying > 0 || h.id === mySeat?.id || h.id === myRope?.id) continue;
+      const pos = vehicleModels.positionOf(h.id);
+      if (!pos) continue;
+      const distance = helicopterRayDistance(player.eyePosition, _airDir, pos, nearest);
+      if (distance === null) continue;
+      if (raycastBlocks(world, player.eyePosition, _airDir, distance)) continue;
+      nearest = distance; hovered = h.id;
+    }
+  }
+  vehicleModels.setHovered(hovered);
+  vehicleModels.update(dt, view === View.First ? camera : viewCamera);
   heliBombCooldown = Math.max(0, heliBombCooldown - dt);
   if (openHelipad) refreshAirframeLive();
 
@@ -10617,8 +10849,8 @@ function updateTrapGrip(dt: number): void {
   player.pinned = false;
   player.trapSlow = 1;
   player.trapNoJump = false;
-  if (player.dead || localMode !== 'survival' || player.noclip) {
-    trapPinLeft = 0; trapHudEl.style.display = 'none';
+  if (arenaActive || player.dead || localMode !== 'survival' || player.noclip) {
+    trapPinLeft = 0; trapStruggles = 0; prevJumpForTrap = false; trapHudEl.style.display = 'none';
     return;
   }
 
@@ -11290,6 +11522,7 @@ function frame(): void {
 
   // Advance cinematics before control/camera decisions so their final frame and
   // UI restoration happen atomically.
+  vaultCinematic.setReducedMotion(accessibility.reducedMotion || accessibility.photosensitivitySafe);
   vaultCinematic.update(dt);
 
   // Direct control only while actively playing (pointer locked, no UI, alive).
@@ -11524,9 +11757,9 @@ function frame(): void {
       } else if (input.dismountPressed && tryAttachFastRope()) {
         interaction.update(dt, input, camera, true, true);
       } else if (partyWeaponsActive() && heldStack &&
-          (heldStack.id === Item.VoidCleaver || heldStack.id === Item.BridgeBow)) {
+          (heldStack.id === Item.IronAxe || heldStack.id === Item.BridgeBow)) {
         // The Bridge's weapons own both buttons while one is in hand: no
-        // mining, no placing, and no block use behind the bow's draw.
+        // mining, no placing, and no block use behind a shot.
         updatePartyWeapon(heldStack.id, lookDir, eye);
         interaction.update(dt, input, camera, true, true);
       } else if (input.rightClicked && !interaction.armedMove && heldStack &&

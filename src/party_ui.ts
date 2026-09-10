@@ -21,8 +21,6 @@ export class PartyUI {
   private standings = el('div', 'pg-standings');
   private card = el('div', 'pg-card');
   private banner = el('div', 'pg-banner');
-  private draw = el('div', 'pg-draw');
-  private drawFill = el('i', '');
   private snapshot: PartyLobbySnapshot | null = null;
   private me = 0;
   private lastPhase = '';
@@ -33,19 +31,9 @@ export class PartyUI {
   onLeave?: () => void;
   private lastKill = 0;
   constructor(host: HTMLElement) {
-    this.draw.append(this.drawFill);
-    this.draw.hidden = true;
-    this.root.append(this.progress, this.score, this.clock, this.standings, this.card, this.banner, this.draw);
+    this.root.append(this.progress, this.score, this.clock, this.standings, this.card, this.banner);
     host.append(this.root);
     this.setVisible(false);
-  }
-  /** The bow's draw, 0..1. Hidden entirely at rest, so a player who never
-   *  picks the bow up never sees a meter. */
-  setDraw(power: number): void {
-    const p = Math.max(0, Math.min(1, power));
-    this.draw.hidden = p <= 0;
-    this.drawFill.style.width = `${(p * 100).toFixed(1)}%`;
-    this.draw.classList.toggle('full', p >= .97);
   }
   setVisible(v: boolean): void {
     this.root.hidden = !v;
@@ -54,7 +42,6 @@ export class PartyUI {
       this.lastRound = '';
       this.lastGoal = 0;
       this.lastKill = 0;
-      this.setDraw(0);
     }
   }
   private myTeam(): number {
@@ -188,7 +175,7 @@ export class PartyUI {
       if (s.round.game === 'parkour')
         text += ` · CHECKPOINT ${p?.checkpoint ?? 0} · NEXT ${(p?.progress ?? 0) + 1}/${PARKOUR_PLATFORMS - 1} · ${p?.falls ?? 0} FALLS · R TO RETRY`;
       else if (s.goalResetAt && serverNow < s.goalResetAt)
-        text += ' · BACK TO YOUR BASE';
+        text += ` · BACK TO YOUR CAGE · ${Math.max(1, Math.ceil((s.goalResetAt - serverNow) / 1000))}`;
       else
         text += ` · CROSS THE SPAN · DIVE INTO THE ${BRIDGE_TEAM_NAME[1 - (p?.team ?? 0)]} PORTAL`;
     }

@@ -106,6 +106,11 @@ export const DUEL_SPAWN_SHIELD_MS = 1_250;
 export const DUEL_REMATCH_MS = 30_000;
 export const DUEL_ARENA_BASE_X = 12_288;
 export const DUEL_ARENA_SLOT_SPACING = 512;
+/** Concurrent Duels matches the band has room for. Slots are allocated from 0
+ *  upward and freed on match end, so this is a ceiling on simultaneous
+ *  matches, not on lifetime matches — and it is what stops a runaway allocator
+ *  from walking a colosseum out of the Duels band and into another mode's. */
+export const DUEL_ARENA_SLOTS = 96;
 export const DUEL_ARENA_SIZE = 44;
 export const DUEL_ARENA_INTERIOR = 40;
 export const DUEL_ARENA_FLOOR_Y = 96;
@@ -334,7 +339,7 @@ export interface DuelLobbySnapshot {
 }
 
 export type DuelJoinFailure = 'invalid' | 'full' | 'match_in_progress' | 'already_in_lobby';
-export type DuelStartFailure = 'not_host' | 'too_few_players' | 'too_many_players' | 'not_everyone_ready' | 'not_in_lobby';
+export type DuelStartFailure = 'not_host' | 'too_few_players' | 'too_many_players' | 'not_everyone_ready' | 'not_in_lobby' | 'no_arena';
 
 export function duelArenaBounds(slot: number): DuelArenaBounds {
   const safeSlot = Math.max(0, Math.floor(slot));
@@ -662,7 +667,7 @@ export class Duels {
     if ([...lobby.participants.values()].some((p) => !p.connected || !p.ready)) {
       return { ok: false, reason: 'not_everyone_ready' };
     }
-    this.beginCountdown(lobby, now);
+    if (!this.beginCountdown(lobby, now)) return { ok: false, reason: 'no_arena' };
     return { ok: true, snapshot: this.snapshotLobby(lobby, now) };
   }
 
@@ -731,8 +736,11 @@ export class Duels {
     }
     p.rematchVote = true;
     const connected = [...lobby.participants.values()].filter((v) => v.connected);
-    if (connected.length >= DUEL_MIN_PLAYERS && connected.every((v) => v.rematchVote)) {
-      this.beginCountdown(lobby, now);
+    if (connected.length >= DUEL_MIN_PLAYERS && connected.every((v) => v.rematchVote) &&
+        !this.beginCountdown(lobby, now)) {
+      // Every colosseum is busy. Clear the votes rather than stranding the
+      // room on a rematch that silently never starts.
+      for (const v of lobby.participants.values()) v.rematchVote = false;
     }
     return this.snapshotLobby(lobby, now);
   }
@@ -850,9 +858,13 @@ export class Duels {
     for (const p of lobby.participants.values()) p.ready = false;
   }
 
-  private allocateSlot(): number {
+  /** The lowest free arena slot, or null when every slot in the band is busy.
+   *  Slots are recycled the moment a match ends, so exhausting this means 96
+   *  Duels are genuinely running at once. */
+  private allocateSlot(): number | null {
     let slot = 0;
     while (this.usedSlots.has(slot)) slot++;
+    if (slot >= DUEL_ARENA_SLOTS) return null;
     this.usedSlots.add(slot);
     return slot;
   }
@@ -862,8 +874,14 @@ export class Duels {
     lobby.arena = undefined;
   }
 
-  private beginCountdown(lobby: DuelLobby, now: number): void {
-    if (!lobby.arena) lobby.arena = duelArenaBounds(this.allocateSlot());
+  /** False when the band is full: the lobby is left exactly as it was, so the
+   *  host can simply try again once a colosseum frees up. */
+  private beginCountdown(lobby: DuelLobby, now: number): boolean {
+    if (!lobby.arena) {
+      const slot = this.allocateSlot();
+      if (slot === null) return false;
+      lobby.arena = duelArenaBounds(slot);
+    }
     lobby.phase = 'countdown'; lobby.countdownEndsAt = undefined;
     lobby.arenaReady = new Set();
     lobby.arenaLoadDeadline = now + DUEL_ARENA_LOAD_TIMEOUT_MS;
@@ -874,6 +892,7 @@ export class Duels {
       p.rematchVote = false; p.respawnAt = undefined; p.shieldUntil = undefined;
       p.spree = 0; p.bestSpree = 0; p.multi = 0; p.multiUntil = 0; p.lastKilledBy = 0;
     }
+    return true;
   }
 
   private tryArmCountdown(lobby: DuelLobby, now: number): void {

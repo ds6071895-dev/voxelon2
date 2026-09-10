@@ -1,16 +1,6 @@
-// The GLIDER, as an actual aircraft you hang under.
-//
-// Before this, a deployed glider was invisible: the wearer got a small box on
-// their back and a fixed backward body tilt, so other players saw someone
-// reclining through the air with a rucksack. This module builds the thing you
-// are actually riding — a swept delta wing on a spar frame, with an A-frame
-// control bar the pilot grips — and the matching prone pilot pose.
-//
-// The rig is deliberately NOT a child of the avatar body. The pilot hangs from
-// the wing, so the wing follows the FLIGHT PATH (pitch of the look direction,
-// roll of the turn) while the body hangs beneath it in a prone pose; parenting
-// one to the other would force them to share an attitude they do not share.
-// Built in code with baked face shading like the rest of the project's art.
+// Shared first/third-person flight rig: a swept, faceted stormwing with
+// luminous edges, articulated tips and a suspended control frame.
+// The wing and pilot have independent attitudes so banking feels airborne.
 
 import * as THREE from 'three';
 
@@ -23,11 +13,17 @@ const SAIL_MAT = new THREE.MeshBasicMaterial({
   vertexColors: true, side: THREE.DoubleSide,
 });
 
-const SPAR = 0x6b4f2a;       // varnished wood spars
-const SPAR_DARK = 0x4a371d;
-const SAIL_A = 0xe4884a;     // sunset orange panels
-const SAIL_B = 0xf2e3c8;     // bleached canvas panels
-const SKIN = 0xc89a6a;       // grip fists (first-person only)
+const SPAR = 0xb6d1da;
+const SPAR_DARK = 0x162a3c;
+const SAIL_A = 0x123749;
+const SAIL_B = 0x217d91;
+const ACCENT = 0x6df5ee;
+const GOLD = 0xffc775;
+const GLOW_MAT = new THREE.MeshBasicMaterial({ color: ACCENT, toneMapped: false });
+const TRAIL_MAT = new THREE.MeshBasicMaterial({
+  color: ACCENT, side: THREE.DoubleSide, transparent: true, opacity: 0.22,
+  depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false,
+});
 
 /** Height of the keel above the rig origin (the pilot's harness point). */
 const KEEL_Y = 0.95;
@@ -70,6 +66,35 @@ function box(
   return mesh;
 }
 
+/** A spar joining two authored points, so the frame really follows the sail. */
+function beam(parent: THREE.Object3D, hex: number, width: number,
+  a: THREE.Vector3, b: THREE.Vector3, glow = false): void {
+  const mesh = box(parent, glow ? GLOW_MAT : FRAME_MAT, hex,
+    width, a.distanceTo(b), width, 0, 0, 0);
+  mesh.position.copy(a).add(b).multiplyScalar(0.5);
+  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), b.clone().sub(a).normalize());
+}
+
+/** Cambered sail bay: four baked-shaded facets meet at a raised ridge. */
+function sailBay(parent: THREE.Object3D, corners: THREE.Vector3[], hex: number): void {
+  const center = corners.reduce((sum, v) => sum.add(v), new THREE.Vector3()).multiplyScalar(.25);
+  center.y += .12;
+  const positions: number[] = [], colors: number[] = [];
+  const base = new THREE.Color(hex);
+  for (let i = 0; i < 4; i++) {
+    for (const v of [corners[i], corners[(i + 1) % 4], center]) {
+      positions.push(v.x, v.y, v.z);
+      const shade = [1, .82, .65, .92][i];
+      colors.push(base.r * shade, base.g * shade, base.b * shade);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geo.computeVertexNormals();
+  parent.add(new THREE.Mesh(geo, SAIL_MAT));
+}
+
 export interface GliderRig {
   /** Add to the scene. Position at the pilot's harness point, rotate to the
    *  flight attitude (YXZ: pitch of the flight path, yaw, bank). */
@@ -83,6 +108,8 @@ export interface GliderRig {
   hands: THREE.Group;
   /** Wingtip anchors, for vapour trails at speed. */
   tips: THREE.Object3D[];
+  /** Tapered slipstreams visible to the pilot and other players. */
+  trails: THREE.Mesh[];
 }
 
 /** Build one hang-glider rig: swept delta canopy, spar frame, control bar. */
@@ -95,48 +122,76 @@ export function buildGliderRig(): GliderRig {
   wing.position.y = KEEL_Y;
   group.add(wing);
 
-  box(wing, FRAME_MAT, SPAR, 0.08, 0.08, 3.1, 0, 0, -0.35);        // keel spar
-  box(wing, FRAME_MAT, SPAR_DARK, 0.18, 0.13, 0.22, 0, 0, -1.95);  // nose block
-  box(wing, FRAME_MAT, SPAR, 3.6, 0.07, 0.1, 0, -0.05, 0.3);       // cross spar
+  beam(wing, SPAR_DARK, .10, new THREE.Vector3(0, 0, -2.1), new THREE.Vector3(0, 0, .92));
+  box(wing, FRAME_MAT, GOLD, .22, .12, .34, 0, .03, -1.94);
+  box(wing, GLOW_MAT, ACCENT, .055, .035, 1.2, 0, .08, -.85);
 
   const panels: THREE.Group[] = [];
   const tips: THREE.Object3D[] = [];
+  const trails: THREE.Mesh[] = [];
   for (const side of [-1, 1]) {
     const panel = new THREE.Group();
     wing.add(panel);
     panels.push(panel);
-    // Three slabs of shrinking chord fake a swept delta half-wing; alternating
-    // sail colours give it stripes that stay readable at distance.
-    box(panel, SAIL_MAT, SAIL_A, 0.78, 0.05, 1.95, side * 0.44, 0.02, -0.4);
-    box(panel, SAIL_MAT, SAIL_B, 0.72, 0.05, 1.45, side * 1.13, 0.04, 0.0);
-    box(panel, SAIL_MAT, SAIL_A, 0.64, 0.05, 0.9, side * 1.74, 0.06, 0.35);
-    // Leading edge: one spar from the nose out to the tip.
-    box(panel, FRAME_MAT, SPAR, 0.07, 0.07, 3.25,
-      side * 1.0, 0.05, -0.5, side * 0.67);
-
+    // Span, leading edge, trailing edge, lift. Continuous swept silhouette,
+    // with teal facets and a pale outer blade that reads from far away.
+    const sections = [[0, -2.05, .85, 0], [.8, -1.65, .62, .06],
+      [1.7, -.88, .65, .13], [2.65, .02, .98, .22], [2.95, .5, .8, .33]];
+    const leading = sections.map(([x, z, , y]) => new THREE.Vector3(side * x, y, z));
+    const trailing = sections.map(([x, , z, y]) => new THREE.Vector3(side * x, y, z));
+    for (let i = 0; i < sections.length - 1; i++) {
+      sailBay(panel, [leading[i], leading[i + 1], trailing[i + 1], trailing[i]],
+        [SAIL_A, SAIL_B, SAIL_A, 0xd6edf0][i]);
+      beam(panel, SPAR_DARK, .055, leading[i], leading[i + 1]);
+      beam(panel, ACCENT, .028, trailing[i], trailing[i + 1], true);
+      if (i > 0) beam(panel, SPAR, .022, leading[i], trailing[i]);
+      // Gold slash through each bay, visible above and below the canopy.
+      const stripeA = leading[i].clone().lerp(trailing[i], .22);
+      const stripeB = leading[i + 1].clone().lerp(trailing[i + 1], .22);
+      stripeA.y += .055; stripeB.y += .055;
+      beam(panel, GOLD, .045, stripeA, stripeB);
+    }
     const tip = new THREE.Object3D();
-    tip.position.set(side * 2.05, 0.06, 0.7);
+    tip.position.copy(trailing[4]);
     panel.add(tip);
     tips.push(tip);
+    // Upraked blade tips finish the silhouette and carry the running lights.
+    beam(panel, GOLD, .075, leading[4], new THREE.Vector3(side * 3.04, .67, .88));
+    box(tip, GLOW_MAT, ACCENT, .11, .06, .2, 0, .03, 0);
+    const trailGeo = new THREE.BufferGeometry();
+    trailGeo.setAttribute('position', new THREE.Float32BufferAttribute([
+      -.045, 0, 0, .045, 0, 0, 0, -.08, 3.8,
+      0, -.035, 0, 0, .035, 0, 0, -.08, 3.8,
+    ], 3));
+    const trail = new THREE.Mesh(trailGeo, TRAIL_MAT);
+    trail.frustumCulled = false;
+    tip.add(trail);
+    trails.push(trail);
   }
 
-  // ── Control frame: the A-frame the pilot steers with ────────────────────
+  // A real triangular control frame and harness, with wrapped grips in POV.
   for (const side of [-1, 1]) {
-    box(group, FRAME_MAT, SPAR_DARK, 0.06, KEEL_Y, 0.06,
-      side * BAR_X, KEEL_Y / 2, BAR_Z);                            // downtube
-    box(group, FRAME_MAT, SPAR_DARK, 0.05, KEEL_Y - 0.08, 0.05,
-      side * 0.17, (KEEL_Y - 0.08) / 2 + 0.05, 0.14);              // harness strap
+    beam(group, SPAR, .055, new THREE.Vector3(0, KEEL_Y, BAR_Z),
+      new THREE.Vector3(side * BAR_X, .02, BAR_Z));
+    beam(group, SPAR_DARK, .04, new THREE.Vector3(side * .12, KEEL_Y, .1),
+      new THREE.Vector3(side * .17, .05, .14));
+    box(group, FRAME_MAT, SPAR_DARK, .25, .10, .11, side * BAR_X, .02, BAR_Z);
+    box(group, FRAME_MAT, GOLD, .035, .12, .12, side * .31, .02, BAR_Z);
   }
-  box(group, FRAME_MAT, SPAR, 1.02, 0.07, 0.07, 0, 0.02, BAR_Z);   // control bar
-
+  box(group, FRAME_MAT, SPAR, 1.02, .065, .065, 0, .02, BAR_Z);
+  // Compact luminous hub below the canopy, above the pilot's sightline.
+  box(group, FRAME_MAT, SPAR_DARK, .24, .13, .12, 0, .12, BAR_Z);
+  box(group, GLOW_MAT, ACCENT, .13, .035, .025, 0, .14, BAR_Z + .065);
   const hands = new THREE.Group();
   group.add(hands);
   for (const side of [-1, 1]) {
-    box(hands, FRAME_MAT, SKIN, 0.17, 0.16, 0.19, side * BAR_X, 0.06, BAR_Z);
+    box(hands, FRAME_MAT, SPAR_DARK, .17, .16, .19, side * BAR_X, .06, BAR_Z);
+    box(hands, FRAME_MAT, GOLD, .18, .055, .075, side * BAR_X, .09, BAR_Z + .11);
+    box(hands, FRAME_MAT, SAIL_B, .14, .12, .29, side * BAR_X, .035, BAR_Z + .23);
   }
   hands.visible = false;
 
-  return { group, wing, panels, hands, tips };
+  return { group, wing, panels, hands, tips, trails };
 }
 
 export interface GliderRigPose {
@@ -161,6 +216,11 @@ export function poseGliderRig(rig: GliderRig, p: GliderRigPose): void {
     const flutter = Math.sin(p.time * 6.5 + i * 1.3) *
       (0.02 + 0.045 * Math.max(0, Math.min(1, p.speed01)));
     rig.panels[i].rotation.z = side * (DIHEDRAL + FOLD * (1 - d) + flutter);
+  }
+  const speed = Math.max(0, Math.min(1, p.speed01));
+  for (const trail of rig.trails) {
+    trail.visible = d > .8 && speed > .3;
+    trail.scale.set(1, 1, .25 + speed * 1.2);
   }
   rig.wing.rotation.z = -p.bank * 0.12;
 }

@@ -1,4 +1,9 @@
 import * as THREE from 'three';
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
+import { bossSurface } from './boss_surface';
+import { BossAttackEffects } from './boss_effects';
+import { BossStageEffects } from './boss_stage';
+import { bossTextures } from './boss_textures';
 import type {
   EncounterActorKind, EncounterHazard, EncounterObjectKind, EncounterSnapshot,
 } from './vault_encounter';
@@ -15,28 +20,28 @@ const TELEGRAPH_GEOMETRY = {
   ring: new THREE.RingGeometry(0.82, 1, 48),
   line: new THREE.PlaneGeometry(1, 1),
   cone: new THREE.CircleGeometry(1, 48, -Math.PI * 0.4, Math.PI * 0.8),
-  quadrant: new THREE.CircleGeometry(1, 32, 0, Math.PI / 2),
+  quadrant: new THREE.CircleGeometry(1, 48, -Math.PI / 2, Math.PI / 2),
 };
 const coneGeometry = new Map<number, THREE.CircleGeometry>();
 const ringGeometry = new Map<number, THREE.RingGeometry>();
 const OBJECT_GEOMETRY = {
-  box: new THREE.BoxGeometry(1.2, 1.8, 1.2),
-  pillar: new THREE.CylinderGeometry(0.48, 0.65, 2.4, 8),
-  prism: new THREE.OctahedronGeometry(0.85, 0),
-  pool: new THREE.CylinderGeometry(1.1, 1.1, 0.25, 20),
-  mine: new THREE.CylinderGeometry(0.55, 0.7, 0.22, 10),
+  box: new RoundedBoxGeometry(1.2, 1.8, 1.2, 3, 0.12),
+  pillar: new THREE.CylinderGeometry(0.48, 0.65, 2.4, 32),
+  prism: new THREE.OctahedronGeometry(0.85, 1),
+  pool: new THREE.CylinderGeometry(1.1, 1.1, 0.25, 48),
+  mine: new THREE.CylinderGeometry(0.55, 0.7, 0.22, 32),
 };
 const ACTOR_GEOMETRY = {
-  brute: new THREE.OctahedronGeometry(0.62, 0),
-  skitter: new THREE.TetrahedronGeometry(0.62, 0),
-  guard: new THREE.BoxGeometry(0.9, 1.25, 0.9),
-  clone: new THREE.OctahedronGeometry(0.7, 0),
-  skeleton: new THREE.CylinderGeometry(0.24, 0.42, 1.35, 6),
-  spitter: new THREE.ConeGeometry(0.58, 1.25, 7),
-  bog: new THREE.DodecahedronGeometry(0.68, 0),
-  ember: new THREE.ConeGeometry(0.5, 1.2, 6),
-  magma: new THREE.IcosahedronGeometry(0.7, 0),
-  drone: new THREE.TorusGeometry(0.5, 0.16, 6, 12),
+  brute: new THREE.SphereGeometry(0.62, 24, 16),
+  skitter: new THREE.SphereGeometry(0.5, 24, 16),
+  guard: new RoundedBoxGeometry(0.9, 1.0, 0.65, 3, 0.12),
+  clone: new THREE.OctahedronGeometry(0.7, 2),
+  skeleton: new THREE.CylinderGeometry(0.24, 0.42, 1.0, 24),
+  spitter: new THREE.ConeGeometry(0.58, 1.0, 24),
+  bog: new THREE.DodecahedronGeometry(0.68, 2),
+  ember: new THREE.ConeGeometry(0.5, 1.2, 24),
+  magma: new THREE.IcosahedronGeometry(0.7, 2),
+  drone: new THREE.TorusGeometry(0.5, 0.16, 12, 40),
 };
 
 function hazardGeometry(h: EncounterHazard): THREE.BufferGeometry {
@@ -52,7 +57,7 @@ function hazardGeometry(h: EncounterHazard): THREE.BufferGeometry {
   }
   if (h.shape === 'quadrant') return TELEGRAPH_GEOMETRY.quadrant;
   if (h.shape === 'ring') {
-    const ratio = Math.max(0.05, Math.min(0.95, 1 - h.width / Math.max(0.01, h.radius)));
+    const ratio = Math.max(0, Math.min(0.999, (h.radius - h.width) / Math.max(0.01, h.radius + h.width)));
     const key = Math.round(ratio * 1000);
     let geometry = ringGeometry.get(key);
     if (!geometry) {
@@ -95,6 +100,8 @@ function actorGeometry(kind: EncounterActorKind): THREE.BufferGeometry {
 export class VaultEncounterVisuals {
   private readonly root = new THREE.Group();
   private readonly hazards: THREE.Mesh[] = [];
+  private readonly effects: BossAttackEffects;
+  private readonly stage: BossStageEffects;
   private readonly objects: THREE.Mesh[] = [];
   private readonly actors: THREE.Mesh[] = [];
   private readonly aura: THREE.Mesh[] = [];
@@ -103,7 +110,10 @@ export class VaultEncounterVisuals {
   private readonly moveMarker: THREE.Mesh;
 
   constructor(scene: THREE.Scene) {
+    this.root.name = 'vault-encounter-visuals';
     scene.add(this.root);
+    this.effects = new BossAttackEffects(this.root);
+    this.stage = new BossStageEffects(this.root);
     for (let i = 0; i < 12; i++) {
       const mesh = new THREE.Mesh(TELEGRAPH_GEOMETRY.circle, new THREE.MeshBasicMaterial({
         color: 0xffffff, transparent: true, opacity: 0.58,
@@ -113,23 +123,32 @@ export class VaultEncounterVisuals {
       mesh.visible = false;
       mesh.renderOrder = 4;
       this.root.add(mesh);
+      mesh.name = `boss-telegraph-${i}`;
       this.hazards.push(mesh);
     }
     for (let i = 0; i < 24; i++) {
-      const mesh = new THREE.Mesh(OBJECT_GEOMETRY.box, new THREE.MeshBasicMaterial({
-        color: 0xffffff, transparent: true, opacity: 0.86,
-      }));
+      const mesh = new THREE.Mesh(OBJECT_GEOMETRY.box, bossSurface(0xffffff, true));
       mesh.visible = false;
       mesh.renderOrder = 3;
       this.root.add(mesh);
       this.objects.push(mesh);
     }
     for (let i = 0; i < 32; i++) {
-      const mesh = new THREE.Mesh(ACTOR_GEOMETRY.brute, new THREE.MeshBasicMaterial({
-        color: 0xffffff, transparent: true, opacity: 0.9,
-      }));
+      const mesh = new THREE.Mesh(ACTOR_GEOMETRY.brute, bossSurface(0xffffff));
       mesh.visible = false;
       mesh.renderOrder = 3;
+      // Small articulated silhouettes replace floating placeholder polyhedra.
+      const face = new THREE.Mesh(new THREE.SphereGeometry(0.28, 20, 14), mesh.material);
+      face.position.set(0, 0.62, 0.1); mesh.add(face);
+      for (const side of [-1, 1]) {
+        const eye = new THREE.Mesh(new THREE.SphereGeometry(0.055, 12, 8),
+          new THREE.MeshBasicMaterial({color: 0xffedbd}));
+        eye.position.set(side * 0.11, 0.68, 0.34); mesh.add(eye);
+        const leg = new THREE.Mesh(new THREE.CapsuleGeometry(0.11, 0.32, 4, 12), mesh.material);
+        leg.position.set(side * 0.28, -0.4, 0); mesh.add(leg);
+        const arm = new THREE.Mesh(new THREE.CapsuleGeometry(0.13, 0.4, 4, 12), mesh.material);
+        arm.position.set(side * 0.47, 0.02, 0.05); arm.rotation.z = side * 0.3; mesh.add(arm);
+      }
       this.root.add(mesh);
       this.actors.push(mesh);
     }
@@ -153,7 +172,7 @@ export class VaultEncounterVisuals {
       const ring = new THREE.Mesh(
         new THREE.RingGeometry(i ? 0.84 : 0.9, 1, 48),
         new THREE.MeshBasicMaterial({
-          color: 0xffffff, transparent: true, opacity: i ? 0.18 : 0.35,
+          color: 0xffffff, transparent: true, opacity: i ? 0.06 : 0.12,
           side: THREE.DoubleSide, depthWrite: false,
         }),
       );
@@ -171,6 +190,8 @@ export class VaultEncounterVisuals {
     if (!snapshot) { this.hide(); return; }
     this.root.visible = true;
     const color = FAMILY_COLOR[snapshot.family];
+    this.effects.update(snapshot, reducedMotion);
+    this.stage.update(snapshot, color, reducedMotion);
     const pulse = reducedMotion ? 1 : 1 + Math.sin(snapshot.time * 7) * 0.06;
     this.hazards.forEach((mesh, i) => {
       const h = snapshot.hazards[i];
@@ -181,7 +202,7 @@ export class VaultEncounterVisuals {
       mat.color.set(highContrast ? 0xffffff : color);
       const countdown = Math.max(0, h.executeAt - snapshot.time);
       const urgency = Math.max(0, Math.min(1, 1 - countdown / 1.2));
-      mat.opacity = highContrast ? 0.92 : 0.42 + urgency * 0.38;
+      mat.opacity = highContrast ? 0.8 : snapshot.time >= h.executeAt ? 0.16 : 0.13 + urgency * 0.17;
       mesh.rotation.set(-Math.PI / 2, 0, 0);
       mesh.position.set(h.origin.x, h.origin.y + 0.045, h.origin.z);
       if (h.shape === 'line') {
@@ -190,17 +211,17 @@ export class VaultEncounterVisuals {
         const len = Math.max(0.01, Math.hypot(dx, dz));
         mesh.position.x += dx / len * h.radius / 2;
         mesh.position.z += dz / len * h.radius / 2;
-        mesh.rotation.z = Math.atan2(dz, dx) + Math.PI / 2;
+        mesh.rotation.z = -Math.atan2(dz, dx) - Math.PI / 2;
         mesh.scale.set(Math.max(0.1, h.width), Math.max(0.2, h.radius), 1);
       } else {
-        const s = Math.max(0.2, h.radius) * pulse;
+        const s = Math.max(0.2, h.radius + (h.shape === 'ring' ? h.width : 0));
         mesh.scale.set(s, s, 1);
         if (h.shape === 'cone' && h.target) {
-          mesh.rotation.z = Math.atan2(
+          mesh.rotation.z = -Math.atan2(
             h.target.z - h.origin.z, h.target.x - h.origin.x,
-          ) - Math.PI / 2;
+          );
         } else if (h.shape === 'quadrant') {
-          mesh.rotation.z = (h.id & 3) * Math.PI / 2;
+          mesh.rotation.z = -(h.id & 3) * Math.PI / 2;
         }
       }
     });
@@ -212,7 +233,12 @@ export class VaultEncounterVisuals {
       const hp = Math.max(0.2, o.maxHp > 0 ? o.hp / o.maxHp : 1);
       mesh.position.set(o.position.x, o.position.y +
         (o.kind === 'mine' || o.kind === 'brood_pool' ? 0.14 : 0.9), o.position.z);
-      const mat = mesh.material as THREE.MeshBasicMaterial;
+      const mat = mesh.material as THREE.MeshMatcapMaterial;
+      if (mat.userData.family !== snapshot.kind) {
+        const textures = bossTextures(snapshot.kind, true);
+        mat.map = textures.map; mat.bumpMap = textures.bumpMap; mat.bumpScale = 0.04;
+        mat.userData.family = snapshot.kind; mat.needsUpdate = true;
+      }
       mat.color.set(color);
       // Critical styling remains for snapshot compatibility. Current boss
       // phases only use temporary props, which sit flat and never gate damage.
@@ -235,9 +261,26 @@ export class VaultEncounterVisuals {
       mesh.geometry = actorGeometry(a.kind);
       const hp = Math.max(0.3, a.maxHp > 0 ? a.hp / a.maxHp : 1);
       mesh.position.set(a.position.x, a.position.y + 0.65, a.position.z);
-      mesh.rotation.y = reducedMotion ? 0 : snapshot.time * 2 + i;
+      const previous = mesh.userData.actorPosition as THREE.Vector3 | undefined;
+      if (previous && mesh.userData.actorId === a.id) {
+        const dx = a.position.x - previous.x, dz = a.position.z - previous.z;
+        if (Math.hypot(dx, dz) > 0.005) mesh.rotation.y = Math.atan2(dx, dz);
+      } else mesh.rotation.y = 0;
+      mesh.userData.actorPosition ??= new THREE.Vector3();
+      mesh.userData.actorPosition.set(a.position.x, a.position.y, a.position.z);
+      mesh.userData.actorId = a.id;
+      for (const part of mesh.children) {
+        if (part.position.y < 0) part.rotation.x = reducedMotion ? 0 :
+          Math.sin(snapshot.time * 7 + Math.sign(part.position.x) * 1.5) * 0.3;
+      }
       mesh.scale.set(0.8 + hp * 0.2, 0.8 + hp * 0.2, 0.8 + hp * 0.2);
-      (mesh.material as THREE.MeshBasicMaterial).color.set(color);
+      const skin = mesh.material as THREE.MeshMatcapMaterial;
+      if (skin.userData.family !== snapshot.kind) {
+        const textures = bossTextures(snapshot.kind, false);
+        skin.map = textures.map; skin.bumpMap = textures.bumpMap; skin.bumpScale = 0.04;
+        skin.userData.family = snapshot.kind; skin.needsUpdate = true;
+      }
+      skin.color.set(color);
     });
     const critical = snapshot.objects.filter((o) => o.critical && o.hp > 0);
     this.healingBeams.forEach((beam, i) => {
@@ -327,6 +370,8 @@ export class VaultEncounterVisuals {
 
   hide(): void {
     this.root.visible = false;
+    this.effects.clear();
+    this.stage.hide();
     this.seal.visible = false;
     this.moveMarker.visible = false;
     for (const pool of [this.hazards, this.objects, this.actors, this.aura, this.healingBeams]) {

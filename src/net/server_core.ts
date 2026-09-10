@@ -72,6 +72,7 @@ import {
   WORLD_SEED, WORLD_HALF, WORLD_BORDER, CORE_HALF, makeUsername, skinSeed, GameMode,
   MAX_ATTUNED, TOTEM_COOLDOWN, COMBAT_TAG, TPA_EXPIRE, bloodlustMult,
   FACTION_FACES_LIMIT, FACTION_ROSTER_LIMIT, type FactionPublic, type Notification,
+  type PlayerCounts,
 } from './protocol';
 import {
   COMEBACK_HEARTS, KILL_CREDIT_WINDOW, MAX_HEARTS, canConsume, canWithdraw,
@@ -86,23 +87,21 @@ import {
   clampToDuelArena, duelArenaBlockAt, duelArenaBounds, duelArenaSolidAt, duelTerrainElevation,
   hasArenaLineOfSight, safestDuelSpawn, secureDuelToken,
 } from '../duels';
-import { ArenaAABB, ArenaKind } from '../arena';
+import { ArenaAABB, ArenaKind, isArenaEditKey } from '../arena';
 
 import {
   PARTY_CEILING_Y, PARTY_FLOOR_Y, PARTY_MAX_HEALTH, PARTY_ARENA_SIZE_Z, PARTY_VOID_Y,
   BRIDGE_TEAM_BLOCK, PartyArenaBounds, PartyGamesEngine, PartyLobbySnapshot,
   PartyMode, PartyParticipant, PartySubBounds,
   BRIDGE_ARROW_GRAVITY, BRIDGE_ARROW_KB_VERT, BRIDGE_ARROW_LIFE_MS,
-  BRIDGE_BOW_COOLDOWN_MS, BRIDGE_BOW_DRAW_MS, BRIDGE_BOW_MIN_POWER,
-  bridgeArrowShot, bridgeGoalGuard, clampToPartySub, partyArenaBlockAt,
-  partySpawns, parkourCourse,
+  BRIDGE_BOW_COOLDOWN_MS, BRIDGE_MELEE_TIER, bridgeSwing,
+  bridgeArrowShot, bridgeCageHatch, bridgeGoalGuard, clampToPartySub,
+  partyArenaBlockAt, partySpawns, parkourCourse,
 } from '../partygames';
-// The Bridge fights with the Bedwars swing model: charge, combo, crit,
-// look-blended knockback. It is a pure function over one weapon tier, and
-// reusing it keeps ONE definition of what a hit feels like in this game.
+// Shared contact validation and combo limits for directional melee.
 import {
   BW_COMBO_MAX, BW_COMBO_WINDOW_MS, BW_MELEE_FACING_DOT, BW_MELEE_RANGE,
-  BW_MELEE_REWIND_S, BW_SWING_FLOOR, bedwarsAxeTier, bedwarsSwing,
+  BW_MELEE_REWIND_S,
 } from '../bedwars';
 import { isMinigameOnly, stripMinigameItems } from '../minigame_items';
 import {
@@ -472,6 +471,9 @@ export class GameServer {
   private readonly partyQueueModes = new Map<number, PartyMode>();
   private partyClockNextAt = 0;
   private readonly partyMoves = new Map<number, PartyMoveState>();
+  /** Arena slot -> is that Bridge's pair of cage hatches currently open? An
+   *  absent entry means shut, which is what the authored venue already is. */
+  private readonly partyCagesOpen = new Map<number, boolean>();
   /** Per-player Bridge combat clocks: the swing model needs to know how long
    *  you waited, who you have been hitting, and when you last let an arrow go. */
   private readonly partyCombat = new Map<number, PartyCombatState>();
@@ -568,6 +570,47 @@ export class GameServer {
 
   get playerCount(): number {
     return this.players.size;
+  }
+
+  /** Current connected population by playable mode. Players in matchmaking or
+   * a private lobby count toward that mode; an arena body is already assigned
+   * to its mode, while everyone else belongs to the open-world Play mode. */
+  activePlayerCounts(): PlayerCounts {
+    const counts: PlayerCounts = { play: 0, duels: 0, parkour: 0, bridge: 0 };
+    const counted = new Set<number>();
+    const count = (mode: keyof PlayerCounts, id: number): void => {
+      if (!this.players.has(id) || counted.has(id)) return;
+      counted.add(id);
+      counts[mode]++;
+    };
+
+    for (const snapshot of this.duels.snapshots(this.worldTime * 1000)) {
+      for (const participant of snapshot.participants) {
+        if (participant.connected) count('duels', participant.id);
+      }
+    }
+    for (const snapshot of this.party.snapshots(this.worldTime * 1000)) {
+      for (const participant of snapshot.participants) {
+        if (!participant.connected) continue;
+        count(snapshot.mode === 'parkour' ? 'parkour' : 'bridge', participant.id);
+      }
+    }
+    for (const id of this.duelQueue) count('duels', id);
+    for (const id of this.partyQueue) {
+      count(this.partyQueueModes.get(id) === 'parkour' ? 'parkour' : 'bridge', id);
+    }
+
+    for (const player of this.players.values()) {
+      if (counted.has(player.id)) continue;
+      if (!player.arenaSaved) {
+        count('play', player.id);
+      } else if (player.arenaKind === 'duel') {
+        count('duels', player.id);
+      } else {
+        count(this.party.subFor(player.id)?.game === 'parkour' ? 'parkour' : 'bridge', player.id);
+      }
+    }
+    return counts;
   }
 
   /** Auto-balance a joining player into the lowest-population faction. */
@@ -793,7 +836,12 @@ export class GameServer {
       // A normal-world login must never learn about players inside an active
       // Duels scope. Lobby-only players remain ordinary title/world roster.
       players: [...this.players.values()].filter((v) => !v.arenaSaved).map(toInfo),
-      edits: [...this.edits.entries()],
+      // Arena columns are stripped here, not merely ignored on arrival: a
+      // block a competitor placed inside a colosseum is not part of the world
+      // and has no business being handed to somebody logging into it. The
+      // authored arena geometry is generated identically on both sides, so
+      // there is nothing an arena client loses by not being told.
+      edits: this.worldEdits(),
       items: [...this.items.values()],
       turrets: [...this.turrets.entries()].map(([k, state]) => {
         const [x, y, z] = k.split(',').map(Number);
@@ -1460,7 +1508,7 @@ export class GameServer {
         if (!h || sameFaction(h.faction, p.faction)) return [];
         const dmg = fin(msg.amount) ? Math.max(0, Math.min(RANGED_MAX_DAMAGE, msg.amount)) : 0;
         if (dmg <= 0) return [];
-        return [...this.applyVehicleEvents(this.vehicles.damage(msg.id, dmg)),
+        return [...this.applyVehicleEvents(this.vehicles.damageFromGun(msg.id, dmg)),
           ...this.heliBroadcast()];
       }
       // --- Lifesteal (Milestone A) ---
@@ -2101,6 +2149,7 @@ export class GameServer {
       too_many_players: 'Duels supports no more than four players.',
       not_everyone_ready: 'Every connected player must ready up first.',
       not_in_lobby: 'You are not in a Duels lobby.',
+      no_arena: 'Every colosseum is in use right now — try again in a moment.',
     };
     return [{ to, msg: { t: 'duelError', code, message: messages[code] } }];
   }
@@ -2287,6 +2336,7 @@ export class GameServer {
       match_in_progress: 'That match is already playing.', already_in_lobby: 'Leave your current lobby first.',
       not_host: 'Only the host can start.', too_few_players: 'You need two players.',
       too_many_players: 'That lobby is full.', not_everyone_ready: 'Everyone needs to ready up.', not_in_lobby: 'You are not in a lobby.',
+      no_arena: 'Every venue is in use right now — try again in a moment.',
     };
     return [{ to, msg: { t: 'partyError', code, message: messages[code] } }];
   }
@@ -2297,18 +2347,21 @@ export class GameServer {
     return snapshot.participants.filter(p => p.connected).map(p => ({ to: p.id, msg: { t: 'partyLobby', snapshot, inviteToken: invite?.id === p.id ? invite.token : undefined } }));
   }
   private resetPartyArenaEdits(arena: PartyArenaBounds, ids?: number[]): Outbound[] {
+    // Wiping the slot's edits puts the hatches back to their authored (shut)
+    // state, so the remembered state has to go with them.
+    this.partyCagesOpen.delete(arena.slot);
     return this.resetArenaEdits(`party:${arena.slot}`, { minX: arena.minX, maxX: arena.maxX, minZ: 0, maxZ: PARTY_ARENA_SIZE_Z, minY: PARTY_VOID_Y - 4, maxY: PARTY_CEILING_Y }, ids);
   }
   /** Both modes hand out one infinite stack of your own team's wool — the only
    *  block either lets you place. The Bridge adds the two weapons the span is
-   *  fought with: a Void Cleaver for the moment somebody is next to you on a
+   *  fought with: an iron axe for the moment somebody is next to you on a
    *  one-block walkway, and a bow for the long look down it. Neither is ever
-   *  consumed and neither exists anywhere else in the game. */
+   *  consumed; their PvP handling is confined to this arena. */
   private partyLoadout(p: ServerPlayer, member: PartyParticipant, sub: PartySubBounds): Outbound {
     const slots: (ItemStack | null)[] = new Array(36).fill(null);
     slots[0] = { id: BRIDGE_TEAM_BLOCK[member.team] ?? Block.TeamWoolA, count: 64 };
     if (sub.game === 'bridge') {
-      slots[1] = { id: Item.VoidCleaver, count: 1 };
+      slots[1] = { id: Item.IronAxe, count: 1 };
       slots[2] = { id: Item.BridgeBow, count: 1 };
       slots[3] = { id: Item.BridgeArrow, count: 64 };
     }
@@ -2399,7 +2452,9 @@ export class GameServer {
   private partyGrounded(x: number, y: number, z: number): boolean {
     const by = Math.round(y) - 1;
     if (Math.abs(y - by - 1) > .3) return false;
-    return [-.25, .25].some(ox => [-.25, .25].some(oz => {
+    // Match the client's 0.6-block body. A narrower probe calls a legitimate
+    // edge landing airborne and eventually rejects every movement as flight.
+    return [-.2999, .2999].some(ox => [-.2999, .2999].some(oz => {
       const bx = Math.floor(x + ox), bz = Math.floor(z + oz);
       const b = this.edits.get(`${bx},${by},${bz}`) ?? partyArenaBlockAt(bx, by, bz) ?? Block.Air;
       return !!BLOCKS[b]?.solid;
@@ -2498,7 +2553,7 @@ export class GameServer {
     // weapons and nothing else, so no open-world item can be worn into a venue.
     const wool = BRIDGE_TEAM_BLOCK[participant.team] ?? Block.TeamWoolA;
     const holdable = sub.game === 'bridge'
-      ? [wool, Item.VoidCleaver, Item.BridgeBow, Item.BridgeArrow]
+      ? [wool, Item.IronAxe, Item.BridgeBow, Item.BridgeArrow]
       : [wool];
     p.held = holdable.includes(msg.held as number) ? msg.held as number : 0;
     p.sneaking = msg.sneaking === true;
@@ -2530,6 +2585,10 @@ export class GameServer {
     }
     if (evaluated.changed) {
       const snap = this.party.snapshotFor(p.id, now)!;
+      // A goal is the one thing that shuts the hatches mid-round, and it has
+      // to shut them in the same batch that puts everybody back inside — a
+      // tick of open hatch under a just-teleported player is a tick of fall.
+      out.push(...this.syncPartyCages(snap, now));
       out.push(...this.partySnapshotOutbound(snap));
       if (before !== snap.phase) {
         out.push(...this.partyRoundTransition(snap), ...this.partyResultOutbound(snap));
@@ -2590,23 +2649,22 @@ export class GameServer {
     ];
     if (!killed) return out;
     target.health = PARTY_MAX_HEALTH;
-    const snapshot = this.party.recordDeath(target.id, attacker.id, now, hit.ranged ? 'bow' : 'cleaver');
+    const snapshot = this.party.recordDeath(target.id, attacker.id, now, hit.ranged ? 'bow' : 'melee');
     if (snapshot) out.push(...this.partySnapshotOutbound(snapshot));
     // `pendingSpawn` is set; evaluating the corpse is what sends it home.
     out.push(...this.evaluatePartyPlayer(target));
     return out;
   }
-  /** A Void Cleaver swing. The client sends a target id and nothing else. */
+  /** A Bridge iron axe swing. The client sends a target id and nothing else. */
   private handlePartyMelee(p: ServerPlayer, targetId: number): Outbound[] {
     const now = this.worldTime * 1000, target = this.players.get(targetId);
     const sub = this.party.subFor(p.id);
-    if (!target || !sub || sub.game !== 'bridge' || p.held !== Item.VoidCleaver ||
+    if (!target || !sub || sub.game !== 'bridge' || p.held !== Item.IronAxe ||
       !this.party.canFight(p.id, targetId, now)) return [];
-    const combat = this.partyCombatOf(p.id), tier = bedwarsAxeTier(Item.VoidCleaver);
+    const combat = this.partyCombatOf(p.id), tier = BRIDGE_MELEE_TIER;
     const since = now - combat.lastSwingAt;
-    // A swing thrown faster than the charge floor is DROPPED, not scaled:
-    // spamming the button has to be a loss, not a break-even.
-    if (since < tier.cooldownMs * BW_SWING_FLOOR) return [];
+    // Fixed cadence only: every accepted contact hits at full strength.
+    if (since < tier.cooldownMs) return [];
     // Judge the swing against where the target was when it was thrown. Melee
     // has no travel time, so the window is a quarter-second and no more.
     const lookX = -Math.sin(p.yaw), lookZ = -Math.cos(p.yaw);
@@ -2617,13 +2675,23 @@ export class GameServer {
       const dist = Math.hypot(dx, dy, dz), horiz = Math.hypot(dx, dz) || 1e-3;
       if (dist > BW_MELEE_RANGE) continue;
       if ((dx / horiz) * lookX + (dz / horiz) * lookZ < BW_MELEE_FACING_DOT) continue;
+      let blocked = false;
+      const steps = Math.max(1, Math.ceil(dist * 4));
+      for (let i = 1; i < steps; i++) {
+        const t = i / steps;
+        if (this.partySolid(p.x + dx * t, p.y + 1.35 + dy * t, p.z + dz * t)) {
+          blocked = true;
+          break;
+        }
+      }
+      if (blocked) continue;
       if (!best || dist < best.dist) best = { dx: dx / horiz, dz: dz / horiz, dist };
     }
     if (!best) return [];
     const motion = this.partyMotion(p);
     const combo = combat.comboTarget === targetId && since <= BW_COMBO_WINDOW_MS ? combat.combo : 0;
-    const swing = bedwarsSwing({
-      tier, sinceLastSwingMs: since, combo,
+    const swing = bridgeSwing({
+      combo,
       onGround: this.partyGrounded(p.x, p.y, p.z), vy: motion.vy, speed: motion.speed,
       toTargetX: best.dx, toTargetZ: best.dz, lookX, lookZ,
     });
@@ -2644,15 +2712,13 @@ export class GameServer {
     const len = Math.hypot(msg.dx, msg.dy, msg.dz);
     if (!(len > 1e-3)) return [];
     const combat = this.partyCombatOf(p.id);
-    // The draw is TIMED, never trusted. Whatever the client claims it pulled,
-    // a shot can only be as strong as the gap since the last one paid for —
-    // which makes rapid fire and full power mutually exclusive by arithmetic
-    // rather than by a rule anybody has to enforce.
-    const earned = (now - combat.lastShotAt - BRIDGE_BOW_COOLDOWN_MS) / BRIDGE_BOW_DRAW_MS;
-    const power = Math.max(0, Math.min(1, Math.min(msg.power, earned)));
-    if (power < BRIDGE_BOW_MIN_POWER) return [];
+    const round = this.party.snapshotFor(p.id, now);
+    if (member.pendingSpawn || (round?.goalResetAt !== undefined && now < round.goalResetAt) ||
+        now - combat.lastShotAt < BRIDGE_BOW_COOLDOWN_MS) return [];
+    // Legacy clients can send power, but strength is always server-owned.
+    const power = 1;
     combat.lastShotAt = now;
-    const shot = bridgeArrowShot(power);
+    const shot = bridgeArrowShot();
     const dx = msg.dx / len, dy = msg.dy / len, dz = msg.dz / len;
     const arrow: PartyArrow = {
       id: this.partyArrowSeq++, owner: p.id,
@@ -2701,7 +2767,7 @@ export class GameServer {
         }
       }
       if (victim) {
-        const shot = bridgeArrowShot(a.power), flat = Math.hypot(a.vx, a.vz) || 1;
+        const shot = bridgeArrowShot(), flat = Math.hypot(a.vx, a.vz) || 1;
         out.push(...this.landPartyHit(owner, victim, now, {
           damage: shot.damage, kx: a.vx / flat * shot.knockback, ky: BRIDGE_ARROW_KB_VERT,
           kz: a.vz / flat * shot.knockback, charge: a.power, combo: 0, crit: shot.crit, ranged: true,
@@ -2853,6 +2919,33 @@ export class GameServer {
   private partyRoundTransition(snap: PartyLobbySnapshot): Outbound[] {
     return snap.phase === 'countdown' ? this.launchParty(snap) : [];
   }
+  /** Open or shut both drop cages on a Bridge, to match the round's own clock.
+   *
+   *  The cages themselves are authored geometry and always there; only the
+   *  hatch under each one moves, and it moves as ordinary arena edits — the
+   *  same channel a player's wool travels on — so a client that has not
+   *  streamed the base yet still records the change and gets it right when the
+   *  chunk arrives. Shut during the opening countdown and for the three
+   *  seconds after every goal; open for the rest of the round. */
+  private syncPartyCages(snap: PartyLobbySnapshot, now: number): Outbound[] {
+    const sub = snap.sub, slot = snap.arena?.slot;
+    if (slot === undefined || !sub || sub.game !== 'bridge')
+      return [];
+    const held = snap.goalResetAt !== undefined && now < snap.goalResetAt;
+    const open = snap.phase === 'running' && !held;
+    if (open === (this.partyCagesOpen.get(slot) ?? false))
+      return [];
+    this.partyCagesOpen.set(slot, open);
+    const edits = bridgeCageHatch().map(cell => {
+      const x = sub.minX + cell.lx, y = cell.y, z = sub.minZ + cell.lz;
+      const key = `${x},${y},${z}`;
+      if (open) this.edits.set(key, Block.Air);
+      else this.edits.delete(key);
+      return { x, y, z, block: open ? Block.Air : partyArenaBlockAt(x, y, z) ?? Block.Air };
+    });
+    return snap.participants.filter(p => p.connected)
+      .map(p => ({ to: p.id, msg: { t: 'editBatch', edits } as ServerMsg }));
+  }
   tickParty(): Outbound[] {
     const now = this.worldTime * 1000, out: Outbound[] = [];
     // Arrows are the only thing in either venue that moves on its own, so this
@@ -2861,14 +2954,22 @@ export class GameServer {
     this.partyArrowClock = this.worldTime;
     if (dt > 0) out.push(...this.tickPartyArrows(dt));
     // Resolve all hazards together on the server, even when a tab stops sending movement.
-    for (const snap of this.party.snapshots(now))
-      if (snap.phase === 'running')
-        for (const member of snap.participants) {
-          const p = this.players.get(member.id);
-          if (p && member.connected)
-            out.push(...this.evaluatePartyPlayer(p));
-        }
+    for (const snap of this.party.snapshots(now)) {
+      // The hatches are on the round clock, not on anybody's packets: the
+      // three seconds after a goal end for both players at the same instant.
+      out.push(...this.syncPartyCages(snap, now));
+      if (snap.phase !== 'running')
+        continue;
+      for (const member of snap.participants) {
+        const p = this.players.get(member.id);
+        if (p && member.connected)
+          out.push(...this.evaluatePartyPlayer(p));
+      }
+    }
     for (const snap of this.party.tick(now)) {
+      // The whistle is a phase change, so the hatches drop on the same tick
+      // rather than on the next one.
+      out.push(...this.syncPartyCages(snap, now));
       out.push(...this.partySnapshotOutbound(snap));
       if (snap.phase === 'lobby')
         out.push(...this.restorePartyLobby(snap));
@@ -3192,6 +3293,9 @@ export class GameServer {
         case 'heliDown':
           out.push({ to: 'all', msg: { t: 'heliDown', id: ev.id,
             x: ev.x, y: ev.y, z: ev.z, faction: ev.faction, reason: ev.reason } });
+          break;
+        case 'heliCrash':
+          out.push({ to: 'all', msg: { t: 'heliCrash', id: ev.id, x: ev.x, y: ev.y, z: ev.z } });
           break;
         case 'eject': {
           const victim = this.players.get(ev.playerId);
@@ -5381,12 +5485,23 @@ export class GameServer {
   // JSON-able object the shell writes to disk and reloads on boot. Dropped item
   // entities are ephemeral (not saved).
 
+  /** The edit log with every minigame column removed.
+   *
+   *  `this.edits` is one map because the arena reset sweeps it by footprint,
+   *  but only the open-world part of it is the WORLD: arena blocks are
+   *  ephemeral match state that must never reach the save file or another
+   *  player's login. A retired mode used to leave its wool in the world save
+   *  permanently, and it would still be there today. */
+  private worldEdits(): [string, number][] {
+    return [...this.edits.entries()].filter(([key]) => !isArenaEditKey(key));
+  }
+
   serialize(): WorldSave {
     return {
       v: 3,
       seed: this.seed,
       worldTime: this.worldTime,
-      edits: [...this.edits.entries()],
+      edits: this.worldEdits(),
       chests: [...this.chests.entries()],
       machines: [...this.machines.entries()],
       turrets: [...this.turrets.entries()],
@@ -5420,6 +5535,10 @@ export class GameServer {
       for (const e of s.edits) {
         if (!Array.isArray(e) || e.length !== 2) continue;
         const [k, b] = e as [unknown, unknown];
+        // Drop arena columns on the way in as well as on the way out, so a
+        // world written by an older build sheds the minigame blocks it should
+        // never have kept the first time it is loaded.
+        if (typeof k === 'string' && isArenaEditKey(k)) continue;
         if (validBlockKey(k) && Number.isInteger(b) && (b as number) >= 0 && (b as number) <= 255) {
           // Retired hardware ids become Air, so a world saved with a silo in it
           // still loads (and renders) after that hardware was removed.
@@ -5506,6 +5625,31 @@ export class GameServer {
     }));
   }
 
+  /** Everyone in the same live match as `id`, whichever mode that is.
+   *
+   *  Asking Duels for this unconditionally was a bug with two faces: a Bridge
+   *  or Parkour competitor got an EMPTY set and so never saw their opponent at
+   *  all, and the rule that keeps one match's bodies out of another match's
+   *  snapshot only ever held for Duels. Every mode's roster now comes from
+   *  that mode's own lobby, which is also what makes many simultaneous
+   *  matches — in either band — safe. */
+  private arenaMembersOf(id: number): number[] {
+    return this.players.get(id)?.arenaKind === 'party'
+      ? this.party.membersOf(id)
+      : this.duels.membersOf(id);
+  }
+
+  /** Is this arena body a spectator waiting to respawn — invisible to the rest
+   *  of its match — in whichever mode owns it?
+   *
+   *  Only Duels has that state. The Bridge and Parkour put a fallen player
+   *  straight back on a pad (`pendingSpawn`), so nobody in the party band is
+   *  ever a ghost. */
+  private arenaSpectating(id: number): boolean {
+    return this.players.get(id)?.arenaKind !== 'party' &&
+      this.duels.participantFor(id)?.spectating === true;
+  }
+
   /** Per-recipient visibility snapshot. Normal-world players never receive an
    * arena transform; an arena player receives only their own match. */
   snapshotFor(recipientId: number): PlayerSnapshot[] {
@@ -5515,13 +5659,13 @@ export class GameServer {
     // only when an arena body is created, and remains set through results.
     // Using phaseFor here also scoped ordinary lobby members out of snapshots
     // after they dismissed the lobby with Escape.
-    const inDuel = !!recipient.arenaSaved;
-    const visible = inDuel ? new Set(this.duels.membersOf(recipientId)) : null;
+    const inArena = !!recipient.arenaSaved;
+    const visible = inArena ? new Set(this.arenaMembersOf(recipientId)) : null;
     return [...this.players.values()]
       .filter((p) => {
-        const pInDuel = !!p.arenaSaved;
-        if (inDuel) return visible!.has(p.id);
-        return !pInDuel;
+        const pInArena = !!p.arenaSaved;
+        if (inArena) return visible!.has(p.id);
+        return !pInArena;
       })
       .map((p) => ({
         id: p.id, x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
@@ -5529,7 +5673,7 @@ export class GameServer {
         // A respawn spectator is invisible to opponents, while their own
         // client stays technically alive to bypass the normal death screen.
         dead: p.arenaSaved
-          ? p.id !== recipientId && this.duels.participantFor(p.id)?.spectating === true
+          ? p.id !== recipientId && this.arenaSpectating(p.id)
           : p.dead,
         gliding: p.arenaSaved ? false : p.gliding,
         boating: p.arenaSaved ? false : p.boating,

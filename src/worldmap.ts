@@ -13,6 +13,7 @@ import { factionColor } from './teams';
 import { Terrain } from './terrain';
 import { CORE_BORDER, CORE_HALF, WORLD_BORDER } from './net/protocol';
 import { iconSvg } from './emoji_icons';
+import { STRUCTURE_NAMES, StructureKind } from './structures';
 
 const CANVAS_PX = 700;
 type MapView = 'core' | 'world';
@@ -58,6 +59,8 @@ const STRUCT_COLOR: Record<string, string> = {
   tower: '#c8ccd4',   // ruined watchtower — pale stone
   bunker: '#93a559',  // bunker — military olive
   pod: '#e0913a',     // crashed cargo pod — scorched orange
+  village: '#f1c56f', cottage: '#e8aa83', inn: '#e5bb75', windmill: '#f4e5ba',
+  shrine: '#a6e6e0', ruins: '#a5bf96', camp: '#dd9766', greenhouse: '#9cdebd',
 };
 
 interface Waypoint {
@@ -401,7 +404,24 @@ export class WorldMap {
     ctx.shadowColor = 'rgba(0,0,0,0.75)'; ctx.shadowBlur = 3;
     ctx.fillStyle = col;
     ctx.strokeStyle = 'rgba(10,12,18,0.9)'; ctx.lineWidth = 1.5;
-    if (kind === 'tower') {
+    if (['village', 'cottage', 'inn', 'greenhouse'].includes(kind)) {
+      // Warm roof silhouettes; a second roof distinguishes settlements.
+      for (const offset of kind === 'village' ? [-3, 3] : [0]) {
+        ctx.beginPath();
+        ctx.moveTo(px + offset - 4, py); ctx.lineTo(px + offset, py - 5);
+        ctx.lineTo(px + offset + 4, py); ctx.lineTo(px + offset + 4, py + 5);
+        ctx.lineTo(px + offset - 4, py + 5); ctx.closePath(); ctx.fill(); ctx.stroke();
+      }
+    } else if (kind === 'windmill') {
+      ctx.fillRect(px - 2, py - 2, 4, 8);
+      ctx.beginPath(); ctx.moveTo(px - 5, py - 6); ctx.lineTo(px + 5, py + 4);
+      ctx.moveTo(px + 5, py - 6); ctx.lineTo(px - 5, py + 4);
+      ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.stroke();
+    } else if (kind === 'shrine' || kind === 'ruins' || kind === 'camp') {
+      ctx.beginPath(); ctx.moveTo(px, py - 6); ctx.lineTo(px + 6, py + 5);
+      ctx.lineTo(px - 6, py + 5); ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#243234'; ctx.fillRect(px - 1.5, py, 3, 5);
+    } else if (kind === 'tower') {
       // A little watchtower: a tall keep with crenellations.
       ctx.beginPath();
       ctx.moveTo(px - 4, py + 5); ctx.lineTo(px - 4, py - 3);
@@ -446,10 +466,9 @@ export class WorldMap {
         this.structures.reduce((n, s) => n + (s.kind === k ? 1 : 0), 0);
       const chip = iconSvg('square');
       lines.push(`<b>${chip} STRUCTURES</b> (${this.structures.length})`);
-      lines.push(
-        `<span style="color:${STRUCT_COLOR.tower}">${chip}</span> Towers ${c('tower')} · ` +
-        `<span style="color:${STRUCT_COLOR.bunker}">${chip}</span> Bunkers ${c('bunker')} · ` +
-        `<span style="color:${STRUCT_COLOR.pod}">${chip}</span> Pods ${c('pod')}`);
+      for (const kind of Object.keys(STRUCTURE_NAMES) as StructureKind[]) {
+        if (c(kind)) lines.push(`<span style="color:${STRUCT_COLOR[kind]}">${chip}</span> ${STRUCTURE_NAMES[kind]} ${c(kind)}`);
+      }
       lines.push('');
     }
     const p = this.mapCtx.player();

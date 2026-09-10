@@ -6,10 +6,16 @@
 // session transport (the `party*` message family); they differ only in the
 // venue they stamp and in what `evaluate` counts as progress.
 import { Block } from './blocks';
+import { Item } from './items';
+import { bedwarsSwing, type BwSwingInput, type BwSwingResult } from './bedwars';
 import { parkourTheme, PARKOUR_THEMES } from './parkour_themes';
 
 export const PARTY_BASE_X = 262144;
 export const PARTY_SLOT_SPACING = 1024;
+/** Concurrent Bridge/Parkour matches the band has room for. Slots are freed on
+ *  match end, so this caps simultaneous matches and — more importantly — stops
+ *  a runaway allocator from stamping a venue outside the party band. */
+export const PARTY_ARENA_SLOTS = 96;
 export const PARTY_ARENA_SIZE_X = 64;
 export const PARTY_ARENA_SIZE_Z = 640;
 export const PARTY_FLOOR_Y = 140;
@@ -29,60 +35,38 @@ export const PARTY_ARENA_LOAD_TIMEOUT_MS = 30000;
 export const PARTY_RESULT_MS = 20000;
 /** Goals that take a game of The Bridge. */
 export const BRIDGE_GOAL_LIMIT = 5;
-/** Everyone is returned to their own base for this long after a goal. */
-export const BRIDGE_GOAL_RESET_MS = 1600;
-/** Fighting on the span. Melee is the Bedwars swing model (charge, combo,
- *  crit, knockback) driven by the Void Cleaver's tier; the bow is a charged
- *  shot the server times itself. Both live here so the client can predict the
- *  feel and the server can be the only thing that decides the damage. */
+/** A goal restarts the round: both players are shut back into their own drop
+ *  cage and held there for this long, counted down on the HUD, before the
+ *  hatches open again. Deliberately the same three seconds as the opening
+ *  countdown — a restart should feel like the round starting over. */
+export const BRIDGE_GOAL_RESET_MS = 3000;
+/** Bridge attacks have fixed strength. Short action intervals bound packet
+ * spam; waiting never earns extra damage or knockback. */
 export const BRIDGE_RESPAWN_SHIELD_MS = 1800;
-/** How long after a hit a void death still counts as that attacker's kill —
- *  knocking somebody off the span IS the mode's signature kill. */
+export const BRIDGE_MELEE_TIER = { item: Item.IronAxe, damage: 5, cooldownMs: 280, kbBonus: 0.02 } as const;
 export const BRIDGE_KILL_CREDIT_MS = 10_000;
-/** A full draw takes this long; anything shorter is a weaker, slower arrow. */
-export const BRIDGE_BOW_DRAW_MS = 900;
-/** Below this draw the string is not released at all. */
-export const BRIDGE_BOW_MIN_POWER = 0.2;
-/** Floor on the gap between two released arrows, on top of the draw itself. */
-export const BRIDGE_BOW_COOLDOWN_MS = 220;
-/** Arrow muzzle speed, blocks/second, from minimum to full draw. */
-export const BRIDGE_ARROW_SPEED = [26, 62] as const;
-/** Blocks/second². Gentler than the player's 32 so the arc stays readable. */
+export const BRIDGE_BOW_COOLDOWN_MS = 360;
+export const BRIDGE_ARROW_SPEED = 62;
 export const BRIDGE_ARROW_GRAVITY = 19;
-/** Arrows expire after this long in the air. */
 export const BRIDGE_ARROW_LIFE_MS = 5000;
-/** Damage from minimum to full draw, before the full-draw crit bonus. */
-export const BRIDGE_ARROW_DAMAGE = [3, 11] as const;
-/** A shot released at (essentially) full draw hits this much harder. */
-export const BRIDGE_ARROW_CRIT_DRAW = 0.97;
-export const BRIDGE_ARROW_CRIT_MULT = 1.45;
-/** Knockback an arrow delivers along its own flight line, at full draw. */
+export const BRIDGE_ARROW_DAMAGE = 7;
 export const BRIDGE_ARROW_KB = 0.55;
 export const BRIDGE_ARROW_KB_VERT = 0.3;
 
-/** Draw fraction (0..1) for a bow held for `heldMs`. */
-export function bridgeBowPower(heldMs: number): number {
-  return Math.max(0, Math.min(1, heldMs / BRIDGE_BOW_DRAW_MS));
+/** Keep movement crits, directional sprint knockback and earned combos, with
+ * full-strength contact on every accepted swing, including the first one. */
+export function bridgeSwing(input: Omit<BwSwingInput, 'tier' | 'sinceLastSwingMs' | 'critFallVy'>): BwSwingResult {
+  // About 0.9 m/s downward: past the apex of an ordinary 1.25-block jump.
+  return bedwarsSwing({ ...input, tier: BRIDGE_MELEE_TIER, critFallVy: -.015,
+    sinceLastSwingMs: BRIDGE_MELEE_TIER.cooldownMs });
 }
-/** Everything one released arrow is worth, from its draw alone. Pure, shared,
- *  and the only place these curves exist: the client draws the charge meter
- *  from it and the server damages with it. */
-export function bridgeArrowShot(power: number): {
+
+/** Instant arrows reward leading a moving target and controlling the arc. */
+export function bridgeArrowShot(): {
   speed: number; damage: number; crit: boolean; knockback: number;
 } {
-  const p = Math.max(0, Math.min(1, power));
-  const crit = p >= BRIDGE_ARROW_CRIT_DRAW;
-  // Quadratic in the draw, like the axe's charge curve: a flicked shot is a
-  // strict loss rather than a break-even one, so patience is the skill.
-  const curve = p * p;
-  return {
-    speed: BRIDGE_ARROW_SPEED[0] + (BRIDGE_ARROW_SPEED[1] - BRIDGE_ARROW_SPEED[0]) * p,
-    damage: Math.max(1, Math.round(
-      (BRIDGE_ARROW_DAMAGE[0] + (BRIDGE_ARROW_DAMAGE[1] - BRIDGE_ARROW_DAMAGE[0]) * curve) *
-      (crit ? BRIDGE_ARROW_CRIT_MULT : 1))),
-    crit,
-    knockback: BRIDGE_ARROW_KB * (0.5 + 0.5 * p),
-  };
+  return { speed: BRIDGE_ARROW_SPEED, damage: BRIDGE_ARROW_DAMAGE,
+    crit: false, knockback: BRIDGE_ARROW_KB };
 }
 
 export type PartyMode = 'bridge' | 'parkour';
@@ -90,7 +74,7 @@ export type PartyGameId = 'bridge' | 'parkour';
 export type PartyPhase = 'lobby' | 'countdown' | 'running' | 'results';
 export type PartyFinishReason = 'complete' | 'forfeit' | 'cancelled';
 export type PartyJoinFailure = 'invalid' | 'full' | 'match_in_progress' | 'already_in_lobby';
-export type PartyStartFailure = 'not_host' | 'too_few_players' | 'too_many_players' | 'not_everyone_ready' | 'not_in_lobby';
+export type PartyStartFailure = 'not_host' | 'too_few_players' | 'too_many_players' | 'not_everyone_ready' | 'not_in_lobby' | 'no_arena';
 
 export interface PartyVec3 { x: number; y: number; z: number }
 
@@ -130,8 +114,8 @@ export interface PartyGameDef extends PartyVenue {
 export const PARTY_GAME_DEFS: readonly PartyGameDef[] = [
   {
     id: 'bridge', index: 0, title: 'THE BRIDGE',
-    rule: `One span, one block wide. Cleaver, bow and wool — dive into the enemy portal, first to ${BRIDGE_GOAL_LIMIT} goals.`,
-    durationMs: 480_000, insetX: 8, sizeX: 48, originZ: 0, sizeZ: 176,
+    rule: `Iron axe, bow and wool. Sprint-hit rivals off the span, then dive into the enemy portal. First to ${BRIDGE_GOAL_LIMIT} goals.`,
+    durationMs: 480_000, insetX: 20, sizeX: 24, originZ: 0, sizeZ: 80,
   },
   {
     id: 'parkour', index: 1, title: 'PARKOUR DUEL',
@@ -228,137 +212,213 @@ class VenueStamp {
 }
 
 // ── The Bridge ─────────────────────────────────────────────────────────────
-// One 48 x 176 island chain, perfectly mirror-symmetric about z = 87.5. Only
-// the crimson half is authored; the cobalt half is that half reflected with the
+// One 24 x 80 island chain, perfectly mirror-symmetric about z = 40. Only the
+// crimson half is authored; the cobalt half is that half reflected with the
 // team wool swapped, so neither side can ever have a geometric advantage.
+//
+// The venue is deliberately COMPACT — roughly half the span and half the width
+// it used to be — because a duel over one block of walkway is decided by how
+// long the crossing takes, not by how far apart the two ends are. What the
+// smaller footprint buys is spent back on the base itself: at this size every
+// block of it is on screen at once, so it is built out of small pieces —
+// courses, slits, machicolations, obelisks, a keep and a drop cage — rather
+// than large flat plates.
 
-export const BRIDGE_SIZE_X = 48;
-export const BRIDGE_SIZE_Z = 176;
-/** Reflection axis. `BRIDGE_SIZE_Z - 1 - lz` maps crimson to cobalt. */
+export const BRIDGE_SIZE_X = 24;
+export const BRIDGE_SIZE_Z = 80;
+/** Reflection axis. `BRIDGE_SIZE_Z - 1 - lz` maps crimson to cobalt in BLOCKS;
+ *  a continuous z mirrors as `BRIDGE_SIZE_Z - z`, which is the same axis. */
 const BRIDGE_MIRROR = BRIDGE_SIZE_Z - 1;
 /** Team wool, indexed by team. Placeable, and the only block players may add. */
 export const BRIDGE_TEAM_BLOCK = [Block.TeamWoolA, Block.TeamWoolB] as const;
 export const BRIDGE_TEAM_NAME = ['CRIMSON', 'COBALT'] as const;
+/** The crimson base's footprint, slot-local and inclusive. */
+const BASE_X0 = 4, BASE_X1 = 20, BASE_Z0 = 2, BASE_Z1 = 18;
 /** Scoring portal footprints, in slot-local blocks. Half-open on max. */
 export const BRIDGE_GOALS: readonly { team: number; minX: number; maxX: number; minZ: number; maxZ: number }[] = [
-  { team: 0, minX: 23, maxX: 26, minZ: 11, maxZ: 14 },
-  { team: 1, minX: 23, maxX: 26, minZ: BRIDGE_MIRROR - 13, maxZ: BRIDGE_MIRROR - 10 },
+  { team: 0, minX: 11, maxX: 14, minZ: 6, maxZ: 9 },
+  { team: 1, minX: 11, maxX: 14, minZ: BRIDGE_MIRROR - 8, maxZ: BRIDGE_MIRROR - 5 },
 ];
 /** No player-placed block may enter this pad around a portal mouth. */
 const GOAL_GUARD = 2;
 /** The centre line. One span, one block wide, runs the whole length on it. */
-export const BRIDGE_LANE_X = 24;
+export const BRIDGE_LANE_X = 12;
 /** Spawn pad centre, crimson side. */
-const BRIDGE_SPAWN_Z = 21.5;
+const BRIDGE_SPAWN_Z = 13.5;
+
+// ── The drop cage ──────────────────────────────────────────────────────────
+// Every round, and every restart after a goal, begins with both players shut
+// inside a glass pod over their own spawn pad. The pod is ordinary authored
+// geometry — it is always there — but its hatch is the one part of either
+// venue the server opens and closes at runtime, so the start of play is a real
+// three-block fall onto your own deck rather than a teleport.
+/** Cage footprint, inclusive. The hatch is the interior of it. */
+const CAGE_X0 = BRIDGE_LANE_X - 2, CAGE_X1 = BRIDGE_LANE_X + 2;
+const CAGE_Z0 = 11, CAGE_Z1 = 15;
+/** Hatch height and standing height, both relative to the deck. Three blocks:
+ *  short enough that the drop never costs a single point of fall damage. */
+export const BRIDGE_CAGE_FLOOR = 3;
+export const BRIDGE_CAGE_ROOF = 7;
 
 function bridgeSwapTeam(block: number): number {
   return block === Block.TeamWoolA ? Block.TeamWoolB : block === Block.TeamWoolB ? Block.TeamWoolA : block;
 }
+/** `lz` reflected onto the other side of the arena. */
+function bridgeMirrorZ(lz: number): number { return BRIDGE_MIRROR - lz; }
 
 let bridgeStampCache: VenueStamp | null = null;
 function bridgeStamp(): VenueStamp {
   if (bridgeStampCache) return bridgeStampCache;
   const s = new VenueStamp(BRIDGE_SIZE_X, BRIDGE_SIZE_Z);
-  const F = PARTY_FLOOR_Y;
+  const F = PARTY_FLOOR_Y, cx = BRIDGE_LANE_X;
   const TEAM = Block.TeamWoolA, STONE = Block.OpalBrick, DECK = Block.SpectralMarble;
   const TRIM = Block.PearlTile, CORE = Block.Basalt, GLOW = Block.RuneGlass;
   const GOLD = Block.GildedVaultBrick, COLUMN = Block.IvoryColumn, PRISM = Block.PrismBrick;
+  const CARVED = Block.CarvedVaultBrick, JADE = Block.JadeMosaic, MOSAIC = Block.VaultMosaic;
+  const LIME = Block.LuminousLimestone, GRATE = Block.ClockworkGrate, LAMP = Block.GildedLamp;
+  const g = BRIDGE_GOALS[0];
 
-  // 1. Base deck: a chevron of team wool sweeping toward the enemy.
-  for (let lz = 2; lz <= 43; lz++)
-    for (let lx = 3; lx <= 44; lx++) {
-      const edge = lx === 3 || lx === 44 || lz === 2 || lz === 43;
-      const chevron = (lz + Math.abs(lx - 24)) % 8 < 2;
-      s.set(lx, F, lz, edge ? TRIM : chevron ? TEAM : (lx % 6 === 0 || lz % 6 === 0) ? TRIM : DECK);
+  // 1. The island the base stands on. Each course steps in as it falls, so the
+  //    base reads as a rock hanging in the void rather than a slab on stilts.
+  //    The last course is lit and sits directly under the portal: it IS the
+  //    floor a scoring dive lands on.
+  const island: readonly [number, number, number, number, number, number][] = [
+    [BASE_X0, BASE_X1, F - 1, BASE_Z0, BASE_Z1, CORE],
+    [BASE_X0 + 1, BASE_X1 - 1, F - 2, BASE_Z0 + 1, BASE_Z1 - 1, CORE],
+    [BASE_X0 + 2, BASE_X1 - 2, F - 3, BASE_Z0 + 2, BASE_Z1 - 2, LIME],
+    [BASE_X0 + 3, BASE_X1 - 3, F - 4, BASE_Z0 + 2, BASE_Z1 - 4, STONE],
+    [BASE_X0 + 4, BASE_X1 - 4, F - 5, BASE_Z0 + 2, BASE_Z1 - 6, PRISM],
+    [BASE_X0 + 5, BASE_X1 - 5, F - 6, BASE_Z0 + 3, BASE_Z1 - 7, PRISM],
+    [BASE_X0 + 6, BASE_X1 - 6, F - 7, BASE_Z0 + 3, BASE_Z1 - 8, PRISM],
+    [BASE_X0 + 6, BASE_X1 - 6, F - 8, BASE_Z0 + 3, BASE_Z1 - 8, GLOW],
+  ];
+  for (const [x0, x1, y, z0, z1, block] of island) s.fill(x0, x1, y, y, z0, z1, block);
+  // Ribs down the flanks, and a hanging pylon under each corner tipped with a
+  // team lamp — the underside is the first thing you see from the far base.
+  for (const lz of [4, 8, 12, 16])
+    for (const lx of [BASE_X0, BASE_X1]) {
+      s.fill(lx, lx, F - 4, F - 2, lz, lz, CARVED);
+      s.set(lx, F - 5, lz, GLOW);
     }
-
-  // 2. The island the base stands on: a stepped underside falling into a lit
-  //    keel directly beneath the portal, so the goal glows from below.
-  s.fill(3, 44, F - 1, F - 1, 2, 43, CORE);
-  s.fill(4, 43, F - 2, F - 2, 3, 42, CORE);
-  s.fill(6, 41, F - 3, F - 3, 4, 41, STONE);
-  s.fill(9, 38, F - 4, F - 4, 6, 39, STONE);
-  s.fill(13, 34, F - 5, F - 5, 8, 30, PRISM);
-  s.fill(17, 30, F - 6, F - 6, 8, 24, PRISM);
-  s.fill(20, 27, F - 7, F - 7, 8, 18, PRISM);
-  s.fill(21, 26, F - 8, F - 8, 9, 16, GLOW);
-  // Hanging corner pylons, tipped with a team lamp.
-  for (const [px, pz] of [[5, 4], [42, 4], [5, 41], [42, 41]]) {
-    s.fill(px, px + 1, F - 16, F - 5, pz, pz + 1, CORE);
-    s.fill(px, px + 1, F - 10, F - 10, pz, pz + 1, TEAM);
-    s.fill(px, px + 1, F - 17, F - 17, pz, pz + 1, GLOW);
+  for (const [px, pz] of [[BASE_X0 + 1, BASE_Z0 + 1], [BASE_X1 - 1, BASE_Z0 + 1],
+    [BASE_X0 + 1, BASE_Z1 - 1], [BASE_X1 - 1, BASE_Z1 - 1]]) {
+    s.fill(px, px, F - 12, F - 3, pz, pz, CORE);
+    s.set(px, F - 7, pz, TEAM);
+    s.set(px, F - 13, pz, GLOW);
   }
 
-  // 3. Rampart. Back and sides are closed; the front opens onto the catwalks.
-  for (let y = F + 1; y <= F + 3; y++)
-    for (let lz = 2; lz <= 43; lz++)
-      for (let lx = 3; lx <= 44; lx++) {
-        const perimeter = lx === 3 || lx === 44 || lz === 2 || lz === 43;
-        if (!perimeter) continue;
-        // One sally port, dead centre, lined up with the span and with the
-        // portal at the far end of it: there is exactly one way out.
-        if (lz === 43 && lx >= BRIDGE_LANE_X - 1 && lx <= BRIDGE_LANE_X + 1) continue;
-        if (y === F + 3 && (lx + lz) % 2 !== 0) continue; // crenellations
-        s.set(lx, y, lz, y === F + 2 ? TEAM : STONE);
+  // 2. The deck. A gilded runway leaves the portal and runs out through the
+  //    sally port, so the one route out of the base is drawn on the floor.
+  for (let lz = BASE_Z0; lz <= BASE_Z1; lz++)
+    for (let lx = BASE_X0; lx <= BASE_X1; lx++) {
+      const dx = Math.abs(lx - cx), edge = lx === BASE_X0 || lx === BASE_X1 || lz === BASE_Z0 || lz === BASE_Z1;
+      const rim = lx === BASE_X0 + 1 || lx === BASE_X1 - 1 || lz === BASE_Z0 + 1 || lz === BASE_Z1 - 1;
+      const runway = dx <= 1 && lz >= g.maxZ;
+      s.set(lx, F, lz, edge ? TRIM : rim ? CARVED
+        : runway ? (dx === 0 ? GOLD : PRISM)
+          : (lz + dx) % 6 < 2 ? TEAM
+            : (lx % 4 === 0 || lz % 4 === 0) ? JADE : DECK);
+    }
+
+  // 3. The rampart. Four courses, arrow slits every third block, crenellated —
+  //    and one sally port, dead centre, lined up with the span and with the
+  //    portal at the far end of it: there is exactly one way out.
+  for (let y = F + 1; y <= F + 4; y++)
+    for (let lz = BASE_Z0; lz <= BASE_Z1; lz++)
+      for (let lx = BASE_X0; lx <= BASE_X1; lx++) {
+        if (!(lx === BASE_X0 || lx === BASE_X1 || lz === BASE_Z0 || lz === BASE_Z1)) continue;
+        if (lz === BASE_Z1 && lx >= g.minX && lx < g.maxX) continue;
+        if (y === F + 4 && (lx + lz) % 2 !== 0) continue; // crenellations
+        const slit = y === F + 2 && (lx + lz) % 3 === 0;
+        s.set(lx, y, lz, slit ? GLOW : y === F + 3 ? TEAM : y === F + 1 ? STONE : CARVED);
       }
 
-  // 4. Corner towers with a beacon crown.
-  for (const [cx, cz] of [[6, 6], [41, 6], [6, 38], [41, 38]]) {
-    for (let y = F + 1; y <= F + 12; y++)
+  // 4. Corner turrets: a banded shaft, a machicolated ring on grates, a wool
+  //    crown and a gilded finial.
+  for (const [tx, tz] of [[BASE_X0 + 1, BASE_Z0 + 1], [BASE_X1 - 1, BASE_Z0 + 1],
+    [BASE_X0 + 1, BASE_Z1 - 1], [BASE_X1 - 1, BASE_Z1 - 1]]) {
+    for (let y = F + 1; y <= F + 9; y++)
       for (let dz = -1; dz <= 1; dz++)
         for (let dx = -1; dx <= 1; dx++) {
           const corner = dx !== 0 && dz !== 0;
-          s.set(cx + dx, y, cz + dz, corner ? COLUMN : (y === F + 4 || y === F + 8) ? TEAM : STONE);
+          s.set(tx + dx, y, tz + dz, corner ? COLUMN
+            : y === F + 4 || y === F + 8 ? TEAM : y % 3 === 0 ? CARVED : STONE);
         }
-    for (const [dx, dz] of [[2, 0], [-2, 0], [0, 2], [0, -2]]) s.set(cx + dx, F + 10, cz + dz, GLOW);
-    s.fill(cx - 2, cx + 2, F + 13, F + 13, cz - 2, cz + 2, STONE);
+    for (const [dx, dz] of [[2, 0], [-2, 0], [0, 2], [0, -2]]) {
+      s.set(tx + dx, F + 9, tz + dz, GRATE);
+      s.set(tx + dx, F + 8, tz + dz, LAMP);
+    }
+    s.fill(tx - 2, tx + 2, F + 10, F + 10, tz - 2, tz + 2, STONE);
     for (let dz = -2; dz <= 2; dz++)
       for (let dx = -2; dx <= 2; dx++)
-        if (Math.abs(dx) === 2 || Math.abs(dz) === 2) s.set(cx + dx, F + 14, cz + dz, TEAM);
-    s.fill(cx, cx, F + 15, F + 17, cz, cz, GLOW);
-    s.set(cx, F + 18, cz, GOLD);
+        if (Math.abs(dx) === 2 || Math.abs(dz) === 2) s.set(tx + dx, F + 11, tz + dz, TEAM);
+    s.fill(tx, tx, F + 11, F + 13, tz, tz, GLOW);
+    s.set(tx, F + 14, tz, GOLD);
   }
 
-  // 5. Gate arch over the sally port.
-  for (const [x0, x1] of [[BRIDGE_LANE_X - 1, BRIDGE_LANE_X + 1]]) {
-    for (const jamb of [x0 - 1, x1 + 1]) {
-      s.fill(jamb, jamb, F + 1, F + 7, 43, 43, COLUMN);
-      s.set(jamb, F + 6, 43, GLOW);
+  // 5. The gate over the sally port: jambs, a carved lintel, a wool banner and
+  //    a lamp either side, so the one way out is also the loudest thing on the
+  //    wall from the enemy's deck.
+  for (const jx of [g.minX - 1, g.maxX]) {
+    s.fill(jx, jx, F + 1, F + 3, BASE_Z1, BASE_Z1, COLUMN);
+    s.set(jx, F + 6, BASE_Z1, LAMP);
+  }
+  s.fill(g.minX - 1, g.maxX, F + 4, F + 4, BASE_Z1, BASE_Z1, CARVED);
+  s.fill(g.minX, g.maxX - 1, F + 5, F + 5, BASE_Z1, BASE_Z1, TEAM);
+  s.fill(g.minX - 1, g.maxX, F + 6, F + 6, BASE_Z1, BASE_Z1, GOLD);
+  s.set(cx, F + 7, BASE_Z1, GLOW);
+
+  // 6. The keep, behind the portal: a two-step dais, four lit columns, a
+  //    slab roof and a gilded ridge.
+  s.fill(BASE_X0 + 2, BASE_X1 - 2, F + 1, F + 1, BASE_Z0 + 1, BASE_Z0 + 3, TRIM);
+  s.fill(BASE_X0 + 4, BASE_X1 - 4, F + 2, F + 2, BASE_Z0 + 1, BASE_Z0 + 2, MOSAIC);
+  for (const px of [BASE_X0 + 4, BASE_X1 - 4])
+    for (const pz of [BASE_Z0 + 1, BASE_Z0 + 3]) {
+      s.fill(px, px, F + 2, F + 5, pz, pz, COLUMN);
+      s.set(px, F + 6, pz, LAMP);
     }
-    s.fill(x0 - 1, x1 + 1, F + 8, F + 8, 43, 43, STONE);
-    s.fill(x0, x1, F + 9, F + 9, 43, 43, TEAM);
-    for (const banner of [x0 + 1, x1 - 1]) s.set(banner, F + 7, 43, TEAM);
-  }
+  s.fill(BASE_X0 + 3, BASE_X1 - 3, F + 7, F + 7, BASE_Z0, BASE_Z0 + 4, STONE);
+  s.fill(BASE_X0 + 5, BASE_X1 - 5, F + 8, F + 8, BASE_Z0 + 1, BASE_Z0 + 3, TEAM);
+  s.fill(cx - 1, cx + 1, F + 9, F + 9, BASE_Z0 + 1, BASE_Z0 + 3, GOLD);
+  s.set(cx, F + 10, BASE_Z0 + 2, GLOW);
 
-  // 6. The keep, behind the portal.
-  s.fill(14, 34, F + 1, F + 1, 3, 9, TRIM);
-  s.fill(16, 32, F + 2, F + 2, 4, 8, DECK);
-  for (const [px, pz] of [[16, 4], [32, 4], [16, 8], [32, 8]]) {
-    s.fill(px, px, F + 3, F + 8, pz, pz, COLUMN);
-    s.set(px, F + 7, pz, GLOW);
-  }
-  s.fill(15, 33, F + 9, F + 9, 3, 9, STONE);
-  s.fill(17, 31, F + 10, F + 10, 4, 8, TEAM);
-  s.fill(20, 28, F + 11, F + 11, 5, 7, GOLD);
-
-  // 7. The portal: a gilded ring, four obelisks and a floating cross over a
-  //    shaft that drops onto the lit keel.
-  const g = BRIDGE_GOALS[0];
+  // 7. The portal: a gilded collar on the deck, a prism-lined shaft, four
+  //    banded obelisks and a floating cross over the mouth.
   s.fill(g.minX - 1, g.maxX, F, F, g.minZ - 1, g.maxZ, GOLD);
   s.fill(g.minX - 1, g.maxX, F - 7, F - 1, g.minZ - 1, g.maxZ, PRISM);
-  for (const [ox, oz] of [[g.minX - 1, g.minZ - 1], [g.maxX, g.minZ - 1], [g.minX - 1, g.maxZ], [g.maxX, g.maxZ]]) {
-    for (let y = F + 1; y <= F + 5; y++) s.set(ox, y, oz, y % 2 ? STONE : TEAM);
-    s.set(ox, F + 6, oz, GLOW);
-  }
-  const gx = (g.minX + g.maxX - 1) / 2, gz = (g.minZ + g.maxZ - 1) / 2;
-  s.fill(g.minX - 1, g.maxX, F + 8, F + 8, gz, gz, GOLD);
-  s.fill(gx, gx, F + 8, F + 8, g.minZ - 1, g.maxZ, GOLD);
-  s.set(gx, F + 9, gz, GLOW);
+  for (const ox of [g.minX - 1, g.maxX])
+    for (const oz of [g.minZ - 1, g.maxZ]) {
+      for (let y = F + 1; y <= F + 4; y++) s.set(ox, y, oz, y % 2 ? CARVED : TEAM);
+      s.set(ox, F + 5, oz, GLOW);
+      s.set(ox, F + 6, oz, GOLD);
+    }
+  const gz = (g.minZ + g.maxZ - 1) / 2;
+  s.fill(g.minX - 1, g.maxX, F + 7, F + 7, gz, gz, GOLD);
+  s.fill(cx, cx, F + 7, F + 7, g.minZ - 1, g.maxZ, GOLD);
+  s.set(cx, F + 8, gz, GLOW);
 
-  // 8. Spawn pad, a wool square you cannot mistake for the deck.
-  for (let lz = 19; lz <= 24; lz++)
-    for (let lx = 17; lx <= 31; lx++)
-      s.set(lx, F, lz, lz === 19 || lz === 24 || lx === 17 || lx === 31 ? GOLD : TEAM);
+  // 8. The spawn pad, a wool-and-mosaic square you cannot mistake for the
+  //    deck, and the drop cage standing over it on four legs.
+  for (let lz = CAGE_Z0; lz <= CAGE_Z1; lz++)
+    for (let lx = CAGE_X0 - 2; lx <= CAGE_X1 + 2; lx++) {
+      const border = lz === CAGE_Z0 || lz === CAGE_Z1 || lx === CAGE_X0 - 2 || lx === CAGE_X1 + 2;
+      s.set(lx, F, lz, border ? GOLD : (lx + lz) % 2 ? TEAM : MOSAIC);
+    }
+  for (let lz = CAGE_Z0; lz <= CAGE_Z1; lz++)
+    for (let lx = CAGE_X0; lx <= CAGE_X1; lx++) {
+      const rim = lx === CAGE_X0 || lx === CAGE_X1 || lz === CAGE_Z0 || lz === CAGE_Z1;
+      const corner = (lx === CAGE_X0 || lx === CAGE_X1) && (lz === CAGE_Z0 || lz === CAGE_Z1);
+      // The hatch is the interior; the lip it swings out of stays put.
+      s.set(lx, F + BRIDGE_CAGE_FLOOR, lz, rim ? GOLD : PRISM);
+      s.set(lx, F + BRIDGE_CAGE_ROOF, lz, corner ? GOLD : rim ? CARVED : GLOW);
+      if (corner) {
+        s.fill(lx, lx, F + 1, F + BRIDGE_CAGE_FLOOR - 1, lz, lz, COLUMN);
+        s.fill(lx, lx, F + BRIDGE_CAGE_FLOOR + 1, F + BRIDGE_CAGE_ROOF - 1, lz, lz, COLUMN);
+      } else if (rim) {
+        s.fill(lx, lx, F + BRIDGE_CAGE_FLOOR + 1, F + BRIDGE_CAGE_ROOF - 1, lz, lz, GLOW);
+      }
+    }
+  s.set(cx, F + BRIDGE_CAGE_ROOF + 1, (CAGE_Z0 + CAGE_Z1) / 2, LAMP);
 
   // 9. The span. ONE lane, ONE block wide, straight down the centre line and
   //    unbroken from the sally port to the middle island — and, once the
@@ -366,47 +426,47 @@ function bridgeStamp(): VenueStamp {
   //    second route, no rail, and nothing at all to stand on either side of
   //    it: every crossing is a tightrope with somebody at the far end. The
   //    wool is for repairing the span and for climbing back onto it.
-  for (let lz = 44; lz <= 79; lz++) {
-    s.set(BRIDGE_LANE_X, F, lz, lz % 4 === 0 ? TEAM : DECK);
+  for (let lz = BASE_Z1 + 1; lz <= 35; lz++) {
+    s.set(cx, F, lz, lz % 4 === 0 ? TEAM : DECK);
     // Lanterns hang a clear block underneath: they light the span and give the
     // drop a scale, and that gap keeps them off the walking surface until
     // somebody knocks the deck out from over them.
-    if (lz % 6 === 2) {
-      s.set(BRIDGE_LANE_X, F - 2, lz, GLOW);
-      s.set(BRIDGE_LANE_X, F - 3, lz, CORE);
+    if (lz % 5 === 1) {
+      s.set(cx, F - 2, lz, GLOW);
+      s.set(cx, F - 3, lz, CORE);
     }
   }
   // Buttress arms where the span leaves the base, so it reads as built rather
   // than floating. They sit BELOW the walkway and are never a second footing.
-  for (const lz of [44, 45, 46]) {
-    s.set(BRIDGE_LANE_X - 1, F - 1, lz, CORE);
-    s.set(BRIDGE_LANE_X + 1, F - 1, lz, CORE);
-    s.set(BRIDGE_LANE_X, F - 1, lz, STONE);
+  for (const lz of [BASE_Z1 + 1, BASE_Z1 + 2]) {
+    s.set(cx - 1, F - 1, lz, CORE);
+    s.set(cx + 1, F - 1, lz, CORE);
+    s.set(cx, F - 1, lz, STONE);
   }
 
   // 10. The middle island: a small contested node ON the line rather than a
-  //     plaza beside it — fourteen blocks across, so the span still reads as
-  //     one continuous route from base to base. Self-symmetric, so the mirror
-  //     pass below completes it rather than duplicating it.
-  for (let lz = 80; lz <= 87; lz++)
-    for (let lx = 17; lx <= 30; lx++) {
-      const edge = lx === 17 || lx === 30 || lz === 80;
-      s.set(lx, F, lz, edge ? TRIM : ((lx >> 1) + (lz >> 1)) % 2 ? DECK : TRIM);
+  //     plaza beside it — eleven blocks across, so the span still reads as one
+  //     continuous route from base to base. Only the near half is authored;
+  //     the mirror pass completes it rather than duplicating it. The shrine on
+  //     it is an arch you RUN under: nothing here is ever a step to clear.
+  for (let lz = 36; lz <= 39; lz++)
+    for (let lx = cx - 5; lx <= cx + 5; lx++) {
+      const edge = lx === cx - 5 || lx === cx + 5 || lz === 36;
+      s.set(lx, F, lz, edge ? TRIM : ((lx >> 1) + (lz >> 1)) % 2 ? DECK : JADE);
     }
-  s.fill(18, 29, F - 1, F - 1, 80, 87, CORE);
-  s.fill(19, 28, F - 2, F - 2, 80, 87, CORE);
-  s.fill(20, 27, F - 3, F - 3, 80, 87, STONE);
-  s.fill(21, 26, F - 4, F - 4, 80, 87, STONE);
-  s.fill(22, 25, F - 12, F - 5, 84, 87, PRISM);
-  s.fill(23, 24, F - 13, F - 13, 84, 87, GLOW);
-  s.fill(20, 27, F + 1, F + 1, 84, 87, TRIM);
-  s.fill(22, 25, F + 2, F + 2, 86, 87, GOLD);
-  s.fill(23, 24, F + 3, F + 5, 86, 87, GLOW);
-  s.fill(22, 25, F + 6, F + 6, 86, 87, GOLD);
-  for (const ox of [18, 29]) {
-    s.fill(ox, ox, F + 1, F + 6, 82, 82, STONE);
-    s.set(ox, F + 7, 82, GLOW);
+  s.fill(cx - 4, cx + 4, F - 1, F - 1, 36, 39, CORE);
+  s.fill(cx - 3, cx + 3, F - 2, F - 2, 36, 39, CORE);
+  s.fill(cx - 2, cx + 2, F - 4, F - 3, 37, 39, STONE);
+  s.fill(cx - 1, cx + 1, F - 9, F - 5, 38, 39, PRISM);
+  s.fill(cx, cx, F - 10, F - 10, 38, 39, GLOW);
+  for (const ox of [cx - 3, cx + 3]) {
+    s.fill(ox, ox, F + 1, F + 4, 37, 37, COLUMN);
+    s.set(ox, F + 3, 37, TEAM);
+    s.set(ox, F + 5, 37, LAMP);
   }
+  s.fill(cx - 3, cx + 3, F + 5, F + 5, 39, 39, GOLD);
+  for (const ox of [cx - 3, cx + 3]) s.fill(ox, ox, F + 1, F + 4, 39, 39, COLUMN);
+  s.fill(cx - 1, cx + 1, F + 6, F + 6, 39, 39, GLOW);
 
   // 11. Carve the portal shaft before mirroring, so both sides lose the same
   //     columns and the lit keel becomes the landing pad.
@@ -419,17 +479,39 @@ function bridgeStamp(): VenueStamp {
     const lz = rest % BRIDGE_SIZE_Z;
     const y = (rest - lz) / BRIDGE_SIZE_Z + PARTY_STAMP_MIN_Y;
     if (lz > BRIDGE_MIRROR / 2) continue;
-    s.set(lx, y, BRIDGE_MIRROR - lz, bridgeSwapTeam(block));
+    s.set(lx, y, bridgeMirrorZ(lz), bridgeSwapTeam(block));
   }
   bridgeStampCache = s;
   return s;
 }
 
+/** Where seat `seat` of `team` stands, in slot-local blocks. Seat 0 is dead
+ *  centre on the lane; a 1v1 never uses another. */
+function bridgeLane(seat: number): number {
+  return BRIDGE_LANE_X + (seat === 0 ? 0 : (seat % 2 ? 2 : -2) * Math.ceil(seat / 2));
+}
 /** Spawn pad for one seat on one team, in world coordinates. */
 export function bridgeSpawn(sub: PartySubBounds, team: number, seat: number): PartyVec3 {
-  const lane = 24 + ((seat % 2) * 2 - 1) * (2 + Math.floor(seat / 2) * 3);
-  const lz = team === 0 ? BRIDGE_SPAWN_Z : BRIDGE_MIRROR - BRIDGE_SPAWN_Z;
-  return { x: sub.minX + lane + .5, y: PARTY_FLOOR_Y + 1.01, z: sub.minZ + lz };
+  const lz = team === 0 ? BRIDGE_SPAWN_Z : BRIDGE_SIZE_Z - BRIDGE_SPAWN_Z;
+  return { x: sub.minX + bridgeLane(seat) + .5, y: PARTY_FLOOR_Y + 1.01, z: sub.minZ + lz };
+}
+/** Inside the drop cage over that same pad: where a round, and every restart
+ *  after a goal, actually begins. */
+export function bridgeCageSpawn(sub: PartySubBounds, team: number, seat: number): PartyVec3 {
+  const spawn = bridgeSpawn(sub, team, seat);
+  return { ...spawn, y: PARTY_FLOOR_Y + BRIDGE_CAGE_FLOOR + 1.01 };
+}
+/** Every block of hatch under both cages, in slot-local coordinates. The
+ *  server is the only caller: it deletes these to drop both players onto their
+ *  decks together, and puts them back the moment a goal restarts the round. */
+export function bridgeCageHatch(): readonly { lx: number; y: number; lz: number }[] {
+  const cells: { lx: number; y: number; lz: number }[] = [];
+  for (let lz = CAGE_Z0 + 1; lz < CAGE_Z1; lz++)
+    for (let lx = CAGE_X0 + 1; lx < CAGE_X1; lx++) {
+      cells.push({ lx, y: PARTY_FLOOR_Y + BRIDGE_CAGE_FLOOR, lz });
+      cells.push({ lx, y: PARTY_FLOOR_Y + BRIDGE_CAGE_FLOOR, lz: bridgeMirrorZ(lz) });
+    }
+  return cells;
 }
 
 /** Which portal, if any, contains this slot-local point below the deck lip. */
@@ -725,8 +807,10 @@ export function partySpawns(sub: PartySubBounds, members: readonly { team: numbe
       x: sub.minX + p.x + (i % 2 ? .7 : -.7), y: p.y + .01, z: sub.minZ + p.z,
     }));
   }
+  // The Bridge always opens inside the cages: the first thing either player
+  // does is watch the hatch drop out from under them.
   const seats = [0, 0];
-  return members.map((m) => bridgeSpawn(sub, m.team, seats[m.team]++));
+  return members.map((m) => bridgeCageSpawn(sub, m.team, seats[m.team]++));
 }
 
 // ── Lobby engine ───────────────────────────────────────────────────────────
@@ -796,7 +880,7 @@ export interface PartyLobbySnapshot {
   /** The most recent kill on the span, for the banner and the feed. */
   lastKill?: {
     id: number; username: string; victim: string; team: number; at: number;
-    cause: 'cleaver' | 'bow' | 'void';
+    cause: 'melee' | 'bow' | 'void';
   };
   round?: PartyRoundState;
   arena?: PartyArenaBounds;
@@ -935,6 +1019,7 @@ export class PartyGamesEngine {
     if ([...l.participants.values()].some((p) => !p.ready)) return { ok: false, reason: 'not_everyone_ready' };
     let slot = 0;
     while (this.usedSlots.has(slot)) slot++;
+    if (slot >= PARTY_ARENA_SLOTS) return { ok: false, reason: 'no_arena' };
     this.usedSlots.add(slot);
     // Random secret token + monotonic counter produces a fresh course on every replay.
     let seed = ++this.seedCounter;
@@ -1051,7 +1136,7 @@ export class PartyGamesEngine {
   /** A player was killed outright (not a void fall). The victim is sent home
    *  on the next evaluation, exactly like a goal reset. */
   recordDeath(victimId: number, killerId: number | null, now: number,
-    cause: 'cleaver' | 'bow' | 'void' = 'cleaver'): PartyLobbySnapshot | null {
+    cause: 'melee' | 'bow' | 'void' = 'melee'): PartyLobbySnapshot | null {
     const l = this.lobbyByPlayer.get(victimId), victim = l?.participants.get(victimId);
     if (!l || !victim) return null;
     victim.deaths++;
@@ -1079,10 +1164,18 @@ export class PartyGamesEngine {
   private evaluateBridge(l: PartyLobby, p: PartyParticipant, sub: PartySubBounds, pos: PartyVec3, now: number):
     { spawn?: PartyVec3; changed: boolean } {
     const seat = [...l.participants.values()].filter((v) => v.team === p.team && v.joinOrder < p.joinOrder).length;
+    // A goal puts everybody back in a cage; an ordinary void death just puts
+    // you back on your own deck, with no pause in the game for anyone else.
     const home = (): { spawn: PartyVec3; changed: boolean } => {
+      const caged = l.goalResetAt !== undefined && now < l.goalResetAt;
       p.pendingSpawn = false;
-      p.immuneUntil = now + BRIDGE_RESPAWN_SHIELD_MS;
-      return { spawn: bridgeSpawn(sub, p.team, seat), changed: true };
+      // A caged player's shield starts when the hatch does, so nobody lands
+      // out of one straight into a waiting axe.
+      p.immuneUntil = (caged ? l.goalResetAt! : now) + BRIDGE_RESPAWN_SHIELD_MS;
+      return {
+        spawn: caged ? bridgeCageSpawn(sub, p.team, seat) : bridgeSpawn(sub, p.team, seat),
+        changed: true,
+      };
     };
     if (p.pendingSpawn) return home();
     const lx = Math.floor(pos.x - sub.minX), lz = Math.floor(pos.z - sub.minZ);

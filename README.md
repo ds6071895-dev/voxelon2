@@ -33,6 +33,30 @@ energy, mobs, armor/guns, and authoritative server-core logic),
 `npm run warfare-smoke` (the Warfare Command tree, boss-XP settlement, missiles,
 interceptors and vehicles — 170+ checks).
 
+## World exploration
+
+Surface landmarks now appear throughout suitable dry land, with a candidate
+in each 80-block district. Eleven families include villages of three or four
+houses, furnished cottages, wayside inns, windmills, glass gardens, shrines,
+overgrown ruins, traveller camps, watchtowers, bunkers and rare cargo pods.
+Biome palettes, roof profiles, building heights, orientation, gardens and
+interiors vary with the seed. Villages have connected streets, lit wells and
+multiple supplies caches. Common and rare chests guarantee iron and torches
+alongside their random equipment, healing supplies and other finds.
+
+Caves combine connecting galleries with huge overlapping domes, broad arched
+entrances and sloping rock bridges into the chambers. Lush, crystal and
+limestone regions have tapered mineral formations, ceiling growth, natural
+pillars, glowing plants, shallow pools and occasional ceiling springs. Cave
+approaches avoid vaults, and spawning avoids cave mouths and buildings.
+
+Generation stays identical between server and client and across chunk reloads.
+A different world seed creates different discoveries; revisiting a location
+preserves its layout and already-opened loot. Restart the server and reload
+clients together after updating generation. Saved block edits still overlay
+the generated terrain. Run `npm run worldgen-smoke` for structure coverage,
+loot, walkable cave routes, generation determinism and chunk-boundary checks.
+
 ## Minigames
 
 Open **Minigames** with the multiplayer server running. Duels, Parkour and
@@ -129,8 +153,8 @@ initial title screen; pausing in-game freezes your view over the live world.
   forests mix oak and birch. Grass/leaves/tall-grass are tinted per biome
   from a continuous colormap that blends across borders. Cross-shaped
   plants: tall grass, dandelions, poppies, dead bushes.
-- **Caves and ores (M2):** spaghetti caves (intersecting 3D noise tubes —
-  VOXELON removed the large open "cheese" caverns), surface ravines, and
+- **Caves and ores (M2, expanded):** connecting cave galleries, large domed
+  caverns with walk-in entrances and mineral formations, surface ravines, and
   ore veins with vanilla depth rules — coal anywhere, iron below y=72, gold
   below y=32, **redstone and diamond below y=16** (dig down to Y≤16 to find
   diamond).
@@ -319,6 +343,9 @@ src/
   terrain.ts   biome-aware heightmap (fBm + mountain factor), biome/mountain
                surfaces, water fill, three tree species, plants/cacti,
                spaghetti caves, ravines, ore veins (deterministic)
+  caves.ts     connected cave landmarks, entry ramps, pools and mineral growth
+  structures.ts seeded site placement, world map discovery and loot lookup
+  settlements.ts varied houses, villages, gardens and other surface architecture
   light.ts     0-15 sky/block light: column skylight + BFS flood (pure;
                exact over a 3x3-chunk window since max travel is 15)
   mesher.ts    culled face meshing with directional shade + vertex AO,

@@ -1,5 +1,6 @@
 import {
-  DUEL_ARENA_FLOOR_Y, DUEL_ARENA_LOAD_TIMEOUT_MS, DUEL_ARENA_SIZE, DUEL_COUNTDOWN_MS,
+  DUEL_ARENA_BASE_X, DUEL_ARENA_FLOOR_Y, DUEL_ARENA_LOAD_TIMEOUT_MS, DUEL_ARENA_SIZE,
+  DUEL_ARENA_SLOTS, DUEL_ARENA_SLOT_SPACING, DUEL_COUNTDOWN_MS,
   DUEL_MAX_ELEVATION, DUEL_MIN_LIGHT, DUEL_MULTI_KILL_MS, DUEL_REMATCH_MS,
   DUEL_RESPAWN_MS, DUEL_ROUND_MS, DUEL_SCORE_LIMIT, DUEL_WALL_ROWS,
   Duels, clampToDuelArena, duelArenaBounds,
@@ -19,7 +20,7 @@ import { Block } from '../src/blocks';
 import { Item } from '../src/items';
 import { GameServer } from '../src/net/server_core';
 import {
-  ARENA_BANDS, ARENA_BAND_MIN_X, arenaBandForX, arenaBandsDisjoint,
+  ARENA_BANDS, ARENA_BAND_MIN_X, arenaBandFor, arenaBandForX, arenaBandsDisjoint,
 } from '../src/arena';
 
 let passed = 0;
@@ -176,6 +177,41 @@ const who = (id: number) => ({ id, username: `Player${id}`, skin: id * 17 });
   d.join(made.token, who(guest), 2); d.setReady(owner, true, 2); d.setReady(guest, true, 2);
   const reused = d.start(owner, 2);
   check('lowest released arena slot is reused', reused.ok && reused.snapshot.arena?.slot === 0);
+}
+
+// The band has a floor AND a ceiling. Running out of colosseums is reported as
+// a start failure the host can act on, never as a match quietly stamped past
+// the end of the band and into whatever lives there.
+{
+  const d = new Duels(token);
+  const openMatch = (owner: number): boolean => {
+    const made = d.create(who(owner), 0); if ('reason' in made) throw new Error('create failed');
+    d.join(made.token, who(owner + 1), 0);
+    d.setReady(owner, true, 0); d.setReady(owner + 1, true, 0);
+    return d.start(owner, 0).ok;
+  };
+  const slots: number[] = [];
+  for (let i = 0; i < DUEL_ARENA_SLOTS; i++) {
+    const owner = 1000 + i * 2;
+    if (!openMatch(owner)) throw new Error(`match ${i} refused early`);
+    slots.push(d.arenaFor(owner)!.slot);
+  }
+  check('every slot in the band can be live at the same time',
+    new Set(slots).size === DUEL_ARENA_SLOTS &&
+    Math.min(...slots) === 0 && Math.max(...slots) === DUEL_ARENA_SLOTS - 1);
+  check('every one of those arenas is inside the duel band',
+    slots.every((slot) => arenaBandForX(duelArenaBounds(slot).originX)?.kind === 'duel'));
+
+  const overflowOwner = 1000 + DUEL_ARENA_SLOTS * 2;
+  const made = d.create(who(overflowOwner), 0);
+  if ('reason' in made) throw new Error('create failed');
+  d.join(made.token, who(overflowOwner + 1), 0);
+  d.setReady(overflowOwner, true, 0); d.setReady(overflowOwner + 1, true, 0);
+  const overflow = d.start(overflowOwner, 0);
+  check('one match too many is refused with a reason, not stamped out of band',
+    !overflow.ok && overflow.reason === 'no_arena');
+  check('the refused lobby is left intact and startable later',
+    d.snapshotFor(overflowOwner, 0)?.phase === 'lobby');
 }
 
 // Equal leaders enter sudden death; next kill finishes it.
@@ -809,8 +845,12 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
 
 // Every match opens on a bare arena. The per-lobby record of what was placed
 // is not the thing that gets cleared — the arena's FOOTPRINT is — so a plank
-// nobody is tracking any more (a forfeit, a crash, a world reloaded off disk)
-// cannot be standing there when the next fight starts.
+// nobody is tracking any more (a forfeit, a crash, a host who dropped) cannot
+// be standing there when the next fight starts.
+//
+// A world reloaded off disk is no longer one of those routes, because an arena
+// column never reaches the save file in the first place; that is asserted
+// below and covered in full by the minigame isolation smoke.
 {
   const seed = 913;
   const s = new GameServer(seed, () => 0.5);
@@ -820,10 +860,16 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   const by = a0.floor + duelTerrainElevation(lx, lz) + 2;
   const key = `${bx},${by},${bz}`;
   // A world that comes back from disk with cover still standing in the arena.
+  // It does not come back: the arena is not part of the world.
   s.restore({ v: 2, seed, edits: [[key, Block.OakPlanks]] });
-  check('a stale arena plank survives a world reload',
-    s.serialize().edits.some(([k, b]) => k === key && b === Block.OakPlanks));
+  check('a world reload cannot bring an arena plank back at all',
+    !s.serialize().edits.some(([k]) => k === key) && s.edits.get(key) === undefined);
 
+  // The case the footprint sweep is actually for: a plank placed THIS session
+  // that no lobby is tracking any more. Seeded straight into the live edit log
+  // — `serialize()` is a world-only view of it, so the assertions below read
+  // the map rather than the save.
+  s.edits.set(key, Block.OakPlanks);
   s.addPlayer(1, { username: 'Stale', faction: 0 });
   s.addPlayer(2, { username: 'Fresh', faction: 0 });
   const created = s.handle(1, { t: 'duelCreate' });
@@ -837,14 +883,15 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   check('the swept arena is the one the match was actually given',
     arenaMsg.arena.slot === 0);
   check('starting a match clears untracked oak planks from the arena',
-    !s.serialize().edits.some(([k]) => k === key));
+    s.edits.get(key) === undefined);
   const cleared = (id: number) => entered.some((o) => o.to === id && o.msg.t === 'editBatch' &&
     o.msg.edits.some((e) => e.x === bx && e.y === by && e.z === bz && e.block === Block.Air));
   check('and both clients are told to remove it', cleared(1) && cleared(2));
 
   // The sweep is scoped to the arena: the open world is never touched.
   const s2 = new GameServer(seed, () => 0.5);
-  s2.restore({ v: 2, seed, edits: [['40,80,40', Block.OakPlanks], [key, Block.OakPlanks]] });
+  s2.restore({ v: 2, seed, edits: [['40,80,40', Block.OakPlanks]] });
+  s2.edits.set(key, Block.OakPlanks);
   s2.addPlayer(1, { username: 'Stale', faction: 0 });
   s2.addPlayer(2, { username: 'Fresh', faction: 0 });
   const made = s2.handle(1, { t: 'duelCreate' })
@@ -853,9 +900,8 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   s2.handle(2, { t: 'duelJoin', token: made.inviteToken });
   for (const id of [1, 2]) s2.handle(id, { t: 'duelReady', ready: true });
   s2.handle(1, { t: 'duelStart' });
-  const after = s2.serialize().edits;
   check('the sweep never reaches outside the arena footprint',
-    after.some(([k]) => k === '40,80,40') && !after.some(([k]) => k === key));
+    s2.edits.get('40,80,40') === Block.OakPlanks && s2.edits.get(key) === undefined);
 }
 
 // Healing is server-counted: no passive regeneration, normal Medkit healing,
@@ -935,6 +981,29 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
     s.snapshotFor(22).map((p) => p.id).sort().join(',') === '22,23');
   check('forged other-lobby damage is rejected',
     s.handle(20, { t: 'rangedAttack', target: 22, amount: 5 }).length === 0);
+  const coverKey = (arena: DuelArenaBounds) => `${arena.minX + 15},${arena.floor + 7},${arena.minZ + 15}`;
+  s.edits.set(coverKey(first), Block.OakPlanks);
+  s.edits.set(coverKey(second), Block.OakPlanks);
+  const endsAt = s.duels.snapshotFor(20, s.worldTime * 1000)!.endsAt!;
+  // Give the first room a winner so it ends at regulation, not sudden death.
+  s.duels.recordDeath(21, 20, s.worldTime * 1000);
+  s.tickWar((endsAt - s.worldTime * 1000) / 1000 + .001);
+  const finished = s.tickDuels();
+  check('one duel can finish while the other keeps fighting',
+    s.duels.phaseFor(20) === 'results' && s.duels.phaseFor(22) === 'running');
+  check('results are delivered only to the finished room',
+    finished.filter(o => o.msg.t === 'duelResult').length === 2 &&
+    finished.filter(o => o.msg.t === 'duelResult').every(o => o.to === 20 || o.to === 21));
+  check('finishing a duel leaves the other arena cover intact',
+    !s.edits.has(coverKey(first)) && s.edits.has(coverKey(second)));
+  s.handle(20, { t: 'duelRematch', vote: true });
+  s.handle(21, { t: 'duelRematch', vote: true });
+  check('one room can stage a rematch without restarting the other',
+    s.duels.phaseFor(20) === 'countdown' && s.duels.phaseFor(22) === 'running' &&
+    s.duels.arenaFor(22)?.slot === second.slot && s.edits.has(coverKey(second)));
+  s.removePlayer(20);
+  check('disconnect during a concurrent rematch does not disturb the other room',
+    s.duels.phaseFor(22) === 'running' && s.snapshotFor(22).map(p => p.id).sort().join(',') === '22,23');
 }
 
 // A result-decision timeout restores the remaining player without needing a
@@ -974,12 +1043,22 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   check('every registered band is self-disjoint and ordered by base x',
     ARENA_BANDS.every((b, i) => b.spacing >= b.sizeX &&
       (i === 0 || b.baseX > ARENA_BANDS[i - 1].baseX)));
-  check('band footprints stay disjoint out to 96 slots each', arenaBandsDisjoint(96));
+  check('band footprints stay disjoint across every slot either band can hand out',
+    arenaBandsDisjoint(Math.max(...ARENA_BANDS.map((b) => b.slots))));
+  check('no band is allowed to grow past the slots its allocator can issue',
+    ARENA_BANDS.every((b) => b.slots > 0 && Number.isInteger(b.slots)) &&
+    (arenaBandFor('duel')?.slots ?? 0) === DUEL_ARENA_SLOTS);
   check('the duel band still owns its historical base',
     ARENA_BAND_MIN_X === 12_288 && arenaBandForX(12_288)?.kind === 'duel');
-  check('a band claims every x from its base up to the next band',
+  check('a band claims every x inside its own allocated slots',
     arenaBandForX(12_288 + 511)?.kind === 'duel' &&
     arenaBandForX(12_288 + 512)?.kind === 'duel');
+  // ...and NOT one column further. An unbounded lowest band answered for the
+  // whole quarter-million columns above it, so a retired mode's coordinates
+  // (Bedwars sat at x=65 536, exactly duel slot 104) generated colosseums.
+  check('a band claims NOTHING past its last slot',
+    arenaBandForX(DUEL_ARENA_BASE_X + DUEL_ARENA_SLOTS * DUEL_ARENA_SLOT_SPACING) === null &&
+    arenaBandForX(65_536) === null);
   check('open-world columns belong to no band',
     arenaBandForX(0) === null && arenaBandForX(4_096) === null &&
     arenaBandForX(ARENA_BAND_MIN_X - 16) === null);
@@ -1001,9 +1080,12 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   s.handle(3, { t: 'xform', x: 60, y: 70, z: 60, yaw: 0, pitch: 0 });
   // An ordinary world edit, and a second one at the arena's y/z but a world x.
   s.handle(3, { t: 'edit', x: 60, y: 70, z: 60, block: Block.OakPlanks });
-  const worldEdits = s.serialize().edits.length;
+  // Counted off the LIVE edit log. `serialize()` is a world-only view of it —
+  // an arena column never reaches the save file — so the sweep has to be
+  // measured against the map it actually operates on.
+  const worldEdits = s.edits.size;
   check('the control world edit landed, so the sweep has something to spare',
-    worldEdits === 1);
+    worldEdits === 1 && s.serialize().edits.length === 1);
 
   const made = s.handle(1, { t: 'duelCreate' })
     .find((o) => o.to === 1 && o.msg.t === 'duelLobby')?.msg;
@@ -1023,17 +1105,16 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   const py = arena.floor + DUEL_MAX_ELEVATION + 1;
   s.handle(1, { t: 'xform', x: px + 0.5, y: py, z: pz + 0.5, yaw: 0, pitch: 0 });
   s.handle(1, { t: 'edit', x: px, y: py, z: pz, block: Block.OakPlanks });
-  const withArenaEdit = s.serialize().edits.length;
   check('an in-match arena placement does land in the edit log',
-    withArenaEdit === worldEdits + 1);
+    s.edits.size === worldEdits + 1 && s.edits.get(`${px},${py},${pz}`) === Block.OakPlanks);
+  check('but it is never part of the world that gets saved',
+    s.serialize().edits.length === worldEdits);
 
   // Forfeit: player 1 leaves, which resets the arena footprint.
   const left = s.handle(1, { t: 'duelLeave' });
-  const after = s.serialize().edits;
-  check('the arena sweep clears exactly the arena AABB',
-    after.length === worldEdits);
+  check('the arena sweep clears exactly the arena AABB', s.edits.size === worldEdits);
   check('the sweep leaves an uninvolved world edit untouched',
-    after.some(([key, block]) => key === '60,70,60' && block === Block.OakPlanks));
+    s.edits.get('60,70,60') === Block.OakPlanks);
   check('the sweep is announced to arena members only, never to the world',
     left.every((o) => o.msg.t !== 'editBatch' || o.to === 1 || o.to === 2));
   check('no swept cell lies outside the arena footprint',

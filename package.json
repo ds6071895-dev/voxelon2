@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "worldgen-smoke": "esbuild scripts/worldgen_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/worldgen-smoke.cjs --log-level=error && node node_modules/.tmp/worldgen-smoke.cjs",
     "dev": "vite --host",
     "build": "tsc && vite build",
     "preview": "vite preview",
@@ -19,7 +20,8 @@
     "politics-smoke": "esbuild scripts/politics_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/politics-smoke.cjs --log-level=error && node node_modules/.tmp/politics-smoke.cjs",
     "minigame-smoke": "esbuild scripts/minigame_isolation_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/minigame-smoke.cjs --log-level=error && node node_modules/.tmp/minigame-smoke.cjs",
     "party-smoke": "esbuild scripts/partygames_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/party-smoke.cjs --log-level=error && node node_modules/.tmp/party-smoke.cjs",
-    "parkour-smoke": "esbuild scripts/parkour_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/parkour-smoke.cjs --log-level=error && node node_modules/.tmp/parkour-smoke.cjs"
+    "parkour-smoke": "esbuild scripts/parkour_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/parkour-smoke.cjs --log-level=error && node node_modules/.tmp/parkour-smoke.cjs",
+    "boss-visual-smoke": "esbuild scripts/boss_visual_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/boss-visual-smoke.cjs --log-level=error && node node_modules/.tmp/boss-visual-smoke.cjs"
   },
   "dependencies": {
     "three": "^0.165.0",

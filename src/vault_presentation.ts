@@ -388,6 +388,7 @@ export class VaultCinematic {
   private readonly title: HTMLDivElement;
   private readonly subtitle: HTMLDivElement;
   private active = false;
+  private reducedMotion = false;
   private elapsed = 0;
   private duration = 0;
   private modeValue: VaultCinematicMode = 'intro';
@@ -400,7 +401,7 @@ export class VaultCinematic {
     this.root.className = 'vault-cinematic';
     this.root.style.cssText =
       'position:absolute;inset:0;z-index:100;display:none;pointer-events:none;' +
-      'align-items:center;justify-content:center;flex-direction:column;overflow:hidden;' +
+      'align-items:center;justify-content:flex-end;flex-direction:column;overflow:hidden;padding:0 4vw 3vh;' +
       'border-style:solid;border-color:#020207;border-width:12vh 0;box-sizing:border-box;' +
       'background:radial-gradient(circle at 50% 50%,transparent 10%,rgba(0,0,0,.28) 60%,rgba(0,0,0,.7) 100%);';
     this.vignette = document.createElement('div');
@@ -410,7 +411,7 @@ export class VaultCinematic {
     this.sigil = document.createElement('div');
     this.sigil.className = 'mc-font';
     this.sigil.style.cssText =
-      'position:absolute;font-size:clamp(110px,24vw,290px);opacity:.08;filter:blur(.3px);' +
+      'position:absolute;top:8%;right:6%;font-size:clamp(80px,15vw,190px);opacity:.05;filter:blur(.3px);' +
       'text-shadow:0 0 42px currentColor;transform:scale(.75) rotate(-8deg);';
     this.eyebrow = document.createElement('div');
     this.eyebrow.className = 'mc-font';
@@ -420,7 +421,7 @@ export class VaultCinematic {
     this.title = document.createElement('div');
     this.title.className = 'mc-font';
     this.title.style.cssText =
-      'position:relative;font-size:clamp(28px,7vw,76px);letter-spacing:clamp(3px,1.1vw,12px);' +
+      'position:relative;font-size:clamp(26px,5vw,56px);letter-spacing:clamp(3px,1.1vw,12px);' +
       'line-height:1;text-align:center;text-shadow:0 3px #000,0 8px 28px #000,0 0 26px currentColor;' +
       'opacity:0;transform:scale(1.2);';
     this.subtitle = document.createElement('div');
@@ -488,6 +489,8 @@ export class VaultCinematic {
     if (p >= 1) this.finish();
   }
 
+  setReducedMotion(value: boolean): void { this.reducedMotion = value; }
+
   private renderFrame(progress: number): void {
     const snapshot = this.snapshotValue;
     if (!snapshot) return;
@@ -496,14 +499,14 @@ export class VaultCinematic {
     const fadeOut = 1 - smoothstep(0.84, 1, progress);
     const opacity = Math.min(fadeIn, fadeOut);
     const reveal = smoothstep(0.18, 0.48, progress);
-    const pulse = 1 + Math.sin(progress * Math.PI * 8) * 0.018 * (1 - progress);
+    const pulse = this.reducedMotion ? 1 : 1 + Math.sin(progress * Math.PI * 2) * 0.012;
     this.root.style.opacity = String(Math.max(0, opacity));
     this.vignette.style.opacity = String(0.55 + progress * 0.3);
-    this.sigil.style.opacity = String(0.03 + reveal * 0.1);
+    this.sigil.style.opacity = String(0.02 + reveal * 0.035);
     this.sigil.style.transform = `scale(${0.72 + reveal * 0.38}) rotate(${-8 + progress * 18}deg)`;
     this.eyebrow.style.opacity = String(smoothstep(0.12, 0.32, progress) * fadeOut);
     this.title.style.opacity = String(reveal * fadeOut);
-    this.title.style.transform = `scale(${(1.18 - reveal * 0.18) * pulse})`;
+    this.title.style.transform = `scale(${this.reducedMotion ? 1 : (1.06 - reveal * 0.06) * pulse})`;
     this.subtitle.style.opacity = String(smoothstep(0.34, 0.58, progress) * fadeOut);
     this.subtitle.style.transform = `translateY(${(1 - reveal) * 12}px)`;
 
