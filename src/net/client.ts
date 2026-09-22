@@ -6,7 +6,8 @@
 
 import { TransformBuffer, netNow } from '../interp';
 import type { ItemStack } from '../items';
-import type { MachineState, UpgradeAxis } from '../machines';
+import type { MachineAct, MachineState, UpgradeAxis } from '../machines';
+import type { EffectKind, TrapFxWhat, TrapKind, TrapState } from '../traps';
 import type { TurretState, TurretAxis } from '../turrets';
 import {
   ClientMsg, DuelLeaderboardEntry, GameMode, ItemEntityInfo, PlayerInfo, SERVER_PORT, ServerMsg,
@@ -29,7 +30,6 @@ import type {
 } from '../partygames';
 import type { DuelFlair, DuelPublicProfile } from '../duels_progression';
 import type { FactionPublic, Notification } from './protocol';
-import type { PoliticsState } from '../politics';
 
 export interface Remote {
   info: PlayerInfo;
@@ -165,7 +165,7 @@ export class NetClient {
    *  this is how server-side REGEN reaches the client (hurt only fires on a
    *  hit, so without this the HUD froze between hits then jumped on the next). */
   onSelfHealth?: (health: number, dead: boolean) => void;
-  onKillfeed?: (killer: string, victim: string) => void;
+  onKillfeed?: (killer: string, victim: string, how?: string) => void;
   /** The LOCAL player's gamemode changed (admin command). */
   onGamemode?: (mode: GameMode) => void;
   /** The server teleported the local player (admin command). */
@@ -188,6 +188,19 @@ export class NetClient {
   onChest?: (x: number, y: number, z: number, slots: (ItemStack | null)[]) => void;
   /** Authoritative machine state (open reply / config / upgrade / collect). */
   onMachine?: (x: number, y: number, z: number, state: MachineState) => void;
+  /** A rig event (jam, gusher, well fire…) for FX + notices. */
+  onMachineFx?: (x: number, y: number, z: number, fx: string) => void;
+  /** Trap state sync (null = removed). */
+  onTrap?: (x: number, y: number, z: number, state: TrapState | null) => void;
+  /** Full trap list (welcome). */
+  onTraps?: (traps: [string, TrapState][]) => void;
+  /** A trap fired / armed / reset (animation + sound). */
+  onTrapFx?: (x: number, y: number, z: number, kind: TrapKind, what: TrapFxWhat,
+    tx?: number, ty?: number, tz?: number) => void;
+  /** A status effect landed on us. */
+  onEffect?: (kind: EffectKind, seconds: number) => void;
+  /** One of our (or our faction's) alarm bells rang. */
+  onAlarm?: (x: number, y: number, z: number, owner: string, intruder: string) => void;
   /** Authoritative turret state (open reply / upgrade / load / fire refresh). */
   onTurret?: (x: number, y: number, z: number, state: TurretState) => void;
   /** A turret fired (render a tracer + aim the barrel). */
@@ -232,23 +245,15 @@ export class NetClient {
   ) => void;
   /** Private confirmation of YOUR secret faction switch (Phase 7). */
   onFactionSwitched?: (faction: number, remaining: number) => void;
-  // --- FACTION GOVERNMENT ----------------------------------------------------
-  /** The whole politics state. `treasury` is only present for your own faction. */
-  onPolitics?: (state: PoliticsState, factions: FactionPublic[],
-    treasury?: (ItemStack | null)[]) => void;
+  // --- FACTIONS ---------------------------------------------------------------
+  /** The public faction dossiers the pledge screen reads. */
+  onFactions?: (factions: FactionPublic[]) => void;
   /** Your allegiance landed — you are a citizen of `faction` from now on. */
   onPledged?: (faction: number) => void;
-  /** A governance action was refused. */
+  /** A pledge was refused. */
   onGovErr?: (reason: string) => void;
   /** One entry for the notifications inbox. */
   onNotify?: (notif: Notification) => void;
-  /** Somebody is in a treasury — drives the alarm horn for its defenders. */
-  onTreasuryRaided?: (faction: number, by: string, stacks: number) => void;
-  /** Your hoard's live contents, in answer to `sendTreasuryOpen` — the president
-   *  standing at their own flag. Opens the chest panel on it. */
-  onTreasury?: (faction: number, slots: (ItemStack | null)[]) => void;
-  /** Everything the pledge screen and the inbox need, straight off `welcome`. */
-  onGovWelcome?: (inbox: Notification[], kitClaimed: boolean) => void;
   /** Play a gadget visual effect (frag/oil blast, smoke cloud) at a point. */
   onGadgetFx?: (kind: string, x: number, y: number, z: number) => void;
   /** A player is disguised as `faction` until `until` (server worldTime). */
@@ -352,6 +357,8 @@ export class NetClient {
         }
         this.netItems.clear();
         for (const it of msg.items) this.netItems.set(it.eid, it);
+        for (const rig of msg.machines ?? []) this.onMachine?.(rig.x, rig.y, rig.z, rig.state);
+        this.onTraps?.(msg.traps ?? []);
         for (const tr of msg.turrets) this.onTurret?.(tr.x, tr.y, tr.z, tr.state);
         this.onSeason?.(msg.season.number, msg.season.timeLeft);
         this.onWar?.(msg.war.active, msg.war.timeLeft, msg.war.nextIn,
@@ -359,8 +366,7 @@ export class NetClient {
         this.onFlags?.(msg.flags.breakable, msg.flags.flags);
         this.onWarfare?.(msg.warfare.xp, msg.warfare.nodes);
         this.onHelis?.(msg.helis, []);
-        this.onPolitics?.(msg.politics, msg.factions, msg.treasury);
-        this.onGovWelcome?.(msg.inbox ?? [], msg.kitClaimed === true);
+        this.onFactions?.(msg.factions ?? []);
         this.onDuelProfile?.(msg.duelProfile, msg.duelLeaderboard);
         this.onWorldTime?.(msg.worldTime);
         const me = msg.players.find((p) => p.id === this.myId);
@@ -462,7 +468,7 @@ export class NetClient {
         this.onRespawned?.(msg.x, msg.y, msg.z, msg.health);
         break;
       case 'killfeed':
-        this.onKillfeed?.(msg.killer, msg.victim);
+        this.onKillfeed?.(msg.killer, msg.victim, msg.how);
         break;
       case 'itemspawn':
         this.netItems.set(msg.item.eid, msg.item);
@@ -484,6 +490,21 @@ export class NetClient {
         break;
       case 'machine':
         this.onMachine?.(msg.x, msg.y, msg.z, msg.state);
+        break;
+      case 'machineFx':
+        this.onMachineFx?.(msg.x, msg.y, msg.z, msg.fx);
+        break;
+      case 'trap':
+        this.onTrap?.(msg.x, msg.y, msg.z, msg.state);
+        break;
+      case 'trapFx':
+        this.onTrapFx?.(msg.x, msg.y, msg.z, msg.kind, msg.what, msg.tx, msg.ty, msg.tz);
+        break;
+      case 'effect':
+        this.onEffect?.(msg.kind, msg.seconds);
+        break;
+      case 'alarm':
+        this.onAlarm?.(msg.x, msg.y, msg.z, msg.owner, msg.intruder);
         break;
       case 'turret':
         this.onTurret?.(msg.x, msg.y, msg.z, msg.state);
@@ -543,8 +564,8 @@ export class NetClient {
       case 'factionSwitched':
         this.onFactionSwitched?.(msg.faction, msg.remaining);
         break;
-      case 'politics':
-        this.onPolitics?.(msg.state, msg.factions, msg.treasury);
+      case 'factions':
+        this.onFactions?.(msg.factions);
         break;
       case 'pledged':
         this.onPledged?.(msg.faction);
@@ -554,12 +575,6 @@ export class NetClient {
         break;
       case 'notify':
         this.onNotify?.(msg.notif);
-        break;
-      case 'treasuryRaided':
-        this.onTreasuryRaided?.(msg.faction, msg.by, msg.stacks);
-        break;
-      case 'treasury':
-        this.onTreasury?.(msg.faction, msg.slots);
         break;
       case 'gadgetFx':
         this.onGadgetFx?.(msg.kind, msg.x, msg.y, msg.z);
@@ -851,8 +866,18 @@ export class NetClient {
     if (this.connected) this.raw({ t: 'partyShoot', dx, dy, dz, power });
   }
 
-  sendEdit(x: number, y: number, z: number, block: number): void {
-    if (this.connected) this.raw({ t: 'edit', x, y, z, block });
+  sendEdit(x: number, y: number, z: number, block: number, facing?: number): void {
+    if (!this.connected) return;
+    this.raw(facing === undefined ? { t: 'edit', x, y, z, block } : { t: 'edit', x, y, z, block, f: facing });
+  }
+  sendTrapConfig(x: number, y: number, z: number, channel: number, interval?: number): void {
+    if (this.connected) this.raw({ t: 'trapConfig', x, y, z, channel, interval });
+  }
+  sendTrapFuel(x: number, y: number, z: number, count: number): void {
+    if (this.connected) this.raw({ t: 'trapFuel', x, y, z, count });
+  }
+  sendTrapDefuse(x: number, y: number, z: number): void {
+    if (this.connected) this.raw({ t: 'trapDefuse', x, y, z });
   }
   /** Pull a lever (the server flips it + every linked trap). */
   /** Swing at the flag you're standing next to (the server picks which). */
@@ -889,57 +914,20 @@ export class NetClient {
   /**
    * Hand stacks to the server as world item entities.
    *
-   * `reason` tells the server whether this is a HARVEST (taxable — a block you
-   * just broke) or a player emptying their own pockets (never taxed).
-   *
    * Returns whether the message actually reached the wire; see `raw`. A caller
    * that has ALREADY removed the items locally must check it, or a send that
    * lands in the closing-socket window deletes them instead of dropping them.
    */
   sendDrop(
-    items: { id: number; count: number }[], x: number, y: number, z: number,
-    reason: 'harvest' | 'manual' = 'manual'
+    items: { id: number; count: number }[], x: number, y: number, z: number
   ): boolean {
     if (!items.length) return true;
-    return this.connected && this.raw({ t: 'drop', items, x, y, z, reason });
+    return this.connected && this.raw({ t: 'drop', items, x, y, z });
   }
 
-  // --- FACTION GOVERNMENT ------------------------------------------------------
+  // --- FACTIONS -----------------------------------------------------------------
   sendPledge(faction: number): void {
     if (this.connected) this.raw({ t: 'pledgeFaction', faction });
-  }
-  sendFoundParty(name: string, slogan: string, promises: number[]): void {
-    if (this.connected) this.raw({ t: 'foundParty', name, slogan, promises });
-  }
-  sendDisbandParty(): void { if (this.connected) this.raw({ t: 'disbandParty' }); }
-  sendVote(partyId: string): void {
-    if (this.connected) this.raw({ t: 'castVote', partyId });
-  }
-  sendGovBroadcast(text: string): void {
-    if (this.connected) this.raw({ t: 'govBroadcast', text });
-  }
-  sendGovTax(rate: number): void {
-    if (this.connected) this.raw({ t: 'govTax', rate });
-  }
-  sendSetKit(slots: (ItemStack | null)[]): void {
-    if (this.connected) this.raw({ t: 'govSetKit', slots });
-  }
-  /** Fund `count` kits. The bill has ALREADY left this client's inventory by the
-   *  time this is sent — the president's pockets are the only purse. */
-  sendFundKits(count: number): void {
-    if (this.connected) this.raw({ t: 'govFundKits', count, source: 'inventory' });
-  }
-  sendClaimKit(): void { if (this.connected) this.raw({ t: 'claimKit' }); }
-  sendTreasuryRaid(faction: number): void {
-    if (this.connected) this.raw({ t: 'treasuryRaid', faction });
-  }
-  /** Ask for your own hoard's contents (president, at the flag). */
-  sendTreasuryOpen(faction: number): void {
-    if (this.connected) this.raw({ t: 'treasuryOpen', faction });
-  }
-  /** Push back the one page the chest panel is holding. */
-  sendTreasurySet(faction: number, page: number, slots: (ItemStack | null)[]): void {
-    if (this.connected) this.raw({ t: 'treasurySet', faction, page, slots });
   }
   sendPickup(eid: number): void {
     if (this.connected) this.raw({ t: 'pickup', eid });
@@ -974,6 +962,9 @@ export class NetClient {
   sendMachineClaim(x: number, y: number, z: number): void {
     if (this.connected) this.raw({ t: 'machineClaim', x, y, z });
   }
+  sendMachineAct(x: number, y: number, z: number, act: MachineAct, n: number, item: number): void {
+    if (this.connected) this.raw({ t: 'machineAct', x, y, z, act, n, item });
+  }
   sendMachineMove(x: number, y: number, z: number, tx: number, ty: number, tz: number): void {
     if (this.connected) this.raw({ t: 'machineMove', x, y, z, tx, ty, tz });
   }
@@ -1000,8 +991,14 @@ export class NetClient {
   sendTurretClaim(x: number, y: number, z: number): void {
     if (this.connected) this.raw({ t: 'turretClaim', x, y, z });
   }
+  sendTurretMove(x: number, y: number, z: number, tx: number, ty: number, tz: number): void {
+    if (this.connected) this.raw({ t: 'turretMove', x, y, z, tx, ty, tz });
+  }
   sendTurretLoad(x: number, y: number, z: number, item: number, count: number): void {
     if (this.connected) this.raw({ t: 'turretLoad', x, y, z, item, count });
+  }
+  sendTurretMobShot(x: number, y: number, z: number, tx: number, ty: number, tz: number): void {
+    if (this.connected) this.raw({ t: 'turretMobShot', x, y, z, tx, ty, tz });
   }
   sendTurretHit(x: number, y: number, z: number, amount: number): void {
     if (this.connected) this.raw({ t: 'turretHit', x, y, z, amount });

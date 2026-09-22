@@ -196,11 +196,12 @@ function progressionGuideSections(): FieldGuideSection[] {
     {
       id: 'automation', title: '5. Automation', icon: icon('machine'),
       summary: 'Deploy Autominers and Oil Derricks before endgame demand overwhelms manual gathering.', entries: [
-        entry('autominer-route', 'Autominers replace solid-resource grinding', ['autominer', 'filter', 'production', 'storage', 'cobalt'],
-          steps(['Secure a site near the base but away from the flag room.', 'Place and claim the Autominer.', 'Configure a filter appropriate to its level.', 'Add lighting, walls, defender access, and a nearby supply chest.', 'Collect output before storage caps production.', 'Upgrade production and storage only after the site is defensible.'])),
-        entry('oil-derrick-route', 'Oil Derricks power the late game', ['oil derrick', 'oil', 'fuel', 'turret', 'helicopter'],
-          `<p>Oil fuels advanced faction infrastructure, especially turrets and aviation. Treat a Derrick as strategic hardware, not an exposed crafting station.</p>` +
-          steps(['Claim a defensible Derrick site.', 'Build a guarded route back to the faction.', 'Split oil between more than one protected cache.', 'Reserve fuel for defenses and aircraft before optional spending.', 'Check production before vault expeditions and raids.']) +
+        entry('autominer-route', 'Autominers: the Deep Bore', ['autominer', 'bore', 'depth', 'fuel', 'overdrive', 'drill bit', 'filter', 'titanium'],
+          `<p>An Autominer sinks a bore under itself. The deeper it goes, the richer the spoil: iron from 15 m, redstone and gold from about 40 m, diamond from 70 m and titanium past 96 m. Rank and drill bit both cap how deep it can go.</p>` +
+          steps(['Check the Seismic Survey on its panel and place it on the richest ground you can defend. It is yours from the moment you place it.', 'Load coal or oil: fuelled rigs run at full speed, dry ones trickle at 25%. An Oil Derrick of yours within 12 blocks pipes crude in automatically.', 'Craft Iron, Diamond or Titanium drill bits to bore deeper and faster; bits wear out.', 'Flip OVERDRIVE for double output, but watch the heat. At 100% the rig jams; pour Packed Snow coolant or vent it (costs hull).', 'Focus one or two ores for a yield bonus once the bore reaches them.', 'The vein thins as you work it. When the survey shows better ground, relocate: upgrades travel, the bore restarts.'])),
+        entry('oil-derrick-route', 'Oil Derricks: the Wildcat Well', ['oil derrick', 'oil', 'gusher', 'pressure', 'frac sand', 'refinery', 'fuel', 'turret', 'helicopter'],
+          `<p>A Derrick drills a well for about a minute, then strikes. Rich fields often strike a GUSHER: a burst of free oil and extra flow, but the well is uncapped and an explosion nearby sets it ablaze. Output follows reservoir pressure, which falls as it pumps.</p>` +
+          steps(['Survey for strong oil (desert and ocean fields, oil shale seeps) and place the Derrick.', 'On a gusher, cap the wellhead with iron as soon as the rush is banked.', 'If it catches fire, smother it with sand before it burns the rig down.', 'When pressure runs low, inject frac sand to bring it back.', 'Use the refinery selector to make Tar or Fuel Tanks on site.', 'Keep an Autominer within 12 blocks and the Derrick fuels it for you.']) +
           warning('Distribute critical assets', 'Never cluster the flag, all machines, every oil barrel, and all storage into one raid or blast target.')),
         entry('automation-ready', 'Stage 5 readiness check', ['machine defense', 'ready', 'titanium'],
           ready(['Claimed Autominer', 'Claimed Oil Derrick', 'Protected collection routes', 'Distributed resource and fuel caches', 'Replacement ammunition and repair stock'],
@@ -359,9 +360,12 @@ export function fieldGuideSections(): FieldGuideSection[] {
       id: 'defenses', title: 'Building & Defenses', icon: icon('building'), summary: 'Layered bases, traps, and defensive infrastructure.', entries: [
         entry('building-principles', 'Base design principles', ['building', 'walls', 'storage', 'outpost'],
           list(['Use layered walls rather than one monolithic wall.', 'Keep storage and industry away from the flag room.', 'Create controlled firing angles and more than one exit.', 'Use height for observation and protect machines.', 'Maintain safe respawn, recovery, and supply routes.'])),
-        entry('traps', 'Trap combinations', ['bear trap', 'tar', 'barbed wire', 'spike', 'landmine', 'lever'],
-          table(['Tool', 'Best use'], [['Bear trap', 'Hold attackers in chokepoints'], ['Tar', 'Slow targets in firing lanes'], ['Barbed wire', 'Shape perimeter movement'], ['Spike trap', 'Damage corridors and drop zones'], ['Landmine', 'Burst damage after commitment'], ['Barricade', 'Emergency cover and movement denial'], ['Floodlight', 'Reveal approaches and protect roads'], ['Lever traps', 'Trigger fall or wall traps at the right moment']]) +
-          tip('Combination', 'Scout enters → defender waits → lever activates → route closes or damage triggers.')),
+        entry('traps', 'Trapcraft: traps, triggers and wiring', ['trap', 'bear trap', 'tar', 'barbed wire', 'spike', 'landmine', 'lever', 'claymore', 'tripwire', 'channel', 'defuse'],
+          `<p>Every trap you place is yours: it never fires on you or your allies, and hidden ones are invisible to enemies. Right-click a trap you own to pick its wiring CHANNEL (16 colours). Triggers fire every one of your receivers on the same channel within 24 blocks.</p>` +
+          table(['Trigger', 'Fires when'], [['Pressure Plate', 'An enemy steps on it (hidden)'], ['Tripwire Laser', 'An enemy breaks its beam (up to 8 blocks)'], ['Motion Sensor', 'An enemy comes within 5 blocks'], ['Trap Timer', 'Every 2-15 seconds'], ['Lever', 'Pulled: holds its channel ON until pulled back']]) +
+          table(['Receiver / trap', 'Effect'], [['Spike Trap', 'Hidden spikes spring up: heavy damage and bleeding'], ['Landmine', 'Explodes under an enemy, or remotely on its channel'], ['Bear Trap', 'Pins an enemy until they mash free'], ['Shock Plate', 'Stuns: no moving or aiming'], ['Claymore', 'Directional shrapnel blast'], ['Flame Jet', 'Burns oil to torch the lane in front'], ['Dart / Net Launcher', 'Poison darts, or a net that stops movement and fighting'], ['Fall / Wall Trap', 'Floor drops away or a wall springs up for a few seconds'], ['Alarm Bell', 'Rings and alerts you and your faction'], ['Tar / Barbed Wire', 'Passive: slow, no jumping, bleeding']]) +
+          tip('Combination', 'Tripwire across the doorway (Red) → Wall Trap seals the exit behind them (Red) → Flame Jet and Dart Launcher cover the room (Red). One broken beam springs the whole kill box.') +
+          warning('Raiding traps', 'Sneak to spot hidden traps within 3 blocks, or carry a Trap Detector (10 blocks). Sneak and hold USE on a revealed trap for 2.5 seconds to defuse it. Mining an armed trap instead sets it off in your face.')),
       ],
     },
     {
@@ -401,7 +405,7 @@ export function fieldGuideSections(): FieldGuideSection[] {
             Item.GreaterRuneOfIron, Item.GreaterRuneOfSwiftness, Item.GreaterRuneOfFortune,
             Item.GreaterRuneOfFocus, Item.GreaterRuneOfPower,
           ])) +
-          tip('Why Iron is not simply "+3 armor"', 'A full titanium set is already 20 armor points — the hard cap, where percentage armor stops doing anything at all. The Greater Rune of Iron instead soaks a flat point of damage off every single hit, which nothing else in the game can do, so it keeps working on a maxed-out set.') +
+          tip('Why Iron is not simply "+3 armor"', 'A full titanium set is already 20 armor points — the hard cap, where percentage armor stops doing anything at all. The Greater Rune of Iron instead soaks a flat point of damage off every hit — never more than half of it — which nothing else in the game can do, so it keeps working on a maxed-out set. Rune armor that lands past the cap is not wasted either: every 2 extra points become 1 toughness.') +
           warning('A hit always hurts', 'Toughness can never make you immune: any hit that connects still costs at least 1 health, no matter how many runes you stack.')),
         entry('boss-armor', 'Lair hazards cut through armor', ['armor', 'pierce', 'mitigation', 'difficulty', 'tier', 'why did that hurt'],
           `<p>Ordinary damage — a mob, a bullet, a fall — is reduced by <strong>4% per armor point</strong>, up to 80% at 20 points. A vault boss is the one thing in the world that does not respect all of it. Every hazard a lair throws at you <strong>ignores part of your armor</strong>, and the deeper the vault the more it ignores.</p>` +
@@ -471,7 +475,7 @@ export function fieldGuideSections(): FieldGuideSection[] {
     {
       id: 'machines', title: 'Machines & Automation', icon: icon('machine'), summary: 'Production, ownership, fuel, ammunition, upgrades, and safety.', entries: [
         entry('machine-workflow', 'Recommended machine workflow', ['autominer', 'oil derrick', 'turret', 'machine', 'automation'],
-          steps(['Secure the area.', 'Place and claim the machine.', 'Configure its filter or loadout.', 'Protect it with walls and lighting.', 'Check storage, fuel, and ammunition regularly.', 'Upgrade only after the site is defensible.']) +
+          steps(['Secure the area and read the Seismic Survey.', 'Place the machine: it belongs to you and your faction from the start.', 'Fuel it, fit a drill bit, and set its ore filter or refinery output.', 'Protect it with walls, lighting and traps; enemies can siphon a quarter of the buffer, and hack it once its hull drops below 25%.', 'Watch heat, fuel, vein and pressure gauges, and collect before the buffer fills.', 'Upgrade only after the site is defensible.']) +
           tip('Separation', 'Do not cluster all machines, storage, and the faction flag into one easy raid target.')),
       ],
     },

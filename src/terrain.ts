@@ -593,7 +593,7 @@ export class Terrain {
           if (y > 4 && caveSlices.some(s => y > s.floor && y <= s.ceiling)) continue;
 
           // Nothing hollows out the ground under a monument: a cave mouth in
-          // the plaza floor would put the treasury over a hole.
+          // the plaza floor would put the flag pole over a hole.
           if (id !== Block.Bedrock && y > 4 && y < h - 5 &&
               !caveSlices.some(s => y >= s.floor - 3 && y <= s.ceiling + 3) &&
               !(paving !== 0 && y > h - PLAZA_FOUNDATION - 4)) {

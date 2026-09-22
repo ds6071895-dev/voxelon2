@@ -1,10 +1,8 @@
 // FLAG PLAZA — the levelled monument ground under every faction's flag.
 //
-// The flag pole and the treasury ring (flags.ts / treasury.ts) stand at ONE
-// fixed spot per faction, and until now they stood on whatever the heightmap
-// happened to drop there: a lakeside step for Crimson, a four-block cliff
-// through the pedestal ring for Azure, ice spikes growing out of the pad. Half
-// the hoard floated, the other half was buried in a hillside.
+// The flag pole (flags.ts) stands at ONE fixed spot per faction, and until now
+// it stood on whatever the heightmap happened to drop there: a lakeside step
+// for Crimson, a four-block cliff for Azure, ice spikes growing out of the pad.
 //
 // So the terrain gives the monument a site. Every flag home gets a flat, paved
 // disc at ONE pad height with a graded rim back into the natural landscape, and
@@ -12,8 +10,8 @@
 // ravine, no structure. The site is part of the HEIGHTMAP, which is what makes
 // it work everywhere at once: the surface fill, the tree/decoration passes, the
 // server's spawn search and the client's model ground probes all read the same
-// `Terrain.height()`, so the pole, the strongbox and all eight pedestals land
-// on the same level by construction rather than by luck.
+// `Terrain.height()`, so the pole and everything around it land on the same
+// level by construction rather than by luck.
 //
 // PURE + transport-agnostic (no THREE/DOM/Node): the server generates from it,
 // every client generates from it, and they agree — same discipline as
@@ -23,11 +21,11 @@ import { Block } from './blocks';
 import { flagHome } from './flags';
 import { hash2 } from './noise';
 import { FACTIONS } from './teams';
-import { TREASURY_RING_RADIUS } from './treasury';
 
-/** Radius (blocks) of the fully flat, paved court around a flag pole. Covers
- *  the treasury ring (3.4) and its reach (5) several times over, so the whole
- *  site you can walk up to and fight over is one level. */
+/** Radius (blocks) of the decorative cobble ring paved around each pole. */
+const PLAZA_RING_RADIUS = 3.4;
+/** Radius (blocks) of the fully flat, paved court around a flag pole, so the
+ *  whole site you can walk up to and fight over is one level. */
 export const PLAZA_FLAT = 12;
 /** Width of the graded rim outside the court: the pad height ramps back to the
  *  natural surface over this many blocks, so a plaza never ends in a cliff. */
@@ -94,14 +92,14 @@ export const PLAZA_FOUNDATION = 5;
 /**
  * The paving block for a court column at distance `d` from the pole. Three
  * deliberate bands so the site reads as BUILT from the ground: a stone apron
- * under the monument's footing, a cobble ring exactly where the treasury
- * pedestals stand, and a cobble kerb at the outer edge. Everything between is
+ * under the monument's footing, a cobble ring around the pole, and a cobble
+ * kerb at the outer edge. Everything between is
  * stone with a seeded scatter of cobble so a 24-block disc doesn't read as one
  * flat grey sheet.
  */
 export function plazaSurface(seed: number, x: number, z: number, d: number): number {
   if (d <= 2.0) return Block.Stone;                                   // pole apron
-  if (Math.abs(d - TREASURY_RING_RADIUS) <= 0.9) return Block.Cobblestone; // hoard ring
+  if (Math.abs(d - PLAZA_RING_RADIUS) <= 0.9) return Block.Cobblestone; // ring
   if (d >= PLAZA_FLAT - 1.5) return Block.Cobblestone;                // outer kerb
   return hash2(seed ^ 0x9143, x, z) < 0.12 ? Block.Cobblestone : Block.Stone;
 }

@@ -3,7 +3,8 @@
 // the Node server, so it must stay free of DOM and Node APIs.
 
 import type { ItemStack } from '../items';
-import type { MachineState, UpgradeAxis } from '../machines';
+import type { MachineAct, MachineState, UpgradeAxis } from '../machines';
+import type { EffectKind, TrapFxWhat, TrapKind, TrapState } from '../traps';
 import type { TurretState, TurretAxis } from '../turrets';
 import type { GadgetKind } from '../gadgets';
 import type { Cosmetics } from '../character';
@@ -20,12 +21,10 @@ import type {
   PartyArenaBounds, PartyLobbySnapshot, PartyMode, PartyResult, PartySubBounds,
 } from '../partygames';
 import type { DuelFlair, DuelPublicProfile } from '../duels_progression';
-import type { PoliticsState } from '../politics';
 
 /** One entry in a player's notification inbox (notifications_ui.ts). Kinds drive
  *  the icon and the accent, nothing else. */
-export type NotificationKind =
-  'broadcast' | 'election' | 'raid' | 'tax' | 'kit' | 'system';
+export type NotificationKind = 'system';
 
 export interface Notification {
   id: string;
@@ -39,38 +38,19 @@ export interface Notification {
 /**
  * Everything the allegiance screen needs to show about a faction you have NOT
  * joined. Deliberately a separate, narrow shape rather than a slice of the
- * server's state: a side you are only inspecting gets its president, its roster
- * and its headline numbers, and nothing that would leak what it is holding.
+ * server's state: a side you are only inspecting gets its roster and its
+ * headcount, and nothing else.
  */
 export interface FactionPublic {
   faction: number;
   /** Roster sample, capped — a long server must not put 5,000 names on the wire. */
   members: string[];
   memberCount: number;
-  taxRate: number;
-  kitStock: number;
-  /** COUNT only. The treasury's contents are for its own members. */
-  treasuryCount: number;
   /**
-   * Live citizens whose looks the server actually knows (they are online), so a
-   * faction with a VACANT SEAT still has real people standing on its card
-   * instead of an empty plinth. Capped at FACTION_FACES_LIMIT. Anybody in
-   * `members` who is not in here is drawn from `defaultCosmetics(skinSeed(name))`
-   * — the same avatar they wear in the world when the client has never seen them.
+   * Live citizens whose looks the server actually knows (they are online), drawn
+   * standing on the faction's card. Capped at FACTION_FACES_LIMIT.
    */
   faces?: { username: string; cosmetics?: Cosmetics }[];
-  /** The sitting president, absent while the seat is vacant. */
-  president?: {
-    username: string;
-    partyName: string;
-    slogan: string;
-    /** Indices into PRESET_PROMISES (politics.ts). */
-    promises: number[];
-    cosmetics?: Cosmetics;
-    /** What they are actually carrying — rendered as hoverable item chips. */
-    held?: ItemStack | null;
-    armor?: (ItemStack | null)[];
-  };
 }
 
 /** Roster names sent per faction on the pledge screen. */
@@ -121,6 +101,9 @@ export function bloodlustMult(fightSeconds: number): number {
   return Math.min(BLOODLUST_CAP, 1 + steps * BLOODLUST_PER_STEP);
 }
 export const EDIT_RANGE = 7;       // max distance a player may edit a block
+/** Farthest (horizontal blocks) a machine or turret may be carried when
+ *  relocated. You stand at the NEW site; the old one can be this far behind. */
+export const RELOCATE_RANGE = 320;
 // TPA (teleport requests, DonutSMP-style): the target must HOLD the accept key
 // for TPA_HOLD seconds (client-side — moving or taking damage resets the hold);
 // a pending request expires server-side after TPA_EXPIRE seconds.
@@ -222,9 +205,13 @@ export const TOUGHNESS_CAP = 4;
  *  ungeared player is a tickle to the geared one. Nothing in the open world
  *  uses it (default 0 = the old function, bit for bit); vault-boss hazards do,
  *  which is what lets one authored damage ladder stay honest across the whole
- *  gear curve. A pierced hit also caps the flat toughness soak at half the
- *  hit, so four Greater Runes of Iron stay a strong upgrade instead of
- *  flattening every attack in a lair to the 1 HP minimum. */
+ *  gear curve.
+ *
+ *  Toughness never soaks more than HALF of what got through armor, on every
+ *  hit. It used to be a flat 4 outside lairs, and since most gun hits land at
+ *  3-5 damage (and a titanium sniper/rocket hit at 4), a full Greater Iron set
+ *  shrank every weapon in the game to the 1 HP minimum — 20 sniper shots to
+ *  kill. Capped at half, a maxed set roughly doubles time-to-kill instead. */
 export function mitigate(
   amount: number, armorPoints: number, toughness = 0, pierce = 0,
 ): number {
@@ -232,8 +219,7 @@ export function mitigate(
   const eff = Math.max(0, Math.min(ARMOR_POINT_CAP, armorPoints)) * (1 - bite);
   const base = Math.max(0, Math.round(amount * (1 - eff * 0.04)));
   if (!(toughness > 0) || base <= 0) return base;
-  const soak = Math.min(TOUGHNESS_CAP, toughness,
-    bite > 0 ? Math.floor(base / 2) : Infinity);
+  const soak = Math.min(TOUGHNESS_CAP, Math.floor(toughness), Math.floor(base / 2));
   return Math.max(1, base - soak);
 }
 
@@ -299,12 +285,17 @@ export type ClientMsg =
       gliding?: boolean; boating?: boolean; seated?: boolean;
       sneaking?: boolean; held?: number; armor?: number[]; swing?: number;
       aiming?: boolean; reloading?: boolean }
-  | { t: 'edit'; x: number; y: number; z: number; block: number }
-  // Pull a Lever: the server recomputes the flips (lever + linked traps within
-  // LEVER_RADIUS, traps.ts) over its edit log and broadcasts them as edits —
-  // linked traps can sit beyond the puller's own EDIT_RANGE, so this can't be
-  // expressed as plain client edits.
+  // `f` = facing for directional traps (traps.ts FACING_DIRS), ignored otherwise.
+  | { t: 'edit'; x: number; y: number; z: number; block: number; f?: number }
+  // Pull a Lever: the server toggles its latch and pulses its wiring channel
+  // (traps.ts) — linked receivers can sit beyond the puller's own EDIT_RANGE,
+  // so this can't be expressed as plain client edits.
   | { t: 'lever'; x: number; y: number; z: number }
+  // Trapcraft: set a trap's channel/timer (owner/allies), fuel a flame jet, or
+  // defuse a hostile trap (sneaking, adjacent) and pocket it.
+  | { t: 'trapConfig'; x: number; y: number; z: number; channel: number; interval?: number }
+  | { t: 'trapFuel'; x: number; y: number; z: number; count: number }
+  | { t: 'trapDefuse'; x: number; y: number; z: number }
   // FLAGS (capture the flag): one swing at the flag pad you're standing next
   // to. The server decides WHICH flag from your position + faction, so a
   // forged hit can never reach across the map or touch your own flag.
@@ -320,13 +311,7 @@ export type ClientMsg =
   | { t: 'command'; text: string }
   | { t: 'selfhurt'; amount: number }   // fall/drown damage, applied by server
   | { t: 'respawn' }
-  // `reason` separates a HARVEST (a block you just broke, a machine spilling)
-  // from a player emptying their own inventory. Only a harvest is taxed, so
-  // dropping and re-collecting your own stack can never be levied twice. Same
-  // trust model as the client-reported armor points: a client could mislabel
-  // one, and the cost of that is a dodged tax, not a duped item.
-  | { t: 'drop'; items: { id: number; count: number }[]; x: number; y: number; z: number;
-      reason?: 'harvest' | 'manual' }
+  | { t: 'drop'; items: { id: number; count: number }[]; x: number; y: number; z: number }
   | { t: 'pickup'; eid: number }
   | { t: 'chestOpen'; x: number; y: number; z: number }
   | { t: 'chestSet'; x: number; y: number; z: number; slots: (ItemStack | null)[] }
@@ -351,14 +336,22 @@ export type ClientMsg =
   | { t: 'machineClaim'; x: number; y: number; z: number }
   // Relocate a placed machine (you can't break it, only MOVE it): the server
   // clears the old footprint and rebuilds it at the target, preserving level/
-  // storage/filter/stored/owner. Both ends must be within reach of the player.
+  // storage/filter/stored/owner. The player must be friendly to the machine and
+  // within reach of the destination, which may be up to RELOCATE_RANGE away.
   | { t: 'machineMove'; x: number; y: number; z: number; tx: number; ty: number; tz: number }
+  // Hands-on rig operation (fuel/bit/overdrive/coolant/vent/cap/smother/inject/
+  // refine). Item costs are paid client-side, like upgrades.
+  | { t: 'machineAct'; x: number; y: number; z: number; act: MachineAct; n: number; item: number }
   // Turrets (warfare M14): block-entities (placement is a normal edit).
   | { t: 'turretOpen'; x: number; y: number; z: number }
   | { t: 'turretUpgrade'; x: number; y: number; z: number; axis: TurretAxis }
   | { t: 'turretClaim'; x: number; y: number; z: number }
+  // Relocate a friendly turret (same rules as machineMove); state carries over.
+  | { t: 'turretMove'; x: number; y: number; z: number; tx: number; ty: number; tz: number }
   | { t: 'turretHit'; x: number; y: number; z: number; amount: number } // sabotage
   | { t: 'turretLoad'; x: number; y: number; z: number; item: number; count: number }
+  /** Fire a friendly turret at one of the sender's client-side hostile mobs. */
+  | { t: 'turretMobShot'; x: number; y: number; z: number; tx: number; ty: number; tz: number }
   // A rocket detonation point: the client fires + simulates the projectile and
   // reports where it burst. The server applies the (capped) splash damage to
   // enemies in range + broadcasts the crater, so rocket splash syncs to everyone
@@ -368,40 +361,10 @@ export type ClientMsg =
   // announcement — others keep seeing your old colors (a spy), but the server
   // treats you as your new faction. Max 2/season, locked in the final week.
   | { t: 'switchFaction'; faction: number }
-  // --- FACTION GOVERNMENT (politics.ts / treasury.ts) ------------------------
+  // --- FACTIONS ---------------------------------------------------------------
   // Swear allegiance. PERMANENT: the server refuses a second pledge, so this is
   // the one and only time a player chooses a side.
   | { t: 'pledgeFaction'; faction: number }
-  // Stand for election / withdraw / vote. One party and one vote per citizen
-  // per cycle; the server owns both rules.
-  | { t: 'foundParty'; name: string; slogan: string; promises: number[] }
-  | { t: 'disbandParty' }
-  | { t: 'castVote'; partyId: string }
-  // Powers of office. Every one is re-checked against the sitting presidency
-  // server-side — the client only hides the controls.
-  | { t: 'govBroadcast'; text: string }
-  | { t: 'govTax'; rate: number }
-  // Rewrite the recruit loadout: 4 armor slots then 9 hotbar slots, nulls for
-  // the gaps (treasury.ts owns the layout and re-validates every slot).
-  | { t: 'govSetKit'; slots: (ItemStack | null)[] }
-  // Fund kits. The president pays out of their OWN POCKETS, always: the CLIENT
-  // has already removed the bill from its inventory and the server banks it
-  // before spending it, so the treasury nets out unchanged and the stock still
-  // comes from something real. Same trust model as `drop`, which is also the
-  // client declaring what it just had. `source` is carried so a build that
-  // still knows about the old treasury purse is REFUSED rather than handed free
-  // kits it never paid for.
-  | { t: 'govFundKits'; count: number; source?: 'inventory' }
-  // Claim the recruit kit your faction funded (once per account, ever).
-  | { t: 'claimKit' }
-  // Haul stacks out of the ENEMY treasury. Refused outside a war window.
-  | { t: 'treasuryRaid'; faction: number }
-  // Open YOUR OWN hoard as a chest. President-only, and only while standing at
-  // the flag — the server answers with a `treasury` message or refuses.
-  | { t: 'treasuryOpen'; faction: number }
-  // Write one PAGE of that hoard back (the chest panel holds one page at a
-  // time). Same president + in-reach check, and every slot is re-validated.
-  | { t: 'treasurySet'; faction: number; page: number; slots: (ItemStack | null)[] }
   // RETIRED (Warfare Command): the old mob-kill XP report. Kept in the union so
   // an older client's message is accepted and ignored rather than desyncing.
   | { t: 'xp'; amount: number }
@@ -541,6 +504,10 @@ export type ServerMsg =
       /** Authoritative seconds on the persistent server world clock. */
       worldTime: number;
       players: PlayerInfo[]; edits: [string, number][]; items: ItemEntityInfo[];
+      /** Seed prediction and visible rig tiers before a player opens a panel. */
+      machines?: { x: number; y: number; z: number; state: MachineState }[];
+      /** Every placed trap (owner/channel/facing) — drives camouflage + models. */
+      traps?: [string, TrapState][];
       turrets: { x: number; y: number; z: number; state: TurretState }[];
       /** Current season number + seconds left before the deadline (Phase 5), or
        *  SEASON_ENDLESS (-1) for a season that has no deadline — which is every
@@ -565,17 +532,9 @@ export type ServerMsg =
       duelLeaderboard: DuelLeaderboardEntry[];
       /** Aviation hardware standing in the world. */
       helis: HelicopterSnapshot[];
-      /** FACTION GOVERNMENT: elections + governments for every faction. Present
-       *  even for an unpledged player — the allegiance screen reads it. */
-      politics: PoliticsState;
-      /** Per-faction public dossiers for the allegiance screen. */
+      /** Per-faction public dossiers for the allegiance screen. Present even for
+       *  an unpledged player — that screen reads it. */
       factions: FactionPublic[];
-      /** YOUR faction's treasury contents (omitted while unpledged). */
-      treasury?: (ItemStack | null)[];
-      /** Stored broadcasts waiting in your inbox, oldest first. */
-      inbox: Notification[];
-      /** Have you already claimed your recruit kit? */
-      kitClaimed: boolean;
     }
   | { t: 'join'; player: PlayerInfo }
   | { t: 'leave'; id: number }
@@ -599,13 +558,22 @@ export type ServerMsg =
   | { t: 'shot'; id: number; x: number; y: number; z: number;
       dx: number; dy: number; dz: number; item: number }
   | { t: 'respawned'; x: number; y: number; z: number; health: number }
-  | { t: 'killfeed'; killer: string; victim: string }
+  | { t: 'killfeed'; killer: string; victim: string; how?: string }
   | { t: 'itemspawn'; item: ItemEntityInfo }
   | { t: 'itemsmove'; items: { eid: number; x: number; y: number; z: number }[] }
   | { t: 'itemremove'; eid: number }
   | { t: 'gotitem'; item: number; count: number }
   | { t: 'chest'; x: number; y: number; z: number; slots: (ItemStack | null)[] }
   | { t: 'machine'; x: number; y: number; z: number; state: MachineState }
+  // A discrete rig event everyone nearby should see/hear (jam, gusher, fire…).
+  | { t: 'machineFx'; x: number; y: number; z: number;
+      fx: 'jam' | 'strike' | 'gusher' | 'ignite' | 'fireOut' | 'bitBroke' | 'siphon' }
+  // Trapcraft.
+  | { t: 'trap'; x: number; y: number; z: number; state: TrapState | null }
+  | { t: 'trapFx'; x: number; y: number; z: number; kind: TrapKind; what: TrapFxWhat;
+      tx?: number; ty?: number; tz?: number }
+  | { t: 'effect'; kind: EffectKind; seconds: number }
+  | { t: 'alarm'; x: number; y: number; z: number; owner: string; intruder: string }
   // Turrets.
   | { t: 'turret'; x: number; y: number; z: number; state: TurretState }
   | { t: 'turretFire'; x: number; y: number; z: number; tx: number; ty: number; tz: number }
@@ -629,23 +597,15 @@ export type ServerMsg =
       faction: number; by: string; holder: number }
   // Private confirmation of a secret faction switch (only to the defector).
   | { t: 'factionSwitched'; faction: number; remaining: number }
-  // --- FACTION GOVERNMENT ----------------------------------------------------
-  // The whole politics state plus the public dossiers, rebroadcast on every
-  // change (it is small: two elections, at most 12 parties each). `treasury` is
-  // per-recipient — you only ever see your OWN faction's contents.
-  | { t: 'politics'; state: PoliticsState; factions: FactionPublic[];
-      treasury?: (ItemStack | null)[] }
+  // --- FACTIONS ---------------------------------------------------------------
+  // The public dossiers, rebroadcast whenever someone pledges.
+  | { t: 'factions'; factions: FactionPublic[] }
   // Your pledge landed: you are a citizen of `faction` from now on.
   | { t: 'pledged'; faction: number }
-  // A governance action was refused, with the reason to show.
+  // A pledge was refused, with the reason to show.
   | { t: 'govErr'; reason: string }
   // One entry for the notifications inbox.
   | { t: 'notify'; notif: Notification }
-  // Somebody is in the vault. Drives the alarm horn for the defenders.
-  | { t: 'treasuryRaided'; faction: number; by: string; stacks: number }
-  // The hoard, in full, in answer to `treasuryOpen` — the president's live copy
-  // to open the chest panel on.
-  | { t: 'treasury'; faction: number; slots: (ItemStack | null)[] }
   // Gadget visual effect to play everywhere (frag/oil blast, smoke cloud).
   | { t: 'gadgetFx'; kind: GadgetKind; x: number; y: number; z: number }
   // Spy disguise (Phase 8): render player `id` as `faction` until `until`

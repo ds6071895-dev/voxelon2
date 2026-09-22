@@ -53,6 +53,10 @@ export const enum Block {
   Autominer = 41,    // block-entity: drills the column beneath it
   OilDerrick = 42,   // block-entity: pumps oil from the local oil field
   MachinePart = 43,  // structural cell of a machine's multi-block footprint
+  // Trapcraft triggers (traps.ts): a hostile stepping on a Pressure Plate or
+  // breaking a Tripwire Laser pulses the trap's wiring channel.
+  PressurePlate = 44,
+  TripwireHook = 45,
   // Warfare layer (M14): turrets
   Turret = 46,       // auto-targeting defensive block-entity (sabotage to raid)
   // Decorative building set (M15): per-wood planks + slabs + stairs (stairs use
@@ -103,11 +107,11 @@ export const enum Block {
   // Vault guard spawner: a caged dark heart at the centre of each guarded
   // vault room — guards pour out while it stands; break it to silence the room.
   MobSpawner = 86,
-  // Lever-triggered traps: pulling a Lever flips every linked trap within
-  // LEVER_RADIUS blocks (traps.ts). FallTrap = a solid floor hatch that swings
-  // OPEN (non-solid — victims drop through) when triggered; WallTrap = a flat
-  // floor plate whose block POPS UP into a solid wall. The ITEM is always the
-  // off/closed/down variant, like wall torches and top slabs.
+  // Wired traps (traps.ts): a Lever latches its wiring channel; FallTrap = a
+  // solid floor hatch that swings OPEN (non-solid — victims drop through) when
+  // its channel fires; WallTrap = a flat floor plate whose block POPS UP into a
+  // solid wall. The ITEM is always the off/closed/down variant, like wall
+  // torches and top slabs.
   Lever = 87,
   LeverOn = 88,
   FallTrap = 89,
@@ -176,13 +180,22 @@ export const enum Block {
   BwGenerator = 234,
   BwShop = 235,
   ArenaRim = 236,
-  // 237-241 stay free.
+  // Trapcraft (traps.ts): sensors, a timer and the new actuators.
+  MotionSensor = 237,
+  TrapTimer = 238,
+  Claymore = 239,
+  FlameJet = 240,
+  DartLauncher = 241,
   // Placeable inside an arena, so these DO get an item form — and therefore
   // need the explicit MINIGAME_ONLY gate rather than getting it for free.
   TeamWoolA = 242,
   TeamWoolB = 243,
   PartyTileC = 244,
   PartyTileD = 245,
+  // 246-250 are minigame item ids (see minigame_item_ids.ts).
+  NetLauncher = 251,
+  ShockPlate = 252,
+  AlarmBell = 253,
 }
 
 export const enum Tile {
@@ -484,6 +497,28 @@ export const enum Tile {
   KnockbackStick = 270,
   BridgeBow = 271,
   BridgeArrow = 272,
+  // --- Deep Bore drill bits + Trapcraft ------------------------------------
+  DrillBitIron = 273,
+  DrillBitDiamond = 274,
+  DrillBitTitanium = 275,
+  TrapDetector = 276,
+  PressurePlate = 277,
+  TripwireHook = 278,
+  MotionSensorTop = 279,
+  MotionSensorSide = 280,
+  TrapTimerTop = 281,
+  TrapTimerSide = 282,
+  ClaymoreTop = 283,
+  ClaymoreSide = 284,
+  FlameJetTop = 285,
+  FlameJetSide = 286,
+  DartLauncherFront = 287,
+  DartLauncherSide = 288,
+  NetLauncherTop = 289,
+  NetLauncherSide = 290,
+  ShockPlate = 291,
+  AlarmBellTop = 292,
+  AlarmBellSide = 293,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel' | 'sword';
@@ -777,11 +812,11 @@ export const BLOCKS: Record<number, BlockInfo> = {
   [Block.CobaltOre]: def({ name: 'Cobalt Ore', hardness: 3.5, top: Tile.CobaltOre }),
   [Block.OilShale]: def({ name: 'Oil Shale', hardness: 1.6, top: Tile.OilShale }),
   [Block.Autominer]: def({
-    name: 'Autominer', hardness: 3.5,
+    name: 'Autominer', hardness: 3.5, opaque: false, occludes: false,
     top: Tile.AutominerTop, bottom: Tile.AutominerTop, side: Tile.AutominerSide,
   }),
   [Block.OilDerrick]: def({
-    name: 'Oil Derrick', hardness: 3.5,
+    name: 'Oil Derrick', hardness: 3.5, opaque: false, occludes: false,
     top: Tile.OilDerrickTop, bottom: Tile.AutominerTop, side: Tile.OilDerrickSide,
   }),
   // Structural footprint cell of a machine (the tower/rig body). Solid so you
@@ -796,7 +831,7 @@ export const BLOCKS: Record<number, BlockInfo> = {
   // Turret is a block-entity (like a machine): placed as a normal edit but
   // sabotaged (HP), not mined, and tracked server-side. Single block footprint.
   [Block.Turret]: def({
-    name: 'Turret', hardness: 4.0,
+    name: 'Turret', hardness: 4.0, opaque: false, occludes: false,
     top: Tile.TurretTop, bottom: Tile.AutominerTop, side: Tile.TurretSide,
   }),
 
@@ -932,8 +967,8 @@ export const BLOCKS: Record<number, BlockInfo> = {
     top: Tile.SpikeTrapTop, bottom: Tile.SpikeTrapSide, side: Tile.SpikeTrapSide,
     opaque: false, occludes: false,
   }),
-  // Landmine: a thin camouflaged blast plate. Arms the moment it's placed and
-  // DETONATES when any player steps on it (even the owner — watch your feet).
+  // Landmine: a thin camouflaged blast plate. Arms a moment after placing and
+  // DETONATES under an enemy (never its owner or allies), or on its channel.
   [Block.Landmine]: def({
     name: 'Landmine', hardness: 0.6, shape: 'slab',
     top: Tile.LandmineTop, bottom: Tile.LandmineSide, side: Tile.LandmineSide,
@@ -1002,6 +1037,56 @@ export const BLOCKS: Record<number, BlockInfo> = {
   [Block.WallTrapUp]: def({
     name: 'Wall Trap', hardness: 1.2,
     top: Tile.WallTrapTop, bottom: Tile.WallTrapSide, side: Tile.WallTrapSide,
+  }),
+
+  // --- Trapcraft (traps.ts) ---
+  // Pressure Plate: a flush plate that pulses its channel when an enemy steps
+  // on it. Camouflaged to enemies like the other floor traps.
+  [Block.PressurePlate]: def({
+    name: 'Pressure Plate', hardness: 0.6, shape: 'slab', top: Tile.PressurePlate,
+    bottom: Tile.WallTrapSide, side: Tile.WallTrapSide, opaque: false, occludes: false,
+  }),
+  // Tripwire Laser: an emitter that throws a thin beam up to TRIP_RANGE cells
+  // along its facing; breaking the beam pulses the channel.
+  [Block.TripwireHook]: def({
+    name: 'Tripwire Laser', hardness: 0.6, top: Tile.TripwireHook,
+    solid: false, opaque: false, occludes: false, shape: 'cross',
+  }),
+  [Block.MotionSensor]: def({
+    name: 'Motion Sensor', hardness: 1.2, emission: 3, shape: 'slab',
+    top: Tile.MotionSensorTop, bottom: Tile.MotionSensorSide, side: Tile.MotionSensorSide,
+    opaque: false, occludes: false,
+  }),
+  [Block.TrapTimer]: def({
+    name: 'Trap Timer', hardness: 1.2,
+    top: Tile.TrapTimerTop, bottom: Tile.TrapTimerSide, side: Tile.TrapTimerSide,
+  }),
+  // Claymore: directional shrapnel mine. Non-solid so it can sit in a doorway.
+  [Block.Claymore]: def({
+    name: 'Claymore', hardness: 0.6, shape: 'slab',
+    top: Tile.ClaymoreTop, bottom: Tile.ClaymoreSide, side: Tile.ClaymoreSide,
+    solid: false, opaque: false, occludes: false,
+  }),
+  [Block.FlameJet]: def({
+    name: 'Flame Jet', hardness: 2.0,
+    top: Tile.FlameJetTop, bottom: Tile.FlameJetSide, side: Tile.FlameJetSide,
+  }),
+  [Block.DartLauncher]: def({
+    name: 'Dart Launcher', hardness: 2.0,
+    top: Tile.DartLauncherSide, bottom: Tile.DartLauncherSide, side: Tile.DartLauncherFront,
+  }),
+  [Block.NetLauncher]: def({
+    name: 'Net Launcher', hardness: 2.0,
+    top: Tile.NetLauncherTop, bottom: Tile.NetLauncherSide, side: Tile.NetLauncherSide,
+  }),
+  [Block.ShockPlate]: def({
+    name: 'Shock Plate', hardness: 1.0, shape: 'slab', emission: 2, top: Tile.ShockPlate,
+    bottom: Tile.WallTrapSide, side: Tile.WallTrapSide, opaque: false, occludes: false,
+  }),
+  [Block.AlarmBell]: def({
+    name: 'Alarm Bell', hardness: 1.0, shape: 'slab',
+    top: Tile.AlarmBellTop, bottom: Tile.AlarmBellSide, side: Tile.AlarmBellSide,
+    opaque: false, occludes: false,
   }),
 
   // Protected room anchor. Its finite wave goes dormant after combat, so the

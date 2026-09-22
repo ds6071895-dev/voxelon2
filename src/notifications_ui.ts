@@ -1,19 +1,14 @@
-// THE DISPATCH INBOX — where the government talks to you.
+// THE DISPATCH INBOX — faction news that should outlast a three-second toast
+// (a new citizen swearing allegiance, for one).
 //
-// Presidential broadcasts, election results, tax changes, funded kits and the
-// alarm when somebody is inside your treasury all land here. It exists because
-// VOXELON has no chat: a president with something to say has no other way to
-// reach the faction, and a raid alarm that only shows as a three-second toast is
-// a raid alarm you miss while you are underground.
+// SELF-CONTAINED by design. Every style it needs is in the <style> block it
+// injects, under a `vx-notif-` prefix that appears nowhere else in the project.
+// It adds nothing to index.html, so there is no global stylesheet it can collide
+// with and nothing else can change how it looks. The same is true of
+// faction_picker.ts.
 //
-// SELF-CONTAINED by design. Every rule this file needs is in politics.ts; every
-// style it needs is in the <style> block it injects, under a `vx-notif-` prefix
-// that appears nowhere else in the project. It adds nothing to index.html, so
-// there is no global stylesheet it can collide with and nothing else can change
-// how it looks. The same is true of president_ui.ts and faction_picker.ts.
-//
-// Player-authored text (a broadcast) is only ever written with `textContent` —
-// it never reaches innerHTML, so a party slogan cannot become markup.
+// Text that carries a username is only ever written with `textContent` — it
+// never reaches innerHTML, so a name cannot become markup.
 
 import { iconSvg, type IconName } from './emoji_icons';
 import type { Notification, NotificationKind } from './net/protocol';
@@ -23,11 +18,6 @@ import type { Notification, NotificationKind } from './net/protocol';
 const MAX_ENTRIES = 60;
 
 const KIND_ICON: Record<NotificationKind, IconName> = {
-  broadcast: 'horn',
-  election: 'ballot',
-  raid: 'warning',
-  tax: 'scales',
-  kit: 'backpack',
   system: 'flag',
 };
 
@@ -35,19 +25,13 @@ const KIND_ICON: Record<NotificationKind, IconName> = {
  *  panel runs on paper, so the slate-theme pastels these replaced washed out
  *  against it. Used for the rule, the glyph chip, the unread wash and the pip. */
 const KIND_TONE: Record<NotificationKind, string> = {
-  broadcast: '#c8820c',
-  election: '#2f6fd0',
-  raid: '#d0301c',
-  tax: '#12855a',
-  kit: '#7a3fd6',
   system: '#5b6b82',
 };
 
 const CSS = `
 /* THE DAYLIGHT SKIN. The inbox reads like post rather than a terminal: white
    cards on a soft wash, ink type, and each dispatch kind carrying its own hue
-   in exactly two places — the rule down its left edge and the glyph chip — so
-   a raid alarm is findable at a glance without shouting over everything else.
+   in exactly two places — the rule down its left edge and the glyph chip.
 
    Scoped entirely to the vx-notif- prefix, injected from here, nothing in
    index.html. */
@@ -353,13 +337,6 @@ export class NotificationsUI {
     if (this.isOpen) this.render();
   }
 
-  /** Replace the whole board (login / reconnect). */
-  seed(notifs: Notification[]): void {
-    this.entries = [...notifs].sort((a, b) => a.at - b.at).slice(-MAX_ENTRIES);
-    this.refreshBadges();
-    if (this.isOpen) this.render();
-  }
-
   /** One new dispatch. Returns true if it was actually new — the caller uses
    *  that to decide whether to play a sound, so a re-sync never re-alarms. */
   push(notif: Notification): boolean {
@@ -424,8 +401,7 @@ export class NotificationsUI {
       const glyph = document.createElement('i');
       glyph.innerHTML = iconSvg('mail');
       empty.append(glyph,
-        'Nothing yet. Your president’s broadcasts, election results and treasury '
-        + 'alarms all arrive here.');
+        'Nothing yet. Faction news arrives here.');
       this.list.appendChild(empty);
       return;
     }

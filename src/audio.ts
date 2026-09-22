@@ -475,6 +475,76 @@ export class GameAudio {
     this.tone({ type: 'sine', from: 90, to: 30, dur: 0.8, gain: 0.6, pos });
   }
 
+  /** Trapcraft: one voice per trap event (all synthesized, positional). */
+  trap(kind: 'spike' | 'snap' | 'beep' | 'arm' | 'zap' | 'click' | 'laser' | 'whoosh' | 'dart' | 'net' | 'bell' | 'slam',
+    pos?: THREE.Vector3): void {
+    switch (kind) {
+      case 'spike':
+        this.noise({ freq: 2400, dur: 0.08, gain: 0.35, slideTo: 900, type: 'bandpass', q: 3, pos });
+        this.tone({ type: 'square', from: 420, to: 180, dur: 0.06, gain: 0.12, pos });
+        break;
+      case 'snap':
+        this.noise({ freq: 3000, dur: 0.05, gain: 0.5, type: 'highpass', pos });
+        this.tone({ type: 'square', from: 260, to: 90, dur: 0.12, gain: 0.25, pos });
+        break;
+      case 'beep': this.tone({ type: 'square', from: 1560, to: 1560, dur: 0.06, gain: 0.12, pos }); break;
+      case 'arm':
+        this.tone({ type: 'sine', from: 880, to: 880, dur: 0.05, gain: 0.08, pos });
+        this.tone({ type: 'sine', from: 1320, to: 1320, dur: 0.06, gain: 0.08, delay: 0.07, pos });
+        break;
+      case 'zap':
+        this.noise({ freq: 5200, dur: 0.22, gain: 0.3, slideTo: 1800, type: 'bandpass', q: 6, pos });
+        this.tone({ type: 'sawtooth', from: 120, to: 60, dur: 0.2, gain: 0.12, pos });
+        break;
+      case 'click': this.noise({ freq: 1800, dur: 0.02, gain: 0.18, type: 'bandpass', q: 2, pos }); break;
+      case 'laser': this.tone({ type: 'sine', from: 2200, to: 700, dur: 0.18, gain: 0.1, pos }); break;
+      case 'whoosh': this.noise({ freq: 600, dur: 0.9, gain: 0.45, slideTo: 1400, type: 'bandpass', q: 0.8, pos }); break;
+      case 'dart': this.noise({ freq: 2600, dur: 0.06, gain: 0.25, slideTo: 1200, type: 'bandpass', q: 4, pos }); break;
+      case 'net':
+        this.noise({ freq: 400, dur: 0.18, gain: 0.35, type: 'lowpass', pos });
+        this.noise({ freq: 1800, dur: 0.3, gain: 0.12, type: 'bandpass', q: 1, delay: 0.05, pos });
+        break;
+      case 'bell':
+        for (let i = 0; i < 3; i++) {
+          this.tone({ type: 'sine', from: 1180, to: 1175, dur: 0.35, gain: 0.16, delay: i * 0.22, pos });
+          this.tone({ type: 'sine', from: 2950, to: 2940, dur: 0.2, gain: 0.05, delay: i * 0.22, pos });
+        }
+        break;
+      case 'slam':
+        this.noise({ freq: 260, dur: 0.18, gain: 0.5, slideTo: 90, type: 'lowpass', pos });
+        this.tone({ type: 'triangle', from: 110, to: 45, dur: 0.16, gain: 0.3, pos });
+        break;
+    }
+  }
+
+  /** Rig events: jams, well strikes, gushers, well fires, siphons. */
+  rig(kind: 'jam' | 'strike' | 'gusher' | 'ignite' | 'hiss' | 'siphon' | 'bit', pos?: THREE.Vector3): void {
+    switch (kind) {
+      case 'jam':
+        this.noise({ freq: 900, dur: 0.5, gain: 0.5, slideTo: 200, type: 'bandpass', q: 1.5, pos });
+        this.tone({ type: 'sawtooth', from: 180, to: 40, dur: 0.6, gain: 0.25, pos });
+        break;
+      case 'strike':
+        this.tone({ type: 'sine', from: 70, to: 40, dur: 0.9, gain: 0.5, pos });
+        this.noise({ freq: 200, dur: 0.8, gain: 0.4, type: 'lowpass', pos });
+        break;
+      case 'gusher':
+        this.tone({ type: 'sine', from: 60, to: 30, dur: 1.4, gain: 0.6, pos });
+        this.noise({ freq: 500, dur: 2.2, gain: 0.55, slideTo: 1200, type: 'bandpass', q: 0.6, pos });
+        break;
+      case 'ignite':
+        this.noise({ freq: 300, dur: 1.4, gain: 0.9, slideTo: 80, type: 'lowpass', pos });
+        this.noise({ freq: 900, dur: 2.5, gain: 0.35, type: 'bandpass', q: 0.5, delay: 0.2, pos });
+        break;
+      case 'hiss': this.noise({ freq: 3200, dur: 0.9, gain: 0.3, slideTo: 1500, type: 'highpass', pos }); break;
+      case 'siphon': this.noise({ freq: 700, dur: 0.6, gain: 0.3, slideTo: 300, type: 'bandpass', q: 2, pos }); break;
+      case 'bit':
+        this.noise({ freq: 2800, dur: 0.12, gain: 0.4, type: 'highpass', pos });
+        this.tone({ type: 'square', from: 500, to: 120, dur: 0.2, gain: 0.15, pos });
+        break;
+    }
+  }
+
   /** Gunshot: a soft body "thump" + a brief click — deliberately low on harsh
    *  high frequencies so rapid fire isn't piercing/painful to listen to.
    *  `weight` scales the report so a shotgun booms and an SMG snaps, without
@@ -600,26 +670,13 @@ export class GameAudio {
     this.noise({ freq: 1400, dur: 0.09, gain: 0.05, slideTo: 700, type: 'bandpass', q: 0.9, pos });
   }
 
-  /** Bounce Pad: spring compression, a rubbery launch note, then air rushing by. */
-  /** TREASURY ALARM: two low war horns over a swell of air. Deliberately the
-   *  lowest, longest cue in the game — it has to carry from underground and read
-   *  as "come home now", not as another pickup chime. */
-  raidHorn(): void {
-    this.tone({ type: 'sawtooth', from: 108, to: 114, dur: 0.9, gain: 0.19, attack: 0.09 });
-    this.tone({ type: 'triangle', from: 163, to: 169, dur: 0.85, gain: 0.14, attack: 0.09 });
-    this.tone({ type: 'square', from: 218, to: 226, dur: 0.7, gain: 0.08, attack: 0.07 });
-    this.tone({ type: 'sawtooth', from: 146, to: 153, dur: 0.95, gain: 0.17, attack: 0.09, delay: 0.48 });
-    this.tone({ type: 'triangle', from: 219, to: 226, dur: 0.9, gain: 0.12, attack: 0.09, delay: 0.48 });
-    this.noise({ freq: 280, dur: 1.3, gain: 0.09, slideTo: 155, type: 'lowpass', q: 0.8 });
-  }
-
-  /** A short civic chime for a broadcast or an election result landing in the
-   *  inbox. Bright and brief — it must never be mistaken for the raid horn. */
+  /** A short civic chime for a dispatch landing in the inbox. */
   dispatchChime(): void {
     this.tone({ type: 'triangle', from: 784, to: 1046, dur: 0.16, gain: 0.1, attack: 0.01 });
     this.tone({ type: 'sine', from: 1046, to: 1318, dur: 0.22, gain: 0.08, delay: 0.1 });
   }
 
+  /** Bounce Pad: spring compression, a rubbery launch note, then air rushing by. */
   bouncePad(): void {
     this.noise({ freq: 540, dur: 0.08, gain: 0.2, slideTo: 170, type: 'lowpass', q: 0.8 });
     this.tone({ type: 'sine', from: 150, to: 640, dur: 0.34, gain: 0.2, attack: 0.015 });

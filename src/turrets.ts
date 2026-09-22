@@ -3,14 +3,17 @@
 // mined, ownable/claimable, with geometric upgrade costs paid client-side and
 // capped server-side. PURE + transport-agnostic so server + client agree.
 //
-// A turret tracks the nearest non-owner player in range with rough line of
+// A turret tracks the nearest non-owner player in range with clear line of
 // sight, consumes a Cannonball + a little oil per shot, and applies a
 // server-validated ranged hit (reusing the ranged-damage path). The targeting
 // scan itself runs in server_core (it owns the player list); this module owns
 // the pure numbers (range/damage/interval/HP), state lifecycle, and validation.
+// Hostile mobs are client-side, so each client aims friendly turrets at its own
+// mobs and asks the server to spend the shot (turretMobShotOk gates that).
 
 import { Block } from './blocks';
 import { Item } from './items';
+import { sameFaction } from './teams';
 
 const MAX_OWNER_LEN = 24;
 export const TURRET_MAX_LEVEL = 20;
@@ -27,6 +30,16 @@ const INTERVAL_PER_LEVEL = 0.04;
 const FUEL_PER_SHOT = 0.15;           // oil barrels consumed per shot
 export const TURRET_AMMO_CAP = 256;
 export const TURRET_FUEL_CAP = 64;
+
+/** Height of the gun head's pivot above the block's floor. The mount is a full
+ *  block, so the head sits just above it — shots start here, and a block
+ *  placed on top of the turret buries the head and silences it. */
+export const TURRET_MUZZLE_Y = 1.28;
+/** At or below this HP fraction an enemy turret is knocked offline: it stops
+ *  firing and can be hacked (claimed) by the raider standing over it. */
+export const TURRET_DISABLED_FRAC = 0.25;
+/** Most HP one sabotage swing may remove (fists + the best tool, with slack). */
+export const TURRET_MAX_HIT = 30;
 
 export type TurretAxis = 'range' | 'damage' | 'rate';
 
@@ -87,9 +100,70 @@ export function claimTurret(state: TurretState, owner: string, faction = -1): vo
   state.faction = faction;
 }
 
-/** Can the turret fire right now (loaded + fuelled + off cooldown)? */
+/** Knocked offline by sabotage (low HP): silent, and open to a hack-claim. */
+export function turretDisabled(state: TurretState): boolean {
+  return state.hp <= state.maxHp * TURRET_DISABLED_FRAC;
+}
+
+/** May `name` (in `faction`) claim this turret? Unowned turrets are free, an
+ *  owner or their faction-mates may re-claim, and an ENEMY turret can only be
+ *  hacked once sabotage has knocked it offline — never stolen off the shelf. */
+export function turretCanClaim(state: TurretState, name: string, faction = -1): boolean {
+  if (!state.owner) return true;
+  if (state.owner === name) return true;
+  if (sameFaction(state.faction, faction)) return true;
+  return turretDisabled(state);
+}
+
+/** Friendly to this player: they own it, or share its faction. */
+export function turretFriendly(state: TurretState, name: string, faction = -1): boolean {
+  return (!!state.owner && state.owner === name) || sameFaction(state.faction, faction);
+}
+
+/** Can the turret fire right now (claimed + healthy + loaded + fuelled +
+ *  off cooldown)? */
 export function turretArmed(state: TurretState): boolean {
-  return state.cooldown <= 0 && state.ammo >= 1 && state.fuel >= FUEL_PER_SHOT;
+  return !!state.owner && !turretDisabled(state) &&
+    state.cooldown <= 0 && state.ammo >= 1 && state.fuel >= FUEL_PER_SHOT;
+}
+
+/** Clear shot from the turret at block (bx,by,bz) to a world point? Marches
+ *  the segment from the muzzle in quarter-block steps; the turret's own cell
+ *  and the target's own cell are ignored. `solid` is the caller's world query
+ *  (server edits+terrain, or the client's loaded chunks). */
+export function turretHasLineOfSight(
+  bx: number, by: number, bz: number, tx: number, ty: number, tz: number,
+  solid: (x: number, y: number, z: number) => boolean,
+): boolean {
+  const ox = bx + 0.5, oy = by + TURRET_MUZZLE_Y, oz = bz + 0.5;
+  const dx = tx - ox, dy = ty - oy, dz = tz - oz;
+  const len = Math.hypot(dx, dy, dz);
+  if (!Number.isFinite(len)) return false;
+  const steps = Math.ceil(len / 0.25);
+  const ex = Math.floor(tx), ey = Math.floor(ty), ez = Math.floor(tz);
+  for (let i = 0; i <= steps; i++) {
+    const f = steps === 0 ? 0 : i / steps;
+    const x = Math.floor(ox + dx * f), y = Math.floor(oy + dy * f), z = Math.floor(oz + dz * f);
+    if (x === bx && y === by && z === bz) continue;
+    if (x === ex && y === ey && z === ez) break;
+    if (solid(x + 0.5, y + 0.5, z + 0.5)) return false;
+  }
+  return true;
+}
+
+/** Validate a client's request to fire a friendly turret at one of its own
+ *  (client-side) hostile mobs: the shooter must be friendly, the turret armed,
+ *  and the aim point inside the turret's range (a little slack for mob drift
+ *  between the client's frame and the server's tick). */
+export function turretMobShotOk(
+  state: TurretState, bx: number, by: number, bz: number,
+  tx: number, ty: number, tz: number, name: string, faction = -1,
+): boolean {
+  if (![tx, ty, tz].every(Number.isFinite)) return false;
+  if (!turretFriendly(state, name, faction) || !turretArmed(state)) return false;
+  const r = turretRange(state.level) + 1.5;
+  const dx = tx - (bx + 0.5), dy = ty - (by + TURRET_MUZZLE_Y), dz = tz - (bz + 0.5);
+  return dx * dx + dy * dy + dz * dz <= r * r;
 }
 
 /** Consume one shot's resources and reset the cooldown. */

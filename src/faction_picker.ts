@@ -1,37 +1,26 @@
-// THE ALLEGIANCE PLEDGE — the screen that replaces being told which side you
-// are on.
+// THE ALLEGIANCE ROLL — the screen that decides which side you are on.
 //
-// VOXELON used to assign your faction at registration to keep the war 50/50, and
-// announce it on a card you could only click "Accept" on. Now you inspect both
-// sides and choose, and the choice is PERMANENT — so the screen's whole job is
-// to make sure you are choosing with the facts in front of you:
+// Both sides are laid out with the facts in front of you:
 //
-//   · the sitting president, as a live 3D character who poses when you point at
-//     them (the same board the Duels ladder uses), named on the plinth they
-//     stand on — or, where the seat is VACANT, the plinth stays empty and says
-//     so, because a character standing on an open seat is a president that does
-//     not exist
-//   · their party, their slogan and the promises they were elected on
-//   · the gear they are actually carrying, hoverable for names and runes
-//   · the tax you would pay, the kits waiting for recruits, what the treasury
-//     holds, and who is already fighting on that side
+//   · the citizens online on that side right now, as live 3D characters who
+//     pose when you point at them (the same board the Duels ladder uses)
+//   · how many have sworn to it, and who they are
 //
-// Nothing here balances the sides. Both cards are always joinable; a faction
-// that is already bigger simply says so, and the smaller one advertises the
-// underdog's advantage: an empty side's president is YOURS to win in a week.
+// …but you do not pick. One press of ROLL spins a light across the cards,
+// slowing until it settles on a side at random, and the result is PERMANENT.
+// The winner is drawn before the spin starts; the animation only reveals it.
 //
 // SELF-CONTAINED: one injected <style>, a `vx-pledge-` prefix used nowhere else,
-// nothing added to index.html. Player-authored strings (party names, slogans,
-// usernames) are written with textContent and never reach innerHTML.
+// nothing added to index.html. Usernames are written with textContent and never
+// reach innerHTML.
 
 import { BUST_POSES, type BustEntry } from './avatar_bust';
 import { type Cosmetics, sanitizeCosmetics } from './character';
 import { iconSvg } from './emoji_icons';
-import { PRESET_PROMISES } from './politics';
 import type { FactionPublic } from './net/protocol';
 import { skinSeed } from './net/protocol';
 import { FACTIONS, factionColor, factionName } from './teams';
-import { bustStage, hideTip, injectGovStyle, itemChip } from './gov_ui';
+import { bustStage, injectGovStyle } from './gov_ui';
 
 const CSS = `
 /* A DEFINITE HEIGHT, not just a cap.
@@ -43,8 +32,7 @@ const CSS = `
  * built and rendered correctly into a scrollport 0px tall, which is why the
  * pledge screen came up reading "Swear allegiance / Choose your side" with
  * nothing under it to press — and why joining looked like something you had to
- * wait for an election to unlock. The government panel gets this right by
- * stating its height outright (see .vx-prez-shell); so does this one now. */
+ * wait for something to unlock. So this states its height outright. */
 .vx-pledge-shell {
   position: relative; display: flex; flex-direction: column; gap: 18px;
   width: min(1120px, 100%); height: min(860px, 100%); padding: 4px;
@@ -58,13 +46,8 @@ const CSS = `
 }
 .vx-pledge-head b { color: #ffd98a; }
 
-/* The pan fills the scrollport exactly, so each card is a known height and can
-   scroll its own dossier instead of pushing its JOIN BUTTON off the bottom of
-   the screen. That is not a polish detail: swearing allegiance is the only way
-   into the world, and a card whose crest, plinth, stats and roster all fit while
-   its button sits 200px below the fold reads as a side you are not allowed to
-   join. Nothing about the pledge screen may ever require scrolling to find the
-   thing you came here to press. */
+/* The pan fills the scrollport exactly, so each card is a known height and
+   scrolls its own dossier while the spin lights it as a whole. */
 .vx-pledge-cards {
   display: grid; gap: 18px; grid-template-columns: 1fr 1fr; padding: 2px;
   height: 100%; align-items: stretch;
@@ -74,9 +57,9 @@ const CSS = `
   position: relative; display: flex; flex-direction: column; min-height: 0;
   border-radius: 16px; overflow: hidden; background: rgba(12, 20, 30, .88);
   box-shadow: inset 0 0 0 1px rgba(232, 238, 252, .12), 0 20px 48px rgba(0, 0, 0, .45);
-  transition: box-shadow .18s, transform .18s;
+  transition: box-shadow .18s, transform .18s, opacity .35s, filter .35s;
 }
-.vx-pledge-card:hover {
+.vx-pledge-shell[data-phase="idle"] .vx-pledge-card:hover {
   transform: translateY(-3px);
   box-shadow: inset 0 0 0 1px var(--side), 0 26px 60px rgba(0, 0, 0, .55);
 }
@@ -97,20 +80,19 @@ const CSS = `
 .vx-pledge-strength[data-tone="big"] { color: #ffd0a0; background: rgba(237, 160, 26, .2); }
 .vx-pledge-strength[data-tone="small"] { color: #a8e8c4; background: rgba(46, 160, 100, .22); }
 
-/* The president's plinth. The 3D bust is drawn OVER this box by the shared
-   renderer, so it must keep its size whether or not a bust lands in it. */
+/* The plinth. The 3D busts are drawn OVER this box by the shared renderer, so
+   it must keep its size whether or not a bust lands in it. */
 .vx-pledge-stage {
   position: relative; display: flex; align-items: flex-end; justify-content: center;
   flex: none; height: clamp(132px, 21vh, 210px); margin: 0 18px; border-radius: 13px;
   background: radial-gradient(70% 90% at 50% 12%, color-mix(in srgb, var(--side) 26%, transparent), transparent 72%),
     rgba(0, 0, 0, .28);
 }
-.vx-pledge-slot { position: absolute; inset: 12px 0 32px; }
+.vx-pledge-slot { position: absolute; top: 12px; bottom: 32px; }
 /* THE FALLBACK PORTRAIT. A browser hands out a limited number of WebGL contexts
    and the world already spends one, so "no context to spare" is a state a real
    player can land in — and it used to present as a plinth that simply stayed
-   empty. When the bust board cannot draw, this monogram stands there instead,
-   so a faction's president always has a face on the pledge screen. */
+   empty. When the bust board cannot draw, this monogram stands there instead. */
 .vx-pledge-mug {
   position: absolute; left: 50%; top: 50%; transform: translate(-50%, -58%);
   display: flex; align-items: center; justify-content: center;
@@ -124,34 +106,52 @@ const CSS = `
   width: 74%; height: 12px; margin-bottom: 12px; border-radius: 50%;
   background: radial-gradient(50% 100% at 50% 50%, color-mix(in srgb, var(--side) 60%, transparent), transparent 76%);
 }
-/* THE NAMEPLATE. The president's own name, on the plinth they are standing on,
-   so the character and the name are one object rather than a portrait with a
-   caption somewhere below it. It sits UNDER the bust slot, never behind it —
-   the bust canvas paints over anything inside its own rectangle, so text that
-   overlaps it is text with a character drawn through it. */
+/* THE NAMEPLATE. Each citizen's name, under the slot they stand in. It sits
+   UNDER the bust slot, never behind it — the bust canvas paints over anything
+   inside its own rectangle, so text that overlaps it is text with a character
+   drawn through it. */
 .vx-pledge-stage .vx-pledge-stage-name {
-  position: absolute; left: 10px; right: 10px; bottom: 5px;
+  position: absolute; bottom: 5px;
   font: 700 13px/1.25 inherit; letter-spacing: .6px; text-align: center; color: #fff;
   text-shadow: 0 2px 7px rgba(0, 0, 0, .7);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
-/* THE OPEN SEAT. An unheld faction stands NOBODY on its plinth: the citizens
-   who used to fill it read as a government that was there, and they were drawn
-   by the bust canvas, which paints over the whole slot — so the very banner
-   saying the seat was open had characters standing through it. An empty plinth
-   with the vacancy written across the middle of it is the honest picture, and
-   the reason to pick that side is spelled out in the card body underneath. */
-.vx-pledge-openseat {
+/* NOBODY ONLINE. A side with no citizens online stands nobody on its plinth,
+   and says so across the middle of it. */
+.vx-pledge-empty {
   position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
   display: flex; align-items: center; gap: 7px; padding: 7px 14px; border-radius: 999px;
   font: 700 10.5px/1 inherit; letter-spacing: 1.6px; text-transform: uppercase;
   color: #ffd0a0; background: rgba(9, 15, 23, .82);
   box-shadow: inset 0 0 0 1px rgba(237, 160, 26, .35);
 }
-.vx-pledge-openseat svg { width: 13px; height: 13px; }
+.vx-pledge-empty svg { width: 13px; height: 13px; }
 .vx-pledge-open-note {
-  margin-top: 6px; font-size: 11.5px; line-height: 1.5; color: #9fb0cc;
+  font-size: 11.5px; line-height: 1.5; color: #9fb0cc; text-align: center;
+}
+
+/* THE SPIN. The light that runs across the cards while the roll is live, then
+   the winner's glow and the loser's fade once it settles. */
+.vx-pledge-card[data-lit="1"] {
+  transform: scale(1.025);
+  box-shadow: inset 0 0 0 2px var(--side), 0 0 46px color-mix(in srgb, var(--side) 55%, transparent);
+}
+.vx-pledge-card::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none; opacity: 0;
+  background: radial-gradient(90% 55% at 50% 0%, color-mix(in srgb, var(--side) 38%, transparent), transparent 72%);
+  transition: opacity .12s;
+}
+.vx-pledge-card[data-lit="1"]::after { opacity: 1; }
+.vx-pledge-card[data-fate="won"] {
+  animation: vx-pledge-win 1.1s cubic-bezier(.2, .9, .3, 1.3) both;
+  box-shadow: inset 0 0 0 3px var(--side), 0 0 90px color-mix(in srgb, var(--side) 70%, transparent);
+}
+.vx-pledge-card[data-fate="lost"] { opacity: .32; filter: grayscale(.9); transform: scale(.96); }
+@keyframes vx-pledge-win {
+  0% { transform: scale(1.025); }
+  30% { transform: scale(1.075); }
+  100% { transform: scale(1.035); }
 }
 
 /* The only scrolling part of a card. Everything here is reading material; the
@@ -162,21 +162,8 @@ const CSS = `
 }
 .vx-pledge-body::-webkit-scrollbar { width: 7px; }
 .vx-pledge-body::-webkit-scrollbar-thumb { border-radius: 4px; background: rgba(232, 238, 252, .18); }
-.vx-pledge-prez { text-align: center; }
-.vx-pledge-prez-name { font-size: 16px; font-weight: 700; letter-spacing: .5px; }
-.vx-pledge-prez-party { margin-top: 3px; font-size: 11px; letter-spacing: 1.6px; text-transform: uppercase; color: var(--side); }
-.vx-pledge-prez-slogan { margin-top: 6px; font-size: 12.5px; font-style: italic; color: #c3cfe2; overflow-wrap: anywhere; }
 
-.vx-pledge-promises { display: flex; flex-direction: column; gap: 5px; }
-.vx-pledge-promise {
-  display: flex; gap: 7px; align-items: flex-start; font-size: 11.5px; line-height: 1.45; color: #b7c4d8;
-}
-.vx-pledge-promise span { flex: none; color: var(--side); }
-
-.vx-pledge-gear { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.vx-pledge-gear-label { font-size: 9.5px; letter-spacing: 1.8px; text-transform: uppercase; color: #77879f; }
-
-.vx-pledge-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; }
+.vx-pledge-stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; }
 .vx-pledge-stat {
   padding: 9px 8px; border-radius: 9px; text-align: center; background: rgba(232, 238, 252, .06);
 }
@@ -199,16 +186,67 @@ const CSS = `
 }
 .vx-pledge-roster-empty { margin-top: 8px; font-size: 11.5px; color: #77879f; }
 
-.vx-pledge-join {
-  flex: none; padding: 14px 18px 18px;
-  background: linear-gradient(180deg, transparent, rgba(6, 11, 17, .55) 40%);
-  box-shadow: inset 0 1px 0 rgba(232, 238, 252, .1);
+.vx-pledge-roll {
+  flex: none; display: flex; flex-direction: column; align-items: center; gap: 8px;
 }
-.vx-pledge-join .vx-gov-btn { width: 100%; min-height: 46px; font-size: 11.5px; }
-.vx-pledge-join[data-confirming="1"] .vx-gov-btn { background: linear-gradient(180deg, #ff9a6a, #e2503b); color: #fff; }
-.vx-pledge-warn {
-  margin-top: 8px; font-size: 11px; line-height: 1.5; text-align: center; color: #ffb4a4;
-  min-height: 2.8em;
+.vx-pledge-roll .vx-gov-btn {
+  position: relative; overflow: hidden;
+  width: min(440px, 100%); min-height: 54px; font-size: 13px; letter-spacing: 2.6px;
+}
+/* A sheen that sweeps the idle button, so the one thing to press reads as live. */
+.vx-pledge-roll .vx-gov-btn::after {
+  content: ''; position: absolute; top: 0; bottom: 0; left: -40%; width: 30%;
+  background: linear-gradient(100deg, transparent, rgba(255, 255, 255, .55), transparent);
+  transform: skewX(-18deg); animation: vx-pledge-sheen 2.6s ease-in-out infinite;
+}
+.vx-pledge-roll .vx-gov-btn:disabled { opacity: .7; cursor: default; }
+.vx-pledge-roll .vx-gov-btn:disabled::after { display: none; }
+@keyframes vx-pledge-sheen { 0%, 55% { left: -40%; } 100% { left: 130%; } }
+.vx-pledge-roll-note { font-size: 11px; line-height: 1.5; text-align: center; color: #ffb4a4; }
+
+/* THE REVEAL. Laid over the whole shell — above the bust layer — once the spin
+   settles: a flash in the winning colour, the side's name, and a burst. */
+.vx-pledge-reveal {
+  position: absolute; inset: 0; z-index: 10; pointer-events: none;
+  display: none; flex-direction: column; align-items: center; justify-content: center;
+}
+.vx-pledge-reveal[data-show="1"] { display: flex; }
+.vx-pledge-flash {
+  position: absolute; inset: -10%; opacity: 0;
+  background: radial-gradient(45% 45% at 50% 50%, color-mix(in srgb, var(--side) 55%, #fff), transparent 70%);
+  animation: vx-pledge-flash 1.1s ease-out both;
+}
+@keyframes vx-pledge-flash { 0% { opacity: 0; } 12% { opacity: .9; } 100% { opacity: 0; } }
+.vx-pledge-banner {
+  position: relative; padding: 18px 42px 22px; border-radius: 18px; text-align: center;
+  background: rgba(7, 12, 19, .9);
+  box-shadow: inset 0 0 0 2px var(--side), 0 0 70px color-mix(in srgb, var(--side) 60%, transparent);
+  animation: vx-pledge-pop .7s cubic-bezier(.2, 1.4, .4, 1) both .08s;
+}
+.vx-pledge-banner small {
+  display: block; font-size: 10px; letter-spacing: 3px; text-transform: uppercase; color: #b9862d;
+}
+.vx-pledge-banner strong {
+  display: block; margin-top: 6px; font-size: clamp(30px, 6vw, 56px); letter-spacing: 4px;
+  text-transform: uppercase; color: var(--side);
+  text-shadow: 0 0 26px color-mix(in srgb, var(--side) 70%, transparent) !important;
+}
+@keyframes vx-pledge-pop {
+  0% { transform: scale(.3) rotate(-6deg); opacity: 0; }
+  100% { transform: scale(1) rotate(0); opacity: 1; }
+}
+.vx-pledge-spark {
+  position: absolute; left: 50%; top: 50%; width: 9px; height: 14px; border-radius: 2px;
+  background: var(--c); opacity: 0;
+  animation: vx-pledge-burst 1.5s cubic-bezier(.15, .7, .3, 1) both var(--delay);
+}
+@keyframes vx-pledge-burst {
+  0% { opacity: 1; transform: translate(-50%, -50%) rotate(0); }
+  100% { opacity: 0; transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy))) rotate(var(--rot)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .vx-pledge-spark, .vx-pledge-roll .vx-gov-btn::after { display: none; }
+  .vx-pledge-card[data-fate="won"], .vx-pledge-banner, .vx-pledge-flash { animation-duration: .01s; }
 }
 .vx-pledge-foot {
   display: flex; align-items: center; justify-content: center; gap: 14px;
@@ -245,14 +283,31 @@ function injectStyle(): void {
 
 export interface PledgeData {
   factions: FactionPublic[];
-  /** Item icons are drawn out of the live block atlas. */
-  atlasCanvas: HTMLCanvasElement;
-  /** The player doing the choosing. Nothing on a card is drawn from them — only
-   *  a sitting president ever stands on a plinth — but callers still pass it. */
-  viewer?: { username: string; cosmetics?: Cosmetics };
 }
 
-/** The one person drawn on a card's stage: its sitting president. */
+/** A uniformly random integer in [0, n). */
+function randomIndex(n: number): number {
+  try {
+    return crypto.getRandomValues(new Uint32Array(1))[0] % n;
+  } catch {
+    return Math.floor(Math.random() * n);
+  }
+}
+
+/** The fast first beat of the spin and the extra wait on its last one, in ms. */
+const SPIN_FAST_MS = 55;
+const SPIN_SLOW_MS = 540;
+/** Full passes over the cards before the spin may start to settle. */
+const SPIN_MIN_STEPS = 24;
+/** How long the reveal holds before the pledge is sent. */
+const REVEAL_MS = 2400;
+/** If the screen is still up this long after sending (the server said no),
+ *  put the roll back so the player is never stuck behind a dead screen. */
+const PLEDGE_RETRY_MS = 8000;
+
+type Phase = 'idle' | 'rolling' | 'landed';
+
+/** One person drawn on a card's stage. */
 interface Face {
   username: string;
   cosmetics: Cosmetics;
@@ -265,42 +320,22 @@ interface Face {
  * decorate them. Building the screen straight off the dossier list meant a
  * faction the server had not described yet simply had no card — and since
  * swearing allegiance is the only way into the world, a screen with a missing
- * card is a screen a new player cannot get off. An unelected presidency is the
- * ordinary case at the start of a season, not an error: a side with no
- * government, no citizens and no treasury is still Crimson or Azure, and is
- * joined by the same button as a side with all three.
+ * card is a screen a new player cannot get off. A side with no citizens is the
+ * ordinary case at the start of a season, not an error.
  *
- * So every field is defaulted rather than trusted, and `president` stays absent
- * unless a real one was sent — which is exactly what puts the card into its
- * "seat vacant" shape.
+ * So every field is defaulted rather than trusted.
  */
 function dossiersFor(list: readonly FactionPublic[] | undefined): FactionPublic[] {
   const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
   return FACTIONS.map((f) => {
     const d = list?.find((i) => i && i.faction === f.id);
-    const out: FactionPublic = {
+    return {
       faction: f.id,
       members: Array.isArray(d?.members) ? d!.members.filter((m) => typeof m === 'string') : [],
       memberCount: num(d?.memberCount),
-      taxRate: num(d?.taxRate),
-      kitStock: num(d?.kitStock),
-      treasuryCount: num(d?.treasuryCount),
-      faces: Array.isArray(d?.faces) ? d!.faces : [],
+      faces: Array.isArray(d?.faces)
+        ? d!.faces.filter((x) => x && typeof x.username === 'string') : [],
     };
-    // A president is only ever half-known: an offline one has no gear, an
-    // unparsed one has no promises. Fill the holes here so the card below can
-    // read every field without a guard of its own.
-    const p = d?.president;
-    if (p?.username) {
-      out.president = {
-        ...p,
-        partyName: p.partyName || 'Independent',
-        slogan: typeof p.slogan === 'string' ? p.slogan : '',
-        promises: Array.isArray(p.promises) ? p.promises : [],
-        armor: Array.isArray(p.armor) ? p.armor : [],
-      };
-    }
-    return out;
   });
 }
 
@@ -311,15 +346,25 @@ export class FactionPicker {
   private readonly cards: HTMLElement;
   /** The positioned box the cards scroll in and the bust canvas covers. */
   private readonly viewport: HTMLElement;
-  /** The hint under the cards. It names whoever is actually standing on the
-   *  plinths, which is not always a president. */
+  /** The hint under the cards. */
   private readonly footText: HTMLElement;
+  private readonly back: HTMLButtonElement;
+  private readonly rollButton: HTMLButtonElement;
+  private readonly reveal: HTMLElement;
   private isOpen = false;
   private data: PledgeData | null = null;
-  /** The card awaiting its second click. A permanent choice gets two. */
-  private confirming = -1;
+  private phase: Phase = 'idle';
+  private timer: number | undefined;
+  /** This render's cards by faction id, for the spin to light without a rebuild. */
+  private cardEls = new Map<number, HTMLElement>();
+  /** This render's busts, so the losing side's can be cleared on landing. */
+  private busts: BustEntry[] = [];
 
   onPledge?: (faction: number) => void;
+  /** Each beat of the spin; `progress` runs 0 → 1 as it slows. */
+  onTick?: (progress: number) => void;
+  /** The spin settled on a side. */
+  onLand?: (faction: number) => void;
   onOpen?: () => void;
   onClose?: () => void;
 
@@ -332,11 +377,15 @@ export class FactionPicker {
     this.surface.setAttribute('aria-label', 'Choose your faction');
     this.surface.tabIndex = -1;
     this.surface.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') { e.stopPropagation(); this.hide(); }
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        if (this.phase === 'idle') this.hide();
+      }
     });
 
     this.shell = document.createElement('div');
     this.shell.className = 'vx-pledge-shell';
+    this.shell.dataset.phase = 'idle';
 
     const head = document.createElement('div');
     head.className = 'vx-pledge-head';
@@ -347,9 +396,8 @@ export class FactionPicker {
     title.textContent = 'Choose your side';
     const lede = document.createElement('p');
     lede.innerHTML =
-      'Every faction elects its own president each week. They set the tax you pay, '
-      + 'fund the kits new recruits get, and speak for the whole side. '
-      + '<b>You can never switch.</b> Read both before you pick.';
+      'Fate picks the side you will fight for in every war, flag raid and season. '
+      + '<b>You can never switch.</b> Look them over, then roll.';
     head.append(eyebrow, title, lede);
 
     // The card pan scrolls INSIDE a positioned viewport, and the bust canvas is
@@ -373,13 +421,30 @@ export class FactionPicker {
     // the dossiers — or who wants to set their character up first — must be able
     // to leave without committing to anything.
     const back = document.createElement('button');
+    this.back = back;
     back.type = 'button';
     back.className = 'vx-pledge-back';
     back.textContent = 'Decide later';
     back.addEventListener('click', () => this.hide());
     foot.append(footText, back);
 
-    this.shell.append(head, this.viewport, foot);
+    const roll = document.createElement('div');
+    roll.className = 'vx-pledge-roll';
+    this.rollButton = document.createElement('button');
+    this.rollButton.type = 'button';
+    this.rollButton.className = 'vx-gov-btn';
+    this.rollButton.dataset.kind = 'primary';
+    this.rollButton.addEventListener('click', () => this.roll());
+    const note = document.createElement('div');
+    note.className = 'vx-pledge-roll-note';
+    note.textContent = 'Your side is chosen at random and is permanent on this account.';
+    roll.append(this.rollButton, note);
+
+    this.reveal = document.createElement('div');
+    this.reveal.className = 'vx-pledge-reveal';
+    this.reveal.setAttribute('aria-live', 'assertive');
+
+    this.shell.append(head, this.viewport, roll, foot, this.reveal);
     this.surface.appendChild(this.shell);
     host.appendChild(this.surface);
   }
@@ -388,7 +453,7 @@ export class FactionPicker {
 
   show(data: PledgeData): void {
     this.data = data;
-    this.confirming = -1;
+    this.reset();
     if (!this.isOpen) {
       this.isOpen = true;
       this.surface.dataset.open = '1';
@@ -399,44 +464,153 @@ export class FactionPicker {
     this.surface.focus();
   }
 
-  /** New data while the screen is up (a president was just elected, a treasury
-   *  was raided). Keeps any confirmation the player is halfway through. */
+  /** New data while the screen is up (somebody just pledged). A spin in
+   *  progress is never rebuilt under the player; it picks the data up after. */
   update(data: PledgeData): void {
     this.data = data;
-    if (this.isOpen) this.render();
+    if (this.isOpen && this.phase === 'idle') this.render();
   }
 
   hide(): void {
     if (!this.isOpen) return;
+    this.reset();
     this.isOpen = false;
     delete this.surface.dataset.open;
-    hideTip();
     bustStage.release(this.viewport);
     this.onClose?.();
+  }
+
+  /** Back to a fresh, rollable screen: no timers, no light, no reveal. */
+  private reset(): void {
+    if (this.timer !== undefined) clearTimeout(this.timer);
+    this.timer = undefined;
+    this.setPhase('idle');
+    delete this.reveal.dataset.show;
+    this.reveal.replaceChildren();
+  }
+
+  private setPhase(phase: Phase): void {
+    this.phase = phase;
+    this.shell.dataset.phase = phase;
+    this.back.disabled = phase !== 'idle';
+    this.rollButton.disabled = phase !== 'idle';
+    this.rollButton.textContent = phase === 'idle' ? 'Roll for my side'
+      : phase === 'rolling' ? 'Rolling…' : 'Fate has spoken';
+  }
+
+  /** Draw the side first, then spin a light over the cards that slows and
+   *  stops exactly on it. */
+  private roll(): void {
+    if (this.phase !== 'idle' || !this.isOpen) return;
+    const ids = FACTIONS.map((f) => f.id);
+    const n = ids.length;
+    const winner = ids[randomIndex(n)];
+    const target = ids.indexOf(winner);
+    let at = randomIndex(n);
+    // Enough beats to feel like a spin, and exactly the number that ends on
+    // the winner: (start + steps) % n === target.
+    const steps = SPIN_MIN_STEPS + ((((target - at - SPIN_MIN_STEPS) % n) + n) % n);
+    this.setPhase('rolling');
+
+    const beat = (left: number): void => {
+      at = (at + 1) % n;
+      this.light(ids[at]);
+      const progress = 1 - (left - 1) / steps;
+      this.onTick?.(progress);
+      if (left === 1) {
+        this.timer = window.setTimeout(() => this.land(winner), SPIN_SLOW_MS);
+        return;
+      }
+      // Ease out: quick at first, then each beat lingers longer.
+      const delay = SPIN_FAST_MS + SPIN_SLOW_MS * progress ** 3;
+      this.timer = window.setTimeout(() => beat(left - 1), delay);
+    };
+    beat(steps);
+  }
+
+  private light(faction: number): void {
+    for (const [id, card] of this.cardEls) {
+      if (id === faction) card.dataset.lit = '1';
+      else delete card.dataset.lit;
+    }
+  }
+
+  private land(winner: number): void {
+    this.setPhase('landed');
+    for (const [id, card] of this.cardEls) {
+      card.dataset.fate = id === winner ? 'won' : 'lost';
+      if (id === winner) card.dataset.lit = '1';
+      else delete card.dataset.lit;
+    }
+    // Only the winning side keeps its figures standing.
+    const keep = `pledge:${winner}:`;
+    bustStage.setRoster(this.busts.filter((b) => b.key.startsWith(keep)));
+    this.showReveal(winner);
+    this.onLand?.(winner);
+
+    this.timer = window.setTimeout(() => {
+      this.onPledge?.(winner);
+      this.timer = window.setTimeout(() => {
+        if (!this.isOpen) return;
+        this.reset();
+        this.render();
+      }, PLEDGE_RETRY_MS);
+    }, REVEAL_MS);
+  }
+
+  private showReveal(winner: number): void {
+    const side = `#${factionColor(winner).toString(16).padStart(6, '0')}`;
+    this.reveal.style.setProperty('--side', side);
+    const flash = document.createElement('div');
+    flash.className = 'vx-pledge-flash';
+    const banner = document.createElement('div');
+    banner.className = 'vx-pledge-banner';
+    const eyebrow = document.createElement('small');
+    eyebrow.textContent = 'Fate has chosen';
+    const name = document.createElement('strong');
+    name.textContent = factionName(winner);
+    banner.append(eyebrow, name);
+    this.reveal.replaceChildren(flash);
+    const colors = [side, '#ffd06a', '#ffffff'];
+    for (let i = 0; i < 40; i++) {
+      const spark = document.createElement('span');
+      spark.className = 'vx-pledge-spark';
+      const angle = (i / 40) * Math.PI * 2 + Math.random() * 0.3;
+      const dist = 160 + Math.random() * 260;
+      spark.style.setProperty('--dx', `${Math.round(Math.cos(angle) * dist)}px`);
+      spark.style.setProperty('--dy', `${Math.round(Math.sin(angle) * dist * 0.75)}px`);
+      spark.style.setProperty('--rot', `${Math.round(Math.random() * 720 - 360)}deg`);
+      spark.style.setProperty('--delay', `${Math.round(Math.random() * 140)}ms`);
+      spark.style.setProperty('--c', colors[i % colors.length]);
+      this.reveal.appendChild(spark);
+    }
+    this.reveal.appendChild(banner);
+    this.reveal.dataset.show = '1';
   }
 
   private render(): void {
     const data = this.data;
     if (!data) return;
     const busts: BustEntry[] = [];
+    this.busts = busts;
+    this.cardEls.clear();
     this.cards.replaceChildren();
 
     // Never the wire's list directly — see dossiersFor. Both sides get a card
-    // whether or not anyone has been elected on either of them.
+    // whether or not anyone has joined either of them.
     const dossiers = dossiersFor(data.factions);
     const total = dossiers.reduce((n, f) => n + f.memberCount, 0);
-    // Before the first election nobody is a president, and telling the player to
-    // point at one is telling them the screen is broken. Name who is really up
-    // there instead.
-    this.footText.textContent = dossiers.some((f) => f.president)
-      ? 'Point at a president to get their attention.'
-      : 'No elections have been held yet — either side is yours to join.';
+    // Only tell the player to point at somebody when somebody is standing there.
+    this.footText.textContent = dossiers.some((f) => f.faces?.length)
+      ? 'Point at a citizen to get their attention.'
+      : 'Either side is yours to join.';
 
     dossiers.forEach((info, index) => {
       const card = document.createElement('div');
       card.className = 'vx-pledge-card';
       const side = `#${factionColor(info.faction).toString(16).padStart(6, '0')}`;
       card.style.setProperty('--side', side);
+      this.cardEls.set(info.faction, card);
 
       // --- crest -------------------------------------------------------------
       const crest = document.createElement('div');
@@ -462,130 +636,72 @@ export class FactionPicker {
       crest.append(mark, name, strength);
 
       // --- the plinth --------------------------------------------------------
-      // A president stands on it, named. A VACANT seat stands NOBODY: the
-      // plinth says the office is open and nothing else, because any character
-      // drawn there is a president the faction has not got.
+      // The citizens online on this side right now stand on it, named. With
+      // nobody online the plinth stays empty and says so.
       const stage = document.createElement('div');
       stage.className = 'vx-pledge-stage';
       const plinth = document.createElement('div');
       plinth.className = 'vx-pledge-plinth';
       stage.appendChild(plinth);
 
-      const prez = info.president;
-      if (prez) {
-        const slot = document.createElement('div');
-        slot.className = 'vx-pledge-slot';
-        stage.insertBefore(slot, plinth);
-        const key = `pledge:${info.faction}:${prez.username.toLowerCase()}`;
-        this.standUp(busts, {
-          key, slot,
-          face: {
-            username: prez.username,
-            cosmetics: sanitizeCosmetics(prez.cosmetics, skinSeed(prez.username)),
-          },
-          // The two plinths get different salutes so the screen never plays the
-          // same animation twice side by side.
-          pose: BUST_POSES[index % BUST_POSES.length],
+      const faces = info.faces ?? [];
+      if (faces.length) {
+        const width = 100 / faces.length;
+        faces.forEach((citizen, i) => {
+          const slot = document.createElement('div');
+          slot.className = 'vx-pledge-slot';
+          slot.style.left = `${i * width}%`;
+          slot.style.width = `${width}%`;
+          stage.insertBefore(slot, plinth);
+          const key = `pledge:${info.faction}:${citizen.username.toLowerCase()}`;
+          this.standUp(busts, {
+            key, slot,
+            face: {
+              username: citizen.username,
+              cosmetics: sanitizeCosmetics(citizen.cosmetics, skinSeed(citizen.username)),
+            },
+            // Neighbouring figures get different salutes so the screen never
+            // plays the same animation twice side by side.
+            pose: BUST_POSES[(index + i) % BUST_POSES.length],
+          });
+          // The name belongs to the figure, so it goes on the plinth under its
+          // slot rather than inside it, where the canvas would paint over it.
+          const nameplate = document.createElement('div');
+          nameplate.className = 'vx-pledge-stage-name';
+          nameplate.style.left = `${i * width}%`;
+          nameplate.style.width = `${width}%`;
+          nameplate.textContent = citizen.username;
+          stage.appendChild(nameplate);
+          slot.addEventListener('mouseenter', () => bustStage.setHover(key));
+          slot.addEventListener('mouseleave', () => bustStage.setHover(null));
         });
-        // The name belongs to the figure, so it goes on the plinth rather than
-        // in the body — and it is the ONLY text on the stage, sitting under the
-        // bust slot instead of inside it, where the canvas would paint over it.
-        const nameplate = document.createElement('div');
-        nameplate.className = 'vx-pledge-stage-name';
-        nameplate.textContent = prez.username;
-        stage.appendChild(nameplate);
-        stage.addEventListener('mouseenter', () => bustStage.setHover(key));
-        stage.addEventListener('mouseleave', () => bustStage.setHover(null));
       } else {
-        const seat = document.createElement('div');
-        seat.className = 'vx-pledge-openseat';
-        const seatGlyph = document.createElement('span');
-        seatGlyph.innerHTML = iconSvg('crown');
-        const seatLabel = document.createElement('span');
-        seatLabel.textContent = 'Seat vacant';
-        seat.append(seatGlyph, seatLabel);
-        stage.appendChild(seat);
+        const empty = document.createElement('div');
+        empty.className = 'vx-pledge-empty';
+        const glyph = document.createElement('span');
+        glyph.innerHTML = iconSvg('flag');
+        const label = document.createElement('span');
+        label.textContent = 'Nobody online';
+        empty.append(glyph, label);
+        stage.appendChild(empty);
       }
 
       // --- body --------------------------------------------------------------
       const body = document.createElement('div');
       body.className = 'vx-pledge-body';
 
-      const who = document.createElement('div');
-      who.className = 'vx-pledge-prez';
-      const whoParty = document.createElement('div');
-      whoParty.className = 'vx-pledge-prez-party';
-      whoParty.textContent = prez ? prez.partyName : 'The office is open';
-      // A president is named on their own plinth; repeating it as a heading here
-      // said the same word twice, an inch apart.
-      if (!prez) {
-        const whoName = document.createElement('div');
-        whoName.className = 'vx-pledge-prez-name';
-        whoName.textContent = 'No president';
-        who.appendChild(whoName);
-      }
-      who.appendChild(whoParty);
-      if (prez?.slogan) {
-        const slogan = document.createElement('div');
-        slogan.className = 'vx-pledge-prez-slogan';
-        slogan.textContent = `“${prez.slogan}”`;
-        who.appendChild(slogan);
-      }
-      if (!prez) {
-        // Said plainly, because an empty plinth used to read as a side that was
-        // shut: an unheld faction is joined like any other, and the vacancy is
-        // the reason to pick it rather than a reason not to.
+      if (!info.memberCount) {
         const note = document.createElement('div');
         note.className = 'vx-pledge-open-note';
-        note.textContent = info.memberCount
-          ? 'Nobody has won an election here yet. Join now, stand a party, and the presidency could be yours inside the week.'
-          : 'Nobody has pledged here yet. Join and you are its first citizen — and its first candidate.';
-        who.appendChild(note);
-      }
-      body.appendChild(who);
-
-      if (prez?.promises.length) {
-        const promises = document.createElement('div');
-        promises.className = 'vx-pledge-promises';
-        for (const i of prez.promises) {
-          const line = document.createElement('div');
-          line.className = 'vx-pledge-promise';
-          const tick = document.createElement('span');
-          tick.innerHTML = iconSvg('check');
-          const text = document.createElement('span');
-          text.textContent = PRESET_PROMISES[i] ?? '';
-          line.append(tick, text);
-          promises.appendChild(line);
-        }
-        body.appendChild(promises);
-      }
-
-      // The president's actual kit — hover for names and runes.
-      if (prez) {
-        const gear = document.createElement('div');
-        gear.className = 'vx-pledge-gear';
-        const label = document.createElement('div');
-        label.className = 'vx-pledge-gear-label';
-        label.textContent = 'Carrying';
-        const chips = document.createElement('div');
-        chips.className = 'vx-gov-chips';
-        chips.appendChild(itemChip(data.atlasCanvas, prez.held ?? null, 'Empty-handed'));
-        const armor = prez.armor ?? [];
-        const slots = ['Helmet', 'Chestplate', 'Leggings', 'Boots'];
-        for (let i = 0; i < 4; i++) {
-          chips.appendChild(itemChip(data.atlasCanvas, armor[i] ?? null, `No ${slots[i].toLowerCase()}`));
-        }
-        gear.append(label, chips);
-        body.appendChild(gear);
+        note.textContent = 'Nobody has pledged here yet. Join and you are its first citizen.';
+        body.appendChild(note);
       }
 
       const stats = document.createElement('div');
       stats.className = 'vx-pledge-stats';
       const cells: [string, string][] = [
         [String(info.memberCount), 'Citizens'],
-        [`${Math.round(info.taxRate * 100)}%`, 'Tax'],
-        [String(info.kitStock), 'Kits ready'],
-        [String(info.treasuryCount), 'In treasury'],
+        [total > 0 ? `${Math.round((info.memberCount / total) * 100)}%` : '—', 'Of all citizens'],
       ];
       for (const [value, label] of cells) {
         const stat = document.createElement('div');
@@ -628,36 +744,7 @@ export class FactionPicker {
       }
       body.appendChild(roster);
 
-      // --- the commitment ----------------------------------------------------
-      const join = document.createElement('div');
-      join.className = 'vx-pledge-join';
-      const confirming = this.confirming === info.faction;
-      if (confirming) join.dataset.confirming = '1';
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'vx-gov-btn';
-      button.dataset.kind = confirming ? 'danger' : 'primary';
-      button.textContent = confirming
-        ? `Yes — I am ${factionName(info.faction)} for good`
-        : `Fight for ${factionName(info.faction)}`;
-      button.addEventListener('click', () => {
-        if (this.confirming === info.faction) {
-          this.onPledge?.(info.faction);
-          return;
-        }
-        // First click arms, second commits. A permanent, unrecoverable choice
-        // should never be one stray click away.
-        this.confirming = info.faction;
-        this.render();
-      });
-      const warn = document.createElement('div');
-      warn.className = 'vx-pledge-warn';
-      warn.textContent = confirming
-        ? 'This is permanent. You will never be able to join the other side on this account.'
-        : '';
-      join.append(button, warn);
-
-      card.append(crest, stage, body, join);
+      card.append(crest, stage, body);
       this.cards.appendChild(card);
     });
 

@@ -449,7 +449,7 @@ export function buildAvatarBody(
   cosmetics: Cosmetics, shirtOverride?: THREE.Color
 ): AvatarBody {
   // Sanitize on the way in. Cosmetics reach here straight off the wire on the
-  // bust paths (duel ladder, election plinths), and a blob written by an older
+  // bust paths (duel ladder, pledge-screen plinths), and a blob written by an older
   // build can be missing a field or carry an index the palette no longer has —
   // an unguarded `PALETTE[i].hex` would take the whole handler down with it.
   const c = sanitizeCosmetics(cosmetics);

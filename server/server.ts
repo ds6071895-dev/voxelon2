@@ -17,7 +17,6 @@ import { Accounts, Account } from '../src/net/accounts';
 import { WARFARE_TREE, sanitizeWarfare, warfareAvailable } from '../src/warfare';
 import { ITEMS, Item } from '../src/items';
 import { isMinigameOnly } from '../src/minigame_items';
-import { FACTIONS, type Faction, factionName } from '../src/teams';
 import {
   COMEBACK_HEARTS, ELIMINATION_MS, PERMANENT_UNTIL, formatRemaining,
   isPermanentElimination,
@@ -145,9 +144,9 @@ game.onRevive = (target, faction, by) => {
   if (ok) { saveAccounts(); console.log(`[REVIVE] ${by} revived ${target}`); }
   return ok;
 };
-// FACTION GOVERNMENT: the pure core has no account store, so allegiance and the
-// one-per-account recruit kit are written here. Both are PERMANENT flags, which
-// is exactly why they live on the account record and not in the client blob.
+// FACTIONS: the pure core has no account store, so allegiance is written here.
+// It is a PERMANENT flag, which is exactly why it lives on the account record
+// and not in the client blob.
 game.onPledge = (username, faction) => {
   const res = accounts.pledge(username, faction, Date.now());
   if (res.ok) {
@@ -158,12 +157,6 @@ game.onPledge = (username, faction) => {
 };
 game.factionRoster = (faction, limit) => accounts.factionMembers(faction, limit);
 game.factionCitizens = (faction) => accounts.factionCounts()[faction] ?? 0;
-game.kitClaimed = (username) => accounts.kitClaimed(username);
-game.onClaimKit = (username) => {
-  const ok = accounts.claimKit(username);
-  if (ok) saveAccounts();
-  return ok;
-};
 
 let worldDirty = false;
 function saveWorld(): void {
@@ -575,6 +568,7 @@ setInterval(() => {
   vaultLast = now;
   dispatch(game.tickVaultEncounters(dt));
   dispatch(game.tickWarfare(dt));
+  dispatch(game.tickTraps(dt)); // Trapcraft: triggers + damage-over-time at 20 Hz
 }, 1000 / 20);
 
 let last = Date.now();
@@ -583,14 +577,13 @@ setInterval(() => {
   const dt = (now - last) / 1000;
   last = now;
   game.tickRegen(dt);
-  game.tickMachines(dt);
+  dispatch(game.tickMachines(dt)); // rig events: jams, gushers, well fires
   const moved = game.tickItems(dt);
   dispatch(game.tickTurrets(dt));
   dispatch(game.tickWar(dt)); // advances worldTime + the shrinking border
   dispatch(game.tickDuels());
   dispatch(game.tickParty());
   dispatch(game.tickSeason(dt));
-  dispatch(game.tickPolitics(dt)); // weekly elections + the coalesced treasury sync
   broadcastPlayerCounts();
   for (const cid of authed.keys()) {
     send(cid, { t: 'snapshot', players: game.snapshotFor(cid), worldTime: game.clockTime() }, true);
@@ -698,19 +691,6 @@ function grantXp(name: string, amount: number): { username: string; total: numbe
   return { username: account.username, total };
 }
 
-/**
- * The faction(s) an operator named: a name ("crimson"), an id ("0"), or "all"
- * / nothing for every side. Returns null for anything else, so a typo counts a
- * vote nobody asked to have counted.
- */
-function factionsNamed(word: string | undefined): Faction[] | null {
-  const key = (word ?? 'all').toLowerCase();
-  if (key === 'all' || key === 'both' || key === '*') return FACTIONS.slice();
-  const match = FACTIONS.find((f) =>
-    f.name.toLowerCase() === key || String(f.id) === key);
-  return match ? [match] : null;
-}
-
 /** Commands only the terminal may run — granting operator is never in-game. */
 const CONSOLE_ONLY = new Set(['op', 'deop']);
 
@@ -732,8 +712,6 @@ const HELP = [
   '  war schedule <delay> <min>    - schedule a war in <delay> min, lasting <min>',
   '  war cancel                    - end/cancel the war (back to peacetime)',
   '  war status                    - show the current war / next-war timer',
-  '  election tally [faction|all]  - count the votes NOW and seat the winner',
-  '  election status               - presidents, terms, parties, tax, kits',
   '  flags on|off                  - arm/lock flag breaking (default: locked)',
   '  flags reset                   - send every flag home to its own faction',
   '  flags status                  - who holds which flag right now',
@@ -913,31 +891,6 @@ function runCommand(line: string, out: (text: string) => void = console.log,
           log(game.warStatusText());
         } else {
           log('usage: war start|schedule|cancel|status');
-        }
-        break;
-      }
-      case 'election': case 'vote': {
-        // The weekly count, on demand. `adminTallyElection` moves the deadline
-        // into the past and runs the SAME tick the clock would have run, so a
-        // forced count seats exactly who the real one would have seated — and
-        // the next term opens behind it, as usual.
-        const sub = (parts[1] || 'status').toLowerCase();
-        if (sub === 'tally' || sub === 'end' || sub === 'count' || sub === 'now') {
-          const sides = factionsNamed(parts[2]);
-          if (!sides) {
-            log(`no faction "${parts[2]}" — use ${FACTIONS.map((f) => f.name.toLowerCase())
-              .join('|')}|all`);
-            break;
-          }
-          for (const f of sides) {
-            dispatch(game.adminTallyElection(f.id));
-            log(`counted ${factionName(f.id)}'s vote`);
-          }
-          log(game.politicsStatusText());
-        } else if (sub === 'status') {
-          log(game.politicsStatusText());
-        } else {
-          log('usage: election tally [faction|all] | election status');
         }
         break;
       }

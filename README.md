@@ -250,17 +250,22 @@ initial title screen; pausing in-game freezes your view over the live world.
   **multi-block, animated structures**: the **Autominer** (a 2-tall rig with a
   spinning drill) drills the column beneath it, banking ore at a rate
   proportional to the local ore richness through a level-gated **ore filter**
-  (basic stone/coal/iron → +gold/redstone at L10 → +diamond/titanium at L30);
+  (basic stone/coal/iron → +gold/redstone at R3 → +diamond/titanium at R6);
   the **Oil Derrick** (a 3-tall lattice tower with a rocking pumpjack) pumps
   **Oil Barrels** from the oil field (useless on dry ground). Each occupies a
   real footprint (solid frame cells you can't walk through). Right-click any
-  cell to open a UI with an HP bar, owner, storage fill, live rate, the
-  ore-filter checklist, **~100 levels** of two upgrade axes (**production**
-  rate+tiers, **storage** cap) with **geometric** costs that pull in cobalt the
-  machine can't self-produce (so it can't bankroll its own grind), plus
-  **Collect** and **Claim** buttons. Machines are **contested**: anyone nearby
-  can collect, upgrade, claim, or **sabotage** them — left-clicking a machine
-  deals HP damage instead of mining, and destroying one spills its stored loot
+  cell to open an industrial dashboard with a live haul preview, output/minute,
+  time-to-full, site diagnostics, accessible ore toggles and exact upgrade gains.
+  **Ten production ranks and ten buffer ranks** replace the old 100-level grind.
+  Starter production is 4.8× faster; one selected ore gets +50% yield, two get
+  +25%. Ranks 3/6/10 add visible hardware and 192 free buffer slots each. New
+  materials include riveted paint, brushed metal, chevrons, grilles and screens;
+  mechanisms stop on full/dry rigs and lamps report operating status. Costs grow
+  linearly, use obtainable supplies, and let derricks reinvest oil. Production
+  upgrades repair the hull. Legacy saves migrate once, retaining output/unlocks
+  and grandfathering large buffers. Machines are **contested**: anyone nearby
+  can collect, upgrade or claim. Relocation keeps all stock and upgrades;
+  explosives destroy the machine and spill its stored loot
   *and* drops the machine block to the raider. The simulation is a pure,
   unit-tested module (`machines.ts`) fed by `Terrain.oreRichness` /
   `oilRichness`, so yields need no loaded chunk: the **server owns** every
@@ -269,6 +274,37 @@ initial title screen; pausing in-game freezes your view over the live world.
   **offline single-player runs the identical module locally** (the client
   predicts the fill bar and reconciles on open/collect in multiplayer). Oil
   Barrels are the intended fuel currency for a later warfare layer.
+- **Deep Bore & Wildcat Well (machines v3):** the **Autominer** now sinks a
+  bore under itself: depth bands unlock ores (iron 15 m, redstone/gold ~40 m,
+  diamond 70 m, **titanium 96 m**), capped by rank and by consumable **drill
+  bits** (Iron/Diamond/Titanium). Coal/oil **fuel** runs it at full speed (dry
+  rigs trickle at 25%); **Overdrive** doubles output and burns double fuel
+  while heat climbs until the rig **jams** (Packed Snow coolant, or a hull-costly
+  vent). Veins thin as they are worked, and a 9×9 **Seismic Survey** on the
+  dashboard shows where to relocate. The **Oil Derrick** drills a well, then
+  **strikes**: rich fields often throw a **gusher** (a burst of oil and faster,
+  wasteful flow) that stays uncapped and flammable until capped; an explosion
+  sets an uncapped well **ablaze** (smother with sand). Output follows
+  reservoir **pressure** (restore it with frac-sand injection), a refinery
+  selector makes Crude, Tar or Fuel Tanks, and a derrick pipes crude into its
+  owner's rigs within 12 blocks. Rigs belong to their placer and faction:
+  raiders can **siphon** a quarter of the buffer (every 90 s, owner alerted) or
+  hack a rig below 25% hull. Discrete events (jam, strike, gusher, fire) are
+  server-broadcast; `scripts/machine_smoke.ts` covers the model.
+- **Trapcraft:** traps are server-authoritative block-entities
+  (`traps.ts`) with an owner and faction; they never fire on you or your allies,
+  arm a moment after placing, and concealed ones (spikes, landmine, bear trap,
+  pressure/shock plates, tripwire) are drawn per viewer by `trapmodels.ts`, so
+  enemies only see them while sneaking within 3 blocks or holding a **Trap
+  Detector** (10). Sneak + hold USE for 2.5 s to **defuse**; mining an armed
+  hostile trap sets it off. Triggers (**Pressure Plate**, **Tripwire Laser**,
+  **Motion Sensor**, **Trap Timer**, **Lever**) fire every same-owner receiver
+  on one of 16 colour **channels** within 24 blocks. Receivers: pop-up **Spike
+  Trap**, **Landmine** (remote det), **Claymore**, **Flame Jet** (burns oil),
+  **Dart** and **Net Launchers**, **Shock Plate**, **Fall/Wall Traps** and the
+  **Alarm Bell**. Hits apply status effects (`effects.ts`: bleed, poison slow,
+  stun, pinned, netted, burning) and trap kills read in the kill feed as
+  "X was shredded by Y's Claymore". `scripts/trap_smoke.ts` covers the model.
 
 ## Warfare Command
 
@@ -530,7 +566,7 @@ hearts persist through the account save and the offline localStorage mirror
 An earlier revision added the **automation economy** (M13): Cobalt ore, an oil
 field, and the server-authoritative **Autominer** / **Oil Derrick** machines —
 contested **multi-block, animated structures** with HP/sabotage, ownership/
-claiming, a level-gated ore filter, and ~100 levels of geometric-cost
+claiming, a rank-gated ore filter, and ten ranks of predictable-cost
 production/storage upgrades, all driven by a pure, unit-tested yield module
 mirrored offline — the economic base for the planned warfare layer (missiles,
 turrets, drones consuming stored oil/ore).

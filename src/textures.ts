@@ -2304,6 +2304,162 @@ function paintWallTrapSide(p: Painter, seed: number): void {
   for (const x of [3, 8, 13]) p.set(x, 12, [150, 154, 164, 255]); // rivets
 }
 
+// --- Deep Bore drill bits + Trapcraft ------------------------------------------
+
+/** Drill bit sprite: a fluted cutting head on a collar and shank. */
+function paintDrillBit(head: RGBA, hi: RGBA) {
+  return (p: Painter, seed: number): void => {
+    const collar: RGBA = [96, 100, 110, 255], shank: RGBA = [150, 40, 36, 255];
+    for (let y = 11; y <= 14; y++) { p.set(7, y, shank); p.set(8, y, shade(shank, 0.8)); }
+    for (let x = 5; x <= 10; x++) { p.set(x, 10, collar); p.set(x, 9, shade(collar, 1.2)); }
+    // Head: a cone tapering to a point at the top, with a spiral flute.
+    for (let y = 1; y <= 8; y++) {
+      const half = Math.floor((y + 1) / 2);
+      for (let x = 8 - half; x < 8 + half; x++) {
+        const flute = ((x + y) & 3) === 0;
+        p.set(x, y, flute ? shade(head, 0.62) : shade(head, 0.9 + hash2(seed, x, y) * 0.2));
+      }
+    }
+    p.set(7, 1, hi); p.set(6, 4, hi); p.set(5, 7, hi);
+    outlineSprite(p);
+  };
+}
+
+/** Trap Detector: a wand with a pulsing radar dish. */
+function paintTrapDetector(p: Painter, seed: number): void {
+  for (let i = 0; i < 7; i++) p.set(4 + i, 14 - i, shade(WAR_STEEL, 0.9 + hash2(seed, i, 1) * 0.2));
+  for (let y = 2; y <= 8; y++) for (let x = 8; x <= 14; x++) {
+    const d = Math.hypot(x - 11, y - 5);
+    if (d > 3.6) continue;
+    p.set(x, y, d < 1.2 ? [255, 90, 70, 255] : Math.abs(d - 2.4) < 0.5 ? WAR_CYAN : WAR_DARK);
+  }
+  outlineSprite(p);
+}
+
+/** Pressure Plate: a flush steel pad with a sunken red contact. */
+function paintPressurePlate(p: Painter, seed: number): void {
+  const steel: RGBA = [104, 108, 116, 255];
+  p.fill((x, y) => shade(steel, speckle(seed, x, y, 0.09)));
+  for (let i = 1; i < 15; i++) { p.set(i, 1, shade(steel, 1.25)); p.set(1, i, shade(steel, 1.18)); p.set(i, 14, shade(steel, 0.7)); p.set(14, i, shade(steel, 0.72)); }
+  for (let y = 6; y <= 9; y++) for (let x = 6; x <= 9; x++) p.set(x, y, [168, 40, 36, 255]);
+  p.set(6, 6, [236, 96, 80, 255]);
+}
+
+/** Tripwire Laser emitter (cross billboard): a post with a glowing red lens. */
+function paintTripwireHook(p: Painter, seed: number): void {
+  p.fill(() => [0, 0, 0, 0]);
+  for (let y = 7; y <= 15; y++) { p.set(7, y, shade(WAR_STEEL, 0.9 + hash2(seed, 7, y) * 0.2)); p.set(8, y, shade(WAR_STEEL, 0.75)); }
+  for (let y = 3; y <= 7; y++) for (let x = 5; x <= 10; x++) p.set(x, y, WAR_DARK);
+  p.set(7, 5, [255, 70, 60, 255]); p.set(8, 5, [255, 150, 130, 255]);
+  p.set(7, 4, [210, 40, 36, 255]); p.set(8, 4, [210, 40, 36, 255]);
+}
+
+function paintMotionSensorTop(p: Painter, seed: number): void {
+  p.fill((x, y) => shade(WAR_STEEL, speckle(seed, x, y, 0.1)));
+  for (let y = 3; y <= 12; y++) for (let x = 3; x <= 12; x++) {
+    const d = Math.hypot(x - 7.5, y - 7.5);
+    if (d < 4.6) p.set(x, y, d < 1.5 ? [120, 255, 150, 255] : shade([40, 60, 70, 255], 1 + (4.6 - d) * 0.08));
+  }
+}
+function paintMotionSensorSide(p: Painter, seed: number): void {
+  p.fill((x, y) => shade(WAR_STEEL, speckle(seed, x, y, 0.12)));
+  for (let x = 2; x < 14; x += 3) p.set(x, 11, [120, 255, 150, 255]);
+}
+
+function paintTrapTimerTop(p: Painter, seed: number): void {
+  p.fill((x, y) => shade([112, 112, 112, 255], speckle(seed, x, y, 0.12)));
+  for (let a = 0; a < 12; a++) {
+    const t = (a / 12) * Math.PI * 2;
+    p.set(Math.round(7.5 + Math.cos(t) * 5), Math.round(7.5 + Math.sin(t) * 5), [214, 176, 62, 255]);
+  }
+  for (let i = 0; i < 4; i++) p.set(8, 7 - i, [200, 40, 36, 255]);
+  for (let i = 0; i < 3; i++) p.set(8 + i, 8, [240, 240, 240, 255]);
+}
+function paintTrapTimerSide(p: Painter, seed: number): void {
+  p.fill((x, y) => shade([104, 104, 104, 255], speckle(seed, x, y, 0.12)));
+  for (let x = 3; x <= 12; x++) p.set(x, 7, [200, 40, 36, 255]);
+  p.set(7, 7, [255, 120, 100, 255]);
+}
+
+/** Claymore top: olive plate stamped with a FRONT arrow. */
+function paintClaymoreTop(p: Painter, seed: number): void {
+  const olive: RGBA = [88, 98, 62, 255];
+  p.fill((x, y) => shade(olive, speckle(seed, x, y, 0.1)));
+  const hi: RGBA = [226, 214, 150, 255];
+  for (let i = 0; i < 5; i++) { p.set(7 - i, 3 + i, hi); p.set(8 + i, 3 + i, hi); }
+  for (let y = 4; y <= 12; y++) { p.set(7, y, hi); p.set(8, y, hi); }
+}
+function paintClaymoreSide(p: Painter, seed: number): void {
+  p.fill((x, y) => shade([72, 80, 52, 255], speckle(seed, x, y, 0.12)));
+  for (let x = 2; x <= 13; x++) p.set(x, 5, [200, 190, 130, 255]);
+  p.set(3, 9, [220, 60, 50, 255]); p.set(12, 9, [220, 60, 50, 255]);
+}
+
+function paintFlameJetTop(p: Painter, seed: number): void {
+  p.fill((x, y) => shade([70, 70, 74, 255], speckle(seed, x, y, 0.12)));
+  for (let y = 4; y <= 11; y++) for (let x = 4; x <= 11; x++) {
+    const d = Math.hypot(x - 7.5, y - 7.5);
+    if (d < 3.8) p.set(x, y, d < 1.6 ? [255, 170, 60, 255] : [30, 26, 24, 255]);
+  }
+}
+function paintFlameJetSide(p: Painter, seed: number): void {
+  p.fill((x, y) => shade([88, 84, 80, 255], speckle(seed, x, y, 0.12)));
+  for (let x = 0; x < 16; x++) {
+    const hot = ((x >> 1) & 1) === 0;
+    p.set(x, 2, hot ? [226, 110, 40, 255] : [40, 34, 30, 255]);
+  }
+  for (let y = 5; y <= 13; y++) { p.set(3, y, [58, 54, 50, 255]); p.set(12, y, [58, 54, 50, 255]); }
+}
+
+function paintDartLauncherFront(p: Painter, seed: number): void {
+  p.fill((x, y) => shade([118, 118, 118, 255], speckle(seed, x, y, 0.14)));
+  for (const [cx, cy] of [[5, 5], [10, 5], [5, 10], [10, 10]]) {
+    p.set(cx, cy, [20, 20, 20, 255]); p.set(cx + 1, cy, [20, 20, 20, 255]);
+    p.set(cx, cy + 1, [20, 20, 20, 255]); p.set(cx + 1, cy + 1, [60, 160, 70, 255]);
+  }
+}
+function paintDartLauncherSide(p: Painter, seed: number): void {
+  p.fill((x, y) => shade([108, 108, 108, 255], speckle(seed, x, y, 0.14)));
+  for (let x = 0; x < 16; x++) p.set(x, 13, [60, 140, 70, 255]);
+}
+
+function paintNetLauncherTop(p: Painter, seed: number): void {
+  p.fill((x, y) => shade([100, 100, 100, 255], speckle(seed, x, y, 0.12)));
+  for (let y = 3; y <= 12; y++) for (let x = 3; x <= 12; x++) {
+    p.set(x, y, ((x + y) % 3 === 0 || (x - y + 30) % 3 === 0) ? [226, 220, 196, 255] : [44, 40, 36, 255]);
+  }
+}
+function paintNetLauncherSide(p: Painter, seed: number): void {
+  p.fill((x, y) => shade([96, 96, 96, 255], speckle(seed, x, y, 0.12)));
+  for (let x = 0; x < 16; x++) { p.set(x, 3, [226, 220, 196, 255]); p.set(x, 12, [70, 70, 70, 255]); }
+}
+
+function paintShockPlate(p: Painter, seed: number): void {
+  p.fill((x, y) => shade([60, 64, 76, 255], speckle(seed, x, y, 0.1)));
+  const arc: RGBA = [140, 210, 255, 255];
+  for (let x = 1; x < 15; x++) {
+    p.set(x, 4 + ((x * 5) % 3), arc);
+    p.set(x, 11 - ((x * 7) % 3), shade(arc, 0.8));
+  }
+  for (let i = 0; i < 16; i += 5) { p.set(i, 0, [230, 196, 60, 255]); p.set(0, i, [230, 196, 60, 255]); }
+}
+
+function paintAlarmBellTop(p: Painter, seed: number): void {
+  p.fill((x, y) => shade([96, 70, 44, 255], speckle(seed, x, y, 0.12)));
+  for (let y = 3; y <= 12; y++) for (let x = 3; x <= 12; x++) {
+    const d = Math.hypot(x - 7.5, y - 7.5);
+    if (d < 4.8) p.set(x, y, shade([226, 184, 64, 255], 0.8 + (4.8 - d) * 0.07));
+  }
+  p.set(7, 7, [120, 80, 30, 255]);
+}
+function paintAlarmBellSide(p: Painter, seed: number): void {
+  p.fill((x, y) => shade([96, 70, 44, 255], speckle(seed, x, y, 0.12)));
+  for (let x = 3; x <= 12; x++) for (let y = 3; y <= 10; y++) {
+    if (Math.abs(x - 7.5) < 2 + (y - 3) * 0.5) p.set(x, y, shade([226, 184, 64, 255], 0.85 + hash2(seed, x, y) * 0.2));
+  }
+  p.set(7, 12, [200, 40, 36, 255]); p.set(8, 12, [200, 40, 36, 255]);
+}
+
 /** Boat sprite: a little plank hull from the side — curved bow, dark cockpit,
  *  a paddle poking up. */
 function paintBoat(p: Painter, seed: number): void {
@@ -2906,6 +3062,27 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.BombCasingSprite]: paintBombCasing,
   [Tile.AerialBombSprite]: paintAerialBomb,
   [Tile.RepairKitSprite]: paintRepairKit,
+  [Tile.DrillBitIron]: paintDrillBit([176, 180, 190, 255], [240, 244, 250, 255]),
+  [Tile.DrillBitDiamond]: paintDrillBit([96, 222, 214, 255], [220, 255, 250, 255]),
+  [Tile.DrillBitTitanium]: paintDrillBit([150, 148, 176, 255], [226, 224, 246, 255]),
+  [Tile.TrapDetector]: paintTrapDetector,
+  [Tile.PressurePlate]: paintPressurePlate,
+  [Tile.TripwireHook]: paintTripwireHook,
+  [Tile.MotionSensorTop]: paintMotionSensorTop,
+  [Tile.MotionSensorSide]: paintMotionSensorSide,
+  [Tile.TrapTimerTop]: paintTrapTimerTop,
+  [Tile.TrapTimerSide]: paintTrapTimerSide,
+  [Tile.ClaymoreTop]: paintClaymoreTop,
+  [Tile.ClaymoreSide]: paintClaymoreSide,
+  [Tile.FlameJetTop]: paintFlameJetTop,
+  [Tile.FlameJetSide]: paintFlameJetSide,
+  [Tile.DartLauncherFront]: paintDartLauncherFront,
+  [Tile.DartLauncherSide]: paintDartLauncherSide,
+  [Tile.NetLauncherTop]: paintNetLauncherTop,
+  [Tile.NetLauncherSide]: paintNetLauncherSide,
+  [Tile.ShockPlate]: paintShockPlate,
+  [Tile.AlarmBellTop]: paintAlarmBellTop,
+  [Tile.AlarmBellSide]: paintAlarmBellSide,
   [Tile.HelicopterKitSprite]: paintHelicopterKit,
   // --- Minigame-only art ---
   [Tile.BwBedTopA]: paintBedTop([196, 62, 68, 255], [255, 146, 132, 255]),

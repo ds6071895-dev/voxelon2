@@ -7,15 +7,18 @@
 import { BLOCKS, Block, isVaultMasonry, migrateBlockId } from '../blocks';
 import { ITEMS, ItemStack, gunVolley } from '../items';
 import {
-  MachineState, MachineType, applyUpgrade, claimMachine, collectMachine,
+  MachineState, MachineType, MachineAct, YieldContext, applyUpgrade, claimMachine, collectMachine,
   damageMachine, machineHeight, machineTypeForBlock, newMachine, setFilter,
-  tickMachine, sanitizeState as sanitizeMachineState,
+  tickMachine, sanitizeState as sanitizeMachineState, machineFriendly, machineCanClaim,
+  siphonMachine, applyMachineAct, igniteWell, relocateMachine, linkFuel, machineContext,
+  depositInto, HOPPER_SIDES, totalStored,
 } from '../machines';
 import { Item } from '../items';
 import {
   TurretState, applyTurretUpgrade, claimTurret, damageTurret, newTurret,
   turretArmed, turretConsumeShot, turretDamage, turretLoad, turretRange,
-  sanitizeTurretState,
+  sanitizeTurretState, turretCanClaim, turretFriendly, turretHasLineOfSight, turretMobShotOk,
+  TURRET_MAX_HIT, TURRET_MUZZLE_Y,
 } from '../turrets';
 import {
   FACTIONS, NO_FACTION, balancedFaction, factionName, isFaction, sameFaction,
@@ -34,16 +37,6 @@ import {
   factionHasFlag, carriedBy, flagHome, FLAG_HIT_COOLDOWN,
 } from '../flags';
 import {
-  Broadcast, PoliticsState, castVote, disbandParty, electionOf, foundParty,
-  governmentOf, isPresident, newPolitics, partyById, pushBroadcast, rollCycle,
-  sanitizePolitics, setKit, setTaxRate, tallyElection, termExpired, voteCounts,
-} from '../politics';
-import {
-  Treasury, deposit, kitItemCount, kitStacks, setTreasuryPage,
-  levy, newTreasuries, raid, sanitizeTreasury, treasuryCount, treasuryInReach,
-  RAID_COOLDOWN, RAID_STACKS,
-} from '../treasury';
-import {
   ContributionRecord, WarfareProgress, buyWarfareNode, grantWarfareXp,
   newWarfare, sanitizeWarfare, settleWarfareXp,
   warfareOwns, warfareTier, MAX_HARDWARE_TIER,
@@ -54,7 +47,11 @@ import {
 } from '../vehicles';
 import { WARFARE_BLUEPRINTS } from '../crafting';
 import { GadgetCooldowns, gadgetOf, falloffDamage } from '../gadgets';
-import { leverFlips } from '../traps';
+import {
+  TrapField, TrapTarget, TrapTickResult, TrapBlast, trapKindForBlock, trapFriendly,
+  sanitizeTrap, TRAP_NAMES, TRAP_VERBS, TrapKind, CHANNELS, TIMER_INTERVALS,
+  FLAME_FUEL_CAP, FLAME_BURSTS_PER_BARREL, isTrapBlock,
+} from '../traps';
 import { sanitizeCosmetics } from '../character';
 import { Terrain } from '../terrain';
 import { structureChestTier, worldStructures } from '../structures';
@@ -66,7 +63,7 @@ import {
   worldVaults,
 } from '../vaults';
 import {
-  ClientMsg, EDIT_RANGE, CHEST_SLOTS, PICKUP_RANGE,
+  ClientMsg, EDIT_RANGE, RELOCATE_RANGE, CHEST_SLOTS, PICKUP_RANGE,
   ARMOR_POINT_CAP, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE,
   mitigate, TOUGHNESS_CAP, DuelLeaderboardEntry, ItemEntityInfo, PlayerInfo, PlayerSnapshot, ServerMsg,
   WORLD_SEED, WORLD_HALF, WORLD_BORDER, CORE_HALF, makeUsername, skinSeed, GameMode,
@@ -144,9 +141,6 @@ const UNSAFE_RESPAWN_BLOCKS = new Set<number>([
 ]);
 
 interface ServerPlayer extends PlayerInfo {
-  /** World-clock seconds of this player's last successful treasury raid, so one
-   *  raider cannot empty a strongbox by spamming the key. */
-  lastTreasuryRaid?: number;
   regenCooldown: number;
   regenTimer: number;
   /** Healing consumable (Bandage/Medkit): seconds of accelerated regen left +
@@ -311,12 +305,18 @@ interface ArenaSavedState {
 
 const GAME_MODES: GameMode[] = ['survival', 'creative', 'spectator'];
 
+/** Relocations are gated by horizontal distance between the old and new site. */
+function withinRelocateRange(x: number, z: number, tx: number, tz: number): boolean {
+  const dx = Math.floor(tx) - Math.floor(x), dz = Math.floor(tz) - Math.floor(z);
+  return dx * dx + dz * dz <= RELOCATE_RANGE * RELOCATE_RANGE;
+}
+
 /** Client messages a spectator may NOT send (world edits + combat + economy). */
 const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
-  'edit', 'lever', 'rangedAttack', 'shot', 'selfhurt', 'drop', 'pickup', 'chestSet',
+  'edit', 'lever', 'trapConfig', 'trapFuel', 'trapDefuse', 'machineAct', 'rangedAttack', 'shot', 'selfhurt', 'drop', 'pickup', 'chestSet',
   'machineConfig', 'machineUpgrade', 'machineCollect', 'machineHit', 'machineClaim',
   'machineMove', 'setSpawn',
-  'turretUpgrade', 'turretClaim', 'turretHit', 'turretLoad',
+  'turretUpgrade', 'turretClaim', 'turretMove', 'turretHit', 'turretLoad', 'turretMobShot',
   'gadgetUse', 'rocketBlast', 'xp',
   // Warfare Command: a spectator may never build, fire, fly or sabotage.
   'warfareBuy',
@@ -325,11 +325,8 @@ const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
   'heartConsume', 'heartWithdraw', 'beaconRevive', 'useHeal',
   'attune', 'totemTeleport',
   'vaultAttack', 'vaultChestOpen',
-  // Government: a spectator may watch an election, never take part in one or
-  // touch a treasury. Reading (the politics sync) is unaffected.
-  'pledgeFaction', 'foundParty', 'disbandParty', 'castVote',
-  'govBroadcast', 'govTax', 'govSetKit', 'govFundKits', 'claimKit', 'treasuryRaid',
-  'treasuryOpen', 'treasurySet',
+  // A spectator may read the faction dossiers, never swear allegiance.
+  'pledgeFaction',
 ]);
 
 /** One message the transport should deliver. `to` is a client id, or a
@@ -371,6 +368,16 @@ export class GameServer {
   private readonly edits = new Map<string, number>();
   private readonly chests = new Map<string, (ItemStack | null)[]>();
   private readonly machines = new Map<string, MachineState>();
+  /** Terrain richness per machine key (pure per column, so cache it). */
+  private readonly machineCtx = new Map<string, YieldContext>();
+  /** Rig key -> worldTime of the last raider siphon (one per 90 s). */
+  private readonly siphonAt = new Map<string, number>();
+  private machineLinkTimer = 0;
+  private machineHopperTimer = 0;
+  /** Trapcraft: every placed trap (owner/channel/facing/cooldowns). */
+  private readonly traps = new TrapField();
+  /** Damage-over-time from trap effects, per player id. */
+  private readonly trapDots = new Map<number, { bleed: number; burn: number; acc: number; by: number }>();
   // Warfare layer (M14).
   private readonly turrets = new Map<string, TurretState>();
   // Capture the flag: one flag per faction, disarmed until an admin arms them.
@@ -423,17 +430,7 @@ export class GameServer {
    *  member of `faction`; returns success. `by` is credited in the target's
    *  next-login notice. */
   onRevive?: (target: string, faction: number, by: string) => boolean;
-  // --- FACTION GOVERNMENT ----------------------------------------------------
-  /** Elections + governments for every faction (politics.ts). Persisted. */
-  private politics: PoliticsState = newPolitics(0);
-  /** One strongbox per faction, standing beside its flag pad (treasury.ts). */
-  private treasuries = newTreasuries();
-  /** Seconds since the election clock was last checked (it only needs to tick
-   *  about once a second — a weekly deadline does not need 20Hz). */
-  private politicsAccum = 0;
-  /** A treasury changed and the clients have not been told yet. Coalesced so a
-   *  faction mining flat out costs one sync a second, not one per block. */
-  private politicsDirty = false;
+  // --- FACTIONS ---------------------------------------------------------------
   /** Set by the shell to write a pledge onto the ACCOUNT. Returns false when
    *  the store refuses it — which is what makes the choice permanent across a
    *  reconnect, not just for the length of one session. */
@@ -442,9 +439,6 @@ export class GameServer {
    *  who is online. The allegiance screen shows both. */
   factionRoster?: (faction: number, limit: number) => string[];
   factionCitizens?: (faction: number) => number;
-  /** Set by the shell: has this account taken its one recruit kit / take it. */
-  kitClaimed?: (username: string) => boolean;
-  onClaimKit?: (username: string) => boolean;
   // Vaults (Milestone D): per-vault boss HP + per-player loot ledger, keyed
   // by the anchor chunk "cx,cz". Persisted in the world save.
   private readonly vaults = new Map<string, VaultServerState>();
@@ -490,9 +484,6 @@ export class GameServer {
     this.rng = rng;
     this.duels = new Duels(secureDuelToken);
     this.terrain = new Terrain(seed);
-    // Elections run on the WALL clock, not the world clock: a term is a week of
-    // real time whether or not the server was up for all of it.
-    this.politics = newPolitics(this.wallNow());
     this.vehicles = new VehicleSim({
       solid: (x, y, z) => this.solidAt(x, y, z),
       groundY: (x, z) => this.surfaceY(x, z),
@@ -843,10 +834,15 @@ export class GameServer {
       // there is nothing an arena client loses by not being told.
       edits: this.worldEdits(),
       items: [...this.items.values()],
-      turrets: [...this.turrets.entries()].map(([k, state]) => {
+      machines: [...this.machines.entries()].filter(([k]) => !isArenaEditKey(k)).map(([k, state]) => {
         const [x, y, z] = k.split(',').map(Number);
         return { x, y, z, state };
       }),
+      turrets: [...this.turrets.entries()].filter(([k]) => !isArenaEditKey(k)).map(([k, state]) => {
+        const [x, y, z] = k.split(',').map(Number);
+        return { x, y, z, state };
+      }),
+      traps: this.traps.serialize().filter(([k]) => !isArenaEditKey(k)),
       season: { number: this.season.number, timeLeft: seasonWireTimeLeft(this.season) },
       war: { ...warSnapshot(this.war, this.worldTime),
         score: this.warKills.slice(), wins: this.warWins.slice() },
@@ -856,11 +852,7 @@ export class GameServer {
       duelProfile: player.duelProfile,
       duelLeaderboard: account?.duelLeaderboard ?? [],
       helis: this.vehicles.snapshot(),
-      politics: this.politics,
       factions: this.factionPublics(),
-      treasury: isFaction(faction) ? this.treasuryOf(faction).slots : undefined,
-      inbox: this.inboxFor(faction),
-      kitClaimed: this.kitClaimed?.(username) ?? false,
     };
     return [
       { to: id, msg: welcome },
@@ -1095,24 +1087,41 @@ export class GameServer {
       }
       case 'flagHit': return this.handleFlagHit(p);
       case 'edit':
-        return this.handleEdit(p, msg.x, msg.y, msg.z, msg.block);
+        return this.handleEdit(p, msg.x, msg.y, msg.z, msg.block, msg.f);
       case 'lever': {
-        // A lever pull: recompute the flips over the edit log (levers + traps
-        // only ever exist as player edits) and broadcast them as normal edits.
-        // The lever itself must be within reach; the LINKED traps may not be —
-        // that's the point of a lever — so this is server-computed, not a
-        // client edit batch.
+        // A lever pull latches/unlatches its wiring channel (traps.ts). The
+        // lever itself must be within reach; the LINKED receivers may not be —
+        // that's the point of a lever — so this is server-computed.
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
         const bx = Math.floor(msg.x), by = Math.floor(msg.y), bz = Math.floor(msg.z);
-        const flips = leverFlips(
-          (x, y, z) => this.edits.get(`${x},${y},${z}`) ?? Block.Air, bx, by, bz);
-        const out: Outbound[] = [];
-        for (const f of flips) {
-          this.edits.set(`${f.x},${f.y},${f.z}`, f.block);
-          out.push({ to: 'all', msg: { t: 'edit', x: f.x, y: f.y, z: f.z, block: f.block } });
-        }
-        return out;
+        const lever = this.ensureTrap(bx, by, bz);
+        if (!lever || lever.kind !== TrapKind.Lever) return [];
+        // A hostile lever can still be yanked — levers are the one trap part
+        // anyone may operate (a raider flipping your wall traps is fair play).
+        return this.applyTrapResult(this.traps.pull(bx, by, bz, this.trapSolid(), this.trapTargets()));
       }
+      case 'trapConfig': {
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        const bx = Math.floor(msg.x), by = Math.floor(msg.y), bz = Math.floor(msg.z);
+        const t = this.ensureTrap(bx, by, bz);
+        if (!t || !trapFriendly(t, p.username, p.faction)) return [];
+        if (fin(msg.channel)) t.channel = Math.max(0, Math.min(CHANNELS - 1, Math.floor(msg.channel)));
+        if (t.kind === TrapKind.Timer && (TIMER_INTERVALS as readonly number[]).includes(msg.interval as number)) {
+          t.interval = msg.interval as number;
+        }
+        return [{ to: 'all', msg: { t: 'trap', x: bx, y: by, z: bz, state: t } }];
+      }
+      case 'trapFuel': {
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z) || !fin(msg.count)) return [];
+        const bx = Math.floor(msg.x), by = Math.floor(msg.y), bz = Math.floor(msg.z);
+        const t = this.ensureTrap(bx, by, bz);
+        if (!t || t.kind !== TrapKind.FlameJet || !trapFriendly(t, p.username, p.faction)) return [];
+        const barrels = Math.max(0, Math.min(10, Math.floor(msg.count)));
+        t.fuel = Math.min(FLAME_FUEL_CAP, t.fuel + barrels * FLAME_BURSTS_PER_BARREL);
+        return [{ to: 'all', msg: { t: 'trap', x: bx, y: by, z: bz, state: t } }];
+      }
+      case 'trapDefuse':
+        return this.handleTrapDefuse(p, msg.x, msg.y, msg.z);
       case 'tpa': {
         if (p.dead || typeof msg.target !== 'string') return [];
         if (this.duels.phaseFor(p.id) || p.arenaSaved) {
@@ -1185,32 +1194,10 @@ export class GameServer {
         if (msg.data && typeof msg.data === 'object') p.savedClientData = msg.data;
         return [];
       case 'drop':
-        return this.handleDrop(p, msg.items, msg.x, msg.y, msg.z, msg.reason);
-      // --- FACTION GOVERNMENT --------------------------------------------------
+        return this.handleDrop(msg.items, msg.x, msg.y, msg.z);
+      // --- FACTIONS -----------------------------------------------------------
       case 'pledgeFaction':
         return this.handlePledge(p, msg.faction);
-      case 'foundParty':
-        return this.handleFoundParty(p, msg.name, msg.slogan, msg.promises);
-      case 'disbandParty':
-        return this.handleDisbandParty(p);
-      case 'castVote':
-        return this.handleVote(p, msg.partyId);
-      case 'govBroadcast':
-        return this.handleGovBroadcast(p, msg.text);
-      case 'govTax':
-        return this.handleGovTax(p, msg.rate);
-      case 'govSetKit':
-        return this.handleSetKit(p, msg.slots);
-      case 'govFundKits':
-        return this.handleFundKits(p, msg.count, msg.source);
-      case 'treasuryOpen':
-        return this.handleTreasuryOpen(p, msg.faction);
-      case 'treasurySet':
-        return this.handleTreasurySet(p, msg.faction, msg.page, msg.slots);
-      case 'claimKit':
-        return this.handleClaimKit(p);
-      case 'treasuryRaid':
-        return this.handleTreasuryRaid(p, msg.faction);
       case 'pickup':
         return this.handlePickup(p, msg.eid);
       case 'armor': {
@@ -1266,6 +1253,7 @@ export class GameServer {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
         const s = this.ensureMachine(msg.x, msg.y, msg.z);
         if (!s || s.type !== MachineType.Autominer) return [];
+        if (!machineFriendly(s, p.username, p.faction)) return this.machineRefresh(id, msg.x, msg.y, msg.z, s);
         setFilter(s, msg.filter);
         // All viewers refresh (server doesn't track who has it open).
         return [{ to: 'all', msg: { t: 'machine', x: msg.x, y: msg.y, z: msg.z, state: s } }];
@@ -1276,8 +1264,9 @@ export class GameServer {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
         const s = this.ensureMachine(msg.x, msg.y, msg.z);
         if (!s) return [];
-        // Cost is paid client-side (authoritative-lite); the server just bumps
-        // and caps the level so it can never exceed the max.
+        if (!machineFriendly(s, p.username, p.faction)) return this.machineRefresh(id, msg.x, msg.y, msg.z, s);
+        // Cost is paid client-side (the server holds no inventories); the
+        // server bumps and caps the level so it can never exceed the max.
         applyUpgrade(s, msg.axis);
         return [{ to: 'all', msg: { t: 'machine', x: msg.x, y: msg.y, z: msg.z, state: s } }];
       }
@@ -1285,19 +1274,33 @@ export class GameServer {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
         const s = this.ensureMachine(msg.x, msg.y, msg.z);
         if (!s) return [];
-        const taken = collectMachine(s);
+        const bx = Math.floor(msg.x), by = Math.floor(msg.y), bz = Math.floor(msg.z);
+        const friendly = machineFriendly(s, p.username, p.faction);
         const out: Outbound[] = [];
+        let taken: Record<number, number>;
+        if (friendly) {
+          taken = collectMachine(s);
+        } else {
+          // A raider can SIPHON a quarter of a hostile rig — once per 90 s,
+          // and the owner hears about it.
+          const key = `${bx},${by},${bz}`;
+          const last = this.siphonAt.get(key);
+          if (last !== undefined && this.worldTime - last < 90) {
+            return [{ to: id, msg: { t: 'notice', text: 'That rig was siphoned recently — its lines are dry.' } }];
+          }
+          this.siphonAt.set(key, this.worldTime);
+          taken = siphonMachine(s);
+          out.push({ to: 'all', msg: { t: 'machineFx', x: bx, y: by, z: bz, fx: 'siphon' } });
+          const owner = this.playerByName(s.owner);
+          if (owner) out.push({ to: owner.id, msg: { t: 'notice', text: `⚠ ${p.username} is siphoning your rig at ${bx}, ${bz}!` } });
+        }
         // Grant via the same dup-safe path as item pickups (leftover that won't
         // fit is re-dropped by the client), then refresh viewers.
         for (const [idStr, count] of Object.entries(taken)) {
           const itemId = Number(idStr);
           if (!ITEMS[itemId] || !fin(count) || count <= 0) continue;
-          // Automated output is faction income too — the server mints it here,
-          // so unlike a harvest drop there is nothing a client could mislabel.
-          const net = Math.floor(count) - this.levyInto(p.faction, itemId, Math.floor(count));
-          if (net > 0) out.push({ to: id, msg: { t: 'gotitem', item: itemId, count: net } });
+          out.push({ to: id, msg: { t: 'gotitem', item: itemId, count: Math.floor(count) } });
         }
-        this.politicsDirty = true;
         out.push({ to: 'all', msg: { t: 'machine', x: msg.x, y: msg.y, z: msg.z, state: s } });
         return out;
       }
@@ -1317,15 +1320,36 @@ export class GameServer {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
         const s = this.ensureMachine(msg.x, msg.y, msg.z);
         if (!s) return [];
-        claimMachine(s, p.username);
+        if (!machineCanClaim(s, p.username, p.faction)) {
+          return [...this.machineRefresh(id, msg.x, msg.y, msg.z, s),
+            { to: id, msg: { t: 'notice', text: 'Hostile rig — knock its hull below 25% before hacking it.' } }];
+        }
+        const hacked = !!s.owner && s.owner !== p.username && !machineFriendly(s, p.username, p.faction);
+        claimMachine(s, p.username, p.faction);
+        const out: Outbound[] = [{ to: 'all', msg: { t: 'machine', x: msg.x, y: msg.y, z: msg.z, state: s } }];
+        if (hacked) out.push({ to: id, msg: { t: 'notice', text: 'Rig hacked — it works for you now.' } });
+        return out;
+      }
+      case 'machineAct': {
+        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        const s = this.ensureMachine(msg.x, msg.y, msg.z);
+        if (!s) return [];
+        if (!machineFriendly(s, p.username, p.faction)) return this.machineRefresh(id, msg.x, msg.y, msg.z, s);
+        const acts: readonly MachineAct[] = ['fuel', 'bit', 'overdrive', 'coolant', 'vent', 'cap', 'smother', 'inject', 'refine'];
+        if (!acts.includes(msg.act)) return [];
+        if (!applyMachineAct(s, msg.act, fin(msg.n) ? msg.n : 0, fin(msg.item) ? Math.floor(msg.item) : 0)) {
+          return this.machineRefresh(id, msg.x, msg.y, msg.z, s);
+        }
         return [{ to: 'all', msg: { t: 'machine', x: msg.x, y: msg.y, z: msg.z, state: s } }];
       }
       case 'machineMove': {
         if (!fin(msg.x, msg.y, msg.z, msg.tx, msg.ty, msg.tz)) return [];
-        // Must be within reach of BOTH the machine and the destination.
-        if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
+        // You stand at the destination; the rig may be up to RELOCATE_RANGE
+        // behind you — but only a rig you're friendly to (no remote theft).
         if (!this.nearMachine(p, msg.tx, msg.ty, msg.tz)) return [];
-        // Enemy-claim protection on either end blocks the move (no shield theft).
+        if (!withinRelocateRange(msg.x, msg.z, msg.tx, msg.tz)) return [];
+        const s = this.machines.get(`${Math.floor(msg.x)},${Math.floor(msg.y)},${Math.floor(msg.z)}`);
+        if (!s || !machineFriendly(s, p.username, p.faction)) return [];
         return this.moveMachine(msg.x, msg.y, msg.z, msg.tx, msg.ty, msg.tz);
       }
       case 'setSpawn': {
@@ -1355,8 +1379,25 @@ export class GameServer {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
         const s = this.ensureTurret(msg.x, msg.y, msg.z);
         if (!s) return [];
+        if (!turretCanClaim(s, p.username, p.faction)) {
+          // Refresh the requester's panel so its optimistic claim rolls back.
+          return [{ to: id, msg: { t: 'turret', x: msg.x, y: msg.y, z: msg.z, state: s } },
+            { to: id, msg: { t: 'notice', text: 'Enemy turret — knock it offline before hacking it.' } }];
+        }
+        const hacked = !!s.owner && s.owner !== p.username;
         claimTurret(s, p.username, p.faction);
-        return [{ to: 'all', msg: { t: 'turret', x: msg.x, y: msg.y, z: msg.z, state: s } }];
+        const out: Outbound[] = [{ to: 'all', msg: { t: 'turret', x: msg.x, y: msg.y, z: msg.z, state: s } }];
+        if (hacked) out.push({ to: id, msg: { t: 'notice', text: 'Turret hacked — it fights for you now.' } });
+        return out;
+      }
+      case 'turretMove': {
+        if (!fin(msg.x, msg.y, msg.z, msg.tx, msg.ty, msg.tz)) return [];
+        if (!this.nearMachine(p, msg.tx, msg.ty, msg.tz)) return [];
+        if (!withinRelocateRange(msg.x, msg.z, msg.tx, msg.tz)) return [];
+        const s = this.ensureTurret(msg.x, msg.y, msg.z);
+        if (!s || !turretFriendly(s, p.username, p.faction)) return [];
+        return this.moveTurret(Math.floor(msg.x), Math.floor(msg.y), Math.floor(msg.z),
+          Math.floor(msg.tx), Math.floor(msg.ty), Math.floor(msg.tz));
       }
       case 'turretLoad': {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
@@ -1370,11 +1411,30 @@ export class GameServer {
         if (!this.nearMachine(p, msg.x, msg.y, msg.z)) return [];
         const s = this.ensureTurret(msg.x, msg.y, msg.z);
         if (!s) return [];
-        const dmg = fin(msg.amount) ? Math.max(0, Math.min(1000, msg.amount)) : 0;
+        const dmg = fin(msg.amount) ? Math.max(0, Math.min(TURRET_MAX_HIT, msg.amount)) : 0;
         if (damageTurret(s, dmg)) {
           return this.destroyTurret(Math.floor(msg.x), Math.floor(msg.y), Math.floor(msg.z));
         }
         return [{ to: 'all', msg: { t: 'turret', x: msg.x, y: msg.y, z: msg.z, state: s } }];
+      }
+      case 'turretMobShot': {
+        // Mobs are client-side: a friendly client aims the turret at one of its
+        // own hostiles and the server spends (and broadcasts) the shot.
+        if (!fin(msg.x, msg.y, msg.z, msg.tx, msg.ty, msg.tz) || p.dead) return [];
+        const s = this.ensureTurret(msg.x, msg.y, msg.z);
+        if (!s) return [];
+        const bx = Math.floor(msg.x), by = Math.floor(msg.y), bz = Math.floor(msg.z);
+        // The sender must be near enough to have the mob loaded around them.
+        if (Math.hypot(p.x - bx - 0.5, p.z - bz - 0.5) > 96) return [];
+        if (!turretMobShotOk(s, bx, by, bz, msg.tx, msg.ty, msg.tz, p.username, p.faction)) return [];
+        if (!turretHasLineOfSight(bx, by, bz, msg.tx, msg.ty, msg.tz,
+          (x, y, z) => this.solidAt(x, y, z))) return [];
+        s.facingYaw = Math.atan2(msg.tx - bx - 0.5, msg.tz - bz - 0.5);
+        turretConsumeShot(s);
+        return [
+          { to: 'all', msg: { t: 'turretFire', x: bx, y: by, z: bz, tx: msg.tx, ty: msg.ty, tz: msg.tz } },
+          { to: 'all', msg: { t: 'turret', x: bx, y: by, z: bz, state: s } },
+        ];
       }
       // --- WARFARE COMMAND ---------------------------------------------------
       case 'warfareBuy': {
@@ -3621,11 +3681,8 @@ export class GameServer {
     const out: Outbound[] = [];
     for (const s of vaultLoot(this.seed, st.cx, st.cz, st.tier, p.username, roll)) {
       if (!ITEMS[s.id] || !fin(s.count) || s.count <= 0) continue;
-      // Vault haul is taxed like any other take from the world.
-      const net = Math.floor(s.count) - this.levyInto(p.faction, s.id, Math.floor(s.count));
-      if (net > 0) out.push({ to: p.id, msg: { t: 'gotitem', item: s.id, count: net } });
+      out.push({ to: p.id, msg: { t: 'gotitem', item: s.id, count: Math.floor(s.count) } });
     }
-    this.politicsDirty = true;
     out.push({ to: p.id, msg: { t: 'vaultLooted', cx: st.cx, cz: st.cz } });
     out.push({ to: p.id, msg: { t: 'notice', text: `[VAULT] Tier ${st.tier} vault treasure claimed!` } });
     return out;
@@ -3671,7 +3728,11 @@ export class GameServer {
     // Vacate the old footprint (anchor + parts) for everyone.
     this.machines.delete(fromKey);
     out.push(...this.clearFootprint(fx, fy, fz, type, true));
-    // Rebuild at the destination and carry the state over.
+    // Rebuild at the destination and carry the state over (the bore/well
+    // restarts on fresh ground).
+    relocateMachine(state);
+    this.machineCtx.delete(fromKey);
+    this.machineCtx.delete(toKey);
     this.machines.set(toKey, state);
     this.edits.set(toKey, blockId);
     out.push({ to: 'all', msg: { t: 'edit', x: tx, y: ty, z: tz, block: blockId } });
@@ -3751,18 +3812,257 @@ export class GameServer {
     return out;
   }
 
-  /** Tick every placed machine using its column's terrain richness. Call from
-   *  the per-second server loop alongside tickRegen. */
-  tickMachines(dt: number): void {
-    if (!fin(dt) || dt <= 0) return;
-    for (const [key, s] of this.machines) {
+  /** Tick every placed machine using its column's terrain richness. Returns
+   *  broadcasts for discrete events (jam, strike/gusher, bit wear-out, fire)
+   *  and burns down any rig whose well fire ate its hull. Clients predict the
+   *  continuous parts (depth, heat, fuel) with the same pure sim. */
+  tickMachines(dt: number): Outbound[] {
+    if (!fin(dt) || dt <= 0) return [];
+    const out: Outbound[] = [];
+    for (const [key, s] of [...this.machines]) {
       const parts = key.split(',');
-      const x = Number(parts[0]), z = Number(parts[2]);
-      const ctx = s.type === MachineType.Autominer
-        ? { ore: this.terrain.oreRichness(x, z) }
-        : { oil: this.terrain.oilRichness(x, z) };
-      tickMachine(s, ctx, dt);
+      const x = Number(parts[0]), y = Number(parts[1]), z = Number(parts[2]);
+      let ctx = this.machineCtx.get(key);
+      if (!ctx || (s.type === MachineType.Autominer) !== !!ctx.ore) {
+        ctx = machineContext(this.terrain, x, z, s.type);
+        this.machineCtx.set(key, ctx);
+      }
+      // Keep the rig's faction current (a player who switched sides takes it).
+      const owner = s.owner ? this.playerByName(s.owner) : undefined;
+      if (owner && owner.faction !== s.faction) s.faction = owner.faction;
+      const ev = tickMachine(s, ctx, dt);
+      if (s.hp <= 0) { // a well fire burned it down
+        out.push(...this.destroyMachine(key, x, y, z));
+        continue;
+      }
+      const fx = ev.jammed ? 'jam' : ev.gusher ? 'gusher' : ev.struck ? 'strike'
+        : ev.fireOut ? 'fireOut' : ev.bitBroke ? 'bitBroke' : null;
+      if (fx) {
+        out.push({ to: 'all', msg: { t: 'machineFx', x, y, z, fx } });
+        out.push({ to: 'all', msg: { t: 'machine', x, y, z, state: s } });
+      }
     }
+    // Output hopper: every few seconds a rig empties into an adjacent chest.
+    this.machineHopperTimer += dt;
+    if (this.machineHopperTimer >= 4) {
+      this.machineHopperTimer = 0;
+      for (const [key, s] of this.machines) {
+        if (totalStored(s) <= 0) continue;
+        const [x, y, z] = key.split(',').map(Number);
+        for (const [dx, dz] of HOPPER_SIDES) {
+          const ck = `${x + dx},${y},${z + dz}`;
+          if (this.edits.get(ck) !== Block.Chest) continue;
+          const slots = this.chests.get(ck) ?? new Array<ItemStack | null>(CHEST_SLOTS).fill(null);
+          if (!depositInto(slots, s.stored)) continue;
+          this.chests.set(ck, slots);
+          out.push({ to: 'all', msg: { t: 'chest', x: x + dx, y, z: z + dz, slots } });
+          out.push({ to: 'all', msg: { t: 'machine', x, y, z, state: s } });
+          if (totalStored(s) <= 0) break;
+        }
+      }
+    }
+    this.machineLinkTimer += dt;
+    if (this.machineLinkTimer >= 1) {
+      this.machineLinkTimer = 0;
+      linkFuel([...this.machines].map(([key, state]) => {
+        const [x, y, z] = key.split(',').map(Number);
+        return { key, x, y, z, state };
+      }));
+    }
+    return out;
+  }
+
+  /** Re-send a rig's true state to one client (rolls back a refused prediction). */
+  private machineRefresh(to: number, x: number, y: number, z: number, s: MachineState): Outbound[] {
+    return [{ to, msg: { t: 'machine', x: Math.floor(x), y: Math.floor(y), z: Math.floor(z), state: s } }];
+  }
+
+  // --- TRAPCRAFT -------------------------------------------------------------
+
+  /** Trap state at a cell, created (ownerless) if the edit log holds a trap
+   *  block with no entity yet — legacy traps from before Trapcraft. */
+  private ensureTrap(x: number, y: number, z: number): ReturnType<TrapField['get']> {
+    const block = this.edits.get(`${x},${y},${z}`);
+    if (block === undefined || !isTrapBlock(block)) return undefined;
+    return this.traps.get(x, y, z) ?? this.traps.place(x, y, z, block) ?? undefined;
+  }
+
+  private trapSolid(): (x: number, y: number, z: number) => boolean {
+    return (x, y, z) => this.solidAt(x, y, z);
+  }
+
+  /** Every player a trap may catch right now. */
+  private trapTargets(): TrapTarget[] {
+    const out: TrapTarget[] = [];
+    for (const p of this.players.values()) {
+      if (p.dead || p.arenaSaved || p.mode !== 'survival' || this.duels.phaseFor(p.id)) continue;
+      if (!fin(p.x, p.y, p.z)) continue;
+      out.push({ id: String(p.id), name: p.username, faction: p.faction, x: p.x, y: p.y, z: p.z });
+    }
+    return out;
+  }
+
+  /** Advance every trap against the live players (20 Hz loop). */
+  tickTraps(dt: number): Outbound[] {
+    if (!fin(dt) || dt <= 0) return [];
+    const out: Outbound[] = [];
+    if (this.traps.size) {
+      out.push(...this.applyTrapResult(this.traps.tick(dt, this.trapTargets(), this.trapSolid())));
+    }
+    // Bleed / burning damage over time.
+    for (const [pid, dot] of [...this.trapDots]) {
+      const p = this.players.get(pid);
+      if (!p || p.dead || (dot.bleed <= 0 && dot.burn <= 0)) { this.trapDots.delete(pid); continue; }
+      dot.bleed = Math.max(0, dot.bleed - dt);
+      dot.burn = Math.max(0, dot.burn - dt);
+      dot.acc += dt;
+      if (dot.acc >= 1) {
+        dot.acc -= 1;
+        const dmg = (dot.bleed > 0 ? 1 : 0) + (dot.burn > 0 ? 1.5 : 0);
+        if (dmg > 0) out.push(...this.applyDamage(p, dmg, this.players.has(dot.by) ? dot.by : -1));
+      }
+    }
+    return out;
+  }
+
+  /** Turn a pure trap result into edits, damage, effects and broadcasts. */
+  private applyTrapResult(res: TrapTickResult): Outbound[] {
+    const out: Outbound[] = [];
+    for (const w of res.writes) {
+      const key = `${w.x},${w.y},${w.z}`;
+      this.edits.set(key, w.block);
+      out.push({ to: 'all', msg: { t: 'edit', x: w.x, y: w.y, z: w.z, block: w.block } });
+    }
+    for (const f of res.fx) {
+      out.push({ to: 'all', msg: { t: 'trapFx', x: f.x, y: f.y, z: f.z, kind: f.kind, what: f.what,
+        tx: f.tx, ty: f.ty, tz: f.tz } });
+    }
+    for (const h of res.hits) {
+      const victim = this.players.get(Number(h.target));
+      if (!victim) continue;
+      const owner = h.owner ? this.playerByName(h.owner) : undefined;
+      const by = owner ? owner.id : -1;
+      for (const e of h.effects) {
+        out.push({ to: victim.id, msg: { t: 'effect', kind: e.kind, seconds: e.seconds } });
+        if (e.kind === 'bleed' || e.kind === 'burning') {
+          const dot = this.trapDots.get(victim.id) ?? { bleed: 0, burn: 0, acc: 0, by };
+          if (e.kind === 'bleed') dot.bleed = Math.max(dot.bleed, e.seconds);
+          else dot.burn = Math.max(dot.burn, e.seconds);
+          dot.by = by;
+          this.trapDots.set(victim.id, dot);
+        }
+      }
+      const knock = h.kx || h.kz ? { x: h.kx, y: h.ky, z: h.kz } : undefined;
+      out.push(...this.withTrapCause(this.applyDamage(victim, h.damage, by, knock), h.kind, h.owner));
+    }
+    for (const b of res.blasts) out.push(...this.trapBlast(b));
+    for (const a of res.alarms) {
+      for (const p of this.players.values()) {
+        if (p.username !== a.owner && !(a.owner && sameFaction(p.faction, a.faction))) continue;
+        out.push({ to: p.id, msg: { t: 'alarm', x: a.x, y: a.y, z: a.z, owner: a.owner, intruder: a.name } });
+      }
+    }
+    for (const k of new Set(res.changed)) {
+      const [x, y, z] = k.split(',').map(Number);
+      const t = this.traps.get(x, y, z);
+      if (t) out.push({ to: 'all', msg: { t: 'trap', x, y, z, state: t } });
+    }
+    for (const k of res.removed) {
+      const [x, y, z] = k.split(',').map(Number);
+      out.push({ to: 'all', msg: { t: 'trap', x, y, z, state: null } });
+    }
+    return out;
+  }
+
+  /** Stamp a trap cause onto any killfeed line this damage produced. */
+  private withTrapCause(out: Outbound[], kind: TrapKind, owner: string): Outbound[] {
+    for (const o of out) {
+      if (o.msg.t === 'killfeed') {
+        const verb = TRAP_VERBS[kind] ?? 'caught';
+        o.msg.how = owner ? `${verb} by ${owner}'s ${TRAP_NAMES[kind]}` : `${verb} by a ${TRAP_NAMES[kind]}`;
+      }
+    }
+    return out;
+  }
+
+  /** A landmine going off: owner/allies are spared (legacy mines hit all). */
+  private trapBlast(b: TrapBlast): Outbound[] {
+    const out: Outbound[] = [];
+    const owner = b.owner ? this.playerByName(b.owner) : undefined;
+    const by = owner ? owner.id : -1;
+    out.push({ to: 'all', msg: { t: 'blast', x: b.x, y: b.y, z: b.z } });
+    for (const t of this.players.values()) {
+      if (t.dead || t.arenaSaved) continue;
+      if (b.owner && (t.username === b.owner || sameFaction(t.faction, b.faction))) continue;
+      const d = Math.hypot(t.x - b.x, t.y - b.y, t.z - b.z);
+      const dmg = falloffDamage(b.damage, d, b.radius);
+      if (dmg > 0) {
+        out.push(...this.withTrapCause(this.applyDamage(t, dmg, by,
+          { x: (t.x - b.x) || 0.01, y: 0.4, z: (t.z - b.z) || 0 }), b.kind, b.owner));
+      }
+    }
+    const ir = Math.ceil(b.crater);
+    const r2 = b.crater * b.crater + 1;
+    for (let dx = -ir; dx <= ir; dx++) {
+      for (let dy = -ir; dy <= ir; dy++) {
+        for (let dz = -ir; dz <= ir; dz++) {
+          if (dx * dx + dy * dy + dz * dz > r2) continue;
+          const bx = Math.floor(b.x) + dx, by2 = Math.floor(b.y) + dy, bz = Math.floor(b.z) + dz;
+          const key = `${bx},${by2},${bz}`;
+          const existing = this.edits.get(key);
+          if (existing === undefined || existing === Block.Air) continue;
+          if ((BLOCKS[existing]?.hardness ?? -1) < 0) continue;
+          if (isVaultMasonry(existing) || existing === Block.VaultChest) continue;
+          if (machineTypeForBlock(existing) !== null || existing === Block.MachinePart) continue;
+          this.edits.set(key, Block.Air);
+          if (this.traps.remove(bx, by2, bz)) out.push({ to: 'all', msg: { t: 'trap', x: bx, y: by2, z: bz, state: null } });
+          out.push({ to: 'all', msg: { t: 'edit', x: bx, y: by2, z: bz, block: Block.Air } });
+        }
+      }
+    }
+    out.push(...this.blastMachines(b.x, b.y, b.z, b.crater + 1.5));
+    return out;
+  }
+
+  /** Explosions flatten rigs — except an UNCAPPED well, which catches fire. */
+  private blastMachines(x: number, y: number, z: number, radius: number): Outbound[] {
+    const out: Outbound[] = [];
+    for (const key of [...this.machines.keys()]) {
+      const [mx, my, mz] = key.split(',').map(Number);
+      if (Math.hypot(mx + 0.5 - x, my + 0.5 - y, mz + 0.5 - z) > radius) continue;
+      const s = this.machines.get(key)!;
+      if (igniteWell(s)) {
+        out.push({ to: 'all', msg: { t: 'machineFx', x: mx, y: my, z: mz, fx: 'ignite' } });
+        out.push({ to: 'all', msg: { t: 'machine', x: mx, y: my, z: mz, state: s } });
+        continue;
+      }
+      if (s.fire > 0) continue; // already burning: the fire finishes it
+      out.push(...this.destroyMachine(key, mx, my, mz));
+    }
+    return out;
+  }
+
+  /** Sneak up to a hostile trap and hold USE: it comes up safe, into your bag. */
+  private handleTrapDefuse(p: ServerPlayer, x: number, y: number, z: number): Outbound[] {
+    if (!fin(x, y, z) || p.dead) return [];
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    if (Math.hypot(bx + 0.5 - p.x, by + 0.5 - p.y, bz + 0.5 - p.z) > 3.5) return [];
+    if (!p.sneaking) return [{ to: p.id, msg: { t: 'notice', text: 'Sneak to defuse — one wrong step and it goes off.' } }];
+    const block = this.edits.get(`${bx},${by},${bz}`);
+    if (block === undefined || !isTrapBlock(block)) return [];
+    const t = this.ensureTrap(bx, by, bz);
+    if (!t) return [];
+    this.traps.remove(bx, by, bz);
+    this.edits.set(`${bx},${by},${bz}`, Block.Air);
+    // Item form is always the base variant (LeverOn → Lever, etc.).
+    const item = block === Block.LeverOn ? Block.Lever : block === Block.FallTrapOpen ? Block.FallTrap
+      : block === Block.WallTrapUp ? Block.WallTrap : block;
+    return [
+      { to: 'all', msg: { t: 'edit', x: bx, y: by, z: bz, block: Block.Air } },
+      { to: 'all', msg: { t: 'trap', x: bx, y: by, z: bz, state: null } },
+      { to: p.id, msg: { t: 'gotitem', item, count: 1 } },
+      { to: p.id, msg: { t: 'notice', text: `Defused a ${TRAP_NAMES[t.kind]}.` } },
+    ];
   }
 
   /** Create a server-owned item entity (registered for gravity) and return the
@@ -3822,34 +4122,19 @@ export class GameServer {
   }
 
   private handleDrop(
-    p: ServerPlayer, items: { id: number; count: number }[],
-    x: number, y: number, z: number, reason?: 'harvest' | 'manual'
+    items: { id: number; count: number }[], x: number, y: number, z: number
   ): Outbound[] {
     // Dead players DO drop (death spill), so no alive-guard here.
     if (!fin(x, y, z) || !Array.isArray(items)) return [];
     const out: Outbound[] = [];
     let n = 0;
-    // The faction TAX is levied here, on the way OUT of the world, rather than
-    // on pickup: a harvest passes through this path exactly once, whereas a
-    // player who drops and re-collects their own stack passes through pickup
-    // every time and would be taxed again on each pass.
-    const taxable = reason === 'harvest';
-    let levied = 0;
     for (const it of items) {
       if (n++ >= 64) break; // sanity cap per request
       if (!it || !ITEMS[it.id] || !fin(it.count) || it.count <= 0) continue;
       if (isMinigameOnly(it.id)) continue; // redundant with spawnItem, deliberately
-      // levy() never takes a whole stack, so `count` stays >= 1 here.
-      const count = taxable
-        ? Math.floor(it.count) - this.levyInto(p.faction, it.id, Math.floor(it.count))
-        : Math.floor(it.count);
-      if (count !== Math.floor(it.count)) levied++;
+      const count = Math.floor(it.count);
       out.push(...this.spawnItem(it.id, count, x + (this.rng() - 0.5), y, z + (this.rng() - 0.5)));
     }
-    // Mining is the highest-frequency message on the server, so a levy must NOT
-    // fan a politics message out to everybody per broken block. Mark it dirty
-    // and let the once-a-second election tick flush it.
-    if (levied > 0) this.politicsDirty = true;
     return out;
   }
 
@@ -3867,7 +4152,7 @@ export class GameServer {
   }
 
   private handleEdit(
-    p: ServerPlayer, x: number, y: number, z: number, block: number
+    p: ServerPlayer, x: number, y: number, z: number, block: number, facing?: number
   ): Outbound[] {
     if (p.dead) return [];
     if (!fin(x, y, z) || !fin(p.x, p.y, p.z)) return [];
@@ -3932,17 +4217,36 @@ export class GameServer {
         out.push(...this.spawnItem(Item.Cannonball, Math.min(64, ts.ammo), x + 0.5, y + 0.3, z + 0.5));
       }
     }
+    // Traps: breaking one drops its entity — and MINING a hostile armed trap
+    // (instead of sneaking up and defusing it) sets it off on the miner.
+    if (prev !== undefined && isTrapBlock(prev) && trapKindForBlock(prev) !== trapKindForBlock(block)) {
+      const target = { id: String(p.id), name: p.username, faction: p.faction, x: p.x, y: p.y, z: p.z };
+      if (!this.traps.has(x, y, z)) this.traps.place(x, y, z, prev);
+      out.push(...this.applyTrapResult(this.traps.spring(x, y, z, target, this.trapSolid())));
+    }
     this.edits.set(key, block);
     // Placing a machine block creates its server entity, which then ticks even
-    // with no chunk loaded and no one viewing it.
+    // with no chunk loaded and no one viewing it. The placer owns it.
     const placed = machineTypeForBlock(block);
     if (placed !== null && !this.machines.has(key)) {
-      this.machines.set(key, newMachine(placed));
+      this.machines.set(key, newMachine(placed, p.username, p.faction));
+      out.push({ to: 'all', msg: { t: 'machine', x, y, z, state: this.machines.get(key)! } });
+    }
+    const trapKind = trapKindForBlock(block);
+    if (trapKind !== null && trapKindForBlock(prev ?? -1) !== trapKind) {
+      const f = typeof facing === 'number' && Number.isFinite(facing) ? Math.max(0, Math.min(4, Math.floor(facing))) : 0;
+      const t = this.traps.place(x, y, z, block, p.username, p.faction, f);
+      if (t) out.push({ to: 'all', msg: { t: 'trap', x, y, z, state: t } });
     }
     if (block === Block.Turret && !this.turrets.has(key)) {
-      this.turrets.set(key, newTurret());
+      // The placer owns it straight away — a fresh turret isn't left inert
+      // (or up for grabs) until someone remembers to press Claim.
+      this.turrets.set(key, newTurret(p.username, p.faction));
     }
     out.push({ to: 'all', msg: { t: 'edit', x, y, z, block } });
+    // Everyone learns the new turret's owner/faction now, not on first open.
+    const placedTurret = block === Block.Turret ? this.turrets.get(key) : undefined;
+    if (placedTurret) out.push({ to: 'all', msg: { t: 'turret', x, y, z, state: placedTurret } });
     // Placing warfare hardware is revalidated here, because the client that
     // sent the edit cannot be trusted about its own blueprints.
     if (block === Block.Helipad && !this.hasBlueprint(p, Block.Helipad)) {
@@ -4304,6 +4608,28 @@ export class GameServer {
     return s;
   }
 
+  /** Relocate a turret, carrying its whole state (level/ammo/fuel/hp/owner)
+   *  to the new cell. The destination must be open air, not another entity. */
+  private moveTurret(fx: number, fy: number, fz: number, tx: number, ty: number, tz: number): Outbound[] {
+    const fromKey = `${fx},${fy},${fz}`, toKey = `${tx},${ty},${tz}`;
+    if (fromKey === toKey || ty < 0 || ty >= 256) return [];
+    const s = this.turrets.get(fromKey);
+    if (!s || this.turrets.has(toKey)) return [];
+    const dest = this.edits.get(toKey);
+    if (dest !== undefined && dest !== Block.Air && (machineTypeForBlock(dest) !== null ||
+      dest === Block.Chest || isTrapBlock(dest))) return [];
+    if (this.solidAt(tx + 0.5, ty + 0.5, tz + 0.5)) return [];
+    this.turrets.delete(fromKey);
+    this.edits.set(fromKey, Block.Air);
+    this.turrets.set(toKey, s);
+    this.edits.set(toKey, Block.Turret);
+    return [
+      { to: 'all', msg: { t: 'edit', x: fx, y: fy, z: fz, block: Block.Air } },
+      { to: 'all', msg: { t: 'edit', x: tx, y: ty, z: tz, block: Block.Turret } },
+      { to: 'all', msg: { t: 'turret', x: tx, y: ty, z: tz, state: s } },
+    ];
+  }
+
   /** Raid-destroy a turret: spill loaded ammo + drop the block, clear the cell. */
   private destroyTurret(x: number, y: number, z: number): Outbound[] {
     const key = `${x},${y},${z}`;
@@ -4329,23 +4655,31 @@ export class GameServer {
     const out: Outbound[] = [];
     for (const [key, s] of this.turrets) {
       s.cooldown = Math.max(0, s.cooldown - dt);
-      if (!s.owner || !turretArmed(s)) continue; // unclaimed/empty turrets are inert
+      // An online owner who switched faction takes the turret with them, so it
+      // never keeps guarding (and sparing) the side they left.
+      const owner = this.playerByName(s.owner);
+      if (owner && owner.faction !== s.faction) s.faction = owner.faction;
+      if (!turretArmed(s)) continue; // unclaimed/empty/disabled turrets are inert
       const [tx, ty, tz] = key.split(',').map(Number);
-      const cx = tx + 0.5, cy = ty + 0.5, cz = tz + 0.5;
+      const cx = tx + 0.5, cy = ty + TURRET_MUZZLE_Y, cz = tz + 0.5;
       const range = turretRange(s.level);
+      const solid = (x: number, y: number, z: number) => this.solidAt(x, y, z);
       let best: ServerPlayer | null = null;
       let bestD2 = range * range;
       for (const p of this.players.values()) {
         // Skip the dead, the owner, and anyone in the turret's own faction.
         if (p.dead || p.arenaSaved || p.username === s.owner || sameFaction(p.faction, s.faction)) continue;
-        const dx = p.x - cx, dy = p.y - cy, dz = p.z - cz;
+        const dx = p.x - cx, dy = p.y + 0.9 - cy, dz = p.z - cz;
         const d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 <= bestD2) { bestD2 = d2; best = p; }
+        if (d2 > bestD2) continue;
+        // Walls, hills and bunkers are cover: no shooting through terrain.
+        if (!turretHasLineOfSight(tx, ty, tz, p.x, p.y + 0.9, p.z, solid) &&
+            !turretHasLineOfSight(tx, ty, tz, p.x, p.y + 1.5, p.z, solid)) continue;
+        bestD2 = d2; best = p;
       }
       if (!best) continue;
       s.facingYaw = Math.atan2(best.x - cx, best.z - cz); // aim heading toward the target
       turretConsumeShot(s);
-      const owner = this.playerByName(s.owner);
       const horiz = Math.hypot(best.x - cx, best.z - cz) || 1;
       out.push(...this.applyDamage(best, Math.round(turretDamage(s.level)),
         owner ? owner.id : -1, { x: (best.x - cx) / horiz, y: 0.3, z: (best.z - cz) / horiz }));
@@ -4600,19 +4934,9 @@ export class GameServer {
     return counts;
   }
 
-  // --- FACTION GOVERNMENT: elections, the treasury, and the powers of office --
-  //
-  // Rules live in politics.ts / treasury.ts (pure, shared with the offline
-  // client and the smoke tests). Everything below is AUTHORITY: who is allowed
-  // to ask for what, and who gets told about it.
+  // --- FACTIONS: the allegiance pledge and the public dossiers --------------
 
   private notifySerial = 1;
-
-  private treasuryOf(faction: number): Treasury {
-    let t = this.treasuries.get(faction);
-    if (!t) { t = newTreasuries().get(faction)!; this.treasuries.set(faction, t); }
-    return t;
-  }
 
   /** Live (online) player count per faction — folded into the citizen count so
    *  a transport with no account store still shows something real. */
@@ -4628,76 +4952,35 @@ export class GameServer {
   /**
    * The per-faction dossiers the allegiance screen reads. Deliberately built
    * from scratch rather than sliced off internal state: a player inspecting a
-   * side they have not joined gets its president, its roster and its headline
-   * numbers, and NOT what its treasury is holding.
+   * side they have not joined gets its roster and its headcount, nothing more.
    */
   private factionPublics(): FactionPublic[] {
     const online = this.onlineFactionCounts();
     return FACTIONS.map((f) => {
-      const e = this.politics.elections[f.id];
-      const g = this.politics.governments[f.id];
       const roster = this.factionRoster?.(f.id, FACTION_ROSTER_LIMIT);
       const members = roster ?? [...this.players.values()]
         .filter((p) => p.faction === f.id).map((p) => p.username)
         .sort((a, b) => a.localeCompare(b)).slice(0, FACTION_ROSTER_LIMIT);
       // Faces for the card's plinth. Only ONLINE members can supply real
-      // cosmetics, and the president has their own portrait, so they are left
-      // out of the crowd. A faction whose seat is vacant is what these are for:
-      // its card shows the citizens you would be fighting alongside rather than
-      // an empty stage.
+      // cosmetics, so the card shows the citizens you would be fighting
+      // alongside right now.
       const faces = [...this.players.values()]
-        .filter((p) => p.faction === f.id &&
-          p.username.toLowerCase() !== (e.president ?? '').toLowerCase())
+        .filter((p) => p.faction === f.id)
         .sort((a, b) => a.username.localeCompare(b.username))
         .slice(0, FACTION_FACES_LIMIT)
         .map((p) => ({ username: p.username, cosmetics: p.cosmetics }));
-      const out: FactionPublic = {
+      return {
         faction: f.id,
         members,
         memberCount: this.factionCitizens?.(f.id) ?? online[f.id] ?? 0,
-        taxRate: g.taxRate,
-        kitStock: g.kitStock,
-        treasuryCount: treasuryCount(this.treasuryOf(f.id)),
         faces,
       };
-      if (e.president) {
-        const party = e.presidentPartyId ? partyById(e, e.presidentPartyId) : undefined;
-        // Their gear is only knowable while they are online; an absent president
-        // still shows their party and their face.
-        const live = [...this.players.values()]
-          .find((p) => p.username.toLowerCase() === e.president!.toLowerCase());
-        out.president = {
-          username: e.president,
-          partyName: party?.name ?? 'Independent',
-          slogan: party?.slogan ?? '',
-          promises: party?.promises ?? [],
-          cosmetics: live?.cosmetics,
-          held: live?.held ? { id: live.held, count: 1 } : null,
-          armor: (live?.armor ?? []).map((id) => (id ? { id, count: 1 } : null)),
-        };
-      }
-      return out;
     });
   }
 
-  /** The politics message for ONE recipient: shared state plus, if they have a
-   *  faction, that faction's treasury contents. */
-  private politicsMsgFor(p: ServerPlayer | undefined): ServerMsg {
-    const msg: Extract<ServerMsg, { t: 'politics' }> = {
-      t: 'politics', state: this.politics, factions: this.factionPublics(),
-    };
-    if (p && isFaction(p.faction)) msg.treasury = this.treasuryOf(p.faction).slots;
-    return msg;
-  }
-
-  /** Push the whole politics state to everyone. One message per player, because
-   *  the treasury half of it is faction-private. */
-  private broadcastPolitics(): Outbound[] {
-    const out: Outbound[] = [];
-    for (const p of this.players.values()) {
-      out.push({ to: p.id, msg: this.politicsMsgFor(p) });
-    }
-    return out;
+  /** Push the public dossiers to everyone. */
+  private broadcastFactions(): Outbound[] {
+    return [{ to: 'all', msg: { t: 'factions', factions: this.factionPublics() } }];
   }
 
   private makeNotification(
@@ -4727,37 +5010,6 @@ export class GameServer {
     return [{ to, msg: { t: 'govErr', reason } }];
   }
 
-  /** The inbox a player is handed on login: their faction's stored broadcasts,
-   *  oldest first, so somebody who was away still hears what was said. */
-  private inboxFor(faction: number): Notification[] {
-    const g = governmentOf(this.politics, faction);
-    if (!g) return [];
-    return g.broadcasts.map((b: Broadcast) => ({
-      id: `b${b.id}`, kind: 'broadcast' as const,
-      title: `${factionName(faction)} broadcast · ${b.from}`,
-      body: b.text, at: b.at,
-    }));
-  }
-
-  /**
-   * Levy the faction tax on items a citizen just pulled out of the world, and
-   * bank it. Returns how many were taken (0 when there is no tax, no faction, or
-   * the treasury is full — a full treasury must never eat somebody's ore, so
-   * anything that does not fit is left with the player).
-   */
-  private levyInto(faction: number, id: number, count: number): number {
-    if (!isFaction(faction)) return 0;
-    const g = governmentOf(this.politics, faction);
-    if (!g || g.taxRate <= 0) return 0;
-    const want = levy(count, g.taxRate, this.rng());
-    if (want <= 0) return 0;
-    const t = this.treasuryOf(faction);
-    const leftOver = deposit(t, id, want);
-    const banked = want - leftOver;
-    t.taken += banked;
-    return banked;
-  }
-
   /** Swear allegiance. One-shot: the account store owns "permanent", and this
    *  refuses anything it refuses. */
   private handlePledge(p: ServerPlayer, faction: number): Outbound[] {
@@ -4783,339 +5035,8 @@ export class GameServer {
     ];
     out.push(...this.notifyFaction(faction, 'system', 'A new citizen',
       `${p.username} has sworn allegiance to ${factionName(faction)}.`, p.id));
-    const g = governmentOf(this.politics, faction);
-    if (g && g.kitStock > 0 && !this.kitClaimed?.(p.username)) {
-      out.push({ to: p.id, msg: { t: 'notify', notif: this.makeNotification(
-        'kit', 'A recruit kit is waiting',
-        `${factionName(faction)} has funded ${g.kitStock} starter kit${g.kitStock === 1 ? '' : 's'}. ` +
-        'Open /president to claim yours.') } });
-    }
-    out.push(...this.broadcastPolitics());
+    out.push(...this.broadcastFactions());
     return out;
-  }
-
-  private handleFoundParty(
-    p: ServerPlayer, name: unknown, slogan: unknown, promises: unknown
-  ): Outbound[] {
-    const res = foundParty(this.politics, p.faction, p.username,
-      name, slogan, promises, this.wallNow());
-    if (!res.ok) return this.govErr(p.id, res.error ?? 'That party cannot stand.');
-    return [
-      ...this.notifyFaction(p.faction, 'election', 'A new party stands',
-        `${res.party!.name} — "${res.party!.slogan}" — led by ${p.username}.`),
-      ...this.broadcastPolitics(),
-    ];
-  }
-
-  private handleDisbandParty(p: ServerPlayer): Outbound[] {
-    const res = disbandParty(this.politics, p.faction, p.username);
-    if (!res.ok) return this.govErr(p.id, res.error ?? 'You do not lead a party.');
-    return this.broadcastPolitics();
-  }
-
-  private handleVote(p: ServerPlayer, partyId: unknown): Outbound[] {
-    if (typeof partyId !== 'string') return this.govErr(p.id, 'No such party.');
-    const res = castVote(this.politics, p.faction, p.username, partyId);
-    if (!res.ok) return this.govErr(p.id, res.error ?? 'That vote cannot be cast.');
-    return this.broadcastPolitics();
-  }
-
-  /** Guard shared by every power of office. */
-  private requirePresident(p: ServerPlayer): string | null {
-    if (!isFaction(p.faction)) return 'You have no faction.';
-    if (!isPresident(this.politics, p.faction, p.username)) {
-      return 'Only your faction\'s president can do that.';
-    }
-    return null;
-  }
-
-  private handleGovBroadcast(p: ServerPlayer, text: unknown): Outbound[] {
-    const denied = this.requirePresident(p);
-    if (denied) return this.govErr(p.id, denied);
-    const g = governmentOf(this.politics, p.faction)!;
-    const res = pushBroadcast(g, p.username, text, this.wallNow(), this.politics.serial++);
-    if (!res.ok) return this.govErr(p.id, res.error ?? 'Say something first.');
-    const notif = this.makeNotification('broadcast',
-      `${factionName(p.faction)} broadcast · ${p.username}`, res.broadcast!.text);
-    const out: Outbound[] = [];
-    for (const other of this.players.values()) {
-      if (other.faction !== p.faction) continue;
-      out.push({ to: other.id, msg: { t: 'notify', notif } });
-    }
-    out.push(...this.broadcastPolitics());
-    return out;
-  }
-
-  private handleGovTax(p: ServerPlayer, rate: unknown): Outbound[] {
-    const denied = this.requirePresident(p);
-    if (denied) return this.govErr(p.id, denied);
-    const g = governmentOf(this.politics, p.faction)!;
-    const before = g.taxRate;
-    const res = setTaxRate(g, rate);
-    if (!res.ok) return this.govErr(p.id, res.error ?? 'Not a tax rate.');
-    if (g.taxRate === before) return this.broadcastPolitics();
-    return [
-      ...this.notifyFaction(p.faction, 'tax', 'The tax rate changed',
-        `${p.username} set the levy to ${Math.round(g.taxRate * 100)}% ` +
-        `(was ${Math.round(before * 100)}%).`),
-      ...this.broadcastPolitics(),
-    ];
-  }
-
-  /** Rewrite the recruit loadout. President-only, and re-validated slot by slot
-   *  in politics.ts — a helmet in the boots slot is dropped here, not worn. */
-  private handleSetKit(p: ServerPlayer, slots: unknown): Outbound[] {
-    const denied = this.requirePresident(p);
-    if (denied) return this.govErr(p.id, denied);
-    const g = governmentOf(this.politics, p.faction)!;
-    const res = setKit(g, slots);
-    if (!res.ok) return this.govErr(p.id, res.error ?? 'That is not a kit layout.');
-    return [
-      ...this.notifyFaction(p.faction, 'kit', 'The recruit kit changed',
-        `${p.username} re-issued the standard loadout — ` +
-        `${kitItemCount(g.kit)} items per recruit.`),
-      ...this.broadcastPolitics(),
-    ];
-  }
-
-  /**
-   * Fund `n` recruit kits at whatever the loadout currently costs.
-   *
-   * ONE purse: the president's own pockets. The treasury no longer buys kits —
-   * arming your faction's newcomers is something a president does out of what
-   * they personally dug up, so the stock waiting for recruits is a bill somebody
-   * actually paid rather than a number spent out of a hoard the levy filled.
-   *
-   * The CLIENT has already removed the bill from its inventory by the time this
-   * arrives, so the stock still comes from items that existed and the server
-   * only has to record it. That is the same trust model `drop` runs on — the
-   * client declaring what it just had.
-   *
-   * The bill deliberately does NOT pass through the treasury on its way. It used
-   * to, so that one code path minted every kit; but nothing spends the hoard any
-   * more, so a treasury that has filled up would start refusing to route kits it
-   * was never paying for — a president unable to arm recruits out of their own
-   * backpack because the levy box is full.
-   *
-   * `source` only ever arrives as 'inventory'. A build that still asks for the
-   * retired treasury purse took nothing out of its own pockets, so honouring it
-   * would mint free kits — it is refused.
-   */
-  private handleFundKits(
-    p: ServerPlayer, count: unknown, source?: 'inventory'
-  ): Outbound[] {
-    const denied = this.requirePresident(p);
-    if (denied) return this.govErr(p.id, denied);
-    if (source !== undefined && source !== 'inventory') {
-      return this.govErr(p.id, 'Recruit kits are funded from your own inventory now.');
-    }
-    const n = Number.isFinite(count) ? Math.floor(count as number) : 0;
-    if (n <= 0 || n > 100) return this.govErr(p.id, 'Fund between 1 and 100 kits.');
-    const g = governmentOf(this.politics, p.faction)!;
-    const kit = kitStacks(g.kit);
-    if (!kit.length) return this.govErr(p.id, 'The recruit kit is empty — build one first.');
-    g.kitStock += n;
-    return [
-      ...this.notifyFaction(p.faction, 'kit', 'Recruit kits funded',
-        `${p.username} funded ${n} starter kit${n === 1 ? '' : 's'} out of their own ` +
-        `pockets — ${g.kitStock} now waiting.`),
-      ...this.broadcastPolitics(),
-    ];
-  }
-
-  /** Take the one recruit kit this account is entitled to, ever. */
-  private handleClaimKit(p: ServerPlayer): Outbound[] {
-    if (!isFaction(p.faction)) return this.govErr(p.id, 'You have no faction.');
-    const g = governmentOf(this.politics, p.faction)!;
-    if (g.kitStock <= 0) {
-      return this.govErr(p.id, 'Your faction has no kits funded right now.');
-    }
-    if (this.kitClaimed?.(p.username)) {
-      return this.govErr(p.id, 'You have already taken your recruit kit.');
-    }
-    // Claim on the ACCOUNT first: if that refuses, no stock is spent and no
-    // items are minted.
-    if (this.onClaimKit && !this.onClaimKit(p.username)) {
-      return this.govErr(p.id, 'You have already taken your recruit kit.');
-    }
-    g.kitStock--;
-    const out: Outbound[] = [];
-    // Whatever THIS faction's president laid out, not the stock starter kit.
-    for (const line of kitStacks(g.kit)) {
-      out.push({ to: p.id, msg: { t: 'gotitem', item: line.id, count: line.count } });
-    }
-    out.push({ to: p.id, msg: { t: 'notice', text: '[KIT] Your faction funded this. Go build something.' } });
-    out.push(...this.broadcastPolitics());
-    return out;
-  }
-
-  /**
-   * The gate on your own hoard: the sitting PRESIDENT, standing AT THE FLAG.
-   *
-   * Both halves matter. Office alone would make the treasury a menu a president
-   * empties from the other side of the map; proximity alone would make the levy
-   * a self-service counter for whoever wandered past. Together they put the
-   * faction's savings somewhere a rival has to physically go — and somewhere the
-   * enemy already knows to look for them during a war.
-   *
-   * Returns a refusal string, or null when the hoard may be opened.
-   */
-  private treasuryDenial(p: ServerPlayer, faction: unknown): string | null {
-    // A spectator is already refused upstream (SPECTATOR_BLOCKED); creative is
-    // deliberately allowed, because banking the levy is not a combat action and
-    // an operator testing a government should not have to respawn to do it.
-    if (p.dead) return 'Not right now.';
-    if (!isFaction(p.faction)) return 'You have no faction.';
-    if (faction !== p.faction) return 'That is not your hoard.';
-    if (!isPresident(this.politics, p.faction, p.username)) {
-      return 'Only your faction\'s president can open the hoard.';
-    }
-    if (treasuryInReach(p.x, p.z) !== p.faction) {
-      return 'Walk to your flag — the hoard is only open where it stands.';
-    }
-    return null;
-  }
-
-  /** Open your own hoard: hands the president its live contents to fill the
-   *  chest panel with. Read-only in itself; `treasurySet` does the writing. */
-  private handleTreasuryOpen(p: ServerPlayer, faction: unknown): Outbound[] {
-    const denied = this.treasuryDenial(p, faction);
-    if (denied) return this.govErr(p.id, denied);
-    const t = this.treasuryOf(p.faction);
-    return [{ to: p.id, msg: {
-      t: 'treasury', faction: p.faction, slots: t.slots.map((s) => (s ? { ...s } : null)),
-    } }];
-  }
-
-  /**
-   * Write one page of the hoard back after the president rearranged it.
-   *
-   * The client declares the page's contents, exactly as `chestSet` does — the
-   * president can already carry the whole hoard away by hand, so trusting the
-   * arrangement they hand back costs nothing that the take does not already
-   * cost. Every slot is still re-validated (`setTreasuryPage`), and the write is
-   * scoped to ONE page so a raid landing on another page during the edit is not
-   * undone by it.
-   */
-  private handleTreasurySet(
-    p: ServerPlayer, faction: unknown, page: unknown, slots: unknown
-  ): Outbound[] {
-    const denied = this.treasuryDenial(p, faction);
-    if (denied) return this.govErr(p.id, denied);
-    const t = this.treasuryOf(p.faction);
-    if (!setTreasuryPage(t.slots, page as number, slots)) {
-      return this.govErr(p.id, 'That is not a page of the hoard.');
-    }
-    return this.broadcastPolitics();
-  }
-
-  /**
-   * Haul stacks out of the ENEMY treasury. Only during a war window, only from
-   * inside reach of their pad, and never from your own — so this is a reason to
-   * defend the flag site during a war, not a permanent grief button.
-   */
-  private handleTreasuryRaid(p: ServerPlayer, faction: unknown): Outbound[] {
-    if (p.dead || p.mode !== 'survival') return [];
-    if (!isFaction(p.faction)) return this.govErr(p.id, 'You have no faction.');
-    if (!isFaction(faction as number) || faction === p.faction) {
-      return this.govErr(p.id, 'That is not an enemy treasury.');
-    }
-    if (!this.isWarActive()) {
-      return this.govErr(p.id, 'The strongbox is sealed. It can only be forced during a war.');
-    }
-    if (treasuryInReach(p.x, p.z) !== faction) {
-      return this.govErr(p.id, 'Stand at their treasury first.');
-    }
-    if (this.worldTime - (p.lastTreasuryRaid ?? -Infinity) < RAID_COOLDOWN) {
-      return this.govErr(p.id, 'You are still hauling the last load — wait a moment.');
-    }
-    const t = this.treasuryOf(faction as number);
-    const loot = raid(t, p.username, this.wallNow(), RAID_STACKS);
-    if (!loot.length) return this.govErr(p.id, 'The strongbox is empty.');
-    p.lastTreasuryRaid = this.worldTime;
-    const out: Outbound[] = [];
-    for (const stack of loot) {
-      out.push({ to: p.id, msg: { t: 'gotitem', item: stack.id, count: stack.count } });
-    }
-    out.push({ to: 'all', msg: {
-      t: 'treasuryRaided', faction: faction as number, by: p.username, stacks: loot.length } });
-    out.push(...this.notifyFaction(faction as number, 'raid', 'THE TREASURY IS BEING ROBBED',
-      `${p.username} hauled ${loot.length} stack${loot.length === 1 ? '' : 's'} out of the ` +
-      `${factionName(faction as number)} strongbox. Get to the flag.`));
-    out.push(...this.broadcastPolitics());
-    return out;
-  }
-
-  /**
-   * Advance the election clock. Weekly terms on the WALL clock, checked about
-   * once a second — a seven-day deadline does not need the tick rate.
-   */
-  tickPolitics(dt: number): Outbound[] {
-    if (!fin(dt) || dt <= 0) return [];
-    this.politicsAccum += dt;
-    if (this.politicsAccum < 1) return [];
-    this.politicsAccum = 0;
-    const now = this.wallNow();
-    const out: Outbound[] = [];
-    let changed = this.politicsDirty;
-    this.politicsDirty = false;
-    for (const f of FACTIONS) {
-      const e = this.politics.elections[f.id];
-      if (!termExpired(e, now)) continue;
-      const before = e.president;
-      const { president, party } = tallyElection(e);
-      const counts = voteCounts(e);
-      rollCycle(e, now);
-      changed = true;
-      if (party) {
-        out.push(...this.notifyFaction(f.id, 'election',
-          `${party.name} wins the election`,
-          `${president} takes office for term ${e.cycle} with ${counts[party.id]} vote` +
-          `${counts[party.id] === 1 ? '' : 's'}${before && before !== president
-            ? `, unseating ${before}` : ''}.`));
-      } else {
-        out.push(...this.notifyFaction(f.id, 'election', 'Nobody voted',
-          before
-            ? `${before} stays in office by default. Term ${e.cycle} is open — stand a party.`
-            : `The presidency is still vacant. Term ${e.cycle} is open — stand a party.`));
-      }
-    }
-    if (changed) out.push(...this.broadcastPolitics());
-    return out;
-  }
-
-  /** Console/report: one line per faction. */
-  politicsStatusText(): string {
-    const now = this.wallNow();
-    const lines: string[] = [];
-    for (const f of FACTIONS) {
-      const e = this.politics.elections[f.id];
-      const g = this.politics.governments[f.id];
-      const days = Math.max(0, (e.endsAt - now) / 86400000);
-      lines.push(`${factionName(f.id)}: president ${e.president ?? '(vacant)'} · ` +
-        `term ${e.cycle}, ${days.toFixed(1)}d left · ${e.parties.length} part` +
-        `${e.parties.length === 1 ? 'y' : 'ies'} · tax ${Math.round(g.taxRate * 100)}% · ` +
-        `treasury ${treasuryCount(this.treasuryOf(f.id))} items · ${g.kitStock} kits`);
-    }
-    return lines.join('\n');
-  }
-
-  /** Admin: force this faction's term to end now (console `election tally`). */
-  adminTallyElection(faction: number): Outbound[] {
-    const e = electionOf(this.politics, faction);
-    if (!e) return [];
-    e.endsAt = this.wallNow() - 1;
-    this.politicsAccum = 1;
-    return this.tickPolitics(1);
-  }
-
-  /** Admin: put items straight into a faction treasury (console `treasury give`). */
-  adminDepositTreasury(faction: number, item: number, count: number): boolean {
-    if (!isFaction(faction) || !ITEMS[item] || !fin(count) || count <= 0) return false;
-    const t = this.treasuryOf(faction);
-    const left = deposit(t, item, Math.floor(count));
-    t.taken += Math.floor(count) - left;
-    return left < Math.floor(count);
   }
 
   // --- Seasons (Phase 5) -----------------------------------------------------
@@ -5299,14 +5220,9 @@ export class GameServer {
         }
       }
     }
-    // Machines are immune to bullets/melee but DEMOLISHED outright by a blast.
-    const machineR = blastR + 1.5;
-    for (const key of [...this.machines.keys()]) {
-      const [mx, my, mz] = key.split(',').map(Number);
-      if (Math.hypot(mx + 0.5 - x, my + 0.5 - y, mz + 0.5 - z) <= machineR) {
-        out.push(...this.destroyMachine(key, mx, my, mz));
-      }
-    }
+    // Machines are immune to bullets/melee but DEMOLISHED outright by a blast
+    // (an uncapped gusher catches fire instead).
+    out.push(...this.blastMachines(x, y, z, blastR + 1.5));
     return out;
   }
 
@@ -5505,12 +5421,11 @@ export class GameServer {
       chests: [...this.chests.entries()],
       machines: [...this.machines.entries()],
       turrets: [...this.turrets.entries()],
+      traps: this.traps.serialize(),
       season: this.season,
       war: this.war,
       warWins: this.warWins.slice(),
       flags: this.flags,
-      politics: this.politics,
-      treasuries: [...this.treasuries.entries()],
       vaults: [...this.vaults.entries()],
       helis: [...this.vehicles.helicopters.values()].filter((h) => h.dying <= 0),
       // peekNextId, NOT allocId: a serializer must be read-only, or every
@@ -5563,6 +5478,23 @@ export class GameServer {
         if (validBlockKey(k) && st) this.machines.set(k as string, st);
       }
     }
+    if (Array.isArray(s.traps)) {
+      for (const e of s.traps) {
+        if (!Array.isArray(e) || e.length !== 2) continue;
+        const [k, raw] = e as [unknown, unknown];
+        const st = sanitizeTrap(raw);
+        if (validBlockKey(k) && st) {
+          const [x, y, z] = (k as string).split(',').map(Number);
+          this.traps.set(x, y, z, st);
+        }
+      }
+    }
+    // Legacy trap blocks (placed before Trapcraft) become ownerless traps.
+    for (const [k, b] of this.edits) {
+      if (!isTrapBlock(b)) continue;
+      const [x, y, z] = k.split(',').map(Number);
+      if (!this.traps.has(x, y, z)) this.traps.place(x, y, z, b);
+    }
     if (Array.isArray(s.turrets)) {
       for (const e of s.turrets) {
         if (!Array.isArray(e) || e.length !== 2) continue;
@@ -5600,17 +5532,8 @@ export class GameServer {
     this.vehicles.seedIds(highestId);
     this.vehicles.clearOccupants();   // occupants never survive a restart
     this.flags = sanitizeFlags(s.flags); // carriers never survive a reboot
-    // Government. A v2 save carries neither key and simply comes back with a
-    // fresh election clock and empty strongboxes — fail-closed, like every other
-    // record here, rather than refusing the whole world.
-    this.politics = sanitizePolitics(s.politics, this.wallNow());
-    this.treasuries = newTreasuries();
-    for (const entry of Array.isArray(s.treasuries) ? s.treasuries : []) {
-      if (!Array.isArray(entry) || entry.length !== 2) continue;
-      const [faction, raw] = entry as [unknown, unknown];
-      if (!isFaction(faction as number)) continue;
-      this.treasuries.set(faction as number, sanitizeTreasury(raw, faction as number));
-    }
+    // Older saves may still carry `politics`/`treasuries` from the removed
+    // faction government; they are ignored and dropped on the next save.
     return true;
   }
 
@@ -5713,6 +5636,7 @@ export interface WorldSave {
   chests: [string, (ItemStack | null)[]][];
   machines: [string, MachineState][];
   turrets: [string, TurretState][];
+  traps?: [string, import('../traps').TrapState][];
   season?: SeasonState;
   war?: WarState;
   /** War wins per faction id this season (the season scoreboard). */
@@ -5724,10 +5648,6 @@ export interface WorldSave {
   strategicNextId?: number;
   /** Capture-the-flag state: who holds which flag + the armed switch. */
   flags?: FlagsState;
-  /** Elections, parties and governments (politics.ts). Absent in a v2 save. */
-  politics?: PoliticsState;
-  /** One strongbox per faction (treasury.ts). Absent in a v2 save. */
-  treasuries?: [number, Treasury][];
   /** Vault boss HP + per-player openedBy ledgers (Milestone D). */
   vaults?: [string, VaultServerState][];
 }

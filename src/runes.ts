@@ -9,7 +9,7 @@
 // persistence and the smoke tests agree.
 
 import { Item, ItemStack, ITEMS } from './items';
-import { TOUGHNESS_CAP } from './net/protocol';
+import { ARMOR_POINT_CAP, TOUGHNESS_CAP } from './net/protocol';
 
 export interface RuneBonus {
   /** Extra armor points while worn. */
@@ -24,6 +24,12 @@ export interface RuneBonus {
   mine?: number;
   /** Gun-spread reduction (0.25 = −25% cone). */
   spread?: number;
+  /** Reload-time reduction (0.1 = −10%). Focus carries this so it still pays
+   *  on the guns that have no spread at all (only the Shotgun and SMG do). */
+  reload?: number;
+  /** Chance a mining swing costs the tool no durability (0.1 = 10%). Fortune
+   *  carries this so it still pays once diamond tools make mining instant. */
+  wear?: number;
 }
 
 export interface RuneDef {
@@ -37,7 +43,7 @@ export interface RuneDef {
 export const RUNES: Record<number, RuneDef> = {
   [Item.RuneOfIron]: {
     item: Item.RuneOfIron, name: 'Rune of Iron',
-    desc: 'Socket into worn armor: +1 armor point.',
+    desc: 'Socket into worn armor: +1 armor point. On armor already at the cap, every 2 extra points become 1 toughness.',
     bonus: { armor: 1 },
   },
   [Item.RuneOfSwiftness]: {
@@ -47,23 +53,22 @@ export const RUNES: Record<number, RuneDef> = {
   },
   [Item.RuneOfFortune]: {
     item: Item.RuneOfFortune, name: 'Rune of Fortune',
-    desc: 'Socket into worn armor: +20% mining speed.',
-    bonus: { mine: 0.2 },
+    desc: 'Socket into worn armor: +20% mining speed, 8% chance a swing costs no tool durability.',
+    bonus: { mine: 0.2, wear: 0.08 },
   },
-  // 0.18, not 0.25: four of these sum to 1.0, i.e. they used to erase gun
-  // spread ENTIRELY, and the clamp merely hid it — which also meant a full set
-  // of base runes tied a full set of Greater ones, leaving no reason to
-  // upgrade. At 0.18 a full base set reduces 72% and the ceiling stays
-  // Greater-only territory.
+  // Spread alone was a dead stat on every gun but the Shotgun and SMG, and
+  // near-zero spread turned the Shotgun into a 21-damage precision burst. So
+  // Focus is now a smaller spread cut (a full base set = −40%) plus faster
+  // reloads, which every gun uses.
   [Item.RuneOfFocus]: {
     item: Item.RuneOfFocus, name: 'Rune of Focus',
-    desc: 'Socket into worn armor: −18% gun spread.',
-    bonus: { spread: 0.18 },
+    desc: 'Socket into worn armor: −10% gun spread, −5% reload time.',
+    bonus: { spread: 0.1, reload: 0.05 },
   },
   // Greater Runes: crafted (never looted) from a matching vault boss's relics
   // — a real endgame use for what used to be pure decoration. Each one is a
-  // straight ~2.5-3x upgrade over the base rune it's forged from, or (Power)
-  // a hybrid spread across three stats.
+  // straight ~1.5-2.5x upgrade over the base rune it's forged from, or (Power)
+  // a hybrid touching every stat but toughness.
   // Deliberately NOT "+3 armor": a full titanium set is already 20 points =
   // ARMOR_POINT_CAP, so a bigger percentage rune would be literally zero for
   // the exact players who can farm a Tier III Warden. Toughness soaks flat
@@ -75,23 +80,23 @@ export const RUNES: Record<number, RuneDef> = {
   },
   [Item.GreaterRuneOfSwiftness]: {
     item: Item.GreaterRuneOfSwiftness, name: 'Greater Rune of Swiftness',
-    desc: 'Forged from Mire Queen relics. Socket into worn armor: +8% move speed.',
-    bonus: { speed: 0.08 },
+    desc: 'Forged from Mire Queen relics. Socket into worn armor: +6% move speed.',
+    bonus: { speed: 0.06 },
   },
   [Item.GreaterRuneOfFortune]: {
     item: Item.GreaterRuneOfFortune, name: 'Greater Rune of Fortune',
-    desc: 'Forged from Ember Colossus relics. Socket into worn armor: +50% mining speed.',
-    bonus: { mine: 0.5 },
+    desc: 'Forged from Ember Colossus relics. Socket into worn armor: +50% mining speed, 15% chance a swing costs no tool durability.',
+    bonus: { mine: 0.5, wear: 0.15 },
   },
   [Item.GreaterRuneOfFocus]: {
     item: Item.GreaterRuneOfFocus, name: 'Greater Rune of Focus',
-    desc: 'Forged from Crystal Seer relics. Socket into worn armor: −55% gun spread.',
-    bonus: { spread: 0.55 },
+    desc: 'Forged from Crystal Seer relics. Socket into worn armor: −15% gun spread, −10% reload time.',
+    bonus: { spread: 0.15, reload: 0.1 },
   },
   [Item.GreaterRuneOfPower]: {
     item: Item.GreaterRuneOfPower, name: 'Greater Rune of Power',
-    desc: 'Forged from Gilded Artificer relics. Socket into worn armor: +1 armor, +3% speed, −15% gun spread.',
-    bonus: { armor: 1, speed: 0.03, spread: 0.15 },
+    desc: 'Forged from Gilded Artificer relics. Socket into worn armor: +1 armor, +3% speed, +15% mining speed, −5% gun spread, −5% reload time.',
+    bonus: { armor: 1, speed: 0.03, mine: 0.15, spread: 0.05, reload: 0.05 },
   },
 };
 
@@ -108,8 +113,9 @@ export function runeOf(id: number): RuneDef | undefined { return RUNES[id]; }
  *  now reach roughly half the ceiling, which is the intended power gap. */
 export function runeBonuses(worn: (ItemStack | null)[]): {
   armor: number; toughness: number; speedMult: number; mineMult: number; spreadMult: number;
+  reloadMult: number; wearSave: number;
 } {
-  let armor = 0, toughness = 0, speed = 0, mine = 0, spread = 0;
+  let armor = 0, toughness = 0, speed = 0, mine = 0, spread = 0, reload = 0, wear = 0;
   for (const s of worn) {
     if (!s || s.rune === undefined || !ITEMS[s.id]?.armor) continue;
     const def = RUNES[s.rune];
@@ -119,12 +125,34 @@ export function runeBonuses(worn: (ItemStack | null)[]): {
     speed += def.bonus.speed ?? 0;
     mine += def.bonus.mine ?? 0;
     spread += def.bonus.spread ?? 0;
+    reload += def.bonus.reload ?? 0;
+    wear += def.bonus.wear ?? 0;
   }
   return {
     armor,
     toughness: Math.min(TOUGHNESS_CAP, toughness),      // 4x Greater Iron
-    speedMult: 1 + Math.min(0.24, speed),               // 3x Greater Swiftness
+    speedMult: 1 + Math.min(0.24, speed),               // 4x Greater Swiftness
     mineMult: 1 + Math.min(2, mine),                    // 4x Greater Fortune
-    spreadMult: Math.max(0.15, 1 - Math.min(0.85, spread)),
+    spreadMult: 1 - Math.min(0.6, spread),              // 4x Greater Focus
+    reloadMult: 1 - Math.min(0.4, reload),              // 4x Greater Focus
+    wearSave: Math.min(0.6, wear),                      // 4x Greater Fortune
+  };
+}
+
+/** Worn defense with runes applied. Percentage armor stops at ARMOR_POINT_CAP,
+ *  and a levelled iron-or-better set reaches it on its own, so +armor from
+ *  runes used to be literally nothing for most players. Rune armor that lands
+ *  PAST the cap now converts to toughness at half rate (2 points -> 1), so a
+ *  base Rune of Iron still does something on a maxed set while Greater Iron
+ *  stays the stronger path. Only RUNE points convert: armor levels alone never
+ *  grant toughness. */
+export function runeDefense(baseArmor: number, worn: (ItemStack | null)[]): {
+  armorPoints: number; toughness: number;
+} {
+  const r = runeBonuses(worn);
+  const overflow = Math.max(0, Math.min(r.armor, baseArmor + r.armor - ARMOR_POINT_CAP));
+  return {
+    armorPoints: baseArmor + r.armor,
+    toughness: Math.min(TOUGHNESS_CAP, r.toughness + Math.floor(overflow / 2)),
   };
 }

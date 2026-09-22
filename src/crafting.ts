@@ -128,6 +128,11 @@ export const RECIPES: Recipe[] = [
   shaped([[I, I, I], [R, Pk, R], [I, I, I]], Block.Autominer),
   // Oil Derrick = iron + cobalt ingots + redstone.
   shaped([[Cb, I, Cb], [I, R, I], [I, I, I]], Block.OilDerrick),
+  // Drill bits = a cutting head on an iron collar and a redstone shank. Better
+  // heads bore deeper, faster, and last longer.
+  shaped([[I, I, I], [null, I, null], [null, R, null]], Item.DrillBitIron),
+  shaped([[D, D, D], [null, I, null], [null, R, null]], Item.DrillBitDiamond),
+  shaped([[T, T, T], [null, I, null], [null, R, null]], Item.DrillBitTitanium),
 
   // Warfare (M14): turret + cannonball ammo.
   // Turret = a cannon-grade barrel on an iron+redstone auto-mount.
@@ -186,6 +191,30 @@ export const RECIPES: Recipe[] = [
   shaped([[S], [C]], Block.Lever, 2),
   shaped([[P, P]], Block.FallTrap, 2),
   shaped([[C, C]], Block.WallTrap, 2),
+  // --- Trapcraft: triggers ----------------------------------------------------
+  // Pressure Plate = a redstone contact between two iron pads.
+  shaped([[I, R, I]], Block.PressurePlate, 2),
+  // Tripwire Laser = a glass lens on a redstone emitter on an iron mount.
+  shaped([[Block.Glass], [R], [I]], Block.TripwireHook, 2),
+  // Motion Sensor = a glass dome on a redstone eye.
+  shaped([[null, R, null], [I, Block.Glass, I]], Block.MotionSensor),
+  // Trap Timer = a gold escapement ringed with redstone in a stone case.
+  shaped([[C, R, C], [R, Item.GoldIngot, R], [C, R, C]], Block.TrapTimer),
+  // --- Trapcraft: actuators ---------------------------------------------------
+  // Claymore = an iron plate packed with powder over twin redstone tripwires.
+  shaped([[I, ANY_COAL, I], [R, I, R]], Block.Claymore, 2),
+  // Flame Jet = an oil-fed iron nozzle on a stone base.
+  shaped([[I, Item.OilBarrel, I], [I, R, I], [C, C, C]], Block.FlameJet),
+  // Dart Launcher = a stone housing with a redstone spring and an iron barrel.
+  shaped([[C, C, C], [C, R, I], [C, C, C]], Block.DartLauncher),
+  // Net Launcher = wool netting packed into a redstone-sprung stone mortar.
+  shaped([[C, Block.Wool, C], [C, R, C], [C, C, C]], Block.NetLauncher),
+  // Shock Plate = a redstone grid laid over iron.
+  shaped([[R, R, R], [I, I, I]], Block.ShockPlate, 2),
+  // Alarm Bell = a gold bell on a redstone striker.
+  shaped([[null, Item.GoldIngot, null], [Item.GoldIngot, R, Item.GoldIngot]], Block.AlarmBell),
+  // Trap Detector = a diamond sensor on an iron wand.
+  shaped([[null, R, null], [I, D, I], [null, I, null]], Item.TrapDetector),
 
   // --- Flag-war kit ---------------------------------------------------------
   // Bear Trap = a sprung iron jaw on a redstone plate: pins whoever steps in it.

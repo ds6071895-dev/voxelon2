@@ -17,9 +17,10 @@ import { renderItemIcon } from './icons';
 import { iconSvg, iconifyHtml, setIconText, type IconName } from './emoji_icons';
 import { itemDescription } from './itemdesc';
 import {
-  Machines, MachineType, allowedFilterMask, applyUpgrade, claimMachine,
+  Machines, MachineType, MachineEvents, MachineState, applyUpgrade, claimMachine,
   collectMachine, currentRate, machineHeight, machineTypeForBlock,
-  sanitizeState, setFilter, upgradeCost,
+  sanitizeState, setFilter, upgradeCost, machineRank, applyMachineAct, actCost,
+  relocateMachine, igniteWell, machineCanClaim, depositInto, HOPPER_SIDES, totalStored,
 } from './machines';
 import { ItemEntities, itemGeometry } from './itementity';
 import { createGunModel, gunFeel, isGunItem, poseGunModel } from './gunmodels';
@@ -29,12 +30,20 @@ import { Chests } from './chests';
 import { Mob, Mobs } from './mobs';
 import { NetClient } from './net/client';
 import {
-  WORLD_SEED, WORLD_HALF, WORLD_BORDER, CORE_HALF, makeUsername, skinSeed,
+  WORLD_SEED, WORLD_HALF, WORLD_BORDER, CORE_HALF, RELOCATE_RANGE, makeUsername, skinSeed,
   GameMode, MAX_ATTUNED, RANGED_MAX_DAMAGE, TOTEM_COOLDOWN, TOTEM_WINDUP, COMBAT_TAG,
   TPA_HOLD, TPA_EXPIRE, type DuelLeaderboardEntry, type PlayerCounts,
   type FactionPublic, type Notification,
 } from './net/protocol';
-import { leverFlips } from './traps';
+import {
+  TrapField, TrapTarget, TrapTickResult, TrapKind, TrapFxWhat, TRAP_NAMES, TRAP_VERBS, isTrapBlock,
+  trapKindForBlock, trapFriendly, ownerHostile, trapConcealed, sanitizeTrap, solidFrom, CHANNELS,
+  CHANNEL_COLORS, CHANNEL_NAMES, TIMER_INTERVALS, FLAME_FUEL_CAP, FLAME_BURSTS_PER_BARREL,
+} from './traps';
+import { TrapModels, TRAP_MODEL_BLOCKS } from './trapmodels';
+import { meshHooks } from './mesher';
+import { StatusEffects, EFFECT_LABELS, EFFECT_COLORS } from './effects';
+import { falloffDamage } from './gadgets';
 import { MachineModels } from './machinemodels';
 import { NetItems } from './netitems';
 import { Particles } from './particles';
@@ -45,9 +54,10 @@ import { Player, MAX_AIR } from './player';
 import {
   TurretState, TurretAxis, applyTurretUpgrade, claimTurret, damageTurret,
   newTurret, sanitizeTurretState, turretLoad, turretUpgradeCost, TURRET_AMMO_CAP,
-  TURRET_FUEL_CAP,
+  TURRET_FUEL_CAP, TURRET_MUZZLE_Y, turretCanClaim, turretDisabled, turretFriendly,
 } from './turrets';
 import { TurretModels } from './turretmodels';
+import { TurretDefense } from './turret_defense';
 import {
   RemotePlayers, SEAT_SINK, anchorTiltedBody, applyAvatarSneak, buildAvatarBody,
   buildArmorOverlay, disposeAvatarBody, stridePose, AvatarBody,
@@ -72,22 +82,8 @@ import {
 import { warBorderAt, clampInsideBorder, WAR_MIN_BORDER } from './war';
 import { Flag, FLAG_REACH, FLAG_MAX_HP, newFlags, flagPosition } from './flags';
 import { FlagModels } from './flagmodels';
-import { TreasuryModels } from './treasury_models';
 import { NotificationsUI } from './notifications_ui';
 import { FactionPicker, type PledgeData } from './faction_picker';
-import {
-  PresidentUI, type GovernActions, type GovernData, type PresidentView,
-} from './president_ui';
-import {
-  type PoliticsState, OFFLINE_TERM_MS, castVote, disbandParty, electionOf,
-  foundParty, governmentOf, isPresident, newPolitics, pushBroadcast, rollCycle,
-  sanitizePolitics, setKit, setTaxRate, tallyElection, termExpired, voteCounts,
-} from './politics';
-import {
-  deposit, kitCost, kitStacks, levy, newTreasuries, newTreasury,
-  sanitizeTreasury, setTreasuryPage, treasuryCount, treasuryCounts, treasuryPage,
-  TREASURY_PAGES,
-} from './treasury';
 import {
   WarfareProgress, buyWarfareNode, grantWarfareXp, migrateWarfare, newWarfare,
   sanitizeWarfare, settleWarfareXp, warfareAvailable, warfareOwns, warfareTier,
@@ -136,7 +132,7 @@ import {
   GUIDE_STEPS, GuideState, compassGlyph, guideComplete, guideProgress, markGuideStep,
   newGuideState, nextGuideStep, sanitizeGuide,
 } from './guide';
-import { isRune, runeOf, runeBonuses } from './runes';
+import { isRune, runeOf, runeBonuses, runeDefense } from './runes';
 import { HealUse } from './healuse';
 import { createFieldGuide } from './field_guide';
 import {
@@ -629,21 +625,173 @@ const chests = new Chests();
 chests.net = net;
 const machines = new Machines(world.terrain);
 const machineModels = new MachineModels(scene, machines);
+// Rig particles: exhaust smoke, drill dust, jam sparks, gusher spray, embers.
+machineModels.onPuff = (kind, x, y, z) => {
+  if (kind === 'smoke') particles.burst(x, y, z, 2, 0x55595f, 0.5, 1.6, { gravity: -1.4, spread: 0.2, scale: 1.7 });
+  else if (kind === 'dust') particles.burst(x, y, z, 3, 0x9a8466, 1.6, 0.5, { gravity: 3, spread: 0.5, scale: 0.8 });
+  else if (kind === 'spark') particles.burst(x, y, z, 4, 0xffb040, 3.2, 0.35, { gravity: 7, spread: 0.3, scale: 0.35 });
+  else if (kind === 'oil') particles.burst(x, y, z, 6, 0x120e0a, 3.4, 1.3, { gravity: 5, spread: 0.8, scale: 1.3 });
+  else particles.burst(x, y, z, 3, 0xff7a20, 1.4, 0.9, { gravity: -2.4, spread: 0.6, scale: 0.6 });
+};
+// Trapcraft: offline this field is authoritative; online it mirrors the
+// server's trap entities (owner/channel/facing) for models + camouflage.
+const trapField = new TrapField();
+const trapSolid = solidFrom((x, y, z) => world.getBlock(x, y, z));
+const trapModels = new TrapModels(scene, trapField, trapSolid);
+// Cells with a live trap entity are drawn by TrapModels, not the chunk mesh.
+meshHooks.skipTrap = (x, y, z) => trapField.has(x, y, z);
+/** A cell gained/lost a trap entity: rebuild its chunk so mesh + model agree. */
+function remeshTrapCell(x: number, z: number): void {
+  const c = world.getChunk(x >> 4, z >> 4);
+  if (c) c.dirty = true;
+}
+const statusFx = new StatusEffects();
+/** Seconds until the open machine dashboard re-requests server truth (MP). */
+let machineResync = 0;
+/** Seconds until the offline output hoppers next run. */
+let machineHopper = 4;
+
+// --- Trap wiring panel: right-click a trap you own ---------------------------
+let trapPanelAt: { x: number; y: number; z: number } | null = null;
+const trapPanel = document.createElement('div');
+trapPanel.style.cssText =
+  'position:absolute;inset:0;display:none;z-index:34;align-items:center;justify-content:center;' +
+  'background:rgba(6,9,16,0.6);';
+const trapCard = document.createElement('div');
+trapCard.style.cssText =
+  'background:#101b28;border:1px solid #395063;border-radius:14px;box-shadow:0 18px 60px #000b;' +
+  'width:360px;max-width:92vw;color:#dce8f0;font:12px/1.45 Inter,system-ui,sans-serif;padding:16px;' +
+  'display:flex;flex-direction:column;gap:10px;';
+trapPanel.appendChild(trapCard);
+app.appendChild(trapPanel);
+trapPanel.addEventListener('mousedown', (e) => { if (e.target === trapPanel) closeTrapPanel(); });
+let trapPanelKey = '';
+
+function openTrapPanel(x: number, y: number, z: number): void {
+  trapPanelAt = { x, y, z };
+  trapPanelKey = '';
+  trapPanel.style.display = 'flex';
+  input.unlock();
+  refreshTrapPanel();
+}
+
+function closeTrapPanel(): void {
+  trapPanelAt = null;
+  trapPanel.style.display = 'none';
+  if (worldReady && !player.dead && screen === 'playing') input.lock();
+}
+
+/** Rebuild the panel when the trap's visible state changes. */
+function refreshTrapPanel(): void {
+  const at = trapPanelAt;
+  if (!at) return;
+  const s = trapField.get(at.x, at.y, at.z);
+  if (!s || Math.hypot(at.x + 0.5 - player.pos.x, at.z + 0.5 - player.pos.z) > 8) { closeTrapPanel(); return; }
+  const key = `${s.kind}:${s.channel}:${s.interval}:${s.fuel}:${inventory.countItem(Item.OilBarrel)}`;
+  if (key === trapPanelKey) return;
+  trapPanelKey = key;
+  trapCard.replaceChildren();
+  const el = (tag: string, css: string, text = '') => {
+    const n = document.createElement(tag); n.style.cssText = css; n.textContent = text; trapCard.appendChild(n); return n;
+  };
+  el('div', 'font-size:9px;font-weight:700;letter-spacing:.15em;color:#98afc1;', 'TRAPCRAFT / WIRING');
+  el('div', 'font-size:20px;font-weight:750;color:#f3f8fc;', TRAP_NAMES[s.kind]);
+  const receiver = s.kind === TrapKind.FallTrap || s.kind === TrapKind.WallTrap || s.kind === TrapKind.Spike ||
+    s.kind === TrapKind.Landmine || s.kind === TrapKind.Claymore || s.kind === TrapKind.FlameJet ||
+    s.kind === TrapKind.DartLauncher || s.kind === TrapKind.NetLauncher || s.kind === TrapKind.AlarmBell;
+  el('div', 'color:#a8bfce;font-size:11px;', receiver
+    ? 'RECEIVER — fires whenever any of your triggers on this channel goes off (within 24 blocks).'
+    : 'TRIGGER — signals every one of your receivers on this channel within 24 blocks.');
+  const grid = el('div', 'display:grid;grid-template-columns:repeat(8,1fr);gap:5px;');
+  for (let c = 0; c < CHANNELS; c++) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.title = `${CHANNEL_NAMES[c]} channel`;
+    b.style.cssText = `aspect-ratio:1;border-radius:6px;cursor:pointer;background:${CHANNEL_COLORS[c]};` +
+      `border:${c === s.channel ? '3px solid #fff' : '1px solid #0006'};`;
+    b.addEventListener('click', () => {
+      s.channel = c;
+      if (net.connected) net.sendTrapConfig(at.x, at.y, at.z, c, s.kind === TrapKind.Timer ? s.interval : undefined);
+      audio.trap('click');
+      refreshTrapPanel();
+    });
+    grid.appendChild(b);
+  }
+  el('div', 'color:#e7f0f6;font-weight:600;', `Channel: ${CHANNEL_NAMES[s.channel]}`);
+  const row = () => el('div', 'display:flex;gap:6px;flex-wrap:wrap;');
+  const btn = (parent: HTMLElement, label: string, on: boolean, click: () => void, disabled = false) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.textContent = label; b.disabled = disabled;
+    b.style.cssText = 'flex:1;padding:8px 10px;border-radius:7px;cursor:pointer;font:600 11px system-ui;' +
+      `color:${on ? '#102431' : '#e5eff7'};background:${on ? '#72ead5' : '#243647'};border:1px solid #41556a;` +
+      (disabled ? 'opacity:.5;cursor:default;' : '');
+    b.addEventListener('click', click);
+    parent.appendChild(b);
+    return b;
+  };
+  if (s.kind === TrapKind.Timer) {
+    el('div', 'font-size:9px;font-weight:700;letter-spacing:.15em;color:#98afc1;', 'PULSE EVERY');
+    const r = row();
+    for (const iv of TIMER_INTERVALS) {
+      btn(r, `${iv}s`, s.interval === iv, () => {
+        s.interval = iv;
+        if (net.connected) net.sendTrapConfig(at.x, at.y, at.z, s.channel, iv);
+        refreshTrapPanel();
+      });
+    }
+  }
+  if (s.kind === TrapKind.FlameJet) {
+    el('div', 'font-size:9px;font-weight:700;letter-spacing:.15em;color:#98afc1;',
+      `FUEL — ${s.fuel} / ${FLAME_FUEL_CAP} bursts`);
+    const have = inventory.countItem(Item.OilBarrel);
+    const room = Math.floor((FLAME_FUEL_CAP - s.fuel) / FLAME_BURSTS_PER_BARREL);
+    const n = Math.min(have, room, 10);
+    btn(row(), n > 0 ? `Load ${n} Oil Barrel${n > 1 ? 's' : ''} (+${n * FLAME_BURSTS_PER_BARREL})` : 'No oil to load', false, () => {
+      if (n <= 0) return;
+      inventory.removeItem(Item.OilBarrel, n);
+      s.fuel = Math.min(FLAME_FUEL_CAP, s.fuel + n * FLAME_BURSTS_PER_BARREL);
+      if (net.connected) net.sendTrapFuel(at.x, at.y, at.z, n);
+      refreshTrapPanel();
+    }, n <= 0);
+  }
+  el('div', 'color:#90a8b9;font-size:10px;',
+    'Your traps never fire on you or your allies. Enemies see concealed traps only when sneaking right next to them or carrying a Trap Detector.');
+  btn(row(), 'Done', false, closeTrapPanel);
+}
 // --- Warfare (M14): turrets, territory ---
 const turretStates = new Map<string, TurretState>();
-const turretModels = new TurretModels(scene, turretStates);
+const turretModels = new TurretModels(scene, turretStates, particles);
+// Friendly turrets also gun down our (client-side) hostile mobs.
+const turretDefense = new TurretDefense(turretStates, mobs, {
+  online: () => net.connected,
+  me: () => ({ name: net.connected ? net.username : 'You', faction: localFaction }),
+  solid: (x, y, z) => isSolid(world.getBlock(Math.floor(x), Math.floor(y), Math.floor(z))),
+  fireLocal: (x, y, z, tx, ty, tz) => {
+    turretModels.fireTracer(x, y, z, tx, ty, tz);
+    audio.gun(new THREE.Vector3(x + 0.5, y + TURRET_MUZZLE_Y, z + 0.5), 2.1);
+  },
+  fireNet: (x, y, z, tx, ty, tz) => net.sendTurretMobShot(x, y, z, tx, ty, tz),
+});
+/** Keep the turret entity map in step with its block: a cell that stops being
+ *  a turret (raided, exploded, replaced) loses its state, model and panel. */
+function syncTurretCell(x: number, y: number, z: number, b: number): void {
+  const key = `${x},${y},${z}`;
+  if (b === Block.Turret) {
+    if (!turretStates.has(key)) turretStates.set(key, newTurret());
+    return;
+  }
+  if (!turretStates.delete(key)) return;
+  if (openTurret && openTurret.x === x && openTurret.y === y && openTurret.z === z) {
+    openTurret = null;
+    turretModels.showRange(null);
+    if (invUI.open && invUI.mode === 'turret') invUI.hide();
+  }
+}
 // --- CAPTURE THE FLAG: one flag per faction, server-authoritative ---
 let flagState = newFlags();
 const flagModels = new FlagModels(scene);
 flagModels.setGroundProbe((x, z) => world.terrain.height(Math.floor(x), Math.floor(z)) + 1);
 flagModels.setState(flagState.breakable, flagState.flags);
-// The faction HOARD stands at each flag pole — the strongbox beside the banner
-// and a ring of loot pedestals around it, one per slice of what is banked, all
-// presentation only over positions treasury.ts derives from flagHome(). Never a
-// block, never a chest. What the enemy can see of it is what the wire publishes:
-// your own ring shows the real stacks, everybody else's shows generic bullion.
-const treasuryModels = new TreasuryModels(scene, atlas);
-treasuryModels.setGroundProbe((x, z) => world.terrain.height(Math.floor(x), Math.floor(z)) + 1);
 /** Seconds until the client may send another flag swing (matches the server). */
 let flagHitTimer = 0;
 /** Local mirror of "my faction holds no flag" — drives the danger banner.
@@ -1111,10 +1259,6 @@ let openMachine: { x: number; y: number; z: number } | null = null;
 let openChest: { x: number; y: number; z: number } | null = null;
 let lastChestVersion = -1;   // last version pushed/loaded — gates the live sync
 let chestBaseVersion = -1;   // version as of the last load FROM the server
-/** The faction hoard open in the chest panel, and which PAGE of it. Only ever
- *  set for a sitting president standing at their own flag. */
-let openTreasury: { faction: number; page: number } | null = null;
-let lastTreasuryVersion = -1; // gates the live push, exactly like a chest
 
 // Multiplayer HUD: connection/roster line + a small kill feed (top-right).
 const netinfoEl = document.createElement('div');
@@ -1255,18 +1399,8 @@ function showRegionBanner(text: string, color: string): void {
 // factionName, sameFaction and isFaction all handle it), so an unpledged player
 // simply renders grey and is friendly with nobody.
 let localFaction = NO_FACTION;
-// --- FACTION GOVERNMENT (mirrors of the server's authoritative state) --------
-let politicsState: PoliticsState = newPolitics(Date.now());
-/** Per-faction public dossiers for the pledge screen. */
+/** Per-faction public dossiers for the pledge screen (server-sent online). */
 let factionPublics: FactionPublic[] = [];
-/** YOUR faction's treasury contents (empty while unpledged). */
-let myTreasury: (ItemStack | null)[] = [];
-/** Has this account taken its one recruit kit? */
-let kitClaimed = false;
-/** Offline single-player runs its own government so the panels are live rather
- *  than dead: you can found a party, hold an election against yourself, and
- *  watch the levy fill a local strongbox. */
-const offlineTreasuries = newTreasuries();
 // Local gamemode (admin-set via the server console). Drives flight/noclip/
 // invulnerability + the creative build conveniences.
 let localMode: GameMode = 'survival';
@@ -1339,11 +1473,12 @@ function refreshNetInfo(): void {
     netinfoEl.innerHTML = '';
   }
 }
-function showKill(killer: string, victim: string): void {
+function showKill(killer: string, victim: string, how?: string): void {
   const line = document.createElement('div');
   line.className = 'mc-font';
   line.style.cssText = 'font-size:13px;text-shadow:1px 1px 0 #000;';
-  setIconText(line, killer ? `${killer}  »  ${victim}` : `${victim} died`);
+  // Trap kills read as a sentence: "Alex was shredded by Sam's Claymore".
+  setIconText(line, how ? `${victim} was ${how}` : killer ? `${killer}  »  ${victim}` : `${victim} died`);
   killfeedEl.appendChild(line);
   window.setTimeout(() => line.remove(), 5000);
 }
@@ -1544,38 +1679,9 @@ function showNotice(text: string): void {
 
 // Drop routing: in multiplayer drops are server-owned (everyone sees them);
 // offline they are local item entities.
-/**
- * Put an item on the ground.
- *
- * `reason` is what the faction TAX keys off: a HARVEST (a block you just broke,
- * a machine spilling its output) is taxable, and a player emptying their own
- * pockets is not. It is levied here — on the way out of the world — rather than
- * on pickup, because a harvest passes this way exactly once, while dropping and
- * re-collecting your own stack would be taxed on every pass.
- */
-function spawnDrop(
-  x: number, y: number, z: number, id: number, count: number,
-  reason: 'harvest' | 'manual' = 'harvest'
-): void {
-  if (net.connected) { net.sendDrop([{ id, count }], x, y, z, reason); return; }
-  // Offline the levy is applied locally against the local strongbox, so the
-  // single-player treasury fills exactly the way the server's would.
-  itemEntities.spawn(x, y, z, id, reason === 'harvest' ? offlineLevy(id, count) : count);
-}
-
-/** Offline mirror of the server's levy: bank the faction's cut in the local
- *  strongbox and return what the player actually gets to keep. */
-function offlineLevy(id: number, count: number): number {
-  const g = governmentOf(politicsState, localFaction);
-  const t = offlineTreasuries.get(localFaction);
-  if (!g || !t || g.taxRate <= 0) return count;
-  const cut = levy(count, g.taxRate, Math.random());
-  if (cut <= 0) return count;
-  const leftOver = deposit(t, id, cut);
-  const banked = cut - leftOver;
-  t.taken += banked;
-  if (banked > 0) { saveOfflinePolitics(); refreshGovernment(); }
-  return count - banked;
+function spawnDrop(x: number, y: number, z: number, id: number, count: number): void {
+  if (net.connected) { net.sendDrop([{ id, count }], x, y, z); return; }
+  itemEntities.spawn(x, y, z, id, count);
 }
 /**
  * Tip a set of stacks onto the ground. Returns whether they actually got there:
@@ -1583,14 +1689,10 @@ function offlineLevy(id: number, count: number): number {
  * spill) has to know, because a socket that closed a moment ago accepts the
  * send and discards it — see `NetClient.raw`.
  */
-function spillStacks(
-  stacks: ItemStack[], x: number, y: number, z: number,
-  reason: 'harvest' | 'manual' = 'harvest'
-): boolean {
+function spillStacks(stacks: ItemStack[], x: number, y: number, z: number): boolean {
   if (!stacks.length) return true;
   if (net.connected) {
-    return net.sendDrop(
-      stacks.map((s) => ({ id: s.id, count: s.count })), x, y, z, reason);
+    return net.sendDrop(stacks.map((s) => ({ id: s.id, count: s.count })), x, y, z);
   }
   for (const s of stacks) itemEntities.spawn(x, y, z, s.id, s.count);
   return true;
@@ -1602,7 +1704,7 @@ function dropCurrentItem(entireStack = false): void {
   const d = new THREE.Vector3(-Math.sin(player.yaw), 0.3, -Math.cos(player.yaw)).normalize();
   const dropPos = player.pos.clone().addScaledVector(d, 1.0);
   dropPos.y += 1.2;
-  spawnDrop(dropPos.x, dropPos.y, dropPos.z, stack.id, count, 'manual');
+  spawnDrop(dropPos.x, dropPos.y, dropPos.z, stack.id, count);
   inventory.consumeSelected(count);
   pushStateSave();
 }
@@ -1684,6 +1786,7 @@ interaction.onOpenContainer = (kind, x, y, z) => {
     const key = `${x},${y},${z}`;
     if (!turretStates.has(key)) turretStates.set(key, newTurret()); // local predict
     if (net.connected) net.sendTurretOpen(x, y, z);
+    turretModels.showRange(x, y, z);
     invUI.show('turret', undefined, undefined, turretCtxFor(x, y, z));
   } else if (kind === 'helipad') {
     openHelipadPanel(x, y, z);
@@ -1721,16 +1824,24 @@ function grantRecord(rec: Record<number, number>): void {
 }
 function machineCtxFor(x: number, y: number, z: number): MachineUIContext {
   const here = () => machines.get(x, y, z) ?? null;
+  const yieldContext = machines.context(x, z, here()?.type ?? MachineType.Autominer);
   return {
     state: here,
+    context: () => yieldContext,
+    configureFilter: (mask) => {
+      const s = here(); if (!s) return;
+      setFilter(s, mask);
+      if (net.connected) net.sendMachineConfig(x, y, z, s.filter);
+    },
     rate: () => {
       const s = here();
-      return s ? currentRate(s, machines.context(x, z, s.type)) : 0;
+      return s ? currentRate(s, yieldContext) : 0;
     },
     toggleFilter: (i) => {
       const s = here();
       if (!s || s.type !== MachineType.Autominer) return;
-      if (!(allowedFilterMask(s.level) & (1 << i))) return; // gated: ignore
+      // Bands the bore hasn't reached yet stay selectable: they start
+      // producing the moment the drill gets there.
       setFilter(s, (s.filter ^ (1 << i)) >>> 0); // local prediction
       if (net.connected) net.sendMachineConfig(x, y, z, s.filter);
     },
@@ -1742,6 +1853,7 @@ function machineCtxFor(x: number, y: number, z: number): MachineUIContext {
       payCost(cost);              // payment is client-side (trust model)
       applyUpgrade(s, axis);      // local prediction; server also applies + caps
       if (net.connected) net.sendMachineUpgrade(x, y, z, axis);
+      showNotice(axis === 'production' ? `${machineRank(s.level)} installed — output boosted, hull repaired!` : 'Expanded buffer installed!');
     },
     collect: () => {
       const s = here();
@@ -1760,21 +1872,95 @@ function machineCtxFor(x: number, y: number, z: number): MachineUIContext {
     claim: () => {
       const s = here();
       if (!s) return;
-      claimMachine(s, net.connected ? net.username : 'You'); // local predict
+      const me = net.connected ? net.username : 'You';
+      if (!machineCanClaim(s, me, localFaction)) {
+        showNotice('Hostile rig — knock its hull below 25% before hacking it.');
+        return;
+      }
+      claimMachine(s, me, localFaction); // local predict
       if (net.connected) net.sendMachineClaim(x, y, z);
     },
     move: () => {
       if (!here()) return;
       const fromX = x, fromY = y, fromZ = z;
       forceCloseMachine();
-      if (invUI.open && invUI.mode === 'machine') invUI.hide();
-      if (worldReady) input.lock();
-      showNotice('✋ Right-click where to move the machine.');
       interaction.armedMove = (px, py, pz) => moveMachine(fromX, fromY, fromZ, px, py, pz);
+      if (worldReady) resumePlay();
+      showNotice(`✋ Carry it up to ${RELOCATE_RANGE} blocks, then right-click the new site. Esc cancels.`);
     },
     myName: () => (net.connected ? net.username : 'You'),
+    myFaction: () => localFaction,
+    act: (act, n, item) => {
+      const s = here();
+      if (!s) return;
+      // Item costs: fixed ones (coolant/cap/smother/inject) or the fuel/bit
+      // item itself. Paid client-side, like upgrades.
+      const cost: Record<number, number> = actCost(act) ?? {};
+      if (act === 'fuel') cost[item] = Math.floor(n);
+      if (act === 'bit') cost[item] = 1;
+      if (!canAffordCost(cost)) return;
+      if (!applyMachineAct(s, act, n, item)) return; // not applicable right now
+      payCost(cost);
+      if (net.connected) net.sendMachineAct(x, y, z, act, n, item);
+      const pos = new THREE.Vector3(x + 0.5, y + 1, z + 0.5);
+      if (act === 'coolant' || act === 'vent') { audio.rig('hiss', pos); particles.burst(pos.x, pos.y + 0.6, pos.z, 12, 0xe8eef2, 1.6, 1.2, { gravity: -1.5, scale: 1.4 }); }
+      else if (act === 'bit') audio.rig('bit', pos);
+      else if (act === 'cap') showNotice('🛢 Wellhead capped — the gusher is under control.');
+      else if (act === 'smother') { showNotice('🔥 Fire smothered.'); audio.rig('hiss', pos); }
+      else if (act === 'inject') showNotice('Frac sand injected — reservoir pressure rising.');
+      else audio.place(materialOf(Block.Autominer), pos);
+    },
+    survey: () => {
+      const s = here();
+      return s ? machines.survey(x, z, s.type) : [];
+    },
   };
 }
+
+/** Rig events (jam, strike, gusher, well fire…): sound, particles, notices.
+ *  Offline from the local sim; online from the server's `machineFx`. */
+function machineFx(x: number, y: number, z: number, fx: string): void {
+  const pos = new THREE.Vector3(x + 0.5, y + 1, z + 0.5);
+  const near = Math.hypot(pos.x - player.pos.x, pos.z - player.pos.z) < 64;
+  const s = machines.get(x, y, z);
+  const mine = !!s && (s.owner === (net.connected ? net.username : 'You') || !s.owner);
+  switch (fx) {
+    case 'jam':
+      audio.rig('jam', pos);
+      particles.burst(pos.x, pos.y + 0.4, pos.z, 18, 0xffb040, 3.5, 0.5, { gravity: 7, scale: 0.4 });
+      if (near || mine) showNotice('⚠ Autominer OVERHEATED and jammed!');
+      break;
+    case 'strike':
+      audio.rig('strike', pos);
+      if (near || mine) showNotice('🛢 Oil struck! The derrick is pumping.');
+      break;
+    case 'gusher':
+      audio.rig('gusher', pos);
+      particles.burst(pos.x + 0.3, pos.y + 2, pos.z, 40, 0x120e0a, 6, 1.6, { gravity: 5, spread: 0.6, scale: 1.4 });
+      if (near || mine) showNotice('🛢💥 GUSHER! Free oil — cap it before anything sets it alight!');
+      break;
+    case 'ignite':
+      audio.rig('ignite', pos);
+      particles.explosion(pos.x, pos.y + 1, pos.z);
+      if (near || mine) showNotice('🔥 An uncapped well caught fire! Smother it with sand!');
+      break;
+    case 'fireOut':
+      if (near || mine) showNotice('The well fire burned itself out.');
+      break;
+    case 'bitBroke':
+      audio.rig('bit', pos);
+      if (mine) showNotice('Your autominer wore out its drill bit — back to the stock bit.');
+      break;
+    case 'siphon':
+      audio.rig('siphon', pos);
+      break;
+  }
+}
+machines.onEvent = (x: number, y: number, z: number, _s: MachineState, ev: MachineEvents) => {
+  if (net.connected) return; // the server announces events online
+  machineFx(x, y, z, ev.jammed ? 'jam' : ev.gusher ? 'gusher' : ev.struck ? 'strike'
+    : ev.fireOut ? 'fireOut' : 'bitBroke');
+};
 
 /** Relocate a placed machine to a new anchor cell. You can't break a machine,
  *  only MOVE it — so this preserves its level/storage/filter/stored output.
@@ -1782,9 +1968,20 @@ function machineCtxFor(x: number, y: number, z: number): MachineUIContext {
  *  carry the local MachineState object across to the new footprint. */
 function moveMachine(
   fromX: number, fromY: number, fromZ: number, px: number, py: number, pz: number
-): void {
+): boolean {
   const s = machines.get(fromX, fromY, fromZ);
-  if (!s) return;
+  if (!s) {
+    showNotice('That machine is no longer there.');
+    return true;
+  }
+  if (px === fromX && py === fromY && pz === fromZ) {
+    showNotice('Choose a different site. Right-click to try again.');
+    return false;
+  }
+  if (Math.hypot(px - fromX, pz - fromZ) > RELOCATE_RANGE) {
+    showNotice(`Too far — a rig can be carried at most ${RELOCATE_RANGE} blocks. Right-click a closer site.`);
+    return false;
+  }
   const type = s.type;
   const h = machineHeight(type);
   // Validate the destination column is clear (cells being vacated count as free).
@@ -1792,24 +1989,30 @@ function moveMachine(
     const cy = py + k;
     const vacating = px === fromX && pz === fromZ && cy >= fromY && cy < fromY + h;
     if (cy < 0 || cy >= 256 || (!vacating && !isReplaceable(world.getBlock(px, cy, pz)))) {
-      showNotice('No room to move it there.');
-      return;
+      showNotice('No room there. Right-click another site to try again.');
+      return false;
+    }
+    if (player.intersectsBlock(px, cy, pz) || interaction.canEdit?.(px, cy, pz) === false) {
+      showNotice('That site is obstructed. Step clear and right-click another site.');
+      return false;
     }
   }
   if (net.connected) {
     net.sendMachineMove(fromX, fromY, fromZ, px, py, pz); // server echoes edits + state
     audio.place(materialOf(Block.Autominer), new THREE.Vector3(px + 0.5, py + 0.5, pz + 0.5));
-    return;
+    return true;
   }
   // Offline: move the footprint + the live state object locally.
   const blockId = type === MachineType.OilDerrick ? Block.OilDerrick : Block.Autominer;
   for (let k = 0; k < h; k++) world.applyRemoteEdit(fromX, fromY + k, fromZ, Block.Air);
   machines.remove(fromX, fromY, fromZ); // deletes the map entry; `s` keeps the data
+  relocateMachine(s); // fresh ground: the bore/well starts over
   world.setBlock(px, py, pz, blockId);
   for (let k = 1; k < h; k++) world.setBlock(px, py + k, pz, Block.MachinePart);
   machines.set(px, py, pz, s);
   audio.place(materialOf(blockId), new THREE.Vector3(px + 0.5, py + 0.5, pz + 0.5));
   showNotice('Machine moved!');
+  return true;
 }
 function forceCloseMachine(): void {
   openMachine = null;
@@ -1834,6 +2037,9 @@ function destroyMachinesNear(center: THREE.Vector3, radius: number): void {
   const r = radius + 1.5;
   for (const m of machines.list()) {
     if (Math.hypot(m.x + 0.5 - center.x, m.y + 0.5 - center.y, m.z + 0.5 - center.z) <= r) {
+      // An uncapped gusher catches fire instead of being flattened.
+      if (igniteWell(m.state)) { machineFx(m.x, m.y, m.z, 'ignite'); continue; }
+      if (m.state.fire > 0) continue;
       destroyMachineLocal(m.x, m.y, m.z);
     }
   }
@@ -1845,11 +2051,8 @@ function destroyMachineLocal(ax: number, ay: number, az: number): void {
   const type = s.type;
   const stored = machines.remove(ax, ay, az);
   spillStacks(recordToStacks(stored), ax + 0.5, ay + 0.3, az + 0.5);
-  // The machine BLOCK is hardware coming back to its owner, not something
-  // pulled out of the world — the levy does not touch it. (Its stored OUTPUT,
-  // spilled just above, is taxed like any other harvest.)
   spawnDrop(ax + 0.5, ay + 0.3, az + 0.5,
-    type === MachineType.OilDerrick ? Block.OilDerrick : Block.Autominer, 1, 'manual');
+    type === MachineType.OilDerrick ? Block.OilDerrick : Block.Autominer, 1);
   for (let k = 0; k < machineHeight(type); k++) world.applyRemoteEdit(ax, ay + k, az, Block.Air);
   if (openMachine && openMachine.x === ax && openMachine.y === ay && openMachine.z === az) {
     forceCloseMachine();
@@ -1872,11 +2075,9 @@ interaction.onSabotage = (x, y, z) => {
       const s = turretStates.get(key);
       if (s && damageTurret(s, dmg)) {
         turretStates.delete(key);
-        // Hardware and the ammunition its owner loaded into it: their property
-        // coming back, so no levy.
-        spawnDrop(x + 0.5, y + 0.3, z + 0.5, Block.Turret, 1, 'manual');
+        spawnDrop(x + 0.5, y + 0.3, z + 0.5, Block.Turret, 1);
         if (s.ammo > 0) {
-          spawnDrop(x + 0.5, y + 0.3, z + 0.5, Item.Cannonball, Math.min(64, s.ammo), 'manual');
+          spawnDrop(x + 0.5, y + 0.3, z + 0.5, Item.Cannonball, Math.min(64, s.ammo));
         }
         world.applyRemoteEdit(x, y, z, Block.Air);
         if (openTurret && openTurret.x === x && openTurret.y === y && openTurret.z === z) {
@@ -1912,13 +2113,12 @@ invUI.onClose = () => {
     chests.sync(openChest.x, openChest.y, openChest.z, inventory.saveChest());
     openChest = null;
   }
-  closeTreasuryChest(); // flushes the open page, then hands the region back
   openMachine = null; // machine actions sync immediately; nothing to flush
   openTurret = null;  // turret actions also sync immediately
+  turretModels.showRange(null);
 };
-const spillAtPlayer = (
-  stacks: ItemStack[], reason: 'harvest' | 'manual' = 'harvest'
-) => spillStacks(stacks, player.pos.x, player.pos.y + 1, player.pos.z, reason);
+const spillAtPlayer = (stacks: ItemStack[]) =>
+  spillStacks(stacks, player.pos.x, player.pos.y + 1, player.pos.z);
 invUI.onOverflow = spillAtPlayer;
 // Lifesteal: crafting a Heart item bottles one of YOUR hearts. Veto the craft
 // at the withdrawal floor; a successful craft tells the server to deduct the
@@ -2070,6 +2270,7 @@ function enterPause(): void {
   if (pauseGuideBtn) pauseGuideBtn.style.display = arenaActive ? 'none' : '';
 }
 function enterTitle(): void {
+  interaction.armedMove = null;
   if (fieldGuide?.open) fieldGuide.closeSilently();
   screen = 'title';
   // Disarm any outstanding pointer request. Input re-asks for the pointer on
@@ -2164,24 +2365,22 @@ function saveLocalAccounts(): void {
   try { localStorage.setItem('voxelon.accounts', JSON.stringify(localAccounts.toJSON())); } catch { /* ignore */ }
 }
 
-// --- FACTION GOVERNMENT ------------------------------------------------------
+// --- FACTIONS ---------------------------------------------------------------
 // Registration used to assign your side to keep the war 50/50 and announce it on
 // a card you could only accept. That whole path is gone: an account is created
 // with NO faction, and the first time you press Play you get the ALLEGIANCE
-// PLEDGE (faction_picker.ts) — both sides laid out with their sitting president,
-// their tax rate and their roster — and the choice you make there is permanent.
+// PLEDGE (faction_picker.ts) — both sides laid out with their roster — and the
+// choice you make there is permanent.
 //
-// Three panels, each self-contained (its own injected stylesheet, its own class
-// prefix, nothing in index.html) and each sharing ONE WebGL bust board through
-// gov_ui.ts, because the page has a hard ceiling on GL contexts and the world
-// and the Duels ladder already spend two.
+// The pledge screen shares ONE WebGL bust board through gov_ui.ts, because the
+// page has a hard ceiling on GL contexts and the world and the Duels ladder
+// already spend two.
 const notifications = new NotificationsUI(app);
 const factionPicker = new FactionPicker(app);
-const presidentUI = new PresidentUI(app);
-// The cape wardrobe rides with the government panels for pointer-lock etiquette:
+// The cape wardrobe rides with the pledge screen for pointer-lock etiquette:
 // it opens from the title screen today, but it is a full-screen modal either way.
 const capesUI = new CapesUI(app);
-// Two bells, one unread count: one on the title screen (so a broadcast is
+// Two bells, one unread count: one on the title screen (so a notice is
 // visible before you drop in) and one on the HUD. Both stay hidden until an
 // account is actually logged in — there is nothing to read before that.
 const titleBell = notifications.mountBell(overlay, 'title');
@@ -2204,9 +2403,10 @@ hudBell.hidden = true;
  *  three hand-rolled full-screen cards are read straight off their display. */
 function cursorPanelOpen(): boolean {
   return invUI.open || worldMap.open || warfareUI.open || chatBox.open
-    || presidentUI.open || factionPicker.open || notifications.open
+    || factionPicker.open || notifications.open
     || capesUI.open || fieldGuide.open || tutorial.open || guideOpen
     || strategicPanel.style.display !== 'none'   // helipad bay
+    || trapPanel.style.display !== 'none'        // trap wiring panel
     || revivePanel.style.display !== 'none'      // teammate revival picker
     || elimEl.style.display !== 'none';          // elimination banner
 }
@@ -2252,386 +2452,63 @@ function resumePlay(): void {
   syncPointerLock();
 }
 
-for (const panel of [notifications, factionPicker, presidentUI, capesUI]) {
+for (const panel of [notifications, factionPicker, capesUI]) {
   // The arbiter would catch these on the next frame anyway; running it on the
   // open/close edge means the cursor is already there when the panel paints.
   panel.onOpen = syncPointerLock;
   panel.onClose = syncPointerLock;
 }
 
-/** The avatar to put on a party's plinth: their live look if they are online,
- *  your own if it is you, otherwise the seed-derived default the bust board
- *  falls back to anyway. */
-function cosmeticsFor(username: string): Cosmetics | undefined {
-  const key = username.toLowerCase();
-  if (authedName && key === authedName.toLowerCase()) return myCosmetics;
-  for (const r of net.remotes.values()) {
-    if (r.info.username.toLowerCase() === key) return r.info.cosmetics;
-  }
-  return undefined;
-}
-
-/** Item counts per faction treasury — online from the public dossiers, offline
- *  from the local strongboxes. Drives the in-world fill gauge. */
-function treasuryCountsNow(): Record<number, number> {
-  if (!net.connected) return treasuryCounts(offlineTreasuries);
-  const out: Record<number, number> = {};
-  for (const info of factionPublics) out[info.faction] = info.treasuryCount;
-  return out;
-}
-
-/** Build the dossiers the pledge screen reads. Offline they are derived from
- *  the local government so single-player still gets a real screen. */
+/** Build the dossiers the pledge screen reads. Offline there is exactly one
+ *  citizen — you — so the dossiers are derived locally. */
 function pledgeDossiers(): FactionPublic[] {
   if (net.connected && factionPublics.length) return factionPublics;
   return FACTIONS.map((f) => {
-    const e = politicsState.elections[f.id];
-    const g = politicsState.governments[f.id];
-    const party = e?.presidentPartyId
-      ? e.parties.find((q) => q.id === e.presidentPartyId) : undefined;
     const mine = localFaction === f.id && !!authedName;
-    const info: FactionPublic = {
+    return {
       faction: f.id,
       members: mine ? [authedName] : [],
-      memberCount: localFaction === f.id ? 1 : 0,
-      taxRate: g?.taxRate ?? 0,
-      kitStock: g?.kitStock ?? 0,
-      // Never assert here. The pledge screen is the ONLY way onto a faction,
-      // so a strongbox that has not been built yet must not be able to throw
-      // and take the whole screen — and with it the player's way into the
-      // world — down with it.
-      treasuryCount: treasuryCount(offlineTreasuries.get(f.id) ?? newTreasury(f.id)),
-      // Single-player has exactly one citizen, and the screen knows what they
-      // look like — so an unheld side still has somebody on its plinth.
-      faces: mine && e?.president !== authedName
-        ? [{ username: authedName, cosmetics: myCosmetics }] : [],
+      memberCount: mine ? 1 : 0,
+      faces: mine ? [{ username: authedName, cosmetics: myCosmetics }] : [],
     };
-    if (e?.president) {
-      info.president = {
-        username: e.president,
-        partyName: party?.name ?? 'Independent',
-        slogan: party?.slogan ?? '',
-        promises: party?.promises ?? [],
-        cosmetics: cosmeticsFor(e.president),
-        held: inventory.selectedStack ?? null,
-        armor: inventory.wornArmor(),
-      };
-    }
-    return info;
   });
 }
 
-/** Everything the pledge screen renders from: the dossiers plus the player
- *  doing the choosing, who stands in on a faction nobody has joined yet. */
-function pledgeData(): PledgeData {
-  return {
-    factions: pledgeDossiers(),
-    atlasCanvas: atlas.canvas,
-    viewer: authedName
-      ? { username: authedName, cosmetics: cosmeticsFor(authedName) } : undefined,
-  };
-}
-
-function governData(): GovernData {
-  return {
-    state: politicsState,
-    faction: localFaction,
-    username: authedName || 'Citizen',
-    treasury: net.connected
-      ? myTreasury
-      : (offlineTreasuries.get(localFaction)?.slots ?? []),
-    // The kit workshop builds a loadout out of what the president is actually
-    // carrying, and prices funding against it — so it needs the real pockets,
-    // hotbar included, not a summary.
-    pocket: inventory.serialize().slots,
-    cosmeticsOf: cosmeticsFor,
-    atlasCanvas: atlas.canvas,
-    kitClaimed,
-  };
-}
-
-// --- Offline government persistence ------------------------------------------
-// Single-player runs the SAME pure rules the server runs (politics.ts /
-// treasury.ts), so the panels are live rather than dead. It is stored per
-// account beside the other offline saves; a malformed blob is dropped by the
-// same fail-closed sanitizers the server's disk load uses.
-function offlinePoliticsKey(): string {
-  return `voxelon.politics.${(authedName || 'guest').toLowerCase()}`;
-}
-
-function saveOfflinePolitics(): void {
-  if (net.connected || !authedName) return;
-  try {
-    localStorage.setItem(offlinePoliticsKey(), JSON.stringify({
-      politics: politicsState,
-      treasuries: [...offlineTreasuries.entries()],
-    }));
-  } catch { /* storage disabled — the session still works, it just won't keep */ }
-}
-
-function loadOfflinePolitics(): void {
-  politicsState = newPolitics(Date.now(), OFFLINE_TERM_MS);
-  for (const f of FACTIONS) offlineTreasuries.set(f.id, newTreasury(f.id));
-  try {
-    const raw = JSON.parse(localStorage.getItem(offlinePoliticsKey()) || 'null');
-    if (!raw || typeof raw !== 'object') return;
-    // OFFLINE_TERM_MS also re-clamps a save written before offline elections ran
-    // on a clock, whose deadline is a week out and would never be reached.
-    politicsState = sanitizePolitics(raw.politics, Date.now(), OFFLINE_TERM_MS);
-    for (const entry of Array.isArray(raw.treasuries) ? raw.treasuries : []) {
-      if (!Array.isArray(entry) || entry.length !== 2) continue;
-      const [faction, blob] = entry;
-      if (isFaction(faction)) offlineTreasuries.set(faction, sanitizeTreasury(blob, faction));
-    }
-  } catch { /* keep the fresh state */ }
-}
-
-/** Seconds until the next offline election check; see the frame loop. */
-let offlineElectionTick = 1;
-
-/**
- * The single-player election clock — offline's copy of `tickPolitics`.
- *
- * This used to resolve the instant a vote was cast, which put the player in
- * office while the ballot was still open and the countdown still running: the
- * screen said the election had not happened and the title bar said they had
- * won it. Nobody takes the seat before the term ends now. The rules are the
- * server's own, unchanged — `termExpired`, then `tallyElection`, then
- * `rollCycle` — run on the short offline term so a week of real time is not
- * standing between a single player and their own government.
- *
- * A term that expires with an EMPTY ballot box just gets extended. Rolling it
- * would burn a cycle number every ninety seconds and have single-player open
- * on "Term 412" of an election nobody has ever contested.
- */
-function tickOfflineElection(): void {
-  if (net.connected || !isFaction(localFaction)) return;
-  const e = electionOf(politicsState, localFaction);
-  const now = Date.now();
-  if (!e || !termExpired(e, now)) return;
-  if (!Object.keys(e.votes).length) { e.endsAt = now + OFFLINE_TERM_MS; return; }
-  const before = e.president;
-  const counts = voteCounts(e);
-  const { president, party } = tallyElection(e);
-  rollCycle(e, now, OFFLINE_TERM_MS);
-  saveOfflinePolitics();
-  refreshGovernment();
-  if (!party) return;
-  const votes = counts[party.id] ?? 0;
-  pushNotification({
-    id: `local-election-${e.cycle}-${localFaction}`, kind: 'election',
-    title: `${party.name} wins the election`,
-    body: `${president} takes office for term ${e.cycle} with ${votes} vote`
-      + `${votes === 1 ? '' : 's'}`
-      + `${before && before !== president ? `, unseating ${before}` : ''}.`,
-    at: now,
-  });
-}
-
-/**
- * THE OFFICE GATE. The three powers of office — addressing the faction, setting
- * the levy and funding kits — are refused here for anyone who has not won the
- * seat, on BOTH paths: offline, where this client is the only authority, and
- * online, where refusing before `net.send*` means an unelected citizen's request
- * never leaves the machine. The server re-checks the presidency on every
- * govern-* message either way (server_core.requirePresident), so this is the
- * screen refusing honestly and instantly rather than the thing that makes it
- * safe. Returns false — and says why in the panel — when the seat is not yours.
- */
-function holdsOffice(): boolean {
-  if (!isFaction(localFaction)) {
-    presidentUI.setError('Swear allegiance to a faction first.');
-    return false;
-  }
-  if (!isPresident(politicsState, localFaction, authedName)) {
-    presidentUI.setError('Only your faction\'s president can do that. Win the election first.');
-    return false;
-  }
-  return true;
-}
-
-/**
- * Offline government. Single-player runs the SAME pure rules the server runs
- * (politics.ts / treasury.ts), so the panels are live instead of dead: you can
- * found a party, win an unopposed election, set a levy and watch it fill the
- * strongbox beside your flag.
- */
-/**
- * Take `n` kits' worth of `bill` out of the player's own inventory, or nothing.
- *
- * Checked in full before a single item moves: a half-paid bill would leave the
- * president short AND unfunded, with no way to tell which lines were taken.
- * Returns false and changes nothing when the pockets cannot cover it.
- */
-function takeKitBill(bill: ItemStack[], n: number): boolean {
-  if (!Number.isFinite(n) || n <= 0) return false;
-  for (const line of bill) {
-    if (inventory.countItem(line.id) < line.count * n) return false;
-  }
-  for (const line of bill) inventory.removeItem(line.id, line.count * n);
-  return true;
-}
-
-const governActions: GovernActions = {
-  onFoundParty: (name, slogan, promises) => {
-    if (net.connected) { net.sendFoundParty(name, slogan, promises); return; }
-    const res = foundParty(politicsState, localFaction, authedName,
-      name, slogan, promises, Date.now());
-    if (!res.ok) { presidentUI.setError(res.error ?? 'That party cannot stand.'); return; }
-    saveOfflinePolitics();
-    refreshGovernment();
-  },
-  onDisbandParty: () => {
-    if (net.connected) { net.sendDisbandParty(); return; }
-    const res = disbandParty(politicsState, localFaction, authedName);
-    if (!res.ok) { presidentUI.setError(res.error ?? 'You do not lead a party.'); return; }
-    saveOfflinePolitics();
-    refreshGovernment();
-  },
-  onVote: (partyId) => {
-    if (net.connected) { net.sendVote(partyId); return; }
-    const res = castVote(politicsState, localFaction, authedName, partyId);
-    if (!res.ok) { presidentUI.setError(res.error ?? 'That vote cannot be cast.'); return; }
-    // The ballot goes in the box; `tickOfflineElection` opens it when the term
-    // runs out, exactly as the server does.
-    saveOfflinePolitics();
-    refreshGovernment();
-  },
-  onBroadcast: (text) => {
-    if (!holdsOffice()) return;
-    if (net.connected) { net.sendGovBroadcast(text); return; }
-    const g = governmentOf(politicsState, localFaction);
-    if (!g) return;
-    const res = pushBroadcast(g, authedName, text, Date.now(), politicsState.serial++);
-    if (!res.ok) { presidentUI.setError(res.error ?? 'Say something first.'); return; }
-    pushNotification({
-      id: `local-${res.broadcast!.id}`, kind: 'broadcast',
-      title: `${factionName(localFaction)} broadcast · ${authedName}`,
-      body: res.broadcast!.text, at: res.broadcast!.at,
-    });
-    saveOfflinePolitics();
-    refreshGovernment();
-  },
-  onSetTax: (rate) => {
-    if (!holdsOffice()) return;
-    if (net.connected) { net.sendGovTax(rate); return; }
-    const g = governmentOf(politicsState, localFaction);
-    if (!g) return;
-    setTaxRate(g, rate);
-    saveOfflinePolitics();
-    refreshGovernment();
-  },
-  onSetKit: (slots) => {
-    if (!holdsOffice()) return;
-    if (net.connected) { net.sendSetKit(slots); return; }
-    const g = governmentOf(politicsState, localFaction);
-    if (!g) return;
-    const res = setKit(g, slots);
-    if (!res.ok) { presidentUI.setError(res.error ?? 'That is not a kit layout.'); return; }
-    saveOfflinePolitics();
-    refreshGovernment();
-  },
-  /**
-   * Fund `count` kits out of the president's OWN inventory — the only purse.
-   *
-   * The bill leaves this client's inventory HERE, before anything is sent, so a
-   * refused or dropped message can never cost items without producing kits, and
-   * the server (which holds no inventory of its own) is told about a transfer
-   * that has already happened. `takeKitBill` is all-or-nothing for exactly that
-   * reason.
-   */
-  onFundKits: (count) => {
-    if (!holdsOffice()) return;
-    const g = governmentOf(politicsState, localFaction);
-    if (!g) return;
-    const bill = kitCost(kitStacks(g.kit));
-    if (!bill.length) {
-      presidentUI.setError('The recruit kit is empty — build one first.');
-      return;
-    }
-    if (!takeKitBill(bill, count)) {
-      presidentUI.setError('You are not carrying enough to fund that many.');
-      return;
-    }
-    if (net.connected) { net.sendFundKits(count); return; }
-    // Offline mirrors the server exactly: the bill has already left the pockets
-    // above, and the treasury is not involved on the way.
-    g.kitStock += count;
-    saveOfflinePolitics();
-    refreshGovernment();
-  },
-  onClaimKit: () => {
-    if (net.connected) { net.sendClaimKit(); return; }
-    const g = governmentOf(politicsState, localFaction);
-    if (!g || g.kitStock <= 0 || kitClaimed) {
-      presidentUI.setError('There is no kit waiting for you.');
-      return;
-    }
-    g.kitStock--;
-    kitClaimed = true;
-    localAccounts.claimKit(authedName);
-    saveLocalAccounts();
-    for (const line of kitStacks(g.kit)) inventory.add(line.id, line.count);
-    showNotice('[KIT] Your faction funded this. Go build something.');
-    saveOfflinePolitics();
-    refreshGovernment();
-  },
-};
-
-/** Push the latest state into whatever government surface is on screen, and
- *  into the in-world strongboxes. Called on every politics sync. */
-function refreshGovernment(): void {
-  treasuryModels.setCounts(treasuryCountsNow());
-  // Only YOUR ring shows the real stacks. The wire publishes a bare count for
-  // everybody else, and the models must never show more than the wire does.
-  treasuryModels.setOwnContents(localFaction, net.connected
-    ? myTreasury
-    : (offlineTreasuries.get(localFaction)?.slots ?? []));
-  if (presidentUI.open) presidentUI.update(governData());
+/** Push the latest dossiers into the pledge screen if it is up. */
+function refreshPledgeScreen(): void {
   if (factionPicker.open) factionPicker.update(safePledgeData());
-}
-
-function openPresidentUI(view: PresidentView = 'election'): void {
-  presidentUI.show(governData(), governActions, view);
 }
 
 /** One dispatch into the inbox, with the cue that matches its weight. */
 function pushNotification(notif: Notification): void {
   if (!notifications.push(notif)) return;   // a re-sync must never re-alarm
-  if (notif.kind === 'raid') {
-    audio.raidHorn();
-    showNotice(`🚨 ${notif.title}`);
-  } else {
-    audio.dispatchChime();
-    showNotice(`🔔 ${notif.title}`);
-  }
+  audio.dispatchChime();
+  showNotice(`🔔 ${notif.title}`);
 }
 
 /** Show the allegiance pledge. Everything else waits behind it — an unpledged
- *  player has no side, no treasury and no vote. */
+ *  player has no side. */
 function openFactionPicker(): void {
   factionPicker.show(safePledgeData());
 }
 
 /** The dossiers, or an empty set of them. Everything the cards show — the
- *  president, the tax, the treasury, the roster — is DECORATION around a choice
- *  that has to be makeable regardless: the screen renders one card per faction
- *  out of FACTIONS whether or not any dossier arrived, so a politics sync that
- *  is late (or a strongbox that failed to load) can never be what stands between
+ *  roster, the faces — is DECORATION around a choice that has to be makeable
+ *  regardless: the screen renders one card per faction out of FACTIONS whether
+ *  or not any dossier arrived, so a late sync can never be what stands between
  *  a new player and the world. */
 function safePledgeData(): PledgeData {
   try {
-    return pledgeData();
+    return { factions: pledgeDossiers() };
   } catch (e) {
     console.error('[PLEDGE] dossiers unavailable — showing the bare screen', e);
-    return {
-      factions: [],
-      atlasCanvas: atlas.canvas,
-      viewer: authedName
-        ? { username: authedName, cosmetics: cosmeticsFor(authedName) } : undefined,
-    };
+    return { factions: [] };
   }
 }
+// The roll's sound: a glassy tick per beat that climbs as the spin slows, and
+// the fanfare when it settles.
+factionPicker.onTick = (progress) => audio.healTick(0.8 + progress * 0.6);
+factionPicker.onLand = () => audio.warfareAuthorized();
 factionPicker.onPledge = (faction) => {
   if (net.connected) { net.sendPledge(faction); return; }
   // Offline we are our own authority, but the choice is just as permanent.
@@ -2652,7 +2529,7 @@ function adoptFaction(faction: number): void {
   invalidateSelfAvatar();  // your body wears the new side's shirt
   refreshFlagless();       // the badge is about the side we just joined
   refreshNetInfo();
-  refreshGovernment();
+  refreshPledgeScreen();
 }
 
 // All surface structures shown on the world map as icons (one cached sweep —
@@ -2753,12 +2630,10 @@ function finishOfflineAuth(account: Account, freshRegister: boolean): void {
   // May be NO_FACTION: an offline account swears allegiance on the pledge screen
   // exactly like an online one, and the choice is just as permanent.
   localFaction = account.faction;
-  kitClaimed = account.kitClaimed === true;
   invalidateSelfAvatar(); // your third-person body reflects the new look/side
   refreshFlagless();
   onAuthSuccess(account.username);
-  loadOfflinePolitics();
-  refreshGovernment();
+  refreshPledgeScreen();
   spawnInOwnTerritory(); // never drop into enemy land (offline)
   // A fresh account has no side yet — the pledge screen comes up on Play.
   if (!freshRegister) restoreOfflineInventory(); // bring back saved single-player stuff
@@ -5435,140 +5310,182 @@ try { tutorialSeen = localStorage.getItem('voxelon.tutorialSeen') === '1'; } cat
 
 type TutorialStep = {
   chapter: string;
-  icon: string;
+  icon: IconName;
+  /** Title with the one word worth colouring wrapped in *asterisks*. */
   title: string;
   summary: string;
   tip: string;
   accent: string;
-  items: { label: string; value: string }[];
+  items: { icon: IconName; label: string; value: string; keys?: string[] }[];
 };
 
 const tutorial = (() => {
   const steps: TutorialStep[] = isMobile ? [
     {
-      chapter: 'Orientation 01 · Movement', icon: '✦', title: 'Claim your first ground', accent: '#65dcff',
+      chapter: 'Movement', icon: 'compass', title: 'Claim your *first* ground', accent: '#2bb6e8',
       summary: 'Explore with the left joystick, look by dragging the world, and learn the rhythm of movement before night closes in.',
       tip: 'Push the joystick beyond its rim to sprint. The jump control also deploys your glider while airborne.',
       items: [
-        { label: 'Move', value: 'Use the left joystick · push farther to sprint' },
-        { label: 'Look', value: 'Drag anywhere on the right side of the screen' },
-        { label: 'Jump / glide', value: 'Hold the ⬆ control' },
+        { icon: 'compass', label: 'Move', value: 'Left joystick · push farther to sprint' },
+        { icon: 'eye', label: 'Look', value: 'Drag anywhere on the right side of the screen' },
+        { icon: 'wing', label: 'Jump / glide', value: 'Hold the jump control', keys: ['⬆'] },
       ],
     },
     {
-      chapter: 'Orientation 02 · Survival', icon: '⛏', title: 'Turn the world into tools', accent: '#f7c95d',
+      chapter: 'Survival', icon: 'pickaxe', title: 'Turn the world into *tools*', accent: '#f0a81c',
       summary: 'Mine your first tree, shape raw blocks into equipment, and build a shelter that can survive the frontier.',
-      tip: 'Your getting-started guide remains available in-game and tracks the path from bare hands to your first vault.',
+      tip: 'Your getting-started guide stays available in-game and tracks the path from bare hands to your first vault.',
       items: [
-        { label: 'Break / attack', value: 'Long-press a block or target' },
-        { label: 'Place / use', value: 'Tap a block face or interactable object' },
-        { label: 'Inventory', value: 'Tap 🎒 to craft and manage items' },
+        { icon: 'pickaxe', label: 'Break / attack', value: 'Long-press a block or target' },
+        { icon: 'brick', label: 'Place / use', value: 'Tap a block face or an interactable object' },
+        { icon: 'backpack', label: 'Inventory', value: 'Tap the backpack to craft and manage items' },
       ],
     },
     {
-      chapter: 'Orientation 03 · Civilization', icon: '◆', title: 'Build power, not just shelter', accent: '#a98cff',
+      chapter: 'Civilization', icon: 'gear', title: 'Build *power*, not just shelter', accent: '#8b6cff',
       summary: 'Automate resources, customize your character, unlock progression branches, and turn a camp into a functioning civilization.',
-      tip: 'Open the recipe guide from crafting screens whenever you need a complete production path.',
+      tip: 'Open the recipe guide from any crafting screen whenever you need a complete production path.',
       items: [
-        { label: 'World map', value: 'Tap 🗺 to inspect territory and travel points' },
-        { label: 'Progress', value: 'Tap ⚑ to spend upgrades and view faction growth' },
-        { label: 'Machines', value: 'Build autominers, derricks, defenses, and transport' },
+        { icon: 'map', label: 'World map', value: 'Tap the map to inspect territory and travel points' },
+        { icon: 'flag', label: 'Progress', value: 'Tap the flag to spend upgrades and view faction growth' },
+        { icon: 'gear', label: 'Machines', value: 'Autominers, derricks, defenses, and transport' },
       ],
     },
     {
-      chapter: 'Orientation 04 · War', icon: '⚔', title: 'Every heart changes the war', accent: '#ff6b52',
-      summary: 'You are assigned to a balanced faction. Fight for territory, protect your flag, and remember that defeat can cost more than gear.',
+      chapter: 'War', icon: 'swords', title: 'Every *heart* changes the war', accent: '#ff5a43',
+      summary: 'You fight for a balanced faction. Hold territory, protect your flag, and remember that defeat can cost more than gear.',
       tip: 'During war the border contracts and every player glows. Stay with your faction and watch the map.',
       items: [
-        { label: 'Lifesteal', value: 'Kills can transfer hearts between players' },
-        { label: 'Faction war', value: 'The side with the strongest season performance wins' },
-        { label: 'Your objective', value: 'Survive, build leverage, and fight as a team' },
+        { icon: 'heart', label: 'Lifesteal', value: 'Kills can transfer hearts between players' },
+        { icon: 'trophy', label: 'Faction war', value: 'The strongest season performance wins' },
+        { icon: 'shield', label: 'Your objective', value: 'Survive, build leverage, and fight as a team' },
       ],
     },
   ] : [
     {
-      chapter: 'Orientation 01 · Movement', icon: '✦', title: 'Claim your first ground', accent: '#65dcff',
+      chapter: 'Movement', icon: 'compass', title: 'Claim your *first* ground', accent: '#2bb6e8',
       summary: 'Learn the movement language of the frontier before you commit to a direction. The world is large, persistent, and dangerous after dark.',
-      tip: 'Double-tap W or press Q to sprint. Press V later to cycle first- and third-person views.',
+      tip: 'Press V any time to cycle between first- and third-person views.',
       items: [
-        { label: 'Move', value: 'W A S D · Space to jump · Shift to sneak' },
-        { label: 'Sprint', value: 'Q or double-tap W' },
-        { label: 'Look', value: 'Move the mouse after entering the world' },
+        { icon: 'compass', label: 'Move', value: 'Space to jump · Shift to sneak', keys: ['W', 'A', 'S', 'D'] },
+        { icon: 'bolt', label: 'Sprint', value: 'Or double-tap W', keys: ['Q'] },
+        { icon: 'eye', label: 'Look', value: 'Move the mouse once you enter the world' },
       ],
     },
     {
-      chapter: 'Orientation 02 · Survival', icon: '⛏', title: 'Turn the world into tools', accent: '#f7c95d',
+      chapter: 'Survival', icon: 'pickaxe', title: 'Turn the world into *tools*', accent: '#f0a81c',
       summary: 'Mine your first tree, convert raw blocks into equipment, and build a shelter that can survive the frontier.',
-      tip: 'Press T at any time and type /guide for the getting-started checklist. It tracks the path from bare hands to your first vault.',
+      tip: 'Press T and type /guide for the getting-started checklist — it tracks the path from bare hands to your first vault.',
       items: [
-        { label: 'Break / attack', value: 'Left click' },
-        { label: 'Place / use', value: 'Right click' },
-        { label: 'Inventory', value: 'Press E to craft and manage items' },
+        { icon: 'pickaxe', label: 'Break / attack', value: 'Hold on a block, click a target', keys: ['LMB'] },
+        { icon: 'brick', label: 'Place / use', value: 'Blocks, doors, machines, chests', keys: ['RMB'] },
+        { icon: 'backpack', label: 'Inventory', value: 'Craft and manage items', keys: ['E'] },
       ],
     },
     {
-      chapter: 'Orientation 03 · Civilization', icon: '◆', title: 'Build power, not just shelter', accent: '#a98cff',
+      chapter: 'Civilization', icon: 'gear', title: 'Build *power*, not just shelter', accent: '#8b6cff',
       summary: 'Automate resources, unlock progression branches, and turn a temporary camp into a functioning civilization.',
       tip: 'Crafting screens include a recipe guide. Use it to trace complete production chains for machines, weapons, and defenses.',
       items: [
-        { label: 'World map', value: '/map · inspect territory, structures, and travel points' },
-        { label: 'Progress', value: '/warfare · spend upgrades and view faction growth' },
-        { label: 'Machines', value: 'Build autominers, derricks, defenses, and transport' },
+        { icon: 'map', label: 'World map', value: 'Territory, structures, and travel points', keys: ['/map'] },
+        { icon: 'flag', label: 'Progress', value: 'Spend upgrades and view faction growth', keys: ['/warfare'] },
+        { icon: 'gear', label: 'Machines', value: 'Autominers, derricks, defenses, and transport' },
       ],
     },
     {
-      chapter: 'Orientation 04 · War', icon: '⚔', title: 'Every heart changes the war', accent: '#ff6b52',
-      summary: 'You are assigned to a balanced faction. Fight for territory, protect your flag, and remember that defeat can cost more than gear.',
+      chapter: 'War', icon: 'swords', title: 'Every *heart* changes the war', accent: '#ff5a43',
+      summary: 'You fight for a balanced faction. Hold territory, protect your flag, and remember that defeat can cost more than gear.',
       tip: 'During war the border contracts and every player glows. Stay close to allies, watch the map, and choose fights carefully.',
       items: [
-        { label: 'Lifesteal', value: 'Kills can transfer hearts between players' },
-        { label: 'Faction war', value: 'The side with the strongest season performance wins' },
-        { label: 'Your objective', value: 'Survive, build leverage, and fight as a team' },
+        { icon: 'heart', label: 'Lifesteal', value: 'Kills can transfer hearts between players' },
+        { icon: 'trophy', label: 'Faction war', value: 'The strongest season performance wins' },
+        { icon: 'shield', label: 'Your objective', value: 'Survive, build leverage, and fight as a team' },
       ],
     },
   ];
 
+  /** A five-faced CSS voxel (the bottom never shows). `face` goes on the sides. */
+  function makeCube(face = ''): HTMLDivElement {
+    const cube = document.createElement('div');
+    cube.className = 'brief-cube';
+    for (let f = 0; f < 5; f++) {
+      const side = document.createElement('i');
+      if (face && f !== 2) side.innerHTML = face;
+      cube.appendChild(side);
+    }
+    return cube;
+  }
+
   let i = 0;
   const panel = document.createElement('div');
-  panel.className = 'onboarding-shell mc-font';
+  panel.className = 'onboarding-shell';
   panel.setAttribute('role', 'dialog');
   panel.setAttribute('aria-modal', 'true');
   panel.setAttribute('aria-label', 'First-play briefing');
   panel.tabIndex = -1;
 
+  // Drifting background voxels, each tinted by one of the step accents.
+  const field = document.createElement('div');
+  field.className = 'brief-field';
+  const floats: [number, number, number, number][] = [ // x%, y%, size px, accent index
+    [6, 14, 34, 0], [16, 78, 22, 1], [44, 6, 18, 2], [58, 88, 30, 3],
+    [84, 12, 26, 1], [93, 56, 38, 2], [3, 50, 16, 3], [72, 40, 14, 0],
+  ];
+  floats.forEach(([x, y, size, accent], n) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'brief-float';
+    wrap.style.cssText = `--x:${x}%;--y:${y}%;--d:${10 + n * 1.7}s;--delay:${-n * 1.3}s;--spin:${18 + n * 4}s;--o:${.35 + (n % 3) * .15}`;
+    const cube = makeCube();
+    cube.style.setProperty('--s', size + 'px');
+    cube.style.setProperty('--c', steps[accent].accent);
+    wrap.appendChild(cube);
+    field.appendChild(wrap);
+  });
+
   const frame = document.createElement('div');
   frame.className = 'onboarding-frame';
   const visual = document.createElement('section');
   visual.className = 'onboarding-visual';
-  const visualTop = document.createElement('div');
   const chapter = document.createElement('div'); chapter.className = 'brief-chapter';
-  const icon = document.createElement('div'); icon.className = 'brief-icon';
+  const hero = document.createElement('div'); hero.className = 'brief-hero';
+  const heroBob = document.createElement('div'); heroBob.className = 'brief-hero-bob';
+  hero.appendChild(heroBob);
+  const visualText = document.createElement('div');
   const number = document.createElement('div'); number.className = 'brief-number';
   const title = document.createElement('h2'); title.className = 'brief-title';
   const summary = document.createElement('p'); summary.className = 'brief-summary';
-  visualTop.append(chapter, icon, number, title, summary);
-  const tip = document.createElement('div'); tip.className = 'brief-tip';
-  visual.append(visualTop, tip);
+  visualText.append(number, title, summary);
+  visual.append(chapter, hero, visualText);
 
   const content = document.createElement('section');
   content.className = 'onboarding-content';
-  const progress = document.createElement('div'); progress.className = 'brief-progress';
-  const track = document.createElement('div'); track.className = 'brief-progress-track';
-  const fill = document.createElement('div'); fill.className = 'brief-progress-fill';
-  track.appendChild(fill);
-  const count = document.createElement('div'); count.className = 'brief-progress-count';
-  progress.append(track, count);
+  const stepper = document.createElement('div'); stepper.className = 'brief-steps';
+  const stepButtons = steps.map((s, n) => {
+    const b = document.createElement('button');
+    b.className = 'brief-step';
+    b.setAttribute('aria-label', `Step ${n + 1}: ${s.chapter}`);
+    b.innerHTML = `<span class="brief-step-bar"></span><span class="brief-step-name">${s.chapter}</span>`;
+    b.addEventListener('click', () => go(n));
+    stepper.appendChild(b);
+    return b;
+  });
   const contentLabel = document.createElement('div'); contentLabel.className = 'brief-content-label';
   contentLabel.textContent = 'Field essentials';
   const items = document.createElement('div'); items.className = 'brief-items';
+  const tip = document.createElement('div'); tip.className = 'brief-tip';
   const actions = document.createElement('div'); actions.className = 'brief-actions';
   const back = document.createElement('button'); back.className = 'mc-btn brief-back'; back.textContent = '← Back';
   const skip = document.createElement('button'); skip.className = 'mc-btn brief-skip'; skip.textContent = 'Skip briefing';
   const next = document.createElement('button'); next.className = 'mc-btn brief-next';
   actions.append(back, skip, next);
-  content.append(progress, contentLabel, items, actions);
+  content.append(stepper, contentLabel, items, tip, actions);
+  if (!isMobile) {
+    const hint = document.createElement('div'); hint.className = 'brief-hint';
+    hint.innerHTML = 'Navigate with <span class="brief-key">←</span> <span class="brief-key">→</span> · <span class="brief-key">Esc</span> to skip';
+    content.appendChild(hint);
+  }
   frame.append(visual, content);
-  panel.appendChild(frame);
+  panel.append(field, frame);
   app.appendChild(panel);
 
   function render(): void {
@@ -5576,22 +5493,51 @@ const tutorial = (() => {
     panel.style.setProperty('--brief-accent', step.accent);
     panel.dataset.step = String(i + 1);
     chapter.textContent = step.chapter;
-    setIconText(icon, step.icon);
-    number.textContent = 'BRIEF ' + String(i + 1).padStart(2, '0');
-    title.textContent = step.title;
+    heroBob.replaceChildren(makeCube(iconSvg(step.icon)));
+    number.textContent = String(i + 1).padStart(2, '0') + ' / ' + String(steps.length).padStart(2, '0');
+    title.replaceChildren(...step.title.split('*').map((part, n) => {
+      if (n % 2 === 0) return document.createTextNode(part);
+      const em = document.createElement('em'); em.textContent = part; return em;
+    }));
     summary.textContent = step.summary;
     tip.textContent = step.tip;
-    count.textContent = String(i + 1).padStart(2, '0') + ' / ' + String(steps.length).padStart(2, '0');
-    fill.style.width = (((i + 1) / steps.length) * 100) + '%';
+    stepButtons.forEach((b, n) => {
+      b.classList.toggle('active', n === i);
+      b.classList.toggle('done', n < i);
+      if (n === i) b.setAttribute('aria-current', 'step'); else b.removeAttribute('aria-current');
+    });
     items.replaceChildren();
-    for (const detail of step.items) {
+    step.items.forEach((detail, n) => {
       const row = document.createElement('div'); row.className = 'brief-item';
+      row.style.setProperty('--n', String(n));
+      const glyph = document.createElement('div'); glyph.className = 'brief-item-glyph';
+      glyph.innerHTML = iconSvg(detail.icon);
+      const text = document.createElement('div');
       const label = document.createElement('div'); label.className = 'brief-item-label'; label.textContent = detail.label;
-      const value = document.createElement('div'); value.className = 'brief-item-value'; setIconText(value, detail.value);
-      row.append(label, value); items.appendChild(row);
-    }
+      const value = document.createElement('div'); value.className = 'brief-item-value'; value.textContent = detail.value;
+      text.append(label, value);
+      row.append(glyph, text);
+      if (detail.keys) {
+        const keys = document.createElement('div'); keys.className = 'brief-keys';
+        for (const k of detail.keys) {
+          const cap = document.createElement('span'); cap.className = 'brief-key'; setIconText(cap, k);
+          keys.appendChild(cap);
+        }
+        row.appendChild(keys);
+      }
+      items.appendChild(row);
+    });
     back.disabled = i === 0;
     next.textContent = i === steps.length - 1 ? 'Enter the world →' : 'Continue →';
+    // Restart the entrance animation for the new step.
+    panel.classList.remove('is-entering');
+    void panel.offsetWidth;
+    panel.classList.add('is-entering');
+  }
+
+  function go(n: number): void {
+    if (n === i || n < 0 || n >= steps.length) return;
+    i = n; render();
   }
 
   function finish(): void {
@@ -5601,23 +5547,26 @@ const tutorial = (() => {
     if (worldReady) resumePlay();
   }
 
-  back.addEventListener('click', () => { if (i > 0) { i--; render(); } });
+  function advance(): void {
+    if (i >= steps.length - 1) finish(); else go(i + 1);
+  }
+
+  back.addEventListener('click', () => go(i - 1));
   skip.addEventListener('click', finish);
-  next.addEventListener('click', () => {
-    if (i >= steps.length - 1) finish();
-    else { i++; render(); }
-  });
+  next.addEventListener('click', advance);
   panel.addEventListener('keydown', (e) => {
-    if (e.key === 'ArrowLeft' && i > 0) { e.preventDefault(); i--; render(); }
-    if (e.key === 'ArrowRight') {
-      e.preventDefault();
-      if (i >= steps.length - 1) finish(); else { i++; render(); }
-    }
+    if (e.key === 'ArrowLeft') { e.preventDefault(); go(i - 1); }
+    if (e.key === 'ArrowRight') { e.preventDefault(); advance(); }
   });
 
   return {
     get open(): boolean { return panel.style.display === 'flex'; },
-    show(): void { i = 0; render(); panel.style.display = 'flex'; panel.focus(); },
+    show(): void {
+      i = 0; render();
+      panel.style.display = 'flex';
+      panel.classList.remove('is-opening'); void panel.offsetWidth; panel.classList.add('is-opening');
+      panel.focus();
+    },
     finish,
   };
 })();
@@ -5729,12 +5678,17 @@ renderer.domElement.addEventListener('mousedown', () => {
 });
 document.addEventListener('keydown', (e) => {
   if (e.code !== 'Escape' || e.defaultPrevented) return;
-  else if (tutorial.open) { tutorial.finish(); }
+  if (interaction.armedMove) {
+    interaction.armedMove = null;
+    showNotice('Machine relocation cancelled.');
+  }
+  if (tutorial.open) { tutorial.finish(); }
   else if (chatBox.open) { chatBox.hide(); }
   else if (warfareUI.open) { hideProgress(); }
   else if (guideOpen) { hideGuide(); }
   else if (worldMap.open) { worldMap.hide(); input.lock(); }
   else if (invUI.open) { invUI.hide(); input.lock(); }
+  else if (trapPanelAt) { closeTrapPanel(); }
   else if (fieldGuide.open) fieldGuide.backToPause();
   // Do not re-lock from Escape while paused. Browsers may deliver the native
   // pointer-lock exit before this key event; treating that same press as
@@ -5787,7 +5741,7 @@ function spillDeathLoot(): void {
   const x = player.pos.x, z = player.pos.z;
   const surface = world.terrain.height(Math.floor(x), Math.floor(z)) + 2;
   const y = player.pos.y + 1 < 1 ? surface : player.pos.y + 1;
-  if (!spillStacks(loot, x, y, z, 'manual')) {
+  if (!spillStacks(loot, x, y, z)) {
     inventory.restore(carried);
     showNotice('⚠ Connection lost — your items stayed with you.');
   }
@@ -5806,6 +5760,7 @@ function checkDeath(): void {
   }
   if (deathShown) return;
   deathShown = true;
+  interaction.armedMove = null;
   if (myRope) {
     if (!net.connected) offlineVehicles.detachRope(0);
     myRope = null;
@@ -5928,6 +5883,7 @@ function applyNetworkEdit(x: number, y: number, z: number, b: number): void {
     && b !== Block.Chest) {
     forceCloseChest();
   }
+  syncTurretCell(x, y, z, b);
   // Keep local machine prediction in step with remote placements/removals.
   const mt = machineTypeForBlock(b);
   if (mt !== null) {
@@ -6012,9 +5968,9 @@ net.onRespawned = (x, y, z, h) => {
   pushStateSave();
   if (worldReady && screen === 'playing') input.lock();
 };
-net.onKillfeed = (killer, victim) => {
+net.onKillfeed = (killer, victim, how) => {
   if (arenaActive) pushDuelKill(killer, victim);
-  else showKill(killer, victim);
+  else showKill(killer, victim, how);
 };
 net.onRoster = refreshNetInfo;
 // Admin gamemode/teleport/notice (driven from the server console).
@@ -6424,15 +6380,18 @@ mobs.onPlayerKill = () => { /* warfare XP comes from vault bosses only */ };
  *  system, so this now reads straight off worn gear. */
 function activeBuffs(): {
   speedMult: number; armorBonus: number; toughness: number; reloadMult: number;
-  mineMult: number; spreadMult: number; gunDamageMult: number;
+  mineMult: number; spreadMult: number; gunDamageMult: number; wearSave: number;
   meleeBonus: number; energyMult: number; fallMult: number; xpMult: number;
 } {
-  const runes = runeBonuses(inventory.wornArmor());
+  const worn = inventory.wornArmor();
+  const runes = runeBonuses(worn);
+  const defense = runeDefense(inventory.armorPoints(), worn);
   return {
     speedMult: runes.speedMult,
     armorBonus: runes.armor,
-    toughness: runes.toughness,
-    reloadMult: 1,
+    toughness: defense.toughness,
+    reloadMult: runes.reloadMult,
+    wearSave: runes.wearSave,
     mineMult: runes.mineMult,
     spreadMult: runes.spreadMult,
     gunDamageMult: 1,
@@ -7482,9 +7441,8 @@ interaction.onVaultChest = (x, y, z) => {
 interaction.onLever = (x, y, z) => {
   audio.place(materialOf(Block.Lever), new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
   if (net.connected) { net.sendLever(x, y, z); return; }
-  for (const f of leverFlips((bx, by, bz) => world.getBlock(bx, by, bz), x, y, z)) {
-    world.setBlock(f.x, f.y, f.z, f.block);
-  }
+  if (!trapField.has(x, y, z)) trapField.place(x, y, z, world.getBlock(x, y, z));
+  applyTrapResultLocal(trapField.pull(x, y, z, trapSolid, localTrapTargets()));
 };
 
 // --- TPA: teleport requests (DonutSMP-style) ----------------------------------
@@ -7649,12 +7607,6 @@ const chatBox = new ChatBox(app, {
         if (player.dead) return "You can't do that while dead.";
         showProgress();
         return null;
-      case 'president':
-        if (player.dead) return "You can't do that while dead.";
-        if (!isFaction(localFaction)) return 'Swear allegiance first — press Play and choose a side.';
-        if (invUI.open) invUI.hide();
-        openPresidentUI();
-        return null;
       case 'notifications':
         notifications.show();
         return null;
@@ -7700,7 +7652,7 @@ net.onGotItem = (id, count) => {
   // add the inventory has no room left, so the re-drop won't be re-requested.
   const left = inventory.add(id, count);
   if (left > 0) {
-    net.sendDrop([{ id, count: left }], player.pos.x, player.pos.y, player.pos.z, 'manual');
+    net.sendDrop([{ id, count: left }], player.pos.x, player.pos.y, player.pos.z);
   }
 };
 net.onChest = (x, y, z, slots) => {
@@ -7722,14 +7674,40 @@ net.onMachine = (x, y, z, state) => {
   const s = sanitizeState(state);
   if (s) machines.set(x, y, z, s);
 };
+net.onMachineFx = (x, y, z, fx) => machineFx(x, y, z, fx);
+net.onTraps = (list) => {
+  trapField.clear();
+  for (const [k, raw] of list) {
+    const st = sanitizeTrap(raw);
+    if (!st) continue;
+    const [x, y, z] = k.split(',').map(Number);
+    trapField.set(x, y, z, st);
+    remeshTrapCell(x, z);
+  }
+};
+net.onTrap = (x, y, z, state) => {
+  if (!state) { if (trapField.remove(x, y, z)) remeshTrapCell(x, z); return; }
+  const st = sanitizeTrap(state);
+  if (!st) return;
+  const fresh = !trapField.has(x, y, z);
+  trapField.set(x, y, z, st);
+  if (fresh) remeshTrapCell(x, z);
+};
+net.onTrapFx = (x, y, z, kind, what, tx, ty, tz) => trapFxLocal(x, y, z, kind, what, tx, ty, tz);
+net.onEffect = (kind, seconds) => applyStatusEffect(kind, seconds);
+net.onAlarm = (x, y, z, owner, intruder) => {
+  audio.trap('bell', new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
+  const whose = owner === net.username ? 'Your' : `${owner}'s`;
+  showNotice(`🔔 ${whose} alarm at ${x}, ${z}: ${intruder || 'an intruder'} is inside!`);
+};
 net.onTurret = (x, y, z, state) => {
   const s = sanitizeTurretState(state);
   if (s) turretStates.set(`${x},${y},${z}`, s);
 };
 net.onTurretFire = (x, y, z, tx, ty, tz) => {
   turretModels.fireTracer(x, y, z, tx, ty, tz);
-  particles.poof(tx, ty, tz);
-  audio.gun(new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
+  // A cannon, not a pistol: the heavy report with its room tail.
+  audio.gun(new THREE.Vector3(x + 0.5, y + TURRET_MUZZLE_Y, z + 0.5), 2.1);
 };
 net.onWar = (active, timeLeft, nextIn, duration, score, wins) => {
   const wasActive = warActiveNow;
@@ -7772,21 +7750,10 @@ net.onFactionSwitched = (faction, remaining) => {
   showNotice(`🤫 You secretly joined ${factionName(faction)}. Switches left: ${remaining}.`);
 };
 
-// --- FACTION GOVERNMENT: the wire ---------------------------------------------
-net.onPolitics = (state, factions, treasury) => {
-  politicsState = state;
+// --- FACTIONS: the wire -------------------------------------------------------
+net.onFactions = (factions) => {
   factionPublics = factions;
-  if (treasury) myTreasury = treasury;
-  refreshGovernment();
-};
-net.onGovWelcome = (inbox, claimed) => {
-  kitClaimed = claimed;
-  // NOT setAccount here: this fires from inside the `welcome` handler, before
-  // onWelcome -> onAuthSuccess has adopted the username, so it would file the
-  // read-marks under the previous account. onAuthSuccess owns that call.
-  // Broadcasts the government stored while you were away, so logging in after a
-  // week still shows you what your president has been saying.
-  notifications.seed(inbox);
+  refreshPledgeScreen();
 };
 net.onPledged = (faction) => {
   adoptFaction(faction);
@@ -7795,30 +7762,8 @@ net.onPledged = (faction) => {
   // The pledge screen is the last thing between the title and the world.
   startPlaying();
 };
-net.onGovErr = (reason) => {
-  // Shown IN the panel that asked, not as a toast over the world — the player
-  // is looking at the form that was refused.
-  if (presidentUI.open) presidentUI.setError(reason);
-  else showNotice(`⚠ ${reason}`);
-};
+net.onGovErr = (reason) => showNotice(`⚠ ${reason}`);
 net.onNotify = (notif) => pushNotification(notif);
-net.onTreasury = (faction, slots) => {
-  // The president asked for their hoard and the server allowed it: this IS the
-  // open. Nothing else opens the panel in multiplayer, so office and distance
-  // are checked by the authority rather than by the button that was pressed.
-  myTreasury = slots;
-  refreshGovernment();
-  if (faction === localFaction) openTreasuryChest(faction, openTreasury?.page ?? 0);
-};
-net.onTreasuryRaided = (faction, by, stacks) => {
-  treasuryModels.setCounts(treasuryCountsNow());
-  // Scorch the ring. A robbery is a thing that happened to a PLACE, so anyone
-  // who walks past in the next few seconds can see it happened.
-  treasuryModels.markRaided(faction);
-  if (faction === localFaction) return; // the raid alarm already came as a notify
-  showNotice(`💰 ${by} hauled ${stacks} stack${stacks === 1 ? '' : 's'} out of the ` +
-    `${factionName(faction)} treasury.`);
-};
 net.onSeasonEnd = (winner, number) => {
   // The winning side's badge is refreshed on the next welcome, but bump it now
   // for instant feedback.
@@ -7866,7 +7811,7 @@ net.onDisconnect = () => {
   worldMap.setDynamicMarkers([]);
   refreshNetInfo();
 };
-interaction.onEdit = (x, y, z, b) => {
+interaction.onEdit = (x, y, z, b, facing) => {
   const key = `${x},${y},${z}`;
   if (!net.connected && localVaultEncounter && curVault && blockInsideArena(curVault, x, y, z)) {
     if (b === Block.Air) {
@@ -7882,10 +7827,29 @@ interaction.onEdit = (x, y, z, b) => {
     }
   }
   pendingOfflineArenaPlacements.delete(key);
+  // A placed turret is ours from the start (the server claims it for the placer
+  // too); breaking one drops its entity + model.
+  if (b === Block.Turret && !turretStates.has(key)) {
+    turretStates.set(key, newTurret(net.connected ? net.username : 'You', localFaction));
+  }
+  syncTurretCell(x, y, z, b);
   // Placing a machine block creates its local entity (prediction offline + MP).
   const mt = machineTypeForBlock(b);
   if (mt !== null) machines.place(x, y, z, mt);
-  net.sendEdit(x, y, z, b);
+  // Traps: breaking one drops its entity — offline, mining an armed hostile
+  // trap sets it off (online the server does this); placing one creates an
+  // entity we own, facing the way interact.ts chose.
+  const had = trapField.get(x, y, z);
+  const newKind = trapKindForBlock(b);
+  if (had && had.kind !== newKind) {
+    if (net.connected) trapField.remove(x, y, z);
+    else applyTrapResultLocal(trapField.spring(x, y, z, meAsTarget(), trapSolid));
+  }
+  if (newKind !== null && (!had || had.kind !== newKind)) {
+    trapField.place(x, y, z, b, net.connected ? net.username : 'You', localFaction, facing ?? 0);
+    remeshTrapCell(x, z);
+  }
+  net.sendEdit(x, y, z, b, facing);
 };
 /** The Duels build rules, as a data object behind the generic arena hooks.
  *  Moved verbatim out of `interaction.canPlace`/`canEdit`; a new mode supplies
@@ -8421,21 +8385,6 @@ let lastSentArmor = -1; // last armor-points value pushed to the server
 let lastSentToughness = -1; // last flat-soak value pushed to the server
 let lastInWater = false;
 let lavaTimer = 0; // throttles lava burn damage
-let spikeHurtTimer = 0; // throttles spike-trap damage ticks
-
-/** Someone (you) stepped on a landmine: the plate detonates — blocks crater,
- *  you and nearby mobs take blast damage, and in MP the server splashes other
- *  players + broadcasts the crater (same path as a rocket burst). */
-function triggerLandmine(x: number, y: number, z: number): void {
-  world.setBlock(x, y, z, Block.Air);
-  net.sendEdit(x, y, z, 0);
-  const at = new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5);
-  gadgetFxAt('frag', at.x, at.y, at.z);
-  mobs.explode(at, player); // local blocks/mobs/self blast
-  if (net.connected) net.sendRocketBlast(at.x, at.y, at.z);
-  else destroyMachinesNear(at, 4);
-  showNotice('💥 You stepped on a landmine!');
-}
 
 // Gun state.
 const ammoEl = document.getElementById('ammo')!;
@@ -8482,7 +8431,7 @@ function fireVolley(stack: ItemStack, gun: GunInfo): boolean {
   const base = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
   const pellets = Math.max(1, gun.pellets ?? 1);
   const buffs = activeBuffs();
-  const spread = (gun.spread ?? 0) * buffs.spreadMult; // Gunslinger + Rune of Focus
+  const spread = (gun.spread ?? 0) * (arenaActive ? 1 : buffs.spreadMult); // Rune of Focus
   // Gunslinger capstones boost per-round damage (server still clamps PvP hits).
   const boosted = !arenaActive && buffs.gunDamageMult > 1
     ? { ...gun, damage: Math.max(1, Math.round(gun.damage * buffs.gunDamageMult)) }
@@ -9093,9 +9042,16 @@ function turretCtxFor(x: number, y: number, z: number): TurretUIContext {
     },
     claim: () => {
       const s = here();
-      if (!s) return;
-      claimTurret(s, net.connected ? net.username : 'You');
+      const me = net.connected ? net.username : 'You';
+      if (!s || !turretCanClaim(s, me, localFaction)) return;
+      const hacked = !!s.owner && s.owner !== me && turretDisabled(s);
+      claimTurret(s, me, localFaction);
       if (net.connected) net.sendTurretClaim(x, y, z);
+      else if (hacked) showNotice('Turret hacked — it fights for you now.');
+    },
+    canClaim: () => {
+      const s = here();
+      return !!s && turretCanClaim(s, net.connected ? net.username : 'You', localFaction);
     },
     load: (item: number) => {
       const s = here();
@@ -9109,6 +9065,21 @@ function turretCtxFor(x: number, y: number, z: number): TurretUIContext {
       turretLoad(s, item, n); // local predict
       if (net.connected) net.sendTurretLoad(x, y, z, item, n);
     },
+    canMove: () => {
+      const s = here();
+      return !!s && turretFriendly(s, net.connected ? net.username : 'You', localFaction);
+    },
+    move: () => {
+      const s = here();
+      if (!s || !turretFriendly(s, net.connected ? net.username : 'You', localFaction)) {
+        showNotice('Only your own (or your faction\'s) turret can be relocated.');
+        return;
+      }
+      invUI.hide();
+      interaction.armedMove = (px, py, pz) => moveTurret(x, y, z, px, py, pz);
+      if (worldReady) resumePlay();
+      showNotice(`✋ Carry it up to ${RELOCATE_RANGE} blocks, then right-click the new site. Esc cancels.`);
+    },
     canLoad: (item: number) => {
       const s = here();
       if (!s) return false;
@@ -9117,6 +9088,49 @@ function turretCtxFor(x: number, y: number, z: number): TurretUIContext {
     },
     myName: () => (net.connected ? net.username : 'You'),
   };
+}
+
+/** Relocate a turret: its level, ammo, fuel and hull travel with it. Online the
+ *  server moves it and echoes the edits + state; offline we move it locally. */
+function moveTurret(
+  fromX: number, fromY: number, fromZ: number, px: number, py: number, pz: number
+): boolean {
+  const fromKey = `${fromX},${fromY},${fromZ}`;
+  const s = turretStates.get(fromKey);
+  if (!s || world.getBlock(fromX, fromY, fromZ) !== Block.Turret) {
+    showNotice('That turret is no longer there.');
+    return true;
+  }
+  if (px === fromX && py === fromY && pz === fromZ) {
+    showNotice('Choose a different site. Right-click to try again.');
+    return false;
+  }
+  if (Math.hypot(px - fromX, pz - fromZ) > RELOCATE_RANGE) {
+    showNotice(`Too far — a turret can be carried at most ${RELOCATE_RANGE} blocks. Right-click a closer site.`);
+    return false;
+  }
+  if (py < 0 || py >= 256 || !isReplaceable(world.getBlock(px, py, pz))) {
+    showNotice('No room there. Right-click another site to try again.');
+    return false;
+  }
+  if (player.intersectsBlock(px, py, pz) || interaction.canEdit?.(px, py, pz) === false) {
+    showNotice('That site is obstructed. Step clear and right-click another site.');
+    return false;
+  }
+  const pos = new THREE.Vector3(px + 0.5, py + 0.5, pz + 0.5);
+  if (net.connected) {
+    net.sendTurretMove(fromX, fromY, fromZ, px, py, pz); // server echoes edits + state
+    audio.place(materialOf(Block.Turret), pos);
+    return true;
+  }
+  turretStates.delete(fromKey); // keep `s` so the placement hook can't reset it
+  world.applyRemoteEdit(fromX, fromY, fromZ, Block.Air);
+  syncTurretCell(fromX, fromY, fromZ, Block.Air);
+  turretStates.set(`${px},${py},${pz}`, s);
+  world.setBlock(px, py, pz, Block.Turret);
+  audio.place(materialOf(Block.Turret), pos);
+  showNotice('Turret moved!');
+  return true;
 }
 
 // --- WARFARE COMMAND: vehicles (client) --------------------------------------
@@ -10764,8 +10778,8 @@ function useGadget(def: GadgetDef): void {
       if (world.getBlock(x, y, z) !== Block.Air) { showNotice('No room for a sentry there.'); return; }
       gadgetCd.use(def.item, worldTimeLocal); consume();
       world.setBlock(x, y, z, Block.Turret);
-      net.sendEdit(x, y, z, Block.Turret);
-      if (net.connected) net.sendTurretClaim(x, y, z);
+      net.sendEdit(x, y, z, Block.Turret); // the server claims it for us
+      turretStates.set(`${x},${y},${z}`, newTurret(net.connected ? net.username : 'You', localFaction));
       showNotice('🔫 Sentry deployed — load it with cannonballs + oil.');
       break;
     }
@@ -10817,13 +10831,6 @@ function tickDisguises(dt: number): void {
 // costs you a fixed number of frantic jumps (and everyone nearby hears it);
 // tar costs you your speed and your jump; barbed wire costs speed and blood.
 
-/** Jumps needed to prise a bear trap open. */
-const BEAR_TRAP_STRUGGLES = 6;
-/** Hard ceiling on how long the jaws can hold you, however badly you struggle. */
-const BEAR_TRAP_MAX_SECONDS = 7;
-
-let trapStruggles = 0;      // jumps banked toward getting free
-let trapPinLeft = 0;        // seconds left on the current pin
 let prevJumpForTrap = false;
 let wireHurtTimer = 0;
 const trapHudEl = document.createElement('div');
@@ -10833,6 +10840,14 @@ trapHudEl.style.cssText =
   'display:none;padding:10px 20px;border-radius:8px;font-size:17px;color:#fff;' +
   'background:rgba(60,10,10,0.8);border:2px solid #ff6a3d;text-align:center;';
 app.appendChild(trapHudEl);
+// Lingering effect chips (bleeding, poisoned, on fire…) above the hotbar.
+const effectChipsEl = document.createElement('div');
+effectChipsEl.className = 'mc-font';
+effectChipsEl.style.cssText =
+  'position:absolute;bottom:118px;left:50%;transform:translateX(-50%);z-index:12;display:flex;gap:6px;' +
+  'pointer-events:none;font-size:11px;';
+app.appendChild(effectChipsEl);
+let effectChipsKey = '';
 
 /** Which holding trap the player is standing in (Air if none). */
 function trapUnderfoot(): number {
@@ -10840,70 +10855,286 @@ function trapUnderfoot(): number {
   const feet = world.getBlock(bx, Math.floor(player.pos.y + 0.1), bz);
   if (feet === Block.Tar || feet === Block.BarbedWire) return feet;
   const under = world.getBlock(bx, Math.floor(player.pos.y - 0.05), bz);
-  if (under === Block.BearTrap || under === Block.Tar) return under;
+  if (under === Block.Tar) return under;
   return Block.Air;
 }
 
+/** A trap (or anything) put a status effect on us: HUD line + sound. */
+function applyStatusEffect(kind: import('./traps').EffectKind, seconds: number): void {
+  if (player.dead || arenaActive) return;
+  const fresh = !statusFx.has(kind);
+  statusFx.add(kind, seconds);
+  if (!fresh) return;
+  if (kind === 'pinned') { audio.hurt(); showNotice('🪤 A bear trap snapped shut on your leg!'); }
+  else if (kind === 'netted') showNotice('🕸 Netted! You can\'t move or fight for a moment.');
+  else if (kind === 'stun') showNotice('⚡ Stunned!');
+  else if (kind === 'burning') showNotice('🔥 You\'re on fire!');
+  else if (kind === 'slow') showNotice('☠ Poison dart — you\'re slowed!');
+}
+
+/** Status effects + the passive holding blocks (tar, barbed wire). */
 function updateTrapGrip(dt: number): void {
   wireHurtTimer = Math.max(0, wireHurtTimer - dt);
   player.pinned = false;
   player.trapSlow = 1;
   player.trapNoJump = false;
   if (arenaActive || player.dead || localMode !== 'survival' || player.noclip) {
-    trapPinLeft = 0; trapStruggles = 0; prevJumpForTrap = false; trapHudEl.style.display = 'none';
+    statusFx.clear(); prevJumpForTrap = false; trapHudEl.style.display = 'none';
+    effectChipsEl.replaceChildren(); effectChipsKey = '';
     return;
+  }
+  // Damage over time is the server's job online; offline we are the authority.
+  const dot = statusFx.update(dt);
+  if (dot > 0 && !net.connected) player.damage(dot);
+  if (statusFx.has('burning') && Math.random() < dt * 8) {
+    particles.burst(player.pos.x, player.pos.y + 0.9, player.pos.z, 1, 0xff7a20, 1, 0.5, { gravity: -2, scale: 0.5 });
+  }
+
+  const jumpNow = input.jump;
+  const pressed = jumpNow && !prevJumpForTrap;
+  prevJumpForTrap = jumpNow;
+  let hud = '';
+  if (statusFx.has('pinned')) {
+    // Struggle out: each fresh jump press prises the jaws a little wider.
+    if (pressed && statusFx.struggle()) showNotice('🪤 You wrenched the trap open!');
+    else hud = `${iconSvg('trap')} <b>CAUGHT IN A BEAR TRAP</b><br>Mash <b>JUMP</b> to break free — ${statusFx.strugglesLeft()} more`;
+  } else if (statusFx.has('netted')) {
+    hud = `<b>NETTED</b><br>${statusFx.remaining('netted').toFixed(1)}s`;
+  } else if (statusFx.has('stun')) {
+    hud = `<b>STUNNED</b>`;
+  }
+  if (statusFx.rooted()) { player.pinned = true; player.trapNoJump = true; }
+  player.trapSlow = Math.min(player.trapSlow, statusFx.speedMult());
+  if (hud) { trapHudEl.innerHTML = hud; trapHudEl.style.display = 'block'; }
+  else trapHudEl.style.display = 'none';
+
+  // Lingering effect chips.
+  const chips = statusFx.active.filter(k => k === 'bleed' || k === 'slow' || k === 'burning');
+  const key = chips.map(k => `${k}${Math.ceil(statusFx.remaining(k))}`).join(',');
+  if (key !== effectChipsKey) {
+    effectChipsKey = key;
+    effectChipsEl.replaceChildren(...chips.map(k => {
+      const chip = document.createElement('span');
+      chip.textContent = `${EFFECT_LABELS[k]} ${Math.ceil(statusFx.remaining(k))}s`;
+      chip.style.cssText = `padding:3px 8px;border-radius:5px;background:rgba(0,0,0,.6);color:${EFFECT_COLORS[k]};` +
+        `border:1px solid ${EFFECT_COLORS[k]};text-shadow:none;`;
+      return chip;
+    }));
   }
 
   const trap = trapUnderfoot();
-
-  // Bear trap: the jaws snap shut the moment you step on them.
-  if (trap === Block.BearTrap && trapPinLeft <= 0 && trapStruggles === 0) {
-    trapPinLeft = BEAR_TRAP_MAX_SECONDS;
-    trapStruggles = 0;
-    player.damage(2);
-    audio.hurt();
-    showNotice('🪤 A bear trap snapped shut on your leg!');
-  }
-
-  if (trapPinLeft > 0) {
-    trapPinLeft = Math.max(0, trapPinLeft - dt);
-    player.pinned = true;
-    player.trapNoJump = true;
-    // Struggle out: each fresh jump press prises the jaws a little wider.
-    const jumpNow = input.jump;
-    if (jumpNow && !prevJumpForTrap) trapStruggles++;
-    prevJumpForTrap = jumpNow;
-    const left = Math.max(0, BEAR_TRAP_STRUGGLES - trapStruggles);
-    if (left <= 0 || trapPinLeft <= 0) {
-      trapPinLeft = 0; trapStruggles = 0;
-      trapHudEl.style.display = 'none';
-      showNotice('🪤 You wrenched the trap open!');
-    } else {
-      trapHudEl.innerHTML =
-        `${iconSvg('trap')} <b>CAUGHT IN A BEAR TRAP</b><br>Mash <b>JUMP</b> to break free — ${left} more`;
-      trapHudEl.style.display = 'block';
-    }
-    return;
-  }
-  trapStruggles = 0;
-  prevJumpForTrap = input.jump;
-  trapHudEl.style.display = 'none';
-
   // Tar: a crawl, and no jumping out of the pit.
   if (trap === Block.Tar) {
-    player.trapSlow = 0.32;
+    player.trapSlow = Math.min(player.trapSlow, 0.32);
     player.trapNoJump = true;
     return;
   }
   // Barbed wire: slow AND bleeding while you push through it.
   if (trap === Block.BarbedWire) {
-    player.trapSlow = 0.45;
+    player.trapSlow = Math.min(player.trapSlow, 0.45);
     if (wireHurtTimer <= 0) {
       wireHurtTimer = 0.8;
       player.damage(2);
+      particles.burst(player.pos.x, player.pos.y + 0.5, player.pos.z, 3, 0xb01e1e, 1.2, 0.4, { scale: 0.4 });
     }
   }
 }
+
+// --- Trapcraft: local plumbing ------------------------------------------------
+
+/** The local player as a trap target. */
+function meAsTarget(): TrapTarget {
+  return { id: 'me', name: net.connected ? net.username : 'You', faction: localFaction,
+    x: player.pos.x, y: player.pos.y, z: player.pos.z };
+}
+
+/** Mobs the offline trap sim can see this frame, by target id. */
+const trapMobs = new Map<string, Mob>();
+/** Targets the offline trap sim may catch: us (when catchable) and nearby mobs. */
+function localTrapTargets(): TrapTarget[] {
+  const out: TrapTarget[] = [];
+  if (arenaActive) return out;
+  if (!player.dead && localMode === 'survival' && !player.noclip) out.push(meAsTarget());
+  trapMobs.clear();
+  if (!net.connected) {
+    mobs.list.forEach((m, i) => {
+      if (Math.abs(m.pos.x - player.pos.x) > 48 || Math.abs(m.pos.z - player.pos.z) > 48) return;
+      const id = `mob:${i}`;
+      trapMobs.set(id, m);
+      out.push({ id, name: '', faction: NO_FACTION, x: m.pos.x, y: m.pos.y, z: m.pos.z });
+    });
+  }
+  return out;
+}
+
+/** Generated spikes (vault floors) have no trap entity: they keep the classic
+ *  rule — anyone standing on them is pricked — reported as self-damage. */
+let legacySpikeTimer = 0;
+function legacySpikes(dt: number): void {
+  legacySpikeTimer = Math.max(0, legacySpikeTimer - dt);
+  if (player.dead || localMode !== 'survival' || player.noclip || !player.onGround) return;
+  const bx = Math.floor(player.pos.x), bz = Math.floor(player.pos.z);
+  const by = Math.floor(player.pos.y - 0.05);
+  if (world.getBlock(bx, by, bz) !== Block.SpikeTrap || trapField.has(bx, by, bz)) return;
+  if (legacySpikeTimer > 0) return;
+  player.damage(3);
+  legacySpikeTimer = 0.55;
+}
+
+/** Radius within which hidden enemy traps show up for us. */
+function trapRevealRadius(): number {
+  if (inventory.selectedStack?.id === Item.TrapDetector) return 10;
+  return player.sneaking ? 3 : 0;
+}
+
+/** Is this trap cell invisible to us right now (hidden hostile trap)? */
+function trapHiddenAt(x: number, y: number, z: number): boolean {
+  const s = trapField.get(x, y, z);
+  if (!s || !s.owner || s.arm > 0 || !trapConcealed(s.kind)) return false;
+  if (trapFriendly(s, net.connected ? net.username : 'You', localFaction)) return false;
+  return Math.hypot(x + 0.5 - player.pos.x, y + 0.5 - player.pos.y, z + 0.5 - player.pos.z) > trapRevealRadius();
+}
+
+/** Sound + particles + model animation for one trap event. */
+function trapFxLocal(
+  x: number, y: number, z: number, kind: TrapKind, what: TrapFxWhat, tx?: number, ty?: number, tz?: number,
+): void {
+  trapModels.fx(x, y, z, what, tx, ty, tz);
+  const pos = new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5);
+  const s = trapField.get(x, y, z);
+  const mine = !!s && trapFriendly(s, net.connected ? net.username : 'You', localFaction);
+  // Don't let a hidden trap give itself away by sound before it actually bites.
+  if (what === 'arm') { if (mine) audio.trap('arm', pos); return; }
+  if (what === 'reset') return;
+  if (what === 'prime') { audio.trap('beep', pos); return; }
+  switch (kind) {
+    case TrapKind.Spike: audio.trap('spike', pos); break;
+    case TrapKind.BearTrap: audio.trap('snap', pos); break;
+    case TrapKind.ShockPlate:
+      audio.trap('zap', pos);
+      particles.burst(pos.x, pos.y, pos.z, 14, 0x8fd3ff, 3, 0.3, { gravity: 0, scale: 0.35 });
+      break;
+    case TrapKind.Landmine:
+      // Online the server's `blast` message draws the explosion.
+      if (!net.connected) { particles.explosion(pos.x, pos.y, pos.z); audio.explosion(pos); }
+      break;
+    case TrapKind.Claymore:
+      particles.explosion(pos.x, pos.y, pos.z);
+      audio.explosion(pos);
+      break;
+    case TrapKind.FlameJet: audio.trap('whoosh', pos); break;
+    case TrapKind.DartLauncher: audio.trap('dart', pos); break;
+    case TrapKind.NetLauncher: audio.trap('net', pos); break;
+    case TrapKind.AlarmBell: audio.trap('bell', pos); break;
+    case TrapKind.FallTrap: case TrapKind.WallTrap: audio.trap('slam', pos); break;
+    case TrapKind.Tripwire: if (mine) audio.trap('laser', pos); break;
+    case TrapKind.PressurePlate: case TrapKind.Timer: if (mine) audio.trap('click', pos); break;
+    case TrapKind.MotionSensor: if (mine) audio.trap('beep', pos); break;
+    default: break;
+  }
+}
+
+/** Offline authority: apply a pure trap result to the local world + player. */
+function applyTrapResultLocal(res: TrapTickResult): void {
+  for (const w of res.writes) world.applyRemoteEdit(w.x, w.y, w.z, w.block);
+  for (const f of res.fx) trapFxLocal(f.x, f.y, f.z, f.kind, f.what, f.tx, f.ty, f.tz);
+  for (const h of res.hits) {
+    const mob = trapMobs.get(h.target);
+    if (mob) {
+      const hold = h.effects.find(e => e.kind === 'pinned' || e.kind === 'netted' || e.kind === 'stun');
+      const dot = h.effects.some(e => e.kind === 'bleed' || e.kind === 'burning') ? 3 : 0;
+      mobs.trapHit(mob, h.damage + dot, hold ? hold.seconds : 0);
+      continue;
+    }
+    if (h.target !== 'me') continue;
+    const wasAlive = !player.dead;
+    player.damage(h.damage);
+    if (h.kx || h.kz) { player.vel.x += h.kx * 6; player.vel.y += h.ky * 6; player.vel.z += h.kz * 6; }
+    for (const e of h.effects) applyStatusEffect(e.kind, e.seconds);
+    if (wasAlive && player.dead) {
+      showNotice(`You were ${TRAP_VERBS[h.kind] ?? 'caught'} by ${h.owner ? `${h.owner}'s` : 'a'} ${TRAP_NAMES[h.kind]}.`);
+    }
+  }
+  for (const b of res.blasts) {
+    const at = new THREE.Vector3(b.x, b.y, b.z);
+    particles.explosion(at.x, at.y, at.z);
+    audio.explosion(at);
+    const me = meAsTarget();
+    if (!player.dead && ownerHostile(b.owner, b.faction, me)) {
+      const dmg = falloffDamage(b.damage, Math.hypot(me.x - b.x, me.y - b.y, me.z - b.z), b.radius);
+      if (dmg > 0) player.damage(dmg);
+    }
+    if (!net.connected) {
+      for (const m of [...mobs.list]) {
+        const dmg = falloffDamage(b.damage, m.pos.distanceTo(at), b.radius);
+        if (dmg > 0) mobs.trapHit(m, dmg);
+      }
+    }
+    destroyMachinesNear(at, b.crater);
+  }
+  for (const a of res.alarms) {
+    audio.trap('bell', new THREE.Vector3(a.x + 0.5, a.y + 0.5, a.z + 0.5));
+    showNotice(`🔔 Alarm at ${a.x}, ${a.z}!`);
+  }
+}
+
+// --- Defusing: sneak + hold USE on a revealed enemy trap ---------------------
+const DEFUSE_SECONDS = 2.5;
+let defuseAt: { x: number; y: number; z: number; t: number; px: number; pz: number; hp: number } | null = null;
+
+function beginDefuse(x: number, y: number, z: number): void {
+  defuseAt = { x, y, z, t: 0, px: player.pos.x, pz: player.pos.z, hp: player.health };
+  audio.trap('click', new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5));
+}
+
+function updateDefuse(dt: number): void {
+  if (!defuseAt) return;
+  const d = defuseAt;
+  const moved = Math.hypot(player.pos.x - d.px, player.pos.z - d.pz) > 0.6;
+  if (player.dead || !player.sneaking || moved || player.health < d.hp || !input.rightDown ||
+      !isTrapBlock(world.getBlock(d.x, d.y, d.z))) {
+    defuseAt = null;
+    trapHudEl.style.display = 'none';
+    if (!player.dead) showNotice('Defuse abandoned.');
+    return;
+  }
+  d.t += dt;
+  const pct = Math.min(100, Math.round(d.t / DEFUSE_SECONDS * 100));
+  trapHudEl.innerHTML = `${iconSvg('trap')} <b>DEFUSING</b> ${pct}%<br>Stay still and keep sneaking`;
+  trapHudEl.style.display = 'block';
+  if (d.t < DEFUSE_SECONDS) return;
+  defuseAt = null;
+  trapHudEl.style.display = 'none';
+  if (net.connected) { net.sendTrapDefuse(d.x, d.y, d.z); return; }
+  const block = world.getBlock(d.x, d.y, d.z);
+  const s = trapField.remove(d.x, d.y, d.z);
+  world.applyRemoteEdit(d.x, d.y, d.z, Block.Air);
+  const item = block === Block.LeverOn ? Block.Lever : block === Block.FallTrapOpen ? Block.FallTrap
+    : block === Block.WallTrapUp ? Block.WallTrap : block;
+  const left = inventory.add(item, 1);
+  if (left > 0) spillAtPlayer([{ id: item, count: left }]);
+  showNotice(`Defused a ${s ? TRAP_NAMES[s.kind] : 'trap'}.`);
+}
+
+interaction.hiddenAt = (x, y, z, id) => TRAP_MODEL_BLOCKS.has(id) && trapHiddenAt(x, y, z);
+interaction.onTrapUse = (x, y, z, sneaking) => {
+  const block = world.getBlock(x, y, z);
+  if (!trapField.has(x, y, z)) trapField.place(x, y, z, block); // legacy: ownerless
+  const s = trapField.get(x, y, z);
+  if (!s) return false;
+  const friendly = trapFriendly(s, net.connected ? net.username : 'You', localFaction);
+  if (sneaking && !friendly) {
+    if (Math.hypot(x + 0.5 - player.pos.x, y + 0.5 - player.pos.y, z + 0.5 - player.pos.z) > 3.5) {
+      showNotice('Get closer to defuse it.');
+      return true;
+    }
+    beginDefuse(x, y, z);
+    return true;
+  }
+  if (!friendly) return false;
+  openTrapPanel(x, y, z);
+  return true;
+};
 
 // --- CAPTURE THE FLAG (client side) -----------------------------------------
 // Everything here is presentation + intent: the server owns the rules, decides
@@ -10921,169 +11152,6 @@ function showFlagHud(html: string, border: string): void {
   flagHudEl.innerHTML = html;
   flagHudEl.style.borderColor = border;
   flagHudEl.style.display = 'block';
-}
-
-// --- THE STRONGBOX in the world ---------------------------------------------
-// Right-click at your own faction's hoard to open the Treasury tab of the
-// government menu; right-click at the ENEMY's, while a war window is open, to
-// strip its ring. Right-click rather than left so it never competes with beating
-// on the flag pole standing in the middle of it.
-const treasuryHudEl = document.createElement('div');
-treasuryHudEl.className = 'mc-font';
-treasuryHudEl.style.cssText =
-  'position:absolute;top:140px;left:50%;transform:translateX(-50%);z-index:22;' +
-  'display:none;padding:7px 16px;border-radius:8px;font-size:14px;color:#fff;' +
-  'background:rgba(10,12,20,0.72);border:2px solid #d8b64a;text-align:center;';
-app.appendChild(treasuryHudEl);
-
-/** The faction strongbox the player is standing at right now, or null. */
-function treasuryUnderfoot(): number | null {
-  if (!isFaction(localFaction) || player.dead) return null;
-  return treasuryModels.inReach(player.pos.x, player.pos.z);
-}
-
-// Right-click only acts on the hoard when you are actually LOOKING at it.
-// Without this, standing anywhere inside the reach radius would swallow every
-// right-click — no placing blocks, no opening a chest, no eating — which is a
-// five-block dead zone around each flag site.
-//
-// The test asks the models, because the hoard is not a point any more: the
-// strongbox AND every pedestal in the ring count, so walking up to the side of
-// the ring and looking at the nearest pile works the way it looks like it should.
-const treasuryAim = new THREE.Vector3();
-/** Roughly the crosshair plus a forgiving margin. */
-const TREASURY_AIM_DOT = Math.cos(0.6);
-
-function lookingAtTreasury(faction: number): boolean {
-  camera.getWorldDirection(treasuryAim);
-  // Your own ledger opens off the strongbox alone; an enemy ring can be stripped
-  // by looking at any pile on it. See `TreasuryModels.lookingAt` for why.
-  return treasuryModels.lookingAt(
-    faction, camera.position, treasuryAim, TREASURY_AIM_DOT, faction !== localFaction);
-}
-
-function updateTreasuryPrompt(): void {
-  const at = treasuryUnderfoot();
-  if (at === null) { treasuryHudEl.style.display = 'none'; return; }
-  const g = governmentOf(politicsState, at);
-  const stored = treasuryCountsNow()[at] ?? 0;
-  if (at === localFaction) {
-    // Two different prompts, because there are two different rights here: the
-    // president can take the levy out, and everybody else can only read it.
-    const mine = isPresident(politicsState, localFaction, authedName);
-    treasuryHudEl.innerHTML =
-      `${iconSvg('coinbag')} <b>${factionName(at)} hoard</b> — ${stored} items on the ring · ` +
-      `levy ${Math.round((g?.taxRate ?? 0) * 100)}% · ${g?.kitStock ?? 0} kits funded<br>` +
-      (mine
-        ? '<b>Look at the strongbox and right-click</b> to open it — '
-          + `${TREASURY_PAGES} pages, take what the faction needs.`
-        : '<b>Look at the strongbox and right-click</b> to read the ledger. '
-          + 'Only the president can open it.');
-    treasuryHudEl.style.borderColor = '#d8b64a';
-  } else if (!warActiveNow) {
-    treasuryHudEl.innerHTML =
-      `${iconSvg('lock')} The ${factionName(at)} hoard is <b>sealed</b> — ${stored} items ` +
-      'behind the shields. It can only be forced during a war.';
-    treasuryHudEl.style.borderColor = '#7a8090';
-  } else {
-    treasuryHudEl.innerHTML =
-      `${iconSvg('warning')} The shields are <b>down</b>. <b>Look at the hoard and right-click</b> ` +
-      `to strip the ${factionName(at)} ring — ${stored} items on it. They will hear it.`;
-    treasuryHudEl.style.borderColor = factionCss(at);
-  }
-  treasuryHudEl.style.display = 'block';
-}
-
-/**
- * The live slot array of a hoard the local player is allowed to hold: the
- * server's synced copy of YOUR faction's in multiplayer, the local strongbox
- * offline. Mutating it is the local mirror of a page write — in multiplayer the
- * next politics sync overwrites it with the server's word anyway, which is what
- * makes the mirror safe to keep rather than authoritative.
- */
-function treasurySlotsNow(faction: number): (ItemStack | null)[] {
-  if (net.connected) return myTreasury;
-  return offlineTreasuries.get(faction)?.slots ?? [];
-}
-
-/**
- * Open the faction hoard AS A CHEST, on `page`.
- *
- * The hoard used to be a ledger you could read and nothing else — the levy went
- * in and never came out, which made a treasury a scoreboard rather than a bank.
- * Now its president walks to the flag and opens it like any other container:
- * drag stacks out into your inventory, drop your own stacks in, page through the
- * three grids it holds.
- *
- * Only ONE page is ever in the panel. Flipping pages flushes the one on screen
- * first, so a write can only ever say what a president was actually looking at.
- */
-function openTreasuryChest(faction: number, page: number): void {
-  openTreasury = { faction, page };
-  invUI.chestPager = {
-    title: `${factionName(faction)} hoard`,
-    pages: TREASURY_PAGES,
-    page,
-    onPage: (next) => {
-      if (!openTreasury || next === openTreasury.page) return;
-      pushTreasuryPage(inventory.readChest());
-      openTreasuryChest(faction, next);
-    },
-  };
-  inventory.loadChest(treasuryPage(treasurySlotsNow(faction), page));
-  lastTreasuryVersion = inventory.version;
-  invUI.show('chest');
-}
-
-/** Write the page on screen back: into the local mirror, and (MP) to the server
- *  which re-checks the office and the distance before believing a word of it. */
-function pushTreasuryPage(slots: (ItemStack | null)[]): void {
-  if (!openTreasury) return;
-  const { faction, page } = openTreasury;
-  setTreasuryPage(treasurySlotsNow(faction), page, slots);
-  if (net.connected) net.sendTreasurySet(faction, page, slots);
-  else saveOfflinePolitics();
-  lastTreasuryVersion = inventory.version;
-  refreshGovernment();
-}
-
-/** Close the hoard: flush the open page and hand the chest region back. */
-function closeTreasuryChest(): void {
-  if (!openTreasury) return;
-  pushTreasuryPage(inventory.saveChest());
-  openTreasury = null;
-  invUI.chestPager = null;
-}
-
-/** Right-click at a strongbox. Returns true when it consumed the click. */
-function treasuryUse(): boolean {
-  const at = treasuryUnderfoot();
-  if (at === null || !lookingAtTreasury(at)) return false;
-  if (at === localFaction) {
-    // The hoard OPENS for one person only, and only here. Everyone else gets the
-    // ledger — what their faction has banked is public to its own citizens; the
-    // key to it is not.
-    if (!isPresident(politicsState, localFaction, authedName)) {
-      showNotice('🔒 Only the president can open the hoard. Opening the ledger instead.');
-      openPresidentUI('treasury');
-      return true;
-    }
-    if (net.connected) net.sendTreasuryOpen(at); // the reply opens the panel
-    else openTreasuryChest(at, 0);
-    held.swing();
-    return true;
-  }
-  if (!net.connected) {
-    showNotice('There is nobody to rob in single-player.');
-    return true;
-  }
-  if (!warActiveNow) {
-    showNotice('🔒 The hoard is sealed. Its shields only drop during a war.');
-    return true;
-  }
-  net.sendTreasuryRaid(at);
-  held.swing();
-  return true;
 }
 
 /**
@@ -11545,6 +11613,7 @@ function frame(): void {
   if(arenaKind === 'party'){player.energy=1;player.exhausted=false;}   // Windrunner capstones
   player.fallDamageMult = arenaActive ? 1 : buffsNow.fallMult;      // Juggernaut capstones
   interaction.miningSpeedMult = arenaActive ? 1 : buffsNow.mineMult; // Prospector + Rune of Fortune
+  interaction.toolWearSave = arenaActive ? 0 : buffsNow.wearSave;    // Rune of Fortune
   const armorPts = arenaActive ? 0 : inventory.armorPoints() + buffsNow.armorBonus;
   player.armorPoints = armorPts;
   player.toughness = arenaActive ? 0 : buffsNow.toughness;           // Greater Rune of Iron
@@ -11724,6 +11793,10 @@ function frame(): void {
         // Empty temporary slots are not mining tools. Suppress client
         // prediction too, so rejected edits cannot leave a local-only hole.
         interaction.update(dt, input, camera, true, true);
+      } else if (statusFx.blocksActions() || defuseAt) {
+        // Stunned, netted, or both hands busy defusing: no shooting, mining
+        // or placing until it passes.
+        interaction.update(dt, input, camera, true, true);
       } else if (healUse.active) {
         // Both hands are busy with the wrap: no mining, placing or shooting
         // until it is finished (or interrupted by switching away).
@@ -11769,8 +11842,6 @@ function frame(): void {
       } else if (input.rightClicked && !interaction.armedMove && !heldGun &&
           tryBoardHelicopter()) {
         // Stood beside a parked airframe: right-click climbs in.
-        interaction.update(dt, input, camera, true, true); // suppress mine + use
-      } else if (input.rightClicked && !interaction.armedMove && treasuryUse()) {
         interaction.update(dt, input, camera, true, true); // suppress mine + use
       } else if (flagSwingUpdate(dt, input.leftDown)) {
         interaction.update(dt, input, camera, true, true); // suppress mine + use
@@ -11911,28 +11982,52 @@ function frame(): void {
         }
       }
     } else prevBoatJump = false;
-    // Traps: spikes prick anyone standing on them; a landmine detonates; the
-    // holding traps (bear trap / tar / barbed wire) grab you where you stand.
-    spikeHurtTimer = Math.max(0, spikeHurtTimer - dt);
-    if (!arenaActive) updateTrapGrip(dt);
-    if (!player.dead && !arenaActive && localMode === 'survival' && !player.noclip) {
-      const bx = Math.floor(player.pos.x), bz = Math.floor(player.pos.z);
-      const by = Math.floor(player.pos.y - 0.05);
-      const under = world.getBlock(bx, by, bz);
-      if (under === Block.SpikeTrap && player.onGround && spikeHurtTimer <= 0) {
-        // Spikes bite harder now — a spike moat is meant to hurt.
-        player.damage(3);
-        spikeHurtTimer = 0.55;
-      } else if (under === Block.Landmine) {
-        triggerLandmine(bx, by, bz);
+    // Trapcraft: status effects + tar/wire grip every frame; offline the trap
+    // field is simulated here (online the server runs it and tells us).
+    if (!arenaActive) {
+      updateTrapGrip(dt);
+      updateDefuse(dt);
+      legacySpikes(dt);
+      if (!net.connected && trapField.size) {
+        applyTrapResultLocal(trapField.tick(dt, localTrapTargets(), trapSolid));
       }
+      trapModels.update(dt, {
+        name: net.connected ? net.username : 'You', faction: localFaction,
+        x: player.pos.x, y: player.pos.y, z: player.pos.z, reveal: trapRevealRadius(),
+      });
+      if (trapPanelAt) refreshTrapPanel();
     }
     // Machines run under the same never-pausing sim. Offline this is the
     // authoritative tick; in multiplayer it's a local prediction for the fill
     // bar (the server is authoritative and reconciles on open/collect).
     if (!arenaActive) {
       machines.update(dt);
+      if (!net.connected) {
+        // Offline authority: a well fire that eats the whole hull flattens it.
+        for (const m of machines.list()) if (m.state.hp <= 0) destroyMachineLocal(m.x, m.y, m.z);
+        // Output hopper: rigs empty into an adjacent chest every few seconds
+        // (never into the chest you have open — the panel would overwrite it).
+        machineHopper -= dt;
+        if (machineHopper <= 0) {
+          machineHopper = 4;
+          for (const m of machines.list()) {
+            if (totalStored(m.state) <= 0) continue;
+            for (const [dx, dz] of HOPPER_SIDES) {
+              const cx = m.x + dx, cz = m.z + dz;
+              if (world.getBlock(cx, m.y, cz) !== Block.Chest) continue;
+              if (openChest && openChest.x === cx && openChest.y === m.y && openChest.z === cz) continue;
+              const slots = chests.open(cx, m.y, cz);
+              if (depositInto(slots, m.state.stored)) chests.sync(cx, m.y, cz, slots);
+            }
+          }
+        }
+      } else if (openMachine) {
+        // Keep the open dashboard honest: re-adopt server truth every 3 s.
+        machineResync -= dt;
+        if (machineResync <= 0) { machineResync = 3; net.sendMachineOpen(openMachine.x, openMachine.y, openMachine.z); }
+      }
       machineModels.update(dt); // animate drills/pumpjacks
+      if (!player.dead) turretDefense.update(dt, player.pos.x, player.pos.z);
       turretModels.update(dt);
       updateWarfare(dt);    // helicopters
       updateWarHud(dt);     // war clock + border + kill score (MP only, war only)
@@ -11940,7 +12035,6 @@ function frame(): void {
       updateTpa(dt, controlling);   // TPA accept hold + incoming-request banner
       updateWarVisuals();   // the closing red ring + everybody-glows halos
       updateFlagVisuals(dt); // flag poles, beacons + the carrier's banner
-      updateTreasuryPrompt(); // the strongbox prompt beside each flag pad
       tickDisguises(dt); // Phase 8: expire spy disguises on remote avatars
       updateThrownItems(dt); // animate tossed grenades/bombs
     }
@@ -11960,11 +12054,6 @@ function frame(): void {
   }
 
   checkDeath();
-  // The single-player election clock. Once a second is plenty for a deadline
-  // measured in tens of seconds, and it keeps a per-frame Date.now() and a
-  // politics walk out of the frame budget.
-  offlineElectionTick -= dt;
-  if (offlineElectionTick <= 0) { offlineElectionTick = 1; tickOfflineElection(); }
   furnaces.update(dt);
 
   // Past this point we're always in-game (title returns early above).
@@ -12127,19 +12216,10 @@ function frame(): void {
     lastChestVersion = inventory.version;
     chests.sync(openChest.x, openChest.y, openChest.z, inventory.readChest());
   }
-  // The hoard rides the same rail: every rearrangement lands on the server as it
-  // happens, so a president who alt-F4s mid-shuffle loses nothing.
-  if (openTreasury && inventory.version !== lastTreasuryVersion) {
-    pushTreasuryPage(inventory.readChest());
-  }
   invUI.update();
 
   if (!arenaActive) {
     flagModels.setWarActive(warActiveNow);
-    // Driven here rather than in updateFlagVisuals: that one is multiplayer-only
-    // and the strongbox has to keep breathing in single-player too.
-    treasuryModels.setWarActive(warActiveNow);
-    treasuryModels.update(dt);
     flagModels.update(dt, activeCamera, (id) => {
       if (id === net.myId) return player.pos;
       const remote = net.remotes.get(id);

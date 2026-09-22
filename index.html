@@ -161,7 +161,7 @@
     .inv-hotbar { margin-top: 8px; }
     .chest-layout { display: flex; flex-direction: column; gap: 8px; }
     .chest-sort-btn { flex: none; min-width: 112px; }
-    /* Page tabs for a container deeper than one grid (the faction hoard). The
+    /* Page tabs for a container deeper than one grid. The
        page you are on is the disabled one — it is where you already are. */
     .chest-pages { display: flex; gap: 4px; flex: none; }
     .chest-pages .war-btn { min-width: 34px; padding: 4px 6px; }
@@ -2483,83 +2483,202 @@
     .faction-rule strong { color: #eef8fa; }
     .faction-continue { margin-top: 28px; min-width: 220px; color: #071014; background: var(--faction-color, #65dcff); border-color: #effcff #285d6c #285d6c #effcff; }
 
-    /* First-play onboarding: a responsive mission briefing */
+    /* First-play onboarding: a bright, light-mode field briefing. It is the
+       one screen that deliberately breaks from the dark menus — daylight on
+       the frontier before the first night. --brief-accent is set per step;
+       --brief-ink is that accent darkened enough to read on white. */
     .onboarding-shell {
+      --brief-accent: #2bb6e8;
+      --brief-ink: color-mix(in srgb, var(--brief-accent) 58%, #0e1c26);
+      --brief-soft: color-mix(in srgb, var(--brief-accent) 14%, #ffffff);
+      --brief-line: #e3e8ef;
       position: absolute; inset: 0; z-index: 26; display: none; align-items: center; justify-content: center;
       padding: calc(34px + var(--safe-top)) calc(34px + var(--safe-right))
                calc(34px + var(--safe-bottom)) calc(34px + var(--safe-left));
+      font-family: ui-sans-serif, -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif;
+      color: #16232c; text-shadow: none; letter-spacing: normal;
       background:
-        radial-gradient(circle at 24% 46%, color-mix(in srgb, var(--brief-accent, #65dcff) 17%, transparent), transparent 33%),
-        linear-gradient(115deg, rgba(2,6,10,.98), rgba(5,11,17,.94));
+        radial-gradient(60% 55% at 18% 30%, color-mix(in srgb, var(--brief-accent) 26%, transparent), transparent 70%),
+        radial-gradient(50% 50% at 88% 85%, rgba(255,214,140,.45), transparent 70%),
+        linear-gradient(180deg, #e8f3ff 0%, #f6f9fc 55%, #fdf7ec 100%);
+      transition: background .6s ease;
       overflow: hidden;
     }
+    /* A faint isometric grid, like graph paper for a voxel world. */
     .onboarding-shell::before {
-      content: ''; position: absolute; inset: 20px; border: 1px solid rgba(148,209,229,.18); pointer-events: none;
+      content: ''; position: absolute; inset: -50%; pointer-events: none; opacity: .5;
+      background-image:
+        linear-gradient(30deg, rgba(40,80,120,.07) 1px, transparent 1px),
+        linear-gradient(150deg, rgba(40,80,120,.07) 1px, transparent 1px);
+      background-size: 56px 32px;
+      animation: brief-grid-drift 40s linear infinite;
     }
-    .onboarding-shell::after {
-      content: ''; position: absolute; inset: 0; pointer-events: none;
-      background: repeating-linear-gradient(0deg, transparent 0 4px, rgba(130,220,255,.018) 4px 5px);
+    @keyframes brief-grid-drift { to { transform: translate(56px, 32px); } }
+
+    /* Voxel cubes: three faces in preserve-3d. Used for the hero and the
+       drifting background field. --s is the edge length. */
+    .brief-cube {
+      --s: 40px; --c: var(--brief-accent);
+      position: relative; width: var(--s); height: var(--s); transform-style: preserve-3d;
+      transform: rotateX(-30deg) rotateY(45deg);
     }
+    .brief-cube > i {
+      position: absolute; inset: 0; display: grid; place-items: center; font-style: normal;
+      backface-visibility: hidden; border-radius: calc(var(--s) * .06);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.35);
+      transition: background-color .5s ease;
+    }
+    .brief-cube > i:nth-child(1) { transform: translateZ(calc(var(--s) / 2)); background: var(--c); }
+    .brief-cube > i:nth-child(2) { transform: rotateY(90deg) translateZ(calc(var(--s) / 2)); background: color-mix(in srgb, var(--c) 78%, #0b1a24); }
+    .brief-cube > i:nth-child(3) { transform: rotateX(90deg) translateZ(calc(var(--s) / 2)); background: color-mix(in srgb, var(--c) 55%, #ffffff); }
+    .brief-cube > i:nth-child(4) { transform: rotateY(-90deg) translateZ(calc(var(--s) / 2)); background: color-mix(in srgb, var(--c) 78%, #0b1a24); }
+    .brief-cube > i:nth-child(5) { transform: rotateY(180deg) translateZ(calc(var(--s) / 2)); background: var(--c); }
+
+    .brief-field { position: absolute; inset: 0; pointer-events: none; perspective: 900px; }
+    .brief-float {
+      position: absolute; left: var(--x); top: var(--y); opacity: var(--o, .55); perspective: 600px;
+      animation: brief-float var(--d, 14s) ease-in-out var(--delay, 0s) infinite alternate;
+    }
+    .brief-float .brief-cube { animation: brief-spin var(--spin, 26s) linear infinite; }
+    @keyframes brief-float { from { transform: translateY(0); } to { transform: translateY(-38px); } }
+    @keyframes brief-spin { from { transform: rotateX(-30deg) rotateY(0deg); } to { transform: rotateX(-30deg) rotateY(360deg); } }
+
     .onboarding-frame {
-      width: min(1050px, 100%); min-height: min(620px, calc(100dvh - 90px)); position: relative; z-index: 1;
-      display: grid; grid-template-columns: .85fr 1.15fr; background: rgba(6,13,19,.84);
-      border: 1px solid rgba(123,192,216,.28); box-shadow: 0 34px 90px rgba(0,0,0,.72);
-      overflow: hidden; backdrop-filter: blur(12px);
-    }
-    .onboarding-visual {
-      position: relative; display: flex; flex-direction: column; justify-content: space-between;
-      padding: clamp(28px, 4vw, 48px); overflow: hidden;
-      background:
-        linear-gradient(160deg, color-mix(in srgb, var(--brief-accent, #65dcff) 18%, #0c1820), #050b10 68%);
-      border-right: 1px solid rgba(137,199,219,.18);
-    }
-    .onboarding-visual::before {
-      content: ''; position: absolute; width: 330px; height: 330px; right: -170px; bottom: -170px;
-      border: 1px solid color-mix(in srgb, var(--brief-accent, #65dcff) 35%, transparent);
-      box-shadow: 0 0 0 42px rgba(255,255,255,.015), 0 0 0 84px rgba(255,255,255,.012);
-      transform: rotate(45deg);
-    }
-    .brief-chapter { color: color-mix(in srgb, var(--brief-accent, #65dcff) 80%, white); font-size: 8px; letter-spacing: 3px; text-transform: uppercase; text-shadow: none; }
-    .brief-icon {
-      position: relative; width: 112px; height: 112px; display: grid; place-items: center; margin: 34px 0 24px;
-      color: #fff; font-size: 50px; border: 1px solid color-mix(in srgb, var(--brief-accent, #65dcff) 55%, transparent);
-      background: color-mix(in srgb, var(--brief-accent, #65dcff) 10%, rgba(2,7,10,.82));
-      box-shadow: inset 0 0 34px color-mix(in srgb, var(--brief-accent, #65dcff) 9%, transparent),
-        0 0 34px color-mix(in srgb, var(--brief-accent, #65dcff) 12%, transparent);
-    }
-    .brief-icon::before, .brief-icon::after { content: ''; position: absolute; background: var(--brief-accent, #65dcff); }
-    .brief-icon::before { left: -1px; top: -1px; width: 25px; height: 2px; }
-    .brief-icon::after { right: -1px; bottom: -1px; width: 2px; height: 25px; }
-    .brief-number { color: rgba(224,241,247,.26); font-size: 10px; letter-spacing: 4px; text-shadow: none; }
-    .brief-title { margin-top: 12px; max-width: 360px; color: #f0f8fa; font-size: clamp(27px, 3.2vw, 42px); line-height: 1.08; letter-spacing: 1px; text-shadow: none; }
-    .brief-summary { margin-top: 18px; max-width: 390px; color: #aec4cc; font-size: 12px; line-height: 1.75; text-shadow: none; }
-    .brief-tip { position: relative; margin-top: 28px; padding: 13px 14px 13px 34px; color: #c5d6dc; font-size: 9px; line-height: 1.55; background: rgba(0,0,0,.22); border-left: 2px solid var(--brief-accent, #65dcff); text-shadow: none; }
-    .brief-tip::before {
-      content: ''; position: absolute; left: 14px; top: 18px; width: 8px; height: 8px;
-      background: var(--brief-accent, #65dcff); transform: rotate(45deg);
+      width: min(1080px, 100%); min-height: min(620px, calc(100dvh - 90px)); position: relative; z-index: 1;
+      display: grid; grid-template-columns: .92fr 1.08fr;
+      background: rgba(255,255,255,.82); border: 1px solid rgba(255,255,255,.9); border-radius: 26px;
+      box-shadow: 0 1px 0 rgba(255,255,255,.9) inset, 0 40px 90px -30px rgba(30,60,90,.35), 0 12px 30px -12px rgba(30,60,90,.18);
+      overflow: hidden; backdrop-filter: blur(18px) saturate(1.3);
     }
 
-    .onboarding-content { display: flex; flex-direction: column; padding: clamp(28px, 4vw, 50px); background: linear-gradient(145deg, rgba(13,24,31,.94), rgba(5,10,15,.96)); }
-    .brief-progress { display: flex; align-items: center; gap: 12px; }
-    .brief-progress-track { flex: 1; height: 3px; background: #1a2a32; overflow: hidden; }
-    .brief-progress-fill { height: 100%; width: 25%; background: var(--brief-accent, #65dcff); box-shadow: 0 0 12px var(--brief-accent, #65dcff); transition: width .28s ease; }
-    .brief-progress-count { color: #718993; font-size: 8px; letter-spacing: 2px; text-shadow: none; }
-    .brief-content-label { margin-top: 38px; color: #6f8994; font-size: 8px; letter-spacing: 2.5px; text-transform: uppercase; text-shadow: none; }
-    .brief-items { display: grid; gap: 10px; margin-top: 14px; }
-    .brief-item {
-      display: grid; grid-template-columns: minmax(110px, .75fr) minmax(0, 1.25fr); gap: 18px; align-items: center;
-      min-height: 62px; padding: 12px 14px; border: 1px solid rgba(114,169,188,.17);
-      background: rgba(3,9,13,.48); transition: border-color .15s, transform .15s;
+    /* Left: the hero stage with the spinning block. */
+    .onboarding-visual {
+      position: relative; display: flex; flex-direction: column; justify-content: space-between;
+      padding: clamp(28px, 4vw, 46px); overflow: hidden;
+      background:
+        radial-gradient(70% 60% at 50% 38%, #ffffff 0%, transparent 70%),
+        linear-gradient(165deg, var(--brief-soft), color-mix(in srgb, var(--brief-accent) 30%, #ffffff));
+      transition: background .5s ease;
     }
-    .brief-item:hover { border-color: color-mix(in srgb, var(--brief-accent, #65dcff) 43%, transparent); transform: translateX(2px); }
-    .brief-item-label { color: color-mix(in srgb, var(--brief-accent, #65dcff) 76%, white); font-size: 9px; letter-spacing: 1.2px; text-transform: uppercase; text-shadow: none; }
-    .brief-item-value { color: #d9e5e9; font-size: 10px; line-height: 1.55; text-shadow: none; }
-    .brief-actions { display: flex; align-items: center; gap: 10px; margin-top: auto; padding-top: 30px; }
-    .brief-actions .mc-btn { min-height: 43px; padding: 9px 18px; font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; }
-    .brief-back { background: transparent; border-color: #38505b; box-shadow: none; }
-    .brief-back:disabled { opacity: .3; cursor: default; transform: none; filter: none; }
-    .brief-skip { margin-left: auto; background: transparent; border-color: transparent; box-shadow: none; color: #6f8791; }
-    .brief-next { min-width: 160px; color: #071014; background: var(--brief-accent, #65dcff); border-color: #e6fbff #1f697d #1f697d #e6fbff; box-shadow: 0 9px 26px color-mix(in srgb, var(--brief-accent, #65dcff) 20%, transparent); }
+    .brief-chapter {
+      align-self: flex-start; display: inline-flex; align-items: center; gap: 8px;
+      padding: 7px 13px 7px 10px; border-radius: 999px; background: #ffffff;
+      color: var(--brief-ink); font-size: 11px; font-weight: 800; letter-spacing: 1.4px; text-transform: uppercase;
+      box-shadow: 0 4px 14px -6px color-mix(in srgb, var(--brief-accent) 60%, transparent);
+    }
+    .brief-chapter::before {
+      content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--brief-accent);
+      box-shadow: 0 0 0 4px color-mix(in srgb, var(--brief-accent) 22%, transparent);
+      animation: brief-pulse 1.8s ease-in-out infinite;
+    }
+    @keyframes brief-pulse { 50% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--brief-accent) 8%, transparent); } }
+    .brief-hero {
+      position: relative; height: clamp(170px, 26vh, 230px); display: grid; place-items: center; perspective: 900px;
+    }
+    .brief-hero::after {
+      content: ''; position: absolute; left: 50%; bottom: 8%; width: 150px; height: 26px; transform: translateX(-50%);
+      border-radius: 50%; background: radial-gradient(closest-side, rgba(20,50,80,.22), transparent);
+      animation: brief-shadow 4.5s ease-in-out infinite;
+    }
+    .brief-hero-bob { perspective: 900px; animation: brief-bob 4.5s ease-in-out infinite; }
+    .brief-hero .brief-cube { --s: clamp(84px, 11vw, 116px); animation: brief-spin 18s linear infinite; }
+    .brief-hero .brief-cube > i { color: #ffffff; font-size: calc(var(--s) * .42); text-shadow: 0 2px 6px rgba(0,0,0,.18); }
+    @keyframes brief-bob { 50% { transform: translateY(-14px); } }
+    @keyframes brief-shadow { 50% { transform: translateX(-50%) scale(.8); opacity: .6; } }
+    .brief-number { color: color-mix(in srgb, var(--brief-ink) 60%, transparent); font-family: 'Lucida Console', Monaco, monospace; font-size: 11px; font-weight: 700; letter-spacing: 3px; }
+    .brief-title { margin: 8px 0 0; max-width: 400px; color: #0f1c25; font-size: clamp(28px, 3.3vw, 42px); font-weight: 850; line-height: 1.05; letter-spacing: -.8px; }
+    .brief-title em { font-style: normal; color: var(--brief-ink); }
+    .brief-summary { margin: 14px 0 0; max-width: 420px; color: #4a5c68; font-size: 14.5px; font-weight: 500; line-height: 1.6; }
+
+    /* Right: stepper, controls, tip, actions. */
+    .onboarding-content { display: flex; flex-direction: column; padding: clamp(28px, 4vw, 46px); background: #ffffff; }
+    .brief-steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    .brief-step {
+      position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 7px;
+      padding: 0 0 2px; border: 0; background: none; cursor: pointer; font: inherit; color: #8795a0; text-align: left;
+    }
+    .brief-step-bar { width: 100%; height: 5px; border-radius: 99px; background: #edf1f5; overflow: hidden; }
+    .brief-step-bar::after {
+      content: ''; display: block; height: 100%; width: 0; border-radius: inherit; background: var(--brief-accent);
+      transition: width .45s cubic-bezier(.2,.8,.2,1), background-color .5s;
+    }
+    .brief-step.done .brief-step-bar::after, .brief-step.active .brief-step-bar::after { width: 100%; }
+    .brief-step-name { font-size: 11px; font-weight: 750; letter-spacing: .6px; text-transform: uppercase; transition: color .2s; }
+    .brief-step.active .brief-step-name { color: var(--brief-ink); }
+    .brief-step.done .brief-step-name { color: #3d4e59; }
+    .brief-step:hover .brief-step-name { color: #1a2a34; }
+    .brief-step:focus-visible { outline: 2px solid var(--brief-accent); outline-offset: 4px; border-radius: 6px; }
+
+    .brief-content-label { margin-top: 30px; color: #8795a0; font-size: 11px; font-weight: 800; letter-spacing: 1.6px; text-transform: uppercase; }
+    .brief-items { display: grid; gap: 10px; margin-top: 12px; }
+    .brief-item {
+      display: grid; grid-template-columns: 46px minmax(0, 1fr) auto; gap: 14px; align-items: center;
+      padding: 12px 14px; border: 1px solid var(--brief-line); border-radius: 16px; background: #fbfcfe;
+      transition: border-color .18s, transform .18s, box-shadow .18s, background .18s;
+    }
+    .brief-item:hover {
+      border-color: color-mix(in srgb, var(--brief-accent) 45%, #ffffff); background: #ffffff; transform: translateY(-2px);
+      box-shadow: 0 12px 24px -16px color-mix(in srgb, var(--brief-accent) 80%, #102030);
+    }
+    .brief-item-glyph {
+      width: 46px; height: 46px; display: grid; place-items: center; border-radius: 13px;
+      background: var(--brief-soft); color: var(--brief-ink); font-size: 21px;
+    }
+    .brief-item-label { color: #0f1c25; font-size: 14px; font-weight: 800; }
+    .brief-item-value { margin-top: 2px; color: #5a6b76; font-size: 12.5px; font-weight: 500; line-height: 1.45; }
+    .brief-keys { display: flex; justify-content: flex-end; gap: 5px; }
+    .brief-key {
+      min-width: 30px; height: 30px; padding: 0 8px; display: grid; place-items: center;
+      font-family: 'Lucida Console', Monaco, monospace; font-size: 11px; font-weight: 700; color: #22323d;
+      background: linear-gradient(#ffffff, #f0f3f7); border: 1px solid #d5dce4; border-bottom-width: 3px; border-radius: 8px;
+    }
+    .brief-tip {
+      position: relative; margin-top: 16px; padding: 13px 15px 13px 48px; border-radius: 14px;
+      color: #3a4b56; font-size: 12.5px; font-weight: 500; line-height: 1.5;
+      background: linear-gradient(100deg, #fff8e6, #fffdf6); border: 1px solid #f6e3b4;
+    }
+    .brief-tip::before {
+      content: '★'; position: absolute; left: 14px; top: 50%; width: 24px; height: 24px; margin-top: -12px;
+      display: grid; place-items: center; border-radius: 50%; background: #f5b82e; color: #ffffff; font-size: 12px;
+    }
+    .brief-tip strong { color: #0f1c25; }
+
+    .brief-actions { display: flex; align-items: center; gap: 10px; margin-top: auto; padding-top: 26px; }
+    .onboarding-shell .mc-btn {
+      min-height: 46px; padding: 10px 20px; border: 1px solid transparent; border-radius: 13px;
+      font-family: inherit; font-size: 13.5px; font-weight: 800; letter-spacing: .2px; text-transform: none;
+      box-shadow: none; transition: transform .12s, filter .15s, box-shadow .2s, background .2s;
+    }
+    .brief-back { color: #2d3d48; background: #f1f4f8; border-color: #e3e8ef; }
+    .brief-back:hover { background: #e8edf3; filter: none; }
+    .brief-back:disabled { opacity: .35; cursor: default; transform: none; filter: none; }
+    .brief-skip { margin-left: auto; color: #8795a0; background: transparent; }
+    .brief-skip:hover { color: #2d3d48; filter: none; }
+    .brief-next {
+      min-width: 170px; color: #ffffff; background: linear-gradient(180deg, color-mix(in srgb, var(--brief-accent) 88%, #ffffff), color-mix(in srgb, var(--brief-accent) 82%, #0e1c26));
+      box-shadow: 0 12px 26px -10px color-mix(in srgb, var(--brief-accent) 85%, #0e1c26), inset 0 1px 0 rgba(255,255,255,.35) !important;
+      text-shadow: 0 1px 1px rgba(0,0,0,.15);
+    }
+    .brief-next:hover { filter: brightness(1.06) saturate(1.1); }
+    .brief-hint { margin-top: 12px; color: #a3aeb7; font-size: 11px; text-align: right; }
+    .brief-hint .brief-key { display: inline-grid; min-width: 22px; height: 20px; padding: 0 5px; font-size: 9px; border-bottom-width: 2px; vertical-align: middle; }
+
+    /* Step change: the copy slides in, rows cascade. */
+    .onboarding-shell.is-entering .brief-title,
+    .onboarding-shell.is-entering .brief-summary,
+    .onboarding-shell.is-entering .brief-tip { animation: brief-rise .5s cubic-bezier(.2,.8,.2,1) both; }
+    .onboarding-shell.is-entering .brief-summary { animation-delay: .06s; }
+    .onboarding-shell.is-entering .brief-item { animation: brief-rise .5s cubic-bezier(.2,.8,.2,1) both; animation-delay: calc(.08s + var(--n, 0) * .07s); }
+    .onboarding-shell.is-entering .brief-tip { animation-delay: .32s; }
+    .onboarding-shell.is-entering .brief-hero-bob { animation: brief-pop .6s cubic-bezier(.3,1.6,.5,1) both, brief-bob 4.5s ease-in-out .6s infinite; }
+    @keyframes brief-rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+    @keyframes brief-pop { from { opacity: 0; transform: scale(.6) translateY(20px); } to { opacity: 1; transform: none; } }
+    .onboarding-shell.is-opening .onboarding-frame { animation: brief-open .7s cubic-bezier(.2,.9,.2,1) both; }
+    @keyframes brief-open { from { opacity: 0; transform: translateY(26px) scale(.97); } to { opacity: 1; transform: none; } }
+
+    @media (prefers-reduced-motion: reduce) {
+      .onboarding-shell *, .onboarding-shell::before { animation: none !important; transition: none !important; }
+    }
 
     /* Narrow: the spread folds into one centred column. */
     @media (max-width: 900px) {
@@ -2583,10 +2702,11 @@
     @media (max-width: 920px) {
       .title-footer { display: none; }
       .onboarding-frame { grid-template-columns: 1fr; min-height: auto; max-height: calc(100dvh - 54px); overflow-y: auto; }
-      .onboarding-visual { min-height: 270px; border-right: 0; border-bottom: 1px solid rgba(137,199,219,.18); }
-      .brief-icon { width: 78px; height: 78px; margin: 20px 0 14px; font-size: 35px; }
+      .onboarding-visual { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 22px; align-items: center; }
+      .onboarding-visual .brief-chapter { grid-column: 1 / -1; margin-bottom: 6px; }
+      .brief-hero { height: 150px; width: 150px; }
+      .brief-hero .brief-cube { --s: 74px; }
       .brief-summary { max-width: 620px; }
-      .brief-tip { display: none; }
     }
     @media (max-width: 640px), (max-height: 720px) {
       :root { --hotbar-slot: clamp(30px, 10.4vw, 40px); }
@@ -2606,15 +2726,20 @@
       #auth, #menu-btns { padding: 18px; gap: 12px; }
       #overlay #play-btn { min-height: 54px; }
       .onboarding-shell { padding: calc(10px + var(--safe-top)) calc(10px + var(--safe-right)) calc(10px + var(--safe-bottom)) calc(10px + var(--safe-left)); }
-      .onboarding-shell::before { inset: 5px; }
-      .onboarding-frame { max-height: calc(100dvh - 20px); }
-      .onboarding-visual, .onboarding-content { padding: 22px; }
-      .onboarding-visual { min-height: 220px; }
-      .brief-icon { width: 62px; height: 62px; margin: 14px 0 10px; font-size: 28px; }
-      .brief-title { font-size: 25px; }
-      .brief-summary { margin-top: 10px; font-size: 10px; line-height: 1.55; }
-      .brief-content-label { margin-top: 24px; }
-      .brief-item { grid-template-columns: 1fr; gap: 5px; min-height: 0; padding: 10px 12px; }
+      .onboarding-frame { max-height: calc(100dvh - 20px); border-radius: 20px; }
+      .onboarding-visual, .onboarding-content { padding: 20px; }
+      .onboarding-visual { grid-template-columns: 1fr; text-align: center; }
+      .onboarding-visual .brief-chapter { justify-self: center; }
+      .brief-hero { height: 118px; width: auto; }
+      .brief-hero .brief-cube { --s: 58px; }
+      .brief-title { font-size: 25px; margin-inline: auto; }
+      .brief-summary { margin: 8px auto 0; font-size: 13px; line-height: 1.5; }
+      .brief-step-name { display: none; }
+      .brief-content-label { margin-top: 20px; }
+      .brief-item { grid-template-columns: 38px minmax(0, 1fr); gap: 12px; padding: 10px 12px; }
+      .brief-item-glyph { width: 38px; height: 38px; font-size: 17px; border-radius: 11px; }
+      .brief-keys { grid-column: 2; justify-content: flex-start; max-width: none; }
+      .brief-hint { display: none; }
       .brief-actions { flex-wrap: wrap; padding-top: 20px; }
       .brief-skip { order: 3; width: 100%; margin-left: 0; }
       .brief-next { flex: 1; min-width: 130px; }
@@ -2642,7 +2767,6 @@
       #overlay #submit-btn::after, #overlay #play-btn::after,
       .tstat.live { animation: none; }
       .title-hero, .entry-card { animation: none; }
-      .brief-progress-fill { transition: none; }
     }
     @media (max-width: 640px) {
       .table-station {
@@ -2822,22 +2946,6 @@
     }
     html[data-ui-dark] .vx-notif-body { color: #a9b8cc; }
     html[data-ui-dark] .vx-notif-bell:hover { background: #232b3b; }
-
-    /* President / cabinet menu: every colour there is already a token on the
-       shell, so the whole four-view menu turns over in one block. */
-    html[data-ui-dark] .vx-prez-shell {
-      --paper: #1a2030;
-      --ink: #eaf1fa;
-      --muted: #a3b2c6;
-      --faint: #7c8ca2;
-      --line: rgba(150, 178, 216, .14);
-      --tint: #202839;
-      --gold: #ffc043;
-      --gold-lit: #f0a521;
-      background: linear-gradient(180deg, #161c28 0%, #10151e 100%);
-      box-shadow: 0 40px 90px rgba(0, 0, 0, .55), 0 0 0 1px rgba(150, 178, 216, .12),
-        inset 0 1px 0 rgba(255, 255, 255, .05);
-    }
 
     /* Warfare tree. Built from inline styles, so it is themed through the
        tokens its palette constants resolve against (see warfare_ui.ts). */

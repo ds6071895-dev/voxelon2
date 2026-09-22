@@ -6,6 +6,7 @@
 import * as THREE from 'three';
 import type { ColumnTints, Tint } from './biomes';
 import { Block, BLOCKS, isOpaque, occludesAO, Tile, torchSupport } from './blocks';
+import { TRAP_MODEL_BLOCKS } from './trapmodels';
 import { Chunk, CHUNK_X, CHUNK_Z } from './chunk';
 import type { LightField } from './light';
 import { renderBoxes } from './shapes';
@@ -260,6 +261,9 @@ export interface ChunkGeometry {
   water: THREE.BufferGeometry | null;
 }
 
+/** Host hooks into meshing (set once by main.ts). */
+export const meshHooks: { skipTrap: ((x: number, y: number, z: number) => boolean) | null } = { skipTrap: null };
+
 export function buildChunkGeometry(
   chunk: Chunk, sample: BlockSampler, atlas: Atlas, tints: TintSampler,
   light: LightField, smoothLighting = false
@@ -285,6 +289,14 @@ export function buildChunkGeometry(
       for (let y = 0; y < maxY; y++) {
         const id = chunk.get(x, y, z);
         if (id === Block.Air || id === Block.Barrier) continue;
+        // Automation uses the detailed MachineModels renderer. Keep the solid
+        // cells for interaction/collision, but don't bury its mechanism in cubes.
+        if (id === Block.Autominer || id === Block.OilDerrick || id === Block.MachinePart) continue;
+        // Turrets likewise: TurretModels draws the armoured mount + tracking head.
+        if (id === Block.Turret) continue;
+        // Concealable traps with a live entity are drawn per viewer by
+        // TrapModels (camouflage); generated ones (vault spikes) mesh normally.
+        if (TRAP_MODEL_BLOCKS.has(id) && meshHooks.skipTrap?.(wx, y, wz)) continue;
         const info = BLOCKS[id];
         // An id with no definition is a block this build no longer knows (a
         // world saved by an older build). Skip it rather than dereferencing

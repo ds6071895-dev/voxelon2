@@ -1,6 +1,6 @@
 // THE CAPE WARDROBE — everything you own on one board, click one to wear it.
 //
-// SELF-CONTAINED, the same way the government screens are: one injected <style>
+// SELF-CONTAINED, the same way the pledge screen is: one injected <style>
 // under a `vx-cape-` prefix and nothing added to index.html.
 //
 // It is lit like a DAYLIT DRESSING ROOM rather than the black-glass vault the

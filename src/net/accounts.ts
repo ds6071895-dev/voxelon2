@@ -5,7 +5,7 @@
 // An account is created with NO faction: a player swears allegiance on the
 // pledge screen, once, permanently (see `pledge`). Registration no longer picks
 // a side and no longer auto-balances the two — choosing your own faction after
-// inspecting its president, its roster and its tax rate IS the feature. Each
+// inspecting its roster IS the feature. Each
 // account also carries the player's saved state (position/inventory).
 
 import { FACTIONS, NO_FACTION, isFaction } from '../teams';
@@ -28,10 +28,6 @@ export interface Account {
   /** Wall-clock ms of the pledge. Present == pledged; the choice is permanent,
    *  so this is what makes a second pledge refusable. */
   pledgedAt?: number;
-  /** Has this account already taken the recruit kit its faction funded? Stored
-   *  top-level (like `op`/`eliminatedUntil`), never inside the client-owned
-   *  `data` blob, so a hand-edited state save cannot re-arm a free kit. */
-  kitClaimed?: boolean;
   /** Permanent "Seasons Won" badge rank, kept across seasons (Phase 5). */
   seasonsWon?: number;
   /** Secret-switch bookkeeping (Phase 7). */
@@ -93,7 +89,6 @@ export class Accounts {
           username: a.username, salt: a.salt, hash: a.hash,
           faction: Number.isFinite(a.faction) ? a.faction : NO_FACTION,
           pledgedAt: Number.isFinite(a.pledgedAt) ? Math.max(0, a.pledgedAt as number) : undefined,
-          kitClaimed: a.kitClaimed === true,
           seasonsWon: Number.isFinite(a.seasonsWon) ? Math.max(0, Math.floor(a.seasonsWon as number)) : 0,
           switchesUsed: Number.isFinite(a.switchesUsed) ? Math.max(0, Math.floor(a.switchesUsed as number)) : 0,
           switchSeason: Number.isFinite(a.switchSeason) ? Math.floor(a.switchSeason as number) : 0,
@@ -179,19 +174,6 @@ export class Accounts {
     a.faction = faction;
     a.pledgedAt = now;
     return { ok: true, account: a };
-  }
-
-  /** Has this account taken its one recruit kit? */
-  kitClaimed(name: string): boolean {
-    return this.get(name)?.kitClaimed === true;
-  }
-
-  /** Mark the recruit kit as taken. Returns false if it already was. */
-  claimKit(name: string): boolean {
-    const a = this.get(name);
-    if (!a || a.kitClaimed) return false;
-    a.kitClaimed = true;
-    return true;
   }
 
   /** Verify credentials. Returns the account on success. */

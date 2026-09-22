@@ -10,6 +10,7 @@ import type { Input } from './input';
 import type { Inventory } from './inventory';
 import { ITEMS, miningStats } from './items';
 import { machineHeight, machineTypeForBlock } from './machines';
+import { facingForPlacement, isLeverBlock, trapDirectional, trapKindForBlock } from './traps';
 import type { Player } from './player';
 import type { World } from './world';
 
@@ -39,7 +40,8 @@ export interface RayHit {
 }
 
 export function raycastBlocks(
-  world: World, origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number
+  world: World, origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number,
+  skip?: (x: number, y: number, z: number, id: number) => boolean,
 ): RayHit | null {
   let x = Math.floor(origin.x);
   let y = Math.floor(origin.y);
@@ -69,7 +71,7 @@ export function raycastBlocks(
       z += stepZ; tMaxZ += tDeltaZ; nx = 0; ny = 0; nz = -stepZ;
     }
     const id = world.getBlock(x, y, z);
-    if (id !== Block.Air && id !== Block.Water && id !== Block.Barrier) {
+    if (id !== Block.Air && id !== Block.Water && id !== Block.Barrier && !skip?.(x, y, z, id)) {
       return {
         x, y, z, nx, ny, nz,
         hx: origin.x + dir.x * t, hy: origin.y + dir.y * t, hz: origin.z + dir.z * t,
@@ -96,18 +98,25 @@ export class Interaction {
   onAttune?: (x: number, y: number, z: number) => void;
   /** Fired on right-click of a VaultChest: claim the per-player vault loot. */
   onVaultChest?: (x: number, y: number, z: number) => void;
-  /** Fired on right-click of a Lever: pull it (flips linked traps). */
+  /** Fired on right-click of a Lever: pull it (latches its channel). */
   onLever?: (x: number, y: number, z: number) => void;
-  /** When set ("Move machine" armed), the NEXT right-click consumes itself and
-   *  calls this with the placement cell (against the aimed face) instead of
-   *  placing/opening — so a machine can be relocated without breaking it. */
-  armedMove: ((px: number, py: number, pz: number) => void) | null = null;
+  /** Right-click on a trap (sneaking = defuse attempt). Return true if handled
+   *  (a config panel opened / a defuse began) so nothing gets placed. */
+  onTrapUse?: (x: number, y: number, z: number, sneaking: boolean) => boolean;
+  /** Cells the ray passes straight through (hidden enemy traps): no outline,
+   *  no mining, no tell. */
+  hiddenAt?: (x: number, y: number, z: number, id: number) => boolean;
+  /** Right-click attempts relocation instead of placing/opening. Return false
+   *  to keep the mode armed when the destination is invalid. */
+  armedMove: ((px: number, py: number, pz: number) => boolean) | null = null;
+  private moveClickHeld = false;
   /** Block dig/place sounds. */
   onBlockSound?: (
     kind: 'break' | 'place', blockId: number, x: number, y: number, z: number
   ) => void;
-  /** Local block edit (break = block 0); main broadcasts it to the server. */
-  onEdit?: (x: number, y: number, z: number, block: number) => void;
+  /** Local block edit (break = block 0); main broadcasts it to the server.
+   *  `facing` is set for directional traps (traps.ts FACING_DIRS). */
+  onEdit?: (x: number, y: number, z: number, block: number, facing?: number) => void;
   /** Veto an edit at a cell. Returning false blocks the break/place so the
    *  client doesn't mispredict it. */
   canEdit?: (x: number, y: number, z: number) => boolean;
@@ -131,6 +140,8 @@ export class Interaction {
   creative = false;
   /** Mining-speed multiplier (Rune of Fortune etc.; 1 = normal). */
   miningSpeedMult = 1;
+  /** Chance (0..1) a mining swing costs the tool no durability (Rune of Fortune). */
+  toolWearSave = 0;
 
   constructor(
     scene: THREE.Scene, world: World, player: Player,
@@ -169,7 +180,7 @@ export class Interaction {
     this.breakingActive = false;
     const origin = this.player.eyePosition;
     const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-    this.target = raycastBlocks(this.world, origin, dir, REACH);
+    this.target = raycastBlocks(this.world, origin, dir, REACH, this.hiddenAt);
 
     // Highlight outline.
     if (this.target && !suppressMining) {
@@ -181,20 +192,26 @@ export class Interaction {
       this.highlight.visible = false;
     }
 
-    // "Move machine" armed: the next right-click drops the machine at the cell
-    // against the aimed face (no placing/opening), then disarms. This is an
-    // explicit one-shot mode the player just armed from the machine panel, so
-    // it fires even while a gun/gadget is held (ignores suppressUse — otherwise
-    // holding a gun would silently swallow the move click as an ADS zoom).
-    if (this.armedMove && input.rightClicked && this.target) {
+    // A move owns the whole gesture, including frames after a successful move:
+    // holding right-click must not immediately place the selected block too.
+    if (!input.rightDown) this.moveClickHeld = false;
+    if (this.armedMove || this.moveClickHeld) {
+      // Carrying can take a long walk, so digging (not sabotage) still works.
+      const tgt = this.target;
+      if (tgt && !isEntityBlock(this.world.getBlock(tgt.x, tgt.y, tgt.z))) {
+        this.updateBreaking(dt, input, suppressMining);
+      } else {
+        this.breakKey = ''; this.breakProgress = 0; this.crackMesh.visible = false;
+      }
+      if (!this.armedMove || !input.rightClicked || !this.target) return;
+      this.moveClickHeld = true;
       const tId = this.world.getBlock(this.target.x, this.target.y, this.target.z);
       const into = BLOCKS[tId]?.replaceable ?? false;
       const px = this.target.x + (into ? 0 : this.target.nx);
       const py = this.target.y + (into ? 0 : this.target.ny);
       const pz = this.target.z + (into ? 0 : this.target.nz);
       const cb = this.armedMove;
-      this.armedMove = null;
-      cb(px, py, pz);
+      if (cb(px, py, pz)) this.armedMove = null;
       return;
     }
 
@@ -233,8 +250,15 @@ export class Interaction {
   }
 
   private tryOpenContainer(input: Input): boolean {
-    if (!input.rightClicked || !this.target || this.player.sneaking) return false;
+    if (!input.rightClicked || !this.target) return false;
     const id = this.world.getBlock(this.target.x, this.target.y, this.target.z);
+    // Traps: sneak + right-click = defuse; plain right-click = your trap's
+    // wiring panel (levers keep their pull on a plain click).
+    const trapKind = trapKindForBlock(id);
+    if (trapKind !== null && (this.player.sneaking || !isLeverBlock(id))) {
+      if (this.onTrapUse?.(this.target.x, this.target.y, this.target.z, this.player.sneaking)) return true;
+    }
+    if (this.player.sneaking) return false;
     // A Respawn Beacon: set the player's personal spawn point here.
     if (id === Block.RespawnBeacon) {
       this.onSetSpawn?.(this.target.x, this.target.y, this.target.z);
@@ -250,7 +274,7 @@ export class Interaction {
       this.onVaultChest?.(this.target.x, this.target.y, this.target.z);
       return true;
     }
-    // A Lever: pull it — flips itself + every linked trap in radius.
+    // A Lever: pull it — latches its wiring channel (traps.ts).
     if (id === Block.Lever || id === Block.LeverOn) {
       this.onLever?.(this.target.x, this.target.y, this.target.z);
       return true;
@@ -302,7 +326,8 @@ export class Interaction {
       this.onBlockSound?.('break', id, t.x, t.y, t.z);
       this.world.setBlock(t.x, t.y, t.z, Block.Air, harvest);
       this.onEdit?.(t.x, t.y, t.z, 0);
-      if (!this.creative && info.hardness > 0 && held && ITEMS[held.id]?.tool) {
+      if (!this.creative && info.hardness > 0 && held && ITEMS[held.id]?.tool &&
+          Math.random() >= this.toolWearSave) {
         this.inventory.damageSelected(1); // mining wears a tool by 1
       }
       this.breakKey = '';
@@ -396,8 +421,12 @@ export class Interaction {
 
     if (BLOCKS[blockId].solid && this.player.intersectsBlock(px, py, pz, blockId)) return;
 
+    const trap = trapKindForBlock(blockId);
+    const facing = trap !== null && trapDirectional(trap)
+      ? facingForPlacement(trap, this.target.nx, this.target.ny, this.target.nz, this.player.yaw)
+      : undefined;
     this.world.setBlock(px, py, pz, blockId);
-    this.onEdit?.(px, py, pz, blockId);
+    this.onEdit?.(px, py, pz, blockId, facing);
     this.onBlockSound?.('place', blockId, px, py, pz);
     if (!this.creative && (this.shouldConsumePlacement?.(blockId) ?? true)) {
       this.inventory.consumeSelected(1);

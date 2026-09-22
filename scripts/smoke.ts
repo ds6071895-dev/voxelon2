@@ -74,7 +74,7 @@ import { LEVER_RADIUS, flippedTrap, isLeverBlock, leverFlips } from '../src/trap
 import {
   Machines, MachineType, MAX_LEVEL, allowedFilterMask, applyUpgrade,
   autominerRates, claimMachine, collectMachine, currentRate, damageMachine,
-  derrickRate, filterTierMax, machineHeight, machineMaxHp, machineTypeForBlock,
+  derrickRate, machineHeight, machineMaxHp, machineTypeForBlock,
   newMachine, productionRate, sanitizeState, setFilter, storageCap, tickMachine,
   totalStored, upgradeCost,
 } from '../src/machines';
@@ -102,7 +102,7 @@ import {
   GADGETS, isGadget, gadgetOf, GadgetCooldowns, falloffDamage,
 } from '../src/gadgets';
 import { itemDescription } from '../src/itemdesc';
-import { RUNES, isRune, runeOf, runeBonuses } from '../src/runes';
+import { RUNES, isRune, runeOf, runeBonuses, runeDefense } from '../src/runes';
 import { Inventory as RuneInv } from '../src/inventory';
 import { Accounts, validUsername } from '../src/net/accounts';
 import {
@@ -1734,34 +1734,35 @@ check('furnace smelts ore/sand/log but not removed foods',
       [Block.Stone]: 1, [Block.CoalOre]: 0.5, [Block.IronOre]: 0.4,
       [Block.GoldOre]: 0.9, [Block.RedstoneOre]: 0.9, [Block.DiamondOre]: 0.9,
     };
-    const m = newMachine(MachineType.Autominer);
+    // v3 Deep Bore: ores unlock by BORE DEPTH (rank/bit cap how deep it goes).
+    const m = newMachine(MachineType.Autominer); m.fuel = 600; m.depth = 30;
     const r1 = autominerRates(m, rich);
     check('autominer rate is proportional to richness',
-      Math.abs(r1[Block.Stone] - productionRate(1) * 1) < 1e-9 &&
-      Math.abs(r1[Block.CoalOre] - productionRate(1) * 0.5) < 1e-9);
-    check('level 1 filter gates out gold/redstone/diamond',
+      Math.abs(r1[Block.CoalOre] / r1[Block.IronOre] - 0.5 / 0.4) < 1e-9);
+    check('a shallow bore gates out gold/redstone/diamond',
       r1[Block.GoldOre] === undefined && r1[Block.DiamondOre] === undefined);
-    // Enabling an ungated ore is rejected (masked to the level tier).
+    // Selecting an unreached ore is remembered but produces nothing yet.
     setFilter(m, 0b1111111);
-    check('filter cannot enable an ore above the machine level',
-      !(m.filter & (1 << AUTOMINER_ORES.indexOf(Block.DiamondOre))) &&
+    check('filter cannot mine an ore the bore has not reached',
+      !!(m.filter & (1 << AUTOMINER_ORES.indexOf(Block.DiamondOre))) &&
+      !(allowedFilterMask(m) & (1 << AUTOMINER_ORES.indexOf(Block.DiamondOre))) &&
       autominerRates(m, rich)[Block.DiamondOre] === undefined);
-    // Production upgrades raise the rate; filter tiers unlock at milestones.
+    // Production upgrades raise the rate; deeper bands unlock richer ores.
     const base = productionRate(1);
-    m.level = 10; setFilter(m, 0b1111111);
-    check('mid tier (L10) unlocks gold/redstone but not diamond',
-      productionRate(m.level) > base && filterTierMax(m.level) === 4 &&
+    m.level = 3; m.depth = 55;
+    check('mid depth unlocks gold/redstone but not diamond',
+      productionRate(m.level) > base &&
       autominerRates(m, rich)[Block.GoldOre] > 0 &&
       autominerRates(m, rich)[Block.DiamondOre] === undefined);
-    m.level = 30; setFilter(m, 0b1111111);
-    check('high tier (L30) unlocks diamond',
+    m.level = 6; m.depth = 80;
+    check('diamond depth unlocks diamond',
       autominerRates(m, rich)[Block.DiamondOre] > 0);
-    check('upgrade cost grows with level (geometric)',
+    check('upgrade costs rise predictably across ten ranks',
       (upgradeCost(newMachine(MachineType.Autominer), 'production')![Item.IronIngot]) <
-      (upgradeCost({ ...newMachine(MachineType.Autominer), level: 30 }, 'production')![Item.IronIngot]));
+      (upgradeCost({ ...newMachine(MachineType.Autominer), level: 9 }, 'production')![Item.IronIngot]));
     m.level = MAX_LEVEL;
     check('production maxes out at MAX_LEVEL',
-      !applyUpgrade(m, 'production') && m.level === MAX_LEVEL && MAX_LEVEL >= 100);
+      !applyUpgrade(m, 'production') && m.level === MAX_LEVEL && MAX_LEVEL === 10);
   }
 
   // Tick + storage cap (never overflows), then collect clears it.
@@ -2102,18 +2103,19 @@ check('furnace smelts ore/sand/log but not removed foods',
   check('upgrade raises production level + storage cap',
     upState.state.level === 2 && storageCap(upState.state) > beforeCap);
 
-  // Filter set to "everything" is masked to the level tier (rejects ungated).
+  // Filter set to "everything" is remembered; unreached bands just idle.
   s.handle(1, { t: 'machineConfig', x: px, y: py, z: pz, filter: 0b1111111 });
   const cfg = open()!.state;
-  check('server masks ungated ores out of the filter',
-    !(cfg.filter & (1 << AUTOMINER_ORES.indexOf(Block.DiamondOre))));
+  check('server keeps the filter but unreached ores stay unmineable',
+    cfg.filter === 0b1111111 &&
+    !(allowedFilterMask(cfg) & (1 << AUTOMINER_ORES.indexOf(Block.DiamondOre))));
 
   // Collect grants the stored output (dup-safe gotitem path) + empties it.
   const before = totalStored(open()!.state);
   const collect = s.handle(1, { t: 'machineCollect', x: px, y: py, z: pz });
   const granted = collect.filter((o) => o.msg.t === 'gotitem')
     .reduce((n, o) => n + (o.msg as { count: number }).count, 0);
-  check('collect grants the whole stored output to the collector',
+  check('collect grants the whole stored output',
     before > 0 && granted === before);
   check('collected machine is emptied', totalStored(open()!.state) === 0);
 
@@ -2245,7 +2247,13 @@ check('furnace smelts ore/sand/log but not removed foods',
 
   // Sabotage to destruction: clears the block + drops loot.
   s.handle(1, { t: 'xform', x: 1.5, y: 70, z: 0.5, yaw: 0, pitch: 0 });
-  const dead = s.handle(1, { t: 'turretHit', x: 1, y: 70, z: 0, amount: 100000 });
+  check('a single sabotage swing is capped (no one-shot hacked hits)',
+    !s.handle(1, { t: 'turretHit', x: 1, y: 70, z: 0, amount: 100000 })
+      .some((o) => o.msg.t === 'edit'));
+  let dead: ReturnType<typeof s.handle> = [];
+  for (let i = 0; i < 20 && !dead.some((o) => o.msg.t === 'edit'); i++) {
+    dead = s.handle(1, { t: 'turretHit', x: 1, y: 70, z: 0, amount: 100000 });
+  }
   check('sabotaging a turret to 0 hp clears it + drops loot',
     dead.some((o) => o.msg.t === 'edit' && (o.msg as { block: number }).block === Block.Air) &&
     dead.some((o) => o.msg.t === 'itemspawn'));
@@ -2891,11 +2899,6 @@ check('furnace smelts ore/sand/log but not removed foods',
     accs.factionMembers(FACTION_A).join(',') === 'Bob,Cara,Dan,Eve,Fin' &&
     accs.factionMembers(FACTION_A, 2).length === 2 &&
     accs.factionMembers(NO_FACTION).length === 0);
-
-  // The recruit kit is one per account, ever.
-  check('a recruit kit can be claimed exactly once',
-    !accs.kitClaimed('Bob') && accs.claimKit('Bob') &&
-    accs.kitClaimed('Bob') && !accs.claimKit('Bob'));
 
   // Login verifies the password; wrong password + unknown user are rejected.
   check('login succeeds with the right password',
@@ -3708,6 +3711,38 @@ check('furnace smelts ore/sand/log but not removed foods',
     mitigate(20, titaniumSet) === mitigate(20, titaniumSet + 12));
   check('...but toughness still works on a maxed-out set',
     mitigate(20, titaniumSet, 4) < mitigate(20, titaniumSet));
+
+  // Toughness soaks at most HALF a hit, everywhere — a full Greater Iron set
+  // used to shrink every weapon (titanium-mitigated sniper included) to 1 HP.
+  check('toughness never soaks more than half of what got through armor',
+    mitigate(18, ARMOR_POINT_CAP, TOUGHNESS_CAP) === 2 &&  // sniper vs titanium: 4 -> 2
+    mitigate(18, 15, TOUGHNESS_CAP) === 4 &&               // sniper vs iron: 7 -> 4
+    mitigate(5, 15, TOUGHNESS_CAP) === 1);                 // pistol vs iron: 2 -> 1
+
+  // Rune armor past the cap converts to toughness at half rate; armor levels
+  // alone never do.
+  const set4 = (rune: number) => [Item.TitaniumHelmet, Item.TitaniumChestplate,
+    Item.TitaniumLeggings, Item.TitaniumBoots].map((id) => ({ id, count: 1, rune }));
+  check('base Rune of Iron still pays on a capped set (overflow -> toughness)',
+    runeDefense(titaniumSet, set4(Item.RuneOfIron)).toughness === 2 &&
+    runeDefense(10, set4(Item.RuneOfIron)).toughness === 0 &&
+    runeDefense(titaniumSet + 12, [null, null, null, null]).toughness === 0);
+  check('...and Greater Iron still beats it there',
+    runeDefense(titaniumSet, set4(Item.GreaterRuneOfIron)).toughness === TOUGHNESS_CAP);
+
+  // No wasted slots: every cap is reached by exactly four Greater runes.
+  const three = (rune: number) => runeBonuses(set4(rune).slice(0, 3));
+  check('the 4th Greater rune of each kind still adds something',
+    fullGreater(Item.GreaterRuneOfSwiftness).speedMult > three(Item.GreaterRuneOfSwiftness).speedMult &&
+    fullGreater(Item.GreaterRuneOfFocus).spreadMult < three(Item.GreaterRuneOfFocus).spreadMult &&
+    fullGreater(Item.GreaterRuneOfFocus).reloadMult < three(Item.GreaterRuneOfFocus).reloadMult &&
+    fullGreater(Item.GreaterRuneOfFortune).wearSave > three(Item.GreaterRuneOfFortune).wearSave);
+  check('Focus/Fortune carry a stat every gun / every tool uses',
+    wear(Item.RuneOfFocus).reloadMult < 1 && wear(Item.RuneOfFortune).wearSave > 0 &&
+    wear(Item.GreaterRuneOfFocus).reloadMult < wear(Item.RuneOfFocus).reloadMult &&
+    wear(Item.GreaterRuneOfFortune).wearSave > wear(Item.RuneOfFortune).wearSave);
+  check('max Focus never makes the shotgun a laser (spread floor 40%)',
+    fullGreater(Item.GreaterRuneOfFocus).spreadMult >= 0.4);
 
   // The socketed rune survives the persistence round-trip.
   const blob = JSON.parse(JSON.stringify(inv.serialize()));

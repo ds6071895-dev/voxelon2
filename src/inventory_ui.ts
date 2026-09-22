@@ -1,3 +1,4 @@
+import './machine_ui.css';
 // Container UI: one panel with three modes — personal inventory (2x2 craft),
 // crafting table (3x3), and furnace (input/fuel/output with progress bars).
 // Click semantics delegate to the pure Inventory class; furnace slots talk
@@ -15,12 +16,17 @@ import {
 } from './inventory';
 import { ArmorSlot, creativePaletteIds, Item, ITEMS, ItemStack } from './items';
 import {
-  MachineState, MachineType, UpgradeAxis, MAX_LEVEL, MAX_STORAGE_LEVEL,
+  MachineState, MachineType, UpgradeAxis, MachineAct, MAX_LEVEL, MAX_STORAGE_LEVEL,
   allowedFilterMask, machineMaxHp, storageCap, totalStored, upgradeCost,
+  machineRank, productionRate, focusMultiplier, YieldContext,
+  MAX_DEPTH, ORE_DEPTH, maxDepth, rankDepth, BIT_NAMES, BIT_DEPTH, BIT_DURABILITY,
+  FUEL_CAP, JAM_HEAT, fuelRoom, bitTier, veinFactor, WellPhase, WELL_DEPTH,
+  REFINE_NAMES, gusherChance, OIL_THRESHOLD, actCost, FUEL_LINK_RADIUS,
+  machineFriendly, VENT_HULL_FRACTION,
 } from './machines';
 import {
   TurretState, TurretAxis, TURRET_MAX_LEVEL, TURRET_AMMO_CAP, TURRET_FUEL_CAP,
-  turretDamage, turretInterval, turretRange, turretUpgradeCost,
+  turretDamage, turretInterval, turretRange, turretUpgradeCost, turretDisabled,
 } from './turrets';
 import { AUTOMINER_ORES } from './terrain';
 
@@ -33,9 +39,14 @@ export interface TurretUIContext {
   upgrade(axis: TurretAxis): void;
   canAfford(axis: TurretAxis): boolean;
   claim(): void;
+  /** Unowned, ours/our faction's, or an enemy turret knocked offline (hack). */
+  canClaim(): boolean;
   /** Deposit as much of a held item (Cannonball or OilBarrel) as fits. */
   load(item: number): void;
   canLoad(item: number): boolean;
+  /** Arm relocation: close the panel and let the player carry it elsewhere. */
+  move(): void;
+  canMove(): boolean;
   myName(): string;
 }
 
@@ -46,6 +57,8 @@ export interface MachineUIContext {
   state(): MachineState | null;
   /** Current production rate in items/sec, for the readout. */
   rate(): number;
+  context(): YieldContext;
+  configureFilter(mask: number): void;
   toggleFilter(index: number): void;
   upgrade(axis: UpgradeAxis): void;
   collect(): void;
@@ -57,6 +70,13 @@ export interface MachineUIContext {
   move(): void;
   /** The local player's display name (to compare against the owner). */
   myName(): string;
+  /** The local player's faction (allies may operate a claimed rig). */
+  myFaction(): number;
+  /** Hands-on operation (fuel, bit, overdrive, coolant, vent, cap, smother,
+   *  inject, refine). The host pays any item cost and routes it. */
+  act(act: MachineAct, n: number, item: number): void;
+  /** 9×9 prospecting grid (row-major, centre = this rig), each 0..1. */
+  survey(): number[];
 }
 
 interface SlotView {
@@ -73,6 +93,22 @@ function maxStack(id: number): number {
 /** Short ore name for a filter chip (e.g. "Cobblestone"->"Stone" left as-is). */
 function oreLabel(block: number): string {
   return (BLOCKS[block]?.name ?? '?').replace(' Ore', '').replace(' Block', '');
+}
+
+interface MachineViews {
+  levels: HTMLDivElement; owner: HTMLDivElement; status: HTMLDivElement;
+  ranks: HTMLDivElement[];
+  hpBar: HTMLDivElement; hpText: HTMLSpanElement;
+  fillBar: HTMLDivElement; fillText: HTMLSpanElement; rate: HTMLDivElement;
+  hint: HTMLDivElement; output: HTMLDivElement; outputKey: string;
+  filters: { index: number; el: HTMLButtonElement }[];
+  prodBtn: HTMLButtonElement; storageBtn: HTMLButtonElement;
+  collectBtn: HTMLButtonElement; claimBtn: HTMLButtonElement; moveBtn: HTMLButtonElement;
+  /** Bore / well column: head marker + readout. */
+  shaftHead: HTMLDivElement; shaftFill: HTMLDivElement; shaftText: HTMLDivElement;
+  gauges: { bar: HTMLDivElement; text: HTMLSpanElement; box: HTMLDivElement }[];
+  ops: { el: HTMLButtonElement; update: (s: MachineState) => void }[];
+  refine: HTMLButtonElement[];
 }
 
 export class InventoryUI {
@@ -97,8 +133,9 @@ export class InventoryUI {
    *
    * The panel never holds more than one page: `onPage` hands the page change
    * back to the owner, which flushes what is on screen and re-opens on the page
-   * asked for. That keeps this class ignorant of what it is paging through (the
-   * faction hoard, today) and keeps a write scoped to one page.
+   * asked for. That keeps this class ignorant of what it is paging through and
+   * keeps a write scoped to one page. (Nothing pages today: its only user was
+   * the removed faction hoard.)
    */
   chestPager: {
     title: string; pages: number; page: number; onPage: (page: number) => void;
@@ -121,27 +158,14 @@ export class InventoryUI {
     flame: HTMLDivElement; arrow: HTMLDivElement;
   } | null = null;
   private machineCtx: MachineUIContext | null = null;
-  private machineViews: {
-    levels: HTMLDivElement;
-    owner: HTMLDivElement;
-    hpBar: HTMLDivElement;
-    hpText: HTMLSpanElement;
-    fillBar: HTMLDivElement;
-    fillText: HTMLSpanElement;
-    rate: HTMLDivElement;
-    filters: { index: number; el: HTMLDivElement }[];
-    prodBtn: HTMLButtonElement;
-    storageBtn: HTMLButtonElement;
-    collectBtn: HTMLButtonElement;
-    claimBtn: HTMLButtonElement;
-    moveBtn: HTMLButtonElement;
-  } | null = null;
+  private machineViews: MachineViews | null = null;
   private turretCtx: TurretUIContext | null = null;
   private turretViews: {
     info: HTMLDivElement; owner: HTMLDivElement; hpBar: HTMLDivElement; hpText: HTMLSpanElement;
     ammo: HTMLDivElement;
     rangeBtn: HTMLButtonElement; damageBtn: HTMLButtonElement; rateBtn: HTMLButtonElement;
     loadAmmoBtn: HTMLButtonElement; loadFuelBtn: HTMLButtonElement; claimBtn: HTMLButtonElement;
+    moveBtn: HTMLButtonElement;
   } | null = null;
   private readonly cursorEl: HTMLDivElement;
   private readonly cursorIcon: HTMLCanvasElement;
@@ -757,197 +781,375 @@ export class InventoryUI {
   // --- machine panel ---------------------------------------------------------
 
   private buildMachineTop(ctx: MachineUIContext): void {
-    const state = ctx.state();
+    const oil = ctx.state()?.type === MachineType.OilDerrick;
     const wrap = document.createElement('div');
-    wrap.style.cssText =
-      'display:flex;flex-direction:column;gap:8px;width:340px;align-items:stretch;';
+    wrap.className = `machine-console ${oil ? 'machine-oil' : ''}`;
+    const node = (parent: HTMLElement, className: string, text = '') => {
+      const el = document.createElement('div');
+      el.className = className; el.textContent = text; parent.appendChild(el); return el;
+    };
+    const button = (parent: HTMLElement, label: string, action: () => void, className = '') => {
+      const el = document.createElement('button');
+      el.type = 'button'; el.className = `machine-button ${className}`;
+      el.textContent = label; el.addEventListener('click', action); parent.appendChild(el); return el;
+    };
+    const hero = node(wrap, 'machine-hero');
+    const title = node(hero, 'machine-identity');
+    node(title, 'machine-eyebrow', oil ? 'WILDCAT WELL / PETROLEUM' : 'DEEP BORE / MINERAL EXTRACTION');
+    const levels = node(title, 'machine-rank');
+    const owner = node(title, 'machine-owner');
+    const status = node(hero, 'machine-status');
+    status.setAttribute('role', 'status');
+    const rankTrack = node(wrap, 'machine-ranks');
+    const ranks = Array.from({ length: MAX_LEVEL }, (_, i) => {
+      const el = node(rankTrack, 'machine-rank-step', String(i + 1));
+      el.title = `${machineRank(i + 1)} · Rank ${i + 1}`;
+      return el;
+    });
 
-    const levels = document.createElement('div');
-    levels.className = 'mc-font';
-    levels.style.cssText = 'font-size:13px;text-align:center;';
-    wrap.appendChild(levels);
-
-    const owner = document.createElement('div');
-    owner.className = 'mc-font';
-    owner.style.cssText = 'font-size:11px;text-align:center;color:#d8c;';
-    wrap.appendChild(owner);
-
-    // Health bar (sabotage/raid).
-    const hpOuter = document.createElement('div');
-    hpOuter.style.cssText =
-      'position:relative;height:14px;background:#1c1c1c;border:2px solid #000;';
-    const hpBar = document.createElement('div');
-    hpBar.style.cssText = 'height:100%;width:100%;background:#cc4444;';
-    const hpText = document.createElement('span');
-    hpText.className = 'mc-font';
-    hpText.style.cssText =
-      'position:absolute;inset:0;display:flex;align-items:center;' +
-      'justify-content:center;font-size:10px;text-shadow:none;';
-    hpOuter.appendChild(hpBar);
-    hpOuter.appendChild(hpText);
-    wrap.appendChild(hpOuter);
-
-    // Storage fill bar.
-    const barOuter = document.createElement('div');
-    barOuter.style.cssText =
-      'position:relative;height:18px;background:#1c1c1c;border:2px solid #000;';
-    const fillBar = document.createElement('div');
-    fillBar.style.cssText = 'height:100%;width:0;background:#4ea3e0;transition:width .1s;';
-    const fillText = document.createElement('span');
-    fillText.className = 'mc-font';
-    fillText.style.cssText =
-      'position:absolute;inset:0;display:flex;align-items:center;' +
-      'justify-content:center;font-size:11px;text-shadow:none;';
-    barOuter.appendChild(fillBar);
-    barOuter.appendChild(fillText);
-    wrap.appendChild(barOuter);
-
-    const rate = document.createElement('div');
-    rate.className = 'mc-font';
-    rate.style.cssText = 'font-size:12px;text-align:center;color:#bdf;';
-    wrap.appendChild(rate);
-
-    // Ore filter checklist (autominer only).
-    const filters: { index: number; el: HTMLDivElement }[] = [];
-    if (state && state.type === MachineType.Autominer) {
-      const grid = document.createElement('div');
-      grid.style.cssText =
-        'display:grid;grid-template-columns:repeat(4,1fr);gap:3px;';
-      for (let i = 0; i < AUTOMINER_ORES.length; i++) {
-        const chip = document.createElement('div');
-        chip.className = 'mc-font';
-        chip.style.cssText =
-          'font-size:10px;text-align:center;padding:3px 2px;border:1px solid #000;' +
-          'cursor:pointer;user-select:none;';
-        chip.textContent = oreLabel(AUTOMINER_ORES[i]);
-        chip.addEventListener('mousedown', (e) => {
-          e.preventDefault();
-          ctx.toggleFilter(i);
-        });
-        grid.appendChild(chip);
-        filters.push({ index: i, el: chip });
+    // --- The shaft: bore depth (autominer) or well depth → pressure (derrick).
+    const deck = node(wrap, 'machine-deck');
+    const shaft = node(deck, 'machine-shaft');
+    const shaftFill = node(shaft, 'machine-shaft-fill');
+    if (!oil) {
+      // Ore bands, drawn to scale down the bore.
+      for (const ore of AUTOMINER_ORES) {
+        const d = ORE_DEPTH[ore] ?? 0;
+        if (d <= 0) continue;
+        const band = node(shaft, 'machine-shaft-band');
+        band.style.top = `${(d / MAX_DEPTH) * 100}%`;
+        band.dataset.ore = oreLabel(ore);
+        band.title = `${oreLabel(ore)} from ${d} m`;
       }
-      wrap.appendChild(grid);
+    }
+    const shaftHead = node(shaft, 'machine-shaft-head');
+    const side = node(deck, 'machine-deck-side');
+    const shaftText = node(side, 'machine-shaft-text');
+    const gaugeGrid = node(side, 'machine-gauges');
+    const gauges = (oil
+      ? ['Well pressure', 'Field strength', 'Hull']
+      : ['Heat', 'Fuel', 'Vein', 'Drill bit']
+    ).map((label) => {
+      const box = node(gaugeGrid, 'machine-gauge');
+      const text = document.createElement('span'); box.appendChild(text);
+      text.textContent = label;
+      const outer = node(box, 'machine-meter');
+      const bar = node(outer, 'machine-fill');
+      return { bar, text, box };
+    });
+
+    const metrics = node(wrap, 'machine-metrics');
+    const rate = node(metrics, 'machine-rate');
+    const buffer = node(metrics, 'machine-buffer');
+    const fillText = document.createElement('span'); buffer.appendChild(fillText);
+    const barOuter = node(buffer, 'machine-meter');
+    barOuter.setAttribute('aria-label', 'Output buffer');
+    const fillBar = node(barOuter, 'machine-fill');
+    const hint = node(wrap, 'machine-hint');
+    const output = node(wrap, 'machine-output');
+
+    // --- Operations: the hands-on part of running a rig.
+    node(wrap, 'machine-section-heading', oil ? 'WELLHEAD / OPERATIONS' : 'RIG / OPERATIONS');
+    const opsGrid = node(wrap, 'machine-ops');
+    const ops: MachineViews['ops'] = [];
+    const op = (label: string, onClick: () => void, update: (el: HTMLButtonElement, s: MachineState) => void, cls = '') => {
+      const el = button(opsGrid, label, onClick, `machine-op ${cls}`);
+      ops.push({ el, update: (s) => update(el, s) });
+    };
+    const costText = (cost: Record<number, number>) => Object.entries(cost)
+      .map(([id, n]) => `${n} ${ITEMS[Number(id)]?.name ?? '?'}`).join(' + ');
+    const canPay = (cost: Record<number, number>) =>
+      Object.entries(cost).every(([id, n]) => this.inventory.countItem(Number(id)) >= n);
+    const refine: HTMLButtonElement[] = [];
+    if (!oil) {
+      op('', () => { const s = ctx.state(); if (s) ctx.act('overdrive', s.overdrive ? 0 : 1, 0); }, (el, s) => {
+        el.textContent = s.overdrive ? 'OVERDRIVE ON\nclick to throttle back' : 'Overdrive\n×2 output · builds heat';
+        el.classList.toggle('is-hot', s.overdrive);
+        el.disabled = s.jam > 0 || (!s.overdrive && s.fuel <= 0);
+        el.title = s.fuel <= 0 ? 'Needs fuel in the tank' : s.jam > 0 ? 'Rig is jammed' : 'Double output while fuelled; heat climbs until the rig jams.';
+      }, 'machine-op-wide');
+      const fuelOp = (item: number, label: string) => op('', () => {
+        const s = ctx.state(); if (!s) return;
+        const n = Math.min(fuelRoom(s, item), this.inventory.countItem(item));
+        if (n > 0) ctx.act('fuel', n, item);
+      }, (el, s) => {
+        const have = this.inventory.countItem(item), room = fuelRoom(s, item);
+        el.textContent = `Load ${label}\n${have} carried · room ${room}`;
+        el.disabled = !have || !room;
+      });
+      fuelOp(Item.Coal, 'Coal');
+      fuelOp(Item.OilBarrel, 'Oil');
+      op('', () => {
+        const best = [Item.DrillBitTitanium, Item.DrillBitDiamond, Item.DrillBitIron]
+          .find(id => this.inventory.countItem(id) > 0);
+        if (best !== undefined) ctx.act('bit', 1, best);
+      }, (el, s) => {
+        const best = [Item.DrillBitTitanium, Item.DrillBitDiamond, Item.DrillBitIron]
+          .find(id => this.inventory.countItem(id) > 0);
+        el.textContent = best !== undefined
+          ? `Fit ${BIT_NAMES[bitTier(best)]} bit\n→ bores to ${BIT_DEPTH[bitTier(best)]} m`
+          : `Fit drill bit\ncraft one to bore past ${BIT_DEPTH[s.bit]} m`;
+        el.disabled = best === undefined;
+      });
+      op('', () => ctx.act('coolant', 0, 0), (el, s) => {
+        const cost = actCost('coolant')!;
+        el.textContent = `Coolant\n${costText(cost)}`;
+        el.disabled = !canPay(cost) || (s.heat <= 0 && s.jam <= 0);
+      });
+      op('', () => ctx.act('vent', 0, 0), (el, s) => {
+        el.textContent = `Emergency vent\nclears jam · −${Math.round(VENT_HULL_FRACTION * 100)}% hull`;
+        el.disabled = s.jam <= 0;
+      }, 'machine-op-danger');
+    } else {
+      const refineRow = node(wrap, 'machine-refine');
+      for (let m = 0; m < REFINE_NAMES.length; m++) {
+        const b = button(refineRow, REFINE_NAMES[m], () => ctx.act('refine', m, 0), 'machine-filter');
+        refine.push(b);
+      }
+      opsGrid.before(refineRow);
+      op('', () => ctx.act('cap', 0, 0), (el, s) => {
+        const cost = actCost('cap')!;
+        el.textContent = `Cap wellhead\n${costText(cost)}`;
+        el.disabled = !s.uncapped || s.fire > 0 || !canPay(cost);
+        el.classList.toggle('is-hot', s.uncapped && s.fire <= 0);
+      });
+      op('', () => ctx.act('smother', 0, 0), (el, s) => {
+        const cost = actCost('smother')!;
+        el.textContent = `Smother fire\n${costText(cost)}`;
+        el.disabled = s.fire <= 0 || !canPay(cost);
+        el.classList.toggle('is-hot', s.fire > 0);
+      }, 'machine-op-danger');
+      op('', () => ctx.act('inject', 0, 0), (el, s) => {
+        const cost = actCost('inject')!;
+        el.textContent = `Frac-sand injection\n+25% pressure · ${costText(cost)}`;
+        el.disabled = s.phase !== WellPhase.Pumping || s.reserves >= 1 || !canPay(cost);
+      });
     }
 
-    // Upgrade + collect buttons.
-    const btnRow = document.createElement('div');
-    btnRow.style.cssText = 'display:flex;gap:6px;';
-    const mkBtn = (): HTMLButtonElement => {
-      const b = document.createElement('button');
-      b.className = 'mc-font';
-      b.style.cssText =
-        'flex:1;font-size:10px;padding:5px 3px;cursor:pointer;border:2px solid #000;' +
-        'background:#6a6a6a;color:#fff;';
-      b.addEventListener('contextmenu', (e) => e.preventDefault());
-      return b;
-    };
-    const prodBtn = mkBtn();
-    prodBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.upgrade('production'); });
-    const storageBtn = mkBtn();
-    storageBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.upgrade('storage'); });
-    btnRow.appendChild(prodBtn);
-    btnRow.appendChild(storageBtn);
-    wrap.appendChild(btnRow);
+    const filters: { index: number; el: HTMLButtonElement }[] = [];
+    if (!oil) {
+      const heading = node(wrap, 'machine-section-heading', 'EXTRACTION TARGETS');
+      button(heading, 'All reached', () => {
+        const s = ctx.state(); if (s) ctx.configureFilter(allowedFilterMask(s));
+      }, 'machine-link');
+      const grid = node(wrap, 'machine-filters');
+      for (let i = 0; i < AUTOMINER_ORES.length; i++) {
+        const chip = button(grid, oreLabel(AUTOMINER_ORES[i]), () => ctx.toggleFilter(i), 'machine-filter');
+        filters.push({ index: i, el: chip });
+      }
+    }
 
-    const bottomRow = document.createElement('div');
-    bottomRow.style.cssText = 'display:flex;gap:6px;';
-    const collectBtn = mkBtn();
-    collectBtn.style.background = '#3b7a3b';
-    collectBtn.textContent = 'Collect';
-    collectBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.collect(); });
-    const claimBtn = mkBtn();
-    claimBtn.style.background = '#3b5a7a';
-    claimBtn.textContent = 'Claim';
-    claimBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.claim(); });
-    bottomRow.appendChild(collectBtn);
-    bottomRow.appendChild(claimBtn);
-    wrap.appendChild(bottomRow);
+    // --- Seismic survey: where would this rig do better? (static per open)
+    const survey = ctx.survey();
+    if (survey.length === 81) {
+      const heading = node(wrap, 'machine-section-heading', oil ? 'SEISMIC SURVEY / OIL' : 'SEISMIC SURVEY / ORE');
+      const grid = node(wrap, 'machine-survey');
+      let best = 0;
+      for (let i = 0; i < 81; i++) if (survey[i] > survey[best]) best = i;
+      survey.forEach((v, i) => {
+        const cell = node(grid, 'machine-survey-cell');
+        cell.style.setProperty('--v', v.toFixed(3));
+        if (i === 40) cell.classList.add('is-here');
+        if (i === best && best !== 40) cell.classList.add('is-best');
+        cell.title = `${Math.round(v * 100)}%`;
+      });
+      const bx = (best % 9) - 4, bz = Math.floor(best / 9) - 4;
+      const dir = best === 40 ? 'You are on the best ground nearby.'
+        : `Richest ground ≈ ${Math.round(Math.hypot(bx, bz) * 4)} blocks ${bz < 0 ? 'north' : bz > 0 ? 'south' : ''}${bx && bz ? '-' : ''}${bx > 0 ? 'east' : bx < 0 ? 'west' : ''}. Relocate to chase it.`;
+      node(heading, 'machine-survey-note', dir);
+    }
 
-    // Move: machines can't be broken — only relocated. Arms a right-click to
-    // re-place the whole rig (keeping its level/storage/filter/stored).
-    const moveBtn = mkBtn();
-    moveBtn.style.background = '#7a5a3b';
-    moveBtn.innerHTML = `${iconSvg('hand')} Move (right-click a new spot)`;
-    moveBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.move(); });
-    wrap.appendChild(moveBtn);
-
+    node(wrap, 'machine-section-heading', 'ENGINEERING / NEXT UPGRADE');
+    const upgrades = node(wrap, 'machine-upgrades');
+    const prodBtn = button(upgrades, '', () => ctx.upgrade('production'), 'machine-upgrade');
+    const storageBtn = button(upgrades, '', () => ctx.upgrade('storage'), 'machine-upgrade');
+    const controls = node(wrap, 'machine-controls');
+    const collectBtn = button(controls, 'Collect output', () => ctx.collect(), 'machine-collect');
+    const claimBtn = button(controls, 'Claim', () => ctx.claim());
+    const moveBtn = button(controls, 'Relocate', () => ctx.move());
+    moveBtn.title = oil
+      ? 'Move the rig, keeping upgrades and stored output. The new site must be drilled from scratch.'
+      : 'Move the rig, keeping upgrades and stored output. The bore restarts at the surface on fresh ground.';
+    const integrity = node(wrap, 'machine-integrity');
+    const hpOuter = node(integrity, 'machine-meter');
+    const hpBar = node(hpOuter, 'machine-fill');
+    const hpText = document.createElement('span'); integrity.appendChild(hpText);
     this.machineViews = {
       levels, owner, hpBar, hpText, fillBar, fillText, rate, filters,
-      prodBtn, storageBtn, collectBtn, claimBtn, moveBtn,
+      prodBtn, storageBtn, collectBtn, claimBtn, moveBtn, status, output, hint, ranks, outputKey: '',
+      shaftHead, shaftFill, shaftText, gauges, ops, refine,
     };
     this.topEl.appendChild(wrap);
+    this.refreshMachine();
   }
 
   private refreshMachine(): void {
-    const ctx = this.machineCtx;
-    const v = this.machineViews;
+    const ctx = this.machineCtx, v = this.machineViews;
     if (!ctx || !v) return;
     const state = ctx.state();
     if (!state) return;
-
-    v.levels.textContent =
-      `${state.type === MachineType.Autominer ? 'Autominer' : 'Oil Derrick'}` +
-      `  ·  Prod Lv ${state.level}/${MAX_LEVEL}  ·  Storage Lv ${state.storageLevel}/${MAX_STORAGE_LEVEL}`;
-
-    const mine = state.owner && state.owner === ctx.myName();
-    v.owner.textContent = state.owner ? `Owner: ${state.owner}${mine ? ' (you)' : ''}` : 'Unclaimed';
-    v.claimBtn.disabled = !!mine;
-    v.claimBtn.style.opacity = mine ? '0.5' : '1';
-    v.claimBtn.textContent = mine ? 'Owned' : 'Claim';
-
+    const oil = state.type === MachineType.OilDerrick;
+    v.levels.textContent = `${machineRank(state.level)} / ${String(state.level).padStart(2, '0')}`;
+    v.ranks.forEach((el, i) => {
+      el.classList.toggle('is-reached', i < state.level);
+      el.classList.toggle('is-current', i + 1 === state.level);
+    });
+    const name = ctx.myName();
+    const mine = !!state.owner && state.owner === name;
+    const friendly = machineFriendly(state, name, ctx.myFaction());
+    v.owner.textContent = state.owner
+      ? `Operated by ${state.owner}${mine ? ' · You' : friendly ? ' · Ally' : ' · HOSTILE'}`
+      : 'Unclaimed rig · anyone may operate it';
+    v.claimBtn.disabled = mine;
+    v.claimBtn.textContent = mine ? 'Claimed' : friendly ? 'Claim' : 'Hack (<25% hull)';
     const maxHp = machineMaxHp(state);
-    const hpFrac = maxHp > 0 ? Math.max(0, Math.min(1, state.hp / maxHp)) : 0;
-    v.hpBar.style.width = `${Math.round(hpFrac * 100)}%`;
-    v.hpBar.style.background = hpFrac > 0.5 ? '#4caf50' : hpFrac > 0.25 ? '#e0a14e' : '#cc4444';
-    v.hpText.textContent = `HP ${Math.ceil(state.hp)} / ${maxHp}`;
+    v.hpBar.style.width = `${Math.max(0, Math.min(100, state.hp / maxHp * 100))}%`;
+    v.hpText.textContent = `Hull ${Math.ceil(state.hp)} / ${maxHp} · Production upgrades repair hull`;
+    const cap = storageCap(state), stored = totalStored(state), rate = ctx.rate();
+    const full = stored >= cap;
+    const running = rate > 0 && !full;
+    const ctxOil = ctx.context().oil ?? 0;
 
-    const cap = storageCap(state);
-    const stored = totalStored(state);
-    const frac = cap > 0 ? Math.min(1, stored / cap) : 0;
-    v.fillBar.style.width = `${Math.round(frac * 100)}%`;
-    v.fillBar.style.background = frac > 0.92 ? '#e0a14e' : '#4ea3e0';
-    v.fillText.textContent = `${stored} / ${cap}`;
-    v.rate.textContent = `Rate: ${ctx.rate().toFixed(2)} /s`;
+    let status: string;
+    let hint: string;
+    const minutes = rate > 0 ? Math.ceil((cap - stored) / rate / 60) : 0;
+    const setGauge = (i: number, frac: number, text: string, warn = false) => {
+      const g = v.gauges[i]; if (!g) return;
+      g.bar.style.width = `${Math.max(0, Math.min(100, frac * 100))}%`;
+      if (g.text.textContent !== text) g.text.textContent = text;
+      g.box.classList.toggle('is-warn', warn);
+    };
 
-    const mask = allowedFilterMask(state.level);
+    if (!oil) {
+      const cap2 = maxDepth(state);
+      const depthFrac = state.depth / MAX_DEPTH;
+      v.shaftFill.style.height = `${depthFrac * 100}%`;
+      v.shaftHead.style.top = `${depthFrac * 100}%`;
+      v.shaftHead.classList.toggle('is-hot', state.heat > 60);
+      const binding = cap2 < rankDepth(state.level) ? `${BIT_NAMES[state.bit]} bit` : 'rank';
+      v.shaftText.textContent = `Bore ${state.depth.toFixed(1)} m · limit ${cap2} m (${binding})`;
+      setGauge(0, state.heat / JAM_HEAT,
+        state.jam > 0 ? `JAMMED · ${Math.ceil(state.jam)}s` : `Heat ${Math.round(state.heat)}%`, state.heat > 70 || state.jam > 0);
+      setGauge(1, state.fuel / FUEL_CAP,
+        state.fuel > 0 ? `Fuel ${Math.ceil(state.fuel / 60)} min${state.overdrive ? ' (×2 burn)' : ''}` : 'No fuel · trickle 25%', state.fuel <= 0);
+      setGauge(2, state.reserves, `Vein ${Math.round(state.reserves * 100)}% · yield ×${veinFactor(state).toFixed(2)}`, state.reserves < 0.15);
+      setGauge(3, state.bit ? state.bitWear / BIT_DURABILITY[state.bit] : 1,
+        state.bit ? `${BIT_NAMES[state.bit]} bit ${Math.round(state.bitWear / BIT_DURABILITY[state.bit] * 100)}%` : 'Stock bit (≤45 m)', state.bit > 0 && state.bitWear < BIT_DURABILITY[state.bit] * 0.15);
+      status = state.jam > 0 ? 'JAMMED' : full ? 'BUFFER FULL' : state.overdrive && running ? 'OVERDRIVE'
+        : running ? (state.fuel > 0 ? 'EXTRACTING' : 'TRICKLE') : 'STANDBY';
+      const focus = focusMultiplier(state);
+      const nextBand = AUTOMINER_ORES.map(o => ORE_DEPTH[o] ?? 0).filter(d => d > state.depth).sort((a, b) => a - b)[0];
+      hint = state.jam > 0 ? 'Seized solid. Wait it out, pour in coolant, or vent it at the cost of hull.'
+        : full ? 'Buffer full. Collect to restart extraction, or expand your buffer.'
+        : state.fuel <= 0 ? 'Running dry at 25%. Load coal or oil — or place your Oil Derrick within 12 blocks and it pipes crude in.'
+        : state.reserves < 0.15 ? 'This vein is nearly worked out. Check the seismic survey and relocate.'
+        : nextBand !== undefined && nextBand <= cap2 ? `Next ore band at ${nextBand} m · ${focus > 1 ? `focus +${Math.round((focus - 1) * 100)}%` : 'focus 1-2 ores for a yield bonus'} · full in ~${minutes} min`
+        : nextBand !== undefined ? `Next band at ${nextBand} m is past your limit — upgrade rank or fit a better bit.`
+        : `Bottom of the bore. ~${minutes} min until full.`;
+      if (!full && !state.jam) hint += ' · Place a chest beside the rig and it empties itself.';
+    } else {
+      const drilling = state.phase === WellPhase.Drilling;
+      const frac = drilling ? state.depth / WELL_DEPTH : 1;
+      v.shaftFill.style.height = `${frac * 100}%`;
+      v.shaftHead.style.top = `${frac * 100}%`;
+      v.shaftHead.classList.toggle('is-hot', state.fire > 0 || state.uncapped);
+      v.shaftText.textContent = drilling
+        ? `Drilling ${state.depth.toFixed(0)} / ${WELL_DEPTH} m · gusher odds ${Math.round(gusherChance(ctxOil) * 100)}%`
+        : state.fire > 0 ? `WELL FIRE · ${Math.ceil(state.fire)}s — hull burning`
+        : state.uncapped ? 'GUSHER · uncapped: +50% flow, 3× pressure loss, FLAMMABLE'
+        : `Pumping · ${REFINE_NAMES[state.refine]} · links crude to your rigs within ${FUEL_LINK_RADIUS} blocks`;
+      setGauge(0, drilling ? 0 : state.reserves, drilling ? 'Pressure · not struck yet' : `Pressure ${Math.round(state.reserves * 100)}%`, !drilling && state.reserves < 0.2);
+      setGauge(1, ctxOil, `Field ${Math.round(ctxOil * 100)}%`, ctxOil < OIL_THRESHOLD);
+      setGauge(2, state.hp / maxHp, `Hull ${Math.round(state.hp / maxHp * 100)}%`, state.fire > 0);
+      v.refine.forEach((b, i) => b.setAttribute('aria-pressed', String(state.refine === i)));
+      status = state.fire > 0 ? 'WELL FIRE' : ctxOil < OIL_THRESHOLD ? 'DRY GROUND' : drilling ? 'DRILLING'
+        : full ? 'BUFFER FULL' : state.uncapped ? 'GUSHER!' : state.reserves < 0.2 ? 'LOW PRESSURE' : 'PUMPING';
+      hint = state.fire > 0 ? 'The well is ablaze! Smother it with sand before it burns the rig down.'
+        : ctxOil < OIL_THRESHOLD ? 'No oil here. Relocate near oil shale in a desert or ocean field; upgrades travel with you.'
+        : drilling ? `Sinking the well. On the strike, ${Math.round(gusherChance(ctxOil) * 100)}% chance of a gusher.`
+        : state.uncapped ? 'A gusher! Big flow — but cap it soon: an explosion near an uncapped well sets it on fire.'
+        : full ? 'Tanks full. Collect to keep pumping, or expand your buffer.'
+        : state.reserves < 0.2 ? 'Reservoir pressure is low. Frac-sand injection brings it back.'
+        : `${REFINE_NAMES[state.refine]} · full in ~${minutes} min`;
+    }
+    if (v.status.textContent !== status) v.status.textContent = status;
+    v.status.dataset.running = String(running);
+    v.status.dataset.alarm = String(status === 'JAMMED' || status === 'WELL FIRE' || status === 'GUSHER!');
+    if (v.hint.textContent !== hint) v.hint.textContent = hint;
+    v.fillBar.style.width = `${Math.min(100, stored / cap * 100)}%`;
+    v.fillText.textContent = `${stored.toLocaleString()} / ${cap.toLocaleString()} buffered`;
+    v.rate.textContent = `${(running ? rate * 60 : 0).toFixed(1)} ${oil ? 'units' : 'items'} / min`;
+
+    const mask = allowedFilterMask(state);
+    const richness = ctx.context().ore ?? {};
     for (const { index, el } of v.filters) {
+      const ore = AUTOMINER_ORES[index];
       const gated = !(mask & (1 << index));
       const on = !!(state.filter & (1 << index));
-      el.style.opacity = gated ? '0.35' : '1';
-      el.style.cursor = gated ? 'not-allowed' : 'pointer';
-      el.style.background = gated ? '#333' : on ? '#3b7a3b' : '#555';
-      el.style.color = on && !gated ? '#fff' : '#ccc';
+      el.setAttribute('aria-pressed', String(on));
+      el.classList.toggle('is-locked', gated);
+      el.textContent = `${oreLabel(ore)}${gated ? ` · ${ORE_DEPTH[ore]} m` : ''}`;
+      el.title = gated ? `Reached at ${ORE_DEPTH[ore]} m of bore depth` : `${Math.round((richness[ore] ?? 0) * 100)}% deposit strength · ${on ? 'Click to disable' : 'Click to extract'}`;
     }
-
-    this.setUpgradeBtn(v.prodBtn, ctx, state, 'production',
-      state.level >= MAX_LEVEL);
-    this.setUpgradeBtn(v.storageBtn, ctx, state, 'storage',
-      state.storageLevel >= MAX_STORAGE_LEVEL);
+    for (const o of v.ops) {
+      o.update(state);
+      if (!friendly) o.el.disabled = true;
+    }
+    if (!friendly) v.refine.forEach(b => { b.disabled = true; });
+    const outputKey = JSON.stringify(state.stored);
+    if (v.outputKey !== outputKey) {
+      v.outputKey = outputKey;
+      v.output.replaceChildren();
+      const entries = Object.entries(state.stored).filter(([, n]) => n > 0);
+      if (!entries.length) v.output.textContent = 'Your next haul appears here. The rig works while you explore.';
+      for (const [id, n] of entries) {
+        const chip = document.createElement('div'); chip.className = 'machine-loot';
+        const icon = document.createElement('canvas'); icon.width = icon.height = 32;
+        renderItemIcon(icon, this.atlasCanvas, Number(id));
+        const label = document.createElement('span');
+        label.textContent = `${n} ${ITEMS[Number(id)]?.name ?? 'items'}`;
+        chip.append(icon, label); v.output.appendChild(chip);
+      }
+    }
+    this.setUpgradeBtn(v.prodBtn, ctx, state, 'production', state.level >= MAX_LEVEL);
+    this.setUpgradeBtn(v.storageBtn, ctx, state, 'storage', state.storageLevel >= MAX_STORAGE_LEVEL);
+    if (!friendly) { v.prodBtn.disabled = true; v.storageBtn.disabled = true; }
     v.collectBtn.disabled = stored <= 0;
-    v.collectBtn.style.opacity = stored <= 0 ? '0.5' : '1';
+    v.collectBtn.textContent = stored <= 0 ? 'Awaiting output'
+      : friendly ? `Collect ${stored.toLocaleString()} →` : 'Siphon 25% (raid)';
+    v.collectBtn.title = friendly ? 'Transfer output to your inventory.'
+      : 'Steal a quarter of the buffer. The owner is alerted; one siphon per rig every 90 seconds.';
   }
 
   private setUpgradeBtn(
     btn: HTMLButtonElement, ctx: MachineUIContext, state: MachineState,
     axis: UpgradeAxis, maxed: boolean
   ): void {
-    const label = axis === 'production' ? 'Production' : 'Storage';
+    const production = axis === 'production';
+    const label = production ? 'Production' : 'Buffer';
     if (maxed) {
-      btn.textContent = `${label}: MAX`;
+      btn.textContent = `${label} complete
+${production ? 'Masterwork achieved' : 'Maximum capacity installed'}`;
       btn.disabled = true;
-      btn.style.opacity = '0.5';
       return;
     }
-    const cost = upgradeCost(state, axis);
-    const costStr = cost
-      ? Object.entries(cost).map(([id, n]) => `${n} ${ITEMS[Number(id)]?.name ?? '?'}`).join(', ')
-      : '';
-    setIconText(btn, `▲ ${label}\n${costStr}`);
-    btn.style.whiteSpace = 'pre-line';
-    const afford = ctx.canAfford(axis);
-    btn.disabled = !afford;
-    btn.style.opacity = afford ? '1' : '0.5';
+    const next = { ...state, level: state.level + (production ? 1 : 0), storageLevel: state.storageLevel + (production ? 0 : 1) };
+    const deeper = state.type === MachineType.Autominer && rankDepth(next.level) > rankDepth(state.level)
+      ? `\nRank depth ${rankDepth(state.level)} → ${rankDepth(next.level)} m` : '';
+    const benefit = production
+      ? `+${Math.round((productionRate(next.level) / productionRate(state.level) - 1) * 100)}% output` +
+        (storageCap(next) > storageCap(state) ? ` · +${storageCap(next) - storageCap(state)} buffer` : '') + deeper
+      : `${storageCap(state).toLocaleString()} → ${storageCap(next).toLocaleString()} items`;
+    const cost = upgradeCost(state, axis)!;
+    const costStr = Object.entries(cost).map(([id, n]) => {
+      const held = this.inventory.countItem(Number(id));
+      return `${n} ${ITEMS[Number(id)]?.name ?? '?'}${held < n ? ` (need ${n - held})` : ''}`;
+    }).join(' · ');
+    const text = `${production ? machineRank(next.level) : `Buffer ${next.storageLevel}`} ↑
+${benefit}
+${costStr}`;
+    if (btn.textContent !== text) btn.textContent = text;
+    btn.disabled = !ctx.canAfford(axis);
   }
 
   // --- turret panel ----------------------------------------------------------
@@ -1008,12 +1210,15 @@ export class InventoryUI {
     const claimBtn = this.warBtn();
     claimBtn.style.background = '#3b5a7a';
     claimBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.claim(); });
-    loadRow.append(loadAmmoBtn, loadFuelBtn, claimBtn);
+    const moveBtn = this.warBtn();
+    moveBtn.textContent = 'Relocate';
+    moveBtn.addEventListener('mousedown', (e) => { e.preventDefault(); ctx.move(); });
+    loadRow.append(loadAmmoBtn, loadFuelBtn, claimBtn, moveBtn);
     wrap.appendChild(loadRow);
 
     this.turretViews = {
       info, owner, hpBar, hpText, ammo,
-      rangeBtn, damageBtn, rateBtn, loadAmmoBtn, loadFuelBtn, claimBtn,
+      rangeBtn, damageBtn, rateBtn, loadAmmoBtn, loadFuelBtn, claimBtn, moveBtn,
     };
     this.topEl.appendChild(wrap);
   }
@@ -1026,11 +1231,16 @@ export class InventoryUI {
     v.info.textContent =
       `Turret  ·  Rng ${turretRange(s.level).toFixed(0)}  ·  ` +
       `Dmg ${turretDamage(s.level).toFixed(0)}  ·  ${(1 / turretInterval(s.level)).toFixed(1)}/s`;
-    const mine = s.owner && s.owner === ctx.myName();
-    v.owner.textContent = s.owner ? `Owner: ${s.owner}${mine ? ' (you)' : ''}` : 'Unclaimed (inert)';
-    v.claimBtn.disabled = !!mine;
-    v.claimBtn.style.opacity = mine ? '0.5' : '1';
-    v.claimBtn.textContent = mine ? 'Owned' : 'Claim';
+    const mine = !!s.owner && s.owner === ctx.myName();
+    const claimable = !mine && ctx.canClaim();
+    const hack = claimable && !!s.owner && turretDisabled(s);
+    const status = turretDisabled(s) ? '  ·  OFFLINE (sabotaged)'
+      : !s.owner ? '' : s.ammo < 1 ? '  ·  NO AMMO' : s.fuel < 0.15 ? '  ·  NO OIL' : '  ·  ARMED';
+    v.owner.textContent = (s.owner ? `Owner: ${s.owner}${mine ? ' (you)' : ''}` : 'Unclaimed (inert)') + status;
+    v.claimBtn.disabled = !claimable;
+    v.claimBtn.style.opacity = claimable ? '1' : '0.5';
+    v.claimBtn.style.background = hack ? '#8a2f2f' : '#3b5a7a';
+    v.claimBtn.textContent = mine ? 'Owned' : hack ? 'Hack' : claimable ? 'Claim' : 'Enemy';
     const frac = s.maxHp > 0 ? Math.max(0, Math.min(1, s.hp / s.maxHp)) : 0;
     v.hpBar.style.width = `${Math.round(frac * 100)}%`;
     v.hpBar.style.background = frac > 0.5 ? '#4caf50' : frac > 0.25 ? '#e0a14e' : '#cc4444';
@@ -1045,6 +1255,8 @@ export class InventoryUI {
     const canF = ctx.canLoad(Item.OilBarrel);
     v.loadFuelBtn.textContent = 'Load Oil';
     v.loadFuelBtn.disabled = !canF; v.loadFuelBtn.style.opacity = canF ? '1' : '0.5';
+    const canM = ctx.canMove();
+    v.moveBtn.disabled = !canM; v.moveBtn.style.opacity = canM ? '1' : '0.5';
   }
 
   private setTurretBtn(
@@ -1124,6 +1336,7 @@ export class InventoryUI {
       this.headerEl.lastElementChild?.remove();
     }
     this.mode = mode;
+    this.panel.classList.toggle('machine-panel', mode === 'machine');
     if (mode === 'turret' && turretCtx) {
       this.titleEl.textContent = 'Turret';
       this.buildTurretTop(turretCtx);
@@ -1150,6 +1363,8 @@ export class InventoryUI {
     }
     this.open = true;
     this.panel.style.display = 'flex';
+    this.panel.scrollTop = 0;
+    this.tooltip.style.display = 'none';
     this.renderedVersion = -1;
   }
 

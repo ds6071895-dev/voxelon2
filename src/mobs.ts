@@ -253,6 +253,8 @@ export class Mob {
   burnAccum = 0;
   /** Damage-tick accumulator while standing on a Spike Trap. */
   spikeAccum = 0;
+  /** Seconds a trap (bear jaws, net, shock) holds this mob in place. */
+  trapFreeze = 0;
   soundTimer = 3 + Math.random() * 9;
   walkPhase = 0;
   brightness = 1;
@@ -1016,6 +1018,15 @@ export class Mobs {
     }
   }
 
+  /** A trap caught this mob (offline trap sim): damage + optional hold. */
+  trapHit(mob: Mob, dmg: number, freeze = 0): void {
+    if (!this.list.includes(mob)) return;
+    mob.health -= dmg;
+    mob.hurtTime = 0.4;
+    if (freeze > 0) mob.trapFreeze = Math.max(mob.trapFreeze, freeze);
+    if (mob.health <= 0) this.kill(mob);
+  }
+
   update(dt: number, player: Player, sun: number): void {
     this.guardClock += dt;
     this.guardTimer = Math.max(0, this.guardTimer - dt);
@@ -1265,6 +1276,12 @@ export class Mobs {
       }
     } else {
       mob.spikeAccum = 0;
+    }
+
+    // Held by a trap: no walking until it lets go.
+    if (mob.trapFreeze > 0) {
+      mob.trapFreeze = Math.max(0, mob.trapFreeze - dt);
+      mob.vel.x = 0; mob.vel.z = 0;
     }
 
     // --- physics ------------------------------------------------------------

@@ -759,7 +759,7 @@ function faceOff(s: GameServer, mid: { x: number; y: number; z: number }, gap = 
     s.snapshotFor(1).every((v) => v.id === 1 || v.id === 2) &&
     s.snapshotFor(3).every((v) => v.id === 3));
   // The welcome PLAYERS roster is the presence list a joining client renders
-  // bodies from. (The politics faction roster is a citizenship list and does
+  // bodies from. (The faction dossier roster is a citizenship list and does
   // still name arena members — pre-existing, and identical for Duels.)
   const welcome = s.addPlayer(4, { username: 'Late', faction: 0 })
     .find((o) => o.msg.t === 'welcome')?.msg;

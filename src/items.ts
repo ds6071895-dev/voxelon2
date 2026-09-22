@@ -12,6 +12,12 @@ export const enum Item {
   Stick = 100,
   Coal = 101,
   IronIngot = 102,
+  // Deep Bore drill bits (machines.ts): set how deep an Autominer can bore and
+  // how fast it chews; they wear out. Trap Detector pings hidden traps.
+  DrillBitIron = 103,
+  DrillBitDiamond = 104,
+  DrillBitTitanium = 105,
+  TrapDetector = 106,
   Redstone = 108,
   Diamond = 109,
   // M5: tools (vanilla stats) + smelting products. (No swords in VOXELON.)
@@ -595,6 +601,22 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Block.Lever]: blockItem(Block.Lever),
   [Block.FallTrap]: blockItem(Block.FallTrap),
   [Block.WallTrap]: blockItem(Block.WallTrap),
+  // Trapcraft: triggers, sensors and actuators (traps.ts).
+  [Block.PressurePlate]: blockItem(Block.PressurePlate),
+  [Block.TripwireHook]: blockItem(Block.TripwireHook),
+  [Block.MotionSensor]: blockItem(Block.MotionSensor),
+  [Block.TrapTimer]: blockItem(Block.TrapTimer),
+  [Block.Claymore]: blockItem(Block.Claymore),
+  [Block.FlameJet]: blockItem(Block.FlameJet),
+  [Block.DartLauncher]: blockItem(Block.DartLauncher),
+  [Block.NetLauncher]: blockItem(Block.NetLauncher),
+  [Block.ShockPlate]: blockItem(Block.ShockPlate),
+  [Block.AlarmBell]: blockItem(Block.AlarmBell),
+  [Item.TrapDetector]: { name: 'Trap Detector', kind: 'item', sprite: Tile.TrapDetector, maxStack: 1 },
+  // Drill bits for the Autominer (install from its panel).
+  [Item.DrillBitIron]: { name: 'Iron Drill Bit', kind: 'item', sprite: Tile.DrillBitIron, maxStack: 8 },
+  [Item.DrillBitDiamond]: { name: 'Diamond Drill Bit', kind: 'item', sprite: Tile.DrillBitDiamond, maxStack: 8 },
+  [Item.DrillBitTitanium]: { name: 'Titanium Drill Bit', kind: 'item', sprite: Tile.DrillBitTitanium, maxStack: 8 },
 
   // Boat: right-click water to launch, ride it fast across the surface.
   [Item.Boat]: { name: 'Boat', kind: 'item', sprite: Tile.Boat, maxStack: 4 },

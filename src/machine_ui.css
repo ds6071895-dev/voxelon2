@@ -1,0 +1,115 @@
+/* Scoped to automation; other inventory/container layouts keep their chrome. */
+#inventory.machine-panel {
+  --rig-accent: #72ead5;
+  width: min(620px, calc(100vw - 24px)); max-height: calc(100dvh - 24px);
+  box-sizing: border-box; overflow: auto; padding: 18px; gap: 10px;
+  overscroll-behavior: contain; overflow-anchor: none; touch-action: pan-y;
+  color: #dce8f0; background: #101b28;
+  border: 1px solid #395063; border-radius: 16px;
+  box-shadow: 0 24px 90px #000b, inset 0 1px #ffffff0b;
+  font-family: Inter, system-ui, sans-serif; text-shadow: none;
+}
+/* Keep the console's full height in the scroll flow. The base .inv-top has a
+   small min-height, so flex shrinking otherwise puts the slots over controls. */
+#inventory.machine-panel > * { flex-shrink: 0; min-width: 0; }
+#inventory.machine-panel:has(.machine-oil) { --rig-accent: #ffc276; }
+#inventory.machine-panel .inv-title { color: #ecf4fa; font: 600 17px system-ui; letter-spacing: .02em; }
+#inventory.machine-panel .inv-top { display: block; padding: 0; margin: 0; background: none; border: 0; box-shadow: none; }
+#inventory.machine-panel > .inv-grid { justify-content: center; grid-template-columns: repeat(9, minmax(0, 48px)); }
+#inventory.machine-panel .inv-slot { box-sizing: border-box; max-width: 100%; background: #243342; border-color: #435568 #16222f #16222f #435568; }
+.machine-console { display: flex; flex-direction: column; gap: 12px; font-size: 12px; line-height: 1.45; }
+.machine-hero { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px; border: 1px solid #ffffff12; border-radius: 10px; background: radial-gradient(ellipse at top right, #72ead51a, transparent 70%), repeating-linear-gradient(0deg, transparent 0 19px, #ffffff04 20px), #162536; }
+.machine-identity { min-width: 0; }
+.machine-oil .machine-hero { background: radial-gradient(ellipse at top right, #ffc27620, transparent 70%), #202733; }
+.machine-eyebrow, .machine-section-heading { font-size: 9px; font-weight: 700; letter-spacing: .15em; color: #98afc1; }
+.machine-rank { color: #f3f8fc; font-size: 26px; font-weight: 750; letter-spacing: -.04em; }
+.machine-owner { color: #99adbe; font-size: 10px; overflow-wrap: anywhere; }
+.machine-status { flex: none; color: #f5bc75; font-size: 9px; font-weight: 800; letter-spacing: .08em; padding: 7px 9px; border: 1px solid currentColor; border-radius: 5px; }
+.machine-status[data-running=true] { color: var(--rig-accent); }
+.machine-status[data-running=true]::before { content: ''; display: inline-block; width: 5px; height: 5px; margin-right: 6px; border-radius: 50%; background: currentColor; animation: rig-pulse 1.8s infinite; }
+.machine-ranks { display: grid; grid-template-columns: repeat(10, 1fr); gap: 5px; }
+.machine-rank-step { text-align: center; padding: 3px 0; border-radius: 3px; background: #20303e; color: #8094a5; font: 10px ui-monospace, monospace; border-bottom: 2px solid transparent; }
+.machine-rank-step.is-reached { color: var(--rig-accent); background: #ffffff0a; border-color: var(--rig-accent); }
+.machine-rank-step.is-current { background: var(--rig-accent); color: #142331; font-weight: 800; }
+.machine-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: center; }
+.machine-rate { color: var(--rig-accent); font: 700 21px ui-monospace, monospace; letter-spacing: -.06em; }
+.machine-buffer { color: #b6c8d6; font-size: 11px; text-align: right; }
+.machine-meter { height: 5px; border-radius: 8px; background: #2a3a48; overflow: hidden; margin-top: 6px; }
+.machine-fill { height: 100%; background: var(--rig-accent); transition: width .2s; }
+.machine-hint { color: #a8bfce; font-size: 11px; }
+.machine-output { display: flex; flex-wrap: wrap; gap: 6px; min-height: 36px; padding: 9px; background: #0a1420; border: 1px solid #ffffff0a; border-radius: 8px; align-items: center; color: #8fa8ba; font-size: 11px; }
+.machine-loot { display: flex; align-items: center; gap: 4px; padding: 2px 7px 2px 2px; border-radius: 4px; background: #213142; color: #e1edf4; }
+.machine-loot canvas { width: 24px; height: 24px; image-rendering: pixelated; }
+.machine-section-heading { display: flex; align-items: center; justify-content: space-between; }
+.machine-button { border: 1px solid #41556a; background: #243647; border-radius: 7px; color: #e5eff7; padding: 9px 12px; font: 600 11px/1.5 system-ui, sans-serif; cursor: pointer; transition: background .15s, border-color .15s; text-align: center; }
+.machine-button:hover:enabled { background: #324c61; border-color: var(--rig-accent); }
+.machine-button:focus-visible { outline: 2px solid var(--rig-accent); outline-offset: 3px; }
+.machine-button:disabled { cursor: default; color: #97aabc; background: #1b2b3a; border-color: #2d4052; }
+.machine-link { padding: 0; border: 0; background: transparent; color: var(--rig-accent); font-size: 10px; }
+.machine-filters { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
+.machine-filter { padding: 6px 3px; font-size: 10px; }
+.machine-filter[aria-pressed=true] { color: var(--rig-accent); border-color: var(--rig-accent); background: #72ead50d; }
+.machine-upgrades { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.machine-upgrade { text-align: left; white-space: pre-line; font-weight: 400; font-size: 11px; min-height: 92px; }
+.machine-upgrade::first-line { color: var(--rig-accent); font-weight: 750; font-size: 14px; }
+.machine-controls { display: flex; gap: 7px; }
+.machine-collect { flex: 1; background: var(--rig-accent); color: #102431; border-color: transparent; font-size: 13px; }
+.machine-collect:disabled { background: #243647; color: #97aabc; }
+.machine-collect:hover:enabled { background: #e4fff6; color: #102431; }
+.machine-integrity { display: flex; align-items: center; gap: 9px; color: #90a8b9; font-size: 9px; }
+.machine-integrity .machine-meter { width: 55px; flex: none; height: 3px; margin: 0; }
+/* --- v3: bore / well column, gauges, operations, survey ------------------- */
+.machine-status[data-alarm=true] { color: #ff6b5b; animation: rig-pulse .9s infinite; }
+.machine-deck { display: grid; grid-template-columns: 46px 1fr; gap: 14px; align-items: stretch; }
+.machine-shaft { position: relative; min-height: 132px; border-radius: 6px; overflow: hidden;
+  background: linear-gradient(#5b4a3a, #3d3530 30%, #2c2b33 60%, #1d1d2a); border: 1px solid #ffffff14; }
+.machine-oil .machine-shaft { background: linear-gradient(#6b5a3e, #3a3226 45%, #15110c); }
+.machine-shaft-fill { position: absolute; left: 50%; top: 0; width: 6px; margin-left: -3px; height: 0;
+  background: repeating-linear-gradient(#9aa6b2 0 5px, #6c7784 5px 9px); transition: height .3s; }
+.machine-oil .machine-shaft-fill { background: repeating-linear-gradient(#d69a4a 0 4px, #80562a 4px 8px); }
+.machine-shaft-band { position: absolute; left: 0; right: 0; height: 0; border-top: 1px dashed #ffffff33; }
+.machine-shaft-band::after { content: attr(data-ore); position: absolute; left: 2px; top: -1px;
+  font: 7px/1 ui-monospace, monospace; color: #ffffff88; letter-spacing: .02em; }
+.machine-shaft-head { position: absolute; left: 50%; width: 14px; height: 10px; margin: -2px 0 0 -7px;
+  clip-path: polygon(0 0, 100% 0, 50% 100%); background: var(--rig-accent); transition: top .3s; }
+.machine-shaft-head.is-hot { background: #ff6b3b; box-shadow: 0 0 10px #ff6b3b; }
+.machine-deck-side { display: flex; flex-direction: column; gap: 8px; justify-content: center; }
+.machine-shaft-text { color: #e7f0f6; font: 600 11px ui-monospace, monospace; }
+.machine-gauges { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+.machine-gauge { color: #a9bccb; font-size: 10px; }
+.machine-gauge .machine-meter { margin-top: 3px; }
+.machine-gauge.is-warn { color: #ff8a6b; }
+.machine-gauge.is-warn .machine-fill { background: #ff6b3b; }
+.machine-ops { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.machine-op { white-space: pre-line; font-weight: 500; font-size: 10px; padding: 7px 6px; }
+.machine-op::first-line { font-weight: 750; font-size: 11px; color: #f1f7fb; }
+.machine-op-wide { grid-column: span 3; }
+.machine-op.is-hot { border-color: #ff7b45; background: #3a2419; box-shadow: inset 0 0 18px #ff6b3b33; }
+.machine-op-danger:enabled { border-color: #a4473b; }
+.machine-refine { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+.machine-refine .machine-filter[aria-pressed=true] { color: var(--rig-accent); border-color: var(--rig-accent); background: #ffc2760f; }
+.machine-filter.is-locked { color: #6f8496; border-style: dashed; }
+.machine-survey { display: grid; grid-template-columns: repeat(9, 1fr); gap: 2px; max-width: 240px; }
+.machine-survey-cell { aspect-ratio: 1; border-radius: 2px;
+  background: color-mix(in srgb, var(--rig-accent) calc(var(--v) * 100%), #1a2633); }
+.machine-survey-cell.is-here { outline: 2px solid #fff; outline-offset: -1px; }
+.machine-survey-cell.is-best { outline: 2px dashed #ffe082; outline-offset: -1px; }
+.machine-survey-note { font-weight: 500; letter-spacing: 0; text-transform: none; color: #b9ccd9; font-size: 10px; }
+@media (max-width: 480px) {
+  .machine-ops { grid-template-columns: repeat(2, 1fr); }
+  .machine-op-wide { grid-column: span 2; }
+  .machine-gauges { grid-template-columns: 1fr; }
+}
+@keyframes rig-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .machine-console * { animation: none !important; transition: none !important; } }
+@media (max-width: 480px) {
+  #inventory.machine-panel { padding: 10px; }
+  #inventory.machine-panel .inv-slot { width: 100%; height: 36px; }
+  #inventory.machine-panel .inv-slot canvas { max-width: 100%; }
+  .machine-hero { padding: 12px; gap: 8px; }
+  .machine-rank { font-size: 22px; }
+  .machine-status { font-size: 8px; padding: 5px; }
+  .machine-rate { font-size: 16px; }
+  .machine-metrics { gap: 8px; }
+  .machine-upgrade { padding: 8px; font-size: 10px; }
+}
