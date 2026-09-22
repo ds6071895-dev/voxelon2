@@ -82,7 +82,6 @@ import {
 import { warBorderAt, clampInsideBorder, WAR_MIN_BORDER } from './war';
 import { Flag, FLAG_REACH, FLAG_MAX_HP, newFlags, flagPosition } from './flags';
 import { FlagModels } from './flagmodels';
-import { NotificationsUI } from './notifications_ui';
 import { FactionPicker, type PledgeData } from './faction_picker';
 import {
   WarfareProgress, buyWarfareNode, grantWarfareXp, migrateWarfare, newWarfare,
@@ -108,7 +107,7 @@ import {
 } from './duels';
 import {
   PARTY_AMBIENT_LIGHT, PARTY_MAX_HEALTH, PARTY_FLOOR_Y, PARTY_VOID_Y,
-  BRIDGE_TEAM_BLOCK, BRIDGE_TEAM_NAME,
+  BRIDGE_TEAM_BLOCK, BRIDGE_TEAM_NAME, BRIDGE_GOAL_LIMIT,
   BRIDGE_MELEE_TIER, BRIDGE_BOW_COOLDOWN_MS,
   bridgeGoalGuard, clampToPartySub, registerPartyArena, parkourCourse,
   type PartyLobbySnapshot, type PartyMode, type PartySubBounds,
@@ -2251,9 +2250,6 @@ function enterPlaying(): void {
   document.body.classList.add('in-game');
   overlay.classList.add('hidden');
   pauseEl.style.display = 'none';
-  // The title bell rides inside #overlay and hides with it; the HUD bell has to
-  // be toggled by hand, or it would sit over the title screen too.
-  hudBell.hidden = !authed;
 }
 const pauseGuideBtn = document.getElementById('pause-guide-btn') as HTMLButtonElement;
 
@@ -2280,7 +2276,6 @@ function enterTitle(): void {
   document.body.classList.remove('in-game');
   overlay.classList.remove('hidden');
   pauseEl.style.display = 'none';
-  hudBell.hidden = true;
   cleanupDuelSession(true);
   onVaultTransition(null);
 }
@@ -2375,18 +2370,10 @@ function saveLocalAccounts(): void {
 // The pledge screen shares ONE WebGL bust board through gov_ui.ts, because the
 // page has a hard ceiling on GL contexts and the world and the Duels ladder
 // already spend two.
-const notifications = new NotificationsUI(app);
 const factionPicker = new FactionPicker(app);
 // The cape wardrobe rides with the pledge screen for pointer-lock etiquette:
 // it opens from the title screen today, but it is a full-screen modal either way.
 const capesUI = new CapesUI(app);
-// Two bells, one unread count: one on the title screen (so a notice is
-// visible before you drop in) and one on the HUD. Both stay hidden until an
-// account is actually logged in — there is nothing to read before that.
-const titleBell = notifications.mountBell(overlay, 'title');
-const hudBell = notifications.mountBell(app, 'hud');
-titleBell.hidden = true;
-hudBell.hidden = true;
 
 // --- THE POINTER-LOCK ARBITER ------------------------------------------------
 // One question, asked in one place: does anything on screen need a cursor?
@@ -2403,7 +2390,7 @@ hudBell.hidden = true;
  *  three hand-rolled full-screen cards are read straight off their display. */
 function cursorPanelOpen(): boolean {
   return invUI.open || worldMap.open || warfareUI.open || chatBox.open
-    || factionPicker.open || notifications.open
+    || factionPicker.open
     || capesUI.open || fieldGuide.open || tutorial.open || guideOpen
     || strategicPanel.style.display !== 'none'   // helipad bay
     || trapPanel.style.display !== 'none'        // trap wiring panel
@@ -2452,7 +2439,7 @@ function resumePlay(): void {
   syncPointerLock();
 }
 
-for (const panel of [notifications, factionPicker, capesUI]) {
+for (const panel of [factionPicker, capesUI]) {
   // The arbiter would catch these on the next frame anyway; running it on the
   // open/close edge means the cursor is already there when the panel paints.
   panel.onOpen = syncPointerLock;
@@ -2479,11 +2466,10 @@ function refreshPledgeScreen(): void {
   if (factionPicker.open) factionPicker.update(safePledgeData());
 }
 
-/** One dispatch into the inbox, with the cue that matches its weight. */
+/** Faction news (a new citizen swore in): a chime and a toast, nothing kept. */
 function pushNotification(notif: Notification): void {
-  if (!notifications.push(notif)) return;   // a re-sync must never re-alarm
   audio.dispatchChime();
-  showNotice(`🔔 ${notif.title}`);
+  showNotice(notif.body || notif.title);
 }
 
 /** Show the allegiance pledge. Everything else waits behind it — an unpledged
@@ -2505,8 +2491,7 @@ function safePledgeData(): PledgeData {
     return { factions: [] };
   }
 }
-// The roll's sound: a glassy tick per beat that climbs as the spin slows, and
-// the fanfare when it settles.
+// A glassy tick when a side is picked, and the fanfare when the oath is sworn.
 factionPicker.onTick = (progress) => audio.healTick(0.8 + progress * 0.6);
 factionPicker.onLand = () => audio.warfareAuthorized();
 factionPicker.onPledge = (faction) => {
@@ -2568,9 +2553,6 @@ function onAuthSuccess(username: string): void {
   refreshNetInfo();
   renderLivePlayerCounts();
   titleStatusTimer = 0; // your side + the war clock appear with the menu
-  // Dispatches are per-account: the read-marks and the badge follow the login.
-  notifications.setAccount(username);
-  titleBell.hidden = false;
 }
 
 // --- Saved session (skip the login form on return visits) -------------------
@@ -2915,6 +2897,8 @@ const minigamesModal = document.getElementById('minigames-modal')!;
 const minigamesClose = document.getElementById('minigames-close') as HTMLButtonElement;
 const minigamesBrowser = document.getElementById('minigames-browser')!;
 const minigamesLobby = document.getElementById('minigames-lobby')!;
+const duelLobbyPanel = document.getElementById('duel-lobby-panel')!;
+const partyLobbyPanel = document.getElementById('party-lobby-panel')!;
 const duelsCardAction = document.getElementById('duels-card-action') as HTMLButtonElement;
 const duelsPrivateAction = document.getElementById('duels-private-action') as HTMLButtonElement;
 const duelQueueStatus = document.getElementById('duel-queue-status')!;
@@ -3258,13 +3242,17 @@ function refreshDuelsAvailability(): void {
 // ── View switching ─────────────────────────────────────────────────────────
 type ArenaView = 'games' | 'lobby' | 'ladder';
 let arenaView: ArenaView = 'games';
+/** A Bridge/Parkour private lobby is open and owns the Lobby tab. */
+let partyLobbyLive = false;
 
 function showArenaView(view: ArenaView): void {
   // The Lobby tab only exists while you are actually in one.
-  if (view === 'lobby' && !duelSnapshot) view = 'games';
+  if (view === 'lobby' && !duelSnapshot && !partyLobbyLive) view = 'games';
   arenaView = view;
   minigamesBrowser.hidden = view !== 'games';
   minigamesLobby.hidden = view !== 'lobby';
+  duelLobbyPanel.hidden = !duelSnapshot;
+  partyLobbyPanel.hidden = !!duelSnapshot || !partyLobbyLive;
   duelRanksView.hidden = view !== 'ladder';
   const tabs: [HTMLButtonElement, ArenaView][] =
     [[arenaTabGames, 'games'], [arenaTabLobby, 'lobby'], [arenaTabLadder, 'ladder']];
@@ -3273,7 +3261,7 @@ function showArenaView(view: ArenaView): void {
 }
 
 function refreshArenaTabs(): void {
-  const inLobby = !!duelSnapshot;
+  const inLobby = !!duelSnapshot || partyLobbyLive;
   arenaTabLobby.disabled = !inLobby;
   arenaTabLobby.replaceChildren(document.createTextNode('Lobby'));
   if (inLobby) {
@@ -3293,7 +3281,7 @@ function openMinigames(focusLobby = false): void {
   refreshArenaTabs();
   minigamesModal.classList.add('open');
   minigamesModal.setAttribute('aria-hidden', 'false');
-  if (focusLobby && duelSnapshot) showDuelLobby();
+  if (focusLobby && (duelSnapshot || partyLobbyLive)) showDuelLobby();
   requestAnimationFrame(() => (focusLobby && duelSnapshot ? duelReady : minigamesClose).focus());
 }
 
@@ -3407,7 +3395,7 @@ function renderDuelLobby(): void {
   }
 }
 
-minigamesBtn.addEventListener('click', () => openMinigames(!!duelSnapshot));
+minigamesBtn.addEventListener('click', () => openMinigames(!!duelSnapshot || partyLobbyLive));
 arenaTabGames.addEventListener('click', () => showArenaView('games'));
 arenaTabLobby.addEventListener('click', () => showArenaView('lobby'));
 arenaTabLadder.addEventListener('click', () => showArenaView('ladder'));
@@ -7607,9 +7595,6 @@ const chatBox = new ChatBox(app, {
         if (player.dead) return "You can't do that while dead.";
         showProgress();
         return null;
-      case 'notifications':
-        notifications.show();
-        return null;
       case 'guide':
         if (arenaActive) return `Guide is disabled during ${arenaModeName()}.`;
         toggleGuidePanel();
@@ -7947,10 +7932,6 @@ let partyLocalFallback: {
   dead: boolean;
   mode: GameMode;
 } | null = null;
-const partyLobbyPanel = document.createElement('section');
-partyLobbyPanel.className = 'pg-lobby';
-partyLobbyPanel.hidden = true;
-minigamesBrowser.prepend(partyLobbyPanel);
 let pendingPartyInvite = new URL(location.href).searchParams.get('party') ?? '';
 let partyInviteAttempted = false;
 function joinPendingParty(): void {
@@ -8064,45 +8045,148 @@ function leaveParty(): void {
   refreshPartyAvailability();
   setDuelCue('');
 }
+/** One lobby seat, in the same shape as a Duels seat so both lobbies share
+ *  the stage styling. */
+function partyLobbySeat(p: PartyLobbySnapshot['participants'][number], sub: string): HTMLElement {
+  const row = document.createElement('div'); row.className = 'duel-slot';
+  if (p.ready && p.connected) row.classList.add('ready');
+  if (p.id === net.myId) row.classList.add('me');
+  const avatar = document.createElement('span'); avatar.className = 'duel-avatar';
+  avatar.setAttribute('aria-hidden', 'true');
+  avatar.style.background = duelSkinColor(p.skin);
+  const name = document.createElement('strong');
+  name.textContent = p.id === net.myId ? `${p.username} (you)` : p.username;
+  if (p.host) {
+    const host = document.createElement('span');
+    host.className = 'duel-slot-host'; host.textContent = 'HOST';
+    name.appendChild(host);
+  }
+  const line = document.createElement('small'); line.className = 'duel-player-rank';
+  line.textContent = sub;
+  const state = document.createElement('span');
+  state.className = `duel-slot-state ${!p.connected ? 'duel-gone' : p.ready ? 'duel-ready' : 'duel-waiting'}`;
+  state.textContent = !p.connected ? 'Gone' : p.ready ? 'Ready' : 'Waiting';
+  row.append(avatar, name, line, state);
+  return row;
+}
+function partyEmptySeat(text: string): HTMLElement {
+  const slot = document.createElement('div');
+  slot.className = 'duel-slot empty'; slot.textContent = text;
+  return slot;
+}
 function renderPartyLobby(): void {
   const s = partySnapshot;
-  partyLobbyPanel.hidden = !s || s.phase !== 'lobby';
+  const live = !!s && s.phase === 'lobby';
+  const changed = live !== partyLobbyLive;
+  partyLobbyLive = live;
   partyLobbyPanel.replaceChildren();
-  if (!s || s.phase !== 'lobby')
+  if (changed) refreshArenaTabs();
+  if (!s || !live) {
+    if (arenaView === 'lobby' && !duelSnapshot) showArenaView('games');
     return;
-  const title = document.createElement('h3');
-  title.textContent = `${s.mode === 'parkour' ? 'Parkour Duel' : 'The Bridge'} · ${s.participants.length}/${s.capacity}`;
-  const rule = document.createElement('p');
-  rule.textContent = s.mode === 'parkour'
-    ? 'A fresh course, infinite wool and one rival.'
-    : 'Two bases, one span between them — a single block wide, the whole way. Cleaver, bow and infinite wool; dive into the enemy portal, first to five.';
-  const roster = document.createElement('div');
-  roster.className = 'pg-lobby-roster';
-  for (const p of s.participants) {
-    const row = document.createElement('div');
-    const side = s.mode === 'bridge' ? ` · ${BRIDGE_TEAM_NAME[p.team]}` : '';
-    row.textContent = `${p.username}${p.host ? ' · HOST' : ''}${side} · ${p.ready ? 'Ready' : 'Not ready'}`;
-    roster.append(row);
   }
-  const actions = document.createElement('div');
-  actions.className = 'duel-card-actions';
-  const me = s.participants.find(p => p.id === net.myId);
-  const button = (text: string, action: () => void, disabled = false) => { const b = document.createElement('button'); b.className = 'minigame-action'; b.textContent = text; b.disabled = disabled; b.onclick = action; actions.append(b); };
-  button(me?.ready ? 'Cancel ready' : 'Ready up', () => net.sendPartyReady(!me?.ready));
-  if (me?.host)
-    button('Start match', () => net.sendPartyStart(), s.participants.length < 2 || s.participants.some(p => !p.ready));
-  if (partyInviteToken)
-    button('Copy invite', () => { void navigator.clipboard?.writeText(partyInviteUrl(partyInviteToken)).then(() => showNotice('Invite copied.')).catch(() => showNotice('Select and copy the invite link below.')); });
-  button('Leave lobby', () => leaveParty());
-  partyLobbyPanel.append(title, rule, roster, actions);
+  const bridge = s.mode === 'bridge';
+  const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', text = ''): HTMLElementTagNameMap[K] => {
+    const n = document.createElement(tag); if (cls) n.className = cls; if (text) n.textContent = text; return n;
+  };
+  partyLobbyPanel.style.setProperty('--hero', `url('/minigames/${bridge ? 'the-bridge' : 'parkour'}.webp')`);
+  partyLobbyPanel.style.setProperty('--mode', bridge ? '#ff6b8b' : '#7ee07a');
+
+  const hero = el('header', 'lobby-hero');
+  const copy = el('div', 'lobby-hero-copy');
+  copy.append(
+    el('div', 'lobby-kicker', `Private match · ${bridge ? 'The Bridge' : 'Parkour'}`),
+    el('h3', '', bridge ? 'The Bridge' : 'Parkour Duel'),
+    el('p', '', bridge
+      ? 'Two bases, one span a single block wide. Cleaver, bow and infinite wool — dive into the enemy portal.'
+      : 'A fresh course, infinite wool and one rival. First to the golden gate wins.'));
+  const rules = el('div', 'duel-ruleline');
+  for (const chip of bridge
+    ? [`First to ${BRIDGE_GOAL_LIMIT}`, `${s.participants.length}/${s.capacity} players`, 'Infinite wool', 'Bow + cleaver']
+    : ['Fresh course', `${s.participants.length}/${s.capacity} racers`, 'Infinite wool', 'R to retry'])
+    rules.append(el('span', '', chip));
+  hero.append(copy, rules);
+  partyLobbyPanel.append(hero);
+
   if (partyInviteToken) {
-    const link = document.createElement('input');
-    link.className = 'pg-invite-link';
+    const invite = el('div', 'lobby-invite');
+    const label = el('div', 'lobby-invite-label');
+    label.append(el('b', '', 'Invite your friends'), el('span', '', 'Anyone with this link lands straight in your lobby.'));
+    const link = el('input');
     link.readOnly = true;
+    link.setAttribute('aria-label', 'Invite link');
     link.value = partyInviteUrl(partyInviteToken);
     link.onclick = () => link.select();
-    partyLobbyPanel.append(link);
+    const copyBtn = el('button', 'duel-copy lobby-copy', 'Copy invite');
+    copyBtn.type = 'button';
+    copyBtn.onclick = async () => {
+      try {
+        if (!navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable');
+        await navigator.clipboard.writeText(link.value);
+        copyBtn.textContent = 'Copied!';
+      } catch {
+        link.focus(); link.select();
+        let ok = false;
+        try { ok = document.execCommand('copy'); } catch { /* selection remains */ }
+        copyBtn.textContent = ok ? 'Copied!' : 'Link selected';
+      }
+      window.setTimeout(() => { copyBtn.textContent = 'Copy invite'; }, 1800);
+    };
+    invite.append(label, link, copyBtn);
+    partyLobbyPanel.append(invite);
   }
+
+  const readyCount = s.participants.filter(p => p.ready && p.connected).length;
+  const bar = el('div', 'duel-readybar'); bar.setAttribute('aria-hidden', 'true');
+  const fill = el('i'); fill.style.width = `${s.participants.length ? Math.round(readyCount / s.participants.length * 100) : 0}%`;
+  bar.append(fill);
+  const me = s.participants.find(p => p.id === net.myId);
+  const canStart = !!me?.host && s.participants.length >= 2 && s.participants.every(p => p.ready && p.connected);
+  const feedback = el('div', 'duel-feedback', canStart
+    ? 'Everyone is ready. Drop them in.'
+    : s.participants.length < 2
+      ? 'Send the invite link — you need at least one opponent.'
+      : `${readyCount}/${s.participants.length} ready.${me?.host ? '' : ' The host starts the match.'}`);
+  feedback.setAttribute('role', 'status');
+  partyLobbyPanel.append(bar, feedback);
+
+  if (bridge) {
+    const teams = el('div', 'lobby-teams');
+    const per = Math.max(1, Math.ceil(s.capacity / 2));
+    const column = (team: number) => {
+      const col = el('div', 'lobby-team');
+      col.style.setProperty('--team', team === 0 ? '#ff5f76' : '#5aa8ff');
+      col.append(el('div', 'lobby-team-name', BRIDGE_TEAM_NAME[team]));
+      const members = s.participants.filter(p => p.team === team);
+      for (const p of members) col.append(partyLobbySeat(p, `${BRIDGE_TEAM_NAME[team]} side`));
+      for (let i = members.length; i < per; i++) col.append(partyEmptySeat('Open seat'));
+      return col;
+    };
+    teams.append(column(0), el('div', 'lobby-vs', 'VS'), column(1));
+    partyLobbyPanel.append(teams);
+  } else {
+    const roster = el('div', 'duel-roster');
+    for (const p of s.participants) roster.append(partyLobbySeat(p, 'Racer'));
+    for (let i = s.participants.length; i < s.capacity; i++)
+      roster.append(partyEmptySeat(i < 2 ? 'Waiting for a challenger' : 'Open seat'));
+    partyLobbyPanel.append(roster);
+  }
+
+  const actions = el('div', 'duel-controls');
+  const button = (text: string, cls: string, action: () => void, disabled = false) => {
+    const b = el('button', `duel-control ${cls}`, text);
+    b.type = 'button';
+    b.setAttribute('aria-disabled', String(disabled));
+    b.onclick = () => { if (b.getAttribute('aria-disabled') !== 'true') action(); };
+    actions.append(b);
+    return b;
+  };
+  button(me?.ready ? 'Cancel ready' : 'Ready up', 'lobby-ready', () => net.sendPartyReady(!me?.ready))
+    .setAttribute('aria-pressed', String(me?.ready === true));
+  if (me?.host) button('Start match', 'lobby-start', () => net.sendPartyStart(), !canStart);
+  button('Leave lobby', 'lobby-leave', () => leaveParty());
+  partyLobbyPanel.append(actions);
+  if (arenaView === 'lobby') showArenaView('lobby');
 }
 partyCardAction.addEventListener('click', () => queuePartyMode('bridge'));
 partyPrivateAction.addEventListener('click', () => createPartyMode('bridge'));
@@ -8130,11 +8214,12 @@ net.onPartyLobby = (snapshot, inviteToken) => {
   partyClockLocal = performance.now();
   if (inviteToken)
     partyInviteToken = inviteToken;
+  // Every phase re-renders: leaving 'lobby' is what retires the Lobby tab.
+  renderPartyLobby();
   if (snapshot.phase === 'lobby') {
-    renderPartyLobby();
     if (!arenaActive) {
-      showDuelBrowser();
       openMinigames();
+      showArenaView('lobby');
     }
   }
   if (snapshot.phase === 'results' && arenaKind === 'party') {
@@ -8228,6 +8313,7 @@ net.onPartyLoadout = (slots, selected) => {
   resetPartyWeaponPose();
   partySwingAt = -1e9;
   partyShotAt = -1e9;
+  partyUI.bowReadyAt = 0;
   inventory.restore({ slots, armor: new Array(4).fill(null), selected });
   fireCooldown = 0;
   reloadTimer = 0;
@@ -8357,6 +8443,7 @@ function updatePartyWeapon(heldId: number, lookDir: THREE.Vector3, eye: THREE.Ve
   audio.bowRelease(1);
   held.releaseBow(1);
   partyShotAt = now;
+  partyUI.bowReadyAt = now + BRIDGE_BOW_COOLDOWN_MS;
   net.sendPartyShoot(lookDir.x, lookDir.y, lookDir.z, 1);
 }
 function updatePartyFrame(dt: number): void {

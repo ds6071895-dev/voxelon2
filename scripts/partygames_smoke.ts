@@ -471,7 +471,7 @@ function serverMatch(mode: PartyMode = 'parkour') {
     s.party.participantFor(1)!.kills === 1 && s.party.participantFor(2)!.deaths === 1);
   // The bow fires instantly with consistent strength at its action interval.
   a.held = Item.BridgeBow;
-  s.tickWar(2);
+  s.tickWar(BRIDGE_BOW_COOLDOWN_MS / 1000 + .001);
   const shot = sends(1, { t: 'partyShoot', dx: 0, dy: 0, dz: 1, power: 1 });
   check('a released arrow reaches BOTH clients', shot.filter(o => o.msg.t === 'partyArrow').length === 2);
   check('a second shot in the same instant is refused', sends(1, { t: 'partyShoot', dx: 0, dy: 0, dz: 1, power: 1 }).length === 0);
@@ -479,7 +479,7 @@ function serverMatch(mode: PartyMode = 'parkour') {
   const full = sends(1, { t: 'partyShoot', dx: 0, dy: 0, dz: 1, power: 1 })
     .find(o => o.msg.t === 'partyArrow')!.msg as { power: number };
   check('the next arrow needs no additional draw time', full.power === 1);
-  s.tickWar(2);
+  s.tickWar(BRIDGE_BOW_COOLDOWN_MS / 1000 + .001);
   const cheated = sends(1, { t: 'partyShoot', dx: 0, dy: 0, dz: 1, power: 9 })
     .find(o => o.msg.t === 'partyArrow')!.msg as { power: number };
   check('a forged power cannot increase arrow strength', cheated.power === 1);

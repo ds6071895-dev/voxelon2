@@ -409,6 +409,72 @@
     .pg-card-name { flex: 1; }
     .pg-card-points { color: #ffd25e; font: 800 10px/1 inherit; }
 
+    /* Result reveal. Its buttons are styled here, not borrowed from the game
+       cards: .minigame-action paints from a --card colour that only exists on a
+       card, so off-card it rendered as black text on a transparent button. */
+    .pg-card.pg-result {
+      --pg-accent: #ffd25e;
+      width: min(440px, calc(100vw - 32px)); min-width: 0; padding: 26px 24px 22px; border-radius: 20px;
+      text-align: center; overflow: hidden; pointer-events: auto;
+      border: 1px solid color-mix(in srgb, var(--pg-accent) 45%, transparent);
+      background:
+        radial-gradient(ellipse 90% 60% at 50% 0%, color-mix(in srgb, var(--pg-accent) 26%, transparent), transparent 70%),
+        linear-gradient(180deg, rgba(14,20,34,.97), rgba(7,10,18,.97));
+      box-shadow: 0 30px 80px rgba(0,0,0,.65), 0 0 60px color-mix(in srgb, var(--pg-accent) 22%, transparent),
+                  inset 0 1px rgba(255,255,255,.08);
+      animation: pg-result-in .5s cubic-bezier(.18,.9,.25,1.15) both;
+    }
+    @keyframes pg-result-in { from { opacity: 0; transform: translate(-50%,-44%) scale(.92); } }
+    /* Rays behind a win. */
+    .pg-card.pg-result.win::before {
+      content: ''; position: absolute; left: 50%; top: -60%; width: 180%; aspect-ratio: 1; z-index: -1;
+      transform: translateX(-50%); pointer-events: none; opacity: .5;
+      background: repeating-conic-gradient(from 0deg, color-mix(in srgb, var(--pg-accent) 22%, transparent) 0 8deg, transparent 8deg 20deg);
+      -webkit-mask: radial-gradient(circle, #000 10%, transparent 55%); mask: radial-gradient(circle, #000 10%, transparent 55%);
+      animation: pg-rays 24s linear infinite;
+    }
+    .pg-card.pg-result { isolation: isolate; }
+    @keyframes pg-rays { to { transform: translateX(-50%) rotate(1turn); } }
+    .pg-result-kicker {
+      display: inline-block; padding: 5px 12px; border-radius: 99px; color: #0b0f18; background: var(--pg-accent);
+      box-shadow: 0 0 24px color-mix(in srgb, var(--pg-accent) 60%, transparent);
+      font-size: 9px; font-weight: 950; letter-spacing: 2.6px; text-transform: uppercase;
+    }
+    .pg-result .pg-card-title {
+      margin: 12px 0 6px; font-size: clamp(24px, 5vw, 36px); line-height: 1; font-weight: 950;
+      letter-spacing: 1.5px; color: #fff;
+      text-shadow: 0 0 30px color-mix(in srgb, var(--pg-accent) 70%, transparent), 0 3px 12px rgba(0,0,0,.8);
+    }
+    .pg-result.lose .pg-card-title { color: #ffd6dc; }
+    .pg-result .pg-result-note { margin: 0; color: #aec1d8; font-size: 12px; line-height: 1.55; }
+    .pg-result-board {
+      margin-top: 16px; padding: 6px 12px; border-radius: 12px; text-align: left;
+      background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.07);
+    }
+    .pg-result-board .pg-card-row { font-size: 12px; font-weight: 700; }
+    .pg-result-board .pg-card-row + .pg-card-row { border-top: 1px solid rgba(255,255,255,.06); }
+    .pg-result .pg-result-actions { margin-top: 18px; gap: 10px; flex-wrap: wrap; }
+    .pg-result-btn {
+      flex: 1 1 150px; min-height: 46px; padding: 12px 18px; border-radius: 12px; cursor: pointer;
+      border: 1px solid rgba(170,205,255,.25); color: #eef4ff; background: rgba(255,255,255,.07);
+      font-family: inherit; font-size: 10.5px; font-weight: 900; line-height: 1;
+      letter-spacing: 1.6px; text-transform: uppercase;
+      transition: transform .15s ease, background .15s ease, box-shadow .15s ease;
+    }
+    .pg-result-btn:hover, .pg-result-btn:focus-visible { transform: translateY(-2px); background: rgba(255,255,255,.12); outline: none; }
+    .pg-result-btn.primary {
+      color: #0b0f18; border-color: transparent;
+      background: linear-gradient(135deg, color-mix(in srgb, var(--pg-accent) 45%, #fff), var(--pg-accent));
+      box-shadow: 0 10px 26px color-mix(in srgb, var(--pg-accent) 38%, transparent);
+    }
+    .pg-result-btn.primary:hover, .pg-result-btn.primary:focus-visible {
+      background: linear-gradient(135deg, color-mix(in srgb, var(--pg-accent) 30%, #fff), var(--pg-accent));
+      box-shadow: 0 12px 32px color-mix(in srgb, var(--pg-accent) 55%, transparent);
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .pg-card.pg-result, .pg-card.pg-result.win::before { animation: none; }
+    }
+
     .pvp-slam {
       position: absolute; left: 50%; top: 21%; z-index: 13; display: none;
       transform: translateX(-50%); pointer-events: none; text-align: center; width: max-content;
@@ -2077,11 +2143,7 @@
     .duel-gone { color: #ff7f8c; background: rgba(255,127,140,.12); }
     @keyframes ar-pop { from { transform: scale(.7); } }
     .duel-controls { display: flex; flex-wrap: wrap; gap: 9px; }
-    #duel-ready { color: #08131e; border-color: transparent; background: linear-gradient(135deg, #ffe6a4, #f0ac3e); }
-    #duel-ready[aria-pressed="true"] { color: #55e8a6; border-color: rgba(72,227,154,.45); background: rgba(72,227,154,.14); }
-    #duel-start { color: #05171f; border-color: transparent; background: linear-gradient(135deg, #a8f0ff, #46c8ec); }
-    #duel-start[aria-disabled="true"], .duel-control[aria-disabled="true"] { opacity: .4; cursor: not-allowed; filter: saturate(.45); }
-    #duel-leave { margin-left: auto; color: #ff98a2; border-color: rgba(255,127,140,.24); background: rgba(255,80,100,.09); }
+    .duel-control[aria-disabled="true"] { opacity: .4; cursor: not-allowed; filter: saturate(.45); }
     .duel-feedback { min-height: 1.4em; color: color-mix(in srgb, var(--rank) 72%, #17445a); font-size: 11.5px; font-weight: 650; }
     /* A live readiness bar so "3 of 4 ready" is legible at a glance. */
     .duel-readybar { height: 4px; overflow: hidden; border-radius: 99px; background: rgba(31,73,93,.09); }
@@ -2092,6 +2154,142 @@
     .duel-arena-brief div { padding: 11px 13px; border: 1px solid var(--ar-line); border-radius: 12px; background: var(--ar-panel); }
     .duel-arena-brief strong { display: block; color: var(--ar-ink); font-size: 11px; font-weight: 900; }
     .duel-arena-brief span { display: block; margin-top: 4px; color: var(--ar-dim); font-size: 9.5px; line-height: 1.45; }
+
+    /* ── Lobby stage ──────────────────────────────────────────────────
+       Every private lobby (Duels, The Bridge, Parkour) gets its own screen: a
+       night-arena stage under the mode's key art. The Arena's --ar-* tokens
+       are re-pointed at a dark palette here, so the shared duel-* seat, bar
+       and chip rules above render correctly on it without a second copy. */
+    .lobby-stage {
+      --mode: #5ad0ff;
+      --ar-ink: #eef5ff; --ar-dim: #a9bdd2; --ar-mute: #7890aa;
+      --ar-line: rgba(160,205,255,.14); --ar-line-hot: color-mix(in srgb, var(--mode) 60%, transparent);
+      --ar-panel: rgba(255,255,255,.045); --ar-panel-2: rgba(255,255,255,.06);
+      position: relative; gap: 16px; padding: 0 0 22px; overflow: hidden;
+      border-radius: 20px; border: 1px solid rgba(160,205,255,.16); color: var(--ar-ink);
+      background:
+        radial-gradient(ellipse 70% 40% at 50% 100%, color-mix(in srgb, var(--mode) 16%, transparent), transparent 70%),
+        linear-gradient(180deg, #0c1624, #070d17);
+      box-shadow: 0 26px 70px rgba(6,18,30,.38), inset 0 1px rgba(255,255,255,.06);
+    }
+    .lobby-stage[hidden] { display: none; }
+    .lobby-stage > :not(.lobby-hero) { margin-inline: clamp(16px,2.4vw,24px); }
+    .lobby-hero {
+      position: relative; display: flex; align-items: flex-end; justify-content: space-between;
+      flex-wrap: wrap; gap: 14px 18px; min-height: 172px; padding: 22px clamp(16px,2.4vw,24px) 18px;
+      background:
+        linear-gradient(180deg, rgba(7,13,23,.1), rgba(7,13,23,.55) 55%, #0c1624),
+        linear-gradient(90deg, rgba(7,13,23,.78), transparent 70%),
+        var(--hero, none) center 40% / cover no-repeat;
+      border-bottom: 1px solid color-mix(in srgb, var(--mode) 30%, transparent);
+    }
+    /* A slow light sweep across the art keeps the stage feeling live. */
+    .lobby-hero::after {
+      content: ''; position: absolute; inset: 0; pointer-events: none;
+      background: linear-gradient(100deg, transparent 35%, rgba(255,255,255,.09) 50%, transparent 65%);
+      background-size: 260% 100%; animation: ar-scan 6s linear infinite;
+    }
+    .lobby-hero-copy { position: relative; z-index: 1; min-width: 0; }
+    .lobby-kicker {
+      display: inline-flex; align-items: center; gap: 7px; padding: 5px 10px; border-radius: 99px;
+      color: #08131e; background: var(--mode); box-shadow: 0 0 22px color-mix(in srgb, var(--mode) 55%, transparent);
+      font-size: 8.5px; font-weight: 950; letter-spacing: 2.2px; text-transform: uppercase;
+    }
+    .lobby-kicker::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: #08131e; animation: ar-blink 1.4s ease-in-out infinite; }
+    .lobby-hero h3 {
+      margin-top: 10px; font-size: clamp(28px,4.8vw,46px); line-height: .95; font-weight: 950; letter-spacing: -1.2px;
+      background: linear-gradient(180deg, #fff 30%, color-mix(in srgb, var(--mode) 60%, #fff));
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+      filter: drop-shadow(0 4px 18px rgba(0,0,0,.6));
+    }
+    .lobby-hero p { margin-top: 7px; max-width: 52ch; color: #c9d8ea; font-size: 12px; line-height: 1.5; text-shadow: 0 2px 8px rgba(0,0,0,.8); }
+    .lobby-stage .duel-ruleline { position: relative; z-index: 1; }
+    .lobby-stage .duel-ruleline span {
+      color: #e8f2ff; border-color: rgba(255,255,255,.18); background: rgba(7,13,23,.55);
+      backdrop-filter: blur(6px);
+    }
+
+    .lobby-invite {
+      display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 9px; padding: 14px;
+      border-radius: 15px; border: 1px dashed color-mix(in srgb, var(--mode) 55%, transparent);
+      background: linear-gradient(120deg, color-mix(in srgb, var(--mode) 12%, transparent), rgba(255,255,255,.02));
+    }
+    .lobby-invite[hidden] { display: none; }
+    .lobby-invite-label { grid-column: 1 / -1; display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; }
+    .lobby-invite-label b { color: var(--mode); font-size: 12px; font-weight: 900; letter-spacing: .3px; }
+    .lobby-invite-label span { color: var(--ar-dim); font-size: 10.5px; }
+    .lobby-stage .lobby-invite input {
+      min-width: 0; padding: 13px 14px; border-radius: 11px; border: 1px solid rgba(160,205,255,.18);
+      color: #cfe6ff; background: rgba(0,0,0,.35); user-select: text;
+      font: 600 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis;
+    }
+    .lobby-stage .lobby-invite input:focus { outline: none; border-color: var(--mode); }
+
+    .lobby-stage .duel-copy, .lobby-stage .duel-control {
+      min-height: 46px; padding: 12px 20px; border-radius: 12px; cursor: pointer;
+      border: 1px solid rgba(160,205,255,.2); color: #eef5ff; background: rgba(255,255,255,.07);
+      font-family: inherit; font-size: 10px; font-weight: 900; line-height: 1;
+      letter-spacing: 1.5px; text-transform: uppercase;
+      transition: transform .15s ease, box-shadow .15s ease, background .15s ease, filter .15s ease;
+    }
+    .lobby-stage .duel-copy:hover, .lobby-stage .duel-control:hover:not([aria-disabled="true"]),
+    .lobby-stage .duel-copy:focus-visible, .lobby-stage .duel-control:focus-visible {
+      transform: translateY(-2px); outline: none; filter: brightness(1.08);
+    }
+    .lobby-stage .lobby-copy {
+      color: #08131e; border-color: transparent;
+      background: linear-gradient(135deg, color-mix(in srgb, var(--mode) 45%, #fff), var(--mode));
+      box-shadow: 0 8px 22px color-mix(in srgb, var(--mode) 35%, transparent);
+    }
+    .lobby-stage .lobby-ready {
+      min-width: 160px; color: #1a1204; border-color: transparent;
+      background: linear-gradient(135deg, #ffe6a4, #f0ac3e); box-shadow: 0 8px 24px rgba(240,172,62,.32);
+    }
+    .lobby-stage .lobby-ready[aria-pressed="true"] {
+      color: #55e8a6; border-color: rgba(72,227,154,.5); background: rgba(72,227,154,.14);
+      box-shadow: inset 0 0 18px rgba(72,227,154,.18);
+    }
+    .lobby-stage .lobby-start {
+      min-width: 160px; color: #04161e; border-color: transparent;
+      background: linear-gradient(135deg, #a8f0ff, #46c8ec); box-shadow: 0 8px 24px rgba(70,200,236,.32);
+    }
+    .lobby-stage .lobby-start:not([aria-disabled="true"]) { animation: lobby-go 1.6s ease-in-out infinite; }
+    @keyframes lobby-go { 50% { box-shadow: 0 8px 34px rgba(70,200,236,.7); } }
+    .lobby-stage .lobby-leave { margin-left: auto; color: #ffa3ad; border-color: rgba(255,127,140,.3); background: rgba(255,80,100,.1); }
+    .lobby-stage .duel-control[aria-disabled="true"] { opacity: .38; box-shadow: none; }
+
+    .lobby-stage .duel-readybar { height: 6px; background: rgba(255,255,255,.08); }
+    .lobby-stage .duel-feedback { color: color-mix(in srgb, var(--mode) 70%, #fff); }
+    .lobby-stage .duel-slot { min-height: 80px; background: linear-gradient(120deg, rgba(255,255,255,.07), rgba(255,255,255,.025)); }
+    .lobby-stage .duel-slot.me { background: linear-gradient(110deg, color-mix(in srgb, var(--rank, var(--mode)) 24%, transparent), rgba(255,255,255,.03) 60%); }
+    .lobby-stage .duel-slot.empty { border-color: rgba(160,205,255,.2); background: rgba(255,255,255,.02); }
+    .lobby-stage .duel-arena-brief div { background: rgba(255,255,255,.035); }
+
+    /* The Bridge: two sides facing each other across a VS rail. */
+    .lobby-teams { display: grid; grid-template-columns: minmax(0,1fr) auto minmax(0,1fr); align-items: start; gap: 12px; }
+    .lobby-team { display: grid; gap: 9px; }
+    .lobby-team-name {
+      padding: 8px 12px; border-radius: 10px; color: var(--team);
+      background: color-mix(in srgb, var(--team) 14%, transparent);
+      box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--team) 45%, transparent);
+      font-size: 10px; font-weight: 950; letter-spacing: 2.4px; text-transform: uppercase;
+    }
+    .lobby-team .duel-slot { border-color: color-mix(in srgb, var(--team) 40%, transparent); }
+    .lobby-vs {
+      align-self: center; display: grid; place-items: center; width: 52px; height: 52px; border-radius: 50%;
+      color: #fff; background: radial-gradient(circle, #1b2a3e, #0a121e);
+      box-shadow: 0 0 0 1px rgba(255,255,255,.14), 0 0 26px rgba(255,255,255,.1);
+      font-size: 15px; font-weight: 950; font-style: italic; letter-spacing: 1px;
+    }
+    @media (max-width: 700px) {
+      .lobby-teams { grid-template-columns: 1fr; }
+      .lobby-vs { justify-self: center; }
+      .lobby-invite { grid-template-columns: 1fr; }
+      .lobby-hero { min-height: 150px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .lobby-hero::after, .lobby-stage .lobby-start, .lobby-kicker::before { animation: none !important; }
+    }
 
     .duel-invite-banner {
       display: none; margin-bottom: 14px; padding: 13px 15px; border-radius: 13px;
@@ -2798,7 +2996,7 @@
        HUD Settings › Appearance › Dark mode sets [data-ui-dark] on <html>.
        The HUD theme above styles marks that FLOAT over the world; this styles
        the opaque sheets that open on top of it — the inventory and its slots,
-       the Field Guide, the notification tray, the warfare tree, the menus.
+       the Field Guide, the warfare tree, the menus.
        Those are the surfaces that actually hurt at night, and most of them were
        deliberately lit like paper.
 
@@ -2929,24 +3127,6 @@
     html[data-ui-dark] .field-guide-boss p { color: #9fb0c4; }
     html[data-ui-dark] .field-guide-nav.mobile-open { background: #141923; }
 
-    /* Notification tray. */
-    html[data-ui-dark] .vx-notif-panel { background: linear-gradient(180deg, #1a2030, #141923); }
-    html[data-ui-dark] .vx-notif-head { background: linear-gradient(180deg, #1f2637, rgba(31, 38, 55, .4)); }
-    html[data-ui-dark] .vx-notif-head h2 { color: #eaf1fa; }
-    html[data-ui-dark] .vx-notif-crest { color: #ffc043; background: linear-gradient(180deg, #2b2416, #221c11); }
-    html[data-ui-dark] .vx-notif-act,
-    html[data-ui-dark] .vx-notif-act:hover { color: #dbe4f0; background: #232b3b; }
-    html[data-ui-dark] .vx-notif-item { background: #1e2534; }
-    html[data-ui-dark] .vx-notif-item[data-unread="1"] {
-      background: linear-gradient(100deg,
-        color-mix(in srgb, var(--tone, #8593a7) 20%, #1e2534), #1e2534 62%);
-    }
-    html[data-ui-dark] .vx-notif-mark {
-      background: color-mix(in srgb, var(--tone, #8593a7) 24%, #1e2534);
-    }
-    html[data-ui-dark] .vx-notif-body { color: #a9b8cc; }
-    html[data-ui-dark] .vx-notif-bell:hover { background: #232b3b; }
-
     /* Warfare tree. Built from inline styles, so it is themed through the
        tokens its palette constants resolve against (see warfare_ui.ts). */
     :root {
@@ -2971,13 +3151,9 @@
     }
 
 
-    .pg-hud[hidden], .pg-card[hidden], .pg-banner[hidden], .pg-call[hidden], .pg-lobby[hidden] { display:none !important; }
+    .pg-hud[hidden], .pg-card[hidden], .pg-banner[hidden], .pg-call[hidden] { display:none !important; }
     .pg-result-actions { display:flex; gap:12px; justify-content:center; pointer-events:auto; margin-top:20px; }
     .pg-result-note { color:#aec1d8; line-height:1.6; }
-    .pg-lobby { padding:24px; margin:0 0 20px; border:1px solid #61dbb855; border-radius:16px; background:#102331; color:#eaf1fa; }
-    .pg-lobby p { color:#aec1d8; }
-    .pg-lobby-roster { display:grid; gap:10px; margin:18px 0; }
-    .pg-invite-link { width:100%; box-sizing:border-box; margin-top:16px; padding:12px; color:#b6fce4; background:#091923; border:1px solid #61dbb855; border-radius:8px; }
     .pg-call { top:auto; bottom:100px; max-width:min(90vw,800px); font-size:12px; line-height:1.5; text-align:center; }
     .pg-progress { color:#b6fce4; max-width:65vw; line-height:1.4; text-align:center; }
     @media(max-width:650px) { .pg-standings { top:55px; } .pg-banner { width:90vw; } .pg-banner-title { font-size:24px; } .pg-card { width:80vw; min-width:0; } .pg-call { bottom:140px; } }
@@ -3333,21 +3509,28 @@
             </div>
 
             <div id="minigames-lobby" class="minigames-lobby arena-view" role="tabpanel" aria-labelledby="tab-lobby" hidden>
-              <div class="duel-lobby-panel">
-                <div class="duel-lobby-head">
-                  <div><div class="minigames-kicker">Private match</div><h3 id="duel-lobby-title">Private match</h3></div>
+              <div id="duel-lobby-panel" class="duel-lobby-panel lobby-stage" style="--hero: url('/minigames/duels.webp'); --mode: #ffb454">
+                <header class="lobby-hero">
+                  <div class="lobby-hero-copy">
+                    <div class="lobby-kicker">Private match · Duels</div>
+                    <h3 id="duel-lobby-title">Private match</h3>
+                    <p>Prism Colosseum · 2–4 players · ranked</p>
+                  </div>
                   <div class="duel-ruleline">
                     <span>5 min</span><span>First to 15</span><span>40 HP</span><span>Build 7 high</span><span>3s respawn</span>
                   </div>
+                </header>
+                <div class="duel-invite lobby-invite">
+                  <div class="lobby-invite-label"><b>Invite your friends</b><span>Anyone with this link lands straight in your lobby.</span></div>
+                  <input id="duel-invite" readonly aria-label="Duels invite link" /><button id="duel-copy" class="duel-copy lobby-copy" type="button">Copy invite</button>
                 </div>
-                <div class="duel-invite"><input id="duel-invite" readonly aria-label="Duels invite link" /><button id="duel-copy" class="duel-copy" type="button">Copy invite</button></div>
                 <div class="duel-readybar" aria-hidden="true"><i id="duel-readybar-fill"></i></div>
                 <div id="duel-feedback" class="duel-feedback" role="status" aria-live="polite"></div>
                 <div id="duel-roster" class="duel-roster" aria-live="polite"></div>
                 <div class="duel-controls">
-                  <button id="duel-ready" class="duel-control" type="button">Ready up</button>
-                  <button id="duel-start" class="duel-control" type="button">Start match</button>
-                  <button id="duel-leave" class="duel-control" type="button">Leave lobby</button>
+                  <button id="duel-ready" class="duel-control lobby-ready" type="button">Ready up</button>
+                  <button id="duel-start" class="duel-control lobby-start" type="button">Start match</button>
+                  <button id="duel-leave" class="duel-control lobby-leave" type="button">Leave lobby</button>
                 </div>
                 <div class="duel-arena-brief" aria-label="Prism Colosseum briefing">
                   <div><strong>The Altar</strong><span>The pedestal at dead centre is the highest natural ground. Owning it owns the round.</span></div>
@@ -3356,6 +3539,7 @@
                   <div><strong>Build cover</strong><span>Unlimited planks, seven blocks above ground. The axe takes them back.</span></div>
                 </div>
               </div>
+              <div id="party-lobby-panel" class="duel-lobby-panel lobby-stage" hidden></div>
             </div>
 
             <section id="duel-ranks-view" class="duel-ranks-view arena-view" role="tabpanel" aria-labelledby="duel-ranks-button" hidden>

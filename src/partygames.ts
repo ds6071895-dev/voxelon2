@@ -45,7 +45,8 @@ export const BRIDGE_GOAL_RESET_MS = 3000;
 export const BRIDGE_RESPAWN_SHIELD_MS = 1800;
 export const BRIDGE_MELEE_TIER = { item: Item.IronAxe, damage: 5, cooldownMs: 280, kbBonus: 0.02 } as const;
 export const BRIDGE_KILL_CREDIT_MS = 10_000;
-export const BRIDGE_BOW_COOLDOWN_MS = 360;
+/** One arrow every five seconds: the bow is a finisher, not a spray. */
+export const BRIDGE_BOW_COOLDOWN_MS = 5000;
 export const BRIDGE_ARROW_SPEED = 62;
 export const BRIDGE_ARROW_GRAVITY = 19;
 export const BRIDGE_ARROW_LIFE_MS = 5000;
@@ -545,6 +546,19 @@ export const PARKOUR_PLATFORMS = 56;
  *  fourteen-jump leg is long enough that a fall costs you something and short
  *  enough that it never costs you the match. */
 export const PARKOUR_CHECKPOINT_EVERY = 14;
+/** Rubber band for a runaway lead. A racer this many platforms behind the
+ *  leader saves progress on EVERY pad they land, so a fall costs one jump, not
+ *  a whole leg. Nobody is moved forward for free — every jump is still theirs
+ *  to make — and it switches off the moment the gap closes. */
+export const PARKOUR_CATCHUP_GAP = 8;
+
+/** True while `p` is far enough behind the field to get catch-up checkpoints. */
+export function parkourCatchUp(p: { progress: number }, field: Iterable<{ progress: number; connected: boolean }>): boolean {
+  let lead = 0;
+  for (const o of field) if (o.connected && o.progress > lead) lead = o.progress;
+  return lead - p.progress >= PARKOUR_CATCHUP_GAP;
+}
+
 /** No two platforms are ever closer than this along the lane. */
 const PARKOUR_MIN_STEP = 2;
 
@@ -1229,9 +1243,11 @@ export class PartyGamesEngine {
       Math.abs(pos.x - sub.minX - next.x) < next.width / 2 + .35 &&
       Math.abs(pos.z - sub.minZ - next.z) < next.depth / 2 + .35 &&
       Math.abs(pos.y - next.y) < .35) {
+      // Checked before the step, against the lead as it stood when they jumped.
+      const trailing = parkourCatchUp(p, l.participants.values());
       p.progress++;
       p.score = Math.max(p.score, p.progress);
-      if (next.checkpoint) p.checkpoint = p.progress;
+      if (next.checkpoint || trailing) p.checkpoint = p.progress;
       if (p.progress === course.length - 1) {
         p.finishedAt = now;
         this.endMatch(l, now);

@@ -1,6 +1,6 @@
 import { parkourTheme } from './parkour_themes';
 import {
-  BRIDGE_GOAL_LIMIT, BRIDGE_TEAM_NAME, PARKOUR_PLATFORMS, partyGame,
+  BRIDGE_GOAL_LIMIT, BRIDGE_TEAM_NAME, PARKOUR_PLATFORMS, partyGame, parkourCatchUp,
   type PartyLobbySnapshot, type PartyGameId, type PartyParticipant,
 } from './partygames';
 
@@ -29,6 +29,8 @@ export class PartyUI {
   private bannerUntil = 0;
   onReplay?: () => void;
   onLeave?: () => void;
+  /** Local (performance.now) time the Bridge bow can fire again. */
+  bowReadyAt = 0;
   private lastKill = 0;
   constructor(host: HTMLElement) {
     this.root.append(this.progress, this.score, this.clock, this.standings, this.card, this.banner);
@@ -109,17 +111,42 @@ export class PartyUI {
             ? (s.result.winnerTeam === null ? 'DRAW'
               : `${BRIDGE_TEAM_NAME[s.result.winnerTeam]} ${s.result.winnerTeam === this.myTeam() ? 'WINS — THAT IS YOU' : 'WINS'}`)
             : winner ? (winner.id === me ? 'YOU WIN' : `${winner.username} WINS`) : 'DRAW';
+        const cancelled = s.result.finishReason === 'cancelled';
+        const won = !cancelled && (bridge
+          ? s.result.winnerTeam !== null && s.result.winnerTeam === this.myTeam()
+          : winner?.id === me);
+        const draw = !cancelled && (bridge ? s.result.winnerTeam === null : !winner);
+        const outcome = cancelled || draw ? 'draw' : won ? 'win' : 'lose';
+        this.card.className = `pg-card pg-result ${outcome}`;
+        const accent = bridge && s.result.winnerTeam !== null ? TEAM_CSS[s.result.winnerTeam]
+          : outcome === 'win' ? '#ffd25e' : outcome === 'lose' ? '#ff6d80' : '#9fb4cc';
+        this.card.style.setProperty('--pg-accent', accent);
+        const kicker = el('div', 'pg-result-kicker',
+          cancelled ? 'Match cancelled' : outcome === 'win' ? 'Victory' : outcome === 'lose' ? 'Defeat' : 'Draw');
         const heading = el('div', 'pg-card-title', title);
-        if (bridge && s.result.winnerTeam !== null)
-          heading.style.color = TEAM_CSS[s.result.winnerTeam];
         const me2 = s.participants.find(p => p.id === me);
         const note = bridge
           ? `${s.result.teamScores[0]} — ${s.result.teamScores[1]} · ${BRIDGE_TEAM_NAME[0]} vs ${BRIDGE_TEAM_NAME[1]} · ${me2?.kills ?? 0} kills, ${me2?.deaths ?? 0} deaths. Cross, fight, dive.`
-          : `${s.participants.find(p => p.id === me)?.score ?? 0} / ${PARKOUR_PLATFORMS - 1} platforms · Sprint, jump, race again.`;
-        this.card.replaceChildren(heading, el('p', 'pg-result-note', note));
+          : `${me2?.score ?? 0} / ${PARKOUR_PLATFORMS - 1} platforms · Sprint, jump, race again.`;
+        const board = el('div', 'pg-result-board');
+        this.order(s).forEach((p, i) => {
+          const row = el('div', `pg-card-row${p.id === me ? ' me' : ''}`);
+          const place = el('span', 'pg-card-place', String(i + 1));
+          const name = el('span', 'pg-card-name', p.username);
+          if (bridge) name.style.color = TEAM_CSS[p.team];
+          row.append(place, name, el('span', 'pg-card-points', bridge
+            ? `${p.score} goal${p.score === 1 ? '' : 's'} · ${p.kills}/${p.deaths}`
+            : `${p.score}/${PARKOUR_PLATFORMS - 1} · ${p.falls} falls`));
+          board.append(row);
+        });
+        this.card.replaceChildren(kicker, heading, el('p', 'pg-result-note', note), board);
         const actions = el('div', 'pg-result-actions');
-        for (const [label, action] of [['Play again', () => this.onReplay?.()], ['Back to games', () => this.onLeave?.()]] as const) {
-          const b = el('button', 'minigame-action', label);
+        for (const [label, cls, action] of [
+          ['Play again', 'pg-result-btn primary', () => this.onReplay?.()],
+          ['Back to games', 'pg-result-btn', () => this.onLeave?.()],
+        ] as const) {
+          const b = el('button', cls, label) as HTMLButtonElement;
+          b.type = 'button';
           b.addEventListener('click', action);
           actions.append(b);
         }
@@ -172,12 +199,16 @@ export class PartyUI {
       const secs = Math.max(0, Math.ceil((s.round.endsAt - serverNow) / 1000));
       text = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
       const p = s.participants.find(v => v.id === this.me);
-      if (s.round.game === 'parkour')
+      if (s.round.game === 'parkour') {
         text += ` · CHECKPOINT ${p?.checkpoint ?? 0} · NEXT ${(p?.progress ?? 0) + 1}/${PARKOUR_PLATFORMS - 1} · ${p?.falls ?? 0} FALLS · R TO RETRY`;
+        if (p && p.connected && parkourCatchUp(p, s.participants)) text += ' · CATCH-UP: EVERY PAD SAVES';
+      }
       else if (s.goalResetAt && serverNow < s.goalResetAt)
         text += ` · BACK TO YOUR CAGE · ${Math.max(1, Math.ceil((s.goalResetAt - serverNow) / 1000))}`;
       else
         text += ` · CROSS THE SPAN · DIVE INTO THE ${BRIDGE_TEAM_NAME[1 - (p?.team ?? 0)]} PORTAL`;
+      if (s.round.game === 'bridge')
+        text += localNow < this.bowReadyAt ? ` · BOW ${Math.ceil((this.bowReadyAt - localNow) / 1000)}s` : ' · BOW READY';
     }
     this.clock.textContent = text;
     this.clock.hidden = !text;

@@ -989,6 +989,7 @@ export class RemotePlayers {
     // Replay every avatar at the same instant, INTERP_DELAY behind now. One
     // clock read for the whole loop keeps them consistent with each other.
     const renderTime = netNow() - INTERP_DELAY;
+    this.net.applyRemotePoses(renderTime);
     const fallback = Math.min(1, 14 * dt);
     for (const [id, r] of this.net.remotes) {
       let av = this.avatars.get(id);

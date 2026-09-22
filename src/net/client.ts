@@ -4,7 +4,7 @@
 // callbacks. Fails gracefully to offline mode so the game is fully playable
 // with no server running.
 
-import { TransformBuffer, netNow } from '../interp';
+import { SenderClock, StateTimeline, TransformBuffer, netNow } from '../interp';
 import type { ItemStack } from '../items';
 import type { MachineAct, MachineState, UpgradeAxis } from '../machines';
 import type { EffectKind, TrapFxWhat, TrapKind, TrapState } from '../traps';
@@ -40,6 +40,14 @@ export interface Remote {
   /** Timestamped transform history, replayed INTERP_DELAY behind the local
    *  clock so the avatar moves smoothly instead of easing toward each packet. */
   buf: TransformBuffer;
+  /** Maps this player's relayed sample clock onto ours for `buf`. */
+  clock: SenderClock;
+  /** Receive time of the last snapshot that included this player. */
+  seenAt: number;
+  /** Pose/action history on `buf`'s timeline. The fields below are only set
+   *  from it by `applyRemotePoses`, so they describe the same instant as the
+   *  drawn body rather than running INTERP_DELAY ahead of it. */
+  poses: StateTimeline<RemotePose>;
   health: number;
   dead: boolean;
   gliding: boolean;
@@ -55,6 +63,24 @@ export interface Remote {
   swing: number;
   aiming: boolean;
   reloading: boolean;
+}
+
+/** The part of a Remote that is replayed on the render timeline. */
+export type RemotePose = Pick<Remote,
+  'gliding' | 'boating' | 'seated' | 'sneaking' | 'held' | 'armor' | 'swing' | 'aiming' | 'reloading'>;
+
+function poseOf(s: {
+  gliding?: boolean; boating?: boolean; seated?: boolean; sneaking?: boolean; held?: number;
+  armor?: number[]; swing?: number; aiming?: boolean; reloading?: boolean;
+}, prev?: RemotePose): RemotePose {
+  return {
+    gliding: s.gliding === true, boating: s.boating === true,
+    seated: s.seated === true, sneaking: s.sneaking === true,
+    held: typeof s.held === 'number' ? s.held : 0,
+    armor: Array.isArray(s.armor) ? s.armor : prev?.armor ?? [0, 0, 0, 0],
+    swing: typeof s.swing === 'number' ? s.swing : prev?.swing ?? 0,
+    aiming: s.aiming === true, reloading: s.reloading === true,
+  };
 }
 
 /** Resolve the WebSocket URL. When the page is served by the game server itself
@@ -404,20 +430,43 @@ export class NetClient {
           if (s.id === this.myId) { this.onSelfHealth?.(s.health, s.dead); continue; }
           const r = this.remotes.get(s.id);
           if (r) {
+            r.seenAt = at;
             r.tx = s.x; r.ty = s.y; r.tz = s.z;
             r.tyaw = s.yaw; r.tpitch = s.pitch;
-            r.buf.push({ t: at, x: s.x, y: s.y, z: s.z, yaw: s.yaw, pitch: s.pitch });
+            // Place the sample on its owner's timeline when the server relays
+            // one; older servers fall back to the batch receive time.
+            const pose = poseOf(s, r);
+            if (typeof s.ct === 'number') {
+              const m = r.clock.map(s.ct, at);
+              if (m) {
+                const sample = { t: m.t, x: s.x, y: s.y, z: s.z, yaw: s.yaw, pitch: s.pitch };
+                if (m.restarted) {
+                  r.buf.reset(sample);
+                  r.poses.reset(m.t, pose);
+                } else {
+                  r.buf.push(sample);
+                  r.poses.push(m.t, pose);
+                }
+              } else if (Number.isFinite(r.buf.newest)) {
+                // A re-relay of the last transform: any pose change the server
+                // made on its own (arena entry, dismount) rides the newest sample.
+                r.poses.push(r.buf.newest, pose);
+              }
+            } else {
+              r.buf.push({ t: at, x: s.x, y: s.y, z: s.z, yaw: s.yaw, pitch: s.pitch });
+              r.poses.push(at, pose);
+            }
             r.health = s.health; r.dead = s.dead;
-            r.gliding = s.gliding === true;
-            r.boating = s.boating === true;
-            r.sneaking = s.sneaking === true;
-            r.held = typeof s.held === 'number' ? s.held : 0;
-            if (Array.isArray(s.armor)) r.armor = s.armor;
-            r.swing = typeof s.swing === 'number' ? s.swing : r.swing;
-            r.aiming = s.aiming === true;
-            r.reloading = s.reloading === true;
           }
         }
+        // A snapshot lists every player this client can see. One the server
+        // has left out for a while is gone from our scope, whether or not its
+        // `leave` ever reached us — never keep drawing a frozen body.
+        let pruned = false;
+        for (const [id, r] of this.remotes) {
+          if (at - r.seenAt > STALE_REMOTE_S) { this.remotes.delete(id); pruned = true; }
+        }
+        if (pruned) this.onRoster?.();
         break;
       }
       case 'gamemode': {
@@ -793,6 +842,15 @@ export class NetClient {
   // --- outbound -------------------------------------------------------------
 
   /** Throttled transform send (call every frame with dt). */
+  /** Bring every remote's pose/action fields to `renderTime` — the instant
+   *  the renderer is drawing — so a swing or crouch lands with the body. */
+  applyRemotePoses(renderTime: number): void {
+    for (const r of this.remotes.values()) {
+      const pose = r.poses.at(renderTime);
+      if (pose) Object.assign(r, pose);
+    }
+  }
+
   sendXform(
     dt: number, x: number, y: number, z: number, yaw: number, pitch: number,
     gliding = false, boating = false, sneaking = false, held = 0, armor: number[] = [], swing = 0,
@@ -805,7 +863,8 @@ export class NetClient {
     // Subtract the interval (don't zero) so the long-run rate matches
     // TRANSFORM_HZ; clamp to avoid a burst after a long stall.
     this.xformAcc = Math.min(this.xformAcc - interval, interval);
-    this.raw({ t: 'xform', arenaRevision: this.arenaRevision, x, y, z, yaw, pitch, gliding, boating, seated, sneaking, held, armor,
+    this.raw({ t: 'xform', arenaRevision: this.arenaRevision, x, y, z, yaw, pitch,
+      ct: Math.round(netNow() * 1000), gliding, boating, seated, sneaking, held, armor,
       swing, aiming, reloading }, true);
   }
 
@@ -1068,16 +1127,20 @@ export class NetClient {
   }
 }
 
+/** Seconds a remote may be absent from received snapshots before it is
+ *  dropped (a few snapshot intervals, so one odd tick never flickers it). */
+const STALE_REMOTE_S = 2;
+
 function toRemote(p: PlayerInfo): Remote {
+  const now = netNow();
   const buf = new TransformBuffer();
-  buf.reset({ t: netNow(), x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch });
+  buf.reset({ t: now, x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch });
+  const pose = poseOf(p);
+  const poses = new StateTimeline<RemotePose>();
+  poses.reset(now, pose);
   return {
-    info: p, buf, tx: p.x, ty: p.y, tz: p.z, tyaw: p.yaw, tpitch: p.pitch,
-    health: p.health, dead: p.dead, gliding: p.gliding === true,
-    boating: p.boating === true, seated: p.seated === true, sneaking: p.sneaking === true,
-    held: typeof p.held === 'number' ? p.held : 0,
-    armor: Array.isArray(p.armor) ? p.armor : [0, 0, 0, 0],
-    swing: typeof p.swing === 'number' ? p.swing : 0,
-    aiming: p.aiming === true, reloading: p.reloading === true,
+    info: p, buf, clock: new SenderClock(), seenAt: now, poses,
+    tx: p.x, ty: p.y, tz: p.z, tyaw: p.yaw, tpitch: p.pitch,
+    health: p.health, dead: p.dead, ...pose,
   };
 }

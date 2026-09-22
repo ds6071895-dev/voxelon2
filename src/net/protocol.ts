@@ -22,8 +22,7 @@ import type {
 } from '../partygames';
 import type { DuelFlair, DuelPublicProfile } from '../duels_progression';
 
-/** One entry in a player's notification inbox (notifications_ui.ts). Kinds drive
- *  the icon and the accent, nothing else. */
+/** One piece of faction news, shown to online members as a toast. */
 export type NotificationKind = 'system';
 
 export interface Notification {
@@ -60,7 +59,7 @@ export const FACTION_ROSTER_LIMIT = 40;
 export const FACTION_FACES_LIMIT = 3;
 
 export const SERVER_PORT = 8080;
-export const SNAPSHOT_HZ = 15;     // server -> clients transform broadcasts
+export const SNAPSHOT_HZ = 20;     // server -> clients transform broadcasts (= TRANSFORM_HZ: one fresh sample per relay)
 export const TRANSFORM_HZ = 20;    // client -> server transform sends
 export const WORLD_SEED = 1337;    // fixed shared seed (clients + server)
 export const WORLD_BORDER = 5000;  // square play area side length (centred on origin)
@@ -115,6 +114,10 @@ export interface PlayerSnapshot {
   id: number;
   x: number; y: number; z: number;
   yaw: number; pitch: number;
+  /** The owner's clock (ms) when this transform was sampled, relayed from
+   *  their last `xform`. Receivers interpolate on this timeline rather than on
+   *  packet arrival, so relay/network jitter never becomes speed jitter. */
+  ct?: number;
   health: number;
   dead: boolean;
   gliding?: boolean;
@@ -282,6 +285,8 @@ export type ClientMsg =
    *  a client claiming a full draw it did not wait for gets the draw it did. */
   | { t: 'partyShoot'; dx: number; dy: number; dz: number; power: number }
   | { t: 'xform'; arenaRevision?: number; x: number; y: number; z: number; yaw: number; pitch: number;
+      /** Sender's own monotonic clock (ms) when this transform was sampled. */
+      ct?: number;
       gliding?: boolean; boating?: boolean; seated?: boolean;
       sneaking?: boolean; held?: number; armor?: number[]; swing?: number;
       aiming?: boolean; reloading?: boolean }

@@ -10,6 +10,7 @@
 
 import { Block } from './blocks';
 import { Item } from './items';
+import { INTERP_DELAY } from './interp';
 
 // ── Geometry ───────────────────────────────────────────────────────────────
 
@@ -576,10 +577,13 @@ export const BW_KB_VERT = 0.42;
 export const BW_LOOK_BLEND = 0.30;
 export const BW_MELEE_RANGE = 4.2;
 export const BW_MELEE_FACING_DOT = 0.55;
-/** Lag-compensation window. Deliberately 0.25s, not the 1.2s DUEL_TRACK_WINDOW:
- *  melee has no travel time, so a wider window would let a laggy client hit
- *  someone who has already sprinted four metres clear. */
-export const BW_MELEE_REWIND_S = 0.25;
+/** Lag-compensation window: the attacker sees the target INTERP_DELAY (plus
+ *  one-way latency) in the past, so the swing reaches the server roughly
+ *  INTERP_DELAY + the attacker's RTT after the position it was aimed at. Kept
+ *  tied to INTERP_DELAY with ~150ms of RTT headroom — far short of the 1.2s
+ *  DUEL_TRACK_WINDOW: melee has no travel time, so a wider window would let a
+ *  laggy client hit someone who has already sprinted four metres clear. */
+export const BW_MELEE_REWIND_S = INTERP_DELAY + 0.15;
 
 export interface BwSwingInput {
   tier: BwSwingTier;

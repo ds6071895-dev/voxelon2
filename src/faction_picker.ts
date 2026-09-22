@@ -6,9 +6,8 @@
 //     pose when you point at them (the same board the Duels ladder uses)
 //   · how many have sworn to it, and who they are
 //
-// …but you do not pick. One press of ROLL spins a light across the cards,
-// slowing until it settles on a side at random, and the result is PERMANENT.
-// The winner is drawn before the spin starts; the animation only reveals it.
+// You pick a card, then confirm with the swear button. The result is
+// PERMANENT, so nothing is sent until that second, deliberate press.
 //
 // SELF-CONTAINED: one injected <style>, a `vx-pledge-` prefix used nowhere else,
 // nothing added to index.html. Usernames are written with textContent and never
@@ -34,12 +33,25 @@ const CSS = `
  * nothing under it to press — and why joining looked like something you had to
  * wait for something to unlock. So this states its height outright. */
 .vx-pledge-shell {
+  --side-a: #e23b3b; --side-b: #3b78e2;
   position: relative; display: flex; flex-direction: column; gap: 18px;
   width: min(1120px, 100%); height: min(860px, 100%); padding: 4px;
 }
+/* Each side's colour bleeds in from its own edge, meeting in the middle. */
+.vx-pledge-shell::before {
+  content: ''; position: absolute; inset: -12% -8%; z-index: -1; pointer-events: none;
+  background:
+    radial-gradient(45% 60% at 0% 55%, color-mix(in srgb, var(--side-a) 34%, transparent), transparent 70%),
+    radial-gradient(45% 60% at 100% 55%, color-mix(in srgb, var(--side-b) 34%, transparent), transparent 70%);
+  animation: vx-pledge-breathe 6s ease-in-out infinite alternate;
+}
+@keyframes vx-pledge-breathe { to { opacity: .6; } }
 .vx-pledge-head { text-align: center; }
 .vx-pledge-head h1 {
-  margin: 6px 0 0; font-size: clamp(24px, 4.4vw, 38px); letter-spacing: 3px; text-transform: uppercase;
+  margin: 6px 0 0; font-size: clamp(28px, 5vw, 48px); font-weight: 900; letter-spacing: 4px; text-transform: uppercase;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--side-a) 55%, #fff), #fff 50%, color-mix(in srgb, var(--side-b) 55%, #fff));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  filter: drop-shadow(0 4px 20px rgba(0, 0, 0, .55));
 }
 .vx-pledge-head p {
   margin: 8px auto 0; max-width: 62ch; font-size: 12.5px; line-height: 1.6; color: #9fb0cc;
@@ -49,29 +61,72 @@ const CSS = `
 /* The pan fills the scrollport exactly, so each card is a known height and
    scrolls its own dossier while the spin lights it as a whole. */
 .vx-pledge-cards {
-  display: grid; gap: 18px; grid-template-columns: 1fr 1fr; padding: 2px;
+  display: grid; gap: 18px; grid-template-columns: 1fr 1fr; padding: 6px;
   height: 100%; align-items: stretch;
+}
+.vx-pledge-cards.duo { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 14px; }
+.vx-pledge-vs {
+  align-self: center; display: grid; place-items: center; width: 64px; height: 64px; border-radius: 50%;
+  font: italic 900 20px/1 inherit; letter-spacing: 1px; color: #fff;
+  background: radial-gradient(circle at 50% 35%, #26324a, #0a111c);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, .12), -10px 0 30px color-mix(in srgb, var(--side-a) 45%, transparent),
+    10px 0 30px color-mix(in srgb, var(--side-b) 45%, transparent);
 }
 
 .vx-pledge-card {
-  position: relative; display: flex; flex-direction: column; min-height: 0;
-  border-radius: 16px; overflow: hidden; background: rgba(12, 20, 30, .88);
+  position: relative; display: flex; flex-direction: column; min-height: 0; cursor: pointer;
+  border-radius: 18px; overflow: hidden;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--side) 10%, rgba(12, 20, 30, .92)), rgba(9, 14, 22, .94));
   box-shadow: inset 0 0 0 1px rgba(232, 238, 252, .12), 0 20px 48px rgba(0, 0, 0, .45);
-  transition: box-shadow .18s, transform .18s, opacity .35s, filter .35s;
+  transition: box-shadow .2s, transform .2s cubic-bezier(.2, .9, .25, 1), opacity .3s, filter .3s;
 }
+.vx-pledge-card:focus-visible { outline: 2px solid var(--side); outline-offset: 3px; }
 .vx-pledge-shell[data-phase="idle"] .vx-pledge-card:hover {
-  transform: translateY(-3px);
-  box-shadow: inset 0 0 0 1px var(--side), 0 26px 60px rgba(0, 0, 0, .55);
+  transform: translateY(-4px);
+  box-shadow: inset 0 0 0 1px var(--side), 0 26px 60px rgba(0, 0, 0, .55),
+    0 0 40px color-mix(in srgb, var(--side) 25%, transparent);
 }
+/* The picked side burns; the other steps back. */
+.vx-pledge-card[data-selected="1"] {
+  transform: translateY(-4px) scale(1.015);
+  box-shadow: inset 0 0 0 2px var(--side), 0 0 60px color-mix(in srgb, var(--side) 50%, transparent),
+    0 26px 60px rgba(0, 0, 0, .55);
+}
+.vx-pledge-shell[data-picked="1"][data-phase="idle"] .vx-pledge-card:not([data-selected="1"]) {
+  opacity: .55; filter: saturate(.45);
+}
+.vx-pledge-shell[data-picked="1"][data-phase="idle"] .vx-pledge-card:not([data-selected="1"]):hover { opacity: .85; filter: none; }
 .vx-pledge-crest {
-  flex: none; display: flex; align-items: center; gap: 11px; padding: 15px 18px;
-  background: linear-gradient(180deg, color-mix(in srgb, var(--side) 34%, transparent), transparent);
+  position: relative; flex: none; display: flex; align-items: center; gap: 13px; padding: 18px 20px;
+  background:
+    repeating-linear-gradient(135deg, rgba(255, 255, 255, .045) 0 10px, transparent 10px 20px),
+    linear-gradient(180deg, color-mix(in srgb, var(--side) 45%, transparent), transparent);
 }
 .vx-pledge-crest-mark {
-  display: flex; align-items: center; justify-content: center; width: 34px; height: 34px;
-  border-radius: 10px; font-size: 17px; color: #0b1119; background: var(--side);
+  display: flex; align-items: center; justify-content: center; width: 44px; height: 44px;
+  border-radius: 12px; font-size: 21px; color: #0b1119;
+  background: linear-gradient(150deg, color-mix(in srgb, var(--side) 55%, #fff), var(--side));
+  box-shadow: 0 0 24px color-mix(in srgb, var(--side) 55%, transparent), inset 0 -3px rgba(0, 0, 0, .25);
 }
-.vx-pledge-crest h2 { flex: 1; margin: 0; font-size: 19px; letter-spacing: 2.4px; text-transform: uppercase; }
+.vx-pledge-card[data-selected="1"] .vx-pledge-crest-mark { animation: vx-pledge-pulse 1.6s ease-in-out infinite; }
+@keyframes vx-pledge-pulse { 50% { box-shadow: 0 0 40px color-mix(in srgb, var(--side) 85%, transparent), inset 0 -3px rgba(0, 0, 0, .25); } }
+.vx-pledge-crest h2 {
+  flex: 1; margin: 0; font-size: clamp(20px, 2.6vw, 27px); font-weight: 900; letter-spacing: 3px; text-transform: uppercase;
+  color: #fff; text-shadow: 0 0 24px color-mix(in srgb, var(--side) 70%, transparent) !important;
+}
+/* Per-card pick button, pinned under the dossier. */
+.vx-pledge-pick {
+  flex: none; margin: 0 18px 18px; min-height: 46px; border: 1px solid color-mix(in srgb, var(--side) 55%, transparent);
+  border-radius: 12px; cursor: pointer; color: #fff; background: color-mix(in srgb, var(--side) 16%, transparent);
+  font: 800 11px/1 inherit; letter-spacing: 2px; text-transform: uppercase;
+  transition: background .15s, transform .15s, box-shadow .15s;
+}
+.vx-pledge-pick:hover { background: color-mix(in srgb, var(--side) 30%, transparent); }
+.vx-pledge-card[data-selected="1"] .vx-pledge-pick {
+  color: #0b1119; border-color: transparent;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--side) 50%, #fff), var(--side));
+  box-shadow: 0 10px 28px color-mix(in srgb, var(--side) 45%, transparent);
+}
 .vx-pledge-strength {
   padding: 5px 9px; border-radius: 7px; font: 700 9px/1 inherit;
   letter-spacing: 1.3px; text-transform: uppercase; color: #cfd9ea;
@@ -131,18 +186,14 @@ const CSS = `
   font-size: 11.5px; line-height: 1.5; color: #9fb0cc; text-align: center;
 }
 
-/* THE SPIN. The light that runs across the cards while the roll is live, then
-   the winner's glow and the loser's fade once it settles. */
-.vx-pledge-card[data-lit="1"] {
-  transform: scale(1.025);
-  box-shadow: inset 0 0 0 2px var(--side), 0 0 46px color-mix(in srgb, var(--side) 55%, transparent);
-}
+/* THE PICK. A wash of the side's colour over the chosen card, then the
+   winner's glow and the other side's fade once the oath is sworn. */
 .vx-pledge-card::after {
   content: ''; position: absolute; inset: 0; pointer-events: none; opacity: 0;
   background: radial-gradient(90% 55% at 50% 0%, color-mix(in srgb, var(--side) 38%, transparent), transparent 72%);
-  transition: opacity .12s;
+  transition: opacity .2s;
 }
-.vx-pledge-card[data-lit="1"]::after { opacity: 1; }
+.vx-pledge-card[data-selected="1"]::after, .vx-pledge-card[data-fate="won"]::after { opacity: 1; }
 .vx-pledge-card[data-fate="won"] {
   animation: vx-pledge-win 1.1s cubic-bezier(.2, .9, .3, 1.3) both;
   box-shadow: inset 0 0 0 3px var(--side), 0 0 90px color-mix(in srgb, var(--side) 70%, transparent);
@@ -191,7 +242,11 @@ const CSS = `
 }
 .vx-pledge-roll .vx-gov-btn {
   position: relative; overflow: hidden;
-  width: min(440px, 100%); min-height: 54px; font-size: 13px; letter-spacing: 2.6px;
+  width: min(460px, 100%); min-height: 56px; font-size: 13px; letter-spacing: 2.6px;
+}
+.vx-pledge-roll[data-side] .vx-gov-btn:not(:disabled) {
+  color: #0b1119; background: linear-gradient(135deg, color-mix(in srgb, var(--side) 45%, #fff), var(--side));
+  box-shadow: 0 12px 34px color-mix(in srgb, var(--side) 45%, transparent);
 }
 /* A sheen that sweeps the idle button, so the one thing to press reads as live. */
 .vx-pledge-roll .vx-gov-btn::after {
@@ -199,7 +254,7 @@ const CSS = `
   background: linear-gradient(100deg, transparent, rgba(255, 255, 255, .55), transparent);
   transform: skewX(-18deg); animation: vx-pledge-sheen 2.6s ease-in-out infinite;
 }
-.vx-pledge-roll .vx-gov-btn:disabled { opacity: .7; cursor: default; }
+.vx-pledge-roll .vx-gov-btn:disabled { opacity: .55; cursor: default; }
 .vx-pledge-roll .vx-gov-btn:disabled::after { display: none; }
 @keyframes vx-pledge-sheen { 0%, 55% { left: -40%; } 100% { left: 130%; } }
 .vx-pledge-roll-note { font-size: 11px; line-height: 1.5; text-align: center; color: #ffb4a4; }
@@ -246,6 +301,7 @@ const CSS = `
 }
 @media (prefers-reduced-motion: reduce) {
   .vx-pledge-spark, .vx-pledge-roll .vx-gov-btn::after { display: none; }
+  .vx-pledge-shell::before, .vx-pledge-card[data-selected="1"] .vx-pledge-crest-mark { animation: none; }
   .vx-pledge-card[data-fate="won"], .vx-pledge-banner, .vx-pledge-flash { animation-duration: .01s; }
 }
 .vx-pledge-foot {
@@ -264,7 +320,8 @@ const CSS = `
   /* Stacked, the two cards cannot both fill the screen — the pan goes back to
      scrolling, and each card sizes to its own content with the button at its
      foot rather than a screen away from it. */
-  .vx-pledge-cards { grid-template-columns: 1fr; height: auto; }
+  .vx-pledge-cards, .vx-pledge-cards.duo { grid-template-columns: 1fr; height: auto; }
+  .vx-pledge-vs { justify-self: center; width: 48px; height: 48px; font-size: 16px; }
   .vx-pledge-stage { height: 180px; }
   .vx-pledge-body { overflow-y: visible; }
 }
@@ -285,27 +342,13 @@ export interface PledgeData {
   factions: FactionPublic[];
 }
 
-/** A uniformly random integer in [0, n). */
-function randomIndex(n: number): number {
-  try {
-    return crypto.getRandomValues(new Uint32Array(1))[0] % n;
-  } catch {
-    return Math.floor(Math.random() * n);
-  }
-}
-
-/** The fast first beat of the spin and the extra wait on its last one, in ms. */
-const SPIN_FAST_MS = 55;
-const SPIN_SLOW_MS = 540;
-/** Full passes over the cards before the spin may start to settle. */
-const SPIN_MIN_STEPS = 24;
 /** How long the reveal holds before the pledge is sent. */
 const REVEAL_MS = 2400;
 /** If the screen is still up this long after sending (the server said no),
  *  put the roll back so the player is never stuck behind a dead screen. */
 const PLEDGE_RETRY_MS = 8000;
 
-type Phase = 'idle' | 'rolling' | 'landed';
+type Phase = 'idle' | 'landed';
 
 /** One person drawn on a card's stage. */
 interface Face {
@@ -354,16 +397,19 @@ export class FactionPicker {
   private isOpen = false;
   private data: PledgeData | null = null;
   private phase: Phase = 'idle';
+  /** The side the player has picked but not yet sworn to. */
+  private selected: number | null = null;
+  private readonly rollWrap: HTMLElement;
   private timer: number | undefined;
-  /** This render's cards by faction id, for the spin to light without a rebuild. */
+  /** This render's cards by faction id, to mark the pick without a rebuild. */
   private cardEls = new Map<number, HTMLElement>();
   /** This render's busts, so the losing side's can be cleared on landing. */
   private busts: BustEntry[] = [];
 
   onPledge?: (faction: number) => void;
-  /** Each beat of the spin; `progress` runs 0 → 1 as it slows. */
+  /** A side was picked (not yet sworn); `progress` is kept for the UI tick sound. */
   onTick?: (progress: number) => void;
-  /** The spin settled on a side. */
+  /** The player swore to a side. */
   onLand?: (faction: number) => void;
   onOpen?: () => void;
   onClose?: () => void;
@@ -396,8 +442,8 @@ export class FactionPicker {
     title.textContent = 'Choose your side';
     const lede = document.createElement('p');
     lede.innerHTML =
-      'Fate picks the side you will fight for in every war, flag raid and season. '
-      + '<b>You can never switch.</b> Look them over, then roll.';
+      'Pick the side you will fight for in every war, flag raid and season. '
+      + '<b>You can never switch.</b> Look them over, then swear.';
     head.append(eyebrow, title, lede);
 
     // The card pan scrolls INSIDE a positioned viewport, and the bust canvas is
@@ -429,15 +475,16 @@ export class FactionPicker {
     foot.append(footText, back);
 
     const roll = document.createElement('div');
+    this.rollWrap = roll;
     roll.className = 'vx-pledge-roll';
     this.rollButton = document.createElement('button');
     this.rollButton.type = 'button';
     this.rollButton.className = 'vx-gov-btn';
     this.rollButton.dataset.kind = 'primary';
-    this.rollButton.addEventListener('click', () => this.roll());
+    this.rollButton.addEventListener('click', () => this.swear());
     const note = document.createElement('div');
     note.className = 'vx-pledge-roll-note';
-    note.textContent = 'Your side is chosen at random and is permanent on this account.';
+    note.textContent = 'Your choice is permanent on this account.';
     roll.append(this.rollButton, note);
 
     this.reveal = document.createElement('div');
@@ -484,6 +531,7 @@ export class FactionPicker {
   private reset(): void {
     if (this.timer !== undefined) clearTimeout(this.timer);
     this.timer = undefined;
+    this.selected = null;
     this.setPhase('idle');
     delete this.reveal.dataset.show;
     this.reveal.replaceChildren();
@@ -493,54 +541,49 @@ export class FactionPicker {
     this.phase = phase;
     this.shell.dataset.phase = phase;
     this.back.disabled = phase !== 'idle';
-    this.rollButton.disabled = phase !== 'idle';
-    this.rollButton.textContent = phase === 'idle' ? 'Roll for my side'
-      : phase === 'rolling' ? 'Rolling…' : 'Fate has spoken';
+    this.refreshPick();
   }
 
-  /** Draw the side first, then spin a light over the cards that slows and
-   *  stops exactly on it. */
-  private roll(): void {
-    if (this.phase !== 'idle' || !this.isOpen) return;
-    const ids = FACTIONS.map((f) => f.id);
-    const n = ids.length;
-    const winner = ids[randomIndex(n)];
-    const target = ids.indexOf(winner);
-    let at = randomIndex(n);
-    // Enough beats to feel like a spin, and exactly the number that ends on
-    // the winner: (start + steps) % n === target.
-    const steps = SPIN_MIN_STEPS + ((((target - at - SPIN_MIN_STEPS) % n) + n) % n);
-    this.setPhase('rolling');
-
-    const beat = (left: number): void => {
-      at = (at + 1) % n;
-      this.light(ids[at]);
-      const progress = 1 - (left - 1) / steps;
-      this.onTick?.(progress);
-      if (left === 1) {
-        this.timer = window.setTimeout(() => this.land(winner), SPIN_SLOW_MS);
-        return;
-      }
-      // Ease out: quick at first, then each beat lingers longer.
-      const delay = SPIN_FAST_MS + SPIN_SLOW_MS * progress ** 3;
-      this.timer = window.setTimeout(() => beat(left - 1), delay);
-    };
-    beat(steps);
-  }
-
-  private light(faction: number): void {
+  /** Reflect the current pick on the cards and the swear button. */
+  private refreshPick(): void {
+    const pick = this.selected;
+    if (pick === null) delete this.shell.dataset.picked; else this.shell.dataset.picked = '1';
     for (const [id, card] of this.cardEls) {
-      if (id === faction) card.dataset.lit = '1';
-      else delete card.dataset.lit;
+      const on = id === pick;
+      if (on) card.dataset.selected = '1'; else delete card.dataset.selected;
+      card.setAttribute('aria-checked', String(on));
+      const btn = card.querySelector<HTMLButtonElement>('.vx-pledge-pick');
+      if (btn) btn.textContent = on ? 'Selected' : `Choose ${factionName(id)}`;
     }
+    if (pick === null) {
+      delete this.rollWrap.dataset.side;
+      this.rollWrap.style.removeProperty('--side');
+    } else {
+      this.rollWrap.dataset.side = String(pick);
+      this.rollWrap.style.setProperty('--side', `#${factionColor(pick).toString(16).padStart(6, '0')}`);
+    }
+    this.rollButton.disabled = this.phase !== 'idle' || pick === null;
+    this.rollButton.textContent = this.phase === 'landed' ? 'Sworn'
+      : pick === null ? 'Pick a side' : `Swear allegiance to ${factionName(pick)}`;
+  }
+
+  private select(faction: number): void {
+    if (this.phase !== 'idle' || !this.isOpen || this.selected === faction) return;
+    this.selected = faction;
+    this.onTick?.(0.5);
+    this.refreshPick();
+  }
+
+  /** The second, deliberate press: commit to the picked side. */
+  private swear(): void {
+    if (this.phase !== 'idle' || !this.isOpen || this.selected === null) return;
+    this.land(this.selected);
   }
 
   private land(winner: number): void {
     this.setPhase('landed');
     for (const [id, card] of this.cardEls) {
       card.dataset.fate = id === winner ? 'won' : 'lost';
-      if (id === winner) card.dataset.lit = '1';
-      else delete card.dataset.lit;
     }
     // Only the winning side keeps its figures standing.
     const keep = `pledge:${winner}:`;
@@ -566,7 +609,7 @@ export class FactionPicker {
     const banner = document.createElement('div');
     banner.className = 'vx-pledge-banner';
     const eyebrow = document.createElement('small');
-    eyebrow.textContent = 'Fate has chosen';
+    eyebrow.textContent = 'You have sworn to';
     const name = document.createElement('strong');
     name.textContent = factionName(winner);
     banner.append(eyebrow, name);
@@ -592,6 +635,8 @@ export class FactionPicker {
     const data = this.data;
     if (!data) return;
     const busts: BustEntry[] = [];
+    this.cards.setAttribute('role', 'radiogroup');
+    this.cards.setAttribute('aria-label', 'Factions');
     this.busts = busts;
     this.cardEls.clear();
     this.cards.replaceChildren();
@@ -599,6 +644,10 @@ export class FactionPicker {
     // Never the wire's list directly — see dossiersFor. Both sides get a card
     // whether or not anyone has joined either of them.
     const dossiers = dossiersFor(data.factions);
+    const hex = (id: number) => `#${factionColor(id).toString(16).padStart(6, '0')}`;
+    if (dossiers[0]) this.shell.style.setProperty('--side-a', hex(dossiers[0].faction));
+    if (dossiers[1]) this.shell.style.setProperty('--side-b', hex(dossiers[1].faction));
+    this.cards.classList.toggle('duo', dossiers.length === 2);
     const total = dossiers.reduce((n, f) => n + f.memberCount, 0);
     // Only tell the player to point at somebody when somebody is standing there.
     this.footText.textContent = dossiers.some((f) => f.faces?.length)
@@ -608,8 +657,16 @@ export class FactionPicker {
     dossiers.forEach((info, index) => {
       const card = document.createElement('div');
       card.className = 'vx-pledge-card';
-      const side = `#${factionColor(info.faction).toString(16).padStart(6, '0')}`;
-      card.style.setProperty('--side', side);
+      card.style.setProperty('--side', hex(info.faction));
+      card.setAttribute('role', 'radio');
+      card.setAttribute('aria-label', factionName(info.faction));
+      card.tabIndex = 0;
+      card.addEventListener('click', () => this.select(info.faction));
+      card.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        this.select(info.faction);
+      });
       this.cardEls.set(info.faction, card);
 
       // --- crest -------------------------------------------------------------
@@ -744,9 +801,21 @@ export class FactionPicker {
       }
       body.appendChild(roster);
 
-      card.append(crest, stage, body);
+      const pick = document.createElement('button');
+      pick.type = 'button';
+      pick.className = 'vx-pledge-pick';
+      pick.tabIndex = -1; // the card itself is the focus stop
+      card.append(crest, stage, body, pick);
+      if (index === 1 && dossiers.length === 2) {
+        const vs = document.createElement('div');
+        vs.className = 'vx-pledge-vs';
+        vs.setAttribute('aria-hidden', 'true');
+        vs.textContent = 'VS';
+        this.cards.appendChild(vs);
+      }
       this.cards.appendChild(card);
     });
+    this.refreshPick();
 
     // Roster last: the slots have to be in the DOM before the board measures them.
     bustStage.setRoster(busts);

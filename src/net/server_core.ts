@@ -905,6 +905,11 @@ export class GameServer {
     if (!duelLeave.snapshot || (duelLeave.snapshot.phase !== 'running' &&
         duelLeave.snapshot.phase !== 'sudden_death')) this.duelProgress.delete(id);
     out.push({ to: 'others', from: id, msg: { t: 'leave', id } });
+    // 'others' only reaches the open world. Anyone still inside an arena was
+    // looking at this player too (a closed tab mid-duel), so tell them directly.
+    for (const other of this.players.values()) {
+      if (other.arenaSaved) out.push({ to: other.id, msg: { t: 'leave', id } });
+    }
     if (dropped) out.push(...this.flagBroadcast('returned', dropped.flag, p.username));
     return out;
   }
@@ -996,6 +1001,10 @@ export class GameServer {
   handle(id: number, msg: ClientMsg): Outbound[] {
     const p = this.players.get(id);
     if (!p) return [];
+    // Relay the sender's sample clock with whatever position this packet
+    // resolves to, on every route (world, duel, party), so other clients can
+    // play the motion back at the pace it was actually walked.
+    if (msg.t === 'xform' && typeof msg.ct === 'number' && Number.isFinite(msg.ct)) p.ct = Math.floor(msg.ct);
     if (['duelCreate', 'duelJoin', 'duelQueue', 'partyCreate', 'partyJoin', 'partyQueue'].includes(msg.t)) {
       const entering = !('join' in msg) || msg.join === true;
       const wantsDuel = msg.t.startsWith('duel');
@@ -1948,7 +1957,15 @@ export class GameServer {
       const p = this.players.get(id);
       if (!p) continue;
       for (const other of this.players.values()) {
-        if (other.id === id || other.arenaSaved) continue;
+        if (other.id === id) continue;
+        if (other.arenaSaved) {
+          // Still in a match: each side must forget the other, or the arena
+          // keeps a frozen body where the leaver last stood (and the leaver
+          // carries the arena's bodies back into the world).
+          out.push({ to: id, msg: { t: 'leave', id: other.id } });
+          out.push({ to: other.id, msg: { t: 'leave', id } });
+          continue;
+        }
         out.push({ to: id, msg: { t: 'join', player: toInfo(other) } });
         if (!restored.has(other.id)) out.push({ to: other.id, msg: { t: 'join', player: toInfo(p) } });
       }
@@ -5591,7 +5608,7 @@ export class GameServer {
         return !pInArena;
       })
       .map((p) => ({
-        id: p.id, x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
+        id: p.id, x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch, ct: p.ct,
         health: p.health,
         // A respawn spectator is invisible to opponents, while their own
         // client stays technically alive to bypass the normal death screen.

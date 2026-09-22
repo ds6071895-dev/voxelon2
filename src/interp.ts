@@ -20,10 +20,11 @@
 // Pure module: no DOM, no THREE, no network types — so the smoke tests can
 // drive it directly.
 
-/** Seconds behind the local clock that remote avatars are rendered. Must be
- *  comfortably longer than one snapshot interval (1/15s = 67ms) so an ordinary
- *  late packet still lands before it is needed. */
-export const INTERP_DELAY = 0.1;
+/** Seconds behind the local clock that remote avatars are rendered. Samples
+ *  are placed on the SENDER's timeline (see SenderClock), so this has to cover
+ *  one client send interval (1/20s) plus the server's relay hold (up to one
+ *  1/20s snapshot tick) plus ordinary network jitter. */
+export const INTERP_DELAY = 0.13;
 /** How far past the newest sample we will extrapolate before freezing. Covers a
  *  dropped packet or two without letting a disconnected player slide away. */
 export const EXTRAPOLATE_MAX = 0.15;
@@ -154,6 +155,111 @@ export class TransformBuffer {
       };
     }
     return { ...first, t: renderTime };
+  }
+}
+
+/**
+ * Maps one remote player's sample clock onto ours.
+ *
+ * Stamping samples with their ARRIVAL time turns every bit of delivery
+ * unevenness into speed changes: the server's relay tick is not phase-locked
+ * to any client's send tick, and the network adds its own jitter on top, so
+ * arrival spacing never matches the spacing of the movement it carries. The owner's own clock
+ * (relayed as `ct`) is perfectly even, so we play motion back on that timeline.
+ *
+ * The offset (local − sender) tracks the FASTEST delivery over the last
+ * CLOCK_WINDOW seconds: a sliding-window minimum, which stays put under steady
+ * jitter (the fast packets keep re-confirming it) yet still lets go of an old
+ * minimum once latency lasts longer. The applied offset slews toward it at a
+ * bounded rate, so playback never jumps backwards in time. That slew is baked
+ * into the spacing of the samples, i.e. it IS a playback-speed change, so it is
+ * kept small: at most a few percent, never a visible surge.
+ */
+export class SenderClock {
+  /** Candidate minima as (local time, offset), offsets strictly increasing. */
+  private readonly window: { at: number; o: number }[] = [];
+  private applied = NaN;
+  private lastLocal = 0;
+  private lastSender = -Infinity;
+
+  private get target(): number { return this.window.length ? this.window[0].o : NaN; }
+
+  /**
+   * Local time for a sample stamped `senderMs` that arrived at `localNow`, or
+   * null for a stale/duplicate stamp (the server re-relays the last transform
+   * when no new one came in). `restarted` is true when the sender's clock
+   * jumped (reload, reconnect) and the caller should reset its history.
+   */
+  map(senderMs: number, localNow: number): { t: number; restarted: boolean } | null {
+    const sender = senderMs / 1000;
+    const o = localNow - sender;
+    let restarted = false;
+    if (!Number.isFinite(this.applied) || Math.abs(o - this.target) > 1 || sender < this.lastSender - 1) {
+      restarted = Number.isFinite(this.lastSender);
+      this.window.length = 0;
+      this.window.push({ at: localNow, o });
+      this.applied = o;
+    } else {
+      if (sender <= this.lastSender) return null;
+      // Monotonic deque: anything slower than the newcomer can never be the
+      // minimum again; anything older than the window has expired.
+      while (this.window.length && this.window[this.window.length - 1].o >= o) this.window.pop();
+      this.window.push({ at: localNow, o });
+      while (this.window.length > 1 && localNow - this.window[0].at > CLOCK_WINDOW) this.window.shift();
+      const elapsed = Math.max(0, localNow - this.lastLocal);
+      const gap = this.target - this.applied;
+      // Falling behind (latency rose) risks running dry, so it is corrected a
+      // little faster than surplus buffer is given back.
+      const step = elapsed * (gap > 0 ? CLOCK_SLEW_UP : CLOCK_SLEW_DOWN);
+      this.applied += Math.max(-step, Math.min(step, gap));
+    }
+    this.lastLocal = localNow;
+    this.lastSender = sender;
+    return { t: sender + this.applied, restarted };
+  }
+}
+
+/** Seconds of arrivals the SenderClock minimum is taken over. */
+const CLOCK_WINDOW = 2;
+/** Max playback-rate change while re-syncing the SenderClock (fractions). */
+const CLOCK_SLEW_UP = 0.05;
+const CLOCK_SLEW_DOWN = 0.02;
+
+/**
+ * Discrete state (pose flags, held item, swing counter) on the same timeline as
+ * a TransformBuffer. Applying it on ARRIVAL would run it INTERP_DELAY ahead of
+ * the body it belongs to: a player would crouch, draw a bow or swing before
+ * reaching the spot where they actually did it. `at(renderTime)` returns the
+ * state that was current at the instant being drawn.
+ */
+export class StateTimeline<T> {
+  private readonly entries: { t: number; v: T }[] = [];
+
+  /** Drop all history and restart with this state (join, clock restart). */
+  reset(t: number, v: T): void {
+    this.entries.length = 0;
+    this.entries.push({ t, v });
+  }
+
+  /** Record the state current from `t` on. A same-time push replaces; an older
+   *  one is ignored, so the timeline only ever moves forward. */
+  push(t: number, v: T): void {
+    if (!Number.isFinite(t)) return;
+    const last = this.entries[this.entries.length - 1];
+    if (last && t < last.t) return;
+    if (last && t === last.t) { last.v = v; return; }
+    this.entries.push({ t, v });
+    // Bounded even if nobody is sampling (avatar not rendered this session).
+    if (this.entries.length > 64) this.entries.splice(0, this.entries.length - 64);
+  }
+
+  /** The newest state stamped at or before `renderTime` (the oldest one before
+   *  history begins), or undefined when empty. Earlier entries are retired. */
+  at(renderTime: number): T | undefined {
+    let i = 0;
+    while (i + 1 < this.entries.length && this.entries[i + 1].t <= renderTime) i++;
+    if (i > 0) this.entries.splice(0, i);
+    return this.entries[0]?.v;
   }
 }
 
