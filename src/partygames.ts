@@ -8,7 +8,14 @@
 import { Block } from './blocks';
 import { Item } from './items';
 import { bedwarsSwing, type BwSwingInput, type BwSwingResult } from './bedwars';
-import { parkourTheme, PARKOUR_THEMES } from './parkour_themes';
+import { PARKOUR_THEMES } from './parkour_themes';
+import {
+  PARKOUR_MODES, PARKOUR_MODE_LAYOUTS, encodeParkourSeed, parkourCourse,
+  type ParkourLayout, type ParkourMode,
+} from './parkour_course';
+import {
+  COLLAPSE_LIVES, COLLAPSE_RESPAWN_LEAD, parkourCollapseFront, parkourVoidY,
+} from './parkour_mechanics';
 
 export const PARTY_BASE_X = 262144;
 export const PARTY_SLOT_SPACING = 1024;
@@ -531,21 +538,17 @@ export function bridgeGoalGuard(lx: number, lz: number): boolean {
 }
 
 // ── Parkour ────────────────────────────────────────────────────────────────
-// One straight lane running the length of the venue. Every platform advances
-// in +z; only the jump SHAPE varies, so the route always reads as a single
-// line you can see to the end of, never a knot of blocks.
+// The course itself — mode, layout, deck, and every pad — is generated in
+// parkour_course.ts; its moving parts live in parkour_mechanics.ts. This file
+// only stamps it into the venue and keeps score.
+
+export {
+  parkourCourse, parkourNext, parkourLength, parkourVariant,
+  type ParkourCourse, type ParkourPlatform, type ParkourJump, type ParkourMode,
+} from './parkour_course';
 
 export const PARKOUR_SIZE_X = 32;
 export const PARKOUR_SIZE_Z = 448;
-/** Centre of the lane. Platforms stray at most three blocks either side. */
-export const PARKOUR_LANE_X = 16;
-export const PARKOUR_PLATFORMS = 56;
-/** Saved progress every this many platforms (and always the last one).
- *  Deliberately sparse: a checkpoint on every other pad turns a course into a
- *  sequence of independent single jumps, and the run stops being a run. A
- *  fourteen-jump leg is long enough that a fall costs you something and short
- *  enough that it never costs you the match. */
-export const PARKOUR_CHECKPOINT_EVERY = 14;
 /** Rubber band for a runaway lead. A racer this many platforms behind the
  *  leader saves progress on EVERY pad they land, so a fall costs one jump, not
  *  a whole leg. Nobody is moved forward for free — every jump is still theirs
@@ -559,233 +562,14 @@ export function parkourCatchUp(p: { progress: number }, field: Iterable<{ progre
   return lead - p.progress >= PARKOUR_CATCHUP_GAP;
 }
 
-/** No two platforms are ever closer than this along the lane. */
-const PARKOUR_MIN_STEP = 2;
-
-export type ParkourJump =
-  | 'pad' | 'wide' | 'pillar' | 'beam' | 'rail' | 'step' | 'drop' | 'hurdle' | 'gate' | 'stones'
-  // Obstacle pads: the jump that REACHES them is an ordinary jump; what makes
-  // them hard is getting across the pad itself to the take-off lip.
-  | 'wall' | 'slalom' | 'tunnel' | 'pit' | 'teeth';
-
-export interface ParkourPlatform extends PartyVec3 {
-  /** Landing footprint, in blocks. `width` spans x, `depth` spans z. */
-  width: number;
-  depth: number;
-  checkpoint: boolean;
-  kind: ParkourJump;
-}
-
-/** Landing footprint of each jump shape. Variety lives here, not in the route:
- *  the lane always runs straight, only what you land on changes. */
-interface ParkourShape {
-  width: number;
-  depth: number;
-  /** Depth still usable for the NEXT take-off. Lower than `depth` when the
-   *  platform carries an obstacle you have to launch from behind. */
-  exit?: number;
-}
-const PARKOUR_SHAPES: Record<ParkourJump, ParkourShape> = {
-  wide: { width: 5, depth: 5 },
-  pad: { width: 3, depth: 3 },
-  step: { width: 3, depth: 3 },
-  drop: { width: 3, depth: 3 },
-  gate: { width: 3, depth: 3 },
-  hurdle: { width: 3, depth: 5 },
-  rail: { width: 3, depth: 1 },
-  beam: { width: 1, depth: 5 },
-  pillar: { width: 1, depth: 1 },
-  stones: { width: 1, depth: 1 },
-  // Obstacle pads are seven deep on purpose: two rows to land on in front of
-  // the obstacle, the obstacle itself, and four rows of run-up behind it. The
-  // depth is what pays for the obstacle — it never shortens the take-off lip,
-  // so `parkourSpan` still measures the jump from the far edge and no seed can
-  // produce a jump the physics smoke cannot land.
-  wall: { width: 5, depth: 7 },
-  slalom: { width: 5, depth: 7 },
-  tunnel: { width: 3, depth: 7 },
-  pit: { width: 3, depth: 7 },
-  teeth: { width: 5, depth: 7 },
-};
-
-/** Horizontal distance a sprint jump covers while it is at or above `rise`.
- *  From the shared player physics (jump apex 1.25 blocks, sprint 5.612 m/s,
- *  gravity 32): about 3.1 blocks flat, 2.3 up a block, more on the way down.
- *  Held a shade under the true numbers so no seed is ever a coin flip. */
-function parkourTravel(rise: number): number {
-  return rise >= 1 ? 2.2 : rise === 0 ? 3.0 : rise === -1 ? 3.6 : 4.0;
-}
-
-/** Furthest the centres of two consecutive platforms may sit apart. The pads
- *  themselves buy reach: you take off from the front edge of one and land on
- *  the near edge of the next, so bigger pads legitimately allow longer jumps
- *  and a one-block stepping stone forces a short one. */
-function parkourSpan(from: ParkourShape, to: ParkourShape, rise: number): number {
-  return Math.max(2.5, parkourTravel(rise) + (from.exit ?? from.depth) / 2 + to.depth / 2 - .6);
-}
-
-const courseCache = new Map<number, ParkourPlatform[]>();
-
-/** The 42-jump lane for a seed. Deterministic and shared by client, server and
- *  smoke tests, so nobody disagrees about where the next pad is. */
-export function parkourCourse(seed: number): readonly ParkourPlatform[] {
-  const cached = courseCache.get(seed);
-  if (cached) return cached;
-  const course: ParkourPlatform[] = [];
-  // Shapes come from a bag rather than a raw modulo so a course cannot end up
-  // being nine stepping stones in a row.
-  const bag: ParkourJump[] = [
-    'pad', 'pillar', 'beam', 'step', 'drop', 'hurdle', 'rail', 'gate', 'stones',
-    'wall', 'tunnel', 'slalom', 'pit', 'teeth', 'wall', 'tunnel',
-    'pad', 'step', 'pit', 'drop', 'teeth', 'pad',
-  ];
-  let x = PARKOUR_LANE_X, z = 8, height = 0;
-  let from = PARKOUR_SHAPES.wide;
-  for (let i = 0; i < PARKOUR_PLATFORMS; i++) {
-    const h = partyHash(seed, i);
-    const checkpoint = i % PARKOUR_CHECKPOINT_EVERY === 0 || i === PARKOUR_PLATFORMS - 1;
-    const kind: ParkourJump = checkpoint ? 'wide' : bag[h % bag.length];
-    const shape = PARKOUR_SHAPES[kind];
-    let rise = 0;
-    if (i > 0) {
-      rise = kind === 'step' ? 1 : kind === 'drop' ? -2 : (h >>> 3) % 5 === 0 ? -1 : 0;
-      // Stay inside the venue's headroom and never below the start height.
-      // Flattening is the only correction: turning a drop into a climb would
-      // hand the player a two-block rise nobody can jump.
-      if (height + rise < 0) rise = 0;
-      if (height + rise > 8) rise = -1;
-    }
-    const span = parkourSpan(from, shape, rise);
-    // Drift keeps the line readable: at most three blocks either side of the
-    // lane, and only one when either end of the jump is a single block wide.
-    // It is also capped by the jump budget, since every block sideways is a
-    // block of forward reach spent.
-    const room = Math.floor(Math.sqrt(Math.max(0, span * span - PARKOUR_MIN_STEP * PARKOUR_MIN_STEP)));
-    const limit = Math.min(room, Math.min(from.width, shape.width) >= 3 ? 3 : 1);
-    const drift = i === 0 ? 0 : Math.max(-limit, Math.min(limit, [0, 0, 1, -1, 2, -2, 3, -3][(h >>> 8) % 8]));
-    const nx = Math.max(PARKOUR_LANE_X - 4, Math.min(PARKOUR_LANE_X + 4, x + drift));
-    const dx = nx - x;
-    // Whatever the drift spends of the jump budget comes out of the forward
-    // distance, so a sideways jump is a shorter jump, never a longer one.
-    const dz = i === 0 ? 0
-      : Math.max(PARKOUR_MIN_STEP, Math.floor(Math.sqrt(Math.max(0, span * span - dx * dx))));
-    x = nx; z += dz; height += rise;
-    course.push({
-      x: x + .5, z: z + .5, y: PARTY_FLOOR_Y + height + 1,
-      width: shape.width, depth: shape.depth, checkpoint, kind,
-    });
-    from = shape;
-  }
-  if (courseCache.size > 128) courseCache.delete(courseCache.keys().next().value!);
-  courseCache.set(seed, course);
-  return course;
-}
-
 const parkourStampCache = new Map<number, VenueStamp>();
 function parkourStamp(seed: number): VenueStamp {
   const cached = parkourStampCache.get(seed);
   if (cached) return cached;
   const s = new VenueStamp(PARKOUR_SIZE_X, PARKOUR_SIZE_Z);
-  const theme = parkourTheme(seed);
-  const course = parkourCourse(seed);
-  course.forEach((p, i) => {
-    const pad = p.checkpoint ? Block.GildedVaultBrick : theme.platforms[partyHash(seed, i) % theme.platforms.length];
-    const x0 = Math.floor(p.x - p.width / 2), z0 = Math.floor(p.z - p.depth / 2);
-    const y = p.y - 1;
-    s.fill(x0, x0 + p.width - 1, y, y, z0, z0 + p.depth - 1, pad);
-    if (p.checkpoint) {
-      // A lit rim you can pick out from six jumps back.
-      for (let dz = 0; dz < p.depth; dz++)
-        for (let dx = 0; dx < p.width; dx++)
-          if (dx === 0 || dz === 0 || dx === p.width - 1 || dz === p.depth - 1)
-            s.set(x0 + dx, y, z0 + dz, Block.RuneGlass);
-      // The two lit posts sit halfway down the SIDES: the landing edge and the
-      // take-off lip both stay completely clear, so a drifting jump can never
-      // be stopped by the marker for the pad it was aimed at.
-      for (const cx of [x0, x0 + p.width - 1]) {
-        s.fill(cx, cx, y + 1, y + 2, z0 + (p.depth >> 1), z0 + (p.depth >> 1), theme.platforms[0]);
-        s.set(cx, y + 3, z0 + (p.depth >> 1), Block.RuneGlass);
-      }
-    }
-    // The obstacle is stamped ON the landing pad, so the jump that reaches it
-    // is unchanged and the thing you have to clear is the next problem.
-    if (p.kind === 'hurdle') {
-      // A bar across the middle of a long pad. You land in front of it, hop it
-      // standing, and take off from the far half — so it costs a beat without
-      // ever getting into the flight path of the jump that reaches the pad.
-      s.fill(x0, x0 + p.width - 1, y + 1, y + 1, z0 + 2, z0 + 2, Block.PrismBrick);
-    }
-    if (p.kind === 'gate') {
-      // The arch straddles the far edge only, so it is something you run
-      // through rather than something in the flight path of the jump.
-      const gz = z0 + p.depth - 1;
-      for (const jx of [x0 - 1, x0 + p.width]) {
-        s.fill(jx, jx, y + 1, y + 3, gz, gz, theme.platforms[1]);
-        s.set(jx, y + 3, gz, Block.RuneGlass);
-      }
-      s.fill(x0 - 1, x0 + p.width, y + 4, y + 4, gz, gz, Block.OpalBrick);
-    }
-    if (p.kind === 'stones') {
-      // A stepping stone gets a lamp under it — a 1x1 block is hard to read
-      // against the sky otherwise.
-      s.set(x0, y - 2, z0, Block.RuneGlass);
-      s.set(x0, y - 1, z0, theme.platforms[2]);
-    }
-    if (p.kind === 'pillar') s.fill(x0, x0, y - 3, y - 1, z0, z0, theme.platforms[2]);
-    if (p.kind === 'beam') s.fill(x0, x0, y - 1, y - 1, z0, z0 + p.depth - 1, theme.platforms[1]);
-    if (p.kind === 'wall') {
-      // A wall across the pad with ONE doorway, two blocks tall so it cannot
-      // be jumped. It sits two rows in: you land in front of it at speed, then
-      // have to find the gap before you can start the next run-up.
-      const wz = z0 + 2, door = x0 + 1 + partyHash(seed, i + 0x117) % (p.width - 2);
-      for (let dx = 0; dx < p.width; dx++)
-        for (let dy = 1; dy <= 2; dy++)
-          if (x0 + dx !== door) s.set(x0 + dx, y + dy, wz, theme.platforms[1]);
-      // A lit lintel over the gap, so the way through reads from a jump back.
-      s.set(door, y + 3, wz, Block.RuneGlass);
-    }
-    if (p.kind === 'slalom') {
-      // Two staggered half-walls. Neither can be jumped and neither can be
-      // walked straight past: the pad has to be crossed diagonally, twice.
-      for (const [wz, from, to] of [[z0 + 2, 0, p.width - 3], [z0 + 4, 2, p.width - 1]])
-        for (let dx = from; dx <= to; dx++)
-          s.fill(x0 + dx, x0 + dx, y + 1, y + 2, wz, wz, theme.platforms[dx % 2]);
-    }
-    if (p.kind === 'tunnel') {
-      // A covered corridor: two blocks of headroom, so it has to be RUN, not
-      // jumped, and the run-up for the next jump starts on the far side of it.
-      for (let dz = 2; dz <= 4; dz++) {
-        for (const jx of [x0 - 1, x0 + p.width])
-          s.fill(jx, jx, y + 1, y + 3, z0 + dz, z0 + dz, theme.platforms[1]);
-        s.fill(x0 - 1, x0 + p.width, y + 3, y + 3, z0 + dz, z0 + dz,
-          dz === 3 ? Block.RuneGlass : Block.OpalBrick);
-      }
-    }
-    if (p.kind === 'pit') {
-      // A hole straight through the middle of the landing pad. Overshoot the
-      // jump that reaches this pad and you go through it.
-      s.carve(x0, x0 + p.width - 1, y, y, z0 + 3, z0 + 3);
-      s.set(x0 + (p.width >> 1), y - 3, z0 + 3, Block.RuneGlass);
-    }
-    if (p.kind === 'teeth') {
-      // Two staggered rows of single blocks — hop them, or weave them, but
-      // you cannot hold a straight sprint through.
-      for (let dx = 0; dx < p.width; dx += 2) s.set(x0 + dx, y + 1, z0 + 2, theme.platforms[2]);
-      for (let dx = 1; dx < p.width; dx += 2) s.set(x0 + dx, y + 1, z0 + 4, theme.platforms[2]);
-    }
-  });
-  // Start terrace and finish arch: the two ends of the line are unmistakable.
-  const first = course[0], last = course[course.length - 1];
-  s.fill(Math.floor(first.x) - 3, Math.floor(first.x) + 3, first.y - 1, first.y - 1,
-    Math.floor(first.z) - 5, Math.floor(first.z) - 1, theme.platforms[0]);
-  for (const dx of [-3, 3]) {
-    s.fill(Math.floor(last.x) + dx, Math.floor(last.x) + dx, last.y, last.y + 4,
-      Math.floor(last.z), Math.floor(last.z), Block.GildedVaultBrick);
-  }
-  s.fill(Math.floor(last.x) - 3, Math.floor(last.x) + 3, last.y + 5, last.y + 5,
-    Math.floor(last.z), Math.floor(last.z), Block.GildedVaultBrick);
-  s.fill(Math.floor(last.x) - 1, Math.floor(last.x) + 1, last.y + 4, last.y + 4,
-    Math.floor(last.z), Math.floor(last.z), Block.RuneGlass);
+  for (const c of parkourCourse(seed).cells)
+    if (c.block === Block.Air) s.clear(c.x, c.y, c.z);
+    else s.set(c.x, c.y, c.z, c.block);
   if (parkourStampCache.size > 24) parkourStampCache.delete(parkourStampCache.keys().next().value!);
   parkourStampCache.set(seed, s);
   return s;
@@ -816,7 +600,7 @@ export function partySolidAt(x: number, y: number, z: number): boolean {
 /** Spawn positions, in participant order. */
 export function partySpawns(sub: PartySubBounds, members: readonly { team: number }[]): PartyVec3[] {
   if (sub.game === 'parkour') {
-    const p = parkourCourse(sub.seed)[0];
+    const p = parkourCourse(sub.seed).start;
     return members.map((_, i) => ({
       x: sub.minX + p.x + (i % 2 ? .7 : -.7), y: p.y + .01, z: sub.minZ + p.z,
     }));
@@ -849,6 +633,10 @@ export interface PartyParticipant extends PartyIdentity {
   checkpoint: number;
   progress: number;
   falls: number;
+  /** Collapse Chase: falls left before you are out. */
+  lives: number;
+  /** Rising Void / Collapse Chase: when this racer was knocked out. */
+  outAt?: number;
   finishedAt?: number;
   immuneUntil: number;
   /** Server-owned respawn request: a goal reset, or a fall into the void. */
@@ -911,12 +699,14 @@ interface PartyLobby extends Omit<PartyLobbySnapshot, 'participants' | 'serverNo
   startedAt?: number;
 }
 
-/** Round order: score first, then whoever got there with fewer falls. */
+/** Round order: a finisher first, then whoever lasted longest, then score,
+ *  then whoever got there with fewer falls. */
 export function orderPartyRound(ps: Iterable<PartyParticipant>): PartyParticipant[] {
   return [...ps].sort((a, b) =>
-    Number(b.connected) - Number(a.connected) || b.score - a.score ||
+    Number(b.connected) - Number(a.connected) ||
     (a.finishedAt ?? Infinity) - (b.finishedAt ?? Infinity) ||
-    a.falls - b.falls || a.joinOrder - b.joinOrder);
+    (b.outAt ?? Infinity) - (a.outAt ?? Infinity) ||
+    b.score - a.score || a.falls - b.falls || a.joinOrder - b.joinOrder);
 }
 /** Scoreboard order for The Bridge: winning side first, top scorer first. */
 export function orderPartyTeams(ps: Iterable<PartyParticipant>, teamScores: readonly number[]): PartyParticipant[] {
@@ -936,15 +726,19 @@ export class PartyGamesEngine {
   private readonly usedSlots = new Set<number>();
   private nextId = 1;
   private seedCounter = 0;
-  private readonly lastThemes = new Map<number, number>();
+  /** What each player raced last, so the next match is never the same kind
+   *  of match: not the same mode, not the same layout, not the same world. */
+  private readonly lastParkour = new Map<number, { theme: number; mode: ParkourMode; layout: ParkourLayout }>();
   private themeBag: number[] = [];
+  private modeBag: ParkourMode[] = [];
+  private readonly layoutBags = new Map<ParkourMode, ParkourLayout[]>();
   constructor(private readonly tokenFactory: () => string) { }
 
   private static blank(identity: PartyIdentity, host: boolean, joinOrder: number): PartyParticipant {
     return {
       ...identity, host, ready: false, connected: true, joinOrder, team: 0, score: 0,
       kills: 0, deaths: 0, lastHitBy: undefined, lastHitAt: 0,
-      checkpoint: 0, progress: 0, falls: 0, immuneUntil: 0, pendingSpawn: false,
+      checkpoint: 0, progress: 0, falls: 0, lives: 0, immuneUntil: 0, pendingSpawn: false,
     };
   }
 
@@ -1039,14 +833,22 @@ export class PartyGamesEngine {
     let seed = ++this.seedCounter;
     for (const c of this.tokenFactory()) seed = partyHash(seed, c.charCodeAt(0));
     if (l.mode === 'parkour') {
-      const excluded = new Set([...l.participants.keys()].map((v) => this.lastThemes.get(v)));
-      if (!this.themeBag.length)
-        this.themeBag = PARKOUR_THEMES.map((_, i) => i).sort((a, b) => partyHash(seed, a) - partyHash(seed, b));
-      const next = this.themeBag.findIndex((t) => !excluded.has(t));
-      const theme = next >= 0 ? this.themeBag.splice(next, 1)[0]
-        : PARKOUR_THEMES.map((_, i) => i).find((t) => !excluded.has(t))!;
-      seed = ((seed & ~7) | theme) >>> 0;
-      for (const v of l.participants.keys()) this.lastThemes.set(v, theme);
+      const last = [...l.participants.keys()].map((v) => this.lastParkour.get(v));
+      /** Shuffle-bag draw: every option comes round before any repeats, and
+       *  nothing either racer just played is drawn while anything else is left. */
+      const drawFrom = <T>(bag: T[], all: readonly T[], excluded: Set<T | undefined>): T => {
+        if (!bag.length) bag.push(...[...all].sort((a, b) =>
+          partyHash(seed, all.indexOf(a) + 31) - partyHash(seed, all.indexOf(b) + 31)));
+        const next = bag.findIndex((t) => !excluded.has(t));
+        return next >= 0 ? bag.splice(next, 1)[0] : all.find((t) => !excluded.has(t)) ?? bag.splice(0, 1)[0];
+      };
+      const theme = drawFrom(this.themeBag, PARKOUR_THEMES.map((_, i) => i), new Set(last.map((v) => v?.theme)));
+      const mode = drawFrom(this.modeBag, PARKOUR_MODES, new Set(last.map((v) => v?.mode)));
+      let layouts = this.layoutBags.get(mode);
+      if (!layouts) this.layoutBags.set(mode, layouts = []);
+      const layout = drawFrom(layouts, PARKOUR_MODE_LAYOUTS[mode], new Set(last.map((v) => v?.layout)));
+      seed = encodeParkourSeed(seed, theme, mode, layout);
+      for (const v of l.participants.keys()) this.lastParkour.set(v, { theme, mode, layout });
     }
     l.arena = partyArenaBounds(slot, seed);
     registerPartyArena(l.arena);
@@ -1069,10 +871,12 @@ export class PartyGamesEngine {
     l.teamScores = [0, 0];
     const game = partyGame(l.mode);
     l.round = { game: game.id, index: game.index, startedAt: 0, endsAt: 0, revision: l.revision };
+    const lives = l.mode === 'parkour' && l.arena && parkourCourse(l.arena.seed).variant.mode === 'collapse'
+      ? COLLAPSE_LIVES : 0;
     for (const p of l.participants.values())
       Object.assign(p, {
         score: 0, kills: 0, deaths: 0, lastHitBy: undefined, lastHitAt: 0,
-        progress: 0, checkpoint: 0, falls: 0,
+        progress: 0, checkpoint: 0, falls: 0, lives, outAt: undefined,
         finishedAt: undefined, immuneUntil: 0, pendingSpawn: false,
       });
   }
@@ -1169,7 +973,7 @@ export class PartyGamesEngine {
   evaluate(id: number, pos: PartyVec3, now: number): { spawn?: PartyVec3; changed: boolean } {
     const l = this.lobbyByPlayer.get(id), p = l?.participants.get(id);
     if (!l || !p || l.phase !== 'running' || !l.round || !l.arena || !p.connected ||
-      p.finishedAt !== undefined || now >= l.round.endsAt) return { changed: false };
+      p.finishedAt !== undefined || p.outAt !== undefined || now >= l.round.endsAt) return { changed: false };
     const sub = this.subFor(id)!;
     return sub.game === 'bridge' ? this.evaluateBridge(l, p, sub, pos, now)
       : this.evaluateParkour(l, p, sub, pos, now);
@@ -1227,28 +1031,60 @@ export class PartyGamesEngine {
 
   private evaluateParkour(l: PartyLobby, p: PartyParticipant, sub: PartySubBounds, pos: PartyVec3, now: number):
     { spawn?: PartyVec3; changed: boolean } {
-    const course = parkourCourse(sub.seed);
-    const reset = (): { spawn: PartyVec3; changed: boolean } => {
+    const course = parkourCourse(sub.seed), mode = course.variant.mode;
+    const t = now - l.round!.startedAt;
+    const at = (order: number): PartyVec3 => {
+      const base = course.steps[Math.max(0, Math.min(order, course.steps.length - 1))][0];
+      return { x: sub.minX + base.x, y: base.y + .01, z: sub.minZ + base.z };
+    };
+    /** Knocked out: no more spawns, and the match ends once one is left. */
+    const out = (): { changed: boolean } => {
+      p.outAt = now;
+      p.pendingSpawn = false;
+      const alive = [...l.participants.values()].filter((v) => v.connected && v.outAt === undefined);
+      if (alive.length <= 1) this.endMatch(l, now);
+      return { changed: true };
+    };
+    const reset = (): { spawn?: PartyVec3; changed: boolean } => {
       p.falls++;
       p.immuneUntil = now + 1400;
-      p.progress = p.checkpoint;
       p.pendingSpawn = false;
-      const base = course[p.checkpoint];
-      return { spawn: { x: sub.minX + base.x, y: base.y + .01, z: sub.minZ + base.z }, changed: true };
+      if (mode === 'collapse') {
+        // A fall costs a life and puts you back just ahead of the front —
+        // or at your own progress, if you were never caught up by it.
+        if (--p.lives <= 0) return out();
+        const front = Math.floor(parkourCollapseFront(t));
+        const back = Math.max(p.checkpoint, front + COLLAPSE_RESPAWN_LEAD);
+        if (back >= course.steps.length - 1) return out();
+        p.progress = p.checkpoint = back;
+        p.score = Math.max(p.score, p.progress);
+        return { spawn: at(p.progress), changed: true };
+      }
+      if (mode === 'void') {
+        // The saved pad has to still be above the void to stand on.
+        const base = course.steps[p.checkpoint][0];
+        if (base.y < parkourVoidY(course, t) + 1.5) return out();
+      }
+      p.progress = p.checkpoint;
+      return { spawn: at(p.checkpoint), changed: true };
     };
     if (p.pendingSpawn) return reset();
-    if (pos.y < PARTY_VOID_Y || pos.y < PARTY_FLOOR_Y - 4) return reset();
-    const next = course[p.progress + 1];
-    if (next &&
-      Math.abs(pos.x - sub.minX - next.x) < next.width / 2 + .35 &&
-      Math.abs(pos.z - sub.minZ - next.z) < next.depth / 2 + .35 &&
-      Math.abs(pos.y - next.y) < .35) {
+    // A tower is tall: a fall well past the pads you were jumping between is
+    // a fall, even though there is still a long way to the bottom of it.
+    const here = course.steps[p.progress]?.[0], ahead = course.steps[p.progress + 1]?.[0];
+    const floor = Math.min(here?.y ?? Infinity, ahead?.y ?? Infinity) - 8;
+    if (pos.y < PARTY_VOID_Y || pos.y < course.lowY - 5 || pos.y < floor) return reset();
+    if (mode === 'void' && pos.y < parkourVoidY(course, t)) return reset();
+    for (const next of course.steps[p.progress + 1] ?? []) {
+      if (Math.abs(pos.x - sub.minX - next.x) >= next.width / 2 + .35 ||
+        Math.abs(pos.z - sub.minZ - next.z) >= next.depth / 2 + .35 ||
+        Math.abs(pos.y - next.y) >= .35) continue;
       // Checked before the step, against the lead as it stood when they jumped.
       const trailing = parkourCatchUp(p, l.participants.values());
       p.progress++;
       p.score = Math.max(p.score, p.progress);
       if (next.checkpoint || trailing) p.checkpoint = p.progress;
-      if (p.progress === course.length - 1) {
+      if (p.progress === course.steps.length - 1) {
         p.finishedAt = now;
         this.endMatch(l, now);
       }
@@ -1268,7 +1104,8 @@ export class PartyGamesEngine {
       return;
     }
     const board = orderPartyRound(l.participants.values());
-    const tied = board[0].score === board[1]?.score && board[0].falls === board[1]?.falls && !board[0].finishedAt;
+    const tied = board[0].score === board[1]?.score && board[0].falls === board[1]?.falls &&
+      !board[0].finishedAt && board[0].outAt === board[1]?.outAt;
     this.finish(l, now, tied ? null : board[0].id, 'complete');
   }
 

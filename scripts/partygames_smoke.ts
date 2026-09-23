@@ -2,7 +2,6 @@ import {
   BRIDGE_CAGE_FLOOR, BRIDGE_GOALS, BRIDGE_GOAL_LIMIT, BRIDGE_GOAL_RESET_MS,
   BRIDGE_LANE_X, BRIDGE_SIZE_X, BRIDGE_SIZE_Z, BRIDGE_TEAM_BLOCK,
   BRIDGE_MELEE_TIER, BRIDGE_BOW_COOLDOWN_MS, bridgeSwing,
-  PARKOUR_CHECKPOINT_EVERY, PARKOUR_PLATFORMS,
   PARTY_ARENA_LOAD_TIMEOUT_MS, PARTY_CAPACITY, PARTY_COUNTDOWN_MS, PARTY_FLOOR_Y,
   PARTY_MAX_HEALTH, PARTY_RESULT_MS, PARTY_STAMP_MAX_Y, PARTY_STAMP_MIN_Y, PARTY_VOID_Y,
   PartyGamesEngine, bridgeCageHatch, bridgeCageSpawn, bridgeGoalGuard, bridgeSpawn,
@@ -203,25 +202,58 @@ function run(e: PartyGamesEngine, snap: PartyLobbySnapshot, now: number) {
   const { e, snap } = prepared('parkour');
   check('parkour caps at two', snap.capacity === 2 && !e.join(e.tokenFor(1)!, who(3), 0).ok);
   const s = run(e, snap, 0), sub = s.sub!, course = parkourCourse(sub.seed);
+  const mode = course.variant.mode, last = course.steps.length - 1;
   for (const p of partySpawns(sub, s.participants))
     check('both racers spawn on solid platforms', !!BLOCKS[partyArenaBlockAt(p.x, p.y - .1, p.z)!]?.solid);
-  const at = (i: number) => ({ x: sub.minX + course[i].x, y: course[i].y + .01, z: sub.minZ + course[i].z });
-  e.evaluate(1, at(PARKOUR_PLATFORMS - 1), 4000);
+  const at = (i: number) => ({ x: sub.minX + course.steps[i][0].x, y: course.steps[i][0].y + .01, z: sub.minZ + course.steps[i][0].z });
+  e.evaluate(1, at(last), 4000);
   check('finish cannot skip the course', e.participantFor(1)!.progress === 0);
   // Far enough in to have banked exactly one checkpoint, and no further: what
   // a fall costs is the whole leg since that checkpoint, not the last jump.
-  const banked = PARKOUR_CHECKPOINT_EVERY;
+  const banked = course.steps.findIndex((st, i) => i > 0 && st[0].checkpoint);
+  check('the course has a checkpoint before the finish', banked > 0 && banked < last);
   for (let i = 1; i <= banked + 2; i++)
-    e.evaluate(1, at(i), 4000 + i * 1000);
-  const fall = e.evaluate(1, { x: sub.minX + 16, y: PARTY_VOID_Y - 1, z: sub.minZ + 40 }, 60000);
-  check('fall restores last saved checkpoint', fall.spawn?.z === at(banked).z &&
-    e.participantFor(1)!.progress === banked && e.participantFor(1)!.falls === 1);
-  for (let i = banked + 1; i < PARKOUR_PLATFORMS; i++)
-    e.evaluate(1, at(i), 70000 + i * 1000);
+    e.evaluate(1, at(i), 4000 + i * 100);
+  check('landing pads advances progress', e.participantFor(1)!.progress === banked + 2);
+  const fall = e.evaluate(1, { x: sub.minX + 16, y: PARTY_VOID_Y - 1, z: sub.minZ + 40 }, 4000 + (banked + 3) * 100);
+  if (mode === 'collapse') {
+    check('a collapse fall costs a life', e.participantFor(1)!.lives === 2 && !!fall.spawn);
+  } else {
+    check('fall restores last saved checkpoint', fall.spawn?.z === at(banked).z &&
+      e.participantFor(1)!.progress === banked && e.participantFor(1)!.falls === 1);
+  }
+  const from = e.participantFor(1)!.progress;
+  for (let i = from + 1; i <= last; i++)
+    e.evaluate(1, at(i), 4000 + (banked + 4 + i) * 100);
   check('first finisher wins immediately', e.snapshotFor(1, 60000)?.result?.winner === 1);
   const left = e.leave(1, 60000);
   check('leaving detaches player from engine', e.phaseFor(1) === null && left.snapshot?.participants.find(p => p.id === 1)?.connected === false);
   check('last departure deletes the lobby', e.leave(2, 60000).deleted && e.snapshots(60000).length === 0);
+}
+// Rising Void and Collapse Chase: the modes that knock you out.
+{
+  let voids = 0, collapses = 0;
+  for (let round = 0; round < 12 && (!voids || !collapses); round++) {
+    const { e, snap } = prepared('parkour');
+    const s = run(e, snap, 0), sub = s.sub!, course = parkourCourse(sub.seed), mode = course.variant.mode;
+    const start = s.round!.startedAt;
+    if (mode === 'void') {
+      voids++;
+      // Stand still at the start for five minutes: the void comes for you.
+      const pad = course.steps[0][0];
+      const out = e.evaluate(1, { x: sub.minX + pad.x, y: pad.y + .01, z: sub.minZ + pad.z }, start + 300_000);
+      check('the void reaches a racer who never climbs', out.changed && e.participantFor(1)!.outAt !== undefined);
+      check('last one above the void wins', e.snapshotFor(2, start + 300_000)?.result?.winner === 2);
+    } else if (mode === 'collapse') {
+      collapses++;
+      check('a Collapse Chase starts everyone on three lives', s.participants.every(p => p.lives === 3));
+      for (let i = 0; i < 3; i++)
+        e.evaluate(1, { x: sub.minX + 16, y: PARTY_VOID_Y - 1, z: sub.minZ + 40 }, start + 1000 + i * 2000);
+      check('three falls and you are out', e.participantFor(1)!.lives === 0 && e.participantFor(1)!.outAt !== undefined);
+      check('last one with lives wins', e.snapshotFor(2, start + 9000)?.result?.winner === 2);
+    }
+  }
+  check('rising void and collapse chase both came up in twelve matches', voids > 0 && collapses > 0);
 }
 // ── Server integration ─────────────────────────────────────────────────────
 function serverMatch(mode: PartyMode = 'parkour') {

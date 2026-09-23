@@ -105,11 +105,16 @@ export function subFaceUV(f: number, lx: number, ly: number, lz: number): [numbe
 export type BlockSampler = (wx: number, wy: number, wz: number) => number;
 export type TintSampler = (wx: number, wz: number) => ColumnTints;
 
+/** What the chunk shader needs to know about a surface, per vertex. */
+const enum SurfaceKind { Solid = 0, Plant = 1, Leaves = 2, Water = 3 }
+
 class GeoBuffer {
   positions: number[] = [];
   colors: number[] = [];
   uvs: number[] = [];
   lights: number[] = []; // (sky, block) per vertex, normalized 0-1
+  /** (kind, emission 0..1, wind sway 0..1) per vertex — see world.ts. */
+  info: number[] = [];
   indices: number[] = [];
 
   quad(
@@ -123,9 +128,11 @@ class GeoBuffer {
     tintBottom?: Tint,
     /** Smooth lighting: per-corner (sky, block) levels replacing the flat
      *  skyL/blockL. Both arrays are indexed like `face.corners`. */
-    cornerSky?: number[], cornerBlock?: number[]
+    cornerSky?: number[], cornerBlock?: number[],
+    kind: SurfaceKind = SurfaceKind.Solid, emission = 0
   ): void {
     const base = this.positions.length / 3;
+    const sway = kind === SurfaceKind.Leaves ? 0.35 : 0;
     const [u0, v0, u1, v1] = uvRect;
     for (let i = 0; i < 4; i++) {
       const c = face.corners[i];
@@ -140,9 +147,20 @@ class GeoBuffer {
         (cornerSky ? cornerSky[i] : skyL) / 15,
         (cornerBlock ? cornerBlock[i] : blockL) / 15
       );
+      this.info.push(kind, emission, sway);
     }
-    // Flip the quad diagonal when needed so AO interpolates correctly.
-    if (ao[0] + ao[3] > ao[1] + ao[2]) {
+    // Split the quad along the diagonal that interpolates it best. With
+    // smooth lighting the corners differ in LIGHT as well as occlusion, and
+    // choosing on occlusion alone ran the crease across the light gradient,
+    // drawing a dark diagonal through lit faces. Judge on what the corner
+    // will actually look like: occlusion times its brightest light.
+    let d03 = ao[0] + ao[3], d12 = ao[1] + ao[2];
+    if (cornerSky && cornerBlock) {
+      const lum = (i: number): number =>
+        AO_CURVE[ao[i]] * Math.max(cornerSky[i], cornerBlock[i]);
+      d03 = lum(0) + lum(3); d12 = lum(1) + lum(2);
+    }
+    if (d03 > d12) {
       this.indices.push(base, base + 1, base + 3, base, base + 3, base + 2);
     } else {
       this.indices.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
@@ -153,7 +171,7 @@ class GeoBuffer {
   cross(
     bx: number, by: number, bz: number,
     uvRect: [number, number, number, number], tint: Tint,
-    skyL: number, blockL: number
+    skyL: number, blockL: number, emission = 0
   ): void {
     const [u0, v0, u1, v1] = uvRect;
     const diags: [number, number, number, number][] = [
@@ -171,6 +189,8 @@ class GeoBuffer {
       for (let i = 0; i < 4; i++) {
         this.colors.push(tint[0], tint[1], tint[2]);
         this.lights.push(skyL / 15, blockL / 15);
+        // Rooted: only the two top corners (i = 2, 3) sway in the wind.
+        this.info.push(SurfaceKind.Plant, emission, i >= 2 ? 1 : 0);
       }
       this.uvs.push(u0, v0, u1, v0, u0, v1, u1, v1);
       this.indices.push(
@@ -185,7 +205,7 @@ class GeoBuffer {
     bx: number, by: number, bz: number,
     min: [number, number, number], max: [number, number, number],
     uvRect: [number, number, number, number],
-    skyL: number, blockL: number
+    skyL: number, blockL: number, emission = 0
   ): void {
     const [u0, v0, u1, v1] = uvRect;
     for (const face of FACES) {
@@ -209,6 +229,7 @@ class GeoBuffer {
         const sv = sv0 + (sv1 - sv0) * c.uv[1];
         this.uvs.push(u0 + (u1 - u0) * su, v0 + (v1 - v0) * sv);
         this.lights.push(skyL / 15, blockL / 15);
+        this.info.push(SurfaceKind.Solid, emission, 0);
       }
       this.indices.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
     }
@@ -221,7 +242,7 @@ class GeoBuffer {
     bx: number, by: number, bz: number,
     min: [number, number, number], max: [number, number, number],
     uvRect: [number, number, number, number], tint: Tint,
-    skyL: number, blockL: number
+    skyL: number, blockL: number, emission = 0
   ): void {
     const [u0, v0, u1, v1] = uvRect;
     for (let f = 0; f < FACES.length; f++) {
@@ -238,6 +259,7 @@ class GeoBuffer {
         const [fu, fv] = subFaceUV(f, lx, ly, lz);
         this.uvs.push(u0 + (u1 - u0) * fu, v0 + (v1 - v0) * fv);
         this.lights.push(skyL / 15, blockL / 15);
+        this.info.push(SurfaceKind.Solid, emission, 0);
       }
       this.indices.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
     }
@@ -250,6 +272,7 @@ class GeoBuffer {
     geo.setAttribute('color', new THREE.Float32BufferAttribute(this.colors, 3));
     geo.setAttribute('uv', new THREE.Float32BufferAttribute(this.uvs, 2));
     geo.setAttribute('skyblock', new THREE.Float32BufferAttribute(this.lights, 2));
+    geo.setAttribute('vxinfo', new THREE.Float32BufferAttribute(this.info, 3));
     geo.setIndex(this.indices);
     geo.computeBoundingSphere();
     return geo;
@@ -308,7 +331,7 @@ export function buildChunkGeometry(
           opaque.cross(
             x, y, z, atlas.uvRect(info.side),
             info.tint ? tintFor(info.tint) : WHITE,
-            light.sky(wx, y, wz), light.block(wx, y, wz)
+            light.sky(wx, y, wz), light.block(wx, y, wz), info.emission / 15
           );
           continue;
         }
@@ -325,7 +348,7 @@ export function buildChunkGeometry(
             [0.4375 + offX, offY, 0.4375 + offZ],
             [0.5625 + offX, 0.625 + offY, 0.5625 + offZ],
             atlas.uvRect(info.side),
-            light.sky(wx, y, wz), light.block(wx, y, wz)
+            light.sky(wx, y, wz), light.block(wx, y, wz), info.emission / 15
           );
           continue;
         }
@@ -355,7 +378,7 @@ export function buildChunkGeometry(
           const skyL = light.sky(wx, y, wz), blockL = light.block(wx, y, wz);
           const boxes = renderBoxes(id);
           for (const [mn, mx] of boxes) {
-            opaque.subBox(x, y, z, mn, mx, uvRect, WHITE, skyL, blockL);
+            opaque.subBox(x, y, z, mn, mx, uvRect, WHITE, skyL, blockL, info.emission / 15);
           }
           continue;
         }
@@ -410,7 +433,10 @@ export function buildChunkGeometry(
             face, x, y, z, atlas.uvRect(tile), ao, topOffset, tint, skyL, blockL,
             grassSide ? WHITE : undefined,
             smoothLighting ? cornerSky : undefined,
-            smoothLighting ? cornerBlock : undefined
+            smoothLighting ? cornerBlock : undefined,
+            isWater ? SurfaceKind.Water
+              : info.tint === 'foliage' ? SurfaceKind.Leaves : SurfaceKind.Solid,
+            info.emission / 15
           );
         }
       }
@@ -485,13 +511,22 @@ function computeSmoothLight(
     const s2 = c[t2] === 1 ? 1 : -1;
 
     let sky = 0, block = 0, n = 0;
+    // When BOTH side cells are solid, the diagonal cell touches this corner
+    // only through a crack of zero width: light cannot get from there to here.
+    // Averaging it in anyway leaked the (often pitch-dark) far side of a wall
+    // round the corner as a dark smudge — vanilla excludes it, and so do we.
+    let sideSolid = 0;
     // k as a 2-bit mask over the two tangent offsets: p, p+t1, p+t2, p+t1+t2.
     for (let k = 0; k < 4; k++) {
       q[0] = p[0]; q[1] = p[1]; q[2] = p[2];
       if (k & 1) q[t1] += s1;
       if (k & 2) q[t2] += s2;
       if (q[1] < 0 || q[1] >= 256) continue;
-      if (isOpaque(sample(q[0], q[1], q[2]))) continue;
+      if (k === 3 && sideSolid === 2) continue;
+      if (isOpaque(sample(q[0], q[1], q[2]))) {
+        if (k === 1 || k === 2) sideSolid++;
+        continue;
+      }
       sky += light.sky(q[0], q[1], q[2]);
       block += light.block(q[0], q[1], q[2]);
       n++;

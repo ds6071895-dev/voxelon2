@@ -68,7 +68,7 @@ import {
   mitigate, TOUGHNESS_CAP, DuelLeaderboardEntry, ItemEntityInfo, PlayerInfo, PlayerSnapshot, ServerMsg,
   WORLD_SEED, WORLD_HALF, WORLD_BORDER, CORE_HALF, makeUsername, skinSeed, GameMode,
   MAX_ATTUNED, TOTEM_COOLDOWN, COMBAT_TAG, TPA_EXPIRE, bloodlustMult,
-  FACTION_FACES_LIMIT, FACTION_ROSTER_LIMIT, type FactionPublic, type Notification,
+  FACTION_FACES_LIMIT, FACTION_ROSTER_LIMIT, type FactionPublic,
   type PlayerCounts,
 } from './protocol';
 import {
@@ -95,6 +95,12 @@ import {
   bridgeArrowShot, bridgeCageHatch, bridgeGoalGuard, clampToPartySub,
   partyArenaBlockAt, partySpawns, parkourCourse,
 } from '../partygames';
+import {
+  CRUMBLE_BACK_MS, CRUMBLE_CRACKED, CRUMBLE_FALL_MS, blinkSolid, parkourBlinkCells,
+  parkourBuildBlocked, parkourCollapseCells, parkourCollapseFront, parkourCrumbleCells,
+  parkourCrumbleUnder, parkourPadNear,
+} from '../parkour_mechanics';
+import type { ParkourCell } from '../parkour_course';
 // Shared contact validation and combo limits for directional melee.
 import {
   BW_COMBO_MAX, BW_COMBO_WINDOW_MS, BW_MELEE_FACING_DOT, BW_MELEE_RANGE,
@@ -468,6 +474,14 @@ export class GameServer {
   /** Arena slot -> is that Bridge's pair of cage hatches currently open? An
    *  absent entry means shut, which is what the authored venue already is. */
   private readonly partyCagesOpen = new Map<number, boolean>();
+  /** Arena slot -> the moving parts of a running Parkour course: which blink
+   *  group is up, how far the collapse has eaten, and every crumble pad that
+   *  has been stepped on and when it drops and comes back. */
+  private readonly partyParkour = new Map<number, {
+    blink: [boolean, boolean];
+    collapsed: number;
+    crumbles: Map<number, { fallAt: number; backAt: number; gone: boolean }>;
+  }>();
   /** Per-player Bridge combat clocks: the swing model needs to know how long
    *  you waited, who you have been hitting, and when you last let an arrow go. */
   private readonly partyCombat = new Map<number, PartyCombatState>();
@@ -2451,6 +2465,7 @@ export class GameServer {
     const ids = snapshot.participants.filter(p => p.connected).map(p => p.id);
     const out = this.partySnapshotOutbound(snapshot);
     out.push(...this.resetPartyArenaEdits(snapshot.arena, ids));
+    this.partyParkour.delete(snapshot.arena.slot);
     const spawns = partySpawns(snapshot.sub, snapshot.participants);
     snapshot.participants.forEach((member, i) => {
       const p = this.players.get(member.id);
@@ -2495,7 +2510,10 @@ export class GameServer {
       return this.handlePartyTransform(p, msg);
     // Retry is Parkour's. Honouring it on The Bridge would let a client claim
     // a position under the deck — which is exactly where the portals are.
-    if (msg.t === 'partyRetry' && this.party.subFor(p.id)?.game === 'parkour' &&
+    // Collapse Chase has none: there, a fall is a life.
+    const retrySub = this.party.subFor(p.id);
+    if (msg.t === 'partyRetry' && retrySub?.game === 'parkour' &&
+      parkourCourse(retrySub.seed).variant.mode !== 'collapse' &&
       this.party.phaseFor(p.id) === 'running' && this.worldTime * 1000 >= (this.party.participantFor(p.id)?.immuneUntil ?? Infinity))
       return this.evaluatePartyPlayer(p, true);
     // Combat is The Bridge's. Both handlers re-check the venue themselves, so
@@ -2563,6 +2581,17 @@ export class GameServer {
     move.at = this.worldTime;
     if (this.partyGrounded(p.x, p.y, p.z))
       this.markPartyGround(move, p.x, p.y, p.z);
+    // A Parkour throw pad is the course throwing this player, exactly as
+    // knockback is: the pad is found by POSITION on the authored course, so
+    // only a real pad can open the window, and only right beside it.
+    if (sub.game === 'parkour') {
+      const course = parkourCourse(sub.seed);
+      if ([p, wanted].some(at => parkourPadNear(course, at.x - sub.minX, at.y, at.z - sub.minZ))) {
+        if (this.worldTime >= move.launchUntil) move.allowance = Math.max(move.allowance, 4);
+        move.launchUntil = this.worldTime + 1.6;
+        move.groundedAt = this.worldTime;
+      }
+    }
     // Knockback is the server throwing this player through the air. While an
     // impulse is settling, the flight rules stand down entirely — otherwise
     // the mode's signature (hitting somebody off the span) would be corrected
@@ -2637,7 +2666,8 @@ export class GameServer {
     if (Number.isFinite(msg.swing))
       p.swing = Number(msg.swing) & 0xffff;
     this.recordArenaTrack(p);
-    return this.evaluatePartyPlayer(p);
+    const crumbled = sub.game === 'parkour' ? this.stepOnCrumble(p, sub) : [];
+    return [...crumbled, ...this.evaluatePartyPlayer(p)];
   }
   private evaluatePartyPlayer(p: ServerPlayer, retry = false): Outbound[] {
     const now = this.worldTime * 1000, before = this.party.phaseFor(p.id);
@@ -2892,13 +2922,10 @@ export class GameServer {
       return !!BLOCKS[b]?.solid;
     });
     // Neither mode lets you wall off the thing everybody is racing for: a
-    // Parkour checkpoint, or the mouth of either Bridge portal.
+    // Parkour checkpoint or live pad, or the mouth of either Bridge portal.
     const blocked = bridge
       ? bridgeGoalGuard(bx - sub.minX, bz - sub.minZ)
-      : parkourCourse(sub.seed).some(c => c.checkpoint &&
-        bx + 1 > sub.minX + c.x - c.width / 2 && bx < sub.minX + c.x + c.width / 2 &&
-        bz + 1 > sub.minZ + c.z - c.depth / 2 && bz < sub.minZ + c.z + c.depth / 2 &&
-        by >= c.y && by < c.y + 2);
+      : parkourBuildBlocked(parkourCourse(sub.seed), bx - sub.minX, by, bz - sub.minZ);
     if (blocked || !attached || this.party.membersOf(p.id).some(id => { const v = this.players.get(id)!; return v.x + .3 > bx && v.x - .3 < bx + 1 && v.z + .3 > bz && v.z - .3 < bz + 1 && v.y + 1.8 > by && v.y < by + 1; }))
       return reject();
     this.edits.set(key, block);
@@ -3023,6 +3050,81 @@ export class GameServer {
     return snap.participants.filter(p => p.connected)
       .map(p => ({ to: p.id, msg: { t: 'editBatch', edits } as ServerMsg }));
   }
+  /** Set (or, with `restore`, un-set back to the authored block) a batch of
+   *  course cells, and tell everybody in the match. The same edit channel a
+   *  player's wool travels on, so a client that has not streamed that part of
+   *  the course yet still gets it right when the chunk arrives. */
+  private parkourCellEdits(snap: PartyLobbySnapshot, cells: readonly ParkourCell[], block: number | 'restore'): Outbound[] {
+    const sub = snap.sub!, edits: { x: number; y: number; z: number; block: number }[] = [];
+    for (const c of cells) {
+      const x = sub.minX + c.x, y = c.y, z = sub.minZ + c.z, key = `${x},${y},${z}`;
+      if (block === 'restore') {
+        // Never grow a block back inside somebody.
+        if (snap.participants.some(m => {
+          const v = this.players.get(m.id);
+          return v && v.x + .3 > x && v.x - .3 < x + 1 && v.z + .3 > z && v.z - .3 < z + 1 && v.y + 1.8 > y && v.y < y + 1;
+        })) continue;
+        this.edits.delete(key);
+        edits.push({ x, y, z, block: partyArenaBlockAt(x, y, z) ?? Block.Air });
+      } else {
+        this.edits.set(key, block);
+        edits.push({ x, y, z, block });
+      }
+    }
+    if (!edits.length) return [];
+    return snap.participants.filter(p => p.connected)
+      .map(p => ({ to: p.id, msg: { t: 'editBatch', edits } as ServerMsg }));
+  }
+  private parkourState(slot: number) {
+    let st = this.partyParkour.get(slot);
+    if (!st) this.partyParkour.set(slot, st = { blink: [true, true], collapsed: 0, crumbles: new Map() });
+    return st;
+  }
+  /** A racer standing on a crumble pad cracks the whole pad. */
+  private stepOnCrumble(p: ServerPlayer, sub: PartySubBounds): Outbound[] {
+    const snap = this.party.snapshotFor(p.id, this.worldTime * 1000);
+    if (!snap || snap.phase !== 'running' || !snap.arena || !this.partyGrounded(p.x, p.y, p.z)) return [];
+    const course = parkourCourse(sub.seed);
+    const pad = parkourCrumbleUnder(course, p.x - sub.minX, p.y, p.z - sub.minZ);
+    if (!pad) return [];
+    const st = this.parkourState(snap.arena.slot), now = this.worldTime * 1000;
+    if (st.crumbles.has(pad.index)) return [];
+    st.crumbles.set(pad.index, { fallAt: now + CRUMBLE_FALL_MS, backAt: now + CRUMBLE_BACK_MS, gone: false });
+    return this.parkourCellEdits(snap, parkourCrumbleCells(course, pad.index), CRUMBLE_CRACKED);
+  }
+  /** Everything on a running Parkour course that moves on the round clock. */
+  private tickParkourCourse(snap: PartyLobbySnapshot, now: number): Outbound[] {
+    if (snap.sub?.game !== 'parkour' || !snap.arena || !snap.round) return [];
+    const course = parkourCourse(snap.sub.seed), st = this.parkourState(snap.arena.slot);
+    const t = now - snap.round.startedAt, out: Outbound[] = [];
+    // Collapse Chase: eat every cell behind the front, for good.
+    if (course.variant.mode === 'collapse') {
+      const front = Math.min(course.steps.length, Math.floor(parkourCollapseFront(t)));
+      if (front > st.collapsed) {
+        out.push(...this.parkourCellEdits(snap, parkourCollapseCells(course, st.collapsed, front), Block.Air));
+        st.collapsed = front;
+      }
+    }
+    const alive = (c: ParkourCell): boolean => c.order >= st.collapsed;
+    for (const group of [0, 1] as const) {
+      const solid = blinkSolid(group, t);
+      if (solid === st.blink[group]) continue;
+      st.blink[group] = solid;
+      const cells = parkourBlinkCells(course, group).filter(alive);
+      out.push(...this.parkourCellEdits(snap, cells, solid ? 'restore' : Block.Air));
+    }
+    for (const [index, c] of st.crumbles) {
+      const cells = parkourCrumbleCells(course, index).filter(alive);
+      if (!c.gone && now >= c.fallAt) {
+        c.gone = true;
+        out.push(...this.parkourCellEdits(snap, cells, Block.Air));
+      } else if (c.gone && now >= c.backAt) {
+        st.crumbles.delete(index);
+        out.push(...this.parkourCellEdits(snap, cells, 'restore'));
+      }
+    }
+    return out;
+  }
   tickParty(): Outbound[] {
     const now = this.worldTime * 1000, out: Outbound[] = [];
     // Arrows are the only thing in either venue that moves on its own, so this
@@ -3037,6 +3139,7 @@ export class GameServer {
       out.push(...this.syncPartyCages(snap, now));
       if (snap.phase !== 'running')
         continue;
+      out.push(...this.tickParkourCourse(snap, now));
       for (const member of snap.participants) {
         const p = this.players.get(member.id);
         if (p && member.connected)
@@ -4953,8 +5056,6 @@ export class GameServer {
 
   // --- FACTIONS: the allegiance pledge and the public dossiers --------------
 
-  private notifySerial = 1;
-
   /** Live (online) player count per faction — folded into the citizen count so
    *  a transport with no account store still shows something real. */
   private onlineFactionCounts(): Record<number, number> {
@@ -5000,29 +5101,6 @@ export class GameServer {
     return [{ to: 'all', msg: { t: 'factions', factions: this.factionPublics() } }];
   }
 
-  private makeNotification(
-    kind: Notification['kind'], title: string, body: string
-  ): Notification {
-    return {
-      id: `n${this.notifySerial++}`, kind, title, body, at: this.wallNow(),
-    };
-  }
-
-  /** Deliver one notification to every online member of a faction. */
-  private notifyFaction(
-    faction: number, kind: Notification['kind'], title: string, body: string,
-    except?: number
-  ): Outbound[] {
-    if (!isFaction(faction)) return [];
-    const notif = this.makeNotification(kind, title, body);
-    const out: Outbound[] = [];
-    for (const p of this.players.values()) {
-      if (p.faction !== faction || p.id === except) continue;
-      out.push({ to: p.id, msg: { t: 'notify', notif } });
-    }
-    return out;
-  }
-
   private govErr(to: number, reason: string): Outbound[] {
     return [{ to, msg: { t: 'govErr', reason } }];
   }
@@ -5050,8 +5128,6 @@ export class GameServer {
       // Everyone re-reads the newcomer: their nameplate and shirt just changed.
       { to: 'all', msg: { t: 'join', player: toInfo(p) } },
     ];
-    out.push(...this.notifyFaction(faction, 'system', 'A new citizen',
-      `${p.username} has sworn allegiance to ${factionName(faction)}.`, p.id));
     out.push(...this.broadcastFactions());
     return out;
   }

@@ -15,13 +15,69 @@
 
 import { BUST_POSES, type BustEntry } from './avatar_bust';
 import { type Cosmetics, sanitizeCosmetics } from './character';
-import { iconSvg } from './emoji_icons';
+import { type IconName, iconSvg } from './emoji_icons';
 import type { FactionPublic } from './net/protocol';
 import { skinSeed } from './net/protocol';
 import { FACTIONS, factionColor, factionName } from './teams';
 import { bustStage, injectGovStyle } from './gov_ui';
 
 const CSS = `
+/* DAYLIGHT. The pledge is the last thing a new player does before the world
+ * opens, straight after the first-play briefing — so it wears the briefing's
+ * clothes: pale sky, drifting graph-paper grid, floating voxels, white glass.
+ * Each side's colour washes in from its own edge. --side-a/--side-b are set
+ * from FACTIONS at render time. */
+.vx-gov-surface.vx-pledge-surface {
+  --side-a: #e23b3b; --side-b: #3b78e2;
+  --ink: #0f1c25; --ink-2: #4a5c68; --ink-3: #8795a0; --line: #e3e8ef;
+  overflow: hidden; color: var(--ink); backdrop-filter: none;
+  background:
+    radial-gradient(48% 62% at 0% 55%, color-mix(in srgb, var(--side-a) 24%, transparent), transparent 72%),
+    radial-gradient(48% 62% at 100% 55%, color-mix(in srgb, var(--side-b) 24%, transparent), transparent 72%),
+    radial-gradient(40% 40% at 50% 100%, rgba(255, 214, 140, .45), transparent 70%),
+    linear-gradient(180deg, #e8f3ff 0%, #f6f9fc 55%, #fdf7ec 100%);
+}
+/* A faint isometric grid, like graph paper for a voxel world. */
+.vx-pledge-surface::before {
+  content: ''; position: absolute; inset: -50%; pointer-events: none; opacity: .55;
+  background-image:
+    linear-gradient(30deg, rgba(40, 80, 120, .07) 1px, transparent 1px),
+    linear-gradient(150deg, rgba(40, 80, 120, .07) 1px, transparent 1px);
+  background-size: 56px 32px;
+  animation: vx-pledge-grid 40s linear infinite;
+}
+@keyframes vx-pledge-grid { to { transform: translate(56px, 32px); } }
+.vx-pledge-surface .vx-gov-scroll::-webkit-scrollbar-thumb { background: rgba(30, 60, 90, .18); }
+
+/* Voxels: five faces in preserve-3d (the bottom never shows). --s is the edge,
+   --c the colour. The same cube the briefing spins. */
+.vx-pledge-cube {
+  --s: 40px; --c: #2bb6e8;
+  position: relative; width: var(--s); height: var(--s); transform-style: preserve-3d;
+  transform: rotateX(-30deg) rotateY(45deg);
+}
+.vx-pledge-cube > i {
+  position: absolute; inset: 0; display: grid; place-items: center; font-style: normal;
+  backface-visibility: hidden; border-radius: calc(var(--s) * .06);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .35);
+  color: #fff; font-size: calc(var(--s) * .44);
+}
+.vx-pledge-cube > i svg { filter: drop-shadow(0 2px 3px rgba(0, 0, 0, .2)); }
+.vx-pledge-cube > i:nth-child(1) { transform: translateZ(calc(var(--s) / 2)); background: var(--c); }
+.vx-pledge-cube > i:nth-child(2) { transform: rotateY(90deg) translateZ(calc(var(--s) / 2)); background: color-mix(in srgb, var(--c) 78%, #0b1a24); }
+.vx-pledge-cube > i:nth-child(3) { transform: rotateX(90deg) translateZ(calc(var(--s) / 2)); background: color-mix(in srgb, var(--c) 55%, #fff); }
+.vx-pledge-cube > i:nth-child(4) { transform: rotateY(-90deg) translateZ(calc(var(--s) / 2)); background: color-mix(in srgb, var(--c) 78%, #0b1a24); }
+.vx-pledge-cube > i:nth-child(5) { transform: rotateY(180deg) translateZ(calc(var(--s) / 2)); background: var(--c); }
+@keyframes vx-pledge-spin { from { transform: rotateX(-30deg) rotateY(0deg); } to { transform: rotateX(-30deg) rotateY(360deg); } }
+
+.vx-pledge-field { position: absolute; inset: 0; pointer-events: none; }
+.vx-pledge-float {
+  position: absolute; left: var(--x); top: var(--y); opacity: var(--o, .5); perspective: 600px;
+  animation: vx-pledge-float var(--d, 14s) ease-in-out var(--delay, 0s) infinite alternate;
+}
+.vx-pledge-float .vx-pledge-cube { animation: vx-pledge-spin var(--spin, 26s) linear infinite; }
+@keyframes vx-pledge-float { from { transform: translateY(0); } to { transform: translateY(-38px); } }
+
 /* A DEFINITE HEIGHT, not just a cap.
  *
  * The cards live in .vx-gov-scroll, which is position:absolute — so it adds
@@ -33,115 +89,147 @@ const CSS = `
  * nothing under it to press — and why joining looked like something you had to
  * wait for something to unlock. So this states its height outright. */
 .vx-pledge-shell {
-  --side-a: #e23b3b; --side-b: #3b78e2;
-  position: relative; display: flex; flex-direction: column; gap: 18px;
-  width: min(1120px, 100%); height: min(860px, 100%); padding: 4px;
+  position: relative; z-index: 1; display: flex; flex-direction: column; gap: 12px;
+  width: min(1120px, 100%); height: min(880px, 100%); padding: 4px;
+  animation: vx-pledge-open .7s cubic-bezier(.2, .9, .2, 1) both;
 }
-/* Each side's colour bleeds in from its own edge, meeting in the middle. */
-.vx-pledge-shell::before {
-  content: ''; position: absolute; inset: -12% -8%; z-index: -1; pointer-events: none;
-  background:
-    radial-gradient(45% 60% at 0% 55%, color-mix(in srgb, var(--side-a) 34%, transparent), transparent 70%),
-    radial-gradient(45% 60% at 100% 55%, color-mix(in srgb, var(--side-b) 34%, transparent), transparent 70%);
-  animation: vx-pledge-breathe 6s ease-in-out infinite alternate;
+@keyframes vx-pledge-open { from { opacity: 0; transform: translateY(26px) scale(.97); } to { opacity: 1; transform: none; } }
+
+.vx-pledge-head { display: flex; flex-direction: column; align-items: center; text-align: center; }
+.vx-pledge-chapter {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 7px 13px 7px 10px; border-radius: 999px; background: #fff;
+  color: #3d4e59; font-size: 11px; font-weight: 800; letter-spacing: 1.4px; text-transform: uppercase;
+  box-shadow: 0 4px 14px -6px rgba(30, 60, 90, .45);
 }
-@keyframes vx-pledge-breathe { to { opacity: .6; } }
-.vx-pledge-head { text-align: center; }
+.vx-pledge-chapter::before {
+  content: ''; width: 8px; height: 8px; border-radius: 50%;
+  background: linear-gradient(90deg, var(--side-a) 50%, var(--side-b) 50%);
+  box-shadow: 0 0 0 4px rgba(120, 130, 160, .16);
+  animation: vx-pledge-dot 1.8s ease-in-out infinite;
+}
+@keyframes vx-pledge-dot { 50% { box-shadow: 0 0 0 7px rgba(120, 130, 160, .06); } }
 .vx-pledge-head h1 {
-  margin: 6px 0 0; font-size: clamp(28px, 5vw, 48px); font-weight: 900; letter-spacing: 4px; text-transform: uppercase;
-  background: linear-gradient(90deg, color-mix(in srgb, var(--side-a) 55%, #fff), #fff 50%, color-mix(in srgb, var(--side-b) 55%, #fff));
-  -webkit-background-clip: text; background-clip: text; color: transparent;
-  filter: drop-shadow(0 4px 20px rgba(0, 0, 0, .55));
+  margin: 12px 0 0; color: var(--ink); font-size: clamp(30px, 4.4vw, 52px); font-weight: 900;
+  line-height: 1; letter-spacing: -1.2px;
+}
+.vx-pledge-head h1 em {
+  font-style: normal; color: transparent; -webkit-background-clip: text; background-clip: text;
+  background-image: linear-gradient(90deg,
+    color-mix(in srgb, var(--side-a) 82%, #0e1c26), color-mix(in srgb, var(--side-b) 82%, #0e1c26));
 }
 .vx-pledge-head p {
-  margin: 8px auto 0; max-width: 62ch; font-size: 12.5px; line-height: 1.6; color: #9fb0cc;
+  margin: 10px auto 0; max-width: 60ch; font-size: 14px; font-weight: 500; line-height: 1.55; color: var(--ink-2);
 }
-.vx-pledge-head b { color: #ffd98a; }
+.vx-pledge-head b { color: var(--ink); font-weight: 800; }
 
 /* The pan fills the scrollport exactly, so each card is a known height and
-   scrolls its own dossier while the spin lights it as a whole. */
+   scrolls its own dossier. */
 .vx-pledge-cards {
-  display: grid; gap: 18px; grid-template-columns: 1fr 1fr; padding: 6px;
+  display: grid; gap: 22px; grid-template-columns: 1fr 1fr; padding: 16px 24px 26px;
   height: 100%; align-items: stretch;
 }
-.vx-pledge-cards.duo { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 14px; }
+.vx-pledge-cards.duo { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 16px; }
+
+/* VS: a white medallion ringed half in each side's colour, slowly turning. */
 .vx-pledge-vs {
-  align-self: center; display: grid; place-items: center; width: 64px; height: 64px; border-radius: 50%;
-  font: italic 900 20px/1 inherit; letter-spacing: 1px; color: #fff;
-  background: radial-gradient(circle at 50% 35%, #26324a, #0a111c);
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, .12), -10px 0 30px color-mix(in srgb, var(--side-a) 45%, transparent),
-    10px 0 30px color-mix(in srgb, var(--side-b) 45%, transparent);
+  position: relative; align-self: center; display: grid; place-items: center; width: 70px; height: 70px;
+  border-radius: 50%; background: #fff;
+  font-style: italic; font-weight: 900; font-size: 21px; line-height: 1; letter-spacing: -.5px; color: var(--ink);
+  box-shadow: 0 14px 30px -10px rgba(30, 60, 90, .45);
 }
+.vx-pledge-vs::before {
+  content: ''; position: absolute; inset: -5px; z-index: -1; border-radius: 50%;
+  background: conic-gradient(from 0deg, var(--side-a), color-mix(in srgb, var(--side-a) 20%, #fff), var(--side-b), color-mix(in srgb, var(--side-b) 20%, #fff), var(--side-a));
+  animation: vx-pledge-turn 6s linear infinite;
+}
+.vx-pledge-vs::after {
+  content: ''; position: absolute; left: 50%; top: -120%; bottom: -120%; width: 2px; z-index: -2;
+  transform: translateX(-50%);
+  background: linear-gradient(180deg, transparent, rgba(30, 60, 90, .16) 30%, rgba(30, 60, 90, .16) 70%, transparent);
+}
+@keyframes vx-pledge-turn { to { transform: rotate(360deg); } }
 
 .vx-pledge-card {
+  --side-ink: color-mix(in srgb, var(--side) 70%, #0e1c26);
+  --side-soft: color-mix(in srgb, var(--side) 11%, #fff);
   position: relative; display: flex; flex-direction: column; min-height: 0; cursor: pointer;
-  border-radius: 18px; overflow: hidden;
-  background: linear-gradient(180deg, color-mix(in srgb, var(--side) 10%, rgba(12, 20, 30, .92)), rgba(9, 14, 22, .94));
-  box-shadow: inset 0 0 0 1px rgba(232, 238, 252, .12), 0 20px 48px rgba(0, 0, 0, .45);
-  transition: box-shadow .2s, transform .2s cubic-bezier(.2, .9, .25, 1), opacity .3s, filter .3s;
+  border-radius: 24px; overflow: hidden;
+  /* Solid, not frosted: a backdrop-filter under the bust canvas composites a
+     pale veil over the whole viewport the canvas covers. */
+  background: rgba(255, 255, 255, .95);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .9), 0 1px 0 rgba(255, 255, 255, .9) inset,
+    0 24px 44px -24px rgba(30, 60, 90, .38), 0 10px 22px -14px rgba(30, 60, 90, .2);
+  transition: box-shadow .25s, transform .3s cubic-bezier(.2, .9, .25, 1), opacity .3s, filter .3s;
 }
-.vx-pledge-card:focus-visible { outline: 2px solid var(--side); outline-offset: 3px; }
+.vx-pledge-card:focus-visible { outline: 3px solid var(--side); outline-offset: 4px; }
 .vx-pledge-shell[data-phase="idle"] .vx-pledge-card:hover {
-  transform: translateY(-4px);
-  box-shadow: inset 0 0 0 1px var(--side), 0 26px 60px rgba(0, 0, 0, .55),
-    0 0 40px color-mix(in srgb, var(--side) 25%, transparent);
+  transform: translateY(-5px);
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--side) 45%, #fff),
+    0 24px 44px -22px color-mix(in srgb, var(--side) 60%, rgba(30, 60, 90, .5)), 0 10px 22px -14px rgba(30, 60, 90, .2);
 }
-/* The picked side burns; the other steps back. */
+/* The picked side lights up; the other steps back. */
 .vx-pledge-card[data-selected="1"] {
-  transform: translateY(-4px) scale(1.015);
-  box-shadow: inset 0 0 0 2px var(--side), 0 0 60px color-mix(in srgb, var(--side) 50%, transparent),
-    0 26px 60px rgba(0, 0, 0, .55);
+  transform: translateY(-6px) scale(1.012);
+  box-shadow: inset 0 0 0 3px var(--side), 0 0 0 6px color-mix(in srgb, var(--side) 16%, transparent),
+    0 24px 44px -20px color-mix(in srgb, var(--side) 75%, rgba(30, 60, 90, .5));
 }
 .vx-pledge-shell[data-picked="1"][data-phase="idle"] .vx-pledge-card:not([data-selected="1"]) {
-  opacity: .55; filter: saturate(.45);
+  opacity: .6; filter: saturate(.35);
 }
-.vx-pledge-shell[data-picked="1"][data-phase="idle"] .vx-pledge-card:not([data-selected="1"]):hover { opacity: .85; filter: none; }
+.vx-pledge-shell[data-picked="1"][data-phase="idle"] .vx-pledge-card:not([data-selected="1"]):hover { opacity: .9; filter: none; }
+
+/* THE BANNER. A band of the side's colour, striped like a flag on a pole, with
+   its spinning voxel crest and a giant ghost initial behind the name. */
 .vx-pledge-crest {
-  position: relative; flex: none; display: flex; align-items: center; gap: 13px; padding: 18px 20px;
+  position: relative; flex: none; display: flex; align-items: center; gap: 18px;
+  padding: 20px 22px 22px; overflow: hidden; color: #fff;
   background:
-    repeating-linear-gradient(135deg, rgba(255, 255, 255, .045) 0 10px, transparent 10px 20px),
-    linear-gradient(180deg, color-mix(in srgb, var(--side) 45%, transparent), transparent);
+    repeating-linear-gradient(135deg, rgba(255, 255, 255, .09) 0 12px, transparent 12px 24px),
+    radial-gradient(80% 140% at 0% 0%, color-mix(in srgb, var(--side) 55%, #fff), transparent 60%),
+    linear-gradient(135deg, var(--side), color-mix(in srgb, var(--side) 70%, #0e1c26));
 }
-.vx-pledge-crest-mark {
-  display: flex; align-items: center; justify-content: center; width: 44px; height: 44px;
-  border-radius: 12px; font-size: 21px; color: #0b1119;
-  background: linear-gradient(150deg, color-mix(in srgb, var(--side) 55%, #fff), var(--side));
-  box-shadow: 0 0 24px color-mix(in srgb, var(--side) 55%, transparent), inset 0 -3px rgba(0, 0, 0, .25);
+.vx-pledge-crest::after {
+  content: attr(data-initial); position: absolute; right: -8px; bottom: -40px;
+  font-weight: 900; font-size: 150px; line-height: 1; letter-spacing: -8px; color: rgba(255, 255, 255, .13); pointer-events: none;
 }
-.vx-pledge-card[data-selected="1"] .vx-pledge-crest-mark { animation: vx-pledge-pulse 1.6s ease-in-out infinite; }
-@keyframes vx-pledge-pulse { 50% { box-shadow: 0 0 40px color-mix(in srgb, var(--side) 85%, transparent), inset 0 -3px rgba(0, 0, 0, .25); } }
+.vx-pledge-emblem {
+  flex: none; display: grid; place-items: center; width: 64px; height: 64px; perspective: 600px;
+  animation: vx-pledge-bob 4.5s ease-in-out infinite;
+}
+.vx-pledge-emblem .vx-pledge-cube {
+  --s: 42px; --c: color-mix(in srgb, var(--side) 85%, #fff);
+  animation: vx-pledge-spin 16s linear infinite;
+}
+.vx-pledge-emblem .vx-pledge-cube > i { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .55); }
+.vx-pledge-card[data-selected="1"] .vx-pledge-emblem .vx-pledge-cube { animation-duration: 3s; }
+@keyframes vx-pledge-bob { 50% { transform: translateY(-6px); } }
+.vx-pledge-crest-text { position: relative; z-index: 1; flex: 1; min-width: 0; }
 .vx-pledge-crest h2 {
-  flex: 1; margin: 0; font-size: clamp(20px, 2.6vw, 27px); font-weight: 900; letter-spacing: 3px; text-transform: uppercase;
-  color: #fff; text-shadow: 0 0 24px color-mix(in srgb, var(--side) 70%, transparent) !important;
+  margin: 0; font-size: clamp(26px, 3.2vw, 38px); font-weight: 900; line-height: 1; letter-spacing: -.5px;
+  color: #fff; text-transform: uppercase;
 }
-/* Per-card pick button, pinned under the dossier. */
-.vx-pledge-pick {
-  flex: none; margin: 0 18px 18px; min-height: 46px; border: 1px solid color-mix(in srgb, var(--side) 55%, transparent);
-  border-radius: 12px; cursor: pointer; color: #fff; background: color-mix(in srgb, var(--side) 16%, transparent);
-  font: 800 11px/1 inherit; letter-spacing: 2px; text-transform: uppercase;
-  transition: background .15s, transform .15s, box-shadow .15s;
-}
-.vx-pledge-pick:hover { background: color-mix(in srgb, var(--side) 30%, transparent); }
-.vx-pledge-card[data-selected="1"] .vx-pledge-pick {
-  color: #0b1119; border-color: transparent;
-  background: linear-gradient(135deg, color-mix(in srgb, var(--side) 50%, #fff), var(--side));
-  box-shadow: 0 10px 28px color-mix(in srgb, var(--side) 45%, transparent);
+.vx-pledge-motto {
+  margin-top: 6px; font-size: 12.5px; font-weight: 600; letter-spacing: .2px; color: rgba(255, 255, 255, .86);
 }
 .vx-pledge-strength {
-  padding: 5px 9px; border-radius: 7px; font: 700 9px/1 inherit;
-  letter-spacing: 1.3px; text-transform: uppercase; color: #cfd9ea;
-  background: rgba(232, 238, 252, .1);
+  position: relative; z-index: 1; align-self: flex-start;
+  padding: 6px 10px; border-radius: 999px; font-weight: 800; font-size: 10px; line-height: 1;
+  letter-spacing: 1.2px; text-transform: uppercase; color: var(--side-ink);
+  background: #fff; box-shadow: 0 6px 16px -8px rgba(0, 0, 0, .45);
 }
-.vx-pledge-strength[data-tone="big"] { color: #ffd0a0; background: rgba(237, 160, 26, .2); }
-.vx-pledge-strength[data-tone="small"] { color: #a8e8c4; background: rgba(46, 160, 100, .22); }
+.vx-pledge-strength[data-tone="big"] { color: #9a5a00; background: #fff4dc; }
+.vx-pledge-strength[data-tone="small"] { color: #137046; background: #e3f8ec; }
 
 /* The plinth. The 3D busts are drawn OVER this box by the shared renderer, so
    it must keep its size whether or not a bust lands in it. */
 .vx-pledge-stage {
   position: relative; display: flex; align-items: flex-end; justify-content: center;
-  flex: none; height: clamp(132px, 21vh, 210px); margin: 0 18px; border-radius: 13px;
-  background: radial-gradient(70% 90% at 50% 12%, color-mix(in srgb, var(--side) 26%, transparent), transparent 72%),
-    rgba(0, 0, 0, .28);
+  flex: none; height: clamp(120px, 18vh, 200px); margin: 16px 18px 0; border-radius: 18px;
+  background:
+    radial-gradient(70% 90% at 50% 10%, #fff, transparent 70%),
+    linear-gradient(180deg, var(--side-soft), color-mix(in srgb, var(--side) 24%, #fff));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--side) 18%, #fff);
 }
 .vx-pledge-slot { position: absolute; top: 12px; bottom: 32px; }
 /* THE FALLBACK PORTRAIT. A browser hands out a limited number of WebGL contexts
@@ -152,23 +240,22 @@ const CSS = `
   position: absolute; left: 50%; top: 50%; transform: translate(-50%, -58%);
   display: flex; align-items: center; justify-content: center;
   width: 86px; height: 86px; border-radius: 50%;
-  font: 800 34px/1 inherit; letter-spacing: -1px; color: #fff;
+  font-weight: 800; font-size: 34px; line-height: 1; letter-spacing: -1px; color: #fff;
   background: linear-gradient(160deg, color-mix(in srgb, var(--side) 62%, #fff), var(--side));
-  box-shadow: 0 14px 30px color-mix(in srgb, var(--side) 46%, transparent),
-    inset 0 2px 0 rgba(255, 255, 255, .4);
+  box-shadow: 0 14px 30px -8px color-mix(in srgb, var(--side) 60%, transparent),
+    inset 0 2px 0 rgba(255, 255, 255, .4), 0 0 0 5px #fff;
 }
 .vx-pledge-plinth {
-  width: 74%; height: 12px; margin-bottom: 12px; border-radius: 50%;
-  background: radial-gradient(50% 100% at 50% 50%, color-mix(in srgb, var(--side) 60%, transparent), transparent 76%);
+  width: 74%; height: 14px; margin-bottom: 12px; border-radius: 50%;
+  background: radial-gradient(closest-side, color-mix(in srgb, var(--side) 45%, rgba(20, 50, 80, .3)), transparent);
 }
 /* THE NAMEPLATE. Each citizen's name, under the slot they stand in. It sits
    UNDER the bust slot, never behind it — the bust canvas paints over anything
    inside its own rectangle, so text that overlaps it is text with a character
    drawn through it. */
 .vx-pledge-stage .vx-pledge-stage-name {
-  position: absolute; bottom: 5px;
-  font: 700 13px/1.25 inherit; letter-spacing: .6px; text-align: center; color: #fff;
-  text-shadow: 0 2px 7px rgba(0, 0, 0, .7);
+  position: absolute; bottom: 6px;
+  font-weight: 800; font-size: 12.5px; line-height: 1.25; letter-spacing: .2px; text-align: center; color: var(--side-ink);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
@@ -176,91 +263,135 @@ const CSS = `
    and says so across the middle of it. */
 .vx-pledge-empty {
   position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-  display: flex; align-items: center; gap: 7px; padding: 7px 14px; border-radius: 999px;
-  font: 700 10.5px/1 inherit; letter-spacing: 1.6px; text-transform: uppercase;
-  color: #ffd0a0; background: rgba(9, 15, 23, .82);
-  box-shadow: inset 0 0 0 1px rgba(237, 160, 26, .35);
+  display: flex; align-items: center; gap: 8px; padding: 9px 15px; border-radius: 999px; white-space: nowrap;
+  font-weight: 800; font-size: 10.5px; line-height: 1; letter-spacing: 1.4px; text-transform: uppercase;
+  color: var(--side-ink); background: #fff;
+  box-shadow: 0 10px 24px -12px color-mix(in srgb, var(--side) 70%, #102030);
 }
-.vx-pledge-empty svg { width: 13px; height: 13px; }
+.vx-pledge-empty svg { width: 14px; height: 14px; }
 .vx-pledge-open-note {
-  font-size: 11.5px; line-height: 1.5; color: #9fb0cc; text-align: center;
+  position: relative; padding: 12px 14px 12px 46px; border-radius: 14px;
+  font-size: 12.5px; font-weight: 500; line-height: 1.5; color: #3a4b56;
+  background: linear-gradient(100deg, #fff8e6, #fffdf6); border: 1px solid #f6e3b4;
+}
+.vx-pledge-open-note::before {
+  content: '★'; position: absolute; left: 13px; top: 50%; width: 24px; height: 24px; margin-top: -12px;
+  display: grid; place-items: center; border-radius: 50%; background: #f5b82e; color: #fff; font-size: 12px;
 }
 
-/* THE PICK. A wash of the side's colour over the chosen card, then the
-   winner's glow and the other side's fade once the oath is sworn. */
+/* THE PICK. A wash of the side's colour over the chosen card. */
 .vx-pledge-card::after {
   content: ''; position: absolute; inset: 0; pointer-events: none; opacity: 0;
-  background: radial-gradient(90% 55% at 50% 0%, color-mix(in srgb, var(--side) 38%, transparent), transparent 72%);
-  transition: opacity .2s;
+  background: radial-gradient(90% 50% at 50% 100%, color-mix(in srgb, var(--side) 14%, transparent), transparent 72%);
+  transition: opacity .25s;
 }
 .vx-pledge-card[data-selected="1"]::after, .vx-pledge-card[data-fate="won"]::after { opacity: 1; }
 .vx-pledge-card[data-fate="won"] {
   animation: vx-pledge-win 1.1s cubic-bezier(.2, .9, .3, 1.3) both;
-  box-shadow: inset 0 0 0 3px var(--side), 0 0 90px color-mix(in srgb, var(--side) 70%, transparent);
+  box-shadow: inset 0 0 0 3px var(--side), 0 0 0 8px color-mix(in srgb, var(--side) 22%, transparent),
+    0 24px 44px -20px color-mix(in srgb, var(--side) 80%, transparent);
 }
-.vx-pledge-card[data-fate="lost"] { opacity: .32; filter: grayscale(.9); transform: scale(.96); }
+.vx-pledge-card[data-fate="lost"] { opacity: .3; filter: grayscale(1); transform: scale(.95); }
 @keyframes vx-pledge-win {
-  0% { transform: scale(1.025); }
-  30% { transform: scale(1.075); }
+  0% { transform: scale(1.02); }
+  30% { transform: scale(1.07); }
   100% { transform: scale(1.035); }
 }
 
 /* The only scrolling part of a card. Everything here is reading material; the
-   crest above it and the button below it stay put. */
+   banner above it and the button below it stay put. */
 .vx-pledge-body {
+  position: relative; z-index: 1;
   flex: 1; min-height: 0; overflow-y: auto;
-  display: flex; flex-direction: column; gap: 13px; padding: 15px 18px 18px;
+  display: flex; flex-direction: column; gap: 12px; padding: 14px 18px 16px;
 }
 .vx-pledge-body::-webkit-scrollbar { width: 7px; }
-.vx-pledge-body::-webkit-scrollbar-thumb { border-radius: 4px; background: rgba(232, 238, 252, .18); }
+.vx-pledge-body::-webkit-scrollbar-thumb { border-radius: 4px; background: rgba(30, 60, 90, .16); }
 
-.vx-pledge-stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; }
+.vx-pledge-stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
 .vx-pledge-stat {
-  padding: 9px 8px; border-radius: 9px; text-align: center; background: rgba(232, 238, 252, .06);
+  display: grid; grid-template-columns: 40px minmax(0, 1fr); gap: 11px; align-items: center;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 15px; background: #fbfcfe;
 }
-.vx-pledge-stat b { display: block; font-size: 15px; }
-.vx-pledge-stat small { display: block; margin-top: 3px; font-size: 8.5px; letter-spacing: 1.1px; text-transform: uppercase; color: #77879f; }
+.vx-pledge-stat-glyph {
+  display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12px;
+  font-size: 18px; color: var(--side-ink); background: var(--side-soft);
+}
+.vx-pledge-stat b { display: block; font-size: 20px; font-weight: 900; line-height: 1.1; color: var(--ink); }
+.vx-pledge-stat small { display: block; margin-top: 2px; font-size: 10.5px; font-weight: 700; letter-spacing: .8px; text-transform: uppercase; color: var(--ink-3); }
+/* A tug-of-war meter under the numbers: this side's share of all citizens. */
+.vx-pledge-share { grid-column: 1 / -1; height: 6px; border-radius: 99px; background: #edf1f5; overflow: hidden; }
+.vx-pledge-share > span {
+  display: block; height: 100%; border-radius: inherit;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--side) 60%, #fff), var(--side));
+  transition: width .6s cubic-bezier(.2, .8, .2, 1);
+}
 
-.vx-pledge-roster { border-radius: 9px; background: rgba(232, 238, 252, .045); padding: 10px 11px; }
+.vx-pledge-roster { padding: 12px 13px; border: 1px solid var(--line); border-radius: 15px; background: #fbfcfe; }
 .vx-pledge-roster-head {
   display: flex; justify-content: space-between; align-items: baseline;
-  font-size: 9.5px; letter-spacing: 1.6px; text-transform: uppercase; color: #77879f;
+  font-size: 11px; font-weight: 800; letter-spacing: 1.4px; text-transform: uppercase; color: var(--ink-3);
 }
 .vx-pledge-roster-names {
-  display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; max-height: 74px; overflow-y: auto;
+  display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; max-height: 78px; overflow-y: auto;
 }
 .vx-pledge-roster-names::-webkit-scrollbar { width: 6px; }
-.vx-pledge-roster-names::-webkit-scrollbar-thumb { border-radius: 3px; background: rgba(232, 238, 252, .2); }
+.vx-pledge-roster-names::-webkit-scrollbar-thumb { border-radius: 3px; background: rgba(30, 60, 90, .16); }
 .vx-pledge-name {
-  padding: 3px 7px; border-radius: 6px; font-size: 10.5px; color: #c3cfe2;
-  background: rgba(232, 238, 252, .07);
+  padding: 4px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 700; color: var(--side-ink);
+  background: var(--side-soft); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--side) 16%, #fff);
 }
-.vx-pledge-roster-empty { margin-top: 8px; font-size: 11.5px; color: #77879f; }
+.vx-pledge-roster-empty { margin-top: 8px; font-size: 12.5px; font-weight: 500; color: var(--ink-3); }
+
+/* Per-card pick button, pinned under the dossier. */
+.vx-pledge-pick {
+  position: relative; z-index: 1;
+  flex: none; display: flex; align-items: center; justify-content: center; gap: 8px;
+  margin: 0 18px 18px; min-height: 48px; border: 1px solid color-mix(in srgb, var(--side) 30%, #fff);
+  border-radius: 14px; cursor: pointer; color: var(--side-ink); background: var(--side-soft);
+  font-weight: 800; font-size: 13.5px; line-height: 1; letter-spacing: .2px;
+  transition: background .15s, transform .15s, box-shadow .2s, color .15s;
+}
+.vx-pledge-pick svg { width: 16px; height: 16px; }
+.vx-pledge-pick:hover { background: color-mix(in srgb, var(--side) 20%, #fff); }
+.vx-pledge-card[data-selected="1"] .vx-pledge-pick {
+  color: #fff; border-color: transparent;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--side) 88%, #fff), color-mix(in srgb, var(--side) 82%, #0e1c26));
+  box-shadow: 0 12px 26px -10px color-mix(in srgb, var(--side) 85%, #0e1c26), inset 0 1px 0 rgba(255, 255, 255, .35);
+}
 
 .vx-pledge-roll {
   flex: none; display: flex; flex-direction: column; align-items: center; gap: 8px;
 }
-.vx-pledge-roll .vx-gov-btn {
+.vx-pledge-surface .vx-pledge-roll .vx-gov-btn {
   position: relative; overflow: hidden;
-  width: min(460px, 100%); min-height: 56px; font-size: 13px; letter-spacing: 2.6px;
+  width: min(480px, 100%); min-height: 58px; border-radius: 16px;
+  font-size: 15px; font-weight: 850; letter-spacing: .2px; text-transform: none;
+  color: #8795a0; background: #fff; box-shadow: inset 0 0 0 1px var(--line), 0 10px 24px -14px rgba(30, 60, 90, .4);
 }
-.vx-pledge-roll[data-side] .vx-gov-btn:not(:disabled) {
-  color: #0b1119; background: linear-gradient(135deg, color-mix(in srgb, var(--side) 45%, #fff), var(--side));
-  box-shadow: 0 12px 34px color-mix(in srgb, var(--side) 45%, transparent);
+.vx-pledge-surface .vx-pledge-roll[data-side] .vx-gov-btn:not(:disabled) {
+  color: #fff; text-shadow: 0 1px 1px rgba(0, 0, 0, .15);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--side) 88%, #fff), color-mix(in srgb, var(--side) 82%, #0e1c26));
+  box-shadow: 0 16px 34px -12px color-mix(in srgb, var(--side) 85%, #0e1c26), inset 0 1px 0 rgba(255, 255, 255, .35);
 }
-/* A sheen that sweeps the idle button, so the one thing to press reads as live. */
+/* A sheen that sweeps the live button, so the one thing to press reads as live. */
 .vx-pledge-roll .vx-gov-btn::after {
   content: ''; position: absolute; top: 0; bottom: 0; left: -40%; width: 30%;
   background: linear-gradient(100deg, transparent, rgba(255, 255, 255, .55), transparent);
   transform: skewX(-18deg); animation: vx-pledge-sheen 2.6s ease-in-out infinite;
 }
-.vx-pledge-roll .vx-gov-btn:disabled { opacity: .55; cursor: default; }
+.vx-pledge-roll .vx-gov-btn:disabled { opacity: 1; cursor: default; }
 .vx-pledge-roll .vx-gov-btn:disabled::after { display: none; }
 @keyframes vx-pledge-sheen { 0%, 55% { left: -40%; } 100% { left: 130%; } }
-.vx-pledge-roll-note { font-size: 11px; line-height: 1.5; text-align: center; color: #ffb4a4; }
+.vx-pledge-roll-note {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 600; line-height: 1.5; text-align: center; color: #b4452f;
+}
+.vx-pledge-roll-note svg { width: 13px; height: 13px; }
 
-/* THE REVEAL. Laid over the whole shell — above the bust layer — once the spin
-   settles: a flash in the winning colour, the side's name, and a burst. */
+/* THE REVEAL. Laid over the whole surface — above the bust layer — once the
+   oath is sworn: a daylight flash in the winning colour, the side's name on a
+   white banner, and a burst of voxels. */
 .vx-pledge-reveal {
   position: absolute; inset: 0; z-index: 10; pointer-events: none;
   display: none; flex-direction: column; align-items: center; justify-content: center;
@@ -268,62 +399,79 @@ const CSS = `
 .vx-pledge-reveal[data-show="1"] { display: flex; }
 .vx-pledge-flash {
   position: absolute; inset: -10%; opacity: 0;
-  background: radial-gradient(45% 45% at 50% 50%, color-mix(in srgb, var(--side) 55%, #fff), transparent 70%);
-  animation: vx-pledge-flash 1.1s ease-out both;
+  background: radial-gradient(45% 45% at 50% 50%, #fff, color-mix(in srgb, var(--side) 30%, #fff) 45%, transparent 75%);
+  animation: vx-pledge-flash 1.3s ease-out both;
 }
-@keyframes vx-pledge-flash { 0% { opacity: 0; } 12% { opacity: .9; } 100% { opacity: 0; } }
+@keyframes vx-pledge-flash { 0% { opacity: 0; } 12% { opacity: 1; } 100% { opacity: .5; } }
 .vx-pledge-banner {
-  position: relative; padding: 18px 42px 22px; border-radius: 18px; text-align: center;
-  background: rgba(7, 12, 19, .9);
-  box-shadow: inset 0 0 0 2px var(--side), 0 0 70px color-mix(in srgb, var(--side) 60%, transparent);
+  position: relative; display: flex; flex-direction: column; align-items: center;
+  padding: 26px 52px 30px; border-radius: 26px; text-align: center;
+  background: rgba(255, 255, 255, .96);
+  box-shadow: inset 0 0 0 3px var(--side), 0 0 0 10px color-mix(in srgb, var(--side) 18%, transparent),
+    0 40px 90px -20px color-mix(in srgb, var(--side) 70%, rgba(30, 60, 90, .5));
   animation: vx-pledge-pop .7s cubic-bezier(.2, 1.4, .4, 1) both .08s;
 }
+.vx-pledge-banner .vx-pledge-emblem { width: 90px; height: 90px; }
+.vx-pledge-banner .vx-pledge-cube { --s: 60px; --c: var(--side); animation-duration: 2.4s; }
 .vx-pledge-banner small {
-  display: block; font-size: 10px; letter-spacing: 3px; text-transform: uppercase; color: #b9862d;
+  display: block; margin-top: 10px; font-size: 11px; font-weight: 800; letter-spacing: 3px; text-transform: uppercase; color: #8795a0;
 }
 .vx-pledge-banner strong {
-  display: block; margin-top: 6px; font-size: clamp(30px, 6vw, 56px); letter-spacing: 4px;
-  text-transform: uppercase; color: var(--side);
-  text-shadow: 0 0 26px color-mix(in srgb, var(--side) 70%, transparent) !important;
+  display: block; margin-top: 6px; font-size: clamp(36px, 7vw, 68px); font-weight: 900; line-height: 1;
+  letter-spacing: -1px; text-transform: uppercase; color: var(--side);
 }
 @keyframes vx-pledge-pop {
   0% { transform: scale(.3) rotate(-6deg); opacity: 0; }
   100% { transform: scale(1) rotate(0); opacity: 1; }
 }
 .vx-pledge-spark {
-  position: absolute; left: 50%; top: 50%; width: 9px; height: 14px; border-radius: 2px;
-  background: var(--c); opacity: 0;
-  animation: vx-pledge-burst 1.5s cubic-bezier(.15, .7, .3, 1) both var(--delay);
+  position: absolute; left: 50%; top: 50%; width: var(--sz, 12px); height: var(--sz, 12px); border-radius: 2px;
+  background: var(--c); opacity: 0; box-shadow: inset 0 -3px rgba(0, 0, 0, .18), inset 0 2px rgba(255, 255, 255, .4);
+  animation: vx-pledge-burst 1.6s cubic-bezier(.15, .7, .3, 1) both var(--delay);
 }
 @keyframes vx-pledge-burst {
   0% { opacity: 1; transform: translate(-50%, -50%) rotate(0); }
+  80% { opacity: 1; }
   100% { opacity: 0; transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy))) rotate(var(--rot)); }
 }
 @media (prefers-reduced-motion: reduce) {
   .vx-pledge-spark, .vx-pledge-roll .vx-gov-btn::after { display: none; }
-  .vx-pledge-shell::before, .vx-pledge-card[data-selected="1"] .vx-pledge-crest-mark { animation: none; }
-  .vx-pledge-card[data-fate="won"], .vx-pledge-banner, .vx-pledge-flash { animation-duration: .01s; }
+  .vx-pledge-surface *, .vx-pledge-surface::before, .vx-pledge-shell { animation: none !important; }
+  .vx-pledge-card[data-fate="won"], .vx-pledge-banner, .vx-pledge-flash { animation-duration: .01s !important; }
 }
 .vx-pledge-foot {
-  display: flex; align-items: center; justify-content: center; gap: 14px;
-  font-size: 11px; color: #77879f;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px 16px;
+  font-size: 12px; font-weight: 500; color: var(--ink-3);
 }
 .vx-pledge-back {
-  border: 0; border-radius: 8px; padding: 8px 13px; cursor: pointer;
-  font: 600 10px/1 inherit; letter-spacing: 1.3px; text-transform: uppercase;
-  color: #9fb0cc; background: rgba(232, 238, 252, .08);
+  min-height: 36px; border: 1px solid var(--line); border-radius: 11px; padding: 0 14px; cursor: pointer;
+  font-weight: 800; font-size: 12px; line-height: 1; color: #2d3d48; background: #f1f4f8;
 }
-.vx-pledge-back:hover { color: #e8eefc; background: rgba(232, 238, 252, .16); }
-.vx-pledge-back:focus-visible { outline: 2px solid #eda01a; outline-offset: 2px; }
+.vx-pledge-back:hover { background: #e8edf3; }
+.vx-pledge-back:disabled { opacity: .35; cursor: default; }
+.vx-pledge-back:focus-visible { outline: 2px solid #2bb6e8; outline-offset: 2px; }
 
 @media (max-width: 860px) {
   /* Stacked, the two cards cannot both fill the screen — the pan goes back to
      scrolling, and each card sizes to its own content with the button at its
      foot rather than a screen away from it. */
   .vx-pledge-cards, .vx-pledge-cards.duo { grid-template-columns: 1fr; height: auto; }
-  .vx-pledge-vs { justify-self: center; width: 48px; height: 48px; font-size: 16px; }
+  .vx-pledge-vs { justify-self: center; width: 52px; height: 52px; font-size: 17px; }
+  .vx-pledge-vs::after { display: none; }
   .vx-pledge-stage { height: 180px; }
   .vx-pledge-body { overflow-y: visible; }
+  .vx-pledge-float { display: none; }
+}
+@media (max-width: 520px) {
+  .vx-gov-surface.vx-pledge-surface { padding: 12px; }
+  .vx-pledge-head p { font-size: 13px; }
+  .vx-pledge-crest { padding: 38px 16px 18px; gap: 12px; }
+  .vx-pledge-crest h2 { font-size: 26px; }
+  .vx-pledge-strength { position: absolute; top: 12px; right: 12px; padding: 5px 9px; font-size: 9px; }
+  .vx-pledge-emblem { width: 48px; height: 48px; }
+  .vx-pledge-emblem .vx-pledge-cube { --s: 32px; }
+  .vx-pledge-stats { grid-template-columns: 1fr; }
+  .vx-pledge-foot > span { display: none; }
 }
 `;
 
@@ -337,6 +485,34 @@ function injectStyle(): void {
   el.textContent = CSS;
   document.head.appendChild(el);
 }
+
+/** A five-faced CSS voxel (the bottom never shows). `face` goes on the sides. */
+function makeCube(face = ''): HTMLDivElement {
+  const cube = document.createElement('div');
+  cube.className = 'vx-pledge-cube';
+  for (let f = 0; f < 5; f++) {
+    const side = document.createElement('i');
+    if (face && f !== 2) side.innerHTML = face;
+    cube.appendChild(side);
+  }
+  return cube;
+}
+
+/** The spinning crest: a voxel in the side's colour carrying the flag. */
+function makeEmblem(): HTMLDivElement {
+  const emblem = document.createElement('div');
+  emblem.className = 'vx-pledge-emblem';
+  emblem.appendChild(makeCube(iconSvg('flag')));
+  return emblem;
+}
+
+/** One line under each side's name. Flavour only; unknown sides get none. */
+const MOTTOS: Record<number, string> = {
+  0: 'Strike first. Hold the line.',
+  1: 'Outthink them. Outlast them.',
+};
+
+const hex = (id: number): string => `#${factionColor(id).toString(16).padStart(6, '0')}`;
 
 export interface PledgeData {
   factions: FactionPublic[];
@@ -385,6 +561,8 @@ function dossiersFor(list: readonly FactionPublic[] | undefined): FactionPublic[
 export class FactionPicker {
   private readonly surface: HTMLElement;
   private readonly shell: HTMLElement;
+  /** The floating voxels behind everything. */
+  private readonly field: HTMLElement;
   /** The pan of cards. Its CHILDREN are rebuilt on every render; it is not. */
   private readonly cards: HTMLElement;
   /** The positioned box the cards scroll in and the bust canvas covers. */
@@ -429,6 +607,28 @@ export class FactionPicker {
       }
     });
 
+    // Drifting background voxels, alternating the two sides' colours — the
+    // same field the first-play briefing floats behind its frame.
+    this.field = document.createElement('div');
+    this.field.className = 'vx-pledge-field';
+    this.field.setAttribute('aria-hidden', 'true');
+    const floats: [number, number, number][] = [ // x%, y%, size px
+      [4, 12, 34], [12, 80, 22], [30, 4, 16], [66, 92, 28],
+      [84, 8, 26], [94, 58, 38], [2, 48, 18], [76, 42, 14],
+    ];
+    floats.forEach(([x, y, size], n) => {
+      const wrap = document.createElement('div');
+      wrap.className = 'vx-pledge-float';
+      wrap.style.cssText = `--x:${x}%;--y:${y}%;--d:${10 + n * 1.7}s;--delay:${-n * 1.3}s;--spin:${18 + n * 4}s;--o:${.3 + (n % 3) * .14}`;
+      const cube = makeCube();
+      cube.style.setProperty('--s', `${size}px`);
+      // Left of centre floats side A's colour, right of it side B's.
+      cube.style.setProperty('--c', x < 50 ? 'var(--side-a)' : 'var(--side-b)');
+      wrap.appendChild(cube);
+      this.field.appendChild(wrap);
+    });
+    this.surface.appendChild(this.field);
+
     this.shell = document.createElement('div');
     this.shell.className = 'vx-pledge-shell';
     this.shell.dataset.phase = 'idle';
@@ -436,10 +636,10 @@ export class FactionPicker {
     const head = document.createElement('div');
     head.className = 'vx-pledge-head';
     const eyebrow = document.createElement('div');
-    eyebrow.className = 'vx-gov-eyebrow';
-    eyebrow.textContent = 'Swear allegiance';
+    eyebrow.className = 'vx-pledge-chapter';
+    eyebrow.textContent = 'Final step · Swear allegiance';
     const title = document.createElement('h1');
-    title.textContent = 'Choose your side';
+    title.innerHTML = 'Choose your <em>side</em>';
     const lede = document.createElement('p');
     lede.innerHTML =
       'Pick the side you will fight for in every war, flag raid and season. '
@@ -459,6 +659,15 @@ export class FactionPicker {
     scroll.appendChild(this.cards);
     this.viewport.appendChild(scroll);
 
+    // The warning sits in the foot row, beside the way out, so the cards keep
+    // the height.
+    const note = document.createElement('div');
+    note.className = 'vx-pledge-roll-note';
+    const lock = document.createElement('span');
+    lock.innerHTML = iconSvg('lock');
+    const noteText = document.createElement('span');
+    noteText.textContent = 'Your choice is permanent on this account.';
+    note.append(lock, noteText);
     const foot = document.createElement('div');
     foot.className = 'vx-pledge-foot';
     const footText = document.createElement('span');
@@ -472,7 +681,7 @@ export class FactionPicker {
     back.className = 'vx-pledge-back';
     back.textContent = 'Decide later';
     back.addEventListener('click', () => this.hide());
-    foot.append(footText, back);
+    foot.append(note, footText, back);
 
     const roll = document.createElement('div');
     this.rollWrap = roll;
@@ -482,10 +691,7 @@ export class FactionPicker {
     this.rollButton.className = 'vx-gov-btn';
     this.rollButton.dataset.kind = 'primary';
     this.rollButton.addEventListener('click', () => this.swear());
-    const note = document.createElement('div');
-    note.className = 'vx-pledge-roll-note';
-    note.textContent = 'Your choice is permanent on this account.';
-    roll.append(this.rollButton, note);
+    roll.append(this.rollButton);
 
     this.reveal = document.createElement('div');
     this.reveal.className = 'vx-pledge-reveal';
@@ -553,14 +759,19 @@ export class FactionPicker {
       if (on) card.dataset.selected = '1'; else delete card.dataset.selected;
       card.setAttribute('aria-checked', String(on));
       const btn = card.querySelector<HTMLButtonElement>('.vx-pledge-pick');
-      if (btn) btn.textContent = on ? 'Selected' : `Choose ${factionName(id)}`;
+      if (btn) {
+        const label = document.createElement('span');
+        label.textContent = on ? `${factionName(id)} selected` : `Choose ${factionName(id)}`;
+        btn.innerHTML = iconSvg(on ? 'check' : 'arrowRight');
+        btn.prepend(label);
+      }
     }
     if (pick === null) {
       delete this.rollWrap.dataset.side;
       this.rollWrap.style.removeProperty('--side');
     } else {
       this.rollWrap.dataset.side = String(pick);
-      this.rollWrap.style.setProperty('--side', `#${factionColor(pick).toString(16).padStart(6, '0')}`);
+      this.rollWrap.style.setProperty('--side', hex(pick));
     }
     this.rollButton.disabled = this.phase !== 'idle' || pick === null;
     this.rollButton.textContent = this.phase === 'landed' ? 'Sworn'
@@ -602,7 +813,7 @@ export class FactionPicker {
   }
 
   private showReveal(winner: number): void {
-    const side = `#${factionColor(winner).toString(16).padStart(6, '0')}`;
+    const side = hex(winner);
     this.reveal.style.setProperty('--side', side);
     const flash = document.createElement('div');
     flash.className = 'vx-pledge-flash';
@@ -612,14 +823,15 @@ export class FactionPicker {
     eyebrow.textContent = 'You have sworn to';
     const name = document.createElement('strong');
     name.textContent = factionName(winner);
-    banner.append(eyebrow, name);
+    banner.append(makeEmblem(), eyebrow, name);
     this.reveal.replaceChildren(flash);
-    const colors = [side, '#ffd06a', '#ffffff'];
-    for (let i = 0; i < 40; i++) {
+    const colors = [side, '#ffd06a', `color-mix(in srgb, ${side} 45%, #fff)`, '#2bb6e8'];
+    for (let i = 0; i < 48; i++) {
       const spark = document.createElement('span');
       spark.className = 'vx-pledge-spark';
-      const angle = (i / 40) * Math.PI * 2 + Math.random() * 0.3;
-      const dist = 160 + Math.random() * 260;
+      const angle = (i / 48) * Math.PI * 2 + Math.random() * 0.3;
+      const dist = 180 + Math.random() * 300;
+      spark.style.setProperty('--sz', `${8 + Math.round(Math.random() * 10)}px`);
       spark.style.setProperty('--dx', `${Math.round(Math.cos(angle) * dist)}px`);
       spark.style.setProperty('--dy', `${Math.round(Math.sin(angle) * dist * 0.75)}px`);
       spark.style.setProperty('--rot', `${Math.round(Math.random() * 720 - 360)}deg`);
@@ -644,9 +856,10 @@ export class FactionPicker {
     // Never the wire's list directly — see dossiersFor. Both sides get a card
     // whether or not anyone has joined either of them.
     const dossiers = dossiersFor(data.factions);
-    const hex = (id: number) => `#${factionColor(id).toString(16).padStart(6, '0')}`;
-    if (dossiers[0]) this.shell.style.setProperty('--side-a', hex(dossiers[0].faction));
-    if (dossiers[1]) this.shell.style.setProperty('--side-b', hex(dossiers[1].faction));
+    // On the surface, not the shell: the backdrop washes and floating voxels
+    // are tinted with them too.
+    if (dossiers[0]) this.surface.style.setProperty('--side-a', hex(dossiers[0].faction));
+    if (dossiers[1]) this.surface.style.setProperty('--side-b', hex(dossiers[1].faction));
     this.cards.classList.toggle('duo', dossiers.length === 2);
     const total = dossiers.reduce((n, f) => n + f.memberCount, 0);
     // Only tell the player to point at somebody when somebody is standing there.
@@ -672,11 +885,19 @@ export class FactionPicker {
       // --- crest -------------------------------------------------------------
       const crest = document.createElement('div');
       crest.className = 'vx-pledge-crest';
-      const mark = document.createElement('div');
-      mark.className = 'vx-pledge-crest-mark';
-      mark.innerHTML = iconSvg('flag');
+      crest.dataset.initial = factionName(info.faction).charAt(0);
+      const text = document.createElement('div');
+      text.className = 'vx-pledge-crest-text';
       const name = document.createElement('h2');
       name.textContent = factionName(info.faction);
+      text.appendChild(name);
+      const mottoLine = MOTTOS[info.faction];
+      if (mottoLine) {
+        const motto = document.createElement('div');
+        motto.className = 'vx-pledge-motto';
+        motto.textContent = mottoLine;
+        text.appendChild(motto);
+      }
       const strength = document.createElement('span');
       strength.className = 'vx-pledge-strength';
       // Purely informational. Nothing here blocks a join — a lopsided war is a
@@ -690,7 +911,7 @@ export class FactionPicker {
       } else {
         strength.textContent = 'Even';
       }
-      crest.append(mark, name, strength);
+      crest.append(makeEmblem(), text, strength);
 
       // --- the plinth --------------------------------------------------------
       // The citizens online on this side right now stand on it, named. With
@@ -756,20 +977,33 @@ export class FactionPicker {
 
       const stats = document.createElement('div');
       stats.className = 'vx-pledge-stats';
-      const cells: [string, string][] = [
-        [String(info.memberCount), 'Citizens'],
-        [total > 0 ? `${Math.round((info.memberCount / total) * 100)}%` : '—', 'Of all citizens'],
+      const share = total > 0 ? info.memberCount / total : 0;
+      const cells: [IconName, string, string][] = [
+        ['shield', String(info.memberCount), 'Citizens'],
+        ['scales', total > 0 ? `${Math.round(share * 100)}%` : '—', 'Of all citizens'],
       ];
-      for (const [value, label] of cells) {
+      for (const [icon, value, label] of cells) {
         const stat = document.createElement('div');
         stat.className = 'vx-pledge-stat';
+        const glyph = document.createElement('div');
+        glyph.className = 'vx-pledge-stat-glyph';
+        glyph.innerHTML = iconSvg(icon);
+        const words = document.createElement('div');
         const b = document.createElement('b');
         b.textContent = value;
         const small = document.createElement('small');
         small.textContent = label;
-        stat.append(b, small);
+        words.append(b, small);
+        stat.append(glyph, words);
         stats.appendChild(stat);
       }
+      const meter = document.createElement('div');
+      meter.className = 'vx-pledge-share';
+      meter.setAttribute('aria-hidden', 'true');
+      const fill = document.createElement('span');
+      fill.style.width = `${Math.round(share * 100)}%`;
+      meter.appendChild(fill);
+      stats.appendChild(meter);
       body.appendChild(stats);
 
       const roster = document.createElement('div');

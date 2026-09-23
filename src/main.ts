@@ -1,4 +1,5 @@
 import './prestige_ui.css';
+import './arena_3d.css';
 import * as THREE from 'three';
 import { GameAudio, materialOf } from './audio';
 import { Block, BLOCKS, isReplaceable, isSolid, isVaultMasonry } from './blocks';
@@ -33,7 +34,7 @@ import {
   WORLD_SEED, WORLD_HALF, WORLD_BORDER, CORE_HALF, RELOCATE_RANGE, makeUsername, skinSeed,
   GameMode, MAX_ATTUNED, RANGED_MAX_DAMAGE, TOTEM_COOLDOWN, TOTEM_WINDUP, COMBAT_TAG,
   TPA_HOLD, TPA_EXPIRE, type DuelLeaderboardEntry, type PlayerCounts,
-  type FactionPublic, type Notification,
+  type FactionPublic,
 } from './net/protocol';
 import {
   TrapField, TrapTarget, TrapTickResult, TrapKind, TrapFxWhat, TRAP_NAMES, TRAP_VERBS, isTrapBlock,
@@ -65,15 +66,11 @@ import {
 import {
   GliderRig, RIG_HARNESS_Y, buildGliderRig, glidePose, poseGliderRig,
 } from './glidermodels';
+import { Cosmetics, defaultCosmetics, sanitizeCosmetics } from './character';
 import {
-  COSMETIC_RANGES, Cosmetics, EYE_COLORS, FACE_ACCESSORIES,
-  HAIR_COLORS, HAIR_STYLES, HATS, HAT_COLORS, PANTS_COLORS, SHIRT_COLORS,
-  SKIN_TONES, Swatch, defaultCosmetics, randomCosmetics, sanitizeCosmetics,
-} from './character';
-import {
-  NO_CAPE, type Wardrobe, emptyWardrobe, equipCape, sanitizeWardrobe,
+  type Wardrobe, emptyWardrobe, equipCape, sanitizeWardrobe,
 } from './capes';
-import { CapesUI } from './capes_ui';
+import { createWardrobe } from './wardrobe_ui';
 import { WorldMap } from './worldmap';
 import { Accounts, Account } from './net/accounts';
 import {
@@ -115,6 +112,7 @@ import {
 import { PartyUI } from './party_ui';
 import { PartyVisuals } from './party_visuals';
 import { parkourTheme } from './parkour_themes';
+import { parkourBuildBlocked, parkourPadImpulse, parkourPadUnder } from './parkour_mechanics';
 import {
   DUEL_DIVISIONS, DUEL_FLAIRS, DUEL_SIGILS, DUEL_SIGIL_SIZE, DUEL_TIER_THEMES,
   DuelProgressChange, DuelPublicProfile,
@@ -147,7 +145,7 @@ import { PostFX } from './postfx';
 import { SunShadow } from './shadows';
 import { createHudMods } from './hud_mods';
 import type { HudModData } from './hud_mods';
-import { structureChestTier, worldStructures } from './structures';
+import { structureChestTier } from './structures';
 import { chestLootSlots } from './loot';
 import {
   VAULT_BOSS_NAMES, VAULT_LOOT_COOLDOWN, VAULT_LOOT_WINDOW, VAULT_RECHARGE,
@@ -1247,7 +1245,7 @@ function exitBoat(hop = true): void {
   if (hop) { player.vel.y = 5; player.fallDistance = 0; }
 }
 
-// World map (M key): terrain + structures + vaults + waypoints + travel.
+// World map (M key): terrain + war flags + waypoints + totem travel.
 const worldMap = new WorldMap(scene, camera, world.terrain, {
   player: () => ({ x: player.pos.x, z: player.pos.z, yaw: player.yaw }),
   faction: () => localFaction,
@@ -1262,6 +1260,7 @@ let chestBaseVersion = -1;   // version as of the last load FROM the server
 // Multiplayer HUD: connection/roster line + a small kill feed (top-right).
 const netinfoEl = document.createElement('div');
 netinfoEl.className = 'mc-font';
+netinfoEl.id = 'netinfo';
 netinfoEl.style.cssText =
   'position:absolute;top:6px;right:8px;font-size:14px;z-index:10;' +
   'pointer-events:none;text-align:right;';
@@ -2371,9 +2370,6 @@ function saveLocalAccounts(): void {
 // page has a hard ceiling on GL contexts and the world and the Duels ladder
 // already spend two.
 const factionPicker = new FactionPicker(app);
-// The cape wardrobe rides with the pledge screen for pointer-lock etiquette:
-// it opens from the title screen today, but it is a full-screen modal either way.
-const capesUI = new CapesUI(app);
 
 // --- THE POINTER-LOCK ARBITER ------------------------------------------------
 // One question, asked in one place: does anything on screen need a cursor?
@@ -2391,7 +2387,7 @@ const capesUI = new CapesUI(app);
 function cursorPanelOpen(): boolean {
   return invUI.open || worldMap.open || warfareUI.open || chatBox.open
     || factionPicker.open
-    || capesUI.open || fieldGuide.open || tutorial.open || guideOpen
+    || wardrobeUI.open || fieldGuide.open || tutorial.open || guideOpen
     || strategicPanel.style.display !== 'none'   // helipad bay
     || trapPanel.style.display !== 'none'        // trap wiring panel
     || revivePanel.style.display !== 'none'      // teammate revival picker
@@ -2439,7 +2435,7 @@ function resumePlay(): void {
   syncPointerLock();
 }
 
-for (const panel of [factionPicker, capesUI]) {
+for (const panel of [factionPicker]) {
   // The arbiter would catch these on the next frame anyway; running it on the
   // open/close edge means the cursor is already there when the panel paints.
   panel.onOpen = syncPointerLock;
@@ -2464,12 +2460,6 @@ function pledgeDossiers(): FactionPublic[] {
 /** Push the latest dossiers into the pledge screen if it is up. */
 function refreshPledgeScreen(): void {
   if (factionPicker.open) factionPicker.update(safePledgeData());
-}
-
-/** Faction news (a new citizen swore in): a chime and a toast, nothing kept. */
-function pushNotification(notif: Notification): void {
-  audio.dispatchChime();
-  showNotice(notif.body || notif.title);
 }
 
 /** Show the allegiance pledge. Everything else waits behind it — an unpledged
@@ -2515,17 +2505,6 @@ function adoptFaction(faction: number): void {
   refreshFlagless();       // the badge is about the side we just joined
   refreshNetInfo();
   refreshPledgeScreen();
-}
-
-// All surface structures shown on the world map as icons (one cached sweep —
-// the layout is fixed for the seed, so it never needs recomputing).
-let structureMarks: { x: number; z: number; kind: string }[] | null = null;
-function refreshStructureMap(): void {
-  if (!structureMarks) {
-    structureMarks = worldStructures(seed, world.terrain)
-      .map((s) => ({ x: s.x, z: s.z, kind: s.kind }));
-  }
-  worldMap.setStructures(structureMarks);
 }
 
 function onAuthSuccess(username: string): void {
@@ -2695,6 +2674,17 @@ const submitBtn = document.getElementById('submit-btn')!;
 // rather than hidden in a sentence of microcopy below the form.
 const tabRegister = document.getElementById('tab-register')!;
 const tabLogin = document.getElementById('tab-login')!;
+const authTitle = document.querySelector<HTMLElement>('#auth .auth-title')!;
+// Show / hide the passphrase. Only ever changes the input type — the value
+// never leaves the field.
+const passToggle = document.getElementById('pass-toggle') as HTMLButtonElement;
+passToggle.addEventListener('click', () => {
+  const show = authPass.type === 'password';
+  authPass.type = show ? 'text' : 'password';
+  passToggle.setAttribute('aria-pressed', String(show));
+  passToggle.setAttribute('aria-label', show ? 'Hide passphrase' : 'Show passphrase');
+  authPass.focus();
+});
 let authMode: 'register' | 'login' = 'register';
 // Remember the last account that logged in (username only) so a returning player
 // lands on a prefilled login instead of retyping it.
@@ -2711,10 +2701,11 @@ function setAuthMode(mode: 'register' | 'login'): void {
     tab.setAttribute('aria-selected', String(active));
   }
   if (mode === 'register') {
-    submitBtn.textContent = 'Create account';
+    submitBtn.textContent = 'Enlist';
+    authTitle.textContent = 'Enter the war';
     authModeLabel.textContent =
-      'Roll a callsign and pick a passphrase. Your character, inventory and ' +
-      'faction are kept with the account.';
+      'Roll a callsign and pick a passphrase. Your soldier, kit and side ' +
+      'are kept with the account.';
     authUser.readOnly = true;          // names are random-only on register
     rollBtn.style.display = '';
     // ALWAYS roll a fresh name on entering register — never keep a name typed
@@ -2722,8 +2713,9 @@ function setAuthMode(mode: 'register' | 'login'): void {
     rollUsername();
   } else {
     submitBtn.textContent = 'Log in';
+    authTitle.textContent = 'Welcome back';
     authModeLabel.textContent =
-      'Welcome back. Sign in and the world picks up exactly where you left it.';
+      'Sign in and the world picks up exactly where you left it.';
     authUser.readOnly = false;         // type your existing name to log in
     authUser.value = lastUser;         // prefill the remembered account
     rollBtn.style.display = 'none';
@@ -2744,14 +2736,14 @@ tabLogin.addEventListener('click', () => {
 // had no flag) says so plainly instead of counting toward a date in 2286.
 const elimPanel = document.createElement('div');
 elimPanel.className = 'mc-font';
-// Matches the title screen it sits on: dark glass, crimson ink.
+// Matches the daylight title screen it sits on: white glass, crimson ink.
 elimPanel.style.cssText =
   'display:none;position:absolute;left:50%;bottom:26px;transform:translateX(-50%);z-index:8;' +
-  'width:min(430px,calc(100vw - 36px));padding:14px 18px;border-radius:14px;' +
-  'background:linear-gradient(180deg,rgba(48,14,17,.94),rgba(24,8,11,.94));' +
-  'border:1px solid rgba(255,77,85,.4);color:#ffb3b7;font-size:12px;text-align:center;' +
-  'line-height:1.55;text-shadow:none;backdrop-filter:blur(10px);' +
-  'box-shadow:0 22px 48px rgba(0,0,0,.5),inset 0 1px rgba(255,255,255,.06);';
+  'width:min(430px,calc(100vw - 36px));padding:14px 18px;border-radius:16px;' +
+  'background:linear-gradient(180deg,rgba(255,244,245,.96),rgba(255,236,238,.94));' +
+  'border:1px solid rgba(212,52,63,.3);color:#8f1d27;font-size:12.5px;text-align:center;' +
+  'line-height:1.55;text-shadow:none;backdrop-filter:blur(12px);' +
+  'box-shadow:0 22px 48px rgba(157,31,40,.18),inset 0 1px rgba(255,255,255,.9);';
 overlay.appendChild(elimPanel);
 let elimUntilMs = 0;        // wall-clock ms when the lockout lifts (0 = none)
 let elimPermanent = false;
@@ -2911,6 +2903,10 @@ const duelReadyBarFill = document.getElementById('duel-readybar-fill') as HTMLEl
 const duelReady = document.getElementById('duel-ready') as HTMLButtonElement;
 const duelStart = document.getElementById('duel-start') as HTMLButtonElement;
 const duelLeave = document.getElementById('duel-leave') as HTMLButtonElement;
+const duelShare = document.getElementById('duel-share') as HTMLButtonElement;
+const duelSteps = document.getElementById('duel-steps');
+/** The host has copied or shared this lobby's link at least once. */
+let duelInviteShared = false;
 const duelProfileCard = document.getElementById('duel-profile-card')!;
 const duelProfileEmblem = document.getElementById('duel-profile-emblem')!;
 const duelRankName = document.getElementById('duel-rank-name')!;
@@ -3327,6 +3323,58 @@ function duelSkinColor(skin: number): string {
   return `hsl(${((skin % 360) + 360) % 360} 68% 56%)`;
 }
 
+/** A lobby seat's avatar: a small CSS voxel head that turns slowly in 3D,
+ *  painted in the player's stable skin colour. */
+function lobbyAvatar(skin: number): HTMLElement {
+  const avatar = document.createElement('span'); avatar.className = 'duel-avatar fl-head';
+  avatar.setAttribute('aria-hidden', 'true');
+  avatar.style.setProperty('--skin', duelSkinColor(skin));
+  avatar.style.setProperty('--spin-delay', `${-(Math.abs(skin) % 7)}s`);
+  const cube = document.createElement('span'); cube.className = 'fl-head-cube';
+  for (let i = 0; i < 6; i++) cube.appendChild(document.createElement('i'));
+  avatar.appendChild(cube);
+  return avatar;
+}
+
+/** Tick off the three lobby steps: shared, joined, all ready. Each step only
+ *  counts once the ones before it have. */
+function paintLobbySteps(steps: HTMLElement | null, shared: boolean, joined: boolean, ready: boolean): void {
+  if (!steps) return;
+  const done = [shared || joined, joined, joined && ready];
+  steps.querySelectorAll('li').forEach((li, i) => {
+    li.classList.toggle('done', done[i]);
+    li.classList.toggle('now', !done[i] && (i === 0 || done[i - 1]));
+  });
+}
+
+/** Copy an invite link, falling back to a selection copy. Plays the button's
+ *  "copied" burst on success. Resolves with whether the copy landed. */
+async function copyInviteLink(link: HTMLInputElement, button: HTMLElement): Promise<boolean> {
+  let ok = false;
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable');
+    await navigator.clipboard.writeText(link.value);
+    ok = true;
+  } catch {
+    link.focus(); link.select();
+    try { ok = document.execCommand('copy'); } catch { /* selection remains */ }
+  }
+  button.classList.remove('copied');
+  if (ok) { void button.offsetWidth; button.classList.add('copied'); }
+  return ok;
+}
+
+/** The native share sheet, where the platform has one. */
+function wireLobbyShare(button: HTMLButtonElement, url: () => string, onShared: () => void): void {
+  const nav = navigator as Navigator & { share?: (data: ShareData) => Promise<void> };
+  button.hidden = typeof nav.share !== 'function';
+  button.onclick = () => {
+    const href = url();
+    if (!href || !nav.share) return;
+    nav.share({ title: 'Join my VOXELON lobby', url: href }).then(onShared, () => { /* dismissed */ });
+  };
+}
+
 function renderDuelLobby(): void {
   const snap = duelSnapshot;
   refreshArenaTabs();
@@ -3341,9 +3389,8 @@ function renderDuelLobby(): void {
     const row = document.createElement('div'); row.className = 'duel-slot';
     if (p.ready && p.connected) row.classList.add('ready');
     if (p.id === net.myId) { row.classList.add('me'); applyRankTheme(row, p.profile.rank); }
-    const avatar = document.createElement('span'); avatar.className = 'duel-avatar';
-    avatar.setAttribute('aria-hidden', 'true');
-    avatar.style.background = duelSkinColor(p.skin);
+    row.style.setProperty('--seat-i', String(duelRoster.childElementCount));
+    const avatar = lobbyAvatar(p.skin);
     const name = document.createElement('strong');
     name.textContent = p.id === net.myId ? `${p.username} (you)` : p.username;
     if (p.host) {
@@ -3371,6 +3418,8 @@ function renderDuelLobby(): void {
 
   const me = snap.participants.find((p) => p.id === net.myId);
   const readyCount = snap.participants.filter((p) => p.ready && p.connected).length;
+  paintLobbySteps(duelSteps, duelInviteShared, snap.participants.length >= DUEL_MIN_PLAYERS,
+    readyCount === snap.participants.length && snap.participants.length >= DUEL_MIN_PLAYERS);
   // The bar tracks readiness of the people actually here, not of four seats.
   duelReadyBarFill.style.width = snap.participants.length
     ? `${Math.round(readyCount / snap.participants.length * 100)}%` : '0%';
@@ -3418,17 +3467,43 @@ minigamesModal.addEventListener('keydown', (event) => {
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
 });
 
-// Parallax on the card art: the pointer nudges the image inside its frame.
-for (const card of minigamesModal.querySelectorAll<HTMLElement>('.minigame-card')) {
-  card.addEventListener('pointermove', (event) => {
-    if (accessibility.reducedMotion || accessibility.photosensitivitySafe) return;
-    const rect = card.getBoundingClientRect();
-    card.style.setProperty('--px', `${((event.clientX - rect.left) / rect.width - .5) * -10}px`);
-    card.style.setProperty('--py', `${((event.clientY - rect.top) / rect.height - .5) * -8}px`);
-  });
-  card.addEventListener('pointerleave', () => {
-    card.style.setProperty('--px', '0px'); card.style.setProperty('--py', '0px');
-  });
+// 3D tilt on anything marked [data-tilt] (game cards, the lobby hero): the
+// card leans toward the pointer and its art parallaxes inside the frame.
+// Delegated, because the party lobby hero is rebuilt on every snapshot.
+let tiltTarget: HTMLElement | null = null;
+function resetTilt(el: HTMLElement): void {
+  for (const prop of ['--px', '--py', '--rx', '--ry']) el.style.setProperty(prop, prop.startsWith('--r') ? '0deg' : '0px');
+  el.classList.remove('tilting');
+}
+minigamesModal.addEventListener('pointermove', (event) => {
+  const el = (event.target as Element | null)?.closest<HTMLElement>('[data-tilt]') ?? null;
+  if (tiltTarget && tiltTarget !== el) resetTilt(tiltTarget);
+  tiltTarget = el;
+  if (!el || event.pointerType === 'touch') return;
+  if (accessibility.reducedMotion || accessibility.photosensitivitySafe) return;
+  const rect = el.getBoundingClientRect();
+  const x = (event.clientX - rect.left) / rect.width - .5;
+  const y = (event.clientY - rect.top) / rect.height - .5;
+  el.classList.add('tilting');
+  el.style.setProperty('--px', `${x * -10}px`);
+  el.style.setProperty('--py', `${y * -8}px`);
+  el.style.setProperty('--ry', `${x * 9}deg`);
+  el.style.setProperty('--rx', `${y * -7}deg`);
+});
+minigamesModal.addEventListener('pointerleave', () => { if (tiltTarget) resetTilt(tiltTarget); tiltTarget = null; });
+
+// The Arena backdrop: a handful of voxel cubes drifting and turning in 3D.
+{
+  const field = document.getElementById('arena-voxels');
+  const tints = ['#7dd3fc', '#fcd34d', '#a7f3d0', '#f9a8d4', '#c4b5fd', '#fdba74', '#93c5fd', '#86efac'];
+  for (let n = 0; field && n < 12; n++) {
+    const wrap = document.createElement('span'); wrap.className = 'ar-voxel';
+    wrap.style.cssText = `--x:${(n * 37 + 7) % 96}%;--y:${(n * 53 + 11) % 88}%;--s:${14 + (n * 7) % 26}px;` +
+      `--c:${tints[n % tints.length]};--d:${14 + (n % 5) * 3}s;--delay:${-n * 1.7}s;--z:${(n % 4) * 60 - 90}px`;
+    const cube = document.createElement('span'); cube.className = 'ar-voxel-cube';
+    for (let i = 0; i < 6; i++) cube.appendChild(document.createElement('i'));
+    wrap.appendChild(cube); field.appendChild(wrap);
+  }
 }
 for (const disabled of minigamesModal.querySelectorAll<HTMLButtonElement>('[aria-disabled="true"]')) {
   disabled.addEventListener('click', (event) => {
@@ -3458,6 +3533,7 @@ duelsCardAction.addEventListener('click', () => {
 });
 duelsPrivateAction.addEventListener('click', () => {
   if (!net.connected || duelsPrivateAction.getAttribute('aria-disabled') === 'true') return;
+  duelInviteShared = false;
   duelQueueStatus.textContent = 'Creating your private party…';
   duelFeedback.textContent = 'Opening a private party…';
   net.sendDuelCreate();
@@ -3485,20 +3561,22 @@ duelLeave.addEventListener('click', () => {
   if (pendingDuelRetry) window.clearTimeout(pendingDuelRetry); pendingDuelRetry = 0;
   duelLocalFallback = null;
   setDuelParam(null); showDuelBrowser(); duelFeedback.textContent = '';
+  duelInviteShared = false;
 });
 duelCopy.addEventListener('click', async () => {
   if (!duelInvite.value) return;
-  try {
-    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(duelInvite.value);
-    else throw new Error('Clipboard API unavailable');
-    duelFeedback.textContent = 'Invite copied. Send it to whoever you want to beat.';
-  } catch {
-    duelInvite.focus(); duelInvite.select();
-    let copied = false;
-    try { copied = document.execCommand('copy'); } catch { /* selection remains */ }
-    duelFeedback.textContent = copied ? 'Invite copied.' : 'Copy unavailable — the invite is selected.';
+  const copied = await copyInviteLink(duelInvite, duelCopy);
+  duelFeedback.textContent = copied
+    ? 'Invite copied. Send it to whoever you want to beat.'
+    : 'Copy unavailable — the invite is selected.';
+  if (copied) {
+    duelInviteShared = true;
+    duelCopy.textContent = 'Copied!';
+    window.setTimeout(() => { duelCopy.textContent = 'Copy invite'; }, 1800);
+    renderDuelLobby();
   }
 });
+wireLobbyShare(duelShare, () => duelInvite.value, () => { duelInviteShared = true; renderDuelLobby(); });
 
 net.onDuelLobby = (snapshot, inviteToken) => {
   duelQueued = false;
@@ -3934,12 +4012,18 @@ function renderDuelResult(result: DuelResult): void {
     const crestStage = document.createElement('div'); crestStage.className = 'duel-crest-stage';
     const effects = document.createElement('div'); effects.className = 'duel-ascension-fx';
     effects.setAttribute('aria-hidden', 'true');
-    effects.innerHTML = '<i class="duel-orbit"></i><i class="duel-orbit inner"></i><i class="duel-shockwave"></i><i class="duel-shockwave second"></i>';
+    // Light rays and a glowing pedestal sit under the crest; the orbits and
+    // shockwaves are tilted rings in the same 3D stage, and every spark is a
+    // small voxel that flies out at its own depth.
+    effects.innerHTML = '<i class="duel-rays"></i><i class="duel-pedestal"></i>' +
+      '<i class="duel-orbit"></i><i class="duel-orbit inner"></i><i class="duel-shockwave"></i><i class="duel-shockwave second"></i>';
     for (let i = 0; i < 24; i++) {
       const spark = document.createElement('b');
       spark.style.setProperty('--angle', `${i * 15}deg`);
       spark.style.setProperty('--distance', `${90 + (i % 4) * 17}px`);
       spark.style.setProperty('--spark-delay', `${(i % 3) * 45}ms`);
+      spark.style.setProperty('--z', `${((i * 7) % 5 - 2) * 40}px`);
+      spark.style.setProperty('--spin', `${(i % 2 ? 1 : -1) * (240 + (i % 5) * 60)}deg`);
       effects.appendChild(spark);
     }
     crestStage.append(effects, revealEmblem);
@@ -4676,8 +4760,7 @@ const controlsPanel = (() => {
 })();
 
 controlsBtn.addEventListener('click', () => {
-  charUI.close();
-  capesUI.hide();
+  wardrobeUI.hide();
   const opening = controlsPanel.style.display !== 'flex';
   if (opening) renderControlsBody(); // pick up any rebinds since it last opened
   controlsPanel.style.display = opening ? 'flex' : 'none';
@@ -4717,21 +4800,6 @@ function saveCosmetics(): void {
   if (net.connected) net.sendCosmetics(myCosmetics);
 }
 
-// Every editor row: which Cosmetics field it cycles, its label, the display
-// name per index and (for colour categories) the swatch to preview.
-const CHAR_OPTIONS: { key: keyof Cosmetics; label: string; names: string[];
-  swatches?: Swatch[] }[] = [
-  { key: 'skin', label: 'Skin Tone', names: SKIN_TONES.map((s) => s.name), swatches: SKIN_TONES },
-  { key: 'hairStyle', label: 'Hair Style', names: HAIR_STYLES },
-  { key: 'hair', label: 'Hair Colour', names: HAIR_COLORS.map((s) => s.name), swatches: HAIR_COLORS },
-  { key: 'eyes', label: 'Eyes', names: EYE_COLORS.map((s) => s.name), swatches: EYE_COLORS },
-  { key: 'shirt', label: 'Shirt', names: SHIRT_COLORS.map((s) => s.name), swatches: SHIRT_COLORS },
-  { key: 'pants', label: 'Trousers', names: PANTS_COLORS.map((s) => s.name), swatches: PANTS_COLORS },
-  { key: 'hat', label: 'Hat', names: HATS },
-  { key: 'hatColor', label: 'Hat Colour', names: HAT_COLORS.map((s) => s.name), swatches: HAT_COLORS },
-  { key: 'face', label: 'Face', names: FACE_ACCESSORIES },
-];
-
 const titleCharacterPreview = (() => {
   const host = document.getElementById('title-character-preview')!;
   const previewRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -4740,8 +4808,8 @@ const titleCharacterPreview = (() => {
   host.appendChild(previewRenderer.domElement);
   const previewScene = new THREE.Scene();
   const previewCam = new THREE.PerspectiveCamera(38, 1, 0.1, 20);
-  previewCam.position.set(0, 1.08, 3.85);
-  previewCam.lookAt(0, 1.0, 0);
+  previewCam.position.set(0, 1.15, 4.3);
+  previewCam.lookAt(0, 0.98, 0);
   let body: AvatarBody | null = null;
   let pointerX = 0;
   let pointerY = 0;
@@ -4753,19 +4821,30 @@ const titleCharacterPreview = (() => {
     previewCam.aspect = width / height;
     previewCam.updateProjectionMatrix();
   };
-  host.addEventListener('pointermove', (e) => {
+  // The soldier on the plinth follows the pointer anywhere on the title
+  // screen, not just over its own box — it is watching you pick your side.
+  overlay.addEventListener('pointermove', (e) => {
     const rect = host.getBoundingClientRect();
-    pointerX = ((e.clientX - rect.left) / rect.width - 0.5) * 2;
-    pointerY = ((e.clientY - rect.top) / rect.height - 0.5) * 2;
+    if (!rect.width) return;
+    const cx = rect.left + rect.width / 2, cy = rect.top + rect.height * 0.3;
+    pointerX = Math.max(-1, Math.min(1, (e.clientX - cx) / (window.innerWidth * 0.45)));
+    pointerY = Math.max(-1, Math.min(1, (e.clientY - cy) / (window.innerHeight * 0.6)));
   });
-  host.addEventListener('pointerleave', () => { pointerX = 0; pointerY = 0; });
+  overlay.addEventListener('pointerleave', () => { pointerX = 0; pointerY = 0; });
   new ResizeObserver(resize).observe(host);
 
   const animate = (): void => {
     requestAnimationFrame(animate);
     if (body) {
-      body.head.rotation.y += (pointerX * 0.55 - body.head.rotation.y) * 0.12;
-      body.head.rotation.x += (pointerY * 0.3 - body.head.rotation.x) * 0.12;
+      const t = performance.now() / 1000;
+      // Model faces +z after the flip, so looking toward the pointer is -x.
+      body.head.rotation.y += (-pointerX * 0.6 - body.head.rotation.y) * 0.1;
+      body.head.rotation.x += (pointerY * 0.3 - body.head.rotation.x) * 0.1;
+      // At ease: a slow breath through the shoulders and a slight body turn.
+      body.group.rotation.y += (Math.PI - pointerX * 0.18 - body.group.rotation.y) * 0.05;
+      const breath = Math.sin(t * 1.6) * 0.012;
+      body.parts[2].rotation.x = -0.06 + breath; body.parts[3].rotation.x = 0.06 - breath;
+      body.parts[2].rotation.z = -0.05; body.parts[3].rotation.z = 0.05;
     }
     if (screen === 'title' && authed) previewRenderer.render(previewScene, previewCam);
   };
@@ -4784,471 +4863,36 @@ const titleCharacterPreview = (() => {
   };
 })();
 
-// THE DRESSING ROOM. A lit stage rather than a settings dialog: the avatar
-// stands on a podium under a spotlight, and every cosmetic category is a row
-// you can walk with the arrow keys. Styled from one injected `vx-dress-` sheet
-// so the markup below stays readable.
-//
-// Painted in DAYLIGHT, matching the cape wardrobe it sits beside. Both screens
-// exist to judge colour — a skin tone, a shirt, a cape — and colour cannot be
-// judged against near-black: on the old dark stage every swatch read as a dark
-// version of itself and neighbouring shades were indistinguishable. The
-// spotlight and podium survive the move; they are just cast onto paper now.
-const DRESS_CSS = `
-.vx-dress {
-  --ink: #16202e; --ink-soft: #435771; --ink-mute: #6f8298;
-  --line: rgba(22,42,70,.14); --plate: #ffffff;
-  --gold: #b07c14; --gold-lit: #e5a72b; --gold-deep: #855a06;
-  position: absolute; inset: 0; z-index: 24; display: none;
-  flex-direction: column; align-items: center; justify-content: center;
-  gap: clamp(10px, 2vh, 20px); padding: 22px; overflow-y: auto;
-  color: var(--ink);
-  font-family: ui-sans-serif, -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif;
-  background:
-    radial-gradient(ellipse 55% 45% at 50% -8%, rgba(255,214,148,.55), transparent 62%),
-    radial-gradient(ellipse 70% 60% at 8% 100%, rgba(168,205,255,.4), transparent 66%),
-    linear-gradient(180deg, #ffffff, #eef2f8 55%, #e2e8f2);
-}
-.vx-dress * { box-sizing: border-box; text-shadow: none; font-family: inherit; }
-/* The same voxel grid the title screen wears, low on the wall. */
-.vx-dress::after {
-  content: ''; position: absolute; inset: 0; pointer-events: none;
-  background:
-    linear-gradient(rgba(40,70,110,.05) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(40,70,110,.05) 1px, transparent 1px);
-  background-size: 38px 38px;
-  -webkit-mask-image: linear-gradient(180deg, transparent 38%, #000 100%);
-  mask-image: linear-gradient(180deg, transparent 38%, #000 100%);
-}
-.vx-dress > * { position: relative; z-index: 1; }
-
-.vx-dress-head { display: grid; justify-items: center; gap: 5px; }
-.vx-dress-eyebrow {
-  display: flex; align-items: center; gap: 9px;
-  font-size: 9px; font-weight: 700; letter-spacing: 3px;
-  text-transform: uppercase; color: var(--gold);
-}
-.vx-dress-eyebrow::before, .vx-dress-eyebrow::after {
-  content: ''; width: 34px; height: 1px; background: rgba(176,124,20,.45);
-}
-.vx-dress h2 {
-  margin: 0; font-family: 'Lucida Console', Monaco, monospace;
-  font-size: clamp(22px, 3.4vw, 30px); font-weight: 700; letter-spacing: 2px;
-  color: var(--ink);
-}
-
-.vx-dress-cols { display: flex; gap: 30px; align-items: center; }
-
-/* LEFT: the stage. A cone of light, the model, and a turning podium. */
-.vx-dress-stage {
-  position: relative; width: 320px; padding-bottom: 26px; flex: none;
-}
-.vx-dress-preview {
-  position: relative; width: 300px; height: 430px; margin: 0 auto;
-  border-radius: 20px; overflow: hidden; cursor: grab; touch-action: none;
-  background:
-    radial-gradient(ellipse 70% 46% at 50% 96%, rgba(176,124,20,.16), transparent 70%),
-    linear-gradient(180deg, #eef3fa 0%, #dfe7f2 62%, #d3dcea 100%);
-  box-shadow: inset 0 0 0 1px var(--line), 0 24px 48px rgba(24,40,66,.18),
-    inset 0 12px 26px rgba(255,255,255,.8);
-}
-.vx-dress-preview canvas { position: relative; z-index: 2; display: block; }
-/* The spotlight: a cone widening down the stage, with dust drifting through. */
-.vx-dress-beam {
-  position: absolute; inset: -14% 0 32%; z-index: 1; pointer-events: none;
-  clip-path: polygon(41% 0, 59% 0, 96% 100%, 4% 100%);
-  background: linear-gradient(180deg, rgba(255,236,190,.85), rgba(255,214,133,.3) 62%, transparent);
-  animation: vx-dress-flicker 6s ease-in-out infinite;
-}
-@keyframes vx-dress-flicker { 50% { opacity: .74; } }
-.vx-dress-motes {
-  position: absolute; inset: 0; z-index: 1; pointer-events: none; opacity: .5;
-  background:
-    radial-gradient(1.6px 1.6px at 22% 30%, rgba(120,96,42,.5), transparent),
-    radial-gradient(1.4px 1.4px at 68% 18%, rgba(120,96,42,.4), transparent),
-    radial-gradient(1.8px 1.8px at 46% 62%, rgba(120,96,42,.34), transparent),
-    radial-gradient(1.3px 1.3px at 78% 74%, rgba(120,96,42,.42), transparent),
-    radial-gradient(1.5px 1.5px at 14% 84%, rgba(120,96,42,.3), transparent);
-  animation: vx-dress-motes 14s linear infinite;
-}
-@keyframes vx-dress-motes { to { transform: translateY(-46px); opacity: .18; } }
-/* The podium: a still ellipse under the model's feet. On a lit stage this is
-   the SHADOW the character casts rather than a pool of light — a screen blend
-   comes to nothing against paper — so it multiplies, and so never smears over
-   the boots. */
-.vx-dress-podium {
-  position: absolute; left: 50%; bottom: 14px; z-index: 3;
-  width: 210px; height: 46px; transform: translateX(-50%); pointer-events: none;
-  mix-blend-mode: multiply;
-  border-radius: 50%;
-  background: radial-gradient(closest-side, rgba(48,62,88,.34), rgba(48,62,88,.1) 70%, transparent);
-}
-.vx-dress-drag {
-  position: absolute; left: 0; right: 0; bottom: 0; text-align: center;
-  font-size: 9px; font-weight: 700; letter-spacing: 2.2px;
-  text-transform: uppercase; color: var(--ink-mute);
-}
-
-/* RIGHT: the wardrobe rack — one glass row per cosmetic category. */
-.vx-dress-panel {
-  display: flex; flex-direction: column; gap: 6px; min-width: 400px;
-  padding: 16px; border-radius: 20px;
-  background: linear-gradient(180deg, #ffffff, #f4f7fb);
-  box-shadow: inset 0 0 0 1px var(--line), 0 20px 44px rgba(24,40,66,.14);
-}
-.vx-dress-row {
-  display: flex; align-items: center; gap: 9px; padding: 5px 6px 5px 10px;
-  border-radius: 13px; background: var(--plate);
-  box-shadow: inset 0 0 0 1px var(--line);
-  transition: box-shadow .16s ease, background .16s ease, transform .16s ease;
-}
-.vx-dress-row:hover, .vx-dress-row:focus-within {
-  background: #fff9ec; transform: translateX(2px);
-  box-shadow: inset 0 0 0 1px rgba(176,124,20,.35), 0 4px 14px rgba(24,40,66,.08);
-}
-.vx-dress-row:focus { outline: none; }
-.vx-dress-row.is-hit { animation: vx-dress-hit .3s ease; }
-@keyframes vx-dress-hit {
-  0% { box-shadow: inset 0 0 0 2px rgba(176,124,20,.8), 0 0 20px rgba(229,167,43,.45); }
-}
-.vx-dress-icon {
-  display: grid; place-items: center; width: 26px; height: 26px; flex: none;
-  border-radius: 8px; font-size: 14px; color: var(--gold);
-  background: rgba(229,167,43,.16); box-shadow: inset 0 0 0 1px rgba(176,124,20,.28);
-}
-.vx-dress-label {
-  flex: 0 0 104px; font-size: 9px; font-weight: 700; letter-spacing: 1.5px;
-  text-transform: uppercase; color: var(--ink-mute);
-}
-.vx-dress-arrow {
-  flex: none; width: 28px; height: 28px; display: grid; place-items: center;
-  border: 0; border-radius: 9px; cursor: pointer; font-size: 15px; line-height: 1;
-  color: var(--ink-soft); background: rgba(24,46,78,.05);
-  box-shadow: inset 0 0 0 1px var(--line);
-  transition: color .12s ease, background .12s ease, transform .12s ease;
-}
-.vx-dress-arrow:hover {
-  color: #241703; background: linear-gradient(180deg, #ffd980, var(--gold-lit));
-  box-shadow: 0 6px 16px rgba(176,124,20,.32);
-}
-.vx-dress-arrow:active { transform: scale(.9); }
-.vx-dress-value {
-  flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px;
-  min-width: 0; font-size: 13px; font-weight: 600; letter-spacing: .3px; color: var(--ink);
-}
-.vx-dress-value span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.vx-dress-dot {
-  width: 16px; height: 16px; flex: none; border-radius: 5px;
-  box-shadow: inset 0 0 0 1px rgba(16,28,46,.3), 0 0 12px var(--dot-glow, transparent);
-}
-.vx-dress-count {
-  flex: none; min-width: 46px; text-align: right; padding-right: 4px;
-  font-family: 'Lucida Console', Monaco, monospace; font-size: 10px;
-  font-variant-numeric: tabular-nums; color: var(--ink-mute);
-}
-
-/* Foot: randomise, save, back. */
-.vx-dress-foot { display: flex; gap: 12px; align-items: center; }
-.vx-dress-btn {
-  display: inline-flex; align-items: center; gap: 8px; cursor: pointer;
-  padding: 12px 22px; border: 0; border-radius: 13px;
-  font-size: 10px; font-weight: 700; letter-spacing: 1.7px; text-transform: uppercase;
-  color: var(--ink-soft); background: var(--plate);
-  box-shadow: inset 0 0 0 1px var(--line);
-  transition: color .14s ease, background .14s ease, transform .14s ease, box-shadow .14s ease;
-}
-.vx-dress-btn:hover {
-  color: var(--ink); background: #eef2f8; transform: translateY(-1px);
-  box-shadow: inset 0 0 0 1px rgba(22,42,70,.22);
-}
-.vx-dress-btn:active { transform: translateY(1px); }
-/* The glyphs size off their own font-size (width/height are 1em), so they need
-   lifting away from the button's 10px label type. */
-.vx-dress-btn svg { font-size: 14px; }
-.vx-dress-btn.is-primary {
-  padding: 13px 30px; color: #241703;
-  background: linear-gradient(180deg, #ffd980, var(--gold-lit));
-  box-shadow: 0 10px 24px rgba(176,124,20,.3);
-}
-.vx-dress-btn.is-primary:hover {
-  color: #241703; filter: brightness(1.05);
-  background: linear-gradient(180deg, #ffd980, var(--gold-lit));
-  box-shadow: 0 14px 30px rgba(176,124,20,.38);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .vx-dress-beam, .vx-dress-motes, .vx-dress-row.is-hit {
-    animation: none;
-  }
-}
-@media (max-width: 900px), (max-height: 780px) {
-  .vx-dress-cols { flex-direction: column; gap: 18px; }
-  .vx-dress-stage { width: 240px; padding-bottom: 20px; }
-  .vx-dress-preview { width: 220px; height: 315px; } /* keeps the 300x430 aspect */
-  .vx-dress-preview canvas { width: 100% !important; height: 100% !important; }
-  .vx-dress-podium { width: 156px; height: 34px; }
-  .vx-dress-panel { min-width: 0; width: min(430px, 100%); }
-}
-`;
-
-/** Which glyph rides each cosmetic row, so the rack reads at a glance. */
-const CHAR_ICONS: Record<string, IconName> = {
-  skin: 'hand', hairStyle: 'sparkle', hair: 'droplet', eyes: 'eye',
-  shirt: 'shield', pants: 'brick', hat: 'crown', hatColor: 'gem', face: 'star',
-};
-
-const charUI = (() => {
-  const style = document.createElement('style');
-  style.textContent = DRESS_CSS;
-  document.head.appendChild(style);
-
-  const panel = document.createElement('div');
-  panel.className = 'vx-dress';
-  panel.style.display = 'none';
-
-  const head = document.createElement('div');
-  head.className = 'vx-dress-head';
-  const eyebrow = document.createElement('div');
-  eyebrow.className = 'vx-dress-eyebrow';
-  eyebrow.textContent = 'Wardrobe / Character studio';
-  const h = document.createElement('h2');
-  h.textContent = 'Make it yours.';
-  const subtitle = document.createElement('p');
-  subtitle.className = 'vx-dress-subtitle';
-  subtitle.textContent = 'Your style. Every detail. Out there for everyone to see.';
-  head.append(eyebrow, h, subtitle);
-  panel.appendChild(head);
-
-  const cols = document.createElement('div');
-  cols.className = 'vx-dress-cols';
-  panel.appendChild(cols);
-
-  // Left: the lit stage. The renderer is created lazily on first open; the
-  // beam, motes and podium are pure CSS layered around its canvas.
-  const stage = document.createElement('div');
-  stage.className = 'vx-dress-stage';
-  const previewWrap = document.createElement('div');
-  previewWrap.className = 'vx-dress-preview';
-  const beam = document.createElement('div');
-  beam.className = 'vx-dress-beam';
-  const motes = document.createElement('div');
-  motes.className = 'vx-dress-motes';
-  const podium = document.createElement('div');
-  podium.className = 'vx-dress-podium';
-  const dragHint = document.createElement('div');
-  dragHint.className = 'vx-dress-drag';
-  dragHint.textContent = 'Drag to spin';
-  previewWrap.append(beam, motes, podium);
-  stage.append(previewWrap, dragHint);
-  cols.appendChild(stage);
-
-  // Right: one ‹ value › cycler row per cosmetic category.
-  const rows = document.createElement('div');
-  rows.className = 'vx-dress-panel';
-  const rackTitle = document.createElement('div');
-  rackTitle.className = 'vx-dress-rack-title';
-  rackTitle.textContent = 'THE DETAILS';
-  rows.appendChild(rackTitle);
-  cols.appendChild(rows);
-
-  const editing: Cosmetics = defaultCosmetics(0);
-  const valueEls = new Map<keyof Cosmetics, {
-    row: HTMLElement; text: HTMLSpanElement; dot: HTMLSpanElement; count: HTMLSpanElement;
-  }>();
-
-  let previewRenderer: THREE.WebGLRenderer | null = null;
-  let previewScene: THREE.Scene | null = null;
-  let previewCam: THREE.PerspectiveCamera | null = null;
-  let previewBody: AvatarBody | null = null;
-  let previewSpin = 0.6;
-  let previewRAF = 0;
-  let dragPointer: number | null = null;
-  let dragX = 0;
-
-  previewWrap.addEventListener('pointerdown', (e) => {
-    dragPointer = e.pointerId;
-    dragX = e.clientX;
-    previewWrap.setPointerCapture(e.pointerId);
-    previewWrap.style.cursor = 'grabbing';
-  });
-  previewWrap.addEventListener('pointermove', (e) => {
-    if (dragPointer !== e.pointerId) return;
-    previewSpin += (e.clientX - dragX) * 0.012;
-    dragX = e.clientX;
-    if (previewBody) previewBody.group.rotation.y = previewSpin;
-  });
-  const stopDragging = (e: PointerEvent): void => {
-    if (dragPointer !== e.pointerId) return;
-    dragPointer = null;
-    previewWrap.style.cursor = 'grab';
-  };
-  previewWrap.addEventListener('pointerup', stopDragging);
-  previewWrap.addEventListener('pointercancel', stopDragging);
-
-  function rebuildPreview(): void {
-    if (!previewScene) return;
-    if (previewBody) {
-      previewScene.remove(previewBody.group);
-      disposeAvatarBody(previewBody);
-    }
-    previewBody = buildAvatarBody({ ...editing });
-    previewBody.group.rotation.y = previewSpin;
-    // Relaxed idle pose so the model doesn't look like a mannequin.
-    previewBody.parts[2].rotation.x = -0.08;
-    previewBody.parts[3].rotation.x = 0.08;
-    previewScene.add(previewBody.group);
-  }
-
-  function refreshRows(): void {
-    for (const opt of CHAR_OPTIONS) {
-      const el = valueEls.get(opt.key);
-      if (!el) continue;
-      const i = editing[opt.key];
-      el.text.textContent = opt.names[i] ?? '—';
-      el.count.textContent = `${i + 1}/${COSMETIC_RANGES[opt.key]}`;
-      if (opt.swatches) {
-        const hex = `#${opt.swatches[i].hex.toString(16).padStart(6, '0')}`;
-        el.dot.style.display = '';
-        el.dot.style.background = hex;
-        el.dot.style.setProperty('--dot-glow', `${hex}88`);
-      } else {
-        el.dot.style.display = 'none';
-      }
-    }
-  }
-
-  /** Step one category and light its row, so the change is visible on the rack
-   *  as well as on the model. */
-  function cycle(key: keyof Cosmetics, d: number): void {
-    const n = COSMETIC_RANGES[key];
-    editing[key] = (editing[key] + d + n) % n;
-    refreshRows();
-    rebuildPreview();
-    const row = valueEls.get(key)?.row;
-    if (row) { row.classList.remove('is-hit'); void row.offsetWidth; row.classList.add('is-hit'); }
-  }
-
-  for (const opt of CHAR_OPTIONS) {
-    const row = document.createElement('div');
-    row.className = 'vx-dress-row';
-    row.tabIndex = 0;
-    row.setAttribute('role', 'group');
-    row.setAttribute('aria-label', opt.label);
-    const icon = document.createElement('span');
-    icon.className = 'vx-dress-icon';
-    icon.innerHTML = iconSvg(CHAR_ICONS[opt.key] ?? 'sparkle');
-    const label = document.createElement('span');
-    label.className = 'vx-dress-label';
-    label.textContent = opt.label;
-    const mkArrow = (txt: string, d: number): HTMLButtonElement => {
-      const b = document.createElement('button');
-      b.className = 'vx-dress-arrow';
-      b.type = 'button';
-      b.textContent = txt;
-      b.tabIndex = -1; // the row itself is the tab stop; ← → walk the values
-      b.setAttribute('aria-label', `${d < 0 ? 'Previous' : 'Next'} ${opt.label}`);
-      b.addEventListener('click', () => cycle(opt.key, d));
-      return b;
-    };
-    const dot = document.createElement('span');
-    dot.className = 'vx-dress-dot';
-    dot.style.display = 'none';
-    const value = document.createElement('span');
-    value.className = 'vx-dress-value';
-    const valueText = document.createElement('span');
-    value.append(dot, valueText);
-    const count = document.createElement('span');
-    count.className = 'vx-dress-count';
-    row.addEventListener('keydown', (e) => {
-      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-      e.preventDefault();
-      cycle(opt.key, e.key === 'ArrowLeft' ? -1 : 1);
-    });
-    row.append(icon, label, mkArrow('‹', -1), value, mkArrow('›', 1), count);
-    rows.appendChild(row);
-    valueEls.set(opt.key, { row, text: valueText, dot, count });
-  }
-
-  // Bottom buttons: randomise / save / back.
-  const btnRow = document.createElement('div');
-  btnRow.className = 'vx-dress-foot';
-  const mkBtn = (text: string, icon: IconName, primary = false): HTMLButtonElement => {
-    const b = document.createElement('button');
-    b.className = primary ? 'vx-dress-btn is-primary' : 'vx-dress-btn';
-    b.type = 'button';
-    b.innerHTML = `${iconSvg(icon)}<span>${text}</span>`;
-    return b;
-  };
-  const randomBtn = mkBtn('Randomise', 'dice');
-  randomBtn.addEventListener('click', () => {
-    Object.assign(editing, randomCosmetics());
-    refreshRows();
-    rebuildPreview();
-  });
-  const saveBtn = mkBtn('Save Look', 'check', true);
-  saveBtn.addEventListener('click', () => {
-    myCosmetics = { ...editing };
-    invalidateSelfAvatar(); // your third-person body reflects the new look/side
+// THE WARDROBE (wardrobe_ui.ts): one studio for the look AND the capes —
+// a lit plinth, every option laid out as a tile, live head-shot thumbnails.
+const wardrobeUI = createWardrobe({
+  root: app,
+  getCosmetics: () => myCosmetics,
+  getWardrobe: () => myWardrobe,
+  factions: FACTIONS.map((f) => ({ name: f.name, color: factionColor(f.id) })),
+  getFaction: () => (isFaction(localFaction) ? FACTIONS.findIndex((f) => f.id === localFaction) : -1),
+  reducedMotion: () => accessibility.reducedMotion
+    || window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+  onSave: (look) => {
+    myCosmetics = look;
+    invalidateSelfAvatar(); // your third-person body reflects the new look
     saveCosmetics();
-    showNotice('New look saved — everyone sees it!');
-    close();
-  });
-  const backBtn = mkBtn('Back', 'close');
-  backBtn.addEventListener('click', () => close());
-  btnRow.append(randomBtn, saveBtn, backBtn);
-  panel.appendChild(btnRow);
-  app.appendChild(panel);
-
-  window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && panel.style.display === 'flex') {
-      e.stopPropagation();
-      close();
-    }
-  });
-
-  function animatePreview(): void {
-    previewRAF = requestAnimationFrame(animatePreview);
-    if (!previewRenderer || !previewScene || !previewCam) return;
-    // Slow turntable while you are not holding the model yourself.
-    if (dragPointer === null && previewBody && !accessibility.reducedMotion &&
-        !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      previewSpin += 0.0035;
-      previewBody.group.rotation.y = previewSpin;
-    }
-    previewRenderer.render(previewScene, previewCam);
-  }
-
-  function open(): void {
-    Object.assign(editing, myCosmetics);
-    if (!previewRenderer) {
-      previewRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-      previewRenderer.setSize(300, 430);
-      previewRenderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
-      previewWrap.appendChild(previewRenderer.domElement);
-      previewScene = new THREE.Scene();
-      previewCam = new THREE.PerspectiveCamera(38, 300 / 430, 0.1, 20);
-      previewCam.position.set(0, 1.25, 3.4);
-      previewCam.lookAt(0, 1.0, 0);
-    }
-    refreshRows();
-    rebuildPreview();
-    panel.style.display = 'flex';
-    previewRAF = requestAnimationFrame(animatePreview);
-  }
-  function close(): void {
-    if (panel.style.display === 'none') return;
-    panel.style.display = 'none';
-    cancelAnimationFrame(previewRAF);
-  }
-  return { open, close };
-})();
+  },
+  onEquipCape: (id) => {
+    const next = equipCape(myWardrobe, id);
+    if (next === myWardrobe) return; // not yours — sanitize already refused it
+    myWardrobe = next;
+    saveWardrobe();
+  },
+});
+wardrobeUI.onOpen = syncPointerLock;
+wardrobeUI.onClose = syncPointerLock;
 
 characterBtn.addEventListener('click', () => {
   if (!authed) return;
   audio.resume();
   controlsPanel.style.display = 'none';
-  capesUI.hide();
-  charUI.open();
+  wardrobeUI.show();
 });
 
 // --- CAPES: the wardrobe you collect into, and the one you wear --------------
@@ -5266,7 +4910,7 @@ function loadWardrobe(user: string): void {
     const raw = localStorage.getItem(wardrobeKey(user));
     if (raw) myWardrobe = sanitizeWardrobe(JSON.parse(raw));
   } catch { /* ignore */ }
-  capesUI.update(myWardrobe);
+  wardrobeUI.update();
 }
 function saveWardrobe(): void {
   if (!authedName) return;
@@ -5275,21 +4919,11 @@ function saveWardrobe(): void {
   } catch { /* ignore */ }
 }
 
-capesUI.onEquip = (id) => {
-  const next = equipCape(myWardrobe, id);
-  if (next === myWardrobe) return; // not yours — sanitize already refused it
-  myWardrobe = next;
-  saveWardrobe();
-  capesUI.update(myWardrobe);
-  showNotice(id === NO_CAPE ? 'Cape stowed.' : 'Cape equipped.');
-};
-
 capesBtn.addEventListener('click', () => {
   if (!authed) return;
   audio.resume();
   controlsPanel.style.display = 'none';
-  charUI.close();
-  capesUI.show(myWardrobe);
+  wardrobeUI.show('capes');
 });
 
 // --- First-play onboarding: guided mission briefing, shown once ---------------
@@ -5375,7 +5009,7 @@ const tutorial = (() => {
       summary: 'Automate resources, unlock progression branches, and turn a temporary camp into a functioning civilization.',
       tip: 'Crafting screens include a recipe guide. Use it to trace complete production chains for machines, weapons, and defenses.',
       items: [
-        { icon: 'map', label: 'World map', value: 'Territory, structures, and travel points', keys: ['/map'] },
+        { icon: 'map', label: 'World map', value: 'Terrain, war flags and your waypoints', keys: ['/map'] },
         { icon: 'flag', label: 'Progress', value: 'Spend upgrades and view faction growth', keys: ['/warfare'] },
         { icon: 'gear', label: 'Machines', value: 'Autominers, derricks, defenses, and transport' },
       ],
@@ -6524,7 +6158,7 @@ function offlineVaultView(v: VaultStamp): VaultView {
   };
 }
 
-// Discovered vaults (client-side collection: map icons + "found X / Y").
+// Discovered vaults (client-side collection: the "found X / Y" count).
 let discoveredVaults: { key: string; x: number; z: number; tier: number }[] | null = null;
 function discoveredList(): { key: string; x: number; z: number; tier: number }[] {
   if (!discoveredVaults) {
@@ -6541,7 +6175,7 @@ function discoveredList(): { key: string; x: number; z: number; tier: number }[]
 }
 // Every vault ENTRANCE in the world (one cached sweep — the layout is fixed for
 // the seed). Vaults were too hard to find blind, so entrances within
-// VAULT_REVEAL blocks now surface on the map/minimap (faint until entered).
+// Every vault in the seed (for proximity sensing and the "found X / Y" count).
 let allVaults: { cx: number; cz: number; x: number; z: number; tier: number }[] | null = null;
 function allVaultsList(): { cx: number; cz: number; x: number; z: number; tier: number }[] {
   if (!allVaults) allVaults = worldVaults(seed, world.terrain);
@@ -6582,33 +6216,8 @@ function updateNearbyVaults(): void {
   nearbyVaultKey = key;
   nearbyVaults = near;
   rebuildVaultBeams();
-  refreshVaultMap();
 }
 
-function refreshVaultMap(): void {
-  const disc = discoveredList();
-  const discKeys = new Set(disc.map((d) => d.key));
-  const marks = disc.map((d) => ({
-    x: d.x, z: d.z, tier: d.tier, discovered: true,
-    cleared: vaultViews.get(d.key)?.alive === false,
-  }));
-  // Sensed-but-not-entered vaults render faint with no tier. EVERY Heartland
-  // (Tier I) entrance is marked from the start — finding your first vault
-  // should be a map-read, not a needle hunt.
-  const marked = new Set(discKeys);
-  for (const v of [...nearbyVaults, ...allVaultsList().filter((a) => a.tier === 1)]) {
-    const key = `${v.cx},${v.cz}`;
-    if (marked.has(key)) continue;
-    marked.add(key);
-    marks.push({ x: v.x, z: v.z, tier: v.tier, discovered: false, cleared: false });
-  }
-  worldMap.setVaults(marks, totalVaults());
-}
-
-function prepareWorldMap(): void {
-  refreshVaultMap();
-  refreshStructureMap();
-}
 
 function discoverVault(v: VaultStamp): void {
   const list = discoveredList();
@@ -6620,7 +6229,6 @@ function discoverVault(v: VaultStamp): void {
     } catch { /* ignore */ }
     showNotice(`☠ Vault discovered! (${list.length}/${totalVaults()} found)`);
   }
-  refreshVaultMap();
 }
 
 /** Crossing a vault's bounds: sting + banner + minimap dim + discovery, and
@@ -6895,7 +6503,6 @@ function completeOfflineEncounter(v: VaultStamp): void {
   showRegionBanner('🏆 VAULT CLEARED!', '#ffd84a');
   audio.vaultMusicCue('victory');
   showKill(authedName || 'You', `Tier ${v.tier} ${VAULT_BOSS_NAMES[v.bossKind]} ☠`);
-  refreshVaultMap();
   settleOfflineWarfareXp(v, elapsed);
 }
 
@@ -7305,7 +6912,6 @@ net.onVault = (cx, cz, tier, hp, maxHp, alive, opened) => {
     bruteMob.health = hp;
     if (!alive) { mobs.slay(bruteMob); bruteMob = null; }
   }
-  refreshVaultMap();
 };
 net.onEncounterStart = (cx, cz, data) => {
   if (screen !== 'playing' || player.dead || !curVault || curVault.cx !== cx || curVault.cz !== cz) return;
@@ -7376,7 +6982,6 @@ net.onVaultCleared = (cx, cz, by) => {
     showRegionBanner(by === net.username ? '🏆 VAULT CLEARED!' : `🏆 ${by.toUpperCase()} CLEARED THE VAULT!`, '#ffd84a');
     audio.vaultClear();
   }
-  refreshVaultMap();
 };
 net.onVaultLooted = (cx, cz) => {
   const v = vaultViews.get(`${cx},${cz}`);
@@ -7588,7 +7193,6 @@ const chatBox = new ChatBox(app, {
         // the box has already unlocked it, so open them straight away.
         if (player.dead) return "You can't do that while dead.";
         if (invUI.open) invUI.hide();
-        prepareWorldMap();
         worldMap.show();
         return null;
       case 'warfare':
@@ -7748,7 +7352,6 @@ net.onPledged = (faction) => {
   startPlaying();
 };
 net.onGovErr = (reason) => showNotice(`⚠ ${reason}`);
-net.onNotify = (notif) => pushNotification(notif);
 net.onSeasonEnd = (winner, number) => {
   // The winning side's badge is refreshed on the next welcome, but bump it now
   // for instant feedback.
@@ -7918,6 +7521,8 @@ let partyActiveBounds: { minX: number; minZ: number; maxX: number; maxZ: number 
 let partyQueued = false;
 let partyQueuedMode: PartyMode = 'bridge';
 let partyInviteToken = '';
+/** The host has copied or shared this party lobby's link at least once. */
+let partyInviteShared = false;
 let partyArenaReadySent = false;
 let partyClockServer = 0, partyClockLocal = 0;
 let partyReadyWatchdog = 0;
@@ -8030,10 +7635,12 @@ function createPartyMode(mode: PartyMode): void {
   }
   savePartyFallback();
   partyQueuedMode = mode;
+  partyInviteShared = false;
   net.sendPartyCreate(mode);
 }
 function leaveParty(): void {
   net.sendPartyLeave();
+  partyInviteShared = false;
   pendingPartyInvite = '';
   partySnapshot = null;
   partyQueued = false;
@@ -8051,9 +7658,7 @@ function partyLobbySeat(p: PartyLobbySnapshot['participants'][number], sub: stri
   const row = document.createElement('div'); row.className = 'duel-slot';
   if (p.ready && p.connected) row.classList.add('ready');
   if (p.id === net.myId) row.classList.add('me');
-  const avatar = document.createElement('span'); avatar.className = 'duel-avatar';
-  avatar.setAttribute('aria-hidden', 'true');
-  avatar.style.background = duelSkinColor(p.skin);
+  const avatar = lobbyAvatar(p.skin);
   const name = document.createElement('strong');
   name.textContent = p.id === net.myId ? `${p.username} (you)` : p.username;
   if (p.host) {
@@ -8090,9 +7695,12 @@ function renderPartyLobby(): void {
     const n = document.createElement(tag); if (cls) n.className = cls; if (text) n.textContent = text; return n;
   };
   partyLobbyPanel.style.setProperty('--hero', `url('/minigames/${bridge ? 'the-bridge' : 'parkour'}.webp')`);
-  partyLobbyPanel.style.setProperty('--mode', bridge ? '#ff6b8b' : '#7ee07a');
+  partyLobbyPanel.style.setProperty('--mode', bridge ? '#f43f5e' : '#10b981');
 
-  const hero = el('header', 'lobby-hero');
+  const top = el('div', 'fl-top');
+  const hero = el('header', 'lobby-hero fl-hero');
+  hero.dataset.tilt = '';
+  const art = el('div', 'fl-hero-art'); art.setAttribute('aria-hidden', 'true');
   const copy = el('div', 'lobby-hero-copy');
   copy.append(
     el('div', 'lobby-kicker', `Private match · ${bridge ? 'The Bridge' : 'Parkour'}`),
@@ -8105,11 +7713,17 @@ function renderPartyLobby(): void {
     ? [`First to ${BRIDGE_GOAL_LIMIT}`, `${s.participants.length}/${s.capacity} players`, 'Infinite wool', 'Bow + cleaver']
     : ['Fresh course', `${s.participants.length}/${s.capacity} racers`, 'Infinite wool', 'R to retry'])
     rules.append(el('span', '', chip));
-  hero.append(copy, rules);
-  partyLobbyPanel.append(hero);
+  hero.append(art, copy, rules);
+  top.append(hero);
 
+  const readyCount = s.participants.filter(p => p.ready && p.connected).length;
+  const joined = s.participants.length >= 2;
   if (partyInviteToken) {
-    const invite = el('div', 'lobby-invite');
+    const invite = el('div', 'lobby-invite fl-invite');
+    const gift = el('div', 'fl-gift'); gift.setAttribute('aria-hidden', 'true');
+    const giftCube = el('div', 'fl-gift-cube');
+    for (let i = 0; i < 6; i++) giftCube.append(el('i'));
+    gift.append(giftCube);
     const label = el('div', 'lobby-invite-label');
     label.append(el('b', '', 'Invite your friends'), el('span', '', 'Anyone with this link lands straight in your lobby.'));
     const link = el('input');
@@ -8117,26 +7731,27 @@ function renderPartyLobby(): void {
     link.setAttribute('aria-label', 'Invite link');
     link.value = partyInviteUrl(partyInviteToken);
     link.onclick = () => link.select();
+    const steps = el('ol', 'fl-steps'); steps.setAttribute('aria-label', 'Lobby progress');
+    for (const text of ['Share the link', 'Friends join', 'Everyone readies']) steps.append(el('li', '', text));
+    const paint = () => paintLobbySteps(steps, partyInviteShared, joined, joined && readyCount === s.participants.length);
     const copyBtn = el('button', 'duel-copy lobby-copy', 'Copy invite');
     copyBtn.type = 'button';
     copyBtn.onclick = async () => {
-      try {
-        if (!navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable');
-        await navigator.clipboard.writeText(link.value);
-        copyBtn.textContent = 'Copied!';
-      } catch {
-        link.focus(); link.select();
-        let ok = false;
-        try { ok = document.execCommand('copy'); } catch { /* selection remains */ }
-        copyBtn.textContent = ok ? 'Copied!' : 'Link selected';
-      }
+      const ok = await copyInviteLink(link, copyBtn);
+      copyBtn.textContent = ok ? 'Copied!' : 'Link selected';
+      if (ok) { partyInviteShared = true; paint(); }
       window.setTimeout(() => { copyBtn.textContent = 'Copy invite'; }, 1800);
     };
-    invite.append(label, link, copyBtn);
-    partyLobbyPanel.append(invite);
+    const shareBtn = el('button', 'duel-copy fl-share', 'Share…');
+    shareBtn.type = 'button';
+    wireLobbyShare(shareBtn, () => link.value, () => { partyInviteShared = true; paint(); });
+    paint();
+    invite.append(gift, label, link, copyBtn, shareBtn, steps);
+    top.append(invite);
   }
+  partyLobbyPanel.append(top);
 
-  const readyCount = s.participants.filter(p => p.ready && p.connected).length;
+  const head = el('div', 'fl-seats-head');
   const bar = el('div', 'duel-readybar'); bar.setAttribute('aria-hidden', 'true');
   const fill = el('i'); fill.style.width = `${s.participants.length ? Math.round(readyCount / s.participants.length * 100) : 0}%`;
   bar.append(fill);
@@ -8148,27 +7763,30 @@ function renderPartyLobby(): void {
       ? 'Send the invite link — you need at least one opponent.'
       : `${readyCount}/${s.participants.length} ready.${me?.host ? '' : ' The host starts the match.'}`);
   feedback.setAttribute('role', 'status');
-  partyLobbyPanel.append(bar, feedback);
+  head.append(el('b', '', bridge ? 'Teams' : 'Racers'), bar, feedback);
+  partyLobbyPanel.append(head);
 
+  let seat = 0;
+  const numbered = (node: HTMLElement) => { node.style.setProperty('--seat-i', String(seat++)); return node; };
   if (bridge) {
     const teams = el('div', 'lobby-teams');
     const per = Math.max(1, Math.ceil(s.capacity / 2));
     const column = (team: number) => {
       const col = el('div', 'lobby-team');
-      col.style.setProperty('--team', team === 0 ? '#ff5f76' : '#5aa8ff');
+      col.style.setProperty('--team', team === 0 ? '#f43f5e' : '#3b82f6');
       col.append(el('div', 'lobby-team-name', BRIDGE_TEAM_NAME[team]));
       const members = s.participants.filter(p => p.team === team);
-      for (const p of members) col.append(partyLobbySeat(p, `${BRIDGE_TEAM_NAME[team]} side`));
-      for (let i = members.length; i < per; i++) col.append(partyEmptySeat('Open seat'));
+      for (const p of members) col.append(numbered(partyLobbySeat(p, `${BRIDGE_TEAM_NAME[team]} side`)));
+      for (let i = members.length; i < per; i++) col.append(numbered(partyEmptySeat('Open seat')));
       return col;
     };
     teams.append(column(0), el('div', 'lobby-vs', 'VS'), column(1));
     partyLobbyPanel.append(teams);
   } else {
     const roster = el('div', 'duel-roster');
-    for (const p of s.participants) roster.append(partyLobbySeat(p, 'Racer'));
+    for (const p of s.participants) roster.append(numbered(partyLobbySeat(p, 'Racer')));
     for (let i = s.participants.length; i < s.capacity; i++)
-      roster.append(partyEmptySeat(i < 2 ? 'Waiting for a challenger' : 'Open seat'));
+      roster.append(numbered(partyEmptySeat(i < 2 ? 'Waiting for a challenger' : 'Open seat')));
     partyLobbyPanel.append(roster);
   }
 
@@ -8249,7 +7867,8 @@ net.onPartyArena = (arena, sub, team, spawn, _countdown) => {
   arenaCanPlaceAt = (x, y, z, held) => partySnapshot?.phase === 'running' && held === wool &&
     x >= sub.minX && x < sub.maxX && z >= sub.minZ && z < sub.maxZ &&
     y >= (bridge ? PARTY_VOID_Y : PARTY_FLOOR_Y - 3) && y < (bridge ? PARTY_FLOOR_Y + 16 : PARTY_FLOOR_Y + 12) &&
-    !(bridge && bridgeGoalGuard(Math.floor(x) - sub.minX, Math.floor(z) - sub.minZ));
+    !(bridge && bridgeGoalGuard(Math.floor(x) - sub.minX, Math.floor(z) - sub.minZ)) &&
+    !(!bridge && parkourBuildBlocked(parkourCourse(sub.seed), Math.floor(x) - sub.minX, Math.floor(y), Math.floor(z) - sub.minZ));
   arenaCanEditAt = (x, y, z, held) => {
     const block = world.getBlock(x, y, z);
     // Taking your own wool back out of the bridge you just built is part of
@@ -8299,7 +7918,7 @@ net.onPartyArena = (arena, sub, team, spawn, _countdown) => {
   // Start facing the thing you are trying to reach: the first jump, or the
   // far end of the chasm.
   if (sub.game === 'parkour') {
-    const target = parkourCourse(sub.seed)[1];
+    const target = parkourCourse(sub.seed).steps[1][0];
     player.yaw = Math.atan2(-(sub.minX + target.x - spawn.x), -(sub.minZ + target.z - spawn.z));
   } else {
     player.yaw = Math.atan2(0, -((team === 0 ? sub.maxZ : sub.minZ) - spawn.z));
@@ -9027,20 +8646,14 @@ function updateGliderRig(dt: number): void {
 /** Scratch colour for the underwater fog tint (per-frame; not allocated). */
 const waterFogTint = new THREE.Color();
 
-function updateAtmosphere(): void {
-  world.sunUniform.value = sky.sunIntensity;
-  world.auroraUniform.value = sky.auroraIntensity;
-  // Direct-sun and ambient-sky colour, so terrain is graded by the same light
-  // the sky is showing rather than by a flat brightness scalar.
-  world.sunTintUniform.value.copy(sky.sunTint);
-  world.skyTintUniform.value.copy(sky.ambientTint);
-  // Where the LIGHT is — the sun by day, the moon once it sets — and what the
-  // water reflects when it looks up at the sky.
-  world.lightDirUniform.value.copy(sky.lightDir);
-  world.nightUniform.value = sky.nightAmount;
-  world.skyColorUniform.value.copy(sky.skyColor);
-  postfx.setNight(sky.nightAmount);
-  world.timeUniform.value = sky.time * DAY_LENGTH;
+function updateAtmosphere(activeCamera: THREE.Camera): void {
+  // Every light the terrain is lit by — the sun or moon, the dome's ambient,
+  // the horizon it fogs into — is measured off the sky the player can see.
+  world.applySky(sky, !player.eyeUnderwater && !curVault);
+  postfx.setSky(sky, activeCamera);
+  // Animation clock for water, wind and flicker. Wall time, wrapped well
+  // inside float32's comfortable range (the world clock is days since epoch).
+  world.timeUniform.value = (performance.now() / 1000) % 4096;
   const fog = scene.fog as THREE.Fog;
   if (player.eyeUnderwater) {
     // Underwater haze takes the local water colour, so surfacing in a tropical
@@ -9089,7 +8702,6 @@ function toggleMap(): void {
     input.lock();
   } else if (input.locked) {
     if (invUI.open) invUI.hide();
-    prepareWorldMap();
     worldMap.show();
     input.unlock();
   }
@@ -11769,7 +11381,23 @@ function frame(): void {
     player.update(dt, moveInput, world);
     // R gives up on the current jump. The Bridge has checkpoints of its own
     // (the portals) and nothing to retry, so the key is Parkour's alone.
-    if (controlling && arenaKind === 'party' && partySub?.game === 'parkour' && input.reloadPressed) net.sendPartyRetry();
+    // Collapse Chase has no retry: a life is the only thing a fall costs.
+    if (controlling && arenaKind === 'party' && partySub?.game === 'parkour' && input.reloadPressed &&
+      parkourCourse(partySub.seed).variant.mode !== 'collapse') net.sendPartyRetry();
+    // Parkour throw pads: touching one sets your velocity outright. The
+    // server recognises the same pad by position and lets the flight stand.
+    if (arenaKind === 'party' && partySub?.game === 'parkour' && player.onGround &&
+      partySnapshot?.phase === 'running') {
+      const pad = parkourPadUnder(parkourCourse(partySub.seed),
+        player.pos.x - partySub.minX, player.pos.y, player.pos.z - partySub.minZ);
+      if (pad) {
+        const kick = parkourPadImpulse(pad);
+        player.vel.set(kick.vx, kick.vy, kick.vz);
+        player.momentumTime = kick.momentum;
+        player.onGround = false;
+        player.fallDistance = 0;
+      }
+    }
     if (arenaActive && arenaClampPos) {
       const beforeX = player.pos.x, beforeY = player.pos.y, beforeZ = player.pos.z;
       const bounded = arenaClampPos(player.pos);
@@ -12167,7 +11795,7 @@ function frame(): void {
   // clock, and also absorbs small authoritative clock corrections smoothly.
   sky.update(dt, activeCamera, arenaKind==='party' && partySub ? parkourTheme(partySub.seed).time : arenaActive ? 0.25 : undefined,
     !(net.connected && hasServerWorldTime));
-  updateAtmosphere();
+  updateAtmosphere(activeCamera);
   ambientWorld.update(
     dt, player.pos, sky.sunIntensity,
     !player.eyeUnderwater && !curVault && !arenaActive,
@@ -12407,3 +12035,16 @@ function frame(): void {
 overlay.classList.remove('hidden');
 updateCamera();
 frame();
+
+// Dev-server-only handle for poking the renderer from a console or a headless
+// screenshot script (time of day, graphics preset, where the eye is). Vite
+// strips the whole block from production builds.
+if (import.meta.env.DEV) {
+  (window as unknown as { __vx: unknown }).__vx = {
+    sky, player, world, camera,
+    setQuality: (q: GraphicsQuality) => {
+      graphicsInput.value = q;
+      saveAccessUi();
+    },
+  };
+}

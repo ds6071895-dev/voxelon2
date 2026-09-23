@@ -249,11 +249,11 @@ export class ParkourScenery {
     this.root.add(this.motes);
   }
 
-  /** Underpinnings for the straight jump lane: every platform gets a plinth,
-   *  and the finish gets an arch you can see from the start terrace. */
+  /** Underpinnings for the course: every platform gets a plinth, and the
+   *  finish gets an arch you can see from the start terrace. */
   private buildParkour(sub: PartySubBounds, theme: ParkourTheme): void {
     const b = this.box.bind(this), course = parkourCourse(sub.seed);
-    course.forEach((p, i) => {
+    course.platforms.forEach((p, i) => {
       const cx = Math.floor(p.x - p.width / 2) + p.width / 2, cz = Math.floor(p.z - p.depth / 2) + p.depth / 2;
       b(cx, p.y - 1.15, cz, p.width + .14, .3, p.depth + .14, theme.trim);
       b(cx, p.y - 2, cz, p.width * .75, 1.4, p.depth * .75, theme.stone);
@@ -273,9 +273,17 @@ export class ParkourScenery {
       if (theme.id === 'frost')
         b(cx, p.y - 3.8, cz, .2, 1.5, .2, theme.light);
     });
-    const start = course[0], end = course[course.length - 1];
-    this.arch(end.x, end.y, end.z, theme, 1);
-    this.arch(start.x, start.y, start.z - 4, theme, .8);
+    // Towers get a lit core column rising through the middle of the ring,
+    // so the climb reads as a building rather than a cloud of steps.
+    if (course.variant.layout === 'spiral' || course.variant.layout === 'twin') {
+      const cores = course.variant.layout === 'spiral' ? [39] : [39, 119];
+      for (const cz of cores) {
+        const top = course.highY + 4;
+        b(15.5, (sub.floor - 20 + top) / 2, cz, 3, top - sub.floor + 20, 3, theme.stone);
+        for (let y = sub.floor; y < top; y += 4) b(15.5, y, cz, 3.4, .3, 3.4, theme.light);
+      }
+    }
+    this.arch(course.start.x, course.start.y, course.start.z - 4, theme, .8);
   }
 
   /** The Bridge is stamped in real blocks, so the scenery only has to build a

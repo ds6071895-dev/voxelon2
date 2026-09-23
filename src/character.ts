@@ -36,7 +36,7 @@ export const SKIN_TONES: Swatch[] = [
 ];
 
 export const HAIR_STYLES: string[] = [
-  'Classic', 'Long', 'Mohawk', 'Buns', 'Ponytail', 'Bowl', 'Bald',
+  'Crew Cut', 'Long', 'Mohawk', 'Bun', 'Ponytail', 'Side Part', 'Shaved',
 ];
 
 export const HAIR_COLORS: Swatch[] = [
@@ -63,57 +63,60 @@ export const EYE_COLORS: Swatch[] = [
   { name: 'Violet', hex: 0x8a5fd6 },
 ];
 
+/** Uniform colours. In a war the faction colour replaces this on the tunic
+ *  (see buildAvatarBody), so these are what you wear off the front line. */
 export const SHIRT_COLORS: Swatch[] = [
-  { name: 'Crimson',  hex: 0xa83232 },
-  { name: 'Rust',     hex: 0xb35427 },
-  { name: 'Gold',     hex: 0xc99a18 },
-  { name: 'Forest',   hex: 0x3f7a37 },
-  { name: 'Mint',     hex: 0x5cb98a },
-  { name: 'Teal',     hex: 0x2e7d84 },
-  { name: 'Sky',      hex: 0x4a8fd0 },
-  { name: 'Navy',     hex: 0x2c3e78 },
-  { name: 'Violet',   hex: 0x7a4fc4 },
-  { name: 'Magenta',  hex: 0xb0479a },
-  { name: 'Charcoal', hex: 0x3a3f46 },
-  { name: 'White',    hex: 0xdfe3e8 },
+  { name: 'Olive Drab',   hex: 0x55603a },
+  { name: 'Coyote',       hex: 0x8a6f4d },
+  { name: 'Khaki',        hex: 0xa99a6b },
+  { name: 'Ranger Green', hex: 0x4a5a3f },
+  { name: 'Forest',       hex: 0x2f5a36 },
+  { name: 'Desert Sand',  hex: 0xc2a878 },
+  { name: 'Urban Grey',   hex: 0x6b7178 },
+  { name: 'Navy',         hex: 0x2c3a5e },
+  { name: 'Charcoal',     hex: 0x3a3e44 },
+  { name: 'Crimson',      hex: 0x8e2d2d },
+  { name: 'Azure',        hex: 0x2f5f9e },
+  { name: 'Snow',         hex: 0xd6dadf },
 ];
 
 export const PANTS_COLORS: Swatch[] = [
-  { name: 'Denim',    hex: 0x33415e },
-  { name: 'Navy',     hex: 0x232c4a },
-  { name: 'Charcoal', hex: 0x2e3238 },
-  { name: 'Black',    hex: 0x1a1c20 },
-  { name: 'Olive',    hex: 0x4a4a2e },
-  { name: 'Brown',    hex: 0x4a3626 },
-  { name: 'Sand',     hex: 0x9a8a62 },
-  { name: 'Grey',     hex: 0x6a6f76 },
-  { name: 'Maroon',   hex: 0x5e2430 },
-  { name: 'Plum',     hex: 0x4a2a5e },
-  { name: 'Pine',     hex: 0x24483a },
-  { name: 'White',    hex: 0xcfd3d8 },
+  { name: 'Olive Drab',   hex: 0x4b5334 },
+  { name: 'Coyote',       hex: 0x7a6344 },
+  { name: 'Khaki',        hex: 0x96895f },
+  { name: 'Ranger Green', hex: 0x404e37 },
+  { name: 'Slate',        hex: 0x3e4552 },
+  { name: 'Black',        hex: 0x1d1f23 },
+  { name: 'Desert Sand',  hex: 0xae9667 },
+  { name: 'Urban Grey',   hex: 0x5d6269 },
+  { name: 'Navy',         hex: 0x252f4a },
+  { name: 'Brown',        hex: 0x4a3626 },
+  { name: 'Pine',         hex: 0x24483a },
+  { name: 'Snow',         hex: 0xc4c8cd },
 ];
 
 export const HATS: string[] = [
-  'None', 'Cap', 'Beanie', 'Top Hat', 'Crown', 'Halo', 'Horns',
-  'Cowboy', 'Wizard', 'Headband',
+  'None', 'Patrol Cap', 'Watch Cap', 'Beret', 'Boonie Hat', 'Combat Helmet',
+  'Bandana', 'Officer Cap', 'Comms Headset', 'Headband', 'Night-Vision Helmet',
 ];
 
 export const HAT_COLORS: Swatch[] = [
-  { name: 'Red',      hex: 0xa83232 },
-  { name: 'Orange',   hex: 0xc07030 },
-  { name: 'Gold',     hex: 0xd8b32a },
-  { name: 'Green',    hex: 0x3f7a37 },
-  { name: 'Teal',     hex: 0x2e7d84 },
-  { name: 'Blue',     hex: 0x3a5fa8 },
-  { name: 'Purple',   hex: 0x7a4fc4 },
-  { name: 'Pink',     hex: 0xd66a9c },
-  { name: 'Black',    hex: 0x22242a },
-  { name: 'White',    hex: 0xe8e8ec },
-  { name: 'Brown',    hex: 0x6a4a2e },
+  { name: 'Olive Drab',   hex: 0x55603a },
+  { name: 'Coyote',       hex: 0x8a6f4d },
+  { name: 'Khaki',        hex: 0xa99a6b },
+  { name: 'Ranger Green', hex: 0x4a5a3f },
+  { name: 'Black',        hex: 0x24262b },
+  { name: 'Urban Grey',   hex: 0x6b7178 },
+  { name: 'Navy',         hex: 0x2c3a5e },
+  { name: 'Maroon',       hex: 0x6e2430 },
+  { name: 'Crimson',      hex: 0x9a3030 },
+  { name: 'Azure',        hex: 0x3566a8 },
+  { name: 'Snow',         hex: 0xdadde2 },
 ];
 
 export const FACE_ACCESSORIES: string[] = [
-  'None', 'Glasses', 'Sunglasses', 'Eyepatch', 'Mask', 'Moustache', 'Monocle',
+  'None', 'Shooting Glasses', 'Aviators', 'Eyepatch', 'Face Wrap', 'Moustache',
+  'Full Beard', 'War Paint', 'Scar',
 ];
 
 /** Category sizes, used by sanitize + the editor's cyclers. */
@@ -137,13 +140,15 @@ export const COSMETIC_KEYS = Object.keys(COSMETIC_RANGES) as (keyof Cosmetics)[]
 export function defaultCosmetics(seed: number): Cosmetics {
   const rng = mulberry32(seed);
   return {
-    skin: Math.floor(rng() * 4),          // lighter half keeps the classic look
+    skin: Math.floor(rng() * SKIN_TONES.length),
     hairStyle: 0,
     hair: Math.floor(rng() * 7),          // natural hair shades only by default
     eyes: Math.floor(rng() * 4),
-    shirt: Math.floor(rng() * SHIRT_COLORS.length),
+    shirt: Math.floor(rng() * 5),         // field colours, not dress ones
     pants: Math.floor(rng() * 4),
-    hat: 0, hatColor: Math.floor(rng() * HAT_COLORS.length),
+    // Everyone turns up in SOME kit: a patrol cap, a watch cap, a helmet or a
+    // beret, in a field colour.
+    hat: [1, 2, 5, 3][Math.floor(rng() * 4)], hatColor: Math.floor(rng() * 5),
     face: 0,
   };
 }

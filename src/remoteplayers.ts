@@ -141,14 +141,53 @@ function addBoxTo(
   return mesh;
 }
 
+// ─── proportions ────────────────────────────────────────────────────────────
+//
+// A SOLDIER, not a mannequin. The old model was the classic 8-4-12 block man
+// with a half-block head on a pencil neck, a smile and rosy cheeks — which read
+// as a toy, not as someone fighting a war. This one keeps the blocky language
+// and every pivot the animation, sneak and armor code depend on, and changes
+// what hangs off them:
+//
+//   - the head is a little smaller than the torso is wide (0.46 on 0.52), so
+//     the silhouette reads as a person in kit rather than a bobblehead;
+//   - there is no neck stalk: a uniform collar meets the jaw, the way a buttoned
+//     field shirt does;
+//   - the torso carries a plate carrier with magazine pouches, shoulder straps
+//     and a slim pack, so the shape changes front to back;
+//   - gloves, knee pads, a cargo pocket and proper boots break the limbs up.
+//
+// Everything is on a pixel grid of HEAD/8, like a skin, so the face features
+// line up on whole "pixels".
+const HEAD = 0.46;
+const PX = HEAD / 8;
+/** Centre of the head above the head-group pivot (the pivot is the jaw line). */
+const HEAD_Y = HEAD / 2 + 0.02;
+const TORSO_W = 0.52, TORSO_H = 0.72, TORSO_D = 0.28;
+const ARM_W = 0.22, ARM_D = 0.23;
+const LEG_W = 0.23, LEG_D = 0.24;
+/** Limb length. Arms and legs share it so held items and poses keep working. */
+const LIMB_H = 0.74;
+const LIMB_W = ARM_W, LIMB_D = ARM_D;
+const HIP_Y = 0.75;        // top of the legs / bottom of the torso
+const SHOULDER_Y = 1.46;   // arm pivot
+const NECK_Y = 1.5;        // head pivot (jaw line)
+const VEST_W = TORSO_W + 0.05, VEST_H = 0.46, VEST_D = TORSO_D + 0.06;
+const VEST_Y = HIP_Y + 0.43;
+
+const OLIVE = new THREE.Color(0x3d4128);
+const GLOVE = new THREE.Color(0x2b2c2e);
+const BOOT = new THREE.Color(0x2f2922);
+const WEBBING_DARK = new THREE.Color(0x24261c);
+const BRASS = new THREE.Color(0xc9a24a);
+
 // ─── face builder ─────────────────────────────────────────────────────────
 
 /**
- * Paints a flat, friendly blocky face onto the front of the head: chunky
- * two-tone pixel eyes (white + a coloured pupil on the inner edge), soft flat
- * brows in the hair colour, a smile with upturned corners, and faint rosy
- * cheeks — plus the chosen face accessory (glasses/mask/…). Everything sits
- * a hair proud of the face cube so it doesn't z-fight.
+ * A stern, level face on the HEAD/8 pixel grid: narrow eyes (a white outer
+ * pixel and the iris inboard), brows that step DOWN toward the nose, a nose
+ * picked out in shadow, and a flat mouth line. No smile, no blush — these are
+ * soldiers. Then the chosen face accessory.
  */
 function buildFace(
   parent: THREE.Group,
@@ -157,81 +196,88 @@ function buildFace(
   skin: THREE.Color,
   hair: THREE.Color,
   eye: THREE.Color,
-  headY: number,  // local Y of the centre of the head
+  headY: number,
   accessory: number
 ): void {
-  const white = new THREE.Color(0xf5f7f9);
-  const mouth = new THREE.Color(skin).multiplyScalar(0.55);
-  const blush = new THREE.Color(skin).lerp(new THREE.Color(0xe86a55), 0.3);
-  // Flat front-face shading (features read straight-on, not directionally lit).
+  const white = new THREE.Color(0xe9ecef);
+  const shadow = new THREE.Color(skin).multiplyScalar(0.8);
+  const lip = new THREE.Color(skin).multiplyScalar(0.58);
+  const jaw = new THREE.Color(skin).multiplyScalar(0.9);
+  const brow = new THREE.Color(hair).multiplyScalar(0.85);
   const flat = [1, 1, 1, 1, 1, 1];
-  const addBox = (
-    w: number, h: number, d: number, color: THREE.Color,
-    x: number, y: number, z: number
+  const top = headY + HEAD / 2;
+  /** Centre y of pixel row r (0 = the top row of the face). */
+  const row = (r: number): number => top - (r + 0.5) * PX;
+  const fz = -HEAD / 2 - 0.004;
+  const add = (
+    w: number, h: number, color: THREE.Color, x: number, y: number, z = fz, d = 0.012,
   ): THREE.Mesh => addBoxTo(parent, mat, w, h, d, color, x, y, z, flat);
 
-  const fz = -0.252; // just proud of the front face of the 0.5-deep head
-
+  // Jaw: the bottom row a shade darker, which gives the face a chin.
+  add(HEAD - 0.01, PX, jaw, 0, row(7), fz + 0.002, 0.008);
   for (const side of [-1, 1]) {
-    const ex = side * 0.125;
-    // Chunky two-pixel eye: white outer half, coloured pupil on the inner half.
-    addBox(0.14, 0.11, 0.02, white, ex, headY + 0.04, fz);
-    // Keep the pupil fully proud of the white instead of intersecting it. Both
-    // use detailMat, so overlapping them can z-fight as the preview rotates.
-    addBox(0.07, 0.11, 0.025, eye, ex - side * 0.035, headY + 0.04, fz - 0.026);
-    // Flat relaxed brow in the hair colour.
-    addBox(0.14, 0.03, 0.02, hair, ex, headY + 0.125, fz);
-    // Rosy cheek dot just outside each eye.
-    addBox(0.05, 0.04, 0.02, blush, side * 0.185, headY - 0.05, fz);
+    // Eyes on row 4: white outboard, iris inboard with a dark pupil core.
+    add(PX, PX * 0.9, white, side * PX * 2.5, row(4));
+    add(PX, PX * 0.9, eye, side * PX * 1.5, row(4), fz - 0.004);
+    add(PX * 0.45, PX * 0.55, new THREE.Color(0x111418), side * PX * 1.35, row(4), fz - 0.008, 0.008);
+    // Brows on row 3, the inner pixel set lower: a level, focused look.
+    add(PX, PX * 0.42, brow, side * PX * 2.5, row(3) + PX * 0.12);
+    add(PX, PX * 0.42, brow, side * PX * 1.5, row(3) - PX * 0.12);
   }
-  // Smile: a short bar with raised corner nubs.
-  addBox(0.14, 0.035, 0.02, mouth, 0, headY - 0.145, fz);
-  addBox(0.035, 0.035, 0.02, mouth, -0.085, headY - 0.115, fz);
-  addBox(0.035, 0.035, 0.02, mouth, 0.085, headY - 0.115, fz);
+  // Nose: two pixels of shadow on row 5, standing a little proud.
+  add(PX * 2, PX * 0.85, shadow, 0, row(5), fz - 0.006, 0.02);
+  // Mouth: one flat line on row 6.
+  add(PX * 2.2, PX * 0.38, lip, 0, row(6) + PX * 0.05);
 
-  // Face accessory (FACE_ACCESSORIES order: None, Glasses, Sunglasses,
-  // Eyepatch, Mask, Moustache, Monocle).
-  const dark = new THREE.Color(0x22242a);
-  const az = fz - 0.02; // accessories float just proud of the face features
-  const addAccessory = (
-    w: number, h: number, d: number, color: THREE.Color,
-    x: number, y: number, z: number
+  const dark = new THREE.Color(0x1d1f22);
+  const az = fz - 0.024;
+  const acc = (
+    w: number, h: number, d: number, color: THREE.Color, x: number, y: number, z = az,
   ): THREE.Mesh => addBoxTo(parent, accessoryMat, w, h, d, color, x, y, z, flat);
   switch (accessory) {
-    case 1: { // Glasses: two thin frames + a bridge
+    case 1: { // Shooting glasses: one wrap-around amber lens
+      acc(HEAD * 0.86, PX * 1.2, 0.02, new THREE.Color(0xd08a22), 0, row(4));
+      acc(HEAD * 0.9, PX * 0.3, 0.02, dark, 0, row(4) + PX * 0.7);
+      for (const side of [-1, 1]) acc(0.02, PX * 0.35, HEAD * 0.6, dark, side * (HEAD / 2 + 0.012), row(4), 0);
+      break;
+    }
+    case 2: { // Aviators: two dark lenses on a thin gold frame
       for (const side of [-1, 1]) {
-        addAccessory(0.17, 0.15, 0.02, dark, side * 0.125, headY + 0.04, az);
-        addAccessory(0.12, 0.1, 0.025, new THREE.Color(0xbfd8e8),
-          side * 0.125, headY + 0.04, az - 0.012);
+        acc(PX * 2.1, PX * 1.3, 0.02, new THREE.Color(0x26303a), side * PX * 2, row(4) - PX * 0.1);
       }
-      addAccessory(0.08, 0.03, 0.02, dark, 0, headY + 0.06, az);
+      acc(HEAD * 0.9, PX * 0.22, 0.02, BRASS, 0, row(4) + PX * 0.62);
+      for (const side of [-1, 1]) acc(0.018, PX * 0.25, HEAD * 0.6, BRASS, side * (HEAD / 2 + 0.01), row(4) + PX * 0.5, 0);
       break;
     }
-    case 2: { // Sunglasses: one solid dark band
-      addAccessory(0.44, 0.13, 0.02, dark, 0, headY + 0.04, az);
+    case 3: { // Eyepatch: over the left eye, strap round the head
+      acc(PX * 2.3, PX * 1.6, 0.02, dark, -PX * 2, row(4));
+      acc(HEAD + 0.02, PX * 0.3, HEAD + 0.02, dark, 0, row(3) + PX * 0.1, 0);
       break;
     }
-    case 3: { // Eyepatch: a patch over the left eye + a strap
-      addAccessory(0.16, 0.14, 0.02, dark, -0.125, headY + 0.04, az);
-      addAccessory(0.5, 0.035, 0.02, dark, 0, headY + 0.1, az + 0.005);
+    case 4: { // Face wrap: a shemagh over the nose, mouth and jaw
+      const cloth = new THREE.Color(0x9c8c66);
+      acc(HEAD + 0.04, PX * 3.2, HEAD + 0.04, cloth, 0, row(6) + PX * 0.1, 0);
+      acc(HEAD + 0.02, PX * 0.3, 0.02, cloth.clone().multiplyScalar(0.8), 0, row(5) - PX * 0.2, -HEAD / 2 - 0.03);
       break;
     }
-    case 4: { // Mask: covers the mouth/nose area
-      addAccessory(0.4, 0.18, 0.02, new THREE.Color(0x5a6470),
-        0, headY - 0.12, az);
+    case 5: { // Moustache: a heavy bar over the mouth line
+      acc(PX * 3.2, PX * 0.6, 0.02, hair, 0, row(6) - PX * -0.55);
       break;
     }
-    case 5: { // Moustache: a proud bar above the smile
-      addAccessory(0.2, 0.05, 0.02, hair, 0, headY - 0.1, az);
+    case 6: { // Full beard: jaw, chin and sideburns in the hair colour
+      acc(HEAD + 0.02, PX * 2.2, 0.03, hair, 0, row(7) + PX * 0.25);
+      acc(PX * 3.2, PX * 0.55, 0.03, hair, 0, row(6) + PX * 0.45);
+      for (const side of [-1, 1]) acc(0.03, PX * 3.2, HEAD * 0.55, hair, side * (HEAD / 2 + 0.012), row(5) + PX * 0.4, -HEAD * 0.1);
       break;
     }
-    case 6: { // Monocle: one round-ish frame + a hanging chain hint
-      addAccessory(0.15, 0.15, 0.02, new THREE.Color(0xd8b32a),
-        0.125, headY + 0.04, az);
-      addAccessory(0.1, 0.1, 0.025, new THREE.Color(0xbfd8e8),
-        0.125, headY + 0.04, az - 0.012);
-      addAccessory(0.02, 0.14, 0.02, new THREE.Color(0xd8b32a),
-        0.2, headY - 0.08, az);
+    case 7: { // War paint: two black bars under the eyes and one down the nose
+      for (const side of [-1, 1]) acc(PX * 2, PX * 0.5, 0.012, dark, side * PX * 2, row(5) + PX * 0.2, fz - 0.012);
+      acc(PX * 0.6, PX * 2, 0.012, dark, 0, row(4), fz - 0.013);
+      break;
+    }
+    case 8: { // Scar: a pale line down through the left brow and cheek
+      const scar = new THREE.Color(skin).lerp(new THREE.Color(0xf2d2c8), 0.6);
+      acc(PX * 0.35, PX * 3.4, 0.012, scar, -PX * 2.8, row(4.2), fz - 0.012);
       break;
     }
   }
@@ -239,135 +285,141 @@ function buildFace(
 
 // ─── hair + hat builders ───────────────────────────────────────────────────
 
-const HEAD = 0.5;
-
-/** Hair styles (HAIR_STYLES order: Classic, Long, Mohawk, Buns, Ponytail,
- *  Bowl, Bald). Built onto the head group so it pitches with look-dir. */
+/** Hair styles (HAIR_STYLES order: Crew Cut, Long, Mohawk, Bun, Ponytail,
+ *  Side Part, Shaved). Built onto the head group so it pitches with look-dir. */
 function buildHair(
   head: THREE.Group, mat: THREE.Material, hair: THREE.Color,
   headY: number, style: number
 ): void {
-  if (style === 6) return; // Bald
-
-  const cap = (): void => {
-    addBoxTo(head, mat, HEAD + 0.04, 0.13, HEAD + 0.04, hair,
-      0, headY + HEAD / 2 - 0.025, 0);
+  const top = headY + HEAD / 2;
+  const cap = (h = 0.07, lift = 0): void => {
+    addBoxTo(head, mat, HEAD + 0.03, h, HEAD + 0.03, hair, 0, top - h / 2 + 0.02 + lift, 0);
   };
-  const fringe = (h = 0.07): void => {
-    addBoxTo(head, mat, HEAD + 0.02, h, 0.035, hair,
-      0, headY + 0.18, -HEAD / 2 - 0.005);
+  const fringe = (rows = 1, x = 0, w = HEAD + 0.02): void => {
+    addBoxTo(head, mat, w, PX * rows, 0.03, hair, x, top - PX * rows / 2, -HEAD / 2 - 0.008);
   };
-  const sides = (h = 0.2): void => {
+  const sides = (rows = 2): void => {
     for (const side of [-1, 1]) {
-      addBoxTo(head, mat, 0.035, h, HEAD + 0.02, hair,
-        side * (HEAD / 2 + 0.005), headY + HEAD / 2 - h / 2 - 0.08, 0);
+      addBoxTo(head, mat, 0.03, PX * rows, HEAD + 0.02, hair,
+        side * (HEAD / 2 + 0.008), top - PX * rows / 2, 0.01);
     }
   };
-  const back = (h = 0.3): void => {
-    addBoxTo(head, mat, HEAD + 0.02, h, 0.045, hair,
-      0, headY + HEAD / 2 - h / 2 - 0.05, HEAD / 2 - 0.01);
+  const back = (rows = 4): void => {
+    addBoxTo(head, mat, HEAD + 0.02, PX * rows, 0.035, hair, 0, top - PX * rows / 2, HEAD / 2 + 0.008);
   };
 
   switch (style) {
-    case 0: // Classic: cap + fringe + side panels + fuller back
-      cap(); fringe(); sides(); back();
+    case 0: // Crew cut: short all round, a single row of fringe
+      cap(0.06); fringe(0.7); sides(2); back(3.5);
       break;
-    case 1: // Long: flows past the shoulders on the sides + back
-      cap(); fringe(); sides(0.55);
-      addBoxTo(head, mat, HEAD + 0.02, 0.72, 0.05, hair,
-        0, headY - 0.1, HEAD / 2 + 0.005);
+    case 1: // Long: past the jaw at the sides, down to the collar behind
+      cap(0.08); fringe(1.2); sides(6);
+      addBoxTo(head, mat, HEAD + 0.03, HEAD * 1.1, 0.05, hair, 0, top - HEAD * 0.55, HEAD / 2 + 0.012);
       break;
-    case 2: { // Mohawk: a tall centre strip, shaved sides
+    case 2: // Mohawk: a tall centre strip over shaved sides
+      cap(0.02);
       for (let i = 0; i < 4; i++) {
-        addBoxTo(head, mat, 0.09, 0.14, 0.14, hair,
-          0, headY + HEAD / 2 + 0.055, -0.18 + i * 0.12);
+        addBoxTo(head, mat, 0.08, 0.12, 0.13, hair, 0, top + 0.06, -0.17 + i * 0.115);
       }
+      break;
+    case 3: // Bun: pulled back tight, a knot at the crown
+      cap(0.06); fringe(0.5); sides(2.5); back(4);
+      addBoxTo(head, mat, 0.16, 0.14, 0.13, hair, 0, top - 0.02, HEAD / 2 + 0.07);
+      break;
+    case 4: // Ponytail: tied off low at the back
+      cap(0.06); fringe(0.8); sides(3); back(4);
+      addBoxTo(head, mat, 0.1, 0.1, 0.1, hair, 0, headY + 0.02, HEAD / 2 + 0.05);
+      addBoxTo(head, mat, 0.08, 0.36, 0.08, hair, 0, headY - 0.17, HEAD / 2 + 0.06);
+      break;
+    case 5: // Side part: longer on one side, swept over
+      cap(0.08); sides(2.5); back(4);
+      fringe(1.6, -PX * 1.2, HEAD * 0.72);
+      fringe(0.7, PX * 2.6, HEAD * 0.34);
+      break;
+    case 6: { // Shaved: just the shadow of it
+      const shade = new THREE.Color(hair).lerp(new THREE.Color(0x777777), 0.45);
+      addBoxTo(head, mat, HEAD + 0.012, 0.02, HEAD + 0.012, shade, 0, top + 0.004, 0);
       break;
     }
-    case 3: // Buns: neat cap + two buns on top
-      cap(); fringe();
-      for (const side of [-1, 1]) {
-        addBoxTo(head, mat, 0.14, 0.12, 0.14, hair,
-          side * 0.16, headY + HEAD / 2 + 0.05, 0.08);
-      }
-      break;
-    case 4: // Ponytail: cap + a tail hanging down the back
-      cap(); fringe(); sides();
-      addBoxTo(head, mat, 0.12, 0.16, 0.12, hair,
-        0, headY + 0.12, HEAD / 2 + 0.05);
-      addBoxTo(head, mat, 0.09, 0.42, 0.09, hair,
-        0, headY - 0.12, HEAD / 2 + 0.06);
-      break;
-    case 5: // Bowl: a deep all-around cut
-      addBoxTo(head, mat, HEAD + 0.05, 0.2, HEAD + 0.05, hair,
-        0, headY + HEAD / 2 - 0.06, 0);
-      fringe(0.1); sides(0.16); back(0.2);
-      break;
   }
 }
 
-/** Hats (HATS order: None, Cap, Beanie, Top Hat, Crown, Halo, Horns, Cowboy,
- *  Wizard, Headband). Built onto the head group, above the hair. */
+/** Headgear (HATS order: None, Patrol Cap, Watch Cap, Beret, Boonie, Combat
+ *  Helmet, Bandana, Officer Cap, Comms Headset, Headband, NVG Helmet). */
 function buildHat(
   head: THREE.Group, mat: THREE.Material, color: THREE.Color,
   headY: number, hat: number
 ): void {
   const topY = headY + HEAD / 2;
-  const dark = new THREE.Color(color).multiplyScalar(0.7);
+  const dark = new THREE.Color(color).multiplyScalar(0.62);
+  const black = new THREE.Color(0x1e2023);
+  const helmet = (): void => {
+    addBoxTo(head, mat, HEAD + 0.1, 0.2, HEAD + 0.1, color, 0, topY + 0.04, 0.005);
+    addBoxTo(head, mat, HEAD + 0.13, 0.05, HEAD + 0.13, dark, 0, topY - 0.04, 0.005);
+    addBoxTo(head, mat, HEAD - 0.04, 0.04, HEAD - 0.04, color, 0, topY + 0.155, 0.005);
+    for (const side of [-1, 1]) {
+      // Side rails and the chin strap.
+      addBoxTo(head, mat, 0.03, 0.06, 0.24, dark, side * (HEAD / 2 + 0.065), topY + 0.02, 0);
+      addBoxTo(head, mat, 0.02, HEAD * 0.62, 0.035, black, side * (HEAD / 2 + 0.012), headY - 0.04, -0.02);
+    }
+  };
   switch (hat) {
-    case 1: // Cap: crown + a front brim
-      addBoxTo(head, mat, HEAD + 0.08, 0.14, HEAD + 0.08, color, 0, topY + 0.05, 0);
-      addBoxTo(head, mat, 0.4, 0.035, 0.22, dark, 0, topY + 0.01, -HEAD / 2 - 0.13);
+    case 1: // Patrol cap: flat-topped crown and a short stiff brim
+      addBoxTo(head, mat, HEAD + 0.05, 0.13, HEAD + 0.05, color, 0, topY + 0.035, 0);
+      addBoxTo(head, mat, HEAD + 0.07, 0.03, HEAD + 0.07, dark, 0, topY - 0.02, 0);
+      addBoxTo(head, mat, 0.36, 0.028, 0.14, dark, 0, topY - 0.015, -HEAD / 2 - 0.07);
       break;
-    case 2: // Beanie: a snug dome + fold band
-      addBoxTo(head, mat, HEAD + 0.07, 0.16, HEAD + 0.07, color, 0, topY + 0.06, 0);
-      addBoxTo(head, mat, HEAD + 0.1, 0.07, HEAD + 0.1, dark, 0, topY - 0.01, 0);
-      addBoxTo(head, mat, 0.12, 0.09, 0.12, dark, 0, topY + 0.18, 0);
+    case 2: // Watch cap: snug knit with a rolled band
+      addBoxTo(head, mat, HEAD + 0.05, 0.17, HEAD + 0.05, color, 0, topY + 0.045, 0);
+      addBoxTo(head, mat, HEAD + 0.07, 0.07, HEAD + 0.07, dark, 0, topY - 0.025, 0);
       break;
-    case 3: // Top Hat: wide brim + a tall stack
-      addBoxTo(head, mat, HEAD + 0.24, 0.04, HEAD + 0.24, color, 0, topY + 0.02, 0);
-      addBoxTo(head, mat, HEAD - 0.06, 0.36, HEAD - 0.06, color, 0, topY + 0.22, 0);
-      addBoxTo(head, mat, HEAD - 0.04, 0.06, HEAD - 0.04, dark, 0, topY + 0.08, 0);
-      break;
-    case 4: { // Crown: a golden band + spikes (hat colour = gem accents)
-      const gold = new THREE.Color(0xd8b32a);
-      addBoxTo(head, mat, HEAD + 0.06, 0.09, HEAD + 0.06, gold, 0, topY + 0.045, 0);
-      for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]] as const) {
-        addBoxTo(head, mat, 0.06, 0.12, 0.06, gold,
-          sx * 0.2, topY + 0.14, sz * 0.2);
-      }
-      addBoxTo(head, mat, 0.07, 0.07, 0.03, color, 0, topY + 0.045, -HEAD / 2 - 0.045);
+    case 3: { // Beret: pulled down over one side, badge on the other
+      const beret = new THREE.Mesh(shadedBox(HEAD + 0.08, 0.07, HEAD + 0.1, color), mat);
+      beret.position.set(-0.035, topY + 0.03, 0.01);
+      beret.rotation.z = 0.16;
+      head.add(beret);
+      addBoxTo(head, mat, HEAD + 0.05, 0.035, HEAD + 0.05, dark, 0, topY - 0.01, 0);
+      addBoxTo(head, mat, 0.06, 0.07, 0.02, BRASS, PX * 2.3, topY + 0.01, -HEAD / 2 - 0.035);
       break;
     }
-    case 5: { // Halo: a glowing ring floating above (always light gold)
-      const glow = new THREE.Color(0xf5e28a);
-      const flat = [1, 1, 1, 1, 1, 1];
-      const r = 0.19, t = 0.05;
-      addBoxTo(head, mat, r * 2, 0.03, t, glow, 0, topY + 0.22, -r, flat);
-      addBoxTo(head, mat, r * 2, 0.03, t, glow, 0, topY + 0.22, r, flat);
-      addBoxTo(head, mat, t, 0.03, r * 2, glow, -r, topY + 0.22, 0, flat);
-      addBoxTo(head, mat, t, 0.03, r * 2, glow, r, topY + 0.22, 0, flat);
+    case 4: // Boonie: floppy wide brim and a banded crown
+      addBoxTo(head, mat, HEAD + 0.26, 0.03, HEAD + 0.26, color, 0, topY - 0.01, 0);
+      addBoxTo(head, mat, HEAD + 0.04, 0.13, HEAD + 0.04, color, 0, topY + 0.06, 0);
+      addBoxTo(head, mat, HEAD + 0.06, 0.035, HEAD + 0.06, dark, 0, topY + 0.02, 0);
       break;
-    }
-    case 6: // Horns: two stubby devil horns
+    case 5: // Combat helmet
+      helmet();
+      break;
+    case 6: // Bandana: tied over the crown, knot behind
+      addBoxTo(head, mat, HEAD + 0.035, 0.1, HEAD + 0.035, color, 0, topY - 0.03, 0);
+      addBoxTo(head, mat, 0.1, 0.08, 0.06, dark, 0, topY - 0.07, HEAD / 2 + 0.04);
+      addBoxTo(head, mat, 0.06, 0.14, 0.03, dark, 0.03, topY - 0.16, HEAD / 2 + 0.05);
+      break;
+    case 7: // Officer cap: a raised crown, black visor, brass badge
+      addBoxTo(head, mat, HEAD + 0.16, 0.1, HEAD + 0.16, color, 0, topY + 0.1, -0.01);
+      addBoxTo(head, mat, HEAD + 0.05, 0.1, HEAD + 0.05, dark, 0, topY + 0.02, 0);
+      addBoxTo(head, mat, 0.38, 0.025, 0.14, black, 0, topY - 0.025, -HEAD / 2 - 0.07);
+      addBoxTo(head, mat, 0.07, 0.06, 0.02, BRASS, 0, topY + 0.04, -HEAD / 2 - 0.04);
+      break;
+    case 8: // Comms headset: band, ear cups and a boom mic
+      addBoxTo(head, mat, 0.05, 0.04, HEAD * 0.45, black, 0, topY + 0.02, 0.02);
       for (const side of [-1, 1]) {
-        addBoxTo(head, mat, 0.08, 0.14, 0.08, color, side * 0.17, topY + 0.06, -0.05);
-        addBoxTo(head, mat, 0.055, 0.1, 0.055, color, side * 0.19, topY + 0.16, -0.05);
+        addBoxTo(head, mat, 0.03, HEAD * 0.5, 0.04, black, side * (HEAD / 2 + 0.02), topY - HEAD * 0.2, 0.02);
+        addBoxTo(head, mat, 0.07, 0.15, 0.14, color, side * (HEAD / 2 + 0.035), headY - 0.02, 0.02);
       }
+      addBoxTo(head, mat, 0.03, 0.03, 0.2, black, -(HEAD / 2 + 0.03), headY - 0.08, -0.1);
+      addBoxTo(head, mat, 0.12, 0.035, 0.035, black, -(HEAD / 2 - 0.04), headY - 0.09, -HEAD / 2 - 0.02);
       break;
-    case 7: // Cowboy: a wide brim + a rounded crown with a band
-      addBoxTo(head, mat, HEAD + 0.3, 0.045, HEAD + 0.22, color, 0, topY + 0.02, 0);
-      addBoxTo(head, mat, HEAD - 0.08, 0.17, HEAD - 0.1, color, 0, topY + 0.12, 0);
-      addBoxTo(head, mat, HEAD - 0.06, 0.05, HEAD - 0.08, dark, 0, topY + 0.06, 0);
+    case 9: // Headband
+      addBoxTo(head, mat, HEAD + 0.035, 0.055, HEAD + 0.035, color, 0, topY - PX * 1.4, 0);
       break;
-    case 8: // Wizard: a brim + a tapering point
-      addBoxTo(head, mat, HEAD + 0.18, 0.045, HEAD + 0.18, color, 0, topY + 0.02, 0);
-      addBoxTo(head, mat, 0.34, 0.16, 0.34, color, 0, topY + 0.12, 0);
-      addBoxTo(head, mat, 0.22, 0.15, 0.22, color, 0, topY + 0.27, 0.02);
-      addBoxTo(head, mat, 0.11, 0.15, 0.11, color, 0, topY + 0.4, 0.045);
-      break;
-    case 9: // Headband: a thin band around the forehead
-      addBoxTo(head, mat, HEAD + 0.05, 0.055, HEAD + 0.05, color, 0, headY + 0.16, 0);
+    case 10: // Helmet with night-vision mount
+      helmet();
+      addBoxTo(head, mat, 0.12, 0.08, 0.05, black, 0, topY + 0.03, -HEAD / 2 - 0.07);
+      for (const side of [-1, 1]) {
+        addBoxTo(head, mat, 0.07, 0.07, 0.12, black, side * 0.05, topY + 0.02, -HEAD / 2 - 0.13);
+        addBoxTo(head, mat, 0.05, 0.05, 0.02, new THREE.Color(0x4cff7a), side * 0.05, topY + 0.02, -HEAD / 2 - 0.195);
+      }
       break;
   }
 }
@@ -391,14 +443,14 @@ export interface AvatarBody {
  * with the caller because walking, boating, gliding, and attacking compose them. */
 export function applyAvatarSneak(body: AvatarBody, amount: number): void {
   const a = Math.max(0, Math.min(1, amount));
-  body.head.position.y = 1.5 - a * 0.16;
+  body.head.position.y = NECK_Y - a * 0.16;
   body.head.position.z = -a * 0.08;
   for (const arm of [body.parts[2], body.parts[3]]) {
-    arm.position.y = 1.46 - a * 0.14;
+    arm.position.y = SHOULDER_Y - a * 0.14;
     arm.position.z = -a * 0.08;
   }
   for (const leg of [body.parts[0], body.parts[1]]) {
-    leg.position.y = 0.75;
+    leg.position.y = HIP_Y;
     leg.position.z = a * 0.04;
   }
 }
@@ -443,107 +495,111 @@ export function stridePose(
 }
 
 /** Build the full customised avatar body (feet at y=0, facing -z). The
- *  optional shirt override paints faction colours over the cosmetic shirt so
- *  teams stay readable in the war. */
+ *  optional shirt override paints faction colours over the cosmetic uniform
+ *  so teams stay readable in the war. */
 export function buildAvatarBody(
   cosmetics: Cosmetics, shirtOverride?: THREE.Color
 ): AvatarBody {
-  // Sanitize on the way in. Cosmetics reach here straight off the wire on the
-  // bust paths (duel ladder, pledge-screen plinths), and a blob written by an older
-  // build can be missing a field or carry an index the palette no longer has —
-  // an unguarded `PALETTE[i].hex` would take the whole handler down with it.
+  // Sanitize on the way in: cosmetics reach here straight off the wire on the
+  // bust paths, and a blob from an older build can be missing a field.
   const c = sanitizeCosmetics(cosmetics);
   const skin  = new THREE.Color(SKIN_TONES[c.skin].hex);
   const eye   = new THREE.Color(EYE_COLORS[c.eyes].hex);
   const hair  = new THREE.Color(HAIR_COLORS[c.hair].hex);
   const shirt = shirtOverride ?? new THREE.Color(SHIRT_COLORS[c.shirt].hex);
   const pants = new THREE.Color(PANTS_COLORS[c.pants].hex);
-  const shoe  = new THREE.Color(PANTS_COLORS[c.pants].hex).multiplyScalar(0.45);
+  // Kit is the uniform colour pushed toward field olive and knocked back, so
+  // a faction still reads on the vest while it looks like gear, not a shirt.
+  const vest = new THREE.Color(shirt).lerp(OLIVE, 0.55).multiplyScalar(0.82);
+  const pouch = new THREE.Color(vest).multiplyScalar(0.82);
+  const collar = new THREE.Color(shirt).multiplyScalar(0.84);
+  const boot = new THREE.Color(BOOT).lerp(pants, 0.18);
+  const pad = new THREE.Color(0x303236).lerp(pants, 0.25);
 
-  // Stable opaque layers replace tiny geometry-only offsets. This avoids
-  // distance/animation-dependent z-fighting without disabling the depth test.
-  // Each layer also carries the material texture for what it actually is, so
-  // skin, cloth, denim, hair, leather and plate all read differently.
-  const skinMat  = layeredAvatarMaterial(0, 'skin');    // head, neck
-  const clothMat = layeredAvatarMaterial(0, 'cloth');   // torso, sleeves
-  const denimMat = layeredAvatarMaterial(0, 'denim');   // legs
-  const propMat  = layeredAvatarMaterial(0, 'wood');    // boat hull / props
-  const handMat  = layeredAvatarMaterial(1, 'skin');    // hands
-  const trimMat  = layeredAvatarMaterial(1, 'leather'); // belt, shoes
-  const hairMat  = layeredAvatarMaterial(2, 'hair');
-  const detailMat = layeredAvatarMaterial(3, 'none');   // face pixels stay crisp
+  // Stable opaque layers, each with its own depth bias, so the overlapping
+  // kit never z-fights at range; each carries the texture of what it IS.
+  const skinMat   = layeredAvatarMaterial(0, 'skin');     // head
+  const clothMat  = layeredAvatarMaterial(0, 'camo');     // tunic, sleeves
+  const legMat    = layeredAvatarMaterial(0, 'denim');    // trousers
+  const propMat   = layeredAvatarMaterial(0, 'wood');     // boat hull / props
+  const handMat   = layeredAvatarMaterial(1, 'leather');  // gloves
+  const kitMat    = layeredAvatarMaterial(1, 'webbing');  // plate carrier, pack
+  const trimMat   = layeredAvatarMaterial(2, 'leather');  // belt, boots, pads, pouches
+  const hairMat   = layeredAvatarMaterial(2, 'hair');
+  const detailMat = layeredAvatarMaterial(3, 'none');     // face pixels stay crisp
   const accessoryMat = layeredAvatarMaterial(4, 'none');
-  const hatMat   = layeredAvatarMaterial(4, 'cloth');
-  const armorMat = layeredAvatarMaterial(6, 'metal');
+  const hatMat    = layeredAvatarMaterial(4, 'cloth');
+  const armorMat  = layeredAvatarMaterial(6, 'metal');
   const materials = [
-    skinMat, clothMat, denimMat, propMat, handMat, trimMat,
+    skinMat, clothMat, legMat, propMat, handMat, kitMat, trimMat,
     hairMat, detailMat, accessoryMat, hatMat, armorMat,
   ];
   const group = new THREE.Group();
   group.rotation.order = 'YXZ';
 
-  // Classic Minecraft proportions, in world blocks (feet at y=0):
-  //   head 0.5³ · torso 0.5w×0.75h×0.25d · arms/legs 0.25×0.75×0.25.
-  // Total height ≈ 2.0. Single-segment limbs (no forearms/shins) for the
-  // crisp blocky look; hands/feet are short skin/shoe caps on each limb.
-  const TORSO_W = 0.5, TORSO_H = 0.75, TORSO_D = 0.26;
-  const LIMB_W = 0.24, LIMB_H = 0.74, LIMB_D = 0.24;
-  const HIP_Y = 0.75;        // top of the legs / bottom of the torso
-  const SHOULDER_Y = 1.46;   // arm pivot
-  const NECK_Y = 1.5;        // bottom of the head / neck base
-
-  // ── Torso ──────────────────────────────────────────────────────────────
+  // ── Torso: tunic, plate carrier, pouches, straps, belt, pack ───────────
   const torso = new THREE.Mesh(shadedBox(TORSO_W, TORSO_H, TORSO_D, shirt), clothMat);
   torso.position.y = HIP_Y + TORSO_H / 2;
   group.add(torso);
-  // Belt strip (pants-colored) at the waist for a two-tone read.
-  const belt = new THREE.Mesh(
-    shadedBox(TORSO_W + 0.006, 0.16, TORSO_D + 0.006, pants), trimMat);
-  belt.position.y = HIP_Y + 0.08;
-  group.add(belt);
-
-  // Neck
-  const neck = new THREE.Mesh(shadedBox(0.2, 0.1, 0.2, skin), skinMat);
-  neck.position.y = NECK_Y + 0.04;
-  group.add(neck);
+  addBoxTo(group, kitMat, VEST_W, VEST_H, VEST_D, vest, 0, VEST_Y, 0);
+  // Three magazine pouches across the front, with their flaps.
+  for (const x of [-0.15, 0, 0.15]) {
+    addBoxTo(group, trimMat, 0.125, 0.15, 0.06, pouch, x, VEST_Y - 0.1, -VEST_D / 2 - 0.028);
+    addBoxTo(group, trimMat, 0.13, 0.035, 0.07, new THREE.Color(pouch).multiplyScalar(0.8),
+      x, VEST_Y - 0.03, -VEST_D / 2 - 0.03);
+  }
+  // A uniform-coloured patch high on the chest: the side you fight for,
+  // readable even across a field on a kitted-out soldier.
+  addBoxTo(group, trimMat, 0.12, 0.07, 0.02, new THREE.Color(shirt).multiplyScalar(1.12),
+    0.13, VEST_Y + 0.14, -VEST_D / 2 - 0.008);
+  // Shoulder straps over the top, down to the carrier.
+  for (const side of [-1, 1]) {
+    addBoxTo(group, kitMat, 0.09, 0.07, TORSO_D + 0.04, vest, side * 0.15, HIP_Y + TORSO_H - 0.02, 0);
+  }
+  // Slim assault pack on the back.
+  addBoxTo(group, kitMat, 0.34, 0.36, 0.09, pouch, 0, VEST_Y + 0.02, VEST_D / 2 + 0.045);
+  addBoxTo(group, trimMat, 0.3, 0.06, 0.1, WEBBING_DARK, 0, VEST_Y - 0.12, VEST_D / 2 + 0.05);
+  // Belt and buckle.
+  addBoxTo(group, trimMat, TORSO_W + 0.02, 0.08, TORSO_D + 0.02, new THREE.Color(0x2a2721),
+    0, HIP_Y + 0.05, 0);
+  addBoxTo(group, trimMat, 0.07, 0.055, 0.02, new THREE.Color(0x8a8f96), 0, HIP_Y + 0.05, -TORSO_D / 2 - 0.018);
+  // Collar: the field shirt closes on the jaw — no neck stalk.
+  addBoxTo(group, clothMat, 0.32, 0.08, 0.3, collar, 0, NECK_Y - 0.02, 0);
 
   // ── Head ──────────────────────────────────────────────────────────────
-  // Separate group, pivot at the neck base so it can pitch with look-dir.
+  // Its own group, pivoting at the jaw line so it pitches with look-dir.
   const headGroup = new THREE.Group();
-  const headY_local = HEAD / 2 + 0.05; // centre of the head above the pivot
   const headMesh = new THREE.Mesh(shadedBox(HEAD, HEAD, HEAD, skin), skinMat);
-  headMesh.position.y = headY_local;
+  headMesh.position.y = HEAD_Y;
   headGroup.add(headMesh);
-
-  buildHair(headGroup, hairMat, hair, headY_local, c.hairStyle);
-  buildHat(headGroup, hatMat, new THREE.Color(HAT_COLORS[c.hatColor].hex),
-    headY_local, c.hat);
-  buildFace(headGroup, detailMat, accessoryMat, skin, hair, eye, headY_local, c.face);
-
+  buildHair(headGroup, hairMat, hair, HEAD_Y, c.hairStyle);
+  buildHat(headGroup, hatMat, new THREE.Color(HAT_COLORS[c.hatColor].hex), HEAD_Y, c.hat);
+  buildFace(headGroup, detailMat, accessoryMat, skin, hair, eye, HEAD_Y, c.face);
   headGroup.position.y = NECK_Y;
   group.add(headGroup);
 
-  // ── Legs (single segment, pivot at the hip) ────────────────────────────
-  const ll = limb(denimMat, LIMB_W, LIMB_H, LIMB_D, pants, -0.12, HIP_Y, 0);
-  const rl = limb(denimMat, LIMB_W, LIMB_H, LIMB_D, pants,  0.12, HIP_Y, 0);
-  // Shoes — short caps at the foot of each leg (swing with the leg).
-  for (const leg of [ll, rl]) {
-    const foot = new THREE.Mesh(
-      shadedBox(LIMB_W + 0.01, 0.12, LIMB_D + 0.06, shoe), trimMat);
-    foot.position.set(0, -LIMB_H + 0.06, -0.02);
-    leg.add(foot);
+  // ── Legs: trousers, knee pads, cargo pockets, boots ───────────────────
+  const legX = LEG_W / 2 + 0.006;
+  const ll = limb(legMat, LEG_W, LIMB_H, LEG_D, pants, -legX, HIP_Y, 0);
+  const rl = limb(legMat, LEG_W, LIMB_H, LEG_D, pants, legX, HIP_Y, 0);
+  for (const [leg, side] of [[ll, -1], [rl, 1]] as const) {
+    addBoxTo(leg, trimMat, LEG_W - 0.02, 0.13, 0.05, pad, 0, -0.4, -LEG_D / 2 - 0.02);
+    addBoxTo(leg, trimMat, 0.05, 0.15, 0.13, new THREE.Color(pants).multiplyScalar(0.86),
+      side * (LEG_W / 2 + 0.018), -0.24, 0);
+    addBoxTo(leg, trimMat, LEG_W + 0.02, 0.2, LEG_D + 0.05, boot, 0, -LIMB_H + 0.1, -0.02);
+    addBoxTo(leg, trimMat, LEG_W + 0.03, 0.04, LEG_D + 0.07, new THREE.Color(0x1b1916),
+      0, -LIMB_H + 0.02, -0.025);
   }
 
-  // ── Arms (single segment, pivot at the shoulder) ───────────────────────
-  const armX = TORSO_W / 2 + LIMB_W / 2;
-  const la = limb(clothMat, LIMB_W, LIMB_H, LIMB_D, shirt, -armX, SHOULDER_Y, 0);
-  const ra = limb(clothMat, LIMB_W, LIMB_H, LIMB_D, shirt,  armX, SHOULDER_Y, 0);
-  // Hands — skin-colored caps below the sleeve (swing with the arm).
-  for (const arm of [la, ra]) {
-    const hand = new THREE.Mesh(
-      shadedBox(LIMB_W + 0.006, 0.14, LIMB_D + 0.006, skin), handMat);
-    hand.position.y = -LIMB_H + 0.07;
-    arm.add(hand);
+  // ── Arms: sleeves, shoulder patch, rolled cuff, gloves ────────────────
+  const armX = TORSO_W / 2 + ARM_W / 2;
+  const la = limb(clothMat, ARM_W, LIMB_H - 0.14, ARM_D, shirt, -armX, SHOULDER_Y, 0);
+  const ra = limb(clothMat, ARM_W, LIMB_H - 0.14, ARM_D, shirt, armX, SHOULDER_Y, 0);
+  for (const [arm, side] of [[la, -1], [ra, 1]] as const) {
+    addBoxTo(arm, trimMat, 0.02, 0.1, 0.11, new THREE.Color(shirt).lerp(new THREE.Color(0xffffff), 0.25),
+      side * (ARM_W / 2 + 0.008), -0.13, 0);
+    addBoxTo(arm, clothMat, ARM_W + 0.014, 0.06, ARM_D + 0.014, collar, 0, -LIMB_H + 0.17, 0);
+    addBoxTo(arm, handMat, ARM_W + 0.006, 0.16, ARM_D + 0.006, GLOVE, 0, -LIMB_H + 0.075, 0);
   }
 
   group.add(ll, rl, la, ra);
@@ -565,12 +621,6 @@ export function disposeAvatarBody(body: AvatarBody): void {
 }
 
 // ─── worn armor + held item (equip visuals) ────────────────────────────────
-
-// Body dimensions mirrored from buildAvatarBody (keep in sync).
-const TORSO_W = 0.5, TORSO_H = 0.75, TORSO_D = 0.26;
-const LIMB_W = 0.24, LIMB_H = 0.74, LIMB_D = 0.24;
-const HIP_Y = 0.75;
-const HEAD_Y = HEAD / 2 + 0.05; // centre of the head above the head-group pivot
 
 /** Plating colour per armor material (readable at a distance). */
 function armorColorFor(id: number): THREE.Color {

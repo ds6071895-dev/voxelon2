@@ -2,10 +2,11 @@
 // with a ZOOM TOGGLE between the HEARTLAND core (inner 1000×1000, where society
 // lives) and the full 5000×5000 world (the Wilds). A biome-colored base
 // (sampled from the deterministic Terrain, cached PER VIEW — never the full
-// 5000² block grid) with big readable landmark icons: surface structures,
-// vault entrances, attuned WAYPOINT TOTEMS (click to travel), and
-// click-to-drop WAYPOINTS (shown here AND as in-world beacons, persisted in
-// localStorage).
+// 5000² block grid). The only landmarks on it are the WAR FLAGS: structures and
+// vaults are deliberately NOT marked — the world is for finding things in, and
+// a map that hands you every tower and dungeon empties it of exploring. What
+// remains is yours: attuned WAYPOINT TOTEMS (click to travel) and click-to-drop
+// WAYPOINTS (shown here AND as in-world beacons, persisted in localStorage).
 
 import * as THREE from 'three';
 import { Biome } from './biomes';
@@ -13,7 +14,6 @@ import { factionColor } from './teams';
 import { Terrain } from './terrain';
 import { CORE_BORDER, CORE_HALF, WORLD_BORDER } from './net/protocol';
 import { iconSvg } from './emoji_icons';
-import { STRUCTURE_NAMES, StructureKind } from './structures';
 
 const CANVAS_PX = 700;
 type MapView = 'core' | 'world';
@@ -54,15 +54,6 @@ const BIOME_COLOR: Record<number, string> = {
   [Biome.Heath]: '#8d7fa0',
 };
 
-/** Map-icon color per surface-structure kind. */
-const STRUCT_COLOR: Record<string, string> = {
-  tower: '#c8ccd4',   // ruined watchtower — pale stone
-  bunker: '#93a559',  // bunker — military olive
-  pod: '#e0913a',     // crashed cargo pod — scorched orange
-  village: '#f1c56f', cottage: '#e8aa83', inn: '#e5bb75', windmill: '#f4e5ba',
-  shrine: '#a6e6e0', ruins: '#a5bf96', camp: '#dd9766', greenhouse: '#9cdebd',
-};
-
 interface Waypoint {
   x: number; z: number; color: number; name: string; show: boolean;
   /** Altitude of the waypoint (older saved points have none). */
@@ -74,15 +65,6 @@ interface DynamicMarker {
   beaconRange?: number;
 }
 export interface TotemPos { x: number; y: number; z: number; }
-/** A vault marker for the map (Milestone D). `discovered` vaults (entered once)
- *  render bright with their tier; merely SENSED nearby ones render faint with no
- *  tier (you know something's there, not what). */
-export interface VaultMark {
-  x: number; z: number; tier: number; cleared: boolean; discovered: boolean;
-}
-/** A surface structure on the map: position + kind (tower/bunker/pod). */
-export interface StructureMark { x: number; z: number; kind: string; }
-
 /** Live game state the map reads each frame it's open. */
 export interface MapContext {
   player(): { x: number; z: number; yaw: number };
@@ -103,11 +85,6 @@ export class WorldMap {
   private waypoints: Waypoint[] = [];
   /** Attuned Waypoint Totems (B4) — click one on the map to travel to it. */
   private totems: TotemPos[] = [];
-  /** Discovered vaults (Milestone D) + the world's total (collection pressure). */
-  private vaults: VaultMark[] = [];
-  private vaultTotal = 0;
-  /** Every surface structure (shown as icons so the map reads as a treasure map). */
-  private structures: StructureMark[] = [];
   /** Fired when the player clicks an attuned totem marker (main runs the
    *  wind-up + the actual teleport). */
   onTotemTravel?: (t: TotemPos) => void;
@@ -276,42 +253,6 @@ export class WorldMap {
       ctx.fillText('WILDS', this.cx(0), this.cy(-WORLD_BORDER * 0.36));
     }
 
-    // Surface structures: big, readable kind-shaped icons with a drop shadow.
-    for (const st of this.structures) {
-      this.drawStructure(this.cx(st.x), this.cy(st.z), st.kind);
-    }
-
-    // Vault markers (Milestone D): discovered vaults are bright + tier-labeled;
-    // merely SENSED nearby ones are faint with a '?'. Cleared ones dim.
-    for (const v of this.vaults) {
-      const px = this.cx(v.x), py = this.cy(v.z);
-      ctx.save();
-      ctx.globalAlpha = !v.discovered ? 0.5 : (v.cleared ? 0.6 : 1);
-      ctx.shadowColor = 'rgba(0,0,0,0.7)'; ctx.shadowBlur = 4;
-      ctx.fillStyle = '#171224';
-      ctx.strokeStyle = '#b9a5ff'; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(px, py, 9, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-      ctx.shadowBlur = 0;
-      ctx.fillStyle = v.discovered ? '#efe6ff' : '#a898e0';
-      if (v.discovered) {
-        // Tiny drawn skull glyph (canvas can't render SVG/emoji fonts here).
-        ctx.beginPath(); ctx.arc(px, py - 1, 4.5, Math.PI, 0); ctx.lineTo(px + 4.5, py + 2);
-        ctx.quadraticCurveTo(px, py + 5, px - 4.5, py + 2); ctx.closePath(); ctx.fill();
-        ctx.fillStyle = '#171224';
-        ctx.beginPath(); ctx.arc(px - 1.8, py - 1, 1, 0, Math.PI * 2); ctx.fill();
-        ctx.beginPath(); ctx.arc(px + 1.8, py - 1, 1, 0, Math.PI * 2); ctx.fill();
-      } else {
-        ctx.font = 'bold 11px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.fillText('?', px, py);
-      }
-      if (v.discovered) {
-        ctx.fillStyle = '#c9b8ff';
-        ctx.font = 'bold 9px monospace';
-        ctx.fillText(['I', 'II', 'III'][v.tier - 1] ?? '?', px, py + 15);
-      }
-      ctx.restore();
-    }
-
     this.drawWaypoints();
 
     // Attuned Waypoint Totems (B4): gold ringed markers — CLICK to travel.
@@ -396,81 +337,8 @@ export class WorldMap {
     }
   }
 
-  /** A big, kind-shaped structure icon (tower/bunker/pod) with a drop shadow. */
-  private drawStructure(px: number, py: number, kind: string): void {
-    const ctx = this.ctx;
-    const col = STRUCT_COLOR[kind] ?? '#c9c9c9';
-    ctx.save();
-    ctx.shadowColor = 'rgba(0,0,0,0.75)'; ctx.shadowBlur = 3;
-    ctx.fillStyle = col;
-    ctx.strokeStyle = 'rgba(10,12,18,0.9)'; ctx.lineWidth = 1.5;
-    if (['village', 'cottage', 'inn', 'greenhouse'].includes(kind)) {
-      // Warm roof silhouettes; a second roof distinguishes settlements.
-      for (const offset of kind === 'village' ? [-3, 3] : [0]) {
-        ctx.beginPath();
-        ctx.moveTo(px + offset - 4, py); ctx.lineTo(px + offset, py - 5);
-        ctx.lineTo(px + offset + 4, py); ctx.lineTo(px + offset + 4, py + 5);
-        ctx.lineTo(px + offset - 4, py + 5); ctx.closePath(); ctx.fill(); ctx.stroke();
-      }
-    } else if (kind === 'windmill') {
-      ctx.fillRect(px - 2, py - 2, 4, 8);
-      ctx.beginPath(); ctx.moveTo(px - 5, py - 6); ctx.lineTo(px + 5, py + 4);
-      ctx.moveTo(px + 5, py - 6); ctx.lineTo(px - 5, py + 4);
-      ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.stroke();
-    } else if (kind === 'shrine' || kind === 'ruins' || kind === 'camp') {
-      ctx.beginPath(); ctx.moveTo(px, py - 6); ctx.lineTo(px + 6, py + 5);
-      ctx.lineTo(px - 6, py + 5); ctx.closePath(); ctx.fill(); ctx.stroke();
-      ctx.fillStyle = '#243234'; ctx.fillRect(px - 1.5, py, 3, 5);
-    } else if (kind === 'tower') {
-      // A little watchtower: a tall keep with crenellations.
-      ctx.beginPath();
-      ctx.moveTo(px - 4, py + 5); ctx.lineTo(px - 4, py - 3);
-      ctx.lineTo(px - 5, py - 3); ctx.lineTo(px - 5, py - 6); ctx.lineTo(px - 2, py - 6);
-      ctx.lineTo(px - 2, py - 4); ctx.lineTo(px + 2, py - 4); ctx.lineTo(px + 2, py - 6);
-      ctx.lineTo(px + 5, py - 6); ctx.lineTo(px + 5, py - 3); ctx.lineTo(px + 4, py - 3);
-      ctx.lineTo(px + 4, py + 5);
-      ctx.closePath(); ctx.fill(); ctx.stroke();
-    } else if (kind === 'bunker') {
-      // A dome bunker with a slit.
-      ctx.beginPath();
-      ctx.moveTo(px - 6, py + 4);
-      ctx.arc(px, py + 4, 6, Math.PI, 0);
-      ctx.closePath(); ctx.fill(); ctx.stroke();
-      ctx.shadowBlur = 0;
-      ctx.fillStyle = 'rgba(10,12,18,0.85)';
-      ctx.fillRect(px - 3, py, 6, 1.6);
-    } else {
-      // Crashed cargo pod: a canted crate with a cross strap.
-      ctx.translate(px, py);
-      ctx.rotate(Math.PI / 4);
-      ctx.fillRect(-4.5, -4.5, 9, 9);
-      ctx.strokeRect(-4.5, -4.5, 9, 9);
-      ctx.shadowBlur = 0;
-      ctx.fillStyle = 'rgba(10,12,18,0.7)';
-      ctx.fillRect(-4.5, -0.8, 9, 1.6);
-      ctx.fillRect(-0.8, -4.5, 1.6, 9);
-    }
-    ctx.restore();
-  }
-
   private drawLegend(): void {
     const lines: string[] = [];
-    // Vault collection line (Milestone D): dungeon-hunting pressure.
-    if (this.vaultTotal > 0) {
-      lines.push(`<b>${iconSvg('skull')} VAULTS</b> — found ${this.vaults.length}/${this.vaultTotal}`);
-      lines.push('');
-    }
-    // Surface structures legend (icon key + total).
-    if (this.structures.length) {
-      const c = (k: string): number =>
-        this.structures.reduce((n, s) => n + (s.kind === k ? 1 : 0), 0);
-      const chip = iconSvg('square');
-      lines.push(`<b>${chip} STRUCTURES</b> (${this.structures.length})`);
-      for (const kind of Object.keys(STRUCTURE_NAMES) as StructureKind[]) {
-        if (c(kind)) lines.push(`<span style="color:${STRUCT_COLOR[kind]}">${chip}</span> ${STRUCTURE_NAMES[kind]} ${c(kind)}`);
-      }
-      lines.push('');
-    }
     const p = this.mapCtx.player();
     // War flags (server-driven): always listed, with the distance to each, so
     // "where is our flag right now" is answerable at a glance.
@@ -541,20 +409,6 @@ export class WorldMap {
   /** Replace the attuned-totem markers (click-to-travel). */
   setTotems(list: TotemPos[]): void {
     this.totems = list;
-    if (this.open) this.draw();
-  }
-
-  /** Replace the discovered-vault markers (Milestone D). `total` is the whole
-   *  world's vault count for the "found X / Y" collection line. */
-  setVaults(list: VaultMark[], total: number): void {
-    this.vaults = list;
-    this.vaultTotal = total;
-    if (this.open) this.draw();
-  }
-
-  /** Replace the surface-structure markers (shown as icons on the map). */
-  setStructures(list: StructureMark[]): void {
-    this.structures = list;
     if (this.open) this.draw();
   }
 

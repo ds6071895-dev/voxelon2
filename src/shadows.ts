@@ -53,7 +53,7 @@ export interface ShadowUniforms {
   /** World -> shadow texture space, with a translation by `origin` already
    *  folded in, so the shader feeds it ORIGIN-RELATIVE positions. See `origin`. */
   matrix: { value: THREE.Matrix4 };
-  /** x: on (0/1), y: one texel in UV, z: how much light a shadow takes away. */
+  /** x: on (0/1), y: one texel in UV, z: shadow strength 0..1 (horizon fade). */
   params: { value: THREE.Vector3 };
   /**
    * THE SHADING ORIGIN, and the reason arenas stopped fizzing.
@@ -187,11 +187,12 @@ export class SunShadow {
     }
     if (!this.enabled || !this.target || !this.depthMat) return;
 
-    // How much light a shadow takes away. Deliberately well under half: a voxel
-    // world already has strong per-face shading, so a heavy cast on top of it
-    // reads as a black hole rather than as shade, and the sky bounce in the
-    // chunk shader is what should be filling it.
-    const strength = (moon ? 0.17 : 0.42)
+    // How much of the DIRECT light a shadow takes away, faded out as the body
+    // nears the horizon. It can go all the way now: the chunk shader lights
+    // shade with the sky dome's own irradiance, so a full shadow reads as cool
+    // blue daylight, never as a hole. The moon's shadows are as sharp as the
+    // sun's — its direct light is simply a small fraction of the sun's.
+    const strength = (moon ? 0.9 : 1.0)
       * THREE.MathUtils.smoothstep(sunUp, 0.03, 0.22);
     this.out.params.value.z = strength;
     this.out.params.value.x = strength > 0.004 ? 1 : 0;

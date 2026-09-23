@@ -9,6 +9,10 @@ import { itemGeometry } from './itementity';
 import { Item, ITEMS } from './items';
 import { avatarTexture } from './avatartex';
 import { skinColorFor } from './remoteplayers';
+
+/** The avatar's glove colour (see buildAvatarBody), lifted a touch so the fist
+ *  still reads against a dark screen edge. */
+const HELD_GLOVE = new THREE.Color(0x3a3b3e);
 import { Cosmetics, SHIRT_COLORS, defaultCosmetics } from './character';
 import type { Atlas } from './textures';
 import { createGunModel, poseGunModel, gunFeel, GunFeel } from './gunmodels';
@@ -169,6 +173,7 @@ export class HeldItemView {
   // plus a support hand that rides the foregrip of any two-handed weapon.
   private readonly armMat: THREE.MeshBasicMaterial;
   private readonly sleeveMat: THREE.MeshBasicMaterial;
+  private readonly gloveMat: THREE.MeshBasicMaterial;
   private readonly arm: THREE.Group;
   private readonly offArm: THREE.Group;
   private readonly baseSkin = new THREE.Color(0xc89a6a);
@@ -234,7 +239,11 @@ export class HeldItemView {
       color: this.baseSkin.clone(), map: avatarTexture('skin'),
     });
     this.sleeveMat = new THREE.MeshBasicMaterial({
-      color: this.baseSleeve.clone(), map: avatarTexture('cloth'),
+      color: this.baseSleeve.clone(), map: avatarTexture('camo'),
+    });
+    // Tactical gloves, like the avatar's: the fist you see is gloved.
+    this.gloveMat = new THREE.MeshBasicMaterial({
+      color: HELD_GLOVE.clone(), map: avatarTexture('leather'),
     });
     this.arm = this.buildArm(1, 0.42);
     this.arm.position.set(0.05, -0.16, 0.06);
@@ -261,8 +270,8 @@ export class HeldItemView {
       new THREE.BoxGeometry(0.185 * scale, 0.185 * scale, 0.1), this.armMat);
     wrist.position.set(0, 0, 0.09); // bare skin between the cuff and the grip
     arm.add(wrist);
-    arm.add(new THREE.Mesh( // fist, at the item's own position
-      new THREE.BoxGeometry(0.21 * scale, 0.21 * scale, 0.2 * scale), this.armMat));
+    arm.add(new THREE.Mesh( // gloved fist, at the item's own position
+      new THREE.BoxGeometry(0.21 * scale, 0.21 * scale, 0.2 * scale), this.gloveMat));
     arm.renderOrder = 99; // just behind the item
     return arm;
   }
@@ -494,6 +503,7 @@ export class HeldItemView {
     this.material.color.setScalar(shade);
     this.armMat.color.copy(this.baseSkin).multiplyScalar(shade);
     this.sleeveMat.color.copy(this.baseSleeve).multiplyScalar(shade);
+    this.gloveMat.color.copy(HELD_GLOVE).multiplyScalar(shade);
     // A real block-breaking attempt swings the whole hand/item pivot regardless
     // of what is held. Gunfire still uses recoil because main only passes true
     // here when Interaction is actually working a block target.

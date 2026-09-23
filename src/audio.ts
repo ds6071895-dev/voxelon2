@@ -670,12 +670,6 @@ export class GameAudio {
     this.noise({ freq: 1400, dur: 0.09, gain: 0.05, slideTo: 700, type: 'bandpass', q: 0.9, pos });
   }
 
-  /** A short civic chime for a dispatch landing in the inbox. */
-  dispatchChime(): void {
-    this.tone({ type: 'triangle', from: 784, to: 1046, dur: 0.16, gain: 0.1, attack: 0.01 });
-    this.tone({ type: 'sine', from: 1046, to: 1318, dur: 0.22, gain: 0.08, delay: 0.1 });
-  }
-
   /** Bounce Pad: spring compression, a rubbery launch note, then air rushing by. */
   bouncePad(): void {
     this.noise({ freq: 540, dur: 0.08, gain: 0.2, slideTo: 170, type: 'lowpass', q: 0.8 });

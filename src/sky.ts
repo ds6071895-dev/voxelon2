@@ -1,42 +1,29 @@
-// Sky: 20-minute day/night cycle. Sun and moon arc overhead, stars fade in
-// at night, sky/fog colors follow a day-night gradient with sunset tinting,
-// and the blocky cloud layer drifts at y=192.
+// Sky: 20-minute day/night cycle driven by a small ATMOSPHERE MODEL.
 //
-// The night aurora lives IN the sky dome's own shader. It used to be three
-// translucent curtain planes parked to the geographic north, which meant it
-// existed on one bearing and simply was not there on the others; evaluating it
-// per fragment from the view direction instead gives one continuous display
-// that wraps the whole dome and reads the same whichever way you turn.
+// Everything the world is lit by comes out of one function, `scatter()`, which
+// exists twice — once in GLSL for the dome, once in TypeScript for the CPU —
+// and the two are kept line-for-line identical. It is single-scattering
+// Rayleigh (the blue) plus Mie (the white glare round the sun), attenuated by
+// how much air the sunlight crossed on its way in. That one idea produces every
+// sky the day needs without a colour table: a deep blue zenith over a pale
+// horizon at noon, gold as the sun drops and its light crosses more air, an
+// ember-red disc on the skyline, and the "blue hour" after it sets, when the
+// high sky is still lit but the ground is not.
+//
+// Because the CPU runs the same maths, the fog colour, the ambient sky light,
+// the direct sunlight and the water's reflection are all MEASURED off the sky
+// the player is looking at rather than tuned alongside it — so the horizon the
+// terrain fades into is always exactly the horizon the dome paints.
+//
+// The dome also draws the sun and moon discs, a starfield that turns with the
+// sky, a Milky Way band, and the night aurora — all per fragment, so none of it
+// is a sprite that can be seen edge-on or clipped by the far plane.
 
 import * as THREE from 'three';
 import { mulberry32, wrappedValueNoise } from './noise';
 
 export const DAY_LENGTH = 1200; // seconds: vanilla 20-minute day
 export const WATER_FOG_COLOR = new THREE.Color(0x16335f);
-
-const DAY_HORIZON = new THREE.Color(0xa8dcff);
-const DAY_ZENITH = new THREE.Color(0x1f66e6);
-const NIGHT_HORIZON = new THREE.Color(0x182748);
-const NIGHT_ZENITH = new THREE.Color(0x03050d);
-// Dawn and dusk are not the same colour. Sunrise runs cool-pink into gold;
-// sunset runs gold into a deep ember red. Having two makes the day feel like
-// it has a direction instead of playing the same twenty seconds backwards.
-const DAWN = new THREE.Color(0xff9d7a);
-const DUSK = new THREE.Color(0xf2652a);
-const DAY_HAZE = new THREE.Color(0xdcefff);   // atmospheric pile-up at the skyline
-const SUN_HIGH_GLOW = new THREE.Color(0xfff0cf);  // halo colour once the sun is up
-const SUN_DISC = new THREE.Color(0xfffee8);
-const SUN_DISC_HIGH = new THREE.Color(0xffe8bd);
-const NIGHT_HAZE = new THREE.Color(0x1b2c4e);
-const AURORA_HORIZON = new THREE.Color(0x164b55);
-
-// Direct-sun and ambient-sky colours handed to the terrain shader.
-const SUN_NOON = new THREE.Color(1.06, 1.03, 0.96);
-const SUN_LOW = new THREE.Color(1.32, 0.84, 0.54);
-const SUN_NIGHT = new THREE.Color(0.72, 0.82, 1.08);
-const AMBIENT_DAY = new THREE.Color(0.84, 0.93, 1.14);
-const AMBIENT_LOW = new THREE.Color(1.02, 0.86, 0.86);
-const AMBIENT_NIGHT = new THREE.Color(0.66, 0.78, 1.14);
 
 const CLOUD_Y = 192;
 const CLOUD_TEX = 64;     // texels per repeat
@@ -64,24 +51,308 @@ export function daylight(tod: number): number {
   return NIGHT_FLOOR + (1 - NIGHT_FLOOR) * s;
 }
 
-/** Soft radial falloff used for the sun and moon halos. */
-function radialGlowTexture(): THREE.CanvasTexture {
-  const canvas = document.createElement('canvas');
-  canvas.width = canvas.height = 128;
-  const ctx = canvas.getContext('2d')!;
-  const g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
-  g.addColorStop(0, 'rgba(255,255,255,1)');
-  g.addColorStop(0.18, 'rgba(255,255,255,0.62)');
-  g.addColorStop(0.45, 'rgba(255,255,255,0.16)');
-  g.addColorStop(1, 'rgba(255,255,255,0)');
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, 128, 128);
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.generateMipmaps = false;
-  tex.minFilter = THREE.LinearFilter;
-  return tex;
+// ─── the atmosphere ─────────────────────────────────────────────────────────
+//
+// Units are "game radiance": 1.0 is roughly a sunlit white block at noon. The
+// scattering coefficients are Earth's ratios (blue scatters ~5.5x more than
+// red), scaled to a thinner air so the game's compressed day still reads.
+
+/** Rayleigh extinction per unit air mass. */
+const BETA_R: [number, number, number] = [0.080, 0.180, 0.420];
+/** Mie (haze) extinction per unit air mass — grey, it scatters every colour. */
+const BETA_M = 0.020;
+/** Sunlight arriving at the top of the air, in game radiance. */
+const SUN_E = 3.2;
+/** The moon: the same sky model, a few percent as bright and a touch cooler. */
+const MOON_E = 0.09;
+/** Direct light on the ground, before transmittance. */
+const SUN_DIRECT = 0.68;
+const MOON_DIRECT = 0.17;
+/** Ambient sky irradiance scale — how much of the dome's light fills shade. */
+const AMBIENT_SCALE = 0.33;
+/** Starlight and airglow: the floor under a moonless night. */
+const NIGHT_BASE: [number, number, number] = [0.020, 0.028, 0.056];
+
+/** Air mass looking along a direction of height y (thin at the zenith, ~7x at
+ *  the skyline). Offsets differ for the view and for the sun, because a sun
+ *  ON the horizon has to go properly red while the skyline itself only has to
+ *  go pale. */
+function airView(y: number): number { return 1 / (Math.max(y, 0) + 0.35); }
+function airSun(y: number): number { return 1 / (Math.max(y, 0) + 0.06); }
+
+/** Sunlight left after crossing the air to reach a point, per channel. */
+function transmit(y: number, out: THREE.Color): THREE.Color {
+  const m = airSun(y);
+  return out.setRGB(
+    Math.exp(-(BETA_R[0] + BETA_M) * m),
+    Math.exp(-(BETA_R[1] + BETA_M) * m),
+    Math.exp(-(BETA_R[2] + BETA_M) * m));
 }
 
+function smooth(e0: number, e1: number, x: number): number {
+  const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
+}
+
+const _t = new THREE.Color();
+/** Sky radiance seen along `d` (unit) from a light at `l` (unit) of strength
+ *  `e`, ADDED into `out`. The TypeScript twin of GLSL `scatter()`. */
+function scatterInto(
+  d: THREE.Vector3, l: THREE.Vector3, e: number, out: THREE.Color
+): void {
+  const mu = d.x * l.x + d.y * l.y + d.z * l.z;
+  const am = airView(d.y);
+  const pR = 0.75 * (1 + mu * mu);
+  const g = 0.76;
+  const pM = (1 - g * g) / Math.pow(1 + g * g - 2 * g * mu, 1.5) * 0.12;
+  const inM = 1 - Math.exp(-BETA_M * am);
+  const vis = smooth(-0.14, 0.03, l.y);
+  transmit(l.y, _t);
+  const k = e * vis;
+  out.r += k * _t.r * ((1 - Math.exp(-BETA_R[0] * am)) * pR + inM * pM);
+  out.g += k * _t.g * ((1 - Math.exp(-BETA_R[1] * am)) * pR + inM * pM);
+  out.b += k * _t.b * ((1 - Math.exp(-BETA_R[2] * am)) * pR + inM * pM);
+  // Multiple scattering + ozone: what keeps the zenith BLUE through twilight
+  // instead of letting it fall straight to black the moment the direct path
+  // reddens out.
+  const ms = e * 0.055 * smooth(-0.18, 0.35, l.y) * (0.35 + 0.65 * Math.min(1, Math.max(0, d.y)));
+  out.r += ms * 0.30; out.g += ms * 0.50; out.b += ms * 1.0;
+}
+
+/**
+ * The display curve used when there is NO post-processing stack to tone-map
+ * the frame: identity up to 0.78, then a soft shoulder to 1.0. The dome, the
+ * fog colour and the terrain all go through this same curve on those presets,
+ * which is what keeps the skyline seamless on every preset. Exported for the
+ * GLSL twin's documentation only — the shaders carry their own copy.
+ */
+export function displayKnee(c: THREE.Color): THREE.Color {
+  const k = (x: number): number => {
+    const over = Math.max(x - 0.78, 0);
+    return x - over + (1 - Math.exp(-over / 0.22)) * 0.22;
+  };
+  return c.setRGB(k(c.r), k(c.g), k(c.b));
+}
+
+/** GLSL twins of the functions above. Shared with the chunk shader (world.ts)
+ *  so the water reflects the SAME sky the dome draws. */
+export const ATMOSPHERE_GLSL = /* glsl */`
+const vec3 VX_BETA_R = vec3(${BETA_R.join(', ')});
+const float VX_BETA_M = ${BETA_M.toFixed(4)};
+float vxAirView(float y) { return 1.0 / (max(y, 0.0) + 0.35); }
+float vxAirSun(float y) { return 1.0 / (max(y, 0.0) + 0.06); }
+vec3 vxTransmit(float y) { return exp(-(VX_BETA_R + VX_BETA_M) * vxAirSun(y)); }
+vec3 vxScatter(vec3 d, vec3 l, float e) {
+  float mu = dot(d, l);
+  float am = vxAirView(d.y);
+  float pR = 0.75 * (1.0 + mu * mu);
+  const float g = 0.76;
+  float pM = (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * mu, 1.5) * 0.12;
+  float inM = 1.0 - exp(-VX_BETA_M * am);
+  vec3 inR = 1.0 - exp(-VX_BETA_R * am);
+  float vis = smoothstep(-0.14, 0.03, l.y);
+  vec3 c = e * vis * vxTransmit(l.y) * (inR * pR + inM * pM);
+  c += e * 0.055 * vec3(0.30, 0.50, 1.0) * smoothstep(-0.18, 0.35, l.y)
+     * (0.35 + 0.65 * clamp(d.y, 0.0, 1.0));
+  return c;
+}
+vec3 vxKnee(vec3 c) {
+  vec3 over = max(c - 0.78, 0.0);
+  return c - over + (1.0 - exp(-over / 0.22)) * 0.22;
+}
+`;
+
+// ─── the dome ───────────────────────────────────────────────────────────────
+
+const DOME_VERT = /* glsl */`
+  varying vec3 vDir;
+  void main() {
+    vDir = normalize(position);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const DOME_FRAG = /* glsl */`
+  uniform vec3 uSunDir;
+  uniform vec3 uMoonDir;
+  uniform float uSunE;
+  uniform float uMoonE;
+  uniform vec3 uNightBase;
+  uniform float uNight;
+  uniform float uHDR;
+  uniform float uTime;
+  uniform mat3 uStarRot;
+  uniform float uAurora;
+  uniform float uAuroraTime;
+  uniform float uAuroraPhase;
+  varying vec3 vDir;
+
+  ${ATMOSPHERE_GLSL}
+
+  float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+  }
+  float hash3(vec3 p) {
+    p = fract(p * 0.3183099 + 0.1);
+    p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+  }
+  float vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
+               mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+  }
+  float vnoise3(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float n000 = hash3(i), n100 = hash3(i + vec3(1, 0, 0));
+    float n010 = hash3(i + vec3(0, 1, 0)), n110 = hash3(i + vec3(1, 1, 0));
+    float n001 = hash3(i + vec3(0, 0, 1)), n101 = hash3(i + vec3(1, 0, 1));
+    float n011 = hash3(i + vec3(0, 1, 1)), n111 = hash3(i + vec3(1, 1, 1));
+    return mix(mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+               mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z);
+  }
+  float fbm3(vec3 p) {
+    float a = 0.5, s = 0.0;
+    for (int i = 0; i < 4; i++) { s += a * vnoise3(p); p = p * 2.03 + 11.7; a *= 0.5; }
+    return s;
+  }
+  float fbm2(vec2 p) {
+    return vnoise(p) * 0.65 + vnoise(p * 2.07 + 19.3) * 0.35;
+  }
+
+  /** One aurora curtain: a band of light draped around the sky at elevation
+   *  centre, its lower hem crisp and its crown feathering out. */
+  vec3 curtain(vec2 bearing, float azim, float elev, float centre,
+               float width, float speed, float phase, float rayCount) {
+    float drift = uAuroraTime * speed;
+    float sweep = fbm2(bearing * 1.6 + vec2(drift, phase)) - 0.5;
+    float waver = vnoise(bearing * 5.1 - vec2(drift * 1.7, phase)) - 0.5;
+    float hem = centre + sweep * 0.34 + waver * 0.12;
+    float above = elev - hem;
+    float body = smoothstep(-0.035, 0.045, above) *
+      (1.0 - smoothstep(0.0, width, above));
+    if (body <= 0.0) return vec3(0.0);
+    float ray = vnoise(bearing * 23.0 + vec2(phase, drift * 0.6));
+    float rays = 0.5 + 0.5 * sin(rayCount * azim + ray * 21.0 + phase);
+    rays = rays * rays; rays = rays * rays;
+    float shimmer = 0.72 + 0.28 * sin(uAuroraTime * 0.9 + ray * 12.0 + phase);
+    float presence = smoothstep(0.26, 0.74,
+      fbm2(bearing * 0.9 + vec2(drift * 0.45, phase * 0.5)));
+    float h = clamp(above / width, 0.0, 1.0);
+    vec3 tint = mix(vec3(0.20, 1.00, 0.55), vec3(0.20, 0.78, 1.00), smoothstep(0.10, 0.62, h));
+    tint = mix(tint, vec3(0.62, 0.34, 1.00), smoothstep(0.55, 1.0, h));
+    return tint * body * shimmer * presence * (0.30 + rays * 0.85);
+  }
+
+  /** Stars on a rotating celestial sphere: a jittered point per cell of a 3D
+   *  grid, kept only where the hash says so, each with its own colour
+   *  temperature and twinkle. */
+  vec3 stars(vec3 d) {
+    vec3 p = d * 190.0;
+    vec3 ip = floor(p);
+    vec3 fp = fract(p);
+    float h = hash3(ip);
+    if (h < 0.955) return vec3(0.0);
+    vec3 at = vec3(hash3(ip + 3.1), hash3(ip + 7.7), hash3(ip + 13.3)) * 0.7 + 0.15;
+    float r = length(fp - at);
+    float mag = pow((h - 0.955) / 0.045, 3.0);
+    float core = smoothstep(0.16 + mag * 0.16, 0.0, r);
+    float tw = 0.65 + 0.35 * sin(uTime * (1.3 + h * 4.0) + h * 91.0);
+    vec3 temp = mix(vec3(0.68, 0.78, 1.0), vec3(1.0, 0.86, 0.66), hash3(ip + 5.0));
+    return temp * core * (0.35 + mag * 2.4) * tw;
+  }
+
+  /** The galactic band: a great circle of dim, dusty light. */
+  vec3 milkyWay(vec3 d) {
+    vec3 n = normalize(vec3(0.32, 0.18, 0.93));
+    float b = dot(d, n);
+    float band = exp(-b * b * 26.0);
+    if (band < 0.01) return vec3(0.0);
+    float cloud = fbm3(d * 7.0);
+    float dust = smoothstep(0.52, 0.72, fbm3(d * 13.0 + 4.0));
+    float core = exp(-b * b * 90.0);
+    vec3 c = mix(vec3(0.28, 0.30, 0.52), vec3(0.62, 0.52, 0.55), core);
+    return c * band * (0.35 + cloud * 0.9) * (1.0 - dust * 0.75) * 0.11;
+  }
+
+  void main() {
+    vec3 dir = normalize(vDir);
+    vec3 sd = vec3(dir.x, max(dir.y, 0.0), dir.z);
+    sd = normalize(sd + vec3(0.0, 0.0001, 0.0));
+
+    vec3 color = vxScatter(sd, uSunDir, uSunE) + vxScatter(sd, uMoonDir, uMoonE) + uNightBase;
+
+    // The night sky proper: stars and the galaxy, fading in as the sky goes
+    // dark and out again through the horizon haze.
+    if (uNight > 0.01 && dir.y > -0.05) {
+      vec3 cd = uStarRot * dir;
+      float veil = smoothstep(-0.02, 0.28, dir.y) * uNight;
+      color += (stars(cd) * 1.4 + milkyWay(cd)) * veil;
+    }
+
+    // Sun disc: limb-darkened, reddened by the same air the sky is.
+    float sunCos = dot(dir, uSunDir);
+    float sunR = 0.0325;
+    float cosR = cos(sunR);
+    if (sunCos > cosR - 0.002) {
+      float rr = clamp((1.0 - sunCos) / (1.0 - cosR), 0.0, 1.0);
+      float limb = 1.0 - 0.55 * (1.0 - sqrt(max(1.0 - rr, 0.0)));
+      float disc = smoothstep(cosR - 0.0006, cosR + 0.0003, sunCos);
+      color += vxTransmit(uSunDir.y) * disc * limb * (uHDR > 0.5 ? 26.0 : 4.0)
+        * smoothstep(-0.06, 0.02, uSunDir.y);
+    }
+    // A soft corona round it, which the bloom pass then spreads further.
+    float corona = pow(max(sunCos, 0.0), 900.0) * 3.0 + pow(max(sunCos, 0.0), 90.0) * 0.35;
+    color += vxTransmit(uSunDir.y) * corona * smoothstep(-0.08, 0.02, uSunDir.y);
+
+    // Moon: a cratered disc with its own glow.
+    float moonCos = dot(dir, uMoonDir);
+    float moonR = 0.026;
+    float cosM = cos(moonR);
+    if (moonCos > cosM - 0.002) {
+      vec3 mz = uMoonDir;
+      vec3 mx = normalize(cross(vec3(0.0, 1.0, 0.0), mz));
+      vec3 my = cross(mz, mx);
+      vec2 uv = vec2(dot(dir, mx), dot(dir, my)) / sin(moonR);
+      float maria = smoothstep(0.45, 0.62, fbm3(vec3(uv * 2.2, 3.0)));
+      float craters = smoothstep(0.62, 0.8, vnoise(uv * 7.0 + 2.0)) * 0.25;
+      float disc = smoothstep(cosM - 0.0005, cosM + 0.0003, moonCos);
+      float shade = 1.0 - maria * 0.32 - craters;
+      float edge = 0.78 + 0.22 * sqrt(max(1.0 - dot(uv, uv), 0.0));
+      color += vec3(0.92, 0.95, 1.0) * disc * shade * edge * (uHDR > 0.5 ? 3.2 : 1.1)
+        * smoothstep(-0.06, 0.03, uMoonDir.y);
+    }
+    color += vec3(0.55, 0.65, 0.9) * pow(max(moonCos, 0.0), 260.0) * 0.5 * uNight;
+
+    if (uAurora > 0.004 && dir.y > -0.05) {
+      vec2 ground = vec2(dir.x, dir.z);
+      vec2 bearing = ground / max(length(ground), 1e-4);
+      float azim = atan(bearing.y, bearing.x);
+      float elev = dir.y;
+      float ph = uAuroraPhase;
+      vec3 light =
+        curtain(bearing, azim, elev, 0.16, 0.62, 0.055, ph, 47.0) +
+        curtain(bearing, azim, elev, 0.34, 0.50, 0.041, ph + 2.31, 61.0) * 0.70 +
+        curtain(bearing, azim, elev, 0.05, 0.78, 0.070, ph + 4.77, 31.0) * 0.52;
+      light = light / (1.0 + light * 0.55);
+      float sky = smoothstep(-0.04, 0.16, elev);
+      color += light * uAurora * 0.38 * sky;
+      color += vec3(0.02, 0.06, 0.06) * uAurora * sky;
+    }
+
+    // Below the skyline: the far ground, darker than the horizon above it so
+    // the world never floats on a band of bright sky.
+    color = mix(color, color * 0.62, smoothstep(0.0, -0.18, dir.y));
+
+    if (uHDR < 0.5) color = vxKnee(color);
+    gl_FragColor = vec4(color, 1.0);
+    #include <colorspace_fragment>
+  }
+`;
 
 /**
  * The `max` preset's cloud material.
@@ -91,8 +362,8 @@ function radialGlowTexture(): THREE.CanvasTexture {
  * opaque a pixel is. That is enough to buy the two things a flat cutout plane
  * can never have: the deck THICKENS as you look along it toward the horizon
  * instead of thinning to a line, and the edges of a cloud go soft because the
- * samples disagree there. A second sample taken toward the sun shades the far
- * side of each cloud, and the rim facing the sun keeps the silver lining.
+ * samples disagree there. A sample taken toward the sun shades the far side of
+ * each cloud, and the rim facing the sun keeps the silver lining.
  */
 const CLOUD_SHADER = {
   vertexShader: /* glsl */`
@@ -112,20 +383,24 @@ const CLOUD_SHADER = {
     uniform float uPlane;
     uniform float uOpacity;
     uniform float uThickness;
-    uniform vec3 uColor;
+    uniform vec3 uLit;
+    uniform vec3 uShade;
+    uniform vec3 uHaze;
     uniform vec3 uSunDir;
     uniform vec3 uSunColor;
+    uniform float uHDR;
     varying vec2 vUv;
     varying vec3 vWorld;
+
+    vec3 vxKneeC(vec3 c) {
+      vec3 over = max(c - 0.78, 0.0);
+      return c - over + (1.0 - exp(-over / 0.22)) * 0.22;
+    }
 
     void main() {
       vec3 viewDir = normalize(vWorld - cameraPosition);
       vec2 base = vUv * uRepeat + uOffset;
       float uvPerUnit = uRepeat / uPlane;
-
-      // One step climbs a slice of the deck's thickness; grazing views take
-      // long steps and so pass through much more cloud, which is exactly the
-      // behaviour that makes the horizon pile up.
       vec2 duv = (viewDir.xz / max(abs(viewDir.y), 0.12))
         * uvPerUnit * (uThickness / 6.0);
       float acc = 0.0;
@@ -137,31 +412,62 @@ const CLOUD_SHADER = {
       acc /= 6.0;
       if (acc <= 0.004) discard;
 
-      // Shade the side of the cloud the sun cannot reach.
       vec2 sunStep = (uSunDir.xz / max(abs(uSunDir.y), 0.28))
         * uvPerUnit * uThickness * 0.85;
       float occl = texture2D(uMap, base + sunStep).a;
-      float lit = 1.0 - 0.42 * occl;
+      float lit = 1.0 - 0.62 * occl;
 
-      // Silver lining: thin cloud in front of the sun scatters straight through.
-      float toSun = max(dot(-viewDir, uSunDir), 0.0);
-      float rim = pow(toSun, 8.0) * (1.0 - acc) * 1.35;
+      float toSun = max(dot(viewDir, uSunDir), 0.0);
+      float rim = pow(toSun, 8.0) * (1.0 - acc) * 1.6;
+      float forward = pow(toSun, 3.0) * 0.35;
 
       float alpha = smoothstep(0.02, 0.45, acc) * uOpacity;
-      // Fade the deck out well before its own edge, so the plane the whole
-      // thing is drawn on never shows itself as a square.
       float dist = length(vWorld.xz - cameraPosition.xz);
       alpha *= 1.0 - smoothstep(uPlane * 0.22, uPlane * 0.46, dist);
       if (alpha <= 0.002) discard;
 
-      gl_FragColor = vec4(uColor * lit + uSunColor * rim, alpha);
+      vec3 col = mix(uShade, uLit, lit) + uSunColor * (rim + forward);
+      // Distant cloud sinks into the skyline haze, like the terrain does.
+      col = mix(col, uHaze, smoothstep(uPlane * 0.08, uPlane * 0.4, dist) * 0.7);
+      if (uHDR < 0.5) col = vxKneeC(col);
+      gl_FragColor = vec4(col, alpha);
+      #include <colorspace_fragment>
     }
   `,
 };
 
-/** One cloud deck's shader material. */
-function makeCloudShaderMaterial(
-  map: THREE.Texture, repeat: number, opacity: number, thickness: number
+/** Cheap cloud material for the presets below `max`: one flat textured deck,
+ *  coloured by the same lit/shade pair so dusk still reaches it. */
+const FLAT_CLOUD_FRAG = /* glsl */`
+  uniform sampler2D uMap;
+  uniform vec2 uOffset;
+  uniform float uRepeat;
+  uniform float uPlane;
+  uniform float uOpacity;
+  uniform vec3 uLit;
+  uniform vec3 uHaze;
+  uniform float uHDR;
+  varying vec2 vUv;
+  varying vec3 vWorld;
+  vec3 vxKneeC(vec3 c) {
+    vec3 over = max(c - 0.78, 0.0);
+    return c - over + (1.0 - exp(-over / 0.22)) * 0.22;
+  }
+  void main() {
+    float a = texture2D(uMap, vUv * uRepeat + uOffset).a;
+    if (a < 0.5) discard;
+    float dist = length(vWorld.xz - cameraPosition.xz);
+    float alpha = uOpacity * (1.0 - smoothstep(uPlane * 0.22, uPlane * 0.46, dist));
+    if (alpha <= 0.002) discard;
+    vec3 col = mix(uLit, uHaze, smoothstep(uPlane * 0.08, uPlane * 0.4, dist) * 0.7);
+    if (uHDR < 0.5) col = vxKneeC(col);
+    gl_FragColor = vec4(col, alpha);
+    #include <colorspace_fragment>
+  }
+`;
+
+function makeCloudMaterial(
+  map: THREE.Texture, repeat: number, opacity: number, thickness: number, volumetric: boolean
 ): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
     uniforms: {
@@ -171,12 +477,15 @@ function makeCloudShaderMaterial(
       uPlane: { value: CLOUD_PLANE },
       uOpacity: { value: opacity },
       uThickness: { value: thickness },
-      uColor: { value: new THREE.Color(1, 1, 1) },
+      uLit: { value: new THREE.Color(1, 1, 1) },
+      uShade: { value: new THREE.Color(0.6, 0.65, 0.75) },
+      uHaze: { value: new THREE.Color(0.8, 0.85, 0.9) },
       uSunDir: { value: new THREE.Vector3(0, 1, 0) },
       uSunColor: { value: new THREE.Color(1, 1, 1) },
+      uHDR: { value: 0 },
     },
     vertexShader: CLOUD_SHADER.vertexShader,
-    fragmentShader: CLOUD_SHADER.fragmentShader,
+    fragmentShader: volumetric ? CLOUD_SHADER.fragmentShader : FLAT_CLOUD_FRAG,
     transparent: true,
     depthWrite: false,
     side: THREE.DoubleSide,
@@ -184,326 +493,129 @@ function makeCloudShaderMaterial(
   });
 }
 
+// Scratch for the per-frame CPU atmosphere work (no allocation in update()).
+const _d = new THREE.Vector3();
+const _c = new THREE.Color();
+const _c2 = new THREE.Color();
+const _moonDir = new THREE.Vector3();
+
 export class Sky {
   /** Time in days; fractional part is the time of day (0 = sunrise). */
   time = 0.04; // start shortly after sunrise
-  /** Current sunlight factor (drives the chunk shader uniform). */
+  /** Current sunlight factor (drives mobs, audio and legacy consumers). */
   sunIntensity = 1;
-  /** Unit vector from the world toward the sun. The shadow pass aims its
-   *  camera down this, and the water shader puts its glitter on it. */
+  /** Unit vector from the world toward the sun. */
   readonly sunDir = new THREE.Vector3(0, 1, 0);
-  /** Height of the sun on its arc, -1..1. Shadows fade out below the horizon. */
+  /** Height of the sun on its arc, -1..1. */
   sunHeight = 1;
-  /** Current sky/fog color, updated each frame. */
+  /** Horizon/fog colour, measured off the atmosphere each frame. Linear. */
   readonly skyColor = new THREE.Color();
+  /** The extra glow the horizon picks up TOWARD the sun (fog in-scatter). */
+  readonly fogSunColor = new THREE.Color();
+  /** Zenith colour — what an upward-facing mirror (calm water) sees. */
+  readonly zenithColor = new THREE.Color();
   /** Night-only aurora strength. Also drives its subtle light on terrain. */
   auroraIntensity = 0;
-  /** How night it is, 0..1 — 0 in daylight, 1 once the sky has gone properly
-   *  dark. The shader preset grades the world and the frame off this. */
+  /** How night it is, 0..1. */
   nightAmount = 0;
-  /** Unit vector toward the body that is actually lighting the ground: the sun
-   *  while it is up, the MOON once it is not. The two are opposite ends of the
-   *  same arc, so this is `sunDir` with the sign of the half-cycle folded in.
-   *  The shadow pass casts down it, and the water puts its glitter on it. */
+  /** Unit vector toward the body actually lighting the ground: the sun while
+   *  it is up, the MOON once it is not. The shadow pass casts down it. */
   readonly lightDir = new THREE.Vector3(0, 1, 0);
-  /** Height of whichever body `lightDir` points at, 0..1. Shadows fade out as
-   *  it touches the horizon, so dusk hands over to dawn without a pop. */
+  /** Height of whichever body `lightDir` points at, 0..1. */
   lightHeight = 1;
   /** True while `lightDir` is the moon rather than the sun. */
   moonlit = false;
-  /** Colour of direct sunlight right now — white at noon, deep gold at the
-   *  horizon crossings, moon-blue at night. The terrain shader multiplies its
-   *  sunlit pixels by this. */
+  /** Direct radiance of the casting body at the ground (sun or moon), after
+   *  the air it crossed. The terrain multiplies lit faces by this. */
   readonly sunTint = new THREE.Color(1, 1, 1);
-  /** Colour of the ambient sky bounce that fills shadow. Cool blue by day,
-   *  which is what stops shaded voxel faces reading as flat grey. */
+  /** Ambient irradiance from the whole dome onto an upward-facing surface. */
   readonly ambientTint = new THREE.Color(1, 1, 1);
 
-  /** Time actually presented by the renderer. It follows the authoritative
-   * clock gradually so server corrections and fixed-time arenas never pop the
-   * whole atmosphere from one lighting state to another. */
   private visualTime = this.time;
+  private hdr = false;
 
-  private readonly sun: THREE.Mesh;
-  private readonly moon: THREE.Mesh;
   private readonly dome: THREE.Mesh;
   private readonly domeMat: THREE.ShaderMaterial;
-  private readonly stars: THREE.Points;
-  private readonly starsMat: THREE.PointsMaterial;
   private readonly clouds: THREE.Mesh;
-  private readonly cloudsMat: THREE.MeshBasicMaterial;
   private readonly cloudTexture: THREE.CanvasTexture;
   private readonly highClouds: THREE.Mesh;
-  private readonly highCloudsMat: THREE.MeshBasicMaterial;
   private readonly highCloudTexture: THREE.CanvasTexture;
-  /** The `max` preset's cloud materials. Built up front (they are two small
-   *  programs) and swapped in by setShaders. */
+  private readonly cloudFlatMat: THREE.ShaderMaterial;
+  private readonly highCloudFlatMat: THREE.ShaderMaterial;
   private readonly cloudShaderMat: THREE.ShaderMaterial;
   private readonly highCloudShaderMat: THREE.ShaderMaterial;
-  private shadersOn = false;
-  private readonly sunGlow: THREE.Mesh;
-  private readonly sunGlowMat: THREE.MeshBasicMaterial;
-  private readonly moonGlow: THREE.Mesh;
-  private readonly moonGlowMat: THREE.MeshBasicMaterial;
   private readonly auroraPhase: number;
   private auroraTime = 0;
+  private starTime = 0;
+  private readonly starAxis = new THREE.Vector3(0.18, 0, -1).normalize();
+  private readonly _m4 = new THREE.Matrix4();
+  private readonly cloudSun = new THREE.Color();
 
   constructor(scene: THREE.Scene, seed: number) {
     this.auroraPhase = ((seed >>> 0) % 10000) / 10000 * Math.PI * 2;
-    // A real horizon-to-zenith gradient gives the landscape depth. The old sky
-    // was one flat clear color, which made even varied terrain feel like a
-    // diorama against painted cardboard.
     this.domeMat = new THREE.ShaderMaterial({
       uniforms: {
-        uHorizon: { value: DAY_HORIZON.clone() },
-        uZenith: { value: DAY_ZENITH.clone() },
-        uHaze: { value: DAY_HAZE.clone() },
         uSunDir: { value: new THREE.Vector3(1, 0, 0) },
-        uSunGlow: { value: new THREE.Color(0, 0, 0) },
+        uMoonDir: { value: new THREE.Vector3(-1, 0, 0) },
+        uSunE: { value: SUN_E },
+        uMoonE: { value: MOON_E },
+        uNightBase: { value: new THREE.Vector3(...NIGHT_BASE) },
+        uNight: { value: 0 },
+        uHDR: { value: 0 },
+        uTime: { value: 0 },
+        uStarRot: { value: new THREE.Matrix3() },
         uAurora: { value: 0 },
         uAuroraTime: { value: 0 },
         uAuroraPhase: { value: this.auroraPhase },
       },
-      vertexShader: `
-        varying vec3 vDir;
-        void main() {
-          vDir = normalize(position);
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      // The aurora is part of the SKY, not a prop hung in front of one bearing:
-      // it is evaluated per fragment from the view direction, so the curtains
-      // wrap the entire dome and read the same whichever way you turn.
-      fragmentShader: `
-        uniform vec3 uHorizon;
-        uniform vec3 uZenith;
-        uniform vec3 uHaze;
-        uniform vec3 uSunDir;
-        uniform vec3 uSunGlow;
-        uniform float uAurora;
-        uniform float uAuroraTime;
-        uniform float uAuroraPhase;
-        varying vec3 vDir;
-
-        float hash(vec2 p) {
-          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-        }
-        float vnoise(vec2 p) {
-          vec2 i = floor(p);
-          vec2 f = fract(p);
-          f = f * f * (3.0 - 2.0 * f);
-          return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
-                     mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
-        }
-        /** Sampled on the unit circle of the bearing, so it is seamless the
-         *  whole way around the horizon — no join to hunt for. Two octaves:
-         *  this runs for every sky pixel on the screen, so the fine detail is
-         *  bought from the cheap sine terms below instead of from more taps. */
-        float fbm2(vec2 p) {
-          return vnoise(p) * 0.65 + vnoise(p * 2.07 + 19.3) * 0.35;
-        }
-
-        /** One curtain: a band of light draped around the sky at elevation
-         *  centre, its lower hem crisp and its crown feathering out. */
-        vec3 curtain(vec2 bearing, float azim, float elev, float centre,
-                     float width, float speed, float phase, float rayCount) {
-          // Undulate the hem. Two scales: slow wide sweeps plus a finer waver,
-          // which is what stops it reading as a ring painted on a ball.
-          float drift = uAuroraTime * speed;
-          float sweep = fbm2(bearing * 1.6 + vec2(drift, phase)) - 0.5;
-          float waver = vnoise(bearing * 5.1 - vec2(drift * 1.7, phase)) - 0.5;
-          float hem = centre + sweep * 0.34 + waver * 0.12;
-
-          // Asymmetric falloff: a bright, defined bottom edge and a long soft
-          // crown — the shape that makes an aurora read as hanging cloth.
-          float above = elev - hem;
-          float body = smoothstep(-0.035, 0.045, above) *
-            (1.0 - smoothstep(0.0, width, above));
-          if (body <= 0.0) return vec3(0.0);
-
-          // Vertical rays. Their phase is the BEARING ANGLE, so they stay
-          // parallel to the zenith the way real field lines do instead of
-          // smearing along the band. rayCount is a whole number of cycles per
-          // turn, which is what makes the +/-PI seam of atan() invisible.
-          float ray = vnoise(bearing * 23.0 + vec2(phase, drift * 0.6));
-          float rays = 0.5 + 0.5 * sin(rayCount * azim + ray * 21.0 + phase);
-          rays = rays * rays; rays = rays * rays;
-          float shimmer = 0.72 + 0.28 * sin(uAuroraTime * 0.9 + ray * 12.0 + phase);
-
-          // Only a stretch of sky is lit at a time, and which stretch drifts,
-          // so the curtains gather and part instead of ringing the horizon.
-          float presence = smoothstep(0.26, 0.74,
-            fbm2(bearing * 0.9 + vec2(drift * 0.45, phase * 0.5)));
-
-          float h = clamp(above / width, 0.0, 1.0);
-          vec3 green = vec3(0.20, 1.00, 0.55);
-          vec3 cyan = vec3(0.20, 0.78, 1.00);
-          vec3 violet = vec3(0.62, 0.34, 1.00);
-          vec3 tint = mix(green, cyan, smoothstep(0.10, 0.62, h));
-          tint = mix(tint, violet, smoothstep(0.55, 1.0, h));
-
-          return tint * body * shimmer * presence * (0.30 + rays * 0.85);
-        }
-
-        void main() {
-          vec3 dir = normalize(vDir);
-          float blend = smoothstep(-0.12, 0.86, dir.y);
-          blend = pow(blend, 0.72);
-          vec3 color = mix(uHorizon, uZenith, blend);
-
-          // Horizon haze: the air column is longest along the skyline, so the
-          // band just above it washes out pale and bright. Without it the dome
-          // reads as a painted gradient rather than an atmosphere.
-          float haze = pow(1.0 - clamp(abs(dir.y), 0.0, 1.0), 5.0);
-          color = mix(color, uHaze, haze * 0.55);
-
-          // Forward scattering around the sun. A broad halo plus a tight core:
-          // this is the single cheapest thing that makes a sunset look like
-          // light arriving from a place instead of a colour ramp.
-          float sd = max(dot(dir, uSunDir), 0.0);
-          color += uSunGlow * (pow(sd, 5.0) * 0.5 + pow(sd, 48.0) * 1.4);
-
-          // Sky only, and only once night has actually taken hold. Everything
-          // below the skyline skips the whole thing.
-          if (uAurora > 0.004 && dir.y > -0.05) {
-            // atan() of the bearing would seam at +/-PI; the bearing vector
-            // itself never does, so every lookup uses it directly.
-            vec2 ground = vec2(dir.x, dir.z);
-            vec2 bearing = ground / max(length(ground), 1e-4);
-            float azim = atan(bearing.y, bearing.x);
-            float elev = dir.y;
-            float ph = uAuroraPhase;
-
-            vec3 light =
-              curtain(bearing, azim, elev, 0.16, 0.62, 0.055, ph, 47.0) +
-              curtain(bearing, azim, elev, 0.34, 0.50, 0.041, ph + 2.31, 61.0) * 0.70 +
-              curtain(bearing, azim, elev, 0.05, 0.78, 0.070, ph + 4.77, 31.0) * 0.52;
-
-            // Where curtains overlap the sum runs well past 1 and would clip
-            // to a flat white core. A soft knee keeps the hue all the way up.
-            light = light / (1.0 + light * 0.55);
-
-            // A faint wash under the curtains so the whole dome takes the cast
-            // rather than only the ribbons themselves.
-            float sky = smoothstep(-0.04, 0.16, elev);
-            color += light * uAurora * 1.35 * sky;
-            color += vec3(0.04, 0.12, 0.12) * uAurora * sky;
-          }
-
-          gl_FragColor = vec4(color, 1.0);
-        }
-      `,
+      vertexShader: DOME_VERT,
+      fragmentShader: DOME_FRAG,
       side: THREE.BackSide,
       depthWrite: false,
       fog: false,
     });
-    this.dome = new THREE.Mesh(
-      new THREE.SphereGeometry(980, 32, 18), this.domeMat
-    );
+    this.dome = new THREE.Mesh(new THREE.SphereGeometry(980, 48, 28), this.domeMat);
     this.dome.frustumCulled = false;
     this.dome.renderOrder = -100;
     scene.add(this.dome);
 
-    // A soft additive halo behind each body. The sun used to be a flat white
-    // square pasted on the sky; a bloom around it is what sells it as the
-    // brightest thing in the world.
-    const glowTexture = radialGlowTexture();
-    this.sunGlowMat = new THREE.MeshBasicMaterial({
-      map: glowTexture, color: 0xffd9a0, transparent: true, opacity: 0.75,
-      blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
-    });
-    this.sunGlow = new THREE.Mesh(new THREE.PlaneGeometry(330, 330), this.sunGlowMat);
-    this.sunGlow.renderOrder = -90;
-    scene.add(this.sunGlow);
-
-    this.sun = new THREE.Mesh(
-      new THREE.PlaneGeometry(64, 64),
-      new THREE.MeshBasicMaterial({ color: 0xfffee8, fog: false })
-    );
-    scene.add(this.sun);
-
-    this.moonGlowMat = new THREE.MeshBasicMaterial({
-      map: glowTexture, color: 0xaec4ff, transparent: true, opacity: 0.5,
-      blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
-    });
-    this.moonGlow = new THREE.Mesh(new THREE.PlaneGeometry(180, 180), this.moonGlowMat);
-    this.moonGlow.renderOrder = -90;
-    scene.add(this.moonGlow);
-
-    this.moon = new THREE.Mesh(
-      new THREE.PlaneGeometry(44, 44),
-      new THREE.MeshBasicMaterial({ color: 0xdde0ea, fog: false })
-    );
-    scene.add(this.moon);
-
-    // Stars: random points on a far sphere, fading in at night.
-    const rng = mulberry32(seed ^ 0x57a5);
-    const starPositions: number[] = [];
-    for (let i = 0; i < 450; i++) {
-      const u = rng() * 2 - 1;
-      const phi = rng() * Math.PI * 2;
-      const r = Math.sqrt(1 - u * u);
-      starPositions.push(
-        Math.cos(phi) * r * 900, Math.abs(u) * 900 + 60, Math.sin(phi) * r * 900
-      );
-    }
-    const starGeo = new THREE.BufferGeometry();
-    starGeo.setAttribute(
-      'position', new THREE.Float32BufferAttribute(starPositions, 3)
-    );
-    this.starsMat = new THREE.PointsMaterial({
-      color: 0xffffff, size: 2, sizeAttenuation: false,
-      transparent: true, opacity: 0, fog: false, depthWrite: false,
-    });
-    this.stars = new THREE.Points(starGeo, this.starsMat);
-    scene.add(this.stars);
-
     this.cloudTexture = this.makeCloudTexture(seed);
-    this.cloudsMat = new THREE.MeshBasicMaterial({
-      map: this.cloudTexture,
-      transparent: true,
-      opacity: 0.85,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      fog: false,
-    });
-    this.clouds = new THREE.Mesh(
-      new THREE.PlaneGeometry(CLOUD_PLANE, CLOUD_PLANE), this.cloudsMat
-    );
+    this.highCloudTexture = this.makeCloudTexture(seed ^ 0x77ab, 0.72);
+    this.cloudFlatMat = makeCloudMaterial(this.cloudTexture, CLOUD_REPEAT, 0.86, 0, false);
+    this.highCloudFlatMat = makeCloudMaterial(this.highCloudTexture, HIGH_CLOUD_REPEAT, 0.42, 0, false);
+    this.cloudShaderMat = makeCloudMaterial(this.cloudTexture, CLOUD_REPEAT, 0.92, 44, true);
+    this.highCloudShaderMat = makeCloudMaterial(this.highCloudTexture, HIGH_CLOUD_REPEAT, 0.5, 30, true);
+
+    this.clouds = new THREE.Mesh(new THREE.PlaneGeometry(CLOUD_PLANE, CLOUD_PLANE), this.cloudFlatMat);
     this.clouds.rotation.x = -Math.PI / 2;
     this.clouds.position.y = CLOUD_Y;
     this.clouds.renderOrder = -1;
+    this.clouds.frustumCulled = false;
     scene.add(this.clouds);
 
-    // High deck: sparser, softer, drifting faster on its own heading.
-    this.highCloudTexture = this.makeCloudTexture(seed ^ 0x77ab, 0.72);
-    this.highCloudTexture.repeat.set(HIGH_CLOUD_REPEAT, HIGH_CLOUD_REPEAT);
-    this.highCloudsMat = new THREE.MeshBasicMaterial({
-      map: this.highCloudTexture,
-      transparent: true, opacity: 0.42, depthWrite: false,
-      side: THREE.DoubleSide, fog: false,
-    });
     this.highClouds = new THREE.Mesh(
-      new THREE.PlaneGeometry(CLOUD_PLANE, CLOUD_PLANE), this.highCloudsMat
-    );
+      new THREE.PlaneGeometry(CLOUD_PLANE, CLOUD_PLANE), this.highCloudFlatMat);
     this.highClouds.rotation.x = -Math.PI / 2;
     this.highClouds.position.y = HIGH_CLOUD_Y;
     this.highClouds.renderOrder = -2;
+    this.highClouds.frustumCulled = false;
     scene.add(this.highClouds);
 
-    this.cloudShaderMat = makeCloudShaderMaterial(
-      this.cloudTexture, CLOUD_REPEAT, 0.9, 44);
-    this.highCloudShaderMat = makeCloudShaderMaterial(
-      this.highCloudTexture, HIGH_CLOUD_REPEAT, 0.5, 30);
+    // A fixed random tilt for the celestial pole, per world seed.
+    const rng = mulberry32(seed ^ 0x57a5);
+    this.starTime = rng() * 100;
   }
 
-  /** Turn the volumetric cloud shading on (the `max` graphics preset) or back
-   *  off. Everything else about the sky is the same either way. */
+  /** Switch between the HDR shader stack (`max`: volumetric clouds, full-range
+   *  sun, tone-mapped later by PostFX) and the plain presets (display-knee'd
+   *  here, because nothing downstream will tone-map). */
   setShaders(on: boolean): void {
-    if (on === this.shadersOn) return;
-    this.shadersOn = on;
-    this.clouds.material = on ? this.cloudShaderMat : this.cloudsMat;
-    this.highClouds.material = on ? this.highCloudShaderMat : this.highCloudsMat;
+    this.hdr = on;
+    this.clouds.material = on ? this.cloudShaderMat : this.cloudFlatMat;
+    this.highClouds.material = on ? this.highCloudShaderMat : this.highCloudFlatMat;
+    this.domeMat.uniforms.uHDR.value = on ? 1 : 0;
+    for (const m of [this.cloudFlatMat, this.highCloudFlatMat,
+      this.cloudShaderMat, this.highCloudShaderMat]) m.uniforms.uHDR.value = on ? 1 : 0;
   }
 
   private makeCloudTexture(seed: number, cover = 0.62): THREE.CanvasTexture {
@@ -529,8 +641,15 @@ export class Sky {
     tex.minFilter = THREE.NearestFilter;
     tex.generateMipmaps = false;
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-    tex.repeat.set(CLOUD_REPEAT, CLOUD_REPEAT);
     return tex;
+  }
+
+  /** Sky radiance along a direction, from both bodies plus the night floor. */
+  private radiance(d: THREE.Vector3, out: THREE.Color): THREE.Color {
+    out.setRGB(NIGHT_BASE[0], NIGHT_BASE[1], NIGHT_BASE[2]);
+    scatterInto(d, this.sunDir, SUN_E, out);
+    scatterInto(d, _moonDir, MOON_E, out);
+    return out;
   }
 
   update(
@@ -554,139 +673,130 @@ export class Sky {
     this.sunHeight = sunHeight;
     this.sunIntensity = daylight(tod);
 
-    // Sky/fog color: night <-> day, blended toward orange near the horizon
-    // crossings (sunrise/sunset). `s` normalizes daylight back to 0..1 so the
-    // sky/stars still go fully dark at night even though the block-light floor
-    // (NIGHT_FLOOR) is raised for playability.
     const s = (this.sunIntensity - NIGHT_FLOOR) / (1 - NIGHT_FLOOR);
     const night = 1 - THREE.MathUtils.smoothstep(s, 0.08, 0.46);
-    // A slow activity swell keeps the display alive without making it blink.
-    // The floor ensures every properly dark night still gets a visible aurora.
-    this.auroraTime += Math.min(Math.max(dt, 0), 0.1);
-    const activity = 0.78 + 0.22 *
-      Math.sin(this.auroraTime * 0.075 + this.auroraPhase);
+    const step = Math.min(Math.max(dt, 0), 0.1);
+    this.auroraTime += step;
+    this.starTime += step;
+    const activity = 0.78 + 0.22 * Math.sin(this.auroraTime * 0.075 + this.auroraPhase);
     this.auroraIntensity = night * activity;
     this.nightAmount = night;
-    const horizon = NIGHT_HORIZON.clone().lerp(DAY_HORIZON, s);
-    const zenith = NIGHT_ZENITH.clone().lerp(DAY_ZENITH, s);
-    const haze = NIGHT_HAZE.clone().lerp(DAY_HAZE, s);
-    const sunsetAmount =
-      Math.max(0, 1 - Math.abs(sunHeight) / 0.28) * (sunHeight > -0.2 ? 1 : 0);
-    // tod < 0.5 is the rising half of the arc, so morning gets DAWN and the
-    // evening crossing gets DUSK.
-    const twilight = tod < 0.5 ? DAWN : DUSK;
-    horizon.lerp(twilight, sunsetAmount * 0.7);
-    zenith.lerp(twilight, sunsetAmount * 0.2);
-    haze.lerp(twilight, sunsetAmount * 0.62);
-    horizon.lerp(AURORA_HORIZON, this.auroraIntensity * 0.18);
-    this.skyColor.copy(horizon);
-    (this.domeMat.uniforms.uHorizon.value as THREE.Color).copy(horizon);
-    (this.domeMat.uniforms.uZenith.value as THREE.Color).copy(zenith);
-    (this.domeMat.uniforms.uHaze.value as THREE.Color).copy(haze);
-    this.domeMat.uniforms.uAurora.value = this.auroraIntensity;
-    this.domeMat.uniforms.uAuroraTime.value = this.auroraTime;
-    this.dome.position.copy(camera.position);
 
-    // Sun rises in the +x, sets in the -x; moon is opposite.
-    const sunDir = this.sunDir.set(Math.cos(angle), sunHeight, 0.18).normalize();
-    this.sun.position.copy(camera.position).addScaledVector(sunDir, 700);
-    this.sun.lookAt(camera.position);
-    this.moon.position.copy(camera.position).addScaledVector(sunDir, -700);
-    this.moon.lookAt(camera.position);
+    // Sun rises in +x and sets in -x; the moon rides the opposite end.
+    this.sunDir.set(Math.cos(angle), sunHeight, 0.18).normalize();
+    _moonDir.copy(this.sunDir).negate();
 
-    // Which body is casting. The handover happens exactly at the horizon, where
-    // BOTH are at height 0 and every consumer of `lightHeight` has already
-    // faded itself out — so the vector flipping end for end at that instant is
-    // invisible rather than a pop, and the world gets a directional moon
-    // instead of the flat, sourceless night it had before.
+    // The casting body. The handover happens at the horizon, where both are
+    // at height 0 and every consumer of lightHeight has already faded out.
     this.moonlit = sunHeight < 0;
-    this.lightDir.copy(sunDir);
-    if (this.moonlit) this.lightDir.negate();
+    this.lightDir.copy(this.moonlit ? _moonDir : this.sunDir);
     this.lightHeight = Math.abs(sunHeight);
 
-    // Scattering halo in the dome shader, aimed at whichever body is up.
-    const above = Math.max(0, sunHeight);
-    (this.domeMat.uniforms.uSunDir.value as THREE.Vector3).copy(sunDir);
-    (this.domeMat.uniforms.uSunGlow.value as THREE.Color)
-      .copy(twilight)
-      .lerp(SUN_HIGH_GLOW, THREE.MathUtils.smoothstep(above, 0.1, 0.7))
-      .multiplyScalar(0.16 + 0.5 * sunsetAmount + 0.24 * above);
+    // ── Measure the sky ───────────────────────────────────────────────────
+    // Direct light at the ground: the body's own transmittance.
+    const sunUp = smooth(-0.04, 0.06, this.sunDir.y);
+    const moonUp = smooth(-0.04, 0.06, _moonDir.y);
+    transmit(this.sunDir.y, _c).multiplyScalar(SUN_DIRECT * sunUp);
+    transmit(_moonDir.y, _c2).multiplyScalar(MOON_DIRECT * moonUp);
+    _c2.r *= 0.78; _c2.g *= 0.9; _c2.b *= 1.12;
+    this.sunTint.copy(this.moonlit ? _c2 : _c);
 
-    // Body halos. The sun's swells and reddens as it touches the horizon.
-    this.sunGlow.position.copy(this.sun.position);
-    this.sunGlow.quaternion.copy(this.sun.quaternion);
-    this.sunGlow.scale.setScalar(0.8 + 0.9 * sunsetAmount);
-    this.sunGlowMat.color.copy(twilight).lerp(
-      SUN_DISC_HIGH, THREE.MathUtils.smoothstep(above, 0.05, 0.55));
-    this.sunGlowMat.opacity = 0.28 + 0.55 * Math.max(sunsetAmount, above);
-    this.sunGlow.visible = sunHeight > -0.25;
-    this.moonGlow.position.copy(this.moon.position);
-    this.moonGlow.quaternion.copy(this.moon.quaternion);
-    this.moonGlowMat.opacity = 0.55 * (1 - s);
-    this.moonGlow.visible = sunHeight < 0.1;
-    // The sun disc itself takes the light's own colour as it sets.
-    (this.sun.material as THREE.MeshBasicMaterial).color
-      .copy(SUN_DISC).lerp(twilight, sunsetAmount * 0.8);
+    // Ambient: the dome's irradiance onto an up-facing surface, approximated
+    // by a cosine-weighted handful of directions.
+    const amb = this.ambientTint.setRGB(0, 0, 0);
+    let wsum = 0;
+    const addDir = (x: number, y: number, z: number, w: number): void => {
+      _d.set(x, y, z).normalize();
+      this.radiance(_d, _c);
+      amb.r += _c.r * w; amb.g += _c.g * w; amb.b += _c.b * w;
+      wsum += w;
+    };
+    addDir(0, 1, 0, 1.0);
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      addDir(Math.cos(a), 0.9, Math.sin(a), 0.8);
+      addDir(Math.cos(a + 0.5), 0.2, Math.sin(a + 0.5), 0.35);
+    }
+    amb.multiplyScalar(AMBIENT_SCALE / wsum);
+    // Sky light bounces off everything on its way down, and the ground sends
+    // some back up: the fill that actually reaches a surface is noticeably
+    // less blue than the dome itself. Without this, shade reads as cyan.
+    const ambLum = amb.r * 0.2126 + amb.g * 0.7152 + amb.b * 0.0722;
+    amb.lerp(_c.setRGB(ambLum, ambLum, ambLum), 0.4);
 
-    // Light colours handed to the terrain shader: warm direct sun, cool sky
-    // fill, both swinging through gold at the horizon crossings.
-    this.sunTint.copy(SUN_NIGHT).lerp(SUN_NOON, s);
-    this.sunTint.lerp(SUN_LOW, sunsetAmount * 0.85);
-    this.ambientTint.copy(AMBIENT_NIGHT).lerp(AMBIENT_DAY, s);
-    this.ambientTint.lerp(AMBIENT_LOW, sunsetAmount * 0.7);
+    // Horizon (fog) colour: averaged round the skyline, plus the extra glow
+    // looking TOWARD the sun, which the terrain fog adds back by direction.
+    const hz = this.skyColor.setRGB(0, 0, 0);
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      _d.set(Math.cos(a), 0.035, Math.sin(a)).normalize();
+      this.radiance(_d, _c);
+      hz.r += _c.r / 8; hz.g += _c.g / 8; hz.b += _c.b / 8;
+    }
+    _d.set(this.sunDir.x, 0.035, this.sunDir.z).normalize();
+    this.radiance(_d, _c);
+    this.fogSunColor.setRGB(
+      Math.max(0, _c.r - hz.r), Math.max(0, _c.g - hz.g), Math.max(0, _c.b - hz.b));
+    _d.set(0, 1, 0);
+    this.radiance(_d, this.zenithColor);
+    if (!this.hdr) {
+      // No tone mapper downstream: the fog has to land on the same displayed
+      // colour the dome's knee gives the skyline.
+      displayKnee(this.skyColor);
+      displayKnee(this.zenithColor);
+      this.fogSunColor.multiplyScalar(0.6);
+    }
 
-    this.starsMat.opacity = Math.max(0, 1 - s * 1.6) * 0.9;
-    this.stars.position.copy(camera.position);
+    // ── Feed the dome ─────────────────────────────────────────────────────
+    const u = this.domeMat.uniforms;
+    (u.uSunDir.value as THREE.Vector3).copy(this.sunDir);
+    (u.uMoonDir.value as THREE.Vector3).copy(_moonDir);
+    u.uNight.value = night;
+    u.uTime.value = this.starTime;
+    u.uAurora.value = this.auroraIntensity;
+    u.uAuroraTime.value = this.auroraTime;
+    // The stars turn with the sun, about the same tilted axis.
+    this._m4.makeRotationAxis(this.starAxis, angle);
+    (u.uStarRot.value as THREE.Matrix3).setFromMatrix4(this._m4);
+    this.dome.position.copy(camera.position);
 
-    // Clouds: follow the camera, texture offset keeps the pattern anchored
-    // to the world plus the slow vanilla drift; dim at night.
+    // ── Clouds ────────────────────────────────────────────────────────────
+    // Lit side: the direct light plus a share of the sky; shade side: sky only.
+    // By night a cloud is a dark shape against the stars, faintly silvered
+    // on its moonward side — never a white sheet.
+    const cloudLit = _c.copy(this.sunTint).multiplyScalar(this.moonlit ? 0.5 : 1.15)
+      .add(_c2.copy(this.ambientTint).multiplyScalar(this.moonlit ? 0.45 : 1.35));
+    const cloudShade = _c2.copy(this.ambientTint).multiplyScalar(this.moonlit ? 0.3 : 1.1);
+    const sunColor = transmit(this.sunDir.y, this.cloudSun).multiplyScalar(0.9 * sunUp);
+    for (const m of [this.cloudFlatMat, this.highCloudFlatMat,
+      this.cloudShaderMat, this.highCloudShaderMat]) {
+      (m.uniforms.uLit.value as THREE.Color).copy(cloudLit);
+      (m.uniforms.uShade.value as THREE.Color).copy(cloudShade);
+      (m.uniforms.uHaze.value as THREE.Color).copy(this.skyColor);
+      (m.uniforms.uSunDir.value as THREE.Vector3).copy(this.lightDir);
+      (m.uniforms.uSunColor.value as THREE.Color).copy(sunColor);
+    }
+
+    // Clouds follow the camera; the texture offset keeps the pattern anchored
+    // to the world plus the slow vanilla drift.
     const prevX = this.clouds.position.x;
     const prevZ = this.clouds.position.z;
     this.clouds.position.x = camera.position.x;
     this.clouds.position.z = camera.position.z;
     const uPerUnit = CLOUD_REPEAT / CLOUD_PLANE;
     const drift = dt * 0.8;
-    this.cloudTexture.offset.x =
-      (this.cloudTexture.offset.x +
-        (camera.position.x - prevX + drift) * uPerUnit) % 1;
-    this.cloudTexture.offset.y =
-      (this.cloudTexture.offset.y - (camera.position.z - prevZ) * uPerUnit) % 1;
-    // Clouds catch the sunset before the ground does — they are up where the
-    // light still reaches. Tinting them is most of a good dusk.
-    this.cloudsMat.color.setScalar(0.35 + 0.65 * s);
-    this.cloudsMat.color.lerp(twilight, sunsetAmount * 0.6);
-
-    // High deck: its own heading and a faster drift, so the two layers slide
-    // past each other and the sky gains depth.
+    const o = this.cloudTexture.offset;
+    o.x = (o.x + (camera.position.x - prevX + drift) * uPerUnit) % 1;
+    o.y = (o.y - (camera.position.z - prevZ) * uPerUnit) % 1;
     this.highClouds.position.x = camera.position.x;
     this.highClouds.position.z = camera.position.z;
     const hPerUnit = HIGH_CLOUD_REPEAT / CLOUD_PLANE;
-    this.highCloudTexture.offset.x =
-      (this.highCloudTexture.offset.x +
-        (camera.position.x - prevX + dt * 1.9) * hPerUnit) % 1;
-    this.highCloudTexture.offset.y =
-      (this.highCloudTexture.offset.y -
-        (camera.position.z - prevZ - dt * 0.7) * hPerUnit) % 1;
-    this.highCloudsMat.color.setScalar(0.4 + 0.6 * s);
-    this.highCloudsMat.color.lerp(twilight, sunsetAmount * 0.75);
-
-    // The shader decks reuse the colours and the drift worked out above; only
-    // the texture transform has to be handed over by hand, because a
-    // ShaderMaterial does not apply Texture.offset for us.
-    if (this.shadersOn) {
-      const sunLightColor = twilight.clone()
-        .lerp(SUN_HIGH_GLOW, THREE.MathUtils.smoothstep(above, 0.05, 0.6))
-        .multiplyScalar(0.35 + 0.65 * s);
-      const feed = (
-        mat: THREE.ShaderMaterial, tex: THREE.Texture, color: THREE.Color
-      ): void => {
-        (mat.uniforms.uOffset.value as THREE.Vector2).copy(tex.offset);
-        (mat.uniforms.uColor.value as THREE.Color).copy(color);
-        (mat.uniforms.uSunDir.value as THREE.Vector3).copy(sunDir);
-        (mat.uniforms.uSunColor.value as THREE.Color).copy(sunLightColor);
-      };
-      feed(this.cloudShaderMat, this.cloudTexture, this.cloudsMat.color);
-      feed(this.highCloudShaderMat, this.highCloudTexture, this.highCloudsMat.color);
-    }
+    const ho = this.highCloudTexture.offset;
+    ho.x = (ho.x + (camera.position.x - prevX + dt * 1.9) * hPerUnit) % 1;
+    ho.y = (ho.y - (camera.position.z - prevZ - dt * 0.7) * hPerUnit) % 1;
+    (this.cloudFlatMat.uniforms.uOffset.value as THREE.Vector2).copy(o);
+    (this.cloudShaderMat.uniforms.uOffset.value as THREE.Vector2).copy(o);
+    (this.highCloudFlatMat.uniforms.uOffset.value as THREE.Vector2).copy(ho);
+    (this.highCloudShaderMat.uniforms.uOffset.value as THREE.Vector2).copy(ho);
   }
 }

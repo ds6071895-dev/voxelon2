@@ -2748,6 +2748,22 @@ function paintArenaRim(p: Painter, seed: number): void {
   });
 }
 
+/** A Parkour throw pad: a dark plate with lit chevrons. The launch pad's
+ *  chevrons stack towards the middle (up); the boost pad's all point one way
+ *  (forward), so the two read differently at a glance. */
+function paintThrowPad(lit: RGBA, forward: boolean) {
+  return (p: Painter, seed: number): void => {
+    const plate: RGBA = [40, 44, 58, 255];
+    p.fill((x, y) => {
+      if (x === 0 || x === 15 || y === 0 || y === 15) return shade(lit, 0.7);
+      const cx = Math.abs(x - 7.5);
+      const band = forward ? (y + Math.round(cx)) % 6 : (Math.abs(y - 7.5) + cx) % 5;
+      if (band < 2) return shade(lit, 0.85 + hash2(seed, x, y) * 0.3);
+      return shade(plate, speckle(seed, x, y, 0.12));
+    });
+  };
+}
+
 /** A minigame floor tile: a bold flat colour with a bevelled border, so a
  *  called colour is unmistakable at a glance from across the arena. */
 function paintPartyTile(base: RGBA) {
@@ -3098,6 +3114,8 @@ const PAINTERS: Record<number, (p: Painter, seed: number) => void> = {
   [Tile.TeamWoolB]: paintTeamWool([62, 110, 200, 255]),
   [Tile.PartyTileC]: paintPartyTile([232, 168, 48, 255]),
   [Tile.PartyTileD]: paintPartyTile([74, 182, 96, 255]),
+  [Tile.ParkourLaunchPad]: paintThrowPad([120, 236, 255, 255], false),
+  [Tile.ParkourBoostPad]: paintThrowPad([255, 196, 84, 255], true),
   [Tile.VoidCleaver]: paintVoidCleaver,
   [Tile.KnockbackStick]: paintKnockbackStick,
   [Tile.BridgeBow]: paintBridgeBow,

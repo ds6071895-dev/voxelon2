@@ -30,6 +30,8 @@ export const MINIGAME_ONLY: ReadonlySet<number> = new Set<number>([
   Block.BwGenerator,
   Block.BwShop,
   Block.ArenaRim,
+  Block.ParkourLaunchPad,
+  Block.ParkourBoostPad,
   // Placeable arena blocks — these have an item form, so the gate is load-bearing.
   Block.TeamWoolA,
   Block.TeamWoolB,

@@ -11,6 +11,8 @@ import type { Atlas } from './textures';
 import { World } from './world';
 
 const PANO_SEED = 0x5ca1ab1e;   // fixed -> identical panorama every launch
+/** Sun a little over halfway up the morning sky: warm, long-ish shadows. */
+const PANO_TIME_OF_DAY = 0.16;
 // This is decorative scenery behind an opaque-heavy menu. A 9-chunk radius
 // used to generate 361 fully lit meshes alongside the real startup world;
 // four chunks are ample once the edge is hidden by fog.
@@ -40,7 +42,7 @@ export class Panorama {
     this.camera.rotation.order = 'YXZ';
     // A deterministic scenic spot (fixed seed -> same every time).
     const s = this.world.terrain.randomDrySpawn(mulberry32(PANO_SEED), 200);
-    this.cx = s.x; this.cz = s.z; this.cy = s.y + 14;
+    this.cx = s.x; this.cz = s.z; this.cy = s.y + 22;
     this.resize(aspect); // match the viewport up front so it isn't stretched
   }
 
@@ -56,11 +58,12 @@ export class Panorama {
     this.camera.position.set(this.cx, this.cy, this.cz);
     // Tilted down enough that the landscape — not empty sky — fills the frame
     // behind the (light, mostly translucent) title screen.
-    this.camera.rotation.set(-0.26, this.yaw, 0);
-    this.sky.update(dt, this.camera);
-    this.world.sunUniform.value = this.sky.sunIntensity;
-    this.world.sunTintUniform.value.copy(this.sky.sunTint);
-    this.world.skyTintUniform.value.copy(this.sky.ambientTint);
+    this.camera.rotation.set(-0.16, this.yaw, 0);
+    // The title screen is always a bright, clear late morning: it is the
+    // front door, and the menu over it is painted in daylight.
+    this.sky.update(dt, this.camera, PANO_TIME_OF_DAY, false);
+    this.world.applySky(this.sky);
+    this.world.timeUniform.value += dt;
     // Track the live sky colour so the background + fog blend into the horizon.
     (this.scene.background as THREE.Color).copy(this.sky.skyColor);
     (this.scene.fog as THREE.Fog).color.copy(this.sky.skyColor);

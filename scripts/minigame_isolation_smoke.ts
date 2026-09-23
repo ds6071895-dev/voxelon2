@@ -37,6 +37,7 @@ const ONLY = [...MINIGAME_ONLY].sort((a, b) => a - b);
 /** Ids registered as blocks but deliberately given NO item form. */
 const BLOCK_ONLY = [
   Block.BwBedA, Block.BwBedB, Block.BwGenerator, Block.BwShop, Block.ArenaRim,
+  Block.ParkourLaunchPad, Block.ParkourBoostPad,
 ];
 /** Ids that DO have an item form, so their gate is load-bearing rather than free. */
 const ITEM_FORMED = [

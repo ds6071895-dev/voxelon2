@@ -196,6 +196,10 @@ export const enum Block {
   NetLauncher = 251,
   ShockPlate = 252,
   AlarmBell = 253,
+  // Parkour throw pads: block-only venue fixtures, like the Void Rim. They are
+  // the last two ids a chunk byte can hold.
+  ParkourLaunchPad = 254,
+  ParkourBoostPad = 255,
 }
 
 export const enum Tile {
@@ -519,6 +523,8 @@ export const enum Tile {
   ShockPlate = 291,
   AlarmBellTop = 292,
   AlarmBellSide = 293,
+  ParkourLaunchPad = 294,
+  ParkourBoostPad = 295,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel' | 'sword';
@@ -1148,8 +1154,16 @@ export const BLOCKS: Record<number, BlockInfo> = {
   // Player-placeable arena blocks. Cheap to break so a bridge fight stays fast.
   [Block.TeamWoolA]: def({ name: 'Crimson Wool', hardness: 0.8, top: Tile.TeamWoolA }),
   [Block.TeamWoolB]: def({ name: 'Cobalt Wool', hardness: 0.8, top: Tile.TeamWoolB }),
-  [Block.PartyTileC]: def({ name: 'Amber Tile', hardness: 0.8, top: Tile.PartyTileC }),
-  [Block.PartyTileD]: def({ name: 'Verdant Tile', hardness: 0.8, top: Tile.PartyTileD }),
+  // Parkour's live surfaces. The venue stamps them; the course knows where
+  // every one is, so the tile itself carries no behaviour of its own.
+  [Block.PartyTileC]: def({ name: 'Crumble Tile', hardness: 0.8, top: Tile.PartyTileC }),
+  [Block.PartyTileD]: def({ name: 'Blink Stone', hardness: 0.8, emission: 3, top: Tile.PartyTileD }),
+  [Block.ParkourLaunchPad]: def({
+    name: 'Launch Pad', hardness: -1, emission: 6, top: Tile.ParkourLaunchPad,
+  }),
+  [Block.ParkourBoostPad]: def({
+    name: 'Boost Pad', hardness: -1, emission: 6, top: Tile.ParkourBoostPad,
+  }),
 };
 
 // Vanilla tool effectiveness and harvest tiers (wood 0, stone 1, iron 2).

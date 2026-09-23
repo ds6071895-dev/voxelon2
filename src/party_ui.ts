@@ -1,8 +1,10 @@
 import { parkourTheme } from './parkour_themes';
 import {
-  BRIDGE_GOAL_LIMIT, BRIDGE_TEAM_NAME, PARKOUR_PLATFORMS, partyGame, parkourCatchUp,
+  BRIDGE_GOAL_LIMIT, BRIDGE_TEAM_NAME, partyGame, parkourCatchUp, parkourCourse, parkourLength,
   type PartyLobbySnapshot, type PartyGameId, type PartyParticipant,
 } from './partygames';
+import { PARKOUR_LAYOUT_TITLE, PARKOUR_MODE_INFO } from './parkour_course';
+import { COLLAPSE_GRACE_MS, COLLAPSE_LIVES, VOID_GRACE_MS, parkourCollapseFront, parkourVoidY } from './parkour_mechanics';
 
 function el(tag: string, cls: string, text = ''): HTMLElement {
   const n = document.createElement(tag);
@@ -55,9 +57,13 @@ export class PartyUI {
     if (!s)
       return;
     const bridge = s.mode === 'bridge';
+    const course = !bridge && s.arena ? parkourCourse(s.arena.seed) : null;
+    const jumps = course ? parkourLength(course) : 0;
     this.progress.textContent = bridge
       ? `THE BRIDGE · FIRST TO ${BRIDGE_GOAL_LIMIT}`
-      : `${s.arena ? parkourTheme(s.arena.seed).title : 'PARKOUR DUEL'} · INFINITE WOOL`;
+      : course
+        ? `${PARKOUR_MODE_INFO[course.variant.mode].title} · ${PARKOUR_LAYOUT_TITLE[course.variant.layout]} · ${course.variant.deck.title}`
+        : 'PARKOUR DUEL';
     this.renderScore(s, bridge);
     const running = s.phase === 'running';
     this.standings.replaceChildren(...this.order(s).map(p => {
@@ -67,7 +73,7 @@ export class PartyUI {
         name.style.borderLeft = `3px solid ${TEAM_CSS[p.team]}`, name.style.paddingLeft = '7px';
       row.append(name, el('span', 'pg-row-points', bridge
         ? `${p.score} goal${p.score === 1 ? '' : 's'} · ${p.kills}/${p.deaths} K/D`
-        : `${p.score}/${PARKOUR_PLATFORMS - 1} · ${p.falls} falls`));
+        : `${p.score}/${jumps} · ${parkourStanding(p, course?.variant.mode)}`));
       return row;
     }));
     const key = `${s.id}:${s.revision}`;
@@ -127,7 +133,7 @@ export class PartyUI {
         const me2 = s.participants.find(p => p.id === me);
         const note = bridge
           ? `${s.result.teamScores[0]} — ${s.result.teamScores[1]} · ${BRIDGE_TEAM_NAME[0]} vs ${BRIDGE_TEAM_NAME[1]} · ${me2?.kills ?? 0} kills, ${me2?.deaths ?? 0} deaths. Cross, fight, dive.`
-          : `${me2?.score ?? 0} / ${PARKOUR_PLATFORMS - 1} platforms · Sprint, jump, race again.`;
+          : `${me2?.score ?? 0} / ${jumps} platforms · ${course ? `${PARKOUR_MODE_INFO[course.variant.mode].title} on ${PARKOUR_LAYOUT_TITLE[course.variant.layout]}` : ''} · Next match is a different course.`;
         const board = el('div', 'pg-result-board');
         this.order(s).forEach((p, i) => {
           const row = el('div', `pg-card-row${p.id === me ? ' me' : ''}`);
@@ -136,7 +142,7 @@ export class PartyUI {
           if (bridge) name.style.color = TEAM_CSS[p.team];
           row.append(place, name, el('span', 'pg-card-points', bridge
             ? `${p.score} goal${p.score === 1 ? '' : 's'} · ${p.kills}/${p.deaths}`
-            : `${p.score}/${PARKOUR_PLATFORMS - 1} · ${p.falls} falls`));
+            : `${p.score}/${jumps} · ${parkourStanding(p, course?.variant.mode)}`));
           board.append(row);
         });
         this.card.replaceChildren(kicker, heading, el('p', 'pg-result-note', note), board);
@@ -151,13 +157,26 @@ export class PartyUI {
           actions.append(b);
         }
         this.card.append(actions);
+        // A win rains voxel confetti in the accent colour and its neighbours.
+        if (outcome === 'win') {
+          const confetti = el('div', 'pg-confetti');
+          confetti.setAttribute('aria-hidden', 'true');
+          for (let i = 0; i < 22; i++) {
+            const bit = el('i', '');
+            bit.style.cssText = `--x:${(i * 41) % 100}%;--d:${(i % 6) * 0.11}s;--r:${(i % 2 ? 1 : -1) * (180 + (i % 5) * 70)}deg;--h:${(i * 47) % 360}`;
+            confetti.append(bit);
+          }
+          this.card.append(confetti);
+        }
       }
     }
   }
   private order(s: PartyLobbySnapshot): PartyParticipant[] {
     return [...s.participants].sort((a, b) =>
       s.mode === 'bridge' ? a.team - b.team || b.score - a.score || a.joinOrder - b.joinOrder
-        : b.score - a.score || a.falls - b.falls || a.joinOrder - b.joinOrder);
+        : (a.finishedAt ?? Infinity) - (b.finishedAt ?? Infinity) ||
+          (b.outAt ?? Infinity) - (a.outAt ?? Infinity) ||
+          b.score - a.score || a.falls - b.falls || a.joinOrder - b.joinOrder);
   }
   /** The Bridge scoreline: two team pills either side of the goal count. */
   private renderScore(s: PartyLobbySnapshot, bridge: boolean): void {
@@ -174,11 +193,22 @@ export class PartyUI {
   }
   showRound(game: PartyGameId, now: number): void {
     const d = partyGame(game);
-    const theme = this.snapshot?.arena ? parkourTheme(this.snapshot.arena.seed) : null;
-    const parkour = game === 'parkour' && theme;
-    this.banner.replaceChildren(
-      el('div', 'pg-banner-title', parkour ? theme.title : d.title),
-      el('div', 'pg-banner-rule', parkour ? `${theme.subtitle} · ${d.rule}` : d.rule));
+    const seed = this.snapshot?.arena?.seed;
+    const parkour = game === 'parkour' && seed !== undefined;
+    if (parkour) {
+      // Mode first — it is what changes how you have to play — then the
+      // shape of the course, the kind of jumps in it, and where you are.
+      const { variant } = parkourCourse(seed), theme = parkourTheme(seed);
+      const info = PARKOUR_MODE_INFO[variant.mode];
+      this.banner.replaceChildren(
+        el('div', 'pg-banner-title', info.title),
+        el('div', 'pg-banner-rule', `${PARKOUR_LAYOUT_TITLE[variant.layout]} · ${variant.deck.title} JUMPS · ${theme.title}`),
+        el('div', 'pg-banner-rule', info.rule));
+    } else {
+      this.banner.replaceChildren(
+        el('div', 'pg-banner-title', d.title),
+        el('div', 'pg-banner-rule', d.rule));
+    }
     (this.banner.firstElementChild as HTMLElement).style.color = '';
     this.banner.hidden = false;
     this.bannerUntil = now + 6500;
@@ -199,9 +229,24 @@ export class PartyUI {
       const secs = Math.max(0, Math.ceil((s.round.endsAt - serverNow) / 1000));
       text = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
       const p = s.participants.find(v => v.id === this.me);
-      if (s.round.game === 'parkour') {
-        text += ` · CHECKPOINT ${p?.checkpoint ?? 0} · NEXT ${(p?.progress ?? 0) + 1}/${PARKOUR_PLATFORMS - 1} · ${p?.falls ?? 0} FALLS · R TO RETRY`;
-        if (p && p.connected && parkourCatchUp(p, s.participants)) text += ' · CATCH-UP: EVERY PAD SAVES';
+      if (s.round.game === 'parkour' && s.arena) {
+        const course = parkourCourse(s.arena.seed), mode = course.variant.mode, t = serverNow - s.round.startedAt;
+        text += ` · NEXT ${(p?.progress ?? 0) + 1}/${parkourLength(course)}`;
+        if (p?.outAt !== undefined) text += ' · OUT — WATCH THEM FINISH';
+        else if (mode === 'collapse') {
+          const gap = (p?.progress ?? 0) - parkourCollapseFront(t);
+          text += ` · ${'♥'.repeat(Math.max(0, p?.lives ?? 0))}${'♡'.repeat(Math.max(0, COLLAPSE_LIVES - (p?.lives ?? 0)))}`;
+          text += t < COLLAPSE_GRACE_MS ? ` · COLLAPSE IN ${Math.ceil((COLLAPSE_GRACE_MS - t) / 1000)}` : ` · COLLAPSE ${Math.max(0, Math.floor(gap))} PADS BEHIND`;
+        } else {
+          text += ` · CHECKPOINT ${p?.checkpoint ?? 0} · ${p?.falls ?? 0} FALLS · R TO RETRY`;
+          if (mode === 'void') {
+            const here = course.steps[p?.progress ?? 0]?.[0];
+            const below = here ? here.y - parkourVoidY(course, t) : 0;
+            text += t < VOID_GRACE_MS ? ` · VOID RISES IN ${Math.ceil((VOID_GRACE_MS - t) / 1000)}` : ` · VOID ${Math.max(0, Math.floor(below))} BELOW`;
+          }
+        }
+        if (p && p.connected && p.outAt === undefined && mode !== 'collapse' && parkourCatchUp(p, s.participants))
+          text += ' · CATCH-UP: EVERY PAD SAVES';
       }
       else if (s.goalResetAt && serverNow < s.goalResetAt)
         text += ` · BACK TO YOUR CAGE · ${Math.max(1, Math.ceil((s.goalResetAt - serverNow) / 1000))}`;
@@ -213,6 +258,14 @@ export class PartyUI {
     this.clock.textContent = text;
     this.clock.hidden = !text;
   }
+}
+/** A racer's standing line: falls in a race, lives left in a Collapse
+ *  Chase, and whether they are still in it at all. */
+function parkourStanding(p: PartyParticipant, mode?: string): string {
+  if (p.finishedAt !== undefined) return 'finished';
+  if (p.outAt !== undefined) return 'out';
+  if (mode === 'collapse') return `${p.lives} ${p.lives === 1 ? 'life' : 'lives'}`;
+  return `${p.falls} falls`;
 }
 export function partyResultCopy(winner: string | null, reason: string): { title: string; sub: string } {
   return {

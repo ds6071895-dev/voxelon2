@@ -15,7 +15,8 @@
 import * as THREE from 'three';
 
 export type AvatarSurface =
-  | 'skin' | 'cloth' | 'denim' | 'hair' | 'leather' | 'metal' | 'wood' | 'none';
+  | 'skin' | 'cloth' | 'camo' | 'webbing' | 'denim' | 'hair' | 'leather' | 'metal'
+  | 'wood' | 'none';
 
 const SIZE = 16;
 
@@ -89,6 +90,39 @@ function buildPattern(surface: AvatarSurface): Pattern {
         p.set(2, i, 206); p.set(SIZE - 3, i, 206);
       }
       p.border(200, -14);
+      return p;
+    }
+    case 'camo': {
+      // Tonal disruptive pattern: three shades of whatever colour the uniform
+      // is, in chunky blotches. Because it is a multiplier it works on every
+      // faction colour — a crimson side wears crimson camo — and it is what
+      // makes a plain shirt read as a battle-dress uniform.
+      const p = new Pattern(250);
+      for (let y = 0; y < SIZE; y++) {
+        for (let x = 0; x < SIZE; x++) {
+          const big = noise(x >> 2, y >> 2, 71);
+          const mid = noise((x + 1) >> 1, (y + 2) >> 1, 73);
+          const blot = big * 0.62 + mid * 0.38;
+          const tone = blot > 0.66 ? 196 : blot > 0.44 ? 224 : 250;
+          p.set(x, y, tone + ((x + y) & 1 ? 3 : -3) + (noise(x, y, 79) - 0.5) * 6);
+        }
+      }
+      for (let i = 2; i < SIZE - 2; i += 2) { p.add(2, i, -18); p.add(SIZE - 3, i, -18); }
+      p.border(196, -12);
+      return p;
+    }
+    case 'webbing': {
+      // Load-bearing webbing: horizontal rows of stitched nylon loops (MOLLE),
+      // the texture that makes a slab of colour read as a plate carrier.
+      const p = new Pattern(238);
+      for (let y = 0; y < SIZE; y++) {
+        const loop = (y % 4 === 1) ? -26 : (y % 4 === 2) ? 8 : 0;
+        for (let x = 0; x < SIZE; x++) {
+          const tack = (y % 4 === 1 && x % 4 === 0) ? -14 : 0;
+          p.set(x, y, 236 + loop + tack + (noise(x, y, 83) - 0.5) * 8);
+        }
+      }
+      p.border(176, -14);
       return p;
     }
     case 'denim': {

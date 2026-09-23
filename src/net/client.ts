@@ -29,7 +29,7 @@ import type {
   PartyArenaBounds, PartyLobbySnapshot, PartyMode, PartyResult, PartySubBounds,
 } from '../partygames';
 import type { DuelFlair, DuelPublicProfile } from '../duels_progression';
-import type { FactionPublic, Notification } from './protocol';
+import type { FactionPublic } from './protocol';
 
 export interface Remote {
   info: PlayerInfo;
@@ -278,8 +278,6 @@ export class NetClient {
   onPledged?: (faction: number) => void;
   /** A pledge was refused. */
   onGovErr?: (reason: string) => void;
-  /** One entry for the notifications inbox. */
-  onNotify?: (notif: Notification) => void;
   /** Play a gadget visual effect (frag/oil blast, smoke cloud) at a point. */
   onGadgetFx?: (kind: string, x: number, y: number, z: number) => void;
   /** A player is disguised as `faction` until `until` (server worldTime). */
@@ -621,9 +619,6 @@ export class NetClient {
         break;
       case 'govErr':
         this.onGovErr?.(msg.reason);
-        break;
-      case 'notify':
-        this.onNotify?.(msg.notif);
         break;
       case 'gadgetFx':
         this.onGadgetFx?.(msg.kind, msg.x, msg.y, msg.z);

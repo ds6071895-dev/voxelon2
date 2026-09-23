@@ -22,18 +22,6 @@ import type {
 } from '../partygames';
 import type { DuelFlair, DuelPublicProfile } from '../duels_progression';
 
-/** One piece of faction news, shown to online members as a toast. */
-export type NotificationKind = 'system';
-
-export interface Notification {
-  id: string;
-  kind: NotificationKind;
-  title: string;
-  body: string;
-  /** Wall-clock ms. */
-  at: number;
-}
-
 /**
  * Everything the allegiance screen needs to show about a faction you have NOT
  * joined. Deliberately a separate, narrow shape rather than a slice of the
@@ -609,8 +597,6 @@ export type ServerMsg =
   | { t: 'pledged'; faction: number }
   // A pledge was refused, with the reason to show.
   | { t: 'govErr'; reason: string }
-  // One entry for the notifications inbox.
-  | { t: 'notify'; notif: Notification }
   // Gadget visual effect to play everywhere (frag/oil blast, smoke cloud).
   | { t: 'gadgetFx'; kind: GadgetKind; x: number; y: number; z: number }
   // Spy disguise (Phase 8): render player `id` as `faction` until `until`
