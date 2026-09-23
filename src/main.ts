@@ -1511,7 +1511,8 @@ function showPvpHit(targetId: number, amount: number, killed: boolean): void {
     amount, killed, arenaActive ? arenaMaxHealth : 20);
   const remote = net.remotes.get(targetId);
   if (remote) {
-    const x = remote.tx, y = remote.ty + 1.15, z = remote.tz;
+    const body = remotePlayers.renderedPos(targetId);
+    const x = body?.x ?? remote.tx, y = (body?.y ?? remote.ty) + 1.15, z = body?.z ?? remote.tz;
     damageNumbers.spawn(x, y, z, amount, flavor);
     // Impact spray at the body: red for damage that got through, a dull gray
     // spall for a round the target's kit ate.
@@ -2277,6 +2278,9 @@ function enterTitle(): void {
   pauseEl.style.display = 'none';
   cleanupDuelSession(true);
   onVaultTransition(null);
+  // The socket stays open for the menus; without this the server keeps our
+  // body standing in the world and everyone else sees it frozen there.
+  net.sendAway();
 }
 
 
@@ -5248,6 +5252,12 @@ document.getElementById('hud-settings-btn')!.addEventListener('click', () => {
   hudSettingsPanel.show();
 });
 document.getElementById('quit-btn')!.addEventListener('click', () => {
+  // Quitting mid-fight would be a combat log with extra steps (the server
+  // refuses to hide a tagged body anyway), so hold the door until it lapses.
+  if (net.connected && !arenaActive && combatSecondsLeft() > 0) {
+    showNotice(`You're in combat — you can quit in ${Math.ceil(combatSecondsLeft())}s.`);
+    return;
+  }
   // Quitting the play screen must relinquish every helicopter attachment even
   // though the title shares this page and the network connection stays alive.
   if (myRope) dropFastRope();
@@ -5478,6 +5488,10 @@ net.onWelcome = (me) => {
   }
   held.setSkin(skinSeed(me.username), myCosmetics);
   refreshNetInfo();
+  // Logging in lands on the title screen (a reconnect mid-game does not): stay
+  // out of everyone's world until Play, or our body stands frozen at the
+  // saved spot the whole time we sit in the menus.
+  if (screen === 'title') net.sendAway();
   joinPendingDuel();
   joinPendingParty();
 };
@@ -5996,6 +6010,28 @@ function grantOfflineWarfareXp(amount: number, boss: string, tier: number): void
 // of retiring the old system. (The hook stays so mob-death sounds/loot keep
 // working through the same path.)
 mobs.onPlayerKill = () => { /* warfare XP comes from vault bosses only */ };
+// Shared mobs: every client simulates the mobs it spawned and streams them;
+// the others draw proxies and send their hits to the owner (mobs.ts).
+mobs.onProxyHit = (mob, dmg, kx, kz) => {
+  if (mob.proxy) net.sendMobHit(mob.proxy.owner, mob.proxy.nid, dmg, kx, kz);
+};
+net.onMobs = (owner, list, gone) => { if (!arenaActive) mobs.applyRemote(owner, list, gone); };
+net.onMobHit = (_from, nid, dmg, kx, kz) => mobs.applyRemoteHit(nid, dmg, kx, kz);
+net.onLeave = (id) => mobs.dropOwner(id);
+let mobSyncTimer = 0;
+let mobSyncHadAny = false;
+/** Stream our mobs ~10×/s while anyone could be watching. An empty list is
+ *  still sent once after the last one goes, so proxies clear promptly. */
+function syncMobs(dt: number): void {
+  mobSyncTimer -= dt;
+  if (!net.connected || mobSyncTimer > 0) return;
+  mobSyncTimer = 0.1;
+  if (net.remotes.size === 0) { mobSyncHadAny = false; return; }
+  const { mobs: list, gone } = mobs.wire(player.pos);
+  if (!list.length && !gone.length && !mobSyncHadAny) return;
+  mobSyncHadAny = list.length > 0;
+  net.sendMobSync(list, gone);
+}
 
 /** Rune bonuses are the only surviving personal modifiers. The five generic
  *  Progress branches and the faction-level perks were retired with the old
@@ -10936,7 +10972,9 @@ function updateFlagVisuals(dt: number): void {
 function flagCarrierPos(pid: number): THREE.Vector3 | null {
   if (pid === net.myId) return player.pos.clone();
   const r = net.remotes.get(pid);
-  return r ? new THREE.Vector3(r.tx, r.ty, r.tz) : null;
+  if (!r) return null;
+  // The drawn body, so the flag rides on the carrier instead of hopping ahead.
+  return remotePlayers.renderedPos(pid)?.clone() ?? new THREE.Vector3(r.tx, r.ty, r.tz);
 }
 
 // The map/beacon markers are rebuilt only when something actually moved —
@@ -11017,7 +11055,12 @@ function updateWarVisuals(): void {
         glowSprites.set(id, sp);
       }
       (sp.material as THREE.SpriteMaterial).color.setHex(factionColor(r.info.faction));
-      sp.position.set(r.tx, r.ty + 1.1, r.tz);
+      // Follow the drawn body, not the raw network target: that runs a
+      // snapshot ahead and hops at packet rate, so the halo jittered off the
+      // walking player it belongs to.
+      const at = remotePlayers.renderedPos(id);
+      if (at) sp.position.set(at.x, at.y + 1.1, at.z);
+      else sp.position.set(r.tx, r.ty + 1.1, r.tz);
     }
   }
   for (const [id, sp] of glowSprites) {
@@ -11667,7 +11710,16 @@ function frame(): void {
     // Simulation never pauses: mobs hunt you and survival ticks in menus too.
     if (!arenaActive) {
       survival.update(dt, player);
+      mobs.myId = net.connected ? net.myId : -1;
+      mobs.remoteTargets.length = 0;
+      if (net.connected) {
+        for (const [id, r] of net.remotes) {
+          if (r.info.mode !== 'survival') continue; // creative/spectator are not prey
+          mobs.remoteTargets.push({ id, pos: new THREE.Vector3(r.tx, r.ty, r.tz), dead: r.dead });
+        }
+      }
       mobs.update(dt, player, sky.sunIntensity);
+      syncMobs(dt);
       updateVaults(dt); // dungeons: bounds/banner, guard anchors, the Brute, sparkle
     }
     // Volcanic lava is a hazard: standing in it burns you (the M21 ashlands
@@ -11810,6 +11862,7 @@ function frame(): void {
   } else {
     remotePlayers.setHovered(-1);
   }
+  net.adaptiveDelay = !arenaActive; // open world rides out late packets; arenas keep their tuned delay
   remotePlayers.update(dt); // interpolate + animate other players
   {
     netItems.update(dt, player, inventory, sky.sunIntensity);
@@ -11937,8 +11990,7 @@ function frame(): void {
     flagModels.setWarActive(warActiveNow);
     flagModels.update(dt, activeCamera, (id) => {
       if (id === net.myId) return player.pos;
-      const remote = net.remotes.get(id);
-      return remote ? new THREE.Vector3(remote.tx, remote.ty, remote.tz) : null;
+      return flagCarrierPos(id);
     });
     worldMap.setDynamicMarkers(flagState.flags.map((flag) => {
       const home = flagPosition(flag);

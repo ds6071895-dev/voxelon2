@@ -63,7 +63,7 @@ import {
   worldVaults,
 } from '../vaults';
 import {
-  ClientMsg, EDIT_RANGE, RELOCATE_RANGE, CHEST_SLOTS, PICKUP_RANGE,
+  ClientMsg, EDIT_RANGE, RELOCATE_RANGE, CHEST_SLOTS, PICKUP_RANGE, SYNCED_MOB_TYPES, type MobWire,
   ARMOR_POINT_CAP, RANGED_MAX_RANGE, RANGED_MAX_DAMAGE,
   mitigate, TOUGHNESS_CAP, DuelLeaderboardEntry, ItemEntityInfo, PlayerInfo, PlayerSnapshot, ServerMsg,
   WORLD_SEED, WORLD_HALF, WORLD_BORDER, CORE_HALF, makeUsername, skinSeed, GameMode,
@@ -187,6 +187,10 @@ interface ServerPlayer extends PlayerInfo {
    *  and when the current continuous fight began. A fight lapses once no PvP
    *  hit lands for COMBAT_TAG seconds. */
   lastPvpTime: number;
+  /** Signed in but sitting on the title screen: hidden from every other
+   *  player and untouchable until the next open-world transform. The client
+   *  sends `away` on reaching the title, including right after logging in. */
+  away: boolean;
   pvpSince: number;
   /** The "damage is ramping" notice was already sent for this fight. */
   bloodlustWarned: boolean;
@@ -239,6 +243,15 @@ interface ServerPlayer extends PlayerInfo {
   duelRespawning: boolean;
 
 }
+
+/** How far apart two players can be and still share each other's mobs. */
+const MOB_RELAY_RANGE = 112;
+
+/** Movement budget while a throw (pad or knockback) is settling: refill rate
+ *  in blocks/s and the cap it banks to. Covers the 12 b/s boost pad plus
+ *  sprint air control with headroom for packet jitter. */
+const PARTY_LAUNCH_RATE = 17;
+const PARTY_LAUNCH_CAP = 6;
 
 /** What the party movement gate remembers between packets.
  *
@@ -323,7 +336,7 @@ const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
   'machineConfig', 'machineUpgrade', 'machineCollect', 'machineHit', 'machineClaim',
   'machineMove', 'setSpawn',
   'turretUpgrade', 'turretClaim', 'turretMove', 'turretHit', 'turretLoad', 'turretMobShot',
-  'gadgetUse', 'rocketBlast', 'xp',
+  'gadgetUse', 'rocketBlast', 'xp', 'mobSync', 'mobHit',
   // Warfare Command: a spectator may never build, fire, fly or sabotage.
   'warfareBuy',
   'heliSpawn', 'heliDeploy', 'heliMount', 'heliInput', 'heliBomb', 'heliService',
@@ -608,7 +621,7 @@ export class GameServer {
     for (const player of this.players.values()) {
       if (counted.has(player.id)) continue;
       if (!player.arenaSaved) {
-        count('play', player.id);
+        if (!player.away) count('play', player.id); // on the title screen, not in the world
       } else if (player.arenaKind === 'duel') {
         count('duels', player.id);
       } else {
@@ -801,7 +814,7 @@ export class GameServer {
       toughness: 0,
       held: 0, armor: [0, 0, 0, 0], sneaking: false, swing: 0,
       aiming: false, reloading: false,
-      lastPvpTime: -Infinity, pvpSince: 0, bloodlustWarned: false,
+      lastPvpTime: -Infinity, away: false, pvpSince: 0, bloodlustWarned: false,
       switchesUsed: Number.isFinite(account?.switchesUsed) ? Math.max(0, Math.floor(account!.switchesUsed!)) : 0,
       switchSeason: Number.isFinite(account?.switchSeason) ? Math.floor(account!.switchSeason!) : 0,
       forfeitSeason: Number.isFinite(account?.forfeitSeason) ? Math.floor(account!.forfeitSeason!) : 0,
@@ -840,7 +853,8 @@ export class GameServer {
       t: 'welcome', id, seed: this.seed, username, worldTime: this.worldTime,
       // A normal-world login must never learn about players inside an active
       // Duels scope. Lobby-only players remain ordinary title/world roster.
-      players: [...this.players.values()].filter((v) => !v.arenaSaved).map(toInfo),
+      players: [...this.players.values()]
+        .filter((v) => v.id === id || (!v.arenaSaved && !v.away)).map(toInfo),
       // Arena columns are stripped here, not merely ignored on arrival: a
       // block a competitor placed inside a colosseum is not part of the world
       // and has no business being handed to somebody logging into it. The
@@ -926,6 +940,51 @@ export class GameServer {
     }
     if (dropped) out.push(...this.flagBroadcast('returned', dropped.flag, p.username));
     return out;
+  }
+
+  /** Relay a client's mob list to open-world players near it. Every field is
+   *  re-built from validated numbers so nothing else rides along. */
+  private relayMobs(p: ServerPlayer, raw: unknown, rawGone: unknown): Outbound[] {
+    if (p.away || p.arenaSaved || !Array.isArray(raw)) return [];
+    const mobs: MobWire[] = [];
+    for (const m of raw.slice(0, 40)) {
+      if (!m || typeof m !== 'object') continue;
+      const w = m as Record<string, unknown>;
+      const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : NaN);
+      const x = n(w.x), y = n(w.y), z = n(w.z), yaw = n(w.yaw), i = n(w.i), k = n(w.k);
+      if (!fin(x, y, z, yaw, i, k) || k < 0 || k >= SYNCED_MOB_TYPES.length) continue;
+      if (Math.hypot(x - p.x, z - p.z) > 72) continue; // only mobs around the sender
+      mobs.push({ i: Math.floor(i), k: Math.floor(k), x, y, z, yaw,
+        hu: n(w.hu) ? 1 : 0, sw: Math.floor(n(w.sw) || 0) & 0xffff,
+        sp: Math.floor(n(w.sp) || 0) & 0xffff, tg: Number.isFinite(n(w.tg)) ? Math.floor(n(w.tg)) : -1,
+        fu: Math.max(0, Math.min(1, n(w.fu) || 0)) });
+    }
+    const gone = Array.isArray(rawGone)
+      ? rawGone.slice(0, 40).filter((v): v is number => typeof v === 'number' && Number.isFinite(v)).map(Math.floor)
+      : [];
+    const out: Outbound[] = [];
+    for (const other of this.players.values()) {
+      if (other.id === p.id || other.arenaSaved || other.away) continue;
+      if (Math.hypot(other.x - p.x, other.z - p.z) > MOB_RELAY_RANGE) continue;
+      out.push({ to: other.id, msg: { t: 'mobs', owner: p.id, mobs, gone } });
+    }
+    return out;
+  }
+
+  /** Quit to title: the socket stays open for the menus, but the body must
+   *  leave the world — otherwise everyone keeps seeing it frozen where it
+   *  stood. Refused while combat-tagged so a menu is never a combat log. */
+  private goAway(p: ServerPlayer): Outbound[] {
+    if (p.away || p.arenaSaved) return [];
+    if (this.worldTime - p.lastPvpTime < COMBAT_TAG) return [];
+    p.away = true;
+    return [{ to: 'others', from: p.id, msg: { t: 'leave', id: p.id } }];
+  }
+
+  /** First open-world transform after `away` (Play pressed): re-announce. */
+  private comeBack(p: ServerPlayer): Outbound[] {
+    if (p.away || p.arenaSaved) return [];
+    return [{ to: 'others', from: p.id, msg: { t: 'join', player: toInfo(p) } }];
   }
 
   /**
@@ -1058,7 +1117,23 @@ export class GameServer {
     // message. They may still move (xform), persist (saveState), and respawn.
     if (p.mode === 'spectator' && SPECTATOR_BLOCKED.has(msg.t)) return [];
     switch (msg.t) {
+      case 'away': return this.goAway(p);
+      case 'mobSync': return this.relayMobs(p, msg.mobs, msg.gone);
+      case 'mobHit': {
+        // Mobs are client-owned; the server is a switchboard with limits. The
+        // owner applies the damage to its own copy, capped there as well.
+        const owner = this.players.get(msg.owner);
+        if (!owner || owner.id === p.id || owner.arenaSaved || owner.away || p.away ||
+            !fin(msg.nid, msg.dmg, msg.kx, msg.kz) || msg.dmg <= 0) return [];
+        if (Math.hypot(owner.x - p.x, owner.z - p.z) > MOB_RELAY_RANGE) return [];
+        return [{ to: owner.id, msg: { t: 'mobHit', from: p.id, nid: Math.floor(msg.nid),
+          dmg: Math.min(40, msg.dmg), kx: Math.max(-10, Math.min(10, msg.kx)),
+          kz: Math.max(-10, Math.min(10, msg.kz)) } }];
+      }
       case 'xform': {
+        // Pressing Play: apply this transform first so the re-announced body
+        // appears where the player actually is, not where they quit.
+        if (p.away) { p.away = false; return [...this.handle(id, msg), ...this.comeBack(p)]; }
         // Reject non-finite transforms so they can't poison distance/facing
         // math elsewhere (range/hit checks must never fail open).
         if (!p.dead && fin(msg.x, msg.y, msg.z, msg.yaw, msg.pitch)) {
@@ -1970,6 +2045,7 @@ export class GameServer {
     for (const id of restoredIds) {
       const p = this.players.get(id);
       if (!p) continue;
+      p.away = false; // back from a match into the open world, not the menu
       for (const other of this.players.values()) {
         if (other.id === id) continue;
         if (other.arenaSaved) {
@@ -1980,7 +2056,7 @@ export class GameServer {
           out.push({ to: other.id, msg: { t: 'leave', id } });
           continue;
         }
-        out.push({ to: id, msg: { t: 'join', player: toInfo(other) } });
+        if (!other.away) out.push({ to: id, msg: { t: 'join', player: toInfo(other) } });
         if (!restored.has(other.id)) out.push({ to: other.id, msg: { t: 'join', player: toInfo(p) } });
       }
     }
@@ -2575,10 +2651,6 @@ export class GameServer {
       return [];
     const wanted = clampToPartySub(msg, sub);
     const move = this.partyMoves.get(p.id) ?? this.freshPartyMove(p, round.revision);
-    // Token budget permits packet jitter, but cannot be refilled by sending
-    // more packets. Collision is checked along the whole travelled segment.
-    move.allowance = Math.min(4, move.allowance + Math.max(0, this.worldTime - move.at) * 6.5);
-    move.at = this.worldTime;
     if (this.partyGrounded(p.x, p.y, p.z))
       this.markPartyGround(move, p.x, p.y, p.z);
     // A Parkour throw pad is the course throwing this player, exactly as
@@ -2587,7 +2659,7 @@ export class GameServer {
     if (sub.game === 'parkour') {
       const course = parkourCourse(sub.seed);
       if ([p, wanted].some(at => parkourPadNear(course, at.x - sub.minX, at.y, at.z - sub.minZ))) {
-        if (this.worldTime >= move.launchUntil) move.allowance = Math.max(move.allowance, 4);
+        if (this.worldTime >= move.launchUntil) move.allowance = Math.max(move.allowance, PARTY_LAUNCH_CAP);
         move.launchUntil = this.worldTime + 1.6;
         move.groundedAt = this.worldTime;
       }
@@ -2597,6 +2669,15 @@ export class GameServer {
     // the mode's signature (hitting somebody off the span) would be corrected
     // away as cheating the instant it worked.
     const launched = this.worldTime < move.launchUntil;
+    // Token budget permits packet jitter, but cannot be refilled by sending
+    // more packets. Collision is checked along the whole travelled segment.
+    // A throw outruns running pace (a boost pad is 12 b/s flat plus air
+    // control), so the budget refills at flight speed while one is settling —
+    // at running pace it drained mid-flight and every packet after that was
+    // "corrected", rubber-banding the flyer back along the arc.
+    const rate = launched ? PARTY_LAUNCH_RATE : 6.5, cap = launched ? PARTY_LAUNCH_CAP : 4;
+    move.allowance = Math.min(cap, move.allowance + Math.max(0, this.worldTime - move.at) * rate);
+    move.at = this.worldTime;
     const distance = Math.hypot(wanted.x - p.x, wanted.z - p.z);
     let clear = distance <= move.allowance && (launched || wanted.y - move.groundY <= 1.6);
     // Anti-flight: hanging at or above your last footing for seconds on end is
@@ -4497,7 +4578,7 @@ export class GameServer {
     // Duels has a separate normalized damage path. This fail-closed guard keeps
     // every world hazard/projectile from crossing the visibility boundary even
     // if a new subsystem forgets to filter its target list.
-    if (p.arenaSaved || p.dead || amount <= 0) return [];
+    if (p.arenaSaved || p.away || p.dead || amount <= 0) return [];
     if (p.mode !== 'survival') return []; // creative/spectator are invulnerable
     // server-authoritative armor reduction
     amount = mitigate(amount, p.armorPoints, p.toughness, pierce);
@@ -5681,7 +5762,7 @@ export class GameServer {
       .filter((p) => {
         const pInArena = !!p.arenaSaved;
         if (inArena) return visible!.has(p.id);
-        return !pInArena;
+        return !pInArena && (!p.away || p.id === recipientId);
       })
       .map((p) => ({
         id: p.id, x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch, ct: p.ct,

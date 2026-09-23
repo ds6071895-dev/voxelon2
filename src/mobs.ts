@@ -10,7 +10,8 @@ import { detailBoss } from './boss_detail';
 import { Block, BLOCKS, isSolid, isVaultMasonry, Tile } from './blocks';
 import type { ItemEntities } from './itementity';
 import { Item, ItemStack } from './items';
-import { inCore } from './net/protocol';
+import { inCore, SYNCED_MOB_TYPES, type MobWire } from './net/protocol';
+export { SYNCED_MOB_TYPES, type MobWire };
 import { VAULT_BOSS_HITBOX, VAULT_RECHARGE, VaultBossKind, VaultStamp } from './vaults';
 import type { Particles } from './particles';
 import type { Player } from './player';
@@ -22,6 +23,16 @@ import type { World } from './world';
 // lunger — panic fun, dies to one good hit; Wilds + dungeons). Milestone D adds
 // the vault-boss BRUTE (huge, slow, telegraphed lunge — server-side HP online).
 export type MobType = 'zombie' | 'creeper' | 'spitter' | 'skitter' | 'brute';
+
+/** A living player (other than us) that owner-simulated mobs may hunt. */
+export interface MobTarget { id: number; pos: THREE.Vector3; dead: boolean }
+
+/** Where a proxy mob's owner last put it, and when we heard. */
+interface ProxyState {
+  owner: number; nid: number;
+  tx: number; ty: number; tz: number; tyaw: number;
+  seen: number; sw: number; sp: number; tg: number;
+}
 
 const GRAVITY = 32;
 const JUMP_V = 8.4;
@@ -278,6 +289,14 @@ export class Mob {
   bossDefeated = false;
   readonly bossParts: THREE.Object3D[] = [];
   readonly bossMaterials: THREE.Material[] = [];
+  /** Owner-local network id (0 until spawned through Mobs). */
+  nid = 0;
+  /** Set when another player's client owns this mob: we only draw it. */
+  proxy: ProxyState | null = null;
+  /** Hunted player id (-1 = nobody / the local player offline). */
+  targetId = -1;
+  swingSeq = 0;
+  spitSeq = 0;
   readonly model: MobModel;
   readonly material: THREE.MeshBasicMaterial;
 
@@ -669,6 +688,17 @@ export class Mobs {
   onPlayerKill?: (kind: string) => void;
   /** The local Brute died (offline authority: main marks the vault cleared). */
   onBruteDown?: (mob: Mob) => void;
+  /** We damaged a mob another player owns: forward it to them (main → net). */
+  onProxyHit?: (mob: Mob, damage: number, kx: number, kz: number) => void;
+  /** Our network id, so a proxy knows when its swing is aimed at us. */
+  myId = -1;
+  /** Other players in this world. Our mobs hunt whoever is nearest, so a
+   *  zombie chasing a friend is the same zombie on both screens. */
+  remoteTargets: MobTarget[] = [];
+  private nextNid = 1;
+  /** Our mobs that died since the last sync (receivers poof these). */
+  private killedNids: number[] = [];
+  private clock = 0;
 
   private readonly scene: THREE.Scene;
   private readonly world: World;
@@ -703,6 +733,7 @@ export class Mobs {
 
   spawnAt(type: MobType, x: number, y: number, z: number): Mob {
     const mob = new Mob(type, x, y, z, this.atlas);
+    mob.nid = this.nextNid++;
     this.scene.add(mob.model.group);
     this.list.push(mob);
     return mob;
@@ -818,13 +849,16 @@ export class Mobs {
     }
   }
 
-  private hostileCount(): number {
-    return this.list.filter((m) => m.def.hostile).length;
+  private hostileCount(near: THREE.Vector3): number {
+    // Somebody else's mobs around us count toward our cap, or two players
+    // standing together would each fill the night with a full population.
+    return this.list.filter((m) => m.def.hostile &&
+      (!m.proxy || m.pos.distanceToSquared(near) < 48 * 48)).length;
   }
 
   private trySpawns(player: Player, sun: number): void {
     const cap = inCore(player.pos.x, player.pos.z) ? HOSTILE_CAP : HOSTILE_CAP_WILDS;
-    if (this.hostileCount() >= cap) return;
+    if (this.hostileCount(player.pos) >= cap) return;
     const angle = Math.random() * Math.PI * 2;
     const dist = 20 + Math.random() * 22;
     const x = Math.floor(player.pos.x + Math.cos(angle) * dist);
@@ -882,13 +916,14 @@ export class Mobs {
   ): boolean {
     const mob = this.rayHit(origin, dir, 3.5);
     if (!mob) return false;
+    const away = new THREE.Vector3(
+      mob.pos.x - player.pos.x, 0, mob.pos.z - player.pos.z
+    ).normalize();
+    if (this.forwardHit(mob, damage, away.x * 7, away.z * 7)) return true;
     mob.health -= damage;
     mob.hurtTime = 0.5;
     // The Brute is heavy — barely any knockback (it's a boss, not a piñata).
     const heavy = mob.type === 'brute' ? 0.15 : 1;
-    const away = new THREE.Vector3(
-      mob.pos.x - player.pos.x, 0, mob.pos.z - player.pos.z
-    ).normalize();
     mob.vel.x += away.x * 7 * heavy;
     mob.vel.z += away.z * 7 * heavy;
     mob.vel.y += 4.5 * heavy;
@@ -918,6 +953,7 @@ export class Mobs {
   shootPoint(p: THREE.Vector3, damage: number, dir: THREE.Vector3): boolean {
     const mob = this.mobAtPoint(p);
     if (!mob) return false;
+    if (this.forwardHit(mob, damage, dir.x * 5, dir.z * 5)) return true;
     mob.health -= damage;
     mob.hurtTime = 0.5;
     const heavy = mob.type === 'brute' ? 0.15 : 1; // bosses barely budge
@@ -931,12 +967,129 @@ export class Mobs {
     return true;
   }
 
+  /** Damage to a mob another player owns is theirs to apply: show the hit
+   *  here (flash + yelp) and send it on. True when the mob was a proxy. */
+  private forwardHit(mob: Mob, damage: number, kx: number, kz: number): boolean {
+    if (!mob.proxy) return false;
+    mob.hurtTime = 0.3;
+    this.onSound?.('mobHurt', mob.pos);
+    this.onProxyHit?.(mob, damage, kx, kz);
+    return true;
+  }
+
+  /** The owner side of `forwardHit`: another player hit one of our mobs. */
+  applyRemoteHit(nid: number, damage: number, kx: number, kz: number): void {
+    const mob = this.list.find((m) => !m.proxy && m.nid === nid);
+    if (!mob || !(damage > 0)) return;
+    mob.health -= Math.min(40, damage);
+    mob.hurtTime = 0.5;
+    const k = Math.hypot(kx, kz), scale = k > 8 ? 8 / k : 1;
+    mob.vel.x += kx * scale; mob.vel.z += kz * scale; mob.vel.y += 3.5;
+    this.onSound?.('mobHurt', mob.pos);
+    if (mob.health <= 0) this.kill(mob);
+  }
+
+  /** Our mobs near `near`, for other players (main sends this ~10×/s). */
+  wire(near: THREE.Vector3): { mobs: MobWire[]; gone: number[] } {
+    const mobs: MobWire[] = [];
+    for (const m of this.list) {
+      if (m.proxy || m.bossKind || m.removed) continue;
+      const k = (SYNCED_MOB_TYPES as readonly MobType[]).indexOf(m.type);
+      if (k < 0 || m.pos.distanceToSquared(near) > 64 * 64) continue;
+      const r = (v: number) => Math.round(v * 100) / 100;
+      mobs.push({
+        i: m.nid, k, x: r(m.pos.x), y: r(m.pos.y), z: r(m.pos.z), yaw: r(m.yaw),
+        hu: m.hurtTime > 0 ? 1 : 0, sw: m.swingSeq & 0xffff, sp: m.spitSeq & 0xffff,
+        tg: m.targetId, fu: m.type === 'creeper' ? r(m.fuse / CREEPER_FUSE) : 0,
+      });
+      if (mobs.length >= 40) break;
+    }
+    const gone = this.killedNids;
+    this.killedNids = [];
+    return { mobs, gone };
+  }
+
+  /** A mob list from `owner`: create, steer or retire our proxies of theirs. */
+  applyRemote(owner: number, list: MobWire[], gone: number[]): void {
+    const seen = new Set<number>();
+    for (const w of list) {
+      const type = SYNCED_MOB_TYPES[w.k];
+      if (!type) continue;
+      seen.add(w.i);
+      let mob = this.list.find((m) => m.proxy?.owner === owner && m.proxy.nid === w.i);
+      if (!mob) {
+        mob = new Mob(type, w.x, w.y, w.z, this.atlas);
+        mob.yaw = w.yaw;
+        mob.proxy = { owner, nid: w.i, tx: w.x, ty: w.y, tz: w.z, tyaw: w.yaw,
+          seen: this.clock, sw: w.sw, sp: w.sp, tg: w.tg };
+        this.scene.add(mob.model.group);
+        this.list.push(mob);
+      }
+      const p = mob.proxy!;
+      p.tx = w.x; p.ty = w.y; p.tz = w.z; p.tyaw = w.yaw; p.seen = this.clock;
+      p.tg = w.tg;
+      if (w.hu) mob.hurtTime = Math.max(mob.hurtTime, 0.15);
+      mob.fuse = Math.max(0, Math.min(1, w.fu || 0)) * CREEPER_FUSE;
+      if (w.sw !== p.sw) { p.sw = w.sw; this.proxySwing(mob); }
+      if (w.sp !== p.sp) { p.sp = w.sp; this.proxySpit(mob); }
+    }
+    const died = new Set(gone);
+    for (const m of [...this.list]) {
+      if (m.proxy?.owner !== owner || seen.has(m.proxy.nid)) continue;
+      if (died.has(m.proxy.nid)) {
+        this.particles.poof(m.pos.x, m.pos.y + m.height / 2, m.pos.z);
+        this.onSound?.('poof', m.pos);
+      }
+      this.remove(m);
+    }
+  }
+
+  /** That player left or went out of range: their mobs go with them. */
+  dropOwner(owner: number): void {
+    for (const m of [...this.list]) if (m.proxy?.owner === owner) this.remove(m);
+  }
+
+  /** The player a proxy is hunting: us, a remote, or nobody. */
+  private proxyTarget(mob: Mob, player: Player): THREE.Vector3 | null {
+    const tg = mob.proxy?.tg ?? -1;
+    if (tg < 0) return null;
+    if (tg === this.myId) return player.dead ? null : player.pos;
+    return this.remoteTargets.find((t) => t.id === tg && !t.dead)?.pos ?? null;
+  }
+
+  private player: Player | null = null;
+
+  /** The owner swung. If it swung at US, whether it connects is ours to say
+   *  (we apply our own damage, exactly as with our own mobs). */
+  private proxySwing(mob: Mob): void {
+    const player = this.player;
+    if (!player || player.dead || mob.proxy?.tg !== this.myId) return;
+    const to = new THREE.Vector3().subVectors(player.pos, mob.pos);
+    // A touch more reach than the owner's check: our copy is a packet behind.
+    if (Math.hypot(to.x, to.z) > mob.halfW + 1.9 || Math.abs(to.y) > 2.5) return;
+    player.damage(mob.type === 'skitter' ? SKITTER_DAMAGE : ZOMBIE_DAMAGE);
+    const kick = to.setY(0).normalize().multiplyScalar(7);
+    player.vel.add(kick);
+    player.vel.y += 3;
+  }
+
+  /** The owner's spitter spat: launch our own copy of the gob at its target.
+   *  Gobs only ever hurt the local player, so every client stays the sole
+   *  judge of its own damage. */
+  private proxySpit(mob: Mob): void {
+    const player = this.player;
+    if (!player) return;
+    const at = this.proxyTarget(mob, player);
+    if (at) this.spitAt(mob, at);
+  }
+
   private kill(mob: Mob): void {
     if (mob.room) {
       const wave = this.roomWaves.get(mob.room);
       if (wave) wave.defeated++;
     }
     if (mob.type === 'brute') this.onBruteDown?.(mob);
+    if (!mob.proxy && mob.nid) this.killedNids.push(mob.nid);
     for (const drop of mob.def.drops(Math.random)) {
       this.items.spawn(
         mob.pos.x, mob.pos.y + 0.4, mob.pos.z, drop.id, drop.count
@@ -1010,6 +1163,7 @@ export class Mobs {
     });
     for (const mob of [...this.list]) {
       hurt(mob.pos, (dmg, k) => {
+        if (this.forwardHit(mob, dmg, k.x, k.z)) return;
         mob.health -= dmg;
         mob.hurtTime = 0.5;
         mob.vel.add(k);
@@ -1020,7 +1174,7 @@ export class Mobs {
 
   /** A trap caught this mob (offline trap sim): damage + optional hold. */
   trapHit(mob: Mob, dmg: number, freeze = 0): void {
-    if (!this.list.includes(mob)) return;
+    if (!this.list.includes(mob) || mob.proxy) return;
     mob.health -= dmg;
     mob.hurtTime = 0.4;
     if (freeze > 0) mob.trapFreeze = Math.max(mob.trapFreeze, freeze);
@@ -1028,6 +1182,8 @@ export class Mobs {
   }
 
   update(dt: number, player: Player, sun: number): void {
+    this.player = player;
+    this.clock += dt;
     this.guardClock += dt;
     this.guardTimer = Math.max(0, this.guardTimer - dt);
     if (this.spawningEnabled) this.tickVaultGuards(player);
@@ -1041,15 +1197,16 @@ export class Mobs {
     if (relight) this.lightTimer = 0;
 
     for (const mob of [...this.list]) {
-      this.updateMob(dt, mob, player, sun, relight);
+      if (mob.proxy) this.updateProxy(dt, mob, player, sun, relight);
+      else this.updateMob(dt, mob, player, sun, relight);
     }
     this.updateSpits(dt, player);
   }
 
   /** Launch a lobbed spit gob from a spitter toward the player. */
-  private spitAt(mob: Mob, player: Player): void {
+  private spitAt(mob: Mob, at: THREE.Vector3): void {
     const from = mob.pos.clone(); from.y += mob.height * 0.75;
-    const target = player.pos.clone(); target.y += 1.0;
+    const target = at.clone(); target.y += 1.0;
     const d = target.clone().sub(from);
     const flat = Math.hypot(d.x, d.z) || 1;
     const speed = 11;
@@ -1089,6 +1246,31 @@ export class Mobs {
     }
   }
 
+  /** Draw a mob another player simulates: glide toward where its owner last
+   *  put it, animate from that motion, and let it go if the owner falls silent. */
+  private updateProxy(
+    dt: number, mob: Mob, player: Player, sun: number, relight: boolean
+  ): void {
+    const p = mob.proxy!;
+    if (this.clock - p.seen > 1.5 || mob.pos.distanceTo(player.pos) > 128) {
+      this.remove(mob);
+      return;
+    }
+    mob.hurtTime = Math.max(0, mob.hurtTime - dt);
+    const far = Math.hypot(p.tx - mob.pos.x, p.ty - mob.pos.y, p.tz - mob.pos.z) > 6;
+    const k = far ? 1 : Math.min(1, dt * 12);
+    const px = mob.pos.x, pz = mob.pos.z;
+    mob.pos.x += (p.tx - mob.pos.x) * k;
+    mob.pos.y += (p.ty - mob.pos.y) * k;
+    mob.pos.z += (p.tz - mob.pos.z) * k;
+    mob.yaw += wrapAngle(p.tyaw - mob.yaw) * k;
+    // Velocity from the drawn motion drives the legs, like an owned mob.
+    mob.vel.set((mob.pos.x - px) / Math.max(dt, 1e-4), 0, (mob.pos.z - pz) / Math.max(dt, 1e-4));
+    mob.state = p.tg >= 0 ? 'chase' : 'walk';
+    const prey = this.proxyTarget(mob, player) ?? player.pos;
+    this.present(dt, mob, prey, mob.pos.distanceTo(prey), sun, relight);
+  }
+
   private updateMob(
     dt: number, mob: Mob, player: Player, sun: number, relight: boolean
   ): void {
@@ -1099,20 +1281,33 @@ export class Mobs {
     mob.hurtTime = Math.max(0, mob.hurtTime - dt);
     mob.attackCooldown = Math.max(0, mob.attackCooldown - dt);
 
-    const toPlayer = new THREE.Vector3().subVectors(player.pos, mob.pos);
+    // Hunt whichever living player is nearest — us or someone else in this
+    // world. Culling and despawning stay tied to OUR distance: we own it.
+    const ownDist = mob.pos.distanceTo(player.pos);
+    let prey: THREE.Vector3 = player.pos, preyId = this.myId, preyDead = player.dead;
+    let dist = player.dead ? Infinity : ownDist;
+    if (def.hostile && !mob.bossKind) {
+      for (const t of this.remoteTargets) {
+        if (t.dead) continue;
+        const d = mob.pos.distanceTo(t.pos);
+        if (d < dist) { dist = d; prey = t.pos; preyId = t.id; preyDead = false; }
+      }
+    }
+    if (!Number.isFinite(dist)) dist = ownDist;
+    const preyIsMe = prey === player.pos;
+    const toPlayer = new THREE.Vector3().subVectors(prey, mob.pos);
     const distXZ = Math.hypot(toPlayer.x, toPlayer.z);
-    const dist = mob.pos.distanceTo(player.pos);
 
     // Cull any mob that fell out of the world (its chunk unloaded beneath it)
     // or strayed beyond loaded terrain, so passives can't pile up or plummet
     // forever and the population stays fresh as the player roams.
-    if (mob.pos.y < -8 || dist > 128) {
+    if (mob.pos.y < -8 || ownDist > 128) {
       this.remove(mob);
       return;
     }
     // Despawn far hostiles (sooner than the hard cull above).
     if (def.hostile) {
-      mob.despawnTime = dist > DESPAWN_DIST ? mob.despawnTime + dt : 0;
+      mob.despawnTime = ownDist > DESPAWN_DIST && dist > DESPAWN_DIST ? mob.despawnTime + dt : 0;
       if (mob.despawnTime > 3) {
         this.remove(mob);
         return;
@@ -1123,7 +1318,7 @@ export class Mobs {
     // living player (handled in the chase branch). Everywhere else — player
     // escaped past chase range, player died, or it backed off — it winds back
     // down, so it can never get stuck swollen and flashing.
-    const priming = mob.type === 'creeper' && !player.dead && dist < 3;
+    const priming = mob.type === 'creeper' && !preyDead && dist < 3;
     if (mob.type === 'creeper' && !priming && mob.fuse > 0) {
       mob.fuse = Math.max(0, mob.fuse - dt * 1.5);
       if (mob.fuse === 0) mob.fuseStarted = false;
@@ -1143,8 +1338,9 @@ export class Mobs {
       moving = true;
       speedMul = 1.5;
       if (mob.stateTime <= 0) mob.state = 'idle';
-    } else if (def.hostile && !player.dead && dist < 16) {
+    } else if (def.hostile && !preyDead && dist < 16) {
       mob.state = 'chase';
+      mob.targetId = preyId;
       mob.yaw = Math.atan2(toPlayer.x, toPlayer.z);
       speedMul = 1;
       if (mob.type === 'zombie' || mob.type === 'skitter' || mob.type === 'brute') {
@@ -1172,11 +1368,14 @@ export class Mobs {
         if (distXZ < mob.halfW + reach && Math.abs(toPlayer.y) < 2.5 &&
           mob.attackCooldown <= 0) {
           mob.attackCooldown = cd;
-          player.damage(dmg);
-          const kick = toPlayer.clone().setY(0).normalize()
-            .multiplyScalar(mob.type === 'brute' ? 11 : 7);
-          player.vel.add(kick);
-          player.vel.y += mob.type === 'brute' ? 4.5 : 3;
+          mob.swingSeq++; // someone else's prey applies the hit on their side
+          if (preyIsMe) {
+            player.damage(dmg);
+            const kick = toPlayer.clone().setY(0).normalize()
+              .multiplyScalar(mob.type === 'brute' ? 11 : 7);
+            player.vel.add(kick);
+            player.vel.y += mob.type === 'brute' ? 4.5 : 3;
+          }
         }
         mob.soundTimer -= dt;
         if (mob.soundTimer <= 0) {
@@ -1196,7 +1395,8 @@ export class Mobs {
         }
         if (dist >= 4 && dist < 15 && mob.attackCooldown <= 0) {
           mob.attackCooldown = SPIT_COOLDOWN;
-          this.spitAt(mob, player);
+          mob.spitSeq++;
+          this.spitAt(mob, prey);
         }
       } else { // creeper: stalk silently, fuse close in
         moving = dist > 2.2;
@@ -1209,6 +1409,7 @@ export class Mobs {
           if (mob.fuse >= CREEPER_FUSE) {
             const at = mob.pos.clone();
             at.y += 0.8;
+            this.killedNids.push(mob.nid); // everyone sees it go up
             this.remove(mob);
             this.explode(at, player);
             return;
@@ -1219,6 +1420,7 @@ export class Mobs {
     } else {
       // Passive wander / hostile idle wander.
       if (mob.state === 'chase') mob.state = 'idle';
+      mob.targetId = -1;
       mob.stateTime -= dt;
       if (mob.stateTime <= 0) {
         if (mob.state === 'idle') {
@@ -1420,9 +1622,19 @@ export class Mobs {
       }
     }
 
+    this.present(dt, mob, prey, dist, sun, relight);
+  }
+
+  /** Walk cycle, gaze, creeper swell and lighting — shared by owned mobs and
+   *  proxies so both look identical. */
+  private present(
+    dt: number, mob: Mob, prey: THREE.Vector3, dist: number, sun: number, relight: boolean
+  ): void {
+    mob.model.group.position.copy(mob.pos);
+    mob.model.group.rotation.y = mob.yaw;
     const horiz = Math.hypot(mob.vel.x, mob.vel.z);
     mob.walkPhase += horiz * dt * 3.2;
-    const swing = Math.sin(mob.walkPhase) * Math.min(1, horiz / def.speed) * 0.7;
+    const swing = Math.sin(mob.walkPhase) * Math.min(1, horiz / mob.def.speed) * 0.7;
     mob.model.legs.forEach((leg, i) => {
       leg.rotation.x = i % 2 === 0 ? swing : -swing;
     });
@@ -1430,7 +1642,7 @@ export class Mobs {
     // Gaze at the player when close (or while chasing).
     if (mob.model.head) {
       const want = (mob.state === 'chase' || dist < 5)
-        ? wrapAngle(Math.atan2(toPlayer.x, toPlayer.z) - mob.yaw)
+        ? wrapAngle(Math.atan2(prey.x - mob.pos.x, prey.z - mob.pos.z) - mob.yaw)
         : 0;
       mob.model.head.rotation.y +=
         (Math.max(-1.1, Math.min(1.1, want)) - mob.model.head.rotation.y) *

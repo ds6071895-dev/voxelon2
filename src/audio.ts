@@ -83,6 +83,12 @@ export class GameAudio {
   private musicBus: GainNode | null = null;
   private bossScore: BossMusicEngine | null = null;
   private noiseBuf: AudioBuffer | null = null;
+  /** Head-relative sounds (UI cues, your own gun) enter here: dry to the
+   *  effects bus plus a light reverb send. World sounds use `out(pos)`. */
+  private fxIn: GainNode | null = null;
+  /** Shared room: one convolver every sound sends into, so effects sit in a
+   *  space instead of playing bone-dry straight into your ears. */
+  private reverbIn: GainNode | null = null;
   private readonly listenerPos = new THREE.Vector3();
   private effectsVolume = GameAudio.savedVolume('effects', 0.8);
   private musicVolume = GameAudio.savedVolume('music', DEFAULT_MUSIC_VOLUME);
@@ -104,7 +110,12 @@ export class GameAudio {
       this.ctx = new Ctor();
       this.master = this.ctx.createGain();
       this.master.gain.value = 0.5;
-      this.master.connect(this.ctx.destination);
+      // Gentle glue on the whole mix: stacked transients (a burst of fire
+      // over an explosion) get tamed rather than clipping into harsh crackle.
+      const glue = new DynamicsCompressorNode(this.ctx, {
+        threshold: -16, knee: 12, ratio: 3, attack: 0.004, release: 0.2,
+      });
+      this.master.connect(glue).connect(this.ctx.destination);
       this.effectsBus = this.ctx.createGain();
       this.ambienceBus = this.ctx.createGain();
       this.musicBus = this.ctx.createGain();
@@ -114,12 +125,50 @@ export class GameAudio {
       this.effectsBus.connect(this.master);
       this.ambienceBus.connect(this.master);
       this.musicBus.connect(this.master);
-      const len = this.ctx.sampleRate;
+      // Pink noise (Paul Kellet's filter), not white: white noise is mostly
+      // treble and is exactly the fizzy "cheap synth" hiss. Two seconds long,
+      // and every burst starts at a random offset so no two digs, steps or
+      // shots are the same sample.
+      const len = this.ctx.sampleRate * 2;
       this.noiseBuf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
       const data = this.noiseBuf.getChannelData(0);
-      for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+      let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+      for (let i = 0; i < len; i++) {
+        const w = Math.random() * 2 - 1;
+        b0 = 0.99886 * b0 + w * 0.0555179; b1 = 0.99332 * b1 + w * 0.0750759;
+        b2 = 0.969 * b2 + w * 0.153852; b3 = 0.8665 * b3 + w * 0.3104856;
+        b4 = 0.55 * b4 + w * 0.5329522; b5 = -0.7616 * b5 - w * 0.016898;
+        data[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + w * 0.5362) * 0.11;
+        b6 = w * 0.115926;
+      }
+      const reverb = new ConvolverNode(this.ctx, { buffer: this.roomImpulse(this.ctx, 1.7) });
+      const wet = new GainNode(this.ctx, { gain: 0.9 });
+      this.reverbIn = new GainNode(this.ctx, { gain: 1 });
+      this.reverbIn.connect(reverb).connect(wet).connect(this.effectsBus);
+      this.fxIn = new GainNode(this.ctx, { gain: 1 });
+      this.fxIn.connect(this.effectsBus);
+      this.fxIn.connect(new GainNode(this.ctx, { gain: 0.1 })).connect(this.reverbIn);
     }
     if (this.ctx.state === 'suspended') void this.ctx.resume();
+  }
+
+  /** A synthetic stereo room: decaying noise that darkens as it fades (high
+   *  frequencies die first in a real space), decorrelated per channel for width. */
+  private roomImpulse(ctx: AudioContext, seconds: number): AudioBuffer {
+    const len = Math.floor(ctx.sampleRate * seconds);
+    const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+    const pre = Math.floor(ctx.sampleRate * 0.012); // pre-delay before the first reflections
+    for (let ch = 0; ch < 2; ch++) {
+      const d = buf.getChannelData(ch);
+      let lp = 0;
+      for (let i = pre; i < len; i++) {
+        const t = (i - pre) / (len - pre);
+        const k = 0.55 - t * 0.45;                  // one-pole lowpass, closing over time
+        lp += (Math.random() * 2 - 1 - lp) * k;
+        d[i] = lp * Math.pow(1 - t, 3.2) * 0.6;
+      }
+    }
+    return buf;
   }
 
   private applyBusMix(): void {
@@ -171,17 +220,32 @@ export class GameAudio {
 
   /** Output chain: (panner?) -> master. */
   private out(pos?: THREE.Vector3): AudioNode {
-    if (!pos || !this.ctx) return this.effectsBus ?? this.master!;
+    if (!pos || !this.ctx) return this.fxIn ?? this.effectsBus ?? this.master!;
+    // Inverse falloff (how sound actually thins out) instead of a linear ramp
+    // that cut to silence at 32 blocks, plus air absorption: distant sounds
+    // lose their top end, so a far fight rumbles instead of ticking quietly.
+    const dist = pos.distanceTo(this.listenerPos);
+    const air = new BiquadFilterNode(this.ctx, {
+      type: 'lowpass', Q: 0.5,
+      frequency: Math.max(700, 16000 * Math.exp(-dist / 16)),
+    });
     const panner = new PannerNode(this.ctx, {
-      distanceModel: 'linear',
-      refDistance: 2,
-      maxDistance: 32,
+      panningModel: dist < 24 ? 'HRTF' : 'equalpower',
+      distanceModel: 'inverse',
+      refDistance: 3,
+      rolloffFactor: 1.1,
+      maxDistance: 80,
       positionX: pos.x,
       positionY: pos.y,
       positionZ: pos.z,
     });
-    panner.connect(this.effectsBus ?? this.master!);
-    return panner;
+    air.connect(panner).connect(this.effectsBus ?? this.master!);
+    // Farther away = more room, less direct sound.
+    if (this.reverbIn) {
+      const send = new GainNode(this.ctx, { gain: Math.min(0.55, 0.18 + dist / 60) });
+      air.connect(send).connect(this.reverbIn);
+    }
+    return air;
   }
 
   /** Start a long-form, bar-aligned adaptive score for this dungeon boss.
@@ -239,7 +303,7 @@ export class GameAudio {
     gain.gain.setValueAtTime(opts.gain, t0);
     gain.gain.exponentialRampToValueAtTime(0.001, t0 + opts.dur);
     src.connect(filter).connect(gain).connect(this.out(opts.pos));
-    src.start(t0);
+    src.start(t0, Math.random() * (this.noiseBuf.duration - 0.5));
     src.stop(t0 + opts.dur + 0.05);
   }
 
@@ -250,15 +314,20 @@ export class GameAudio {
   }): void {
     if (!this.ctx) return;
     const t0 = this.ctx.currentTime + (opts.delay ?? 0);
+    // World sounds drift a little in pitch so a repeated groan or impact never
+    // sounds like the same beep fired twice. UI cues stay exact (they're
+    // musical and must stay in tune).
+    const drift = opts.pos ? 0.96 + Math.random() * 0.08 : 1;
+    const from = opts.from * drift, to = opts.to * drift;
     const osc = this.ctx.createOscillator();
     osc.type = opts.type;
-    osc.frequency.setValueAtTime(opts.from, t0);
-    osc.frequency.exponentialRampToValueAtTime(Math.max(20, opts.to), t0 + opts.dur);
+    osc.frequency.setValueAtTime(from, t0);
+    osc.frequency.exponentialRampToValueAtTime(Math.max(20, to), t0 + opts.dur);
     if (opts.vibrato) {
       const lfo = this.ctx.createOscillator();
       lfo.frequency.value = opts.vibrato;
       const lfoGain = this.ctx.createGain();
-      lfoGain.gain.value = opts.from * 0.06;
+      lfoGain.gain.value = from * 0.06;
       lfo.connect(lfoGain).connect(osc.frequency);
       lfo.start(t0);
       lfo.stop(t0 + opts.dur);
@@ -268,7 +337,17 @@ export class GameAudio {
     gain.gain.setValueAtTime(0.001, t0);
     gain.gain.exponentialRampToValueAtTime(opts.gain, t0 + attack);
     gain.gain.exponentialRampToValueAtTime(0.001, t0 + opts.dur);
-    osc.connect(gain).connect(this.out(opts.pos));
+    // A raw square/saw is a wall of buzzy harmonics up to Nyquist — the
+    // chiptune signature. Rolling it off a few octaves up keeps its bite but
+    // makes it sound like an instrument rather than a beeper.
+    let head: AudioNode = osc;
+    if (opts.type === 'square' || opts.type === 'sawtooth') {
+      head = osc.connect(new BiquadFilterNode(this.ctx, {
+        type: 'lowpass', Q: 0.6,
+        frequency: Math.min(9000, Math.max(from, to) * 4.5),
+      }));
+    }
+    head.connect(gain).connect(this.out(opts.pos));
     osc.start(t0);
     osc.stop(t0 + opts.dur + 0.05);
   }
@@ -471,8 +550,13 @@ export class GameAudio {
   }
 
   explosion(pos?: THREE.Vector3): void {
-    this.noise({ freq: 350, dur: 1.1, gain: 0.9, slideTo: 60, type: 'lowpass', pos });
-    this.tone({ type: 'sine', from: 90, to: 30, dur: 0.8, gain: 0.6, pos });
+    // Crack, body, then a long rolling tail (debris + the blast echoing off
+    // terrain) — a single filtered noise burst read as a puff, not a blast.
+    this.noise({ freq: 3000, dur: 0.05, gain: 0.35, type: 'highpass', q: 0.6, pos });
+    this.noise({ freq: 900, dur: 0.5, gain: 0.8, slideTo: 120, type: 'lowpass', q: 0.8, pos });
+    this.noise({ freq: 350, dur: 1.8, gain: 0.55, slideTo: 45, type: 'lowpass', q: 0.5, delay: 0.04, pos });
+    this.tone({ type: 'sine', from: 90, to: 28, dur: 1.0, gain: 0.6, pos });
+    this.noise({ freq: 1600, dur: 0.9, gain: 0.08, slideTo: 500, type: 'bandpass', q: 0.6, delay: 0.25, pos });
   }
 
   /** Trapcraft: one voice per trap event (all synthesized, positional). */
@@ -558,6 +642,11 @@ export class GameAudio {
     });
     // A short, gentle mid click for definition (bandpass, low gain).
     this.noise({ freq: 1500, dur: 0.025, gain: 0.1, type: 'bandpass', q: 1, pos });
+    // The muzzle crack: a few milliseconds of bright air, over before it can
+    // turn into hiss. It is what makes a shot sound like a shot, not a thud.
+    this.noise({ freq: 2800, dur: 0.012, gain: 0.12 * Math.min(1.4, w), type: 'highpass', q: 0.7, pos });
+    // Sub kick you feel on the heavier guns.
+    if (w > 0.9) this.tone({ type: 'sine', from: 95 / w, to: 42, dur: 0.12 * w, gain: 0.12 * w, pos });
     // Soft triangle thump (much smoother than the old square wave).
     this.tone({
       type: 'triangle', from: 170 / w, to: 55 / w, dur: 0.07 * w, gain: 0.15 * w, pos,

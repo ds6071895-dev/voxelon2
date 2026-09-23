@@ -97,6 +97,31 @@ export const RELOCATE_RANGE = 320;
 export const TPA_HOLD = 5;
 export const TPA_EXPIRE = 60;
 
+/** Mob kinds that are shared between players (index = wire code). Vault
+ *  bosses/brutes are not here: their state is already server-driven. */
+export const SYNCED_MOB_TYPES = ['zombie', 'creeper', 'spitter', 'skitter'] as const;
+
+/** One owner-simulated mob as other players are told about it. Every client
+ *  simulates the mobs it spawned and streams them; everyone else draws them
+ *  as proxies and forwards any damage they deal back to the owner. */
+export interface MobWire {
+  /** Owner-local id. */
+  i: number;
+  /** Index into SYNCED_MOB_TYPES. */
+  k: number;
+  x: number; y: number; z: number; yaw: number;
+  /** Hurt flash running (0/1). */
+  hu: number;
+  /** Melee swing counter: a bump while `tg` is you means the swing is yours to take. */
+  sw: number;
+  /** Spit counter: a bump launches a gob at `tg`. */
+  sp: number;
+  /** Player id the mob is hunting, or -1. */
+  tg: number;
+  /** Creeper fuse (0..1) so the swell/flash shows on every screen. */
+  fu: number;
+}
+
 /** Public, render-relevant state of one player. */
 export interface PlayerSnapshot {
   id: number;
@@ -272,6 +297,14 @@ export type ClientMsg =
    *  the server independently caps it by how long the bow was actually down —
    *  a client claiming a full draw it did not wait for gets the draw it did. */
   | { t: 'partyShoot'; dx: number; dy: number; dz: number; power: number }
+  /** The mobs this client simulates, for players near it (~10 Hz). `gone`
+   *  lists ids that died since the last one (receivers poof those). */
+  | { t: 'mobSync'; mobs: MobWire[]; gone: number[] }
+  /** We damaged a mob `owner` simulates; the server forwards it to them. */
+  | { t: 'mobHit'; owner: number; nid: number; dmg: number; kx: number; kz: number }
+  /** Back on the title screen (Quit). The body leaves everyone else's view
+   *  until the next transform puts it back in the world. */
+  | { t: 'away' }
   | { t: 'xform'; arenaRevision?: number; x: number; y: number; z: number; yaw: number; pitch: number;
       /** Sender's own monotonic clock (ms) when this transform was sampled. */
       ct?: number;
@@ -531,6 +564,10 @@ export type ServerMsg =
     }
   | { t: 'join'; player: PlayerInfo }
   | { t: 'leave'; id: number }
+  /** Another player's simulated mobs near you (relayed `mobSync`). */
+  | { t: 'mobs'; owner: number; mobs: MobWire[]; gone: number[] }
+  /** Someone hit one of YOUR mobs: apply it (you own that mob's health). */
+  | { t: 'mobHit'; from: number; nid: number; dmg: number; kx: number; kz: number }
   | { t: 'snapshot'; players: PlayerSnapshot[]; worldTime: number }
   | { t: 'edit'; x: number; y: number; z: number; block: number }
   | { t: 'editBatch'; edits: { x: number; y: number; z: number; block: number }[] }

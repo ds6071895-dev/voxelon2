@@ -509,12 +509,15 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
       return;
     }
     dispatch(game.handle(id, msg));
-    if (msg.t !== 'xform') broadcastPlayerCounts();
+    // Streams that never touch the saved world or mode counts: transforms, the
+    // ~10 Hz mob relay and its hit forwarding, and the title-screen presence.
+    const transient = msg.t === 'xform' || msg.t === 'mobSync' || msg.t === 'mobHit' || msg.t === 'away';
+    if (!transient) broadcastPlayerCounts();
     // A pushed state blob is persisted to the account right away (cheap, and
     // means an unclean disconnect still keeps the last save). Any non-transform
     // message can mutate the world, so flag it for the next autosave.
     if (msg.t === 'saveState') persistPlayer(id);
-    else if (msg.t !== 'xform') worldDirty = true;
+    else if (!transient) worldDirty = true;
   });
   ws.on('close', () => {
     sockets.delete(id);

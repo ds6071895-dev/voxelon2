@@ -4,7 +4,7 @@
 // callbacks. Fails gracefully to offline mode so the game is fully playable
 // with no server running.
 
-import { SenderClock, StateTimeline, TransformBuffer, netNow } from '../interp';
+import { INTERP_DELAY, SenderClock, StateTimeline, TransformBuffer, netNow } from '../interp';
 import type { ItemStack } from '../items';
 import type { MachineAct, MachineState, UpgradeAxis } from '../machines';
 import type { EffectKind, TrapFxWhat, TrapKind, TrapState } from '../traps';
@@ -13,7 +13,7 @@ import {
   ClientMsg, DuelLeaderboardEntry, GameMode, ItemEntityInfo, PlayerInfo, SERVER_PORT, ServerMsg,
   TRANSFORM_HZ,
 } from './protocol';
-import type { PlayerCounts } from './protocol';
+import type { MobWire, PlayerCounts } from './protocol';
 import type { Cosmetics } from '../character';
 import type {
   EncounterEvent, EncounterSnapshot, VaultAttackIntent,
@@ -110,6 +110,13 @@ export class NetClient {
    *  UI hint — the server re-authorises every operator command it receives. */
   isOp = false;
   readonly remotes = new Map<number, Remote>();
+  /** Open world only: stretch the playback delay when packets run late. The
+   *  arenas keep the fixed INTERP_DELAY their lag compensation is tuned to. */
+  adaptiveDelay = false;
+  /** Decaying peak of how late samples arrive past their timeline slot (s). */
+  private latePeak = 0;
+  private lateAt = 0;
+  private delayApplied = INTERP_DELAY;
   /** Server-owned dropped items, keyed by entity id (for the renderer). */
   readonly netItems = new Map<number, ItemEntityInfo>();
   /** Latest server-authoritative population by mode. */
@@ -204,6 +211,12 @@ export class NetClient {
   onOpState?: (op: boolean) => void;
   /** Output of an operator command we sent, for the command box. */
   onCmdOut?: (lines: string[], ok: boolean) => void;
+  /** A player left our world (quit, arena, disconnect). */
+  onLeave?: (id: number) => void;
+  /** Another player's mobs near us. */
+  onMobs?: (owner: number, mobs: MobWire[], gone: number[]) => void;
+  /** Someone hit one of our mobs. */
+  onMobHit?: (from: number, nid: number, dmg: number, kx: number, kz: number) => void;
   /** Roster changed (join/leave/welcome) — refresh player count UI. */
   onRoster?: () => void;
   /** Connection lost after having been live. */
@@ -410,13 +423,26 @@ export class NetClient {
       }
       case 'join':
         if (msg.player.id !== this.myId) {
-          this.remotes.set(msg.player.id, toRemote(msg.player));
+          // A re-announce of someone already here (back from the menu or an
+          // arena) refreshes their info without throwing away the motion
+          // history — a fresh buffer would pop the body.
+          const known = this.remotes.get(msg.player.id);
+          if (known) known.info = msg.player;
+          else this.remotes.set(msg.player.id, toRemote(msg.player));
           this.onRoster?.();
         }
         break;
       case 'leave':
         this.remotes.delete(msg.id);
+        this.onLeave?.(msg.id);
         this.onRoster?.();
+        break;
+      case 'mobs':
+        this.onMobs?.(msg.owner, Array.isArray(msg.mobs) ? msg.mobs : [],
+          Array.isArray(msg.gone) ? msg.gone : []);
+        break;
+      case 'mobHit':
+        this.onMobHit?.(msg.from, msg.nid, msg.dmg, msg.kx, msg.kz);
         break;
       case 'snapshot': {
         this.onWorldTime?.(msg.worldTime);
@@ -436,6 +462,7 @@ export class NetClient {
             const pose = poseOf(s, r);
             if (typeof s.ct === 'number') {
               const m = r.clock.map(s.ct, at);
+              if (m && !m.restarted) this.noteLateness(at - m.t, at);
               if (m) {
                 const sample = { t: m.t, x: s.x, y: s.y, z: s.z, yaw: s.yaw, pitch: s.pitch };
                 if (m.restarted) {
@@ -837,6 +864,29 @@ export class NetClient {
   // --- outbound -------------------------------------------------------------
 
   /** Throttled transform send (call every frame with dt). */
+  private noteLateness(late: number, at: number): void {
+    if (!Number.isFinite(late)) return;
+    // The peak relaxes by 40ms per second of calm, so one hitch widens the
+    // buffer for a few seconds rather than for the rest of the session.
+    this.latePeak = Math.max(0, this.latePeak - Math.max(0, at - this.lateAt) * 0.04);
+    this.lateAt = at;
+    if (late > this.latePeak) this.latePeak = Math.min(0.5, late);
+  }
+
+  /** Seconds behind now that remote bodies are drawn. A sample is only usable
+   *  once the one AFTER the render instant has arrived, so the delay must
+   *  cover one send interval plus the worst recent lateness. Slewed at a few
+   *  percent so the change is a gentle playback-speed shift, never a jump. */
+  renderDelay(dt: number): number {
+    // Arena entry is a teleport anyway, so snap straight back to the tuned
+    // delay there rather than easing out of an open-world stretch.
+    if (!this.adaptiveDelay) return (this.delayApplied = INTERP_DELAY);
+    const target = Math.min(INTERP_DELAY + 0.1, Math.max(INTERP_DELAY, this.latePeak + 0.07));
+    const step = Math.max(0, dt) * 0.06;
+    this.delayApplied += Math.max(-step, Math.min(step, target - this.delayApplied));
+    return this.delayApplied;
+  }
+
   /** Bring every remote's pose/action fields to `renderTime` — the instant
    *  the renderer is drawing — so a swing or crouch lands with the body. */
   applyRemotePoses(renderTime: number): void {
@@ -880,6 +930,16 @@ export class NetClient {
   sendDuelJoin(token: string): void {
     if (this.connected) this.raw({ t: 'duelJoin', token });
   }
+  /** Our simulated mobs, for the players around us. */
+  sendMobSync(mobs: MobWire[], gone: number[]): void {
+    if (this.connected) this.raw({ t: 'mobSync', mobs, gone }, true);
+  }
+  /** We hit a mob `owner` simulates. */
+  sendMobHit(owner: number, nid: number, dmg: number, kx: number, kz: number): void {
+    if (this.connected) this.raw({ t: 'mobHit', owner, nid, dmg, kx, kz });
+  }
+  /** Back on the title screen: take our body out of everyone's world. */
+  sendAway(): void { if (this.connected) this.raw({ t: 'away' }); }
   sendDuelLeave(): void { if (this.connected) this.raw({ t: 'duelLeave' }); }
   sendDuelReady(ready: boolean): void {
     if (this.connected) this.raw({ t: 'duelReady', ready });

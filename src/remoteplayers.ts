@@ -13,7 +13,7 @@
 // preview of the same model.
 
 import * as THREE from 'three';
-import { INTERP_DELAY, netNow } from './interp';
+import { SNAP_DISTANCE, netNow } from './interp';
 import { AvatarSurface, avatarTexture } from './avatartex';
 import type { NetClient, Remote } from './net/client';
 import { factionColor, isFaction } from './teams';
@@ -831,6 +831,15 @@ interface Avatar {
   dx: number; dy: number; dz: number; dyaw: number; dpitch: number;
   walkPhase: number;
   lastX: number; lastZ: number;
+  /** Low-passed ground speed that drives the legs: raw per-frame speed dips
+   *  to zero on a late packet and spikes on the catch-up, which read as the
+   *  legs stalling and flailing mid-stride. */
+  strideSpeed: number;
+  /** Visual error being bled off after a correction (catch-up after a late
+   *  packet): the body glides the last few centimetres instead of popping. */
+  ex: number; ey: number; ez: number;
+  /** Playback speed (blocks/s) over the previous frame, before error terms. */
+  rawSpeed: number;
   /** Equip visuals currently built (rebuilt when the synced state changes). */
   heldId: number;
   heldMesh: THREE.Object3D | null;
@@ -880,6 +889,12 @@ export class RemotePlayers {
       color: 0xffd27a, blending: THREE.AdditiveBlending,
       transparent: true, depthWrite: false,
     });
+  }
+
+  /** Where this remote's body is actually drawn (interpolated), or null. Use
+   *  this, not the raw network target, for anything attached to the body. */
+  renderedPos(id: number): THREE.Vector3 | null {
+    return this.avatars.get(id)?.group.position ?? null;
   }
 
   /** Mark which avatar the local crosshair is over (-1 = none). */
@@ -967,6 +982,7 @@ export class RemotePlayers {
       dx: remote.tx, dy: remote.ty, dz: remote.tz, dyaw: remote.tyaw,
       dpitch: remote.tpitch,
       walkPhase: 0, lastX: remote.tx, lastZ: remote.tz,
+      strideSpeed: 0, ex: 0, ey: 0, ez: 0, rawSpeed: 0,
       heldId: 0, heldMesh: null, armorKey: '', armorMeshes: [],
       lastSwing: remote.swing | 0, swingT: 1, sneakT: 0, aimT: 0, reloadT: 0,
       flash: null, flashT: 0, hurtT: 0, hurtPeak: 0,
@@ -1038,7 +1054,7 @@ export class RemotePlayers {
     }
     // Replay every avatar at the same instant, INTERP_DELAY behind now. One
     // clock read for the whole loop keeps them consistent with each other.
-    const renderTime = netNow() - INTERP_DELAY;
+    const renderTime = netNow() - this.net.renderDelay(dt);
     this.net.applyRemotePoses(renderTime);
     const fallback = Math.min(1, 14 * dt);
     for (const [id, r] of this.net.remotes) {
@@ -1047,7 +1063,22 @@ export class RemotePlayers {
 
       const s = r.buf.sample(renderTime);
       if (s) {
-        av.dx = s.x; av.dy = s.y; av.dz = s.z;
+        // A playback step far beyond the pace the body was just moving at is
+        // the buffer catching up after a late packet (it froze, now it leaps):
+        // absorb it into the error term and bleed that off, instead of drawing
+        // the jump. Steady fast travel (gliding, vehicles) matches its own
+        // pace and is untouched; a real teleport (past SNAP_DISTANCE) snaps.
+        const jump = Math.hypot(s.x - (av.dx - av.ex), s.y - (av.dy - av.ey), s.z - (av.dz - av.ez));
+        const expected = av.rawSpeed * dt;
+        av.rawSpeed = jump / Math.max(dt, 1e-4);
+        if (jump - expected > 0.3 && jump < SNAP_DISTANCE) {
+          av.ex = av.dx - s.x; av.ey = av.dy - s.y; av.ez = av.dz - s.z;
+        } else if (jump >= SNAP_DISTANCE) {
+          av.ex = av.ey = av.ez = 0;
+        }
+        const bleed = Math.exp(-dt * 14);
+        av.ex *= bleed; av.ey *= bleed; av.ez *= bleed;
+        av.dx = s.x + av.ex; av.dy = s.y + av.ey; av.dz = s.z + av.ez;
         av.dyaw = s.yaw; av.dpitch = s.pitch;
       } else {
         // No history yet (a join whose first snapshot hasn't landed): ease
@@ -1100,6 +1131,7 @@ export class RemotePlayers {
       // sail flutter and how hard the wing banks.
       const hspeed = Math.hypot(av.dx - av.lastX, av.dz - av.lastZ) / Math.max(dt, 1e-4);
       av.lastX = av.dx; av.lastZ = av.dz;
+      av.strideSpeed += (Math.min(hspeed, 9) - av.strideSpeed) * Math.min(1, dt * 9);
 
       // Glider: ease the deploy (the wings unfurl, they do not blink open) and
       // bank into turns off the yaw rate — a turning aircraft rolls.
@@ -1173,10 +1205,10 @@ export class RemotePlayers {
         av.head.rotation.x = THREE.MathUtils.clamp(av.dpitch, -1.15, 1.15) + av.sneakT * 0.12;
 
         // Walk/idle animation based on horizontal movement speed.
-        av.walkPhase += Math.min(hspeed, 7) * dt * 2.4;
+        av.walkPhase += Math.min(av.strideSpeed, 7) * dt * 2.4;
 
         const pose = stridePose(
-          av.walkPhase, hspeed, av.sneakT, av.heldId > 0, attackSwing);
+          av.walkPhase, av.strideSpeed, av.sneakT, av.heldId > 0, attackSwing);
         av.parts[0].rotation.x = pose.legs[0];
         av.parts[1].rotation.x = pose.legs[1];
         av.parts[2].rotation.x = pose.arms[0];
