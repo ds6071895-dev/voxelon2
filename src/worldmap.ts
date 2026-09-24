@@ -8,9 +8,12 @@ import { factionColor } from './teams';
 import { Terrain } from './terrain';
 import { CORE_BORDER, CORE_HALF, WORLD_BORDER } from './net/protocol';
 import { iconSvg } from './emoji_icons';
+import { createBeam } from './vault_beacons';
 
 const CANVAS_PX = 700;
 const MAX_ZOOM = 10;
+const DETAIL_TILE_PX = 96;
+const DETAIL_CACHE_LIMIT = 96;
 type MapView = 'core' | 'world';
 // Per-view span + biome sample step. Both bases stay ~a few tens of thousands
 // of terrain samples (rendered lazily once, cached) — NEVER the full 5000² grid.
@@ -89,6 +92,8 @@ export class WorldMap {
   private dragStart: { x: number; y: number } | null = null;
   private suppressClickUntil = 0;
   private readonly bases = new Map<MapView, HTMLCanvasElement>(); // cached biome renders
+  private readonly detailTiles = new Map<string, HTMLCanvasElement>();
+  private detailFrame = 0;
   private waypoints: Waypoint[] = [];
   /** Attuned Waypoint Totems (B4) — click one on the map to travel to it. */
   private totems: TotemPos[] = [];
@@ -100,7 +105,6 @@ export class WorldMap {
   // + as in-world beacons exactly like waypoints. Refreshed each frame by main.
   private dynamicMarkers: DynamicMarker[] = [];
   private readonly markerGroup = new THREE.Group();
-  private readonly markerGeo = new THREE.BoxGeometry(1.2, 30, 1.2);
   // In-world MC-mod-style screen markers (one DOM badge per shown waypoint).
   private readonly beaconLayer: HTMLDivElement;
   private readonly beaconEls: HTMLDivElement[] = [];
@@ -131,16 +135,19 @@ export class WorldMap {
     this.el.setAttribute('aria-modal', 'true');
     this.el.setAttribute('aria-label', 'World atlas');
     this.el.innerHTML = `
+      <div class="atlas-bubbles" aria-hidden="true">${Array.from({ length: 14 }, (_, i) => `<i style="--x:${(i * 37 + 11) % 100}%;--s:${4 + (i * 7) % 9}px;--d:${9 + (i * 5) % 8}s;--w:${-(i * 1.3).toFixed(1)}s"></i>`).join('')}</div>
       <section class="atlas-panel">
-        <header class="atlas-header"><div><span class="atlas-eyebrow">VOXELON / EXPLORATION</span><h1>World atlas<span>Find your next horizon.</span></h1></div><button class="atlas-close" aria-label="Close map">×</button></header>
-        <div class="atlas-body"><div class="atlas-main">
-          <nav class="atlas-toolbar" aria-label="Map region"><div class="atlas-tabs"><button data-view="core" aria-pressed="true">Heartland</button><button data-view="world" aria-pressed="false">Full world</button></div><span class="atlas-region">TERRAIN SURVEY</span></nav>
-          <div class="atlas-chart"><canvas aria-label="World map. Scroll or pinch to zoom, drag to pan, select a marker to edit or terrain to create a waypoint."></canvas><span class="atlas-north">N<span>↑</span></span><div class="atlas-zoom"><button type="button" data-zoom="in" aria-label="Zoom in">+</button><span aria-live="off">100%</span><button type="button" data-zoom="out" aria-label="Zoom out">−</button></div></div><div class="atlas-readout"></div>
-        </div><aside class="atlas-sidebar"><div class="atlas-sidehead"><span class="atlas-eyebrow">YOUR JOURNEY</span><h2>Waypoints</h2><button class="atlas-primary" data-here>+ Mark my location</button></div>
+        <header class="atlas-header"><div class="atlas-title"><h1>World atlas</h1><span class="atlas-eyebrow">TERRAIN SURVEY</span></div>
+          <div class="atlas-header-tools"><nav class="atlas-tabs" aria-label="Map region"><button data-view="core" aria-pressed="true">Heartland</button><button data-view="world" aria-pressed="false">Full world</button></nav><button class="atlas-close" aria-label="Close map">×</button></div></header>
+        <div class="atlas-main">
+          <div class="atlas-chart"><canvas aria-label="World map. Scroll or pinch to zoom, drag to pan, select a marker to edit or terrain to create a waypoint."></canvas><span class="atlas-north">N<span>▲</span></span><div class="atlas-zoom"><button type="button" data-zoom="in" aria-label="Zoom in">+</button><span aria-live="off">100%</span><button type="button" data-zoom="out" aria-label="Zoom out">−</button></div></div><div class="atlas-readout"></div>
+        </div>
+        <aside class="atlas-sidebar"><div class="atlas-sidehead"><span class="atlas-eyebrow">YOUR JOURNEY</span><h2>Waypoints</h2><button class="atlas-primary" data-here>+ Mark my location</button></div>
           <form class="atlas-editor" hidden></form>
           <label class="atlas-search"><input type="search" placeholder="Find a waypoint…" aria-label="Find a waypoint"></label><div class="atlas-list"></div>
-          <div class="atlas-key"><span>◆ Saved waypoint</span><span>◇ Attuned totem · tap to travel</span><span>↑ Your position & heading</span></div>
-        </aside></div><footer class="atlas-footer"><span>Scroll or pinch to zoom · Drag to pan · Click terrain to place a pin</span><span><kbd>Esc</kbd> Close atlas</span></footer>
+          <div class="atlas-key"><span><i class="k-pin"></i>Waypoint</span><span><i class="k-totem"></i>Totem · tap to travel</span><span><i class="k-you"></i>You</span></div>
+        </aside>
+        <footer class="atlas-footer"><span>Scroll or pinch to zoom · Drag to pan · Click terrain to drop a pin</span><span><kbd>Esc</kbd>Close</span></footer>
       </section>`;
     this.canvas = this.el.querySelector('canvas')!;
     this.canvas.width = CANVAS_PX; this.canvas.height = CANVAS_PX;
@@ -227,6 +234,8 @@ export class WorldMap {
   show(): void { this.open = true; this.el.style.display = 'flex'; this.draw(); this.el.querySelector<HTMLButtonElement>('.atlas-close')!.focus(); }
   hide(): void {
     this.open = false;
+    cancelAnimationFrame(this.detailFrame);
+    this.detailFrame = 0;
     this.el.style.display = 'none';
     this.editor.hidden = true;
   }
@@ -311,126 +320,227 @@ export class WorldMap {
     if (cached) return cached;
     const { sample } = VIEWS[this.view];
     const half = this.half;
+    const cells = Math.ceil(VIEWS[this.view].span / sample);
     const c = document.createElement('canvas');
-    c.width = CANVAS_PX; c.height = CANVAS_PX;
+    // One terrain sample per source pixel keeps biome edges square at any zoom.
+    c.width = cells; c.height = cells;
     const g = c.getContext('2d')!;
-    const step = sample * this.scale;
-    for (let x = -half; x < half; x += sample) {
-      for (let z = -half; z < half; z += sample) {
+    for (let ix = 0; ix < cells; ix++) {
+      const x = -half + ix * sample;
+      for (let iz = 0; iz < cells; iz++) {
+        const z = -half + iz * sample;
         const h = this.terrain.height(x, z);
         const b = this.terrain.biomeWithWater(x, z, h);
         g.fillStyle = BIOME_COLOR[b] ?? '#444';
-        g.fillRect(this.cx(x), this.cy(z), step + 1, step + 1);
+        g.fillRect(ix, iz, 1, 1);
         const slope = h - this.terrain.height(x - sample, z - sample);
         g.fillStyle = slope > 0 ? `rgba(255,245,210,${Math.min(.24, slope * .018)})` : `rgba(5,20,30,${Math.min(.32, -slope * .022) + .08})`;
-        g.fillRect(this.cx(x), this.cy(z), step + 1, step + 1);
+        g.fillRect(ix, iz, 1, 1);
       }
     }
     this.bases.set(this.view, c);
     return c;
   }
 
+  /** Replace only the visible part of the overview with terrain sampled at the
+   * current zoom. Tiles are reused while panning, with a bounded cache. */
+  private drawDetail(): void {
+    const { span, sample } = VIEWS[this.view];
+    const step = Math.max(1, Math.ceil(span / (CANVAS_PX * this.zoom) * 1.4));
+    if (step >= sample) return;
+    const tileWorld = DETAIL_TILE_PX * step;
+    const left = Math.max(0, -this.panX / this.zoom / this.scale);
+    const top = Math.max(0, -this.panY / this.zoom / this.scale);
+    const right = Math.min(span, (CANVAS_PX - this.panX) / this.zoom / this.scale);
+    const bottom = Math.min(span, (CANVAS_PX - this.panY) / this.zoom / this.scale);
+    const firstX = Math.floor(left / tileWorld), lastX = Math.ceil(right / tileWorld);
+    const firstZ = Math.floor(top / tileWorld), lastZ = Math.ceil(bottom / tileWorld);
+    let made = 0, missing = false;
+    for (let iz = firstZ; iz < lastZ; iz++) for (let ix = firstX; ix < lastX; ix++) {
+      const key = `${this.view}:${step}:${ix}:${iz}`;
+      let tile = this.detailTiles.get(key);
+      if (!tile && made < 2) {
+        tile = this.renderDetailTile(ix, iz, step);
+        this.detailTiles.set(key, tile);
+        if (this.detailTiles.size > DETAIL_CACHE_LIMIT)
+          this.detailTiles.delete(this.detailTiles.keys().next().value!);
+        made++;
+      }
+      if (tile) {
+        // Keep recently visited tiles in the cache during nearby pans.
+        this.detailTiles.delete(key); this.detailTiles.set(key, tile);
+        this.ctx.drawImage(tile, ix * tileWorld * this.scale, iz * tileWorld * this.scale,
+          tileWorld * this.scale, tileWorld * this.scale);
+      } else missing = true;
+    }
+    if (missing && !this.detailFrame && this.open) {
+      this.detailFrame = requestAnimationFrame(() => { this.detailFrame = 0; if (this.open) this.draw(); });
+    }
+  }
+
+  private renderDetailTile(ix: number, iz: number, step: number): HTMLCanvasElement {
+    const tile = document.createElement('canvas');
+    tile.width = tile.height = DETAIL_TILE_PX;
+    const g = tile.getContext('2d')!;
+    const image = g.createImageData(DETAIL_TILE_PX, DETAIL_TILE_PX);
+    const originX = -this.half + ix * DETAIL_TILE_PX * step;
+    const originZ = -this.half + iz * DETAIL_TILE_PX * step;
+    for (let z = 0; z < DETAIL_TILE_PX; z++) for (let x = 0; x < DETAIL_TILE_PX; x++) {
+      const wx = originX + x * step, wz = originZ + z * step;
+      const h = this.terrain.height(wx, wz);
+      const biome = this.terrain.biomeWithWater(wx, wz, h);
+      const color = BIOME_COLOR[biome] ?? '#444444';
+      const slope = h - this.terrain.height(wx - step, wz - step);
+      const shade = slope > 0 ? Math.min(.24, slope * .018) : -Math.min(.32, -slope * .022) - .08;
+      const i = (z * DETAIL_TILE_PX + x) * 4;
+      const tint = shade > 0 ? [255, 245, 210] : [5, 20, 30];
+      const alpha = Math.abs(shade);
+      for (let c = 0; c < 3; c++)
+        image.data[i + c] = parseInt(color.slice(1 + c * 2, 3 + c * 2), 16) * (1 - alpha) + tint[c] * alpha;
+      image.data[i + 3] = 255;
+    }
+    g.putImageData(image, 0, 0);
+    return tile;
+  }
+
   private draw(): void {
     const ctx = this.ctx;
+    const t = performance.now() / 1000;
+    const k = 1 / this.zoom; // keep marker/label sizes constant while zooming
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, CANVAS_PX, CANVAS_PX);
     ctx.save();
     ctx.setTransform(this.zoom, 0, 0, this.zoom, this.panX, this.panY);
-    ctx.drawImage(this.renderBase(), 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(this.renderBase(), 0, 0, CANVAS_PX, CANVAS_PX);
+    this.drawDetail();
 
+    // Sea-glass wash + fine survey grid.
     ctx.save();
-    ctx.strokeStyle = 'rgba(220,242,236,.12)'; ctx.lineWidth = 1;
-    for (let n = 1; n < 10; n++) {
-      ctx.beginPath(); ctx.moveTo(n * 70, 0); ctx.lineTo(n * 70, 700); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(0, n * 70); ctx.lineTo(700, n * 70); ctx.stroke();
+    ctx.fillStyle = 'rgba(40,140,180,.10)'; ctx.fillRect(0, 0, CANVAS_PX, CANVAS_PX);
+    ctx.strokeStyle = 'rgba(170,235,255,.2)'; ctx.lineWidth = k;
+    for (let n = 1; n < 20; n++) {
+      ctx.globalAlpha = n % 5 === 0 ? 1 : .4;
+      ctx.beginPath(); ctx.moveTo(n * 35, 0); ctx.lineTo(n * 35, 700); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, n * 35); ctx.lineTo(700, n * 35); ctx.stroke();
     }
-    const shade = ctx.createRadialGradient(350, 350, 180, 350, 350, 500);
-    shade.addColorStop(0, 'transparent'); shade.addColorStop(1, 'rgba(4,16,23,.5)');
+    ctx.globalAlpha = 1;
+    const shade = ctx.createRadialGradient(350, 350, 200, 350, 350, 520);
+    shade.addColorStop(0, 'transparent'); shade.addColorStop(1, 'rgba(2,24,44,.55)');
     ctx.fillStyle = shade; ctx.fillRect(0, 0, 700, 700);
-    if (this.tracked) {
-      const p = this.mapCtx.player();
-      ctx.setLineDash([5, 7]); ctx.strokeStyle = this.rgba(this.tracked.color, .9); ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.moveTo(this.cx(p.x), this.cy(p.z)); ctx.lineTo(this.cx(this.tracked.x), this.cy(this.tracked.z)); ctx.stroke();
+    ctx.restore();
+
+    // The HEARTLAND boundary.
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,216,74,.85)'; ctx.lineWidth = 1.5 * k;
+    ctx.setLineDash([8 * k, 5 * k]);
+    ctx.strokeRect(this.cx(-CORE_HALF), this.cy(-CORE_HALF), CORE_BORDER * this.scale, CORE_BORDER * this.scale);
+    ctx.setLineDash([]);
+    if (this.view === 'world') {
+      ctx.font = `700 ${11 * k}px system-ui,sans-serif`; ctx.textAlign = 'center';
+      this.label('HEARTLAND', this.cx(0), this.cy(-CORE_HALF) - 6 * k, '#ffd84a', k);
+      this.label('WILDS', this.cx(0), this.cy(-WORLD_BORDER * 0.36), 'rgba(200,235,255,.85)', k);
     }
     ctx.restore();
 
-    // The HEARTLAND boundary: a gold square at ±CORE_HALF. In the full-world
-    // view, label the two societies so kids can read the geography at a glance.
-    ctx.strokeStyle = 'rgba(255,216,74,0.9)';
-    ctx.lineWidth = this.view === 'world' ? 1.5 : 2;
-    ctx.strokeRect(this.cx(-CORE_HALF), this.cy(-CORE_HALF),
-      CORE_BORDER * this.scale, CORE_BORDER * this.scale);
-    if (this.view === 'world') {
-      ctx.font = 'bold 13px monospace'; ctx.textAlign = 'center';
-      ctx.fillStyle = 'rgba(255,216,74,0.95)';
-      ctx.fillText('HEARTLAND', this.cx(0), this.cy(-CORE_HALF) - 5);
-      ctx.fillStyle = 'rgba(190,205,230,0.8)';
-      ctx.fillText('WILDS', this.cx(0), this.cy(-WORLD_BORDER * 0.36));
+    // Tracked route: glowing dotted line from you to the target.
+    const p = this.mapCtx.player();
+    if (this.tracked) {
+      ctx.save();
+      ctx.lineCap = 'round';
+      ctx.setLineDash([0.1, 7 * k]); ctx.lineDashOffset = -t * 14 * k;
+      ctx.strokeStyle = this.rgba(this.tracked.color, .95); ctx.lineWidth = 3 * k;
+      ctx.shadowColor = this.rgba(this.tracked.color, .9); ctx.shadowBlur = 6;
+      ctx.beginPath(); ctx.moveTo(this.cx(p.x), this.cy(p.z)); ctx.lineTo(this.cx(this.tracked.x), this.cy(this.tracked.z)); ctx.stroke();
+      ctx.restore();
     }
 
-    this.drawWaypoints();
+    this.drawWaypoints(k, t);
 
-    // Attuned Waypoint Totems (B4): gold ringed markers — CLICK to travel.
-    for (const t of this.totems) {
-      const px = this.cx(t.x), py = this.cy(t.z);
+    // Attuned Waypoint Totems (B4): gold halo rings — CLICK to travel.
+    for (const totem of this.totems) {
+      const px = this.cx(totem.x), py = this.cy(totem.z);
       ctx.save();
-      ctx.shadowColor = 'rgba(0,0,0,0.7)'; ctx.shadowBlur = 4;
-      ctx.strokeStyle = '#000'; ctx.lineWidth = 4;
-      ctx.beginPath(); ctx.arc(px, py, 9, 0, Math.PI * 2); ctx.stroke();
+      ctx.translate(px, py); ctx.scale(k, k);
+      ctx.shadowColor = 'rgba(255,210,80,.9)'; ctx.shadowBlur = 10;
+      ctx.strokeStyle = '#ffd84a'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(0, 0, 8, 0, Math.PI * 2); ctx.stroke();
       ctx.shadowBlur = 0;
-      ctx.strokeStyle = '#ffd84a'; ctx.lineWidth = 2.5;
-      ctx.beginPath(); ctx.arc(px, py, 9, 0, Math.PI * 2); ctx.stroke();
-      ctx.fillStyle = '#ffe27a';
-      ctx.beginPath();
-      ctx.moveTo(px, py - 5); ctx.lineTo(px + 5, py); ctx.lineTo(px, py + 5); ctx.lineTo(px - 5, py);
-      ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,216,74,.35)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(0, 0, 11 + Math.sin(t * 2) * 1.5, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = '#fff2b8';
+      ctx.beginPath(); ctx.moveTo(0, -4); ctx.lineTo(4, 0); ctx.lineTo(0, 4); ctx.lineTo(-4, 0); ctx.closePath(); ctx.fill();
       ctx.restore();
     }
 
     this.drawDynamicMarkers();
 
-    // Player marker: a big outlined heading arrow with a soft glow.
-    const p = this.mapCtx.player();
+    // You: a view cone + crisp arrow + sonar ping.
     const px = this.cx(p.x), py = this.cy(p.z);
     ctx.save();
-    ctx.translate(px, py);
+    ctx.translate(px, py); ctx.scale(k, k);
+    const ping = (t * .8) % 1;
+    ctx.strokeStyle = `rgba(160,240,255,${(1 - ping) * .7})`; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(0, 0, 6 + ping * 22, 0, Math.PI * 2); ctx.stroke();
     ctx.rotate(-p.yaw); // map +z is down; yaw 0 faces -z (up)
-    ctx.shadowColor = 'rgba(255,255,255,0.7)'; ctx.shadowBlur = 6;
-    ctx.fillStyle = '#fff'; ctx.strokeStyle = '#000'; ctx.lineWidth = 1.6;
-    ctx.beginPath();
-    ctx.moveTo(0, -10); ctx.lineTo(7, 8); ctx.lineTo(0, 4); ctx.lineTo(-7, 8);
-    ctx.closePath(); ctx.fill(); ctx.stroke();
+    const cone = ctx.createRadialGradient(0, 0, 0, 0, 0, 46);
+    cone.addColorStop(0, 'rgba(170,240,255,.45)'); cone.addColorStop(1, 'rgba(170,240,255,0)');
+    ctx.fillStyle = cone;
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, 46, -Math.PI / 2 - .55, -Math.PI / 2 + .55); ctx.closePath(); ctx.fill();
+    ctx.shadowColor = 'rgba(0,30,50,.8)'; ctx.shadowBlur = 5;
+    ctx.fillStyle = '#fff'; ctx.strokeStyle = '#0b3a52'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(0, -9); ctx.lineTo(6.5, 7); ctx.lineTo(0, 3.5); ctx.lineTo(-6.5, 7); ctx.closePath();
+    ctx.fill(); ctx.stroke();
     ctx.restore();
 
     ctx.restore();
     this.el.querySelector('.atlas-zoom span')!.textContent = `${Math.round(this.zoom * 100)}%`;
-    this.readout.textContent = `X ${Math.round(p.x)} / Z ${Math.round(p.z)}   ·   ${this.view === 'core' ? 'HEARTLAND' : 'FULL WORLD'}   ·   Grid ${Math.round(VIEWS[this.view].span / 10)} m${this.tracked ? `   ·   To ${this.tracked.name}: ${Math.round(Math.hypot(this.tracked.x - p.x, this.tracked.z - p.z))} m` : ''}`;
+    this.readout.textContent = `X ${Math.round(p.x)}  Z ${Math.round(p.z)}   ·   ${this.view === 'core' ? 'Heartland' : 'Full world'}${this.tracked ? `   ·   ${this.tracked.name} ${this.formatDist(Math.hypot(this.tracked.x - p.x, this.tracked.z - p.z))}` : ''}`;
     this.drawLegend();
   }
 
-  /** The player's saved waypoints. */
-  private drawWaypoints(): void {
+  /** Outlined text that reads over any terrain colour. */
+  private label(text: string, x: number, y: number, fill: string, k: number): void {
+    const ctx = this.ctx;
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = 'rgba(2,20,34,.85)'; ctx.lineWidth = 3.5 * k;
+    ctx.strokeText(text, x, y);
+    ctx.fillStyle = fill; ctx.fillText(text, x, y);
+  }
+
+  private formatDist(d: number): string {
+    return d < 1000 ? `${Math.round(d)} m` : `${(d / 1000).toFixed(1)} km`;
+  }
+
+  /** The player's saved waypoints: teardrop pins with a name tag. */
+  private drawWaypoints(k: number, t: number): void {
     const ctx = this.ctx;
     for (const w of this.waypoints) {
       const px = this.cx(w.x), py = this.cy(w.z);
       ctx.save();
+      ctx.translate(px, py); ctx.scale(k, k);
       ctx.globalAlpha = w.show ? 1 : .45;
       if (w === this.selected || w === this.tracked) {
-        ctx.fillStyle = this.rgba(w.color, .18); ctx.strokeStyle = this.rgba(w.color, .85); ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.arc(px, py, 17, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        const r = 10 + ((t * 1.2) % 1) * 12;
+        ctx.strokeStyle = this.rgba(w.color, .9 - ((t * 1.2) % 1) * .9); ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.ellipse(0, 0, r, r * .55, 0, 0, Math.PI * 2); ctx.stroke();
       }
-      ctx.shadowColor = 'rgba(0,0,0,0.7)'; ctx.shadowBlur = 3;
-      ctx.fillStyle = this.rgba(w.color, 1);
-      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.6;
+      // Ground shadow, then the pin: a circle head tapering to the exact spot.
+      ctx.fillStyle = 'rgba(0,15,30,.45)';
+      ctx.beginPath(); ctx.ellipse(0, 0, 5, 2.2, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowColor = this.rgba(w.color, .8); ctx.shadowBlur = 8;
+      ctx.fillStyle = this.rgba(w.color, 1); ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.6;
       ctx.beginPath();
-      ctx.moveTo(px, py - 8); ctx.lineTo(px + 8, py); ctx.lineTo(px, py + 8); ctx.lineTo(px - 8, py);
+      ctx.moveTo(0, 0);
+      ctx.bezierCurveTo(-3, -6, -8, -9, -8, -15);
+      ctx.arc(0, -15, 8, Math.PI, 0);
+      ctx.bezierCurveTo(8, -9, 3, -6, 0, 0);
       ctx.closePath(); ctx.fill(); ctx.stroke();
       ctx.shadowBlur = 0;
-      ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-      ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 3;
-      ctx.strokeText(w.name, px, py + 10);
       ctx.fillStyle = '#fff';
-      ctx.fillText(w.name, px, py + 10);
+      ctx.beginPath(); ctx.arc(0, -15, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.font = '600 10.5px system-ui,sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      this.label(w.name, 0, 5, '#fff', 1);
       ctx.restore();
     }
   }
@@ -438,23 +548,18 @@ export class WorldMap {
   /** Live war flags, pushed each frame by the game. */
   private drawDynamicMarkers(): void {
     const ctx = this.ctx;
+    // Flags grow as the player zooms in, without filling the whole chart.
+    const markerScale = Math.min(2.4, Math.sqrt(this.zoom)) / this.zoom;
     for (const m of this.dynamicMarkers) {
-      const fx = this.cx(m.x), fy = this.cy(m.z);
       ctx.save();
-      ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 4;
-      ctx.strokeStyle = '#000'; ctx.lineWidth = 2.5;
-      ctx.beginPath(); ctx.moveTo(fx, fy + 8); ctx.lineTo(fx, fy - 14); ctx.stroke();
+      ctx.translate(this.cx(m.x), this.cy(m.z)); ctx.scale(markerScale, markerScale);
+      ctx.strokeStyle = '#092635'; ctx.lineWidth = 3; ctx.lineCap = 'square';
+      ctx.beginPath(); ctx.moveTo(0, 2); ctx.lineTo(0, -21); ctx.stroke();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
       ctx.fillStyle = this.rgba(m.color, 1);
-      ctx.beginPath();
-      ctx.moveTo(fx, fy - 14); ctx.lineTo(fx + 14, fy - 9); ctx.lineTo(fx, fy - 4);
-      ctx.closePath(); ctx.fill(); ctx.stroke();
-      ctx.shadowBlur = 0;
-      // Name under the pole, outlined so it survives any terrain colour.
-      ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-      ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 3;
-      ctx.strokeText(m.name, fx, fy + 10);
-      ctx.fillStyle = '#fff';
-      ctx.fillText(m.name, fx, fy + 10);
+      ctx.strokeStyle = '#092635'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(1, -21); ctx.lineTo(17, -21); ctx.lineTo(17, -10);
+      ctx.lineTo(10, -12); ctx.lineTo(1, -10); ctx.closePath(); ctx.fill(); ctx.stroke();
       ctx.restore();
     }
   }
@@ -465,11 +570,11 @@ export class WorldMap {
       if (!w.name.toLowerCase().includes(this.search)) return '';
       const dist = Math.round(Math.hypot(w.x - p.x, w.z - p.z));
       return `<article class="atlas-card ${w === this.tracked ? 'is-tracked' : ''}" style="--pin:${this.rgba(w.color, 1)}">
-        <button class="atlas-card-name" data-edit="${i}"><span class="atlas-pin">◆</span><span><strong>${this.escape(w.name)}</strong><small>X ${w.x} · Z ${w.z}${w.y !== undefined ? ` · Y ${w.y}` : ''}</small></span><b>${dist < 1000 ? `${dist} m` : `${(dist / 1000).toFixed(1)} km`}</b></button>
+        <button class="atlas-card-name" data-edit="${i}"><span class="atlas-pin"></span><span><strong>${this.escape(w.name)}</strong><small>X ${w.x} · Z ${w.z}${w.y !== undefined ? ` · Y ${w.y}` : ''}</small></span><b>${this.formatDist(dist)}</b></button>
         <div class="atlas-card-actions"><button data-track="${i}" aria-pressed="${w === this.tracked}">${w === this.tracked ? '◉ Tracking' : '◎ Track'}</button><button data-eye="${i}" aria-pressed="${w.show}">${w.show ? 'Visible' : 'Hidden'}</button><button data-del="${i}" aria-label="Delete ${this.escape(w.name)}">${iconSvg('close')}</button></div></article>`;
     }).join('');
     const flags = this.dynamicMarkers.map(m => `<div class="atlas-flag"><span style="color:${this.rgba(m.color, 1)}">⚑</span> ${this.escape(m.name)}<small>${Math.round(Math.hypot(m.x - p.x, m.z - p.z))} m</small></div>`).join('');
-    const markup = `<div class="atlas-list-label">SAVED LOCATIONS <span>${this.waypoints.length}</span></div>${cards || `<div class="atlas-empty"><span>◇</span><strong>${this.search ? 'No matching waypoints' : 'Every journey starts somewhere'}</strong><p>${this.search ? 'Try another name.' : 'Click the map to save a place worth returning to.'}</p></div>`}${flags ? `<div class="atlas-list-label">LIVE FLAGS</div>${flags}` : ''}`;
+    const markup = `<div class="atlas-list-label">SAVED LOCATIONS <span>${this.waypoints.length}</span></div>${cards || `<div class="atlas-empty"><span></span><strong>${this.search ? 'No matching waypoints' : 'Every journey starts somewhere'}</strong><p>${this.search ? 'Try another name.' : 'Click the map to save a place worth returning to.'}</p></div>`}${flags ? `<div class="atlas-list-label">LIVE FLAGS</div>${flags}` : ''}`;
     if (markup !== this.legendMarkup) {
       // Keep keyboard focus when live distance updates replace the cards.
       const focused = document.activeElement as HTMLElement | null;
@@ -570,21 +675,21 @@ export class WorldMap {
     while (this.markerGroup.children.length > shown.length) {
       const m = this.markerGroup.children[this.markerGroup.children.length - 1] as THREE.Mesh;
       this.markerGroup.remove(m);
+      m.geometry.dispose();
       (m.material as THREE.Material).dispose();
     }
     while (this.markerGroup.children.length < shown.length) {
-      this.markerGroup.add(new THREE.Mesh(this.markerGeo,
-        new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.35, depthWrite: false })));
+      this.markerGroup.add(createBeam(0xffffff, 70, 0.3, 0.45).mesh);
     }
     shown.forEach((w, i) => {
       const m = this.markerGroup.children[i] as THREE.Mesh;
       const gy = w.y ?? this.terrain.height(Math.round(w.x), Math.round(w.z));
-      m.position.set(w.x + 0.5, gy + 15, w.z + 0.5);
-      (m.material as THREE.MeshBasicMaterial).color.setHex(w.color);
+      m.position.set(w.x + 0.5, gy, w.z + 0.5);
+      (m.material as THREE.ShaderMaterial).uniforms.uColor.value.setHex(w.color);
     });
   }
 
-  /** Project shown waypoints to floating on-screen badges (square + name +
+  /** Project shown waypoints to floating on-screen badges (pin + name +
    *  distance), MC-waypoint-mod style: clamped to the screen edge so a marker
    *  in any direction stays visible, pointing where to walk. Call each rendered
    *  frame while playing; pass the canvas size. */
@@ -594,17 +699,16 @@ export class WorldMap {
     const shown = this.open ? []
       : [...this.waypoints.filter((w) => w.show), ...this.dynamicMarkers.filter((m) =>
         m.beaconRange === undefined || Math.hypot(m.x - p.x, m.z - p.z) <= m.beaconRange)];
+    const time = performance.now() / 1000;
+    for (const m of this.markerGroup.children)
+      ((m as THREE.Mesh).material as THREE.ShaderMaterial).uniforms.uTime.value = time;
     // Grow/shrink the pool of badge elements to match.
     while (this.beaconEls.length > shown.length) {
       this.beaconLayer.removeChild(this.beaconEls.pop()!);
     }
     while (this.beaconEls.length < shown.length) {
       const el = document.createElement('div');
-      el.className = 'atlas-beacon';
-      el.style.cssText =
-        'position:absolute;transform:translate(-50%,-50%);text-align:center;' +
-        'text-shadow:0 1px 2px #000;font-size:11px;color:#fff;white-space:nowrap;' +
-        'line-height:1.3;will-change:left,top;';
+      el.innerHTML = '<div class="wp-label"><b></b><span></span></div><div class="wp-arrow"></div><div class="wp-pin"></div>';
       this.beaconLayer.appendChild(el);
       this.beaconEls.push(el);
     }
@@ -613,7 +717,7 @@ export class WorldMap {
     const cam = this.camera;
     cam.getWorldPosition(this._camPos);
     cam.getWorldDirection(this._camFwd);
-    const margin = Math.min(100, width / 4);
+    const margin = Math.min(48, width / 8);
 
     shown.forEach((w, i) => {
       const el = this.beaconEls[i];
@@ -625,32 +729,41 @@ export class WorldMap {
         (this._v.y - this._camPos.y) * this._camFwd.y +
         (this._v.z - this._camPos.z) * this._camFwd.z > 0;
       const ndc = this._v.project(cam); // mutates _v into NDC space
-      let sx: number, sy: number;
-      if (front) {
-        sx = (ndc.x * 0.5 + 0.5) * width;
-        sy = (-ndc.y * 0.5 + 0.5) * height;
-      } else {
-        // Behind the camera: NDC is mirrored — push to the opposite edge so the
-        // badge still indicates the bearing.
-        sx = ndc.x < 0 ? width - margin : margin;
-        sy = height - margin;
-      }
+      let sx = (ndc.x * 0.5 + 0.5) * width;
+      let sy = (-ndc.y * 0.5 + 0.5) * height;
+      // Behind the camera NDC is mirrored — flip it so the arrow points the
+      // way you need to turn.
+      if (!front) { sx = width - sx; sy = height - sy; }
       if (!Number.isFinite(sx)) sx = width / 2;
       if (!Number.isFinite(sy)) sy = height / 2;
-      sx = Math.max(margin, Math.min(width - margin, sx));
-      sy = Math.max(margin, Math.min(height - margin, sy));
-      const dist = Math.round(Math.hypot(w.x - p.x, w.z - p.z));
-      const col = this.rgba(w.color, 1);
-      const alt = wy !== undefined ? ` · Y${wy}` : '';
+      let edge = !front || sx < margin || sx > width - margin || sy < margin || sy > height - margin;
+      let angle = 0;
+      if (edge) {
+        // Push out from the screen centre onto the margin rectangle.
+        let dx = sx - width / 2, dy = sy - height / 2;
+        if (!front && Math.hypot(dx, dy) < 1) { dx = 0; dy = 1; }
+        const f = Math.min((width / 2 - margin) / Math.max(Math.abs(dx), 1e-3),
+          (height / 2 - margin) / Math.max(Math.abs(dy), 1e-3));
+        if (!front || f < 1) { sx = width / 2 + dx * f; sy = height / 2 + dy * f; }
+        else edge = false;
+        angle = Math.atan2(dy, dx) * 180 / Math.PI + 90;
+      }
+      const dist = Math.hypot(w.x - p.x, w.z - p.z);
+      const tracked = w === this.tracked;
+      el.className = `wp-badge${edge ? ' is-edge' : ''}${tracked ? ' is-tracked' : ''}${dist > 600 ? ' is-far' : ''}`;
+      el.style.setProperty('--pin', this.rgba(w.color, 1));
       el.style.display = '';
       el.style.left = `${sx}px`;
       el.style.top = `${sy}px`;
-      el.style.opacity = dist > 600 ? '0.6' : '0.95';
-      const badge =
-        `<div style="width:9px;height:9px;margin:0 auto 2px;background:${col};` +
-        `border:1px solid #000;transform:rotate(45deg)"></div>` +
-        `${w === this.tracked ? '◎ ' : ''}${this.escape(w.name)}<br><span style="color:#cfe0ff">${dist}m${alt}</span>`;
-      if (el.dataset.badge !== badge) { el.innerHTML = badge; el.dataset.badge = badge; }
+      // Nearby markers stay quiet so they don't clutter the view.
+      el.style.opacity = tracked ? '1' : dist < 8 ? '0.35' : dist > 600 ? '0.7' : '0.92';
+      const arrow = el.children[1] as HTMLElement;
+      arrow.style.transform = edge ? `rotate(${angle}deg)` : '';
+      const name = `${tracked ? '◎ ' : ''}${w.name}`;
+      const meta = `${this.formatDist(dist)}${wy !== undefined ? ` · Y${wy}` : ''}`;
+      const label = el.firstElementChild as HTMLElement;
+      if (label.firstElementChild!.textContent !== name) label.firstElementChild!.textContent = name;
+      if (label.lastElementChild!.textContent !== meta) label.lastElementChild!.textContent = meta;
     });
   }
 

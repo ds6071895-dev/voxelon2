@@ -139,6 +139,8 @@ const GRADE_SHADER = {
         color.r = texture2D(tDiffuse, vUv - fromCentre * ca).r;
         color.b = texture2D(tDiffuse, vUv + fromCentre * ca).b;
       }
+      // A NaN would turn black through ACES; never let one reach the screen.
+      if (any(isnan(color)) || any(isinf(color))) color = vec3(0.0);
       if (uRayStrength > 0.002) color += godRays();
 
       vec3 g = aces(color * uExposure);
@@ -191,6 +193,32 @@ const TIER_RAY_STEPS = [28, 20, 16] as const;
  *  biggest saving in the stack. Only the lite tier halves it. */
 class LeanBloomPass extends UnrealBloomPass {
   scale = 1;
+
+  constructor(resolution: THREE.Vector2, strength: number, radius: number, threshold: number) {
+    super(resolution, strength, radius, threshold);
+    // One NaN/Inf pixel in the scene (a degenerate normal, a half-float
+    // overflow) would otherwise be blurred down the whole mip chain and
+    // added back as a big flickering black block. Drop it at the source.
+    const hp = this.materialHighPassFilter;
+    hp.fragmentShader = /* glsl */`
+      uniform sampler2D tDiffuse;
+      uniform vec3 defaultColor;
+      uniform float defaultOpacity;
+      uniform float luminosityThreshold;
+      uniform float smoothWidth;
+      varying vec2 vUv;
+      void main() {
+        vec4 texel = texture2D(tDiffuse, vUv);
+        if (any(isnan(texel)) || any(isinf(texel))) texel = vec4(0.0);
+        texel.rgb = min(texel.rgb, vec3(512.0));
+        float v = dot(texel.rgb, vec3(0.299, 0.587, 0.114));
+        float alpha = smoothstep(luminosityThreshold, luminosityThreshold + smoothWidth, v);
+        gl_FragColor = mix(vec4(defaultColor, defaultOpacity), texel, alpha);
+      }
+    `;
+    hp.needsUpdate = true;
+  }
+
   override setSize(width: number, height: number): void {
     super.setSize(Math.max(2, Math.round(width * this.scale)), Math.max(2, Math.round(height * this.scale)));
   }

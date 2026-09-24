@@ -159,7 +159,11 @@ vec3 voxViewDir() {
 /** The face normal, from the screen-space derivative of the ORIGIN-RELATIVE
  *  position (see shadows.ts: an absolute one is quantised in the arenas). */
 vec3 voxFaceNormal() {
-  vec3 n = normalize(cross(dFdx(vRelPos), dFdy(vRelPos)));
+  // At a grazing edge or on a sliver the derivatives can be parallel; a zero
+  // cross product would normalize to NaN and poison the whole lighting chain.
+  vec3 c = cross(dFdx(vRelPos), dFdy(vRelPos));
+  float l2 = dot(c, c);
+  vec3 n = l2 > 1e-30 ? c * inversesqrt(l2) : vec3(0.0, 1.0, 0.0);
   return dot(n, (cameraPosition - uShadeOrigin) - vRelPos) < 0.0 ? -n : n;
 }
 
