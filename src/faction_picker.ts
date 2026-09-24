@@ -2,8 +2,6 @@
 //
 // Both sides are laid out with the facts in front of you:
 //
-//   · the citizens online on that side right now, as live 3D characters who
-//     pose when you point at them (the same board the Duels ladder uses)
 //   · how many have sworn to it, and who they are
 //
 // You pick a card, then confirm with the swear button. The result is
@@ -13,13 +11,10 @@
 // nothing added to index.html. Usernames are written with textContent and never
 // reach innerHTML.
 
-import { BUST_POSES, type BustEntry } from './avatar_bust';
-import { type Cosmetics, sanitizeCosmetics } from './character';
 import { type IconName, iconSvg } from './emoji_icons';
 import type { FactionPublic } from './net/protocol';
-import { skinSeed } from './net/protocol';
 import { FACTIONS, factionColor, factionName } from './teams';
-import { bustStage, injectGovStyle } from './gov_ui';
+import { injectGovStyle } from './gov_ui';
 
 const CSS = `
 /* DAYLIGHT. The pledge is the last thing a new player does before the world
@@ -221,64 +216,6 @@ const CSS = `
 .vx-pledge-strength[data-tone="big"] { color: #9a5a00; background: #fff4dc; }
 .vx-pledge-strength[data-tone="small"] { color: #137046; background: #e3f8ec; }
 
-/* The plinth. The 3D busts are drawn OVER this box by the shared renderer, so
-   it must keep its size whether or not a bust lands in it. */
-.vx-pledge-stage {
-  position: relative; display: flex; align-items: flex-end; justify-content: center;
-  flex: none; height: clamp(120px, 18vh, 200px); margin: 16px 18px 0; border-radius: 18px;
-  background:
-    radial-gradient(70% 90% at 50% 10%, #fff, transparent 70%),
-    linear-gradient(180deg, var(--side-soft), color-mix(in srgb, var(--side) 24%, #fff));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--side) 18%, #fff);
-}
-.vx-pledge-slot { position: absolute; top: 12px; bottom: 32px; }
-/* THE FALLBACK PORTRAIT. A browser hands out a limited number of WebGL contexts
-   and the world already spends one, so "no context to spare" is a state a real
-   player can land in — and it used to present as a plinth that simply stayed
-   empty. When the bust board cannot draw, this monogram stands there instead. */
-.vx-pledge-mug {
-  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -58%);
-  display: flex; align-items: center; justify-content: center;
-  width: 86px; height: 86px; border-radius: 50%;
-  font-weight: 800; font-size: 34px; line-height: 1; letter-spacing: -1px; color: #fff;
-  background: linear-gradient(160deg, color-mix(in srgb, var(--side) 62%, #fff), var(--side));
-  box-shadow: 0 14px 30px -8px color-mix(in srgb, var(--side) 60%, transparent),
-    inset 0 2px 0 rgba(255, 255, 255, .4), 0 0 0 5px #fff;
-}
-.vx-pledge-plinth {
-  width: 74%; height: 14px; margin-bottom: 12px; border-radius: 50%;
-  background: radial-gradient(closest-side, color-mix(in srgb, var(--side) 45%, rgba(20, 50, 80, .3)), transparent);
-}
-/* THE NAMEPLATE. Each citizen's name, under the slot they stand in. It sits
-   UNDER the bust slot, never behind it — the bust canvas paints over anything
-   inside its own rectangle, so text that overlaps it is text with a character
-   drawn through it. */
-.vx-pledge-stage .vx-pledge-stage-name {
-  position: absolute; bottom: 6px;
-  font-weight: 800; font-size: 12.5px; line-height: 1.25; letter-spacing: .2px; text-align: center; color: var(--side-ink);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-
-/* NOBODY ONLINE. A side with no citizens online stands nobody on its plinth,
-   and says so across the middle of it. */
-.vx-pledge-empty {
-  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-  display: flex; align-items: center; gap: 8px; padding: 9px 15px; border-radius: 999px; white-space: nowrap;
-  font-weight: 800; font-size: 10.5px; line-height: 1; letter-spacing: 1.4px; text-transform: uppercase;
-  color: var(--side-ink); background: #fff;
-  box-shadow: 0 10px 24px -12px color-mix(in srgb, var(--side) 70%, #102030);
-}
-.vx-pledge-empty svg { width: 14px; height: 14px; }
-.vx-pledge-open-note {
-  position: relative; padding: 12px 14px 12px 46px; border-radius: 14px;
-  font-size: 12.5px; font-weight: 500; line-height: 1.5; color: #3a4b56;
-  background: linear-gradient(100deg, #fff8e6, #fffdf6); border: 1px solid #f6e3b4;
-}
-.vx-pledge-open-note::before {
-  content: '★'; position: absolute; left: 13px; top: 50%; width: 24px; height: 24px; margin-top: -12px;
-  display: grid; place-items: center; border-radius: 50%; background: #f5b82e; color: #fff; font-size: 12px;
-}
-
 /* THE PICK. A wash of the side's colour over the chosen card. */
 .vx-pledge-card::after {
   content: ''; position: absolute; inset: 0; pointer-events: none; opacity: 0;
@@ -458,7 +395,6 @@ const CSS = `
   .vx-pledge-cards, .vx-pledge-cards.duo { grid-template-columns: 1fr; height: auto; }
   .vx-pledge-vs { justify-self: center; width: 52px; height: 52px; font-size: 17px; }
   .vx-pledge-vs::after { display: none; }
-  .vx-pledge-stage { height: 180px; }
   .vx-pledge-body { overflow-y: visible; }
   .vx-pledge-float { display: none; }
 }
@@ -526,12 +462,6 @@ const PLEDGE_RETRY_MS = 8000;
 
 type Phase = 'idle' | 'landed';
 
-/** One person drawn on a card's stage. */
-interface Face {
-  username: string;
-  cosmetics: Cosmetics;
-}
-
 /**
  * ONE CARD PER FACTION, ALWAYS.
  *
@@ -552,8 +482,6 @@ function dossiersFor(list: readonly FactionPublic[] | undefined): FactionPublic[
       faction: f.id,
       members: Array.isArray(d?.members) ? d!.members.filter((m) => typeof m === 'string') : [],
       memberCount: num(d?.memberCount),
-      faces: Array.isArray(d?.faces)
-        ? d!.faces.filter((x) => x && typeof x.username === 'string') : [],
     };
   });
 }
@@ -581,8 +509,6 @@ export class FactionPicker {
   private timer: number | undefined;
   /** This render's cards by faction id, to mark the pick without a rebuild. */
   private cardEls = new Map<number, HTMLElement>();
-  /** This render's busts, so the losing side's can be cleared on landing. */
-  private busts: BustEntry[] = [];
 
   onPledge?: (faction: number) => void;
   /** A side was picked (not yet sworn); `progress` is kept for the UI tick sound. */
@@ -712,7 +638,6 @@ export class FactionPicker {
       this.surface.dataset.open = '1';
       this.onOpen?.();
     }
-    bustStage.attach(this.viewport);
     this.render();
     this.surface.focus();
   }
@@ -729,7 +654,6 @@ export class FactionPicker {
     this.reset();
     this.isOpen = false;
     delete this.surface.dataset.open;
-    bustStage.release(this.viewport);
     this.onClose?.();
   }
 
@@ -796,9 +720,6 @@ export class FactionPicker {
     for (const [id, card] of this.cardEls) {
       card.dataset.fate = id === winner ? 'won' : 'lost';
     }
-    // Only the winning side keeps its figures standing.
-    const keep = `pledge:${winner}:`;
-    bustStage.setRoster(this.busts.filter((b) => b.key.startsWith(keep)));
     this.showReveal(winner);
     this.onLand?.(winner);
 
@@ -846,10 +767,8 @@ export class FactionPicker {
   private render(): void {
     const data = this.data;
     if (!data) return;
-    const busts: BustEntry[] = [];
     this.cards.setAttribute('role', 'radiogroup');
     this.cards.setAttribute('aria-label', 'Factions');
-    this.busts = busts;
     this.cardEls.clear();
     this.cards.replaceChildren();
 
@@ -862,10 +781,7 @@ export class FactionPicker {
     if (dossiers[1]) this.surface.style.setProperty('--side-b', hex(dossiers[1].faction));
     this.cards.classList.toggle('duo', dossiers.length === 2);
     const total = dossiers.reduce((n, f) => n + f.memberCount, 0);
-    // Only tell the player to point at somebody when somebody is standing there.
-    this.footText.textContent = dossiers.some((f) => f.faces?.length)
-      ? 'Point at a citizen to get their attention.'
-      : 'Either side is yours to join.';
+    this.footText.textContent = 'Either side is yours to join.';
 
     dossiers.forEach((info, index) => {
       const card = document.createElement('div');
@@ -913,67 +829,9 @@ export class FactionPicker {
       }
       crest.append(makeEmblem(), text, strength);
 
-      // --- the plinth --------------------------------------------------------
-      // The citizens online on this side right now stand on it, named. With
-      // nobody online the plinth stays empty and says so.
-      const stage = document.createElement('div');
-      stage.className = 'vx-pledge-stage';
-      const plinth = document.createElement('div');
-      plinth.className = 'vx-pledge-plinth';
-      stage.appendChild(plinth);
-
-      const faces = info.faces ?? [];
-      if (faces.length) {
-        const width = 100 / faces.length;
-        faces.forEach((citizen, i) => {
-          const slot = document.createElement('div');
-          slot.className = 'vx-pledge-slot';
-          slot.style.left = `${i * width}%`;
-          slot.style.width = `${width}%`;
-          stage.insertBefore(slot, plinth);
-          const key = `pledge:${info.faction}:${citizen.username.toLowerCase()}`;
-          this.standUp(busts, {
-            key, slot,
-            face: {
-              username: citizen.username,
-              cosmetics: sanitizeCosmetics(citizen.cosmetics, skinSeed(citizen.username)),
-            },
-            // Neighbouring figures get different salutes so the screen never
-            // plays the same animation twice side by side.
-            pose: BUST_POSES[(index + i) % BUST_POSES.length],
-          });
-          // The name belongs to the figure, so it goes on the plinth under its
-          // slot rather than inside it, where the canvas would paint over it.
-          const nameplate = document.createElement('div');
-          nameplate.className = 'vx-pledge-stage-name';
-          nameplate.style.left = `${i * width}%`;
-          nameplate.style.width = `${width}%`;
-          nameplate.textContent = citizen.username;
-          stage.appendChild(nameplate);
-          slot.addEventListener('mouseenter', () => bustStage.setHover(key));
-          slot.addEventListener('mouseleave', () => bustStage.setHover(null));
-        });
-      } else {
-        const empty = document.createElement('div');
-        empty.className = 'vx-pledge-empty';
-        const glyph = document.createElement('span');
-        glyph.innerHTML = iconSvg('flag');
-        const label = document.createElement('span');
-        label.textContent = 'Nobody online';
-        empty.append(glyph, label);
-        stage.appendChild(empty);
-      }
-
       // --- body --------------------------------------------------------------
       const body = document.createElement('div');
       body.className = 'vx-pledge-body';
-
-      if (!info.memberCount) {
-        const note = document.createElement('div');
-        note.className = 'vx-pledge-open-note';
-        note.textContent = 'Nobody has pledged here yet. Join and you are its first citizen.';
-        body.appendChild(note);
-      }
 
       const stats = document.createElement('div');
       stats.className = 'vx-pledge-stats';
@@ -1039,7 +897,7 @@ export class FactionPicker {
       pick.type = 'button';
       pick.className = 'vx-pledge-pick';
       pick.tabIndex = -1; // the card itself is the focus stop
-      card.append(crest, stage, body, pick);
+      card.append(crest, body, pick);
       if (index === 1 && dossiers.length === 2) {
         const vs = document.createElement('div');
         vs.className = 'vx-pledge-vs';
@@ -1050,32 +908,5 @@ export class FactionPicker {
       this.cards.appendChild(card);
     });
     this.refreshPick();
-
-    // Roster last: the slots have to be in the DOM before the board measures them.
-    bustStage.setRoster(busts);
-  }
-
-  /**
-   * Put one person on a plinth: a live bust when the board can draw, and the
-   * monogram medallion when it cannot (a browser hands out a limited number of
-   * WebGL contexts and the world already spends one, so "no context to spare"
-   * is a state a real player lands in — it must never present as an empty box).
-   */
-  private standUp(
-    busts: BustEntry[],
-    entry: { key: string; slot: HTMLElement; face: Face; pose: BustEntry['pose'] }
-  ): void {
-    if (!bustStage.available) {
-      const mug = document.createElement('div');
-      mug.className = 'vx-pledge-mug';
-      const ch = [...entry.face.username].find((c) => /\S/.test(c)) ?? '?';
-      mug.textContent = ch.toUpperCase();
-      entry.slot.appendChild(mug);
-      return;
-    }
-    busts.push({
-      key: entry.key, slot: entry.slot, pose: entry.pose,
-      cosmetics: entry.face.cosmetics,
-    });
   }
 }

@@ -53,7 +53,8 @@ export interface ShadowUniforms {
   /** World -> shadow texture space, with a translation by `origin` already
    *  folded in, so the shader feeds it ORIGIN-RELATIVE positions. See `origin`. */
   matrix: { value: THREE.Matrix4 };
-  /** x: on (0/1), y: one texel in UV, z: shadow strength 0..1 (horizon fade). */
+  /** x: PCF tap count (0 = off; 4, 8 or 16), y: one texel in UV, z: shadow
+   *  strength 0..1 (horizon fade). */
   params: { value: THREE.Vector3 };
   /**
    * THE SHADING ORIGIN, and the reason arenas stopped fizzing.
@@ -106,6 +107,12 @@ export class SunShadow {
   private readonly lightX = new THREE.Vector3();
   private readonly lightY = new THREE.Vector3();
   private enabled = false;
+  /** 0 full, 1 balanced, 2 lite (see ShaderBudget in postfx.ts). */
+  private tier = 0;
+  /** Seconds since the map was last drawn, and what it was drawn for. */
+  private sinceDraw = Infinity;
+  private readonly drawnCentre = new THREE.Vector3(Infinity, 0, 0);
+  private readonly drawnDir = new THREE.Vector3();
 
   constructor(
     renderer: THREE.WebGLRenderer, scene: THREE.Scene, atlas: THREE.Texture,
@@ -126,8 +133,17 @@ export class SunShadow {
     if (!on) this.out.params.value.x = 0;
   }
 
+  /** Shadow filter per tier, read by the chunk shader from params.x: 16 is a
+   *  wide four-tap bilinear PCF, 8 the same kernel tighter, 4 a single
+   *  bilinear tap (see voxSunVisibility in world.ts). */
+  setTier(tier: number): void {
+    this.tier = Math.max(0, Math.min(2, Math.round(tier)));
+    this.sinceDraw = Infinity;
+  }
+
   private build(): void {
     if (this.target) return;
+    this.sinceDraw = Infinity;
     this.target = new THREE.WebGLRenderTarget(MAP_SIZE, MAP_SIZE, {
       // Nearest, because the packed bytes of one texel are a single number:
       // filtering between two of them averages the byte lanes and produces a
@@ -171,9 +187,18 @@ export class SunShadow {
    * @param moon    True while the moon is the caster. Moonlight is a fraction
    *                of a sunbeam and its shadows have to read like it — present,
    *                soft, and nowhere near as deep as noon's.
+   * @param dt      Frame time. Only TERRAIN casts into this map (nothing else
+   *                is on SHADOW_CASTER_LAYER), and terrain barely changes from
+   *                one frame to the next — so the map is only REDRAWN when the
+   *                player has moved a few blocks, the sun has visibly turned,
+   *                or a short refresh interval has passed (so a mined or placed
+   *                block shows up in the shadows promptly). Every frame in
+   *                between just re-aims the old map at the new shading origin,
+   *                which is a matrix multiply. That removes most of a whole
+   *                scene render from nearly every frame.
    */
   update(
-    sunDir: THREE.Vector3, focus: THREE.Vector3, sunUp: number, moon = false
+    sunDir: THREE.Vector3, focus: THREE.Vector3, sunUp: number, moon = false, dt = 1 / 60
   ): void {
     // The shading origin is NOT gated on the pass being enabled: every preset's
     // chunk shader measures from it, shadows or no shadows. See ShadowUniforms.
@@ -195,14 +220,32 @@ export class SunShadow {
     const strength = (moon ? 0.9 : 1.0)
       * THREE.MathUtils.smoothstep(sunUp, 0.03, 0.22);
     this.out.params.value.z = strength;
-    this.out.params.value.x = strength > 0.004 ? 1 : 0;
+    this.out.params.value.x = strength > 0.004 ? [16, 8, 4][this.tier] : 0;
     // Both bodies at the horizon, or the moon too low: nothing worth drawing,
     // and the shader reads uShadowParams.x and skips the lookup entirely.
-    if (strength <= 0.004) return;
+    if (strength <= 0.004) { this.sinceDraw = Infinity; return; }
+
+    const cam = this.camera;
+    this.sinceDraw += Math.max(0, dt);
+    const refresh = [0.1, 0.2, 0.34][this.tier];
+    const moved = this.drawnCentre.distanceToSquared(focus) > 4 * 4;
+    const turned = this.drawnDir.dot(sunDir) < 0.99999;
+    if (!moved && !turned && this.sinceDraw < refresh) {
+      // Same map, new origin: refold the translation and we are done.
+      this.out.matrix.value
+        .copy(this.bias)
+        .multiply(cam.projectionMatrix)
+        .multiply(cam.matrixWorldInverse)
+        .multiply(this.originShift.makeTranslation(
+          this.out.origin.value.x, this.out.origin.value.y, this.out.origin.value.z));
+      return;
+    }
+    this.sinceDraw = 0;
+    this.drawnCentre.copy(focus);
+    this.drawnDir.copy(sunDir);
 
     this.centre.copy(focus);
 
-    const cam = this.camera;
     // A sun straight overhead makes the default up vector degenerate.
     const up = this.lightUp.set(0, 1, 0);
     if (Math.abs(sunDir.y) > 0.999) up.set(0, 0, 1);

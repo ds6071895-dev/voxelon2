@@ -398,6 +398,10 @@ export type ClientMsg =
   // item id; the server derives the effect kind + params. (frag/oil/smoke use the
   // detonation point; horn/disguise ignore it; other kinds are client-handled.)
   | { t: 'gadgetUse'; item: number; x: number; y: number; z: number }
+  // A throwable (frag/smoke/oil bomb) just left the thrower's hand: launch point
+  // + velocity, so everyone else can fly the same arc. Starts the cooldown and
+  // earns the one `gadgetUse` detonation that follows when it lands.
+  | { t: 'gadgetThrow'; item: number; x: number; y: number; z: number; vx: number; vy: number; vz: number }
   // Personal respawn point: right-clicking a Respawn Beacon sets the player's
   // spawn to that block. The server validates the block + range and remembers it.
   | { t: 'setSpawn'; x: number; y: number; z: number }
@@ -636,6 +640,10 @@ export type ServerMsg =
   | { t: 'govErr'; reason: string }
   // Gadget visual effect to play everywhere (frag/oil blast, smoke cloud).
   | { t: 'gadgetFx'; kind: GadgetKind; x: number; y: number; z: number }
+  // Player `id` threw gadget `item` from (x,y,z) with velocity (vx,vy,vz):
+  // fly the model along the same ballistic arc (cosmetic; the blast arrives
+  // as its own gadgetFx). Sent to everyone but the thrower.
+  | { t: 'gadgetThrown'; id: number; item: number; x: number; y: number; z: number; vx: number; vy: number; vz: number }
   // Spy disguise (Phase 8): render player `id` as `faction` until `until`
   // (server worldTime). Broadcast to OTHERS; the spy sees themselves normally.
   | { t: 'disguised'; id: number; faction: number; until: number }

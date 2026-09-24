@@ -120,6 +120,80 @@ const HARMONY_PATHS: Record<VaultFamily, readonly number[]> = {
   gilded:  [0,1,0,2, 3,1,2,0, 0,2,1,3, 1,0,3,2, 0,1,2,3, 2,1,3,0, 0,3,1,2, 0,2,3,1, 1,3,2,0, 0,1,3,2, 2,0,1,3, 1,0,0,0],
 };
 
+/**
+ * THE THEMES. The motif cells above give each score its texture; these give it
+ * a TUNE — a four-bar melody per boss that a player can hum after the fight.
+ * `[degree | null, beats]`, sixteen beats, then a four-beat cadence that
+ * replaces the last bar on the second pass so the eight-bar statement closes.
+ * Written in each boss's own mode: the Warden's Phrygian lament, the Queen's
+ * swung Aeolian, the Colossus's harmonic-minor hammer, the Seer's Lydian
+ * climb and the Artificer's clockwork arpeggios.
+ */
+type ThemeNote = readonly [Degree, number];
+const BOSS_THEMES: Record<VaultFamily, { theme: readonly ThemeNote[]; cadence: readonly ThemeNote[] }> = {
+  crypt: {
+    theme: [[0, 2], [1, 1], [0, 1], [-1, 2], [-3, 2], [0, 1], [2, 1], [3, 1], [4, 1], [1, 4]],
+    cadence: [[2, 2], [0, 2]],
+  },
+  mire: {
+    theme: [[0, 1], [2, 1], [3, 2], [4, 1.5], [3, 0.5], [2, 2], [0, 1], [-1, 1], [0, 1], [2, 1], [4, 3], [null, 1]],
+    cadence: [[3, 2], [0, 2]],
+  },
+  ember: {
+    theme: [[0, 0.5], [0, 0.5], [4, 1], [3, 1], [2, 1], [0, 1], [-1, 1], [0, 2],
+      [0, 0.5], [0, 0.5], [5, 1], [4, 1], [3, 1], [6, 2], [4, 2]],
+    cadence: [[6, 2], [7, 2]],
+  },
+  crystal: {
+    theme: [[0, 1], [4, 1], [6, 1], [7, 1], [6, 2], [4, 2], [3, 1], [5, 1], [7, 1], [9, 1], [8, 4]],
+    cadence: [[6, 2], [7, 2]],
+  },
+  gilded: {
+    theme: [[0, 0.5], [2, 0.5], [4, 1], [0, 0.5], [2, 0.5], [4, 1], [5, 1], [4, 1], [2, 1], [1, 1],
+      [0, 0.5], [2, 0.5], [4, 1], [7, 1], [6, 1], [4, 4]],
+    cadence: [[6, 2], [7, 2]],
+  },
+};
+
+/** Beats in a theme line. Exported for the music smoke. */
+export function themeBeats(family: VaultFamily): { theme: number; cadence: number } {
+  const sum = (notes: readonly ThemeNote[]): number => notes.reduce((n, [, b]) => n + b, 0);
+  return { theme: sum(BOSS_THEMES[family].theme), cadence: sum(BOSS_THEMES[family].cadence) };
+}
+
+/** The eight-bar statement as note-ons keyed by sixteenth step (0..127):
+ *  the theme, then the theme again with its last bar swapped for the cadence. */
+const THEME_EVENTS: Record<VaultFamily, Map<number, { degree: number; steps: number }>> =
+  (() => {
+    const out = {} as Record<VaultFamily, Map<number, { degree: number; steps: number }>>;
+    for (const family of Object.keys(BOSS_THEMES) as VaultFamily[]) {
+      const { theme, cadence } = BOSS_THEMES[family];
+      const map = new Map<number, { degree: number; steps: number }>();
+      let at = 0;
+      const lay = (notes: readonly ThemeNote[]): void => {
+        for (const [degree, beats] of notes) {
+          const steps = Math.round(beats * 4);
+          if (degree !== null) map.set(at, { degree, steps });
+          at += steps;
+        }
+      };
+      lay(theme);
+      // Second pass: all but the last bar (16 steps), then the cadence.
+      let kept = 0;
+      const head: ThemeNote[] = [];
+      for (const note of theme) {
+        if (kept + note[1] * 4 > 48) break;
+        head.push(note);
+        kept += note[1] * 4;
+      }
+      if (kept < 48) head.push([null, (48 - kept) / 4]);
+      lay(head);
+      lay(cadence);
+      out[family] = map;
+    }
+    return out;
+  })();
+
 interface VoiceOptions {
   at: number;
   duration: number;
@@ -213,6 +287,13 @@ export class BossMusicEngine {
   private readonly lastCueAt: Partial<Record<BossMusicCue, number>> = {};
   private victoryEnding = false;
   private engaged = false;
+  /** Semitones the score is lifted by. Phase three modulates up a whole step
+   *  — at a bar line, never mid-phrase — so the final form sounds like a
+   *  different, higher-stakes fight rather than the same one, louder. */
+  private keyLift = 0;
+  /** Enrage pushes the tempo: the fight is running out of time and so is the band. */
+  private tempoScale = 1;
+  private readonly liftedProfiles = new Map<string, BossScoreProfile>();
 
   constructor(
     private readonly ctx: AudioContext,
@@ -275,6 +356,8 @@ export class BossMusicEngine {
     this.lowHealth = false;
     this.victoryEnding = false;
     this.engaged = false;
+    this.keyLift = phase === 3 ? 2 : 0;
+    this.tempoScale = 1;
     for (const key of Object.keys(this.lastCueAt) as BossMusicCue[]) delete this.lastCueAt[key];
     this.running = true;
     this.absoluteStep = 0;
@@ -332,9 +415,10 @@ export class BossMusicEngine {
     this.lastCueAt[kind] = cueTime;
     if (musicalKind === 'victory') this.victoryEnding = true;
 
-    const profile = BOSS_SCORE_PROFILES[this.family];
+    const profile = this.liveProfile();
     const now = cueTime + 0.025;
     const root = midiToHz(profile.rootMidi + 12);
+    const beat = 60 / (profile.bpm * this.tempoScale);
 
     if (musicalKind === 'engage') {
       // The camera hands control back: land the battle downbeat immediately,
@@ -376,8 +460,15 @@ export class BossMusicEngine {
           pan: index % 2 ? 0.3 : -0.3, wet: profile.reverb,
         });
       });
+      // Then the head of the boss's theme, broad, on the full brass — the
+      // tune the player will hear for the rest of the fight, announced.
+      this.playThemePhrase(profile, now + 2.1, Math.min(0.62, beat), 5, 0.07, 1);
+      this.cymbal(now + 0.78, 2.4, 0.045);
     } else if (musicalKind === 'enrage') {
+      this.tempoScale = 1.07;
       for (let i = 0; i < 3; i++) this.lowBoom(now + i * 0.13, 0.2 + i * 0.035, 1.3);
+      this.drumRoll(now + 0.4, 1.1, 0.06);
+      this.noiseSweep(now + 0.3, 1.2, 300, 7000, 0.04, 0.4);
       this.subDrop(now, 0.2);
       this.playTimbre('horn', root / 2, {
         at: now, duration: 1.1, gain: 0.13, wet: 0.2, attack: 0.03, cutoff: 1900,
@@ -409,9 +500,18 @@ export class BossMusicEngine {
         });
       });
       this.cymbal(now, 3.2, 0.05);
+      // And the theme once more, triumphant and twice as broad — the fight's
+      // own tune is the last thing you hear of it.
+      this.impactHit(now + 1.2, 0.16);
+      const end = this.playThemePhrase(profile, now + 1.25, Math.min(0.5, beat * 0.9), 8, 0.08, 1);
+      [0, 2, 4].forEach((degree, i) => this.playTimbre('strings', midiToHz(degreeToMidi(profile, degree, 1)), {
+        at: end, duration: 3.2, gain: 0.05, pan: -0.4 + i * 0.4, wet: 0.8, attack: 0.2, release: 2.2, cutoff: 2800,
+      }));
+      this.impactHit(end, 0.18);
+      this.cymbal(end, 3.6, 0.055);
       window.setTimeout(() => {
-        if (capturedRun === this.runId) this.stop(2.4);
-      }, 2300);
+        if (capturedRun === this.runId) this.stop(3);
+      }, Math.max(2300, (end - this.ctx.currentTime) * 1000 + 1600));
     }
   }
 
@@ -438,8 +538,8 @@ export class BossMusicEngine {
 
   private schedule(): void {
     if (!this.running || this.victoryEnding || this.ctx.state !== 'running') return;
-    const profile = BOSS_SCORE_PROFILES[this.family];
-    const stepSeconds = 60 / profile.bpm / 4;
+    let profile = this.liveProfile();
+    const stepSeconds = 60 / (profile.bpm * this.tempoScale) / 4;
     if (this.nextStepAt < this.ctx.currentTime - stepSeconds) {
       // A heavily throttled tab may miss part of the score. Recover on the next
       // sixteenth rather than trying to burst-schedule an audible backlog.
@@ -450,6 +550,11 @@ export class BossMusicEngine {
       const cycleStep = this.absoluteStep % BOSS_SCORE_LOOP_STEPS;
       const step = cycleStep % STEPS_PER_BAR;
       const bar = Math.floor(cycleStep / STEPS_PER_BAR);
+      // Modulate only on a bar line.
+      if (step === 0) {
+        const lift = this.phase === 3 ? 2 : 0;
+        if (lift !== this.keyLift) { this.keyLift = lift; profile = this.liveProfile(); }
+      }
       const swingOffset = (step & 1) ? stepSeconds * profile.swing : 0;
       this.scheduleStep(profile, this.nextStepAt + swingOffset, step, bar, stepSeconds);
       this.absoluteStep = (this.absoluteStep + 1) % BOSS_SCORE_LOOP_STEPS;
@@ -477,6 +582,9 @@ export class BossMusicEngine {
     const intensity = shape.energy * phaseEnergy * healthEnergy;
     const motifDegree = this.arrangedMotifDegree(profile, step, bar, shape);
     const bassDegree = this.arrangedBassDegree(profile, step, bar);
+    const themeOn = this.themeActive(shape);
+    // The signature voice steps back while the theme is singing over it.
+    const motifIntensity = themeOn ? intensity * 0.68 : intensity;
 
     // Two-bar harmonic rhythm gives every track a full 48-chord journey. Chords
     // are re-articulated midway through energetic bars, but breakdown sections
@@ -497,12 +605,14 @@ export class BossMusicEngine {
     }
 
     switch (this.family) {
-      case 'crypt': this.scheduleCrypt(profile, at, step, stepSeconds, motifDegree, intensity); break;
-      case 'mire': this.scheduleMire(profile, at, step, stepSeconds, motifDegree, intensity); break;
-      case 'ember': this.scheduleEmber(profile, at, step, stepSeconds, motifDegree, intensity); break;
-      case 'crystal': this.scheduleCrystal(profile, at, step, stepSeconds, motifDegree, intensity); break;
-      case 'gilded': this.scheduleGilded(profile, at, step, stepSeconds, motifDegree, intensity); break;
+      case 'crypt': this.scheduleCrypt(profile, at, step, stepSeconds, motifDegree, motifIntensity); break;
+      case 'mire': this.scheduleMire(profile, at, step, stepSeconds, motifDegree, motifIntensity); break;
+      case 'ember': this.scheduleEmber(profile, at, step, stepSeconds, motifDegree, motifIntensity); break;
+      case 'crystal': this.scheduleCrystal(profile, at, step, stepSeconds, motifDegree, motifIntensity); break;
+      case 'gilded': this.scheduleGilded(profile, at, step, stepSeconds, motifDegree, motifIntensity); break;
     }
+    if (themeOn) this.scheduleTheme(profile, shape, at, step, stepSeconds, intensity);
+    if (this.lowHealth && !shape.breakdown) this.finalStandOstinato(profile, at, step, stepSeconds, intensity);
 
     this.epicPercussion(shape, at, step, stepSeconds, intensity);
     this.scheduleLongFormLayers(profile, shape, at, step, stepSeconds, motifDegree, intensity);
@@ -671,7 +781,7 @@ export class BossMusicEngine {
     // The hero line: one long, soaring horn note per two bars in the widest
     // sections. It is the melody you remember after the fight, and it only
     // exists where the arrangement can carry it — never in a breakdown.
-    if (step === 0 && (shape.energy >= 0.78 || this.phase >= 2) &&
+    if (step === 0 && (shape.energy >= 0.78 || this.phase >= 2) && !this.themeActive(shape) &&
         (!shape.breakdown || this.phase === 3) && (this.currentSectionBar & 1) === 0) {
       const anchor = profile.chords[
         HARMONY_PATHS[this.family][Math.floor(this.currentBar / 2) %
@@ -940,6 +1050,98 @@ export class BossMusicEngine {
     source.start(at);
     source.stop(at + duration + 0.03);
     this.track(source);
+  }
+
+  /** The profile with the current key lift applied (cached per lift). */
+  private liveProfile(): BossScoreProfile {
+    const base = BOSS_SCORE_PROFILES[this.family];
+    if (!this.keyLift) return base;
+    const key = `${this.family}:${this.keyLift}`;
+    let lifted = this.liftedProfiles.get(key);
+    if (!lifted) {
+      lifted = { ...base, rootMidi: base.rootMidi + this.keyLift };
+      this.liftedProfiles.set(key, lifted);
+    }
+    return lifted;
+  }
+
+  /** Where the theme sings: the first statement in phase one's "first oath",
+   *  every wide section from phase two, and ALL the time in the final stand. */
+  private themeActive(shape: ArrangementShape): boolean {
+    if (this.lowHealth) return !shape.breakdown || this.phase === 3;
+    if (shape.breakdown) return false;
+    if (this.phase === 1) return this.currentSection === 2 || this.currentSection === 6;
+    return shape.energy >= 0.9;
+  }
+
+  private scheduleTheme(
+    profile: BossScoreProfile, shape: ArrangementShape, at: number,
+    step: number, stepSeconds: number, intensity: number,
+  ): void {
+    const note = THEME_EVENTS[this.family].get(this.currentSectionBar * STEPS_PER_BAR + step);
+    if (!note) return;
+    const octave = this.phase === 3 && shape.octaveLift ? 2 : 1;
+    const frequency = midiToHz(degreeToMidi(profile, note.degree, octave));
+    const duration = stepSeconds * note.steps * 0.97;
+    const release = Math.min(0.6, duration * 0.35);
+    const lift = this.lowHealth ? 1.2 : 1;
+    this.playTimbre('horn', frequency, {
+      at, duration, gain: 0.05 * intensity * lift, attack: 0.035, release,
+      pan: -0.12, wet: Math.min(0.8, profile.reverb + 0.14), cutoff: 2500 + this.phase * 350,
+    });
+    this.playTimbre('strings', frequency * 2, {
+      at: at + 0.01, duration, gain: 0.026 * intensity * lift, attack: 0.07, release,
+      pan: 0.28, wet: Math.min(0.85, profile.reverb + 0.2), cutoff: 3400,
+    });
+    if (this.phase >= 2) {
+      // The low octave in the cellos gives it weight once the fight is on.
+      this.playTimbre('strings', frequency / 2, {
+        at: at + 0.02, duration, gain: 0.02 * intensity, attack: 0.09, release,
+        pan: -0.35, wet: 0.4, cutoff: 1400,
+      });
+    }
+    if (this.family === 'crystal') this.glassHit(frequency * 2, at, Math.min(2.4, duration * 1.6), 0.03 * intensity, 0.3);
+    else if (this.family === 'gilded' && note.steps <= 2) this.clockTick(at, 0.014 * intensity, 0.35, 2600);
+  }
+
+  /** Under 15% boss health: sixteenths in the strings on the current chord,
+   *  root-fifth-third-fifth, accenting each beat — the "finish it" engine. */
+  private finalStandOstinato(
+    profile: BossScoreProfile, at: number, step: number, stepSeconds: number, intensity: number,
+  ): void {
+    if (profile.bpm < 90 && (step & 1)) return; // slow scores run in eighths
+    const chord = profile.chords[HARMONY_PATHS[this.family][
+      Math.floor(this.currentBar / 2) % HARMONY_PATHS[this.family].length] % profile.chords.length];
+    const pick = [0, 2, 1, 2][step % 4];
+    const degree = chord[Math.min(chord.length - 1, pick)];
+    this.playTimbre('strings', midiToHz(degreeToMidi(profile, degree, 1)), {
+      at, duration: stepSeconds * 0.85, gain: 0.015 * intensity * (step % 4 === 0 ? 1.45 : 1),
+      attack: 0.005, release: 0.05, pan: step & 1 ? 0.5 : -0.5, wet: 0.18, cutoff: 3200,
+    });
+  }
+
+  /** A phrase from the theme, played outside the grid (stingers). Returns the
+   *  time the last note ends. */
+  private playThemePhrase(
+    profile: BossScoreProfile, at: number, beat: number, notes: number, gain: number, octave: number,
+  ): number {
+    let t = at;
+    const line = BOSS_THEMES[this.family].theme.filter(([d]) => d !== null).slice(0, notes);
+    line.forEach(([degree, beats], i) => {
+      const last = i === line.length - 1;
+      const duration = (last ? Math.max(2, beats) : beats) * beat;
+      const frequency = midiToHz(degreeToMidi(profile, degree as number, octave));
+      this.playTimbre('horn', frequency, {
+        at: t, duration: duration * 0.96, gain, attack: 0.03, release: Math.min(0.8, duration * 0.4),
+        pan: -0.15, wet: 0.55, cutoff: 2800,
+      });
+      this.playTimbre('strings', frequency * 2, {
+        at: t + 0.01, duration: duration * 0.96, gain: gain * 0.55, attack: 0.05,
+        release: Math.min(0.9, duration * 0.4), pan: 0.3, wet: 0.7, cutoff: 3600,
+      });
+      t += duration;
+    });
+    return t;
   }
 
   private signatureTimbre(): Timbre {

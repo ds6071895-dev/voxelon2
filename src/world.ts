@@ -31,6 +31,7 @@ export const DEFAULT_RENDER_DISTANCE = 8; // chunks
 /** Everything the injected chunk shader reads that is not already a three.js
  *  built-in. One object so the two materials are wired identically. */
 export interface ChunkShaderUniforms {
+  underwater: { value: THREE.Vector2 };
   sun: { value: number };
   aurora: { value: number };
   torch: { value: THREE.Vector4 };
@@ -66,6 +67,7 @@ export interface ChunkShaderUniforms {
 /** The bit of GLSL both materials share: the voxel light model, the sun shadow
  *  lookup, the atmosphere and the atlas sampler. */
 const CHUNK_COMMON = /* glsl */`
+uniform vec2 uUnderwater; // immersion, local water surface height
 uniform float uSunLight;
 uniform float uAuroraLight;
 uniform vec4 uTorch;
@@ -99,17 +101,30 @@ float voxUnpackDepth(const in vec4 v) {
                      255.0 / 65536.0, 255.0 / 256.0));
 }
 
-/** Interleaved gradient noise: a per-pixel rotation for the shadow taps that
- *  trades the banding of a fixed kernel for a fine, even grain. */
-float voxIGN(vec2 p) {
-  return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+/** One shadow lookup, bilinearly filtered by hand: the four texels round
+ *  uv are each depth-compared, then blended by where uv falls between
+ *  them. (The map is packed RGBA, so the hardware cannot filter it for us.) */
+float voxShadowTap(vec2 uv, float z) {
+  float ts = uShadowParams.y;
+  vec2 p = uv / ts - 0.5;
+  vec2 f = fract(p);
+  vec2 b = (floor(p) + 0.5) * ts;
+  float s00 = step(z, voxUnpackDepth(texture2D(uShadowMap, b)));
+  float s10 = step(z, voxUnpackDepth(texture2D(uShadowMap, b + vec2(ts, 0.0))));
+  float s01 = step(z, voxUnpackDepth(texture2D(uShadowMap, b + vec2(0.0, ts))));
+  float s11 = step(z, voxUnpackDepth(texture2D(uShadowMap, b + vec2(ts, ts))));
+  return mix(mix(s00, s10, f.x), mix(s01, s11, f.x), f.y);
 }
 
 /**
  * How much of the LIGHT reaches this fragment: 1 in the open, 0 in full shade.
- * Sixteen taps on a Poisson disc, rotated per pixel, so a shadow edge is a
- * soft penumbra a couple of texels wide instead of a staircase. relPos is
- * measured from uShadeOrigin, never absolute — see shadows.ts.
+ * Bilinear PCF, NOT a noise-rotated Poisson disc: the rotated disc only looks
+ * smooth under temporal accumulation, which this renderer does not have, so
+ * every penumbra — and the whole of a distant canopy, which is nothing but
+ * penumbra — came out as a fixed salt-and-pepper grain. The lite tier takes a
+ * single filtered tap (a one-texel ramp); the others average four of them
+ * round a diagonal, which widens the edge into a soft, even gradient.
+ * relPos is measured from uShadeOrigin, never absolute — see shadows.ts.
  */
 float voxSunVisibility(vec3 relPos, vec3 n) {
   if (uShadowParams.x < 0.5) return 1.0;
@@ -121,24 +136,20 @@ float voxSunVisibility(vec3 relPos, vec3 n) {
   vec3 c = (uShadowMatrix * vec4(p, 1.0)).xyz;
   if (c.x <= 0.004 || c.x >= 0.996 || c.y <= 0.004 || c.y >= 0.996
     || c.z >= 0.999) return 1.0;
-  float bias = 0.0004 + 0.0016 * (1.0 - ndl);
-  float a = voxIGN(gl_FragCoord.xy) * 6.2831853;
-  mat2 rot = mat2(cos(a), sin(a), -sin(a), cos(a));
-  float r = uShadowParams.y * 1.7;
-  vec2 taps[16] = vec2[16](
-    vec2(-0.942, -0.399), vec2(0.946, -0.769), vec2(-0.094, -0.929), vec2(0.345, 0.294),
-    vec2(-0.916, 0.458), vec2(-0.815, -0.879), vec2(-0.383, 0.277), vec2(0.975, 0.756),
-    vec2(0.443, -0.975), vec2(0.537, -0.474), vec2(-0.265, -0.419), vec2(0.792, 0.191),
-    vec2(-0.242, 0.997), vec2(-0.814, 0.914), vec2(0.200, 0.786), vec2(0.144, -0.141));
-  float sum = 0.0;
-  for (int i = 0; i < 16; i++) {
-    vec2 uv = c.xy + rot * taps[i] * r;
-    sum += step(c.z - bias, voxUnpackDepth(texture2D(uShadowMap, uv)));
+  float z = c.z - (0.0004 + 0.0016 * (1.0 - ndl));
+  float sum;
+  if (uShadowParams.x < 4.5) {
+    sum = voxShadowTap(c.xy, z);
+  } else {
+    // 16 taps: a 3-texel-wide ramp; 8 taps: a tighter 2-texel one.
+    float r = uShadowParams.y * (uShadowParams.x > 8.5 ? 1.0 : 0.5);
+    sum = 0.25 * (voxShadowTap(c.xy + vec2(-r, -r), z) + voxShadowTap(c.xy + vec2(r, -r), z)
+                + voxShadowTap(c.xy + vec2(-r, r), z) + voxShadowTap(c.xy + vec2(r, r), z));
   }
   // Fade the map out toward its own edge, so the box it covers never shows.
   vec2 e = min(c.xy, 1.0 - c.xy);
   float edge = smoothstep(0.0, 0.08, min(e.x, e.y));
-  return mix(1.0, sum / 16.0, edge * uShadowParams.z);
+  return mix(1.0, sum, edge * uShadowParams.z);
 }
 
 vec3 voxViewDir() {
@@ -193,6 +204,14 @@ const ATLAS_SAMPLE = /* glsl */`
   }
   vec4 sampledDiffuseColor = textureGrad(map, vMapUv,
     voxGx / ${ATLAS_PX.toFixed(1)}, voxGy / ${ATLAS_PX.toFixed(1)});
+  #ifdef USE_ALPHATEST
+    // Coverage-preserving mips for the cutouts. Each mip level averages a
+    // leaf's holes into its alpha, so a distant canopy sinks under the 0.5
+    // test pixel by pixel and fizzes into sky-coloured speckles — worst on a
+    // tier with no MSAA, where alpha-to-coverage is inert. Scaling alpha back
+    // up with the mip level keeps the far canopy solid, the way it reads.
+    sampledDiffuseColor.a *= 1.0 + clamp(log2(max(voxMajor, 1.0)), 0.0, 5.0) * 0.25;
+  #endif
   diffuseColor *= sampledDiffuseColor;
 #endif
 `;
@@ -225,6 +244,7 @@ function applyLightShader(
     shader.uniforms.uAuroraLight = u.aurora;
     shader.uniforms.uTorch = u.torch;
     shader.uniforms.uArenaBounds = u.arenaBounds;
+    shader.uniforms.uUnderwater = u.underwater;
     shader.uniforms.uArenaLight = u.arenaLight;
     shader.uniforms.uSunTint = u.sunTint;
     shader.uniforms.uSkyTint = u.skyTint;
@@ -256,7 +276,10 @@ function applyLightShader(
       // weight) and leaves shiver in place. The offset is a function of WORLD
       // position alone, so two leaf blocks sharing a corner move it together
       // and the canopy never cracks open.
-      float sway = vxinfo.z * uShaderMode;
+      // Faded out with distance: past a few dozen blocks the motion is under a
+      // pixel, and all it does is make the far canopy shimmer.
+      float sway = vxinfo.z * uShaderMode
+        * (1.0 - smoothstep(20.0, 40.0, distance(worldSeed, cameraPosition)));
       if (sway > 0.0) {
         float gust = 0.6 + 0.4 * sin(uTime * 0.35 + worldSeed.x * 0.02 + worldSeed.z * 0.015);
         float t = uTime * 1.9;
@@ -339,6 +362,21 @@ function applyLightShader(
       float torch = uTorch.w * (0.45 * fall + 0.55 * fall * fall);
       blockLight = max(blockLight, fire * torch * 1.05);
 
+      // A soft local fill keeps nearby materials readable through the water.
+      // Sunlit ripples move across submerged surfaces in world space.
+      if (uUnderwater.x > 0.001 && kind < 2.5) {
+        float submerged = 1.0 - smoothstep(uUnderwater.y - 0.4, uUnderwater.y, vWorldPos.y);
+        float wet = uUnderwater.x * submerged;
+        float nearEye = 1.0 - smoothstep(5.0, 28.0, distance(vWorldPos, cameraPosition));
+        ambient = max(ambient, vec3(0.12, 0.17, 0.18) * wet * nearEye);
+        vec2 p = vWorldPos.xz * 2.1 + vWorldPos.y * 0.25;
+        p += vec2(sin(p.y * 0.7 + uTime * 0.6), cos(p.x * 0.6 - uTime * 0.5)) * 0.65;
+        float ripple = sin(p.x + uTime * 0.75) * sin(p.y - uTime * 0.6);
+        float caustic = pow(1.0 - abs(ripple), 12.0);
+        float sunlit = smoothstep(0.12, 0.8, skyLv) * (1.0 - uNight);
+        ambient += vec3(0.35, 0.48, 0.40) * caustic * wet * sunlit
+          * (0.25 + 0.75 * max(faceN.y, 0.0));
+      }
       vec3 lit = albedo * (ambient + direct + blockLight);
       // Emitters light themselves, and in HDR they run hot enough to bloom.
       lit += albedo * vInfo.y * (0.55 + 0.9 * uShaderMode);
@@ -406,11 +444,19 @@ function applyLightShader(
         vec3 vdir = toFrag / max(dist, 1e-4);
         float sunward = pow(max(dot(vdir, normalize(vec3(uSunDir.x, 0.0, uSunDir.z) + vec3(0.0, 1e-4, 0.0))), 0.0), 5.0);
         vec3 fogCol = fogColor + uFogSun * sunward;
+        // The dome darkens below the horizon; match it where the last terrain
+        // fades away so the cutoff does not leave a bright silhouette.
+        fogCol *= mix(0.62, 1.0, smoothstep(-0.18, 0.0, vdir.y));
         // Aerial perspective: a light haze that thickens with distance well
-        // before the hard fog wall, which is what gives the land DEPTH.
-        float haze = (1.0 - exp(-dist * 0.003)) * 0.18;
-        float wall = smoothstep(fogNear, fogFar, vFogDepth);
-        diffuseColor.rgb = mix(diffuseColor.rgb, fogCol, max(haze, wall));
+        // before the render edge.
+        float haze = (1.0 - exp(-dist * 0.002)) * 0.12;
+        // Camera-space depth leaves the sides of a wide view unfogged. Radial
+        // distance covers every direction before its chunks run out.
+        float wall = smoothstep(fogNear, fogFar, dist);
+        // outgoingLight, not diffuseColor: MeshBasicMaterial has already copied
+        // diffuseColor into outgoingLight by here, and opaque_fragment writes
+        // gl_FragColor from outgoingLight — so a diffuseColor edit is discarded.
+        outgoingLight = mix(outgoingLight, fogCol, max(haze, wall));
       #endif
     `;
 
@@ -455,6 +501,7 @@ export class World {
   /** Ambient light floor inside the cropped arena; 0 in the open world. */
   readonly arenaLightUniform = { value: 0 };
   /** Seconds since load, driving water, foliage and flicker. */
+  readonly underwaterUniform = { value: new THREE.Vector2(0, 0) };
   readonly timeUniform = { value: 0 };
   /** Unit vector toward the body that is lighting the world. */
   readonly lightDirUniform = { value: new THREE.Vector3(0, 1, 0) };
@@ -531,6 +578,7 @@ export class World {
       depthWrite: false,
     });
     const shaderUniforms: ChunkShaderUniforms = {
+      underwater: this.underwaterUniform,
       sun: this.sunUniform, aurora: this.auroraUniform, torch: this.torchUniform,
       arenaBounds: this.arenaBoundsUniform, arenaLight: this.arenaLightUniform,
       sunTint: this.sunTintUniform,
@@ -863,6 +911,23 @@ export class World {
       if (chunk && chunk.opaqueMesh) meshed++;
     }
     return total === 0 ? 1 : meshed / total;
+  }
+
+  /** Largest complete square of terrain around the player. A percentage of
+   * loaded chunks can hide one missing direction, so the fog uses this radius
+   * while the streamer catches up. */
+  meshedRadius(px: number, pz: number): number {
+    const pcx = Math.floor(px) >> 4;
+    const pcz = Math.floor(pz) >> 4;
+    for (let radius = 0; radius <= this.renderDistance; radius++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        for (let dz = -radius; dz <= radius; dz++) {
+          if (Math.max(Math.abs(dx), Math.abs(dz)) !== radius) continue;
+          if (!this.getChunk(pcx + dx, pcz + dz)?.opaqueMesh) return radius - 1;
+        }
+      }
+    }
+    return this.renderDistance;
   }
 
   /**

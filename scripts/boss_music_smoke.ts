@@ -5,6 +5,7 @@ import {
   bossScoreLoopSeconds,
   sectionDynamic,
   MUSIC_MAKEUP_GAIN,
+  themeBeats,
 } from '../src/boss_music';
 import type { VaultFamily } from '../src/vaults';
 import type { BossMusicCue } from '../src/boss_music';
@@ -63,6 +64,9 @@ for (const family of families) {
     `${profile.boss}: long-form loop stays between 2:50 and 5:10`);
   check(profile.reverb >= 0 && profile.reverb <= 1 && profile.delay >= 0 && profile.delay <= 1,
     `${profile.boss}: ambience sends are bounded`);
+  const beats = themeBeats(family);
+  check(beats.theme === 16 && beats.cadence === 4,
+    `${profile.boss}: theme is four whole bars with a one-bar cadence`);
   titles.add(profile.title);
   bosses.add(profile.boss);
 }

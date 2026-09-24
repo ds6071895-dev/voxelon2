@@ -1,8 +1,9 @@
 import * as THREE from 'three';
 import { ParkourScenery } from './parkour_scenery';
 import {
-  BRIDGE_ARROW_GRAVITY, BRIDGE_ARROW_LIFE_MS, BRIDGE_GOALS, PARTY_FLOOR_Y,
-  bridgeSpawn, parkourCourse, type PartyLobbySnapshot,
+  BRIDGE_ARROW_GRAVITY, BRIDGE_ARROW_LIFE_MS, BRIDGE_CAGE_FLOOR, BRIDGE_CAGE_ROOF, BRIDGE_GOALS,
+  BRIDGE_GOAL_RESET_MS, PARTY_COUNTDOWN_MS, PARTY_FLOOR_Y,
+  bridgeCageSpawn, bridgeSpawn, parkourCourse, type PartyLobbySnapshot,
 } from './partygames';
 import {
   BLINK_WARN_MS, blinkSolid, blinkWarning, COLLAPSE_GRACE_MS, parkourCollapseFront, parkourVoidY,
@@ -89,6 +90,11 @@ export class PartyVisuals {
       this.root.add(pool[index]);
     }
     return pool[index];
+  }
+  /** Cage fields are seen from INSIDE, so their marker boxes draw both faces. */
+  private twoSided(index: number): void {
+    const mat = this.marker(index).material as THREE.MeshBasicMaterial;
+    if (mat.side !== THREE.DoubleSide) { mat.side = THREE.DoubleSide; mat.needsUpdate = true; }
   }
   update(s: PartyLobbySnapshot, me: number, now: number): void {
     const sub = s.sub, round = s.round;
@@ -197,6 +203,27 @@ export class PartyVisuals {
       if (target)
         ring(2 + i, x, PARTY_FLOOR_Y + .12, z, 2.4 + (now % 1400) / 1400 * 1.8, color, .5 - (now % 1400) / 2800);
     });
+    // THE CAGES. While a round is held — the opening countdown, and the three
+    // seconds after every goal — both pods wear a humming force field in their
+    // team's colour, and a ring on the hatch shrinks toward the drop, so
+    // "how long until I fall" is read off the floor of the cage you are in.
+    const heldUntil = s.phase === 'countdown' ? s.countdownEndsAt
+      : s.goalResetAt && now < s.goalResetAt ? s.goalResetAt : undefined;
+    if (heldUntil !== undefined && heldUntil > now) {
+      const span = s.phase === 'countdown' ? PARTY_COUNTDOWN_MS : BRIDGE_GOAL_RESET_MS;
+      const left = Math.max(0, Math.min(1, (heldUntil - now) / span));
+      const hum = .5 + .5 * Math.sin(now / 90);
+      for (const t of [0, 1]) {
+        const c = bridgeCageSpawn(sub, t, 0);
+        const cx = c.x - sub.minX, cz = c.z - sub.minZ;
+        const floor = PARTY_FLOOR_Y + BRIDGE_CAGE_FLOOR + 1, roof = PARTY_FLOOR_Y + BRIDGE_CAGE_ROOF;
+        const color = PartyVisuals.TEAM_COLOR[t];
+        this.twoSided(5 + t);
+        box(5 + t, cx, (floor + roof) / 2, cz, 5.25, roof - floor + .3, 5.25, color,
+          (t === team ? .16 : .1) + .08 * hum + (1 - left) * .12);
+        ring(4 + t, cx, floor + .06, cz, .3 + 2.1 * left, t === team ? 0xffffff : color, .55 + .35 * hum);
+      }
+    }
     // Your own base glows underfoot while a goal is being reset, so the pause
     // reads as "everyone is home" rather than "the game stopped".
     if (s.goalResetAt && now < s.goalResetAt) {

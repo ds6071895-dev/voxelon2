@@ -293,6 +293,9 @@ export class NetClient {
   onGovErr?: (reason: string) => void;
   /** Play a gadget visual effect (frag/oil blast, smoke cloud) at a point. */
   onGadgetFx?: (kind: string, x: number, y: number, z: number) => void;
+  /** Another player threw a gadget: fly it from (x,y,z) with (vx,vy,vz). */
+  onGadgetThrown?: (id: number, item: number, x: number, y: number, z: number,
+    vx: number, vy: number, vz: number) => void;
   /** A player is disguised as `faction` until `until` (server worldTime). */
   onDisguised?: (id: number, faction: number, until: number) => void;
   /** A player changed their avatar cosmetics (their info is already updated). */
@@ -649,6 +652,9 @@ export class NetClient {
         break;
       case 'gadgetFx':
         this.onGadgetFx?.(msg.kind, msg.x, msg.y, msg.z);
+        break;
+      case 'gadgetThrown':
+        this.onGadgetThrown?.(msg.id, msg.item, msg.x, msg.y, msg.z, msg.vx, msg.vy, msg.vz);
         break;
       case 'disguised':
         this.onDisguised?.(msg.id, msg.faction, msg.until);
@@ -1169,6 +1175,10 @@ export class NetClient {
   }
   sendGadgetUse(item: number, x: number, y: number, z: number): void {
     if (this.connected) this.raw({ t: 'gadgetUse', item, x, y, z });
+  }
+  /** A throwable just left your hand (launch point + velocity). */
+  sendGadgetThrow(item: number, x: number, y: number, z: number, vx: number, vy: number, vz: number): void {
+    if (this.connected) this.raw({ t: 'gadgetThrow', item, x, y, z, vx, vy, vz });
   }
   // Vaults (Milestone D).
   sendVaultEnter(cx: number, cz: number): void {

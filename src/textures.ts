@@ -2460,27 +2460,45 @@ function paintAlarmBellSide(p: Painter, seed: number): void {
   p.set(7, 12, [200, 40, 36, 255]); p.set(8, 12, [200, 40, 36, 255]);
 }
 
-/** Boat sprite: a little plank hull from the side — curved bow, dark cockpit,
- *  a paddle poking up. */
+/** Boat sprite: a clinker-built rowing boat in profile — rising bow on the
+ *  right, square transom on the left, overlapping plank strakes, a blue sheer
+ *  stripe under the gunwale, a thwart and an oar resting across it. */
 function paintBoat(p: Painter, seed: number): void {
-  const hull: RGBA = [150, 116, 68, 255];
-  const hullHi: RGBA = [186, 150, 96, 255];
-  const hullLo: RGBA = [108, 82, 48, 255];
-  const rows: Record<number, [number, number]> = {
-    6: [1, 14], 7: [1, 14], 8: [2, 13], 9: [3, 12], 10: [5, 10],
-  };
-  for (const yStr of Object.keys(rows)) {
-    const y = Number(yStr);
-    const [a, b] = rows[y];
-    for (let x = a; x <= b; x++) {
-      const c = y === 6 ? hullHi : y >= 9 ? hullLo : hull;
-      p.set(x, y, shade(c, 0.92 + hash2(seed, x, y) * 0.14));
+  const gunwale: RGBA = [74, 48, 26, 255];
+  const stripe: RGBA = [52, 118, 150, 255];
+  const stripeHi: RGBA = [96, 168, 196, 255];
+  const strakes: RGBA[] = [[168, 118, 68, 255], [146, 98, 54, 255], [158, 108, 60, 255], [128, 84, 46, 255]];
+  const keel: RGBA = [62, 40, 22, 255];
+  const oar: RGBA = [214, 176, 120, 255];
+  const oarLo: RGBA = [160, 124, 76, 255];
+  // Oar behind the hull: shaft from upper left down to the blade lower right.
+  for (let i = 0; i <= 10; i++) p.set(3 + i, 1 + i, i % 2 ? oarLo : oar);
+  p.set(3, 1, [96, 64, 36, 255]); // grip
+  // Hull silhouette per column: [sheer top, keel bottom].
+  const top = [6, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 6, 6, 5, 4, 3];
+  const bot = [10, 11, 12, 12, 12, 12, 12, 12, 12, 12, 11, 11, 10, 9, 7, 5];
+  for (let x = 0; x < 16; x++) {
+    for (let y = top[x]; y <= bot[x]; y++) {
+      const d = y - top[x];
+      let c: RGBA;
+      if (d === 0) c = gunwale;
+      else if (d === 1) c = x > 13 ? gunwale : (x + y) % 5 === 0 ? stripeHi : stripe;
+      else if (y === bot[x]) c = keel;
+      else c = strakes[(d - 2) % strakes.length];
+      // Clinker laps: the top pixel of each strake catches the light.
+      const lapLight = d >= 2 && y !== bot[x] && hash2(seed, x, y) > 0.7;
+      p.set(x, y, shade(c, (lapLight ? 1.1 : 0.94) + hash2(seed, x, y) * 0.1));
     }
   }
-  // Raised bow/stern tips + a dark cockpit + the paddle.
-  p.set(0, 5, hullHi); p.set(1, 5, hullHi); p.set(14, 5, hullHi); p.set(15, 5, hullHi);
-  for (let x = 6; x <= 9; x++) p.set(x, 5, [70, 54, 34, 255]);
-  p.set(11, 3, [122, 94, 58, 255]); p.set(10, 4, [122, 94, 58, 255]);
+  // Stem post rising at the bow, transom edge at the stern.
+  p.set(15, 2, keel); p.set(15, 3, gunwale);
+  for (let y = 6; y <= 10; y++) p.set(0, y, shade(keel, 1.15));
+  // Thwart ends + oarlock, and the oar blade dipping below the hull.
+  p.set(7, 6, [196, 150, 96, 255]); p.set(8, 6, [196, 150, 96, 255]);
+  p.set(9, 5, [176, 126, 58, 255]);
+  p.set(13, 12, [236, 230, 214, 255]); p.set(14, 12, [236, 230, 214, 255]);
+  p.set(13, 13, [220, 212, 192, 255]); p.set(14, 13, [236, 230, 214, 255]);
+  p.set(14, 14, stripe); p.set(15, 14, stripe);
   outlineSprite(p);
 }
 

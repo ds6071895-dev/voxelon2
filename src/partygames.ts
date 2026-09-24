@@ -51,6 +51,13 @@ export const BRIDGE_GOAL_RESET_MS = 3000;
  * spam; waiting never earns extra damage or knockback. */
 export const BRIDGE_RESPAWN_SHIELD_MS = 1800;
 export const BRIDGE_MELEE_TIER = { item: Item.IronAxe, damage: 5, cooldownMs: 280, kbBonus: 0.02 } as const;
+/** How early (ms) a swing may ARRIVE against the cooldown and still count.
+ *  The client paces the axe at exactly `cooldownMs`, but packets bunch up on
+ *  the way: judged to the millisecond, a held button dropped roughly one hit
+ *  in five as "spam", and those were the swings that felt like they went
+ *  straight through somebody. Small enough that no client can gain a real
+ *  extra swing from it. */
+export const BRIDGE_SWING_JITTER_MS = 60;
 export const BRIDGE_KILL_CREDIT_MS = 10_000;
 /** One arrow every five seconds: the bow is a finisher, not a spray. */
 export const BRIDGE_BOW_COOLDOWN_MS = 5000;

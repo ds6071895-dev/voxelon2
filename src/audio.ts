@@ -793,13 +793,19 @@ export class GameAudio {
     this.tone({ type: 'triangle', from: 320, to: 90, dur: 0.18, gain: 0.16 });
   }
 
-  /** Starting to apply a healing consumable: a wrapper tear (bandage) or a
-   *  case latch pop (medkit) — the sound that says "you are committed now". */
+  /** Starting to apply a healing consumable: a wrapper tear (bandage) or the
+   *  medkit case coming open — two latches thrown left-right, the lid's hinge
+   *  and the zip of the inner pouch. The sound that says "you are committed". */
   healStart(medkit = false): void {
     if (medkit) {
-      this.tone({ type: 'square', from: 260, to: 150, dur: 0.05, gain: 0.07 });
-      this.noise({ freq: 700, dur: 0.09, gain: 0.14, slideTo: 220, type: 'lowpass', q: 0.7 });
-      this.tone({ type: 'triangle', from: 180, to: 120, dur: 0.12, gain: 0.09, delay: 0.06 });
+      // Latch, latch: bright plastic clicks with a little body under each.
+      for (const [i, f] of [[0, 2300], [1, 2000]] as const) {
+        this.noise({ freq: f, dur: 0.035, gain: 0.16, q: 3, delay: i * 0.09 });
+        this.tone({ type: 'square', from: 520 - i * 60, to: 240, dur: 0.04, gain: 0.06, delay: i * 0.09 });
+      }
+      // The lid swinging open on its hinge, then the pouch zip.
+      this.tone({ type: 'triangle', from: 170, to: 125, dur: 0.18, gain: 0.08, delay: 0.2, vibrato: 18 });
+      this.noise({ freq: 1400, dur: 0.26, gain: 0.07, slideTo: 3800, type: 'bandpass', q: 2.4, delay: 0.3 });
     } else {
       // Gauze tearing: a short rising noise rip with a papery body.
       this.noise({ freq: 900, dur: 0.22, gain: 0.11, slideTo: 2600, type: 'bandpass', q: 0.5 });
@@ -808,29 +814,82 @@ export class GameAudio {
   }
 
   /** One "work" beat while the wrap is being pressed in: a soft, quiet pat.
-   *  Pitch rises with `step` so the channel feels like it is going somewhere. */
-  healBeat(step = 0): void {
+   *  Pitch rises with `step` so the channel feels like it is going somewhere.
+   *  A medkit beat is a firm press: a padded thump plus a clicking ratchet and
+   *  a rising note on a major scale, so the procedure climbs towards its end. */
+  healBeat(step = 0, medkit = false): void {
+    if (medkit) {
+      const scale = [0, 2, 4, 7, 9, 12, 14];
+      const f = 220 * 2 ** (scale[Math.min(scale.length - 1, step)] / 12);
+      this.noise({ freq: 380, dur: 0.08, gain: 0.13, slideTo: 120, type: 'lowpass', q: 0.8 });
+      this.noise({ freq: 3000, dur: 0.025, gain: 0.07, q: 4 });
+      this.tone({ type: 'triangle', from: f * 2, to: f * 2, dur: 0.16, gain: 0.05, attack: 0.005 });
+      this.tone({ type: 'sine', from: f, to: f, dur: 0.22, gain: 0.04, attack: 0.01 });
+      return;
+    }
     const f = 300 + step * 55;
     this.noise({ freq: f, dur: 0.07, gain: 0.07, slideTo: f * 0.5, type: 'lowpass', q: 0.7 });
     this.tone({ type: 'triangle', from: f * 1.5, to: f, dur: 0.06, gain: 0.05 });
   }
 
   /** Healing consumable applied: a warm rising three-note resolve + a soft
-   *  sparkle tail, so a Bandage/Medkit lands as relief (kid-friendly, low gain). */
+   *  sparkle tail, so a Bandage/Medkit lands as relief (kid-friendly, low gain).
+   *  The medkit is the big one: a pressurised stim HISS, a deep double
+   *  heartbeat as it takes, then a full major bloom with a sub swell and a
+   *  shimmering arpeggio tail — the most rewarding non-combat sound in the kit. */
   heal(medkit = false): void {
-    const g = medkit ? 0.12 : 0.1;
+    if (medkit) {
+      // Stim: a pneumatic hiss falling through a band, plus the click of the
+      // injector firing.
+      this.noise({ freq: 5200, dur: 0.32, gain: 0.12, slideTo: 1400, type: 'bandpass', q: 0.9 });
+      this.noise({ freq: 2600, dur: 0.03, gain: 0.14, q: 3 });
+      // Lub-dub, lub-dub: the body taking it.
+      for (const d of [0.16, 0.52]) {
+        this.tone({ type: 'sine', from: 88, to: 42, dur: 0.18, gain: 0.2, delay: d });
+        this.tone({ type: 'sine', from: 74, to: 36, dur: 0.2, gain: 0.15, delay: d + 0.16 });
+      }
+      // The bloom: C major opening upward, with a sub swell underneath.
+      const chord = [261.6, 329.6, 392, 523.3, 659.3];
+      chord.forEach((f, i) => {
+        this.tone({ type: 'triangle', from: f, to: f, dur: 1.4 - i * 0.12, gain: 0.07, attack: 0.05, delay: 0.62 + i * 0.045 });
+        this.tone({ type: 'sine', from: f * 2, to: f * 2, dur: 0.9, gain: 0.025, attack: 0.08, delay: 0.66 + i * 0.045 });
+      });
+      this.tone({ type: 'sine', from: 65, to: 131, dur: 1.2, gain: 0.12, attack: 0.25, delay: 0.55 });
+      // A sparkling run up over the top, and the air brightening.
+      [1047, 1319, 1568, 2093, 2637].forEach((f, i) =>
+        this.tone({ type: 'sine', from: f, to: f * 1.01, dur: 0.22, gain: 0.03, delay: 0.8 + i * 0.07 }));
+      this.noise({ freq: 1600, dur: 1.1, gain: 0.04, slideTo: 5000, type: 'bandpass', q: 0.6, delay: 0.62 });
+      return;
+    }
+    const g = 0.1;
     this.tone({ type: 'triangle', from: 392, to: 523, dur: 0.16, gain: g });
     this.tone({ type: 'triangle', from: 523, to: 659, dur: 0.18, gain: g * 0.9, delay: 0.1 });
     this.tone({ type: 'triangle', from: 659, to: 784, dur: 0.3, gain: g * 0.85, delay: 0.2 });
-    if (medkit) {
-      this.tone({ type: 'sine', from: 196, to: 262, dur: 0.5, gain: 0.07 }); // warm floor
-    }
     this.noise({ freq: 1100, dur: 0.5, gain: 0.03, slideTo: 2200, type: 'bandpass', q: 0.7, delay: 0.12 });
   }
 
-  /** Each point of health the heal buff restores: a tiny glassy sparkle. */
-  healTick(pitch = 1): void {
+  /** Each point of health the heal buff restores: a tiny glassy sparkle. With
+   *  a `step`, successive points climb a pentatonic ladder — a medkit's refill
+   *  plays as a rising run you can hear filling the bar, like coins in a jar. */
+  healTick(pitch = 1, step = -1): void {
+    if (step >= 0) {
+      const penta = [0, 2, 4, 7, 9];
+      const n = penta[step % 5] + 12 * Math.min(2, Math.floor(step / 5));
+      const f = 523.3 * 2 ** (n / 12);
+      this.tone({ type: 'sine', from: f, to: f * 1.005, dur: 0.14, gain: 0.04 });
+      this.tone({ type: 'triangle', from: f * 2, to: f * 2, dur: 0.06, gain: 0.015 });
+      return;
+    }
     this.tone({ type: 'sine', from: 880 * pitch, to: 1320 * pitch, dur: 0.09, gain: 0.045 });
+  }
+
+  /** The medkit's afterglow: a slow, calm heartbeat under the regen, settling
+   *  as you recover. `calm` 0..1 — how far through the buff you are. */
+  healPulse(calm: number): void {
+    const c = Math.max(0, Math.min(1, calm));
+    const g = 0.07 * (1 - c * 0.6);
+    this.tone({ type: 'sine', from: 70, to: 40, dur: 0.16, gain: g });
+    this.tone({ type: 'sine', from: 60, to: 34, dur: 0.18, gain: g * 0.7, delay: 0.2 });
   }
 
   /** An interrupted application (slot switched away, killed mid-wrap). */
@@ -916,6 +975,58 @@ export class GameAudio {
   voidFall(): void {
     this.tone({ type: 'sine', from: 900, to: 120, dur: 1.1, gain: 0.12, attack: 0.03 });
     this.noise({ freq: 700, dur: 1.1, gain: 0.09, slideTo: 90, type: 'bandpass', q: 1.1 });
+  }
+
+  // --- The Bridge: the whistle, the cage and the goal -------------------------
+
+  /** One number of the 3-2-1: a clean arena beep that climbs a step each
+   *  second, with a low drum under it, so the count is felt with eyes on the
+   *  span. The restart after a goal plays it a touch lower. */
+  bridgeCount(n: number, reset = false): void {
+    const base = reset ? 440 : 523.3;
+    const f = base * (n >= 3 ? 1 : n === 2 ? 1.122 : 1.26);
+    this.tone({ type: 'square', from: f, to: f, dur: 0.16, gain: 0.07, attack: 0.004 });
+    this.tone({ type: 'sine', from: f * 2, to: f * 2, dur: 0.12, gain: 0.03, attack: 0.004 });
+    this.tone({ type: 'sine', from: 120, to: 60, dur: 0.18, gain: 0.14 });
+  }
+
+  /** GO: the hatch drops. A bright octave stab, a glassy shatter (the cage
+   *  field coming down) and a whoosh — the loudest "start" in the game. */
+  bridgeGo(): void {
+    const f = 1046.5;
+    this.tone({ type: 'square', from: f, to: f, dur: 0.34, gain: 0.07, attack: 0.004 });
+    this.tone({ type: 'triangle', from: f / 2, to: f / 2, dur: 0.4, gain: 0.08, attack: 0.004 });
+    this.tone({ type: 'sine', from: 150, to: 45, dur: 0.35, gain: 0.2 });
+    this.noise({ freq: 5200, dur: 0.35, gain: 0.07, slideTo: 1600, type: 'bandpass', q: 1.2 });
+    for (const [i, g] of [[0, 3100], [1, 3900], [2, 2500]] as const)
+      this.tone({ type: 'sine', from: g, to: g * 0.94, dur: 0.22, gain: 0.03, delay: 0.02 + i * 0.035 });
+    this.noise({ freq: 400, dur: 0.5, gain: 0.08, slideTo: 1800, type: 'bandpass', q: 0.6, delay: 0.05 });
+  }
+
+  /** A goal. Your side: a rising major fanfare over a crowd-like roar and a
+   *  cymbal. Theirs: the same roar, but a falling minor answer — you know
+   *  which way it went without looking at the board. Match point adds a bell. */
+  bridgeGoal(ours: boolean, matchPoint = false): void {
+    this.noise({ freq: 900, dur: 1.4, gain: 0.08, slideTo: 1400, type: 'bandpass', q: 0.35 }); // the roar
+    this.noise({ freq: 6000, dur: 1.1, gain: 0.05, slideTo: 3000, type: 'highpass', q: 0.5, delay: 0.02 }); // cymbal
+    this.tone({ type: 'sine', from: 110, to: 40, dur: 0.5, gain: 0.2 });
+    const notes = ours ? [523.3, 659.3, 784, 1046.5] : [659.3, 587.3, 523.3, 440];
+    notes.forEach((f, i) => {
+      this.tone({ type: 'triangle', from: f, to: f, dur: i === 3 ? 0.7 : 0.16, gain: 0.09, delay: i * 0.11 });
+      this.tone({ type: 'square', from: f / 2, to: f / 2, dur: i === 3 ? 0.6 : 0.14, gain: 0.035, delay: i * 0.11 });
+    });
+    if (matchPoint) {
+      for (let i = 0; i < 3; i++)
+        this.tone({ type: 'sine', from: 1568, to: 1568, dur: 0.5, gain: 0.05, delay: 0.55 + i * 0.22 });
+    }
+  }
+
+  /** Axe contact predicted on your own screen (the server confirms the damage
+   *  a moment later). A tight, meaty chop — it has to land on the click. */
+  axeContact(sprint: boolean, pos?: THREE.Vector3): void {
+    this.noise({ freq: 1400, dur: 0.05, gain: 0.2, slideTo: 260, type: 'lowpass', q: 0.9, pos });
+    this.tone({ type: 'triangle', from: 260, to: 90, dur: 0.11, gain: 0.18, pos });
+    if (sprint) this.tone({ type: 'sine', from: 90, to: 45, dur: 0.16, gain: 0.16, pos });
   }
 
   /** Entering a vault (Milestone D): a low, ominous synth pad — soft attack,

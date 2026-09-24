@@ -663,9 +663,11 @@ export function poseGunModel(
     model.rotation.set(0.02, 0.02, 0);
     model.scale.setScalar(0.48);
   } else if (context === 'avatar') {
-    model.position.set(0, -0.66, -0.18);
-    model.rotation.set(-0.52, 0, 0);
-    model.scale.setScalar(0.42);
+    // Placed per frame by poseGunHold (remoteplayers.ts); only the size is
+    // fixed here — big enough to read past the soldier's gloves.
+    model.position.set(0, 1.2, -0.3);
+    model.rotation.set(0, 0, 0);
+    model.scale.setScalar(0.52);
   } else {
     model.rotation.set(0.12, 0.45, 0);
     model.scale.setScalar(0.3);

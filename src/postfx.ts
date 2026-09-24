@@ -5,8 +5,18 @@
 // Turning shaders on redirects the frame through an offscreen HDR buffer so the
 // image can be worked on as a whole:
 //
-//   RenderPass -> GodRays -> UnrealBloom -> Grade (expose, ACES, colour, lens)
+//   RenderPass -> UnrealBloom -> Grade (god rays, expose, ACES, colour, lens)
 //              -> OutputPass (linear -> sRGB)
+//
+// SCALING DOWN. The stack has three TIERS (0 full, 1 balanced, 2 lite) so the
+// same look survives on an iGPU or a phone: the scene buffer drops from 4x MSAA
+// at full resolution to 2x at 80% to no MSAA at 64%, the lite bloom chain runs
+// at half of that, and the god-ray march shortens from 28 to 20 to 16 taps. The
+// tier is chosen by `ShaderBudget` (below) from measured frame times, so a
+// strong GPU never loses anything and a weak one still gets the grade, the
+// bloom and the rays — just computed on fewer pixels. The god rays used to be a
+// pass of their own (a full-screen half-float read + write); they now live in
+// the grade, and cost nothing at all while the sun is off screen.
 //
 // The buffer is half-float on purpose: the sky dome writes the sun disc at ~26x
 // a lit block, and both the god rays and the bloom are thresholds on that
@@ -32,61 +42,14 @@ const PASS_VERT = /* glsl */`
 `;
 
 /**
- * Crepuscular rays, screen-space. Every pixel marches toward the sun's position
- * on screen and sums how much VERY bright sky it crosses on the way. Where
- * leaves, a ridge or a tower stand between the pixel and the sun, the march
- * crosses them instead and comes back dark, so the light breaks into shafts
- * around every silhouette — the single most "shader pack" image a voxel world
- * can make. The threshold sits far above anything the terrain reaches, so only
- * the sun, its corona and the sky right round it ever feed the rays.
+ * Crepuscular rays, screen-space (inside the grade). Every pixel marches
+ * toward the sun's position on screen and sums how much VERY bright sky it
+ * crosses on the way. Where leaves, a ridge or a tower stand between the pixel
+ * and the sun, the march crosses them instead and comes back dark, so the light
+ * breaks into shafts around every silhouette. The threshold sits far above
+ * anything the terrain reaches, so only the sun, its corona and the sky right
+ * round it ever feed the rays.
  */
-const GODRAY_SHADER = {
-  uniforms: {
-    tDiffuse: { value: null as THREE.Texture | null },
-    uSunPos: { value: new THREE.Vector2(0.5, 0.5) },
-    uStrength: { value: 0 },
-    uColor: { value: new THREE.Color(1, 0.9, 0.7) },
-    uAspect: { value: 1 },
-  },
-  vertexShader: PASS_VERT,
-  fragmentShader: /* glsl */`
-    uniform sampler2D tDiffuse;
-    uniform vec2 uSunPos;
-    uniform float uStrength;
-    uniform vec3 uColor;
-    uniform float uAspect;
-    varying vec2 vUv;
-
-    float ign(vec2 p) {
-      return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
-    }
-
-    void main() {
-      vec4 base = texture2D(tDiffuse, vUv);
-      if (uStrength < 0.002) { gl_FragColor = base; return; }
-      const int STEPS = 32;
-      vec2 toSun = uSunPos - vUv;
-      float reach = length(toSun * vec2(uAspect, 1.0));
-      vec2 stepUv = toSun * (0.92 / float(STEPS));
-      vec2 uv = vUv + stepUv * ign(gl_FragCoord.xy);
-      float decay = 1.0;
-      vec3 acc = vec3(0.0);
-      for (int i = 0; i < STEPS; i++) {
-        uv += stepUv;
-        vec3 s = texture2D(tDiffuse, clamp(uv, 0.001, 0.999)).rgb;
-        float l = dot(s, vec3(0.2126, 0.7152, 0.0722));
-        acc += s * (smoothstep(1.15, 4.0, l) * decay);
-        decay *= 0.962;
-      }
-      acc /= float(STEPS);
-      // Strongest close to the sun, gone a screen away from it.
-      float falloff = exp(-reach * 1.35);
-      vec3 rays = min(acc, vec3(6.0)) * uColor * uStrength * falloff;
-      gl_FragColor = vec4(base.rgb + rays, base.a);
-    }
-  `,
-};
-
 /**
  * The grade: what the light LOOKS like.
  *
@@ -105,6 +68,13 @@ const GRADE_SHADER = {
     uTime: { value: 0 },
     /** 0..1, how golden the hour is: warms and softens the whole frame. */
     uGolden: { value: 0 },
+    uSunPos: { value: new THREE.Vector2(0.5, 0.5) },
+    uRayStrength: { value: 0 },
+    uRayColor: { value: new THREE.Color(1, 0.9, 0.7) },
+    uAspect: { value: 1 },
+    uRaySteps: { value: 28 },
+    /** Chromatic fringe on (1) or off (0) — two extra taps per pixel. */
+    uFringe: { value: 1 },
   },
   vertexShader: PASS_VERT,
   fragmentShader: /* glsl */`
@@ -113,7 +83,41 @@ const GRADE_SHADER = {
     uniform float uExposure;
     uniform float uTime;
     uniform float uGolden;
+    uniform vec2 uSunPos;
+    uniform float uRayStrength;
+    uniform vec3 uRayColor;
+    uniform float uAspect;
+    uniform float uRaySteps;
+    uniform float uFringe;
     varying vec2 vUv;
+
+    float ign(vec2 p) {
+      return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+    }
+
+    /** Linear-light god rays toward uSunPos (see the note above). The branch
+     *  is on a uniform, so a frame without the sun on screen skips it whole. */
+    vec3 godRays() {
+      vec2 toSun = uSunPos - vUv;
+      float reach = length(toSun * vec2(uAspect, 1.0));
+      float falloff = exp(-reach * 1.35);
+      if (falloff < 0.02) return vec3(0.0);
+      vec2 stepUv = toSun * (0.92 / uRaySteps);
+      vec2 uv = vUv + stepUv * ign(gl_FragCoord.xy);
+      float decay = 1.0;
+      float fade = pow(0.962, 28.0 / uRaySteps);
+      vec3 acc = vec3(0.0);
+      for (int i = 0; i < 28; i++) {
+        if (float(i) >= uRaySteps) break;
+        uv += stepUv;
+        vec3 s = texture2D(tDiffuse, clamp(uv, 0.001, 0.999)).rgb;
+        float l = dot(s, vec3(0.2126, 0.7152, 0.0722));
+        acc += s * (smoothstep(1.15, 4.0, l) * decay);
+        decay *= fade;
+      }
+      acc /= uRaySteps;
+      return min(acc, vec3(6.0)) * uRayColor * uRayStrength * falloff;
+    }
 
     // Narkowicz's fit of the ACES filmic curve.
     vec3 aces(vec3 x) {
@@ -127,13 +131,15 @@ const GRADE_SHADER = {
       vec2 fromCentre = vUv - 0.5;
       float r = length(fromCentre) * 1.4142;
 
-      // Chromatic aberration at the very corners only.
-      float ca = 0.0012 * smoothstep(0.45, 1.0, r);
-      vec3 color = vec3(
-        texture2D(tDiffuse, vUv - fromCentre * ca).r,
-        texture2D(tDiffuse, vUv).g,
-        texture2D(tDiffuse, vUv + fromCentre * ca).b
-      );
+      // Chromatic aberration at the very corners only (and only where it is
+      // wide enough to see — the middle of the frame takes one tap).
+      vec3 color = texture2D(tDiffuse, vUv).rgb;
+      float ca = 0.0012 * smoothstep(0.45, 1.0, r) * uFringe;
+      if (ca > 0.00005) {
+        color.r = texture2D(tDiffuse, vUv - fromCentre * ca).r;
+        color.b = texture2D(tDiffuse, vUv + fromCentre * ca).b;
+      }
+      if (uRayStrength > 0.002) color += godRays();
 
       vec3 g = aces(color * uExposure);
 
@@ -174,6 +180,68 @@ const GRADE_SHADER = {
   `,
 };
 
+/** Scene-buffer scale, MSAA samples and god-ray taps per tier. */
+const TIER_SCALE = [1, 0.8, 0.64] as const;
+const TIER_SAMPLES = [4, 2, 0] as const;
+const TIER_RAY_STEPS = [28, 20, 16] as const;
+
+/** Unreal bloom whose mip chain can start an octave lower. A glow is a blur;
+ *  on the cheaper tiers computing it on a quarter of the pixels is near
+ *  invisible, and the chain is five blur passes deep, so it is the single
+ *  biggest saving in the stack. Only the lite tier halves it. */
+class LeanBloomPass extends UnrealBloomPass {
+  scale = 1;
+  override setSize(width: number, height: number): void {
+    super.setSize(Math.max(2, Math.round(width * this.scale)), Math.max(2, Math.round(height * this.scale)));
+  }
+}
+
+/**
+ * ShaderBudget — picks the PostFX/shadow tier from how the frames are actually
+ * landing. It steps DOWN quickly when the frame time sits well over budget for
+ * a couple of seconds, and steps back UP only after a long clean stretch, with
+ * a back-off that doubles every time an upgrade immediately had to be undone —
+ * so a machine on the edge settles instead of oscillating.
+ */
+export class ShaderBudget {
+  tier = 0;
+  private slow = 0;
+  private fast = 0;
+  private avg = 1 / 60;
+  private holdUp = 8;
+  private lastUpAt = -1e9;
+  private clock = 0;
+
+  /** Feed one frame. Returns true when the tier changed. */
+  sample(dt: number): boolean {
+    if (!(dt > 0) || dt > 0.25) return false; // a hitch or a background tab
+    this.clock += dt;
+    this.avg += (dt - this.avg) * 0.06;
+    if (this.avg > 1 / 42) { this.slow += dt; this.fast = 0; }
+    else if (this.avg < 1 / 57) { this.fast += dt; this.slow = 0; }
+    else { this.slow = Math.max(0, this.slow - dt); this.fast = Math.max(0, this.fast - dt * 0.5); }
+    if (this.slow > 2 && this.tier < 2) {
+      // An upgrade that could not hold: wait longer before the next one.
+      if (this.clock - this.lastUpAt < 12) this.holdUp = Math.min(120, this.holdUp * 2);
+      this.tier++;
+      this.slow = 0;
+      this.avg = 1 / 50;
+      return true;
+    }
+    if (this.fast > this.holdUp && this.tier > 0) {
+      this.tier--;
+      this.fast = 0;
+      this.lastUpAt = this.clock;
+      return true;
+    }
+    return false;
+  }
+
+  reset(): void {
+    this.tier = 0; this.slow = 0; this.fast = 0; this.avg = 1 / 60; this.holdUp = 8;
+  }
+}
+
 const _sunNdc = new THREE.Vector3();
 const _camDir = new THREE.Vector3();
 
@@ -182,8 +250,7 @@ export class PostFX {
   private readonly scene: THREE.Scene;
   private composer: EffectComposer | null = null;
   private renderPass: RenderPass | null = null;
-  private rayPass: ShaderPass | null = null;
-  private bloomPass: UnrealBloomPass | null = null;
+  private bloomPass: LeanBloomPass | null = null;
   private gradePass: ShaderPass | null = null;
   private enabled = false;
   private night = 0;
@@ -193,6 +260,8 @@ export class PostFX {
   private readonly rayColor = new THREE.Color(1, 0.9, 0.7);
   private readonly clock = new THREE.Clock();
   private readonly _size = new THREE.Vector2();
+  /** 0 full, 1 balanced, 2 lite — see the header and ShaderBudget. */
+  private tier = 0;
 
   constructor(renderer: THREE.WebGLRenderer, scene: THREE.Scene) {
     this.renderer = renderer;
@@ -255,18 +324,24 @@ export class PostFX {
       // colour and contrast, not by being too dark to play.
       this.gradePass.uniforms.uExposure.value = 1.02 + 0.3 * this.night;
     }
-    if (this.rayPass) {
-      (this.rayPass.uniforms.uSunPos.value as THREE.Vector2).copy(this.sunPos);
-      this.rayPass.uniforms.uStrength.value = this.rayStrength * 0.55;
-      (this.rayPass.uniforms.uColor.value as THREE.Color).copy(this.rayColor);
+    if (this.gradePass) {
+      const u = this.gradePass.uniforms;
+      (u.uSunPos.value as THREE.Vector2).copy(this.sunPos);
+      u.uRayStrength.value = this.rayStrength * 0.55;
+      (u.uRayColor.value as THREE.Color).copy(this.rayColor);
       const size = this.renderer.getSize(this._size);
-      this.rayPass.uniforms.uAspect.value = size.x / Math.max(1, size.y);
+      u.uAspect.value = size.x / Math.max(1, size.y);
+      u.uRaySteps.value = TIER_RAY_STEPS[this.tier];
+      u.uFringe.value = this.tier < 2 ? 1 : 0;
     }
     if (this.bloomPass) {
       // By day only the sun and the emitters bloom; after dark the bar drops
       // so the moon, fire and lava own the night.
       this.bloomPass.threshold = 1.05 - 0.55 * this.night;
       this.bloomPass.strength = 0.26 + 0.2 * this.night + 0.08 * this.golden;
+      // A half-resolution chain spreads every mip an octave wider; pull the
+      // radius in so the lite glow keeps the full tier's shape.
+      this.bloomPass.radius = this.tier > 1 ? 0.22 : 0.6;
     }
   }
 
@@ -276,11 +351,30 @@ export class PostFX {
     this.pushUniforms();
   }
 
-  /** Match a new viewport or pixel-ratio cap. Safe to call when off. */
+  /** Match a new viewport or pixel-ratio cap. Safe to call when off. The
+   *  scene buffer renders at the tier's scale of the canvas; the final pass
+   *  stretches it back up (bilinear), which on a lower tier reads as a touch
+   *  softer, not as jaggier. */
   setSize(width: number, height: number): void {
     if (!this.composer) return;
-    this.composer.setPixelRatio(this.renderer.getPixelRatio());
+    if (this.bloomPass) this.bloomPass.scale = this.tier > 1 ? 0.5 : 1;
+    this.composer.setPixelRatio(this.renderer.getPixelRatio() * TIER_SCALE[this.tier]);
     this.composer.setSize(width, height);
+  }
+
+  get currentTier(): number { return this.tier; }
+
+  /** Move to a cheaper (higher) or richer (lower) tier. MSAA is bound to the
+   *  buffer, so a change of sample count rebuilds the stack — rare by design. */
+  setTier(tier: number): void {
+    const t = Math.max(0, Math.min(2, Math.round(tier)));
+    if (t === this.tier) return;
+    const rebuild = TIER_SAMPLES[t] !== TIER_SAMPLES[this.tier];
+    this.tier = t;
+    if (!this.composer) return;
+    if (rebuild) { this.teardown(); this.build(); }
+    else this.setSize(window.innerWidth, window.innerHeight);
+    this.pushUniforms();
   }
 
   private build(): void {
@@ -290,14 +384,12 @@ export class PostFX {
     // context's own MSAA never resolves anything.
     const target = new THREE.WebGLRenderTarget(size.x, size.y, {
       type: THREE.HalfFloatType,
-      samples: 4,
+      samples: TIER_SAMPLES[this.tier],
     });
     const composer = new EffectComposer(this.renderer, target);
     this.renderPass = new RenderPass(this.scene, new THREE.PerspectiveCamera());
     composer.addPass(this.renderPass);
-    this.rayPass = new ShaderPass(GODRAY_SHADER);
-    composer.addPass(this.rayPass);
-    this.bloomPass = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.26, 0.6, 1.05);
+    this.bloomPass = new LeanBloomPass(new THREE.Vector2(size.x, size.y), 0.26, 0.6, 1.05);
     composer.addPass(this.bloomPass);
     this.gradePass = new ShaderPass(GRADE_SHADER);
     composer.addPass(this.gradePass);
@@ -314,7 +406,6 @@ export class PostFX {
     this.composer?.dispose();
     this.composer = null;
     this.renderPass = null;
-    this.rayPass = null;
     this.bloomPass = null;
     this.gradePass = null;
   }

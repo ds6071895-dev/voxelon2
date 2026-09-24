@@ -24,8 +24,9 @@ import {
   relocateMachine, igniteWell, machineCanClaim, depositInto, HOPPER_SIDES, totalStored,
 } from './machines';
 import { ItemEntities, itemGeometry } from './itementity';
+import { BOAT_SIT_SINK, boatArmPose, createBoatRig, updateBoatRig } from './boatmodel';
 import { createGunModel, gunFeel, isGunItem, poseGunModel } from './gunmodels';
-import { createGadgetModel, isModeledGadget, poseGadgetModel } from './gadgetmodels';
+import { createGadgetModel, isModeledGadget, isOneHandModel, isThrowableModel, poseGadgetModel } from './gadgetmodels';
 import { ChatBox } from './chat';
 import { Chests } from './chests';
 import { Mob, Mobs } from './mobs';
@@ -61,7 +62,7 @@ import { TurretModels } from './turretmodels';
 import { TurretDefense } from './turret_defense';
 import {
   RemotePlayers, SEAT_SINK, anchorTiltedBody, applyAvatarSneak, buildAvatarBody,
-  buildArmorOverlay, disposeAvatarBody, stridePose, AvatarBody,
+  buildArmorOverlay, disposeAvatarBody, stridePose, AvatarBody, poseGunHold, releaseGunHold,
 } from './remoteplayers';
 import {
   GliderRig, RIG_HARNESS_Y, buildGliderRig, glidePose, poseGliderRig,
@@ -105,8 +106,8 @@ import {
 import {
   PARTY_AMBIENT_LIGHT, PARTY_MAX_HEALTH, PARTY_FLOOR_Y, PARTY_VOID_Y,
   BRIDGE_TEAM_BLOCK, BRIDGE_TEAM_NAME, BRIDGE_GOAL_LIMIT,
-  BRIDGE_MELEE_TIER, BRIDGE_BOW_COOLDOWN_MS,
-  bridgeGoalGuard, clampToPartySub, registerPartyArena, parkourCourse,
+  BRIDGE_MELEE_TIER, BRIDGE_BOW_COOLDOWN_MS, BRIDGE_GOALS,
+  bridgeCageSpawn, bridgeGoalGuard, clampToPartySub, registerPartyArena, parkourCourse,
   type PartyLobbySnapshot, type PartyMode, type PartySubBounds,
 } from './partygames';
 import { PartyUI } from './party_ui';
@@ -136,12 +137,13 @@ import {
   MAX_HEARTS, START_HEARTS, WITHDRAW_FLOOR, canConsume, canWithdraw,
   clampHearts, formatRemaining, maxHealthFor,
 } from './hearts';
-import { DAY_LENGTH, Sky, WATER_FOG_COLOR } from './sky';
+import { DAY_LENGTH, Sky } from './sky';
 import { Survival } from './survival';
 import { createAtlas, createCrackTextures } from './textures';
 import { World, RENDER_DISTANCE, DEFAULT_RENDER_DISTANCE } from './world';
 import { Panorama } from './panorama';
-import { PostFX } from './postfx';
+import { PostFX, ShaderBudget } from './postfx';
+import { UnderwaterMotes } from './underwater';
 import { SunShadow } from './shadows';
 import { createHudMods } from './hud_mods';
 import type { HudModData } from './hud_mods';
@@ -157,11 +159,12 @@ import {
   ENCOUNTER_VICTORY_CINEMATIC_SECONDS, bossMaxHp, sealContains,
 } from './vault_encounter';
 import {
-  GRAPHICS_PRESETS, MAX_LOOK_SENSITIVITY, MIN_LOOK_SENSITIVITY,
+  GRAPHICS_ORDER, GRAPHICS_PRESETS, MAX_LOOK_SENSITIVITY, MIN_LOOK_SENSITIVITY,
   VaultBossHUD, VaultCinematic, loadAccessibility, saveAccessibility,
 } from './vault_presentation';
 import type { GraphicsQuality } from './vault_presentation';
 import { VaultEncounterVisuals } from './vault_visuals';
+import { VaultBeacons } from './vault_beacons';
 import {
   applyHudTheme, createHudSettingsPanel, keyLabel, loadHudSettings, saveHudSettings,
 } from './hud_settings';
@@ -169,8 +172,15 @@ import {
 // Fog is pinned to the live render distance so lowering graphics quality hides
 // the shorter view behind fog instead of behind a hard edge of missing chunks.
 // Recomputed by applyGraphicsQuality().
-let FOG_NEAR = DEFAULT_RENDER_DISTANCE * 16 - 38;
-let FOG_FAR = DEFAULT_RENDER_DISTANCE * 16 - 6;
+function fogEnd(radius: number): number {
+  // Keep a margin inside the loaded edge without hiding a quarter of the view.
+  return Math.max(4, radius * 16 * 0.9 - 4);
+}
+let FOG_FAR = fogEnd(DEFAULT_RENDER_DISTANCE);
+function fogStart(far: number): number {
+  return far * 0.55;
+}
+let FOG_NEAR = fogStart(FOG_FAR);
 // Only this nearby bubble blocks entry. The old startup path waited for the
 // complete 17x17 render area (289 expensive light+mesh jobs) before Play could
 // proceed, even though collision only needs the chunks immediately around the
@@ -288,6 +298,10 @@ const scene = new THREE.Scene();
 // The `max` preset's shader stack. Inert (and holding no buffers) until a
 // preset with `shaders: true` is applied — see applyGraphicsQuality.
 const postfx = new PostFX(renderer, scene);
+const underwaterMotes = new UnderwaterMotes(scene);
+// Keeps the shader preset playable on weak GPUs: measures frame times and moves
+// PostFX + the sun shadow between their full / balanced / lite tiers.
+const shaderBudget = new ShaderBudget();
 const vaultEncounterVisuals = new VaultEncounterVisuals(scene);
 scene.background = new THREE.Color();
 scene.fog = new THREE.Fog(new THREE.Color(), FOG_NEAR, FOG_FAR);
@@ -1186,26 +1200,10 @@ function updateGrappleAim(controlling: boolean): void {
 let boatActive = false;
 let boatGroundTime = 0; // seconds beached (auto-dismount)
 let prevBoatJump = false;
-/** The local hull mesh (follows the player while boating). */
-const boatGroup = (() => {
-  const g = new THREE.Group();
-  const hull = new THREE.MeshBasicMaterial({ color: 0x7c5f38 });
-  const dark = new THREE.MeshBasicMaterial({ color: 0x54401f });
-  const floor = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.18, 2.0), dark);
-  floor.position.y = 0.09;
-  const railL = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.36, 2.0), hull);
-  railL.position.set(-0.55, 0.3, 0);
-  const railR = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.36, 2.0), hull);
-  railR.position.set(0.55, 0.3, 0);
-  const bow = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.42, 0.16), hull);
-  bow.position.set(0, 0.34, -1.0); // -z = forward at yaw 0
-  const stern = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.36, 0.16), hull);
-  stern.position.set(0, 0.3, 1.0);
-  g.add(floor, railL, railR, bow, stern);
-  g.visible = false;
-  scene.add(g);
-  return g;
-})();
+/** Your rowing boat — the same model (and stroke) everyone else sees. */
+const boatRig = createBoatRig();
+const boatGroup = boatRig.group;
+scene.add(boatGroup);
 
 /** Right-clicked holding a Boat: find a water-surface cell along the aim
  *  (block raycasts skip water, so we walk the ray ourselves) and hop in. */
@@ -1229,6 +1227,7 @@ function tryLaunchBoat(): void {
     player.gliding = false;
     player.boating = true;
     boatGroup.visible = true;
+    boatRig.prevYaw = player.yaw;
     audio.splash();
     showNotice('⛵ Boat launched! Look + W to row · jump to hop out');
     return;
@@ -2174,8 +2173,8 @@ window.addEventListener('resize', () => {
 function applyGraphicsQuality(quality: GraphicsQuality): void {
   const preset = GRAPHICS_PRESETS[quality];
   world.renderDistance = Math.max(2, Math.min(RENDER_DISTANCE, preset.renderDistance));
-  FOG_NEAR = world.renderDistance * 16 - 38;
-  FOG_FAR = world.renderDistance * 16 - 6;
+  FOG_FAR = fogEnd(world.renderDistance);
+  FOG_NEAR = fogStart(FOG_FAR);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, preset.pixelRatioCap));
   renderer.setSize(window.innerWidth, window.innerHeight);
   // Smooth lighting is baked into the chunk geometry, so this queues a remesh
@@ -2186,7 +2185,13 @@ function applyGraphicsQuality(quality: GraphicsQuality): void {
   // The rest of the shader preset: cast sun shadows and give the cloud decks
   // their volumetric shading. Both are inert on every preset below `max`.
   sunShadow.setEnabled(preset.shaders);
+  // A fresh preset starts at full quality; the budget steps it down only if
+  // this machine actually cannot hold the frame rate.
+  shaderBudget.reset();
+  postfx.setTier(0);
+  sunShadow.setTier(0);
   sky.setShaders(preset.shaders);
+  sky.setDetail(GRAPHICS_ORDER.indexOf(quality) <= GRAPHICS_ORDER.indexOf('medium') ? 1 : 0);
   world.shaderModeUniform.value = preset.shaders ? 1 : 0;
 }
 
@@ -5833,14 +5838,28 @@ const healUse = new HealUse();
 let healGlow = 0;      // 0..1 vignette strength (decays; pulses on each heal tick)
 let healBuff = 0;      // seconds of accelerated regen left (visual only)
 let heartsSqueeze = 0; // seconds left of the hearts-bar squeeze
+const healTallyEl = document.getElementById('heal-tally') as HTMLDivElement;
+const healBurstEl = document.getElementById('heal-burst') as HTMLDivElement;
+let healBeatCount = 0; // work beats landed in the current application
+let healMedkitBuff = false; // the running buff came from a medkit
+let healTally = 0;     // health restored by the running buff (the big counter)
+let healTallyFade = 0; // seconds the finished tally lingers before fading
+let healTickStep = 0;  // rising-ladder index for the medkit's refill ticks
+let healSpiralT = 0;   // cadence of the medkit's helix motes
+let healPulseT = 0;    // cadence of the medkit's afterglow heartbeat
+let fovPunch = 0;      // degrees taken off the FOV by a "focus" punch (medkit stim, axe crit)
+let useBarDoneT = 0;   // seconds the completed use bar holds its flash
 
-/** Floating "+N" above the health bar whenever the buff restores health. */
-function showHealPopup(amount: number): void {
-  const el = document.createElement('div');
-  el.className = 'heal-pop mc-font';
-  el.textContent = `+${amount}`;
-  app.appendChild(el);
-  window.setTimeout(() => el.remove(), 1000);
+/** The running total above the hearts: one number counting up, bumped on
+ *  every point, rather than a scatter of separate "+1"s. */
+function renderHealTally(): void {
+  if (healTally <= 0) { healTallyEl.dataset.show = ''; return; }
+  healTallyEl.dataset.show = '1';
+  healTallyEl.dataset.medkit = healMedkitBuff ? '1' : '';
+  healTallyEl.textContent = `+${healTally}`;
+  healTallyEl.classList.remove('bump');
+  void healTallyEl.offsetWidth; // restart the bump animation
+  healTallyEl.classList.add('bump');
 }
 
 /** Right-click a held Bandage/Medkit: begin applying it. */
@@ -5854,7 +5873,12 @@ function beginHealUse(): void {
     return;
   }
   healUse.start(stack.id, inventory.selected);
-  audio.healStart(stack.id === Item.Medkit);
+  healBeatCount = 0;
+  useBarDoneT = 0;
+  const medkit = stack.id === Item.Medkit;
+  audio.healStart(medkit);
+  useBarEl.dataset.medkit = medkit ? '1' : '';
+  useBarEl.classList.remove('done');
   held.swing(); // the hand reaches for it before the wrap animation takes over
 }
 
@@ -5881,9 +5905,30 @@ function finishHealUse(id: number): void {
   showNotice(`${ITEMS[id]?.name ?? 'Heal'} applied — regenerating fast!`);
   audio.heal(medkit);
   healBuff = heal.duration;
-  healGlow = Math.max(healGlow, medkit ? 0.9 : 0.65);
-  heartsSqueeze = 0.16;
-  particles.heal(player.pos.x, player.pos.y + 1, player.pos.z, medkit ? 22 : 14, medkit);
+  healMedkitBuff = medkit;
+  healTally = 0;
+  healTickStep = 0;
+  healTallyFade = 0;
+  healGlow = Math.max(healGlow, medkit ? 1 : 0.65);
+  heartsSqueeze = medkit ? 0.3 : 0.16;
+  useBarDoneT = 0.42;
+  useBarEl.classList.add('done');
+  particles.heal(player.pos.x, player.pos.y + 1, player.pos.z, medkit ? 30 : 14, medkit);
+  if (medkit) {
+    // The stim going in: a shockwave ring at the waist, the view snapping into
+    // focus and back, a heavy thud through the camera and a bright ring across
+    // the screen. (Motion-sensitive players keep the sound and the numbers.)
+    particles.healRing(player.pos.x, player.pos.y + 0.9, player.pos.z);
+    fovPunch = accessibility.reducedMotion ? 0 : 7;
+    triggerEncounterShake(0.18, 0.05);
+    if (!accessibility.photosensitivitySafe) {
+      healBurstEl.classList.remove('go');
+      void healBurstEl.offsetWidth;
+      healBurstEl.classList.add('go');
+    }
+    healSpiralT = 0;
+    healPulseT = 0.9;
+  }
   pushStateSave();
 }
 
@@ -5895,22 +5940,54 @@ function updateHealFeel(dt: number, active: boolean): void {
     if (!active || inventory.selected !== healUse.slot || stack?.id !== healUse.itemId) {
       cancelHealUse();
     } else {
+      const medkit = healUse.itemId === Item.Medkit;
       const step = healUse.tick(dt);
       for (let i = 0; i < step.beats; i++) {
-        audio.healBeat(i);
-        particles.heal(player.pos.x, player.pos.y + 1.1, player.pos.z, 3);
+        audio.healBeat(healBeatCount++, medkit);
+        particles.heal(player.pos.x, player.pos.y + 1.1, player.pos.z, medkit ? 5 : 3, medkit);
+        useBarEl.classList.remove('beat');
+        void useBarEl.offsetWidth;
+        useBarEl.classList.add('beat');
       }
       if (step.done) finishHealUse(step.item);
     }
   }
 
-  // Use bar under the crosshair.
+  // Use bar under the crosshair. On completion it holds full for a beat and
+  // flashes, so the moment of "done" is seen as well as heard.
+  useBarDoneT = Math.max(0, useBarDoneT - dt);
   if (healUse.active) {
     useBarEl.style.display = 'block';
     useBarFill.style.width = `${(healUse.progress * 100).toFixed(1)}%`;
-    useBarLabel.textContent = (ITEMS[healUse.itemId]?.name ?? 'Applying').toUpperCase();
+    const name = (ITEMS[healUse.itemId]?.name ?? 'Applying').toUpperCase();
+    const left = Math.max(0, healUse.duration - healUse.elapsed);
+    useBarLabel.textContent = `${name} · ${left.toFixed(1)}s`;
+  } else if (useBarDoneT > 0) {
+    useBarFill.style.width = '100%';
+    useBarLabel.textContent = healMedkitBuff ? 'STIM IN — REGENERATING' : 'APPLIED';
   } else {
     useBarEl.style.display = 'none';
+    useBarEl.classList.remove('done');
+  }
+
+  // The medkit's regen is something you are visibly and audibly inside: a
+  // rising helix of crosses and a slow heartbeat that calms as it runs out.
+  if (healBuff > 0 && healMedkitBuff) {
+    healSpiralT -= dt;
+    if (healSpiralT <= 0) {
+      healSpiralT = 0.09;
+      particles.healSpiral(player.pos.x, player.pos.y + 0.15, player.pos.z, worldTimeLocal * 5.5);
+    }
+    healPulseT -= dt;
+    if (healPulseT <= 0) {
+      healPulseT = 0.95 + (1 - healBuff / 8) * 0.5;
+      audio.healPulse(1 - healBuff / 8);
+    }
+  }
+  fovPunch = Math.max(0, fovPunch - dt * 18);
+  if (healBuff <= 0 && healTally > 0) {
+    healTallyFade += dt;
+    if (healTallyFade > 1.4) { healTally = 0; healTallyEl.dataset.show = ''; }
   }
 
   // Green vignette: a strong pop on application that settles into a slow
@@ -5934,11 +6011,13 @@ function updateHealFeel(dt: number, active: boolean): void {
 /** Health went UP: while a bandage/medkit buff is running, sell every point. */
 function onHealthRestored(amount: number): void {
   if (healBuff <= 0 || amount <= 0) return;
-  showHealPopup(amount);
-  audio.healTick(1 + Math.min(0.5, player.health / Math.max(1, player.maxHealth)));
+  healTally += amount;
+  renderHealTally();
+  if (healMedkitBuff) audio.healTick(1, healTickStep++);
+  else audio.healTick(1 + Math.min(0.5, player.health / Math.max(1, player.maxHealth)));
   healGlow = Math.min(1, healGlow + 0.22);
   heartsSqueeze = 0.16;
-  particles.heal(player.pos.x, player.pos.y + 1, player.pos.z, 4);
+  particles.heal(player.pos.x, player.pos.y + 1, player.pos.z, 4, healMedkitBuff);
 }
 
 /** Right-click a held Heart: +1 max heart (server-validated online). */
@@ -6124,6 +6203,8 @@ const vaultViews = new Map<string, VaultView>();
 let curVault: VaultStamp | null = null;
 let bruteMob: Mob | null = null;
 let bossVictoryTimer = 0;
+let bossHpSeen = 0;
+let bossHpSeenFor = '';
 const bossRenderTarget = new THREE.Vector3();
 let localVaultEncounter: VaultEncounter | null = null;
 let localEncounterVaultKey: string | null = null;
@@ -6209,9 +6290,7 @@ function discoveredList(): { key: string; x: number; z: number; tier: number }[]
   }
   return discoveredVaults!;
 }
-// Every vault ENTRANCE in the world (one cached sweep — the layout is fixed for
-// the seed). Vaults were too hard to find blind, so entrances within
-// Every vault in the seed (for proximity sensing and the "found X / Y" count).
+// Every vault entrance in the seed, cached for proximity sensing and discovery.
 let allVaults: { cx: number; cz: number; x: number; z: number; tier: number }[] | null = null;
 function allVaultsList(): { cx: number; cz: number; x: number; z: number; tier: number }[] {
   if (!allVaults) allVaults = worldVaults(seed, world.terrain);
@@ -6219,39 +6298,18 @@ function allVaultsList(): { cx: number; cz: number; x: number; z: number; tier: 
 }
 function totalVaults(): number { return allVaultsList().length; }
 
-// Vault entrances currently within reveal range (recomputed as the player roams).
-let nearbyVaults: { cx: number; cz: number; x: number; z: number; tier: number }[] = [];
+// Nearby vaults get an in-world beacon, independent of chunk streaming.
 let nearbyVaultKey = '';
+const vaultBeacons = new VaultBeacons(scene);
 
-// A faint light column at each nearby entrance so you can SPOT it in-world once
-// the map has pointed you to the area. Shared geo + material (never disposed).
-const vaultBeamGroup = new THREE.Group();
-scene.add(vaultBeamGroup);
-const VAULT_BEAM_GEO = new THREE.CylinderGeometry(0.6, 0.6, 70, 8, 1, true);
-const VAULT_BEAM_MAT = new THREE.MeshBasicMaterial({
-  color: 0x9a6aff, transparent: true, opacity: 0.14, depthWrite: false,
-  side: THREE.DoubleSide,
-});
-function rebuildVaultBeams(): void {
-  while (vaultBeamGroup.children.length > nearbyVaults.length) vaultBeamGroup.children.pop();
-  while (vaultBeamGroup.children.length < nearbyVaults.length) {
-    vaultBeamGroup.add(new THREE.Mesh(VAULT_BEAM_GEO, VAULT_BEAM_MAT));
-  }
-  nearbyVaults.forEach((v, i) => {
-    const gy = world.terrain.height(Math.round(v.x), Math.round(v.z));
-    (vaultBeamGroup.children[i] as THREE.Mesh).position.set(v.x + 0.5, gy + 35, v.z + 0.5);
-  });
-}
-
-/** Recompute the reveal set; rebuild the beams + map only when it changes. */
+/** Recompute the beacon set only when nearby vaults change. */
 function updateNearbyVaults(): void {
   const near = allVaultsList().filter((v) =>
-    Math.hypot(v.x - player.pos.x, v.z - player.pos.z) <= VAULT_REVEAL);
+    Math.hypot(v.x - player.pos.x, v.z - player.pos.z) <= VAULT_REVEAL + 20);
   const key = near.map((v) => `${v.cx},${v.cz}`).join('|');
   if (key === nearbyVaultKey) return;
   nearbyVaultKey = key;
-  nearbyVaults = near;
-  rebuildVaultBeams();
+  vaultBeacons.setSites(near, (x, z) => world.terrain.height(Math.round(x), Math.round(z)));
 }
 
 
@@ -6681,6 +6739,19 @@ function updateVaults(dt: number): void {
     bruteMob.pos.lerp(bossRenderTarget, Math.min(1, dt *
       (encounterSnapshot.movement ? 8 : 12)));
     bruteMob.model.group.position.copy(bruteMob.pos);
+    // Every drop in the SHARED health — yours, a teammate's, a turret's —
+    // flinches the body red, and a big chunk throws sparks off it, so the boss
+    // visibly takes the damage the bar says it took.
+    const hpNow = encounterSnapshot.hp;
+    if (bossHpSeenFor === encounterSnapshot.encounterId && hpNow < bossHpSeen - 0.5) {
+      bruteMob.hurtTime = Math.max(bruteMob.hurtTime, 0.14);
+      if (bossHpSeen - hpNow >= encounterSnapshot.maxHp * 0.015) {
+        particles.burst(bruteMob.pos.x, bruteMob.pos.y + bruteMob.height * 0.6, bruteMob.pos.z,
+          8, 0xfff2c8, 5, 0.35, { gravity: 9, spread: 1.2, scale: 0.8 });
+      }
+    }
+    bossHpSeen = hpNow;
+    bossHpSeenFor = encounterSnapshot.encounterId;
   }
   // The Brute prowls its loot room whenever the vault is uncleared.
   if (view?.alive && !bruteMob && !player.dead) {
@@ -7355,6 +7426,10 @@ net.onWarEnd = (winner, score) => {
   }
 };
 net.onGadgetFx = (kind, x, y, z) => gadgetFxAt(kind, x, y, z);
+net.onGadgetThrown = (_id, item, x, y, z, vx, vy, vz) => {
+  if (!isThrowableModel(item) || ![x, y, z, vx, vy, vz].every(Number.isFinite)) return;
+  launchThrown(item, new THREE.Vector3(x, y, z), new THREE.Vector3(vx, vy, vz), 4, null);
+};
 net.onDisguised = (id, faction) => {
   // A remote player is disguised: re-skin their avatar to the shown faction for
   // the disguise window, remembering their real faction to restore afterward.
@@ -7981,11 +8056,18 @@ net.onPartyHit = (target, amount, combo, _charge, crit, killed, ranged) => {
   const at = remote ? new THREE.Vector3(remote.tx, remote.ty + 1.1, remote.tz) : undefined;
   if (ranged) audio.arrowHit(crit, at);
   else {
-    audio.axeHit(crit, at);
-    held.meleeImpact(crit);
+    // The contact already played on the click (see updatePartyWeapon). The
+    // confirm only adds what the client could not know: the crit, the kill.
+    const predicted = partyPredicted.id === target && performance.now() - partyPredicted.at < 450;
+    partyPredicted.id = -1;
+    if (!predicted || crit) audio.axeHit(crit, at);
+    if (!predicted) held.meleeImpact(crit);
+    else if (crit) held.meleeImpact(true);
     if (at) particles.burst(at.x, at.y, at.z, crit ? 16 : 8,
       crit ? 0xffd25e : 0xd8edf5, crit ? 3 : 2, .25,
       { gravity: 4, spread: .3, scale: .25 });
+    if (crit && !accessibility.reducedMotion) fovPunch = Math.max(fovPunch, 3);
+    if (crit || killed) triggerEncounterShake(0.12, crit ? 0.012 : 0.02);
   }
   // Confirm movement crits and consecutive hits without a recharge meter.
   if (!killed && (crit || combo > 0))
@@ -8037,6 +8119,11 @@ function startPartyReadyWatchdog(x: number, z: number): void {
 /** Predict responsive weapon motion; the server validates every contact and
  * flies every arrow. Neither weapon gains power from waiting. */
 const PARTY_MELEE_REACH = 4.2;
+/** The last axe contact this client PREDICTED, so the server's confirm does
+ *  not play the same chop twice. */
+const partyPredicted = { id: -1, at: 0 };
+const axeIndicatorEl = document.getElementById('axe-indicator') as HTMLDivElement;
+const axeIndicatorFill = axeIndicatorEl.firstElementChild as HTMLElement;
 let partySwingAt = -1e9;
 let partyShotAt = -1e9;
 /** Shut in the drop cage: the opening countdown, and the three seconds after
@@ -8068,6 +8155,23 @@ function updatePartyWeapon(heldId: number, lookDir: THREE.Vector3, eye: THREE.Ve
     // positions, so the only thing a loose client test can do is stop a swing
     // that would have landed from never being sent at all.
     let target = remotePlayers.rayHit(eye, lookDir, PARTY_MELEE_REACH);
+    if (target >= 0 && !net.remotes.get(target)?.dead) {
+      // The crosshair is ON them: land the chop now — sound, flinch, sparks,
+      // hand kick — instead of a round-trip later. The server still decides
+      // the damage and the knockback; its confirm adds the number (and a crit
+      // or kill if there was one), never a second chop.
+      const body = remotePlayers.renderedPos(target);
+      const r = net.remotes.get(target)!;
+      const at = new THREE.Vector3(body?.x ?? r.tx, (body?.y ?? r.ty) + 1.1, body?.z ?? r.tz);
+      audio.axeContact(player.sprinting, at);
+      remotePlayers.hurtFlash(target, 0.45);
+      held.meleeImpact(false);
+      particles.burst(at.x, at.y, at.z, player.sprinting ? 7 : 4, 0xf4f0e8, 2.2, .22,
+        { gravity: 5, spread: .3, scale: .28 });
+      triggerEncounterShake(0.07, player.sprinting ? 0.007 : 0.004);
+      partyPredicted.id = target;
+      partyPredicted.at = now;
+    }
     if (target < 0) {
       // The cone is measured flat, the way the server measures it: looking
       // steeply down at somebody is still looking at them.
@@ -8108,13 +8212,68 @@ function updatePartyFrame(dt: number): void {
     resetPartyWeaponPose();
   if (arenaKind !== 'party' || !partySnapshot) {
     partyVisuals.updateArrows(dt);
+    axeIndicatorEl.style.display = 'none';
     return;
   }
   const now = partyNow();
   partyUI.update(performance.now(), now);
   partyVisuals.update(partySnapshot, net.myId, now);
   partyVisuals.updateArrows(dt);
+  updateAxeIndicator();
 }
+
+/** Under the crosshair while the Bridge axe is out: a bar that refills over
+ *  the swing cadence, and turns red when somebody is inside your reach AND in
+ *  your sights — so you swing when it lands, not a step too early. */
+function updateAxeIndicator(): void {
+  const show = partyWeaponsActive() && screen === 'playing' && view === View.First &&
+    inventory.selectedStack?.id === Item.IronAxe;
+  axeIndicatorEl.style.display = show ? 'block' : 'none';
+  if (!show) return;
+  const ready = Math.min(1, (performance.now() - partySwingAt) / BRIDGE_MELEE_TIER.cooldownMs);
+  axeIndicatorFill.style.width = `${Math.round(ready * 100)}%`;
+  axeIndicatorEl.classList.toggle('ready', ready >= 1);
+  camera.getWorldDirection(axeLook);
+  const inReach = remotePlayers.rayHit(camera.position, axeLook, PARTY_MELEE_REACH) >= 0;
+  axeIndicatorEl.classList.toggle('reach', inReach);
+}
+const axeLook = new THREE.Vector3();
+
+// The Bridge's big beats: the count, the drop, the goal.
+partyUI.onCountTick = (n, kind) => {
+  audio.bridgeCount(n, kind === 'reset');
+};
+partyUI.onGo = () => {
+  audio.bridgeGo();
+  const sub = partySub;
+  if (!sub || sub.game !== 'bridge') return;
+  // The cage fields come down: a shower of shards off both pods.
+  for (const team of [0, 1]) {
+    const c = bridgeCageSpawn(sub, team, 0);
+    const color = team === 0 ? 0xff5f76 : 0x5aa8ff;
+    particles.burst(c.x, c.y + 1.2, c.z, 26, color, 6, 0.8, { gravity: 9, spread: 4.6, scale: 0.7 });
+    particles.burst(c.x, c.y + 1.2, c.z, 10, 0xffffff, 4, 0.5, { gravity: 6, spread: 4, scale: 0.45 });
+  }
+  triggerEncounterShake(0.18, 0.02);
+};
+partyUI.onGoal = (ours, team, matchPoint) => {
+  audio.bridgeGoal(ours, matchPoint);
+  triggerEncounterShake(0.35, ours ? 0.03 : 0.018);
+  const sub = partySub;
+  if (!sub) return;
+  // Fireworks over the portal that was scored in.
+  const portal = BRIDGE_GOALS.find((g) => g.team !== team);
+  if (!portal) return;
+  const color = team === 0 ? 0xff5f76 : 0x5aa8ff;
+  const x = sub.minX + (portal.minX + portal.maxX) / 2, z = sub.minZ + (portal.minZ + portal.maxZ) / 2;
+  for (let i = 0; i < 5; i++) {
+    const a = (i / 5) * Math.PI * 2;
+    window.setTimeout(() => {
+      particles.burst(x + Math.cos(a) * 3, PARTY_FLOOR_Y + 5 + i * 1.3, z + Math.sin(a) * 3, 22,
+        i % 2 ? 0xffffff : color, 8, 1.1, { gravity: 5, spread: 0.6, scale: 0.8 });
+    }, i * 140);
+  }
+};
 
 net.connect();
 
@@ -8278,7 +8437,7 @@ function updateCamera(): void {
   // which is most of what makes going fast FEEL fast. (updateCamera already
   // eases toward the target, so no extra smoothing is needed here.)
   const base = player.sprinting ? SPRINT_FOV : FOV;
-  const targetFov = base / aimZoom + (aimZoom > 1 ? 0 : speedFov);
+  const targetFov = base / aimZoom + (aimZoom > 1 ? 0 : speedFov) - fovPunch;
   // Sights and the zoom key stack: scoping a rifle while zoomed magnifies both.
   player.lookScale = aimZoom * zoomAmount > 1
     ? Math.max(0.1, 1 / (aimZoom * zoomAmount)) : 1;
@@ -8517,7 +8676,7 @@ function updateSelfAvatar(dt: number): void {
         mesh.rotation.set(-0.5, 0, 0);
         mesh.scale.setScalar(ITEMS[heldId].kind === 'block' ? 1.5 : 1.1);
       }
-      b.parts[3].add(mesh); // right hand
+      (isGunItem(heldId) ? b.group : b.parts[3]).add(mesh); // guns: two-handed on the body
       selfHeldMesh = mesh;
     }
   }
@@ -8530,15 +8689,22 @@ function updateSelfAvatar(dt: number): void {
   }
 
   // Pose: the same glide/boat/stride/crouch poses the remote avatars use.
+  releaseGunHold(b);
+  if (selfHeldMesh && isGunItem(selfHeldId)) {
+    selfHeldMesh.visible = !(player.boating || mySeat || selfGlideT > 0.01);
+  }
   const sneakTarget = player.sneaking && !player.boating && !player.gliding ? 1 : 0;
   selfSneakT += (sneakTarget - selfSneakT) * Math.min(1, 12 * dt);
   if (player.boating || mySeat) {
     applyAvatarSneak(b, 0);
     b.group.rotation.x = 0; b.group.rotation.z = 0; b.head.rotation.x = 0;
     b.parts[0].rotation.x = 1.35; b.parts[1].rotation.x = 1.35;
-    const arms = mySeat ? 0.95 : 0.55;
+    const arms = mySeat ? 0.95 : boatArmPose(boatRig);
     b.parts[2].rotation.x = arms; b.parts[3].rotation.x = arms;
-    b.parts[2].rotation.z = 0; b.parts[3].rotation.z = 0;
+    const armRoll = player.boating && !mySeat ? 0.12 : 0;
+    b.parts[2].rotation.z = armRoll; b.parts[3].rotation.z = -armRoll;
+    // Sit on the thwart and ride the boat's bob.
+    if (player.boating && !mySeat) b.group.position.y = player.pos.y - BOAT_SIT_SINK + boatRig.bobY;
     // The seat banks and pitches with the helicopter. Inheriting its complete
     // attitude keeps the rider inside the cabin when A/D rolls the airframe.
     if (mySeat) {
@@ -8573,22 +8739,16 @@ function updateSelfAvatar(dt: number): void {
     b.parts[2].rotation.z = 0;
     b.parts[3].rotation.x = pose.arms[1];
     b.parts[3].rotation.z = pose.rightArmRoll;
-    if (isGunItem(selfHeldId)) {
-      const aiming = aimZoom > 1;
+    if (isGunItem(selfHeldId) && selfHeldMesh) {
       const reloadProgress = reloadTimer > 0 && reloadDuration > 0
         ? 1 - reloadTimer / reloadDuration : -1;
-      const reloadDip = reloadProgress >= 0 ? Math.sin(reloadProgress * Math.PI) : 0;
-      const raise = 0.9 + (aiming ? 0.42 : 0);
-      const kick = held.recoilAmount();
-      b.parts[2].rotation.x = raise + kick * 0.1 - reloadDip * 0.25;
-      b.parts[3].rotation.x = raise + 0.1 + kick * 0.18 - reloadDip * 0.35;
-      b.parts[2].rotation.z = -0.42 + (aiming ? 0.12 : 0);
-      b.parts[3].rotation.z = 0.08 + reloadDip * 0.5;
-      if (selfHeldMesh) {
-        selfHeldMesh.rotation.x = -(raise + 0.1) + player.pitch;
-        selfHeldMesh.rotation.z = -reloadDip * 0.45;
-      }
-    } else if (isModeledGadget(selfHeldId)) {
+      poseGunHold(b, selfHeldMesh, {
+        pitch: player.pitch,
+        aim: aimZoom > 1 ? 1 : 0,
+        reload: reloadProgress >= 0 ? Math.sin(reloadProgress * Math.PI) : 0,
+        kick: held.recoilAmount(),
+      });
+    } else if (isModeledGadget(selfHeldId) && !isOneHandModel(selfHeldId)) {
       const action = held.recoilAmount();
       b.parts[2].rotation.x = 0.45 + action * 0.18;
       b.parts[3].rotation.x = 0.62 + action * 0.48;
@@ -8681,8 +8841,9 @@ function updateGliderRig(dt: number): void {
 
 /** Scratch colour for the underwater fog tint (per-frame; not allocated). */
 const waterFogTint = new THREE.Color();
+let outdoorFogFar: number | null = null;
 
-function updateAtmosphere(activeCamera: THREE.Camera): void {
+function updateAtmosphere(activeCamera: THREE.Camera, dt: number): void {
   // Every light the terrain is lit by — the sun or moon, the dome's ambient,
   // the horizon it fogs into — is measured off the sky the player can see.
   world.applySky(sky, !player.eyeUnderwater && !curVault);
@@ -8691,15 +8852,27 @@ function updateAtmosphere(activeCamera: THREE.Camera): void {
   // inside float32's comfortable range (the world clock is days since epoch).
   world.timeUniform.value = (performance.now() / 1000) % 4096;
   const fog = scene.fog as THREE.Fog;
+  if (player.eyeUnderwater || arenaActive || curVault) outdoorFogFar = null;
+  world.underwaterUniform.value.x = player.eyeUnderwater ? 1 : 0;
+  underwaterMotes.update(activeCamera.position, world, player.eyeUnderwater, dt, sky.sunIntensity);
   if (player.eyeUnderwater) {
     // Underwater haze takes the local water colour, so surfacing in a tropical
     // lagoon looks nothing like surfacing under polar ice.
     const wt = world.terrain.tints(Math.floor(player.pos.x), Math.floor(player.pos.z)).water;
-    waterFogTint.setRGB(0.4 + wt[0], 0.4 + wt[1], 0.4 + wt[2]);
-    fog.color.copy(WATER_FOG_COLOR).multiply(waterFogTint)
-      .multiplyScalar(0.3 + 0.7 * sky.sunIntensity);
-    fog.near = 0;
-    fog.far = 24;
+    const eye = player.eyePosition;
+    const x = Math.floor(eye.x), z = Math.floor(eye.z);
+    let surface = Math.floor(eye.y);
+    const scanEnd = surface + 48;
+    while (surface < scanEnd && world.getBlock(x, surface, z) === Block.Water) surface++;
+    world.underwaterUniform.value.y = surface - 0.125;
+    const depth = THREE.MathUtils.smoothstep(surface - eye.y, 2, 24);
+    // Keep nearby block colours intact; reserve the teal haze for distance.
+    waterFogTint.setRGB(0.08 + wt[0] * 0.12, 0.27 + wt[1] * 0.16, 0.30 + wt[2] * 0.14);
+    fog.color.copy(waterFogTint).multiplyScalar((0.55 + 0.45 * sky.sunIntensity) * (1 - depth * 0.28));
+    fog.near = 7 - depth * 3;
+    fog.far = Math.min(58 - depth * 20, FOG_FAR,
+      fogEnd(Math.max(0, world.meshedRadius(player.pos.x, player.pos.z))));
+    fog.near = Math.min(fog.near, fog.far * 0.3);
   } else if (arenaActive) {
     // The sealed room has its own clear daytime presentation. A shorter bright
     // haze softens the wall line and guarantees no distant open-world terrain
@@ -8716,17 +8889,20 @@ function updateAtmosphere(activeCamera: THREE.Camera): void {
     fog.near = 5;
     fog.far = Math.min(92, FOG_FAR);
   } else {
-    fog.color.copy(sky.skyColor);
-    // While the outer world is still streaming, pull the fog edge in to the
-    // generated bubble. Since chunks are built nearest-first, sqrt(progress)
-    // closely tracks the currently available radius. This prevents holes or
-    // pop-in without making the player wait for the full view distance.
-    const loadedRadius = Math.max(
-      INITIAL_LOAD_DISTANCE,
-      Math.sqrt(world.progress(player.pos.x, player.pos.z)) * world.renderDistance
-    );
-    fog.far = Math.min(FOG_FAR, loadedRadius * 16 - 6);
-    fog.near = Math.min(FOG_NEAR, Math.max(8, fog.far - 32));
+    fog.color.copy(sky.hazeColor);
+    // Keep the fog inside the complete ring of streamed chunks so a missing
+    // patch in one direction cannot show through the distance fade.
+    const loadedRadius = Math.max(0,
+      world.meshedRadius(player.pos.x, player.pos.z));
+    const targetFar = Math.min(FOG_FAR, fogEnd(loadedRadius));
+    // Streaming advances in whole chunks. Ease both directions so each ring
+    // doesn't push the fog back in a visible step. Close in faster when the
+    // streamer falls behind, while revealing newly loaded terrain gradually.
+    if (outdoorFogFar === null) outdoorFogFar = targetFar;
+    const responseSeconds = targetFar < outdoorFogFar ? 0.3 : 1.2;
+    outdoorFogFar += (targetFar - outdoorFogFar) * (1 - Math.exp(-dt / responseSeconds));
+    fog.far = outdoorFogFar;
+    fog.near = fogStart(fog.far);
   }
   (scene.background as THREE.Color).copy(fog.color);
 }
@@ -10338,26 +10514,38 @@ function gadgetTargetPoint(): { x: number; y: number; z: number } {
   return { x: eye.x + dir.x * 14, y: eye.y + dir.y * 14, z: eye.z + dir.z * 14 };
 }
 
-// Thrown-item visuals: a small spinning cube that arcs from your hand to the
-// detonation point, then fires its on-land effect. (frag/oil/smoke get tossed.)
-const THROW_GEO = new THREE.BoxGeometry(0.28, 0.28, 0.28);
+// Thrown-item visuals: the real grenade / smoke canister / oil bomb model arcs
+// from the hand to the detonation point, tumbling end over end, then fires its
+// on-land effect. Other players' throws fly the same arc from the launch point
+// + velocity the server relays (their blast arrives as its own gadgetFx).
 const THROW_GRAVITY = 26;
 interface ThrownItem {
-  mesh: THREE.Mesh; pos: THREE.Vector3; vel: THREE.Vector3; life: number;
-  onLand: (p: THREE.Vector3) => void;
+  mesh: THREE.Object3D; pos: THREE.Vector3; vel: THREE.Vector3; life: number;
+  spin: THREE.Vector3;
+  onLand: ((p: THREE.Vector3) => void) | null;
 }
 const thrownItems: ThrownItem[] = [];
-function tossItem(color: number, to: THREE.Vector3, onLand: (p: THREE.Vector3) => void): void {
+function launchThrown(
+  item: number, from: THREE.Vector3, vel: THREE.Vector3, life: number,
+  onLand: ((p: THREE.Vector3) => void) | null,
+): void {
+  const mesh = createGadgetModel(item);
+  mesh.scale.setScalar(0.62);
+  mesh.position.copy(from);
+  scene.add(mesh);
+  // Tumble about an axis across the flight path, like a real overhand lob.
+  const spin = new THREE.Vector3(-9 - Math.random() * 3, (Math.random() - 0.5) * 3, (Math.random() - 0.5) * 4);
+  thrownItems.push({ mesh, pos: from.clone(), vel: vel.clone(), life, spin, onLand });
+}
+function tossItem(item: number, to: THREE.Vector3, onLand: (p: THREE.Vector3) => void): void {
   const from = player.eyePosition.clone();
   const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
   from.addScaledVector(dir, 0.6); // start just past the hand
-  const mesh = new THREE.Mesh(THROW_GEO, new THREE.MeshBasicMaterial({ color }));
-  mesh.position.copy(from);
-  scene.add(mesh);
   const t = Math.max(0.35, from.distanceTo(to) / 18);
   const vel = new THREE.Vector3(
     (to.x - from.x) / t, (to.y - from.y) / t + 0.5 * THROW_GRAVITY * t, (to.z - from.z) / t);
-  thrownItems.push({ mesh, pos: from, vel, life: t + 0.5, onLand });
+  if (net.connected) net.sendGadgetThrow(item, from.x, from.y, from.z, vel.x, vel.y, vel.z);
+  launchThrown(item, from, vel, t + 0.5, onLand);
 }
 function updateThrownItems(dt: number): void {
   for (let i = thrownItems.length - 1; i >= 0; i--) {
@@ -10365,18 +10553,18 @@ function updateThrownItems(dt: number): void {
     it.vel.y -= THROW_GRAVITY * dt;
     it.pos.addScaledVector(it.vel, dt);
     it.mesh.position.copy(it.pos);
-    it.mesh.rotation.x += dt * 9; it.mesh.rotation.z += dt * 7;
+    it.mesh.rotation.x += it.spin.x * dt;
+    it.mesh.rotation.y += it.spin.y * dt;
+    it.mesh.rotation.z += it.spin.z * dt;
     it.life -= dt;
     const solid = BLOCKS[world.getBlock(Math.floor(it.pos.x), Math.floor(it.pos.y), Math.floor(it.pos.z))]?.solid ?? false;
     if (it.life <= 0 || solid) {
-      it.onLand(it.pos.clone());
-      scene.remove(it.mesh);
-      (it.mesh.material as THREE.Material).dispose();
+      it.onLand?.(it.pos.clone());
+      scene.remove(it.mesh); // shared model geometry — detach only
       thrownItems.splice(i, 1);
     }
   }
 }
-const THROW_COLOR: Record<string, number> = { frag: 0x6a9a5a, oil: 0x2a2630, smoke: 0x9aa2ae };
 
 // Held-gadget tooltip: shows the gadget name + description above the hotbar so
 // players know what a toy does and how to use it.
@@ -10451,7 +10639,8 @@ function useGadget(def: GadgetDef): void {
       // Toss the item through the air; the blast/fx fire when it lands.
       const kind = def.kind, item = def.item;
       const blastR = def.radius ?? 4;
-      tossItem(THROW_COLOR[kind] ?? 0x888888, new THREE.Vector3(tgt.x, tgt.y, tgt.z), (land) => {
+      held.swing(); // the throwing arm — also tells everyone else via the swing seq
+      tossItem(item, new THREE.Vector3(tgt.x, tgt.y, tgt.z), (land) => {
         if (net.connected) net.sendGadgetUse(item, land.x, land.y, land.z);
         gadgetFxAt(kind, land.x, land.y, land.z);
         if (kind !== 'smoke') {
@@ -11744,8 +11933,8 @@ function frame(): void {
             boatGroundTime += dt;
             if (boatGroundTime > 0.6) { exitBoat(); showNotice('You ran aground.'); }
           } else boatGroundTime = 0;
-          boatGroup.position.copy(player.pos);
-          boatGroup.rotation.y = player.yaw;
+          updateBoatRig(boatRig, dt, player.pos.x, player.pos.y, player.pos.z, player.yaw,
+            -player.vel.x * Math.sin(player.yaw) - player.vel.z * Math.cos(player.yaw));
         }
       }
     } else prevBoatJump = false;
@@ -11847,7 +12036,7 @@ function frame(): void {
   // clock, and also absorbs small authoritative clock corrections smoothly.
   sky.update(dt, activeCamera, arenaKind==='party' && partySub ? parkourTheme(partySub.seed).time : arenaActive ? 0.25 : undefined,
     !(net.connected && hasServerWorldTime));
-  updateAtmosphere(activeCamera);
+  updateAtmosphere(activeCamera, dt);
   ambientWorld.update(
     dt, player.pos, sky.sunIntensity,
     !player.eyeUnderwater && !curVault && !arenaActive,
@@ -12076,7 +12265,14 @@ function frame(): void {
   // the frame that samples it, so it can never be a frame behind the world it
   // is shading. `camera` is the eye even in third person, which keeps the box
   // centred on the player rather than on the trailing camera.
-  sunShadow.update(sky.lightDir, camera.position, sky.lightHeight, sky.moonlit);
+  sunShadow.update(sky.lightDir, camera.position, sky.lightHeight, sky.moonlit, dt);
+  if (GRAPHICS_PRESETS[accessibility.graphicsQuality].shaders && !document.hidden
+    && shaderBudget.sample(dt)) {
+    postfx.setTier(shaderBudget.tier);
+    sunShadow.setTier(shaderBudget.tier);
+  }
+  vaultBeacons.update(player.pos.x, player.pos.z, performance.now() / 1000,
+    screen === 'playing' && !arenaActive && !player.eyeUnderwater && !curVault);
   postfx.render(activeCamera);
   // Floating waypoint badges (skip the title panorama — wrong camera + covered).
   worldMap.renderBeacons(window.innerWidth, window.innerHeight);

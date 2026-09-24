@@ -1,7 +1,7 @@
 import {
   BRIDGE_CAGE_FLOOR, BRIDGE_GOALS, BRIDGE_GOAL_LIMIT, BRIDGE_GOAL_RESET_MS,
   BRIDGE_LANE_X, BRIDGE_SIZE_X, BRIDGE_SIZE_Z, BRIDGE_TEAM_BLOCK,
-  BRIDGE_MELEE_TIER, BRIDGE_BOW_COOLDOWN_MS, bridgeSwing,
+  BRIDGE_MELEE_TIER, BRIDGE_SWING_JITTER_MS, BRIDGE_BOW_COOLDOWN_MS, bridgeSwing,
   PARTY_ARENA_LOAD_TIMEOUT_MS, PARTY_CAPACITY, PARTY_COUNTDOWN_MS, PARTY_FLOOR_Y,
   PARTY_MAX_HEALTH, PARTY_RESULT_MS, PARTY_STAMP_MAX_Y, PARTY_STAMP_MIN_Y, PARTY_VOID_Y,
   PartyGamesEngine, bridgeCageHatch, bridgeCageSpawn, bridgeGoalGuard, bridgeSpawn,
@@ -477,6 +477,9 @@ function serverMatch(mode: PartyMode = 'parkour') {
     .find(o => o.to === 1 && o.msg.t === 'partyHit')?.msg;
   check('a fast follow-up has full damage and an earned combo',
     !!followup && followup.t === 'partyHit' && followup.amount >= landed!.amount && followup.combo === 1);
+  s.tickWar((BRIDGE_MELEE_TIER.cooldownMs - BRIDGE_SWING_JITTER_MS / 2) / 1000);
+  check('a swing arriving a hair early (packet jitter) still lands',
+    sends(1, { t: 'partyMelee', target: 2 }).some(o => o.to === 1 && o.msg.t === 'partyHit'));
   s.tickWar(1);
   const coverKey = `${Math.floor(a.x + .7)},${Math.floor(a.y + 1.35)},${Math.floor(a.z)}`;
   s.edits.set(coverKey, Block.TeamWoolB);

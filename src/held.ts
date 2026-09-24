@@ -299,7 +299,8 @@ export class HeldItemView {
     this.bowReleaseT = 1;
     this.isGun = id !== null && !!ITEMS[id]?.gun;
     this.isGadgetModel = id !== null && isModeledGadget(id);
-    this.isBlockItem = id !== null && ITEMS[id]?.kind === 'block';
+    // A modelled block item (the torch) is held in the fist, not floated.
+    this.isBlockItem = id !== null && ITEMS[id]?.kind === 'block' && !this.isGadgetModel;
     this.feel = gunFeel(id ?? -1);
     if (this.mesh) {
       this.pivot.remove(this.mesh);
@@ -354,7 +355,7 @@ export class HeldItemView {
         poseGadgetModel(model, 'firstPerson');
         model.traverse((o) => {
           const mesh = o as THREE.Mesh;
-          if (!mesh.isMesh) return;
+          if (!mesh.isMesh || mesh.userData.glow) return; // flames stay lit
           const mat = (mesh.material as THREE.MeshBasicMaterial).clone();
           this.modelMats.push(mat);
           mesh.material = mat;
@@ -634,7 +635,34 @@ export class HeldItemView {
     ry += this.kickYaw;
     rz += this.kickRoll;
 
-    if (healProgress >= 0) {
+    if (healProgress >= 0 && this.currentItem === Item.Medkit) {
+      // THE MEDKIT is a procedure, not a wrap: the case swings up and turns
+      // face-on (latches toward you), each beat is a firm two-handed PRESS that
+      // drives it forward and kicks back, the last third winds up — and it
+      // finishes with a slam into the chest (the stim going in) before it drops
+      // out of frame. Every phase is visible from first person, so a medkit
+      // reads as a heavy, deliberate commitment next to a bandage's quick wrap.
+      this.healClock += dt;
+      const t = Math.min(1, healProgress);
+      const lift = smoothstep(t / 0.2);
+      const wind = smoothstep((t - 0.72) / 0.14);          // pull back for the slam
+      const slam = smoothstep((t - 0.86) / 0.06);          // drive into the chest
+      const drop = smoothstep((t - 0.93) / 0.07);          // and away
+      const hold = lift * (1 - drop);
+      const beat = (this.healClock / HEAL_BEAT) % 1;
+      // A sharp attack and a slower release reads as a latch clicking home.
+      const press = hold * (1 - wind) * (beat < 0.18 ? beat / 0.18 : Math.max(0, 1 - (beat - 0.18) / 0.5));
+      const shake = hold * (1 - wind) * Math.sin(this.healClock * 47) * 0.004;
+      px += (0.02 - px) * hold - press * 0.02 + shake;
+      py += (-0.16 - py) * hold - press * 0.035 + wind * 0.06 - slam * 0.1;
+      pz += (-0.42 - pz) * hold - press * 0.07 + wind * 0.1 + slam * 0.2;
+      rx += hold * -0.2 + press * 0.28 - wind * 0.35 + slam * 0.6 + drop * 0.8;
+      ry += hold * -0.35;
+      rz += hold * 0.1 - press * 0.08 + drop * 0.9;
+      px += drop * 0.12;
+      py -= drop * 0.42;
+      this.pivot.scale.setScalar(1 + hold * (0.24 + press * 0.05 + slam * 0.08));
+    } else if (healProgress >= 0) {
       // Applying a bandage/medkit: bring the item up in front of the face,
       // work it in with a few rhythmic presses (in step with the audio beats),
       // then flick the spent wrapper away as the channel completes.

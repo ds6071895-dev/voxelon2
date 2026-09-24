@@ -178,6 +178,8 @@ const DOME_FRAG = /* glsl */`
   uniform float uSunE;
   uniform float uMoonE;
   uniform vec3 uNightBase;
+  uniform vec3 uHorizonFog;
+  uniform vec3 uHorizonFogSun;
   uniform float uNight;
   uniform float uHDR;
   uniform float uTime;
@@ -185,6 +187,7 @@ const DOME_FRAG = /* glsl */`
   uniform float uAurora;
   uniform float uAuroraTime;
   uniform float uAuroraPhase;
+  uniform float uAuroraStorm;
   varying vec3 vDir;
 
   ${ATMOSPHERE_GLSL}
@@ -220,32 +223,67 @@ const DOME_FRAG = /* glsl */`
     for (int i = 0; i < 4; i++) { s += a * vnoise3(p); p = p * 2.03 + 11.7; a *= 0.5; }
     return s;
   }
-  float fbm2(vec2 p) {
-    return vnoise(p) * 0.65 + vnoise(p * 2.07 + 19.3) * 0.35;
+
+  /**
+   * One aurora curtain: a ribbon of light hung round the sky with its lower
+   * HEM at elevation centre.
+   *
+   * The folds are a sum of sines in azimuth with INTEGER frequencies, so the
+   * curtain closes on itself round the sky with no seam — and it costs a few
+   * trig calls where the old one took five value-noise lookups. On top of it:
+   *
+   *   · rays      vertical striations that slide SIDEWAYS along the curtain,
+   *               two scales beating against each other, so it dances;
+   *   · surges    bright pulses that race along the ribbon;
+   *   · profile   brightest just above a crisp hem, feathering out upward,
+   *               the way a real curtain hangs;
+   *   · colour    oxygen green in the body, teal then violet toward the crown,
+   *               and in a SUBSTORM a magenta fringe on the hem and a deep red
+   *               crown — the rare, big nights.
+   */
+  vec3 curtain(float azim, float elev, float centre, float width,
+               float spd, float ph, float rayCount) {
+    float t = uAuroraTime;
+    float fold =
+        sin(2.0 * azim + t * spd * 2.0 + ph) * 0.15
+      + sin(3.0 * azim - t * spd * 1.3 + ph * 1.7) * 0.09
+      + sin(7.0 * azim + t * spd * 4.1 + ph * 2.3) * 0.045
+      + sin(15.0 * azim - t * spd * 7.0 + ph * 0.6) * 0.018 * (1.0 + uAuroraStorm);
+    float above = elev - (centre + fold);
+    if (above < -0.04 || above > width) return vec3(0.0);
+    float h = above / width;
+    float profile = smoothstep(-0.03, 0.012, above)
+      * (exp(-h * 2.8) * 0.85 + 0.15 * (1.0 - h)) * (1.0 - smoothstep(0.72, 1.0, h));
+    // Breaks in the ribbon, slowly drifting, so it is never a full ring.
+    float presence = smoothstep(-0.35, 0.55,
+      sin(2.0 * azim + ph * 3.1 + t * spd * 0.8) + 0.6 * sin(5.0 * azim - t * spd * 1.9 + ph));
+    if (presence <= 0.0) return vec3(0.0);
+    // Rays: fold-following phase makes them lean with the curtain.
+    float slide = t * spd * (8.0 + uAuroraStorm * 10.0);
+    float r1 = 0.5 + 0.5 * sin(rayCount * azim + slide + fold * 30.0 + ph);
+    float r2 = 0.5 + 0.5 * sin(rayCount * 2.37 * azim - slide * 1.6 + ph * 2.0);
+    r1 *= r1; r1 *= r1;
+    float rays = r1 * 0.75 + r2 * r2 * 0.35;
+    float surge = 0.55 + 0.45 * sin(3.0 * azim - t * (0.35 + uAuroraStorm * 0.9) + ph);
+    surge *= surge;
+    float flicker = 1.0 + uAuroraStorm * 0.25 * sin(t * 9.0 + azim * 37.0 + ph);
+    vec3 tint = mix(vec3(0.24, 1.00, 0.34), vec3(0.14, 0.84, 0.92), smoothstep(0.3, 0.68, h));
+    tint = mix(tint, vec3(0.58, 0.30, 1.00), smoothstep(0.58, 0.97, h));
+    tint = mix(tint, vec3(1.00, 0.20, 0.40), smoothstep(0.7, 1.0, h) * uAuroraStorm * 0.8);
+    // The hem fringe: pink-magenta, only on active nights.
+    tint = mix(tint, vec3(1.00, 0.28, 0.72), (1.0 - smoothstep(0.0, 0.07, h)) * (0.25 + uAuroraStorm * 0.75));
+    return tint * profile * presence * (0.35 + rays) * (0.45 + surge * 0.9) * flicker;
   }
 
-  /** One aurora curtain: a band of light draped around the sky at elevation
-   *  centre, its lower hem crisp and its crown feathering out. */
-  vec3 curtain(vec2 bearing, float azim, float elev, float centre,
-               float width, float speed, float phase, float rayCount) {
-    float drift = uAuroraTime * speed;
-    float sweep = fbm2(bearing * 1.6 + vec2(drift, phase)) - 0.5;
-    float waver = vnoise(bearing * 5.1 - vec2(drift * 1.7, phase)) - 0.5;
-    float hem = centre + sweep * 0.34 + waver * 0.12;
-    float above = elev - hem;
-    float body = smoothstep(-0.035, 0.045, above) *
-      (1.0 - smoothstep(0.0, width, above));
-    if (body <= 0.0) return vec3(0.0);
-    float ray = vnoise(bearing * 23.0 + vec2(phase, drift * 0.6));
-    float rays = 0.5 + 0.5 * sin(rayCount * azim + ray * 21.0 + phase);
-    rays = rays * rays; rays = rays * rays;
-    float shimmer = 0.72 + 0.28 * sin(uAuroraTime * 0.9 + ray * 12.0 + phase);
-    float presence = smoothstep(0.26, 0.74,
-      fbm2(bearing * 0.9 + vec2(drift * 0.45, phase * 0.5)));
-    float h = clamp(above / width, 0.0, 1.0);
-    vec3 tint = mix(vec3(0.20, 1.00, 0.55), vec3(0.20, 0.78, 1.00), smoothstep(0.10, 0.62, h));
-    tint = mix(tint, vec3(0.62, 0.34, 1.00), smoothstep(0.55, 1.0, h));
-    return tint * body * shimmer * presence * (0.30 + rays * 0.85);
+  /** The substorm corona: rays converging on the magnetic zenith. */
+  vec3 auroraCorona(float azim, float elev) {
+    if (uAuroraStorm < 0.02 || elev < 0.62) return vec3(0.0);
+    float t = uAuroraTime;
+    float spokes = 0.5 + 0.5 * sin(azim * 19.0 + t * 0.32 + sin(azim * 3.0 - t * 0.2) * 2.0);
+    spokes = spokes * spokes * spokes;
+    float ring = smoothstep(0.62, 0.86, elev) * (1.0 - smoothstep(0.96, 1.0, elev) * 0.6);
+    vec3 c = mix(vec3(0.2, 1.0, 0.55), vec3(0.62, 0.32, 1.0), smoothstep(0.75, 0.98, elev));
+    return c * spokes * ring * uAuroraStorm * 0.55;
   }
 
   /** Stars on a rotating celestial sphere: a jittered point per cell of a 3D
@@ -272,8 +310,13 @@ const DOME_FRAG = /* glsl */`
     float b = dot(d, n);
     float band = exp(-b * b * 26.0);
     if (band < 0.01) return vec3(0.0);
+    #ifdef DOME_LITE
+    float cloud = vnoise3(d * 7.0) * 0.6 + vnoise3(d * 14.0) * 0.3;
+    float dust = smoothstep(0.3, 0.62, vnoise3(d * 13.0 + 4.0)) * 0.7;
+    #else
     float cloud = fbm3(d * 7.0);
     float dust = smoothstep(0.52, 0.72, fbm3(d * 13.0 + 4.0));
+    #endif
     float core = exp(-b * b * 90.0);
     vec3 c = mix(vec3(0.28, 0.30, 0.52), vec3(0.62, 0.52, 0.55), core);
     return c * band * (0.35 + cloud * 0.9) * (1.0 - dust * 0.75) * 0.11;
@@ -329,26 +372,38 @@ const DOME_FRAG = /* glsl */`
     color += vec3(0.55, 0.65, 0.9) * pow(max(moonCos, 0.0), 260.0) * 0.5 * uNight;
 
     if (uAurora > 0.004 && dir.y > -0.05) {
-      vec2 ground = vec2(dir.x, dir.z);
-      vec2 bearing = ground / max(length(ground), 1e-4);
-      float azim = atan(bearing.y, bearing.x);
+      float azim = atan(dir.z, dir.x);
       float elev = dir.y;
       float ph = uAuroraPhase;
       vec3 light =
-        curtain(bearing, azim, elev, 0.16, 0.62, 0.055, ph, 47.0) +
-        curtain(bearing, azim, elev, 0.34, 0.50, 0.041, ph + 2.31, 61.0) * 0.70 +
-        curtain(bearing, azim, elev, 0.05, 0.78, 0.070, ph + 4.77, 31.0) * 0.52;
-      light = light / (1.0 + light * 0.55);
+        curtain(azim, elev, 0.17, 0.60, 0.050, ph, 47.0) +
+        curtain(azim, elev, 0.33, 0.48, 0.038, ph + 2.31, 61.0) * 0.72;
+      #ifndef DOME_LITE
+      light += curtain(azim, elev, 0.06, 0.74, 0.066, ph + 4.77, 31.0) * 0.55;
+      light += auroraCorona(azim, elev);
+      #endif
+      light = light / (1.0 + light * 0.45);
       float sky = smoothstep(-0.04, 0.16, elev);
-      color += light * uAurora * 0.38 * sky;
-      color += vec3(0.02, 0.06, 0.06) * uAurora * sky;
+      // In HDR the brightest folds sit over the night bloom threshold, so the
+      // curtains GLOW; the display-knee presets get a brighter straight read.
+      color += light * uAurora * (uHDR > 0.5 ? 0.85 : 0.5) * sky;
+      // Airglow: the whole low sky picks up a faint green under an aurora.
+      color += vec3(0.008, 0.035, 0.022) * uAurora * (1.0 + uAuroraStorm * 0.5) * sky
+        * (1.0 - smoothstep(0.05, 0.4, elev));
     }
 
     // Below the skyline: the far ground, darker than the horizon above it so
     // the world never floats on a band of bright sky.
-    color = mix(color, color * 0.62, smoothstep(0.0, -0.18, dir.y));
+    color = mix(color * 0.62, color, smoothstep(-0.18, 0.0, dir.y));
 
     if (uHDR < 0.5) color = vxKnee(color);
+    // Continue the terrain's opaque fog into the lower sky as a band of mist.
+    // Matching the exact colour hides the silhouette where streamed terrain
+    // ends, and the band standing above the skyline is what reads as fog.
+    float sunward = pow(max(dot(dir, normalize(vec3(uSunDir.x, 0.0, uSunDir.z) + vec3(0.0, 1e-4, 0.0))), 0.0), 5.0);
+    vec3 horizonFog = (uHorizonFog + uHorizonFogSun * sunward)
+      * mix(0.62, 1.0, smoothstep(-0.18, 0.0, dir.y));
+    color = mix(horizonFog, color, smoothstep(0.0, 0.24, dir.y));
     gl_FragColor = vec4(color, 1.0);
     #include <colorspace_fragment>
   }
@@ -512,10 +567,16 @@ export class Sky {
   readonly skyColor = new THREE.Color();
   /** The extra glow the horizon picks up TOWARD the sun (fog in-scatter). */
   readonly fogSunColor = new THREE.Color();
+  /** Distance fog colour: the horizon washed paler and greyer, so the render
+   *  edge reads as a bank of mist rather than terrain dissolving into sky. */
+  readonly hazeColor = new THREE.Color();
   /** Zenith colour — what an upward-facing mirror (calm water) sees. */
   readonly zenithColor = new THREE.Color();
   /** Night-only aurora strength. Also drives its subtle light on terrain. */
   auroraIntensity = 0;
+  /** 0..1 substorm: a few times a night the aurora flares — brighter, faster,
+   *  fringed in magenta, with a corona overhead. */
+  auroraStorm = 0;
   /** How night it is, 0..1. */
   nightAmount = 0;
   /** Unit vector toward the body actually lighting the ground: the sun while
@@ -560,6 +621,8 @@ export class Sky {
         uSunE: { value: SUN_E },
         uMoonE: { value: MOON_E },
         uNightBase: { value: new THREE.Vector3(...NIGHT_BASE) },
+        uHorizonFog: { value: this.hazeColor },
+        uHorizonFogSun: { value: this.fogSunColor },
         uNight: { value: 0 },
         uHDR: { value: 0 },
         uTime: { value: 0 },
@@ -567,6 +630,7 @@ export class Sky {
         uAurora: { value: 0 },
         uAuroraTime: { value: 0 },
         uAuroraPhase: { value: this.auroraPhase },
+        uAuroraStorm: { value: 0 },
       },
       vertexShader: DOME_VERT,
       fragmentShader: DOME_FRAG,
@@ -616,6 +680,16 @@ export class Sky {
     this.domeMat.uniforms.uHDR.value = on ? 1 : 0;
     for (const m of [this.cloudFlatMat, this.highCloudFlatMat,
       this.cloudShaderMat, this.highCloudShaderMat]) m.uniforms.uHDR.value = on ? 1 : 0;
+  }
+
+  /** 1 = the lite dome for the cheapest presets: two aurora curtains instead
+   *  of three (no corona) and a lighter Milky Way. Recompiles the dome once. */
+  setDetail(lite: number): void {
+    const want = lite > 0;
+    const has = 'DOME_LITE' in (this.domeMat.defines ?? {});
+    if (want === has) return;
+    this.domeMat.defines = want ? { DOME_LITE: 1 } : {};
+    this.domeMat.needsUpdate = true;
   }
 
   private makeCloudTexture(seed: number, cover = 0.62): THREE.CanvasTexture {
@@ -679,7 +753,13 @@ export class Sky {
     this.auroraTime += step;
     this.starTime += step;
     const activity = 0.78 + 0.22 * Math.sin(this.auroraTime * 0.075 + this.auroraPhase);
-    this.auroraIntensity = night * activity;
+    // Substorms: a slow cycle (~4.5 min) that only crests above zero for about
+    // a quarter of it, shaped into a fast onset and a long, fading tail.
+    const cycle = (this.auroraTime / 270 + this.auroraPhase * 0.159) % 1;
+    const storm = cycle < 0.06 ? THREE.MathUtils.smoothstep(cycle, 0, 0.06)
+      : cycle < 0.3 ? 1 - THREE.MathUtils.smoothstep(cycle, 0.06, 0.3) : 0;
+    this.auroraStorm = storm * night;
+    this.auroraIntensity = night * activity * (1 + storm * 0.45);
     this.nightAmount = night;
 
     // Sun rises in +x and sets in -x; the moon rides the opposite end.
@@ -746,6 +826,15 @@ export class Sky {
       displayKnee(this.zenithColor);
       this.fogSunColor.multiplyScalar(0.6);
     }
+    // Mist is the horizon desaturated toward its own brightness and lifted a
+    // touch. Scaling with the sky keeps it dark at night.
+    const hzLum = this.skyColor.r * 0.2126 + this.skyColor.g * 0.7152 + this.skyColor.b * 0.0722;
+    this.hazeColor.copy(this.skyColor).lerp(_c.setRGB(hzLum, hzLum, hzLum), 0.45)
+      .multiplyScalar(1.15);
+    if (!this.hdr) {
+      this.hazeColor.setRGB(
+        Math.min(1, this.hazeColor.r), Math.min(1, this.hazeColor.g), Math.min(1, this.hazeColor.b));
+    }
 
     // ── Feed the dome ─────────────────────────────────────────────────────
     const u = this.domeMat.uniforms;
@@ -755,6 +844,7 @@ export class Sky {
     u.uTime.value = this.starTime;
     u.uAurora.value = this.auroraIntensity;
     u.uAuroraTime.value = this.auroraTime;
+    u.uAuroraStorm.value = this.auroraStorm;
     // The stars turn with the sun, about the same tilted axis.
     this._m4.makeRotationAxis(this.starAxis, angle);
     (u.uStarRot.value as THREE.Matrix3).setFromMatrix4(this._m4);

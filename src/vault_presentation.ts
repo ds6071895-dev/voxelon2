@@ -1,6 +1,6 @@
 import type { EncounterSnapshot, HazardShape } from './vault_encounter';
 import {
-  BOSS_DEFINITIONS, ENCOUNTER_INTRO_SECONDS, ENCOUNTER_PHASE_TRANSITION_SECONDS,
+  BOSS_DEFINITIONS, ENCOUNTER_ENRAGE_SECONDS, ENCOUNTER_INTRO_SECONDS, ENCOUNTER_PHASE_TRANSITION_SECONDS,
   ENCOUNTER_VICTORY_CINEMATIC_SECONDS,
 } from './vault_encounter';
 import { BOSS_SCORE_PROFILES, bossScoreLoopSeconds } from './boss_music';
@@ -208,6 +208,10 @@ export class VaultBossHUD {
   private readonly hpFill: HTMLDivElement;
   private readonly hpLoss: HTMLDivElement;
   private readonly hpText: HTMLDivElement;
+  private readonly hpBar: HTMLDivElement;
+  private readonly hpFlash: HTMLDivElement;
+  private readonly tally: HTMLDivElement;
+  private readonly markers: HTMLElement[] = [];
   private readonly phase: HTMLDivElement;
   private readonly poise: HTMLDivElement;
   private readonly cast: HTMLDivElement;
@@ -215,6 +219,12 @@ export class VaultBossHUD {
   private readonly coach: HTMLDivElement;
   private readonly brief: HTMLDivElement;
   private displayedHp = 1;
+  /** Raw HP last frame (for the tally), the running chunk and when it last grew. */
+  private lastHpRaw = -1;
+  private lastEncounter = '';
+  private tallyValue = 0;
+  private tallyAt = 0;
+  private shakeUntil = 0;
   /** Phase the brief card is currently showing, and how long it has been up.
    *  HUD-local: the snapshot has no per-phase clock and does not need one. */
   private briefPhase = -1;
@@ -245,13 +255,28 @@ export class VaultBossHUD {
     for (const left of [35, 70]) {
       const marker = document.createElement('i');
       marker.style.cssText =
-        `position:absolute;left:${left}%;top:-3px;height:26px;width:2px;background:#fff;opacity:.82;z-index:3;`;
+        `position:absolute;left:${left}%;top:-3px;height:26px;width:2px;background:#fff;opacity:.82;z-index:3;` +
+        'transition:opacity .4s,background .4s;';
       hp.appendChild(marker);
+      this.markers.push(marker);
     }
+    // A white flash laid over the bar on every chunk of damage, and a running
+    // "-N" tally beside it: the fight's damage is FELT on the bar, not read.
+    this.hpFlash = document.createElement('div');
+    this.hpFlash.style.cssText =
+      'position:absolute;inset:0;z-index:2;background:#fff;opacity:0;transition:opacity .22s ease-out;';
+    hp.appendChild(this.hpFlash);
+    this.hpBar = hp;
     this.hpText = document.createElement('div');
     this.hpText.style.cssText =
       'position:absolute;inset:0;z-index:4;display:flex;align-items:center;justify-content:center;font-size:clamp(8px,2.1vw,11px);';
     hp.append(this.hpLoss, this.hpFill, this.hpText);
+    this.tally = document.createElement('div');
+    this.tally.style.cssText =
+      'position:absolute;right:6px;top:15px;z-index:5;padding:3px 7px;line-height:1;border-radius:4px;' +
+      'background:rgba(0,0,0,.62);font-size:clamp(11px,2.4vw,15px);' +
+      'color:#ffe28a;text-shadow:2px 2px #000,0 0 10px rgba(255,190,60,.7);opacity:0;transition:opacity .3s;' +
+      'white-space:nowrap;';
     const row = document.createElement('div');
     row.style.cssText =
       'display:flex;justify-content:space-between;gap:8px;font-size:clamp(8px,2vw,10px);margin-top:4px;';
@@ -278,7 +303,7 @@ export class VaultBossHUD {
       'background:rgba(10,7,2,.86);border:1px solid rgba(255,216,74,.5);border-radius:5px;' +
       'color:#ffe08a;font-size:clamp(10px,2.5vw,13px);line-height:1.5;display:none;' +
       'box-shadow:0 6px 26px rgba(0,0,0,.6);';
-    this.root.append(this.name, hp, row, this.cast, this.coach, this.brief);
+    this.root.append(this.name, hp, row, this.cast, this.coach, this.brief, this.tally);
     parent.appendChild(this.root);
   }
 
@@ -309,13 +334,51 @@ export class VaultBossHUD {
       requestAnimationFrame(() => { this.hpLoss.style.width = `${hp * 100}%`; });
     }
     this.hpText.textContent = `${Math.ceil(snapshot.hp)} / ${snapshot.maxHp}`;
+    // Damage feel: flash + tally + a small shake scaled by the chunk size.
+    const now = performance.now();
+    if (snapshot.encounterId !== this.lastEncounter) {
+      this.lastEncounter = snapshot.encounterId;
+      this.lastHpRaw = snapshot.hp;
+      this.tallyValue = 0;
+    }
+    const lost = this.lastHpRaw - snapshot.hp;
+    this.lastHpRaw = snapshot.hp;
+    if (lost > 0.5 && snapshot.status === 'active') {
+      this.tallyValue = (now - this.tallyAt < 1400 ? this.tallyValue : 0) + lost;
+      this.tallyAt = now;
+      this.tally.textContent = `-${Math.round(this.tallyValue)}`;
+      this.tally.style.opacity = '1';
+      this.tally.style.fontSize = `clamp(11px,2.4vw,${Math.round(15 + Math.min(7, this.tallyValue / snapshot.maxHp * 120))}px)`;
+      this.hpFlash.style.transition = 'none';
+      this.hpFlash.style.opacity = String(Math.min(0.7, 0.25 + lost / snapshot.maxHp * 12));
+      void this.hpFlash.offsetWidth;
+      this.hpFlash.style.transition = 'opacity .22s ease-out';
+      this.hpFlash.style.opacity = '0';
+      this.shakeUntil = now + Math.min(260, 90 + lost / snapshot.maxHp * 2500);
+    } else if (now - this.tallyAt > 1400) {
+      this.tally.style.opacity = '0';
+    }
+    const calmBar = document.body.classList.contains('reduced-motion');
+    this.hpBar.style.transform = now < this.shakeUntil && !calmBar
+      ? `translate(${(Math.sin(now * 0.09) * 2.5).toFixed(1)}px,${(Math.cos(now * 0.13) * 1.5).toFixed(1)}px)`
+      : '';
+    // Phase thresholds already crossed go dim; the next one glows.
+    this.markers.forEach((marker, i) => {
+      const at = i === 0 ? 0.35 : 0.7;
+      marker.style.opacity = hp < at ? '0.25' : '0.95';
+      marker.style.background = hp >= at && hp - at < 0.08 ? '#ffd86a' : '#fff';
+    });
     this.phase.textContent =
       `PHASE ${snapshot.phase}/3 — ${def.phaseTitles[snapshot.phase - 1].toUpperCase()}`;
     this.poise.textContent = snapshot.enrage
       ? 'DAMAGE OPEN • MAXIMUM THREAT'
       : `DAMAGE OPEN • PHASE ${snapshot.phase} PRESSURE`;
+    // The countdown shows for the last minute before the enrage — which fires
+    // at ENCOUNTER_ENRAGE_SECONDS (it used to be keyed to an old 360s timer,
+    // so the warning never appeared at all).
+    const enrageLeft = ENCOUNTER_ENRAGE_SECONDS - snapshot.elapsed;
     const enrage = snapshot.enrage ? ' • ENRAGED'
-      : snapshot.elapsed >= 300 ? ` • ENRAGE ${Math.max(0, Math.ceil(360 - snapshot.elapsed))}s` : '';
+      : enrageLeft <= 60 ? ` • ENRAGE ${Math.max(0, Math.ceil(enrageLeft))}s` : '';
     this.details.textContent =
       `${snapshot.participants.length} raider${snapshot.participants.length === 1 ? '' : 's'} ` +
       `×${(1 + 0.7 * (snapshot.peakParticipants - 1)).toFixed(1)} • ` +
@@ -366,6 +429,9 @@ export class VaultBossHUD {
   hide(): void {
     this.displayedHp = 1;
     this.briefPhase = -1;
+    this.lastEncounter = '';
+    this.tallyValue = 0;
+    this.tally.style.opacity = '0';
     this.update(null);
   }
 }

@@ -46,7 +46,7 @@ import {
   HelicopterState, VehicleSim, VehicleEvent, bombBlast, sanitizeHelicopter,
 } from '../vehicles';
 import { WARFARE_BLUEPRINTS } from '../crafting';
-import { GadgetCooldowns, gadgetOf, falloffDamage } from '../gadgets';
+import { GadgetCooldowns, gadgetOf, falloffDamage, THROWN_KINDS } from '../gadgets';
 import {
   TrapField, TrapTarget, TrapTickResult, TrapBlast, trapKindForBlock, trapFriendly,
   sanitizeTrap, TRAP_NAMES, TRAP_VERBS, TrapKind, CHANNELS, TIMER_INTERVALS,
@@ -92,7 +92,7 @@ import {
   PartyMode, PartyParticipant, PartySubBounds,
   BRIDGE_ARROW_GRAVITY, BRIDGE_ARROW_KB_VERT, BRIDGE_ARROW_LIFE_MS,
   BRIDGE_BOW_COOLDOWN_MS, BRIDGE_MELEE_TIER, bridgeSwing,
-  bridgeArrowShot, bridgeCageHatch, bridgeGoalGuard, clampToPartySub,
+  BRIDGE_SWING_JITTER_MS, bridgeArrowShot, bridgeCageHatch, bridgeGoalGuard, clampToPartySub,
   partyArenaBlockAt, partySpawns, parkourCourse,
 } from '../partygames';
 import {
@@ -201,6 +201,10 @@ interface ServerPlayer extends PlayerInfo {
   forfeitSeason: number;
   /** Per-gadget cooldown tracker (Phase 8; server-authoritative anti-spam). */
   gadgetCd: GadgetCooldowns;
+  /** Throws accepted by `gadgetThrow` whose landing (`gadgetUse`) has not come
+   *  in yet. The cooldown is charged at the THROW, so a landing that arrives a
+   *  flight-time later is never rejected as "still cooling down". */
+  thrownPending: { item: number; until: number }[];
   /** Token bucket limiting how many COSMETIC gunshot rebroadcasts this player
    *  may generate, so a hacked client can't flood everyone with fake tracers.
    *  Purely about noise — dropping one only costs a visual. */
@@ -336,7 +340,7 @@ const SPECTATOR_BLOCKED = new Set<ClientMsg['t']>([
   'machineConfig', 'machineUpgrade', 'machineCollect', 'machineHit', 'machineClaim',
   'machineMove', 'setSpawn',
   'turretUpgrade', 'turretClaim', 'turretMove', 'turretHit', 'turretLoad', 'turretMobShot',
-  'gadgetUse', 'rocketBlast', 'xp', 'mobSync', 'mobHit',
+  'gadgetUse', 'gadgetThrow', 'rocketBlast', 'xp', 'mobSync', 'mobHit',
   // Warfare Command: a spectator may never build, fire, fly or sabotage.
   'warfareBuy',
   'heliSpawn', 'heliDeploy', 'heliMount', 'heliInput', 'heliBomb', 'heliService',
@@ -819,6 +823,7 @@ export class GameServer {
       switchSeason: Number.isFinite(account?.switchSeason) ? Math.floor(account!.switchSeason!) : 0,
       forfeitSeason: Number.isFinite(account?.forfeitSeason) ? Math.floor(account!.forfeitSeason!) : 0,
       gadgetCd: new GadgetCooldowns(),
+      thrownPending: [],
       shotTokens: SHOT_BURST, shotRefillAt: 0,
       borderRelocateAt: 0,
       disconnectSettled: false,
@@ -1272,6 +1277,8 @@ export class GameServer {
         return this.handleSwitch(p, msg.faction);
       case 'gadgetUse':
         return this.handleGadget(p, msg.item, msg.x, msg.y, msg.z);
+      case 'gadgetThrow':
+        return this.handleGadgetThrow(p, msg.item, msg.x, msg.y, msg.z, msg.vx, msg.vy, msg.vz);
       case 'rocketBlast':
         return this.handleRocketBlast(p, msg.x, msg.y, msg.z);
       case 'xp':
@@ -2851,8 +2858,9 @@ export class GameServer {
       !this.party.canFight(p.id, targetId, now)) return [];
     const combat = this.partyCombatOf(p.id), tier = BRIDGE_MELEE_TIER;
     const since = now - combat.lastSwingAt;
-    // Fixed cadence only: every accepted contact hits at full strength.
-    if (since < tier.cooldownMs) return [];
+    // Fixed cadence only: every accepted contact hits at full strength. A
+    // little arrival jitter is forgiven — see BRIDGE_SWING_JITTER_MS.
+    if (since < tier.cooldownMs - BRIDGE_SWING_JITTER_MS) return [];
     // Judge the swing against where the target was when it was thrown. Melee
     // has no travel time, so the window is a quarter-second and no more.
     const lookX = -Math.sin(p.yaw), lookZ = -Math.cos(p.yaw);
@@ -5309,8 +5317,14 @@ export class GameServer {
         if (!fin(x, y, z)) return [];
         // The detonation must be within throw range of the thrower.
         if (Math.hypot(x - p.x, y - p.y, z - p.z) > RANGED_MAX_RANGE) return [];
-        if (!p.gadgetCd.use(item, now)) return []; // cooldown
-        const out: Outbound[] = [{ to: 'all', msg: { t: 'gadgetFx', kind: def.kind, x, y, z } }];
+        // A throw we already accepted pays for its own landing; anything else
+        // (C4, or a client that never announced the throw) pays the cooldown.
+        p.thrownPending = p.thrownPending.filter((t) => t.until > now);
+        const pending = p.thrownPending.findIndex((t) => t.item === item);
+        if (pending >= 0) p.thrownPending.splice(pending, 1);
+        else if (!p.gadgetCd.use(item, now)) return []; // cooldown
+        // The instigator already played the blast locally — don't double it.
+        const out: Outbound[] = [{ to: 'others', from: p.id, msg: { t: 'gadgetFx', kind: def.kind, x, y, z } }];
         if (def.kind !== 'smoke') { // frag/oil/c4 all detonate
           out.push(...this.detonate(p, x, y, z,
             def.damage ?? 0, def.radius ?? 0, def.radius ?? 4));
@@ -5320,7 +5334,7 @@ export class GameServer {
       case 'horn': {
         // War Horn: a cosmetic rallying blast anyone can sound.
         if (!p.gadgetCd.use(item, now)) return [];
-        return [{ to: 'all', msg: { t: 'gadgetFx', kind: 'horn', x: p.x, y: p.y, z: p.z } }];
+        return [{ to: 'others', from: p.id, msg: { t: 'gadgetFx', kind: 'horn', x: p.x, y: p.y, z: p.z } }];
       }
       case 'disguise': {
         if (!p.gadgetCd.use(item, now)) return [];
@@ -5332,6 +5346,26 @@ export class GameServer {
       default:
         return []; // client-handled gadget kind
     }
+  }
+
+  /** A throwable left a player's hand: charge the cooldown now, remember the
+   *  landing it is owed, and relay the launch so everyone else flies the same
+   *  arc. Launch point must be at the thrower; speed is capped. */
+  private handleGadgetThrow(
+    p: ServerPlayer, item: number,
+    x: number, y: number, z: number, vx: number, vy: number, vz: number,
+  ): Outbound[] {
+    const def = gadgetOf(item);
+    if (!def || p.dead || !THROWN_KINDS.has(def.kind)) return [];
+    if (!fin(x, y, z) || !fin(vx, vy, vz)) return [];
+    if (Math.hypot(x - p.x, y - (p.y + 1.6), z - p.z) > 4) return [];
+    if (Math.hypot(vx, vy, vz) > 80) return [];
+    const now = this.worldTime;
+    if (!p.gadgetCd.use(item, now)) return [];
+    p.thrownPending = p.thrownPending.filter((t) => t.until > now);
+    if (p.thrownPending.length >= 4) p.thrownPending.shift();
+    p.thrownPending.push({ item, until: now + 6 });
+    return [{ to: 'others', from: p.id, msg: { t: 'gadgetThrown', id: p.id, item, x, y, z, vx, vy, vz } }];
   }
 
   /** A rocket detonation reported by the shooter's client: validate the burst is

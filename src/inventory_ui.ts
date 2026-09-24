@@ -7,7 +7,7 @@ import './machine_ui.css';
 import { BLOCKS } from './blocks';
 import { craftResult, consumeCraft } from './crafting';
 import { COOK_TIME, FUEL, SMELT, FurnaceState } from './furnace';
-import { renderItemIcon } from './icons';
+import { clearItemIcon, renderItemIcon } from './icons';
 import { iconSvg, setIconText } from './emoji_icons';
 import type { Inventory } from './inventory';
 import {
@@ -423,7 +423,7 @@ export class InventoryUI {
         view.dur.style.display = 'none';
       }
     } else {
-      view.icon.getContext('2d')!.clearRect(0, 0, 32, 32);
+      clearItemIcon(view.icon);
       view.count.textContent = '';
       view.dur.style.display = 'none';
     }

@@ -1,7 +1,7 @@
 // HUD: vanilla-style hotbar driven by the inventory (icons + stack counts),
 // selection name popup, and the F3 debug overlay.
 
-import { renderItemIcon } from './icons';
+import { clearItemIcon, renderItemIcon } from './icons';
 import type { Inventory } from './inventory';
 import { HOTBAR_SIZE } from './inventory';
 import { ITEMS } from './items';
@@ -153,7 +153,7 @@ export class HUD {
         renderItemIcon(this.icons[i], this.atlasCanvas, stack.id);
         this.counts[i].textContent = stack.count > 1 ? String(stack.count) : '';
       } else {
-        this.icons[i].getContext('2d')!.clearRect(0, 0, 32, 32);
+        clearItemIcon(this.icons[i]);
         this.counts[i].textContent = '';
       }
     }

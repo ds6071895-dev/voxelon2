@@ -21,8 +21,9 @@ import { itemGeometry } from './itementity';
 import { ITEMS, Item, ARMOR_SLOT_INDEX } from './items';
 import type { Atlas } from './textures';
 import { createGunModel, isGunItem, poseGunModel } from './gunmodels';
-import { createGadgetModel, isModeledGadget, poseGadgetModel } from './gadgetmodels';
+import { createGadgetModel, isModeledGadget, isOneHandModel, poseGadgetModel } from './gadgetmodels';
 import { createBowModel, poseBowModel } from './bowmodel';
+import { BOAT_SIT_SINK, BoatRig, boatArmPose, createBoatRig, removeBoatRig, updateBoatRig } from './boatmodel';
 import {
   GliderRig, RIG_HARNESS_Y, buildGliderRig, disposeGliderRig, glidePose,
   poseGliderRig,
@@ -494,6 +495,115 @@ export function stridePose(
   };
 }
 
+// ─── two-handed firearm hold ───────────────────────────────────────────────
+//
+// A gun used to hang off the right forearm with the left arm waved vaguely
+// at it — to everyone else it read as a one-handed carry. Now the gun is
+// placed on the BODY (butt at the right shoulder, rifles; arms out in a
+// two-handed isosceles grip, pistols) along the look pitch, and each arm is
+// aimed at its own hand-hold on the model: the right hand at the pistol grip,
+// the left at the gun's 'grip2' anchor (handguard / pump / fore grip). The
+// single-segment arms stretch or shorten a little to land exactly — a
+// shortened right arm reads as a bent elbow, which is what a real hold is.
+
+/** Hand centre below the shoulder pivot (glove middle). */
+const HAND_REACH = LIMB_H - 0.075;
+const ARM_DOWN = new THREE.Vector3(0, -1, 0);
+const _holdV = new THREE.Vector3();
+const _holdR = new THREE.Vector3();
+const _holdL = new THREE.Vector3();
+
+export interface GunHoldState {
+  /** Look pitch, radians (+ = up). */
+  pitch: number;
+  /** Aim-down-sights ease, 0..1. */
+  aim: number;
+  /** Reload dip, 0..1 (peaks mid-reload). */
+  reload: number;
+  /** Recoil kick, 0..1. */
+  kick: number;
+}
+
+/** Point in `gun`'s local space → the space of `gun`'s parent. */
+function gunPointToParent(gun: THREE.Object3D, local: THREE.Vector3, out: THREE.Vector3): THREE.Vector3 {
+  out.copy(local);
+  gun.updateMatrix();
+  return out.applyMatrix4(gun.matrix);
+}
+
+/** Aim a limb (pivot at the top, hanging along -y) so its hand lands on
+ *  `target` (in the limb's parent space). */
+function reachLimb(limb: THREE.Object3D, target: THREE.Vector3, minS = 0.7, maxS = 1.2): void {
+  _holdV.copy(target).sub(limb.position);
+  const len = _holdV.length();
+  if (len < 1e-4) return;
+  limb.quaternion.setFromUnitVectors(ARM_DOWN, _holdV.divideScalar(len));
+  limb.scale.y = Math.max(minS, Math.min(maxS, len / HAND_REACH));
+}
+
+/** Undo a previous gun hold: arms back to plain x/z swings at full length.
+ *  Call before any pose branch that only writes rotation.x/z. */
+export function releaseGunHold(body: AvatarBody): void {
+  for (const arm of [body.parts[2], body.parts[3]]) {
+    arm.rotation.y = 0;
+    arm.scale.y = 1;
+  }
+}
+
+/** Pose a held gun two-handed on an avatar. `gun` is a createGunModel root
+ *  already scaled by poseGunModel(…, 'avatar'); it is (re)parented onto the
+ *  body so it stays on the look line instead of swinging with one arm. */
+export function poseGunHold(body: AvatarBody, gun: THREE.Object3D, s: GunHoldState): void {
+  if (gun.parent !== body.group) body.group.add(gun);
+  const la = body.parts[2], ra = body.parts[3];
+  const aim = Math.max(0, Math.min(1, s.aim));
+  const dip = Math.max(0, Math.min(1, s.reload));
+  const kick = Math.max(0, Math.min(1, s.kick));
+  const grip2 = gun.getObjectByName('grip2');
+  const pistol = !grip2;
+  // Grip position relative to the right shoulder's height, before pitch.
+  let gx: number, gy: number, gz: number;
+  if (pistol) {
+    // Arms out, both hands wrapped on the grip, sights brought up to the eye.
+    gx = 0.03 + aim * 0.05; gy = -0.12 + aim * 0.2; gz = -0.44 - aim * 0.02;
+  } else {
+    // Stock in the right shoulder pocket; ADS lifts the sights to the cheek.
+    gx = 0.12 - aim * 0.02; gy = -0.25 + aim * 0.28; gz = -0.3 - aim * 0.02;
+  }
+  gy -= dip * 0.14;            // reload: lower it and bring it in
+  gz += dip * 0.08 + kick * 0.06; // recoil drives it back into the shoulder
+  const pitch = THREE.MathUtils.clamp(s.pitch, -1.1, 1.1) * 0.9 + kick * 0.14 - dip * 0.35;
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  gun.position.set(gx, ra.position.y + gy * cp - gz * sp, ra.position.z + gy * sp + gz * cp);
+  gun.rotation.set(pitch, 0, -dip * 0.55);
+
+  // Right hand on the pistol grip.
+  _holdV.set(0, -0.15, 0.03);
+  gunPointToParent(gun, _holdV, _holdR);
+  // Left hand on the handguard — or cupping the right hand on a pistol.
+  if (grip2) {
+    _holdV.copy(grip2.position);
+    let o: THREE.Object3D | null = grip2.parent;
+    const onPump = o !== gun;
+    while (o && o !== gun) { o.updateMatrix(); _holdV.applyMatrix4(o.matrix); o = o.parent; }
+    // A pump is worked where it is; otherwise the support hand takes the
+    // handguard just ahead of the magazine — where these arms can reach.
+    if (!onPump) _holdV.z *= 0.62;
+    _holdV.y -= 0.08; // hand wraps under the guard, not through it
+  } else {
+    _holdV.set(-0.1, -0.2, 0.02);
+  }
+  gunPointToParent(gun, _holdV, _holdL);
+  // During the reload the support hand drops to the magazine well.
+  if (dip > 0) {
+    _holdV.set(0, -0.3, -0.12);
+    gunPointToParent(gun, _holdV, _holdV);
+    _holdL.lerp(_holdV, dip);
+  }
+  reachLimb(ra, _holdR, 0.62, 1.15);
+  reachLimb(la, _holdL, 0.7, 1.3);
+}
+
 /** Build the full customised avatar body (feet at y=0, facing -z). The
  *  optional shirt override paints faction colours over the cosmetic uniform
  *  so teams stay readable in the war. */
@@ -622,14 +732,46 @@ export function disposeAvatarBody(body: AvatarBody): void {
 
 // ─── worn armor + held item (equip visuals) ────────────────────────────────
 
-/** Plating colour per armor material (readable at a distance). */
-function armorColorFor(id: number): THREE.Color {
-  if (id >= Item.WoodHelmet && id <= Item.WoodBoots) return new THREE.Color(0x7a5b33);
-  if (id >= Item.StoneHelmet && id <= Item.StoneBoots) return new THREE.Color(0x83878d);
-  if (id >= Item.IronHelmet && id <= Item.IronBoots) return new THREE.Color(0xd8dce2);
-  if (id >= Item.DiamondHelmet && id <= Item.DiamondBoots) return new THREE.Color(0x45d6c9);
-  if (id >= Item.TitaniumHelmet && id <= Item.TitaniumBoots) return new THREE.Color(0xaec4e8);
-  return new THREE.Color(0x9aa0a8);
+/**
+ * WORN ARMOR — a real suit, not a coloured box over the kit.
+ *
+ * Every tier shares one construction (dome + brim + cheek and neck guards;
+ * cuirass + breastplate + ridge + gorget + faulds + layered pauldrons +
+ * vambraces; cuisses + knee cops + tassets + shin plates; sabatons with toe
+ * caps, cuff rims and soles) and gets its identity from a four-colour palette
+ * plus ONE signature detail you can read across a field:
+ *
+ *   leather  — stitched tan trim, brass buckles, no crest
+ *   stone    — slab-heavy and squat, studded, a flat-topped bucket
+ *   iron     — polished steel with a red horsehair plume
+ *   diamond  — cyan crystal plate on gold trim with a tall crystal fin
+ *   titanium — blue-grey alloy with glowing cyan seams and a lit visor bar
+ */
+interface ArmorLook {
+  base: THREE.Color; dark: THREE.Color; trim: THREE.Color; accent: THREE.Color;
+  tier: 'leather' | 'stone' | 'iron' | 'diamond' | 'titanium';
+}
+
+const ARMOR_LOOKS: Record<ArmorLook['tier'], ArmorLook> = (() => {
+  const look = (tier: ArmorLook['tier'], base: number, dark: number, trim: number, accent: number): ArmorLook =>
+    ({ tier, base: new THREE.Color(base), dark: new THREE.Color(dark), trim: new THREE.Color(trim), accent: new THREE.Color(accent) });
+  return {
+    leather: look('leather', 0x8a6538, 0x55391f, 0xc79a5c, 0xd8b04a),
+    stone: look('stone', 0x8d9197, 0x5b5f65, 0x70747a, 0xb3b7bd),
+    iron: look('iron', 0xe2e6eb, 0x9ea5af, 0x6b7280, 0xd0342c),
+    diamond: look('diamond', 0x52e3d5, 0x249c93, 0xf2c94c, 0xc8fff8),
+    titanium: look('titanium', 0xb9cbe8, 0x5a6a86, 0x2c3850, 0x62f4ff),
+  };
+})();
+
+/** The look for an armor item id (unknown ids fall back to iron). */
+function armorLookFor(id: number): ArmorLook {
+  if (id >= Item.WoodHelmet && id <= Item.WoodBoots) return ARMOR_LOOKS.leather;
+  if (id >= Item.StoneHelmet && id <= Item.StoneBoots) return ARMOR_LOOKS.stone;
+  if (id >= Item.IronHelmet && id <= Item.IronBoots) return ARMOR_LOOKS.iron;
+  if (id >= Item.DiamondHelmet && id <= Item.DiamondBoots) return ARMOR_LOOKS.diamond;
+  if (id >= Item.TitaniumHelmet && id <= Item.TitaniumBoots) return ARMOR_LOOKS.titanium;
+  return ARMOR_LOOKS.iron;
 }
 
 /** Build worn-armor plating onto an avatar body. `armor` is the synced
@@ -643,7 +785,11 @@ export function buildArmorOverlay(body: AvatarBody, armor: number[]): THREE.Mesh
   const add = (
     parent: THREE.Object3D, w: number, h: number, d: number,
     color: THREE.Color, x: number, y: number, z: number
-  ): void => { added.push(addBoxTo(parent, mat, w, h, d, color, x, y, z)); };
+  ): THREE.Mesh => {
+    const m = addBoxTo(parent, mat, w, h, d, color, x, y, z);
+    added.push(m);
+    return m;
+  };
 
   const helmet = armor[ARMOR_SLOT_INDEX.helmet] | 0;
   const chest  = armor[ARMOR_SLOT_INDEX.chestplate] | 0;
@@ -651,13 +797,49 @@ export function buildArmorOverlay(body: AvatarBody, armor: number[]): THREE.Mesh
   const boots  = armor[ARMOR_SLOT_INDEX.boots] | 0;
 
   if (helmet && ITEMS[helmet]?.armor) {
-    const c = armorColorFor(helmet);
-    const dark = new THREE.Color(c).multiplyScalar(0.8);
-    // Open-faced dome + a brow band, so the face/eyes stay visible.
-    add(body.head, HEAD + 0.1, 0.3, HEAD + 0.1, c, 0, HEAD_Y + 0.13, 0);
-    add(body.head, HEAD + 0.08, 0.09, 0.05, dark, 0, HEAD_Y + 0.02, -HEAD / 2 - 0.035);
-    for (const side of [-1, 1]) { // cheek guards
-      add(body.head, 0.05, 0.3, HEAD + 0.06, dark, side * (HEAD / 2 + 0.035), HEAD_Y - 0.05, 0.02);
+    const L = armorLookFor(helmet);
+    const h = body.head;
+    const top = HEAD_Y + HEAD / 2;           // crown of the head
+    const front = -HEAD / 2;
+    const squat = L.tier === 'stone';
+    // Dome over the crown, stopping above the brows so the face stays readable.
+    add(h, HEAD + 0.1, squat ? 0.24 : 0.2, HEAD + 0.1, L.base, 0, top - (squat ? 0.03 : 0.05), 0);
+    if (!squat) add(h, HEAD - 0.04, 0.05, HEAD - 0.04, L.base, 0, top + 0.07, 0); // rounded cap
+    // Brim band all the way round.
+    add(h, HEAD + 0.12, 0.05, HEAD + 0.12, L.trim, 0, top - 0.15, 0);
+    // Cheek guards and a neck guard.
+    for (const side of [-1, 1]) {
+      add(h, 0.05, 0.25, HEAD * 0.62, L.dark, side * (HEAD / 2 + 0.045), HEAD_Y - 0.03, 0.06);
+      if (L.tier !== 'leather') add(h, 0.055, 0.04, 0.04, L.trim, side * (HEAD / 2 + 0.05), HEAD_Y - 0.1, -0.08);
+    }
+    add(h, HEAD + 0.1, 0.22, 0.05, L.dark, 0, HEAD_Y - 0.01, HEAD / 2 + 0.045);
+    // Nose guard (not on soft leather).
+    if (L.tier !== 'leather') add(h, 0.05, 0.13, 0.035, L.trim, 0, top - 0.22, front - 0.06);
+    switch (L.tier) {
+      case 'leather':
+        for (const x of [-0.16, 0, 0.16]) add(h, 0.035, 0.035, 0.02, L.accent, x, top - 0.15, front - 0.07);
+        break;
+      case 'stone':
+        for (const side of [-1, 1]) add(h, 0.06, 0.06, 0.06, L.accent, side * 0.15, top + 0.1, -0.1);
+        add(h, HEAD + 0.02, 0.04, HEAD + 0.02, L.dark, 0, top + 0.1, 0);
+        break;
+      case 'iron':
+        // A red plume sweeping from brow to nape.
+        add(h, 0.06, 0.05, HEAD - 0.02, L.trim, 0, top + 0.12, 0);
+        add(h, 0.07, 0.1, HEAD * 0.6, L.accent, 0, top + 0.18, 0.02);
+        add(h, 0.07, 0.16, 0.12, L.accent, 0, top + 0.1, HEAD / 2 + 0.06);
+        break;
+      case 'diamond':
+        // A tall crystal fin with gold at its root.
+        add(h, 0.07, 0.04, HEAD - 0.04, L.trim, 0, top + 0.11, 0);
+        add(h, 0.045, 0.16, HEAD * 0.55, L.accent, 0, top + 0.2, 0.02);
+        add(h, 0.045, 0.08, 0.1, L.accent, 0, top + 0.31, 0.06);
+        break;
+      case 'titanium':
+        // A lit visor bar across the brim and twin sensor fins.
+        add(h, HEAD + 0.02, 0.028, 0.02, L.accent, 0, top - 0.15, front - 0.065);
+        for (const side of [-1, 1]) add(h, 0.03, 0.12, 0.16, L.dark, side * 0.18, top + 0.12, 0.08);
+        break;
     }
   }
   if (chest && ITEMS[chest]?.glider) {
@@ -671,23 +853,70 @@ export function buildArmorOverlay(body: AvatarBody, armor: number[]): THREE.Mesh
     add(body.group, 0.64, 0.06, 0.06, new THREE.Color(0xffc775), 0, packY + 0.13, packZ);
     for (const m of added.slice(-3)) m.userData.gliderPack = true;
   } else if (chest && ITEMS[chest]?.armor) {
-    const c = armorColorFor(chest);
-    add(body.group, TORSO_W + 0.09, TORSO_H + 0.04, TORSO_D + 0.09, c,
-      0, HIP_Y + TORSO_H / 2 + 0.02, 0);
-    for (const arm of [la, ra]) { // shoulder pads swing with the arms
-      add(arm, LIMB_W + 0.1, 0.26, LIMB_D + 0.1, c, 0, -0.13, 0);
+    const L = armorLookFor(chest);
+    const g = body.group;
+    // Deep enough to close over the slim pack on the back (so it never pokes
+    // through the plate) and the pouches on the front; shifted back a touch
+    // because the pack sticks out further than the pouches do.
+    const D = 0.51, W = TORSO_W + 0.1, zc = 0.02;
+    const front = zc - D / 2, back = zc + D / 2;
+    const plateTop = HIP_Y + TORSO_H + 0.01, plateBot = HIP_Y + 0.22;
+    const plateY = (plateTop + plateBot) / 2, plateH = plateTop - plateBot;
+    // Cuirass shell, then a raised breastplate with a centre ridge.
+    add(g, W, plateH, D, L.base, 0, plateY, zc);
+    add(g, W - 0.14, plateH * 0.62, 0.035, L.base, 0, plateY + plateH * 0.12, front - 0.015);
+    add(g, 0.045, plateH * 0.7, 0.03, L.trim, 0, plateY + plateH * 0.1, front - 0.035);
+    // Back plate: a trim band across the shoulders and a spine down it.
+    add(g, W - 0.1, 0.05, 0.03, L.trim, 0, plateTop - 0.04, back + 0.012);
+    add(g, 0.05, plateH * 0.7, 0.03, L.dark, 0, plateY, back + 0.012);
+    // Gorget collar.
+    add(g, 0.4, 0.075, 0.4, L.trim, 0, NECK_Y - 0.025, 0);
+    // Faulds: two stepped lames over the belt line.
+    add(g, W - 0.02, 0.08, D - 0.02, L.dark, 0, plateBot - 0.035, zc);
+    add(g, W - 0.05, 0.07, D - 0.05, L.base, 0, plateBot - 0.11, zc);
+    // The signature at the heart.
+    add(g, 0.11, 0.11, 0.03, L.accent, 0, plateY + plateH * 0.18, front - 0.05);
+    if (L.tier === 'titanium') {
+      for (const side of [-1, 1]) add(g, 0.025, plateH * 0.62, 0.02, L.accent, side * 0.17, plateY + 0.02, front - 0.01);
+    } else if (L.tier === 'leather') {
+      for (const side of [-1, 1]) add(g, 0.05, 0.035, 0.02, L.accent, side * 0.16, plateY - 0.08, front - 0.012);
+    } else if (L.tier === 'stone') {
+      for (const x of [-0.2, 0.2]) for (const y of [plateY + 0.1, plateY - 0.1])
+        add(g, 0.05, 0.05, 0.03, L.accent, x, y, front - 0.01);
+    }
+    for (const [arm, side] of [[la, -1], [ra, 1]] as const) {
+      // Layered pauldrons that swing with the arms, flared outward.
+      add(arm, LIMB_W + 0.14, 0.15, LIMB_D + 0.14, L.base, side * 0.03, -0.02, 0);
+      add(arm, LIMB_W + 0.11, 0.1, LIMB_D + 0.11, L.dark, side * 0.03, -0.13, 0);
+      add(arm, LIMB_W + 0.12, 0.03, LIMB_D + 0.12, L.trim, side * 0.03, -0.195, 0);
+      if (L.tier === 'diamond' || L.tier === 'iron')
+        add(arm, 0.05, 0.08, 0.14, L.tier === 'diamond' ? L.accent : L.trim, side * 0.14, 0.07, 0);
+      // Vambrace over the forearm, above the glove.
+      add(arm, LIMB_W + 0.05, 0.16, LIMB_D + 0.05, L.base, 0, -LIMB_H + 0.27, 0);
+      add(arm, LIMB_W + 0.06, 0.03, LIMB_D + 0.06, L.trim, 0, -LIMB_H + 0.2, 0);
+      if (L.tier === 'titanium') add(arm, 0.02, 0.12, 0.02, L.accent, side * (LIMB_W / 2 + 0.03), -LIMB_H + 0.27, -0.05);
     }
   }
   if (legs && ITEMS[legs]?.armor) {
-    const c = armorColorFor(legs);
-    for (const leg of [ll, rl]) {
-      add(leg, LIMB_W + 0.06, 0.46, LIMB_D + 0.06, c, 0, -0.23, 0);
+    const L = armorLookFor(legs);
+    for (const [leg, side] of [[ll, -1], [rl, 1]] as const) {
+      add(leg, LEG_W + 0.07, 0.3, LEG_D + 0.07, L.base, 0, -0.17, 0);           // cuisse
+      add(leg, LEG_W + 0.09, 0.11, LEG_D + 0.09, L.dark, side * 0.012, -0.03, 0); // tasset
+      add(leg, 0.19, 0.12, 0.06, L.trim, 0, -0.4, -LEG_D / 2 - 0.06);           // knee cop
+      add(leg, 0.07, 0.06, 0.03, L.accent, 0, -0.4, -LEG_D / 2 - 0.1);
+      add(leg, 0.17, 0.12, 0.03, L.base, 0, -0.52, -LEG_D / 2 - 0.04);          // shin plate
+      if (L.tier === 'titanium') add(leg, 0.02, 0.24, 0.02, L.accent, side * (LEG_W / 2 + 0.04), -0.17, -0.06);
     }
   }
   if (boots && ITEMS[boots]?.armor) {
-    const c = armorColorFor(boots);
+    const L = armorLookFor(boots);
     for (const leg of [ll, rl]) {
-      add(leg, LIMB_W + 0.09, 0.24, LIMB_D + 0.12, c, 0, -LIMB_H + 0.12, -0.02);
+      add(leg, LEG_W + 0.09, 0.2, LEG_D + 0.13, L.base, 0, -LIMB_H + 0.11, -0.025);
+      add(leg, LEG_W + 0.07, 0.09, 0.07, L.dark, 0, -LIMB_H + 0.05, -LEG_D / 2 - 0.1); // toe cap
+      add(leg, LEG_W + 0.11, 0.045, LEG_D + 0.15, L.trim, 0, -LIMB_H + 0.22, -0.025);  // cuff rim
+      add(leg, LEG_W + 0.1, 0.03, LEG_D + 0.19, L.dark.clone().multiplyScalar(0.6), 0, -LIMB_H + 0.012, -0.035);
+      if (L.tier !== 'stone' && L.tier !== 'leather')
+        add(leg, 0.05, 0.05, 0.03, L.accent, 0, -LIMB_H + 0.14, -LEG_D / 2 - 0.1);
     }
   }
   return added;
@@ -807,8 +1036,8 @@ interface Avatar {
   head: THREE.Group;    // separate group so we can pitch it with look-dir
   /** [leftLeg, rightLeg, leftArm, rightArm] — each pivots at its hip/shoulder. */
   parts: THREE.Group[];
-  /** Wooden boat hull, shown while the player is boating. */
-  boat: THREE.Group;
+  /** Rowing boat, shown (and rowed) while the player is boating. */
+  boat: BoatRig;
   /** Hang-glider rig — a scene-level object, NOT a child of the body: the
    *  wing flies the flight path while the pilot hangs beneath it. */
   rig: GliderRig;
@@ -928,26 +1157,12 @@ export class RemotePlayers {
     // Faction members wear their team colour so sides stay readable in a war.
     const body = buildAvatarBody(cosmetics, isFaction(faction) ? team : undefined);
     const { group } = body;
-    const mat = body.material;
 
-    // ── Boat hull (shown while boating) ────────────────────────────────────
-    // Per-avatar geometry (not shared) so dispose()'s traverse stays correct.
-    const boat = new THREE.Group();
-    const hullC = new THREE.Color(0x8a6a3f);
-    const hullD = new THREE.Color(0x6d5330);
-    const floor = new THREE.Mesh(shadedBox(1.1, 0.18, 2.0, hullD), mat);
-    floor.position.y = 0.09;
-    const railL = new THREE.Mesh(shadedBox(0.14, 0.36, 2.0, hullC), mat);
-    railL.position.set(-0.55, 0.3, 0);
-    const railR = new THREE.Mesh(shadedBox(0.14, 0.36, 2.0, hullC), mat);
-    railR.position.set(0.55, 0.3, 0);
-    const bow = new THREE.Mesh(shadedBox(1.1, 0.42, 0.16, hullC), mat);
-    bow.position.set(0, 0.34, -1.0); // model faces -z
-    const stern = new THREE.Mesh(shadedBox(1.1, 0.36, 0.16, hullC), mat);
-    stern.position.set(0, 0.3, 1.0);
-    boat.add(floor, railL, railR, bow, stern);
-    boat.visible = false;
-    group.add(boat);
+    // ── Boat (shown while boating) ─────────────────────────────────────────
+    // Scene-level like the glider (shared cached geometry must stay out of
+    // the body's dispose traverse); the same model you ride yourself.
+    const boat = createBoatRig();
+    this.scene.add(boat.group);
 
     // ── Glider rig (shown while gliding) ───────────────────────────────────
     const rig = buildGliderRig();
@@ -1019,7 +1234,9 @@ export class RemotePlayers {
           mesh.rotation.set(-0.5, 0, 0);
           mesh.scale.setScalar(ITEMS[held].kind === 'block' ? 1.5 : 1.1);
         }
-        av.parts[3].add(mesh); // right arm — swings with the arm
+        // Guns ride the body two-handed (poseGunHold); anything else swings
+        // with the right arm.
+        (isGunItem(held) ? av.body.group : av.parts[3]).add(mesh);
         av.heldMesh = mesh;
         // Hang a muzzle flash off the gun's own muzzle anchor so a distant
         // shooter reads as a muzzle blink even before the tracer resolves.
@@ -1121,7 +1338,8 @@ export class RemotePlayers {
       if (av.swingT < 1) av.swingT = Math.min(1, av.swingT + dt / 0.25);
       const attackSwing = av.swingT < 1 ? Math.sin(av.swingT * Math.PI) : 0;
       const gunHeld = isGunItem(av.heldId);
-      const gadgetHeld = isModeledGadget(av.heldId);
+      // Throwables sit in one fist; only the big gadgets take both hands.
+      const gadgetHeld = isModeledGadget(av.heldId) && !isOneHandModel(av.heldId);
       av.aimT += ((gunHeld && r.aiming ? 1 : 0) - av.aimT) * Math.min(1, dt * 12);
       av.reloadT = r.reloading ? (av.reloadT + dt / 1.1) % 1 : 0;
       const sneakTarget = r.sneaking && !r.boating && !r.gliding ? 1 : 0;
@@ -1130,6 +1348,9 @@ export class RemotePlayers {
       // How fast they are actually travelling — drives the walk cycle, the
       // sail flutter and how hard the wing banks.
       const hspeed = Math.hypot(av.dx - av.lastX, av.dz - av.lastZ) / Math.max(dt, 1e-4);
+      // Signed speed along the heading, for the boat's rowing stroke.
+      const fwdSpeed = (-(av.dx - av.lastX) * Math.sin(av.dyaw) - (av.dz - av.lastZ) * Math.cos(av.dyaw)) /
+        Math.max(dt, 1e-4);
       av.lastX = av.dx; av.lastZ = av.dz;
       av.strideSpeed += (Math.min(hspeed, 9) - av.strideSpeed) * Math.min(1, dt * 9);
 
@@ -1155,7 +1376,15 @@ export class RemotePlayers {
       }
 
       // ── Pose / animation ──── parts = [leftLeg, rightLeg, leftArm, rightArm] ─
-      av.boat.visible = r.boating;
+      releaseGunHold(av.body);
+      // A slung gun while seated or hanging under a wing: out of the hands.
+      if (gunHeld && av.heldMesh) av.heldMesh.visible = !(r.boating || r.seated || av.glideT > 0.01);
+      const wasBoating = av.boat.group.visible;
+      av.boat.group.visible = r.boating && av.group.visible;
+      if (r.boating) {
+        if (!wasBoating) av.boat.prevYaw = av.dyaw;
+        updateBoatRig(av.boat, dt, av.dx, av.dy, av.dz, av.dyaw, fwdSpeed);
+      }
       if (av.tagTilted && av.glideT <= 0.01) {
         // Back on our feet: undo the flight anchoring.
         av.tagTilted = false;
@@ -1174,11 +1403,14 @@ export class RemotePlayers {
         av.group.rotation.x = 0;
         av.head.rotation.x = 0;
         if (r.seated) av.group.position.y = av.dy - SEAT_SINK;
+        // In a boat: sit ON the thwart, ride its bob and pull the oars.
+        if (r.boating) av.group.position.y = av.dy - BOAT_SIT_SINK + av.boat.bobY;
+        const armX = r.seated ? 0.95 : boatArmPose(av.boat);
         av.parts[0].rotation.x = 1.35;
         av.parts[1].rotation.x = 1.35;
-        av.parts[2].rotation.x = r.seated ? 0.95 : 0.55;
-        av.parts[3].rotation.x = r.seated ? 0.95 : 0.55;
-        av.parts[2].rotation.z = 0; av.parts[3].rotation.z = 0;
+        av.parts[2].rotation.x = armX;
+        av.parts[3].rotation.x = armX;
+        av.parts[2].rotation.z = r.boating ? 0.12 : 0; av.parts[3].rotation.z = r.boating ? -0.12 : 0;
       } else if (av.glideT > 0.01) {
         // Hanging under the wing: prone along the flight path, hands on the
         // control bar, banked into the turn.
@@ -1215,21 +1447,11 @@ export class RemotePlayers {
         av.parts[2].rotation.z = 0;
         av.parts[3].rotation.x = pose.arms[1];
         av.parts[3].rotation.z = pose.rightArmRoll;
-        if (gunHeld) {
-          // Shoulder the weapon with both hands. ADS raises it to the cheek;
-          // firing kicks both arms briefly and reload rolls the receiver inward.
+        if (gunHeld && av.heldMesh) {
           const reloadDip = r.reloading ? Math.sin(av.reloadT * Math.PI) : 0;
-          const raise = 0.9 + av.aimT * 0.42;
-          av.parts[2].rotation.x = raise + attackSwing * 0.1 - reloadDip * 0.25;
-          av.parts[3].rotation.x = raise + 0.1 + attackSwing * 0.18 - reloadDip * 0.35;
-          av.parts[2].rotation.z = -0.42 + av.aimT * 0.12;
-          av.parts[3].rotation.z = 0.08 + reloadDip * 0.5;
-          if (av.heldMesh) {
-            // Counter the raised forearm so the barrel remains on the look line.
-            av.heldMesh.rotation.x = -(raise + 0.1) +
-              THREE.MathUtils.clamp(av.dpitch, -1.15, 1.15);
-            av.heldMesh.rotation.z = -reloadDip * 0.45;
-          }
+          poseGunHold(av.body, av.heldMesh, {
+            pitch: av.dpitch, aim: av.aimT, reload: reloadDip, kick: attackSwing,
+          });
         } else if (gadgetHeld) {
           av.parts[2].rotation.x = 0.45 + attackSwing * 0.18;
           av.parts[3].rotation.x = 0.62 + attackSwing * 0.48;
@@ -1322,6 +1544,7 @@ export class RemotePlayers {
     // BEFORE the body traverse below would dispose it for everyone.
     if (av.heldMesh) { av.heldMesh.parent?.remove(av.heldMesh); av.heldMesh = null; }
     disposeGliderRig(av.rig); // scene-level: it does not ride the body's traverse
+    removeBoatRig(av.boat); // scene-level, shared geometry: detach only
     disposeAvatarBody(av.body);
     av.nameTex.dispose();
     (av.sprite.material as THREE.SpriteMaterial).dispose();

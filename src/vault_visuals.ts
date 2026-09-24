@@ -22,6 +22,9 @@ const TELEGRAPH_GEOMETRY = {
   cone: new THREE.CircleGeometry(1, 48, -Math.PI * 0.4, Math.PI * 0.8),
   quadrant: new THREE.CircleGeometry(1, 48, -Math.PI / 2, Math.PI / 2),
 };
+/** A thin outline for round telegraphs, so the exact edge of the danger is
+ *  never a guess at a soft decal's fade. */
+const EDGE_GEOMETRY = new THREE.RingGeometry(0.955, 1, 64);
 const coneGeometry = new Map<number, THREE.CircleGeometry>();
 const ringGeometry = new Map<number, THREE.RingGeometry>();
 const OBJECT_GEOMETRY = {
@@ -122,6 +125,24 @@ export class VaultEncounterVisuals {
       mesh.rotation.x = -Math.PI / 2;
       mesh.visible = false;
       mesh.renderOrder = 4;
+      // The FILL grows from the attack's origin to its full reach over the
+      // wind-up, so how long you have left is read off the floor rather than
+      // guessed; the EDGE marks the exact boundary.
+      const fill = new THREE.Mesh(TELEGRAPH_GEOMETRY.circle, new THREE.MeshBasicMaterial({
+        color: 0xffffff, transparent: true, opacity: 0.3,
+        side: THREE.DoubleSide, depthWrite: false,
+      }));
+      fill.position.z = 0.004;
+      fill.renderOrder = 5;
+      fill.name = 'fill';
+      const edge = new THREE.Mesh(EDGE_GEOMETRY, new THREE.MeshBasicMaterial({
+        color: 0xffffff, transparent: true, opacity: 0.85,
+        side: THREE.DoubleSide, depthWrite: false,
+      }));
+      edge.position.z = 0.008;
+      edge.renderOrder = 6;
+      edge.name = 'edge';
+      mesh.add(fill, edge);
       this.root.add(mesh);
       mesh.name = `boss-telegraph-${i}`;
       this.hazards.push(mesh);
@@ -203,6 +224,31 @@ export class VaultEncounterVisuals {
       const countdown = Math.max(0, h.executeAt - snapshot.time);
       const urgency = Math.max(0, Math.min(1, 1 - countdown / 1.2));
       mat.opacity = highContrast ? 0.8 : snapshot.time >= h.executeAt ? 0.16 : 0.13 + urgency * 0.17;
+      const [fill, edge] = mesh.children as THREE.Mesh[];
+      const windup = Math.max(0.05, h.executeAt - h.telegraphAt);
+      const progress = Math.max(0, Math.min(1, (snapshot.time - h.telegraphAt) / windup));
+      const since = snapshot.time - h.executeAt;
+      fill.geometry = mesh.geometry;
+      fill.position.y = 0;
+      fill.scale.set(1, 1, 1);
+      if (h.shape === 'line') {
+        // Local +y runs from the origin toward the target: grow along it.
+        fill.scale.set(1, Math.max(0.001, progress), 1);
+        fill.position.y = -0.5 + progress / 2;
+      } else if (h.shape !== 'ring') {
+        fill.scale.set(Math.max(0.001, progress), Math.max(0.001, progress), 1);
+      }
+      const fillMat = fill.material as THREE.MeshBasicMaterial;
+      fillMat.color.set(highContrast ? 0xffffff : color).lerp(WHITE, progress * progress * 0.55);
+      fillMat.opacity = since >= 0
+        ? Math.max(0, 0.75 * (1 - since / 0.3))      // the strike: a white flash
+        : (h.shape === 'ring' ? 0.08 + progress * 0.3 : 0.2 + progress * 0.22);
+      if (since >= 0) fillMat.color.copy(WHITE);
+      edge.visible = h.shape === 'circle' || h.shape === 'ring' || h.shape === 'rain';
+      const edgeMat = edge.material as THREE.MeshBasicMaterial;
+      edgeMat.color.set(highContrast ? 0xffffff : color).lerp(WHITE, 0.35 + urgency * 0.5);
+      edgeMat.opacity = since >= 0 ? Math.max(0, 0.9 * (1 - since / 0.25))
+        : 0.45 + urgency * 0.45 * (reducedMotion ? 1 : 0.75 + 0.25 * Math.sin(snapshot.time * 24));
       mesh.rotation.set(-Math.PI / 2, 0, 0);
       mesh.position.set(h.origin.x, h.origin.y + 0.045, h.origin.z);
       if (h.shape === 'line') {
