@@ -104,7 +104,7 @@ import {
   duelTokenFromUrl, withDuelToken,
 } from './duels';
 import {
-  PARTY_AMBIENT_LIGHT, PARTY_MAX_HEALTH, PARTY_FLOOR_Y, PARTY_VOID_Y,
+  PARTY_AMBIENT_LIGHT, PARTY_MAX_HEALTH, PARTY_FLOOR_Y, PARTY_CEILING_Y, PARTY_VOID_Y,
   BRIDGE_TEAM_BLOCK, BRIDGE_TEAM_NAME, BRIDGE_GOAL_LIMIT,
   BRIDGE_MELEE_TIER, BRIDGE_BOW_COOLDOWN_MS, BRIDGE_GOALS,
   bridgeCageSpawn, bridgeGoalGuard, clampToPartySub, registerPartyArena, parkourCourse,
@@ -7930,8 +7930,8 @@ partyUI.onReplay = () => {
 };
 net.onPartyQueue = queued => {
   partyQueued = queued;
-  partyQueueStatus.textContent = queued && partyQueuedMode === 'bridge' ? 'Finding an opponent…' : '';
-  parkourQueueStatus.textContent = queued && partyQueuedMode === 'parkour' ? 'Finding a racer…' : '';
+  partyQueueStatus.textContent = queued && partyQueuedMode === 'bridge' ? 'Finding an opponent… A bot joins after 20 seconds.' : '';
+  parkourQueueStatus.textContent = queued && partyQueuedMode === 'parkour' ? 'Finding a racer… A bot joins after 20 seconds.' : '';
   refreshPartyAvailability();
 };
 net.onPartyError = (_code, message) => { partyQueued = false; refreshPartyAvailability(); showNotice(message); partyQueueStatus.textContent = message; };
@@ -7971,20 +7971,20 @@ net.onPartyArena = (arena, sub, team, spawn, _countdown) => {
   arenaMaxHealth = PARTY_MAX_HEALTH;
   arenaHpPerHeart = 2;
   // Local prediction of the server's build rules (server_core.handlePartyEdit
-  // is still the authority). The Bridge builds out over the void, so its box
-  // reaches below the deck; Parkour keeps the tighter one.
+  // is still the authority). The Bridge builds out over the void; Parkour
+  // building reaches the top of its towers.
   const wool = BRIDGE_TEAM_BLOCK[team] ?? Block.TeamWoolA;
   const bridge = sub.game === 'bridge';
   arenaCanPlaceAt = (x, y, z, held) => partySnapshot?.phase === 'running' && held === wool &&
     x >= sub.minX && x < sub.maxX && z >= sub.minZ && z < sub.maxZ &&
-    y >= (bridge ? PARTY_VOID_Y : PARTY_FLOOR_Y - 3) && y < (bridge ? PARTY_FLOOR_Y + 16 : PARTY_FLOOR_Y + 12) &&
+    y >= (bridge ? PARTY_VOID_Y : PARTY_FLOOR_Y - 3) && y < (bridge ? PARTY_FLOOR_Y + 16 : PARTY_CEILING_Y) &&
     !(bridge && bridgeGoalGuard(Math.floor(x) - sub.minX, Math.floor(z) - sub.minZ)) &&
     !(!bridge && parkourBuildBlocked(parkourCourse(sub.seed), Math.floor(x) - sub.minX, Math.floor(y), Math.floor(z) - sub.minZ));
   arenaCanEditAt = (x, y, z, held) => {
     const block = world.getBlock(x, y, z);
-    // Taking your own wool back out of the bridge you just built is part of
-    // crossing; everything the venue itself is made of stays put.
-    if (bridge && (block === Block.TeamWoolA || block === Block.TeamWoolB))
+    // Placed wool can be cleared in either mode; the server checks that the
+    // block was player-placed, so authored venue blocks remain protected.
+    if (block === Block.TeamWoolA || block === Block.TeamWoolB)
       return x >= sub.minX && x < sub.maxX && z >= sub.minZ && z < sub.maxZ;
     return block === Block.Air && !!arenaCanPlaceAt?.(x, y, z, held);
   };

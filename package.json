@@ -18,6 +18,7 @@
     "warfare-smoke": "esbuild scripts/warfare_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/warfare-smoke.cjs --log-level=error && node node_modules/.tmp/warfare-smoke.cjs",
     "duels-smoke": "esbuild scripts/duels_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/duels-smoke.cjs --log-level=error && node node_modules/.tmp/duels-smoke.cjs",
     "minigame-smoke": "esbuild scripts/minigame_isolation_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/minigame-smoke.cjs --log-level=error && node node_modules/.tmp/minigame-smoke.cjs",
+    "party-bot-smoke": "esbuild scripts/party_bot_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/party-bot-smoke.cjs --log-level=error && node node_modules/.tmp/party-bot-smoke.cjs",
     "party-smoke": "esbuild scripts/partygames_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/party-smoke.cjs --log-level=error && node node_modules/.tmp/party-smoke.cjs",
     "parkour-smoke": "esbuild scripts/parkour_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/parkour-smoke.cjs --log-level=error && node node_modules/.tmp/parkour-smoke.cjs",
     "boss-visual-smoke": "esbuild scripts/boss_visual_smoke.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/boss-visual-smoke.cjs --log-level=error && node node_modules/.tmp/boss-visual-smoke.cjs",

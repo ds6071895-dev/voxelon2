@@ -146,6 +146,6 @@ export function parkourBuildBlocked(course: ParkourCourse, lx: number, y: number
     const reach = live ? 1 : 0;
     const x0 = Math.floor(c.x - c.width / 2) - reach, z0 = Math.floor(c.z - c.depth / 2) - reach;
     return lx >= x0 && lx < x0 + c.width + 2 * reach && lz >= z0 && lz < z0 + c.depth + 2 * reach &&
-      y >= (live ? c.y - 2 : c.y) && y < c.y + (live ? 3 : 2);
+      y >= (live ? c.y - 2 : c.y) && y < c.y + 4;
   });
 }

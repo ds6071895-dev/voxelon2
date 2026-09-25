@@ -244,7 +244,7 @@ export function parkourCourse(seed: number): ParkourCourse {
   return course;
 }
 
-function generate(seed: number): ParkourCourse {
+function generate(seed: number, attempt = 0): ParkourCourse {
   const variant = parkourVariant(seed);
   const { mode, layout, deck } = variant;
   const theme = parkourTheme(seed);
@@ -254,7 +254,10 @@ function generate(seed: number): ParkourCourse {
   const volumes: { box: Box; owner: number }[] = [];
   /** The air every jump flies through, tagged with its two ends. */
   const corridors: { box: Box; a: number; b: number }[] = [];
-  let salt = 0;
+  // A spiral can occasionally box its next lap in with an obstacle. Retry
+  // its layout with a different deterministic draw before accepting a short
+  // tower; the public seed, mode and theme remain the same on every client.
+  let salt = attempt * 0x10000;
   const rand = (): number => partyHash(seed, 0x5000 + salt++);
 
   const vertical = layout === 'spiral' || layout === 'twin' || (layout === 'switchback' && mode === 'void');
@@ -671,6 +674,9 @@ function generate(seed: number): ParkourCourse {
   }
   const finish = cur;
   finish.checkpoint = true;
+
+  if (layout === 'spiral' && (finish.order < 40 || finish.y - start.y < 30) && attempt < 32)
+    return generate(seed, attempt + 1);
 
   // ── Stamp every pad into blocks ──
   const cells: ParkourCell[] = [];

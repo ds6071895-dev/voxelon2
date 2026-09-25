@@ -620,7 +620,7 @@ export function partySpawns(sub: PartySubBounds, members: readonly { team: numbe
 
 // ── Lobby engine ───────────────────────────────────────────────────────────
 
-export interface PartyIdentity { id: number; username: string; skin: number }
+export interface PartyIdentity { id: number; username: string; skin: number; bot?: boolean }
 
 export interface PartyParticipant extends PartyIdentity {
   host: boolean;
@@ -799,6 +799,7 @@ export class PartyGamesEngine {
     this.lobbyByPlayer.delete(id);
     const p = l.participants.get(id)!;
     p.connected = false;
+    if (p.bot) this.lastParkour.delete(id);
     p.ready = false;
     if (l.phase === 'lobby') l.participants.delete(id);
     const remaining = [...l.participants.values()].filter((v) => v.connected);
@@ -1079,18 +1080,23 @@ export class PartyGamesEngine {
     // A tower is tall: a fall well past the pads you were jumping between is
     // a fall, even though there is still a long way to the bottom of it.
     const here = course.steps[p.progress]?.[0], ahead = course.steps[p.progress + 1]?.[0];
+    // Credit the surface actually reached. A racer can jump past a pad or
+    // build around it; requiring every intermediate order used to leave all
+    // later checkpoints inert for the rest of that run.
+    const landed = course.platforms.find(pad => pad.order > p.progress &&
+      Math.abs(pos.x - sub.minX - pad.x) < pad.width / 2 + .35 &&
+      Math.abs(pos.z - sub.minZ - pad.z) < pad.depth / 2 + .35 &&
+      Math.abs(pos.y - pad.y) < .35 &&
+      (pad.order < course.steps.length - 1 || pad.order === p.progress + 1));
     const floor = Math.min(here?.y ?? Infinity, ahead?.y ?? Infinity) - 8;
-    if (pos.y < PARTY_VOID_Y || pos.y < course.lowY - 5 || pos.y < floor) return reset();
+    if (pos.y < PARTY_VOID_Y || pos.y < course.lowY - 5 || (pos.y < floor && !landed)) return reset();
     if (mode === 'void' && pos.y < parkourVoidY(course, t)) return reset();
-    for (const next of course.steps[p.progress + 1] ?? []) {
-      if (Math.abs(pos.x - sub.minX - next.x) >= next.width / 2 + .35 ||
-        Math.abs(pos.z - sub.minZ - next.z) >= next.depth / 2 + .35 ||
-        Math.abs(pos.y - next.y) >= .35) continue;
+    if (landed) {
       // Checked before the step, against the lead as it stood when they jumped.
       const trailing = parkourCatchUp(p, l.participants.values());
-      p.progress++;
+      p.progress = landed.order;
       p.score = Math.max(p.score, p.progress);
-      if (next.checkpoint || trailing) p.checkpoint = p.progress;
+      if (landed.checkpoint || trailing) p.checkpoint = p.progress;
       if (p.progress === course.steps.length - 1) {
         p.finishedAt = now;
         this.endMatch(l, now);

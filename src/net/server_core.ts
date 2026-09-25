@@ -101,6 +101,8 @@ import {
   parkourCrumbleUnder, parkourPadNear,
 } from '../parkour_mechanics';
 import type { ParkourCell } from '../parkour_course';
+import { PartyBot, PARTY_BOT_WAIT_MS } from '../party_bot';
+import type { World } from '../world';
 // Shared contact validation and combo limits for directional melee.
 import {
   BW_COMBO_MAX, BW_COMBO_WINDOW_MS, BW_MELEE_FACING_DOT, BW_MELEE_RANGE,
@@ -486,6 +488,9 @@ export class GameServer {
   readonly party = new PartyGamesEngine(secureDuelToken);
   private partyQueue: number[] = [];
   private readonly partyQueueModes = new Map<number, PartyMode>();
+  private readonly partyQueuedAt = new Map<number, number>();
+  private readonly partyBots = new Map<number, PartyBot>();
+  private nextPartyBotId = 1_000_000_000;
   private partyClockNextAt = 0;
   private readonly partyMoves = new Map<number, PartyMoveState>();
   /** Arena slot -> is that Bridge's pair of cage hatches currently open? An
@@ -591,7 +596,7 @@ export class GameServer {
   }
 
   get playerCount(): number {
-    return this.players.size;
+    return this.players.size - this.partyBots.size;
   }
 
   /** Current connected population by playable mode. Players in matchmaking or
@@ -601,7 +606,7 @@ export class GameServer {
     const counts: PlayerCounts = { play: 0, duels: 0, parkour: 0, bridge: 0 };
     const counted = new Set<number>();
     const count = (mode: keyof PlayerCounts, id: number): void => {
-      if (!this.players.has(id) || counted.has(id)) return;
+      if (!this.players.has(id) || this.partyBots.has(id) || counted.has(id)) return;
       counted.add(id);
       counts[mode]++;
     };
@@ -897,7 +902,8 @@ export class GameServer {
   removePlayer(id: number): Outbound[] {
     const p = this.players.get(id);
     if (!p) return [];
-    const out = this.settleDisconnect(id);
+    const out = this.removePartyBotsFor(id);
+    out.push(...this.settleDisconnect(id));
     this.removeFromDuelQueue(id);
     const duelLeave = this.duels.leave(id, this.worldTime * 1000);
     if (duelLeave.snapshot) {
@@ -2559,10 +2565,21 @@ export class GameServer {
       const yaw = snapshot.sub!.game === 'bridge' ? (member.team === 0 ? Math.PI : 0) : Math.PI;
       this.enterArenaBody(p, 'party', spawns[i], yaw, PARTY_MAX_HEALTH);
       this.partyMoves.set(p.id, this.freshPartyMove(spawns[i], snapshot.revision));
+      const bot = this.partyBots.get(p.id);
+      if (bot) {
+        bot.reset(spawns[i]);
+        bot.body.yaw = yaw;
+        this.party.markArenaReady(p.id, this.worldTime * 1000, snapshot.revision);
+      }
       this.partyCombat.delete(p.id);
       out.push(this.partyLoadout(p, member, snapshot.sub!));
       out.push({ to: p.id, msg: { t: 'partyArena', arena: snapshot.arena!, sub: snapshot.sub!, team: member.team, spawn: spawns[i], countdownEndsAt: snapshot.countdownEndsAt ?? 0 } });
     });
+    for (const id of ids) {
+      if (this.partyBots.has(id)) continue;
+      for (const botId of ids) if (this.partyBots.has(botId))
+        out.push({ to: id, msg: { t: 'join', player: toInfo(this.players.get(botId)!) } });
+    }
     out.push(...this.announceArenaScope(ids));
     return out;
   }
@@ -2762,6 +2779,11 @@ export class GameServer {
     const evaluated = this.party.evaluate(p.id, retry ? { x: p.x, y: PARTY_FLOOR_Y - 30, z: p.z } : p, now), out: Outbound[] = [];
     if (evaluated.spawn) {
       Object.assign(p, evaluated.spawn);
+      const bot = this.partyBots.get(p.id);
+      if (bot) {
+        bot.reset(evaluated.spawn);
+        bot.body.yaw = (this.party.participantFor(p.id)?.team ?? 0) === 0 ? Math.PI : 0;
+      }
       p.health = PARTY_MAX_HEALTH;
       const move = this.partyMoves.get(p.id);
       if (move) {
@@ -2821,6 +2843,13 @@ export class GameServer {
       charge: number; combo: number; crit: boolean; ranged: boolean;
     },
   ): Outbound[] {
+    const bot = this.partyBots.get(target.id);
+    if (bot) {
+      bot.body.vel.x += hit.kx * 6;
+      bot.body.vel.y += hit.ky * 6;
+      bot.body.vel.z += hit.kz * 6;
+      bot.body.onGround = false;
+    }
     const dealt = Math.min(hit.damage, target.health);
     target.health = Math.max(0, target.health - hit.damage);
     const killed = target.health <= 0;
@@ -2989,16 +3018,16 @@ export class GameServer {
     const reject = (): Outbound[] => [{ to: p.id, msg: { t: 'edit', x: bx, y: by, z: bz, block: current } }];
     const inRange = Math.hypot(bx + .5 - p.x, by + .5 - p.y, bz + .5 - p.z) <= EDIT_RANGE;
     const inSub = bx >= sub.minX && bx < sub.maxX && bz >= sub.minZ && bz < sub.maxZ;
-    // Building out over the void is the whole of The Bridge, so its build box
-    // reaches down past the deck; Parkour keeps its tighter one.
+    // Bridge building reaches down toward the void. Parkour building reaches
+    // the top of its towers, including Descent's high starting platform.
     const minY = bridge ? PARTY_VOID_Y : PARTY_FLOOR_Y - 3;
-    const maxY = bridge ? PARTY_FLOOR_Y + 16 : PARTY_FLOOR_Y + 12;
+    const maxY = bridge ? PARTY_FLOOR_Y + 16 : PARTY_CEILING_Y;
     if (!inSub || !inRange || by < minY || by >= maxY)
       return reject();
-    // Taking your own wool back is how you get across a second time, so a
-    // break is allowed — but only of a block a player put there.
+    // Player-placed wool can be removed in either party mode. Parkour racers
+    // must be able to clear a misplaced block from a narrow landing too.
     if (block === Block.Air) {
-      if (!bridge || !this.edits.has(key) || !BRIDGE_TEAM_BLOCK.includes(current as typeof BRIDGE_TEAM_BLOCK[number]))
+      if (!this.edits.has(key) || !BRIDGE_TEAM_BLOCK.includes(current as typeof BRIDGE_TEAM_BLOCK[number]))
         return reject();
       this.edits.set(key, Block.Air);
       return this.party.membersOf(p.id).map(id => ({ to: id, msg: { t: 'edit', x: bx, y: by, z: bz, block: Block.Air } }));
@@ -3020,10 +3049,96 @@ export class GameServer {
     this.edits.set(key, block);
     return this.party.membersOf(p.id).map(id => ({ to: id, msg: { t: 'edit', x: bx, y: by, z: bz, block } }));
   }
+  private matchPartyBots(now: number): Outbound[] {
+    const out: Outbound[] = [];
+    for (const id of [...this.partyQueue]) {
+      const human = this.players.get(id), mode = this.partyQueueModes.get(id);
+      if (!human || human.dead || human.arenaSaved || this.party.phaseFor(id) || this.duels.phaseFor(id)) {
+        this.removeFromPartyQueue(id);
+        out.push({ to: id, msg: { t: 'partyQueue', queued: false } });
+        continue;
+      }
+      if (!mode || now - (this.partyQueuedAt.get(id) ?? now) < PARTY_BOT_WAIT_MS) continue;
+      while (this.players.has(this.nextPartyBotId)) this.nextPartyBotId--;
+      const botId = this.nextPartyBotId--, username = mode === 'bridge' ? 'Scout [Bot]' : 'Piper [Bot]';
+      const made = this.party.create({ id, username: human.username, skin: human.skin }, now, mode);
+      if ('reason' in made) continue;
+      const joined = this.party.join(made.token, { id: botId, username, skin: skinSeed(username), bot: true }, now);
+      if (!joined.ok) { this.party.leave(id, now); continue; }
+      this.party.setReady(id, true, now);
+      this.party.setReady(botId, true, now);
+      const started = this.party.start(id, now);
+      if (!started.ok) {
+        this.party.leave(botId, now); this.party.leave(id, now);
+        continue; // Arena capacity: keep the original queue age and retry.
+      }
+      const bot: ServerPlayer = {
+        ...human, id: botId, username, skin: skinSeed(username), faction: NO_FACTION,
+        cosmetics: undefined, duelProfile: duelProfileOf(newDuelProgress()), seasonsWon: 0, savedClientData: undefined, arenaSaved: undefined,
+        ct: undefined, away: false, tpaFrom: undefined, thrownPending: [], duelShotTickets: [],
+        arenaKind: undefined, arenaTrack: [], totems: [], armor: [0, 0, 0, 0],
+        health: PARTY_MAX_HEALTH, dead: false, eliminated: false, held: 0,
+        gliding: false, boating: false, seated: false, sneaking: false,
+      };
+      this.partyBots.set(botId, new PartyBot(id, human, this.rng));
+      this.players.set(botId, bot);
+      this.removeFromPartyQueue(id);
+      out.push({ to: id, msg: { t: 'partyQueue', queued: false } }, ...this.launchParty(started.snapshot));
+    }
+    return out;
+  }
+
+  private removePartyBotsFor(humanId: number): Outbound[] {
+    const out: Outbound[] = [];
+    for (const [id, bot] of this.partyBots) {
+      if (bot.opponent !== humanId) continue;
+      const arena = this.party.arenaFor(id);
+      const left = this.party.leave(id, this.worldTime * 1000);
+      if (left.deleted && arena) out.push(...this.resetPartyArenaEdits(arena));
+      this.partyBots.delete(id);
+      this.players.delete(id);
+      this.partyMoves.delete(id);
+      this.partyCombat.delete(id);
+      this.partyArrows = this.partyArrows.filter(a => a.owner !== id);
+      out.push({ to: humanId, msg: { t: 'leave', id } });
+    }
+    return out;
+  }
+
+  private tickPartyBots(dt: number, now: number): Outbound[] {
+    const out: Outbound[] = [];
+    const world = { isLoaded: () => true, getBlock: (x: number, y: number, z: number) =>
+      this.edits.get(`${x},${y},${z}`) ?? partyArenaBlockAt(x, y, z) ?? Block.Air } as unknown as World;
+    for (const [id, bot] of this.partyBots) {
+      const p = this.players.get(id)!, human = this.players.get(bot.opponent);
+      const snap = this.party.snapshotFor(id, now), me = this.party.participantFor(id), other = this.party.participantFor(bot.opponent);
+      if (!human || !snap || !me || !other) { out.push(...this.removePartyBotsFor(bot.opponent)); continue; }
+      if (snap.phase !== 'running' || me.outAt !== undefined || now < (snap.goalResetAt ?? 0)) continue;
+      // Apply pending respawns before advancing inputs, just like a client teleport.
+      if (me.pendingSpawn) out.push(...this.evaluatePartyPlayer(p));
+      const action = bot.step(dt, now, snap, me, other, human, world);
+      Object.assign(p, { x: bot.body.pos.x, y: bot.body.pos.y, z: bot.body.pos.z, yaw: bot.body.yaw, pitch: 0 });
+      p.sneaking = bot.body.sneaking;
+      p.ct = Math.floor(now);
+      this.recordArenaTrack(p);
+      if (action.edit) out.push(...this.handlePartyEdit(p, action.edit.x, action.edit.y, action.edit.z, action.edit.block));
+      p.held = snap.mode === 'bridge' ? Item.IronAxe : BRIDGE_TEAM_BLOCK[me.team];
+      if (action.melee) { p.swing = (p.swing + 1) & 0xffff; out.push(...this.handlePartyMelee(p, human.id)); }
+      if (action.shot) {
+        p.held = Item.BridgeBow;
+        out.push(...this.handlePartyShoot(p, { t: 'partyShoot', ...action.shot, power: 1 }));
+      }
+      if (snap.sub?.game === 'parkour') out.push(...this.stepOnCrumble(p, snap.sub));
+      out.push(...this.evaluatePartyPlayer(p));
+    }
+    return out;
+  }
+
   private removeFromPartyQueue(id: number): boolean {
     const before = this.partyQueue.length;
     this.partyQueue = this.partyQueue.filter(v => v !== id);
     this.partyQueueModes.delete(id);
+    this.partyQueuedAt.delete(id);
     return before !== this.partyQueue.length;
   }
   private handlePartyLobby(p: ServerPlayer, msg: Extract<ClientMsg, {
@@ -3048,12 +3163,15 @@ export class GameServer {
         if (this.party.phaseFor(p.id))
           return this.partyError(p.id, 'already_in_lobby');
         const mode: PartyMode = msg.mode === 'parkour' ? 'parkour' : 'bridge';
+        if (this.partyQueueModes.get(p.id) === mode && this.partyQueuedAt.has(p.id))
+          return [{ to: p.id, msg: { t: 'partyQueue', queued: true } }];
         this.removeFromPartyQueue(p.id);
         this.partyQueue = this.partyQueue.filter(id => this.players.has(id) && !this.party.phaseFor(id) && !this.duels.phaseFor(id) && !this.players.get(id)?.arenaSaved);
         const opponentId = this.partyQueue.find(id => this.partyQueueModes.get(id) === mode);
         if (opponentId === undefined) {
           this.partyQueue.push(p.id);
           this.partyQueueModes.set(p.id, mode);
+          this.partyQueuedAt.set(p.id, now);
           return [{ to: p.id, msg: { t: 'partyQueue', queued: true } }];
         }
         this.removeFromPartyQueue(opponentId);
@@ -3079,12 +3197,13 @@ export class GameServer {
         return result.ok ? this.partySnapshotOutbound(result.snapshot, { id: p.id, token: msg.token }) : this.partyError(p.id, result.reason);
       }
       case 'partyLeave': {
+        const botCleanup = this.removePartyBotsFor(p.id);
         this.removeFromPartyQueue(p.id);
         this.partyMoves.delete(p.id);
         this.partyCombat.delete(p.id);
         this.partyArrows = this.partyArrows.filter(a => a.owner !== p.id);
         const arena = this.party.arenaFor(p.id), result = this.party.leave(p.id, now);
-        const out: Outbound[] = [{ to: p.id, msg: { t: 'partyQueue', queued: false } }];
+        const out: Outbound[] = [...botCleanup, { to: p.id, msg: { t: 'partyQueue', queued: false } }];
         if (result.deleted && arena)
           out.push(...this.resetPartyArenaEdits(arena));
         if (p.arenaSaved) {
@@ -3216,11 +3335,11 @@ export class GameServer {
   }
   tickParty(): Outbound[] {
     const now = this.worldTime * 1000, out: Outbound[] = [];
-    // Arrows are the only thing in either venue that moves on its own, so this
-    // is the only place the party layer needs a real dt.
+    out.push(...this.matchPartyBots(now));
+    // Server-owned arrows and bot inputs advance on the same match clock.
     const dt = this.partyArrowClock > 0 ? Math.min(.25, Math.max(0, this.worldTime - this.partyArrowClock)) : 0;
     this.partyArrowClock = this.worldTime;
-    if (dt > 0) out.push(...this.tickPartyArrows(dt));
+    if (dt > 0) out.push(...this.tickPartyArrows(dt), ...this.tickPartyBots(dt, now));
     // Resolve all hazards together on the server, even when a tab stops sending movement.
     for (const snap of this.party.snapshots(now)) {
       // The hatches are on the round clock, not on anybody's packets: the
@@ -3235,7 +3354,12 @@ export class GameServer {
           out.push(...this.evaluatePartyPlayer(p));
       }
     }
-    for (const snap of this.party.tick(now)) {
+    for (let snap of this.party.tick(now)) {
+      if (snap.phase === 'lobby') {
+        for (const member of snap.participants)
+          if (!this.partyBots.has(member.id)) out.push(...this.removePartyBotsFor(member.id));
+        snap = this.party.snapshotFor(snap.host, now) ?? snap;
+      }
       // The whistle is a phase change, so the hatches drop on the same tick
       // rather than on the next one.
       out.push(...this.syncPartyCages(snap, now));

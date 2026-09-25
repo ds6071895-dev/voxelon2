@@ -11,6 +11,7 @@ import {
 import { GameServer, type Outbound } from '../src/net/server_core';
 import { Block, BLOCKS } from '../src/blocks';
 import { Item } from '../src/items';
+import { parkourBuildBlocked } from '../src/parkour_mechanics';
 import type { ClientMsg } from '../src/net/protocol';
 
 let passed = 0;
@@ -203,6 +204,8 @@ function run(e: PartyGamesEngine, snap: PartyLobbySnapshot, now: number) {
   check('parkour caps at two', snap.capacity === 2 && !e.join(e.tokenFor(1)!, who(3), 0).ok);
   const s = run(e, snap, 0), sub = s.sub!, course = parkourCourse(sub.seed);
   const mode = course.variant.mode, last = course.steps.length - 1;
+  check('wool cannot cap the headroom above a checkpoint',
+    parkourBuildBlocked(course, Math.floor(course.start.x), course.start.y + 2, Math.floor(course.start.z)));
   for (const p of partySpawns(sub, s.participants))
     check('both racers spawn on solid platforms', !!BLOCKS[partyArenaBlockAt(p.x, p.y - .1, p.z)!]?.solid);
   const at = (i: number) => ({ x: sub.minX + course.steps[i][0].x, y: course.steps[i][0].y + .01, z: sub.minZ + course.steps[i][0].z });
@@ -229,6 +232,20 @@ function run(e: PartyGamesEngine, snap: PartyLobbySnapshot, now: number) {
   const left = e.leave(1, 60000);
   check('leaving detaches player from engine', e.phaseFor(1) === null && left.snapshot?.participants.find(p => p.id === 1)?.connected === false);
   check('last departure deletes the lobby', e.leave(2, 60000).deleted && e.snapshots(60000).length === 0);
+}
+{
+  const { e, snap } = prepared('parkour');
+  const s = run(e, snap, 0), sub = s.sub!, course = parkourCourse(sub.seed);
+  const checkpoints = course.steps.flatMap((step, i) => i > 0 && i < course.steps.length - 1 && step.some(p => p.checkpoint) ? [i] : []);
+  check('course provides later checkpoints', checkpoints.length >= 2);
+  const at = (i: number) => ({ x: sub.minX + course.steps[i][0].x, y: course.steps[i][0].y + .01, z: sub.minZ + course.steps[i][0].z });
+  const missed = checkpoints[0];
+  for (let i = 1; i < missed; i++) e.evaluate(1, at(i), 4000 + i * 100);
+  e.evaluate(1, at(missed + 1), 4000 + missed * 100);
+  check('skipping one platform does not freeze progress', e.participantFor(1)!.progress === missed + 1);
+  for (let i = missed + 2; i <= checkpoints[1]; i++) e.evaluate(1, at(i), 4000 + i * 100);
+  check('later checkpoint counts after an earlier one was missed',
+    e.participantFor(1)!.checkpoint === checkpoints[1] && e.participantFor(1)!.progress === checkpoints[1]);
 }
 // Rising Void and Collapse Chase: the modes that knock you out.
 {
@@ -305,7 +322,7 @@ function serverMatch(mode: PartyMode = 'parkour') {
     }
   check('infinite wool can bridge and broadcasts to rival', !!wool);
   const removed = sends(1, { t: 'edit', ...wool!, block: Block.Air });
-  check('parkour wool cannot be taken back', removed.some(o => o.msg.t === 'edit' && o.msg.block === Block.TeamWoolA));
+  check('parkour wool can be cleared', removed.some(o => o.to === 2 && o.msg.t === 'edit' && o.msg.block === Block.Air));
   check('arena items cannot be dropped into world', sends(1, { t: 'drop', items: [{ id: Block.TeamWoolA, count: 64 }], x: player.x, y: player.y, z: player.z }).length === 0);
   const leave = sends(1, { t: 'partyLeave' });
   check('departed socket gets no old party lobby or result', !leave.some(o => o.to === 1 && (o.msg.t === 'partyLobby' || o.msg.t === 'partyResult')));
