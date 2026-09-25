@@ -3542,11 +3542,11 @@
                     <span class="minigame-particles" aria-hidden="true"><i></i><i></i><i></i></span>
                   </div>
                   <div class="minigame-copy">
-                    <div class="minigame-title-row"><h3>Duels</h3><span class="minigame-count"><span>2–4 players · ranked</span><span id="duels-live-count" class="minigame-live-count" data-state="syncing" aria-live="polite">Syncing…</span></span></div>
+                    <div class="minigame-title-row"><h3>Duels</h3><span class="minigame-count"><span>Play: ranked · Friends: unranked</span><span id="duels-live-count" class="minigame-live-count" data-state="syncing" aria-live="polite">Syncing…</span></span></div>
                     <p>Five minutes in the Prism Colosseum. Burst Rifle, four identical spawn corners, first to fifteen kills takes it early. Build your own cover, hold the altar, climb the ladder.</p>
                     <div class="duel-card-actions">
                       <button id="duels-card-action" class="minigame-action" type="button">Play</button>
-                      <button id="duels-private-action" class="duel-private-action" type="button">Invite Friends</button>
+                      <button id="duels-private-action" class="duel-private-action" type="button" title="Friend matches are unranked: your RP never changes">Invite Friends · Unranked</button>
                       <div id="duel-queue-status" class="duel-queue-status" role="status" aria-live="polite"></div>
                     </div>
                   </div>
@@ -3674,9 +3674,9 @@
                   <header class="lobby-hero fl-hero" data-tilt>
                     <div class="fl-hero-art" aria-hidden="true"></div>
                     <div class="lobby-hero-copy">
-                      <div class="lobby-kicker">Private match · Duels</div>
+                      <div id="duel-lobby-kicker" class="lobby-kicker">Private match · Duels · Unranked</div>
                       <h3 id="duel-lobby-title">Private match</h3>
-                      <p>Prism Colosseum · 2–4 players · ranked</p>
+                      <p id="duel-lobby-rules">Prism Colosseum · 2–4 players · unranked — RP never changes</p>
                     </div>
                     <div class="duel-ruleline">
                       <span>5 min</span><span>First to 15</span><span>40 HP</span><span>Build 7 high</span><span>3s respawn</span>
@@ -3684,7 +3684,7 @@
                   </header>
                   <div class="duel-invite lobby-invite fl-invite">
                     <div class="fl-gift" aria-hidden="true"><div class="fl-gift-cube"><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
-                    <div class="lobby-invite-label"><b>Invite your friends</b><span>Anyone with this link lands straight in your lobby.</span></div>
+                    <div class="lobby-invite-label"><b>Invite your friends</b><span>Anyone with this link lands straight in your lobby. Friend matches are unranked, so nobody's RP changes.</span></div>
                     <input id="duel-invite" readonly aria-label="Duels invite link" />
                     <button id="duel-copy" class="duel-copy lobby-copy" type="button">Copy invite</button>
                     <button id="duel-share" class="duel-copy fl-share" type="button" hidden>Share…</button>

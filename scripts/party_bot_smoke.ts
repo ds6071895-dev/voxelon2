@@ -86,7 +86,7 @@ for (const mode of ['bridge', 'parkour'] as const) {
     slow.adapt(snap.round!.startedAt + t, snap, me, { ...human, score: 1, falls: 8 });
     fast.adapt(snap.round!.startedAt + t, snap, me, { ...human, score: t / 1000, progress: 30 });
   }
-  assert.ok(slow.skill >= .2 && fast.skill <= .8 && fast.skill > slow.skill + .2, 'bounded skill adaptation');
+  assert.ok(slow.skill >= .2 && fast.skill <= 1 && fast.skill > slow.skill + .2, 'bounded skill adaptation');
 }
 {
   const { s, botId } = launch('bridge');

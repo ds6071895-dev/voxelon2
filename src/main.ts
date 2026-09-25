@@ -2889,7 +2889,7 @@ net.onDuelInviteInfo = (valid, host, lobbyId) => {
   if (!initialDuelToken) return;
   duelInviteBanner.classList.add('visible');
   duelInviteBanner.textContent = valid && host
-    ? `${host} is inviting you to Duel${lobbyId ? ` · Lobby ${lobbyId}` : ''}. Sign in or create an account to join.`
+    ? `${host} is inviting you to Duel${lobbyId ? ` · Lobby ${lobbyId}` : ''} (unranked friend match). Sign in or create an account to join.`
     : 'This Duel invite has expired. You can still sign in and create a new lobby.';
 };
 
@@ -2904,6 +2904,8 @@ const duelsCardAction = document.getElementById('duels-card-action') as HTMLButt
 const duelsPrivateAction = document.getElementById('duels-private-action') as HTMLButtonElement;
 const duelQueueStatus = document.getElementById('duel-queue-status')!;
 const duelLobbyTitle = document.getElementById('duel-lobby-title')!;
+const duelLobbyKicker = document.getElementById('duel-lobby-kicker')!;
+const duelLobbyRules = document.getElementById('duel-lobby-rules')!;
 const duelInvite = document.getElementById('duel-invite') as HTMLInputElement;
 const duelCopy = document.getElementById('duel-copy') as HTMLButtonElement;
 const duelFeedback = document.getElementById('duel-feedback')!;
@@ -3240,7 +3242,7 @@ function refreshDuelsAvailability(): void {
   duelsPrivateAction.setAttribute('aria-disabled', String(!online || duelQueued));
   duelsCardAction.textContent = online ? (duelQueued ? 'Cancel Queue' : 'Play') : 'Multiplayer server required';
   if (!online) duelQueueStatus.textContent = 'Connect to multiplayer to play Duels.';
-  else if (duelQueued) duelQueueStatus.textContent = 'Finding you an opponent…';
+  else if (duelQueued) duelQueueStatus.textContent = 'Finding you an opponent… A bot matched to your rank joins after 20 seconds.';
   else duelQueueStatus.textContent = '';
 }
 
@@ -3390,6 +3392,10 @@ function renderDuelLobby(): void {
   if (!snap) { showDuelBrowser(); return; }
   showDuelLobby();
   duelLobbyTitle.textContent = `Lobby ${snap.id}`;
+  duelLobbyKicker.textContent = snap.ranked ? 'Ranked match · Duels' : 'Private match · Duels · Unranked';
+  duelLobbyRules.textContent = snap.ranked
+    ? 'Prism Colosseum · ranked — RP on the line'
+    : 'Prism Colosseum · 2–4 players · unranked — RP never changes';
   duelInvite.value = duelInviteToken ? duelInviteUrl(duelInviteToken) : '';
   duelInvite.parentElement!.toggleAttribute('hidden', !duelInviteToken);
 
@@ -4002,7 +4008,8 @@ function renderDuelResult(result: DuelResult): void {
     time: 'full time', score: `score limit — ${DUEL_SCORE_LIMIT} kills`,
     sudden_death: 'sudden death', forfeit: 'forfeit', cancelled: 'cancelled',
   };
-  summary.textContent = `${formatDuelTime(result.durationMs)} · ${reasonText[result.finishReason]}`;
+  summary.textContent = `${formatDuelTime(result.durationMs)} · ${reasonText[result.finishReason]}` +
+    (result.ranked ? '' : ' · Unranked friend match — no RP change');
   const recap = document.createElement('div'); recap.className = 'duel-result-recap';
   for (const text of duelResultRecap(result)) {
     const chip = document.createElement('span'); chip.textContent = text; recap.appendChild(chip);
@@ -7930,8 +7937,8 @@ partyUI.onReplay = () => {
 };
 net.onPartyQueue = queued => {
   partyQueued = queued;
-  partyQueueStatus.textContent = queued && partyQueuedMode === 'bridge' ? 'Finding an opponent… A bot joins after 20 seconds.' : '';
-  parkourQueueStatus.textContent = queued && partyQueuedMode === 'parkour' ? 'Finding a racer… A bot joins after 20 seconds.' : '';
+  partyQueueStatus.textContent = queued && partyQueuedMode === 'bridge' ? 'Finding an opponent… A bot tuned to your level joins after 20 seconds.' : '';
+  parkourQueueStatus.textContent = queued && partyQueuedMode === 'parkour' ? 'Finding a racer… A bot tuned to your level joins after 20 seconds.' : '';
   refreshPartyAvailability();
 };
 net.onPartyError = (_code, message) => { partyQueued = false; refreshPartyAvailability(); showNotice(message); partyQueueStatus.textContent = message; };

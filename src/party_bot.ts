@@ -17,11 +17,24 @@ const solidAt = (world: World, x: number, y: number, z: number) => !!BLOCKS[worl
 const isWool = (block: number) => block === Block.TeamWoolA || block === Block.TeamWoolB;
 const RUN: PlayerInput = { ...FROZEN_INPUT, forward: true, sprintKey: true, sprintHeld: true };
 interface JumpPlan { x: number; z: number; yaw: number; speed: number }
+const BOT_NAMES = {
+  bridge: ['Scout', 'Brick', 'Rampart', 'Sable', 'Flint', 'Havoc'],
+  parkour: ['Piper', 'Skip', 'Zephyr', 'Lark', 'Dart', 'Hopscotch'],
+} as const;
+export function partyBotName(mode: 'bridge' | 'parkour', rng: () => number): string {
+  const names = BOT_NAMES[mode];
+  return `${names[Math.floor(rng() * names.length)]} [Bot]`;
+}
+/** Where a first-ever bot starts, before it has seen the player play. */
+export const PARTY_BOT_START_SKILL = .5;
 export interface BotAction { melee?: boolean; shot?: { dx: number; dy: number; dz: number }; edit?: PartyVec3 & { block: number } }
 
 export class PartyBot {
   readonly body: Player;
-  skill = .5;
+  skill: number;
+  /** The level this player has proven across matches. Live adaptation pulls
+   * around it; it drifts with every adaptation, so it follows them up. */
+  anchor: number;
   private nextThink = 0;
   private nextAttack = 0;
   private nextShot = 0;
@@ -39,8 +52,15 @@ export class PartyBot {
   private nextShortcut = 0;
   private nextReplan = 0;
   private navigation: PartyVec3[] = [];
+  private strafe = 1;
+  private strafeUntil = 0;
+  private nextClutch = 0;
+  private enemyPrev: (PartyVec3 & { at: number }) | null = null;
+  private enemyVel = { x: 0, y: 0, z: 0 };
 
-  constructor(readonly opponent: number, spawn: PartyVec3, private readonly rng: () => number) {
+  constructor(readonly opponent: number, spawn: PartyVec3, private readonly rng: () => number,
+    startSkill = PARTY_BOT_START_SKILL) {
+    this.skill = this.anchor = clamp(startSkill, .15, 1);
     this.body = new Player(spawn);
     this.body.energyDrainMult = 0; // Party modes give human players unlimited sprint too.
     this.body.damageSink = () => {}; // The match engine owns falls and health.
@@ -60,17 +80,26 @@ export class PartyBot {
     this.pauseUntil = 0;
   }
 
-  /** Falling behind sharpens decisions without changing health, reach, or physics. */
+  /** Falling behind sharpens decisions without changing health, reach, or
+   * physics; running away with it eases off so the race stays a race. The
+   * target is centred on `anchor`, the level this player has already proven,
+   * and a big gap closes fast instead of a notch every few seconds. */
   adapt(now: number, snap: PartyLobbySnapshot, me: PartyParticipant, human: PartyParticipant): void {
     const elapsed = now - snap.round!.startedAt;
-    if (elapsed < 3000 || now < this.adaptAt) return;
-    this.adaptAt = now + 2500;
+    if (elapsed < 2500 || now < this.adaptAt) return;
+    this.adaptAt = now + 2000;
     const target = snap.mode === 'bridge'
-      ? .52 + (human.score - me.score) * .2 + (human.kills - me.kills) * .045
-      : .25 + clamp(human.score / Math.max(1, elapsed / 1000), 0, .7) * .7
-        + clamp(human.progress - me.progress, -8, 8) * .02 - Math.min(.12, human.falls * .02);
-    this.skill = clamp(this.skill + clamp(target - this.skill, -.09, .09), .2, snap.mode === 'bridge' ? .95 : .8);
+      ? this.anchor + (human.score - me.score) * .13 + (human.kills - me.kills) * .04
+      : this.anchor + clamp(human.progress - me.progress, -10, 10) * .055 - Math.min(.1, human.falls * .01);
+    const gap = target - this.skill;
+    // Proportional step: a player lapping the bot sees it wake up within a few
+    // seconds, while a close race only nudges it.
+    this.skill = clamp(this.skill + clamp(gap * .45, -.14, .14), .15, 1);
+    this.anchor = clamp(this.anchor + (this.skill - this.anchor) * .12, .15, 1);
   }
+
+  /** What to remember for this player's next bot. */
+  get rating(): number { return clamp(this.anchor * .5 + this.skill * .5, .15, 1); }
 
   step(dt: number, now: number, snap: PartyLobbySnapshot, me: PartyParticipant,
     human: PartyParticipant, opponent: PartyVec3, world: World): BotAction {
@@ -104,22 +133,45 @@ export class PartyBot {
 
   private bridge(now: number, snap: PartyLobbySnapshot, me: PartyParticipant,
     enemy: PartyVec3, world: World, action: BotAction): void {
-    const p = this.body, sub = snap.sub!;
+    const p = this.body, sub = snap.sub!, s = this.skill;
     const dx = enemy.x - p.pos.x, dz = enemy.z - p.pos.z, distance = Math.hypot(dx, dz);
+    if (this.enemyPrev && now > this.enemyPrev.at) {
+      const t = (now - this.enemyPrev.at) / 1000;
+      this.enemyVel = { x: (enemy.x - this.enemyPrev.x) / t, y: (enemy.y - this.enemyPrev.y) / t, z: (enemy.z - this.enemyPrev.z) / t };
+    }
+    this.enemyPrev = { ...enemy, at: now };
     if (now >= this.nextThink) {
-      this.nextThink = now + 130 + (1 - this.skill) * 260 + this.rng() * 120;
-      const goal = BRIDGE_GOALS[1 - me.team];
+      this.nextThink = now + 90 + (1 - s) * 280 + this.rng() * 90;
+      const goal = BRIDGE_GOALS[1 - me.team], home = BRIDGE_GOALS[me.team];
+      const homeZ = sub.minZ + (home.minZ + home.maxZ) / 2;
       let tx = sub.minX + BRIDGE_LANE_X + .5, tz = sub.minZ + (goal.minZ + goal.maxZ) / 2;
-      if (distance < 4.2 && Math.abs(enemy.y - p.pos.y) < 3 &&
-        solidAt(world, Math.floor(enemy.x), Math.floor(p.pos.y) - 1, Math.floor(enemy.z))) {
+      const onBridge = Math.abs(enemy.y - p.pos.y) < 3 &&
+        solidAt(world, Math.floor(enemy.x), Math.floor(p.pos.y) - 1, Math.floor(enemy.z));
+      // A rival who has slipped past toward our portal gets chased down —
+      // sooner the better the bot is — instead of waved through.
+      const pastUs = Math.abs(enemy.z - homeZ) + 2 < Math.abs(p.pos.z - homeZ);
+      if (onBridge && (distance < 3.4 + s * 2.2 || (pastUs && this.rng() < .3 + s * .7))) {
         tx = enemy.x; tz = enemy.z;
       }
       this.aim = Math.atan2(-(tx - p.pos.x), -(tz - p.pos.z));
-      if (distance < 5) this.aim += (this.rng() - .5) * (.7 - this.skill * .45);
-      this.input = { ...RUN, sprintHeld: this.rng() < .4 + this.skill * .5, sprintKey: false };
+      if (distance < 5) this.aim += (this.rng() - .5) * (1 - s) * .75;
+      const sprint = this.rng() < .35 + s * .65;
+      this.input = { ...RUN, sprintHeld: sprint, sprintKey: sprint };
       // Brief hesitations and imperfect swing timing are independent of frame rate.
-      if (this.rng() < (1 - this.skill) * .06) this.pauseUntil = now + 100 + this.rng() * 300;
-      if (distance < 2 && this.rng() < .3) this.input.forward = false;
+      if (this.rng() < (1 - s) * .07) this.pauseUntil = now + 100 + this.rng() * 300;
+      if (distance < 2 && this.rng() < .3 - s * .2) this.input.forward = false;
+      // Good bots strafe in a close fight rather than walking straight in.
+      if (distance < 4.5 && s > .4) {
+        if (now >= this.strafeUntil) {
+          this.strafe = this.rng() < .6 ? -this.strafe : this.strafe;
+          this.strafeUntil = now + 280 + (1 - s) * 700 + this.rng() * 300;
+        }
+        // Only on a wide enough footing: side-stepping off a one-wide span is suicide.
+        const side = Math.floor(p.pos.x + this.strafe * .9);
+        if (solidAt(world, side, Math.floor(p.pos.y) - 1, Math.floor(p.pos.z))) {
+          this.input.left = this.strafe < 0; this.input.right = this.strafe > 0;
+        }
+      }
     }
     const delta = Math.atan2(Math.sin(this.aim - p.yaw), Math.cos(this.aim - p.yaw));
     p.yaw += clamp(delta, -.18, .18);
@@ -160,17 +212,29 @@ export class PartyBot {
       }
     }
     if ((!p.onGround && p.pos.y > PARTY_FLOOR_Y + 2.5) || now < this.pauseUntil) this.input.forward = false;
-    if (distance < 3.2 && now >= this.nextAttack) {
-      this.nextAttack = now + 580 + (1 - this.skill) * 450 + this.rng() * 240;
-      action.melee = this.rng() < .6 + this.skill * .3;
+    // Clutch: knocked off the span, a sharp bot drops a block under its feet.
+    if (!p.onGround && p.vel.y < -1 && !action.edit && s > .45 && now >= this.nextClutch &&
+      p.pos.y > PARTY_FLOOR_Y + .6 && localZ > 10 && localZ < 69) {
+      this.nextClutch = now + 260;
+      const bx = Math.floor(p.pos.x), bz = Math.floor(p.pos.z);
+      if (!solid(bx, PARTY_FLOOR_Y, bz) && this.rng() < s * .9)
+        action.edit = { x: bx, y: PARTY_FLOOR_Y, z: bz, block: me.team === 0 ? Block.TeamWoolA : Block.TeamWoolB };
     }
-    if (distance > 6 && distance < 25 && now >= this.nextShot) {
-      this.nextShot = now + 2300 + this.rng() * 2000;
-      // Aim with angular spread and no perfect leading.
-      const error = (.09 - this.skill * .065) * distance;
-      action.shot = { dx: dx + (this.rng() - .5) * error * 2,
+    if (distance < 3.2 && now >= this.nextAttack) {
+      this.nextAttack = now + 330 + (1 - s) * 600 + this.rng() * (60 + (1 - s) * 250);
+      action.melee = this.rng() < .5 + s * .45;
+      // W-tap: let go of forward for a beat so the next hit lands full knockback.
+      if (action.melee && s > .6) this.pauseUntil = Math.max(this.pauseUntil, now + 70 + this.rng() * 60);
+    }
+    if (distance > 6 && distance < 28 && now >= this.nextShot) {
+      this.nextShot = now + 5000 + (1 - s) * 2500 + this.rng() * 800;
+      // Lead a moving target by the arrow's flight time, better the sharper the bot.
+      const flight = distance / 62, lead = s * .9;
+      const ax = dx + this.enemyVel.x * flight * lead, az = dz + this.enemyVel.z * flight * lead;
+      const error = (.12 - s * .105) * distance;
+      action.shot = { dx: ax + (this.rng() - .5) * error * 2,
         dy: enemy.y - p.pos.y + distance * .10 + (this.rng() - .5) * error,
-        dz: dz + (this.rng() - .5) * error * 2 };
+        dz: az + (this.rng() - .5) * error * 2 };
     }
   }
 
@@ -187,7 +251,7 @@ export class PartyBot {
       this.jumping = false;
       this.navigation = [];
       this.pauseUntil = now + (a.kind === 'crumble' || a.kind === 'blink' || a.kind === 'launch' || a.kind === 'boost'
-        ? 0 : 120 + (1 - this.skill) * 550 + this.rng() * 300);
+        ? 0 : 30 + (1 - this.skill) * 620 + this.rng() * (40 + (1 - this.skill) * 320));
       const key = `${a.index}:${b.index}`;
       if (!this.plans.has(key)) this.plans.set(key, this.planJump(a, b, {
         isLoaded: () => true,
@@ -224,7 +288,7 @@ export class PartyBot {
     const plan = this.plan;
     const tx = plan?.x ?? sub.minX + a.x, tz = plan?.z ?? sub.minZ + a.z;
     if (Math.hypot(tx - p.pos.x, tz - p.pos.z) > .075) {
-      this.walkTo(tx, a.y, tz, world, a.kind === 'crumble' || a.kind === 'blink', now, action);
+      this.walkTo(tx, a.y, tz, world, a.kind === 'crumble' || a.kind === 'blink' || this.skill > .65, now, action);
       return;
     }
     if (!p.onGround) return;
@@ -242,7 +306,7 @@ export class PartyBot {
     }
     p.yaw = plan.yaw;
     // Occasional under/over-steering produces real, recoverable misses.
-    if (this.rng() < .15 - this.skill * .14) p.yaw += (this.rng() < .5 ? -1 : 1) * .22;
+    if (this.rng() < (1 - this.skill) * .17) p.yaw += (this.rng() < .5 ? -1 : 1) * .22;
     const dx = -Math.sin(p.yaw), dz = -Math.cos(p.yaw);
     p.vel.x = dx * plan.speed; p.vel.z = dz * plan.speed;
     this.input = { ...RUN, jump: true };

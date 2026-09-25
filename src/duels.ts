@@ -290,6 +290,8 @@ export interface DuelParticipant {
   multiUntil: number;
   /** Who killed this player last, so a payback reads as Revenge. */
   lastKilledBy: number;
+  /** A server-driven practice opponent. Bots never hold an account. */
+  bot?: boolean;
 }
 
 export interface DuelArenaBounds {
@@ -316,12 +318,17 @@ export interface DuelResult {
   durationMs: number;
   rematchDeadline: number;
   progressChanges: DuelProgressChange[];
+  /** False for invite-link lobbies: nobody's RP moved. */
+  ranked: boolean;
 }
 
 export interface DuelLobbySnapshot {
   /** Public display id. Invite tokens are never included in snapshots/logs. */
   id: string;
   phase: DuelPhase;
+  /** Matchmade lobbies are ranked. Friend lobbies made from an invite link
+   * never touch RP, so playing a mate cannot be used to farm the ladder. */
+  ranked: boolean;
   capacity: number;
   participants: DuelParticipant[];
   host: number;
@@ -531,6 +538,7 @@ interface DuelLobby {
   id: string;
   token: string;
   phase: DuelPhase;
+  ranked: boolean;
   participants: Map<number, DuelParticipant>;
   host: number;
   nextJoinOrder: number;
@@ -546,7 +554,7 @@ interface DuelLobby {
   result?: DuelResult;
 }
 
-export interface DuelIdentity { id: number; username: string; skin: number; profile?: DuelPublicProfile }
+export interface DuelIdentity { id: number; username: string; skin: number; profile?: DuelPublicProfile; bot?: boolean }
 
 export interface DuelCreateResult { token: string; snapshot: DuelLobbySnapshot }
 export type DuelJoinResult =
@@ -585,13 +593,15 @@ export class Duels {
 
   constructor(private readonly tokenFactory: () => string) {}
 
-  create(identity: DuelIdentity, now: number): DuelCreateResult | { reason: 'already_in_lobby' } {
+  /** `ranked` is only ever true for matchmaking; every lobby a player opens
+   * to invite friends is unranked. */
+  create(identity: DuelIdentity, now: number, ranked = false): DuelCreateResult | { reason: 'already_in_lobby' } {
     if (this.lobbyByPlayer.has(identity.id)) return { reason: 'already_in_lobby' };
     let token = '';
     do token = this.tokenFactory(); while (!token || token.length < 24 || this.lobbies.has(token));
     const p = this.newParticipant(identity, true, 0);
     const lobby: DuelLobby = {
-      id: `D${this.nextLobbyId++}`, token, phase: 'lobby', participants: new Map([[p.id, p]]),
+      id: `D${this.nextLobbyId++}`, token, phase: 'lobby', ranked, participants: new Map([[p.id, p]]),
       host: p.id, nextJoinOrder: 1, feed: [], nextEventSeq: 1, firstBloodTaken: false,
     };
     this.lobbies.set(token, lobby);
@@ -919,7 +929,7 @@ export class Duels {
     lobby.result = { winner, scoreboard, feed: lobby.feed.map((event) => ({ ...event })),
       finishReason: reason, durationMs: Math.max(0, now - (lobby.startedAt ?? now)),
       rematchDeadline: now + DUEL_REMATCH_MS,
-      progressChanges: [] };
+      progressChanges: [], ranked: lobby.ranked };
   }
 
   private returnToLobby(lobby: DuelLobby): void {
@@ -938,7 +948,7 @@ export class Duels {
   }
 
   private snapshotLobby(lobby: DuelLobby, now: number): DuelLobbySnapshot {
-    return { id: lobby.id, phase: lobby.phase, capacity: DUEL_CAPACITY,
+    return { id: lobby.id, phase: lobby.phase, ranked: lobby.ranked, capacity: DUEL_CAPACITY,
       participants: orderedDuelScoreboard(lobby.participants.values()), host: lobby.host,
       serverNow: now, feed: lobby.feed.map((event) => ({ ...event })),
       countdownEndsAt: lobby.countdownEndsAt, startedAt: lobby.startedAt,

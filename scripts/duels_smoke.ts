@@ -827,10 +827,10 @@ function madeParticipant(id: number, kills: number, deaths: number, joinOrder: n
   const forfeited = s.handle(1, { t: 'duelLeave' });
   check('leaving a two-player round yields a scoped forfeit result', forfeited.some((o) =>
     o.to === 2 && o.msg.t === 'duelResult' && o.msg.result.winner === 2 &&
-    o.msg.result.finishReason === 'forfeit' && o.msg.result.progressChanges.length === 2));
-  check('server settles and persists a result exactly once before fan-out', settlementCalls === 1);
+    o.msg.result.finishReason === 'forfeit' && !o.msg.result.ranked && o.msg.result.progressChanges.length === 0));
+  check('an invite-lobby (friend) match is unranked and never settles RP', settlementCalls === 0);
   s.handle(2, { t: 'duelFlair', flair: 'Scrapper' });
-  check('revisiting the result snapshot cannot settle it twice', settlementCalls === 1);
+  check('revisiting an unranked result still cannot settle it', settlementCalls === 0);
   const restoredOne = forfeited.find((o) => o.to === 1 && o.msg.t === 'arenaRestored')?.msg;
   check('leaver receives exact open-world restoration', !!restoredOne &&
     restoredOne.t === 'arenaRestored' && restoredOne.x === 120 &&

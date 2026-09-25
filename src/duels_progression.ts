@@ -169,6 +169,10 @@ export interface DuelSettlementPlayer {
   id: number;
   username: string;
   state: DuelProgressState;
+  /** A practice bot rated at its human opponent's own RP. It never takes the
+   * repeat-opponent discount (it is a fresh, level-matched opponent every
+   * time) and never enters anyone's opponent history. */
+  bot?: boolean;
 }
 
 export interface DuelSettlement {
@@ -331,6 +335,7 @@ export function settleDuelProgress(players: readonly DuelSettlementPlayer[], now
       const actual = i < j ? 1 : i > j ? 0 : 0.5;
       const expected = 1 / (1 + Math.pow(10, (before[j].rp - old.rp) / 400));
       performance += actual - expected;
+      if (opponent.bot) continue;
       const key = opponent.username.toLowerCase();
       const prior = (old.opponentHistory[key] ?? []).filter((stamp) => stamp >= cutoff).length;
       repeatFactors.push(duelRepeatMultiplier(prior));
@@ -362,7 +367,7 @@ export function settleDuelProgress(players: readonly DuelSettlementPlayer[], now
     next.peakRp = Math.max(old.peakRp, afterRp);
     next.demotionShield = namedRankPromotion ? true : shieldUsed ? false : old.demotionShield;
     next.opponentHistory = cleanHistory(old.opponentHistory, now);
-    for (let j = 0; j < players.length; j++) if (j !== i) {
+    for (let j = 0; j < players.length; j++) if (j !== i && !players[j].bot) {
       addEncounter(next.opponentHistory, players[j].username.toLowerCase(), now);
     }
     next.opponentHistory = cleanHistory(next.opponentHistory, now);

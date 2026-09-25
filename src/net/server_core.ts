@@ -101,7 +101,8 @@ import {
   parkourCrumbleUnder, parkourPadNear,
 } from '../parkour_mechanics';
 import type { ParkourCell } from '../parkour_course';
-import { PartyBot, PARTY_BOT_WAIT_MS } from '../party_bot';
+import { PartyBot, PARTY_BOT_WAIT_MS, partyBotName } from '../party_bot';
+import { DuelBot, DUEL_BOT_NAMES, DUEL_BOT_WAIT_MS } from '../duel_bot';
 import type { World } from '../world';
 // Shared contact validation and combo limits for directional melee.
 import {
@@ -490,6 +491,15 @@ export class GameServer {
   private readonly partyQueueModes = new Map<number, PartyMode>();
   private readonly partyQueuedAt = new Map<number, number>();
   private readonly partyBots = new Map<number, PartyBot>();
+  /** Skill each human last left their Bridge/Parkour bot on, keyed
+   *  `mode:username`, so the next bot starts at the level they proved rather
+   *  than from scratch. In memory only: a restart re-learns within a match. */
+  private readonly partyBotSkill = new Map<string, number>();
+  private readonly partyBotKey = new Map<number, string>();
+  /** Ranked Duels practice bots, keyed by their own player id. */
+  private readonly duelBots = new Map<number, DuelBot>();
+  private readonly duelQueuedAt = new Map<number, number>();
+  private duelBotClock = 0;
   private nextPartyBotId = 1_000_000_000;
   private partyClockNextAt = 0;
   private readonly partyMoves = new Map<number, PartyMoveState>();
@@ -596,7 +606,7 @@ export class GameServer {
   }
 
   get playerCount(): number {
-    return this.players.size - this.partyBots.size;
+    return this.players.size - this.partyBots.size - this.duelBots.size;
   }
 
   /** Current connected population by playable mode. Players in matchmaking or
@@ -606,7 +616,7 @@ export class GameServer {
     const counts: PlayerCounts = { play: 0, duels: 0, parkour: 0, bridge: 0 };
     const counted = new Set<number>();
     const count = (mode: keyof PlayerCounts, id: number): void => {
-      if (!this.players.has(id) || this.partyBots.has(id) || counted.has(id)) return;
+      if (!this.players.has(id) || this.partyBots.has(id) || this.duelBots.has(id) || counted.has(id)) return;
       counted.add(id);
       counts[mode]++;
     };
@@ -915,6 +925,7 @@ export class GameServer {
         });
       }
     }
+    out.push(...this.removeDuelBotsFor(id));
     this.removeFromPartyQueue(id);
     const oldPartyArena = this.party.arenaFor(id);
     const partyLeave = this.party.leave(id, this.worldTime * 1000);
@@ -1848,11 +1859,18 @@ export class GameServer {
     const key = `${snapshot.id}:${snapshot.startedAt ?? result.rematchDeadline}`;
     if (this.settledDuelResults.has(key)) return [];
     this.settledDuelResults.add(key);
-    if (result.finishReason === 'cancelled') return [];
-    const settlement = settleDuelProgress(result.scoreboard.map((participant) => ({
-      id: participant.id, username: participant.username,
-      state: this.duelProgress.get(participant.id) ?? newDuelProgress(),
-    })), this.wallNow());
+    if (result.finishReason === 'cancelled' || !snapshot.ranked) return [];
+    const humanState = result.scoreboard.map((participant) => this.duelBots.has(participant.id)
+      ? null : this.duelProgress.get(participant.id) ?? newDuelProgress()).find((state) => state) ?? newDuelProgress();
+    const settlement = settleDuelProgress(result.scoreboard.map((participant) => this.duelBots.has(participant.id)
+      // The bot is rated exactly at its human's RP, so the expected score is
+      // 50/50 and a win or a loss moves them by the same fair amount.
+      ? { id: participant.id, username: participant.username, bot: true,
+        state: { ...newDuelProgress(), rp: humanState.rp, placementsRemaining: 0 } }
+      : { id: participant.id, username: participant.username,
+        state: this.duelProgress.get(participant.id) ?? newDuelProgress() }), this.wallNow());
+    settlement.states = settlement.states.filter((value) => !this.duelBots.has(value.id));
+    settlement.changes = settlement.changes.filter((value) => !this.duelBots.has(value.id));
     // The callback receives the complete account set in one call. It must
     // finish before the result object is exposed to any outbound message.
     const persisted = this.onDuelSettlement?.(settlement.states.map((value) => ({
@@ -2033,7 +2051,7 @@ export class GameServer {
     if (snapshot.arena) {
       out.push(...this.resetDuelArenaEdits(snapshot.arena.slot, snapshot.participants.map((v) => v.id)));
     }
-    for (const member of snapshot.participants.filter(p => p.connected)) {
+    for (const member of snapshot.participants.filter(p => p.connected && !this.duelBots.has(p.id))) {
       const p = this.players.get(member.id);
       if (p?.arenaSaved) { out.push(...this.restoreOpenWorldState(p)); restored.push(p.id); }
     }
@@ -2187,7 +2205,7 @@ export class GameServer {
     // through the target's body.
     if (amount !== 5 || !fin(target.x, target.y, target.z)) return [];
     const dx = target.x - attacker.x, dy = target.y - attacker.y, dz = target.z - attacker.z;
-    const distance = Math.hypot(dx, dy, dz), horiz = Math.hypot(dx, dz);
+    const distance = Math.hypot(dx, dy, dz);
     if (!(distance > 0 && distance <= 60)) return [];
     const now = this.worldTime;
     // Lag compensation. The shooter aimed at the opponent as their own client
@@ -2233,10 +2251,19 @@ export class GameServer {
     // let a blocked round be re-reported the moment the target steps out.
     attacker.duelShotTickets.splice(ticketIndex, 1);
     if (!clear) return [];
+    return this.applyDuelRound(attacker, target);
+  }
+
+  /** One Burst Rifle round that has already been judged a hit. */
+  private applyDuelRound(attacker: ServerPlayer, target: ServerPlayer): Outbound[] {
+    const nowMs = this.worldTime * 1000;
+    const dx = target.x - attacker.x, dz = target.z - attacker.z, horiz = Math.hypot(dx, dz);
     const dealt = Math.min(5, target.health);
     target.health = Math.max(0, target.health - 5);
     const killed = target.health <= 0;
     const knockX = horiz > 0 ? dx / horiz : 0, knockZ = horiz > 0 ? dz / horiz : 0;
+    const bot = this.duelBots.get(target.id);
+    if (bot) { bot.body.vel.x += knockX * 2.2; bot.body.vel.z += knockZ * 2.2; }
     const out: Outbound[] = [
       { to: target.id, msg: { t: 'hurt', health: killed ? 1 : target.health, dead: false,
         by: attacker.id, kx: knockX, ky: 0.25, kz: knockZ, combat: 0 } },
@@ -2392,7 +2419,7 @@ export class GameServer {
         }
         const made = this.duels.create({
           id: opponent.id, username: opponent.username, skin: opponent.skin, profile: opponent.duelProfile,
-        }, now);
+        }, now, true);
         if ('reason' in made) {
           this.duelQueue.push(p.id);
           return [{ to: p.id, msg: { t: 'duelQueue', queued: true } }];
@@ -2440,6 +2467,7 @@ export class GameServer {
         }
         if (result.snapshot?.phase === 'lobby') out.push(...this.restoreDuelLobby(result.snapshot));
         if (result.snapshot) out.push(...this.duelResultOutbound(result.snapshot));
+        out.push(...this.removeDuelBotsFor(p.id));
         return out;
       }
       case 'duelReady': {
@@ -3060,7 +3088,8 @@ export class GameServer {
       }
       if (!mode || now - (this.partyQueuedAt.get(id) ?? now) < PARTY_BOT_WAIT_MS) continue;
       while (this.players.has(this.nextPartyBotId)) this.nextPartyBotId--;
-      const botId = this.nextPartyBotId--, username = mode === 'bridge' ? 'Scout [Bot]' : 'Piper [Bot]';
+      const botId = this.nextPartyBotId--, username = partyBotName(mode, this.rng);
+      const memoryKey = `${mode}:${human.username.toLowerCase()}`;
       const made = this.party.create({ id, username: human.username, skin: human.skin }, now, mode);
       if ('reason' in made) continue;
       const joined = this.party.join(made.token, { id: botId, username, skin: skinSeed(username), bot: true }, now);
@@ -3080,7 +3109,8 @@ export class GameServer {
         health: PARTY_MAX_HEALTH, dead: false, eliminated: false, held: 0,
         gliding: false, boating: false, seated: false, sneaking: false,
       };
-      this.partyBots.set(botId, new PartyBot(id, human, this.rng));
+      this.partyBots.set(botId, new PartyBot(id, human, this.rng, this.partyBotSkill.get(memoryKey)));
+      this.partyBotKey.set(botId, memoryKey);
       this.players.set(botId, bot);
       this.removeFromPartyQueue(id);
       out.push({ to: id, msg: { t: 'partyQueue', queued: false } }, ...this.launchParty(started.snapshot));
@@ -3092,6 +3122,9 @@ export class GameServer {
     const out: Outbound[] = [];
     for (const [id, bot] of this.partyBots) {
       if (bot.opponent !== humanId) continue;
+      const memoryKey = this.partyBotKey.get(id);
+      if (memoryKey) this.partyBotSkill.set(memoryKey, bot.rating);
+      this.partyBotKey.delete(id);
       const arena = this.party.arenaFor(id);
       const left = this.party.leave(id, this.worldTime * 1000);
       if (left.deleted && arena) out.push(...this.resetPartyArenaEdits(arena));
@@ -3388,6 +3421,7 @@ export class GameServer {
   tickDuels(): Outbound[] {
     const out: Outbound[] = [];
     const nowMs = this.worldTime * 1000;
+    out.push(...this.matchDuelBots(nowMs));
     for (const snap of this.duels.tick(nowMs)) {
       out.push(...this.duelSnapshotOutbound(snap));
       if (snap.phase === 'lobby') out.push(...this.restoreDuelLobby(snap));
@@ -3419,6 +3453,7 @@ export class GameServer {
       }
       out.push(...this.duelResultOutbound(snap));
     }
+    out.push(...this.tickDuelBots());
     if (this.worldTime >= this.duelClockNextAt) {
       this.duelClockNextAt = this.worldTime + 1;
       for (const snap of this.duels.snapshots(nowMs)) {
@@ -3429,6 +3464,123 @@ export class GameServer {
         for (const p of snap.participants.filter(p=>p.connected)) out.push({ to: p.id, msg: {
           t: 'duelClock', serverNow: nowMs, endsAt, suddenDeath: snap.phase === 'sudden_death',
         } });
+      }
+    }
+    return out;
+  }
+
+  /** Nobody else in the queue after DUEL_BOT_WAIT_MS: start a ranked match
+   *  against a practice bot rated at the player's own RP. */
+  private matchDuelBots(now: number): Outbound[] {
+    const out: Outbound[] = [];
+    for (const id of this.duelQueuedAt.keys()) if (!this.duelQueue.includes(id)) this.duelQueuedAt.delete(id);
+    for (const id of [...this.duelQueue]) {
+      if (!this.duelQueuedAt.has(id)) this.duelQueuedAt.set(id, now);
+      const human = this.players.get(id);
+      if (!human || human.dead || human.arenaSaved || this.duels.phaseFor(id) || this.party.phaseFor(id)) continue;
+      if (now - this.duelQueuedAt.get(id)! < DUEL_BOT_WAIT_MS) continue;
+      const humanState = this.duelProgress.get(id) ?? newDuelProgress();
+      while (this.players.has(this.nextPartyBotId)) this.nextPartyBotId--;
+      const botId = this.nextPartyBotId--;
+      const username = `${DUEL_BOT_NAMES[Math.floor(this.rng() * DUEL_BOT_NAMES.length)]} [Bot]`;
+      const botProfile = duelProfileOf({ ...newDuelProgress(), rp: humanState.rp, peakRp: humanState.rp, placementsRemaining: 0 });
+      const made = this.duels.create({ id, username: human.username, skin: human.skin, profile: human.duelProfile }, now, true);
+      if ('reason' in made) continue;
+      const joined = this.duels.join(made.token, { id: botId, username, skin: skinSeed(username), profile: botProfile, bot: true }, now);
+      if (!joined.ok) { this.duels.leave(id, now); continue; }
+      this.duels.setReady(id, true, now);
+      this.duels.setReady(botId, true, now);
+      const bot: ServerPlayer = {
+        ...human, id: botId, username, skin: skinSeed(username), faction: NO_FACTION,
+        cosmetics: undefined, duelProfile: botProfile, seasonsWon: 0, savedClientData: undefined, arenaSaved: undefined,
+        ct: undefined, away: false, tpaFrom: undefined, thrownPending: [], duelShotTickets: [],
+        arenaKind: undefined, arenaTrack: [], totems: [], armor: [0, 0, 0, 0],
+        health: DUEL_MAX_HEALTH, dead: false, eliminated: false, held: 0,
+        gliding: false, boating: false, seated: false, sneaking: false, aiming: false, reloading: false,
+        regenBoostTimer: 0, regenTimer: 0, regenCooldown: 0,
+      };
+      this.players.set(botId, bot);
+      const started = this.duels.start(id, now);
+      if (!started.ok) {
+        // Every colosseum busy: undo, keep the player's queue age and retry.
+        this.players.delete(botId);
+        this.duels.leave(botId, now); this.duels.leave(id, now);
+        continue;
+      }
+      this.duelBots.set(botId, new DuelBot(id, humanState.rp, human, this.rng));
+      this.removeFromDuelQueue(id);
+      this.duelQueuedAt.delete(id);
+      out.push({ to: id, msg: { t: 'duelQueue', queued: false } }, ...this.launchDuel(started.snapshot));
+      out.push({ to: id, msg: { t: 'join', player: toInfo(bot) } });
+      const armed = this.duels.markArenaReady(botId, now);
+      if (armed) out.push(...this.duelSnapshotOutbound(armed));
+    }
+    return out;
+  }
+
+  /** Take a human's Duels bot out of the lobby and the player list. Only call
+   *  once the human has left or the match is over, never mid-round. */
+  private removeDuelBotsFor(humanId: number): Outbound[] {
+    const out: Outbound[] = [];
+    for (const [id, bot] of this.duelBots) {
+      if (bot.opponent !== humanId) continue;
+      const arena = this.duels.arenaFor(id);
+      const left = this.duels.leave(id, this.worldTime * 1000);
+      if (left.deleted && arena) out.push(...this.resetDuelArenaEdits(arena.slot));
+      if (left.snapshot) out.push(...this.duelSnapshotOutbound(left.snapshot));
+      this.duelBots.delete(id);
+      this.players.delete(id);
+      this.duelProgress.delete(id);
+      if (this.players.has(humanId)) out.push({ to: humanId, msg: { t: 'leave', id } });
+    }
+    return out;
+  }
+
+  private tickDuelBots(): Outbound[] {
+    const out: Outbound[] = [];
+    const dt = this.duelBotClock > 0 ? Math.min(.25, Math.max(0, this.worldTime - this.duelBotClock)) : 0;
+    this.duelBotClock = this.worldTime;
+    const now = this.worldTime * 1000;
+    for (const [id, bot] of [...this.duelBots]) {
+      const p = this.players.get(id), human = this.players.get(bot.opponent);
+      const snap = this.duels.snapshotFor(id, now), arena = this.duels.arenaFor(id);
+      if (!p || !human || !snap || !this.duels.participantFor(bot.opponent)) {
+        out.push(...this.removeDuelBotsFor(bot.opponent)); continue;
+      }
+      // The match is over and the human went back to the lobby: the bot goes.
+      if (snap.phase === 'lobby') { out.push(...this.removeDuelBotsFor(bot.opponent)); continue; }
+      if (!arena || dt <= 0 || (snap.phase !== 'running' && snap.phase !== 'sudden_death')) continue;
+      const me = this.duels.participantFor(id)!, them = this.duels.participantFor(bot.opponent)!;
+      if (me.alive && bot.needsRespawnSync) bot.reset(p, p.yaw);
+      const world = { isLoaded: () => true, getBlock: (x: number, y: number, z: number) =>
+        this.edits.get(`${x},${y},${z}`) ?? duelArenaBlockAt(x, y, z) ?? Block.Air } as unknown as World;
+      const action = bot.step(dt, now, {
+        me: { health: p.health, alive: me.alive && !p.duelRespawning, kills: me.kills, medkits: p.duelMedkits },
+        enemy: { x: human.x, y: human.y, z: human.z, alive: them.alive && !them.spectating, kills: them.kills,
+          shielded: them.shieldUntil !== undefined && them.shieldUntil > now },
+        arena,
+        sight: (a, b) => hasArenaLineOfSight(a, b, arena,
+          (x, y, z) => this.edits.get(`${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`) === Block.OakPlanks),
+      }, world);
+      if (!me.alive || p.duelRespawning) continue;
+      const pos = clampToDuelArena({ x: bot.body.pos.x, y: bot.body.pos.y, z: bot.body.pos.z }, arena);
+      Object.assign(p, { x: pos.x, y: pos.y, z: pos.z, yaw: bot.body.yaw, pitch: 0 });
+      p.sneaking = false; p.ct = Math.floor(now);
+      p.held = action.shots.length ? Item.BurstRifle : p.held || Item.BurstRifle;
+      this.recordArenaTrack(p);
+      if (action.heal) {
+        p.held = Item.Medkit;
+        out.push(...this.handleDuelHeal(p, Item.Medkit));
+      }
+      for (const b of action.build) out.push(...this.handleDuelEdit(p, b.x, b.y, b.z, Block.OakPlanks));
+      for (const shot of action.shots) {
+        p.held = Item.BurstRifle;
+        this.duels.removeSpawnShield(id);
+        const len = Math.hypot(shot.dx, shot.dy, shot.dz) || 1;
+        out.push({ to: human.id, msg: { t: 'shot', id, item: Item.BurstRifle,
+          x: shot.from.x, y: shot.from.y, z: shot.from.z, dx: shot.dx / len, dy: shot.dy / len, dz: shot.dz / len } });
+        const live = this.duels.participantFor(bot.opponent);
+        if (shot.hit && live?.alive && !human.duelRespawning) out.push(...this.applyDuelRound(p, human));
       }
     }
     return out;
