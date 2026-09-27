@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Worlds</title>
+  <meta name="description" content="Worlds: Duels, The Bridge and Parkour in your browser. Every match is a world of its own. No download, no sign-up needed." />
+  <meta name="theme-color" content="#eef3f9" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="manifest" href="/site.webmanifest" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Worlds" />
+  <meta property="og:title" content="Worlds — Duels, The Bridge and Parkour" />
+  <meta property="og:description" content="Three voxel minigames in your browser. Every match is a world of its own." />
+  <meta property="og:image" content="/og.png" />
+  <style>
+    /* Before the bundle's CSS arrives: never flash white text on white. */
+    html, body { margin: 0; height: 100%; background: #dfe9f4; overflow: hidden; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="crosshair"></div>
+    <div id="hotbar"></div>
+    <div id="status">
+      <canvas id="hearts" width="202" height="40"></canvas>
+      <canvas id="energybar" width="202" height="20"></canvas>
+      <canvas id="bubbles" width="202" height="20"></canvas>
+      <canvas id="armor" width="202" height="20"></canvas>
+      <div id="ammo" class="mc-font"></div>
+    </div>
+    <div id="heal-glow"></div>
+    <div id="axe-indicator"><i></i></div>
+    <div id="heal-burst"></div>
+    <div id="heal-tally" class="mc-font"></div>
+    <div id="hurt-vignette"></div>
+    <div id="damage-flash"></div>
+    <div id="use-bar">
+      <div class="use-label mc-font"></div>
+      <div class="use-track"><div class="use-fill"></div></div>
+    </div>
+    <div id="pause">
+      <div class="pause-card" role="dialog" aria-modal="true" aria-labelledby="pause-title">
+        <header class="pause-head">
+          <span class="pause-badge" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2.8v2.4M12 18.8v2.4M21.2 12h-2.4M5.2 12H2.8M18.5 5.5l-1.7 1.7M7.2 16.8l-1.7 1.7M18.5 18.5l-1.7-1.7M7.2 7.2 5.5 5.5"/><circle cx="12" cy="12" r="6.6"/></svg></span>
+          <div class="pause-head-text">
+            <div class="pause-eyebrow">Worlds &middot; paused</div>
+            <h1 id="pause-title" class="mc-font">Paused</h1>
+            <p class="pause-hint">The match keeps going while you are in here.</p>
+          </div>
+        </header>
+        <div id="vault-accessibility" class="mc-font">
+          <section class="pause-section">
+            <div class="pause-group"><i aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="12" rx="2.5"/><path d="M8.5 20h7M12 16.5V20"/></svg></i>Controls &amp; display</div>
+            <label><span class="pause-label"><b>Look sensitivity</b><small>How far the camera turns per mouse move</small></span>
+              <span class="setting-pair"><input id="look-sensitivity" type="range" min="0.25" max="3" step="0.05" /><span id="look-sensitivity-value">1.00&#215;</span></span></label>
+            <label><span class="pause-label"><b>Graphics</b><small>Lower it if the game stutters</small></span>
+              <select id="graphics-quality">
+                <option value="low">Low (fastest)</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+                <option value="ultra">Extra High (smooth lighting)</option>
+                <option value="max">Max (Shaders)</option>
+              </select>
+            </label>
+          </section>
+          <section class="pause-section">
+            <div class="pause-group"><i aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></svg></i>Audio</div>
+            <label><span class="pause-label"><b>Music</b></span><input id="music-volume" type="range" min="0" max="1" step="0.05" /></label>
+            <label><span class="pause-label"><b>Effects</b></span><input id="effects-volume" type="range" min="0" max="1" step="0.05" /></label>
+          </section>
+          <section class="pause-section">
+            <div class="pause-group"><i aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="4.8" r="1.8"/><path d="M5 8.5c2.3.7 4.6 1 7 1s4.7-.3 7-1M12 9.5v4.5M12 14l-3 6.5M12 14l3 6.5"/></svg></i>Accessibility</div>
+            <label><span class="pause-label"><b>Camera shake</b><small>Hits, blasts and landings</small></span><input id="camera-shake" type="range" min="0" max="1" step="0.1" /></label>
+            <label><span class="pause-label"><b>Reduced motion</b><small>Calmer menus and banners</small></span><input id="reduced-motion" type="checkbox" /></label>
+            <label><span class="pause-label"><b>Photosensitivity safe</b><small>No screen flashes</small></span><input id="safe-effects" type="checkbox" /></label>
+          </section>
+        </div>
+        <div class="pause-actions">
+          <button id="resume-btn" class="mc-btn">Resume</button>
+          <button id="hud-settings-btn" class="mc-btn"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M3 15.5h18M7 18h3M14 18h3"/></svg>HUD Settings</button>
+          <button id="pause-controls-btn" class="mc-btn"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><rect x="2.5" y="6.5" width="19" height="11" rx="2.5"/><path d="M6.5 10h1M10 10h1M13.5 10h1M17 10h.5M7 14h10"/></svg>Controls</button>
+          <button id="quit-btn" class="mc-btn">Leave match</button>
+        </div>
+      </div>
+    </div>
+    <div id="debug" class="mc-font"></div>
+
+    <div id="w-loading" class="w-loading" role="status" aria-live="polite">
+      <div><i></i><b id="w-loading-title">Entering world</b><span id="w-loading-sub">Building the arena…</span></div>
+    </div>
+
+    <div id="w-home" class="w-home">
+      <header class="w-top">
+        <button id="w-settings-btn" class="w-top-btn" type="button" aria-haspopup="dialog">
+          <span class="w-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2.8v2.4M12 18.8v2.4M21.2 12h-2.4M5.2 12H2.8M18.5 5.5l-1.7 1.7M7.2 16.8l-1.7 1.7M18.5 18.5l-1.7-1.7M7.2 7.2 5.5 5.5"/><circle cx="12" cy="12" r="6.6"/></svg></span>
+          <span>Settings</span>
+        </button>
+        <button id="w-party-btn" class="w-top-btn" type="button" aria-haspopup="dialog">
+          <span class="w-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8.5" r="3.2"/><path d="M3.5 19c.6-3.2 2.8-5 5.5-5s4.9 1.8 5.5 5"/><circle cx="16.5" cy="9.5" r="2.6"/><path d="M15.5 14.1c2.4.1 4.3 1.6 5 4.4"/></svg></span>
+          <span id="w-party-label">Party</span>
+          <span id="w-party-count" class="w-party-count" hidden>1</span>
+        </button>
+        <button id="w-account-btn" class="w-top-btn w-account" type="button" aria-haspopup="dialog">
+          <span id="w-account-face" class="w-face" aria-hidden="true"></span>
+          <span class="w-account-text">
+            <small id="w-account-kind">Guest</small>
+            <b id="w-account-name">Connecting…</b>
+          </span>
+          <span id="w-account-cta" class="w-account-cta">Log in</span>
+        </button>
+      </header>
+
+      <main class="w-stage">
+        <section class="w-left" aria-label="Games">
+          <h1 class="w-wordmark" aria-label="Worlds">
+            <!-- Lockup: the mark from public/favicon.svg (without its plate) and a
+                 wordmark drawn as strokes on a 100-unit cap height, so it looks
+                 identical on every OS instead of depending on system fonts. -->
+            <svg viewBox="0 -10 900 120" aria-hidden="true" focusable="false">
+              <defs>
+                <linearGradient id="wl-top" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffe7a6"/><stop offset="1" stop-color="#f2a922"/></linearGradient>
+                <linearGradient id="wl-left" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5e9dff"/><stop offset="1" stop-color="#2b5fd1"/></linearGradient>
+                <linearGradient id="wl-right" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2e52ab"/><stop offset="1" stop-color="#162c69"/></linearGradient>
+                <linearGradient id="wl-ring" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#e8a52c"/><stop offset=".5" stop-color="#ffd978"/><stop offset="1" stop-color="#e8a52c"/></linearGradient>
+                <linearGradient id="wl-ink" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1f3350"/><stop offset="1" stop-color="#0d1829"/></linearGradient>
+                <mask id="wl-gap" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
+                  <rect width="64" height="64" fill="#fff"/>
+                  <path d="M4.5 39A27.5 7.5 0 0 0 59.5 39" transform="rotate(-14 32 39)" fill="none" stroke="#000" stroke-width="5.4"/>
+                </mask>
+              </defs>
+              <g transform="translate(-9 -40) scale(2.85)">
+                <ellipse cx="32" cy="39" rx="27.5" ry="7.5" transform="rotate(-14 32 39)" fill="none" stroke="#e8a52c" stroke-opacity=".5" stroke-width="2.4"/>
+                <g mask="url(#wl-gap)">
+                  <path d="M32 11 49.3 21 32 31 14.7 21Z" fill="url(#wl-top)"/>
+                  <path d="M14.7 21 32 31v20L14.7 41Z" fill="url(#wl-left)"/>
+                  <path d="M49.3 21 32 31v20l17.3-10Z" fill="url(#wl-right)"/>
+                  <path d="M14.7 21 32 11l17.3 10" fill="none" stroke="#fff6dc" stroke-opacity=".7" stroke-width=".9" stroke-linejoin="round"/>
+                </g>
+                <path d="M4.5 39A27.5 7.5 0 0 0 59.5 39" transform="rotate(-14 32 39)" fill="none" stroke="url(#wl-ring)" stroke-width="2.4" stroke-linecap="round"/>
+              </g>
+              <g transform="translate(188 0)" fill="none" stroke="url(#wl-ink)" stroke-width="22" stroke-linejoin="round">
+                <path d="M11 0V66Q11 89 34 89H99Q122 89 122 66V0M66.5 34V89"/>
+                <path d="M184 11H216Q239 11 239 34V66Q239 89 216 89H184Q161 89 161 66V34Q161 11 184 11Z"/>
+                <path d="M279 100V11H326Q352 11 352 36Q352 61 326 61H279M318 61 356 100"/>
+                <path d="M393 0V89H462"/>
+                <path d="M493 11H536Q571 11 571 46V54Q571 89 536 89H493Z"/>
+                <path d="M710 11H643Q621 11 621 31Q621 50 643 50H676Q699 50 699 69Q699 89 676 89H599"/>
+              </g>
+            </svg>
+          </h1>
+          <div id="w-cards" class="w-cards">
+            <button class="w-card" type="button" data-mode="duels" style="--i:0; --tone:#f59e0b">
+              <span class="w-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="7"/><path d="M12 2.5v4.5M12 17v4.5M2.5 12H7M17 12h4.5"/><circle cx="12" cy="12" r="1.3" fill="currentColor" stroke="none"/></svg></span>
+              <span class="w-card-body">
+                <span class="w-card-kicker">Free-for-all &middot; up to 4</span>
+                <span class="w-card-title">Duels</span>
+              </span>
+              <span class="w-card-go"><span class="w-card-label">Play</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg></span>
+              <span class="w-card-status" role="status" aria-live="polite"><i class="w-dot"></i><span class="w-card-status-text">Finding players…</span></span>
+            </button>
+            <button class="w-card" type="button" data-mode="bridge" style="--i:1; --tone:#7aa2ff">
+              <span class="w-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 20.5V9.5l1.75-1.5L7 9.5v11M17 20.5V9.5l1.75-1.5 1.75 1.5v11"/><path d="M7 14h10"/><path d="M2 20.5h20"/></svg></span>
+              <span class="w-card-body">
+                <span class="w-card-kicker">1v1 &middot; first to 5 goals</span>
+                <span class="w-card-title">The Bridge</span>
+              </span>
+              <span class="w-card-go"><span class="w-card-label">Play</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg></span>
+              <span class="w-card-status" role="status" aria-live="polite"><i class="w-dot"></i><span class="w-card-status-text">Finding players…</span></span>
+            </button>
+            <button class="w-card" type="button" data-mode="parkour" style="--i:2; --tone:#4ade80">
+              <span class="w-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="15.5" width="6" height="5.5" rx="1"/><rect x="15.5" y="10.5" width="6" height="10.5" rx="1"/><path d="M6 12.5c1.5-6 9.5-7.5 12.5-4" stroke-dasharray="2.2 2.2"/><path d="m16.4 6.6 2.3 1.9-1.4 2.6"/></svg></span>
+              <span class="w-card-body">
+                <span class="w-card-kicker">Race &middot; fresh course every time</span>
+                <span class="w-card-title">Parkour</span>
+              </span>
+              <span class="w-card-go"><span class="w-card-label">Play</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg></span>
+              <span class="w-card-status" role="status" aria-live="polite"><i class="w-dot"></i><span class="w-card-status-text">Finding players…</span></span>
+            </button>
+          </div>
+          <button id="w-controls-link" class="w-controls-link" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="6.5" width="19" height="11" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M6.5 10h1M10 10h1M13.5 10h1M17 10h.5M7 14h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            Controls
+          </button>
+          <div id="w-connection" class="w-connection" role="status"></div>
+        </section>
+
+        <section class="w-right" aria-label="Dressing room">
+          <div class="w-right-head">
+            <div>
+              <h2>Your look</h2>
+            </div>
+          </div>
+          <div class="w-stage-box"><div id="w-preview" aria-label="Your character preview"></div></div>
+          <div class="w-right-actions">
+            <button id="w-wardrobe-btn" class="w-btn primary" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 3.5 4 6v4.5h3V20.5h10V10.5h3V6l-4.5-2.5C15 5 13.7 6 12 6S9 5 8.5 3.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+              Open wardrobe
+            </button>
+            <button id="w-capes-btn" class="w-btn" type="button" title="Capes">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3.5h10l2.5 16.5-4-1.8L12 20.5l-3.5-2.3-4 1.8z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+              Capes
+            </button>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

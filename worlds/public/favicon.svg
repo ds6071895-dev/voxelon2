@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Worlds">
+  <!-- THE WORLDS MARK. One block as a planet, with an orbit ring passing
+       behind it and back out in front: every match is a world of its own.
+       The title screen (index.html .w-wordmark) draws the same geometry
+       without the plate; the PNG icons and og.png are rendered from these. -->
+  <defs>
+    <linearGradient id="wm-plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#18263f"/><stop offset="1" stop-color="#080f1c"/>
+    </linearGradient>
+    <linearGradient id="wm-top" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffe7a6"/><stop offset="1" stop-color="#f2a922"/>
+    </linearGradient>
+    <linearGradient id="wm-left" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5e9dff"/><stop offset="1" stop-color="#2b5fd1"/>
+    </linearGradient>
+    <linearGradient id="wm-right" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2e52ab"/><stop offset="1" stop-color="#162c69"/>
+    </linearGradient>
+    <linearGradient id="wm-ring" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f2b640"/><stop offset=".5" stop-color="#fff3d1"/><stop offset="1" stop-color="#f2b640"/>
+    </linearGradient>
+    <!-- Cuts a clean gap into the block where the front of the ring crosses it. -->
+    <mask id="wm-gap" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
+      <rect width="64" height="64" fill="#fff"/>
+      <path d="M4.5 39A27.5 7.5 0 0 0 59.5 39" transform="rotate(-14 32 39)" fill="none" stroke="#000" stroke-width="5.4"/>
+    </mask>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#wm-plate)"/>
+  <ellipse cx="32" cy="39" rx="27.5" ry="7.5" transform="rotate(-14 32 39)" fill="none" stroke="#f2b640" stroke-opacity=".45" stroke-width="2.4"/>
+  <g mask="url(#wm-gap)">
+    <path d="M32 11 49.3 21 32 31 14.7 21Z" fill="url(#wm-top)"/>
+    <path d="M14.7 21 32 31v20L14.7 41Z" fill="url(#wm-left)"/>
+    <path d="M49.3 21 32 31v20l17.3-10Z" fill="url(#wm-right)"/>
+    <path d="M14.7 21 32 11l17.3 10" fill="none" stroke="#fff6dc" stroke-opacity=".7" stroke-width=".9" stroke-linejoin="round"/>
+    <path d="M32 31v20" stroke="#8fb8ff" stroke-opacity=".35" stroke-width=".9"/>
+  </g>
+  <path d="M4.5 39A27.5 7.5 0 0 0 59.5 39" transform="rotate(-14 32 39)" fill="none" stroke="url(#wm-ring)" stroke-width="2.4" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,1526 @@
+// Renders other players as boxy, Minecraft-style humanoid avatars with
+// customisable cosmetics (character.ts) and floating name tags.
+//
+// Motion is SNAPSHOT INTERPOLATION (interp.ts): each avatar is drawn at the
+// position its owner actually occupied INTERP_DELAY ago, reconstructed by
+// lerping between the two buffered snapshots that bracket that instant. That
+// costs a fixed sliver of latency and buys constant-velocity movement, so a
+// strafing enemy tracks predictably instead of easing toward each packet.
+// The PvP hit tests below deliberately run against these same rendered
+// positions — what you shoot at is what you hit.
+//
+// Also exports the avatar-body builder so the Character screen can show a live
+// preview of the same model.
+
+import * as THREE from 'three';
+import { SNAP_DISTANCE, netNow } from './interp';
+import { AvatarSurface, avatarTexture } from './avatartex';
+import type { NetClient, Remote } from './net/client';
+import { itemGeometry } from './itementity';
+import { ITEMS, Item, ARMOR_SLOT_INDEX } from './items';
+import type { Atlas } from './textures';
+import { createGunModel, isGunItem, poseGunModel } from './gunmodels';
+import { createGadgetModel, isModeledGadget, isOneHandModel, poseGadgetModel } from './gadgetmodels';
+import { createBowModel, poseBowModel } from './bowmodel';
+import { BOAT_SIT_SINK, BoatRig, boatArmPose, createBoatRig, removeBoatRig, updateBoatRig } from './boatmodel';
+import {
+  GliderRig, RIG_HARNESS_Y, buildGliderRig, disposeGliderRig, glidePose,
+  poseGliderRig,
+} from './glidermodels';
+import {
+  Cosmetics, EYE_COLORS, HAIR_COLORS, HAT_COLORS, PANTS_COLORS,
+  SHIRT_COLORS, SKIN_TONES, defaultCosmetics, sanitizeCosmetics,
+} from './character';
+
+// Per-face shading (right/left/top/bottom/front/back) — mimics Minecraft's
+// directional lighting so the model reads as 3D even without real lights.
+const FACE_SHADE = [0.75, 0.6, 1.0, 0.45, 0.85, 0.7];
+
+/** Shared skin texture, used by the avatar and the first-person hand. */
+export function avatarSurfaceTexture(): THREE.Texture | null {
+  return avatarTexture('skin');
+}
+
+/** The skin tone a given player renders with — cosmetics-aware, falling back
+ *  to the seed-derived default. Shared so the local first-person hand matches
+ *  the avatar other players see. */
+export function skinColorFor(seed: number, cosmetics?: Cosmetics): THREE.Color {
+  const c = cosmetics ?? defaultCosmetics(seed);
+  return new THREE.Color(SKIN_TONES[c.skin]?.hex ?? SKIN_TONES[0].hex);
+}
+
+// ─── geometry helpers ──────────────────────────────────────────────────────
+
+/**
+ * Avatar parts are deliberately built from overlapping boxes. At long range,
+ * the depth buffer cannot reliably distinguish the very small gaps between
+ * skin, cuffs, facial pixels, cosmetics and armor, which causes z-fighting.
+ * Give each visual layer a progressively stronger camera-facing depth bias.
+ * The meshes remain opaque and keep writing depth, so avatars still occlude
+ * themselves and the world normally.
+ */
+function layeredAvatarMaterial(
+  layer: number, surface: AvatarSurface
+): THREE.MeshBasicMaterial {
+  const mat = new THREE.MeshBasicMaterial({
+    vertexColors: true,
+    map: avatarTexture(surface),
+  });
+  // Recorded so callers (and the smoke suite) can reason about the bias order
+  // without depending on the position of a material inside `body.materials`.
+  mat.userData.avatarLayer = layer;
+  mat.userData.avatarSurface = surface;
+  if (layer > 0) {
+    mat.polygonOffset = true;
+    mat.polygonOffsetFactor = -1;
+    mat.polygonOffsetUnits = -layer;
+  }
+  return mat;
+}
+
+function shadedBox(
+  w: number, h: number, d: number, color: THREE.Color,
+  shadeOverride?: number[]
+): THREE.BufferGeometry {
+  const geo = new THREE.BoxGeometry(w, h, d);
+  const pos = geo.getAttribute('position');
+  const colors = new Float32Array(pos.count * 3);
+  const shade = shadeOverride ?? FACE_SHADE;
+  for (let f = 0; f < 6; f++) {
+    const s = shade[f];
+    for (let v = 0; v < 4; v++) {
+      const k = f * 4 + v;
+      colors[k * 3]     = color.r * s;
+      colors[k * 3 + 1] = color.g * s;
+      colors[k * 3 + 2] = color.b * s;
+    }
+  }
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  return geo;
+}
+
+/** A coloured box mesh offset so the pivot is at the TOP of the box. */
+function pivotedBox(
+  mat: THREE.Material,
+  w: number, h: number, d: number,
+  color: THREE.Color,
+  shade?: number[]
+): THREE.Mesh {
+  const mesh = new THREE.Mesh(shadedBox(w, h, d, color, shade), mat);
+  mesh.position.y = -h / 2; // pivot at top
+  return mesh;
+}
+
+/** A limb group (pivot at top) placed at (x, y, z). */
+function limb(
+  mat: THREE.Material,
+  w: number, h: number, d: number,
+  color: THREE.Color,
+  x: number, y: number, z: number,
+  shade?: number[]
+): THREE.Group {
+  const g = new THREE.Group();
+  g.add(pivotedBox(mat, w, h, d, color, shade));
+  g.position.set(x, y, z);
+  return g;
+}
+
+/** Add a plain shaded box to `parent` at (x, y, z). */
+function addBoxTo(
+  parent: THREE.Object3D, mat: THREE.Material,
+  w: number, h: number, d: number, color: THREE.Color,
+  x: number, y: number, z: number, shade?: number[]
+): THREE.Mesh {
+  const mesh = new THREE.Mesh(shadedBox(w, h, d, color, shade), mat);
+  mesh.position.set(x, y, z);
+  parent.add(mesh);
+  return mesh;
+}
+
+// ─── proportions ────────────────────────────────────────────────────────────
+//
+// A person, not a mannequin: the blocky language and every pivot the
+// animation, sneak and armor code depend on, dressed for a game rather than a
+// war:
+//
+//   - the head is a little smaller than the torso is wide (0.46 on 0.52), so
+//     the silhouette reads as a person rather than a bobblehead;
+//   - a crew collar meets the jaw — no neck stalk;
+//   - a t-shirt with a chest print and a hem, jeans with a belt, sneakers.
+//
+// Everything is on a pixel grid of HEAD/8, like a skin, so the face features
+// line up on whole "pixels".
+const HEAD = 0.46;
+const PX = HEAD / 8;
+/** Centre of the head above the head-group pivot (the pivot is the jaw line). */
+const HEAD_Y = HEAD / 2 + 0.02;
+const TORSO_W = 0.52, TORSO_H = 0.72, TORSO_D = 0.28;
+const ARM_W = 0.22, ARM_D = 0.23;
+const LEG_W = 0.23, LEG_D = 0.24;
+/** Limb length. Arms and legs share it so held items and poses keep working. */
+const LIMB_H = 0.74;
+const LIMB_W = ARM_W, LIMB_D = ARM_D;
+const HIP_Y = 0.75;        // top of the legs / bottom of the torso
+const SHOULDER_Y = 1.46;   // arm pivot
+const NECK_Y = 1.5;        // head pivot (jaw line)
+const BRASS = new THREE.Color(0xc9a24a);
+
+// ─── face builder ─────────────────────────────────────────────────────────
+
+/**
+ * A stern, level face on the HEAD/8 pixel grid: narrow eyes (a white outer
+ * pixel and the iris inboard), brows that step DOWN toward the nose, a nose
+ * picked out in shadow, and a flat mouth line. No smile, no blush — these are
+ * soldiers. Then the chosen face accessory.
+ */
+function buildFace(
+  parent: THREE.Group,
+  mat: THREE.Material,
+  accessoryMat: THREE.Material,
+  skin: THREE.Color,
+  hair: THREE.Color,
+  eye: THREE.Color,
+  headY: number,
+  accessory: number
+): void {
+  const white = new THREE.Color(0xe9ecef);
+  const shadow = new THREE.Color(skin).multiplyScalar(0.8);
+  const lip = new THREE.Color(skin).multiplyScalar(0.58);
+  const jaw = new THREE.Color(skin).multiplyScalar(0.9);
+  const brow = new THREE.Color(hair).multiplyScalar(0.85);
+  const flat = [1, 1, 1, 1, 1, 1];
+  const top = headY + HEAD / 2;
+  /** Centre y of pixel row r (0 = the top row of the face). */
+  const row = (r: number): number => top - (r + 0.5) * PX;
+  const fz = -HEAD / 2 - 0.004;
+  const add = (
+    w: number, h: number, color: THREE.Color, x: number, y: number, z = fz, d = 0.012,
+  ): THREE.Mesh => addBoxTo(parent, mat, w, h, d, color, x, y, z, flat);
+
+  // Jaw: the bottom row a shade darker, which gives the face a chin.
+  add(HEAD - 0.01, PX, jaw, 0, row(7), fz + 0.002, 0.008);
+  for (const side of [-1, 1]) {
+    // Eyes on row 4: white outboard, iris inboard with a dark pupil core.
+    add(PX, PX * 0.9, white, side * PX * 2.5, row(4));
+    add(PX, PX * 0.9, eye, side * PX * 1.5, row(4), fz - 0.004);
+    add(PX * 0.45, PX * 0.55, new THREE.Color(0x111418), side * PX * 1.35, row(4), fz - 0.008, 0.008);
+    // Brows on row 3, the inner pixel set lower: a level, focused look.
+    add(PX, PX * 0.42, brow, side * PX * 2.5, row(3) + PX * 0.12);
+    add(PX, PX * 0.42, brow, side * PX * 1.5, row(3) - PX * 0.12);
+  }
+  // Nose: two pixels of shadow on row 5, standing a little proud.
+  add(PX * 2, PX * 0.85, shadow, 0, row(5), fz - 0.006, 0.02);
+  // Mouth: one flat line on row 6.
+  add(PX * 2.2, PX * 0.38, lip, 0, row(6) + PX * 0.05);
+
+  const dark = new THREE.Color(0x1d1f22);
+  const az = fz - 0.024;
+  const acc = (
+    w: number, h: number, d: number, color: THREE.Color, x: number, y: number, z = az,
+  ): THREE.Mesh => addBoxTo(parent, accessoryMat, w, h, d, color, x, y, z, flat);
+  switch (accessory) {
+    case 1: { // Shooting glasses: one wrap-around amber lens
+      acc(HEAD * 0.86, PX * 1.2, 0.02, new THREE.Color(0xd08a22), 0, row(4));
+      acc(HEAD * 0.9, PX * 0.3, 0.02, dark, 0, row(4) + PX * 0.7);
+      for (const side of [-1, 1]) acc(0.02, PX * 0.35, HEAD * 0.6, dark, side * (HEAD / 2 + 0.012), row(4), 0);
+      break;
+    }
+    case 2: { // Aviators: two dark lenses on a thin gold frame
+      for (const side of [-1, 1]) {
+        acc(PX * 2.1, PX * 1.3, 0.02, new THREE.Color(0x26303a), side * PX * 2, row(4) - PX * 0.1);
+      }
+      acc(HEAD * 0.9, PX * 0.22, 0.02, BRASS, 0, row(4) + PX * 0.62);
+      for (const side of [-1, 1]) acc(0.018, PX * 0.25, HEAD * 0.6, BRASS, side * (HEAD / 2 + 0.01), row(4) + PX * 0.5, 0);
+      break;
+    }
+    case 3: { // Eyepatch: over the left eye, strap round the head
+      acc(PX * 2.3, PX * 1.6, 0.02, dark, -PX * 2, row(4));
+      acc(HEAD + 0.02, PX * 0.3, HEAD + 0.02, dark, 0, row(3) + PX * 0.1, 0);
+      break;
+    }
+    case 4: { // Face wrap: a shemagh over the nose, mouth and jaw
+      const cloth = new THREE.Color(0x9c8c66);
+      acc(HEAD + 0.04, PX * 3.2, HEAD + 0.04, cloth, 0, row(6) + PX * 0.1, 0);
+      acc(HEAD + 0.02, PX * 0.3, 0.02, cloth.clone().multiplyScalar(0.8), 0, row(5) - PX * 0.2, -HEAD / 2 - 0.03);
+      break;
+    }
+    case 5: { // Moustache: a heavy bar over the mouth line
+      acc(PX * 3.2, PX * 0.6, 0.02, hair, 0, row(6) - PX * -0.55);
+      break;
+    }
+    case 6: { // Full beard: jaw, chin and sideburns in the hair colour
+      acc(HEAD + 0.02, PX * 2.2, 0.03, hair, 0, row(7) + PX * 0.25);
+      acc(PX * 3.2, PX * 0.55, 0.03, hair, 0, row(6) + PX * 0.45);
+      for (const side of [-1, 1]) acc(0.03, PX * 3.2, HEAD * 0.55, hair, side * (HEAD / 2 + 0.012), row(5) + PX * 0.4, -HEAD * 0.1);
+      break;
+    }
+    case 7: { // War paint: two black bars under the eyes and one down the nose
+      for (const side of [-1, 1]) acc(PX * 2, PX * 0.5, 0.012, dark, side * PX * 2, row(5) + PX * 0.2, fz - 0.012);
+      acc(PX * 0.6, PX * 2, 0.012, dark, 0, row(4), fz - 0.013);
+      break;
+    }
+    case 8: { // Scar: a pale line down through the left brow and cheek
+      const scar = new THREE.Color(skin).lerp(new THREE.Color(0xf2d2c8), 0.6);
+      acc(PX * 0.35, PX * 3.4, 0.012, scar, -PX * 2.8, row(4.2), fz - 0.012);
+      break;
+    }
+  }
+}
+
+// ─── hair + hat builders ───────────────────────────────────────────────────
+
+/** Hair styles (HAIR_STYLES order: Crew Cut, Long, Mohawk, Bun, Ponytail,
+ *  Side Part, Shaved). Built onto the head group so it pitches with look-dir. */
+function buildHair(
+  head: THREE.Group, mat: THREE.Material, hair: THREE.Color,
+  headY: number, style: number
+): void {
+  const top = headY + HEAD / 2;
+  const cap = (h = 0.07, lift = 0): void => {
+    addBoxTo(head, mat, HEAD + 0.03, h, HEAD + 0.03, hair, 0, top - h / 2 + 0.02 + lift, 0);
+  };
+  const fringe = (rows = 1, x = 0, w = HEAD + 0.02): void => {
+    addBoxTo(head, mat, w, PX * rows, 0.03, hair, x, top - PX * rows / 2, -HEAD / 2 - 0.008);
+  };
+  const sides = (rows = 2): void => {
+    for (const side of [-1, 1]) {
+      addBoxTo(head, mat, 0.03, PX * rows, HEAD + 0.02, hair,
+        side * (HEAD / 2 + 0.008), top - PX * rows / 2, 0.01);
+    }
+  };
+  const back = (rows = 4): void => {
+    addBoxTo(head, mat, HEAD + 0.02, PX * rows, 0.035, hair, 0, top - PX * rows / 2, HEAD / 2 + 0.008);
+  };
+
+  switch (style) {
+    case 0: // Crew cut: short all round, a single row of fringe
+      cap(0.06); fringe(0.7); sides(2); back(3.5);
+      break;
+    case 1: // Long: past the jaw at the sides, down to the collar behind
+      cap(0.08); fringe(1.2); sides(6);
+      addBoxTo(head, mat, HEAD + 0.03, HEAD * 1.1, 0.05, hair, 0, top - HEAD * 0.55, HEAD / 2 + 0.012);
+      break;
+    case 2: // Mohawk: a tall centre strip over shaved sides
+      cap(0.02);
+      for (let i = 0; i < 4; i++) {
+        addBoxTo(head, mat, 0.08, 0.12, 0.13, hair, 0, top + 0.06, -0.17 + i * 0.115);
+      }
+      break;
+    case 3: // Bun: pulled back tight, a knot at the crown
+      cap(0.06); fringe(0.5); sides(2.5); back(4);
+      addBoxTo(head, mat, 0.16, 0.14, 0.13, hair, 0, top - 0.02, HEAD / 2 + 0.07);
+      break;
+    case 4: // Ponytail: tied off low at the back
+      cap(0.06); fringe(0.8); sides(3); back(4);
+      addBoxTo(head, mat, 0.1, 0.1, 0.1, hair, 0, headY + 0.02, HEAD / 2 + 0.05);
+      addBoxTo(head, mat, 0.08, 0.36, 0.08, hair, 0, headY - 0.17, HEAD / 2 + 0.06);
+      break;
+    case 5: // Side part: longer on one side, swept over
+      cap(0.08); sides(2.5); back(4);
+      fringe(1.6, -PX * 1.2, HEAD * 0.72);
+      fringe(0.7, PX * 2.6, HEAD * 0.34);
+      break;
+    case 6: { // Shaved: just the shadow of it
+      const shade = new THREE.Color(hair).lerp(new THREE.Color(0x777777), 0.45);
+      addBoxTo(head, mat, HEAD + 0.012, 0.02, HEAD + 0.012, shade, 0, top + 0.004, 0);
+      break;
+    }
+  }
+}
+
+/** Headgear (HATS order: None, Patrol Cap, Watch Cap, Beret, Boonie, Combat
+ *  Helmet, Bandana, Officer Cap, Comms Headset, Headband, NVG Helmet). */
+function buildHat(
+  head: THREE.Group, mat: THREE.Material, color: THREE.Color,
+  headY: number, hat: number
+): void {
+  const topY = headY + HEAD / 2;
+  const dark = new THREE.Color(color).multiplyScalar(0.62);
+  const black = new THREE.Color(0x1e2023);
+  const helmet = (): void => {
+    addBoxTo(head, mat, HEAD + 0.1, 0.2, HEAD + 0.1, color, 0, topY + 0.04, 0.005);
+    addBoxTo(head, mat, HEAD + 0.13, 0.05, HEAD + 0.13, dark, 0, topY - 0.04, 0.005);
+    addBoxTo(head, mat, HEAD - 0.04, 0.04, HEAD - 0.04, color, 0, topY + 0.155, 0.005);
+    for (const side of [-1, 1]) {
+      // Side rails and the chin strap.
+      addBoxTo(head, mat, 0.03, 0.06, 0.24, dark, side * (HEAD / 2 + 0.065), topY + 0.02, 0);
+      addBoxTo(head, mat, 0.02, HEAD * 0.62, 0.035, black, side * (HEAD / 2 + 0.012), headY - 0.04, -0.02);
+    }
+  };
+  switch (hat) {
+    case 1: // Patrol cap: flat-topped crown and a short stiff brim
+      addBoxTo(head, mat, HEAD + 0.05, 0.13, HEAD + 0.05, color, 0, topY + 0.035, 0);
+      addBoxTo(head, mat, HEAD + 0.07, 0.03, HEAD + 0.07, dark, 0, topY - 0.02, 0);
+      addBoxTo(head, mat, 0.36, 0.028, 0.14, dark, 0, topY - 0.015, -HEAD / 2 - 0.07);
+      break;
+    case 2: // Watch cap: snug knit with a rolled band
+      addBoxTo(head, mat, HEAD + 0.05, 0.17, HEAD + 0.05, color, 0, topY + 0.045, 0);
+      addBoxTo(head, mat, HEAD + 0.07, 0.07, HEAD + 0.07, dark, 0, topY - 0.025, 0);
+      break;
+    case 3: { // Beret: pulled down over one side, badge on the other
+      const beret = new THREE.Mesh(shadedBox(HEAD + 0.08, 0.07, HEAD + 0.1, color), mat);
+      beret.position.set(-0.035, topY + 0.03, 0.01);
+      beret.rotation.z = 0.16;
+      head.add(beret);
+      addBoxTo(head, mat, HEAD + 0.05, 0.035, HEAD + 0.05, dark, 0, topY - 0.01, 0);
+      addBoxTo(head, mat, 0.06, 0.07, 0.02, BRASS, PX * 2.3, topY + 0.01, -HEAD / 2 - 0.035);
+      break;
+    }
+    case 4: // Boonie: floppy wide brim and a banded crown
+      addBoxTo(head, mat, HEAD + 0.26, 0.03, HEAD + 0.26, color, 0, topY - 0.01, 0);
+      addBoxTo(head, mat, HEAD + 0.04, 0.13, HEAD + 0.04, color, 0, topY + 0.06, 0);
+      addBoxTo(head, mat, HEAD + 0.06, 0.035, HEAD + 0.06, dark, 0, topY + 0.02, 0);
+      break;
+    case 5: // Combat helmet
+      helmet();
+      break;
+    case 6: // Bandana: tied over the crown, knot behind
+      addBoxTo(head, mat, HEAD + 0.035, 0.1, HEAD + 0.035, color, 0, topY - 0.03, 0);
+      addBoxTo(head, mat, 0.1, 0.08, 0.06, dark, 0, topY - 0.07, HEAD / 2 + 0.04);
+      addBoxTo(head, mat, 0.06, 0.14, 0.03, dark, 0.03, topY - 0.16, HEAD / 2 + 0.05);
+      break;
+    case 7: // Officer cap: a raised crown, black visor, brass badge
+      addBoxTo(head, mat, HEAD + 0.16, 0.1, HEAD + 0.16, color, 0, topY + 0.1, -0.01);
+      addBoxTo(head, mat, HEAD + 0.05, 0.1, HEAD + 0.05, dark, 0, topY + 0.02, 0);
+      addBoxTo(head, mat, 0.38, 0.025, 0.14, black, 0, topY - 0.025, -HEAD / 2 - 0.07);
+      addBoxTo(head, mat, 0.07, 0.06, 0.02, BRASS, 0, topY + 0.04, -HEAD / 2 - 0.04);
+      break;
+    case 8: // Comms headset: band, ear cups and a boom mic
+      addBoxTo(head, mat, 0.05, 0.04, HEAD * 0.45, black, 0, topY + 0.02, 0.02);
+      for (const side of [-1, 1]) {
+        addBoxTo(head, mat, 0.03, HEAD * 0.5, 0.04, black, side * (HEAD / 2 + 0.02), topY - HEAD * 0.2, 0.02);
+        addBoxTo(head, mat, 0.07, 0.15, 0.14, color, side * (HEAD / 2 + 0.035), headY - 0.02, 0.02);
+      }
+      addBoxTo(head, mat, 0.03, 0.03, 0.2, black, -(HEAD / 2 + 0.03), headY - 0.08, -0.1);
+      addBoxTo(head, mat, 0.12, 0.035, 0.035, black, -(HEAD / 2 - 0.04), headY - 0.09, -HEAD / 2 - 0.02);
+      break;
+    case 9: // Headband
+      addBoxTo(head, mat, HEAD + 0.035, 0.055, HEAD + 0.035, color, 0, topY - PX * 1.4, 0);
+      break;
+    case 10: // Helmet with night-vision mount
+      helmet();
+      addBoxTo(head, mat, 0.12, 0.08, 0.05, black, 0, topY + 0.03, -HEAD / 2 - 0.07);
+      for (const side of [-1, 1]) {
+        addBoxTo(head, mat, 0.07, 0.07, 0.12, black, side * 0.05, topY + 0.02, -HEAD / 2 - 0.13);
+        addBoxTo(head, mat, 0.05, 0.05, 0.02, new THREE.Color(0x4cff7a), side * 0.05, topY + 0.02, -HEAD / 2 - 0.195);
+      }
+      break;
+  }
+}
+
+// ─── full body builder (shared with the Character screen preview) ─────────
+
+export interface AvatarBody {
+  group: THREE.Group;
+  head: THREE.Group;
+  /** [leftLeg, rightLeg, leftArm, rightArm] — each pivots at its hip/shoulder. */
+  parts: THREE.Group[];
+  /** Wood-grained base material for solid avatar-adjacent props (the boat). */
+  material: THREE.MeshBasicMaterial;
+  /** Strongest depth-biased layer (brushed plate), used by worn armor. */
+  armorMaterial: THREE.MeshBasicMaterial;
+  /** Every owned material, disposed together with the body. */
+  materials: readonly THREE.MeshBasicMaterial[];
+}
+
+/** Apply the positional part of the Minecraft-style sneak pose. Rotations stay
+ * with the caller because walking, boating, gliding, and attacking compose them. */
+export function applyAvatarSneak(body: AvatarBody, amount: number): void {
+  const a = Math.max(0, Math.min(1, amount));
+  body.head.position.y = NECK_Y - a * 0.16;
+  body.head.position.z = -a * 0.08;
+  for (const arm of [body.parts[2], body.parts[3]]) {
+    arm.position.y = SHOULDER_Y - a * 0.14;
+    arm.position.z = -a * 0.08;
+  }
+  for (const leg of [body.parts[0], body.parts[1]]) {
+    leg.position.y = HIP_Y;
+    leg.position.z = a * 0.04;
+  }
+}
+
+/** Limb rotations for the standing walk/idle/attack pose, in radians.
+ *  Limbs pivot at the top and the model faces -z, so a POSITIVE rotation.x
+ *  swings a limb FORWARD. Every term below is signed to match that. */
+export interface StridePose {
+  /** rotation.x for [leftLeg, rightLeg]. */
+  legs: [number, number];
+  /** rotation.x for [leftArm, rightArm]. */
+  arms: [number, number];
+  /** rotation.z for the right arm — the strike crosses slightly inward. */
+  rightArmRoll: number;
+}
+
+/**
+ * The single source of truth for the standing avatar pose, shared by remote
+ * avatars and the local third-person body so the two can never drift apart.
+ *
+ * `attackSwing` is 0 at rest and 1 at the peak of a swing; it drives the right
+ * arm forward (toward -z), which is the direction the punch actually travels.
+ */
+export function stridePose(
+  walkPhase: number,
+  hspeed: number,
+  sneak: number,
+  holding: boolean,
+  attackSwing: number
+): StridePose {
+  const amp = Math.sin(walkPhase) * Math.min(1, hspeed / 4.5) * 0.8;
+  return {
+    legs: [amp + sneak * 0.28, -amp + sneak * 0.28],
+    arms: [
+      -amp + sneak * 0.18,                                        // counter-swings
+      // Peaks around 95° with an item raised, 72° bare-handed — a strike that
+      // travels forward, not an arm thrown up past vertical.
+      amp + (holding ? 0.4 : 0) + attackSwing * 1.25 + sneak * 0.18,
+    ],
+    rightArmRoll: -attackSwing * 0.12,
+  };
+}
+
+// ─── two-handed firearm hold ───────────────────────────────────────────────
+//
+// A gun used to hang off the right forearm with the left arm waved vaguely
+// at it — to everyone else it read as a one-handed carry. Now the gun is
+// placed on the BODY (butt at the right shoulder, rifles; arms out in a
+// two-handed isosceles grip, pistols) along the look pitch, and each arm is
+// aimed at its own hand-hold on the model: the right hand at the pistol grip,
+// the left at the gun's 'grip2' anchor (handguard / pump / fore grip). The
+// single-segment arms stretch or shorten a little to land exactly — a
+// shortened right arm reads as a bent elbow, which is what a real hold is.
+
+/** Hand centre below the shoulder pivot (glove middle). */
+const HAND_REACH = LIMB_H - 0.075;
+const ARM_DOWN = new THREE.Vector3(0, -1, 0);
+const _holdV = new THREE.Vector3();
+const _holdR = new THREE.Vector3();
+const _holdL = new THREE.Vector3();
+
+export interface GunHoldState {
+  /** Look pitch, radians (+ = up). */
+  pitch: number;
+  /** Aim-down-sights ease, 0..1. */
+  aim: number;
+  /** Reload dip, 0..1 (peaks mid-reload). */
+  reload: number;
+  /** Recoil kick, 0..1. */
+  kick: number;
+}
+
+/** Point in `gun`'s local space → the space of `gun`'s parent. */
+function gunPointToParent(gun: THREE.Object3D, local: THREE.Vector3, out: THREE.Vector3): THREE.Vector3 {
+  out.copy(local);
+  gun.updateMatrix();
+  return out.applyMatrix4(gun.matrix);
+}
+
+/** Aim a limb (pivot at the top, hanging along -y) so its hand lands on
+ *  `target` (in the limb's parent space). */
+function reachLimb(limb: THREE.Object3D, target: THREE.Vector3, minS = 0.7, maxS = 1.2): void {
+  _holdV.copy(target).sub(limb.position);
+  const len = _holdV.length();
+  if (len < 1e-4) return;
+  limb.quaternion.setFromUnitVectors(ARM_DOWN, _holdV.divideScalar(len));
+  limb.scale.y = Math.max(minS, Math.min(maxS, len / HAND_REACH));
+}
+
+/** Undo a previous gun hold: arms back to plain x/z swings at full length.
+ *  Call before any pose branch that only writes rotation.x/z. */
+export function releaseGunHold(body: AvatarBody): void {
+  for (const arm of [body.parts[2], body.parts[3]]) {
+    arm.rotation.y = 0;
+    arm.scale.y = 1;
+  }
+}
+
+/** Pose a held gun two-handed on an avatar. `gun` is a createGunModel root
+ *  already scaled by poseGunModel(…, 'avatar'); it is (re)parented onto the
+ *  body so it stays on the look line instead of swinging with one arm. */
+export function poseGunHold(body: AvatarBody, gun: THREE.Object3D, s: GunHoldState): void {
+  if (gun.parent !== body.group) body.group.add(gun);
+  const la = body.parts[2], ra = body.parts[3];
+  const aim = Math.max(0, Math.min(1, s.aim));
+  const dip = Math.max(0, Math.min(1, s.reload));
+  const kick = Math.max(0, Math.min(1, s.kick));
+  const grip2 = gun.getObjectByName('grip2');
+  const pistol = !grip2;
+  // Grip position relative to the right shoulder's height, before pitch.
+  let gx: number, gy: number, gz: number;
+  if (pistol) {
+    // Arms out, both hands wrapped on the grip, sights brought up to the eye.
+    gx = 0.03 + aim * 0.05; gy = -0.12 + aim * 0.2; gz = -0.44 - aim * 0.02;
+  } else {
+    // Stock in the right shoulder pocket; ADS lifts the sights to the cheek.
+    gx = 0.12 - aim * 0.02; gy = -0.25 + aim * 0.28; gz = -0.3 - aim * 0.02;
+  }
+  gy -= dip * 0.14;            // reload: lower it and bring it in
+  gz += dip * 0.08 + kick * 0.06; // recoil drives it back into the shoulder
+  const pitch = THREE.MathUtils.clamp(s.pitch, -1.1, 1.1) * 0.9 + kick * 0.14 - dip * 0.35;
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  gun.position.set(gx, ra.position.y + gy * cp - gz * sp, ra.position.z + gy * sp + gz * cp);
+  gun.rotation.set(pitch, 0, -dip * 0.55);
+
+  // Right hand on the pistol grip.
+  _holdV.set(0, -0.15, 0.03);
+  gunPointToParent(gun, _holdV, _holdR);
+  // Left hand on the handguard — or cupping the right hand on a pistol.
+  if (grip2) {
+    _holdV.copy(grip2.position);
+    let o: THREE.Object3D | null = grip2.parent;
+    const onPump = o !== gun;
+    while (o && o !== gun) { o.updateMatrix(); _holdV.applyMatrix4(o.matrix); o = o.parent; }
+    // A pump is worked where it is; otherwise the support hand takes the
+    // handguard just ahead of the magazine — where these arms can reach.
+    if (!onPump) _holdV.z *= 0.62;
+    _holdV.y -= 0.08; // hand wraps under the guard, not through it
+  } else {
+    _holdV.set(-0.1, -0.2, 0.02);
+  }
+  gunPointToParent(gun, _holdV, _holdL);
+  // During the reload the support hand drops to the magazine well.
+  if (dip > 0) {
+    _holdV.set(0, -0.3, -0.12);
+    gunPointToParent(gun, _holdV, _holdV);
+    _holdL.lerp(_holdV, dip);
+  }
+  reachLimb(ra, _holdR, 0.62, 1.15);
+  reachLimb(la, _holdL, 0.7, 1.3);
+}
+
+/** Build the full customised avatar body (feet at y=0, facing -z). The
+ *  optional shirt override paints a team colour over the chosen top. */
+export function buildAvatarBody(
+  cosmetics: Cosmetics, shirtOverride?: THREE.Color
+): AvatarBody {
+  // Sanitize on the way in: cosmetics reach here straight off the wire on the
+  // bust paths, and a blob from an older build can be missing a field.
+  const c = sanitizeCosmetics(cosmetics);
+  const skin  = new THREE.Color(SKIN_TONES[c.skin].hex);
+  const eye   = new THREE.Color(EYE_COLORS[c.eyes].hex);
+  const hair  = new THREE.Color(HAIR_COLORS[c.hair].hex);
+  const shirt = shirtOverride ?? new THREE.Color(SHIRT_COLORS[c.shirt].hex);
+  const pants = new THREE.Color(PANTS_COLORS[c.pants].hex);
+  const collar = new THREE.Color(shirt).multiplyScalar(0.84);
+  const hem = new THREE.Color(shirt).multiplyScalar(0.78);
+  const print = new THREE.Color(shirt).lerp(new THREE.Color(0xffffff), 0.55);
+  const shoe = new THREE.Color(0xe9ecef).lerp(shirt, 0.18);
+  const sole = new THREE.Color(0xf7f7f5);
+
+  // Stable opaque layers, each with its own depth bias, so the overlapping
+  // kit never z-fights at range; each carries the texture of what it IS.
+  const skinMat   = layeredAvatarMaterial(0, 'skin');     // head
+  const clothMat  = layeredAvatarMaterial(0, 'cloth');    // t-shirt, sleeves
+  const legMat    = layeredAvatarMaterial(0, 'denim');    // trousers
+  const propMat   = layeredAvatarMaterial(0, 'wood');     // boat hull / props
+  const handMat   = layeredAvatarMaterial(1, 'skin');     // hands
+  const kitMat    = layeredAvatarMaterial(1, 'cloth');    // print, hem
+  const trimMat   = layeredAvatarMaterial(2, 'leather');  // belt, shoes
+  const hairMat   = layeredAvatarMaterial(2, 'hair');
+  const detailMat = layeredAvatarMaterial(3, 'none');     // face pixels stay crisp
+  const accessoryMat = layeredAvatarMaterial(4, 'none');
+  const hatMat    = layeredAvatarMaterial(4, 'cloth');
+  const armorMat  = layeredAvatarMaterial(6, 'metal');
+  const materials = [
+    skinMat, clothMat, legMat, propMat, handMat, kitMat, trimMat,
+    hairMat, detailMat, accessoryMat, hatMat, armorMat,
+  ];
+  const group = new THREE.Group();
+  group.rotation.order = 'YXZ';
+
+  // ── Torso: t-shirt with a chest print and a hem, belt ──────────────────
+  const torso = new THREE.Mesh(shadedBox(TORSO_W, TORSO_H, TORSO_D, shirt), clothMat);
+  torso.position.y = HIP_Y + TORSO_H / 2;
+  group.add(torso);
+  // A simple square print on the chest, and a darker hem at the waist.
+  addBoxTo(group, kitMat, 0.2, 0.16, 0.02, print, 0, HIP_Y + TORSO_H * 0.62, -TORSO_D / 2 - 0.008);
+  addBoxTo(group, kitMat, TORSO_W + 0.012, 0.07, TORSO_D + 0.012, hem, 0, HIP_Y + 0.12, 0);
+  // Belt and buckle.
+  addBoxTo(group, trimMat, TORSO_W + 0.02, 0.08, TORSO_D + 0.02, new THREE.Color(0x2a2721),
+    0, HIP_Y + 0.05, 0);
+  addBoxTo(group, trimMat, 0.07, 0.055, 0.02, new THREE.Color(0x8a8f96), 0, HIP_Y + 0.05, -TORSO_D / 2 - 0.018);
+  // Crew collar: the shirt closes on the jaw — no neck stalk.
+  addBoxTo(group, clothMat, 0.32, 0.08, 0.3, collar, 0, NECK_Y - 0.02, 0);
+
+  // ── Head ──────────────────────────────────────────────────────────────
+  // Its own group, pivoting at the jaw line so it pitches with look-dir.
+  const headGroup = new THREE.Group();
+  const headMesh = new THREE.Mesh(shadedBox(HEAD, HEAD, HEAD, skin), skinMat);
+  headMesh.position.y = HEAD_Y;
+  headGroup.add(headMesh);
+  buildHair(headGroup, hairMat, hair, HEAD_Y, c.hairStyle);
+  buildHat(headGroup, hatMat, new THREE.Color(HAT_COLORS[c.hatColor].hex), HEAD_Y, c.hat);
+  buildFace(headGroup, detailMat, accessoryMat, skin, hair, eye, HEAD_Y, c.face);
+  headGroup.position.y = NECK_Y;
+  group.add(headGroup);
+
+  // ── Legs: jeans, sneakers with a white sole ───────────────────────────
+  const legX = LEG_W / 2 + 0.006;
+  const ll = limb(legMat, LEG_W, LIMB_H, LEG_D, pants, -legX, HIP_Y, 0);
+  const rl = limb(legMat, LEG_W, LIMB_H, LEG_D, pants, legX, HIP_Y, 0);
+  for (const leg of [ll, rl]) {
+    addBoxTo(leg, trimMat, LEG_W + 0.02, 0.16, LEG_D + 0.05, shoe, 0, -LIMB_H + 0.08, -0.02);
+    addBoxTo(leg, trimMat, LEG_W + 0.03, 0.04, LEG_D + 0.07, sole, 0, -LIMB_H + 0.02, -0.025);
+  }
+
+  // ── Arms: short sleeves, bare forearms, hands ─────────────────────────
+  const armX = TORSO_W / 2 + ARM_W / 2;
+  const la = limb(clothMat, ARM_W, LIMB_H - 0.14, ARM_D, shirt, -armX, SHOULDER_Y, 0);
+  const ra = limb(clothMat, ARM_W, LIMB_H - 0.14, ARM_D, shirt, armX, SHOULDER_Y, 0);
+  const ARM_L = LIMB_H - 0.14;
+  for (const arm of [la, ra]) {
+    // Bare forearm below a short sleeve, with the sleeve's cuff on top.
+    addBoxTo(arm, handMat, ARM_W + 0.006, ARM_L - 0.27, ARM_D + 0.006, skin, 0, -(0.27 + ARM_L) / 2, 0);
+    addBoxTo(arm, clothMat, ARM_W + 0.014, 0.05, ARM_D + 0.014, collar, 0, -0.265, 0);
+  }
+
+  group.add(ll, rl, la, ra);
+
+  return {
+    group, head: headGroup, parts: [ll, rl, la, ra],
+    material: propMat, armorMaterial: armorMat, materials,
+  };
+}
+
+/** Dispose every geometry and layered material owned by an avatar body. */
+export function disposeAvatarBody(body: AvatarBody): void {
+  body.group.traverse((o) => {
+    if ((o as THREE.Sprite).isSprite) return;
+    const m = o as THREE.Mesh;
+    if (m.geometry) m.geometry.dispose();
+  });
+  for (const mat of body.materials) mat.dispose();
+}
+
+// ─── worn armor + held item (equip visuals) ────────────────────────────────
+
+/**
+ * WORN ARMOR — a real suit, not a coloured box over the kit.
+ *
+ * Every tier shares one construction (dome + brim + cheek and neck guards;
+ * cuirass + breastplate + ridge + gorget + faulds + layered pauldrons +
+ * vambraces; cuisses + knee cops + tassets + shin plates; sabatons with toe
+ * caps, cuff rims and soles) and gets its identity from a four-colour palette
+ * plus ONE signature detail you can read across a field:
+ *
+ *   leather  — stitched tan trim, brass buckles, no crest
+ *   stone    — slab-heavy and squat, studded, a flat-topped bucket
+ *   iron     — polished steel with a red horsehair plume
+ *   diamond  — cyan crystal plate on gold trim with a tall crystal fin
+ *   titanium — blue-grey alloy with glowing cyan seams and a lit visor bar
+ */
+interface ArmorLook {
+  base: THREE.Color; dark: THREE.Color; trim: THREE.Color; accent: THREE.Color;
+  tier: 'leather' | 'stone' | 'iron' | 'diamond' | 'titanium';
+}
+
+const ARMOR_LOOKS: Record<ArmorLook['tier'], ArmorLook> = (() => {
+  const look = (tier: ArmorLook['tier'], base: number, dark: number, trim: number, accent: number): ArmorLook =>
+    ({ tier, base: new THREE.Color(base), dark: new THREE.Color(dark), trim: new THREE.Color(trim), accent: new THREE.Color(accent) });
+  return {
+    leather: look('leather', 0x8a6538, 0x55391f, 0xc79a5c, 0xd8b04a),
+    stone: look('stone', 0x8d9197, 0x5b5f65, 0x70747a, 0xb3b7bd),
+    iron: look('iron', 0xe2e6eb, 0x9ea5af, 0x6b7280, 0xd0342c),
+    diamond: look('diamond', 0x52e3d5, 0x249c93, 0xf2c94c, 0xc8fff8),
+    titanium: look('titanium', 0xb9cbe8, 0x5a6a86, 0x2c3850, 0x62f4ff),
+  };
+})();
+
+/** The look for an armor item id (unknown ids fall back to iron). */
+function armorLookFor(id: number): ArmorLook {
+  if (id >= Item.WoodHelmet && id <= Item.WoodBoots) return ARMOR_LOOKS.leather;
+  if (id >= Item.StoneHelmet && id <= Item.StoneBoots) return ARMOR_LOOKS.stone;
+  if (id >= Item.IronHelmet && id <= Item.IronBoots) return ARMOR_LOOKS.iron;
+  if (id >= Item.DiamondHelmet && id <= Item.DiamondBoots) return ARMOR_LOOKS.diamond;
+  if (id >= Item.TitaniumHelmet && id <= Item.TitaniumBoots) return ARMOR_LOOKS.titanium;
+  return ARMOR_LOOKS.iron;
+}
+
+/** Build worn-armor plating onto an avatar body. `armor` is the synced
+ *  [helmet, chest, legs, boots] item ids (0 = bare). Returns every mesh added
+ *  so a re-equip can strip them (their geometries die with the body's group
+ *  traverse on dispose; the material is the body's owned armor layer). */
+export function buildArmorOverlay(body: AvatarBody, armor: number[]): THREE.Mesh[] {
+  const mat = body.armorMaterial;
+  const added: THREE.Mesh[] = [];
+  const [ll, rl, la, ra] = body.parts;
+  const add = (
+    parent: THREE.Object3D, w: number, h: number, d: number,
+    color: THREE.Color, x: number, y: number, z: number
+  ): THREE.Mesh => {
+    const m = addBoxTo(parent, mat, w, h, d, color, x, y, z);
+    added.push(m);
+    return m;
+  };
+
+  const helmet = armor[ARMOR_SLOT_INDEX.helmet] | 0;
+  const chest  = armor[ARMOR_SLOT_INDEX.chestplate] | 0;
+  const legs   = armor[ARMOR_SLOT_INDEX.leggings] | 0;
+  const boots  = armor[ARMOR_SLOT_INDEX.boots] | 0;
+
+  if (helmet && ITEMS[helmet]?.armor) {
+    const L = armorLookFor(helmet);
+    const h = body.head;
+    const top = HEAD_Y + HEAD / 2;           // crown of the head
+    const front = -HEAD / 2;
+    const squat = L.tier === 'stone';
+    // Dome over the crown, stopping above the brows so the face stays readable.
+    add(h, HEAD + 0.1, squat ? 0.24 : 0.2, HEAD + 0.1, L.base, 0, top - (squat ? 0.03 : 0.05), 0);
+    if (!squat) add(h, HEAD - 0.04, 0.05, HEAD - 0.04, L.base, 0, top + 0.07, 0); // rounded cap
+    // Brim band all the way round.
+    add(h, HEAD + 0.12, 0.05, HEAD + 0.12, L.trim, 0, top - 0.15, 0);
+    // Cheek guards and a neck guard.
+    for (const side of [-1, 1]) {
+      add(h, 0.05, 0.25, HEAD * 0.62, L.dark, side * (HEAD / 2 + 0.045), HEAD_Y - 0.03, 0.06);
+      if (L.tier !== 'leather') add(h, 0.055, 0.04, 0.04, L.trim, side * (HEAD / 2 + 0.05), HEAD_Y - 0.1, -0.08);
+    }
+    add(h, HEAD + 0.1, 0.22, 0.05, L.dark, 0, HEAD_Y - 0.01, HEAD / 2 + 0.045);
+    // Nose guard (not on soft leather).
+    if (L.tier !== 'leather') add(h, 0.05, 0.13, 0.035, L.trim, 0, top - 0.22, front - 0.06);
+    switch (L.tier) {
+      case 'leather':
+        for (const x of [-0.16, 0, 0.16]) add(h, 0.035, 0.035, 0.02, L.accent, x, top - 0.15, front - 0.07);
+        break;
+      case 'stone':
+        for (const side of [-1, 1]) add(h, 0.06, 0.06, 0.06, L.accent, side * 0.15, top + 0.1, -0.1);
+        add(h, HEAD + 0.02, 0.04, HEAD + 0.02, L.dark, 0, top + 0.1, 0);
+        break;
+      case 'iron':
+        // A red plume sweeping from brow to nape.
+        add(h, 0.06, 0.05, HEAD - 0.02, L.trim, 0, top + 0.12, 0);
+        add(h, 0.07, 0.1, HEAD * 0.6, L.accent, 0, top + 0.18, 0.02);
+        add(h, 0.07, 0.16, 0.12, L.accent, 0, top + 0.1, HEAD / 2 + 0.06);
+        break;
+      case 'diamond':
+        // A tall crystal fin with gold at its root.
+        add(h, 0.07, 0.04, HEAD - 0.04, L.trim, 0, top + 0.11, 0);
+        add(h, 0.045, 0.16, HEAD * 0.55, L.accent, 0, top + 0.2, 0.02);
+        add(h, 0.045, 0.08, 0.1, L.accent, 0, top + 0.31, 0.06);
+        break;
+      case 'titanium':
+        // A lit visor bar across the brim and twin sensor fins.
+        add(h, HEAD + 0.02, 0.028, 0.02, L.accent, 0, top - 0.15, front - 0.065);
+        for (const side of [-1, 1]) add(h, 0.03, 0.12, 0.16, L.dark, side * 0.18, top + 0.12, 0.08);
+        break;
+    }
+  }
+  if (chest && ITEMS[chest]?.glider) {
+    // A worn glider is a FOLDED WING, not plating and not a rucksack: rolled
+    // sailcloth across the back with the spar ends poking out, so you can tell
+    // at a glance who can fly. Tagged because the deployed rig hides it — you
+    // cannot be wearing the wing you are hanging underneath.
+    const packY = HIP_Y + TORSO_H - 0.26, packZ = TORSO_D / 2 + 0.09;
+    add(body.group, 0.46, 0.19, 0.16, new THREE.Color(0x217d91), 0, packY, packZ);
+    add(body.group, 0.5, 0.11, 0.13, new THREE.Color(0x123749), 0, packY - 0.17, packZ);
+    add(body.group, 0.64, 0.06, 0.06, new THREE.Color(0xffc775), 0, packY + 0.13, packZ);
+    for (const m of added.slice(-3)) m.userData.gliderPack = true;
+  } else if (chest && ITEMS[chest]?.armor) {
+    const L = armorLookFor(chest);
+    const g = body.group;
+    // Deep enough to close over the slim pack on the back (so it never pokes
+    // through the plate) and the pouches on the front; shifted back a touch
+    // because the pack sticks out further than the pouches do.
+    const D = 0.51, W = TORSO_W + 0.1, zc = 0.02;
+    const front = zc - D / 2, back = zc + D / 2;
+    const plateTop = HIP_Y + TORSO_H + 0.01, plateBot = HIP_Y + 0.22;
+    const plateY = (plateTop + plateBot) / 2, plateH = plateTop - plateBot;
+    // Cuirass shell, then a raised breastplate with a centre ridge.
+    add(g, W, plateH, D, L.base, 0, plateY, zc);
+    add(g, W - 0.14, plateH * 0.62, 0.035, L.base, 0, plateY + plateH * 0.12, front - 0.015);
+    add(g, 0.045, plateH * 0.7, 0.03, L.trim, 0, plateY + plateH * 0.1, front - 0.035);
+    // Back plate: a trim band across the shoulders and a spine down it.
+    add(g, W - 0.1, 0.05, 0.03, L.trim, 0, plateTop - 0.04, back + 0.012);
+    add(g, 0.05, plateH * 0.7, 0.03, L.dark, 0, plateY, back + 0.012);
+    // Gorget collar.
+    add(g, 0.4, 0.075, 0.4, L.trim, 0, NECK_Y - 0.025, 0);
+    // Faulds: two stepped lames over the belt line.
+    add(g, W - 0.02, 0.08, D - 0.02, L.dark, 0, plateBot - 0.035, zc);
+    add(g, W - 0.05, 0.07, D - 0.05, L.base, 0, plateBot - 0.11, zc);
+    // The signature at the heart.
+    add(g, 0.11, 0.11, 0.03, L.accent, 0, plateY + plateH * 0.18, front - 0.05);
+    if (L.tier === 'titanium') {
+      for (const side of [-1, 1]) add(g, 0.025, plateH * 0.62, 0.02, L.accent, side * 0.17, plateY + 0.02, front - 0.01);
+    } else if (L.tier === 'leather') {
+      for (const side of [-1, 1]) add(g, 0.05, 0.035, 0.02, L.accent, side * 0.16, plateY - 0.08, front - 0.012);
+    } else if (L.tier === 'stone') {
+      for (const x of [-0.2, 0.2]) for (const y of [plateY + 0.1, plateY - 0.1])
+        add(g, 0.05, 0.05, 0.03, L.accent, x, y, front - 0.01);
+    }
+    for (const [arm, side] of [[la, -1], [ra, 1]] as const) {
+      // Layered pauldrons that swing with the arms, flared outward.
+      add(arm, LIMB_W + 0.14, 0.15, LIMB_D + 0.14, L.base, side * 0.03, -0.02, 0);
+      add(arm, LIMB_W + 0.11, 0.1, LIMB_D + 0.11, L.dark, side * 0.03, -0.13, 0);
+      add(arm, LIMB_W + 0.12, 0.03, LIMB_D + 0.12, L.trim, side * 0.03, -0.195, 0);
+      if (L.tier === 'diamond' || L.tier === 'iron')
+        add(arm, 0.05, 0.08, 0.14, L.tier === 'diamond' ? L.accent : L.trim, side * 0.14, 0.07, 0);
+      // Vambrace over the forearm, above the glove.
+      add(arm, LIMB_W + 0.05, 0.16, LIMB_D + 0.05, L.base, 0, -LIMB_H + 0.27, 0);
+      add(arm, LIMB_W + 0.06, 0.03, LIMB_D + 0.06, L.trim, 0, -LIMB_H + 0.2, 0);
+      if (L.tier === 'titanium') add(arm, 0.02, 0.12, 0.02, L.accent, side * (LIMB_W / 2 + 0.03), -LIMB_H + 0.27, -0.05);
+    }
+  }
+  if (legs && ITEMS[legs]?.armor) {
+    const L = armorLookFor(legs);
+    for (const [leg, side] of [[ll, -1], [rl, 1]] as const) {
+      add(leg, LEG_W + 0.07, 0.3, LEG_D + 0.07, L.base, 0, -0.17, 0);           // cuisse
+      add(leg, LEG_W + 0.09, 0.11, LEG_D + 0.09, L.dark, side * 0.012, -0.03, 0); // tasset
+      add(leg, 0.19, 0.12, 0.06, L.trim, 0, -0.4, -LEG_D / 2 - 0.06);           // knee cop
+      add(leg, 0.07, 0.06, 0.03, L.accent, 0, -0.4, -LEG_D / 2 - 0.1);
+      add(leg, 0.17, 0.12, 0.03, L.base, 0, -0.52, -LEG_D / 2 - 0.04);          // shin plate
+      if (L.tier === 'titanium') add(leg, 0.02, 0.24, 0.02, L.accent, side * (LEG_W / 2 + 0.04), -0.17, -0.06);
+    }
+  }
+  if (boots && ITEMS[boots]?.armor) {
+    const L = armorLookFor(boots);
+    for (const leg of [ll, rl]) {
+      add(leg, LEG_W + 0.09, 0.2, LEG_D + 0.13, L.base, 0, -LIMB_H + 0.11, -0.025);
+      add(leg, LEG_W + 0.07, 0.09, 0.07, L.dark, 0, -LIMB_H + 0.05, -LEG_D / 2 - 0.1); // toe cap
+      add(leg, LEG_W + 0.11, 0.045, LEG_D + 0.15, L.trim, 0, -LIMB_H + 0.22, -0.025);  // cuff rim
+      add(leg, LEG_W + 0.1, 0.03, LEG_D + 0.19, L.dark.clone().multiplyScalar(0.6), 0, -LIMB_H + 0.012, -0.035);
+      if (L.tier !== 'stone' && L.tier !== 'leather')
+        add(leg, 0.05, 0.05, 0.03, L.accent, 0, -LIMB_H + 0.14, -LEG_D / 2 - 0.1);
+    }
+  }
+  return added;
+}
+
+// ─── tilted-body placement (gliding) ───────────────────────────────────────
+
+// An avatar body pivots at its FEET, so pitching it face-down for flight would
+// swing the whole model a metre out of its own hitbox and sling the name tag
+// along with it. Both helpers below undo that: the body is re-anchored around
+// its middle, and anything that must stay overhead is placed in the tilted
+// frame so it still ends up overhead in world space.
+const POSE_PIVOT_Y = 1.0;
+/** How far a vehicle-seated avatar drops so its HIPS land on the seat pan the
+ *  simulation reports, rather than its feet. Roughly a thigh. */
+export const SEAT_SINK = 0.52;
+const _v = new THREE.Vector3();
+const _q = new THREE.Quaternion();
+
+/** Position a rotated body so its mid-height point stays on the hitbox. */
+export function anchorTiltedBody(
+  group: THREE.Object3D, x: number, y: number, z: number
+): void {
+  _v.set(0, POSE_PIVOT_Y, 0).applyQuaternion(group.quaternion);
+  group.position.set(x - _v.x, y + POSE_PIVOT_Y - _v.y, z - _v.z);
+}
+
+/** Place a child at a fixed world height above the body, whatever its tilt. */
+function placeOverhead(
+  group: THREE.Object3D, child: THREE.Object3D, worldY: number
+): void {
+  _q.copy(group.quaternion).invert();
+  _v.set(0, worldY - POSE_PIVOT_Y, 0).applyQuaternion(_q);
+  child.position.set(_v.x, _v.y + POSE_PIVOT_Y, _v.z);
+}
+
+// ─── name/health tag helpers ───────────────────────────────────────────────
+
+function drawHealthBar(canvas: HTMLCanvasElement, frac: number): void {
+  const ctx = canvas.getContext('2d')!;
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  // Pill-shaped background
+  ctx.fillStyle = 'rgba(0,0,0,0.65)';
+  const r = h / 2;
+  ctx.beginPath();
+  ctx.roundRect(0, 0, w, h, r);
+  ctx.fill();
+
+  // Empty track
+  ctx.fillStyle = '#2a0a0a';
+  ctx.beginPath();
+  ctx.roundRect(3, 3, w - 6, h - 6, r - 2);
+  ctx.fill();
+
+  const f = Math.max(0, Math.min(1, frac));
+  if (f > 0) {
+    // Filled portion — colour shifts green→yellow→red
+    ctx.fillStyle = f > 0.5 ? '#3fd63a' : f > 0.25 ? '#e8c43a' : '#e84040';
+    ctx.beginPath();
+    ctx.roundRect(3, 3, Math.round((w - 6) * f), h - 6, r - 2);
+    ctx.fill();
+  }
+}
+
+function makeNameTag(name: string): { tex: THREE.CanvasTexture; sprite: THREE.Sprite } {
+  const canvas = document.createElement('canvas');
+  canvas.width = 320; canvas.height = 72;
+  const ctx = canvas.getContext('2d')!;
+  ctx.font = 'bold 25px "Segoe UI", Arial, sans-serif';
+  const width = Math.min(316, Math.ceil(ctx.measureText(name).width) + 34);
+  // Rounded dark pill, just wide enough for the name.
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.beginPath();
+  ctx.roundRect(160 - width / 2, 22, width, 40, 10);
+  ctx.fill();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillText(name, 162, 44);  // shadow
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(name, 160, 42);  // main
+
+  const tex = new THREE.CanvasTexture(canvas);
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: tex, transparent: true, depthTest: false,
+  }));
+  sprite.scale.set(1.8, 0.4, 1);
+  sprite.renderOrder = 50;
+  return { tex, sprite };
+}
+
+// ─── avatar state ─────────────────────────────────────────────────────────
+
+interface Avatar {
+  body: AvatarBody;
+  group: THREE.Group;
+  head: THREE.Group;    // separate group so we can pitch it with look-dir
+  /** [leftLeg, rightLeg, leftArm, rightArm] — each pivots at its hip/shoulder. */
+  parts: THREE.Group[];
+  /** Rowing boat, shown (and rowed) while the player is boating. */
+  boat: BoatRig;
+  /** Hang-glider rig — a scene-level object, NOT a child of the body: the
+   *  wing flies the flight path while the pilot hangs beneath it. */
+  rig: GliderRig;
+  /** 0..1 deploy ease, so the wings unfurl instead of popping into existence. */
+  glideT: number;
+  /** Smoothed bank angle (radians), driven by how hard the player is turning. */
+  bank: number;
+  /** Previous frame's interpolated yaw, for the turn rate behind `bank`. */
+  prevYaw: number;
+  /** True while the tags are being placed in the tilted frame. */
+  tagTilted: boolean;
+  nameTex: THREE.CanvasTexture;
+  sprite: THREE.Sprite;
+  healthCanvas: HTMLCanvasElement;
+  healthTex: THREE.CanvasTexture;
+  healthSprite: THREE.Sprite;
+  lastHealth: number;
+  /** Rendered transform: the interpolated playback of the network history, and
+   *  the ONLY position the hit tests use — what you shoot is what you see. */
+  dx: number; dy: number; dz: number; dyaw: number; dpitch: number;
+  walkPhase: number;
+  lastX: number; lastZ: number;
+  /** Low-passed ground speed that drives the legs: raw per-frame speed dips
+   *  to zero on a late packet and spikes on the catch-up, which read as the
+   *  legs stalling and flailing mid-stride. */
+  strideSpeed: number;
+  /** Visual error being bled off after a correction (catch-up after a late
+   *  packet): the body glides the last few centimetres instead of popping. */
+  ex: number; ey: number; ez: number;
+  /** Playback speed (blocks/s) over the previous frame, before error terms. */
+  rawSpeed: number;
+  /** Equip visuals currently built (rebuilt when the synced state changes). */
+  heldId: number;
+  heldMesh: THREE.Object3D | null;
+  armorKey: string;
+  armorMeshes: THREE.Mesh[];
+  lastSwing: number;
+  swingT: number;
+  sneakT: number;
+  aimT: number;
+  reloadT: number;
+  /** Muzzle flash quad parented to the held gun's muzzle anchor (null when the
+   *  avatar isn't holding a gun), and its 1→0 burn-down. */
+  flash: THREE.Mesh | null;
+  flashT: number;
+  /** 0..1 HIT FLASH: the whole avatar tints red for a moment when one of our
+   *  rounds lands on them. Every avatar material is a per-body instance, so
+   *  writing `material.color` here tints exactly one player. */
+  hurtT: number;
+  /** How hard the flash hit (0..1) — a killing blow burns brighter and longer
+   *  than a graze, so a finishing shot is unmistakable at a glance. */
+  hurtPeak: number;
+}
+
+// ─── main class ───────────────────────────────────────────────────────────
+
+export class RemotePlayers {
+  private readonly scene: THREE.Scene;
+  private readonly net: NetClient;
+  private readonly avatars = new Map<number, Avatar>();
+  private hovered = -1;
+  /** Full health in the current mode, for the hover health bar. */
+  maxHealth = 20;
+  private readonly atlas: Atlas;
+  /** Shared material for held-item meshes (same look as dropped items). */
+  private readonly itemMat: THREE.MeshBasicMaterial;
+  /** Shared muzzle-flash burst, instanced per armed avatar. */
+  private readonly flashGeo = new THREE.OctahedronGeometry(0.13, 0);
+  private readonly flashMat: THREE.MeshBasicMaterial;
+
+  constructor(scene: THREE.Scene, net: NetClient, atlas: Atlas) {
+    this.scene = scene;
+    this.net = net;
+    this.atlas = atlas;
+    this.itemMat = new THREE.MeshBasicMaterial({
+      map: atlas.texture, alphaTest: 0.4, vertexColors: true,
+      side: THREE.DoubleSide,
+    });
+    this.flashMat = new THREE.MeshBasicMaterial({
+      color: 0xffd27a, blending: THREE.AdditiveBlending,
+      transparent: true, depthWrite: false,
+    });
+  }
+
+  /** Where this remote's body is actually drawn (interpolated), or null. Use
+   *  this, not the raw network target, for anything attached to the body. */
+  renderedPos(id: number): THREE.Vector3 | null {
+    return this.avatars.get(id)?.group.position ?? null;
+  }
+
+  /** Mark which avatar the local crosshair is over (-1 = none). */
+  setHovered(id: number): void { this.hovered = id; }
+
+  /** Light up a remote player's muzzle — driven by their broadcast gunshot, so
+   *  you can spot a shooter by the blink even at tracer-blurring range. */
+  muzzleFlash(id: number): void {
+    const av = this.avatars.get(id);
+    if (av?.flash) av.flashT = 1;
+  }
+
+  /**
+   * One of our rounds landed on this player: tint them red for a beat.
+   *
+   * A hitmarker answers "did that land?" on OUR screen; this answers it on
+   * THEIRS, in the world, where the eye already is. `strength` runs 0..1 —
+   * a soaked hit barely blushes, a kill goes full crimson.
+   */
+  hurtFlash(id: number, strength = 1): void {
+    const av = this.avatars.get(id);
+    if (!av) return;
+    av.hurtPeak = Math.max(av.hurtPeak * av.hurtT, Math.max(0.25, Math.min(1, strength)));
+    av.hurtT = 1;
+  }
+
+  private build(remote: Remote): Avatar {
+    const cosmetics = sanitizeCosmetics(remote.info.cosmetics, remote.info.skin);
+    const body = buildAvatarBody(cosmetics);
+    const { group } = body;
+
+    // ── Boat (shown while boating) ─────────────────────────────────────────
+    // Scene-level like the glider (shared cached geometry must stay out of
+    // the body's dispose traverse); the same model you ride yourself.
+    const boat = createBoatRig();
+    this.scene.add(boat.group);
+
+    // ── Glider rig (shown while gliding) ───────────────────────────────────
+    const rig = buildGliderRig();
+    rig.group.visible = false;
+    this.scene.add(rig.group);
+
+    // ── Name tag ───────────────────────────────────────────────────────────
+    const { tex, sprite } = makeNameTag(remote.info.username);
+    sprite.position.y = 2.34;
+    group.add(sprite);
+
+    // ── Health bar ─────────────────────────────────────────────────────────
+    const healthCanvas = document.createElement('canvas');
+    healthCanvas.width = 160; healthCanvas.height = 20;
+    const healthTex = new THREE.CanvasTexture(healthCanvas);
+    const healthSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: healthTex, transparent: true, depthTest: false,
+    }));
+    healthSprite.scale.set(1.2, 0.15, 1);
+    healthSprite.position.y = 2.62;
+    healthSprite.renderOrder = 51;
+    healthSprite.visible = false;
+    group.add(healthSprite);
+
+    this.scene.add(group);
+    return {
+      body, group, head: body.head, boat,
+      rig, glideT: 0, bank: 0, prevYaw: remote.tyaw, tagTilted: false,
+      parts: body.parts,
+      nameTex: tex, sprite,
+      healthCanvas, healthTex, healthSprite, lastHealth: -1,
+      dx: remote.tx, dy: remote.ty, dz: remote.tz, dyaw: remote.tyaw,
+      dpitch: remote.tpitch,
+      walkPhase: 0, lastX: remote.tx, lastZ: remote.tz,
+      strideSpeed: 0, ex: 0, ey: 0, ez: 0, rawSpeed: 0,
+      heldId: 0, heldMesh: null, armorKey: '', armorMeshes: [],
+      lastSwing: remote.swing | 0, swingT: 1, sneakT: 0, aimT: 0, reloadT: 0,
+      flash: null, flashT: 0, hurtT: 0, hurtPeak: 0,
+    };
+  }
+
+  /** Keep the avatar's held item + worn armor in step with the synced state. */
+  private syncEquip(av: Avatar, r: Remote): void {
+    const held = r.held | 0;
+    if (held !== av.heldId) {
+      av.heldId = held;
+      if (av.heldMesh) {
+        // Shared cached geometry — detach only, never dispose.
+        av.heldMesh.parent?.remove(av.heldMesh);
+        av.heldMesh = null;
+        av.flash = null; // went with the gun it was parented to
+        av.flashT = 0;
+      }
+      if (held > 0 && ITEMS[held]) {
+        const mesh = isGunItem(held)
+          ? createGunModel(held)
+          : isModeledGadget(held)
+            ? createGadgetModel(held)
+            : held === Item.BridgeBow ? createBowModel()
+            : new THREE.Mesh(itemGeometry(this.atlas, held), this.itemMat);
+        if (isGunItem(held)) {
+          poseGunModel(mesh, 'avatar');
+        } else if (isModeledGadget(held)) {
+          poseGadgetModel(mesh, 'avatar');
+        } else if (held === Item.BridgeBow) {
+          poseBowModel(mesh, 'avatar');
+        } else {
+          mesh.position.set(0, -LIMB_H + 0.06, -0.2);
+          mesh.rotation.set(-0.5, 0, 0);
+          mesh.scale.setScalar(ITEMS[held].kind === 'block' ? 1.5 : 1.1);
+        }
+        // Guns ride the body two-handed (poseGunHold); anything else swings
+        // with the right arm.
+        (isGunItem(held) ? av.body.group : av.parts[3]).add(mesh);
+        av.heldMesh = mesh;
+        // Hang a muzzle flash off the gun's own muzzle anchor so a distant
+        // shooter reads as a muzzle blink even before the tracer resolves.
+        if (isGunItem(held)) {
+          const flash = new THREE.Mesh(this.flashGeo, this.flashMat);
+          flash.visible = false;
+          flash.renderOrder = 60;
+          (mesh.getObjectByName('muzzle') ?? mesh).add(flash);
+          av.flash = flash;
+        }
+      }
+    }
+    const key = (r.armor ?? []).join(',');
+    if (key !== av.armorKey) {
+      av.armorKey = key;
+      for (const m of av.armorMeshes) {
+        m.parent?.remove(m);
+        m.geometry.dispose(); // per-piece geometry (material is the body's)
+      }
+      av.armorMeshes = buildArmorOverlay(av.body, r.armor ?? []);
+    }
+  }
+
+  /** Reconcile avatars with the net roster and interpolate, once per frame. */
+  update(dt: number): void {
+    // Remove avatars whose players left.
+    for (const [id, av] of this.avatars) {
+      if (!this.net.remotes.has(id)) {
+        this.dispose(av);
+        this.avatars.delete(id);
+      }
+    }
+    // Replay every avatar at the same instant, INTERP_DELAY behind now. One
+    // clock read for the whole loop keeps them consistent with each other.
+    const renderTime = netNow() - this.net.renderDelay(dt);
+    this.net.applyRemotePoses(renderTime);
+    const fallback = Math.min(1, 14 * dt);
+    for (const [id, r] of this.net.remotes) {
+      let av = this.avatars.get(id);
+      if (!av) { av = this.build(r); this.avatars.set(id, av); }
+
+      const s = r.buf.sample(renderTime);
+      if (s) {
+        // A playback step far beyond the pace the body was just moving at is
+        // the buffer catching up after a late packet (it froze, now it leaps):
+        // absorb it into the error term and bleed that off, instead of drawing
+        // the jump. Steady fast travel (gliding, vehicles) matches its own
+        // pace and is untouched; a real teleport (past SNAP_DISTANCE) snaps.
+        const jump = Math.hypot(s.x - (av.dx - av.ex), s.y - (av.dy - av.ey), s.z - (av.dz - av.ez));
+        const expected = av.rawSpeed * dt;
+        av.rawSpeed = jump / Math.max(dt, 1e-4);
+        if (jump - expected > 0.3 && jump < SNAP_DISTANCE) {
+          av.ex = av.dx - s.x; av.ey = av.dy - s.y; av.ez = av.dz - s.z;
+        } else if (jump >= SNAP_DISTANCE) {
+          av.ex = av.ey = av.ez = 0;
+        }
+        const bleed = Math.exp(-dt * 14);
+        av.ex *= bleed; av.ey *= bleed; av.ez *= bleed;
+        av.dx = s.x + av.ex; av.dy = s.y + av.ey; av.dz = s.z + av.ez;
+        av.dyaw = s.yaw; av.dpitch = s.pitch;
+      } else {
+        // No history yet (a join whose first snapshot hasn't landed): ease
+        // toward the raw target rather than popping.
+        av.dx += (r.tx - av.dx) * fallback;
+        av.dy += (r.ty - av.dy) * fallback;
+        av.dz += (r.tz - av.dz) * fallback;
+        av.dyaw += wrap(r.tyaw - av.dyaw) * fallback;
+        av.dpitch += (r.tpitch - av.dpitch) * fallback;
+      }
+      av.group.position.set(av.dx, av.dy, av.dz);
+      av.group.rotation.y = av.dyaw;
+      av.group.visible = !r.dead;
+
+      this.syncEquip(av, r); // held item + worn armor follow the synced state
+      if (av.hurtT > 0) {
+        // A heavier hit holds the tint longer, so sustained fire on one target
+        // keeps them visibly lit instead of flickering back to normal.
+        av.hurtT = Math.max(0, av.hurtT - dt / (0.12 + av.hurtPeak * 0.16));
+        const tint = av.hurtT * av.hurtPeak;
+        for (const mat of av.body.materials) {
+          // The materials are pure white multipliers at rest (the avatar's real
+          // colours live in vertex colours), so pulling green/blue down is a
+          // clean red tint that survives every cosmetic palette.
+          mat.color.setRGB(1, 1 - tint * 0.78, 1 - tint * 0.8);
+        }
+        if (av.hurtT <= 0) av.hurtPeak = 0;
+      }
+      if (av.flash) {
+        // ~70ms burn-down: long enough to catch out of the corner of an eye,
+        // short enough that automatic fire strobes rather than glows.
+        av.flashT = Math.max(0, av.flashT - dt / 0.07);
+        av.flash.visible = av.flashT > 0;
+        if (av.flashT > 0) av.flash.scale.setScalar(0.6 + av.flashT * 0.8);
+      }
+      if ((r.swing | 0) !== av.lastSwing) {
+        av.lastSwing = r.swing | 0;
+        av.swingT = 0;
+      }
+      if (av.swingT < 1) av.swingT = Math.min(1, av.swingT + dt / 0.25);
+      const attackSwing = av.swingT < 1 ? Math.sin(av.swingT * Math.PI) : 0;
+      const gunHeld = isGunItem(av.heldId);
+      // Throwables sit in one fist; only the big gadgets take both hands.
+      const gadgetHeld = isModeledGadget(av.heldId) && !isOneHandModel(av.heldId);
+      av.aimT += ((gunHeld && r.aiming ? 1 : 0) - av.aimT) * Math.min(1, dt * 12);
+      av.reloadT = r.reloading ? (av.reloadT + dt / 1.1) % 1 : 0;
+      const sneakTarget = r.sneaking && !r.boating && !r.gliding ? 1 : 0;
+      av.sneakT += (sneakTarget - av.sneakT) * Math.min(1, 12 * dt);
+
+      // How fast they are actually travelling — drives the walk cycle, the
+      // sail flutter and how hard the wing banks.
+      const hspeed = Math.hypot(av.dx - av.lastX, av.dz - av.lastZ) / Math.max(dt, 1e-4);
+      // Signed speed along the heading, for the boat's rowing stroke.
+      const fwdSpeed = (-(av.dx - av.lastX) * Math.sin(av.dyaw) - (av.dz - av.lastZ) * Math.cos(av.dyaw)) /
+        Math.max(dt, 1e-4);
+      av.lastX = av.dx; av.lastZ = av.dz;
+      av.strideSpeed += (Math.min(hspeed, 9) - av.strideSpeed) * Math.min(1, dt * 9);
+
+      // Glider: ease the deploy (the wings unfurl, they do not blink open) and
+      // bank into turns off the yaw rate — a turning aircraft rolls.
+      av.glideT += ((r.gliding ? 1 : 0) - av.glideT) *
+        Math.min(1, dt * (r.gliding ? 6 : 9));
+      const turnRate = wrap(av.dyaw - av.prevYaw) / Math.max(dt, 1e-4);
+      av.prevYaw = av.dyaw;
+      const bankTarget = r.gliding
+        ? Math.max(-0.75, Math.min(0.75, turnRate * 0.42)) : 0;
+      av.bank += (bankTarget - av.bank) * Math.min(1, dt * 5);
+
+      // Health bar
+      const showHealth = id === this.hovered && av.group.visible;
+      av.healthSprite.visible = showHealth;
+      if (showHealth && av.lastHealth !== r.health) {
+        drawHealthBar(av.healthCanvas, Math.min(1, r.health / Math.max(1, this.maxHealth)));
+        av.healthTex.needsUpdate = true;
+        av.lastHealth = r.health;
+      }
+
+      // ── Pose / animation ──── parts = [leftLeg, rightLeg, leftArm, rightArm] ─
+      releaseGunHold(av.body);
+      // A slung gun while seated or hanging under a wing: out of the hands.
+      if (gunHeld && av.heldMesh) av.heldMesh.visible = !(r.boating || r.seated || av.glideT > 0.01);
+      const wasBoating = av.boat.group.visible;
+      av.boat.group.visible = r.boating && av.group.visible;
+      if (r.boating) {
+        if (!wasBoating) av.boat.prevYaw = av.dyaw;
+        updateBoatRig(av.boat, dt, av.dx, av.dy, av.dz, av.dyaw, fwdSpeed);
+      }
+      if (av.tagTilted && av.glideT <= 0.01) {
+        // Back on our feet: undo the flight anchoring.
+        av.tagTilted = false;
+        av.group.rotation.z = 0;
+        av.sprite.position.y = 2.34;
+        av.sprite.position.x = 0; av.sprite.position.z = 0;
+        av.healthSprite.position.y = 2.62;
+        av.healthSprite.position.x = 0; av.healthSprite.position.z = 0;
+      }
+      if (r.boating || r.seated) {
+        // Seated: legs stretched forward, arms out to the controls. A vehicle
+        // seat additionally DROPS the whole body by a thigh's length, because
+        // the reported position is the seat pan and a body drawn standing on it
+        // puts the rider's head straight through the cabin roof.
+        applyAvatarSneak(av.body, 0);
+        av.group.rotation.x = 0;
+        av.head.rotation.x = 0;
+        if (r.seated) av.group.position.y = av.dy - SEAT_SINK;
+        // In a boat: sit ON the thwart, ride its bob and pull the oars.
+        if (r.boating) av.group.position.y = av.dy - BOAT_SIT_SINK + av.boat.bobY;
+        const armX = r.seated ? 0.95 : boatArmPose(av.boat);
+        av.parts[0].rotation.x = 1.35;
+        av.parts[1].rotation.x = 1.35;
+        av.parts[2].rotation.x = armX;
+        av.parts[3].rotation.x = armX;
+        av.parts[2].rotation.z = r.boating ? 0.12 : 0; av.parts[3].rotation.z = r.boating ? -0.12 : 0;
+      } else if (av.glideT > 0.01) {
+        // Hanging under the wing: prone along the flight path, hands on the
+        // control bar, banked into the turn.
+        applyAvatarSneak(av.body, 0);
+        av.walkPhase += dt * 2.2; // doubles as the flutter/scissor clock
+        const pose = glidePose(av.dpitch, av.bank, av.walkPhase, av.glideT);
+        av.group.rotation.x = pose.tilt;
+        av.group.rotation.z = pose.roll;
+        anchorTiltedBody(av.group, av.dx, av.dy, av.dz);
+        av.parts[0].rotation.x = pose.legs[0];
+        av.parts[1].rotation.x = pose.legs[1];
+        av.parts[2].rotation.x = pose.arms[0];
+        av.parts[3].rotation.x = pose.arms[1];
+        av.parts[2].rotation.z = -pose.armRoll;
+        av.parts[3].rotation.z = pose.armRoll;
+        av.head.rotation.x = pose.head;
+        // Name tag and health bar belong overhead, not slung out behind.
+        placeOverhead(av.group, av.sprite, 2.34);
+        placeOverhead(av.group, av.healthSprite, 2.62);
+        av.tagTilted = true;
+      } else {
+        applyAvatarSneak(av.body, av.sneakT);
+        av.group.rotation.x = 0;
+        av.head.rotation.x = THREE.MathUtils.clamp(av.dpitch, -1.15, 1.15) + av.sneakT * 0.12;
+
+        // Walk/idle animation based on horizontal movement speed.
+        av.walkPhase += Math.min(av.strideSpeed, 7) * dt * 2.4;
+
+        const pose = stridePose(
+          av.walkPhase, av.strideSpeed, av.sneakT, av.heldId > 0, attackSwing);
+        av.parts[0].rotation.x = pose.legs[0];
+        av.parts[1].rotation.x = pose.legs[1];
+        av.parts[2].rotation.x = pose.arms[0];
+        av.parts[2].rotation.z = 0;
+        av.parts[3].rotation.x = pose.arms[1];
+        av.parts[3].rotation.z = pose.rightArmRoll;
+        if (gunHeld && av.heldMesh) {
+          const reloadDip = r.reloading ? Math.sin(av.reloadT * Math.PI) : 0;
+          poseGunHold(av.body, av.heldMesh, {
+            pitch: av.dpitch, aim: av.aimT, reload: reloadDip, kick: attackSwing,
+          });
+        } else if (gadgetHeld) {
+          av.parts[2].rotation.x = 0.45 + attackSwing * 0.18;
+          av.parts[3].rotation.x = 0.62 + attackSwing * 0.48;
+          av.parts[2].rotation.z = -0.18;
+          av.parts[3].rotation.z = 0.08;
+        }
+      }
+
+      // ── The wing ───────────────────────────────────────────────────────
+      // Placed in world, not parented to the pilot: it holds the flight-path
+      // attitude while the body hangs (and pitches) underneath it.
+      poseGliderRig(av.rig, {
+        deploy: av.glideT, bank: av.bank, time: av.walkPhase,
+        speed01: Math.min(1, hspeed / 26),
+      });
+      if (av.rig.group.visible) {
+        av.rig.group.visible = av.group.visible;
+        av.rig.group.position.set(av.dx, av.dy + RIG_HARNESS_Y, av.dz);
+        av.rig.group.rotation.set(
+          THREE.MathUtils.clamp(av.dpitch, -1.2, 1.2) * 0.8 + 0.06,
+          av.dyaw, av.bank);
+      }
+      // You cannot wear the wing you are hanging from: fold the back-pack away
+      // once the rig is open.
+      const packOut = av.glideT > 0.35;
+      for (const m of av.armorMeshes) {
+        if (m.userData.gliderPack) m.visible = !packOut;
+      }
+    }
+  }
+
+  /** Id of a living avatar whose body contains the point, else -1. */
+  avatarAtPoint(p: THREE.Vector3): number {
+    for (const [id, av] of this.avatars) {
+      const r = this.net.remotes.get(id);
+      if (!r || r.dead) continue;
+      if (p.x >= av.dx - 0.35 && p.x <= av.dx + 0.35 &&
+          p.y >= av.dy         && p.y <= av.dy + 2.0 &&
+          p.z >= av.dz - 0.35 && p.z <= av.dz + 0.35) return id;
+    }
+    return -1;
+  }
+
+  /** Nearest living avatar crossed by the segment `from`->`to`, else -1.
+   *
+   *  A projectile advances in fixed sub-steps and used to test only the point
+   *  it landed on. A body is 0.7 blocks wide, so a round clipping a shoulder
+   *  could step straight over it and fly on — the shot that visibly went
+   *  through someone and did nothing. Sweeping the segment cannot miss. */
+  avatarAtSegment(from: THREE.Vector3, to: THREE.Vector3): number {
+    SEG_DIR.subVectors(to, from);
+    const length = SEG_DIR.length();
+    if (length < 1e-9) return this.avatarAtPoint(to);
+    SEG_DIR.multiplyScalar(1 / length);
+    let best = -1, bestT = length;
+    for (const [id, av] of this.avatars) {
+      const r = this.net.remotes.get(id);
+      if (!r || r.dead) continue;
+      SEG_MIN.set(av.dx - 0.35, av.dy, av.dz - 0.35);
+      SEG_MAX.set(av.dx + 0.35, av.dy + 2.0, av.dz + 0.35);
+      const tHit = rayBox(from, SEG_DIR, SEG_MIN, SEG_MAX);
+      if (tHit !== null && tHit <= bestT) { bestT = tHit; best = id; }
+    }
+    return best;
+  }
+
+  /** Nearest living avatar hit by the ray within maxDist, else -1. */
+  rayHit(origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number): number {
+    let best = -1, bestT = maxDist;
+    for (const [id, av] of this.avatars) {
+      const r = this.net.remotes.get(id);
+      if (!r || r.dead) continue;
+      const min = new THREE.Vector3(av.dx - 0.35, av.dy,        av.dz - 0.35);
+      const max = new THREE.Vector3(av.dx + 0.35, av.dy + 2.0, av.dz + 0.35);
+      const tHit = rayBox(origin, dir, min, max);
+      if (tHit !== null && tHit < bestT) { bestT = tHit; best = id; }
+    }
+    return best;
+  }
+
+  /** Force one avatar to rebuild (e.g. spy disguise or cosmetics changed). */
+  invalidate(id: number): void {
+    const av = this.avatars.get(id);
+    if (av) { this.dispose(av); this.avatars.delete(id); }
+  }
+
+  private dispose(av: Avatar): void {
+    this.scene.remove(av.group);
+    // The held item's geometry is the shared itemGeometry cache — detach it
+    // BEFORE the body traverse below would dispose it for everyone.
+    if (av.heldMesh) { av.heldMesh.parent?.remove(av.heldMesh); av.heldMesh = null; }
+    disposeGliderRig(av.rig); // scene-level: it does not ride the body's traverse
+    removeBoatRig(av.boat); // scene-level, shared geometry: detach only
+    disposeAvatarBody(av.body);
+    av.nameTex.dispose();
+    (av.sprite.material as THREE.SpriteMaterial).dispose();
+    av.healthTex.dispose();
+    (av.healthSprite.material as THREE.SpriteMaterial).dispose();
+  }
+}
+
+// ─── utility ──────────────────────────────────────────────────────────────
+
+function wrap(a: number): number {
+  while (a >  Math.PI) a -= Math.PI * 2;
+  while (a < -Math.PI) a += Math.PI * 2;
+  return a;
+}
+
+// Scratch vectors for avatarAtSegment — it runs once per projectile sub-step.
+const SEG_DIR = new THREE.Vector3();
+const SEG_MIN = new THREE.Vector3();
+const SEG_MAX = new THREE.Vector3();
+
+function rayBox(
+  origin: THREE.Vector3, dir: THREE.Vector3,
+  min: THREE.Vector3,   max: THREE.Vector3
+): number | null {
+  let tmin = 0, tmax = Infinity;
+  for (const k of ['x', 'y', 'z'] as const) {
+    const d = dir[k];
+    if (Math.abs(d) < 1e-9) {
+      if (origin[k] < min[k] || origin[k] > max[k]) return null;
+      continue;
+    }
+    let t1 = (min[k] - origin[k]) / d, t2 = (max[k] - origin[k]) / d;
+    if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+    tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2);
+    if (tmin > tmax) return null;
+  }
+  return tmin;
+}
