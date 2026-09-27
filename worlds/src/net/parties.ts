@@ -29,9 +29,7 @@ export class Parties {
   constructor(private readonly rng: () => number) { }
 
   of(id: number): Party | undefined { return this.byMember.get(id); }
-  byCodeOf(code: string): Party | undefined { return this.byCode.get(normalizePartyCode(code)); }
   get size(): number { return this.byCode.size; }
-  codes(): IterableIterator<string> { return this.byCode.keys(); }
 
   /** Is this code live or cooling down? */
   codeTaken(code: string, now: number): boolean {

@@ -289,8 +289,6 @@ export class PartyUI {
     this.banner.hidden = false;
     this.bannerUntil = now + 6500;
   }
-  hideCard(): void { this.card.hidden = true; }
-  hideCall(): void { this.clock.hidden = true; }
   /** The big centre count. Driven off the server clock, so both players see
    *  the same number at the same moment, and the GO lands on the hatch drop. */
   private updateCount(s: PartyLobbySnapshot, serverNow: number): void {
@@ -378,10 +376,4 @@ function parkourStanding(p: PartyParticipant, mode?: string): string {
   if (p.outAt !== undefined) return 'out';
   if (mode === 'collapse') return `${p.lives} ${p.lives === 1 ? 'life' : 'lives'}`;
   return `${p.falls} falls`;
-}
-export function partyResultCopy(winner: string | null, reason: string): { title: string; sub: string } {
-  return {
-    title: winner ? `${winner} WINS` : 'DRAW',
-    sub: reason === 'forfeit' ? 'Opponent left' : reason === 'cancelled' ? 'Arena loading timed out' : 'Match complete',
-  };
 }

@@ -151,10 +151,6 @@ export class WorldBlocks {
   constructor(readonly gen: WorldGenerator) { }
 
   static key(x: number, y: number, z: number): number { return ((y + 64) * 4096 + (z + 2048)) * 4096 + (x + 2048); }
-  private static cell(k: number): { x: number; y: number; z: number } {
-    const x = k % 4096, rest = (k - x) / 4096, z = rest % 4096;
-    return { x: x - 2048, y: (rest - z) / 4096 - 64, z: z - 2048 };
-  }
 
   getBlock(x: number, y: number, z: number): number {
     const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
@@ -181,16 +177,6 @@ export class WorldBlocks {
   isEdited(x: number, y: number, z: number): boolean { return this.edits.has(WorldBlocks.key(x, y, z)); }
   /** The player-placed block at a cell, if any (undefined = authored). */
   editAt(x: number, y: number, z: number): number | undefined { return this.edits.get(WorldBlocks.key(x, y, z)); }
-  /** Wipe every edit, returning the cells that changed back. */
-  reset(): { x: number; y: number; z: number; block: number }[] {
-    const out: { x: number; y: number; z: number; block: number }[] = [];
-    for (const k of this.edits.keys()) {
-      const { x, y, z } = WorldBlocks.cell(k);
-      out.push({ x, y, z, block: this.gen.blockAt(x, y, z) });
-    }
-    this.edits.clear();
-    return out;
-  }
   /** Adapter for code written against the client World's read API (the bots'
    *  Player physics and planners). Every chunk "is loaded". */
   asWorld(): { isLoaded: () => boolean; getBlock: (x: number, y: number, z: number) => number } {

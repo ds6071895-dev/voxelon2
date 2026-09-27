@@ -315,8 +315,4 @@ export class SunShadow {
     this.scene.overrideMaterial = prevOverride;
     this.scene.fog = prevFog;
   }
-
-  dispose(): void {
-    this.teardown();
-  }
 }

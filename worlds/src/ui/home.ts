@@ -61,7 +61,6 @@ export class HomeScreen {
 
   show(): void { this.root.hidden = false; this.render(); }
   hide(): void { this.root.hidden = true; }
-  get visible(): boolean { return !this.root.hidden; }
 
   setConnected(connected: boolean, message = ''): void {
     this.connected = connected;

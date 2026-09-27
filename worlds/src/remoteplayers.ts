@@ -16,7 +16,7 @@ import * as THREE from 'three';
 import { SNAP_DISTANCE, netNow } from './interp';
 import { AvatarSurface, avatarTexture } from './avatartex';
 import type { NetClient, Remote } from './net/client';
-import { itemGeometry } from './itementity';
+import { itemGeometry } from './item_geometry';
 import { ITEMS, Item, ARMOR_SLOT_INDEX } from './items';
 import type { Atlas } from './textures';
 import { createGunModel, isGunItem, poseGunModel } from './gunmodels';
@@ -35,11 +35,6 @@ import {
 // Per-face shading (right/left/top/bottom/front/back) — mimics Minecraft's
 // directional lighting so the model reads as 3D even without real lights.
 const FACE_SHADE = [0.75, 0.6, 1.0, 0.45, 0.85, 0.7];
-
-/** Shared skin texture, used by the avatar and the first-person hand. */
-export function avatarSurfaceTexture(): THREE.Texture | null {
-  return avatarTexture('skin');
-}
 
 /** The skin tone a given player renders with — cosmetics-aware, falling back
  *  to the seed-derived default. Shared so the local first-person hand matches

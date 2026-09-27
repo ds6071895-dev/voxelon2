@@ -560,20 +560,6 @@ function parkourStamp(seed: number): VenueStamp {
   parkourStampCache.set(seed, s);
   return s;
 }
-
-// ── World queries ──────────────────────────────────────────────────────────
-
-/** The authored block of `game`'s venue at a world cell, or Air. Every venue
- *  sits at its own world's origin, so world and venue coordinates coincide. */
-export function partyVenueBlockAt(game: PartyGameId, seed: number, x: number, y: number, z: number): number {
-  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return Block.Air;
-  const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
-  if (by < PARTY_STAMP_MIN_Y || by > PARTY_STAMP_MAX_Y) return Block.Air;
-  const def = partyGame(game);
-  if (bx < 0 || bx >= def.sizeX || bz < 0 || bz >= def.sizeZ) return Block.Air;
-  const stamp = game === 'bridge' ? bridgeStamp() : parkourStamp(seed);
-  return stamp.get(bx, by, bz);
-}
 /** `partyVenueBlockAt` bound to one venue: the stamp is resolved once, so a
  *  world's generator never goes back through the shared course cache. */
 export function partyVenueLookup(game: PartyGameId, seed: number): (x: number, y: number, z: number) => number {
@@ -1144,19 +1130,13 @@ export class PartyGamesEngine {
   }
   snapshots(now: number): PartyLobbySnapshot[] { return [...this.lobbies.values()].map((l) => this.snapshotLobby(l, now)); }
   phaseFor(id: number): PartyPhase | null { return this.lobbyByPlayer.get(id)?.phase ?? null; }
-  arenaFor(id: number): PartyArenaBounds | null { return this.lobbyByPlayer.get(id)?.arena ?? null; }
   subFor(id: number): PartySubBounds | null {
     const l = this.lobbyByPlayer.get(id);
     return l?.arena && l.round ? partySubBounds(l.mode, l.arena.seed) : null;
   }
   roundFor(id: number): PartyRoundState | null { return this.lobbyByPlayer.get(id)?.round ?? null; }
   participantFor(id: number): PartyParticipant | null { return this.lobbyByPlayer.get(id)?.participants.get(id) ?? null; }
-  tokenFor(id: number): string | null { return this.lobbyByPlayer.get(id)?.token ?? null; }
   membersOf(id: number): number[] {
     return [...(this.lobbyByPlayer.get(id)?.participants.values() ?? [])].filter((p) => p.connected).map((p) => p.id);
-  }
-  sameMatch(a: number, b: number): boolean {
-    const l = this.lobbyByPlayer.get(a);
-    return !!l && l === this.lobbyByPlayer.get(b) && l.phase === 'running';
   }
 }

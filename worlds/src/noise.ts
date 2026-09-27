@@ -73,36 +73,6 @@ export class Noise2D {
   }
 }
 
-export class Noise3D {
-  private perm: Uint8Array;
-  constructor(seed: number) {
-    const rng = mulberry32(seed);
-    const p = new Uint8Array(256);
-    for (let i = 0; i < 256; i++) p[i] = i;
-    for (let i = 255; i > 0; i--) {
-      const j = Math.floor(rng() * (i + 1));
-      [p[i], p[j]] = [p[j], p[i]];
-    }
-    this.perm = new Uint8Array(512);
-    for (let i = 0; i < 512; i++) this.perm[i] = p[i & 255];
-  }
-
-  /** Value noise in [-1, 1] (cheap, good enough for caves). */
-  noise(x: number, y: number, z: number): number {
-    const X = Math.floor(x), Y = Math.floor(y), Z = Math.floor(z);
-    const xf = x - X, yf = y - Y, zf = z - Z;
-    const u = fade(xf), v = fade(yf), w = fade(zf);
-    const p = this.perm;
-    const val = (i: number, j: number, k: number) =>
-      p[(p[(p[i & 255] + (j & 255)) & 255] + (k & 255)) & 255] / 127.5 - 1;
-    const x00 = lerp(val(X, Y, Z), val(X + 1, Y, Z), u);
-    const x10 = lerp(val(X, Y + 1, Z), val(X + 1, Y + 1, Z), u);
-    const x01 = lerp(val(X, Y, Z + 1), val(X + 1, Y, Z + 1), u);
-    const x11 = lerp(val(X, Y + 1, Z + 1), val(X + 1, Y + 1, Z + 1), u);
-    return lerp(lerp(x00, x10, v), lerp(x01, x11, v), w);
-  }
-}
-
 /** Tileable 2D value noise on a wrapped lattice (for the cloud texture). */
 export function wrappedValueNoise(
   seed: number, x: number, y: number, period: number

@@ -94,9 +94,3 @@ export function equipCape(w: Wardrobe, id: string): Wardrobe {
   if (!canEquip(w, id)) return w;
   return { owned: [...w.owned], equipped: id };
 }
-
-/** Grant a cape (the seam the future drop/reward system writes through). */
-export function grantCape(w: Wardrobe, id: string): Wardrobe {
-  if (!capeById(id) || w.owned.includes(id)) return w;
-  return { owned: [...w.owned, id], equipped: w.equipped };
-}

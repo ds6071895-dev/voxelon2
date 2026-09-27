@@ -624,61 +624,10 @@ function woodSet(
   }
   return out;
 }
-
-/** Stairs base id for any stairs variant (or -1). Stairs occupy 4 consecutive
- *  ids per wood: base+0=N, +1=E, +2=S, +3=W. */
-export function stairsBaseOf(id: number): number {
-  for (const b of [Block.OakStairsN, Block.BirchStairsN, Block.SpruceStairsN]) {
-    if (id >= b && id <= b + 3) return b;
-  }
-  return -1;
-}
-
-/** Orient a stairs base id to face the player's cardinal look direction. */
-export function orientStairsForYaw(base: number, yaw: number): number {
-  const dx = -Math.sin(yaw), dz = -Math.cos(yaw);
-  const f = Math.abs(dx) > Math.abs(dz) ? (dx > 0 ? 1 : 3) : (dz > 0 ? 2 : 0);
-  return base + f;
-}
-
-/** True for any slab (bottom or top variant). */
-export function isSlab(id: number): boolean {
-  return BLOCKS[id]?.shape === 'slab';
-}
 /** True only for the upper-half (top) slab variants. */
 export function isTopSlab(id: number): boolean {
   return id === Block.OakSlabTop || id === Block.BirchSlabTop ||
     id === Block.SpruceSlabTop;
-}
-/** The bottom-slab (item) id for any slab variant, or -1 if not a slab. */
-export function slabBottomId(id: number): number {
-  switch (id) {
-    case Block.OakSlab: case Block.OakSlabTop: return Block.OakSlab;
-    case Block.BirchSlab: case Block.BirchSlabTop: return Block.BirchSlab;
-    case Block.SpruceSlab: case Block.SpruceSlabTop: return Block.SpruceSlab;
-    default: return -1;
-  }
-}
-/** The top-slab id paired with a bottom-slab id, or -1 if not a bottom slab. */
-export function slabTopId(id: number): number {
-  switch (id) {
-    case Block.OakSlab: return Block.OakSlabTop;
-    case Block.BirchSlab: return Block.BirchSlabTop;
-    case Block.SpruceSlab: return Block.SpruceSlabTop;
-    default: return -1;
-  }
-}
-
-/** Vanilla-like slab placement: pick the bottom or top variant of `bottomId`
- *  from the clicked face normal `ny` and the fractional hit height in the cell
- *  (`hitFracY` in [0,1)). Top face -> bottom slab; bottom face -> top slab;
- *  side face -> bottom for the lower half, top for the upper half. */
-export function slabPlacement(bottomId: number, ny: number, hitFracY: number): number {
-  // Single-variant slab-shaped blocks (traps) always sit in the lower half.
-  const top = slabTopId(bottomId);
-  if (top < 0) return bottomId;
-  const useTop = ny > 0 ? false : ny < 0 ? true : hitFracY >= 0.5;
-  return useTop ? top : bottomId;
 }
 
 function plant(name: string, tile: Tile, tint: TintKind, replaceable: boolean): BlockInfo {
@@ -714,17 +663,6 @@ export function torchSupport(id: number): [number, number, number] | null {
     case Block.TorchNZ: return [0, 0, 1];
     default: return null;
   }
-}
-
-/** Oriented torch block for a placement face normal (null = can't attach). */
-export function torchForFace(nx: number, ny: number, nz: number): Block | null {
-  if (ny > 0) return Block.Torch;
-  if (ny < 0) return null;
-  if (nx > 0) return Block.TorchPX;
-  if (nx < 0) return Block.TorchNX;
-  if (nz > 0) return Block.TorchPZ;
-  if (nz < 0) return Block.TorchNZ;
-  return null;
 }
 
 export const BLOCKS: Record<number, BlockInfo> = {
@@ -1212,32 +1150,8 @@ BLOCKS[Block.ReinforcedStone].requiresTool = true;
 BLOCKS[Block.ReinforcedStone].minTier = 2;
 BLOCKS[Block.Barricade].tool = 'axe';
 
-/**
- * Block ids that once existed and no longer do — the retired strategic-missile
- * hardware. A world saved while a silo or battery stood in it still names these
- * ids, so every load path maps them to Air rather than handing the mesher a
- * block with no definition.
- */
-const RETIRED_BLOCKS = new Set<number>([213, 214, 215]);
-
-/** A saved block id, migrated: retired hardware becomes Air, everything else
- *  passes through unchanged. */
-export function migrateBlockId(id: number): number {
-  return RETIRED_BLOCKS.has(id) ? Block.Air : id;
-}
-
 export function isSolid(id: number): boolean {
   return id !== Block.Air && (BLOCKS[id]?.solid ?? false);
-}
-export function isVaultMasonry(id: number): boolean {
-  return id === Block.VaultBrick || id === Block.CarvedVaultBrick ||
-    id === Block.MossyVaultBrick || id === Block.EmberBrick ||
-    id === Block.PrismBrick || id === Block.GildedVaultBrick ||
-    id === Block.LuminousLimestone || id === Block.PearlTile ||
-    id === Block.RuneGlass || id === Block.IvoryColumn ||
-    id === Block.SpectralMarble || id === Block.JadeMosaic ||
-    id === Block.FurnaceCeramic || id === Block.OpalBrick ||
-    id === Block.ClockworkGrate || id === Block.VaultMosaic;
 }
 export function isOpaque(id: number): boolean {
   return id !== Block.Air && (BLOCKS[id]?.opaque ?? false);

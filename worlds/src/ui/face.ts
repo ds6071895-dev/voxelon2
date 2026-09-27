@@ -41,9 +41,3 @@ export function drawFace(canvas: HTMLCanvasElement, cosmetics: Cosmetics | undef
     g.fillRect(0, 0, 8, 2);
   }
 }
-
-export function faceCanvas(cosmetics: Cosmetics | undefined, seed: number): HTMLCanvasElement {
-  const canvas = document.createElement('canvas');
-  drawFace(canvas, cosmetics, seed);
-  return canvas;
-}

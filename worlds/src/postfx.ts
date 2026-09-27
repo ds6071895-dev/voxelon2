@@ -373,12 +373,6 @@ export class PostFX {
     }
   }
 
-  /** Back-compat for callers that only know the night amount. */
-  setNight(night: number): void {
-    this.night = Number.isFinite(night) ? Math.max(0, Math.min(1, night)) : 0;
-    this.pushUniforms();
-  }
-
   /** Match a new viewport or pixel-ratio cap. Safe to call when off. The
    *  scene buffer renders at the tier's scale of the canvas; the final pass
    *  stretches it back up (bilinear), which on a lower tier reads as a touch
@@ -389,8 +383,6 @@ export class PostFX {
     this.composer.setPixelRatio(this.renderer.getPixelRatio() * TIER_SCALE[this.tier]);
     this.composer.setSize(width, height);
   }
-
-  get currentTier(): number { return this.tier; }
 
   /** Move to a cheaper (higher) or richer (lower) tier. MSAA is bound to the
    *  buffer, so a change of sample count rebuilds the stack — rare by design. */

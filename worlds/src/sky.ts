@@ -23,7 +23,6 @@ import * as THREE from 'three';
 import { mulberry32, wrappedValueNoise } from './noise';
 
 export const DAY_LENGTH = 1200; // seconds: vanilla 20-minute day
-export const WATER_FOG_COLOR = new THREE.Color(0x16335f);
 
 const CLOUD_Y = 192;
 const CLOUD_TEX = 64;     // texels per repeat

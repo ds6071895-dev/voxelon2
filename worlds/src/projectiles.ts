@@ -165,15 +165,4 @@ export class Projectiles {
     for (const p of this.list) this.scene.remove(p.mesh);
     this.list.length = 0;
   }
-
-  /** Free GPU buffers (shared geometry/material) on teardown. */
-  dispose(): void {
-    for (const p of this.list) this.scene.remove(p.mesh);
-    this.list.length = 0;
-    this.bulletGeo.dispose();
-    this.rocketGeo.dispose();
-    this.bulletMat.dispose();
-    this.ghostMat.dispose();
-    this.rocketMat.dispose();
-  }
 }

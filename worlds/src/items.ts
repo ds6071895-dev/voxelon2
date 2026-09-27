@@ -1,11 +1,8 @@
 // Item registry. Placeable blocks share their Block id; pure items start at
 // 100. Includes the vanilla drop table used when blocks break.
 
-import {
-  Block, BLOCKS, BlockInfo, isTopSlab, slabBottomId, stairsBaseOf, Tile, ToolKind,
-} from './blocks';
+import { Block, BLOCKS, BlockInfo, Tile, ToolKind } from './blocks';
 import { MinigameItemId } from './minigame_item_ids';
-import { isMinigameOnly } from './minigame_items';
 
 export const enum Item {
   // Blocks are items with id === Block id (wall torch variants are not items).
@@ -262,24 +259,6 @@ export interface ItemStack {
   rune?: number;
 }
 
-// Per-piece armor leveling: wearing a piece through hits levels it up, adding
-// a small defense bonus on top of its base points (client-trusted progression).
-export const ARMOR_MAX_LEVEL = 10;
-const ARMOR_XP_PER_LEVEL = 60;
-const ARMOR_POINTS_PER_LEVEL = 0.3;
-
-export function armorLevel(stack: ItemStack): number {
-  return Math.min(ARMOR_MAX_LEVEL, Math.floor(Math.max(0, stack.xp ?? 0) / ARMOR_XP_PER_LEVEL));
-}
-
-/** Effective defense points for a worn piece (base + level bonus). */
-export function armorPointsOf(stack: ItemStack): number {
-  if (ITEMS[stack.id]?.glider) return 0; // a glider sits in the chest slot but is not armor
-  const a = ITEMS[stack.id]?.armor;
-  if (!a) return 0;
-  return a.points + armorLevel(stack) * ARMOR_POINTS_PER_LEVEL;
-}
-
 function blockItem(block: Block): ItemInfo {
   return { name: BLOCKS[block].name, kind: 'block', block, maxStack: 64 };
 }
@@ -292,31 +271,6 @@ function gadgetItem(name: string, sprite: Tile, maxStack: number): ItemInfo {
 }
 function armorItem(name: string, sprite: Tile, armor: ArmorInfo): ItemInfo {
   return { name, kind: 'item', sprite, maxStack: 1, armor };
-}
-/**
- * How a trigger pull is validated when it hits a vault boss.
- *
- * A "shot" is not always one projectile: a shotgun volley is 7 pellets and a
- * burst rifle fires 3 rounds, and every projectile arrives as its own hit.
- * Validating one hit per gun cooldown therefore threw away 6 of 7 shotgun
- * pellets, leaving that gun doing a seventh of its damage to a boss. Budget the
- * cooldown across the whole volley instead and cap each hit at ONE projectile's
- * damage — the sustained ceiling is identical, but every projectile counts.
- *
- * Shared by the client and the server so their boss-hit validation can never
- * disagree (and so offline play matches online exactly).
- */
-export function gunVolley(gun: GunInfo): {
-  /** Damage ceiling for a single accepted hit. */
-  perHit: number;
-  /** Minimum spacing between two accepted hits. */
-  cadence: number;
-  /** Projectiles in one trigger pull. */
-  shots: number;
-} {
-  const shots = Math.max(1, Math.floor(gun.pellets ?? 1)) *
-    Math.max(1, Math.floor(gun.burst ?? 1));
-  return { perHit: gun.damage, cadence: Math.max(0.02, gun.cooldown / shots), shots };
 }
 
 function gunItem(name: string, sprite: Tile, gun: GunInfo): ItemInfo {
@@ -687,20 +641,6 @@ export const ITEMS: Record<number, ItemInfo> = {
 };
 
 /**
- * Every item the creative palette may show, ascending.
- *
- * This is the ONLY full walk of the registry on the client, so it is also the
- * only place a minigame-only id could reach a player's hands through the UI.
- * Pure and exported so the isolation smoke test can assert on it directly
- * rather than reaching into inventory_ui's DOM.
- */
-export function creativePaletteIds(): number[] {
-  return Object.keys(ITEMS).map(Number)
-    .filter((id) => ITEMS[id] && !isMinigameOnly(id))
-    .sort((a, b) => a - b);
-}
-
-/**
  * Vanilla mining: effective tools divide `hardness * 1.5` by their speed;
  * blocks that require a tool you can't harvest with take `hardness * 5`
  * (and drop nothing).
@@ -719,84 +659,4 @@ export function miningStats(
   const speed = effective && harvest ? tool!.speed : 1;
   const time = harvest ? (info.hardness * 1.5) / speed : info.hardness * 5;
   return { time, harvest };
-}
-
-/**
- * Vanilla drop table. `rng` in [0,1) drives probabilistic drops;
- * `harvested` is false when mined without the required tool (no drop).
- */
-export function dropFor(
-  block: number, rng: number, harvested = true
-): ItemStack | null {
-  // Arena blocks never enter the generic drop table, in either direction: a
-  // minigame block cannot legally occupy a world cell in the first place, and
-  // inside an arena the mode hands out its own materials (the Bedwars shop,
-  // the Party loadouts) through server-authoritative paths. Returning null
-  // here means no prediction path — client or server — can mint one.
-  if (isMinigameOnly(block)) return null;
-  if (!harvested && BLOCKS[block]?.requiresTool) return null;
-  switch (block) {
-    case Block.FurnaceLit:
-      return { id: Block.Furnace, count: 1 };
-    // Grass keeps its turf: breaking a grass block gives you the grass block
-    // back (not dirt), so you can re-lay a green surface anywhere.
-    case Block.Grass:
-      return { id: Block.Grass, count: 1 };
-    case Block.SnowyGrass:
-      return { id: Block.SnowyGrass, count: 1 };
-    case Block.Stone:
-      return { id: Block.Cobblestone, count: 1 };
-    case Block.Leaves:
-      // occasional sticks
-      if (rng < 0.025) return { id: Item.Stick, count: 1 };
-      return null;
-    case Block.BirchLeaves:
-    case Block.SpruceLeaves:
-    case Block.JungleLeaves:
-      if (rng < 0.02) return { id: Item.Stick, count: 1 };
-      return null;
-    case Block.CherryLeaves:
-      // Petals are pretty but yield little.
-      if (rng < 0.015) return { id: Item.Stick, count: 1 };
-      return null;
-    case Block.CrystalBlock:
-      return { id: Item.CrystalShard, count: 1 + (rng < 0.35 ? 1 : 0) };
-    case Block.Glass:
-    case Block.TallGrass:
-      return null; // vanilla: nothing without shears/silk touch
-    case Block.DeadBush:
-      return rng < 0.5 ? { id: Item.Stick, count: 1 } : null;
-    case Block.CoalOre:
-      return { id: Item.Coal, count: 1 };
-    case Block.RedstoneOre:
-      return { id: Item.Redstone, count: 4 + (rng < 0.5 ? 0 : 1) };
-    case Block.DiamondOre:
-      return { id: Item.Diamond, count: 1 };
-    case Block.Torch:
-    case Block.TorchPX:
-    case Block.TorchNX:
-    case Block.TorchPZ:
-    case Block.TorchNZ:
-      return { id: Block.Torch, count: 1 };
-    // Triggered trap states drop their base (item) variant.
-    case Block.LeverOn:
-      return { id: Block.Lever, count: 1 };
-    case Block.FallTrapOpen:
-      return { id: Block.FallTrap, count: 1 };
-    case Block.WallTrapUp:
-      return { id: Block.WallTrap, count: 1 };
-    case Block.Bedrock:
-    case Block.Water:
-    case Block.Air:
-      return null;
-    default: {
-      // Stairs drop the (N-facing) stairs item regardless of placed orientation.
-      const sb = stairsBaseOf(block);
-      if (sb >= 0) return { id: sb, count: 1 };
-      // Top slabs aren't a separate item: they drop the bottom slab (item form).
-      if (isTopSlab(block)) return { id: slabBottomId(block), count: 1 };
-      // Everything else drops itself if it is registered as an item.
-      return ITEMS[block] ? { id: block, count: 1 } : null;
-    }
-  }
 }

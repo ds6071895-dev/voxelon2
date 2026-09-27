@@ -23,7 +23,7 @@ import { Interaction } from './interact';
 import { Inventory } from './inventory';
 import { Item, ITEMS, type GunInfo, type ItemStack } from './items';
 import { iconSvg } from './emoji_icons';
-import { itemGeometry } from './itementity';
+import { itemGeometry } from './item_geometry';
 import { createGunModel, gunFeel, isGunItem, poseGunModel } from './gunmodels';
 import { createGadgetModel, isModeledGadget, isOneHandModel, poseGadgetModel } from './gadgetmodels';
 import { gadgetOf, GadgetCooldowns } from './gadgets';
@@ -199,7 +199,6 @@ held.onGunSound = (kind) => audio.gunAction(kind);
 const viewKickOut = { pitch: 0, yaw: 0, roll: 0 };
 const particles = new Particles(scene);
 const audio = new GameAudio();
-audio.setMusicVolume(accessibility.musicVolume);
 audio.setEffectsVolume(accessibility.effectsVolume);
 const net = new NetClient();
 const remotePlayers = new RemotePlayers(scene, net, atlas);
@@ -250,7 +249,6 @@ function applyGraphicsQuality(quality: GraphicsQuality): void {
 
 // ── Settings (pause menu) ──────────────────────────────────────────────────
 
-const musicVolumeInput = document.getElementById('music-volume') as HTMLInputElement;
 const effectsVolumeInput = document.getElementById('effects-volume') as HTMLInputElement;
 const cameraShakeInput = document.getElementById('camera-shake') as HTMLInputElement;
 const reducedMotionInput = document.getElementById('reduced-motion') as HTMLInputElement;
@@ -260,14 +258,12 @@ const lookSensValue = document.getElementById('look-sensitivity-value')!;
 const graphicsInput = document.getElementById('graphics-quality') as HTMLSelectElement;
 lookSensInput.value = String(accessibility.lookSensitivity);
 graphicsInput.value = accessibility.graphicsQuality;
-musicVolumeInput.value = String(accessibility.musicVolume);
 effectsVolumeInput.value = String(accessibility.effectsVolume);
 cameraShakeInput.value = String(accessibility.cameraShake);
 reducedMotionInput.checked = accessibility.reducedMotion;
 safeEffectsInput.checked = accessibility.photosensitivitySafe;
 let graphicsApplied = false;
 function saveAccessUi(): void {
-  accessibility.musicVolume = Number(musicVolumeInput.value);
   accessibility.effectsVolume = Number(effectsVolumeInput.value);
   accessibility.cameraShake = Number(cameraShakeInput.value);
   accessibility.reducedMotion = reducedMotionInput.checked;
@@ -282,17 +278,16 @@ function saveAccessUi(): void {
     applyGraphicsQuality(quality);
   }
   saveAccessibility(accessibility);
-  audio.setMusicVolume(accessibility.musicVolume);
   audio.setEffectsVolume(accessibility.effectsVolume);
   document.body.classList.toggle('reduced-motion', accessibility.reducedMotion);
   document.body.classList.toggle('photosensitivity-safe', accessibility.photosensitivitySafe);
   // Slider tracks fill up to the thumb (hud.css reads --fill).
-  for (const el of [lookSensInput, musicVolumeInput, effectsVolumeInput, cameraShakeInput]) {
+  for (const el of [lookSensInput, effectsVolumeInput, cameraShakeInput]) {
     const min = Number(el.min), max = Number(el.max);
     el.style.setProperty('--fill', `${((Number(el.value) - min) / (max - min)) * 100}%`);
   }
 }
-for (const el of [musicVolumeInput, effectsVolumeInput, cameraShakeInput, reducedMotionInput, safeEffectsInput, lookSensInput, graphicsInput]) {
+for (const el of [effectsVolumeInput, cameraShakeInput, reducedMotionInput, safeEffectsInput, lookSensInput, graphicsInput]) {
   el.addEventListener('input', saveAccessUi);
 }
 saveAccessUi();

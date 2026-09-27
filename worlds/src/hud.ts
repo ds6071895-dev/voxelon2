@@ -72,8 +72,6 @@ export class HUD {
   private readonly icons: HTMLCanvasElement[] = [];
   private readonly counts: HTMLSpanElement[] = [];
   private readonly cooldowns: HTMLDivElement[] = [];
-  /** Returns 0..1 of an item's cooldown remaining (1 = just used). */
-  cooldownOf?: (itemId: number) => number;
   private readonly debugEl: HTMLElement;
   private readonly nameEl: HTMLDivElement;
   private nameTimer: number | undefined;
@@ -131,16 +129,6 @@ export class HUD {
     const selectionChanged = this.inventory.selected !== this.lastSelected;
     this.refresh();
     if (selectionChanged) this.showName();
-  }
-
-  /** Refresh the per-slot cooldown sweep (call every frame; cheap). */
-  updateCooldowns(): void {
-    if (!this.cooldownOf) return;
-    for (let i = 0; i < HOTBAR_SIZE; i++) {
-      const stack = this.inventory.slots[i];
-      const frac = stack ? Math.max(0, Math.min(1, this.cooldownOf(stack.id))) : 0;
-      this.cooldowns[i].style.height = `${frac * 100}%`;
-    }
   }
 
   private refresh(): void {

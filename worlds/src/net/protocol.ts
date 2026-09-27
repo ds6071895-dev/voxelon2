@@ -26,7 +26,6 @@ export const PARTY_MAX = 4;        // most members one party can hold
 
 /** The three games on the title screen. */
 export type GameMode = 'duels' | 'bridge' | 'parkour';
-export const GAME_MODES: readonly GameMode[] = ['duels', 'bridge', 'parkour'];
 export function isGameMode(v: unknown): v is GameMode {
   return v === 'duels' || v === 'bridge' || v === 'parkour';
 }

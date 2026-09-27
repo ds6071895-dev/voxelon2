@@ -5,7 +5,7 @@
 // animation, choreographed reloads, muzzle flash, smoke and flying brass.
 
 import * as THREE from 'three';
-import { itemGeometry } from './itementity';
+import { itemGeometry } from './item_geometry';
 import { Item, ITEMS } from './items';
 import { avatarTexture } from './avatartex';
 import { skinColorFor } from './remoteplayers';
@@ -413,17 +413,6 @@ export class HeldItemView {
     }
   }
 
-  /** A full-charge axe release. Reuses the same `swingT` spring as `swing()`
-   *  — it is the ARC that differs, not the machinery — so a heavy hit reads as
-   *  a bigger, slower commitment without a second animation system. */
-  swingHeavy(): void {
-    if (this.swingT >= 1) {
-      this.swingT = 0;
-      this.heavySwing = true;
-      this.onSwing?.();
-    }
-  }
-
   /** 0 at rest, 1 at the middle of the current swing. */
   swingAmount(): number {
     if (this.swingT >= 1) return 0;
@@ -475,10 +464,6 @@ export class HeldItemView {
       this.kickVPitch += 3.2;
       this.kickVRoll += (Math.random() - 0.5) * 0.8;
     }
-  }
-
-  setGrappleReeling(active: boolean): void {
-    this.grappleReeling = active;
   }
 
   /** 0 at rest, 1 immediately after a shot; used by the local third-person body. */

@@ -66,9 +66,6 @@ function lerpAngle(a: number, b: number, k: number): number {
 export class TransformBuffer {
   private readonly samples: TransformSample[] = [];
 
-  /** Number of buffered samples (tests / diagnostics). */
-  get length(): number { return this.samples.length; }
-
   /** Local time of the newest sample, or -Infinity when empty. */
   get newest(): number {
     return this.samples.length ? this.samples[this.samples.length - 1].t : -Infinity;

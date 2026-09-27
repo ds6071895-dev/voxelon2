@@ -111,7 +111,6 @@ export const DUEL_ARENA_FLOOR_Y = 96;
 export const DUEL_WALL_ROWS = 11;
 /** The arena is open to the sky. The numeric ceiling is only the world limit. */
 export const DUEL_ARENA_HEIGHT = 256 - DUEL_ARENA_FLOOR_Y;
-export const DUEL_MIN_LIGHT = 12;
 export const DUEL_MAX_HEALTH = 40;
 export const DUEL_MAX_PILLAR_HEIGHT = 7;
 
@@ -229,9 +228,6 @@ export function duelTerrainElevation(lx: number, lz: number): number {
   if (x < 0 || x >= DUEL_ARENA_INTERIOR || z < 0 || z >= DUEL_ARENA_INTERIOR) return 0;
   return duelArenaMap().height[z * DUEL_ARENA_INTERIOR + x];
 }
-
-/** Tallest sculpted column in the arena, used to bound pathing/mesh scans. */
-export const DUEL_MAX_ELEVATION = 6;
 
 interface DuelPalette { top: number; body: number }
 
@@ -465,12 +461,6 @@ export function duelArenaSolidAt(x: number, y: number, z: number, arena: DuelAre
   return false;
 }
 
-/** Arena-only ambient floor. Fixture gradients can add to this in rendering,
- * but no walkable point can fall below the competitive visibility standard. */
-export function duelArenaLightAt(_x: number, _y: number, _z: number, _arena: DuelArenaBounds): number {
-  return DUEL_MIN_LIGHT;
-}
-
 export function hasArenaLineOfSight(
   a: DuelVec3, b: DuelVec3, arena: DuelArenaBounds,
   isSolidExtra?: (x: number, y: number, z: number) => boolean
@@ -701,28 +691,6 @@ export class Duels {
     if (p) p.shieldUntil = undefined;
   }
 
-  voteRematch(playerId: number, vote: boolean, now: number): DuelLobbySnapshot | null {
-    const lobby = this.lobbyByPlayer.get(playerId), p = lobby?.participants.get(playerId);
-    if (!lobby || !p || lobby.phase !== 'results') return null;
-    if (!vote) {
-      this.returnToLobby(lobby);
-      return this.snapshotLobby(lobby, now);
-    }
-    p.rematchVote = true;
-    const connected = [...lobby.participants.values()].filter((v) => v.connected);
-    if (connected.length >= DUEL_MIN_PLAYERS && connected.every((v) => v.rematchVote)) {
-      this.beginCountdown(lobby, now);
-    }
-    return this.snapshotLobby(lobby, now);
-  }
-
-  requestLobby(playerId: number, now: number): DuelLobbySnapshot | null {
-    const lobby = this.lobbyByPlayer.get(playerId);
-    if (!lobby || lobby.phase !== 'results') return null;
-    this.returnToLobby(lobby);
-    return this.snapshotLobby(lobby, now);
-  }
-
   tick(now: number): DuelLobbySnapshot[] {
     const changed: DuelLobbySnapshot[] = [];
     for (const lobby of this.lobbies.values()) {
@@ -779,13 +747,6 @@ export class Duels {
    * present in this representation. */
   snapshots(now: number): DuelLobbySnapshot[] {
     return [...this.lobbies.values()].map((lobby) => this.snapshotLobby(lobby, now));
-  }
-
-  tokenFor(playerId: number): string | null { return this.lobbyByPlayer.get(playerId)?.token ?? null; }
-  inviteInfo(token: string): { host: string; lobbyId: string } | null {
-    const lobby = this.lobbies.get(token);
-    const host = lobby?.participants.get(lobby.host);
-    return lobby && host ? { host: host.username, lobbyId: lobby.id } : null;
   }
   arenaFor(playerId: number): DuelArenaBounds | null { return this.lobbyByPlayer.get(playerId)?.arena ?? null; }
   phaseFor(playerId: number): DuelPhase | null { return this.lobbyByPlayer.get(playerId)?.phase ?? null; }

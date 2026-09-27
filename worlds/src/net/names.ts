@@ -27,7 +27,6 @@ export class NameRegistry {
 
   /** Is `name` currently held by anybody (session, bot or offer)? */
   inUse(name: string): boolean { return this.held.has(name.toLowerCase()); }
-  holderOf(name: string): string | undefined { return this.held.get(name.toLowerCase()); }
 
   /** Claim a specific name. Registered names may only be claimed through
    *  `claimAccount` (a successful sign-in). */
@@ -73,6 +72,4 @@ export class NameRegistry {
       if (this.claim(name, holder)) return name;
     }
   }
-
-  get size(): number { return this.held.size; }
 }

@@ -2,8 +2,6 @@
 // look sensitivity and comfort options. (Split out of VOXELON's vault
 // presentation module; Worlds keeps the same presets and the same panel.)
 
-import { DEFAULT_MUSIC_VOLUME } from './audio';
-
 /** Graphics presets. A browser voxel game runs on whatever hardware opens the
  *  tab, and render distance is by far the most expensive dial (chunk meshing +
  *  draw calls + fog depth), with device pixel ratio second. `antialias` is
@@ -62,11 +60,9 @@ export const MIN_LOOK_SENSITIVITY = 0.25;
 export const MAX_LOOK_SENSITIVITY = 3;
 
 export interface AccessibilitySettings {
-  musicVolume: number;
   effectsVolume: number;
   cameraShake: number;
   reducedMotion: boolean;
-  highContrastTelegraphs: boolean;
   photosensitivitySafe: boolean;
   /** Multiplier on raw mouse/touch look deltas. 1 = the historical feel. */
   lookSensitivity: number;
@@ -74,11 +70,9 @@ export interface AccessibilitySettings {
 }
 
 export const DEFAULT_ACCESSIBILITY: AccessibilitySettings = {
-  musicVolume: DEFAULT_MUSIC_VOLUME,
   effectsVolume: 0.8,
   cameraShake: 1,
   reducedMotion: false,
-  highContrastTelegraphs: false,
   photosensitivitySafe: false,
   lookSensitivity: 1,
   graphicsQuality: 'high',
@@ -89,11 +83,9 @@ export function sanitizeAccessibility(raw: unknown): AccessibilitySettings {
   const volume = (v: unknown, d: number): number =>
     typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : d;
   return {
-    musicVolume: volume(x.musicVolume, DEFAULT_ACCESSIBILITY.musicVolume),
     effectsVolume: volume(x.effectsVolume, DEFAULT_ACCESSIBILITY.effectsVolume),
     cameraShake: volume(x.cameraShake, DEFAULT_ACCESSIBILITY.cameraShake),
     reducedMotion: x.reducedMotion === true,
-    highContrastTelegraphs: x.highContrastTelegraphs === true,
     photosensitivitySafe: x.photosensitivitySafe === true,
     lookSensitivity: typeof x.lookSensitivity === 'number' && Number.isFinite(x.lookSensitivity)
       ? Math.max(MIN_LOOK_SENSITIVITY, Math.min(MAX_LOOK_SENSITIVITY, x.lookSensitivity))

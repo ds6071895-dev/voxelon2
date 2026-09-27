@@ -42,10 +42,6 @@ export class Particles {
     this.scene = scene;
   }
 
-  get count(): number {
-    return this.list.length;
-  }
-
   burst(
     x: number, y: number, z: number,
     count: number, color: number, speed: number, life = 0.6,
@@ -143,12 +139,6 @@ export class Particles {
   /** Gray puff when a mob dies. */
   poof(x: number, y: number, z: number): void {
     this.burst(x, y, z, 10, 0xdddddd, 2, 0.5);
-  }
-
-  /** Explosion: dark smoke + a few sparks. */
-  explosion(x: number, y: number, z: number): void {
-    this.burst(x, y, z, 26, 0x555555, 7, 1.0);
-    this.burst(x, y, z, 10, 0xffc864, 9, 0.4);
   }
 
   update(dt: number, camera: THREE.Camera): void {

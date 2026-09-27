@@ -248,10 +248,6 @@ export class GameServer {
     this.pg = new PartyGamesEngine(opts.token ?? secureDuelToken);
     this.parties = new Parties(this.rng);
   }
-
-  // ── Introspection (tests, console) ──────────────────────────────────────
-
-  get time(): number { return this.worldTime; }
   worldCount(): number { return this.worlds.size; }
   playerCount(): number { return [...this.players.values()].filter((p) => !p.bot).length; }
   botCount(): number { return this.duelBots.size + this.partyBots.size; }
@@ -262,7 +258,6 @@ export class GameServer {
   }
   worldMembers(worldId: number): number[] { return [...(this.worlds.get(worldId)?.members ?? [])]; }
   worldEditCount(worldId: number): number { return this.worlds.get(worldId)?.blocks.edits.size ?? -1; }
-  queueOf(id: number): GameMode | null { return this.players.get(id)?.queue ?? null; }
 
   /**
    * Test and load-test hook: a match between practice opponents only, each
@@ -320,7 +315,6 @@ export class GameServer {
       participants: snap.participants.map((p) => ({ id: p.id, score: p.score, progress: p.progress, kills: p.kills,
         falls: p.falls, finishedAt: p.finishedAt, team: p.team })) };
   }
-  isBot(id: number): boolean { return this.players.get(id)?.bot === true; }
   healthOf(id: number): number | null { return this.players.get(id)?.health ?? null; }
   positionOf(id: number): { x: number; y: number; z: number } | null {
     const p = this.players.get(id);

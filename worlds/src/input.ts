@@ -264,10 +264,6 @@ export class Input {
     try { document.exitPointerLock(); } catch { /* already released */ }
   }
 
-  down(code: string): boolean {
-    return this.keys.has(code);
-  }
-
   get forward(): boolean { return this.heldBind('forward') || this.tForward; }
   get back(): boolean { return this.heldBind('back') || this.tBack; }
   get left(): boolean { return this.heldBind('left') || this.tLeft; }

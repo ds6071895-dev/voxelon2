@@ -5,7 +5,7 @@
 // materials, shaders and atlas.
 
 import * as THREE from 'three';
-import { Block, BLOCKS, isOpaque, torchSupport } from './blocks';
+import { Block, BLOCKS, torchSupport } from './blocks';
 import { Chunk, CHUNK_X, CHUNK_Z } from './chunk';
 import { computeLight } from './light';
 import { buildChunkGeometry, BlockSampler } from './mesher';
@@ -534,8 +534,6 @@ export class World {
     params: { value: new THREE.Vector3(0, 1 / 2048, 0) },
     origin: { value: new THREE.Vector3() },
   };
-  /** Probability a broken block drops items (explosions lower it). */
-  dropChance = 1;
   /** When true, setBlock skips the onBlockBroken hook (remote edits). */
   private suppressBreakEvent = false;
   /**
@@ -606,9 +604,6 @@ export class World {
     );
   }
 
-  /** The generator this world is currently built from. */
-  get generator(): WorldGenerator { return this.gen; }
-
   /** Move to another world: every chunk and every recorded edit belongs to
    *  the old one, so all of it goes. Streaming starts again from nothing. */
   setGenerator(gen: WorldGenerator): void {
@@ -640,12 +635,6 @@ export class World {
     else this.fogSunUniform.value.setRGB(0, 0, 0);
   }
 
-  /** Drive the held-torch point light (xyz = world position, intensity 0..1).
-   *  Intensity 0 turns it off. */
-  setHeldLight(x: number, y: number, z: number, intensity: number): void {
-    this.torchUniform.value.set(x, y, z, intensity);
-  }
-
   /** Turn smooth lighting on or off. The light levels live in the chunk
    *  geometry, so this can only take effect by rebuilding it: every loaded
    *  chunk is marked dirty and the ordinary streamer remeshes them inside its
@@ -668,17 +657,6 @@ export class World {
     this.arenaLightUniform.value = bounds ? ambientFloor : 0;
   }
 
-
-  /** Drop a retired procedural arena, including its placed-block overlay. */
-  invalidateArena(bounds: { minX:number; maxX:number; minZ:number; maxZ:number }): void {
-    for(let cx=Math.floor(bounds.minX/16);cx<=Math.floor((bounds.maxX-1)/16);cx++)
-      for(let cz=Math.floor(bounds.minZ/16);cz<=Math.floor((bounds.maxZ-1)/16);cz++){
-        const key=Chunk.key(cx,cz),chunk=this.chunks.get(key);
-        if(chunk){this.disposeMeshes(chunk);this.chunks.delete(key);}
-        this.editOverlay.delete(key);
-      }
-  }
-
   private ensureData(cx: number, cz: number): Chunk {
     const key = Chunk.key(cx, cz);
     let chunk = this.chunks.get(key);
@@ -695,14 +673,6 @@ export class World {
       this.chunks.set(key, chunk);
     }
     return chunk;
-  }
-
-  /** The player-placed block recorded at a cell (0/undefined = natural terrain
-   *  there). Used by ship capture to flood-fill only built blocks. */
-  getEditedBlock(wx: number, wy: number, wz: number): number | undefined {
-    const m = this.editOverlay.get(Chunk.key(wx >> 4, wz >> 4));
-    if (!m) return undefined;
-    return m.get(((((wx & 15) << 4) | (wz & 15)) << 8) | (wy & 255));
   }
 
   /** Has the chunk column holding (wx, wz) got its block data yet? `getBlock`
@@ -809,39 +779,6 @@ export class World {
     if (set) for (const chunk of set) this.remesh(chunk);
   }
 
-  /**
-   * Block light estimate at a position from nearby emitters, ignoring
-   * occlusion (an over-estimate — safe for spawn suppression near torches).
-   */
-  approxBlockLight(wx: number, wy: number, wz: number): number {
-    const cx = wx >> 4, cz = wz >> 4;
-    let best = 0;
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dz = -1; dz <= 1; dz++) {
-        const chunk = this.getChunk(cx + dx, cz + dz);
-        if (!chunk || chunk.lights.size === 0) continue;
-        for (const [idx, level] of chunk.lights) {
-          const ex = chunk.cx * CHUNK_X + ((idx >> 12) & 15);
-          const ey = idx & 255;
-          const ez = chunk.cz * CHUNK_Z + ((idx >> 8) & 15);
-          const d = Math.abs(ex - wx) + Math.abs(ey - wy) + Math.abs(ez - wz);
-          best = Math.max(best, level - d);
-        }
-      }
-    }
-    return best;
-  }
-
-  /** True when no opaque block sits anywhere above this cell. */
-  hasSkyAccess(wx: number, wy: number, wz: number): boolean {
-    const chunk = this.getChunk(wx >> 4, wz >> 4);
-    if (!chunk) return true;
-    for (let y = wy; y < chunk.maxY; y++) {
-      if (isOpaque(chunk.get(wx & 15, y, wz & 15))) return false;
-    }
-    return true;
-  }
-
   private remesh(chunk: Chunk): void {
     if (this.batch) {
       this.batch.add(chunk);
@@ -917,37 +854,6 @@ export class World {
     }
     chunk.opaqueMesh = null;
     chunk.waterMesh = null;
-  }
-
-  /** Fraction of chunks within render distance that are meshed (loading UI). */
-  progress(px: number, pz: number): number {
-    const pcx = Math.floor(px) >> 4;
-    const pcz = Math.floor(pz) >> 4;
-    let meshed = 0, total = 0;
-    for (const [dx, dz] of this.spiral) {
-      if (Math.max(Math.abs(dx), Math.abs(dz)) > this.renderDistance) continue;
-      total++;
-      const chunk = this.getChunk(pcx + dx, pcz + dz);
-      if (chunk && chunk.opaqueMesh) meshed++;
-    }
-    return total === 0 ? 1 : meshed / total;
-  }
-
-  /** Largest complete square of terrain around the player. A percentage of
-   * loaded chunks can hide one missing direction, so the fog uses this radius
-   * while the streamer catches up. */
-  meshedRadius(px: number, pz: number): number {
-    const pcx = Math.floor(px) >> 4;
-    const pcz = Math.floor(pz) >> 4;
-    for (let radius = 0; radius <= this.renderDistance; radius++) {
-      for (let dx = -radius; dx <= radius; dx++) {
-        for (let dz = -radius; dz <= radius; dz++) {
-          if (Math.max(Math.abs(dx), Math.abs(dz)) !== radius) continue;
-          if (!this.getChunk(pcx + dx, pcz + dz)?.opaqueMesh) return radius - 1;
-        }
-      }
-    }
-    return this.renderDistance;
   }
 
   /**

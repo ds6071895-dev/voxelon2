@@ -100,12 +100,6 @@ export class Player {
   /** In multiplayer, damage is routed here (to the server) instead of being
    *  applied locally — the server owns health. */
   damageSink?: (amount: number) => void;
-  /** Total worn-armor defense points (kept in sync by main each frame); used
-   *  for offline mitigation. In MP the server mitigates from its synced copy. */
-  armorPoints = 0;
-  /** Flat post-percentage damage soak from Greater Runes of Iron (same
-   *  sync/authority split as `armorPoints`). */
-  toughness = 0;
   /** Admin/gamemode flight: no gravity, jump/sneak rise/descend (creative+spectator). */
   flying = false;
   /** Admin/gamemode noclip: move through blocks, ignore collision (spectator). */

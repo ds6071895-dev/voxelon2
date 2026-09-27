@@ -153,13 +153,6 @@ class Rig {
     return this;
   }
 
-  glowDisc(radius: number, pos: V3, color: number, sides = 8): this {
-    const geo = new THREE.CylinderGeometry(radius, radius, 0.008, sides);
-    geo.rotateX(Math.PI / 2);
-    this.push(geo, pos, [0, 0, 0], color, true);
-    return this;
-  }
-
   /** A named point animation code can look up (muzzle, sight, eject, grip2). */
   anchor(name: string, pos: V3, part = 'body'): this {
     this.anchors.push({ name, part, pos: new THREE.Vector3(...pos) });

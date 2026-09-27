@@ -20,9 +20,6 @@ export type GadgetKind =
   | 'disguise'  // spy disguise — look like the enemy faction for a while
   | 'jump';     // bounce pad — a single-use, ~20-block vertical launch
 
-/** Throwable gadget kinds get an in-air tossed item + a detonation point. */
-export const THROWN_KINDS = new Set<GadgetKind>(['frag', 'oil', 'smoke']);
-
 export interface GadgetDef {
   item: number;
   tile: number;
@@ -100,23 +97,8 @@ export const GADGETS: Record<number, GadgetDef> = {
     cooldown: 0.5, maxStack: 8, consumed: true,
   },
 };
-
-export function isGadget(id: number): boolean {
-  return GADGETS[id] !== undefined;
-}
 export function gadgetOf(id: number): GadgetDef | undefined {
   return GADGETS[id];
-}
-
-/**
- * AoE damage with linear falloff from the blast centre: full `base` at distance
- * 0, zero at/after `radius`. Shared by frag + oil bomb so the server and the
- * client preview agree. Returns a rounded, non-negative number.
- */
-export function falloffDamage(base: number, dist: number, radius: number): number {
-  if (!Number.isFinite(base) || !Number.isFinite(dist) || !Number.isFinite(radius) || radius <= 0) return 0;
-  if (dist >= radius) return 0;
-  return Math.max(0, Math.round(base * (1 - dist / radius)));
 }
 
 /**
@@ -130,10 +112,6 @@ export class GadgetCooldowns {
   ready(id: number, now: number): boolean {
     return now >= (this.next.get(id) ?? 0);
   }
-  /** Seconds until the gadget is usable again (0 = ready now). */
-  remaining(id: number, now: number): number {
-    return Math.max(0, (this.next.get(id) ?? 0) - now);
-  }
   /** Mark a gadget used: starts its cooldown. Returns false if it wasn't ready. */
   use(id: number, now: number): boolean {
     if (!this.ready(id, now)) return false;
@@ -141,5 +119,4 @@ export class GadgetCooldowns {
     this.next.set(id, now + (def ? def.cooldown : 0));
     return true;
   }
-  clear(): void { this.next.clear(); }
 }

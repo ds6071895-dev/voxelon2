@@ -4,16 +4,8 @@
 
 import * as THREE from 'three';
 import { Block } from './blocks';
-import type { VaultFamily } from './boss_music';
-import { BossMusicEngine, type BossMusicCue } from './boss_music';
 
 export type Material = 'stone' | 'wood' | 'grass' | 'sand' | 'glass' | 'wool';
-
-/** Ambience families. Several biomes share one voice — a snowy taiga and a
- *  snowy plain sound the same, and there is no reason to write both. */
-export type BiomeSound =
-  | 'forest' | 'jungle' | 'plains' | 'swamp' | 'desert'
-  | 'mountain' | 'snow' | 'ocean' | 'ashlands' | 'crystal' | 'none';
 
 /** Sound material category for a block id. */
 export function materialOf(block: number): Material {
@@ -54,23 +46,6 @@ export function materialOf(block: number): Material {
   }
 }
 
-// Encounter mix. A boss score is a dense, compressed, SUSTAINED signal while
-// gunshots and explosions are short transients with far higher peaks — matched
-// on paper, the music still reads as background noise underneath a fight. So
-// the encounter mix pushes the score up and pulls the fight down harder than a
-// naive "slightly louder" balance would: combined with the score's own makeup
-// gain (MUSIC_MAKEUP_GAIN in boss_music.ts) the track finally sits ON TOP of
-// the boss fight instead of behind it.
-export const ENCOUNTER_MUSIC_BOOST = 1.28;
-export const ENCOUNTER_EFFECTS_DUCK = 0.74;
-export const ENCOUNTER_AMBIENCE_DUCK = 0.34;
-/** Bus ceiling for the music path. Above 1 on purpose: the bus feeds a master
- *  at 0.5, so headroom is available and the score needs it to compete. */
-const MUSIC_BUS_CEILING = 1.6;
-/** Default music slider position. Higher than it used to be for the same
- *  reason: at 0.65 the boss score was inaudible next to the fight. */
-export const DEFAULT_MUSIC_VOLUME = 0.85;
-
 const MATERIAL_FREQ: Record<Material, number> = {
   stone: 700, wood: 380, grass: 950, sand: 2400, glass: 3200, wool: 500,
 };
@@ -79,9 +54,6 @@ export class GameAudio {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
   private effectsBus: GainNode | null = null;
-  private ambienceBus: GainNode | null = null;
-  private musicBus: GainNode | null = null;
-  private bossScore: BossMusicEngine | null = null;
   private noiseBuf: AudioBuffer | null = null;
   /** Head-relative sounds (UI cues, your own gun) enter here: dry to the
    *  effects bus plus a light reverb send. World sounds use `out(pos)`. */
@@ -91,8 +63,6 @@ export class GameAudio {
   private reverbIn: GainNode | null = null;
   private readonly listenerPos = new THREE.Vector3();
   private effectsVolume = GameAudio.savedVolume('effects', 0.8);
-  private musicVolume = GameAudio.savedVolume('music', DEFAULT_MUSIC_VOLUME);
-  private encounterMix = false;
 
   private static savedVolume(key: string, fallback: number): number {
     try {
@@ -117,14 +87,8 @@ export class GameAudio {
       });
       this.master.connect(glue).connect(this.ctx.destination);
       this.effectsBus = this.ctx.createGain();
-      this.ambienceBus = this.ctx.createGain();
-      this.musicBus = this.ctx.createGain();
       this.effectsBus.gain.value = this.effectsVolume;
-      this.ambienceBus.gain.value = this.effectsVolume * 0.7;
-      this.musicBus.gain.value = this.musicVolume;
       this.effectsBus.connect(this.master);
-      this.ambienceBus.connect(this.master);
-      this.musicBus.connect(this.master);
       // Pink noise (Paul Kellet's filter), not white: white noise is mostly
       // treble and is exactly the fizzy "cheap synth" hiss. Two seconds long,
       // and every burst starts at a random offset so no two digs, steps or
@@ -171,39 +135,11 @@ export class GameAudio {
     return buf;
   }
 
-  private applyBusMix(): void {
-    if (!this.ctx) return;
-    const now = this.ctx.currentTime;
-    const music = Math.min(MUSIC_BUS_CEILING,
-      this.musicVolume * (this.encounterMix ? ENCOUNTER_MUSIC_BOOST : 1));
-    const effects = this.effectsVolume * (this.encounterMix ? ENCOUNTER_EFFECTS_DUCK : 1);
-    const ambience = this.effectsVolume * (this.encounterMix ? ENCOUNTER_AMBIENCE_DUCK : 0.7);
-    this.musicBus?.gain.setTargetAtTime(music, now, 0.08);
-    this.effectsBus?.gain.setTargetAtTime(effects, now, 0.08);
-    this.ambienceBus?.gain.setTargetAtTime(ambience, now, 0.1);
-  }
-
-  private setEncounterMix(active: boolean): void {
-    if (this.encounterMix === active) return;
-    this.encounterMix = active;
-    this.applyBusMix();
-  }
-
   setEffectsVolume(value: number): void {
     this.effectsVolume = Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0.8));
-    this.applyBusMix();
+    if (this.ctx) this.effectsBus?.gain.setTargetAtTime(this.effectsVolume, this.ctx.currentTime, 0.08);
     try { localStorage.setItem('voxelon.audio.effects', String(this.effectsVolume)); } catch { /* ignore */ }
   }
-
-  setMusicVolume(value: number): void {
-    this.musicVolume = Math.max(0, Math.min(1,
-      Number.isFinite(value) ? value : DEFAULT_MUSIC_VOLUME));
-    this.applyBusMix();
-    try { localStorage.setItem('voxelon.audio.music', String(this.musicVolume)); } catch { /* ignore */ }
-  }
-
-  getEffectsVolume(): number { return this.effectsVolume; }
-  getMusicVolume(): number { return this.musicVolume; }
 
   updateListener(camera: THREE.Camera): void {
     if (!this.ctx) return;
@@ -246,40 +182,6 @@ export class GameAudio {
       air.connect(send).connect(this.reverbIn);
     }
     return air;
-  }
-
-  /** Start a long-form, bar-aligned adaptive score for this dungeon boss.
-   *  IDEMPOTENT: if that boss's score is already running this is a no-op, so a
-   *  re-sent vaultEnter, a reconnect or a knockback that flickers the vault
-   *  bounds cannot rewind a five-minute track back to bar one. */
-  startVaultMusic(family: VaultFamily, phase: 1 | 2 | 3 = 1): void {
-    this.resume();
-    if (!this.ctx || !this.musicBus) return;
-    this.setEncounterMix(true);
-    this.bossScore ??= new BossMusicEngine(this.ctx, this.musicBus);
-    if (this.bossScore.playing(family)) return; // already scored — let it run
-    this.bossScore.start(family, phase);
-  }
-
-  /** Is a boss score currently playing (optionally for a specific family)? */
-  vaultMusicPlaying(family?: VaultFamily): boolean {
-    return this.bossScore?.playing(family) ?? false;
-  }
-
-  /** Change orchestration at the next scheduler boundary without restarting. */
-  setVaultMusicPhase(phase: 1 | 2 | 3, lowHealth = false): void {
-    this.bossScore?.setPhase(phase, lowHealth);
-  }
-
-  /** Fire a score-synchronised encounter stinger. */
-  vaultMusicCue(kind: BossMusicCue): void {
-    this.bossScore?.cue(kind);
-    if (kind === 'reset' || kind === 'victory') this.setEncounterMix(false);
-  }
-
-  stopVaultMusic(fade = 0.4): void {
-    this.bossScore?.stop(fade);
-    this.setEncounterMix(false);
   }
 
   /** Band-filtered noise burst. */
@@ -536,99 +438,6 @@ export class GameAudio {
     }
   }
 
-  eatTick(): void {
-    this.noise({ freq: 1300, dur: 0.07, gain: 0.3, q: 0.8 });
-    this.tone({ type: 'triangle', from: 320, to: 180, dur: 0.06, gain: 0.12 });
-  }
-
-  splash(): void {
-    this.noise({ freq: 1500, dur: 0.4, gain: 0.35, slideTo: 400, q: 0.7 });
-  }
-
-  poof(pos?: THREE.Vector3): void {
-    this.noise({ freq: 900, dur: 0.3, gain: 0.3, slideTo: 300, q: 0.6, pos });
-  }
-
-  explosion(pos?: THREE.Vector3): void {
-    // Crack, body, then a long rolling tail (debris + the blast echoing off
-    // terrain) — a single filtered noise burst read as a puff, not a blast.
-    this.noise({ freq: 3000, dur: 0.05, gain: 0.35, type: 'highpass', q: 0.6, pos });
-    this.noise({ freq: 900, dur: 0.5, gain: 0.8, slideTo: 120, type: 'lowpass', q: 0.8, pos });
-    this.noise({ freq: 350, dur: 1.8, gain: 0.55, slideTo: 45, type: 'lowpass', q: 0.5, delay: 0.04, pos });
-    this.tone({ type: 'sine', from: 90, to: 28, dur: 1.0, gain: 0.6, pos });
-    this.noise({ freq: 1600, dur: 0.9, gain: 0.08, slideTo: 500, type: 'bandpass', q: 0.6, delay: 0.25, pos });
-  }
-
-  /** Trapcraft: one voice per trap event (all synthesized, positional). */
-  trap(kind: 'spike' | 'snap' | 'beep' | 'arm' | 'zap' | 'click' | 'laser' | 'whoosh' | 'dart' | 'net' | 'bell' | 'slam',
-    pos?: THREE.Vector3): void {
-    switch (kind) {
-      case 'spike':
-        this.noise({ freq: 2400, dur: 0.08, gain: 0.35, slideTo: 900, type: 'bandpass', q: 3, pos });
-        this.tone({ type: 'square', from: 420, to: 180, dur: 0.06, gain: 0.12, pos });
-        break;
-      case 'snap':
-        this.noise({ freq: 3000, dur: 0.05, gain: 0.5, type: 'highpass', pos });
-        this.tone({ type: 'square', from: 260, to: 90, dur: 0.12, gain: 0.25, pos });
-        break;
-      case 'beep': this.tone({ type: 'square', from: 1560, to: 1560, dur: 0.06, gain: 0.12, pos }); break;
-      case 'arm':
-        this.tone({ type: 'sine', from: 880, to: 880, dur: 0.05, gain: 0.08, pos });
-        this.tone({ type: 'sine', from: 1320, to: 1320, dur: 0.06, gain: 0.08, delay: 0.07, pos });
-        break;
-      case 'zap':
-        this.noise({ freq: 5200, dur: 0.22, gain: 0.3, slideTo: 1800, type: 'bandpass', q: 6, pos });
-        this.tone({ type: 'sawtooth', from: 120, to: 60, dur: 0.2, gain: 0.12, pos });
-        break;
-      case 'click': this.noise({ freq: 1800, dur: 0.02, gain: 0.18, type: 'bandpass', q: 2, pos }); break;
-      case 'laser': this.tone({ type: 'sine', from: 2200, to: 700, dur: 0.18, gain: 0.1, pos }); break;
-      case 'whoosh': this.noise({ freq: 600, dur: 0.9, gain: 0.45, slideTo: 1400, type: 'bandpass', q: 0.8, pos }); break;
-      case 'dart': this.noise({ freq: 2600, dur: 0.06, gain: 0.25, slideTo: 1200, type: 'bandpass', q: 4, pos }); break;
-      case 'net':
-        this.noise({ freq: 400, dur: 0.18, gain: 0.35, type: 'lowpass', pos });
-        this.noise({ freq: 1800, dur: 0.3, gain: 0.12, type: 'bandpass', q: 1, delay: 0.05, pos });
-        break;
-      case 'bell':
-        for (let i = 0; i < 3; i++) {
-          this.tone({ type: 'sine', from: 1180, to: 1175, dur: 0.35, gain: 0.16, delay: i * 0.22, pos });
-          this.tone({ type: 'sine', from: 2950, to: 2940, dur: 0.2, gain: 0.05, delay: i * 0.22, pos });
-        }
-        break;
-      case 'slam':
-        this.noise({ freq: 260, dur: 0.18, gain: 0.5, slideTo: 90, type: 'lowpass', pos });
-        this.tone({ type: 'triangle', from: 110, to: 45, dur: 0.16, gain: 0.3, pos });
-        break;
-    }
-  }
-
-  /** Rig events: jams, well strikes, gushers, well fires, siphons. */
-  rig(kind: 'jam' | 'strike' | 'gusher' | 'ignite' | 'hiss' | 'siphon' | 'bit', pos?: THREE.Vector3): void {
-    switch (kind) {
-      case 'jam':
-        this.noise({ freq: 900, dur: 0.5, gain: 0.5, slideTo: 200, type: 'bandpass', q: 1.5, pos });
-        this.tone({ type: 'sawtooth', from: 180, to: 40, dur: 0.6, gain: 0.25, pos });
-        break;
-      case 'strike':
-        this.tone({ type: 'sine', from: 70, to: 40, dur: 0.9, gain: 0.5, pos });
-        this.noise({ freq: 200, dur: 0.8, gain: 0.4, type: 'lowpass', pos });
-        break;
-      case 'gusher':
-        this.tone({ type: 'sine', from: 60, to: 30, dur: 1.4, gain: 0.6, pos });
-        this.noise({ freq: 500, dur: 2.2, gain: 0.55, slideTo: 1200, type: 'bandpass', q: 0.6, pos });
-        break;
-      case 'ignite':
-        this.noise({ freq: 300, dur: 1.4, gain: 0.9, slideTo: 80, type: 'lowpass', pos });
-        this.noise({ freq: 900, dur: 2.5, gain: 0.35, type: 'bandpass', q: 0.5, delay: 0.2, pos });
-        break;
-      case 'hiss': this.noise({ freq: 3200, dur: 0.9, gain: 0.3, slideTo: 1500, type: 'highpass', pos }); break;
-      case 'siphon': this.noise({ freq: 700, dur: 0.6, gain: 0.3, slideTo: 300, type: 'bandpass', q: 2, pos }); break;
-      case 'bit':
-        this.noise({ freq: 2800, dur: 0.12, gain: 0.4, type: 'highpass', pos });
-        this.tone({ type: 'square', from: 500, to: 120, dur: 0.2, gain: 0.15, pos });
-        break;
-    }
-  }
-
   /** Gunshot: a soft body "thump" + a brief click — deliberately low on harsh
    *  high frequencies so rapid fire isn't piercing/painful to listen to.
    *  `weight` scales the report so a shotgun booms and an SMG snaps, without
@@ -682,83 +491,6 @@ export class GameAudio {
     }
   }
 
-  // --- Grappling hook --------------------------------------------------------
-  // Four beats, because the hook is four beats: the launch, the bite, the reel
-  // and the release. Each one is short and low-mid so chaining swings never
-  // turns into a shriek.
-
-  /** Launch: a rising "thwip" as the line pays out. */
-  grappleFire(): void {
-    this.noise({ freq: 380, dur: 0.16, gain: 0.2, slideTo: 1500, type: 'bandpass', q: 0.8 });
-    this.tone({ type: 'triangle', from: 220, to: 520, dur: 0.12, gain: 0.09 });
-  }
-
-  /** The hook bites: a solid metal thunk with a short ring. */
-  grappleHit(pos?: THREE.Vector3): void {
-    this.noise({ freq: 700, dur: 0.09, gain: 0.26, slideTo: 140, type: 'lowpass', q: 0.7, pos });
-    this.tone({ type: 'triangle', from: 260, to: 90, dur: 0.13, gain: 0.18, pos });
-    this.tone({ type: 'sine', from: 1450, to: 900, dur: 0.22, gain: 0.05, pos });
-  }
-
-  /** Reeling: a low winch whir under the flight (called once per pull). */
-  grappleReel(): void {
-    this.tone({ type: 'sawtooth', from: 120, to: 210, dur: 0.55, gain: 0.05, attack: 0.08 });
-    this.noise({ freq: 240, dur: 0.6, gain: 0.05, slideTo: 700, type: 'lowpass', q: 0.6 });
-  }
-
-  /** Let go at speed: a snap of tension plus the wind of the launch. */
-  grappleRelease(): void {
-    this.tone({ type: 'triangle', from: 520, to: 180, dur: 0.1, gain: 0.1 });
-    this.noise({ freq: 700, dur: 0.42, gain: 0.16, slideTo: 2000, type: 'bandpass', q: 0.5 });
-  }
-
-  // --- Helicopters: hull hits and the fast rope --------------------------------
-
-  /** A round bites the airframe: a hard metal slap with a short ring on top.
-   *  `armorish` is for a graze that mostly skidded off. */
-  heliHit(pos?: THREE.Vector3, heavy = false): void {
-    this.noise({ freq: 900, dur: 0.07, gain: heavy ? 0.24 : 0.16, slideTo: 200,
-      type: 'lowpass', q: 0.8, pos });
-    this.tone({ type: 'square', from: heavy ? 340 : 420, to: 120, dur: 0.09,
-      gain: heavy ? 0.13 : 0.09, pos });
-    this.tone({ type: 'sine', from: 1900, to: 1200, dur: 0.16, gain: 0.04, pos });
-  }
-
-  /** The rope goes out of the door: a winch clatter, then the line falling. */
-  ropeDeploy(pos?: THREE.Vector3): void {
-    this.tone({ type: 'square', from: 190, to: 130, dur: 0.09, gain: 0.1, pos });
-    this.noise({ freq: 520, dur: 0.5, gain: 0.16, slideTo: 130, type: 'lowpass', q: 0.7, pos });
-    this.noise({ freq: 260, dur: 0.7, gain: 0.07, slideTo: 900, type: 'bandpass',
-      q: 0.5, delay: 0.06, pos });
-  }
-
-  /** Gloves close on the line. Short, dry, and it has to land on the frame you
-   *  attached — this is the "I'm on" confirmation. */
-  ropeGrab(): void {
-    this.noise({ freq: 420, dur: 0.1, gain: 0.2, slideTo: 130, type: 'lowpass', q: 0.7 });
-    this.tone({ type: 'triangle', from: 300, to: 150, dur: 0.1, gain: 0.11 });
-  }
-
-  /** One tick of the descent bed, called on a short repeat while sliding.
-   *  `level` is 0..1 of the slide's ramp, so the friction hiss and the wind
-   *  both wind up exactly as the descent does. */
-  ropeSlide(level: number): void {
-    const l = Math.max(0, Math.min(1, level));
-    // Rope-through-gloves friction: mid-band hiss that opens up with speed.
-    this.noise({ freq: 700 + l * 900, dur: 0.2, gain: 0.05 + l * 0.1,
-      slideTo: 380 + l * 700, type: 'bandpass', q: 0.7 });
-    // Air past the ears underneath it.
-    this.noise({ freq: 300 + l * 260, dur: 0.24, gain: 0.03 + l * 0.06,
-      slideTo: 170 + l * 220, type: 'lowpass', q: 0.5 });
-  }
-
-  /** Boots hit the deck at the bottom of the line. */
-  ropeLand(pos?: THREE.Vector3): void {
-    this.noise({ freq: 300, dur: 0.16, gain: 0.24, slideTo: 90, type: 'lowpass', q: 0.7, pos });
-    this.tone({ type: 'triangle', from: 150, to: 62, dur: 0.16, gain: 0.16, pos });
-    this.noise({ freq: 1400, dur: 0.09, gain: 0.05, slideTo: 700, type: 'bandpass', q: 0.9, pos });
-  }
-
   /** Bounce Pad: spring compression, a rubbery launch note, then air rushing by. */
   bouncePad(): void {
     this.noise({ freq: 540, dur: 0.08, gain: 0.2, slideTo: 170, type: 'lowpass', q: 0.8 });
@@ -766,31 +498,6 @@ export class GameAudio {
     this.tone({ type: 'triangle', from: 95, to: 280, dur: 0.22, gain: 0.13 });
     this.noise({ freq: 320, dur: 0.48, gain: 0.13, slideTo: 1500, type: 'bandpass', q: 0.5,
       delay: 0.04 });
-  }
-
-  /** Glider deploy: sailcloth cracking taut, then the wings catching the air. */
-  glide(): void {
-    this.noise({ freq: 900, dur: 0.09, gain: 0.3, slideTo: 260, type: 'bandpass', q: 0.8 });
-    this.noise({ freq: 320, dur: 0.6, gain: 0.24, slideTo: 1500, type: 'bandpass', q: 0.5,
-      delay: 0.05 });
-    this.tone({ type: 'triangle', from: 140, to: 260, dur: 0.35, gain: 0.09, attack: 0.05 });
-  }
-
-  /** One gust of the wind bed while gliding. Called on a short repeat by the
-   *  flight loop with `level` 0..1 for airspeed, so the rush swells as you dive
-   *  and drops back to a whisper on a level cruise. */
-  glideWind(level: number): void {
-    const l = Math.max(0, Math.min(1, level));
-    this.noise({
-      freq: 380 + l * 520, dur: 0.42, gain: 0.03 + l * 0.09,
-      slideTo: 200 + l * 420, type: 'lowpass', q: 0.5,
-    });
-  }
-
-  /** Glider breaks: a short snap + falling whoosh. */
-  gliderBreak(): void {
-    this.noise({ freq: 2200, dur: 0.07, gain: 0.28, slideTo: 600, type: 'bandpass', q: 0.9 });
-    this.tone({ type: 'triangle', from: 320, to: 90, dur: 0.18, gain: 0.16 });
   }
 
   /** Starting to apply a healing consumable: a wrapper tear (bandage) or the
@@ -898,19 +605,6 @@ export class GameAudio {
     this.noise({ freq: 500, dur: 0.08, gain: 0.05, slideTo: 200, type: 'lowpass', q: 0.6 });
   }
 
-  /** Lifesteal: you STOLE a heart — a warm little triangle up-chirp (LOW gain,
-   *  kid-friendly; same soft recipe as the rest of the kit). */
-  heartSteal(): void {
-    this.tone({ type: 'triangle', from: 330, to: 640, dur: 0.2, gain: 0.11 });
-    this.tone({ type: 'triangle', from: 500, to: 980, dur: 0.16, gain: 0.06, delay: 0.09 });
-  }
-
-  /** Lifesteal: you LOST a heart — a soft downward chirp, sad but gentle. */
-  heartLoss(): void {
-    this.tone({ type: 'triangle', from: 460, to: 190, dur: 0.26, gain: 0.11 });
-    this.noise({ freq: 300, dur: 0.12, gain: 0.04, slideTo: 130, type: 'lowpass', q: 0.6 });
-  }
-
   // --- Bedwars axe melee -----------------------------------------------------
   // Four beats that carry the whole combat read by ear: how charged the swing
   // was, whether it connected, whether it crit, and — the one that matters
@@ -936,15 +630,6 @@ export class GameAudio {
     }
   }
 
-  // --- The Bridge: bow ------------------------------------------------------
-
-  /** The draw. A short creak per step of the pull, rising in pitch, so a full
-   *  draw is something you HEAR arrive rather than something you time. */
-  bowDraw(step: number): void {
-    const t = Math.max(0, Math.min(1, step));
-    this.noise({ freq: 300 + 900 * t, dur: 0.05, gain: 0.05 + 0.03 * t, slideTo: 240, type: 'bandpass', q: 2.2 });
-  }
-
   /** The release. A string snap over the shaft leaving; a full draw adds the
    *  low whump that says the shot was worth waiting for. */
   bowRelease(power: number): void {
@@ -959,22 +644,6 @@ export class GameAudio {
     this.noise({ freq: 1100, dur: 0.06, gain: 0.2, slideTo: 200, type: 'bandpass', q: 1.1, pos });
     this.tone({ type: 'triangle', from: 520, to: 180, dur: 0.1, gain: 0.16, pos });
     if (crit) this.tone({ type: 'sine', from: 2100, to: 1500, dur: 0.18, gain: 0.08, pos });
-  }
-
-  /** A bed goes down. The loudest thing in the mode, because it is the moment
-   *  the match changes shape: a splintering crack over a falling sub-bass. */
-  bedBreak(pos?: THREE.Vector3): void {
-    this.noise({ freq: 1600, dur: 0.22, gain: 0.30, slideTo: 260, type: 'bandpass', q: 0.6, pos });
-    this.noise({ freq: 320, dur: 0.5, gain: 0.20, slideTo: 70, type: 'lowpass', q: 0.7, pos });
-    this.tone({ type: 'triangle', from: 220, to: 55, dur: 0.7, gain: 0.20, pos });
-    this.tone({ type: 'sine', from: 110, to: 40, dur: 1.1, gain: 0.14, attack: 0.02, pos });
-  }
-
-  /** Falling past the island bottom: a doppler-down whistle. Deliberately long
-   *  — the 22-block drop is a beat the player is meant to feel end. */
-  voidFall(): void {
-    this.tone({ type: 'sine', from: 900, to: 120, dur: 1.1, gain: 0.12, attack: 0.03 });
-    this.noise({ freq: 700, dur: 1.1, gain: 0.09, slideTo: 90, type: 'bandpass', q: 1.1 });
   }
 
   // --- The Bridge: the whistle, the cage and the goal -------------------------
@@ -1027,198 +696,5 @@ export class GameAudio {
     this.noise({ freq: 1400, dur: 0.05, gain: 0.2, slideTo: 260, type: 'lowpass', q: 0.9, pos });
     this.tone({ type: 'triangle', from: 260, to: 90, dur: 0.11, gain: 0.18, pos });
     if (sprint) this.tone({ type: 'sine', from: 90, to: 45, dur: 0.16, gain: 0.16, pos });
-  }
-
-  /** Entering a vault (Milestone D): a low, ominous synth pad — soft attack,
-   *  gentle gain, nothing shrill (same kid-safe recipe as the rest). */
-  vaultSting(): void {
-    this.tone({ type: 'sine', from: 82, to: 66, dur: 2.4, gain: 0.13, attack: 0.7 });
-    this.tone({ type: 'sine', from: 123, to: 99, dur: 2.4, gain: 0.08, attack: 1.0 });
-    this.noise({ freq: 180, dur: 1.6, gain: 0.05, slideTo: 70, type: 'lowpass', q: 0.6 });
-  }
-
-  /** Spatial attack payoff, separate from the score so an eruption sounds
-   * like it landed in the arena. Layered but quieter than the player's weapon. */
-  vaultImpact(family: VaultFamily, pos: THREE.Vector3, weight = 1): void {
-    const gain = Math.max(0.35, Math.min(1.25, weight));
-    this.tone({type:'sine',from:family==='ember' ? 96 : 135,to:34,
-      dur:0.48,gain:0.17*gain,pos});
-    this.noise({freq:family==='mire' ? 620 : 380,slideTo:85,dur:0.55,
-      gain:0.13*gain,type:'lowpass',q:0.7,pos});
-    if (family==='crystal' || family==='gilded') {
-      for (const [i,ratio] of [1,1.51,2.03].entries()) this.tone({
-        type:'sine',from:540*ratio,to:480*ratio,dur:0.45-i*0.08,
-        gain:0.055*gain/(i+1),delay:i*0.018,pos,
-      });
-    } else {
-      this.noise({freq:family==='crypt' ? 1700 : 950,slideTo:280,dur:0.23,
-        gain:0.055*gain,q:0.8,pos});
-    }
-  }
-
-  /** VAULT CLEARED: a warm rising triangle fanfare (triumphant, still soft). */
-  vaultClear(): void {
-    this.tone({ type: 'triangle', from: 330, to: 440, dur: 0.16, gain: 0.12 });
-    this.tone({ type: 'triangle', from: 440, to: 587, dur: 0.16, gain: 0.12, delay: 0.14 });
-    this.tone({ type: 'triangle', from: 587, to: 880, dur: 0.3, gain: 0.13, delay: 0.28 });
-    this.noise({ freq: 500, dur: 0.35, gain: 0.05, slideTo: 900, type: 'bandpass', q: 0.7, delay: 0.28 });
-  }
-
-  /** WARFARE COMMAND: a technology authorized. A confident four-note rise with
-   *  a mechanical latch underneath — this is the payoff for a whole boss fight,
-   *  so it is the biggest sound in the kit that still stays soft. */
-  warfareAuthorized(): void {
-    // The latch: a short filtered click, like a breaker being thrown.
-    this.noise({ freq: 900, dur: 0.07, gain: 0.07, slideTo: 260, type: 'lowpass', q: 1.1 });
-    // The rise: root, fifth, octave, then a held major tenth on top.
-    this.tone({ type: 'triangle', from: 294, to: 294, dur: 0.12, gain: 0.11 });
-    this.tone({ type: 'triangle', from: 440, to: 440, dur: 0.12, gain: 0.11, delay: 0.10 });
-    this.tone({ type: 'triangle', from: 587, to: 587, dur: 0.14, gain: 0.12, delay: 0.20 });
-    this.tone({ type: 'triangle', from: 740, to: 880, dur: 0.42, gain: 0.13, delay: 0.31, attack: 0.02 });
-    // A soft sine pad an octave down gives the chord some body.
-    this.tone({ type: 'sine', from: 147, to: 220, dur: 0.55, gain: 0.07, delay: 0.20, attack: 0.08 });
-    this.noise({ freq: 600, dur: 0.4, gain: 0.04, slideTo: 1400, type: 'bandpass', q: 0.8, delay: 0.31 });
-  }
-
-  /**
-   * Surface ambience for a biome. Called on the same slow timer that plays the
-   * cave pad, but for columns that CAN see the sky — so the open world stops
-   * being silent between footsteps. Everything here is synthesised from the
-   * same tone/noise primitives as the rest of the game's audio; there are no
-   * assets to load.
-   *
-   * `night` swaps the daytime voice of a place for its nocturnal one: birdsong
-   * becomes owls and crickets, and the wind on a summit keeps blowing either
-   * way.
-   */
-  biomeAmbience(biome: BiomeSound, night: boolean): void {
-    const rand = (a: number, b: number) => a + Math.random() * (b - a);
-    /** Two or three quick notes: a bird call, a frog, a chime. */
-    const call = (
-      type: OscillatorType, f: number, spread: number, count: number,
-      gain: number, dur: number
-    ) => {
-      for (let i = 0; i < count; i++) {
-        const up = Math.random() < 0.55;
-        const a = f * rand(0.92, 1.08);
-        const b = a * (up ? rand(1.15, 1.5) : rand(0.66, 0.87));
-        this.tone({
-          type, from: a, to: b, dur, gain, attack: 0.02,
-          delay: i * rand(0.1, 0.26) + Math.random() * spread,
-        });
-      }
-    };
-    /** A long filtered hiss: wind, surf, rustling leaves. */
-    const bed = (freq: number, slideTo: number, gain: number, dur: number,
-                 q = 0.6, type: BiquadFilterType = 'bandpass') =>
-      this.noise({ freq, dur, gain, slideTo, q, type });
-
-    switch (biome) {
-      case 'forest':
-        if (night) {
-          // Owl: two soft low hoots, then crickets.
-          call('sine', 420, 0.1, 2, 0.07, 0.34);
-          call('square', 2600, 0.7, 4, 0.012, 0.05);
-        } else {
-          call('sine', 1900, 0.5, 3, 0.05, 0.14);
-          bed(900, 1500, 0.03, 2.6, 0.5);
-        }
-        break;
-      case 'jungle':
-        if (night) call('square', 3100, 0.9, 6, 0.014, 0.06);
-        else {
-          call('triangle', 1250, 0.4, 4, 0.055, 0.2); // whooping bird
-          call('sawtooth', 2400, 0.8, 3, 0.012, 0.09);
-        }
-        bed(700, 1100, 0.035, 3.2, 0.5);
-        break;
-      case 'plains':
-        if (night) call('square', 2800, 0.8, 5, 0.012, 0.05);
-        else {
-          call('sine', 2300, 0.6, 3, 0.04, 0.11);
-          bed(600, 900, 0.03, 3.0, 0.4);
-        }
-        break;
-      case 'swamp':
-        // Frogs: short descending croaks, plus a low wet drone.
-        call('sawtooth', 190, 0.5, 3, 0.07, 0.16);
-        this.tone({ type: 'sine', from: 74, to: 62, dur: 3.4, gain: 0.05, attack: 1.4 });
-        if (night) call('square', 2500, 0.9, 4, 0.01, 0.06);
-        break;
-      case 'desert':
-        bed(480, 300, 0.05, 3.8, 0.4, 'lowpass');
-        if (night) this.tone({ type: 'sine', from: 130, to: 110, dur: 3.0, gain: 0.04, attack: 1.2 });
-        break;
-      case 'mountain':
-        // Thin, cold, high wind — the loudest bed in the game.
-        bed(1400, 700, 0.07, 4.5, 0.35);
-        bed(320, 220, 0.045, 4.0, 0.5, 'lowpass');
-        break;
-      case 'snow':
-        bed(900, 500, 0.045, 4.2, 0.4);
-        break;
-      case 'ocean':
-        // Surf: a slow swell that rises and falls.
-        bed(400, 900, 0.055, 2.4, 0.35);
-        bed(900, 350, 0.05, 2.8, 0.35);
-        break;
-      case 'ashlands':
-        // Low volcanic rumble with the odd sputter of a lava pool.
-        this.tone({ type: 'sine', from: 48, to: 38, dur: 4.0, gain: 0.09, attack: 1.6 });
-        this.noise({ freq: 260, dur: 0.7, gain: 0.035, slideTo: 90, type: 'lowpass', q: 0.7,
-          delay: rand(0.3, 1.8) });
-        break;
-      case 'crystal': {
-        // Struck glass: a bell chord out of a pentatonic scale.
-        const root = [523, 587, 659, 784, 880][(Math.random() * 5) | 0];
-        for (let i = 0; i < 3; i++) {
-          this.tone({ type: 'sine', from: root * (i === 0 ? 1 : i === 1 ? 1.5 : 2),
-            to: root * (i === 0 ? 1 : i === 1 ? 1.5 : 2) * 0.998,
-            dur: rand(1.6, 2.6), gain: 0.035, attack: 0.01, delay: i * rand(0.1, 0.4) });
-        }
-        break;
-      }
-    }
-  }
-
-  caveAmbience(): void {
-    // eerie detuned pad
-    const base = 110 + Math.random() * 80;
-    this.tone({ type: 'sine', from: base, to: base * 0.8, dur: 3.5, gain: 0.12, attack: 1.2 });
-    this.tone({ type: 'sine', from: base * 1.02, to: base * 0.78, dur: 3.5, gain: 0.1, attack: 1.5 });
-  }
-
-  /** Mob voices: zombie groans, hurt yelps, creeper hiss, explosions. */
-  mob(name: string, pos: THREE.Vector3): void {
-    switch (name) {
-      case 'zombie':
-        this.tone({ type: 'sawtooth', from: 95, to: 65, dur: 0.85, gain: 0.26, pos, vibrato: 4, attack: 0.15 });
-        this.noise({ freq: 300, dur: 0.8, gain: 0.08, pos, q: 0.7 });
-        break;
-      case 'brute': // a deep, slow boss groan — bigger and lower than a zombie
-        this.tone({ type: 'sawtooth', from: 62, to: 40, dur: 1.3, gain: 0.3, pos, vibrato: 3, attack: 0.25 });
-        this.noise({ freq: 160, dur: 1.1, gain: 0.1, slideTo: 60, type: 'lowpass', q: 0.7, pos });
-        break;
-      case 'hiss':
-        this.noise({ freq: 1800, dur: 1.5, gain: 0.45, slideTo: 4200, q: 0.6, pos });
-        break;
-      case 'mobHurt':
-        this.tone({ type: 'square', from: 350, to: 180, dur: 0.12, gain: 0.2, pos });
-        break;
-      case 'spit': // a soft wet blip as the gob launches
-        this.tone({ type: 'triangle', from: 420, to: 160, dur: 0.14, gain: 0.14, pos });
-        this.noise({ freq: 700, dur: 0.08, gain: 0.05, slideTo: 250, type: 'lowpass', q: 0.7, pos });
-        break;
-      case 'skitter': // a quick chittery rattle (two fast soft clicks)
-        this.tone({ type: 'triangle', from: 640, to: 480, dur: 0.05, gain: 0.09, pos });
-        this.tone({ type: 'triangle', from: 560, to: 400, dur: 0.05, gain: 0.08, pos, delay: 0.07 });
-        break;
-      case 'poof':
-        this.poof(pos);
-        break;
-      case 'explosion':
-        this.explosion(pos);
-        break;
-    }
   }
 }

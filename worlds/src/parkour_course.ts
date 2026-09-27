@@ -179,7 +179,6 @@ const PLAIN = new Set<ParkourJump>(['pad', 'wide', 'landing', 'fork', 'join']);
 const MECHANIC = new Set<ParkourJump>(['launch', 'boost', 'blink', 'crumble']);
 /** Pads with nothing standing on them, that a route can turn 90° off. */
 const CORNER_SAFE = new Set<ParkourJump>([...PLAIN, 'step', 'drop', 'stones', 'pillar', 'ladder', 'rail', 'beam', 'blink', 'crumble', 'window']);
-export function parkourIsMechanic(kind: ParkourJump): boolean { return MECHANIC.has(kind); }
 
 /** Horizontal distance a sprint jump covers while it is at or above `rise`.
  *  From the shared player physics (jump apex 1.25 blocks, sprint 5.612 m/s,

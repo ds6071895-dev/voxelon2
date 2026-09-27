@@ -12,10 +12,6 @@ export interface SwingTier {
   readonly cooldownMs: number;
   readonly kbBonus: number;
 }
-
-/** A swing faster than this fraction of the cooldown is DROPPED, not scaled.
- *  The anti-macro wall: spam does not merely lose damage, it does nothing. */
-export const MELEE_SWING_FLOOR = 0.55;
 export const MELEE_COMBO_WINDOW_MS = 1_600;
 export const MELEE_COMBO_STEP = 0.10;
 export const MELEE_COMBO_MAX = 3;
