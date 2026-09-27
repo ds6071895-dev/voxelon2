@@ -1,0 +1,28 @@
+{
+  "name": "worlds",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host --port 5174",
+    "build": "tsc && vite build",
+    "preview": "vite preview --port 5174",
+    "server": "esbuild server/server.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/server.cjs --external:ws --log-level=error && node node_modules/.tmp/server.cjs",
+    "host": "npm run build && npm run server",
+    "test": "esbuild test/run.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/test.cjs --log-level=error && node node_modules/.tmp/test.cjs",
+    "bot-sim": "esbuild test/bot_sim.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/bot-sim.cjs --log-level=error && node node_modules/.tmp/bot-sim.cjs",
+    "stress": "esbuild test/stress.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/stress.cjs --log-level=error && node node_modules/.tmp/stress.cjs"
+  },
+  "dependencies": {
+    "three": "^0.165.0",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.42",
+    "@types/three": "^0.165.0",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.21.5",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.0"
+  }
+}

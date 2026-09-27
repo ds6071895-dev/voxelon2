@@ -1,0 +1,72 @@
+# Worlds
+
+A minigames-only rebuild of VOXELON: **Duels**, **The Bridge** and **Parkour**.
+It uses the same blocks, textures and renderer, but every match runs in its own
+separate world (Multiverse-style) instead of an arena stamped into an open
+world. VOXELON itself (the parent folder) is untouched and runs on its own
+ports.
+
+| | Worlds | VOXELON |
+|---|---|---|
+| client (Vite) | 5174 | 5173 |
+| game server (ws) | 8090 | 8080 |
+| accounts file | `worlds-accounts.json` | its own |
+
+## Running
+
+```sh
+npm install
+npm run server      # game server on :8090 (also serves dist/ when built)
+npm run dev         # client on http://localhost:5174
+# or, one process for production:
+npm run host        # build, then serve client + server from :8090
+```
+
+In the server console you can type `status`, `save` or `stop`.
+
+## How it fits together
+
+- **`src/multiverse.ts`**: a `WorldSpec {id, kind, seed}` names a world, and
+  `worldGenerator(spec)` builds its blocks. Every venue sits at its world's
+  origin. `WorldBlocks` layers one match's placed and broken blocks over the
+  generator.
+- **Client**: `World.setGenerator()` swaps worlds when you enter a match or go
+  back to the menu. The title backdrop is a separate world instance.
+- **Server** (`src/net/server_core.ts`, pure logic; `server/server.ts` is the
+  socket layer): one `MatchWorld` per match, created on demand and freed when
+  the match closes. There's no cap on how many run at once. Snapshots, edits,
+  arrows and hits never cross between worlds.
+- **Accounts**: you start as a guest with a generated name. The Account button
+  (top right) turns that name into an account or logs into another one.
+  Custom names aren't allowed. `NameRegistry` makes sure no two live or
+  registered players share a name.
+- **Parties**: up to 4 players, 6-character codes from an alphabet with no
+  look-alike characters. A code can't be reissued while in use or for
+  10 minutes after. The leader picks the game and the party plays privately.
+  Size limits: The Bridge 2; Parkour 4 as a party, 2 from the queue;
+  Duels 4.
+- **Practice opponents**: if nobody else is queuing after 15 s, the server
+  fills the match with an opponent. It gets a generated name like everyone
+  else and nothing on the wire marks it. Its hidden level adapts during the
+  match and is remembered per player and game for the next one.
+
+## Tests
+
+```sh
+npm test            # 61 checks: names, codes, isolation, queue/party sizes, bots, 300 worlds
+npm run stress      # 300+ live worlds with 300 AI opponents: tick budget, isolation, teardown
+npm run bot-sim     # opponent strength: new vs old bots, adaptation, returning players
+```
+
+Browser end-to-end (needs a running client and server, plus any Playwright
+install):
+
+```sh
+PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs TEST_URL=http://localhost:5174 node test/e2e.mjs
+```
+
+Diagnostics: `test/parkour_trace.ts` (why a bot fell on a course) and
+`test/bridge_ledger.ts` (who wins Bridge fights and how).
+`test/bridge_scenarios.ts` plays the Bridge bot against a scripted player: walls, tunnels,
+steps, a flanking bridge, a skybridge overhead and a straight rush (`SKILL=0.55 ONLY=over VERBOSE=1`). `test/legacy_party_bot.ts`
+is VOXELON's original bot, kept only so the sim can compare against it.

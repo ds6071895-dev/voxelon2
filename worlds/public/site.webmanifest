@@ -1,0 +1,16 @@
+{
+  "name": "Worlds",
+  "short_name": "Worlds",
+  "description": "Duels, The Bridge and Parkour in your browser. Every match is a world of its own.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#080f1c",
+  "theme_color": "#080f1c",
+  "icons": [
+    { "src": "/favicon.svg", "type": "image/svg+xml", "sizes": "any", "purpose": "any" },
+    { "src": "/icon-192.png", "type": "image/png", "sizes": "192x192" },
+    { "src": "/icon-512.png", "type": "image/png", "sizes": "512x512" }
+  ]
+}
