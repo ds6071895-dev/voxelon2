@@ -19,21 +19,19 @@ import type { HudLayout, HudModId } from './hud_mods';
 
 // --- Keybinds ---------------------------------------------------------------
 
-/** Every action the player can rebind. Hotbar digits and F3/F4 stay fixed:
- *  they are positional (1-9) or developer keys, not preferences. */
+/** Every action the player can rebind. Hotbar digits and F3 stay fixed: they
+ *  are positional (1-9) or a developer key, not preferences. */
 export type BindAction =
   | 'forward' | 'back' | 'left' | 'right'
   | 'jump' | 'sneak' | 'sprint'
-  | 'inventory' | 'drop' | 'reload'
-  | 'chat' | 'dismount' | 'view' | 'zoom';
+  | 'reload' | 'view' | 'zoom';
 
 export type Keybinds = Record<BindAction, string>;
 
 export const DEFAULT_KEYBINDS: Keybinds = {
   forward: 'KeyW', back: 'KeyS', left: 'KeyA', right: 'KeyD',
   jump: 'Space', sneak: 'ShiftLeft', sprint: 'KeyQ',
-  inventory: 'KeyE', drop: 'KeyO', reload: 'KeyR',
-  chat: 'KeyT', dismount: 'KeyF', view: 'KeyV', zoom: 'KeyC',
+  reload: 'KeyR', view: 'KeyV', zoom: 'KeyC',
 };
 
 /** Display order and prose for the keybind list, grouped the way the Controls
@@ -57,7 +55,7 @@ const BIND_GROUPS: { title: string; binds: [BindAction, string, string?][] }[] =
 
 const BIND_ACTIONS = Object.keys(DEFAULT_KEYBINDS) as BindAction[];
 
-export function sanitizeKeybinds(raw: unknown): Keybinds {
+function sanitizeKeybinds(raw: unknown): Keybinds {
   const x = raw && typeof raw === 'object' ? raw as Partial<Keybinds> : {};
   const out = { ...DEFAULT_KEYBINDS };
   for (const action of BIND_ACTIONS) {
@@ -97,7 +95,7 @@ export function keyLabel(code: string): string {
 /** The font stacks on offer. All of them ship with the OS - the game loads no
  *  webfonts, and a HUD that waits on a network font would flash unstyled over
  *  the world every time it opened. */
-export const HUD_FONTS: { id: string; name: string; stack: string }[] = [
+const HUD_FONTS: { id: string; name: string; stack: string }[] = [
   { id: 'console', name: 'Console (default)', stack: "'Lucida Console', Monaco, monospace" },
   // The blocky one. Half of the look is the face and half is the RENDERING:
   // `pixel` is the only font here that also switches text antialiasing off (see
@@ -114,7 +112,7 @@ export const HUD_FONTS: { id: string; name: string; stack: string }[] = [
   { id: 'impact', name: 'Impact', stack: "Impact, 'Arial Black', sans-serif" },
 ];
 
-export interface HudTheme {
+interface HudTheme {
   /** Id from HUD_FONTS. */
   font: string;
   /** Multiplier on HUD text size, 0.8..1.4. */
@@ -129,14 +127,14 @@ export interface HudTheme {
   accentColor: string;
   /** Drop shadow under HUD text (off reads cleaner on a bright HUD). */
   textShadow: boolean;
-  /** Dark chrome for the game's PANELS - inventory, crafting, the Field Guide,
-   *  the pause menu, every menu button. Separate from the HUD colours above:
+  /** Dark chrome for the game's PANELS - the pause menu and every menu button.
+   *  Separate from the HUD colours above:
    *  those style text floating over the world, this restyles the opaque
    *  surfaces you open on top of it. */
   darkUi: boolean;
 }
 
-export const DEFAULT_HUD_THEME: HudTheme = {
+const DEFAULT_HUD_THEME: HudTheme = {
   font: 'console',
   scale: 1,
   textColor: '#ffffff',
@@ -160,7 +158,7 @@ const PRESETS: { name: string; theme: Partial<HudTheme> }[] = [
 
 const HEX = /^#[0-9a-fA-F]{6}$/;
 
-export function sanitizeHudTheme(raw: unknown): HudTheme {
+function sanitizeHudTheme(raw: unknown): HudTheme {
   const x = raw && typeof raw === 'object' ? raw as Partial<HudTheme> : {};
   const hex = (v: unknown, d: string): string =>
     typeof v === 'string' && HEX.test(v) ? v.toLowerCase() : d;
@@ -178,7 +176,7 @@ export function sanitizeHudTheme(raw: unknown): HudTheme {
   };
 }
 
-export interface HudSettings {
+interface HudSettings {
   theme: HudTheme;
   binds: Keybinds;
   /** Where the always-on HUD modules sit, and which of them are on. Owned by
@@ -484,13 +482,13 @@ html[data-ui-dark] #hud-settings {
 body.reduced-motion .hs-card, body.reduced-motion .hs-key.listening { animation:none; }
 `;
 
-export interface HudSettingsPanel {
+interface HudSettingsPanel {
   readonly open: boolean;
   show(): void;
   hide(): void;
 }
 
-export interface HudSettingsHooks {
+interface HudSettingsHooks {
   /** Live settings object; the panel mutates it in place. */
   settings: HudSettings;
   /** Called after any change, so the host can persist and re-push the binds. */
@@ -623,10 +621,10 @@ export function createHudSettingsPanel(
   pvDebug.textContent = 'XYZ: 128.500 / 71.00000 / -64.250';
   const pvChat = document.createElement('div');
   pvChat.className = 'hs-pv-line';
-  pvChat.textContent = 'Waypoint set at your position.';
+  pvChat.textContent = "You're already at full health!";
   const pvName = document.createElement('div');
   pvName.className = 'hs-pv-name';
-  pvName.textContent = 'Diamond Pickaxe';
+  pvName.textContent = 'Burst Rifle';
   const pvBar = document.createElement('div');
   pvBar.className = 'hs-pv-bar';
   for (let i = 0; i < 9; i++) {
@@ -711,7 +709,7 @@ export function createHudSettingsPanel(
   const darkSw = switchControl(
     () => settings.theme.darkUi, (v) => { settings.theme.darkUi = v; changed(); });
   row(lookPane, 'Dark mode',
-    'Dark chrome for the inventory, crafting, chests, the Field Guide and the menus.')
+    'Dark chrome for the pause menu and the other menus.')
     .appendChild(darkSw.el);
 
   for (const preset of PRESETS) {

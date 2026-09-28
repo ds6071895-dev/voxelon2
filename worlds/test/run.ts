@@ -10,6 +10,11 @@ import { isGeneratedName, normalizePartyCode, type ClientMsg, type ServerMsg } f
 import { WorldBlocks, worldGenerator } from '../src/multiverse';
 import { Block } from '../src/blocks';
 import { mulberry32 } from '../src/noise';
+import { Player } from '../src/player';
+import { FROZEN_INPUT } from '../src/input';
+import type { World } from '../src/world';
+import { RatSeekMatch } from '../src/ratseek';
+import { SeekerBot } from '../src/ratseek_bot';
 
 let passed = 0, failed = 0;
 function check(name: string, ok: boolean, detail = ''): void {
@@ -69,7 +74,7 @@ section('names never overlap');
   const ids = Array.from({ length: 400 }, () => h.join());
   const names = ids.map((id) => h.name(id).toLowerCase());
   check('400 guests get 400 distinct names', new Set(names).size === names.length);
-  check('every name is a generated name', names.every((n, i) => isGeneratedName(h.name(ids[i]))));
+  check('every name is a generated name', ids.every((id) => isGeneratedName(h.name(id))));
   // A second socket asking for a name somebody is using does not get it.
   const taken = h.name(ids[0]);
   const dup = h.join({ guest: taken });
@@ -297,6 +302,124 @@ section('world blocks');
   check('setting a cell back to authored forgets the edit', blocks.edits.size === 0);
   check('the span exists in every bridge world', before !== Block.Air);
   check('outside the venue is void', gen.blockAt(-50, 140, 40) === Block.Air && gen.blockAt(500, 140, 40) === Block.Air);
+}
+
+section('rat and seek');
+{
+  const h = new Harness(11);
+  // Solo: you are the rat, a practice seeker hunts you, after a short "finding players".
+  const a = h.join();
+  h.send(a, { t: 'play', mode: 'ratseek', ratClass: 'thief' });
+  check('solo rat and seek queues first', h.last(a, 'queue')?.mode === 'ratseek' && !h.server.worldOf(a));
+  h.tick(BOT_WAIT_MS / 1000 - 1);
+  check('and waits the usual 15 s for others', !h.server.worldOf(a));
+  h.tick(1.5);
+  const arena = h.last(a, 'rsArena');
+  check('a lone player becomes the rat', arena?.role === 'rat', JSON.stringify(arena?.role));
+  const w = h.server.worldOf(a)!;
+  const members = h.server.worldMembers(w.id);
+  check('a practice seeker joins them', members.length === 2);
+  const rs = h.server.ratSeek(w.id)!;
+  check('the seeker is the practice one', rs.botIds.size === 1 && rs.humans.size === 0 && rs.rats.has(a));
+  check('the remembered class is applied', rs.classes.get(a) === 'thief');
+  const text = JSON.stringify(h.all(a));
+  check('nothing on the wire says bot', !/"bot"|\[Bot\]|\[AI\]/.test(text));
+  h.send(a, { t: 'worldReady', world: w.id });
+  h.tick(6);
+  check('the intro and hiding start once everyone is in', ['hiding', 'intro'].includes(h.last(a, 'rsState')!.s.phase));
+  const kit = h.last(a, 'rsKit')!.slots;
+  check('the rat kit: taunt, scamper and the class rosette', kit[0]?.id === 306 && kit[1]?.id === 307 && kit[6]?.id === 317);
+  h.send(a, { t: 'rsClass', cls: 'scout' });
+  check('a class can be changed while hiding', rs.classes.get(a) === 'scout');
+
+  // Solo players who queue together hide together.
+  const h3 = new Harness(13);
+  const q = [h3.join(), h3.join(), h3.join()];
+  for (const id of q) h3.send(id, { t: 'play', mode: 'ratseek' });
+  h3.tick(BOT_WAIT_MS / 1000 + 0.5);
+  const qw = h3.server.worldOf(q[0]);
+  check('queued players share one match as rats', !!qw && q.every((id) => h3.server.worldOf(id)?.id === qw.id &&
+    h3.last(id, 'rsArena')?.role === 'rat'));
+  const four = [h3.join(), h3.join(), h3.join(), h3.join()];
+  for (const id of four) h3.send(id, { t: 'play', mode: 'ratseek' });
+  check('four in the queue start at once', four.every((id) => !!h3.server.worldOf(id)));
+
+  // Party: the leader picks who seeks.
+  const h2 = new Harness(12);
+  const [l, m1, m2] = [h2.join(), h2.join(), h2.join()];
+  h2.send(l, { t: 'partyCreate' });
+  const code = h2.last(l, 'party')!.party!.code;
+  h2.send(m1, { t: 'partyJoin', code }); h2.send(m2, { t: 'partyJoin', code });
+  h2.send(l, { t: 'play', mode: 'ratseek', seeker: m1 });
+  const pw = h2.server.worldOf(l)!;
+  const prs = h2.server.ratSeek(pw.id)!;
+  check('the picked member seeks, the rest hide, no practice seeker', prs.humans.has(m1) && prs.rats.has(l) && prs.rats.has(m2) && prs.botIds.size === 0);
+  check('the seeker is told', h2.last(m1, 'rsArena')?.role === 'human');
+  h2.send(l, { t: 'leaveMatch' }); h2.send(m1, { t: 'leaveMatch' }); h2.send(m2, { t: 'leaveMatch' });
+  h2.send(l, { t: 'play', mode: 'ratseek', seeker: 0 });
+  const pw2 = h2.server.worldOf(l)!;
+  const prs2 = h2.server.ratSeek(pw2.id)!;
+  check('or a practice seeker hunts the whole party', prs2.botIds.size === 1 && prs2.rats.size === 3 && prs2.humans.size === 0);
+}
+{
+  // Stairs and mouseholes, with the real player physics in the real manor.
+  const wb = new WorldBlocks(worldGenerator({ kind: 'ratseek', seed: 1 })).asWorld() as unknown as World;
+  const climb = (scale: number): number => {
+    const p = new Player({ x: -1, y: 81, z: -15.2 });
+    p.setBodyScale(scale);
+    p.yaw = Math.PI;
+    for (let i = 0; i < 100; i++) p.update(0.05, { ...FROZEN_INPUT, forward: true }, wb);
+    return p.pos.y;
+  };
+  check('a seeker walks up a flight of stairs without jumping', Math.abs(climb(1) - 87) < 0.05);
+  check('so does a rat', Math.abs(climb(0.5) - 87) < 0.05);
+  const crawl = (scale: number): number => {
+    const p = new Player({ x: -2.5, y: 81, z: -8.5 });
+    p.setBodyScale(scale);
+    p.yaw = Math.PI / 2;
+    for (let i = 0; i < 60; i++) p.update(0.05, { ...FROZEN_INPUT, forward: true }, wb);
+    return p.pos.x;
+  };
+  check('a rat fits through a mousehole', crawl(0.5) < -4.4);
+  check('a seeker does not', crawl(1) > -3.8);
+}
+{
+  // The twists lean with the game, silently: Spotlight while the rats run away
+  // with it, Ghost Rats while they are losing.
+  const rng = mulberry32(5);
+  const bodies = new Map<number, { x: number; y: number; z: number; yaw: number; pitch: number; sneaking: boolean }>();
+  const host = {
+    nowMs: () => 0, body: (id: number) => bodies.get(id), name: (id: number) => `P${id}`, send: () => {},
+    teleport: (id: number, x: number, y: number, z: number) => { bodies.set(id, { x, y, z, yaw: 0, pitch: 0, sneaking: false }); },
+    setBlock: () => {}, getBlock: () => Block.Air, drive: () => {},
+  };
+  const count = (standing: 'winning' | 'losing'): Record<string, number> => {
+    const m = new RatSeekMatch(host, rng, { humans: [9], bots: [], rats: [1, 2, 3, 4], classes: new Map(), skill: 0.7 });
+    const internals = m as unknown as { phase: string; huntStartTick: number; ticks: number; heat: number;
+      triggerTwist(): void; lastTwist: string | null; rats: Map<number, string> };
+    internals.phase = 'hunting';
+    const tally: Record<string, number> = {};
+    for (let i = 0; i < 2000; i++) {
+      internals.ticks = standing === 'winning' ? 4000 : 400; internals.huntStartTick = 0;
+      internals.heat = standing === 'winning' ? 0 : 1.2;
+      internals.lastTwist = null;
+      internals.triggerTwist();
+      tally[internals.lastTwist!] = (tally[internals.lastTwist!] ?? 0) + 1;
+    }
+    return tally;
+  };
+  const up = count('winning'), down = count('losing');
+  check('rats winning: Spotlight much more often', (up.spotlight ?? 0) > 3 * (up.ghost_rats ?? 0) && (up.spotlight ?? 0) > 700, JSON.stringify(up));
+  check('rats losing: Ghost Rats much more often', (down.ghost_rats ?? 0) > 3 * (down.spotlight ?? 0) && (down.ghost_rats ?? 0) > 700, JSON.stringify(down));
+}
+{
+  // The practice seeker adapts to the outcome: sharper while the rats run away
+  // with it, gentler while it is cruising.
+  const bot = new SeekerBot({} as never, 1, 0.7, mulberry32(3));
+  for (let i = 0; i < 30; i++) bot.adapt(0.8);
+  check('the seeker sharpens up against strong rats', bot.skill > 1.2, bot.skill.toFixed(2));
+  for (let i = 0; i < 60; i++) bot.adapt(-0.9);
+  check('and eases off when it is winning easily', bot.skill < 0.3, bot.skill.toFixed(2));
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

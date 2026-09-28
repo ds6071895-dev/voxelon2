@@ -13,6 +13,7 @@ import type { Cosmetics } from '../character';
 import type { DuelArenaBounds, DuelLobbySnapshot, DuelResult } from '../duels';
 import type { PartyArenaBounds, PartyLobbySnapshot, PartyResult, PartySubBounds } from '../partygames';
 import type { WorldSpec } from '../multiverse';
+import type { RatClassId, RsEffects, RsResult, RsRole, RsSnapshot, RsSound } from '../ratseek_rules';
 
 export interface Remote {
   info: PlayerInfo;
@@ -25,29 +26,21 @@ export interface Remote {
   poses: StateTimeline<RemotePose>;
   health: number;
   dead: boolean;
-  /** Always false in Worlds; kept so the avatar renderer's pose code runs as-is. */
-  gliding: boolean;
-  boating: boolean;
-  seated: boolean;
   sneaking: boolean;
   held: number;
-  armor: number[];
   swing: number;
   aiming: boolean;
   reloading: boolean;
 }
 
-export type RemotePose = Pick<Remote,
-  'gliding' | 'boating' | 'seated' | 'sneaking' | 'held' | 'armor' | 'swing' | 'aiming' | 'reloading'>;
-
-const NO_ARMOR = [0, 0, 0, 0];
+type RemotePose = Pick<Remote,
+  'sneaking' | 'held' | 'swing' | 'aiming' | 'reloading'>;
 
 function poseOf(s: { sneaking?: boolean; held?: number; swing?: number; aiming?: boolean; reloading?: boolean },
   prev?: RemotePose): RemotePose {
   return {
-    gliding: false, boating: false, seated: false, sneaking: s.sneaking === true,
+    sneaking: s.sneaking === true,
     held: typeof s.held === 'number' ? s.held : 0,
-    armor: NO_ARMOR,
     swing: typeof s.swing === 'number' ? s.swing : prev?.swing ?? 0,
     aiming: s.aiming === true, reloading: s.reloading === true,
   };
@@ -69,8 +62,6 @@ export class NetClient {
   /** Socket open and `welcome` received. */
   connected = false;
   myId = -1;
-  username = '';
-  account = false;
   /** The world this client is in (null on the menu). */
   worldId: number | null = null;
   /** Bridge/Parkour round revision the transforms are stamped with. */
@@ -96,8 +87,6 @@ export class NetClient {
   onPgArena?: (world: WorldSpec, arena: PartyArenaBounds, sub: PartySubBounds, team: number,
     spawn: { x: number; y: number; z: number }, countdownEndsAt: number, revision: number) => void;
   onLeftWorld?: () => void;
-  onRoster?: () => void;
-  onLeave?: (id: number) => void;
   onSelfHealth?: (health: number) => void;
   onEdit?: (x: number, y: number, z: number, block: number) => void;
   onEditBatch?: (edits: { x: number; y: number; z: number; block: number }[]) => void;
@@ -120,6 +109,16 @@ export class NetClient {
     dx: number; dy: number; dz: number; speed: number; power: number }) => void;
   onPgArrowEnd?: (id: number, x: number, y: number, z: number, hit: boolean) => void;
   onPgResult?: (result: PartyResult) => void;
+  onRsArena?: (world: WorldSpec, role: RsRole, spawn: { x: number; y: number; z: number }, yaw: number) => void;
+  onRsState?: (s: RsSnapshot) => void;
+  onRsKit?: (slots: (ItemStack | null)[], selected?: number) => void;
+  onRsFx?: (fx: RsEffects) => void;
+  onRsTitle?: (title: string, sub: string, color: string, ms: number) => void;
+  onRsBar?: (text: string, color: string) => void;
+  onRsMsg?: (text: string, color: string) => void;
+  onRsSound?: (kind: RsSound, at: { x: number; y: number; z: number } | null) => void;
+  onRsImpulse?: (vx: number, vy: number, vz: number, momentum: number) => void;
+  onRsResult?: (result: RsResult) => void;
 
   connect(): void {
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return;
@@ -154,13 +153,9 @@ export class NetClient {
       case 'welcome':
         this.connected = true;
         this.myId = msg.id;
-        this.username = msg.username;
-        this.account = msg.account;
         this.onWelcome?.(msg.username, msg.account, msg.cosmetics);
         break;
       case 'identity':
-        this.username = msg.username;
-        this.account = msg.account;
         this.onIdentity?.(msg.username, msg.account, msg.token, msg.cosmetics);
         break;
       case 'authErr': this.onAuthErr?.(msg.error); break;
@@ -181,7 +176,6 @@ export class NetClient {
         this.worldId = null;
         this.revision = undefined;
         this.remotes.clear();
-        this.onRoster?.();
         this.onLeftWorld?.();
         break;
       case 'join':
@@ -189,13 +183,10 @@ export class NetClient {
           const known = this.remotes.get(msg.player.id);
           if (known) known.info = msg.player;
           else this.remotes.set(msg.player.id, toRemote(msg.player));
-          this.onRoster?.();
         }
         break;
       case 'leave':
         this.remotes.delete(msg.id);
-        this.onLeave?.(msg.id);
-        this.onRoster?.();
         break;
       case 'snapshot': {
         const at = netNow();
@@ -221,11 +212,9 @@ export class NetClient {
           }
           r.health = s.health; r.dead = s.dead;
         }
-        let pruned = false;
         for (const [id, r] of this.remotes) {
-          if (at - r.seenAt > STALE_REMOTE_S) { this.remotes.delete(id); pruned = true; }
+          if (at - r.seenAt > STALE_REMOTE_S) this.remotes.delete(id);
         }
-        if (pruned) this.onRoster?.();
         break;
       }
       case 'edit': this.onEdit?.(msg.x, msg.y, msg.z, msg.block); break;
@@ -256,6 +245,19 @@ export class NetClient {
       case 'pgArrow': this.onPgArrow?.(msg); break;
       case 'pgArrowEnd': this.onPgArrowEnd?.(msg.id, msg.x, msg.y, msg.z, msg.hit); break;
       case 'pgResult': this.onPgResult?.(msg.result); break;
+      case 'rsArena':
+        this.enterWorld(msg.world.id, undefined);
+        this.onRsArena?.(msg.world, msg.role, msg.spawn, msg.yaw);
+        break;
+      case 'rsState': this.onRsState?.(msg.s); break;
+      case 'rsKit': this.onRsKit?.(msg.slots, msg.selected); break;
+      case 'rsFx': this.onRsFx?.(msg.fx); break;
+      case 'rsTitle': this.onRsTitle?.(msg.title, msg.sub, msg.color, msg.ms); break;
+      case 'rsBar': this.onRsBar?.(msg.text, msg.color); break;
+      case 'rsMsg': this.onRsMsg?.(msg.text, msg.color); break;
+      case 'rsSound': this.onRsSound?.(msg.kind, msg.x !== undefined ? { x: msg.x, y: msg.y!, z: msg.z! } : null); break;
+      case 'rsImpulse': this.onRsImpulse?.(msg.vx, msg.vy, msg.vz, msg.momentum); break;
+      case 'rsResult': this.onRsResult?.(msg.result); break;
     }
   }
 
@@ -304,6 +306,16 @@ export class NetClient {
     this.raw({ t: 'xform', world: this.worldId, revision: this.revision, x, y, z, yaw, pitch,
       ct: Math.round(netNow() * 1000), sneaking, held, swing, aiming, reloading }, true);
   }
+  /** Unthrottled transform send, for right before an edit: the server checks a
+   *  placement against the placer's body, and a pose up to 1/TRANSFORM_HZ old
+   *  still overlaps the cell you just jumped or stepped off. */
+  flushXform(x: number, y: number, z: number, yaw: number, pitch: number,
+    sneaking = false, held = 0, swing = 0, aiming = false, reloading = false): void {
+    if (!this.connected || this.worldId === null) return;
+    this.xformAcc = 0;
+    this.raw({ t: 'xform', world: this.worldId, revision: this.revision, x, y, z, yaw, pitch,
+      ct: Math.round(netNow() * 1000), sneaking, held, swing, aiming, reloading });
+  }
   sendWorldReady(): void {
     if (this.worldId !== null) this.send({ t: 'worldReady', world: this.worldId, revision: this.revision });
   }
@@ -316,6 +328,12 @@ export class NetClient {
   sendPgMelee(target: number): void { this.send({ t: 'pgMelee', target }); }
   sendPgShoot(dx: number, dy: number, dz: number, power: number): void { this.send({ t: 'pgShoot', dx, dy, dz, power }); }
   sendPgRetry(): void { this.send({ t: 'pgRetry' }); }
+  sendRsUse(slot: number, block?: { x: number; y: number; z: number; nx: number; ny: number; nz: number }): void {
+    this.send({ t: 'rsUse', slot, block });
+  }
+  sendRsHit(target: number, decoy = false): void { this.send({ t: 'rsHit', target, decoy }); }
+  sendRsClass(cls: RatClassId): void { this.send({ t: 'rsClass', cls }); }
+  sendRsSeeker(seeker: number): void { this.send({ t: 'rsSeeker', seeker }); }
 }
 
 function toRemote(p: PlayerInfo): Remote {

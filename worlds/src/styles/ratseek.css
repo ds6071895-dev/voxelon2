@@ -1,0 +1,156 @@
+/* Rat and Seek: HUD, class picker, seeker picker, results, screen effects. */
+
+.rs-hud { position: absolute; inset: 0; pointer-events: none; z-index: 12;
+  font-family: ui-sans-serif, -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif; }
+.rs-hud[hidden] { display: none; }
+
+/* Top centre: the same clock + pills as the Duels match HUD. */
+.rs-top { position: absolute; top: calc(12px + var(--safe-top, 0px)); left: 50%; transform: translateX(-50%);
+  display: flex; flex-direction: column; align-items: center; gap: 7px; }
+.rs-clock { position: relative; display: flex; align-items: baseline; gap: 9px; padding: 8px 20px 10px; border-radius: 13px;
+  border: 1px solid rgba(150,200,255,.24); color: #fff; background: rgba(6,12,22,.72); backdrop-filter: blur(9px);
+  box-shadow: 0 10px 30px rgba(0,0,0,.45); --tone: #9fd8ff; white-space: nowrap; }
+.rs-clock[data-tone="intro"] { --tone: #c3a6ff; }
+.rs-clock[data-tone="hide"] { --tone: #55e8a6; }
+.rs-clock[data-tone="final"] { --tone: #ff7d8e; border-color: rgba(255,90,110,.7); animation: rs-clock-pulse .9s ease-in-out infinite; }
+.rs-clock[data-tone="final"] strong { color: #ff7d8e; }
+@keyframes rs-clock-pulse { 50% { box-shadow: 0 0 26px rgba(255,90,110,.5), 0 10px 30px rgba(0,0,0,.45); } }
+.rs-clock small { color: color-mix(in srgb, var(--tone) 55%, #8fa8c4); font-weight: 800; font-size: 8px; line-height: 1; letter-spacing: 2px; text-transform: uppercase; }
+.rs-clock strong { font-weight: 900; font-size: 22px; line-height: 1; letter-spacing: 1px; font-variant-numeric: tabular-nums; }
+.rs-clock-bar { position: absolute; inset: auto 10px 4px; height: 2px; border-radius: 2px; background: rgba(255,255,255,.12); overflow: hidden; }
+.rs-clock-bar i { display: block; height: 100%; background: var(--tone); box-shadow: 0 0 8px var(--tone);
+  transform-origin: 0 50%; transition: transform .25s linear; }
+.rs-pills { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; }
+.rs-pills:empty { display: none; }
+.rs-pill { display: flex; align-items: center; gap: 6px; padding: 5px 11px 5px 7px; border-radius: 999px;
+  border: 1px solid rgba(150,200,255,.18); color: #d6e4f5; background: rgba(6,12,22,.66); backdrop-filter: blur(8px);
+  font-weight: 800; font-size: 11px; line-height: 1; }
+.rs-pill i { width: 9px; height: 9px; border-radius: 50%; background: var(--tone); box-shadow: 0 0 8px var(--tone); }
+.rs-pill b { color: #fff; font-weight: 950; font-variant-numeric: tabular-nums; }
+.rs-pill.free { --tone: #55e8a6; } .rs-pill.caged { --tone: #ff7d8e; }
+.rs-pill.twist { --tone: #c3a6ff; color: #fff; border-color: rgba(195,166,255,.5); }
+
+/* The seeker's compass needle, as one more pill. */
+.rs-compass { display: none; align-items: center; gap: 7px; padding: 5px 11px 5px 8px; border-radius: 999px;
+  border: 1px solid rgba(255,212,94,.45); background: rgba(6,12,22,.72); backdrop-filter: blur(8px);
+  color: #ffd45e; font-weight: 800; font-size: 11px; line-height: 1; }
+.rs-compass.show { display: inline-flex; }
+.rs-compass b { display: inline-block; color: #ffd45e; font-size: 13px; line-height: 1; transition: transform .08s linear; }
+
+/* Side panel: the Duels scoreboard's look, pinned to the right. */
+.rs-sidebar { position: absolute; right: calc(12px + var(--safe-right, 0px)); top: 50%; transform: translateY(-50%); width: 212px;
+  overflow: hidden; border-radius: 13px; border: 1px solid rgba(150,200,255,.2); background: rgba(8,14,26,.8);
+  backdrop-filter: blur(9px); box-shadow: 0 16px 40px rgba(0,0,0,.4); color: #a9bccd; font-size: 11.5px; }
+.rs-sidebar header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px;
+  border-bottom: 1px solid rgba(255,255,255,.08); }
+.rs-sidebar header span { color: #7fd3f5; font-weight: 850; font-size: 8.5px; line-height: 1; letter-spacing: 2px; text-transform: uppercase; }
+.rs-sidebar header em { font-weight: 900; font-size: 10px; line-height: 1; font-style: normal; letter-spacing: 1px; text-transform: uppercase;
+  padding: 4px 8px; border-radius: 999px; color: #1a1408; background: #ffd45e; }
+.rs-sidebar header em.human { color: #fff; background: #e5484d; }
+.rs-sidebar dl { margin: 0; padding: 4px 0; }
+.rs-sidebar dl div { display: flex; justify-content: space-between; gap: 10px; padding: 5px 12px; }
+.rs-sidebar dt { color: #6f86a0; font-weight: 800; font-size: 8.5px; line-height: 1.4; letter-spacing: 1.4px; text-transform: uppercase;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rs-sidebar dd { margin: 0; color: #fff; font-weight: 850; font-variant-numeric: tabular-nums; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.rs-sidebar .gold dd { color: #ffd45e; } .rs-sidebar .good dd { color: #55e8a6; }
+.rs-sidebar .bad dd { color: #ff7d8e; } .rs-sidebar .dim dd { color: #a9bccd; }
+.rs-side-rats { list-style: none; margin: 0; padding: 4px 0; border-top: 1px solid rgba(255,255,255,.08); }
+.rs-side-rats li { display: flex; justify-content: space-between; gap: 10px; padding: 5px 12px; }
+.rs-side-rats li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rs-side-rats li b { color: #fff; font-weight: 900; font-variant-numeric: tabular-nums; }
+.rs-side-rats li.caged { opacity: .45; } .rs-side-rats li.caged span { text-decoration: line-through; }
+.rs-side-rats li.me { color: #fff; background: rgba(70,200,236,.14); box-shadow: inset 3px 0 #46c8ec; }
+@media (max-width: 760px) { .rs-sidebar { top: calc(110px + var(--safe-top, 0px)); transform: none; width: 170px; font-size: 10.5px; } }
+
+/* Big titles: the Duels announcer. */
+.rs-title { position: absolute; left: 0; right: 0; top: 25%; text-align: center; opacity: 0; --tone: #ffb347;
+  transition: opacity .25s ease; }
+.rs-title.show { opacity: 1; }
+.rs-title b { display: block; color: var(--tone); font-weight: 950; font-size: clamp(26px, 5.6vw, 54px); line-height: 1; letter-spacing: 2px;
+  text-shadow: 0 0 40px color-mix(in srgb, var(--tone) 75%, transparent), 0 6px 24px rgba(0,0,0,.75); }
+.rs-title.show b { animation: rs-announce .55s cubic-bezier(.16,.95,.3,1) both; }
+.rs-title small { display: block; margin-top: 7px; color: #cfe0f2; font-weight: 800; font-size: 10px; line-height: 1.3; letter-spacing: 3px;
+  text-transform: uppercase; text-shadow: 0 2px 10px rgba(0,0,0,.8); }
+.rs-title.show small { animation: rs-announce-sub .5s .12s cubic-bezier(.2,.9,.25,1) both; }
+@keyframes rs-announce { from { opacity: 0; transform: scale(1.7) skewX(-9deg); } 62% { transform: scale(.95) skewX(0); opacity: 1; } to { transform: scale(1); } }
+@keyframes rs-announce-sub { from { opacity: 0; letter-spacing: 10px; } }
+
+/* Action bar: one pill above the hotbar. */
+.rs-actionbar { position: absolute; left: 50%; bottom: calc(108px + var(--safe-bottom, 0px)); transform: translateX(-50%);
+  max-width: calc(100vw - 32px); padding: 8px 14px; border-radius: 11px; --tone: #9fd8ff;
+  border: 1px solid color-mix(in srgb, var(--tone) 45%, transparent); background: rgba(6,12,22,.74); backdrop-filter: blur(8px);
+  box-shadow: 0 0 22px color-mix(in srgb, var(--tone) 22%, transparent); color: #fff; font-weight: 800; font-size: 12px; line-height: 1.2;
+  text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 0; transition: opacity .3s ease; }
+.rs-actionbar::before { content: ''; display: inline-block; width: 7px; height: 7px; margin: 0 8px 1px 0; border-radius: 50%;
+  background: var(--tone); box-shadow: 0 0 8px var(--tone); }
+.rs-actionbar.show { opacity: 1; }
+
+/* Match messages: the Duels kill-feed chips, down the left. */
+.rs-feed { position: absolute; left: calc(12px + var(--safe-left, 0px)); top: calc(14px + var(--safe-top, 0px));
+  width: min(360px, calc(50vw - 150px)); display: flex; flex-direction: column; align-items: flex-start; gap: 5px; }
+.rs-feed-row { display: flex; align-items: baseline; gap: 7px; max-width: 100%; padding: 6px 11px; border-radius: 8px; --tone: #9fd8ff;
+  border: 1px solid rgba(150,200,255,.16); box-shadow: inset 3px 0 var(--tone); color: #d3e2f3; background: rgba(6,12,22,.72);
+  backdrop-filter: blur(8px); font-weight: 750; font-size: 10.5px; line-height: 1.35; animation: rs-feed .3s cubic-bezier(.2,.9,.25,1) both;
+  transition: opacity 1s ease; }
+.rs-feed-row b { flex: none; color: var(--tone); font-weight: 950; letter-spacing: 1px; }
+.rs-feed-row.fade { opacity: 0; }
+@keyframes rs-feed { from { opacity: 0; transform: translateX(-26px); } }
+@media (max-width: 760px) { .rs-feed { top: auto; bottom: calc(150px + var(--safe-bottom, 0px)); width: calc(100vw - 24px); } }
+
+/* Blindfold, blackout, and the intro's letterbox. */
+.rs-blind, .rs-dark { position: absolute; inset: 0; pointer-events: none; z-index: 11; opacity: 0; transition: opacity .6s ease; }
+.rs-blind { background: radial-gradient(circle at 50% 50%, rgba(0,0,0,.82) 0, #000 38%); }
+.rs-dark { background: radial-gradient(circle at 50% 50%, rgba(0,0,0,.25) 0, rgba(0,0,0,.92) 45%); transition: opacity .2s ease; }
+.rs-letterbox { position: absolute; inset: 0; pointer-events: none; z-index: 11; }
+.rs-letterbox i { position: absolute; left: 0; right: 0; height: 0; background: #000; transition: height .6s cubic-bezier(.2,.9,.25,1); }
+.rs-letterbox i:first-child { top: 0; } .rs-letterbox i:last-child { bottom: 0; }
+.rs-letterbox.on i { height: 11vh; }
+
+/* The class picker. */
+.rs-picker { position: absolute; inset: 0; z-index: 40; display: none; place-items: center; padding: 16px;
+  background: rgba(6,8,14,.55); backdrop-filter: blur(3px); }
+.rs-picker.open { display: grid; }
+.rs-picker-sheet { width: min(860px, 100%); max-height: 100%; overflow: auto; padding: clamp(16px, 3vw, 26px); border-radius: 22px;
+  background: linear-gradient(170deg, #ffffff, #f4f8fb); color: #0f2233; box-shadow: 0 30px 90px rgba(0,0,0,.55);
+  font-family: ui-sans-serif, -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif; }
+.rs-picker-head h2 { margin: 0; font-size: 24px; font-weight: 900; }
+.rs-picker-head p { margin: 4px 0 14px; color: #4f6679; font-size: 13px; }
+.rs-picker-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+@media (max-width: 760px) { .rs-picker-cards { grid-template-columns: repeat(2, 1fr); } }
+.rs-class { display: grid; gap: 6px; align-content: start; justify-items: center; text-align: center; padding: 14px 10px; border: 0;
+  border-radius: 16px; cursor: pointer; background: #fff; color: inherit; font: inherit;
+  box-shadow: inset 0 0 0 1.5px #dbe6ee, 0 4px 0 #dbe6ee; transition: transform .12s ease, box-shadow .12s ease; }
+.rs-class:hover:not(.full), .rs-class:focus-visible { transform: translateY(-2px); outline: none;
+  box-shadow: inset 0 0 0 2px var(--tone), 0 6px 0 color-mix(in srgb, var(--tone) 55%, #dbe6ee); }
+.rs-class.selected { box-shadow: inset 0 0 0 3px var(--tone), 0 5px 0 color-mix(in srgb, var(--tone) 70%, #000); background: color-mix(in srgb, var(--tone) 12%, #fff); }
+.rs-class.full { opacity: .5; cursor: not-allowed; }
+.rs-class-icon { width: 56px; height: 56px; image-rendering: pixelated; }
+.rs-class b { font-size: 17px; font-weight: 900; color: color-mix(in srgb, var(--tone) 60%, #0f2233); }
+.rs-class-passive { font-size: 12px; font-weight: 700; }
+.rs-class-ability { font-size: 11.5px; color: #4f6679; }
+.rs-class-count { font-size: 11px; font-weight: 800; color: #7890a2; }
+.rs-class.selected .rs-class-count { color: #178a45; }
+.rs-picker-done { display: block; margin: 16px auto 0; min-width: 160px; padding: 11px 20px; border: 0; border-radius: 13px; cursor: pointer;
+  font-family: inherit; font-size: 14px; font-weight: 800; line-height: 1; color: #fff; background: linear-gradient(180deg, #2b3e5b, #16273d); box-shadow: 0 4px 0 #0c1624; }
+
+/* The party leader's seeker pick. */
+.rs-seeker-pick { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 16px; background: rgba(12,20,32,.45);
+  backdrop-filter: blur(4px); font-family: ui-sans-serif, -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif; }
+.rs-seeker-sheet { width: min(440px, 100%); padding: 22px; border-radius: 22px; background: #fff; color: #10202f;
+  box-shadow: 0 30px 80px rgba(10,30,50,.4); }
+.rs-seeker-sheet h2 { margin: 0; font-size: 22px; font-weight: 900; }
+.rs-seeker-sheet p { margin: 4px 0 14px; color: #5a6b7c; font-size: 13px; }
+.rs-seeker-list { display: grid; gap: 8px; }
+.rs-seeker-option { display: grid; gap: 2px; justify-items: start; padding: 12px 14px; border: 0; border-radius: 14px; cursor: pointer;
+  text-align: left; font: inherit; color: inherit; background: #f4f7fa; box-shadow: inset 0 0 0 1.5px #dde6ee; }
+.rs-seeker-option b { font-size: 15px; } .rs-seeker-option span { font-size: 12px; color: #607284; }
+.rs-seeker-option[aria-pressed="true"] { background: #e9f6fc; box-shadow: inset 0 0 0 2.5px #46c8ec; }
+.rs-seeker-option:focus-visible { outline: 2px solid #46c8ec; outline-offset: 2px; }
+.rs-seeker-controls { display: flex; gap: 8px; margin-top: 16px; }
+.rs-seeker-controls button { flex: 1; min-height: 46px; border: 0; border-radius: 13px; cursor: pointer; font-family: inherit; font-size: 14px; font-weight: 800; line-height: 1;
+  color: #10202f; background: #fff; box-shadow: inset 0 0 0 1.5px #dde6ee, 0 4px 0 #dde6ee; }
+.rs-seeker-controls button.primary { color: #fff; background: linear-gradient(180deg, #2b3e5b, #16273d); box-shadow: 0 4px 0 #0c1624; }
+
+body.reduced-motion .rs-title b, body.reduced-motion .rs-title small,
+body.reduced-motion .rs-feed-row { animation: none; }

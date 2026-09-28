@@ -34,9 +34,6 @@ const CELL = 5;
 const REACH = 4;
 
 export class TitleTerrain implements WorldGenerator {
-  // Scenery rides the 'parkour' kind: nothing reads a title world's kind, and
-  // it keeps the multiverse's kind union about real match worlds.
-  readonly kind = 'parkour' as const;
   readonly bounds: WorldBounds = { minX: -HALF, maxX: HALF, minZ: -HALF, maxZ: HALF };
   readonly minY = MIN_Y;
   readonly maxY = 200;
@@ -115,7 +112,7 @@ export class TitleTerrain implements WorldGenerator {
     return Block.Grass;
   }
 
-  private columnBlock(x: number, y: number, z: number, h: number, top: number): number {
+  private columnBlock(y: number, h: number, top: number): number {
     if (y > h) return y <= TITLE_SEA ? Block.Water : Block.Air;
     if (y === h) return top;
     if (top === Block.Sand) return y > h - 3 ? Block.Sand : Block.Stone;
@@ -221,7 +218,7 @@ export class TitleTerrain implements WorldGenerator {
     const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
     if (bx < -HALF || bx >= HALF || bz < -HALF || bz >= HALF || by < MIN_Y || by > this.maxY) return Block.Air;
     const h = this.height(bx, bz), top = this.surface(bx, bz, h);
-    const ground = this.columnBlock(bx, by, bz, h, top);
+    const ground = this.columnBlock(by, h, top);
     if (ground !== Block.Air) return ground;
     let found: number = Block.Air;
     const g0x = Math.floor((bx - REACH) / CELL), g1x = Math.floor((bx + REACH) / CELL);
@@ -251,7 +248,7 @@ export class TitleTerrain implements WorldGenerator {
         const low = Math.min(h, this.height(wx + 1, wz), this.height(wx - 1, wz),
           this.height(wx, wz + 1), this.height(wx, wz - 1));
         for (let y = Math.max(MIN_Y, low - 2); y <= Math.max(h, TITLE_SEA); y++) {
-          const block = this.columnBlock(wx, y, wz, h, top);
+          const block = this.columnBlock(y, h, top);
           if (block !== Block.Air) chunk.set(lx, y, lz, block);
         }
         const plant = this.plantOn(wx, wz, h, top);

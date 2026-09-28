@@ -11,7 +11,7 @@
 import { sanitizeCosmetics, type Cosmetics } from '../character';
 import { isGeneratedName, isGameMode, skinSeed, type GameMode } from './protocol';
 
-export interface Account {
+interface Account {
   username: string;
   salt: string;
   hash: string;
@@ -27,7 +27,7 @@ export interface Account {
 /** Deterministic password hasher: (password, salt) -> hex digest. */
 export type Hasher = (password: string, salt: string) => string;
 
-export interface AuthResult { ok: boolean; error?: string; account?: Account }
+interface AuthResult { ok: boolean; error?: string; account?: Account }
 
 const MIN_PASS = 4;
 const MAX_PASS = 128;

@@ -1,16 +1,16 @@
 // On-screen touch controls (phones/tablets). Everything funnels into the SAME
 // Input fields the keyboard/mouse write, so gameplay code (player, interact,
-// guns, glider, boats…) never special-cases touch:
+// guns, bows…) never special-cases touch:
 //
 //   · left virtual joystick  — move (8-way); push past the rim to sprint
 //   · drag anywhere else     — look around
 //   · tap                    — use / place / open (right-click)
 //   · long-press (and hold)  — mine / attack / fire (left button held)
-//   · JUMP button (hold)     — jump, swim up, deploy/stow glider, hop out of boat
+//   · JUMP button (hold)     — jump, swim up
 //   · SNEAK toggle           — sneak on/off
 //   · gun cluster            — FIRE (hold) / AIM toggle (ADS) / R reload,
 //                              shown only while a gun is selected
-//   · top-right utility row  — inventory / commands / pause
+//   · top-right utility row  — pause
 //   · tap a hotbar slot      — select it
 //
 // The whole overlay only exists on touch devices (isTouchDevice()).
@@ -25,27 +25,18 @@ export function isTouchDevice(): boolean {
 }
 
 /** What main.ts tells the overlay each frame. */
-export interface TouchState {
+interface TouchState {
   /** In the game world (not the title screen). Shows the utility row. */
   shown: boolean;
   /** Actively controlling (locked, alive, no menu). Shows the pads. */
   playing: boolean;
   /** A gun is selected — show the FIRE/AIM/RELOAD cluster. */
   gun: boolean;
-  /** Riding a helicopter: show a dedicated exit button. */
-  vehicle: boolean;
-  vehicleLabel: string;
-  /** Pilot has a rope control available. */
-  rope: boolean;
 }
 
-export interface TouchCallbacks {
-  /** Utility-row buttons — main.ts routes these through its own toggles. */
+interface TouchCallbacks {
+  /** The utility row's pause button — main.ts routes it through its own toggle. */
   onPause(): void;
-  onInventory(): void;
-  /** Open the command box (touch devices have no T key). The map, Warfare
-   *  Command, waypoints and the guide all live behind /map, /warfare, etc. */
-  onChat(): void;
 }
 
 const LOOK_SENS = 2.3;      // css px -> mouseDX units (≈ mouse movementX feel)
@@ -59,10 +50,8 @@ export class TouchControls {
   private readonly input: Input;
   private readonly root: HTMLElement;
   private readonly pads: HTMLElement;    // gameplay zones (joystick, look, buttons)
-  private readonly utils: HTMLElement;   // inventory / map / pause row
+  private readonly utils: HTMLElement;   // pause row
   private readonly gunBox: HTMLElement;  // FIRE / AIM / RELOAD cluster
-  private readonly vehicleBtn: HTMLElement;
-  private readonly ropeBtn: HTMLElement;
   private readonly knob: HTMLElement;
   private readonly sneakBtn: HTMLElement;
   private readonly aimBtn: HTMLElement;
@@ -190,7 +179,7 @@ export class TouchControls {
     stick.addEventListener('pointercancel', stickEnd);
 
     // --- action buttons ---
-    // JUMP: hold-to-hold (swimming, glider deploy, boat hop-out all read it).
+    // JUMP: hold-to-hold (swimming reads it too).
     const jumpBtn = this.mkBtn(this.pads, iconSvg('chevronUp'), 'right:24px;bottom:104px;width:88px;height:88px;font-size:30px;');
     jumpBtn.classList.add('t-jump');
     this.hold(jumpBtn, (down) => { this.input.tJump = down; });
@@ -201,15 +190,6 @@ export class TouchControls {
       this.input.tSneak = !this.input.tSneak;
       this.sneakBtn.classList.toggle('t-on', this.input.tSneak);
     });
-
-    this.vehicleBtn = this.mkBtn(
-      this.pads, 'EXIT', 'right:134px;bottom:108px;width:64px;height:48px;font-size:13px;');
-    this.vehicleBtn.classList.add('t-sq');
-    this.tap(this.vehicleBtn, () => { this.input.dismountPressed = true; });
-    this.ropeBtn = this.mkBtn(
-      this.pads, 'ROPE', 'right:206px;bottom:108px;width:64px;height:48px;font-size:12px;');
-    this.ropeBtn.classList.add('t-sq');
-    this.tap(this.ropeBtn, () => { this.input.reloadPressed = true; });
 
     // Gun cluster (only visible while a gun is selected).
     this.gunBox = document.createElement('div');
@@ -228,8 +208,8 @@ export class TouchControls {
     reloadBtn.classList.add('t-reload');
     this.tap(reloadBtn, () => { this.input.reloadPressed = true; });
 
-    // --- utility row (kept visible while any in-game menu is open, so the
-    // same button that opened the inventory/map can close it again) ---
+    // --- utility row (kept visible while the pause menu is open, so the same
+    // button that opened it can close it again) ---
     this.utils = document.createElement('div');
     this.utils.className = 't-utils';
     this.utils.style.cssText = 'position:absolute;top:8px;right:8px;display:flex;gap:8px;pointer-events:none;';
@@ -239,8 +219,6 @@ export class TouchControls {
       b.classList.add('t-sq');
       this.tap(b, fn);
     };
-    util(iconSvg('backpack'), cb.onInventory);
-    util('/', cb.onChat);       // command box (/map, /warfare, /tpa, /guide…)
     util(iconSvg('pause'), cb.onPause);
 
     // --- hotbar: tap a slot to select it ---
@@ -262,9 +240,6 @@ export class TouchControls {
     this.root.style.display = s.shown ? '' : 'none';
     this.pads.style.display = s.playing ? '' : 'none';
     this.gunBox.style.display = s.playing && s.gun ? '' : 'none';
-    this.vehicleBtn.style.display = s.playing && s.vehicle ? '' : 'none';
-    this.vehicleBtn.textContent = s.vehicleLabel;
-    this.ropeBtn.style.display = s.playing && s.rope ? '' : 'none';
     if (!s.gun && this.aimOn) this.setAim(false);
     if (this.wasPlaying && !s.playing) this.resetTransient();
     this.wasPlaying = s.playing;

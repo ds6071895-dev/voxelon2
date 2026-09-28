@@ -4,7 +4,7 @@
 // Every avatar part is a shaded box whose faces already carry the cosmetic
 // colour in vertex colours. These textures are pure grayscale MULTIPLIERS laid
 // over that colour, so they add material — cloth weave, denim twill, hair
-// strands, brushed metal — without touching a single palette value or
+// strands, leather — without touching a single palette value or
 // cosmetic choice.
 //
 // Each texture is 16x16 and maps 0..1 across every box face (BoxGeometry's
@@ -14,9 +14,7 @@
 
 import * as THREE from 'three';
 
-export type AvatarSurface =
-  | 'skin' | 'cloth' | 'camo' | 'webbing' | 'denim' | 'hair' | 'leather' | 'metal'
-  | 'wood' | 'none';
+export type AvatarSurface = 'skin' | 'cloth' | 'denim' | 'hair' | 'leather' | 'none';
 
 const SIZE = 16;
 
@@ -92,39 +90,6 @@ function buildPattern(surface: AvatarSurface): Pattern {
       p.border(200, -14);
       return p;
     }
-    case 'camo': {
-      // Tonal disruptive pattern: three shades of whatever colour the uniform
-      // is, in chunky blotches. Because it is a multiplier it works on every
-      // faction colour — a crimson side wears crimson camo — and it is what
-      // makes a plain shirt read as a battle-dress uniform.
-      const p = new Pattern(250);
-      for (let y = 0; y < SIZE; y++) {
-        for (let x = 0; x < SIZE; x++) {
-          const big = noise(x >> 2, y >> 2, 71);
-          const mid = noise((x + 1) >> 1, (y + 2) >> 1, 73);
-          const blot = big * 0.62 + mid * 0.38;
-          const tone = blot > 0.66 ? 196 : blot > 0.44 ? 224 : 250;
-          p.set(x, y, tone + ((x + y) & 1 ? 3 : -3) + (noise(x, y, 79) - 0.5) * 6);
-        }
-      }
-      for (let i = 2; i < SIZE - 2; i += 2) { p.add(2, i, -18); p.add(SIZE - 3, i, -18); }
-      p.border(196, -12);
-      return p;
-    }
-    case 'webbing': {
-      // Load-bearing webbing: horizontal rows of stitched nylon loops (MOLLE),
-      // the texture that makes a slab of colour read as a plate carrier.
-      const p = new Pattern(238);
-      for (let y = 0; y < SIZE; y++) {
-        const loop = (y % 4 === 1) ? -26 : (y % 4 === 2) ? 8 : 0;
-        for (let x = 0; x < SIZE; x++) {
-          const tack = (y % 4 === 1 && x % 4 === 0) ? -14 : 0;
-          p.set(x, y, 236 + loop + tack + (noise(x, y, 83) - 0.5) * 8);
-        }
-      }
-      p.border(176, -14);
-      return p;
-    }
     case 'denim': {
       // Twill: staggered horizontal dashes read as diagonal ribbing without
       // skewing when the face is taller than it is wide, plus a worn hem.
@@ -172,41 +137,6 @@ function buildPattern(surface: AvatarSurface): Pattern {
         p.set(3, i, 255); p.set(SIZE - 4, i, 255);
       }
       p.border(178, -16);
-      return p;
-    }
-    case 'metal': {
-      // Brushed plate: horizontal tool marks, a lit top bevel, a shadowed
-      // bottom bevel, and a rivet in each corner.
-      const p = new Pattern(240);
-      for (let y = 0; y < SIZE; y++) {
-        const streak = (noise(0, y, 41) - 0.5) * 16;
-        for (let x = 0; x < SIZE; x++) {
-          p.set(x, y, 241 + streak + (noise(x, y, 43) - 0.5) * 9);
-          if (noise(x, y, 47) > 0.978) p.add(x, y, -26); // scuff
-        }
-      }
-      for (let x = 1; x < SIZE - 1; x++) {
-        p.set(x, 1, 255); p.set(x, 2, 252);          // catch light along the top
-        p.set(x, SIZE - 2, 198); p.set(x, SIZE - 3, 214); // shadow under the lip
-      }
-      for (const [rx, ry] of [[3, 3], [SIZE - 4, 3], [3, SIZE - 4], [SIZE - 4, SIZE - 4]]) {
-        p.set(rx, ry, 255); p.set(rx + 1, ry, 206);
-        p.set(rx, ry + 1, 214); p.set(rx + 1, ry + 1, 190);
-      }
-      p.border(172, -18);
-      return p;
-    }
-    case 'wood': {
-      // Vertical grain with a couple of knots — the boat hull and props.
-      const p = new Pattern(238);
-      for (let x = 0; x < SIZE; x++) {
-        const plank = noise(x, 0, 53) > 0.8 ? -30 : 0;
-        for (let y = 0; y < SIZE; y++) {
-          const grain = Math.sin(x * 1.7 + noise(0, y >> 2, 59) * 3) * 9;
-          p.set(x, y, 236 + plank + grain + (noise(x, y, 61) - 0.5) * 8);
-        }
-      }
-      p.border(186, -14);
       return p;
     }
     default:

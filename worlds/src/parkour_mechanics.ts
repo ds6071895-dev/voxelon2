@@ -11,7 +11,7 @@ import type { ParkourCell, ParkourCourse, ParkourPlatform } from './parkour_cour
 // and the solid windows OVERLAP by a tenth of it either way, so there is
 // always a moment when both are up — the moment to jump from one to the other.
 
-export const BLINK_PERIOD_MS = 3200;
+const BLINK_PERIOD_MS = 3200;
 /** How long before a blink stone goes that it starts to flicker. */
 export const BLINK_WARN_MS = 450;
 export function blinkSolid(group: 0 | 1, tMs: number): boolean {
@@ -59,13 +59,13 @@ export function parkourCollapseFront(tMs: number): number {
 
 // ── Throw pads ─────────────────────────────────────────────────────────────
 
-export interface PadImpulse { vx: number; vy: number; vz: number; momentum: number }
+interface PadImpulse { vx: number; vy: number; vz: number; momentum: number }
 const DIRS: readonly (readonly [number, number])[] = [[0, 1], [1, 0], [0, -1], [-1, 0]];
 
 /** The velocity a throw pad sets. A launch pad goes almost straight up — to
  *  a ledge four blocks higher and one block on. A boost pad goes long and
- *  flat, and hands the flight the grapple's momentum window so ordinary air
- *  control does not drag it back to running pace. */
+ *  flat, and hands the flight a momentum window so ordinary air control does
+ *  not drag it back to running pace. */
 export function parkourPadImpulse(p: ParkourPlatform): PadImpulse {
   const [dx, dz] = DIRS[p.heading];
   if (p.kind === 'launch') return { vx: dx * 4.8, vy: 18, vz: dz * 4.8, momentum: 0 };

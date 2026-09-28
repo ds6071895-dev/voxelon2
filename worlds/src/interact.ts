@@ -7,21 +7,19 @@ import * as THREE from 'three';
 import { Block, BLOCKS, isReplaceable } from './blocks';
 import type { Input } from './input';
 import type { Inventory } from './inventory';
-import { ITEMS, miningStats } from './items';
+import { breakTime as blockBreakTime, ITEMS } from './items';
 import type { Player } from './player';
 import type { World } from './world';
 
-export const REACH = 4.5;
+const REACH = 4.5;
 const PLACE_REPEAT = 0.25; // vanilla holds place every 4 ticks
 
-export interface RayHit {
+interface RayHit {
   x: number; y: number; z: number;
   nx: number; ny: number; nz: number;
-  /** World hit point on the targeted face. */
-  hx: number; hy: number; hz: number;
 }
 
-export function raycastBlocks(
+function raycastBlocks(
   world: World, origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number,
 ): RayHit | null {
   let x = Math.floor(origin.x);
@@ -47,7 +45,7 @@ export function raycastBlocks(
     }
     const id = world.getBlock(x, y, z);
     if (id !== Block.Air && id !== Block.Water && id !== Block.Barrier) {
-      return { x, y, z, nx, ny, nz, hx: origin.x + dir.x * t, hy: origin.y + dir.y * t, hz: origin.z + dir.z * t };
+      return { x, y, z, nx, ny, nz };
     }
   }
   return null;
@@ -133,11 +131,11 @@ export class Interaction {
       this.breakProgress = 0;
       return;
     }
-    const { time: breakTime } = miningStats(info, this.inventory.selectedStack);
+    const breakTime = blockBreakTime(info, this.inventory.selectedStack);
     this.breakProgress += dt;
     if (this.breakProgress >= breakTime) {
       this.onBlockSound?.('break', id, t.x, t.y, t.z);
-      this.world.setBlock(t.x, t.y, t.z, Block.Air, false);
+      this.world.setBlock(t.x, t.y, t.z, Block.Air);
       this.onEdit?.(t.x, t.y, t.z, 0);
       this.breakKey = ''; this.breakProgress = 0; this.crackMesh.visible = false;
       this.onAction?.();
@@ -165,7 +163,7 @@ export class Interaction {
     if (!isReplaceable(this.world.getBlock(px, py, pz)) || py < 0 || py >= 256) return;
     if (this.canEdit && !this.canEdit(px, py, pz)) return;
     if (this.canPlace && !this.canPlace(px, py, pz, blockId)) return;
-    if (BLOCKS[blockId].solid && this.player.intersectsBlock(px, py, pz, blockId)) return;
+    if (BLOCKS[blockId].solid && this.player.intersectsBlock(px, py, pz)) return;
     this.world.setBlock(px, py, pz, blockId);
     this.onEdit?.(px, py, pz, blockId);
     this.onBlockSound?.('place', blockId, px, py, pz);

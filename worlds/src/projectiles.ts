@@ -45,7 +45,6 @@ export class Projectiles {
   private readonly list: Projectile[] = [];
   // A unit-length bar stretched per-round to the gun's tracer length.
   private readonly bulletGeo = new THREE.BoxGeometry(0.055, 0.055, 1);
-  private readonly rocketGeo = new THREE.BoxGeometry(0.16, 0.16, 0.42);
   private readonly bulletMat = new THREE.MeshBasicMaterial({
     color: 0xffe9a0, blending: THREE.AdditiveBlending,
     transparent: true, depthWrite: false,
@@ -56,7 +55,6 @@ export class Projectiles {
     color: 0xff9440, blending: THREE.AdditiveBlending,
     transparent: true, depthWrite: false,
   });
-  private readonly rocketMat = new THREE.MeshBasicMaterial({ color: 0xcc4434 });
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -69,20 +67,14 @@ export class Projectiles {
 
   fire(origin: THREE.Vector3, dir: THREE.Vector3, gun: GunInfo, ghost = false): void {
     const d = dir.clone().normalize();
-    const rocket = gun.rocket === true;
-    const mesh = new THREE.Mesh(
-      rocket ? this.rocketGeo : this.bulletGeo,
-      rocket ? this.rocketMat : (ghost ? this.ghostMat : this.bulletMat),
-    );
+    const mesh = new THREE.Mesh(this.bulletGeo, ghost ? this.ghostMat : this.bulletMat);
     const pos = origin.clone().addScaledVector(d, SPAWN_OFFSET);
     mesh.position.copy(pos);
-    // Both shapes run along their local +Z, so aim that axis down the flight
-    // path — for the tracer this is what turns the round into a streak.
+    // The bar runs along its local +Z, so aim that axis down the flight path —
+    // this is what turns the round into a streak.
     mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), d);
-    if (!rocket) {
-      mesh.scale.z = Math.max(
-        TRACER_MIN, Math.min(TRACER_MAX, gun.speed * TRACER_PER_SPEED));
-    }
+    mesh.scale.z = Math.max(
+      TRACER_MIN, Math.min(TRACER_MAX, gun.speed * TRACER_PER_SPEED));
     this.scene.add(mesh);
     this.list.push({ mesh, pos, dir: d, gun, traveled: 0, alive: true, ghost });
   }
@@ -103,9 +95,7 @@ export class Projectiles {
         p.traveled += step;
         remaining -= step;
         this.collideAt(p, SWEEP_FROM);
-        if (p.alive && p.traveled >= p.gun.range) {
-          this.despawn(p, p.gun.rocket === true); // rockets airburst at max range
-        }
+        if (p.alive && p.traveled >= p.gun.range) this.despawn(p, false);
       }
       if (p.alive) p.mesh.position.copy(p.pos);
     }
@@ -114,11 +104,11 @@ export class Projectiles {
     }
   }
 
-  /** Test this sub-step against players, mobs, then blocks. Players are swept
+  /** Test this sub-step against players, then blocks. Players are swept
    *  over the whole `from`->`p.pos` segment; the rest test the end point. */
   private collideAt(p: Projectile, from: THREE.Vector3): void {
     // A ghost round only needs to know WHERE to stop, so it tests geometry and
-    // nothing else: no damage, no hit report, no encounter/mob interaction.
+    // nothing else: no damage, no hit report.
     if (p.ghost) {
       if (this.remotePlayers.avatarAtSegment(from, p.pos) >= 0 || this.hitsLocalPlayer(p.pos) ||
           isSolid(this.world.getBlock(
@@ -130,7 +120,7 @@ export class Projectiles {
     // Remote player (PvP): the server validates + applies the damage.
     const pid = this.remotePlayers.avatarAtSegment(from, p.pos);
     if (pid >= 0) {
-      if (p.gun.rocket !== true) this.net.sendRangedAttack(pid, p.gun.damage);
+      this.net.sendRangedAttack(pid, p.gun.damage);
       this.despawn(p, true);
       return;
     }

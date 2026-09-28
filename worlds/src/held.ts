@@ -1,8 +1,8 @@
 // First-person held item in the bottom-right: mini-block or sprite parented
-// to the camera, with a swing animation while mining/placing, and — for guns —
-// a full weapon-feel layer: spring recoil, a cycling action (slide, bolt, pump,
-// warhead), sight-aligned aim-down-sights, look-lag sway, walk bob, a draw
-// animation, choreographed reloads, muzzle flash, smoke and flying brass.
+// to the camera, with a swing animation while mining/placing, and — for the
+// gun — a full weapon-feel layer: spring recoil, a cycling bolt, sight-aligned
+// aim-down-sights, look-lag sway, walk bob, a draw animation, a choreographed
+// reload, muzzle flash, smoke and flying brass.
 
 import * as THREE from 'three';
 import { itemGeometry } from './item_geometry';
@@ -14,7 +14,7 @@ import { skinColorFor } from './remoteplayers';
  *  still reads against a dark screen edge. */
 import { Cosmetics, SHIRT_COLORS, defaultCosmetics } from './character';
 import type { Atlas } from './textures';
-import { createGunModel, poseGunModel, gunFeel, GunFeel } from './gunmodels';
+import { createGunModel, poseGunModel, GUN_FEEL } from './gunmodels';
 import { createGadgetModel, isModeledGadget, poseGadgetModel } from './gadgetmodels';
 import { HEAL_BEAT } from './healuse';
 import { createBowModel, poseBowModel, poseBowDraw } from './bowmodel';
@@ -43,11 +43,10 @@ const CAMERA_KICK = 0.2;
 // depth), so this is purely about how much gun you want in frame — pulling it
 // to the sight's own eye relief would bury the camera inside the receiver.
 const ADS_Z = -0.66;
-// A scoped weapon is the exception: the eye goes right behind the eyepiece, so
-// the tube frames the whole sight picture the way a scope is supposed to.
-const EYE_RELIEF = 0.13;
 
 const FLASH_CORE = 0xfff2c4, FLASH_FRINGE = 0xff9c38;
+/** Seconds the Bounce Pad's spring snap plays. */
+const BOUNCE_S = 0.42;
 const MAX_SHELLS = 10, MAX_SMOKE = 14;
 
 interface Shell {
@@ -68,7 +67,7 @@ interface Puff {
 }
 
 /** Mechanical noises the view asks for, so audio stays in main. */
-export type GunSound = 'cycle' | 'magOut' | 'magIn' | 'shellDrop';
+type GunSound = 'cycle' | 'magOut' | 'magIn';
 
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
@@ -92,8 +91,6 @@ export class HeldItemView {
   private mesh: THREE.Object3D | null = null;
   private currentItem: number | null = null;
   private swingT = 1; // 0..1, animating while < 1
-  /** The current swing is a full-charge axe release (a wider, heavier arc). */
-  private heavySwing = false;
   /** Fires once whenever a new hand/tool swing begins. */
   onSwing?: () => void;
   /** Fires when the weapon's action makes a noise worth hearing. */
@@ -106,30 +103,24 @@ export class HeldItemView {
   private isGadgetModel = false;
   /** A placeable block: shown as a bare mini-cube, with no fist behind it. */
   private isBlockItem = false;
-  private feel: GunFeel = gunFeel(-1);
   private readonly atlas: Atlas;
 
-  // Per-gun scene-graph handles, refreshed on every item change.
+  // Gun/gadget scene-graph handles, refreshed on every item change.
   private modelMats: THREE.MeshBasicMaterial[] = [];
   private partCycle: THREE.Object3D | null = null;
   private partMag: THREE.Object3D | null = null;
-  private partBipod: THREE.Object3D | null = null;
   private partStock: THREE.Object3D | null = null;
   private anchorMuzzle: THREE.Object3D | null = null;
   private anchorEject: THREE.Object3D | null = null;
   private anchorSight: THREE.Object3D | null = null;
   private anchorGrip2: THREE.Object3D | null = null;
-  private partSpool: THREE.Object3D | null = null;
   private partPad: THREE.Object3D | null = null;
   private partSpring: THREE.Object3D | null = null;
 
   // Animation state.
   private equipT = 1;          // 0..1 draw animation
-  private cycleT = -1;         // seconds into the action's cycle (-1 = idle)
-  private cycleDelay = 0;      // wait before a hand-worked action starts
-  private ejected = false;     // one case per cycle
+  private cycleT = -1;         // seconds into the bolt's cycle (-1 = idle)
   private pendingShot = false; // spawn flash/brass on the next update
-  private chambered = true;    // a fired single-shot tube stays empty until reloaded
   private recoilPulse = 0;     // 0..1 decaying, for the third-person body
   private kickZ = 0;
   private kickY = 0;
@@ -149,11 +140,9 @@ export class HeldItemView {
   private lastYaw = 0;
   private lastPitch = 0;
   private reloadStage = -1;    // last reload progress seen, for one-shot cues
-  private gadgetBeat: 'grappleFire' | 'grappleRelease' | 'bounce' | null = null;
-  private gadgetBeatT = 0;
-  private gadgetSpin = 0;
-  private spoolAngle = 0;
-  private grappleReeling = false;
+  /** The Bounce Pad firing: its spring snap is playing. */
+  private bouncing = false;
+  private bounceT = 0;
 
   // Muzzle flash: a stretched additive burst plus a two-quad star.
   private readonly flash: THREE.Group;
@@ -177,6 +166,9 @@ export class HeldItemView {
   private readonly offArm: THREE.Group;
   private readonly baseSkin = new THREE.Color(0xc89a6a);
   private readonly baseSleeve = new THREE.Color(0x3f6f9c);
+  private readonly ownSkin = new THREE.Color(0xc89a6a);
+  private readonly ownSleeve = new THREE.Color(0x3f6f9c);
+  private paws = false;
 
   private readonly scratch = new THREE.Vector3();
   private readonly scratchB = new THREE.Vector3();
@@ -278,9 +270,18 @@ export class HeldItemView {
   /** Tint the first-person hand to the local player's skin tone — cosmetics-
    *  aware (so your own hand matches the avatar everyone else sees). */
   setSkin(seed: number, cosmetics?: Cosmetics): void {
-    this.baseSkin.copy(skinColorFor(seed, cosmetics));
     const c = cosmetics ?? defaultCosmetics(seed);
-    this.baseSleeve.setHex(SHIRT_COLORS[c.shirt]?.hex ?? SHIRT_COLORS[0].hex);
+    this.ownSkin.copy(skinColorFor(seed, cosmetics));
+    this.ownSleeve.setHex(SHIRT_COLORS[c.shirt]?.hex ?? SHIRT_COLORS[0].hex);
+    if (!this.paws) { this.baseSkin.copy(this.ownSkin); this.baseSleeve.copy(this.ownSleeve); }
+  }
+
+  /** Rat and Seek: a rat's first-person "arm" is a furry leg and a pink paw. */
+  setPaws(on: boolean): void {
+    if (on === this.paws) return;
+    this.paws = on;
+    if (on) { this.baseSkin.setHex(0xe8a0a8); this.baseSleeve.setHex(0x6b4a35); }
+    else { this.baseSkin.copy(this.ownSkin); this.baseSleeve.copy(this.ownSleeve); }
   }
 
   /** Show only in active first-person gameplay; item state is tracked separately. */
@@ -291,36 +292,32 @@ export class HeldItemView {
 
   setItem(id: number | null): void {
     // Keep the final consumed pad in view long enough to finish its spring snap.
-    if (id === null && this.currentItem === Item.JumpBoost && this.gadgetBeat === 'bounce') return;
+    if (id === null && this.currentItem === Item.JumpBoost && this.bouncing) return;
     if (id === this.currentItem) return;
     this.currentItem = id;
     this.bowPower = 0;
     this.bowReleaseT = 1;
     this.isGun = id !== null && !!ITEMS[id]?.gun;
     this.isGadgetModel = id !== null && isModeledGadget(id);
-    // A modelled block item (the torch) is held in the fist, not floated.
-    this.isBlockItem = id !== null && ITEMS[id]?.kind === 'block' && !this.isGadgetModel;
-    this.feel = gunFeel(id ?? -1);
+    this.isBlockItem = id !== null && ITEMS[id]?.kind === 'block';
     if (this.mesh) {
       this.pivot.remove(this.mesh);
       this.mesh = null;
     }
     for (const m of this.modelMats) m.dispose();
     this.modelMats = [];
-    this.partCycle = this.partMag = this.partBipod = this.partStock = null;
+    this.partCycle = this.partMag = this.partStock = null;
     this.anchorMuzzle = this.anchorEject = this.anchorSight = this.anchorGrip2 = null;
-    this.partSpool = this.partPad = this.partSpring = null;
-    this.gadgetBeat = null;
-    this.gadgetSpin = 0;
-    this.grappleReeling = false;
+    this.partPad = this.partSpring = null;
+    this.bouncing = false;
     this.cycleT = -1;
     this.flashT = 1;
     this.flash.visible = false;
     if (id !== null) {
       if (this.isGun) {
-        const model = createGunModel(id);
+        const model = createGunModel();
         poseGunModel(model, 'firstPerson');
-        // Guns share cached geometry AND materials with every other copy in the
+        // The gun shares cached geometry AND materials with every other copy in the
         // world, so the first-person one needs its own material instances
         // before it can be tinted by the light where the player is standing.
         model.traverse((o) => {
@@ -331,9 +328,8 @@ export class HeldItemView {
           m.material = mat;
         });
         this.mesh = model;
-        this.partCycle = model.getObjectByName(this.feel.cyclePart) ?? null;
+        this.partCycle = model.getObjectByName(GUN_FEEL.cyclePart) ?? null;
         this.partMag = model.getObjectByName('mag') ?? null;
-        this.partBipod = model.getObjectByName('bipod') ?? null;
         this.partStock = model.getObjectByName('stock') ?? null;
         this.anchorMuzzle = model.getObjectByName('muzzle') ?? null;
         this.anchorEject = model.getObjectByName('eject') ?? null;
@@ -350,17 +346,16 @@ export class HeldItemView {
           o.material = mat;
         });
       } else if (this.isGadgetModel) {
-        const model = createGadgetModel(id);
+        const model = createGadgetModel();
         poseGadgetModel(model, 'firstPerson');
         model.traverse((o) => {
           const mesh = o as THREE.Mesh;
-          if (!mesh.isMesh || mesh.userData.glow) return; // flames stay lit
+          if (!mesh.isMesh) return;
           const mat = (mesh.material as THREE.MeshBasicMaterial).clone();
           this.modelMats.push(mat);
           mesh.material = mat;
         });
         this.mesh = model;
-        this.partSpool = model.getObjectByName('spool') ?? null;
         this.partPad = model.getObjectByName('pad') ?? null;
         this.partSpring = model.getObjectByName('spring') ?? null;
       } else {
@@ -416,13 +411,12 @@ export class HeldItemView {
   /** 0 at rest, 1 at the middle of the current swing. */
   swingAmount(): number {
     if (this.swingT >= 1) return 0;
-    // The heavy arc overshoots and lingers: same phase, wider reach.
-    return Math.sin(this.swingT * Math.PI) * (this.heavySwing ? 1.45 : 1);
+    return Math.sin(this.swingT * Math.PI);
   }
 
   /** Gun fired: punch the recoil springs, pop the flash, work the action. */
   recoil(): void {
-    const f = this.feel.kick;
+    const f = GUN_FEEL.kick;
     const braced = 1 - this.aimT * 0.3; // shouldered = less throw
     this.kickVZ += 1.6 * f * braced;
     this.kickVY += 0.55 * f * braced;
@@ -431,39 +425,22 @@ export class HeldItemView {
     this.kickVRoll += (Math.random() - 0.5) * 1.7 * f;
     this.recoilPulse = 1;
     this.flashT = 0;
-    this.flashScale = this.feel.flash * (0.85 + Math.random() * 0.3);
+    this.flashScale = GUN_FEEL.flash * (0.85 + Math.random() * 0.3);
     this.flash.rotation.z = Math.random() * Math.PI * 2;
     this.pendingShot = true;
-    // Self-loading actions cycle instantly; a pump or a bolt is worked by hand
-    // a beat after the shot, which is exactly what makes those guns feel heavy.
-    this.cycleT = 0;
-    this.ejected = false;
-    this.chambered = false;
-    this.cycleDelay = this.feel.action === 'pump' ? 0.12
-      : this.feel.action === 'bolt' ? 0.22 : 0;
+    this.cycleT = 0; // a self-loader cycles on the shot
   }
 
-  /** Mobility gadget fired: mechanical motion and a tailored view impulse,
-   * without pretending the gadget has a muzzle flash or firearm action. */
-  gadgetAction(kind: 'grappleFire' | 'grappleRelease' | 'bounce'): void {
-    this.gadgetBeat = kind;
-    this.gadgetBeatT = 0;
+  /** The Bounce Pad fired: its spring snaps and the view takes a tailored
+   *  impulse, without pretending the pad has a muzzle flash or firearm action. */
+  bounce(): void {
+    this.bouncing = true;
+    this.bounceT = 0;
     this.recoilPulse = 1;
-    if (kind === 'grappleFire') {
-      this.gadgetSpin = -30;
-      this.kickVZ += 1.5;
-      this.kickVPitch += 1.5;
-      this.kickVRoll -= 0.55;
-    } else if (kind === 'grappleRelease') {
-      this.gadgetSpin = 22;
-      this.kickVZ += 0.75;
-      this.kickVPitch -= 0.8;
-    } else {
-      this.kickVZ += 1.2;
-      this.kickVY += 1.8;
-      this.kickVPitch += 3.2;
-      this.kickVRoll += (Math.random() - 0.5) * 0.8;
-    }
+    this.kickVZ += 1.2;
+    this.kickVY += 1.8;
+    this.kickVPitch += 3.2;
+    this.kickVRoll += (Math.random() - 0.5) * 0.8;
   }
 
   /** 0 at rest, 1 immediately after a shot; used by the local third-person body. */
@@ -494,12 +471,7 @@ export class HeldItemView {
     // here when Interaction is actually working a block target.
     if (mining) this.swing();
 
-    if (this.swingT < 1) {
-      // A heavy swing takes longer to come round, which is what makes it read
-      // as a commitment rather than a flick.
-      this.swingT = Math.min(1, this.swingT + dt / (this.heavySwing ? 0.32 : 0.25));
-      if (this.swingT >= 1) this.heavySwing = false;
-    }
+    if (this.swingT < 1) this.swingT = Math.min(1, this.swingT + dt / 0.25);
     if (this.equipT < 1) this.equipT = Math.min(1, this.equipT + dt / 0.34);
     this.recoilPulse = Math.max(0, this.recoilPulse - dt * 5);
     this.idleT += dt;
@@ -512,7 +484,7 @@ export class HeldItemView {
     this.stepSway(dt, aim);
     this.stepBob(dt, moveSpeed, grounded);
     if (this.cycleT >= 0) this.stepCycle(dt);
-    this.stepGadgetAction(dt);
+    this.stepBounce(dt);
     this.stepReloadCues(this.isGun ? reloadProgress : -1);
     if (this.flashT < 1) this.flashT = Math.min(1, this.flashT + dt / 0.075);
 
@@ -545,13 +517,12 @@ export class HeldItemView {
       this.mesh.rotation.set(0.02 * (1 - aim), 0.02 * (1 - aim), 0);
       if (aim > 0.001 && this.anchorSight) {
         // Put the gun's OWN sight on the camera axis rather than guessing an
-        // offset per weapon: every model carries a 'sight' anchor, so red dots,
-        // scopes and iron sights all centre themselves with no per-gun tuning.
+        // offset: the model carries a 'sight' anchor, so the reticle centres
+        // itself with no hand tuning.
         const s = this.pointInPivot(this.anchorSight, this.scratch);
-        const z = this.feel.scoped ? -EYE_RELIEF - s.z : ADS_Z;
         px = THREE.MathUtils.lerp(BASE_X, -s.x, aim);
         py = THREE.MathUtils.lerp(BASE_Y, -s.y, aim);
-        pz = THREE.MathUtils.lerp(BASE_Z, z, aim);
+        pz = THREE.MathUtils.lerp(BASE_Z, ADS_Z, aim);
       }
     }
 
@@ -587,28 +558,19 @@ export class HeldItemView {
       const strike = t < WIND
         ? 0
         : Math.sin(((t - WIND) / (1 - WIND)) * Math.PI);
-      const weight = this.heavySwing ? 1.35 : 1;
-      px += draw * 0.05 - strike * 0.10 * weight;
-      py += draw * 0.09 - strike * 0.15 * weight;
+      px += draw * 0.05 - strike * 0.10;
+      py += draw * 0.09 - strike * 0.15;
       pz += draw * 0.13 - strike * 0.27;
       // Negative pitch drops the item's nose (it points at -z), so the wind-up
       // raises it and the strike chops down through the swing.
       rx += draw * 0.42 - strike * 1.05;
-      rz += -strike * 0.2 * weight; // rolls slightly inward as it lands
+      rz += -strike * 0.2; // rolls slightly inward as it lands
     }
-    if (this.gadgetBeat) {
-      const duration = this.gadgetBeat === 'bounce' ? 0.42 : 0.28;
-      const u = clamp(this.gadgetBeatT / duration, 0, 1);
-      const pulse = Math.sin(u * Math.PI);
-      if (this.gadgetBeat === 'bounce') {
-        py -= pulse * 0.12;
-        pz += pulse * 0.08;
-        rx += pulse * 0.36;
-      } else {
-        pz += pulse * 0.11;
-        rx += pulse * (this.gadgetBeat === 'grappleFire' ? 0.22 : -0.13);
-        rz -= pulse * 0.08;
-      }
+    if (this.bouncing) {
+      const pulse = Math.sin(clamp(this.bounceT / BOUNCE_S, 0, 1) * Math.PI);
+      py -= pulse * 0.12;
+      pz += pulse * 0.08;
+      rx += pulse * 0.36;
     }
     // Spring recoil: straight back into the shoulder, with the muzzle climbing.
     // Both are capped so the heaviest weapons throw the gun hard without ever
@@ -619,7 +581,7 @@ export class HeldItemView {
     ry += this.kickYaw;
     rz += this.kickRoll;
 
-    if (healProgress >= 0 && this.currentItem === Item.Medkit) {
+    if (healProgress >= 0) {
       // THE MEDKIT is a procedure, not a wrap: the case swings up and turns
       // face-on (latches toward you), each beat is a firm two-handed PRESS that
       // drives it forward and kicks back, the last third winds up — and it
@@ -646,27 +608,6 @@ export class HeldItemView {
       px += drop * 0.12;
       py -= drop * 0.42;
       this.pivot.scale.setScalar(1 + hold * (0.24 + press * 0.05 + slam * 0.08));
-    } else if (healProgress >= 0) {
-      // Applying a bandage/medkit: bring the item up in front of the face,
-      // work it in with a few rhythmic presses (in step with the audio beats),
-      // then flick the spent wrapper away as the channel completes.
-      this.healClock += dt;
-      const t = Math.min(1, healProgress);
-      const lift = smoothstep(t / 0.18);              // raise into view
-      const away = smoothstep((t - 0.86) / 0.14);     // toss it aside at the end
-      const hold = lift * (1 - away);
-      // Two-sided press: eases in, holds, eases back — reads as pressure, not
-      // a vibration. Phase matches HEAL_BEAT so the tick sound lands on it.
-      const press = hold *
-        Math.max(0, Math.sin((this.healClock / HEAL_BEAT) * Math.PI * 2)) ** 2;
-      px += (0.12 - px) * hold - press * 0.03;
-      py += (-0.13 - py) * hold + press * 0.02;
-      pz += (-0.44 - pz) * hold - press * 0.05;
-      rx += hold * -0.55 + press * 0.35 + away * 0.9;
-      rz += hold * 0.75 - press * 0.22 + away * 1.6;
-      px += away * 0.28;
-      py -= away * 0.34;
-      this.pivot.scale.setScalar(1 + hold * 0.16);
     } else {
       this.healClock = 0;
       this.pivot.scale.setScalar(1);
@@ -744,62 +685,33 @@ export class HeldItemView {
     }
   }
 
-  private stepGadgetAction(dt: number): void {
-    this.gadgetSpin += ((this.grappleReeling ? -12 : 0) - this.gadgetSpin) *
-      Math.min(1, dt * (this.grappleReeling ? 8 : 5));
-    this.spoolAngle += this.gadgetSpin * dt;
-    if (this.partSpool) this.partSpool.rotation.x = this.spoolAngle;
-
-    if (!this.gadgetBeat) return;
-    this.gadgetBeatT += dt;
-    const duration = this.gadgetBeat === 'bounce' ? 0.42 : 0.28;
-    const u = clamp(this.gadgetBeatT / duration, 0, 1);
-    if (this.gadgetBeat === 'bounce') {
-      const compression = u < 0.2
-        ? 1 - smoothstep(u / 0.2) * 0.52
-        : 0.48 + easeOut((u - 0.2) / 0.8) * 0.52;
-      if (this.partSpring) this.partSpring.scale.y = compression;
-      if (this.partPad) this.partPad.position.y = 0.16 + 0.39 * compression;
-    }
+  /** The Bounce Pad's spring: compress, then snap the pad up. */
+  private stepBounce(dt: number): void {
+    if (!this.bouncing) return;
+    this.bounceT += dt;
+    const u = clamp(this.bounceT / BOUNCE_S, 0, 1);
+    const compression = u < 0.2
+      ? 1 - smoothstep(u / 0.2) * 0.52
+      : 0.48 + easeOut((u - 0.2) / 0.8) * 0.52;
+    if (this.partSpring) this.partSpring.scale.y = compression;
+    if (this.partPad) this.partPad.position.y = 0.16 + 0.39 * compression;
     if (u >= 1) {
       if (this.partSpring) this.partSpring.scale.y = 1;
       if (this.partPad) this.partPad.position.y = 0.55;
-      this.gadgetBeat = null;
+      this.bouncing = false;
     }
   }
 
-  /** Drive the reciprocating part: slide, bolt carrier, pump or bolt handle. */
+  /** Drive the bolt carrier through one cycle after a shot. */
   private stepCycle(dt: number): void {
-    if (this.cycleDelay > 0) {
-      this.cycleDelay = Math.max(0, this.cycleDelay - dt);
-      if (this.cycleDelay === 0) this.onGunSound?.('cycle');
-      return;
-    }
     this.cycleT += dt;
-    const u = this.cycleT / this.feel.cycle;
-    // Hand-worked actions throw their case halfway through the stroke; a
-    // self-loader has already thrown its own at the moment of the shot.
-    if (!this.ejected && u >= 0.35) {
-      this.ejected = true;
-      if (this.feel.action === 'pump' || this.feel.action === 'bolt') {
-        this.spawnShell();
-        this.onGunSound?.('shellDrop');
-      }
-    }
-    if (u >= 1) {
-      this.cycleT = -1;
-      if (this.feel.action === 'pump' || this.feel.action === 'bolt') {
-        this.onGunSound?.('cycle');
-      }
-    }
+    if (this.cycleT >= GUN_FEEL.cycle) this.cycleT = -1;
   }
 
   /** One-shot audio cues at the beats of a reload. */
   private stepReloadCues(progress: number): void {
     const prev = this.reloadStage;
     this.reloadStage = progress;
-    // A finished reload has put something back in the chamber.
-    if (progress < 0 && prev >= 0) this.chambered = true;
     if (progress < 0 || prev < 0) return;
     if (prev < 0.2 && progress >= 0.2) this.onGunSound?.('magOut');
     if (prev < 0.72 && progress >= 0.72) this.onGunSound?.('magIn');
@@ -817,61 +729,29 @@ export class HeldItemView {
     // thirds of the way down, so these dips are small and the weapon is pulled
     // back toward the camera (+z) rather than dropped out of frame.
     const dip = Math.sin(t * Math.PI);
-    if (this.feel.action === 'tube') {
-      // Off the shoulder, muzzle up, then back into the firing position.
-      add(dip * 0.08, -dip * 0.07, dip * 0.14, -dip * 0.45, dip * 0.3, dip * 0.2);
-      return;
-    }
-    if (this.feel.action === 'pump') {
-      // Rolled over to feed shells up through the loading port.
-      add(dip * 0.04, -dip * 0.07, dip * 0.1, -dip * 0.18, -dip * 0.22, dip * 0.8);
-      return;
-    }
-    // Magazine guns: cant the magwell into view, then snap level for the
-    // charging stroke at the end.
+    // Cant the magwell into view, then snap level for the charging stroke at
+    // the end.
     const seat = Math.sin(Math.max(0, (t - 0.7) / 0.3) * Math.PI);
     add(dip * 0.05, -dip * 0.09 - seat * 0.02, dip * 0.1,
       -dip * 0.38, dip * 0.1, dip * 0.65 - seat * 0.2);
   }
 
-  /** Moving parts: the action's stroke plus any reload-specific motion. */
+  /** Moving parts: the bolt's stroke plus the reload's magazine swap. */
   private poseParts(reloadProgress: number, aim: number): void {
-    const feel = this.feel;
     const reloading = reloadProgress >= 0;
     const t = clamp(reloadProgress, 0, 1);
-    const cycle = this.cycleT >= 0 && this.cycleDelay === 0
-      ? clamp(this.cycleT / feel.cycle, 0, 1) : 0;
+    const cycle = this.cycleT >= 0 ? clamp(this.cycleT / GUN_FEEL.cycle, 0, 1) : 0;
     if (this.partCycle) {
-      const p = this.partCycle;
-      p.position.set(0, 0, 0);
-      p.rotation.set(0, 0, 0);
-      if (feel.action === 'tube') {
-        // The warhead is simply gone until a fresh one is rammed in from behind.
-        if (reloading) {
-          const slide = clamp((t - 0.35) / 0.35, 0, 1);
-          p.visible = t >= 0.35;
-          p.position.z = (1 - easeOut(slide)) * 2.2;
-        } else {
-          p.visible = this.chambered;
-        }
-      } else if (feel.action === 'bolt') {
-        const u = reloading ? this.boltReloadPhase(t) : cycle;
-        // Lift the handle, draw straight back, run forward, lock down.
-        const lift = u <= 0 ? 0 : u < 0.18 ? u / 0.18 : u > 0.85 ? (1 - u) / 0.15 : 1;
-        p.rotation.z = -clamp(lift, 0, 1) * 0.9;
-        p.position.z = stroke(clamp((u - 0.15) / 0.7, 0, 1), 0.45) * feel.travel;
-      } else {
-        // Self-loaders cycle on the shot; a pump racks by hand, and during a
-        // magazine change the charging handle is worked at the very end.
-        const u = reloading ? (t > 0.86 ? (t - 0.86) / 0.14 : 0) : cycle;
-        p.position.z = stroke(u, feel.action === 'pump' ? 0.45 : 0.35) * feel.travel;
-      }
+      // The bolt cycles on the shot, and during a magazine change the charging
+      // handle is worked at the very end.
+      const u = reloading ? (t > 0.86 ? (t - 0.86) / 0.14 : 0) : cycle;
+      this.partCycle.position.set(0, 0, stroke(u, 0.35) * GUN_FEEL.travel);
     }
     if (this.partMag) {
       const m = this.partMag;
       m.position.set(0, 0, 0);
       m.visible = true;
-      if (reloading && feel.action !== 'pump' && feel.action !== 'tube') {
+      if (reloading) {
         if (t < 0.2) {
           m.position.y = -smoothstep(t / 0.2) * 0.08;      // unseat
         } else if (t < 0.5) {
@@ -884,17 +764,8 @@ export class HeldItemView {
         }
       }
     }
-    // Bipod legs drop as you settle behind the scope; a collapsible stock
-    // extends into the shoulder as the weapon comes up.
-    if (this.partBipod) this.partBipod.rotation.x = (1 - aim) * -1.35;
+    // The collapsible stock extends into the shoulder as the weapon comes up.
     if (this.partStock) this.partStock.position.z = (1 - aim) * 0.06;
-  }
-
-  /** Where the bolt is during a bolt-action reload (open, feed, close). */
-  private boltReloadPhase(t: number): number {
-    if (t < 0.25) return clamp(t / 0.25, 0, 1) * 0.5; // open and hold it back
-    if (t < 0.7) return 0.5;
-    return 0.5 + clamp((t - 0.7) / 0.3, 0, 1) * 0.5;  // run it home
   }
 
   /** Support hand on the foregrip — or chasing the magazine during a reload,
@@ -902,10 +773,7 @@ export class HeldItemView {
    *  the receiver as the weapon comes up: a fist is a bigger block than the gun
    *  it is holding, and dead centre of an aimed shot is the worst place for it. */
   private placeHands(aim: number): void {
-    // A pistol has no stock to shoulder, so its firing hand must rise with the
-    // whole ADS pose instead of tucking behind the receiver like a long gun.
-    const handTuck = this.currentItem === Item.Pistol ? 0 : aim;
-    this.arm.position.set(0.05, -0.16 - handTuck * 0.13, 0.06 + handTuck * 0.05);
+    this.arm.position.set(0.05, -0.16 - aim * 0.13, 0.06 + aim * 0.05);
     if (!this.offArm.visible || !this.anchorGrip2) return;
     const target = this.pointInPivot(this.anchorGrip2, this.scratch);
     if (this.partMag && this.partMag.position.y < -0.01) {
@@ -936,8 +804,8 @@ export class HeldItemView {
   // --- Brass and smoke -------------------------------------------------------
 
   private spawnShotFx(): void {
-    if (this.feel.action !== 'pump' && this.feel.action !== 'bolt') this.spawnShell();
-    for (let i = 0; i < this.feel.smoke; i++) this.spawnPuff();
+    this.spawnShell();
+    for (let i = 0; i < GUN_FEEL.smoke; i++) this.spawnPuff();
   }
 
   /** Convert a point on the gun into camera space (where the fx group lives). */
@@ -949,7 +817,7 @@ export class HeldItemView {
   }
 
   private spawnShell(): void {
-    if (this.feel.shell === 'none' || !this.anchorEject) return;
+    if (!this.anchorEject) return;
     let shell = this.shells.find((s) => s.life <= 0);
     if (!shell && this.shells.length < MAX_SHELLS) {
       const mat = new THREE.MeshBasicMaterial({
@@ -962,10 +830,7 @@ export class HeldItemView {
       this.shells.push(shell);
     }
     if (!shell) return;
-    const hull = this.feel.shell === 'shell'; // a shotgun hull is fat and red
-    shell.mesh.scale.setScalar(hull ? 1.6 : 1);
     shell.mesh.visible = true;
-    shell.mat.color.setHex(hull ? 0xb0392c : 0xc9a040);
     shell.mat.opacity = 1;
     this.toCamera(this.anchorEject, shell.mesh.position);
     shell.vel.set(

@@ -32,12 +32,12 @@ const isWool = (block: number) => block === Block.TeamWoolA || block === Block.T
 const RUN: PlayerInput = { ...FROZEN_INPUT, forward: true, sprintKey: true, sprintHeld: true };
 interface JumpPlan { x: number; z: number; yaw: number; speed: number }
 
-export const PARTY_BOT_MIN_SKILL = 0.15;
-export const PARTY_BOT_MAX_SKILL = 1.35;
+const PARTY_BOT_MIN_SKILL = 0.15;
+const PARTY_BOT_MAX_SKILL = 1.35;
 /** Where a first-ever bot starts, before it has seen the player play. */
-export const PARTY_BOT_START_SKILL = 0.55;
+const PARTY_BOT_START_SKILL = 0.55;
 
-export interface BotAction {
+interface BotAction {
   melee?: boolean;
   shot?: { dx: number; dy: number; dz: number };
   edit?: PartyVec3 & { block: number };
@@ -47,7 +47,7 @@ export interface BotAction {
 
 /** Combat behaviour switches (kept as data so the simulation harness can
  *  measure each one's worth). */
-export const BRIDGE_TACTICS = { critHops: false, timedCrits: true, wTap: false, lean: true, leanMax: 0.43, engageBonus: 5, strafe: true, bow: true };
+const BRIDGE_TACTICS = { critHops: false, timedCrits: true, wTap: false, lean: true, leanMax: 0.43, engageBonus: 5, strafe: true, bow: true };
 
 /** Where on a crumble pad to aim a landing, relative to its centre: most of
  *  the way to the edge it will be left from. */

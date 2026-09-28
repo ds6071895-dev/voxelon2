@@ -131,7 +131,7 @@ export const COSMETIC_RANGES: Record<keyof Cosmetics, number> = {
   face: FACE_ACCESSORIES.length,
 };
 
-export const COSMETIC_KEYS = Object.keys(COSMETIC_RANGES) as (keyof Cosmetics)[];
+const COSMETIC_KEYS = Object.keys(COSMETIC_RANGES) as (keyof Cosmetics)[];
 
 /** The look every player starts with when they never customised: derived
  *  deterministically from their skin seed, so a player renders the same on

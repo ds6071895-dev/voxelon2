@@ -34,32 +34,20 @@ export class Input {
   mouseDX = 0;
   mouseDY = 0;
   /** Look-speed multiplier from the settings panel. Applied where raw pointer
-   *  deltas are accumulated, so every consumer of mouseDX/mouseDY (camera,
-   *  vehicles, the vault cinematic) inherits it without knowing it exists. Touch
+   *  deltas are accumulated, so every consumer of mouseDX/mouseDY inherits it
+   *  without knowing it exists. Touch
    *  scales by this too, on top of its own px->delta calibration. */
   lookSensitivity = 1;
   leftDown = false;
   leftClicked = false;
   rightDown = false;
-  middleClicked = false;
   rightClicked = false;
   wheelDelta = 0;
   hotbarKey = -1; // 0-8 when a number key was pressed this frame
   debugToggled = false;
-  operatorModeTogglePressed = false; // secret F4 shortcut; server still verifies OP
-  inventoryToggled = false;
-  // The world map and Warfare Command have NO key and NO button of their own
-  // any more — they are `/map` and `/warfare` in the command box. These two
-  // flags survive only so the mobile pause button can close an open map or
-  // Warfare panel (they toggle, so setting them is all main.ts needs).
-  mapToggled = false;
-  // The five edges below fire on their BOUND key (see hud_settings.ts), not a
-  // fixed one; the defaults are R / O / T / F / V.
-  reloadPressed = false;   // gun reload
-  dropPressed = false;     // drop the held item
-  chatPressed = false;     // open the command box
-  progressPressed = false; // tapped on touch — Warfare Command
-  dismountPressed = false; // leave a vehicle seat
+  // These edges fire on their BOUND key (see hud_settings.ts), not a fixed
+  // one; the defaults are R / V.
+  reloadPressed = false;   // gun reload / back to the Parkour checkpoint
   viewPressed = false;     // cycle the camera view
   locked = false;
 
@@ -115,22 +103,11 @@ export class Input {
         this.debugToggled = true;
         return;
       }
-      if (e.code === 'F4') {
-        e.preventDefault();
-        if (!e.repeat) this.operatorModeTogglePressed = true;
-        return;
-      }
       this.keys.add(e.code);
       // Losing pointer lock clears held keys. A key still physically held
       // must resume movement on its next repeat after control returns.
       if (e.repeat) return;
-      if (this.isBind(e.code, 'inventory')) this.inventoryToggled = true;
       if (this.isBind(e.code, 'reload')) this.reloadPressed = true;
-      if (this.isBind(e.code, 'drop')) this.dropPressed = true;
-      // The command-box key is the ONE key for everything that used to have its
-      // own binding (map/waypoint/warfare/guide/tpa/tpa-accept).
-      if (this.isBind(e.code, 'chat')) this.chatPressed = true;
-      if (this.isBind(e.code, 'dismount')) this.dismountPressed = true;
       if (this.isBind(e.code, 'view')) this.viewPressed = true;
       if (this.isBind(e.code, 'forward')) {
         const now = performance.now();
@@ -155,7 +132,7 @@ export class Input {
     document.addEventListener('mousedown', (e) => {
       if (!this.locked) return;
       if (e.button === 0) { this.leftDown = true; this.leftClicked = true; }
-      if (e.button === 1) { this.middleClicked = true; e.preventDefault(); }
+      if (e.button === 1) e.preventDefault();
       if (e.button === 2) { this.rightDown = true; this.rightClicked = true; }
     });
     document.addEventListener('mouseup', (e) => {
@@ -282,17 +259,9 @@ export class Input {
     this.wheelDelta = 0;
     this.hotbarKey = -1;
     this.leftClicked = false;
-    this.middleClicked = false;
     this.rightClicked = false;
     this.debugToggled = false;
-    this.operatorModeTogglePressed = false;
-    this.inventoryToggled = false;
-    this.mapToggled = false;
     this.reloadPressed = false;
-    this.dropPressed = false;
-    this.chatPressed = false;
-    this.progressPressed = false;
-    this.dismountPressed = false;
     this.viewPressed = false;
   }
 }

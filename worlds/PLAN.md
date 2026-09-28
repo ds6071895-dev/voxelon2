@@ -288,3 +288,32 @@ leaderboard, online counters, invite-link lobbies, Bedwars.
 
 VOXELON's own build/smoke suites are **not** run (standing rule). Only `worlds/`
 tests are run.
+
+---
+
+## 10. Rat and Seek (added 2026-09-28)
+
+A port of the AutoBox plugin's Rat and Seek (`autobox-plugin-src-2026-09-27.zip`),
+the minigame only — no lobby, no host settings. It plays the plugin's Normal
+rules: 30 s hide, 4 min hunt, rescues at 3 cheese, all seven twists.
+
+- **Files:** `ratseek_house.ts` (the Crooked Manor, block-for-block), `ratseek_nav.ts`
+  (seeker + cat navigation), `ratseek.ts` (server engine), `ratseek_bot.ts` (the
+  practice seeker), `ratseek_rules.ts` (shared rules/types), `ratseek_client.ts` +
+  `ratseek_models.ts` + `styles/ratseek.css` (client), `tile_art_manor.ts` (all new art).
+- **Engine additions:** a `box` block shape (stairs, slabs, lanterns, levers,
+  traps) drawn by the mesher and collided exactly by `Player`, so stairs are
+  walked up via the normal half-block step; `Player.setBodyScale` (rats are half
+  size and fit one-block holes), `speedMult`, `jumpBoost`.
+- **Who plays what:** a solo queue waits 15 s like the others; everyone it matches
+  (up to 4) is a rat and a practice seeker hunts them. A party leader picks one
+  member to seek, or a practice seeker for the whole party.
+- **Changes from the plugin:** the villager is the Cheese Exchange (a brass
+  machine block); rat classes are remembered between games (localStorage +
+  `play.ratClass`); the manor is morning-lit at full brightness; twists are
+  weighted by how the rats stand (`ratStanding`): Spotlight much more often while
+  they are winning, Ghost Rats much more often while they are losing — never
+  announced; Mr. Whiskers (Lazy) is in.
+- **Practice seeker:** one hidden level 0.2–1.35 drives every trait; it slides
+  each second toward a close game and settles after each match (quick wins make
+  it gentler next time), remembered per rat like the other modes' skills.

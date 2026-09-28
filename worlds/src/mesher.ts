@@ -5,10 +5,9 @@
 
 import * as THREE from 'three';
 import type { ColumnTints, Tint } from './tints';
-import { Block, BLOCKS, isOpaque, occludesAO, Tile, torchSupport } from './blocks';
+import { Block, BLOCKS, isOpaque, occludesAO, Tile } from './blocks';
 import { Chunk, CHUNK_X, CHUNK_Z } from './chunk';
 import type { LightField } from './light';
-import { renderBoxes } from './shapes';
 import type { Atlas } from './textures';
 
 const WHITE: Tint = [1, 1, 1];
@@ -87,22 +86,8 @@ const FACES: FaceDef[] = [
 
 const AO_CURVE = [0.45, 0.65, 0.82, 1.0];
 
-/** Tile UV (fraction 0..1) for a corner on face f of a sub-box, so partial-extent
- *  boxes (slabs/stairs) sample the matching window of the tile. Face order
- *  matches FACES: 0=-x 1=+x 2=-y 3=+y 4=-z 5=+z. */
-export function subFaceUV(f: number, lx: number, ly: number, lz: number): [number, number] {
-  switch (f) {
-    case 0: return [lz, ly];          // -x
-    case 1: return [1 - lz, ly];      // +x
-    case 2: return [lx, 1 - lz];      // -y
-    case 3: return [1 - lx, lz];      // +y
-    case 4: return [1 - lx, ly];      // -z
-    default: return [lx, ly];         // +z
-  }
-}
-
 export type BlockSampler = (wx: number, wy: number, wz: number) => number;
-export type TintSampler = (wx: number, wz: number) => ColumnTints;
+type TintSampler = (wx: number, wz: number) => ColumnTints;
 
 /** What the chunk shader needs to know about a surface, per vertex. */
 const enum SurfaceKind { Solid = 0, Plant = 1, Leaves = 2, Water = 3 }
@@ -199,69 +184,20 @@ class GeoBuffer {
     }
   }
 
-  /** A small textured box (torches), using a sub-rect of one tile. */
-  box(
-    bx: number, by: number, bz: number,
-    min: [number, number, number], max: [number, number, number],
-    uvRect: [number, number, number, number],
-    skyL: number, blockL: number, emission = 0
+  /** One face of a sub-box (stairs, lanterns, plates): explicit corner
+   *  positions and uvs, flat-lit, no corner occlusion. */
+  boxQuad(
+    pos: number[], uv: number[], shade: number, skyL: number, blockL: number, emission: number,
   ): void {
-    const [u0, v0, u1, v1] = uvRect;
-    for (const face of FACES) {
-      // Sub-rect of the torch sprite per face: sides show the stick column,
-      // top shows the tip, bottom the stick base.
-      const vertical = face.dir[1] !== 0;
-      const su0 = 7 / 16, su1 = 9 / 16;
-      const sv0 = vertical ? (face.dir[1] > 0 ? 8 / 16 : 0) : 0;
-      const sv1 = vertical ? (face.dir[1] > 0 ? 10 / 16 : 2 / 16) : 10 / 16;
-      const base = this.positions.length / 3;
-      for (let i = 0; i < 4; i++) {
-        const c = face.corners[i];
-        this.positions.push(
-          bx + min[0] + (max[0] - min[0]) * c.pos[0],
-          by + min[1] + (max[1] - min[1]) * c.pos[1],
-          bz + min[2] + (max[2] - min[2]) * c.pos[2]
-        );
-        const b = face.shade;
-        this.colors.push(b, b, b);
-        const su = su0 + (su1 - su0) * c.uv[0];
-        const sv = sv0 + (sv1 - sv0) * c.uv[1];
-        this.uvs.push(u0 + (u1 - u0) * su, v0 + (v1 - v0) * sv);
-        this.lights.push(skyL / 15, blockL / 15);
-        this.info.push(SurfaceKind.Solid, emission, 0);
-      }
-      this.indices.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
+    const base = this.positions.length / 3;
+    for (let i = 0; i < 4; i++) {
+      this.positions.push(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
+      this.colors.push(shade, shade, shade);
+      this.uvs.push(uv[i * 2], uv[i * 2 + 1]);
+      this.lights.push(skyL / 15, blockL / 15);
+      this.info.push(SurfaceKind.Solid, emission, 0);
     }
-  }
-
-  /** An axis-aligned sub-box (slabs/stairs) with per-face tile sub-rect UVs +
-   *  directional shading (no AO). The box min/max are in [0,1] cell-local space,
-   *  so a half-height box samples the matching half of the tile. */
-  subBox(
-    bx: number, by: number, bz: number,
-    min: [number, number, number], max: [number, number, number],
-    uvRect: [number, number, number, number], tint: Tint,
-    skyL: number, blockL: number, emission = 0
-  ): void {
-    const [u0, v0, u1, v1] = uvRect;
-    for (let f = 0; f < FACES.length; f++) {
-      const face = FACES[f];
-      const base = this.positions.length / 3;
-      for (let i = 0; i < 4; i++) {
-        const c = face.corners[i].pos;
-        const lx = c[0] ? max[0] : min[0];
-        const ly = c[1] ? max[1] : min[1];
-        const lz = c[2] ? max[2] : min[2];
-        this.positions.push(bx + lx, by + ly, bz + lz);
-        const b = face.shade;
-        this.colors.push(b * tint[0], b * tint[1], b * tint[2]);
-        const [fu, fv] = subFaceUV(f, lx, ly, lz);
-        this.uvs.push(u0 + (u1 - u0) * fu, v0 + (v1 - v0) * fv);
-        this.lights.push(skyL / 15, blockL / 15);
-        this.info.push(SurfaceKind.Solid, emission, 0);
-      }
-      this.indices.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
-    }
+    this.indices.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
   }
 
   build(): THREE.BufferGeometry | null {
@@ -278,11 +214,10 @@ class GeoBuffer {
   }
 }
 
-export interface ChunkGeometry {
+interface ChunkGeometry {
   opaque: THREE.BufferGeometry | null;
   water: THREE.BufferGeometry | null;
 }
-
 
 export function buildChunkGeometry(
   chunk: Chunk, sample: BlockSampler, atlas: Atlas, tints: TintSampler,
@@ -309,19 +244,17 @@ export function buildChunkGeometry(
       for (let y = 0; y < maxY; y++) {
         const id = chunk.get(x, y, z);
         if (id === Block.Air || id === Block.Barrier) continue;
-        // Automation uses the detailed MachineModels renderer. Keep the solid
-        // cells for interaction/collision, but don't bury its mechanism in cubes.
-        if (id === Block.Autominer || id === Block.OilDerrick || id === Block.MachinePart) continue;
-        // Turrets likewise: TurretModels draws the armoured mount + tracking head.
-        if (id === Block.Turret) continue;
-        // Concealable traps with a live entity are drawn per viewer by
-        // TrapModels (camouflage); generated ones (vault spikes) mesh normally.
         const info = BLOCKS[id];
         // An id with no definition is a block this build no longer knows (a
         // world saved by an older build). Skip it rather than dereferencing
         // undefined and taking the whole chunk mesh down with it.
         if (!info) continue;
         const isWater = id === Block.Water;
+
+        if (info.shape === 'box' && info.boxes) {
+          emitBoxes(opaque, info, x, y, z, wx, wz, sample, atlas, light);
+          continue;
+        }
 
         if (info.shape === 'cross') {
           opaque.cross(
@@ -332,59 +265,11 @@ export function buildChunkGeometry(
           continue;
         }
 
-        if (info.shape === 'torch') {
-          // Wall torches shift toward their supporting block and sit higher.
-          const sup = torchSupport(id);
-          const wall = sup && sup[1] === 0;
-          const offX = wall ? sup![0] * 0.3125 : 0;
-          const offZ = wall ? sup![2] * 0.3125 : 0;
-          const offY = wall ? 0.1875 : 0;
-          opaque.box(
-            x, y, z,
-            [0.4375 + offX, offY, 0.4375 + offZ],
-            [0.5625 + offX, 0.625 + offY, 0.5625 + offZ],
-            atlas.uvRect(info.side),
-            light.sky(wx, y, wz), light.block(wx, y, wz), info.emission / 15
-          );
-          continue;
-        }
-
-        if (id === Block.BwBedA || id === Block.BwBedB) {
-          const skyL = light.sky(wx, y + 1, wz), blockL = light.block(wx, y + 1, wz);
-          const wool = BLOCKS[id === Block.BwBedA ? Block.TeamWoolA : Block.TeamWoolB].top;
-          const wood = atlas.uvRect(BLOCKS[Block.OakPlanks].side);
-          opaque.subBox(x, y, z, [0, .16, 0], [1, .3, 1], wood, WHITE, skyL, blockL);
-          opaque.subBox(x, y, z, [.03, .3, 0], [.97, .56, 1], atlas.uvRect(wool), WHITE, skyL, blockL);
-          for (const dx of [.06, .8]) for (const dz of [.06, .8]) {
-            opaque.subBox(x, y, z, [dx, 0, dz], [dx + .14, .2, dz + .14], wood, WHITE, skyL, blockL);
-          }
-          // The anchor half alone has a pillow. Works across chunk boundaries
-          // and along either bed axis without giving each half a head texture.
-          if (sample(wx - 1, y, wz) !== id && sample(wx, y, wz - 1) !== id) {
-            const alongX = sample(wx + 1, y, wz) === id;
-            opaque.subBox(x, y, z, [.09, .56, .09],
-              alongX ? [.4, .62, .91] : [.91, .62, .4],
-              atlas.uvRect(BLOCKS[Block.PearlTile].top), WHITE, skyL, blockL);
-          }
-          continue;
-        }
-
-        if (info.shape === 'slab' || info.shape === 'stairs') {
-          const uvRect = atlas.uvRect(info.side);
-          const skyL = light.sky(wx, y, wz), blockL = light.block(wx, y, wz);
-          const boxes = renderBoxes(id);
-          for (const [mn, mx] of boxes) {
-            opaque.subBox(x, y, z, mn, mx, uvRect, WHITE, skyL, blockL, info.emission / 15);
-          }
-          continue;
-        }
-
         for (const face of FACES) {
           const [dx, dy, dz] = face.dir;
           const ny = y + dy;
-          const neighbor = ny < 0
-            ? Block.Bedrock // never draw the underside of the world
-            : sample(wx + dx, ny, wz + dz);
+          if (ny < 0) continue; // never draw the underside of the world
+          const neighbor = sample(wx + dx, ny, wz + dz);
 
           if (isWater) {
             if (neighbor === Block.Water || isOpaque(neighbor)) continue;
@@ -440,6 +325,48 @@ export function buildChunkGeometry(
   }
 
   return { opaque: opaque.build(), water: water.build() };
+}
+
+/** Texture coordinate (0..1 across the tile) of a point on a face, matching
+ *  the orientation FACES gives a full cube, so a stair tread reads like the
+ *  top of a whole block cut in half. Indexed like FACES. */
+const FACE_UV: ((x: number, y: number, z: number) => [number, number])[] = [
+  (_x, y, z) => [z, y],          // west
+  (_x, y, z) => [1 - z, y],      // east
+  (x, _y, z) => [x, 1 - z],      // bottom
+  (x, _y, z) => [1 - x, z],      // top
+  (x, y) => [1 - x, y],          // north
+  (x, y) => [x, y],              // south
+];
+
+/** Sub-box blocks: every box face is drawn unless it sits flush against an
+ *  opaque neighbour. Lit by the cell a face opens onto. */
+function emitBoxes(
+  out: GeoBuffer, info: (typeof BLOCKS)[number], x: number, y: number, z: number,
+  wx: number, wz: number, sample: BlockSampler, atlas: Atlas, light: LightField,
+): void {
+  const pos: number[] = new Array(12), uv: number[] = new Array(8);
+  const emission = info.emission / 15;
+  for (const [mn, mx] of info.boxes!) {
+    FACES.forEach((face, f) => {
+      const [dx, dy, dz] = face.dir;
+      const axis = dx !== 0 ? 0 : dy !== 0 ? 1 : 2;
+      const sign = dx + dy + dz;
+      const flush = sign > 0 ? mx[axis] >= 1 : mn[axis] <= 0;
+      if (flush && isOpaque(sample(wx + dx, y + dy, wz + dz))) return;
+      const tile: Tile = dy > 0 ? info.top : dy < 0 ? info.bottom : info.side;
+      const [u0, v0, u1, v1] = atlas.uvRect(tile);
+      for (let i = 0; i < 4; i++) {
+        const c = face.corners[i].pos;
+        const px = c[0] ? mx[0] : mn[0], py = c[1] ? mx[1] : mn[1], pz = c[2] ? mx[2] : mn[2];
+        pos[i * 3] = x + px; pos[i * 3 + 1] = y + py; pos[i * 3 + 2] = z + pz;
+        const [u, v] = FACE_UV[f](px, py, pz);
+        uv[i * 2] = u0 + (u1 - u0) * u; uv[i * 2 + 1] = v0 + (v1 - v0) * v;
+      }
+      const lx = flush ? wx + dx : wx, ly = Math.max(0, flush ? y + dy : y), lz = flush ? wz + dz : wz;
+      out.boxQuad(pos, uv, face.shade, light.sky(lx, ly, lz), light.block(lx, ly, lz), emission);
+    });
+  }
 }
 
 function computeAO(

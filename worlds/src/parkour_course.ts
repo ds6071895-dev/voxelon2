@@ -25,7 +25,7 @@ import { parkourTheme } from './parkour_themes';
 export type ParkourMode = 'race' | 'void' | 'collapse';
 export type ParkourLayout = 'lane' | 'switchback' | 'spiral' | 'twin' | 'forked' | 'islands' | 'descent';
 export const PARKOUR_MODES: readonly ParkourMode[] = ['race', 'void', 'collapse'];
-export const PARKOUR_LAYOUTS: readonly ParkourLayout[] = ['lane', 'switchback', 'spiral', 'twin', 'forked', 'islands', 'descent'];
+const PARKOUR_LAYOUTS: readonly ParkourLayout[] = ['lane', 'switchback', 'spiral', 'twin', 'forked', 'islands', 'descent'];
 /** A tower is only worth climbing when something is chasing you up it, and a
  *  course that deletes itself needs somewhere flat to run. */
 export const PARKOUR_MODE_LAYOUTS: Record<ParkourMode, readonly ParkourLayout[]> = {
@@ -58,20 +58,19 @@ export type ParkourJump =
   // a player places can ever pretend to be one.
   | 'launch' | 'boost' | 'blink' | 'crumble';
 
-export interface ParkourDeck { id: string; title: string; kinds: readonly ParkourJump[] }
-export const PARKOUR_DECKS: readonly ParkourDeck[] = [
-  { id: 'technical', title: 'TECHNICAL', kinds: ['stones', 'beam', 'rail', 'pillar', 'window'] },
-  { id: 'speed', title: 'SPEED', kinds: ['boost', 'pad', 'hurdle', 'gate', 'drop'] },
-  { id: 'obstacle', title: 'OBSTACLE RUN', kinds: ['wall', 'slalom', 'tunnel', 'teeth', 'pit'] },
-  { id: 'chaos', title: 'CHAOS', kinds: ['blink', 'crumble', 'launch', 'stones', 'boost'] },
-  { id: 'precision', title: 'PRECISION', kinds: ['pillar', 'stones', 'ladder', 'rail', 'ledge'] },
-  { id: 'hazard', title: 'HAZARD', kinds: ['crumble', 'blink', 'pit', 'beam', 'teeth'] },
-  { id: 'ascent', title: 'ASCENT', kinds: ['ladder', 'launch', 'step', 'pillar', 'ledge'] },
-  { id: 'flow', title: 'FLOW', kinds: ['pad', 'step', 'gate', 'window', 'boost'] },
+interface ParkourDeck { title: string; kinds: readonly ParkourJump[] }
+const PARKOUR_DECKS: readonly ParkourDeck[] = [
+  { title: 'TECHNICAL', kinds: ['stones', 'beam', 'rail', 'pillar', 'window'] },
+  { title: 'SPEED', kinds: ['boost', 'pad', 'hurdle', 'gate', 'drop'] },
+  { title: 'OBSTACLE RUN', kinds: ['wall', 'slalom', 'tunnel', 'teeth', 'pit'] },
+  { title: 'CHAOS', kinds: ['blink', 'crumble', 'launch', 'stones', 'boost'] },
+  { title: 'PRECISION', kinds: ['pillar', 'stones', 'ladder', 'rail', 'ledge'] },
+  { title: 'HAZARD', kinds: ['crumble', 'blink', 'pit', 'beam', 'teeth'] },
+  { title: 'ASCENT', kinds: ['ladder', 'launch', 'step', 'pillar', 'ledge'] },
+  { title: 'FLOW', kinds: ['pad', 'step', 'gate', 'window', 'boost'] },
 ];
 
-export interface ParkourVariant {
-  theme: number;
+interface ParkourVariant {
   mode: ParkourMode;
   layout: ParkourLayout;
   deck: ParkourDeck;
@@ -85,7 +84,7 @@ export function parkourVariant(seed: number): ParkourVariant {
   const allowed = PARKOUR_MODE_LAYOUTS[mode];
   const wanted = PARKOUR_LAYOUTS[((s >>> 5) & 7) % PARKOUR_LAYOUTS.length];
   const layout = allowed.includes(wanted) ? wanted : allowed[((s >>> 5) & 7) % allowed.length];
-  return { theme: s & 7, mode, layout, deck: PARKOUR_DECKS[partyHash(s, 0xdec) % PARKOUR_DECKS.length] };
+  return { mode, layout, deck: PARKOUR_DECKS[partyHash(s, 0xdec) % PARKOUR_DECKS.length] };
 }
 /** Write a mode, layout and theme into the low byte of a seed. */
 export function encodeParkourSeed(seed: number, theme: number, mode: ParkourMode, layout: ParkourLayout): number {
@@ -118,16 +117,12 @@ export interface ParkourPlatform extends PartyVec3 {
 export interface ParkourCell { x: number; y: number; z: number; block: number; order: number; platform: number }
 
 export interface ParkourCourse {
-  seed: number;
   variant: ParkourVariant;
   platforms: ParkourPlatform[];
   /** `steps[order]` holds every pad at that order (two at a fork). */
   steps: ParkourPlatform[][];
-  /** Every physical jump, as [from, to] platform indices. */
-  edges: [number, number][];
   cells: ParkourCell[];
   start: ParkourPlatform;
-  finish: ParkourPlatform;
   /** Lowest and highest standing heights on the course. */
   lowY: number;
   highY: number;
@@ -189,7 +184,7 @@ function parkourTravel(rise: number): number {
 }
 /** A launch pad throws you up onto a pad this much higher, one block of air
  *  beyond its own far edge. */
-export const PARKOUR_LAUNCH_RISE = 4;
+const PARKOUR_LAUNCH_RISE = 4;
 const LAUNCH_GAP = 1;
 /** A boost pad throws you across this much open air — further than any
  *  sprint jump can reach. */
@@ -248,6 +243,7 @@ function generate(seed: number, attempt = 0): ParkourCourse {
   const { mode, layout, deck } = variant;
   const theme = parkourTheme(seed);
   const platforms: ParkourPlatform[] = [];
+  /** Every physical jump, as [from, to] platform indices. */
   const edges: [number, number][] = [];
   /** Solid volumes (pads and their dressing), tagged with the owning pad. */
   const volumes: { box: Box; owner: number }[] = [];
@@ -828,7 +824,7 @@ function generate(seed: number, attempt = 0): ParkourCourse {
   for (const p of platforms) (steps[p.order] ??= []).push(p);
   const ys = platforms.map(p => p.y);
   return {
-    seed, variant, platforms, steps, edges, cells, start, finish,
+    variant, platforms, steps, cells, start,
     lowY: Math.min(...ys), highY: Math.max(...ys),
   };
 }

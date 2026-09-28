@@ -8,7 +8,6 @@
 // multiverse.ts): a venue is authored at that world's origin, so there are no
 // arena slots and no cap on simultaneous matches.
 import { Block } from './blocks';
-import { Item } from './items';
 import { meleeSwing, type SwingInput, type SwingResult } from './melee';
 import { PARKOUR_THEMES } from './parkour_themes';
 import {
@@ -28,18 +27,18 @@ export const PARTY_MAX_HEALTH = 20;
 export const PARTY_AMBIENT_LIGHT = 0.8;
 /** The Bridge is strictly 1v1: a duel over a one-block span, where a second
  *  body on your own side has nowhere to stand and nothing to do. */
-export const BRIDGE_CAPACITY = 2;
+const BRIDGE_CAPACITY = 2;
 /** A Parkour race from matchmaking is 1v1; a party can bring up to four. */
-export const PARKOUR_QUEUE_CAPACITY = 2;
-export const PARKOUR_PARTY_CAPACITY = 4;
-export const PARTY_MIN_PLAYERS = 2;
+const PARKOUR_QUEUE_CAPACITY = 2;
+const PARKOUR_PARTY_CAPACITY = 4;
+const PARTY_MIN_PLAYERS = 2;
 /** Most racers/fighters one match of `mode` can hold. */
 export function partyModeCapacity(mode: PartyMode, fromParty: boolean): number {
   return mode === 'bridge' ? BRIDGE_CAPACITY : fromParty ? PARKOUR_PARTY_CAPACITY : PARKOUR_QUEUE_CAPACITY;
 }
 export const PARTY_COUNTDOWN_MS = 3000;
-export const PARTY_ARENA_LOAD_TIMEOUT_MS = 30000;
-export const PARTY_RESULT_MS = 20000;
+const PARTY_ARENA_LOAD_TIMEOUT_MS = 30000;
+const PARTY_RESULT_MS = 20000;
 /** Goals that take a game of The Bridge. */
 export const BRIDGE_GOAL_LIMIT = 5;
 /** A goal restarts the round: both players are shut back into their own drop
@@ -49,8 +48,8 @@ export const BRIDGE_GOAL_LIMIT = 5;
 export const BRIDGE_GOAL_RESET_MS = 3000;
 /** Bridge attacks have fixed strength. Short action intervals bound packet
  * spam; waiting never earns extra damage or knockback. */
-export const BRIDGE_RESPAWN_SHIELD_MS = 1800;
-export const BRIDGE_MELEE_TIER = { item: Item.IronAxe, damage: 5, cooldownMs: 280, kbBonus: 0.02 } as const;
+const BRIDGE_RESPAWN_SHIELD_MS = 1800;
+export const BRIDGE_MELEE_TIER = { damage: 5, cooldownMs: 280, kbBonus: 0.02 } as const;
 /** How early (ms) a swing may ARRIVE against the cooldown and still count.
  *  The client paces the axe at exactly `cooldownMs`, but packets bunch up on
  *  the way: judged to the millisecond, a held button dropped roughly one hit
@@ -58,14 +57,14 @@ export const BRIDGE_MELEE_TIER = { item: Item.IronAxe, damage: 5, cooldownMs: 28
  *  straight through somebody. Small enough that no client can gain a real
  *  extra swing from it. */
 export const BRIDGE_SWING_JITTER_MS = 60;
-export const BRIDGE_KILL_CREDIT_MS = 10_000;
+const BRIDGE_KILL_CREDIT_MS = 10_000;
 /** One arrow every five seconds: the bow is a finisher, not a spray. */
 export const BRIDGE_BOW_COOLDOWN_MS = 5000;
 export const BRIDGE_ARROW_SPEED = 62;
 export const BRIDGE_ARROW_GRAVITY = 19;
 export const BRIDGE_ARROW_LIFE_MS = 5000;
-export const BRIDGE_ARROW_DAMAGE = 7;
-export const BRIDGE_ARROW_KB = 0.55;
+const BRIDGE_ARROW_DAMAGE = 7;
+const BRIDGE_ARROW_KB = 0.55;
 export const BRIDGE_ARROW_KB_VERT = 0.3;
 
 /** Keep movement crits, directional sprint knockback and earned combos, with
@@ -86,10 +85,10 @@ export function bridgeArrowShot(): {
 
 export type PartyMode = 'bridge' | 'parkour';
 export type PartyGameId = 'bridge' | 'parkour';
-export type PartyPhase = 'lobby' | 'countdown' | 'running' | 'results';
-export type PartyFinishReason = 'complete' | 'forfeit' | 'cancelled';
-export type PartyJoinFailure = 'invalid' | 'full' | 'match_in_progress' | 'already_in_lobby';
-export type PartyStartFailure = 'not_host' | 'too_few_players' | 'too_many_players' | 'not_everyone_ready' | 'not_in_lobby';
+type PartyPhase = 'lobby' | 'countdown' | 'running' | 'results';
+type PartyFinishReason = 'complete' | 'forfeit' | 'cancelled';
+type PartyJoinFailure = 'invalid' | 'full' | 'match_in_progress' | 'already_in_lobby';
+type PartyStartFailure = 'not_host' | 'too_few_players' | 'too_many_players' | 'not_everyone_ready' | 'not_in_lobby';
 
 export interface PartyVec3 { x: number; y: number; z: number }
 
@@ -98,38 +97,33 @@ export interface PartyArenaBounds {
   seed: number;
   minX: number;
   maxX: number;
-  minY: number;
-  maxY: number;
   minZ: number;
   maxZ: number;
   floor: number;
   ceiling: number;
-  voidY: number;
 }
 export interface PartySubBounds extends PartyArenaBounds {
-  index: number;
   game: PartyGameId;
 }
 
 /** A mode's venue footprint, in blocks from its world's origin. */
 interface PartyVenue { sizeX: number; sizeZ: number }
 
-export interface PartyGameDef extends PartyVenue {
+interface PartyGameDef extends PartyVenue {
   id: PartyGameId;
-  index: number;
   title: string;
   rule: string;
   durationMs: number;
 }
 
-export const PARTY_GAME_DEFS: readonly PartyGameDef[] = [
+const PARTY_GAME_DEFS: readonly PartyGameDef[] = [
   {
-    id: 'bridge', index: 0, title: 'THE BRIDGE',
+    id: 'bridge', title: 'THE BRIDGE',
     rule: `Iron axe, bow and wool. Sprint-hit rivals off the span, then dive into the enemy portal. First to ${BRIDGE_GOAL_LIMIT} goals.`,
     durationMs: 480_000, sizeX: 24, sizeZ: 80,
   },
   {
-    id: 'parkour', index: 1, title: 'PARKOUR DUEL',
+    id: 'parkour', title: 'PARKOUR DUEL',
     rule: 'One straight line of jumps, walls, tunnels and gaps. Checkpoints are rare. Sprint, jump, do not look down.',
     durationMs: 420_000, sizeX: 32, sizeZ: 448,
   },
@@ -146,17 +140,16 @@ export function partyHash(seed: number, n: number): number {
 }
 
 /** A mode's venue in its own world, carrying the course seed. */
-export function partyArenaBounds(game: PartyGameId, seed: number): PartyArenaBounds {
+function partyArenaBounds(game: PartyGameId, seed: number): PartyArenaBounds {
   const def = partyGame(game);
   return {
     seed, minX: 0, maxX: def.sizeX, minZ: 0, maxZ: def.sizeZ,
-    minY: PARTY_VOID_Y, maxY: PARTY_CEILING_Y,
-    floor: PARTY_FLOOR_Y, ceiling: PARTY_CEILING_Y, voidY: PARTY_VOID_Y,
+    floor: PARTY_FLOOR_Y, ceiling: PARTY_CEILING_Y,
   };
 }
-export function partySubBounds(game: PartyGameId, seed: number): PartySubBounds {
+function partySubBounds(game: PartyGameId, seed: number): PartySubBounds {
   const def = partyGame(game);
-  return { ...partyArenaBounds(game, seed), index: def.index, game: def.id };
+  return { ...partyArenaBounds(game, seed), game: def.id };
 }
 export function clampToPartySub(p: PartyVec3, sub: PartySubBounds): PartyVec3 {
   return {
@@ -218,8 +211,8 @@ class VenueStamp {
 // courses, slits, machicolations, obelisks, a keep and a drop cage — rather
 // than large flat plates.
 
-export const BRIDGE_SIZE_X = 24;
-export const BRIDGE_SIZE_Z = 80;
+const BRIDGE_SIZE_X = 24;
+const BRIDGE_SIZE_Z = 80;
 /** Reflection axis. `BRIDGE_SIZE_Z - 1 - lz` maps crimson to cobalt in BLOCKS;
  *  a continuous z mirrors as `BRIDGE_SIZE_Z - z`, which is the same axis. */
 const BRIDGE_MIRROR = BRIDGE_SIZE_Z - 1;
@@ -509,7 +502,7 @@ export function bridgeCageHatch(): readonly { lx: number; y: number; lz: number 
 }
 
 /** Which portal, if any, contains this venue-local point below the deck lip. */
-export function bridgeGoalAt(lx: number, y: number, lz: number): number | null {
+function bridgeGoalAt(lx: number, y: number, lz: number): number | null {
   if (y >= PARTY_FLOOR_Y - .5) return null;
   for (const g of BRIDGE_GOALS)
     if (lx >= g.minX && lx < g.maxX && lz >= g.minZ && lz < g.maxZ) return g.team;
@@ -533,13 +526,13 @@ export {
   type ParkourCourse, type ParkourPlatform, type ParkourJump, type ParkourMode,
 } from './parkour_course';
 
-export const PARKOUR_SIZE_X = 32;
-export const PARKOUR_SIZE_Z = 448;
+const PARKOUR_SIZE_X = 32;
+const PARKOUR_SIZE_Z = 448;
 /** Rubber band for a runaway lead. A racer this many platforms behind the
  *  leader saves progress on EVERY pad they land, so a fall costs one jump, not
  *  a whole leg. Nobody is moved forward for free — every jump is still theirs
  *  to make — and it switches off the moment the gap closes. */
-export const PARKOUR_CATCHUP_GAP = 8;
+const PARKOUR_CATCHUP_GAP = 8;
 
 /** True while `p` is far enough behind the field to get catch-up checkpoints. */
 export function parkourCatchUp(p: { progress: number }, field: Iterable<{ progress: number; connected: boolean }>): boolean {
@@ -567,7 +560,7 @@ export function partyVenueLookup(game: PartyGameId, seed: number): (x: number, y
   return (x, y, z) => stamp.get(Math.floor(x), Math.floor(y), Math.floor(z));
 }
 /** Forget a finished course's stamp (the server calls this when a world ends). */
-export function releaseParkourStamp(seed: number): void { parkourStampCache.delete(seed); }
+function releaseParkourStamp(seed: number): void { parkourStampCache.delete(seed); }
 
 /** Spawn positions, in participant order. */
 export function partySpawns(sub: PartySubBounds, members: readonly { team: number }[]): PartyVec3[] {
@@ -589,10 +582,9 @@ export function partySpawns(sub: PartySubBounds, members: readonly { team: numbe
 
 // ── Lobby engine ───────────────────────────────────────────────────────────
 
-export interface PartyIdentity { id: number; username: string; skin: number; bot?: boolean }
+interface PartyIdentity { id: number; username: string; bot?: boolean }
 
 export interface PartyParticipant extends PartyIdentity {
-  host: boolean;
   ready: boolean;
   connected: boolean;
   joinOrder: number;
@@ -619,9 +611,8 @@ export interface PartyParticipant extends PartyIdentity {
   pendingSpawn: boolean;
 }
 
-export interface PartyRoundState {
+interface PartyRoundState {
   game: PartyGameId;
-  index: number;
   startedAt: number;
   endsAt: number;
   revision: number;
@@ -634,8 +625,6 @@ export interface PartyResult {
   teamScores: [number, number];
   scoreboard: PartyParticipant[];
   finishReason: PartyFinishReason;
-  durationMs: number;
-  ranked: false;
 }
 
 export interface PartyLobbySnapshot {
@@ -664,10 +653,9 @@ export interface PartyLobbySnapshot {
   arena?: PartyArenaBounds;
   sub?: PartySubBounds;
   result?: PartyResult;
-  ranked: false;
 }
 
-interface PartyLobby extends Omit<PartyLobbySnapshot, 'participants' | 'serverNow' | 'ranked' | 'sub'> {
+interface PartyLobby extends Omit<PartyLobbySnapshot, 'participants' | 'serverNow' | 'sub'> {
   token: string;
   participants: Map<number, PartyParticipant>;
   arenaReady: Set<number>;
@@ -677,7 +665,7 @@ interface PartyLobby extends Omit<PartyLobbySnapshot, 'participants' | 'serverNo
 
 /** Round order: a finisher first, then whoever lasted longest, then score,
  *  then whoever got there with fewer falls. */
-export function orderPartyRound(ps: Iterable<PartyParticipant>): PartyParticipant[] {
+function orderPartyRound(ps: Iterable<PartyParticipant>): PartyParticipant[] {
   return [...ps].sort((a, b) =>
     Number(b.connected) - Number(a.connected) ||
     (a.finishedAt ?? Infinity) - (b.finishedAt ?? Infinity) ||
@@ -685,14 +673,14 @@ export function orderPartyRound(ps: Iterable<PartyParticipant>): PartyParticipan
     b.score - a.score || a.falls - b.falls || a.joinOrder - b.joinOrder);
 }
 /** Scoreboard order for The Bridge: winning side first, top scorer first. */
-export function orderPartyTeams(ps: Iterable<PartyParticipant>, teamScores: readonly number[]): PartyParticipant[] {
+function orderPartyTeams(ps: Iterable<PartyParticipant>, teamScores: readonly number[]): PartyParticipant[] {
   return [...ps].sort((a, b) =>
     (teamScores[b.team] ?? 0) - (teamScores[a.team] ?? 0) || a.team - b.team ||
     b.score - a.score || a.joinOrder - b.joinOrder);
 }
 
-export interface PartyCreateResult { token: string; snapshot: PartyLobbySnapshot }
-export type PartyJoinResult =
+interface PartyCreateResult { token: string; snapshot: PartyLobbySnapshot }
+type PartyJoinResult =
   | { ok: true; snapshot: PartyLobbySnapshot }
   | { ok: false; reason: PartyJoinFailure };
 
@@ -709,9 +697,9 @@ export class PartyGamesEngine {
   private readonly layoutBags = new Map<ParkourMode, ParkourLayout[]>();
   constructor(private readonly tokenFactory: () => string) { }
 
-  private static blank(identity: PartyIdentity, host: boolean, joinOrder: number): PartyParticipant {
+  private static blank(identity: PartyIdentity, joinOrder: number): PartyParticipant {
     return {
-      ...identity, host, ready: false, connected: true, joinOrder, team: 0, score: 0,
+      ...identity, ready: false, connected: true, joinOrder, team: 0, score: 0,
       kills: 0, deaths: 0, lastHitBy: undefined, lastHitAt: 0,
       checkpoint: 0, progress: 0, falls: 0, lives: 0, immuneUntil: 0, pendingSpawn: false,
     };
@@ -736,7 +724,7 @@ export class PartyGamesEngine {
     PartyCreateResult | { reason: 'already_in_lobby' } {
     if (this.lobbyByPlayer.has(identity.id)) return { reason: 'already_in_lobby' };
     const token = this.tokenFactory();
-    const p = PartyGamesEngine.blank(identity, true, 0);
+    const p = PartyGamesEngine.blank(identity, 0);
     const lobby: PartyLobby = {
       id: `P${this.nextId++}`, token, mode, revision: 0, phase: 'lobby',
       capacity: Math.max(PARTY_MIN_PLAYERS, Math.min(partyModeCapacity(mode, true), capacity)),
@@ -756,7 +744,7 @@ export class PartyGamesEngine {
     if (l.phase !== 'lobby') return { ok: false, reason: 'match_in_progress' };
     if (l.participants.size >= l.capacity) return { ok: false, reason: 'full' };
     const joinOrder = Math.max(...[...l.participants.values()].map((v) => v.joinOrder)) + 1;
-    const p = PartyGamesEngine.blank(identity, false, joinOrder);
+    const p = PartyGamesEngine.blank(identity, joinOrder);
     for (const v of l.participants.values()) v.ready = false;
     l.participants.set(p.id, p);
     this.lobbyByPlayer.set(p.id, l);
@@ -764,9 +752,11 @@ export class PartyGamesEngine {
     return { ok: true, snapshot: this.snapshotLobby(l, now) };
   }
 
-  leave(id: number, now: number): { snapshot?: PartyLobbySnapshot; deleted: boolean; token?: string } {
+  /** Take a player out of their lobby. Returns the lobby as it now stands, or
+   *  undefined when there was none or it emptied and was deleted. */
+  leave(id: number, now: number): PartyLobbySnapshot | undefined {
     const l = this.lobbyByPlayer.get(id);
-    if (!l) return { deleted: false };
+    if (!l) return undefined;
     this.lobbyByPlayer.delete(id);
     const p = l.participants.get(id)!;
     p.connected = false;
@@ -777,19 +767,16 @@ export class PartyGamesEngine {
     if (!remaining.length) {
       this.release(l);
       this.lobbies.delete(l.token);
-      return { deleted: true, token: l.token };
+      return undefined;
     }
     l.host = remaining[0].id;
-    for (const v of l.participants.values()) {
-      v.host = v.id === l.host;
-      if (l.phase === 'lobby') v.ready = false;
-    }
+    if (l.phase === 'lobby') for (const v of l.participants.values()) v.ready = false;
     if (l.phase === 'lobby') this.assignTeams(l);
     if (remaining.length < 2 && l.phase !== 'lobby' && l.phase !== 'results')
       // The side still standing takes it. (The Bridge reads its winner by team.)
       this.finish(l, now, remaining[0].id, 'forfeit', l.mode === 'bridge' ? remaining[0].team : null);
     else if (l.phase === 'countdown') this.arm(l, now);
-    return { deleted: false, snapshot: this.snapshotLobby(l, now) };
+    return this.snapshotLobby(l, now);
   }
 
   setReady(id: number, ready: boolean, now: number): PartyLobbySnapshot | null {
@@ -846,7 +833,7 @@ export class PartyGamesEngine {
     l.lastKill = undefined;
     l.teamScores = [0, 0];
     const game = partyGame(l.mode);
-    l.round = { game: game.id, index: game.index, startedAt: 0, endsAt: 0, revision: l.revision };
+    l.round = { game: game.id, startedAt: 0, endsAt: 0, revision: l.revision };
     const lives = l.mode === 'parkour' && l.arena && parkourCourse(l.arena.seed).variant.mode === 'collapse'
       ? COLLAPSE_LIVES : 0;
     for (const p of l.participants.values())
@@ -1102,7 +1089,7 @@ export class PartyGamesEngine {
     l.result = {
       winner, winnerTeam, teamScores,
       scoreboard: board.map((p) => ({ ...p })),
-      finishReason: reason, durationMs: Math.max(0, now - (l.startedAt ?? now)), ranked: false,
+      finishReason: reason,
     };
   }
 
@@ -1120,7 +1107,7 @@ export class PartyGamesEngine {
       lastGoal: l.lastGoal, lastKill: l.lastKill,
       round: l.round ? { ...l.round } : undefined, arena: l.arena,
       sub: l.arena && l.round ? partySubBounds(l.mode, l.arena.seed) : undefined,
-      result: l.result, ranked: false,
+      result: l.result,
     };
   }
 

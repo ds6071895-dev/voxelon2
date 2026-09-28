@@ -5,7 +5,7 @@
 import { PARTY_CODE_LENGTH, PARTY_MAX, type PartyState } from '../net/protocol';
 import { drawFace } from './face';
 
-export interface PartyHooks {
+interface PartyHooks {
   onCreate(): void;
   onJoin(code: string): void;
   onLeave(): void;

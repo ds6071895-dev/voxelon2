@@ -3,14 +3,16 @@
 // gravity 32 m/s^2, collision box 0.6 x 1.8, eye height 1.62 (1.27 sneaking).
 
 import * as THREE from 'three';
-import { Block, isSolid } from './blocks';
+import { Block, collisionBoxes, isSolid } from './blocks';
 import type { PlayerInput } from './input';
-import { collisionBoxes, FULL_BOX, type Box } from './shapes';
 import type { World } from './world';
 
-const FULL: Box[] = [FULL_BOX];
+/** Min/max corner of a collision box in cell-local [0,1] space. Most solid
+ *  blocks are full cubes; stairs and props carry their own sub-boxes. */
+type Box = [[number, number, number], [number, number, number]];
+const FULL: Box[] = [[[0, 0, 0], [1, 1, 1]]];
+const NONE: Box[] = [];
 
-export const MAX_AIR = 15; // seconds of breath = vanilla's 10 bubbles
 
 const WALK_SPEED = 4.317;
 const SPRINT_SPEED = 5.612;
@@ -18,13 +20,13 @@ const SNEAK_SPEED = 1.295;
 const GRAVITY = 32;
 const JUMP_VELOCITY = Math.sqrt(2 * GRAVITY * 1.25); // exactly 1.25 blocks
 const TERMINAL_VELOCITY = 78;
-const HALF_WIDTH = 0.3;
-const HEIGHT = 1.8;
+const BASE_HALF_WIDTH = 0.3;
+const BASE_HEIGHT = 1.8;
 // Vanilla-style auto-step: walk straight up obstacles whose top is within this
 // height (slabs, single stairs) when there's headroom, without jumping.
 const STEP_HEIGHT = 0.6;
-const EYE_STANDING = 1.62;
-const EYE_SNEAKING = 1.27;
+const BASE_EYE_STANDING = 1.62;
+const BASE_EYE_SNEAKING = 1.27;
 const MOUSE_SENSITIVITY = 0.0022;
 const EPS = 0.001;
 
@@ -33,36 +35,12 @@ const EPS = 0.001;
 const ENERGY_DRAIN = 1 / 30;
 const ENERGY_REFILL = 1 / 4;
 const ENERGY_SPRINT_THRESHOLD = 0.25;
-const DAMAGE_REGEN_DELAY = 3; // seconds after a hit before health regen resumes
-// Admin/gamemode flight (creative + spectator).
+// Spectator flight.
 const FLY_SPEED_MULT = 2.4;   // horizontal speed multiplier while flying
 const FLY_V_SPEED = 9;        // vertical rise/descend speed (blocks/s)
-// Glider (chestplate-slot wings): a fast, forgiving directional descent. The
-// look direction steers; diving trades altitude for speed, leveling out cruises
-// fast with a small constant sink ("fun and easy" transport from high places).
-const GLIDE_BASE_SPEED = 13;   // cruise speed looking level (≈3× walking)
-const GLIDE_DIVE_GAIN = 20;    // extra speed gained nose-down
-const GLIDE_MIN_SPEED = 6;
-const GLIDE_MAX_SPEED = 34;
-const GLIDE_SINK = 2.0;        // baseline downward drift (blocks/s)
-const GLIDE_MIN_CLEARANCE = 3; // air blocks below required to deploy
-// A wing carries ENERGY: airspeed does not jump to whatever the nose is
-// pointing at, it builds in a dive and bleeds off in a climb. That single
-// difference is what makes gliding feel like flying rather than like being
-// dragged along the look vector — dive to build speed, then pull up and trade
-// it back for a burst of altitude before the wing settles into a cruise.
-const GLIDE_ACCEL_DIVE = 2.0;  // per-second easing toward a faster target
-const GLIDE_ACCEL_CLIMB = 2.9; // speed bleeds off faster than it builds
-const GLIDE_LIFT = 0.72;       // how much of the airspeed becomes climb/descent
-const GLIDE_CATCH_V = -3;      // the wings catch: fall speed clamped on deploy
-// Boat: fast, drifty travel over water. W rows toward where you look, S back-
-// paddles; buoyancy bobs the hull at the surface (mounted/dismounted by main).
-const BOAT_SPEED = 11;         // ~2.5× walking
-const BOAT_REVERSE = 0.35;     // back-paddle fraction of full speed
-const BOAT_ACCEL = 2.5;        // low accel = a drifty, boaty feel
-// Grappling-hook momentum: how hard WASD can push a launch around mid-air, and
-// how fast the carried speed bleeds off (per-second multiplier). Tuned so a
-// full-speed reel release stays fast for roughly two seconds of flight.
+// Launch momentum (Parkour pads, the Bounce Pad): how hard WASD can push a
+// launch around mid-air, and how fast the carried speed bleeds off (per-second
+// multiplier), so a launch stays fast for a couple of seconds of flight.
 const MOMENTUM_STEER = 13;
 const MOMENTUM_DRAG = 0.62;
 // Un-sticking: how far the body may be shoved to escape geometry it is already
@@ -79,19 +57,15 @@ export class Player {
   sprinting = false;
   sneaking = false;
   inWater = false;
-  eyeUnderwater = false;
-  // Survival stats: hearts-driven max HP (lifesteal: 2 HP per heart, start
-  // 10 hearts = 20 HP), plus a 0..1 energy bar that gates sprinting.
+  // Health (the server owns it in a match), plus a 0..1 energy bar that gates
+  // sprinting.
   health = 20;
-  /** Max HP = hearts * 2; main keeps it in sync with the hearts count. */
+  /** Set per mode by main (Duels and party games each have their own). */
   maxHealth = 20;
   energy = 1;
   /** True after energy hits 0 until it recovers to the sprint threshold. */
   exhausted = false;
-  air = MAX_AIR;
   fallDistance = 0;
-  /** Counts down after a hit; health only regenerates once it reaches 0. */
-  regenCooldown = 0;
   /** Invulnerability window after a hit. */
   hurtTimer = 0;
   /** Drives the red flash + camera tilt; decays to 0. */
@@ -100,45 +74,43 @@ export class Player {
   /** In multiplayer, damage is routed here (to the server) instead of being
    *  applied locally — the server owns health. */
   damageSink?: (amount: number) => void;
-  /** Admin/gamemode flight: no gravity, jump/sneak rise/descend (creative+spectator). */
+  /** Spectator flight: no gravity, jump/sneak rise/descend. */
   flying = false;
-  /** Admin/gamemode noclip: move through blocks, ignore collision (spectator). */
+  /** Spectator noclip: move through blocks, ignore collision. */
   noclip = false;
-  /** Trap grip: a Bear Trap pins you outright, Tar/Barbed Wire drag you down.
-   *  main.ts writes these each frame from the block you're standing in. */
-  pinned = false;      // Bear Trap: no movement at all until you break free
-  trapSlow = 1;        // Tar/Barbed Wire speed multiplier (1 = free)
-  trapNoJump = false;  // Tar/Bear Trap: you cannot jump out of it
   /** Mouse-look sensitivity multiplier (1 = normal). Lowered while a gun is
    *  scoped (aim-down-sights) so high-zoom aiming is steady. */
   lookScale = 1;
-  /** A cockpit may opt into the complete vertical hemisphere, including the
-   *  exact straight-up and straight-down poles. */
-  fullVerticalLook = false;
-  /** Progression speed multiplier (skill tree + faction perk). */
-  speedMult = 1;
-  /** Sprint energy-drain multiplier (<1 = Windrunner capstones). */
+  /** Sprint energy-drain multiplier (bots run with 0: unlimited sprint). */
   energyDrainMult = 1;
-  /** Fall-damage multiplier (<1 = Juggernaut capstones). */
-  fallDamageMult = 1;
-  /** A glider is worn in the chestplate slot (set by main from the inventory). */
-  gliderEquipped = false;
-  /** Currently gliding (wings deployed). */
-  gliding = false;
-  /** Current airspeed of the wing (blocks/s). Carried across frames so a dive
-   *  can be traded back for altitude; read by the view for wind and FX. */
-  glideSpeed = 0;
-  /** Riding a boat (mounted/dismounted by main; drives water-surface physics). */
-  boating = false;
-  /** Seconds of PRESERVED MOMENTUM left (grappling hook). Normal air control
+  /** Seconds of PRESERVED MOMENTUM left after a launch. Normal air control
    *  drags your horizontal speed back toward walking pace within a fraction of
-   *  a second, which would eat a hook launch the instant the rope let go —
-   *  while this is positive, WASD instead ADDS thrust to whatever speed you
-   *  already carry and only a light drag bleeds it off. main.ts tops it up
-   *  every frame the rope is attached and sets the launch window on release. */
+   *  a second, which would eat a launch at once — while this is positive, WASD
+   *  instead ADDS thrust to whatever speed you already carry and only a light
+   *  drag bleeds it off. Set by whatever launched you (a pad, the Bounce Pad). */
   momentumTime = 0;
-  private prevJump = false;
-  private eye = EYE_STANDING;
+  /** Movement speed multiplier (status effects, a mode's pace). */
+  speedMult = 1;
+  /** Jump Boost level: each level adds a tenth of a block-per-tick of launch. */
+  jumpBoost = 0;
+  /** Body size (Rat and Seek shrinks rats to half scale). */
+  private halfWidth = BASE_HALF_WIDTH;
+  private height = BASE_HEIGHT;
+  private eyeStanding = BASE_EYE_STANDING;
+  private eyeSneaking = BASE_EYE_SNEAKING;
+  private eye = BASE_EYE_STANDING;
+  /** Resize the body: collision box and eye height scale together; walking
+   *  speed, jump height and step-up height do not (as in vanilla). */
+  setBodyScale(scale: number): void {
+    const s = Math.max(0.2, Math.min(1, scale));
+    this.halfWidth = BASE_HALF_WIDTH * s;
+    this.height = BASE_HEIGHT * s;
+    this.eyeStanding = BASE_EYE_STANDING * s;
+    this.eyeSneaking = BASE_EYE_SNEAKING * s;
+    this.eye = this.eyeStanding;
+  }
+  get bodyHeight(): number { return this.height; }
+  get bodyHalfWidth(): number { return this.halfWidth; }
   /** True while the body's own chunk column has streamed in — only then may
    *  collision treat NEIGHBOURING unloaded columns as rock (see cellBoxes). */
   private streamGuard = false;
@@ -156,7 +128,6 @@ export class Player {
     const dealt = Math.max(0, Math.round(amount));
     this.hurtTimer = 0.5;
     this.damageFlash = 0.45;
-    this.regenCooldown = DAMAGE_REGEN_DELAY;
     if (dealt <= 0) return; // fully absorbed: i-frames + flash, no health loss
     this.health = Math.max(0, this.health - dealt);
     if (this.health <= 0) this.dead = true;
@@ -175,16 +146,11 @@ export class Player {
     this.health = this.maxHealth;
     this.energy = 1;
     this.exhausted = false;
-    this.air = MAX_AIR;
     this.fallDistance = 0;
-    this.regenCooldown = 0;
     this.hurtTimer = 0;
     this.damageFlash = 0;
     this.dead = false;
-    this.gliding = false;
-    this.boating = false;
     this.momentumTime = 0;
-    this.prevJump = false;
   }
 
   get eyePosition(): THREE.Vector3 {
@@ -198,12 +164,11 @@ export class Player {
       world.isLoaded?.(Math.floor(this.pos.x), Math.floor(this.pos.z)) ?? false;
     this.hurtTimer = Math.max(0, this.hurtTimer - dt);
     this.damageFlash = Math.max(0, this.damageFlash - dt);
-    // regenCooldown is ticked by Survival.update (runs while paused/inventory).
 
     // Mouse look (lookScale < 1 while scoped for steady aim-down-sights).
     this.yaw -= input.mouseDX * MOUSE_SENSITIVITY * this.lookScale;
     this.pitch -= input.mouseDY * MOUSE_SENSITIVITY * this.lookScale;
-    const maxPitch = Math.PI / 2 - (this.fullVerticalLook ? 0 : 0.001);
+    const maxPitch = Math.PI / 2 - 0.001;
     this.pitch = Math.max(-maxPitch, Math.min(maxPitch, this.pitch));
 
     // Sprint is gated on energy: blocked while sneaking, not moving forward,
@@ -215,37 +180,11 @@ export class Player {
       this.sprinting = true;
     }
 
-    // Water state (feet column and eye block).
+    // Water state (feet column).
     const feetBlock = world.getBlock(
       Math.floor(this.pos.x), Math.floor(this.pos.y + 0.4), Math.floor(this.pos.z)
     );
     this.inWater = feetBlock === Block.Water;
-    const eyeP = this.eyePosition;
-    this.eyeUnderwater =
-      world.getBlock(Math.floor(eyeP.x), Math.floor(eyeP.y), Math.floor(eyeP.z)) ===
-      Block.Water;
-
-    // Glider: jump in mid-air (with clearance below) to deploy; jump again, or
-    // touch ground/water, to stow. Rising-edge on jump so a held Space doesn't
-    // immediately re-toggle.
-    const jumpEdge = input.jump && !this.prevJump;
-    this.prevJump = input.jump;
-    if (this.boating) this.gliding = false;
-    if (this.gliding) {
-      if (this.onGround || this.inWater || this.flying ||
-          !this.gliderEquipped || jumpEdge) {
-        this.gliding = false;
-      }
-    } else if (jumpEdge && this.gliderEquipped && !this.boating && !this.onGround &&
-        !this.inWater && !this.flying &&
-        this.groundClearance(world) > GLIDE_MIN_CLEARANCE) {
-      this.gliding = true;
-      // Open with whatever speed you already carry (a grapple launch into the
-      // wings keeps its momentum), and let the sail catch the fall instead of
-      // snapping the descent to zero.
-      this.glideSpeed = Math.max(GLIDE_MIN_SPEED, Math.hypot(this.vel.x, this.vel.z));
-      this.vel.y = Math.max(this.vel.y, GLIDE_CATCH_V);
-    }
 
     // Wish direction in the horizontal plane, relative to yaw.
     let fwd = 0, strafe = 0;
@@ -260,80 +199,59 @@ export class Player {
     const dirX = -sin * fwd + cos * strafe;
     const dirZ = -cos * fwd - sin * strafe;
 
-    if (this.boating && !this.flying) {
-      // In a boat: W rows toward where you look, buoyancy pins the hull to the
-      // water surface (collisions still resolve at integration).
-      this.sprinting = false;
-      this.momentumTime = 0;
-      this.applyBoat(dt, input, world);
-    } else if (this.gliding) {
-      // Wings deployed: the look direction sets the whole velocity (collisions
-      // still resolve at integration). WASD is ignored — you fly where you aim.
-      this.momentumTime = 0; // the wings own the velocity now, not the hook
-      this.applyGlide(dt);
+    let speed = this.sneaking ? SNEAK_SPEED : this.sprinting ? SPRINT_SPEED : WALK_SPEED;
+    if (this.inWater) speed *= 0.45;
+    speed *= this.speedMult;
+    if (this.flying) speed = (this.sprinting ? SPRINT_SPEED : WALK_SPEED) * FLY_SPEED_MULT;
+
+    // Approach target velocity; much weaker control while airborne (but full
+    // authority while flying).
+    const grounded = this.flying || this.onGround || this.inWater;
+    if (this.momentumTime > 0 && !grounded) {
+      // Carrying launch momentum: steering ADDS thrust in the direction you
+      // ask for, and only a light air drag bleeds the speed off, so a launch
+      // stays a launch and can be aimed mid-flight.
+      this.vel.x += dirX * MOMENTUM_STEER * dt;
+      this.vel.z += dirZ * MOMENTUM_STEER * dt;
+      const drag = Math.pow(MOMENTUM_DRAG, dt);
+      this.vel.x *= drag;
+      this.vel.z *= drag;
     } else {
-      let speed = (this.sneaking ? SNEAK_SPEED
-        : this.sprinting ? SPRINT_SPEED
-        : WALK_SPEED) * this.speedMult * this.trapSlow;
-      // Caught in a Bear Trap: the jaws hold you exactly where you stand.
-      if (this.pinned) speed = 0;
-      if (this.inWater) speed *= 0.45;
-      // Swamp mud drags the feet (slight, kid-gentle slowdown).
-      if (!this.flying && this.onGround && world.getBlock(
-        Math.floor(this.pos.x), Math.floor(this.pos.y - 0.05), Math.floor(this.pos.z)
-      ) === Block.Mud) speed *= 0.72;
-      if (this.flying) speed = (this.sprinting ? SPRINT_SPEED : WALK_SPEED) * FLY_SPEED_MULT;
+      const accel = grounded ? 14 : 3;
+      const t = Math.min(1, accel * dt);
+      this.vel.x += (dirX * speed - this.vel.x) * t;
+      this.vel.z += (dirZ * speed - this.vel.z) * t;
+    }
+    // Landing (or a swim) ends the momentum window; otherwise it decays.
+    this.momentumTime = grounded && !this.flying
+      ? 0 : Math.max(0, this.momentumTime - dt);
 
-      // Approach target velocity; much weaker control while airborne (but full
-      // authority while flying).
-      const grounded = this.flying || this.onGround || this.inWater;
-      if (this.momentumTime > 0 && !grounded) {
-        // Carrying hook momentum: steering ADDS thrust in the direction you
-        // ask for, and only a light air drag bleeds the speed off, so a launch
-        // stays a launch and can be aimed mid-flight.
-        this.vel.x += dirX * MOMENTUM_STEER * dt;
-        this.vel.z += dirZ * MOMENTUM_STEER * dt;
-        const drag = Math.pow(MOMENTUM_DRAG, dt);
-        this.vel.x *= drag;
-        this.vel.z *= drag;
-      } else {
-        const accel = grounded ? 14 : 3;
-        const t = Math.min(1, accel * dt);
-        this.vel.x += (dirX * speed - this.vel.x) * t;
-        this.vel.z += (dirZ * speed - this.vel.z) * t;
+    // Vertical.
+    if (this.flying) {
+      // Free vertical control: jump rises, sneak descends, no gravity/fall.
+      let vy = 0;
+      if (input.jump) vy += 1;
+      if (input.sneak) vy -= 1;
+      this.vel.y = vy * FLY_V_SPEED;
+      this.fallDistance = 0;
+    } else if (this.inWater) {
+      this.vel.y -= GRAVITY * 0.4 * dt;
+      this.vel.y *= 1 - 2.5 * dt; // drag
+      if (input.jump) this.vel.y += 24 * dt;
+      this.vel.y = Math.max(-6, Math.min(4.5, this.vel.y));
+      // Climbing out: at the water's edge, holding jump while pushing into a
+      // 1-block ledge gives an upward hop that beats the buoyancy clamp, so
+      // you mount the block instead of bobbing against it (like vanilla).
+      if (input.jump && len > 0 && this.ledgeAhead(world, dirX, dirZ)) {
+        this.vel.y = 5.5;
       }
-      // Landing (or a swim) ends the momentum window; otherwise it decays.
-      this.momentumTime = grounded && !this.flying
-        ? 0 : Math.max(0, this.momentumTime - dt);
-
-      // Vertical.
-      if (this.flying) {
-        // Free vertical control: jump rises, sneak descends, no gravity/fall.
-        let vy = 0;
-        if (input.jump) vy += 1;
-        if (input.sneak) vy -= 1;
-        this.vel.y = vy * FLY_V_SPEED;
-        this.fallDistance = 0;
-      } else if (this.inWater) {
-        this.vel.y -= GRAVITY * 0.4 * dt;
-        this.vel.y *= 1 - 2.5 * dt; // drag
-        if (input.jump) this.vel.y += 24 * dt;
-        this.vel.y = Math.max(-6, Math.min(4.5, this.vel.y));
-        // Climbing out: at the water's edge, holding jump while pushing into a
-        // 1-block ledge gives an upward hop that beats the buoyancy clamp, so
-        // you mount the block instead of bobbing against it (like vanilla).
-        if (input.jump && len > 0 && this.ledgeAhead(world, dirX, dirZ)) {
-          this.vel.y = 5.5;
-        }
-      } else {
-        // Tar and bear-trap jaws hold your feet: no jumping out of them.
-        if (input.jump && this.onGround && !this.trapNoJump) {
-          this.vel.y = JUMP_VELOCITY;
-          this.onGround = false;
-        }
-        this.vel.y -= GRAVITY * dt;
-        if (this.vel.y < -TERMINAL_VELOCITY) this.vel.y = -TERMINAL_VELOCITY;
+    } else {
+      if (input.jump && this.onGround) {
+        this.vel.y = JUMP_VELOCITY * (0.42 + 0.1 * this.jumpBoost) / 0.42;
+        this.onGround = false;
       }
+      this.vel.y -= GRAVITY * dt;
+      if (this.vel.y < -TERMINAL_VELOCITY) this.vel.y = -TERMINAL_VELOCITY;
     }
 
     // Energy: sprinting drains it; otherwise it refills. Hitting 0 forces a
@@ -373,17 +291,16 @@ export class Player {
       this.moveAxisSneakAware(world, 0, this.vel.x * dt, wasOnGround);
       this.moveAxisSneakAware(world, 2, this.vel.z * dt, wasOnGround);
 
-      // Landing: vanilla fall damage = blocks fallen minus 3 (skill-tree
-      // capstones shave a fraction off).
+      // Landing: vanilla fall damage = blocks fallen minus 3.
       if (this.onGround && this.fallDistance > 0) {
-        const dmg = Math.ceil(Math.max(0, this.fallDistance - 3.2) * this.fallDamageMult);
+        const dmg = Math.ceil(Math.max(0, this.fallDistance - 3.2));
         if (dmg > 0) this.damage(dmg);
         this.fallDistance = 0;
       }
     }
 
     // Smooth eye height (sneak transition).
-    const targetEye = this.sneaking ? EYE_SNEAKING : EYE_STANDING;
+    const targetEye = this.sneaking ? this.eyeSneaking : this.eyeStanding;
     this.eye += (targetEye - this.eye) * Math.min(1, 14 * dt);
   }
 
@@ -446,8 +363,8 @@ export class Player {
    *  blocks above it — i.e. a ledge at the water's edge to climb out onto.
    *  Requiring true air keeps the hop from firing on submerged 1-block bumps. */
   private ledgeAhead(world: World, dirX: number, dirZ: number): boolean {
-    const px = this.pos.x + dirX * (HALF_WIDTH + 0.2);
-    const pz = this.pos.z + dirZ * (HALF_WIDTH + 0.2);
+    const px = this.pos.x + dirX * (this.halfWidth + 0.2);
+    const pz = this.pos.z + dirZ * (this.halfWidth + 0.2);
     const bx = Math.floor(px), bz = Math.floor(pz);
     const fy = Math.floor(this.pos.y + 0.1);
     return (
@@ -457,88 +374,22 @@ export class Player {
     );
   }
 
-  /** Boat physics: a drifty rowed throttle along the look yaw + buoyancy that
-   *  bobs the hull at the water surface (mild gravity when it leaves water, so
-   *  waterfalls and beachings feel right). */
-  private applyBoat(dt: number, input: PlayerInput, world: World): void {
-    let throttle = 0;
-    if (input.forward) throttle = 1;
-    else if (input.back) throttle = -BOAT_REVERSE;
-    const speed = BOAT_SPEED * this.speedMult * throttle;
-    const tx = -Math.sin(this.yaw) * speed;
-    const tz = -Math.cos(this.yaw) * speed;
-    const t = Math.min(1, BOAT_ACCEL * dt);
-    this.vel.x += (tx - this.vel.x) * t;
-    this.vel.z += (tz - this.vel.z) * t;
-    // Buoyancy: push up while the hull sits in water, mild gravity otherwise;
-    // heavy damping keeps the bob small — the boat rides right at the surface.
-    const hull = world.getBlock(
-      Math.floor(this.pos.x), Math.floor(this.pos.y + 0.1), Math.floor(this.pos.z));
-    if (hull === Block.Water) this.vel.y += 26 * dt;
-    else this.vel.y -= GRAVITY * 0.6 * dt;
-    this.vel.y *= 1 - Math.min(1, 7 * dt);
-    this.vel.y = Math.max(-8, Math.min(2.6, this.vel.y));
-    this.fallDistance = 0; // a boat never takes fall damage
-  }
-
-  /** Glider velocity from the look direction: dive to build airspeed, pull up
-   *  to trade it back for altitude, level out to cruise with a gentle sink.
-   *  Sets vel directly (integration still collides). */
-  private applyGlide(dt: number): void {
-    const cosP = Math.cos(this.pitch), sinP = Math.sin(this.pitch);
-    const fx = -Math.sin(this.yaw) * cosP;
-    const fy = sinP;                       // <0 looking down, >0 looking up
-    const fz = -Math.cos(this.yaw) * cosP;
-    const dive = -fy;                      // +1 nose straight down
-
-    // The attitude sets a TARGET airspeed; the wing eases toward it, so speed
-    // has weight. Climbing sheds it faster than diving builds it, which is
-    // what stops a pilot pumping their way to the sky for free.
-    const target = Math.max(GLIDE_MIN_SPEED,
-      Math.min(GLIDE_MAX_SPEED, GLIDE_BASE_SPEED + dive * GLIDE_DIVE_GAIN));
-    const rate = target > this.glideSpeed ? GLIDE_ACCEL_DIVE : GLIDE_ACCEL_CLIMB;
-    this.glideSpeed += (target - this.glideSpeed) * Math.min(1, rate * dt);
-    const speed = this.glideSpeed;
-
-    // A fast wing sinks less: holding speed is rewarded with range.
-    const fast = Math.max(0, Math.min(1,
-      (speed - GLIDE_BASE_SPEED) / (GLIDE_MAX_SPEED - GLIDE_BASE_SPEED)));
-    // Pulling up can only turn speed above the stall floor into altitude. At
-    // minimum airspeed the wing must sink, otherwise looking up climbs forever.
-    const liftSpeed = fy > 0 ? Math.max(0, speed - GLIDE_MIN_SPEED) : speed;
-    this.vel.x = fx * speed;
-    this.vel.z = fz * speed;
-    this.vel.y = fy * liftSpeed * GLIDE_LIFT - GLIDE_SINK * (1 - 0.45 * fast);
-    this.fallDistance = 0; // gliding lands softly (no fall damage)
-  }
-
-  /** Distance (in blocks) to the first solid block straight below the feet,
-   *  capped at 96. Used to require real clearance before deploying the glider. */
-  private groundClearance(world: World): number {
-    const x = Math.floor(this.pos.x), z = Math.floor(this.pos.z);
-    const fy = Math.floor(this.pos.y);
-    for (let d = 1; d <= 96; d++) {
-      if (isSolid(world.getBlock(x, fy - d, z))) return d;
-    }
-    return 96;
-  }
-
   /** Collision boxes of one cell, with UNGENERATED WORLD TREATED AS ROCK.
    *  `world.getBlock` answers Air for a chunk that has not streamed in yet, so
-   *  anything moving faster than the chunk loader (a grapple launch, a glide)
+   *  anything moving faster than the chunk loader (a pad launch, a long fall)
    *  would sail straight through terrain that merely hasn't arrived, ending up
    *  inside the ground once it does. Only guard while the body's OWN column is
    *  loaded, so a player can never be frozen by the chunk they are standing in. */
   private cellBoxes(world: World, x: number, y: number, z: number): Box[] {
     if (this.streamGuard && !(world.isLoaded?.(x, z) ?? true)) return FULL;
-    return collisionBoxes(world.getBlock(x, y, z));
+    return collisionBoxes(world.getBlock(x, y, z)) ?? NONE;
   }
 
   /** Does the body overlap solid geometry at (x, y, z)? */
   private overlapping(world: World, x: number, y: number, z: number): boolean {
-    const minX = x - HALF_WIDTH, maxX = x + HALF_WIDTH;
-    const minY = y, maxY = y + HEIGHT;
-    const minZ = z - HALF_WIDTH, maxZ = z + HALF_WIDTH;
+    const minX = x - this.halfWidth, maxX = x + this.halfWidth;
+    const minY = y, maxY = y + this.height;
+    const minZ = z - this.halfWidth, maxZ = z + this.halfWidth;
     for (let cx = Math.floor(minX); cx <= Math.floor(maxX); cx++)
       for (let cy = Math.floor(minY); cy <= Math.floor(maxY); cy++)
         for (let cz = Math.floor(minZ); cz <= Math.floor(maxZ); cz++) {
@@ -559,9 +410,8 @@ export class Player {
    * axis that frees it.
    *
    * Nothing in normal movement can end a step overlapping a block — but plenty
-   * outside it can: a teleport, the war-border clamp, a vault seal clamping you
-   * back into the arena, a block placed where you stand, a chunk streaming in
-   * around you. The axis resolver's answer to a pre-existing overlap is to snap
+   * outside it can: a teleport, a block placed where you stand, a chunk
+   * streaming in around you. The axis resolver's answer to a pre-existing overlap is to snap
    * the body to the far face of the offending box, which is a BLOCK-SIZED JUMP
    * WITH NO SWEEP: repeated over a few frames it walks a stuck player clean
    * through a wall and out into the rock beyond, where they can then swim around
@@ -571,9 +421,9 @@ export class Player {
     const p = this.pos;
     if (!this.overlapping(world, p.x, p.y, p.z)) return;
 
-    const minX = p.x - HALF_WIDTH, maxX = p.x + HALF_WIDTH;
-    const minY = p.y, maxY = p.y + HEIGHT;
-    const minZ = p.z - HALF_WIDTH, maxZ = p.z + HALF_WIDTH;
+    const minX = p.x - this.halfWidth, maxX = p.x + this.halfWidth;
+    const minY = p.y, maxY = p.y + this.height;
+    const minZ = p.z - this.halfWidth, maxZ = p.z + this.halfWidth;
     // Distance to travel along each of the six directions to clear EVERY box
     // the body currently intersects.
     let up = 0, down = 0, east = 0, west = 0, south = 0, north = 0;
@@ -635,10 +485,10 @@ export class Player {
 
   private hasSupport(world: World): boolean {
     const y = Math.floor(this.pos.y - 0.05);
-    const x0 = Math.floor(this.pos.x - HALF_WIDTH);
-    const x1 = Math.floor(this.pos.x + HALF_WIDTH);
-    const z0 = Math.floor(this.pos.z - HALF_WIDTH);
-    const z1 = Math.floor(this.pos.z + HALF_WIDTH);
+    const x0 = Math.floor(this.pos.x - this.halfWidth);
+    const x1 = Math.floor(this.pos.x + this.halfWidth);
+    const z0 = Math.floor(this.pos.z - this.halfWidth);
+    const z1 = Math.floor(this.pos.z + this.halfWidth);
     for (let x = x0; x <= x1; x++)
       for (let z = z0; z <= z1; z++)
         if (isSolid(world.getBlock(x, y, z))) return true;
@@ -665,9 +515,9 @@ export class Player {
     else if (axis === 1) p.y += amount;
     else p.z += amount;
 
-    const minX = p.x - HALF_WIDTH, maxX = p.x + HALF_WIDTH;
-    const minY = p.y, maxY = p.y + HEIGHT;
-    const minZ = p.z - HALF_WIDTH, maxZ = p.z + HALF_WIDTH;
+    const minX = p.x - this.halfWidth, maxX = p.x + this.halfWidth;
+    const minY = p.y, maxY = p.y + this.height;
+    const minZ = p.z - this.halfWidth, maxZ = p.z + this.halfWidth;
     const x0 = Math.floor(minX), x1 = Math.floor(maxX);
     const y0 = Math.floor(minY), y1 = Math.floor(maxY);
     const z0 = Math.floor(minZ), z1 = Math.floor(maxZ);
@@ -687,9 +537,9 @@ export class Player {
             if (maxY <= by0 || minY >= by1) continue;
             if (maxZ <= bz0 || minZ >= bz1) continue;
             let c: number;
-            if (axis === 0) c = amount > 0 ? bx0 - HALF_WIDTH - EPS : bx1 + HALF_WIDTH + EPS;
-            else if (axis === 1) c = amount > 0 ? by0 - HEIGHT - EPS : by1 + EPS;
-            else c = amount > 0 ? bz0 - HALF_WIDTH - EPS : bz1 + HALF_WIDTH + EPS;
+            if (axis === 0) c = amount > 0 ? bx0 - this.halfWidth - EPS : bx1 + this.halfWidth + EPS;
+            else if (axis === 1) c = amount > 0 ? by0 - this.height - EPS : by1 + EPS;
+            else c = amount > 0 ? bz0 - this.halfWidth - EPS : bz1 + this.halfWidth + EPS;
             if (best === null || (amount > 0 ? c < best : c > best)) best = c;
           }
         }
@@ -705,19 +555,11 @@ export class Player {
     return true;
   }
 
-  /** AABB overlap test used to forbid placing a block inside the player. With an
-   *  `id` it tests that block's real shape (so a slab clear of the body is OK);
-   *  without one it falls back to a full cube (machine footprint / torch checks). */
-  intersectsBlock(bx: number, by: number, bz: number, id?: number): boolean {
-    const boxes = id === undefined ? [FULL_BOX] : collisionBoxes(id);
-    for (let i = 0; i < boxes.length; i++) {
-      const [mn, mx] = boxes[i];
-      if (
-        bx + mx[0] > this.pos.x - HALF_WIDTH && bx + mn[0] < this.pos.x + HALF_WIDTH &&
-        by + mx[1] > this.pos.y && by + mn[1] < this.pos.y + HEIGHT &&
-        bz + mx[2] > this.pos.z - HALF_WIDTH && bz + mn[2] < this.pos.z + HALF_WIDTH
-      ) return true;
-    }
-    return false;
+  /** AABB overlap test used to forbid placing a (full-cube) block inside the
+   *  player. */
+  intersectsBlock(bx: number, by: number, bz: number): boolean {
+    return bx + 1 > this.pos.x - this.halfWidth && bx < this.pos.x + this.halfWidth &&
+      by + 1 > this.pos.y && by < this.pos.y + this.height &&
+      bz + 1 > this.pos.z - this.halfWidth && bz < this.pos.z + this.halfWidth;
   }
 }

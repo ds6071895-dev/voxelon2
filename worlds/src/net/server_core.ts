@@ -46,6 +46,8 @@ import {
   MELEE_COMBO_MAX, MELEE_COMBO_WINDOW_MS, MELEE_FACING_DOT, MELEE_RANGE, MELEE_REWIND_S,
 } from '../melee';
 import { partyCapacityFor } from '../modes';
+import { RatSeekMatch, type RsHost } from '../ratseek';
+import { isRatClass, type RatClassId } from '../ratseek_rules';
 import { Accounts, type Hasher } from './accounts';
 import { NameRegistry } from './names';
 import { Parties, type Party } from './parties';
@@ -57,9 +59,14 @@ import {
 
 /** Alone in a queue this long, and a practice opponent takes the other seat.
  *  Nothing on the client ever mentions it. */
-export const BOT_WAIT_MS = 15_000;
+export const BOT_WAIT_MS = 10_000;
+/** Rat and Seek from the public queue: everyone matched is a rat (up to
+ *  this many), and a practice seeker hunts them. */
+const RS_QUEUE_RATS = 4;
 /** Seconds a finished match's world stays open for its results screen. */
 const RESULTS_LINGER_S = 25;
+/** Rat and Seek ends on the backyard podium instead of a results screen. */
+const RS_PODIUM_S = 7;
 
 /** What the server needs from a Bridge/Parkour practice opponent. */
 export interface PgBot {
@@ -133,6 +140,10 @@ interface ServerPlayer {
   duelReloadUntil: number;
   duelMedkits: number;
   duelRespawning: boolean;
+  /** Rat and Seek: the class this player last picked (remembered between games). */
+  rsClass?: RatClassId;
+  /** Rat and Seek: when the last transform was accepted (worldTime s). */
+  rsMoveAt: number;
   /** Recent authoritative positions, oldest first, for lag compensation. */
   arenaTrack: ArenaTrackSample[];
 }
@@ -141,7 +152,6 @@ interface ServerPlayer {
 interface PartyMoveState {
   at: number;
   allowance: number;
-  revision: number;
   groundX: number; groundY: number; groundZ: number;
   groundedAt: number;
   stuck: number;
@@ -176,8 +186,6 @@ interface MatchWorld {
   lobby: string;
   /** Every body in this world, bots included. */
   members: Set<number>;
-  /** Launched by a party rather than from matchmaking. */
-  party: boolean;
   /** worldTime (s) at which a finished match's world closes. */
   closeAt: number | null;
   cagesOpen: boolean;
@@ -187,9 +195,13 @@ interface MatchWorld {
     crumbles: Map<number, { fallAt: number; backAt: number; gone: boolean }>;
   } | null;
   arrows: PartyArrow[];
+  /** Rat and Seek's engine, and the messages it produced since the last drain. */
+  rs: RatSeekMatch | null;
+  rsOut: Outbound[];
+  rsQuiet: boolean;
 }
 
-export interface ServerOptions {
+interface ServerOptions {
   accounts?: Accounts;
   hasher?: Hasher;
   salt?: () => string;
@@ -198,8 +210,8 @@ export interface ServerOptions {
   wallNow?: () => number;
 }
 
-const MODE_TO_KIND: Record<GameMode, WorldKind> = { duels: 'duel', bridge: 'bridge', parkour: 'parkour' };
-const MODE_NAMES: Record<GameMode, string> = { duels: 'Duels', bridge: 'The Bridge', parkour: 'Parkour' };
+const MODE_TO_KIND: Record<GameMode, WorldKind> = { duels: 'duel', bridge: 'bridge', parkour: 'parkour', ratseek: 'ratseek' };
+const MODE_NAMES: Record<GameMode, string> = { duels: 'Duels', bridge: 'The Bridge', parkour: 'Parkour', ratseek: 'Rat and Seek' };
 
 export class GameServer {
   readonly accounts: Accounts;
@@ -298,7 +310,7 @@ export class GameServer {
   private deliverNothing(_out: Outbound[]): void { /* bots have no sockets */ }
   /** A snapshot of an exhibition or any match, for tests. */
   matchState(worldId: number): { mode: GameMode; phase: string; participants: { id: number; score: number; progress: number;
-    kills: number; falls: number; finishedAt?: number; team: number }[]; winner: number | null; winnerTeam: number | null; teamScores?: number[] } | null {
+    kills: number; falls: number; team: number }[]; winner: number | null; winnerTeam: number | null } | null {
     const w = this.worlds.get(worldId);
     if (!w) return null;
     const now = this.nowMs();
@@ -311,10 +323,11 @@ export class GameServer {
     const snap = this.pg.snapshots(now).find((s) => s.id === w.lobby);
     if (!snap) return null;
     return { mode: w.mode, phase: snap.phase, winner: snap.result?.winner ?? null, winnerTeam: snap.result?.winnerTeam ?? null,
-      teamScores: snap.teamScores,
       participants: snap.participants.map((p) => ({ id: p.id, score: p.score, progress: p.progress, kills: p.kills,
-        falls: p.falls, finishedAt: p.finishedAt, team: p.team })) };
+        falls: p.falls, team: p.team })) };
   }
+  /** Rat and Seek internals, for tests. */
+  ratSeek(worldId: number): RatSeekMatch | null { return this.worlds.get(worldId)?.rs ?? null; }
   healthOf(id: number): number | null { return this.players.get(id)?.health ?? null; }
   positionOf(id: number): { x: number; y: number; z: number } | null {
     const p = this.players.get(id);
@@ -339,7 +352,7 @@ export class GameServer {
       regenTimer: 0, regenBoostTimer: 0, regenBoostInterval: 0,
       duelSpawnIndex: -1, duelLastShotAt: -Infinity, duelNextBurstAt: 0, duelBurstShots: 0,
       duelShotTickets: [], duelLoaded: 0, duelReloadUntil: 0, duelMedkits: 0, duelRespawning: false,
-      arenaTrack: [],
+      rsMoveAt: 0, arenaTrack: [],
     };
   }
 
@@ -376,7 +389,9 @@ export class GameServer {
       case 'partyLeave': return this.leaveParty(p, true);
       case 'partyKick': return this.partyKick(p, msg.id);
       case 'partyPromote': return this.partyPromote(p, msg.id);
-      case 'play': return isGameMode(msg.mode) ? this.play(p, msg.mode) : [];
+      case 'play':
+        if (isRatClass(msg.ratClass)) p.rsClass = msg.ratClass;
+        return isGameMode(msg.mode) ? this.play(p, msg.mode, typeof msg.seeker === 'number' ? msg.seeker : undefined) : [];
       case 'cancelQueue': {
         if (!p.queue) return [this.to(p, { t: 'queue', mode: null })];
         this.leaveQueue(p);
@@ -458,7 +473,7 @@ export class GameServer {
     const token = this.makeToken();
     this.accounts.setToken(p.username, token);
     // Whatever the practice opponents learned about this player so far comes along.
-    for (const mode of ['duels', 'bridge', 'parkour'] as GameMode[]) {
+    for (const mode of ['duels', 'bridge', 'parkour', 'ratseek'] as GameMode[]) {
       const learned = this.guestSkill.get(`${mode}:${p.username.toLowerCase()}`);
       if (learned !== undefined) this.accounts.setSkill(p.username, mode, learned);
     }
@@ -573,9 +588,9 @@ export class GameServer {
     if (!party) return notify ? [this.to(p, { t: 'party', party: null })] : [];
     const left = this.parties.leave(p.id, this.wallNow());
     const out: Outbound[] = notify ? [this.to(p, { t: 'party', party: null })] : [];
-    if (left.party) {
-      const state = this.partyState(left.party);
-      for (const m of left.party.members) out.push(this.to(m, { t: 'party', party: state }));
+    if (left) {
+      const state = this.partyState(left);
+      for (const m of left.members) out.push(this.to(m, { t: 'party', party: state }));
     }
     return out;
   }
@@ -609,7 +624,7 @@ export class GameServer {
     return !!w && w.closeAt !== null;
   }
 
-  private play(p: ServerPlayer, mode: GameMode): Outbound[] {
+  private play(p: ServerPlayer, mode: GameMode, seeker?: number): Outbound[] {
     const out: Outbound[] = [];
     if (p.worldId !== null) {
       if (!this.inFinishedWorld(p)) return this.partyErr(p, 'You are already in a match.');
@@ -634,7 +649,7 @@ export class GameServer {
         if (m.worldId !== null) out.push(...this.exitMatch(m, true));
         if (m.queue) { this.leaveQueue(m); out.push(this.to(m, { t: 'queue', mode: null })); }
       }
-      out.push(...this.launch(mode, members, true));
+      out.push(...(mode === 'ratseek' ? this.launchRatSeek(members, seeker ?? 0, p.id) : this.launch(mode, members, true)));
       return out;
     }
     // Solo: the public queue.
@@ -648,6 +663,7 @@ export class GameServer {
 
   /** Pair waiting humans, oldest first. */
   private matchQueue(mode: GameMode): Outbound[] {
+    if (mode === 'ratseek') return this.matchRatSeekQueue(false);
     const waiting = [...this.players.values()]
       .filter((v) => !v.bot && v.ready && v.queue === mode && v.worldId === null)
       .sort((a, b) => a.queuedAt - b.queuedAt || a.id - b.id);
@@ -665,10 +681,28 @@ export class GameServer {
     const now = this.worldTime * 1000, out: Outbound[] = [];
     for (const p of [...this.players.values()]) {
       if (p.bot || !p.queue || p.worldId !== null || now - p.queuedAt < BOT_WAIT_MS) continue;
+      if (p.queue === 'ratseek') { out.push(...this.matchRatSeekQueue(true)); continue; }
       const mode = p.queue;
       this.leaveQueue(p);
       out.push(this.to(p, { t: 'queue', mode: null }));
       out.push(...this.launch(mode, [p, this.makeBot()], false));
+    }
+    return out;
+  }
+
+  /** Rat and Seek's public queue: a full house of rats goes at once; after the
+   *  usual wait, whoever is queued goes together. Either way the seeker is a
+   *  practice one, so nobody from the queue is made to hunt. */
+  private matchRatSeekQueue(timeUp: boolean): Outbound[] {
+    const waiting = [...this.players.values()]
+      .filter((v) => !v.bot && v.ready && v.queue === 'ratseek' && v.worldId === null)
+      .sort((a, b) => a.queuedAt - b.queuedAt || a.id - b.id);
+    const out: Outbound[] = [];
+    while (waiting.length >= RS_QUEUE_RATS || (timeUp && waiting.length > 0)) {
+      const group = waiting.splice(0, RS_QUEUE_RATS);
+      for (const m of group) { this.leaveQueue(m); out.push(this.to(m, { t: 'queue', mode: null })); }
+      out.push(...this.launchRatSeek(group, 0));
+      timeUp = false;
     }
     return out;
   }
@@ -709,13 +743,13 @@ export class GameServer {
 
   // ── Worlds ───────────────────────────────────────────────────────────────
 
-  private createWorld(mode: GameMode, seed: number, lobby: string, party: boolean): MatchWorld {
+  private createWorld(mode: GameMode, seed: number, lobby: string): MatchWorld {
     const spec: WorldSpec = { id: this.nextWorldId++, kind: MODE_TO_KIND[mode], seed };
     const w: MatchWorld = {
-      spec, blocks: new WorldBlocks(worldGenerator(spec)), mode, lobby, members: new Set(), party,
+      spec, blocks: new WorldBlocks(worldGenerator(spec)), mode, lobby, members: new Set(),
       closeAt: null, cagesOpen: false,
       parkour: mode === 'parkour' ? { blink: [true, true], collapsed: 0, crumbles: new Map() } : null,
-      arrows: [],
+      arrows: [], rs: null, rsOut: [], rsQuiet: false,
     };
     this.worlds.set(spec.id, w);
     this.worldByLobby.set(lobby, spec.id);
@@ -754,12 +788,15 @@ export class GameServer {
     const w = this.worldOfPlayer(p);
     const out: Outbound[] = [];
     if (!w) { p.worldId = null; return notify ? [this.to(p, { t: 'leftWorld' })] : []; }
-    if (w.mode === 'duels') {
-      const res = this.duels.leave(p.id, this.nowMs());
-      if (res.snapshot) out.push(...this.duelStateOut(res.snapshot), ...this.duelResultOut(res.snapshot));
+    if (w.mode === 'ratseek') {
+      w.rs?.leave(p.id);
+      out.push(...this.drainRs(w));
+    } else if (w.mode === 'duels') {
+      const snap = this.duels.leave(p.id, this.nowMs());
+      if (snap) out.push(...this.duelStateOut(snap), ...this.duelResultOut(snap));
     } else {
-      const res = this.pg.leave(p.id, this.nowMs());
-      if (res.snapshot) out.push(...this.pgStateOut(res.snapshot), ...this.pgResultOut(res.snapshot));
+      const snap = this.pg.leave(p.id, this.nowMs());
+      if (snap) out.push(...this.pgStateOut(snap), ...this.pgResultOut(snap));
     }
     this.detach(p, w, out);
     if (notify) out.push(this.to(p, { t: 'leftWorld' }));
@@ -785,6 +822,7 @@ export class GameServer {
   /** A results screen is up: the world closes after it has been read. */
   private markFinishedIfDone(w: MatchWorld): void {
     if (w.closeAt !== null) return;
+    if (w.mode === 'ratseek') { if (w.rs?.isOver()) w.closeAt = this.worldTime + RS_PODIUM_S; return; }
     const phase = w.mode === 'duels'
       ? this.duels.snapshots(this.nowMs()).find((s) => s.id === w.lobby)?.phase
       : this.pg.snapshots(this.nowMs()).find((s) => s.id === w.lobby)?.phase;
@@ -799,7 +837,7 @@ export class GameServer {
     for (const id of [...w.members]) {
       const p = this.players.get(id);
       if (!p) { w.members.delete(id); continue; }
-      if (w.mode === 'duels') this.duels.leave(id, now); else this.pg.leave(id, now);
+      if (w.mode === 'duels') this.duels.leave(id, now); else if (w.mode !== 'ratseek') this.pg.leave(id, now);
       if (p.bot) {
         this.settleBot(p, w);
         w.members.delete(id);
@@ -815,12 +853,23 @@ export class GameServer {
     }
     this.worlds.delete(w.spec.id);
     this.worldByLobby.delete(w.lobby);
-    releaseWorldGenerator(w.spec);
+    if (w.mode !== 'ratseek') releaseWorldGenerator(w.spec);
     return out;
   }
 
   /** A practice opponent is leaving: remember the level it ended at. */
   private settleBot(bot: ServerPlayer, w: MatchWorld): void {
+    if (w.mode === 'ratseek') {
+      // The practice seeker's level is remembered for the rats it hunted.
+      const level = w.rs?.botSkill();
+      if (level != null && w.rs) {
+        for (const id of w.rs.rats.keys()) {
+          const rat = this.players.get(id);
+          if (rat && !rat.bot) this.rememberSkill(rat, 'ratseek', level);
+        }
+      }
+      return;
+    }
     const db = this.duelBots.get(bot.id), pb = this.partyBots.get(bot.id);
     const human = this.players.get(db?.opponent ?? pb?.opponent ?? -1);
     const rating = db?.rating ?? pb?.rating;
@@ -837,7 +886,7 @@ export class GameServer {
 
   private launchDuel(members: ServerPlayer[], party: boolean): Outbound[] {
     const now = this.nowMs();
-    const ident = (m: ServerPlayer) => ({ id: m.id, username: m.username, skin: m.skin, bot: m.bot });
+    const ident = (m: ServerPlayer) => ({ id: m.id, username: m.username, skin: m.skin });
     const made = this.duels.create(ident(members[0]), now);
     if ('reason' in made) return [];
     for (const m of members.slice(1)) this.duels.join(made.token, ident(m), now);
@@ -849,7 +898,7 @@ export class GameServer {
     }
     const snap = started.snapshot;
     const arena = snap.arena!;
-    const w = this.createWorld('duels', 1, snap.id, party);
+    const w = this.createWorld('duels', 1, snap.id);
     const out: Outbound[] = [];
     snap.participants.forEach((part, i) => {
       const p = this.players.get(part.id);
@@ -874,7 +923,7 @@ export class GameServer {
   private launchPg(mode: GameMode, members: ServerPlayer[], party: boolean): Outbound[] {
     const now = this.nowMs();
     const pgMode: PartyMode = mode === 'bridge' ? 'bridge' : 'parkour';
-    const ident = (m: ServerPlayer) => ({ id: m.id, username: m.username, skin: m.skin, bot: m.bot });
+    const ident = (m: ServerPlayer) => ({ id: m.id, username: m.username, bot: m.bot });
     const made = this.pg.create(ident(members[0]), now, pgMode, partyModeCapacity(pgMode, party));
     if ('reason' in made) return [];
     for (const m of members.slice(1)) this.pg.join(made.token, ident(m), now);
@@ -885,7 +934,7 @@ export class GameServer {
       return members.filter((m) => !m.bot).map((m) => this.to(m, { t: 'notice', text: 'Could not start the match — try again.' }));
     }
     const snap = started.snapshot;
-    const w = this.createWorld(mode, snap.arena!.seed, snap.id, party);
+    const w = this.createWorld(mode, snap.arena!.seed, snap.id);
     const out: Outbound[] = [];
     const sub = snap.sub!;
     const spawns = partySpawns(sub, snap.participants);
@@ -894,7 +943,7 @@ export class GameServer {
       if (!p || !member.connected) return;
       const yaw = sub.game === 'bridge' ? (member.team === 0 ? Math.PI : 0) : Math.PI;
       this.resetBody(p, spawns[i], yaw, PARTY_MAX_HEALTH);
-      this.partyMoves.set(p.id, this.freshPartyMove(spawns[i], snap.revision));
+      this.partyMoves.set(p.id, this.freshPartyMove(spawns[i]));
       this.partyCombat.delete(p.id);
       out.push(...this.enterWorld(p, w));
       out.push(this.pgLoadout(p, member, sub));
@@ -930,6 +979,7 @@ export class GameServer {
   private handleInWorld(p: ServerPlayer, msg: ClientMsg): Outbound[] {
     const w = this.worldOfPlayer(p);
     if (!w) return [];
+    if (w.mode === 'ratseek') return this.handleRatSeek(p, w, msg);
     if (msg.t === 'worldReady') {
       if (msg.world !== w.spec.id) return [];
       if (w.mode === 'duels') {
@@ -968,30 +1018,19 @@ export class GameServer {
 
   // ── Duels ────────────────────────────────────────────────────────────────
 
-  /** Strip server-only fields (who is a bot) before a snapshot leaves. */
-  private cleanDuel(snapshot: DuelLobbySnapshot): DuelLobbySnapshot {
-    const strip = <T extends { bot?: boolean }>(v: T): T => { const c = { ...v }; delete c.bot; return c; };
-    return {
-      ...snapshot, arenaReady: undefined,
-      participants: snapshot.participants.map(strip),
-      result: snapshot.result ? { ...snapshot.result, scoreboard: snapshot.result.scoreboard.map(strip) } : undefined,
-    };
-  }
-
   private duelStateOut(snapshot: DuelLobbySnapshot): Outbound[] {
-    const clean = this.cleanDuel(snapshot);
     return snapshot.participants
       .filter((v) => v.connected && !this.players.get(v.id)?.bot)
-      .map((v) => this.to(v.id, { t: 'duelState', snapshot: clean }));
+      .map((v) => this.to(v.id, { t: 'duelState', snapshot }));
   }
 
   private duelResultOut(snapshot: DuelLobbySnapshot): Outbound[] {
     if (snapshot.phase !== 'results' || !snapshot.result) return [];
     const w = this.worlds.get(this.worldByLobby.get(snapshot.id) ?? -1);
     if (w && w.closeAt === null) w.closeAt = this.worldTime + RESULTS_LINGER_S;
-    const clean = this.cleanDuel(snapshot).result!;
+    const result = snapshot.result;
     return snapshot.participants.filter((v) => v.connected && !this.players.get(v.id)?.bot)
-      .map((v) => this.to(v.id, { t: 'duelResult', result: clean }));
+      .map((v) => this.to(v.id, { t: 'duelResult', result }));
   }
 
   private duelLoadout(to: number): Outbound {
@@ -1254,9 +1293,9 @@ export class GameServer {
     return this.pg.membersOf(p.id).filter((id) => !this.players.get(id)?.bot);
   }
 
-  private freshPartyMove(p: { x: number; y: number; z: number }, revision: number): PartyMoveState {
+  private freshPartyMove(p: { x: number; y: number; z: number }): PartyMoveState {
     return {
-      at: this.worldTime, allowance: 1, revision, groundX: p.x, groundY: p.y, groundZ: p.z,
+      at: this.worldTime, allowance: 1, groundX: p.x, groundY: p.y, groundZ: p.z,
       groundedAt: this.worldTime, stuck: 0, launchUntil: 0,
     };
   }
@@ -1281,7 +1320,7 @@ export class GameServer {
     p.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, msg.pitch));
     if (phase !== 'running') return [];
     const wanted = clampToPartySub(msg, sub);
-    const move = this.partyMoves.get(p.id) ?? this.freshPartyMove(p, round.revision);
+    const move = this.partyMoves.get(p.id) ?? this.freshPartyMove(p);
     if (this.partyGrounded(w, p.x, p.y, p.z)) this.markPartyGround(move, p.x, p.y, p.z);
     if (sub.game === 'parkour') {
       // A throw pad is the course throwing this player, exactly as knockback is.
@@ -1642,6 +1681,154 @@ export class GameServer {
     return out;
   }
 
+  // ── Rat and Seek ─────────────────────────────────────────────────────────
+
+  /** The engine's window onto one world: its bodies, blocks and players. */
+  private rsHost(w: MatchWorld): RsHost {
+    const send = (id: number, msg: ServerMsg): void => {
+      const p = this.players.get(id);
+      if (p && !p.bot && p.worldId === w.spec.id) w.rsOut.push(this.to(id, msg));
+    };
+    return {
+      nowMs: () => this.nowMs(),
+      body: (id) => {
+        const p = this.players.get(id);
+        return p && p.worldId === w.spec.id ? p : undefined;
+      },
+      name: (id) => this.players.get(id)?.username ?? 'Someone',
+      send,
+      teleport: (id, x, y, z, yaw) => {
+        const p = this.players.get(id);
+        if (!p) return;
+        p.x = x; p.y = y; p.z = z;
+        if (yaw !== undefined) p.yaw = yaw;
+        p.rsMoveAt = this.worldTime;
+        if (!p.bot && !w.rsQuiet) send(id, { t: 'teleport', x, y, z });
+      },
+      setBlock: (x, y, z, block) => {
+        w.blocks.set(x, y, z, block);
+        for (const id of w.members) send(id, { t: 'edit', x, y, z, block });
+      },
+      getBlock: (x, y, z) => w.blocks.getBlock(x, y, z),
+      drive: (id, pose) => {
+        const p = this.players.get(id);
+        if (!p) return;
+        p.x = pose.x; p.y = pose.y; p.z = pose.z; p.yaw = pose.yaw; p.pitch = pose.pitch;
+        p.sneaking = pose.sneaking; p.held = pose.held; p.ct = Math.floor(this.nowMs());
+        if (pose.swing) p.swing = (p.swing + 1) & 0xffff;
+      },
+      addBot: () => {
+        const bot = this.makeBot();
+        bot.health = 20; bot.dead = false; bot.held = 0; bot.sneaking = false; bot.arenaTrack = [];
+        w.rsOut.push(...this.enterWorld(bot, w));
+        return bot.id;
+      },
+      dropBot: (id) => {
+        w.members.delete(id);
+        for (const other of w.members) send(other, { t: 'leave', id });
+        this.removeBot(id);
+      },
+    };
+  }
+
+  private drainRs(w: MatchWorld): Outbound[] {
+    const out = w.rsOut;
+    w.rsOut = [];
+    return out;
+  }
+
+  /** Start a Rat and Seek match: `seekerId` hunts (0 = the AI seeker), everyone
+   *  else hides. A party `leader` may change the seeker during the prep time. */
+  private launchRatSeek(members: ServerPlayer[], seekerId: number, leader?: number): Outbound[] {
+    const human = members.find((m) => m.id === seekerId && members.length > 1);
+    const rats = members.filter((m) => m !== human);
+    const bot = human ? null : this.makeBot();
+    const seed = Math.floor(this.rng() * 1e9);
+    const w = this.createWorld('ratseek', seed, `rs:${this.nextWorldId}`);
+    const learned = rats.map((r) => this.learnedSkill(r, 'ratseek')).filter((v): v is number => v !== undefined);
+    const skill = learned.length ? learned.reduce((a, b) => a + b, 0) / learned.length : 0.5;
+    const out: Outbound[] = [];
+    for (const m of [...members, ...(bot ? [bot] : [])]) {
+      m.health = 20; m.dead = false; m.held = 0; m.sneaking = false; m.arenaTrack = [];
+      m.worldId = w.spec.id;
+    }
+    w.rsQuiet = true;
+    w.rs = new RatSeekMatch(this.rsHost(w), this.rng, {
+      humans: human ? [human.id] : [], bots: bot ? [bot.id] : [], rats: rats.map((r) => r.id),
+      classes: new Map(rats.filter((r) => r.rsClass).map((r) => [r.id, r.rsClass!])), skill,
+      leader: members.length > 1 ? leader : undefined,
+    });
+    w.rsQuiet = false;
+    w.rsOut = w.rsOut.filter((o) => o.msg.t !== 'teleport');
+    for (const m of [...members, ...(bot ? [bot] : [])]) {
+      m.worldId = null;
+      out.push(...this.enterWorld(m, w));
+    }
+    for (const m of members) {
+      const spawn = w.rs.spawnOf(m.id);
+      out.push(this.to(m, { t: 'rsArena', world: w.spec, role: w.rs.roleOf(m.id) ?? 'rat',
+        spawn: { x: spawn.x, y: spawn.y, z: spawn.z }, yaw: spawn.yaw }));
+    }
+    out.push(...this.drainRs(w));
+    for (const m of members) out.push(...this.partyBroadcast(m.id));
+    return out;
+  }
+
+  private handleRatSeek(p: ServerPlayer, w: MatchWorld, msg: ClientMsg): Outbound[] {
+    const rs = w.rs;
+    if (!rs) return [];
+    switch (msg.t) {
+      case 'worldReady':
+        if (msg.world === w.spec.id) rs.markLoaded(p.id);
+        break;
+      case 'xform': {
+        if (msg.world !== w.spec.id || !fin(msg.x, msg.y, msg.z, msg.yaw, msg.pitch)) return [];
+        if (typeof msg.ct === 'number' && Number.isFinite(msg.ct)) p.ct = Math.floor(msg.ct);
+        p.yaw = msg.yaw;
+        p.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, msg.pitch));
+        p.sneaking = msg.sneaking === true;
+        const kit = rs.kitOf(p.id);
+        p.held = kit.some((s) => s?.id === msg.held) ? msg.held as number : 0;
+        if (Number.isFinite(msg.swing)) p.swing = Number(msg.swing) & 0xffff;
+        const dt = this.worldTime - p.rsMoveAt;
+        if (rs.acceptMove(p.id, p, msg, dt)) {
+          p.x = msg.x; p.y = msg.y; p.z = msg.z; p.rsMoveAt = this.worldTime;
+          this.recordArenaTrack(p);
+        } else if (Math.hypot(msg.x - p.x, msg.y - p.y, msg.z - p.z) > 0.25) {
+          return [this.to(p, { t: 'teleport', x: p.x, y: p.y, z: p.z })];
+        }
+        break;
+      }
+      case 'rsUse':
+        if (Number.isInteger(msg.slot) && msg.slot >= 0 && msg.slot < 9) rs.handleUse(p.id, msg.slot, msg.block);
+        break;
+      case 'rsHit':
+        if (Number.isInteger(msg.target)) rs.handleHit(p.id, msg.target, msg.decoy === true);
+        break;
+      case 'rsClass':
+        if (isRatClass(msg.cls)) { p.rsClass = msg.cls; rs.handleClass(p.id, msg.cls); }
+        break;
+      case 'rsSeeker':
+        if (Number.isInteger(msg.seeker)) rs.chooseSeeker(p.id, msg.seeker);
+        break;
+      default:
+    }
+    const out = this.drainRs(w);
+    this.markFinishedIfDone(w);
+    return out;
+  }
+
+  private tickRatSeek(dt: number): Outbound[] {
+    const out: Outbound[] = [];
+    for (const w of this.worlds.values()) {
+      if (w.mode !== 'ratseek' || !w.rs) continue;
+      w.rs.tick(dt);
+      out.push(...this.drainRs(w));
+      this.markFinishedIfDone(w);
+    }
+    return out;
+  }
+
   // ── Ticking ──────────────────────────────────────────────────────────────
 
   /** Advance the whole server by `dt` seconds. */
@@ -1651,6 +1838,7 @@ export class GameServer {
     out.push(...this.fillWithBots());
     out.push(...this.tickDuels());
     out.push(...this.tickPg());
+    out.push(...this.tickRatSeek(dt));
     this.tickRegen(dt);
     // Close worlds whose results screen has been up long enough.
     for (const w of [...this.worlds.values()]) {

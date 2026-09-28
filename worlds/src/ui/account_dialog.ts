@@ -5,7 +5,7 @@
 // name: sign in to one you already own, or keep the one you are using now (or
 // roll another — names are always generated, never typed).
 
-export interface AccountHooks {
+interface AccountHooks {
   onLogin(username: string, password: string): void;
   onRegister(username: string, password: string): void;
   onRoll(): void;

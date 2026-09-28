@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { ParkourScenery } from './parkour_scenery';
 import {
   BRIDGE_ARROW_GRAVITY, BRIDGE_ARROW_LIFE_MS, BRIDGE_CAGE_FLOOR, BRIDGE_CAGE_ROOF, BRIDGE_GOALS,
   BRIDGE_GOAL_RESET_MS, PARTY_COUNTDOWN_MS, PARTY_FLOOR_Y,
@@ -24,7 +23,6 @@ interface DrawnArrow {
 /** Presentation only: every marker is derived from the server snapshot and the
  * server clock. No animation callback changes scores or terrain. */
 export class PartyVisuals {
-  private readonly scenery: ParkourScenery;
   private readonly root = new THREE.Group();
   private readonly boxes: THREE.Mesh[] = [];
   private readonly rings: THREE.Mesh[] = [];
@@ -37,12 +35,11 @@ export class PartyVisuals {
   private readonly arrowMaterial = new THREE.MeshBasicMaterial({ color: 0xf2e4c4 });
   private readonly arrowRoot = new THREE.Group();
   constructor(scene: THREE.Scene) {
-    this.scenery = new ParkourScenery(scene);
     scene.add(this.root);
     scene.add(this.arrowRoot);
     this.root.visible = false;
   }
-  clear(): void { this.root.visible = false; this.scenery.clear(); this.clearArrows(); }
+  clear(): void { this.root.visible = false; this.clearArrows(); }
   clearArrows(): void {
     for (const a of this.arrows) this.arrowRoot.remove(a.mesh);
     this.arrows.length = 0;
@@ -98,10 +95,6 @@ export class PartyVisuals {
   }
   update(s: PartyLobbySnapshot, me: number, now: number): void {
     const sub = s.sub, round = s.round;
-    if (sub && round && s.phase !== 'lobby')
-      this.scenery.update(sub, now);
-    else
-      this.scenery.clear();
     this.root.visible = !!sub && !!round && s.phase !== 'results' && s.phase !== 'lobby';
     if (!this.root.visible || !sub || !round)
       return;

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { BLOCKS } from './blocks';
 
 export const CHUNK_X = 16;
-export const CHUNK_Y = 256;
+const CHUNK_Y = 256;
 export const CHUNK_Z = 16;
 
 export class Chunk {

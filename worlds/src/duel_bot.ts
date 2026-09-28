@@ -13,14 +13,14 @@ import type { World } from './world';
 import { DUEL_MAX_HEALTH, type DuelArenaBounds, type DuelVec3 } from './duels';
 
 /** Where a first-ever Duels bot starts. */
-export const DUEL_BOT_START_SKILL = 0.5;
+const DUEL_BOT_START_SKILL = 0.5;
 const DUEL_BOT_MIN = 0.2, DUEL_BOT_MAX = 1.3;
 /** How far live adaptation may pull the bot from where it started. */
 const ADAPT_BAND = 0.45;
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
-export interface DuelBotShot { from: DuelVec3; dx: number; dy: number; dz: number; hit: boolean }
-export interface DuelBotAction {
+interface DuelBotShot { from: DuelVec3; dx: number; dy: number; dz: number; hit: boolean }
+interface DuelBotAction {
   shots: DuelBotShot[];
   heal?: boolean;
   /** Plank placements for emergency cover. */
@@ -30,7 +30,7 @@ export interface DuelBotAction {
 }
 
 /** What the server tells the bot about the world each tick. */
-export interface DuelBotView {
+interface DuelBotView {
   me: { health: number; alive: boolean; kills: number; deaths: number; medkits: number };
   enemy: { x: number; y: number; z: number; alive: boolean; kills: number; deaths: number; shielded: boolean } | null;
   arena: DuelArenaBounds;

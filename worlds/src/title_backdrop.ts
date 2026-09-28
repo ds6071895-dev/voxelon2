@@ -59,7 +59,7 @@ export class TitleBackdrop {
     this.camera.position.set(x, y, z);
     const across = this.yaw + Math.PI + 0.35;
     this.camera.lookAt(Math.sin(across) * 60, TITLE_SEA + 12, Math.cos(across) * 60);
-    this.sky.update(dt, this.camera, TIME_OF_DAY, false);
+    this.sky.update(dt, this.camera, TIME_OF_DAY);
     this.world.applySky(this.sky);
     this.world.timeUniform.value += dt;
     (this.scene.background as THREE.Color).copy(this.sky.skyColor);

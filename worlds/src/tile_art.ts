@@ -18,30 +18,30 @@ export interface Canvas16 {
   set(x: number, y: number, c: RGBA): void;
   fill(fn: (x: number, y: number) => RGBA): void;
 }
-type Paint = (p: Canvas16, seed: number) => void;
+export type Paint = (p: Canvas16, seed: number) => void;
 
 const N = 16;
-const CLEAR: RGBA = [0, 0, 0, 0];
+export const CLEAR: RGBA = [0, 0, 0, 0];
 
-function hex(h: number, a = 255): RGBA { return [(h >> 16) & 255, (h >> 8) & 255, h & 255, a]; }
-function ramp(...hs: number[]): RGBA[] { return hs.map((h) => hex(h)); }
-function mix(a: RGBA, b: RGBA, t: number): RGBA {
+export function hex(h: number, a = 255): RGBA { return [(h >> 16) & 255, (h >> 8) & 255, h & 255, a]; }
+export function ramp(...hs: number[]): RGBA[] { return hs.map((h) => hex(h)); }
+export function mix(a: RGBA, b: RGBA, t: number): RGBA {
   return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t];
 }
-const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+export const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 
 /** 4x4 Bayer matrix in [-.5, .5): ordered dither between palette steps. */
 const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map((v) => v / 16 - .5);
-function dither(x: number, y: number): number { return BAYER[(y & 3) * 4 + (x & 3)]; }
+export function dither(x: number, y: number): number { return BAYER[(y & 3) * 4 + (x & 3)]; }
 
 /** A palette entry for a 0..1 value, dithered so gradients read as pixel art. */
-function pick(pal: RGBA[], t: number, x: number, y: number, amount = .8): RGBA {
+export function pick(pal: RGBA[], t: number, x: number, y: number, amount = .8): RGBA {
   const v = clamp01(t) * (pal.length - 1) + dither(x, y) * amount;
   return pal[Math.max(0, Math.min(pal.length - 1, Math.round(v)))];
 }
 
 /** Tileable value noise over the 16px tile: `cell` must divide 16. */
-function tnoise(seed: number, x: number, y: number, cell: number): number {
+export function tnoise(seed: number, x: number, y: number, cell: number): number {
   const period = N / cell;
   const gx = x / cell, gy = y / cell;
   const x0 = Math.floor(gx), y0 = Math.floor(gy);
@@ -53,13 +53,13 @@ function tnoise(seed: number, x: number, y: number, cell: number): number {
   return a + (b - a) * sy;
 }
 /** Three octaves of tileable noise, 0..1. */
-function tfbm(seed: number, x: number, y: number): number {
+export function tfbm(seed: number, x: number, y: number): number {
   return tnoise(seed, x, y, 8) * .5 + tnoise(seed ^ 0x55, x, y, 4) * .32 + tnoise(seed ^ 0xaa, x, y, 2) * .18;
 }
-function rnd(seed: number, x: number, y: number): number { return hash2(seed, x, y); }
+export function rnd(seed: number, x: number, y: number): number { return hash2(seed, x, y); }
 
 /** Paint a per-pixel buffer, then outline its opaque shape (sprites). */
-class Grid {
+export class Grid {
   readonly px: (RGBA | null)[] = new Array(N * N).fill(null);
   get(x: number, y: number): RGBA | null { return x < 0 || y < 0 || x >= N || y >= N ? null : this.px[y * N + x]; }
   put(x: number, y: number, c: RGBA): void { if (x >= 0 && y >= 0 && x < N && y < N) this.px[y * N + x] = c; }
@@ -79,21 +79,21 @@ class Grid {
 interface Brick { x0: number; y0: number; w: number; h: number; id: number }
 /** Which brick of a running bond a pixel belongs to. Rows `h` tall, bricks
  *  `w` wide, alternate rows offset by half a brick. Wraps at 16. */
-function bondAt(x: number, y: number, w: number, h: number, offset = w / 2): Brick {
+export function bondAt(x: number, y: number, w: number, h: number, offset = w / 2): Brick {
   const row = Math.floor(y / h);
   const shift = row % 2 ? offset : 0;
   const bx = Math.floor((((x + shift) % N) + N) % N / w);
   return { x0: ((bx * w - shift) % N + N) % N, y0: row * h, w, h, id: row * 8 + bx };
 }
 /** Position inside a brick: local u,v and whether on its mortar line. */
-function inBrick(x: number, y: number, b: Brick): { u: number; v: number; mortar: boolean } {
+export function inBrick(x: number, y: number, b: Brick): { u: number; v: number; mortar: boolean } {
   const u = ((x - b.x0) % N + N) % N, v = y - b.y0;
   return { u, v, mortar: u === b.w - 1 || v === b.h - 1 };
 }
 
 /** Bevel light: +1 on the lit top/left rim of a rect, -1 on its shadowed
  *  bottom/right rim, 0 inside. */
-function bevel(u: number, v: number, w: number, h: number): number {
+export function bevel(u: number, v: number, w: number, h: number): number {
   if (v === 0 || u === 0) return 1;
   if (v === h - 1 || u === w - 1) return -1;
   return 0;
@@ -263,7 +263,7 @@ const CHERRY_BARK = ramp(0x2e1a1d, 0x3b2226, 0x4a2b30, 0x58353a, 0x664044);
 const CHERRY_WOOD = ramp(0xb0746f, 0xc3857f, 0xd3968f, 0xe0a79f);
 
 /** Four horizontal boards with grain, a shadowed seam and staggered joints. */
-function planks(pal: RGBA[]) {
+export function planks(pal: RGBA[]) {
   return (p: Canvas16, seed: number): void => {
     p.fill((x, y) => {
       const board = y >> 2, v = y & 3;
@@ -285,7 +285,7 @@ const PLANK_CHERRY = ramp(0x9a615c, 0xb0746e, 0xc2857e, 0xd1968e, 0xdea7a0, 0xe8
 // ── Foliage and plants ──────────────────────────────────────────────────────
 
 /** Clumped leaves: rounded clusters, lit up-left, with a few see-through gaps. */
-function leaves(pal: RGBA[], extra?: (x: number, y: number, seed: number) => RGBA | null) {
+export function leaves(pal: RGBA[], extra?: (x: number, y: number, seed: number) => RGBA | null) {
   return (p: Canvas16, seed: number): void => {
     p.fill((x, y) => {
       const e = extra?.(x, y, seed);
@@ -388,7 +388,7 @@ const paintGlass: Paint = (p, seed) => {
 // ── Arena masonry ───────────────────────────────────────────────────────────
 
 /** Running-bond bricks with lit tops, shadowed feet and per-brick tone. */
-function bricks(pal: RGBA[], mortar: RGBA, opts: {
+export function bricks(pal: RGBA[], mortar: RGBA, opts: {
   w?: number; h?: number; texture?: number;
   deco?: (x: number, y: number, u: number, v: number, b: Brick, seed: number) => RGBA | null;
   mortarDeco?: (x: number, y: number, seed: number) => RGBA | null;
@@ -609,7 +609,7 @@ const paintIvoryColumn: Paint = (p, seed) => {
 };
 
 /** Lanterns: a caged frame round a glowing heart, rivets at the corners. */
-function lantern(metal: RGBA[], glow: RGBA[]) {
+export function lantern(metal: RGBA[], glow: RGBA[]) {
   return (p: Canvas16, seed: number): void => {
     p.fill((x, y) => {
       const ring = Math.min(x, y, 15 - x, 15 - y);
@@ -659,7 +659,7 @@ const paintTerracotta: Paint = (p, seed) => {
 };
 
 /** Knitted wool: columns of V stitches, each lit on its left stroke. */
-function wool(pal: RGBA[]) {
+export function wool(pal: RGBA[]) {
   return (p: Canvas16, seed: number): void => {
     p.fill((x, y) => {
       const u = x & 3, v = y & 3, arm = v >> 1;
@@ -730,21 +730,11 @@ function pad(lit: RGBA[], forward: boolean) {
 const CYAN_LIGHT = ramp(0x2aa5c4, 0x46c3dd, 0x6ddcee, 0x9bedf8, 0xd2fbff);
 const GOLD_LIGHT = ramp(0xb46f12, 0xd58d1d, 0xefaa32, 0xffc758, 0xffe39a);
 
-const paintArenaRim: Paint = (p, seed) => {
-  const obsidian = ramp(0x120d1d, 0x1a1329, 0x231a36, 0x2d2244, 0x392c54);
-  p.fill((x, y) => {
-    // Violet hazard chevrons running along a dark rim.
-    const k = (x + Math.abs(y - 7.5)) % 8;
-    if (y >= 5 && y <= 10 && k < 2.5) return (x + y) % 2 ? hex(0xc79bff) : hex(0xa56cf5);
-    return pick(obsidian, .4 + (tnoise(seed, x, y, 4) - .5) * .6 + (y === 0 ? .4 : 0), x, y, .6);
-  });
-};
-
 // ── Items ───────────────────────────────────────────────────────────────────
 
-const OUTLINE = hex(0x17161c);
-const STEEL = ramp(0x5f6674, 0x7d8594, 0x9aa2b0, 0xb8bfcb, 0xd7dce4, 0xf4f7fb);
-const HANDLE = ramp(0x4a2f17, 0x62401f, 0x7a5129, 0x926334);
+export const OUTLINE = hex(0x17161c);
+export const STEEL = ramp(0x5f6674, 0x7d8594, 0x9aa2b0, 0xb8bfcb, 0xd7dce4, 0xf4f7fb);
+export const HANDLE = ramp(0x4a2f17, 0x62401f, 0x7a5129, 0x926334);
 
 const paintIronAxe: Paint = (p) => {
   const g = new Grid();
@@ -877,7 +867,6 @@ export const WORLDS_ART: Partial<Record<Tile, Paint>> = {
   [Tile.GildedLamp]: lantern(BRASS, ramp(0xa4620e, 0xd48a1c, 0xf5b53a, 0xffdc7a, 0xfff6d2)),
   [Tile.Basalt]: paintBasalt,
   [Tile.Terracotta]: paintTerracotta,
-  [Tile.ArenaRim]: paintArenaRim,
   [Tile.TeamWoolA]: wool(CRIMSON),
   [Tile.TeamWoolB]: wool(COBALT),
   [Tile.PartyTileC]: paintCrumbleTile,

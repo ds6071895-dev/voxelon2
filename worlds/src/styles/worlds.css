@@ -19,13 +19,8 @@
   --w-ink-soft: #3b4f68;
   --w-ink-mute: #687d95;
   --w-line: rgba(18,32,50,.10);
-  --w-line-firm: rgba(18,32,50,.18);
-  --w-paper: rgba(255,255,255,.78);
   --w-shadow: 0 24px 60px rgba(28,52,86,.18), 0 2px 6px rgba(28,52,86,.06);
-  --w-gold: #e3a12a;
   --w-azure: #2d6ee0;
-  --w-crimson: #d4343f;
-  --w-green: #1f9d5b;
   --w-focus: #2d6ee0;
 }
 
@@ -170,6 +165,7 @@
 @keyframes w-ping { to { box-shadow: 0 0 0 10px transparent; } }
 .w-card[data-state="searching"] .w-card-status { display: flex; }
 .w-card[data-state="searching"] .w-card-go { color: var(--w-ink); background: rgba(18,32,50,.07); box-shadow: inset 0 0 0 1.5px rgba(18,32,50,.2); }
+.w-card[data-state="searching"]:hover:not([aria-disabled="true"]) .w-card-go { color: #a3202a; background: #fdecee; box-shadow: inset 0 0 0 1.5px rgba(163,32,42,.35); }
 .w-card[data-state="searching"] { box-shadow: 0 16px 36px rgba(18,32,50,.24), 0 0 0 3px var(--tone); }
 .w-card[aria-disabled="true"] { cursor: not-allowed; }
 .w-card[aria-disabled="true"] .w-card-icon { filter: grayscale(.8); opacity: .6; }
@@ -237,7 +233,6 @@
   box-shadow: 0 14px 30px rgba(18,32,50,.3), inset 0 1px 0 rgba(255,255,255,.12);
 }
 .w-btn.primary:hover:not(:disabled) { background: linear-gradient(180deg, #2b3e5b, #16273d); }
-.w-btn.ghost { background: transparent; box-shadow: none; border-color: transparent; color: var(--w-ink-soft); }
 .w-btn.danger { color: #a3202a; }
 
 
@@ -353,9 +348,6 @@
   background: linear-gradient(135deg, #ffd272, #e3a12a); animation: w-spin 1.1s cubic-bezier(.6,.1,.4,.9) infinite;
 }
 @keyframes w-spin { 50% { transform: rotate(90deg) scale(.86); } 100% { transform: rotate(180deg); } }
-
-/* Results: add the two Worlds buttons under the existing cards. */
-.w-result-actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 14px; }
 
 /* ── Short screens: tighten the vertical rhythm so all three cards fit. ── */
 @media (max-height: 760px) and (min-width: 901px) {

@@ -8,8 +8,8 @@
 
 import { Block } from './blocks';
 
-export type DuelPhase = 'lobby' | 'countdown' | 'running' | 'sudden_death' | 'results';
-export type DuelFinishReason = 'time' | 'score' | 'sudden_death' | 'forfeit' | 'cancelled';
+type DuelPhase = 'lobby' | 'countdown' | 'running' | 'sudden_death' | 'results';
+type DuelFinishReason = 'time' | 'score' | 'sudden_death' | 'forfeit' | 'cancelled';
 
 /** Announcer beats. The server derives these from the authoritative kill feed
  * so every client shows the same call at the same moment. */
@@ -28,20 +28,19 @@ export interface DuelEvent {
   victimName: string;
   /** Streak length or multi-kill size, whichever the beat is about. */
   count: number;
-  at: number;
 }
 
 /** Consecutive kills land as one multi-kill while they stay inside this gap. */
-export const DUEL_MULTI_KILL_MS = 8_000;
+const DUEL_MULTI_KILL_MS = 8_000;
 /** Killing spree thresholds, in kills without dying. */
-export const DUEL_SPREE_STEPS: readonly { at: number; kind: DuelEventKind }[] = [
+const DUEL_SPREE_STEPS: readonly { at: number; kind: DuelEventKind }[] = [
   { at: 3, kind: 'spree' }, { at: 5, kind: 'rampage' },
   { at: 7, kind: 'unstoppable' }, { at: 10, kind: 'godlike' },
 ];
 /** Reaching this many kills wins the round outright, before the clock. */
 export const DUEL_SCORE_LIMIT = 15;
 /** How many announcer beats a snapshot carries back. */
-export const DUEL_FEED_LENGTH = 6;
+const DUEL_FEED_LENGTH = 6;
 
 const DUEL_EVENT_COPY: Record<DuelEventKind, { title: string; sub: (e: DuelEvent) => string }> = {
   first_blood: { title: 'FIRST BLOOD', sub: (e) => `${e.actorName} drew it` },
@@ -66,7 +65,7 @@ export function duelEventCopy(event: DuelEvent): { title: string; sub: string } 
 
 /** Which announcer beats a single kill produces, most important last (the
  * client banners the last one and files the rest into the feed). */
-export function duelKillEvents(state: {
+function duelKillEvents(state: {
   firstKillOfMatch: boolean;
   /** Killer's kills-without-dying AFTER this kill. */
   killerSpree: number;
@@ -92,25 +91,25 @@ export function duelKillEvents(state: {
   return beats;
 }
 
-export const DUEL_MIN_PLAYERS = 2;
+const DUEL_MIN_PLAYERS = 2;
 export const DUEL_CAPACITY = 4;
-export const DUEL_COUNTDOWN_MS = 3_000;
-export const DUEL_ARENA_LOAD_TIMEOUT_MS = 30_000;
+const DUEL_COUNTDOWN_MS = 3_000;
+const DUEL_ARENA_LOAD_TIMEOUT_MS = 30_000;
 export const DUEL_ROUND_MS = 5 * 60_000;
-export const DUEL_RESPAWN_MS = 3_000;
-export const DUEL_SPAWN_SHIELD_MS = 1_250;
+const DUEL_RESPAWN_MS = 3_000;
+const DUEL_SPAWN_SHIELD_MS = 1_250;
 // The results screen plays a rank-reveal animation before the vote buttons are
 // worth reading. Fifteen seconds meant the window could close while the RP was
 // still counting up, so "Run it back" regularly expired unanswered.
-export const DUEL_REMATCH_MS = 30_000;
+const DUEL_REMATCH_MS = 30_000;
 export const DUEL_ARENA_SIZE = 44;
-export const DUEL_ARENA_INTERIOR = 40;
+const DUEL_ARENA_INTERIOR = 40;
 export const DUEL_ARENA_FLOOR_Y = 96;
 /** Rows of colosseum wall above the floor before the invisible barrier takes
  * over. The interior itself stays open to the sky. */
-export const DUEL_WALL_ROWS = 11;
+const DUEL_WALL_ROWS = 11;
 /** The arena is open to the sky. The numeric ceiling is only the world limit. */
-export const DUEL_ARENA_HEIGHT = 256 - DUEL_ARENA_FLOOR_Y;
+const DUEL_ARENA_HEIGHT = 256 - DUEL_ARENA_FLOOR_Y;
 export const DUEL_MAX_HEALTH = 40;
 export const DUEL_MAX_PILLAR_HEIGHT = 7;
 
@@ -256,14 +255,12 @@ export interface DuelParticipant {
   id: number;
   username: string;
   skin: number;
-  host: boolean;
   ready: boolean;
   connected: boolean;
   kills: number;
   deaths: number;
   alive: boolean;
   spectating: boolean;
-  rematchVote: boolean;
   /** Stable lobby order, used as the final scoreboard tie-break. */
   joinOrder: number;
   respawnAt?: number;
@@ -277,8 +274,6 @@ export interface DuelParticipant {
   multiUntil: number;
   /** Who killed this player last, so a payback reads as Revenge. */
   lastKilledBy: number;
-  /** Server-side only: never leaves the server (see sanitize in server_core). */
-  bot?: boolean;
 }
 
 export interface DuelArenaBounds {
@@ -309,27 +304,23 @@ export interface DuelLobbySnapshot {
   /** Public display id. Invite tokens are never included in snapshots/logs. */
   id: string;
   phase: DuelPhase;
-  capacity: number;
   participants: DuelParticipant[];
-  host: number;
   serverNow: number;
   countdownEndsAt?: number;
-  arenaLoadDeadline?: number;
   startedAt?: number;
   endsAt?: number;
   arena?: DuelArenaBounds;
-  arenaReady?: Set<number>;
   /** Announcer beats, oldest first. Clients replay anything above the last
    * `seq` they have seen, so a dropped frame never loses a call. */
   feed: DuelEvent[];
   result?: DuelResult;
 }
 
-export type DuelJoinFailure = 'invalid' | 'full' | 'match_in_progress' | 'already_in_lobby';
-export type DuelStartFailure = 'not_host' | 'too_few_players' | 'too_many_players' | 'not_everyone_ready' | 'not_in_lobby';
+type DuelJoinFailure = 'invalid' | 'full' | 'match_in_progress' | 'already_in_lobby';
+type DuelStartFailure = 'not_host' | 'too_few_players' | 'too_many_players' | 'not_everyone_ready' | 'not_in_lobby';
 
 /** The colosseum, at the origin of its own world. */
-export function duelArenaBounds(): DuelArenaBounds {
+function duelArenaBounds(): DuelArenaBounds {
   const originX = 0;
   const originZ = 0;
   const minX = originX + 2;
@@ -360,7 +351,7 @@ export function duelArenaBounds(): DuelArenaBounds {
 const DUEL_ARENA = duelArenaBounds();
 
 /** The colosseum if this column is part of it, else null (open void). */
-export function duelArenaAt(x: number, z: number): DuelArenaBounds | null {
+function duelArenaAt(x: number, z: number): DuelArenaBounds | null {
   if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
   return x >= 0 && x < DUEL_ARENA_SIZE && z >= 0 && z < DUEL_ARENA_SIZE ? DUEL_ARENA : null;
 }
@@ -443,7 +434,7 @@ export function clampToDuelArena(p: DuelVec3, arena: DuelArenaBounds): DuelVec3 
 }
 
 /** Arena shell/cover occupancy. 40x40 terrain with world-height perimeter barriers. */
-export function duelArenaSolidAt(x: number, y: number, z: number, arena: DuelArenaBounds): boolean {
+function duelArenaSolidAt(x: number, y: number, z: number, arena: DuelArenaBounds): boolean {
   const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
   const outerMinX = arena.originX, outerMaxX = arena.originX + DUEL_ARENA_SIZE - 1;
   const outerMinZ = arena.originZ, outerMaxZ = arena.originZ + DUEL_ARENA_SIZE - 1;
@@ -476,11 +467,11 @@ export function hasArenaLineOfSight(
   return true;
 }
 
-export function orderDuelScore(a: DuelParticipant, b: DuelParticipant): number {
+function orderDuelScore(a: DuelParticipant, b: DuelParticipant): number {
   return b.kills - a.kills || a.deaths - b.deaths || a.joinOrder - b.joinOrder;
 }
 
-export function orderedDuelScoreboard(players: Iterable<DuelParticipant>): DuelParticipant[] {
+function orderedDuelScoreboard(players: Iterable<DuelParticipant>): DuelParticipant[] {
   return [...players].map((p) => ({ ...p })).sort(orderDuelScore);
 }
 
@@ -525,10 +516,10 @@ interface DuelLobby {
   result?: DuelResult;
 }
 
-export interface DuelIdentity { id: number; username: string; skin: number; bot?: boolean }
+interface DuelIdentity { id: number; username: string; skin: number }
 
-export interface DuelCreateResult { token: string; snapshot: DuelLobbySnapshot }
-export type DuelJoinResult =
+interface DuelCreateResult { token: string; snapshot: DuelLobbySnapshot }
+type DuelJoinResult =
   | { ok: true; snapshot: DuelLobbySnapshot }
   | { ok: false; reason: DuelJoinFailure };
 
@@ -553,7 +544,7 @@ export class Duels {
     if (this.lobbyByPlayer.has(identity.id)) return { reason: 'already_in_lobby' };
     let token = '';
     do token = this.tokenFactory(); while (!token || token.length < 24 || this.lobbies.has(token));
-    const p = this.newParticipant(identity, true, 0);
+    const p = this.newParticipant(identity, 0);
     const lobby: DuelLobby = {
       id: `D${this.nextLobbyId++}`, token, phase: 'lobby', participants: new Map([[p.id, p]]),
       host: p.id, nextJoinOrder: 1, feed: [], nextEventSeq: 1, firstBloodTaken: false,
@@ -570,15 +561,17 @@ export class Duels {
     if (lobby.phase !== 'lobby') return { ok: false, reason: 'match_in_progress' };
     if (lobby.participants.size >= DUEL_CAPACITY) return { ok: false, reason: 'full' };
     this.resetReady(lobby);
-    const p = this.newParticipant(identity, false, lobby.nextJoinOrder++);
+    const p = this.newParticipant(identity, lobby.nextJoinOrder++);
     lobby.participants.set(p.id, p);
     this.lobbyByPlayer.set(p.id, lobby);
     return { ok: true, snapshot: this.snapshotLobby(lobby, now) };
   }
 
-  leave(playerId: number, now: number): { snapshot?: DuelLobbySnapshot; deleted: boolean; token?: string } {
+  /** Take a player out of their lobby. Returns the lobby as it now stands, or
+   *  undefined when there was none or it emptied and was deleted. */
+  leave(playerId: number, now: number): DuelLobbySnapshot | undefined {
     const lobby = this.lobbyByPlayer.get(playerId);
-    if (!lobby) return { deleted: false };
+    if (!lobby) return undefined;
     const live = lobby.phase === 'running' || lobby.phase === 'sudden_death';
     const leaving = lobby.participants.get(playerId);
     this.lobbyByPlayer.delete(playerId);
@@ -594,14 +587,13 @@ export class Duels {
     if (![...lobby.participants.values()].some(p => p.connected)) {
       this.releaseArena(lobby);
       this.lobbies.delete(lobby.token);
-      return { deleted: true, token: lobby.token };
+      return undefined;
     }
     if (lobby.host === playerId) {
       const next = [...lobby.participants.values()].filter((p) => p.connected)
         .sort((a, b) => a.joinOrder - b.joinOrder)[0];
-      if (!next) return { snapshot: this.snapshotLobby(lobby, now), deleted: false };
+      if (!next) return this.snapshotLobby(lobby, now);
       lobby.host = next.id;
-      for (const p of lobby.participants.values()) p.host = p.id === next.id;
     }
     if (lobby.phase === 'lobby') this.resetReady(lobby);
     else if (lobby.phase === 'running' || lobby.phase === 'sudden_death' || lobby.phase === 'countdown') {
@@ -611,7 +603,7 @@ export class Duels {
     } else if (lobby.phase === 'results') {
       this.returnToLobby(lobby);
     }
-    return { snapshot: this.snapshotLobby(lobby, now), deleted: false };
+    return this.snapshotLobby(lobby, now);
   }
 
   setReady(playerId: number, ready: boolean, now: number): DuelLobbySnapshot | null {
@@ -676,8 +668,7 @@ export class Duels {
       lobby.feed.push({ seq: lobby.nextEventSeq++, kind, actor: killer.id,
         actorName: killer.username, victim: victim.id, victimName: victim.username,
         count: kind === 'double_kill' || kind === 'triple_kill' || kind === 'quad_kill'
-          ? killer.multi : killer.spree,
-        at: now });
+          ? killer.multi : killer.spree });
     }
     if (lobby.feed.length > DUEL_FEED_LENGTH) lobby.feed.splice(0, lobby.feed.length - DUEL_FEED_LENGTH);
 
@@ -762,9 +753,9 @@ export class Duels {
       (lobby.phase === 'running' || lobby.phase === 'sudden_death');
   }
 
-  private newParticipant(identity: DuelIdentity, host: boolean, joinOrder: number): DuelParticipant {
-    return { ...identity, host, ready: false, connected: true, kills: 0, deaths: 0,
-      alive: true, spectating: false, rematchVote: false, joinOrder,
+  private newParticipant(identity: DuelIdentity, joinOrder: number): DuelParticipant {
+    return { ...identity, ready: false, connected: true, kills: 0, deaths: 0,
+      alive: true, spectating: false, joinOrder,
       spree: 0, bestSpree: 0, multi: 0, multiUntil: 0, lastKilledBy: 0 };
   }
 
@@ -786,7 +777,7 @@ export class Duels {
     lobby.feed = []; lobby.firstBloodTaken = false;
     for (const p of lobby.participants.values()) {
       p.kills = 0; p.deaths = 0; p.alive = true; p.spectating = false;
-      p.rematchVote = false; p.respawnAt = undefined; p.shieldUntil = undefined;
+      p.respawnAt = undefined; p.shieldUntil = undefined;
       p.spree = 0; p.bestSpree = 0; p.multi = 0; p.multiUntil = 0; p.lastKilledBy = 0;
     }
   }
@@ -802,7 +793,7 @@ export class Duels {
 
   private finish(lobby: DuelLobby, now: number, winner: number | null, reason: DuelFinishReason): void {
     lobby.phase = 'results';
-    for (const p of lobby.participants.values()) { p.alive = false; p.spectating = true; p.rematchVote = false; }
+    for (const p of lobby.participants.values()) { p.alive = false; p.spectating = true; }
     const scoreboard = orderedDuelScoreboard(lobby.participants.values());
     // Every disconnect is a forfeit placement even if the remaining players
     // continue to regulation time. The combatant stays visible on the board,
@@ -827,14 +818,14 @@ export class Duels {
     lobby.feed = []; lobby.firstBloodTaken = false;
     for (const p of lobby.participants.values()) {
       p.ready = false; p.kills = 0; p.deaths = 0; p.alive = true; p.spectating = false;
-      p.rematchVote = false; p.respawnAt = undefined; p.shieldUntil = undefined;
+      p.respawnAt = undefined; p.shieldUntil = undefined;
       p.spree = 0; p.bestSpree = 0; p.multi = 0; p.multiUntil = 0; p.lastKilledBy = 0;
     }
   }
 
   private snapshotLobby(lobby: DuelLobby, now: number): DuelLobbySnapshot {
-    return { id: lobby.id, phase: lobby.phase, capacity: DUEL_CAPACITY,
-      participants: orderedDuelScoreboard(lobby.participants.values()), host: lobby.host,
+    return { id: lobby.id, phase: lobby.phase,
+      participants: orderedDuelScoreboard(lobby.participants.values()).map((p) => ({ ...p })),
       serverNow: now, feed: lobby.feed.map((event) => ({ ...event })),
       countdownEndsAt: lobby.countdownEndsAt, startedAt: lobby.startedAt,
       endsAt: lobby.endsAt, arena: lobby.arena ? { ...lobby.arena, spawns: lobby.arena.spawns.map((s) => ({ ...s })) } : undefined,

@@ -15,7 +15,7 @@ export interface Party {
   members: number[];
 }
 
-export type PartyJoinError = 'invalid' | 'full' | 'already' | 'busy';
+type PartyJoinError = 'invalid' | 'full' | 'already' | 'busy';
 
 /** How long a released code stays out of circulation. */
 export const PARTY_CODE_COOLDOWN_MS = 10 * 60_000;
@@ -76,18 +76,18 @@ export class Parties {
   /** Remove a member. The party disbands when its last member goes, and the
    *  leadership passes to the longest-standing member when the leader goes.
    *  Returns the party as it now stands (null if it disbanded). */
-  leave(id: number, now: number): { party: Party | null; disbanded: string | null } {
+  leave(id: number, now: number): Party | null {
     const party = this.byMember.get(id);
-    if (!party) return { party: null, disbanded: null };
+    if (!party) return null;
     this.byMember.delete(id);
     party.members = party.members.filter((m) => m !== id);
     if (party.members.length === 0) {
       this.byCode.delete(party.code);
       this.cooling.set(party.code, now + PARTY_CODE_COOLDOWN_MS);
-      return { party: null, disbanded: party.code };
+      return null;
     }
     if (party.leader === id) party.leader = party.members[0];
-    return { party, disbanded: null };
+    return party;
   }
 
   promote(leader: number, target: number): Party | null {

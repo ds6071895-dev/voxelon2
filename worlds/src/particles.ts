@@ -78,17 +78,13 @@ export class Particles {
     }
   }
 
-  /** Healing: soft green motes that FLOAT UP around the player (negative
-   *  gravity), so a bandage/medkit reads as restorative at a glance. A strong
-   *  (medkit) burst is glowing medical crosses rather than plain squares. */
-  heal(x: number, y: number, z: number, count = 12, strong = false): void {
-    const map = strong ? healCrossTexture() : undefined;
-    this.burst(x, y, z, count, strong ? 0x9dffc0 : 0x6ff0a0, 0.9, 1.1,
-      { gravity: -1.4, spread: 1.3, scale: strong ? 1.6 : 0.8, map, additive: strong });
-    if (strong) {
-      this.burst(x, y + 0.4, z, 6, 0xffffff, 1.4, 0.7,
-        { gravity: -0.8, spread: 1.0, scale: 0.55, additive: true });
-    }
+  /** Healing: glowing medical crosses that FLOAT UP around the player
+   *  (negative gravity), so the medkit reads as restorative at a glance. */
+  heal(x: number, y: number, z: number, count: number): void {
+    this.burst(x, y, z, count, 0x9dffc0, 0.9, 1.1,
+      { gravity: -1.4, spread: 1.3, scale: 1.6, map: healCrossTexture(), additive: true });
+    this.burst(x, y + 0.4, z, 6, 0xffffff, 1.4, 0.7,
+      { gravity: -0.8, spread: 1.0, scale: 0.55, additive: true });
   }
 
   /** One pair of motes on a rising double helix around the player — called
@@ -136,7 +132,7 @@ export class Particles {
     }
   }
 
-  /** Gray puff when a mob dies. */
+  /** Gray puff where a round hits something. */
   poof(x: number, y: number, z: number): void {
     this.burst(x, y, z, 10, 0xdddddd, 2, 0.5);
   }

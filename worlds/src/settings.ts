@@ -12,7 +12,7 @@
  *  below it, so `GRAPHICS_ORDER` can be used to compare two settings. */
 export type GraphicsQuality = 'low' | 'medium' | 'high' | 'ultra' | 'max';
 
-export interface GraphicsPreset {
+interface GraphicsPreset {
   /** Chunks streamed around the player. Must never exceed world.ts's
    *  RENDER_DISTANCE, which sizes the precomputed streaming spiral. */
   renderDistance: number;
@@ -26,29 +26,28 @@ export interface GraphicsPreset {
   smoothLighting: boolean;
   /** Post-processing stack: bloom + filmic grade. Costs fill rate per frame. */
   shaders: boolean;
-  label: string;
 }
 
 export const GRAPHICS_PRESETS: Record<GraphicsQuality, GraphicsPreset> = {
   low: {
     renderDistance: 4, pixelRatioCap: 1, antialias: false,
-    smoothLighting: false, shaders: false, label: 'Low',
+    smoothLighting: false, shaders: false,
   },
   medium: {
     renderDistance: 6, pixelRatioCap: 1.5, antialias: true,
-    smoothLighting: false, shaders: false, label: 'Medium',
+    smoothLighting: false, shaders: false,
   },
   high: {
     renderDistance: 8, pixelRatioCap: 2, antialias: true,
-    smoothLighting: false, shaders: false, label: 'High',
+    smoothLighting: false, shaders: false,
   },
   ultra: {
     renderDistance: 10, pixelRatioCap: 2, antialias: true,
-    smoothLighting: true, shaders: false, label: 'Extra High',
+    smoothLighting: true, shaders: false,
   },
   max: {
     renderDistance: 12, pixelRatioCap: 2, antialias: true,
-    smoothLighting: true, shaders: true, label: 'Max',
+    smoothLighting: true, shaders: true,
   },
 };
 
@@ -59,7 +58,7 @@ export const GRAPHICS_ORDER: GraphicsQuality[] =
 export const MIN_LOOK_SENSITIVITY = 0.25;
 export const MAX_LOOK_SENSITIVITY = 3;
 
-export interface AccessibilitySettings {
+interface AccessibilitySettings {
   effectsVolume: number;
   cameraShake: number;
   reducedMotion: boolean;
@@ -69,7 +68,7 @@ export interface AccessibilitySettings {
   graphicsQuality: GraphicsQuality;
 }
 
-export const DEFAULT_ACCESSIBILITY: AccessibilitySettings = {
+const DEFAULT_ACCESSIBILITY: AccessibilitySettings = {
   effectsVolume: 0.8,
   cameraShake: 1,
   reducedMotion: false,
@@ -78,7 +77,7 @@ export const DEFAULT_ACCESSIBILITY: AccessibilitySettings = {
   graphicsQuality: 'high',
 };
 
-export function sanitizeAccessibility(raw: unknown): AccessibilitySettings {
+function sanitizeAccessibility(raw: unknown): AccessibilitySettings {
   const x = raw && typeof raw === 'object' ? raw as Partial<AccessibilitySettings> : {};
   const volume = (v: unknown, d: number): number =>
     typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : d;

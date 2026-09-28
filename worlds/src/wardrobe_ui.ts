@@ -266,7 +266,7 @@ const CSS = `
 }
 `;
 
-export interface WardrobeOptions {
+interface WardrobeOptions {
   root: HTMLElement;
   /** The look to start editing from. */
   getCosmetics(): Cosmetics;
@@ -280,7 +280,7 @@ export interface WardrobeOptions {
   onEquipCape(id: string): void;
 }
 
-export interface WardrobeUI {
+interface WardrobeUI {
   readonly open: boolean;
   show(tab?: TabId): void;
   hide(): void;

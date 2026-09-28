@@ -6,27 +6,26 @@
 import { INTERP_DELAY } from './interp';
 
 /** One weapon's stats: base damage, cadence and extra knockback. */
-export interface SwingTier {
-  readonly item: number;
+interface SwingTier {
   readonly damage: number;
   readonly cooldownMs: number;
   readonly kbBonus: number;
 }
 export const MELEE_COMBO_WINDOW_MS = 1_600;
-export const MELEE_COMBO_STEP = 0.10;
+const MELEE_COMBO_STEP = 0.10;
 export const MELEE_COMBO_MAX = 3;
-export const MELEE_CRIT_MULT = 1.5;
+const MELEE_CRIT_MULT = 1.5;
 /** Falling at least this fast counts as a jump-crit / fall-crit. */
-export const MELEE_CRIT_FALL_VY = -0.15;
-export const MELEE_SPRINT_SPEED = 5.2;
-export const MELEE_SPRINT_KB_MULT = 1.85;
-export const MELEE_KB_BASE = 0.62;
-export const MELEE_KB_VERT = 0.42;
+const MELEE_CRIT_FALL_VY = -0.15;
+const MELEE_SPRINT_SPEED = 5.2;
+const MELEE_SPRINT_KB_MULT = 1.85;
+const MELEE_KB_BASE = 0.62;
+const MELEE_KB_VERT = 0.42;
 /** How much of the knockback direction comes from where the attacker is LOOKING
  *  rather than from the line between the bodies. This is the most important
  *  number in the mode: it is what turns "line him up with the edge, then swing"
  *  into a learnable skill instead of an accident of where you happened to stand. */
-export const MELEE_LOOK_BLEND = 0.30;
+const MELEE_LOOK_BLEND = 0.30;
 export const MELEE_RANGE = 4.2;
 export const MELEE_FACING_DOT = 0.55;
 /** Lag-compensation window: the attacker sees the target INTERP_DELAY (plus
@@ -63,7 +62,6 @@ export interface SwingResult {
   /** 0..1 charge actually achieved. */
   charge: number;
   crit: boolean;
-  sprint: boolean;
   /** Combo multiplier step applied (0..MELEE_COMBO_MAX). */
   combo: number;
   /** Knockback impulse, in the same units the `hurt` arm already delivers. */
@@ -107,7 +105,7 @@ export function meleeSwing(input: SwingInput): SwingResult {
 
   return {
     damage: Math.max(1, damage),
-    charge: c, crit, sprint, combo: comboSteps,
+    charge: c, crit, combo: comboSteps,
     kx: dx * kh, ky, kz: dz * kh,
   };
 }

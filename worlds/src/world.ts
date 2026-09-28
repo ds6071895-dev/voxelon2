@@ -5,7 +5,7 @@
 // materials, shaders and atlas.
 
 import * as THREE from 'three';
-import { Block, BLOCKS, torchSupport } from './blocks';
+import { Block, BLOCKS } from './blocks';
 import { Chunk, CHUNK_X, CHUNK_Z } from './chunk';
 import { computeLight } from './light';
 import { buildChunkGeometry, BlockSampler } from './mesher';
@@ -33,11 +33,9 @@ export const DEFAULT_RENDER_DISTANCE = 8; // chunks
 
 /** Everything the injected chunk shader reads that is not already a three.js
  *  built-in. One object so the two materials are wired identically. */
-export interface ChunkShaderUniforms {
-  underwater: { value: THREE.Vector2 };
+interface ChunkShaderUniforms {
   sun: { value: number };
   aurora: { value: number };
-  torch: { value: THREE.Vector4 };
   arenaBounds: { value: THREE.Vector4 };
   /** Ambient light floor inside an arena; 0 disables it. */
   arenaLight: { value: number };
@@ -70,10 +68,8 @@ export interface ChunkShaderUniforms {
 /** The bit of GLSL both materials share: the voxel light model, the sun shadow
  *  lookup, the atmosphere and the atlas sampler. */
 const CHUNK_COMMON = /* glsl */`
-uniform vec2 uUnderwater; // immersion, local water surface height
 uniform float uSunLight;
 uniform float uAuroraLight;
-uniform vec4 uTorch;
 uniform vec4 uArenaBounds;
 uniform float uArenaLight;
 uniform vec3 uSunTint;
@@ -234,7 +230,7 @@ const ATLAS_SAMPLE = /* glsl */`
  *   ambient  the sky dome's irradiance, hemispherical (up-faces see all of it,
  *            walls most, undersides a ground bounce), scaled by skylight level
  *   direct   the sun or moon, N.L, times the shadow map, times sky exposure
- *   block    torch/lava light — warm, gently flickering
+ *   block    lamp/lantern light — warm, gently flickering
  *   emissive glowing blocks light themselves
  *
  * then fogs by distance in LINEAR light (before the sRGB encode, unlike
@@ -249,9 +245,7 @@ function applyLightShader(
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uSunLight = u.sun;
     shader.uniforms.uAuroraLight = u.aurora;
-    shader.uniforms.uTorch = u.torch;
     shader.uniforms.uArenaBounds = u.arenaBounds;
-    shader.uniforms.uUnderwater = u.underwater;
     shader.uniforms.uArenaLight = u.arenaLight;
     shader.uniforms.uSunTint = u.sunTint;
     shader.uniforms.uSkyTint = u.skyTint;
@@ -363,27 +357,7 @@ function applyLightShader(
                          * sin(uTime * 3.1 + vWorldPos.y);
       vec3 fire = vec3(1.0, 0.68, 0.38);
       vec3 blockLight = fire * blkK * 1.05 * mix(1.0, flick, uShaderMode);
-      // The held torch: a moving point light, no remesh needed.
-      float td = distance(vWorldPos, uTorch.xyz);
-      float fall = clamp(1.0 - td / 16.0, 0.0, 1.0);
-      float torch = uTorch.w * (0.45 * fall + 0.55 * fall * fall);
-      blockLight = max(blockLight, fire * torch * 1.05);
 
-      // A soft local fill keeps nearby materials readable through the water.
-      // Sunlit ripples move across submerged surfaces in world space.
-      if (uUnderwater.x > 0.001 && kind < 2.5) {
-        float submerged = 1.0 - smoothstep(uUnderwater.y - 0.4, uUnderwater.y, vWorldPos.y);
-        float wet = uUnderwater.x * submerged;
-        float nearEye = 1.0 - smoothstep(5.0, 28.0, distance(vWorldPos, cameraPosition));
-        ambient = max(ambient, vec3(0.12, 0.17, 0.18) * wet * nearEye);
-        vec2 p = vWorldPos.xz * 2.1 + vWorldPos.y * 0.25;
-        p += vec2(sin(p.y * 0.7 + uTime * 0.6), cos(p.x * 0.6 - uTime * 0.5)) * 0.65;
-        float ripple = sin(p.x + uTime * 0.75) * sin(p.y - uTime * 0.6);
-        float caustic = pow(1.0 - abs(ripple), 12.0);
-        float sunlit = smoothstep(0.12, 0.8, skyLv) * (1.0 - uNight);
-        ambient += vec3(0.35, 0.48, 0.40) * caustic * wet * sunlit
-          * (0.25 + 0.75 * max(faceN.y, 0.0));
-      }
       vec3 lit = albedo * (ambient + direct + blockLight);
       // Emitters light themselves, and in HDR they run hot enough to bloom.
       lit += albedo * vInfo.y * (0.55 + 0.9 * uShaderMode);
@@ -501,14 +475,11 @@ export class World {
   readonly sunTintUniform = { value: new THREE.Color(1, 1, 1) };
   /** Ambient sky irradiance that fills shade. */
   readonly skyTintUniform = { value: new THREE.Color(1, 1, 1) };
-  /** Held-torch point light shared with the chunk shaders (xyz pos, w intensity). */
-  readonly torchUniform = { value: new THREE.Vector4(0, 0, 0, 0) };
   /** x/z render crop for minigame arenas. x>=z disables the crop. */
   readonly arenaBoundsUniform = { value: new THREE.Vector4(1, 1, 0, 0) };
-  /** Ambient light floor inside the cropped arena; 0 in the open world. */
+  /** Ambient light floor inside the cropped arena; 0 when there is no crop. */
   readonly arenaLightUniform = { value: 0 };
   /** Seconds since load, driving water, foliage and flicker. */
-  readonly underwaterUniform = { value: new THREE.Vector2(0, 0) };
   readonly timeUniform = { value: 0 };
   /** Unit vector toward the body that is lighting the world. */
   readonly lightDirUniform = { value: new THREE.Vector3(0, 1, 0) };
@@ -534,8 +505,6 @@ export class World {
     params: { value: new THREE.Vector3(0, 1 / 2048, 0) },
     origin: { value: new THREE.Vector3() },
   };
-  /** When true, setBlock skips the onBlockBroken hook (remote edits). */
-  private suppressBreakEvent = false;
   /**
    * Persistent record of every block changed from natural terrain, keyed by
    * chunk -> (local index -> block id). Re-applied whenever a chunk is
@@ -552,11 +521,6 @@ export class World {
   }
   /** When set, remeshes are collected and deduplicated until endBatch(). */
   private batch: Set<Chunk> | null = null;
-  /** Fired when a block becomes air (drop spawning hooks in here).
-   *  `harvested` is false when mined without the required tool. */
-  onBlockBroken?: (
-    wx: number, wy: number, wz: number, oldId: number, harvested: boolean
-  ) => void;
 
   constructor(scene: THREE.Scene, atlas: Atlas, gen: WorldGenerator) {
     this.scene = scene;
@@ -583,8 +547,7 @@ export class World {
       depthWrite: false,
     });
     const shaderUniforms: ChunkShaderUniforms = {
-      underwater: this.underwaterUniform,
-      sun: this.sunUniform, aurora: this.auroraUniform, torch: this.torchUniform,
+      sun: this.sunUniform, aurora: this.auroraUniform,
       arenaBounds: this.arenaBoundsUniform, arenaLight: this.arenaLightUniform,
       sunTint: this.sunTintUniform,
       skyTint: this.skyTintUniform, time: this.timeUniform,
@@ -618,10 +581,8 @@ export class World {
     return this.chunks.get(Chunk.key(cx, cz));
   }
 
-  /** Copy everything the sky measured this frame into the chunk shaders.
-   *  `openAir` is false underwater or in a vault, where the horizon's glow
-   *  toward the sun has no business being in the fog. */
-  applySky(sky: Sky, openAir = true): void {
+  /** Copy everything the sky measured this frame into the chunk shaders. */
+  applySky(sky: Sky): void {
     this.sunUniform.value = sky.sunIntensity;
     this.auroraUniform.value = sky.auroraIntensity;
     this.sunTintUniform.value.copy(sky.sunTint);
@@ -631,8 +592,7 @@ export class World {
     this.nightUniform.value = sky.nightAmount;
     this.skyColorUniform.value.copy(sky.skyColor);
     this.zenithUniform.value.copy(sky.zenithColor);
-    if (openAir) this.fogSunUniform.value.copy(sky.fogSunColor);
-    else this.fogSunUniform.value.setRGB(0, 0, 0);
+    this.fogSunUniform.value.copy(sky.fogSunColor);
   }
 
   /** Turn smooth lighting on or off. The light levels live in the chunk
@@ -647,7 +607,7 @@ export class World {
 
   /** Hide all terrain outside one temporary minigame arena, including geometry
    * sharing a chunk mesh with its walls, and apply that mode's ambient floor.
-   * Passing null restores the open world. */
+   * Passing null turns the crop off (the title backdrop, the menus). */
   setArenaRenderBounds(
     bounds: { minX: number; minZ: number; maxX: number; maxZ: number } | null,
     ambientFloor = 0,
@@ -690,9 +650,7 @@ export class World {
     return chunk.get(wx & 15, wy, wz & 15);
   }
 
-  setBlock(
-    wx: number, wy: number, wz: number, id: number, harvested = true
-  ): void {
+  setBlock(wx: number, wy: number, wz: number, id: number): void {
     if (wy < 0 || wy >= 256) return;
     // Persist the edit first, so it is honoured even if the chunk is not
     // loaded yet (remote edits) and survives a later unload/regen.
@@ -701,28 +659,12 @@ export class World {
     const chunk = this.chunks.get(Chunk.key(cx, cz));
     if (!chunk) return;
     const lx = wx & 15, lz = wz & 15;
-    const oldId = chunk.get(lx, wy, lz);
     chunk.set(lx, wy, lz, id);
-    if (!this.suppressBreakEvent && id === Block.Air &&
-      oldId !== Block.Air && oldId !== Block.Water) {
-      this.onBlockBroken?.(wx, wy, wz, oldId, harvested);
-    }
 
     if (id === Block.Air) {
-      // Breaking the support under a plant, cactus or floor torch pops it.
-      const above = chunk.get(lx, wy + 1, lz);
-      if (
-        BLOCKS[above]?.shape === 'cross' || above === Block.Cactus ||
-        above === Block.Torch
-      ) {
+      // Breaking the support under a plant pops it.
+      if (BLOCKS[chunk.get(lx, wy + 1, lz)]?.shape === 'cross') {
         this.setBlock(wx, wy + 1, wz, Block.Air);
-      }
-      // Wall torches attached to this block pop too.
-      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const sup = torchSupport(this.getBlock(wx + dx, wy, wz + dz));
-        if (sup && sup[0] === -dx && sup[2] === -dz) {
-          this.setBlock(wx + dx, wy, wz + dz, Block.Air);
-        }
       }
     }
 
@@ -758,14 +700,6 @@ export class World {
       const chunk = cache[dcz * 3 + dcx];
       return chunk ? chunk.get(wx & 15, wy, wz & 15) : Block.Air;
     };
-  }
-
-  /** Apply another player's block edit: updates + remeshes, but does NOT
-   *  fire onBlockBroken (no drops, no re-broadcast). */
-  applyRemoteEdit(wx: number, wy: number, wz: number, id: number): void {
-    this.suppressBreakEvent = true;
-    this.setBlock(wx, wy, wz, id);
-    this.suppressBreakEvent = false;
   }
 
   /** Collect remeshes for a bulk edit (e.g. an explosion). */

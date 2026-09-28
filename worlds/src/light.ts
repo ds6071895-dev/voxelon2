@@ -7,7 +7,7 @@
 
 import { Block, isOpaque } from './blocks';
 
-export interface LightRegion {
+interface LightRegion {
   minX: number;
   minZ: number;
   sizeX: number;

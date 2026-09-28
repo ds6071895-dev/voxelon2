@@ -16,6 +16,7 @@ import type {
   PartyArenaBounds, PartyLobbySnapshot, PartyResult, PartySubBounds,
 } from '../partygames';
 import type { WorldSpec } from '../multiverse';
+import type { RatClassId, RsEffects, RsResult, RsRole, RsSnapshot, RsSound } from '../ratseek_rules';
 
 /** Worlds' own game-server port. VOXELON keeps 8080; the two never collide. */
 export const SERVER_PORT = 8090;
@@ -24,10 +25,10 @@ export const TRANSFORM_HZ = 20;    // client -> server transform sends
 export const EDIT_RANGE = 7;       // max distance a player may edit a block
 export const PARTY_MAX = 4;        // most members one party can hold
 
-/** The three games on the title screen. */
-export type GameMode = 'duels' | 'bridge' | 'parkour';
+/** The games on the title screen. */
+export type GameMode = 'duels' | 'bridge' | 'parkour' | 'ratseek';
 export function isGameMode(v: unknown): v is GameMode {
-  return v === 'duels' || v === 'bridge' || v === 'parkour';
+  return v === 'duels' || v === 'bridge' || v === 'parkour' || v === 'ratseek';
 }
 
 /** Public, render-relevant state of one player. */
@@ -60,7 +61,7 @@ export interface PlayerInfo extends PlayerSnapshot {
 }
 
 /** One member as the party panel shows them. */
-export interface PartyMember {
+interface PartyMember {
   id: number;
   username: string;
   skin: number;
@@ -94,7 +95,9 @@ export type ClientMsg =
   | { t: 'partyKick'; id: number }
   | { t: 'partyPromote'; id: number }
   // Play: solo -> public queue; a party leader -> a private match for the party.
-  | { t: 'play'; mode: GameMode }
+  // Rat and Seek: `seeker` is the party member the leader picked to hunt
+  // (0 = the AI seeker, the default), and `ratClass` the class this player last chose.
+  | { t: 'play'; mode: GameMode; seeker?: number; ratClass?: RatClassId }
   | { t: 'cancelQueue' }
   // Back to the menu (from a results screen, or forfeiting a live match).
   | { t: 'leaveMatch' }
@@ -112,7 +115,14 @@ export type ClientMsg =
   // The Bridge / Parkour.
   | { t: 'pgMelee'; target: number }
   | { t: 'pgShoot'; dx: number; dy: number; dz: number; power: number }
-  | { t: 'pgRetry' };
+  | { t: 'pgRetry' }
+  // Rat and Seek: right-click with a hotbar slot (on a block, if one is under
+  // the crosshair), a left-click on a body or a decoy, and a class pick.
+  | { t: 'rsUse'; slot: number; block?: { x: number; y: number; z: number; nx: number; ny: number; nz: number } }
+  | { t: 'rsHit'; target: number; decoy?: boolean }
+  | { t: 'rsClass'; cls: RatClassId }
+  // The party host's "Who seeks?" pick during the prep time (0 = the AI seeker).
+  | { t: 'rsSeeker'; seeker: number };
 
 // --- server -> client -------------------------------------------------------
 export type ServerMsg =
@@ -162,7 +172,18 @@ export type ServerMsg =
   | { t: 'pgArrow'; id: number; by: number; x: number; y: number; z: number;
       dx: number; dy: number; dz: number; speed: number; power: number }
   | { t: 'pgArrowEnd'; id: number; x: number; y: number; z: number; hit: boolean }
-  | { t: 'pgResult'; result: PartyResult };
+  | { t: 'pgResult'; result: PartyResult }
+  // Rat and Seek.
+  | { t: 'rsArena'; world: WorldSpec; role: RsRole; spawn: { x: number; y: number; z: number }; yaw: number }
+  | { t: 'rsState'; s: RsSnapshot }
+  | { t: 'rsKit'; slots: (ItemStack | null)[]; selected?: number }
+  | { t: 'rsFx'; fx: RsEffects }
+  | { t: 'rsTitle'; title: string; sub: string; color: string; ms: number }
+  | { t: 'rsBar'; text: string; color: string }
+  | { t: 'rsMsg'; text: string; color: string }
+  | { t: 'rsSound'; kind: RsSound; x?: number; y?: number; z?: number }
+  | { t: 'rsImpulse'; vx: number; vy: number; vz: number; momentum: number }
+  | { t: 'rsResult'; result: RsResult };
 
 // --- Names ------------------------------------------------------------------
 

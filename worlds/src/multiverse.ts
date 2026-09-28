@@ -20,8 +20,9 @@ import {
   PARTY_STAMP_MAX_Y, PARTY_STAMP_MIN_Y, partyGame, partyVenueLookup,
 } from './partygames';
 import { parkourTheme } from './parkour_themes';
+import { RS_BOUNDS, RS_MAX_Y, RS_MIN_Y, ratseekBlockAt } from './ratseek_house';
 
-export type WorldKind = 'duel' | 'bridge' | 'parkour';
+export type WorldKind = 'duel' | 'bridge' | 'parkour' | 'ratseek';
 
 /** Everything a client needs to build a world: which generator, which seed.
  *  `id` is the server's handle for this world instance. */
@@ -35,7 +36,6 @@ export interface WorldBounds { minX: number; maxX: number; minZ: number; maxZ: n
 
 /** A deterministic world. Chunks outside `bounds` are empty air. */
 export interface WorldGenerator {
-  readonly kind: WorldKind;
   readonly seed: number;
   readonly bounds: WorldBounds;
   /** Inclusive y range that can hold authored blocks. */
@@ -60,7 +60,6 @@ const TEMPERATE: ColumnTints = {
 class VenueGenerator implements WorldGenerator {
   private readonly columnTints: ColumnTints;
   constructor(
-    readonly kind: WorldKind,
     readonly seed: number,
     readonly bounds: WorldBounds,
     readonly minY: number,
@@ -110,18 +109,21 @@ export function worldGenerator(spec: Pick<WorldSpec, 'kind' | 'seed'>): WorldGen
   let gen = generators.get(key);
   if (gen) return gen;
   if (spec.kind === 'duel') {
-    gen = new VenueGenerator('duel', spec.seed,
+    gen = new VenueGenerator(spec.seed,
       { minX: 0, maxX: DUEL_ARENA_SIZE, minZ: 0, maxZ: DUEL_ARENA_SIZE },
       // The colosseum's invisible barrier runs to the top of the world, so a
       // pillar-and-jump can never clear the wall.
       DUEL_ARENA_FLOOR_Y - 1, 255,
       (x, y, z) => duelArenaBlockAt(x, y, z) ?? Block.Air);
+  } else if (spec.kind === 'ratseek') {
+    // The Crooked Manor is one fixed estate; every match gets a fresh copy.
+    gen = new VenueGenerator(spec.seed, RS_BOUNDS, RS_MIN_Y, RS_MAX_Y, ratseekBlockAt);
   } else {
     const game = spec.kind, def = partyGame(game);
     const tints = game === 'parkour'
       ? { ...TEMPERATE, grass: tintOf(parkourTheme(spec.seed).foliage), foliage: tintOf(parkourTheme(spec.seed).foliage) }
       : TEMPERATE;
-    gen = new VenueGenerator(game, spec.seed,
+    gen = new VenueGenerator(spec.seed,
       { minX: 0, maxX: def.sizeX, minZ: 0, maxZ: def.sizeZ },
       PARTY_STAMP_MIN_Y, PARTY_STAMP_MAX_Y,
       partyVenueLookup(game, spec.seed), tints);

@@ -27,14 +27,14 @@
 export const INTERP_DELAY = 0.13;
 /** How far past the newest sample we will extrapolate before freezing. Covers a
  *  dropped packet or two without letting a disconnected player slide away. */
-export const EXTRAPOLATE_MAX = 0.15;
+const EXTRAPOLATE_MAX = 0.15;
 /** A gap this large between consecutive samples is a teleport/respawn, not
  *  movement — snap rather than sliding the avatar across the world. */
 export const SNAP_DISTANCE = 8;
 /** Samples older than this are dropped (they can never be needed again). */
 const RETAIN = 1;
 
-export interface TransformSample {
+interface TransformSample {
   /** Local receive time, in seconds. */
   t: number;
   x: number; y: number; z: number;
@@ -42,7 +42,7 @@ export interface TransformSample {
 }
 
 /** Shortest signed angular distance from `a` to `b` (radians, result in ±π). */
-export function wrapAngle(delta: number): number {
+function wrapAngle(delta: number): number {
   let d = delta;
   while (d > Math.PI) d -= Math.PI * 2;
   while (d < -Math.PI) d += Math.PI * 2;

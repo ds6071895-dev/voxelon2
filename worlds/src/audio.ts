@@ -1,45 +1,32 @@
-// M8: all sound is synthesized with WebAudio — no recorded assets.
-// Filtered noise bursts for digging/steps/explosions, little oscillator
-// phrases for mob voices, positional playback through PannerNodes.
+// All sound is synthesized with WebAudio — no recorded assets. Filtered noise
+// bursts for digging/steps/gunfire, little oscillator phrases for UI cues,
+// positional playback through PannerNodes.
 
 import * as THREE from 'three';
 import { Block } from './blocks';
 
-export type Material = 'stone' | 'wood' | 'grass' | 'sand' | 'glass' | 'wool';
+type Material = 'stone' | 'wood' | 'grass' | 'sand' | 'glass' | 'wool';
 
 /** Sound material category for a block id. */
 export function materialOf(block: number): Material {
   switch (block) {
     case Block.Stone: case Block.Cobblestone: case Block.Sandstone:
-    case Block.Bedrock: case Block.CoalOre: case Block.IronOre:
-    case Block.GoldOre: case Block.RedstoneOre: case Block.DiamondOre:
-    case Block.Furnace: case Block.FurnaceLit:
-      return 'stone';
-    case Block.OakLog: case Block.BirchLog: case Block.SpruceLog:
-    case Block.JungleLog: case Block.CherryLog:
-    case Block.JunglePlanks: case Block.CherryPlanks:
-    case Block.OakPlanks: case Block.CraftingTable: case Block.Torch:
-    case Block.TorchPX: case Block.TorchNX: case Block.TorchPZ:
-    case Block.TorchNZ:
-    case Block.Lever: case Block.LeverOn:
-    case Block.FallTrap: case Block.FallTrapOpen:
-      return 'wood';
-    case Block.RespawnBeacon: case Block.WaypointTotem:
-    case Block.VaultBrick: case Block.VaultChest:
+    case Block.Terracotta: case Block.Basalt:
     case Block.CarvedVaultBrick: case Block.MossyVaultBrick:
     case Block.EmberBrick: case Block.GildedVaultBrick:
     case Block.SoulLantern: case Block.EmberBrazier: case Block.GildedLamp:
-    case Block.WallTrap: case Block.WallTrapUp:
     case Block.LuminousLimestone: case Block.PearlTile: case Block.IvoryColumn:
     case Block.SpectralMarble: case Block.JadeMosaic: case Block.FurnaceCeramic:
     case Block.OpalBrick: case Block.ClockworkGrate: case Block.VaultMosaic:
       return 'stone';
+    case Block.OakLog: case Block.BirchLog: case Block.SpruceLog:
+    case Block.CherryLog: case Block.CherryPlanks: case Block.OakPlanks:
+      return 'wood';
     case Block.Sand:
       return 'sand';
-    case Block.Glass: case Block.CrystalBlock: case Block.PrismBrick:
-    case Block.PrismLamp: case Block.RuneGlass:
+    case Block.PrismBrick: case Block.PrismLamp: case Block.RuneGlass:
       return 'glass';
-    case Block.Wool:
+    case Block.TeamWoolA: case Block.TeamWoolB:
       return 'wool';
     default:
       return 'grass'; // dirt, grass, leaves, plants, snow...
@@ -305,8 +292,8 @@ export class GameAudio {
   }
 
   /** Hit confirmation for the SHOOTER: a crisp, tiny tick that cuts through
-   *  sustained fire. Deliberately dry and short (under 60ms) so an SMG burst
-   *  reads as a run of distinct hits instead of a smear. A kill drops a second,
+   *  sustained fire. Deliberately dry and short (under 60ms) so a burst reads
+   *  as a run of distinct hits instead of a smear. A kill drops a second,
    *  lower note under it; a shot the target's armor ate is dulled and quieter,
    *  which is audible feedback that you're shooting a tank. Head-relative (no
    *  `pos`): it's UI, not something happening in the world. */
@@ -324,8 +311,7 @@ export class GameAudio {
 
   /** Head-relative competitive cues for Duels. All route through the effects
    * bus, so the existing volume slider remains authoritative. */
-  duelCue(kind: 'countdown' | 'fight' | 'lead' | 'final30' | 'sudden' | 'victory' | 'defeat' |
-    'gain' | 'loss' | 'promotion' | 'rankPromotion' | 'demotion' | 'placement' | 'unlock'): void {
+  duelCue(kind: 'countdown' | 'fight' | 'lead' | 'final30' | 'sudden' | 'victory' | 'defeat'): void {
     switch (kind) {
       case 'countdown':
         // A struck-metal beat, not a beep: a short bright ping over a low thud.
@@ -363,30 +349,6 @@ export class GameAudio {
         break;
       case 'defeat':
         this.tone({ type: 'triangle', from: 330, to: 150, dur: 0.5, gain: 0.13 });
-        break;
-      case 'gain':
-        this.tone({ type: 'triangle', from: 440, to: 590, dur: 0.13, gain: 0.08 });
-        this.tone({ type: 'triangle', from: 590, to: 740, dur: 0.16, gain: 0.07, delay: 0.1 });
-        break;
-      case 'loss':
-        this.tone({ type: 'triangle', from: 340, to: 225, dur: 0.24, gain: 0.08 });
-        break;
-      case 'promotion':
-        for (const [i, f] of [440, 554, 659].entries()) this.tone({ type: 'triangle', from: f, to: f * 1.04, dur: 0.22, gain: 0.085, delay: i * 0.1 });
-        break;
-      case 'rankPromotion':
-        for (const [i, f] of [330, 440, 554, 740].entries()) this.tone({ type: 'square', from: f, to: f * 1.05, dur: 0.25, gain: 0.065, delay: i * 0.1 });
-        break;
-      case 'demotion':
-        this.tone({ type: 'triangle', from: 410, to: 255, dur: 0.3, gain: 0.075 });
-        this.tone({ type: 'sine', from: 255, to: 220, dur: 0.16, gain: 0.055, delay: 0.2 });
-        break;
-      case 'placement':
-        for (const [i, f] of [294, 392, 523, 698].entries()) this.tone({ type: 'triangle', from: f, to: f * 1.08, dur: 0.28, gain: 0.085, delay: i * 0.13 });
-        break;
-      case 'unlock':
-        this.tone({ type: 'sine', from: 740, to: 980, dur: 0.35, gain: 0.075 });
-        this.tone({ type: 'triangle', from: 494, to: 740, dur: 0.3, gain: 0.07, delay: 0.1 });
         break;
     }
   }
@@ -439,39 +401,28 @@ export class GameAudio {
   }
 
   /** Gunshot: a soft body "thump" + a brief click — deliberately low on harsh
-   *  high frequencies so rapid fire isn't piercing/painful to listen to.
-   *  `weight` scales the report so a shotgun booms and an SMG snaps, without
-   *  any of them turning into the hiss the old shot used to be. */
-  gun(pos?: THREE.Vector3, weight = 1): void {
-    const w = Math.max(0.4, Math.min(2.6, weight));
+   *  high frequencies so rapid fire isn't piercing/painful to listen to. */
+  gun(pos?: THREE.Vector3): void {
+    const w = 0.85; // the Burst Rifle's weight: a crisp report, no sub or tail
     // Low-passed body (the punch), sliding down — no shrill hiss.
     this.noise({
-      freq: 820 / w, dur: 0.07 * w, gain: 0.3 * Math.min(1.6, w),
+      freq: 820 / w, dur: 0.07 * w, gain: 0.3 * w,
       slideTo: 180 / w, type: 'lowpass', q: 0.7, pos,
     });
     // A short, gentle mid click for definition (bandpass, low gain).
     this.noise({ freq: 1500, dur: 0.025, gain: 0.1, type: 'bandpass', q: 1, pos });
     // The muzzle crack: a few milliseconds of bright air, over before it can
     // turn into hiss. It is what makes a shot sound like a shot, not a thud.
-    this.noise({ freq: 2800, dur: 0.012, gain: 0.12 * Math.min(1.4, w), type: 'highpass', q: 0.7, pos });
-    // Sub kick you feel on the heavier guns.
-    if (w > 0.9) this.tone({ type: 'sine', from: 95 / w, to: 42, dur: 0.12 * w, gain: 0.12 * w, pos });
-    // Soft triangle thump (much smoother than the old square wave).
+    this.noise({ freq: 2800, dur: 0.012, gain: 0.12 * w, type: 'highpass', q: 0.7, pos });
+    // Soft triangle thump (much smoother than a square wave).
     this.tone({
       type: 'triangle', from: 170 / w, to: 55 / w, dur: 0.07 * w, gain: 0.15 * w, pos,
     });
-    // Heavy weapons get a tail: the room answering the shot.
-    if (w > 1.3) {
-      this.noise({
-        freq: 300, dur: 0.34 * w, gain: 0.07 * w, slideTo: 90,
-        type: 'lowpass', q: 0.5, delay: 0.03, pos,
-      });
-    }
   }
 
-  /** Working the action: racking a pump/bolt, dropping and seating magazines.
+  /** Working the action: cycling the bolt, dropping and seating magazines.
    *  Small, dry, mechanical — these land on the animation, not the trigger. */
-  gunAction(kind: 'cycle' | 'magOut' | 'magIn' | 'shellDrop'): void {
+  gunAction(kind: 'cycle' | 'magOut' | 'magIn'): void {
     switch (kind) {
       case 'cycle': // metal on metal, twice: back, then home
         this.noise({ freq: 2600, dur: 0.035, gain: 0.1, type: 'bandpass', q: 1.6 });
@@ -485,9 +436,6 @@ export class GameAudio {
         this.noise({ freq: 700, dur: 0.07, gain: 0.13, slideTo: 200, type: 'lowpass', q: 0.8 });
         this.tone({ type: 'triangle', from: 300, to: 110, dur: 0.08, gain: 0.1 });
         break;
-      case 'shellDrop':
-        this.noise({ freq: 3200, dur: 0.03, gain: 0.05, type: 'bandpass', q: 2, delay: 0.12 });
-        break;
     }
   }
 
@@ -500,94 +448,67 @@ export class GameAudio {
       delay: 0.04 });
   }
 
-  /** Starting to apply a healing consumable: a wrapper tear (bandage) or the
-   *  medkit case coming open — two latches thrown left-right, the lid's hinge
-   *  and the zip of the inner pouch. The sound that says "you are committed". */
-  healStart(medkit = false): void {
-    if (medkit) {
-      // Latch, latch: bright plastic clicks with a little body under each.
-      for (const [i, f] of [[0, 2300], [1, 2000]] as const) {
-        this.noise({ freq: f, dur: 0.035, gain: 0.16, q: 3, delay: i * 0.09 });
-        this.tone({ type: 'square', from: 520 - i * 60, to: 240, dur: 0.04, gain: 0.06, delay: i * 0.09 });
-      }
-      // The lid swinging open on its hinge, then the pouch zip.
-      this.tone({ type: 'triangle', from: 170, to: 125, dur: 0.18, gain: 0.08, delay: 0.2, vibrato: 18 });
-      this.noise({ freq: 1400, dur: 0.26, gain: 0.07, slideTo: 3800, type: 'bandpass', q: 2.4, delay: 0.3 });
-    } else {
-      // Gauze tearing: a short rising noise rip with a papery body.
-      this.noise({ freq: 900, dur: 0.22, gain: 0.11, slideTo: 2600, type: 'bandpass', q: 0.5 });
-      this.noise({ freq: 400, dur: 0.14, gain: 0.06, slideTo: 180, type: 'lowpass', q: 0.6 });
+  /** Starting to apply the medkit: two latches thrown left-right, the lid's
+   *  hinge and the zip of the inner pouch. The sound that says "you are
+   *  committed". */
+  healStart(): void {
+    // Latch, latch: bright plastic clicks with a little body under each.
+    for (const [i, f] of [[0, 2300], [1, 2000]] as const) {
+      this.noise({ freq: f, dur: 0.035, gain: 0.16, q: 3, delay: i * 0.09 });
+      this.tone({ type: 'square', from: 520 - i * 60, to: 240, dur: 0.04, gain: 0.06, delay: i * 0.09 });
     }
+    // The lid swinging open on its hinge, then the pouch zip.
+    this.tone({ type: 'triangle', from: 170, to: 125, dur: 0.18, gain: 0.08, delay: 0.2, vibrato: 18 });
+    this.noise({ freq: 1400, dur: 0.26, gain: 0.07, slideTo: 3800, type: 'bandpass', q: 2.4, delay: 0.3 });
   }
 
-  /** One "work" beat while the wrap is being pressed in: a soft, quiet pat.
-   *  Pitch rises with `step` so the channel feels like it is going somewhere.
-   *  A medkit beat is a firm press: a padded thump plus a clicking ratchet and
-   *  a rising note on a major scale, so the procedure climbs towards its end. */
-  healBeat(step = 0, medkit = false): void {
-    if (medkit) {
-      const scale = [0, 2, 4, 7, 9, 12, 14];
-      const f = 220 * 2 ** (scale[Math.min(scale.length - 1, step)] / 12);
-      this.noise({ freq: 380, dur: 0.08, gain: 0.13, slideTo: 120, type: 'lowpass', q: 0.8 });
-      this.noise({ freq: 3000, dur: 0.025, gain: 0.07, q: 4 });
-      this.tone({ type: 'triangle', from: f * 2, to: f * 2, dur: 0.16, gain: 0.05, attack: 0.005 });
-      this.tone({ type: 'sine', from: f, to: f, dur: 0.22, gain: 0.04, attack: 0.01 });
-      return;
-    }
-    const f = 300 + step * 55;
-    this.noise({ freq: f, dur: 0.07, gain: 0.07, slideTo: f * 0.5, type: 'lowpass', q: 0.7 });
-    this.tone({ type: 'triangle', from: f * 1.5, to: f, dur: 0.06, gain: 0.05 });
+  /** One "work" beat while the medkit is applied: a firm press — a padded
+   *  thump plus a clicking ratchet and a rising note on a major scale, so the
+   *  procedure climbs towards its end. */
+  healBeat(step: number): void {
+    const scale = [0, 2, 4, 7, 9, 12, 14];
+    const f = 220 * 2 ** (scale[Math.min(scale.length - 1, step)] / 12);
+    this.noise({ freq: 380, dur: 0.08, gain: 0.13, slideTo: 120, type: 'lowpass', q: 0.8 });
+    this.noise({ freq: 3000, dur: 0.025, gain: 0.07, q: 4 });
+    this.tone({ type: 'triangle', from: f * 2, to: f * 2, dur: 0.16, gain: 0.05, attack: 0.005 });
+    this.tone({ type: 'sine', from: f, to: f, dur: 0.22, gain: 0.04, attack: 0.01 });
   }
 
-  /** Healing consumable applied: a warm rising three-note resolve + a soft
-   *  sparkle tail, so a Bandage/Medkit lands as relief (kid-friendly, low gain).
-   *  The medkit is the big one: a pressurised stim HISS, a deep double
-   *  heartbeat as it takes, then a full major bloom with a sub swell and a
-   *  shimmering arpeggio tail — the most rewarding non-combat sound in the kit. */
-  heal(medkit = false): void {
-    if (medkit) {
-      // Stim: a pneumatic hiss falling through a band, plus the click of the
-      // injector firing.
-      this.noise({ freq: 5200, dur: 0.32, gain: 0.12, slideTo: 1400, type: 'bandpass', q: 0.9 });
-      this.noise({ freq: 2600, dur: 0.03, gain: 0.14, q: 3 });
-      // Lub-dub, lub-dub: the body taking it.
-      for (const d of [0.16, 0.52]) {
-        this.tone({ type: 'sine', from: 88, to: 42, dur: 0.18, gain: 0.2, delay: d });
-        this.tone({ type: 'sine', from: 74, to: 36, dur: 0.2, gain: 0.15, delay: d + 0.16 });
-      }
-      // The bloom: C major opening upward, with a sub swell underneath.
-      const chord = [261.6, 329.6, 392, 523.3, 659.3];
-      chord.forEach((f, i) => {
-        this.tone({ type: 'triangle', from: f, to: f, dur: 1.4 - i * 0.12, gain: 0.07, attack: 0.05, delay: 0.62 + i * 0.045 });
-        this.tone({ type: 'sine', from: f * 2, to: f * 2, dur: 0.9, gain: 0.025, attack: 0.08, delay: 0.66 + i * 0.045 });
-      });
-      this.tone({ type: 'sine', from: 65, to: 131, dur: 1.2, gain: 0.12, attack: 0.25, delay: 0.55 });
-      // A sparkling run up over the top, and the air brightening.
-      [1047, 1319, 1568, 2093, 2637].forEach((f, i) =>
-        this.tone({ type: 'sine', from: f, to: f * 1.01, dur: 0.22, gain: 0.03, delay: 0.8 + i * 0.07 }));
-      this.noise({ freq: 1600, dur: 1.1, gain: 0.04, slideTo: 5000, type: 'bandpass', q: 0.6, delay: 0.62 });
-      return;
+  /** The medkit applied: a pressurised stim HISS, a deep double heartbeat as
+   *  it takes, then a full major bloom with a sub swell and a shimmering
+   *  arpeggio tail — the most rewarding non-combat sound in the kit. */
+  heal(): void {
+    // Stim: a pneumatic hiss falling through a band, plus the click of the
+    // injector firing.
+    this.noise({ freq: 5200, dur: 0.32, gain: 0.12, slideTo: 1400, type: 'bandpass', q: 0.9 });
+    this.noise({ freq: 2600, dur: 0.03, gain: 0.14, q: 3 });
+    // Lub-dub, lub-dub: the body taking it.
+    for (const d of [0.16, 0.52]) {
+      this.tone({ type: 'sine', from: 88, to: 42, dur: 0.18, gain: 0.2, delay: d });
+      this.tone({ type: 'sine', from: 74, to: 36, dur: 0.2, gain: 0.15, delay: d + 0.16 });
     }
-    const g = 0.1;
-    this.tone({ type: 'triangle', from: 392, to: 523, dur: 0.16, gain: g });
-    this.tone({ type: 'triangle', from: 523, to: 659, dur: 0.18, gain: g * 0.9, delay: 0.1 });
-    this.tone({ type: 'triangle', from: 659, to: 784, dur: 0.3, gain: g * 0.85, delay: 0.2 });
-    this.noise({ freq: 1100, dur: 0.5, gain: 0.03, slideTo: 2200, type: 'bandpass', q: 0.7, delay: 0.12 });
+    // The bloom: C major opening upward, with a sub swell underneath.
+    const chord = [261.6, 329.6, 392, 523.3, 659.3];
+    chord.forEach((f, i) => {
+      this.tone({ type: 'triangle', from: f, to: f, dur: 1.4 - i * 0.12, gain: 0.07, attack: 0.05, delay: 0.62 + i * 0.045 });
+      this.tone({ type: 'sine', from: f * 2, to: f * 2, dur: 0.9, gain: 0.025, attack: 0.08, delay: 0.66 + i * 0.045 });
+    });
+    this.tone({ type: 'sine', from: 65, to: 131, dur: 1.2, gain: 0.12, attack: 0.25, delay: 0.55 });
+    // A sparkling run up over the top, and the air brightening.
+    [1047, 1319, 1568, 2093, 2637].forEach((f, i) =>
+      this.tone({ type: 'sine', from: f, to: f * 1.01, dur: 0.22, gain: 0.03, delay: 0.8 + i * 0.07 }));
+    this.noise({ freq: 1600, dur: 1.1, gain: 0.04, slideTo: 5000, type: 'bandpass', q: 0.6, delay: 0.62 });
   }
 
-  /** Each point of health the heal buff restores: a tiny glassy sparkle. With
-   *  a `step`, successive points climb a pentatonic ladder — a medkit's refill
-   *  plays as a rising run you can hear filling the bar, like coins in a jar. */
-  healTick(pitch = 1, step = -1): void {
-    if (step >= 0) {
-      const penta = [0, 2, 4, 7, 9];
-      const n = penta[step % 5] + 12 * Math.min(2, Math.floor(step / 5));
-      const f = 523.3 * 2 ** (n / 12);
-      this.tone({ type: 'sine', from: f, to: f * 1.005, dur: 0.14, gain: 0.04 });
-      this.tone({ type: 'triangle', from: f * 2, to: f * 2, dur: 0.06, gain: 0.015 });
-      return;
-    }
-    this.tone({ type: 'sine', from: 880 * pitch, to: 1320 * pitch, dur: 0.09, gain: 0.045 });
+  /** Each point of health the heal buff restores: a tiny glassy sparkle.
+   *  Successive points climb a pentatonic ladder, so the refill plays as a
+   *  rising run you can hear filling the bar, like coins in a jar. */
+  healTick(step: number): void {
+    const penta = [0, 2, 4, 7, 9];
+    const n = penta[step % 5] + 12 * Math.min(2, Math.floor(step / 5));
+    const f = 523.3 * 2 ** (n / 12);
+    this.tone({ type: 'sine', from: f, to: f * 1.005, dur: 0.14, gain: 0.04 });
+    this.tone({ type: 'triangle', from: f * 2, to: f * 2, dur: 0.06, gain: 0.015 });
   }
 
   /** The medkit's afterglow: a slow, calm heartbeat under the regen, settling
@@ -599,13 +520,13 @@ export class GameAudio {
     this.tone({ type: 'sine', from: 60, to: 34, dur: 0.18, gain: g * 0.7, delay: 0.2 });
   }
 
-  /** An interrupted application (slot switched away, killed mid-wrap). */
+  /** An interrupted application (slot switched away, killed mid-use). */
   healCancel(): void {
     this.tone({ type: 'triangle', from: 360, to: 190, dur: 0.14, gain: 0.08 });
     this.noise({ freq: 500, dur: 0.08, gain: 0.05, slideTo: 200, type: 'lowpass', q: 0.6 });
   }
 
-  // --- Bedwars axe melee -----------------------------------------------------
+  // --- Axe melee (The Bridge) -----------------------------------------------
   // Four beats that carry the whole combat read by ear: how charged the swing
   // was, whether it connected, whether it crit, and — the one that matters
   // most over a fourteen-block gap — that somebody is falling.
@@ -697,4 +618,85 @@ export class GameAudio {
     this.tone({ type: 'triangle', from: 260, to: 90, dur: 0.11, gain: 0.18, pos });
     if (sprint) this.tone({ type: 'sine', from: 90, to: 45, dur: 0.16, gain: 0.16, pos });
   }
+
+  /** Rat and Seek's sounds, all synthesised: squeaks, snaps, the cage, the
+   *  cat, the chandelier, and the stings that mark the hunt. */
+  rsCue(kind: import('./ratseek_rules').RsSound, pos?: THREE.Vector3): void {
+    const t = (o: Parameters<GameAudio['tone']>[0]): void => this.tone({ ...o, pos: o.pos ?? pos });
+    const n = (o: Parameters<GameAudio['noise']>[0]): void => this.noise({ ...o, pos: o.pos ?? pos });
+    switch (kind) {
+      case 'squeak':
+        for (let i = 0; i < 3; i++) t({ type: 'sine', from: 2600 + i * 180, to: 3400 + i * 120, dur: 0.07, gain: 0.07, delay: i * 0.09, vibrato: 40 });
+        break;
+      case 'snap':
+        n({ freq: 3200, dur: 0.05, gain: 0.3, type: 'highpass', q: 0.7 });
+        t({ type: 'square', from: 900, to: 140, dur: 0.09, gain: 0.12 });
+        break;
+      case 'cage':
+        t({ type: 'square', from: 180, to: 120, dur: 0.35, gain: 0.1 });
+        n({ freq: 600, dur: 0.3, gain: 0.12, type: 'bandpass', q: 3 });
+        break;
+      case 'rescue':
+        [523, 659, 784, 1046].forEach((f, i) => t({ type: 'triangle', from: f, to: f, dur: 0.18, gain: 0.08, delay: i * 0.09 }));
+        break;
+      case 'escape':
+        [784, 988, 1175].forEach((f, i) => t({ type: 'sine', from: f, to: f * 1.01, dur: 0.16, gain: 0.08, delay: i * 0.07 }));
+        break;
+      case 'hunt':
+        t({ type: 'sawtooth', from: 110, to: 70, dur: 1.1, gain: 0.12 });
+        t({ type: 'square', from: 220, to: 140, dur: 0.9, gain: 0.05, delay: 0.1 });
+        n({ freq: 300, dur: 1, gain: 0.08, slideTo: 90, type: 'lowpass', q: 0.5 });
+        break;
+      case 'intro':
+        [196, 233, 294, 392].forEach((f, i) => t({ type: 'triangle', from: f, to: f, dur: 0.5, gain: 0.05, delay: i * 0.22 }));
+        break;
+      case 'tick': t({ type: 'square', from: 1200, to: 1200, dur: 0.05, gain: 0.05, attack: 0.002 }); break;
+      case 'bell':
+        t({ type: 'sine', from: 1318, to: 1310, dur: 0.6, gain: 0.07 });
+        t({ type: 'sine', from: 2637, to: 2620, dur: 0.4, gain: 0.03 });
+        break;
+      case 'sniff':
+        for (let i = 0; i < 3; i++) n({ freq: 2400, dur: 0.08, gain: 0.08, type: 'bandpass', q: 1.5, delay: i * 0.12 });
+        break;
+      case 'rattle':
+        for (let i = 0; i < 6; i++) n({ freq: 1800 + i * 90, dur: 0.05, gain: 0.14, type: 'bandpass', q: 5, delay: i * 0.05 });
+        break;
+      case 'crash':
+        n({ freq: 5000, dur: 0.5, gain: 0.2, slideTo: 800, type: 'bandpass', q: 0.6 });
+        t({ type: 'sine', from: 90, to: 40, dur: 0.4, gain: 0.3 });
+        [2400, 3100, 3700].forEach((f, i) => t({ type: 'sine', from: f, to: f * 0.9, dur: 0.3, gain: 0.04, delay: 0.02 * i }));
+        break;
+      case 'chain':
+        for (let i = 0; i < 4; i++) n({ freq: 3600, dur: 0.04, gain: 0.07, type: 'bandpass', q: 6, delay: i * 0.07 });
+        break;
+      case 'pounce':
+        n({ freq: 1400, dur: 0.35, gain: 0.14, slideTo: 3000, type: 'bandpass', q: 2 });
+        t({ type: 'sawtooth', from: 500, to: 300, dur: 0.3, gain: 0.05 });
+        break;
+      case 'purr': t({ type: 'sawtooth', from: 26, to: 24, dur: 0.9, gain: 0.05, vibrato: 3 }); break;
+      case 'meow': t({ type: 'triangle', from: 650, to: 420, dur: 0.45, gain: 0.07, vibrato: 12 }); break;
+      case 'decoy':
+        t({ type: 'sine', from: 3000, to: 3800, dur: 0.08, gain: 0.06 });
+        n({ freq: 900, dur: 0.12, gain: 0.05, type: 'bandpass', q: 1 });
+        break;
+      case 'poof': n({ freq: 700, dur: 0.25, gain: 0.12, slideTo: 200, type: 'lowpass', q: 0.7 }); break;
+      case 'cheese':
+        // Bright two-note pickup chime (a rising fifth), sine with a soft octave shimmer.
+        t({ type: 'sine', from: 988, to: 988, dur: 0.12, gain: 0.08, attack: 0.004 });
+        t({ type: 'sine', from: 1480, to: 1480, dur: 0.22, gain: 0.08, delay: 0.07, attack: 0.004 });
+        t({ type: 'triangle', from: 2960, to: 2960, dur: 0.16, gain: 0.02, delay: 0.07, attack: 0.004 });
+        break;
+      case 'dash': n({ freq: 900, dur: 0.2, gain: 0.1, slideTo: 2600, type: 'bandpass', q: 0.8 }); break;
+      case 'twist':
+        [440, 554, 659, 880].forEach((f, i) => t({ type: 'square', from: f, to: f, dur: 0.1, gain: 0.04, delay: i * 0.06 }));
+        break;
+      case 'alarm': for (let i = 0; i < 3; i++) t({ type: 'square', from: 880, to: 660, dur: 0.15, gain: 0.06, delay: i * 0.2 }); break;
+      case 'click': t({ type: 'square', from: 2200, to: 1400, dur: 0.03, gain: 0.05, attack: 0.001 }); break;
+      case 'win': [523, 659, 784, 1046, 1318].forEach((f, i) => t({ type: 'triangle', from: f, to: f, dur: 0.3, gain: 0.08, delay: i * 0.1 })); break;
+      case 'lose': [392, 330, 262, 196].forEach((f, i) => t({ type: 'triangle', from: f, to: f * 0.98, dur: 0.35, gain: 0.07, delay: i * 0.14 })); break;
+      case 'heartbeat': this.heartbeat(0.4); break;
+      case 'drum': t({ type: 'sine', from: 120, to: 50, dur: 0.18, gain: 0.2 }); break;
+    }
+  }
+
 }

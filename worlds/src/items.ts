@@ -1,210 +1,60 @@
-// Item registry. Placeable blocks share their Block id; pure items start at
-// 100. Includes the vanilla drop table used when blocks break.
+// Item registry: the loadout items Worlds hands out. Placeable blocks share
+// their Block id; pure items start at 100.
 
 import { Block, BLOCKS, BlockInfo, Tile, ToolKind } from './blocks';
-import { MinigameItemId } from './minigame_item_ids';
 
 export const enum Item {
-  // Blocks are items with id === Block id (wall torch variants are not items).
-  Stick = 100,
-  Coal = 101,
-  IronIngot = 102,
-  // Deep Bore drill bits (machines.ts): set how deep an Autominer can bore and
-  // how fast it chews; they wear out. Trap Detector pings hidden traps.
-  DrillBitIron = 103,
-  DrillBitDiamond = 104,
-  DrillBitTitanium = 105,
-  TrapDetector = 106,
-  Redstone = 108,
-  Diamond = 109,
-  // M5: tools (vanilla stats) + smelting products. (No swords in VOXELON.)
-  WoodenPickaxe = 110,
-  WoodenAxe = 111,
-  WoodenShovel = 112,
-  StonePickaxe = 114,
-  StoneAxe = 115,
-  StoneShovel = 116,
-  IronPickaxe = 118,
   IronAxe = 119,
-  IronShovel = 120,
-  Charcoal = 122,
-  GoldIngot = 123,
-  // Armor (helmet/chestplate/leggings/boots × iron/diamond/titanium).
-  TitaniumIngot = 124,
-  IronHelmet = 125,
-  IronChestplate = 126,
-  IronLeggings = 127,
-  IronBoots = 128,
-  DiamondHelmet = 129,
-  DiamondChestplate = 130,
-  DiamondLeggings = 131,
-  DiamondBoots = 132,
-  TitaniumHelmet = 133,
-  TitaniumChestplate = 134,
-  TitaniumLeggings = 135,
-  TitaniumBoots = 136,
-  // Guns + ammo.
-  Pistol = 137,
-  Rifle = 138,
-  RocketLauncher = 139,
   Bullet = 140,
-  Rocket = 141,
-  // Automation layer (M13)
-  CobaltIngot = 142,
-  OilBarrel = 143,
-  // Warfare layer (M14)
-  Cannonball = 144, // ammo for turrets (craft: iron + coal)
-  // Arcade guns (distinct roles): close-range, spray, pinpoint, burst.
-  Shotgun = 145,
-  SMG = 146,
-  Sniper = 147,
   BurstRifle = 148,
-  // Glider: an early-game chestplate-slot item for fast descent travel.
-  Glider = 149,
-  // Gadgets (Phase 8): nine war toys.
-  Grenade = 150,
-  C4 = 151,
-  GrapplingHook = 152,
-  DeployCover = 153,
-  SentryKit = 154,
-  SmokeGrenade = 155,
-  WarHorn = 156,
-  OilBomb = 157,
-  SpyDisguise = 158,
+  /** The Bounce Pad gadget. */
   JumpBoost = 159,
-  // Lifesteal (Milestone A): a bottled max-health heart + the teammate-revival
-  // totem. Hearts are lootable/tradeable/raidable like any other item.
-  Heart = 160,
-  RevivalBeacon = 161,
-  // Crystal Shard (Milestone C): mined from Crystalfields spikes (Wilds-only).
-  CrystalShard = 162,
-  // Healing consumables: right-click to trigger a burst of accelerated regen.
-  Bandage = 163,
   Medkit = 164,
-  // Runes: exploration-only armor socketables (never craftable — loot them).
-  RuneOfIron = 165,
-  RuneOfSwiftness = 166,
-  RuneOfFortune = 167,
-  RuneOfFocus = 168,
-  // Boat: right-click on water to launch and ride it (jump to hop out).
-  Boat = 169,
-  // Vault compasses (one per tier): right-click to reveal the nearest vault of
-  // that tier — drops a waypoint pointing straight at it. ONE USE.
-  VaultCompass1 = 170,
-  VaultCompass2 = 171,
-  VaultCompass3 = 172,
-  // Early-game armor (wood/stone): cheap starter sets — thin protection next
-  // to iron, but a real edge for a fresh spawn's first Tier I vault run.
-  WoodHelmet = 173,
-  WoodChestplate = 174,
-  WoodLeggings = 175,
-  WoodBoots = 176,
-  StoneHelmet = 177,
-  StoneChestplate = 178,
-  StoneLeggings = 179,
-  StoneBoots = 180,
-  // The Sword: the dedicated melee weapon (mobs only — PvP stays guns-only).
-  Sword = 181,
-  // The Diamond Shovel: end-game digging. INSTANTLY breaks soft ground
-  // (grass/dirt/sand) — the terraforming reward for a diamond haul.
-  DiamondShovel = 182,
-  // Family relics: personal vault-chest rewards, one guaranteed per haul.
-  // Their real value is crafting Greater Runes (below) — decorative vault
-  // trophy blocks (crafting.ts) are a bonus use, not the point.
-  WardenSigil = 193,
-  MireBloom = 194,
-  EmberCore = 195,
-  SeerPrism = 196,
-  ArtificerGear = 197,
-  // Greater Runes: crafted ONLY from a matching boss's relics (farm THAT
-  // boss repeatedly) + the base rune they upgrade. Real BiS armor sockets —
-  // the reason a vault boss is worth killing more than once.
-  GreaterRuneOfIron = 198,
-  GreaterRuneOfSwiftness = 199,
-  GreaterRuneOfFortune = 200,
-  GreaterRuneOfFocus = 201,
-  GreaterRuneOfPower = 202,
-  // --- Warfare Command --------------------------------------------------------
-  // Intermediate components. The crafting grid cannot express "32 iron" in one
-  // recipe, so heavy hardware is assembled from sub-assemblies instead — which
-  // also makes the raw cost of an airframe readable at a glance.
-  // 219 is a retired strategic-missile component id and is not reused.
-  ReinforcedFrame = 217,
-  GuidanceUnit = 218,
-  RotorAssembly = 220,
-  FuelTank = 221,
-  BombCasing = 222,
-  // Ordnance loaded into hardware (the hardware owns it once loaded).
-  // 223-224 are retired strategic-missile ordnance ids and are not reused.
-  AerialBomb = 225,
-  RepairKit = 226,
-  /** Right-click a Helipad with this to assemble a helicopter on it. */
-  HelicopterKit = 227,
-  RopeWinch = 228,
-  AuxiliaryTank = 229,
-  LongRangeTank = 230,
-  // --- Minigame-only items --------------------------------------------------
-  // 242-245 mirror their Block ids so the arena wool/tiles are placeable.
-  // 247-248 are pure weapons. EVERY id here is in MINIGAME_ONLY
-  // (src/minigame_items.ts) and is therefore excluded from the creative
-  // palette, `/give`, drops, chests, loot, recipes and persistence.
-  //
-  // The names are deliberately arena-flavoured rather than material-flavoured
-  // ("Void Cleaver", not "Diamond Axe") so no future crafting recipe ever looks
-  // like it ought to produce one.
-  TeamWoolA = 242,
-  TeamWoolB = 243,
-  PartyTileC = 244,
-  PartyTileD = 245,
-  VoidCleaver = MinigameItemId.VoidCleaver,
-  KnockbackStick = MinigameItemId.KnockbackStick,
-  BridgeBow = MinigameItemId.BridgeBow,
-  BridgeArrow = MinigameItemId.BridgeArrow,
+  BridgeBow = 249,
+  BridgeArrow = 250,
+  // Rat and Seek. Ids above every block id.
+  RatCatcher = 300,
+  SeekerCompass = 301,
+  ScentPulse = 302,
+  Flashlight = 303,
+  Mousetrap = 304,
+  CheeseBait = 305,
+  SqueakTaunt = 306,
+  Scamper = 307,
+  CageRattle = 308,
+  EscapeCard = 309,
+  ClassPicker = 310,
+  WhiskerSense = 311,
+  CheeseMagnet = 312,
+  DecoyRat = 313,
+  Disarm = 314,
+  Cheese = 315,
+  ClassScout = 316,
+  ClassThief = 317,
+  ClassTrickster = 318,
+  ClassTinkerer = 319,
+  SeekerPicker = 320,
 }
 
-export interface ToolInfo {
+interface ToolInfo {
   type: ToolKind;
   /** Harvest tier: wood 0, stone 1, iron 2. */
   tier: number;
-  /** Mining speed multiplier on effective blocks (wood 2, stone 4, iron 6). */
+  /** Mining speed multiplier on effective blocks. */
   speed: number;
-  durability: number;
-  /** Melee damage dealt to mobs. */
-  damage: number;
-}
-
-export type ArmorSlot = 'helmet' | 'chestplate' | 'leggings' | 'boots';
-/** Equip-slot index per armor slot (matches Inventory's ARMOR region order). */
-export const ARMOR_SLOT_INDEX: Record<ArmorSlot, number> = {
-  helmet: 0, chestplate: 1, leggings: 2, boots: 3,
-};
-
-export interface ArmorInfo {
-  slot: ArmorSlot;
-  /** Base defense points (vanilla-ish; each point blocks 4% of damage). */
-  points: number;
-  /** Material tier (iron 0, diamond 1, titanium 2) for display/sorting. */
-  tier: number;
-  durability: number;
-}
-
-/** A glider equips into the chestplate slot (like an elytra). It has no defense;
- *  `durability` is the number of seconds of gliding before it wears out. */
-export interface GliderInfo {
-  durability: number;
 }
 
 /** A healing consumable (right-click): applies an accelerated-regen buff that
  *  bypasses the post-damage regen delay, so you can patch up mid-fight. */
-export interface HealInfo {
+interface HealInfo {
   /** Seconds the fast-regen buff lasts. */
   duration: number;
-  /** Seconds between +1 HP while the buff is active (normal regen is 2s). */
+  /** Seconds between +1 HP while the buff is active. */
   interval: number;
 }
 
 export interface GunInfo {
-  /** Damage per projectile hit (mobs + PvP). */
+  /** Damage per projectile hit. */
   damage: number;
   /** Item id consumed per shot (drawn from the magazine, refilled on reload). */
   ammo: number;
@@ -218,20 +68,13 @@ export interface GunInfo {
   speed: number;
   /** Max projectile travel (blocks) before it despawns. */
   range: number;
-  /** Rockets fly slower and detonate on impact instead of a point hit. */
-  rocket?: boolean;
-  /** Projectiles launched per trigger pull (shotgun spread). Default 1. */
-  pellets?: number;
-  /** Half-angle (radians) of random cone spread applied to each projectile. */
-  spread?: number;
-  /** Rounds auto-fired in a quick burst per trigger pull (burst rifle). Default 1. */
+  /** Rounds auto-fired in a quick burst per trigger pull. Default 1. */
   burst?: number;
-  /** Aim-down-sights magnification when right-click is held (FOV divides by this).
-   *  Bigger = more zoom (sniper scopes most). Omitted/1 = no zoom. */
+  /** Aim-down-sights magnification when right-click is held (FOV divides by this). */
   zoom?: number;
 }
 
-export interface ItemInfo {
+interface ItemInfo {
   name: string;
   kind: 'block' | 'item';
   /** Block placed by this item (block items only). */
@@ -240,396 +83,43 @@ export interface ItemInfo {
   sprite?: Tile;
   maxStack: number;
   tool?: ToolInfo;
-  armor?: ArmorInfo;
   gun?: GunInfo;
-  glider?: GliderInfo;
   heal?: HealInfo;
 }
 
 export interface ItemStack {
   id: number;
   count: number;
-  /** Accumulated tool damage (tools only). */
-  damage?: number;
-  /** Accumulated armor XP (armor only); drives the per-piece level. */
-  xp?: number;
   /** Rounds currently in a gun's magazine (guns only; undefined = full). */
   loaded?: number;
-  /** Socketed rune item id (worn armor only; one rune per piece). */
-  rune?: number;
 }
 
 function blockItem(block: Block): ItemInfo {
   return { name: BLOCKS[block].name, kind: 'block', block, maxStack: 64 };
 }
-function pureItem(name: string, sprite: Tile): ItemInfo {
-  return { name, kind: 'item', sprite, maxStack: 64 };
-}
-/** A gadget item (Phase 8): a pure item with a gadget-specific stack ceiling. */
-function gadgetItem(name: string, sprite: Tile, maxStack: number): ItemInfo {
-  return { name, kind: 'item', sprite, maxStack };
-}
-function armorItem(name: string, sprite: Tile, armor: ArmorInfo): ItemInfo {
-  return { name, kind: 'item', sprite, maxStack: 1, armor };
-}
-
-function gunItem(name: string, sprite: Tile, gun: GunInfo): ItemInfo {
-  return { name, kind: 'item', sprite, maxStack: 1, gun };
-}
-function healItem(name: string, sprite: Tile, heal: HealInfo): ItemInfo {
-  return { name, kind: 'item', sprite, maxStack: 16, heal };
-}
-function gliderItem(name: string, sprite: Tile, glider: GliderInfo): ItemInfo {
-  // A 0-defense "chestplate" so the existing armor-slot equip/swap plumbing
-  // (inventory + UI) handles it with no special cases; `glider` drives flight.
-  return {
-    name, kind: 'item', sprite, maxStack: 1, glider,
-    armor: { slot: 'chestplate', points: 0, tier: 0, durability: glider.durability },
-  };
-}
-
-const TOOL_TIERS = [
-  { prefix: 'Wooden', tier: 0, speed: 2, durability: 59 },
-  { prefix: 'Stone', tier: 1, speed: 4, durability: 131 },
-  { prefix: 'Iron', tier: 2, speed: 6, durability: 250 },
-  { prefix: 'Diamond', tier: 3, speed: 8, durability: 1561 },
-];
-
-/** Tool tier that digs its blocks INSTANTLY (diamond and up). */
-export const INSTAMINE_TIER = 3;
-
-function toolItem(tierIdx: number, type: ToolKind, sprite: Tile): ItemInfo {
-  const t = TOOL_TIERS[tierIdx];
-  // Axes hit hardest, then pickaxes/shovels; all scale a little with tier.
-  const baseDamage = type === 'axe' ? 3 : 2;
-  return {
-    name: `${t.prefix} ${type[0].toUpperCase()}${type.slice(1)}`,
-    kind: 'item', sprite, maxStack: 1,
-    tool: { type, tier: t.tier, speed: t.speed, durability: t.durability,
-      damage: baseDamage + t.tier },
-  };
-}
 
 export const ITEMS: Record<number, ItemInfo> = {
-  [Block.Grass]: blockItem(Block.Grass),
-  [Block.Dirt]: blockItem(Block.Dirt),
-  [Block.Stone]: blockItem(Block.Stone),
-  [Block.Cobblestone]: blockItem(Block.Cobblestone),
-  [Block.Sand]: blockItem(Block.Sand),
-  [Block.OakLog]: blockItem(Block.OakLog),
   [Block.OakPlanks]: blockItem(Block.OakPlanks),
-  [Block.Leaves]: blockItem(Block.Leaves),
-  [Block.Glass]: blockItem(Block.Glass),
-  [Block.Sandstone]: blockItem(Block.Sandstone),
-  [Block.PackedSnow]: blockItem(Block.PackedSnow),
-  [Block.BirchLog]: blockItem(Block.BirchLog),
-  [Block.BirchLeaves]: blockItem(Block.BirchLeaves),
-  [Block.SpruceLog]: blockItem(Block.SpruceLog),
-  [Block.SpruceLeaves]: blockItem(Block.SpruceLeaves),
-  [Block.Cactus]: blockItem(Block.Cactus),
-  [Block.Dandelion]: blockItem(Block.Dandelion),
-  [Block.Poppy]: blockItem(Block.Poppy),
-  [Block.CoalOre]: blockItem(Block.CoalOre),
-  [Block.IronOre]: blockItem(Block.IronOre),
-  [Block.GoldOre]: blockItem(Block.GoldOre),
-  [Block.Torch]: blockItem(Block.Torch),
-  [Block.CraftingTable]: blockItem(Block.CraftingTable),
-  [Block.Furnace]: blockItem(Block.Furnace),
-  [Block.Chest]: blockItem(Block.Chest),
-  [Block.TitaniumOre]: blockItem(Block.TitaniumOre),
-
-  // Automation (M13): machine blocks + the new resources.
-  [Block.CobaltOre]: blockItem(Block.CobaltOre),
-  [Block.OilShale]: blockItem(Block.OilShale),
-  [Block.Autominer]: blockItem(Block.Autominer),
-  [Block.OilDerrick]: blockItem(Block.OilDerrick),
-  [Item.CobaltIngot]: pureItem('Cobalt Ingot', Tile.CobaltIngot),
-  [Item.OilBarrel]: pureItem('Oil Barrel', Tile.OilBarrel),
-
-  // Warfare (M14): turret block + cannonball ammo.
-  [Block.Turret]: blockItem(Block.Turret),
-  [Item.Cannonball]: pureItem('Cannonball', Tile.Cannonball),
-  // Personal respawn point block (right-click to set spawn).
-  [Block.RespawnBeacon]: blockItem(Block.RespawnBeacon),
-  // Waypoint Totem (B4): fast-travel anchor (right-click to attune).
-  [Block.WaypointTotem]: blockItem(Block.WaypointTotem),
-  // Discovery biomes (Milestone C).
-  [Block.JungleLog]: blockItem(Block.JungleLog),
-  [Block.JungleLeaves]: blockItem(Block.JungleLeaves),
-  [Block.JunglePlanks]: blockItem(Block.JunglePlanks),
-  [Block.CherryLog]: blockItem(Block.CherryLog),
-  [Block.CherryLeaves]: blockItem(Block.CherryLeaves),
-  [Block.CherryPlanks]: blockItem(Block.CherryPlanks),
-  [Block.Mud]: blockItem(Block.Mud),
-  [Block.CrystalBlock]: blockItem(Block.CrystalBlock),
-  // Dungeons (Milestone D): mined vault walls are a building trophy. The
-  // VaultChest is deliberately NOT an item (breaking one drops nothing).
-  [Block.VaultBrick]: blockItem(Block.VaultBrick),
-  [Block.CarvedVaultBrick]: blockItem(Block.CarvedVaultBrick),
-  [Block.MossyVaultBrick]: blockItem(Block.MossyVaultBrick),
-  [Block.EmberBrick]: blockItem(Block.EmberBrick),
-  [Block.PrismBrick]: blockItem(Block.PrismBrick),
-  [Block.GildedVaultBrick]: blockItem(Block.GildedVaultBrick),
-  [Block.SoulLantern]: blockItem(Block.SoulLantern),
-  [Block.GlowFungus]: blockItem(Block.GlowFungus),
-  [Block.EmberBrazier]: blockItem(Block.EmberBrazier),
-  [Block.PrismLamp]: blockItem(Block.PrismLamp),
-  [Block.GildedLamp]: blockItem(Block.GildedLamp),
-  [Block.LuminousLimestone]: blockItem(Block.LuminousLimestone),
-  [Block.PearlTile]: blockItem(Block.PearlTile),
-  [Block.RuneGlass]: blockItem(Block.RuneGlass),
-  [Block.IvoryColumn]: blockItem(Block.IvoryColumn),
-  [Block.SpectralMarble]: blockItem(Block.SpectralMarble),
-  [Block.JadeMosaic]: blockItem(Block.JadeMosaic),
-  [Block.FurnaceCeramic]: blockItem(Block.FurnaceCeramic),
-  [Block.OpalBrick]: blockItem(Block.OpalBrick),
-  [Block.ClockworkGrate]: blockItem(Block.ClockworkGrate),
-  [Block.VaultMosaic]: blockItem(Block.VaultMosaic),
-  // Solid gold: vault-treasury loot, a compact way to bank ingots.
-  [Block.GoldBlock]: blockItem(Block.GoldBlock),
-  // The Sword: top melee damage, useless as a mining tool.
-  [Item.Sword]: {
-    name: 'Sword', kind: 'item', sprite: Tile.IronSword, maxStack: 1,
-    tool: { type: 'sword', tier: 0, speed: 1, durability: 350, damage: 7 },
-  },
-  // Terrain (M21): mesa + ashlands materials (Lava is a liquid, like Water).
-  [Block.RedSand]: blockItem(Block.RedSand),
-  [Block.Terracotta]: blockItem(Block.Terracotta),
-  [Block.Basalt]: blockItem(Block.Basalt),
-
-  // Building set (M15): per-wood planks + slabs + stairs (only the N-facing
-  // stair id is an item; placement orients it, like wall torches).
-  [Block.BirchPlanks]: blockItem(Block.BirchPlanks),
-  [Block.SprucePlanks]: blockItem(Block.SprucePlanks),
-  [Block.OakSlab]: blockItem(Block.OakSlab),
-  [Block.BirchSlab]: blockItem(Block.BirchSlab),
-  [Block.SpruceSlab]: blockItem(Block.SpruceSlab),
-  [Block.OakStairsN]: blockItem(Block.OakStairsN),
-  [Block.BirchStairsN]: blockItem(Block.BirchStairsN),
-  [Block.SpruceStairsN]: blockItem(Block.SpruceStairsN),
-
-  [Item.Stick]: pureItem('Stick', Tile.Stick),
-  [Item.Coal]: pureItem('Coal', Tile.CoalItem),
-  [Item.IronIngot]: pureItem('Iron Ingot', Tile.IronIngot),
-  [Item.Redstone]: pureItem('Redstone Dust', Tile.RedstoneDust),
-  [Item.Diamond]: pureItem('Diamond', Tile.Diamond),
-
-  [Item.WoodenPickaxe]: toolItem(0, 'pickaxe', Tile.WoodPickaxe),
-  [Item.WoodenAxe]: toolItem(0, 'axe', Tile.WoodAxe),
-  [Item.WoodenShovel]: toolItem(0, 'shovel', Tile.WoodShovel),
-  [Item.StonePickaxe]: toolItem(1, 'pickaxe', Tile.StonePickaxe),
-  [Item.StoneAxe]: toolItem(1, 'axe', Tile.StoneAxe),
-  [Item.StoneShovel]: toolItem(1, 'shovel', Tile.StoneShovel),
-  [Item.IronPickaxe]: toolItem(2, 'pickaxe', Tile.IronPickaxe),
-  [Item.IronAxe]: toolItem(2, 'axe', Tile.IronAxe),
-  [Item.IronShovel]: toolItem(2, 'shovel', Tile.IronShovel),
-  [Item.DiamondShovel]: toolItem(3, 'shovel', Tile.DiamondShovel),
-  [Item.Charcoal]: pureItem('Charcoal', Tile.Charcoal),
-  [Item.GoldIngot]: pureItem('Gold Ingot', Tile.GoldIngot),
-  [Item.TitaniumIngot]: pureItem('Titanium Ingot', Tile.TitaniumIngot),
-
-  // Early-game armor — wood (5 points total = 20% reduction) and stone
-  // (8 points = 32%): cheap, fast-wearing starter sets so a fresh spawn can
-  // walk into a Tier I vault with SOMETHING on. Iron and up outclass them.
-  [Item.WoodHelmet]: armorItem('Wood Helmet', Tile.ArmorHelmetWood,
-    { slot: 'helmet', points: 1, tier: 0, durability: 55 }),
-  [Item.WoodChestplate]: armorItem('Wood Chestplate', Tile.ArmorChestWood,
-    { slot: 'chestplate', points: 2, tier: 0, durability: 80 }),
-  [Item.WoodLeggings]: armorItem('Wood Leggings', Tile.ArmorLegsWood,
-    { slot: 'leggings', points: 1, tier: 0, durability: 75 }),
-  [Item.WoodBoots]: armorItem('Wood Boots', Tile.ArmorBootsWood,
-    { slot: 'boots', points: 1, tier: 0, durability: 65 }),
-  [Item.StoneHelmet]: armorItem('Stone Helmet', Tile.ArmorHelmetStone,
-    { slot: 'helmet', points: 1, tier: 0, durability: 110 }),
-  [Item.StoneChestplate]: armorItem('Stone Chestplate', Tile.ArmorChestStone,
-    { slot: 'chestplate', points: 3, tier: 0, durability: 160 }),
-  [Item.StoneLeggings]: armorItem('Stone Leggings', Tile.ArmorLegsStone,
-    { slot: 'leggings', points: 2, tier: 0, durability: 150 }),
-  [Item.StoneBoots]: armorItem('Stone Boots', Tile.ArmorBootsStone,
-    { slot: 'boots', points: 2, tier: 0, durability: 130 }),
-
-  // Armor — base points roughly track vanilla (iron 15, diamond ~17, titanium
-  // ~21 total), with per-piece XP leveling adding up to +3 each over time.
-  [Item.IronHelmet]: armorItem('Iron Helmet', Tile.ArmorHelmetIron,
-    { slot: 'helmet', points: 2, tier: 0, durability: 165 }),
-  [Item.IronChestplate]: armorItem('Iron Chestplate', Tile.ArmorChestIron,
-    { slot: 'chestplate', points: 6, tier: 0, durability: 240 }),
-  [Item.IronLeggings]: armorItem('Iron Leggings', Tile.ArmorLegsIron,
-    { slot: 'leggings', points: 5, tier: 0, durability: 225 }),
-  [Item.IronBoots]: armorItem('Iron Boots', Tile.ArmorBootsIron,
-    { slot: 'boots', points: 2, tier: 0, durability: 195 }),
-  [Item.DiamondHelmet]: armorItem('Diamond Helmet', Tile.ArmorHelmetDiamond,
-    { slot: 'helmet', points: 3, tier: 1, durability: 363 }),
-  [Item.DiamondChestplate]: armorItem('Diamond Chestplate', Tile.ArmorChestDiamond,
-    { slot: 'chestplate', points: 7, tier: 1, durability: 528 }),
-  [Item.DiamondLeggings]: armorItem('Diamond Leggings', Tile.ArmorLegsDiamond,
-    { slot: 'leggings', points: 6, tier: 1, durability: 495 }),
-  [Item.DiamondBoots]: armorItem('Diamond Boots', Tile.ArmorBootsDiamond,
-    { slot: 'boots', points: 3, tier: 1, durability: 429 }),
-  [Item.TitaniumHelmet]: armorItem('Titanium Helmet', Tile.ArmorHelmetTitanium,
-    { slot: 'helmet', points: 3, tier: 2, durability: 555 }),
-  [Item.TitaniumChestplate]: armorItem('Titanium Chestplate', Tile.ArmorChestTitanium,
-    { slot: 'chestplate', points: 8, tier: 2, durability: 800 }),
-  [Item.TitaniumLeggings]: armorItem('Titanium Leggings', Tile.ArmorLegsTitanium,
-    { slot: 'leggings', points: 6, tier: 2, durability: 750 }),
-  [Item.TitaniumBoots]: armorItem('Titanium Boots', Tile.ArmorBootsTitanium,
-    { slot: 'boots', points: 3, tier: 2, durability: 650 }),
-
-  // Guns — pistol (semi), rifle (auto), rocket launcher (explosive). `zoom` is
-  // the aim-down-sights magnification (hold right-click); scoped guns zoom more.
-  [Item.Pistol]: gunItem('Pistol', Tile.Pistol,
-    { damage: 5, ammo: Item.Bullet, mag: 12, cooldown: 0.32, auto: false, speed: 80, range: 48,
-      zoom: 1.15 }),
-  [Item.Rifle]: gunItem('Rifle', Tile.Rifle,
-    { damage: 4, ammo: Item.Bullet, mag: 30, cooldown: 0.11, auto: true, speed: 100, range: 64,
-      zoom: 1.35 }),
-  [Item.RocketLauncher]: gunItem('Rocket Launcher', Tile.RocketLauncher,
-    { damage: 18, ammo: Item.Rocket, mag: 1, cooldown: 1.1, auto: false, speed: 28, range: 80,
-      rocket: true, zoom: 1.25 }),
-  // Shotgun — point-blank bruiser: a wide pellet spray that shreds up close and
-  // fizzles at range. Slow pump, small mag. No scope (it's a hip-fire brawler).
-  [Item.Shotgun]: gunItem('Shotgun', Tile.Shotgun,
-    { damage: 3, ammo: Item.Bullet, mag: 6, cooldown: 0.7, auto: false, speed: 70, range: 22,
-      pellets: 7, spread: 0.13 }),
-  // SMG — spray-and-pray: blistering auto fire, low per-hit damage, big mag,
-  // a touch of bloom and short reach. A small ADS zoom to tighten sprays.
-  // (0.08s cooldown keeps its DPS just ABOVE the rifle's but only up close.)
-  [Item.SMG]: gunItem('SMG', Tile.SMG,
-    { damage: 3, ammo: Item.Bullet, mag: 35, cooldown: 0.08, auto: true, speed: 95, range: 38,
-      spread: 0.035, zoom: 1.2 }),
-  // Sniper — pinpoint hitscan-feel: huge damage, dead-accurate, long reach, but
-  // a long recovery between shots and a tiny mag. A big scope zoom. 18 damage =
-  // NEVER a one-shot body kill on a full-health player (20 HP) — hurts, not
-  // deletes.
-  [Item.Sniper]: gunItem('Sniper', Tile.Sniper,
-    { damage: 18, ammo: Item.Bullet, mag: 5, cooldown: 1.35, auto: false, speed: 150, range: 80,
-      zoom: 4 }),
-  // Burst Rifle — disciplined 3-round bursts; rewards aim with a quick clustered
-  // hit then a beat of downtime. A medium marksman zoom.
-  [Item.BurstRifle]: gunItem('Burst Rifle', Tile.BurstRifle,
-    { damage: 5, ammo: Item.Bullet, mag: 24, cooldown: 0.5, auto: false, speed: 115, range: 58,
-      burst: 3, zoom: 1.8 }),
-  [Item.Bullet]: pureItem('Bullet', Tile.Bullet),
-  [Item.Rocket]: pureItem('Rocket', Tile.Rocket),
-
-  // Glider — early-game wings worn in the chestplate slot. Jump in mid-air to
-  // deploy (it slows your fall and rockets you forward); easy to craft, easy to
-  // break (wears out with use).
-  [Item.Glider]: gliderItem('Glider', Tile.Glider, { durability: 22 }),
-  // Gadgets (Phase 8): pure items; behaviour + cooldown/stack live in gadgets.ts.
-  [Item.Grenade]: gadgetItem('Frag Grenade', Tile.Grenade, 16),
-  [Item.C4]: gadgetItem('C4 Charge', Tile.C4, 8),
-  [Item.GrapplingHook]: gadgetItem('Grappling Hook', Tile.GrapplingHook, 1),
-  [Item.DeployCover]: gadgetItem('Deployable Cover', Tile.DeployCover, 8),
-  [Item.SentryKit]: gadgetItem('Sentry Kit', Tile.SentryKit, 4),
-  [Item.SmokeGrenade]: gadgetItem('Smoke Grenade', Tile.SmokeGrenade, 16),
-  [Item.WarHorn]: gadgetItem('War Horn', Tile.WarHorn, 1),
-  [Item.OilBomb]: gadgetItem('Oil Bomb', Tile.OilBomb, 8),
-  [Item.SpyDisguise]: gadgetItem('Spy Disguise', Tile.SpyDisguise, 1),
-  [Item.JumpBoost]: gadgetItem('Bounce Pad', Tile.JumpBoost, 8),
-
-  // Lifesteal (Milestone A). Hearts stack small (they're precious loot);
-  // the Revival Beacon is a one-shot totem.
-  [Item.Heart]: gadgetItem('Heart', Tile.Heart, 16),
-  [Item.CrystalShard]: pureItem('Crystal Shard', Tile.CrystalShard),
-  [Item.RevivalBeacon]: gadgetItem('Revival Beacon', Tile.RevivalBeacon, 1),
-
-  // Healing consumables: right-click for a burst of fast regeneration.
-  // Bandage = quick minor patch; Medkit = a strong, near-full heal.
-  [Item.Bandage]: healItem('Bandage', Tile.BandageSprite, { duration: 5, interval: 0.6 }),
-  [Item.Medkit]: healItem('Medkit', Tile.MedkitSprite, { duration: 8, interval: 0.3 }),
-
-  // Traps: placeable blocks (spikes hurt anyone standing on them; the mine
-  // detonates underfoot).
-  [Block.SpikeTrap]: blockItem(Block.SpikeTrap),
-  [Block.Landmine]: blockItem(Block.Landmine),
-  // Lever-triggered traps: the item is always the off/closed/down variant
-  // (LeverOn/FallTrapOpen/WallTrapUp are placement states, like wall torches).
-  // Flag-war kit — traps that HOLD you and defenses that hold a base.
-  [Block.BearTrap]: blockItem(Block.BearTrap),
-  [Block.Tar]: blockItem(Block.Tar),
-  [Block.BarbedWire]: blockItem(Block.BarbedWire),
-  [Block.Barricade]: blockItem(Block.Barricade),
-  [Block.ReinforcedStone]: blockItem(Block.ReinforcedStone),
-  [Block.Floodlight]: blockItem(Block.Floodlight),
-  [Block.Lever]: blockItem(Block.Lever),
-  [Block.FallTrap]: blockItem(Block.FallTrap),
-  [Block.WallTrap]: blockItem(Block.WallTrap),
-  // Trapcraft: triggers, sensors and actuators (traps.ts).
-  [Block.PressurePlate]: blockItem(Block.PressurePlate),
-  [Block.TripwireHook]: blockItem(Block.TripwireHook),
-  [Block.MotionSensor]: blockItem(Block.MotionSensor),
-  [Block.TrapTimer]: blockItem(Block.TrapTimer),
-  [Block.Claymore]: blockItem(Block.Claymore),
-  [Block.FlameJet]: blockItem(Block.FlameJet),
-  [Block.DartLauncher]: blockItem(Block.DartLauncher),
-  [Block.NetLauncher]: blockItem(Block.NetLauncher),
-  [Block.ShockPlate]: blockItem(Block.ShockPlate),
-  [Block.AlarmBell]: blockItem(Block.AlarmBell),
-  [Item.TrapDetector]: { name: 'Trap Detector', kind: 'item', sprite: Tile.TrapDetector, maxStack: 1 },
-  // Drill bits for the Autominer (install from its panel).
-  [Item.DrillBitIron]: { name: 'Iron Drill Bit', kind: 'item', sprite: Tile.DrillBitIron, maxStack: 8 },
-  [Item.DrillBitDiamond]: { name: 'Diamond Drill Bit', kind: 'item', sprite: Tile.DrillBitDiamond, maxStack: 8 },
-  [Item.DrillBitTitanium]: { name: 'Titanium Drill Bit', kind: 'item', sprite: Tile.DrillBitTitanium, maxStack: 8 },
-
-  // Boat: right-click water to launch, ride it fast across the surface.
-  [Item.Boat]: { name: 'Boat', kind: 'item', sprite: Tile.Boat, maxStack: 4 },
-
-  // Vault compasses: one-use vault finders, one per tier.
-  [Item.VaultCompass1]: { name: 'Vault Compass I', kind: 'item', sprite: Tile.VaultCompass1, maxStack: 8 },
-  [Item.VaultCompass2]: { name: 'Vault Compass II', kind: 'item', sprite: Tile.VaultCompass2, maxStack: 8 },
-  [Item.VaultCompass3]: { name: 'Vault Compass III', kind: 'item', sprite: Tile.VaultCompass3, maxStack: 8 },
-
-  // Runes (loot-only): right-click to socket into a worn armor piece.
-  [Item.RuneOfIron]: pureItem('Rune of Iron', Tile.RuneIron),
-  [Item.RuneOfSwiftness]: pureItem('Rune of Swiftness', Tile.RuneSwift),
-  [Item.RuneOfFortune]: pureItem('Rune of Fortune', Tile.RuneFortune),
-  [Item.RuneOfFocus]: pureItem('Rune of Focus', Tile.RuneFocus),
-  [Item.WardenSigil]: pureItem('Warden Sigil', Tile.WardenSigil),
-  [Item.MireBloom]: pureItem('Mire Bloom', Tile.MireBloom),
-  [Item.EmberCore]: pureItem('Ember Core', Tile.EmberCore),
-  [Item.SeerPrism]: pureItem('Seer Prism', Tile.SeerPrism),
-  [Item.ArtificerGear]: pureItem('Artificer Gear', Tile.ArtificerGear),
-
-  // Greater Runes (crafted, not looted): stronger single-piece armor sockets.
-  [Item.GreaterRuneOfIron]: pureItem('Greater Rune of Iron', Tile.GreaterRuneIron),
-  [Item.GreaterRuneOfSwiftness]: pureItem('Greater Rune of Swiftness', Tile.GreaterRuneSwift),
-  [Item.GreaterRuneOfFortune]: pureItem('Greater Rune of Fortune', Tile.GreaterRuneFortune),
-  [Item.GreaterRuneOfFocus]: pureItem('Greater Rune of Focus', Tile.GreaterRuneFocus),
-  [Item.GreaterRuneOfPower]: pureItem('Greater Rune of Power', Tile.GreaterRuneOfPower),
-
-  // --- Warfare Command --------------------------------------------------------
-  [Block.Helipad]: blockItem(Block.Helipad),
-  // Components (stack small — they are heavy assemblies, not screws).
-  [Item.ReinforcedFrame]: { name: 'Reinforced Frame', kind: 'item', sprite: Tile.ReinforcedFrame, maxStack: 16 },
-  [Item.GuidanceUnit]: { name: 'Guidance Unit', kind: 'item', sprite: Tile.GuidanceUnit, maxStack: 16 },
-  [Item.RotorAssembly]: { name: 'Rotor Assembly', kind: 'item', sprite: Tile.RotorAssembly, maxStack: 16 },
-  [Item.FuelTank]: { name: 'Fuel Tank', kind: 'item', sprite: Tile.FuelTank, maxStack: 16 },
-  [Item.BombCasing]: { name: 'Bomb Casing', kind: 'item', sprite: Tile.BombCasingSprite, maxStack: 16 },
-  // Ordnance.
-  [Item.AerialBomb]: { name: 'Aerial Bomb', kind: 'item', sprite: Tile.AerialBombSprite, maxStack: 16 },
-  [Item.RepairKit]: { name: 'Hardware Repair Kit', kind: 'item', sprite: Tile.RepairKitSprite, maxStack: 16 },
-  [Item.HelicopterKit]: { name: 'Helicopter Airframe', kind: 'item', sprite: Tile.HelicopterKitSprite, maxStack: 1 },
-  [Item.RopeWinch]: { name: 'Fast-Rope Winch', kind: 'item', sprite: Tile.GrapplingHook, maxStack: 1 },
-  [Item.AuxiliaryTank]: { name: 'Auxiliary Tank Module', kind: 'item', sprite: Tile.FuelTank, maxStack: 4 },
-  [Item.LongRangeTank]: { name: 'Long-Range Tank Module', kind: 'item', sprite: Tile.OilBarrel, maxStack: 4 },
-
-  // --- Minigame-only items (see src/minigame_items.ts) ----------------------
   [Block.TeamWoolA]: blockItem(Block.TeamWoolA),
   [Block.TeamWoolB]: blockItem(Block.TeamWoolB),
-  [Block.PartyTileC]: blockItem(Block.PartyTileC),
-  [Block.PartyTileD]: blockItem(Block.PartyTileD),
-  /** Bedwars tier-3 axe. Its damage is read from BW_AXE_TIERS server-side —
-   *  this `tool` entry exists only so the item renders and swings like an axe. */
-  [Item.VoidCleaver]: {
-    name: 'Void Cleaver', kind: 'item', sprite: Tile.VoidCleaver, maxStack: 1,
-    tool: { type: 'axe', tier: 2, speed: 6, durability: 2000, damage: 6 },
+  [Item.IronAxe]: {
+    name: 'Iron Axe', kind: 'item', sprite: Tile.IronAxe, maxStack: 1,
+    tool: { type: 'axe', tier: 2, speed: 6 },
   },
-  /** Minigame-only knockback weapon: zero damage, enormous knockback. No
-   *  mode grants it today; it stays registered so the id is never reused. */
-  [Item.KnockbackStick]: {
-    name: 'Knockback Stick', kind: 'item', sprite: Tile.KnockbackStick, maxStack: 1,
-    tool: { type: 'axe', tier: 0, speed: 1, durability: 2000, damage: 0 },
+  // Burst Rifle — disciplined 3-round bursts; rewards aim with a quick clustered
+  // hit then a beat of downtime. A medium marksman zoom.
+  [Item.BurstRifle]: {
+    name: 'Burst Rifle', kind: 'item', sprite: Tile.BurstRifle, maxStack: 1,
+    gun: { damage: 5, ammo: Item.Bullet, mag: 24, cooldown: 0.5, auto: false, speed: 115, range: 58,
+      burst: 3, zoom: 1.8 },
+  },
+  [Item.Bullet]: { name: 'Bullet', kind: 'item', sprite: Tile.Bullet, maxStack: 64 },
+  // Behaviour + cooldown live in gadgets.ts.
+  [Item.JumpBoost]: { name: 'Bounce Pad', kind: 'item', sprite: Tile.JumpBoost, maxStack: 8 },
+  // A strong, near-full heal: right-click for a burst of fast regeneration.
+  [Item.Medkit]: {
+    name: 'Medkit', kind: 'item', sprite: Tile.MedkitSprite, maxStack: 16,
+    heal: { duration: 8, interval: 0.3 },
   },
   /** The Bridge's bow. Deliberately NOT a `gun`: guns fire hitscan rounds the
    *  client reports, and this fires a server-simulated arrow with an arc. The
@@ -638,25 +128,41 @@ export const ITEMS: Record<number, ItemInfo> = {
   /** Ammunition. The Bridge hands out an unlimited stack, so the count on the
    *  hotbar is decoration — the server never reads it. */
   [Item.BridgeArrow]: { name: 'Arrow', kind: 'item', sprite: Tile.BridgeArrow, maxStack: 64 },
+  // Rat and Seek: the seeker's kit, the rat's kit and the four class badges.
+  // Every behaviour lives on the server (ratseek.ts); these only render.
+  [Item.RatCatcher]: { name: 'Rat Catcher', kind: 'item', sprite: Tile.RatCatcher, maxStack: 1 },
+  [Item.SeekerCompass]: { name: "Seeker's Compass", kind: 'item', sprite: Tile.SeekerCompass, maxStack: 1 },
+  [Item.ScentPulse]: { name: 'Scent Pulse', kind: 'item', sprite: Tile.ScentPulse, maxStack: 1 },
+  [Item.Flashlight]: { name: 'Flashlight', kind: 'item', sprite: Tile.Flashlight, maxStack: 1 },
+  [Item.Mousetrap]: { name: 'Snap Mousetrap', kind: 'item', sprite: Tile.MousetrapItem, maxStack: 3 },
+  [Item.CheeseBait]: { name: 'Cheese Bait', kind: 'item', sprite: Tile.CheeseBait, maxStack: 2 },
+  [Item.SqueakTaunt]: { name: 'Squeak Taunt', kind: 'item', sprite: Tile.SqueakTaunt, maxStack: 1 },
+  [Item.Scamper]: { name: 'Scamper', kind: 'item', sprite: Tile.Scamper, maxStack: 1 },
+  [Item.CageRattle]: { name: 'Rattle the Cage', kind: 'item', sprite: Tile.CageRattle, maxStack: 1 },
+  [Item.EscapeCard]: { name: 'Get Out of Jail Free', kind: 'item', sprite: Tile.EscapeCard, maxStack: 1 },
+  [Item.ClassPicker]: { name: 'Choose Your Class', kind: 'item', sprite: Tile.ClassPicker, maxStack: 1 },
+  [Item.WhiskerSense]: { name: 'Whisker Sense (Scout)', kind: 'item', sprite: Tile.WhiskerSense, maxStack: 1 },
+  [Item.CheeseMagnet]: { name: 'Cheese Magnet (Thief)', kind: 'item', sprite: Tile.CheeseMagnet, maxStack: 1 },
+  [Item.DecoyRat]: { name: 'Decoy Rat (Trickster)', kind: 'item', sprite: Tile.DecoyRat, maxStack: 1 },
+  [Item.Disarm]: { name: 'Disarm (Tinkerer)', kind: 'item', sprite: Tile.Disarm, maxStack: 1 },
+  [Item.Cheese]: { name: 'Stolen Cheese', kind: 'item', sprite: Tile.Cheese, maxStack: 64 },
+  [Item.ClassScout]: { name: 'Scout', kind: 'item', sprite: Tile.ClassScout, maxStack: 1 },
+  [Item.ClassThief]: { name: 'Thief', kind: 'item', sprite: Tile.ClassThief, maxStack: 1 },
+  [Item.ClassTrickster]: { name: 'Trickster', kind: 'item', sprite: Tile.ClassTrickster, maxStack: 1 },
+  [Item.ClassTinkerer]: { name: 'Tinkerer', kind: 'item', sprite: Tile.ClassTinkerer, maxStack: 1 },
+  [Item.SeekerPicker]: { name: 'Who Seeks?', kind: 'item', sprite: Tile.SeekerPicker, maxStack: 1 },
 };
 
 /**
- * Vanilla mining: effective tools divide `hardness * 1.5` by their speed;
- * blocks that require a tool you can't harvest with take `hardness * 5`
- * (and drop nothing).
+ * Vanilla mining time: effective tools divide `hardness * 1.5` by their speed;
+ * blocks that require a tool you can't harvest with take `hardness * 5`.
  */
-export function miningStats(
-  info: BlockInfo, held: ItemStack | null
-): { time: number; harvest: boolean } {
+export function breakTime(info: BlockInfo, held: ItemStack | null): number {
   const tool = held ? ITEMS[held.id]?.tool : undefined;
   const effective = !!tool && tool.type === info.tool;
   const harvest =
     !info.requiresTool || (effective && tool!.tier >= info.minTier);
-  if (info.hardness <= 0) return { time: 0, harvest };
-  // A diamond-tier tool INSTAMINES the ground it's made for — the diamond
-  // shovel clears grass/dirt/sand (every 'shovel' block) in one click.
-  if (effective && harvest && tool!.tier >= INSTAMINE_TIER) return { time: 0, harvest };
+  if (info.hardness <= 0) return 0;
   const speed = effective && harvest ? tool!.speed : 1;
-  const time = harvest ? (info.hardness * 1.5) / speed : info.hardness * 5;
-  return { time, harvest };
+  return harvest ? (info.hardness * 1.5) / speed : info.hardness * 5;
 }

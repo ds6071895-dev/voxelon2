@@ -22,8 +22,6 @@
 import * as THREE from 'three';
 import { mulberry32, wrappedValueNoise } from './noise';
 
-export const DAY_LENGTH = 1200; // seconds: vanilla 20-minute day
-
 const CLOUD_Y = 192;
 const CLOUD_TEX = 64;     // texels per repeat
 const CLOUD_PLANE = 4096; // world units
@@ -36,14 +34,14 @@ const HIGH_CLOUD_REPEAT = 2;
 /** Moonlit-night skylight floor. Higher than vanilla so the world stays
  *  PLAYABLE at night (you can still see) while reading clearly as night —
  *  the sky itself, stars and fog still go dark (those track `s`, not this). */
-export const NIGHT_FLOOR = 0.36;
+const NIGHT_FLOOR = 0.36;
 
 /**
  * Sunlight factor for a time of day in [0,1) (0 = sunrise, 0.25 = noon,
  * 0.5 = sunset, 0.75 = midnight). Clamped to NIGHT_FLOOR so moonlit nights
  * keep a comfortable, visible skylight. Pure, for tests.
  */
-export function daylight(tod: number): number {
+function daylight(tod: number): number {
   const sunHeight = Math.sin(tod * Math.PI * 2);
   const t = Math.min(1, Math.max(0, (sunHeight + 0.08) / 0.3));
   const s = t * t * (3 - 2 * t);
@@ -125,7 +123,7 @@ function scatterInto(
  * which is what keeps the skyline seamless on every preset. Exported for the
  * GLSL twin's documentation only — the shaders carry their own copy.
  */
-export function displayKnee(c: THREE.Color): THREE.Color {
+function displayKnee(c: THREE.Color): THREE.Color {
   const k = (x: number): number => {
     const over = Math.max(x - 0.78, 0);
     return x - over + (1 - Math.exp(-over / 0.22)) * 0.22;
@@ -135,7 +133,7 @@ export function displayKnee(c: THREE.Color): THREE.Color {
 
 /** GLSL twins of the functions above. Shared with the chunk shader (world.ts)
  *  so the water reflects the SAME sky the dome draws. */
-export const ATMOSPHERE_GLSL = /* glsl */`
+const ATMOSPHERE_GLSL = /* glsl */`
 const vec3 VX_BETA_R = vec3(${BETA_R.join(', ')});
 const float VX_BETA_M = ${BETA_M.toFixed(4)};
 float vxAirView(float y) { return 1.0 / (max(y, 0.0) + 0.35); }
@@ -554,9 +552,7 @@ const _c2 = new THREE.Color();
 const _moonDir = new THREE.Vector3();
 
 export class Sky {
-  /** Time in days; fractional part is the time of day (0 = sunrise). */
-  time = 0.04; // start shortly after sunrise
-  /** Current sunlight factor (drives mobs, audio and legacy consumers). */
+  /** Current sunlight factor. */
   sunIntensity = 1;
   /** Unit vector from the world toward the sun. */
   readonly sunDir = new THREE.Vector3(0, 1, 0);
@@ -591,7 +587,8 @@ export class Sky {
   /** Ambient irradiance from the whole dome onto an upward-facing surface. */
   readonly ambientTint = new THREE.Color(1, 1, 1);
 
-  private visualTime = this.time;
+  /** Time of day shown, easing toward the one asked for (0 = sunrise). */
+  private visualTime = 0.04;
   private hdr = false;
 
   private readonly dome: THREE.Mesh;
@@ -727,18 +724,12 @@ export class Sky {
 
   /** Jump straight to a time of day, with no easing (entering a new world). */
   snapTo(timeOfDay: number): void {
-    this.time = timeOfDay;
     this.visualTime = timeOfDay;
   }
 
-  update(
-    dt: number,
-    camera: THREE.Camera,
-    forcedTimeOfDay?: number,
-    advanceClock = true,
-  ): void {
-    if (advanceClock) this.time += dt / DAY_LENGTH;
-    const target = forcedTimeOfDay === undefined ? this.time : forcedTimeOfDay;
+  /** Ease the sky toward a fixed time of day. Worlds has no day cycle: every
+   *  venue (and the title valley) picks its own hour. */
+  update(dt: number, camera: THREE.Camera, target: number): void {
     // Follow the shortest route around the circular clock. Capping the visual
     // delta prevents a long background-tab frame from defeating the fade.
     const wrappedTarget = ((target % 1) + 1) % 1;

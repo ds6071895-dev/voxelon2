@@ -14,13 +14,6 @@ const HEART_MASK = [
 const ENERGY_MASK = [
   '0111110', '1111111', '1111111', '1111111', '1111111', '0111110',
 ];
-const BUBBLE_MASK = [
-  '0011100', '0111110', '0110110', '0111110', '0011100', '0000000',
-];
-// A chestplate-ish shield for one armor segment (2 defense points each).
-const ARMOR_MASK = [
-  '0111110', '1111111', '1111111', '1111111', '0111110', '0011100',
-];
 
 function drawIcon(
   ctx: CanvasRenderingContext2D, x: number, mask: string[],
@@ -37,9 +30,9 @@ function drawIcon(
   }
 }
 
-export interface StatusInfo {
+interface StatusInfo {
   health: number;
-  /** Lifesteal max-health hearts; sizes the heart row. */
+  /** Max-health hearts; sizes the heart row. */
   hearts: number;
   /** HP one heart icon is worth. 2 everywhere except Duels, whose 40 HP pool
    *  would otherwise draw twenty icons in two stacked rows — a wall of hearts
@@ -49,14 +42,9 @@ export interface StatusInfo {
   energy: number;
   /** True when energy is depleted and sprinting is locked out. */
   exhausted: boolean;
-  air: number;
-  maxAir: number;
-  underwater: boolean;
-  /** Effective worn-armor defense points (0..20); the bar hides at 0. */
-  armor: number;
 }
 
-export interface DebugInfo {
+interface DebugInfo {
   fps: number;
   x: number; y: number; z: number;
   cx: number; cz: number;
@@ -160,14 +148,13 @@ export class HUD {
 
   private lastStatus = '';
 
-  /** Hearts (left), blue energy bar (right), bubbles when submerged. */
+  /** Hearts (left) and the blue energy bar (right). */
   updateStatus(s: StatusInfo): void {
-    const key = `${s.health}|${s.hearts}|${s.hpPerHeart ?? 2}|${Math.round(s.energy * 40)}|${s.exhausted}|` +
-      `${Math.ceil(s.air)}|${s.underwater}|${Math.round(s.armor * 2)}`;
+    const key = `${s.health}|${s.hearts}|${s.hpPerHeart ?? 2}|${Math.round(s.energy * 40)}|${s.exhausted}`;
     if (key === this.lastStatus) return;
     this.lastStatus = key;
 
-    // Lifesteal heart row(s): exactly one icon per MAX heart (half-heart
+    // Heart row(s): exactly one icon per MAX heart (half-heart
     // granularity), so fewer hearts show fewer icons. Past 10 the row WRAPS
     // upward — a second row of hearts stacks on top (never a text readout).
     const hearts = (document.getElementById('hearts') as HTMLCanvasElement)
@@ -188,10 +175,7 @@ export class HUD {
       // in the upper half (y=0) — so a single row keeps its usual position.
       drawIcon(hearts, col * 20, HEART_MASK, heartFill(s.health - i * per), (1 - row) * 20);
     }
-    // The armor bar sits just above the (possibly two-row) heart stack.
-    const armorEl = document.getElementById('armor') as HTMLCanvasElement;
-    armorEl.style.bottom = rows > 1 ? '44px' : '22px';
-    // Keep gun ammo directly above armor instead of independently overlapping it.
+    // Gun ammo sits above the (possibly two-row) heart stack.
     const ammoEl = document.getElementById('ammo')!;
     ammoEl.style.bottom = rows > 1 ? '66px' : '44px';
 
@@ -206,35 +190,6 @@ export class HUD {
       drawIcon(energy, i * 20 + 2, ENERGY_MASK, (px, py) =>
         on ? (px <= 1 || py <= 1 ? litEdge : lit) : '#26303a'
       );
-    }
-
-    const bubbles = (document.getElementById('bubbles') as HTMLCanvasElement)
-      .getContext('2d')!;
-    bubbles.clearRect(0, 0, 202, 20);
-    if (s.underwater || s.air < s.maxAir) {
-      for (let i = 0; i < 10; i++) {
-        const threshold = ((9 - i) + 1) * (s.maxAir / 10);
-        drawIcon(bubbles, i * 20 + 2, BUBBLE_MASK, (px, py) =>
-          s.air >= threshold - 0.001
-            ? (px === 2 && py === 1 ? '#ffffff' : '#4d9be8')
-            : null
-        );
-      }
-    }
-
-    // Armor: 10 shields above the hearts, each worth 2 defense points (vanilla).
-    const armor = (document.getElementById('armor') as HTMLCanvasElement)
-      .getContext('2d')!;
-    armor.clearRect(0, 0, 202, 20);
-    if (s.armor > 0) {
-      for (let i = 0; i < 10; i++) {
-        const v = s.armor - i * 2;
-        drawIcon(armor, i * 20, ARMOR_MASK, (px) => {
-          if (v >= 2) return px % 6 === 1 ? '#e8eef5' : '#a9b6c6';
-          if (v >= 1) return px < 3 ? '#a9b6c6' : '#2b2f36';
-          return '#2b2f36';
-        });
-      }
     }
   }
 

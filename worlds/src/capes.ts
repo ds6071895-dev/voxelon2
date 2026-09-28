@@ -10,11 +10,11 @@
 // `CAPES` and the wardrobe screen, persistence and equip rules all work as-is.
 
 /** How rare a cape is. Drives the tile's accent colour and its sort order. */
-export type CapeRarity = 'common' | 'rare' | 'epic' | 'legendary';
+type CapeRarity = 'common' | 'rare' | 'epic' | 'legendary';
 
 /** One cape in the catalog. `colors` is only what the wardrobe TILE paints —
  *  the in-world model arrives with the cape system itself. */
-export interface Cape {
+interface Cape {
   /** Stable key. Persisted and sent over the wire, so never renumber these. */
   id: string;
   name: string;
@@ -32,7 +32,7 @@ export const CAPES: Cape[] = [];
 export const NO_CAPE = '';
 
 /** Rarest last, so a collection reads as a progression left to right. */
-export const RARITY_ORDER: CapeRarity[] = ['common', 'rare', 'epic', 'legendary'];
+const RARITY_ORDER: CapeRarity[] = ['common', 'rare', 'epic', 'legendary'];
 
 /** Accent colour per rarity, shared by the tile ring and the rarity chip. */
 export const RARITY_COLORS: Record<CapeRarity, number> = {
@@ -42,7 +42,7 @@ export const RARITY_COLORS: Record<CapeRarity, number> = {
   legendary: 0xe0a423,
 };
 
-export function capeById(id: string): Cape | undefined {
+function capeById(id: string): Cape | undefined {
   return CAPES.find((c) => c.id === id);
 }
 
@@ -85,7 +85,7 @@ export function ownedCapes(w: Wardrobe): Cape[] {
 }
 
 /** You can always take a cape OFF; you can only put on one you own. */
-export function canEquip(w: Wardrobe, id: string): boolean {
+function canEquip(w: Wardrobe, id: string): boolean {
   return id === NO_CAPE || w.owned.includes(id);
 }
 

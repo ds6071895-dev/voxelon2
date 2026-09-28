@@ -1,0 +1,109 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Result cards — Duels and Bridge/Parkour, in daylight and in 3D.
+   ═══════════════════════════════════════════════════════════════════════════ */
+body .duel-result {
+  color: #0f2233; perspective: 1600px;
+  background:
+    radial-gradient(ellipse 70% 55% at 50% 6%, color-mix(in srgb, var(--rank) 34%, transparent), transparent 72%),
+    radial-gradient(ellipse 60% 50% at 50% 110%, rgba(253,224,171,.55), transparent 70%),
+    rgba(236,244,250,.93);
+  backdrop-filter: blur(16px) saturate(1.2); -webkit-backdrop-filter: blur(16px) saturate(1.2);
+}
+body .duel-result-card {
+  width: min(800px, 100%);
+  border: 1px solid color-mix(in srgb, var(--rank) 25%, #e2ebf1); border-radius: 30px;
+  background: linear-gradient(170deg, #ffffff, #f4f8fb);
+  box-shadow: 0 8px 0 color-mix(in srgb, var(--rank) 16%, #e1eaf0),
+              0 60px 120px -30px color-mix(in srgb, var(--rank) 45%, rgba(20,60,90,.5)),
+              inset 0 1px #fff;
+  animation: rs-card-in .75s cubic-bezier(.2,.9,.25,1.08) backwards; transform-origin: 50% 0;
+}
+@keyframes rs-card-in { from { opacity: 0; transform: rotateX(26deg) translateY(50px) scale(.94); } }
+body .duel-result-card[data-reveal-phase="impact"] { animation: rs-card-in .75s cubic-bezier(.2,.9,.25,1.08) backwards; }
+@media (max-width: 620px) {
+  body .duel-result-card { padding: 20px 14px; }
+}
+body .duel-result-kicker { color: color-mix(in srgb, var(--rank) 72%, #0b1b28); }
+body .duel-result h2 {
+  color: #0f2233; background: none; -webkit-background-clip: border-box; background-clip: border-box;
+  text-shadow: 0 1px 0 color-mix(in srgb, var(--rank) 25%, #fff), 0 2px 0 color-mix(in srgb, var(--rank) 35%, #fff),
+               0 3px 0 color-mix(in srgb, var(--rank) 45%, #fff), 0 4px 0 color-mix(in srgb, var(--rank) 55%, #fff),
+               0 5px 0 color-mix(in srgb, var(--rank) 62%, #fff), 0 16px 28px rgba(20,60,90,.22);
+}
+body .duel-result-summary { color: #4f6679; }
+body .duel-result-recap span { color: #25405a; border: 0; background: #eef4f8; box-shadow: 0 2px 0 #dbe6ee; }
+body .duel-result-score { border: 1px solid rgba(33,74,104,.1); background: #fff; }
+body .duel-result .duel-score-row { color: #4f6679; border-top-color: rgba(33,74,104,.07); }
+body .duel-result .duel-score-row.header { color: #7890a2; }
+body .duel-result .duel-score-row.local { color: #0f2233; background: color-mix(in srgb, var(--rank) 12%, #fff); box-shadow: inset 4px 0 var(--rank); }
+body .duel-result .duel-score-kills { color: #0f2233; }
+body .duel-result .duel-status-alive { color: #047857; }
+body .duel-result .duel-status-out { color: #b45309; }
+body .duel-result .duel-leader-mark { color: #d97706; text-shadow: none; }
+body .duel-result-controls button {
+  border: 0; border-radius: 14px; color: #0f2233; background: #fff;
+  box-shadow: inset 0 0 0 1.5px #dbe6ee, 0 4px 0 #dbe6ee;
+  transition: transform .12s ease, box-shadow .12s ease;
+}
+body .duel-result-controls button:hover:not(:disabled) { transform: translateY(-2px); background: #fff; }
+body .duel-result-controls button:active:not(:disabled) { transform: translateY(3px); box-shadow: inset 0 0 0 1.5px #dbe6ee, 0 1px 0 #dbe6ee; }
+body .duel-result-controls .primary, body .duel-result-controls .primary:hover:not(:disabled) {
+  color: #0b1b28; background: linear-gradient(180deg, color-mix(in srgb, var(--rank-accent) 70%, #fff), var(--rank));
+  box-shadow: 0 5px 0 color-mix(in srgb, var(--rank) 55%, #1a1a1a), 0 16px 28px -12px var(--rank);
+}
+
+/* ── Bridge / Parkour result card, light ──────────────────────────────── */
+body .pg-card.pg-result {
+  color: #0f2233; border: 1px solid color-mix(in srgb, var(--pg-accent) 30%, #e2ebf1); border-radius: 26px;
+  background:
+    radial-gradient(ellipse 90% 60% at 50% 0%, color-mix(in srgb, var(--pg-accent) 24%, transparent), transparent 70%),
+    linear-gradient(180deg, #fff, #f3f8fb);
+  box-shadow: 0 7px 0 color-mix(in srgb, var(--pg-accent) 25%, #dfe8ee), 0 40px 90px -20px rgba(8,20,34,.55), inset 0 1px #fff;
+  animation: pg3-result-in .7s cubic-bezier(.2,.9,.25,1.1) backwards;
+}
+@keyframes pg3-result-in { from { opacity: 0; transform: translate(-50%,-50%) perspective(900px) rotateX(38deg) translateY(50px) scale(.9); } }
+body .pg-result-kicker { color: #0b1b28; box-shadow: 0 3px 0 color-mix(in srgb, var(--pg-accent) 60%, #1a1a1a); }
+body .pg-result .pg-card-title {
+  color: #0f2233;
+  text-shadow: 0 1px 0 color-mix(in srgb, var(--pg-accent) 35%, #fff), 0 2px 0 color-mix(in srgb, var(--pg-accent) 45%, #fff),
+               0 3px 0 color-mix(in srgb, var(--pg-accent) 55%, #fff), 0 10px 22px rgba(8,20,34,.2);
+}
+body .pg-result.lose .pg-card-title { color: #4c0519; }
+body .pg-result .pg-result-note { color: #4f6679; }
+body .pg-result-board { background: #fff; border: 1px solid rgba(33,74,104,.1); }
+body .pg-result-board .pg-card-row { color: #25405a; }
+body .pg-result-board .pg-card-row + .pg-card-row { border-top-color: rgba(33,74,104,.08); }
+body .pg-result-board .pg-card-row.me { color: #0f2233; font-weight: 900; }
+body .pg-result-board .pg-card-place { background: #eef4f8; color: #25405a; }
+body .pg-result-board .pg-card-row:first-of-type .pg-card-place { background: #fde68a; color: #78350f; }
+body .pg-result-board .pg-card-points { color: color-mix(in srgb, var(--pg-accent) 65%, #0b1b28); }
+body .pg-result-btn {
+  border: 0; color: #0f2233; background: #fff; box-shadow: inset 0 0 0 1.5px #dbe6ee, 0 4px 0 #dbe6ee;
+  transition: transform .12s ease, box-shadow .12s ease;
+}
+body .pg-result-btn:hover, body .pg-result-btn:focus-visible { background: #fff; }
+body .pg-result-btn:active { transform: translateY(3px); box-shadow: inset 0 0 0 1.5px #dbe6ee, 0 1px 0 #dbe6ee; }
+body .pg-result-btn.primary, body .pg-result-btn.primary:hover, body .pg-result-btn.primary:focus-visible {
+  color: #0b1b28; background: linear-gradient(180deg, color-mix(in srgb, var(--pg-accent) 55%, #fff), var(--pg-accent));
+  box-shadow: 0 5px 0 color-mix(in srgb, var(--pg-accent) 55%, #1a1a1a), 0 14px 26px -12px var(--pg-accent);
+}
+.pg-confetti { position: absolute; inset: 0; z-index: 3; pointer-events: none; overflow: hidden; border-radius: inherit; perspective: 600px; }
+.pg-confetti i {
+  position: absolute; top: -14px; left: var(--x); width: 9px; height: 9px; border-radius: 2px;
+  background: linear-gradient(145deg, #fff, hsl(var(--h) 90% 62%) 40%, hsl(var(--h) 80% 48%));
+  animation: pg3-confetti 2.2s cubic-bezier(.3,.6,.5,1) var(--d) both;
+}
+@keyframes pg3-confetti {
+  from { opacity: 1; transform: translate3d(0, 0, 60px) rotateX(0) rotateZ(0); }
+  to { opacity: 0; transform: translate3d(18px, 560px, -40px) rotateX(var(--r)) rotateZ(var(--r)); }
+}
+
+/* ── Comfort modes ────────────────────────────────────────────────────── */
+body.reduced-motion :is(.duel-result, .pg-card) *, body.photosensitivity-safe :is(.duel-result, .pg-card) *, body.reduced-motion :is(.duel-result-card, .pg-card.pg-result), body.photosensitivity-safe :is(.duel-result-card, .pg-card.pg-result) {
+  animation: none !important; transition: none !important;
+}
+body.photosensitivity-safe .pg-confetti, body.reduced-motion .pg-confetti { display: none; }
+@media (prefers-reduced-motion: reduce) {
+  .duel-result-card, .pg-card.pg-result, :is(.duel-result, .pg-card) * { animation: none !important; transition: none !important; }
+  .pg-confetti { display: none; }
+}

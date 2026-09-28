@@ -24,14 +24,13 @@ import type { BindAction, Keybinds } from './hud_settings';
 
 export type HudModId =
   | 'fps' | 'cps' | 'coords' | 'direction' | 'keystrokes' | 'clock'
-  | 'gametime' | 'speed' | 'session' | 'biome' | 'held' | 'players'
-  | 'armor' | 'health';
+  | 'speed' | 'session' | 'biome' | 'held' | 'players' | 'health';
 
 /** Which corner a module hangs off. Chosen automatically when it is dropped. */
 type AnchorX = 'l' | 'r';
 type AnchorY = 't' | 'b';
 
-export interface HudModConfig {
+interface HudModConfig {
   /** Drawn while playing. */
   on: boolean;
   ax: AnchorX;
@@ -75,8 +74,6 @@ export const HUD_MODULES: readonly ModuleDef[] = [
     def: { on: false, ax: 'l', ay: 'b', x: 0.014, y: 0.140 } },
   { id: 'clock', name: 'Real time', desc: 'The clock on your own machine.',
     def: { on: false, ax: 'r', ay: 't', x: 0.010, y: 0.016 } },
-  { id: 'gametime', name: 'World time', desc: 'The in-game day and clock.',
-    def: { on: false, ax: 'r', ay: 't', x: 0.010, y: 0.052 } },
   { id: 'speed', name: 'Speed', desc: 'How fast you are moving across the ground.',
     def: { on: false, ax: 'r', ay: 't', x: 0.010, y: 0.088 } },
   { id: 'session', name: 'Session', desc: 'Time since this session started.',
@@ -87,12 +84,9 @@ export const HUD_MODULES: readonly ModuleDef[] = [
     def: { on: false, ax: 'r', ay: 't', x: 0.010, y: 0.196 } },
   { id: 'players', name: 'Players online', desc: 'How many people are on the server with you.',
     def: { on: false, ax: 'r', ay: 't', x: 0.010, y: 0.232 } },
-  { id: 'armor', name: 'Armor value', desc: 'Your worn defence points as a number.',
-    def: { on: false, ax: 'r', ay: 't', x: 0.010, y: 0.268 } },
   { id: 'health', name: 'Health', desc: 'Your HP as a number, next to the hearts.',
     def: { on: false, ax: 'r', ay: 't', x: 0.010, y: 0.304 } },
 ];
-
 
 function defaultConfig(def: ModuleDef): HudModConfig {
   return { ...def.def, scale: 1, bg: true };
@@ -139,16 +133,11 @@ export interface HudModData {
   facing: string;
   /** "+Z", "-X" and so on: the axis that facing runs along. */
   axis: string;
-  /** In-game clock, already formatted ("06:14"). */
-  time: string;
-  /** In-game day number. */
-  day: number;
   /** Horizontal speed in blocks per second. */
   speed: number;
   biome: string;
   held: string;
   players: number;
-  armor: number;
   health: number;
   maxHealth: number;
 }
@@ -168,7 +157,6 @@ const CSS = `
 .hm[hidden] { display:none; }
 .hm.bg { background:var(--hud-bg); padding:3px 9px; border-radius:7px;
   box-shadow:inset 0 0 0 1px rgba(255,255,255,.06); }
-.hm .hm-k { color:var(--hud-text-dim); font-weight:normal; }
 
 /* Keystrokes: a WASD cluster over the two mouse buttons and a space bar. */
 .hm-keys { display:flex; flex-direction:column; align-items:center;
@@ -271,7 +259,7 @@ html[data-ui-dark] #hud-mods { --hm-ink:#eaf1fa; --hm-mute:#8398b2; --hm-line:rg
 
 // --- The controller ---------------------------------------------------------
 
-export interface HudModsHooks {
+interface HudModsHooks {
   layout: HudLayout;
   /** Live binds, so the keystroke display shows the keys actually bound. */
   binds: Keybinds;
@@ -281,7 +269,7 @@ export interface HudModsHooks {
   onEditDone(): void;
 }
 
-export interface HudMods {
+interface HudMods {
   update(data: HudModData): void;
   /** Show or hide the whole set (the game hides it outside play). */
   setVisible(v: boolean): void;
@@ -431,7 +419,6 @@ export function createHudMods(parent: HTMLElement, hooks: HudModsHooks): HudMods
         return `${String(now.getHours()).padStart(2, '0')}:`
           + `${String(now.getMinutes()).padStart(2, '0')}`;
       };
-      case 'gametime': return (d) => `Day ${d.day}  ${d.time}`;
       case 'speed': return (d) => `${d.speed.toFixed(2)} b/s`;
       case 'session': return () => {
         const t = Math.floor((performance.now() - sessionStart) / 1000);
@@ -443,7 +430,6 @@ export function createHudMods(parent: HTMLElement, hooks: HudModsHooks): HudMods
       case 'biome': return (d) => d.biome;
       case 'held': return (d) => d.held || 'Empty hand';
       case 'players': return (d) => `${d.players} online`;
-      case 'armor': return (d) => `Armor ${Math.round(d.armor)}`;
       case 'health': return (d) => `${Math.ceil(d.health)} / ${Math.round(d.maxHealth)} HP`;
       default: return () => '';
     }

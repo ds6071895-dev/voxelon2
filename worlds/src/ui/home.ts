@@ -12,7 +12,7 @@ import { partyCapacityFor } from '../modes';
 import type { Cosmetics } from '../character';
 import { drawFace } from './face';
 
-export interface HomeHooks {
+interface HomeHooks {
   onPlay(mode: GameMode): void;
   onCancel(): void;
   onControls(): void;
@@ -23,7 +23,7 @@ export interface HomeHooks {
   onCapes(): void;
 }
 
-const MODE_TITLE: Record<GameMode, string> = { duels: 'Duels', bridge: 'The Bridge', parkour: 'Parkour' };
+const MODE_TITLE: Record<GameMode, string> = { duels: 'Duels', bridge: 'The Bridge', parkour: 'Parkour', ratseek: 'Rat and Seek' };
 
 export class HomeScreen {
   readonly root = document.getElementById('w-home') as HTMLElement;

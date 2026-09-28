@@ -9,9 +9,9 @@
 // checks, hits, goals, respawns — is decided by the server.
 
 import './styles/hud.css';
-import './prestige_ui.css';
-import './arena_3d.css';
+import './styles/results.css';
 import './styles/worlds.css';
+import './styles/ratseek.css';
 import * as THREE from 'three';
 import { GameAudio, materialOf } from './audio';
 import { Block, isReplaceable, isSolid } from './blocks';
@@ -24,9 +24,8 @@ import { Inventory } from './inventory';
 import { Item, ITEMS, type GunInfo, type ItemStack } from './items';
 import { iconSvg } from './emoji_icons';
 import { itemGeometry } from './item_geometry';
-import { createGunModel, gunFeel, isGunItem, poseGunModel } from './gunmodels';
-import { createGadgetModel, isModeledGadget, isOneHandModel, poseGadgetModel } from './gadgetmodels';
-import { gadgetOf, GadgetCooldowns } from './gadgets';
+import { createGunModel, GUN_FEEL, isGunItem, poseGunModel } from './gunmodels';
+import { createGadgetModel, isModeledGadget, poseGadgetModel } from './gadgetmodels';
 import { NetClient } from './net/client';
 import { skinSeed, type GameMode, type PartyState } from './net/protocol';
 import { Particles } from './particles';
@@ -73,6 +72,8 @@ import { HomeScreen } from './ui/home';
 import { AccountDialog } from './ui/account_dialog';
 import { PartyPanel } from './ui/party_panel';
 import { ControlsSheet } from './ui/controls_sheet';
+import { RatSeekClient, isClassBadge, pickSeeker, storedRatClass } from './ratseek_client';
+import { RS } from './ratseek_rules';
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -92,7 +93,7 @@ const PARTY_MELEE_REACH = 4.2;
 const GUEST_KEY = 'worlds.guest';
 const SESSION_KEY = 'worlds.session';
 const LOOK_KEY = 'worlds.look';
-const MODE_NAMES: Record<GameMode, string> = { duels: 'Duels', bridge: 'The Bridge', parkour: 'Parkour' };
+const MODE_NAMES: Record<GameMode, string> = { duels: 'Duels', bridge: 'The Bridge', parkour: 'Parkour', ratseek: 'Rat and Seek' };
 
 function fogEnd(radius: number): number { return Math.max(4, radius * 16 * 0.9 - 4); }
 let FOG_FAR = fogEnd(DEFAULT_RENDER_DISTANCE);
@@ -181,8 +182,6 @@ const input = new Input(renderer.domElement);
 input.setBinds(hudSettings.binds);
 const isMobile = isTouchDevice();
 const touch = isMobile ? new TouchControls(input, {
-  onInventory: () => { /* no inventory in Worlds */ },
-  onChat: () => { /* no command box in Worlds */ },
   onPause: () => {
     if (screen === 'paused') { resumePlay(); return; }
     if (screen === 'playing') { if (input.locked) input.unlock(); enterPause(); }
@@ -206,7 +205,15 @@ const projectiles = new Projectiles(scene, world, remotePlayers, net, player, pa
 const partyUI = new PartyUI(document.body);
 const partyVisuals = new PartyVisuals(scene);
 const healUse = new HealUse();
-const gadgetCd = new GadgetCooldowns();
+/** Rat and Seek's HUD, props and screen effects. */
+const rsClient = new RatSeekClient({
+  scene, app, net, audio, particles, player, world, remotePlayers, atlasCanvas: atlas.canvas,
+  onPanel: () => syncPointerLock(),
+});
+/** Morning over the manor: low sun, bright rooms. */
+const RS_TIME_OF_DAY = 0.1;
+/** Bounce Pad cooldown: earliest `worldTimeLocal` it can fire again. */
+let bouncePadReadyAt = 0;
 /** The title screen's living backdrop. Built once and kept: it has its own
  *  scene and World, so a match never touches it. */
 const backdrop = new TitleBackdrop(atlas, window.innerWidth / window.innerHeight);
@@ -217,7 +224,11 @@ interaction.onBlockSound = (kind, blockId, x, y, z) => {
   if (kind === 'break') audio.dig(materialOf(blockId), pos);
   else audio.place(materialOf(blockId), pos);
 };
-interaction.onEdit = (x, y, z, b) => net.sendEdit(x, y, z, b);
+interaction.onEdit = (x, y, z, b) => {
+  net.flushXform(player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch,
+    player.sneaking, inventory.selectedStack?.id ?? 0, heldSwingSeq, aimZoom > 1, reloadTimer > 0);
+  net.sendEdit(x, y, z, b);
+};
 
 window.addEventListener('resize', () => {
   const aspect = window.innerWidth / window.innerHeight;
@@ -315,7 +326,7 @@ clickResumeEl.textContent = 'Click to take control';
 app.appendChild(clickResumeEl);
 
 function cursorPanelOpen(): boolean {
-  return wardrobeUI.open || controlsSheet.open || hudSettingsPanelOpen();
+  return wardrobeUI.open || controlsSheet.open || hudSettingsPanelOpen() || rsClient.pickerOpen || !!seekerPick;
 }
 let hudSettingsVisible = false;
 function hudSettingsPanelOpen(): boolean { return hudSettingsVisible || hudMods.editing; }
@@ -543,6 +554,7 @@ let myParty: PartyState | null = null;
 const home = new HomeScreen({
   onPlay: (mode) => {
     audio.resume();
+    if (mode === 'ratseek') { playRatSeek(); return; }
     net.send({ t: 'play', mode });
   },
   onCancel: () => net.send({ t: 'cancelQueue' }),
@@ -567,6 +579,25 @@ const partyPanel = new PartyPanel(app, {
   onKick: (id) => net.send({ t: 'partyKick', id }),
   onPromote: (id) => net.send({ t: 'partyPromote', id }),
 });
+
+/** Queue or launch Rat and Seek. A party starts with the AI Seeker; the host
+ *  can change who seeks in game, with the "Who seeks?" item, until the hunt. */
+function playRatSeek(): void {
+  net.send({ t: 'play', mode: 'ratseek', seeker: 0, ratClass: storedRatClass() });
+}
+/** Closes the host's in-game "Who seeks?" sheet, while it is open. */
+let seekerPick: AbortController | null = null;
+function openSeekerPick(): void {
+  if (seekerPick || !myParty || !rsClient.canPickSeeker()) return;
+  const current = rsClient.snapshotSeeker(myParty.members.map((m) => m.id));
+  seekerPick = new AbortController();
+  syncPointerLock();
+  void pickSeeker(app, myParty, net.myId, current, seekerPick.signal).then((seeker) => {
+    seekerPick = null;
+    syncPointerLock();
+    if (seeker !== null && seeker !== current) net.sendRsSeeker(seeker);
+  });
+}
 
 net.helloPayload = () => {
   const session = storedJson<{ username: string; token: string }>(SESSION_KEY);
@@ -606,7 +637,7 @@ home.setConnected(false, '');
 
 // ── Worlds: entering and leaving a match ────────────────────────────────────
 
-type MatchKind = 'duel' | 'pg';
+type MatchKind = 'duel' | 'pg' | 'rs';
 let match: { kind: MatchKind; spec: WorldSpec; mode: GameMode } | null = null;
 let readySent = false;
 let readyWatchdog = 0;
@@ -640,7 +671,7 @@ function enterMatchWorld(spec: WorldSpec, kind: MatchKind, mode: GameMode, spawn
     projectiles.clear();
     partyVisuals.clear();
     // Each world has its own fixed time of day; arrive in it, don't fade into it.
-    sky.snapTo(kind === 'pg' ? parkourTheme(spec.seed).time : 0.25);
+    sky.snapTo(kind === 'pg' ? parkourTheme(spec.seed).time : kind === 'rs' ? RS_TIME_OF_DAY : 0.25);
   }
   closeTitleSettings();
   home.hide();
@@ -688,6 +719,7 @@ function exitToMenu(): void {
   arenaUnlimited = new Set();
   arenaMaxHealth = 20; arenaHpPerHeart = 2;
   world.setArenaRenderBounds(null);
+  rsClient.exit();
   duelSpectating = false;
   hideLoading();
   duelResultEl.classList.remove('visible');
@@ -701,7 +733,7 @@ function exitToMenu(): void {
   partyVisuals.clear();
   interaction.clear();
   healUse.cancel();
-  inventory.restore({ slots: new Array(36).fill(null), armor: new Array(4).fill(null), selected: 0 });
+  inventory.restore([], 0);
   damageNumbers.clear();
   killBanner.clear();
   killChipEl.classList.remove('visible');
@@ -723,10 +755,10 @@ net.onLeftWorld = () => exitToMenu();
 
 // ── Remote edits, hits and movement corrections ────────────────────────────
 
-net.onEdit = (x, y, z, b) => world.applyRemoteEdit(x, y, z, b);
+net.onEdit = (x, y, z, b) => world.setBlock(x, y, z, b);
 net.onEditBatch = (edits) => {
   world.beginBatch();
-  for (const e of edits) world.applyRemoteEdit(e.x, e.y, e.z, e.block);
+  for (const e of edits) world.setBlock(e.x, e.y, e.z, e.block);
   world.endBatch();
 };
 net.onTeleport = (x, y, z) => {
@@ -742,6 +774,11 @@ net.onSelfHealth = (health) => {
 net.onRespawned = (x, y, z, h) => {
   if (match?.kind === 'pg') held.setBowDraw(0);
   player.respawn({ x, y, z });
+  // Every Bridge respawn (void, own portal, goal reset) faces down the span.
+  if (match?.kind === 'pg' && pgSub?.game === 'bridge') {
+    player.yaw = Math.atan2(0, -((pgSub.minZ + pgSub.maxZ) / 2 - z));
+    player.pitch = 0;
+  }
   player.maxHealth = arenaMaxHealth;
   player.health = h;
   lastHealth = h;
@@ -913,8 +950,8 @@ net.onShot = (id, item, x, y, z, dx, dy, dz) => {
   const dir = new THREE.Vector3(dx, dy, dz);
   if (dir.lengthSq() < 1e-6) return;
   dir.normalize();
-  for (let i = 0; i < Math.max(1, gun.pellets ?? 1); i++) projectiles.fireGhost(origin, spreadDir(dir, gun.spread ?? 0), gun);
-  audio.gun(origin, gunFeel(item).kick);
+  projectiles.fireGhost(origin, dir, gun);
+  audio.gun(origin);
   remotePlayers.muzzleFlash(id);
 };
 net.onKillfeed = (killer, victim) => { if (match?.kind === 'duel') pushDuelKill(killer, victim); };
@@ -935,15 +972,6 @@ let zoomTarget = ZOOM_DEFAULT;
 let zoomAmount = 1;
 let fovNoZoom = FOV;
 
-function spreadDir(dir: THREE.Vector3, spread: number): THREE.Vector3 {
-  if (spread <= 0) return dir.clone();
-  const up = Math.abs(dir.y) < 0.99 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
-  const right = new THREE.Vector3().crossVectors(dir, up).normalize();
-  const realUp = new THREE.Vector3().crossVectors(right, dir).normalize();
-  const ang = Math.random() * Math.PI * 2;
-  const mag = Math.tan(spread) * Math.sqrt(Math.random());
-  return dir.clone().addScaledVector(right, Math.cos(ang) * mag).addScaledVector(realUp, Math.sin(ang) * mag).normalize();
-}
 function fireVolley(stack: ItemStack, gun: GunInfo): boolean {
   const loaded = stack.loaded ?? gun.mag;
   if (loaded <= 0) return false;
@@ -951,13 +979,12 @@ function fireVolley(stack: ItemStack, gun: GunInfo): boolean {
   inventory.version++;
   const base = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
   const eye = player.eyePosition;
-  for (let i = 0; i < Math.max(1, gun.pellets ?? 1); i++) projectiles.fire(eye, spreadDir(base, gun.spread ?? 0), gun);
+  projectiles.fire(eye, base, gun);
   net.sendShot(eye.x, eye.y, eye.z, base.x, base.y, base.z, stack.id);
   held.recoil();
   heldSwingSeq = (heldSwingSeq + 1) & 0xffff;
-  const feel = gunFeel(stack.id);
-  audio.gun(player.eyePosition, feel.kick);
-  if (feel.shake > 0) triggerShake(0.11, feel.shake);
+  audio.gun(player.eyePosition);
+  triggerShake(0.11, GUN_FEEL.shake);
   return true;
 }
 function tryFire(stack: ItemStack, gun: GunInfo): void {
@@ -987,13 +1014,12 @@ const healGlowEl = document.getElementById('heal-glow') as HTMLDivElement;
 const heartsEl = document.getElementById('hearts') as HTMLCanvasElement;
 const healTallyEl = document.getElementById('heal-tally') as HTMLDivElement;
 const healBurstEl = document.getElementById('heal-burst') as HTMLDivElement;
-let healGlow = 0, healBuff = 0, heartsSqueeze = 0, healBeatCount = 0, healMedkitBuff = false;
+let healGlow = 0, healBuff = 0, heartsSqueeze = 0, healBeatCount = 0;
 let healTally = 0, healTallyFade = 0, healTickStep = 0, healSpiralT = 0, healPulseT = 0, useBarDoneT = 0;
 
 function renderHealTally(): void {
   if (healTally <= 0) { healTallyEl.dataset.show = ''; return; }
   healTallyEl.dataset.show = '1';
-  healTallyEl.dataset.medkit = healMedkitBuff ? '1' : '';
   healTallyEl.textContent = `+${healTally}`;
   healTallyEl.classList.remove('bump');
   void healTallyEl.offsetWidth;
@@ -1008,9 +1034,7 @@ function beginHealUse(): void {
   healUse.start(stack.id, inventory.selected);
   healBeatCount = 0;
   useBarDoneT = 0;
-  const medkit = stack.id === Item.Medkit;
-  audio.healStart(medkit);
-  useBarEl.dataset.medkit = medkit ? '1' : '';
+  audio.healStart();
   useBarEl.classList.remove('done');
   held.swing();
 }
@@ -1024,38 +1048,33 @@ function finishHealUse(id: number): void {
   if (!heal || inventory.selectedStack?.id !== id) return;
   inventory.consumeSelected(1);
   net.sendUseHeal(id);
-  const medkit = id === Item.Medkit;
-  audio.heal(medkit);
+  audio.heal();
   healBuff = heal.duration;
-  healMedkitBuff = medkit;
   healTally = 0; healTickStep = 0; healTallyFade = 0;
-  healGlow = Math.max(healGlow, medkit ? 1 : 0.65);
-  heartsSqueeze = medkit ? 0.3 : 0.16;
+  healGlow = 1;
+  heartsSqueeze = 0.3;
   useBarDoneT = 0.42;
   useBarEl.classList.add('done');
-  particles.heal(player.pos.x, player.pos.y + 1, player.pos.z, medkit ? 30 : 14, medkit);
-  if (medkit) {
-    particles.healRing(player.pos.x, player.pos.y + 0.9, player.pos.z);
-    fovPunch = accessibility.reducedMotion ? 0 : 7;
-    triggerShake(0.18, 0.05);
-    if (!accessibility.photosensitivitySafe) {
-      healBurstEl.classList.remove('go');
-      void healBurstEl.offsetWidth;
-      healBurstEl.classList.add('go');
-    }
-    healSpiralT = 0; healPulseT = 0.9;
+  particles.heal(player.pos.x, player.pos.y + 1, player.pos.z, 30);
+  particles.healRing(player.pos.x, player.pos.y + 0.9, player.pos.z);
+  fovPunch = accessibility.reducedMotion ? 0 : 7;
+  triggerShake(0.18, 0.05);
+  if (!accessibility.photosensitivitySafe) {
+    healBurstEl.classList.remove('go');
+    void healBurstEl.offsetWidth;
+    healBurstEl.classList.add('go');
   }
+  healSpiralT = 0; healPulseT = 0.9;
 }
 function updateHealFeel(dt: number, active: boolean): void {
   if (healUse.active) {
     const stack = inventory.selectedStack;
     if (!active || inventory.selected !== healUse.slot || stack?.id !== healUse.itemId) cancelHealUse();
     else {
-      const medkit = healUse.itemId === Item.Medkit;
       const step = healUse.tick(dt);
       for (let i = 0; i < step.beats; i++) {
-        audio.healBeat(healBeatCount++, medkit);
-        particles.heal(player.pos.x, player.pos.y + 1.1, player.pos.z, medkit ? 5 : 3, medkit);
+        audio.healBeat(healBeatCount++);
+        particles.heal(player.pos.x, player.pos.y + 1.1, player.pos.z, 5);
         useBarEl.classList.remove('beat');
         void useBarEl.offsetWidth;
         useBarEl.classList.add('beat');
@@ -1071,12 +1090,12 @@ function updateHealFeel(dt: number, active: boolean): void {
     useBarLabel.textContent = `${name} · ${Math.max(0, healUse.duration - healUse.elapsed).toFixed(1)}s`;
   } else if (useBarDoneT > 0) {
     useBarFill.style.width = '100%';
-    useBarLabel.textContent = healMedkitBuff ? 'STIM IN — REGENERATING' : 'APPLIED';
+    useBarLabel.textContent = 'STIM IN — REGENERATING';
   } else {
     useBarEl.style.display = 'none';
     useBarEl.classList.remove('done');
   }
-  if (healBuff > 0 && healMedkitBuff) {
+  if (healBuff > 0) {
     healSpiralT -= dt;
     if (healSpiralT <= 0) { healSpiralT = 0.09; particles.healSpiral(player.pos.x, player.pos.y + 0.15, player.pos.z, worldTimeLocal * 5.5); }
     healPulseT -= dt;
@@ -1100,30 +1119,28 @@ function onHealthRestored(amount: number): void {
   if (healBuff <= 0 || amount <= 0) return;
   healTally += amount;
   renderHealTally();
-  if (healMedkitBuff) audio.healTick(1, healTickStep++);
-  else audio.healTick(1 + Math.min(0.5, player.health / Math.max(1, player.maxHealth)));
+  audio.healTick(healTickStep++);
   healGlow = Math.min(1, healGlow + 0.22);
   heartsSqueeze = 0.16;
-  particles.heal(player.pos.x, player.pos.y + 1, player.pos.z, 4, healMedkitBuff);
+  particles.heal(player.pos.x, player.pos.y + 1, player.pos.z, 4);
 }
 
 /** Duels' Bounce Pad: a single-use ~20-block launch straight up. */
 function useBouncePad(): void {
-  const def = gadgetOf(Item.JumpBoost);
-  if (!def || !gadgetCd.ready(def.item, worldTimeLocal)) return;
+  if (worldTimeLocal < bouncePadReadyAt) return;
   let supportY = -1;
   const bx = Math.floor(player.pos.x), bz = Math.floor(player.pos.z);
   for (let y = Math.min(255, Math.floor(player.pos.y) - 1); y >= 0; y--) {
     if (isSolid(world.getBlock(bx, y, bz))) { supportY = y; break; }
   }
   if (supportY < 0 || player.pos.y - (supportY + 1) > 10) { toast('Bounce Pad needs ground within 10 blocks below you.', 2000); return; }
-  gadgetCd.use(def.item, worldTimeLocal);
+  bouncePadReadyAt = worldTimeLocal + 0.5;
   inventory.consumeSelected(1);
   player.vel.y = 36;
   player.onGround = false;
   player.momentumTime = Math.max(player.momentumTime, 1.8);
   player.fallDistance = 0;
-  held.gadgetAction('bounce');
+  held.bounce();
   heldSwingSeq = (heldSwingSeq + 1) & 0xffff;
   audio.bouncePad();
   triggerShake(0.22, 0.035);
@@ -1539,7 +1556,7 @@ net.onDuelState = (snapshot) => {
   if (snapshot.phase !== 'lobby') { playDuelFeed(snapshot.feed); if (duelScoresHeld) renderDuelScoreboard(); }
 };
 net.onDuelLoadout = (slots, selected) => {
-  inventory.restore({ slots, armor: new Array(4).fill(null), selected });
+  inventory.restore(slots, selected);
   arenaUnlimited = new Set<number>([Block.OakPlanks, Item.Bullet]);
   fireCooldown = 0; reloadTimer = 0; burstRemaining = 0; healUse.cancel();
 };
@@ -1657,7 +1674,7 @@ net.onPgLoadout = (slots, selected) => {
   held.setBowDraw(0);
   partySwingAt = -1e9; partyShotAt = -1e9;
   partyUI.bowReadyAt = 0;
-  inventory.restore({ slots, armor: new Array(4).fill(null), selected });
+  inventory.restore(slots, selected);
   fireCooldown = 0; reloadTimer = 0; burstRemaining = 0; healUse.cancel();
 };
 net.onPgHit = (target, amount, combo, _charge, crit, killed, ranged) => {
@@ -1687,6 +1704,61 @@ net.onPgArrowEnd = (id, x, y, z, hit) => {
 net.onPgResult = () => {
   if (match?.kind === 'pg') { screen = 'results'; input.unlock(); pauseEl.style.display = 'none'; }
 };
+
+// ── Rat and Seek ───────────────────────────────────────────────────────────
+
+net.onRsArena = (spec, role, spawn, yaw) => {
+  duelSnapshot = null; duelResultData = null; duelResultEl.classList.remove('visible');
+  pgSnapshot = null; pgSub = null; partyUI.setVisible(false);
+  arenaMaxHealth = 20; arenaHpPerHeart = 2; remotePlayers.maxHealth = 20;
+  arenaCanPlaceAt = null; arenaCanEditAt = null; arenaClampPos = null;
+  arenaUnlimited = new Set();
+  player.maxHealth = 20; player.health = 20; lastHealth = 20;
+  player.yaw = yaw;
+  rsClient.enter(role);
+  enterMatchWorld(spec, 'rs', 'ratseek', spawn);
+};
+net.onRsState = (s) => {
+  if (match?.kind !== 'rs') return;
+  rsClient.onState(s);
+  if (!rsClient.canPickSeeker()) seekerPick?.abort();
+};
+net.onRsKit = (slots, selected) => inventory.restore(slots, selected ?? inventory.selected);
+net.onRsFx = (fx) => rsClient.applyFx(fx);
+net.onRsTitle = (title, sub, color, ms) => rsClient.title(title, sub, color, ms);
+net.onRsBar = (text, color) => rsClient.bar(text, color);
+net.onRsMsg = (text, color) => rsClient.message(text, color);
+net.onRsSound = (kind, at) => rsClient.sound(kind, at);
+net.onRsImpulse = (vx, vy, vz, momentum) => rsClient.impulse(vx, vy, vz, momentum);
+net.onRsResult = (result) => {
+  if (match?.kind !== 'rs') return;
+  rsClient.noteResult(result);
+  // No results screen: the server has put everyone round the backyard podium
+  // and sends us back to the menu after a few seconds.
+  player.yaw = result.podium.some((p) => p.id === net.myId) ? 0 : Math.PI;
+  player.pitch = 0;
+};
+
+/** Rat and Seek clicks: a seeker's swing, and right-click item use. */
+function updateRatSeekInput(lookDir: THREE.Vector3, eye: THREE.Vector3): void {
+  const stack = inventory.selectedStack;
+  if (input.leftClicked) {
+    held.swing();
+    if (rsClient.role === 'human' && rsClient.phase() === 'hunting') {
+      const hit = rsClient.targetUnderCrosshair(eye, lookDir, RS.REACH + 0.3);
+      if (hit) { net.sendRsHit(hit.id, hit.decoy); remotePlayers.hurtFlash(hit.id, 0.4); }
+    }
+  }
+  if (input.rightClicked) {
+    if (stack && isClassBadge(stack.id)) { rsClient.openPicker(); return; }
+    if (stack?.id === Item.SeekerPicker) { openSeekerPick(); return; }
+    const t = interaction.target;
+    net.flushXform(player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch,
+      player.sneaking, stack?.id ?? 0, heldSwingSeq, false, false);
+    net.sendRsUse(inventory.selected, t ? { x: t.x, y: t.y, z: t.z, nx: t.nx, ny: t.ny, nz: t.nz } : undefined);
+    if (stack) held.swing();
+  }
+}
 
 function updatePartyWeapon(heldId: number, lookDir: THREE.Vector3, eye: THREE.Vector3): void {
   const now = performance.now();
@@ -1757,6 +1829,7 @@ function updatePartyFrame(dt: number): void {
 
 /** Nothing the keyboard does counts while the match holds everybody still. */
 function controlBlocked(): boolean {
+  if (match?.kind === 'rs') return rsClient.frozen() || screen === 'results';
   if (match?.kind === 'pg') return pgSnapshot?.phase !== 'running' || pgCaged();
   if (match?.kind === 'duel') return !duelSnapshot || duelSnapshot.phase === 'countdown' || duelSnapshot.phase === 'results' || screen === 'results';
   return true;
@@ -1813,7 +1886,7 @@ function invalidateSelfAvatar(): void {
   selfBody = null;
 }
 function updateSelfAvatar(dt: number): void {
-  if (view === View.First || duelSpectating || !match) { hideSelfAvatar(); return; }
+  if (view === View.First || duelSpectating || !match || rsClient.selfIsRat()) { hideSelfAvatar(); return; }
   if (!selfBody) { selfBody = buildAvatarBody({ ...myCosmetics }); scene.add(selfBody.group); }
   const b = selfBody;
   b.group.visible = true;
@@ -1824,8 +1897,8 @@ function updateSelfAvatar(dt: number): void {
     selfHeldId = heldId;
     if (selfHeldMesh) { selfHeldMesh.parent?.remove(selfHeldMesh); selfHeldMesh = null; }
     if (heldId > 0 && ITEMS[heldId]) {
-      const mesh = isGunItem(heldId) ? createGunModel(heldId)
-        : isModeledGadget(heldId) ? createGadgetModel(heldId)
+      const mesh = isGunItem(heldId) ? createGunModel()
+        : isModeledGadget(heldId) ? createGadgetModel()
         : new THREE.Mesh(itemGeometry(atlas, heldId), selfItemMat);
       if (isGunItem(heldId)) poseGunModel(mesh, 'avatar');
       else if (isModeledGadget(heldId)) poseGadgetModel(mesh, 'avatar');
@@ -1838,7 +1911,6 @@ function updateSelfAvatar(dt: number): void {
   const sneakTarget = player.sneaking ? 1 : 0;
   selfSneakT += (sneakTarget - selfSneakT) * Math.min(1, 12 * dt);
   applyAvatarSneak(b, selfSneakT);
-  b.group.rotation.x = 0; b.group.rotation.z = 0;
   b.head.rotation.x = player.pitch + selfSneakT * 0.12;
   const hspeed = Math.hypot(player.vel.x, player.vel.z);
   selfWalkPhase += Math.min(hspeed, 7) * dt * 2.4;
@@ -1850,7 +1922,7 @@ function updateSelfAvatar(dt: number): void {
     const reloadProgress = reloadTimer > 0 && reloadDuration > 0 ? 1 - reloadTimer / reloadDuration : -1;
     poseGunHold(b, selfHeldMesh, { pitch: player.pitch, aim: aimZoom > 1 ? 1 : 0,
       reload: reloadProgress >= 0 ? Math.sin(reloadProgress * Math.PI) : 0, kick: held.recoilAmount() });
-  } else if (isModeledGadget(selfHeldId) && !isOneHandModel(selfHeldId)) {
+  } else if (isModeledGadget(selfHeldId)) {
     const action = held.recoilAmount();
     b.parts[2].rotation.x = 0.45 + action * 0.18; b.parts[3].rotation.x = 0.62 + action * 0.48;
     b.parts[2].rotation.z = -0.18; b.parts[3].rotation.z = 0.08;
@@ -1858,16 +1930,17 @@ function updateSelfAvatar(dt: number): void {
 }
 
 function updateAtmosphere(activeCamera: THREE.Camera): void {
-  world.applySky(sky, true);
+  world.applySky(sky);
   postfx.setSky(sky, activeCamera);
   world.timeUniform.value = (performance.now() / 1000) % 4096;
   const fog = scene.fog as THREE.Fog;
-  world.underwaterUniform.value.x = 0;
   // A match presents a clear, bright arena: a soft haze on the far walls,
   // never a dark corner.
   fog.color.copy(sky.skyColor);
   fog.near = 34;
   fog.far = Math.min(68, FOG_FAR);
+  const rsFog = match?.kind === 'rs' ? rsClient.fog() : null;
+  if (rsFog) { fog.near = rsFog.near; fog.far = rsFog.far; fog.color.setRGB(0, 0, 0); }
   (scene.background as THREE.Color).copy(fog.color);
 }
 
@@ -1891,7 +1964,7 @@ function frame(): void {
     home.tick();
     backdrop.update(dt);
     backdrop.render(renderer);
-    touch?.update({ shown: false, playing: false, gun: false, vehicle: false, vehicleLabel: 'EXIT', rope: false });
+    touch?.update({ shown: false, playing: false, gun: false });
     input.endFrame();
     return;
   }
@@ -1920,8 +1993,8 @@ function frame(): void {
   }
 
   const controlling = input.locked && !controlBlocked() && screen === 'playing';
-  player.energyDrainMult = match.kind === 'pg' ? 0 : 1;
-  if (match.kind === 'pg') { player.energy = 1; player.exhausted = false; }
+  player.energyDrainMult = match.kind === 'duel' ? 1 : 0;
+  if (match.kind !== 'duel') { player.energy = 1; player.exhausted = false; }
 
   if (controlling) {
     if (input.debugToggled) hud.toggleDebug();
@@ -1978,6 +2051,10 @@ function frame(): void {
     aimZoom = controlling && !!g?.zoom && input.rightDown ? g!.zoom! : 1;
   }
   updateCamera();
+  if (match.kind === 'rs') {
+    camera.rotation.z += rsClient.nausea();
+    if (rsClient.introCamera(camera)) view = View.First;
+  }
   updateShake(dt);
 
   if (controlling && !duelSpectating) {
@@ -1985,7 +2062,10 @@ function frame(): void {
     const eye = player.eyePosition;
     const heldStack = inventory.selectedStack;
     const heldGun = heldStack ? ITEMS[heldStack.id]?.gun : undefined;
-    if (!heldStack || healUse.active) {
+    if (match.kind === 'rs') {
+      updateRatSeekInput(lookDir, eye);
+      interaction.update(dt, input, camera, true, true);
+    } else if (!heldStack || healUse.active) {
       interaction.update(dt, input, camera, true, true);
     } else if (pgWeaponsActive() && (heldStack.id === Item.IronAxe || heldStack.id === Item.BridgeBow)) {
       updatePartyWeapon(heldStack.id, lookDir, eye);
@@ -2022,9 +2102,9 @@ function frame(): void {
 
   const activeCamera: THREE.Camera = view === View.First ? camera : viewCamera;
   updateSelfAvatar(dt);
-  world.update(player.pos.x, player.pos.z, 6, match.kind === 'pg' ? 10 : 3);
-  const tod = match.kind === 'pg' && pgSub ? parkourTheme(pgSub.seed).time : 0.25;
-  sky.update(dt, activeCamera, tod, false);
+  world.update(player.pos.x, player.pos.z, 6, match.kind === 'pg' ? 10 : match.kind === 'rs' ? 5 : 3);
+  const tod = match.kind === 'pg' && pgSub ? parkourTheme(pgSub.seed).time : match.kind === 'rs' ? RS_TIME_OF_DAY : 0.25;
+  sky.update(dt, activeCamera, tod);
   updateAtmosphere(activeCamera);
   particles.update(dt, activeCamera);
   if (controlling) {
@@ -2035,6 +2115,10 @@ function frame(): void {
   projectiles.update(dt);
   updateCombatFeedback(dt);
   updatePartyFrame(dt);
+  if (match.kind === 'rs') {
+    const look = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+    rsClient.frame(dt, player.yaw, player.eyePosition, look, view !== View.First);
+  }
   damageNumbers.update(dt, activeCamera);
 
   audio.updateListener(activeCamera);
@@ -2043,8 +2127,10 @@ function frame(): void {
   lastHealth = player.health;
   updateHealFeel(dt, controlling && !duelSpectating);
 
-  const firstPersonActive = !duelSpectating && view === View.First && screen !== 'results';
+  const firstPersonActive = !duelSpectating && view === View.First && screen !== 'results' &&
+    !(match.kind === 'rs' && rsClient.phase() === 'intro');
   held.setActive(firstPersonActive);
+  held.setPaws(rsClient.selfIsRat());
   held.setItem(!duelSpectating ? inventory.selectedStack?.id ?? null : null);
   const reloadProgress = reloadTimer > 0 && reloadDuration > 0 ? 1 - reloadTimer / reloadDuration : -1;
   held.update(dt, controlling && interaction.breakingActive, sky.sunIntensity, aimZoom > 1, reloadProgress,
@@ -2059,7 +2145,7 @@ function frame(): void {
   const showHud = controlling || (screen === 'playing' && !duelSpectating);
   crosshair.style.display = controlling ? '' : 'none';
   hotbarEl.style.display = showHud ? 'flex' : 'none';
-  statusEl.style.display = showHud ? '' : 'none';
+  statusEl.style.display = showHud && match.kind !== 'rs' ? '' : 'none';
   hitmarkerEl.style.display = controlling ? '' : 'none';
   dmgArcWrap.style.display = controlling ? '' : 'none';
   const gunStack = controlling ? inventory.selectedStack : null;
@@ -2076,10 +2162,6 @@ function frame(): void {
     hpPerHeart: arenaHpPerHeart,
     energy: player.energy,
     exhausted: player.exhausted,
-    air: player.air,
-    maxAir: 15,
-    underwater: false,
-    armor: 0,
   });
   (document.getElementById('damage-flash') as HTMLDivElement).style.opacity = String(Math.min(0.35, player.damageFlash));
 
@@ -2092,10 +2174,10 @@ function frame(): void {
     const heldStack = inventory.selectedStack;
     const modData: HudModData = {
       fps, x: player.pos.x, y: player.pos.y, z: player.pos.z,
-      facing: facing.name, axis: facing.axis, time: '12:00', day: 1,
+      facing: facing.name, axis: facing.axis,
       speed: Math.hypot(player.vel.x, player.vel.z), biome: MODE_NAMES[match.mode],
       held: heldStack ? ITEMS[heldStack.id]?.name ?? '' : '',
-      players: net.remotes.size + 1, armor: 0, health: player.health, maxHealth: arenaMaxHealth,
+      players: net.remotes.size + 1, health: player.health, maxHealth: arenaMaxHealth,
     };
     hudMods.update(modData);
   }
@@ -2113,7 +2195,7 @@ function frame(): void {
     const hs = inventory.selectedStack;
     touch.update({
       shown: screen === 'playing', playing: input.locked && screen === 'playing',
-      gun: !duelSpectating && !!(hs && ITEMS[hs.id]?.gun), vehicle: false, vehicleLabel: 'EXIT', rope: false,
+      gun: !duelSpectating && !!(hs && ITEMS[hs.id]?.gun),
     });
   }
   input.endFrame();
