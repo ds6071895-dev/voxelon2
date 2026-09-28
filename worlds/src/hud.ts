@@ -76,6 +76,7 @@ export class HUD {
     for (let i = 0; i < HOTBAR_SIZE; i++) {
       const slot = document.createElement('div');
       slot.className = 'slot';
+      slot.dataset.slot = String(i);
       const icon = document.createElement('canvas');
       icon.width = 32;
       icon.height = 32;
@@ -101,7 +102,7 @@ export class HUD {
     // Item name popup above the hotbar, like vanilla. `hud-themed` puts it on
     // the same font and colour as the rest of the HUD (Pause -> HUD Settings).
     this.nameEl = document.createElement('div');
-    this.nameEl.className = 'mc-font hud-themed';
+    this.nameEl.className = 'item-name mc-font hud-themed';
     this.nameEl.style.cssText =
       'position:absolute;bottom:70px;left:50%;transform:translateX(-50%);' +
       'font-size:calc(16px * var(--hud-scale));z-index:10;pointer-events:none;' +
@@ -116,7 +117,11 @@ export class HUD {
     if (this.inventory.version === this.renderedVersion) return;
     const selectionChanged = this.inventory.selected !== this.lastSelected;
     this.refresh();
-    if (selectionChanged) this.showName();
+    if (selectionChanged) {
+      this.showName();
+      if (document.documentElement.classList.contains('touch-ui'))
+        this.slots[this.inventory.selected].scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
   }
 
   private refresh(): void {
@@ -125,6 +130,8 @@ export class HUD {
     for (let i = 0; i < HOTBAR_SIZE; i++) {
       const stack = this.inventory.slots[i];
       this.slots[i].classList.toggle('selected', i === this.inventory.selected);
+      this.slots[i].classList.toggle('empty', !stack);
+      this.slots[i].setAttribute('aria-label', stack ? ITEMS[stack.id]?.name ?? 'Item' : 'Empty slot');
       if (stack) {
         renderItemIcon(this.icons[i], this.atlasCanvas, stack.id);
         this.counts[i].textContent = stack.count > 1 ? String(stack.count) : '';

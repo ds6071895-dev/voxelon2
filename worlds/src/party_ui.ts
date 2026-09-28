@@ -1,3 +1,4 @@
+import { isTouchDevice } from './touch';
 import { parkourTheme } from './parkour_themes';
 import {
   BRIDGE_GOAL_LIMIT, BRIDGE_TEAM_NAME, partyGame, parkourCatchUp, parkourCourse, parkourLength,
@@ -39,6 +40,7 @@ export class PartyUI {
   onGoal?: (mine: boolean, team: number, matchPoint: boolean) => void;
   private snapshot: PartyLobbySnapshot | null = null;
   private me = 0;
+  private readonly touch = isTouchDevice();
   private lastPhase = '';
   private lastRound = '';
   private lastGoal = 0;
@@ -87,6 +89,8 @@ export class PartyUI {
       : course
         ? `${PARKOUR_MODE_INFO[course.variant.mode].title} · ${PARKOUR_LAYOUT_TITLE[course.variant.layout]} · ${course.variant.deck.title}`
         : 'PARKOUR';
+    this.root.dataset.mode = s.mode;
+    if (this.touch) this.progress.textContent = bridge ? 'THE BRIDGE' : course ? PARKOUR_MODE_INFO[course.variant.mode].title : 'PARKOUR';
     this.renderScore(s, bridge);
     const running = s.phase === 'running';
     this.standings.replaceChildren(...this.order(s).map(p => {
@@ -348,7 +352,7 @@ export class PartyUI {
           text += ` · ${'♥'.repeat(Math.max(0, p?.lives ?? 0))}${'♡'.repeat(Math.max(0, COLLAPSE_LIVES - (p?.lives ?? 0)))}`;
           text += t < COLLAPSE_GRACE_MS ? ` · COLLAPSE IN ${Math.ceil((COLLAPSE_GRACE_MS - t) / 1000)}` : ` · COLLAPSE ${Math.max(0, Math.floor(gap))} PADS BEHIND`;
         } else {
-          text += ` · CHECKPOINT ${p?.checkpoint ?? 0} · ${p?.falls ?? 0} FALLS · R TO RETRY`;
+          text += this.touch ? ` · CP ${p?.checkpoint ?? 0}` : ` · CHECKPOINT ${p?.checkpoint ?? 0} · ${p?.falls ?? 0} FALLS · R TO RETRY`;
           if (mode === 'void') {
             const here = course.steps[p?.progress ?? 0]?.[0];
             const below = here ? here.y - parkourVoidY(course, t) : 0;
@@ -360,7 +364,7 @@ export class PartyUI {
       }
       else if (s.goalResetAt && serverNow < s.goalResetAt)
         text += ' · BACK IN YOUR CAGE · THE HATCH DROPS ON GO';
-      else
+      else if (!this.touch)
         text += ` · CROSS THE SPAN · DIVE INTO THE ${BRIDGE_TEAM_NAME[1 - (p?.team ?? 0)]} PORTAL`;
       if (s.round.game === 'bridge')
         text += localNow < this.bowReadyAt ? ` · BOW ${Math.ceil((this.bowReadyAt - localNow) / 1000)}s` : ' · BOW READY';

@@ -815,6 +815,14 @@ export class RemotePlayers {
     return this.avatars.get(id)?.group.position ?? null;
   }
 
+  /** Visible body centre for touch aim assistance (never hidden avatars). */
+  aimPoint(id: number): THREE.Vector3 | null {
+    const av = this.avatars.get(id);
+    if (!av?.group.visible || this.net.remotes.get(id)?.dead) return null;
+    const [, height] = this.dims(id);
+    return new THREE.Vector3(av.dx, av.dy + height * .55, av.dz);
+  }
+
   /** Mark which avatar the local crosshair is over (-1 = none). */
   setHovered(id: number): void { this.hovered = id; }
 

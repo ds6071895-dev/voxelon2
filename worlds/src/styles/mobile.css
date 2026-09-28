@@ -1,0 +1,61 @@
+/* Match the actual touch-controller detection, including touchscreen tablets. */
+html.touch-ui, .touch-ui body { touch-action:auto; }
+.touch-ui canvas.game { touch-action:none; }
+.touch-ui #hotbar { pointer-events:auto; --hotbar-slot:48px; max-width:calc(100vw - var(--safe-left) - var(--safe-right) - 24px);
+  overflow-x:auto; overflow-y:hidden; touch-action:pan-x; scrollbar-width:none; padding:7px 4px 4px; }
+.touch-ui #hotbar::-webkit-scrollbar { display:none; }
+.touch-ui .slot { flex:0 0 48px; height:48px; touch-action:pan-x; }
+.touch-ui .slot.empty { display:none; }
+.touch-ui #hotbar:not(:has(.slot:not(.empty))) { display:none !important; }
+.touch-ui #status { width:202px; bottom:calc(76px + var(--safe-bottom)); transform:translateX(-50%); }
+.touch-ui #energybar { bottom:-10px; height:10px; }
+.touch-ui #ammo { bottom:28px; font-size:14px; }
+.touch-ui .item-name { bottom:calc(114px + var(--safe-bottom)) !important; max-width:50vw; text-align:center; font-size:12px !important; }
+.touch-ui .duel-match-hud { top:calc(8px + var(--safe-top)); width:calc(100% - 132px); gap:4px; }
+.touch-ui .duel-clock { padding:6px 10px; }
+.touch-ui .duel-pill { padding:4px 7px; }
+.touch-ui .duel-pill:not(.me) { display:none; }
+.touch-ui .duel-killfeed, .touch-ui .duel-chip { display:none !important; }
+.touch-ui .duel-scores-touch.visible { display:block; top:calc(8px + var(--safe-top)); right:auto;
+  left:calc(12px + var(--safe-left)); min-width:48px; min-height:48px; padding:8px; font-size:10px; }
+.touch-ui .duel-scoreboard { padding:12px; }
+.touch-ui .duel-score-panel { max-height:calc(100dvh - 24px); overflow-y:auto; }
+.touch-ui .pg-progress { top:calc(8px + var(--safe-top)); max-width:calc(100vw - 140px); font-size:11px; padding:4px 8px; }
+.touch-ui .pg-score { top:calc(34px + var(--safe-top)); padding:4px; gap:4px; }
+.touch-ui .pg-team { min-width:64px; padding:4px; gap:4px; }
+.touch-ui .pg-team-name { font-size:9px; letter-spacing:1px; }
+.touch-ui .pg-team-you, .touch-ui .pg-team-split { display:none; }
+.touch-ui .pg-scoreline b { font-size:21px; }
+.touch-ui .pg-pips i { width:8px; height:8px; }
+.touch-ui .pg-standings { display:none; }
+.touch-ui .pg-call { bottom:auto; top:calc(92px + var(--safe-top)); max-width:calc(100vw - 130px);
+  width:max-content; font-size:11px; line-height:1.35; }
+.touch-ui .pg-hud[data-mode="parkour"] .pg-call { top:calc(36px + var(--safe-top)); }
+.touch-ui .pg-banner { max-width:calc(100vw - 32px); }
+.touch-ui .pg-banner-title { font-size:24px; }
+.touch-ui .pg-card { max-height:calc(100dvh - 24px); overflow-y:auto; touch-action:pan-y; }
+.touch-ui .rs-top { top:calc(8px + var(--safe-top)); max-width:calc(100vw - 132px); gap:4px; }
+.touch-ui .rs-sidebar, .touch-ui .rs-feed { display:none; }
+.touch-ui .rs-clock { padding:6px 10px; }
+.touch-ui .rs-clock strong { font-size:18px; }
+.touch-ui .rs-pill { padding:4px 6px; font-size:10px; }
+.touch-ui .rs-actionbar { bottom:auto; top:calc(96px + var(--safe-top)); max-width:calc(100vw - 120px);
+  white-space:normal; font-size:11px; padding:5px 8px; }
+.touch-ui .rs-picker-sheet, .touch-ui .rs-seeker-sheet { max-height:calc(100dvh - 32px); overflow-y:auto; touch-action:pan-y; }
+.touch-ui .w-home, .touch-ui .w-dialog, .touch-ui .pause-card, .touch-ui .sheet-card,
+.touch-ui .sheet-body, .touch-ui .hs-body { touch-action:pan-y; }
+.touch-ui :is(.w-home, .w-dialog, .pause-card, .sheet-card, .rs-picker) button { min-height:44px; }
+@media (orientation:landscape) {
+  .touch-ui #hotbar { max-width:calc(100vw - var(--safe-left) - var(--safe-right) - 300px); }
+  .touch-ui .item-name { display:none; }
+  .touch-ui .rs-actionbar { top:calc(88px + var(--safe-top)); }
+}
+/* Announcements can scale beyond the viewport during their entrance. */
+.touch-ui .pg-hud { overflow:hidden; }
+.rs-pocket { display:none; }
+.touch-ui .rs-pocket { display:block; position:absolute; bottom:calc(74px + var(--safe-bottom)); left:50%;
+  transform:translateX(-50%); max-width:calc(100vw - 32px); padding:4px 8px; border-radius:8px;
+  background:rgba(6,12,22,.7); color:#fff; font:700 11px/1.3 system-ui,sans-serif; text-align:center; }
+@media (orientation:portrait) {
+  .touch-ui .rs-actionbar { top:calc(120px + var(--safe-top)); }
+}

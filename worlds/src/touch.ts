@@ -1,378 +1,249 @@
-// On-screen touch controls (phones/tablets). Everything funnels into the SAME
-// Input fields the keyboard/mouse write, so gameplay code (player, interact,
-// guns, bows…) never special-cases touch:
-//
-//   · left virtual joystick  — move (8-way); push past the rim to sprint
-//   · drag anywhere else     — look around
-//   · tap                    — use / place / open (right-click)
-//   · long-press (and hold)  — mine / attack / fire (left button held)
-//   · JUMP button (hold)     — jump, swim up
-//   · SNEAK toggle           — sneak on/off
-//   · gun cluster            — FIRE (hold) / AIM toggle (ADS) / R reload,
-//                              shown only while a gun is selected
-//   · top-right utility row  — pause
-//   · tap a hotbar slot      — select it
-//
-// The whole overlay only exists on touch devices (isTouchDevice()).
-
+// Touch controls write the same input fields as keyboard/mouse gameplay.
 import { Input } from './input';
 import { iconSvg } from './emoji_icons';
+import './styles/touch.css';
 
 export function isTouchDevice(): boolean {
   return typeof window !== 'undefined' &&
-    (window.matchMedia?.('(pointer: coarse)').matches ||
-      (navigator.maxTouchPoints ?? 0) > 1);
+    (window.matchMedia?.('(pointer: coarse)').matches || (navigator.maxTouchPoints ?? 0) > 1);
 }
 
-/** What main.ts tells the overlay each frame. */
-interface TouchState {
-  /** In the game world (not the title screen). Shows the utility row. */
+export interface TouchState {
   shown: boolean;
-  /** Actively controlling (locked, alive, no menu). Shows the pads. */
   playing: boolean;
-  /** A gun is selected — show the FIRE/AIM/RELOAD cluster. */
   gun: boolean;
+  /** Contextual primary action: gun, melee, bow, building or item use. */
+  action?: 'attack' | 'use' | 'build' | 'interact' | 'none';
+  label?: string;
+  retry?: boolean;
+  /** Changing a slot or mode must release actions held for the old item. */
+  context?: string;
 }
 
-interface TouchCallbacks {
-  /** The utility row's pause button — main.ts routes it through its own toggle. */
-  onPause(): void;
-}
-
-const LOOK_SENS = 2.3;      // css px -> mouseDX units (≈ mouse movementX feel)
-const TAP_MS = 260;         // max press time for a tap (use/place)
-const TAP_SLOP = 14;        // max finger travel (px) for a tap / long-press
-const HOLD_MS = 320;        // press-and-hold this long to start mining/attacking
-const DEAD = 0.28;          // joystick dead zone (fraction of radius)
-const SECTOR = 0.38;        // 8-way threshold (≈ sin 22.5°)
+const LOOK_SENS = 2.3;
+const TAP_SLOP = 14;
 
 export class TouchControls {
-  private readonly input: Input;
-  private readonly root: HTMLElement;
-  private readonly pads: HTMLElement;    // gameplay zones (joystick, look, buttons)
-  private readonly utils: HTMLElement;   // pause row
-  private readonly gunBox: HTMLElement;  // FIRE / AIM / RELOAD cluster
-  private readonly knob: HTMLElement;
-  private readonly sneakBtn: HTMLElement;
-  private readonly aimBtn: HTMLElement;
-
+  private root = document.createElement('div');
+  private pads = document.createElement('div');
+  private knob = document.createElement('div');
+  private primary: HTMLButtonElement;
+  private secondary: HTMLButtonElement;
+  private aim: HTMLButtonElement;
+  private reload: HTMLButtonElement;
+  private sneak: HTMLButtonElement;
+  private retry: HTMLButtonElement;
+  private state: TouchState = { shown: false, playing: false, gun: false };
+  private resets: (() => void)[] = [];
+  private actionResets: (() => void)[] = [];
   private aimOn = false;
-  private wasPlaying = false;
-
-  // Look-drag pointer bookkeeping (one finger; the stick tracks its own).
+  private stickId = -1;
   private lookId = -1;
-  private lookLastX = 0; private lookLastY = 0;
+  private lookX = 0;
+  private lookY = 0;
   private lookDist = 0;
   private lookStart = 0;
   private holdTimer = 0;
-  private holding = false; // long-press engaged -> leftDown until release
+  private attackSources = new Set<string>();
+  private useSources = new Set<string>();
 
-  // Joystick pointer bookkeeping.
-  private stickId = -1;
-
-  constructor(input: Input, cb: TouchCallbacks) {
-    this.input = input;
+  constructor(private input: Input, cb: { onPause(): void }) {
     input.touchMode = true;
-
-    const style = document.createElement('style');
-    style.textContent = `
-      #touch { position:absolute; inset:0; z-index:9; pointer-events:none; overflow:hidden;
-               user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
-      #touch { --edge-l: max(10px, env(safe-area-inset-left));
-               --edge-r: max(10px, env(safe-area-inset-right));
-               --edge-t: max(8px, env(safe-area-inset-top));
-               --edge-b: max(8px, env(safe-area-inset-bottom));
-               --stick-size: clamp(112px, 22vw, 150px); }
-      #touch * { touch-action:none; }
-      .t-look { position:absolute; inset:0; pointer-events:auto; }
-      .t-stick { position:absolute; left:calc(var(--edge-l) + 8px); bottom:calc(var(--edge-b) + 72px);
-                  width:var(--stick-size); height:var(--stick-size);
-                 border-radius:50%; background:rgba(255,255,255,0.06);
-                 border:2px solid rgba(255,255,255,0.22); pointer-events:auto; }
-      .t-knob { position:absolute; left:50%; top:50%; width:60px; height:60px;
-                margin:-30px 0 0 -30px; border-radius:50%;
-                background:rgba(255,255,255,0.28); border:2px solid rgba(255,255,255,0.45); }
-      .t-btn { position:absolute; pointer-events:auto; display:flex; align-items:center;
-               justify-content:center; border-radius:50%;
-               background:rgba(16,20,32,0.42); border:2px solid rgba(255,255,255,0.32);
-               color:#fff; font:bold 20px 'Lucida Console',Monaco,monospace;
-               text-shadow:0 1px 2px rgba(0,0,0,0.6); }
-      .t-btn.t-on { background:rgba(110,190,255,0.5); border-color:#bfe6ff; }
-      .t-sq { border-radius:10px; }
-      .t-jump { right:calc(var(--edge-r) + 8px) !important; bottom:calc(var(--edge-b) + 82px) !important;
-                width:clamp(68px,14vw,88px) !important; height:clamp(68px,14vw,88px) !important; }
-      .t-sneak { right:calc(var(--edge-r) + clamp(92px,19vw,118px)) !important;
-                 bottom:calc(var(--edge-b) + 22px) !important; }
-      .t-fire { right:calc(var(--edge-r) + clamp(96px,20vw,126px)) !important;
-                bottom:calc(var(--edge-b) + 110px) !important; }
-      .t-aim { right:calc(var(--edge-r) + 20px) !important; bottom:calc(var(--edge-b) + 194px) !important; }
-      .t-reload { right:calc(var(--edge-r) + clamp(118px,23vw,150px)) !important;
-                  bottom:calc(var(--edge-b) + 205px) !important; }
-      .t-utils { top:var(--edge-t) !important; right:var(--edge-r) !important;
-                 max-width:min(270px,calc(100vw - var(--edge-l) - var(--edge-r) - 16px));
-                 flex-wrap:wrap; justify-content:flex-end; }
-      @media (max-width:380px), (max-height:620px) {
-        #touch { --stick-size: 108px; }
-        .t-btn { transform:scale(.88); transform-origin:center; }
-        .t-utils { gap:4px !important; max-width:160px; }
-        .t-utils .t-btn { width:40px !important; height:40px !important; font-size:17px !important; }
-        .t-jump { bottom:calc(var(--edge-b) + 68px) !important; }
-        .t-fire { bottom:calc(var(--edge-b) + 92px) !important; }
-        .t-aim { bottom:calc(var(--edge-b) + 162px) !important; }
-        .t-reload { bottom:calc(var(--edge-b) + 170px) !important; }
-      }
-      @media (orientation:landscape) and (max-height:520px) {
-        #touch { --stick-size: clamp(96px,24vh,122px); }
-        .t-stick { bottom:calc(var(--edge-b) + 40px); }
-        .t-jump { bottom:calc(var(--edge-b) + 28px) !important; }
-        .t-sneak { right:calc(var(--edge-r) + 98px) !important; bottom:calc(var(--edge-b) + 8px) !important; }
-        .t-fire { right:calc(var(--edge-r) + 110px) !important; bottom:calc(var(--edge-b) + 72px) !important; }
-        .t-aim { right:calc(var(--edge-r) + 12px) !important; bottom:calc(var(--edge-b) + 118px) !important; }
-        .t-reload { right:calc(var(--edge-r) + 184px) !important; bottom:calc(var(--edge-b) + 80px) !important; }
-        .t-utils { max-width:280px; flex-wrap:nowrap; }
-      }
-    `;
-    document.head.appendChild(style);
-
-    const app = document.getElementById('app')!;
-    this.root = document.createElement('div');
+    document.documentElement.classList.add('touch-ui');
     this.root.id = 'touch';
-    this.root.style.display = 'none';
-    app.appendChild(this.root);
-
-    // --- look / tap / long-press layer (under the hotbar & HUD buttons) ---
-    this.pads = document.createElement('div');
-    this.pads.style.cssText = 'position:absolute;inset:0;pointer-events:none;';
+    this.root.hidden = true;
+    document.getElementById('app')!.appendChild(this.root);
+    this.pads.className = 't-pads';
     this.root.appendChild(this.pads);
-
     const look = document.createElement('div');
     look.className = 't-look';
     this.pads.appendChild(look);
-    look.addEventListener('pointerdown', (e) => this.lookDown(look, e));
-    look.addEventListener('pointermove', (e) => this.lookMove(e));
-    look.addEventListener('pointerup', (e) => this.lookUp(e, true));
-    look.addEventListener('pointercancel', (e) => this.lookUp(e, false));
+    look.addEventListener('pointerdown', e => {
+      if (!this.state.playing || e.pointerType !== 'touch' || this.lookId >= 0) return;
+      this.lookId = e.pointerId;
+      look.setPointerCapture(e.pointerId);
+      this.lookX = e.clientX; this.lookY = e.clientY;
+      this.lookDist = 0; this.lookStart = performance.now();
+      this.holdTimer = window.setTimeout(() => {
+        if (this.lookId === e.pointerId && this.lookDist < TAP_SLOP && this.state.playing)
+          this.press('look', false, true);
+      }, 320);
+      e.preventDefault();
+    });
+    look.addEventListener('pointermove', e => {
+      if (e.pointerId !== this.lookId) return;
+      this.dragLook(e.clientX - this.lookX, e.clientY - this.lookY);
+      this.lookDist += Math.abs(e.clientX - this.lookX) + Math.abs(e.clientY - this.lookY);
+      this.lookX = e.clientX; this.lookY = e.clientY;
+      e.preventDefault();
+    });
+    const lookEnd = (e: PointerEvent) => {
+      if (e.pointerId !== this.lookId) return;
+      if (e.type === 'pointerup' && !this.attackSources.has('look') &&
+          performance.now() - this.lookStart < 260 && this.lookDist < TAP_SLOP)
+        input.rightClicked = true;
+      this.lookId = -1;
+      clearTimeout(this.holdTimer);
+      this.press('look', false, false);
+    };
+    for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) look.addEventListener(type, lookEnd as EventListener);
 
-    // --- virtual joystick ---
     const stick = document.createElement('div');
     stick.className = 't-stick';
-    this.knob = document.createElement('div');
+    stick.setAttribute('aria-label', 'Move; push to the rim to sprint');
     this.knob.className = 't-knob';
     stick.appendChild(this.knob);
     this.pads.appendChild(stick);
-    stick.addEventListener('pointerdown', (e) => {
-      if (this.stickId >= 0) return;
-      this.stickId = e.pointerId;
-      stick.setPointerCapture(e.pointerId);
-      this.stickMove(stick, e);
-      e.preventDefault(); e.stopPropagation();
+    const move = (e: PointerEvent) => {
+      const r = stick.getBoundingClientRect(), radius = r.width / 2;
+      let dx = (e.clientX - r.left - radius) / radius, dy = (e.clientY - r.top - radius) / radius;
+      const mag = Math.hypot(dx, dy), scale = mag > 1 ? 1 / mag : 1;
+      this.knob.style.transform = `translate(${dx * scale * radius * .65}px, ${dy * scale * radius * .65}px)`;
+      if (mag < .22) { this.clearMove(); return; }
+      dx /= mag; dy /= mag;
+      input.tForward = dy < -.38; input.tBack = dy > .38;
+      input.tLeft = dx < -.38; input.tRight = dx > .38;
+      input.tSprint = input.tForward && mag >= .9;
+    };
+    stick.addEventListener('pointerdown', e => {
+      if (!this.state.playing || e.pointerType !== 'touch' || this.stickId >= 0) return;
+      this.stickId = e.pointerId; stick.setPointerCapture(e.pointerId); move(e); e.preventDefault();
     });
-    stick.addEventListener('pointermove', (e) => {
-      if (e.pointerId === this.stickId) { this.stickMove(stick, e); e.preventDefault(); }
-    });
-    const stickEnd = (e: PointerEvent): void => {
+    stick.addEventListener('pointermove', e => { if (e.pointerId === this.stickId) { move(e); e.preventDefault(); } });
+    const stickEnd = (e: PointerEvent) => {
       if (e.pointerId !== this.stickId) return;
-      this.stickId = -1;
-      this.resetStick();
+      this.stickId = -1; this.clearMove(); this.knob.style.transform = '';
     };
-    stick.addEventListener('pointerup', stickEnd);
-    stick.addEventListener('pointercancel', stickEnd);
+    for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) stick.addEventListener(type, stickEnd as EventListener);
 
-    // --- action buttons ---
-    // JUMP: hold-to-hold (swimming reads it too).
-    const jumpBtn = this.mkBtn(this.pads, iconSvg('chevronUp'), 'right:24px;bottom:104px;width:88px;height:88px;font-size:30px;');
-    jumpBtn.classList.add('t-jump');
-    this.hold(jumpBtn, (down) => { this.input.tJump = down; });
-    // SNEAK: a toggle (holding a toggle AND moving is awkward on glass).
-    this.sneakBtn = this.mkBtn(this.pads, iconSvg('chevronDown'), 'right:134px;bottom:40px;width:56px;height:56px;');
-    this.sneakBtn.classList.add('t-sneak');
-    this.tap(this.sneakBtn, () => {
-      this.input.tSneak = !this.input.tSneak;
-      this.sneakBtn.classList.toggle('t-on', this.input.tSneak);
+    const jump = this.button('t-jump', iconSvg('chevronUp'), 'Jump / swim up');
+    this.hold(jump, down => { input.tJump = down; });
+    this.sneak = this.button('t-sneak', iconSvg('chevronDown'), 'Sneak');
+    this.tap(this.sneak, () => {
+      input.tSneak = !input.tSneak;
+      this.sneak.classList.toggle('t-on', input.tSneak);
+      this.sneak.setAttribute('aria-pressed', String(input.tSneak));
     });
+    this.primary = this.button('t-primary', 'FIRE', 'Fire');
+    this.hold(this.primary, down => this.press('primary', this.state.action === 'use' || this.state.action === 'build' || this.state.action === 'interact', down), true);
+    this.secondary = this.button('t-secondary', 'BREAK', 'Break block');
+    this.hold(this.secondary, down => this.press('secondary', false, down), true);
+    this.aim = this.button('t-aim', 'AIM', 'Aim down sights');
+    this.tap(this.aim, () => this.setAim(!this.aimOn));
+    this.reload = this.button('t-reload', 'R', 'Reload');
+    this.tap(this.reload, () => { input.reloadPressed = true; });
+    this.retry = this.button('t-retry', 'RETRY', 'Return to checkpoint');
+    this.tap(this.retry, () => { input.reloadPressed = true; });
+    const pause = this.button('t-pause', iconSvg('pause'), 'Pause', this.root);
+    this.tap(pause, cb.onPause, false);
 
-    // Gun cluster (only visible while a gun is selected).
-    this.gunBox = document.createElement('div');
-    this.gunBox.style.cssText = 'position:absolute;inset:0;pointer-events:none;display:none;';
-    this.pads.appendChild(this.gunBox);
-    const fireBtn = this.mkBtn(this.gunBox, iconSvg('reticle'), 'right:126px;bottom:128px;width:78px;height:78px;font-size:28px;');
-    fireBtn.classList.add('t-fire');
-    this.hold(fireBtn, (down) => {
-        if (down) { this.input.leftClicked = true; this.input.leftDown = true; }
-        else this.input.leftDown = false;
-      });
-    this.aimBtn = this.mkBtn(this.gunBox, '⊕', 'right:36px;bottom:216px;width:58px;height:58px;font-size:24px;');
-    this.aimBtn.classList.add('t-aim');
-    this.tap(this.aimBtn, () => this.setAim(!this.aimOn));
-    const reloadBtn = this.mkBtn(this.gunBox, 'R', 'right:150px;bottom:230px;width:50px;height:50px;font-size:18px;');
-    reloadBtn.classList.add('t-reload');
-    this.tap(reloadBtn, () => { this.input.reloadPressed = true; });
-
-    // --- utility row (kept visible while the pause menu is open, so the same
-    // button that opened it can close it again) ---
-    this.utils = document.createElement('div');
-    this.utils.className = 't-utils';
-    this.utils.style.cssText = 'position:absolute;top:8px;right:8px;display:flex;gap:8px;pointer-events:none;';
-    this.root.appendChild(this.utils);
-    const util = (label: string, fn: () => void): void => {
-      const b = this.mkBtn(this.utils, label, 'position:relative;width:46px;height:46px;font-size:20px;');
-      b.classList.add('t-sq');
-      this.tap(b, fn);
-    };
-    util(iconSvg('pause'), cb.onPause);
-
-    // --- hotbar: tap a slot to select it ---
-    const hotbar = document.getElementById('hotbar');
-    if (hotbar) {
-      hotbar.style.pointerEvents = 'auto'; // CSS default is none (mouse play)
-      hotbar.addEventListener('pointerdown', (e) => {
-        const slot = (e.target as HTMLElement).closest('.slot');
-        if (!slot) return;
-        const i = Array.from(hotbar.children).indexOf(slot);
-        if (i >= 0) this.input.hotbarKey = i;
-        e.preventDefault(); e.stopPropagation();
-      });
-    }
+    const hotbar = document.getElementById('hotbar')!;
+    let hotbarTouch: { id: number; slot: number; x: number; y: number } | null = null;
+    hotbar.addEventListener('pointerdown', e => {
+      if (!this.state.playing || e.pointerType !== 'touch') return;
+      const slot = (e.target as HTMLElement).closest<HTMLElement>('.slot');
+      if (slot) hotbarTouch = { id: e.pointerId, slot: Number(slot.dataset.slot), x: e.clientX, y: e.clientY };
+      e.stopPropagation();
+    });
+    hotbar.addEventListener('pointerup', e => {
+      if (hotbarTouch?.id !== e.pointerId) return;
+      if (this.state.playing && Math.hypot(e.clientX - hotbarTouch.x, e.clientY - hotbarTouch.y) < 12)
+        input.hotbarKey = hotbarTouch.slot;
+      hotbarTouch = null;
+    });
+    hotbar.addEventListener('pointercancel', () => { hotbarTouch = null; });
+    window.addEventListener('blur', () => { this.reset(); if (input.locked) input.unlock(); });
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) { this.reset(); if (input.locked) input.unlock(); }
+    });
   }
 
-  /** Per-frame visibility + safety resets; called from the main loop. */
   update(s: TouchState): void {
-    this.root.style.display = s.shown ? '' : 'none';
-    this.pads.style.display = s.playing ? '' : 'none';
-    this.gunBox.style.display = s.playing && s.gun ? '' : 'none';
-    if (!s.gun && this.aimOn) this.setAim(false);
-    if (this.wasPlaying && !s.playing) this.resetTransient();
-    this.wasPlaying = s.playing;
+    if (this.state.playing && !s.playing) this.reset();
+    else if (this.state.context !== s.context || this.state.action !== s.action || this.state.gun !== s.gun) this.resetActions();
+    this.state = s;
+    this.root.hidden = !s.shown;
+    this.pads.hidden = !s.playing;
+    this.primary.hidden = !s.gun && (!s.action || s.action === 'none');
+    this.primary.textContent = s.gun ? 'FIRE' : s.label ?? (s.action === 'build' ? 'PLACE' : s.action === 'use' ? 'USE' : 'HIT');
+    this.primary.setAttribute('aria-label', this.primary.textContent);
+    this.secondary.hidden = s.action !== 'build' && s.action !== 'interact';
+    this.secondary.textContent = s.action === 'interact' ? 'HIT' : 'BREAK';
+    this.secondary.setAttribute('aria-label', s.action === 'interact' ? 'Catch rat' : 'Break block');
+    this.aim.hidden = this.reload.hidden = !s.gun;
+    this.retry.hidden = !s.retry;
   }
 
-  // --- internals -------------------------------------------------------------
-
-  private setAim(on: boolean): void {
-    this.aimOn = on;
-    this.input.rightDown = on; // main.ts reads rightDown for ADS (with suppressUse)
-    this.aimBtn.classList.toggle('t-on', on);
-  }
-
-  /** A menu opened / we died / lock dropped: release every held control so
-   *  nothing stays "pressed" under the menu. */
-  private resetTransient(): void {
-    const i = this.input;
-    i.tForward = i.tBack = i.tLeft = i.tRight = false;
-    i.tJump = i.tSprint = false;
-    i.leftDown = false;
-    if (this.aimOn) this.setAim(false);
-    this.stickId = -1;
-    this.lookId = -1;
-    this.holding = false;
-    clearTimeout(this.holdTimer);
-    this.resetStick();
-  }
-
-  private resetStick(): void {
-    const i = this.input;
-    i.tForward = i.tBack = i.tLeft = i.tRight = i.tSprint = false;
-    this.knob.style.transform = '';
-  }
-
-  private stickMove(stick: HTMLElement, e: PointerEvent): void {
-    const r = stick.getBoundingClientRect();
-    const radius = r.width / 2;
-    let dx = (e.clientX - (r.left + radius)) / radius;
-    let dy = (e.clientY - (r.top + radius)) / radius;
-    const mag = Math.hypot(dx, dy);
-    // Knob display is clamped to the rim; direction thresholds use raw values.
-    const disp = mag > 1 ? 1 / mag : 1;
-    this.knob.style.transform =
-      `translate(${dx * disp * radius * 0.7}px, ${dy * disp * radius * 0.7}px)`;
-    const i = this.input;
-    if (mag < DEAD) { i.tForward = i.tBack = i.tLeft = i.tRight = i.tSprint = false; return; }
-    dx /= mag; dy /= mag;
-    i.tForward = dy < -SECTOR;
-    i.tBack = dy > SECTOR;
-    i.tLeft = dx < -SECTOR;
-    i.tRight = dx > SECTOR;
-    i.tSprint = i.tForward && mag > 1.05; // past the rim = sprint
-  }
-
-  private lookDown(look: HTMLElement, e: PointerEvent): void {
-    if (this.lookId >= 0) return;
-    this.lookId = e.pointerId;
-    look.setPointerCapture(e.pointerId);
-    this.lookLastX = e.clientX; this.lookLastY = e.clientY;
-    this.lookDist = 0;
-    this.lookStart = performance.now();
-    this.holding = false;
-    clearTimeout(this.holdTimer);
-    this.holdTimer = window.setTimeout(() => {
-      // Still down and hasn't wandered: engage mining/attacking/firing.
-      if (this.lookId === e.pointerId && this.lookDist < TAP_SLOP) {
-        this.holding = true;
-        this.input.leftClicked = true;
-        this.input.leftDown = true;
-      }
-    }, HOLD_MS);
-    e.preventDefault();
-  }
-
-  private lookMove(e: PointerEvent): void {
-    if (e.pointerId !== this.lookId) return;
-    const dx = e.clientX - this.lookLastX;
-    const dy = e.clientY - this.lookLastY;
-    this.lookLastX = e.clientX; this.lookLastY = e.clientY;
-    this.lookDist += Math.abs(dx) + Math.abs(dy);
+  private dragLook(dx: number, dy: number): void {
     this.input.mouseDX += dx * LOOK_SENS * this.input.lookSensitivity;
     this.input.mouseDY += dy * LOOK_SENS * this.input.lookSensitivity;
-    e.preventDefault();
   }
-
-  private lookUp(e: PointerEvent, allowTap: boolean): void {
-    if (e.pointerId !== this.lookId) return;
-    this.lookId = -1;
+  private press(source: string, use: boolean, down: boolean): void {
+    const sources = use ? this.useSources : this.attackSources;
+    if (down) {
+      sources.add(source);
+      if (use) this.input.rightClicked = true; else this.input.leftClicked = true;
+    } else sources.delete(source);
+    this.input.leftDown = this.attackSources.size > 0;
+    this.input.rightDown = this.aimOn || this.useSources.size > 0;
+  }
+  private setAim(on: boolean): void {
+    this.aimOn = on;
+    this.input.rightDown = on || this.useSources.size > 0;
+    this.aim.classList.toggle('t-on', on);
+    this.aim.setAttribute('aria-pressed', String(on));
+  }
+  private clearMove(): void {
+    this.input.tForward = this.input.tBack = this.input.tLeft = this.input.tRight = this.input.tSprint = false;
+  }
+  private resetActions(): void {
+    this.actionResets.forEach(fn => fn());
+    this.attackSources.clear(); this.useSources.clear();
+    this.input.leftDown = this.input.leftClicked = this.input.rightClicked = false;
+    this.setAim(false);
     clearTimeout(this.holdTimer);
-    if (this.holding) {
-      this.holding = false;
-      this.input.leftDown = false;
-    } else if (allowTap && performance.now() - this.lookStart < TAP_MS &&
-        this.lookDist < TAP_SLOP) {
-      this.input.rightClicked = true; // tap = use / place / open
-    }
   }
-
-  private mkBtn(parent: HTMLElement, label: string, css: string): HTMLElement {
-    const b = document.createElement('div');
-    b.className = 't-btn';
-    b.style.cssText = css;
-    b.innerHTML = label;
-    parent.appendChild(b);
-    return b;
+  private reset(): void {
+    this.resets.forEach(fn => fn());
+    this.resetActions();
+    this.attackSources.clear(); this.useSources.clear();
+    this.clearMove(); this.input.tJump = this.input.tSneak = false;
+    this.input.leftDown = this.input.leftClicked = this.input.rightClicked = false;
+    this.input.mouseDX = this.input.mouseDY = 0;
+    this.setAim(false);
+    this.sneak.classList.remove('t-on'); this.sneak.setAttribute('aria-pressed', 'false');
+    this.stickId = this.lookId = -1;
+    this.knob.style.transform = '';
+    clearTimeout(this.holdTimer);
   }
-
-  /** Press-and-hold button: `fn(true)` on down, `fn(false)` on release. */
-  private hold(b: HTMLElement, fn: (down: boolean) => void): void {
-    let id = -1;
-    b.addEventListener('pointerdown', (e) => {
-      if (id >= 0) return;
-      id = e.pointerId;
-      b.setPointerCapture(e.pointerId);
-      b.classList.add('t-on');
-      fn(true);
+  private button(cls: string, text: string, label: string, parent = this.pads): HTMLButtonElement {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = `t-btn ${cls}`; b.innerHTML = text;
+    b.setAttribute('aria-label', label); parent.appendChild(b); return b;
+  }
+  private tap(b: HTMLElement, fn: () => void, playing = true): void {
+    b.addEventListener('pointerdown', e => {
+      if (playing && !this.state.playing) return;
+      fn(); e.preventDefault(); e.stopPropagation();
+    });
+  }
+  private hold(b: HTMLElement, fn: (down: boolean) => void, look = false): void {
+    let id = -1, x = 0, y = 0;
+    const release = () => { id = -1; b.classList.remove('t-on'); fn(false); };
+    (look ? this.actionResets : this.resets).push(release);
+    b.addEventListener('pointerdown', e => {
+      if (!this.state.playing || e.pointerType !== 'touch' || id >= 0) return;
+      id = e.pointerId; x = e.clientX; y = e.clientY;
+      b.setPointerCapture(id); b.classList.add('t-on'); fn(true);
       e.preventDefault(); e.stopPropagation();
     });
-    const end = (e: PointerEvent): void => {
-      if (e.pointerId !== id) return;
-      id = -1;
-      b.classList.remove('t-on');
-      fn(false);
-    };
-    b.addEventListener('pointerup', end);
-    b.addEventListener('pointercancel', end);
-  }
-
-  /** Tap button: fires once on pointerdown (snappy on glass). */
-  private tap(b: HTMLElement, fn: () => void): void {
-    b.addEventListener('pointerdown', (e) => {
-      fn();
-      e.preventDefault(); e.stopPropagation();
+    b.addEventListener('pointermove', e => {
+      if (e.pointerId !== id || !look) return;
+      this.dragLook(e.clientX - x, e.clientY - y); x = e.clientX; y = e.clientY;
+      e.preventDefault();
+    });
+    for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) b.addEventListener(type, e => {
+      if ((e as PointerEvent).pointerId === id) release();
     });
   }
 }

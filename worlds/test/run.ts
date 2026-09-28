@@ -2,6 +2,9 @@
 // through the same pure GameServer the WebSocket shell runs.
 //   npm test
 
+import { aimAssist } from '../src/aim_assist';
+import { raycastBlocks } from '../src/interact';
+import { Vector3 } from 'three';
 import { GameServer, BOT_WAIT_MS, type Outbound } from '../src/net/server_core';
 import { Accounts } from '../src/net/accounts';
 import { NameRegistry } from '../src/net/names';
@@ -420,6 +423,33 @@ section('rat and seek');
   check('the seeker sharpens up against strong rats', bot.skill > 1.2, bot.skill.toFixed(2));
   for (let i = 0; i < 60; i++) bot.adapt(-0.9);
   check('and eases off when it is winning easily', bot.skill < 0.3, bot.skill.toFixed(2));
+}
+
+section('mobile aim assistance stays modest and respects visibility');
+{
+  const eye = { x: 0, y: 1, z: 0 }, degrees = Math.PI / 180;
+  const near = { x: -Math.sin(4 * degrees) * 10, y: 1, z: -Math.cos(4 * degrees) * 10 };
+  const run = (active = true, visible = true, point = near, range = 40) =>
+    aimAssist(0, 0, eye, [point], range, 1 / 60, active, () => visible);
+  check('small gradual correction towards an opponent', run().yaw > 0 && run().yaw < .2 * degrees);
+  check('no idle tracking', run(false).yaw === 0);
+  check('no assistance through cover', run(true, false).yaw === 0);
+  check('no assistance outside weapon range', run(true, true, near, 4).yaw === 0);
+  check('no large angle snaps', run(true, true, { x: 10, y: 1, z: -10 }).yaw === 0);
+  check('no attraction behind the player', run(true, true, { x: 0, y: 1, z: 10 }).yaw === 0);
+  const elevated = run(true, true, { x: 0, y: 1.5, z: -10 });
+  check('vertical correction is gradual too', elevated.pitch > 0 && elevated.pitch < .2 * degrees);
+  const simulate = (hz: number) => {
+    let yaw = 0;
+    for (let n = 0; n < hz; n++) yaw = aimAssist(yaw, 0, eye, [near], 40, 1 / hz, true, () => true).yaw;
+    return yaw;
+  };
+  check('assist strength is frame rate independent', Math.abs(simulate(30) - simulate(120)) < 1e-6);
+  const wrap = aimAssist(Math.PI - .01, 0, eye, [{ x: .1, y: 1, z: 10 }], 40, 1 / 60, true, () => true);
+  check('yaw seam takes the short path', wrap.yaw > Math.PI - .01 && wrap.yaw < Math.PI);
+  const wall = { getBlock: (_x: number, _y: number, z: number) => z === -4 ? Block.Stone : Block.Air } as World;
+  check('voxel line of sight detects a wall', !!raycastBlocks(wall, new Vector3(0, 1, 0), new Vector3(0, 0, -1), 10));
+  check('voxel line of sight stops at target range', !raycastBlocks(wall, new Vector3(0, 1, 0), new Vector3(0, 0, -1), 2));
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -77,6 +77,7 @@ export class RatSeekClient {
   private readonly boss: HTMLElement;
   private readonly pills: HTMLElement;
   private readonly sidebar: HTMLElement;
+  private readonly pocket: HTMLElement;
   private readonly titleEl: HTMLElement;
   private readonly titleMain: HTMLElement;
   private readonly titleSub: HTMLElement;
@@ -124,6 +125,7 @@ export class RatSeekClient {
     this.compassArrow.textContent = '▲';
     this.compassText = el('span', '', this.compassEl);
     this.sidebar = el('div', 'rs-sidebar', this.root);
+    this.pocket = el('div', 'rs-pocket', this.root);
     this.titleEl = el('div', 'rs-title', this.root);
     this.titleMain = el('b', '', this.titleEl);
     this.titleSub = el('small', '', this.titleEl);
@@ -331,6 +333,11 @@ export class RatSeekClient {
     if (!v) return null;
     return { rat: v.role === 'rat', caged: v.caged, glow: v.glow && !v.caged, hidden: v.hidden, tag: v.role === 'human' };
   }
+  /** Decoys receive the same assistance as rats, so aiming cannot identify them. */
+  decoyAimPoints(): THREE.Vector3[] {
+    return [...this.decoys.values()].map(d => new THREE.Vector3(d.x, d.y + .3, d.z));
+  }
+
   /** A remote body the crosshair is on that a seeker may swat: a free rat or a decoy. */
   targetUnderCrosshair(eye: THREE.Vector3, dir: THREE.Vector3, reach: number): { id: number; decoy: boolean } | null {
     let best: { id: number; decoy: boolean } | null = null, bestT = reach;
@@ -543,6 +550,9 @@ export class RatSeekClient {
     const s = this.snap;
     if (!s) return;
     const me = s.me;
+    this.pocket.textContent = me.role === 'rat'
+      ? `${me.caged ? 'CAGED · ' : ''}${me.points} pts · Cheese ${me.cheese}/${RS.RESCUE_COST}`
+      : `Scent ${me.scentCd === 0 ? 'ready' : `${Math.ceil(me.scentCd / 20)}s`} · Light ${Math.round(me.battery * 100)}%`;
     const rows: [string, string, string?][] = [];
     const secs = (ticks: number) => `${Math.ceil(ticks / 20)}s`;
     if (me.room) rows.push(['Room', escapeHtml(me.room.replace(/\b\w/g, (c) => c.toUpperCase()))]);

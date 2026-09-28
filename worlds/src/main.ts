@@ -12,6 +12,7 @@ import './styles/hud.css';
 import './styles/results.css';
 import './styles/worlds.css';
 import './styles/ratseek.css';
+import './styles/mobile.css';
 import * as THREE from 'three';
 import { GameAudio, materialOf } from './audio';
 import { Block, isReplaceable, isSolid } from './blocks';
@@ -19,7 +20,8 @@ import { HeldItemView } from './held';
 import { HUD } from './hud';
 import { Input, FROZEN_INPUT } from './input';
 import { TouchControls, isTouchDevice } from './touch';
-import { Interaction } from './interact';
+import { Interaction, raycastBlocks } from './interact';
+import { aimAssist, type AimPoint } from './aim_assist';
 import { Inventory } from './inventory';
 import { Item, ITEMS, type GunInfo, type ItemStack } from './items';
 import { iconSvg } from './emoji_icons';
@@ -1760,6 +1762,42 @@ function updateRatSeekInput(lookDir: THREE.Vector3, eye: THREE.Vector3): void {
   }
 }
 
+/** Touch-only assist follows the same camera direction that the server sees. */
+function updateMobileAim(dt: number): void {
+  const id = inventory.selectedStack?.id;
+  const gun = id !== undefined && !!ITEMS[id]?.gun;
+  const bridge = pgWeaponsActive() && (id === Item.BridgeBow || id === Item.IronAxe);
+  const seeker = match?.kind === 'rs' && rsClient.role === 'human' && rsClient.phase() === 'hunting';
+  if (!(match?.kind === 'duel' && gun) && !bridge && !seeker) return;
+  const active = input.mouseDX !== 0 || input.mouseDY !== 0 || input.leftDown || input.rightClicked;
+  if (!active) return;
+  const points: AimPoint[] = [];
+  const myTeam = pgSnapshot?.participants.find(p => p.id === net.myId)?.team;
+  for (const [remoteId, r] of net.remotes) {
+    if (remoteId === net.myId || r.dead) continue;
+    if (bridge) {
+      const p = pgSnapshot?.participants.find(p => p.id === remoteId);
+      if (!p?.connected || p.team === myTeam) continue;
+    }
+    if (seeker) {
+      const style = rsClient.styleOf(remoteId);
+      if (!style?.rat || style.hidden || style.caged) continue;
+    }
+    const point = remotePlayers.aimPoint(remoteId);
+    if (point) points.push(point);
+  }
+  if (seeker) points.push(...rsClient.decoyAimPoints());
+  const eye = player.eyePosition;
+  const range = seeker ? RS.REACH : id === Item.IronAxe ? PARTY_MELEE_REACH : 40;
+  const adjusted = aimAssist(player.yaw, player.pitch, eye, points, range, dt, active, point => {
+    const direction = new THREE.Vector3(point.x, point.y, point.z).sub(eye);
+    const distance = direction.length();
+    return !raycastBlocks(world, eye, direction.normalize(), distance);
+  });
+  player.yaw = adjusted.yaw;
+  player.pitch = adjusted.pitch;
+}
+
 function updatePartyWeapon(heldId: number, lookDir: THREE.Vector3, eye: THREE.Vector3): void {
   const now = performance.now();
   if (heldId === Item.IronAxe) {
@@ -2005,6 +2043,20 @@ function frame(): void {
     }
     if (input.viewPressed) cycleView();
   }
+  if (touch) {
+    const hs = inventory.selectedStack;
+    touch.update({
+      shown: screen === 'playing' || screen === 'paused', playing: controlling && !duelSpectating,
+      gun: !!(hs && ITEMS[hs.id]?.gun),
+      action: match.kind === 'rs' ? (rsClient.role === 'human' ? 'interact' : hs ? 'use' : 'none')
+        : !hs ? 'none' : ITEMS[hs.id]?.gun ? 'attack' : ITEMS[hs.id]?.kind === 'block' ? 'build'
+        : hs.id === Item.IronAxe ? 'attack' : 'use',
+      label: match.kind === 'rs' ? 'USE' : hs?.id === Item.BridgeBow ? 'SHOOT' : hs && ITEMS[hs.id]?.heal ? 'HEAL'
+        : hs?.id === Item.JumpBoost ? 'BOOST' : undefined,
+      retry: match.kind === 'pg' && pgSub?.game === 'parkour' && parkourCourse(pgSub.seed).variant.mode !== 'collapse',
+      context: `${match.mode}:${inventory.selected}:${hs?.id ?? 0}`,
+    });
+  }
   const moveInput = controlling ? input : FROZEN_INPUT;
   if (pendingTeleport) {
     const tp = pendingTeleport;
@@ -2050,6 +2102,7 @@ function frame(): void {
     const g = hs ? ITEMS[hs.id]?.gun : undefined;
     aimZoom = controlling && !!g?.zoom && input.rightDown ? g!.zoom! : 1;
   }
+  if (controlling && input.touchMode && !duelSpectating) updateMobileAim(dt);
   updateCamera();
   if (match.kind === 'rs') {
     camera.rotation.z += rsClient.nausea();
@@ -2191,13 +2244,6 @@ function frame(): void {
       time: `${Math.round(duelNow() / 1000)}s`,
     });
   }
-  if (touch) {
-    const hs = inventory.selectedStack;
-    touch.update({
-      shown: screen === 'playing', playing: input.locked && screen === 'playing',
-      gun: !duelSpectating && !!(hs && ITEMS[hs.id]?.gun),
-    });
-  }
   input.endFrame();
   sunShadow.update(sky.lightDir, camera.position, sky.lightHeight, sky.moonlit, dt);
   if (GRAPHICS_PRESETS[accessibility.graphicsQuality].shaders && !document.hidden && shaderBudget.sample(dt)) {
@@ -2213,5 +2259,5 @@ updateCamera();
 frame();
 
 if (import.meta.env.DEV) {
-  (window as unknown as { __worlds: unknown }).__worlds = { sky, player, world, camera, net };
+  (window as unknown as { __worlds: unknown }).__worlds = { sky, player, world, camera, net, input, inventory };
 }

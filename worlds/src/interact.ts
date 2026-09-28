@@ -19,7 +19,7 @@ interface RayHit {
   nx: number; ny: number; nz: number;
 }
 
-function raycastBlocks(
+export function raycastBlocks(
   world: World, origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number,
 ): RayHit | null {
   let x = Math.floor(origin.x);

@@ -12,12 +12,14 @@ function groups(k: Keybinds, touch: boolean): Group[] {
   if (touch) {
     return [
       { title: 'Moving', binds: [
-        ['Move', [['left joystick']]], ['Sprint', [['left joystick']], 'push past the rim'],
+        ['Move', [['left joystick']]], ['Sprint', [['left joystick']], 'push to the rim'],
         ['Jump', [['⬆']], 'hold'], ['Sneak', [['⇩']], 'toggle'],
       ] },
       { title: 'Fighting & building', binds: [
-        ['Attack / break', [['long-press']]], ['Place block / use', [['tap']]],
-        ['Aim down sights', [['⊕']], 'Duels'], ['Reload', [['R']], 'Duels'],
+        ['Fire / attack / break', [['FIRE'], ['HIT'], ['BREAK']], 'drag to aim'], ['Place block / use', [['PLACE'], ['USE']]],
+        ['Shoot the bow', [['SHOOT']], 'The Bridge'], ['Back to checkpoint', [['RETRY']], 'Parkour'],
+        ['Look around', [['drag the world']]], ['Quick use', [['tap the world']]],
+        ['Aim down sights', [['AIM']], 'Duels'], ['Reload', [['R']], 'Duels'],
       ] },
       { title: 'Items', binds: [['Hotbar slot', [['tap a slot']]]] },
       { title: 'Screens', binds: [['Pause', [['⏸']]]] },

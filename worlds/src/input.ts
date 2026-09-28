@@ -125,17 +125,18 @@ export class Input {
     });
 
     document.addEventListener('mousemove', (e) => {
-      if (!this.locked) return;
+      if (!this.locked || this.touchMode) return;
       this.mouseDX += e.movementX * this.lookSensitivity;
       this.mouseDY += e.movementY * this.lookSensitivity;
     });
     document.addEventListener('mousedown', (e) => {
-      if (!this.locked) return;
+      if (!this.locked || this.touchMode) return;
       if (e.button === 0) { this.leftDown = true; this.leftClicked = true; }
       if (e.button === 1) e.preventDefault();
       if (e.button === 2) { this.rightDown = true; this.rightClicked = true; }
     });
     document.addEventListener('mouseup', (e) => {
+      if (this.touchMode) return;
       if (e.button === 0) this.leftDown = false;
       if (e.button === 2) this.rightDown = false;
     });

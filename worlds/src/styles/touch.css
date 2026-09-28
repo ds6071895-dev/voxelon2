@@ -1,0 +1,30 @@
+#touch { position:absolute; inset:0; z-index:9; pointer-events:none; overflow:hidden;
+  --edge-l:max(12px, env(safe-area-inset-left)); --edge-r:max(12px, env(safe-area-inset-right));
+  --edge-t:max(8px, env(safe-area-inset-top)); --edge-b:max(8px, env(safe-area-inset-bottom)); }
+#touch [hidden], #touch[hidden] { display:none !important; }
+#touch * { touch-action:none; user-select:none; -webkit-user-select:none; }
+.t-pads, .t-look { position:absolute; inset:0; }
+.t-look { pointer-events:auto; }
+.t-stick { position:absolute; left:var(--edge-l); bottom:calc(var(--edge-b) + 104px); width:112px; height:112px;
+  border:2px solid #ffffff38; border-radius:50%; background:#ffffff0d; pointer-events:auto; }
+.t-knob { position:absolute; left:50%; top:50%; width:50px; height:50px; margin:-25px;
+  border-radius:50%; border:2px solid #ffffff70; background:#ffffff40; }
+.t-btn { position:absolute; display:flex; align-items:center; justify-content:center; pointer-events:auto;
+  width:48px; height:48px; padding:0; border-radius:50%; border:2px solid #ffffff50; color:#fff;
+  background:rgba(16,20,32,.38); font:700 12px/1 system-ui,sans-serif; text-shadow:0 1px 3px #000; }
+.t-btn.t-on { background:#6ebeff80; border-color:#bfe6ff; }
+.t-jump { right:var(--edge-r); bottom:calc(var(--edge-b) + 96px); width:68px; height:68px; font-size:28px; }
+.t-primary { right:calc(var(--edge-r) + 76px); bottom:calc(var(--edge-b) + 164px); width:68px; height:68px; }
+.t-sneak { left:var(--edge-l); bottom:calc(var(--edge-b) + 228px); font-size:22px; }
+.t-aim, .t-secondary { right:var(--edge-r); bottom:calc(var(--edge-b) + 184px); }
+.t-reload { right:calc(var(--edge-r) + 20px); bottom:calc(var(--edge-b) + 248px); }
+.t-retry { left:var(--edge-l); top:var(--edge-t); width:56px; border-radius:14px; }
+.t-pause { right:var(--edge-r); top:var(--edge-t); border-radius:12px; font-size:22px; }
+@media (orientation:landscape) {
+  .t-stick { bottom:calc(var(--edge-b) + 72px); }
+  .t-sneak { left:calc(var(--edge-l) + 124px); bottom:calc(var(--edge-b) + 80px); }
+  .t-jump { bottom:calc(var(--edge-b) + 68px); }
+  .t-primary { bottom:calc(var(--edge-b) + 100px); }
+  .t-aim, .t-secondary { bottom:calc(var(--edge-b) + 156px); }
+  .t-reload { right:calc(var(--edge-r) + 84px); bottom:calc(var(--edge-b) + 184px); }
+}
