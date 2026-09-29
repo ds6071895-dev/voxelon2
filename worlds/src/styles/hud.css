@@ -853,6 +853,15 @@
     #overlay.hidden { display: none; }
     /* The in-game connection tag belongs to the HUD, not the front door. */
     body:not(.in-game) #netinfo { display: none; }
+    /* Nothing of the in-game HUD may show on the title screen. The frame loop
+       stops touching these once no match is running, so any one of them left
+       lit by the last frame (an FPS readout, the F3 overlay, an ammo count, a
+       fading item name) would otherwise sit on the front door until the next
+       match. The layout editor stays: it is opened from the title's Settings. */
+    body:not(.in-game) :is(#crosshair, #hotbar, #status, #debug, #heal-glow, #axe-indicator,
+      #heal-burst, #heal-tally, #hurt-vignette, #bridge-fx, #damage-flash, #use-bar,
+      .item-name, .pvp-slam, .pvp-killchip, .dmg-num),
+    body:not(.in-game) #hud-mods:not(.editing) { display: none !important; }
     #overlay .mc-font { font-family: inherit; color: inherit; text-shadow: none; letter-spacing: normal; }
     /* Drifting motes of light — dust in the morning sun. */
     #overlay::before {

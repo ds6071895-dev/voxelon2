@@ -402,15 +402,21 @@ html[data-ui-dark] #hud-settings {
 .hs-key.clash { border-color:var(--hs-bad); color:var(--hs-bad); background:var(--hs-bad-soft); }
 .hs-clash-note { margin:12px 4px 0; color:var(--hs-bad); font-size:11.5px; font-weight:600; }
 .hs-clash-note[hidden] { display:none; }
-.hs-presets { display:grid; grid-template-columns:repeat(auto-fill,minmax(118px,1fr)); gap:8px; padding:0 0 4px; }
-.hs-preset { display:flex; align-items:center; gap:9px; padding:8px 10px;
-  border:1px solid var(--hs-line); border-radius:12px; background:var(--hs-surface); color:var(--hs-ink);
-  font:inherit; font-size:12.5px; font-weight:650; cursor:pointer; box-shadow:var(--hs-row-shadow);
-  transition:transform .12s,border-color .12s,box-shadow .12s; }
+.hs-presets { display:grid; grid-template-columns:repeat(auto-fill,minmax(132px,1fr)); gap:8px; padding:0 0 4px; }
+.hs-preset { position:relative; display:flex; align-items:center; gap:10px; padding:8px 12px 8px 8px;
+  border:1px solid var(--hs-line); border-radius:13px; background:var(--hs-surface); color:var(--hs-ink);
+  font:inherit; font-size:12.5px; font-weight:700; cursor:pointer; box-shadow:var(--hs-row-shadow);
+  transition:transform .12s,border-color .12s,box-shadow .12s,background .12s; }
 .hs-preset:hover { transform:translateY(-1px); border-color:var(--hs-line-lit);
   box-shadow:0 8px 18px rgba(28,52,86,.1); }
-.hs-preset i { width:22px; height:22px; border-radius:7px; flex:0 0 auto;
-  box-shadow:inset 0 0 0 1px rgba(255,255,255,.25), 0 1px 3px rgba(18,32,50,.25); }
+.hs-preset.on { border-color:var(--hs-accent); background:var(--hs-accent-soft);
+  box-shadow:0 0 0 1px var(--hs-accent); }
+.hs-preset.on::after { content:''; position:absolute; right:10px; top:50%; width:6px; height:11px;
+  margin-top:-7px; border:solid var(--hs-accent); border-width:0 2.5px 2.5px 0; transform:rotate(40deg); }
+/* Each chip is a miniature HUD line in the preset's own colours. */
+.hs-preset i { display:grid; place-items:center; width:36px; height:28px; border-radius:8px; flex:0 0 auto;
+  font:800 12px/1 ui-sans-serif,system-ui,sans-serif; font-style:normal; letter-spacing:.2px;
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.18), 0 1px 3px rgba(18,32,50,.3); }
 .hs-foot { flex:0 0 auto; display:flex; align-items:center; gap:10px;
   padding:14px 18px; border-top:1px solid var(--hs-line); background:var(--hs-bar); }
 .hs-foot .hs-hint { color:var(--hs-mute); font-size:11.5px; margin-right:auto; }
@@ -434,31 +440,40 @@ html[data-ui-dark] #hud-settings {
 .hs-dragcard .hs-btn { flex:0 0 auto; }
 .hs-ctl input[type=range].hs-modsize { width:104px; }
 
-/* Live preview: the real HUD variables, at HUD scale, on a stand-in sky. */
-.hs-preview { position:relative; border:1px solid var(--hs-line); border-radius:16px;
-  padding:16px; margin-bottom:6px; overflow:hidden;
-  box-shadow:inset 0 -30px 40px -30px rgba(0,0,0,.25), var(--hs-row-shadow);
+/* Live preview: the real HUD variables, at HUD scale, on a stand-in world.
+   It sticks to the top of the pane on taller windows so a slider can be
+   dragged while watching what it does. */
+.hs-preview { position:relative; z-index:2; border:1px solid var(--hs-line); border-radius:18px;
+  padding:14px 16px 14px; margin-bottom:4px; overflow:hidden;
+  box-shadow:0 10px 26px -12px rgba(18,32,50,.4), var(--hs-row-shadow);
   background:
-    radial-gradient(ellipse 60% 50% at 80% 10%, rgba(255,255,255,.45), transparent 70%),
-    linear-gradient(180deg,#6f9bd6,#a8c6ec 52%,#6e9a5a 52.5%,#4e7440); }
-.hs-preview::after { content:'Preview'; position:absolute; right:10px; top:10px;
-  padding:3px 8px; border-radius:999px; background:rgba(255,255,255,.8); color:#3b4f68;
+    radial-gradient(circle at 84% 22%, rgba(255,247,214,.95) 0 9px, rgba(255,240,190,.35) 10px 22px, transparent 23px),
+    linear-gradient(180deg,#5f93d8,#a8c9ee 56%,#77a25f 56.5%,#4f7a41 78%,#436b37); }
+@media (min-height:740px) { .hs-preview { position:sticky; top:-8px; } }
+.hs-preview::after { content:'Live preview'; position:absolute; right:10px; bottom:10px;
+  padding:3px 9px; border-radius:999px; background:rgba(255,255,255,.82); color:#3b4f68;
   font:800 9.5px/1.4 ui-sans-serif,system-ui,sans-serif; letter-spacing:1px; text-transform:uppercase; }
 .hs-preview .hs-pv-stack { display:flex; flex-direction:column; align-items:flex-start; gap:6px;
   font-family:var(--hud-font); color:var(--hud-text);
   text-shadow:var(--hud-text-shadow); font-weight:bold; letter-spacing:.5px; }
+.hs-pv-top { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; width:100%; }
+.hs-pv-debug { background:var(--hud-bg); padding:2px 7px; border-radius:5px;
+  font-size:calc(12px * var(--hud-scale)); }
 .hs-pv-line { background:var(--hud-bg); border-left:3px solid var(--hud-accent);
   padding:3px 9px; border-radius:0 6px 6px 0; font-size:calc(12px * var(--hud-scale)); }
-.hs-pv-debug { background:var(--hud-bg); padding:1px 6px; border-radius:5px;
-  font-size:calc(13px * var(--hud-scale)); }
-.hs-pv-bar { display:flex; gap:3px; align-self:center; margin-top:4px; padding:3px;
+.hs-pv-foot { align-self:center; display:flex; flex-direction:column; align-items:stretch; gap:5px; }
+.hs-pv-name { align-self:center; font-size:calc(13px * var(--hud-scale)); }
+.hs-pv-hearts { display:flex; gap:3px; }
+.hs-pv-hearts i { flex:1 1 0; height:10px; border-radius:3px; background:#e0394d;
+  box-shadow:inset 0 -3px 0 rgba(0,0,0,.22), inset 0 2px 0 rgba(255,255,255,.35), 0 1px 2px rgba(0,0,0,.35); }
+.hs-pv-hearts i:nth-child(n+9) { background:rgba(20,20,26,.55); box-shadow:inset 0 0 0 1px rgba(255,255,255,.18); }
+.hs-pv-bar { display:flex; gap:3px; padding:3px;
   background:var(--hud-bg); border-radius:10px;
   box-shadow:0 0 0 1px var(--hud-accent-soft), 0 6px 16px rgba(0,0,0,.25); }
 .hs-pv-bar span { position:relative; width:30px; height:30px; border-radius:7px;
   background:rgba(255,255,255,.06); box-shadow:inset 0 0 0 1px rgba(255,255,255,.1); }
 .hs-pv-bar span.sel { background:rgba(255,255,255,.16);
   box-shadow:inset 0 0 0 2px var(--hud-accent), 0 0 10px var(--hud-accent-soft); z-index:1; }
-.hs-pv-name { align-self:center; font-size:calc(13px * var(--hud-scale)); }
 
 @media (max-width: 720px) {
   #hud-settings { padding:10px; }
@@ -604,6 +619,7 @@ export function createHudSettingsPanel(
   /** Everything routes through here: repaint the HUD, save, tell the host. */
   function changed(): void {
     applyHudTheme(settings.theme);
+    markPresets();
     hooks.onChange();
   }
 
@@ -616,15 +632,21 @@ export function createHudSettingsPanel(
   preview.className = 'hs-preview';
   const pvStack = document.createElement('div');
   pvStack.className = 'hs-pv-stack';
+  const pvTop = document.createElement('div');
+  pvTop.className = 'hs-pv-top';
   const pvDebug = document.createElement('div');
   pvDebug.className = 'hs-pv-debug';
-  pvDebug.textContent = 'XYZ: 128.500 / 71.00000 / -64.250';
+  pvDebug.textContent = 'XYZ: 128.5 / 71.0 / -64.3';
   const pvChat = document.createElement('div');
   pvChat.className = 'hs-pv-line';
   pvChat.textContent = "You're already at full health!";
+  pvTop.appendChild(pvDebug);
   const pvName = document.createElement('div');
   pvName.className = 'hs-pv-name';
   pvName.textContent = 'Burst Rifle';
+  const pvHearts = document.createElement('div');
+  pvHearts.className = 'hs-pv-hearts';
+  for (let i = 0; i < 10; i++) pvHearts.appendChild(document.createElement('i'));
   const pvBar = document.createElement('div');
   pvBar.className = 'hs-pv-bar';
   for (let i = 0; i < 9; i++) {
@@ -632,7 +654,10 @@ export function createHudSettingsPanel(
     if (i === 3) slot.className = 'sel';
     pvBar.appendChild(slot);
   }
-  pvStack.append(pvDebug, pvChat, pvName, pvBar);
+  const pvFoot = document.createElement('div');
+  pvFoot.className = 'hs-pv-foot';
+  pvFoot.append(pvName, pvHearts, pvBar);
+  pvStack.append(pvTop, pvChat, pvFoot);
   preview.appendChild(pvStack);
   lookPane.appendChild(preview);
 
@@ -712,13 +737,16 @@ export function createHudSettingsPanel(
     'Dark chrome for the pause menu and the other menus.')
     .appendChild(darkSw.el);
 
+  const presetBtns: { btn: HTMLButtonElement; theme: Partial<HudTheme> }[] = [];
   for (const preset of PRESETS) {
     const btn = document.createElement('button');
     btn.className = 'hs-preset';
     btn.type = 'button';
     const chip = document.createElement('i');
-    chip.style.background =
-      `linear-gradient(135deg, ${preset.theme.accentColor}, ${preset.theme.bgColor})`;
+    chip.textContent = 'Aa';
+    chip.style.background = preset.theme.bgColor!;
+    chip.style.color = preset.theme.textColor!;
+    chip.style.boxShadow = `inset 0 -3px 0 ${preset.theme.accentColor}, inset 0 0 0 1px rgba(255,255,255,.18), 0 1px 3px rgba(18,32,50,.3)`;
     const name = document.createElement('span');
     name.textContent = preset.name;
     btn.append(chip, name);
@@ -727,6 +755,7 @@ export function createHudSettingsPanel(
       changed();
       syncLook();
     });
+    presetBtns.push({ btn, theme: preset.theme });
     presetRow.appendChild(btn);
   }
 
@@ -1000,6 +1029,16 @@ export function createHudSettingsPanel(
     shadowSw.sync();
     darkSw.sync();
     paintRanges();
+    markPresets();
+  }
+
+  /** Mark the preset whose palette the theme currently matches. */
+  function markPresets(): void {
+    const t = settings.theme;
+    for (const { btn, theme } of presetBtns) {
+      btn.classList.toggle('on', t.textColor === theme.textColor && t.bgColor === theme.bgColor
+        && t.accentColor === theme.accentColor && Math.abs(t.bgOpacity - (theme.bgOpacity ?? 0)) < 0.005);
+    }
   }
 
   /** Slider tracks fill up to the thumb (the CSS reads --fill). */

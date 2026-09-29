@@ -751,6 +751,15 @@ function exitToMenu(): void {
   crosshair.style.display = 'none';
   hotbarEl.style.display = 'none';
   statusEl.style.display = 'none';
+  // The frame loop only repaints the HUD while a match runs, so whatever it
+  // last left lit has to be put away here or it sits on the title screen.
+  hudMods.endEdit();
+  hudMods.setVisible(false);
+  hitmarkerEl.style.display = 'none';
+  dmgArcWrap.style.display = 'none';
+  ammoEl.style.display = 'none';
+  useBarEl.style.display = 'none';
+  useBarEl.classList.remove('beat', 'done');
   home.show();
 }
 net.onLeftWorld = () => exitToMenu();
