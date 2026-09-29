@@ -436,7 +436,7 @@
       text-shadow: 0 3px 0 #300008, 0 0 24px rgba(255,40,70,.6);
     }
     #bridge-fx .bfx-title small {
-      display: block; margin-top: 8px; font-size: 16px; letter-spacing: 2px; color: #ffd9de;
+      display: block; margin-top: 10px; font-size: 16px; line-height: 1.6; letter-spacing: 2px; color: #ffd9de; white-space: pre-line;
       text-shadow: 1px 1px 0 #000;
     }
     @keyframes bfx-title { from { opacity: 0; transform: translateX(-50%) scale(1.7); } to { opacity: 1; transform: translateX(-50%) scale(1); } }

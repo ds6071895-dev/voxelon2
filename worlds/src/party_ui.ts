@@ -333,8 +333,9 @@ export class PartyUI {
       return;
     this.updateCount(s, serverNow);
     const mine = s.participants.find(v => v.id === this.me);
-    if (s.phase === 'running' && mine?.respawnAt !== undefined && mine.respawnAt > serverNow) {
-      // Dead: the countdown owns the banner until you are back.
+    if (s.phase === 'running' && s.mode !== 'bridge' && mine?.respawnAt !== undefined && mine.respawnAt > serverNow) {
+      // Dead: the countdown owns the banner until you are back. Bridge has its
+      // own death title (#bridge-fx) that already carries the countdown.
       this.banner.className = 'pg-banner';
       this.banner.replaceChildren(
         el('div', 'pg-banner-title', `RESPAWN ${Math.ceil((mine.respawnAt - serverNow) / 1000)}`),

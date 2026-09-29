@@ -1659,7 +1659,7 @@ function updateBridgeFx(): void {
     if (left !== bridgeDeathShown) {
       bridgeDeathShown = left;
       const by = bridgeFxSub.dataset.by ?? '';
-      bridgeFxSub.textContent = `${by ? `${by} · ` : ''}Respawning in ${left}`;
+      bridgeFxSub.textContent = `${by ? `${by}\n` : ''}Respawning in ${left}`;
     }
   }
   for (const id of bridgeRemoteFx.keys()) if (!net.remotes.has(id)) bridgeRemoteFx.delete(id);
