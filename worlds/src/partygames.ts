@@ -938,7 +938,7 @@ export class PartyGamesEngine {
 
   /** Evaluate an accepted position, or a stationary player on the server tick.
    *  Returned spawn is an authoritative reset, never a client claim. */
-  evaluate(id: number, pos: PartyVec3, now: number): { spawn?: PartyVec3; changed: boolean } {
+  evaluate(id: number, pos: PartyVec3, now: number): { spawn?: PartyVec3; changed: boolean; killedBy?: number } {
     const l = this.lobbyByPlayer.get(id), p = l?.participants.get(id);
     if (!l || !p || l.phase !== 'running' || !l.round || !l.arena || !p.connected ||
       p.finishedAt !== undefined || p.outAt !== undefined || now >= l.round.endsAt) return { changed: false };
@@ -948,7 +948,7 @@ export class PartyGamesEngine {
   }
 
   private evaluateBridge(l: PartyLobby, p: PartyParticipant, sub: PartySubBounds, pos: PartyVec3, now: number):
-    { spawn?: PartyVec3; changed: boolean } {
+    { spawn?: PartyVec3; changed: boolean; killedBy?: number } {
     const seat = [...l.participants.values()].filter((v) => v.team === p.team && v.joinOrder < p.joinOrder).length;
     // A goal puts everybody back in a cage; an ordinary void death just puts
     // you back on your own deck, with no pause in the game for anyone else.
@@ -996,7 +996,7 @@ export class PartyGamesEngine {
       }
       p.lastHitBy = undefined;
       p.respawnAt = now + BRIDGE_RESPAWN_DELAY_MS;
-      return { changed: true };
+      return { changed: true, killedBy: killer && killer.team !== p.team ? killer.id : undefined };
     }
     return { changed: false };
   }

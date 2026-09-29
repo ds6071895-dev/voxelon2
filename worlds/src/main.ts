@@ -775,6 +775,7 @@ net.onSelfHealth = (health) => {
 };
 net.onRespawned = (x, y, z, h) => {
   if (match?.kind === 'pg') held.setBowDraw(0);
+  if (match?.kind === 'pg' && pgSub?.game === 'bridge') bridgeRespawnFx(x, y, z);
   player.respawn({ x, y, z });
   // Every Bridge respawn (void, own portal, goal reset) faces down the span.
   if (match?.kind === 'pg' && pgSub?.game === 'bridge') {
@@ -1573,9 +1574,10 @@ net.onDuelRespawn = (respawnAt, spectating) => {
   player.flying = spectating; player.noclip = spectating;
   if (!spectating) player.health = arenaMaxHealth;
 };
-net.onPgRespawn = (_respawnAt, spectating) => {
+net.onPgRespawn = (respawnAt, spectating) => {
   duelSpectating = spectating;
-  if (spectating) { held.setBowDraw(0); damageNumbers.clear(); hurtPulse = 0; }
+  if (spectating) { held.setBowDraw(0); damageNumbers.clear(); hurtPulse = 0; bridgeDeathFx(respawnAt); }
+  else bridgeFxEl.classList.remove('dead');
   player.flying = spectating; player.noclip = spectating;
 };
 net.onDuelResult = (result) => renderDuelResult(result);
@@ -1591,6 +1593,88 @@ const partyPredicted = { id: -1, at: 0 };
 const axeIndicatorEl = document.getElementById('axe-indicator') as HTMLDivElement;
 const axeIndicatorFill = axeIndicatorEl.firstElementChild as HTMLElement;
 const axeLook = new THREE.Vector3();
+
+// ── Bridge death, respawn and kill-refill feel ──────────────────────────────
+// Pure presentation. Death and respawn for OTHER players ride the authoritative
+// `dead` flag on their snapshots, so a fall, a hit and a goal reset all read
+// the same way to everyone watching.
+const bridgeFxEl = document.getElementById('bridge-fx') as HTMLDivElement;
+const bridgeFxTitle = bridgeFxEl.querySelector('.bfx-title b') as HTMLElement;
+const bridgeFxSub = bridgeFxEl.querySelector('.bfx-title small') as HTMLElement;
+const BRIDGE_TEAM_HEX = [0xff5f76, 0x5aa8ff];
+let bridgeDeathRespawnAt = 0, bridgeDeathShown = -1;
+const bridgeRemoteFx = new Map<number, { dead: boolean; x: number; y: number; z: number }>();
+
+function bridgeTeamColor(id: number): number {
+  return BRIDGE_TEAM_HEX[pgSnapshot?.participants.find((p) => p.id === id)?.team ?? 0] ?? 0xffffff;
+}
+function bridgeDeathFx(respawnAt: number): void {
+  if (pgSub?.game !== 'bridge') return;
+  bridgeDeathRespawnAt = respawnAt; bridgeDeathShown = -1;
+  const me = pgSnapshot?.participants.find((p) => p.id === net.myId);
+  const kill = pgSnapshot?.lastKill;
+  const how = kill?.cause === 'void' ? 'knocked you into the void' : kill?.cause === 'bow' ? 'shot you' : 'cut you down';
+  bridgeFxTitle.textContent = 'YOU DIED';
+  bridgeFxSub.dataset.by = kill && me && kill.victim === me.username && pgNow() - kill.at < 2000 ? `${kill.username} ${how}` : 'You fell';
+  bridgeFxEl.classList.remove('reborn', 'dead');
+  void bridgeFxEl.offsetWidth; // restart the wash
+  bridgeFxEl.classList.add('dead');
+  particles.deathBurst(player.pos.x, player.pos.y, player.pos.z, bridgeTeamColor(net.myId));
+  audio.bridgeDeath(true);
+  triggerShake(0.3, 0.05);
+  if (!accessibility.reducedMotion) fovPunch = Math.max(fovPunch, 6);
+  hurtPulse = 1;
+}
+function bridgeRespawnFx(x: number, y: number, z: number): void {
+  bridgeFxEl.classList.remove('dead', 'reborn');
+  void bridgeFxEl.offsetWidth;
+  bridgeFxEl.classList.add('reborn');
+  particles.respawnBeam(x, y, z, bridgeTeamColor(net.myId));
+  audio.bridgeRespawn(true);
+  triggerShake(0.14, 0.02);
+  if (!accessibility.reducedMotion) fovPunch = Math.max(fovPunch, 5);
+}
+function bridgeKillHealFx(gain: number): void {
+  particles.killHeal(player.pos.x, player.pos.y, player.pos.z);
+  audio.killHeal();
+  healGlow = 1;
+  heartsSqueeze = 0.6;
+  if (gain > 0) { healTally = gain; healTallyFade = 0; renderHealTally(); }
+  triggerShake(0.16, 0.02);
+  if (!accessibility.reducedMotion) fovPunch = Math.max(fovPunch, 4);
+  if (!accessibility.photosensitivitySafe) {
+    healBurstEl.classList.remove('go');
+    void healBurstEl.offsetWidth;
+    healBurstEl.classList.add('go');
+  }
+}
+function updateBridgeFx(): void {
+  if (match?.kind !== 'pg' || pgSub?.game !== 'bridge') {
+    if (bridgeRemoteFx.size) bridgeRemoteFx.clear();
+    if (bridgeFxEl.className) bridgeFxEl.className = '';
+    return;
+  }
+  if (bridgeFxEl.classList.contains('dead')) {
+    const left = Math.max(1, Math.ceil((bridgeDeathRespawnAt - pgNow()) / 1000));
+    if (left !== bridgeDeathShown) {
+      bridgeDeathShown = left;
+      const by = bridgeFxSub.dataset.by ?? '';
+      bridgeFxSub.textContent = `${by ? `${by} · ` : ''}Respawning in ${left}`;
+    }
+  }
+  for (const id of bridgeRemoteFx.keys()) if (!net.remotes.has(id)) bridgeRemoteFx.delete(id);
+  for (const [id, r] of net.remotes) {
+    const prev = bridgeRemoteFx.get(id);
+    const body = r.dead ? null : remotePlayers.renderedPos(id);
+    if (!prev) { bridgeRemoteFx.set(id, { dead: r.dead, x: r.tx, y: r.ty, z: r.tz }); continue; }
+    if (!r.dead) { prev.x = body?.x ?? r.tx; prev.y = body?.y ?? r.ty; prev.z = body?.z ?? r.tz; }
+    if (r.dead === prev.dead) continue;
+    prev.dead = r.dead;
+    const at = new THREE.Vector3(r.dead ? prev.x : r.tx, r.dead ? prev.y : r.ty, r.dead ? prev.z : r.tz);
+    if (r.dead) { particles.deathBurst(at.x, at.y, at.z, bridgeTeamColor(id)); audio.bridgeDeath(false, at.clone().setY(at.y + 1)); }
+    else { particles.respawnBeam(at.x, at.y, at.z, bridgeTeamColor(id)); audio.bridgeRespawn(false, at.clone().setY(at.y + 1)); }
+  }
+}
 
 function pgNow(): number { return pgClockServer + performance.now() - pgClockLocal; }
 function pgCaged(): boolean {
@@ -1702,6 +1786,12 @@ net.onPgHit = (target, amount, combo, _charge, crit, killed, ranged) => {
     killBanner.push(crit ? 'CRIT' : `COMBO ×${combo + 1}`, ranged ? 'On target' : crit ? 'Jump strike' : 'Keep the pressure',
       crit ? '#ffd25e' : '#72ffcb', 1.1);
   }
+};
+net.onPgKillHeal = (_victim, health) => {
+  const gain = Math.max(0, health - player.health);
+  player.health = Math.max(player.health, health);
+  lastHealth = player.health; // the refill is its own event, not a medkit tick
+  bridgeKillHealFx(gain);
 };
 net.onPgArrow = (a) => { partyVisuals.spawnArrow(a); if (a.by !== net.myId) audio.bowRelease(a.power); };
 net.onPgArrowEnd = (id, x, y, z, hit) => {
@@ -2184,6 +2274,7 @@ function frame(): void {
   else if (player.health > lastHealth) onHealthRestored(player.health - lastHealth);
   lastHealth = player.health;
   updateHealFeel(dt, controlling && !duelSpectating);
+  updateBridgeFx();
 
   const firstPersonActive = !duelSpectating && view === View.First && screen !== 'results' &&
     !(match.kind === 'rs' && rsClient.phase() === 'intro');

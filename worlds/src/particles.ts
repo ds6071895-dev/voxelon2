@@ -132,6 +132,77 @@ export class Particles {
     }
   }
 
+  /** A flat ring of glowing motes racing outward, in any colour. */
+  ring(x: number, y: number, z: number, color: number, count = 24, speed = 6, life = 0.7): void {
+    for (let i = 0; i < count; i++) {
+      if (this.list.length >= MAX_PARTICLES) return;
+      const a = (i / count) * Math.PI * 2;
+      const mat = new THREE.MeshBasicMaterial({
+        color: i % 3 ? color : 0xffffff, transparent: true, depthWrite: false,
+        side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+      });
+      const mesh = new THREE.Mesh(this.geo, mat);
+      mesh.scale.setScalar(0.9);
+      mesh.position.set(x + Math.cos(a) * 0.25, y, z + Math.sin(a) * 0.25);
+      this.scene.add(mesh);
+      this.list.push({
+        mesh, life: 0, maxLife: life, gravity: -1,
+        vel: new THREE.Vector3(Math.cos(a) * speed, 0.3, Math.sin(a) * speed),
+      });
+    }
+  }
+
+  /** Motes standing in a column that all drift upward — or, with `inward`,
+   *  start wide and spiral into the centre line as they rise. */
+  column(x: number, y: number, z: number, color: number, count: number, opts: { radius?: number; rise?: number;
+    life?: number; inward?: boolean; map?: THREE.Texture } = {}): void {
+    const radius = opts.radius ?? 0.6, rise = opts.rise ?? 4, life = opts.life ?? 0.9;
+    for (let i = 0; i < count; i++) {
+      if (this.list.length >= MAX_PARTICLES) return;
+      const a = Math.random() * Math.PI * 2, r = radius * (0.4 + Math.random() * 0.6);
+      const mat = new THREE.MeshBasicMaterial({
+        color: i % 4 ? color : 0xffffff, transparent: true, depthWrite: false, map: opts.map ?? null,
+        side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+      });
+      const mesh = new THREE.Mesh(this.geo, mat);
+      mesh.scale.setScalar(opts.map ? 1.1 : 0.7);
+      mesh.position.set(x + Math.cos(a) * r, y + Math.random() * 1.6, z + Math.sin(a) * r);
+      this.scene.add(mesh);
+      const pull = opts.inward ? -r * 1.6 : 0;
+      this.list.push({
+        mesh, life: 0, maxLife: life * (0.7 + Math.random() * 0.6), gravity: -0.5,
+        vel: new THREE.Vector3(Math.cos(a) * pull - Math.sin(a) * (opts.inward ? 2.4 : 0.6),
+          rise * (0.6 + Math.random() * 0.6), Math.sin(a) * pull + Math.cos(a) * (opts.inward ? 2.4 : 0.6)),
+      });
+    }
+  }
+
+  /** Bridge death: the body shatters into shards in the team colour while a
+   *  pale column of spirits lifts out of it and a ring rolls away. */
+  deathBurst(x: number, y: number, z: number, color: number): void {
+    this.burst(x, y + 0.9, z, 22, color, 6.5, 0.75, { gravity: 9, spread: 0.6, scale: 0.75 });
+    this.burst(x, y + 0.9, z, 8, 0xffffff, 3, 0.5, { gravity: 6, spread: 0.4, scale: 0.4, additive: true });
+    this.column(x, y, z, 0xd9e6ff, 16, { radius: 0.5, rise: 5, life: 1.1 });
+    this.ring(x, y + 0.15, z, color, 22, 5.5, 0.6);
+  }
+
+  /** Bridge respawn: motes pour in and up, then a ring flares out from the
+   *  feet — the body assembling itself out of light. */
+  respawnBeam(x: number, y: number, z: number, color: number): void {
+    this.column(x, y, z, color, 26, { radius: 1.3, rise: 3.6, life: 0.9, inward: true });
+    this.column(x, y, z, 0xffffff, 8, { radius: 0.3, rise: 6, life: 0.7 });
+    this.ring(x, y + 0.1, z, color, 26, 7, 0.65);
+  }
+
+  /** Bridge kill: a gold-green surge — crosses float up, a double ring and a
+   *  helix wrap the killer as health floods back to full. */
+  killHeal(x: number, y: number, z: number): void {
+    this.heal(x, y + 1, z, 14);
+    this.healRing(x, y + 0.9, z, 26);
+    this.ring(x, y + 0.3, z, 0xffe38a, 22, 4.2, 0.8);
+    for (let i = 0; i < 6; i++) this.healSpiral(x, y + 0.2 + i * 0.28, z, i * 1.05);
+  }
+
   /** Gray puff where a round hits something. */
   poof(x: number, y: number, z: number): void {
     this.burst(x, y, z, 10, 0xdddddd, 2, 0.5);

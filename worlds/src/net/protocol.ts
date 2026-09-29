@@ -171,6 +171,8 @@ export type ServerMsg =
   /** Attacker-only feedback: `hitconfirm` cannot carry crit/combo. */
   | { t: 'pgHit'; target: number; amount: number; combo: number; charge: number;
       crit: boolean; killed: boolean; ranged: boolean }
+  /** Bridge, killer only: a kill topped you back up to full health. */
+  | { t: 'pgKillHeal'; victim: number; health: number }
   | { t: 'pgArrow'; id: number; by: number; x: number; y: number; z: number;
       dx: number; dy: number; dz: number; speed: number; power: number }
   | { t: 'pgArrowEnd'; id: number; x: number; y: number; z: number; hit: boolean }

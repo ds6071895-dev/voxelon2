@@ -1384,6 +1384,10 @@ export class GameServer {
     const now = this.nowMs(), before = this.pg.phaseFor(p.id);
     const evaluated = this.pg.evaluate(p.id, retry ? { x: p.x, y: PARTY_FLOOR_Y - 30, z: p.z } : p, now);
     const out: Outbound[] = [];
+    if (evaluated.killedBy !== undefined) {
+      const killer = this.players.get(evaluated.killedBy);
+      if (killer) out.push(...this.healKiller(killer, p.id));
+    }
     if (evaluated.spawn) {
       p.x = evaluated.spawn.x; p.y = evaluated.spawn.y; p.z = evaluated.spawn.z;
       const bot = this.partyBots.get(p.id);
@@ -1404,9 +1408,11 @@ export class GameServer {
     const dead = this.pg.participantFor(p.id)?.respawnAt;
     if (dead !== undefined && !this.partySpectators.has(p.id)) {
       this.partySpectators.add(p.id);
+      p.dead = true; // the body vanishes for everyone else while you spectate
       if (!p.bot) out.push(this.to(p, { t: 'pgRespawn', respawnAt: dead, spectating: true }));
-    } else if (dead === undefined && this.partySpectators.delete(p.id) && !p.bot) {
-      out.push(this.to(p, { t: 'pgRespawn', respawnAt: 0, spectating: false }));
+    } else if (dead === undefined && this.partySpectators.delete(p.id)) {
+      p.dead = false;
+      if (!p.bot) out.push(this.to(p, { t: 'pgRespawn', respawnAt: 0, spectating: false }));
     }
     if (evaluated.changed) {
       const snap = this.pg.snapshotFor(p.id, now)!;
@@ -1462,10 +1468,18 @@ export class GameServer {
       combo: hit.combo, charge: hit.charge, crit: hit.crit, killed, ranged: hit.ranged }));
     if (!killed) return out;
     target.health = PARTY_MAX_HEALTH;
+    out.push(...this.healKiller(attacker, target.id));
     const snapshot = this.pg.recordDeath(target.id, attacker.id, now, hit.ranged ? 'bow' : 'melee');
     if (snapshot) out.push(...this.pgStateOut(snapshot));
     out.push(...this.evaluatePartyPlayer(target, w));
     return out;
+  }
+
+  /** A Bridge kill tops the killer back up to full health. */
+  private healKiller(killer: ServerPlayer, victimId: number): Outbound[] {
+    killer.health = PARTY_MAX_HEALTH;
+    killer.regenBoostTimer = 0;
+    return killer.bot ? [] : [this.to(killer, { t: 'pgKillHeal', victim: victimId, health: PARTY_MAX_HEALTH })];
   }
 
   private handlePartyMelee(p: ServerPlayer, w: MatchWorld, targetId: number): Outbound[] {

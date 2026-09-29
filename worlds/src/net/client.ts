@@ -106,6 +106,7 @@ export class NetClient {
   onPgState?: (snapshot: PartyLobbySnapshot) => void;
   onPgLoadout?: (slots: (ItemStack | null)[], selected: number) => void;
   onPgHit?: (target: number, amount: number, combo: number, charge: number, crit: boolean, killed: boolean, ranged: boolean) => void;
+  onPgKillHeal?: (victim: number, health: number) => void;
   onPgArrow?: (a: { id: number; by: number; x: number; y: number; z: number;
     dx: number; dy: number; dz: number; speed: number; power: number }) => void;
   onPgArrowEnd?: (id: number, x: number, y: number, z: number, hit: boolean) => void;
@@ -243,6 +244,7 @@ export class NetClient {
       case 'duelResult': this.onDuelResult?.(msg.result); break;
       case 'pgState': this.onPgState?.(msg.snapshot); break;
       case 'pgLoadout': this.onPgLoadout?.(msg.slots, msg.selected); break;
+      case 'pgKillHeal': this.onPgKillHeal?.(msg.victim, msg.health); break;
       case 'pgHit': this.onPgHit?.(msg.target, msg.amount, msg.combo, msg.charge, msg.crit, msg.killed, msg.ranged); break;
       case 'pgArrow': this.onPgArrow?.(msg); break;
       case 'pgArrowEnd': this.onPgArrowEnd?.(msg.id, msg.x, msg.y, msg.z, msg.hit); break;

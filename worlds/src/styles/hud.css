@@ -406,6 +406,46 @@
       0% { opacity: .95; transform: scale(.25); }
       100% { opacity: 0; transform: scale(2.1); }
     }
+    /* The Bridge: dying, coming back, and the kill refill. The wash sits
+       under the title; `.dead` holds while you spectate, `.reborn` is the
+       one-shot bloom of light when you land back on your deck. */
+    #bridge-fx { position: absolute; inset: 0; pointer-events: none; z-index: 15; opacity: 0; }
+    #bridge-fx.dead, #bridge-fx.reborn { opacity: 1; }
+    #bridge-fx .bfx-wash { position: absolute; inset: 0; opacity: 0; }
+    #bridge-fx.dead .bfx-wash {
+      animation: bfx-die .55s ease-out forwards;
+      background:
+        radial-gradient(ellipse at center, rgba(90,0,8,.15) 20%, rgba(70,0,6,.78) 100%),
+        rgba(20,0,4,.32);
+      backdrop-filter: grayscale(.85) brightness(.75);
+    }
+    @keyframes bfx-die { 0% { opacity: 1; background: rgba(255,60,80,.7); } 100% { opacity: 1; } }
+    #bridge-fx.reborn .bfx-wash {
+      animation: bfx-reborn .9s cubic-bezier(.1,.7,.3,1) forwards;
+      background: radial-gradient(circle at 50% 55%, rgba(255,255,255,.92) 0%, rgba(150,220,255,.5) 38%, rgba(110,180,255,0) 72%);
+    }
+    @keyframes bfx-reborn { 0% { opacity: 1; transform: scale(.6); } 100% { opacity: 0; transform: scale(1.9); } }
+    #bridge-fx .bfx-title {
+      position: absolute; left: 50%; top: 34%; transform: translateX(-50%); text-align: center;
+      opacity: 0; white-space: nowrap;
+    }
+    #bridge-fx.dead .bfx-title { animation: bfx-title .5s cubic-bezier(.2,.9,.25,1.4) .08s both; }
+    #bridge-fx.reborn .bfx-title { display: none; }
+    #bridge-fx .bfx-title b {
+      display: block; font-size: 46px; letter-spacing: 6px; color: #ff5a6c;
+      text-shadow: 0 3px 0 #300008, 0 0 24px rgba(255,40,70,.6);
+    }
+    #bridge-fx .bfx-title small {
+      display: block; margin-top: 8px; font-size: 16px; letter-spacing: 2px; color: #ffd9de;
+      text-shadow: 1px 1px 0 #000;
+    }
+    @keyframes bfx-title { from { opacity: 0; transform: translateX(-50%) scale(1.7); } to { opacity: 1; transform: translateX(-50%) scale(1); } }
+    body.reduced-motion #bridge-fx .bfx-wash, body.reduced-motion #bridge-fx .bfx-title { animation: none !important; }
+    body.reduced-motion #bridge-fx.dead .bfx-title { opacity: 1; }
+    body.reduced-motion #bridge-fx.dead .bfx-wash { opacity: 1; }
+    body.reduced-motion #bridge-fx.reborn, body.photosensitivity-safe #bridge-fx.reborn { display: none; }
+    body.photosensitivity-safe #bridge-fx.dead .bfx-wash { animation: none; opacity: .8; }
+
     /* Hearts give a little squeeze whenever the heal buff restores a point. */
     #hearts { transition: transform 0.12s ease-out; }
     body.reduced-motion #hearts { transition: none; }

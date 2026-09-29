@@ -611,6 +611,37 @@ export class GameAudio {
     }
   }
 
+  /** You died in The Bridge: a hollow thud, a glassy shatter and a falling
+   *  minor sigh. Others hear a softer, positioned version. */
+  bridgeDeath(self: boolean, pos?: THREE.Vector3): void {
+    const g = self ? 1 : 0.55;
+    this.tone({ type: 'sine', from: 140, to: 34, dur: 0.5, gain: 0.22 * g, pos });
+    this.noise({ freq: 3200, dur: 0.35, gain: 0.12 * g, slideTo: 500, type: 'bandpass', q: 0.8, pos });
+    [523.3, 392, 311.1].forEach((f, i) =>
+      this.tone({ type: 'triangle', from: f, to: f * 0.96, dur: 0.32, gain: 0.07 * g, delay: 0.08 + i * 0.13, pos }));
+  }
+
+  /** Back in the fight: a rising shimmer that resolves in a bright chime. */
+  bridgeRespawn(self: boolean, pos?: THREE.Vector3): void {
+    const g = self ? 1 : 0.55;
+    this.noise({ freq: 700, dur: 0.5, gain: 0.05 * g, slideTo: 5200, type: 'bandpass', q: 0.7, pos });
+    [392, 523.3, 659.3, 784].forEach((f, i) =>
+      this.tone({ type: 'sine', from: f, to: f, dur: i === 3 ? 0.5 : 0.14, gain: 0.07 * g, delay: i * 0.07, pos }));
+    this.tone({ type: 'sine', from: 90, to: 200, dur: 0.3, gain: 0.12 * g, pos });
+  }
+
+  /** A kill refilled you: the heal ladder run all the way up, capped by a
+   *  warm two-note bell. */
+  killHeal(): void {
+    [0, 2, 4, 7, 9, 12, 14, 16].forEach((n, i) => {
+      const f = 523.3 * 2 ** (n / 12);
+      this.tone({ type: 'sine', from: f, to: f * 1.005, dur: 0.14, gain: 0.04, delay: i * 0.04 });
+    });
+    this.tone({ type: 'sine', from: 1046.5, to: 1046.5, dur: 0.5, gain: 0.06, delay: 0.3 });
+    this.tone({ type: 'sine', from: 1568, to: 1568, dur: 0.6, gain: 0.05, delay: 0.38 });
+    this.tone({ type: 'sine', from: 80, to: 55, dur: 0.22, gain: 0.14 });
+  }
+
   /** Axe contact predicted on your own screen (the server confirms the damage
    *  a moment later). A tight, meaty chop — it has to land on the click. */
   axeContact(sprint: boolean, pos?: THREE.Vector3): void {
