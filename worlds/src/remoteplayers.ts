@@ -2,9 +2,10 @@
 // customisable cosmetics (character.ts) and floating name tags.
 //
 // Motion is SNAPSHOT INTERPOLATION (interp.ts): each avatar is drawn at the
-// position its owner actually occupied INTERP_DELAY ago, reconstructed by
-// lerping between the two buffered snapshots that bracket that instant. That
-// costs a fixed sliver of latency and buys constant-velocity movement, so a
+// position its owner actually occupied a moment ago (one send interval plus
+// that link's measured jitter), reconstructed by lerping between the two
+// buffered snapshots that bracket that instant. That costs a small sliver of
+// latency and buys constant-velocity movement, so a
 // strafing enemy tracks predictably instead of easing toward each packet.
 // The PvP hit tests below deliberately run against these same rendered
 // positions — what you shoot at is what you hit.
@@ -942,7 +943,8 @@ export class RemotePlayers {
         this.avatars.delete(id);
       }
     }
-    // Replay every avatar at the same instant, INTERP_DELAY behind now. One
+    // Replay every avatar at the same instant, INTERP_DELAY behind now (each
+    // remote's own jitter buffer is already baked into its sample times). One
     // clock read for the whole loop keeps them consistent with each other.
     const renderTime = netNow() - this.net.renderDelay(dt);
     this.net.applyRemotePoses(renderTime);

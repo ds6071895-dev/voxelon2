@@ -95,16 +95,22 @@ function allowMessage(id: number, now: number): boolean {
   return true;
 }
 
-function send(id: number, msg: ServerMsg, volatile = false): void {
+function send(id: number, msg: ServerMsg, volatile = false, json?: string): void {
   const ws = sockets.get(id);
   if (!ws || ws.readyState !== ws.OPEN) return;
   // A snapshot supersedes every older one: drop it rather than queue it
   // behind a slow connection.
   if (volatile && ws.bufferedAmount > 64 * 1024) return;
-  ws.send(JSON.stringify(msg));
+  ws.send(json ?? JSON.stringify(msg));
 }
 function dispatch(out: Outbound[]): void {
-  for (const o of out) send(o.to, o.msg, o.msg.t === 'snapshot');
+  // The core hands the same message object to every recipient of a broadcast
+  // (snapshots, relayed transforms): serialise each one once, not per socket.
+  let lastMsg: ServerMsg | null = null, lastJson = '';
+  for (const o of out) {
+    if (o.msg !== lastMsg) { lastMsg = o.msg; lastJson = JSON.stringify(o.msg); }
+    send(o.to, o.msg, o.msg.t === 'snapshot', lastJson);
+  }
 }
 
 // --- Static client hosting ------------------------------------------------------
@@ -150,7 +156,12 @@ const httpServer = http.createServer((req, res) => {
   });
 });
 
-const wss = new WebSocketServer({ server: httpServer, perMessageDeflate: { threshold: 256 }, maxPayload: MAX_FRAME_BYTES });
+// No per-message deflate: nearly every frame is a tiny transform or snapshot,
+// and ws runs (de)compression on libuv's shared threadpool, so each one queued
+// behind the others and arrived later than it left. Browsers also compress
+// EVERY outgoing frame once it is negotiated. The bytes saved were not worth
+// the latency; the big one-off payloads are rare and small in absolute terms.
+const wss = new WebSocketServer({ server: httpServer, perMessageDeflate: false, maxPayload: MAX_FRAME_BYTES });
 
 wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
   const ip = clientIp(req);

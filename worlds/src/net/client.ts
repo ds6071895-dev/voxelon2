@@ -57,6 +57,8 @@ function serverUrl(): string {
 
 /** Seconds a remote may be absent from snapshots before it is dropped. */
 const STALE_REMOTE_S = 2;
+/** Playback cushion for snapshots that carry no sender clock (`ct`). */
+const UNSTAMPED_DELAY = 0.1;
 
 export class NetClient {
   /** Socket open and `welcome` received. */
@@ -66,6 +68,8 @@ export class NetClient {
   worldId: number | null = null;
   /** Bridge/Parkour round revision the transforms are stamped with. */
   revision: number | undefined;
+  /** Newest server move (`respawned`/`teleport` seq) applied; echoed in xform. */
+  private moveSeq = 0;
   readonly remotes = new Map<number, Remote>();
   private ws: WebSocket | null = null;
   private xformAcc = 0;
@@ -155,6 +159,7 @@ export class NetClient {
       case 'welcome':
         this.connected = true;
         this.myId = msg.id;
+        this.moveSeq = 0;
         this.onWelcome?.(msg.username, msg.account, msg.cosmetics);
         break;
       case 'identity':
@@ -209,8 +214,11 @@ export class NetClient {
               r.poses.push(r.buf.newest, pose);
             }
           } else {
-            r.buf.push({ t: at, x: s.x, y: s.y, z: s.z, yaw: s.yaw, pitch: s.pitch });
-            r.poses.push(at, pose);
+            // No sender clock yet (never moved): arrival time plus a fixed
+            // cushion stands in for the jitter buffer a SenderClock would add.
+            const t = at + UNSTAMPED_DELAY;
+            r.buf.push({ t, x: s.x, y: s.y, z: s.z, yaw: s.yaw, pitch: s.pitch });
+            r.poses.push(t, pose);
           }
           r.health = s.health; r.dead = s.dead;
         }
@@ -227,8 +235,14 @@ export class NetClient {
       case 'hurt': this.onHurt?.(msg.health, [msg.kx, msg.ky, msg.kz], msg.by); break;
       case 'hitconfirm': this.onHitConfirm?.(msg.target, msg.amount, msg.killed === true); break;
       case 'shot': this.onShot?.(msg.id, msg.item, msg.x, msg.y, msg.z, msg.dx, msg.dy, msg.dz); break;
-      case 'respawned': this.onRespawned?.(msg.x, msg.y, msg.z, msg.health); break;
-      case 'teleport': this.onTeleport?.(msg.x, msg.y, msg.z); break;
+      case 'respawned':
+        if (typeof msg.seq === 'number') this.moveSeq = msg.seq;
+        this.onRespawned?.(msg.x, msg.y, msg.z, msg.health);
+        break;
+      case 'teleport':
+        if (typeof msg.seq === 'number') this.moveSeq = msg.seq;
+        this.onTeleport?.(msg.x, msg.y, msg.z);
+        break;
       case 'killfeed': this.onKillfeed?.(msg.killer, msg.victim); break;
       case 'cosmetics': {
         const rc = this.remotes.get(msg.id);
@@ -308,7 +322,7 @@ export class NetClient {
     if (this.xformAcc < interval) return;
     this.xformAcc = Math.min(this.xformAcc - interval, interval);
     this.raw({ t: 'xform', world: this.worldId, revision: this.revision, x, y, z, yaw, pitch,
-      ct: Math.round(netNow() * 1000), sneaking, held, swing, aiming, reloading }, true);
+      ct: Math.round(netNow() * 1000), seq: this.moveSeq, sneaking, held, swing, aiming, reloading }, true);
   }
   /** Unthrottled transform send, for right before an edit: the server checks a
    *  placement against the placer's body, and a pose up to 1/TRANSFORM_HZ old
@@ -318,7 +332,7 @@ export class NetClient {
     if (!this.connected || this.worldId === null) return;
     this.xformAcc = 0;
     this.raw({ t: 'xform', world: this.worldId, revision: this.revision, x, y, z, yaw, pitch,
-      ct: Math.round(netNow() * 1000), sneaking, held, swing, aiming, reloading });
+      ct: Math.round(netNow() * 1000), seq: this.moveSeq, sneaking, held, swing, aiming, reloading });
   }
   sendWorldReady(): void {
     if (this.worldId !== null) this.send({ t: 'worldReady', world: this.worldId, revision: this.revision });

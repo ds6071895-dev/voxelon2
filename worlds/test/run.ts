@@ -13,6 +13,7 @@ import { isGeneratedName, normalizePartyCode, type ClientMsg, type ServerMsg } f
 import { WorldBlocks, worldGenerator } from '../src/multiverse';
 import { Block } from '../src/blocks';
 import { mulberry32 } from '../src/noise';
+import { INTERP_DELAY, SenderClock } from '../src/interp';
 import { Player } from '../src/player';
 import { FROZEN_INPUT } from '../src/input';
 import type { World } from '../src/world';
@@ -423,6 +424,63 @@ section('rat and seek');
   check('the seeker sharpens up against strong rats', bot.skill > 1.2, bot.skill.toFixed(2));
   for (let i = 0; i < 60; i++) bot.adapt(-0.9);
   check('and eases off when it is winning easily', bot.skill < 0.3, bot.skill.toFixed(2));
+}
+
+section('netcode: relay, stale moves and the jitter buffer');
+{
+  const h = new Harness(77);
+  const a = h.join(), b = h.join();
+  h.send(a, { t: 'partyCreate' });
+  h.send(b, { t: 'partyJoin', code: h.last(a, 'party')!.party!.code });
+  h.send(a, { t: 'play', mode: 'bridge' });
+  h.ready(a, b);
+  for (let i = 0; i < 400 && h.last(a, 'pgState')?.snapshot.phase !== 'running'; i++) h.tick(0.05);
+  check('a Bridge party match reaches the running phase', h.last(a, 'pgState')?.snapshot.phase === 'running');
+  const world = h.server.worldOf(a)!.id, revision = h.last(a, 'pgArena')!.revision;
+  const at = h.server.positionOf(a)!;
+  const xform = (x: number, z: number, ct: number, seq?: number): ClientMsg =>
+    ({ t: 'xform', world, revision, x, y: at.y, z, yaw: 0.123456789, pitch: 0, ct, seq });
+
+  h.inbox.set(a, []); h.inbox.set(b, []);
+  h.send(a, xform(at.x + 0.2, at.z, 5000, 0));
+  const relayed = h.all(b).find((m) => m.t === 'snapshot') as Extract<ServerMsg, { t: 'snapshot' }> | undefined;
+  const body = relayed?.players.find((p) => p.id === a);
+  check('a transform reaches the opponent at once, not on the next tick', body?.ct === 5000 && Math.abs(body.x - (at.x + 0.2)) < 1e-3);
+  check('relayed transforms are rounded for the wire', body?.yaw === 0.1235);
+  check('the mover is not sent their own transform', !h.all(a).some((m) => m.t === 'snapshot' && m.players.some((p) => p.id === a)));
+
+  h.send(a, xform(at.x + 30, at.z, 5033, 0));
+  const fix = h.last(a, 'teleport');
+  check('an impossible move is corrected with a numbered teleport', !!fix && typeof fix.seq === 'number' && fix.seq > 0);
+  h.inbox.set(a, []);
+  h.send(a, xform(at.x + 31, at.z, 5066, 0));
+  check('a transform sent before the correction landed is dropped quietly',
+    h.all(a).length === 0 && Math.abs(h.server.positionOf(a)!.x - (at.x + 0.2)) < 1e-6);
+  h.send(a, xform(fix!.x + 0.1, fix!.z, 5100, fix!.seq));
+  check('once the client echoes the correction, it moves on normally',
+    !h.all(a).some((m) => m.t === 'teleport') && Math.abs(h.server.positionOf(a)!.x - (fix!.x + 0.1)) < 1e-6);
+
+  // The jitter buffer: every sample must be mapped at or after the moment the
+  // renderer could need it, on a clean link AND a jittery one, while the clean
+  // link pays only about one send interval of delay.
+  const trial = (jitter: number) => {
+    const clock = new SenderClock(), rng = mulberry32(3);
+    let late = 0, n = 0, buffer = 0;
+    for (let i = 0; i < 30 * 12; i++) {
+      const sent = i / 30, arrived = sent + 0.03 + rng() * jitter;
+      const m = clock.map(sent * 1000, arrived);
+      if (!m || sent < 4) continue;
+      n++;
+      if (m.t < arrived - INTERP_DELAY) late++;
+      buffer += m.t - (sent + 0.03);
+    }
+    return { late: late / n, buffer: buffer / n };
+  };
+  const clean = trial(0.002), noisy = trial(0.08);
+  check('clean link: every sample is in time', clean.late === 0, `${(clean.late * 100).toFixed(1)}% late`);
+  check('clean link: remotes are drawn about one send interval behind', clean.buffer < 0.05, `${(clean.buffer * 1000).toFixed(0)} ms`);
+  check('jittery link: the buffer grows to cover it', noisy.late < 0.02 && noisy.buffer > 0.07,
+    `${(noisy.late * 100).toFixed(1)}% late, ${(noisy.buffer * 1000).toFixed(0)} ms`);
 }
 
 section('mobile aim assistance stays modest and respects visibility');

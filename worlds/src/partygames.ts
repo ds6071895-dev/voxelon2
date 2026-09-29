@@ -1120,11 +1120,34 @@ export class PartyGamesEngine {
     };
   }
 
+  /** snapshotLobby minus the defensive copies: the participants, round and
+   *  scores are the live objects. Only for the server's per-tick paths that
+   *  READ a match (never mutate it, keep it, or put it on the wire) — copying
+   *  every match once per tick, and again per bot, was a quarter of the tick. */
+  private viewLobby(l: PartyLobby, now: number): PartyLobbySnapshot {
+    return {
+      id: l.id, mode: l.mode, revision: l.revision, phase: l.phase, capacity: l.capacity,
+      participants: [...l.participants.values()], host: l.host, serverNow: now,
+      countdownEndsAt: l.countdownEndsAt, arenaLoadDeadline: l.arenaLoadDeadline,
+      teamScores: l.teamScores, goalResetAt: l.goalResetAt,
+      lastGoal: l.lastGoal, lastKill: l.lastKill,
+      round: l.round, arena: l.arena,
+      sub: l.arena && l.round ? partySubBounds(l.mode, l.arena.seed) : undefined,
+      result: l.result,
+    };
+  }
+
   snapshotFor(id: number, now: number): PartyLobbySnapshot | null {
     const l = this.lobbyByPlayer.get(id);
     return l ? this.snapshotLobby(l, now) : null;
   }
   snapshots(now: number): PartyLobbySnapshot[] { return [...this.lobbies.values()].map((l) => this.snapshotLobby(l, now)); }
+  /** Read-only live views (see viewLobby). */
+  viewFor(id: number, now: number): Readonly<PartyLobbySnapshot> | null {
+    const l = this.lobbyByPlayer.get(id);
+    return l ? this.viewLobby(l, now) : null;
+  }
+  views(now: number): Readonly<PartyLobbySnapshot>[] { return [...this.lobbies.values()].map((l) => this.viewLobby(l, now)); }
   phaseFor(id: number): PartyPhase | null { return this.lobbyByPlayer.get(id)?.phase ?? null; }
   subFor(id: number): PartySubBounds | null {
     const l = this.lobbyByPlayer.get(id);

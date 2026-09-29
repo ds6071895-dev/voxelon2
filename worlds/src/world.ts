@@ -659,6 +659,10 @@ export class World {
     const chunk = this.chunks.get(Chunk.key(cx, cz));
     if (!chunk) return;
     const lx = wx & 15, lz = wz & 15;
+    // Already that block — typically the server echoing a placement this
+    // client predicted a round trip ago. Remeshing (up to four chunks) again
+    // for no visible change was a frame hitch per block while bridging.
+    if (chunk.get(lx, wy, lz) === id) return;
     chunk.set(lx, wy, lz, id);
 
     if (id === Block.Air) {

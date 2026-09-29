@@ -226,14 +226,24 @@ interface Candidate {
 }
 
 const courseCache = new Map<number, ParkourCourse>();
+/** Courses kept (a few hundred KB of geometry records at most). */
+const COURSE_CACHE_MAX = 256;
 
 /** The course for a seed. Deterministic and shared by client, server and
  *  smoke tests, so nobody disagrees about where the next pad is. */
 export function parkourCourse(seed: number): ParkourCourse {
+  // Least-recently-used: the server asks for every live Parkour match's course
+  // on each of its players' transforms, so a cache smaller than the number of
+  // live matches (the old FIFO of 64) regenerated courses constantly and ate
+  // most of the tick on a busy server.
   const cached = courseCache.get(seed);
-  if (cached) return cached;
+  if (cached) {
+    courseCache.delete(seed);
+    courseCache.set(seed, cached);
+    return cached;
+  }
   const course = generate(seed >>> 0);
-  if (courseCache.size > 64) courseCache.delete(courseCache.keys().next().value!);
+  if (courseCache.size >= COURSE_CACHE_MAX) courseCache.delete(courseCache.keys().next().value!);
   courseCache.set(seed, course);
   return course;
 }

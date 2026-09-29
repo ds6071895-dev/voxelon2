@@ -3,8 +3,6 @@
 // one agree to the last decimal. Extracted from VOXELON's Bedwars module,
 // which Worlds does not ship.
 
-import { INTERP_DELAY } from './interp';
-
 /** One weapon's stats: base damage, cadence and extra knockback. */
 interface SwingTier {
   readonly damage: number;
@@ -28,13 +26,14 @@ const MELEE_KB_VERT = 0.42;
 const MELEE_LOOK_BLEND = 0.30;
 export const MELEE_RANGE = 4.2;
 export const MELEE_FACING_DOT = 0.55;
-/** Lag-compensation window: the attacker sees the target INTERP_DELAY (plus
- *  one-way latency) in the past, so the swing reaches the server roughly
- *  INTERP_DELAY + the attacker's RTT after the position it was aimed at. Kept
- *  tied to INTERP_DELAY with ~150ms of RTT headroom — far short of the 1.2s
+/** Lag-compensation window: the attacker sees the target its playback buffer
+ *  (one send interval plus measured jitter, ~50-120 ms — see SenderClock) plus
+ *  one-way latency in the past, so the swing reaches the server roughly that
+ *  buffer + the attacker's RTT after the position it was aimed at. ~150 ms of
+ *  RTT headroom over a typical buffer — far short of the 1.2s
  *  DUEL_TRACK_WINDOW: melee has no travel time, so a wider window would let a
  *  laggy client hit someone who has already sprinted four metres clear. */
-export const MELEE_REWIND_S = INTERP_DELAY + 0.15;
+export const MELEE_REWIND_S = 0.28;
 
 export interface SwingInput {
   tier: SwingTier;

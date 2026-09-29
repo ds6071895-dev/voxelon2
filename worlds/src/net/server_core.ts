@@ -97,6 +97,9 @@ interface DuelShotTicket { at: number; x: number; y: number; z: number; dx: numb
  *  shooter's client renders opponents at, and a slow round trip on top. */
 const DUEL_TRACK_WINDOW = 1.2;
 
+/** Consecutive rejected moves (each a full round trip) before a Bridge or
+ *  Parkour body is settled onto its last known footing. */
+const PARTY_STUCK_LIMIT = 4;
 /** Movement budget while a throw (pad or knockback) is settling. */
 const PARTY_LAUNCH_RATE = 17;
 const PARTY_LAUNCH_CAP = 6;
@@ -121,6 +124,12 @@ interface ServerPlayer {
   queuedAt: number;
   x: number; y: number; z: number; yaw: number; pitch: number;
   ct?: number;
+  /** Bumped every time the server moves this body and tells its client
+   *  (respawn, correction, Rat and Seek warp). A transform echoing an older
+   *  value was sent before the client knew, so it is dropped unanswered —
+   *  rejecting it with yet another correction would yank the player back to
+   *  the new spot a round trip after they had already started moving on. */
+  moveSeq: number;
   health: number;
   dead: boolean;
   held: number;
@@ -354,7 +363,7 @@ export class GameServer {
       regenTimer: 0, regenBoostTimer: 0, regenBoostInterval: 0,
       duelSpawnIndex: -1, duelLastShotAt: -Infinity, duelNextBurstAt: 0, duelBurstShots: 0,
       duelShotTickets: [], duelLoaded: 0, duelReloadUntil: 0, duelMedkits: 0, duelRespawning: false,
-      rsMoveAt: 0, arenaTrack: [],
+      rsMoveAt: 0, arenaTrack: [], moveSeq: 0,
     };
   }
 
@@ -967,6 +976,15 @@ export class GameServer {
     return out;
   }
 
+  /** The server just moved `p` and is telling its client: the new move seq. */
+  private moved(p: ServerPlayer): number { return p.moveSeq = (p.moveSeq + 1) & 0xffff; }
+  /** A transform sent before its client applied our latest move of it. (No
+   *  `seq` at all is taken at face value: nothing a client gains by omitting
+   *  it gets past the movement checks.) */
+  private staleMove(p: ServerPlayer, msg: Extract<ClientMsg, { t: 'xform' }>): boolean {
+    return msg.seq !== undefined && msg.seq !== p.moveSeq;
+  }
+
   /** Reset a body onto a spawn, at full health, with fresh combat clocks. */
   private resetBody(p: ServerPlayer, spawn: { x: number; y: number; z: number }, yaw: number, health: number): void {
     p.x = spawn.x; p.y = spawn.y; p.z = spawn.z; p.yaw = yaw; p.pitch = 0;
@@ -992,9 +1010,12 @@ export class GameServer {
       return snap ? this.pgStateOut(snap) : [];
     }
     if (msg.t === 'xform') {
-      if (msg.world !== w.spec.id) return [];
+      if (msg.world !== w.spec.id || this.staleMove(p, msg)) return [];
       if (typeof msg.ct === 'number' && Number.isFinite(msg.ct)) p.ct = Math.floor(msg.ct);
-      return w.mode === 'duels' ? this.handleDuelTransform(p, w, msg) : this.handlePartyTransform(p, w, msg);
+      const out = w.mode === 'duels' ? this.handleDuelTransform(p, w, msg) : this.handlePartyTransform(p, w, msg);
+      // The mover may have left the world (a Bridge goal can end the match).
+      if (this.worldOfPlayer(p) === w) out.push(...this.relayTransform(p, w));
+      return out;
     }
     if (w.mode === 'duels') {
       if (msg.t === 'shot') return this.handleDuelShot(p, msg);
@@ -1345,7 +1366,8 @@ export class GameServer {
     const distance = Math.hypot(wanted.x - p.x, wanted.z - p.z);
     let clear = distance <= move.allowance && (launched || wanted.y - move.groundY <= 1.6);
     // Anti-flight: hanging at or above your last footing for seconds on end.
-    if (!launched && this.worldTime - move.groundedAt > 2.2 && wanted.y >= move.groundY - .15) clear = false;
+    const hovering = !launched && this.worldTime - move.groundedAt > 2.2 && wanted.y >= move.groundY - .15;
+    if (hovering) clear = false;
     const steps = Math.max(1, Math.ceil(Math.hypot(wanted.x - p.x, wanted.y - p.y, wanted.z - p.z) * 4));
     for (let i = 1; clear && i <= steps; i++) {
       const t = i / steps, x = p.x + (wanted.x - p.x) * t, y = p.y + (wanted.y - p.y) * t, z = p.z + (wanted.z - p.z) * t;
@@ -1357,13 +1379,19 @@ export class GameServer {
     this.partyMoves.set(p.id, move);
     if (!clear) {
       // A correction the client keeps losing gets settled onto the last
-      // footing this player is known to have stood on.
-      if (++move.stuck < 12) return [this.to(p, { t: 'teleport', x: p.x, y: p.y, z: p.z })];
+      // footing this player is known to have stood on. So does hovering at
+      // once: sending them back to their last accepted spot, still in mid-air,
+      // would only fail the same check again. (Each rejection here is a whole
+      // round trip — transforms sent before the client applied the previous
+      // correction are dropped by `staleMove` — so a few in a row is plenty.)
+      if (!hovering && ++move.stuck < PARTY_STUCK_LIMIT) {
+        return [this.to(p, { t: 'teleport', x: p.x, y: p.y, z: p.z, seq: this.moved(p) })];
+      }
       move.stuck = 0; move.allowance = 1; move.groundedAt = this.worldTime; move.launchUntil = 0;
       p.x = move.groundX; p.y = move.groundY; p.z = move.groundZ;
       p.arenaTrack = [];
       this.recordArenaTrack(p);
-      return [this.to(p, { t: 'teleport', x: p.x, y: p.y, z: p.z })];
+      return [this.to(p, { t: 'teleport', x: p.x, y: p.y, z: p.z, seq: this.moved(p) })];
     }
     move.stuck = 0;
     move.allowance -= distance;
@@ -1403,7 +1431,7 @@ export class GameServer {
       }
       p.arenaTrack = [];
       this.recordArenaTrack(p);
-      if (!p.bot) out.push(this.to(p, { t: 'respawned', ...evaluated.spawn, health: PARTY_MAX_HEALTH }));
+      if (!p.bot) out.push(this.to(p, { t: 'respawned', ...evaluated.spawn, health: PARTY_MAX_HEALTH, seq: this.moved(p) }));
     }
     const dead = this.pg.participantFor(p.id)?.respawnAt;
     if (dead !== undefined && !this.partySpectators.has(p.id)) {
@@ -1531,7 +1559,7 @@ export class GameServer {
     const len = Math.hypot(msg.dx, msg.dy, msg.dz);
     if (!(len > 1e-3)) return [];
     const combat = this.partyCombatOf(p.id);
-    const round = this.pg.snapshotFor(p.id, now);
+    const round = this.pg.viewFor(p.id, now);
     if (member.pendingSpawn || (round?.goalResetAt !== undefined && now < round.goalResetAt) ||
         now - combat.lastShotAt < BRIDGE_BOW_COOLDOWN_MS) return [];
     combat.lastShotAt = now;
@@ -1666,7 +1694,7 @@ export class GameServer {
 
   /** A racer standing on a crumble pad cracks the whole pad. */
   private stepOnCrumble(p: ServerPlayer, w: MatchWorld, sub: PartySubBounds): Outbound[] {
-    const snap = this.pg.snapshotFor(p.id, this.nowMs());
+    const snap = this.pg.viewFor(p.id, this.nowMs());
     if (!snap || snap.phase !== 'running' || !w.parkour || !this.partyGrounded(w, p.x, p.y, p.z)) return [];
     const course = parkourCourse(sub.seed);
     const pad = parkourCrumbleUnder(course, p.x - sub.minX, p.y, p.z - sub.minZ);
@@ -1731,7 +1759,7 @@ export class GameServer {
         p.x = x; p.y = y; p.z = z;
         if (yaw !== undefined) p.yaw = yaw;
         p.rsMoveAt = this.worldTime;
-        if (!p.bot && !w.rsQuiet) send(id, { t: 'teleport', x, y, z });
+        if (!p.bot && !w.rsQuiet) send(id, { t: 'teleport', x, y, z, seq: this.moved(p) });
       },
       setBlock: (x, y, z, block) => {
         w.blocks.set(x, y, z, block);
@@ -1810,7 +1838,7 @@ export class GameServer {
         if (msg.world === w.spec.id) rs.markLoaded(p.id);
         break;
       case 'xform': {
-        if (msg.world !== w.spec.id || !fin(msg.x, msg.y, msg.z, msg.yaw, msg.pitch)) return [];
+        if (msg.world !== w.spec.id || this.staleMove(p, msg) || !fin(msg.x, msg.y, msg.z, msg.yaw, msg.pitch)) return [];
         if (typeof msg.ct === 'number' && Number.isFinite(msg.ct)) p.ct = Math.floor(msg.ct);
         p.yaw = msg.yaw;
         p.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, msg.pitch));
@@ -1823,9 +1851,11 @@ export class GameServer {
           p.x = msg.x; p.y = msg.y; p.z = msg.z; p.rsMoveAt = this.worldTime;
           this.recordArenaTrack(p);
         } else if (Math.hypot(msg.x - p.x, msg.y - p.y, msg.z - p.z) > 0.25) {
-          return [this.to(p, { t: 'teleport', x: p.x, y: p.y, z: p.z })];
+          return [this.to(p, { t: 'teleport', x: p.x, y: p.y, z: p.z, seq: this.moved(p) }), ...this.relayTransform(p, w)];
         }
-        break;
+        const out = this.drainRs(w);
+        this.markFinishedIfDone(w);
+        return [...out, ...this.relayTransform(p, w)];
       }
       case 'rsUse':
         if (Number.isInteger(msg.slot) && msg.slot >= 0 && msg.slot < 9) rs.handleUse(p.id, msg.slot, msg.block);
@@ -1908,7 +1938,7 @@ export class GameServer {
           p.arenaTrack = []; this.recordArenaTrack(p);
           if (!p.bot) {
             out.push(this.duelLoadout(p.id));
-            out.push(this.to(p, { t: 'respawned', x: spawn.x, y: spawn.y, z: spawn.z, health: DUEL_MAX_HEALTH }));
+            out.push(this.to(p, { t: 'respawned', x: spawn.x, y: spawn.y, z: spawn.z, health: DUEL_MAX_HEALTH, seq: this.moved(p) }));
             out.push(this.to(p, { t: 'duelRespawn', respawnAt: 0, spectating: false }));
           }
         }
@@ -1984,7 +2014,7 @@ export class GameServer {
       for (const w of this.worlds.values()) if (w.mode !== 'duels') out.push(...this.tickArrows(w, dt));
       out.push(...this.tickPartyBots(dt, now));
     }
-    for (const snap of this.pg.snapshots(now)) {
+    for (const snap of this.pg.views(now)) {
       const w = this.worlds.get(this.worldByLobby.get(snap.id) ?? -1);
       if (!w) continue;
       out.push(...this.syncPartyCages(w, snap, now));
@@ -2021,7 +2051,7 @@ export class GameServer {
     for (const [id, bot] of [...this.partyBots]) {
       const p = this.players.get(id), human = this.players.get(bot.opponent);
       const w = p ? this.worldOfPlayer(p) : undefined;
-      const snap = this.pg.snapshotFor(id, now), me = this.pg.participantFor(id);
+      const snap = this.pg.viewFor(id, now), me = this.pg.participantFor(id);
       const other = this.pg.participantFor(bot.opponent);
       if (!p || !w || !human || !snap || !me || !other) continue;
       if (snap.phase !== 'running' || me.outAt !== undefined || now < (snap.goalResetAt ?? 0)) continue;
@@ -2068,31 +2098,67 @@ export class GameServer {
 
   // ── Snapshots ────────────────────────────────────────────────────────────
 
+  /** One body as other players see it. Coordinates are rounded to the
+   *  millimetre (and angles to ~0.006°): full doubles triple the JSON size of
+   *  the hottest message on the wire for precision nobody can see. */
+  private bodyOf(p: ServerPlayer, w: MatchWorld): PlayerSnapshot {
+    return {
+      id: p.id, x: round3(p.x), y: round3(p.y), z: round3(p.z), yaw: round4(p.yaw), pitch: round4(p.pitch), ct: p.ct,
+      health: p.health, dead: this.hiddenInWorld(p, w), sneaking: p.sneaking, held: p.held, swing: p.swing,
+      aiming: p.aiming, reloading: p.reloading,
+    };
+  }
+
+  /** A respawn spectator is invisible to everyone else (never to themselves). */
+  private hiddenInWorld(p: ServerPlayer, w: MatchWorld): boolean {
+    return w.mode === 'duels' ? this.duels.participantFor(p.id)?.spectating === true
+      : this.pg.participantFor(p.id)?.respawnAt !== undefined;
+  }
+
+  /** A freshly received transform goes to the rest of its world at once,
+   *  rather than waiting up to a whole tick for the next snapshot: that hold
+   *  used to be the biggest single slice of the delay before you saw someone
+   *  move. One shared message object, so the transport serialises it once. */
+  private relayTransform(p: ServerPlayer, w: MatchWorld): Outbound[] {
+    if (p.ct === undefined) return [];
+    const out: Outbound[] = [];
+    let msg: ServerMsg | null = null;
+    for (const id of w.members) {
+      if (id === p.id || this.players.get(id)?.bot !== false) continue;
+      msg ??= { t: 'snapshot', players: [this.bodyOf(p, w)] };
+      out.push({ to: id, msg });
+    }
+    return out;
+  }
+
   /** One transform snapshot per human in every world, listing that world's
-   *  bodies and nothing else. */
+   *  bodies and nothing else. Everyone who sees the same thing shares one
+   *  message object (the transport serialises it once). */
   snapshots(): Outbound[] {
     const out: Outbound[] = [];
     for (const w of this.worlds.values()) {
       const bodies: PlayerSnapshot[] = [];
       for (const id of w.members) {
         const p = this.players.get(id);
-        if (!p) continue;
-        bodies.push({
-          id: p.id, x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch, ct: p.ct,
-          health: p.health, dead: false, sneaking: p.sneaking, held: p.held, swing: p.swing,
-          aiming: p.aiming, reloading: p.reloading,
-        });
+        if (p) bodies.push(this.bodyOf(p, w));
       }
+      let shared: ServerMsg | null = null;
       for (const id of w.members) {
         const p = this.players.get(id);
         if (!p || p.bot) continue;
-        // A Duels respawn spectator is invisible to everyone else.
-        const players = bodies.map((b) => b.id !== id && (w.mode === 'duels'
-          ? this.duels.participantFor(b.id)?.spectating
-          : this.pg.participantFor(b.id)?.respawnAt !== undefined) ? { ...b, dead: true } : b);
-        out.push(this.to(id, { t: 'snapshot', players }));
+        const self = bodies.find((b) => b.id === id);
+        if (self?.dead) {
+          // You always see your own body, even while the others can't.
+          out.push(this.to(id, { t: 'snapshot', players: bodies.map((b) => b === self ? { ...b, dead: false } : b) }));
+          continue;
+        }
+        shared ??= { t: 'snapshot', players: bodies };
+        out.push({ to: id, msg: shared });
       }
     }
     return out;
   }
 }
+
+function round3(n: number): number { return Math.round(n * 1000) / 1000; }
+function round4(n: number): number { return Math.round(n * 10000) / 10000; }

@@ -20,8 +20,11 @@ import type { RatClassId, RsEffects, RsResult, RsRole, RsSnapshot, RsSound } fro
 
 /** Worlds' own game-server port. VOXELON keeps 8080; the two never collide. */
 export const SERVER_PORT = 8090;
-export const SNAPSHOT_HZ = 20;     // server -> clients transform broadcasts
-export const TRANSFORM_HZ = 20;    // client -> server transform sends
+export const SNAPSHOT_HZ = 20;     // server tick: bots, health and state broadcasts
+/** client -> server transform sends. The server relays each one to the rest of
+ *  the world the moment it is accepted (it does not wait for a tick), so this
+ *  rate IS the rate everybody sees you move at. */
+export const TRANSFORM_HZ = 30;
 export const EDIT_RANGE = 7;       // max distance a player may edit a block
 export const PARTY_MAX = 4;        // most members one party can hold
 
@@ -104,9 +107,11 @@ export type ClientMsg =
   // The spawn bubble of the world you were sent to is built.
   | { t: 'worldReady'; world: number; revision?: number }
   // In-world.
+  // `seq` echoes the newest `respawned`/`teleport` seq this client has
+  // applied: a transform sent before it knew it had been moved is stale.
   | { t: 'xform'; world: number; revision?: number; x: number; y: number; z: number;
       yaw: number; pitch: number; sneaking?: boolean; held?: number; swing?: number;
-      aiming?: boolean; reloading?: boolean; ct?: number }
+      aiming?: boolean; reloading?: boolean; ct?: number; seq?: number }
   | { t: 'edit'; x: number; y: number; z: number; block: number }
   // Duels rifle: a cosmetic tracer ticket, then a separately reported hit.
   | { t: 'shot'; x: number; y: number; z: number; dx: number; dy: number; dz: number; item: number }
@@ -153,8 +158,9 @@ export type ServerMsg =
   | { t: 'hurt'; health: number; dead: boolean; by: number; kx: number; ky: number; kz: number }
   | { t: 'hitconfirm'; target: number; amount: number; killed: boolean }
   | { t: 'shot'; id: number; item: number; x: number; y: number; z: number; dx: number; dy: number; dz: number }
-  | { t: 'respawned'; x: number; y: number; z: number; health: number }
-  | { t: 'teleport'; x: number; y: number; z: number }
+  /** The server moved your body. `seq` numbers these moves; echo it in `xform`. */
+  | { t: 'respawned'; x: number; y: number; z: number; health: number; seq?: number }
+  | { t: 'teleport'; x: number; y: number; z: number; seq?: number }
   | { t: 'killfeed'; killer: string; victim: string }
   | { t: 'cosmetics'; id: number; c: Cosmetics }
   // Duels.
