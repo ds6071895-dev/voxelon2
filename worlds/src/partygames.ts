@@ -49,6 +49,8 @@ export const BRIDGE_GOAL_RESET_MS = 3000;
 /** Bridge attacks have fixed strength. Short action intervals bound packet
  * spam; waiting never earns extra damage or knockback. */
 const BRIDGE_RESPAWN_SHIELD_MS = 1800;
+/** Dead in The Bridge: this long as a flying spectator before you respawn. */
+const BRIDGE_RESPAWN_DELAY_MS = 3000;
 export const BRIDGE_MELEE_TIER = { damage: 5, cooldownMs: 280, kbBonus: 0.02 } as const;
 /** How early (ms) a swing may ARRIVE against the cooldown and still count.
  *  The client paces the axe at exactly `cooldownMs`, but packets bunch up on
@@ -609,6 +611,8 @@ export interface PartyParticipant extends PartyIdentity {
   immuneUntil: number;
   /** Server-owned respawn request: a goal reset, or a fall into the void. */
   pendingSpawn: boolean;
+  /** Bridge: dead and spectating until this time. */
+  respawnAt?: number;
 }
 
 interface PartyRoundState {
@@ -840,7 +844,7 @@ export class PartyGamesEngine {
       Object.assign(p, {
         score: 0, kills: 0, deaths: 0, lastHitBy: undefined, lastHitAt: 0,
         progress: 0, checkpoint: 0, falls: 0, lives, outAt: undefined,
-        finishedAt: undefined, immuneUntil: 0, pendingSpawn: false,
+        finishedAt: undefined, immuneUntil: 0, pendingSpawn: false, respawnAt: undefined,
       });
   }
 
@@ -903,7 +907,8 @@ export class PartyGamesEngine {
     if (l.goalResetAt !== undefined && now < l.goalResetAt) return false;
     const a = l.participants.get(attackerId), b = l.participants.get(targetId);
     return !!a && !!b && a.connected && b.connected && a.team !== b.team &&
-      !a.pendingSpawn && !b.pendingSpawn && now >= b.immuneUntil;
+      !a.pendingSpawn && !b.pendingSpawn && a.respawnAt === undefined && b.respawnAt === undefined &&
+      now >= b.immuneUntil;
   }
 
   /** Record that `attacker` damaged `victim`, so a fall in the next ten
@@ -921,7 +926,7 @@ export class PartyGamesEngine {
     const l = this.lobbyByPlayer.get(victimId), victim = l?.participants.get(victimId);
     if (!l || !victim) return null;
     victim.deaths++;
-    victim.pendingSpawn = true;
+    victim.respawnAt = now + BRIDGE_RESPAWN_DELAY_MS;
     victim.lastHitBy = undefined;
     const killer = killerId === null ? undefined : l.participants.get(killerId);
     if (killer && killer.team !== victim.team) {
@@ -950,6 +955,7 @@ export class PartyGamesEngine {
     const home = (): { spawn: PartyVec3; changed: boolean } => {
       const caged = l.goalResetAt !== undefined && now < l.goalResetAt;
       p.pendingSpawn = false;
+      p.respawnAt = undefined;
       // A caged player's shield starts when the hatch does, so nobody lands
       // out of one straight into a waiting axe.
       p.immuneUntil = (caged ? l.goalResetAt! : now) + BRIDGE_RESPAWN_SHIELD_MS;
@@ -959,6 +965,8 @@ export class PartyGamesEngine {
       };
     };
     if (p.pendingSpawn) return home();
+    // Dead: spectate until the timer runs out. No goals, no void, no fights.
+    if (p.respawnAt !== undefined) return now >= p.respawnAt ? home() : { changed: false };
     const lx = Math.floor(pos.x - sub.minX), lz = Math.floor(pos.z - sub.minZ);
     const goal = bridgeGoalAt(lx, pos.y, lz);
     if (goal !== null) {
@@ -987,7 +995,8 @@ export class PartyGamesEngine {
         l.lastKill = { id: killer.id, username: killer.username, victim: p.username, team: killer.team, at: now, cause: 'void' };
       }
       p.lastHitBy = undefined;
-      return home();
+      p.respawnAt = now + BRIDGE_RESPAWN_DELAY_MS;
+      return { changed: true };
     }
     return { changed: false };
   }

@@ -685,7 +685,7 @@ function enterMatchWorld(spec: WorldSpec, kind: MatchKind, mode: GameMode, spawn
   player.pos.set(spawn.x, spawn.y, spawn.z);
   player.vel.set(0, 0, 0);
   player.fallDistance = 0;
-  player.flying = false; player.noclip = false; player.dead = false;
+  player.flying = false; player.noclip = false; duelSpectating = false; player.dead = false;
   pendingTeleport = { ...spawn, started: worldTimeLocal };
   showLoading(MODE_NAMES[mode], 'Entering the world…');
   audio.resume();
@@ -1572,6 +1572,11 @@ net.onDuelRespawn = (respawnAt, spectating) => {
   }
   player.flying = spectating; player.noclip = spectating;
   if (!spectating) player.health = arenaMaxHealth;
+};
+net.onPgRespawn = (_respawnAt, spectating) => {
+  duelSpectating = spectating;
+  if (spectating) { held.setBowDraw(0); damageNumbers.clear(); hurtPulse = 0; }
+  player.flying = spectating; player.noclip = spectating;
 };
 net.onDuelResult = (result) => renderDuelResult(result);
 

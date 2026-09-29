@@ -165,6 +165,8 @@ export type ServerMsg =
   | { t: 'duelResult'; result: DuelResult }
   // The Bridge / Parkour.
   | { t: 'pgState'; snapshot: PartyLobbySnapshot }
+  /** Bridge: you died and spectate until `respawnAt` (server clock), or you are back. */
+  | { t: 'pgRespawn'; respawnAt: number; spectating: boolean }
   | { t: 'pgLoadout'; slots: (ItemStack | null)[]; selected: number }
   /** Attacker-only feedback: `hitconfirm` cannot carry crit/combo. */
   | { t: 'pgHit'; target: number; amount: number; combo: number; charge: number;

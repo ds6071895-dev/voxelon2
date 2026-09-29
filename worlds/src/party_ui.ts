@@ -332,7 +332,17 @@ export class PartyUI {
     if (!s)
       return;
     this.updateCount(s, serverNow);
-    if (localNow >= this.bannerUntil)
+    const mine = s.participants.find(v => v.id === this.me);
+    if (s.phase === 'running' && mine?.respawnAt !== undefined && mine.respawnAt > serverNow) {
+      // Dead: the countdown owns the banner until you are back.
+      this.banner.className = 'pg-banner';
+      this.banner.replaceChildren(
+        el('div', 'pg-banner-title', `RESPAWN ${Math.ceil((mine.respawnAt - serverNow) / 1000)}`),
+        el('div', 'pg-banner-rule', 'Fly around while you wait'));
+      (this.banner.firstElementChild as HTMLElement).style.color = '';
+      this.banner.hidden = false;
+      this.bannerUntil = localNow + 300;
+    } else if (localNow >= this.bannerUntil)
       this.banner.hidden = true;
     this.clock.hidden = false;
     let text = '';

@@ -101,6 +101,7 @@ export class NetClient {
   onDuelLoadout?: (slots: (ItemStack | null)[], selected: number) => void;
   onDuelClock?: (serverNow: number) => void;
   onDuelRespawn?: (respawnAt: number, spectating: boolean) => void;
+  onPgRespawn?: (respawnAt: number, spectating: boolean) => void;
   onDuelResult?: (result: DuelResult) => void;
   onPgState?: (snapshot: PartyLobbySnapshot) => void;
   onPgLoadout?: (slots: (ItemStack | null)[], selected: number) => void;
@@ -237,6 +238,7 @@ export class NetClient {
       case 'duelState': this.onDuelState?.(msg.snapshot); break;
       case 'duelLoadout': this.onDuelLoadout?.(msg.slots, msg.selected); break;
       case 'duelClock': this.onDuelClock?.(msg.serverNow); break;
+      case 'pgRespawn': this.onPgRespawn?.(msg.respawnAt, msg.spectating); break;
       case 'duelRespawn': this.onDuelRespawn?.(msg.respawnAt, msg.spectating); break;
       case 'duelResult': this.onDuelResult?.(msg.result); break;
       case 'pgState': this.onPgState?.(msg.snapshot); break;

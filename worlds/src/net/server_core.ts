@@ -235,6 +235,8 @@ export class GameServer {
   /** Hidden skill memory for players without an account, keyed mode:name. */
   private readonly guestSkill = new Map<string, number>();
   private readonly partyMoves = new Map<number, PartyMoveState>();
+  /** Bridge players currently told they are dead and spectating. */
+  private readonly partySpectators = new Set<number>();
   private readonly partyCombat = new Map<number, PartyCombatState>();
   private nextPlayerId = 1;
   private nextWorldId = 1;
@@ -1320,6 +1322,11 @@ export class GameServer {
     p.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, msg.pitch));
     if (phase !== 'running') return [];
     const wanted = clampToPartySub(msg, sub);
+    if (participant.respawnAt !== undefined) {
+      // A dead Bridge player is a free-flying spectator; nothing they do counts.
+      p.x = wanted.x; p.y = wanted.y; p.z = wanted.z;
+      return this.evaluatePartyPlayer(p, w);
+    }
     const move = this.partyMoves.get(p.id) ?? this.freshPartyMove(p);
     if (this.partyGrounded(w, p.x, p.y, p.z)) this.markPartyGround(move, p.x, p.y, p.z);
     if (sub.game === 'parkour') {
@@ -1393,6 +1400,13 @@ export class GameServer {
       p.arenaTrack = [];
       this.recordArenaTrack(p);
       if (!p.bot) out.push(this.to(p, { t: 'respawned', ...evaluated.spawn, health: PARTY_MAX_HEALTH }));
+    }
+    const dead = this.pg.participantFor(p.id)?.respawnAt;
+    if (dead !== undefined && !this.partySpectators.has(p.id)) {
+      this.partySpectators.add(p.id);
+      if (!p.bot) out.push(this.to(p, { t: 'pgRespawn', respawnAt: dead, spectating: true }));
+    } else if (dead === undefined && this.partySpectators.delete(p.id) && !p.bot) {
+      out.push(this.to(p, { t: 'pgRespawn', respawnAt: 0, spectating: false }));
     }
     if (evaluated.changed) {
       const snap = this.pg.snapshotFor(p.id, now)!;
@@ -1997,7 +2011,10 @@ export class GameServer {
       const other = this.pg.participantFor(bot.opponent);
       if (!p || !w || !human || !snap || !me || !other) continue;
       if (snap.phase !== 'running' || me.outAt !== undefined || now < (snap.goalResetAt ?? 0)) continue;
-      if (me.pendingSpawn) out.push(...this.evaluatePartyPlayer(p, w));
+      if (me.pendingSpawn || me.respawnAt !== undefined) {
+        out.push(...this.evaluatePartyPlayer(p, w));
+        if (me.respawnAt !== undefined) continue;
+      }
       const action = bot.step(dt, now, snap, me, other, human, w.blocks.asWorld() as unknown as World,
         w.blocks.gen);
       p.x = bot.body.pos.x; p.y = bot.body.pos.y; p.z = bot.body.pos.z; p.yaw = bot.body.yaw; p.pitch = bot.pitch;
@@ -2056,8 +2073,9 @@ export class GameServer {
         const p = this.players.get(id);
         if (!p || p.bot) continue;
         // A Duels respawn spectator is invisible to everyone else.
-        const players = bodies.map((b) => b.id !== id && w.mode === 'duels' &&
-          this.duels.participantFor(b.id)?.spectating ? { ...b, dead: true } : b);
+        const players = bodies.map((b) => b.id !== id && (w.mode === 'duels'
+          ? this.duels.participantFor(b.id)?.spectating
+          : this.pg.participantFor(b.id)?.respawnAt !== undefined) ? { ...b, dead: true } : b);
         out.push(this.to(id, { t: 'snapshot', players }));
       }
     }
