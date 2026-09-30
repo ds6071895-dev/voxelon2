@@ -32,6 +32,8 @@ const CLASS_KEY = 'worlds.ratClass';
  *  bright as a lamp-lit Minecraft room. Night vision has nothing to add. */
 const MANOR_AMBIENT = 1;
 const NIGHT_VISION_AMBIENT = 1;
+/** How long a scamper's burst of speed lasts on your screen and legs. */
+const DASH_MS = 420;
 
 export function storedRatClass(): RatClassId | undefined {
   try { const v = localStorage.getItem(CLASS_KEY); return isRatClass(v) ? v : undefined; } catch { return undefined; }
@@ -91,6 +93,10 @@ export class RatSeekClient {
   private readonly blindEl: HTMLElement;
   private readonly darkEl: HTMLElement;
   private readonly letterbox: HTMLElement;
+  /** Speed lines around the screen edge while scampering. */
+  private readonly dashEl: HTMLElement;
+  /** Set from the accessibility setting: no speed lines or view stretch. */
+  reducedMotion = false;
   private readonly picker: HTMLElement;
   private readonly pickerCards = new Map<RatClassId, HTMLButtonElement>();
   pickerOpen = false;
@@ -99,7 +105,11 @@ export class RatSeekClient {
   private readonly group = new THREE.Group();
   private readonly cheese = new Map<number, { mesh: THREE.Group; x: number; y: number; z: number }>();
   private readonly decoys = new Map<number, { model: RatModel; x: number; y: number; z: number; tx: number; tz: number; yaw: number; phase: number }>();
-  private cat: { model: CatModel; x: number; y: number; z: number; yaw: number; tx: number; ty: number; tz: number; tyaw: number } | null = null;
+  private cat: {
+    model: CatModel; x: number; y: number; z: number; yaw: number; tx: number; ty: number; tz: number; tyaw: number;
+    /** Velocity estimated from snapshots, the time the last one landed, and a smoothed ground speed. */
+    vx: number; vz: number; at: number; speed: number;
+  } | null = null;
   private readonly chandeliers: { mesh: THREE.Group; drop: number; target: number; shake: boolean }[] = [];
   private readonly beams = new Map<number, THREE.Mesh>();
   private exchangeLabel: THREE.Sprite | null = null;
@@ -135,6 +145,13 @@ export class RatSeekClient {
     this.darkEl = el('div', 'rs-dark', d.app);
     this.letterbox = el('div', 'rs-letterbox', d.app);
     el('i', '', this.letterbox); el('i', '', this.letterbox);
+    this.dashEl = el('div', 'rs-dash', d.app);
+    const mask = 'radial-gradient(ellipse at center, transparent 42%, #000 92%)';
+    Object.assign(this.dashEl.style, {
+      position: 'fixed', inset: '0', pointerEvents: 'none', opacity: '0', zIndex: '4',
+      background: 'repeating-conic-gradient(from 0deg, rgba(255,255,255,0) 0deg 3.2deg, rgba(255,255,255,0.34) 3.2deg 4deg)',
+      webkitMaskImage: mask, maskImage: mask,
+    });
 
     // The class picker (the plugin's chest menu, as a card sheet).
     this.picker = el('div', 'rs-picker', d.app);
@@ -194,8 +211,8 @@ export class RatSeekClient {
     this.root.dataset.role = role;
     this.d.world.setArenaRenderBounds(RS_BOUNDS, MANOR_AMBIENT);
     this.lastNight = false;
-    this.exchangeLabel = labelSprite(`Cheese Exchange · Rescue / Bank Escape — ${RS.RESCUE_COST} Cheese`);
-    this.exchangeLabel.position.set(RS_KEEPER.x + 0.5, RS_KEEPER.y + 2.6, RS_KEEPER.z + 0.5);
+    this.exchangeLabel = labelSprite(`Cheese Exchange\nRight-click: Free a Rat / Bank Escape · ${RS.RESCUE_COST} Cheese`);
+    this.exchangeLabel.position.set(RS_KEEPER.x + 0.5, RS_KEEPER.y + 2.65,RS_KEEPER.z + 0.5);
     this.group.add(this.exchangeLabel);
     for (let i = 0; i < 4; i++) {
       const mesh = createChandelierModel();
@@ -213,6 +230,15 @@ export class RatSeekClient {
     this.closePicker();
     this.blindEl.style.opacity = '0';
     this.darkEl.style.opacity = '0';
+    this.dashEl.style.opacity = '0';
+    this.dash = null;
+    this.snap = null;
+    // renderCooldowns only runs while a round is live, so the sweeps it left on
+    // the hotbar would otherwise survive into the next screen.
+    document.querySelectorAll<HTMLElement>('#hotbar .slot').forEach((slot) => {
+      const cd = slot.children[2] as HTMLElement | undefined;
+      if (cd) cd.style.height = '0';
+    });
     this.letterbox.classList.remove('on');
     this.exitVisuals();
     this.group.visible = false;
@@ -309,7 +335,7 @@ export class RatSeekClient {
       case 'crash': burst(40, 0xd8a52e, 4, 0.9, 2.2, 0.55); burst(12, 0xffffff, 3, 0.4, 1.5); break;
       case 'sniff': burst(18, 0xbfe8a8, 1.2, 0.9, 1.2, 0.4); break;
       case 'pounce': burst(8, 0xff5555, 1.6, 0.6, 0.4, 0.5); break;
-      case 'dash': burst(14, 0xf2f2f2, 1.4, 0.4, 0.4, 0.4); break;
+      case 'dash': burst(22, 0xf2f2f2, 2.4, 0.5, 0.5, 0.45); burst(8, 0xffe9a8, 3.2, 0.3, 0.25, 0.3); break;
       case 'rattle': burst(30, 0xfff27a, 3.5, 0.6, 2.4, 0.35); break;
       default:
     }
@@ -319,6 +345,49 @@ export class RatSeekClient {
     p.vel.set(vx, vy, vz);
     if (vy > 0) p.onGround = false;
     p.momentumTime = momentum;
+    const top = Math.hypot(vx, vz);
+    // A scamper: hold the burst on the ground too, instead of letting friction eat it.
+    this.dash = top > 8 ? { start: performance.now(), dx: vx / top, dz: vz / top, top, puff: 0 } : null;
+  }
+
+  // ── Scamper ─────────────────────────────────────────────────────────────
+
+  private dash: { start: number; dx: number; dz: number; top: number; puff: number } | null = null;
+  /** How far through the scamper we are: 0 at the launch, 1 when it has run out. */
+  private dashProgress(): number { return this.dash ? Math.min(1, (performance.now() - this.dash.start) / DASH_MS) : 1; }
+  /** Call just before the player moves each frame: the burst keeps its speed on the
+   *  ground, eases off as it ends, and can be steered a little with the mouse. */
+  steerDash(dt: number): void {
+    const d = this.dash;
+    if (!d) return;
+    const p = this.d.player, k = this.dashProgress();
+    if (k >= 1 || this.phase() !== 'hunting') { this.dash = null; return; }
+    const turn = Math.atan2(-Math.sin(p.yaw), -Math.cos(p.yaw)) - Math.atan2(d.dx, d.dz);
+    const wrapped = Math.atan2(Math.sin(turn), Math.cos(turn));
+    const a = Math.atan2(d.dx, d.dz) + Math.max(-2.4 * dt, Math.min(2.4 * dt, wrapped));
+    d.dx = Math.sin(a); d.dz = Math.cos(a);
+    const speed = d.top * (1 - 0.55 * k * k);
+    p.vel.x = d.dx * speed;
+    p.vel.z = d.dz * speed;
+    p.momentumTime = Math.max(p.momentumTime, 0.1);
+  }
+  /** Per-frame flair: speed lines, a widening view and a trail of dust. */
+  private dashFlair(dt: number): void {
+    const d = this.dash;
+    const k = this.dashProgress();
+    const power = d && k < 1 ? Math.sin((1 - k) * Math.PI / 2) : 0;
+    this.dashEl.style.opacity = this.reducedMotion ? '0' : (power * 0.85).toFixed(2);
+    if (!d || k >= 1) return;
+    d.puff -= dt;
+    if (d.puff <= 0) {
+      d.puff = 0.045;
+      const p = this.d.player.pos;
+      this.d.particles.burst(p.x, p.y + 0.08, p.z, 2, 0xe8e4da, 0.7, 0.4, { gravity: -0.4, spread: 0.3, scale: 0.34 });
+    }
+  }
+  /** Extra field of view (degrees) to add while scampering; 0 when not. */
+  dashFov(): number {
+    return this.dash ? 11 * Math.sin((1 - this.dashProgress()) * Math.PI / 2) : 0;
   }
   /** The round is over; the podium itself is staged by the server. */
   noteResult(r: RsResult): void {
@@ -355,6 +424,21 @@ export class RatSeekClient {
       if (t !== null && t < bestT) { bestT = t; best = { id: did, decoy: true }; }
     }
     return best;
+  }
+
+  /** The Cheese Exchange when the crosshair is on or near it and nothing solid is in between,
+   *  as the block a right-click should be sent for. A small aim cone, so a click that lands a
+   *  little off the machine (or on its price board) still works. */
+  exchangeAim(eye: THREE.Vector3, dir: THREE.Vector3, hit: { x: number; y: number; z: number } | null): { x: number; y: number; z: number; nx: number; ny: number; nz: number } | null {
+    if (!this.active) return null;
+    const c = new THREE.Vector3(RS_KEEPER.x + 0.5, RS_KEEPER.y + 1, RS_KEEPER.z + 0.5);
+    const to = c.clone().sub(eye);
+    const dist = to.length();
+    if (dist > 5.5 || dist < 0.05 || to.divideScalar(dist).dot(dir) < 0.93) return null;
+    // A block the ray hits well before the machine is in the way (unless it IS the machine).
+    if (hit && !(hit.x === RS_KEEPER.x && hit.z === RS_KEEPER.z)
+      && Math.hypot(hit.x + 0.5 - eye.x, hit.y + 0.5 - eye.y, hit.z + 0.5 - eye.z) < dist - 1.2) return null;
+    return { x: RS_KEEPER.x, y: RS_KEEPER.y, z: RS_KEEPER.z, nx: 0, ny: 1, nz: 0 };
   }
 
   // ── Class picker ────────────────────────────────────────────────────────
@@ -414,6 +498,7 @@ export class RatSeekClient {
     if (this.barUntil && now > this.barUntil) { this.barEl.classList.remove('show'); this.barUntil = 0; }
     this.renderBoss();
     this.renderCompass(playerYaw);
+    this.dashFlair(dt);
     this.blindEl.style.opacity = this.fx.blind ? '1' : '0';
     this.darkEl.style.opacity = this.fx.dark ? String(0.78 + Math.sin(t * 2.2) * 0.12) : '0';
     this.letterbox.classList.toggle('on', this.phase() === 'intro');
@@ -435,14 +520,21 @@ export class RatSeekClient {
     }
     if (this.cat) {
       const c = this.cat, prevX = c.x, prevZ = c.z;
-      c.x += (c.tx - c.x) * k; c.y += (c.ty - c.y) * k; c.z += (c.tz - c.z) * k;
+      // Dead-reckon along the estimated velocity between 10 Hz snapshots, then
+      // glide onto that moving point: a steady walk instead of a hop every 100 ms.
+      const ahead = Math.min(0.2, (now - c.at) / 1000);
+      const kc = 1 - Math.exp(-dt * 10);
+      c.x += (c.tx + c.vx * ahead - c.x) * kc;
+      c.z += (c.tz + c.vz * ahead - c.z) * kc;
+      c.y += (c.ty - c.y) * kc;
       let dy = c.tyaw - c.yaw;
       while (dy > Math.PI) dy -= Math.PI * 2;
       while (dy < -Math.PI) dy += Math.PI * 2;
-      c.yaw += dy * k;
+      c.yaw += dy * (1 - Math.exp(-dt * 9));
       c.model.group.position.set(c.x, c.y, c.z);
       c.model.group.rotation.y = c.yaw;
-      c.model.update(!!this.snap?.cat?.sit, Math.hypot(c.x - prevX, c.z - prevZ) / Math.max(dt, 1e-3), t);
+      c.speed += (Math.hypot(c.x - prevX, c.z - prevZ) / Math.max(dt, 1e-3) - c.speed) * (1 - Math.exp(-dt * 8));
+      c.model.update(!!this.snap?.cat?.sit, this.snap?.cat?.sit ? 0 : c.speed, t, !!this.snap?.cat?.pounce);
     }
     for (const ch of this.chandeliers) {
       if (ch.target < 0) { ch.mesh.visible = false; continue; }
@@ -534,16 +626,26 @@ export class RatSeekClient {
   private renderCompass(yaw: number): void {
     const s = this.snap;
     const c = s?.me.compass;
-    const show = !!s && this.role === 'human' && s.phase === 'hunting' && !!c;
+    const show = !!s && this.role === 'human' && s.phase === 'hunting';
     this.compassEl.classList.toggle('show', show);
-    if (!show || !c) return;
+    if (!show || !s) return;
+    this.compassEl.style.opacity = c ? '' : '0.7';
+    this.compassArrow.style.visibility = c ? '' : 'hidden';
+    if (!c) {
+      const text = s.me.compassCd > 0 ? `Compass ${Math.ceil(s.me.compassCd / 20)}s` : 'Right-click the compass to track a rat';
+      if (this.compassText.textContent !== text) this.compassText.textContent = text;
+      return;
+    }
     const p = this.d.player.pos;
     const target = Math.atan2(-(c.x - p.x), -(c.z - p.z));
     let rel = target - yaw;
     while (rel > Math.PI) rel -= Math.PI * 2;
     while (rel < -Math.PI) rel += Math.PI * 2;
     this.compassArrow.style.transform = `rotate(${-rel}rad)`;
-    this.compassText.textContent = `${Math.round(Math.hypot(c.x - p.x, c.z - p.z))}m`;
+    const dy = c.y - p.y;
+    const level = dy > 2.5 ? ' ↑ above' : dy < -2.5 ? ' ↓ below' : '';
+    const text = `${Math.round(Math.hypot(c.x - p.x, c.y - p.y, c.z - p.z))}m${level} · ${c.room.replace(/\b\w/g, (m) => m.toUpperCase())}`;
+    if (this.compassText.textContent !== text) this.compassText.textContent = text;
   }
 
   private renderSidebar(): void {
@@ -589,7 +691,7 @@ export class RatSeekClient {
     const cds: Record<number, [number, number]> = me.role === 'rat'
       ? { 0: [me.tauntCd, RS.TAUNT_COOLDOWN], 1: [me.dashCd, me.cls === 'scout' ? RS.DASH_COOLDOWN * 2 / 3 : RS.DASH_COOLDOWN],
           2: [me.rattleCd, RS.RATTLE_COOLDOWN], 4: [me.abilityCd, me.cls ? RAT_CLASSES[me.cls].cooldownTicks : 1] }
-      : { 2: [me.scentCd, RS.SCENT_COOLDOWN], 3: [me.light ? 0 : RS.BATTERY - me.battery * RS.BATTERY, RS.BATTERY] };
+      : { 1: [me.compassCd, RS.COMPASS_COOLDOWN], 2: [me.scentCd, RS.SCENT_COOLDOWN], 3: [me.light ? 0 : RS.BATTERY - me.battery * RS.BATTERY, RS.BATTERY] };
     slots.forEach((slot, i) => {
       const cd = slot.children[2] as HTMLElement | undefined;
       if (!cd) return;
@@ -631,9 +733,20 @@ export class RatSeekClient {
     if (s.cat && !this.cat) {
       const model = createCatModel();
       this.group.add(model.group);
-      this.cat = { model, x: s.cat.x, y: s.cat.y, z: s.cat.z, yaw: s.cat.yaw, tx: s.cat.x, ty: s.cat.y, tz: s.cat.z, tyaw: s.cat.yaw };
+      this.cat = { model, x: s.cat.x, y: s.cat.y, z: s.cat.z, yaw: s.cat.yaw, tx: s.cat.x, ty: s.cat.y, tz: s.cat.z, tyaw: s.cat.yaw,
+        vx: 0, vz: 0, at: performance.now(), speed: 0 };
     }
-    if (s.cat && this.cat) { this.cat.tx = s.cat.x; this.cat.ty = s.cat.y; this.cat.tz = s.cat.z; this.cat.tyaw = s.cat.yaw; }
+    if (s.cat && this.cat) {
+      const c = this.cat, now = performance.now(), gap = (now - c.at) / 1000;
+      if (gap > 0.02 && gap < 0.6) {
+        const vx = (s.cat.x - c.tx) / gap, vz = (s.cat.z - c.tz) / gap;
+        const jump = Math.hypot(s.cat.x - c.tx, s.cat.z - c.tz) > 3;   // a pounce lunge: don't extrapolate it
+        c.vx = jump ? 0 : c.vx + (vx - c.vx) * 0.5;
+        c.vz = jump ? 0 : c.vz + (vz - c.vz) * 0.5;
+      }
+      c.at = now;
+      c.tx = s.cat.x; c.ty = s.cat.y; c.tz = s.cat.z; c.tyaw = s.cat.yaw;
+    }
     else if (!s.cat && this.cat) { this.group.remove(this.cat.model.group); this.cat = null; }
     s.chandeliers.forEach((c, i) => {
       const ch = this.chandeliers[i];

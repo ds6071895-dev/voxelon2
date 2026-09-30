@@ -89,6 +89,10 @@ export class Player {
    *  instead ADDS thrust to whatever speed you already carry and only a light
    *  drag bleeds it off. Set by whatever launched you (a pad, the Bounce Pad). */
   momentumTime = 0;
+  /** Camera-only vertical offset (<= 0). Auto-stepping moves the body up a stair
+   *  in one frame; the eye starts that far below and eases back, so climbing
+   *  glides instead of snapping. */
+  stepLift = 0;
   /** Movement speed multiplier (status effects, a mode's pace). */
   speedMult = 1;
   /** Jump Boost level: each level adds a tenth of a block-per-tick of launch. */
@@ -151,10 +155,11 @@ export class Player {
     this.damageFlash = 0;
     this.dead = false;
     this.momentumTime = 0;
+    this.stepLift = 0;
   }
 
   get eyePosition(): THREE.Vector3 {
-    return new THREE.Vector3(this.pos.x, this.pos.y + this.eye, this.pos.z);
+    return new THREE.Vector3(this.pos.x, this.pos.y + this.eye + this.stepLift, this.pos.z);
   }
 
   update(dt: number, input: PlayerInput, world: World): void {
@@ -288,8 +293,14 @@ export class Player {
       const wasOnGround = this.onGround;
       this.onGround = false;
       this.moveAxis(world, 1, this.vel.y * dt);
+      const yBeforeSteps = this.pos.y;
       this.moveAxisSneakAware(world, 0, this.vel.x * dt, wasOnGround);
       this.moveAxisSneakAware(world, 2, this.vel.z * dt, wasOnGround);
+      // Ease the camera over an auto-step (a jump never lands here: it isn't grounded).
+      const rose = this.pos.y - yBeforeSteps;
+      if (wasOnGround && this.onGround && rose > 0.02 && rose <= STEP_HEIGHT + 0.02) {
+        this.stepLift = Math.max(-STEP_HEIGHT, this.stepLift - rose);
+      }
 
       // Landing: vanilla fall damage = blocks fallen minus 3.
       if (this.onGround && this.fallDistance > 0) {
@@ -297,6 +308,12 @@ export class Player {
         if (dmg > 0) this.damage(dmg);
         this.fallDistance = 0;
       }
+    }
+
+    // The step offset eases out fast enough to keep up with a sprint up the stairs.
+    if (this.stepLift !== 0) {
+      this.stepLift *= Math.exp(-dt * 11);
+      if (this.stepLift > -0.002) this.stepLift = 0;
     }
 
     // Smooth eye height (sneak transition).

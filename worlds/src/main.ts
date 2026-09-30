@@ -683,6 +683,7 @@ function enterMatchWorld(spec: WorldSpec, kind: MatchKind, mode: GameMode, spawn
   if (controlsSheet.open) controlsSheet.hide();
   readySent = false;
   player.pos.set(spawn.x, spawn.y, spawn.z);
+  player.stepLift = 0;
   player.vel.set(0, 0, 0);
   player.fallDistance = 0;
   player.flying = false; player.noclip = false; duelSpectating = false; player.dead = false;
@@ -740,6 +741,10 @@ function exitToMenu(): void {
   killBanner.clear();
   killChipEl.classList.remove('visible');
   hurtPulse = 0;
+  player.damageFlash = 0;
+  // Both overlays are only repainted by the in-match frame, so blank them here.
+  hurtVignetteEl.style.opacity = '0';
+  (document.getElementById('damage-flash') as HTMLDivElement).style.opacity = '0';
   burstRemaining = 0; reloadTimer = 0; fireCooldown = 0;
   hideSelfAvatar();
   held.setActive(false);
@@ -774,6 +779,7 @@ net.onEditBatch = (edits) => {
 };
 net.onTeleport = (x, y, z) => {
   player.pos.set(x, y, z);
+  player.stepLift = 0;
   player.vel.set(0, 0, 0);
   player.fallDistance = 0;
   const loaded = [-.3, .3].every((dx) => [-.3, .3].every((dz) => world.isLoaded(x + dx, z + dz)));
@@ -1856,9 +1862,18 @@ function updateRatSeekInput(lookDir: THREE.Vector3, eye: THREE.Vector3): void {
     }
   }
   if (input.rightClicked) {
+    const t = interaction.target;
+    // The Cheese Exchange first, so holding a class badge or the card never blocks a trade.
+    const exchange = rsClient.exchangeAim(eye, lookDir, t);
+    if (exchange) {
+      net.flushXform(player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch,
+        player.sneaking, stack?.id ?? 0, heldSwingSeq, false, false);
+      net.sendRsUse(inventory.selected, exchange);
+      held.swing();
+      return;
+    }
     if (stack && isClassBadge(stack.id)) { rsClient.openPicker(); return; }
     if (stack?.id === Item.SeekerPicker) { openSeekerPick(); return; }
-    const t = interaction.target;
     net.flushXform(player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch,
       player.sneaking, stack?.id ?? 0, heldSwingSeq, false, false);
     net.sendRsUse(inventory.selected, t ? { x: t.x, y: t.y, z: t.z, nx: t.nx, ny: t.ny, nz: t.nz } : undefined);
@@ -1984,7 +1999,8 @@ function updateCamera(): void {
   camera.position.copy(player.eyePosition);
   camera.rotation.set(player.pitch, player.yaw, player.damageFlash * 0.18);
   const base = player.sprinting ? SPRINT_FOV : FOV;
-  const targetFov = base / aimZoom + (aimZoom > 1 ? 0 : speedFov) - fovPunch;
+  const dashFov = match?.kind === 'rs' && !accessibility.reducedMotion ? rsClient.dashFov() : 0;
+  const targetFov = base / aimZoom + (aimZoom > 1 ? 0 : speedFov + dashFov) - fovPunch;
   player.lookScale = aimZoom * zoomAmount > 1 ? Math.max(0.1, 1 / (aimZoom * zoomAmount)) : 1;
   const settled = Math.abs(fovNoZoom - targetFov) <= 0.01;
   if (!settled) fovNoZoom += (targetFov - fovNoZoom) * 0.3;
@@ -2172,6 +2188,10 @@ function frame(): void {
       pendingTeleport = null;
       if (bubbleReady) { hideLoading(); sendReady(); }
     }
+  }
+  if (match.kind === 'rs') {
+    rsClient.reducedMotion = accessibility.reducedMotion;
+    if (controlling) rsClient.steerDash(dt);
   }
   player.update(dt, moveInput, world);
   if (controlling && match.kind === 'pg' && pgSub?.game === 'parkour' && input.reloadPressed &&

@@ -133,7 +133,11 @@ export class RatSeekMatch {
   private readonly effects = new Map<number, Map<Effect, { until: number; amp: number }>>();
   private readonly fxSent = new Map<number, string>();
   private readonly kitSent = new Map<number, string>();
-  private readonly compass = new Map<number, { x: number; z: number }>();
+  private readonly compass = new Map<number, { x: number; y: number; z: number }>();
+  /** Which rat a seeker's compass is following, and until when (live, not a stale spot). */
+  private readonly compassRat = new Map<number, number>();
+  private readonly compassUntil = new Map<number, number>();
+  private readonly compassReady = new Map<number, number>();
   // Cheese.
   private cheese: CheeseItem[] = [];
   private cheeseRespawns: number[] = [];
@@ -349,6 +353,13 @@ export class RatSeekMatch {
       case Item.SqueakTaunt: this.taunt(id); return;
       case Item.Scamper: this.dash(id); return;
       case Item.ScentPulse: this.scentPulse(id); return;
+      case Item.SeekerCompass: this.useCompass(id); return;
+      case Item.EscapeCard:
+        this.bar(id, this.cageOrder.length
+          ? `Banked escape ready — it saves you if caught. Or right-click the Cheese Exchange (${RS.RESCUE_COST} cheese) to free a rat.`
+          : 'Banked escape ready — it saves you automatically the next time you are caught.', GREEN);
+        this.sound('click', undefined, id);
+        return;
       case Item.CageRattle: this.rattleCage(id); return;
       default:
     }
@@ -418,8 +429,10 @@ export class RatSeekMatch {
     this.tickEffects();
     this.tickGadgets();
     this.tickAbilities();
+    this.tickCompasses();
     if (this.phase === 'hunting') {
       this.tickChandeliers();
+      this.moveCat(this.cat && this.cat.target >= 0 ? 0.3 : 0.2);
       if (this.ticks % 10 === 0) this.tickCat();
       for (const bot of this.seekerBots) {
         if (this.isOver()) return;
@@ -761,7 +774,7 @@ export class RatSeekMatch {
     this.dashReady.set(id, this.ticks + (this.isClass(id, 'scout') ? RS.DASH_COOLDOWN * 2 / 3 : RS.DASH_COOLDOWN));
     const b = this.host.body(id)!;
     const fx = -Math.sin(b.yaw), fz = -Math.cos(b.yaw);
-    this.host.send(id, { t: 'rsImpulse', vx: fx * 15, vy: 4.4, vz: fz * 15, momentum: 0.45 });
+    this.host.send(id, { t: 'rsImpulse', vx: fx * 16, vy: 3.4, vz: fz * 16, momentum: 0.45 });
     this.impulseUntil.set(id, this.ticks + 30);
     this.addEffect(id, 'speed', 45, 2);
     this.sound('dash', b);
@@ -840,7 +853,7 @@ export class RatSeekMatch {
     this.scentReadyAt = this.ticks + RS.SCENT_COOLDOWN;
     const r = this.host.body(nearest)!;
     this.addEffect(nearest, 'glow', 50, 0);
-    this.compass.set(id, { x: r.x, z: r.z });
+    this.trackWithCompass(id, nearest, 100);
     this.title(id, 'SNIFF!', `${Math.round(Math.sqrt(dist2(b, r)))} blocks • ${rsRoomAt(r.x, r.y, r.z)}`, YELLOW, 1500);
     this.sound('sniff', b);
     this.heat += 0.15;
@@ -877,8 +890,55 @@ export class RatSeekMatch {
     return best;
   }
 
+  /** Point a seeker's compass at a rat and keep it pointing there as the rat moves. */
+  private trackWithCompass(seeker: number, rat: number, ticks: number): boolean {
+    const b = this.host.body(rat);
+    if (!b) return false;
+    this.compass.set(seeker, { x: b.x, y: b.y, z: b.z });
+    this.compassRat.set(seeker, rat);
+    this.compassUntil.set(seeker, this.ticks + ticks);
+    return true;
+  }
+  private clearCompass(seeker: number): void {
+    this.compass.delete(seeker);
+    this.compassRat.delete(seeker);
+    this.compassUntil.delete(seeker);
+  }
+  /** Keep every followed rat's position fresh; drop the lock when it ends or the rat is caged. */
+  private tickCompasses(): void {
+    for (const seeker of [...this.compass.keys()]) {
+      if ((this.compassUntil.get(seeker) ?? 0) <= this.ticks) { this.clearCompass(seeker); continue; }
+      const rat = this.compassRat.get(seeker);
+      if (rat === undefined) continue;
+      const b = this.rats.get(rat) === 'free' ? this.host.body(rat) : undefined;
+      if (b) this.compass.set(seeker, { x: b.x, y: b.y, z: b.z });
+      else {
+        // Caught (or gone): jump to the nearest rat still free, if any.
+        this.clearCompass(seeker);
+        const sb = this.host.body(seeker);
+        const next = sb ? this.nearestFreeRat(sb) : -1;
+        if (next >= 0) this.trackWithCompass(seeker, next, RS.COMPASS_TRACK / 2);
+      }
+    }
+  }
+  /** Right-click the compass: lock on to the nearest free rat. */
+  private useCompass(id: number): void {
+    if (!this.humans.has(id)) return;
+    if (this.phase !== 'hunting') { this.bar(id, 'The compass wakes up when the hunt begins.', RED); return; }
+    const ready = this.compassReady.get(id) ?? 0;
+    if (ready > this.ticks) { this.bar(id, `Compass recharging — ${((ready - this.ticks) / 20).toFixed(1)}s`, RED); return; }
+    const b = this.host.body(id)!;
+    const nearest = this.nearestFreeRat(b);
+    if (nearest < 0 || !this.trackWithCompass(id, nearest, RS.COMPASS_TRACK)) { this.bar(id, 'No free rats to track.', GRAY); return; }
+    this.compassReady.set(id, this.ticks + RS.COMPASS_COOLDOWN);
+    const r = this.host.body(nearest)!;
+    this.sound('bell', undefined, id);
+    this.title(id, 'COMPASS LOCKED', `${Math.round(Math.sqrt(dist2(b, r)))} blocks • ${rsRoomAt(r.x, r.y, r.z)}`, YELLOW, 1400);
+  }
+
   private pointCompasses(at: { x: number; z: number }): void {
-    for (const id of this.humans) this.compass.set(id, { x: at.x, z: at.z });
+    for (const id of this.humans) this.compass.set(id, { x: at.x, y: (at as RsPos).y ?? 81, z: at.z });
+    for (const id of this.humans) { this.compassRat.delete(id); this.compassUntil.set(id, this.ticks + 200); }
     if (this.phase === 'hunting') for (const bot of this.seekerBots) bot.alert({ x: at.x, y: (at as RsPos).y ?? 81, z: at.z });
   }
   private notifyHumans(text: string, color: string): void { for (const id of this.humans) this.bar(id, text, color); }
@@ -891,7 +951,7 @@ export class RatSeekMatch {
     if (!at) return;
     const room = rsRoomAt(at.x, at.y, at.z);
     for (const id of this.humans) {
-      this.compass.set(id, { x: at.x, z: at.z });
+      this.trackWithCompass(id, target, 160);
       this.bar(id, `Compass tracking a rat near the ${room}`, YELLOW);
       this.sound('bell', undefined, id);
     }
@@ -1276,18 +1336,25 @@ export class RatSeekMatch {
     cat.path = nav.path(nav.nearest(cat.x, cat.y, cat.z, 2), nav.nearest(to.x, to.y, to.z, 2));
     cat.pathIndex = 1;
   }
-  /** Mr. Whiskers moves every tick along his path; he decides twice a second. */
+  /** Mr. Whiskers moves every tick along his path (so clients see a steady walk);
+   *  he decides twice a second. */
   private moveCat(pace: number): void {
-    const cat = this.cat!;
-    if (!cat.path) return;
+    const cat = this.cat;
+    if (!cat || !cat.path) return;
     let left = pace;
     while (left > 1e-4 && cat.pathIndex < cat.path.length) {
       const [tx, ty, tz] = cat.path[cat.pathIndex];
       const dx = tx - cat.x, dz = tz - cat.z, d = Math.hypot(dx, dz);
+      if (d > 1e-3) {
+        // Turn toward the way he is walking instead of snapping at corners.
+        let turn = Math.atan2(-dx, -dz) - cat.yaw;
+        while (turn > Math.PI) turn -= Math.PI * 2;
+        while (turn < -Math.PI) turn += Math.PI * 2;
+        cat.yaw += Math.max(-0.5, Math.min(0.5, turn));
+      }
       if (d <= left) { cat.x = tx; cat.z = tz; cat.y = ty; left -= d; cat.pathIndex++; continue; }
       cat.x += dx / d * left; cat.z += dz / d * left;
       cat.y += (ty - cat.y) * Math.min(1, left / Math.max(d, 1e-3));
-      cat.yaw = Math.atan2(-dx, -dz);
       left = 0;
     }
     if (cat.pathIndex >= cat.path.length) cat.path = null;
@@ -1295,7 +1362,6 @@ export class RatSeekMatch {
   private tickCat(): void {
     const cat = this.cat;
     if (!cat) return;
-    for (let i = 0; i < 10; i++) this.moveCat(cat.target >= 0 ? 0.3 : 0.2);
     if (cat.pounceFx > 0) cat.pounceFx -= 10;
     if (cat.nap > 0) {
       cat.nap -= 10;
@@ -1705,7 +1771,11 @@ export class RatSeekMatch {
         rattleCd: cd(this.rattleReady), scentCd: Math.max(0, this.scentReadyAt - this.ticks),
         light: !!k?.lightOn, battery: k ? k.battery / RS.BATTERY : 1, traps: k?.traps ?? RS.TRAP_CHARGES,
         baits: k?.baits ?? RS.BAIT_CHARGES, room: b ? rsRoomAt(b.x, b.y, b.z) : '',
-        compass: this.compass.get(id) ?? null,
+        compass: (() => {
+          const c = this.compass.get(id);
+          return c && this.humans.has(id) ? { x: r2(c.x), y: r2(c.y), z: r2(c.z), room: rsRoomAt(c.x, c.y, c.z) } : null;
+        })(),
+        compassCd: Math.max(0, (this.compassReady.get(id) ?? 0) - this.ticks),
       };
       const sparkles = rat && cls === 'tinkerer' && this.isFreeRat(id) && b ? [
         ...this.trapCells().filter((t) => dist2(t, b) <= 144).map((t) => ({ x: t.x + 0.5, y: t.y + 0.3, z: t.z + 0.5, bait: false })),

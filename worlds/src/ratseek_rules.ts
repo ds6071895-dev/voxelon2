@@ -14,6 +14,9 @@ export const RS = {
   TAUNT_COOLDOWN: 300,
   DASH_COOLDOWN: 240,
   SCENT_COOLDOWN: 300,
+  /** Compass: a right-click locks onto the nearest free rat and follows it for a while. */
+  COMPASS_COOLDOWN: 160,
+  COMPASS_TRACK: 200,
   RATTLE_COOLDOWN: 300,
   COMBO_WINDOW: 240,
   CHEESE_RESPAWN: 240,
@@ -134,8 +137,10 @@ export interface RsSelfView {
   traps: number;
   baits: number;
   room: string;
-  /** Where the seeker's compass points, if it has a heading. */
-  compass: { x: number; z: number } | null;
+  /** Where the seeker's compass points, if it has a heading (it follows a rat live). */
+  compass: { x: number; y: number; z: number; room: string } | null;
+  /** Ticks until the compass can lock on again (0 = ready). */
+  compassCd: number;
 }
 
 export interface RsSnapshot {

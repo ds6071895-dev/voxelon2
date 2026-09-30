@@ -13,7 +13,7 @@
 // Also exports the avatar-body builder so the Character screen can show a live
 // preview of the same model.
 
-import { createPersonGlow, createRatModel, type RatModel } from './ratseek_models';
+import { createRatModel, glowOf, type Glow, type RatModel } from './ratseek_models';
 import * as THREE from 'three';
 import { SNAP_DISTANCE, netNow } from './interp';
 import { AvatarSurface, avatarTexture } from './avatartex';
@@ -764,7 +764,7 @@ interface Avatar {
   /** Rat and Seek: the rat drawn in place of the person, and what it hid. */
   rat: RatModel | null;
   hiddenParts: THREE.Object3D[];
-  personGlow: THREE.Group | null;
+  personGlow: Glow | null;
 }
 
 /** A mode's say over how one body is drawn (Rat and Seek: rats, glow, ghosts). */
@@ -1091,8 +1091,9 @@ export class RemotePlayers {
       av.rat.setGlow(!!st?.glow);
       if (av.heldMesh) av.heldMesh.visible = false;
     } else if (st?.glow || av.personGlow) {
-      if (!av.personGlow) { av.personGlow = createPersonGlow(); av.group.add(av.personGlow); }
-      av.personGlow.visible = !!st?.glow;
+      // The glow rides on the avatar's own limbs, so it follows every step and swing.
+      if (!av.personGlow && st?.glow) av.personGlow = glowOf(av.group);
+      av.personGlow?.set(!!st?.glow);
     }
     av.sprite.visible = st ? st.tag : true;
   }

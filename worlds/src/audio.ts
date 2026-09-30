@@ -717,7 +717,13 @@ export class GameAudio {
         t({ type: 'sine', from: 1480, to: 1480, dur: 0.22, gain: 0.08, delay: 0.07, attack: 0.004 });
         t({ type: 'triangle', from: 2960, to: 2960, dur: 0.16, gain: 0.02, delay: 0.07, attack: 0.004 });
         break;
-      case 'dash': n({ freq: 900, dur: 0.2, gain: 0.1, slideTo: 2600, type: 'bandpass', q: 0.8 }); break;
+      case 'dash':
+        // A launch thump, a rising whoosh that falls away behind you, and a cheerful squeak.
+        t({ type: 'sine', from: 150, to: 70, dur: 0.12, gain: 0.13, attack: 0.002 });
+        n({ freq: 500, dur: 0.26, gain: 0.13, slideTo: 3200, type: 'bandpass', q: 0.7 });
+        n({ freq: 3200, dur: 0.24, gain: 0.07, slideTo: 800, type: 'bandpass', q: 0.9, delay: 0.14 });
+        t({ type: 'triangle', from: 950, to: 1800, dur: 0.1, gain: 0.06, attack: 0.004, delay: 0.02 });
+        break;
       case 'twist':
         [440, 554, 659, 880].forEach((f, i) => t({ type: 'square', from: f, to: f, dur: 0.1, gain: 0.04, delay: i * 0.06 }));
         break;

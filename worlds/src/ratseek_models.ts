@@ -36,25 +36,40 @@ function joint(parent: THREE.Object3D, x: number, y: number, z: number): THREE.G
   return g;
 }
 
-/** Through-the-walls outline: every mesh of `source`, redrawn a little larger
- *  on top of everything in a flat warm colour. */
+/** Behind walls only. It is opaque and drawn AFTER the world but BEFORE the body (see
+ *  glowOf), so only what a wall hides is painted; the body then covers the rest. */
 export const GLOW_MAT = new THREE.MeshBasicMaterial({
-  color: 0xfff0a0, transparent: true, opacity: 0.55, depthTest: false, depthWrite: false,
+  color: 0xf2c65a, depthFunc: THREE.GreaterDepth, depthWrite: false,
 });
-function glowOf(source: THREE.Object3D): THREE.Group {
-  const g = new THREE.Group();
-  source.updateMatrixWorld(true);
-  const inv = new THREE.Matrix4().copy(source.matrixWorld).invert();
+/** In the open: a thin bright rim, drawn as an inverted hull behind the body. */
+export const GLOW_EDGE_MAT = new THREE.MeshBasicMaterial({
+  color: 0xffe28a, side: THREE.BackSide, transparent: true, opacity: 0.9, depthWrite: false,
+});
+
+/** A glow that rides on the source's own limbs, so it follows every animated
+ *  joint: each mesh gets two slightly larger copies as its siblings. */
+export interface Glow { set(on: boolean): void }
+export function glowOf(source: THREE.Object3D): Glow {
+  const meshes: THREE.Mesh[] = [];
   source.traverse((o) => {
-    if (!(o instanceof THREE.Mesh) || o.material === GLOW_MAT) return;
-    const m = new THREE.Mesh(o.geometry, GLOW_MAT);
-    m.matrixAutoUpdate = false;
-    m.matrix.multiplyMatrices(inv, o.matrixWorld).multiply(new THREE.Matrix4().makeScale(1.12, 1.12, 1.12));
-    m.renderOrder = 900;
-    g.add(m);
+    if (o instanceof THREE.Mesh && o.visible && o.material !== GLOW_MAT && o.material !== GLOW_EDGE_MAT) meshes.push(o);
   });
-  g.visible = false;
-  return g;
+  const copies: THREE.Mesh[] = [];
+  for (const o of meshes) {
+    if (!o.parent) continue;
+    o.renderOrder = Math.max(o.renderOrder, 2);
+    for (const [mat, grow, order] of [[GLOW_EDGE_MAT, 1.16, 899], [GLOW_MAT, 1.08, 1]] as const) {
+      const m = new THREE.Mesh(o.geometry, mat);
+      m.position.copy(o.position);
+      m.quaternion.copy(o.quaternion);
+      m.scale.copy(o.scale).multiplyScalar(grow);
+      m.renderOrder = order;
+      m.visible = false;
+      o.parent.add(m);
+      copies.push(m);
+    }
+  }
+  return { set(on) { for (const m of copies) m.visible = on; } };
 }
 
 // ── The rat ─────────────────────────────────────────────────────────────────
@@ -115,7 +130,6 @@ export function createRatModel(caged = false): RatModel {
     parent = seg;
   }
   const glow = glowOf(group);
-  group.add(glow);
   const model: RatModel = {
     group,
     setCaged(on) {
@@ -123,7 +137,7 @@ export function createRatModel(caged = false): RatModel {
       bellyMat.color.setHex(on ? 0x6a6a70 : 0xffffff);
       for (const s of stripes) s.visible = on;
     },
-    setGlow(on) { glow.visible = on; },
+    setGlow(on) { glow.set(on); },
     pose(speed, phase, t) {
       const run = Math.min(1, speed / 5);
       const swing = Math.sin(phase * 1.6) * 0.9 * run;
@@ -147,52 +161,156 @@ export function createRatModel(caged = false): RatModel {
 
 export interface CatModel {
   group: THREE.Group;
-  update(sit: boolean, speed: number, t: number): void;
+  /** Animate: sitting, ground speed (blocks/s), the clock, and mid-pounce. */
+  update(sit: boolean, speed: number, t: number, pounce?: boolean): void;
 }
+
+const ease = (a: number, b: number, k: number): number => a + (b - a) * k;
+
+/** Mr. Whiskers: a sleek tuxedo cat with jointed legs, a chained tail, ears
+ *  that twitch, a blink, and a gait that turns from a walk into a gallop. */
 export function createCatModel(): CatModel {
   const group = new THREE.Group();
-  const body = new THREE.Group();
-  group.add(body);
-  const BLACK = 0x1c1a20, DARK = 0x2a2830;
-  box(body, 0.32, 0.3, 0.62, BLACK, 0, 0.4, 0);
-  const head = joint(body, 0, 0.58, -0.36);
-  box(head, 0.32, 0.28, 0.28, BLACK, 0, 0, 0);
-  box(head, 0.16, 0.1, 0.08, DARK, 0, -0.07, -0.16);
-  box(head, 0.05, 0.035, 0.02, 0xe07a8a, 0, -0.04, -0.205);
-  for (const x of [-0.09, 0.09]) {
-    box(head, 0.07, 0.06, 0.02, 0xf2d23a, x, 0.04, -0.145);
-    box(head, 0.025, 0.05, 0.022, 0x0a0a0a, x, 0.04, -0.15);
-    box(head, 0.09, 0.1, 0.05, BLACK, x * 1.1, 0.18, 0.02);
-    box(head, 0.05, 0.06, 0.02, 0xc07a86, x * 1.1, 0.17, -0.01);
+  const rig = new THREE.Group();
+  group.add(rig);
+  const BLACK = 0x2b2833, SHEEN = 0x3b3746, WHITE = 0xf1eee6, PINK = 0xe58a9a, EAR_IN = 0xc9707f;
+  const torso = joint(rig, 0, 0.42, 0);
+
+  // Body: a broad chest, a narrower waist and a rounder rump.
+  box(torso, 0.31, 0.31, 0.3, BLACK, 0, 0.01, -0.15);
+  box(torso, 0.26, 0.27, 0.16, BLACK, 0, -0.005, 0.02);
+  box(torso, 0.29, 0.29, 0.3, BLACK, 0, 0, 0.16);
+  box(torso, 0.2, 0.03, 0.44, SHEEN, 0, 0.155, 0.02);       // glossy back
+  box(torso, 0.15, 0.17, 0.02, WHITE, 0, -0.03, -0.305);    // chest bib
+  box(torso, 0.15, 0.02, 0.3, WHITE, 0, -0.146, -0.06);     // belly
+  box(torso, 0.335, 0.06, 0.09, 0xc23030, 0, 0.085, -0.27);  // collar
+  box(torso, 0.055, 0.055, 0.05, 0xe6b840, 0, 0.03, -0.32);  // bell
+
+  // Head.
+  const head = joint(torso, 0, 0.1, -0.33);
+  box(head, 0.29, 0.25, 0.25, BLACK, 0, 0.03, -0.05);
+  box(head, 0.16, 0.09, 0.06, WHITE, 0, -0.045, -0.19);
+  box(head, 0.05, 0.03, 0.02, PINK, 0, -0.005, -0.225);
+  for (const s of [-1, 1]) box(head, 0.05, 0.06, 0.05, WHITE, s * 0.13, -0.05, -0.13);
+  const eyes = joint(head, 0, 0.065, -0.18);
+  for (const s of [-1, 1]) {
+    box(eyes, 0.075, 0.07, 0.02, 0xb8e04a, s * 0.08, 0, 0);
+    box(eyes, 0.02, 0.062, 0.022, 0x0a0a0a, s * 0.08, 0, -0.004);
+    box(eyes, 0.02, 0.02, 0.022, 0xffffff, s * 0.08 + 0.014, 0.018, -0.006);
   }
-  // A red collar with a brass bell.
-  box(body, 0.34, 0.06, 0.1, 0xb02a2a, 0, 0.5, -0.27);
-  box(body, 0.06, 0.06, 0.06, 0xe0b040, 0, 0.45, -0.33);
-  const legs: THREE.Group[] = [];
-  for (const [x, z] of [[-0.1, -0.22], [0.1, -0.22], [-0.1, 0.22], [0.1, 0.22]]) {
-    const leg = joint(body, x, 0.28, z);
-    box(leg, 0.09, 0.28, 0.09, BLACK, 0, -0.14, 0);
-    legs.push(leg);
+  const ears: THREE.Group[] = [];
+  for (const s of [-1, 1]) {
+    const ear = joint(head, s * 0.095, 0.15, -0.03);
+    box(ear, 0.1, 0.07, 0.05, BLACK, 0, 0.035, 0);
+    box(ear, 0.06, 0.06, 0.045, BLACK, 0, 0.09, 0);
+    box(ear, 0.045, 0.07, 0.02, EAR_IN, 0, 0.06, -0.022);
+    ear.rotation.z = -s * 0.14;
+    ears.push(ear);
   }
-  const tail = joint(body, 0, 0.5, 0.3);
-  box(tail, 0.06, 0.06, 0.4, BLACK, 0, 0.08, 0.18);
+  for (const s of [-1, 1]) for (let i = 0; i < 3; i++) {
+    const w = box(head, 0.2, 0.008, 0.008, 0xe8e6ee, s * 0.17, -0.03 + i * 0.02, -0.16);
+    w.rotation.z = s * (i - 1) * 0.13;
+    w.rotation.y = -s * 0.2;
+  }
+
+  // Legs: a shoulder/hip joint, a knee and a white paw on each.
+  interface Leg { hip: THREE.Group; knee: THREE.Group; paw: THREE.Group }
+  const makeLeg = (x: number, y: number, z: number, hind: boolean): Leg => {
+    const hip = joint(torso, x, y, z);
+    if (hind) box(hip, 0.13, 0.19, 0.2, BLACK, 0, -0.08, 0.01);
+    else box(hip, 0.1, 0.17, 0.1, BLACK, 0, -0.085, 0);
+    const knee = joint(hip, 0, -0.17, 0);
+    box(knee, 0.075, hind ? 0.15 : 0.14, 0.075, BLACK, 0, hind ? -0.075 : -0.07, 0);
+    const paw = joint(knee, 0, hind ? -0.15 : -0.14, 0);
+    box(paw, 0.095, 0.05, 0.13, WHITE, 0, -0.025, -0.02);
+    return { hip, knee, paw };
+  };
+  const fl = makeLeg(-0.085, -0.06, -0.17, false);
+  const fr = makeLeg(0.085, -0.06, -0.17, false);
+  const hl = makeLeg(-0.095, -0.05, 0.19, true);
+  const hr = makeLeg(0.095, -0.05, 0.19, true);
+
+  // Tail: five chained segments so it can curl and whip.
+  const tailBase = joint(torso, 0, 0.05, 0.3);
+  const tail: THREE.Group[] = [];
+  let parent: THREE.Group = tailBase;
+  for (let i = 0; i < 5; i++) {
+    const seg = joint(parent, 0, 0, i ? 0.125 : 0);
+    box(seg, 0.06 - i * 0.004, 0.06 - i * 0.004, 0.14, i === 4 ? WHITE : BLACK, 0, 0, 0.065);
+    tail.push(seg);
+    parent = seg;
+  }
+
   const tag = nameSprite('Mr. Whiskers');
   tag.position.y = 1.05;
   group.add(tag);
-  let phase = 0;
+
+  let phase = 0, lastT = -1, gallop = 0, sitAmt = 0, pounceAmt = 0;
+  let nextBlink = 1.5, blinkStart = -1, nextTwitch = 3, twitchStart = -1, twitchSide = 0;
   return {
     group,
-    update(sit, speed, t) {
-      phase += speed * 0.05;
-      const run = Math.min(1, speed / 4);
-      const swing = Math.sin(phase * 4) * 0.7 * run;
-      legs[0].rotation.x = swing; legs[3].rotation.x = swing; legs[1].rotation.x = -swing; legs[2].rotation.x = -swing;
-      body.rotation.x = sit ? -0.45 : 0;
-      body.position.y = sit ? -0.12 : 0;
-      if (sit) { legs[2].rotation.x = 1.2; legs[3].rotation.x = 1.2; }
-      tail.rotation.x = sit ? 1.1 : -0.6 + Math.sin(t * 2) * 0.15;
-      tail.rotation.y = Math.sin(t * (sit ? 0.8 : 2.6)) * 0.4;
-      head.rotation.y = sit ? Math.sin(t * 0.4) * 0.3 : 0;
+    update(sit, speed, t, pounce = false) {
+      const dt = lastT < 0 ? 0.016 : Math.min(0.1, Math.max(0, t - lastT));
+      lastT = t;
+      const k = Math.min(1, dt * 9);
+      sitAmt = ease(sitAmt, sit ? 1 : 0, k * 0.6);
+      pounceAmt = ease(pounceAmt, pounce ? 1 : 0, k);
+      const mv = Math.min(1, speed / 1.2) * (1 - sitAmt) * (1 - pounceAmt);
+      gallop = ease(gallop, Math.max(0, Math.min(1, (speed - 4.2) / 2)), Math.min(1, dt * 6));
+      phase += dt * speed * 0.6 * Math.PI * 2;
+
+      // Gait: diagonal pairs at a walk, bounding pairs at a gallop.
+      const amp = (0.42 + 0.4 * gallop) * mv;
+      const offs = { fl: 0, fr: ease(Math.PI, 0.3, gallop), hl: ease(Math.PI, 1.4, gallop), hr: ease(0, 1.6, gallop) };
+      const drive = (leg: Leg, off: number, front: boolean): void => {
+        const a = phase + off;
+        const lift = Math.max(0, Math.cos(a)) * mv;
+        // Stretched while pouncing, folded while sitting, striding otherwise.
+        const free = 1 - sitAmt - pounceAmt;
+        const sitPose = front ? -0.75 : 0.82;
+        const pouncePose = front ? 1.15 : -0.85;
+        leg.hip.rotation.x = Math.sin(a) * amp * free + sitPose * sitAmt + pouncePose * pounceAmt;
+        leg.knee.rotation.x = -lift * (front ? 0.95 : 1.05) * (1 - gallop * 0.3) + (front ? 0 : -1.9) * sitAmt;
+        leg.paw.rotation.x = -leg.knee.rotation.x * 0.45 + (front ? 0 : 1.1 * sitAmt);
+      };
+      drive(fl, offs.fl, true); drive(fr, offs.fr, true);
+      drive(hl, offs.hl, false); drive(hr, offs.hr, false);
+
+      // Body: bob with each footfall, pitch and sway at speed, sit back on the haunches.
+      const bob = Math.abs(Math.sin(phase)) * 0.018 * mv * (1 + gallop * 1.5);
+      rig.position.y = bob + pounceAmt * 0.06;
+      torso.position.y = ease(0.42, 0.3, sitAmt) - pounceAmt * 0.06;
+      torso.rotation.x = 0.75 * sitAmt - 0.16 * pounceAmt + Math.sin(phase + 0.7) * 0.08 * gallop * mv;
+      torso.rotation.z = Math.sin(phase) * 0.03 * mv * (1 - gallop);
+      torso.rotation.y = Math.sin(phase) * 0.04 * mv * (1 - gallop);
+      torso.scale.y = 1 + Math.sin(t * 2.4) * 0.012 * (1 - mv);
+
+      // Head keeps level against the body pitch and glances around when idle.
+      const idle = 1 - mv;
+      head.rotation.x = -torso.rotation.x * 0.85 - Math.sin(phase * 2) * 0.04 * mv - 0.05 * pounceAmt;
+      head.rotation.y = Math.sin(t * 0.55) * 0.3 * idle * (0.4 + sitAmt) * (1 - pounceAmt);
+      head.rotation.z = Math.sin(t * 0.37 + 1) * 0.05 * idle;
+
+      // Blinks and ear twitches.
+      if (t > nextBlink) { blinkStart = t; nextBlink = t + 2 + Math.random() * 3; }
+      const bp = blinkStart >= 0 ? (t - blinkStart) / 0.16 : 1;
+      eyes.scale.y = bp >= 1 ? 1 : Math.max(0.08, Math.abs(bp * 2 - 1));
+      if (t > nextTwitch) { twitchStart = t; twitchSide = Math.random() < 0.5 ? 0 : 1; nextTwitch = t + 2.5 + Math.random() * 4; }
+      const tp = twitchStart >= 0 ? (t - twitchStart) / 0.3 : 1;
+      for (let i = 0; i < 2; i++) {
+        const s = i === 0 ? -1 : 1;
+        const flick = tp < 1 && i === twitchSide ? Math.sin(tp * Math.PI * 3) * 0.3 * (1 - tp) : 0;
+        ears[i].rotation.z = -s * (0.14 + flick + 0.25 * pounceAmt);
+        ears[i].rotation.x = 0.7 * pounceAmt + (gallop > 0.5 ? 0.25 : 0);
+      }
+
+      // Tail: held up and swaying, curled round the paws when sitting.
+      const rate = 2.2 + speed * 0.3;
+      for (let i = 0; i < tail.length; i++) {
+        const up = -0.5 - 0.22 * i, curl = 0.28 + 0.05 * i;
+        tail[i].rotation.x = (ease(up, curl, sitAmt) + Math.sin(phase * 2 - i) * 0.05 * mv) * (1 - pounceAmt) + 0.2 * pounceAmt;
+        tail[i].rotation.y = Math.sin(t * rate - i * 0.7) * (0.18 + 0.06 * i) * (1 - sitAmt * 0.6) + sitAmt * 0.45;
+      }
     },
   };
 }
@@ -214,18 +332,27 @@ function nameSprite(text: string): THREE.Sprite {
 }
 /** A floating label (the Cheese Exchange's price board). */
 export function labelSprite(text: string, color = '#ffd35a'): THREE.Sprite {
+  // One line per "\n"; the font shrinks until the widest line fits inside the plate.
+  const lines = text.split('\n');
+  const W = 512, PAD = 22, LINE = 44;
+  const H = lines.length * LINE + 2 * PAD;
   const canvas = document.createElement('canvas');
-  canvas.width = 512; canvas.height = 72;
+  canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext('2d')!;
-  ctx.font = 'bold 26px "Segoe UI", Arial, sans-serif';
-  const w = Math.min(508, Math.ceil(ctx.measureText(text).width) + 36);
+  let size = 30;
+  const setFont = (px: number): void => { ctx.font = `bold ${px}px "Segoe UI", Arial, sans-serif`; };
+  setFont(size);
+  const maxW = W - 2 * PAD - 16;
+  const widest = (): number => Math.max(...lines.map((l) => ctx.measureText(l).width));
+  while (size > 12 && widest() > maxW) setFont(--size);
+  const w = Math.ceil(widest()) + 32;
   ctx.fillStyle = 'rgba(12,10,6,0.62)';
-  ctx.beginPath(); ctx.roundRect(256 - w / 2, 18, w, 42, 10); ctx.fill();
+  ctx.beginPath(); ctx.roundRect(W / 2 - w / 2, PAD / 2, w, H - PAD, 12); ctx.fill();
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.fillStyle = color;
-  ctx.fillText(text, 256, 40);
+  lines.forEach((l, i) => ctx.fillText(l, W / 2, PAD + LINE * (i + 0.5)));
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true }));
-  sprite.scale.set(3.4, 0.48, 1);
+  sprite.scale.set(3.4, 3.4 * H / W, 1);
   return sprite;
 }
 
@@ -278,23 +405,6 @@ export function createChandelierModel(): THREE.Group {
 }
 
 // ── Seeker bits ─────────────────────────────────────────────────────────────
-
-/** A seeker's through-walls outline: a lit frame the size of a person. */
-export function createPersonGlow(): THREE.Group {
-  const g = new THREE.Group();
-  const edges = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(0.7, 1.9, 0.45)),
-    new THREE.LineBasicMaterial({ color: 0xfff0a0, depthTest: false, transparent: true, opacity: 0.9 }));
-  edges.position.y = 0.95;
-  edges.renderOrder = 901;
-  const fill = new THREE.Mesh(new THREE.BoxGeometry(0.66, 1.86, 0.42), new THREE.MeshBasicMaterial({
-    color: 0xfff0a0, transparent: true, opacity: 0.18, depthTest: false, depthWrite: false,
-  }));
-  fill.position.y = 0.95;
-  fill.renderOrder = 900;
-  g.add(edges, fill);
-  g.visible = false;
-  return g;
-}
 
 /** A flashlight beam: a soft additive cone, apex at the lens. Length 1 along -z. */
 export function createBeam(): THREE.Mesh {
