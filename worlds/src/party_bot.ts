@@ -114,6 +114,10 @@ export class PartyBot {
   private swingLean = 0;
   private enemyPrev: (PartyVec3 & { at: number }) | null = null;
   private enemyVel = { x: 0, y: 0, z: 0 };
+  /** Parkour: fireballs coming down (set by the server each step). */
+  threats: readonly { id: number; tx: number; tz: number; landAt: number }[] = [];
+  /** Which fireballs this bot noticed in time (decided once per fireball). */
+  private noticed = new Map<number, boolean>();
   /** Recent (time, my progress, their progress) samples: the race pace. */
   private paceLog: { t: number; me: number; them: number }[] = [];
 
@@ -158,7 +162,13 @@ export class PartyBot {
     let pull: number;
     if (snap.mode === 'bridge') {
       pull = (human.score - me.score) * 0.17 + (human.kills - me.kills) * 0.05;
+    } else if (human.finishedAt !== undefined || human.outAt !== undefined || !human.connected) {
+      // Dragon Chase is not a race: with its player done, the bot simply
+      // runs the rest of the course at its own level.
+      pull = 0;
     } else {
+      // Keep company: a runner who is out in front pulls the bot up to their
+      // pace, one who is struggling gets a bot running alongside them.
       const course = parkourCourse(snap.sub!.seed);
       const total = Math.max(1, course.steps.length - 1);
       const gap = clamp(human.progress - me.progress, -14, 14);
@@ -535,7 +545,9 @@ export class PartyBot {
       // The "think" before the next jump. A first-timer stops and looks; a
       // strong runner barely breaks stride; in flow there is no pause at all.
       const timed = a.kind === 'crumble' || a.kind === 'blink' || a.kind === 'launch' || a.kind === 'boost';
-      const think = timed ? 0 : (lerp(620, 35, q) + this.rng() * lerp(360, 30, q)) * (1 - f);
+      // With the dragon at its heels nobody stops to think.
+      const hunted = snap.dragon !== undefined && me.progress - snap.dragon.front < 3;
+      const think = timed ? 0 : (lerp(620, 35, q) + this.rng() * lerp(360, 30, q)) * (1 - f) * (hunted ? .25 : 1);
       this.pauseUntil = now + think;
       const key = `${a.index}:${b.index}`;
       const pristine = gen ? { isLoaded: () => true, getBlock: (x: number, y: number, z: number) => gen.blockAt(x, y, z) } as unknown as World : world;
@@ -573,6 +585,17 @@ export class PartyBot {
       const direct = this.jumpFrom(p.pos.x, p.pos.z, p.pos.y, b, world, sub.minX, sub.minZ, q);
       if (direct) { this.plan = direct; this.pauseUntil = 0; }
     }
+    // Fire coming down. On us: get moving. On the pad ahead: let it land first.
+    for (const f of this.threats) {
+      if (f.landAt < now || f.landAt - now > 1600) continue;
+      if (!this.noticed.has(f.id)) this.noticed.set(f.id, this.rng() < .35 + .6 * q);
+      if (!this.noticed.get(f.id)) continue;
+      const onMe = Math.hypot(f.tx - p.pos.x, f.tz - p.pos.z) < 2.6;
+      const onNext = Math.hypot(f.tx - (sub.minX + b.x), f.tz - (sub.minZ + b.z)) < 2.6;
+      if (onMe && !onNext) this.pauseUntil = 0;
+      else if (onNext && !onMe && p.onGround) { this.pauseUntil = Math.max(this.pauseUntil, f.landAt + 120); this.plan ??= undefined; }
+    }
+    if (this.noticed.size > 64) this.noticed.clear();
     if (now < this.pauseUntil) return;
     if (!this.plan && p.onGround && now >= this.nextReplan) {
       this.nextReplan = now + 700;

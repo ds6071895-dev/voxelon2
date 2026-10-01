@@ -151,11 +151,12 @@ class GeoBuffer {
     }
   }
 
-  /** Two diagonal quads, double-sided — billboard plants. */
+  /** Two diagonal quads, double-sided — billboard plants. `axis` lays the
+   *  pair on its side, its length along x or z (a chain strung sideways). */
   cross(
     bx: number, by: number, bz: number,
     uvRect: [number, number, number, number], tint: Tint,
-    skyL: number, blockL: number, emission = 0
+    skyL: number, blockL: number, emission = 0, axis?: 'x' | 'z'
   ): void {
     const [u0, v0, u1, v1] = uvRect;
     const diags: [number, number, number, number][] = [
@@ -164,17 +165,19 @@ class GeoBuffer {
     ];
     for (const [x1, z1, x2, z2] of diags) {
       const base = this.positions.length / 3;
-      this.positions.push(
-        bx + x1, by, bz + z1,
-        bx + x2, by, bz + z2,
-        bx + x1, by + 1, bz + z1,
-        bx + x2, by + 1, bz + z2
-      );
+      // Corner (a, h, b): `h` runs along the sprite's length, (a, b) across.
+      const corner = (a: number, h: number, b: number): void => {
+        if (axis === 'x') this.positions.push(bx + h, by + a, bz + b);
+        else if (axis === 'z') this.positions.push(bx + a, by + b, bz + h);
+        else this.positions.push(bx + a, by + h, bz + b);
+      };
+      corner(x1, 0, z1); corner(x2, 0, z2); corner(x1, 1, z1); corner(x2, 1, z2);
       for (let i = 0; i < 4; i++) {
         this.colors.push(tint[0], tint[1], tint[2]);
         this.lights.push(skyL / 15, blockL / 15);
-        // Rooted: only the two top corners (i = 2, 3) sway in the wind.
-        this.info.push(SurfaceKind.Plant, emission, i >= 2 ? 1 : 0);
+        // Rooted: only the two top corners (i = 2, 3) sway in the wind, and
+        // nothing strung sideways sways at all.
+        this.info.push(SurfaceKind.Plant, emission, i >= 2 && !axis ? 1 : 0);
       }
       this.uvs.push(u0, v0, u1, v0, u0, v1, u1, v1);
       this.indices.push(
@@ -260,7 +263,7 @@ export function buildChunkGeometry(
           opaque.cross(
             x, y, z, atlas.uvRect(info.side),
             info.tint ? tintFor(info.tint) : WHITE,
-            light.sky(wx, y, wz), light.block(wx, y, wz), info.emission / 15
+            light.sky(wx, y, wz), light.block(wx, y, wz), info.emission / 15, info.axis
           );
           continue;
         }

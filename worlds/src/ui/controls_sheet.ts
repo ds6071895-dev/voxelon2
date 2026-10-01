@@ -17,7 +17,7 @@ function groups(k: Keybinds, touch: boolean): Group[] {
       ] },
       { title: 'Fighting & building', binds: [
         ['Fire / attack / break', [['FIRE'], ['HIT'], ['BREAK']], 'drag to aim'], ['Place block / use', [['PLACE'], ['USE']]],
-        ['Shoot the bow', [['SHOOT']], 'The Bridge'], ['Back to checkpoint', [['RETRY']], 'Parkour'],
+        ['Shoot the bow', [['SHOOT']], 'The Bridge'],
         ['Look around', [['drag the world']]], ['Quick use', [['tap the world']]],
         ['Aim down sights', [['AIM']], 'Duels'], ['Reload', [['R']], 'Duels'],
       ] },
@@ -37,7 +37,6 @@ function groups(k: Keybinds, touch: boolean): Group[] {
       ['Aim down sights', [['Right click']], 'hold, with the rifle (Duels)'],
       ['Reload', [[keyLabel(k.reload)]], 'Duels'],
       ['Shoot the bow', [['Right click']], 'The Bridge'],
-      ['Back to your checkpoint', [[keyLabel(k.reload)]], 'Parkour'],
     ] },
     { title: 'Items', binds: [['Hotbar slot', [['1'], ['9'], ['scroll']]]] },
     { title: 'Screens', binds: [

@@ -115,6 +115,8 @@ export class NetClient {
     dx: number; dy: number; dz: number; speed: number; power: number }) => void;
   onPgArrowEnd?: (id: number, x: number, y: number, z: number, hit: boolean) => void;
   onPgResult?: (result: PartyResult) => void;
+  onPgDragon?: (front: number, speed: number, at: number) => void;
+  onPgFireball?: (f: Extract<ServerMsg, { t: 'pgFireball' }>) => void;
   onRsArena?: (world: WorldSpec, role: RsRole, spawn: { x: number; y: number; z: number }, yaw: number) => void;
   onRsState?: (s: RsSnapshot) => void;
   onRsKit?: (slots: (ItemStack | null)[], selected?: number) => void;
@@ -263,6 +265,8 @@ export class NetClient {
       case 'pgArrow': this.onPgArrow?.(msg); break;
       case 'pgArrowEnd': this.onPgArrowEnd?.(msg.id, msg.x, msg.y, msg.z, msg.hit); break;
       case 'pgResult': this.onPgResult?.(msg.result); break;
+      case 'pgDragon': this.onPgDragon?.(msg.front, msg.speed, msg.at); break;
+      case 'pgFireball': this.onPgFireball?.(msg); break;
       case 'rsArena':
         this.enterWorld(msg.world.id, undefined);
         this.onRsArena?.(msg.world, msg.role, msg.spawn, msg.yaw);
@@ -345,7 +349,6 @@ export class NetClient {
   sendUseHeal(item: number): void { this.send({ t: 'useHeal', item }); }
   sendPgMelee(target: number): void { this.send({ t: 'pgMelee', target }); }
   sendPgShoot(dx: number, dy: number, dz: number, power: number): void { this.send({ t: 'pgShoot', dx, dy, dz, power }); }
-  sendPgRetry(): void { this.send({ t: 'pgRetry' }); }
   sendRsUse(slot: number, block?: { x: number; y: number; z: number; nx: number; ny: number; nz: number }): void {
     this.send({ t: 'rsUse', slot, block });
   }

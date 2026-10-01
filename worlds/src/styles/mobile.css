@@ -59,3 +59,6 @@ html.touch-ui, .touch-ui body { touch-action:auto; }
 @media (orientation:portrait) {
   .touch-ui .rs-actionbar { top:calc(120px + var(--safe-top)); }
 }
+.touch-ui .pg-track { top:calc(34px + var(--safe-top)); width:min(60vw, 360px); height:8px; }
+.touch-ui .pg-hud[data-mode="parkour"] .pg-call { top:calc(52px + var(--safe-top)); }
+.touch-ui .pg-done { right:12px; bottom:auto; top:calc(80px + var(--safe-top)); }

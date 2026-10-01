@@ -15,7 +15,6 @@ export interface TouchState {
   /** Contextual primary action: gun, melee, bow, building or item use. */
   action?: 'attack' | 'use' | 'build' | 'interact' | 'none';
   label?: string;
-  retry?: boolean;
   /** Changing a slot or mode must release actions held for the old item. */
   context?: string;
 }
@@ -32,7 +31,6 @@ export class TouchControls {
   private aim: HTMLButtonElement;
   private reload: HTMLButtonElement;
   private sneak: HTMLButtonElement;
-  private retry: HTMLButtonElement;
   private state: TouchState = { shown: false, playing: false, gun: false };
   private resets: (() => void)[] = [];
   private actionResets: (() => void)[] = [];
@@ -132,8 +130,6 @@ export class TouchControls {
     this.tap(this.aim, () => this.setAim(!this.aimOn));
     this.reload = this.button('t-reload', 'R', 'Reload');
     this.tap(this.reload, () => { input.reloadPressed = true; });
-    this.retry = this.button('t-retry', 'RETRY', 'Return to checkpoint');
-    this.tap(this.retry, () => { input.reloadPressed = true; });
     const pause = this.button('t-pause', iconSvg('pause'), 'Pause', this.root);
     this.tap(pause, cb.onPause, false);
 
@@ -171,7 +167,6 @@ export class TouchControls {
     this.secondary.textContent = s.action === 'interact' ? 'HIT' : 'BREAK';
     this.secondary.setAttribute('aria-label', s.action === 'interact' ? 'Catch rat' : 'Break block');
     this.aim.hidden = this.reload.hidden = !s.gun;
-    this.retry.hidden = !s.retry;
   }
 
   private dragLook(dx: number, dy: number): void {

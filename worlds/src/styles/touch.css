@@ -18,7 +18,6 @@
 .t-sneak { left:var(--edge-l); bottom:calc(var(--edge-b) + 228px); font-size:22px; }
 .t-aim, .t-secondary { right:var(--edge-r); bottom:calc(var(--edge-b) + 184px); }
 .t-reload { right:calc(var(--edge-r) + 20px); bottom:calc(var(--edge-b) + 248px); }
-.t-retry { left:var(--edge-l); top:var(--edge-t); width:56px; border-radius:14px; }
 .t-pause { right:var(--edge-r); top:var(--edge-t); border-radius:12px; font-size:22px; }
 @media (orientation:landscape) {
   .t-stick { bottom:calc(var(--edge-b) + 72px); }

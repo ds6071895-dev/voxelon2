@@ -4,9 +4,7 @@ import {
   BRIDGE_GOAL_RESET_MS, PARTY_COUNTDOWN_MS, PARTY_FLOOR_Y,
   bridgeCageSpawn, bridgeSpawn, parkourCourse, type PartyLobbySnapshot,
 } from './partygames';
-import {
-  BLINK_WARN_MS, blinkSolid, blinkWarning, COLLAPSE_GRACE_MS, parkourCollapseFront, parkourVoidY,
-} from './parkour_mechanics';
+import { BLINK_WARN_MS, blinkSolid, blinkWarning } from './parkour_mechanics';
 
 /** The unit torus (tube included) is scaled by the marker radius. */
 const RING_TUBE = .08;
@@ -126,7 +124,6 @@ export class PartyVisuals {
     if (round.game === 'parkour') {
       const course = parkourCourse(sub.seed), next = (mine?.progress ?? 0) + 1;
       const t = s.phase === 'running' ? now - round.startedAt : -1;
-      const { mode } = course.variant;
       let rings = 0, boxes = 0;
       const centre = (p: typeof course.platforms[number]) => ({
         x: Math.floor(p.x - p.width / 2) + p.width / 2, z: Math.floor(p.z - p.depth / 2) + p.depth / 2,
@@ -163,20 +160,6 @@ export class PartyVisuals {
             box(boxes++, x, p.y - .5, z, p.width + .08, 1.08, p.depth + .08, 0xff5a6e, (Math.floor(now / 90) % 2) ? .55 : .15);
           else if (!blinkSolid(p.group, t))
             box(boxes++, x, p.y - .5, z, p.width, 1, p.depth, 0x7bffb0, blinkSolid(p.group, t + BLINK_WARN_MS) ? .3 : .08);
-        }
-      }
-      if (mode === 'void' && t >= 0) {
-        // The void: a sheet across the whole venue at the kill height.
-        const y = parkourVoidY(course, t), w = sub.maxX - sub.minX, l = sub.maxZ - sub.minZ;
-        box(boxes++, w / 2, y, l / 2, w + 40, .06, l + 40, 0x3a1450, .75);
-        box(boxes++, w / 2, y + .4 + .15 * Math.sin(now / 300), l / 2, w + 40, .04, l + 40, 0xb04cff, .25);
-      }
-      if (mode === 'collapse' && t >= COLLAPSE_GRACE_MS) {
-        // The collapse front: a curtain across the route at the pad it has reached.
-        const front = parkourCollapseFront(t), step = course.steps[Math.min(course.steps.length - 1, Math.floor(front))]?.[0];
-        if (step) {
-          const { x, z } = centre(step);
-          box(boxes++, x, step.y - 3, z, step.width + 6, 12, step.depth + 6, 0xff6a3a, .12 + .06 * pulse);
         }
       }
       return;

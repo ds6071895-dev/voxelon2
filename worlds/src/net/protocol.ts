@@ -120,7 +120,6 @@ export type ClientMsg =
   // The Bridge / Parkour.
   | { t: 'pgMelee'; target: number }
   | { t: 'pgShoot'; dx: number; dy: number; dz: number; power: number }
-  | { t: 'pgRetry' }
   // Rat and Seek: right-click with a hotbar slot (on a block, if one is under
   // the crosshair), a left-click on a body or a decoy, and a class pick.
   | { t: 'rsUse'; slot: number; block?: { x: number; y: number; z: number; nx: number; ny: number; nz: number } }
@@ -183,6 +182,12 @@ export type ServerMsg =
       dx: number; dy: number; dz: number; speed: number; power: number }
   | { t: 'pgArrowEnd'; id: number; x: number; y: number; z: number; hit: boolean }
   | { t: 'pgResult'; result: PartyResult }
+  /** Parkour: where the dragon has got to (a course order), as of server time `at`. */
+  | { t: 'pgDragon'; front: number; speed: number; at: number }
+  /** Parkour: the dragon breathes. The fireball leaves its jaws at `launchAt`
+   *  and comes down on (tx, ty, tz) at `landAt` (server clock). */
+  | { t: 'pgFireball'; id: number; x: number; y: number; z: number; tx: number; ty: number; tz: number;
+      launchAt: number; landAt: number }
   // Rat and Seek.
   | { t: 'rsArena'; world: WorldSpec; role: RsRole; spawn: { x: number; y: number; z: number }; yaw: number }
   | { t: 'rsState'; s: RsSnapshot }

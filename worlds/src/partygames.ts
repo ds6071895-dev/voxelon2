@@ -10,25 +10,24 @@
 import { Block } from './blocks';
 import { meleeSwing, type SwingInput, type SwingResult } from './melee';
 import { PARKOUR_THEMES } from './parkour_themes';
+import { encodeParkourSeed, parkourCourse, parkourStandSpot, type SetPieceId } from './parkour_course';
 import {
-  PARKOUR_MODES, PARKOUR_MODE_LAYOUTS, encodeParkourSeed, parkourCourse,
-  type ParkourLayout, type ParkourMode,
-} from './parkour_course';
-import {
-  COLLAPSE_LIVES, COLLAPSE_RESPAWN_LEAD, parkourCollapseFront, parkourVoidY,
+  DRAGON_GRACE_MS, DRAGON_IMMUNE_MS, DRAGON_LAIR_FRONT, DRAGON_LIVES, DRAGON_RESPAWN_LEAD, DRAGON_SURGE,
+  DRAGON_SURGE_GAP, dragonBaseSpeed,
 } from './parkour_mechanics';
+import { parkourVenue, type ParkourVenue } from './parkour_setpieces';
 
-export const PARTY_FLOOR_Y = 140;
+import { PARKOUR_VENUE_X, PARKOUR_VENUE_Z, PARTY_FLOOR_Y, PARTY_STAMP_MAX_Y, PARTY_STAMP_MIN_Y } from './venue_dims';
+
+export { PARTY_FLOOR_Y, PARTY_STAMP_MAX_Y, PARTY_STAMP_MIN_Y };
 export const PARTY_VOID_Y = 118;
 export const PARTY_CEILING_Y = 190;
-export const PARTY_STAMP_MIN_Y = 120;
-export const PARTY_STAMP_MAX_Y = 190;
 export const PARTY_MAX_HEALTH = 20;
 export const PARTY_AMBIENT_LIGHT = 0.8;
 /** The Bridge is strictly 1v1: a duel over a one-block span, where a second
  *  body on your own side has nowhere to stand and nothing to do. */
 const BRIDGE_CAPACITY = 2;
-/** A Parkour race from matchmaking is 1v1; a party can bring up to four. */
+/** Parkour from matchmaking is two runners; a party can bring up to four. */
 const PARKOUR_QUEUE_CAPACITY = 2;
 const PARKOUR_PARTY_CAPACITY = 4;
 const PARTY_MIN_PLAYERS = 2;
@@ -125,9 +124,11 @@ const PARTY_GAME_DEFS: readonly PartyGameDef[] = [
     durationMs: 480_000, sizeX: 24, sizeZ: 80,
   },
   {
-    id: 'parkour', title: 'PARKOUR DUEL',
-    rule: 'One straight line of jumps, walls, tunnels and gaps. Checkpoints are rare. Sprint, jump, do not look down.',
-    durationMs: 420_000, sizeX: 32, sizeZ: 448,
+    id: 'parkour', title: 'DRAGON CHASE',
+    rule: 'Outrun the dragon to the end. Three lives. Everyone who makes it wins.',
+    // No clock on the HUD: the dragon only ever speeds up, so every run ends.
+    // This is a failsafe, never a rule anybody plays against.
+    durationMs: 1_200_000, sizeX: PARKOUR_VENUE_X, sizeZ: PARKOUR_VENUE_Z,
   },
 ];
 export function partyGame(id: PartyGameId): PartyGameDef {
@@ -519,38 +520,20 @@ export function bridgeGoalGuard(lx: number, lz: number): boolean {
 }
 
 // ── Parkour ────────────────────────────────────────────────────────────────
-// The course itself — mode, layout, deck, and every pad — is generated in
-// parkour_course.ts; its moving parts live in parkour_mechanics.ts. This file
-// only stamps it into the venue and keeps score.
+// The route — every pad — is generated in parkour_course.ts, the builds round
+// it in parkour_setpieces.ts, and the moving parts (the dragon among them) in
+// parkour_mechanics.ts. This file stamps the venue and keeps the score.
 
 export {
   parkourCourse, parkourNext, parkourLength, parkourVariant,
-  type ParkourCourse, type ParkourPlatform, type ParkourJump, type ParkourMode,
+  type ParkourCourse, type ParkourPlatform, type ParkourJump,
 } from './parkour_course';
 
-const PARKOUR_SIZE_X = 32;
-const PARKOUR_SIZE_Z = 448;
-/** Rubber band for a runaway lead. A racer this many platforms behind the
- *  leader saves progress on EVERY pad they land, so a fall costs one jump, not
- *  a whole leg. Nobody is moved forward for free — every jump is still theirs
- *  to make — and it switches off the moment the gap closes. */
-const PARKOUR_CATCHUP_GAP = 8;
-
-/** True while `p` is far enough behind the field to get catch-up checkpoints. */
-export function parkourCatchUp(p: { progress: number }, field: Iterable<{ progress: number; connected: boolean }>): boolean {
-  let lead = 0;
-  for (const o of field) if (o.connected && o.progress > lead) lead = o.progress;
-  return lead - p.progress >= PARKOUR_CATCHUP_GAP;
-}
-
-const parkourStampCache = new Map<number, VenueStamp>();
-function parkourStamp(seed: number): VenueStamp {
+const parkourStampCache = new Map<number, ParkourVenue>();
+function parkourStamp(seed: number): ParkourVenue {
   const cached = parkourStampCache.get(seed);
   if (cached) return cached;
-  const s = new VenueStamp(PARKOUR_SIZE_X, PARKOUR_SIZE_Z);
-  for (const c of parkourCourse(seed).cells)
-    if (c.block === Block.Air) s.clear(c.x, c.y, c.z);
-    else s.set(c.x, c.y, c.z, c.block);
+  const s = parkourVenue(seed);
   if (parkourStampCache.size > 24) parkourStampCache.delete(parkourStampCache.keys().next().value!);
   parkourStampCache.set(seed, s);
   return s;
@@ -570,11 +553,17 @@ export function partySpawns(sub: PartySubBounds, members: readonly { team: numbe
     // Side by side across the 5x5 start pad: two racers stand either side of
     // the centre line, a party of four spreads out so nobody spawns inside
     // anybody else.
-    const p = parkourCourse(sub.seed).start;
+    const course = parkourCourse(sub.seed), p = course.start;
     const lanes = members.length <= 2 ? [-.7, .7] : [-1.6, -.55, .55, 1.6];
-    return members.map((_, i) => ({
-      x: sub.minX + p.x + (lanes[i % lanes.length] ?? 0), y: p.y + .01, z: sub.minZ + p.z,
-    }));
+    return members.map((_, i) => {
+      const x = p.x + (lanes[i % lanes.length] ?? 0);
+      // Only ever onto open floor: a lane that meets anything solid moves to
+      // the nearest clear spot on the pad.
+      const cell = Math.floor(x), clear = parkourStandSpot(course, p, { x: cell + .5, z: p.z });
+      const free = Math.floor(clear.x) === cell && Math.floor(clear.z) === Math.floor(p.z);
+      return free ? { x: sub.minX + x, y: p.y + .01, z: sub.minZ + p.z }
+        : { x: sub.minX + clear.x, y: clear.y + .01, z: sub.minZ + clear.z };
+    });
   }
   // The Bridge always opens inside the cages: the first thing either player
   // does is watch the hatch drop out from under them.
@@ -592,7 +581,7 @@ export interface PartyParticipant extends PartyIdentity {
   joinOrder: number;
   /** 0 or 1 on the Bridge; always 0 in Parkour. */
   team: number;
-  /** Goals scored (Bridge) or platforms reached (Parkour). */
+  /** Goals scored (Bridge) or furthest platform reached (Parkour). */
   score: number;
   /** Bridge PvP. A kill is not a goal — it is what buys you the crossing. */
   kills: number;
@@ -603,16 +592,45 @@ export interface PartyParticipant extends PartyIdentity {
   checkpoint: number;
   progress: number;
   falls: number;
-  /** Collapse Chase: falls left before you are out. */
+  /** Parkour: lives left. */
   lives: number;
-  /** Rising Void / Collapse Chase: when this racer was knocked out. */
+  /** Parkour: when this runner lost their last life (or left mid-run). */
   outAt?: number;
   finishedAt?: number;
+  /** Parkour: 1 for the first runner to make it, 2 for the next… */
+  place?: number;
+  /** Parkour: how the last life was lost, for the HUD. */
+  lastLife?: { at: number; cause: ParkourHurt };
+  /** Parkour: a life the server has taken and not yet applied. */
+  hurtCause?: ParkourHurt;
   immuneUntil: number;
   /** Server-owned respawn request: a goal reset, or a fall into the void. */
   pendingSpawn: boolean;
   /** Bridge: dead and spectating until this time. */
   respawnAt?: number;
+}
+
+/** How a Parkour runner can lose a life. */
+export type ParkourHurt = 'fall' | 'dragon' | 'fire' | 'left';
+
+/** The dragon: which course order it has reached, as of server time `at`. */
+export interface PartyDragon { front: number; speed: number; at: number }
+
+/** One runner's line on a Dragon Chase result. */
+export interface ParkourRunnerResult {
+  id: number;
+  username: string;
+  made: boolean;
+  /** 1st, 2nd… to make it. */
+  place?: number;
+  /** Start to finish, ms. */
+  timeMs?: number;
+  livesLeft: number;
+  /** 1 = the first to fall out of the run. */
+  fellOrder?: number;
+  /** Furthest pad reached. */
+  reached: number;
+  left: boolean;
 }
 
 interface PartyRoundState {
@@ -629,6 +647,8 @@ export interface PartyResult {
   teamScores: [number, number];
   scoreboard: PartyParticipant[];
   finishReason: PartyFinishReason;
+  /** Parkour: who made it, and who fell (in the order they fell). */
+  runners?: ParkourRunnerResult[];
 }
 
 export interface PartyLobbySnapshot {
@@ -657,6 +677,8 @@ export interface PartyLobbySnapshot {
   arena?: PartyArenaBounds;
   sub?: PartySubBounds;
   result?: PartyResult;
+  /** Parkour: the dragon. */
+  dragon?: PartyDragon;
 }
 
 interface PartyLobby extends Omit<PartyLobbySnapshot, 'participants' | 'serverNow' | 'sub'> {
@@ -667,11 +689,10 @@ interface PartyLobby extends Omit<PartyLobbySnapshot, 'participants' | 'serverNo
   startedAt?: number;
 }
 
-/** Round order: a finisher first, then whoever lasted longest, then score,
- *  then whoever got there with fewer falls. */
+/** Round order: whoever made it, first finisher first, then whoever lasted
+ *  longest, then score, then whoever got there with fewer falls. */
 function orderPartyRound(ps: Iterable<PartyParticipant>): PartyParticipant[] {
   return [...ps].sort((a, b) =>
-    Number(b.connected) - Number(a.connected) ||
     (a.finishedAt ?? Infinity) - (b.finishedAt ?? Infinity) ||
     (b.outAt ?? Infinity) - (a.outAt ?? Infinity) ||
     b.score - a.score || a.falls - b.falls || a.joinOrder - b.joinOrder);
@@ -693,12 +714,10 @@ export class PartyGamesEngine {
   private readonly lobbyByPlayer = new Map<number, PartyLobby>();
   private nextId = 1;
   private seedCounter = 0;
-  /** What each player raced last, so the next match is never the same kind
-   *  of match: not the same mode, not the same layout, not the same world. */
-  private readonly lastParkour = new Map<number, { theme: number; mode: ParkourMode; layout: ParkourLayout }>();
+  /** What each player ran last, so the next course is somewhere else and
+   *  built from other set pieces. */
+  private readonly lastParkour = new Map<number, { theme: number; pieces: SetPieceId[] }>();
   private themeBag: number[] = [];
-  private modeBag: ParkourMode[] = [];
-  private readonly layoutBags = new Map<ParkourMode, ParkourLayout[]>();
   constructor(private readonly tokenFactory: () => string) { }
 
   private static blank(identity: PartyIdentity, joinOrder: number): PartyParticipant {
@@ -776,7 +795,16 @@ export class PartyGamesEngine {
     l.host = remaining[0].id;
     if (l.phase === 'lobby') for (const v of l.participants.values()) v.ready = false;
     if (l.phase === 'lobby') this.assignTeams(l);
-    if (remaining.length < 2 && l.phase !== 'lobby' && l.phase !== 'results')
+    if (l.mode === 'parkour' && (l.phase === 'running' || l.phase === 'countdown')) {
+      // Nobody forfeits a Dragon Chase: a runner who walks away mid-run is
+      // simply out of it, and one who already made it stays made it.
+      if (p.finishedAt === undefined && p.outAt === undefined) {
+        p.outAt = now;
+        p.lastLife = { at: now, cause: 'left' };
+      }
+      if (l.phase === 'running') this.checkParkourEnd(l, now);
+      else this.arm(l, now);
+    } else if (remaining.length < 2 && l.phase !== 'lobby' && l.phase !== 'results')
       // The side still standing takes it. (The Bridge reads its winner by team.)
       this.finish(l, now, remaining[0].id, 'forfeit', l.mode === 'bridge' ? remaining[0].team : null);
     else if (l.phase === 'countdown') this.arm(l, now);
@@ -802,6 +830,7 @@ export class PartyGamesEngine {
     for (const c of this.tokenFactory()) seed = partyHash(seed, c.charCodeAt(0));
     if (l.mode === 'parkour') {
       const last = [...l.participants.keys()].map((v) => this.lastParkour.get(v));
+      const recent = new Set(last.flatMap((v) => v?.pieces ?? []));
       /** Shuffle-bag draw: every option comes round before any repeats, and
        *  nothing either racer just played is drawn while anything else is left. */
       const drawFrom = <T>(bag: T[], all: readonly T[], excluded: Set<T | undefined>): T => {
@@ -811,12 +840,17 @@ export class PartyGamesEngine {
         return next >= 0 ? bag.splice(next, 1)[0] : all.find((t) => !excluded.has(t)) ?? bag.splice(0, 1)[0];
       };
       const theme = drawFrom(this.themeBag, PARKOUR_THEMES.map((_, i) => i), new Set(last.map((v) => v?.theme)));
-      const mode = drawFrom(this.modeBag, PARKOUR_MODES, new Set(last.map((v) => v?.mode)));
-      let layouts = this.layoutBags.get(mode);
-      if (!layouts) this.layoutBags.set(mode, layouts = []);
-      const layout = drawFrom(layouts, PARKOUR_MODE_LAYOUTS[mode], new Set(last.map((v) => v?.layout)));
-      seed = encodeParkourSeed(seed, theme, mode, layout);
-      for (const v of l.participants.keys()) this.lastParkour.set(v, { theme, mode, layout });
+      // Of a few candidate courses, the one sharing fewest set pieces with
+      // what these runners just ran.
+      let best = encodeParkourSeed(seed, theme), overlap = Infinity;
+      for (let k = 0; k < 4 && overlap > 0 && recent.size; k++) {
+        const candidate = encodeParkourSeed(partyHash(seed, 0x51ce + k), theme);
+        const n = parkourCourse(candidate).variant.pieces.filter((v) => recent.has(v)).length;
+        if (n < overlap) { overlap = n; best = candidate; }
+      }
+      seed = best;
+      const pieces = parkourCourse(seed).variant.pieces;
+      for (const v of l.participants.keys()) this.lastParkour.set(v, { theme, pieces });
     }
     l.arena = partyArenaBounds(l.mode, seed);
     l.result = undefined;
@@ -838,13 +872,14 @@ export class PartyGamesEngine {
     l.teamScores = [0, 0];
     const game = partyGame(l.mode);
     l.round = { game: game.id, startedAt: 0, endsAt: 0, revision: l.revision };
-    const lives = l.mode === 'parkour' && l.arena && parkourCourse(l.arena.seed).variant.mode === 'collapse'
-      ? COLLAPSE_LIVES : 0;
+    const lives = l.mode === 'parkour' ? DRAGON_LIVES : 0;
+    l.dragon = l.mode === 'parkour' ? { front: DRAGON_LAIR_FRONT, speed: 0, at: now } : undefined;
     for (const p of l.participants.values())
       Object.assign(p, {
         score: 0, kills: 0, deaths: 0, lastHitBy: undefined, lastHitAt: 0,
         progress: 0, checkpoint: 0, falls: 0, lives, outAt: undefined,
         finishedAt: undefined, immuneUntil: 0, pendingSpawn: false, respawnAt: undefined,
+        place: undefined, lastLife: undefined, hurtCause: undefined,
       });
   }
 
@@ -879,6 +914,8 @@ export class PartyGamesEngine {
       } else if (l.phase === 'running' && now >= l.round!.endsAt) {
         this.endMatch(l, now);
         dirty = true;
+      } else if (l.phase === 'running' && l.dragon) {
+        this.flyDragon(l, now);
       } else if (l.phase === 'results' && now >= l.resultDeadline!) {
         l.phase = 'lobby';
         this.release(l);
@@ -940,6 +977,13 @@ export class PartyGamesEngine {
    *  Returned spawn is an authoritative reset, never a client claim. */
   evaluate(id: number, pos: PartyVec3, now: number): { spawn?: PartyVec3; changed: boolean; killedBy?: number } {
     const l = this.lobbyByPlayer.get(id), p = l?.participants.get(id);
+    if (l?.mode === 'parkour' && l.arena && p?.finishedAt !== undefined && p.place !== undefined && l.phase === 'running') {
+      // Made it, and wandered off the podium: back up onto your step.
+      const course = parkourCourse(l.arena.seed), spot = course.podium[Math.min(course.podium.length - 1, p.place - 1)];
+      const sub = this.subFor(id)!;
+      if (pos.y < course.finish.y - 6) return { spawn: { x: sub.minX + spot.x, y: spot.y + .01, z: sub.minZ + spot.z }, changed: false };
+      return { changed: false };
+    }
     if (!l || !p || l.phase !== 'running' || !l.round || !l.arena || !p.connected ||
       p.finishedAt !== undefined || p.outAt !== undefined || now >= l.round.endsAt) return { changed: false };
     const sub = this.subFor(id)!;
@@ -1003,71 +1047,109 @@ export class PartyGamesEngine {
 
   private evaluateParkour(l: PartyLobby, p: PartyParticipant, sub: PartySubBounds, pos: PartyVec3, now: number):
     { spawn?: PartyVec3; changed: boolean } {
-    const course = parkourCourse(sub.seed), mode = course.variant.mode;
-    const t = now - l.round!.startedAt;
+    const course = parkourCourse(sub.seed), last = course.steps.length - 1;
     const at = (order: number): PartyVec3 => {
-      const base = course.steps[Math.max(0, Math.min(order, course.steps.length - 1))][0];
-      return { x: sub.minX + base.x, y: base.y + .01, z: sub.minZ + base.z };
+      const spot = parkourStandSpot(course, course.steps[Math.max(0, Math.min(order, last))][0]);
+      return { x: sub.minX + spot.x, y: spot.y + .01, z: sub.minZ + spot.z };
     };
-    /** Knocked out: no more spawns, and the match ends once one is left. */
-    const out = (): { changed: boolean } => {
-      p.outAt = now;
-      p.pendingSpawn = false;
-      const alive = [...l.participants.values()].filter((v) => v.connected && v.outAt === undefined);
-      if (alive.length <= 1) this.endMatch(l, now);
-      return { changed: true };
-    };
-    const reset = (): { spawn?: PartyVec3; changed: boolean } => {
+    /** A life gone: out of the run on the last one, otherwise back on the
+     *  course — at your checkpoint, or clear ahead of the dragon if it has
+     *  already passed that. */
+    const lose = (cause: ParkourHurt): { spawn?: PartyVec3; changed: boolean } => {
       p.falls++;
-      p.immuneUntil = now + 1400;
       p.pendingSpawn = false;
-      if (mode === 'collapse') {
-        // A fall costs a life and puts you back just ahead of the front —
-        // or at your own progress, if you were never caught up by it.
-        if (--p.lives <= 0) return out();
-        const front = Math.floor(parkourCollapseFront(t));
-        const back = Math.max(p.checkpoint, front + COLLAPSE_RESPAWN_LEAD);
-        if (back >= course.steps.length - 1) return out();
-        p.progress = p.checkpoint = back;
-        p.score = Math.max(p.score, p.progress);
-        return { spawn: at(p.progress), changed: true };
+      p.hurtCause = undefined;
+      p.lastLife = { at: now, cause };
+      if (--p.lives <= 0) {
+        p.lives = 0;
+        p.outAt = now;
+        this.checkParkourEnd(l, now);
+        return { changed: true };
       }
-      if (mode === 'void') {
-        // The saved pad has to still be above the void to stand on.
-        const base = course.steps[p.checkpoint][0];
-        if (base.y < parkourVoidY(course, t) + 1.5) return out();
+      let back = p.checkpoint;
+      const safe = Math.ceil(l.dragon?.front ?? DRAGON_LAIR_FRONT) + DRAGON_RESPAWN_LEAD;
+      if (safe > back) {
+        back = safe;
+        for (let o = safe; o <= Math.min(last - 1, safe + 4); o++)
+          if (course.steps[o]?.[0]?.checkpoint) { back = o; break; }
       }
-      p.progress = p.checkpoint;
-      return { spawn: at(p.checkpoint), changed: true };
+      back = Math.max(0, Math.min(back, last - 1));
+      p.progress = p.checkpoint = back;
+      p.score = Math.max(p.score, p.progress);
+      p.immuneUntil = now + DRAGON_IMMUNE_MS;
+      return { spawn: at(back), changed: true };
     };
-    if (p.pendingSpawn) return reset();
-    // A tower is tall: a fall well past the pads you were jumping between is
-    // a fall, even though there is still a long way to the bottom of it.
+    if (p.pendingSpawn) return lose(p.hurtCause ?? 'fall');
     const here = course.steps[p.progress]?.[0], ahead = course.steps[p.progress + 1]?.[0];
-    // Credit the surface actually reached. A racer can jump past a pad or
-    // build around it; requiring every intermediate order used to leave all
-    // later checkpoints inert for the rest of that run.
+    // Credit the surface actually reached. A runner can jump past a pad or
+    // build around it; requiring every intermediate order would leave later
+    // checkpoints inert for the rest of that run.
     const landed = course.platforms.find(pad => pad.order > p.progress &&
       Math.abs(pos.x - sub.minX - pad.x) < pad.width / 2 + .35 &&
       Math.abs(pos.z - sub.minZ - pad.z) < pad.depth / 2 + .35 &&
       Math.abs(pos.y - pad.y) < .35 &&
-      (pad.order < course.steps.length - 1 || pad.order === p.progress + 1));
-    const floor = Math.min(here?.y ?? Infinity, ahead?.y ?? Infinity) - 8;
-    if (pos.y < PARTY_VOID_Y || pos.y < course.lowY - 5 || (pos.y < floor && !landed)) return reset();
-    if (mode === 'void' && pos.y < parkourVoidY(course, t)) return reset();
+      (pad.order < last || pad.order === p.progress + 1));
+    // Every jump lands on its pad, so anything well below the lower of the
+    // pad you left and the pad you are heading for is off the course — the
+    // street, the moat, a lap further down the tree.
+    const floor = Math.min(here?.y ?? Infinity, ahead?.y ?? Infinity) - 2.5;
+    if (pos.y < PARTY_VOID_Y || (pos.y < floor && !landed)) return lose('fall');
     if (landed) {
-      // Checked before the step, against the lead as it stood when they jumped.
-      const trailing = parkourCatchUp(p, l.participants.values());
       p.progress = landed.order;
       p.score = Math.max(p.score, p.progress);
-      if (landed.checkpoint || trailing) p.checkpoint = p.progress;
-      if (p.progress === course.steps.length - 1) {
+      if (landed.checkpoint) p.checkpoint = p.progress;
+      if (p.progress === last) {
+        // Made it: up onto the podium, safe from everything.
         p.finishedAt = now;
-        this.endMatch(l, now);
+        p.place = [...l.participants.values()].filter((v) => v.finishedAt !== undefined).length;
+        p.immuneUntil = Infinity;
+        const spot = course.podium[Math.min(course.podium.length - 1, p.place - 1)];
+        this.checkParkourEnd(l, now);
+        return { spawn: { x: sub.minX + spot.x, y: spot.y + .01, z: sub.minZ + spot.z }, changed: true };
       }
       return { changed: true };
     }
     return { changed: false };
+  }
+
+  /** Take a life off a Parkour runner (the dragon's jaws or its fire). The
+   *  next evaluation applies it. False when they cannot be hurt right now. */
+  hurt(id: number, cause: ParkourHurt, now: number): boolean {
+    const l = this.lobbyByPlayer.get(id), p = l?.participants.get(id);
+    if (!l || !p || l.mode !== 'parkour' || l.phase !== 'running' || !p.connected || p.pendingSpawn ||
+      p.finishedAt !== undefined || p.outAt !== undefined || now < p.immuneUntil) return false;
+    p.pendingSpawn = true;
+    p.hurtCause = cause;
+    return true;
+  }
+
+  /** The dragon flies on: slowly out of the lair, a little faster every
+   *  second, and faster still while everyone is well clear of it. Anybody it
+   *  has overtaken on the course is caught. */
+  private flyDragon(l: PartyLobby, now: number): void {
+    const d = l.dragon!, course = parkourCourse(l.arena!.seed), last = course.steps.length - 1;
+    const t = now - l.round!.startedAt - DRAGON_GRACE_MS;
+    const dt = Math.max(0, Math.min(.5, (now - d.at) / 1000));
+    d.at = now;
+    if (t < 0) { d.front = DRAGON_LAIR_FRONT; d.speed = 0; return; }
+    let rear = Infinity;
+    for (const p of l.participants.values())
+      if (p.connected && p.outAt === undefined && p.finishedAt === undefined) rear = Math.min(rear, p.progress);
+    const base = dragonBaseSpeed(t / 1000);
+    d.speed = Number.isFinite(rear) && rear - d.front > DRAGON_SURGE_GAP ? base * DRAGON_SURGE : base;
+    // It never follows anybody into the sanctuary.
+    d.front = Math.min(last - .6, d.front + d.speed * dt);
+    for (const p of l.participants.values()) {
+      if (!p.connected || p.outAt !== undefined || p.finishedAt !== undefined || p.pendingSpawn || now < p.immuneUntil) continue;
+      if (d.front >= p.progress + .6) { p.pendingSpawn = true; p.hurtCause = 'dragon'; }
+    }
+  }
+
+  /** A Dragon Chase ends when nobody is left running. */
+  private checkParkourEnd(l: PartyLobby, now: number): void {
+    if (l.phase !== 'running') return;
+    const running = [...l.participants.values()].some((v) => v.connected && v.outAt === undefined && v.finishedAt === undefined);
+    if (!running) this.endMatch(l, now);
   }
 
   private endMatch(l: PartyLobby, now: number): void {
@@ -1080,10 +1162,8 @@ export class PartyGamesEngine {
       this.finish(l, now, best, 'complete', team);
       return;
     }
-    const board = orderPartyRound(l.participants.values());
-    const tied = board[0].score === board[1]?.score && board[0].falls === board[1]?.falls &&
-      !board[0].finishedAt && board[0].outAt === board[1]?.outAt;
-    this.finish(l, now, tied ? null : board[0].id, 'complete');
+    // Nobody wins a Dragon Chase: you made it, or you did not.
+    this.finish(l, now, null, 'complete');
   }
 
   private finish(l: PartyLobby, now: number, winner: number | null, reason: PartyFinishReason, winnerTeam: number | null = null): void {
@@ -1099,7 +1179,26 @@ export class PartyGamesEngine {
       winner, winnerTeam, teamScores,
       scoreboard: board.map((p) => ({ ...p })),
       finishReason: reason,
+      runners: l.mode === 'parkour' ? this.parkourRunners(l) : undefined,
     };
+  }
+
+  private parkourRunners(l: PartyLobby): ParkourRunnerResult[] {
+    const ps = [...l.participants.values()];
+    const fell = ps.filter((p) => p.finishedAt === undefined).sort((a, b) =>
+      (a.outAt ?? Infinity) - (b.outAt ?? Infinity) || a.score - b.score || a.joinOrder - b.joinOrder);
+    const made = ps.filter((p) => p.finishedAt !== undefined).sort((a, b) => a.finishedAt! - b.finishedAt!);
+    const started = l.round?.startedAt ?? 0;
+    return [
+      ...made.map((p, i): ParkourRunnerResult => ({
+        id: p.id, username: p.username, made: true, place: i + 1, timeMs: p.finishedAt! - started,
+        livesLeft: p.lives, reached: p.score, left: !p.connected,
+      })),
+      ...fell.map((p, i): ParkourRunnerResult => ({
+        id: p.id, username: p.username, made: false, fellOrder: i + 1, livesLeft: 0,
+        reached: p.score, left: p.lastLife?.cause === 'left',
+      })),
+    ];
   }
 
   private release(l: PartyLobby): void {
@@ -1116,7 +1215,7 @@ export class PartyGamesEngine {
       lastGoal: l.lastGoal, lastKill: l.lastKill,
       round: l.round ? { ...l.round } : undefined, arena: l.arena,
       sub: l.arena && l.round ? partySubBounds(l.mode, l.arena.seed) : undefined,
-      result: l.result,
+      result: l.result, dragon: l.dragon ? { ...l.dragon } : undefined,
     };
   }
 
@@ -1133,7 +1232,7 @@ export class PartyGamesEngine {
       lastGoal: l.lastGoal, lastKill: l.lastKill,
       round: l.round, arena: l.arena,
       sub: l.arena && l.round ? partySubBounds(l.mode, l.arena.seed) : undefined,
-      result: l.result,
+      result: l.result, dragon: l.dragon,
     };
   }
 
@@ -1154,6 +1253,7 @@ export class PartyGamesEngine {
     return l?.arena && l.round ? partySubBounds(l.mode, l.arena.seed) : null;
   }
   roundFor(id: number): PartyRoundState | null { return this.lobbyByPlayer.get(id)?.round ?? null; }
+  dragonFor(id: number): Readonly<PartyDragon> | null { return this.lobbyByPlayer.get(id)?.dragon ?? null; }
   participantFor(id: number): PartyParticipant | null { return this.lobbyByPlayer.get(id)?.participants.get(id) ?? null; }
   membersOf(id: number): number[] {
     return [...(this.lobbyByPlayer.get(id)?.participants.values() ?? [])].filter((p) => p.connected).map((p) => p.id);

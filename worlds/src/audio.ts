@@ -630,6 +630,49 @@ export class GameAudio {
     this.tone({ type: 'sine', from: 90, to: 200, dur: 0.3, gain: 0.12 * g, pos });
   }
 
+  // --- Dragon Chase ---------------------------------------------------------
+
+  /** The dragon roars: a growling low sweep under a ragged, rasping breath. */
+  dragonRoar(pos?: THREE.Vector3, gain = 1): void {
+    this.tone({ type: 'sawtooth', from: 150, to: 58, dur: 1.5, gain: 0.16 * gain, attack: 0.12, vibrato: 11, pos });
+    this.tone({ type: 'square', from: 96, to: 44, dur: 1.4, gain: 0.08 * gain, attack: 0.15, vibrato: 7, pos });
+    this.noise({ freq: 700, dur: 1.5, gain: 0.2 * gain, slideTo: 260, type: 'bandpass', q: 0.5, pos });
+    this.noise({ freq: 2400, dur: 1.1, gain: 0.06 * gain, slideTo: 900, type: 'bandpass', q: 0.8, pos, delay: 0.1 });
+  }
+  /** One beat of its wings: a heavy whump. */
+  dragonWing(pos?: THREE.Vector3): void {
+    this.noise({ freq: 260, dur: 0.35, gain: 0.14, slideTo: 90, type: 'lowpass', q: 0.7, pos });
+    this.tone({ type: 'sine', from: 70, to: 38, dur: 0.3, gain: 0.08, pos });
+  }
+  /** It breathes: an intake, then the fireball leaves with a roaring whoosh. */
+  dragonBreath(pos?: THREE.Vector3): void {
+    this.noise({ freq: 500, dur: 0.4, gain: 0.07, slideTo: 1800, type: 'bandpass', q: 0.6, pos });
+    this.noise({ freq: 1600, dur: 0.9, gain: 0.16, slideTo: 300, type: 'bandpass', q: 0.45, delay: 0.42, pos });
+    this.tone({ type: 'sawtooth', from: 120, to: 70, dur: 0.6, gain: 0.07, delay: 0.42, vibrato: 14, pos });
+  }
+  /** A fireball comes down. */
+  fireballImpact(pos?: THREE.Vector3, near = false): void {
+    const g = near ? 1 : .6;
+    this.tone({ type: 'sine', from: 120, to: 32, dur: 0.6, gain: 0.3 * g, pos });
+    this.noise({ freq: 900, dur: 0.7, gain: 0.22 * g, slideTo: 140, type: 'lowpass', q: 0.8, pos });
+    this.noise({ freq: 3000, dur: 0.45, gain: 0.07 * g, slideTo: 800, type: 'bandpass', q: 0.9, pos, delay: 0.05 });
+  }
+  /** You lost a life. */
+  lifeLost(out: boolean): void {
+    this.tone({ type: 'sine', from: 160, to: 36, dur: 0.55, gain: 0.24 });
+    this.noise({ freq: 2400, dur: 0.3, gain: 0.08, slideTo: 400, type: 'bandpass', q: 0.8 });
+    (out ? [392, 311.1, 261.6, 196] : [523.3, 392]).forEach((f, i) =>
+      this.tone({ type: 'triangle', from: f, to: f * 0.97, dur: out ? 0.4 : 0.26, gain: 0.08, delay: 0.08 + i * 0.14 }));
+  }
+  /** You made it. */
+  madeIt(): void {
+    [523.3, 659.3, 784, 1046.5, 1318.5].forEach((f, i) => {
+      this.tone({ type: 'triangle', from: f, to: f, dur: i === 4 ? 0.9 : 0.16, gain: 0.09, delay: i * 0.1 });
+      this.tone({ type: 'sine', from: f * 2, to: f * 2, dur: i === 4 ? 0.8 : 0.12, gain: 0.03, delay: i * 0.1 });
+    });
+    this.noise({ freq: 6000, dur: 1.2, gain: 0.05, slideTo: 3000, type: 'highpass', q: 0.5, delay: 0.3 });
+  }
+
   /** A kill refilled you: the heal ladder run all the way up, capped by a
    *  warm two-note bell. */
   killHeal(): void {

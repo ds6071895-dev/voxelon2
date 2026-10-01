@@ -97,11 +97,7 @@ try {
         check('building has place and break buttons', await page.locator('.t-secondary').isVisible());
       }
     }
-    if (mode === 'parkour' && await page.locator('.t-retry').isVisible()) {
-      await page.locator('.t-retry').tap();
-      await page.waitForFunction(() => window.__sent.some(m => m.t === 'pgRetry'));
-      check('checkpoint retry is reachable by touch', true);
-    }
+    if (mode === 'parkour') check('there is no checkpoint retry button (Dragon Chase has lives)', !(await page.locator('.t-retry').count()));
     if (mode === 'ratseek') {
       await page.locator('.t-primary').tap();
       await page.waitForFunction(() => window.__sent.some(m => m.t === 'rsUse') || document.querySelector('.rs-picker.open'));

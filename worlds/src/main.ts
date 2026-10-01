@@ -70,6 +70,7 @@ import { parkourBuildBlocked, parkourPadImpulse, parkourPadUnder } from './parko
 import { parkourTheme } from './parkour_themes';
 import { PartyUI } from './party_ui';
 import { PartyVisuals } from './party_visuals';
+import { DragonView } from './parkour_dragon';
 import { HomeScreen } from './ui/home';
 import { AccountDialog } from './ui/account_dialog';
 import { PartyPanel } from './ui/party_panel';
@@ -206,6 +207,8 @@ const remotePlayers = new RemotePlayers(scene, net, atlas);
 const projectiles = new Projectiles(scene, world, remotePlayers, net, player, particles);
 const partyUI = new PartyUI(document.body);
 const partyVisuals = new PartyVisuals(scene);
+/** Dragon Chase: the dragon and its fire. */
+const dragonView = new DragonView(scene, particles);
 const healUse = new HealUse();
 /** Rat and Seek's HUD, props and screen effects. */
 const rsClient = new RatSeekClient({
@@ -734,6 +737,7 @@ function exitToMenu(): void {
   setDuelCue('');
   partyUI.setVisible(false);
   partyVisuals.clear();
+  dragonView.clear();
   interaction.clear();
   healUse.cancel();
   inventory.restore([], 0);
@@ -792,6 +796,7 @@ net.onRespawned = (x, y, z, h) => {
   if (match?.kind === 'pg') held.setBowDraw(0);
   if (match?.kind === 'pg' && pgSub?.game === 'bridge') bridgeRespawnFx(x, y, z);
   player.respawn({ x, y, z });
+  if (match?.kind === 'pg' && pgSub?.game === 'parkour') parkourRespawnFx(pgSub, x, y, z);
   // Every Bridge respawn (void, own portal, goal reset) faces down the span.
   if (match?.kind === 'pg' && pgSub?.game === 'bridge') {
     player.yaw = Math.atan2(0, -((pgSub.minZ + pgSub.maxZ) / 2 - z));
@@ -1733,6 +1738,63 @@ partyUI.onGoal = (ours, team, matchPoint) => {
   }
 };
 
+// ── Dragon Chase ────────────────────────────────────────────────────────────
+
+/** Show the made-it / out card with a cursor to click it. */
+function parkourDoneCursor(): void {
+  if (match?.kind !== 'pg' || screen !== 'playing') return;
+  screen = 'results'; input.unlock(); pauseEl.style.display = 'none';
+}
+partyUI.onWatch = () => { if (match?.kind === 'pg' && pgSnapshot?.phase === 'running') resumePlay(); };
+partyUI.onLifeLost = (cause, out) => {
+  audio.lifeLost(out);
+  hurtPulse = 1;
+  triggerShake(cause === 'fall' ? .2 : .4, cause === 'fall' ? .02 : .05);
+  if (!accessibility.reducedMotion) fovPunch = Math.max(fovPunch, 6);
+  if (out) parkourDoneCursor();
+};
+partyUI.onMadeIt = () => {
+  audio.madeIt();
+  particles.burst(player.pos.x, player.pos.y + 1.5, player.pos.z, 40, 0xffd25e, 7, 1.2, { gravity: 7, spread: 1.4, scale: .8 });
+  particles.burst(player.pos.x, player.pos.y + 1.5, player.pos.z, 20, 0xffffff, 5, 1, { gravity: 6, spread: 1, scale: .6 });
+  parkourDoneCursor();
+};
+/** Back on the course after a lost life (or up on the podium): a beam of
+ *  light, and you face the way you are going. */
+function parkourRespawnFx(sub: PartySubBounds, x: number, y: number, z: number): void {
+  const course = parkourCourse(sub.seed);
+  particles.respawnBeam(x, y, z, 0xffd25e);
+  audio.bridgeRespawn(true);
+  let best = course.platforms[0], bestD = Infinity;
+  for (const p of course.platforms) {
+    const d = Math.hypot(sub.minX + p.x - x, p.y - y, sub.minZ + p.z - z);
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  const next = bestD < 1.5 ? course.steps[best.order + 1]?.[0] : undefined;
+  player.yaw = next ? Math.atan2(-(sub.minX + next.x - x), -(sub.minZ + next.z - z)) : 0;
+  player.pitch = 0;
+}
+net.onPgDragon = (front, speed, at) => dragonView.sync(front, speed, at);
+net.onPgFireball = (f) => dragonView.fireball(f);
+/** The dragon, drawn and heard, every frame of a run. */
+function updateDragon(dt: number, now: number): void {
+  const s = pgSnapshot;
+  if (!s || pgSub?.game !== 'parkour') return;
+  const ev = dragonView.update(dt, now, s.round && s.phase === 'running' ? s.round.startedAt : null,
+    accessibility.reducedMotion);
+  partyUI.dragonFront = dragonView.shownFront();
+  const head = dragonView.headPosition(), dist = head.distanceTo(player.pos);
+  if (ev.roar) { audio.dragonRoar(ev.roar); triggerShake(.6, .04); }
+  if (ev.wing && dist < 45) audio.dragonWing(ev.wing);
+  if (ev.breath) audio.dragonBreath(ev.breath);
+  for (const at of ev.impacts) {
+    const near = at.distanceTo(player.pos) < 8;
+    audio.fireballImpact(at, near);
+    if (near) triggerShake(.35, .05);
+  }
+  if (dist < 10 && s.phase === 'running') triggerShake(.1, .012);
+}
+
 net.onPgArena = (spec, _arena, sub, team, spawn) => {
   pgSub = sub;
   duelSnapshot = null; duelResultData = null; duelResultEl.classList.remove('visible');
@@ -1752,15 +1814,18 @@ net.onPgArena = (spec, _arena, sub, team, spawn) => {
   };
   arenaClampPos = (pos) => clampToPartySub(pos, sub);
   arenaUnlimited = new Set([wool, Item.BridgeArrow]);
-  world.setArenaRenderBounds(sub, PARTY_AMBIENT_LIGHT);
+  // Dragon Chase is lit like broad daylight everywhere, the cavern included.
+  world.setArenaRenderBounds(sub, sub.game === 'parkour' ? 1 : PARTY_AMBIENT_LIGHT);
   partyUI.setVisible(true);
   partyUI.setSnapshot(pgSnapshot, net.myId);
   partyUI.showRound(sub.game, performance.now());
   player.maxHealth = PARTY_MAX_HEALTH; player.health = PARTY_MAX_HEALTH; lastHealth = PARTY_MAX_HEALTH;
   if (sub.game === 'parkour') {
-    const target = parkourCourse(sub.seed).steps[1][0];
+    const course = parkourCourse(sub.seed), target = course.steps[1][0];
     player.yaw = Math.atan2(-(sub.minX + target.x - spawn.x), -(sub.minZ + target.z - spawn.z));
+    dragonView.enter(course, parkourTheme(sub.seed), sub.minX, sub.minZ);
   } else {
+    dragonView.clear();
     player.yaw = Math.atan2(0, -((team === 0 ? sub.maxZ : sub.minZ) - spawn.z));
   }
   enterMatchWorld(spec, 'pg', sub.game === 'parkour' ? 'parkour' : 'bridge', spawn);
@@ -1971,6 +2036,7 @@ function updatePartyFrame(dt: number): void {
     return;
   }
   const now = pgNow();
+  updateDragon(dt, now);
   partyUI.update(performance.now(), now);
   partyVisuals.update(pgSnapshot, net.myId, now);
   partyVisuals.updateArrows(dt);
@@ -2173,7 +2239,6 @@ function frame(): void {
         : hs.id === Item.IronAxe ? 'attack' : 'use',
       label: match.kind === 'rs' ? 'USE' : hs?.id === Item.BridgeBow ? 'SHOOT' : hs && ITEMS[hs.id]?.heal ? 'HEAL'
         : hs?.id === Item.JumpBoost ? 'BOOST' : undefined,
-      retry: match.kind === 'pg' && pgSub?.game === 'parkour' && parkourCourse(pgSub.seed).variant.mode !== 'collapse',
       context: `${match.mode}:${inventory.selected}:${hs?.id ?? 0}`,
     });
   }
@@ -2194,8 +2259,6 @@ function frame(): void {
     if (controlling) rsClient.steerDash(dt);
   }
   player.update(dt, moveInput, world);
-  if (controlling && match.kind === 'pg' && pgSub?.game === 'parkour' && input.reloadPressed &&
-      parkourCourse(pgSub.seed).variant.mode !== 'collapse') net.sendPgRetry();
   // Parkour throw pads: touching one sets your velocity outright.
   if (match.kind === 'pg' && pgSub?.game === 'parkour' && player.onGround && pgSnapshot?.phase === 'running') {
     const pad = parkourPadUnder(parkourCourse(pgSub.seed), player.pos.x - pgSub.minX, player.pos.y, player.pos.z - pgSub.minZ);
@@ -2384,5 +2447,5 @@ updateCamera();
 frame();
 
 if (import.meta.env.DEV) {
-  (window as unknown as { __worlds: unknown }).__worlds = { sky, player, world, camera, net, input, inventory };
+  (window as unknown as { __worlds: unknown }).__worlds = { sky, player, world, camera, net, input, inventory, dragonView, pg: () => pgSnapshot };
 }

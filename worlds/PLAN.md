@@ -112,8 +112,9 @@ concurrent bot-vs-bot worlds** (all three modes) and checks:
 Everything a player can do today in Duels, The Bridge and Parkour keeps working:
 - Duels: weapons, medkits, building, respawns, sudden death, kill events
 - The Bridge: cages, hatch, Void Cleaver and bow, goals, void-kill credit
-- Parkour: all mode variants, themes, crumble, blink and launch pads, R to
-  retry, wool bail-outs, catch-up
+- Parkour: replaced on 2026-09-30 by the single Dragon Chase mode (§11).
+  Themes, crumble, blink, launch and boost pads and wool bail-outs remain;
+  R-to-retry and catch-up checkpoints are gone.
 
 Changes:
 - **No ranked, no RP, no ladder, no leaderboard, no flair, and no
@@ -317,3 +318,55 @@ rules: 30 s hide, 4 min hunt, rescues at 3 cheese, all seven twists.
 - **Practice seeker:** one hidden level 0.2–1.35 drives every trait; it slides
   each second toward a close game and settles after each match (quick wins make
   it gentler next time), remembered per rat like the other modes' skills.
+
+## 11. Parkour → Dragon Chase (2026-09-30)
+
+The three competitive modes (Sprint Race, Rising Void, Collapse Chase) and the
+layout × deck generator are gone. There is one mode: a dragon chases the
+runners, everyone has **3 lives**, and it is not a race — **everyone who
+reaches the end makes it**. The result lists who made it (finish order, time,
+lives left) and who fell, in the order they fell.
+
+- **Course** (`parkour_course.ts`): Dragon's Lair (start) → six set pieces from
+  a pool of twelve → the Sanctuary (finish + 4-step podium), in a 96 × 512
+  venue. The jump engine (physics budget, overlap and flight-path checks) is
+  unchanged; each piece supplies its PATH through its place — a weave back
+  and forth across the venue (rooftops, rope bridges, waterfall stones, pond
+  stones, trees, clock towers, aqueduct, mine), a castle's wall-walk with
+  corner towers, or a long S (galleon, cavern, foundry) — its own decks for
+  crossings and links, a rise policy and pad materials. Legs that turn end on
+  a broad corner landing; the route stays within 23 blocks of the middle; the
+  last piece runs in to the middle so the Sanctuary fits. Every pad keeps the
+  column under it clear of the rest of the route. (2026-09-30, after a
+  straight-lane version felt like "one lane of boring jumps".)
+- **Builds** (`parkour_setpieces.ts`): every pad is the top of something
+  standing on the ground — a house under a roof, a trunk under a treetop, a
+  rock under a stepping stone, wall under a wall-walk, stilts under a plank —
+  driven down to the terrain AFTER all pieces' terrain and scenery are built,
+  so nothing floats. Scenery round the route comes in mirrored pairs
+  (`Builder.pair`) that are kept or dropped together, so the flanks match
+  block for block although the route winds. Every build is filtered against
+  the route's boxes (`course.spaces`): nothing solid in or beside a jump, and
+  no standable top within 5 blocks of the route between 3 below it and its
+  height. The venue is packed as per-column runs (`ParkourVenue`). Decor
+  blocks: clay/teal roof tiles, chains (hanging, and `ParkourChainX/Z` strung
+  sideways between two posts), crystal cluster, crystal, vines.
+- **Dragon** (`parkour_mechanics.ts` maths, `parkour_dragon.ts` client model):
+  its position is a course order that starts in the lair, leaves after 7 s,
+  speeds up every second, and surges while every runner is far ahead. It
+  catches anyone it reaches (or who is close to its head), and lobs fireballs
+  (with a ground warning ring) at the rearmost runner in range. Sync is
+  `pgDragon` at 5 Hz plus `pgFireball`; the client extrapolates.
+- **Rules** (`partygames.ts`): a fall, the jaws or fire each take a life; you
+  respawn at your checkpoint, or clear ahead of the dragon if it has passed
+  that, with 3 s of protection. Out of lives → free-flying spectator.
+  Finishing puts you on the podium. The match ends only when nobody is left
+  running (a 20-minute failsafe exists but is never shown). A runner who made
+  it may go back to the menu at once: no forfeit, no leave message, and a
+  statue keeps them on the podium for everyone else.
+- **Checks:** `npm test` flies every jump of 24 sampled courses with the real
+  Player against the finished venue, checks the build rule cell by cell, that
+  every pad stands on something reaching the ground, that every chain is
+  attached along its run, that the flanks mirror, that the route winds, and
+  covers lives/respawn/podium/leave/results. `npm run bot-sim` reports make-it
+  rates by skill (roughly: casual 1 in 3, regular 3 in 4, strong always).

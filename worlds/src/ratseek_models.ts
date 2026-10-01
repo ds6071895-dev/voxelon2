@@ -8,7 +8,7 @@ import * as THREE from 'three';
 /** Face shading in BoxGeometry face order (+x, -x, +y, -y, +z, -z). */
 const SHADE = [0.62, 0.62, 1.0, 0.5, 0.82, 0.82];
 
-function shaded(w: number, h: number, d: number, color: number): THREE.BufferGeometry {
+export function shaded(w: number, h: number, d: number, color: number): THREE.BufferGeometry {
   const geo = new THREE.BoxGeometry(w, h, d);
   const c = new THREE.Color(color);
   const pos = geo.getAttribute('position');
@@ -21,7 +21,7 @@ function shaded(w: number, h: number, d: number, color: number): THREE.BufferGeo
   return geo;
 }
 const BODY_MAT = new THREE.MeshBasicMaterial({ vertexColors: true });
-function box(parent: THREE.Object3D, w: number, h: number, d: number, color: number,
+export function box(parent: THREE.Object3D, w: number, h: number, d: number, color: number,
   x: number, y: number, z: number, mat: THREE.Material = BODY_MAT): THREE.Mesh {
   const m = new THREE.Mesh(shaded(w, h, d, color), mat);
   m.position.set(x, y, z);
@@ -29,7 +29,7 @@ function box(parent: THREE.Object3D, w: number, h: number, d: number, color: num
   return m;
 }
 /** A leg or tail joint: a group pivoting at its top. */
-function joint(parent: THREE.Object3D, x: number, y: number, z: number): THREE.Group {
+export function joint(parent: THREE.Object3D, x: number, y: number, z: number): THREE.Group {
   const g = new THREE.Group();
   g.position.set(x, y, z);
   parent.add(g);

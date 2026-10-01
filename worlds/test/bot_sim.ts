@@ -72,13 +72,37 @@ function row(label: string, mode: GameMode, a: Side, b: Side): { winsA: number; 
 }
 
 console.log(`Practice-opponent simulation — ${MATCHES} matches per row\n`);
-console.log('PARKOUR (first to the finish)');
-const pkTop = row('new bot at the top of its range  vs  old bot at its best', 'parkour', { kind: 'new', skill: 1.35 }, { kind: 'legacy', skill: 1 });
-row('new bot at 1.0  vs  old bot at its best', 'parkour', { kind: 'new', skill: 1 }, { kind: 'legacy', skill: 1 });
-const pkAdaptStrong = row('ADAPTIVE new bot  vs  very strong player (fixed 1.2)', 'parkour', { kind: 'new', skill: .55, adaptive: true }, { kind: 'new', skill: 1.2 });
-const pkAdaptWeak = row('ADAPTIVE new bot  vs  casual player (fixed 0.45)', 'parkour', { kind: 'new', skill: .55, adaptive: true }, { kind: 'new', skill: .45 });
-row('old bot (its own adaptation)  vs  very strong player (fixed 1.2)', 'parkour', { kind: 'legacy', skill: .5, adaptive: true }, { kind: 'new', skill: 1.2 });
+/** Dragon Chase is not a race: how often do runners of a level make it? */
+function chase(label: string, skill: number): { made: number; runs: number } {
+  let made = 0, runs = 0, secs = 0;
+  const detail: string[] = [];
+  const t0 = performance.now();
+  for (let i = 0; i < MATCHES; i++) {
+    const seed = 1000 + i * 7919, tokenRng = mulberry32(seed ^ 0x5eed);
+    const server = new GameServer({ accounts: new Accounts(), rng: mulberry32(seed),
+      token: () => Array.from({ length: 48 }, () => Math.floor(tokenRng() * 16).toString(16)).join('') });
+    const world = server.startExhibition('parkour', [{ skill }, { skill }]);
+    for (let t = 0; t < 900; t += TICK) {
+      server.tick(TICK);
+      const st = server.matchState(world);
+      if (!st) break;
+      if (st.phase !== 'results') continue;
+      for (const r of st.runners ?? []) { runs++; if (r.made) made++; }
+      detail.push((st.runners ?? []).map((r) => r.made ? `✓${Math.round((r.timeMs ?? 0) / 1000)}s` : `✕${r.reached}`).join('/'));
+      secs += t;
+      break;
+    }
+  }
+  console.log(`${label.padEnd(58)} made it ${String(made).padStart(2)}/${runs}   avg ${(secs / MATCHES).toFixed(0)}s   [${detail.join(' ')}]   (${((performance.now() - t0) / 1000).toFixed(1)}s cpu)`);
+  return { made, runs };
+}
 
+console.log('DRAGON CHASE (everyone who reaches the end makes it)');
+const pkCasual = chase('casual runners (0.45)', .45);
+chase('improving runners (0.65)', .65);
+const pkRegular = chase('regular runners (0.8)', .8);
+const pkStrong = chase('strong runners (1.0)', 1);
+chase('very strong runners (1.2)', 1.2);
 console.log('\nTHE BRIDGE (first to 5 goals)');
 const brTop = row('new bot at the top of its range  vs  old bot at its best', 'bridge', { kind: 'new', skill: 1.35 }, { kind: 'legacy', skill: 1 });
 row('new bot at 1.0  vs  old bot at its best', 'bridge', { kind: 'new', skill: 1 }, { kind: 'legacy', skill: 1 });
@@ -106,12 +130,13 @@ function series(label: string, mode: GameMode, player: number): { winsA: number;
 }
 
 console.log('\nRETURNING PLAYER (the learned level carries into the next match)');
-const pkSeries = series('parkour: adaptive bot  vs  very strong player (fixed 1.2)', 'parkour', 1.2);
 const brSeries = series('bridge:  adaptive bot  vs  very strong player (fixed 1.2)', 'bridge', 1.2);
 
 const share = (r: { winsA: number; winsB: number; draws: number }) => r.winsA / Math.max(1, r.winsA + r.winsB + r.draws);
 console.log('\nSummary');
-console.log(`  top new bot beats the old bot's best: parkour ${(share(pkTop) * 100).toFixed(0)}%, bridge ${(share(brTop) * 100).toFixed(0)}%`);
-console.log(`  adaptive bot wins vs a very strong player: parkour ${(share(pkAdaptStrong) * 100).toFixed(0)}%, bridge ${(share(brAdaptStrong) * 100).toFixed(0)}%`);
-console.log(`  returning very strong player, bot wins:    parkour ${(share(pkSeries) * 100).toFixed(0)}%, bridge ${(share(brSeries) * 100).toFixed(0)}%`);
-console.log(`  adaptive bot wins vs a casual player:      parkour ${(share(pkAdaptWeak) * 100).toFixed(0)}%, bridge ${(share(brAdaptWeak) * 100).toFixed(0)}%`);
+const rate = (r: { made: number; runs: number }) => `${(r.made / Math.max(1, r.runs) * 100).toFixed(0)}%`;
+console.log(`  dragon chase made it: casual ${rate(pkCasual)}, regular ${rate(pkRegular)}, strong ${rate(pkStrong)}`);
+console.log(`  top new bot beats the old bot's best: bridge ${(share(brTop) * 100).toFixed(0)}%`);
+console.log(`  adaptive bot wins vs a very strong player: bridge ${(share(brAdaptStrong) * 100).toFixed(0)}%`);
+console.log(`  returning very strong player, bot wins:    bridge ${(share(brSeries) * 100).toFixed(0)}%`);
+console.log(`  adaptive bot wins vs a casual player:      bridge ${(share(brAdaptWeak) * 100).toFixed(0)}%`);

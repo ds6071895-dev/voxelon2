@@ -1,8 +1,8 @@
 // Parkour's moving parts, as pure functions of the course and the round
 // clock. The server uses them to decide what happens, the client uses the
-// very same functions to draw it (the rising void, the collapse front, the
-// flicker before a blink stone goes), and the smoke uses them to fly the
-// throw pads with real physics. Nothing here needs a message of its own.
+// very same functions to draw it (the dragon's flight, the flicker before a
+// blink stone goes), and the tests use them to fly the throw pads with real
+// physics.
 import { Block } from './blocks';
 import type { ParkourCell, ParkourCourse, ParkourPlatform } from './parkour_course';
 
@@ -33,28 +33,74 @@ export const CRUMBLE_BACK_MS = 4500;
 /** The cracked look, between the step and the fall. */
 export const CRUMBLE_CRACKED = Block.Terracotta;
 
-// ── Rising Void ────────────────────────────────────────────────────────────
-// Ten seconds of grace, then a kill plane that climbs a little faster every
-// second. A clean climb stays well ahead of it; a run with falls in it does
-// not, and a fall with no saved pad left above the void is the end.
+// ── The dragon ─────────────────────────────────────────────────────────────
+// The dragon's place on the course is a float course ORDER, `front`: it has
+// reached the pad at that order. It sleeps in its lair through the grace
+// period, then flies the course a little faster every second — and faster
+// still when every runner has pulled well clear of it, so it is never far
+// behind anybody for long. Because it only ever speeds up, every run ends.
 
-export const VOID_GRACE_MS = 10_000;
-export function parkourVoidY(course: ParkourCourse, tMs: number): number {
-  const t = Math.max(0, tMs - VOID_GRACE_MS) / 1000;
-  return course.lowY - 5 + t * (.1 + .0012 * t);
+export const DRAGON_LIVES = 3;
+/** After GO, before the dragon leaves its lair. */
+export const DRAGON_GRACE_MS = 7000;
+/** Where the dragon starts: this many orders behind the start pad. */
+export const DRAGON_LAIR_FRONT = -4;
+/** A runner who loses a life comes back at least this far ahead of it. */
+export const DRAGON_RESPAWN_LEAD = 4;
+/** Protection after a respawn: the dragon neither catches nor targets you. */
+export const DRAGON_IMMUNE_MS = 3000;
+/** The dragon's head catches anybody this close to it. */
+export const DRAGON_CATCH_RADIUS = 3.2;
+/** Orders a second, `t` seconds after it set off. */
+export function dragonBaseSpeed(t: number): number {
+  return Math.min(1.35, 0.40 + 0.0042 * Math.max(0, t));
 }
+/** Surge when the rearmost live runner is further ahead than this. */
+export const DRAGON_SURGE_GAP = 11;
+export const DRAGON_SURGE = 2.2;
 
-// ── Collapse Chase ─────────────────────────────────────────────────────────
-// The front is measured in course ORDERS: every pad (and everything built on
-// it) whose order is below the front is gone. It starts slow and speeds up.
+/** Fire breath: a lobbed fireball at the rearmost runner in range. */
+export const FIREBALL_WINDUP_MS = 450;
+export const FIREBALL_FLIGHT_MS = 1150;
+export const FIREBALL_RADIUS = 1.9;
+export const FIREBALL_RANGE = 38;
+/** Milliseconds between breaths, `t` seconds after it set off. */
+export function fireballInterval(t: number): number {
+  return Math.max(3200, 6500 - t * 20);
+}
+/** How far ahead of a moving target the dragon aims, at most. */
+export const FIREBALL_MAX_LEAD = 3.5;
 
-export const COLLAPSE_GRACE_MS = 8000;
-export const COLLAPSE_LIVES = 3;
-/** A racer who falls comes back this many pads ahead of the front. */
-export const COLLAPSE_RESPAWN_LEAD = 2;
-export function parkourCollapseFront(tMs: number): number {
-  const t = Math.max(0, tMs - COLLAPSE_GRACE_MS) / 1000;
-  return t * (.2 + .0016 * t);
+/** A point on the dragon's flight line at course order `front`. */
+export function dragonPoint(course: ParkourCourse, front: number): { x: number; y: number; z: number } {
+  const path = course.dragonPath, lair = course.lair;
+  if (front <= 0) {
+    const t = Math.max(0, Math.min(1, (front - DRAGON_LAIR_FRONT) / -DRAGON_LAIR_FRONT));
+    const a = lair, b = path[0];
+    // Out of the cave mouth low, then up.
+    return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t * t, z: a.z + (b.z - a.z) * t };
+  }
+  const i = Math.min(path.length - 1, Math.floor(front)), j = Math.min(path.length - 1, i + 1), f = front - i;
+  const a = path[i], b = path[j];
+  return { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f, z: a.z + (b.z - a.z) * f };
+}
+/** The dragon's head at `front`, with its heading (radians, three.js yaw
+ *  convention: 0 faces -z). */
+export function dragonPose(course: ParkourCourse, front: number): { x: number; y: number; z: number; yaw: number } {
+  const p = dragonPoint(course, front), q = dragonPoint(course, front + .35);
+  const dx = q.x - p.x, dz = q.z - p.z;
+  const yaw = Math.hypot(dx, dz) > 1e-4 ? Math.atan2(-dx, -dz) : Math.PI;
+  return { ...p, yaw };
+}
+/** Where a fireball is, `f` (0..1) of the way along its lob. */
+export function fireballAt(from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }, f: number):
+  { x: number; y: number; z: number } {
+  const arc = Math.max(3, Math.hypot(to.x - from.x, to.z - from.z) * .18);
+  return {
+    x: from.x + (to.x - from.x) * f,
+    y: from.y + (to.y - from.y) * f + Math.sin(Math.PI * f) * arc,
+    z: from.z + (to.z - from.z) * f,
+  };
 }
 
 // ── Throw pads ─────────────────────────────────────────────────────────────
@@ -97,14 +143,12 @@ export function parkourPadNear(course: ParkourCourse, lx: number, y: number, lz:
 interface CellIndex {
   byPlatform: Map<number, ParkourCell[]>;
   blink: [ParkourCell[], ParkourCell[]];
-  /** Solid cells sorted by order, for the collapse front. */
-  byOrder: ParkourCell[];
 }
 const indexes = new WeakMap<ParkourCourse, CellIndex>();
 function index(course: ParkourCourse): CellIndex {
   let ix = indexes.get(course);
   if (ix) return ix;
-  ix = { byPlatform: new Map(), blink: [[], []], byOrder: [] };
+  ix = { byPlatform: new Map(), blink: [[], []] };
   for (const c of course.cells) {
     if (c.block === Block.Air) continue;
     let list = ix.byPlatform.get(c.platform);
@@ -112,9 +156,7 @@ function index(course: ParkourCourse): CellIndex {
     list.push(c);
     const p = course.platforms[c.platform];
     if (p.kind === 'blink' && c.block === Block.PartyTileD) ix.blink[p.group].push(c);
-    ix.byOrder.push(c);
   }
-  ix.byOrder.sort((a, b) => a.order - b.order);
   indexes.set(course, ix);
   return ix;
 }
@@ -124,10 +166,6 @@ export function parkourCrumbleCells(course: ParkourCourse, platform: number): Pa
 }
 export function parkourBlinkCells(course: ParkourCourse, group: 0 | 1): readonly ParkourCell[] {
   return index(course).blink[group];
-}
-/** Every solid cell whose order is in [from, to). */
-export function parkourCollapseCells(course: ParkourCourse, from: number, to: number): ParkourCell[] {
-  return index(course).byOrder.filter(c => c.order >= from && c.order < to);
 }
 /** The crumble pad a body at venue-local (lx, feetY, lz) is standing on. */
 export function parkourCrumbleUnder(course: ParkourCourse, lx: number, feetY: number, lz: number): ParkourPlatform | null {

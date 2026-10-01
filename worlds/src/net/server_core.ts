@@ -34,9 +34,9 @@ import {
   partySpawns, parkourCourse, partyModeCapacity,
 } from '../partygames';
 import {
-  CRUMBLE_BACK_MS, CRUMBLE_CRACKED, CRUMBLE_FALL_MS, blinkSolid, parkourBlinkCells,
-  parkourBuildBlocked, parkourCollapseCells, parkourCollapseFront, parkourCrumbleCells,
-  parkourCrumbleUnder, parkourPadNear,
+  CRUMBLE_BACK_MS, CRUMBLE_CRACKED, CRUMBLE_FALL_MS, DRAGON_CATCH_RADIUS, DRAGON_GRACE_MS, FIREBALL_FLIGHT_MS,
+  FIREBALL_MAX_LEAD, FIREBALL_RADIUS, FIREBALL_RANGE, FIREBALL_WINDUP_MS, blinkSolid, dragonPose, fireballInterval,
+  parkourBlinkCells, parkourBuildBlocked, parkourCrumbleCells, parkourCrumbleUnder, parkourPadNear,
 } from '../parkour_mechanics';
 import type { ParkourCell } from '../parkour_course';
 import { PartyBot } from '../party_bot';
@@ -78,6 +78,8 @@ export interface PgBot {
   fixedSkill: boolean;
   reset(spawn: { x: number; y: number; z: number }): void;
   noteHurt(now: number): void;
+  /** Parkour: fireballs on their way down (the bot may see them coming). */
+  threats?: readonly { id: number; tx: number; tz: number; landAt: number }[];
   step(...args: Parameters<PartyBot['step']>): ReturnType<PartyBot['step']>;
 }
 
@@ -100,6 +102,9 @@ const DUEL_TRACK_WINDOW = 1.2;
 /** Consecutive rejected moves (each a full round trip) before a Bridge or
  *  Parkour body is settled onto its last known footing. */
 const PARTY_STUCK_LIMIT = 4;
+/** How often the dragon's position goes out, in seconds. */
+const DRAGON_SYNC_S = .2;
+
 /** Movement budget while a throw (pad or knockback) is settling. */
 const PARTY_LAUNCH_RATE = 17;
 const PARTY_LAUNCH_CAP = 6;
@@ -177,6 +182,9 @@ interface PartyCombatState {
   lastShotAt: number;
 }
 
+/** A dragon's fireball in flight (server clock, world coordinates). */
+interface Fireball { id: number; tx: number; ty: number; tz: number; landAt: number }
+
 interface PartyArrow {
   id: number;
   owner: number;
@@ -200,8 +208,13 @@ interface MatchWorld {
   cagesOpen: boolean;
   parkour: {
     blink: [boolean, boolean];
-    collapsed: number;
     crumbles: Map<number, { fallAt: number; backAt: number; gone: boolean }>;
+    fireballs: Fireball[];
+    nextBreathAt: number;
+    dragonSentAt: number;
+    /** Runners who made it and went back to the menu: the others still see
+     *  them standing on the podium until the run is over. */
+    statues: Map<number, PlayerSnapshot>;
   } | null;
   arrows: PartyArrow[];
   /** Rat and Seek's engine, and the messages it produced since the last drain. */
@@ -321,7 +334,9 @@ export class GameServer {
   private deliverNothing(_out: Outbound[]): void { /* bots have no sockets */ }
   /** A snapshot of an exhibition or any match, for tests. */
   matchState(worldId: number): { mode: GameMode; phase: string; participants: { id: number; score: number; progress: number;
-    kills: number; falls: number; team: number }[]; winner: number | null; winnerTeam: number | null } | null {
+    kills: number; falls: number; team: number; lives?: number; outAt?: number; finishedAt?: number; place?: number;
+    connected?: boolean }[]; winner: number | null; winnerTeam: number | null;
+    runners?: import('../partygames').ParkourRunnerResult[]; dragon?: number } | null {
     const w = this.worlds.get(worldId);
     if (!w) return null;
     const now = this.nowMs();
@@ -334,8 +349,10 @@ export class GameServer {
     const snap = this.pg.snapshots(now).find((s) => s.id === w.lobby);
     if (!snap) return null;
     return { mode: w.mode, phase: snap.phase, winner: snap.result?.winner ?? null, winnerTeam: snap.result?.winnerTeam ?? null,
+      runners: snap.result?.runners, dragon: snap.dragon?.front,
       participants: snap.participants.map((p) => ({ id: p.id, score: p.score, progress: p.progress, kills: p.kills,
-        falls: p.falls, team: p.team })) };
+        falls: p.falls, team: p.team, lives: p.lives, outAt: p.outAt, finishedAt: p.finishedAt, place: p.place,
+        connected: p.connected })) };
   }
   /** Rat and Seek internals, for tests. */
   ratSeek(worldId: number): RatSeekMatch | null { return this.worlds.get(worldId)?.rs ?? null; }
@@ -759,7 +776,9 @@ export class GameServer {
     const w: MatchWorld = {
       spec, blocks: new WorldBlocks(worldGenerator(spec)), mode, lobby, members: new Set(),
       closeAt: null, cagesOpen: false,
-      parkour: mode === 'parkour' ? { blink: [true, true], collapsed: 0, crumbles: new Map() } : null,
+      parkour: mode === 'parkour' ? {
+        blink: [true, true], crumbles: new Map(), fireballs: [], nextBreathAt: 0, dragonSentAt: -1, statues: new Map(),
+      } : null,
       arrows: [], rs: null, rsOut: [], rsQuiet: false,
     };
     this.worlds.set(spec.id, w);
@@ -806,6 +825,12 @@ export class GameServer {
       const snap = this.duels.leave(p.id, this.nowMs());
       if (snap) out.push(...this.duelStateOut(snap), ...this.duelResultOut(snap));
     } else {
+      // A runner who made it can go back to the menu at once. Nobody else is
+      // told: they carry on seeing them on the podium.
+      const member = this.pg.participantFor(p.id);
+      if (w.parkour && member?.finishedAt !== undefined && this.pg.phaseFor(p.id) === 'running' && !p.bot) {
+        w.parkour.statues.set(p.id, { ...this.bodyOf(p, w), dead: false, sneaking: false, swing: 0 });
+      }
       const snap = this.pg.leave(p.id, this.nowMs());
       if (snap) out.push(...this.pgStateOut(snap), ...this.pgResultOut(snap));
     }
@@ -827,6 +852,7 @@ export class GameServer {
     this.partyMoves.delete(p.id);
     this.partyCombat.delete(p.id);
     w.arrows = w.arrows.filter((a) => a.owner !== p.id);
+    if (w.parkour?.statues.has(p.id)) return;
     for (const id of w.members) out.push(this.to(id, { t: 'leave', id: p.id }));
   }
 
@@ -1022,15 +1048,6 @@ export class GameServer {
       if (msg.t === 'rangedAttack') return this.handleDuelRanged(p, w, msg.target, msg.amount);
       if (msg.t === 'useHeal') return this.handleDuelHeal(p, msg.item);
       if (msg.t === 'edit') return this.handleDuelEdit(p, w, msg.x, msg.y, msg.z, msg.block);
-      return [];
-    }
-    if (msg.t === 'pgRetry') {
-      const sub = this.pg.subFor(p.id);
-      if (sub?.game === 'parkour' && parkourCourse(sub.seed).variant.mode !== 'collapse' &&
-          this.pg.phaseFor(p.id) === 'running' &&
-          this.nowMs() >= (this.pg.participantFor(p.id)?.immuneUntil ?? Infinity)) {
-        return this.evaluatePartyPlayer(p, w, true);
-      }
       return [];
     }
     if (msg.t === 'pgMelee') return this.handlePartyMelee(p, w, msg.target);
@@ -1343,8 +1360,9 @@ export class GameServer {
     p.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, msg.pitch));
     if (phase !== 'running') return [];
     const wanted = clampToPartySub(msg, sub);
-    if (participant.respawnAt !== undefined) {
-      // A dead Bridge player is a free-flying spectator; nothing they do counts.
+    if (participant.respawnAt !== undefined || (sub.game === 'parkour' && participant.outAt !== undefined)) {
+      // A dead Bridge player, or a Parkour runner out of lives, is a
+      // free-flying spectator; nothing they do counts.
       p.x = wanted.x; p.y = wanted.y; p.z = wanted.z;
       return this.evaluatePartyPlayer(p, w);
     }
@@ -1408,20 +1426,45 @@ export class GameServer {
     return [...crumbled, ...this.evaluatePartyPlayer(p, w)];
   }
 
-  private evaluatePartyPlayer(p: ServerPlayer, w: MatchWorld, retry = false): Outbound[] {
+  /** The spot a body fits in, as close to `at` as the world allows: on the
+   *  same level first, then up. Nothing solid within the body, and a floor. */
+  private clearSpawn(w: MatchWorld, at: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
+    const fits = (x: number, y: number, z: number): boolean => {
+      for (const dx of [-.31, .31]) for (const dz of [-.31, .31]) {
+        const bx = Math.floor(x + dx), bz = Math.floor(z + dz);
+        for (const dy of [.02, 1, 1.79]) if (w.blocks.solidAt(bx, Math.floor(y + dy), bz)) return false;
+      }
+      return w.blocks.solidAt(Math.floor(x), Math.floor(y - .5), Math.floor(z));
+    };
+    if (fits(at.x, at.y, at.z)) return at;
+    const cx = Math.floor(at.x) + .5, cz = Math.floor(at.z) + .5, fy = Math.floor(at.y) + .01;
+    for (let up = 0; up <= 4; up++)
+      for (let r = 0; r <= 3; r++)
+        for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) {
+          if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+          if (fits(cx + dx, fy + up, cz + dz)) return { x: cx + dx, y: fy + up, z: cz + dz };
+        }
+    return at;
+  }
+
+  private evaluatePartyPlayer(p: ServerPlayer, w: MatchWorld): Outbound[] {
     const now = this.nowMs(), before = this.pg.phaseFor(p.id);
-    const evaluated = this.pg.evaluate(p.id, retry ? { x: p.x, y: PARTY_FLOOR_Y - 30, z: p.z } : p, now);
+    const evaluated = this.pg.evaluate(p.id, p, now);
     const out: Outbound[] = [];
     if (evaluated.killedBy !== undefined) {
       const killer = this.players.get(evaluated.killedBy);
       if (killer) out.push(...this.healKiller(killer, p.id));
     }
     if (evaluated.spawn) {
+      // Wool is infinite in Parkour, so the pad a runner comes back to may
+      // have been built over since the course was laid out.
+      if (w.mode === 'parkour') evaluated.spawn = this.clearSpawn(w, evaluated.spawn);
       p.x = evaluated.spawn.x; p.y = evaluated.spawn.y; p.z = evaluated.spawn.z;
       const bot = this.partyBots.get(p.id);
       if (bot) {
         bot.reset(evaluated.spawn);
         bot.body.yaw = (this.pg.participantFor(p.id)?.team ?? 0) === 0 ? Math.PI : 0;
+        p.x = bot.body.pos.x; p.y = bot.body.pos.y; p.z = bot.body.pos.z;
       }
       p.health = PARTY_MAX_HEALTH;
       const move = this.partyMoves.get(p.id);
@@ -1433,7 +1476,9 @@ export class GameServer {
       this.recordArenaTrack(p);
       if (!p.bot) out.push(this.to(p, { t: 'respawned', ...evaluated.spawn, health: PARTY_MAX_HEALTH, seq: this.moved(p) }));
     }
-    const dead = this.pg.participantFor(p.id)?.respawnAt;
+    const member = this.pg.participantFor(p.id);
+    // A Parkour runner out of lives watches the rest of the run from the air.
+    const dead = member?.respawnAt ?? (w.mode === 'parkour' && member?.outAt !== undefined ? 0 : undefined);
     if (dead !== undefined && !this.partySpectators.has(p.id)) {
       this.partySpectators.add(p.id);
       p.dead = true; // the body vanishes for everyone else while you spectate
@@ -1710,22 +1755,14 @@ export class GameServer {
     if (snap.sub?.game !== 'parkour' || !snap.round || !w.parkour) return [];
     const course = parkourCourse(snap.sub.seed), st = w.parkour;
     const t = now - snap.round.startedAt, out: Outbound[] = [];
-    if (course.variant.mode === 'collapse') {
-      const front = Math.min(course.steps.length, Math.floor(parkourCollapseFront(t)));
-      if (front > st.collapsed) {
-        out.push(...this.parkourCellEdits(w, snap, parkourCollapseCells(course, st.collapsed, front), Block.Air));
-        st.collapsed = front;
-      }
-    }
-    const alive = (c: ParkourCell): boolean => c.order >= st.collapsed;
     for (const group of [0, 1] as const) {
       const solid = blinkSolid(group, t);
       if (solid === st.blink[group]) continue;
       st.blink[group] = solid;
-      out.push(...this.parkourCellEdits(w, snap, parkourBlinkCells(course, group).filter(alive), solid ? 'restore' : Block.Air));
+      out.push(...this.parkourCellEdits(w, snap, parkourBlinkCells(course, group), solid ? 'restore' : Block.Air));
     }
     for (const [index, c] of st.crumbles) {
-      const cells = parkourCrumbleCells(course, index).filter(alive);
+      const cells = parkourCrumbleCells(course, index);
       if (!c.gone && now >= c.fallAt) {
         c.gone = true;
         out.push(...this.parkourCellEdits(w, snap, cells, Block.Air));
@@ -1734,6 +1771,69 @@ export class GameServer {
         out.push(...this.parkourCellEdits(w, snap, cells, 'restore'));
       }
     }
+    return out;
+  }
+
+  /** The dragon: its position out to every client, its jaws on anybody it
+   *  reaches, and its fire at whoever is lagging behind. */
+  private tickDragon(w: MatchWorld, snap: Readonly<PartyLobbySnapshot>, now: number): Outbound[] {
+    const st = w.parkour, d = snap.dragon, sub = snap.sub, round = snap.round;
+    if (!st || !d || !sub || !round || sub.game !== 'parkour') return [];
+    const out: Outbound[] = [];
+    const humans = [...w.members].filter((id) => !this.players.get(id)?.bot && !st.statues.has(id));
+    if (this.worldTime - st.dragonSentAt >= DRAGON_SYNC_S) {
+      st.dragonSentAt = this.worldTime;
+      const msg: ServerMsg = { t: 'pgDragon', front: d.front, speed: d.speed, at: d.at };
+      for (const id of humans) out.push({ to: id, msg });
+    }
+    const course = parkourCourse(sub.seed);
+    const head = dragonPose(course, d.front);
+    const hx = sub.minX + head.x, hy = head.y, hz = sub.minZ + head.z;
+    const runners = snap.participants.filter((m) => m.connected && m.outAt === undefined && m.finishedAt === undefined);
+    for (const m of runners) {
+      const p = this.players.get(m.id);
+      if (p && now >= m.immuneUntil && Math.hypot(p.x - hx, p.y + .9 - hy, p.z - hz) < DRAGON_CATCH_RADIUS)
+        this.pg.hurt(m.id, 'dragon', now);
+    }
+    // Fire lands.
+    st.fireballs = st.fireballs.filter((f) => {
+      if (now < f.landAt) return true;
+      for (const m of runners) {
+        const p = this.players.get(m.id);
+        if (p && Math.hypot(p.x - f.tx, p.z - f.tz) < FIREBALL_RADIUS && Math.abs(p.y - f.ty) < 2.2)
+          this.pg.hurt(m.id, 'fire', now);
+      }
+      return false;
+    });
+    // And the next breath: at the rearmost runner it can reach.
+    const t = now - round.startedAt - DRAGON_GRACE_MS;
+    if (t < 0) { st.nextBreathAt = now + 1500; return out; }
+    if (now < st.nextBreathAt) return out;
+    let target: ServerPlayer | null = null, rear = Infinity;
+    for (const m of runners) {
+      const p = this.players.get(m.id);
+      if (!p || now < m.immuneUntil || m.pendingSpawn) continue;
+      if (Math.hypot(p.x - hx, p.y - hy, p.z - hz) > FIREBALL_RANGE) continue;
+      if (m.progress < rear) { rear = m.progress; target = p; }
+    }
+    if (!target) { st.nextBreathAt = now + 400; return out; }
+    st.nextBreathAt = now + fireballInterval(t / 1000);
+    // Lead the target by the way it is moving.
+    const track = target.arenaTrack, a = track[track.length - 2], b = track[track.length - 1];
+    let vx = 0, vz = 0;
+    if (a && b && b.at > a.at) { vx = (b.x - a.x) / ((b.at - a.at) / 1000); vz = (b.z - a.z) / ((b.at - a.at) / 1000); }
+    const lead = (FIREBALL_WINDUP_MS + FIREBALL_FLIGHT_MS) / 1000 * .5;
+    let lx = vx * lead, lz = vz * lead;
+    const ll = Math.hypot(lx, lz);
+    if (ll > FIREBALL_MAX_LEAD) { lx *= FIREBALL_MAX_LEAD / ll; lz *= FIREBALL_MAX_LEAD / ll; }
+    const f: Fireball = {
+      id: this.arrowSeq++, tx: target.x + lx, ty: target.y, tz: target.z + lz,
+      landAt: now + FIREBALL_WINDUP_MS + FIREBALL_FLIGHT_MS,
+    };
+    st.fireballs.push(f);
+    const msg: ServerMsg = { t: 'pgFireball', id: f.id, x: hx, y: hy, z: hz, tx: f.tx, ty: f.ty, tz: f.tz,
+      launchAt: now + FIREBALL_WINDUP_MS, landAt: f.landAt };
+    for (const id of humans) out.push({ to: id, msg });
     return out;
   }
 
@@ -2020,6 +2120,7 @@ export class GameServer {
       out.push(...this.syncPartyCages(w, snap, now));
       if (snap.phase !== 'running') continue;
       out.push(...this.tickParkourCourse(w, snap, now));
+      out.push(...this.tickDragon(w, snap, now));
       for (const member of snap.participants) {
         const p = this.players.get(member.id);
         if (p && member.connected && !p.bot) out.push(...this.evaluatePartyPlayer(p, w));
@@ -2054,11 +2155,13 @@ export class GameServer {
       const snap = this.pg.viewFor(id, now), me = this.pg.participantFor(id);
       const other = this.pg.participantFor(bot.opponent);
       if (!p || !w || !human || !snap || !me || !other) continue;
-      if (snap.phase !== 'running' || me.outAt !== undefined || now < (snap.goalResetAt ?? 0)) continue;
+      if (snap.phase !== 'running' || me.outAt !== undefined || me.finishedAt !== undefined ||
+        now < (snap.goalResetAt ?? 0)) continue;
       if (me.pendingSpawn || me.respawnAt !== undefined) {
         out.push(...this.evaluatePartyPlayer(p, w));
         if (me.respawnAt !== undefined) continue;
       }
+      if (w.parkour) bot.threats = w.parkour.fireballs;
       const action = bot.step(dt, now, snap, me, other, human, w.blocks.asWorld() as unknown as World,
         w.blocks.gen);
       p.x = bot.body.pos.x; p.y = bot.body.pos.y; p.z = bot.body.pos.z; p.yaw = bot.body.yaw; p.pitch = bot.pitch;
@@ -2111,8 +2214,9 @@ export class GameServer {
 
   /** A respawn spectator is invisible to everyone else (never to themselves). */
   private hiddenInWorld(p: ServerPlayer, w: MatchWorld): boolean {
-    return w.mode === 'duels' ? this.duels.participantFor(p.id)?.spectating === true
-      : this.pg.participantFor(p.id)?.respawnAt !== undefined;
+    if (w.mode === 'duels') return this.duels.participantFor(p.id)?.spectating === true;
+    const m = this.pg.participantFor(p.id);
+    return m?.respawnAt !== undefined || (w.mode === 'parkour' && m?.outAt !== undefined);
   }
 
   /** A freshly received transform goes to the rest of its world at once,
@@ -2142,6 +2246,7 @@ export class GameServer {
         const p = this.players.get(id);
         if (p) bodies.push(this.bodyOf(p, w));
       }
+      if (w.parkour) for (const statue of w.parkour.statues.values()) bodies.push(statue);
       let shared: ServerMsg | null = null;
       for (const id of w.members) {
         const p = this.players.get(id);

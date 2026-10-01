@@ -20,6 +20,16 @@ export const enum Block {
   TallGrass = 19,
   Dandelion = 21,
   Poppy = 22,
+  // Parkour set-piece decor (Dragon Chase builds).
+  ParkourRoofRed = 24,
+  ParkourRoofTeal = 25,
+  ParkourChain = 26,
+  ParkourCrystal = 27,
+  ParkourCrystalBlock = 28,
+  ParkourVine = 29,
+  /** A chain run sideways, along x or along z, between two anchors. */
+  ParkourChainX = 30,
+  ParkourChainZ = 31,
   Terracotta = 69,
   Basalt = 70,
   CherryLog = 77,
@@ -135,6 +145,12 @@ export const enum Tile {
   TallGrass = 25,
   Dandelion = 27,
   Poppy = 28,
+  ParkourRoofRed = 30,
+  ParkourRoofTeal = 31,
+  ParkourChain = 32,
+  ParkourCrystal = 33,
+  ParkourCrystalBlock = 34,
+  ParkourVine = 35,
   IronAxe = 59,
   Bullet = 102,
   Terracotta = 125,
@@ -280,6 +296,9 @@ export interface BlockInfo {
   shape: BlockShape;
   /** Sub-boxes of a `box` block. */
   boxes?: Box[];
+  /** A cross sprite's length runs up (default) or along x or z: a chain
+   *  strung sideways lies along its own run. */
+  axis?: 'x' | 'z';
   /** Tint: grass tints only the top face of Grass, all of TallGrass. */
   tint: TintKind;
   /** Placing a block into this one replaces it (tall grass). */
@@ -304,6 +323,7 @@ interface Partial {
   replaceable?: boolean;
   emission?: number;
   boxes?: Box[];
+  axis?: 'x' | 'z';
 }
 
 function def(p: Partial): BlockInfo {
@@ -321,6 +341,7 @@ function def(p: Partial): BlockInfo {
     tint: p.tint ?? null,
     replaceable: p.replaceable ?? false,
     boxes: p.boxes,
+    axis: p.axis,
     top: p.top,
     bottom: p.bottom ?? p.top,
     side: p.side ?? p.top,
@@ -384,6 +405,33 @@ export const BLOCKS: Record<number, BlockInfo> = {
   [Block.TallGrass]: plant('Grass', Tile.TallGrass, 'grass', true),
   [Block.Dandelion]: plant('Dandelion', Tile.Dandelion, null, false),
   [Block.Poppy]: plant('Poppy', Tile.Poppy, null, false),
+  // Parkour decor. Chains, crystals and vines are cross sprites with no
+  // collision, so a build can hang them anywhere without touching the route.
+  [Block.ParkourRoofRed]: def({ name: 'Clay Roof Tiles', hardness: -1, top: Tile.ParkourRoofRed }),
+  [Block.ParkourRoofTeal]: def({ name: 'Glazed Roof Tiles', hardness: -1, top: Tile.ParkourRoofTeal }),
+  [Block.ParkourChain]: def({
+    name: 'Chain', hardness: -1, top: Tile.ParkourChain,
+    solid: false, opaque: false, occludes: false, shape: 'cross',
+  }),
+  [Block.ParkourChainX]: def({
+    name: 'Chain', hardness: -1, top: Tile.ParkourChain,
+    solid: false, opaque: false, occludes: false, shape: 'cross', axis: 'x',
+  }),
+  [Block.ParkourChainZ]: def({
+    name: 'Chain', hardness: -1, top: Tile.ParkourChain,
+    solid: false, opaque: false, occludes: false, shape: 'cross', axis: 'z',
+  }),
+  [Block.ParkourCrystal]: def({
+    name: 'Crystal Cluster', hardness: -1, top: Tile.ParkourCrystal, emission: 12,
+    solid: false, opaque: false, occludes: false, shape: 'cross',
+  }),
+  [Block.ParkourCrystalBlock]: def({
+    name: 'Crystal', hardness: -1, top: Tile.ParkourCrystalBlock, emission: 10, opaque: false, occludes: false,
+  }),
+  [Block.ParkourVine]: def({
+    name: 'Vines', hardness: -1, top: Tile.ParkourVine,
+    solid: false, opaque: false, occludes: false, shape: 'cross', tint: 'foliage',
+  }),
   [Block.Terracotta]: def({ name: 'Terracotta', hardness: 1.25, top: Tile.Terracotta }),
   [Block.Basalt]: def({ name: 'Basalt', hardness: 1.25, top: Tile.Basalt }),
   [Block.CherryLog]: def({

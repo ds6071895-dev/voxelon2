@@ -813,6 +813,86 @@ const paintMedkit: Paint = (p) => {
   g.to(p);
 };
 
+// ── Parkour set-piece decor ─────────────────────────────────────────────────
+
+/** Overlapping shingles: rows of rounded tiles, each row half a tile over,
+ *  lit along its lower lip and shadowed where the next row laps over it. */
+function shingles(pal: RGBA[], line: RGBA) {
+  return (p: Canvas16, seed: number): void => {
+    p.fill((x, y) => {
+      const row = y >> 2, v = y & 3;
+      const u = ((x + (row % 2 ? 2 : 0)) % 4 + 4) % 4;
+      // The rounded foot of each tile: its two outer pixels curl up a row.
+      if (v === 3 && (u === 0 || u === 3)) return line;
+      if (u === 0 && v >= 1) return mix(line, pal[1], .5);
+      let t = .5 + (rnd(seed, (x + (row % 2 ? 2 : 0)) >> 2, row) - .5) * .35 + (tnoise(seed ^ 7, x, y, 4) - .5) * .2;
+      t += v === 0 ? -.3 : v === 2 ? .2 : 0;
+      return pick(pal, t, x, y, .5);
+    });
+  };
+}
+const ROOF_RED = ramp(0x7a2a1d, 0x983624, 0xb3452c, 0xc75a36, 0xd87244, 0xe68d58);
+const ROOF_TEAL = ramp(0x17494f, 0x1f5f66, 0x287780, 0x338e95, 0x44a6aa, 0x62bfbf);
+
+const paintChain: Paint = (p) => {
+  // Alternating oval links down the middle: one face-on, one edge-on.
+  const g = new Grid();
+  const iron = ramp(0x33373d, 0x4a5058, 0x676e77, 0x8b939c, 0xb4bcc4);
+  for (let link = 0; link < 4; link++) {
+    const y0 = link * 4;
+    if (link % 2 === 0) {
+      for (let y = y0; y < y0 + 5; y++) for (const x of [6, 9]) g.put(x, y & 15, iron[y === y0 ? 4 : 2]);
+      g.put(7, y0, iron[3]); g.put(8, y0, iron[3]); g.put(7, (y0 + 4) & 15, iron[1]); g.put(8, (y0 + 4) & 15, iron[1]);
+    } else {
+      for (let y = y0; y < y0 + 5; y++) { g.put(7, y & 15, iron[y === y0 + 1 ? 4 : 2]); g.put(8, y & 15, iron[1]); }
+    }
+  }
+  g.to(p);
+};
+
+const CRYSTAL = ramp(0x3c2f8f, 0x5a45c4, 0x7d67e6, 0xa593f5, 0xcfc4ff, 0xf3efff);
+const paintCrystal: Paint = (p, seed) => {
+  // A cluster of three upright shards, lit on their left facet.
+  const g = new Grid();
+  const shards = [[7, 13, 2], [3, 8, 1], [11, 9, 1]] as const;
+  shards.forEach(([cx, h, r], i) => {
+    for (let k = 0; k < h; k++) {
+      const y = 15 - k, half = k > h - 3 ? 0 : r;
+      for (let x = cx - half; x <= cx + half + 1; x++) {
+        const lit = x <= cx;
+        g.put(x, y, pick(CRYSTAL, (lit ? .75 : .35) + k / h * .3 + (rnd(seed, i, k) - .5) * .1, x, y, .3));
+      }
+    }
+  });
+  g.outline(hex(0x2a1f66, 200));
+  g.to(p);
+};
+const paintCrystalBlock: Paint = (p, seed) => {
+  // Big facets: diagonal bands, with bright seams where facets meet.
+  p.fill((x, y) => {
+    const f = ((x + y * 2) >> 3) + ((x - y + 16) >> 3);
+    const seam = (x + y * 2) % 8 === 0 || (x - y + 16) % 8 === 0;
+    const t = seam ? .95 : .3 + (rnd(seed, f, 1) * .45) + (tnoise(seed, x, y, 8) - .5) * .2;
+    const c = pick(CRYSTAL, t, x, y, .4);
+    return [c[0], c[1], c[2], seam ? 255 : 215];
+  });
+};
+
+const paintVine: Paint = (p, seed) => {
+  // Three trailing strands with leaves every few pixels (tinted by foliage).
+  const g = new Grid();
+  for (let s = 0; s < 3; s++) {
+    let x = 3 + s * 5 + Math.floor(rnd(seed, s, 0) * 2);
+    const len = 10 + Math.floor(rnd(seed, s, 1) * 6);
+    for (let y = 0; y < len; y++) {
+      if (rnd(seed, s, y + 9) > .8) x += rnd(seed, s, y) < .5 ? -1 : 1;
+      g.put(x, y, pick(LEAF_GRAY, .35, x, y, .2));
+      if (y % 3 === 1) { g.put(x - 1, y, pick(LEAF_GRAY, .7, x, y, .3)); g.put(x + 1, y + 1, pick(LEAF_GRAY, .55, x, y, .3)); }
+    }
+  }
+  g.to(p);
+};
+
 // ── Registry ────────────────────────────────────────────────────────────────
 
 export const WORLDS_ART: Partial<Record<Tile, Paint>> = {
@@ -873,6 +953,12 @@ export const WORLDS_ART: Partial<Record<Tile, Paint>> = {
   [Tile.PartyTileD]: paintBlinkStone,
   [Tile.ParkourLaunchPad]: pad(CYAN_LIGHT, false),
   [Tile.ParkourBoostPad]: pad(GOLD_LIGHT, true),
+  [Tile.ParkourRoofRed]: shingles(ROOF_RED, hex(0x4a150e)),
+  [Tile.ParkourRoofTeal]: shingles(ROOF_TEAL, hex(0x0d2c30)),
+  [Tile.ParkourChain]: paintChain,
+  [Tile.ParkourCrystal]: paintCrystal,
+  [Tile.ParkourCrystalBlock]: paintCrystalBlock,
+  [Tile.ParkourVine]: paintVine,
 
   [Tile.IronAxe]: paintIronAxe,
   [Tile.BridgeBow]: paintBridgeBow,

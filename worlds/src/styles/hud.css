@@ -1358,3 +1358,49 @@
     #axe-indicator.reach { box-shadow:0 0 0 1px #ff5f76, 0 0 10px rgba(255,95,118,.8); }
     #axe-indicator.reach i { background:#ff8a9a; }
     .pg-call { color:#eaf1fa; }
+    /* ── Dragon Chase ─────────────────────────────────────────────────────── */
+    /* The course as one bar: the dragon's burn creeping along behind every
+       runner's pip, the flag at the end. */
+    .pg-track { position: absolute; top: 46px; left: 50%; transform: translateX(-50%);
+      width: min(520px, 62vw); height: 10px; border-radius: 99px;
+      background: rgba(8,10,18,.62); border: 1px solid rgba(150,182,224,.22); }
+    .pg-track[hidden] { display: none !important; }
+    .pk-burn { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 99px;
+      background: linear-gradient(90deg, rgba(255,90,40,.15), rgba(255,120,40,.75)); }
+    .pk-pip { position: absolute; top: 50%; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%;
+      background: #d8e2ec; box-shadow: 0 0 0 2px rgba(8,10,18,.8); transition: left .35s ease; }
+    .pk-pip.me { background: #72ffcb; width: 13px; height: 13px; margin: -6.5px 0 0 -6.5px; z-index: 2;
+      box-shadow: 0 0 0 2px rgba(8,10,18,.85), 0 0 12px rgba(114,255,203,.8); }
+    .pk-pip.out { background: #6b7482; opacity: .6; }
+    /* The dragon: a flame-red wedge pointing up the course. */
+    .pk-dragon { position: absolute; top: 50%; width: 0; height: 0; z-index: 3; transform: translate(-70%,-50%);
+      border-top: 9px solid transparent; border-bottom: 9px solid transparent; border-left: 16px solid #ff4d2e;
+      filter: drop-shadow(0 0 5px rgba(255,90,40,.95)); transition: left .2s linear; }
+    /* The finish: a little chequered flag. */
+    .pk-flag { position: absolute; right: -4px; top: 50%; width: 14px; height: 14px; transform: translate(50%,-50%);
+      border-radius: 3px; box-shadow: 0 0 0 2px rgba(8,10,18,.8);
+      background: conic-gradient(#fff 25%, #1b2430 0 50%, #fff 0 75%, #1b2430 0) 0 0 / 7px 7px; }
+    .pg-call.pk-danger { color: #ffd6dc; box-shadow: 0 0 34px rgba(255,60,60,.65);
+      animation: pk-danger .5s ease-in-out infinite alternate; }
+    @keyframes pk-danger { to { background: rgba(120,10,20,.78); } }
+    .pg-row.made .pg-row-points { color: #72ffcb; }
+    .pg-banner.pk-hurt .pg-banner-title { font-size: 30px; font-weight: 900; line-height: 1; }
+    .pg-banner .pk-hearts { font-size: 18px; color: #ff8d9c; letter-spacing: 3px; }
+    .pk-board-head { padding: 8px 0 4px; font-size: 9px; font-weight: 950; letter-spacing: 2.4px; color: #1f8f5f; }
+    .pk-board-head.fell { color: #c2334a; }
+    .pk-fell .pg-card-name { opacity: .75; }
+    /* Made it / out of lives: a card you can act on while the run goes on. */
+    .pg-done { position: absolute; right: 22px; bottom: 26px; width: min(360px, calc(100vw - 32px));
+      padding: 18px 18px 16px; border-radius: 20px; text-align: center; pointer-events: auto; --pg-accent: #ffd25e;
+      color: #0f2233; background:
+        radial-gradient(ellipse 90% 60% at 50% 0%, color-mix(in srgb, var(--pg-accent) 24%, transparent), transparent 70%),
+        linear-gradient(180deg, #fff, #f3f8fb);
+      border: 1px solid color-mix(in srgb, var(--pg-accent) 30%, #e2ebf1);
+      box-shadow: 0 6px 0 color-mix(in srgb, var(--pg-accent) 25%, #dfe8ee), 0 30px 70px -20px rgba(8,20,34,.55);
+      animation: pk-done-in .55s cubic-bezier(.2,.9,.25,1.1) both; }
+    .pg-done[hidden] { display: none !important; }
+    .pg-done.out { --pg-accent: #ff6d80; }
+    @keyframes pk-done-in { from { opacity: 0; transform: translateY(30px) scale(.94); } }
+    .pg-done-title { margin: 10px 0 6px; font-size: 26px; font-weight: 950; line-height: 1; letter-spacing: 1px; }
+    .pg-done-note { margin: 0; font-size: 12px; line-height: 1.5; color: #4f6679; }
+    .pg-done-actions { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }

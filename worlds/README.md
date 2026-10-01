@@ -45,6 +45,20 @@ In the server console you can type `status`, `save` or `stop`.
   10 minutes after. The leader picks the game and the party plays privately.
   Size limits: The Bridge 2; Parkour 4 as a party, 2 from the queue;
   Duels 4.
+- **Parkour is Dragon Chase**: a dragon chases the runners down a course
+  that winds through six set pieces (across a village's rooftops, over a gorge
+  on rope bridges, across a waterfall canyon on stepping stones, along a
+  castle's walls, through great trees, clock towers, an aqueduct, a sky
+  galleon, a crystal cavern, a lantern shrine, a mine scaffold, a foundry)
+  between the Dragon's Lair and the Sanctuary. Every pad is the top of a real
+  build standing on the ground. Everyone has three lives; a
+  fall, the dragon's jaws or its fireballs take one, and you come back clear
+  ahead of it. Everyone who reaches the end makes it (onto the podium, and
+  free to go back to the menu at once); the result lists who made it and who
+  fell, in the order they fell. The route is `src/parkour_course.ts`, the
+  builds round it `src/parkour_setpieces.ts` (filtered so no build ever
+  touches a jump), the dragon's maths `src/parkour_mechanics.ts` and its
+  model `src/parkour_dragon.ts`.
 - **Practice opponents**: if nobody else is queuing after 15 s, the server
   fills the match with an opponent. It gets a generated name like everyone
   else and nothing on the wire marks it. Its hidden level adapts during the
@@ -53,9 +67,10 @@ In the server console you can type `status`, `save` or `stop`.
 ## Tests
 
 ```sh
-npm test            # 61 checks: names, codes, isolation, queue/party sizes, bots, 300 worlds
+npm test            # names, codes, isolation, queue/party sizes, bots, 300 worlds, Dragon Chase
+                    # (every jump of every sampled course flown with real physics, builds included)
 npm run stress      # 300+ live worlds with 300 AI opponents: tick budget, isolation, teardown
-npm run bot-sim     # opponent strength: new vs old bots, adaptation, returning players
+npm run bot-sim     # opponent strength: Dragon Chase make-it rates, Bridge bots and adaptation
 ```
 
 Browser end-to-end (needs a running client and server, plus any Playwright
@@ -65,7 +80,7 @@ install):
 PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs TEST_URL=http://localhost:5174 node test/e2e.mjs
 ```
 
-Diagnostics: `test/parkour_trace.ts` (why a bot fell on a course) and
+Diagnostics: `test/parkour_trace.ts` (every life a bot loses on a course) and
 `test/bridge_ledger.ts` (who wins Bridge fights and how).
 `test/bridge_scenarios.ts` plays the Bridge bot against a scripted player: walls, tunnels,
 steps, a flanking bridge, a skybridge overhead and a straight rush (`SKILL=0.55 ONLY=over VERBOSE=1`). `test/legacy_party_bot.ts`

@@ -19,6 +19,7 @@ import { FROZEN_INPUT } from '../src/input';
 import type { World } from '../src/world';
 import { RatSeekMatch } from '../src/ratseek';
 import { SeekerBot } from '../src/ratseek_bot';
+import { dragonChaseTests } from './dragon_chase';
 
 let passed = 0, failed = 0;
 function check(name: string, ok: boolean, detail = ''): void {
@@ -509,6 +510,41 @@ section('mobile aim assistance stays modest and respects visibility');
   check('voxel line of sight detects a wall', !!raycastBlocks(wall, new Vector3(0, 1, 0), new Vector3(0, 0, -1), 10));
   check('voxel line of sight stops at target range', !raycastBlocks(wall, new Vector3(0, 1, 0), new Vector3(0, 0, -1), 2));
 }
+
+section('dragon chase: a runner who made it can go back to the menu');
+{
+  const h = new Harness(77);
+  const a = h.join(), b = h.join();
+  h.send(a, { t: 'partyCreate' });
+  h.send(b, { t: 'partyJoin', code: h.last(a, 'party')!.party!.code });
+  h.send(a, { t: 'play', mode: 'parkour' });
+  h.ready(a, b);
+  h.tick(3.2);
+  type Engine = {
+    participantFor(id: number): { finishedAt?: number; place?: number; immuneUntil: number } | null;
+    phaseFor(id: number): string | null;
+    hurt(id: number, cause: 'fire', now: number): boolean;
+  };
+  const inner = h.server as unknown as { pg: Engine; nowMs(): number };
+  check('a party runs the course together', inner.pg.phaseFor(a) === 'running' && inner.pg.phaseFor(b) === 'running');
+  const me = inner.pg.participantFor(a)!;
+  me.finishedAt = inner.nowMs(); me.place = 1; me.immuneUntil = Infinity;
+  const before = h.all(b).length;
+  h.send(a, { t: 'leaveMatch' });
+  h.tick(.2);
+  const after = h.all(b).slice(before);
+  check('...the others are not told when one who made it leaves', !after.some((m) => m.t === 'leave' && m.id === a));
+  const snap = [...after].reverse().find((m) => m.t === 'snapshot') as Extract<ServerMsg, { t: 'snapshot' }> | undefined;
+  check('...they still see them on the podium', !!snap?.players.some((p) => p.id === a && !p.dead));
+  check('...and the run goes on', inner.pg.phaseFor(b) === 'running' && h.server.worldOf(a) === null);
+  for (let k = 0; k < 3; k++) { inner.pg.hurt(b, 'fire', inner.nowMs()); h.tick(3.2); }
+  check('out of lives, you watch as a free-flying spectator', h.all(b).some((m) => m.t === 'pgRespawn' && m.spectating));
+  const result = h.last(b, 'pgResult')?.result;
+  check('the run ends once nobody is left running', !!result && result.runners?.length === 2);
+  check('...with the leaver still counted as making it', result?.runners?.find((r) => r.id === a)?.made === true);
+}
+
+dragonChaseTests(check, section);
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);
