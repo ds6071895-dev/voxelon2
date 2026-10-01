@@ -24,6 +24,27 @@ npm run host        # build, then serve client + server from :8090
 
 In the server console you can type `status`, `save` or `stop`.
 
+## November 2026 release trailer
+
+`trailer.html` is a standalone cinematic stage using the game's real worlds,
+models and title-screen logo. With the dev server running, open
+`http://localhost:5174/trailer.html` to preview its seventeen-shot, 94-second edit.
+It does not need the multiplayer server.
+
+- `npm run trailer:music` composes **Worlds Awaken**, the original epic score.
+- `npm run trailer:check` checks camera positions against the authored scenery.
+- `npm run trailer` captures the trailer, eight screenshots, hero images and
+  a thumbnail. Playwright/Chromium and FFmpeg are required for capture.
+- `npm run trailer:verify` validates the exported files.
+
+See [`scripts/TRAILER.md`](scripts/TRAILER.md) for setup and capture options.
+Generated media lives in `release-media/`, with a gallery at
+`release-media/index.html`. The end card says **November 2026** and has no URL.
+
+The [WORLDS v1.0 release](https://github.com/ds6071895-dev/voxelon2/releases/tag/worlds-v1.0)
+contains the finished 94-second trailer, promotional screenshot pack and original
+score with stems. Large media is attached to the release rather than Git history.
+
 ## How it fits together
 
 - **`src/multiverse.ts`**: a `WorldSpec {id, kind, seed}` names a world, and

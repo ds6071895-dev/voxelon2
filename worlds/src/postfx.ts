@@ -305,13 +305,13 @@ export class PostFX {
 
   /** Draw one frame. Falls straight through to the plain renderer whenever the
    *  stack is off, so callers have exactly one render path to think about. */
-  render(camera: THREE.Camera): void {
+  render(camera: THREE.Camera, time?: number): void {
     if (!this.composer || !this.renderPass) {
       this.renderer.render(this.scene, camera);
       return;
     }
     this.renderPass.camera = camera;
-    if (this.gradePass) this.gradePass.uniforms.uTime.value = this.clock.getElapsedTime();
+    if (this.gradePass) this.gradePass.uniforms.uTime.value = time ?? this.clock.getElapsedTime();
     this.composer.render();
   }
 

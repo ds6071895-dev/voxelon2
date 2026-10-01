@@ -7,3 +7,5 @@ dist/
 .env.*
 *.local
 worlds-accounts.json
+release-media/
+__pycache__/

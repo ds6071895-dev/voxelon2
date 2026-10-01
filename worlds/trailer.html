@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Worlds — November 2026 release trailer</title>
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; background: #080e18; color: #edf3fc; font: 14px system-ui, sans-serif; }
+      #output { display: block; width: 100%; height: auto; }
+      #controls { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 12px; padding: 12px 18px; border: 1px solid #ffffff30; border-radius: 14px; background: #101d30e8; }
+      button, select { padding: 8px 12px; border: 1px solid #ffffff30; border-radius: 8px; color: inherit; background: #213653; cursor: pointer; }
+      #status { min-width: 140px; }
+    </style>
+  </head>
+  <body>
+    <canvas id="output" aria-label="Worlds cinematic trailer preview"></canvas>
+    <div id="controls">
+      <button id="play">Play preview</button>
+      <select id="shot" aria-label="Select shot"></select>
+      <span id="status">Preparing scenery…</span>
+    </div>
+    <script type="module" src="/src/trailer/main.ts"></script>
+  </body>
+</html>

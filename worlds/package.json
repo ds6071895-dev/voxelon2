@@ -11,7 +11,11 @@
     "host": "npm run build && npm run server",
     "test": "esbuild test/run.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/test.cjs --log-level=error && node node_modules/.tmp/test.cjs",
     "bot-sim": "esbuild test/bot_sim.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/bot-sim.cjs --log-level=error && node node_modules/.tmp/bot-sim.cjs",
-    "stress": "esbuild test/stress.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/stress.cjs --log-level=error && node node_modules/.tmp/stress.cjs"
+    "stress": "esbuild test/stress.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/stress.cjs --log-level=error && node node_modules/.tmp/stress.cjs",
+    "trailer": "node scripts/capture_trailer.mjs",
+    "trailer:check": "esbuild scripts/check_trailer_locations.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/trailer-check.cjs --log-level=error && node node_modules/.tmp/trailer-check.cjs",
+    "trailer:verify": "node scripts/verify_release.mjs",
+    "trailer:music": "node scripts/compose_trailer.mjs"
   },
   "dependencies": {
     "three": "^0.165.0",
