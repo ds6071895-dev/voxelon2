@@ -203,6 +203,11 @@ export class Particles {
     for (let i = 0; i < 6; i++) this.healSpiral(x, y + 0.2 + i * 0.28, z, i * 1.05);
   }
 
+  /** Chips of a broken block, in the block's own colour, thrown out and down. */
+  debris(x: number, y: number, z: number, color: number, count = 9): void {
+    this.burst(x, y, z, count, color, 4.2, 0.7, { gravity: 16, spread: 0.7, scale: 0.42 });
+  }
+
   /** Gray puff where a round hits something. */
   poof(x: number, y: number, z: number): void {
     this.burst(x, y, z, 10, 0xdddddd, 2, 0.5);

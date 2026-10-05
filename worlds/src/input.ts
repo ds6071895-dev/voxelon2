@@ -254,6 +254,16 @@ export class Input {
   get zoomHeld(): boolean { return !this.touchMode && this.heldBind('zoom'); }
 
   /** Consume per-frame deltas/edges; call once at the end of each frame. */
+  /** Menus must never leave an attack or movement held when they close. */
+  releaseButtons(): void {
+    this.keys.clear(); this.kbSprint = false;
+    this.leftDown = false; this.leftClicked = false; this.rightDown = false; this.rightClicked = false;
+    this.tForward = false; this.tBack = false; this.tLeft = false; this.tRight = false;
+    this.tJump = false; this.tSneak = false; this.tSprint = false;
+    this.mouseDX = 0; this.mouseDY = 0;
+    this.endFrame();
+  }
+
   endFrame(): void {
     this.mouseDX = 0;
     this.mouseDY = 0;

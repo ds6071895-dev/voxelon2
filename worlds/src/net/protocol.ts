@@ -17,6 +17,7 @@ import type {
 } from '../partygames';
 import type { WorldSpec } from '../multiverse';
 import type { RatClassId, RsEffects, RsResult, RsRole, RsSnapshot, RsSound } from '../ratseek_rules';
+import type { BwAction, BwSnapshot, BwResult, BwDropView, BwProjectileView } from '../bedwars_rules';
 
 /** Worlds' own game-server port. VOXELON keeps 8080; the two never collide. */
 export const SERVER_PORT = 8090;
@@ -29,9 +30,9 @@ export const EDIT_RANGE = 7;       // max distance a player may edit a block
 export const PARTY_MAX = 4;        // most members one party can hold
 
 /** The games on the title screen. */
-export type GameMode = 'duels' | 'bridge' | 'parkour' | 'ratseek';
+export type GameMode = 'duels' | 'bridge' | 'parkour' | 'ratseek' | 'bedwars';
 export function isGameMode(v: unknown): v is GameMode {
-  return v === 'duels' || v === 'bridge' || v === 'parkour' || v === 'ratseek';
+  return v === 'duels' || v === 'bridge' || v === 'parkour' || v === 'ratseek' || v === 'bedwars';
 }
 
 /** Public, render-relevant state of one player. */
@@ -70,12 +71,19 @@ interface PartyMember {
   skin: number;
   cosmetics?: Cosmetics;
   /** What they are doing right now, for the leader's "is everyone free". */
-  status: 'menu' | 'queue' | 'match';
+  status: 'menu' | 'queue' | 'match' | 'results';
 }
 export interface PartyState {
   code: string;
   leader: number;
   members: PartyMember[];
+  bedwars?: BedwarsSetupState;
+}
+
+export interface BedwarsSetupState {
+  assignments: Record<string, 0 | 1>;
+  fill: boolean;
+  revision: number;
 }
 
 // --- client -> server -------------------------------------------------------
@@ -83,7 +91,7 @@ export type ClientMsg =
   // First message on every socket. `guest` asks for the temporary name this
   // browser had last time (granted only if nobody else holds it); `session`
   // resumes a signed-in account.
-  | { t: 'hello'; guest?: string; session?: { username: string; token: string }; cosmetics?: Cosmetics }
+  | { t: 'hello'; guest?: string; session?: { username: string; token: string }; cosmetics?: Cosmetics; resumeToken?: string }
   // Accounts. There are no custom usernames: you register the name you are
   // currently playing under, or one the server rolled for you (`rollName`).
   | { t: 'rollName' }
@@ -97,10 +105,11 @@ export type ClientMsg =
   | { t: 'partyLeave' }
   | { t: 'partyKick'; id: number }
   | { t: 'partyPromote'; id: number }
+  | { t: 'bwSetup'; assignments: Record<string, 0 | 1>; fill: boolean; revision: number }
   // Play: solo -> public queue; a party leader -> a private match for the party.
   // Rat and Seek: `seeker` is the party member the leader picked to hunt
   // (0 = the AI seeker, the default), and `ratClass` the class this player last chose.
-  | { t: 'play'; mode: GameMode; seeker?: number; ratClass?: RatClassId }
+  | { t: 'play'; mode: GameMode; seeker?: number; ratClass?: RatClassId; setupRevision?: number }
   | { t: 'cancelQueue' }
   // Back to the menu (from a results screen, or forfeiting a live match).
   | { t: 'leaveMatch' }
@@ -126,11 +135,12 @@ export type ClientMsg =
   | { t: 'rsHit'; target: number; decoy?: boolean }
   | { t: 'rsClass'; cls: RatClassId }
   // The party host's "Who seeks?" pick during the prep time (0 = the AI seeker).
-  | { t: 'rsSeeker'; seeker: number };
+  | { t: 'rsSeeker'; seeker: number }
+  | { t: 'bwAction'; world: number; action: BwAction };
 
 // --- server -> client -------------------------------------------------------
 export type ServerMsg =
-  | { t: 'welcome'; id: number; username: string; account: boolean; cosmetics?: Cosmetics }
+  | { t: 'welcome'; id: number; username: string; account: boolean; cosmetics?: Cosmetics; resumeToken?: string }
   /** Your name or sign-in state changed (register, login, logout). */
   | { t: 'identity'; username: string; account: boolean; token?: string; cosmetics?: Cosmetics }
   | { t: 'authErr'; error: string }
@@ -198,7 +208,18 @@ export type ServerMsg =
   | { t: 'rsMsg'; text: string; color: string }
   | { t: 'rsSound'; kind: RsSound; x?: number; y?: number; z?: number }
   | { t: 'rsImpulse'; vx: number; vy: number; vz: number; momentum: number }
-  | { t: 'rsResult'; result: RsResult };
+  | { t: 'rsResult'; result: RsResult }
+  | { t: 'bwArena'; world: WorldSpec; team: 0 | 1; spawn: { x: number; y: number; z: number }; yaw: number }
+  | { t: 'bwState'; s: BwSnapshot }
+  | { t: 'bwKit'; slots: (ItemStack | null)[]; selected?: number }
+  /** World items: spawns, stack-size changes and pickups/merges. `reset` replaces the whole set (join/reconnect). */
+  | { t: 'bwDrop'; reset?: boolean; add?: BwDropView[]; gone?: { id: number; by?: number; into?: number }[]; count?: { id: number; count: number }[] }
+  | { t: 'bwProj'; p: BwProjectileView[] }
+  /** The server refused a block placement the client had already shown. */
+  | { t: 'bwNack'; x: number; y: number; z: number }
+  | { t: 'bwEvent'; text: string; tone?: string }
+  | { t: 'bwBuyResult'; request: number; ok: boolean; message: string }
+  | { t: 'bwResult'; result: BwResult };
 
 // --- Names ------------------------------------------------------------------
 

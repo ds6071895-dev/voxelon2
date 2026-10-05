@@ -23,7 +23,7 @@ interface HomeHooks {
   onCapes(): void;
 }
 
-const MODE_TITLE: Record<GameMode, string> = { duels: 'Duels', bridge: 'The Bridge', parkour: 'Parkour', ratseek: 'Rat and Seek' };
+const MODE_TITLE: Record<GameMode, string> = { duels: 'Duels', bridge: 'The Bridge', parkour: 'Parkour', ratseek: 'Rat and Seek', bedwars: 'Bedwars' };
 
 export class HomeScreen {
   readonly root = document.getElementById('w-home') as HTMLElement;

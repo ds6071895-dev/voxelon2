@@ -11,6 +11,7 @@ interface PartyHooks {
   onLeave(): void;
   onKick(id: number): void;
   onPromote(id: number): void;
+  onBedwars?(): void;
   onClose?(): void;
 }
 
@@ -71,12 +72,13 @@ export class PartyPanel {
         <div class="w-err" role="alert">${esc(this.error)}</div>
         <ul class="w-rules">
           <li>The leader picks the game and everyone plays together.</li>
-          <li>Duels and Parkour take up to ${PARTY_MAX}; The Bridge is 1v1, so it needs exactly 2.</li>
+          <li>Duels, Parkour, Rat and Seek, and Bedwars take up to ${PARTY_MAX}; The Bridge needs exactly 2.</li>
+          <li>In Bedwars, the leader chooses the teams — including who plays alone in a 2v1.</li>
         </ul>`;
     } else {
       const leader = s.leader === this.myId;
       const rows = s.members.map((m) => {
-        const status = m.status === 'match' ? 'In a match' : m.status === 'queue' ? 'Searching' : 'Ready';
+        const status = m.status === 'match' ? 'In a match' : m.status === 'results' ? 'Match finished · Ready' : m.status === 'queue' ? 'Searching' : 'Ready';
         const me = m.id === this.myId;
         const actions = leader && !me
           ? `<span class="w-member-actions"><button class="w-mini" type="button" data-promote="${m.id}">Make leader</button><button class="w-mini danger" type="button" data-kick="${m.id}">Remove</button></span>`
@@ -91,6 +93,7 @@ export class PartyPanel {
         <div class="w-code"><div><small>Party code</small><b>${esc(s.code)}</b></div>
           <button class="w-btn" type="button" data-act="copy">${Date.now() - this.copied < 1600 ? 'Copied' : 'Copy'}</button></div>
         <ul class="w-members">${rows}${empty}</ul>
+        ${s.members.length > 1 ? '<button class="w-btn" type="button" data-act="bedwars">Bedwars · Choose teams</button>' : ''}
         <p class="w-lede">${leader
           ? 'You lead: pick a game on the title screen and everyone comes with you.'
           : 'The leader picks the game. Stay on the title screen and you will be brought in.'}</p>
@@ -107,6 +110,7 @@ export class PartyPanel {
     this.body.querySelector('[data-act="close"]')?.addEventListener('click', () => this.close());
     this.body.querySelector('[data-act="create"]')?.addEventListener('click', () => this.hooks.onCreate());
     this.body.querySelector('[data-act="leave"]')?.addEventListener('click', () => this.hooks.onLeave());
+    this.body.querySelector('[data-act="bedwars"]')?.addEventListener('click', () => { this.close(); this.hooks.onBedwars?.(); });
     this.body.querySelector('[data-act="copy"]')?.addEventListener('click', () => {
       if (!s) return;
       void navigator.clipboard?.writeText(s.code).catch(() => { /* not allowed: the code is on screen */ });

@@ -6,13 +6,12 @@ import { Tile } from './blocks';
 import { mulberry32, hash2 } from './noise';
 import { WORLDS_ART } from './tile_art';
 import { MANOR_ART } from './tile_art_manor';
+import { BEDWARS_ART } from './tile_art_bedwars';
 
 export const TILE_PX = 16;
-// 20x20 grid. Bumped from 16 when the minigame block/item set needed 15 tiles
-// and only 13 cells were free. All tile addressing goes through tileOrigin /
-// uvRect, so widening the grid is a pure data change — there is no hand-rolled
-// `% 16` arithmetic anywhere in the codebase.
-export const ATLAS_TILES = 20;
+// 21x21 grid: Bedwars equipment follows the manor tiles at cell 400.
+// All tile addressing goes through tileOrigin / uvRect.
+export const ATLAS_TILES = 21;
 /** Gutter around every tile's art inside its atlas cell.
  *
  *  The atlas is MIPMAPPED (see createAtlas), and a mipmap averages neighbouring
@@ -239,11 +238,11 @@ export function createAtlas(seed = 1337, maxAnisotropy = 1): Atlas {
   ctx.imageSmoothingEnabled = false;
 
   const painted: number[] = [];
-  for (const tile of new Set([...Object.keys(PAINTERS), ...Object.keys(WORLDS_ART), ...Object.keys(MANOR_ART)].map(Number))) {
+  for (const tile of new Set([...Object.keys(PAINTERS), ...Object.keys(WORLDS_ART), ...Object.keys(MANOR_ART), ...Object.keys(BEDWARS_ART)].map(Number))) {
     const p = new Painter();
     // Worlds' redesigned tiles are painted in their final colours; only the
     // inherited VOXELON art still goes through the vibrance pass.
-    const redesigned = WORLDS_ART[tile as Tile] ?? MANOR_ART[tile as Tile];
+    const redesigned = WORLDS_ART[tile as Tile] ?? MANOR_ART[tile as Tile] ?? BEDWARS_ART[tile as Tile];
     if (redesigned) redesigned(p, seed ^ (tile * 7919));
     else { PAINTERS[tile](p, seed ^ (tile * 7919)); vibrance(p); }
     const img = new ImageData(p.data, TILE_PX, TILE_PX);
@@ -284,26 +283,35 @@ export function createAtlas(seed = 1337, maxAnisotropy = 1): Atlas {
   };
 }
 
-/** 10 progressive crack-stage textures for block breaking. */
+/** 10 progressive crack-stage textures for block breaking. The cracks spread
+ *  outward from a few seeds across the whole face, so every stage adds to the
+ *  last (no jumping around) and the final stage reads as a shattering block. */
 export function createCrackTextures(seed = 555): THREE.CanvasTexture[] {
+  const rng = mulberry32(seed);
+  const N = TILE_PX, taken = new Set<number>(), order: [number, number][] = [];
+  const frontier: [number, number][] = [[8, 8], [3, 12], [12, 3], [4, 4], [12, 12], [8, 2], [2, 8], [14, 9]];
+  for (const [x, y] of frontier) { taken.add(y * N + x); order.push([x, y]); }
+  // Random growth with a bias toward continuing straight, so it looks like a fracture.
+  const heads = frontier.map(([x, y]) => ({ x, y, dx: rng() < 0.5 ? 1 : -1, dy: rng() < 0.5 ? 1 : -1 }));
+  for (let guard = 0; order.length < 120 && guard < 4000; guard++) {
+    const h = heads[Math.floor(rng() * heads.length)];
+    if (rng() < 0.62) h.x += h.dx; else h.y += h.dy;
+    if (rng() < 0.18) h.dx = -h.dx;
+    if (rng() < 0.18) h.dy = -h.dy;
+    if (h.x < 0 || h.y < 0 || h.x >= N || h.y >= N) { h.x = 8; h.y = 8; continue; }
+    const key = h.y * N + h.x;
+    if (taken.has(key)) continue;
+    taken.add(key); order.push([h.x, h.y]);
+  }
   const out: THREE.CanvasTexture[] = [];
   for (let stage = 0; stage < 10; stage++) {
     const p = new Painter();
-    const rng = mulberry32(seed); // same seed: cracks grow, don't jump around
-    const branches = 4;
-    for (let b = 0; b < branches; b++) {
-      let x = 8, y = 8;
-      let dx = rng() < 0.5 ? 1 : -1;
-      let dy = rng() < 0.5 ? 1 : -1;
-      const steps = 2 + Math.floor((stage + 1) * 1.1);
-      for (let s = 0; s < steps; s++) {
-        const a = Math.floor(40 + stage * 14 + rng() * 40);
-        p.set(x, y, [0, 0, 0, Math.min(a, 200)]);
-        if (stage > 4 && rng() < 0.5) p.set(x + 1, y, [0, 0, 0, a >> 1]);
-        if (rng() < 0.6) x += dx; else y += dy;
-        if (rng() < 0.15) dx = -dx;
-        if (rng() < 0.15) dy = -dy;
-      }
+    const count = Math.ceil(order.length * (stage + 1) / 10);
+    // A pale rim under each crack so it still reads on dark blocks like red wool.
+    for (let i = 0; i < count; i++) { const [x, y] = order[i]; if (!taken.has((y + 1) * N + x)) p.set(x, y + 1, [255, 255, 255, 70]); }
+    for (let i = 0; i < count; i++) {
+      const [x, y] = order[i];
+      p.set(x, y, [10, 8, 12, i % 3 === 0 ? 170 : 230]);
     }
     const canvas = document.createElement('canvas');
     canvas.width = TILE_PX; canvas.height = TILE_PX;

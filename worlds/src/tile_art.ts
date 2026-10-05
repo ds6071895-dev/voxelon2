@@ -304,8 +304,15 @@ const LEAF_GRAY = ramp(0x5c5c5c, 0x767676, 0x8f8f8f, 0xa8a8a8, 0xc2c2c2, 0xd8d8d
 const LEAF_BIRCH = ramp(0x3f6a2a, 0x4f7e33, 0x61923d, 0x74a548, 0x88b755, 0x9cc662);
 const LEAF_SPRUCE = ramp(0x1d3a2a, 0x244633, 0x2c533d, 0x356147, 0x3f6e52, 0x4a7c5d);
 const LEAF_CHERRY = ramp(0xc56a92, 0xd47ea3, 0xe093b4, 0xeaa8c4, 0xf2bdd3, 0xf9d3e2);
-const blossom = (x: number, y: number, seed: number): RGBA | null =>
-  rnd(seed ^ 0x6b, x, y) > .95 ? hex(0xfff4f8) : rnd(seed ^ 0x6c, x, y) > .975 ? hex(0x6f9a4a) : null;
+const cherryLeaves: Paint = (p, seed) => {
+  p.fill((x, y) => {
+    const cluster = tnoise(seed, x, y, 5);
+    if (cluster < .2 && rnd(seed ^ 2, x, y) > .72) return CLEAR;
+    // Broad pink clusters retain the blossom silhouette without bright white
+    // and dark green single-pixel flecks shimmering at island-view distance.
+    return pick(LEAF_CHERRY, .3 + cluster * .55, x, y, .1);
+  });
+};
 
 /** Tinted grass tufts for the cross-shaped plant. */
 const paintTallGrass: Paint = (p, seed) => {
@@ -921,7 +928,7 @@ export const WORLDS_ART: Partial<Record<Tile, Paint>> = {
   [Tile.Leaves]: leaves(LEAF_GRAY),
   [Tile.BirchLeaves]: leaves(LEAF_BIRCH),
   [Tile.SpruceLeaves]: leaves(LEAF_SPRUCE),
-  [Tile.CherryLeaves]: leaves(LEAF_CHERRY, blossom),
+  [Tile.CherryLeaves]: cherryLeaves,
   [Tile.TallGrass]: paintTallGrass,
   [Tile.Dandelion]: flower(ramp(0xd99a12, 0xf0bf22, 0xffdc3d, 0xffee8a), hex(0xd9771b), 'round'),
   [Tile.Poppy]: flower(ramp(0x8f1418, 0xb81f24, 0xdc3232, 0xf05a4f), hex(0x1f1a1a), 'cup'),
@@ -965,4 +972,3 @@ export const WORLDS_ART: Partial<Record<Tile, Paint>> = {
   [Tile.BridgeArrow]: paintBridgeArrow,
   [Tile.MedkitSprite]: paintMedkit,
 };
-

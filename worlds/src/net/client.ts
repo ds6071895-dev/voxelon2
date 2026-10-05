@@ -14,6 +14,7 @@ import type { DuelArenaBounds, DuelLobbySnapshot, DuelResult } from '../duels';
 import type { PartyArenaBounds, PartyLobbySnapshot, PartyResult, PartySubBounds } from '../partygames';
 import type { WorldSpec } from '../multiverse';
 import type { RatClassId, RsEffects, RsResult, RsRole, RsSnapshot, RsSound } from '../ratseek_rules';
+import type { BwSnapshot, BwResult, BwAction, BwDropView, BwProjectileView } from '../bedwars_rules';
 
 export interface Remote {
   info: PlayerInfo;
@@ -75,6 +76,7 @@ export class NetClient {
   private xformAcc = 0;
   private reconnectTimer = 0;
   private attempts = 0;
+  private resumeToken = '';
   /** Supplies the hello payload (guest name, session, look) on every connect. */
   helloPayload: () => Extract<ClientMsg, { t: 'hello' }> = () => ({ t: 'hello' });
 
@@ -127,13 +129,26 @@ export class NetClient {
   onRsSound?: (kind: RsSound, at: { x: number; y: number; z: number } | null) => void;
   onRsImpulse?: (vx: number, vy: number, vz: number, momentum: number) => void;
   onRsResult?: (result: RsResult) => void;
+  onBwArena?: (world: WorldSpec, team: 0 | 1, spawn: { x: number; y: number; z: number }, yaw: number) => void;
+  onBwState?: (s: BwSnapshot) => void;
+  onBwKit?: (slots: (ItemStack | null)[], selected: number | undefined) => void;
+  onBwDrop?: (msg: { reset?: boolean; add?: BwDropView[]; gone?: { id: number; by?: number; into?: number }[]; count?: { id: number; count: number }[] }) => void;
+  onBwProj?: (list: BwProjectileView[]) => void;
+  onBwNack?: (x: number, y: number, z: number) => void;
+  onBwEvent?: (text: string, tone?: string) => void;
+  onBwBuyResult?: (request: number, ok: boolean, message: string) => void;
+  onBwResult?: (result: BwResult) => void;
 
   connect(): void {
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return;
     let ws: WebSocket;
     try { ws = new WebSocket(serverUrl()); } catch { this.scheduleReconnect(); return; }
     this.ws = ws;
-    ws.onopen = () => { this.attempts = 0; this.raw(this.helloPayload()); };
+    ws.onopen = () => {
+      this.attempts = 0;
+      if (!this.resumeToken) { try { this.resumeToken = sessionStorage.getItem('worlds.reconnect') ?? ''; } catch { /* optional */ } }
+      this.raw({ ...this.helloPayload(), resumeToken: this.resumeToken || undefined });
+    };
     ws.onmessage = (e) => {
       let msg: ServerMsg;
       try { msg = JSON.parse(e.data as string) as ServerMsg; } catch { return; }
@@ -161,6 +176,8 @@ export class NetClient {
       case 'welcome':
         this.connected = true;
         this.myId = msg.id;
+        this.resumeToken = msg.resumeToken ?? '';
+        try { sessionStorage.setItem('worlds.reconnect', this.resumeToken); } catch { /* optional */ }
         this.moveSeq = 0;
         this.onWelcome?.(msg.username, msg.account, msg.cosmetics);
         break;
@@ -280,6 +297,18 @@ export class NetClient {
       case 'rsSound': this.onRsSound?.(msg.kind, msg.x !== undefined ? { x: msg.x, y: msg.y!, z: msg.z! } : null); break;
       case 'rsImpulse': this.onRsImpulse?.(msg.vx, msg.vy, msg.vz, msg.momentum); break;
       case 'rsResult': this.onRsResult?.(msg.result); break;
+      case 'bwArena':
+        this.enterWorld(msg.world.id, undefined);
+        this.onBwArena?.(msg.world, msg.team, msg.spawn, msg.yaw);
+        break;
+      case 'bwState': this.onBwState?.(msg.s); break;
+      case 'bwKit': this.onBwKit?.(msg.slots, msg.selected); break;
+      case 'bwDrop': this.onBwDrop?.(msg); break;
+      case 'bwProj': this.onBwProj?.(msg.p); break;
+      case 'bwNack': this.onBwNack?.(msg.x, msg.y, msg.z); break;
+      case 'bwEvent': this.onBwEvent?.(msg.text, msg.tone); break;
+      case 'bwBuyResult': this.onBwBuyResult?.(msg.request, msg.ok, msg.message); break;
+      case 'bwResult': this.onBwResult?.(msg.result); break;
     }
   }
 
@@ -316,6 +345,9 @@ export class NetClient {
   // --- Outbound ----------------------------------------------------------------
 
   send(msg: ClientMsg): boolean { return this.connected ? this.raw(msg) : false; }
+  sendBwAction(action: BwAction): void {
+    if (this.worldId !== null) this.send({ t: 'bwAction', world: this.worldId, action });
+  }
 
   /** Throttled transform send (call every frame with dt). */
   sendXform(dt: number, x: number, y: number, z: number, yaw: number, pitch: number,

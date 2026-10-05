@@ -21,8 +21,9 @@ import {
 } from './partygames';
 import { parkourTheme } from './parkour_themes';
 import { RS_BOUNDS, RS_MAX_Y, RS_MIN_Y, ratseekBlockAt } from './ratseek_house';
+import { BW_BOUNDS, BW_MIN_Y, BW_MAX_Y, bwBlockAt } from './bedwars_map';
 
-export type WorldKind = 'duel' | 'bridge' | 'parkour' | 'ratseek';
+export type WorldKind = 'duel' | 'bridge' | 'parkour' | 'ratseek' | 'bedwars';
 
 /** Everything a client needs to build a world: which generator, which seed.
  *  `id` is the server's handle for this world instance. */
@@ -115,6 +116,9 @@ export function worldGenerator(spec: Pick<WorldSpec, 'kind' | 'seed'>): WorldGen
       // pillar-and-jump can never clear the wall.
       DUEL_ARENA_FLOOR_Y - 1, 255,
       (x, y, z) => duelArenaBlockAt(x, y, z) ?? Block.Air);
+  } else if (spec.kind === 'bedwars') {
+    gen = new VenueGenerator(spec.seed, BW_BOUNDS, BW_MIN_Y, BW_MAX_Y, bwBlockAt,
+      { grass: tintOf(0x89b66c), foliage: tintOf(0x74a763), water: tintOf(0x63c5dc) });
   } else if (spec.kind === 'ratseek') {
     // The Crooked Manor is one fixed estate; every match gets a fresh copy.
     gen = new VenueGenerator(spec.seed, RS_BOUNDS, RS_MIN_Y, RS_MAX_Y, ratseekBlockAt);

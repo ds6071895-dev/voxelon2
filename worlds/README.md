@@ -1,6 +1,7 @@
 # Worlds
 
-A minigames-only rebuild of VOXELON: **Duels**, **The Bridge** and **Parkour**.
+A minigames-only rebuild of VOXELON: **Bedwars**, **Duels**, **The Bridge**,
+**Parkour** and **Rat and Seek**.
 It uses the same blocks, textures and renderer, but every match runs in its own
 separate world (Multiverse-style) instead of an arena stamped into an open
 world. VOXELON itself (the parent folder) is untouched and runs on its own
@@ -85,13 +86,60 @@ score with stems. Large media is attached to the release rather than Git history
   else and nothing on the wire marks it. Its hidden level adapts during the
   match and is remembered per player and game for the next one.
 
+## Bedwars
+
+Protect your team's bed, buy gear at the merchants on your island, and bridge
+across the floating islands. Iron and gold come from your home forge, diamonds
+from the four side islands, and emeralds from the middle island. While your
+bed stands you respawn; once it breaks, your team's next deaths are final.
+
+- **Public queue:** 1v1, with a practice opponent when the queue is quiet.
+- **Private parties:** the leader opens **Bedwars · Choose teams** in the party
+  panel or presses the Bedwars card. Two players play 1v1; three play a chosen
+  2v1; four play 2v2. A three-player party can add an AI teammate for the solo
+  side. The team sheet is a small dialog every member can see live.
+- **Resources are items.** Iron, gold, diamonds and emeralds drop from the
+  generators as real items that fall, bounce and settle, merge into a pile, and
+  go straight into your hotbar when you walk over them (a full hotbar leaves
+  them on the ground). There is no separate wallet and no resource HUD.
+- **Shopping:** stand near a merchant and press **E** (touch: **USE / SHOP**).
+  The shop is a narrow panel on the right edge, it does not dim the game, and it
+  closes with **Esc**, **E** or when you are hit. The team chest accepts
+  deposits and withdrawals.
+- **Building:** a placed block shows up at once and a refusal takes it back.
+  Hold right-click to bridge. Hold left-click to break placed blocks or an
+  exposed enemy bed: a ten-stage crack plays on the block, chips fly off, and
+  the block goes into your hotbar. Authored buildings are protected.
+- **Fighting:** swings are judged against where the target was a moment ago, so
+  a hit you saw lands. Sprinting hits knock back further, falling hits crit,
+  and you get a hit marker, damage number and flash on every confirmed hit.
+- **Dropping items:** **Q** throws one item, **Ctrl+Q** the whole stack. Your
+  sword stays with you.
+- **Persistence:** armor, tools and team upgrades survive death. Your resources
+  go to whoever killed you (anything that does not fit drops where you fell);
+  with no killer they drop where you fell, and are lost in the void.
+- **Reconnection:** a disconnected player has a 30-second return window in the
+  same browser tab. Disconnecting counts as a death.
+- **Endgame:** remaining beds disappear at 8 minutes; a shrinking safe zone
+  begins at 10 minutes; the match ends by 12 minutes.
+
+The match engine is `src/bedwars.ts` (rules and wire types in
+`src/bedwars_rules.ts`, the shop in `src/bedwars_catalog.ts`, hotbar rules in
+`src/bedwars_inventory.ts`, item drop physics in `src/bedwars_drops.ts`). The
+client is `src/bedwars_client.ts` with `bedwars_hud.ts`, `bedwars_shop.ts`,
+`bedwars_results.ts` and `bedwars_world.ts` (items on the ground, projectiles);
+styling is `src/styles/bedwars.css`. The map is built by `src/bedwars_setpieces.ts`
+with markers in `src/bedwars_map.ts` and furnishings in `src/bedwars_models.ts`.
+Item art is in `src/tile_art_bedwars.ts`.
+
 ## Tests
 
 ```sh
-npm test            # names, codes, isolation, queue/party sizes, bots, 300 worlds, Dragon Chase
+npm test            # Bedwars rules/movement, names, codes, isolation, parties, bots, Dragon Chase
                     # (every jump of every sampled course flown with real physics, builds included)
 npm run stress      # 300+ live worlds with 300 AI opponents: tick budget, isolation, teardown
 npm run bot-sim     # opponent strength: Dragon Chase make-it rates, Bridge bots and adaptation
+STRESS_BEDWARS=1 npm run stress # Bedwars-only worlds and practice opponents
 ```
 
 Browser end-to-end (needs a running client and server, plus any Playwright
@@ -99,6 +147,7 @@ install):
 
 ```sh
 PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs TEST_URL=http://localhost:5174 node test/e2e.mjs
+PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs TEST_URL=http://localhost:5174 node test/bedwars_e2e.mjs
 ```
 
 Diagnostics: `test/parkour_trace.ts` (every life a bot loses on a course) and

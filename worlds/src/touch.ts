@@ -165,7 +165,7 @@ export class TouchControls {
     this.primary.setAttribute('aria-label', this.primary.textContent);
     this.secondary.hidden = s.action !== 'build' && s.action !== 'interact';
     this.secondary.textContent = s.action === 'interact' ? 'HIT' : 'BREAK';
-    this.secondary.setAttribute('aria-label', s.action === 'interact' ? 'Catch rat' : 'Break block');
+    this.secondary.setAttribute('aria-label', s.action === 'interact' ? 'Hit or break target' : 'Break block');
     this.aim.hidden = this.reload.hidden = !s.gun;
   }
 

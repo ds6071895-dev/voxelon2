@@ -171,7 +171,7 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     ws.close(1013, 'Server busy');
     return;
   }
-  const id = game.connect();
+  let id = game.connect();
   sockets.set(id, ws);
   socketIps.set(id, ip);
   ipCounts.set(ip, perIp + 1);
@@ -182,6 +182,16 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     let msg: ClientMsg;
     try { msg = JSON.parse(String(data)) as ClientMsg; } catch { return; }
     if (!msg || typeof msg !== 'object' || typeof msg.t !== 'string') return;
+    if (msg.t === 'hello' && msg.resumeToken) {
+      const resumed = game.resume(id, msg.resumeToken);
+      if (resumed) {
+        sockets.delete(id); socketIps.delete(id); msgBuckets.delete(id);
+        id = resumed.id;
+        sockets.set(id, ws); socketIps.set(id, ip);
+        dispatch(resumed.out);
+        return;
+      }
+    }
     if (msg.t === 'login') {
       const key = String(msg.username ?? '').trim().toLowerCase();
       const sk = String(id);

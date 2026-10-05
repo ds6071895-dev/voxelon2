@@ -1,17 +1,17 @@
 /* ═══════════════════════════════════════════════════════════════════════════
    WORLDS — the front door.
-   Daylight, like the world orbiting behind it: frosted paper cards, deep-ink
-   type, and the game art doing the colour work. Layout (desktop):
+   Daylight, like the world orbiting behind it: paper cards, deep-ink type and
+   small illustrated scenes doing the colour work. Layout (desktop):
 
      ┌───────────────────────────────────────────────── [Party] [You ▾] ┐
      │ WORLDS                                         ┌───────────────┐ │
-     │ ┌──────────────── Duels ────────────────┐      │               │ │
-     │ ├──────────────── The Bridge ───────────┤      │ dressing room │ │
-     │ ├──────────────── Parkour ──────────────┤      │               │ │
-     │ └───────────────────────────────────────┘      └───────────────┘ │
-     │ Controls                                                         │
+     │ ┌─────────────── Bedwars (wide) ────────────┐  │               │ │
+     │ ├─────────── Duels ──┬──── The Bridge ──────┤  │ dressing room │ │
+     │ ├────────── Parkour ─┴──── Rat and Seek ────┘  │               │ │
+     │ Controls                                       └───────────────┘ │
      └──────────────────────────────────────────────────────────────────┘
-   One column on phones.
+   One column on phones. There is no backdrop-filter anywhere on this screen:
+   a live 3D valley is drawn behind it, so panels are opaque paper instead.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 :root {
@@ -54,7 +54,6 @@
   border: 1px solid rgba(255,255,255,.75); color: var(--w-ink);
   background: linear-gradient(180deg, rgba(255,255,255,.94), rgba(255,255,255,.8));
   box-shadow: 0 10px 26px rgba(28,52,86,.14), inset 0 1px 0 #fff;
-  backdrop-filter: blur(14px);
   font-size: 13px; font-weight: 750; letter-spacing: .2px;
   transition: transform .12s, box-shadow .14s;
 }
@@ -114,45 +113,45 @@
 @keyframes w-rise { from { transform: translateY(16px); opacity: 0; } }
 
 /* ── Game cards ──────────────────────────────────────────────────────── */
-/* Frosted paper, one tone-coloured icon tile each, and a Play pill. */
-.w-cards { display: grid; gap: 10px; margin-top: clamp(18px, 3.2vh, 30px); }
+/* A wide Bedwars card, then a 2x2 grid. Each card is a small illustrated scene,
+   the game's name, a one-line promise and a Play pill. */
+.w-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: clamp(14px, 2.6vh, 26px); }
 .w-card {
   --tone: #e3a12a;
-  position: relative; display: grid; grid-template-columns: auto 1fr auto; align-items: center; column-gap: 16px;
-  min-height: 84px; padding: 14px 14px 14px 14px;
-  border: 1px solid rgba(255,255,255,.75); border-radius: 20px; cursor: pointer; text-align: left;
-  color: var(--w-ink);
-  background: linear-gradient(180deg, rgba(255,255,255,.93), rgba(255,255,255,.8));
-  backdrop-filter: blur(16px) saturate(1.2);
-  box-shadow: 0 14px 34px rgba(18,32,50,.14), inset 0 1px 0 #fff;
+  position: relative; display: grid; grid-template-columns: 1fr auto; grid-template-areas: "art art" "body go" "status status";
+  align-items: center; row-gap: 9px; column-gap: 10px; padding: 9px 12px 12px 9px; min-width: 0;
+  border: 1px solid rgba(255,255,255,.9); border-radius: 20px; cursor: pointer; text-align: left;
+  color: var(--w-ink); background: rgba(255,255,255,.96);
+  box-shadow: 0 12px 30px rgba(18,32,50,.15), inset 0 -3px 0 color-mix(in srgb, var(--tone) 70%, transparent);
   transition: transform .16s cubic-bezier(.2,.8,.3,1), box-shadow .16s;
-  animation: w-rise .7s cubic-bezier(.16,.84,.28,1) both; animation-delay: calc(.08s + var(--i) * .07s);
+  animation: w-rise .7s cubic-bezier(.16,.84,.28,1) both; animation-delay: calc(.08s + var(--i) * .06s);
 }
-.w-card:hover:not([aria-disabled="true"]) { transform: translateY(-2px); box-shadow: 0 20px 42px rgba(18,32,50,.2), inset 0 1px 0 #fff; }
+.w-card:hover:not([aria-disabled="true"]) { transform: translateY(-3px); box-shadow: 0 18px 38px rgba(18,32,50,.22), inset 0 -3px 0 var(--tone); }
 .w-card:active:not([aria-disabled="true"]) { transform: translateY(0); }
-.w-card-icon {
-  width: 54px; height: 54px; border-radius: 16px; display: grid; place-items: center; color: #fff;
-  background: linear-gradient(155deg, color-mix(in srgb, var(--tone) 72%, #fff), var(--tone) 52%, color-mix(in srgb, var(--tone) 78%, #000));
-  box-shadow: 0 8px 18px color-mix(in srgb, var(--tone) 38%, transparent), inset 0 1px 0 rgba(255,255,255,.45);
-  transition: transform .2s cubic-bezier(.2,.8,.3,1.4);
-}
-.w-card-icon svg { width: 28px; height: 28px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.18)); }
-.w-card:hover:not([aria-disabled="true"]) .w-card-icon { transform: rotate(-4deg) scale(1.05); }
-.w-card-body { display: grid; gap: 2px; min-width: 0; }
-.w-card-title { font-size: clamp(20px, 2vw, 24px); font-weight: 850; letter-spacing: -.3px; }
+.w-card-art { grid-area: art; display: block; height: clamp(64px, 11vh, 98px); border-radius: 13px; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(18,32,50,.07); }
+.w-card-art svg { display: block; width: 100%; height: 100%; transition: transform .35s cubic-bezier(.2,.8,.3,1); }
+.w-card:hover:not([aria-disabled="true"]) .w-card-art svg { transform: scale(1.05); }
+.w-card-body { grid-area: body; display: grid; gap: 1px; min-width: 0; padding-left: 3px; }
+.w-card-title { font-size: clamp(16px, 1.6vw, 19px); font-weight: 850; letter-spacing: -.25px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.w-card-sub { font-size: 12px; font-weight: 600; color: var(--w-ink-mute); line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; }
 .w-card-go {
-  display: inline-flex; align-items: center; gap: 8px; padding: 11px 16px 11px 14px;
-  border-radius: 999px; font-size: 12.5px; font-weight: 850; letter-spacing: .6px; text-transform: uppercase;
-  color: #fff; background: linear-gradient(180deg, #24344c, #122032);
-  box-shadow: 0 8px 18px rgba(18,32,50,.24);
-  white-space: nowrap; transition: background .14s;
+  grid-area: go; display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px 8px 11px;
+  border-radius: 999px; font-size: 11.5px; font-weight: 850; letter-spacing: .5px; text-transform: uppercase;
+  color: #fff; background: linear-gradient(180deg, #24344c, #122032); white-space: nowrap; transition: background .14s;
 }
-.w-card:hover:not([aria-disabled="true"]) .w-card-go { background: linear-gradient(180deg, #2b3e5b, #16273d); }
-.w-card-go svg { width: 16px; height: 16px; }
-.w-card-status {
-  grid-column: 1 / -1; margin-top: 10px; display: none; align-items: center; gap: 10px;
-  font-size: 12.5px; font-weight: 700; color: var(--w-ink-soft);
+.w-card:hover:not([aria-disabled="true"]) .w-card-go { background: linear-gradient(180deg, color-mix(in srgb, var(--tone) 70%, #24344c), color-mix(in srgb, var(--tone) 55%, #122032)); }
+.w-card-go svg { width: 14px; height: 14px; }
+/* Bedwars is the wide hero: words on the left, the scene on the right. */
+.w-card[data-mode="bedwars"] {
+  grid-column: 1 / -1; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); grid-template-areas: "body art" "go art" "status status";
+  align-items: center; align-content: stretch; padding: 10px 10px 10px 18px; row-gap: 12px;
 }
+.w-card[data-mode="bedwars"] .w-card-art { height: clamp(92px, 17vh, 142px); align-self: stretch; }
+.w-card[data-mode="bedwars"] .w-card-body { align-self: end; padding-left: 0; }
+.w-card[data-mode="bedwars"] .w-card-title { font-size: clamp(22px, 2.4vw, 29px); }
+.w-card[data-mode="bedwars"] .w-card-sub { font-size: 13px; -webkit-line-clamp: 2; }
+.w-card[data-mode="bedwars"] .w-card-go { justify-self: start; align-self: start; padding: 10px 16px 10px 14px; font-size: 12.5px; }
+.w-card-status { grid-area: status; display: none; align-items: center; gap: 10px; padding-left: 3px; font-size: 12.5px; font-weight: 700; color: var(--w-ink-soft); }
 .w-card-status .w-dot {
   width: 9px; height: 9px; border-radius: 50%; background: var(--tone);
   box-shadow: 0 0 0 0 color-mix(in srgb, var(--tone) 60%, transparent);
@@ -164,7 +163,7 @@
 .w-card[data-state="searching"]:hover:not([aria-disabled="true"]) .w-card-go { color: #a3202a; background: #fdecee; box-shadow: inset 0 0 0 1.5px rgba(163,32,42,.35); }
 .w-card[data-state="searching"] { box-shadow: 0 16px 36px rgba(18,32,50,.24), 0 0 0 3px var(--tone); }
 .w-card[aria-disabled="true"] { cursor: not-allowed; }
-.w-card[aria-disabled="true"] .w-card-icon { filter: grayscale(.8); opacity: .6; }
+.w-card[aria-disabled="true"] .w-card-art { filter: grayscale(.8); opacity: .6; }
 .w-card[aria-disabled="true"] .w-card-go { color: var(--w-ink-mute); background: rgba(18,32,50,.06); box-shadow: none; }
 .w-card[aria-disabled="true"] .w-card-go svg { display: none; }
 
@@ -172,7 +171,7 @@
   align-self: flex-start; margin-top: 12px; padding: 7px 13px 7px 10px; border: 0; cursor: pointer;
   color: var(--w-ink-soft); font-size: 12.5px; font-weight: 750; letter-spacing: .3px;
   display: inline-flex; align-items: center; gap: 7px; border-radius: 999px;
-  background: rgba(255,255,255,.78); backdrop-filter: blur(10px);
+  background: rgba(255,255,255,.92);
   box-shadow: 0 6px 16px rgba(18,32,50,.12);
 }
 .w-controls-link svg { width: 17px; height: 17px; }
@@ -188,9 +187,9 @@
   display: flex; flex-direction: column; min-height: min(600px, 74vh);
   padding: clamp(18px, 2.4vw, 24px); border-radius: 24px;
   border: 1px solid rgba(255,255,255,.7);
-  background: linear-gradient(180deg, rgba(255,255,255,.9), rgba(255,255,255,.74));
+  background: rgba(255,255,255,.95);
   box-shadow: var(--w-shadow), inset 0 1px 0 rgba(255,255,255,.9);
-  backdrop-filter: blur(18px) saturate(1.2); overflow: hidden;
+  overflow: hidden;
   animation: w-rise .8s .12s cubic-bezier(.16,.84,.28,1) both;
 }
 .w-right-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
@@ -236,7 +235,7 @@
 .w-scrim {
   position: absolute; inset: 0; z-index: 40; display: none;
   align-items: center; justify-content: center; padding: 18px;
-  background: rgba(12,22,36,.34); backdrop-filter: blur(6px);
+  background: rgba(12,22,36,.34);
 }
 .w-scrim.open { display: flex; }
 .w-dialog {
@@ -345,12 +344,15 @@
 }
 @keyframes w-spin { 50% { transform: rotate(90deg) scale(.86); } 100% { transform: rotate(180deg); } }
 
-/* ── Short screens: tighten the vertical rhythm so all three cards fit. ── */
+/* ── Short screens: tighten the vertical rhythm so every card still fits. ── */
 @media (max-height: 760px) and (min-width: 901px) {
-  .w-wordmark svg { height: clamp(40px, 4.6vw, 58px); }
-  .w-cards { gap: 9px; }
-  .w-card { min-height: 72px; padding-top: 10px; padding-bottom: 10px; }
-  .w-card-icon { width: 46px; height: 46px; border-radius: 14px; }
+  .w-wordmark svg { height: clamp(38px, 4.4vw, 54px); }
+  .w-cards { gap: 10px; margin-top: 12px; }
+  .w-card { row-gap: 7px; padding-bottom: 9px; }
+  .w-card-art { height: clamp(52px, 9vh, 70px); }
+  .w-card[data-mode="bedwars"] .w-card-art { height: clamp(78px, 14vh, 104px); }
+  .w-card-sub { display: none; }
+  .w-card[data-mode="bedwars"] .w-card-sub { display: -webkit-box; }
   .w-right { min-height: 0; }
   .w-stage-box { min-height: 240px; }
 }
@@ -370,10 +372,15 @@
   /* Settings keeps just its gear on a phone. */
   #w-settings-btn { padding-right: 8px; }
   #w-settings-btn > span:not(.w-ico) { display: none; }
-  .w-card { column-gap: 12px; padding: 12px; }
-  .w-card-icon { width: 44px; height: 44px; border-radius: 13px; }
-  .w-card-icon svg { width: 24px; height: 24px; }
-  .w-card-go { padding: 10px 12px; }
+  .w-cards { gap: 9px; }
+  .w-card { padding: 7px 8px 10px; grid-template-columns: 1fr; grid-template-areas: "art" "body" "go" "status"; row-gap: 7px; }
+  .w-card:not([data-mode="bedwars"]) .w-card-go { justify-self: stretch; justify-content: center; }
+  .w-card[data-mode="bedwars"] { grid-template-columns: 1fr; grid-template-areas: "art" "body" "go" "status"; padding: 8px 10px 12px; }
+  .w-card[data-mode="bedwars"] .w-card-art { height: 96px; }
+  .w-card-art { height: 58px; }
+  .w-card-sub { display: none; }
+  .w-card[data-mode="bedwars"] .w-card-sub { display: block; }
+  .w-card-go { padding: 8px 10px; }
   .w-card-go svg { display: none; }
 }
 

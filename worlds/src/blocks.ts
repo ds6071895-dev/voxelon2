@@ -263,6 +263,24 @@ export const enum Tile {
   ClassTrickster = 388,
   ClassTinkerer = 389,
   SeekerPicker = 390,
+  WoodSword = 400,
+  StoneSword = 401,
+  IronSword = 402,
+  WoodPickaxe = 403,
+  IronPickaxe = 404,
+  WoodAxe = 405,
+  Shears = 406,
+  BedwarsTNT = 407,
+  TeleportPearl = 408,
+  HealingApple = 409,
+  ChainArmor = 410,
+  IronArmor = 411,
+  DiamondArmor = 412,
+  IronIngot = 413,
+  GoldIngot = 414,
+  DiamondGem = 415,
+  EmeraldGem = 416,
+  DiamondSword = 417,
 }
 
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel' | 'sword';
@@ -502,8 +520,8 @@ export const BLOCKS: Record<number, BlockInfo> = {
     top: Tile.Glass,
   }),
   // Player-placeable arena blocks. Cheap to break so a bridge fight stays fast.
-  [Block.TeamWoolA]: def({ name: 'Crimson Wool', hardness: 0.8, top: Tile.TeamWoolA }),
-  [Block.TeamWoolB]: def({ name: 'Cobalt Wool', hardness: 0.8, top: Tile.TeamWoolB }),
+  [Block.TeamWoolA]: def({ name: 'Red Wool', hardness: 0.8, top: Tile.TeamWoolA }),
+  [Block.TeamWoolB]: def({ name: 'Blue Wool', hardness: 0.8, top: Tile.TeamWoolB }),
   // Parkour's live surfaces. The venue stamps them; the course knows where
   // every one is, so the tile itself carries no behaviour of its own.
   [Block.PartyTileC]: def({ name: 'Crumble Tile', hardness: 0.8, top: Tile.PartyTileC }),

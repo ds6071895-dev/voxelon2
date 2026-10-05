@@ -66,6 +66,8 @@ export class Interaction {
   shouldConsumePlacement?: (block: number) => boolean;
   /** True for this frame while left-click is actively working a block. */
   breakingActive = false;
+  /** Keep the target outline while mining is suppressed (the match owns breaking). */
+  alwaysHighlight = false;
   private readonly highlight: THREE.LineSegments;
   private readonly crackMesh: THREE.Mesh;
   private readonly crackMaterial: THREE.MeshBasicMaterial;
@@ -91,6 +93,15 @@ export class Interaction {
     scene.add(this.crackMesh);
   }
 
+  /** Show a crack stage on a cell for a break the match is timing (0-1). */
+  showCrack(x: number, y: number, z: number, progress: number): void {
+    const stage = Math.max(0, Math.min(9, Math.floor(progress * 10)));
+    this.crackMaterial.map = this.crackTextures[stage];
+    this.crackMesh.position.set(x + 0.5, y + 0.5, z + 0.5);
+    this.crackMesh.visible = true;
+  }
+  hideCrack(): void { this.crackMesh.visible = false; }
+
   /** Hide the outline and crack (menus, spectating). */
   clear(): void {
     this.target = null;
@@ -105,7 +116,7 @@ export class Interaction {
     const origin = this.player.eyePosition;
     const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
     this.target = raycastBlocks(this.world, origin, dir, REACH);
-    if (this.target && !suppressMining) {
+    if (this.target && (!suppressMining || this.alwaysHighlight)) {
       this.highlight.visible = true;
       this.highlight.position.set(this.target.x + 0.5, this.target.y + 0.5, this.target.z + 0.5);
     } else {

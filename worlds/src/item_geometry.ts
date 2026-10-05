@@ -4,7 +4,7 @@
 import * as THREE from 'three';
 import { BLOCKS, BlockInfo, Tile } from './blocks';
 import { ITEMS } from './items';
-import type { Atlas } from './textures';
+import { TILE_PX, tileOrigin, type Atlas } from './textures';
 
 const geoCache = new Map<number, THREE.BufferGeometry>();
 
@@ -86,5 +86,63 @@ export function itemGeometry(atlas: Atlas, id: number): THREE.BufferGeometry {
     geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
   }
   geoCache.set(id, geo);
+  return geo;
+}
+
+const solidCache = new Map<number, THREE.BufferGeometry>();
+
+/** A sprite item as a thin slab of real pixels (front, back and a visible rim
+ *  made of each exposed pixel's own colour). Unlike the single flat plane in
+ *  `itemGeometry`, it still reads as an object when it turns edge-on, which is
+ *  what a held tool and an item lying on the ground both need. Blocks keep
+ *  their mini-cube. */
+export function itemGeometrySolid(atlas: Atlas, id: number, size = 0.45, depth = 0.04): THREE.BufferGeometry {
+  const info = ITEMS[id];
+  if (!info || info.kind === 'block' || info.sprite === undefined) return itemGeometry(atlas, id);
+  const key = id * 1000 + Math.round(size * 100) * 10 + Math.round(depth * 100);
+  const cached = solidCache.get(key);
+  if (cached) return cached;
+  const tile = info.sprite, { x: ox, y: oy } = tileOrigin(tile);
+  const ctx = atlas.canvas.getContext('2d')!;
+  const px = ctx.getImageData(ox, oy, TILE_PX, TILE_PX).data;
+  const opaque = (x: number, y: number): boolean => x >= 0 && y >= 0 && x < TILE_PX && y < TILE_PX && px[(y * TILE_PX + x) * 4 + 3] > 40;
+  const [u0, v0, u1, v1] = atlas.uvRect(tile);
+  const cell = size / TILE_PX, half = size / 2, d = depth / 2;
+  const positions: number[] = [], uvs: number[] = [], colors: number[] = [], indices: number[] = [];
+  const quad = (a: number[], b: number[], c: number[], e: number[], tx: number, ty: number, shade: number): void => {
+    const base = positions.length / 3;
+    positions.push(...a, ...b, ...c, ...e);
+    // Every corner samples the pixel's centre so the whole quad is one flat colour.
+    const u = u0 + (u1 - u0) * (tx + 0.5) / TILE_PX, v = v1 - (v1 - v0) * (ty + 0.5) / TILE_PX;
+    for (let i = 0; i < 4; i++) { uvs.push(u, v); colors.push(shade, shade, shade); }
+    indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  };
+  for (let y = 0; y < TILE_PX; y++) for (let x = 0; x < TILE_PX; x++) {
+    if (!opaque(x, y)) continue;
+    const lx = -half + x * cell, hx = lx + cell, ty = half - y * cell, by = ty - cell;
+    // Front/back carry the real tile UVs so they keep the atlas' filtering.
+    const fu0 = u0 + (u1 - u0) * x / TILE_PX, fu1 = u0 + (u1 - u0) * (x + 1) / TILE_PX;
+    const fv1 = v1 - (v1 - v0) * y / TILE_PX, fv0 = v1 - (v1 - v0) * (y + 1) / TILE_PX;
+    const base = positions.length / 3;
+    positions.push(lx, by, d, hx, by, d, hx, ty, d, lx, ty, d);
+    uvs.push(fu0, fv0, fu1, fv0, fu1, fv1, fu0, fv1);
+    for (let i = 0; i < 4; i++) colors.push(1, 1, 1);
+    indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    const back = positions.length / 3;
+    positions.push(hx, by, -d, lx, by, -d, lx, ty, -d, hx, ty, -d);
+    uvs.push(fu1, fv0, fu0, fv0, fu0, fv1, fu1, fv1);
+    for (let i = 0; i < 4; i++) colors.push(0.8, 0.8, 0.8);
+    indices.push(back, back + 1, back + 2, back, back + 2, back + 3);
+    if (!opaque(x - 1, y)) quad([lx, by, -d], [lx, by, d], [lx, ty, d], [lx, ty, -d], x, y, 0.65);
+    if (!opaque(x + 1, y)) quad([hx, by, d], [hx, by, -d], [hx, ty, -d], [hx, ty, d], x, y, 0.65);
+    if (!opaque(x, y - 1)) quad([lx, ty, d], [hx, ty, d], [hx, ty, -d], [lx, ty, -d], x, y, 0.9);
+    if (!opaque(x, y + 1)) quad([lx, by, -d], [hx, by, -d], [hx, by, d], [lx, by, d], x, y, 0.5);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geo.setIndex(indices);
+  solidCache.set(key, geo);
   return geo;
 }

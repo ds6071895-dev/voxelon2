@@ -26,7 +26,7 @@ const check = (name: string, ok: boolean, detail = '') => {
   if (!ok) failures++;
 };
 
-const modes: GameMode[] = ['duels', 'bridge', 'parkour'];
+const modes: GameMode[] = process.env.STRESS_BEDWARS === '1' ? ['bedwars'] : ['duels', 'bridge', 'parkour', 'bedwars'];
 const inbox = new Map<number, ServerMsg[]>();
 const deliver = (out: Outbound[]) => {
   for (const o of out) {
@@ -49,7 +49,7 @@ const t0 = performance.now();
 const pairs = Math.floor(WORLDS / 2);
 const humans: number[] = [];
 for (let i = 0; i < pairs; i++) {
-  const mode = modes[i % 3];
+  const mode = modes[i % modes.length];
   for (let k = 0; k < 2; k++) {
     const id = server.connect();
     deliver(server.handle(id, { t: 'hello' }));
@@ -60,7 +60,7 @@ for (let i = 0; i < pairs; i++) {
 // 2. Practice matches with no player at all: two opponents, full AI.
 const exhibitions: number[] = [];
 for (let i = 0; i < WORLDS - pairs; i++)
-  exhibitions.push(server.startExhibition(modes[i % 3], [{ skill: .4 + (i % 7) * .15, adaptive: true }, { skill: 1 }]));
+  exhibitions.push(server.startExhibition(modes[i % modes.length], [{ skill: .4 + (i % 7) * .15, adaptive: true }, { skill: 1 }]));
 // 3. One lone player per game, waiting for an opponent.
 const loners = modes.map((mode) => {
   const id = server.connect();
@@ -89,7 +89,7 @@ check('every pair shares a world, and no two pairs do',
   humans.every((id, i) => i % 2 === 1 || server.worldOf(id)?.id === server.worldOf(humans[i + 1])?.id));
 check('each lone player got an opponent of their own after the wait',
   loners.every((id) => server.worldMembers(server.worldOf(id)!.id).length === 2) &&
-  new Set(loners.map((id) => server.worldOf(id)!.id)).size === 3);
+  new Set(loners.map((id) => server.worldOf(id)!.id)).size === modes.length);
 check('practice matches are live in their own worlds', exhibitions.every((w) => server.matchState(w) !== null) &&
   new Set(exhibitions).size === exhibitions.length);
 check(`average tick with ${worlds} live worlds is inside the 50 ms budget`, sumTick / ticks < 50, `${(sumTick / ticks).toFixed(2)} ms`);

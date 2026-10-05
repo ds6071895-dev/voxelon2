@@ -20,6 +20,9 @@ import type { World } from '../src/world';
 import { RatSeekMatch } from '../src/ratseek';
 import { SeekerBot } from '../src/ratseek_bot';
 import { dragonChaseTests } from './dragon_chase';
+import { runBedwarsServerTests } from './bedwars_server';
+import { runBedwarsTests } from './bedwars';
+import { runBedwarsMovementTests } from './bedwars_movement';
 
 let passed = 0, failed = 0;
 function check(name: string, ok: boolean, detail = ''): void {
@@ -545,6 +548,12 @@ section('dragon chase: a runner who made it can go back to the menu');
 }
 
 dragonChaseTests(check, section);
+section('Bedwars server integration');
+runBedwarsServerTests();
+section('Bedwars match rules and economy');
+runBedwarsTests();
+section('Bedwars movement authority');
+runBedwarsMovementTests();
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

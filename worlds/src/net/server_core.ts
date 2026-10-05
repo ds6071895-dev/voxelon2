@@ -14,7 +14,7 @@
 //     authoritative arena code: movement validation, lag-compensated hits,
 //     arrows, build rules, course hazards.
 
-import { Block } from '../blocks';
+import { Block, collisionBoxes } from '../blocks';
 import { ITEMS, Item, type ItemStack } from '../items';
 import { randomCosmetics, sanitizeCosmetics, type Cosmetics } from '../character';
 import {
@@ -48,6 +48,9 @@ import {
 import { partyCapacityFor } from '../modes';
 import { RatSeekMatch, type RsHost } from '../ratseek';
 import { isRatClass, type RatClassId } from '../ratseek_rules';
+import { BedwarsMatch, type BwHost } from '../bedwars';
+import { BW_BASES, BW_BOUNDS, BW_VOID_Y } from '../bedwars_map';
+import { bwMotion, bwAcceptMotion, bwAuthorizeImpulse, bwSupported, bwTickMotion, type BwMotion } from '../bedwars_movement';
 import { Accounts, type Hasher } from './accounts';
 import { NameRegistry } from './names';
 import { Parties, type Party } from './parties';
@@ -221,6 +224,8 @@ interface MatchWorld {
   rs: RatSeekMatch | null;
   rsOut: Outbound[];
   rsQuiet: boolean;
+  bw: BedwarsMatch | null;
+  bwOut: Outbound[];
 }
 
 interface ServerOptions {
@@ -232,8 +237,8 @@ interface ServerOptions {
   wallNow?: () => number;
 }
 
-const MODE_TO_KIND: Record<GameMode, WorldKind> = { duels: 'duel', bridge: 'bridge', parkour: 'parkour', ratseek: 'ratseek' };
-const MODE_NAMES: Record<GameMode, string> = { duels: 'Duels', bridge: 'The Bridge', parkour: 'Parkour', ratseek: 'Rat and Seek' };
+const MODE_TO_KIND: Record<GameMode, WorldKind> = { duels: 'duel', bridge: 'bridge', parkour: 'parkour', ratseek: 'ratseek', bedwars: 'bedwars' };
+const MODE_NAMES: Record<GameMode, string> = { duels: 'Duels', bridge: 'The Bridge', parkour: 'Parkour', ratseek: 'Rat and Seek', bedwars: 'Bedwars' };
 
 export class GameServer {
   readonly accounts: Accounts;
@@ -245,6 +250,10 @@ export class GameServer {
   readonly names: NameRegistry;
   readonly parties: Parties;
   private readonly players = new Map<number, ServerPlayer>();
+  private readonly reconnectTokens = new Map<string, number>();
+  private readonly disconnectedUntil = new Map<number, number>();
+  private nextReconnectNonce = 1;
+  private readonly bwMoves = new Map<number, BwMotion>();
   private readonly worlds = new Map<number, MatchWorld>();
   private readonly worldByLobby = new Map<string, number>();
   private readonly duels: Duels;
@@ -286,7 +295,7 @@ export class GameServer {
   }
   worldCount(): number { return this.worlds.size; }
   playerCount(): number { return [...this.players.values()].filter((p) => !p.bot).length; }
-  botCount(): number { return this.duelBots.size + this.partyBots.size; }
+  botCount(): number { return [...this.players.values()].filter(p => p.bot).length; }
   usernameOf(id: number): string | undefined { return this.players.get(id)?.username; }
   worldOf(id: number): WorldSpec | null {
     const p = this.players.get(id);
@@ -340,6 +349,11 @@ export class GameServer {
     const w = this.worlds.get(worldId);
     if (!w) return null;
     const now = this.nowMs();
+    if (w.bw) {
+      const s = w.bw.snapshot();
+      return { mode: 'bedwars', phase: s.phase, winner: null, winnerTeam: s.result?.winner ?? null,
+        participants: s.players.map(p => ({ id: p.id, score: p.beds, progress: 0, kills: p.kills, falls: p.deaths, team: p.team })) };
+    }
     if (w.mode === 'duels') {
       const snap = this.duels.snapshots(now).find((s) => s.id === w.lobby);
       if (!snap) return null;
@@ -356,6 +370,7 @@ export class GameServer {
   }
   /** Rat and Seek internals, for tests. */
   ratSeek(worldId: number): RatSeekMatch | null { return this.worlds.get(worldId)?.rs ?? null; }
+  bedwars(worldId: number): BedwarsMatch | null { return this.worlds.get(worldId)?.bw ?? null; }
   healthOf(id: number): number | null { return this.players.get(id)?.health ?? null; }
   positionOf(id: number): { x: number; y: number; z: number } | null {
     const p = this.players.get(id);
@@ -390,13 +405,69 @@ export class GameServer {
   disconnect(id: number): Outbound[] {
     const p = this.players.get(id);
     if (!p || p.bot) return [];
+    const w = this.worldOfPlayer(p);
+    if (w?.bw && (w.bw.phase === 'playing' || w.bw.phase === 'suddenDeath')) {
+      this.disconnectedUntil.set(id, this.nowMs() + 30_000);
+      w.bw.disconnect(id);
+      return this.drainBw(w);
+    }
+    return this.dropConnection(p);
+  }
+
+  private dropConnection(p: ServerPlayer): Outbound[] {
+    const id = p.id;
     const out: Outbound[] = [];
     this.leaveQueue(p);
     if (p.worldId !== null) out.push(...this.exitMatch(p, false));
     out.push(...this.leaveParty(p, false));
     this.names.releaseAll(this.holder(id));
     this.players.delete(id);
+    this.bwMoves.delete(id);
+    this.disconnectedUntil.delete(id);
+    for (const [token, owner] of this.reconnectTokens) if (owner === id) this.reconnectTokens.delete(token);
     return out;
+  }
+
+  /** Called by the transport before hello, while the fresh socket is unnamed.
+   * A secret, tab-local token restores the SAME body id and party membership. */
+  resume(connectionId: number, token: unknown): { id: number; out: Outbound[] } | null {
+    const fresh = this.players.get(connectionId);
+    if (!fresh || fresh.ready || typeof token !== 'string' || token.length > 256) return null;
+    const id = this.reconnectTokens.get(token);
+    if (id === undefined || (this.disconnectedUntil.get(id) ?? 0) <= this.nowMs()) return null;
+    const p = this.players.get(id), w = p ? this.worldOfPlayer(p) : undefined;
+    if (!p || !w?.bw) return null;
+    const member = w.bw.players.get(id);
+    if (!member) return null;
+    this.players.delete(connectionId);
+    this.disconnectedUntil.delete(id);
+    this.reconnectTokens.delete(token);
+    const resumeToken = this.issueReconnectToken(id);
+    p.rsMoveAt = this.worldTime;
+    const out: Outbound[] = [this.to(id, { t: 'welcome', id, username: p.username, account: p.account, cosmetics: p.cosmetics, resumeToken }),
+      this.to(id, { t: 'bwArena', world: w.spec, team: member.team, spawn: { x: p.x, y: p.y, z: p.z }, yaw: p.yaw }),
+      this.to(id, { t: 'teleport', x: p.x, y: p.y, z: p.z, seq: this.moved(p) })];
+    for (const other of w.members) {
+      const body = this.players.get(other);
+      if (body && other !== id) out.push(this.to(id, { t: 'join', player: this.info(body) }));
+    }
+    const edits: { x: number; y: number; z: number; block: number }[] = [];
+    for (const [key, block] of w.blocks.edits) {
+      const x = key % 4096 - 2048, yz = Math.floor(key / 4096);
+      const z = yz % 4096 - 2048, y = Math.floor(yz / 4096) - 64;
+      edits.push({ x, y, z, block });
+    }
+    if (edits.length) out.push(this.to(id, { t: 'editBatch', edits }));
+    w.bw.reconnect(id);
+    out.push(...this.drainBw(w), ...this.partyBroadcast(id));
+    return { id, out };
+  }
+
+  private issueReconnectToken(id: number): string {
+    for (const [token, owner] of this.reconnectTokens) if (owner === id) this.reconnectTokens.delete(token);
+    const token = `${this.makeToken()}.${id}.${this.nextReconnectNonce++}`;
+    this.reconnectTokens.set(token, id);
+    return token;
   }
 
   // ── Message entry point ──────────────────────────────────────────────────
@@ -404,7 +475,12 @@ export class GameServer {
   handle(id: number, msg: ClientMsg): Outbound[] {
     const p = this.players.get(id);
     if (!p || p.bot || !msg || typeof msg !== 'object') return [];
-    if (!p.ready) return msg.t === 'hello' ? this.hello(p, msg) : [];
+    if (!p.ready) {
+      if (msg.t !== 'hello') return [];
+      const out = this.hello(p, msg), resumeToken = this.issueReconnectToken(id);
+      for (const o of out) if (o.msg.t === 'welcome') o.msg.resumeToken = resumeToken;
+      return out;
+    }
     switch (msg.t) {
       case 'hello': return [];
       case 'rollName': return this.rollName(p);
@@ -417,9 +493,10 @@ export class GameServer {
       case 'partyLeave': return this.leaveParty(p, true);
       case 'partyKick': return this.partyKick(p, msg.id);
       case 'partyPromote': return this.partyPromote(p, msg.id);
+      case 'bwSetup': return this.bedwarsSetup(p, msg);
       case 'play':
         if (isRatClass(msg.ratClass)) p.rsClass = msg.ratClass;
-        return isGameMode(msg.mode) ? this.play(p, msg.mode, typeof msg.seeker === 'number' ? msg.seeker : undefined) : [];
+        return isGameMode(msg.mode) ? this.play(p, msg.mode, typeof msg.seeker === 'number' ? msg.seeker : undefined, msg.setupRevision) : [];
       case 'cancelQueue': {
         if (!p.queue) return [this.to(p, { t: 'queue', mode: null })];
         this.leaveQueue(p);
@@ -559,12 +636,12 @@ export class GameServer {
 
   private partyState(party: Party): PartyState {
     return {
-      code: party.code, leader: party.leader,
+      code: party.code, leader: party.leader, bedwars: party.bedwars,
       members: party.members.map((id) => {
         const m = this.players.get(id)!;
         return {
           id, username: m.username, skin: m.skin, cosmetics: m.cosmetics,
-          status: m.worldId !== null ? 'match' : m.queue ? 'queue' : 'menu',
+          status: m.worldId !== null ? this.inFinishedWorld(m) ? 'results' : 'match' : m.queue ? 'queue' : 'menu',
         };
       }),
     };
@@ -603,6 +680,7 @@ export class GameServer {
     }
     const out: Outbound[] = [];
     // Searching alone no longer makes sense: you play with the party now.
+    out.push(...this.cancelBedwarsLoading(res.party));
     for (const id of res.party.members) {
       const m = this.players.get(id);
       if (m?.queue) { this.leaveQueue(m); out.push(this.to(m, { t: 'queue', mode: null })); }
@@ -614,8 +692,9 @@ export class GameServer {
   private leaveParty(p: ServerPlayer, notify: boolean): Outbound[] {
     const party = this.parties.of(p.id);
     if (!party) return notify ? [this.to(p, { t: 'party', party: null })] : [];
+    const out: Outbound[] = this.cancelBedwarsLoading(party);
     const left = this.parties.leave(p.id, this.wallNow());
-    const out: Outbound[] = notify ? [this.to(p, { t: 'party', party: null })] : [];
+    if (notify) out.push(this.to(p, { t: 'party', party: null }));
     if (left) {
       const state = this.partyState(left);
       for (const m of left.members) out.push(this.to(m, { t: 'party', party: state }));
@@ -639,6 +718,42 @@ export class GameServer {
     return this.partyBroadcast(p.id);
   }
 
+  private bedwarsSetup(p: ServerPlayer, msg: Extract<ClientMsg, { t: 'bwSetup' }>): Outbound[] {
+    const party = this.parties.of(p.id);
+    if (!party || party.leader !== p.id) return this.partyErr(p, 'Only the party leader can assign teams.');
+    if (party.members.some(id => {
+      const member = this.players.get(id);
+      return member?.worldId != null && !this.inFinishedWorld(member);
+    })) return this.partyErr(p, 'Finish the match before changing teams.');
+    if (msg.revision !== (party.bedwars?.revision ?? 0)) {
+      return [...this.partyErr(p, 'The party changed. Review the updated teams.'), ...this.partyBroadcast(p.id)];
+    }
+    if (!msg.assignments || typeof msg.assignments !== 'object' || Array.isArray(msg.assignments)) return [];
+    const assignments: Record<string, 0 | 1> = {};
+    const counts = [0, 0];
+    for (const [key, team] of Object.entries(msg.assignments)) {
+      if (!party.members.some(id => String(id) === key) || (team !== 0 && team !== 1) || ++counts[team] > 2) {
+        return this.partyErr(p, 'Each team holds at most two party members.');
+      }
+      assignments[key] = team;
+    }
+    party.bedwars = { assignments, fill: party.members.length === 3 && msg.fill === true,
+      revision: (party.bedwars?.revision ?? 0) + 1 };
+    return this.partyBroadcast(p.id);
+  }
+
+  private cancelBedwarsLoading(party: Party): Outbound[] {
+    const out: Outbound[] = [];
+    const ids = new Set(party.members.map(id => this.players.get(id)?.worldId));
+    for (const id of ids) {
+      const w = id != null ? this.worlds.get(id) : undefined;
+      if (!w?.bw || (w.bw.phase !== 'loading' && w.bw.phase !== 'countdown')) continue;
+      for (const member of w.members) out.push(this.to(member, { t: 'notice', text: 'The party changed. Review your Bedwars teams and start again.' }));
+      out.push(...this.closeWorld(w));
+    }
+    return out;
+  }
+
   // ── Play / matchmaking ───────────────────────────────────────────────────
 
   private leaveQueue(p: ServerPlayer): void {
@@ -652,8 +767,19 @@ export class GameServer {
     return !!w && w.closeAt !== null;
   }
 
-  private play(p: ServerPlayer, mode: GameMode, seeker?: number): Outbound[] {
+  private play(p: ServerPlayer, mode: GameMode, seeker?: number, setupRevision?: number): Outbound[] {
     const out: Outbound[] = [];
+    const draftParty = this.parties.of(p.id);
+    if (mode === 'bedwars' && draftParty && draftParty.members.length > 1) {
+      const setup = draftParty.bedwars;
+      if (!setup || setupRevision !== setup.revision) return [...this.partyErr(p, 'Choose your Bedwars teams before starting.'), ...this.partyBroadcast(p.id)];
+    const teams = draftParty.members.map(id => setup.assignments[String(id)]);
+      if (teams.some(t => t !== 0 && t !== 1) || !teams.includes(0) || !teams.includes(1) ||
+          teams.filter(t => t === 0).length > 2 || teams.filter(t => t === 1).length > 2) {
+        return this.partyErr(p, 'Assign every player to a team, with one or two players on each side.');
+      }
+      if (draftParty.members.some(id => this.disconnectedUntil.has(id))) return this.partyErr(p, 'Wait for everyone to reconnect before starting.');
+    }
     if (p.worldId !== null) {
       if (!this.inFinishedWorld(p)) return this.partyErr(p, 'You are already in a match.');
       out.push(...this.exitMatch(p, true));
@@ -677,7 +803,8 @@ export class GameServer {
         if (m.worldId !== null) out.push(...this.exitMatch(m, true));
         if (m.queue) { this.leaveQueue(m); out.push(this.to(m, { t: 'queue', mode: null })); }
       }
-      out.push(...(mode === 'ratseek' ? this.launchRatSeek(members, seeker ?? 0, p.id) : this.launch(mode, members, true)));
+      out.push(...(mode === 'bedwars' ? this.launchBedwars(members, party)
+        : mode === 'ratseek' ? this.launchRatSeek(members, seeker ?? 0, p.id) : this.launch(mode, members, true)));
       return out;
     }
     // Solo: the public queue.
@@ -779,7 +906,7 @@ export class GameServer {
       parkour: mode === 'parkour' ? {
         blink: [true, true], crumbles: new Map(), fireballs: [], nextBreathAt: 0, dragonSentAt: -1, statues: new Map(),
       } : null,
-      arrows: [], rs: null, rsOut: [], rsQuiet: false,
+      arrows: [], rs: null, rsOut: [], rsQuiet: false, bw: null, bwOut: [],
     };
     this.worlds.set(spec.id, w);
     this.worldByLobby.set(lobby, spec.id);
@@ -818,7 +945,14 @@ export class GameServer {
     const w = this.worldOfPlayer(p);
     const out: Outbound[] = [];
     if (!w) { p.worldId = null; return notify ? [this.to(p, { t: 'leftWorld' })] : []; }
-    if (w.mode === 'ratseek') {
+    if (w.bw && (w.bw.phase === 'loading' || w.bw.phase === 'countdown')) {
+      for (const member of w.members) out.push(this.to(member, { t: 'notice', text: 'Bedwars start cancelled because a player left.' }));
+      return [...out, ...this.closeWorld(w)];
+    }
+    if (w.mode === 'bedwars') {
+      w.bw?.leave(p.id);
+      out.push(...this.drainBw(w));
+    } else if (w.mode === 'ratseek') {
       w.rs?.leave(p.id);
       out.push(...this.drainRs(w));
     } else if (w.mode === 'duels') {
@@ -845,6 +979,7 @@ export class GameServer {
 
   /** Remove a body from a world's roster and tell the rest. */
   private detach(p: ServerPlayer, w: MatchWorld, out: Outbound[]): void {
+    this.bwMoves.delete(p.id);
     w.members.delete(p.id);
     p.worldId = null;
     p.arenaTrack = [];
@@ -859,6 +994,15 @@ export class GameServer {
   /** A results screen is up: the world closes after it has been read. */
   private markFinishedIfDone(w: MatchWorld): void {
     if (w.closeAt !== null) return;
+    if (w.mode === 'bedwars') {
+      if (w.bw?.isOver()) {
+        w.closeAt = this.worldTime + RESULTS_LINGER_S;
+        const parties = new Set<Party>();
+        for (const id of w.members) { const party = this.parties.of(id); if (party) parties.add(party); }
+        for (const party of parties) w.bwOut.push(...this.partyBroadcast(party.leader));
+      }
+      return;
+    }
     if (w.mode === 'ratseek') { if (w.rs?.isOver()) w.closeAt = this.worldTime + RS_PODIUM_S; return; }
     const phase = w.mode === 'duels'
       ? this.duels.snapshots(this.nowMs()).find((s) => s.id === w.lobby)?.phase
@@ -874,7 +1018,7 @@ export class GameServer {
     for (const id of [...w.members]) {
       const p = this.players.get(id);
       if (!p) { w.members.delete(id); continue; }
-      if (w.mode === 'duels') this.duels.leave(id, now); else if (w.mode !== 'ratseek') this.pg.leave(id, now);
+      if (w.mode === 'duels') this.duels.leave(id, now); else if (w.mode !== 'ratseek' && w.mode !== 'bedwars') this.pg.leave(id, now);
       if (p.bot) {
         this.settleBot(p, w);
         w.members.delete(id);
@@ -883,11 +1027,14 @@ export class GameServer {
       }
       w.members.delete(id);
       p.worldId = null;
+      this.bwMoves.delete(id);
       p.arenaTrack = [];
       this.partyMoves.delete(id);
       this.partyCombat.delete(id);
       out.push(this.to(p, { t: 'leftWorld' }), ...this.partyBroadcast(id));
     }
+    w.bw?.dispose();
+    w.bwOut = [];
     this.worlds.delete(w.spec.id);
     this.worldByLobby.delete(w.lobby);
     if (w.mode !== 'ratseek') releaseWorldGenerator(w.spec);
@@ -917,7 +1064,172 @@ export class GameServer {
 
   // ── Launching a match ────────────────────────────────────────────────────
 
+  private drainBw(w: MatchWorld): Outbound[] {
+    const out = w.bwOut;
+    w.bwOut = [];
+    return out;
+  }
+
+  private bwHost(w: MatchWorld): BwHost {
+    const send = (id: number, msg: ServerMsg): void => {
+      if (this.players.get(id)?.bot === false) w.bwOut.push(this.to(id, msg));
+    };
+    const broadcast = (msg: ServerMsg): void => { for (const id of w.members) send(id, msg); };
+    return {
+      nowMs: () => this.nowMs(),
+      body: id => this.players.get(id),
+      name: id => this.players.get(id)?.username ?? '',
+      send, broadcast,
+      getBlock: (x, y, z) => w.blocks.getBlock(x, y, z),
+      isEdited: (x, y, z) => w.blocks.isEdited(x, y, z),
+      setBlock: (x, y, z, block) => {
+        w.blocks.set(x, y, z, block);
+        broadcast({ t: 'edit', x, y, z, block });
+      },
+      setHealth: (id, health, dead) => {
+        const p = this.players.get(id);
+        if (p) { p.health = health; p.dead = dead; }
+      },
+      impulse: (id, kx, ky, kz, by, health) => {
+        const p = this.players.get(id);
+        if (!p) return;
+        p.health = health;
+        const motion = this.bwMoves.get(id) ?? bwMotion(this.worldTime, p);
+        bwAuthorizeImpulse(motion, this.worldTime, p, kx, ky, kz);
+        this.bwMoves.set(id, motion);
+        send(id, { t: 'hurt', health, dead: health <= 0, by, kx, ky, kz });
+      },
+      teleport: (id, x, y, z, yaw, health) => {
+        const p = this.players.get(id);
+        if (!p) return;
+        p.x = x; p.y = y; p.z = z; p.rsMoveAt = this.worldTime;
+        this.bwMoves.set(id, bwMotion(this.worldTime, p));
+        p.arenaTrack = [];
+        if (yaw !== undefined) p.yaw = yaw;
+        if (health !== undefined) {
+          p.health = health; p.dead = health <= 0;
+          send(id, { t: 'respawned', x, y, z, health, seq: this.moved(p) });
+        } else send(id, { t: 'teleport', x, y, z, seq: this.moved(p) });
+      },
+      drive: (id, pose) => {
+        const p = this.players.get(id);
+        if (!p) return;
+        p.x = pose.x; p.y = pose.y; p.z = pose.z; p.yaw = pose.yaw; p.pitch = pose.pitch;
+        if (pose.held !== undefined) p.held = pose.held;
+        if (pose.swing) p.swing = (p.swing + 1) & 0xffff;
+        p.ct = this.nowMs();
+      },
+    };
+  }
+
+  private launchBedwars(members: ServerPlayer[], party?: Party): Outbound[] {
+    const w = this.createWorld('bedwars', 1, `bw:${this.nextWorldId}`);
+    const entries = members.map((p, i) => ({ p, team: (party?.bedwars?.assignments[String(p.id)] ?? i % 2) as 0 | 1 }));
+    if (members.length === 3 && party?.bedwars?.fill) {
+      const solo = entries.filter(e => e.team === 0).length === 1 ? 0 : 1;
+      entries.push({ p: this.makeBot(), team: solo });
+    }
+    const out: Outbound[] = [];
+    const teamCounts = [0, 0];
+    for (const { p, team } of entries) {
+      const base = BW_BASES[team], spawn = base.spawns[teamCounts[team]++ % base.spawns.length];
+      this.resetBody(p, spawn, base.yaw, 20);
+      p.rsMoveAt = this.worldTime;
+      p.held = Item.WoodSword;
+      out.push(...this.enterWorld(p, w));
+    }
+    w.bw = new BedwarsMatch(this.bwHost(w), {
+      players: entries.map(({ p, team }) => ({ id: p.id, team, bot: p.bot })),
+      world: w.spec.id, leader: party?.leader,
+    });
+    // Arena first: the client has to switch worlds before applying the kit and state.
+    for (const { p, team } of entries) {
+      if (!p.bot) out.push(this.to(p, { t: 'bwArena', world: w.spec, team,
+        spawn: { x: p.x, y: p.y, z: p.z }, yaw: BW_BASES[team].yaw }));
+      else w.bw.ready(p.id);
+    }
+    out.push(...this.drainBw(w));
+    for (const p of members) out.push(...this.partyBroadcast(p.id));
+    return out;
+  }
+
+  private bwBodyClear(w: MatchWorld, x: number, y: number, z: number): boolean {
+    const r = 0.285, h = 1.79;
+    for (let bx = Math.floor(x - r); bx <= Math.floor(x + r); bx++) {
+      for (let by = Math.floor(y + 0.015); by <= Math.floor(y + h); by++) {
+        for (let bz = Math.floor(z - r); bz <= Math.floor(z + r); bz++) {
+          for (const [mn, mx] of collisionBoxes(w.blocks.getBlock(bx, by, bz)) ?? []) {
+            if (x + r > bx + mn[0] && x - r < bx + mx[0] && y + h > by + mn[1] &&
+                y + 0.015 < by + mx[1] && z + r > bz + mn[2] && z - r < bz + mx[2]) return false;
+          }
+        }
+      }
+    }
+    return true;
+  }
+
+  private bwBodyPathClear(w: MatchWorld, from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }): boolean {
+    const steps = Math.max(1, Math.ceil(Math.hypot(to.x - from.x, to.y - from.y, to.z - from.z) * 3));
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      if (!this.bwBodyClear(w, from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t, from.z + (to.z - from.z) * t)) return false;
+    }
+    return true;
+  }
+
+  private handleBedwars(p: ServerPlayer, w: MatchWorld, msg: ClientMsg): Outbound[] {
+    const bw = w.bw;
+    if (!bw) return [];
+    if (msg.t === 'worldReady' && msg.world === w.spec.id) bw.ready(p.id);
+    else if (msg.t === 'bwAction' && msg.world === w.spec.id) bw.handle(p.id, msg.action);
+    else if (msg.t === 'xform') {
+      if (msg.world !== w.spec.id || this.staleMove(p, msg) || !fin(msg.x, msg.y, msg.z, msg.yaw, msg.pitch)) return [];
+      const motion = this.bwMoves.get(p.id) ?? bwMotion(this.worldTime, p);
+      this.bwMoves.set(p.id, motion);
+      const bounds = BW_BOUNDS;
+      let valid = (bw.canMove(p.id) || p.dead) &&
+        msg.x >= bounds.minX - 4 && msg.x <= bounds.maxX + 4 && msg.z >= bounds.minZ - 4 && msg.z <= bounds.maxZ + 4 &&
+        msg.y >= BW_VOID_Y - 20 && msg.y < 150;
+      if (valid && !p.dead) {
+        valid = this.bwBodyPathClear(w, p, msg);
+        // Player's grounded auto-step rises first, then crosses the tread.
+        // A straight diagonal sweep cuts through that tread and incorrectly
+        // rejects ordinary slabs/stairs. Validate the same two clear segments.
+        const rise = msg.y - p.y;
+        if (!valid && rise > 0 && rise <= .601) {
+          const get = (x: number, y: number, z: number) => w.blocks.getBlock(x, y, z);
+          const raised = { x: p.x, y: msg.y, z: p.z };
+          valid = bwSupported(p, get) && bwSupported(msg, get)
+            && this.bwBodyPathClear(w, p, raised) && this.bwBodyPathClear(w, raised, msg);
+        }
+      }
+      if (valid) {
+        const verdict = bwAcceptMotion(motion, this.worldTime, p, msg, p.dead, (x, y, z) => w.blocks.getBlock(x, y, z));
+        valid = verdict.ok;
+        if (verdict.airViolation) {
+          const fall = bwTickMotion(motion, this.worldTime, p, (x, y, z) => w.blocks.getBlock(x, y, z));
+          if (fall) p.y = fall.y;
+        }
+      }
+      p.yaw = msg.yaw; p.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, msg.pitch));
+      p.sneaking = msg.sneaking === true;
+      if (typeof msg.ct === 'number' && Number.isFinite(msg.ct)) p.ct = Math.floor(msg.ct);
+      if (Number.isFinite(msg.swing)) p.swing = Number(msg.swing) & 0xffff;
+      if (valid) {
+        p.x = msg.x; p.y = msg.y; p.z = msg.z;
+        p.rsMoveAt = this.worldTime;
+      } else if (Math.hypot(msg.x - p.x, msg.y - p.y, msg.z - p.z) > 0.3) {
+        w.bwOut.push(this.to(p, { t: 'teleport', x: p.x, y: p.y, z: p.z, seq: this.moved(p) }));
+      }
+      w.bwOut.push(...this.relayTransform(p, w));
+    }
+    this.markFinishedIfDone(w);
+    return this.drainBw(w);
+  }
+
   private launch(mode: GameMode, members: ServerPlayer[], party: boolean): Outbound[] {
+    if (mode === 'bedwars') return this.launchBedwars(members);
+    if (mode === 'ratseek') return this.launchRatSeek(members, 0);
     return mode === 'duels' ? this.launchDuel(members, party) : this.launchPg(mode, members, party);
   }
 
@@ -1025,6 +1337,7 @@ export class GameServer {
   private handleInWorld(p: ServerPlayer, msg: ClientMsg): Outbound[] {
     const w = this.worldOfPlayer(p);
     if (!w) return [];
+    if (w.mode === 'bedwars') return this.handleBedwars(p, w, msg);
     if (w.mode === 'ratseek') return this.handleRatSeek(p, w, msg);
     if (msg.t === 'worldReady') {
       if (msg.world !== w.spec.id) return [];
@@ -1993,10 +2306,37 @@ export class GameServer {
   tick(dt: number): Outbound[] {
     this.worldTime += dt;
     const out: Outbound[] = [];
+    for (const [id, until] of this.disconnectedUntil) {
+      if (this.nowMs() < until) continue;
+      const p = this.players.get(id);
+      if (p) out.push(...this.dropConnection(p));
+      else this.disconnectedUntil.delete(id);
+    }
     out.push(...this.fillWithBots());
     out.push(...this.tickDuels());
     out.push(...this.tickPg());
     out.push(...this.tickRatSeek(dt));
+    for (const w of this.worlds.values()) {
+      if (!w.bw) continue;
+      // An unsupported body must fall even when its client stops sending
+      // transforms. Keep its horizontal position and original flight clock;
+      // anti-flight corrections never rescue it back onto the island.
+      for (const participant of w.bw.players.values()) {
+        const p = this.players.get(participant.id);
+        if (!p || p.bot || p.dead || !w.bw.canMove(p.id)) continue;
+        const motion = this.bwMoves.get(p.id) ?? bwMotion(this.worldTime, p);
+        this.bwMoves.set(p.id, motion);
+        const fall = bwTickMotion(motion, this.worldTime, p, (x, y, z) => w.blocks.getBlock(x, y, z));
+        if (fall) {
+          p.y = fall.y;
+          w.bwOut.push(this.to(p, { t: 'teleport', x: p.x, y: p.y, z: p.z, seq: this.moved(p) }));
+          w.bwOut.push(...this.relayTransform(p, w));
+        }
+      }
+      w.bw.tick(dt);
+      out.push(...this.drainBw(w));
+      this.markFinishedIfDone(w);
+    }
     this.tickRegen(dt);
     // Close worlds whose results screen has been up long enough.
     for (const w of [...this.worlds.values()]) {
@@ -2214,6 +2554,7 @@ export class GameServer {
 
   /** A respawn spectator is invisible to everyone else (never to themselves). */
   private hiddenInWorld(p: ServerPlayer, w: MatchWorld): boolean {
+    if (w.mode === 'bedwars') return p.dead;
     if (w.mode === 'duels') return this.duels.participantFor(p.id)?.spectating === true;
     const m = this.pg.participantFor(p.id);
     return m?.respawnAt !== undefined || (w.mode === 'parkour' && m?.outAt !== undefined);

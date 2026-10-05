@@ -5,7 +5,7 @@
 // reload, muzzle flash, smoke and flying brass.
 
 import * as THREE from 'three';
-import { itemGeometry } from './item_geometry';
+import { itemGeometry, itemGeometrySolid } from './item_geometry';
 import { Item, ITEMS } from './items';
 import { avatarTexture } from './avatartex';
 import { skinColorFor } from './remoteplayers';
@@ -359,8 +359,14 @@ export class HeldItemView {
         this.partPad = model.getObjectByName('pad') ?? null;
         this.partSpring = model.getObjectByName('spring') ?? null;
       } else {
-        const mesh = new THREE.Mesh(itemGeometry(this.atlas, id), this.material);
-        mesh.scale.setScalar(1.4);
+        // Bedwars gear is a thin slab of real pixels, so a sword still reads as a
+        // sword mid-swing instead of a flat card that vanishes edge-on. Its
+        // silhouettes are long, so it is kept smaller than the other sprites.
+        const solid = id >= Item.WoodSword && id <= Item.DiamondSword;
+        const mesh = new THREE.Mesh(solid ? itemGeometrySolid(this.atlas, id, 0.44, 0.04) : itemGeometry(this.atlas, id), this.material);
+        // A block in hand is a smaller cube in Bedwars, where the bridge ahead has to stay visible.
+        const compact = this.isBlockItem && document.body.classList.contains('bedwars-active');
+        mesh.scale.setScalar(solid ? 1 : compact ? 0.8 : 1.4);
         mesh.rotation.set(0.1, -0.6, 0);
         this.mesh = mesh;
       }

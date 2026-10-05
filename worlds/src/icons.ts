@@ -206,7 +206,8 @@ export function renderItemIcon(
     // Flat sprite (pure items, plants).
     const tile: Tile = block ? block.side : info.sprite ?? Tile.Stone;
     const tint = block?.tint === 'grass' ? ICON_GRASS : null;
-    ctx.drawImage(tileSource(atlasCanvas, tile, tint), 4, 4, 24, 24);
+    // An exact 2x of the 16px art, so every art pixel is the same size.
+    ctx.drawImage(tileSource(atlasCanvas, tile, tint), 0, 0, 32, 32);
     return;
   }
 
