@@ -1,6 +1,7 @@
-// The merchant panels: a narrow card docked to the right edge. There is no
-// scrim and no blur, so the match stays visible and cheap to render. Purchases
-// are decided by the server; the panel only asks and reports the answer.
+// The merchant panels, Hypixel style: a centred window with a quick-buy tab,
+// category tabs and a grid of item tiles; hovering a tile tells you what it
+// does. A light scrim, no blur. Purchases are decided by the server; the panel
+// only asks and reports the answer.
 import { BW_CATALOG, BW_CATEGORIES, bwPrice, type BwCatalogEntry, type BwCategory } from './bedwars_catalog';
 import { BW_RESOURCES, BW_RESOURCE_ITEM, BW_RESOURCE_NAME, bwUpgrades, bwWallet, type BwAction, type BwPlayerView, type BwResource, type BwSnapshot, type BwTeam, type BwWallet } from './bedwars_rules';
 import { bwButton, bwEl } from './bedwars_ui';
@@ -8,7 +9,10 @@ import { renderItemIcon } from './icons';
 
 export type BedwarsService = 'shop' | 'upgrades' | 'chest';
 const TITLES: Record<BedwarsService, string> = { shop: 'Item Shop', upgrades: 'Team Upgrades', chest: 'Team Chest' };
-const SHOP_TABS = BW_CATEGORIES.filter(c => c.id !== 'upgrades');
+type Tab = BwCategory | 'quick';
+const SHOP_TABS: { id: Tab; label: string }[] = [{ id: 'quick', label: 'Quick Buy' }, ...BW_CATEGORIES.filter(c => c.id !== 'upgrades')];
+/** The first tab: what most rounds are bought from. */
+const QUICK = new Set(['wool', 'stone_sword', 'iron_sword', 'iron_armor', 'tools', 'shears', 'wood', 'tnt', 'heal', 'bow', 'arrows', 'pearl']);
 
 interface ShopDeps {
   host: HTMLElement;
@@ -18,7 +22,7 @@ interface ShopDeps {
   count(item: number): number;
   onPanel(): void;
 }
-interface Row { entry: BwCatalogEntry; root: HTMLButtonElement; price: HTMLElement; tag: HTMLElement; state: string }
+interface Row { entry: BwCatalogEntry; root: HTMLButtonElement; price: HTMLElement; tag: HTMLElement; detail: string; state: string }
 
 /** A server-confirmed shop: never spends or grants anything locally. */
 export class BedwarsShop {
@@ -28,27 +32,40 @@ export class BedwarsShop {
   private readonly list: HTMLElement;
   private readonly chest: HTMLElement;
   private readonly notice: HTMLElement;
+  /** What you are carrying, so prices read at a glance. */
+  private readonly purse = new Map<BwResource, HTMLElement>();
   private readonly rows: Row[] = [];
-  private readonly tabButtons = new Map<BwCategory, HTMLButtonElement>();
+  private readonly tabButtons = new Map<Tab, HTMLButtonElement>();
+  private readonly scrim: HTMLElement;
+  private readonly details: HTMLElement;
   private readonly chestRows = new Map<BwResource, { chest: HTMLElement; put: HTMLButtonElement; take: HTMLButtonElement }>();
   private readonly pending = new Map<number, string>();
   private request = 0;
   private self: BwPlayerView | undefined;
   private snap: BwSnapshot | null = null;
   private team: BwTeam = 0;
-  private category: BwCategory = 'blocks';
+  private category: Tab = 'quick';
   private noticeTimer = 0;
   service: BedwarsService | null = null;
 
   constructor(private readonly d: ShopDeps) {
-    this.root = bwEl('aside', 'bw-shop', d.host);
-    this.root.hidden = true;
+    this.scrim = bwEl('div', 'bw-shop-scrim', d.host);
+    this.scrim.hidden = true;
+    this.scrim.addEventListener('pointerdown', e => { e.stopPropagation(); if (e.target === this.scrim) this.close(); });
+    this.root = bwEl('section', 'bw-shop', this.scrim);
+    this.root.setAttribute('role', 'dialog');
     this.root.setAttribute('aria-label', 'Shop');
     const head = bwEl('header', '', this.root);
     this.title = bwEl('b', '', head, TITLES.shop);
     const close = bwButton(head, '', () => this.close(), 'bw-x');
     close.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
     close.setAttribute('aria-label', 'Close');
+    const purse = bwEl('div', 'bw-purse', this.root);
+    for (const r of BW_RESOURCES) {
+      const chip = bwEl('span', '', purse); chip.dataset.resource = r; chip.title = BW_RESOURCE_NAME[r];
+      renderItemIcon(bwEl('canvas', '', chip), this.d.atlasCanvas, BW_RESOURCE_ITEM[r]);
+      this.purse.set(r, bwEl('b', '', chip, '0'));
+    }
     this.tabs = bwEl('nav', 'bw-tabs', this.root);
     this.tabs.setAttribute('role', 'tablist');
     for (const cat of SHOP_TABS) {
@@ -60,32 +77,35 @@ export class BedwarsShop {
     for (const entry of BW_CATALOG) this.rows.push(this.makeRow(entry));
     this.chest = bwEl('div', 'bw-list bw-chest', this.root);
     for (const r of BW_RESOURCES) this.makeChestRow(r);
-    this.notice = bwEl('footer', 'bw-notice', this.root);
+    const foot = bwEl('footer', 'bw-shop-foot', this.root);
+    this.details = bwEl('div', 'bw-details', foot);
+    this.notice = bwEl('div', 'bw-notice', foot);
     this.root.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); this.close(); } });
     this.root.addEventListener('pointerdown', e => e.stopPropagation());
   }
 
-  get open(): boolean { return !this.root.hidden; }
+  get open(): boolean { return !this.scrim.hidden; }
 
   show(service: BedwarsService, team: BwTeam): void {
-    this.service = service; this.team = team; this.root.hidden = false;
+    this.service = service; this.team = team; this.scrim.hidden = false;
     this.root.dataset.service = service;
     this.title.textContent = TITLES[service];
     this.tabs.hidden = service !== 'shop';
     this.list.hidden = service === 'chest';
     this.chest.hidden = service !== 'chest';
-    this.category = service === 'upgrades' ? 'upgrades' : this.category === 'upgrades' ? 'blocks' : this.category;
+    this.category = service === 'upgrades' ? 'upgrades' : this.category === 'upgrades' ? 'quick' : this.category;
+    this.details.textContent = service === 'chest' ? 'Shared with your team. Safe even if you die.' : 'Hover an item to see what it does.';
     this.say('');
     this.layout(); this.refresh();
     this.d.onPanel();
   }
   close(): void {
     if (!this.open) return;
-    this.root.hidden = true; this.service = null;
+    this.scrim.hidden = true; this.service = null;
     this.d.onPanel();
   }
   reset(): void {
-    this.root.hidden = true; this.service = null; this.pending.clear(); this.request = 0; this.snap = null; this.self = undefined;
+    this.scrim.hidden = true; this.service = null; this.pending.clear(); this.request = 0; this.snap = null; this.self = undefined;
   }
 
   /** New snapshot or inventory: re-evaluate what can be bought. */
@@ -99,7 +119,7 @@ export class BedwarsShop {
     this.refresh();
   }
 
-  private choose(cat: BwCategory): void { this.category = cat; this.layout(); this.refresh(); }
+  private choose(cat: Tab): void { this.category = cat; this.layout(); this.refresh(); }
   private say(text: string, tone = ''): void {
     this.notice.textContent = text; this.notice.dataset.tone = tone;
     window.clearTimeout(this.noticeTimer);
@@ -108,17 +128,20 @@ export class BedwarsShop {
 
   private makeRow(entry: BwCatalogEntry): Row {
     const root = bwButton(this.list, '', () => this.buy(entry), 'bw-row');
+    const show = (): void => { this.details.textContent = `${entry.name}: ${row.detail}`; };
+    root.addEventListener('pointerenter', show); root.addEventListener('focus', show);
     const icon = bwEl('canvas', 'bw-icon', root);
     renderItemIcon(icon, this.d.atlasCanvas, entry.item);
     const text = bwEl('span', 'bw-row-text', root);
     bwEl('b', '', text, entry.name);
-    const tag = bwEl('small', '', text, entry.description);
+    const tag = bwEl('small', '', text);
     const price = bwEl('span', 'bw-price', root);
     price.dataset.resource = entry.resource;
     const coin = bwEl('canvas', '', price);
     renderItemIcon(coin, this.d.atlasCanvas, BW_RESOURCE_ITEM[entry.resource]);
     bwEl('i', '', price);
-    return { entry, root, price, tag, state: '' };
+    const row: Row = { entry, root, price, tag, detail: entry.description, state: '' };
+    return row;
   }
   private makeChestRow(resource: BwResource): void {
     const root = bwEl('div', 'bw-row bw-chest-row', this.chest);
@@ -136,7 +159,8 @@ export class BedwarsShop {
   private layout(): void {
     for (const [cat, button] of this.tabButtons) button.setAttribute('aria-selected', String(cat === this.category));
     const upgrades = this.service === 'upgrades';
-    for (const row of this.rows) row.root.hidden = row.entry.category !== this.category || (row.entry.category === 'upgrades') !== upgrades;
+    for (const row of this.rows) row.root.hidden = upgrades ? row.entry.category !== 'upgrades'
+      : row.entry.category === 'upgrades' || (this.category === 'quick' ? !QUICK.has(row.entry.sku) : row.entry.category !== this.category);
   }
 
   private buy(entry: BwCatalogEntry): void {
@@ -158,6 +182,11 @@ export class BedwarsShop {
     return false;
   }
   private refresh(): void {
+    for (const [r, node] of this.purse) {
+      const n = String(this.d.count(BW_RESOURCE_ITEM[r]));
+      if (node.textContent !== n) node.textContent = n;
+      node.parentElement!.dataset.empty = n === '0' ? '1' : '';
+    }
     if (this.service === 'chest') {
       const chest: BwWallet = this.snap?.teams[this.team].chest ?? bwWallet();
       for (const [r, row] of this.chestRows) {
@@ -187,7 +216,8 @@ export class BedwarsShop {
       const label = row.price.querySelector('i')!;
       label.textContent = maxed ? 'Max' : owned ? 'Owned' : String(cost);
       row.price.dataset.hidden = maxed || owned ? '1' : '';
-      row.tag.textContent = e.upgrade ? `${e.description}  Level ${level}/${e.max ?? 1}` : e.description;
+      row.detail = e.upgrade ? `${e.description} Level ${level}/${e.max ?? 1}.` : e.description;
+      row.tag.textContent = e.upgrade ? `Level ${level}/${e.max ?? 1}` : '';
     }
   }
 }

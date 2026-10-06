@@ -4,7 +4,8 @@
 // here with the same `stepDrop` the server runs, so only events cross the wire.
 import * as THREE from 'three';
 import { BW_Y } from './bedwars_map';
-import type { BwBreakView, BwDropView, BwProjectileView, BwSafeZone } from './bedwars_rules';
+import type { BwBreakView, BwDropView, BwGeneratorView, BwProjectileView, BwSafeZone } from './bedwars_rules';
+import type { BedwarsMap } from './bedwars_map';
 import { stepDrop, type BwDropBody } from './bedwars_drops';
 import { itemGeometry, itemGeometrySolid } from './item_geometry';
 import { ITEMS } from './items';
@@ -13,6 +14,7 @@ import type { World } from './world';
 
 interface DropView extends BwDropBody { id: number; item: number; count: number; group: THREE.Group; phase: number; shown: number }
 interface Fly { group: THREE.Group; from: THREE.Vector3; to: () => THREE.Vector3 | null; t: number; arc: number }
+interface GenTag { sprite: THREE.Sprite; canvas: HTMLCanvasElement; texture: THREE.CanvasTexture; text: string }
 interface ProjectileView { object: THREE.Group; target: THREE.Vector3; previous: THREE.Vector3; kind: string; at: number; fuse: number }
 
 const PICKUP_FLIGHT = 0.2;
@@ -23,14 +25,14 @@ export class BedwarsWorld {
   private readonly drops = new Map<number, DropView>();
   private readonly flying: Fly[] = [];
   private readonly projectiles = new Map<number, ProjectileView>();
-  private readonly shared: THREE.BufferGeometry[] = [];
   private zone: THREE.Group | null = null;
   private readonly cracks = new Map<number, THREE.Mesh>();
   private readonly crackMaterial: THREE.MeshBasicMaterial;
   private elapsed = 0;
+  private readonly genTags = new Map<number, GenTag>();
 
   constructor(scene: THREE.Scene, private readonly world: World, private readonly atlas: Atlas,
-    private readonly crackTextures: THREE.Texture[]) {
+    private readonly crackTextures: THREE.Texture[], private readonly map: BedwarsMap) {
     this.group.name = 'bedwars-world';
     this.material = new THREE.MeshBasicMaterial({ map: atlas.texture, alphaTest: 0.4, vertexColors: true, side: THREE.DoubleSide });
     this.crackMaterial = new THREE.MeshBasicMaterial({ map: crackTextures[0], transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 });
@@ -105,6 +107,38 @@ export class BedwarsWorld {
     return out;
   }
 
+  // ── Middle generators: "Diamond II" and a countdown over each ─────────
+  setGenerators(gens: BwGeneratorView[]): void {
+    for (const g of gens) {
+      const def = this.map.generators.find(v => v.id === g.id);
+      if (!def) continue;
+      let tag = this.genTags.get(g.id);
+      if (!tag) {
+        const canvas = document.createElement('canvas'); canvas.width = 256; canvas.height = 112;
+        const texture = new THREE.CanvasTexture(canvas); texture.colorSpace = THREE.SRGBColorSpace;
+        const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false }));
+        sprite.position.set(def.pos.x, def.pos.y + 2.25, def.pos.z); sprite.scale.set(1.5, 1.5 * 112 / 256, 1);
+        this.group.add(sprite);
+        tag = { sprite, canvas, texture, text: '' };
+        this.genTags.set(g.id, tag);
+      }
+      const name = `${def.kind === 'diamond' ? 'Diamond' : 'Emerald'} ${'I'.repeat(Math.max(1, Math.min(3, g.tier)))}`;
+      const text = `${name}|${Math.ceil(g.next)}`;
+      if (text === tag.text) continue;
+      tag.text = text;
+      const ctx = tag.canvas.getContext('2d')!;
+      ctx.clearRect(0, 0, 256, 112);
+      ctx.fillStyle = 'rgba(255,255,255,.94)'; ctx.beginPath(); ctx.roundRect(6, 6, 244, 100, 20); ctx.fill();
+      ctx.strokeStyle = def.kind === 'diamond' ? '#3fd3e0' : '#2fc46d'; ctx.lineWidth = 5;
+      ctx.beginPath(); ctx.roundRect(8, 8, 240, 96, 18); ctx.stroke();
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#122032';
+      ctx.font = '800 34px ui-sans-serif, system-ui, sans-serif'; ctx.fillText(name, 128, 40, 220);
+      ctx.fillStyle = '#4c6079'; ctx.font = '700 26px ui-sans-serif, system-ui, sans-serif';
+      ctx.fillText(`Next in ${Math.ceil(g.next)}s`, 128, 78, 220);
+      tag.texture.needsUpdate = true;
+    }
+  }
+
   // ── Zone and enemy cracks ─────────────────────────────────────────────
   setZone(z: BwSafeZone, visible: boolean): void {
     if (!this.zone) return;
@@ -168,11 +202,12 @@ export class BedwarsWorld {
     this.group.removeFromParent();
     for (const view of this.projectiles.values()) this.disposeGroup(view.object);
     for (const mesh of this.cracks.values()) { (mesh.material as THREE.Material).dispose(); mesh.geometry.dispose(); }
+    for (const tag of this.genTags.values()) { tag.texture.dispose(); tag.sprite.material.dispose(); }
+    this.genTags.clear();
     this.cracks.clear(); this.projectiles.clear(); this.drops.clear(); this.flying.length = 0;
     if (this.zone) this.disposeGroup(this.zone);
     this.zone = null;
     this.material.dispose(); this.crackMaterial.dispose();
-    for (const g of this.shared) g.dispose();
   }
 
   private disposeGroup(object: THREE.Object3D): void {

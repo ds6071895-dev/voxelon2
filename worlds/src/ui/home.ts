@@ -36,6 +36,7 @@ export class HomeScreen {
   private readonly partyLabel = document.getElementById('w-party-label')!;
   private readonly partyCount = document.getElementById('w-party-count')!;
   private readonly connection = document.getElementById('w-connection')!;
+  private readonly nametag = document.getElementById('w-nametag')!;
   private readonly faceCanvas = document.createElement('canvas');
   private queue: GameMode | null = null;
   private queuedAt = 0;
@@ -71,6 +72,7 @@ export class HomeScreen {
 
   setIdentity(name: string, account: boolean, cosmetics: Cosmetics | undefined, seed: number): void {
     this.accountName.textContent = name;
+    this.nametag.textContent = name;
     this.accountKind.textContent = account ? 'Signed in' : 'Guest';
     this.accountCta.textContent = account ? 'Account' : 'Log in';
     this.accountBtn.dataset.signedIn = account ? '1' : '';

@@ -1,7 +1,16 @@
-// Hand-built, reusable low-poly furnishings for the Bedwars map.
+// Hand-built, reusable low-poly furnishings for the Bedwars maps: beds,
+// shopkeepers, generators and the props around them. Everything stationary is
+// baked into a few draw calls and textured with a world-space pixel-noise
+// detail map; shopkeepers are real textured player models.
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { BW_BASES, BW_GENERATORS, type BedwarsBase } from './bedwars_map';
+import type { BedwarsBase, BedwarsMap } from './bedwars_map';
+import { BW_TEAM_COLORS } from './bedwars_rules';
+import { Item } from './items';
+import { itemGeometrySolid } from './item_geometry';
+import { buildAvatarBody, disposeAvatarBody, type AvatarBody } from './remoteplayers';
+import type { Cosmetics } from './character';
+import type { Atlas } from './textures';
 
 const C = {
   wood: 0x624334, lightWood: 0x9a704b, darkWood: 0x352b29, edge: 0xc99b64,
@@ -10,6 +19,46 @@ const C = {
   blue: 0x315faf, blueLight: 0x6c9ce2, jade: 0x39bd92, glass: 0x8de4e5,
   skin: 0xc9956c, ink: 0x242834, leaf: 0x51874d,
 };
+const hex = (css: string): number => parseInt(css.slice(1), 16);
+const TEAM = BW_TEAM_COLORS.map(hex);
+const TEAM_LIGHT = TEAM.map((c) => new THREE.Color(c).lerp(new THREE.Color(0xffffff), .35).getHex());
+
+/** Blocks one detail-texture tile spans (it is 32 px: 16 texels per block). */
+const DETAIL_BLOCKS = 2;
+function detailTexture(): THREE.Texture {
+  const size = 32, data = new Uint8Array(size * size * 4);
+  let seed = 9173;
+  const rnd = (): number => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    // Mostly light pixels with darker flecks, and faint streaks like grain.
+    const grain = (y % 4 === 0 ? -10 : 0) + (rnd() < .12 ? -26 : 0);
+    const v = Math.max(170, Math.min(255, 238 + Math.floor(rnd() * 17) + grain));
+    data.set([v, v, v, 255], (y * size + x) * 4);
+  }
+  const t = new THREE.DataTexture(data, size, size);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestMipmapLinearFilter; t.generateMipmaps = true;
+  t.needsUpdate = true;
+  return t;
+}
+
+/** Pixel art for a gem block (Minecraft's diamond/emerald block look). */
+function gemBlockTexture(base: number, light: number, dark: number): THREE.CanvasTexture | null {
+  if (typeof document === 'undefined') return null;
+  const c = document.createElement('canvas'); c.width = c.height = 16;
+  const ctx = c.getContext('2d')!;
+  const css = (n: number): string => `#${n.toString(16).padStart(6, '0')}`;
+  ctx.fillStyle = css(base); ctx.fillRect(0, 0, 16, 16);
+  ctx.fillStyle = css(dark);
+  ctx.fillRect(0, 15, 16, 1); ctx.fillRect(15, 0, 1, 16);
+  for (const [x, y] of [[3, 3], [9, 5], [5, 10], [11, 11], [2, 7], [12, 2]]) ctx.fillRect(x, y, 2, 1);
+  ctx.fillStyle = css(light);
+  ctx.fillRect(0, 0, 16, 1); ctx.fillRect(0, 0, 1, 16);
+  for (const [x, y] of [[4, 2], [10, 4], [6, 9], [12, 10], [2, 12], [8, 13]]) { ctx.fillRect(x, y, 2, 2); ctx.fillRect(x + 1, y - 1, 1, 1); }
+  const t = new THREE.CanvasTexture(c);
+  t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestFilter; t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
 
 export interface BedwarsModels {
   group: THREE.Group;
@@ -22,7 +71,11 @@ export interface BedwarsModels {
 /** One shaded unit box per color, one material, cached non-box primitives.
  * Every owned GPU resource is disposed once; nothing shared with other modes. */
 class Workshop {
-  readonly material = new THREE.MeshBasicMaterial({ vertexColors: true });
+  /** Every prop is vertex-coloured and multiplied by a pixel-noise detail
+   *  texture laid out in world space at 16 texels per block, so wood, cloth
+   *  and metal read as Minecraft textures instead of flat plastic. */
+  readonly detail = detailTexture();
+  readonly material = new THREE.MeshBasicMaterial({ vertexColors: true, map: this.detail });
   readonly geometries = new Map<string, THREE.BufferGeometry>();
   readonly spriteMaterials: THREE.SpriteMaterial[] = [];
   readonly textures: THREE.Texture[] = [];
@@ -62,21 +115,20 @@ class Workshop {
     const mesh = new THREE.Mesh(this.geometry('ring', color, () => new THREE.TorusGeometry(1, .025, 5, 48)), this.material);
     mesh.position.set(x, y, z); mesh.scale.setScalar(radius); parent.add(mesh); return mesh;
   }
-  label(parent: THREE.Object3D, text: string, x: number, y: number, z: number, color = '#8aa0ba', width = 2.2): void {
-    // Labels remain depth-tested and deliberately small, away from the beds.
+  /** A floating name tag: a bold title and a small hint line, Hypixel style. */
+  label(parent: THREE.Object3D, title: string, hint: string, x: number, y: number, z: number, color: string, width = 1.9): void {
     if (typeof document === 'undefined') return;
-    const canvas = document.createElement('canvas'); canvas.width = 512; canvas.height = 96;
+    const canvas = document.createElement('canvas'); canvas.width = 512; canvas.height = hint ? 150 : 96;
     const ctx = canvas.getContext('2d'); if (!ctx) return;
-    // Light paper tag with ink text, the same look as the rest of the UI.
-    ctx.fillStyle = 'rgba(255,255,255,.94)';
-    ctx.beginPath(); ctx.roundRect(8, 8, 496, 80, 22); ctx.fill();
-    ctx.strokeStyle = color; ctx.lineWidth = 5;
-    ctx.beginPath(); ctx.roundRect(10, 10, 492, 76, 20); ctx.stroke();
-    ctx.font = '800 36px ui-sans-serif, system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#122032'; ctx.fillText(text, 256, 50, 450);
+    ctx.fillStyle = 'rgba(16,22,32,.62)';
+    ctx.beginPath(); ctx.roundRect(6, 6, 500, canvas.height - 12, 18); ctx.fill();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = '900 48px ui-sans-serif, system-ui, sans-serif'; ctx.fillStyle = color;
+    ctx.fillText(title, 256, hint ? 54 : 48, 470);
+    if (hint) { ctx.font = '800 32px ui-sans-serif, system-ui, sans-serif'; ctx.fillStyle = '#ffd95c'; ctx.fillText(hint, 256, 108, 470); }
     const texture = new THREE.CanvasTexture(canvas); texture.colorSpace = THREE.SRGBColorSpace;
     const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false });
-    const sprite = new THREE.Sprite(material); sprite.position.set(x, y, z); sprite.scale.set(width, width * 96 / 512, 1);
+    const sprite = new THREE.Sprite(material); sprite.position.set(x, y, z); sprite.scale.set(width, width * canvas.height / 512, 1);
     parent.add(sprite); this.textures.push(texture); this.spriteMaterials.push(material);
   }
   /** Bake stationary craft into one draw call. Beds and animated objects get
@@ -108,8 +160,19 @@ class Workshop {
         // Octahedra are non-indexed; normalise all inputs for one shared batch.
         const flat = geometry.index ? geometry.toNonIndexed() : geometry;
         if (flat !== geometry) geometry.dispose();
-        // Some primitives omit UVs, and vertex colors supply all our surface art.
+        // World-space texel UVs: each face samples the detail texture by the
+        // two axes it spans, so a 1-block face shows 16 x 16 texels.
         flat.deleteAttribute('uv');
+        const pos = flat.getAttribute('position'), nor = flat.getAttribute('normal'), uv = new Float32Array(pos.count * 2);
+        const world = new THREE.Vector3(), n = new THREE.Vector3(), normalMatrix = new THREE.Matrix3().getNormalMatrix(root.matrixWorld);
+        for (let i = 0; i < pos.count; i++) {
+          world.fromBufferAttribute(pos, i).applyMatrix4(root.matrixWorld);
+          n.fromBufferAttribute(nor, i).applyMatrix3(normalMatrix);
+          const ax = Math.abs(n.x), ay = Math.abs(n.y), az = Math.abs(n.z);
+          const [a, b] = ax >= ay && ax >= az ? [world.z, world.y] : ay >= az ? [world.x, world.z] : [world.x, world.y];
+          uv[i * 2] = a / DETAIL_BLOCKS; uv[i * 2 + 1] = b / DETAIL_BLOCKS;
+        }
+        flat.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
         parts.push(flat); meshes.push(object);
       }
       for (const child of object.children) visit(child);
@@ -126,7 +189,7 @@ class Workshop {
   }
   dispose(): void {
     for (const geometry of this.geometries.values()) geometry.dispose();
-    this.geometries.clear(); this.material.dispose();
+    this.geometries.clear(); this.material.dispose(); this.detail.dispose();
     for (const material of this.spriteMaterials) material.dispose();
     for (const texture of this.textures) texture.dispose();
     this.spriteMaterials.length = 0; this.textures.length = 0;
@@ -134,9 +197,11 @@ class Workshop {
 }
 
 function bed(w: Workshop, parent: THREE.Group, base: BedwarsBase): THREE.Group {
-  const g = w.group(parent, base.bed.x + .5, base.bed.y, base.bed.z + 1);
+  // Centred on the two bed cells; local -z is the pillow end, +z the foot.
+  const g = w.group(parent, (base.bed.x + base.bedFoot.x) / 2 + .5, base.bed.y, (base.bed.z + base.bedFoot.z) / 2 + .5);
+  g.rotation.y = Math.atan2(base.bedFoot.x - base.bed.x, base.bedFoot.z - base.bed.z);
   g.name = `bed-${base.team}`;
-  const color = base.team === 0 ? C.red : C.blue, light = base.team === 0 ? C.redLight : C.blueLight;
+  const color = TEAM[base.team], light = TEAM_LIGHT[base.team];
   // A carved cabinet bed: the lower plinth conceals the entire 1 x .5 x 2
   // collision proxy, including its sides. No exposed collision slab or z-fight.
   w.box(g, 1.06, .34, 2.06, C.darkWood, 0, .17, 0);
@@ -187,45 +252,6 @@ function bed(w: Workshop, parent: THREE.Group, base: BedwarsBase): THREE.Group {
   return g;
 }
 
-function merchant(w: Workshop, parent: THREE.Object3D, upgrades: boolean, team: 0 | 1): void {
-  const coat = upgrades ? 0x526d63 : team === 0 ? C.red : C.blue;
-  for (const x of [-.15, .15]) {
-    w.box(parent, .22, .52, .26, C.darkWood, x, .35, 0);
-    w.box(parent, .25, .13, .36, C.wood, x, .065, -.045);
-  }
-  w.box(parent, .65, .65, .38, coat, 0, .98, 0);
-  w.box(parent, .45, .49, .025, C.linen, 0, .87, -.205);
-  w.box(parent, .68, .09, .41, C.lightWood, 0, .76, 0);
-  w.box(parent, .10, .12, .035, C.brass, 0, .765, -.23);
-  w.box(parent, .45, .43, .42, C.skin, 0, 1.52, -.015);
-  w.box(parent, .48, .14, .44, upgrades ? 0xb8b0a0 : C.darkWood, 0, 1.76, .01);
-  for (const x of [-.125, .125]) {
-    w.box(parent, .055, .055, .026, C.ink, x, 1.565, -.235);
-    w.box(parent, .015, .019, .008, C.linen, x - .009, 1.58, -.253);
-    w.box(parent, .11, .026, .035, C.darkWood, x, 1.635, -.24);
-  }
-  w.box(parent, .105, .12, .11, C.skin, 0, 1.48, -.265);
-  w.box(parent, .24, .06, .03, upgrades ? 0xb8b0a0 : C.wood, 0, 1.365, -.238);
-  // Apron sleeves and hands lean naturally over the counter.
-  for (const s of [-1, 1]) {
-    const arm = w.group(parent, s * .39, 1.20, 0); arm.rotation.x = -.5; arm.rotation.z = s * .08;
-    w.box(arm, .23, .40, .25, coat, 0, -.17, 0);
-    w.box(arm, .20, .18, .22, C.skin, 0, -.43, 0);
-  }
-  if (upgrades) {
-    w.box(parent, .54, .15, .47, 0x47665b, 0, 1.84, .015);
-    w.box(parent, .61, .055, .52, C.brass, 0, 1.76, -.015);
-    w.gem(parent, C.jade, 0, 1.86, -.24, .20);
-    for (const x of [-.13, .13]) {
-      const lens = w.ring(parent, .087, C.brass, x, 1.565, -.259); lens.scale.z = .5;
-    }
-  } else {
-    w.box(parent, .57, .11, .48, C.linen, 0, 1.83, 0);
-    w.box(parent, .44, .20, .41, coat, 0, 1.94, .015);
-    w.box(parent, .44, .04, .42, C.brass, 0, 1.87, .015);
-  }
-}
-
 function chest(w: Workshop, parent: THREE.Object3D): void {
   w.box(parent, 1.25, .64, .83, C.wood, 0, .38, 0);
   w.box(parent, 1.30, .17, .88, C.lightWood, 0, .78, 0);
@@ -256,65 +282,56 @@ function barrel(w: Workshop, parent: THREE.Object3D, x: number, y: number, z: nu
   w.cylinder(parent, .30, .035, C.wood, x, y + .778, z);
 }
 
-function baseProps(w: Workshop, parent: THREE.Group, base: BedwarsBase): void {
-  const side = base.team === 0 ? -1 : 1;
-  // Local model frame: x points into the courtyard, z stays along the hall.
-  const hall = w.group(parent, side * 62 + .5, 97, .5);
-  hall.scale.x = -side;
+/** Shopkeepers are textured player models in a team-coloured or green shirt,
+ *  idly looking around, with a Hypixel-style tag over their heads. */
+const SHOPKEEPER: Cosmetics = { skin: 2, hairStyle: 0, hair: 1, eyes: 1, shirt: 0, pants: 2, hat: 0, hatColor: 0, face: 0 };
+const UPGRADER: Cosmetics = { skin: 5, hairStyle: 0, hair: 3, eyes: 2, shirt: 0, pants: 4, hat: 3, hatColor: 3, face: 0 };
+
+function baseProps(w: Workshop, parent: THREE.Group, base: BedwarsBase, active: boolean, people: AvatarBody[]): void {
+  // Local frame: +x points into the courtyard (toward the middle), +z across.
+  const hall = w.group(parent, base.center.x, 97, base.center.z);
+  hall.rotation.y = Math.atan2(-base.inward.z, base.inward.x);
+  const team = TEAM[base.team];
   for (const z of [-7, 7]) {
-    const person = w.group(hall, -8, 0, z); person.rotation.y = -Math.PI / 2;
-    merchant(w, person, z > 0, base.team);
+    const upgrades = z > 0;
+    // The counter, with wares laid out on it.
     w.box(hall, .96, .10, 3.06, C.lightWood, -7, 1.04, z);
     w.box(hall, 1.02, .045, 3.14, C.brass, -7, 1.105, z);
-    // Handcrafted counter wares: folded cloth, ingots, a blade, potions.
-    if (z < 0) {
-      for (let i = 0; i < 3; i++) w.box(hall, .50, .12, .56, i % 2 ? C.linen : base.team === 0 ? C.red : C.blue, -7, 1.19 + i * .13, z - .8);
+    if (!upgrades) {
+      for (let i = 0; i < 3; i++) w.box(hall, .50, .12, .56, i % 2 ? C.linen : team, -7, 1.19 + i * .13, z - .8);
       w.box(hall, .46, .12, .25, C.iron, -7, 1.20, z + .65);
       w.box(hall, .35, .12, .21, C.gold, -7, 1.32, z + .68);
       w.box(hall, .08, .035, .71, C.iron, -6.81, 1.19, z);
       w.box(hall, .25, .05, .055, C.brass, -6.81, 1.20, z + .34);
-      w.box(hall, .075, .065, .18, C.wood, -6.81, 1.20, z + .44);
     } else {
       books(w, hall, -7, 1.21, z - .7);
       for (let i = 0; i < 3; i++) {
         w.cylinder(hall, .10, .25, [C.jade, C.redLight, C.glass][i], -7, 1.27, z + .45 + i * .3, .8);
         w.cylinder(hall, .045, .095, C.brass, -7, 1.435, z + .45 + i * .3);
       }
-      w.box(hall, .42, .045, .49, C.linen, -6.9, 1.18, z - .05);
     }
-    // Brass-framed hanging boards under the awning.
-    w.box(hall, .12, .44, 2.35, C.darkWood, -6.4, 3.26, z);
-    for (const zz of [z - 1.1, z + 1.1]) {
-      w.box(hall, .13, .48, .045, C.brass, -6.4, 3.26, zz);
-      w.box(hall, .035, .52, .035, C.brass, -6.4, 3.68, zz);
-    }
-    const labelX = side * (62 + 5.7) + .5;
-    w.label(parent, z < 0 ? 'Item Shop' : 'Upgrades', labelX, 100.25, z + .5, '#2d6ee0', 2.2);
+    if (!active) continue;
+    const body = buildAvatarBody(upgrades ? UPGRADER : SHOPKEEPER, new THREE.Color(upgrades ? 0x3f6b58 : team));
+    body.group.position.set(-8, 0, z);
+    body.group.rotation.y = -Math.PI / 2;
+    for (const arm of body.parts.slice(2)) arm.rotation.x = -.35;
+    hall.add(body.group);
+    people.push(body);
+    w.label(hall, upgrades ? 'TEAM UPGRADES' : 'ITEM SHOP', 'Press E', -8, 2.45, z, upgrades ? '#7cf0c4' : '#7fe3ff');
   }
   const storage = w.group(hall, -4.8, 0, 9.3); storage.rotation.y = -Math.PI / 2; chest(w, storage);
+  if (active) w.label(hall, 'TEAM CHEST', '', -4.8, 1.55, 9.3, '#ffe08a', 1.2);
   barrel(w, hall, -9.4, 0, 9.4); barrel(w, hall, -9.4, 0, -9.4);
-  // Forge's side anvil leaves all resource spawn cells walkable.
-  const anvil = w.group(hall, -8.5, 0, 2.2);
-  w.box(anvil, .85, .22, .69, C.darkWood, 0, .11, 0);
-  w.box(anvil, .66, .13, .53, C.ironDark, 0, .29, 0);
-  w.box(anvil, .37, .35, .36, C.ironDark, 0, .48, 0);
-  w.box(anvil, .87, .20, .48, C.iron, 0, .72, 0);
-  w.box(anvil, .29, .15, .29, C.iron, .53, .72, 0);
-  w.box(anvil, .19, .08, .16, C.iron, .76, .72, 0);
-  w.box(anvil, .065, .06, .53, C.wood, -.15, .86, .12);
-  w.box(anvil, .25, .12, .15, C.ironDark, -.15, .89, -.12);
-  w.label(parent, 'Forge', side * 70.6 + .5, 99.8, 1.5, '#e3a12a', 1.3);
-  // Banner poles, sewn swallowtails and the guild's small diamond emblem.
+  // Team banners on the hall's eaves.
   for (const z of [-4, 4]) {
     const flag = w.group(hall, -1.36, 4.7, z);
     w.box(flag, .10, .10, 1.8, C.brass, 0, 0, 0);
-    const color = base.team === 0 ? C.red : C.blue;
-    w.box(flag, .065, 1.45, 1.22, color, 0, -.71, 0);
+    w.box(flag, .065, 1.45, 1.22, team, 0, -.71, 0);
     for (const zz of [-.48, .48]) w.box(flag, .074, 1.5, .045, C.brass, .003, -.73, zz);
-    for (const zz of [-.40, .40]) w.box(flag, .065, .28, .4, color, 0, -1.54, zz);
+    for (const zz of [-.40, .40]) w.box(flag, .065, .28, .4, team, 0, -1.54, zz);
     const emblem = w.box(flag, .08, .40, .40, C.linen, .05, -.69, 0); emblem.rotation.x = Math.PI / 4;
   }
-  // Garden benches, terracotta tubs and delicate brass lamps.
+  // Garden benches and planters.
   for (const z of [-8, 8]) {
     const bench = w.group(hall, 4.5, 0, z);
     for (const x of [-.65, .65]) for (const zz of [-.22, .22]) w.box(bench, .12, .47, .12, C.ironDark, x, .235, zz);
@@ -326,10 +343,51 @@ function baseProps(w: Workshop, parent: THREE.Group, base: BedwarsBase): void {
     for (let i = 0; i < 5; i++) {
       const angle = i * Math.PI * 2 / 5, x = 1 + Math.cos(angle) * .18, zz = z + Math.sin(angle) * .18;
       w.box(hall, .03, .46, .03, C.leaf, x, .8, zz);
-      w.box(hall, .16, .09, .16, i % 2 ? C.linen : C.redLight, x, 1.04, zz);
-      w.box(hall, .05, .04, .05, C.gold, x, 1.10, zz);
+      w.box(hall, .16, .09, .16, i % 2 ? C.linen : team, x, 1.04, zz);
     }
   }
+}
+
+/** The forge: a stone hearth ring with iron and gold ingots turning over it,
+ *  side by side on the island's centre line. */
+function forge(w: Workshop, parent: THREE.Group, base: BedwarsBase, atlas: Atlas, spinners: THREE.Object3D[]): void {
+  const g = w.group(parent, base.forge.x, 97, base.forge.z);
+  g.rotation.y = Math.atan2(-base.inward.z, base.inward.x);
+  for (let i = 0; i < 8; i++) {
+    const a = i / 8 * Math.PI * 2;
+    w.box(g, .22, .08, .22, i % 2 ? C.ironDark : C.brass, Math.cos(a) * 1.25, .04, Math.sin(a) * 1.25);
+  }
+  const spin = new THREE.Group(); spin.position.set(0, 1.3, 0); g.add(spin);
+  const material = new THREE.MeshBasicMaterial({ map: atlas.texture, vertexColors: true, alphaTest: .4, side: THREE.DoubleSide });
+  for (const [item, z] of [[Item.IronIngot, -.32], [Item.GoldIngot, .32]] as const) {
+    const m = new THREE.Mesh(itemGeometrySolid(atlas, item, .42, .06), material);
+    m.position.z = z; m.rotation.y = Math.PI / 2;
+    spin.add(m);
+  }
+  spin.userData.dispose = () => material.dispose();
+  spinners.push(spin);
+  w.label(g, 'FORGE', 'Iron · Gold', 0, 2.25, 0, '#ffd27a', 1.25);
+}
+
+/** A middle generator: a spinning gem block over a brass ring. */
+function gemGenerator(w: Workshop, parent: THREE.Group, x: number, y: number, z: number, kind: 'diamond' | 'emerald',
+  spinners: THREE.Object3D[], textures: THREE.Texture[]): void {
+  const color = kind === 'diamond' ? 0x69d8e8 : 0x4bdfa1;
+  const halo = w.ring(parent, .77, C.brass, x, y + .025, z); halo.rotation.x = Math.PI / 2;
+  for (let i = 0; i < 4; i++) {
+    const a = i * Math.PI / 2;
+    w.box(parent, .16, .05, .16, color, x + Math.cos(a) * .83, y + .04, z + Math.sin(a) * .83);
+  }
+  const tex = kind === 'diamond' ? gemBlockTexture(0x4fd8d0, 0xc8fff6, 0x2a9ea0) : gemBlockTexture(0x2fc46d, 0xa6f5c2, 0x168a45);
+  const spin = new THREE.Group(); spin.position.set(x, y + 1.15, z); parent.add(spin);
+  if (tex) {
+    textures.push(tex);
+    const block = new THREE.Mesh(new THREE.BoxGeometry(.62, .62, .62), new THREE.MeshBasicMaterial({ map: tex }));
+    block.rotation.set(Math.PI / 4, 0, Math.PI / 4);
+    spin.add(block);
+    spin.userData.dispose = () => { block.geometry.dispose(); (block.material as THREE.Material).dispose(); };
+  }
+  spinners.push(spin);
 }
 
 function armillary(w: Workshop, parent: THREE.Group): THREE.Group {
@@ -370,51 +428,40 @@ function armillary(w: Workshop, parent: THREE.Group): THREE.Group {
   return sphere;
 }
 
-export function createBedwarsModels(): BedwarsModels {
+export function createBedwarsModels(map: BedwarsMap, teamCount: number, atlas: Atlas): BedwarsModels {
   const w = new Workshop(), group = new THREE.Group(); group.name = 'bedwars-models';
-  const beds: THREE.Group[] = [];
-  for (const base of BW_BASES) { beds[base.team] = bed(w, group, base); baseProps(w, group, base); }
-  const astronomy = armillary(w, group);
-  const floating: { object: THREE.Group; y: number; phase: number }[] = [];
-  for (const generator of BW_GENERATORS) {
-    const { kind, pos } = generator;
-    const g = w.group(group, pos.x, pos.y + (kind === 'iron' || kind === 'gold' ? .72 : 1.15), pos.z);
-    g.name = `generator-resource-${generator.id}`;
-    if (kind === 'iron' || kind === 'gold') {
-      const color = kind === 'gold' ? C.gold : C.iron;
-      w.box(g, .42, .16, .23, color, 0, 0, 0);
-      w.box(g, .31, .035, .18, kind === 'gold' ? 0xffe2a0 : 0xdce9ef, 0, .09, 0);
-    } else {
-      const color = kind === 'diamond' ? 0x69d8e8 : 0x4bdfa1;
-      w.gem(g, color, 0, 0, 0, 1.1);
-      const halo = w.ring(group, .77, C.brass, pos.x, pos.y + .025, pos.z); halo.rotation.x = Math.PI / 2;
-      for (let i = 0; i < 4; i++) {
-        const a = i * Math.PI / 2;
-        w.box(group, .16, .05, .16, color, pos.x + Math.cos(a) * .83, pos.y + .04, pos.z + Math.sin(a) * .83);
-      }
-      w.label(group, kind === 'diamond' ? 'Diamond' : 'Emerald', pos.x, pos.y + 2.05, pos.z,
-        kind === 'diamond' ? '#3fd3e0' : '#2fc46d', 1.45);
-    }
-    floating.push({ object: g, y: g.position.y, phase: generator.id * .79 });
+  const beds: THREE.Group[] = [], people: AvatarBody[] = [], spinners: THREE.Object3D[] = [], gemTextures: THREE.Texture[] = [];
+  for (const base of map.bases) {
+    const active = base.team < teamCount;
+    if (active) beds[base.team] = bed(w, group, base);
+    baseProps(w, group, base, active, people);
+    if (active) forge(w, group, base, atlas, spinners);
   }
-  const animated = new Set<THREE.Object3D>([...beds, astronomy, ...floating.map(f => f.object)]);
-  for (const root of animated) w.batch(root as THREE.Group);
-  w.batch(group, animated);
+  const astronomy = map.theme === 'garden' ? armillary(w, group) : null;
+  for (const g of map.generators) if (g.team === undefined) gemGenerator(w, group, g.pos.x, g.pos.y, g.pos.z, g.kind as 'diamond' | 'emerald', spinners, gemTextures);
+  const animated = new Set<THREE.Object3D>([...beds.filter(Boolean), ...(astronomy ? [astronomy] : []), ...spinners]);
+  for (const b of beds) if (b) w.batch(b);
+  if (astronomy) w.batch(astronomy as THREE.Group);
+  // Avatars and spinners keep their own materials; everything else bakes.
+  const skip = new Set<THREE.Object3D>([...animated, ...people.map((p) => p.group)]);
+  w.batch(group, skip);
   let disposed = false;
   return {
     group, beds,
     update(timeSeconds: number): void {
       if (disposed) return;
       const t = Number.isFinite(timeSeconds) ? timeSeconds : 0;
-      for (const { object, y, phase } of floating) {
-        object.position.y = y + Math.sin(t * 1.7 + phase) * .105;
-        object.rotation.y = t * .55 + phase;
-      }
-      astronomy.rotation.y = t * .065;
+      spinners.forEach((s, i) => { s.rotation.y = t * 1.6 + i; s.position.y += (Math.sin(t * 1.8 + i) * .0016); });
+      people.forEach((p, i) => { p.head.rotation.y = Math.sin(t * .45 + i * 1.7) * .55; p.head.rotation.x = Math.sin(t * .3 + i) * .08; });
+      if (astronomy) astronomy.rotation.y = t * .065;
     },
     dispose(): void {
       if (disposed) return;
-      disposed = true; group.removeFromParent(); group.clear(); w.dispose();
+      disposed = true; group.removeFromParent();
+      for (const p of people) disposeAvatarBody(p);
+      for (const s of spinners) (s.userData.dispose as (() => void) | undefined)?.();
+      for (const t of gemTextures) t.dispose();
+      group.clear(); w.dispose();
     },
   };
 }

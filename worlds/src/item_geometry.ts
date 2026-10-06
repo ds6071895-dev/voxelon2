@@ -56,13 +56,23 @@ function buildCubeGeometry(atlas: Atlas, block: BlockInfo): THREE.BufferGeometry
   return geo;
 }
 
-/** Mini-cube for cube blocks, flat sprite for items/plants/torches. */
+const blockCache = new Map<number, THREE.BufferGeometry>();
+
+/** A 0.25 textured cube of a placed block (no item needed), e.g. scenery. */
+export function blockCubeGeometry(atlas: Atlas, blockId: number): THREE.BufferGeometry {
+  let geo = blockCache.get(blockId);
+  if (!geo) { geo = buildCubeGeometry(atlas, BLOCKS[blockId]); blockCache.set(blockId, geo); }
+  return geo;
+}
+
+/** Mini-cube for cube blocks, a solid pixel slab for items, a flat card for
+ *  the odd non-cube block (plants, torches). */
 export function itemGeometry(atlas: Atlas, id: number): THREE.BufferGeometry {
   let geo = geoCache.get(id);
   if (geo) return geo;
   const info = ITEMS[id];
   const block = info?.kind === 'block' ? BLOCKS[info.block!] : null;
-
+  if (!block && info?.sprite !== undefined) return itemGeometrySolid(atlas, id);
   if (block && block.shape === 'cube') {
     // Hand-built cube with explicit, upright per-face UVs and vanilla face
     // shading (top brightest). BoxGeometry's built-in UVs mis-orient the top
@@ -106,7 +116,11 @@ export function itemGeometrySolid(atlas: Atlas, id: number, size = 0.45, depth =
   const ctx = atlas.canvas.getContext('2d')!;
   const px = ctx.getImageData(ox, oy, TILE_PX, TILE_PX).data;
   const opaque = (x: number, y: number): boolean => x >= 0 && y >= 0 && x < TILE_PX && y < TILE_PX && px[(y * TILE_PX + x) * 4 + 3] > 40;
-  const [u0, v0, u1, v1] = atlas.uvRect(tile);
+  // Exact tile bounds (no anti-bleed inset): the cut-out edge of the face
+  // quads must land on the same pixel grid as the rim. The atlas gutter is an
+  // extrusion of the edge pixels, so sampling right at the border is safe.
+  const span = atlas.canvas.width;
+  const u0 = ox / span, u1 = (ox + TILE_PX) / span, v1 = 1 - oy / span, v0 = 1 - (oy + TILE_PX) / span;
   const cell = size / TILE_PX, half = size / 2, d = depth / 2;
   const positions: number[] = [], uvs: number[] = [], colors: number[] = [], indices: number[] = [];
   const quad = (a: number[], b: number[], c: number[], e: number[], tx: number, ty: number, shade: number): void => {
@@ -117,22 +131,25 @@ export function itemGeometrySolid(atlas: Atlas, id: number, size = 0.45, depth =
     for (let i = 0; i < 4; i++) { uvs.push(u, v); colors.push(shade, shade, shade); }
     indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
   };
+  // Front and back are each ONE quad over the whole tile, cut out by the
+  // material's alphaTest: per-pixel quads never share bit-identical edges, and
+  // the hairline cracks between them showed the scene through the item.
+  const flat = (z: number, shade: number, flip: boolean): void => {
+    const base = positions.length / 3;
+    const [l, r] = flip ? [half, -half] : [-half, half];
+    positions.push(l, -half, z, r, -half, z, r, half, z, l, half, z);
+    const [ul, ur] = flip ? [u1, u0] : [u0, u1];
+    uvs.push(ul, v0, ur, v0, ur, v1, ul, v1);
+    for (let i = 0; i < 4; i++) colors.push(shade, shade, shade);
+    indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  };
+  flat(d, 1, false);
+  flat(-d, 0.8, true);
+  // The rim: one quad on every pixel edge that faces a transparent neighbour.
+  const at = (i: number): number => -half + i * cell;
   for (let y = 0; y < TILE_PX; y++) for (let x = 0; x < TILE_PX; x++) {
     if (!opaque(x, y)) continue;
-    const lx = -half + x * cell, hx = lx + cell, ty = half - y * cell, by = ty - cell;
-    // Front/back carry the real tile UVs so they keep the atlas' filtering.
-    const fu0 = u0 + (u1 - u0) * x / TILE_PX, fu1 = u0 + (u1 - u0) * (x + 1) / TILE_PX;
-    const fv1 = v1 - (v1 - v0) * y / TILE_PX, fv0 = v1 - (v1 - v0) * (y + 1) / TILE_PX;
-    const base = positions.length / 3;
-    positions.push(lx, by, d, hx, by, d, hx, ty, d, lx, ty, d);
-    uvs.push(fu0, fv0, fu1, fv0, fu1, fv1, fu0, fv1);
-    for (let i = 0; i < 4; i++) colors.push(1, 1, 1);
-    indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
-    const back = positions.length / 3;
-    positions.push(hx, by, -d, lx, by, -d, lx, ty, -d, hx, ty, -d);
-    uvs.push(fu1, fv0, fu0, fv0, fu0, fv1, fu1, fv1);
-    for (let i = 0; i < 4; i++) colors.push(0.8, 0.8, 0.8);
-    indices.push(back, back + 1, back + 2, back, back + 2, back + 3);
+    const lx = at(x), hx = at(x + 1), ty = -at(y), by = -at(y + 1);
     if (!opaque(x - 1, y)) quad([lx, by, -d], [lx, by, d], [lx, ty, d], [lx, ty, -d], x, y, 0.65);
     if (!opaque(x + 1, y)) quad([hx, by, d], [hx, by, -d], [hx, ty, -d], [hx, ty, d], x, y, 0.65);
     if (!opaque(x, y - 1)) quad([lx, ty, d], [hx, ty, d], [hx, ty, -d], [lx, ty, -d], x, y, 0.9);

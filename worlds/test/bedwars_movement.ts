@@ -18,14 +18,27 @@ const close = (actual: number, expected: number, message: string): void => {
 /** Uses real public matchmaking and transform dispatch. Fixture teleports and
  * impulses go through the same host ports as respawns, pearls and combat. */
 class MovementServer {
-  readonly game = new GameServer({ rng: mulberry32(941) });
+  readonly game: GameServer;
   readonly inbox: { to: number; msg: ServerMsg }[] = [];
   readonly ids: number[];
   readonly world: number;
   constructor() {
-    this.ids = [this.game.connect(), this.game.connect()];
-    for (const id of this.ids) this.send(id, { t: 'hello' });
-    for (const id of this.ids) this.send(id, { t: 'play', mode: 'bedwars' });
+    // A party 1v1 on the garden map (the fixtures use its coordinates); the
+    // map is picked by the server's rng, so take the first seed that lands there.
+    let seed = 941;
+    for (;;) {
+      this.game = new GameServer({ rng: mulberry32(seed++) });
+      this.inbox.length = 0;
+      this.ids = [this.game.connect(), this.game.connect()];
+      for (const id of this.ids) this.send(id, { t: 'hello' });
+      this.send(this.ids[0], { t: 'partyCreate' });
+      const code = (this.inbox.filter(o => o.msg.t === 'party').pop()!.msg as Extract<ServerMsg, { t: 'party' }>).party!.code;
+      this.send(this.ids[1], { t: 'partyJoin', code });
+      this.send(this.ids[0], { t: 'bwSetup', teams: 2, assignments: { [this.ids[0]]: 0, [this.ids[1]]: 1 }, fill: false, revision: 0 });
+      const revision = (this.inbox.filter(o => o.msg.t === 'party').pop()!.msg as Extract<ServerMsg, { t: 'party' }>).party!.bedwars!.revision;
+      this.send(this.ids[0], { t: 'play', mode: 'bedwars', setupRevision: revision });
+      if (this.game.bedwars(this.game.worldOf(this.ids[0])!.id)!.map.id === 0) break;
+    }
     this.world = this.game.worldOf(this.ids[0])!.id;
     for (const id of this.ids) this.send(id, { t: 'worldReady', world: this.world });
     this.tick(5.2);
@@ -254,14 +267,16 @@ export function runBedwarsMovementTests(): void {
     h.tick(0.2); h.move(hover); close(h.body.x, hover.x, 'initial step off bridge accepted');
     for (let i = 0; i < 70 && h.match.players.get(h.id)!.alive; i++) {
       h.tick(0.05); h.move(hover);
-      close(h.body.x, hover.x, 'anti-flight never rescues the player onto the bridge');
+      // Once dead the server lifts the body to its base's spectator view.
+      if (h.match.players.get(h.id)!.alive) close(h.body.x, hover.x, 'anti-flight never rescues the player onto the bridge');
     }
     assert.equal(h.match.players.get(h.id)!.deaths, 1, 'hover spam eventually falls into the void');
     assert.equal(h.match.players.get(h.id)!.alive, false, 'void death enters real respawn/spectator state');
     let y = h.body.y;
+    const at = { x: h.body.x, z: h.body.z };
     for (const direction of [1, -1]) for (let i = 0; i < 10; i++) {
       h.tick(0.05); y += direction * 0.4;
-      h.move({ x: hover.x, y, z: hover.z }); close(h.body.y, y, 'dead spectator vertical transform accepted');
+      h.move({ x: at.x, y, z: at.z }); close(h.body.y, y, 'dead spectator vertical transform accepted');
     }
   });
 
@@ -291,8 +306,7 @@ export function runBedwarsMovementTests(): void {
     h.tick(3.5);
     assert.equal(h.match.players.get(h.id)!.deaths, 1, 'server ticks alone advance the fall through the void boundary');
     assert.equal(h.match.players.get(h.id)!.alive, false, 'void death occurs before the bed respawn timer');
-    close(h.body.x, 36.5, 'no silent-client rescue to the supported bridge');
-    assert.ok(h.body.y < 40, 'death body reached the actual void boundary');
+    assert.ok(Math.abs(h.body.x - 36.5) > 5 && h.body.y > 100, 'no rescue to the bridge: the dead watch from over their base');
   });
 
   test('removing the floor under a silent grounded player starts an authoritative fall', () => {
@@ -303,7 +317,7 @@ export function runBedwarsMovementTests(): void {
     h.match.host.setBlock(35, 96, 0, Block.Air);
     h.tick(3.5);
     assert.equal(h.match.players.get(h.id)!.deaths, 1, 'tick validation rechecks changing support geometry without new packets');
-    close(h.body.x, 35.5, 'destroyed support does not trigger a safe-ground rescue');
+    assert.ok(Math.abs(h.body.x - 35.5) > 5 && h.body.y > 100, 'destroyed support does not trigger a safe-ground rescue');
   });
 
   test('server-forced falling lands on the actual top of a half-height slab', () => {

@@ -97,7 +97,7 @@ export class NetClient {
   onEdit?: (x: number, y: number, z: number, block: number) => void;
   onEditBatch?: (edits: { x: number; y: number; z: number; block: number }[]) => void;
   onHurt?: (health: number, k: [number, number, number], by: number) => void;
-  onHitConfirm?: (target: number, amount: number, killed: boolean) => void;
+  onHitConfirm?: (target: number, amount: number, killed: boolean, crit: boolean) => void;
   onShot?: (id: number, item: number, x: number, y: number, z: number, dx: number, dy: number, dz: number) => void;
   onRespawned?: (x: number, y: number, z: number, health: number) => void;
   onTeleport?: (x: number, y: number, z: number) => void;
@@ -129,7 +129,7 @@ export class NetClient {
   onRsSound?: (kind: RsSound, at: { x: number; y: number; z: number } | null) => void;
   onRsImpulse?: (vx: number, vy: number, vz: number, momentum: number) => void;
   onRsResult?: (result: RsResult) => void;
-  onBwArena?: (world: WorldSpec, team: 0 | 1, spawn: { x: number; y: number; z: number }, yaw: number) => void;
+  onBwArena?: (world: WorldSpec, team: number, spawn: { x: number; y: number; z: number }, yaw: number) => void;
   onBwState?: (s: BwSnapshot) => void;
   onBwKit?: (slots: (ItemStack | null)[], selected: number | undefined) => void;
   onBwDrop?: (msg: { reset?: boolean; add?: BwDropView[]; gone?: { id: number; by?: number; into?: number }[]; count?: { id: number; count: number }[] }) => void;
@@ -252,7 +252,7 @@ export class NetClient {
         else for (const e of msg.edits) this.onEdit?.(e.x, e.y, e.z, e.block);
         break;
       case 'hurt': this.onHurt?.(msg.health, [msg.kx, msg.ky, msg.kz], msg.by); break;
-      case 'hitconfirm': this.onHitConfirm?.(msg.target, msg.amount, msg.killed === true); break;
+      case 'hitconfirm': this.onHitConfirm?.(msg.target, msg.amount, msg.killed === true, msg.crit === true); break;
       case 'shot': this.onShot?.(msg.id, msg.item, msg.x, msg.y, msg.z, msg.dx, msg.dy, msg.dz); break;
       case 'respawned':
         if (typeof msg.seq === 'number') this.moveSeq = msg.seq;

@@ -359,15 +359,15 @@ export class HeldItemView {
         this.partPad = model.getObjectByName('pad') ?? null;
         this.partSpring = model.getObjectByName('spring') ?? null;
       } else {
-        // Bedwars gear is a thin slab of real pixels, so a sword still reads as a
-        // sword mid-swing instead of a flat card that vanishes edge-on. Its
-        // silhouettes are long, so it is kept smaller than the other sprites.
-        const solid = id >= Item.WoodSword && id <= Item.DiamondSword;
-        const mesh = new THREE.Mesh(solid ? itemGeometrySolid(this.atlas, id, 0.44, 0.04) : itemGeometry(this.atlas, id), this.material);
-        // A block in hand is a smaller cube in Bedwars, where the bridge ahead has to stay visible.
-        const compact = this.isBlockItem && document.body.classList.contains('bedwars-active');
-        mesh.scale.setScalar(solid ? 1 : compact ? 0.8 : 1.4);
-        mesh.rotation.set(0.1, -0.6, 0);
+        // Items are thin slabs of real pixels, so a sword still reads as a sword
+        // mid-swing instead of a flat card that vanishes edge-on. A block is a
+        // proper fist-sized cube, as big in the hand as a tool is.
+        const mesh = new THREE.Mesh(this.isBlockItem ? itemGeometry(this.atlas, id) : itemGeometrySolid(this.atlas, id, 0.44, 0.04), this.material);
+        // A block sits a little lower and turned 45° so its top and two sides
+        // show, the way Minecraft holds one.
+        mesh.scale.setScalar(this.isBlockItem ? 1.05 : 1.1);
+        if (this.isBlockItem) { mesh.rotation.set(0.32, -0.78, 0); mesh.position.set(0.02, -0.03, 0); }
+        else mesh.rotation.set(0.1, -0.6, 0);
         this.mesh = mesh;
       }
       this.mesh.renderOrder = 100;

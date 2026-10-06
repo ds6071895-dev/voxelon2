@@ -2,7 +2,7 @@
 // both advance the motion with `stepDrop`, so nothing but those events is sent.
 import { pointInSolid, collisionBoxes } from './blocks';
 
-export type BwBlockGetter = (x: number, y: number, z: number) => number;
+type BwBlockGetter = (x: number, y: number, z: number) => number;
 export interface BwDropBody { x: number; y: number; z: number; vx: number; vy: number; vz: number; rest: boolean }
 
 const GRAVITY = 24;

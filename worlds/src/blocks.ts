@@ -58,6 +58,8 @@ export const enum Block {
   PackedSnow = 231,
   TeamWoolA = 242,
   TeamWoolB = 243,
+  TeamWoolC = 32,
+  TeamWoolD = 33,
   PartyTileC = 244,
   PartyTileD = 245,
   ParkourLaunchPad = 254,
@@ -183,6 +185,8 @@ export const enum Tile {
   VaultMosaic = 231,
   TeamWoolA = 265,
   TeamWoolB = 266,
+  TeamWoolC = 315,
+  TeamWoolD = 316,
   PartyTileC = 267,
   PartyTileD = 268,
   BridgeBow = 271,
@@ -522,6 +526,8 @@ export const BLOCKS: Record<number, BlockInfo> = {
   // Player-placeable arena blocks. Cheap to break so a bridge fight stays fast.
   [Block.TeamWoolA]: def({ name: 'Red Wool', hardness: 0.8, top: Tile.TeamWoolA }),
   [Block.TeamWoolB]: def({ name: 'Blue Wool', hardness: 0.8, top: Tile.TeamWoolB }),
+  [Block.TeamWoolC]: def({ name: 'Green Wool', hardness: 0.8, top: Tile.TeamWoolC }),
+  [Block.TeamWoolD]: def({ name: 'Yellow Wool', hardness: 0.8, top: Tile.TeamWoolD }),
   // Parkour's live surfaces. The venue stamps them; the course knows where
   // every one is, so the tile itself carries no behaviour of its own.
   [Block.PartyTileC]: def({ name: 'Crumble Tile', hardness: 0.8, top: Tile.PartyTileC }),

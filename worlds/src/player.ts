@@ -43,6 +43,9 @@ const FLY_V_SPEED = 9;        // vertical rise/descend speed (blocks/s)
 // multiplier), so a launch stays fast for a couple of seconds of flight.
 const MOMENTUM_STEER = 13;
 const MOMENTUM_DRAG = 0.62;
+/** Minecraft's air drag (0.91 per tick, ~0.15 per second): a knockback arc
+ *  slows the way vanilla's does instead of gliding like a launch pad. */
+const KNOCK_DRAG = 0.18;
 // Un-sticking: how far the body may be shoved to escape geometry it is already
 // inside, and how far it will climb when there is no sideways way out.
 const UNSTICK_MAX_PUSH = 2.5;
@@ -89,6 +92,10 @@ export class Player {
    *  instead ADDS thrust to whatever speed you already carry and only a light
    *  drag bleeds it off. Set by whatever launched you (a pad, the Bounce Pad). */
   momentumTime = 0;
+  /** Per-second speed kept while carrying momentum (a launch glides, a hit arcs). */
+  private momentumDrag = MOMENTUM_DRAG;
+  /** How hard WASD steers while carrying it (vanilla air control is ~8 b/s²). */
+  private momentumSteer = MOMENTUM_STEER;
   /** Camera-only vertical offset (<= 0). Auto-stepping moves the body up a stair
    *  in one frame; the eye starts that far below and eases back, so climbing
    *  glides instead of snapping. */
@@ -135,6 +142,19 @@ export class Player {
     if (dealt <= 0) return; // fully absorbed: i-frames + flash, no health loss
     this.health = Math.max(0, this.health - dealt);
     if (this.health <= 0) this.dead = true;
+  }
+
+  /** A melee hit, the way Minecraft applies it: half of the current speed is
+   *  kept, the hit's push is added on top, and the lift never stacks past one
+   *  hit's worth however many land in the air. Velocities in blocks/second. */
+  applyKnockback(kx: number, ky: number, kz: number): void {
+    this.vel.x = this.vel.x * 0.5 + kx;
+    this.vel.z = this.vel.z * 0.5 + kz;
+    this.vel.y = Math.min(ky, this.vel.y * 0.5 + ky);
+    if (ky > 0) this.onGround = false;
+    this.momentumTime = Math.max(this.momentumTime, 0.8);
+    this.momentumDrag = KNOCK_DRAG;
+    this.momentumSteer = 8;
   }
 
   /** Authoritative health update from the server (multiplayer). */
@@ -216,9 +236,9 @@ export class Player {
       // Carrying launch momentum: steering ADDS thrust in the direction you
       // ask for, and only a light air drag bleeds the speed off, so a launch
       // stays a launch and can be aimed mid-flight.
-      this.vel.x += dirX * MOMENTUM_STEER * dt;
-      this.vel.z += dirZ * MOMENTUM_STEER * dt;
-      const drag = Math.pow(MOMENTUM_DRAG, dt);
+      this.vel.x += dirX * this.momentumSteer * dt;
+      this.vel.z += dirZ * this.momentumSteer * dt;
+      const drag = Math.pow(this.momentumDrag, dt);
       this.vel.x *= drag;
       this.vel.z *= drag;
     } else {
@@ -230,6 +250,7 @@ export class Player {
     // Landing (or a swim) ends the momentum window; otherwise it decays.
     this.momentumTime = grounded && !this.flying
       ? 0 : Math.max(0, this.momentumTime - dt);
+    if (this.momentumTime === 0) { this.momentumDrag = MOMENTUM_DRAG; this.momentumSteer = MOMENTUM_STEER; }
 
     // Vertical.
     if (this.flying) {

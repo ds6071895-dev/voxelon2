@@ -120,6 +120,8 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Block.OakPlanks]: blockItem(Block.OakPlanks),
   [Block.TeamWoolA]: blockItem(Block.TeamWoolA),
   [Block.TeamWoolB]: blockItem(Block.TeamWoolB),
+  [Block.TeamWoolC]: blockItem(Block.TeamWoolC),
+  [Block.TeamWoolD]: blockItem(Block.TeamWoolD),
   [Block.Sandstone]: blockItem(Block.Sandstone),
   [Block.ManorGlass]: blockItem(Block.ManorGlass),
   [Item.WoodSword]: { name: 'Wooden Sword', kind: 'item', sprite: Tile.WoodSword, maxStack: 1, tool: { type: 'sword', tier: 0, speed: 2 } },

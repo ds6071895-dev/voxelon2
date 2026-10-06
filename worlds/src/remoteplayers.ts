@@ -690,7 +690,19 @@ function drawHealthBar(canvas: HTMLCanvasElement, frac: number): void {
 function makeNameTag(name: string): { tex: THREE.CanvasTexture; sprite: THREE.Sprite } {
   const canvas = document.createElement('canvas');
   canvas.width = 320; canvas.height = 72;
+  drawNameTag(canvas, name, '#ffffff');
+  const tex = new THREE.CanvasTexture(canvas);
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: tex, transparent: true, depthTest: false,
+  }));
+  sprite.scale.set(1.8, 0.4, 1);
+  sprite.renderOrder = 50;
+  return { tex, sprite };
+}
+/** The name in a rounded dark pill, in `color` (white, or a team's colour). */
+function drawNameTag(canvas: HTMLCanvasElement, name: string, color: string): void {
   const ctx = canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.font = 'bold 25px "Segoe UI", Arial, sans-serif';
   const width = Math.min(316, Math.ceil(ctx.measureText(name).width) + 34);
   // Rounded dark pill, just wide enough for the name.
@@ -702,21 +714,16 @@ function makeNameTag(name: string): { tex: THREE.CanvasTexture; sprite: THREE.Sp
   ctx.textBaseline = 'middle';
   ctx.fillStyle = 'rgba(0,0,0,0.7)';
   ctx.fillText(name, 162, 44);  // shadow
-  ctx.fillStyle = '#ffffff';
+  ctx.fillStyle = color;
   ctx.fillText(name, 160, 42);  // main
-
-  const tex = new THREE.CanvasTexture(canvas);
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: tex, transparent: true, depthTest: false,
-  }));
-  sprite.scale.set(1.8, 0.4, 1);
-  sprite.renderOrder = 50;
-  return { tex, sprite };
 }
 
 // ─── avatar state ─────────────────────────────────────────────────────────
 
 interface Avatar {
+  id: number;
+  /** Colour the name tag is drawn in. */
+  tagColor: string;
   body: AvatarBody;
   group: THREE.Group;
   head: THREE.Group;    // separate group so we can pitch it with look-dir
@@ -776,6 +783,8 @@ export interface BodyStyle {
   hidden: boolean;
   /** Show the floating name tag. */
   tag: boolean;
+  /** Draw the name in this colour (a Bedwars team's). */
+  tagColor?: string;
 }
 
 // ─── main class ───────────────────────────────────────────────────────────
@@ -874,7 +883,7 @@ export class RemotePlayers {
     this.scene.add(group);
     return {
       body, group, head: body.head, parts: body.parts,
-      nameTex: tex, sprite,
+      id: remote.info.id, tagColor: '#ffffff', nameTex: tex, sprite,
       healthCanvas, healthTex, healthSprite, lastHealth: -1,
       dx: remote.tx, dy: remote.ty, dz: remote.tz, dyaw: remote.tyaw,
       dpitch: remote.tpitch,
@@ -1096,6 +1105,12 @@ export class RemotePlayers {
       av.personGlow?.set(!!st?.glow);
     }
     av.sprite.visible = st ? st.tag : true;
+    const color = st?.tagColor ?? '#ffffff';
+    if (color !== av.tagColor) {
+      av.tagColor = color;
+      drawNameTag(av.nameTex.image as HTMLCanvasElement, this.net.remotes.get(av.id)?.info.username ?? '', color);
+      av.nameTex.needsUpdate = true;
+    }
   }
 
   /** Hit box half-width and height of a body (rats are small). */

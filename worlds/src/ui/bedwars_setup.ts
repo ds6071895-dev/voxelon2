@@ -1,5 +1,6 @@
-// The party's shared team sheet: a small light dialog. Only the leader can
-// change it; everyone sees it live.
+// The party's shared Bedwars sheet: a small light dialog. The leader picks a
+// format (2, 3 or 4 teams, each on its own island) and who plays where; bots
+// can fill every team up to the biggest one. Everyone sees it live.
 import type { PartyState } from '../net/protocol';
 import { BW_TEAM_COLORS, BW_TEAM_NAMES } from '../bedwars_rules';
 import { bwButton, bwEl } from '../bedwars_ui';
@@ -7,7 +8,7 @@ import { drawFace } from './face';
 import '../styles/bedwars.css';
 
 interface Hooks {
-  onChange(assignments: Record<string, 0 | 1>, fill: boolean, revision: number): void;
+  onChange(teams: number, assignments: Record<string, number>, fill: boolean, revision: number): void;
   onStart(revision: number): void;
   onClose(): void;
 }
@@ -18,16 +19,16 @@ export class BedwarsSetup {
   private readonly scrim: HTMLElement;
   private readonly kicker: HTMLElement;
   private readonly note: HTMLElement;
-  private readonly columns: HTMLElement[] = [];
-  private readonly counts: HTMLElement[] = [];
-  private readonly pool: HTMLElement;
+  private readonly formats: HTMLElement;
+  private readonly grid: HTMLElement;
   private readonly fillRow: HTMLElement;
   private readonly fillInput: HTMLInputElement;
   private readonly error: HTMLElement;
   private readonly start: HTMLButtonElement;
   private party: PartyState | null = null;
   private myId = 0;
-  private assignments: Record<string, 0 | 1> = {};
+  private teams = 2;
+  private assignments: Record<string, number> = {};
   private fill = false;
   private revision = 0;
   private pending = false;
@@ -41,29 +42,26 @@ export class BedwarsSetup {
     const head = bwEl('div', 'w-dialog-head', dialog);
     const title = bwEl('div', '', head);
     this.kicker = bwEl('span', 'w-kicker', title, 'Party');
-    bwEl('h2', '', title, 'Choose teams');
+    bwEl('h2', '', title, 'Bedwars teams');
     const x = bwButton(head, '', () => this.close(), 'w-x'); x.innerHTML = CLOSE; x.setAttribute('aria-label', 'Close');
     this.note = bwEl('p', 'w-lede', dialog);
-    const grid = bwEl('div', 'bw-teams', dialog);
-    for (const team of [0, 1] as const) {
-      const col = bwEl('div', 'bw-team-col', grid);
-      col.style.setProperty('--team', BW_TEAM_COLORS[team]);
-      const label = bwEl('div', 'bw-team-label', col);
-      bwEl('b', '', label, BW_TEAM_NAMES[team]);
-      this.counts.push(bwEl('small', '', label));
-      this.columns.push(bwEl('div', 'bw-team-list', col));
+    this.formats = bwEl('div', 'bw-formats', dialog);
+    this.formats.setAttribute('role', 'radiogroup'); this.formats.setAttribute('aria-label', 'Number of teams');
+    for (const n of [2, 3, 4]) {
+      const b = bwButton(this.formats, `${n} teams`, () => this.setTeams(n), 'bw-format');
+      b.dataset.teams = String(n); b.setAttribute('role', 'radio');
     }
-    this.pool = bwEl('div', 'bw-pool', dialog);
+    this.grid = bwEl('div', 'bw-teams', dialog);
     this.fillRow = bwEl('label', 'bw-fill', dialog);
     this.fillInput = bwEl('input', '', this.fillRow); this.fillInput.type = 'checkbox';
-    bwEl('span', '', this.fillRow, 'Add an AI teammate to the smaller team');
-    this.fillInput.addEventListener('change', () => this.submit(this.assignments, this.fillInput.checked));
+    bwEl('span', '', this.fillRow, 'Fill empty spots with bots');
+    this.fillInput.addEventListener('change', () => this.submit(this.teams, this.assignments, this.fillInput.checked));
     this.error = bwEl('div', 'w-err', dialog); this.error.setAttribute('role', 'alert');
     const foot = bwEl('div', 'bw-setup-foot', dialog);
-    bwButton(foot, 'Balance', () => {
-      const next: Record<string, 0 | 1> = {};
-      this.party?.members.forEach((m, i) => { next[m.id] = (i % 2) as 0 | 1; });
-      this.submit(next, this.fill);
+    bwButton(foot, 'Shuffle', () => {
+      const ids = (this.party?.members ?? []).map(m => m.id).sort(() => Math.random() - .5), next: Record<string, number> = {};
+      ids.forEach((id, i) => { next[id] = i % this.teams; });
+      this.submit(this.teams, next, this.fill);
     }, 'w-btn');
     this.start = bwButton(foot, 'Start', () => {
       if (!this.canStart()) return;
@@ -95,10 +93,11 @@ export class BedwarsSetup {
     const setup = party?.bedwars;
     this.revision = setup?.revision ?? 0;
     this.fill = setup?.fill ?? false;
+    this.teams = setup?.teams ?? 2;
     this.assignments = {};
     party?.members.forEach(m => {
       const team = setup?.assignments[String(m.id)];
-      if (team === 0 || team === 1) this.assignments[m.id] = team;
+      if (team !== undefined && team >= 0 && team < this.teams) this.assignments[m.id] = team;
     });
     this.pending = false; this.error.textContent = '';
     this.render();
@@ -110,37 +109,41 @@ export class BedwarsSetup {
   }
 
   private get leader(): boolean { return !!this.party && this.party.leader === this.myId; }
-  private size(team: 0 | 1): number { return Object.values(this.assignments).filter(v => v === team).length; }
-  private assigned(id: number): boolean { return this.assignments[id] === 0 || this.assignments[id] === 1; }
+  private size(team: number): number { return Object.values(this.assignments).filter(v => v === team).length; }
+  private assigned(id: number): boolean { const t = this.assignments[id]; return t !== undefined && t >= 0 && t < this.teams; }
   private canStart(): boolean {
     const p = this.party;
-    return this.leader && !this.pending && !this.starting && !!p && p.members.length >= 2 && p.members.length <= 4
-      && this.size(0) > 0 && this.size(1) > 0 && this.size(0) <= 2 && this.size(1) <= 2
-      && p.members.every(m => this.assigned(m.id) && ['menu', 'results'].includes(m.status));
+    if (!this.leader || this.pending || this.starting || !p || p.members.length < 2) return false;
+    if (!p.members.every(m => this.assigned(m.id) && ['menu', 'results'].includes(m.status))) return false;
+    const used = new Set(Object.values(this.assignments));
+    return this.fill ? used.size >= 1 : used.size === this.teams;
   }
 
-  /** Moves one player. A full team swaps, so the leader can never build a 3v1. */
-  private assign(id: number, team: 0 | 1): void {
-    const from = this.assignments[id];
-    if (from === team) return;
-    const next = { ...this.assignments };
-    if (this.size(team) >= 2 || (this.assigned(id) && this.size(from) === 1)) {
-      const other = this.party?.members.find(m => m.id !== id && next[m.id] === team);
-      if (other) next[other.id] = this.assigned(id) ? from : team === 0 ? 1 : 0;
+  private setTeams(n: number): void {
+    if (n === this.teams) return;
+    // Anyone on a team that no longer exists moves to the emptiest one.
+    const next: Record<string, number> = {};
+    const counts = Array.from({ length: n }, () => 0);
+    for (const m of this.party?.members ?? []) {
+      let t = this.assignments[m.id];
+      if (t === undefined || t >= n) t = counts.indexOf(Math.min(...counts));
+      next[m.id] = t; counts[t]++;
     }
-    next[id] = team;
-    this.submit(next, this.fill);
+    this.submit(n, next, this.fill);
   }
-  private submit(assignments: Record<string, 0 | 1>, fill: boolean): void {
+  private assign(id: number, team: number): void {
+    if (this.assignments[id] === team) return;
+    this.submit(this.teams, { ...this.assignments, [id]: team }, this.fill);
+  }
+  private submit(teams: number, assignments: Record<string, number>, fill: boolean): void {
     if (!this.leader || this.pending || this.starting) { this.render(); return; }
-    this.assignments = { ...assignments };
-    this.fill = fill && this.party?.members.length === 3;
+    this.teams = teams; this.assignments = { ...assignments }; this.fill = fill;
     this.pending = true; this.error.textContent = '';
     this.render();
-    this.hooks.onChange({ ...this.assignments }, this.fill, this.revision);
+    this.hooks.onChange(teams, { ...this.assignments }, fill, this.revision);
   }
 
-  private chip(parent: HTMLElement, member: PartyState['members'][number], team: 0 | 1 | null): void {
+  private chip(parent: HTMLElement, member: PartyState['members'][number], team: number): void {
     const editable = this.leader && !this.pending && !this.starting;
     const chip = bwEl('div', 'bw-chip', parent);
     const face = bwEl('span', 'w-face', chip);
@@ -148,34 +151,42 @@ export class BedwarsSetup {
     const name = bwEl('span', 'bw-chip-name', chip, member.username + (member.id === this.myId ? ' (you)' : ''));
     name.title = member.username;
     if (!['menu', 'results'].includes(member.status)) bwEl('small', '', chip, 'Busy');
-    const targets: (0 | 1)[] = team === null ? [0, 1] : [(1 - team) as 0 | 1];
-    for (const t of targets) {
-      const b = bwButton(chip, team === null ? BW_TEAM_NAMES[t] : `To ${BW_TEAM_NAMES[t]}`, () => this.assign(member.id, t), 'bw-move');
+    // Coloured dots move a player to another team.
+    const moves = bwEl('span', 'bw-moves', chip);
+    for (let t = 0; t < this.teams; t++) {
+      if (t === team) continue;
+      const b = bwButton(moves, '', () => this.assign(member.id, t), 'bw-move');
       b.style.setProperty('--team', BW_TEAM_COLORS[t]); b.disabled = !editable;
+      b.setAttribute('aria-label', `Move ${member.username} to ${BW_TEAM_NAMES[t]}`); b.title = `To ${BW_TEAM_NAMES[t]}`;
     }
   }
 
   private render(): void {
     const members = this.party?.members ?? [];
     this.kicker.textContent = this.party ? `Party ${this.party.code}` : 'Party';
-    const unassigned = members.filter(m => !this.assigned(m.id));
     this.note.textContent = !this.party ? 'Create or join a party first.'
-      : !this.leader ? 'The party leader is choosing teams.'
-      : unassigned.length ? 'Put everyone on a team, or press Balance.'
-      : 'Tap a player to move them to the other team.';
-    for (const team of [0, 1] as const) {
-      this.columns[team].replaceChildren();
-      for (const m of members) if (this.assignments[m.id] === team) this.chip(this.columns[team], m, team);
-      const humans = this.size(team), bot = members.length === 3 && this.fill && humans === 1;
-      this.counts[team].textContent = `${humans}${bot ? ' + AI' : ''}`;
+      : !this.leader ? 'The party leader is choosing the teams.'
+      : 'Pick how many teams, then tap a coloured dot to move a player.';
+    for (const b of this.formats.querySelectorAll<HTMLButtonElement>('.bw-format')) {
+      const on = Number(b.dataset.teams) === this.teams;
+      b.setAttribute('aria-checked', String(on)); b.disabled = !this.leader || this.pending || this.starting;
     }
-    this.pool.replaceChildren(); this.pool.hidden = !unassigned.length;
-    for (const m of unassigned) this.chip(this.pool, m, null);
-    this.fillRow.hidden = members.length !== 3;
+    this.grid.replaceChildren();
+    const biggest = Math.max(1, ...Array.from({ length: this.teams }, (_, t) => this.size(t)));
+    for (let t = 0; t < this.teams; t++) {
+      const col = bwEl('div', 'bw-team-col', this.grid);
+      col.style.setProperty('--team', BW_TEAM_COLORS[t]);
+      const label = bwEl('div', 'bw-team-label', col);
+      bwEl('b', '', label, BW_TEAM_NAMES[t]);
+      const bots = this.fill ? biggest - this.size(t) : 0;
+      bwEl('small', '', label, `${this.size(t)}${bots ? ` + ${bots} bot${bots > 1 ? 's' : ''}` : ''}`);
+      const list = bwEl('div', 'bw-team-list', col);
+      for (const m of members) if (this.assignments[m.id] === t) this.chip(list, m, t);
+      if (!this.size(t) && !this.fill) bwEl('small', 'bw-empty', list, 'Empty');
+    }
     this.fillInput.checked = this.fill; this.fillInput.disabled = !this.leader || this.pending || this.starting;
-    let a = this.size(0), b = this.size(1);
-    if (members.length === 3 && this.fill && a && b) a = b = 2;
-    this.start.textContent = this.starting ? 'Starting' : !this.leader && this.party ? 'Waiting for leader' : a && b ? `Start ${a} v ${b}` : 'Start';
+    const sizes = Array.from({ length: this.teams }, (_, t) => this.fill ? biggest : this.size(t));
+    this.start.textContent = this.starting ? 'Starting' : !this.leader && this.party ? 'Waiting for leader' : `Start ${sizes.join('v')}`;
     this.start.disabled = !this.canStart();
   }
 }

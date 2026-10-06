@@ -1,5 +1,5 @@
 // Real browser + a socket peer. Plays a 1v1 through the actual websocket server:
-// title, team dialog, HUD, generator items into the hotbar, the docked shop,
+// title, team dialog, sidebar, generator items into the hotbar, the centred shop,
 // predicted bridging, crack-and-collect mining and the results card. Writes
 // screenshots to ARTIFACTS (default: ./test-artifacts/bedwars).
 //
@@ -60,7 +60,7 @@ try {
   assert.equal(await page.locator('.bw-setup-card').isVisible(), true, 'team dialog opens');
   assert.ok((await page.locator('.bw-setup-card').boundingBox()).width < 520, 'team dialog is small');
   const aId = await page.evaluate(() => window.__latest.welcome.id), bId = B.latest.welcome.id;
-  await page.evaluate(([a, b]) => window.__worlds.net.send({ t: 'bwSetup', assignments: { [a]: 0, [b]: 1 }, fill: false, revision: window.__latest.party.party.bedwars.revision }), [aId, bId]);
+  await page.evaluate(([a, b]) => window.__worlds.net.send({ t: 'bwSetup', teams: 2, assignments: { [a]: 0, [b]: 1 }, fill: false, revision: window.__latest.party.party.bedwars.revision }), [aId, bId]);
   await page.waitForFunction(id => window.__latest.party.party.bedwars.assignments[id] === 1, bId);
   await page.waitForTimeout(300); await shot('02-teams');
   await page.evaluate(() => window.__worlds.net.send({ t: 'play', mode: 'bedwars', setupRevision: window.__latest.party.party.bedwars.revision }));
@@ -69,14 +69,14 @@ try {
   await page.evaluate(() => { document.getElementById('pause').style.display = 'none'; });
 
   // HUD: one small bar, no wallet, and the map name appears nowhere.
-  assert.equal(await page.locator('.bw-bar').isVisible(), true, 'team bar visible');
+  assert.equal(await page.locator('.bw-side').isVisible(), true, 'sidebar visible');
   assert.equal(await page.locator('.bw-wallet, .bw-generator-status, .bw-break').count(), 0, 'the old resource strip and generator panel are gone');
   const text = await page.evaluate(() => document.body.innerText + document.title);
   assert.ok(!/skygarden|citadel|observatory/i.test(text), 'no map name in the UI');
   await shot('03-spawn');
 
   // Generators: items fall and walking over them fills the hotbar.
-  const map = await page.evaluate(async () => { const m = await import('/src/bedwars_map.ts'); return { bases: m.BW_BASES }; });
+  const map = await page.evaluate(() => ({ bases: window.__worlds.bwClient.map.bases }));
   const base = map.bases[0];
   const walkTo = async t => {
     const from = await page.evaluate(() => ({ ...window.__worlds.player.pos }));
@@ -104,8 +104,7 @@ try {
   await page.evaluate(() => window.__worlds.bwClient.interact());
   await page.waitForSelector('.bw-shop:not([hidden])');
   const box = await page.locator('.bw-shop').boundingBox();
-  assert.ok(box.width < 400 && box.x + box.width > 1200, 'shop is a narrow panel on the right edge');
-  assert.equal(await page.locator('.w-scrim.open').count(), 0, 'no scrim while shopping');
+  assert.ok(Math.abs(box.x + box.width / 2 - 640) < 4 && box.width <= 620, 'shop is a centred window');
   await shot('06-shop');
   await page.locator('.bw-row').first().click();
   await page.waitForFunction(() => window.__worlds.inventory.slots.some(s => s && (s.id === 242 || s.id === 243)), undefined, { timeout: 8000 });
@@ -163,7 +162,7 @@ try {
   await page.waitForFunction(() => !window.__worlds.bwClient.active, undefined, { timeout: 10000 });
   peer.close();
   assert.deepEqual(errors, [], `Browser errors: ${errors.join('\n')}`);
-  console.log('PASS: teams dialog, HUD, generator items into the hotbar, docked shop, bridging, mining, results');
+  console.log('PASS: teams dialog, sidebar, generator items into the hotbar, centred shop, bridging, mining, results');
 } finally {
   await browser.close();
 }

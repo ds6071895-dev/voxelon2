@@ -27,7 +27,7 @@ class Lobby {
   }
   assign(ids: number[], solo: number, fill = false): number {
     const revision = this.last(ids[0], 'party')!.party!.bedwars?.revision ?? 0;
-    this.send(ids[0], { t: 'bwSetup', assignments: Object.fromEntries(ids.map(id => [String(id), id === solo ? 1 : 0])), fill, revision });
+    this.send(ids[0], { t: 'bwSetup', teams: 2, assignments: Object.fromEntries(ids.map(id => [String(id), id === solo ? 1 : 0])), fill, revision });
     return this.last(ids[0], 'party')!.party!.bedwars!.revision;
   }
   start(ids: number[], revision: number): void {
@@ -47,7 +47,7 @@ export function runBedwarsServerTests(): void {
     for (const id of ids) assert.equal(h.last(id, 'bwArena')!.team, id === ids[soloIndex] ? 1 : 0);
     assert.equal(h.game.bedwars(world.id)!.phase, 'playing');
     assert.equal(h.game.botCount(), 0, '2v1 never silently fills');
-    h.send(ids[0], { t: 'bwSetup', assignments: {}, fill: false, revision });
+    h.send(ids[0], { t: 'bwSetup', teams: 2, assignments: {}, fill: false, revision });
     assert.match(h.last(ids[0], 'partyErr')!.message, /Finish/);
     for (const id of ids) h.send(id, { t: 'leaveMatch' });
     assert.equal(h.game.worldCount(), 0);
@@ -62,10 +62,10 @@ export function runBedwarsServerTests(): void {
   }
   {
     const h = new Lobby(), ids = h.party(4);
-    const assignments: Record<string, 0 | 1> = { [ids[0]]: 0, [ids[1]]: 1, [ids[2]]: 1, [ids[3]]: 0 };
-    h.send(ids[1], { t: 'bwSetup', assignments, fill: false, revision: 0 });
+    const assignments: Record<string, number> = { [ids[0]]: 0, [ids[1]]: 1, [ids[2]]: 1, [ids[3]]: 0 };
+    h.send(ids[1], { t: 'bwSetup', teams: 2, assignments, fill: false, revision: 0 });
     assert.match(h.last(ids[1], 'partyErr')!.message, /leader/);
-    h.send(ids[0], { t: 'bwSetup', assignments, fill: false, revision: 0 });
+    h.send(ids[0], { t: 'bwSetup', teams: 2, assignments, fill: false, revision: 0 });
     const revision = h.last(ids[0], 'party')!.party!.bedwars!.revision;
     h.send(ids[0], { t: 'play', mode: 'bedwars', setupRevision: revision - 1 });
     assert.equal(h.game.worldCount(), 0, 'stale start rejected');
@@ -108,18 +108,20 @@ export function runBedwarsServerTests(): void {
     const h = new Lobby(), a = h.join();
     h.send(a, { t: 'play', mode: 'bedwars' }); h.tick(BOT_WAIT_MS / 1000 + .1);
     const w = h.game.worldOf(a)!;
-    assert.equal(w.kind, 'bedwars'); assert.equal(h.game.botCount(), 1);
+    assert.equal(w.kind, 'bedwars'); assert.equal(h.game.botCount(), 3, 'a lone queuer gets three bots: one per island');
     h.send(a, { t: 'worldReady', world: w.id }); h.tick(5.2);
     h.deliver(h.game.disconnect(a)); h.tick(31);
     assert.equal(h.game.worldCount(), 0, 'expired last human releases the world');
     assert.equal(h.game.botCount(), 0);
   }
   {
-    const h = new Lobby(), ids = Array.from({ length: 4 }, () => h.join());
+    const h = new Lobby(), ids = Array.from({ length: 8 }, () => h.join());
     for (const id of ids) h.send(id, { t: 'play', mode: 'bedwars' });
     for (const id of ids) h.send(id, { t: 'worldReady', world: h.game.worldOf(id)!.id });
     h.tick(5.2);
-    const own = h.game.worldOf(ids[0])!.id, other = h.game.worldOf(ids[2])!.id;
+    assert.equal(h.game.botCount(), 0, 'four people fill a match on their own');
+    assert.equal(new Set(ids.slice(0, 4).map(id => h.game.worldOf(id)!.id)).size, 1, 'the first four play together');
+    const own = h.game.worldOf(ids[0])!.id, other = h.game.worldOf(ids[4])!.id;
     assert.notEqual(own, other);
     h.send(ids[0], { t: 'bwAction', world: other, action: { kind: 'place', x: 0, y: 98, z: 0, slot: 1 } });
     h.send(ids[0], { t: 'edit', x: 0, y: 98, z: 0, block: 7 });
@@ -131,5 +133,30 @@ export function runBedwarsServerTests(): void {
       assert.ok(o.msg.players.every(p => members.includes(p.id)), 'snapshots remain world-local');
     }
   }
-  console.log('  ✓ Bedwars party assignments, lifecycle, resume, queue and isolation');
+  {
+    // Two people queue together inside the wait: two people and two bots.
+    const h = new Lobby(), a = h.join(), b = h.join();
+    h.send(a, { t: 'play', mode: 'bedwars' }); h.tick(3); h.send(b, { t: 'play', mode: 'bedwars' });
+    h.tick(BOT_WAIT_MS / 1000 - 2.9);
+    const w = h.game.worldOf(a)!;
+    assert.equal(h.game.worldOf(b)!.id, w.id, 'both humans in one match');
+    assert.equal(h.game.botCount(), 2, 'the other two islands get bots');
+    assert.equal(new Set([...h.game.bedwars(w.id)!.players.values()].map(p => p.team)).size, 4, 'four teams, one island each');
+  }
+  {
+    // A party picks its format: 1v1v1v1 with bots on the spare islands.
+    const h = new Lobby(), ids = h.party(2);
+    h.send(ids[0], { t: 'bwSetup', teams: 4, assignments: { [ids[0]]: 0, [ids[1]]: 2 }, fill: true, revision: 0 });
+    h.start(ids, h.last(ids[0], 'party')!.party!.bedwars!.revision);
+    const w = h.game.worldOf(ids[0])!;
+    const teams = [...h.game.bedwars(w.id)!.players.values()].map(p => p.team).sort();
+    assert.deepEqual(teams, [0, 1, 2, 3], 'four teams with bots filling two');
+    assert.equal(h.game.bedwars(w.id)!.teamCount, 4);
+    // Without fill every team needs a person.
+    const h2 = new Lobby(), ids2 = h2.party(2);
+    h2.send(ids2[0], { t: 'bwSetup', teams: 3, assignments: { [ids2[0]]: 0, [ids2[1]]: 1 }, fill: false, revision: 0 });
+    h2.send(ids2[0], { t: 'play', mode: 'bedwars', setupRevision: h2.last(ids2[0], 'party')!.party!.bedwars!.revision });
+    assert.equal(h2.game.worldCount(), 0, 'an empty team without bot fill cannot start');
+  }
+  console.log('  ✓ Bedwars party formats, lifecycle, resume, the bot-filled queue and isolation');
 }

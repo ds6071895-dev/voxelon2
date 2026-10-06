@@ -26,7 +26,7 @@ import { aimAssist, type AimPoint } from './aim_assist';
 import { Inventory } from './inventory';
 import { Item, ITEMS, type GunInfo, type ItemStack } from './items';
 import { iconSvg } from './emoji_icons';
-import { itemGeometry } from './item_geometry';
+import { blockCubeGeometry, itemGeometry } from './item_geometry';
 import { createGunModel, GUN_FEEL, isGunItem, poseGunModel } from './gunmodels';
 import { createGadgetModel, isModeledGadget, poseGadgetModel } from './gadgetmodels';
 import { NetClient } from './net/client';
@@ -80,7 +80,8 @@ import { RatSeekClient, isClassBadge, pickSeeker, storedRatClass } from './ratse
 import { RS } from './ratseek_rules';
 import { BedwarsClient } from './bedwars_client';
 import { BedwarsSetup } from './ui/bedwars_setup';
-import { BW_BASES, BW_BOUNDS, bwBedAt } from './bedwars_map';
+import { BW_BOUNDS } from './bedwars_map';
+import { BW_TEAM_COLORS } from './bedwars_rules';
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -222,8 +223,9 @@ const rsClient = new RatSeekClient({
 const bwClient = new BedwarsClient({
   scene, app, net, player, world, inventory, remotePlayers, atlas, cracks, interaction,
   onPanel: () => { input.releaseButtons(); syncPointerLock(); },
+  flushPose: heldId => net.flushXform(player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch, player.sneaking, heldId, heldSwingSeq),
   onPlaced: (x, y, z, block) => audio.place(materialOf(block), new THREE.Vector3(x + .5, y + .5, z + .5)),
-  onPickup: () => audio.rsCue('cheese'),
+  onPickup: () => audio.pickup(),
   onReplay: () => net.send({ t: 'play', mode: 'bedwars', setupRevision: myParty?.bedwars?.revision }),
   onEditTeams: () => { net.send({ t: 'leaveMatch' }); openBedwarsSetup(); },
   onLeave: () => net.send({ t: 'leaveMatch' }),
@@ -489,11 +491,37 @@ const titlePreview = (() => {
   previewRenderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
   previewHost.appendChild(previewRenderer.domElement);
   const previewScene = new THREE.Scene();
-  const previewCam = new THREE.PerspectiveCamera(38, 1, 0.1, 20);
-  previewCam.position.set(0, 1.15, 4.3);
-  previewCam.lookAt(0, 0.98, 0);
+  const previewCam = new THREE.PerspectiveCamera(36, 1, 0.1, 30);
+  previewCam.position.set(0, 1.15, 5.6);
+  previewCam.lookAt(0, 0.5, 0);
+  // The nametag floats over the head wherever the layout puts the canvas.
+  const nametag = document.querySelector<HTMLElement>('.w-nametag')!;
+  const tagPoint = new THREE.Vector3();
+  let headTop = 2;
+  // The character stands on a little floating island of small blocks: a
+  // rounded 5x5 grass top that tapers through dirt and stone to one tip.
+  const ISLAND_BLOCK = 0.3;
+  const rig = new THREE.Group();
+  previewScene.add(rig);
+  const islandMat = new THREE.MeshBasicMaterial({ map: atlas.texture, vertexColors: true });
+  const islandBlocks: [number, number, number, number][] = [];
+  for (let x = -2; x <= 2; x++) for (let z = -2; z <= 2; z++) {
+    const r = Math.abs(x) + Math.abs(z);
+    if (Math.abs(x) < 2 || Math.abs(z) < 2) islandBlocks.push([Block.Grass, x, -0.5, z]);
+    if (r <= 2 && (Math.abs(x) < 2 || z === 0) && (Math.abs(z) < 2 || x === 0)) islandBlocks.push([Block.Dirt, x, -1.5, z]);
+    if (r <= 1) islandBlocks.push([Block.Stone, x, -2.5, z]);
+  }
+  islandBlocks.push([Block.Stone, 0, -3.5, 0]);
+  for (const [id, x, y, z] of islandBlocks) {
+    const cube = new THREE.Mesh(blockCubeGeometry(atlas, id), islandMat);
+    cube.scale.setScalar(ISLAND_BLOCK / 0.25);
+    cube.position.set(x * ISLAND_BLOCK, y * ISLAND_BLOCK, z * ISLAND_BLOCK);
+    rig.add(cube);
+  }
   let body: AvatarBody | null = null;
   let pointerX = 0, pointerY = 0;
+  // Drag to turn the island; it coasts, then settles back to face you.
+  let spin = 0, spinVel = 0, dragId = -1, dragX = 0;
   const resize = (): void => {
     const width = Math.max(1, previewHost.clientWidth), height = Math.max(1, previewHost.clientHeight);
     previewRenderer.setSize(width, height, false);
@@ -508,11 +536,30 @@ const titlePreview = (() => {
     pointerY = Math.max(-1, Math.min(1, (e.clientY - cy) / (window.innerHeight * 0.6)));
   });
   homeRoot.addEventListener('pointerleave', () => { pointerX = 0; pointerY = 0; });
+  previewHost.addEventListener('pointerdown', (e) => {
+    dragId = e.pointerId; dragX = e.clientX; spinVel = 0;
+    previewHost.setPointerCapture(e.pointerId);
+  });
+  previewHost.addEventListener('pointermove', (e) => {
+    if (e.pointerId !== dragId) return;
+    const dx = e.clientX - dragX; dragX = e.clientX;
+    spin += dx * 0.012; spinVel = dx * 0.012;
+  });
+  const release = (e: PointerEvent): void => { if (e.pointerId === dragId) dragId = -1; };
+  previewHost.addEventListener('pointerup', release);
+  previewHost.addEventListener('pointercancel', release);
   new ResizeObserver(resize).observe(previewHost);
   const animate = (): void => {
     requestAnimationFrame(animate);
+    if (screen !== 'title' || homeRoot.hidden) return;
+    const t = performance.now() / 1000;
+    if (dragId < 0) {
+      spin += spinVel; spinVel *= 0.93;
+      if (Math.abs(spinVel) < 0.002) spin += (Math.round(spin / (Math.PI * 2)) * Math.PI * 2 - spin) * 0.03;
+    }
+    rig.rotation.y = spin;
+    rig.position.y = Math.sin(t * 1.1) * 0.05;
     if (body) {
-      const t = performance.now() / 1000;
       body.head.rotation.y += (-pointerX * 0.6 - body.head.rotation.y) * 0.1;
       body.head.rotation.x += (pointerY * 0.3 - body.head.rotation.x) * 0.1;
       body.group.rotation.y += (Math.PI - pointerX * 0.18 - body.group.rotation.y) * 0.05;
@@ -520,15 +567,18 @@ const titlePreview = (() => {
       body.parts[2].rotation.x = -0.06 + breath; body.parts[3].rotation.x = 0.06 - breath;
       body.parts[2].rotation.z = -0.05; body.parts[3].rotation.z = 0.05;
     }
-    if (screen === 'title' && !homeRoot.hidden) previewRenderer.render(previewScene, previewCam);
+    tagPoint.set(0, headTop + rig.position.y + 0.14, 0).project(previewCam);
+    nametag.style.top = `${((1 - tagPoint.y) / 2 * 100).toFixed(2)}%`;
+    previewRenderer.render(previewScene, previewCam);
   };
   animate();
   return {
     setCosmetics(cosmetics: Cosmetics): void {
-      if (body) { previewScene.remove(body.group); disposeAvatarBody(body); }
+      if (body) { rig.remove(body.group); disposeAvatarBody(body); }
       body = buildAvatarBody({ ...cosmetics });
       body.group.rotation.y = Math.PI;
-      previewScene.add(body.group);
+      rig.add(body.group);
+      headTop = new THREE.Box3().setFromObject(body.group).max.y;
       resize();
     },
   };
@@ -614,16 +664,17 @@ const partyPanel = new PartyPanel(app, {
   onBedwars: () => openBedwarsSetup(),
 });
 const bwSetup = new BedwarsSetup(app, {
-  onChange: (assignments, fill, revision) => net.send({ t: 'bwSetup', assignments, fill, revision }),
+  onChange: (teams, assignments, fill, revision) => net.send({ t: 'bwSetup', teams, assignments, fill, revision }),
   onStart: revision => net.send({ t: 'play', mode: 'bedwars', setupRevision: revision }),
   onClose: () => {},
 });
 function openBedwarsSetup(): void {
   if (!myParty || myParty.members.length < 2) return;
   if (!myParty.bedwars && myParty.leader === net.myId) {
-    const assignments: Record<string, 0 | 1> = {};
-    myParty.members.forEach((m, i) => assignments[String(m.id)] = (i % 2) as 0 | 1);
-    net.send({ t: 'bwSetup', assignments, fill: false, revision: 0 });
+    // Everyone on their own island to start with: 1v1, 1v1v1 or 1v1v1v1.
+    const assignments: Record<string, number> = {};
+    myParty.members.forEach((m, i) => assignments[String(m.id)] = i);
+    net.send({ t: 'bwSetup', teams: Math.max(2, myParty.members.length), assignments, fill: false, revision: 0 });
   }
   partyPanel.close();
   bwSetup.update(myParty, net.myId);
@@ -829,17 +880,22 @@ net.onLeftWorld = () => exitToMenu();
 
 // ── Remote edits, hits and movement corrections ────────────────────────────
 
+let bwEditSoundAt = 0;
 net.onEdit = (x, y, z, b) => {
   const old = world.getBlock(x, y, z);
   world.setBlock(x, y, z, b);
   if (match?.kind === 'bw') {
     bwClient.noteEdit(x, y, z, b);
-    if (old !== b && bwBedAt(x, y, z) === null && Math.hypot(player.pos.x - x, player.pos.y - y, player.pos.z - z) < 24) {
+    if (old !== b && bwClient.map.bedAt(x, y, z) === null && Math.hypot(player.pos.x - x, player.pos.y - y, player.pos.z - z) < 24) {
       const at = new THREE.Vector3(x + .5, y + .5, z + .5);
+      // Someone else's building: audible only close by, and a burst (a TNT
+      // blast, a fast bridge) is one sound rather than a rattle.
+      const now = performance.now(), audible = now - bwEditSoundAt > 90 && at.distanceTo(player.pos) < 14;
+      if (audible) bwEditSoundAt = now;
       if (b === Block.Air) {
-        audio.dig(materialOf(old), at);
+        if (audible) audio.dig(materialOf(old), at);
         particles.debris(at.x, at.y, at.z, blockDebrisColor(old));
-      } else audio.place(materialOf(b), at);
+      } else if (audible) audio.place(materialOf(b), at);
     }
   }
 };
@@ -883,7 +939,7 @@ net.onRespawned = (x, y, z, h) => {
   if (match?.kind === 'bw') {
     duelSpectating = false; player.flying = false; player.noclip = false;
     const team = bwClient.snap?.players.find(p => p.id === net.myId)?.team;
-    if (team !== undefined) player.yaw = BW_BASES[team].yaw;
+    if (team !== undefined) player.yaw = bwClient.map.bases[team].yaw;
     player.pitch = 0;
   }
   if (match?.kind === 'pg') held.setBowDraw(0);
@@ -959,7 +1015,7 @@ function updateShake(dt: number): void {
   encounterShakeStrength *= Math.pow(0.08, dt);
 }
 
-function showHitmarker(amount: number, killed: boolean): void {
+function showHitmarker(amount: number, killed: boolean, silent = false): void {
   hitmarkerT = HITMARKER_TIME;
   hitmarkerKill = killed;
   const color = killed ? '#ff5555' : amount > 0 ? '#ffffff' : '#9fb4c7';
@@ -968,10 +1024,16 @@ function showHitmarker(amount: number, killed: boolean): void {
     tick.style.width = killed ? '16px' : '11px';
     tick.style.boxShadow = killed ? '0 0 6px rgba(255,60,80,.9), 0 0 2px rgba(0,0,0,.9)' : '0 0 2px rgba(0,0,0,0.9)';
   }
-  audio.hitmarker(killed, amount <= 0);
+  if (!silent) audio.hitmarker(killed, amount <= 0);
 }
 function showPvpHit(targetId: number, amount: number, killed: boolean): void {
-  showHitmarker(amount, killed);
+  // Bedwars sounds like Minecraft: the hit is a thud on the victim, not a UI blip.
+  if (match?.kind === 'bw') {
+    const r = net.remotes.get(targetId);
+    showHitmarker(amount, killed, true);
+    audio.axeContact(false, r ? new THREE.Vector3(r.tx, r.ty + 1, r.tz) : undefined);
+    if (killed) audio.hitmarker(true);
+  } else showHitmarker(amount, killed);
   const flavor: HitFlavor = hitFlavor(amount, killed, arenaMaxHealth);
   const remote = net.remotes.get(targetId);
   if (remote) {
@@ -1031,7 +1093,7 @@ function updateCombatFeedback(dt: number): void {
     ? (1 - healthFrac / 0.32) * (accessibility.reducedMotion ? 0.3 : 0.24 + Math.sin(worldTimeLocal * 5.4) * 0.07) : 0;
   const cap = accessibility.photosensitivitySafe ? 0.24 : 0.62;
   hurtVignetteEl.style.opacity = String(Math.min(cap, hurtPulse * 0.62 + critical));
-  if (critical > 0 && screen !== 'title') {
+  if (critical > 0 && screen !== 'title' && match?.kind !== 'bw') {
     const urgency = Math.min(1, 1 - healthFrac / 0.32);
     heartbeatTimer -= dt;
     if (heartbeatTimer <= 0) { audio.heartbeat(urgency); heartbeatTimer = 1.15 - urgency * 0.45; }
@@ -1052,17 +1114,21 @@ function updateCombatFeedback(dt: number): void {
 net.onHurt = (health, k, by) => {
   const bite = Math.max(0, player.health - health);
   player.setHealthFromServer(health, false);
-  const knockScale = match?.kind === 'bw' ? 1 : 6;
-  player.vel.x += k[0] * knockScale; player.vel.y += k[1] * knockScale; player.vel.z += k[2] * knockScale;
-  // A hit in Bedwars sends you flying: keep the speed through the air (as a launch does) instead of
-  // letting ground friction swallow it the moment you leave the floor.
-  if (match?.kind === 'bw') player.momentumTime = Math.max(player.momentumTime, 0.7);
+  if (match?.kind === 'bw') player.applyKnockback(k[0], k[1], k[2]);
+  else { player.vel.x += k[0] * 6; player.vel.y += k[1] * 6; player.vel.z += k[2] * 6; }
   hurtPulse = Math.min(1, Math.max(hurtPulse, 0.34 + bite / 13));
   triggerShake(0.13, Math.min(0.05, 0.006 + bite * 0.0016));
   const attacker = net.remotes.get(by);
   if (attacker && by !== net.myId) showDamageFrom(attacker.tx, attacker.tz);
 };
-net.onHitConfirm = (target, amount, killed) => showPvpHit(target, amount, killed);
+net.onHitConfirm = (target, amount, killed, crit) => {
+  showPvpHit(target, amount, killed);
+  if (match?.kind !== 'bw') return;
+  held.meleeImpact(crit);
+  const r = remotePlayers.renderedPos(target);
+  // A critical hit throws Minecraft's little star sparks off the victim.
+  if (crit && r) particles.burst(r.x, r.y + 1.2, r.z, 14, 0xfff1a8, 3.2, .35, { gravity: 2, spread: .45, scale: .28 });
+};
 net.onShot = (id, item, x, y, z, dx, dy, dz) => {
   const gun = ITEMS[item]?.gun;
   if (!gun) return;
@@ -1990,9 +2056,9 @@ net.onBwArena = (spec, team, spawn, yaw) => {
   player.yaw = yaw; player.pitch = 0;
   enterMatchWorld(spec, 'bw', 'bedwars', spawn);
   world.setArenaRenderBounds(BW_BOUNDS, 0.88);
-  bwClient.enter(team);
+  bwClient.enter(team, spec.seed);
   syncPixelRatio(true);
-  bwSelected = -1; bwSwingAt = 0; bwBowAt = 0; bwFlashAt = 0;
+  bwSelected = -1; bwSwingAt = 0; bwClickAt = 0; bwBowAt = 0; bwFlashAt = 0;
 };
 net.onBwState = s => {
   if (match?.kind !== 'bw') return;
@@ -2000,14 +2066,17 @@ net.onBwState = s => {
   if (before) {
     for (const team of s.teams) {
       if (!before.teams[team.team]?.bed || team.bed) continue;
-      const bed = BW_BASES[team.team].bed;
+      const bed = bwClient.map.bases[team.team].bed;
       audio.dig('wood', new THREE.Vector3(bed.x + .5, bed.y + .5, bed.z + 1));
       particles.burst(bed.x + .5, bed.y + .5, bed.z + 1, 32,
-        team.team === 0 ? 0xe76679 : 0x669de3, 4, 1, { gravity: 9, spread: 1, scale: .5 });
+        parseInt(BW_TEAM_COLORS[team.team].slice(1), 16), 4, 1, { gravity: 9, spread: 1, scale: .5 });
       audio.duelCue('sudden');
     }
     if (s.phase === 'countdown' && Math.ceil(s.countdown) !== Math.ceil(before.countdown)) audio.bridgeCount(Math.ceil(s.countdown));
     if (before.phase === 'countdown' && s.phase === 'playing') audio.bridgeGo();
+    // Just died: the server lifts you over your base; look down at the map.
+    const was = before.players.find(p => p.id === net.myId), now = s.players.find(p => p.id === net.myId);
+    if (was?.alive && now && !now.alive) { player.yaw = bwClient.map.bases[now.team].yaw; player.pitch = -0.38; }
   }
   bwClient.setState(s);
   duelSpectating = bwClient.spectating;
@@ -2036,11 +2105,10 @@ net.onBwResult = result => {
   const team = result.players.find(p => p.id === net.myId)?.team;
   if (result.winner !== null) audio.duelCue(result.winner === team ? 'victory' : 'defeat');
 };
-let bwSelected = -1, bwSwingAt = 0, bwBowAt = 0, bwFlashAt = 0;
+let bwSelected = -1, bwSwingAt = 0, bwClickAt = 0, bwBowAt = 0, bwFlashAt = 0;
 window.addEventListener('keydown', e => {
   if (match?.kind !== 'bw' || screen !== 'playing' || e.repeat || bwClient.panelOpen) return;
-  if (e.code === 'KeyE') { if (bwClient.interact()) e.preventDefault(); }
-  else if (e.code === 'KeyQ') { bwClient.drop(inventory.selected, e.ctrlKey); e.preventDefault(); }
+  if (e.code === 'KeyE' && bwClient.interact()) e.preventDefault();
 });
 function updateBedwarsInput(look: THREE.Vector3, eye: THREE.Vector3): void {
   const now = performance.now(), slot = inventory.selected, stack = inventory.selectedStack;
@@ -2052,12 +2120,17 @@ function updateBedwarsInput(look: THREE.Vector3, eye: THREE.Vector3): void {
   const obstruction = target ? new THREE.Vector3(target.x + .5, target.y + .5, target.z + .5).distanceTo(eye) : Infinity;
   const other = victim >= 0 ? net.remotes.get(victim) : undefined;
   const hitPlayer = !!other && Math.hypot(other.tx - eye.x, other.ty + 1 - eye.y, other.tz - eye.z) < obstruction + .4;
-  if (input.leftDown && hitPlayer && now >= bwSwingAt) {
-    bwSwingAt = now + 220; held.swing();
-    net.flushXform(player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch, player.sneaking, stack?.id ?? 0, heldSwingSeq);
-    net.sendBwAction({ kind: 'melee', target: victim, slot });
-    // Show the hit now; the server's confirmation adds the damage number.
-    if (now - bwFlashAt > 380) { bwFlashAt = now; remotePlayers.hurtFlash(victim, 0.5); }
+  // Every click swings at once (no attack cooldown, as in Bedrock); holding the
+  // button keeps swinging at a steady four a second.
+  const swingNow = input.leftClicked ? now >= bwClickAt : input.leftDown && hitPlayer && now >= bwSwingAt;
+  if (swingNow && (hitPlayer || !target)) {
+    bwClickAt = now + 50; bwSwingAt = now + 250; held.swing();
+    if (hitPlayer) {
+      net.flushXform(player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch, player.sneaking, stack?.id ?? 0, heldSwingSeq);
+      net.sendBwAction({ kind: 'melee', target: victim, slot });
+      // Show the hit now; the server's confirmation adds the damage number.
+      if (now - bwFlashAt > 450) { bwFlashAt = now; remotePlayers.hurtFlash(victim, 0.5); }
+    }
   }
   bwClient.aimBreak(target, slot, input.leftDown && !hitPlayer);
   if (input.leftDown && target && !hitPlayer && now >= bwSwingAt && bwClient.isBreaking) { held.swing(); bwSwingAt = now + 380; }
@@ -2071,10 +2144,9 @@ function updateBedwarsInput(look: THREE.Vector3, eye: THREE.Vector3): void {
     }
   } else {
     bwBowAt = 0; held.setBowDraw(0);
-    if (stack && ITEMS[stack.id]?.kind === 'block' && target && input.rightDown) {
-      net.flushXform(player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch, player.sneaking, stack.id, heldSwingSeq);
-      // Held right-click keeps placing; only a fresh click plays the swing.
-      if (bwClient.place(target, slot) && input.rightClicked) held.swing();
+    if (stack && ITEMS[stack.id]?.kind === 'block') {
+      // Every block that goes down swings the hand, as in Bedrock.
+      if (input.rightDown && bwClient.build(target, eye, look, slot, input.rightClicked)) held.swing();
     } else if (input.rightClicked && stack) {
       bwClient.use(slot, look.x, look.y, look.z); held.swing();
     }

@@ -10,6 +10,7 @@
   <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   <link rel="manifest" href="/site.webmanifest" />
+  <link rel="preload" as="image" href="/cards/bedwars.webp" type="image/webp" />
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="Worlds" />
   <meta property="og:title" content="Worlds — Five worlds to play" />
@@ -91,29 +92,9 @@
     </div>
 
     <div id="w-home" class="w-home">
+      <div class="w-veil" aria-hidden="true"></div>
       <header class="w-top">
-        <button id="w-settings-btn" class="w-top-btn" type="button" aria-haspopup="dialog">
-          <span class="w-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2.8v2.4M12 18.8v2.4M21.2 12h-2.4M5.2 12H2.8M18.5 5.5l-1.7 1.7M7.2 16.8l-1.7 1.7M18.5 18.5l-1.7-1.7M7.2 7.2 5.5 5.5"/><circle cx="12" cy="12" r="6.6"/></svg></span>
-          <span>Settings</span>
-        </button>
-        <button id="w-party-btn" class="w-top-btn" type="button" aria-haspopup="dialog">
-          <span class="w-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8.5" r="3.2"/><path d="M3.5 19c.6-3.2 2.8-5 5.5-5s4.9 1.8 5.5 5"/><circle cx="16.5" cy="9.5" r="2.6"/><path d="M15.5 14.1c2.4.1 4.3 1.6 5 4.4"/></svg></span>
-          <span id="w-party-label">Party</span>
-          <span id="w-party-count" class="w-party-count" hidden>1</span>
-        </button>
-        <button id="w-account-btn" class="w-top-btn w-account" type="button" aria-haspopup="dialog">
-          <span id="w-account-face" class="w-face" aria-hidden="true"></span>
-          <span class="w-account-text">
-            <small id="w-account-kind">Guest</small>
-            <b id="w-account-name">Connecting…</b>
-          </span>
-          <span id="w-account-cta" class="w-account-cta">Log in</span>
-        </button>
-      </header>
-
-      <main class="w-stage">
-        <section class="w-left" aria-label="Games">
-          <h1 class="w-wordmark" aria-label="Worlds">
+        <h1 class="w-wordmark" aria-label="Worlds">
             <!-- Lockup: the mark from public/favicon.svg (without its plate) and a
                  wordmark drawn as strokes on a 100-unit cap height, so it looks
                  identical on every OS instead of depending on system fonts. -->
@@ -149,96 +130,90 @@
               </g>
             </svg>
           </h1>
+        <div class="w-top-actions">
+        <button id="w-settings-btn" class="w-top-btn" type="button" aria-haspopup="dialog">
+          <span class="w-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2.8v2.4M12 18.8v2.4M21.2 12h-2.4M5.2 12H2.8M18.5 5.5l-1.7 1.7M7.2 16.8l-1.7 1.7M18.5 18.5l-1.7-1.7M7.2 7.2 5.5 5.5"/><circle cx="12" cy="12" r="6.6"/></svg></span>
+          <span>Settings</span>
+        </button>
+        <button id="w-party-btn" class="w-top-btn" type="button" aria-haspopup="dialog">
+          <span class="w-ico"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8.5" r="3.2"/><path d="M3.5 19c.6-3.2 2.8-5 5.5-5s4.9 1.8 5.5 5"/><circle cx="16.5" cy="9.5" r="2.6"/><path d="M15.5 14.1c2.4.1 4.3 1.6 5 4.4"/></svg></span>
+          <span id="w-party-label">Party</span>
+          <span id="w-party-count" class="w-party-count" hidden>1</span>
+        </button>
+        <button id="w-account-btn" class="w-top-btn w-account" type="button" aria-haspopup="dialog">
+          <span id="w-account-face" class="w-face" aria-hidden="true"></span>
+          <span class="w-account-text">
+            <small id="w-account-kind">Guest</small>
+            <b id="w-account-name">Connecting…</b>
+          </span>
+          <span id="w-account-cta" class="w-account-cta">Log in</span>
+        </button>
+        </div>
+      </header>
+
+      <main class="w-stage">
+        <section class="w-left" aria-label="Games">
+          <div class="w-eyebrow"><span>Choose a world</span></div>
           <div class="w-cards">
             <button class="w-card" type="button" data-mode="bedwars" style="--i:0; --tone:#e5484d">
-              <span class="w-card-art" aria-hidden="true"><svg viewBox="0 0 360 150" preserveAspectRatio="xMidYMid slice" focusable="false"><defs><linearGradient id="a-sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#bcd9ff"/><stop offset="1" stop-color="#f3f8ff"/></linearGradient>
-<linearGradient id="a-rock" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#9a7550"/><stop offset="1" stop-color="#6b4f37"/></linearGradient></defs>
-<rect width="360" height="150" fill="url(#a-sky)"/>
-<g fill="#fff" opacity=".85"><ellipse cx="62" cy="26" rx="26" ry="8"/><ellipse cx="82" cy="21" rx="16" ry="8"/><ellipse cx="288" cy="34" rx="28" ry="8"/><ellipse cx="310" cy="29" rx="15" ry="7"/></g>
-<g><path d="M26 96h128l-10 14H36z" fill="#86cf72"/><path d="M26 96h128" stroke="#a6e08e" stroke-width="3"/><path d="M36 110h108l-30 36H66z" fill="url(#a-rock)"/><path d="M66 146h48l-10 -8H76z" fill="#5a4230" opacity=".5"/>
-<rect x="54" y="78" width="6" height="18" rx="1.5" fill="#8a5a33"/><rect x="58" y="82" width="52" height="14" rx="3" fill="#e5484d"/><rect x="58" y="82" width="52" height="5" rx="2" fill="#f27c80"/><rect x="61" y="79" width="16" height="8" rx="3" fill="#fff"/><rect x="104" y="96" width="5" height="4" fill="#8a5a33"/><rect x="58" y="96" width="5" height="4" fill="#8a5a33"/></g>
-<g><path d="M206 96h128l-10 14H216z" fill="#86cf72"/><path d="M206 96h128" stroke="#a6e08e" stroke-width="3"/><path d="M216 110h108l-30 36H246z" fill="url(#a-rock)"/><path d="M246 146h48l-10 -8h-28z" fill="#5a4230" opacity=".5"/>
-<rect x="300" y="78" width="6" height="18" rx="1.5" fill="#8a5a33"/><rect x="250" y="82" width="52" height="14" rx="3" fill="#3b82f6"/><rect x="250" y="82" width="52" height="5" rx="2" fill="#78a9f8"/><rect x="283" y="79" width="16" height="8" rx="3" fill="#fff"/><rect x="298" y="96" width="5" height="4" fill="#8a5a33"/><rect x="251" y="96" width="5" height="4" fill="#8a5a33"/></g>
-<g stroke="rgba(18,32,50,.28)" stroke-width="1.5"><rect x="160" y="88" width="12" height="12" rx="2" fill="#e5484d"/><rect x="174" y="88" width="12" height="12" rx="2" fill="#e5484d"/><rect x="188" y="88" width="12" height="12" rx="2" fill="#3b82f6"/><rect x="202" y="88" width="0" height="0"/></g>
-<g><path d="M158 44h44l-8 9h-28z" fill="#86cf72"/><path d="M164 53h32l-10 14h-12z" fill="url(#a-rock)"/><path d="M180 22l11 12-11 20-11-20z" fill="#3fd3e0"/><path d="M169 34h22l-11 20z" fill="#25a9b7"/><path d="M180 22l11 12h-22z" fill="#8af1ef"/></g></svg></span>
-              <span class="w-card-body"><span class="w-card-title">Bedwars</span><span class="w-card-sub">Protect your bed. Break theirs.</span></span>
+              <span class="w-card-art" aria-hidden="true"><img src="/cards/bedwars.webp" alt="" decoding="async" draggable="false" /></span>
+              <span class="w-card-body"><span class="w-card-badge">New</span><span class="w-card-title">Bedwars</span><span class="w-card-sub">Protect your bed. Break theirs.</span></span>
               <span class="w-card-go"><span class="w-card-label">Play</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg></span>
               <span class="w-card-status" role="status" aria-live="polite"><i class="w-dot"></i><span class="w-card-status-text">Finding players…</span></span>
             </button>
             <button class="w-card" type="button" data-mode="duels" style="--i:1; --tone:#f59e0b">
-              <span class="w-card-art" aria-hidden="true"><svg viewBox="0 0 240 120" preserveAspectRatio="xMidYMid slice" focusable="false"><defs><linearGradient id="d-bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffd8a0"/><stop offset="1" stop-color="#fff4de"/></linearGradient></defs>
-<rect width="240" height="120" fill="url(#d-bg)"/><circle cx="120" cy="30" r="46" fill="#ffe9bf" opacity=".7"/>
-<ellipse cx="120" cy="100" rx="96" ry="14" fill="#c98f4a"/><ellipse cx="120" cy="96" rx="96" ry="14" fill="#e3b06a"/>
-<g><rect x="64" y="46" width="16" height="16" fill="#f2c9a0"/><rect x="62" y="62" width="20" height="24" fill="#e5484d"/><rect x="63" y="86" width="8" height="12" fill="#3a4f7a"/><rect x="73" y="86" width="8" height="12" fill="#3a4f7a"/><rect x="62" y="44" width="20" height="6" fill="#5b3a22"/><path d="M82 66L108 34" stroke="#dfe7ee" stroke-width="5" stroke-linecap="round"/><path d="M80 70l8-8" stroke="#8a5a33" stroke-width="5" stroke-linecap="round"/></g>
-<g><rect x="160" y="46" width="16" height="16" fill="#f2c9a0"/><rect x="158" y="62" width="20" height="24" fill="#3b82f6"/><rect x="159" y="86" width="8" height="12" fill="#3a4f7a"/><rect x="169" y="86" width="8" height="12" fill="#3a4f7a"/><rect x="158" y="44" width="20" height="6" fill="#2a2f3a"/><path d="M158 66L132 34" stroke="#dfe7ee" stroke-width="5" stroke-linecap="round"/><path d="M160 70l-8-8" stroke="#8a5a33" stroke-width="5" stroke-linecap="round"/></g>
-<path d="M120 22l4 10 10 1-8 7 3 10-9-6-9 6 3-10-8-7 10-1z" fill="#fff3b8" stroke="#f5a623" stroke-width="2" stroke-linejoin="round"/></svg></span>
+              <span class="w-card-art" aria-hidden="true"><img src="/cards/duels.webp" alt="" decoding="async" draggable="false" /></span>
               <span class="w-card-body"><span class="w-card-title">Duels</span><span class="w-card-sub">Fast fights, last one standing.</span></span>
               <span class="w-card-go"><span class="w-card-label">Play</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg></span>
               <span class="w-card-status" role="status" aria-live="polite"><i class="w-dot"></i><span class="w-card-status-text">Finding players…</span></span>
             </button>
-            <button class="w-card" type="button" data-mode="bridge" style="--i:2; --tone:#5b8def">
-              <span class="w-card-art" aria-hidden="true"><svg viewBox="0 0 240 120" preserveAspectRatio="xMidYMid slice" focusable="false"><defs><linearGradient id="b-bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#b5d2ff"/><stop offset="1" stop-color="#eef5ff"/></linearGradient><linearGradient id="b-void" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#6d8fd6" stop-opacity="0"/><stop offset="1" stop-color="#4766b8" stop-opacity=".55"/></linearGradient></defs>
-<rect width="240" height="120" fill="url(#b-bg)"/><rect y="70" width="240" height="50" fill="url(#b-void)"/>
-<g fill="#fff" opacity=".8"><ellipse cx="50" cy="22" rx="22" ry="7"/><ellipse cx="190" cy="30" rx="24" ry="7"/></g>
-<rect x="6" y="62" width="48" height="12" rx="3" fill="#e5484d"/><rect x="186" y="62" width="48" height="12" rx="3" fill="#3b82f6"/>
-<g stroke="rgba(18,32,50,.25)" stroke-width="1.5"><rect x="56" y="64" width="16" height="10" rx="2" fill="#aab8cb"/><rect x="74" y="64" width="16" height="10" rx="2" fill="#aab8cb"/><rect x="92" y="64" width="16" height="10" rx="2" fill="#aab8cb"/><rect x="110" y="64" width="16" height="10" rx="2" fill="#aab8cb"/><rect x="128" y="64" width="16" height="10" rx="2" fill="#aab8cb"/><rect x="146" y="64" width="16" height="10" rx="2" fill="#aab8cb"/><rect x="164" y="64" width="16" height="10" rx="2" fill="#aab8cb"/></g>
-<g><rect x="14" y="22" width="6" height="40" fill="#8a5a33"/><rect x="32" y="22" width="6" height="40" fill="#8a5a33"/><rect x="14" y="22" width="24" height="6" fill="#8a5a33"/><rect x="20" y="28" width="12" height="34" fill="#ffd36e" opacity=".55"/></g>
-<g><rect x="202" y="22" width="6" height="40" fill="#8a5a33"/><rect x="220" y="22" width="6" height="40" fill="#8a5a33"/><rect x="202" y="22" width="24" height="6" fill="#8a5a33"/><rect x="208" y="28" width="12" height="34" fill="#ffd36e" opacity=".55"/></g>
-<g><rect x="108" y="44" width="10" height="10" fill="#f2c9a0"/><rect x="106" y="54" width="14" height="16" fill="#e5484d"/><path d="M120 58l12-10" stroke="#dfe7ee" stroke-width="3" stroke-linecap="round"/></g></svg></span>
+            <button class="w-card" type="button" data-mode="bridge" style="--i:2; --tone:#4f7fe8">
+              <span class="w-card-art" aria-hidden="true"><img src="/cards/bridge.webp" alt="" decoding="async" draggable="false" /></span>
               <span class="w-card-body"><span class="w-card-title">The Bridge</span><span class="w-card-sub">Cross, score and defend.</span></span>
               <span class="w-card-go"><span class="w-card-label">Play</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg></span>
               <span class="w-card-status" role="status" aria-live="polite"><i class="w-dot"></i><span class="w-card-status-text">Finding players…</span></span>
             </button>
-            <button class="w-card" type="button" data-mode="parkour" style="--i:3; --tone:#34b46a">
-              <span class="w-card-art" aria-hidden="true"><svg viewBox="0 0 240 120" preserveAspectRatio="xMidYMid slice" focusable="false"><defs><linearGradient id="p-bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#bff0d2"/><stop offset="1" stop-color="#f2fff7"/></linearGradient></defs>
-<rect width="240" height="120" fill="url(#p-bg)"/><path d="M0 100q50-34 100-14t140-24V120H0z" fill="#9fdcb0" opacity=".7"/>
-<g stroke="rgba(18,32,50,.22)" stroke-width="1.5"><g><rect x="14" y="86" width="34" height="14" rx="2" fill="#86cf72"/><rect x="14" y="100" width="34" height="8" fill="#8a6a4a"/></g><g><rect x="62" y="74" width="30" height="12" rx="2" fill="#86cf72"/><rect x="62" y="86" width="30" height="8" fill="#8a6a4a"/></g><g><rect x="104" y="62" width="30" height="12" rx="2" fill="#86cf72"/><rect x="104" y="74" width="30" height="8" fill="#8a6a4a"/></g><g><rect x="146" y="50" width="30" height="12" rx="2" fill="#86cf72"/><rect x="146" y="62" width="30" height="8" fill="#8a6a4a"/></g></g>
-<g><rect x="72" y="52" width="9" height="9" fill="#f2c9a0"/><rect x="70" y="61" width="13" height="13" fill="#3b82f6"/></g>
-<g fill="#2f7a68"><ellipse cx="196" cy="30" rx="22" ry="9"/><path d="M196 28l-30-18 8 20zM196 30l22-22 2 24z"/><path d="M174 28l-16 2 14 8z"/><circle cx="160" cy="30" r="1.8" fill="#fff"/></g>
-<path d="M156 33l-8 6-4-4z" fill="#ff9d2e"/></svg></span>
+            <button class="w-card" type="button" data-mode="parkour" style="--i:3; --tone:#2fa463">
+              <span class="w-card-art" aria-hidden="true"><img src="/cards/parkour.webp" alt="" decoding="async" draggable="false" /></span>
               <span class="w-card-body"><span class="w-card-title">Parkour</span><span class="w-card-sub">Outrun the dragon together.</span></span>
               <span class="w-card-go"><span class="w-card-label">Play</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg></span>
               <span class="w-card-status" role="status" aria-live="polite"><i class="w-dot"></i><span class="w-card-status-text">Finding players…</span></span>
             </button>
-            <button class="w-card" type="button" data-mode="ratseek" style="--i:4; --tone:#a66cf0">
-              <span class="w-card-art" aria-hidden="true"><svg viewBox="0 0 240 120" preserveAspectRatio="xMidYMid slice" focusable="false"><defs><linearGradient id="r-bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#cdb7f7"/><stop offset="1" stop-color="#f6efff"/></linearGradient></defs>
-<rect width="240" height="120" fill="url(#r-bg)"/><circle cx="196" cy="26" r="12" fill="#fff7d6"/>
-<rect x="0" y="98" width="240" height="22" fill="#a58bd8" opacity=".55"/>
-<g stroke="rgba(18,32,50,.25)" stroke-width="1.5"><rect x="70" y="52" width="100" height="48" fill="#a56f4a"/><path d="M60 54l60-34 60 34z" fill="#5a3a5e"/><rect x="108" y="72" width="22" height="28" rx="2" fill="#6b3f2a"/><rect x="82" y="64" width="16" height="16" rx="2" fill="#ffe08a"/><rect x="142" y="64" width="16" height="16" rx="2" fill="#ffe08a"/></g>
-<path d="M90 64h-6M98 72H82M150 64v16M142 72h16" stroke="#8a5a33" stroke-width="1.5"/>
-<g><ellipse cx="190" cy="92" rx="10" ry="6" fill="#9aa3b2"/><circle cx="198" cy="88" r="4" fill="#9aa3b2"/><circle cx="196" cy="84" r="2.6" fill="#f4b6c2"/><circle cx="201" cy="84" r="2.6" fill="#f4b6c2"/><path d="M180 92q-12 4-14-4" stroke="#f4b6c2" stroke-width="1.8" fill="none" stroke-linecap="round"/></g>
-<path d="M30 98l16-4v10z" fill="#ffd05a" stroke="rgba(18,32,50,.25)" stroke-width="1.5" stroke-linejoin="round"/></svg></span>
+            <button class="w-card" type="button" data-mode="ratseek" style="--i:4; --tone:#9a5ff0">
+              <span class="w-card-art" aria-hidden="true"><img src="/cards/ratseek.webp" alt="" decoding="async" draggable="false" /></span>
               <span class="w-card-body"><span class="w-card-title">Rat and Seek</span><span class="w-card-sub">Hide in the manor.</span></span>
               <span class="w-card-go"><span class="w-card-label">Play</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg></span>
               <span class="w-card-status" role="status" aria-live="polite"><i class="w-dot"></i><span class="w-card-status-text">Finding players…</span></span>
             </button>
           </div>
-          <button id="w-controls-link" class="w-controls-link" type="button">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="6.5" width="19" height="11" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M6.5 10h1M10 10h1M13.5 10h1M17 10h.5M7 14h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-            Controls
-          </button>
-          <div id="w-connection" class="w-connection" role="status"></div>
         </section>
 
-        <section class="w-right" aria-label="Dressing room">
-          <div class="w-right-head">
-            <div>
-              <h2>Your look</h2>
-            </div>
+        <section class="w-right" aria-label="Your character">
+          <div class="w-stage-box">
+            <div class="w-nametag" aria-hidden="true"><span id="w-nametag"></span></div>
+            <div id="w-preview" aria-label="Your character preview"></div>
+            <div class="w-plinth" aria-hidden="true"></div>
           </div>
-          <div class="w-stage-box"><div id="w-preview" aria-label="Your character preview"></div></div>
           <div class="w-right-actions">
             <button id="w-wardrobe-btn" class="w-btn primary" type="button">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 3.5 4 6v4.5h3V20.5h10V10.5h3V6l-4.5-2.5C15 5 13.7 6 12 6S9 5 8.5 3.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
-              Open wardrobe
+              Wardrobe
             </button>
-            <button id="w-capes-btn" class="w-btn" type="button" title="Capes">
+            <button id="w-capes-btn" class="w-btn" type="button">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3.5h10l2.5 16.5-4-1.8L12 20.5l-3.5-2.3-4 1.8z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
               Capes
             </button>
           </div>
         </section>
       </main>
+
+      <footer class="w-foot">
+        <button id="w-controls-link" class="w-controls-link" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="6.5" width="19" height="11" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M6.5 10h1M10 10h1M13.5 10h1M17 10h.5M7 14h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          Controls
+        </button>
+        <div id="w-connection" class="w-connection" role="status"></div>
+      </footer>
     </div>
   </div>
   <script type="module" src="/src/main.ts"></script>

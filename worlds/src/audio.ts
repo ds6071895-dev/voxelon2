@@ -26,7 +26,7 @@ export function materialOf(block: number): Material {
       return 'sand';
     case Block.PrismBrick: case Block.PrismLamp: case Block.RuneGlass:
       return 'glass';
-    case Block.TeamWoolA: case Block.TeamWoolB:
+    case Block.TeamWoolA: case Block.TeamWoolB: case Block.TeamWoolC: case Block.TeamWoolD:
       return 'wool';
     default:
       return 'grass'; // dirt, grass, leaves, plants, snow...
@@ -280,6 +280,17 @@ export class GameAudio {
     this.tone({ type: 'triangle', from: 180, to: 95, dur: 0.16, gain: 0.16 });
     this.noise({ freq: 260, dur: 0.1, gain: 0.06, slideTo: 120, type: 'lowpass', q: 0.6 });
   }
+
+  /** Walking over an item: one quiet pop, pitched a little differently each
+   *  time like Minecraft's, and never more than a few a second. */
+  pickup(): void {
+    const now = performance.now();
+    if (now - this.pickupAt < 140) return;
+    this.pickupAt = now;
+    const f = 620 + Math.random() * 380;
+    this.tone({ type: 'sine', from: f, to: f * 1.5, dur: 0.07, gain: 0.05, attack: 0.003 });
+  }
+  private pickupAt = 0;
 
   /** LOW HEALTH: a chest-thump pair, felt more than heard. `urgency` (0..1)
    *  tightens and hardens it as the bar empties, so how close you are to dying

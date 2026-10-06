@@ -49,7 +49,7 @@ import { partyCapacityFor } from '../modes';
 import { RatSeekMatch, type RsHost } from '../ratseek';
 import { isRatClass, type RatClassId } from '../ratseek_rules';
 import { BedwarsMatch, type BwHost } from '../bedwars';
-import { BW_BASES, BW_BOUNDS, BW_VOID_Y } from '../bedwars_map';
+import { BW_BOUNDS, BW_MAP_COUNT, BW_VOID_Y, bwMap } from '../bedwars_map';
 import { bwMotion, bwAcceptMotion, bwAuthorizeImpulse, bwSupported, bwTickMotion, type BwMotion } from '../bedwars_movement';
 import { Accounts, type Hasher } from './accounts';
 import { NameRegistry } from './names';
@@ -729,16 +729,15 @@ export class GameServer {
       return [...this.partyErr(p, 'The party changed. Review the updated teams.'), ...this.partyBroadcast(p.id)];
     }
     if (!msg.assignments || typeof msg.assignments !== 'object' || Array.isArray(msg.assignments)) return [];
-    const assignments: Record<string, 0 | 1> = {};
-    const counts = [0, 0];
+    const teams = Number.isInteger(msg.teams) && msg.teams >= 2 && msg.teams <= 4 ? msg.teams : 2;
+    const assignments: Record<string, number> = {};
     for (const [key, team] of Object.entries(msg.assignments)) {
-      if (!party.members.some(id => String(id) === key) || (team !== 0 && team !== 1) || ++counts[team] > 2) {
-        return this.partyErr(p, 'Each team holds at most two party members.');
+      if (!party.members.some(id => String(id) === key) || !Number.isInteger(team) || team < 0 || team >= teams) {
+        return this.partyErr(p, 'Pick a team for every player.');
       }
       assignments[key] = team;
     }
-    party.bedwars = { assignments, fill: party.members.length === 3 && msg.fill === true,
-      revision: (party.bedwars?.revision ?? 0) + 1 };
+    party.bedwars = { teams, assignments, fill: msg.fill === true, revision: (party.bedwars?.revision ?? 0) + 1 };
     return this.partyBroadcast(p.id);
   }
 
@@ -773,11 +772,11 @@ export class GameServer {
     if (mode === 'bedwars' && draftParty && draftParty.members.length > 1) {
       const setup = draftParty.bedwars;
       if (!setup || setupRevision !== setup.revision) return [...this.partyErr(p, 'Choose your Bedwars teams before starting.'), ...this.partyBroadcast(p.id)];
-    const teams = draftParty.members.map(id => setup.assignments[String(id)]);
-      if (teams.some(t => t !== 0 && t !== 1) || !teams.includes(0) || !teams.includes(1) ||
-          teams.filter(t => t === 0).length > 2 || teams.filter(t => t === 1).length > 2) {
-        return this.partyErr(p, 'Assign every player to a team, with one or two players on each side.');
-      }
+      const picks = draftParty.members.map(id => setup.assignments[String(id)]);
+      if (picks.some(t => !Number.isInteger(t) || t < 0 || t >= setup.teams)) return this.partyErr(p, 'Put every player on a team.');
+      const used = new Set(picks);
+      if (!setup.fill && used.size < setup.teams) return this.partyErr(p, 'Every team needs a player, or turn on bot fill.');
+      if (used.size < 2 && !setup.fill) return this.partyErr(p, 'Split the party over at least two teams.');
       if (draftParty.members.some(id => this.disconnectedUntil.has(id))) return this.partyErr(p, 'Wait for everyone to reconnect before starting.');
     }
     if (p.worldId !== null) {
@@ -819,6 +818,7 @@ export class GameServer {
   /** Pair waiting humans, oldest first. */
   private matchQueue(mode: GameMode): Outbound[] {
     if (mode === 'ratseek') return this.matchRatSeekQueue(false);
+    if (mode === 'bedwars') return this.matchBedwarsQueue(false);
     const waiting = [...this.players.values()]
       .filter((v) => !v.bot && v.ready && v.queue === mode && v.worldId === null)
       .sort((a, b) => a.queuedAt - b.queuedAt || a.id - b.id);
@@ -837,10 +837,27 @@ export class GameServer {
     for (const p of [...this.players.values()]) {
       if (p.bot || !p.queue || p.worldId !== null || now - p.queuedAt < BOT_WAIT_MS) continue;
       if (p.queue === 'ratseek') { out.push(...this.matchRatSeekQueue(true)); continue; }
+      if (p.queue === 'bedwars') { out.push(...this.matchBedwarsQueue(true)); continue; }
       const mode = p.queue;
       this.leaveQueue(p);
       out.push(this.to(p, { t: 'queue', mode: null }));
       out.push(...this.launch(mode, [p, this.makeBot()], false));
+    }
+    return out;
+  }
+
+  /** Bedwars' public queue is free-for-all on four islands: four people go at
+   *  once; after the wait, whoever is queued goes and bots take the rest. */
+  private matchBedwarsQueue(timeUp: boolean): Outbound[] {
+    const waiting = [...this.players.values()]
+      .filter((v) => !v.bot && v.ready && v.queue === 'bedwars' && v.worldId === null)
+      .sort((a, b) => a.queuedAt - b.queuedAt || a.id - b.id);
+    const out: Outbound[] = [];
+    while (waiting.length >= 4 || (timeUp && waiting.length > 0)) {
+      const group = waiting.splice(0, 4);
+      for (const m of group) { this.leaveQueue(m); out.push(this.to(m, { t: 'queue', mode: null })); }
+      out.push(...this.launchBedwars(group));
+      timeUp = false;
     }
     return out;
   }
@@ -1043,6 +1060,15 @@ export class GameServer {
 
   /** A practice opponent is leaving: remember the level it ended at. */
   private settleBot(bot: ServerPlayer, w: MatchWorld): void {
+    if (w.mode === 'bedwars') {
+      const brain = w.bw?.bots.find(b => b.id === bot.id), me = w.bw?.players.get(bot.id);
+      if (!brain || !me || !w.bw) return;
+      for (const p of w.bw.players.values()) {
+        const human = this.players.get(p.id);
+        if (p.team !== me.team && human && !human.bot) this.rememberSkill(human, 'bedwars', brain.rating);
+      }
+      return;
+    }
     if (w.mode === 'ratseek') {
       // The practice seeker's level is remembered for the rats it hunted.
       const level = w.rs?.botSkill();
@@ -1081,7 +1107,6 @@ export class GameServer {
       name: id => this.players.get(id)?.username ?? '',
       send, broadcast,
       getBlock: (x, y, z) => w.blocks.getBlock(x, y, z),
-      isEdited: (x, y, z) => w.blocks.isEdited(x, y, z),
       setBlock: (x, y, z, block) => {
         w.blocks.set(x, y, z, block);
         broadcast({ t: 'edit', x, y, z, block });
@@ -1117,35 +1142,46 @@ export class GameServer {
         p.x = pose.x; p.y = pose.y; p.z = pose.z; p.yaw = pose.yaw; p.pitch = pose.pitch;
         if (pose.held !== undefined) p.held = pose.held;
         if (pose.swing) p.swing = (p.swing + 1) & 0xffff;
+        if (pose.sneaking !== undefined) p.sneaking = pose.sneaking;
         p.ct = this.nowMs();
       },
     };
   }
 
   private launchBedwars(members: ServerPlayer[], party?: Party): Outbound[] {
-    const w = this.createWorld('bedwars', 1, `bw:${this.nextWorldId}`);
-    const entries = members.map((p, i) => ({ p, team: (party?.bedwars?.assignments[String(p.id)] ?? i % 2) as 0 | 1 }));
-    if (members.length === 3 && party?.bedwars?.fill) {
-      const solo = entries.filter(e => e.team === 0).length === 1 ? 0 : 1;
-      entries.push({ p: this.makeBot(), team: solo });
+    // A random map; the world seed is its id.
+    const w = this.createWorld('bedwars', Math.floor(this.rng() * BW_MAP_COUNT), `bw:${this.nextWorldId}`);
+    const setup = party?.bedwars;
+    // The queue is a four-island free-for-all; a party plays its chosen format.
+    const teams = setup ? setup.teams : 4;
+    const entries = members.map((p, i) => ({ p, team: setup ? setup.assignments[String(p.id)] ?? i % teams : i % teams }));
+    if (!setup || setup.fill) {
+      const size = Math.max(1, ...Array.from({ length: teams }, (_, t) => entries.filter(e => e.team === t).length));
+      for (let t = 0; t < teams; t++) while (entries.filter(e => e.team === t).length < size) entries.push({ p: this.makeBot(), team: t });
     }
+    const map = bwMap(w.spec.seed);
     const out: Outbound[] = [];
-    const teamCounts = [0, 0];
+    const teamCounts = [0, 0, 0, 0];
     for (const { p, team } of entries) {
-      const base = BW_BASES[team], spawn = base.spawns[teamCounts[team]++ % base.spawns.length];
+      const base = map.bases[team], spawn = base.spawns[teamCounts[team]++ % base.spawns.length];
       this.resetBody(p, spawn, base.yaw, 20);
       p.rsMoveAt = this.worldTime;
       p.held = Item.WoodSword;
       out.push(...this.enterWorld(p, w));
     }
+    // A bot starts at the level its opponents taught the last one.
+    const skillFor = (team: number): number | undefined => {
+      const known = entries.filter(e => e.team !== team && !e.p.bot).map(e => this.learnedSkill(e.p, 'bedwars')).filter((v): v is number => v !== undefined);
+      return known.length ? known.reduce((a, b) => a + b, 0) / known.length : undefined;
+    };
     w.bw = new BedwarsMatch(this.bwHost(w), {
-      players: entries.map(({ p, team }) => ({ id: p.id, team, bot: p.bot })),
-      world: w.spec.id, leader: party?.leader,
+      players: entries.map(({ p, team }) => ({ id: p.id, team, bot: p.bot, skill: p.bot ? skillFor(team) : undefined })),
+      world: w.spec.id, map: w.spec.seed, teams,
     });
     // Arena first: the client has to switch worlds before applying the kit and state.
     for (const { p, team } of entries) {
       if (!p.bot) out.push(this.to(p, { t: 'bwArena', world: w.spec, team,
-        spawn: { x: p.x, y: p.y, z: p.z }, yaw: BW_BASES[team].yaw }));
+        spawn: { x: p.x, y: p.y, z: p.z }, yaw: map.bases[team].yaw }));
       else w.bw.ready(p.id);
     }
     out.push(...this.drainBw(w));

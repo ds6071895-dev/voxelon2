@@ -86,7 +86,6 @@ export class Parties {
     if (party.bedwars) {
       delete party.bedwars.assignments[String(id)];
       party.bedwars.revision++;
-      if (party.members.length !== 3) party.bedwars.fill = false;
     }
     if (party.members.length === 0) {
       this.byCode.delete(party.code);

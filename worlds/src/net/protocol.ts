@@ -80,8 +80,11 @@ export interface PartyState {
   bedwars?: BedwarsSetupState;
 }
 
+/** A party's Bedwars format: how many teams (2 to 4, one island each) and
+ *  who is on which. `fill` pads every team with bots up to the biggest. */
 export interface BedwarsSetupState {
-  assignments: Record<string, 0 | 1>;
+  teams: number;
+  assignments: Record<string, number>;
   fill: boolean;
   revision: number;
 }
@@ -105,7 +108,7 @@ export type ClientMsg =
   | { t: 'partyLeave' }
   | { t: 'partyKick'; id: number }
   | { t: 'partyPromote'; id: number }
-  | { t: 'bwSetup'; assignments: Record<string, 0 | 1>; fill: boolean; revision: number }
+  | { t: 'bwSetup'; teams: number; assignments: Record<string, number>; fill: boolean; revision: number }
   // Play: solo -> public queue; a party leader -> a private match for the party.
   // Rat and Seek: `seeker` is the party member the leader picked to hunt
   // (0 = the AI seeker, the default), and `ratClass` the class this player last chose.
@@ -165,7 +168,7 @@ export type ServerMsg =
   | { t: 'edit'; x: number; y: number; z: number; block: number }
   | { t: 'editBatch'; edits: { x: number; y: number; z: number; block: number }[] }
   | { t: 'hurt'; health: number; dead: boolean; by: number; kx: number; ky: number; kz: number }
-  | { t: 'hitconfirm'; target: number; amount: number; killed: boolean }
+  | { t: 'hitconfirm'; target: number; amount: number; killed: boolean; crit?: boolean }
   | { t: 'shot'; id: number; item: number; x: number; y: number; z: number; dx: number; dy: number; dz: number }
   /** The server moved your body. `seq` numbers these moves; echo it in `xform`. */
   | { t: 'respawned'; x: number; y: number; z: number; health: number; seq?: number }
@@ -209,7 +212,7 @@ export type ServerMsg =
   | { t: 'rsSound'; kind: RsSound; x?: number; y?: number; z?: number }
   | { t: 'rsImpulse'; vx: number; vy: number; vz: number; momentum: number }
   | { t: 'rsResult'; result: RsResult }
-  | { t: 'bwArena'; world: WorldSpec; team: 0 | 1; spawn: { x: number; y: number; z: number }; yaw: number }
+  | { t: 'bwArena'; world: WorldSpec; team: number; spawn: { x: number; y: number; z: number }; yaw: number }
   | { t: 'bwState'; s: BwSnapshot }
   | { t: 'bwKit'; slots: (ItemStack | null)[]; selected?: number }
   /** World items: spawns, stack-size changes and pickups/merges. `reset` replaces the whole set (join/reconnect). */

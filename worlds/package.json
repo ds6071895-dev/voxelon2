@@ -13,6 +13,7 @@
     "bot-sim": "esbuild test/bot_sim.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/bot-sim.cjs --log-level=error && node node_modules/.tmp/bot-sim.cjs",
     "stress": "esbuild test/stress.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/stress.cjs --log-level=error && node node_modules/.tmp/stress.cjs",
     "trailer": "node scripts/capture_trailer.mjs",
+    "cards": "node scripts/capture_cards.mjs",
     "trailer:check": "esbuild scripts/check_trailer_locations.ts --bundle --platform=node --format=cjs --outfile=node_modules/.tmp/trailer-check.cjs --log-level=error && node node_modules/.tmp/trailer-check.cjs",
     "trailer:verify": "node scripts/verify_release.mjs",
     "trailer:music": "node scripts/compose_trailer.mjs"

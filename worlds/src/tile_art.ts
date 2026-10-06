@@ -682,6 +682,8 @@ export function wool(pal: RGBA[]) {
 }
 const CRIMSON = ramp(0x7c1a22, 0x98232c, 0xb22f37, 0xc93f44, 0xdc5754, 0xea7466);
 const COBALT = ramp(0x1c3a80, 0x244a98, 0x2e5bb0, 0x3b6ec4, 0x4f84d4, 0x6a9be0);
+const FERN = ramp(0x1f5a2a, 0x276d33, 0x2f823d, 0x3a9748, 0x4cab57, 0x66c06b);
+const SAFFRON = ramp(0x9a6a0e, 0xb47e12, 0xcb9419, 0xdcaa26, 0xe9bf3c, 0xf3d35e);
 
 const AMBER = ramp(0x9b6519, 0xb77a22, 0xcf8f2e, 0xe0a33e, 0xecb755, 0xf5cb72);
 const paintCrumbleTile: Paint = (p, seed) => {
@@ -956,6 +958,8 @@ export const WORLDS_ART: Partial<Record<Tile, Paint>> = {
   [Tile.Terracotta]: paintTerracotta,
   [Tile.TeamWoolA]: wool(CRIMSON),
   [Tile.TeamWoolB]: wool(COBALT),
+  [Tile.TeamWoolC]: wool(FERN),
+  [Tile.TeamWoolD]: wool(SAFFRON),
   [Tile.PartyTileC]: paintCrumbleTile,
   [Tile.PartyTileD]: paintBlinkStone,
   [Tile.ParkourLaunchPad]: pad(CYAN_LIGHT, false),

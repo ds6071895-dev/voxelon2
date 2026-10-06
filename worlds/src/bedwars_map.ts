@@ -1,90 +1,124 @@
-// Shared deterministic Bedwars map metadata. Safe in browser and server bundles.
-import { Block } from './blocks';
-import { buildBedwarsMap, type BedwarsStamp, BW_Y } from './bedwars_setpieces';
-export { BW_Y, BW_BOUNDS, BW_MIN_Y, BW_MAX_Y, BW_VOID_Y } from './bedwars_setpieces';
+// Bedwars maps: shared, deterministic metadata. Safe in browser and server bundles.
+//
+// Every map has four island bases, one per compass side, each an exact 90°
+// rotation of the same layout, so no team ever gets a better spot. A base is
+// authored in a local frame: `u` points from the island toward the middle of
+// the map and `w` runs across it. `bwMap(id)` turns that into world cells.
+// The world spec's seed is the map id; the map's name is never shown.
+import { baseCell, buildBedwarsMap, type BedwarsStamp, type BwTheme, BW_Y } from './bedwars_setpieces';
+export { BW_Y, BW_BOUNDS, BW_MIN_Y, BW_MAX_Y, BW_VOID_Y, BW_TEAM_WOOL } from './bedwars_setpieces';
 
 export interface Pos { x: number; y: number; z: number }
 export interface BedwarsBase {
-  team: 0 | 1;
+  team: number;
   center: Pos;
   spawns: Pos[];
-  /** Integer voxel address of the head. Foot is at z + 1. */
+  /** The bed's two cells: the pillow end, then the foot. */
   bed: Pos;
+  bedFoot: Pos;
   shop: Pos;
   upgrades: Pos;
+  /** Iron and gold both spawn here, on the island's centre line. */
   forge: Pos;
   chest: Pos;
+  /** Facing the middle of the map. */
   yaw: number;
+  /** Unit vector from this island toward the middle. */
+  inward: { x: number; z: number };
 }
-export interface BedwarsGenerator {
+interface BedwarsGenerator {
   id: number;
   kind: 'iron' | 'gold' | 'diamond' | 'emerald';
-  /** Standing height, centered over the supporting floor cell. */
+  /** Standing height, centred over the supporting floor cell. */
   pos: Pos;
-  team?: 0 | 1;
+  team?: number;
+}
+export interface BedwarsMap {
+  id: number;
+  theme: BwTheme;
+  bases: readonly BedwarsBase[];
+  generators: readonly BedwarsGenerator[];
+  blockAt(x: number, y: number, z: number): number;
+  /** Which team's bed a cell belongs to, or null. */
+  bedAt(x: number, y: number, z: number): number | null;
+  /** Spawn and service cells that nobody can build in. */
+  isProtected(x: number, y: number, z: number): boolean;
 }
 
-/** Physical proxy: two half-height marble cells, hidden by the bed model. */
-export const BW_BED_BLOCK: number = Block.ManorMarbleSlab;
+/** Red west, Blue east, Green north, Yellow south: inward unit vectors. */
+const INWARD = [{ x: 1, z: 0 }, { x: -1, z: 0 }, { x: 0, z: 1 }, { x: 0, z: -1 }] as const;
 
-export const BW_BASES: BedwarsBase[] = ([0, 1] as const).map(team => {
-  const side = team === 0 ? -1 : 1;
-  const pos = (u: number, z: number): Pos => ({ x: side * (62 - u) + .5, y: BW_Y + 1, z: z + .5 });
-  return {
-    team,
-    center: { x: side * 62, y: BW_Y + 1, z: 0 },
-    spawns: [pos(-1, -2), pos(-1, 0), pos(-1, 2), pos(0, 0)],
-    bed: { x: side * 56, y: BW_Y + 1, z: -1 },
-    shop: pos(-5, -7), upgrades: pos(-5, 7), forge: pos(-7, 0), chest: pos(-4, 9),
-    yaw: team === 0 ? -Math.PI / 2 : Math.PI / 2,
-  };
-});
-
-export const BW_GENERATORS: BedwarsGenerator[] = [
-  ...BW_BASES.flatMap(base => [
-    { id: base.team * 2, kind: 'iron' as const, pos: { ...base.forge }, team: base.team },
-    { id: base.team * 2 + 1, kind: 'gold' as const, pos: { ...base.forge, z: base.forge.z + 1 }, team: base.team },
-  ]),
-  ...([-1, 1] as const).flatMap((sx, ix) => ([-1, 1] as const).map((sz, iz) => ({
-    id: 4 + ix * 2 + iz, kind: 'diamond' as const, pos: { x: sx * 28 + .5, y: BW_Y + 1, z: sz * 33 + .5 },
-  }))),
-  { id: 8, kind: 'emerald', pos: { x: -9.5, y: BW_Y + 1, z: .5 } },
-  { id: 9, kind: 'emerald', pos: { x: 10.5, y: BW_Y + 1, z: .5 } },
+interface Layout {
+  theme: BwTheme;
+  /** Distance from the middle to each base's centre cell. */
+  baseDistance: number;
+  /** Diamond islands sit on the diagonals at (±d, ±d). */
+  diamond: number;
+  /** Emerald wells on the middle island, at this distance along each axis. */
+  emerald: number;
+}
+const LAYOUTS: Layout[] = [
+  { theme: 'garden', baseDistance: 62, diamond: 33, emerald: 10 },
+  { theme: 'frost', baseDistance: 60, diamond: 31, emerald: 9 },
 ];
-export const BW_SPAWNS: Pos[] = BW_BASES.flatMap(base => base.spawns);
+export const BW_MAP_COUNT = LAYOUTS.length;
 
-// Metadata is shared across rounds; accidental client mutation cannot move a map.
-for (const base of BW_BASES) {
-  for (const pos of [base.center, base.bed, base.shop, base.upgrades, base.forge, base.chest, ...base.spawns]) Object.freeze(pos);
-  Object.freeze(base.spawns); Object.freeze(base);
-}
-for (const gen of BW_GENERATORS) { Object.freeze(gen.pos); Object.freeze(gen); }
-Object.freeze(BW_BASES); Object.freeze(BW_GENERATORS); Object.freeze(BW_SPAWNS);
+const key = (x: number, y: number, z: number): number => ((x + 128) * 512 + y) * 512 + (z + 128);
 
-let stamp: BedwarsStamp | undefined;
-export function bwBlockAt(x: number, y: number, z: number): number {
-  return (stamp ??= buildBedwarsMap()).get(x, y, z);
-}
-
-/** Both bed cells target the same team; no bed protection is implied. */
-export function bwBedAt(x: number, y: number, z: number): 0 | 1 | null {
-  for (const { team, bed } of BW_BASES)
-    if (x === bed.x && y === bed.y && (z === bed.z || z === bed.z + 1)) return team;
-  return null;
-}
-
-/** Local service/spawn protection only; the entire defense apron is buildable. */
-export function bwProtected(x: number, y: number, z: number): boolean {
-  if (y < BW_Y - 1 || y > BW_Y + 5) return false;
-  for (const base of BW_BASES) {
-    const side = base.team === 0 ? -1 : 1, u = 62 - side * x;
-    // Do not let the spawn halo spill into the courtyard at u >= 2.
-    if (u >= 2) continue;
-    if (base.spawns.some(p => Math.abs(x + .5 - p.x) <= 1 && Math.abs(z + .5 - p.z) <= 1)) return true;
-    if ([base.shop, base.upgrades, base.forge, base.chest].some(p =>
-      Math.abs(x + .5 - p.x) <= 2 && Math.abs(z + .5 - p.z) <= 2)) return true;
+function makeMap(id: number, layout: Layout): BedwarsMap {
+  const D = layout.baseDistance, Y = BW_Y + 1;
+  const bases: BedwarsBase[] = INWARD.map((inward, team) => {
+    const cell = (u: number, w: number): Pos => { const c = baseCell(team, D, u, w); return { x: c.x + .5, y: Y, z: c.z + .5 }; };
+    const bed = cell(6, 0), foot = cell(7, 0);
+    return {
+      team, inward,
+      center: cell(0, 0),
+      spawns: [cell(-1, -2), cell(-1, 0), cell(-1, 2), cell(0, 0)],
+      bed: { x: bed.x - .5, y: Y, z: bed.z - .5 }, bedFoot: { x: foot.x - .5, y: Y, z: foot.z - .5 },
+      shop: cell(-5, -7), upgrades: cell(-5, 7), forge: cell(-7, 0), chest: cell(-4, 9),
+      yaw: Math.atan2(-inward.x, -inward.z),
+    };
+  });
+  const generators: BedwarsGenerator[] = [
+    ...bases.flatMap(b => [
+      { id: b.team * 2, kind: 'iron' as const, pos: { ...b.forge }, team: b.team },
+      { id: b.team * 2 + 1, kind: 'gold' as const, pos: { ...b.forge }, team: b.team },
+    ]),
+    ...[[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([sx, sz], i) => ({
+      id: 8 + i, kind: 'diamond' as const, pos: { x: sx * layout.diamond + .5, y: Y, z: sz * layout.diamond + .5 },
+    })),
+    ...[[-1, 0], [1, 0], [0, -1], [0, 1]].map(([sx, sz], i) => ({
+      id: 12 + i, kind: 'emerald' as const, pos: { x: sx * layout.emerald + .5, y: Y, z: sz * layout.emerald + .5 },
+    })),
+  ];
+  for (const b of bases) {
+    for (const p of [b.center, b.bed, b.bedFoot, b.shop, b.upgrades, b.forge, b.chest, ...b.spawns]) Object.freeze(p);
+    Object.freeze(b.spawns); Object.freeze(b);
   }
-  for (const gen of BW_GENERATORS) if (gen.team === undefined
-    && Math.abs(x + .5 - gen.pos.x) <= 1 && Math.abs(z + .5 - gen.pos.z) <= 1) return true;
-  return false;
+  for (const g of generators) { Object.freeze(g.pos); Object.freeze(g); }
+  const beds = new Map<number, number>();
+  for (const b of bases) { beds.set(key(b.bed.x, b.bed.y, b.bed.z), b.team); beds.set(key(b.bedFoot.x, b.bedFoot.y, b.bedFoot.z), b.team); }
+  // Protection: one cell around each spawn, two around each service, one
+  // around each middle generator. Precomputed: it is asked on every placement.
+  const shielded = new Set<number>();
+  const shield = (p: Pos, r: number): void => {
+    for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) for (let y = BW_Y - 1; y <= BW_Y + 5; y++)
+      shielded.add(key(Math.floor(p.x) + dx, y, Math.floor(p.z) + dz));
+  };
+  for (const b of bases) {
+    for (const s of b.spawns) shield(s, 1);
+    for (const s of [b.shop, b.upgrades, b.forge, b.chest]) shield(s, 2);
+  }
+  for (const g of generators) if (g.team === undefined) shield(g.pos, 1);
+  let stamp: BedwarsStamp | undefined;
+  return Object.freeze({
+    id, theme: layout.theme, bases: Object.freeze(bases), generators: Object.freeze(generators),
+    blockAt: (x: number, y: number, z: number) => (stamp ??= buildBedwarsMap(layout.theme, D, layout.diamond, layout.emerald)).get(x, y, z),
+    bedAt: (x: number, y: number, z: number) => beds.get(key(x, y, z)) ?? null,
+    isProtected: (x: number, y: number, z: number) => shielded.has(key(x, y, z)),
+  });
 }
+
+const MAPS = LAYOUTS.map((l, i) => makeMap(i, l));
+/** The map for a world seed (any integer maps onto one of them). */
+export function bwMap(id: number): BedwarsMap { return MAPS[((Math.floor(id) % MAPS.length) + MAPS.length) % MAPS.length]; }

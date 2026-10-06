@@ -1,15 +1,15 @@
 // Authoritative, fixed-step Bedwars. The host is the only world/transport port.
 import { Block, collisionBoxes, isSolid } from './blocks';
-import { Item, ITEMS } from './items';
-import { BW_BASES, BW_GENERATORS, BW_MIN_Y, BW_MAX_Y, BW_VOID_Y, bwProtected, bwBedAt } from './bedwars_map';
+import { Item } from './items';
+import { BW_BOUNDS, BW_MIN_Y, BW_MAX_Y, BW_VOID_Y, bwMap, type BedwarsMap } from './bedwars_map';
 import {
-  BW, BW_RESOURCES, BW_RESOURCE_ITEM, BW_RESOURCE_NAME, BW_TEAM_NAMES, bwBreakSeconds, bwResourceOf, bwUpgrades, bwWallet,
+  BW, BW_RESOURCES, BW_RESOURCE_ITEM, BW_RESOURCE_NAME, BW_SCHEDULE, BW_TEAM_NAMES, bwBreakSeconds, bwGenTier, bwUpgrades, bwWallet,
   type BwAction, type BwDropView, type BwPhase, type BwPos, type BwResource, type BwResult, type BwSnapshot, type BwTeam,
   type BwTools, type BwUpgrades, type BwWallet, type BwProjectileView,
 } from './bedwars_rules';
 import { bwCatalog, bwEntryOf, bwPrice } from './bedwars_catalog';
 import { bwAdd, bwCloneSlots, bwConsume, bwCount, bwGive, bwHas, bwKit, bwMaxStack, bwRoom, bwTake, type BwSlots } from './bedwars_inventory';
-import { bwDistance, bwFits, bwKey, bwLine } from './bedwars_nav';
+import { bwDistance, bwFits, bwKey, bwLine, bwOnGround } from './bedwars_nav';
 import { stepDrop, type BwDropBody } from './bedwars_drops';
 import { BedwarsBot } from './bedwars_bot';
 
@@ -26,10 +26,11 @@ export interface BwHost {
   impulse(id: number, kx: number, ky: number, kz: number, by: number, health: number): void;
   setBlock(x: number, y: number, z: number, block: number): void;
   getBlock(x: number, y: number, z: number): number;
-  isEdited(x: number, y: number, z: number): boolean;
-  drive(id: number, pose: { x: number; y: number; z: number; yaw: number; pitch: number; held?: number; swing?: boolean }): void;
+  drive(id: number, pose: { x: number; y: number; z: number; yaw: number; pitch: number; held?: number; swing?: boolean; sneaking?: boolean }): void;
 }
-export interface BwSetup { players: { id: number; team: BwTeam; bot: boolean }[]; world: number; leader?: number }
+/** `skill` seeds a bot's level (0..1): what it learned about the humans it faces. */
+/** `map` picks the island layout (the world seed); `teams` is 2 to 4. */
+export interface BwSetup { players: { id: number; team: BwTeam; bot: boolean; skill?: number }[]; world: number; map?: number; teams?: number }
 interface Mining extends BwPos { slot: number; block: number; began: number; heartbeat: number; duration: number }
 interface Track { t: number; x: number; y: number; z: number }
 export interface BwPlayer {
@@ -37,7 +38,7 @@ export interface BwPlayer {
   health: number; respawnAt: number; shieldUntil: number; slots: BwSlots;
   selected: number; armor: number; sword: number; tools: BwTools;
   kills: number; finals: number; deaths: number; beds: number;
-  attackAt: number; placeAt: number; useAt: number; hurtAt: number; healUntil: number; trapUntil: number;
+  attackAt: number; placeTokens: number; useAt: number; hurtAt: number; healUntil: number; trapUntil: number;
   lastAttacker: number | null; lastHit: number; mining?: Mining;
   requests: Map<number, { sku: string; reply: { t: 'bwBuyResult'; request: number; ok: boolean; message: string } }>;
   budget: number; track: Track[]; kitDirty: boolean;
@@ -52,14 +53,22 @@ const PERIOD: Record<BwResource, number> = { iron: 1, gold: 5, diamond: 20, emer
 const PILE: Record<BwResource, number> = { iron: 48, gold: 12, diamond: 6, emerald: 4 };
 const finite = (...v: number[]) => v.every((n) => typeof n === 'number' && Number.isFinite(n));
 const validSlot = (s: number) => Number.isInteger(s) && s >= 0 && s < BW.SLOT_COUNT;
-const SWORD_DAMAGE = [4, 5, 6, 8, 8];
+/** Bedrock's sword damage (wood, stone, iron, diamond); a bare fist does 1. */
+const SWORD_DAMAGE = [5, 6, 7, 8];
+/** Damage taken off by armor tier: everyone starts in leather. */
+const ARMOR_REDUCTION = [0.2, 0.36, 0.48, 0.6];
+/** Knockback in blocks/second: a plain hit, and a sprinting one. Vertical is a
+ *  little under a jump, as in vanilla. */
+const KNOCK = { walk: 7.6, sprint: 12, lift: 7.2, sprintLift: 7.6 };
 
 export class BedwarsMatch {
   readonly players = new Map<number, BwPlayer>();
-  readonly teams: [TeamState, TeamState] = [0, 1].map(() => ({ bed: true, upgrades: bwUpgrades(), chest: bwWallet() })) as [TeamState, TeamState];
+  readonly map: BedwarsMap;
+  readonly teamCount: number;
+  readonly teams: TeamState[];
   readonly bots: BedwarsBot[] = [];
   readonly placed = new Map<number, { x: number; y: number; z: number; block: number }>();
-  readonly generators: Generator[] = BW_GENERATORS.map((g) => ({ ...g, pos: { ...g.pos }, timer: PERIOD[g.kind] }));
+  readonly generators: Generator[];
   phase: BwPhase = 'loading';
   time = 0;
   result: BwResult | null = null;
@@ -76,19 +85,28 @@ export class BedwarsMatch {
   private dropAdd: BwDropView[] = [];
   private dropGone: { id: number; by?: number; into?: number }[] = [];
   private dropCount: { id: number; count: number }[] = [];
+  /** Index of the next BW_SCHEDULE entry. */
+  private nextEvent = 0;
   private readonly createdAt: number;
 
   constructor(readonly host: BwHost, readonly setup: BwSetup) {
     this.createdAt = host.nowMs();
+    this.map = bwMap(setup.map ?? 0);
+    this.teamCount = Math.max(2, Math.min(4, Math.floor(setup.teams ?? 2)));
+    this.teams = Array.from({ length: this.teamCount }, () => ({ bed: true, upgrades: bwUpgrades(), chest: bwWallet() }));
+    this.generators = this.map.generators.filter((g) => g.team === undefined || g.team < this.teamCount)
+      .map((g) => ({ ...g, pos: { ...g.pos }, timer: PERIOD[g.kind] }));
+    // Islands nobody plays on have no bed.
+    for (const base of this.map.bases) if (base.team >= this.teamCount) for (const c of [base.bed, base.bedFoot]) host.setBlock(c.x, c.y, c.z, Block.Air);
     for (const v of setup.players) {
-      if (this.players.has(v.id) || (v.team !== 0 && v.team !== 1)) continue;
+      if (this.players.has(v.id) || !Number.isInteger(v.team) || v.team < 0 || v.team >= this.teamCount) continue;
       const p: BwPlayer = { ...v, ready: v.bot, alive: true, eliminated: false, connected: true, disconnectedAt: 0, health: BW.HEALTH,
         respawnAt: 0, shieldUntil: 0, slots: bwKit(), selected: 0, armor: 0, sword: 0, tools: { pickaxe: 0, axe: 0, shears: 0 },
-        kills: 0, finals: 0, deaths: 0, beds: 0, attackAt: 0, placeAt: 0, useAt: 0, hurtAt: -10, healUntil: 0, trapUntil: 0,
+        kills: 0, finals: 0, deaths: 0, beds: 0, attackAt: 0, placeTokens: BW.PLACE_BURST, useAt: 0, hurtAt: -10, healUntil: 0, trapUntil: 0,
         lastAttacker: null, lastHit: -100, requests: new Map(), budget: 80, track: [], kitDirty: false };
       this.players.set(p.id, p);
       this.spawn(p);
-      if (p.bot) this.bots.push(new BedwarsBot(this, p.id));
+      if (p.bot) this.bots.push(new BedwarsBot(this, p.id, v.skill));
     }
   }
   ready(id: number): void {
@@ -154,14 +172,7 @@ export class BedwarsMatch {
       }
     } else if (this.active()) {
       this.time += STEP;
-      if (this.time - STEP < BW.BED_GONE_AT - 30 && this.time >= BW.BED_GONE_AT - 30) this.event('Beds disappear in 30 seconds.', 'danger');
-      if (this.time - STEP < BW.ZONE_AT - 30 && this.time >= BW.ZONE_AT - 30) this.event('The safe zone shrinks in 30 seconds. Head to the middle.', 'danger');
-      if (this.time - STEP < BW.ZONE_AT && this.time >= BW.ZONE_AT) this.event('The safe zone is shrinking. Stay inside the circle.', 'danger');
-      if (this.phase === 'playing' && this.time >= BW.BED_GONE_AT) {
-        this.phase = 'suddenDeath';
-        this.destroyBed(0); this.destroyBed(1);
-        this.event('Sudden death. All beds are gone, no more respawns.', 'danger');
-      }
+      this.runSchedule();
       this.tickPlayers();
       if (this.active()) {
         this.tickGenerators(); this.tickProjectiles(); this.tickDrops();
@@ -174,8 +185,22 @@ export class BedwarsMatch {
     this.flush();
     if (this.steps % 4 === 0) this.publish();
   }
+  /** Generator upgrades, bed destruction and the deathmatch, on the clock. */
+  private runSchedule(): void {
+    for (const at of [BW.BED_GONE_AT, BW.ZONE_AT]) if (this.time - STEP < at - 30 && this.time >= at - 30)
+      this.event(at === BW.BED_GONE_AT ? 'All beds will be destroyed in 30 seconds!' : 'Deathmatch in 30 seconds. Head to the middle.', 'danger');
+    while (this.nextEvent < BW_SCHEDULE.length && this.time >= BW_SCHEDULE[this.nextEvent].at) {
+      const e = BW_SCHEDULE[this.nextEvent++];
+      if (e.kind === 'diamond' || e.kind === 'emerald') this.event(`${e.label}: ${e.kind === 'diamond' ? 'Diamond' : 'Emerald'} generators are faster.`, 'info');
+      else if (e.kind === 'beds' && this.phase === 'playing') {
+        this.phase = 'suddenDeath';
+        for (let t = 0; t < this.teamCount; t++) this.destroyBed(t);
+        this.event('All beds have been destroyed. No more respawns!', 'danger');
+      } else if (e.kind === 'deathmatch') this.event('Deathmatch! The safe zone is closing in on the middle.', 'danger');
+    }
+  }
   private spawn(p: BwPlayer): void {
-    const base = BW_BASES[p.team], index = [...this.players.values()].filter((v) => v.team === p.team).findIndex((v) => v.id === p.id);
+    const base = this.map.bases[p.team], index = [...this.players.values()].filter((v) => v.team === p.team).findIndex((v) => v.id === p.id);
     const at = base.spawns[Math.max(0, index) % base.spawns.length];
     p.alive = true; p.health = BW.HEALTH; p.respawnAt = 0; p.shieldUntil = this.time + BW.SPAWN_PROTECTION;
     p.sword = 0; p.slots = bwKit(p.tools); p.selected = 0; p.mining = undefined; p.healUntil = 0; p.trapUntil = 0; p.lastAttacker = null; p.track = [];
@@ -196,10 +221,11 @@ export class BedwarsMatch {
   private tickPlayers(): void {
     for (const p of this.players.values()) {
       p.budget = Math.min(80, p.budget + 2);
+      p.placeTokens = Math.min(BW.PLACE_BURST, p.placeTokens + STEP / BW.PLACE_COOLDOWN);
       if (!p.alive) continue;
       const b = this.host.body(p.id);
       if (!b) continue;
-      if (!finite(b.x, b.y, b.z) || b.y < BW_VOID_Y || Math.abs(b.x) > 96 || Math.abs(b.z) > 69 || b.y > BW_MAX_Y + 12 || b.dead || b.health <= 0) { this.kill(p); continue; }
+      if (!finite(b.x, b.y, b.z) || b.y < BW_VOID_Y || Math.abs(b.x) > BW_BOUNDS.maxX + 4 || Math.abs(b.z) > BW_BOUNDS.maxZ + 4 || b.y > BW_MAX_Y + 12 || b.dead || b.health <= 0) { this.kill(p); continue; }
       // The match owns health; movement messages never get to heal a body.
       if (b.health !== p.health) this.host.setHealth(p.id, p.health, false);
       if (this.steps % 20 === 0 && this.time >= BW.ZONE_AT && Math.hypot(b.x, b.z) > this.zoneRadius()) {
@@ -207,19 +233,20 @@ export class BedwarsMatch {
         if (!p.alive) continue;
       }
       if (this.steps % 10 === 0 && p.health < BW.HEALTH && (p.healUntil > this.time ||
-        (this.teams[p.team].upgrades.heal && bwDistance(b, BW_BASES[p.team].center) < 16 && this.time - p.hurtAt > 3))) {
+        (this.teams[p.team].upgrades.heal && bwDistance(b, this.map.bases[p.team].center) < 16 && this.time - p.hurtAt > 3))) {
         p.health = Math.min(BW.HEALTH, p.health + 1); this.host.setHealth(p.id, p.health, false);
       }
-      const other = (1 - p.team) as BwTeam, enemy = this.teams[other];
-      if (enemy.upgrades.trap && bwDistance(b, BW_BASES[other].bed) < 8) {
+      for (let other = 0; other < this.teamCount; other++) {
+        const enemy = this.teams[other];
+        if (other === p.team || !enemy.upgrades.trap || !enemy.bed || bwDistance(b, this.map.bases[other].bed) >= 8) continue;
         enemy.upgrades.trap = 0; p.trapUntil = this.time + 4;
-        this.event(`${BW_TEAM_NAMES[other]} trap: ${this.host.name(p.id)} is at your bed!`, 'danger');
+        this.event(`${BW_TEAM_NAMES[other]} trap: ${this.host.name(p.id)} is at the ${BW_TEAM_NAMES[other]} bed!`, 'danger');
       }
       if (p.mining) {
         const m = p.mining;
         if (this.time - m.heartbeat > BW.BREAK_HEARTBEAT || !this.breakable(p, m) || !this.reachable(p, m) || p.selected !== m.slot || this.host.getBlock(m.x, m.y, m.z) !== m.block) p.mining = undefined;
         else if (this.time - m.began + 1e-8 >= m.duration) {
-          const bed = bwBedAt(m.x, m.y, m.z);
+          const bed = this.map.bedAt(m.x, m.y, m.z);
           if (bed !== null) { this.destroyBed(bed, p); }
           else {
             this.host.setBlock(m.x, m.y, m.z, Block.Air); this.placed.delete(bwKey(m.x, m.y, m.z));
@@ -270,14 +297,13 @@ export class BedwarsMatch {
       if (action.kind === 'place') { if (!this.place(p, action)) this.nack(p, action); }
       else this.mine(p, action);
     } else if (action.kind === 'melee') this.melee(p, action.target);
-    else if (action.kind === 'drop') this.throwItem(p, action.slot, action.all === true);
     else if (action.kind === 'shoot' || action.kind === 'use') {
       if (!finite(action.dx, action.dy, action.dz) || !Number.isFinite(Math.hypot(action.dx, action.dy, action.dz)) || Math.hypot(action.dx, action.dy, action.dz) < 0.001) return;
       this.use(p, action);
     }
   }
   private nack(p: BwPlayer, v: BwPos): void { this.host.send(p.id, { t: 'bwNack', x: v.x, y: v.y, z: v.z }); }
-  private inBounds(v: BwPos): boolean { return v.x >= -92 && v.x < 92 && v.z >= -65 && v.z < 65 && v.y >= BW_MIN_Y && v.y < BW_MAX_Y; }
+  private inBounds(v: BwPos): boolean { return v.x >= BW_BOUNDS.minX && v.x < BW_BOUNDS.maxX && v.z >= BW_BOUNDS.minZ && v.z < BW_BOUNDS.maxZ && v.y >= BW_MIN_Y && v.y < BW_MAX_Y; }
   private eye(p: BwPlayer): BwPos { const b = this.host.body(p.id)!; return { x: b.x, y: b.y + 1.62, z: b.z }; }
   private reachable(p: BwPlayer, v: BwPos): boolean {
     const eye = this.eye(p), mid = { x: v.x + 0.5, y: v.y + 0.5, z: v.z + 0.5 };
@@ -289,7 +315,7 @@ export class BedwarsMatch {
   }
   private buy(p: BwPlayer, sku: string, request: number): void {
     if (typeof sku !== 'string' || sku.length > 64 || !Number.isSafeInteger(request) || request < 0) return;
-    const e = bwCatalog(sku), base = BW_BASES[p.team], team = this.teams[p.team];
+    const e = bwCatalog(sku), base = this.map.bases[p.team], team = this.teams[p.team];
     let message = '', ok = false;
     if (!e) message = 'Unknown item.';
     else if (!this.near(p, e.type === 'upgrade' ? base.upgrades : base.shop, BW.SHOP_REACH)) message = 'Move closer to the shop.';
@@ -320,7 +346,7 @@ export class BedwarsMatch {
     this.host.send(p.id, reply);
   }
   private bank(p: BwPlayer, a: Extract<BwAction, { kind: 'bank' }>): void {
-    if (!BW_RESOURCES.includes(a.resource) || !Number.isSafeInteger(a.amount) || a.amount <= 0 || a.amount > BW.CHEST_CAP || !['deposit', 'withdraw'].includes(a.direction) || !this.near(p, BW_BASES[p.team].chest, BW.CHEST_REACH)) return;
+    if (!BW_RESOURCES.includes(a.resource) || !Number.isSafeInteger(a.amount) || a.amount <= 0 || a.amount > BW.CHEST_CAP || !['deposit', 'withdraw'].includes(a.direction) || !this.near(p, this.map.bases[p.team].chest, BW.CHEST_REACH)) return;
     const chest = this.teams[p.team].chest, item = BW_RESOURCE_ITEM[a.resource];
     if (a.direction === 'deposit') {
       const n = Math.min(a.amount, bwCount(p.slots, item), BW.CHEST_CAP - chest[a.resource]);
@@ -333,26 +359,28 @@ export class BedwarsMatch {
   }
   private place(p: BwPlayer, a: Extract<BwAction, { kind: 'place' }>): boolean {
     const slot = p.slots[a.slot], e = slot && bwEntryOf(slot.id);
-    if (!e || e.type !== 'block' || this.time < p.placeAt || bwProtected(a.x, a.y, a.z) || bwBedAt(a.x, a.y, a.z) !== null || this.host.getBlock(a.x, a.y, a.z) !== Block.Air || !this.reachable(p, a)) return false;
+    if (!e || e.type !== 'block' || p.placeTokens < 1 || this.map.isProtected(a.x, a.y, a.z) || this.map.bedAt(a.x, a.y, a.z) !== null || this.host.getBlock(a.x, a.y, a.z) !== Block.Air || !this.reachable(p, a)) return false;
     if (![[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].some(([dx, dy, dz]) => isSolid(this.host.getBlock(a.x + dx, a.y + dy, a.z + dz)))) return false;
+    // No block inside anyone, the placer included. A client sends its pose
+    // just before each placement, so towering is judged where you really are.
     for (const other of this.players.values()) {
       const b = this.host.body(other.id);
       if (other.alive && b && b.x + 0.3 > a.x && b.x - 0.3 < a.x + 1 && b.z + 0.3 > a.z && b.z - 0.3 < a.z + 1 && b.y + 1.8 > a.y && b.y < a.y + 1) return false;
     }
     const block = slot!.id;
     bwConsume(p.slots, a.slot); this.host.setBlock(a.x, a.y, a.z, block);
-    this.placed.set(bwKey(a.x, a.y, a.z), { x: a.x, y: a.y, z: a.z, block }); p.placeAt = this.time + BW.PLACE_COOLDOWN; p.shieldUntil = 0; this.syncKit(p);
+    this.placed.set(bwKey(a.x, a.y, a.z), { x: a.x, y: a.y, z: a.z, block }); p.placeTokens--; p.shieldUntil = 0; this.syncKit(p);
     return true;
   }
   private breakable(p: BwPlayer, v: BwPos): boolean {
-    const bed = bwBedAt(v.x, v.y, v.z);
-    if (bed !== null) return bed !== p.team && this.teams[bed].bed;
-    return !bwProtected(v.x, v.y, v.z) && this.placed.has(bwKey(v.x, v.y, v.z));
+    const bed = this.map.bedAt(v.x, v.y, v.z);
+    if (bed !== null) return bed !== p.team && !!this.teams[bed]?.bed;
+    return !this.map.isProtected(v.x, v.y, v.z) && this.placed.has(bwKey(v.x, v.y, v.z));
   }
   private mine(p: BwPlayer, a: Extract<BwAction, { kind: 'break' }>): void {
     if (!this.breakable(p, a) || !this.reachable(p, a)) { p.mining = undefined; return; }
     if (p.mining && p.mining.x === a.x && p.mining.y === a.y && p.mining.z === a.z && p.mining.slot === a.slot && this.time - p.mining.heartbeat <= BW.BREAK_HEARTBEAT) { p.mining.heartbeat = this.time; return; }
-    const block = this.host.getBlock(a.x, a.y, a.z), bed = bwBedAt(a.x, a.y, a.z) !== null;
+    const block = this.host.getBlock(a.x, a.y, a.z), bed = this.map.bedAt(a.x, a.y, a.z) !== null;
     const duration = bwBreakSeconds(block, bed, p.slots[a.slot]?.id ?? 0, this.teams[p.team].upgrades.haste);
     p.shieldUntil = 0;
     p.mining = { x: a.x, y: a.y, z: a.z, slot: a.slot, block, began: this.time, heartbeat: this.time, duration };
@@ -395,14 +423,14 @@ export class BedwarsMatch {
     const first = recent[0], last = recent[recent.length - 1], span = first && last ? last.t - first.t : 0;
     const speed = span > 0.08 ? Math.hypot(last.x - first.x, last.z - first.z) / span : 0;
     const fall = span > 0.08 ? (last.y - first.y) / span : 0;
-    const sprint = speed > 5.1, crit = fall < -2.2;
-    const base = (tier < 0 ? 2 : SWORD_DAMAGE[tier]) + this.teams[p.team].upgrades.sharpness;
+    const sprint = speed > 5.1, crit = fall < -2.2 && !bwOnGround(this.host.getBlock.bind(this.host), a);
+    const base = (tier < 0 ? 1 : SWORD_DAMAGE[tier]) + this.teams[p.team].upgrades.sharpness;
     const amount = base * (crit ? 1.5 : 1) * (p.trapUntil > this.time ? 0.65 : 1);
-    this.damage(victim, amount, p.id, a, sprint ? 10.5 : 7.5, false, true);
+    this.damage(victim, amount, p.id, a, sprint ? KNOCK.sprint : KNOCK.walk, false, true, crit, sprint ? KNOCK.sprintLift : KNOCK.lift);
   }
-  private damage(p: BwPlayer, amount: number, by: number, from: BwPos, knockback: number, bypassArmor = false, melee = false): number {
+  private damage(p: BwPlayer, amount: number, by: number, from: BwPos, knockback: number, bypassArmor = false, melee = false, crit = false, lift = 4.4): number {
     if (!p.alive || this.time < p.shieldUntil || !this.active()) return 0;
-    const armor = bypassArmor ? 0 : Math.min(0.7, p.armor * 0.15 + this.teams[p.team].upgrades.protection * 0.08);
+    const armor = bypassArmor ? 0 : Math.min(0.8, ARMOR_REDUCTION[p.armor] + this.teams[p.team].upgrades.protection * 0.04);
     const dealt = Math.min(p.health, Math.max(1, amount * (1 - armor)));
     p.health = Math.max(0, p.health - dealt); p.hurtAt = this.time;
     if (by !== p.id && by >= 0) { p.lastAttacker = by; p.lastHit = this.time; }
@@ -418,11 +446,11 @@ export class BedwarsMatch {
         const nx = ax * 0.75 + lx * 0.25, nz = az * 0.75 + lz * 0.25, nl = Math.hypot(nx, nz) || 1;
         ax = nx / nl; az = nz / nl;
       }
-      const kx = ax * knockback, kz = az * knockback, ky = melee ? 6.2 : 4.4;
+      const kx = ax * knockback, kz = az * knockback, ky = lift;
       this.host.impulse(p.id, kx, ky, kz, by, p.health);
       if (p.bot) this.bots.find((bot) => bot.id === p.id)?.knockback(kx, ky, kz);
     }
-    if (by >= 0 && by !== p.id) this.host.send(by, { t: 'hitconfirm', target: p.id, amount: dealt, killed });
+    if (by >= 0 && by !== p.id) this.host.send(by, { t: 'hitconfirm', target: p.id, amount: dealt, killed, crit: crit || undefined });
     if (killed) this.kill(p);
     return dealt;
   }
@@ -446,14 +474,17 @@ export class BedwarsMatch {
     }
     p.slots = Array.from({ length: BW.SLOT_COUNT }, () => null); this.syncKit(p);
     this.host.setHealth(p.id, 0, true);
+    // The dead watch from high over their own base instead of the void's fog.
+    const base = this.map.bases[p.team];
+    this.host.teleport(p.id, base.center.x - base.inward.x * 10, BW_MAX_Y - 10, base.center.z - base.inward.z * 10, base.yaw);
     this.event(`${this.host.name(p.id)} ${killer ? `was defeated by ${this.host.name(killer.id)}` : 'fell into the void'}${p.eliminated ? '. Final kill!' : '.'}`, p.eliminated ? 'danger' : 'info');
     this.checkWinner();
   }
   private destroyBed(team: BwTeam, by?: BwPlayer): void {
     if (!this.teams[team].bed) return;
     this.teams[team].bed = false;
-    const b = BW_BASES[team].bed;
-    for (let x = b.x - 1; x <= b.x + 1; x++) for (let z = b.z - 1; z <= b.z + 2; z++) if (bwBedAt(x, b.y, z) === team) this.host.setBlock(x, b.y, z, Block.Air);
+    const base = this.map.bases[team];
+    for (const c of [base.bed, base.bedFoot]) this.host.setBlock(c.x, c.y, c.z, Block.Air);
     if (by) { by.beds++; this.event(`${this.host.name(by.id)} destroyed the ${BW_TEAM_NAMES[team]} bed!`, 'danger'); }
     for (const p of this.players.values()) if (p.team === team && !p.alive) { p.eliminated = true; p.respawnAt = 0; }
     // Defer winner evaluation until both beds are removed during sudden death.
@@ -487,14 +518,6 @@ export class BedwarsMatch {
     if (d.src >= 0) this.live.set(d.src, Math.max(0, (this.live.get(d.src) ?? 0) - d.count));
     this.dropGone.push({ id: d.id, by, into });
   }
-  private throwItem(p: BwPlayer, slot: number, all: boolean): void {
-    const s = p.slots[slot];
-    if (!s || swordTier(s.id) >= 0) return;
-    const b = this.host.body(p.id)!, cp = Math.cos(b.pitch);
-    const n = all ? s.count : 1;
-    bwConsume(p.slots, slot, n); this.syncKit(p);
-    this.spawnDrop(s.id, n, { x: b.x, y: b.y + 1.4, z: b.z }, { x: -Math.sin(b.yaw) * cp * 5, y: Math.sin(b.pitch) * 5 + 2, z: -Math.cos(b.yaw) * cp * 5 }, -1, 1.1);
-  }
   private tickDrops(): void {
     const get = this.host.getBlock.bind(this.host);
     for (let i = this.drops.length - 1; i >= 0; i--) {
@@ -526,16 +549,24 @@ export class BedwarsMatch {
         if (!n) continue;
         d.count -= n; if (d.src >= 0) this.live.set(d.src, Math.max(0, (this.live.get(d.src) ?? 0) - n));
         this.syncKit(p);
+        // Forge splitting: teammates standing at the same forge get a copy.
+        if (d.src >= 0 && this.generators.find((g) => g.id === d.src)?.team === p.team) for (const mate of this.players.values()) {
+          const mb = this.host.body(mate.id);
+          if (mate === p || mate.team !== p.team || !mate.alive || !mate.connected || !mb || Math.hypot(mb.x - b.x, mb.z - b.z) > 2.5) continue;
+          if (bwAdd(mate.slots, d.item, n)) this.syncKit(mate);
+        }
         if (d.count <= 0) { this.drops.splice(i, 1); this.dropGone.push({ id: d.id, by: p.id }); }
         else this.dropCount.push({ id: d.id, count: d.count });
       }
     }
   }
+  private genSpeed(g: Generator): number {
+    return g.team !== undefined ? 1 + this.teams[g.team].upgrades.forge * 0.5
+      : 1 + (bwGenTier(g.kind as 'diamond' | 'emerald', this.time) - 1) * 0.45;
+  }
   private tickGenerators(): void {
-    const tier = this.generatorTier();
     for (const g of this.generators) {
-      const speed = g.team === undefined ? 1 + (tier - 1) * 0.4 : 1 + this.teams[g.team].upgrades.forge * 0.5;
-      g.timer -= STEP * speed;
+      g.timer -= STEP * this.genSpeed(g);
       while (g.timer <= 0) {
         g.timer += PERIOD[g.kind];
         if ((this.live.get(g.id) ?? 0) >= PILE[g.kind]) continue;
@@ -545,7 +576,6 @@ export class BedwarsMatch {
       }
     }
   }
-  private generatorTier(): number { return Math.min(3, 1 + Math.floor(this.time / BW.GENERATOR_TIER_AT)); }
 
   private use(p: BwPlayer, a: Extract<BwAction, { kind: 'use' | 'shoot' }>): void {
     const s = p.slots[a.slot], e = s && bwEntryOf(s.id);
@@ -648,7 +678,7 @@ export class BedwarsMatch {
     };
     for (const block of [...this.placed.values()]) {
       const d = bwDistance({ x: block.x + 0.5, y: block.y + 0.5, z: block.z + 0.5 }, shot);
-      if (block.block !== Block.ManorGlass && d < (block.block === Block.OakPlanks || block.block === Block.Sandstone ? 2.4 : 3.6) && !bwProtected(block.x, block.y, block.z)
+      if (block.block !== Block.ManorGlass && d < (block.block === Block.OakPlanks || block.block === Block.Sandstone ? 2.4 : 3.6) && !this.map.isProtected(block.x, block.y, block.z)
         && bwLine(blastBlock, shot, { x: block.x + 0.5, y: block.y + 0.5, z: block.z + 0.5 }, block)) {
         this.host.setBlock(block.x, block.y, block.z, Block.Air); this.placed.delete(bwKey(block.x, block.y, block.z));
       }
@@ -664,10 +694,9 @@ export class BedwarsMatch {
   }
   private checkWinner(): void {
     if (this.isOver() || this.disposed) return;
-    const survives = ([0, 1] as const).map((team) => [...this.players.values()].some((p) => p.team === team && !p.eliminated));
-    if (!survives[0] && !survives[1]) this.finish(null, 'No players remain.');
-    else if (!survives[0]) this.finish(1, `${BW_TEAM_NAMES[1]} team wins!`);
-    else if (!survives[1]) this.finish(0, `${BW_TEAM_NAMES[0]} team wins!`);
+    const standing = [...new Set([...this.players.values()].filter((p) => !p.eliminated).map((p) => p.team))];
+    if (!standing.length) this.finish(null, 'No players remain.');
+    else if (standing.length === 1) this.finish(standing[0], `${BW_TEAM_NAMES[standing[0]]} team wins!`);
   }
   private finish(winner: BwTeam | null, reason: string): void {
     if (this.isOver()) return;
@@ -704,15 +733,16 @@ export class BedwarsMatch {
       bedsIn: Math.max(0, BW.BED_GONE_AT - this.time),
       players: [...this.players.values()].map((p) => ({ id: p.id, name: this.host.name(p.id), team: p.team, bot: p.bot, alive: p.alive, eliminated: p.eliminated, health: p.health,
         respawnIn: p.respawnAt ? Math.max(0, p.respawnAt - this.time) : 0, kills: p.kills, finals: p.finals, deaths: p.deaths, beds: p.beds, armor: p.armor, sword: p.sword, tools: { ...p.tools }, connected: p.connected })),
+      teamCount: this.teamCount,
+      next: BW_SCHEDULE.slice(this.nextEvent).map((e) => ({ label: e.label, in: Math.max(0, e.at - this.time) }))[0] ?? null,
       teams: this.teams.map((t, team) => ({ team: team as BwTeam, bed: t.bed, alive: [...this.players.values()].filter((p) => p.team === team && !p.eliminated).length, upgrades: { ...t.upgrades }, chest: { ...t.chest } })),
       safeZone: { active: this.time >= BW.ZONE_AT, x: 0, z: 0, radius: this.zoneRadius(), startsIn: Math.max(0, BW.ZONE_AT - this.time) },
+      gens: this.generators.filter((g) => g.team === undefined).map((g) => ({ id: g.id, tier: bwGenTier(g.kind as 'diamond' | 'emerald', this.time), next: Math.max(0, g.timer / this.genSpeed(g)) })),
       breaks: [...this.players.values()].filter((p) => p.mining).map((p) => ({ id: p.id, x: p.mining!.x, y: p.mining!.y, z: p.mining!.z, progress: Math.min(1, (this.time - p.mining!.began) / p.mining!.duration), duration: p.mining!.duration })),
       result: this.result };
   }
-  /** Test and bot helpers. */
+  /** Items lying in the world (tests). */
   dropsSnapshot(): BwDropView[] { return this.drops.map((d) => this.view(d)); }
-  generatorLive(id: number): number { return this.live.get(id) ?? 0; }
-  resourceName(item: number): string | null { const r = bwResourceOf(item); return r ? BW_RESOURCE_NAME[r] : ITEMS[item]?.name ?? null; }
 }
 function swordTier(id: number): number {
   switch (id) {

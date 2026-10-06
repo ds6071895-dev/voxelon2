@@ -1,7 +1,8 @@
 // Standalone: bundle with esbuild, then call runBedwarsTests() from Node.
 import { BedwarsMatch, type BwBody, type BwHost, type BwSetup } from '../src/bedwars';
 import { BW, BW_RESOURCE_ITEM, type BwAction, type BwPos } from '../src/bedwars_rules';
-import { BW_BASES, bwBlockAt } from '../src/bedwars_map';
+import { bwMap } from '../src/bedwars_map';
+const MAP = bwMap(0), BW_BASES = MAP.bases;
 import { Block, isSolid } from '../src/blocks';
 import { Item } from '../src/items';
 import { bwCatalog } from '../src/bedwars_catalog';
@@ -16,9 +17,11 @@ export class BwTestHost implements BwHost {
   impulses: { id: number; kx: number; ky: number; kz: number; by: number }[] = [];
   messages: { id: number | null; msg: any }[] = [];
   match: BedwarsMatch;
-  constructor(players: BwSetup['players'] = [{ id: 1, team: 0, bot: false }, { id: 2, team: 1, bot: false }]) {
+  mapId = 0;
+  constructor(players: BwSetup['players'] = [{ id: 1, team: 0, bot: false }, { id: 2, team: 1, bot: false }], map = 0, teams = Math.max(2, ...players.map((p) => p.team + 1))) {
     for (const p of players) this.bodies.set(p.id, { x: 0, y: 97, z: 0, yaw: 0, pitch: 0, health: 20, dead: false });
-    this.match = new BedwarsMatch(this, { players, world: 42 });
+    this.mapId = map;
+    this.match = new BedwarsMatch(this, { players, world: 42, map, teams });
   }
   nowMs(): number { return this.now; }
   body(id: number): BwBody | undefined { return this.bodies.get(id); }
@@ -33,8 +36,7 @@ export class BwTestHost implements BwHost {
   setHealth(id: number, health: number, dead: boolean): void { Object.assign(this.bodies.get(id)!, { health, dead }); }
   impulse(id: number, kx: number, ky: number, kz: number, by: number, _health: number): void { this.impulses.push({ id, kx, ky, kz, by }); }
   setBlock(x: number, y: number, z: number, block: number): void { this.edits.set(bwKey(x, y, z), block); }
-  getBlock(x: number, y: number, z: number): number { return this.edits.get(bwKey(x, y, z)) ?? bwBlockAt(x, y, z); }
-  isEdited(x: number, y: number, z: number): boolean { return this.edits.has(bwKey(x, y, z)); }
+  getBlock(x: number, y: number, z: number): number { return this.edits.get(bwKey(x, y, z)) ?? bwMap(this.mapId).blockAt(x, y, z); }
   drive(id: number, pose: { x: number; y: number; z: number; yaw: number; pitch: number; held?: number; swing?: boolean }): void { Object.assign(this.bodies.get(id)!, pose); }
   at(id: number, p: BwPos): void { this.teleport(id, p.x, p.y, p.z); }
   aim(id: number, target: number): void {
@@ -182,7 +184,7 @@ export function runBedwarsTests(): void {
     h.mine(1, bed, 0.5); assert(h.match.teams[1].bed, 'partial mining cannot destroy bed');
     h.action(1, { kind: 'stopBreak' }); h.mine(1, bed, 0.5); assert(h.match.teams[1].bed, 'stop resets progress');
     h.mine(1, bed, 0.5); assert(!h.match.teams[1].bed && h.match.players.get(1)!.beds === 1, 'sustained mining destroys bed');
-    assert(h.getBlock(bed.x, bed.y, bed.z) === 0 && h.getBlock(bed.x, bed.y, bed.z + 1) === 0, 'both bed cells removed');
+    assert(h.getBlock(bed.x, bed.y, bed.z) === 0 && h.getBlock(BW_BASES[1].bedFoot.x, bed.y, BW_BASES[1].bedFoot.z) === 0, 'both bed cells removed');
     h.at(1, { x: BW_BASES[0].bed.x - 2, y: 97, z: -0.5 }); h.mine(1, BW_BASES[0].bed, 2);
     assert(h.match.teams[0].bed, 'own bed protected');
     const h2 = new BwTestHost(); h2.start(); h2.at(1, { x: bed.x - 2, y: 97, z: bed.z + 0.5 });
@@ -314,7 +316,8 @@ export function runBedwarsTests(): void {
   test('friendly fire is rejected and bots can be knocked off a bridge into the void', () => {
     const h = new BwTestHost([{ id: 1, team: 0, bot: false }, { id: 2, team: 1, bot: true }, { id: 3, team: 0, bot: false }]); h.start(); h.tick(2.1);
     for (const x of [35, 36, 37]) h.setBlock(x, 96, 0, Block.TeamWoolA);
-    h.at(1, { x: 36.5, y: 97, z: 0.5 }); h.at(2, { x: 35.5, y: 97, z: 0.5 }); h.at(3, { x: 37.5, y: 97, z: 0.5 });
+    // The bot stands right at the bridge's end: one hit sends it over.
+    h.at(1, { x: 35.9, y: 97, z: 0.5 }); h.at(2, { x: 35.1, y: 97, z: 0.5 }); h.at(3, { x: 37.5, y: 97, z: 0.5 }); h.tick(0.05);
     h.aim(1, 3); h.action(1, { kind: 'melee', target: 3, slot: 0 }); assert(h.match.players.get(3)!.health === 20, 'friendly melee ignored');
     h.aim(1, 2); h.action(1, { kind: 'melee', target: 2, slot: 0 }); h.tick(3.2);
     assert(h.match.players.get(2)!.deaths === 1 && h.match.players.get(1)!.kills === 1, `bot obeys knockback/gravity and void kill credit: ${JSON.stringify(h.body(2))}`);
@@ -333,7 +336,7 @@ export function runBedwarsTests(): void {
     h.action(1, { kind: 'melee', target: 2, slot: 0 }); assert(victim.health === 16, 'small aim/interpolation discrepancy remains playable');
   });
   test('arrows pass through a slab empty upper half but collide with its solid lower half', () => {
-    for (const [dy, expectedHealth] of [[0, 12], [-0.2, 20]]) {
+    for (const [dy, expectedHealth] of [[0, 20 - 8 * 0.8], [-0.2, 20]]) {
       const h = new BwTestHost(); h.start(); h.tick(2.1);
       const p = h.match.players.get(1)!;
       bwGive(p.slots, bwCatalog('bow')!, 0); bwGive(p.slots, bwCatalog('arrows')!, 0);
@@ -341,7 +344,7 @@ export function runBedwarsTests(): void {
       h.setBlock(-60, 98, 4, Block.ManorMarbleSlab);
       const slot = p.slots.findIndex((s) => s?.id === Item.BridgeBow);
       h.action(1, { kind: 'shoot', slot, dx: 1, dy, dz: 0, power: 1 }); h.tick(0.3);
-      assert(h.match.players.get(2)!.health === expectedHealth, `slab geometry respected for ${dy === 0 ? 'upper air' : 'lower solid'} arrow trajectory`);
+      assert(Math.abs(h.match.players.get(2)!.health - expectedHealth) < 1e-6, `slab geometry respected for ${dy === 0 ? 'upper air' : 'lower solid'} arrow trajectory`);
     }
   });
   test('untrusted payloads do not crash or grant inventory; disposal stops world changes', () => {
@@ -350,17 +353,11 @@ export function runBedwarsTests(): void {
     assert(JSON.stringify(h.match.players.get(1)!.slots) === before, 'malformed actions have no inventory effect');
     h.match.dispose(); const time = h.match.time; h.tick(10); assert(h.match.time === time && !h.match.canMove(1), 'dispose freezes match');
   });
-  test('players can drop items, which others can pick up, but never their sword', () => {
-    const h = new BwTestHost(); h.start(); h.tick(0.1); h.at(2, { x: 80, y: 97, z: -50 });
-    const p = h.match.players.get(1)!; h.at(1, { x: -55.5, y: 97, z: 5.5 });
-    h.give(1, 'gold', 10); const slot = p.slots.findIndex((s) => s?.id === Item.GoldIngot);
-    h.action(1, { kind: 'drop', slot: 0, all: true }); assert(p.slots[0]?.id === Item.WoodSword, 'the sword cannot be thrown away');
-    h.action(1, { kind: 'drop', slot, all: false }); assert(h.have(1, 'gold') === 9 && h.match.dropsSnapshot().some((d) => d.item === Item.GoldIngot && d.count === 1), 'one gold thrown');
-    h.at(1, { x: -40.5, y: 97, z: 5.5 }); h.tick(2);
-    const lying = h.match.dropsSnapshot().find((d) => d.item === Item.GoldIngot)!;
-    assert(lying && Math.hypot(lying.x + 55.5, lying.z - 5.5) > 1, 'the item was thrown away from the player');
-    h.at(2, { x: lying.x, y: 97, z: lying.z }); h.tick(1);
-    assert(h.have(2, 'gold') === 1, 'someone else can pick the thrown item up');
+  test('there is no drop action: Q is sprint, items only leave the hotbar on death or by spending', () => {
+    const h = new BwTestHost(); h.start(); h.tick(0.1);
+    h.give(1, 'gold', 10); const slot = h.match.players.get(1)!.slots.findIndex((s) => s?.id === Item.GoldIngot);
+    h.action(1, { kind: 'drop', slot, all: false } as unknown as BwAction);
+    assert(h.have(1, 'gold') === 10 && !h.match.dropsSnapshot().some((d) => d.item === Item.GoldIngot), 'a stale drop packet does nothing');
   });
   test('pickaxe, axe and shears persist independently and only effective tools accelerate mining', () => {
     const h = new BwTestHost(); h.start(); const p = h.match.players.get(1)!;
@@ -444,34 +441,91 @@ export function runBedwarsTests(): void {
     assert(h.body(1)!.x > -61 && h.body(1)!.y === 97, `pearl landed ahead on floor: ${JSON.stringify(h.body(1))}`);
     assert(!bwHas(p.slots, 'pearl'), 'pearl consumed');
   });
-  test('8/10/12-minute schedule warns, removes beds, shrinks safe zone and hard-ends', () => {
+  test('the schedule upgrades generators, warns, removes beds, starts the deathmatch and hard-ends', () => {
     const h = new BwTestHost(); h.start();
+    assert(h.match.snapshot().next?.label === 'Diamond II', 'the sidebar names the next event');
+    h.match.time = 150.01; h.tick(0.05);
+    assert(h.match.snapshot().gens.some((g) => g.tier === 2), 'diamond generators reach tier II on schedule');
+    assert(h.messages.some((v) => v.msg.t === 'bwEvent' && v.msg.text.startsWith('Diamond II')), 'tier change announced');
     h.match.time = BW.BED_GONE_AT - 30 - 0.025; h.tick(0.05);
-    assert(h.messages.some((v) => v.msg.t === 'bwEvent' && v.msg.text.includes('Beds disappear in 30 seconds')), '30 second bed warning');
+    assert(h.messages.some((v) => v.msg.t === 'bwEvent' && v.msg.text.includes('destroyed in 30 seconds')), '30 second bed warning');
     h.match.time = BW.BED_GONE_AT - 0.025; h.tick(0.05);
-    assert(h.match.phase === 'suddenDeath' && h.match.teams.every((t) => !t.bed), 'beds removed at eight minutes');
+    assert(h.match.phase === 'suddenDeath' && h.match.teams.every((t) => !t.bed), 'beds removed on schedule');
     h.match.time = BW.ZONE_AT - 30 - 0.025; h.tick(0.05);
-    assert(h.messages.some((v) => v.msg.t === 'bwEvent' && v.msg.text.includes('safe zone shrinks in 30')), '30 second zone warning');
+    assert(h.messages.some((v) => v.msg.t === 'bwEvent' && v.msg.text.includes('Deathmatch in 30 seconds')), '30 second deathmatch warning');
     h.match.time = BW.ZONE_AT + 60; h.tick(1.1);
     const zone = h.match.snapshot().safeZone;
-    assert(zone.active && zone.radius < 50 && zone.startsIn === 0, 'shrinking zone published');
+    assert(zone.active && zone.radius < 80 && zone.startsIn === 0, 'shrinking zone published');
     assert(h.match.players.get(1)!.health < 20, 'outside zone takes pressure damage');
     h.at(1, { x: -1, y: 97, z: 0 }); h.at(2, { x: 1, y: 97, z: 0 });
     h.match.time = BW.END_AT - 0.025; h.tick(0.05);
-    assert(h.match.isOver() && h.match.result?.reason.includes('Time limit'), 'hard end at twelve minutes');
+    assert(h.match.isOver() && h.match.result?.reason.includes('Time limit'), 'hard end');
+  });
+  test('every map is four rotated copies of one base, forges on the centre line', () => {
+    for (const id of [0, 1]) {
+      const map = bwMap(id), c = map.bases.map((b) => b.center);
+      const d = c.map((p) => Math.hypot(p.x - 0.5, p.z - 0.5));
+      assert(d.every((v) => Math.abs(v - d[0]) < 1e-9), `map ${id}: every island is the same distance out`);
+      for (const b of map.bases) {
+        const rel = (p: BwPos) => ({ u: (p.x - b.center.x) * b.inward.x + (p.z - b.center.z) * b.inward.z, w: -(p.x - b.center.x) * b.inward.z + (p.z - b.center.z) * b.inward.x });
+        assert(Math.abs(rel(b.forge).w) < 1e-9, `map ${id} team ${b.team}: forge on the centre line`);
+        const gens = map.generators.filter((g) => g.team === b.team);
+        assert(gens.length === 2 && gens.every((g) => g.pos.x === b.forge.x && g.pos.z === b.forge.z), 'iron and gold share the forge spot');
+        assert(Math.abs(rel({ ...b.bed, x: b.bed.x + .5, z: b.bed.z + .5 }).w) < 1e-9, 'bed on the centre line');
+        // The stamp agrees: the same local cell holds the same block on every island.
+        for (const [u, w] of [[-9, 0], [-7, -7], [6, 0], [7, 0], [-11, 5], [3, -10]]) {
+          const blocks = map.bases.map((o) => { const x = Math.floor(o.center.x + o.inward.x * u - o.inward.z * w), z = Math.floor(o.center.z + o.inward.z * u + o.inward.x * w); return [96, 97].map((y) => { const v = map.blockAt(x, y, z); return [Block.TeamWoolA, Block.TeamWoolB, Block.TeamWoolC, Block.TeamWoolD].includes(v) ? 'team' : v; }).join(':'); });
+          assert(blocks.every((v) => v === blocks[0]), `map ${id}: cell (${u}, ${w}) differs between islands: ${blocks}`);
+        }
+      }
+    }
+  });
+  test('three and four teams: own islands, unused beds gone, last team standing wins', () => {
+    const h = new BwTestHost([{ id: 1, team: 0, bot: false }, { id: 2, team: 1, bot: false }, { id: 3, team: 2, bot: false }]);
+    h.start();
+    const s = h.match.snapshot();
+    assert(s.teamCount === 3 && s.teams.length === 3, 'snapshot carries three teams');
+    const unused = MAP.bases[3];
+    assert(h.getBlock(unused.bed.x, unused.bed.y, unused.bed.z) === 0, 'the empty island has no bed');
+    for (const id of [1, 2, 3]) assert(Math.hypot(h.body(id)!.x - MAP.bases[id - 1].center.x, h.body(id)!.z - MAP.bases[id - 1].center.z) < 4, `player ${id} spawns on its own island`);
+    for (const t of [1, 2]) (h.match as unknown as { destroyBed(t: number): void }).destroyBed(t);
+    h.at(2, { x: 0, y: 30, z: 0 }); h.tick(0.1);
+    assert(!h.match.isOver(), 'two teams still standing');
+    h.at(3, { x: 0, y: 30, z: 0 }); h.tick(0.1);
+    assert(h.match.result?.winner === 0, 'the last team standing wins');
+  });
+  test('a bed broken while you are dead means no respawn', () => {
+    const h = new BwTestHost([{ id: 1, team: 0, bot: false }, { id: 2, team: 1, bot: false }, { id: 3, team: 0, bot: false }]); h.start(); h.tick(1);
+    h.at(1, { x: 0, y: 30, z: 0 }); h.tick(0.1);
+    const p = h.match.players.get(1)!;
+    assert(!p.alive && !p.eliminated && p.respawnAt > 0, 'dead, waiting to respawn');
+    const bed = MAP.bases[0].bed; h.at(2, { x: bed.x - 1.5, y: 97, z: bed.z + 0.5 }); h.mine(2, bed, 1.5);
+    assert(!h.match.teams[0].bed, 'bed broken during the timer');
+    h.tick(6);
+    assert(!p.alive && p.eliminated && !h.got(1, 'respawned').length, 'never respawns once the bed is gone');
+    assert(!h.match.isOver(), 'the teammate keeps the team in it');
+  });
+  test('a four-bot free-for-all on the frost map plays to a winner', () => {
+    const h = new BwTestHost([0, 1, 2, 3].map((t) => ({ id: t + 1, team: t, bot: true })), 1, 4);
+    h.start();
+    for (let i = 0; i < 900 && !h.match.isOver(); i++) h.tick(1);
+    assert(h.match.isOver(), `match finishes (t=${h.match.time.toFixed(0)}, ${h.match.result?.reason})`);
+    assert(h.match.placed.size > 40, 'bots bridged between the islands');
   });
   test('team names never mention the map', () => {
     const h = new BwTestHost(); h.start();
     const text = JSON.stringify(h.messages.filter((m) => m.msg.t === 'bwEvent'));
     assert(!/skygarden|citadel|crimson|cobalt/i.test(text), 'event text uses plain names');
   });
-  test('economy-aware bot collects, buys, bridges, upgrades, destroys bed and wins on real map', () => {
+  test('the bot collects, buys, bridges, destroys the bed and wins on the real map', () => {
     const h = new BwTestHost([{ id: 1, team: 0, bot: true }, { id: 2, team: 1, bot: false }]); h.start();
     for (let i = 0; i < 480 && !h.match.isOver(); i++) h.tick(1);
-    const p = h.match.players.get(1)!;
-    assert(p.tools.pickaxe > 0, `bot must purchase tools; goal=${h.match.bots[0].goal}`);
+    const p = h.match.players.get(1)!, bot = h.match.bots[0];
     assert(h.match.placed.size > 12, `bot must bridge/defend; placed=${h.match.placed.size}`);
-    assert(Object.values(h.match.teams[0].upgrades).some((v) => v > 0), 'bot must gather diamonds and buy an upgrade');
+    // A rush goes straight for the bed; the others buy tools first, and the
+    // economy plan also farms diamonds for a team upgrade.
+    if (bot.plan !== 'rush') assert(p.tools.pickaxe > 0, `bot must purchase tools; goal=${bot.goal}`);
+    if (bot.plan === 'eco') assert(Object.values(h.match.teams[0].upgrades).some((v) => v > 0), 'bot must gather diamonds and buy an upgrade');
     assert(p.beds === 1, `bot must break enemy bed; goal=${h.match.bots[0].goal}, pos=${JSON.stringify(h.body(1))}`);
     assert(h.match.result?.winner === 0, 'bot must final-kill and win');
   });

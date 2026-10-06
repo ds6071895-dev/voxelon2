@@ -2,16 +2,15 @@
 // predicts the two things that must feel instant (placing a block and the crack
 // on one being mined) and keeps the HUD tiny.
 import * as THREE from 'three';
-import { BW_BASES } from './bedwars_map';
+import { bwMap, type BedwarsMap } from './bedwars_map';
 import { createBedwarsModels, type BedwarsModels } from './bedwars_models';
 import { BedwarsWorld } from './bedwars_world';
 import { BedwarsHud } from './bedwars_hud';
 import { BedwarsShop, type BedwarsService } from './bedwars_shop';
 import { BedwarsResults } from './bedwars_results';
-import { bwBedAt, bwProtected } from './bedwars_map';
 import { bwEntryOf } from './bedwars_catalog';
 import {
-  BW, bwBreakSeconds,
+  BW, BW_TEAM_COLORS, bwBreakSeconds,
   type BwAction, type BwDropView, type BwPos, type BwProjectileView, type BwResult, type BwSnapshot, type BwTeam,
 } from './bedwars_rules';
 import { bwTime } from './bedwars_ui';
@@ -42,6 +41,8 @@ interface Deps {
   onReplay(): void;
   onEditTeams(): void;
   onLeave(): void;
+  /** Send the current pose before a placement so the server judges reach from it. */
+  flushPose(held: number): void;
   /** A block the local player just placed (for the sound). */
   onPlaced(x: number, y: number, z: number, block: number): void;
   onPickup(): void;
@@ -52,10 +53,15 @@ const BREAK_INTERVAL = 150;
 const PREDICT_TTL = 2500;
 const SERVICE_NAMES: Record<BedwarsService, string> = { shop: 'Item Shop', upgrades: 'Team Upgrades', chest: 'Team Chest' };
 const key = (x: number, y: number, z: number): string => `${x},${y},${z}`;
+/** Reach for placing into open air in front of your footing. */
+const REACH_AROUND = 4.5;
+type Face = { x: number; y: number; z: number; nx: number; ny: number; nz: number };
 
 export class BedwarsClient {
   private enabled = false;
   private snapshot: BwSnapshot | null = null;
+  /** The map this match is played on (the world seed). */
+  map: BedwarsMap = bwMap(0);
   private team: BwTeam = 0;
   private snapshotAt = 0;
   private elapsed = 0;
@@ -66,14 +72,16 @@ export class BedwarsClient {
   private readonly style = (id: number): BodyStyle | null => {
     const player = this.snapshot?.players.find(value => value.id === id);
     if (!player) return null;
+    // Everyone's name shows in their team's colour, Hypixel style.
     return { rat: false, caged: false, glow: false, hidden: !player.alive || player.eliminated,
-      tag: player.team === this.team || this.spectating };
+      tag: true, tagColor: BW_TEAM_COLORS[player.team] };
   };
 
   private readonly hud: BedwarsHud;
   private readonly shop: BedwarsShop;
   private readonly results: BedwarsResults;
   private servicePosition: BwPos | null = null;
+  private readonly snapshotBeds = [true, true];
 
   /** Blocks anyone has placed this match; the map itself can never be broken. */
   private readonly placed = new Set<string>();
@@ -83,6 +91,8 @@ export class BedwarsClient {
   private breakTimer = 0;
   private breakAimedAt = 0;
   private placeAt = 0;
+  /** Face normal the held place button is building along. */
+  private buildLock: [number, number, number] | null = null;
   private reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
   constructor(private readonly d: Deps) {
@@ -131,18 +141,17 @@ export class BedwarsClient {
     this.results.setParty(party, myId);
   }
 
-  enter(team: BwTeam): void {
+  enter(team: BwTeam, mapId: number): void {
     if (this.enabled) this.exit();
     this.enabled = true; this.team = team; this.snapshot = null;
     this.elapsed = 0; this.snapshotAt = performance.now();
     this.previousHealth = this.d.player.health;
-    this.placed.clear(); this.predicted.clear();
+    this.placed.clear(); this.predicted.clear(); this.snapshotBeds.fill(true);
     this.hud.reset(); this.hud.show(true);
     this.results.hide();
     document.body.classList.add('bedwars-active');
-    this.models = createBedwarsModels();
-    this.d.scene.add(this.models.group);
-    this.scene3d = new BedwarsWorld(this.d.scene, this.d.world, this.d.atlas, this.d.cracks);
+    this.map = bwMap(mapId);
+    this.scene3d = new BedwarsWorld(this.d.scene, this.d.world, this.d.atlas, this.d.cracks, this.map);
     this.d.interaction.alwaysHighlight = true;
     this.priorStyle = this.d.remotePlayers.styleOf;
     this.d.remotePlayers.styleOf = this.style;
@@ -170,11 +179,23 @@ export class BedwarsClient {
     this.snapshot = s; this.snapshotAt = performance.now();
     const self = this.self;
     if (self) this.team = self.team;
+    // The props need to know which islands are in play: build them on the
+    // first snapshot.
+    if (!this.models) { this.models = createBedwarsModels(this.map, s.teamCount, this.d.atlas); this.d.scene.add(this.models.group); }
     if ((self && before && self.health < before.health) || this.frozen) { this.shop.close(); this.stopBreak(); }
-    for (const team of s.teams) if (this.models?.beds[team.team]) this.models.beds[team.team].visible = team.bed;
+    for (const team of s.teams) {
+      if (this.models?.beds[team.team]) this.models.beds[team.team].visible = team.bed;
+      const was = before ? this.snapshotBeds[team.team] : true;
+      if (was && !team.bed && before && s.phase !== 'suddenDeath') {
+        if (team.team === this.team) this.hud.flash('Bed destroyed!', 'You will no longer respawn', 'danger');
+        else this.hud.flash('Enemy bed destroyed!', 'Finish them off', 'good');
+      }
+      this.snapshotBeds[team.team] = team.bed;
+    }
     this.shop.update(s, this.d.net.myId, this.team);
     this.scene3d?.setZone(s.safeZone, s.phase !== 'results');
     this.scene3d?.setBreaks(s.breaks, this.d.net.myId);
+    this.scene3d?.setGenerators(s.gens ?? []);
     this.render();
     if (s.result && !this.results.open) this.setResult(s.result);
   }
@@ -222,7 +243,7 @@ export class BedwarsClient {
   noteEdit(x: number, y: number, z: number, block: number): void {
     if (!this.enabled) return;
     const k = key(x, y, z);
-    if (block === Block.Air) this.placed.delete(k); else if (bwBedAt(x, y, z) === null) this.placed.add(k);
+    if (block === Block.Air) this.placed.delete(k); else if (this.map.bedAt(x, y, z) === null) this.placed.add(k);
     this.predicted.delete(k);
   }
 
@@ -266,7 +287,7 @@ export class BedwarsClient {
       this.stopBreak();
       const block = this.d.world.getBlock(hit.x, hit.y, hit.z);
       const held = this.d.inventory.slots[slot]?.id ?? 0;
-      const duration = bwBreakSeconds(block, bwBedAt(hit.x, hit.y, hit.z) !== null, held, this.haste);
+      const duration = bwBreakSeconds(block, this.map.bedAt(hit.x, hit.y, hit.z) !== null, held, this.haste);
       this.breakTarget = { x: hit.x, y: hit.y, z: hit.z, slot, start: now, duration };
     }
     this.breakAimedAt = now;
@@ -284,9 +305,9 @@ export class BedwarsClient {
   }
   private clearBreakTimer(): void { if (this.breakTimer) { window.clearInterval(this.breakTimer); this.breakTimer = 0; } }
   private canBreak(v: BwPos): boolean {
-    const bed = bwBedAt(v.x, v.y, v.z);
+    const bed = this.map.bedAt(v.x, v.y, v.z);
     if (bed !== null) return bed !== this.team && !!this.snapshot?.teams[bed]?.bed;
-    return this.placed.has(key(v.x, v.y, v.z)) && !bwProtected(v.x, v.y, v.z);
+    return this.placed.has(key(v.x, v.y, v.z)) && !this.map.isProtected(v.x, v.y, v.z);
   }
   private drawCrack(now: number): void {
     const t = this.breakTarget;
@@ -299,19 +320,78 @@ export class BedwarsClient {
     this.d.interaction.hideCrack();
   }
 
-  // ── Placing ────────────────────────────────────────────────────────────
-  /** Shows the block at once and asks the server; a refusal takes it back.
-   *  `face` is the block that was aimed at and the side that was hit. */
-  place(face: { x: number; y: number; z: number; nx: number; ny: number; nz: number }, slot: number): boolean {
+  // ── Placing (Bedrock rules) ──────────────────────────────────────────
+  // Holding place puts a block down the moment the aim reaches a NEW spot (no
+  // fixed repeat delay), the build direction locks to the first block's face
+  // while the button stays down, and aiming at open air just past the block
+  // you stand on still places in front of it ("reach-around"), which is what
+  // makes walking-forward bridging possible.
+  /** Called every frame while place is held with a block selected. Returns true
+   *  when a block went down. `fresh` is the frame the button was pressed. */
+  build(face: Face | null, eye: THREE.Vector3, look: THREE.Vector3, slot: number, fresh: boolean): boolean {
+    if (fresh) this.buildLock = null;
     if (!this.enabled || this.frozen || this.panelOpen || !this.validSlot(slot)) return false;
     const now = performance.now();
     if (now < this.placeAt) return false;
+    const locked = (f: Face): boolean => !this.buildLock
+      || (f.nx === this.buildLock[0] && f.ny === this.buildLock[1] && f.nz === this.buildLock[2]);
+    let pick = face && locked(face) && this.placeable(face) ? face : null;
+    if (!face && !pick) { const around = this.reachAround(eye, look); if (around && locked(around)) pick = around; }
+    if (!pick || !this.commitPlace(pick, slot, now)) return false;
+    this.buildLock = [pick.nx, pick.ny, pick.nz];
+    return true;
+  }
+  /** The cell in front of the block under your feet, if the look ray passes
+   *  through it within reach. */
+  private reachAround(eye: THREE.Vector3, look: THREE.Vector3): Face | null {
+    const p = this.d.player, w = this.d.world;
+    if (Math.abs(look.y) > 0.999) return null;
+    const y = Math.floor(p.pos.y - 0.01);
+    const horizontal = Math.abs(look.x) >= Math.abs(look.z);
+    const nx = horizontal ? Math.sign(look.x) : 0, nz = horizontal ? 0 : Math.sign(look.z);
+    // The support is whichever cell under the body reaches furthest that way,
+    // so a player already leaning past the edge still builds from its rim.
+    let support: { x: number; z: number } | null = null, best = -Infinity;
+    for (const dx of [-0.29, 0.29]) for (const dz of [-0.29, 0.29]) {
+      const x = Math.floor(p.pos.x + dx), z = Math.floor(p.pos.z + dz);
+      if (!BLOCKS[w.getBlock(x, y, z)]?.solid) continue;
+      const along = x * nx + z * nz;
+      if (along > best) { best = along; support = { x, z }; }
+    }
+    if (!support) return null;
+    const cell = { x: support.x + nx, y, z: support.z + nz };
+    if (!isReplaceable(w.getBlock(cell.x, cell.y, cell.z))) return null;
+    // The look ray has to pass through the space just ahead of your feet: the
+    // empty cell and a little over a block above it, so a forward-and-down look
+    // at the edge builds, while looking out at the horizon never does.
+    let enter = 0, exit = REACH_AROUND;
+    const o = [eye.x, eye.y, eye.z], d = [look.x, look.y, look.z], lo = [cell.x, cell.y, cell.z], hi = [cell.x + 1, cell.y + 2.2, cell.z + 1];
+    for (let i = 0; i < 3; i++) {
+      if (Math.abs(d[i]) < 1e-9) { if (o[i] < lo[i] || o[i] > hi[i]) return null; continue; }
+      const t1 = (lo[i] - o[i]) / d[i], t2 = (hi[i] - o[i]) / d[i];
+      enter = Math.max(enter, Math.min(t1, t2)); exit = Math.min(exit, Math.max(t1, t2));
+      if (enter > exit) return null;
+    }
+    return { x: support.x, y, z: support.z, nx, ny: 0, nz };
+  }
+  private placeable(face: Face): boolean {
+    const x = face.x + face.nx, y = face.y + face.ny, z = face.z + face.nz;
+    return y >= 0 && y < 256 && isReplaceable(this.d.world.getBlock(x, y, z)) && !this.map.isProtected(x, y, z) && this.map.bedAt(x, y, z) === null;
+  }
+  /** Shows the block at once and asks the server; a refusal takes it back.
+   *  `face` is the block that was aimed at and the side that was hit. */
+  place(face: Face, slot: number): boolean {
+    if (!this.enabled || this.frozen || this.panelOpen || !this.validSlot(slot)) return false;
+    const now = performance.now();
+    return now >= this.placeAt && this.placeable(face) && this.commitPlace(face, slot, now);
+  }
+  private commitPlace(face: Face, slot: number, now: number): boolean {
     const stack = this.d.inventory.slots[slot], info = stack && ITEMS[stack.id];
     if (!stack || !info || info.kind !== 'block' || bwEntryOf(stack.id)?.type !== 'block') return false;
     const x = face.x + face.nx, y = face.y + face.ny, z = face.z + face.nz;
-    if (y < 0 || y >= 256 || !isReplaceable(this.d.world.getBlock(x, y, z)) || bwProtected(x, y, z) || bwBedAt(x, y, z) !== null) return false;
-    if (BLOCKS[info.block!].solid && this.d.player.intersectsBlock(x, y, z)) return false;
+    if (!this.placeable(face) || (BLOCKS[info.block!].solid && this.d.player.intersectsBlock(x, y, z))) return false;
     this.placeAt = now + BW.PLACE_REPEAT_MS;
+    this.d.flushPose(stack.id);
     this.d.world.setBlock(x, y, z, info.block!);
     this.predicted.set(key(x, y, z), { block: info.block!, slot, at: now });
     this.placed.add(key(x, y, z));
@@ -340,9 +420,6 @@ export class BedwarsClient {
     if (entry?.type === 'bow') this.send({ kind: 'shoot', slot, dx, dy, dz, power: 1 });
     else if (entry && ['tnt', 'pearl', 'heal'].includes(entry.type)) this.send({ kind: 'use', slot, dx, dy, dz });
   }
-  drop(slot: number, all: boolean): void {
-    if (this.enabled && !this.frozen && !this.panelOpen && this.validSlot(slot)) this.send({ kind: 'drop', slot, all });
-  }
 
   private send(action: BwAction): boolean {
     if (!this.enabled || !this.d.net.connected || this.d.net.worldId === null) return false;
@@ -352,7 +429,7 @@ export class BedwarsClient {
   private validSlot(slot: number): boolean { return Number.isInteger(slot) && slot >= 0 && slot < 9; }
   private distance(position: BwPos): number { return Math.hypot(this.d.player.pos.x - position.x, this.d.player.pos.y - position.y, this.d.player.pos.z - position.z); }
   private nearestService(): { service: BedwarsService; position: BwPos } | null {
-    const base = BW_BASES.find(base => base.team === this.team);
+    const base = this.map.bases[this.team];
     if (!base) return null;
     let nearest: { service: BedwarsService; position: BwPos } | null = null, distance = SERVICE_REACH;
     for (const service of ['shop', 'upgrades', 'chest'] as const) {
@@ -371,25 +448,27 @@ export class BedwarsClient {
 
   private render(): void {
     const s = this.snapshot, since = this.since, self = this.self;
-    for (const team of [0, 1] as const) {
-      const state = s?.teams[team];
-      this.hud.setTeam(team, state?.bed ?? true, state?.alive ?? 0, team === this.team);
-    }
     const phase = s?.phase ?? 'loading';
-    if (!s) { this.hud.setClock('0:00', '', 'calm'); this.hud.setPill('Loading', 'info'); return; }
+    if (!s) { this.hud.setPill('Loading', 'info'); return; }
     const played = s.time + (phase === 'playing' || phase === 'suddenDeath' ? since : 0);
     const zone = s.safeZone;
-    const sub = phase === 'countdown' ? 'Starting' : phase === 'results' ? 'Finished'
-      : phase === 'suddenDeath' ? (zone.active ? 'Zone closing' : 'Sudden death')
-      : `Beds break in ${bwTime((s.bedsIn - since) * 1000)}`;
-    const tone = phase === 'suddenDeath' || (zone.active && phase !== 'results') ? 'danger' : phase === 'playing' && s.bedsIn - since < 30 ? 'warn' : 'calm';
-    this.hud.setClock(bwTime(played * 1000), sub, tone);
+    const next = s.next ? Math.max(0, s.next.in - (phase === 'playing' || phase === 'suddenDeath' ? since : 0)) : 0;
+    const nextLine = phase === 'countdown' ? 'Starting soon' : phase === 'results' ? 'Game over'
+      : s.next ? `${s.next.label} in ${bwTime(next * 1000)}` : 'Deathmatch';
+    const tone = phase === 'suddenDeath' || (zone.active && phase !== 'results') ? 'danger' : s.next && next < 30 ? 'warn' : 'calm';
+    this.hud.setSidebar({
+      next: nextLine, clock: bwTime(played * 1000), tone,
+      teams: s.teams.map(t => ({ team: t.team, bed: t.bed, alive: t.alive, mine: t.team === this.team })),
+      kills: self?.kills ?? 0, finals: self?.finals ?? 0, beds: self?.beds ?? 0,
+    });
     let pill: string | null = null, pillTone: 'info' | 'danger' = 'info';
     if (phase === 'loading') pill = 'Loading';
     else if (phase === 'countdown') pill = `Starting in ${Math.max(0, Math.ceil(s.countdown - since))}`;
-    else if (self?.eliminated) pill = 'Eliminated. Spectating';
-    else if (self && !self.alive) { pill = `Respawning in ${Math.max(0, Math.ceil(self.respawnIn - since))}`; pillTone = 'danger'; }
-    else if (zone.active && phase !== 'results' && Math.hypot(this.d.player.pos.x - zone.x, this.d.player.pos.z - zone.z) > zone.radius) { pill = 'Outside the zone. Move to the middle'; pillTone = 'danger'; }
+    else if (zone.active && phase !== 'results' && self?.alive && Math.hypot(this.d.player.pos.x - zone.x, this.d.player.pos.z - zone.z) > zone.radius) { pill = 'Outside the zone. Move to the middle'; pillTone = 'danger'; }
     this.hud.setPill(pill, pillTone);
+    if (phase === 'results' || !self) this.hud.setTitle(null);
+    else if (self.eliminated) this.hud.setTitle('Eliminated', 'Your team is out. Spectating', 'info');
+    else if (!self.alive) this.hud.setTitle('You died!', `Respawning in ${Math.max(1, Math.ceil(self.respawnIn - since))}`);
+    else this.hud.setTitle(null);
   }
 }

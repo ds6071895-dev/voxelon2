@@ -39,7 +39,6 @@ function groups(k: Keybinds, touch: boolean): Group[] {
       ['Reload', [[keyLabel(k.reload)]], 'Duels'],
       ['Shoot the bow', [['Right click']], 'The Bridge and Bedwars: hold to draw'],
       ['Open shop / team chest', [['E']], 'Bedwars: stand near a merchant'],
-      ['Drop item', [['Q']], 'Bedwars: Ctrl+Q drops the stack'],
     ] },
     { title: 'Items', binds: [['Hotbar slot', [['1'], ['9'], ['scroll']]]] },
     { title: 'Screens', binds: [

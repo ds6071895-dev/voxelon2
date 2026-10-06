@@ -1,7 +1,7 @@
 import { isSolid, pointInSolid } from './blocks';
 import type { BwPos } from './bedwars_rules';
 
-export type BwBlockReader = (x: number, y: number, z: number) => number;
+type BwBlockReader = (x: number, y: number, z: number) => number;
 export function bwDistance(a: BwPos, b: BwPos): number { return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z); }
 /** Packed integer key for a cell (x, z within +-128, y 0-511). */
 export function bwKey(x: number, y: number, z: number): number { return ((x + 128) * 512 + y) * 512 + (z + 128); }
@@ -16,6 +16,14 @@ export function bwLine(get: BwBlockReader, a: BwPos, b: BwPos, ignore?: BwPos): 
   }
   return true;
 }
+/** Feet resting on something solid (a 0.6-wide body at `p`). */
+export function bwOnGround(get: BwBlockReader, p: BwPos): boolean {
+  for (const dx of [-0.29, 0.29]) for (const dz of [-0.29, 0.29]) {
+    const x = p.x + dx, y = p.y - 0.06, z = p.z + dz;
+    if (pointInSolid(get(Math.floor(x), Math.floor(y), Math.floor(z)), x - Math.floor(x), y - Math.floor(y), z - Math.floor(z))) return true;
+  }
+  return false;
+}
 export function bwFits(get: BwBlockReader, p: BwPos): boolean {
   for (const dx of [-0.29, 0.29]) for (const dz of [-0.29, 0.29]) for (const dy of [0.01, 0.9, 1.79]) {
     const x = p.x + dx, y = p.y + dy, z = p.z + dz;
@@ -24,9 +32,10 @@ export function bwFits(get: BwBlockReader, p: BwPos): boolean {
   return true;
 }
 
-/** Four-connected A*: missing floor costs wool, walls may only be mined when
- * player-authored. The bot still executes every placement/break via actions. */
-export function bwPath(get: BwBlockReader, from: BwPos, to: BwPos, canBreak: (x: number, y: number, z: number) => boolean, avoid?: (x: number, z: number) => boolean): BwPos[] {
+/** Four-connected A*: missing floor costs wool (and is impassable without
+ * any), walls may only be mined when player-authored. The bot still executes
+ * every placement/break via actions. */
+export function bwPath(get: BwBlockReader, from: BwPos, to: BwPos, canBreak: (x: number, y: number, z: number) => boolean, avoid?: (x: number, z: number) => boolean, bridge = true): BwPos[] {
   const y = 97, sx = Math.floor(from.x), sz = Math.floor(from.z);
   const key = (x: number, z: number) => `${x},${z}`;
   interface Node { x: number; z: number; g: number; f: number; parent?: Node }
@@ -60,7 +69,9 @@ export function bwPath(get: BwBlockReader, from: BwPos, to: BwPos, canBreak: (x:
         wall += 5;
       }
       if (blocked) continue;
-      const g = n.g + 1 + wall + (isSolid(get(x, y - 1, z)) ? 0 : 1.8);
+      const floor = isSolid(get(x, y - 1, z));
+      if (!floor && !bridge) continue;
+      const g = n.g + 1 + wall + (floor ? 0 : 1.8);
       if (g >= (costs.get(key(x, z)) ?? Infinity)) continue;
       costs.set(key(x, z), g);
       const next: Node = { x, z, g, f: g + h(x, z), parent: n };
