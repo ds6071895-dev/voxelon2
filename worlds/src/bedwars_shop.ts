@@ -3,12 +3,11 @@
 // does. A light scrim, no blur. Purchases are decided by the server; the panel
 // only asks and reports the answer.
 import { BW_CATALOG, BW_CATEGORIES, bwPrice, type BwCatalogEntry, type BwCategory } from './bedwars_catalog';
-import { BW_RESOURCES, BW_RESOURCE_ITEM, BW_RESOURCE_NAME, bwUpgrades, bwWallet, type BwAction, type BwPlayerView, type BwResource, type BwSnapshot, type BwTeam, type BwWallet } from './bedwars_rules';
+import { BW_RESOURCES, BW_RESOURCE_ITEM, BW_RESOURCE_NAME, BW_SERVICE_NAMES as TITLES, bwUpgrades, bwWallet, type BedwarsService, type BwAction, type BwPlayerView, type BwResource, type BwSnapshot, type BwTeam, type BwWallet } from './bedwars_rules';
+import { BwPurchaseRequests } from './bedwars_requests';
 import { bwButton, bwEl } from './bedwars_ui';
 import { renderItemIcon } from './icons';
 
-export type BedwarsService = 'shop' | 'upgrades' | 'chest';
-const TITLES: Record<BedwarsService, string> = { shop: 'Item Shop', upgrades: 'Team Upgrades', chest: 'Team Chest' };
 type Tab = BwCategory | 'quick';
 const SHOP_TABS: { id: Tab; label: string }[] = [{ id: 'quick', label: 'Quick Buy' }, ...BW_CATEGORIES.filter(c => c.id !== 'upgrades')];
 /** The first tab: what most rounds are bought from. */
@@ -40,7 +39,7 @@ export class BedwarsShop {
   private readonly details: HTMLElement;
   private readonly chestRows = new Map<BwResource, { chest: HTMLElement; put: HTMLButtonElement; take: HTMLButtonElement }>();
   private readonly pending = new Map<number, string>();
-  private request = 0;
+  private readonly requests = new BwPurchaseRequests();
   private self: BwPlayerView | undefined;
   private snap: BwSnapshot | null = null;
   private team: BwTeam = 0;
@@ -105,7 +104,9 @@ export class BedwarsShop {
     this.d.onPanel();
   }
   reset(): void {
-    this.scrim.hidden = true; this.service = null; this.pending.clear(); this.request = 0; this.snap = null; this.self = undefined;
+    this.scrim.hidden = true; this.service = null; this.pending.clear(); this.snap = null; this.self = undefined;
+    window.clearTimeout(this.noticeTimer); this.say('');
+    for (const row of this.rows) { row.state = ''; delete row.root.dataset.busy; }
   }
 
   /** New snapshot or inventory: re-evaluate what can be bought. */
@@ -166,10 +167,10 @@ export class BedwarsShop {
   private buy(entry: BwCatalogEntry): void {
     const row = this.rows.find(r => r.entry === entry);
     if (!row || row.root.dataset.state === 'owned' || row.root.dataset.state === 'maxed') return;
-    const request = ++this.request;
+    const request = this.requests.next();
     this.pending.set(request, entry.sku);
     row.root.dataset.busy = '1';
-    if (!this.d.send({ kind: 'buy', sku: entry.sku, request })) this.pending.delete(request);
+    if (!this.d.send({ kind: 'buy', sku: entry.sku, request })) { this.pending.delete(request); this.refresh(); }
     window.setTimeout(() => { if (this.pending.delete(request)) this.refresh(); }, 4000);
   }
 

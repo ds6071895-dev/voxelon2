@@ -1,13 +1,13 @@
 {
   "name": "Worlds",
   "short_name": "Worlds",
-  "description": "Duels, The Bridge and Parkour in your browser. Every match is a world of its own.",
+  "description": "Bedwars, Duels, The Bridge, Parkour and Rat and Seek in your browser. Every match is a world of its own.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "orientation": "landscape",
-  "background_color": "#080f1c",
-  "theme_color": "#080f1c",
+  "background_color": "#dfe9f4",
+  "theme_color": "#eef3f9",
   "icons": [
     { "src": "/favicon.svg", "type": "image/svg+xml", "sizes": "any", "purpose": "any" },
     { "src": "/icon-192.png", "type": "image/png", "sizes": "192x192" },

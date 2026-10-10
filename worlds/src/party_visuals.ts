@@ -5,6 +5,7 @@ import {
   bridgeCageSpawn, bridgeSpawn, parkourCourse, type PartyLobbySnapshot,
 } from './partygames';
 import { BLINK_WARN_MS, blinkSolid, blinkWarning } from './parkour_mechanics';
+import { BRIDGE_COLORS } from './ui/presentation';
 
 /** The unit torus (tube included) is scaled by the marker radius. */
 const RING_TUBE = .08;
@@ -27,7 +28,7 @@ export class PartyVisuals {
   private readonly boxGeometry = new THREE.BoxGeometry(1, 1, 1);
   private readonly ringGeometry = new THREE.TorusGeometry(1, RING_TUBE, 8, 32);
   /** Crimson and cobalt, matching the wool each side builds with. */
-  static readonly TEAM_COLOR = [0xff5f76, 0x5aa8ff];
+  static readonly TEAM_COLOR = BRIDGE_COLORS;
   private readonly arrows: DrawnArrow[] = [];
   private readonly arrowGeometry = new THREE.BoxGeometry(.07, .07, .9);
   private readonly arrowMaterial = new THREE.MeshBasicMaterial({ color: 0xf2e4c4 });
@@ -91,7 +92,7 @@ export class PartyVisuals {
     const mat = this.marker(index).material as THREE.MeshBasicMaterial;
     if (mat.side !== THREE.DoubleSide) { mat.side = THREE.DoubleSide; mat.needsUpdate = true; }
   }
-  update(s: PartyLobbySnapshot, me: number, now: number): void {
+  update(s: PartyLobbySnapshot, me: number, now: number, reducedMotion = false): void {
     const sub = s.sub, round = s.round;
     this.root.visible = !!sub && !!round && s.phase !== 'results' && s.phase !== 'lobby';
     if (!this.root.visible || !sub || !round)
@@ -120,7 +121,7 @@ export class PartyVisuals {
       (m.material as THREE.MeshBasicMaterial).opacity = opacity;
       m.rotation.set(-Math.PI / 2, 0, 0);
     };
-    const pulse = .6 + .25 * Math.sin(now / 180);
+    const pulse = reducedMotion ? .6 : .6 + .25 * Math.sin(now / 180);
     if (round.game === 'parkour') {
       const course = parkourCourse(sub.seed), next = (mine?.progress ?? 0) + 1;
       const t = s.phase === 'running' ? now - round.startedAt : -1;
@@ -135,7 +136,7 @@ export class PartyVisuals {
         // stone is narrower than the marker used to be, so a fixed radius drew
         // a circle hanging out over the void — which reads as somewhere you
         // could land. Fit it inside the footprint (the torus' own tube included)
-        // and it always describes real ground. At a fork, both branches glow.
+        // and it always describes real ground.
         const { x, z } = centre(p);
         const fit = (Math.min(p.width, p.depth) / 2 - .08) / (1 + RING_TUBE);
         ring(rings++, x, p.y + .12, z, Math.min(p.order === next ? 1.2 : .8, fit),
@@ -157,7 +158,7 @@ export class PartyVisuals {
           // A blink stone that is about to go flickers first; one that is
           // gone leaves a faint outline of where it will be.
           if (blinkWarning(p.group, t))
-            box(boxes++, x, p.y - .5, z, p.width + .08, 1.08, p.depth + .08, 0xff5a6e, (Math.floor(now / 90) % 2) ? .55 : .15);
+            box(boxes++, x, p.y - .5, z, p.width + .08, 1.08, p.depth + .08, 0xff5a6e, reducedMotion ? .35 : (Math.floor(now / 90) % 2) ? .55 : .15);
           else if (!blinkSolid(p.group, t))
             box(boxes++, x, p.y - .5, z, p.width, 1, p.depth, 0x7bffb0, blinkSolid(p.group, t + BLINK_WARN_MS) ? .3 : .08);
         }
@@ -177,7 +178,7 @@ export class PartyVisuals {
       box(i, x, PARTY_FLOOR_Y + (target ? 11 : 4), z, target ? .5 : .25, target ? 22 : 8, target ? .5 : .25,
         color, target ? pulse : .2);
       if (target)
-        ring(2 + i, x, PARTY_FLOOR_Y + .12, z, 2.4 + (now % 1400) / 1400 * 1.8, color, .5 - (now % 1400) / 2800);
+        ring(2 + i, x, PARTY_FLOOR_Y + .12, z, reducedMotion ? 3.3 : 2.4 + (now % 1400) / 1400 * 1.8, color, reducedMotion ? .25 : .5 - (now % 1400) / 2800);
     });
     // THE CAGES. While a round is held — the opening countdown, and the three
     // seconds after every goal — both pods wear a humming force field in their
@@ -188,7 +189,7 @@ export class PartyVisuals {
     if (heldUntil !== undefined && heldUntil > now) {
       const span = s.phase === 'countdown' ? PARTY_COUNTDOWN_MS : BRIDGE_GOAL_RESET_MS;
       const left = Math.max(0, Math.min(1, (heldUntil - now) / span));
-      const hum = .5 + .5 * Math.sin(now / 90);
+      const hum = reducedMotion ? .5 : .5 + .5 * Math.sin(now / 90);
       for (const t of [0, 1]) {
         const c = bridgeCageSpawn(sub, t, 0);
         const cx = c.x - sub.minX, cz = c.z - sub.minZ;

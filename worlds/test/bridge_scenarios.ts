@@ -57,7 +57,7 @@ interface Scenario {
   /** Route for the scripted player, venue-local. */
   route?: Vec[];
   /** Pass/fail from what happened. */
-  judge: (r: { botZ: number; humanScored: boolean; botScored: boolean; hitsOnHuman: number; humanKilled: number; botMaxZ: number }) => string | null;
+  judge: (r: { humanScored: boolean; botScored: boolean; hitsOnHuman: number; humanKilled: number; botMaxZ: number }) => string | null;
 }
 
 const lane = BRIDGE_LANE_X;
@@ -130,10 +130,16 @@ const SCENARIOS: Scenario[] = [
 ];
 
 const skill = Number(process.env.SKILL ?? 0.55);
+const seed = Number(process.env.SEED ?? 3);
+if (!Number.isFinite(skill) || skill < 0 || !String(process.env.SKILL ?? '0.55').trim()) throw new Error('SKILL must be a finite non-negative number');
+if (!Number.isSafeInteger(seed) || !String(process.env.SEED ?? '3').trim()) throw new Error('SEED must be an integer');
+const selected = process.env.ONLY === undefined ? SCENARIOS.map(s => s.name) : process.env.ONLY.split(',').map(s => s.trim());
+if (selected.some(s => !s || !SCENARIOS.some(sc => sc.name === s)) || new Set(selected).size !== selected.length)
+  throw new Error(`ONLY must select distinct scenarios: ${SCENARIOS.map(s => s.name).join(',')}`);
 let failures = 0;
 for (const sc of SCENARIOS) {
-  if (process.env.ONLY && !process.env.ONLY.split(',').includes(sc.name)) continue;
-  const server = new GameServer({ accounts: new Accounts(), rng: mulberry32(Number(process.env.SEED ?? 3)) });
+  if (!selected.includes(sc.name)) continue;
+  const server = new GameServer({ accounts: new Accounts(), rng: mulberry32(seed) });
   let scripted: Scripted | null = null;
   const w = server.startExhibition('bridge', [{ skill }, { skill }], (i, opp, spawn, rng, s): PgBot => {
     if (i === 1) return (scripted = new Scripted(opp, spawn));
@@ -160,6 +166,7 @@ for (const sc of SCENARIOS) {
     return orig.apply(this, a);
   };
   let botMaxZ = 0, humanScored = false, botScored = false, humanKilled = 0, started = -1;
+  try {
   for (let t = 0; t < 60; t += 0.05) {
     server.tick(0.05);
     const st = server.matchState(w);
@@ -179,8 +186,8 @@ for (const sc of SCENARIOS) {
     }
     if (humanScored || botScored) break;
   }
-  proto.landPartyHit = orig;
-  const r = { botZ: 0, humanScored, botScored, hitsOnHuman, humanKilled, botMaxZ };
+  } finally { proto.landPartyHit = orig; }
+  const r = { humanScored, botScored, hitsOnHuman, humanKilled, botMaxZ };
   const why = sc.judge(r);
   if (why) failures++;
   console.log(`${why ? '✗' : '✓'} ${sc.name.padEnd(6)} ${why ?? `ok (max z ${botMaxZ.toFixed(1)}, hits ${hitsOnHuman}, kills ${humanKilled}${botScored ? ', scored' : ''})`}`);

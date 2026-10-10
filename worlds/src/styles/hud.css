@@ -16,7 +16,6 @@
       --hud-text: #ffffff;
       --hud-text-dim: rgba(255, 255, 255, 0.62);
       --hud-bg: rgba(0, 0, 0, 0.55);
-      --hud-bg-solid: rgba(0, 0, 0, 0.78);
       --hud-accent: #4db8ff;
       --hud-accent-soft: rgba(77, 184, 255, 0.4);
       --hud-text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
@@ -151,10 +150,6 @@
     .dmg-num.hit   { color: #ffffff; font-size: 20px; }
     .dmg-num.heavy { color: #ffd25e; font-size: 26px; text-shadow: 0 0 18px rgba(255,180,40,.65), 0 2px 6px rgba(0,0,0,.85); }
     .dmg-num.kill  { color: #ff5566; font-size: 31px; text-shadow: 0 0 24px rgba(255,60,80,.7), 0 2px 8px rgba(0,0,0,.9); }
-    /* A jump-crit is a thing the player DID, so it gets its own read rather
-       than just being a bigger `heavy`: gold, larger, with a hard rim. */
-    .dmg-num.crit  { color: #ffe066; font-size: 34px; letter-spacing: .5px;
-      text-shadow: 0 0 26px rgba(255,205,60,.85), 0 0 6px rgba(255,255,255,.9), 0 2px 8px rgba(0,0,0,.9); }
 
     /* ── The Bridge / Parkour HUD ───────────────────────────────────────── */
     .pg-hud { position: absolute; inset: 0; pointer-events: none; z-index: 42;
@@ -206,17 +201,10 @@
        card, so off-card it rendered as black text on a transparent button. */
     .pg-card.pg-result {
       --pg-accent: #ffd25e;
-      width: min(440px, calc(100vw - 32px)); min-width: 0; padding: 26px 24px 22px; border-radius: 20px;
+      width: min(440px, calc(100vw - 32px)); min-width: 0; padding: 26px 24px 22px;
       text-align: center; overflow: hidden; pointer-events: auto;
-      border: 1px solid color-mix(in srgb, var(--pg-accent) 45%, transparent);
-      background:
-        radial-gradient(ellipse 90% 60% at 50% 0%, color-mix(in srgb, var(--pg-accent) 26%, transparent), transparent 70%),
-        linear-gradient(180deg, rgba(14,20,34,.97), rgba(7,10,18,.97));
-      box-shadow: 0 30px 80px rgba(0,0,0,.65), 0 0 60px color-mix(in srgb, var(--pg-accent) 22%, transparent),
-                  inset 0 1px rgba(255,255,255,.08);
-      animation: pg-result-in .5s cubic-bezier(.18,.9,.25,1.15) both;
+      isolation: isolate;
     }
-    @keyframes pg-result-in { from { opacity: 0; transform: translate(-50%,-44%) scale(.92); } }
     /* Rays behind a win. */
     .pg-card.pg-result.win::before {
       content: ''; position: absolute; left: 50%; top: -60%; width: 180%; aspect-ratio: 1; z-index: -1;
@@ -225,7 +213,6 @@
       -webkit-mask: radial-gradient(circle, #000 10%, transparent 55%); mask: radial-gradient(circle, #000 10%, transparent 55%);
       animation: pg-rays 24s linear infinite;
     }
-    .pg-card.pg-result { isolation: isolate; }
     @keyframes pg-rays { to { transform: translateX(-50%) rotate(1turn); } }
     .pg-result-kicker {
       display: inline-block; padding: 5px 12px; border-radius: 99px; color: #0b0f18; background: var(--pg-accent);
@@ -449,19 +436,6 @@
     /* Hearts give a little squeeze whenever the heal buff restores a point. */
     #hearts { transition: transform 0.12s ease-out; }
     body.reduced-motion #hearts { transition: none; }
-
-    #death {
-      position: absolute; inset: 0; background: rgba(120, 0, 0, 0.55);
-      display: none; flex-direction: column; align-items: center;
-      justify-content: center; gap: 26px; z-index: 50;
-    }
-    #death h1 { font-size: 44px; }
-    #death button {
-      font-family: inherit; font-size: 18px; font-weight: bold;
-      padding: 10px 36px; cursor: pointer;
-      background: #8b8b8b; color: #fff; text-shadow: none;
-      border: 3px solid; border-color: #fff #555 #555 #fff;
-    }
 
     /* ── Pause menu / Settings ────────────────────────────────────────────
        The same sheet serves two screens: Pause over the frozen first-person
@@ -817,42 +791,6 @@
       .keyrow-keys { justify-content: flex-start; }
     }
 
-    /* ── Title screen ─────────────────────────────────────────────────────
-       DAYBREAK. The front door is lit like the world behind it: the live
-       panorama is a clear late morning, and the menu sits over it as frosted
-       paper — white glass, deep-ink type, and the two faction colours carried
-       by the wordmark itself. One strong ink button is always the way
-       forward. Nothing here is dark; the dark is for the war, not the lobby. */
-    #overlay {
-      --ink: #122032;
-      --ink-soft: #3b4f68;
-      --ink-mute: #687d95;
-      --line: rgba(18,32,50,.10);
-      --azure: #2d6ee0;
-      --azure-deep: #1b4aa3;
-      --gold: #e3a12a;
-      --focus: #2d6ee0;
-      position: absolute; inset: 0; z-index: 20; overflow-y: auto; overscroll-behavior: contain;
-      display: flex; flex-direction: column; align-items: center;
-      justify-content: center;
-      justify-content: safe center;
-      overflow-x: hidden;
-      gap: clamp(14px, 2.6vh, 28px);
-      padding: calc(30px + var(--safe-top)) calc(22px + var(--safe-right))
-               calc(24px + var(--safe-bottom)) calc(22px + var(--safe-left));
-      /* Sheer at the top so the sky and the land read straight through; a
-         paper wash rising from the bottom so the type always has a floor. */
-      background:
-        radial-gradient(ellipse 70% 60% at 18% 30%, rgba(255,255,255,.55), transparent 70%),
-        radial-gradient(ellipse 60% 50% at 100% 0%, rgba(255,226,178,.30), transparent 65%),
-        linear-gradient(180deg, rgba(236,243,251,.10) 0%, rgba(236,243,251,.34) 46%, rgba(233,240,248,.88) 100%);
-      backdrop-filter: blur(1.5px) saturate(1.08);
-      font-family: ui-sans-serif, -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif;
-      color: var(--ink); -webkit-tap-highlight-color: transparent;
-    }
-    #overlay.hidden { display: none; }
-    /* The in-game connection tag belongs to the HUD, not the front door. */
-    body:not(.in-game) #netinfo { display: none; }
     /* Nothing of the in-game HUD may show on the title screen. The frame loop
        stops touching these once no match is running, so any one of them left
        lit by the last frame (an FPS readout, the F3 overlay, an ammo count, a
@@ -862,51 +800,6 @@
       #heal-burst, #heal-tally, #hurt-vignette, #bridge-fx, #damage-flash, #use-bar,
       .item-name, .pvp-slam, .pvp-killchip, .dmg-num),
     body:not(.in-game) #hud-mods:not(.editing) { display: none !important; }
-    #overlay .mc-font { font-family: inherit; color: inherit; text-shadow: none; letter-spacing: normal; }
-    /* Drifting motes of light — dust in the morning sun. */
-    #overlay::before {
-      content: ''; position: absolute; inset: 0; z-index: -1; pointer-events: none; opacity: .75;
-      background:
-        radial-gradient(2px 2px at 12% 22%, rgba(255,255,255,.95), transparent 60%),
-        radial-gradient(1.6px 1.6px at 34% 64%, rgba(255,255,255,.8), transparent 60%),
-        radial-gradient(2.2px 2.2px at 58% 18%, rgba(255,246,220,.9), transparent 60%),
-        radial-gradient(1.4px 1.4px at 76% 48%, rgba(255,255,255,.85), transparent 60%),
-        radial-gradient(1.8px 1.8px at 88% 78%, rgba(255,255,255,.8), transparent 60%),
-        radial-gradient(1.5px 1.5px at 22% 86%, rgba(255,250,235,.75), transparent 60%);
-      animation: title-motes 22s linear infinite;
-    }
-    @keyframes title-motes {
-      0% { transform: translateY(0); opacity: .75; }
-      50% { opacity: .45; }
-      100% { transform: translateY(-60px); opacity: .75; }
-    }
-    /* The voxel grid, drawn in ink this time, fading up from the floor. */
-    #overlay::after {
-      content: ''; position: absolute; inset: 0; z-index: -1; pointer-events: none;
-      background:
-        linear-gradient(rgba(18,32,50,.05) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(18,32,50,.05) 1px, transparent 1px);
-      background-size: 40px 40px;
-      -webkit-mask-image: linear-gradient(180deg, transparent 55%, #000 100%);
-      mask-image: linear-gradient(180deg, transparent 55%, #000 100%);
-    }
-    /* The wordmark is built like stacked blocks: every letter is extruded
-       downward in its own darker shade, a crimson half and an azure half —
-       the war, in two syllables. */
-    #overlay #title {
-      margin: clamp(14px, 2.2vh, 20px) 0 0;
-      font-family: 'Lucida Console', Monaco, monospace; font-weight: 700;
-      font-size: clamp(56px, 9.6vw, 128px); line-height: .9;
-      letter-spacing: clamp(2px, .6vw, 9px);
-    }
-    #title span { display: inline-block; }
-    #title span:not(.accent) {
-      color: var(--azure);
-      text-shadow:
-        0 2px 0 #2860c6, 0 4px 0 #2253b0, 0 6px 0 var(--azure-deep),
-        0 8px 0 #173f8c, 0 18px 26px rgba(27,74,163,.26), 0 26px 50px rgba(18,32,50,.18);
-    }
-
     .mc-btn {
       font-family: inherit; font-size: 16px; font-weight: bold; cursor: pointer; color: #eef7fa;
       padding: 10px 26px; background: linear-gradient(#6f7a80, #4e575c); border: 2px solid;
@@ -916,37 +809,7 @@
     .mc-btn:hover { filter: brightness(1.14); transform: translateY(-1px); }
     .mc-btn:active { transform: translateY(1px); }
 
-    /* Title buttons: white paper with an ink primary. */
-    #overlay .mc-btn {
-      position: relative; overflow: hidden;
-      display: inline-flex; align-items: center; justify-content: center; gap: 9px;
-      min-height: 50px; padding: 12px 18px; border: 1px solid rgba(18,32,50,.12); border-radius: 14px;
-      font-size: 13px; font-weight: 750; letter-spacing: .5px;
-      color: var(--ink); background: #fff;
-      box-shadow: 0 6px 16px rgba(28,52,86,.10), inset 0 -1px 0 rgba(18,32,50,.06);
-      transition: transform .12s, background .14s, box-shadow .14s, color .14s, border-color .14s;
-    }
-    #overlay .mc-btn svg { width: 19px; height: 19px; flex: none; }
-    #overlay .mc-btn:hover {
-      filter: none; transform: translateY(-2px); border-color: rgba(18,32,50,.2);
-      box-shadow: 0 12px 26px rgba(28,52,86,.16), inset 0 -1px 0 rgba(18,32,50,.06);
-    }
-    #overlay .mc-btn:active { transform: translateY(0); }
-    #overlay .mc-btn:focus-visible { outline: 2.5px solid var(--focus); outline-offset: 2px; }
-    @media (max-width: 640px), (max-height: 720px) {
-      #overlay {
-        gap: 14px;
-        padding: calc(18px + var(--safe-top)) calc(16px + var(--safe-right))
-                 calc(18px + var(--safe-bottom)) calc(16px + var(--safe-left));
-      }
-      #overlay #title { font-size: clamp(46px, 15vw, 80px); }
-    }
-    @media (max-height: 700px) { #overlay { justify-content: flex-start; } }
-    @media (prefers-reduced-motion: reduce) {
-      #overlay::before { animation: none; }
-    }
     @keyframes ar-fade { from { opacity: 0; } }
-    @keyframes ar-lift { from { opacity: 0; transform: translateY(22px) scale(.985); } }
 
     /* ── Match HUD ────────────────────────────────────────────────────── */
     .duel-match-hud {
@@ -1128,31 +991,19 @@
       position: absolute; inset: 0; z-index: 30; display: none; align-items: center;
       justify-content: center; overflow: auto;
       padding: calc(20px + var(--safe-top)) 20px calc(20px + var(--safe-bottom));
-      color: #eef4ff; font-family: ui-sans-serif, -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif;
-      background:
-        radial-gradient(ellipse 70% 55% at 50% 8%, color-mix(in srgb, var(--rank) 26%, transparent), transparent 72%),
-        rgba(3,7,14,.95);
-      backdrop-filter: blur(12px);
+      font-family: ui-sans-serif, -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif;
     }
     .duel-result.visible { display: flex; animation: ar-fade .3s ease both; }
     .duel-result-card {
-      position: relative; width: min(720px,100%); max-height: 100%; overflow: auto;
-      padding: clamp(24px,4vw,40px); text-align: center; border-radius: 24px;
-      border: 1px solid color-mix(in srgb, var(--rank) 34%, transparent);
-      background: linear-gradient(165deg, color-mix(in srgb, var(--rank) 13%, transparent), rgba(7,13,23,.97) 44%);
-      box-shadow: 0 40px 110px rgba(0,0,0,.72), inset 0 1px rgba(255,255,255,.09);
-      animation: ar-lift .4s cubic-bezier(.2,.9,.25,1) both;
+      position: relative; max-height: 100%; overflow: auto;
+      padding: clamp(24px,4vw,40px); text-align: center;
     }
-    .duel-result-card[data-reveal-phase="impact"] { animation: ar-result-slam .42s cubic-bezier(.16,.9,.3,1) both; }
-    @keyframes ar-result-slam { from { opacity: 0; transform: scale(1.09); } 55% { transform: scale(.985); } to { transform: scale(1); } }
     .duel-result-kicker { color: var(--rank); font: 900 10px/1 inherit; letter-spacing: 3.4px; text-transform: uppercase; }
     .duel-result h2 {
       margin: 10px 0 4px; font-size: clamp(32px,6.6vw,58px); font-weight: 950; letter-spacing: -1.6px;
       background: linear-gradient(180deg, #fff, color-mix(in srgb, var(--rank) 55%, #fff));
       -webkit-background-clip: text; background-clip: text; color: transparent;
     }
-    .duel-result-card[data-reveal-phase="impact"] > h2 { animation: ar-title-land .4s cubic-bezier(.18,.85,.25,1.25) both; }
-    @keyframes ar-title-land { from { opacity: 0; transform: translateY(-20px) scale(1.1); } }
     .duel-result-summary { color: #93a8c4; font-size: 11.5px; }
     .duel-result-recap { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin-top: 14px; }
     .duel-result-recap span {
@@ -1258,11 +1109,6 @@
     }
     html[data-ui-dark] #pause .mc-btn { box-shadow: 0 6px 18px rgba(0,0,0,.3); }
     html[data-ui-dark] .pause-badge { box-shadow: inset 0 0 0 1px rgba(110,168,255,.2); }
-    html[data-ui-dark] #death { background: rgba(58, 0, 0, .68); }
-    html[data-ui-dark] #death button {
-      background: linear-gradient(#333b46, #222831); color: #dbe4f0;
-      border-color: #4b5666 #12161d #12161d #4b5666;
-    }
 
 
     .pg-hud[hidden], .pg-card[hidden], .pg-banner[hidden], .pg-call[hidden] { display:none !important; }

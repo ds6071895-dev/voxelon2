@@ -8,16 +8,15 @@ import * as THREE from 'three';
 import { itemGeometry, itemGeometrySolid } from './item_geometry';
 import { Item, ITEMS } from './items';
 import { avatarTexture } from './avatartex';
-import { skinColorFor } from './remoteplayers';
+import { skinColorFor } from './avatar';
 
-/** The avatar's glove colour (see buildAvatarBody), lifted a touch so the fist
- *  still reads against a dark screen edge. */
-import { Cosmetics, SHIRT_COLORS, defaultCosmetics } from './character';
+import type { Cosmetics } from './character';
 import type { Atlas } from './textures';
 import { createGunModel, poseGunModel, GUN_FEEL } from './gunmodels';
 import { createGadgetModel, isModeledGadget, poseGadgetModel } from './gadgetmodels';
 import { HEAL_BEAT } from './healuse';
 import { createBowModel, poseBowModel, poseBowDraw } from './bowmodel';
+import { cloneModelMaterials } from './model_bake';
 
 /** 0..1 ease with flat ends, clamped outside the range. */
 function smoothstep(x: number): number {
@@ -160,14 +159,11 @@ export class HeldItemView {
   // bottom-right, parented to the pivot so it swings/recoils with the item,
   // plus a support hand that rides the foregrip of any two-handed weapon.
   private readonly armMat: THREE.MeshBasicMaterial;
-  private readonly sleeveMat: THREE.MeshBasicMaterial;
   private readonly gloveMat: THREE.MeshBasicMaterial;
   private readonly arm: THREE.Group;
   private readonly offArm: THREE.Group;
   private readonly baseSkin = new THREE.Color(0xc89a6a);
-  private readonly baseSleeve = new THREE.Color(0x3f6f9c);
   private readonly ownSkin = new THREE.Color(0xc89a6a);
-  private readonly ownSleeve = new THREE.Color(0x3f6f9c);
   private paws = false;
 
   private readonly scratch = new THREE.Vector3();
@@ -229,9 +225,6 @@ export class HeldItemView {
     this.armMat = new THREE.MeshBasicMaterial({
       color: this.baseSkin.clone(), map: avatarTexture('skin'),
     });
-    this.sleeveMat = new THREE.MeshBasicMaterial({
-      color: this.baseSleeve.clone(), map: avatarTexture('cloth'),
-    });
     // Bare hands, like the avatar's: short sleeves, the fist is your own skin.
     this.gloveMat = new THREE.MeshBasicMaterial({
       color: this.baseSkin.clone(), map: avatarTexture('skin'),
@@ -261,7 +254,7 @@ export class HeldItemView {
       new THREE.BoxGeometry(0.185 * scale, 0.185 * scale, 0.1), this.armMat);
     wrist.position.set(0, 0, 0.09); // bare skin between the cuff and the grip
     arm.add(wrist);
-    arm.add(new THREE.Mesh( // gloved fist, at the item's own position
+    arm.add(new THREE.Mesh( // bare fist, at the item's own position
       new THREE.BoxGeometry(0.21 * scale, 0.21 * scale, 0.2 * scale), this.gloveMat));
     arm.renderOrder = 99; // just behind the item
     return arm;
@@ -270,18 +263,16 @@ export class HeldItemView {
   /** Tint the first-person hand to the local player's skin tone — cosmetics-
    *  aware (so your own hand matches the avatar everyone else sees). */
   setSkin(seed: number, cosmetics?: Cosmetics): void {
-    const c = cosmetics ?? defaultCosmetics(seed);
     this.ownSkin.copy(skinColorFor(seed, cosmetics));
-    this.ownSleeve.setHex(SHIRT_COLORS[c.shirt]?.hex ?? SHIRT_COLORS[0].hex);
-    if (!this.paws) { this.baseSkin.copy(this.ownSkin); this.baseSleeve.copy(this.ownSleeve); }
+    if (!this.paws) this.baseSkin.copy(this.ownSkin);
   }
 
   /** Rat and Seek: a rat's first-person "arm" is a furry leg and a pink paw. */
   setPaws(on: boolean): void {
     if (on === this.paws) return;
     this.paws = on;
-    if (on) { this.baseSkin.setHex(0xe8a0a8); this.baseSleeve.setHex(0x6b4a35); }
-    else { this.baseSkin.copy(this.ownSkin); this.baseSleeve.copy(this.ownSleeve); }
+    if (on) this.baseSkin.setHex(0xe8a0a8);
+    else this.baseSkin.copy(this.ownSkin);
   }
 
   /** Show only in active first-person gameplay; item state is tracked separately. */
@@ -320,13 +311,7 @@ export class HeldItemView {
         // The gun shares cached geometry AND materials with every other copy in the
         // world, so the first-person one needs its own material instances
         // before it can be tinted by the light where the player is standing.
-        model.traverse((o) => {
-          const m = o as THREE.Mesh;
-          if (!m.isMesh || m.userData.glow) return;
-          const mat = (m.material as THREE.MeshBasicMaterial).clone();
-          this.modelMats.push(mat);
-          m.material = mat;
-        });
+        this.modelMats = cloneModelMaterials(model, true);
         this.mesh = model;
         this.partCycle = model.getObjectByName(GUN_FEEL.cyclePart) ?? null;
         this.partMag = model.getObjectByName('mag') ?? null;
@@ -338,23 +323,12 @@ export class HeldItemView {
       } else if (id === Item.BridgeBow) {
         this.mesh = createBowModel();
         poseBowModel(this.mesh, 'firstPerson');
-        this.mesh.traverse(o => {
-          if (!(o instanceof THREE.Mesh)) return;
-          const mat = (o.material as THREE.MeshBasicMaterial).clone();
-          mat.userData.bowColor = mat.color.getHex();
-          this.modelMats.push(mat);
-          o.material = mat;
-        });
+        this.modelMats = cloneModelMaterials(this.mesh);
+        for (const mat of this.modelMats) mat.userData.bowColor = mat.color.getHex();
       } else if (this.isGadgetModel) {
         const model = createGadgetModel();
         poseGadgetModel(model, 'firstPerson');
-        model.traverse((o) => {
-          const mesh = o as THREE.Mesh;
-          if (!mesh.isMesh) return;
-          const mat = (mesh.material as THREE.MeshBasicMaterial).clone();
-          this.modelMats.push(mat);
-          mesh.material = mat;
-        });
+        this.modelMats = cloneModelMaterials(model);
         this.mesh = model;
         this.partPad = model.getObjectByName('pad') ?? null;
         this.partSpring = model.getObjectByName('spring') ?? null;
@@ -470,7 +444,6 @@ export class HeldItemView {
     const shade = 0.55 + 0.45 * sunlight;
     this.material.color.setScalar(shade);
     this.armMat.color.copy(this.baseSkin).multiplyScalar(shade);
-    this.sleeveMat.color.copy(this.baseSleeve).multiplyScalar(shade);
     this.gloveMat.color.copy(this.baseSkin).multiplyScalar(shade);
     // A real block-breaking attempt swings the whole hand/item pivot regardless
     // of what is held. Gunfire still uses recoil because main only passes true

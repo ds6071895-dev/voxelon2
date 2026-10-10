@@ -97,12 +97,12 @@ export function poseBowDraw(root: THREE.Object3D, power: number, release = 0, ti
   arrow.visible = release < .15;
 }
 
-export function poseBowModel(root: THREE.Object3D, view: 'firstPerson' | 'avatar' | 'drop'): void {
+export function poseBowModel(root: THREE.Object3D, view: 'firstPerson' | 'avatar'): void {
   if (view === 'firstPerson') {
     root.scale.setScalar(.82);
     root.rotation.set(0, -.12, -.15);
   } else if (view === 'avatar') {
     root.position.set(0, -.48, -.2);
     root.rotation.set(-.3, 0, -.12);
-  } else root.scale.setScalar(.45);
+  }
 }

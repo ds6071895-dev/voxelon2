@@ -31,6 +31,7 @@ export const PARTY_MAX = 4;        // most members one party can hold
 
 /** The games on the title screen. */
 export type GameMode = 'duels' | 'bridge' | 'parkour' | 'ratseek' | 'bedwars';
+export const GAME_MODES: readonly GameMode[] = ['duels', 'bridge', 'parkour', 'ratseek', 'bedwars'];
 export function isGameMode(v: unknown): v is GameMode {
   return v === 'duels' || v === 'bridge' || v === 'parkour' || v === 'ratseek' || v === 'bedwars';
 }
@@ -118,6 +119,8 @@ export type ClientMsg =
   | { t: 'leaveMatch' }
   // The spawn bubble of the world you were sent to is built.
   | { t: 'worldReady'; world: number; revision?: number }
+  /** Recover identity/pose for a remote missing from the local roster. */
+  | { t: 'roster'; world: number }
   // In-world.
   // `seq` echoes the newest `respawned`/`teleport` seq this client has
   // applied: a transform sent before it knew it had been moved is stale.
@@ -214,12 +217,12 @@ export type ServerMsg =
   | { t: 'rsResult'; result: RsResult }
   | { t: 'bwArena'; world: WorldSpec; team: number; spawn: { x: number; y: number; z: number }; yaw: number }
   | { t: 'bwState'; s: BwSnapshot }
-  | { t: 'bwKit'; slots: (ItemStack | null)[]; selected?: number }
+  | { t: 'bwKit'; slots: (ItemStack | null)[]; selected?: number; placement?: number }
   /** World items: spawns, stack-size changes and pickups/merges. `reset` replaces the whole set (join/reconnect). */
   | { t: 'bwDrop'; reset?: boolean; add?: BwDropView[]; gone?: { id: number; by?: number; into?: number }[]; count?: { id: number; count: number }[] }
   | { t: 'bwProj'; p: BwProjectileView[] }
   /** The server refused a block placement the client had already shown. */
-  | { t: 'bwNack'; x: number; y: number; z: number }
+  | { t: 'bwNack'; x: number; y: number; z: number; prediction?: number }
   | { t: 'bwEvent'; text: string; tone?: string }
   | { t: 'bwBuyResult'; request: number; ok: boolean; message: string }
   | { t: 'bwResult'; result: BwResult };

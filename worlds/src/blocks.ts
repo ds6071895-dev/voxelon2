@@ -119,8 +119,8 @@ export const enum Block {
   ManorExchangeTop = 161,
 }
 
-/** Atlas tiles. Ids are the atlas cell index (and seed each tile's art), so
- *  they are kept stable rather than renumbered. */
+/** Atlas cells, independent of the stable block/item wire IDs. Cell indices
+ *  also seed the art; keep them stable unless resolving an allocation clash. */
 export const enum Tile {
   GrassTop = 0,
   GrassSide = 1,
@@ -185,8 +185,9 @@ export const enum Tile {
   VaultMosaic = 231,
   TeamWoolA = 265,
   TeamWoolB = 266,
-  TeamWoolC = 315,
-  TeamWoolD = 316,
+  // Separate from the manor rug cells 314..329.
+  TeamWoolC = 296,
+  TeamWoolD = 297,
   PartyTileC = 267,
   PartyTileD = 268,
   BridgeBow = 271,
@@ -242,6 +243,7 @@ export const enum Tile {
   ManorMousetrap = 359,
   ManorLever = 360,
   ManorExchangeFront = 361,
+  /** Reserved legacy atlas cell; the live Exchange uses IronTop/Cap/Dome. */
   ManorExchangeTop = 362,
   ManorExchangeDome = 363,
   ManorExchangeCap = 364,
@@ -261,6 +263,7 @@ export const enum Tile {
   CheeseMagnet = 382,
   DecoyRat = 383,
   Disarm = 384,
+  /** Reserved legacy sprite cell; loose cheese uses createCheeseModel. */
   Cheese = 385,
   ClassScout = 386,
   ClassThief = 387,

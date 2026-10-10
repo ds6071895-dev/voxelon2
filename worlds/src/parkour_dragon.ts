@@ -4,10 +4,10 @@
 // fire hits. This draws it: a jointed voxel rig whose neck, body and tail
 // follow the head along its own flight trail, so it snakes round the course
 // the way it flew, wings beating and jaw opening as it breathes. Fireballs
-// are drawn along the same lob the server resolves, with a warning ring on
-// the ground where each one will come down.
+// draw a lob toward the authoritative endpoint, with a warning ring on the
+// ground. The server checks endpoint damage, not the presentation's flight arc.
 import * as THREE from 'three';
-import { box, joint } from './ratseek_models';
+import { box, joint } from './model_primitives';
 import type { ParkourCourse } from './parkour_course';
 import {
   DRAGON_GRACE_MS, DRAGON_LAIR_FRONT, FIREBALL_RADIUS, dragonPoint, fireballAt,
@@ -69,6 +69,8 @@ export class DragonView {
   private readonly ringGeo = new THREE.TorusGeometry(FIREBALL_RADIUS, .09, 6, 40);
   private readonly discGeo = new THREE.CircleGeometry(FIREBALL_RADIUS, 32);
   private emitAcc = 0;
+  /** Materials created for this rig; box()'s default material is shared. */
+  private rigMaterials: THREE.Material[] = [];
 
   constructor(scene: THREE.Scene, private readonly particles: Particles) {
     scene.add(this.root);
@@ -81,6 +83,7 @@ export class DragonView {
     this.clear();
     this.course = course;
     this.offset.set(minX, 0, minZ);
+    this.headPos.set(course.lair.x + minX, course.lair.y, course.lair.z + minZ);
     this.build(theme.dragon);
     this.front = this.shown = DRAGON_LAIR_FRONT;
     this.speed = 0;
@@ -92,13 +95,34 @@ export class DragonView {
   clear(): void {
     for (const f of this.flights) this.dropFlight(f);
     this.flights = [];
+    const geometries = new Set<THREE.BufferGeometry>();
+    this.model.traverse((o) => { if (o instanceof THREE.Mesh) geometries.add(o.geometry); });
+    for (const geometry of geometries) geometry.dispose();
+    for (const material of this.rigMaterials) material.dispose();
+    this.rigMaterials = [];
     this.model.clear();
     this.segments = [];
     this.wings = [];
     this.legs = [];
     this.head = this.jaw = null;
     this.course = null;
+    this.trail = [];
+    this.front = this.shown = DRAGON_LAIR_FRONT;
+    this.speed = this.syncAt = this.flap = this.breathUntil = this.emitAcc = 0;
+    this.lastFlapSign = 1;
+    this.awake = false;
+    this.headPos.set(0, 0, 0);
+    this.offset.set(0, 0, 0);
     this.root.visible = false;
+  }
+  /** Final teardown; shared fire and box materials stay owned by their module. */
+  dispose(): void {
+    this.clear();
+    this.root.removeFromParent();
+    this.ballGeo.dispose();
+    this.coreGeo.dispose();
+    this.ringGeo.dispose();
+    this.discGeo.dispose();
   }
   /** The server's position report. */
   sync(front: number, speed: number, at: number): void {
@@ -258,6 +282,7 @@ export class DragonView {
     const BODY = c.body, BELLY = c.belly, WING = c.wing, DARK = new THREE.Color(c.body).multiplyScalar(.6).getHex();
     const HORN = 0xe8dcc0;
     const eye = EYE_MAT.clone();
+    this.rigMaterials.push(eye);
     eye.color.setHex(c.eye);
     const seg = (at: number): THREE.Group => {
       const g = new THREE.Group();

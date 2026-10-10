@@ -6,7 +6,22 @@ import { BLOCKS, BlockInfo, Tile } from './blocks';
 import { ITEMS } from './items';
 import { TILE_PX, tileOrigin, type Atlas } from './textures';
 
-const geoCache = new Map<number, THREE.BufferGeometry>();
+// Geometry embeds UVs and (for slabs) the atlas's pixel silhouette. Copies
+// borrow these geometries; a different atlas must never reuse them.
+interface GeometryCache {
+  items: Map<number, THREE.BufferGeometry>;
+  blocks: Map<number, THREE.BufferGeometry>;
+  solids: Map<string, THREE.BufferGeometry>;
+}
+const atlasCaches = new WeakMap<Atlas, GeometryCache>();
+function cacheFor(atlas: Atlas): GeometryCache {
+  let cache = atlasCaches.get(atlas);
+  if (!cache) {
+    cache = { items: new Map(), blocks: new Map(), solids: new Map() };
+    atlasCaches.set(atlas, cache);
+  }
+  return cache;
+}
 
 const GRASS_TINT: [number, number, number] = [0.57, 0.74, 0.35];
 
@@ -56,10 +71,9 @@ function buildCubeGeometry(atlas: Atlas, block: BlockInfo): THREE.BufferGeometry
   return geo;
 }
 
-const blockCache = new Map<number, THREE.BufferGeometry>();
-
 /** A 0.25 textured cube of a placed block (no item needed), e.g. scenery. */
 export function blockCubeGeometry(atlas: Atlas, blockId: number): THREE.BufferGeometry {
+  const blockCache = cacheFor(atlas).blocks;
   let geo = blockCache.get(blockId);
   if (!geo) { geo = buildCubeGeometry(atlas, BLOCKS[blockId]); blockCache.set(blockId, geo); }
   return geo;
@@ -68,6 +82,7 @@ export function blockCubeGeometry(atlas: Atlas, blockId: number): THREE.BufferGe
 /** Mini-cube for cube blocks, a solid pixel slab for items, a flat card for
  *  the odd non-cube block (plants, torches). */
 export function itemGeometry(atlas: Atlas, id: number): THREE.BufferGeometry {
+  const geoCache = cacheFor(atlas).items;
   let geo = geoCache.get(id);
   if (geo) return geo;
   const info = ITEMS[id];
@@ -99,8 +114,6 @@ export function itemGeometry(atlas: Atlas, id: number): THREE.BufferGeometry {
   return geo;
 }
 
-const solidCache = new Map<number, THREE.BufferGeometry>();
-
 /** A sprite item as a thin slab of real pixels (front, back and a visible rim
  *  made of each exposed pixel's own colour). Unlike the single flat plane in
  *  `itemGeometry`, it still reads as an object when it turns edge-on, which is
@@ -109,7 +122,8 @@ const solidCache = new Map<number, THREE.BufferGeometry>();
 export function itemGeometrySolid(atlas: Atlas, id: number, size = 0.45, depth = 0.04): THREE.BufferGeometry {
   const info = ITEMS[id];
   if (!info || info.kind === 'block' || info.sprite === undefined) return itemGeometry(atlas, id);
-  const key = id * 1000 + Math.round(size * 100) * 10 + Math.round(depth * 100);
+  const solidCache = cacheFor(atlas).solids;
+  const key = `${id}:${size}:${depth}`;
   const cached = solidCache.get(key);
   if (cached) return cached;
   const tile = info.sprite, { x: ox, y: oy } = tileOrigin(tile);

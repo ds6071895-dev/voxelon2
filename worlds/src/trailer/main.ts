@@ -4,21 +4,22 @@ import * as THREE from 'three';
 import { createAtlas } from '../textures';
 import { World } from '../world';
 import { worldGenerator } from '../multiverse';
-import { TitleTerrain, TITLE_SEA } from '../title_terrain';
+import { TitleTerrain } from '../title_terrain';
 import { TEXTURE_SEED } from '../title_backdrop';
 import { Sky } from '../sky';
 import { PostFX } from '../postfx';
 import { SunShadow } from '../shadows';
 import { Particles } from '../particles';
 import { DragonView } from '../parkour_dragon';
-import { parkourCourse, parkourStandSpot, type ParkourPlatform } from '../parkour_course';
 import { parkourTheme } from '../parkour_themes';
-import { buildAvatarBody, poseGunHold, releaseGunHold, stridePose } from '../remoteplayers';
+import { buildAvatarBody, poseGunHold, releaseGunHold } from '../avatar';
 import { defaultCosmetics } from '../character';
 import { createGunModel, poseGunModel } from '../gunmodels';
 import { createRatModel, createCheeseModel } from '../ratseek_models';
-import { isSolid } from '../blocks';
-import { createHeldAxe, fitHands, muzzleLine, PALM } from './grips';
+import { createHeldAxe, fitHands, muzzleLine, PALM } from '../media/grips';
+import { configureCaptureQuality, sizeCapture, loadCaptureChunks, poseCaptureStride } from '../media/offline';
+import { warmCaptureDragon } from '../media/dragon';
+import { createTrailerCourse, trailerShotContext, trailerCamera, trailerActorPoses, trailerRatPoses, trailerDragonCue, captureSmooth as smooth } from './staging';
 import { SHOTS, SCREENSHOTS, RELEASE, DURATION, type Shot } from './shots';
 
 const params = new URLSearchParams(location.search);
@@ -42,22 +43,12 @@ sky.setShaders(true);
 const postfx = new PostFX(renderer, scene);
 const shadows = new SunShadow(renderer, scene, atlas.texture, world.shadowUniforms);
 const effects = params.get('quality') !== 'high';
-postfx.setEnabled(effects);
-postfx.setTier(params.get('quality') === 'max' ? 0 : 1);
-shadows.setEnabled(effects);
-shadows.setTier(1);
+configureCaptureQuality(renderer, postfx, shadows, effects, effects, params.get('quality') === 'max' ? 0 : 1, 1);
 world.shaderModeUniform.value = effects ? 1 : 0;
 const particles = new Particles(scene);
 const dragon = new DragonView(scene, particles);
 
-// Choose one reproducible course with the two hero locations in the edit.
-let seed = 2026;
-for (; seed < 3026; seed += 8) {
-  const pieces = parkourCourse(seed).variant.pieces;
-  if (pieces.includes('rooftops') && pieces.includes('waterfall')) break;
-}
-if (seed >= 3026) throw new Error('No trailer course with rooftops and waterfall found.');
-const course = parkourCourse(seed);
+const { seed, course } = createTrailerCourse();
 const actors = [0xe25360, 0x548af2, 0xedb957, 0x48bda0].map((color, i) => {
   const body = buildAvatarBody(defaultCosmetics(300 + i * 371), new THREE.Color(color));
   scene.add(body.group);
@@ -106,48 +97,18 @@ let previewStart = 0;
 let width = 1920, height = 1080;
 
 function resize(w: number, h: number): void {
+  sizeCapture(renderer, postfx, camera, w, h);
   width = w; height = h;
   canvas.width = w; canvas.height = h;
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-  renderer.setSize(w, h, false);
-  postfx.setSize(w, h);
 }
 resize(Number(params.get('width')) || 1920, Number(params.get('height')) || 1080);
 
-const clamp = (t: number) => Math.max(0, Math.min(1, t));
-const smooth = (t: number) => { const k = clamp(t); return k * k * (3 - 2 * k); };
-function cam(from: number[], to: number[], target: number[], k: number, fov = 58): void {
-  camera.position.fromArray(from).lerp(new THREE.Vector3().fromArray(to), smooth(k));
-  camera.lookAt(new THREE.Vector3().fromArray(target));
-  camera.fov = fov;
-  camera.updateProjectionMatrix();
-}
-
 function shotCamera(s: Shot, t: number): void {
-  const k = t / s.duration;
-  if (s.set === 'lake') {
-    cam([25, TITLE_SEA + 13, 25], [-12, TITLE_SEA + 22, 25], [-48, TITLE_SEA + 25, -42], k, 62);
-  } else if (s.set === 'bridge') {
-    if (s.action === 'scenery') cam([-28, 164, 6], [-19, 156, 60], [12, 143, 40], k, 64);
-    else cam([13.8, 143.6, 32], [13.8, 143.1, 34.5], [12.5, 142, 40], k, 54);
-  } else if (s.set === 'duel') {
-    if (s.action === 'scenery') cam([49, 124, 47], [36, 115, 45], [22, 99, 22], k, 61);
-    else cam([16, 102.2, 27], [16.5, 101.2, 18], [23, 99.2, 22], k, 58);
-  } else if (s.set === 'manor') {
-    if (s.action === 'scenery') cam([44, 111, 46], [32, 104, 41], [0, 91, 0], k, 60);
-    else if (s.action === 'rescue') cam([30.5, 82.2, 7], [29.5, 82, 6], [26.5, 81.5, 0], k, 62);
-    else cam([1.8, 81.75, -4 - t * .65], [1.8, 81.75, -4 - t * .65], [0, 81.6, 1 - t * .3], k, 64);
-  } else {
-    const a = anchor;
-    if (s.action === 'finish') cam([a.x + 21, a.y + 10, a.z - 18], [a.x + 13, a.y + 7, a.z - 11], [a.x, a.y + 2, a.z], k, 62);
-    else if (s.action === 'dragon') {
-      const head = dragon.headPosition();
-      cam([a.x + 15, a.y + 8, a.z + 22], [a.x + 10, a.y + 6, a.z + 21], [head.x, head.y - 1, head.z + 3], k, 64);
-    } else if (s.piece === 'waterfall') {
-      cam([a.x + 33, a.y + 24, a.z - 20], [a.x + 25, a.y + 13, a.z + 15], [a.x, a.y + 3, a.z + 12], k, 66);
-    } else cam([a.x + 19, a.y + 13, a.z - 12], [a.x + 14, a.y + 6, a.z + 13], [a.x, a.y + 1, a.z + 10], k, 64);
-  }
+  const pose = trailerCamera(s, t, { anchor, firstOrder }, dragon.headPosition());
+  camera.position.copy(pose.position);
+  camera.lookAt(pose.target);
+  camera.fov = pose.fov;
+  camera.updateProjectionMatrix();
 }
 
 async function prepare(index: number): Promise<void> {
@@ -178,16 +139,9 @@ async function prepare(index: number): Promise<void> {
   const tod = s.set === 'manor' ? .10 : s.set === 'lake' ? .11 : .14;
   sky.snapTo(tod);
   if (s.set === 'parkour') {
-    const section = course.sections.find(p => p.piece === (s.piece ?? 'rooftops'))!;
-    firstOrder = Math.min(section.toOrder - 5, section.fromOrder + 5);
-    const p = s.action === 'finish' ? course.finish : course.steps[firstOrder][0];
-    anchor = new THREE.Vector3(p.x, p.y, p.z);
+    ({ firstOrder, anchor } = trailerShotContext(s, course));
     dragon.enter(course, parkourTheme(seed), 0, 0);
-    // Warm the flight trail, so the dragon is already airborne at the cut.
-    for (let i = 0; i < 90; i++) {
-      dragon.sync(firstOrder - 8 + i * .055, 1.5, 20000 + i * 33);
-      dragon.update(1 / 30, 20000 + i * 33, 0, true);
-    }
+    warmCaptureDragon(dragon, firstOrder);
   }
   shotCamera(s, s.duration / 2);
   const center = s.set === 'lake' ? new THREE.Vector3(0, 0, 0)
@@ -195,12 +149,7 @@ async function prepare(index: number): Promise<void> {
       : s.set === 'duel' ? new THREE.Vector3(22, 0, 22)
         : s.set === 'manor' ? new THREE.Vector3(4, 0, 5) : anchor;
   const radius = s.set === 'lake' ? 8 : s.set === 'parkour' ? 7 : 4;
-  world.renderDistance = radius;
-  const deadline = performance.now() + 180000;
-  while (!world.update(center.x, center.z, 30, radius)) {
-    if (performance.now() > deadline) throw new Error(`Chunk loading timed out for ${s.id}`);
-    await new Promise(resolve => setTimeout(resolve, 0));
-  }
+  await loadCaptureChunks(world, center.x, center.z, radius, 30, s.id);
   render(0);
   status.textContent = s.id;
 }
@@ -211,11 +160,7 @@ function poseActor(i: number, p: THREE.Vector3, yaw: number, t: number, gun = fa
   a.body.group.visible = true;
   a.body.group.position.copy(p);
   a.body.group.rotation.y = yaw;
-  const pose = stridePose(t * 9 + i, speed, 0, gun || attack > 0, attack);
-  a.body.parts[0].rotation.x = pose.legs[0];
-  a.body.parts[1].rotation.x = pose.legs[1];
-  a.body.parts[2].rotation.set(pose.arms[0], 0, 0);
-  a.body.parts[3].rotation.set(pose.arms[1], 0, pose.rightArmRoll);
+  poseCaptureStride(a.body, t * 9 + i, speed, gun || attack > 0, attack);
   a.gun.visible = gun;
   a.axe.visible = !gun && attack > 0;
   if (gun) {
@@ -224,30 +169,12 @@ function poseActor(i: number, p: THREE.Vector3, yaw: number, t: number, gun = fa
   }
 }
 
-function ground(x: number, z: number): number {
-  for (let y = 110; y >= 96; y--) if (isSolid(generator.blockAt(Math.floor(x), y, Math.floor(z)))) return y + 1.01;
-  return 97.01;
-}
-
-function stand(p: ParkourPlatform): THREE.Vector3 {
-  const at = parkourStandSpot(course, p);
-  return new THREE.Vector3(at.x, at.y, at.z);
-}
-
 function animate(t: number, dt: number): void {
   const s = SHOTS[shotIndex];
-  if (s.action === 'bridge') {
-    const approach = Math.min(1, t / 2.5);
-    const dist = 7 * (1 - approach) + .9;
-    const swing = t > 2 ? Math.max(.1, Math.sin(t * 8)) : .15;
-    poseActor(0, new THREE.Vector3(12.5, 141.01, 40 - dist), Math.PI, t, false, swing);
-    poseActor(1, new THREE.Vector3(12.5, 141.01, 40 + dist), 0, t + .6, false, swing);
-  } else if (s.action === 'duel') {
-    for (let i = 0; i < 2; i++) {
-      const x = 21 + Math.sin(t * 1.1 + i * Math.PI) * 3;
-      const z = 21 + (i ? -3 : 3) + Math.cos(t * .9) * .7;
-      poseActor(i, new THREE.Vector3(x, ground(x, z), z), i ? Math.PI : 0, t + i, true);
-    }
+  for (const pose of trailerActorPoses(s, t, { anchor, firstOrder }, course, generator)) {
+    poseActor(pose.index, pose.position, pose.yaw, pose.time, pose.gun, pose.attack, pose.speed);
+  }
+  if (s.action === 'duel') {
     const { origin, direction } = muzzleLine(actors[0].gun);
     flash.visible = t > .5 && t % .5 < .1;
     flash.position.copy(origin);
@@ -255,35 +182,22 @@ function animate(t: number, dt: number): void {
     tracer.position.copy(origin).addScaledVector(direction, 2);
     tracer.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), direction);
   } else if (s.action === 'run' || s.action === 'dragon') {
-    for (let i = 0; i < 3; i++) {
-      const progress = Math.max(0, t * 1.35 - i * .7);
-      const order = firstOrder + Math.floor(progress);
-      const a = course.steps[Math.min(order, course.steps.length - 2)][0];
-      const b = course.steps[Math.min(order + 1, course.steps.length - 1)][0];
-      const k = progress % 1;
-      const from = stand(a), to = stand(b);
-      const p = from.clone().lerp(to, k);
-      p.y += 4 * 1.25 * k * (1 - k);
-      const yaw = Math.atan2(-(to.x - from.x), -(to.z - from.z));
-      poseActor(i, p, yaw, t + i, false, 0, 5.6);
-    }
-    dragon.sync(firstOrder - 3 + t * 1.2, 1.2, 23000 + t * 1000);
+    const cue = trailerDragonCue(t, firstOrder);
+    dragon.sync(cue.front, cue.speed, cue.now);
     if (s.action === 'dragon' && t > 1.4 && !fireSent) {
       const target = actors[0].body.group.position;
       dragon.fireball({ id: 1, tx: target.x, ty: target.y, tz: target.z + 5, launchAt: 24500, landAt: 26700 });
       fireSent = true;
     }
-    dragon.update(dt, 23000 + t * 1000, 0, false);
-  } else if (s.action === 'finish') {
-    course.podium.forEach((p, i) => poseActor(i, new THREE.Vector3(p.x, p.y, p.z), 0, t + i, false, .5 + Math.sin(t * 3) * .3, 0));
+    dragon.update(dt, cue.now, 0, false);
   } else if (s.action === 'rats') {
-    rats.slice(0, 2).forEach((r, i) => {
+    trailerRatPoses(s, t).forEach((pose, i) => {
+      const r = rats[i];
       r.group.visible = true;
-      r.group.position.set(i ? -.8 : .4, 81, 1.5 - t * .8 + i * 1.8);
-      r.group.rotation.y = 0;
-      r.pose(5, t * 7 + i, t);
+      r.group.position.fromArray(pose.position);
+      r.group.rotation.y = pose.yaw;
+      r.pose(pose.speed, pose.phase, t);
     });
-    poseActor(0, new THREE.Vector3(-.2, 81, 5.5 - t * .8), 0, t, false, 0, 4);
     cheese.visible = true;
     cheese.position.copy(rats[0].group.position).add(new THREE.Vector3(0, .32, -.48));
     cheese.scale.setScalar(.55);
@@ -293,11 +207,12 @@ function animate(t: number, dt: number): void {
       rats[2].setCaged(false);
       freed = true;
     }
-    rats.forEach((r, i) => {
+    trailerRatPoses(s, t, freed).forEach((pose, i) => {
+      const r = rats[i];
       r.group.visible = true;
-      r.group.position.set(i === 2 && !freed ? 29.5 : 25.5 + i * .8, 81, i === 2 && !freed ? 0 : 2 - t);
-      r.group.rotation.y = .5;
-      r.pose(freed ? 4 : 0, t * 8 + i, t);
+      r.group.position.fromArray(pose.position);
+      r.group.rotation.y = pose.yaw;
+      r.pose(pose.speed, pose.phase, t);
     });
     cheese.visible = !freed;
     cheese.position.set(25.2, 81.5, .5);
@@ -468,6 +383,22 @@ const api = {
   prepare, render, resize,
   setExporting(on: boolean) { exporting = on; previewing = false; document.getElementById('controls')!.hidden = on; },
   get logoSVG() { return logoSVG; },
+  /** Cheap capture diagnostics; samples the actual stage without advancing it. */
+  info() {
+    const s = SHOTS[shotIndex];
+    return {
+      seed, shot: s?.id, time: lastTime, firstOrder,
+      anchor: anchor.toArray(), camera: camera.position.toArray(), fov: camera.fov,
+      target: s ? trailerCamera(s, lastTime, { anchor, firstOrder }, dragon.headPosition()).target.toArray() : null,
+      head: dragon.headPosition().toArray(),
+      actors: actors.filter(a => a.body.group.visible).map(a => ({
+        position: a.body.group.position.toArray(), yaw: a.body.group.rotation.y,
+        parts: a.body.parts.map(p => ({ rotation: p.rotation.toArray(), scale: p.scale.toArray() })),
+        gun: a.gun.visible, axe: a.axe.visible,
+      })),
+      rats: rats.filter(r => r.group.visible).map(r => r.group.position.toArray()),
+    };
+  },
   validateRig() {
     const failures: string[] = [];
     for (const a of actors.filter(a => a.body.group.visible)) {

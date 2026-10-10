@@ -17,13 +17,15 @@ import { Block, isSolid } from './blocks';
 import { Item } from './items';
 import { Player } from './player';
 import { FROZEN_INPUT, type PlayerInput } from './input';
-import type { World } from './world';
+import type { PhysicsWorld } from './physics_world';
 import { BW_Y } from './bedwars_map';
 import type { BedwarsMatch, BwPlayer } from './bedwars';
 import { BW, BW_RESOURCE_ITEM, bwToolOf, type BwPos, type BwResource, type BwTeam } from './bedwars_rules';
 import { bwCatalog, bwPrice } from './bedwars_catalog';
 import { bwCount, bwHas } from './bedwars_inventory';
 import { bwDistance, bwKey, bwLine, bwPath } from './bedwars_nav';
+import { bwAttached } from './bedwars_geometry';
+import { bwZoneRadius } from './bedwars_rules';
 
 type Goal = 'forge' | 'shop' | 'defend' | 'diamond' | 'emerald' | 'upgrade' | 'attack' | 'hunt' | 'guard' | 'center';
 type Plan = 'rush' | 'eco' | 'turtle' | 'hybrid';
@@ -46,7 +48,7 @@ export class BedwarsBot {
   plan: Plan = 'hybrid';
   skill: number;
   readonly body: Player;
-  private readonly world: World;
+  private readonly world: PhysicsWorld;
   private readonly baseline: number;
   private request = 1;
   private path: BwPos[] = [];
@@ -98,7 +100,7 @@ export class BedwarsBot {
     this.body = new Player(at ? { x: at.x, y: at.y, z: at.z } : { x: 0, y: STAND, z: 0 });
     this.body.energyDrainMult = 0;
     this.body.damageSink = () => {}; // the match owns health; no fall damage
-    this.world = { getBlock: (x: number, y: number, z: number) => match.host.getBlock(x, y, z), isLoaded: () => true } as unknown as World;
+    this.world = { getBlock: (x: number, y: number, z: number) => match.host.getBlock(x, y, z), isLoaded: () => true };
     this.choosePlan();
   }
 
@@ -694,13 +696,13 @@ export class BedwarsBot {
   }
   private supported(c: BwPos): boolean {
     const get = (x: number, y: number, z: number) => this.match.host.getBlock(x, y, z);
-    return [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].some(([dx, dy, dz]) => isSolid(get(c.x + dx, c.y + dy, c.z + dz)));
+    return bwAttached(get, c);
   }
   private nearEnemyIsland(p: BwPlayer): boolean {
     return this.match.map.bases.some((b) => b.team !== p.team && b.team < this.match.teamCount && bwDistance(this.body.pos, b.center) < 22);
   }
   private foesDown(p: BwPlayer): boolean { return [...this.match.players.values()].every((v) => v.team === p.team || !v.alive); }
-  private zoneRadius(): number { const m = this.match; return Math.max(8, 90 - Math.max(0, m.time - BW.ZONE_AT) / (BW.END_AT - BW.ZONE_AT) * 82); }
+  private zoneRadius(): number { return bwZoneRadius(this.match.time); }
   private have(p: BwPlayer, r: BwResource): number { return bwCount(p.slots, BW_RESOURCE_ITEM[r]); }
   private has(p: BwPlayer, item: number): boolean { return bwCount(p.slots, item) > 0; }
   private wool(p: BwPlayer): number { return bwCount(p.slots, Block.TeamWoolA) + bwCount(p.slots, Block.TeamWoolB); }

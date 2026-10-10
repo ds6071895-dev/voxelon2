@@ -8,7 +8,7 @@
 import { Block } from './blocks';
 import { RS_RELEASE, rsHouse, type RsPos } from './ratseek_house';
 
-export const NAV_MIN_X = -25, NAV_MAX_X = 34, NAV_MIN_Y = 74, NAV_MAX_Y = 100, NAV_MIN_Z = -21, NAV_MAX_Z = 34;
+const NAV_MIN_X = -25, NAV_MAX_X = 34, NAV_MIN_Y = 74, NAV_MAX_Y = 100, NAV_MIN_Z = -21, NAV_MAX_Z = 34;
 const SX = NAV_MAX_X - NAV_MIN_X + 1, SY = NAV_MAX_Y - NAV_MIN_Y + 1, SZ = NAV_MAX_Z - NAV_MIN_Z + 1;
 const CELLS = SX * SY * SZ;
 const STEPS: [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
@@ -36,7 +36,7 @@ export function seeThrough(b: number): boolean {
   return navPassable(b) || b === Block.ManorCageBars || b === Block.ManorLantern || b === Block.ManorFlowerPot;
 }
 
-export function navInside(x: number, y: number, z: number): boolean {
+function navInside(x: number, y: number, z: number): boolean {
   return x >= NAV_MIN_X && x <= NAV_MAX_X && y >= NAV_MIN_Y && y <= NAV_MAX_Y && z >= NAV_MIN_Z && z <= NAV_MAX_Z;
 }
 function index(x: number, y: number, z: number): number {
@@ -214,8 +214,10 @@ export class RsNav {
     return top;
   }
   private heuristic(a: number, b: number): number {
-    const dx = xOf(a) - xOf(b), dz = zOf(a) - zOf(b), dy = yOf(a) - yOf(b);
-    return Math.sqrt(dx * dx + dz * dz) + Math.abs(dy) * 1.2;
+    const dx = Math.abs(xOf(a) - xOf(b)), dz = Math.abs(zOf(a) - zOf(b)), dy = Math.abs(yOf(a) - yOf(b));
+    // Diagonal edges cost 1.414; stairs and drops only add 0.4 per vertical
+    // block. Both lower bounds must use those cheapest actual edge costs.
+    return Math.max(dx, dz) + 0.414 * Math.min(dx, dz) + dy * 0.4;
   }
 
   /** Pulls the grid path taut wherever a straight, level walk fits. */
@@ -246,17 +248,6 @@ export class RsNav {
       }
     }
     return true;
-  }
-
-  /** Path length in blocks (large when unreachable). */
-  static pathLength(path: [number, number, number][] | null): number {
-    if (!path) return 1e6;
-    let total = 0;
-    for (let i = 1; i < path.length; i++) {
-      const a = path[i - 1], b = path[i];
-      total += Math.hypot(a[0] - b[0], a[2] - b[2]) + Math.abs(a[1] - b[1]);
-    }
-    return total;
   }
 
   // ── Perches ────────────────────────────────────────────────────────────

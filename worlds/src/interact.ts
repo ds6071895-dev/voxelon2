@@ -10,6 +10,7 @@ import type { Inventory } from './inventory';
 import { breakTime as blockBreakTime, ITEMS } from './items';
 import type { Player } from './player';
 import type { World } from './world';
+import type { PhysicsWorld } from './physics_world';
 
 const REACH = 4.5;
 const PLACE_REPEAT = 0.25; // vanilla holds place every 4 ticks
@@ -20,7 +21,7 @@ interface RayHit {
 }
 
 export function raycastBlocks(
-  world: World, origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number,
+  world: Pick<PhysicsWorld, 'getBlock'>, origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number,
 ): RayHit | null {
   let x = Math.floor(origin.x);
   let y = Math.floor(origin.y);

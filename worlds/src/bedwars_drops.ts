@@ -21,10 +21,10 @@ const cellTop = (get: BwBlockGetter, x: number, y: number, z: number): number =>
 };
 const supported = (get: BwBlockGetter, d: BwDropBody): boolean => solidAt(get, d.x, d.y - 0.06, d.z);
 
-/** Advances one drop by `dt`. Returns true while it is still moving. */
-export function stepDrop(get: BwBlockGetter, d: BwDropBody, dt: number): boolean {
+/** Advances one drop by `dt`; motion state is stored in the body. */
+export function stepDrop(get: BwBlockGetter, d: BwDropBody, dt: number): void {
   if (d.rest) {
-    if (supported(get, d)) return false;
+    if (supported(get, d)) return;
     d.rest = false; d.vy = 0;
   }
   const steps = Math.max(1, Math.ceil(dt / 0.025)), h = dt / steps;
@@ -40,9 +40,8 @@ export function stepDrop(get: BwBlockGetter, d: BwDropBody, dt: number): boolean
       const cell = Math.floor(ny);
       d.y = cell + cellTop(get, Math.floor(d.x), cell, Math.floor(d.z)) + 0.001;
       if (-d.vy > 3) { d.vy = -d.vy * BOUNCE; d.vx *= 0.7; d.vz *= 0.7; }
-      else { d.vy = 0; d.vx = d.vz = 0; d.rest = true; return false; }
+      else { d.vy = 0; d.vx = d.vz = 0; d.rest = true; return; }
     } else if (d.vy > 0 && solidAt(get, d.x, ny + 0.2, d.z)) d.vy = 0;
     else d.y = ny;
   }
-  return true;
 }

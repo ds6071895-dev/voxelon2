@@ -5,6 +5,7 @@ import {
 } from './partygames';
 import { parkourSectionAt } from './parkour_course';
 import { DRAGON_GRACE_MS, DRAGON_LIVES } from './parkour_mechanics';
+import { BRIDGE_COLORS, formatMatchTime } from './ui/presentation';
 
 function el(tag: string, cls: string, text = ''): HTMLElement {
   const n = document.createElement(tag);
@@ -13,7 +14,7 @@ function el(tag: string, cls: string, text = ''): HTMLElement {
   return n;
 }
 /** Crimson and cobalt, matching the wool each side builds with. */
-const TEAM_CSS = ['#ff5f76', '#5aa8ff'];
+const TEAM_CSS = BRIDGE_COLORS.map(color => `#${color.toString(16).padStart(6, '0')}`);
 const ORDINAL = ['1st', '2nd', '3rd', '4th', '5th', '6th'];
 const ordinal = (n: number): string => ORDINAL[n - 1] ?? `${n}th`;
 const hearts = (n: number): string => '♥'.repeat(Math.max(0, n)) + '♡'.repeat(Math.max(0, DRAGON_LIVES - n));
@@ -102,8 +103,6 @@ export class PartyUI {
       this.track.hidden = true;
     }
   }
-  /** Put the made-it / out card away (Keep watching). */
-  hideDone(): void { this.done.hidden = true; }
   private myTeam(): number {
     return this.snapshot?.participants.find(p => p.id === this.me)?.team ?? 0;
   }
@@ -488,8 +487,7 @@ export class PartyUI {
       this.renderTrack(s, len);
     }
     else if (s.phase === 'running' && s.round) {
-      const secs = Math.max(0, Math.ceil((s.round.endsAt - serverNow) / 1000));
-      text = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+      text = formatMatchTime(s.round.endsAt - serverNow);
       const p = s.participants.find(v => v.id === this.me);
       if (s.goalResetAt && serverNow < s.goalResetAt)
         text += ' · BACK IN YOUR CAGE · THE HATCH DROPS ON GO';

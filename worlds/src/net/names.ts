@@ -65,11 +65,19 @@ export class NameRegistry {
         if (this.claim(name, holder)) return name;
       }
     }
-    // Unreachable in practice (millions of combinations); still never collide.
-    let n = 0;
-    for (;;) {
-      const name = `Player${100000 + n++}`;
-      if (this.claim(name, holder)) return name;
+    // An exhausted or deterministic rng still yields a registrable name. Walk
+    // the generated namespace deterministically instead of inventing a shape
+    // that Accounts would refuse to keep.
+    for (let adjective = 0; adjective < 20; adjective++) {
+      for (let noun = 0; noun < 20; noun++) {
+        for (let tail = 0; tail < 90_000; tail++) {
+          let call = 0;
+          const values = [(adjective + .5) / 20, (noun + .5) / 20, (tail + .5) / 90_000];
+          const name = makeUsername(() => values[call++], 5);
+          if (this.claim(name, holder)) return name;
+        }
+      }
     }
+    throw new Error('Generated name namespace exhausted');
   }
 }

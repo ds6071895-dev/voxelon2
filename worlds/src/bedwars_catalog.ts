@@ -41,7 +41,6 @@ export const BW_CATALOG: readonly BwCatalogEntry[] = [
   { sku: 'heal_pool', name: 'Heal Pool', description: 'Regenerate health near your base.', category: 'upgrades', cost: 1, resource: 'diamond', item: Item.HealingApple, count: 1, type: 'upgrade', upgrade: 'heal', max: 1 },
   { sku: 'trap', name: 'Trap', description: 'Alerts you and slows the next intruder.', category: 'upgrades', cost: 1, resource: 'diamond', item: Item.Mousetrap, count: 1, type: 'upgrade', upgrade: 'trap', max: 1 },
 ];
-export const BW_STARTER = { sku: 'wood_sword', name: 'Wooden Sword', id: Item.WoodSword, count: 1 };
 
 const bySku = new Map(BW_CATALOG.map(e => [e.sku, e]));
 const byItem = new Map<number, BwCatalogEntry>();
@@ -53,3 +52,6 @@ export function bwCatalog(sku: string): BwCatalogEntry | undefined { return bySk
 export function bwEntryOf(item: number): BwCatalogEntry | undefined { return byItem.get(item); }
 export function bwItem(entry: BwCatalogEntry, team: BwTeam): number { return entry.sku === 'wool' && team === 1 ? Block.TeamWoolB : entry.item; }
 export function bwPrice(entry: BwCatalogEntry, upgrades: BwUpgrades): number { return entry.cost * (entry.upgrade ? 2 ** upgrades[entry.upgrade] : 1); }
+
+/** Bare hands are -1; wooden starters are deliberately outside the shop. */
+export function bwSwordTier(item: number): number { return item === Item.WoodSword ? 0 : bwEntryOf(item)?.type === 'sword' ? bwEntryOf(item)!.tier! : -1; }

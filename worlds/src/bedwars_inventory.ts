@@ -1,17 +1,16 @@
 // Hotbar rules. Every item, resources included, is an ordinary stack in one of
 // nine slots; the same functions run for humans, bots and shop purchases.
 import { ITEMS, Item } from './items';
-import { BW, type BwSlot, type BwTeam } from './bedwars_rules';
-import { BW_STARTER, bwItem, bwEntryOf, type BwCatalogEntry } from './bedwars_catalog';
-import { bwToolOf } from './bedwars_rules';
+import { BW, bwToolOf, type BwSlot, type BwTeam, type BwTools } from './bedwars_rules';
+import { bwItem, bwEntryOf, type BwCatalogEntry } from './bedwars_catalog';
 
 export type BwSlots = (BwSlot | null)[];
 export const bwMaxStack = (item: number): number => ITEMS[item]?.maxStack ?? 64;
 export const bwCloneSlots = (slots: BwSlots): BwSlots => slots.map(s => s ? { ...s } : null);
 
-export function bwKit(tools: { pickaxe: number; axe: number; shears: number } = { pickaxe: 0, axe: 0, shears: 0 }, sword = 0): BwSlots {
+export function bwKit(tools: BwTools = { pickaxe: 0, axe: 0, shears: 0 }): BwSlots {
   const slots: BwSlots = Array.from({ length: BW.SLOT_COUNT }, () => null);
-  slots[0] = { id: sword ? SWORDS[sword] ?? BW_STARTER.id : BW_STARTER.id, count: 1 };
+  slots[0] = { id: Item.WoodSword, count: 1 };
   const keep = [
     tools.pickaxe ? (tools.pickaxe === 2 ? Item.IronPickaxe : Item.WoodPickaxe) : 0,
     tools.axe ? (tools.axe === 2 ? Item.IronAxe : Item.WoodAxe) : 0,
@@ -20,7 +19,6 @@ export function bwKit(tools: { pickaxe: number; axe: number; shears: number } = 
   for (const id of keep) if (id) bwAdd(slots, id, 1);
   return slots;
 }
-const SWORDS: Record<number, number> = { 1: Item.StoneSword, 2: Item.IronSword, 3: Item.DiamondSword };
 
 export function bwCount(slots: BwSlots, item: number): number {
   let n = 0;

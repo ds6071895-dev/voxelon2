@@ -6,6 +6,7 @@ The active gh login is passed as an ephemeral Modal secret, never written to dis
 """
 from pathlib import Path
 import json
+import math
 import os
 import subprocess
 import zipfile
@@ -27,7 +28,12 @@ def upload(run: str, repo: str, tag: str):
     import requests
     root = Path('/media') / run / 'final'
     verification = json.loads((root / 'verification.json').read_text())
-    if verification['decodedFrames'] != 2820 or verification['longBlackGaps']:
+    manifest = json.loads((root / 'manifest.json').read_text())
+    expected_frames = sum(math.floor(s['duration'] * manifest['fps'] + .5) for s in manifest['shots'])
+    if (manifest.get('selected') or manifest['frameCount'] != expected_frames
+            or verification['decodedFrames'] != expected_frames or verification['longBlackGaps']
+            or any(verification[key] != manifest[key] for key in ('width', 'height', 'fps'))
+            or verification['seconds'] != manifest['duration']):
         raise ValueError('The revised trailer has not passed verification.')
     headers = {'Authorization': f"Bearer {os.environ['GH_TOKEN']}", 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}
     release = requests.get(f'https://api.github.com/repos/{repo}/releases/tags/{tag}', headers=headers, timeout=60)

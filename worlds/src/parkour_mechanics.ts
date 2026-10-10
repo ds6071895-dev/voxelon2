@@ -51,7 +51,8 @@ export const DRAGON_RESPAWN_LEAD = 4;
 export const DRAGON_IMMUNE_MS = 3000;
 /** The dragon's head catches anybody this close to it. */
 export const DRAGON_CATCH_RADIUS = 3.2;
-/** Orders a second, `t` seconds after it set off. */
+/** Base orders per second, `t` seconds after it set off. Actual speed may add
+ * a temporary catch-up surge and therefore need not increase monotonically. */
 export function dragonBaseSpeed(t: number): number {
   return Math.min(1.35, 0.40 + 0.0042 * Math.max(0, t));
 }

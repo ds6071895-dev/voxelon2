@@ -1,5 +1,14 @@
 # WORLDS: migration plan
 
+> **Historical migration proposal.** The original sections below preserve the
+> initial three-game design and its survey of VOXELON; they are not the current
+> implementation specification. Worlds now has five games (Bedwars, Duels, The
+> Bridge, Parkour/Dragon Chase, Rat and Seek), a ten-second practice-opponent
+> wait, four-island public Bedwars and two/three/four-team private setup. See
+> `README.md` for current runtime, tooling, tests and deployment, and
+> `scripts/TRAILER.md` for current capture commands. Historical tuning and
+> marketing statements below remain as provenance.
+
 A new, standalone, **minigames-only** game built in `worlds/`, reusing VOXELON's
 engine and textures. The original project (`src/`, `server/`, `index.html`,
 `scripts/`, the save files) is **not modified at all**. Both games can run side by

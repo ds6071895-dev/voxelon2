@@ -15,6 +15,7 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { ITEMS } from './items';
+import { bakeModelGeometry } from './model_bake';
 
 /** Flat-shaded material for all gun geometry; volume comes from vertex colors.
  *  The first-person view clones this so it can tint with the world light. */
@@ -35,36 +36,6 @@ const C = {
   cobalt: 0x2c5069, cobaltLight: 0x3f7392, cobaltTrim: 0x59a2c1,
 };
 const GLOW = { lens: 0x8fe8ff, dot: 0xff5340, amber: 0xffb347 };
-
-// Key light for the bake. Slightly right-of-front and high, which is where a
-// held weapon reads best: tops catch, right flanks half-catch, bottoms go dark.
-const LIGHT = new THREE.Vector3(0.34, 0.86, 0.38).normalize();
-const AMBIENT = 0.6, DIRECT = 0.4, SHADOW = 0.16;
-
-/** Fold a primitive's transform + colour into a merge-ready geometry. Normals
- *  are transformed first so the shading is computed in model space. */
-function bake(
-  geo: THREE.BufferGeometry, matrix: THREE.Matrix4, color: number, glow: boolean
-): THREE.BufferGeometry {
-  geo.applyMatrix4(matrix);
-  geo.deleteAttribute('uv'); // merged parts must share one attribute set
-  const c = new THREE.Color(color);
-  const normal = geo.attributes.normal;
-  const out = new Float32Array(normal.count * 3);
-  for (let i = 0; i < normal.count; i++) {
-    let f = 1;
-    if (!glow) {
-      const d = normal.getX(i) * LIGHT.x + normal.getY(i) * LIGHT.y +
-        normal.getZ(i) * LIGHT.z;
-      f = AMBIENT + DIRECT * Math.max(0, d) - SHADOW * Math.max(0, -d);
-    }
-    out[i * 3] = c.r * f;
-    out[i * 3 + 1] = c.g * f;
-    out[i * 3 + 2] = c.b * f;
-  }
-  geo.setAttribute('color', new THREE.BufferAttribute(out, 3));
-  return geo;
-}
 
 interface RigPart {
   pivot: THREE.Vector3;
@@ -107,7 +78,8 @@ class Rig {
       SCRATCH_QUAT.setFromEuler(SCRATCH_EULER.set(...rot)),
       SCRATCH_SCALE);
     const p = this.parts.get(this.cur)!;
-    (glow ? p.glow : p.solid).push(bake(geo, m, color, glow));
+    (glow ? p.glow : p.solid).push(bakeModelGeometry(
+      geo, m, color, glow ? 1 : 0.6, glow ? 0 : 0.4, glow ? 0 : 0.16));
   }
 
   box(size: V3, pos: V3, color: number, rot: V3 = [0, 0, 0]): this {

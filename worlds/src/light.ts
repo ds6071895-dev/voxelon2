@@ -33,7 +33,9 @@ function extraOpacity(id: number): number {
   return 0;
 }
 
-// Shared scratch buffers (one light computation at a time).
+// Shared scratch buffers: consume each returned LightField synchronously before
+// another computeLight call. Its views borrow these buffers; do not retain them
+// between chunk meshes or move computation into concurrent workers unchanged.
 const MAX_CELLS = 48 * 48 * 256;
 const scratchSky = new Uint8Array(MAX_CELLS);
 const scratchBlock = new Uint8Array(MAX_CELLS);

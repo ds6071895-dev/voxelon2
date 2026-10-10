@@ -4,73 +4,37 @@
 // hall chandeliers, glow silhouettes and flashlight beams.
 
 import * as THREE from 'three';
+import { box, joint, glowOf, BOX_MAT, isSharedModelMaterial } from './model_primitives';
 
-/** Face shading in BoxGeometry face order (+x, -x, +y, -y, +z, -z). */
-const SHADE = [0.62, 0.62, 1.0, 0.5, 0.82, 0.82];
-
-export function shaded(w: number, h: number, d: number, color: number): THREE.BufferGeometry {
-  const geo = new THREE.BoxGeometry(w, h, d);
-  const c = new THREE.Color(color);
-  const pos = geo.getAttribute('position');
-  const colors = new Float32Array(pos.count * 3);
-  for (let f = 0; f < 6; f++) for (let v = 0; v < 4; v++) {
-    const k = (f * 4 + v) * 3;
-    colors[k] = c.r * SHADE[f]; colors[k + 1] = c.g * SHADE[f]; colors[k + 2] = c.b * SHADE[f];
-  }
-  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-  return geo;
-}
-const BODY_MAT = new THREE.MeshBasicMaterial({ vertexColors: true });
-export function box(parent: THREE.Object3D, w: number, h: number, d: number, color: number,
-  x: number, y: number, z: number, mat: THREE.Material = BODY_MAT): THREE.Mesh {
-  const m = new THREE.Mesh(shaded(w, h, d, color), mat);
-  m.position.set(x, y, z);
-  parent.add(m);
-  return m;
-}
-/** A leg or tail joint: a group pivoting at its top. */
-export function joint(parent: THREE.Object3D, x: number, y: number, z: number): THREE.Group {
-  const g = new THREE.Group();
-  g.position.set(x, y, z);
-  parent.add(g);
-  return g;
-}
-
-/** Behind walls only. It is opaque and drawn AFTER the world but BEFORE the body (see
- *  glowOf), so only what a wall hides is painted; the body then covers the rest. */
-export const GLOW_MAT = new THREE.MeshBasicMaterial({
-  color: 0xf2c65a, depthFunc: THREE.GreaterDepth, depthWrite: false,
-});
-/** In the open: a thin bright rim, drawn as an inverted hull behind the body. */
-export const GLOW_EDGE_MAT = new THREE.MeshBasicMaterial({
-  color: 0xffe28a, side: THREE.BackSide, transparent: true, opacity: 0.9, depthWrite: false,
-});
-
-/** A glow that rides on the source's own limbs, so it follows every animated
- *  joint: each mesh gets two slightly larger copies as its siblings. */
-export interface Glow { set(on: boolean): void }
-export function glowOf(source: THREE.Object3D): Glow {
-  const meshes: THREE.Mesh[] = [];
-  source.traverse((o) => {
-    if (o instanceof THREE.Mesh && o.visible && o.material !== GLOW_MAT && o.material !== GLOW_EDGE_MAT) meshes.push(o);
-  });
-  const copies: THREE.Mesh[] = [];
-  for (const o of meshes) {
-    if (!o.parent) continue;
-    o.renderOrder = Math.max(o.renderOrder, 2);
-    for (const [mat, grow, order] of [[GLOW_EDGE_MAT, 1.16, 899], [GLOW_MAT, 1.08, 1]] as const) {
-      const m = new THREE.Mesh(o.geometry, mat);
-      m.position.copy(o.position);
-      m.quaternion.copy(o.quaternion);
-      m.scale.copy(o.scale).multiplyScalar(grow);
-      m.renderOrder = order;
-      m.visible = false;
-      o.parent.add(m);
-      copies.push(m);
+const propDisposers = new WeakMap<THREE.Object3D, () => void>();
+/** Capture a model's owned resources once, before any borrowed glow copies are added. */
+function ownProp(root: THREE.Object3D): () => void {
+  const geometries = new Set<THREE.BufferGeometry>(), materials = new Set<THREE.Material>(), textures = new Set<THREE.Texture>();
+  root.traverse((o) => {
+    if (o instanceof THREE.Mesh) {
+      if (o.geometry !== cheeseGeo) geometries.add(o.geometry);
+      for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
+        if (!isSharedModelMaterial(m)) materials.add(m);
+      }
+    } else if (o instanceof THREE.Sprite) {
+      // Sprite geometry belongs to Three; the painted label and material belong to us.
+      materials.add(o.material);
+      if (o.material.map) textures.add(o.material.map);
     }
-  }
-  return { set(on) { for (const m of copies) m.visible = on; } };
+  });
+  let disposed = false;
+  const dispose = (): void => {
+    if (disposed) return;
+    disposed = true;
+    for (const g of geometries) g.dispose();
+    for (const m of materials) m.dispose();
+    for (const t of textures) t.dispose();
+  };
+  propDisposers.set(root, dispose);
+  return dispose;
 }
+/** Ownership-aware teardown for props whose existing API returns an Object3D. */
+export function disposeRsProp(root: THREE.Object3D): void { propDisposers.get(root)?.(); }
 
 // ── The rat ─────────────────────────────────────────────────────────────────
 
@@ -90,8 +54,7 @@ export function createRatModel(caged = false): RatModel {
   const group = new THREE.Group();
   const body = new THREE.Group();
   group.add(body);
-  const materials: THREE.MeshBasicMaterial[] = [];
-  const mat = (): THREE.MeshBasicMaterial => { const m = new THREE.MeshBasicMaterial({ vertexColors: true }); materials.push(m); return m; };
+  const mat = (): THREE.MeshBasicMaterial => new THREE.MeshBasicMaterial({ vertexColors: true });
   const furMat = mat(), bellyMat = mat();
   box(body, 0.34, 0.28, 0.56, FUR, 0, 0.3, 0.04, furMat);
   box(body, 0.28, 0.06, 0.46, BELLY, 0, 0.16, 0.04, bellyMat);
@@ -129,6 +92,7 @@ export function createRatModel(caged = false): RatModel {
     tail.push(seg);
     parent = seg;
   }
+  const dispose = ownProp(group);
   const glow = glowOf(group);
   const model: RatModel = {
     group,
@@ -151,7 +115,7 @@ export function createRatModel(caged = false): RatModel {
         tail[i].rotation.x = i === 0 ? -0.35 : 0.12;
       }
     },
-    dispose() { for (const m of materials) m.dispose(); },
+    dispose() { glow.dispose(); dispose(); },
   };
   model.setCaged(caged);
   return model;
@@ -163,6 +127,7 @@ export interface CatModel {
   group: THREE.Group;
   /** Animate: sitting, ground speed (blocks/s), the clock, and mid-pounce. */
   update(sit: boolean, speed: number, t: number, pounce?: boolean): void;
+  dispose(): void;
 }
 
 const ease = (a: number, b: number, k: number): number => a + (b - a) * k;
@@ -249,6 +214,7 @@ export function createCatModel(): CatModel {
   let nextBlink = 1.5, blinkStart = -1, nextTwitch = 3, twitchStart = -1, twitchSide = 0;
   return {
     group,
+    dispose: ownProp(group),
     update(sit, speed, t, pounce = false) {
       const dt = lastT < 0 ? 0.016 : Math.min(0.1, Math.max(0, t - lastT));
       lastT = t;
@@ -353,6 +319,7 @@ export function labelSprite(text: string, color = '#ffd35a'): THREE.Sprite {
   lines.forEach((l, i) => ctx.fillText(l, W / 2, PAD + LINE * (i + 0.5)));
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true }));
   sprite.scale.set(3.4, 3.4 * H / W, 1);
+  ownProp(sprite);
   return sprite;
 }
 
@@ -380,10 +347,11 @@ export function createCheeseModel(): THREE.Group {
     cheeseGeo = geo;
   }
   const g = new THREE.Group();
-  g.add(new THREE.Mesh(cheeseGeo, BODY_MAT));
+  g.add(new THREE.Mesh(cheeseGeo, BOX_MAT));
   for (const [x, y, z] of [[-0.08, 0.05, 0.112], [0.02, 0.03, 0.112], [-0.12, 0.12, 0.112]]) {
     box(g, 0.035, 0.035, 0.004, 0xc8901c, x, y, z);
   }
+  ownProp(g);
   return g;
 }
 
@@ -401,6 +369,7 @@ export function createChandelierModel(): THREE.Group {
     flame.position.set(x, 0.02, z);
     g.add(flame);
   }
+  ownProp(g);
   return g;
 }
 
@@ -417,5 +386,6 @@ export function createBeam(): THREE.Mesh {
   });
   const m = new THREE.Mesh(geo, mat);
   m.renderOrder = 40;
+  ownProp(m);
   return m;
 }

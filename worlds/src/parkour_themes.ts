@@ -37,8 +37,6 @@ export interface ParkourPalette {
 export interface ParkourTheme {
   id: 'garden' | 'clockwork' | 'lunar' | 'coral' | 'candy' | 'neon' | 'frost' | 'forge';
   title: string;
-  /** Plain pad surfaces, when a set piece does not pick its own. */
-  platforms: readonly number[];
   palette: ParkourPalette;
   /** Grass and leaf tint. */
   foliage: number;
@@ -57,7 +55,7 @@ const CRIMSON = rug(6), INDIGO = rug(8), ROSE = rug(9), VIOLET = rug(10), COCOA 
  *  collision, jump height, or the reachability of the generated route. */
 export const PARKOUR_THEMES: readonly ParkourTheme[] = [
   {
-    id: 'garden', title: 'SKYBLOOM GARDENS', platforms: [Block.CherryPlanks, Block.MossyVaultBrick, Block.JadeMosaic],
+    id: 'garden', title: 'SKYBLOOM GARDENS',
     palette: {
       stone: Block.ManorStoneBrick, brick: Block.MossyVaultBrick, trim: Block.IvoryColumn, wood: Block.CherryPlanks,
       log: Block.CherryLog, roof: Block.ParkourRoofRed, roof2: Block.ParkourRoofTeal, leaves: Block.CherryLeaves,
@@ -68,7 +66,7 @@ export const PARKOUR_THEMES: readonly ParkourTheme[] = [
     dragon: { body: 0x3f8a5a, belly: 0xe8d59a, wing: 0x8fd1a0, eye: 0xffe36b },
   },
   {
-    id: 'clockwork', title: 'THE CLOCKWORK QUARTER', platforms: [Block.ClockworkGrate, Block.OakPlanks, Block.GildedVaultBrick],
+    id: 'clockwork', title: 'THE CLOCKWORK QUARTER',
     palette: {
       stone: Block.ManorStoneBrick, brick: Block.ManorChimney, trim: Block.GildedVaultBrick, wood: Block.OakPlanks,
       log: Block.ManorBeam, roof: Block.ManorSlate, roof2: Block.ManorVerdigris, leaves: Block.Leaves,
@@ -79,7 +77,7 @@ export const PARKOUR_THEMES: readonly ParkourTheme[] = [
     dragon: { body: 0x8a4b2a, belly: 0xe0b067, wing: 0xc98a4a, eye: 0x7dfff0 },
   },
   {
-    id: 'lunar', title: 'MOONGLASS SANCTUARY', platforms: [Block.SpectralMarble, Block.OpalBrick, Block.PrismBrick],
+    id: 'lunar', title: 'MOONGLASS SANCTUARY',
     palette: {
       stone: Block.OpalBrick, brick: Block.SpectralMarble, trim: Block.PearlTile, wood: Block.ManorBoards,
       log: Block.IvoryColumn, roof: Block.ParkourRoofTeal, roof2: Block.PrismBrick, leaves: Block.BirchLeaves,
@@ -90,7 +88,7 @@ export const PARKOUR_THEMES: readonly ParkourTheme[] = [
     dragon: { body: 0x3b3f8f, belly: 0xb7c4ff, wing: 0x7f6be0, eye: 0xb6fff6 },
   },
   {
-    id: 'coral', title: 'THE CORAL CITADEL', platforms: [Block.PearlTile, Block.JadeMosaic, Block.Sandstone],
+    id: 'coral', title: 'THE CORAL CITADEL',
     palette: {
       stone: Block.Sandstone, brick: Block.PearlTile, trim: Block.JadeMosaic, wood: Block.OakPlanks,
       log: Block.BirchLog, roof: Block.ParkourRoofTeal, roof2: Block.ParkourRoofRed, leaves: Block.Leaves,
@@ -101,7 +99,7 @@ export const PARKOUR_THEMES: readonly ParkourTheme[] = [
     dragon: { body: 0x2b8f93, belly: 0xffd0b5, wing: 0xf28483, eye: 0xfff27a },
   },
   {
-    id: 'candy', title: 'SUGARSPUN SKIES', platforms: [Block.CherryPlanks, Block.PearlTile, Block.FurnaceCeramic],
+    id: 'candy', title: 'SUGARSPUN SKIES',
     palette: {
       stone: Block.PearlTile, brick: Block.FurnaceCeramic, trim: Block.ManorPlaster, wood: Block.CherryPlanks,
       log: Block.BirchLog, roof: Block.ParkourRoofRed, roof2: Block.ParkourRoofTeal, leaves: Block.CherryLeaves,
@@ -112,7 +110,7 @@ export const PARKOUR_THEMES: readonly ParkourTheme[] = [
     dragon: { body: 0xd45d93, belly: 0xfff0c9, wing: 0x8fd7ff, eye: 0xffffff },
   },
   {
-    id: 'neon', title: 'NEON HEIGHTS', platforms: [Block.OpalBrick, Block.PrismBrick, Block.PearlTile],
+    id: 'neon', title: 'NEON HEIGHTS',
     palette: {
       stone: Block.OpalBrick, brick: Block.PrismBrick, trim: Block.PearlTile, wood: Block.ManorBoards,
       log: Block.ManorBeam, roof: Block.ParkourRoofTeal, roof2: Block.ManorSlate, leaves: Block.BirchLeaves,
@@ -123,7 +121,7 @@ export const PARKOUR_THEMES: readonly ParkourTheme[] = [
     dragon: { body: 0x4a3f8f, belly: 0xeb68c0, wing: 0x5af7ec, eye: 0xff5ad1 },
   },
   {
-    id: 'frost', title: 'AURORA PALACES', platforms: [Block.PackedSnow, Block.PearlTile, Block.SpectralMarble],
+    id: 'frost', title: 'AURORA PALACES',
     palette: {
       stone: Block.SpectralMarble, brick: Block.PearlTile, trim: Block.ManorPlaster, wood: Block.ManorBoards,
       log: Block.SpruceLog, roof: Block.ParkourRoofTeal, roof2: Block.ManorSlate, leaves: Block.SpruceLeaves,
@@ -134,7 +132,7 @@ export const PARKOUR_THEMES: readonly ParkourTheme[] = [
     dragon: { body: 0xdfeefa, belly: 0x9fc6e6, wing: 0x88b3e5, eye: 0x4ff0ff },
   },
   {
-    id: 'forge', title: 'EMBERFORGE ISLES', platforms: [Block.EmberBrick, Block.Terracotta, Block.Sandstone],
+    id: 'forge', title: 'EMBERFORGE ISLES',
     palette: {
       stone: Block.Terracotta, brick: Block.EmberBrick, trim: Block.FurnaceCeramic, wood: Block.ManorBoards,
       log: Block.SpruceLog, roof: Block.ParkourRoofRed, roof2: Block.ManorSlate, leaves: Block.Leaves,

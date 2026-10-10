@@ -18,8 +18,8 @@ import { rsSeekerNav, seeThrough, type NavRoom, type NavSpot } from './ratseek_n
 import { RS } from './ratseek_rules';
 import type { RatSeekMatch } from './ratseek';
 
-type Goal = 'wait' | 'idle' | 'search' | 'investigate' | 'chase' | 'ambush' | 'trap' | 'bait' | 'guard' | 'scent' | 'dodge';
-interface Lead { at: RsPos3; strength: number; tick: number; rat: number }
+type Goal = 'wait' | 'idle' | 'search' | 'investigate' | 'chase' | 'ambush' | 'trap' | 'bait' | 'scent' | 'dodge';
+interface Lead { at: RsPos3; strength: number; tick: number }
 interface RsPos3 { x: number; y: number; z: number }
 /** A thing the seeker can see: a rat, or a Trickster's decoy. */
 interface Seen { id: number; decoy: boolean; x: number; y: number; z: number; height: number }
@@ -28,7 +28,7 @@ const EYE = 1.62;
 const REACH = 2.9;
 /** A sprinting rat with Speed I, blocks per tick; a seeker runs HUMAN_SPEED times this. */
 const RAT_SPRINT = 0.28 * 1.2;
-export const SKILL_MIN = 0.2, SKILL_MAX = 1.35;
+const SKILL_MIN = 0.2, SKILL_MAX = 1.35;
 
 // ── What the seekers remember between matches (in memory, per server) ──────
 
@@ -37,7 +37,6 @@ const memory = {
   hideWeight: new Map<string, number>(),
   playerRoom: new Map<string, Map<string, number>>(),
   decoyWisdom: 0,
-  chandelierWisdom: 0,
   exitA: new Map<string, { a: number; n: number }>(),
   sites: new Map<string, number>(),
 };
@@ -99,7 +98,6 @@ export class SeekerBot {
   private frenzyUntil = 0;
   private darkUntil = 0;
   private fooledThisMatch = 0;
-  catches = 0;
   /** Rooms searched lately, and where rats were seen (the squad's shared notes). */
   private readonly searchedAt = new Map<string, number>();
   private readonly sightings: { at: RsPos3; tick: number }[] = [];
@@ -194,7 +192,17 @@ export class SeekerBot {
     this.room = null; this.path = null; this.goal = 'idle'; this.decideAt = now; this.crouched = false;
   }
 
+  /** End the mind's work and reconcile the body with its staged podium pose. */
+  stop(): void {
+    this.target = null; this.path = null; this.pathGoal = null;
+    this.lead = this.plannedLead = null;
+    this.plan = []; this.inspecting = null; this.errandSite = null;
+    this.awareness.clear(); this.goal = 'idle'; this.crouched = this.moving = this.swingNow = false;
+    this.syncFromBody();
+  }
+
   tick(): void {
+    if (this.game.isOver()) return;
     const now = this.game.ticks;
     if (now % 20 === 0) {
       // A long drought sharpens the seeker a touch (never more than 8%).
@@ -207,6 +215,9 @@ export class SeekerBot {
     if ((now + this.id) % 4 === 0 && !this.stunned()) this.perceive();
     if (now >= this.decideAt) { this.decideAt = now + 10; this.decide(); }
     this.behave();
+    // A final catch stages the podium synchronously. Never drive our old
+    // simulation position back over the server's podium teleport.
+    if (this.game.isOver()) return;
     this.move(this.pace());
     this.turnHead();
     this.apply();
@@ -379,7 +390,7 @@ export class SeekerBot {
         if (isTarget && rate > 0) rate = Math.max(rate * 2.5, 0.35);
         // Hearing: a running rat's footsteps carry a few blocks round corners.
         if (rate === 0 && !c.decoy && motion > 0.25 && d < 7 && Math.abs(cy - eye.y) < 2.5 && this.rng() < 0.25) {
-          this.hear(c, 0.35, 1.6, c.id);
+          this.hear(c, 0.35, 1.6);
         }
       }
       let level = this.awareness.get(k) ?? 0;
@@ -445,7 +456,7 @@ export class SeekerBot {
     this.target = null;
     if (this.lastSeen && lost && !lost.decoy) {
       const guess = { x: this.lastSeen.x + this.lastSeenMotion.x * 18, y: this.lastSeen.y, z: this.lastSeen.z + this.lastSeenMotion.z * 18 };
-      this.lead = { at: guess, strength: 0.7, tick: this.game.ticks, rat: lost.id };
+      this.lead = { at: guess, strength: 0.7, tick: this.game.ticks };
     }
     this.goal = 'investigate';
     this.path = null;
@@ -453,12 +464,12 @@ export class SeekerBot {
   }
 
   /** A sound or a report. Weaker, older leads give way to stronger, fresher ones. */
-  private hear(at: RsPos3, strength: number, fuzz: number, rat: number): void {
+  private hear(at: RsPos3, strength: number, fuzz: number): void {
     if (this.stunned() || this.goal === 'chase') return;
     if (this.lead && this.effective(this.lead) > strength) return;
     const spread = fuzz + this.distanceTo(at) * 0.08;
     const guess = { x: at.x + (this.rng() - 0.5) * 2 * spread, y: at.y, z: at.z + (this.rng() - 0.5) * 2 * spread };
-    this.lead = { at: guess, strength, tick: this.game.ticks, rat };
+    this.lead = { at: guess, strength, tick: this.game.ticks };
     this.lastLeadTick = this.game.ticks;
     this.glanceAt({ x: at.x, y: at.y + 0.4, z: at.z }, 20);
     if (this.goal !== 'dodge' && this.goal !== 'scent') {
@@ -468,13 +479,13 @@ export class SeekerBot {
   private effective(l: Lead): number { return l.strength - (this.game.ticks - l.tick) / 500; }
 
   /** Noise in the house: in earshot, the seeker turns to it. */
-  noise(at: RsPos3, radius: number, strength: number, rat: number): void {
+  noise(at: RsPos3, radius: number, strength: number, _rat: number): void {
     const range = Math.abs(this.y - at.y) > 4 ? radius * 0.5 : radius;
     const d = this.distanceTo(at);
-    if (d <= range) this.hear(at, strength * (1 - 0.5 * d / range), 1, rat);
+    if (d <= range) this.hear(at, strength * (1 - 0.5 * d / range), 1);
   }
   /** A compass alarm (a trap, bait, a rescue, a flush...). */
-  alert(at: RsPos3): void { if (!this.busy()) this.hear(at, 0.9, 0.8, -1); }
+  alert(at: RsPos3): void { if (!this.busy()) this.hear(at, 0.9, 0.8); }
   /** The periodic hint: roughly where one rat is. A sharp seeker reads it
    *  like a map; a weaker one only takes in "somewhere over that side". */
   hint(at: RsPos3): void {
@@ -482,7 +493,7 @@ export class SeekerBot {
     // A weaker seeker sometimes shrugs a hint off and keeps to its own search.
     if (this.rng() > 0.15 + 0.75 * this.k1) return;
     const sloppy = 1 - this.k1;
-    this.hear(at, 0.45 + 0.15 * this.k1, 2.5 + 16 * sloppy, -1);
+    this.hear(at, 0.45 + 0.15 * this.k1, 2.5 + 16 * sloppy);
   }
 
   // ── Decisions ───────────────────────────────────────────────────────────
@@ -693,7 +704,7 @@ export class SeekerBot {
         if (now === this.scentAt) {
           const found = this.game.botScentPulse(this.id);
           this.held = Item.RatCatcher;
-          if (found >= 0) { const b = this.game.body(found); if (b) this.hear(b, 0.85, 1, found); }
+          if (found >= 0) { const b = this.game.body(found); if (b) this.hear(b, 0.85, 1); }
           this.goalUntil = now;
         }
         break;
@@ -815,7 +826,6 @@ export class SeekerBot {
     if (horizontal > reach - 0.4) chance *= 0.8;
     if (now < this.dazedUntil) chance *= 0.5;
     if (this.rng() < chance) {
-      this.catches++;
       const rat = target!.id;
       this.target = null;
       this.goal = 'idle';
@@ -833,7 +843,7 @@ export class SeekerBot {
   chandelierWarning(floor: RsPos3, ticksLeft: number): void {
     const dx = this.x - floor.x, dz = this.z - floor.z;
     if (dx * dx + dz * dz > 3.2 * 3.2 || Math.abs(this.y - floor.y) > 2.5 || this.stunned()) return;
-    const chance = 0.25 + (this.reaction - 0.6) * 0.35 + memory.chandelierWisdom * 0.5;
+    const chance = 0.25 + (this.reaction - 0.6) * 0.35;
     if (this.rng() >= Math.min(0.9, chance)) { this.glanceAt({ x: floor.x, y: floor.y + 4, z: floor.z }, 15); return; }
     const len = Math.hypot(dx, dz);
     const ux = len < 0.1 ? 1 : dx / len, uz = len < 0.1 ? 0 : dz / len;
@@ -876,13 +886,16 @@ export class SeekerBot {
     this.sightings.push({ at, tick: this.game.ticks });
     if (owner === this.id) bump(memory.sites, `trap:${cell(at)}`, 0.4, 3);
   }
-  baitBitten(owner: number, at: RsPos3, _rat: number): void {
+  baitBitten(owner: number, at: RsPos3, _rat: number, site: RsPos3 = at): void {
     this.sightings.push({ at, tick: this.game.ticks });
-    if (owner === this.id) bump(memory.sites, `bait:${cell(at)}`, 0.4, 3);
+    if (owner === this.id) bump(memory.sites, `bait:${cell(site)}`, 0.4, 3);
   }
   tunnelExit(passage: string, exitA: boolean, _rat: number): void {
     const e = memory.exitA.get(passage) ?? { a: 0, n: 0 };
-    e.n = Math.min(40, e.n + 1); e.a = Math.min(e.n, e.a + (exitA ? 1 : 0));
+    // Once saturated, keep adapting instead of permanently accumulating A
+    // successes while B exits stop changing the denominator.
+    if (e.n >= 40) { e.a *= 39 / 40; e.n = 39; }
+    e.n++; e.a += exitA ? 1 : 0;
     memory.exitA.set(passage, e);
   }
 }

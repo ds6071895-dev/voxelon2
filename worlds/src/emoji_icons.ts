@@ -9,7 +9,7 @@ export type IconName =
   // Geometric/technical glyphs. Several of these (pause, the diamond) carry an
   // emoji presentation and render in the platform's colour emoji font; drawing
   // them keeps every mark on the HUD the game's own.
-  | 'diamond' | 'reticle' | 'pause' | 'arrowUp' | 'arrowDown';
+  | 'diamond' | 'pause' | 'arrowUp' | 'arrowDown';
 
 const PATHS: Record<IconName, string> = {
   skull: '<path d="M12 2C7 2 3 5.6 3 10c0 2.9 1.6 5.2 4 6.6V19a1 1 0 0 0 1 1h1.2l.8 2h4l.8-2H16a1 1 0 0 0 1-1v-2.4c2.4-1.4 4-3.7 4-6.6 0-4.4-4-8-9-8Z" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="9" cy="10" r="1.3" fill="currentColor"/><circle cx="15" cy="10" r="1.3" fill="currentColor"/><path d="M11 13h2l-1 2z" fill="currentColor"/>',
@@ -18,7 +18,6 @@ const PATHS: Record<IconName, string> = {
   chevronUp: '<path d="M5 15l7-7 7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>',
   chevronDown: '<path d="M5 9l7 7 7-7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>',
   diamond: '<path d="M12 2.6 21.4 12 12 21.4 2.6 12 12 2.6Z" fill="currentColor"/>',
-  reticle: '<circle cx="12" cy="12" r="8.4" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="12" r="3.4" fill="currentColor"/>',
   pause: '<rect x="6" y="4.5" width="4.2" height="15" rx="1.3" fill="currentColor"/><rect x="13.8" y="4.5" width="4.2" height="15" rx="1.3" fill="currentColor"/>',
   arrowUp: '<path d="M12 19V5M6 11l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
   arrowDown: '<path d="M12 5v14M6 13l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',

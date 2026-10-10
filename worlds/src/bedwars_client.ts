@@ -6,11 +6,12 @@ import { bwMap, type BedwarsMap } from './bedwars_map';
 import { createBedwarsModels, type BedwarsModels } from './bedwars_models';
 import { BedwarsWorld } from './bedwars_world';
 import { BedwarsHud } from './bedwars_hud';
-import { BedwarsShop, type BedwarsService } from './bedwars_shop';
+import { BedwarsShop } from './bedwars_shop';
+import { BwPredictions, bwCellText as key } from './bedwars_prediction';
 import { BedwarsResults } from './bedwars_results';
 import { bwEntryOf } from './bedwars_catalog';
 import {
-  BW, BW_TEAM_COLORS, bwBreakSeconds,
+  BW, BW_TEAM_COLORS, BW_SERVICE_NAMES as SERVICE_NAMES, bwBreakSeconds, type BedwarsService,
   type BwAction, type BwDropView, type BwPos, type BwProjectileView, type BwResult, type BwSnapshot, type BwTeam,
 } from './bedwars_rules';
 import { bwTime } from './bedwars_ui';
@@ -51,8 +52,6 @@ interface Deps {
 const SERVICE_REACH = 3.8;
 const BREAK_INTERVAL = 150;
 const PREDICT_TTL = 2500;
-const SERVICE_NAMES: Record<BedwarsService, string> = { shop: 'Item Shop', upgrades: 'Team Upgrades', chest: 'Team Chest' };
-const key = (x: number, y: number, z: number): string => `${x},${y},${z}`;
 /** Reach for placing into open air in front of your footing. */
 const REACH_AROUND = 4.5;
 type Face = { x: number; y: number; z: number; nx: number; ny: number; nz: number };
@@ -85,7 +84,7 @@ export class BedwarsClient {
 
   /** Blocks anyone has placed this match; the map itself can never be broken. */
   private readonly placed = new Set<string>();
-  private readonly predicted = new Map<string, { block: number; slot: number; at: number }>();
+  private readonly predicted: BwPredictions;
   private breakTarget: (BwPos & { slot: number; start: number; duration: number }) | null = null;
   private breakSentAt = 0;
   private breakTimer = 0;
@@ -96,6 +95,9 @@ export class BedwarsClient {
   private reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
   constructor(private readonly d: Deps) {
+    this.predicted = new BwPredictions({ slots: d.inventory.slots, placed: this.placed,
+      getBlock: (x, y, z) => d.world.getBlock(x, y, z), setBlock: (x, y, z, b) => d.world.setBlock(x, y, z, b),
+      changed: () => { d.inventory.version++; } });
     this.hud = new BedwarsHud(d.app, () => this.interact());
     this.shop = new BedwarsShop({
       host: d.app, atlasCanvas: d.atlas.canvas,
@@ -200,10 +202,11 @@ export class BedwarsClient {
     if (s.result && !this.results.open) this.setResult(s.result);
   }
 
-  setKit(slots: (ItemStack | null)[]): void {
+  setKit(slots: (ItemStack | null)[], placement?: number): void {
     if (!this.enabled) return;
     // The client's own selection wins; the server only mirrors it.
     this.d.inventory.restore(slots, this.d.inventory.selected);
+    this.predicted.kit(placement);
     this.shop.update(this.snapshot, this.d.net.myId, this.team);
   }
 
@@ -244,7 +247,7 @@ export class BedwarsClient {
     if (!this.enabled) return;
     const k = key(x, y, z);
     if (block === Block.Air) this.placed.delete(k); else if (this.map.bedAt(x, y, z) === null) this.placed.add(k);
-    this.predicted.delete(k);
+    this.predicted.echo({ x, y, z });
   }
 
   update(dt: number): void {
@@ -258,7 +261,7 @@ export class BedwarsClient {
     this.previousHealth = this.d.player.health;
     if (this.breakTarget && (this.frozen || this.panelOpen || now - this.breakAimedAt > 700)) this.stopBreak();
     this.drawCrack(now);
-    for (const [k, p] of this.predicted) if (now - p.at > PREDICT_TTL) this.predicted.delete(k);
+    this.predicted.expire(now, PREDICT_TTL);
     this.hud.tick(now); this.results.tick(now);
     this.renderPrompt();
     this.render();
@@ -376,7 +379,7 @@ export class BedwarsClient {
   }
   private placeable(face: Face): boolean {
     const x = face.x + face.nx, y = face.y + face.ny, z = face.z + face.nz;
-    return y >= 0 && y < 256 && isReplaceable(this.d.world.getBlock(x, y, z)) && !this.map.isProtected(x, y, z) && this.map.bedAt(x, y, z) === null;
+    return y >= 0 && y < 256 && !this.predicted.has({ x, y, z }) && isReplaceable(this.d.world.getBlock(x, y, z)) && !this.map.isProtected(x, y, z) && this.map.bedAt(x, y, z) === null;
   }
   /** Shows the block at once and asks the server; a refusal takes it back.
    *  `face` is the block that was aimed at and the side that was hit. */
@@ -390,26 +393,18 @@ export class BedwarsClient {
     if (!stack || !info || info.kind !== 'block' || bwEntryOf(stack.id)?.type !== 'block') return false;
     const x = face.x + face.nx, y = face.y + face.ny, z = face.z + face.nz;
     if (!this.placeable(face) || (BLOCKS[info.block!].solid && this.d.player.intersectsBlock(x, y, z))) return false;
-    this.placeAt = now + BW.PLACE_REPEAT_MS;
     this.d.flushPose(stack.id);
-    this.d.world.setBlock(x, y, z, info.block!);
-    this.predicted.set(key(x, y, z), { block: info.block!, slot, at: now });
-    this.placed.add(key(x, y, z));
-    this.d.inventory.consumeSelected(1);
+    const prediction = this.predicted.begin({ x, y, z }, info.block!, stack.id, slot, now);
+    if (prediction === null) return false;
+    if (!this.send({ kind: 'place', x, y, z, slot, prediction })) { this.predicted.nack({ x, y, z }, prediction); return false; }
+    this.placeAt = now + BW.PLACE_REPEAT_MS;
     this.d.onPlaced(x, y, z, info.block!);
-    this.send({ kind: 'place', x, y, z, slot });
     return true;
   }
   /** The server refused a placement the client had already drawn. */
-  nack(x: number, y: number, z: number): void {
+  nack(x: number, y: number, z: number, prediction?: number): void {
     if (!this.enabled) return;
-    const k = key(x, y, z), p = this.predicted.get(k);
-    if (!p) return;
-    this.predicted.delete(k); this.placed.delete(k);
-    if (this.d.world.getBlock(x, y, z) === p.block) this.d.world.setBlock(x, y, z, Block.Air);
-    const inv = this.d.inventory, s = inv.slots[p.slot];
-    if (s && s.id === p.block) s.count++; else if (!s) inv.slots[p.slot] = { id: p.block, count: 1 };
-    inv.version++;
+    this.predicted.nack({ x, y, z }, prediction);
   }
 
   use(slot: number, dx: number, dy: number, dz: number): void {
@@ -417,14 +412,13 @@ export class BedwarsClient {
     const item = this.d.inventory.slots[slot];
     if (!item) return;
     const entry = bwEntryOf(item.id);
-    if (entry?.type === 'bow') this.send({ kind: 'shoot', slot, dx, dy, dz, power: 1 });
-    else if (entry && ['tnt', 'pearl', 'heal'].includes(entry.type)) this.send({ kind: 'use', slot, dx, dy, dz });
+    if (entry && ['tnt', 'pearl', 'heal'].includes(entry.type)) this.send({ kind: 'use', slot, dx, dy, dz });
   }
 
   private send(action: BwAction): boolean {
     if (!this.enabled || !this.d.net.connected || this.d.net.worldId === null) return false;
-    this.d.net.sendBwAction(action);
-    return true;
+    try { return this.d.net.send({ t: 'bwAction', world: this.d.net.worldId, action }); }
+    catch { return false; }
   }
   private validSlot(slot: number): boolean { return Number.isInteger(slot) && slot >= 0 && slot < 9; }
   private distance(position: BwPos): number { return Math.hypot(this.d.player.pos.x - position.x, this.d.player.pos.y - position.y, this.d.player.pos.z - position.z); }

@@ -15,6 +15,7 @@ import type { Sky } from './sky';
 import type { WorldGenerator } from './multiverse';
 import { ATLAS_TILES, CELL_PX } from './textures';
 import type { Atlas } from './textures';
+import { DISPLAY_KNEE_GLSL } from './shader_common';
 
 /** The atlas edge in texels (see ATLAS_SAMPLE). */
 const ATLAS_PX = CELL_PX * ATLAS_TILES;
@@ -34,7 +35,6 @@ export const DEFAULT_RENDER_DISTANCE = 8; // chunks
 /** Everything the injected chunk shader reads that is not already a three.js
  *  built-in. One object so the two materials are wired identically. */
 interface ChunkShaderUniforms {
-  sun: { value: number };
   aurora: { value: number };
   arenaBounds: { value: THREE.Vector4 };
   /** Ambient light floor inside an arena; 0 disables it. */
@@ -68,7 +68,6 @@ interface ChunkShaderUniforms {
 /** The bit of GLSL both materials share: the voxel light model, the sun shadow
  *  lookup, the atmosphere and the atlas sampler. */
 const CHUNK_COMMON = /* glsl */`
-uniform float uSunLight;
 uniform float uAuroraLight;
 uniform vec4 uArenaBounds;
 uniform float uArenaLight;
@@ -166,12 +165,7 @@ vec3 voxFaceNormal() {
   return dot(n, (cameraPosition - uShadeOrigin) - vRelPos) < 0.0 ? -n : n;
 }
 
-/** The display curve for presets with no tone-mapper after us (sky.ts has
- *  the twin; the fog colour is pre-kneed on the CPU to match). */
-vec3 voxKnee(vec3 c) {
-  vec3 over = max(c - 0.78, 0.0);
-  return c - over + (1.0 - exp(-over / 0.22)) * 0.22;
-}
+${DISPLAY_KNEE_GLSL}
 
 float voxLuma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 `;
@@ -179,7 +173,7 @@ float voxLuma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 /**
  * The atlas sampler, replacing three's map_fragment.
  *
- * THE GREY LINES. The atlas is 20x20 cells of 32px, each a 16px tile in an
+ * THE GREY LINES. The atlas uses 32px cells, each a 16px tile in an
  * 8px gutter of its own edge pixels — and plenty of the cells are EMPTY, i.e.
  * transparent. Two things let a distant face read outside its cell. Past mip 5
  * one texel spans two cells, so the tile averages with its neighbour; and
@@ -243,7 +237,6 @@ function applyLightShader(
 ): void {
   mat.customProgramCacheKey = () => (water ? 'voxel-water-2' : 'voxel-light-2');
   mat.onBeforeCompile = (shader) => {
-    shader.uniforms.uSunLight = u.sun;
     shader.uniforms.uAuroraLight = u.aurora;
     shader.uniforms.uArenaBounds = u.arenaBounds;
     shader.uniforms.uArenaLight = u.arenaLight;
@@ -417,7 +410,7 @@ function applyLightShader(
 
     const fog = /* glsl */`
       // Tone: presets without the HDR stack get the display knee here.
-      if (uShaderMode < 0.5) diffuseColor.rgb = voxKnee(diffuseColor.rgb);
+      if (uShaderMode < 0.5) diffuseColor.rgb = vxKnee(diffuseColor.rgb);
       #ifdef USE_FOG
         vec3 eyeRel = (cameraPosition - uShadeOrigin);
         vec3 toFrag = vRelPos - eyeRel;
@@ -467,8 +460,6 @@ export class World {
    *  face. Set through `setSmoothLighting`, which schedules the remesh. */
   private smoothLighting = false;
 
-  /** Day-night sunlight factor shared with the chunk shaders. */
-  readonly sunUniform = { value: 1 };
   /** Cool skylight cast by the night aurora. */
   readonly auroraUniform = { value: 0 };
   /** Direct radiance of the sun (or moon) at the ground. */
@@ -521,6 +512,7 @@ export class World {
   }
   /** When set, remeshes are collected and deduplicated until endBatch(). */
   private batch: Set<Chunk> | null = null;
+  private batchDepth = 0;
 
   constructor(scene: THREE.Scene, atlas: Atlas, gen: WorldGenerator) {
     this.scene = scene;
@@ -547,7 +539,7 @@ export class World {
       depthWrite: false,
     });
     const shaderUniforms: ChunkShaderUniforms = {
-      sun: this.sunUniform, aurora: this.auroraUniform,
+      aurora: this.auroraUniform,
       arenaBounds: this.arenaBoundsUniform, arenaLight: this.arenaLightUniform,
       sunTint: this.sunTintUniform,
       skyTint: this.skyTintUniform, time: this.timeUniform,
@@ -574,6 +566,7 @@ export class World {
     this.chunks.clear();
     this.editOverlay.clear();
     this.batch = null;
+    this.batchDepth = 0;
     this.gen = gen;
   }
 
@@ -583,7 +576,6 @@ export class World {
 
   /** Copy everything the sky measured this frame into the chunk shaders. */
   applySky(sky: Sky): void {
-    this.sunUniform.value = sky.sunIntensity;
     this.auroraUniform.value = sky.auroraIntensity;
     this.sunTintUniform.value.copy(sky.sunTint);
     this.skyTintUniform.value.copy(sky.ambientTint);
@@ -631,6 +623,7 @@ export class World {
         }
       }
       this.chunks.set(key, chunk);
+      this.invalidateFootprint(cx, cz);
     }
     return chunk;
   }
@@ -651,6 +644,14 @@ export class World {
   }
 
   setBlock(wx: number, wy: number, wz: number, id: number): void {
+    // Recursive plant removal belongs to the same edit, and explicit bulk
+    // batches can nest without flushing partially applied terrain.
+    this.beginBatch();
+    try { this.editBlock(wx, wy, wz, id); }
+    finally { this.endBatch(); }
+  }
+
+  private editBlock(wx: number, wy: number, wz: number, id: number): void {
     if (wy < 0 || wy >= 256) return;
     // Persist the edit first, so it is honoured even if the chunk is not
     // loaded yet (remote edits) and survives a later unload/regen.
@@ -660,7 +661,7 @@ export class World {
     if (!chunk) return;
     const lx = wx & 15, lz = wz & 15;
     // Already that block — typically the server echoing a placement this
-    // client predicted a round trip ago. Remeshing (up to four chunks) again
+    // client predicted a round trip ago. Remeshing the light footprint again
     // for no visible change was a frame hitch per block while bridging.
     if (chunk.get(lx, wy, lz) === id) return;
     chunk.set(lx, wy, lz, id);
@@ -672,20 +673,20 @@ export class World {
       }
     }
 
-    // Remesh this chunk now, plus any neighbours sharing the edited border.
-    this.remesh(chunk);
-    const dirs: [number, number][] = [];
-    if (lx === 0) dirs.push([-1, 0]);
-    if (lx === 15) dirs.push([1, 0]);
-    if (lz === 0) dirs.push([0, -1]);
-    if (lz === 15) dirs.push([0, 1]);
-    if (lx === 0 && lz === 0) dirs.push([-1, -1]);
-    if (lx === 0 && lz === 15) dirs.push([-1, 1]);
-    if (lx === 15 && lz === 0) dirs.push([1, -1]);
-    if (lx === 15 && lz === 15) dirs.push([1, 1]);
-    for (const [dx, dz] of dirs) {
-      const n = this.getChunk(cx + dx, cz + dz);
-      if (n && n.opaqueMesh !== null) this.remesh(n);
+    // Light travels across chunk borders even for edits away from a border.
+    // All 3x3 light/AO consumers must see emission and opacity changes. Data-only
+    // chunks stay data-only until the streamer requests their geometry.
+    this.invalidateFootprint(cx, cz, true);
+  }
+
+  private invalidateFootprint(cx: number, cz: number, immediate = false): void {
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dz = -1; dz <= 1; dz++) {
+        const chunk = this.getChunk(cx + dx, cz + dz);
+        if (!chunk) continue;
+        chunk.dirty = true;
+        if (immediate && chunk.meshed) this.remesh(chunk);
+      }
     }
   }
 
@@ -708,13 +709,16 @@ export class World {
 
   /** Collect remeshes for a bulk edit (e.g. an explosion). */
   beginBatch(): void {
-    this.batch = new Set();
+    if (this.batchDepth++ === 0) this.batch = new Set();
   }
 
   endBatch(): void {
+    if (this.batchDepth === 0 || --this.batchDepth > 0) return;
     const set = this.batch;
     this.batch = null;
-    if (set) for (const chunk of set) this.remesh(chunk);
+    if (set) for (const chunk of set) {
+      if (this.getChunk(chunk.cx, chunk.cz) === chunk && chunk.meshed) this.remesh(chunk);
+    }
   }
 
   private remesh(chunk: Chunk): void {
@@ -768,9 +772,6 @@ export class World {
       mesh.updateMatrix();
       this.scene.add(mesh);
       chunk.opaqueMesh = mesh;
-    } else {
-      // Keep a marker so "has been meshed" is distinguishable from "pending".
-      chunk.opaqueMesh = new THREE.Mesh();
     }
     if (geo.water) {
       const mesh = new THREE.Mesh(geo.water, this.waterMat);
@@ -781,6 +782,7 @@ export class World {
       chunk.waterMesh = mesh;
     }
     chunk.dirty = false;
+    chunk.meshed = true;
   }
 
   private disposeMeshes(chunk: Chunk): void {
@@ -792,6 +794,7 @@ export class World {
     }
     chunk.opaqueMesh = null;
     chunk.waterMesh = null;
+    chunk.meshed = false;
   }
 
   /**
@@ -805,12 +808,23 @@ export class World {
     const pcz = Math.floor(pz) >> 4;
     let done = true;
 
+    // Cleanup must also run when the meshing budget is exhausted. Drop meshes
+    // beyond the current render radius, retaining only the block-data halo.
+    for (const chunk of this.chunks.values()) {
+      const dist = Math.max(Math.abs(chunk.cx - pcx), Math.abs(chunk.cz - pcz));
+      if (dist > maxDist && chunk.meshed) this.disposeMeshes(chunk);
+      if (dist > maxDist + 2) {
+        this.chunks.delete(Chunk.key(chunk.cx, chunk.cz));
+        this.invalidateFootprint(chunk.cx, chunk.cz);
+      }
+    }
+
     for (const [dx, dz] of this.spiral) {
       const dist = Math.max(Math.abs(dx), Math.abs(dz));
       if (dist > maxDist) continue;
       const cx = pcx + dx, cz = pcz + dz;
       const chunk = this.getChunk(cx, cz);
-      if (chunk && chunk.opaqueMesh && !chunk.dirty) continue;
+      if (chunk?.meshed && !chunk.dirty) continue;
 
       done = false;
       if (performance.now() - start > budgetMs) return false;
@@ -822,16 +836,6 @@ export class World {
       this.remesh(this.ensureData(cx, cz));
     }
 
-    // Unload far chunks.
-    for (const chunk of this.chunks.values()) {
-      if (
-        Math.max(Math.abs(chunk.cx - pcx), Math.abs(chunk.cz - pcz)) >
-        maxDist + 2
-      ) {
-        this.disposeMeshes(chunk);
-        this.chunks.delete(Chunk.key(chunk.cx, chunk.cz));
-      }
-    }
     return done;
   }
 
@@ -843,7 +847,7 @@ export class World {
     for (let cx = Math.floor(b.minX / CHUNK_X); cx <= Math.floor((b.maxX - 1) / CHUNK_X); cx++) {
       for (let cz = Math.floor(b.minZ / CHUNK_Z); cz <= Math.floor((b.maxZ - 1) / CHUNK_Z); cz++) {
         const chunk = this.getChunk(cx, cz);
-        if (chunk?.opaqueMesh && !chunk.dirty) continue;
+        if (chunk?.meshed && !chunk.dirty) continue;
         if (performance.now() - start > budgetMs) return false;
         for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) this.ensureData(cx + dx, cz + dz);
         this.remesh(this.ensureData(cx, cz));

@@ -15,7 +15,7 @@ html.touch-ui, .touch-ui body { touch-action:auto; }
 .touch-ui .duel-clock { padding:6px 10px; }
 .touch-ui .duel-pill { padding:4px 7px; }
 .touch-ui .duel-pill:not(.me) { display:none; }
-.touch-ui .duel-killfeed, .touch-ui .duel-chip { display:none !important; }
+.touch-ui .duel-killfeed { display:none !important; }
 .touch-ui .duel-scores-touch.visible { display:block; top:calc(8px + var(--safe-top)); right:auto;
   left:calc(12px + var(--safe-left)); min-width:48px; min-height:48px; padding:8px; font-size:10px; }
 .touch-ui .duel-scoreboard { padding:12px; }

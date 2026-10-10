@@ -76,6 +76,7 @@ export class NetClient {
   private xformAcc = 0;
   private reconnectTimer = 0;
   private attempts = 0;
+  private nextRosterAt = 0;
   private resumeToken = '';
   /** Supplies the hello payload (guest name, session, look) on every connect. */
   helloPayload: () => Extract<ClientMsg, { t: 'hello' }> = () => ({ t: 'hello' });
@@ -131,10 +132,10 @@ export class NetClient {
   onRsResult?: (result: RsResult) => void;
   onBwArena?: (world: WorldSpec, team: number, spawn: { x: number; y: number; z: number }, yaw: number) => void;
   onBwState?: (s: BwSnapshot) => void;
-  onBwKit?: (slots: (ItemStack | null)[], selected: number | undefined) => void;
+  onBwKit?: (slots: (ItemStack | null)[], selected: number | undefined, placement?: number) => void;
   onBwDrop?: (msg: { reset?: boolean; add?: BwDropView[]; gone?: { id: number; by?: number; into?: number }[]; count?: { id: number; count: number }[] }) => void;
   onBwProj?: (list: BwProjectileView[]) => void;
-  onBwNack?: (x: number, y: number, z: number) => void;
+  onBwNack?: (x: number, y: number, z: number, prediction?: number) => void;
   onBwEvent?: (text: string, tone?: string) => void;
   onBwBuyResult?: (request: number, ok: boolean, message: string) => void;
   onBwResult?: (result: BwResult) => void;
@@ -145,19 +146,23 @@ export class NetClient {
     try { ws = new WebSocket(serverUrl()); } catch { this.scheduleReconnect(); return; }
     this.ws = ws;
     ws.onopen = () => {
-      this.attempts = 0;
+      if (this.ws !== ws) return;
       if (!this.resumeToken) { try { this.resumeToken = sessionStorage.getItem('worlds.reconnect') ?? ''; } catch { /* optional */ } }
       this.raw({ ...this.helloPayload(), resumeToken: this.resumeToken || undefined });
     };
     ws.onmessage = (e) => {
+      if (this.ws !== ws) return;
       let msg: ServerMsg;
       try { msg = JSON.parse(e.data as string) as ServerMsg; } catch { return; }
       this.handle(msg);
     };
     ws.onclose = () => {
+      if (this.ws !== ws) return;
       const was = this.connected;
+      this.ws = null;
       this.connected = false;
       this.worldId = null;
+      this.revision = undefined;
       this.remotes.clear();
       if (was) this.onDisconnect?.();
       this.scheduleReconnect();
@@ -172,9 +177,11 @@ export class NetClient {
   }
 
   private handle(msg: ServerMsg): void {
+    if (!msg || typeof msg !== 'object') return;
     switch (msg.t) {
       case 'welcome':
         this.connected = true;
+        this.attempts = 0;
         this.myId = msg.id;
         this.resumeToken = msg.resumeToken ?? '';
         try { sessionStorage.setItem('worlds.reconnect', this.resumeToken); } catch { /* optional */ }
@@ -219,7 +226,13 @@ export class NetClient {
         for (const s of msg.players) {
           if (s.id === this.myId) { this.onSelfHealth?.(s.health); continue; }
           const r = this.remotes.get(s.id);
-          if (!r) continue;
+          if (!r) {
+            if (this.worldId !== null && at >= this.nextRosterAt) {
+              this.nextRosterAt = at + STALE_REMOTE_S;
+              this.send({ t: 'roster', world: this.worldId });
+            }
+            continue;
+          }
           r.seenAt = at;
           r.tx = s.x; r.ty = s.y; r.tz = s.z; r.tyaw = s.yaw; r.tpitch = s.pitch;
           const pose = poseOf(s, r);
@@ -302,10 +315,10 @@ export class NetClient {
         this.onBwArena?.(msg.world, msg.team, msg.spawn, msg.yaw);
         break;
       case 'bwState': this.onBwState?.(msg.s); break;
-      case 'bwKit': this.onBwKit?.(msg.slots, msg.selected); break;
+      case 'bwKit': this.onBwKit?.(msg.slots, msg.selected, msg.placement); break;
       case 'bwDrop': this.onBwDrop?.(msg); break;
       case 'bwProj': this.onBwProj?.(msg.p); break;
-      case 'bwNack': this.onBwNack?.(msg.x, msg.y, msg.z); break;
+      case 'bwNack': this.onBwNack?.(msg.x, msg.y, msg.z, msg.prediction); break;
       case 'bwEvent': this.onBwEvent?.(msg.text, msg.tone); break;
       case 'bwBuyResult': this.onBwBuyResult?.(msg.request, msg.ok, msg.message); break;
       case 'bwResult': this.onBwResult?.(msg.result); break;
@@ -313,11 +326,10 @@ export class NetClient {
   }
 
   private enterWorld(id: number, revision: number | undefined): void {
+    if (this.worldId !== id) this.remotes.clear();
     this.worldId = id;
     this.revision = revision;
-    // Nobody from the menu or a previous world belongs in this one.
-    // (`join` messages for this world's bodies arrive in the same batch.)
-    for (const [rid, r] of this.remotes) if (r.seenAt < netNow() - 0.05) this.remotes.delete(rid);
+    this.nextRosterAt = 0;
     this.xformAcc = 0;
   }
 

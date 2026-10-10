@@ -85,12 +85,11 @@ export function runBedwarsTests(): void {
     const rested = h.match.dropsSnapshot().find((d) => d.id === first.id)!;
     assert(later.y < first.y + 0.5 && Math.abs(rested.y - 97) < 0.05, `drop falls under gravity onto the platform (y=${rested.y})`);
     assert(h.have(1, 'iron') === 0, 'nothing is collected from afar');
-    const before = h.got(null as any, 'bwDrop').length;
     h.at(1, g); h.tick(1);
     assert(h.have(1, 'iron') >= 2, `standing at the forge puts iron in the hotbar, has ${h.have(1, 'iron')}`);
     const gone = h.messages.filter((m) => m.msg.t === 'bwDrop' && m.msg.gone?.some((x: any) => x.by === 1));
     assert(gone.length > 0, 'pickups tell clients which player took the item, so the entity is removed');
-    assert(before >= 0 && h.match.dropsSnapshot().every((d) => d.item !== Item.IronIngot || d.id !== first.id), 'picked-up drop no longer exists');
+    assert(h.match.dropsSnapshot().every((d) => d.id !== first.id), 'picked-up drop no longer exists');
     assert(!('wallet' in h.match.players.get(1)!), 'there is no separate wallet any more');
   });
   test('generator piles are capped and stack into one pile', () => {
@@ -141,12 +140,12 @@ export function runBedwarsTests(): void {
     h.at(2, BW_BASES[0].chest); h.action(2, { kind: 'bank', resource: 'gold', amount: 12, direction: 'withdraw' });
     assert(h.match.teams[0].chest.gold === 12 && h.have(2, 'gold') === 0, 'enemy cannot raid chest');
     h.at(3, BW_BASES[0].chest); h.action(3, { kind: 'bank', resource: 'gold', amount: 5, direction: 'withdraw' });
-    assert(h.have(3, 'gold') === 5 && h.match.teams[0].chest.gold === 7, 'teammate can withdraw');
+    assert(h.have(3, 'gold') === 5 && h.match.snapshot().teams[0].chest.gold === 7, 'teammate can withdraw');
     h.action(3, { kind: 'bank', resource: 'gold', amount: -5, direction: 'deposit' }); assert(h.have(3, 'gold') === 5, 'negative bank action rejected');
     h.give(1, 'diamond', 6); h.at(1, BW_BASES[0].upgrades);
     assert(h.buy(1, 'protection', 10) && h.buy(1, 'protection', 11), 'upgrade escalating cost 2 then 4');
     assert(h.have(1, 'diamond') === 0 && h.match.teams[0].upgrades.protection === 2, 'team upgrade state');
-    h.at(1, { x: 0, y: 39, z: 0 }); h.tick(0.1); assert(h.match.teams[0].chest.gold === 7, 'chest persists across death');
+    h.at(1, { x: 0, y: 39, z: 0 }); h.tick(0.1); assert(h.match.snapshot().teams[0].chest.gold === 7, 'chest persists across death');
   });
   test('placement consumes stock, protects terrain, rejects occlusion and body overlap, and says no', () => {
     const h = new BwTestHost(); h.start(); const p = h.match.players.get(1)!;
@@ -333,7 +332,7 @@ export function runBedwarsTests(): void {
     h.action(1, { kind: 'melee', target: 2, slot: 0 }); assert(victim.health === 20, 'looking straight up cannot hit a same-level victim');
     h.tick(0.3);
     h.aim(1, 2); a.yaw += 0.2;
-    h.action(1, { kind: 'melee', target: 2, slot: 0 }); assert(victim.health === 16, 'small aim/interpolation discrepancy remains playable');
+    h.action(1, { kind: 'melee', target: 2, slot: 0 }); assert(h.match.snapshot().players.find(p => p.id === 2)!.health === 16, 'small aim/interpolation discrepancy remains playable');
   });
   test('arrows pass through a slab empty upper half but collide with its solid lower half', () => {
     for (const [dy, expectedHealth] of [[0, 20 - 8 * 0.8], [-0.2, 20]]) {

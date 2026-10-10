@@ -19,7 +19,6 @@ body .duel-result-card {
   animation: rs-card-in .75s cubic-bezier(.2,.9,.25,1.08) backwards; transform-origin: 50% 0;
 }
 @keyframes rs-card-in { from { opacity: 0; transform: rotateX(26deg) translateY(50px) scale(.94); } }
-body .duel-result-card[data-reveal-phase="impact"] { animation: rs-card-in .75s cubic-bezier(.2,.9,.25,1.08) backwards; }
 @media (max-width: 620px) {
   body .duel-result-card { padding: 20px 14px; }
 }

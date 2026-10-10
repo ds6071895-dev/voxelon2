@@ -302,17 +302,20 @@ export class SunShadow {
     const prevFog = this.scene.fog;
     const prevAlpha = this.renderer.getClearAlpha();
     this.renderer.getClearColor(this.prevClear);
-    this.scene.overrideMaterial = this.depthMat;
-    this.scene.fog = null;
-    this.renderer.setRenderTarget(this.target);
-    // White clears to the far plane once unpacked, so anything the map does not
-    // cover reads as "nothing in the way" rather than as a shadow.
-    this.renderer.setClearColor(0xffffff, 1);
-    this.renderer.render(this.scene, cam);
-    this.renderer.setRenderTarget(prevTarget);
-    // The clear colour is renderer-wide state and the sky is painted with it.
-    this.renderer.setClearColor(this.prevClear, prevAlpha);
-    this.scene.overrideMaterial = prevOverride;
-    this.scene.fog = prevFog;
+    try {
+      this.scene.overrideMaterial = this.depthMat;
+      this.scene.fog = null;
+      this.renderer.setRenderTarget(this.target);
+      // White clears to the far plane once unpacked, so anything the map does not
+      // cover reads as "nothing in the way" rather than as a shadow.
+      this.renderer.setClearColor(0xffffff, 1);
+      this.renderer.render(this.scene, cam);
+    } finally {
+      this.renderer.setRenderTarget(prevTarget);
+      // The clear colour is renderer-wide state and the sky is painted with it.
+      this.renderer.setClearColor(this.prevClear, prevAlpha);
+      this.scene.overrideMaterial = prevOverride;
+      this.scene.fog = prevFog;
+    }
   }
 }

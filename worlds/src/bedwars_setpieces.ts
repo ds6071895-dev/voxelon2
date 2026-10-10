@@ -10,7 +10,7 @@ export const BW_VOID_Y = 40;
 export const BW_BOUNDS = Object.freeze({ minX: -96, maxX: 96, minZ: -96, maxZ: 96 });
 export type BwTheme = 'garden' | 'frost';
 /** Team wool, also used for each base's roof and banners. */
-export const BW_TEAM_WOOL = [Block.TeamWoolA, Block.TeamWoolB, Block.TeamWoolC, Block.TeamWoolD] as const;
+const BW_TEAM_WOOL = [Block.TeamWoolA, Block.TeamWoolB, Block.TeamWoolC, Block.TeamWoolD] as const;
 
 const W = BW_BOUNDS.maxX - BW_BOUNDS.minX + 1;
 const D = BW_BOUNDS.maxZ - BW_BOUNDS.minZ + 1;
@@ -49,9 +49,6 @@ class Mason {
       for (let z = Math.min(z0, z1); z <= Math.max(z0, z1); z++)
         for (let y = y0; y <= y1; y++) this.put(x, y, z, b);
   }
-  pave(x: number, z: number, b = paving): void {
-    if (this.get(x, BW_Y, z)) this.put(x, BW_Y, z, b);
-  }
   pack(): BedwarsStamp {
     const starts = new Uint32Array(W * D + 1), runs: number[] = [];
     for (let c = 0; c < W * D; c++) {
@@ -85,6 +82,21 @@ class Mason {
 /** A write in some local frame. */
 type Put = (u: number, y: number, w: number, block: number) => void;
 type Get = (u: number, y: number, w: number) => number;
+/** Inclusive local fill, preserving u/w/y write order and reversed u/w bounds. */
+function localFill(put: Put): (u0: number, u1: number, y0: number, y1: number, w0: number, w1: number, b: number) => void {
+  return (u0, u1, y0, y1, w0, w1, b) => {
+    for (let u = Math.min(u0, u1); u <= Math.max(u0, u1); u++) for (let w = Math.min(w0, w1); w <= Math.max(w0, w1); w++)
+      for (let y = y0; y <= y1; y++) put(u, y, w, b);
+  };
+}
+/** Four mirrored writes in the original quadrant order; reads use +x/+z. */
+function quadrants(m: Mason): { put: Put; get: Get; add: Put } {
+  return {
+    put: (u, y, w, b) => { for (const sx of [-1, 1]) for (const sz of [-1, 1]) m.put(sx * u, y, sz * w, b); },
+    add: (u, y, w, b) => { for (const sx of [-1, 1]) for (const sz of [-1, 1]) m.add(sx * u, y, sz * w, b); },
+    get: (u, y, w) => m.get(u, y, w),
+  };
+}
 const INWARD = [[1, 0], [-1, 0], [0, 1], [0, -1]] as const;
 /** World cell of a base's local cell (u toward the middle, w across). The
  *  same formula drives the map metadata, so blocks and spawns always agree. */
@@ -201,10 +213,7 @@ function lantern(put: Put, u: number, w: number, light: number = Block.ManorLant
 // ── Garden ───────────────────────────────────────────────────────────────
 function gardenBase(m: Mason, team: number, D: number): void {
   const f = frame(m, team, D), { put, get } = f;
-  const fill = (u0: number, u1: number, y0: number, y1: number, w0: number, w1: number, b: number): void => {
-    for (let u = Math.min(u0, u1); u <= Math.max(u0, u1); u++) for (let w = Math.min(w0, w1); w <= Math.max(w0, w1); w++)
-      for (let y = y0; y <= y1; y++) put(u, y, w, b);
-  };
+  const fill = localFill(put);
   const roof = BW_TEAM_WOOL[team];
   island(f, 14, 16, 29, GARDEN_ISLAND);
   // Reinforced promenade; clipped corners keep the organic island edge.
@@ -309,13 +318,8 @@ function gardenDiamond(m: Mason, cx: number, cz: number, sx: number, sz: number)
 }
 
 function gardenCenter(m: Mason, emerald: number): void {
-  const all = mirrored(m, 0, 0, 1, 1);
   // The middle is symmetric about its own centre cell in all four quadrants.
-  const q: { put: Put; get: Get; add: Put } = {
-    put: (u, y, w, b) => { for (const sx of [-1, 1]) for (const sz of [-1, 1]) m.put(sx * u, y, sz * w, b); },
-    add: (u, y, w, b) => { for (const sx of [-1, 1]) for (const sz of [-1, 1]) m.add(sx * u, y, sz * w, b); },
-    get: (u, y, w) => all.get(u, y, w),
-  };
+  const q = quadrants(m);
   island(q, 17, 17, 36, GARDEN_ISLAND);
   for (let x = -15; x <= 15; x++) for (let z = -15; z <= 15; z++) {
     const r = Math.hypot(x, z);
@@ -378,10 +382,7 @@ function gardenCenter(m: Mason, emerald: number): void {
 // ── Frost ────────────────────────────────────────────────────────────────
 function frostBase(m: Mason, team: number, D: number): void {
   const f = frame(m, team, D), { put, get } = f;
-  const fill = (u0: number, u1: number, y0: number, y1: number, w0: number, w1: number, b: number): void => {
-    for (let u = Math.min(u0, u1); u <= Math.max(u0, u1); u++) for (let w = Math.min(w0, w1); w <= Math.max(w0, w1); w++)
-      for (let y = y0; y <= y1; y++) put(u, y, w, b);
-  };
+  const fill = localFill(put);
   const wool = BW_TEAM_WOOL[team], wall = Block.Cobblestone, dressed = Block.ManorStoneBrick;
   island(f, 15, 16, 30, FROST_ISLAND);
   // Swept courtyard: stone flags where people walk, snow elsewhere.
@@ -454,11 +455,7 @@ function frostDiamond(m: Mason, cx: number, cz: number, sx: number, sz: number):
 }
 
 function frostCenter(m: Mason, emerald: number): void {
-  const q: { put: Put; get: Get; add: Put } = {
-    put: (u, y, w, b) => { for (const sx of [-1, 1]) for (const sz of [-1, 1]) m.put(sx * u, y, sz * w, b); },
-    add: (u, y, w, b) => { for (const sx of [-1, 1]) for (const sz of [-1, 1]) m.add(sx * u, y, sz * w, b); },
-    get: (u, y, w) => m.get(u, y, w),
-  };
+  const q = quadrants(m);
   island(q, 16, 16, 38, FROST_ISLAND);
   for (let x = -15; x <= 15; x++) for (let z = -15; z <= 15; z++) {
     if (!m.get(x, 95, z)) continue;

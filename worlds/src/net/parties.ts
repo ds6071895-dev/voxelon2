@@ -16,7 +16,7 @@ export interface Party {
   bedwars?: BedwarsSetupState;
 }
 
-type PartyJoinError = 'invalid' | 'full' | 'already' | 'busy';
+type PartyJoinError = 'invalid' | 'full' | 'already';
 
 /** How long a released code stays out of circulation. */
 export const PARTY_CODE_COOLDOWN_MS = 10 * 60_000;

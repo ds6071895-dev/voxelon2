@@ -29,7 +29,6 @@
 // anywhere is left out whole (with its twin) — never shaved into a stump.
 // Only terrain is cut to fit, and a last sweep removes anything left loose.
 import { Block, BLOCKS } from './blocks';
-import { partyHash } from './partygames';
 import { parkourCourse, type PadRole, type ParkourCourse, type ParkourPlatform, type ParkourSection } from './parkour_course';
 import {
   PARKOUR_CENTRE_X, PARKOUR_VENUE_X, PARKOUR_VENUE_Z, PARTY_STAMP_MAX_Y, PARTY_STAMP_MIN_Y,
@@ -74,12 +73,6 @@ export class ParkourVenue {
     }
     return Block.Air;
   }
-  /** Blocks in the venue (tests). */
-  count(): number {
-    let n = 0;
-    for (let i = 0; i < this.runs.length; i += 3) if (this.runs[i + 2] !== Block.Air) n += this.runs[i + 1];
-    return n;
-  }
 }
 
 function pack(cells: Uint8Array): ParkourVenue {
@@ -112,7 +105,7 @@ class Builder {
   readonly twin = new Map<number, number>();
   private current = 0;
   private nextId = 1;
-  constructor(readonly seed: number, readonly pal: ParkourPalette) { }
+  constructor(readonly pal: ParkourPalette) { }
   /** Build `fn` as one structure: kept whole, or left out whole. Anything
    *  built inside another structure is part of it. */
   whole(fn: () => void): void {
@@ -159,12 +152,6 @@ class Builder {
       this.put(x, y, z, typeof block === 'number' ? block : block(y));
       if (this.ground(x, y - 1, z)) return;
     }
-  }
-  /** 0..1, stable for its arguments. */
-  r(...n: number[]): number {
-    let h = this.seed >>> 0;
-    for (const v of n) h = partyHash(h, v | 0);
-    return h / 4294967296;
   }
 
   /** A floating island: a soil-topped slab whose underside steps in, tier by
@@ -335,11 +322,10 @@ function logOf(P: ParkourPalette): number {
 // ── What each piece is given ───────────────────────────────────────────────
 
 interface Area {
-  index: number;
   sec: ParkourSection;
   pads: ParkourPlatform[];
   /** Pad extents, venue-local. */
-  x0: number; x1: number; z0: number; z1: number;
+  z0: number; z1: number;
   /** Lowest and highest standing heights. */
   lo: number; hi: number;
 }
@@ -826,7 +812,7 @@ const clocktower: PieceBuilder = (b, a, course) => {
   };
 };
 
-const cavern: PieceBuilder = (b, a, course) => {
+const cavern: PieceBuilder = (b, a) => {
   const P = b.pal, ground = a.lo - 10, top = (a.sec.ceiling ?? a.hi + 16) - 5;
   // A whole mountain in smooth terraces, on a rock base that reaches past
   // both ends of the piece; the route's boxes cut its passage.
@@ -849,7 +835,6 @@ const cavern: PieceBuilder = (b, a, course) => {
       for (let k = 1; k <= 5; k++) b.put(x, y + k, z, Block.ParkourCrystalBlock);
       for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { b.put(x + dx, y + 1, z + dz, Block.ParkourCrystalBlock); b.put(x + dx, y + 2, z + dz, Block.ParkourCrystalBlock); }
     });
-  void course;
   return () => { for (const p of a.pads) rockUnder(b, p); };
 };
 
@@ -891,7 +876,7 @@ const waterfall: PieceBuilder = (b, a, course) => {
   return () => { for (const p of a.pads) rockUnder(b, p); };
 };
 
-const shrine: PieceBuilder = (b, a, course) => {
+const shrine: PieceBuilder = (b, a) => {
   const P = b.pal, ground = a.lo - 5;
   const zc = (a.z0 + a.z1) / 2, rz = (a.z1 - a.z0) / 2 + 6;
   b.island(CX, zc, 40, rz, ground, 8);
@@ -931,7 +916,6 @@ const shrine: PieceBuilder = (b, a, course) => {
   });
   for (let z = a.z0 + 3; z < a.z1; z += 14) b.pair((side) => b.tree(CX + side * (FLANK + 5), ground + 1, z + 7, 1));
   // Stones out of the pond; on the banks, plinths of dressed stone.
-  void course;
   return () => {
     for (const p of a.pads) {
       if (p.kind === 'stones' || p.kind === 'pillar' || p.kind === 'blink') rockUnder(b, p);
@@ -940,7 +924,7 @@ const shrine: PieceBuilder = (b, a, course) => {
   };
 };
 
-const mine: PieceBuilder = (b, a, course) => {
+const mine: PieceBuilder = (b, a) => {
   const P = b.pal, ground = a.lo - 10, top = a.hi + 9;
   const mz = Math.round((a.z0 + a.z1) / 2);
   b.island(CX, (a.z0 + a.z1) / 2, 40, (a.z1 - a.z0) / 2 + 5, ground, 6, P.rock);
@@ -966,7 +950,6 @@ const mine: PieceBuilder = (b, a, course) => {
   });
   for (let z = a.z0 + 2; z < a.z1; z += 8) b.pair((side) => b.lampPost(CX + side * 18, ground + 1, z, 3));
   // Timber scaffolding under every pad: corner posts and cross-braces.
-  void course;
   return () => { for (const p of a.pads) stilts(b, p, P.log, P.wood); };
 };
 
@@ -1235,7 +1218,7 @@ function sanctuary(b: Builder, course: ParkourCourse): void {
 /** Scenery and route for a seed, stamped and packed. */
 export function parkourVenue(seed: number): ParkourVenue {
   const course = parkourCourse(seed);
-  const b = new Builder(seed ^ 0x5ce4e, parkourTheme(seed).palette);
+  const b = new Builder(parkourTheme(seed).palette);
   const dress: (() => void)[] = [];
   course.sections.forEach((sec, index) => {
     const pads = course.platforms.filter(p => p.section === index);
@@ -1247,8 +1230,7 @@ export function parkourVenue(seed: number): ParkourVenue {
       (p.z >= sec.z0 - 14 && p.z <= sec.z1 + 14 && p !== course.finish));
     const ys = near.map(p => p.y);
     const area: Area = {
-      index, sec, pads,
-      x0: Math.min(...pads.map(p => foot(p).x0)), x1: Math.max(...pads.map(p => foot(p).x1)),
+      sec, pads,
       z0: Math.min(sec.z0, ...pads.map(p => foot(p).z0)), z1: Math.max(sec.z1, ...pads.map(p => foot(p).z1)),
       lo: Math.min(...ys), hi: Math.max(...ys),
     };

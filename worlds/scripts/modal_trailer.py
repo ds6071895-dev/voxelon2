@@ -5,6 +5,7 @@ modal run scripts/modal_trailer.py
 """
 from pathlib import Path
 import json
+import math
 import shutil
 import subprocess
 import time
@@ -68,23 +69,37 @@ def produce(run: str, proof: bool = False):
     shutil.copytree(Path(f"/media/{run}/part-4"), target, dirs_exist_ok=True)
     manifests = [json.loads(Path(f"/media/{run}/part-{p}/picture-manifest.json").read_text()) for p in range(4)]
     manifest = manifests[0]
+    shots = manifest['shots']
+    selected = [index for m in manifests for index in m['selected']]
+    if selected != list(range(len(shots))):
+        raise ValueError('Partitions must cover the complete shot timeline exactly once, in order.')
+    for m in manifests:
+        if any(m[key] != manifest[key] for key in ('width', 'height', 'fps', 'duration', 'seed', 'shots')):
+            raise ValueError('Picture partitions have incompatible capture manifests.')
+        expected = sum(math.floor(shots[i]['duration'] * m['fps'] + .5) for i in m['selected'])
+        if m['frameCount'] != expected:
+            raise ValueError('Picture partition frame count does not match its selected shots.')
     total = sum(m['frameCount'] for m in manifests)
     ivf = target / 'video/worlds-release-picture.ivf'
     with ivf.open('wb') as out:
         for partition in range(4):
             with Path(f"/media/{run}/part-{partition}/video/worlds-release-picture.ivf").open('rb') as src:
                 header = bytearray(src.read(32))
+                if len(header) != 32 or header[:4] != b'DKIF' or int.from_bytes(header[24:28], 'little') != manifests[partition]['frameCount']:
+                    raise ValueError('Invalid IVF partition header.')
+                if partition and header[:24] != first_header[:24]:
+                    raise ValueError('IVF partitions have incompatible encoding headers.')
                 if partition == 0:
+                    first_header = header[:]
                     header[24:28] = total.to_bytes(4, 'little')
                     out.write(header)
                 shutil.copyfileobj(src, out)
     stills = json.loads((target / 'screenshots-manifest.json').read_text())
     manifest.update(screenshots=stills['screenshots'], frameCount=total, video='video/worlds-november-2026-trailer.mp4', cloud='Modal', run=run)
     manifest.pop('selected', None)
+    manifest.pop('picture', None)
     (target / 'manifest.json').write_text(json.dumps(manifest, indent=2))
-    command('node', 'scripts/compose_trailer.mjs', str(target / 'audio'))
-    command('node', 'scripts/mix_trailer.mjs', str(target / 'audio'))
-    command('ffmpeg', '-hide_banner', '-loglevel', 'warning', '-y', '-i', str(ivf), '-i', str(target / 'audio/trailer-final-mix.wav'), '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '320k', '-t', str(manifest['duration']), '-movflags', '+faststart', '-metadata', 'title=Worlds — November 2026 Release Trailer', str(target / manifest['video']))
+    command('node', 'scripts/finish_trailer.mjs', str(target))
     command('node', 'scripts/verify_release.mjs', str(target))
     command('ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-i', str(target / manifest['video']), '-vf', 'fps=1/5,scale=384:216,tile=4x5', '-frames:v', '1', str(target / 'review.png'))
     # Keep audio stems in cloud storage; only final deliverables come back.

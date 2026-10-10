@@ -18,7 +18,7 @@
 // the ground — a house, a tree, a rock, a pier — built by
 // parkour_setpieces.ts round the boxes this file records.
 import { Block } from './blocks';
-import { partyHash, type PartyVec3 } from './partygames';
+import { partyHash, type PartyVec3 } from './party_math';
 import { PARKOUR_CENTRE_X, PARKOUR_VENUE_X, PARKOUR_VENUE_Z, PARTY_FLOOR_Y } from './venue_dims';
 import { PARKOUR_THEMES, parkourTheme, type ParkourPalette } from './parkour_themes';
 
@@ -31,12 +31,10 @@ export type ParkourJump =
   | 'pad' | 'wide' | 'landing' | 'pillar' | 'beam' | 'rail' | 'step' | 'drop' | 'hurdle' | 'gate' | 'stones'
   // Obstacle pads: the jump that REACHES them is an ordinary jump; what makes
   // them hard is getting across the pad itself to the take-off lip.
-  | 'wall' | 'slalom' | 'tunnel' | 'pit' | 'teeth'
+  | 'wall' | 'tunnel' | 'pit' | 'teeth'
   // Climbing stones, a window in a wall to jump through, and a one-block
   // ledge hugging a wall.
   | 'ladder' | 'window' | 'ledge'
-  // Kept for the pad model's sake; no set piece forks its route.
-  | 'fork' | 'join'
   // Mechanics. Each is an ordinary solid block that the client, the server
   // and the tests recognise by POSITION (never by block id alone), so nothing
   // a player places can ever pretend to be one.
@@ -161,8 +159,6 @@ export interface ParkourPlatform extends PartyVec3 {
   order: number;
   /** Travel direction across this pad: 0 +z, 1 +x, 2 -z, 3 -x. */
   heading: number;
-  /** Always 0: routes no longer fork. */
-  branch: number;
   /** Index of this pad in `platforms`. */
   index: number;
   /** The pad this one is jumped to from (-1 for the start). */
@@ -187,7 +183,7 @@ export interface RouteSpace { box: RouteBox; lo: number; hi: number; pad: boolea
 export interface ParkourCourse {
   variant: ParkourVariant;
   platforms: ParkourPlatform[];
-  /** `steps[order]` holds every pad at that order. */
+  /** One pad per order. Singleton arrays keep the existing client/server API. */
   steps: ParkourPlatform[][];
   cells: ParkourCell[];
   start: ParkourPlatform;
@@ -201,9 +197,6 @@ export interface ParkourCourse {
   dragonPath: PartyVec3[];
   /** Where the dragon sleeps until GO. */
   lair: PartyVec3;
-  /** Lowest and highest standing heights on the course. */
-  lowY: number;
-  highY: number;
 }
 
 // ── Venue ──────────────────────────────────────────────────────────────────
@@ -239,14 +232,11 @@ const SHAPES: Record<ParkourJump, Shape> = {
   // Obstacle pads are seven deep on purpose: two rows to land on in front of
   // the obstacle, the obstacle itself, and four rows of run-up behind it.
   wall: { w: 5, d: 7, below: 1, above: 3, margin: 0 },
-  slalom: { w: 5, d: 7, below: 1, above: 2, margin: 0 },
   tunnel: { w: 3, d: 7, below: 1, above: 3, margin: 1 },
   pit: { w: 3, d: 7, below: 4, above: 0, margin: 0 },
   teeth: { w: 5, d: 7, below: 1, above: 1, margin: 0 },
   ledge: { w: 1, d: 5, below: 1, above: 3, margin: 1 },
   window: { w: 3, d: 3, below: 1, above: 0, margin: 0 },
-  fork: { w: 11, d: 5, below: 1, above: 0, margin: 0 },
-  join: { w: 11, d: 5, below: 1, above: 0, margin: 0 },
   launch: { w: 3, d: 3, below: 1, above: 0, margin: 0 },
   boost: { w: 3, d: 3, below: 1, above: 0, margin: 0 },
   blink: { w: 3, d: 3, below: 1, above: 0, margin: 0 },
@@ -258,10 +248,10 @@ function tight(kind: ParkourJump): boolean {
   const s = SHAPES[kind];
   return s.w + 2 * s.margin <= 3;
 }
-const PLAIN = new Set<ParkourJump>(['pad', 'wide', 'landing', 'fork', 'join']);
+const PLAIN = new Set<ParkourJump>(['pad', 'wide', 'landing']);
 const MECHANIC = new Set<ParkourJump>(['launch', 'boost', 'blink', 'crumble']);
 /** Pads with something to get past on them. Never two in a row. */
-const OBSTACLE = new Set<ParkourJump>(['wall', 'slalom', 'tunnel', 'pit', 'teeth']);
+const OBSTACLE = new Set<ParkourJump>(['wall', 'tunnel', 'pit', 'teeth']);
 /** Pads with nothing standing on them, that a route can turn 90° off. */
 const CORNER_SAFE = new Set<ParkourJump>([...PLAIN, 'step', 'drop', 'stones', 'pillar', 'ladder', 'rail', 'beam', 'blink', 'crumble', 'window']);
 
@@ -320,6 +310,7 @@ const COURSE_CACHE_MAX = 256;
 /** The course for a seed. Deterministic and shared by client, server and
  *  tests, so nobody disagrees about where the next pad is. */
 export function parkourCourse(seed: number): ParkourCourse {
+  seed >>>= 0;
   // Least-recently-used: the server asks for every live match's course on
   // each of its players' transforms.
   const cached = courseCache.get(seed);
@@ -328,21 +319,22 @@ export function parkourCourse(seed: number): ParkourCourse {
     courseCache.set(seed, cached);
     return cached;
   }
-  const course = generate(seed >>> 0);
+  const course = generateParkourCourse(seed >>> 0);
   if (courseCache.size >= COURSE_CACHE_MAX) courseCache.delete(courseCache.keys().next().value!);
   courseCache.set(seed, course);
   return course;
 }
-/** Which set pieces a seed's course is made of, in order. */
-export function parkourVariant(seed: number): ParkourVariant { return parkourCourse(seed).variant; }
 /** Write a theme into the low bits of a seed. */
 export function encodeParkourSeed(seed: number, theme: number): number {
   return ((seed & ~0x7) | (theme & 7)) >>> 0;
 }
 
-function generate(seed: number): ParkourCourse {
-  const themeIndex = PARKOUR_THEMES.indexOf(parkourTheme(seed));
-  const palette = parkourTheme(seed).palette;
+/** Generate independently of the shared cache (determinism probes and tools). */
+export function generateParkourCourse(seed: number): ParkourCourse {
+  seed >>>= 0;
+  const theme = parkourTheme(seed);
+  const themeIndex = PARKOUR_THEMES.indexOf(theme);
+  const palette = theme.palette;
   const platforms: ParkourPlatform[] = [];
   const spaces: RouteSpace[] = [];
   let salt = 0;
@@ -448,7 +440,7 @@ function generate(seed: number): ParkourCourse {
     const cx = h % 2 ? a : lat, cz = h % 2 ? lat : a;
     const p: ParkourPlatform = {
       x: cx + .5, y: prev.y + c.rise, z: cz + .5, width: wx, depth: dz, checkpoint: meta.checkpoint,
-      kind: c.kind, order: meta.order, heading: h, branch: 0, index: platforms.length, from: prev.index,
+      kind: c.kind, order: meta.order, heading: h, index: platforms.length, from: prev.index,
       group: c.kind === 'blink' ? (prev.kind === 'blink' ? (1 - prev.group) as 0 | 1 : (rand() & 1) as 0 | 1) : 0,
       section, role,
     };
@@ -526,7 +518,6 @@ function generate(seed: number): ParkourCourse {
   /** What a leg may draw. Anything that forces a rise has to have the
    *  headroom for it; anything that throws you has to have the room. */
   const allowed = (k: ParkourJump, narrow: boolean, room: number): boolean => {
-    if (k === 'fork' || k === 'join') return false;
     // A long pad needs the room to land beyond it before the leg ends.
     if (SHAPES[k].d >= 5 && room < SHAPES[k].d + 9) return false;
     if (narrow && !tight(k)) return false;
@@ -593,7 +584,7 @@ function generate(seed: number): ParkourCourse {
   /** Walk one leg: pads in `leg.heading` until its `until` is passed. The
    *  final pad is plain whenever there is room for it, so the next leg can
    *  turn off it. Returns how many pads it placed. */
-  const walk = (leg: Leg, stop: () => boolean): number => {
+  const walk = (leg: Leg): number => {
     // Turning off something you cannot turn on: a plain pad straight on first.
     if (leg.heading !== cur.heading && !CORNER_SAFE.has(cur.kind)) {
       const side = cur.heading % 2 ? cellZ(cur) : cellX(cur);
@@ -611,19 +602,19 @@ function generate(seed: number): ParkourCourse {
     }
     try {
       // A leg held to a line that cannot even start there gets some room.
-      const placed = walkLeg(leg, stop, from);
+      const placed = walkLeg(leg, from);
       if (placed || cur !== from || leg.wander >= 3) return placed;
-      return walkLeg({ ...leg, wander: 3, centre: undefined }, stop, from);
+      return walkLeg({ ...leg, wander: 3, centre: undefined }, from);
     } finally { policy = was; }
   };
-  const walkLeg = (leg: Leg, stop: () => boolean, from: ParkourPlatform): number => {
+  const walkLeg = (leg: Leg, from: ParkourPlatform): number => {
     const h = leg.heading, s = h < 2 ? 1 : -1;
     const until = typeof leg.until === 'function' ? leg.until(from) : leg.until;
     const startLat = h % 2 ? cellZ(from) : cellX(from);
     const centre = leg.centre ?? startLat;
     const lo = centre - leg.wander, hi = centre + leg.wander;
     let placed = 0;
-    while (!stop()) {
+    while (true) {
       const at = h % 2 ? cellX(cur) : cellZ(cur);
       const room = s * (until - at);
       if (room <= 0) break;
@@ -650,7 +641,7 @@ function generate(seed: number): ParkourCourse {
   // ── The start ──
   const start: ParkourPlatform = {
     x: CX + .5, y: PARTY_FLOOR_Y + height + 1, z: START_Z + .5, width: 5, depth: 5, checkpoint: true,
-    kind: 'wide', order: 0, heading: 0, branch: 0, index: 0, from: -1, group: 0, section: -1, role: 'run',
+    kind: 'wide', order: 0, heading: 0, index: 0, from: -1, group: 0, section: -1, role: 'run',
   };
   commit(start, null);
   cur = start;
@@ -696,9 +687,9 @@ function generate(seed: number): ParkourCourse {
       // A long S: swing out to one side, then the other.
       const side = partyHash(seed, 0x51de + n) & 1 ? 1 : -1;
       const third = (end - z0) / 3;
-      walk({ heading: 0, until: Math.round(z0 + third), wander: 2, centre: CX + side * path.wander }, () => false);
-      walk({ heading: 0, until: Math.round(z0 + 2 * third), wander: 2, centre: CX - side * path.wander }, () => false);
-      walk({ heading: 0, until: end, wander: 2, centre: CX, turns: lastPiece }, () => false);
+      walk({ heading: 0, until: Math.round(z0 + third), wander: 2, centre: CX + side * path.wander });
+      walk({ heading: 0, until: Math.round(z0 + 2 * third), wander: 2, centre: CX - side * path.wander });
+      walk({ heading: 0, until: end, wander: 2, centre: CX, turns: lastPiece });
     } else if (path.shape === 'rampart') {
       // Up the west wall, across the castle on the curtain wall between the
       // corner towers, and up the east wall — or the mirror of that, from
@@ -706,14 +697,14 @@ function generate(seed: number): ParkourCourse {
       const near = x() <= CX ? CX - 13 : CX + 13, far = 2 * CX - near;
       const turn = Math.round(z0 + (end - z0) * .45);
       const sidestep = Math.abs(x() - near) > 3;
-      walk({ heading: 0, until: z0 + 6, wander: 3, turns: sidestep }, () => false);
-      if (sidestep) walk({ heading: x() < near ? 1 : 3, until: near, wander: 0, role: 'link', turns: true }, () => false);
-      walk({ heading: 0, until: turn, wander: 1, centre: near, turns: true }, () => false);
-      walk({ heading: far > near ? 1 : 3, until: far, wander: 1, role: 'cross', turns: true }, () => false);
-      walk({ heading: 0, until: end, wander: 1, centre: far, turns: lastPiece }, () => false);
+      walk({ heading: 0, until: z0 + 6, wander: 3, turns: sidestep });
+      if (sidestep) walk({ heading: x() < near ? 1 : 3, until: near, wander: 0, role: 'link', turns: true });
+      walk({ heading: 0, until: turn, wander: 1, centre: near, turns: true });
+      walk({ heading: far > near ? 1 : 3, until: far, wander: 1, role: 'cross', turns: true });
+      walk({ heading: 0, until: end, wander: 1, centre: far, turns: lastPiece });
     } else {
       // Back and forth: across, a short way on, across the other way.
-      walk({ heading: 0, until: z0 + 7, wander: 2, turns: true }, () => false);
+      walk({ heading: 0, until: z0 + 7, wander: 2, turns: true });
       let dir = x() <= CX ? 1 : 3;
       let k = 0;
       while (z() < end - path.gap - 6) {
@@ -721,23 +712,23 @@ function generate(seed: number): ParkourCourse {
         const reach = path.width - 2 + partyHash(seed, 0x7a11 + n * 16 + k) % 5;
         const placed = walk({
           heading: dir, until: dir === 1 ? CX + reach : CX - reach, wander: 1, role: 'cross', kinds: path.cross, turns: true,
-        }, () => false);
+        });
         walk({
           heading: 0, until: (p) => cellZ(p) + (placed ? path.gap : 6), wander: 1, role: 'link', kinds: path.link, rise: path.linkRise,
           turns: true,
-        }, () => false);
+        });
         // A crossing that could not start is tried again a little further on.
         if (placed) dir = dir === 1 ? 3 : 1;
         if (++k > 8) break;
       }
-      walk({ heading: 0, until: end, wander: 3, centre: x(), turns: lastPiece }, () => false);
+      walk({ heading: 0, until: end, wander: 3, centre: x(), turns: lastPiece });
     }
     // The run-in to the finish: across to the middle if the route has ended
     // off to one side, then straight on, on broad pads.
     if (lastPiece) {
       const broad: ParkourJump[] = ['pad', 'wide', 'landing', 'pad'];
-      if (Math.abs(x() - CX) > 5) walk({ heading: x() < CX ? 1 : 3, until: CX, wander: 1, kinds: broad, turns: true, role: 'link' }, () => false);
-      walk({ heading: 0, until: z1, wander: 3, centre: CX, kinds: broad }, () => false);
+      if (Math.abs(x() - CX) > 5) walk({ heading: x() < CX ? 1 : 3, until: CX, wander: 1, kinds: broad, turns: true, role: 'link' });
+      walk({ heading: 0, until: z1, wander: 3, centre: CX, kinds: broad });
     }
     sec.toOrder = order;
     if (id === 'cavern') {
@@ -854,10 +845,6 @@ function generate(seed: number): ParkourCourse {
         at(2, door, 3, palette.trim);
         break;
       }
-      case 'slalom':
-        for (let v = 0; v <= w - 3; v++) { at(2, v, 1, pick(v)); at(2, v, 2, pick(v)); }
-        for (let v = 2; v <= w - 1; v++) { at(4, v, 1, pick(v)); at(4, v, 2, pick(v)); }
-        break;
       case 'tunnel':
         // A covered corridor with two blocks of headroom: RUN it, don't jump it.
         for (let u = 2; u <= 4; u++) {
@@ -908,7 +895,6 @@ function generate(seed: number): ParkourCourse {
 
   const steps: ParkourPlatform[][] = [];
   for (const p of platforms) (steps[p.order] ??= []).push(p);
-  const ys = platforms.map(p => p.y);
 
   // ── The podium, just inside the sanctuary ──
   const podZ = cellZ(finish) + 11;
@@ -935,14 +921,9 @@ function generate(seed: number): ParkourCourse {
   return {
     variant: { theme: themeIndex, pieces: sections.map(s => s.piece) },
     platforms, steps, cells, start, finish, sections, spaces, podium, dragonPath, lair,
-    lowY: Math.min(...ys), highY: Math.max(...ys),
   };
 }
 
-/** The pads a racer at `progress` is aiming for next. */
-export function parkourNext(course: ParkourCourse, progress: number): readonly ParkourPlatform[] {
-  return course.steps[progress + 1] ?? [];
-}
 /** Number of jumps from the start pad to the finish. */
 export function parkourLength(course: ParkourCourse): number {
   return course.steps.length - 1;

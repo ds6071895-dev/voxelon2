@@ -6,7 +6,6 @@
 
 import { Item } from './items';
 
-export const RS_TPS = 20;
 export const RS = {
   INTRO_TICKS: 90,
   HIDE_TICKS: 30 * 20,
@@ -151,10 +150,8 @@ export interface RsSnapshot {
   /** Length of the phase, for the progress bar. */
   phaseMs: number;
   players: RsPlayerView[];
-  ratCount: number;
   freeRats: number;
   caged: number;
-  seekers: number;
   twist: string;
   finalMinute: boolean;
   me: RsSelfView;
@@ -166,16 +163,13 @@ export interface RsSnapshot {
   chandeliers: { x: number; y: number; z: number; drop: number; shake: boolean }[];
   classCounts: Record<RatClassId, number>;
   classCap: number;
-  exchangeLabel: string;
 }
 
-export interface RsAward { title: string; winner: string; detail: string; color: string }
 export interface RsResult {
   humansWon: boolean;
   reason: string;
   /** Top three of the winning side, best first. */
   podium: { id: number; name: string; score: string }[];
-  awards: RsAward[];
   rats: { id: number; name: string; points: number; cheese: number; caged: boolean }[];
   seekers: { id: number; name: string; catches: number }[];
   durationMs: number;
@@ -194,5 +188,5 @@ export interface RsEffects {
 }
 
 export type RsSound = 'squeak' | 'snap' | 'cage' | 'rescue' | 'hunt' | 'tick' | 'bell' | 'sniff' | 'rattle' | 'crash'
-  | 'chain' | 'pounce' | 'purr' | 'meow' | 'decoy' | 'poof' | 'cheese' | 'dash' | 'twist' | 'alarm' | 'escape' | 'click'
+  | 'chain' | 'pounce' | 'purr' | 'meow' | 'decoy' | 'poof' | 'cheese' | 'dash' | 'twist' | 'escape' | 'click'
   | 'win' | 'lose' | 'heartbeat' | 'drum' | 'intro';

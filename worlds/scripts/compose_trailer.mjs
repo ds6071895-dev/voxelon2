@@ -3,8 +3,9 @@
 // node scripts/compose_trailer.mjs [output directory]
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { releaseDirectory } from './release_tools.mjs';
 
-const output = path.resolve(process.argv[2] ?? 'release-media/audio');
+const output = path.resolve(process.argv[2] ?? path.join(releaseDirectory, 'audio'));
 await mkdir(output, { recursive: true });
 const RATE = 48000, SECONDS = 94, N = RATE * SECONDS, TAU = Math.PI * 2;
 const stems = Object.fromEntries(['melody', 'atmosphere', 'percussion', 'effects'].map(k => [k, [new Float32Array(N), new Float32Array(N)]]));

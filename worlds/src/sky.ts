@@ -1,4 +1,4 @@
-// Sky: 20-minute day/night cycle driven by a small ATMOSPHERE MODEL.
+// Sky: fixed venue time, eased or snapped on entry, with a small ATMOSPHERE MODEL.
 //
 // Everything the world is lit by comes out of one function, `scatter()`, which
 // exists twice — once in GLSL for the dome, once in TypeScript for the CPU —
@@ -21,6 +21,7 @@
 
 import * as THREE from 'three';
 import { mulberry32, wrappedValueNoise } from './noise';
+import { DISPLAY_KNEE_GLSL } from './shader_common';
 
 const CLOUD_Y = 192;
 const CLOUD_TEX = 64;     // texels per repeat
@@ -131,8 +132,8 @@ function displayKnee(c: THREE.Color): THREE.Color {
   return c.setRGB(k(c.r), k(c.g), k(c.b));
 }
 
-/** GLSL twins of the functions above. Shared with the chunk shader (world.ts)
- *  so the water reflects the SAME sky the dome draws. */
+/** GLSL twins of the CPU atmosphere functions above. Water consumes their
+ *  measured colours through World.applySky. */
 const ATMOSPHERE_GLSL = /* glsl */`
 const vec3 VX_BETA_R = vec3(${BETA_R.join(', ')});
 const float VX_BETA_M = ${BETA_M.toFixed(4)};
@@ -153,10 +154,7 @@ vec3 vxScatter(vec3 d, vec3 l, float e) {
      * (0.35 + 0.65 * clamp(d.y, 0.0, 1.0));
   return c;
 }
-vec3 vxKnee(vec3 c) {
-  vec3 over = max(c - 0.78, 0.0);
-  return c - over + (1.0 - exp(-over / 0.22)) * 0.22;
-}
+${DISPLAY_KNEE_GLSL}
 `;
 
 // ─── the dome ───────────────────────────────────────────────────────────────
@@ -444,10 +442,7 @@ const CLOUD_SHADER = {
     varying vec2 vUv;
     varying vec3 vWorld;
 
-    vec3 vxKneeC(vec3 c) {
-      vec3 over = max(c - 0.78, 0.0);
-      return c - over + (1.0 - exp(-over / 0.22)) * 0.22;
-    }
+    ${DISPLAY_KNEE_GLSL}
 
     void main() {
       vec3 viewDir = normalize(vWorld - cameraPosition);
@@ -481,7 +476,7 @@ const CLOUD_SHADER = {
       vec3 col = mix(uShade, uLit, lit) + uSunColor * (rim + forward);
       // Distant cloud sinks into the skyline haze, like the terrain does.
       col = mix(col, uHaze, smoothstep(uPlane * 0.08, uPlane * 0.4, dist) * 0.7);
-      if (uHDR < 0.5) col = vxKneeC(col);
+      if (uHDR < 0.5) col = vxKnee(col);
       gl_FragColor = vec4(col, alpha);
       #include <colorspace_fragment>
     }
@@ -501,10 +496,7 @@ const FLAT_CLOUD_FRAG = /* glsl */`
   uniform float uHDR;
   varying vec2 vUv;
   varying vec3 vWorld;
-  vec3 vxKneeC(vec3 c) {
-    vec3 over = max(c - 0.78, 0.0);
-    return c - over + (1.0 - exp(-over / 0.22)) * 0.22;
-  }
+  ${DISPLAY_KNEE_GLSL}
   void main() {
     float a = texture2D(uMap, vUv * uRepeat + uOffset).a;
     if (a < 0.5) discard;
@@ -512,7 +504,7 @@ const FLAT_CLOUD_FRAG = /* glsl */`
     float alpha = uOpacity * (1.0 - smoothstep(uPlane * 0.22, uPlane * 0.46, dist));
     if (alpha <= 0.002) discard;
     vec3 col = mix(uLit, uHaze, smoothstep(uPlane * 0.08, uPlane * 0.4, dist) * 0.7);
-    if (uHDR < 0.5) col = vxKneeC(col);
+    if (uHDR < 0.5) col = vxKnee(col);
     gl_FragColor = vec4(col, alpha);
     #include <colorspace_fragment>
   }

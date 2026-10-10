@@ -1,19 +1,19 @@
 // Real touch events against the dev client and local game server.
 // PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs CHROMIUM_PATH=/path/to/chrome node test/mobile.mjs
-import { pathToFileURL } from 'node:url';
-import { mkdir } from 'node:fs/promises';
-const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
-const artifacts = process.env.ARTIFACTS ?? '/tmp/worlds-mobile';
-await mkdir(artifacts, { recursive: true });
-const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROMIUM_PATH,
-  args: ['--no-sandbox', '--disable-dev-shm-usage', '--enable-unsafe-swiftshader', '--use-gl=swiftshader'] });
+import { artifactDirectory, browserSession, observeErrors, selection } from '../scripts/browser_session.mjs';
+import { mobileBedwars } from './mobile_bedwars.mjs';
+const modes = selection('MODES', process.env.MODES ?? 'duels,bridge,parkour,ratseek,bedwars', ['duels', 'bridge', 'parkour', 'ratseek', 'bedwars']);
+if (typeof WebSocket !== 'function') throw new Error('Mobile tests require Node 22+ with global WebSocket');
+const artifacts = await artifactDirectory('mobile');
+const session = await browserSession();
+const { browser } = session;
 let failures = 0;
 const check = (name, pass, detail = '') => { console.log(`${pass ? '✓' : '✗'} ${name} ${pass ? '' : detail}`); if (!pass) failures++; };
 const errors = [];
 const peers = [];
 let currentPage;
 try {
-  for (const mode of (process.env.MODES ?? 'duels,bridge,parkour,ratseek').split(',').filter(Boolean)) {
+  for (const mode of modes) {
     console.log(`▸ ${mode}`);
     const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
     await context.addInitScript(() => {
@@ -27,24 +27,29 @@ try {
     });
     const page = await context.newPage();
     currentPage = page;
-    page.on('pageerror', e => errors.push(`${mode}: ${e.message}`));
+    observeErrors(page, errors, `${mode}: `);
     await page.goto(process.env.TEST_URL ?? 'http://localhost:5174');
     await page.waitForFunction(() => window.__worlds?.net.connected);
     // A stationary peer keeps combat bots from resetting the loadout halfway
     // through a touch gesture while slow software-rendered screenshots run.
+    const matchPeers = [];
+    for (let i = 0; i < (mode === 'bedwars' ? 3 : 1); i++) {
     const peer = new WebSocket(process.env.WS_URL ?? 'ws://localhost:8090');
     peers.push(peer);
+    matchPeers.push(peer);
     await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error(`${mode}: socket peer did not welcome within 30 seconds`)), 30000);
       peer.addEventListener('open', () => peer.send(JSON.stringify({ t: 'hello' })));
-      peer.addEventListener('error', reject, { once: true });
+      peer.addEventListener('error', e => { clearTimeout(timeout); reject(e); }, { once: true });
       peer.addEventListener('message', e => {
         const m = JSON.parse(e.data);
-        if (m.t === 'welcome') resolve();
-        if (['duelArena', 'pgArena', 'rsArena'].includes(m.t))
+        if (m.t === 'welcome') { clearTimeout(timeout); resolve(); }
+        if (['duelArena', 'pgArena', 'rsArena', 'bwArena'].includes(m.t))
           peer.send(JSON.stringify({ t: 'worldReady', world: m.world.id, revision: m.revision }));
       });
     });
     peer.send(JSON.stringify({ t: 'play', mode }));
+    }
     await page.locator(`.w-card[data-mode="${mode}"]`).tap();
     await page.waitForFunction(() => document.querySelector('.t-pads')?.hidden === false, null, { timeout: 120000 });
     check('touch control is active', await page.evaluate(() => window.__worlds.input.touchMode));
@@ -103,17 +108,21 @@ try {
       await page.waitForFunction(() => window.__sent.some(m => m.t === 'rsUse') || document.querySelector('.rs-picker.open'));
       check('rat items can be used by touch', true);
     }
+    if (mode === 'bedwars') await mobileBedwars(page, matchPeers, check, artifacts);
+    else {
     await page.locator('.t-pause').tap();
     await page.waitForFunction(() => document.querySelector('.t-pads').hidden);
     check('pause hides gameplay controls and clears inputs', await page.evaluate(() => { const i = window.__worlds.input; return !i.leftDown && !i.rightDown && !i.jump && !i.forward; }));
+    }
     await context.close();
-    peer.close();
+    for (const peer of matchPeers) peer.close();
   }
   console.log('▸ isolated touch input regressions');
   const fixture = await browser.newContext({ viewport: { width: 320, height: 568 }, hasTouch: true, isMobile: true });
   const page = await fixture.newPage(); currentPage = page;
+  observeErrors(page, errors, 'touch fixture: ');
   await page.route('**/touch-fixture', route => route.fulfill({ contentType: 'text/html', body:
-    '<meta name="viewport" content="width=device-width, initial-scale=1"><div id="app"><canvas></canvas><div id="hotbar"></div></div>' }));
+    '<meta name="viewport" content="width=device-width, initial-scale=1"><body class="in-game"><div id="app"><canvas></canvas><div id="hotbar"></div></div></body>' }));
   await page.goto(`${process.env.TEST_URL ?? 'http://localhost:5174'}/touch-fixture`);
   await page.evaluate(async () => {
     await import('/src/styles/hud.css'); await import('/src/styles/mobile.css');
@@ -172,6 +181,6 @@ try {
       pads: document.querySelector('.t-pads').hidden })));
   }
 }
-finally { for (const peer of peers) peer.close(); await browser.close(); }
+finally { for (const peer of peers) peer.close(); await session.close(); }
 check('no browser errors', errors.length === 0, errors.join('\n'));
 process.exitCode = failures ? 1 : 0;

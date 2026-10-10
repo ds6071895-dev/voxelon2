@@ -1,8 +1,8 @@
 import * as THREE from 'three';
-import type { AvatarBody } from '../remoteplayers';
-import { box } from '../ratseek_models';
+import type { AvatarBody } from '../avatar';
+import { box } from '../model_primitives';
 
-// Trailer actors use the actual shortened arm mesh, whose palm is 0.54 units
+// Offline actors use the actual shortened arm mesh, whose palm is 0.54 units
 // below the shoulder. Solve against its geometry, not the full leg length.
 export const PALM = new THREE.Vector3(0, -.54, 0);
 const down = new THREE.Vector3(0, -1, 0);

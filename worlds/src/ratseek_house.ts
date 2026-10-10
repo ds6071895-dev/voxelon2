@@ -9,7 +9,7 @@
 
 import { Block, MANOR_RUGS } from './blocks';
 
-export const RS_CELLAR = 74, RS_GROUND = 80, RS_UPSTAIRS = 86, RS_ATTIC = 92;
+const RS_CELLAR = 74, RS_GROUND = 80, RS_UPSTAIRS = 86, RS_ATTIC = 92;
 
 export interface RsPos { x: number; y: number; z: number }
 export interface RsRoom { name: string; x1: number; x2: number; y1: number; y2: number; z1: number; z2: number }

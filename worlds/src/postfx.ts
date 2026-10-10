@@ -393,7 +393,10 @@ export class PostFX {
     this.tier = t;
     if (!this.composer) return;
     if (rebuild) { this.teardown(); this.build(); }
-    else this.setSize(window.innerWidth, window.innerHeight);
+    else {
+      const size = this.renderer.getSize(this._size);
+      this.setSize(size.x, size.y);
+    }
     this.pushUniforms();
   }
 
@@ -418,7 +421,8 @@ export class PostFX {
     this.pushUniforms();
     // The constructor sizes itself from the target, already in device pixels;
     // re-state it in CSS pixels so the pixel ratio is not applied twice.
-    this.setSize(window.innerWidth, window.innerHeight);
+    const viewport = this.renderer.getSize(this._size);
+    this.setSize(viewport.x, viewport.y);
   }
 
   private teardown(): void {

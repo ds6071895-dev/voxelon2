@@ -1,5 +1,5 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": { "types": ["node"], "lib": ["ES2022", "DOM"] },
-  "include": ["server", "test"]
+  "include": ["server", "test", "vite.config.ts", "scripts/check_trailer_locations.ts"]
 }

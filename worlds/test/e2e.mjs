@@ -1,24 +1,20 @@
 // End-to-end check with real browsers against a running Worlds client+server.
 //
 //   PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs \
-//   TEST_URL=http://localhost:5174 ARTIFACTS=/tmp/worlds-e2e node test/e2e.mjs
+//   TEST_URL=http://localhost:5174 node test/e2e.mjs
 //
 // Playwright is not a dependency of Worlds; point PLAYWRIGHT_MODULE at any
 // install. CHROMIUM_PATH optionally selects the browser binary.
-import { pathToFileURL } from 'node:url';
-import { mkdir } from 'node:fs/promises';
+import { artifactDirectory, browserSession, observeErrors } from '../scripts/browser_session.mjs';
 
-const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE ?? 'playwright/index.mjs').href);
 const url = process.env.TEST_URL ?? 'http://localhost:5174';
-const artifacts = process.env.ARTIFACTS ?? '/tmp/worlds-e2e';
-await mkdir(artifacts, { recursive: true });
-const browser = await chromium.launch({
-  headless: true,
-  ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
-  args: ['--no-sandbox', '--disable-dev-shm-usage', '--enable-unsafe-swiftshader', '--use-gl=swiftshader',
-    '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows'],
-});
+const graphics = process.env.TEST_GRAPHICS ?? 'low';
+if (!['low', 'medium', 'high', 'ultra', 'max'].includes(graphics)) throw new Error(`Invalid TEST_GRAPHICS: ${graphics}`);
+const artifacts = await artifactDirectory('e2e');
+const session = await browserSession({ capture: true });
+const { browser } = session;
 const errors = [];
+const pages = [];
 let failures = 0;
 const ok = (name, cond, detail = '') => {
   if (cond) console.log(`  ✓ ${name}`);
@@ -26,8 +22,10 @@ const ok = (name, cond, detail = '') => {
 };
 
 async function client(label, viewport = { width: 1440, height: 900 }) {
-  const context = await browser.newContext({ viewport });
-  await context.addInitScript(() => {
+  // Keep full CSS viewport coverage while limiting software-GPU fill rate.
+  const context = await browser.newContext({ viewport, deviceScaleFactor: .5 });
+  await context.addInitScript(graphics => {
+    localStorage.setItem('worlds.accessibility', JSON.stringify({ graphicsQuality: graphics }));
     const Native = window.WebSocket;
     window.__messages = []; window.__latest = {}; window.__ws = null;
     window.WebSocket = class extends Native {
@@ -38,10 +36,10 @@ async function client(label, viewport = { width: 1440, height: 900 }) {
         });
       }
     };
-  });
+  }, graphics);
   const page = await context.newPage();
-  page.on('pageerror', (e) => errors.push(`${label}: ${e.stack ?? e}`));
-  page.on('console', (m) => { if (m.type() === 'error') errors.push(`${label} console: ${m.text()}`); });
+  pages.push({ page, label });
+  observeErrors(page, errors, `${label}: `);
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForFunction(() => window.__latest.welcome, undefined, { timeout: 60000 });
   return { page, context };
@@ -60,6 +58,19 @@ try {
   ok('the title never mentions ranked, bots or players online', !/rank|bot|online|leaderboard/.test(bodyText), bodyText.slice(0, 200));
   await shot(A.page, '01-title');
 
+  console.log('▸ accounts');
+  await A.page.locator('#w-account-btn').click();
+  await A.page.locator('[data-tab="create"]').click();
+  await A.page.locator('#w-acct-pass').fill('hunter2hunter2');
+  await A.page.locator('[data-act="create"]').click();
+  await A.page.waitForFunction(() => window.__latest.identity?.account === true, undefined, { timeout: 20000 });
+  ok('A keeps their temporary name as an account', (await latest(A.page, 'identity')).username === nameA);
+  await A.page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+  await A.page.waitForFunction(() => window.__latest.welcome, undefined, { timeout: 60000 });
+  const back = await latest(A.page, 'welcome');
+  ok('a reload resumes the signed-in account', back.account === true && back.username === nameA, JSON.stringify(back));
+  await shot(A.page, '09-signed-in');
+
   console.log('▸ party of two plays The Bridge');
   await A.page.locator('#w-party-btn').click();
   await A.page.locator('[data-act="create"]').click();
@@ -77,6 +88,8 @@ try {
   await B.page.keyboard.press('Escape');
   const bLabel = await B.page.locator('.w-card[data-mode="duels"] .w-card-label').textContent();
   ok('a member sees the leader pick', bLabel === 'Leader picks', bLabel);
+  await A.page.setViewportSize({ width: 640, height: 480 });
+  await B.page.setViewportSize({ width: 640, height: 480 });
   await A.page.locator('.w-card[data-mode="bridge"]').click();
   await Promise.all([A.page, B.page].map((p) => p.waitForFunction(() => window.__latest.pgState?.snapshot?.phase === 'running', undefined, { timeout: 90000 })));
   const worldA = (await latest(A.page, 'pgArena')).world, worldB = (await latest(B.page, 'pgArena')).world;
@@ -85,7 +98,7 @@ try {
   ok('on opposite teams', teams === '0,1', teams);
   await A.page.waitForTimeout(1500);
   await shot(A.page, '04-bridge');
-  await A.page.locator('canvas.game').click({ position: { x: 720, y: 450 }, force: true });
+  await A.page.locator('canvas.game').click({ position: { x: 320, y: 240 }, force: true });
   // Playwright's click drags the mouse across the page, which turns the head;
   // face down the span again before walking.
   const teamA = (await latest(A.page, 'pgArena')).team;
@@ -111,6 +124,7 @@ try {
   await A.page.locator('#quit-btn').click();
   await A.page.waitForFunction(() => !document.getElementById('w-home').hidden, undefined, { timeout: 20000 });
   ok('leaving returns A to the title', true);
+  await A.context.close();
   await B.page.waitForFunction(() => window.__latest.pgResult, undefined, { timeout: 20000 });
   await shot(B.page, '06-bridge-result');
   const resultText = (await B.page.locator('.pg-card').innerText()).toLowerCase();
@@ -138,19 +152,7 @@ try {
   await shot(B.page, '08-duel');
   const duelText = (await B.page.locator('body').innerText()).toLowerCase();
   ok('the Duels HUD never says bot or rank', !/\bbot\b|practice|ranked|\brp\b/.test(duelText));
-
-  console.log('▸ accounts');
-  await A.page.locator('#w-account-btn').click();
-  await A.page.locator('[data-tab="create"]').click();
-  await A.page.locator('#w-acct-pass').fill('hunter2hunter2');
-  await A.page.locator('[data-act="create"]').click();
-  await A.page.waitForFunction(() => window.__latest.identity?.account === true, undefined, { timeout: 20000 });
-  ok('A keeps their temporary name as an account', (await latest(A.page, 'identity')).username === nameA);
-  await A.page.reload({ waitUntil: 'domcontentloaded' });
-  await A.page.waitForFunction(() => window.__latest.welcome, undefined, { timeout: 60000 });
-  const back = await latest(A.page, 'welcome');
-  ok('a reload resumes the signed-in account', back.account === true && back.username === nameA, JSON.stringify(back));
-  await shot(A.page, '09-signed-in');
+  await B.context.close();
 
   console.log('▸ phones');
   const P = await client('phone', { width: 420, height: 820 });
@@ -158,15 +160,26 @@ try {
   await shot(P.page, '10-phone');
   const overflow = await P.page.evaluate(() => document.getElementById('w-home').scrollWidth - document.getElementById('w-home').clientWidth);
   ok('no sideways scroll on a phone', overflow <= 1, String(overflow));
+  await P.context.close();
   const small = await client('small', { width: 1280, height: 620 });
   await small.page.waitForTimeout(1500);
   await shot(small.page, '11-short');
 } catch (e) {
   failures++;
   console.log('ERROR', e);
+  for (const { page, label } of pages) {
+    console.log(`${label} failure state:`, await page.evaluate(() => ({
+      phase: window.__latest?.duelState?.snapshot?.phase,
+      notice: window.__latest?.notice, queue: window.__latest?.queue,
+      arena: window.__latest?.duelArena?.world, leftWorld: window.__latest?.leftWorld,
+      chunks: window.__worlds?.world.chunks.size,
+      meshed: [...(window.__worlds?.world.chunks.values() ?? [])].filter(c => c.meshed).length,
+      dirty: [...(window.__worlds?.world.chunks.values() ?? [])].filter(c => c.dirty).length,
+    })).catch(error => ({ diagnostic: String(error) })));
+  }
 } finally {
   if (errors.length) { console.log('Page errors:'); for (const e of errors.slice(0, 20)) console.log('  ', e); }
-  await browser.close();
+  await session.close();
   console.log(failures || errors.length ? `FAILED (${failures} checks, ${errors.length} page errors)` : 'ALL PASSED');
   process.exit(failures || errors.length ? 1 : 0);
 }

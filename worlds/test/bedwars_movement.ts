@@ -7,7 +7,6 @@ import type { ClientMsg, ServerMsg } from '../src/net/protocol';
 import { mulberry32 } from '../src/noise';
 import { Player } from '../src/player';
 import { FROZEN_INPUT, type PlayerInput } from '../src/input';
-import type { World } from '../src/world';
 
 const floor = (_x: number, y: number, _z: number): number => y === 0 ? Block.Stone : Block.Air;
 const empty = (): number => Block.Air;
@@ -57,7 +56,7 @@ class MovementServer {
 /** Actual browser physics at rendering FPS, transforms at 30Hz, server ticks
  * at 20Hz. No synthetic y curves or ground flags are sent to the server. */
 function runPlayerPhysics(h: MovementServer, player: Player, fps: number, seconds: number, input: PlayerInput): { landings: number; missedLandings: number } {
-  const world = { getBlock: h.match.host.getBlock.bind(h.match.host) } as unknown as World;
+  const world = { getBlock: h.match.host.getBlock.bind(h.match.host) };
   let serverTime = 0, nextPacket = 1 / 30, landings = 0, missedLandings = 0;
   h.move(player.pos); h.inbox.length = 0; // Flush the fixture's authorized teleport.
   for (let frame = 1; frame <= Math.round(seconds * fps); frame++) {
@@ -288,7 +287,7 @@ export function runBedwarsMovementTests(): void {
     h.place(edge); h.move(voidPose); close(h.body.x, voidPose.x, 'step off real map edge accepted');
     h.inbox.length = 0;
     h.tick(3.5);
-    const actual = new Player(voidPose), world = { getBlock: get } as unknown as World;
+    const actual = new Player(voidPose), world = { getBlock: get };
     for (let frame = 0; frame < 240; frame++) actual.update(1 / 120, FROZEN_INPUT, world);
     assert.ok(actual.onGround, 'the critic location really has a lower landing surface');
     close(h.body.y, 96, 'server falls a full block onto the lower ledge');

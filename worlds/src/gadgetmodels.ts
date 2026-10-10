@@ -5,10 +5,10 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { Item } from './items';
+import { bakeModelGeometry } from './model_bake';
 
 const MATERIAL = new THREE.MeshBasicMaterial({ vertexColors: true });
 let cachedPad: THREE.Group | null = null;
-const LIGHT = new THREE.Vector3(0.34, 0.86, 0.38).normalize();
 const scratchPos = new THREE.Vector3();
 const scratchQuat = new THREE.Quaternion();
 const scratchEuler = new THREE.Euler();
@@ -21,23 +21,11 @@ interface Part {
 }
 
 function bake(geometry: THREE.BufferGeometry, position: V3, rotation: V3, color: number): void {
-  geometry.applyMatrix4(new THREE.Matrix4().compose(
+  bakeModelGeometry(geometry, new THREE.Matrix4().compose(
     scratchPos.set(...position),
     scratchQuat.setFromEuler(scratchEuler.set(...rotation)),
     scratchScale,
-  ));
-  geometry.deleteAttribute('uv');
-  const base = new THREE.Color(color);
-  const normal = geometry.attributes.normal;
-  const colors = new Float32Array(normal.count * 3);
-  for (let i = 0; i < normal.count; i++) {
-    const dot = normal.getX(i) * LIGHT.x + normal.getY(i) * LIGHT.y + normal.getZ(i) * LIGHT.z;
-    const shade = 0.58 + 0.4 * Math.max(0, dot) - 0.14 * Math.max(0, -dot);
-    colors[i * 3] = base.r * shade;
-    colors[i * 3 + 1] = base.g * shade;
-    colors[i * 3 + 2] = base.b * shade;
-  }
-  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  ), color, 0.58, 0.4, 0.14);
 }
 
 class Rig {

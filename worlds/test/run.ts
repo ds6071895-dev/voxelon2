@@ -16,13 +16,22 @@ import { mulberry32 } from '../src/noise';
 import { INTERP_DELAY, SenderClock } from '../src/interp';
 import { Player } from '../src/player';
 import { FROZEN_INPUT } from '../src/input';
-import type { World } from '../src/world';
+import type { PhysicsWorld } from '../src/physics_world';
 import { RatSeekMatch } from '../src/ratseek';
 import { SeekerBot } from '../src/ratseek_bot';
 import { dragonChaseTests } from './dragon_chase';
 import { runBedwarsServerTests } from './bedwars_server';
 import { runBedwarsTests } from './bedwars';
 import { runBedwarsMovementTests } from './bedwars_movement';
+import { runMediaCleanupTests } from './media_cleanup';
+import { runRatseekCleanupTests } from './ratseek_cleanup';
+import { runClientCompositionTests, runClientPickerTests } from './client_composition';
+import { runBedwarsCleanupTests } from './bedwars_cleanup';
+import { runBedwarsModelTests } from './bedwars_models';
+import { runClientCleanupTests } from './client_cleanup';
+import { partyCleanupTests } from './party_cleanup';
+import { runRenderingCleanupTests } from './rendering_cleanup';
+import { runServerCleanupTests } from './server_cleanup';
 
 let passed = 0, failed = 0;
 function check(name: string, ok: boolean, detail = ''): void {
@@ -205,7 +214,7 @@ section('matchmaking puts each match in its own world');
   check('an empty world is torn down', h.server.worldCount() === 1);
 }
 
-section('practice opponents fill in silently after 15 s');
+section('practice opponents fill in silently after 10 s');
 {
   const h = new Harness(33);
   const a = h.join();
@@ -217,7 +226,8 @@ section('practice opponents fill in silently after 15 s');
   check('an opponent joins after the wait', !!w && w.kind === 'bridge');
   const members = h.server.worldMembers(w!.id);
   const bot = members.find((id) => id !== a)!;
-  check('the opponent is a generated, human-looking name', isGeneratedName(h.server.usernameOf(bot)));
+  const botName = h.server.usernameOf(bot)!;
+  check('the opponent is a generated, human-looking name', isGeneratedName(botName));
   const wire = JSON.stringify(h.all(a));
   check('nothing on the wire marks it as a bot', !/"bot"|\[Bot\]|practice/i.test(wire));
   check('its id comes from the same sequence as players', bot > a && bot < 1000);
@@ -228,7 +238,7 @@ section('practice opponents fill in silently after 15 s');
   h.send(a, { t: 'leaveMatch' });
   check('leaving dismisses the opponent and the world', h.server.worldCount() === 0 && h.server.botCount() === 0);
   // Names used by bots are released.
-  check('bot names are released afterwards', !h.server.names.inUse(h.server.usernameOf(bot) ?? 'x'));
+  check('bot names are released afterwards', !h.server.names.inUse(botName));
 }
 
 section('queue sizes: 2 from matchmaking');
@@ -371,7 +381,7 @@ section('rat and seek');
 }
 {
   // Stairs and mouseholes, with the real player physics in the real manor.
-  const wb = new WorldBlocks(worldGenerator({ kind: 'ratseek', seed: 1 })).asWorld() as unknown as World;
+  const wb = new WorldBlocks(worldGenerator({ kind: 'ratseek', seed: 1 })).asWorld();
   const climb = (scale: number): number => {
     const p = new Player({ x: -1, y: 81, z: -15.2 });
     p.setBodyScale(scale);
@@ -400,6 +410,8 @@ section('rat and seek');
     nowMs: () => 0, body: (id: number) => bodies.get(id), name: (id: number) => `P${id}`, send: () => {},
     teleport: (id: number, x: number, y: number, z: number) => { bodies.set(id, { x, y, z, yaw: 0, pitch: 0, sneaking: false }); },
     setBlock: () => {}, getBlock: () => Block.Air, drive: () => {},
+    addBot: () => { throw new Error('This fixed-human twist fixture must not create a seeker'); },
+    dropBot: (id: number) => { bodies.delete(id); },
   };
   const count = (standing: 'winning' | 'losing'): Record<string, number> => {
     const m = new RatSeekMatch(host, rng, { humans: [9], bots: [], rats: [1, 2, 3, 4], classes: new Map(), skill: 0.7 });
@@ -509,7 +521,7 @@ section('mobile aim assistance stays modest and respects visibility');
   check('assist strength is frame rate independent', Math.abs(simulate(30) - simulate(120)) < 1e-6);
   const wrap = aimAssist(Math.PI - .01, 0, eye, [{ x: .1, y: 1, z: 10 }], 40, 1 / 60, true, () => true);
   check('yaw seam takes the short path', wrap.yaw > Math.PI - .01 && wrap.yaw < Math.PI);
-  const wall = { getBlock: (_x: number, _y: number, z: number) => z === -4 ? Block.Stone : Block.Air } as World;
+  const wall: PhysicsWorld = { getBlock: (_x: number, _y: number, z: number) => z === -4 ? Block.Stone : Block.Air };
   check('voxel line of sight detects a wall', !!raycastBlocks(wall, new Vector3(0, 1, 0), new Vector3(0, 0, -1), 10));
   check('voxel line of sight stops at target range', !raycastBlocks(wall, new Vector3(0, 1, 0), new Vector3(0, 0, -1), 2));
 }
@@ -555,5 +567,26 @@ runBedwarsTests();
 section('Bedwars movement authority');
 runBedwarsMovementTests();
 
-console.log(`\n${passed} passed, ${failed} failed`);
-if (failed) process.exit(1);
+async function cleanupSuites(): Promise<void> {
+  section('Client storage and input contracts');
+  passed += runClientCleanupTests();
+  section('Client composition, readiness and picker ownership');
+  passed += runClientCompositionTests();
+  passed += await runClientPickerTests();
+  partyCleanupTests(check, section);
+  section('Server authority and lifecycle cleanup');
+  runServerCleanupTests();
+  section('Bedwars prediction and purchase cleanup');
+  runBedwarsCleanupTests();
+  section('Bedwars model ownership');
+  runBedwarsModelTests();
+  section('Shared rendering and avatar ownership');
+  runRenderingCleanupTests();
+  section('Rendering and media resource ownership');
+  runMediaCleanupTests();
+  section('Rat and Seek authority and lifecycle');
+  await runRatseekCleanupTests();
+  console.log(`\n${passed} passed, ${failed} failed`);
+  if (failed) process.exitCode = 1;
+}
+void cleanupSuites().catch(error => { console.error(error); process.exitCode = 1; });

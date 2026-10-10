@@ -11,7 +11,7 @@ export type BwPhase = 'loading' | 'countdown' | 'playing' | 'suddenDeath' | 'res
 export interface BwPos { x: number; y: number; z: number }
 export type BwAction =
   | { kind: 'buy'; sku: string; request: number }
-  | { kind: 'place'; x: number; y: number; z: number; slot: number }
+  | { kind: 'place'; x: number; y: number; z: number; slot: number; prediction?: number }
   /** Re-send every 100-200ms while held; the server owns elapsed mining time. */
   | { kind: 'break'; x: number; y: number; z: number; slot: number }
   | { kind: 'stopBreak' }
@@ -79,6 +79,9 @@ export const BW_RESOURCE_ITEM: Record<BwResource, number> = {
 export const BW_RESOURCE_NAME: Record<BwResource, string> = { iron: 'Iron', gold: 'Gold', diamond: 'Diamond', emerald: 'Emerald' };
 export const BW_TEAM_NAMES = ['Red', 'Blue', 'Green', 'Yellow'] as const;
 export const BW_TEAM_COLORS = ['#e5484d', '#3b82f6', '#2fb24f', '#e2a514'] as const;
+export type BedwarsService = 'shop' | 'upgrades' | 'chest';
+export const BW_SERVICE_NAMES: Record<BedwarsService, string> = { shop: 'Item Shop', upgrades: 'Team Upgrades', chest: 'Team Chest' };
+export function bwZoneRadius(time: number): number { return Math.max(8, 90 - Math.max(0, time - BW.ZONE_AT) / (BW.END_AT - BW.ZONE_AT) * 82); }
 
 /** The match's timeline, Hypixel style: middle generators upgrade on a
  *  schedule, then beds go, then the deathmatch zone closes in. */

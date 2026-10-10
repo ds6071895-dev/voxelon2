@@ -13,6 +13,9 @@ import * as zlib from 'zlib';
 import { SERVER_PORT, SNAPSHOT_HZ, type ClientMsg, type ServerMsg } from '../src/net/protocol';
 import { GameServer, type Outbound } from '../src/net/server_core';
 import { Accounts } from '../src/net/accounts';
+import { LoginThrottle } from '../src/net/login_throttle';
+import { writeAccountsAtomically } from './account_persistence';
+import { staticClientPath } from './static_path';
 
 const port = Number(process.env.PORT) || SERVER_PORT;
 const sockets = new Map<number, WebSocket>();
@@ -23,16 +26,23 @@ const ACCOUNTS_FILE = path.join(process.cwd(), 'worlds-accounts.json');
 const hasher = (pass: string, salt: string): string => crypto.scryptSync(pass, salt, 32).toString('hex');
 
 function loadAccounts(): Accounts {
-  try { return new Accounts(JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf8')) as unknown[]); }
-  catch { return new Accounts(); }
+  try {
+    const records: unknown = JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf8'));
+    if (!Array.isArray(records)) throw new Error('Account store must be an array');
+    return new Accounts(records);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return new Accounts();
+    throw error;
+  }
 }
 const accounts = loadAccounts();
 let accountsDirty = false;
-function saveAccounts(): void {
+function saveAccounts(): boolean {
   try {
-    fs.writeFileSync(ACCOUNTS_FILE, JSON.stringify(accounts.toJSON(), null, 2));
+    writeAccountsAtomically(ACCOUNTS_FILE, JSON.stringify(accounts.toJSON(), null, 2));
     accountsDirty = false;
-  } catch (e) { console.error('failed to save accounts', e); }
+    return true;
+  } catch (e) { console.error('failed to save accounts', e); return false; }
 }
 console.log(`loaded ${accounts.size} account(s) from ${ACCOUNTS_FILE}`);
 
@@ -46,25 +56,8 @@ game.onAccountsChanged = () => { accountsDirty = true; };
 
 // --- Sign-in throttling ------------------------------------------------------
 // Brute-force guard, per name and per socket.
-const LOGIN_MAX_FAILS = 6;
-const LOGIN_WINDOW_MS = 5 * 60_000;
-const LOGIN_LOCKOUT_MS = 60_000;
-const SOCKET_MAX_ATTEMPTS = 20;
-interface Throttle { fails: number; first: number; lockedUntil: number }
-const loginFails = new Map<string, Throttle>();
-const socketAttempts = new Map<string, Throttle>();
-function throttleRemaining(bucket: Map<string, Throttle>, key: string, now: number): number {
-  const t = bucket.get(key);
-  if (!t) return 0;
-  if (now >= t.lockedUntil && now - t.first > LOGIN_WINDOW_MS) { bucket.delete(key); return 0; }
-  return Math.max(0, t.lockedUntil - now);
-}
-function recordFail(bucket: Map<string, Throttle>, key: string, max: number, now: number): void {
-  let t = bucket.get(key);
-  if (!t || now - t.first > LOGIN_WINDOW_MS) { t = { fails: 0, first: now, lockedUntil: 0 }; bucket.set(key, t); }
-  t.fails++;
-  if (t.fails >= max) t.lockedUntil = now + LOGIN_LOCKOUT_MS;
-}
+const loginFails = new LoginThrottle(6);
+const socketAttempts = new LoginThrottle(20);
 
 // --- Connection & flood limits -------------------------------------------------
 const MAX_FRAME_BYTES = 64 * 1024;
@@ -124,10 +117,9 @@ const MIME: Record<string, string> = {
 };
 const COMPRESSIBLE = new Set(['.html', '.js', '.css', '.json', '.svg']);
 const httpServer = http.createServer((req, res) => {
-  let urlPath = decodeURIComponent((req.url || '/').split('?')[0]);
-  if (urlPath === '/') urlPath = '/index.html';
-  const filePath = path.join(DIST, path.normalize(urlPath));
-  if (!filePath.startsWith(DIST)) { res.writeHead(403); res.end(); return; }
+  const resolved = staticClientPath(DIST, req.url || '/');
+  if (!resolved.ok) { res.writeHead(resolved.status); res.end(); return; }
+  const { file: filePath, urlPath } = resolved;
   fs.readFile(filePath, (err, data) => {
     if (err) {
       fs.readFile(path.join(DIST, 'index.html'), (e2, idx) => {
@@ -195,15 +187,15 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     if (msg.t === 'login') {
       const key = String(msg.username ?? '').trim().toLowerCase();
       const sk = String(id);
-      const socketLock = throttleRemaining(socketAttempts, sk, now);
-      recordFail(socketAttempts, sk, SOCKET_MAX_ATTEMPTS, now);
-      const userLock = throttleRemaining(loginFails, key, now);
+      const socketLock = socketAttempts.remaining(sk, now);
+      socketAttempts.record(sk, now);
+      const userLock = loginFails.remaining(key, now);
       if (socketLock > 0 || userLock > 0) {
         send(id, { t: 'authErr', error: `Too many attempts — wait ${Math.ceil(Math.max(socketLock, userLock) / 1000)}s.` });
         return;
       }
       const out = game.handle(id, msg);
-      if (out.some((o) => o.to === id && o.msg.t === 'authErr')) recordFail(loginFails, key, LOGIN_MAX_FAILS, now);
+      if (out.some((o) => o.to === id && o.msg.t === 'authErr')) loginFails.record(key, now);
       else loginFails.delete(key);
       dispatch(out);
       return;
@@ -230,6 +222,8 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
 
 // Heartbeat: drop half-open connections.
 setInterval(() => {
+  loginFails.sweep(Date.now());
+  socketAttempts.sweep(Date.now());
   for (const ws of sockets.values()) {
     const alive = ws as WebSocket & { isAlive: boolean };
     if (!alive.isAlive) { ws.terminate(); continue; }
@@ -258,9 +252,9 @@ setInterval(() => {
 setInterval(() => { if (accountsDirty) saveAccounts(); }, 15000);
 
 function shutdown(): void {
-  saveAccounts();
-  console.log('saved accounts on shutdown');
-  process.exit(0);
+  const saved = saveAccounts();
+  if (saved) console.log('saved accounts on shutdown');
+  process.exit(saved ? 0 : 1);
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
@@ -273,7 +267,7 @@ if (process.stdin.isTTY) {
     if (cmd === 'status') {
       console.log(`${game.playerCount()} players, ${game.worldCount()} worlds, ${game.botCount()} practice opponents, ` +
         `${game.parties.size} parties, ${accounts.size} accounts`);
-    } else if (cmd === 'save') { saveAccounts(); console.log('saved'); }
+    } else if (cmd === 'save') { if (saveAccounts()) console.log('saved'); }
     else if (cmd === 'stop' || cmd === 'quit') shutdown();
     else if (cmd) console.log('commands: status, save, stop');
   });

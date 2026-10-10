@@ -8,7 +8,7 @@ import type { BedwarsBase, BedwarsMap } from './bedwars_map';
 import { BW_TEAM_COLORS } from './bedwars_rules';
 import { Item } from './items';
 import { itemGeometrySolid } from './item_geometry';
-import { buildAvatarBody, disposeAvatarBody, type AvatarBody } from './remoteplayers';
+import { buildAvatarBody, disposeAvatarBody, type AvatarBody } from './avatar';
 import type { Cosmetics } from './character';
 import type { Atlas } from './textures';
 
@@ -16,8 +16,8 @@ const C = {
   wood: 0x624334, lightWood: 0x9a704b, darkWood: 0x352b29, edge: 0xc99b64,
   brass: 0xd5ae61, gold: 0xffce68, iron: 0xa5bac8, ironDark: 0x445362,
   linen: 0xfaf0d7, seam: 0xe6d1a6, red: 0xbd3d50, redLight: 0xe66e78,
-  blue: 0x315faf, blueLight: 0x6c9ce2, jade: 0x39bd92, glass: 0x8de4e5,
-  skin: 0xc9956c, ink: 0x242834, leaf: 0x51874d,
+  blue: 0x315faf, jade: 0x39bd92, glass: 0x8de4e5,
+  ink: 0x242834, leaf: 0x51874d,
 };
 const hex = (css: string): number => parseInt(css.slice(1), 16);
 const TEAM = BW_TEAM_COLORS.map(hex);
@@ -193,6 +193,15 @@ class Workshop {
     for (const material of this.spriteMaterials) material.dispose();
     for (const texture of this.textures) texture.dispose();
     this.spriteMaterials.length = 0; this.textures.length = 0;
+  }
+  /** Construction is complete: retain only owned geometries still in the tree.
+   * Atlas/item geometry has never been put in this workshop's ownership map. */
+  releaseSources(root: THREE.Object3D): void {
+    const retained = new Set<THREE.BufferGeometry>();
+    root.traverse(object => { if (object instanceof THREE.Mesh) retained.add(object.geometry); });
+    for (const [key, geometry] of this.geometries) if (!retained.has(geometry)) {
+      geometry.dispose(); this.geometries.delete(key);
+    }
   }
 }
 
@@ -445,13 +454,15 @@ export function createBedwarsModels(map: BedwarsMap, teamCount: number, atlas: A
   // Avatars and spinners keep their own materials; everything else bakes.
   const skip = new Set<THREE.Object3D>([...animated, ...people.map((p) => p.group)]);
   w.batch(group, skip);
+  w.releaseSources(group);
+  const spinnerHeights = spinners.map(s => s.position.y);
   let disposed = false;
   return {
     group, beds,
     update(timeSeconds: number): void {
       if (disposed) return;
       const t = Number.isFinite(timeSeconds) ? timeSeconds : 0;
-      spinners.forEach((s, i) => { s.rotation.y = t * 1.6 + i; s.position.y += (Math.sin(t * 1.8 + i) * .0016); });
+      spinners.forEach((s, i) => { s.rotation.y = t * 1.6 + i; s.position.y = spinnerHeights[i] + Math.sin(t * 1.8 + i) * .04; });
       people.forEach((p, i) => { p.head.rotation.y = Math.sin(t * .45 + i * 1.7) * .55; p.head.rotation.x = Math.sin(t * .3 + i) * .08; });
       if (astronomy) astronomy.rotation.y = t * .065;
     },

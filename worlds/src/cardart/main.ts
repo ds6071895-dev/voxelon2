@@ -14,19 +14,20 @@ import { PostFX } from '../postfx';
 import { SunShadow } from '../shadows';
 import { Particles } from '../particles';
 import { DragonView } from '../parkour_dragon';
-import { parkourCourse, parkourStandSpot, type ParkourPlatform } from '../parkour_course';
+import { parkourStandSpot, type ParkourPlatform } from '../parkour_course';
 import { parkourTheme } from '../parkour_themes';
-import { buildAvatarBody, poseGunHold, stridePose, type AvatarBody } from '../remoteplayers';
+import { buildAvatarBody, disposeAvatarBody, poseGunHold, type AvatarBody } from '../avatar';
+import { createAvatarEquipment, attachAvatarEquipment } from '../avatar_equipment';
 import { defaultCosmetics } from '../character';
-import { createGunModel, poseGunModel } from '../gunmodels';
-import { createRatModel, createCheeseModel, createCatModel } from '../ratseek_models';
+import { createRatModel, createCheeseModel, createCatModel, disposeRsProp } from '../ratseek_models';
 import { createBedwarsModels } from '../bedwars_models';
 import { bwMap, BW_BOUNDS } from '../bedwars_map';
-import { createBowModel, poseBowModel } from '../bowmodel';
-import { itemGeometry } from '../item_geometry';
 import { Item } from '../items';
-import { Block, isSolid } from '../blocks';
-import { fitHands } from '../trailer/grips';
+import { Block } from '../blocks';
+import { fitHands } from '../media/grips';
+import { chooseCaptureCourse } from '../media/course';
+import { warmCaptureDragon } from '../media/dragon';
+import { captureGround, configureCaptureQuality, sizeCapture, loadCaptureChunks, poseCaptureStride } from '../media/offline';
 
 export type CardId = 'bedwars' | 'duels' | 'bridge' | 'parkour' | 'ratseek';
 export const CARDS: readonly CardId[] = ['bedwars', 'duels', 'bridge', 'parkour', 'ratseek'];
@@ -82,9 +83,7 @@ const shadows = new SunShadow(renderer, scene, atlas.texture, world.shadowUnifor
 // The in-game "Extra High" look: smooth light and sun shadows, no colour grade.
 const shaders = params.get('shaders') === '1';
 sky.setShaders(shaders);
-postfx.setEnabled(shaders);
-shadows.setEnabled(true);
-shadows.setTier(1);
+configureCaptureQuality(renderer, postfx, shadows, shaders, true, 0, 1);
 world.shaderModeUniform.value = shaders ? 1 : 0;
 const particles = new Particles(scene);
 const dragon = new DragonView(scene, particles);
@@ -93,11 +92,13 @@ const itemMat = new THREE.MeshBasicMaterial({ map: atlas.texture, alphaTest: .4,
 /** Everything a card adds to the scene, removed again before the next one. */
 const props = new THREE.Group();
 scene.add(props);
+const propDisposers: (() => void)[] = [];
 
 const TEAM = { red: 0xd9393f, blue: 0x2f6fe0, green: 0x37a845, yellow: 0xe8c22c } as const;
 
 function actor(seed: number, shirt?: number): AvatarBody {
   const body = buildAvatarBody(defaultCosmetics(seed), shirt === undefined ? undefined : new THREE.Color(shirt));
+  propDisposers.push(() => disposeAvatarBody(body));
   props.add(body.group);
   return body;
 }
@@ -107,30 +108,26 @@ function place(body: AvatarBody, p: THREE.Vector3, look: THREE.Vector3): void {
   body.group.rotation.y = Math.atan2(-(look.x - p.x), -(look.z - p.z));
 }
 function stride(body: AvatarBody, phase: number, speed: number, holding: boolean, attack = 0): void {
-  const pose = stridePose(phase, speed, 0, holding, attack);
-  body.parts[0].rotation.x = pose.legs[0];
-  body.parts[1].rotation.x = pose.legs[1];
-  body.parts[2].rotation.set(pose.arms[0], 0, 0);
-  body.parts[3].rotation.set(pose.arms[1], 0, pose.rightArmRoll);
+  poseCaptureStride(body, phase, speed, holding, attack);
 }
-/** A sprite item (sword, wool) in the right hand, posed like remoteplayers. */
+/** Shared avatar equipment with the card's authored hand pose. */
 function hold(body: AvatarBody, item: number): void {
-  const mesh = new THREE.Mesh(itemGeometry(atlas, item), itemMat);
-  mesh.position.set(0, -.74 + .06, -.2);
-  mesh.rotation.set(-.5, 0, 0);
-  mesh.scale.setScalar(item < 256 ? 1.5 : 1.1);
-  body.parts[3].add(mesh);
+  const equipment = createAvatarEquipment(atlas, item, itemMat);
+  if (equipment) {
+    attachAvatarEquipment(body, equipment);
+    propDisposers.push(() => equipment.dispose());
+  }
 }
 function gun(body: AvatarBody, kick = 0): void {
-  const g = createGunModel();
-  poseGunModel(g, 'avatar');
-  body.group.add(g);
+  const equipment = createAvatarEquipment(atlas, Item.BurstRifle, itemMat)!;
+  const g = equipment.root;
+  attachAvatarEquipment(body, equipment);
+  propDisposers.push(() => equipment.dispose());
   poseGunHold(body, g, { pitch: 0, aim: .6, reload: 0, kick });
   fitHands(body, g);
 }
 function ground(gen: WorldGenerator, x: number, z: number, top = 160, bottom = 60): number {
-  for (let y = top; y >= bottom; y--) if (isSolid(gen.blockAt(Math.floor(x), y, Math.floor(z)))) return y + 1;
-  return bottom;
+  return captureGround(gen, x, z, top, bottom);
 }
 const v = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
 
@@ -152,11 +149,7 @@ interface Staging {
   tick?(t: number): void;
 }
 
-let parkourSeed = 2026;
-for (; parkourSeed < 3026; parkourSeed += 8) {
-  const pieces = parkourCourse(parkourSeed).variant.pieces;
-  if (pieces.includes('rooftops')) break;
-}
+const { seed: parkourSeed, course: cardCourse } = chooseCaptureCourse(['rooftops']);
 
 function staging(id: CardId): Staging {
   if (id === 'bedwars') {
@@ -175,6 +168,7 @@ function staging(id: CardId): Staging {
       cam: v(-28, y + 13, 24), at: v(-56.5, y + 1, 7.5), fov: 50, fog: [120, 240], edits: bridge,
       pose() {
         const models = createBedwarsModels(map, 2, atlas);
+        propDisposers.push(() => models.dispose());
         props.add(models.group);
         models.update(3);
         const defender = actor(11, TEAM.red);
@@ -219,12 +213,12 @@ function staging(id: CardId): Staging {
         place(b, v(12.5, yb, 33), v(12.5, yb, 20));
         stride(a, 1.1, 4, true, .7); stride(b, 2.6, 4, true, .15);
         hold(a, Item.IronSword);
-        const bow = createBowModel(); poseBowModel(bow, 'avatar'); b.parts[3].add(bow);
+        hold(b, Item.BridgeBow);
       },
     };
   }
   if (id === 'parkour') {
-    const course = parkourCourse(parkourSeed);
+    const course = cardCourse;
     const gen = worldGenerator({ kind: 'parkour', seed: parkourSeed });
     const section = course.sections.find(p => p.piece === 'rooftops') ?? course.sections[1];
     const order = Math.min(section.toOrder - 5, section.fromOrder + 5);
@@ -237,10 +231,7 @@ function staging(id: CardId): Staging {
       cam: v(anchor.x - 18, anchor.y + 6, anchor.z + 10), at: v(anchor.x + 3, anchor.y + 2.5, anchor.z), fov: 50, fog: [90, 185],
       pose() {
         dragon.enter(course, parkourTheme(parkourSeed), 0, 0);
-        for (let i = 0; i < 90; i++) {
-          dragon.sync(order - 8 + i * .055, 1.5, 20000 + i * 33);
-          dragon.update(1 / 30, 20000 + i * 33, 0, true);
-        }
+        warmCaptureDragon(dragon, order);
         runners = [actor(300, TEAM.red), actor(671, TEAM.blue), actor(1042, TEAM.yellow)];
         runners.forEach((r, i) => {
           const a = stand(course.steps[order + 2 - i][0]), b = stand(course.steps[order + 3 - i][0]);
@@ -266,6 +257,7 @@ function staging(id: CardId): Staging {
       // Below the porch roof: the lawn and path are at most a block up.
       const floor = (x: number, z: number) => ground(gen, x, z, 83, 70);
       const rats = [createRatModel(), createRatModel(), createRatModel()];
+      rats.forEach(r => propDisposers.push(() => r.dispose()));
       const spots = [[-.4, 23.2], [1.2, 24.6], [2.4, 22.4]];
       rats.forEach((r, i) => {
         props.add(r.group);
@@ -276,11 +268,13 @@ function staging(id: CardId): Staging {
         r.pose(5, i * 2.1, 1);
       });
       const cheese = createCheeseModel();
+      propDisposers.push(() => disposeRsProp(cheese));
       cheese.scale.setScalar(.6);
       rats[0].group.updateWorldMatrix(true, false);
       cheese.position.copy(rats[0].group.localToWorld(v(0, .32, -.48)));
       props.add(cheese);
       const cat = createCatModel();
+      propDisposers.push(() => cat.dispose());
       cat.group.position.set(-2.6, floor(-2.6, 19.5), 19.5);
       cat.group.rotation.y = 2.6;
       cat.update(true, 0, 2);
@@ -309,13 +303,13 @@ function frame(s: Staging): void {
 /** Renders a w x h still. `below` extra pixels extend the frame downward
  *  without moving the subject, leaving ground for the tile's title to sit on. */
 async function prepare(id: CardId, w = 1200, h = 900, below = 0): Promise<void> {
-  canvas.width = w; canvas.height = h;
-  renderer.setSize(w, h, false);
-  postfx.setSize(w, h);
-  camera.aspect = w / (h - below);
-  if (below > 0) camera.setViewOffset(w, h - below, 0, 0, w, h);
-  else camera.clearViewOffset();
+  if (!CARDS.includes(id)) throw new Error(`Invalid card ${id}`);
+  sizeCapture(renderer, postfx, camera, w, h, below);
+  // Dispose only resources explicitly owned by this take. Guns, bows, held-item
+  // geometry and the atlas are borrowed from module caches and stay reusable.
+  for (const dispose of propDisposers.splice(0)) dispose();
   props.clear();
+  runners = [];
   dragon.clear();
   heroSky.visible = id === 'bedwars';
   const s = staging(id);
@@ -329,14 +323,9 @@ async function prepare(id: CardId, w = 1200, h = 900, below = 0): Promise<void> 
   world.setArenaRenderBounds(id === 'bedwars' ? BW_BOUNDS : s.generator.bounds, s.ambient);
   for (const [x, y, z, b] of s.edits ?? []) world.setBlock(x, y, z, b);
   sky.snapTo(s.timeOfDay);
-  world.renderDistance = s.radius;
-  const deadline = performance.now() + 180000;
-  while (!world.update(s.center.x, s.center.z, 40, s.radius)) {
-    if (performance.now() > deadline) throw new Error(`Chunk loading timed out for ${id}`);
-    await new Promise(r => setTimeout(r, 0));
-  }
+  await loadCaptureChunks(world, s.center.x, s.center.z, s.radius, 40, id);
   for (const [x, y, z, b] of s.edits ?? []) world.setBlock(x, y, z, b);
-  while (!world.update(s.center.x, s.center.z, 40, s.radius)) await new Promise(r => setTimeout(r, 0));
+  await loadCaptureChunks(world, s.center.x, s.center.z, s.radius, 40, id);
   s.pose();
   time = 0;
   // Let the sky, shadows and dragon settle before the still is taken.

@@ -45,8 +45,8 @@ export class Accounts {
   // Keyed by lowercased username: identity is case-insensitive and unique.
   private readonly byName = new Map<string, Account>();
 
-  constructor(records: unknown[] = []) {
-    for (const raw of records) {
+  constructor(records: unknown = []) {
+    for (const raw of Array.isArray(records) ? records : []) {
       if (!raw || typeof raw !== 'object') continue;
       const a = raw as Partial<Account>;
       if (!isGeneratedName(a.username) || typeof a.salt !== 'string' || typeof a.hash !== 'string') continue;
@@ -82,7 +82,7 @@ export class Accounts {
   /** Verify credentials. Same error for unknown user and wrong passphrase. */
   login(name: string, pass: string, hash: Hasher): AuthResult {
     const a = this.get(name);
-    if (!a || typeof pass !== 'string') return { ok: false, error: 'Wrong name or passphrase.' };
+    if (!a || typeof pass !== 'string' || pass.length > MAX_PASS) return { ok: false, error: 'Wrong name or passphrase.' };
     if (hash(pass, a.salt) !== a.hash) return { ok: false, error: 'Wrong name or passphrase.' };
     return { ok: true, account: a };
   }

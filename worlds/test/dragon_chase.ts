@@ -13,10 +13,10 @@
 import { Player } from '../src/player';
 import { Block, BLOCKS } from '../src/blocks';
 import { FROZEN_INPUT, type PlayerInput } from '../src/input';
-import type { World } from '../src/world';
+import type { PhysicsWorld } from '../src/physics_world';
 import { PartyGamesEngine, PARTY_COUNTDOWN_MS, partySpawns } from '../src/partygames';
 import {
-  PARKOUR_VENUE_X, PARKOUR_VENUE_Z, SET_PIECES, encodeParkourSeed, parkourCourse, parkourLength, parkourStandSpot,
+  PARKOUR_VENUE_X, PARKOUR_VENUE_Z, SET_PIECES, encodeParkourSeed, generateParkourCourse, parkourCourse, parkourLength, parkourStandSpot,
   type ParkourCourse, type ParkourPlatform, type SetPieceId,
 } from '../src/parkour_course';
 import { parkourVenue, type ParkourVenue } from '../src/parkour_setpieces';
@@ -31,8 +31,8 @@ const RUN: PlayerInput = { ...FROZEN_INPUT, forward: true, jump: true, sprintKey
 const SPEEDS = [5.612, 4.317, 3.2, 2.3];
 const OFFSETS = [0, .5, 1, 1.5];
 
-export function venueWorld(v: ParkourVenue): World {
-  return { isLoaded: () => true, getBlock: (x: number, y: number, z: number) => v.get(Math.floor(x), Math.floor(y), Math.floor(z)) } as unknown as World;
+export function venueWorld(v: ParkourVenue): PhysicsWorld {
+  return { isLoaded: () => true, getBlock: (x: number, y: number, z: number) => v.get(Math.floor(x), Math.floor(y), Math.floor(z)) };
 }
 function onPad(p: Player, b: ParkourPlatform): boolean {
   const left = Math.floor(b.x - b.width / 2), front = Math.floor(b.z - b.depth / 2);
@@ -40,7 +40,7 @@ function onPad(p: Player, b: ParkourPlatform): boolean {
     p.pos.z + .3 > front && p.pos.z - .3 < front + b.depth;
 }
 /** One attempt at the jump a → b; true if it lands on b. */
-export function fly(c: ParkourCourse, world: World, a: ParkourPlatform, b: ParkourPlatform, back: number, speed: number, line: number): boolean {
+export function fly(c: ParkourCourse, world: PhysicsWorld, a: ParkourPlatform, b: ParkourPlatform, back: number, speed: number, line: number): boolean {
   const h = b.heading, alongX = h % 2 === 1, s = h < 2 ? 1 : -1;
   const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
   const aAlong = alongX ? a.x : a.z, aLat = alongX ? a.z : a.x, bAlong = alongX ? b.x : b.z, bLat = alongX ? b.z : b.x;
@@ -78,7 +78,7 @@ export function fly(c: ParkourCourse, world: World, a: ParkourPlatform, b: Parko
   }
   return false;
 }
-export function reachable(c: ParkourCourse, world: World, a: ParkourPlatform, b: ParkourPlatform): boolean {
+export function reachable(c: ParkourCourse, world: PhysicsWorld, a: ParkourPlatform, b: ParkourPlatform): boolean {
   for (const back of OFFSETS) for (const speed of SPEEDS) for (const line of [0, 1])
     if (fly(c, world, a, b, back, speed, line)) return true;
   return false;
@@ -102,7 +102,7 @@ export function sceneryFaults(c: ParkourCourse, v: ParkourVenue): string[] {
   const nearFinish = (x: number, z: number) => Math.abs(x - c.finish.x) < 16 && z >= Math.floor(c.finish.z) - 2;
   for (const s of c.spaces) {
     const B = s.box;
-    const y0 = s.pad ? s.lo - 3 : s.lo - 3, y1 = s.pad ? B.y1 + 2 : s.hi + 5;
+    const y0 = s.lo - 3, y1 = s.pad ? B.y1 + 2 : s.hi + 5;
     for (let x = B.x0 - 1; x <= B.x1 + 1; x++)
       for (let z = B.z0 - 1; z <= B.z1 + 1; z++) {
         if (nearFinish(x, z) || z < 13) continue;
@@ -262,8 +262,9 @@ export function dragonChaseTests(check: Check, section: (name: string) => void):
     check('two or four runners all spawn on open floor', spawnsOk);
     check('no little groups of blocks float loose', !strays, strays);
     const seed = encodeParkourSeed(12345, 3);
-    check('a course is the same course on every machine', JSON.stringify(parkourCourse(seed).platforms.map(p => [p.x, p.y, p.z, p.kind])) ===
-      JSON.stringify(parkourCourse(seed).platforms.map(p => [p.x, p.y, p.z, p.kind])));
+    const freshA = generateParkourCourse(seed), freshB = generateParkourCourse(seed);
+    check('independent generation produces the identical complete course', freshA !== freshB &&
+      JSON.stringify(freshA) === JSON.stringify(freshB) && JSON.stringify(freshA) === JSON.stringify(parkourCourse(seed)));
     const t0 = performance.now();
     for (let i = 0; i < 5; i++) parkourVenue(encodeParkourSeed(777 + i * 104729, i));
     const ms = (performance.now() - t0) / 5;

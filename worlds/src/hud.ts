@@ -59,7 +59,6 @@ export class HUD {
   private readonly slots: HTMLDivElement[] = [];
   private readonly icons: HTMLCanvasElement[] = [];
   private readonly counts: HTMLSpanElement[] = [];
-  private readonly cooldowns: HTMLDivElement[] = [];
   private readonly debugEl: HTMLElement;
   private readonly nameEl: HTMLDivElement;
   private nameTimer: number | undefined;
@@ -96,7 +95,6 @@ export class HUD {
       this.slots.push(slot);
       this.icons.push(icon);
       this.counts.push(count);
-      this.cooldowns.push(cd);
     }
 
     // Item name popup above the hotbar, like vanilla. `hud-themed` puts it on

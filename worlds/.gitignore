@@ -9,3 +9,4 @@ dist/
 worlds-accounts.json
 release-media/
 __pycache__/
+test-artifacts/

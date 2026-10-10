@@ -1,29 +1,25 @@
 // Real browser + a socket peer. Plays a 1v1 through the actual websocket server:
 // title, team dialog, sidebar, generator items into the hotbar, the centred shop,
 // predicted bridging, crack-and-collect mining and the results card. Writes
-// screenshots to ARTIFACTS (default: ./test-artifacts/bedwars).
+// screenshots to ARTIFACTS (default: ./node_modules/.tmp/browser-check/bedwars).
 //
 //   npm run server &  npx vite --port 5174 &
 //   PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs CHROMIUM_PATH=/path/to/chrome node test/bedwars_e2e.mjs
 import assert from 'node:assert/strict';
-import { mkdir } from 'node:fs/promises';
-import { pathToFileURL } from 'node:url';
 import WebSocket from 'ws';
+import { artifactDirectory, browserSession, observeErrors } from '../scripts/browser_session.mjs';
 
-const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE ?? '/home/aiscoding2022/aiverest/node_modules/playwright/index.mjs').href);
-const url = process.env.TEST_URL ?? 'http://localhost:5174';
-const artifacts = process.env.ARTIFACTS ?? 'test-artifacts/bedwars';
-await mkdir(artifacts, { recursive: true });
-const browser = await chromium.launch({ headless: true,
-  executablePath: process.env.CHROMIUM_PATH ?? '/home/aiscoding2022/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome',
-  args: ['--no-sandbox', '--disable-dev-shm-usage', '--enable-unsafe-swiftshader', '--use-gl=angle', '--use-angle=swiftshader'] });
+const artifacts = await artifactDirectory('bedwars');
+const session = await browserSession({ base: process.env.TEST_URL ?? 'http://localhost:5174' });
+const { browser, base: url } = session;
 const errors = [];
+let peer;
 const wait = async (predicate, timeout = 20000) => {
   const start = Date.now();
   while (!predicate()) { if (Date.now() - start > timeout) throw new Error('Timed out waiting for socket state'); await new Promise(r => setTimeout(r, 40)); }
 };
 try {
-  const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+  const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: .5 });
   await context.addInitScript(() => {
     localStorage.setItem('worlds.accessibility', JSON.stringify({ graphicsQuality: 'medium' }));
     const Native = window.WebSocket; window.__latest = {};
@@ -32,8 +28,7 @@ try {
     };
   });
   const page = await context.newPage();
-  page.on('pageerror', e => errors.push(String(e.stack ?? e)));
-  page.on('console', m => { if (m.type() === 'error') errors.push(`console: ${m.text()}`); });
+  observeErrors(page, errors);
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForFunction(() => window.__worlds && window.__latest.welcome, undefined, { timeout: 60000 });
   const shot = async name => page.screenshot({ path: `${artifacts}/${name}.png` });
@@ -47,7 +42,7 @@ try {
   await shot('01-title');
 
   // A second human joins a party; the leader chooses teams.
-  const peer = new WebSocket(process.env.WS_URL ?? 'ws://localhost:8090'); const B = { latest: {} };
+  peer = new WebSocket(process.env.WS_URL ?? 'ws://localhost:8090'); const B = { latest: {} };
   peer.on('message', raw => { const m = JSON.parse(String(raw)); B.latest[m.t] = m; if (m.t === 'bwArena') peer.send(JSON.stringify({ t: 'worldReady', world: m.world.id })); });
   await new Promise(r => peer.once('open', r)); peer.send(JSON.stringify({ t: 'hello' })); await wait(() => B.latest.welcome);
   await page.locator('#w-party-btn').click(); await page.locator('[data-act="create"]').click();
@@ -80,13 +75,17 @@ try {
   const base = map.bases[0];
   const walkTo = async t => {
     const from = await page.evaluate(() => ({ ...window.__worlds.player.pos }));
-    const steps = Math.ceil(Math.hypot(t.x - from.x, t.z - from.z) / .35);
+    const steps = Math.max(1, Math.ceil(Math.hypot(t.x - from.x, t.z - from.z) / .25));
     for (let i = 1; i <= steps; i++) {
       const k = i / steps;
       await page.evaluate(({ x, y, z }) => { const w = window.__worlds; w.player.pos.set(x, y, z); w.player.vel.set(0, 0, 0); w.net.flushXform(x, y, z, w.player.yaw, w.player.pitch); },
         { x: from.x + (t.x - from.x) * k, y: t.y, z: from.z + (t.z - from.z) * k });
-      await page.waitForTimeout(50);
+      await page.waitForTimeout(60);
     }
+    await page.waitForFunction(t => {
+      const w = window.__worlds, p = window.__latest.snapshot?.players.find(p => p.id === w.net.myId);
+      return p && Math.hypot(p.x - t.x, p.y - t.y, p.z - t.z) < .2;
+    }, t, { timeout: 5000 });
   };
   await walkTo({ x: base.forge.x + 3.5, y: 97, z: base.forge.z + 0.5 });
   await page.evaluate(() => { const w = window.__worlds; w.player.yaw = Math.PI / 2; w.player.pitch = -0.55; });
@@ -99,9 +98,14 @@ try {
   assert.ok(iron >= 4, `iron went into the hotbar (${iron})`);
   await shot('05-collected');
 
-  // Shop: a docked panel, not a modal.
-  await walkTo({ x: base.shop.x, y: 97, z: base.shop.z + 2.6 });
-  await page.evaluate(() => window.__worlds.bwClient.interact());
+  // Shop: a centred merchant panel.
+  // The hall's front pillars occupy local u=-2, w=±4. Cross between
+  // services along u=0, then approach through the merchant's open arcade.
+  await walkTo({ x: base.forge.x + base.inward.x * 7, y: 97, z: base.forge.z + base.inward.z * 7 });
+  await walkTo({ x: base.shop.x + base.inward.x * 5, y: 97, z: base.shop.z + base.inward.z * 5 });
+  await walkTo({ x: base.shop.x + base.inward.x * 2.6, y: 97, z: base.shop.z + base.inward.z * 2.6 });
+  assert.equal(await page.evaluate(() => window.__worlds.bwClient.interact()), true,
+    `merchant interaction from ${JSON.stringify(await page.evaluate(() => ({ ...window.__worlds.player.pos })))}`);
   await page.waitForSelector('.bw-shop:not([hidden])');
   const box = await page.locator('.bw-shop').boundingBox();
   assert.ok(Math.abs(box.x + box.width / 2 - 640) < 4 && box.width <= 620, 'shop is a centred window');
@@ -115,11 +119,13 @@ try {
 
   // Bridging: blocks appear at once and every one is accepted by the server.
   const edge = await page.evaluate(() => { const w = window.__worlds.world; let e = -76; for (let x = -76; x < -40; x++) if (w.getBlock(x, 96, 5) !== 0) e = x; return e; });
+  await walkTo({ x: base.center.x, y: 97, z: base.shop.z });
+  await walkTo({ x: base.center.x, y: 97, z: 5.5 });
   await walkTo({ x: edge + 0.5, y: 97, z: 5.5 });
   const before = await count(242);
   let placed = 0;
   for (let i = 0; i < 6; i++) {
-    await page.evaluate(({ x }) => { const w = window.__worlds; w.player.pos.set(x + 0.5, 97, 5.5); w.net.flushXform(x + 0.5, 97, 5.5, w.player.yaw, w.player.pitch); }, { x: edge + i });
+    await walkTo({ x: edge + i + .5, y: 97, z: 5.5 });
     placed += await page.evaluate(({ x }) => window.__worlds.bwClient.place({ x, y: 96, z: 5, nx: 1, ny: 0, nz: 0 }, window.__worlds.inventory.selected) ? 1 : 0, { x: edge + i });
     await page.waitForTimeout(110);
   }
@@ -164,5 +170,6 @@ try {
   assert.deepEqual(errors, [], `Browser errors: ${errors.join('\n')}`);
   console.log('PASS: teams dialog, sidebar, generator items into the hotbar, centred shop, bridging, mining, results');
 } finally {
-  await browser.close();
+  peer?.close();
+  await session.close();
 }

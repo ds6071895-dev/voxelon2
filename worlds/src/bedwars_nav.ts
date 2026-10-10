@@ -3,8 +3,7 @@ import type { BwPos } from './bedwars_rules';
 
 type BwBlockReader = (x: number, y: number, z: number) => number;
 export function bwDistance(a: BwPos, b: BwPos): number { return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z); }
-/** Packed integer key for a cell (x, z within +-128, y 0-511). */
-export function bwKey(x: number, y: number, z: number): number { return ((x + 128) * 512 + y) * 512 + (z + 128); }
+export { bwKey } from './bedwars_geometry';
 /** Includes the endpoint unless its cell is explicitly being targeted. */
 export function bwLine(get: BwBlockReader, a: BwPos, b: BwPos, ignore?: BwPos): boolean {
   const steps = Math.ceil(bwDistance(a, b) * 12);

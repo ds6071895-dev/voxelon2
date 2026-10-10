@@ -14,15 +14,16 @@
 // the house twists lean with the game — more Spotlights while the rats run
 // away with it, more Ghost Rats while they are losing. Nobody is told that.
 
-import { Block, collisionBoxes, pointInSolid } from './blocks';
+import { Block, collisionBoxes } from './blocks';
 import { Item, type ItemStack } from './items';
 import type { ServerMsg } from './net/protocol';
 import {
   RS_CAGE, RS_KEEPER, RS_PODIUM, RS_PODIUM_CROWD, RS_RELEASE, RS_WAITING, rsHouse, rsPassageAt, rsRoomAt, type RsPassage, type RsPos,
 } from './ratseek_house';
-import { clearLine, rsSeekerNav, rsSmallNav, seeThrough } from './ratseek_nav';
+import { clearLine, rsSeekerNav, rsSmallNav } from './ratseek_nav';
+import { rsMoveClear } from './ratseek_movement';
 import {
-  RAT_CLASSES, RAT_CLASS_IDS, RS, ratClassCap, type RatClassId, type RsAward, type RsEffects, type RsPhase,
+  RAT_CLASSES, RAT_CLASS_IDS, RS, ratClassCap, type RatClassId, type RsEffects, type RsPhase,
   type RsPlayerView, type RsResult, type RsRole, type RsSnapshot, type RsSound,
 } from './ratseek_rules';
 import { SeekerBot } from './ratseek_bot';
@@ -74,7 +75,7 @@ interface Kit {
   trapRefills: number[];
   baitRefills: number[];
 }
-interface CheeseItem { id: number; x: number; y: number; z: number; bait: boolean; owner: number; pickupAt: number }
+interface CheeseItem { id: number; x: number; y: number; z: number; bait: boolean; owner: number; pickupAt: number; site?: RsPos }
 interface Decoy { id: number; owner: number; x: number; y: number; z: number; sx: number; sz: number; ticks: number; yaw: number }
 interface Trap { owner: number; x: number; y: number; z: number }
 interface Chandelier { hang: RsPos; lever: RsPos; puller: number; warning: number; rehang: number; up: boolean }
@@ -126,10 +127,7 @@ export class RatSeekMatch {
   private readonly perchTicks = new Map<number, number>();
   private readonly cageOrder: number[] = [];
   private readonly catchesBy = new Map<number, number>();
-  private readonly tauntsBy = new Map<number, number>();
-  private readonly escapesBy = new Map<number, number>();
   private readonly cheeseGrabbed = new Map<number, number>();
-  private fastest: { catcher: number; victim: string; ticks: number } | null = null;
   private readonly effects = new Map<number, Map<Effect, { until: number; amp: number }>>();
   private readonly fxSent = new Map<number, string>();
   private readonly kitSent = new Map<number, string>();
@@ -222,6 +220,7 @@ export class RatSeekMatch {
 
   /** Accept or refuse a client's reported position. */
   acceptMove(id: number, from: RsBody, to: { x: number; y: number; z: number }, dt: number): boolean {
+    if (!this.roleOf(id) || ![from.x, from.y, from.z, to.x, to.y, to.z, dt].every(Number.isFinite) || dt < 0) return false;
     if (this.phase === 'loading' || this.phase === 'intro') return Math.hypot(to.x - from.x, to.z - from.z) < 0.05 && Math.abs(to.y - from.y) < 0.6;
     if (this.phase === 'results') return true;
     const rat = this.rats.has(id);
@@ -231,27 +230,41 @@ export class RatSeekMatch {
     const allowance = speed * Math.max(dt, 0.05) * 1.6 + 1.2 + (boosted ? 3 : 0);
     if (Math.hypot(to.x - from.x, to.z - from.z) > allowance) return false;
     if (to.y - from.y > 1.3 + this.effectAmp(id, 'jump') * 0.9 + (boosted ? 1 : 0)) return false;
-    // The body must not end up inside a wall.
-    const hw = 0.3 * scale * 0.85, h = 1.8 * scale * 0.9;
-    for (const ox of [-hw, hw]) for (const oz of [-hw, hw]) for (const oy of [0.06, h / 2, h]) {
-      const px = to.x + ox, py = to.y + oy, pz = to.z + oz;
-      const bx = Math.floor(px), by = Math.floor(py), bz = Math.floor(pz);
-      if (pointInSolid(this.host.getBlock(bx, by, bz), px - bx, py - by, pz - bz)) return false;
-    }
-    return true;
+    return rsMoveClear(from, to, scale, (x, y, z) => this.host.getBlock(x, y, z));
   }
   private readonly impulseUntil = new Map<number, number>();
+
+  /** Transient state cannot survive a teleport into a different role or cage. */
+  private resetMotion(id: number): void {
+    this.motion.delete(id); this.impulseUntil.delete(id);
+    this.passageTicks.delete(id); this.passageOf.delete(id); this.perchTicks.delete(id);
+    this.whiskersUntil.delete(id); this.spotted.delete(id); this.clearEffects(id);
+  }
+
+  private resetPlayer(id: number): void {
+    this.resetMotion(id);
+    for (const m of [this.points, this.carried, this.tauntReady, this.dashReady, this.rattleReady,
+      this.combos, this.comboUntil, this.escapes, this.catchesBy, this.cheeseGrabbed,
+      this.abilityReady, this.compassReady, this.swatReady]) m.delete(id);
+    this.classes.delete(id); this.kits.delete(id); this.clearCompass(id);
+    this.fxSent.delete(id); this.kitSent.delete(id);
+    this.decoys = this.decoys.filter((d) => d.owner !== id);
+    this.cheese = this.cheese.filter((c) => !c.bait || c.owner !== id);
+    for (const [key, trap] of this.traps) if (trap.owner === id) {
+      this.traps.delete(key); this.host.setBlock(trap.x, trap.y, trap.z, Block.Air);
+    }
+    for (const c of this.chandeliers) if (c.puller === id) c.puller = -1;
+    const cage = this.cageOrder.indexOf(id);
+    if (cage >= 0) this.cageOrder.splice(cage, 1);
+    for (const [seeker, rat] of this.compassRat) if (rat === id) this.clearCompass(seeker);
+  }
 
   leave(id: number): void {
     const wasHuman = this.humans.delete(id);
     const wasRat = this.rats.delete(id);
     this.people.delete(id);
     this.loaded.delete(id);
-    this.kits.delete(id);
-    this.classes.delete(id);
-    this.escapes.delete(id);
-    const cage = this.cageOrder.indexOf(id);
-    if (cage >= 0) this.cageOrder.splice(cage, 1);
+    this.resetPlayer(id);
     if (this.phase === 'results') return;
     const name = this.host.name(id);
     if (this.phase === 'loading') { this.tryStart(); return; }
@@ -270,7 +283,7 @@ export class RatSeekMatch {
 
   /** The party host's "Who seeks?" pick: a person in the match, or 0 for the AI seeker. */
   chooseSeeker(by: number, seeker: number): void {
-    if (by !== this.leader) return;
+    if (by !== this.leader || !this.people.has(by)) return;
     if (!this.seekerPickOpen()) { this.bar(by, 'The seeker is locked once the hunt begins.', RED); return; }
     if (seeker !== 0 && !this.people.has(seeker)) return;
     if (seeker === 0 ? this.botIds.size > 0 : this.humans.has(seeker)) return;
@@ -278,16 +291,15 @@ export class RatSeekMatch {
     const spawns = rsHouse().spawns;
     for (const id of [...this.humans]) {
       this.humans.delete(id);
-      this.kits.delete(id);
+      this.resetPlayer(id);
       this.rats.set(id, 'free');
       this.points.set(id, 0);
       this.carried.set(id, 0);
-      this.clearEffects(id);
       const p = centre(spawns[Math.floor(this.rng() * spawns.length)]);
       this.host.teleport(id, p.x, p.y, p.z, this.rng() * Math.PI * 2);
       this.title(id, 'YOU ARE A RAT', 'Find a hiding spot!', GOLD, 2600);
     }
-    for (const id of [...this.botIds]) { this.kits.delete(id); this.host.dropBot(id); }
+    for (const id of [...this.botIds]) { this.resetPlayer(id); this.host.dropBot(id); }
     this.botIds.clear();
     this.seekerBots.length = 0;
     const w = centre(RS_WAITING);
@@ -301,11 +313,7 @@ export class RatSeekMatch {
       this.announce('The AI Seeker will hunt.', GOLD);
     } else {
       this.rats.delete(seeker);
-      this.points.delete(seeker);
-      this.carried.delete(seeker);
-      this.classes.delete(seeker);
-      this.escapes.delete(seeker);
-      this.clearEffects(seeker);
+      this.resetPlayer(seeker);
       this.humans.add(seeker);
       this.host.teleport(seeker, w.x, w.y, w.z, 0);
       if (this.phase === 'hiding') this.addEffect(seeker, 'blind', 1e9, 0);
@@ -332,16 +340,19 @@ export class RatSeekMatch {
 
   handleUse(id: number, slot: number, block?: { x: number; y: number; z: number; nx: number; ny: number; nz: number }): void {
     if (this.phase === 'results' || this.phase === 'loading') return;
+    if (!this.people.has(id) || !Number.isInteger(slot) || slot < 0 || slot >= 36) return;
     const body = this.host.body(id);
     if (!body) return;
-    if (block && [block.x, block.y, block.z, block.nx, block.ny, block.nz].every(Number.isFinite)) {
+    if (block && [block.x, block.y, block.z, block.nx, block.ny, block.nz].every(Number.isInteger)
+      && Math.abs(block.nx) + Math.abs(block.ny) + Math.abs(block.nz) === 1) {
       const eye = this.eye(id);
       const far = dist2(eye, { x: block.x + 0.5, y: block.y + 0.5, z: block.z + 0.5 }) > 6.5 * 6.5;
-      const b = this.host.getBlock(block.x, block.y, block.z);
-      if (!far && (b === Block.ManorLeverOff || b === Block.ManorLeverOn) && this.useLever(id, block)) return;
-      if (!far && (b === Block.ManorExchangeBase || b === Block.ManorExchangeTop)) { this.useExchange(id); return; }
+      if (far) block = undefined;
+      const b = block ? this.host.getBlock(block.x, block.y, block.z) : Block.Air;
+      if (block && (b === Block.ManorLeverOff || b === Block.ManorLeverOn) && this.useLever(id, block)) return;
+      if (block && (b === Block.ManorExchangeBase || b === Block.ManorExchangeTop)) { this.useExchange(id); return; }
     } else block = undefined;
-    const item = this.kitOf(id)[slot]?.id;
+    const item = this.slotOf(id, slot)?.id;
     if (!item) return;
     switch (item) {
       case Item.RatCatcher: this.swat(id); return;
@@ -591,7 +602,6 @@ export class RatSeekMatch {
       humansWon, reason,
       podium: winners.slice(0, 3).map((id) => ({ id, name: this.host.name(id),
         score: humansWon ? `${score(id)} ${score(id) === 1 ? 'catch' : 'catches'}` : `${score(id)} pts` })),
-      awards: this.awards(),
       rats: ratIds.map((id) => ({ id, name: this.host.name(id), points: this.points.get(id) ?? 0,
         cheese: this.cheeseGrabbed.get(id) ?? 0, caged: this.rats.get(id) === 'caged' }))
         .sort((a, b) => b.points - a.points),
@@ -600,7 +610,18 @@ export class RatSeekMatch {
     };
     this.stagePodium(this.result.podium.map((p) => p.id));
     for (const id of this.people) this.host.send(id, { t: 'rsResult', result: this.result });
-    for (const id of this.people) { this.effects.delete(id); this.syncFx(id); }
+    for (const id of [...this.people, ...this.botIds]) {
+      this.resetMotion(id); this.clearCompass(id);
+      this.combos.delete(id); this.comboUntil.delete(id);
+      for (const m of [this.tauntReady, this.dashReady, this.rattleReady, this.abilityReady, this.swatReady, this.compassReady]) m.delete(id);
+      const kit = this.kits.get(id);
+      if (kit) kit.lightOn = false;
+      if (this.people.has(id)) { this.syncFx(id); this.syncKit(id); }
+    }
+    this.scentReadyAt = 0;
+    this.decoys = [];
+    for (const bot of this.seekerBots) bot.stop();
+    this.twistBannerUntil = 0;
     this.broadcastState();
   }
 
@@ -616,41 +637,26 @@ export class RatSeekMatch {
       RS_PODIUM_CROWD.x + (i - (crowd.length - 1) / 2) * 1.5, RS_PODIUM_CROWD.y, RS_PODIUM_CROWD.z, Math.PI));
   }
 
-  private awards(): RsAward[] {
-    const out: RsAward[] = [];
-    const top = (m: Map<number, number>, among: Iterable<number>): number | null => {
-      let best: number | null = null, count = 0;
-      for (const id of among) { const c = m.get(id) ?? 0; if (c > count) { best = id; count = c; } }
-      return best;
-    };
-    const cheese = top(this.points, this.rats.keys());
-    if (cheese !== null) out.push({ title: 'Big Cheese', winner: this.host.name(cheese), detail: `${this.points.get(cheese)} pts`, color: GOLD });
-    const ext = top(this.catchesBy, [...this.humans, ...this.botIds]);
-    if (ext !== null) {
-      const n = this.catchesBy.get(ext)!;
-      out.push({ title: 'Exterminator', winner: this.host.name(ext), detail: `${n} ${n === 1 ? 'catch' : 'catches'}`, color: RED });
-    }
-    if (this.fastest) {
-      const s = Math.floor(this.fastest.ticks / 20);
-      out.push({ title: 'Speed Trap', winner: this.host.name(this.fastest.catcher),
-        detail: `caught ${this.fastest.victim} at ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`, color: AQUA });
-    }
-    const loud = top(this.tauntsBy, this.tauntsBy.keys());
-    if (loud !== null) out.push({ title: 'Loudmouth', winner: this.host.name(loud), detail: `${this.tauntsBy.get(loud)} squeaks`, color: PURPLE });
-    const houdini = top(this.escapesBy, this.escapesBy.keys());
-    if (houdini !== null) {
-      out.push({ title: 'Houdini', winner: this.host.name(houdini), detail: `${this.escapesBy.get(houdini)} escapes & rescues`, color: GREEN });
-    }
-    return out;
-  }
-
   // ── Rats ──────────────────────────────────────────────────────────────────
 
-  freeRats(): number[] { return [...this.rats].filter(([, s]) => s === 'free').map(([id]) => id); }
+  private freeRatIds: readonly number[] = [];
+  /** Reuse the ordered free-rat view until membership/state changes, including
+   * direct edits through the public rats map used by headless fixtures. */
+  freeRats(): readonly number[] {
+    let n = 0, changed = false;
+    for (const [id, state] of this.rats) if (state === 'free') {
+      if (this.freeRatIds[n++] !== id) changed = true;
+    }
+    if (changed || n !== this.freeRatIds.length) {
+      const ids: number[] = [];
+      for (const [id, state] of this.rats) if (state === 'free') ids.push(id);
+      this.freeRatIds = Object.freeze(ids);
+    }
+    return this.freeRatIds;
+  }
   freeRatCount(): number { return this.freeRats().length; }
   isFreeRat(id: number): boolean { return this.rats.get(id) === 'free'; }
   hasEscapeCard(id: number): boolean { return (this.escapes.get(id) ?? 0) > 0; }
-  cagedCount(): number { return this.cageOrder.length; }
   addPoints(id: number, n: number): void { if (this.rats.has(id)) this.points.set(id, (this.points.get(id) ?? 0) + n); }
   classCount(cls: RatClassId): number { let n = 0; for (const c of this.classes.values()) if (c === cls) n++; return n; }
   private isClass(id: number, cls: RatClassId): boolean { return this.classes.get(id) === cls; }
@@ -680,14 +686,12 @@ export class RatSeekMatch {
     if (at) this.sound('snap', at);
     if (catcher >= 0) {
       this.catchesBy.set(catcher, (this.catchesBy.get(catcher) ?? 0) + 1);
-      const t = this.ticks - this.huntStartTick;
-      if (!this.fastest || t < this.fastest.ticks) this.fastest = { catcher, victim: this.host.name(id), ticks: t };
       this.bar(catcher, `SNAP! ${this.host.name(id)} is going to the cage.`, GOLD);
     }
     const cage = centre(RS_CAGE);
     this.host.teleport(id, cage.x + this.rng() - 0.5, cage.y, cage.z + this.rng() - 0.5);
     this.sound('cage', cage);
-    this.clearEffects(id);
+    this.resetMotion(id);
     this.title(id, catcher >= 0 ? 'SNAP! CAGED!' : 'CAGED!', `A free rat can trade ${RS.RESCUE_COST} cheese to free you`, RED, 2800);
     this.announce(`A rat was caught! ${this.freeRatCount()} rat(s) remain free.`, RED);
     if (this.freeRatCount() === 0) this.finish(true, 'Every rat is in the cage. The seeker wins!');
@@ -699,9 +703,9 @@ export class RatSeekMatch {
     const left = Math.max(0, (this.escapes.get(id) ?? 0) - 1);
     if (left) this.escapes.set(id, left); else this.escapes.delete(id);
     const at = this.host.body(id);
-    this.escapesBy.set(id, (this.escapesBy.get(id) ?? 0) + 1);
     this.heat += 0.4;
     const r = this.ratRespawn();
+    this.resetMotion(id);
     this.host.teleport(id, r.x, r.y, r.z);
     this.addEffect(id, 'speed', 100, 2);
     this.title(id, 'JAIL FREE!', 'Your banked escape saved you', GREEN, 2200);
@@ -737,9 +741,9 @@ export class RatSeekMatch {
     const freed = this.cageOrder.shift();
     if (freed === undefined) return;
     this.rats.set(freed, 'free');
+    this.resetMotion(freed);
     this.lastRatRush = false;
     this.addPoints(rescuer, 2);
-    this.escapesBy.set(rescuer, (this.escapesBy.get(rescuer) ?? 0) + 1);
     const r = this.ratRespawn();
     this.host.teleport(freed, r.x, r.y, r.z);
     this.addEffect(freed, 'speed', 100, 2);
@@ -757,7 +761,6 @@ export class RatSeekMatch {
     const ready = this.tauntReady.get(id) ?? 0;
     if (ready > this.ticks) { this.bar(id, `Taunt ready in ${((ready - this.ticks) / 20).toFixed(1)}s`, RED); return; }
     this.tauntReady.set(id, this.ticks + RS.TAUNT_COOLDOWN);
-    this.tauntsBy.set(id, (this.tauntsBy.get(id) ?? 0) + 1);
     this.addPoints(id, 1);
     const at = this.host.body(id)!;
     this.sound('squeak', at);
@@ -873,10 +876,10 @@ export class RatSeekMatch {
   }
   /** A practice seeker's catch. True if the rat went to the cage. */
   botCatch(botId: number, rat: number): boolean {
+    if (!this.botIds.has(botId) || this.phase !== 'hunting' || !this.isFreeRat(rat)) return false;
     const escaping = this.hasEscapeCard(rat);
     if (!escaping) this.announce(`${this.host.name(botId)} caught ${this.host.name(rat)}!`, RED);
-    this.cageRat(rat, botId);
-    return !escaping;
+    return this.cageRat(rat, botId);
   }
 
   private nearestFreeRat(at: { x: number; y: number; z: number }): number {
@@ -1072,7 +1075,10 @@ export class RatSeekMatch {
   }
 
   canPlaceAt(cell: RsPos, trap: boolean): boolean {
-    if (this.host.getBlock(cell.x, cell.y, cell.z) !== Block.Air || !collisionBoxes(this.host.getBlock(cell.x, cell.y - 1, cell.z))) return false;
+    if (![cell.x, cell.y, cell.z].every(Number.isInteger)) return false;
+    const support = collisionBoxes(this.host.getBlock(cell.x, cell.y - 1, cell.z));
+    if (this.host.getBlock(cell.x, cell.y, cell.z) !== Block.Air || !support?.some(([min, max]) =>
+      max[1] === 1 && min[0] <= 0.5 && max[0] >= 0.5 && min[2] <= 0.5 && max[2] >= 0.5)) return false;
     if (rsPassageAt(cell.x, cell.y, cell.z) || this.nearCage(cell)) return false;
     if (trap) for (const t of this.traps.values()) if (dist2(t, cell) < 9) return false;
     return true;
@@ -1095,7 +1101,7 @@ export class RatSeekMatch {
     if (k.baits <= 0 || !this.canPlaceAt(cell, false)) return false;
     k.baits--;
     // Identical to real cheese at a glance.
-    this.cheese.push({ id: this.nextEntity++, x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5, bait: true, owner, pickupAt: this.ticks + 20 });
+    this.cheese.push({ id: this.nextEntity++, x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5, bait: true, owner, pickupAt: this.ticks + 20, site: { ...cell } });
     return true;
   }
   private biteBait(id: number, c: CheeseItem): void {
@@ -1109,7 +1115,7 @@ export class RatSeekMatch {
     this.pointCompasses(b);
     this.notifyHumans(`Bait taken in the ${rsRoomAt(b.x, b.y, b.z)}!`, GOLD);
     this.heat += 0.3;
-    for (const bot of this.seekerBots) bot.baitBitten(c.owner, b, id);
+    for (const bot of this.seekerBots) bot.baitBitten(c.owner, b, id, c.site ?? c);
     this.kits.get(c.owner)?.baitRefills.push(RS.BAIT_RECHARGE);
   }
   private tickGadgets(): void {
@@ -1646,32 +1652,36 @@ export class RatSeekMatch {
 
   // ── Kits ──────────────────────────────────────────────────────────────────
 
-  kitOf(id: number): (ItemStack | null)[] {
-    const slots: (ItemStack | null)[] = new Array(36).fill(null);
+  /** Resolve one hotbar slot without allocating the full inventory on every use. */
+  slotOf(id: number, slot: number): ItemStack | null {
+    if (!Number.isInteger(slot) || slot < 0 || slot >= 36 || !this.roleOf(id) || this.phase === 'results') return null;
     const one = (item: number, count = 1): ItemStack => ({ id: item, count });
+    if (slot === 8 && id === this.leader && this.people.has(id) && this.seekerPickOpen()) return one(Item.SeekerPicker);
     if (this.rats.has(id)) {
       const caged = this.rats.get(id) === 'caged';
-      slots[0] = one(Item.SqueakTaunt);
-      slots[1] = one(Item.Scamper);
-      if (caged) slots[2] = one(Item.CageRattle);
+      if (slot === 0) return one(Item.SqueakTaunt);
+      if (slot === 1) return one(Item.Scamper);
+      if (slot === 2 && caged) return one(Item.CageRattle);
       const esc = this.escapes.get(id) ?? 0;
-      if (esc > 0) slots[3] = one(Item.EscapeCard, esc);
+      if (slot === 3 && esc > 0) return one(Item.EscapeCard, esc);
       const cls = this.classes.get(id);
-      if (cls && !caged && this.phase === 'hunting') slots[4] = one(RAT_CLASSES[cls].item);
-      if (this.phase === 'hiding' || this.phase === 'intro' || this.phase === 'loading') {
-        slots[6] = one(cls ? RAT_CLASSES[cls].badge : Item.ClassPicker);
+      if (slot === 4 && cls && !caged && this.phase === 'hunting') return one(RAT_CLASSES[cls].item);
+      if (slot === 6 && (this.phase === 'hiding' || this.phase === 'intro' || this.phase === 'loading')) {
+        return one(cls ? RAT_CLASSES[cls].badge : Item.ClassPicker);
       }
     } else if (this.humans.has(id) || this.botIds.has(id)) {
       const k = this.kit(id);
-      slots[0] = one(Item.RatCatcher);
-      slots[1] = one(Item.SeekerCompass);
-      slots[2] = one(Item.ScentPulse);
-      slots[3] = one(Item.Flashlight);
-      if (k.traps > 0) slots[4] = one(Item.Mousetrap, k.traps);
-      if (k.baits > 0) slots[5] = one(Item.CheeseBait, k.baits);
+      if (slot === 0) return one(Item.RatCatcher);
+      if (slot === 1) return one(Item.SeekerCompass);
+      if (slot === 2) return one(Item.ScentPulse);
+      if (slot === 3) return one(Item.Flashlight);
+      if (slot === 4 && k.traps > 0) return one(Item.Mousetrap, k.traps);
+      if (slot === 5 && k.baits > 0) return one(Item.CheeseBait, k.baits);
     }
-    if (id === this.leader && this.seekerPickOpen()) slots[8] = one(Item.SeekerPicker);
-    return slots;
+    return null;
+  }
+  kitOf(id: number): (ItemStack | null)[] {
+    return Array.from({ length: 36 }, (_, slot) => this.slotOf(id, slot));
   }
   private syncKit(id: number): void {
     const slots = this.kitOf(id);
@@ -1705,10 +1715,7 @@ export class RatSeekMatch {
     return { x: b.x, y: b.y + (b.sneaking ? 1.27 : 1.62) * scale, z: b.z };
   }
   lineClear(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }): boolean {
-    return clearLine(a.x, a.y, a.z, b.x, b.y, b.z, (x, y, z) => {
-      const block = this.host.getBlock(x, y, z);
-      return seeThrough(block) ? Block.Air : block;
-    });
+    return clearLine(a.x, a.y, a.z, b.x, b.y, b.z, (x, y, z) => this.host.getBlock(x, y, z));
   }
   body(id: number): RsBody | undefined { return this.host.body(id); }
   drive(id: number, pose: RsPose): void { this.host.drive(id, pose); }
@@ -1750,12 +1757,10 @@ export class RatSeekMatch {
     }));
     const base = {
       phase: this.phase, serverNow: now, endsAt, phaseMs, players,
-      ratCount: this.rats.size, freeRats: this.freeRatCount(), caged: this.cageOrder.length,
-      seekers: this.humans.size + this.botIds.size,
+      freeRats: this.freeRatCount(), caged: this.cageOrder.length,
       twist: this.twistBannerUntil > this.ticks ? this.twistBanner : '',
       finalMinute: this.phase === 'hunting' && this.phaseTicks <= RS.FINAL_FRENZY_TICKS,
       cheese, decoys, cat, chandeliers, classCounts: counts, classCap: ratClassCap(this.rats.size),
-      exchangeLabel: `Rescue / Bank Escape — ${RS.RESCUE_COST} Cheese`,
     };
     for (const id of this.people) {
       const rat = this.rats.has(id);

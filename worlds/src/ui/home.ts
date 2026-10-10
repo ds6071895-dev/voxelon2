@@ -11,6 +11,7 @@ import { PARTY_MAX, type GameMode, type PartyState } from '../net/protocol';
 import { partyCapacityFor } from '../modes';
 import type { Cosmetics } from '../character';
 import { drawFace } from './face';
+import { MODE_LABELS } from './presentation';
 
 interface HomeHooks {
   onPlay(mode: GameMode): void;
@@ -23,7 +24,6 @@ interface HomeHooks {
   onCapes(): void;
 }
 
-const MODE_TITLE: Record<GameMode, string> = { duels: 'Duels', bridge: 'The Bridge', parkour: 'Parkour', ratseek: 'Rat and Seek', bedwars: 'Bedwars' };
 
 export class HomeScreen {
   readonly root = document.getElementById('w-home') as HTMLElement;
@@ -126,7 +126,7 @@ export class HomeScreen {
       card.setAttribute('aria-disabled', reason ? 'true' : 'false');
       const label = card.querySelector<HTMLElement>('.w-card-label')!;
       label.textContent = reason || (searching ? 'Cancel' : inParty ? 'Play with party' : 'Play');
-      card.setAttribute('aria-label', `${MODE_TITLE[mode]}: ${reason || (searching ? 'searching, press to cancel' : 'play')}`);
+      card.setAttribute('aria-label', `${MODE_LABELS[mode]}: ${reason || (searching ? 'searching, press to cancel' : 'play')}`);
     }
     this.tick();
   }

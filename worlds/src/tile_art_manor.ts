@@ -492,13 +492,6 @@ const paintExchangeFront: Paint = (p, seed) => {
     return pick(BRASS, .5 + (tnoise(seed, x, y, 4) - .5) * .25 + (r === 1 ? .15 : 0), x, y, .4);
   });
 };
-const paintExchangeTop: Paint = (p, seed) => {
-  p.fill((x, y) => {
-    const r = ring(x, y);
-    if ((x === 2 || x === 13) && (y === 2 || y === 13)) return hex(0xfff0b0);
-    return pick(BRASS, r === 0 ? .2 : .55 + (tnoise(seed, x, y, 4) - .5) * .2, x, y, .4);
-  });
-};
 const paintExchangeDome: Paint = (p) => {
   // A glass bell jar over a pile of wedges, a brass band at its foot.
   p.fill((x, y) => {
@@ -554,16 +547,14 @@ const paintMousetrapItem = sprite((g) => {
   line(g, 3, 6, 12, 6, hex(0xc9ced4)); line(g, 3, 6, 3, 9, hex(0xc9ced4)); line(g, 12, 6, 12, 9, hex(0xc9ced4));
   rect(g, 7, 9, 8, 10, hex(0xf2c94a));
 });
-function wedge(g: Grid, drip: boolean): void {
+const paintCheeseBait = sprite((g) => {
   for (let y = 5; y <= 12; y++) for (let x = 2; x <= 13; x++) {
     if (x - 2 > (y - 4) * 1.6) continue;
     const hole = (Math.hypot(x - 5, y - 9) < 1.1) || (Math.hypot(x - 8, y - 11) < .9) || (Math.hypot(x - 4, y - 6.5) < .7);
     g.put(x, y, hole ? hex(0xb07a12) : pick(CHEESE, y === 5 || x === 2 ? .95 : .55 - (y - 5) * .04, x, y, .3));
   }
-  if (drip) for (const [x, y] of [[9, 12], [9, 13], [10, 13], [9, 14]]) g.put(x, y, hex(0xe08a1a));
-}
-const paintCheeseBait = sprite((g) => wedge(g, true));
-const paintCheese = sprite((g) => wedge(g, false));
+  for (const [x, y] of [[9, 12], [9, 13], [10, 13], [9, 14]]) g.put(x, y, hex(0xe08a1a));
+});
 const paintSqueakTaunt = sprite((g) => {
   // A tin whistle and the squeak it makes.
   for (let i = 0; i <= 8; i++) { g.put(2 + i, 12 - i, pick(STEEL, .6, 0, 0, 0)); g.put(3 + i, 12 - i, pick(STEEL, .9, 0, 0, 0)); }
@@ -706,7 +697,6 @@ export const MANOR_ART: Partial<Record<Tile, Paint>> = {
   [Tile.ManorMousetrap]: paintMousetrap,
   [Tile.ManorLever]: paintLever,
   [Tile.ManorExchangeFront]: paintExchangeFront,
-  [Tile.ManorExchangeTop]: paintExchangeTop,
   [Tile.ManorExchangeDome]: paintExchangeDome,
   [Tile.ManorExchangeCap]: paintExchangeCap,
 
@@ -725,7 +715,6 @@ export const MANOR_ART: Partial<Record<Tile, Paint>> = {
   [Tile.CheeseMagnet]: paintCheeseMagnet,
   [Tile.DecoyRat]: paintDecoyRat,
   [Tile.Disarm]: paintDisarm,
-  [Tile.Cheese]: paintCheese,
   [Tile.ClassScout]: paintClassScout,
   [Tile.ClassThief]: paintClassThief,
   [Tile.ClassTrickster]: paintClassTrickster,
@@ -733,4 +722,3 @@ export const MANOR_ART: Partial<Record<Tile, Paint>> = {
   [Tile.SeekerPicker]: paintSeekerPicker,
 };
 MANOR_RUGS.forEach((_, i) => { MANOR_ART[(Tile.ManorRug0 + i) as Tile] = rugPainter(i); });
-

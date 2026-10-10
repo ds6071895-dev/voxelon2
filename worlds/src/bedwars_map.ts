@@ -6,9 +6,11 @@
 // the map and `w` runs across it. `bwMap(id)` turns that into world cells.
 // The world spec's seed is the map id; the map's name is never shown.
 import { baseCell, buildBedwarsMap, type BedwarsStamp, type BwTheme, BW_Y } from './bedwars_setpieces';
-export { BW_Y, BW_BOUNDS, BW_MIN_Y, BW_MAX_Y, BW_VOID_Y, BW_TEAM_WOOL } from './bedwars_setpieces';
+import { bwKey as key } from './bedwars_geometry';
+import type { BwPos } from './bedwars_rules';
+export { BW_Y, BW_BOUNDS, BW_MIN_Y, BW_MAX_Y, BW_VOID_Y } from './bedwars_setpieces';
 
-export interface Pos { x: number; y: number; z: number }
+type Pos = BwPos;
 export interface BedwarsBase {
   team: number;
   center: Pos;
@@ -63,7 +65,6 @@ const LAYOUTS: Layout[] = [
 ];
 export const BW_MAP_COUNT = LAYOUTS.length;
 
-const key = (x: number, y: number, z: number): number => ((x + 128) * 512 + y) * 512 + (z + 128);
 
 function makeMap(id: number, layout: Layout): BedwarsMap {
   const D = layout.baseDistance, Y = BW_Y + 1;

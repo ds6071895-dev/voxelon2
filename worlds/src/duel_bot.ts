@@ -9,7 +9,7 @@
 import { Player } from './player';
 import { BLOCKS } from './blocks';
 import { FROZEN_INPUT, type PlayerInput } from './input';
-import type { World } from './world';
+import type { PhysicsWorld } from './physics_world';
 import { DUEL_MAX_HEALTH, type DuelArenaBounds, type DuelVec3 } from './duels';
 
 /** Where a first-ever Duels bot starts. */
@@ -106,7 +106,7 @@ export class DuelBot {
     this.skill = clamp(this.skill + clamp(target - this.skill, -0.08, 0.1), DUEL_BOT_MIN, DUEL_BOT_MAX);
   }
 
-  step(dt: number, now: number, view: DuelBotView, world: World): DuelBotAction {
+  step(dt: number, now: number, view: DuelBotView, world: PhysicsWorld): DuelBotAction {
     const action: DuelBotAction = { shots: [], build: [] };
     const p = this.body, s = this.skill;
     if (!view.me.alive) { this.wasAlive = false; return action; }
@@ -241,7 +241,7 @@ export class DuelBot {
   /** True once the bot has respawned and the server should sync its body. */
   get needsRespawnSync(): boolean { return !this.wasAlive; }
 
-  private blockedAhead(world: World, input: PlayerInput): boolean {
+  private blockedAhead(world: PhysicsWorld, input: PlayerInput): boolean {
     const p = this.body;
     let fx = 0, fz = 0;
     const sin = Math.sin(p.yaw), cos = Math.cos(p.yaw);

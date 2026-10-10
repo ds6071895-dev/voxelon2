@@ -2,7 +2,7 @@
 // pause menu). Rebuilt from the live keybinds every time it opens, so it can
 // never disagree with HUD Settings about which key does what.
 
-import { keyLabel, type Keybinds } from '../hud_settings';
+import { keyLabel, type Keybinds } from '../keybinds';
 import { setIconText } from '../emoji_icons';
 
 type Bind = [string, string[][], string?];
@@ -37,7 +37,7 @@ function groups(k: Keybinds, touch: boolean): Group[] {
       ['Attack / break block', [['Left click']]], ['Place block / use item', [['Right click']]],
       ['Aim down sights', [['Right click']], 'hold, with the rifle (Duels)'],
       ['Reload', [[keyLabel(k.reload)]], 'Duels'],
-      ['Shoot the bow', [['Right click']], 'The Bridge and Bedwars: hold to draw'],
+       ['Shoot the bow', [['Right click']], 'The Bridge: click; Bedwars: hold to draw, release to fire'],
       ['Open shop / team chest', [['E']], 'Bedwars: stand near a merchant'],
     ] },
     { title: 'Items', binds: [['Hotbar slot', [['1'], ['9'], ['scroll']]]] },

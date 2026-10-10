@@ -39,13 +39,13 @@ import {
   parkourBlinkCells, parkourBuildBlocked, parkourCrumbleCells, parkourCrumbleUnder, parkourPadNear,
 } from '../parkour_mechanics';
 import type { ParkourCell } from '../parkour_course';
+import { parkourRestoreOccupied, parkourRestorePlan } from '../parkour_footing';
 import { PartyBot } from '../party_bot';
 import { DuelBot } from '../duel_bot';
-import type { World } from '../world';
 import {
   MELEE_COMBO_MAX, MELEE_COMBO_WINDOW_MS, MELEE_FACING_DOT, MELEE_RANGE, MELEE_REWIND_S,
 } from '../melee';
-import { partyCapacityFor } from '../modes';
+import { canDuelAct, canPartyAct, partyCapacityFor } from '../modes';
 import { RatSeekMatch, type RsHost } from '../ratseek';
 import { isRatClass, type RatClassId } from '../ratseek_rules';
 import { BedwarsMatch, type BwHost } from '../bedwars';
@@ -53,6 +53,9 @@ import { BW_BOUNDS, BW_MAP_COUNT, BW_VOID_Y, bwMap } from '../bedwars_map';
 import { bwMotion, bwAcceptMotion, bwAuthorizeImpulse, bwSupported, bwTickMotion, type BwMotion } from '../bedwars_movement';
 import { Accounts, type Hasher } from './accounts';
 import { NameRegistry } from './names';
+import { PracticeSkills } from './practice_skill';
+import { orderWorldEntry } from './world_delivery';
+import { arenaVelocity, recordArenaPosition, DUEL_TRACK_WINDOW, type ArenaTrackSample } from './arena_history';
 import { Parties, type Party } from './parties';
 import {
   EDIT_RANGE, PARTY_MAX, isGameMode, isGeneratedName, skinSeed,
@@ -94,13 +97,7 @@ function fin(...ns: number[]): boolean {
   return ns.every((n) => Number.isFinite(n));
 }
 
-interface ArenaTrackSample { at: number; x: number; y: number; z: number }
 interface DuelShotTicket { at: number; x: number; y: number; z: number; dx: number; dy: number; dz: number }
-
-/** How far back the arena position history reaches, in seconds. Covers a
- *  Burst Rifle round crossing its full range, the interpolation delay the
- *  shooter's client renders opponents at, and a slow round trip on top. */
-const DUEL_TRACK_WINDOW = 1.2;
 
 /** Consecutive rejected moves (each a full round trip) before a Bridge or
  *  Parkour body is settled onto its last known footing. */
@@ -212,12 +209,13 @@ interface MatchWorld {
   parkour: {
     blink: [boolean, boolean];
     crumbles: Map<number, { fallAt: number; backAt: number; gone: boolean }>;
+    pendingRestore: Map<number, { x: number; y: number; z: number }>;
     fireballs: Fireball[];
     nextBreathAt: number;
     dragonSentAt: number;
     /** Runners who made it and went back to the menu: the others still see
      *  them standing on the podium until the run is over. */
-    statues: Map<number, PlayerSnapshot>;
+    statues: Map<number, PlayerInfo>;
   } | null;
   arrows: PartyArrow[];
   /** Rat and Seek's engine, and the messages it produced since the last drain. */
@@ -263,8 +261,7 @@ export class GameServer {
   /** How a Bridge/Parkour practice opponent is made (tests swap in others). */
   pgBotFactory: (opponent: number, spawn: { x: number; y: number; z: number }, rng: () => number,
     skill?: number) => PgBot = (opponent, spawn, rng, skill) => new PartyBot(opponent, spawn, rng, skill);
-  /** Hidden skill memory for players without an account, keyed mode:name. */
-  private readonly guestSkill = new Map<string, number>();
+  private readonly practiceSkills: PracticeSkills;
   private readonly partyMoves = new Map<number, PartyMoveState>();
   /** Bridge players currently told they are dead and spectating. */
   private readonly partySpectators = new Set<number>();
@@ -282,6 +279,7 @@ export class GameServer {
 
   constructor(opts: ServerOptions = {}) {
     this.accounts = opts.accounts ?? new Accounts();
+    this.practiceSkills = new PracticeSkills(this.accounts, () => this.onAccountsChanged?.());
     this.hasher = opts.hasher ?? ((p, s) => `${s}:${p}`);
     this.rng = opts.rng ?? Math.random;
     this.makeSalt = opts.salt ?? (() => Math.floor(this.rng() * 2 ** 48).toString(36));
@@ -304,6 +302,13 @@ export class GameServer {
   worldMembers(worldId: number): number[] { return [...(this.worlds.get(worldId)?.members ?? [])]; }
   worldEditCount(worldId: number): number { return this.worlds.get(worldId)?.blocks.edits.size ?? -1; }
 
+  /** Test-only teardown of bot exhibitions through the production close path. */
+  terminateExhibition(worldId: number): Outbound[] {
+    const w = this.worlds.get(worldId);
+    if (!w || [...w.members].some((id) => this.players.get(id)?.bot !== true)) return [];
+    return this.closeWorld(w);
+  }
+
   /**
    * Test and load-test hook: a match between practice opponents only, each
    * held at a fixed hidden level. Returns the world id. Nothing a client can
@@ -318,7 +323,7 @@ export class GameServer {
       let i = 0;
       this.pgBotFactory = (opponent, spawn, rng) => { const k = i++; return makeBot(k, opponent, spawn, rng, entries[k].skill); };
     }
-    try { this.deliverNothing(this.launch(mode, bots, entries.length > 2)); }
+    try { this.launch(mode, bots, entries.length > 2); }
     finally { this.pgBotFactory = factory; }
     bots.forEach((b, i) => {
       const pb = this.partyBots.get(b.id), db = this.duelBots.get(b.id);
@@ -340,7 +345,6 @@ export class GameServer {
     if (!w) return [];
     return [...w.members].map((id) => this.partyBots.get(id)?.rating ?? this.duelBots.get(id)?.rating ?? NaN);
   }
-  private deliverNothing(_out: Outbound[]): void { /* bots have no sockets */ }
   /** A snapshot of an exhibition or any match, for tests. */
   matchState(worldId: number): { mode: GameMode; phase: string; participants: { id: number; score: number; progress: number;
     kills: number; falls: number; team: number; lives?: number; outAt?: number; finishedAt?: number; place?: number;
@@ -355,12 +359,12 @@ export class GameServer {
         participants: s.players.map(p => ({ id: p.id, score: p.beds, progress: 0, kills: p.kills, falls: p.deaths, team: p.team })) };
     }
     if (w.mode === 'duels') {
-      const snap = this.duels.snapshots(now).find((s) => s.id === w.lobby);
+      const snap = this.duels.snapshotById(w.lobby, now);
       if (!snap) return null;
       return { mode: w.mode, phase: snap.phase, winner: snap.result?.winner ?? null, winnerTeam: null,
         participants: snap.participants.map((p) => ({ id: p.id, score: p.kills, progress: 0, kills: p.kills, falls: p.deaths, team: 0 })) };
     }
-    const snap = this.pg.snapshots(now).find((s) => s.id === w.lobby);
+    const snap = this.pg.snapshotFor(w.members.values().next().value ?? -1, now);
     if (!snap) return null;
     return { mode: w.mode, phase: snap.phase, winner: snap.result?.winner ?? null, winnerTeam: snap.result?.winnerTeam ?? null,
       runners: snap.result?.runners, dragon: snap.dragon?.front,
@@ -421,8 +425,10 @@ export class GameServer {
     if (p.worldId !== null) out.push(...this.exitMatch(p, false));
     out.push(...this.leaveParty(p, false));
     this.names.releaseAll(this.holder(id));
+    this.pg.forgetPlayer(id);
     this.players.delete(id);
     this.bwMoves.delete(id);
+    this.partySpectators.delete(id);
     this.disconnectedUntil.delete(id);
     for (const [token, owner] of this.reconnectTokens) if (owner === id) this.reconnectTokens.delete(token);
     return out;
@@ -460,7 +466,7 @@ export class GameServer {
     if (edits.length) out.push(this.to(id, { t: 'editBatch', edits }));
     w.bw.reconnect(id);
     out.push(...this.drainBw(w), ...this.partyBroadcast(id));
-    return { id, out };
+    return { id, out: orderWorldEntry(out) };
   }
 
   private issueReconnectToken(id: number): string {
@@ -571,17 +577,13 @@ export class GameServer {
     if (!name) return this.authErr(p, 'That name isn’t yours to register — roll again.');
     const res = this.accounts.register(name, password, this.hasher, this.makeSalt(), this.wallNow());
     if (!res.ok || !res.account) return this.authErr(p, res.error ?? 'Could not create the account.');
+    this.practiceSkills.register(p.username, res.account.username);
     this.rename(p, res.account.username);
     this.names.claimAccount(res.account.username, this.holder(p.id));
     p.account = true;
     if (p.cosmetics) this.accounts.setCosmetics(p.username, p.cosmetics);
     const token = this.makeToken();
     this.accounts.setToken(p.username, token);
-    // Whatever the practice opponents learned about this player so far comes along.
-    for (const mode of ['duels', 'bridge', 'parkour', 'ratseek'] as GameMode[]) {
-      const learned = this.guestSkill.get(`${mode}:${p.username.toLowerCase()}`);
-      if (learned !== undefined) this.accounts.setSkill(p.username, mode, learned);
-    }
     this.onAccountsChanged?.();
     return [this.to(p, { t: 'identity', username: p.username, account: true, token, cosmetics: p.cosmetics }),
       ...this.partyBroadcast(p.id)];
@@ -675,7 +677,7 @@ export class GameServer {
     const res = this.parties.join(p.id, typeof code === 'string' ? code : '');
     if (!res.ok) {
       const copy = { invalid: 'No party has that code.', full: `That party is full (${PARTY_MAX} max).`,
-        already: 'Leave your current party first.', busy: 'That party is busy.' };
+        already: 'Leave your current party first.' };
       return this.partyErr(p, copy[res.error]);
     }
     const out: Outbound[] = [];
@@ -763,7 +765,9 @@ export class GameServer {
   /** Is this player's current world a finished match they can walk out of? */
   private inFinishedWorld(p: ServerPlayer): boolean {
     const w = p.worldId !== null ? this.worlds.get(p.worldId) : undefined;
-    return !!w && w.closeAt !== null;
+    if (!w) return false;
+    return w.mode === 'duels' ? this.duels.phaseById(w.lobby) === 'results'
+      : w.mode === 'bridge' || w.mode === 'parkour' ? this.pg.phaseFor(p.id) === 'results' : w.closeAt !== null;
   }
 
   private play(p: ServerPlayer, mode: GameMode, seeker?: number, setupRevision?: number): Outbound[] {
@@ -899,18 +903,16 @@ export class GameServer {
     this.partyBots.delete(id);
     this.partyMoves.delete(id);
     this.partyCombat.delete(id);
+    this.partySpectators.delete(id);
     this.players.delete(id);
   }
 
-  private skillKey(mode: GameMode, name: string): string { return `${mode}:${name.toLowerCase()}`; }
   /** The hidden level practice opponents last settled at against this player. */
   private learnedSkill(p: ServerPlayer, mode: GameMode): number | undefined {
-    return p.account ? this.accounts.skillOf(p.username, mode) : this.guestSkill.get(this.skillKey(mode, p.username));
+    return this.practiceSkills.learned(p, mode);
   }
   private rememberSkill(p: ServerPlayer, mode: GameMode, value: number): void {
-    if (!Number.isFinite(value)) return;
-    if (p.account) { this.accounts.setSkill(p.username, mode, value); this.onAccountsChanged?.(); }
-    else this.guestSkill.set(this.skillKey(mode, p.username), value);
+    this.practiceSkills.remember(p, mode, value);
   }
 
   // ── Worlds ───────────────────────────────────────────────────────────────
@@ -921,7 +923,7 @@ export class GameServer {
       spec, blocks: new WorldBlocks(worldGenerator(spec)), mode, lobby, members: new Set(),
       closeAt: null, cagesOpen: false,
       parkour: mode === 'parkour' ? {
-        blink: [true, true], crumbles: new Map(), fireballs: [], nextBreathAt: 0, dragonSentAt: -1, statues: new Map(),
+        blink: [true, true], crumbles: new Map(), pendingRestore: new Map(), fireballs: [], nextBreathAt: 0, dragonSentAt: -1, statues: new Map(),
       } : null,
       arrows: [], rs: null, rsOut: [], rsQuiet: false, bw: null, bwOut: [],
     };
@@ -946,6 +948,7 @@ export class GameServer {
   private enterWorld(p: ServerPlayer, w: MatchWorld): Outbound[] {
     const out: Outbound[] = [];
     p.worldId = w.spec.id;
+    p.ct = undefined;
     for (const id of w.members) {
       const other = this.players.get(id);
       if (!other) continue;
@@ -975,12 +978,15 @@ export class GameServer {
     } else if (w.mode === 'duels') {
       const snap = this.duels.leave(p.id, this.nowMs());
       if (snap) out.push(...this.duelStateOut(snap), ...this.duelResultOut(snap));
+      // A results departure can return the domain to lobby synchronously;
+      // its next tick has no transition left to report to the coordinator.
+      if (snap?.phase === 'lobby') return [...out, ...this.closeWorld(w)];
     } else {
       // A runner who made it can go back to the menu at once. Nobody else is
       // told: they carry on seeing them on the podium.
       const member = this.pg.participantFor(p.id);
       if (w.parkour && member?.finishedAt !== undefined && this.pg.phaseFor(p.id) === 'running' && !p.bot) {
-        w.parkour.statues.set(p.id, { ...this.bodyOf(p, w), dead: false, sneaking: false, swing: 0 });
+        w.parkour.statues.set(p.id, { ...this.info(p), ...this.bodyOf(p, w), dead: false, sneaking: false, swing: 0 });
       }
       const snap = this.pg.leave(p.id, this.nowMs());
       if (snap) out.push(...this.pgStateOut(snap), ...this.pgResultOut(snap));
@@ -1003,6 +1009,10 @@ export class GameServer {
     p.duelShotTickets = [];
     this.partyMoves.delete(p.id);
     this.partyCombat.delete(p.id);
+    this.partySpectators.delete(p.id);
+    p.ct = undefined;
+    p.duelRespawning = false;
+    p.regenBoostTimer = 0;
     w.arrows = w.arrows.filter((a) => a.owner !== p.id);
     if (w.parkour?.statues.has(p.id)) return;
     for (const id of w.members) out.push(this.to(id, { t: 'leave', id: p.id }));
@@ -1021,10 +1031,8 @@ export class GameServer {
       return;
     }
     if (w.mode === 'ratseek') { if (w.rs?.isOver()) w.closeAt = this.worldTime + RS_PODIUM_S; return; }
-    const phase = w.mode === 'duels'
-      ? this.duels.snapshots(this.nowMs()).find((s) => s.id === w.lobby)?.phase
-      : this.pg.snapshots(this.nowMs()).find((s) => s.id === w.lobby)?.phase;
-    if (phase === 'results') w.closeAt = this.worldTime + RESULTS_LINGER_S;
+    // Duels and PartyGames own their result deadlines. Their transition back
+    // to lobby closes the world; only standalone engines use closeAt.
   }
 
   /** Tear a world down: everybody back to the menu, bots dismissed, blocks
@@ -1046,8 +1054,13 @@ export class GameServer {
       p.worldId = null;
       this.bwMoves.delete(id);
       p.arenaTrack = [];
+      p.duelShotTickets = [];
+      p.duelRespawning = false;
+      p.ct = undefined;
+      p.regenBoostTimer = 0;
       this.partyMoves.delete(id);
       this.partyCombat.delete(id);
+      this.partySpectators.delete(id);
       out.push(this.to(p, { t: 'leftWorld' }), ...this.partyBroadcast(id));
     }
     w.bw?.dispose();
@@ -1186,7 +1199,7 @@ export class GameServer {
     }
     out.push(...this.drainBw(w));
     for (const p of members) out.push(...this.partyBroadcast(p.id));
-    return out;
+    return orderWorldEntry(out);
   }
 
   private bwBodyClear(w: MatchWorld, x: number, y: number, z: number): boolean {
@@ -1266,19 +1279,14 @@ export class GameServer {
   private launch(mode: GameMode, members: ServerPlayer[], party: boolean): Outbound[] {
     if (mode === 'bedwars') return this.launchBedwars(members);
     if (mode === 'ratseek') return this.launchRatSeek(members, 0);
-    return mode === 'duels' ? this.launchDuel(members, party) : this.launchPg(mode, members, party);
+    return mode === 'duels' ? this.launchDuel(members) : this.launchPg(mode, members, party);
   }
 
-  private launchDuel(members: ServerPlayer[], party: boolean): Outbound[] {
+  private launchDuel(members: ServerPlayer[]): Outbound[] {
     const now = this.nowMs();
     const ident = (m: ServerPlayer) => ({ id: m.id, username: m.username, skin: m.skin });
-    const made = this.duels.create(ident(members[0]), now);
-    if ('reason' in made) return [];
-    for (const m of members.slice(1)) this.duels.join(made.token, ident(m), now);
-    for (const m of members) this.duels.setReady(m.id, true, now);
-    const started = this.duels.start(members[0].id, now);
+    const started = this.duels.startMatch(members.map(ident), now);
     if (!started.ok) {
-      for (const m of members) this.duels.leave(m.id, now);
       return members.filter((m) => !m.bot).map((m) => this.to(m, { t: 'notice', text: 'Could not start the match — try again.' }));
     }
     const snap = started.snapshot;
@@ -1288,8 +1296,8 @@ export class GameServer {
     snap.participants.forEach((part, i) => {
       const p = this.players.get(part.id);
       if (!p) return;
-      out.push(...this.enterWorld(p, w));
       out.push(...this.enterDuelBody(p, w, arena, i));
+      out.push(...this.enterWorld(p, w));
     });
     // Practice opponents are "loaded" the moment they exist.
     for (const m of members) {
@@ -1302,7 +1310,7 @@ export class GameServer {
     const latest = this.duels.snapshotFor(members[0].id, now);
     if (latest) out.push(...this.duelStateOut(latest));
     for (const m of members) out.push(...this.partyBroadcast(m.id));
-    return out;
+    return orderWorldEntry(out);
   }
 
   private launchPg(mode: GameMode, members: ServerPlayer[], party: boolean): Outbound[] {
@@ -1347,7 +1355,7 @@ export class GameServer {
     const latest = this.pg.snapshotFor(members[0].id, now);
     if (latest) out.push(...this.pgStateOut(latest));
     for (const m of members) out.push(...this.partyBroadcast(m.id));
-    return out;
+    return orderWorldEntry(out);
   }
 
   /** The server just moved `p` and is telling its client: the new move seq. */
@@ -1365,6 +1373,8 @@ export class GameServer {
     p.health = health; p.dead = false; p.sneaking = false; p.aiming = false; p.reloading = false;
     p.regenTimer = 0; p.regenBoostTimer = 0; p.regenBoostInterval = 0;
     p.arenaTrack = [];
+    p.ct = undefined;
+    this.partySpectators.delete(p.id);
     this.recordArenaTrack(p);
   }
 
@@ -1373,6 +1383,20 @@ export class GameServer {
   private handleInWorld(p: ServerPlayer, msg: ClientMsg): Outbound[] {
     const w = this.worldOfPlayer(p);
     if (!w) return [];
+    if (msg.t === 'roster') {
+      if (msg.world !== w.spec.id) return [];
+      const out: Outbound[] = [];
+      for (const id of w.members) {
+        const body = this.players.get(id);
+        if (body && id !== p.id) out.push(this.to(p, {
+          t: 'join', player: { ...this.info(body), ...this.bodyOf(body, w) },
+        }));
+      }
+      if (w.parkour) for (const statue of w.parkour.statues.values()) {
+        out.push(this.to(p, { t: 'join', player: { ...statue } }));
+      }
+      return out;
+    }
     if (w.mode === 'bedwars') return this.handleBedwars(p, w, msg);
     if (w.mode === 'ratseek') return this.handleRatSeek(p, w, msg);
     if (msg.t === 'worldReady') {
@@ -1415,8 +1439,6 @@ export class GameServer {
 
   private duelResultOut(snapshot: DuelLobbySnapshot): Outbound[] {
     if (snapshot.phase !== 'results' || !snapshot.result) return [];
-    const w = this.worlds.get(this.worldByLobby.get(snapshot.id) ?? -1);
-    if (w && w.closeAt === null) w.closeAt = this.worldTime + RESULTS_LINGER_S;
     const result = snapshot.result;
     return snapshot.participants.filter((v) => v.connected && !this.players.get(v.id)?.bot)
       .map((v) => this.to(v.id, { t: 'duelResult', result }));
@@ -1443,9 +1465,9 @@ export class GameServer {
     p.duelMedkits = 5; p.duelRespawning = false;
     if (p.bot) return [];
     return [
-      this.duelLoadout(p.id),
       this.to(p, { t: 'duelArena', world: w.spec, arena, spawn: { ...spawn },
         countdownEndsAt: this.duels.snapshotFor(p.id, this.nowMs())?.countdownEndsAt ?? 0 }),
+      this.duelLoadout(p.id),
     ];
   }
 
@@ -1471,6 +1493,10 @@ export class GameServer {
   }
 
   private handleDuelTransform(p: ServerPlayer, w: MatchWorld, msg: Extract<ClientMsg, { t: 'xform' }>): Outbound[] {
+    // Bounded deferred rule decision (Q11): retain the existing swept-collision
+    // movement contract here. A new speed/vertical envelope needs trajectories
+    // covering JumpBoost, knockback and auto-step; arbitrary ceilings would
+    // reject legitimate movement. Action authority is gated independently.
     const arena = this.duels.arenaFor(p.id), phase = this.duels.phaseFor(p.id);
     if (!arena || !phase || !fin(msg.x, msg.y, msg.z, msg.yaw, msg.pitch)) return [];
     const participant = this.duels.participantFor(p.id);
@@ -1495,16 +1521,12 @@ export class GameServer {
   }
 
   private recordArenaTrack(p: ServerPlayer): void {
-    const now = this.worldTime;
-    p.arenaTrack.push({ at: now, x: p.x, y: p.y, z: p.z });
-    let drop = 0;
-    while (drop < p.arenaTrack.length && now - p.arenaTrack[drop].at > DUEL_TRACK_WINDOW) drop++;
-    if (drop > 0) p.arenaTrack.splice(0, drop);
+    recordArenaPosition(p.arenaTrack, this.worldTime, p);
   }
 
   private handleDuelShot(p: ServerPlayer, msg: Extract<ClientMsg, { t: 'shot' }>): Outbound[] {
     const phase = this.duels.phaseFor(p.id), participant = this.duels.participantFor(p.id);
-    if ((phase !== 'running' && phase !== 'sudden_death') || !participant?.alive ||
+    if (!canDuelAct(phase, participant) ||
         p.held !== Item.BurstRifle || msg.item !== Item.BurstRifle ||
         !fin(msg.x, msg.y, msg.z, msg.dx, msg.dy, msg.dz)) return [];
     if (Math.hypot(msg.x - p.x, msg.y - (p.y + 1.6), msg.z - p.z) > 4) return [];
@@ -1540,8 +1562,8 @@ export class GameServer {
     const ap = this.duels.participantFor(attacker.id), tp = this.duels.participantFor(targetId);
     const phase = this.duels.phaseFor(attacker.id), nowMs = this.nowMs();
     if (!target || !arena || !this.duels.sameMatch(attacker.id, targetId) ||
-        (phase !== 'running' && phase !== 'sudden_death') || !ap?.alive || !tp?.alive ||
-        (tp.shieldUntil !== undefined && tp.shieldUntil > nowMs)) return [];
+        !canDuelAct(phase, ap) || !canDuelAct(phase, tp) ||
+        (tp?.shieldUntil !== undefined && tp.shieldUntil > nowMs)) return [];
     if (amount !== 5 || !fin(target.x, target.y, target.z)) return [];
     const distance = Math.hypot(target.x - attacker.x, target.y - attacker.y, target.z - attacker.z);
     if (!(distance > 0 && distance <= 60)) return [];
@@ -1603,8 +1625,8 @@ export class GameServer {
 
   private handleDuelHeal(p: ServerPlayer, item: number): Outbound[] {
     const participant = this.duels.participantFor(p.id), phase = this.duels.phaseFor(p.id);
-    if (item !== Item.Medkit || !participant?.alive ||
-        (phase !== 'running' && phase !== 'sudden_death') || p.duelMedkits <= 0 || p.health >= DUEL_MAX_HEALTH) return [];
+    if (item !== Item.Medkit || p.held !== Item.Medkit || !canDuelAct(phase, participant) ||
+        p.duelMedkits <= 0 || p.health >= DUEL_MAX_HEALTH) return [];
     const heal = ITEMS[Item.Medkit].heal;
     if (!heal) return [];
     p.duelMedkits--;
@@ -1615,28 +1637,47 @@ export class GameServer {
   private handleDuelEdit(p: ServerPlayer, w: MatchWorld, x: number, y: number, z: number, block: number): Outbound[] {
     const arena = this.duels.arenaFor(p.id), phase = this.duels.phaseFor(p.id);
     const participant = this.duels.participantFor(p.id);
-    if (!arena || !participant?.alive || (phase !== 'running' && phase !== 'sudden_death')) return [];
     if (!fin(x, y, z)) return [];
     const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
-    if (bx < arena.minX || bx >= arena.maxX || bz < arena.minZ || bz >= arena.maxZ) return [];
-    if (by < arena.floor || by >= arena.ceiling - 1) return [];
+    const reject = (): Outbound[] => p.bot ? [] : [this.to(p, {
+      t: 'edit', x: bx, y: by, z: bz, block: w.blocks.getBlock(bx, by, bz),
+    })];
+    if (!arena || !canDuelAct(phase, participant)) return reject();
+    if (Math.hypot(bx + .5 - p.x, by + .5 - p.y, bz + .5 - p.z) > EDIT_RANGE) return reject();
+    if (bx < arena.minX || bx >= arena.maxX || bz < arena.minZ || bz >= arena.maxZ) return reject();
+    if (by < arena.floor || by >= arena.ceiling - 1) return reject();
     const groundY = arena.floor + duelTerrainElevation(bx - arena.minX, bz - arena.minZ);
-    if (by <= groundY) return [];                              // natural ground is unbreakable
-    if (by > groundY + DUEL_MAX_PILLAR_HEIGHT) return [];      // max pillar height
+    if (by <= groundY || by > groundY + DUEL_MAX_PILLAR_HEIGHT) return reject();
     const broadcast = (b: number) => this.duels.membersOf(p.id).filter((id) => !this.players.get(id)?.bot)
       .map((id) => this.to(id, { t: 'edit', x: bx, y: by, z: bz, block: b }));
     if (block === Block.OakPlanks) {
-      if (w.blocks.getBlock(bx, by, bz) !== Block.Air) return [];
+      if (p.held !== Block.OakPlanks || w.blocks.getBlock(bx, by, bz) !== Block.Air ||
+          !this.attached(w, bx, by, bz) || this.occupied(w, bx, by, bz)) return reject();
       w.blocks.set(bx, by, bz, Block.OakPlanks);
       return broadcast(Block.OakPlanks);
     }
     if (block === Block.Air) {
       // The axe only reclaims player-built cover.
-      if (p.held !== Item.IronAxe || w.blocks.editAt(bx, by, bz) !== Block.OakPlanks) return [];
+      if (p.held !== Item.IronAxe || w.blocks.editAt(bx, by, bz) !== Block.OakPlanks) return reject();
       w.blocks.restore(bx, by, bz);
       return broadcast(Block.Air);
     }
-    return [];
+    return reject();
+  }
+
+  private attached(w: MatchWorld, x: number, y: number, z: number): boolean {
+    return [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
+      .some(([dx, dy, dz]) => w.blocks.solidAt(x + dx, y + dy, z + dz));
+  }
+
+  /** Only current, visible bodies in THIS world can obstruct a restore/build. */
+  private occupied(w: MatchWorld, x: number, y: number, z: number): boolean {
+    const bodies: ServerPlayer[] = [];
+    for (const id of w.members) {
+      const v = this.players.get(id);
+      if (v && v.worldId === w.spec.id && !this.hiddenInWorld(v, w)) bodies.push(v);
+    }
+    return parkourRestoreOccupied({ x, y, z }, bodies);
   }
 
   // ── The Bridge / Parkour ─────────────────────────────────────────────────
@@ -1658,8 +1699,6 @@ export class GameServer {
 
   private pgResultOut(snapshot: PartyLobbySnapshot): Outbound[] {
     if (snapshot.phase !== 'results' || !snapshot.result) return [];
-    const w = this.worlds.get(this.worldByLobby.get(snapshot.id) ?? -1);
-    if (w && w.closeAt === null) w.closeAt = this.worldTime + RESULTS_LINGER_S;
     const clean = this.cleanPg(snapshot).result!;
     return snapshot.participants.filter((v) => v.connected && !this.players.get(v.id)?.bot)
       .map((v) => this.to(v.id, { t: 'pgResult', result: clean }));
@@ -1775,39 +1814,17 @@ export class GameServer {
     return [...crumbled, ...this.evaluatePartyPlayer(p, w)];
   }
 
-  /** The spot a body fits in, as close to `at` as the world allows: on the
-   *  same level first, then up. Nothing solid within the body, and a floor. */
-  private clearSpawn(w: MatchWorld, at: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
-    const fits = (x: number, y: number, z: number): boolean => {
-      for (const dx of [-.31, .31]) for (const dz of [-.31, .31]) {
-        const bx = Math.floor(x + dx), bz = Math.floor(z + dz);
-        for (const dy of [.02, 1, 1.79]) if (w.blocks.solidAt(bx, Math.floor(y + dy), bz)) return false;
-      }
-      return w.blocks.solidAt(Math.floor(x), Math.floor(y - .5), Math.floor(z));
-    };
-    if (fits(at.x, at.y, at.z)) return at;
-    const cx = Math.floor(at.x) + .5, cz = Math.floor(at.z) + .5, fy = Math.floor(at.y) + .01;
-    for (let up = 0; up <= 4; up++)
-      for (let r = 0; r <= 3; r++)
-        for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) {
-          if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
-          if (fits(cx + dx, fy + up, cz + dz)) return { x: cx + dx, y: fy + up, z: cz + dz };
-        }
-    return at;
-  }
-
   private evaluatePartyPlayer(p: ServerPlayer, w: MatchWorld): Outbound[] {
     const now = this.nowMs(), before = this.pg.phaseFor(p.id);
-    const evaluated = this.pg.evaluate(p.id, p, now);
+    const sub = this.pg.subFor(p.id);
+    const evaluated = this.pg.evaluate(p.id, p, now, sub?.game === 'parkour'
+      ? (x, y, z) => w.blocks.getBlock(sub.minX + x, y, sub.minZ + z) : undefined);
     const out: Outbound[] = [];
     if (evaluated.killedBy !== undefined) {
       const killer = this.players.get(evaluated.killedBy);
       if (killer) out.push(...this.healKiller(killer, p.id));
     }
     if (evaluated.spawn) {
-      // Wool is infinite in Parkour, so the pad a runner comes back to may
-      // have been built over since the course was laid out.
-      if (w.mode === 'parkour') evaluated.spawn = this.clearSpawn(w, evaluated.spawn);
       p.x = evaluated.spawn.x; p.y = evaluated.spawn.y; p.z = evaluated.spawn.z;
       const bot = this.partyBots.get(p.id);
       if (bot) {
@@ -1948,13 +1965,13 @@ export class GameServer {
   private handlePartyShoot(p: ServerPlayer, w: MatchWorld, msg: { dx: number; dy: number; dz: number; power: number }): Outbound[] {
     const now = this.nowMs(), sub = this.pg.subFor(p.id);
     const member = this.pg.participantFor(p.id);
-    if (!sub || !member || sub.game !== 'bridge' || this.pg.phaseFor(p.id) !== 'running' ||
+    if (!sub || sub.game !== 'bridge' || !canPartyAct(this.pg.viewFor(p.id, now), member, now) ||
         p.held !== Item.BridgeBow || !fin(msg.dx, msg.dy, msg.dz)) return [];
     const len = Math.hypot(msg.dx, msg.dy, msg.dz);
     if (!(len > 1e-3)) return [];
     const combat = this.partyCombatOf(p.id);
     const round = this.pg.viewFor(p.id, now);
-    if (member.pendingSpawn || (round?.goalResetAt !== undefined && now < round.goalResetAt) ||
+    if ((round?.goalResetAt !== undefined && now < round.goalResetAt) ||
         now - combat.lastShotAt < BRIDGE_BOW_COOLDOWN_MS) return [];
     combat.lastShotAt = now;
     const shot = bridgeArrowShot();
@@ -2016,11 +2033,12 @@ export class GameServer {
 
   private handlePartyEdit(p: ServerPlayer, w: MatchWorld, x: number, y: number, z: number, block: number): Outbound[] {
     const sub = this.pg.subFor(p.id), member = this.pg.participantFor(p.id);
-    if (!sub || !member || this.pg.phaseFor(p.id) !== 'running' || !fin(x, y, z)) return [];
+    if (!sub || !member || !fin(x, y, z)) return [];
     const bridge = sub.game === 'bridge';
     const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
     const current = w.blocks.getBlock(bx, by, bz);
     const reject = (): Outbound[] => p.bot ? [] : [this.to(p, { t: 'edit', x: bx, y: by, z: bz, block: current })];
+    if (!canPartyAct(this.pg.viewFor(p.id, this.nowMs()), member, this.nowMs())) return reject();
     const inRange = Math.hypot(bx + .5 - p.x, by + .5 - p.y, bz + .5 - p.z) <= EDIT_RANGE;
     const inSub = bx >= sub.minX && bx < sub.maxX && bz >= sub.minZ && bz < sub.maxZ;
     const minY = bridge ? PARTY_VOID_Y : PARTY_FLOOR_Y - 3;
@@ -2033,16 +2051,11 @@ export class GameServer {
       w.blocks.set(bx, by, bz, Block.Air);
       return broadcast(Block.Air);
     }
-    if (block !== BRIDGE_TEAM_BLOCK[member.team] || current !== Block.Air) return reject();
-    const attached = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
-      .some(([dx, dy, dz]) => w.blocks.solidAt(bx + dx, by + dy, bz + dz));
+    if (block !== BRIDGE_TEAM_BLOCK[member.team] || p.held !== block || current !== Block.Air) return reject();
     const blocked = bridge
       ? bridgeGoalGuard(bx - sub.minX, bz - sub.minZ)
       : parkourBuildBlocked(parkourCourse(sub.seed), bx - sub.minX, by, bz - sub.minZ);
-    if (blocked || !attached || this.pg.membersOf(p.id).some((id) => {
-      const v = this.players.get(id)!;
-      return v.x + .3 > bx && v.x - .3 < bx + 1 && v.z + .3 > bz && v.z - .3 < bz + 1 && v.y + 1.8 > by && v.y < by + 1;
-    })) return reject();
+    if (blocked || !this.attached(w, bx, by, bz) || this.occupied(w, bx, by, bz)) return reject();
     w.blocks.set(bx, by, bz, block);
     return broadcast(block);
   }
@@ -2067,16 +2080,20 @@ export class GameServer {
   private parkourCellEdits(w: MatchWorld, snap: PartyLobbySnapshot, cells: readonly ParkourCell[],
     block: number | 'restore'): Outbound[] {
     const sub = snap.sub!, edits: { x: number; y: number; z: number; block: number }[] = [];
-    for (const c of cells) {
+    const plan = block === 'restore' ? parkourRestorePlan(cells,
+      (c) => this.occupied(w, sub.minX + c.x, c.y, sub.minZ + c.z)) : { ready: cells, pending: [] };
+    for (const c of plan.pending) {
       const x = sub.minX + c.x, y = c.y, z = sub.minZ + c.z;
+      w.parkour?.pendingRestore.set(WorldBlocks.key(x, y, z), { x, y, z });
+    }
+    for (const c of plan.ready) {
+      const x = sub.minX + c.x, y = c.y, z = sub.minZ + c.z;
+      const key = WorldBlocks.key(x, y, z);
       if (block === 'restore') {
-        // Never grow a block back inside somebody.
-        if (snap.participants.some((m) => {
-          const v = this.players.get(m.id);
-          return v && v.x + .3 > x && v.x - .3 < x + 1 && v.z + .3 > z && v.z - .3 < z + 1 && v.y + 1.8 > y && v.y < y + 1;
-        })) continue;
+        w.parkour?.pendingRestore.delete(key);
         edits.push({ x, y, z, block: w.blocks.restore(x, y, z) });
       } else {
+        w.parkour?.pendingRestore.delete(key);
         w.blocks.set(x, y, z, block);
         edits.push({ x, y, z, block });
       }
@@ -2119,6 +2136,15 @@ export class GameServer {
         st.crumbles.delete(index);
         out.push(...this.parkourCellEdits(w, snap, cells, 'restore'));
       }
+    }
+    const restored: { x: number; y: number; z: number; block: number }[] = [];
+    for (const [key, cell] of st.pendingRestore) {
+      if (this.occupied(w, cell.x, cell.y, cell.z)) continue;
+      st.pendingRestore.delete(key);
+      restored.push({ ...cell, block: w.blocks.restore(cell.x, cell.y, cell.z) });
+    }
+    if (restored.length) for (const id of w.members) {
+      if (this.players.get(id)?.bot === false) out.push(this.to(id, { t: 'editBatch', edits: restored }));
     }
     return out;
   }
@@ -2168,9 +2194,7 @@ export class GameServer {
     if (!target) { st.nextBreathAt = now + 400; return out; }
     st.nextBreathAt = now + fireballInterval(t / 1000);
     // Lead the target by the way it is moving.
-    const track = target.arenaTrack, a = track[track.length - 2], b = track[track.length - 1];
-    let vx = 0, vz = 0;
-    if (a && b && b.at > a.at) { vx = (b.x - a.x) / ((b.at - a.at) / 1000); vz = (b.z - a.z) / ((b.at - a.at) / 1000); }
+    const { x: vx, z: vz } = arenaVelocity(target.arenaTrack);
     const lead = (FIREBALL_WINDUP_MS + FIREBALL_FLIGHT_MS) / 1000 * .5;
     let lx = vx * lead, lz = vz * lead;
     const ll = Math.hypot(lx, lz);
@@ -2276,7 +2300,7 @@ export class GameServer {
     }
     out.push(...this.drainRs(w));
     for (const m of members) out.push(...this.partyBroadcast(m.id));
-    return out;
+    return orderWorldEntry(out);
   }
 
   private handleRatSeek(p: ServerPlayer, w: MatchWorld, msg: ClientMsg): Outbound[] {
@@ -2396,7 +2420,7 @@ export class GameServer {
         for (const participant of snap.participants.filter((v) => v.connected)) {
           const p = this.players.get(participant.id);
           if (!p || !arena) continue;
-          if (snap.phase === 'sudden_death' && participant.spectating) {
+          if (snap.phase === 'sudden_death' && participant.spectating && participant.respawnAt === undefined) {
             p.health = 1; p.held = 0; p.duelRespawning = false; p.duelShotTickets = [];
             if (!p.bot) out.push(this.to(p, { t: 'duelRespawn', respawnAt: 0, spectating: true }));
             continue;
@@ -2447,7 +2471,7 @@ export class GameServer {
       const me = this.duels.participantFor(id), them = this.duels.participantFor(bot.opponent);
       if (!me || !them) continue;
       if (me.alive && bot.needsRespawnSync) bot.reset(p, p.yaw);
-      const world = w.blocks.asWorld() as unknown as World;
+      const world = w.blocks.asWorld();
       const action = bot.step(dt, now, {
         me: { health: p.health, alive: me.alive && !p.duelRespawning, kills: me.kills, deaths: me.deaths, medkits: p.duelMedkits },
         enemy: { x: human.x, y: human.y, z: human.z, alive: them.alive && !them.spectating, kills: them.kills,
@@ -2467,7 +2491,10 @@ export class GameServer {
         p.held = Item.Medkit;
         out.push(...this.handleDuelHeal(p, Item.Medkit));
       }
-      for (const b of action.build) out.push(...this.handleDuelEdit(p, w, b.x, b.y, b.z, Block.OakPlanks));
+      for (const b of action.build) {
+        p.held = Block.OakPlanks;
+        out.push(...this.handleDuelEdit(p, w, b.x, b.y, b.z, Block.OakPlanks));
+      }
       for (const shot of action.shots) {
         p.held = Item.BurstRifle;
         p.swing = (p.swing + 1) & 0xffff;
@@ -2538,15 +2565,20 @@ export class GameServer {
         if (me.respawnAt !== undefined) continue;
       }
       if (w.parkour) bot.threats = w.parkour.fireballs;
-      const action = bot.step(dt, now, snap, me, other, human, w.blocks.asWorld() as unknown as World,
+      const action = bot.step(dt, now, snap, me, other, human, w.blocks.asWorld(),
         w.blocks.gen);
       p.x = bot.body.pos.x; p.y = bot.body.pos.y; p.z = bot.body.pos.z; p.yaw = bot.body.yaw; p.pitch = bot.pitch;
       p.sneaking = bot.body.sneaking;
       p.ct = Math.floor(now);
       this.recordArenaTrack(p);
-      if (action.edit) out.push(...this.handlePartyEdit(p, w, action.edit.x, action.edit.y, action.edit.z, action.edit.block));
       p.held = snap.mode === 'bridge' ? (action.shot ? Item.BridgeBow : action.holdWool ? BRIDGE_TEAM_BLOCK[me.team] : Item.IronAxe)
         : BRIDGE_TEAM_BLOCK[me.team];
+      if (action.edit) {
+        const held = p.held;
+        p.held = BRIDGE_TEAM_BLOCK[me.team];
+        out.push(...this.handlePartyEdit(p, w, action.edit.x, action.edit.y, action.edit.z, action.edit.block));
+        p.held = held;
+      }
       if (action.melee) { p.swing = (p.swing + 1) & 0xffff; out.push(...this.handlePartyMelee(p, w, human.id)); }
       if (action.shot) {
         p.held = Item.BridgeBow;

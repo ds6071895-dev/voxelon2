@@ -6,6 +6,7 @@
 // Everything here only SHOWS the match; the server decides it.
 
 import * as THREE from 'three';
+import { rayAabb } from './ray_aabb';
 import type { GameAudio } from './audio';
 import { Block } from './blocks';
 import { renderItemIcon } from './icons';
@@ -18,7 +19,7 @@ import type { Player } from './player';
 import type { BodyStyle, RemotePlayers } from './remoteplayers';
 import { RS_BOUNDS, RS_KEEPER } from './ratseek_house';
 import {
-  createBeam, createCatModel, createChandelierModel, createCheeseModel, createRatModel, labelSprite,
+  createBeam, createCatModel, createChandelierModel, createCheeseModel, createRatModel, disposeRsProp, labelSprite,
   type CatModel, type RatModel,
 } from './ratseek_models';
 import {
@@ -31,7 +32,6 @@ const CLASS_KEY = 'worlds.ratClass';
 /** The manor is lit like a lived-in house: every room at full daylight, as
  *  bright as a lamp-lit Minecraft room. Night vision has nothing to add. */
 const MANOR_AMBIENT = 1;
-const NIGHT_VISION_AMBIENT = 1;
 /** How long a scamper's burst of speed lasts on your screen and legs. */
 const DASH_MS = 420;
 
@@ -116,7 +116,14 @@ export class RatSeekClient {
   private selfRat: RatModel | null = null;
   private selfPhase = 0;
   private flairT = 0;
-  private lastNight = false;
+  private readonly timers = new Set<number>();
+  private pickerFocus: number | null = null;
+
+  private later(fn: () => void, ms: number): number {
+    const timer = window.setTimeout(() => { this.timers.delete(timer); fn(); }, ms);
+    this.timers.add(timer);
+    return timer;
+  }
 
   constructor(private readonly d: Deps) {
     this.root = el('div', 'rs-hud', d.app);
@@ -200,7 +207,7 @@ export class RatSeekClient {
   // ── Entering and leaving ────────────────────────────────────────────────
 
   enter(role: RsRole): void {
-    this.exitVisuals();
+    this.exit();
     this.active = true;
     this.role = role;
     this.snap = null;
@@ -210,7 +217,6 @@ export class RatSeekClient {
     this.feed.replaceChildren();
     this.root.dataset.role = role;
     this.d.world.setArenaRenderBounds(RS_BOUNDS, MANOR_AMBIENT);
-    this.lastNight = false;
     this.exchangeLabel = labelSprite(`Cheese Exchange\nRight-click: Free a Rat / Bank Escape · ${RS.RESCUE_COST} Cheese`);
     this.exchangeLabel.position.set(RS_KEEPER.x + 0.5, RS_KEEPER.y + 2.65,RS_KEEPER.z + 0.5);
     this.group.add(this.exchangeLabel);
@@ -228,6 +234,14 @@ export class RatSeekClient {
     this.active = false;
     this.root.hidden = true;
     this.closePicker();
+    for (const timer of this.timers) window.clearTimeout(timer);
+    this.timers.clear();
+    this.result = null;
+    this.titleUntil = this.barUntil = 0;
+    this.titleEl.classList.remove('show'); this.barEl.classList.remove('show');
+    this.feed.replaceChildren(); this.sidebar.replaceChildren(); this.pocket.textContent = '';
+    this.compassEl.classList.remove('show');
+    this.clockServer = this.clockLocal = this.selfPhase = this.flairT = 0;
     this.blindEl.style.opacity = '0';
     this.darkEl.style.opacity = '0';
     this.dashEl.style.opacity = '0';
@@ -250,49 +264,51 @@ export class RatSeekClient {
   }
 
   private exitVisuals(): void {
-    for (const c of this.cheese.values()) this.group.remove(c.mesh);
+    for (const c of this.cheese.values()) { this.group.remove(c.mesh); disposeRsProp(c.mesh); }
     this.cheese.clear();
     for (const dcy of this.decoys.values()) { this.group.remove(dcy.model.group); dcy.model.dispose(); }
     this.decoys.clear();
-    if (this.cat) { this.group.remove(this.cat.model.group); this.cat = null; }
-    for (const c of this.chandeliers) this.group.remove(c.mesh);
+    if (this.cat) { this.group.remove(this.cat.model.group); this.cat.model.dispose(); this.cat = null; }
+    for (const c of this.chandeliers) { this.group.remove(c.mesh); disposeRsProp(c.mesh); }
     this.chandeliers.length = 0;
-    for (const b of this.beams.values()) this.group.remove(b);
+    for (const b of this.beams.values()) { this.group.remove(b); disposeRsProp(b); }
     this.beams.clear();
-    if (this.exchangeLabel) { this.group.remove(this.exchangeLabel); this.exchangeLabel = null; }
+    if (this.exchangeLabel) { this.group.remove(this.exchangeLabel); disposeRsProp(this.exchangeLabel); this.exchangeLabel = null; }
     if (this.selfRat) { this.group.remove(this.selfRat.group); this.selfRat.dispose(); this.selfRat = null; }
   }
 
   // ── Server messages ─────────────────────────────────────────────────────
 
   onState(s: RsSnapshot): void {
-    const was = this.snap?.phase;
+    if (!this.active) return;
+    const oldRole = this.role;
     this.snap = s;
     this.clockServer = s.serverNow;
     this.clockLocal = performance.now();
-    const me = s.players.find((p) => p.id === this.d.net.myId);
-    if (me) this.role = me.role;
+    this.role = s.me.role;
+    if (oldRole !== this.role) {
+      this.dash = null; this.dashEl.style.opacity = '0';
+      if (this.selfRat) { this.group.remove(this.selfRat.group); this.selfRat.dispose(); this.selfRat = null; }
+    }
     this.root.dataset.role = this.role;
-    if ((was !== s.phase && s.phase === 'hunting') || this.role !== 'rat') this.closePicker();
+    if (!this.canPickClass()) this.closePicker();
     this.syncProps(s);
     this.renderSidebar();
     if (this.pickerOpen) this.renderPicker();
   }
 
   applyFx(fx: RsEffects): void {
+    if (!this.active) return;
     this.fx = fx;
     const p = this.d.player;
     p.setBodyScale(fx.scale);
     // Vanilla pace times the effect: a rat runs Speed I (1.2x), a seeker 1.56x.
     p.speedMult = fx.speed;
     p.jumpBoost = fx.jump;
-    if (fx.night !== this.lastNight) {
-      this.lastNight = fx.night;
-      this.d.world.setArenaRenderBounds(RS_BOUNDS, fx.night ? NIGHT_VISION_AMBIENT : MANOR_AMBIENT);
-    }
   }
 
   title(title: string, sub: string, color: string, ms: number): void {
+    if (!this.active) return;
     this.titleMain.textContent = title;
     this.titleEl.style.setProperty('--tone', color);
     this.titleSub.textContent = sub;
@@ -302,12 +318,14 @@ export class RatSeekClient {
     this.titleUntil = performance.now() + ms;
   }
   bar(text: string, color: string): void {
+    if (!this.active) return;
     this.barEl.textContent = text;
     this.barEl.style.setProperty('--tone', color);
     this.barEl.classList.add('show');
     this.barUntil = performance.now() + 2600;
   }
   message(text: string, color: string): void {
+    if (!this.active) return;
     const row = el('div', 'rs-feed-row', this.feed);
     row.style.setProperty('--tone', color);
     // "TWIST: CHEESE RAIN! …" → a tag chip plus the sentence.
@@ -315,10 +333,11 @@ export class RatSeekClient {
     if (tag) { el('b', '', row).textContent = tag[1]; el('span', '', row).textContent = tag[2]; }
     else el('span', '', row).textContent = text;
     while (this.feed.childElementCount > 6) this.feed.firstElementChild!.remove();
-    window.setTimeout(() => row.classList.add('fade'), 9000);
-    window.setTimeout(() => row.remove(), 10000);
+    this.later(() => row.classList.add('fade'), 9000);
+    this.later(() => row.remove(), 10000);
   }
   sound(kind: RsSound, at: { x: number; y: number; z: number } | null): void {
+    if (!this.active) return;
     const pos = at ? new THREE.Vector3(at.x, at.y + 0.3, at.z) : undefined;
     this.d.audio.rsCue(kind, pos);
     if (!at) return;
@@ -341,6 +360,7 @@ export class RatSeekClient {
     }
   }
   impulse(vx: number, vy: number, vz: number, momentum: number): void {
+    if (!this.active || this.phase() === 'results') return;
     const p = this.d.player;
     p.vel.set(vx, vy, vz);
     if (vy > 0) p.onGround = false;
@@ -391,8 +411,10 @@ export class RatSeekClient {
   }
   /** The round is over; the podium itself is staged by the server. */
   noteResult(r: RsResult): void {
+    if (!this.active) return;
     this.result = r;
     this.closePicker();
+    this.dash = null; this.dashEl.style.opacity = '0';
   }
 
   // ── Bodies ──────────────────────────────────────────────────────────────
@@ -420,7 +442,7 @@ export class RatSeekClient {
       }
     }
     for (const [did, dcy] of this.decoys) {
-      const t = rayBox(eye, dir, dcy.x - 0.25, dcy.y, dcy.z - 0.25, dcy.x + 0.25, dcy.y + 0.55, dcy.z + 0.25);
+      const t = rayAabb(eye, dir, { x: dcy.x - 0.25, y: dcy.y, z: dcy.z - 0.25 }, { x: dcy.x + 0.25, y: dcy.y + 0.55, z: dcy.z + 0.25 });
       if (t !== null && t < bestT) { bestT = t; best = { id: did, decoy: true }; }
     }
     return best;
@@ -453,9 +475,15 @@ export class RatSeekClient {
     this.picker.classList.add('open');
     this.renderPicker();
     this.d.onPanel();
-    window.setTimeout(() => this.pickerCards.get(this.snap?.me.cls ?? 'scout')?.focus(), 30);
+    this.pickerFocus = this.later(() => {
+      this.pickerFocus = null;
+      if (this.pickerOpen && this.canPickClass()) this.pickerCards.get(this.snap?.me.cls ?? 'scout')?.focus();
+    }, 30);
   }
   closePicker(): void {
+    if (this.pickerFocus !== null) {
+      window.clearTimeout(this.pickerFocus); this.timers.delete(this.pickerFocus); this.pickerFocus = null;
+    }
     if (!this.pickerOpen) return;
     this.pickerOpen = false;
     this.picker.classList.remove('open');
@@ -463,7 +491,7 @@ export class RatSeekClient {
   }
   private pick(cls: RatClassId): void {
     const s = this.snap;
-    if (!s) return;
+    if (!s || !this.canPickClass() || !this.pickerOpen) return;
     const count = s.classCounts[cls] ?? 0;
     if (s.me.cls !== cls && count >= s.classCap) { this.d.audio.rsCue('click'); return; }
     storeRatClass(cls);
@@ -716,7 +744,7 @@ export class RatSeekClient {
       }
       e.x = c.x; e.y = c.y; e.z = c.z;
     }
-    for (const [id, e] of this.cheese) if (!seen.has(id)) { this.group.remove(e.mesh); this.cheese.delete(id); }
+    for (const [id, e] of this.cheese) if (!seen.has(id)) { this.group.remove(e.mesh); disposeRsProp(e.mesh); this.cheese.delete(id); }
     seen.clear();
     for (const dcy of s.decoys) {
       seen.add(dcy.id);
@@ -747,7 +775,7 @@ export class RatSeekClient {
       c.at = now;
       c.tx = s.cat.x; c.ty = s.cat.y; c.tz = s.cat.z; c.tyaw = s.cat.yaw;
     }
-    else if (!s.cat && this.cat) { this.group.remove(this.cat.model.group); this.cat = null; }
+    else if (!s.cat && this.cat) { this.group.remove(this.cat.model.group); this.cat.model.dispose(); this.cat = null; }
     s.chandeliers.forEach((c, i) => {
       const ch = this.chandeliers[i];
       if (!ch) return;
@@ -784,7 +812,7 @@ export class RatSeekClient {
       beam.lookAt(from.clone().sub(dir));
       beam.scale.set(len, len, len);
     }
-    for (const [id, b] of this.beams) if (!lit.has(id)) b.visible = false;
+    for (const [id, b] of this.beams) if (!lit.has(id)) { this.group.remove(b); disposeRsProp(b); this.beams.delete(id); }
   }
   private beamReach(from: THREE.Vector3, dir: THREE.Vector3): number {
     for (let d = 0.5; d < RS.BEAM_RANGE; d += 0.35) {
@@ -800,19 +828,6 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 }
 
-function rayBox(o: THREE.Vector3, d: THREE.Vector3, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): number | null {
-  let tmin = 0, tmax = Infinity;
-  const mins = [x0, y0, z0], maxs = [x1, y1, z1], os = [o.x, o.y, o.z], ds = [d.x, d.y, d.z];
-  for (let i = 0; i < 3; i++) {
-    if (Math.abs(ds[i]) < 1e-9) { if (os[i] < mins[i] || os[i] > maxs[i]) return null; continue; }
-    let t1 = (mins[i] - os[i]) / ds[i], t2 = (maxs[i] - os[i]) / ds[i];
-    if (t1 > t2) [t1, t2] = [t2, t1];
-    tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2);
-    if (tmin > tmax) return null;
-  }
-  return tmin;
-}
-
 /**
  * The party leader's seeker pick: one member hunts, or a practice seeker does
  * and everyone hides. Resolves with a member id, 0 for a practice seeker, or
@@ -820,6 +835,7 @@ function rayBox(o: THREE.Vector3, d: THREE.Vector3, x0: number, y0: number, z0: 
  */
 export function pickSeeker(app: HTMLElement, party: PartyState, myId: number, current: number,
   signal?: AbortSignal): Promise<number | null> {
+  if (signal?.aborted) return Promise.resolve(null);
   return new Promise((resolve) => {
     const wrap = el('div', 'rs-seeker-pick', app);
     wrap.setAttribute('role', 'dialog');
@@ -852,7 +868,11 @@ export function pickSeeker(app: HTMLElement, party: PartyState, myId: number, cu
     const cancel = el('button', '', controls);
     cancel.type = 'button';
     cancel.textContent = 'Cancel';
+    let settled = false, focusTimer: number | null = null;
     const finish = (v: number | null): void => {
+      if (settled) return;
+      settled = true;
+      if (focusTimer !== null) window.clearTimeout(focusTimer);
       wrap.remove(); document.removeEventListener('keydown', onKey, true);
       signal?.removeEventListener('abort', onAbort); resolve(v);
     };
@@ -864,7 +884,7 @@ export function pickSeeker(app: HTMLElement, party: PartyState, myId: number, cu
     cancel.addEventListener('click', () => finish(null));
     wrap.addEventListener('click', (e) => { if (e.target === wrap) finish(null); });
     sync();
-    window.setTimeout(() => go.focus(), 20);
+    focusTimer = window.setTimeout(() => { if (!settled) go.focus(); }, 20);
   });
 }
 

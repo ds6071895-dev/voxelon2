@@ -16,23 +16,10 @@ import { setIconText, iconSvg } from './emoji_icons';
 import type { IconName } from './emoji_icons';
 import { HUD_MODULES, defaultHudLayout, sanitizeHudLayout } from './hud_mods';
 import type { HudLayout, HudModId } from './hud_mods';
+import { BIND_ACTIONS, DEFAULT_KEYBINDS, keyLabel, sanitizeKeybinds, type BindAction, type Keybinds } from './keybinds';
+export { DEFAULT_KEYBINDS, keyLabel, type BindAction, type Keybinds } from './keybinds';
 
 // --- Keybinds ---------------------------------------------------------------
-
-/** Every action the player can rebind. Hotbar digits and F3 stay fixed: they
- *  are positional (1-9) or a developer key, not preferences. */
-export type BindAction =
-  | 'forward' | 'back' | 'left' | 'right'
-  | 'jump' | 'sneak' | 'sprint'
-  | 'reload' | 'view' | 'zoom';
-
-export type Keybinds = Record<BindAction, string>;
-
-export const DEFAULT_KEYBINDS: Keybinds = {
-  forward: 'KeyW', back: 'KeyS', left: 'KeyA', right: 'KeyD',
-  jump: 'Space', sneak: 'ShiftLeft', sprint: 'KeyQ',
-  reload: 'KeyR', view: 'KeyV', zoom: 'KeyC',
-};
 
 /** Display order and prose for the keybind list, grouped the way the Controls
  *  sheet groups them so the two screens agree. */
@@ -45,50 +32,13 @@ const BIND_GROUPS: { title: string; binds: [BindAction, string, string?][] }[] =
     ['sprint', 'Sprint', 'double-tapping forward still works'],
   ] },
   { title: 'Match', binds: [
-    ['reload', 'Reload / back to checkpoint', 'reloads in Duels, retries in Parkour'],
+    ['reload', 'Reload', 'reloads the rifle in Duels'],
   ] },
   { title: 'View', binds: [
     ['view', 'Camera view'],
     ['zoom', 'Zoom (hold)', 'scroll while holding to change the magnification'],
   ] },
 ];
-
-const BIND_ACTIONS = Object.keys(DEFAULT_KEYBINDS) as BindAction[];
-
-function sanitizeKeybinds(raw: unknown): Keybinds {
-  const x = raw && typeof raw === 'object' ? raw as Partial<Keybinds> : {};
-  const out = { ...DEFAULT_KEYBINDS };
-  for (const action of BIND_ACTIONS) {
-    const code = x[action];
-    // A stored bind is only ever a KeyboardEvent.code, and a short one: reject
-    // anything else rather than letting a hand-edited blob reach the listener.
-    if (typeof code === 'string' && code.length > 0 && code.length <= 24
-      && /^[A-Za-z0-9]+$/.test(code)) out[action] = code;
-  }
-  return out;
-}
-
-/** "KeyW" -> "W", "ShiftLeft" -> "L Shift" - what the player actually sees on
- *  the key, not the DOM's spelling of it. */
-export function keyLabel(code: string): string {
-  if (!code) return 'None';
-  if (code.startsWith('Key')) return code.slice(3);
-  if (code.startsWith('Digit')) return code.slice(5);
-  if (code.startsWith('Numpad')) return `Num ${code.slice(6)}`;
-  if (code.startsWith('Arrow')) {
-    return { Up: '↑', Down: '↓', Left: '←', Right: '→' }[code.slice(5)] ?? code;
-  }
-  const named: Record<string, string> = {
-    Space: 'Space', Enter: 'Enter', Tab: 'Tab', Backspace: 'Backspace',
-    CapsLock: 'Caps', Escape: 'Esc', Backquote: '`', Minus: '-', Equal: '=',
-    BracketLeft: '[', BracketRight: ']', Backslash: '\\', Semicolon: ';',
-    Quote: "'", Comma: ',', Period: '.', Slash: '/',
-    ShiftLeft: 'L Shift', ShiftRight: 'R Shift',
-    ControlLeft: 'L Ctrl', ControlRight: 'R Ctrl',
-    AltLeft: 'L Alt', AltRight: 'R Alt',
-  };
-  return named[code] ?? code;
-}
 
 // --- Look -------------------------------------------------------------------
 
@@ -239,9 +189,6 @@ export function applyHudTheme(theme: HudTheme): void {
   root.setProperty('--hud-text', theme.textColor);
   root.setProperty('--hud-text-dim', rgba(theme.textColor, 0.62));
   root.setProperty('--hud-bg', rgba(theme.bgColor, theme.bgOpacity));
-  // The command box and its suggestion list sit ON the backdrop rather than
-  // floating over the world, so they take a firmer fill than the loose HUD one.
-  root.setProperty('--hud-bg-solid', rgba(theme.bgColor, Math.min(1, theme.bgOpacity * 0.5 + 0.5)));
   root.setProperty('--hud-accent', theme.accentColor);
   root.setProperty('--hud-accent-soft', rgba(theme.accentColor, 0.4));
   // A light HUD text colour needs a dark shadow to sit on the sky and a dark
@@ -258,244 +205,6 @@ export function applyHudTheme(theme: HudTheme): void {
 }
 
 // --- The panel --------------------------------------------------------------
-
-const CSS = `
-#hud-settings {
-  --hs-ink:#122032; --hs-ink-soft:#3b4f68; --hs-mute:#687d95;
-  --hs-line:rgba(18,32,50,.1); --hs-line-soft:rgba(18,32,50,.07); --hs-line-lit:rgba(18,32,50,.22);
-  --hs-card:#f4f7fb; --hs-bar:#ffffff; --hs-rail:#eaf0f7; --hs-surface:#ffffff;
-  --hs-field:#ffffff; --hs-hover:rgba(18,32,50,.05);
-  --hs-accent:#2d6ee0; --hs-accent-soft:rgba(45,110,224,.11); --hs-accent-ink:#1d57bd;
-  --hs-track:rgba(18,32,50,.12); --hs-knob:#ffffff;
-  --hs-primary:linear-gradient(180deg,#24344c,#122032); --hs-primary-hover:linear-gradient(180deg,#2b3e5b,#16273d);
-  --hs-primary-ink:#fff;
-  --hs-bad:#c42f3a; --hs-bad-soft:rgba(212,52,63,.08);
-  --hs-shadow:0 34px 80px rgba(12,22,36,.34), 0 2px 8px rgba(12,22,36,.08);
-  --hs-row-shadow:0 1px 2px rgba(18,32,50,.04);
-  --hs-check:#e7edf5;
-  position:absolute; inset:0; z-index:70; display:none;
-  align-items:center; justify-content:center; padding:24px;
-  background:radial-gradient(ellipse 80% 70% at 50% 45%, rgba(236,243,251,.55), rgba(206,220,238,.35) 70%), rgba(160,182,210,.24);
-  backdrop-filter:blur(10px) saturate(1.1);
-  font-family:ui-sans-serif,-apple-system,'Segoe UI',Roboto,system-ui,sans-serif;
-  color:var(--hs-ink); -webkit-font-smoothing:antialiased; }
-html[data-ui-dark] #hud-settings {
-  --hs-ink:#eaf1fa; --hs-ink-soft:#aec1d8; --hs-mute:#8398b2;
-  --hs-line:rgba(150,182,224,.14); --hs-line-soft:rgba(150,182,224,.09); --hs-line-lit:rgba(150,182,224,.32);
-  --hs-card:#0f141d; --hs-bar:#141a25; --hs-rail:#0c1017; --hs-surface:#161d2a;
-  --hs-field:#10151f; --hs-hover:rgba(150,182,224,.08);
-  --hs-accent:#6ea8ff; --hs-accent-soft:rgba(110,168,255,.14); --hs-accent-ink:#a9ccff;
-  --hs-track:rgba(150,182,224,.2); --hs-knob:#eaf1fa;
-  --hs-primary:linear-gradient(180deg,#ffdb87,#ffc043); --hs-primary-hover:linear-gradient(180deg,#ffe7ab,#ffcb5e);
-  --hs-primary-ink:#241703;
-  --hs-bad:#ff8f96; --hs-bad-soft:rgba(255,77,85,.1);
-  --hs-shadow:0 34px 90px rgba(0,0,0,.66);
-  --hs-row-shadow:none;
-  --hs-check:#1a2130;
-  background:rgba(4,6,11,.74); }
-#hud-settings.open { display:flex; }
-#hud-settings * { text-shadow:none; box-sizing:border-box; }
-.hs-card { display:flex; flex-direction:column; width:min(900px,100%);
-  height:min(660px,calc(100vh - 48px)); background:var(--hs-card);
-  border:1px solid var(--hs-line); border-radius:24px; overflow:hidden;
-  box-shadow:var(--hs-shadow); animation:hs-rise .26s cubic-bezier(.2,.9,.3,1.15) both; }
-@keyframes hs-rise { from { transform:translateY(14px) scale(.985); opacity:0; } }
-.hs-head { display:flex; align-items:center; gap:13px; flex:0 0 auto;
-  padding:0 18px; height:68px; border-bottom:1px solid var(--hs-line); background:var(--hs-bar); }
-.hs-mark { width:40px; height:40px; border-radius:13px; flex:0 0 auto;
-  background:var(--hs-accent-soft); box-shadow:inset 0 0 0 1px var(--hs-accent-soft);
-  display:grid; place-items:center; }
-.hs-mark::before { content:''; width:18px; height:14px; border-radius:4px;
-  border:2px solid var(--hs-accent);
-  background:linear-gradient(var(--hs-accent),var(--hs-accent)) no-repeat 50% calc(100% - 2px)/10px 2px; }
-.hs-head h2 { color:var(--hs-ink); font-size:18px; font-weight:850; letter-spacing:-.2px; line-height:1.15; }
-.hs-kicker { margin-top:2px; color:var(--hs-mute); font-size:11.5px; font-weight:500; }
-.hs-x { margin-left:auto; width:36px; height:36px; border:1px solid var(--hs-line); border-radius:11px;
-  background:var(--hs-surface); color:var(--hs-ink-soft); font-size:15px; line-height:1; cursor:pointer;
-  transition:background .12s,color .12s,border-color .12s; }
-.hs-x:hover { background:var(--hs-hover); color:var(--hs-ink); border-color:var(--hs-line-lit); }
-.hs-body { display:flex; flex:1 1 auto; min-height:0; }
-.hs-rail { flex:0 0 200px; display:flex; flex-direction:column; gap:3px;
-  padding:14px 12px; border-right:1px solid var(--hs-line); background:var(--hs-rail); }
-.hs-tab { position:relative; display:flex; align-items:center; gap:10px;
-  padding:10px 12px; border:0; border-radius:11px; background:transparent;
-  color:var(--hs-ink-soft); font:inherit; font-size:13px; font-weight:650; text-align:left;
-  cursor:pointer; transition:background .12s,color .12s,box-shadow .12s; }
-.hs-tab:hover { background:var(--hs-hover); color:var(--hs-ink); }
-.hs-tab.sel { background:var(--hs-surface); color:var(--hs-ink);
-  box-shadow:0 1px 2px rgba(18,32,50,.06), 0 4px 12px rgba(28,52,86,.08), inset 0 0 0 1px var(--hs-line); }
-.hs-tab i { display:flex; align-items:center; justify-content:center; flex:0 0 auto;
-  width:26px; height:26px; border-radius:8px; font-style:normal; color:var(--hs-mute);
-  transition:background .12s,color .12s; }
-.hs-tab i svg { width:16px; height:16px; vertical-align:middle; }
-.hs-tab.sel i { color:var(--hs-accent); background:var(--hs-accent-soft); }
-.hs-rail-note { margin-top:auto; padding:10px 12px; color:var(--hs-mute); font-size:11px;
-  line-height:1.5; }
-.hs-pane { flex:1 1 auto; min-width:0; overflow-y:auto; padding:20px 22px 24px;
-  scrollbar-width:thin; scrollbar-color:var(--hs-track) transparent; }
-.hs-pane::-webkit-scrollbar { width:9px; }
-.hs-pane::-webkit-scrollbar-thumb { background:var(--hs-track); border-radius:5px; }
-.hs-pane[hidden] { display:none; }
-.hs-group { color:var(--hs-mute); font-size:10.5px; font-weight:800; letter-spacing:1.3px;
-  text-transform:uppercase; margin:22px 4px 8px; }
-.hs-group:first-child { margin-top:0; }
-/* Rows between two headings read as one white list card. */
-.hs-row { display:flex; align-items:center; justify-content:space-between; gap:22px;
-  padding:12px 16px; background:var(--hs-surface); border:1px solid var(--hs-line);
-  box-shadow:var(--hs-row-shadow); }
-.hs-row + .hs-row { margin-top:-1px; border-top-color:var(--hs-line-soft); }
-.hs-group + .hs-row, .hs-pane > .hs-row:first-child { border-top-left-radius:14px; border-top-right-radius:14px; }
-.hs-row:last-child, .hs-row:has(+ :not(.hs-row)) { border-bottom-left-radius:14px; border-bottom-right-radius:14px; }
-.hs-label { min-width:0; }
-.hs-label b { display:block; color:var(--hs-ink); font-size:13px; font-weight:700; }
-.hs-label span { display:block; margin-top:3px; color:var(--hs-mute); font-size:11.5px; line-height:1.45; }
-.hs-ctl { flex:0 0 auto; display:flex; align-items:center; gap:10px; }
-.hs-ctl select { min-width:180px; height:36px; padding:0 32px 0 11px; border-radius:10px;
-  border:1px solid var(--hs-line-lit); color:var(--hs-ink); font:inherit; font-size:12.5px; font-weight:650;
-  -webkit-appearance:none; appearance:none; cursor:pointer;
-  background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5' fill='none' stroke='%23687d95' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 10px center / 12px, var(--hs-field); }
-.hs-ctl select option { background:var(--hs-surface); color:var(--hs-ink); }
-.hs-ctl select:hover { border-color:var(--hs-accent); }
-.hs-ctl select:focus-visible, .hs-key:focus-visible, .hs-x:focus-visible, .hs-hex:focus-visible,
-.hs-tab:focus-visible, .hs-btn:focus-visible, .hs-switch:focus-visible, .hs-preset:focus-visible,
-.hs-ctl input[type=range]:focus-visible { outline:2.5px solid var(--hs-accent); outline-offset:2px; }
-/* Sliders fill up to the thumb (--fill is kept in sync by the panel). */
-.hs-ctl input[type=range] { --fill:50%; -webkit-appearance:none; appearance:none;
-  width:150px; height:22px; background:transparent; cursor:pointer; }
-.hs-ctl input[type=range]::-webkit-slider-runnable-track { height:6px; border-radius:999px;
-  background:linear-gradient(90deg,var(--hs-accent) var(--fill),var(--hs-track) var(--fill)); }
-.hs-ctl input[type=range]::-moz-range-track { height:6px; border-radius:999px; background:var(--hs-track); }
-.hs-ctl input[type=range]::-moz-range-progress { height:6px; border-radius:999px; background:var(--hs-accent); }
-.hs-ctl input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:18px; height:18px;
-  margin-top:-6px; border-radius:50%; background:var(--hs-knob); border:2px solid var(--hs-accent);
-  box-shadow:0 2px 6px rgba(18,32,50,.25); }
-.hs-ctl input[type=range]::-moz-range-thumb { width:14px; height:14px; border-radius:50%;
-  background:var(--hs-knob); border:2px solid var(--hs-accent); box-shadow:0 2px 6px rgba(18,32,50,.25); }
-.hs-val { min-width:48px; padding:5px 0; border-radius:8px; background:var(--hs-rail);
-  color:var(--hs-ink); font-size:11.5px; font-weight:750; text-align:center;
-  font-variant-numeric:tabular-nums; }
-.hs-swatch { position:relative; width:44px; height:36px; border-radius:10px;
-  border:1px solid var(--hs-line-lit); overflow:hidden; cursor:pointer;
-  background-image:linear-gradient(45deg,transparent 25%,var(--hs-check) 0 50%,transparent 0 75%,var(--hs-check) 0);
-  background-size:10px 10px; box-shadow:inset 0 0 0 2px var(--hs-surface); }
-.hs-swatch input { position:absolute; inset:-6px; width:calc(100% + 12px);
-  height:calc(100% + 12px); border:0; padding:0; background:transparent; cursor:pointer; }
-.hs-hex { width:92px; height:36px; padding:0 10px; border-radius:10px; border:1px solid var(--hs-line-lit);
-  background:var(--hs-field); color:var(--hs-ink); font-family:'Lucida Console',Monaco,monospace;
-  font-size:11.5px; text-transform:lowercase; }
-.hs-hex.bad { border-color:var(--hs-bad); background:var(--hs-bad-soft); }
-.hs-switch { position:relative; width:44px; height:26px; flex:0 0 auto; border:0; padding:0;
-  border-radius:999px; background:var(--hs-track); cursor:pointer; transition:background .16s; }
-.hs-switch::after { content:''; position:absolute; top:3px; left:3px; width:20px; height:20px;
-  border-radius:50%; background:var(--hs-knob); box-shadow:0 1px 3px rgba(18,32,50,.3);
-  transition:transform .18s cubic-bezier(.3,1.4,.5,1); }
-.hs-switch.on { background:var(--hs-accent); }
-.hs-switch.on::after { transform:translateX(18px); }
-.hs-key { min-width:118px; height:34px; padding:0 12px; border-radius:10px;
-  border:1px solid var(--hs-line-lit); border-bottom-width:2px; background:var(--hs-field); color:var(--hs-ink);
-  font-family:'Lucida Console',Monaco,monospace; font-size:11.5px; font-weight:700; cursor:pointer;
-  transition:border-color .12s,background .12s,color .12s; }
-.hs-key:hover { border-color:var(--hs-accent); }
-.hs-key.listening { border-color:var(--hs-accent); background:var(--hs-accent-soft); color:var(--hs-accent-ink);
-  animation:hs-listen 1s ease-in-out infinite; }
-@keyframes hs-listen { 50% { box-shadow:0 0 0 4px var(--hs-accent-soft); } }
-.hs-key.clash { border-color:var(--hs-bad); color:var(--hs-bad); background:var(--hs-bad-soft); }
-.hs-clash-note { margin:12px 4px 0; color:var(--hs-bad); font-size:11.5px; font-weight:600; }
-.hs-clash-note[hidden] { display:none; }
-.hs-presets { display:grid; grid-template-columns:repeat(auto-fill,minmax(132px,1fr)); gap:8px; padding:0 0 4px; }
-.hs-preset { position:relative; display:flex; align-items:center; gap:10px; padding:8px 12px 8px 8px;
-  border:1px solid var(--hs-line); border-radius:13px; background:var(--hs-surface); color:var(--hs-ink);
-  font:inherit; font-size:12.5px; font-weight:700; cursor:pointer; box-shadow:var(--hs-row-shadow);
-  transition:transform .12s,border-color .12s,box-shadow .12s,background .12s; }
-.hs-preset:hover { transform:translateY(-1px); border-color:var(--hs-line-lit);
-  box-shadow:0 8px 18px rgba(28,52,86,.1); }
-.hs-preset.on { border-color:var(--hs-accent); background:var(--hs-accent-soft);
-  box-shadow:0 0 0 1px var(--hs-accent); }
-.hs-preset.on::after { content:''; position:absolute; right:10px; top:50%; width:6px; height:11px;
-  margin-top:-7px; border:solid var(--hs-accent); border-width:0 2.5px 2.5px 0; transform:rotate(40deg); }
-/* Each chip is a miniature HUD line in the preset's own colours. */
-.hs-preset i { display:grid; place-items:center; width:36px; height:28px; border-radius:8px; flex:0 0 auto;
-  font:800 12px/1 ui-sans-serif,system-ui,sans-serif; font-style:normal; letter-spacing:.2px;
-  box-shadow:inset 0 0 0 1px rgba(255,255,255,.18), 0 1px 3px rgba(18,32,50,.3); }
-.hs-foot { flex:0 0 auto; display:flex; align-items:center; gap:10px;
-  padding:14px 18px; border-top:1px solid var(--hs-line); background:var(--hs-bar); }
-.hs-foot .hs-hint { color:var(--hs-mute); font-size:11.5px; margin-right:auto; }
-.hs-btn { height:40px; padding:0 18px; white-space:nowrap; border-radius:12px; border:1px solid var(--hs-line-lit);
-  background:var(--hs-surface); color:var(--hs-ink); font:inherit; font-size:13px; font-weight:750; cursor:pointer;
-  transition:transform .12s,background .12s,border-color .12s,box-shadow .12s; }
-.hs-btn:hover { transform:translateY(-1px); background:var(--hs-hover); box-shadow:0 8px 18px rgba(28,52,86,.1); }
-.hs-btn.primary { border-color:transparent; background:var(--hs-primary); color:var(--hs-primary-ink);
-  box-shadow:0 10px 24px rgba(18,32,50,.24); }
-.hs-btn.primary:hover { background:var(--hs-primary-hover); }
-
-/* HUD Layout: the call to action that hands the screen to the drag editor. */
-.hs-dragcard { display:flex; align-items:center; gap:16px; padding:16px 18px;
-  margin-bottom:4px; border:1px solid var(--hs-line); border-radius:16px;
-  background:linear-gradient(135deg,var(--hs-accent-soft),transparent 70%),var(--hs-surface);
-  box-shadow:var(--hs-row-shadow); }
-.hs-dragcard > div { min-width:0; }
-.hs-dragcard b { display:block; color:var(--hs-ink); font-size:14px; font-weight:800; }
-.hs-dragcard span { display:block; margin-top:4px; color:var(--hs-mute); font-size:11.5px;
-  line-height:1.5; }
-.hs-dragcard .hs-btn { flex:0 0 auto; }
-.hs-ctl input[type=range].hs-modsize { width:104px; }
-
-/* Live preview: the real HUD variables, at HUD scale, on a stand-in world.
-   It sticks to the top of the pane on taller windows so a slider can be
-   dragged while watching what it does. */
-.hs-preview { position:relative; z-index:2; border:1px solid var(--hs-line); border-radius:18px;
-  padding:14px 16px 14px; margin-bottom:4px; overflow:hidden;
-  box-shadow:0 10px 26px -12px rgba(18,32,50,.4), var(--hs-row-shadow);
-  background:
-    radial-gradient(circle at 84% 22%, rgba(255,247,214,.95) 0 9px, rgba(255,240,190,.35) 10px 22px, transparent 23px),
-    linear-gradient(180deg,#5f93d8,#a8c9ee 56%,#77a25f 56.5%,#4f7a41 78%,#436b37); }
-@media (min-height:740px) { .hs-preview { position:sticky; top:-8px; } }
-.hs-preview::after { content:'Live preview'; position:absolute; right:10px; bottom:10px;
-  padding:3px 9px; border-radius:999px; background:rgba(255,255,255,.82); color:#3b4f68;
-  font:800 9.5px/1.4 ui-sans-serif,system-ui,sans-serif; letter-spacing:1px; text-transform:uppercase; }
-.hs-preview .hs-pv-stack { display:flex; flex-direction:column; align-items:flex-start; gap:6px;
-  font-family:var(--hud-font); color:var(--hud-text);
-  text-shadow:var(--hud-text-shadow); font-weight:bold; letter-spacing:.5px; }
-.hs-pv-top { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; width:100%; }
-.hs-pv-debug { background:var(--hud-bg); padding:2px 7px; border-radius:5px;
-  font-size:calc(12px * var(--hud-scale)); }
-.hs-pv-line { background:var(--hud-bg); border-left:3px solid var(--hud-accent);
-  padding:3px 9px; border-radius:0 6px 6px 0; font-size:calc(12px * var(--hud-scale)); }
-.hs-pv-foot { align-self:center; display:flex; flex-direction:column; align-items:stretch; gap:5px; }
-.hs-pv-name { align-self:center; font-size:calc(13px * var(--hud-scale)); }
-.hs-pv-hearts { display:flex; gap:3px; }
-.hs-pv-hearts i { flex:1 1 0; height:10px; border-radius:3px; background:#e0394d;
-  box-shadow:inset 0 -3px 0 rgba(0,0,0,.22), inset 0 2px 0 rgba(255,255,255,.35), 0 1px 2px rgba(0,0,0,.35); }
-.hs-pv-hearts i:nth-child(n+9) { background:rgba(20,20,26,.55); box-shadow:inset 0 0 0 1px rgba(255,255,255,.18); }
-.hs-pv-bar { display:flex; gap:3px; padding:3px;
-  background:var(--hud-bg); border-radius:10px;
-  box-shadow:0 0 0 1px var(--hud-accent-soft), 0 6px 16px rgba(0,0,0,.25); }
-.hs-pv-bar span { position:relative; width:30px; height:30px; border-radius:7px;
-  background:rgba(255,255,255,.06); box-shadow:inset 0 0 0 1px rgba(255,255,255,.1); }
-.hs-pv-bar span.sel { background:rgba(255,255,255,.16);
-  box-shadow:inset 0 0 0 2px var(--hud-accent), 0 0 10px var(--hud-accent-soft); z-index:1; }
-
-@media (max-width: 720px) {
-  #hud-settings { padding:10px; }
-  .hs-card { height:min(660px,calc(100vh - 20px)); border-radius:20px; }
-  .hs-head { height:60px; padding:0 14px; }
-  .hs-mark { width:34px; height:34px; border-radius:11px; }
-  .hs-kicker { display:none; }
-  .hs-body { flex-direction:column; }
-  .hs-rail { flex:0 0 auto; flex-direction:row; overflow-x:auto; gap:6px;
-    border-right:0; border-bottom:1px solid var(--hs-line); padding:9px 10px; }
-  .hs-rail-note { display:none; }
-  .hs-tab { white-space:nowrap; padding:8px 11px; }
-  .hs-row { flex-direction:column; align-items:stretch; gap:9px; padding:12px 14px; }
-  .hs-ctl { justify-content:flex-end; }
-  .hs-pane { padding:14px; }
-  .hs-dragcard { flex-direction:column; align-items:stretch; }
-  .hs-preview::after, .hs-foot .hs-hint { display:none; }
-  .hs-foot { justify-content:flex-end; }
-}
-@media (prefers-reduced-motion: reduce) { .hs-card, .hs-key.listening { animation:none; } }
-body.reduced-motion .hs-card, body.reduced-motion .hs-key.listening { animation:none; }
-`;
 
 interface HudSettingsPanel {
   readonly open: boolean;
@@ -522,10 +231,6 @@ export function createHudSettingsPanel(
   parent: HTMLElement, hooks: HudSettingsHooks
 ): HudSettingsPanel {
   const { settings } = hooks;
-
-  const style = document.createElement('style');
-  style.textContent = CSS;
-  document.head.appendChild(style);
 
   const scrim = document.createElement('div');
   scrim.id = 'hud-settings';
@@ -1055,6 +760,7 @@ export function createHudSettingsPanel(
   });
 
   function close(): void {
+    if (!scrim.classList.contains('open')) return;
     stopListening();
     scrim.classList.remove('open');
     hooks.onClose();

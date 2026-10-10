@@ -6,10 +6,6 @@ import { ITEMS, ItemStack } from './items';
 export const HOTBAR_SIZE = 9;
 const INV_SIZE = 36;
 
-function maxStack(id: number): number {
-  return ITEMS[id]?.maxStack ?? 64;
-}
-
 export class Inventory {
   readonly slots: (ItemStack | null)[] = new Array(INV_SIZE).fill(null);
   /** Selected hotbar slot 0-8. */
@@ -60,10 +56,14 @@ function sanitizeStack(raw: unknown): ItemStack | null {
   const s = raw as Partial<ItemStack>;
   if (!Number.isInteger(s.id) || !ITEMS[s.id as number]) return null;
   if (!Number.isFinite(s.count) || (s.count as number) <= 0) return null;
-  const stack: ItemStack = {
-    id: s.id as number,
-    count: Math.min(Math.floor(s.count as number), maxStack(s.id as number)),
-  };
-  if (Number.isFinite(s.loaded)) stack.loaded = Math.max(0, Math.floor(s.loaded as number));
+  const info = ITEMS[s.id as number];
+  const count = Math.min(Math.floor(s.count as number), info.maxStack);
+  if (count <= 0) return null;
+  const stack: ItemStack = { id: s.id as number, count };
+  // Only guns carry magazines. Undefined/non-finite values retain the existing
+  // full-magazine default; valid counts include zero (an empty magazine).
+  if (info.gun && Number.isFinite(s.loaded)) {
+    stack.loaded = Math.min(info.gun.mag, Math.max(0, Math.floor(s.loaded as number)));
+  }
   return stack;
 }

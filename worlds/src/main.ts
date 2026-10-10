@@ -21,23 +21,23 @@ import { HeldItemView } from './held';
 import { HUD } from './hud';
 import { Input, FROZEN_INPUT } from './input';
 import { TouchControls, isTouchDevice } from './touch';
+import './styles/hud_mods.css';
+import './styles/hud_settings.css';
+import './styles/wardrobe.css';
 import { Interaction, raycastBlocks } from './interact';
 import { aimAssist, type AimPoint } from './aim_assist';
 import { Inventory } from './inventory';
 import { Item, ITEMS, type GunInfo, type ItemStack } from './items';
-import { iconSvg } from './emoji_icons';
-import { blockCubeGeometry, itemGeometry } from './item_geometry';
-import { createGunModel, GUN_FEEL, isGunItem, poseGunModel } from './gunmodels';
-import { createGadgetModel, isModeledGadget, poseGadgetModel } from './gadgetmodels';
+import { blockCubeGeometry } from './item_geometry';
+import { GUN_FEEL } from './gunmodels';
 import { NetClient } from './net/client';
 import { skinSeed, type GameMode, type PartyState } from './net/protocol';
 import { Particles } from './particles';
 import { Player } from './player';
-import {
-  RemotePlayers, applyAvatarSneak, buildAvatarBody, disposeAvatarBody, poseGunHold, releaseGunHold,
-  stridePose, type AvatarBody,
-} from './remoteplayers';
-import { DamageNumbers, KillBanner, hitFlavor, type HitFlavor } from './pvp_feedback';
+import { RemotePlayers } from './remoteplayers';
+import { buildAvatarBody, disposeAvatarBody, type AvatarBody } from './avatar';
+import { createAvatarItemMaterial, createAvatarEquipment, attachAvatarEquipment, poseAvatar, type AvatarEquipment } from './avatar_equipment';
+import { hitFlavor, type HitFlavor } from './pvp_feedback';
 import { Projectiles } from './projectiles';
 import { Sky } from './sky';
 import { createAtlas, createCrackTextures, TILE_PX, tileOrigin } from './textures';
@@ -57,10 +57,9 @@ import { createHudMods, type HudModData } from './hud_mods';
 import { worldGenerator, type WorldSpec } from './multiverse';
 import { TEXTURE_SEED, TitleBackdrop } from './title_backdrop';
 import {
-  DUEL_MAX_HEALTH, DUEL_MAX_PILLAR_HEIGHT, DUEL_ROUND_MS, DUEL_SCORE_LIMIT, DUEL_ARENA_SIZE,
-  clampToDuelArena, duelEventCopy, duelTerrainElevation,
-  type DuelArenaBounds, type DuelEvent, type DuelEventKind, type DuelLobbySnapshot, type DuelParticipant,
-  type DuelResult,
+  DUEL_MAX_HEALTH, DUEL_MAX_PILLAR_HEIGHT, DUEL_ARENA_SIZE,
+  clampToDuelArena, duelTerrainElevation,
+  type DuelArenaBounds, type DuelLobbySnapshot,
 } from './duels';
 import {
   BRIDGE_BOW_COOLDOWN_MS, BRIDGE_GOALS, BRIDGE_MELEE_TIER, BRIDGE_TEAM_BLOCK, PARTY_AMBIENT_LIGHT,
@@ -82,6 +81,15 @@ import { BedwarsClient } from './bedwars_client';
 import { BedwarsSetup } from './ui/bedwars_setup';
 import { BW_BOUNDS } from './bedwars_map';
 import { BW_TEAM_COLORS } from './bedwars_rules';
+import { MODE_LABELS, BRIDGE_COLORS } from './ui/presentation';
+import { Screens } from './client/screens';
+import { WorldReadiness } from './client/world_readiness';
+import { Comfort } from './client/comfort';
+import { DuelsPresenter } from './client/duels_presenter';
+import { CombatPresenter } from './client/combat_presenter';
+import { HealingPresenter } from './client/healing_presenter';
+import { PickerSession } from './client/picker_session';
+import { canDuelAct, canPartyAct } from './modes';
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -101,7 +109,7 @@ const PARTY_MELEE_REACH = 4.2;
 const GUEST_KEY = 'worlds.guest';
 const SESSION_KEY = 'worlds.session';
 const LOOK_KEY = 'worlds.look';
-const MODE_NAMES: Record<GameMode, string> = { duels: 'Duels', bridge: 'The Bridge', parkour: 'Parkour', ratseek: 'Rat and Seek', bedwars: 'Bedwars' };
+const MODE_NAMES = MODE_LABELS;
 
 function fogEnd(radius: number): number { return Math.max(4, radius * 16 * 0.9 - 4); }
 let FOG_FAR = fogEnd(DEFAULT_RENDER_DISTANCE);
@@ -122,6 +130,7 @@ statusEl.style.display = 'none';
 // ── Renderer ───────────────────────────────────────────────────────────────
 
 const accessibility = loadAccessibility();
+const comfort = new Comfort(accessibility);
 function fatalScreen(heading: string, detail: string): void {
   document.body.innerHTML =
     `<div style="position:fixed;inset:0;display:grid;place-content:center;gap:14px;padding:32px;text-align:center;
@@ -191,8 +200,8 @@ input.setBinds(hudSettings.binds);
 const isMobile = isTouchDevice();
 const touch = isMobile ? new TouchControls(input, {
   onPause: () => {
-    if (screen === 'paused') { resumePlay(); return; }
-    if (screen === 'playing') { if (input.locked) input.unlock(); enterPause(); }
+    if (screens.state === 'paused') { resumePlay(); return; }
+    if (screens.state === 'playing') screens.enterPause();
   },
 }) : null;
 const inventory = new Inventory();
@@ -324,8 +333,7 @@ function saveAccessUi(): void {
   }
   saveAccessibility(accessibility);
   audio.setEffectsVolume(accessibility.effectsVolume);
-  document.body.classList.toggle('reduced-motion', accessibility.reducedMotion);
-  document.body.classList.toggle('photosensitivity-safe', accessibility.photosensitivitySafe);
+  comfort.syncBody();
   // Slider tracks fill up to the thumb (hud.css reads --fill).
   for (const el of [lookSensInput, effectsVolumeInput, cameraShakeInput]) {
     const min = Number(el.min), max = Number(el.max);
@@ -339,8 +347,7 @@ saveAccessUi();
 
 // ── Screens ────────────────────────────────────────────────────────────────
 
-type Screen = 'title' | 'playing' | 'paused' | 'results';
-let screen: Screen = 'title';
+const screens = new Screens(input, pauseEl, () => cancelPendingActions());
 
 const toastEl = document.createElement('div');
 toastEl.className = 'w-toast';
@@ -359,78 +366,15 @@ clickResumeEl.className = 'click-resume';
 clickResumeEl.textContent = 'Click to take control';
 app.appendChild(clickResumeEl);
 
-function cursorPanelOpen(): boolean {
-  return wardrobeUI.open || controlsSheet.open || hudSettingsPanelOpen() || rsClient.pickerOpen || bwClient.panelOpen || !!seekerPick;
-}
-let hudSettingsVisible = false;
-function hudSettingsPanelOpen(): boolean { return hudSettingsVisible || hudMods.editing; }
-function shouldHoldPointer(): boolean {
-  return screen === 'playing' && !cursorPanelOpen();
-}
-function syncPointerLock(): void {
-  if (shouldHoldPointer()) {
-    if (!input.locked && !input.lockPending) input.lock();
-  } else if (input.locked || input.lockPending) {
-    input.unlock();
-  }
-}
-function enterPlaying(): void {
-  screen = 'playing';
-  document.body.classList.add('in-game');
-  pauseEl.style.display = 'none';
-}
-function resumePlay(): void { enterPlaying(); syncPointerLock(); }
-function enterPause(): void {
-  if (screen === 'results') { pauseEl.style.display = 'none'; if (input.locked) input.unlock(); return; }
-  setPauseContext(false);
-  screen = 'paused';
-  pauseEl.style.display = 'flex';
-}
-
-// The pause card doubles as the title screen's Settings sheet: same controls,
-// same saved values, with Done in place of Resume and no Leave match.
-const pauseEyebrow = pauseEl.querySelector<HTMLElement>('.pause-eyebrow')!;
-const pauseTitle = pauseEl.querySelector<HTMLElement>('h1')!;
-const pauseHint = pauseEl.querySelector<HTMLElement>('.pause-hint')!;
-const resumeBtn = document.getElementById('resume-btn')!;
-const quitBtn = document.getElementById('quit-btn')!;
-let titleSettingsOpen = false;
-function setPauseContext(title: boolean): void {
-  titleSettingsOpen = title;
-  pauseEyebrow.textContent = title ? 'Worlds · settings' : 'Worlds · paused';
-  pauseTitle.textContent = title ? 'Settings' : 'Paused';
-  pauseHint.textContent = title ? 'Changes save on this device straight away.' : 'The match keeps going while you are in here.';
-  resumeBtn.textContent = title ? 'Done' : 'Resume';
-  quitBtn.style.display = title ? 'none' : '';
-}
-function openTitleSettings(): void {
-  if (screen !== 'title') return;
-  setPauseContext(true);
-  pauseEl.style.display = 'flex';
-}
-function closeTitleSettings(): void {
-  if (!titleSettingsOpen) return;
-  setPauseContext(false);
-  pauseEl.style.display = 'none';
-}
-resumeBtn.addEventListener('click', () => { if (titleSettingsOpen) closeTitleSettings(); else resumePlay(); });
+function shouldHoldPointer(): boolean { return screens.shouldHoldPointer; }
+function syncPointerLock(): void { screens.syncPointerLock(); }
+function resumePlay(): void { screens.resumePlay(); }
 document.getElementById('quit-btn')!.addEventListener('click', () => {
   net.send({ t: 'leaveMatch' });
   pauseEl.style.display = 'none';
 });
-document.getElementById('pause-controls-btn')!.addEventListener('click', () => controlsSheet.show());
-document.addEventListener('pointerlockchange', () => {
-  if (screen === 'results' || screen === 'title') { if (!titleSettingsOpen) pauseEl.style.display = 'none'; return; }
-  if (input.locked) enterPlaying();
-  else if (screen === 'playing' && !cursorPanelOpen()) enterPause();
-});
+document.getElementById('pause-controls-btn')!.addEventListener('click', () => screens.showOverlay(() => controlsSheet.show()));
 renderer.domElement.addEventListener('mousedown', () => { if (!input.locked) syncPointerLock(); });
-document.addEventListener('keydown', (e) => {
-  if (e.code !== 'Escape' || e.defaultPrevented) return;
-  if (titleSettingsOpen && !hudSettingsPanelOpen() && !controlsSheet.open) { closeTitleSettings(); return; }
-  if (screen === 'paused') return;
-  if (screen === 'playing') { input.unlock(); enterPause(); }
-});
 
 // HUD settings + the draggable readouts (FPS, coordinates...).
 let hudSaveTimer = 0;
@@ -443,7 +387,7 @@ const hudMods = createHudMods(app, {
   binds: hudSettings.binds,
   onChange: saveHudSoon,
   onEditDone: () => {
-    if (screen === 'paused' || titleSettingsOpen) { pauseEl.style.display = 'flex'; hudSettingsPanel.show(); hudSettingsVisible = true; }
+    if (!screens.transitioning && (screens.state === 'paused' || screens.titleSettingsOpen)) screens.showOverlay(() => hudSettingsPanel.show());
   },
 });
 const hudSettingsPanel = createHudSettingsPanel(app, {
@@ -455,12 +399,17 @@ const hudSettingsPanel = createHudSettingsPanel(app, {
     hudMods.sync();
     saveHudSoon();
   },
-  onClose: () => { hudSettingsVisible = false; if (screen === 'paused' || titleSettingsOpen) pauseEl.style.display = 'flex'; },
-  onEditLayout: () => { hudSettingsVisible = false; pauseEl.style.display = 'none'; hudMods.beginEdit(); },
+  onClose: () => screens.restorePause(),
+  onEditLayout: () => screens.showOverlay(() => hudMods.beginEdit()),
 });
-document.getElementById('hud-settings-btn')!.addEventListener('click', () => { hudSettingsVisible = true; hudSettingsPanel.show(); });
+document.getElementById('hud-settings-btn')!.addEventListener('click', () => screens.showOverlay(() => hudSettingsPanel.show()));
 
-const controlsSheet = new ControlsSheet(app, () => hudSettings.binds, isMobile, () => syncPointerLock());
+const controlsSheet = new ControlsSheet(app, () => hudSettings.binds, isMobile, () => screens.restorePause());
+screens.register(controlsSheet);
+screens.register(hudSettingsPanel);
+screens.register({ get open() { return hudMods.editing; }, hide: () => hudMods.endEdit() });
+screens.register({ get open() { return rsClient.pickerOpen; }, hide: () => rsClient.closePicker() });
+screens.register({ get open() { return bwClient.panelOpen; }, hide: () => {} });
 
 // ── Identity, look and wardrobe ────────────────────────────────────────────
 
@@ -551,7 +500,7 @@ const titlePreview = (() => {
   new ResizeObserver(resize).observe(previewHost);
   const animate = (): void => {
     requestAnimationFrame(animate);
-    if (screen !== 'title' || homeRoot.hidden) return;
+    if (screens.state !== 'title' || homeRoot.hidden) return;
     const t = performance.now() / 1000;
     if (dragId < 0) {
       spin += spinVel; spinVel *= 0.93;
@@ -596,9 +545,7 @@ const wardrobeUI = createWardrobe({
   root: app,
   getCosmetics: () => myCosmetics,
   getWardrobe: () => myWardrobe,
-  factions: [],
-  getFaction: () => -1,
-  reducedMotion: () => accessibility.reducedMotion || window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+  reducedMotion: () => comfort.reducedMotion,
   onSave: (look) => {
     applyLook(look);
     store(LOOK_KEY, look);
@@ -613,6 +560,7 @@ const wardrobeUI = createWardrobe({
 });
 wardrobeUI.onOpen = syncPointerLock;
 wardrobeUI.onClose = syncPointerLock;
+screens.register(wardrobeUI);
 
 function setIdentity(name: string, account: boolean, serverLook?: Cosmetics): void {
   myName = name;
@@ -642,7 +590,7 @@ const home = new HomeScreen({
   },
   onCancel: () => net.send({ t: 'cancelQueue' }),
   onControls: () => controlsSheet.show(),
-  onSettings: () => { audio.resume(); openTitleSettings(); },
+  onSettings: () => { audio.resume(); screens.openTitleSettings(); },
   onParty: () => { audio.resume(); partyPanel.show(); },
   onAccount: () => { audio.resume(); accountDialog.show(); },
   onWardrobe: () => { audio.resume(); wardrobeUI.show(); },
@@ -687,16 +635,14 @@ function playRatSeek(): void {
   net.send({ t: 'play', mode: 'ratseek', seeker: 0, ratClass: storedRatClass() });
 }
 /** Closes the host's in-game "Who seeks?" sheet, while it is open. */
-let seekerPick: AbortController | null = null;
+const seekerPicker = new PickerSession<number>(syncPointerLock);
+screens.register(seekerPicker);
 function openSeekerPick(): void {
-  if (seekerPick || !myParty || !rsClient.canPickSeeker()) return;
+  if (seekerPicker.open || !myParty || !rsClient.canPickSeeker()) return;
   const current = rsClient.snapshotSeeker(myParty.members.map((m) => m.id));
-  seekerPick = new AbortController();
-  syncPointerLock();
-  void pickSeeker(app, myParty, net.myId, current, seekerPick.signal).then((seeker) => {
-    seekerPick = null;
-    syncPointerLock();
-    if (seeker !== null && seeker !== current) net.sendRsSeeker(seeker);
+  const party = myParty;
+  seekerPicker.choose(signal => pickSeeker(app, party, net.myId, current, signal), seeker => {
+    if (match?.kind === 'rs' && rsClient.canPickSeeker() && seeker !== current) net.sendRsSeeker(seeker);
   });
 }
 
@@ -727,7 +673,7 @@ net.onParty = (state) => {
   partyPanel.update(state, net.myId);
   bwSetup.update(state, net.myId);
   bwClient.setParty(state, net.myId);
-  if (newDraft && screen === 'title') bwSetup.show();
+  if (newDraft && screens.state === 'title') bwSetup.show();
   if (state && !wasIn && !partyPanel.open) toast(`You're in party ${state.code}.`);
 };
 net.onPartyErr = (message) => { partyPanel.setError(message); bwSetup.setError(message); toast(message); };
@@ -738,7 +684,7 @@ net.onDisconnect = () => {
   myParty = null; home.setParty(null); partyPanel.update(null, -1);
   bwSetup.update(null, -1); bwSetup.close();
   bwClient.setParty(null, -1);
-  if (screen !== 'title') exitToMenu();
+  if (screens.state !== 'title') exitToMenu();
 };
 home.setConnected(false, '');
 
@@ -746,9 +692,7 @@ home.setConnected(false, '');
 
 type MatchKind = 'duel' | 'pg' | 'rs' | 'bw';
 let match: { kind: MatchKind; spec: WorldSpec; mode: GameMode } | null = null;
-let readySent = false;
-let readyWatchdog = 0;
-let pendingTeleport: { x: number; y: number; z: number; started: number } | null = null;
+const readiness = new WorldReadiness(world, () => net.sendWorldReady(), hideLoading);
 let worldTimeLocal = 0;
 let arenaMaxHealth = 20;
 let arenaHpPerHeart = 2;
@@ -772,6 +716,10 @@ function hideLoading(): void { loadingEl.classList.remove('show'); }
 /** Move this client into the match's world. */
 function enterMatchWorld(spec: WorldSpec, kind: MatchKind, mode: GameMode, spawn: { x: number; y: number; z: number }): void {
   const same = match && match.spec.id === spec.id;
+  screens.prepareTransition();
+  if (match?.kind === 'bw') bwClient.exit();
+  if (kind !== 'rs') rsClient.exit();
+  resetMatchPresentation();
   match = { kind, spec, mode };
   if (!same) {
     world.setGenerator(worldGenerator(spec));
@@ -780,49 +728,30 @@ function enterMatchWorld(spec: WorldSpec, kind: MatchKind, mode: GameMode, spawn
     // Each world has its own fixed time of day; arrive in it, don't fade into it.
     sky.snapTo(kind === 'pg' ? parkourTheme(spec.seed).time : kind === 'rs' ? RS_TIME_OF_DAY : 0.25);
   }
-  closeTitleSettings();
   home.hide();
   accountDialog.close();
   partyPanel.close();
   bwSetup.close();
   if (wardrobeUI.open) wardrobeUI.hide();
   if (controlsSheet.open) controlsSheet.hide();
-  readySent = false;
   player.pos.set(spawn.x, spawn.y, spawn.z);
   player.stepLift = 0;
   player.vel.set(0, 0, 0);
   player.fallDistance = 0;
   player.flying = false; player.noclip = false; duelSpectating = false; player.dead = false;
-  pendingTeleport = { ...spawn, started: worldTimeLocal };
   showLoading(MODE_NAMES[mode], 'Entering the world…');
   audio.resume();
-  startReadyWatchdog(spawn.x, spawn.z);
-  resumePlay();
-}
-
-function sendReady(): void {
-  if (readySent || !match) return;
-  readySent = true;
-  net.sendWorldReady();
-  stopReadyWatchdog();
-}
-function stopReadyWatchdog(): void { if (readyWatchdog) window.clearInterval(readyWatchdog); readyWatchdog = 0; }
-/** Report the spawn bubble built even while this tab is in the background
- *  (timers keep running when animation frames do not). */
-function startReadyWatchdog(x: number, z: number): void {
-  stopReadyWatchdog();
-  readyWatchdog = window.setInterval(() => {
-    if (!match || readySent) { stopReadyWatchdog(); return; }
-    const complete = match.kind === 'bw' ? world.updateVenue(30) : world.update(x, z, 30, match.kind === 'pg' ? 4 : 2);
-    if (complete && world.isLoaded(x, z)) { pendingTeleport = null; hideLoading(); sendReady(); }
-  }, 100);
+  readiness.enter(kind, spawn, worldTimeLocal);
+  screens.enterMatch();
 }
 
 /** Back to the title screen. */
 function exitToMenu(): void {
-  stopReadyWatchdog();
+  screens.menu();
+  readiness.reset();
+  resetMatchPresentation();
   match = null;
-  duelSnapshot = null; duelResultData = null;
+  duelSnapshot = null;
   pgSnapshot = null; pgSub = null;
   arenaCanPlaceAt = null; arenaCanEditAt = null; arenaClampPos = null;
   arenaUnlimited = new Set();
@@ -833,47 +762,22 @@ function exitToMenu(): void {
   syncPixelRatio(false);
   duelSpectating = false;
   hideLoading();
-  duelResultEl.classList.remove('visible');
-  duelMatchHud.classList.remove('visible');
-  duelScoresTouch.classList.remove('visible');
-  duelScoreboard.classList.remove('visible');
-  duelAnnounceEl.classList.remove('visible', 'out');
-  duelKillFeedEl.replaceChildren();
-  setDuelCue('');
   partyUI.setVisible(false);
   partyVisuals.clear();
   dragonView.clear();
+  projectiles.clear();
   interaction.clear();
-  healUse.cancel();
   inventory.restore([], 0);
-  damageNumbers.clear();
-  killBanner.clear();
-  killChipEl.classList.remove('visible');
-  hurtPulse = 0;
-  player.damageFlash = 0;
-  // Both overlays are only repainted by the in-match frame, so blank them here.
-  hurtVignetteEl.style.opacity = '0';
-  (document.getElementById('damage-flash') as HTMLDivElement).style.opacity = '0';
-  burstRemaining = 0; reloadTimer = 0; fireCooldown = 0;
   hideSelfAvatar();
   held.setActive(false);
-  screen = 'title';
-  input.unlock();
-  document.body.classList.remove('in-game');
-  setPauseContext(false);
   pauseEl.style.display = 'none';
   crosshair.style.display = 'none';
   hotbarEl.style.display = 'none';
   statusEl.style.display = 'none';
   // The frame loop only repaints the HUD while a match runs, so whatever it
   // last left lit has to be put away here or it sits on the title screen.
-  hudMods.endEdit();
   hudMods.setVisible(false);
-  hitmarkerEl.style.display = 'none';
-  dmgArcWrap.style.display = 'none';
   ammoEl.style.display = 'none';
-  useBarEl.style.display = 'none';
-  useBarEl.classList.remove('beat', 'done');
   home.show();
 }
 net.onLeftWorld = () => exitToMenu();
@@ -929,8 +833,7 @@ net.onTeleport = (x, y, z) => {
   player.stepLift = 0;
   player.vel.set(0, 0, 0);
   player.fallDistance = 0;
-  const loaded = [-.3, .3].every((dx) => [-.3, .3].every((dz) => world.isLoaded(x + dx, z + dz)));
-  pendingTeleport = loaded ? null : { x, y, z, started: worldTimeLocal };
+  readiness.teleport({ x, y, z }, worldTimeLocal);
 };
 net.onSelfHealth = (health) => {
   if (health !== player.health) player.setHealthFromServer(health, false);
@@ -942,7 +845,7 @@ net.onRespawned = (x, y, z, h) => {
     if (team !== undefined) player.yaw = bwClient.map.bases[team].yaw;
     player.pitch = 0;
   }
-  if (match?.kind === 'pg') held.setBowDraw(0);
+  cancelPendingActions();
   if (match?.kind === 'pg' && pgSub?.game === 'bridge') bridgeRespawnFx(x, y, z);
   player.respawn({ x, y, z });
   if (match?.kind === 'pg' && pgSub?.game === 'parkour') parkourRespawnFx(pgSub, x, y, z);
@@ -954,7 +857,7 @@ net.onRespawned = (x, y, z, h) => {
   player.maxHealth = arenaMaxHealth;
   player.health = h;
   lastHealth = h;
-  hurtPulse = 0;
+  combat.clearHurt();
   damageNumbers.clear();
   killBanner.clear();
 };
@@ -962,50 +865,23 @@ net.onCosmetics = (id) => remotePlayers.invalidate(id);
 
 // ── Combat feedback ────────────────────────────────────────────────────────
 
-const hitmarkerEl = document.createElement('div');
-hitmarkerEl.style.cssText = 'position:absolute;left:50%;top:50%;width:34px;height:34px;margin:-17px 0 0 -17px;z-index:11;pointer-events:none;opacity:0;';
-const hitmarkerTicks: HTMLDivElement[] = [];
-for (const [x, y, rot] of [['left:1px', 'top:1px', 45], ['right:1px', 'top:1px', -45],
-  ['left:1px', 'bottom:1px', -45], ['right:1px', 'bottom:1px', 45]] as [string, string, number][]) {
-  const tick = document.createElement('div');
-  tick.style.cssText = `position:absolute;${x};${y};width:11px;height:2px;background:#fff;transform:rotate(${rot}deg);box-shadow:0 0 2px rgba(0,0,0,0.9);`;
-  hitmarkerEl.appendChild(tick);
-  hitmarkerTicks.push(tick);
-}
-app.appendChild(hitmarkerEl);
-let hitmarkerT = 0;
-let hitmarkerKill = false;
-const HITMARKER_TIME = 0.4;
-const damageNumbers = new DamageNumbers(app);
-const pvpSlamEl = document.createElement('div');
-pvpSlamEl.className = 'pvp-slam';
-pvpSlamEl.setAttribute('role', 'status');
-app.appendChild(pvpSlamEl);
-const killBanner = new KillBanner(pvpSlamEl);
-const killChipEl = document.createElement('div');
-killChipEl.className = 'pvp-killchip';
-app.appendChild(killChipEl);
-let killChipT = 0;
-let hurtPulse = 0;
-let heartbeatTimer = 0;
-const hurtVignetteEl = document.getElementById('hurt-vignette') as HTMLDivElement;
-const dmgArcWrap = document.createElement('div');
-dmgArcWrap.style.cssText = 'position:absolute;left:50%;top:50%;width:300px;height:300px;margin:-150px 0 0 -150px;z-index:11;pointer-events:none;';
-app.appendChild(dmgArcWrap);
-interface DamageArc { el: HTMLDivElement; x: number; z: number; t: number }
-const dmgArcs: DamageArc[] = [];
-const DMG_ARC_TIME = 1.6;
+const combat = new CombatPresenter(app, audio, comfort);
+const damageNumbers = combat.numbers;
+const killBanner = combat.banner;
 let encounterShakeTime = 0;
 let encounterShakeStrength = 0;
 let fovPunch = 0;
 
 function triggerShake(duration: number, strength: number): void {
-  if (accessibility.reducedMotion || accessibility.photosensitivitySafe || accessibility.cameraShake <= 0) return;
+  if (comfort.reducedMotion || comfort.photosensitivitySafe || comfort.cameraShake <= 0) return;
   encounterShakeTime = Math.max(encounterShakeTime, duration);
-  encounterShakeStrength = Math.max(encounterShakeStrength, strength * accessibility.cameraShake);
+  encounterShakeStrength = Math.max(encounterShakeStrength, strength * comfort.cameraShake);
 }
 function updateShake(dt: number): void {
-  if (encounterShakeTime <= 0 || accessibility.reducedMotion) return;
+  if (comfort.reducedMotion || comfort.photosensitivitySafe || comfort.cameraShake <= 0) {
+    encounterShakeTime = 0; encounterShakeStrength = 0; return;
+  }
+  if (encounterShakeTime <= 0) return;
   encounterShakeTime = Math.max(0, encounterShakeTime - dt);
   const fade = Math.min(1, encounterShakeTime * 4);
   const x = Math.sin(worldTimeLocal * 79) * encounterShakeStrength * fade;
@@ -1015,25 +891,14 @@ function updateShake(dt: number): void {
   encounterShakeStrength *= Math.pow(0.08, dt);
 }
 
-function showHitmarker(amount: number, killed: boolean, silent = false): void {
-  hitmarkerT = HITMARKER_TIME;
-  hitmarkerKill = killed;
-  const color = killed ? '#ff5555' : amount > 0 ? '#ffffff' : '#9fb4c7';
-  for (const tick of hitmarkerTicks) {
-    tick.style.background = color;
-    tick.style.width = killed ? '16px' : '11px';
-    tick.style.boxShadow = killed ? '0 0 6px rgba(255,60,80,.9), 0 0 2px rgba(0,0,0,.9)' : '0 0 2px rgba(0,0,0,0.9)';
-  }
-  if (!silent) audio.hitmarker(killed, amount <= 0);
-}
 function showPvpHit(targetId: number, amount: number, killed: boolean): void {
   // Bedwars sounds like Minecraft: the hit is a thud on the victim, not a UI blip.
   if (match?.kind === 'bw') {
     const r = net.remotes.get(targetId);
-    showHitmarker(amount, killed, true);
+    combat.hit(amount, killed, true);
     audio.axeContact(false, r ? new THREE.Vector3(r.tx, r.ty + 1, r.tz) : undefined);
     if (killed) audio.hitmarker(true);
-  } else showHitmarker(amount, killed);
+  } else combat.hit(amount, killed);
   const flavor: HitFlavor = hitFlavor(amount, killed, arenaMaxHealth);
   const remote = net.remotes.get(targetId);
   if (remote) {
@@ -1048,66 +913,8 @@ function showPvpHit(targetId: number, amount: number, killed: boolean): void {
   if (flavor !== 'soak') triggerShake(killed ? 0.14 : 0.06, killed ? 0.019 : 0.0035 + Math.min(0.007, amount * 0.0005));
   if (killed) {
     const victim = net.remotes.get(targetId)?.info.username ?? 'Opponent';
-    if (duelAnnounceEl.classList.contains('visible')) return;
-    killChipEl.innerHTML = '';
-    killChipEl.textContent = `✖ ELIMINATED ${victim}`;
-    killChipEl.classList.remove('visible');
-    void killChipEl.offsetWidth;
-    killChipEl.style.opacity = '1';
-    killChipEl.classList.add('visible');
-    killChipT = 2.2;
-  }
-}
-function showDamageFrom(x: number, z: number): void {
-  for (const arc of dmgArcs) {
-    if (Math.hypot(arc.x - x, arc.z - z) < 4) { arc.x = x; arc.z = z; arc.t = DMG_ARC_TIME; return; }
-  }
-  if (dmgArcs.length >= 4) dmgArcs.shift()?.el.remove();
-  const el = document.createElement('div');
-  el.style.cssText = 'position:absolute;inset:0;';
-  const wedge = document.createElement('div');
-  wedge.style.cssText = 'position:absolute;left:50%;top:6px;width:74px;height:26px;margin-left:-37px;'
-    + 'background:linear-gradient(to bottom,rgba(255,52,52,0.95),rgba(255,52,52,0));clip-path:polygon(50% 0,100% 100%,0 100%);';
-  el.appendChild(wedge);
-  dmgArcWrap.appendChild(el);
-  dmgArcs.push({ el, x, z, t: DMG_ARC_TIME });
-}
-function updateCombatFeedback(dt: number): void {
-  if (hitmarkerT > 0) {
-    hitmarkerT = Math.max(0, hitmarkerT - dt);
-    const k = hitmarkerT / HITMARKER_TIME;
-    hitmarkerEl.style.opacity = String(Math.min(1, k * 2.2));
-    const scale = (hitmarkerKill ? 1.75 : 1.35) - 0.35 * Math.min(1, k * 1.6);
-    const spin = hitmarkerKill ? k * 26 : 0;
-    hitmarkerEl.style.transform = `rotate(${spin.toFixed(1)}deg) scale(${scale.toFixed(3)})`;
-  } else if (hitmarkerEl.style.opacity !== '0') hitmarkerEl.style.opacity = '0';
-  if (killChipT > 0) {
-    killChipT = Math.max(0, killChipT - dt);
-    if (killChipT <= 0) killChipEl.classList.remove('visible');
-    else killChipEl.style.opacity = String(Math.min(1, killChipT / 0.45));
-  }
-  killBanner.update(dt);
-  hurtPulse = Math.max(0, hurtPulse - dt * 2.4);
-  const healthFrac = player.maxHealth > 0 ? player.health / player.maxHealth : 1;
-  const critical = match && !duelSpectating && healthFrac < 0.32
-    ? (1 - healthFrac / 0.32) * (accessibility.reducedMotion ? 0.3 : 0.24 + Math.sin(worldTimeLocal * 5.4) * 0.07) : 0;
-  const cap = accessibility.photosensitivitySafe ? 0.24 : 0.62;
-  hurtVignetteEl.style.opacity = String(Math.min(cap, hurtPulse * 0.62 + critical));
-  if (critical > 0 && screen !== 'title' && match?.kind !== 'bw') {
-    const urgency = Math.min(1, 1 - healthFrac / 0.32);
-    heartbeatTimer -= dt;
-    if (heartbeatTimer <= 0) { audio.heartbeat(urgency); heartbeatTimer = 1.15 - urgency * 0.45; }
-  } else heartbeatTimer = 0;
-  if (!dmgArcs.length) return;
-  const fx = -Math.sin(player.yaw), fz = -Math.cos(player.yaw);
-  const rx = Math.cos(player.yaw), rz = -Math.sin(player.yaw);
-  for (let i = dmgArcs.length - 1; i >= 0; i--) {
-    const arc = dmgArcs[i];
-    arc.t -= dt;
-    if (arc.t <= 0) { arc.el.remove(); dmgArcs.splice(i, 1); continue; }
-    const dx = arc.x - player.pos.x, dz = arc.z - player.pos.z;
-    arc.el.style.transform = `rotate(${Math.atan2(dx * rx + dz * rz, dx * fx + dz * fz)}rad)`;
-    arc.el.style.opacity = String(Math.min(1, arc.t / (DMG_ARC_TIME * 0.6)));
+    if (duelUI.announced) return;
+    combat.eliminated(victim);
   }
 }
 
@@ -1116,10 +923,10 @@ net.onHurt = (health, k, by) => {
   player.setHealthFromServer(health, false);
   if (match?.kind === 'bw') player.applyKnockback(k[0], k[1], k[2]);
   else { player.vel.x += k[0] * 6; player.vel.y += k[1] * 6; player.vel.z += k[2] * 6; }
-  hurtPulse = Math.min(1, Math.max(hurtPulse, 0.34 + bite / 13));
+  combat.hurt(bite);
   triggerShake(0.13, Math.min(0.05, 0.006 + bite * 0.0016));
   const attacker = net.remotes.get(by);
-  if (attacker && by !== net.myId) showDamageFrom(attacker.tx, attacker.tz);
+  if (attacker && by !== net.myId) combat.damageFrom(attacker.tx, attacker.tz);
 };
 net.onHitConfirm = (target, amount, killed, crit) => {
   showPvpHit(target, amount, killed);
@@ -1140,7 +947,7 @@ net.onShot = (id, item, x, y, z, dx, dy, dz) => {
   audio.gun(origin);
   remotePlayers.muzzleFlash(id);
 };
-net.onKillfeed = (killer, victim) => { if (match?.kind === 'duel') pushDuelKill(killer, victim); };
+net.onKillfeed = (killer, victim) => { if (match?.kind === 'duel') duelUI.kill(killer, victim); };
 
 // ── Guns (Duels' Burst Rifle) ──────────────────────────────────────────────
 
@@ -1157,6 +964,26 @@ let speedFov = 0;
 let zoomTarget = ZOOM_DEFAULT;
 let zoomAmount = 1;
 let fovNoZoom = FOV;
+
+/** Interrupt local channels, never already-launched projectiles or server state. */
+function cancelPendingActions(): void {
+  burstRemaining = 0; burstTimer = 0; burstStack = null; burstGun = null;
+  reloadTimer = 0; reloadDuration = 0; reloadingStack = null; aimZoom = 1;
+  cancelHealUse();
+  bwBowAt = 0;
+  held.setBowDraw(0);
+}
+
+function resetMatchPresentation(): void {
+  cancelPendingActions();
+  fireCooldown = 0; bouncePadReadyAt = 0;
+  duelUI.reset(); combat.reset(); healing.reset();
+  encounterShakeTime = 0; encounterShakeStrength = 0; fovPunch = 0;
+  player.damageFlash = 0;
+  (document.getElementById('damage-flash') as HTMLDivElement).style.opacity = '0';
+  bridgeRemoteFx.clear(); bridgeFxEl.className = '';
+  axeIndicatorEl.style.display = 'none';
+}
 
 function fireVolley(stack: ItemStack, gun: GunInfo): boolean {
   const loaded = stack.loaded ?? gun.mag;
@@ -1193,24 +1020,7 @@ function reloadGun(): void {
 
 // ── Healing (Duels medkit) ─────────────────────────────────────────────────
 
-const useBarEl = document.getElementById('use-bar') as HTMLDivElement;
-const useBarFill = useBarEl.querySelector('.use-fill') as HTMLDivElement;
-const useBarLabel = useBarEl.querySelector('.use-label') as HTMLDivElement;
-const healGlowEl = document.getElementById('heal-glow') as HTMLDivElement;
-const heartsEl = document.getElementById('hearts') as HTMLCanvasElement;
-const healTallyEl = document.getElementById('heal-tally') as HTMLDivElement;
-const healBurstEl = document.getElementById('heal-burst') as HTMLDivElement;
-let healGlow = 0, healBuff = 0, heartsSqueeze = 0, healBeatCount = 0;
-let healTally = 0, healTallyFade = 0, healTickStep = 0, healSpiralT = 0, healPulseT = 0, useBarDoneT = 0;
-
-function renderHealTally(): void {
-  if (healTally <= 0) { healTallyEl.dataset.show = ''; return; }
-  healTallyEl.dataset.show = '1';
-  healTallyEl.textContent = `+${healTally}`;
-  healTallyEl.classList.remove('bump');
-  void healTallyEl.offsetWidth;
-  healTallyEl.classList.add('bump');
-}
+const healing = new HealingPresenter(audio, particles, comfort);
 function beginHealUse(): void {
   if (healUse.active) return;
   const stack = inventory.selectedStack;
@@ -1218,39 +1028,24 @@ function beginHealUse(): void {
   if (!stack || !heal) return;
   if (player.health >= player.maxHealth) { toast("You're already at full health!", 1600); return; }
   healUse.start(stack.id, inventory.selected);
-  healBeatCount = 0;
-  useBarDoneT = 0;
-  audio.healStart();
-  useBarEl.classList.remove('done');
+  healing.begin();
   held.swing();
 }
 function cancelHealUse(): void {
   if (!healUse.active) return;
   healUse.cancel();
-  audio.healCancel();
+  healing.cancel();
 }
 function finishHealUse(id: number): void {
   const heal = ITEMS[id]?.heal;
   if (!heal || inventory.selectedStack?.id !== id) return;
   inventory.consumeSelected(1);
   net.sendUseHeal(id);
-  audio.heal();
-  healBuff = heal.duration;
-  healTally = 0; healTickStep = 0; healTallyFade = 0;
-  healGlow = 1;
-  heartsSqueeze = 0.3;
-  useBarDoneT = 0.42;
-  useBarEl.classList.add('done');
+  healing.finish(heal.duration);
   particles.heal(player.pos.x, player.pos.y + 1, player.pos.z, 30);
   particles.healRing(player.pos.x, player.pos.y + 0.9, player.pos.z);
-  fovPunch = accessibility.reducedMotion ? 0 : 7;
+  fovPunch = comfort.reducedMotion ? 0 : 7;
   triggerShake(0.18, 0.05);
-  if (!accessibility.photosensitivitySafe) {
-    healBurstEl.classList.remove('go');
-    void healBurstEl.offsetWidth;
-    healBurstEl.classList.add('go');
-  }
-  healSpiralT = 0; healPulseT = 0.9;
 }
 function updateHealFeel(dt: number, active: boolean): void {
   if (healUse.active) {
@@ -1259,56 +1054,18 @@ function updateHealFeel(dt: number, active: boolean): void {
     else {
       const step = healUse.tick(dt);
       for (let i = 0; i < step.beats; i++) {
-        audio.healBeat(healBeatCount++);
-        particles.heal(player.pos.x, player.pos.y + 1.1, player.pos.z, 5);
-        useBarEl.classList.remove('beat');
-        void useBarEl.offsetWidth;
-        useBarEl.classList.add('beat');
+        healing.beat(player.pos.x, player.pos.y, player.pos.z);
       }
       if (step.done) finishHealUse(step.item);
     }
   }
-  useBarDoneT = Math.max(0, useBarDoneT - dt);
-  if (healUse.active) {
-    useBarEl.style.display = 'block';
-    useBarFill.style.width = `${(healUse.progress * 100).toFixed(1)}%`;
-    const name = (ITEMS[healUse.itemId]?.name ?? 'Applying').toUpperCase();
-    useBarLabel.textContent = `${name} · ${Math.max(0, healUse.duration - healUse.elapsed).toFixed(1)}s`;
-  } else if (useBarDoneT > 0) {
-    useBarFill.style.width = '100%';
-    useBarLabel.textContent = 'STIM IN — REGENERATING';
-  } else {
-    useBarEl.style.display = 'none';
-    useBarEl.classList.remove('done');
-  }
-  if (healBuff > 0) {
-    healSpiralT -= dt;
-    if (healSpiralT <= 0) { healSpiralT = 0.09; particles.healSpiral(player.pos.x, player.pos.y + 0.15, player.pos.z, worldTimeLocal * 5.5); }
-    healPulseT -= dt;
-    if (healPulseT <= 0) { healPulseT = 0.95 + (1 - healBuff / 8) * 0.5; audio.healPulse(1 - healBuff / 8); }
-  }
+  healing.update(dt, { active: healUse.active, progress: healUse.progress,
+    remaining: healUse.duration - healUse.elapsed, name: ITEMS[healUse.itemId]?.name ?? 'Applying',
+    x: player.pos.x, y: player.pos.y, z: player.pos.z, time: worldTimeLocal });
   fovPunch = Math.max(0, fovPunch - dt * 18);
-  if (healBuff <= 0 && healTally > 0) {
-    healTallyFade += dt;
-    if (healTallyFade > 1.4) { healTally = 0; healTallyEl.dataset.show = ''; }
-  }
-  if (healBuff > 0) {
-    healBuff = Math.max(0, healBuff - dt);
-    const breathe = accessibility.reducedMotion ? 0.5 : 0.5 + Math.sin(worldTimeLocal * 3.2) * 0.18;
-    healGlow = Math.max(healGlow - dt * 1.6, 0.26 * breathe);
-  } else healGlow = Math.max(0, healGlow - dt * 1.8);
-  healGlowEl.style.opacity = String(Math.min(accessibility.photosensitivitySafe ? 0.22 : 0.5, healGlow * 0.55));
-  heartsSqueeze = Math.max(0, heartsSqueeze - dt);
-  heartsEl.style.transform = heartsSqueeze > 0 && !accessibility.reducedMotion ? 'scale(1.14)' : 'scale(1)';
 }
 function onHealthRestored(amount: number): void {
-  if (healBuff <= 0 || amount <= 0) return;
-  healTally += amount;
-  renderHealTally();
-  audio.healTick(healTickStep++);
-  healGlow = Math.min(1, healGlow + 0.22);
-  heartsSqueeze = 0.16;
-  particles.heal(player.pos.x, player.pos.y + 1, player.pos.z, 4);
+  healing.restored(amount, player.pos.x, player.pos.y, player.pos.z);
 }
 
 /** Duels' Bounce Pad: a single-use ~20-block launch straight up. */
@@ -1338,363 +1095,23 @@ function useBouncePad(): void {
 
 let duelSnapshot: DuelLobbySnapshot | null = null;
 let duelActiveBounds: DuelArenaBounds | null = null;
-let duelCountdownEndsAt = 0;
 let duelRespawnAt = 0;
 let duelSpectating = false;
-let duelClockServer = 0;
-let duelClockLocal = performance.now();
-let duelLastCountdownCue = -1;
-let duelLastLeaderKey = '';
-let duelFinalThirtyPlayed = false;
-let duelSuddenDeathPlayed = false;
-let duelFightPlayed = false;
-let duelFightCueUntil = 0;
-let duelResultData: DuelResult | null = null;
-let duelScoresHeld = false;
-let duelFeedSeen = 0;
-let duelAnnounceUntil = 0;
-const duelLastKills = new Map<number, number>();
+const duelUI = new DuelsPresenter(app, audio, comfort,
+  () => ({ id: net.myId, party: !!myParty && myParty.members.length > 1, follower: followerInParty() }),
+  { replay: () => net.send({ t: 'play', mode: 'duels' }), leave: () => net.send({ t: 'leaveMatch' }) });
 
-const duelMatchHud = document.createElement('div');
-duelMatchHud.className = 'duel-match-hud';
-const duelClockEl = document.createElement('div'); duelClockEl.className = 'duel-clock';
-const duelClockLabel = document.createElement('small'); duelClockLabel.textContent = 'Round';
-const duelTimeEl = document.createElement('strong'); duelTimeEl.textContent = '5:00';
-const duelClockBar = document.createElement('div'); duelClockBar.className = 'duel-clock-bar';
-const duelClockBarFill = document.createElement('i'); duelClockBar.appendChild(duelClockBarFill);
-duelClockEl.append(duelClockLabel, duelTimeEl, duelClockBar);
-const duelPillsEl = document.createElement('div'); duelPillsEl.className = 'duel-score-pills';
-duelMatchHud.append(duelClockEl, duelPillsEl);
-app.appendChild(duelMatchHud);
-const duelCenterCue = document.createElement('div');
-duelCenterCue.className = 'duel-center-cue';
-app.appendChild(duelCenterCue);
-const duelAnnounceEl = document.createElement('div');
-duelAnnounceEl.className = 'duel-announce';
-duelAnnounceEl.setAttribute('role', 'status');
-duelAnnounceEl.setAttribute('aria-live', 'polite');
-const duelAnnounceTitle = document.createElement('b');
-const duelAnnounceSub = document.createElement('small');
-duelAnnounceEl.append(duelAnnounceTitle, duelAnnounceSub);
-app.appendChild(duelAnnounceEl);
-const duelKillFeedEl = document.createElement('div');
-duelKillFeedEl.className = 'duel-killfeed';
-duelKillFeedEl.setAttribute('aria-hidden', 'true');
-app.appendChild(duelKillFeedEl);
-const duelScoreboard = document.createElement('div');
-duelScoreboard.className = 'duel-scoreboard';
-const duelScorePanel = document.createElement('div'); duelScorePanel.className = 'duel-score-panel';
-duelScoreboard.appendChild(duelScorePanel); app.appendChild(duelScoreboard);
-const duelScoresTouch = document.createElement('button');
-duelScoresTouch.className = 'duel-scores-touch'; duelScoresTouch.type = 'button';
-duelScoresTouch.textContent = 'Scores';
-app.appendChild(duelScoresTouch);
-const duelResultEl = document.createElement('div'); duelResultEl.className = 'duel-result';
-duelResultEl.setAttribute('role', 'dialog'); duelResultEl.setAttribute('aria-modal', 'true');
-duelResultEl.setAttribute('aria-label', 'Duels match result');
-duelResultEl.style.setProperty('--rank', '#e3a12a');
-duelResultEl.style.setProperty('--rank-accent', '#ffd272');
-duelResultEl.style.setProperty('--rank-shade', '#9e6912');
-const duelResultCard = document.createElement('div'); duelResultCard.className = 'duel-result-card';
-duelResultEl.appendChild(duelResultCard); app.appendChild(duelResultEl);
-
-const DUEL_EVENT_COLORS: Record<DuelEventKind, string> = {
-  first_blood: '#ff6d80', double_kill: '#7fd3f5', triple_kill: '#5ad0ff', quad_kill: '#a273f7',
-  spree: '#ffd45e', rampage: '#ff9a3c', unstoppable: '#ff5f76', godlike: '#ff4f6e',
-  shutdown: '#55e8a6', revenge: '#c08cff', match_point: '#ffe6a4',
-};
-
-function duelNow(): number { return duelClockServer + (performance.now() - duelClockLocal); }
-function syncDuelClock(serverNow: number): void { duelClockServer = serverNow; duelClockLocal = performance.now(); }
-function formatDuelTime(ms: number): string {
-  const seconds = Math.max(0, Math.ceil(ms / 1000));
-  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
-}
-function duelStatus(p: DuelParticipant): string {
-  if (!p.connected) return 'Left';
-  if (p.spectating && p.respawnAt) return 'Respawning';
-  if (p.spectating) return 'Watching';
-  return p.alive ? 'Alive' : 'Respawning';
-}
-function pushDuelFeedRow(title: string, sub: string, color: string): void {
-  const row = document.createElement('div');
-  row.style.setProperty('--feed', color);
-  const tag = document.createElement('b'); tag.textContent = title;
-  const text = document.createElement('span'); text.textContent = sub;
-  row.append(tag, text);
-  duelKillFeedEl.appendChild(row);
-  while (duelKillFeedEl.childElementCount > 3) duelKillFeedEl.firstElementChild!.remove();
-  window.setTimeout(() => row.remove(), 3_800);
-}
-function pushDuelKill(killer: string, victim: string): void { pushDuelFeedRow(killer || 'ELIMINATED', victim, '#9fb6cc'); }
-function playDuelFeed(feed: DuelEvent[]): void {
-  if (!match) { duelFeedSeen = Math.max(duelFeedSeen, ...feed.map((e) => e.seq), 0); return; }
-  const fresh = feed.filter((event) => event.seq > duelFeedSeen).sort((a, b) => a.seq - b.seq);
-  if (!fresh.length) return;
-  duelFeedSeen = fresh[fresh.length - 1].seq;
-  for (const event of fresh) {
-    if (event.actor === net.myId || event.victim === net.myId) continue;
-    const copy = duelEventCopy(event);
-    pushDuelFeedRow(copy.title, copy.sub, DUEL_EVENT_COLORS[event.kind]);
-  }
-  const mine = fresh.filter((event) => event.actor === net.myId || event.victim === net.myId);
-  if (!mine.length) return;
-  const headline = mine[mine.length - 1];
-  const copy = duelEventCopy(headline);
-  duelAnnounceEl.style.setProperty('--announce', DUEL_EVENT_COLORS[headline.kind]);
-  duelAnnounceTitle.textContent = copy.title;
-  duelAnnounceSub.textContent = copy.sub;
-  duelAnnounceEl.classList.remove('visible', 'out');
-  void duelAnnounceEl.offsetWidth;
-  duelAnnounceEl.classList.add('visible');
-  duelAnnounceUntil = duelNow() + 2_200;
-  audio.duelAnnounce(headline.kind);
-}
-function updateDuelAnnounce(now: number): void {
-  if (!duelAnnounceEl.classList.contains('visible') || now < duelAnnounceUntil) return;
-  if (!duelAnnounceEl.classList.contains('out')) { duelAnnounceEl.classList.add('out'); duelAnnounceUntil = now + 400; return; }
-  duelAnnounceEl.classList.remove('visible', 'out');
-}
-function duelScoreRows(players: DuelParticipant[]): HTMLElement {
-  const rows = document.createElement('div');
-  const head = document.createElement('div'); head.className = 'duel-score-row header';
-  for (const label of ['#', 'Player', 'Kills', 'Deaths', 'K/D']) {
-    const cell = document.createElement('span'); cell.textContent = label; head.appendChild(cell);
-  }
-  const statusHead = document.createElement('span'); statusHead.className = 'duel-score-status'; statusHead.textContent = 'Status';
-  head.appendChild(statusHead);
-  rows.appendChild(head);
-  const topKills = players[0]?.kills ?? 0;
-  players.forEach((p, index) => {
-    const row = document.createElement('div');
-    row.className = `duel-score-row${p.id === net.myId ? ' local' : ''}`;
-    const place = document.createElement('span'); place.textContent = String(index + 1);
-    const name = document.createElement('strong');
-    if (p.kills === topKills && topKills > 0) {
-      const mark = document.createElement('span'); mark.className = 'duel-leader-mark'; mark.innerHTML = iconSvg('diamond');
-      name.appendChild(mark);
-    }
-    const who = document.createElement('span'); who.textContent = p.username; name.appendChild(who);
-    if (p.spree >= 3) { const spree = document.createElement('span'); spree.className = 'duel-score-spree'; spree.textContent = `${p.spree}×`; name.appendChild(spree); }
-    const kills = document.createElement('span'); kills.className = 'duel-score-kills'; kills.textContent = String(p.kills);
-    const deaths = document.createElement('span'); deaths.textContent = String(p.deaths);
-    const kd = document.createElement('span'); kd.textContent = p.deaths === 0 ? p.kills.toFixed(1) : (p.kills / p.deaths).toFixed(2);
-    const status = document.createElement('span');
-    status.className = `duel-score-status ${p.alive ? 'duel-status-alive' : 'duel-status-out'}`;
-    status.textContent = duelStatus(p);
-    row.append(place, name, kills, deaths, kd, status);
-    rows.appendChild(row);
-  });
-  return rows;
-}
-function renderDuelScoreboard(): void {
-  const players = duelResultData?.scoreboard ?? duelSnapshot?.participants ?? [];
-  duelScorePanel.replaceChildren();
-  const head = document.createElement('div'); head.className = 'duel-score-head';
-  const title = document.createElement('div');
-  const kicker = document.createElement('small');
-  kicker.textContent = duelSnapshot?.phase === 'sudden_death' ? 'Sudden death' : 'Prism Colosseum';
-  const heading = document.createElement('h2'); heading.textContent = 'Scoreboard';
-  title.append(kicker, heading);
-  const hint = document.createElement('small');
-  hint.textContent = duelResultData ? 'Final' : `First to ${DUEL_SCORE_LIMIT}`;
-  head.append(title, hint);
-  duelScorePanel.append(head, duelScoreRows(players));
-}
-function setDuelScoresVisible(visible: boolean): void {
-  duelScoresHeld = visible;
-  duelScoreboard.classList.toggle('visible', visible && match?.kind === 'duel' && !duelResultData);
-  if (visible) renderDuelScoreboard();
-}
-window.addEventListener('keydown', (event) => {
-  if (event.key !== 'Tab' || match?.kind !== 'duel' || duelResultData) return;
-  event.preventDefault();
-  if (!event.repeat) setDuelScoresVisible(true);
-});
-window.addEventListener('keyup', (event) => {
-  if (event.key === 'Tab' && match?.kind === 'duel') { event.preventDefault(); setDuelScoresVisible(false); }
-});
-window.addEventListener('blur', () => setDuelScoresVisible(false));
-for (const type of ['pointerdown', 'touchstart'] as const) {
-  duelScoresTouch.addEventListener(type, (event) => { event.preventDefault(); setDuelScoresVisible(true); });
-}
-for (const type of ['pointerup', 'pointercancel', 'touchend', 'touchcancel'] as const) {
-  duelScoresTouch.addEventListener(type, (event) => { event.preventDefault(); setDuelScoresVisible(false); });
-}
-
+function duelNow(): number { return duelUI.now(); }
 /** Am I in a party whose leader is somebody else? Then "play again" is theirs. */
 function followerInParty(): boolean {
   return !!myParty && myParty.members.length > 1 && myParty.leader !== net.myId;
 }
-function resultButtons(mode: GameMode): HTMLElement {
-  const controls = document.createElement('div');
-  controls.className = 'duel-result-controls';
-  const again = document.createElement('button'); again.type = 'button'; again.className = 'primary';
-  const menu = document.createElement('button'); menu.type = 'button'; menu.textContent = 'Menu';
-  if (followerInParty()) {
-    again.textContent = 'Waiting for the leader';
-    again.disabled = true;
-  } else {
-    again.textContent = myParty && myParty.members.length > 1 ? 'Play again with party' : 'Play again';
-    again.addEventListener('click', () => { again.disabled = true; menu.disabled = true; net.send({ t: 'play', mode }); });
-  }
-  menu.addEventListener('click', () => { again.disabled = true; menu.disabled = true; net.send({ t: 'leaveMatch' }); });
-  controls.append(again, menu);
-  return controls;
-}
-function duelResultRecap(result: DuelResult): string[] {
-  const chips: string[] = [];
-  const best = [...result.scoreboard].sort((a, b) => b.bestSpree - a.bestSpree)[0];
-  if (best && best.bestSpree >= 3) chips.push(`Best spree · ${best.username} ×${best.bestSpree}`);
-  const firstBlood = result.feed.find((event) => event.kind === 'first_blood');
-  if (firstBlood) chips.push(`First blood · ${firstBlood.actorName}`);
-  chips.push(`${result.scoreboard.reduce((sum, p) => sum + p.kills, 0)} total kills`);
-  return chips;
-}
-function renderDuelResult(result: DuelResult): void {
-  duelResultData = result;
-  screen = 'results';
-  input.unlock();
-  pauseEl.style.display = 'none';
-  duelAnnounceEl.classList.remove('visible', 'out');
-  duelKillFeedEl.replaceChildren();
-  const winner = result.scoreboard.find((p) => p.id === result.winner);
-  const mine = result.winner === net.myId;
-  audio.duelCue(mine ? 'victory' : 'defeat');
-  duelResultCard.replaceChildren();
-  const kicker = document.createElement('div'); kicker.className = 'duel-result-kicker';
-  kicker.textContent = mine ? 'Victory' : result.winner === null ? 'Match complete' : 'Defeat';
-  const title = document.createElement('h2');
-  title.textContent = winner ? (mine ? 'You win' : `${winner.username} wins`) : 'No winner';
-  const summary = document.createElement('p'); summary.className = 'duel-result-summary';
-  const reasonText: Record<DuelResult['finishReason'], string> = {
-    time: 'full time', score: `score limit — ${DUEL_SCORE_LIMIT} kills`,
-    sudden_death: 'sudden death', forfeit: 'opponent left', cancelled: 'the arena could not load for everyone',
-  };
-  summary.textContent = `${formatDuelTime(result.durationMs)} · ${reasonText[result.finishReason]}`;
-  const recap = document.createElement('div'); recap.className = 'duel-result-recap';
-  for (const text of duelResultRecap(result)) { const chip = document.createElement('span'); chip.textContent = text; recap.appendChild(chip); }
-  const scores = document.createElement('div'); scores.className = 'duel-result-score';
-  scores.appendChild(duelScoreRows(result.scoreboard));
-  const controls = resultButtons('duels');
-  duelResultCard.append(kicker, title, summary, recap, scores, controls);
-  duelResultEl.classList.add('visible');
-  duelScoreboard.classList.remove('visible');
-  requestAnimationFrame(() => controls.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus());
-}
 
-let duelPillNodes = new Map<number, { root: HTMLElement; score: HTMLElement }>();
-let duelPillKey = '';
-function renderDuelPills(board: DuelParticipant[]): void {
-  const key = board.map((p) => p.id).join(',');
-  if (key !== duelPillKey) {
-    duelPillKey = key;
-    duelPillNodes = new Map();
-    duelPillsEl.replaceChildren();
-    for (const p of board) {
-      const pill = document.createElement('div'); pill.className = 'duel-pill';
-      const swatch = document.createElement('i');
-      const c = new THREE.Color().setHSL((p.skin % 360) / 360, 0.55, 0.55);
-      swatch.style.background = `#${c.getHexString()}`;
-      const name = document.createElement('span'); name.textContent = p.username;
-      const score = document.createElement('b');
-      pill.append(swatch, name, score);
-      duelPillsEl.appendChild(pill);
-      duelPillNodes.set(p.id, { root: pill, score });
-    }
-  }
-  const topKills = Math.max(0, ...board.map((p) => p.kills));
-  for (const p of board) {
-    const node = duelPillNodes.get(p.id);
-    if (!node) continue;
-    node.score.textContent = String(p.kills);
-    node.root.classList.toggle('me', p.id === net.myId);
-    node.root.classList.toggle('leader', p.kills === topKills && topKills > 0);
-    node.root.classList.toggle('down', !p.alive || !p.connected);
-    if ((duelLastKills.get(p.id) ?? p.kills) !== p.kills) {
-      node.root.classList.remove('bump');
-      void node.root.offsetWidth;
-      if (!accessibility.reducedMotion) node.root.classList.add('bump');
-    }
-    duelLastKills.set(p.id, p.kills);
-  }
-}
-let duelCueText = '';
-function setDuelCue(text: string, tone: '' | 'go' | 'danger' = ''): void {
-  if (text === duelCueText) return;
-  duelCueText = text;
-  duelCenterCue.textContent = text;
-  duelCenterCue.style.display = text ? 'block' : 'none';
-  duelCenterCue.className = 'duel-center-cue';
-  if (!text) return;
-  if (text.length > 2) duelCenterCue.classList.add('text');
-  if (tone) duelCenterCue.classList.add(tone);
-  if (!accessibility.reducedMotion) { void duelCenterCue.offsetWidth; duelCenterCue.classList.add('slam'); }
-}
-function updateDuelHud(): void {
-  if (match?.kind !== 'duel' || !duelSnapshot) {
-    duelMatchHud.classList.remove('visible'); duelScoresTouch.classList.remove('visible');
-    if (duelCueText) setDuelCue('');
-    return;
-  }
-  duelMatchHud.classList.add('visible'); duelScoresTouch.classList.add('visible');
-  const now = duelNow();
-  const board = duelSnapshot.participants;
-  renderDuelPills(board);
-  updateDuelAnnounce(now);
-  const topKills = Math.max(0, ...board.map((p) => p.kills));
-  const leaderKey = board.filter((p) => p.kills === topKills).map((p) => p.id).join(',');
-  if (duelSnapshot.phase === 'running' && duelLastLeaderKey && topKills > 0 && leaderKey && leaderKey !== duelLastLeaderKey) audio.duelCue('lead');
-  duelLastLeaderKey = leaderKey;
-  duelClockEl.classList.remove('warn', 'critical', 'sudden');
-  if (duelSnapshot.phase === 'sudden_death') {
-    duelClockLabel.textContent = 'Next kill wins';
-    duelTimeEl.textContent = 'SUDDEN DEATH';
-    duelClockEl.classList.add('sudden');
-    duelClockBarFill.style.transform = 'scaleX(1)';
-  } else {
-    const endsAt = duelSnapshot.endsAt ?? (duelSnapshot.startedAt ?? now) + DUEL_ROUND_MS;
-    const remaining = endsAt - now;
-    duelClockLabel.textContent = `First to ${DUEL_SCORE_LIMIT}`;
-    duelTimeEl.textContent = formatDuelTime(remaining);
-    duelClockBarFill.style.transform = `scaleX(${Math.max(0, Math.min(1, remaining / DUEL_ROUND_MS))})`;
-    if (remaining <= 30_000) duelClockEl.classList.add('critical');
-    else if (remaining <= 60_000) duelClockEl.classList.add('warn');
-    if (duelSnapshot.phase === 'running' && remaining <= 30_000 && remaining > 0 && !duelFinalThirtyPlayed) {
-      duelFinalThirtyPlayed = true; audio.duelCue('final30');
-    }
-  }
-  let cue = '', tone: '' | 'go' | 'danger' = '';
-  if (duelSnapshot.phase === 'countdown') {
-    const countdownAt = duelSnapshot.countdownEndsAt ?? duelCountdownEndsAt;
-    if (!countdownAt) cue = 'WAITING FOR PLAYERS';
-    else {
-      const number = Math.max(0, Math.ceil((countdownAt - now) / 1000));
-      cue = number > 0 ? String(number) : 'FIGHT';
-      if (number === 0) tone = 'go';
-      if (number !== duelLastCountdownCue) {
-        duelLastCountdownCue = number;
-        audio.duelCue(number > 0 ? 'countdown' : 'fight');
-        if (number === 0) { duelFightPlayed = true; duelFightCueUntil = now + 900; }
-      }
-    }
-  } else if (duelSpectating && duelRespawnAt > now) {
-    cue = `RESPAWN ${Math.ceil((duelRespawnAt - now) / 1000)}`;
-  } else if (duelSnapshot.phase === 'sudden_death') {
-    cue = 'SUDDEN DEATH'; tone = 'danger';
-    if (!duelSuddenDeathPlayed) { duelSuddenDeathPlayed = true; audio.duelCue('sudden'); }
-  } else if (duelSnapshot.phase === 'running') {
-    if (!duelFightPlayed) { duelFightPlayed = true; duelFightCueUntil = now + 900; audio.duelCue('fight'); }
-    if (now < duelFightCueUntil) { cue = 'FIGHT'; tone = 'go'; }
-  }
-  setDuelCue(duelAnnounceEl.classList.contains('visible') && cue.length > 2 ? '' : cue, tone);
-  if (duelScoresHeld) renderDuelScoreboard();
-}
 
 const duelRules = {
   canPlaceAt(x: number, y: number, z: number, heldId: number): boolean {
     const a = duelActiveBounds;
-    if (!a || (duelSnapshot?.phase !== 'running' && duelSnapshot?.phase !== 'sudden_death') || heldId !== Block.OakPlanks) return false;
+    if (!a || !canDuelAct(duelSnapshot?.phase ?? null, duelSnapshot?.participants.find(p => p.id === net.myId)) || heldId !== Block.OakPlanks) return false;
     const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
     if (bx < a.minX || bx >= a.maxX || bz < a.minZ || bz >= a.maxZ || by < a.floor || by >= a.ceiling - 1) return false;
     const groundY = a.floor + duelTerrainElevation(bx - a.minX, bz - a.minZ);
@@ -1702,7 +1119,7 @@ const duelRules = {
   },
   canEditAt(x: number, y: number, z: number, heldId: number): boolean {
     const a = duelActiveBounds;
-    if (!a || (duelSnapshot?.phase !== 'running' && duelSnapshot?.phase !== 'sudden_death')) return false;
+    if (!a || !canDuelAct(duelSnapshot?.phase ?? null, duelSnapshot?.participants.find(p => p.id === net.myId))) return false;
     const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
     if (bx < a.minX || bx >= a.maxX || bz < a.minZ || bz >= a.maxZ) return false;
     if (by <= a.floor + duelTerrainElevation(bx - a.minX, bz - a.minZ)) return false;
@@ -1721,49 +1138,39 @@ net.onDuelArena = (spec, arena, spawn, countdownEndsAt) => {
   arenaClampPos = (pos) => clampToDuelArena(pos, arena);
   world.setArenaRenderBounds({ minX: arena.originX, minZ: arena.originZ,
     maxX: arena.originX + DUEL_ARENA_SIZE, maxZ: arena.originZ + DUEL_ARENA_SIZE }, 0.8);
-  duelCountdownEndsAt = countdownEndsAt;
-  duelLastCountdownCue = -1; duelCueText = ''; duelLastLeaderKey = '';
-  duelFinalThirtyPlayed = false; duelSuddenDeathPlayed = false; duelFightPlayed = false; duelFightCueUntil = 0;
-  duelFeedSeen = 0;
-  duelLastKills.clear(); duelPillKey = '';
-  duelKillFeedEl.replaceChildren();
-  duelAnnounceEl.classList.remove('visible', 'out');
-  duelResultData = null;
-  duelResultEl.classList.remove('visible');
   duelSpectating = false;
   pgSnapshot = null; partyUI.setVisible(false);
   player.maxHealth = DUEL_MAX_HEALTH; player.health = DUEL_MAX_HEALTH; lastHealth = DUEL_MAX_HEALTH;
   player.yaw = spawn.x < arena.minX + (arena.maxX - arena.minX) / 2 ? -Math.PI * .75 : Math.PI * .75;
   enterMatchWorld(spec, 'duel', 'duels', spawn);
+  duelUI.enter(countdownEndsAt);
 };
 net.onDuelState = (snapshot) => {
   duelSnapshot = snapshot;
-  syncDuelClock(snapshot.serverNow);
-  if (snapshot.phase !== 'lobby') { playDuelFeed(snapshot.feed); if (duelScoresHeld) renderDuelScoreboard(); }
+  duelUI.setSnapshot(snapshot);
 };
 net.onDuelLoadout = (slots, selected) => {
   inventory.restore(slots, selected);
   arenaUnlimited = new Set<number>([Block.OakPlanks, Item.Bullet]);
-  fireCooldown = 0; reloadTimer = 0; burstRemaining = 0; healUse.cancel();
+  cancelPendingActions(); fireCooldown = 0;
 };
-net.onDuelClock = (serverNow) => syncDuelClock(serverNow);
+net.onDuelClock = (serverNow) => duelUI.syncClock(serverNow);
 net.onDuelRespawn = (respawnAt, spectating) => {
   duelRespawnAt = respawnAt; duelSpectating = spectating;
   if (spectating) {
-    damageNumbers.clear(); hurtPulse = 0;
-    burstRemaining = 0; burstStack = null; burstGun = null;
-    reloadTimer = 0; reloadingStack = null; aimZoom = 1; healUse.cancel();
+    damageNumbers.clear(); combat.clearHurt();
+    cancelPendingActions();
   }
   player.flying = spectating; player.noclip = spectating;
   if (!spectating) player.health = arenaMaxHealth;
 };
 net.onPgRespawn = (respawnAt, spectating) => {
   duelSpectating = spectating;
-  if (spectating) { held.setBowDraw(0); damageNumbers.clear(); hurtPulse = 0; bridgeDeathFx(respawnAt); }
+  if (spectating) { cancelPendingActions(); damageNumbers.clear(); combat.clearHurt(); bridgeDeathFx(respawnAt); }
   else bridgeFxEl.classList.remove('dead');
   player.flying = spectating; player.noclip = spectating;
 };
-net.onDuelResult = (result) => renderDuelResult(result);
+net.onDuelResult = (result) => { screens.results(); duelUI.result(result); };
 
 // ── The Bridge / Parkour ───────────────────────────────────────────────────
 
@@ -1784,7 +1191,7 @@ const axeLook = new THREE.Vector3();
 const bridgeFxEl = document.getElementById('bridge-fx') as HTMLDivElement;
 const bridgeFxTitle = bridgeFxEl.querySelector('.bfx-title b') as HTMLElement;
 const bridgeFxSub = bridgeFxEl.querySelector('.bfx-title small') as HTMLElement;
-const BRIDGE_TEAM_HEX = [0xff5f76, 0x5aa8ff];
+const BRIDGE_TEAM_HEX = BRIDGE_COLORS;
 let bridgeDeathRespawnAt = 0, bridgeDeathShown = -1;
 const bridgeRemoteFx = new Map<number, { dead: boolean; x: number; y: number; z: number }>();
 
@@ -1805,8 +1212,8 @@ function bridgeDeathFx(respawnAt: number): void {
   particles.deathBurst(player.pos.x, player.pos.y, player.pos.z, bridgeTeamColor(net.myId));
   audio.bridgeDeath(true);
   triggerShake(0.3, 0.05);
-  if (!accessibility.reducedMotion) fovPunch = Math.max(fovPunch, 6);
-  hurtPulse = 1;
+  if (!comfort.reducedMotion) fovPunch = Math.max(fovPunch, 6);
+  combat.fullPulse();
 }
 function bridgeRespawnFx(x: number, y: number, z: number): void {
   bridgeFxEl.classList.remove('dead', 'reborn');
@@ -1815,21 +1222,14 @@ function bridgeRespawnFx(x: number, y: number, z: number): void {
   particles.respawnBeam(x, y, z, bridgeTeamColor(net.myId));
   audio.bridgeRespawn(true);
   triggerShake(0.14, 0.02);
-  if (!accessibility.reducedMotion) fovPunch = Math.max(fovPunch, 5);
+  if (!comfort.reducedMotion) fovPunch = Math.max(fovPunch, 5);
 }
 function bridgeKillHealFx(gain: number): void {
   particles.killHeal(player.pos.x, player.pos.y, player.pos.z);
   audio.killHeal();
-  healGlow = 1;
-  heartsSqueeze = 0.6;
-  if (gain > 0) { healTally = gain; healTallyFade = 0; renderHealTally(); }
+  healing.refill(gain);
   triggerShake(0.16, 0.02);
-  if (!accessibility.reducedMotion) fovPunch = Math.max(fovPunch, 4);
-  if (!accessibility.photosensitivitySafe) {
-    healBurstEl.classList.remove('go');
-    void healBurstEl.offsetWidth;
-    healBurstEl.classList.add('go');
-  }
+  if (!comfort.reducedMotion) fovPunch = Math.max(fovPunch, 4);
 }
 function updateBridgeFx(): void {
   if (match?.kind !== 'pg' || pgSub?.game !== 'bridge') {
@@ -1865,7 +1265,8 @@ function pgCaged(): boolean {
   return !!s && s.mode === 'bridge' && s.goalResetAt !== undefined && pgNow() < s.goalResetAt;
 }
 function pgWeaponsActive(): boolean {
-  return match?.kind === 'pg' && pgSub?.game === 'bridge' && pgSnapshot?.phase === 'running' && !pgCaged();
+  return match?.kind === 'pg' && pgSub?.game === 'bridge' &&
+    canPartyAct(pgSnapshot, pgSnapshot?.participants.find(p => p.id === net.myId), pgNow());
 }
 
 partyUI.onReplay = () => net.send({ t: 'play', mode: pgSub?.game === 'parkour' ? 'parkour' : 'bridge' });
@@ -1877,7 +1278,7 @@ partyUI.onGo = () => {
   if (!sub || sub.game !== 'bridge') return;
   for (const team of [0, 1]) {
     const c = bridgeCageSpawn(sub, team, 0);
-    const color = team === 0 ? 0xff5f76 : 0x5aa8ff;
+    const color = BRIDGE_COLORS[team] ?? BRIDGE_COLORS[0];
     particles.burst(c.x, c.y + 1.2, c.z, 26, color, 6, 0.8, { gravity: 9, spread: 4.6, scale: 0.7 });
     particles.burst(c.x, c.y + 1.2, c.z, 10, 0xffffff, 4, 0.5, { gravity: 6, spread: 4, scale: 0.45 });
   }
@@ -1890,7 +1291,7 @@ partyUI.onGoal = (ours, team, matchPoint) => {
   if (!sub) return;
   const portal = BRIDGE_GOALS.find((g) => g.team !== team);
   if (!portal) return;
-  const color = team === 0 ? 0xff5f76 : 0x5aa8ff;
+  const color = BRIDGE_COLORS[team] ?? BRIDGE_COLORS[0];
   const x = sub.minX + (portal.minX + portal.maxX) / 2, z = sub.minZ + (portal.minZ + portal.maxZ) / 2;
   for (let i = 0; i < 5; i++) {
     const a = (i / 5) * Math.PI * 2;
@@ -1905,15 +1306,15 @@ partyUI.onGoal = (ours, team, matchPoint) => {
 
 /** Show the made-it / out card with a cursor to click it. */
 function parkourDoneCursor(): void {
-  if (match?.kind !== 'pg' || screen !== 'playing') return;
-  screen = 'results'; input.unlock(); pauseEl.style.display = 'none';
+  if (match?.kind !== 'pg' || screens.state !== 'playing') return;
+  screens.results();
 }
 partyUI.onWatch = () => { if (match?.kind === 'pg' && pgSnapshot?.phase === 'running') resumePlay(); };
 partyUI.onLifeLost = (cause, out) => {
   audio.lifeLost(out);
-  hurtPulse = 1;
+  combat.fullPulse();
   triggerShake(cause === 'fall' ? .2 : .4, cause === 'fall' ? .02 : .05);
-  if (!accessibility.reducedMotion) fovPunch = Math.max(fovPunch, 6);
+  if (!comfort.reducedMotion) fovPunch = Math.max(fovPunch, 6);
   if (out) parkourDoneCursor();
 };
 partyUI.onMadeIt = () => {
@@ -1944,7 +1345,7 @@ function updateDragon(dt: number, now: number): void {
   const s = pgSnapshot;
   if (!s || pgSub?.game !== 'parkour') return;
   const ev = dragonView.update(dt, now, s.round && s.phase === 'running' ? s.round.startedAt : null,
-    accessibility.reducedMotion);
+    comfort.reducedMotion);
   partyUI.dragonFront = dragonView.shownFront();
   const head = dragonView.headPosition(), dist = head.distanceTo(player.pos);
   if (ev.roar) { audio.dragonRoar(ev.roar); triggerShake(.6, .04); }
@@ -1960,17 +1361,18 @@ function updateDragon(dt: number, now: number): void {
 
 net.onPgArena = (spec, _arena, sub, team, spawn) => {
   pgSub = sub;
-  duelSnapshot = null; duelResultData = null; duelResultEl.classList.remove('visible');
+  duelSnapshot = null;
   arenaMaxHealth = PARTY_MAX_HEALTH; arenaHpPerHeart = 2;
   remotePlayers.maxHealth = PARTY_MAX_HEALTH;
   const wool = BRIDGE_TEAM_BLOCK[team] ?? Block.TeamWoolA;
   const bridge = sub.game === 'bridge';
-  arenaCanPlaceAt = (x, y, z, heldId) => pgSnapshot?.phase === 'running' && heldId === wool &&
+  arenaCanPlaceAt = (x, y, z, heldId) => canPartyAct(pgSnapshot, pgSnapshot?.participants.find(p => p.id === net.myId), pgNow()) && heldId === wool &&
     x >= sub.minX && x < sub.maxX && z >= sub.minZ && z < sub.maxZ &&
     y >= (bridge ? PARTY_VOID_Y : PARTY_FLOOR_Y - 3) && y < (bridge ? PARTY_FLOOR_Y + 16 : PARTY_CEILING_Y) &&
     !(bridge && bridgeGoalGuard(Math.floor(x) - sub.minX, Math.floor(z) - sub.minZ)) &&
     !(!bridge && parkourBuildBlocked(parkourCourse(sub.seed), Math.floor(x) - sub.minX, Math.floor(y), Math.floor(z) - sub.minZ));
   arenaCanEditAt = (x, y, z, heldId) => {
+    if (!canPartyAct(pgSnapshot, pgSnapshot?.participants.find(p => p.id === net.myId), pgNow())) return false;
     const block = world.getBlock(x, y, z);
     if (block === Block.TeamWoolA || block === Block.TeamWoolB) return x >= sub.minX && x < sub.maxX && z >= sub.minZ && z < sub.maxZ;
     return block === Block.Air && !!arenaCanPlaceAt?.(x, y, z, heldId);
@@ -1999,7 +1401,7 @@ net.onPgState = (snapshot) => {
   pgClockServer = snapshot.serverNow;
   pgClockLocal = performance.now();
   if (snapshot.phase === 'results' && match?.kind === 'pg') {
-    screen = 'results'; input.unlock(); pauseEl.style.display = 'none';
+    screens.results();
   }
   partyUI.replayLabel = followerInParty() ? '' : myParty && myParty.members.length > 1 ? 'Play again with party' : 'Play again';
   partyUI.setSnapshot(snapshot, net.myId);
@@ -2009,7 +1411,7 @@ net.onPgLoadout = (slots, selected) => {
   partySwingAt = -1e9; partyShotAt = -1e9;
   partyUI.bowReadyAt = 0;
   inventory.restore(slots, selected);
-  fireCooldown = 0; reloadTimer = 0; burstRemaining = 0; healUse.cancel();
+  cancelPendingActions(); fireCooldown = 0;
 };
 net.onPgHit = (target, amount, combo, _charge, crit, killed, ranged) => {
   showPvpHit(target, amount, killed);
@@ -2022,7 +1424,7 @@ net.onPgHit = (target, amount, combo, _charge, crit, killed, ranged) => {
     if (!predicted || crit) audio.axeHit(crit, at);
     if (!predicted) held.meleeImpact(crit); else if (crit) held.meleeImpact(true);
     if (at) particles.burst(at.x, at.y, at.z, crit ? 16 : 8, crit ? 0xffd25e : 0xd8edf5, crit ? 3 : 2, .25, { gravity: 4, spread: .3, scale: .25 });
-    if (crit && !accessibility.reducedMotion) fovPunch = Math.max(fovPunch, 3);
+    if (crit && !comfort.reducedMotion) fovPunch = Math.max(fovPunch, 3);
     if (crit || killed) triggerShake(0.12, crit ? 0.012 : 0.02);
   }
   if (!killed && (crit || combo > 0)) {
@@ -2042,13 +1444,13 @@ net.onPgArrowEnd = (id, x, y, z, hit) => {
   particles.burst(x, y, z, hit ? 8 : 4, hit ? 0xff8f9c : 0xd8cba4, hit ? 3 : 1.8, .3, { gravity: 6, spread: .3, scale: .32 });
 };
 net.onPgResult = () => {
-  if (match?.kind === 'pg') { screen = 'results'; input.unlock(); pauseEl.style.display = 'none'; }
+  if (match?.kind === 'pg') screens.results();
 };
 
 // ── Bedwars ────────────────────────────────────────────────────────────────
 
 net.onBwArena = (spec, team, spawn, yaw) => {
-  duelSnapshot = null; duelResultData = null; duelResultEl.classList.remove('visible');
+  duelSnapshot = null;
   pgSnapshot = null; pgSub = null; partyUI.setVisible(false); rsClient.exit();
   arenaMaxHealth = 20; arenaHpPerHeart = 2; remotePlayers.maxHealth = 20;
   arenaCanPlaceAt = null; arenaCanEditAt = null; arenaClampPos = null; arenaUnlimited = new Set();
@@ -2084,9 +1486,9 @@ net.onBwState = s => {
   player.flying = duelSpectating;
   player.noclip = duelSpectating;
 };
-net.onBwKit = slots => bwClient.setKit(slots);
+net.onBwKit = (slots, _selected, placement) => bwClient.setKit(slots, placement);
 net.onBwDrop = msg => bwClient.setDrops(msg);
-net.onBwNack = (x, y, z) => bwClient.nack(x, y, z);
+net.onBwNack = (x, y, z, prediction?: Parameters<BedwarsClient['nack']>[3]) => bwClient.nack(x, y, z, prediction);
 net.onBwProj = list => {
   for (const at of bwClient.setProjectiles(list)) {
     audio.fireballImpact(at, at.distanceTo(player.pos) < 12);
@@ -2100,14 +1502,14 @@ net.onBwBuyResult = (request, ok, message) => {
 };
 net.onBwResult = result => {
   if (match?.kind !== 'bw') return;
-  screen = 'results'; input.unlock(); pauseEl.style.display = 'none';
+  screens.results();
   bwClient.setResult(result);
   const team = result.players.find(p => p.id === net.myId)?.team;
   if (result.winner !== null) audio.duelCue(result.winner === team ? 'victory' : 'defeat');
 };
 let bwSelected = -1, bwSwingAt = 0, bwClickAt = 0, bwBowAt = 0, bwFlashAt = 0;
 window.addEventListener('keydown', e => {
-  if (match?.kind !== 'bw' || screen !== 'playing' || e.repeat || bwClient.panelOpen) return;
+  if (match?.kind !== 'bw' || screens.state !== 'playing' || e.repeat || bwClient.panelOpen) return;
   if (e.code === 'KeyE' && bwClient.interact()) e.preventDefault();
 });
 function updateBedwarsInput(look: THREE.Vector3, eye: THREE.Vector3): void {
@@ -2156,20 +1558,20 @@ function updateBedwarsInput(look: THREE.Vector3, eye: THREE.Vector3): void {
 // ── Rat and Seek ───────────────────────────────────────────────────────────
 
 net.onRsArena = (spec, role, spawn, yaw) => {
-  duelSnapshot = null; duelResultData = null; duelResultEl.classList.remove('visible');
+  duelSnapshot = null;
   pgSnapshot = null; pgSub = null; partyUI.setVisible(false);
   arenaMaxHealth = 20; arenaHpPerHeart = 2; remotePlayers.maxHealth = 20;
   arenaCanPlaceAt = null; arenaCanEditAt = null; arenaClampPos = null;
   arenaUnlimited = new Set();
   player.maxHealth = 20; player.health = 20; lastHealth = 20;
   player.yaw = yaw;
-  rsClient.enter(role);
   enterMatchWorld(spec, 'rs', 'ratseek', spawn);
+  rsClient.enter(role);
 };
 net.onRsState = (s) => {
   if (match?.kind !== 'rs') return;
   rsClient.onState(s);
-  if (!rsClient.canPickSeeker()) seekerPick?.abort();
+  if (!rsClient.canPickSeeker()) seekerPicker.hide();
 };
 net.onRsKit = (slots, selected) => inventory.restore(slots, selected ?? inventory.selected);
 net.onRsFx = (fx) => rsClient.applyFx(fx);
@@ -2299,7 +1701,7 @@ function updatePartyWeapon(heldId: number, lookDir: THREE.Vector3, eye: THREE.Ve
   net.sendPgShoot(lookDir.x, lookDir.y, lookDir.z, 1);
 }
 function updatePartyFrame(dt: number): void {
-  if (!pgWeaponsActive() || screen !== 'playing' ||
+  if (!pgWeaponsActive() || screens.state !== 'playing' ||
       (inventory.selectedStack?.id !== Item.BridgeBow && inventory.selectedStack?.id !== Item.IronAxe)) held.setBowDraw(0);
   if (match?.kind !== 'pg' || !pgSnapshot) {
     partyVisuals.updateArrows(dt);
@@ -2309,9 +1711,9 @@ function updatePartyFrame(dt: number): void {
   const now = pgNow();
   updateDragon(dt, now);
   partyUI.update(performance.now(), now);
-  partyVisuals.update(pgSnapshot, net.myId, now);
+  partyVisuals.update(pgSnapshot, net.myId, now, comfort.reducedMotion || comfort.photosensitivitySafe);
   partyVisuals.updateArrows(dt);
-  const show = pgWeaponsActive() && screen === 'playing' && view === View.First && inventory.selectedStack?.id === Item.IronAxe;
+  const show = pgWeaponsActive() && screens.state === 'playing' && view === View.First && inventory.selectedStack?.id === Item.IronAxe;
   axeIndicatorEl.style.display = show ? 'block' : 'none';
   if (!show) return;
   const ready = Math.min(1, (performance.now() - partySwingAt) / BRIDGE_MELEE_TIER.cooldownMs);
@@ -2323,10 +1725,10 @@ function updatePartyFrame(dt: number): void {
 
 /** Nothing the keyboard does counts while the match holds everybody still. */
 function controlBlocked(): boolean {
-  if (match?.kind === 'bw') return (bwClient.frozen && !bwClient.spectating) || bwClient.panelOpen || screen === 'results';
-  if (match?.kind === 'rs') return rsClient.frozen() || screen === 'results';
+  if (match?.kind === 'bw') return (bwClient.frozen && !bwClient.spectating) || bwClient.panelOpen || screens.state === 'results';
+  if (match?.kind === 'rs') return rsClient.frozen() || screens.state === 'results';
   if (match?.kind === 'pg') return pgSnapshot?.phase !== 'running' || pgCaged();
-  if (match?.kind === 'duel') return !duelSnapshot || duelSnapshot.phase === 'countdown' || duelSnapshot.phase === 'results' || screen === 'results';
+  if (match?.kind === 'duel') return !duelSnapshot || duelSnapshot.phase === 'countdown' || duelSnapshot.phase === 'results' || screens.state === 'results';
   return true;
 }
 
@@ -2337,7 +1739,7 @@ function updateCamera(): void {
   camera.position.copy(player.eyePosition);
   camera.rotation.set(player.pitch, player.yaw, player.damageFlash * 0.18);
   const base = player.sprinting ? SPRINT_FOV : FOV;
-  const dashFov = match?.kind === 'rs' && !accessibility.reducedMotion ? rsClient.dashFov() : 0;
+  const dashFov = match?.kind === 'rs' && !comfort.reducedMotion ? rsClient.dashFov() : 0;
   const targetFov = base / aimZoom + (aimZoom > 1 ? 0 : speedFov + dashFov) - fovPunch;
   player.lookScale = aimZoom * zoomAmount > 1 ? Math.max(0.1, 1 / (aimZoom * zoomAmount)) : 1;
   const settled = Math.abs(fovNoZoom - targetFov) <= 0.01;
@@ -2368,14 +1770,14 @@ function cycleView(): void {
 
 let selfBody: AvatarBody | null = null;
 let selfHeldId = 0;
-let selfHeldMesh: THREE.Object3D | null = null;
+let selfEquipment: AvatarEquipment | null = null;
 let selfWalkPhase = 0;
 let selfSneakT = 0;
-const selfItemMat = new THREE.MeshBasicMaterial({ map: atlas.texture, alphaTest: 0.4, vertexColors: true, side: THREE.DoubleSide });
+const selfItemMat = createAvatarItemMaterial(atlas);
 function hideSelfAvatar(): void { if (selfBody) selfBody.group.visible = false; }
 function invalidateSelfAvatar(): void {
   if (!selfBody) return;
-  if (selfHeldMesh) { selfHeldMesh.parent?.remove(selfHeldMesh); selfHeldMesh = null; }
+  selfEquipment?.dispose(); selfEquipment = null;
   selfHeldId = 0;
   scene.remove(selfBody.group);
   disposeAvatarBody(selfBody);
@@ -2391,38 +1793,21 @@ function updateSelfAvatar(dt: number): void {
   const heldId = inventory.selectedStack?.id ?? 0;
   if (heldId !== selfHeldId) {
     selfHeldId = heldId;
-    if (selfHeldMesh) { selfHeldMesh.parent?.remove(selfHeldMesh); selfHeldMesh = null; }
-    if (heldId > 0 && ITEMS[heldId]) {
-      const mesh = isGunItem(heldId) ? createGunModel()
-        : isModeledGadget(heldId) ? createGadgetModel()
-        : new THREE.Mesh(itemGeometry(atlas, heldId), selfItemMat);
-      if (isGunItem(heldId)) poseGunModel(mesh, 'avatar');
-      else if (isModeledGadget(heldId)) poseGadgetModel(mesh, 'avatar');
-      else { mesh.position.set(0, -0.68, -0.2); mesh.rotation.set(-0.5, 0, 0); mesh.scale.setScalar(ITEMS[heldId].kind === 'block' ? 1.5 : 1.1); }
-      (isGunItem(heldId) ? b.group : b.parts[3]).add(mesh);
-      selfHeldMesh = mesh;
-    }
+    selfEquipment?.dispose();
+    selfEquipment = createAvatarEquipment(atlas, heldId, selfItemMat);
+    if (selfEquipment) attachAvatarEquipment(b, selfEquipment);
   }
-  releaseGunHold(b);
   const sneakTarget = player.sneaking ? 1 : 0;
   selfSneakT += (sneakTarget - selfSneakT) * Math.min(1, 12 * dt);
-  applyAvatarSneak(b, selfSneakT);
-  b.head.rotation.x = player.pitch + selfSneakT * 0.12;
   const hspeed = Math.hypot(player.vel.x, player.vel.z);
   selfWalkPhase += Math.min(hspeed, 7) * dt * 2.4;
-  const pose = stridePose(selfWalkPhase, hspeed, selfSneakT, selfHeldId > 0, held.swingAmount());
-  b.parts[0].rotation.x = pose.legs[0]; b.parts[1].rotation.x = pose.legs[1];
-  b.parts[2].rotation.x = pose.arms[0]; b.parts[2].rotation.z = 0;
-  b.parts[3].rotation.x = pose.arms[1]; b.parts[3].rotation.z = pose.rightArmRoll;
-  if (isGunItem(selfHeldId) && selfHeldMesh) {
-    const reloadProgress = reloadTimer > 0 && reloadDuration > 0 ? 1 - reloadTimer / reloadDuration : -1;
-    poseGunHold(b, selfHeldMesh, { pitch: player.pitch, aim: aimZoom > 1 ? 1 : 0,
-      reload: reloadProgress >= 0 ? Math.sin(reloadProgress * Math.PI) : 0, kick: held.recoilAmount() });
-  } else if (isModeledGadget(selfHeldId)) {
-    const action = held.recoilAmount();
-    b.parts[2].rotation.x = 0.45 + action * 0.18; b.parts[3].rotation.x = 0.62 + action * 0.48;
-    b.parts[2].rotation.z = -0.18; b.parts[3].rotation.z = 0.08;
-  }
+  const reloadProgress = reloadTimer > 0 && reloadDuration > 0 ? 1 - reloadTimer / reloadDuration : -1;
+  poseAvatar(b, selfEquipment, {
+    walkPhase: selfWalkPhase, speed: hspeed, sneak: selfSneakT, pitch: player.pitch,
+    attackSwing: held.swingAmount(), aim: aimZoom > 1 ? 1 : 0,
+    reload: reloadProgress >= 0 ? Math.sin(reloadProgress * Math.PI) : 0, kick: held.recoilAmount(),
+    bowPower: bwBowAt ? Math.min(1, (performance.now() - bwBowAt) / 850) : 0,
+  });
 }
 
 function updateAtmosphere(activeCamera: THREE.Camera): void {
@@ -2451,6 +1836,7 @@ function frame(): void {
   requestAnimationFrame(frame);
   if (contextLost) return;
   const dt = Math.min(0.05, clock.getDelta());
+  comfort.syncBody();
   frames++; fpsTime += dt;
   if (fpsTime >= 1) { fps = Math.round(frames / fpsTime); frames = 0; fpsTime = 0; }
   syncPointerLock();
@@ -2462,11 +1848,23 @@ function frame(): void {
     backdrop.update(dt);
     backdrop.render(renderer);
     touch?.update({ shown: false, playing: false, gun: false });
+    hudMods.setVisible(false);
+    if (hudMods.editing) hudMods.update({ fps, x: 128, y: 64, z: 128, facing: 'North', axis: '-Z',
+      speed: 4.32, biome: MODE_NAMES.duels, held: ITEMS[Item.BurstRifle]?.name ?? 'Burst Rifle',
+      players: 2, health: DUEL_MAX_HEALTH, maxHealth: DUEL_MAX_HEALTH });
     input.endFrame();
     return;
   }
 
-  updateDuelHud();
+  duelUI.update(match.kind === 'duel', duelSpectating, duelRespawnAt);
+  const controlling = input.locked && !screens.panelOpen && !controlBlocked() && screens.state === 'playing';
+  // Baseline advanced bursts/reloads before checking control. Bound the correction
+  // to pending local channels: pause, overlays, death and held swaps cancel them.
+  const switching = (input.hotbarKey >= 0 && input.hotbarKey !== inventory.selected) ||
+    (input.wheelDelta !== 0 && !input.zoomHeld);
+  if (!controlling || duelSpectating || switching ||
+      (burstStack && burstStack !== inventory.selectedStack) ||
+      (reloadingStack && reloadingStack !== inventory.selectedStack)) cancelPendingActions();
   if (fireCooldown > 0) fireCooldown = Math.max(0, fireCooldown - dt);
   if (burstRemaining > 0 && burstGun && burstStack) {
     if (burstStack !== inventory.selectedStack) { burstRemaining = 0; burstStack = null; burstGun = null; }
@@ -2489,7 +1887,6 @@ function frame(): void {
     }
   }
 
-  const controlling = input.locked && !controlBlocked() && screen === 'playing';
   player.energyDrainMult = match.kind === 'duel' ? 1 : 0;
   if (match.kind !== 'duel') { player.energy = 1; player.exhausted = false; }
 
@@ -2505,7 +1902,7 @@ function frame(): void {
   if (touch) {
     const hs = inventory.selectedStack;
     touch.update({
-      shown: screen === 'playing' || screen === 'paused', playing: controlling && !duelSpectating,
+      shown: screens.state === 'playing' || screens.state === 'paused', playing: controlling && !duelSpectating,
       gun: !!(hs && ITEMS[hs.id]?.gun),
       action: match.kind === 'bw' ? 'interact' : match.kind === 'rs' ? (rsClient.role === 'human' ? 'interact' : hs ? 'use' : 'none')
         : !hs ? 'none' : ITEMS[hs.id]?.gun ? 'attack' : ITEMS[hs.id]?.kind === 'block' ? 'build'
@@ -2516,19 +1913,15 @@ function frame(): void {
     });
   }
   const moveInput = controlling ? input : FROZEN_INPUT;
-  if (pendingTeleport) {
-    const tp = pendingTeleport;
+  if (readiness.pendingTeleport) {
+    const tp = readiness.pendingTeleport;
     player.pos.set(tp.x, tp.y, tp.z);
     player.vel.set(0, 0, 0);
     player.fallDistance = 0;
-    const bubbleReady = match.kind === 'bw' ? world.updateVenue(20) : world.update(tp.x, tp.z, 20, 2);
-    if (bubbleReady || worldTimeLocal - tp.started > 4) {
-      pendingTeleport = null;
-      if (bubbleReady) { hideLoading(); sendReady(); }
-    }
+    readiness.update(worldTimeLocal);
   }
   if (match.kind === 'rs') {
-    rsClient.reducedMotion = accessibility.reducedMotion;
+    rsClient.reducedMotion = comfort.reducedMotion;
     if (controlling) rsClient.steerDash(dt);
   }
   player.update(dt, moveInput, world);
@@ -2631,13 +2024,14 @@ function frame(): void {
   remotePlayers.update(dt);
   if (match.kind === 'bw') bwClient.update(dt);
   projectiles.update(dt);
-  updateCombatFeedback(dt);
+  combat.update(dt, { health: player.health, maxHealth: player.maxHealth, spectating: duelSpectating,
+    heartbeat: match.kind !== 'bw', x: player.pos.x, z: player.pos.z, yaw: player.yaw, time: worldTimeLocal });
   updatePartyFrame(dt);
   if (match.kind === 'rs') {
     const look = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
     rsClient.frame(dt, player.yaw, player.eyePosition, look, view !== View.First);
   }
-  damageNumbers.update(dt, activeCamera);
+  combat.updateNumbers(dt, activeCamera);
 
   audio.updateListener(activeCamera);
   if (player.health < lastHealth) audio.hurt();
@@ -2646,7 +2040,7 @@ function frame(): void {
   updateHealFeel(dt, controlling && !duelSpectating);
   updateBridgeFx();
 
-  const firstPersonActive = !duelSpectating && view === View.First && screen !== 'results' &&
+  const firstPersonActive = !duelSpectating && view === View.First && screens.state !== 'results' &&
     !(match.kind === 'rs' && rsClient.phase() === 'intro');
   held.setActive(firstPersonActive);
   held.setPaws(rsClient.selfIsRat());
@@ -2654,19 +2048,18 @@ function frame(): void {
   const reloadProgress = reloadTimer > 0 && reloadDuration > 0 ? 1 - reloadTimer / reloadDuration : -1;
   held.update(dt, controlling && interaction.breakingActive, sky.sunIntensity, aimZoom > 1, reloadProgress,
     healUse.active ? healUse.progress : -1, Math.hypot(player.vel.x, player.vel.z), player.onGround);
-  if (firstPersonActive && !accessibility.reducedMotion) {
+  if (firstPersonActive && !comfort.reducedMotion) {
     held.viewKick(viewKickOut);
     camera.rotation.x -= viewKickOut.pitch;
     camera.rotation.y += viewKickOut.yaw;
     camera.rotation.z += viewKickOut.roll;
   }
 
-  const showHud = controlling || (screen === 'playing' && !duelSpectating);
+  const showHud = controlling || (screens.state === 'playing' && !duelSpectating);
   crosshair.style.display = controlling ? '' : 'none';
   hotbarEl.style.display = showHud ? 'flex' : 'none';
   statusEl.style.display = showHud && match.kind !== 'rs' ? '' : 'none';
-  hitmarkerEl.style.display = controlling ? '' : 'none';
-  dmgArcWrap.style.display = controlling ? '' : 'none';
+  combat.setVisible(controlling);
   const gunStack = controlling ? inventory.selectedStack : null;
   const gunInfo = gunStack ? ITEMS[gunStack.id]?.gun : undefined;
   if (gunInfo) {
@@ -2684,7 +2077,7 @@ function frame(): void {
   });
   (document.getElementById('damage-flash') as HTMLDivElement).style.opacity = String(Math.min(0.35, player.damageFlash));
 
-  const modsVisible = screen === 'playing';
+  const modsVisible = screens.state === 'playing';
   hudMods.setVisible(modsVisible);
   if (modsVisible || hudMods.editing) {
     const dx = -Math.sin(player.yaw), dz = -Math.cos(player.yaw);

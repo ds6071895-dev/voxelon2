@@ -14,7 +14,7 @@
 //     can be earned.
 //
 // Painted in daylight, like the title screen it opens from: colour can only be
-// judged against paper. Self-contained — one injected `vx-ward-` stylesheet.
+// judged against paper. Component styling lives in styles/wardrobe.css.
 
 import * as THREE from 'three';
 import {
@@ -23,7 +23,7 @@ import {
   type Cosmetics, type Swatch,
 } from './character';
 import { CAPES, NO_CAPE, RARITY_COLORS, ownedCapes, type Wardrobe } from './capes';
-import { buildAvatarBody, disposeAvatarBody, type AvatarBody } from './remoteplayers';
+import { buildAvatarBody, disposeAvatarBody, type AvatarBody } from './avatar';
 
 type TabId = 'face' | 'hair' | 'uniform' | 'headgear' | 'capes';
 
@@ -81,200 +81,11 @@ const hex = (n: number): string => `#${n.toString(16).padStart(6, '0')}`;
 const svg = (body: string): string =>
   `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
 
-const CSS = `
-.vx-ward {
-  --ink: #122032; --ink-soft: #3b4f68; --ink-mute: #687d95;
-  --line: rgba(18,32,50,.10); --line-firm: rgba(18,32,50,.18);
-  --accent: #2d6ee0; --gold: #e3a12a;
-  position: absolute; inset: 0; z-index: 24; display: none;
-  align-items: center; justify-content: center; padding: 20px;
-  color: var(--ink);
-  font-family: ui-sans-serif, -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif;
-  background:
-    radial-gradient(ellipse 60% 50% at 10% 0%, rgba(255,222,170,.55), transparent 62%),
-    radial-gradient(ellipse 60% 50% at 95% 10%, rgba(170,205,255,.5), transparent 64%),
-    linear-gradient(180deg, #f4f7fb, #e6ecf3);
-  animation: vx-ward-in .2s ease both;
-}
-.vx-ward[data-open="1"] { display: flex; }
-.vx-ward * { box-sizing: border-box; text-shadow: none; font-family: inherit; }
-@keyframes vx-ward-in { from { opacity: 0; } }
-.vx-ward-shell {
-  position: relative; display: grid; grid-template-columns: minmax(300px, 0.9fr) minmax(0, 1.25fr);
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  width: min(1180px, 100%); height: min(760px, 100%);
-  border-radius: 26px; overflow: hidden;
-  background: #fff; box-shadow: 0 40px 90px rgba(24,40,66,.22), inset 0 0 0 1px var(--line);
-  animation: vx-ward-rise .28s cubic-bezier(.2,.9,.3,1) both;
-}
-@keyframes vx-ward-rise { from { transform: translateY(14px) scale(.985); opacity: 0; } }
-.vx-ward-head {
-  grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 16px;
-  padding: 18px 24px; border-bottom: 1px solid var(--line);
-}
-.vx-ward-kicker { font-size: 10px; font-weight: 800; letter-spacing: 2px; text-transform: uppercase; color: #a8740f; }
-.vx-ward-title { margin: 2px 0 0; font-size: 24px; font-weight: 850; letter-spacing: -.3px; }
-.vx-ward-dirty {
-  display: none; align-items: center; gap: 7px; padding: 6px 11px; border-radius: 999px;
-  font-size: 11px; font-weight: 750; color: #8a5a07; background: #fff4dc;
-}
-.vx-ward-dirty::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--gold); }
-.vx-ward[data-dirty="1"] .vx-ward-dirty { display: inline-flex; }
-.vx-ward-x {
-  width: 40px; height: 40px; display: grid; place-items: center; border: 0; border-radius: 12px;
-  background: rgba(18,32,50,.05); color: var(--ink-soft); cursor: pointer;
-}
-.vx-ward-x:hover { background: rgba(18,32,50,.1); color: var(--ink); }
-.vx-ward-x svg { width: 20px; height: 20px; }
-
-/* LEFT: the plinth. */
-.vx-ward-stage {
-  position: relative; min-height: 0; overflow: hidden; border-right: 1px solid var(--line);
-  background:
-    radial-gradient(ellipse 50% 10% at 50% 86%, rgba(18,32,50,.22), transparent 70%),
-    radial-gradient(ellipse 70% 55% at 50% 20%, rgba(255,255,255,.95), transparent 70%),
-    linear-gradient(180deg, #d5e6f8 0%, #edf3f9 62%, #e0e7ef 62.2%, #eef2f6 100%);
-  cursor: grab; touch-action: none;
-}
-.vx-ward-stage:active { cursor: grabbing; }
-.vx-ward-stage canvas { position: absolute; inset: 0; width: 100% !important; height: 100% !important; }
-.vx-ward-stagebar {
-  position: absolute; left: 14px; right: 14px; bottom: 14px; z-index: 2;
-  display: flex; align-items: center; justify-content: space-between; gap: 8px; pointer-events: none;
-}
-.vx-ward-seg {
-  pointer-events: auto; display: inline-flex; gap: 3px; padding: 3px; border-radius: 12px;
-  background: rgba(255,255,255,.85); box-shadow: 0 6px 18px rgba(24,40,66,.14); backdrop-filter: blur(8px);
-}
-.vx-ward-seg button {
-  border: 0; border-radius: 9px; padding: 7px 11px; cursor: pointer; background: transparent;
-  font-size: 11px; font-weight: 750; color: var(--ink-mute);
-}
-.vx-ward-seg button[aria-pressed="true"] { background: var(--ink); color: #fff; }
-.vx-ward-seg .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
-.vx-ward-hint {
-  position: absolute; top: 14px; left: 50%; transform: translateX(-50%); z-index: 2; pointer-events: none;
-  font-size: 10px; font-weight: 800; letter-spacing: 1.6px; text-transform: uppercase; color: var(--ink-mute);
-  background: rgba(255,255,255,.7); padding: 5px 10px; border-radius: 999px;
-}
-
-/* RIGHT: tabs + tiles. */
-.vx-ward-panel { display: flex; flex-direction: column; min-height: 0; }
-.vx-ward-tabs { display: flex; gap: 4px; padding: 14px 20px 0; border-bottom: 1px solid var(--line); overflow-x: auto; }
-.vx-ward-tab {
-  display: inline-flex; align-items: center; gap: 7px; padding: 10px 14px 12px; border: 0; cursor: pointer;
-  background: transparent; font-size: 13px; font-weight: 750; color: var(--ink-mute);
-  border-bottom: 2.5px solid transparent; margin-bottom: -1px; white-space: nowrap;
-}
-.vx-ward-tab svg { width: 18px; height: 18px; }
-.vx-ward-tab:hover { color: var(--ink); }
-.vx-ward-tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); }
-.vx-ward-body { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 20px 22px; }
-.vx-ward-group + .vx-ward-group { margin-top: 22px; }
-.vx-ward-glabel {
-  display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px;
-  font-size: 11px; font-weight: 800; letter-spacing: 1.2px; text-transform: uppercase; color: var(--ink-mute);
-}
-.vx-ward-glabel b { font-size: 13px; font-weight: 750; letter-spacing: 0; text-transform: none; color: var(--ink); }
-.vx-ward-grid { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); }
-.vx-ward-grid.swatches { grid-template-columns: repeat(auto-fill, minmax(46px, 1fr)); }
-.vx-ward-tile {
-  position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px;
-  padding: 8px 6px 9px; border-radius: 14px; cursor: pointer;
-  border: 1.5px solid var(--line); background: #f7f9fc;
-  font-size: 11.5px; font-weight: 700; color: var(--ink-soft); text-align: center; line-height: 1.2;
-  transition: border-color .12s, transform .12s, box-shadow .12s, background .12s;
-}
-.vx-ward-tile:hover { transform: translateY(-2px); border-color: var(--line-firm); background: #fff; box-shadow: 0 8px 18px rgba(24,40,66,.1); }
-.vx-ward-tile:focus-visible { outline: 2.5px solid var(--accent); outline-offset: 2px; }
-.vx-ward-tile[aria-checked="true"] {
-  border-color: var(--ink); background: #fff; color: var(--ink);
-  box-shadow: 0 0 0 3px rgba(18,32,50,.1), 0 8px 18px rgba(24,40,66,.12);
-}
-.vx-ward-tile[aria-checked="true"]::after {
-  content: ''; position: absolute; top: 6px; right: 6px; width: 16px; height: 16px; border-radius: 50%;
-  background: var(--ink) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M6 12.5l4 4 8-9' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/12px no-repeat;
-}
-.vx-ward-thumb {
-  width: 100%; aspect-ratio: 1; border-radius: 10px; display: block;
-  background: linear-gradient(180deg, #dbe8f6, #eef3f8);
-}
-.vx-ward-thumb.pending { animation: vx-ward-pulse 1s ease-in-out infinite alternate; }
-@keyframes vx-ward-pulse { to { opacity: .55; } }
-.vx-ward-sw {
-  aspect-ratio: 1; border-radius: 12px; cursor: pointer; position: relative;
-  border: 2px solid rgba(255,255,255,.9); box-shadow: 0 0 0 1px var(--line-firm), inset 0 -6px 10px rgba(0,0,0,.12);
-  transition: transform .12s, box-shadow .12s;
-}
-.vx-ward-sw:hover { transform: translateY(-2px) scale(1.04); }
-.vx-ward-sw:focus-visible { outline: 2.5px solid var(--accent); outline-offset: 2px; }
-.vx-ward-sw[aria-checked="true"] { box-shadow: 0 0 0 2.5px var(--ink), 0 8px 16px rgba(24,40,66,.2); }
-.vx-ward-sw[aria-checked="true"]::after {
-  content: ''; position: absolute; inset: 30%; border-radius: 50%; background: #fff;
-  box-shadow: 0 1px 4px rgba(0,0,0,.35);
-}
-
-.vx-ward-empty {
-  display: grid; justify-items: center; gap: 10px; padding: 34px 20px; text-align: center;
-  border: 1.5px dashed var(--line-firm); border-radius: 18px; color: var(--ink-soft); background: #f8fafc;
-}
-.vx-ward-empty svg { width: 46px; height: 46px; color: #b6c3d2; }
-.vx-ward-empty h4 { margin: 0; font-size: 16px; color: var(--ink); }
-.vx-ward-empty p { margin: 0; max-width: 42ch; font-size: 13px; line-height: 1.55; }
-.vx-ward-cape .vx-ward-swatch { width: 100%; aspect-ratio: 3 / 4; border-radius: 10px; }
-
-.vx-ward-foot {
-  grid-column: 1 / -1; display: flex; align-items: center; gap: 10px;
-  padding: 14px 20px; border-top: 1px solid var(--line); background: #fbfcfe;
-}
-.vx-ward-btn {
-  display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 10px 18px;
-  border: 1px solid var(--line-firm); border-radius: 13px; cursor: pointer; background: #fff;
-  font-size: 13px; font-weight: 750; color: var(--ink);
-  transition: transform .12s, box-shadow .12s, background .12s;
-}
-.vx-ward-btn svg { width: 18px; height: 18px; }
-.vx-ward-btn:hover { transform: translateY(-1px); box-shadow: 0 8px 18px rgba(24,40,66,.12); }
-.vx-ward-btn.primary {
-  margin-left: auto; padding: 10px 26px; border-color: transparent; color: #fff;
-  background: linear-gradient(180deg, #24344c, #122032); box-shadow: 0 10px 24px rgba(18,32,50,.28);
-}
-.vx-ward-btn.primary[disabled] { opacity: .5; cursor: default; transform: none; box-shadow: none; }
-
-@media (max-width: 860px) {
-  .vx-ward { padding: 0; }
-  .vx-ward-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 38vh minmax(0, 1fr) auto; width: 100%; height: 100%; border-radius: 0; }
-  .vx-ward-panel { min-width: 0; }
-  .vx-ward-stage { border-right: 0; border-bottom: 1px solid var(--line); }
-  .vx-ward-head { padding: 12px 16px; }
-  .vx-ward-title { font-size: 20px; }
-  .vx-ward-dirty { display: none !important; }
-  .vx-ward-stagebar { flex-direction: column; align-items: stretch; gap: 6px; }
-  .vx-ward-seg { justify-content: center; }
-  .vx-ward-seg button { flex: 1; padding: 7px 6px; }
-  .vx-ward-tabs { padding: 8px 12px 0; }
-  .vx-ward-tab { padding: 9px 10px 11px; font-size: 12px; }
-  .vx-ward-body { padding: 14px; }
-  .vx-ward-grid { grid-template-columns: repeat(auto-fill, minmax(76px, 1fr)); }
-  .vx-ward-foot { display: grid; grid-template-columns: auto auto 1fr; padding: 10px 12px; gap: 8px; }
-  .vx-ward-btn { padding: 10px 12px; font-size: 12px; }
-  .vx-ward-btn:not(.primary) span { display: none; }
-  .vx-ward-btn.primary { margin-left: 0; justify-content: center; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .vx-ward, .vx-ward-shell, .vx-ward-thumb.pending { animation: none; }
-}
-`;
-
 interface WardrobeOptions {
   root: HTMLElement;
   /** The look to start editing from. */
   getCosmetics(): Cosmetics;
   getWardrobe(): Wardrobe;
-  /** Optional team colours to preview the look in (none in Worlds). */
-  factions: { name: string; color: number }[];
-  /** Index into `factions` the preview defaults to (-1 = your own colours). */
-  getFaction(): number;
   reducedMotion(): boolean;
   onSave(look: Cosmetics): void;
   onEquipCape(id: string): void;
@@ -291,10 +102,6 @@ interface WardrobeUI {
 }
 
 export function createWardrobe(opts: WardrobeOptions): WardrobeUI {
-  const style = document.createElement('style');
-  style.textContent = CSS;
-  document.head.appendChild(style);
-
   const el = document.createElement('div');
   el.className = 'vx-ward';
   el.setAttribute('role', 'dialog');
@@ -317,7 +124,6 @@ export function createWardrobe(opts: WardrobeOptions): WardrobeUI {
             <button type="button" data-frame="full" aria-pressed="true">Full body</button>
             <button type="button" data-frame="head" aria-pressed="false">Close-up</button>
           </div>
-          <div class="vx-ward-seg" data-role="side"></div>
         </div>
       </div>
       <section class="vx-ward-panel">
@@ -336,14 +142,11 @@ export function createWardrobe(opts: WardrobeOptions): WardrobeUI {
   const tabsEl = el.querySelector<HTMLElement>('.vx-ward-tabs')!;
   const bodyEl = el.querySelector<HTMLElement>('.vx-ward-body')!;
   const saveBtn = el.querySelector<HTMLButtonElement>('[data-act="save"]')!;
-  const sideSeg = el.querySelector<HTMLElement>('[data-role="side"]')!;
 
   let isOpen = false;
   let tab: TabId = 'face';
   const editing = { ...opts.getCosmetics() };
   let saved = { ...editing };
-  /** -1: your own uniform colour; otherwise a faction index to preview in. */
-  let side = -1;
   let frame: 'full' | 'head' = 'full';
 
   // ── renderer (lazy; one context for the plinth AND every thumbnail) ────
@@ -377,12 +180,9 @@ export function createWardrobe(opts: WardrobeOptions): WardrobeUI {
     cam.updateProjectionMatrix();
   }
 
-  function shirtOverride(): THREE.Color | undefined {
-    return side >= 0 ? new THREE.Color(opts.factions[side].color) : undefined;
-  }
   function rebuild(): void {
     if (body) { scene.remove(body.group); disposeAvatarBody(body); }
-    body = buildAvatarBody({ ...editing }, shirtOverride());
+    body = buildAvatarBody({ ...editing });
     body.group.rotation.y = spin;
     scene.add(body.group);
   }
@@ -437,22 +237,6 @@ export function createWardrobe(opts: WardrobeOptions): WardrobeUI {
     if (b) setFrame(b.dataset.frame as 'full' | 'head');
   });
 
-  function renderSideSeg(): void {
-    sideSeg.hidden = opts.factions.length === 0;
-    const btn = (id: number, label: string, color?: number): string =>
-      `<button type="button" data-side="${id}" aria-pressed="${side === id}">${
-        color !== undefined ? `<span class="sw" style="background:${hex(color)}"></span>` : ''}${label}</button>`;
-    sideSeg.innerHTML = btn(-1, 'My colours')
-      + opts.factions.map((f, i) => btn(i, f.name, f.color)).join('');
-  }
-  sideSeg.addEventListener('click', (e) => {
-    const b = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-side]');
-    if (!b) return;
-    side = Number(b.dataset.side);
-    renderSideSeg();
-    rebuild();
-  });
-
   // ── thumbnails: head shots rendered off-screen through the same context ──
   const THUMB = 128;
   let thumbTarget: THREE.WebGLRenderTarget | null = null;
@@ -465,9 +249,12 @@ export function createWardrobe(opts: WardrobeOptions): WardrobeUI {
   thumbCanvas.width = thumbCanvas.height = THUMB;
   const thumbCtx = thumbCanvas.getContext('2d')!;
   const thumbCache = new Map<string, string>();
+  // One complete set of head-shot options fits in the cache. Changing the
+  // base look creates new keys, so retain only the latest set per opening.
+  const thumbCacheLimit = FACE_ACCESSORIES.length + HAIR_STYLES.length + HATS.length;
 
   function headShot(look: Cosmetics): string {
-    const key = JSON.stringify(look) + side;
+    const key = JSON.stringify(look);
     const hit = thumbCache.get(key);
     if (hit) return hit;
     const r = ensureRenderer();
@@ -475,7 +262,7 @@ export function createWardrobe(opts: WardrobeOptions): WardrobeUI {
       thumbTarget = new THREE.WebGLRenderTarget(THUMB, THUMB, { samples: 4 });
       thumbTarget.texture.colorSpace = THREE.SRGBColorSpace;
     }
-    const b = buildAvatarBody(look, shirtOverride());
+    const b = buildAvatarBody(look);
     b.group.rotation.y = Math.PI;
     thumbScene.add(b.group);
     const prev = r.getRenderTarget();
@@ -495,6 +282,7 @@ export function createWardrobe(opts: WardrobeOptions): WardrobeUI {
     thumbCtx.putImageData(img, 0, 0);
     const url = thumbCanvas.toDataURL();
     thumbCache.set(key, url);
+    if (thumbCache.size > thumbCacheLimit) thumbCache.delete(thumbCache.keys().next().value!);
     return url;
   }
 
@@ -637,8 +425,6 @@ export function createWardrobe(opts: WardrobeOptions): WardrobeUI {
     show(startTab?: TabId): void {
       Object.assign(editing, opts.getCosmetics());
       saved = { ...editing };
-      const f = opts.getFaction();
-      side = f >= 0 && f < opts.factions.length ? f : -1;
       if (startTab) tab = startTab;
       el.dataset.open = '1';
       isOpen = true;
@@ -646,7 +432,6 @@ export function createWardrobe(opts: WardrobeOptions): WardrobeUI {
       resize();
       setFrame(frame);
       camPos.copy(camPosT); camLook.copy(camLookT);
-      renderSideSeg();
       renderTabs();
       rebuild();
       renderBody();
@@ -661,6 +446,7 @@ export function createWardrobe(opts: WardrobeOptions): WardrobeUI {
       el.dataset.open = '0';
       cancelAnimationFrame(raf);
       cancelAnimationFrame(thumbJob);
+      thumbCache.clear();
       ui.onClose?.();
     },
     update(): void {

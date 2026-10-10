@@ -19,11 +19,12 @@ import { mulberry32 } from '../src/noise';
 import type { GameMode } from '../src/net/protocol';
 
 const MATCHES = Number(process.env.SIM_MATCHES ?? 6);
+if (!Number.isInteger(MATCHES) || MATCHES < 1) throw new Error('SIM_MATCHES must be a positive integer');
 const TICK = 0.05;
 
 type Kind = 'new' | 'legacy';
 interface Side { kind: Kind; skill: number; adaptive?: boolean }
-interface Outcome { winner: number | null; secs: number; scores: number[]; progress: number[]; finalSkills: number[]; ratings: number[] }
+interface Outcome { winner: number | null; secs: number; scores: number[]; finalSkills: number[]; ratings: number[] }
 
 function play(mode: GameMode, sides: Side[], seed: number): Outcome {
   const tokenRng = mulberry32(seed ^ 0x5eed);
@@ -45,10 +46,10 @@ function play(mode: GameMode, sides: Side[], seed: number): Outcome {
       const winnerIndex = mode === 'bridge'
         ? (st.winnerTeam === null ? null : order.findIndex((p) => p.team === st.winnerTeam))
         : (st.winner === null ? null : ids.indexOf(st.winner));
-      return { winner: winnerIndex, secs: t, scores: order.map((p) => p.score), progress: order.map((p) => p.progress), finalSkills, ratings };
+      return { winner: winnerIndex, secs: t, scores: order.map((p) => p.score), finalSkills, ratings };
     }
   }
-  return { winner: null, secs: t, scores: [], progress: [], finalSkills, ratings };
+  return { winner: null, secs: t, scores: [], finalSkills, ratings };
 }
 
 function row(label: string, mode: GameMode, a: Side, b: Side): { winsA: number; winsB: number; draws: number } {

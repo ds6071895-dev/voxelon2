@@ -2,51 +2,42 @@
 // Requires Playwright/Chromium; they may live outside the project.
 //   PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs CHROMIUM_PATH=/path/to/chrome npm run cards
 // Options: --only=bedwars,duels  (default: every card)
-import { pathToFileURL, fileURLToPath } from 'node:url';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { createServer } from 'vite';
+import { root, browserSession, observeErrors, assertBrowserErrors, selection } from './browser_session.mjs';
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const out = path.join(root, 'public/cards');
-const only = process.argv.find(a => a.startsWith('--only='))?.slice(7).split(',');
+const args = process.argv.slice(2);
+if (args.some(a => !/^--(only|output)=.+$/.test(a)) || new Set(args.map(a => a.split('=')[0])).size !== args.length) throw new Error('Options: --only=bedwars,duels --output=<directory>');
+const out = path.resolve(root, args.find(a => a.startsWith('--output='))?.slice(9) ?? 'public/cards');
 /** [width, height, below]: Bedwars is the wide hero tile; the rest are 4:5
  *  portraits whose bottom fifth is extra ground under the title. */
 const SIZE = { bedwars: [1800, 720, 0], duels: [800, 1000, 200], bridge: [800, 1000, 200], parkour: [800, 1000, 200], ratseek: [800, 1000, 200] };
+const onlyArg = args.find(a => a.startsWith('--only='));
+const only = onlyArg ? selection('only', onlyArg.slice(7), Object.keys(SIZE)) : Object.keys(SIZE);
 
-const moduleURL = process.env.PLAYWRIGHT_MODULE ? pathToFileURL(path.resolve(process.env.PLAYWRIGHT_MODULE)).href : 'playwright';
-const { chromium } = await import(moduleURL);
 await mkdir(out, { recursive: true });
-let server, browser;
+const session = await browserSession({ port: process.env.CARDS_PORT ?? 5185 });
+const { browser, base } = session;
+const errors = [];
 try {
-  let base = process.env.TEST_URL;
-  if (!base) {
-    server = await createServer({ root, configFile: path.join(root, 'vite.config.ts'), server: { host: '127.0.0.1', port: Number(process.env.CARDS_PORT ?? 5185), strictPort: true } });
-    await server.listen();
-    base = `http://127.0.0.1:${server.config.server.port}`;
-  }
-  browser = await chromium.launch({
-    headless: true,
-    ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
-    args: ['--no-sandbox', '--disable-dev-shm-usage', '--enable-unsafe-swiftshader', '--use-angle=swiftshader'],
-  });
   for (const [card, [w, h, below]] of Object.entries(SIZE)) {
     if (only && !only.includes(card)) continue;
     const page = await browser.newPage({ viewport: { width: 1000, height: 800 } });
     page.setDefaultTimeout(240000);
-    page.on('pageerror', e => console.error(e));
+    observeErrors(page, errors, `${card}: `);
     await page.goto(`${base}/cardart.html?card=${card}&w=${w}&h=${h}&below=${below}`, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => document.body.dataset.ready === 'true' || document.body.dataset.error);
     const error = await page.evaluate(() => document.body.dataset.error);
     if (error) throw new Error(`${card}: ${error}`);
     const url = await page.evaluate(() => window.__cards.image('image/webp', .86));
     if (!url.startsWith('data:image/webp')) throw new Error(`${card}: browser could not encode WebP`);
+    assertBrowserErrors(errors);
     const file = path.join(out, `${card}.webp`);
     await writeFile(file, Buffer.from(url.split(',')[1], 'base64'));
     console.log(`${path.relative(root, file)}  ${w}x${h}`);
     await page.close();
   }
+  assertBrowserErrors(errors);
 } finally {
-  await browser?.close();
-  await server?.close();
+  await session.close();
 }

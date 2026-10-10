@@ -1,16 +1,6 @@
 // Keyboard / mouse / pointer-lock input.
 
-import { DEFAULT_KEYBINDS } from './hud_settings';
-import type { BindAction, Keybinds } from './hud_settings';
-
-/** Modifier keys come in pairs. A bind on one side answers to the other too —
- *  every game does this, and "Sneak = L Shift" refusing the right-hand Shift
- *  reads as a broken keyboard rather than a setting. */
-const SIDE_PAIR: Record<string, string> = {
-  ShiftLeft: 'ShiftRight', ShiftRight: 'ShiftLeft',
-  ControlLeft: 'ControlRight', ControlRight: 'ControlLeft',
-  AltLeft: 'AltRight', AltRight: 'AltLeft',
-};
+import { DEFAULT_KEYBINDS, heldBind, matchesBind, type BindAction, type Keybinds } from './keybinds';
 
 /** The movement/look fields the player reads. A frozen instance (all
  *  false/0) lets physics keep running with no control while a menu is open. */
@@ -47,7 +37,7 @@ export class Input {
   debugToggled = false;
   // These edges fire on their BOUND key (see hud_settings.ts), not a fixed
   // one; the defaults are R / V.
-  reloadPressed = false;   // gun reload / back to the Parkour checkpoint
+  reloadPressed = false;   // gun reload (Duels)
   viewPressed = false;     // cycle the camera view
   locked = false;
 
@@ -84,14 +74,12 @@ export class Input {
 
   /** Does this KeyboardEvent.code drive `action` right now? */
   private isBind(code: string, action: BindAction): boolean {
-    const bound = this.binds[action];
-    return code === bound || SIDE_PAIR[bound] === code;
+    return matchesBind(code, this.binds[action]);
   }
 
   /** Is the key bound to `action` currently held? */
   private heldBind(action: BindAction): boolean {
-    const bound = this.binds[action];
-    return this.keys.has(bound) || this.keys.has(SIDE_PAIR[bound] ?? '\0');
+    return heldBind(this.keys, this.binds[action]);
   }
 
   constructor(canvas: HTMLCanvasElement) {

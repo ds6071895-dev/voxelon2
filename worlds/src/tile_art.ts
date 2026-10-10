@@ -1,5 +1,5 @@
 // Worlds' own art for every block and item a player actually sees in its
-// three games and on the title landscape. These painters replace VOXELON's
+// venues and on the title landscape. These painters replace VOXELON's
 // originals tile by tile (see createAtlas in textures.ts).
 //
 // The house style: every material gets a small hand-picked palette (4-6
@@ -14,7 +14,7 @@ import { Tile } from './blocks';
 import { hash2 } from './noise';
 
 export type RGBA = [number, number, number, number];
-export interface Canvas16 {
+interface Canvas16 {
   set(x: number, y: number, c: RGBA): void;
   fill(fn: (x: number, y: number) => RGBA): void;
 }
@@ -28,11 +28,11 @@ export function ramp(...hs: number[]): RGBA[] { return hs.map((h) => hex(h)); }
 export function mix(a: RGBA, b: RGBA, t: number): RGBA {
   return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t];
 }
-export const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 
 /** 4x4 Bayer matrix in [-.5, .5): ordered dither between palette steps. */
 const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map((v) => v / 16 - .5);
-export function dither(x: number, y: number): number { return BAYER[(y & 3) * 4 + (x & 3)]; }
+function dither(x: number, y: number): number { return BAYER[(y & 3) * 4 + (x & 3)]; }
 
 /** A palette entry for a 0..1 value, dithered so gradients read as pixel art. */
 export function pick(pal: RGBA[], t: number, x: number, y: number, amount = .8): RGBA {
@@ -666,7 +666,7 @@ const paintTerracotta: Paint = (p, seed) => {
 };
 
 /** Knitted wool: columns of V stitches, each lit on its left stroke. */
-export function wool(pal: RGBA[]) {
+function wool(pal: RGBA[]) {
   return (p: Canvas16, seed: number): void => {
     p.fill((x, y) => {
       const u = x & 3, v = y & 3, arm = v >> 1;
@@ -743,7 +743,7 @@ const GOLD_LIGHT = ramp(0xb46f12, 0xd58d1d, 0xefaa32, 0xffc758, 0xffe39a);
 
 export const OUTLINE = hex(0x17161c);
 export const STEEL = ramp(0x5f6674, 0x7d8594, 0x9aa2b0, 0xb8bfcb, 0xd7dce4, 0xf4f7fb);
-export const HANDLE = ramp(0x4a2f17, 0x62401f, 0x7a5129, 0x926334);
+const HANDLE = ramp(0x4a2f17, 0x62401f, 0x7a5129, 0x926334);
 
 const paintIronAxe: Paint = (p) => {
   const g = new Grid();

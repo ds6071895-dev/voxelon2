@@ -1,19 +1,12 @@
-import { spawn } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { releaseDirectory, requireFiles, run } from './release_tools.mjs';
 
-function command(ffmpeg, args, collect = false) {
-  return new Promise((resolve, reject) => {
-    let stderr = '';
-    const proc = spawn(ffmpeg, args, { stdio: collect ? ['ignore', 'ignore', 'pipe'] : 'inherit' });
-    if (collect) proc.stderr.on('data', b => { stderr += b; });
-    proc.on('error', reject);
-    proc.on('exit', code => code === 0 ? resolve(stderr) : reject(new Error(`FFmpeg exited ${code}: ${stderr}`)));
-  });
-}
+const command = (ffmpeg, args, collect = false) => run(ffmpeg, args, { collect });
 
 export async function mixTrailer(directory, ffmpeg = process.env.FFMPEG ?? 'ffmpeg') {
+  await requireFiles(directory, ['worlds-awaken.wav', 'effects.wav']);
   const file = name => path.join(directory, name);
   const quiet = ['-hide_banner', '-loglevel', 'warning', '-y'];
   await command(ffmpeg, [...quiet, '-i', file('worlds-awaken.wav'), '-i', file('effects.wav'), '-filter_complex', '[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0,volume=2,alimiter=limit=0.89', '-ar', '48000', '-c:a', 'pcm_s24le', file('trailer-mix-premaster.wav')]);
@@ -29,7 +22,7 @@ export async function mixTrailer(directory, ffmpeg = process.env.FFMPEG ?? 'ffmp
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  const directory = path.resolve(process.argv[2] ?? 'release-media/audio');
+  const directory = path.resolve(process.argv[2] ?? path.join(releaseDirectory, 'audio'));
   await mixTrailer(directory);
   console.log(`Final trailer mix and listening copy: ${directory}`);
 }

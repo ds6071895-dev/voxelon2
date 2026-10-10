@@ -49,11 +49,15 @@ export class GameAudio {
    *  space instead of playing bone-dry straight into your ears. */
   private reverbIn: GainNode | null = null;
   private readonly listenerPos = new THREE.Vector3();
+  private readonly listenerRotation = new THREE.Quaternion();
+  private readonly listenerForward = new THREE.Vector3();
   private effectsVolume = GameAudio.savedVolume('effects', 0.8);
 
   private static savedVolume(key: string, fallback: number): number {
     try {
-      const n = Number(localStorage.getItem(`voxelon.audio.${key}`));
+      const raw = localStorage.getItem(`voxelon.audio.${key}`);
+      if (raw === null) return fallback;
+      const n = Number(raw);
       return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : fallback;
     } catch { return fallback; }
   }
@@ -131,9 +135,9 @@ export class GameAudio {
   updateListener(camera: THREE.Camera): void {
     if (!this.ctx) return;
     const l = this.ctx.listener;
-    const p = camera.position;
-    this.listenerPos.copy(p);
-    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+    const p = camera.getWorldPosition(this.listenerPos);
+    camera.getWorldQuaternion(this.listenerRotation);
+    const fwd = this.listenerForward.set(0, 0, -1).applyQuaternion(this.listenerRotation);
     if (l.positionX) {
       l.positionX.value = p.x; l.positionY.value = p.y; l.positionZ.value = p.z;
       l.forwardX.value = fwd.x; l.forwardY.value = fwd.y; l.forwardZ.value = fwd.z;
@@ -781,7 +785,6 @@ export class GameAudio {
       case 'twist':
         [440, 554, 659, 880].forEach((f, i) => t({ type: 'square', from: f, to: f, dur: 0.1, gain: 0.04, delay: i * 0.06 }));
         break;
-      case 'alarm': for (let i = 0; i < 3; i++) t({ type: 'square', from: 880, to: 660, dur: 0.15, gain: 0.06, delay: i * 0.2 }); break;
       case 'click': t({ type: 'square', from: 2200, to: 1400, dur: 0.03, gain: 0.05, attack: 0.001 }); break;
       case 'win': [523, 659, 784, 1046, 1318].forEach((f, i) => t({ type: 'triangle', from: f, to: f, dur: 0.3, gain: 0.08, delay: i * 0.1 })); break;
       case 'lose': [392, 330, 262, 196].forEach((f, i) => t({ type: 'triangle', from: f, to: f * 0.98, dur: 0.35, gain: 0.07, delay: i * 0.14 })); break;

@@ -1,5 +1,6 @@
 // Item registry: the loadout items Worlds hands out. Placeable blocks share
-// their Block id; pure items start at 100.
+// their Block id; pure items keep their assigned wire IDs (some legacy IDs
+// are reserved even when they have no active registry entry).
 
 import { Block, BLOCKS, BlockInfo, Tile, ToolKind } from './blocks';
 
@@ -28,6 +29,7 @@ export const enum Item {
   CheeseMagnet = 312,
   DecoyRat = 313,
   Disarm = 314,
+  /** Reserved legacy inventory ID. Cheese is now a match currency/model. */
   Cheese = 315,
   ClassScout = 316,
   ClassThief = 317,
@@ -185,7 +187,6 @@ export const ITEMS: Record<number, ItemInfo> = {
   [Item.CheeseMagnet]: { name: 'Cheese Magnet (Thief)', kind: 'item', sprite: Tile.CheeseMagnet, maxStack: 1 },
   [Item.DecoyRat]: { name: 'Decoy Rat (Trickster)', kind: 'item', sprite: Tile.DecoyRat, maxStack: 1 },
   [Item.Disarm]: { name: 'Disarm (Tinkerer)', kind: 'item', sprite: Tile.Disarm, maxStack: 1 },
-  [Item.Cheese]: { name: 'Stolen Cheese', kind: 'item', sprite: Tile.Cheese, maxStack: 64 },
   [Item.ClassScout]: { name: 'Scout', kind: 'item', sprite: Tile.ClassScout, maxStack: 1 },
   [Item.ClassThief]: { name: 'Thief', kind: 'item', sprite: Tile.ClassThief, maxStack: 1 },
   [Item.ClassTrickster]: { name: 'Trickster', kind: 'item', sprite: Tile.ClassTrickster, maxStack: 1 },

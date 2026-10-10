@@ -17,12 +17,13 @@
 import { Player } from './player';
 import { Block, BLOCKS } from './blocks';
 import { FROZEN_INPUT, type PlayerInput } from './input';
-import type { World } from './world';
-import {
-  BRIDGE_GOALS, BRIDGE_LANE_X, BRIDGE_MELEE_TIER, BRIDGE_ARROW_SPEED, PARTY_FLOOR_Y, bridgeGoalGuard, parkourCourse,
-  type PartyLobbySnapshot, type PartyParticipant, type PartyVec3,
-} from './partygames';
-import type { ParkourPlatform } from './parkour_course';
+import type { PhysicsWorld as World } from './physics_world';
+import { BRIDGE_GOALS, BRIDGE_LANE_X, bridgeGoalGuard } from './bridge_geometry';
+import { BRIDGE_MELEE_TIER, BRIDGE_ARROW_SPEED } from './bridge_rules';
+import { PARTY_FLOOR_Y } from './venue_dims';
+import type { PartyLobbySnapshot, PartyParticipant } from './partygames';
+import type { PartyVec3 } from './party_math';
+import { parkourCourse, type ParkourPlatform } from './parkour_course';
 import { CRUMBLE_CRACKED, blinkSolid, parkourPadImpulse, parkourPadUnder } from './parkour_mechanics';
 import type { WorldGenerator } from './multiverse';
 
@@ -45,9 +46,8 @@ interface BotAction {
   holdWool?: boolean;
 }
 
-/** Combat behaviour switches (kept as data so the simulation harness can
- *  measure each one's worth). */
-const BRIDGE_TACTICS = { critHops: false, timedCrits: true, wTap: false, lean: true, leanMax: 0.43, engageBonus: 5, strafe: true, bow: true };
+const BRIDGE_LEAN_MAX = 0.43;
+const BRIDGE_ENGAGE_BONUS = 5;
 
 /** Where on a crumble pad to aim a landing, relative to its centre: most of
  *  the way to the edge it will be left from. */
@@ -57,7 +57,6 @@ function crumbleLead(b: ParkourPlatform): { x: number; z: number } {
   return alongX ? { x: sign * reach, z: 0 } : { x: 0, z: sign * reach };
 }
 
-/** 0 at the bottom of the scale, 1 at a strong regular's level. */
 /** Ballistics: could a jump from (x, y, z) reach pad `b` at all? A cheap
  *  test run before the full simulation. Jump 1.25 blocks, gravity 32; air
  *  control pulls any run-up toward sprint speed, so only a full sprint's
@@ -69,6 +68,7 @@ function withinJump(x: number, y: number, z: number, b: ParkourPlatform, minX: n
   const gapX = Math.max(0, Math.abs(minX + b.x - x) - b.width / 2), gapZ = Math.max(0, Math.abs(minZ + b.z - z) - b.depth / 2);
   return 5.612 * air + .75 >= Math.hypot(gapX, gapZ);
 }
+/** 0 at the bottom of the scale, 1 at a strong regular's level. */
 function competence(s: number): number { return clamp((s - PARTY_BOT_MIN_SKILL) / (1 - PARTY_BOT_MIN_SKILL), 0, 1); }
 /** 0 up to 1.0, rising to 1 at the top of the scale. */
 function flow(s: number): number { return clamp((s - 1) / (PARTY_BOT_MAX_SKILL - 1), 0, 1); }
@@ -293,7 +293,7 @@ export class PartyBot {
       // on a bridge of their own off to the side, or walking over our heads.
       const defend = threat && !enemyShielded;
       const engage = defend || (onSpan && enemyAlive && !rush && !enemyShielded &&
-        distance < 4 + q * BRIDGE_TACTICS.engageBonus);
+        distance < 4 + q * BRIDGE_ENGAGE_BONUS);
       if (engage) {
         // Lead the approach toward where they are going; when they are
         // running for our portal, cut them off rather than follow.
@@ -310,10 +310,8 @@ export class PartyBot {
         // Knockback follows the look direction by a third. Lean the SWING
         // toward the edge the rival is already closest to, so a hit sends them
         // off it — the feet keep walking straight down the span.
-        if (BRIDGE_TACTICS.lean) {
-          const side = Math.sign(enemy.x - laneX) || (this.rng() < .5 ? -1 : 1);
-          this.swingLean = side * (Math.sign(dz) || 1) * BRIDGE_TACTICS.leanMax * (q * 0.77 + f * 0.23);
-        }
+        const side = Math.sign(enemy.x - laneX) || (this.rng() < .5 ? -1 : 1);
+        this.swingLean = side * (Math.sign(dz) || 1) * BRIDGE_LEAN_MAX * (q * 0.77 + f * 0.23);
         this.aim += (this.rng() - .5) * (1 - q) * .5;
       }
       // Always sprint to defend; otherwise the weaker the bot, the more often
@@ -323,7 +321,7 @@ export class PartyBot {
       if (!defend && this.rng() < (1 - q) * .06) this.pauseUntil = now + 100 + this.rng() * 300;
       if (distance < 1.6 && Math.abs(vertical) < 1.5 && this.rng() < .3 - q * .25) this.input.forward = false;
       // Good bots strafe in a close fight — but only where the footing allows.
-      if (engage && distance < 4.5 && Math.abs(vertical) < 1.5 && q > .4 && BRIDGE_TACTICS.strafe) {
+      if (engage && distance < 4.5 && Math.abs(vertical) < 1.5 && q > .4) {
         if (now >= this.strafeUntil) {
           this.strafe = this.rng() < .6 ? -this.strafe : this.strafe;
           this.strafeUntil = now + lerp(900, 260, q) + this.rng() * 300;
@@ -464,16 +462,10 @@ export class PartyBot {
     // ── Melee ──
     const inReach = enemyAlive && !enemyShielded && Math.hypot(dx, dz, vertical) < reach;
     const facing = Math.cos(Math.atan2(Math.sin(Math.atan2(-dx, -dz) - p.yaw), Math.cos(Math.atan2(-dx, -dz) - p.yaw))) > .6;
-    // Jump-crits: a strong bot times its swing to the fall of a hop.
-    if (BRIDGE_TACTICS.critHops && enemyAlive && !enemyShielded && toGoal > 6 && q > .55 && p.onGround && distance > 2.2 && distance < 5.6 &&
-      now - this.critJumpAt > lerp(1400, 700, q) && this.rng() < q * .6 + f * .3) {
-      this.input.jump = true;
-      this.critJumpAt = now;
-    }
     // Timed crits, above the ordinary range only: leave the ground so the fall
     // of the hop (about 0.28 s after takeoff) meets the rival at the edge of
     // reach, where a falling hit lands half again as hard.
-    if (BRIDGE_TACTICS.timedCrits && f > 0 && enemyAlive && p.onGround && toGoal > 6 && now - this.critJumpAt > 560 &&
+    if (f > 0 && enemyAlive && p.onGround && toGoal > 6 && now - this.critJumpAt > 560 &&
       this.body.vel.y <= 0) {
       const ux = dx / Math.max(distance, 1e-3), uz = dz / Math.max(distance, 1e-3);
       const closing = (p.vel.x - this.enemyVel.x) * ux + (p.vel.z - this.enemyVel.z) * uz;
@@ -493,8 +485,6 @@ export class PartyBot {
       if (!hopping || descending || distance < 2.2 || this.rng() < (1 - q) * .5) {
         this.nextAttack = now + BRIDGE_MELEE_TIER.cooldownMs + lerp(560, 0, q) + this.rng() * lerp(240, 18, q);
         action.melee = this.rng() < lerp(.55, 1, q);
-        // W-tap: a beat off the key so the next hit carries full sprint knockback.
-        if (action.melee && q > .5 && BRIDGE_TACTICS.wTap) this.pauseUntil = Math.max(this.pauseUntil, now + 50 + this.rng() * 50);
       }
     }
     // Recently hit and at the edge: back off a step rather than trade into the void.
@@ -503,7 +493,7 @@ export class PartyBot {
     // ── Bow ──
     // Out of axe reach (past us, overhead, off on a flank) the bow is the answer.
     const unreachable = threat || vertical > 2;
-    if (BRIDGE_TACTICS.bow && enemyAlive && !enemyShielded && distance > (unreachable ? 3 : 6) && distance < 34 &&
+    if (enemyAlive && !enemyShielded && distance > (unreachable ? 3 : 6) && distance < 34 &&
       now >= this.nextShot && !action.melee && !action.edit) {
       // A rival bridging out, standing still or coming down the span is the
       // shot worth taking.
@@ -531,10 +521,7 @@ export class PartyBot {
     gen: WorldGenerator | undefined, action: BotAction): void {
     const p = this.body, sub = snap.sub!, course = parkourCourse(sub.seed);
     const s = this.skill, q = competence(s), f = flow(s);
-    const a = course.steps[me.progress]?.reduce((best, pad) =>
-      Math.hypot(pad.x + sub.minX - p.pos.x, pad.z + sub.minZ - p.pos.z) <
-      Math.hypot(best.x + sub.minX - p.pos.x, best.z + sub.minZ - p.pos.z) ? pad : best);
-    const b = course.steps[me.progress + 1]?.find((pad) => pad.from === a?.index) ?? course.steps[me.progress + 1]?.[0];
+    const a = course.steps[me.progress]?.[0], b = course.steps[me.progress + 1]?.[0];
     this.input = { ...FROZEN_INPUT };
     this.pitch = -.35;
     if (!a || !b) return;
@@ -550,7 +537,7 @@ export class PartyBot {
       const think = timed ? 0 : (lerp(620, 35, q) + this.rng() * lerp(360, 30, q)) * (1 - f) * (hunted ? .25 : 1);
       this.pauseUntil = now + think;
       const key = `${a.index}:${b.index}`;
-      const pristine = gen ? { isLoaded: () => true, getBlock: (x: number, y: number, z: number) => gen.blockAt(x, y, z) } as unknown as World : world;
+      const pristine = gen ? { isLoaded: () => true, getBlock: (x: number, y: number, z: number) => gen.blockAt(x, y, z) } : world;
       if (!this.plans.has(key)) this.plans.set(key, this.planJump(a, b, pristine, sub.minX, sub.minZ));
       // The course as authored almost always still holds: confirm that plan
       // with one trial in the live world before searching again.
@@ -593,7 +580,7 @@ export class PartyBot {
       const onMe = Math.hypot(f.tx - p.pos.x, f.tz - p.pos.z) < 2.6;
       const onNext = Math.hypot(f.tx - (sub.minX + b.x), f.tz - (sub.minZ + b.z)) < 2.6;
       if (onMe && !onNext) this.pauseUntil = 0;
-      else if (onNext && !onMe && p.onGround) { this.pauseUntil = Math.max(this.pauseUntil, f.landAt + 120); this.plan ??= undefined; }
+      else if (onNext && !onMe && p.onGround) this.pauseUntil = Math.max(this.pauseUntil, f.landAt + 120);
     }
     if (this.noticed.size > 64) this.noticed.clear();
     if (now < this.pauseUntil) return;

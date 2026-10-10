@@ -13,6 +13,10 @@ export class Chunk {
   readonly lights = new Map<number, number>();
   /** Highest non-air block + 1; lets the mesher skip empty sky. */
   maxY = 0;
+  /** Number of non-air cells in each horizontal layer. */
+  private readonly layerCounts = new Uint16Array(CHUNK_Y);
+  /** True after meshing, including an empty or water-only chunk. */
+  meshed = false;
   dirty = false;
   opaqueMesh: THREE.Mesh | null = null;
   waterMesh: THREE.Mesh | null = null;
@@ -36,8 +40,15 @@ export class Chunk {
   set(x: number, y: number, z: number, id: number): void {
     if (y < 0 || y >= CHUNK_Y) return;
     const idx = (((x << 4) | z) << 8) | y;
+    const old = this.data[idx];
+    if (old === id) return;
     this.data[idx] = id;
+    if (old !== 0) this.layerCounts[y]--;
+    if (id !== 0) this.layerCounts[y]++;
     if (id !== 0 && y + 1 > this.maxY) this.maxY = y + 1;
+    else if (id === 0 && y + 1 === this.maxY) {
+      while (this.maxY > 0 && this.layerCounts[this.maxY - 1] === 0) this.maxY--;
+    }
     const emission = id !== 0 ? (BLOCKS[id]?.emission ?? 0) : 0;
     if (emission > 0) this.lights.set(idx, emission);
     else if (this.lights.size > 0) this.lights.delete(idx);

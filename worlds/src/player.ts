@@ -3,13 +3,10 @@
 // gravity 32 m/s^2, collision box 0.6 x 1.8, eye height 1.62 (1.27 sneaking).
 
 import * as THREE from 'three';
-import { Block, collisionBoxes, isSolid } from './blocks';
+import { Block, collisionBoxes, isSolid, type Box } from './blocks';
 import type { PlayerInput } from './input';
-import type { World } from './world';
+import type { PhysicsWorld } from './physics_world';
 
-/** Min/max corner of a collision box in cell-local [0,1] space. Most solid
- *  blocks are full cubes; stairs and props carry their own sub-boxes. */
-type Box = [[number, number, number], [number, number, number]];
 const FULL: Box[] = [[[0, 0, 0], [1, 1, 1]]];
 const NONE: Box[] = [];
 
@@ -182,7 +179,7 @@ export class Player {
     return new THREE.Vector3(this.pos.x, this.pos.y + this.eye + this.stepLift, this.pos.z);
   }
 
-  update(dt: number, input: PlayerInput, world: World): void {
+  update(dt: number, input: PlayerInput, world: PhysicsWorld): void {
     if (this.dead) return;
     // Only trust "that chunk is empty" once our own chunk is real (see cellBoxes).
     this.streamGuard =
@@ -344,7 +341,7 @@ export class Player {
 
   /** Sneaking on the ground refuses moves that would leave you unsupported. */
   private moveAxisSneakAware(
-    world: World, axis: 0 | 2, amount: number, wasOnGround: boolean
+    world: PhysicsWorld, axis: 0 | 2, amount: number, wasOnGround: boolean
   ): void {
     if (this.sneaking && wasOnGround && amount !== 0) {
       const saved = axis === 0 ? this.pos.x : this.pos.z;
@@ -364,7 +361,7 @@ export class Player {
    *  whose top is within STEP_HEIGHT of the feet AND there's headroom for the
    *  full player height above it, climb onto it instead of stopping. */
   private moveHorizontal(
-    world: World, axis: 0 | 2, amount: number, wasOnGround: boolean
+    world: PhysicsWorld, axis: 0 | 2, amount: number, wasOnGround: boolean
   ): void {
     const startX = this.pos.x, startY = this.pos.y, startZ = this.pos.z;
     const v0 = axis === 0 ? this.vel.x : this.vel.z;
@@ -400,7 +397,7 @@ export class Player {
   /** A solid block one step ahead at foot level with two *air* (not water)
    *  blocks above it — i.e. a ledge at the water's edge to climb out onto.
    *  Requiring true air keeps the hop from firing on submerged 1-block bumps. */
-  private ledgeAhead(world: World, dirX: number, dirZ: number): boolean {
+  private ledgeAhead(world: PhysicsWorld, dirX: number, dirZ: number): boolean {
     const px = this.pos.x + dirX * (this.halfWidth + 0.2);
     const pz = this.pos.z + dirZ * (this.halfWidth + 0.2);
     const bx = Math.floor(px), bz = Math.floor(pz);
@@ -418,13 +415,13 @@ export class Player {
    *  would sail straight through terrain that merely hasn't arrived, ending up
    *  inside the ground once it does. Only guard while the body's OWN column is
    *  loaded, so a player can never be frozen by the chunk they are standing in. */
-  private cellBoxes(world: World, x: number, y: number, z: number): Box[] {
+  private cellBoxes(world: PhysicsWorld, x: number, y: number, z: number): Box[] {
     if (this.streamGuard && !(world.isLoaded?.(x, z) ?? true)) return FULL;
     return collisionBoxes(world.getBlock(x, y, z)) ?? NONE;
   }
 
   /** Does the body overlap solid geometry at (x, y, z)? */
-  private overlapping(world: World, x: number, y: number, z: number): boolean {
+  private overlapping(world: PhysicsWorld, x: number, y: number, z: number): boolean {
     const minX = x - this.halfWidth, maxX = x + this.halfWidth;
     const minY = y, maxY = y + this.height;
     const minZ = z - this.halfWidth, maxZ = z + this.halfWidth;
@@ -455,7 +452,7 @@ export class Player {
    * through a wall and out into the rock beyond, where they can then swim around
    * underground. Restoring the invariant here is what makes that impossible.
    */
-  private unstick(world: World): void {
+  private unstick(world: PhysicsWorld): void {
     const p = this.pos;
     if (!this.overlapping(world, p.x, p.y, p.z)) return;
 
@@ -521,7 +518,7 @@ export class Player {
     this.fallDistance = 0;
   }
 
-  private hasSupport(world: World): boolean {
+  private hasSupport(world: PhysicsWorld): boolean {
     const y = Math.floor(this.pos.y - 0.05);
     const x0 = Math.floor(this.pos.x - this.halfWidth);
     const x1 = Math.floor(this.pos.x + this.halfWidth);
@@ -533,7 +530,7 @@ export class Player {
     return false;
   }
 
-  private moveAxis(world: World, axis: 0 | 1 | 2, amount: number): void {
+  private moveAxis(world: PhysicsWorld, axis: 0 | 1 | 2, amount: number): void {
     if (amount === 0) return;
     // Sub-step so a fast move (terminal-velocity fall, knockback) can't tunnel
     // through a thin floor/wall between samples.
@@ -547,7 +544,7 @@ export class Player {
   /** Move the player `amount` along one axis, then resolve against the partial
    *  collision boxes (shapes.ts) of every overlapping cell — clamping to the
    *  strongest correction across all boxes. Returns true if a box clamped it. */
-  private resolveAxis(world: World, axis: 0 | 1 | 2, amount: number): boolean {
+  private resolveAxis(world: PhysicsWorld, axis: 0 | 1 | 2, amount: number): boolean {
     const p = this.pos;
     if (axis === 0) p.x += amount;
     else if (axis === 1) p.y += amount;
