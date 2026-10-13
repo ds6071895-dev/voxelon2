@@ -21,6 +21,59 @@ export function createAvatarItemMaterial(atlas: Atlas): THREE.MeshBasicMaterial 
   });
 }
 
+
+/** Where the hand closes, in the arm's own frame (shoulder pivot at the origin). */
+const PALM_Y = -0.5;
+/** Arm raise (rad) while holding: the stance the item is trimmed for. */
+const HOLD_RAISE = 0.5;
+const _u = new THREE.Vector3(), _v = new THREE.Vector3(), _n = new THREE.Vector3(1, 0, 0);
+const _x = new THREE.Vector3(), _y = new THREE.Vector3(), _m = new THREE.Matrix4();
+
+/** Things you hold by the grip with the business end out: blades, picks, lights. */
+function heldLikeTool(id: number): boolean {
+  const info = ITEMS[id];
+  return !!info?.tool || id === Item.Shears || id === Item.RatCatcher || id === Item.Flashlight;
+}
+
+/** An item in a hand. The palm closes on it: a tool's grip sits in the fist and
+ *  the blade points forward and up, a block sits cradled in front of the fist,
+ *  and any other sprite is held out upright. Every flat sprite faces sideways,
+ *  so a spectator sees its face instead of a hairline edge. */
+function heldItemRoot(atlas: Atlas, id: number, itemMaterial: THREE.Material): THREE.Mesh {
+  const info = ITEMS[id], isBlock = info.kind === 'block';
+  // The mesh itself is the equipment root (visibility and glow act on it),
+  // positioned relative to the palm.
+  const mesh = new THREE.Mesh(itemGeometry(atlas, id), itemMaterial);
+  if (isBlock) {
+    // A fist-sized cube resting on the hand, a corner turned toward the front.
+    mesh.scale.setScalar(1.25);
+    mesh.rotation.set(0, Math.PI / 4, 0);
+    mesh.position.set(0, PALM_Y + 0.04, -0.2);
+    return mesh;
+  }
+  const size = heldLikeTool(id) ? 1.35 : 0.95;
+  mesh.scale.setScalar(size);
+  if (heldLikeTool(id)) {
+    // The sprite's diagonal (grip bottom-left, tip top-right) lies along D in
+    // arm space: out in front of the fist and a little up. The face looks out
+    // to the side (+x) and the grip pixel sits in the palm.
+    const a = 1.72 - HOLD_RAISE * 0.4;
+    _u.set(0, -Math.cos(a), -Math.sin(a)).normalize();
+    _v.crossVectors(_n, _u);
+    _x.copy(_u).sub(_v).multiplyScalar(Math.SQRT1_2);
+    _y.copy(_u).add(_v).multiplyScalar(Math.SQRT1_2);
+    _m.makeBasis(_x.clone(), _y.clone(), _n.clone());
+    mesh.quaternion.setFromRotationMatrix(_m);
+    // Sprite centre is 0.28 (of the tile's half-diagonal) along the blade from the grip.
+    mesh.position.copy(_u).multiplyScalar(0.45 * size * 0.3).y += PALM_Y;
+  } else {
+    // Upright, facing sideways, held just in front of the fist.
+    mesh.rotation.set(-HOLD_RAISE, Math.PI / 2, 0, 'YXZ');
+    mesh.position.set(0, PALM_Y + 0.07, -0.17);
+  }
+  return mesh;
+}
+
 /** The common third-person/card equipment dispatch, with avatar-local poses.
  *  First-person viewmodel animation stays in HeldItemView. */
 export function createAvatarEquipment(
@@ -36,10 +89,7 @@ export function createAvatarEquipment(
   } else if (id === Item.BridgeBow) {
     kind = 'bow'; root = createBowModel(); poseBowModel(root, 'avatar');
   } else {
-    kind = 'item'; root = new THREE.Mesh(itemGeometry(atlas, id), itemMaterial);
-    root.position.set(0, -0.68, -0.2);
-    root.rotation.set(-0.5, 0, 0);
-    root.scale.setScalar(info.kind === 'block' ? 1.5 : 1.1);
+    kind = 'item'; root = heldItemRoot(atlas, id, itemMaterial);
   }
   return { root, kind, dispose() { root.removeFromParent(); } };
 }

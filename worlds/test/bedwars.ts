@@ -375,14 +375,15 @@ export function runBedwarsTests(): void {
     const slot = p.slots.findIndex((s) => s?.id === Item.IronAxe);
     h.action(1, { kind: 'select', slot }); assert(h.body(1)!.held === Item.IronAxe, 'host held item follows authoritative selection');
   });
-  test('bed destruction wins a same-tick race with a due respawn', () => {
+  test('a bed broken on the tick a respawn is due still lets that respawn happen', () => {
     const h = new BwTestHost(); h.start(); const p = h.match.players.get(1)!;
     h.at(1, { x: 0, y: 39, z: 0 }); h.tick(0.1);
     const bed = BW_BASES[0].bed; h.at(2, { x: bed.x + 2, y: 97, z: bed.z + 0.5 });
     h.action(2, { kind: 'break', ...bed, slot: 0 });
     p.respawnAt = h.match.time + 0.85;
     h.mine(2, bed, 0.9);
-    assert(p.eliminated && !p.alive && h.match.result?.winner === 1, 'completed bed break precedes respawn even when victim is first in roster');
+    assert(!h.match.teams[0].bed, 'the bed is gone');
+    h.tick(1); assert(p.alive && !p.eliminated && !h.match.isOver(), 'the pending respawn still happens once');
   });
   test('disconnect counts death, retains upgrades, pauses respawn and expires after grace', () => {
     const h = new BwTestHost(); h.start(); const p = h.match.players.get(1)!;
@@ -493,7 +494,7 @@ export function runBedwarsTests(): void {
     h.at(3, { x: 0, y: 30, z: 0 }); h.tick(0.1);
     assert(h.match.result?.winner === 0, 'the last team standing wins');
   });
-  test('a bed broken while you are dead means no respawn', () => {
+  test('a bed broken while you are dead still respawns you one last time', () => {
     const h = new BwTestHost([{ id: 1, team: 0, bot: false }, { id: 2, team: 1, bot: false }, { id: 3, team: 0, bot: false }]); h.start(); h.tick(1);
     h.at(1, { x: 0, y: 30, z: 0 }); h.tick(0.1);
     const p = h.match.players.get(1)!;
@@ -501,7 +502,9 @@ export function runBedwarsTests(): void {
     const bed = MAP.bases[0].bed; h.at(2, { x: bed.x - 1.5, y: 97, z: bed.z + 0.5 }); h.mine(2, bed, 1.5);
     assert(!h.match.teams[0].bed, 'bed broken during the timer');
     h.tick(6);
-    assert(!p.alive && p.eliminated && !h.got(1, 'respawned').length, 'never respawns once the bed is gone');
+    assert(p.alive && !p.eliminated, 'the pending respawn still happens');
+    h.at(1, { x: 0, y: 30, z: 0 }); h.tick(0.1);
+    assert(!p.alive && p.eliminated, 'dying again with the bed gone is final');
     assert(!h.match.isOver(), 'the teammate keeps the team in it');
   });
   test('a four-bot free-for-all on the frost map plays to a winner', () => {

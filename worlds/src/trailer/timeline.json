@@ -1,0 +1,26 @@
+{
+  "release": "NOVEMBER 2026",
+  "bpm": 120,
+  "duration": 80,
+  "shots": [
+    { "id": "01-worlds-open", "set": "lake", "start": 0, "duration": 4, "action": "lake", "label": "", "cues": [[0.0, "riser"]] },
+    { "id": "02-bedwars-island", "set": "bedwars", "start": 4, "duration": 4, "action": "bw-island", "title": "BEDWARS", "label": "Protect your bed. Break theirs.", "cues": [[0.0, "impact"], [1.5, "block"], [1.85, "block"], [2.2, "block"], [2.55, "block"], [2.9, "block"]] },
+    { "id": "03-bedwars-forge", "set": "bedwars", "start": 8, "duration": 4, "action": "bw-forge", "label": "Gather. Shop. Upgrade.", "cues": [[0.2, "coin"], [0.8, "coin"], [1.3, "coin"], [2.2, "buy"], [3.1, "coin"]] },
+    { "id": "04-bedwars-bridge", "set": "bedwars", "start": 12, "duration": 4, "action": "bw-bridge", "label": "Bridge across the void.", "cues": [[0.0, "whoosh"], [0.5, "block"], [0.8, "block"], [1.1, "block"], [1.4, "block"], [1.7, "block"], [2.0, "block"], [2.3, "block"], [2.6, "block"], [2.9, "block"], [3.2, "block"]] },
+    { "id": "05-bedwars-bed", "set": "bedwars", "start": 16, "duration": 4, "action": "bw-bed", "label": "Break their bed.", "cues": [[0.5, "swing"], [0.7, "pick"], [1.1, "swing"], [1.3, "pick"], [1.7, "swing"], [1.9, "pick"], [2.5, "bedbreak"], [2.55, "impact"]] },
+    { "id": "06-bedwars-fight", "set": "bedwars", "start": 20, "duration": 4, "action": "bw-fight", "label": "Win the fight.", "cues": [[0.5, "swing"], [0.7, "hit"], [1.2, "swing"], [1.4, "hit"], [2.0, "swing"], [2.2, "hit"], [2.3, "hit"], [2.8, "fall"]] },
+    { "id": "07-bridge-arena", "set": "bridge", "start": 24, "duration": 4, "action": "br-arena", "title": "THE BRIDGE", "label": "Cross, score and defend.", "cues": [[0.0, "impact"], [0.2, "whoosh"]] },
+    { "id": "08-bridge-duel", "set": "bridge", "start": 28, "duration": 4, "action": "br-duel", "label": "Fight on the span.", "cues": [[0.6, "swing"], [0.8, "hit"], [1.3, "swing"], [1.5, "hit"], [2.1, "bow"], [2.8, "hit"], [3.0, "swing"]] },
+    { "id": "09-bridge-goal", "set": "bridge", "start": 32, "duration": 4, "action": "br-goal", "label": "Reach the portal to score.", "cues": [[0.0, "whoosh"], [2.2, "whoosh"], [3.0, "goal"]] },
+    { "id": "10-duels-arena", "set": "duel", "start": 36, "duration": 4, "action": "du-arena", "title": "DUELS", "label": "Fast fights, last one standing.", "cues": [[0.0, "impact"], [0.2, "whoosh"]] },
+    { "id": "11-duels-fight", "set": "duel", "start": 40, "duration": 6, "action": "du-fight", "label": "", "cues": [[0.9, "shot"], [1.1, "shot"], [1.3, "shot"], [1.4, "ping"], [2.2, "shot"], [2.4, "shot"], [2.6, "shot"], [3.6, "shot"], [3.8, "shot"], [4.0, "shot"], [4.1, "ping"], [4.9, "shot"], [5.1, "shot"], [5.3, "shot"], [5.4, "ping"], [5.5, "death"]] },
+    { "id": "12-parkour-run", "set": "parkour", "start": 46, "duration": 4, "action": "pk-run", "title": "PARKOUR", "label": "Outrun the dragon together.", "piece": "rooftops", "cues": [[0.0, "impact"], [2.2, "roar"]] },
+    { "id": "13-parkour-dragon", "set": "parkour", "start": 50, "duration": 4, "action": "pk-dragon", "label": "Don’t look back.", "piece": "rooftops", "cues": [[0.3, "roar"], [1.4, "fire"], [2.8, "boom"], [3.2, "whoosh"]] },
+    { "id": "14-parkour-finish", "set": "parkour", "start": 54, "duration": 4, "action": "pk-finish", "label": "Reach the sanctuary.", "piece": "waterfall", "cues": [[1.2, "chime"], [1.6, "cheer"]] },
+    { "id": "15-ratseek-manor", "set": "manor", "start": 58, "duration": 4, "action": "rs-manor", "title": "RAT AND SEEK", "label": "Steal the cheese. Don’t get caught.", "cues": [[0.0, "impact"], [1.8, "squeak"], [2.6, "squeak"]] },
+    { "id": "16-ratseek-chase", "set": "manor", "start": 62, "duration": 4, "action": "rs-chase", "label": "", "cues": [[0.4, "squeak"], [1.1, "squeak"], [1.9, "meow"], [2.6, "squeak"], [3.3, "squeak"]] },
+    { "id": "17-ratseek-rescue", "set": "manor", "start": 66, "duration": 4, "action": "rs-rescue", "label": "Free your friends.", "cues": [[0.9, "cage"], [1.2, "squeak"], [1.6, "chime"]] },
+    { "id": "18-games-reel", "set": "lake", "start": 70, "duration": 4, "action": "reel", "label": "", "cues": [[0.0, "whoosh"], [0.8, "whoosh"], [1.6, "whoosh"], [2.4, "whoosh"], [3.2, "whoosh"]] },
+    { "id": "19-release", "set": "lake", "start": 74, "duration": 6, "action": "logo", "label": "", "cues": [[0.0, "shimmer"], [1.8, "impact"]] }
+  ]
+}

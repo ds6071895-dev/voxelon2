@@ -109,15 +109,16 @@ export class BedwarsHud {
     if (text === null) { if (!this.title.hidden) this.title.hidden = true; return; }
     this.showTitle(text, sub, tone);
   }
-  /** A headline for a few seconds (a bed destroyed). */
-  flash(text: string, sub: string, tone: 'info' | 'danger' | 'good', ms = 2800): void {
-    this.flashUntil = 0; this.showTitle(text, sub, tone);
+  /** A huge headline in the middle of the screen for a moment (your bed destroyed). */
+  flash(text: string, sub: string, tone: 'info' | 'danger' | 'good', ms = 1900): void {
+    this.flashUntil = 0; this.showTitle(text, sub, tone); this.flag(this.title, 'size', 'big');
     this.title.classList.remove('pop'); void this.title.offsetWidth; this.title.classList.add('pop');
     this.flashUntil = performance.now() + ms;
   }
   private showTitle(text: string, sub: string, tone: string): void {
     if (this.title.hidden) this.title.hidden = false;
     this.set(this.titleMain, text); this.set(this.titleSub, sub); this.flag(this.title, 'tone', tone);
+    if (performance.now() >= this.flashUntil) this.flag(this.title, 'size', 'normal');
   }
   setPrompt(label: string | null, key: string): void {
     if (label === null) { if (!this.prompt.hidden) this.prompt.hidden = true; return; }

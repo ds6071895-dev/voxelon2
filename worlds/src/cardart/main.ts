@@ -161,11 +161,12 @@ function staging(id: CardId): Staging {
     const bed = v(red.bed.x + .5, red.bed.y, red.bed.z + .5);
     const y = red.bed.y;
     const bridge: [number, number, number, number][] = [];
+    if (params.get('wall') === '1') for (const [wx, wz] of [[-57, 0], [-54, 0], [-56, -1], [-55, -1], [-56, 1], [-55, 1]]) bridge.push([wx, y, wz, Block.TeamWoolA]);
     for (let x = -46; x <= -36; x++) bridge.push([x, y - 1, 2, Block.TeamWoolB]);
     return {
       // Framed right of centre: the hero tile's words sit over the left.
-      generator: gen, center: v(-46, 0, 0), radius: 5, timeOfDay: .25, ambient: .88,
-      cam: v(-28, y + 13, 24), at: v(-56.5, y + 1, 7.5), fov: 50, fog: [120, 240], edits: bridge,
+      generator: gen, center: v(-46, 0, 0), radius: 5, timeOfDay: .2, ambient: .88,
+      cam: v(-36.8, y + 3.3, 5.4), at: v(-51, y + 1.4, 1.2), fov: 46, fog: [120, 240], edits: bridge,
       pose() {
         const models = createBedwarsModels(map, 2, atlas);
         propDisposers.push(() => models.dispose());
@@ -179,21 +180,17 @@ function staging(id: CardId): Staging {
         place(attacker, v(-43.5, y, 2.5), v(bed.x, y, bed.z));
         stride(attacker, 2.4, 4.5, true, .2);
         hold(attacker, Block.TeamWoolB);
-        const second = actor(4242, TEAM.blue);
-        place(second, v(-39.5, y, 2.5), v(bed.x, y, bed.z));
-        stride(second, .3, 4.5, true);
-        hold(second, Item.StoneSword);
       },
     };
   }
   if (id === 'duels') {
     const gen = worldGenerator({ kind: 'duel', seed: 7 });
     return {
-      generator: gen, center: v(22, 0, 22), radius: 4, timeOfDay: .2, ambient: .65,
-      cam: v(35, 108, 29), at: v(22, 99.5, 22), fov: 40, fog: [90, 185],
+      generator: gen, center: v(22, 0, 22), radius: 4, timeOfDay: .3, ambient: .65,
+      cam: v(23.9, 101.8, 27.4), at: v(22.1, 100.9, 22), fov: 55, fog: [90, 185],
       pose() {
         const a = actor(300, TEAM.red), b = actor(671, TEAM.blue);
-        const pa = v(19.5, 0, 24), pb = v(24.5, 0, 20);
+        const pa = v(20.6, 0, 23.2), pb = v(23.6, 0, 20.8);
         pa.y = ground(gen, pa.x, pa.z, 110, 96); pb.y = ground(gen, pb.x, pb.z, 110, 96);
         place(a, pa, pb); place(b, pb, pa);
         stride(a, .8, 3, true); stride(b, 2.2, 3, true);
@@ -204,8 +201,8 @@ function staging(id: CardId): Staging {
   if (id === 'bridge') {
     const gen = worldGenerator({ kind: 'bridge', seed: 7 });
     return {
-      generator: gen, center: v(12, 0, 40), radius: 4, timeOfDay: .2, ambient: .65,
-      cam: v(25, 150, 23), at: v(12, 140.5, 36), fov: 50, fog: [90, 185],
+      generator: gen, center: v(12, 0, 40), radius: 4, timeOfDay: .3, ambient: .65,
+      cam: v(9.2, 142.3, 28.5), at: v(12.5, 142.2, 32.5), fov: 50, fog: [90, 185],
       pose() {
         const a = actor(1203, TEAM.red), b = actor(77, TEAM.blue);
         const ya = ground(gen, 12.5, 31, 160, 120), yb = ground(gen, 12.5, 33, 160, 120);
@@ -228,7 +225,7 @@ function staging(id: CardId): Staging {
     return {
       generator: gen, center: anchor, radius: 6, timeOfDay: parkourTheme(parkourSeed).time, ambient: 1,
       // The runners head toward -x; the dragon follows them from +x.
-      cam: v(anchor.x - 18, anchor.y + 6, anchor.z + 10), at: v(anchor.x + 3, anchor.y + 2.5, anchor.z), fov: 50, fog: [90, 185],
+      cam: v(anchor.x - 6.6, anchor.y + 1.6, anchor.z - 1.4), at: v(anchor.x + 2.4, anchor.y + 1.2, anchor.z - .3), fov: 52, fog: [90, 185],
       pose() {
         dragon.enter(course, parkourTheme(parkourSeed), 0, 0);
         warmCaptureDragon(dragon, order);
@@ -252,7 +249,7 @@ function staging(id: CardId): Staging {
   const gen = worldGenerator({ kind: 'ratseek', seed: 1 });
   return {
     generator: gen, center: v(0, 0, 8), radius: 5, timeOfDay: .1, ambient: 1,
-    cam: v(6, 84.2, 29), at: v(1, 81.2, 19.5), fov: 50, fog: [90, 185],
+    cam: v(2.0, 82.4, 26.9), at: v(1, 81.5, 22.0), fov: 52, fog: [90, 185],
     pose() {
       // Below the porch roof: the lawn and path are at most a block up.
       const floor = (x: number, z: number) => ground(gen, x, z, 83, 70);
@@ -318,6 +315,7 @@ async function prepare(id: CardId, w = 1200, h = 900, below = 0): Promise<void> 
   if (cam) s.cam.fromArray(cam);
   if (at) s.at.fromArray(at);
   if (fov) s.fov = fov[0];
+  const tod = num('tod'); if (tod) s.timeOfDay = tod[0];
   current = s;
   world.setGenerator(s.generator);
   world.setArenaRenderBounds(id === 'bedwars' ? BW_BOUNDS : s.generator.bounds, s.ambient);

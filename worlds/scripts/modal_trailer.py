@@ -44,7 +44,7 @@ def render_partition(run: str, partition: int, proof: bool = False):
         if proof:
             args += ["--stills-width=1920", "--width=960", "--height=540"]
     else:
-        shots = ["0,1,2,3", "4,5,6,7", "8,9,10,11,12", "13,14,15,16"][partition]
+        shots = ["0,1,2,3,4", "5,6,7,8,9", "10,11,12,13,14", "15,16,17,18"][partition]
         args += ["--video-only", "--picture-only", f"--shots={shots}"]
     command(*args, env={"PLAYWRIGHT_MODULE": "/opt/capture-tools/node_modules/playwright/index.mjs", "FFMPEG": "ffmpeg"})
     volume.commit()
@@ -59,7 +59,7 @@ def produce(run: str, proof: bool = False):
         source = Path(f"/media/{run}/part-4")
         command("ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-pattern_type", "glob", "-i", str(source / "screenshots/*.png"), "-vf", "scale=480:270,tile=4x4", "-frames:v", "1", str(source / "review.png"))
         volume.commit()
-        return {"run": run, "proof": True, "files": [str(p.relative_to('/media')) for p in [source / 'review.png', source / 'screenshots/04-duels.png', source / 'screenshots/03-bridge-showdown.png', source / 'screenshots/13-void-cape-teaser.png']]}
+        return {"run": run, "proof": True, "files": [str(p.relative_to('/media')) for p in [source / 'review.png', source / 'screenshots/09-duels-gunfight.png', source / 'screenshots/05-bedwars-breaking-the-bed.png', source / 'screenshots/18-release-end-card.png']]}
 
     calls = [render_partition.spawn(run, p) for p in range(5)]
     for call in calls:

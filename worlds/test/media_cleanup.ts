@@ -9,7 +9,7 @@ import { createGunModel, poseGunModel } from '../src/gunmodels';
 import type { AvatarBody } from '../src/avatar';
 import type { PostFX } from '../src/postfx';
 import type { SunShadow } from '../src/shadows';
-import { createTrailerCourse, trailerShotContext, trailerCamera, trailerActorPoses, trailerRatPoses } from '../src/trailer/staging';
+import { createTrailerCourse, trailerShotContext, trailerFrame, trailerEdits } from '../src/trailer/staging';
 import { worldGenerator } from '../src/multiverse';
 import { DURATION, SHOTS } from '../src/trailer/shots';
 
@@ -72,39 +72,51 @@ export function runMediaCleanupTests(): void {
   assert.equal(chooseCaptureCourse(['rooftops']).seed, 2026, 'card stage keeps its own required-piece policy');
   assert.throws(() => chooseCaptureCourse(['rooftops'], 2026, 2026), /No capture course/);
   assert.throws(() => chooseCaptureCourse(['rooftops'], 2026, 3026, 0), /Invalid/);
-  assert.equal(SHOTS.length, 17); assert.equal(DURATION, 94);
+  assert.equal(SHOTS.length, 19); assert.equal(DURATION, 80);
   assert.equal(SHOTS.reduce((duration, s) => duration + s.duration, 0), DURATION);
-  const shot = SHOTS.find(s => s.action === 'dragon')!;
+  assert.ok(SHOTS.every((s, i) => i === 0 ? s.start === 0 : Math.abs(s.start - (SHOTS[i - 1].start + SHOTS[i - 1].duration)) < 1e-9), 'shots are contiguous');
+  assert.ok(SHOTS.every(s => s.cues.every(([t]) => t >= 0 && t <= s.duration)), 'every sound cue lands inside its shot');
+  const shot = SHOTS.find(s => s.action === 'pk-dragon')!;
   const context = trailerShotContext(shot, course);
-  assert.throws(() => trailerCamera(shot, 1, context), /actual flight-model/);
+  const dragonEnv = { generator: worldGenerator({ kind: 'parkour', seed }), course, context };
   const head = new THREE.Vector3(30, 170, 250);
-  const shotCam = trailerCamera(shot, 1, context, head);
-  assert.deepEqual(shotCam.target.toArray(), [30, 169, 253], 'dragon framing follows the live flight model');
+  const framed = trailerFrame(shot, 1, { ...dragonEnv, dragonHead: head }).camera.target.clone();
   head.x += 10;
-  assert.equal(trailerCamera(shot, 1, context, head).target.x, 40, 'camera path is evaluable, not copied samples');
+  assert.ok(trailerFrame(shot, 1, { ...dragonEnv, dragonHead: head }).camera.target.x > framed.x, 'dragon framing follows the live flight model');
+
+  // Nobody is held in a hand the shot does not mention: items are real item ids.
+  for (const s of SHOTS) for (const f of [0, .5, 1].map(k => trailerFrame(s, s.duration * k, { ...dragonEnv, dragonHead: head, context: trailerShotContext(s, course), generator: worldGenerator({ kind: s.set === 'duel' ? 'duel' : s.set === 'manor' ? 'ratseek' : s.set === 'lake' ? 'duel' : s.set, seed: s.set === 'bedwars' ? 0 : seed }) }))) {
+    assert.ok(f.camera.position.toArray().every(Number.isFinite) && f.camera.target.toArray().every(Number.isFinite), `${s.id} camera is finite`);
+    assert.ok(f.actors.every(a => a.pos.every(Number.isFinite) && Number.isFinite(a.yaw)), `${s.id} actors are finite`);
+  }
 
   // Regression for proven pillar/cage penetrations: audit full body volumes at
   // every simulation frame, including the rescue teleport's exact boundary.
-  for (const duel of SHOTS.filter(s => s.action === 'duel')) {
+  for (const duel of SHOTS.filter(s => s.action === 'du-fight' || s.action === 'du-arena')) {
     const gen = worldGenerator({ kind: 'duel', seed });
-    const context = trailerShotContext(duel, course);
+    const duelContext = trailerShotContext(duel, course);
     for (let frame = 0; frame <= duel.duration * 60; frame++) {
-      for (const pose of trailerActorPoses(duel, frame / 60, context, course, gen)) {
-        const p = pose.position;
-        assert.equal(captureVolumeHit(gen, [p.x - .3, p.y + .03, p.z - .3], [p.x + .3, p.y + 1.8, p.z + .3]), null,
-          `${duel.id} actor ${pose.index} clears arena geometry at frame ${frame}`);
+      for (const pose of trailerFrame(duel, frame / 60, { generator: gen, course, context: duelContext }).actors) {
+        if (pose.tilt) continue; // the final knock-down leaves the floor on purpose
+        const [x, y, z] = pose.pos;
+        assert.equal(captureVolumeHit(gen, [x - .3, y + .03, z - .3], [x + .3, y + 1.8, z + .3]), null,
+          `${duel.id} actor ${pose.slot} clears arena geometry at frame ${frame}`);
       }
     }
   }
-  const rescue = SHOTS.find(s => s.action === 'rescue')!;
+  const rescue = SHOTS.find(s => s.action === 'rs-rescue')!;
   const manor = worldGenerator({ kind: 'ratseek', seed });
-  assert.equal(trailerRatPoses(rescue, .85)[2].caged, true, 'captive pose remains intentional until the teleport');
+  const rescueEnv = { generator: manor, course, context };
+  assert.equal(trailerFrame(rescue, .85, rescueEnv).rats[2].caged, true, 'captive pose remains intentional until the teleport');
+  assert.equal(trailerFrame(rescue, 1.2, rescueEnv).rats[2].caged, false, 'the captive is free after the teleport');
   for (let frame = 0; frame <= rescue.duration * 60; frame++) {
-    for (const pose of trailerRatPoses(rescue, frame / 60)) {
+    for (const pose of trailerFrame(rescue, frame / 60, rescueEnv).rats) {
       if (pose.caged) continue;
-      const [x, y, z] = pose.position;
+      const [x, y, z] = pose.pos;
       assert.equal(captureVolumeHit(manor, [x - .15, y + .03, z - .15], [x + .15, y + .9, z + .15]), null,
         `freed rescue rat clears cage bars at frame ${frame}`);
     }
   }
+  // Edits only ever add blocks during a shot (and the bed's two cells vanish), never at negative times.
+  for (const s of SHOTS) assert.ok(trailerEdits(s).every(e => e[4] >= 0 && e[4] <= s.duration), `${s.id} edits fall inside the shot`);
 }

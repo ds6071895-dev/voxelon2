@@ -1,42 +1,45 @@
-// The release edit: seconds at 120 BPM. Every location is a real Worlds build.
-export type Set = 'lake' | 'bridge' | 'duel' | 'parkour' | 'manor';
+// The release edit. The picture and the score are cut from one file,
+// timeline.json, at 120 BPM (a bar is two seconds): every game gets a title
+// card and shots that show how it is played. Every location is a real Worlds build.
+import timeline from './timeline.json';
+
+export type Set = 'lake' | 'bedwars' | 'bridge' | 'duel' | 'parkour' | 'manor';
+export type Action =
+  | 'lake' | 'bw-island' | 'bw-forge' | 'bw-bridge' | 'bw-bed' | 'bw-fight'
+  | 'br-arena' | 'br-duel' | 'br-goal' | 'du-arena' | 'du-fight'
+  | 'pk-run' | 'pk-dragon' | 'pk-finish' | 'rs-manor' | 'rs-chase' | 'rs-rescue' | 'reel' | 'logo';
 export interface Shot {
   id: string;
   set: Set;
   start: number;
   duration: number;
+  action: Action;
+  /** Game name chip shown with the first shot of each game. */
+  title?: string;
+  /** One line that explains what is happening. */
   label: string;
-  action: 'scenery' | 'bridge' | 'duel' | 'run' | 'dragon' | 'rats' | 'rescue' | 'finish' | 'logo';
   piece?: 'rooftops' | 'waterfall';
+  /** Sound cues, seconds from the start of the shot. */
+  cues: readonly (readonly [number, string])[];
 }
-export const RELEASE = 'NOVEMBER 2026';
-export const DURATION = 94;
-export const SHOTS: readonly Shot[] = [
-  { id: '01-worlds-awaken', set: 'lake', start: 0, duration: 8, label: 'Every world…', action: 'scenery' },
-  { id: '02-bridge-reveal', set: 'bridge', start: 8, duration: 6, label: '…is a new challenge.', action: 'scenery' },
-  { id: '03-bridge-showdown', set: 'bridge', start: 14, duration: 6, label: 'THE BRIDGE', action: 'bridge' },
-  { id: '04-duels-reveal', set: 'duel', start: 20, duration: 4, label: 'DUELS', action: 'scenery' },
-  { id: '05-duels-action', set: 'duel', start: 24, duration: 8, label: 'Make your move.', action: 'duel' },
-  { id: '06-rooftop-runners', set: 'parkour', start: 32, duration: 6, label: 'PARKOUR', action: 'run', piece: 'rooftops' },
-  { id: '07-waterfall-canyon', set: 'parkour', start: 38, duration: 6, label: 'Keep moving.', action: 'run', piece: 'waterfall' },
-  { id: '08-dragon-pursuit', set: 'parkour', start: 44, duration: 6, label: 'Don’t look back.', action: 'dragon', piece: 'rooftops' },
-  { id: '09-crooked-manor', set: 'manor', start: 50, duration: 4, label: 'RAT AND SEEK', action: 'scenery' },
-  { id: '10-rat-pursuit', set: 'manor', start: 54, duration: 6, label: 'Small heroes. Big trouble.', action: 'rats' },
-  { id: '11-rat-rescue', set: 'manor', start: 60, duration: 2, label: '', action: 'rescue' },
-  { id: '12-bridge-finale', set: 'bridge', start: 62, duration: 3, label: 'Bring your friends.', action: 'bridge' },
-  { id: '13-duels-finale', set: 'duel', start: 65, duration: 3, label: '', action: 'duel' },
-  { id: '14-dragon-finale', set: 'parkour', start: 68, duration: 3, label: '', action: 'dragon', piece: 'waterfall' },
-  { id: '15-sanctuary', set: 'parkour', start: 71, duration: 3, label: 'Find your next world.', action: 'finish' },
-  { id: '16-release', set: 'lake', start: 74, duration: 8, label: RELEASE, action: 'logo' },
-  { id: '17-early-access', set: 'lake', start: 82, duration: 12, label: '', action: 'logo' },
-];
+export const RELEASE = timeline.release;
+export const DURATION = timeline.duration;
+export const SHOTS = timeline.shots as unknown as readonly Shot[];
+
+/** Release stills: clean frames (no captions) of the moments that sell each game. */
 export const SCREENSHOTS = [
-  { shot: 0, time: 4, name: '01-worlds-lake' },
-  { shot: 1, time: 3, name: '02-the-bridge' },
-  { shot: 2, time: 4, name: '03-bridge-showdown' },
-  { shot: 4, time: 4, name: '04-duels' },
-  { shot: 7, time: 3, name: '05-parkour' },
-  { shot: 6, time: 3, name: '06-waterfall-canyon' },
-  { shot: 9, time: 3, name: '07-rat-and-seek' },
-  { shot: 10, time: 1, name: '08-rat-rescue' },
+  { shot: 0, time: 2.5, name: '01-worlds-lake' },
+  { shot: 1, time: 3.4, name: '02-bedwars-protect-your-bed' },
+  { shot: 2, time: 2.6, name: '03-bedwars-forge-and-shop' },
+  { shot: 3, time: 2.2, name: '04-bedwars-bridging' },
+  { shot: 4, time: 2.3, name: '05-bedwars-breaking-the-bed' },
+  { shot: 5, time: 2.3, name: '06-bedwars-knockback' },
+  { shot: 7, time: 1.6, name: '07-the-bridge-duel' },
+  { shot: 8, time: 2.9, name: '08-the-bridge-portal' },
+  { shot: 10, time: 2.4, name: '09-duels-gunfight' },
+  { shot: 11, time: 2.0, name: '10-parkour-run' },
+  { shot: 12, time: 2.4, name: '11-parkour-dragon' },
+  { shot: 13, time: 2.6, name: '12-parkour-sanctuary' },
+  { shot: 15, time: 2.2, name: '13-rat-and-seek-chase' },
+  { shot: 16, time: 1.8, name: '14-rat-and-seek-rescue' },
 ] as const;

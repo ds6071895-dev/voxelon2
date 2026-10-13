@@ -41,8 +41,8 @@ try {
 
   await ready('/trailer.html?capture&width=360&height=240&quality=balanced');
   const shots = await page.evaluate(() => window.__trailer.shots);
-  assert.equal(shots.length, 17);
-  assert.equal(await page.evaluate(() => window.__trailer.duration), 94);
+  assert.equal(shots.length, 19);
+  assert.equal(await page.evaluate(() => window.__trailer.duration), 80);
   for (let index = 0; index < shots.length; index++) {
     const shot = shots[index];
     const capture = await page.evaluate(async ({ index, time }) => {

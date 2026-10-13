@@ -47,6 +47,8 @@ interface Deps {
   /** A block the local player just placed (for the sound). */
   onPlaced(x: number, y: number, z: number, block: number): void;
   onPickup(): void;
+  /** Your own bed was just destroyed (for the sting). */
+  onBedLost(): void;
 }
 
 const SERVICE_REACH = 3.8;
@@ -189,8 +191,8 @@ export class BedwarsClient {
       if (this.models?.beds[team.team]) this.models.beds[team.team].visible = team.bed;
       const was = before ? this.snapshotBeds[team.team] : true;
       if (was && !team.bed && before && s.phase !== 'suddenDeath') {
-        if (team.team === this.team) this.hud.flash('Bed destroyed!', 'You will no longer respawn', 'danger');
-        else this.hud.flash('Enemy bed destroyed!', 'Finish them off', 'good');
+        // Only the team that lost it gets the big title and the sting; everyone else reads the feed.
+        if (team.team === this.team) { this.hud.flash('BED DESTROYED!', self && !self.alive && !self.eliminated ? 'This is your last respawn' : 'You will no longer respawn', 'danger'); this.d.onBedLost(); }
       }
       this.snapshotBeds[team.team] = team.bed;
     }

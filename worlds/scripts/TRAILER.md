@@ -17,7 +17,7 @@ offline export has no loading gaps. Music is mixed into the exported video.
 npm run trailer:music
 ```
 
-`scripts/compose_trailer.mjs` synthesizes the original 94-second, 120 BPM score
+`scripts/compose_trailer.mjs` synthesizes the original 80-second, 120 BPM score
 **Worlds Awaken**. It exports 48 kHz / 24-bit stereo WAV, melody, atmosphere,
 percussion and effects stems, and a machine-readable note list. No audio assets
 or third-party samples are needed.
@@ -49,7 +49,7 @@ Options:
 - `--output=release-media/revised` (the default)
 
 Full outputs under `release-media/revised/` include the H.264/AAC MP4, original score and
-stems, eight clean screenshots, two branded hero images, a thumbnail, an end
+stems, fourteen clean screenshots, two branded hero images, a thumbnail, an end
 card, the logo SVG, and capture manifests. This generated directory is ignored
 by Git. VP9/IVF is retained as the intermediate picture master.
 
@@ -84,10 +84,17 @@ original score/stems directly from the Modal volume to an existing GitHub
 Release. It uses the active `gh` login via an ephemeral secret. Large media is
 published as Release assets, keeping Git history small.
 
-The archived/versioned 94-second campaign edit ends with a dramatic **November 2026** reveal, followed by
-early access **starting within the next few days** and the exclusive **Void Cape**
-announcement. The teaser uses a heavily blurred black silhouette with no emblem
-or final design. Promotional mode branding is **Parkour**.
+The current edit is 80 seconds at 120 BPM (a bar is two seconds). It is cut from
+`src/trailer/timeline.json`, which both the picture (`src/trailer/staging.ts`) and the
+score (`scripts/compose_trailer.mjs`) read, so the sound effects land on the frames.
+Every game gets a title card and shots that show how it is played: Bedwars
+(protect the bed, gather and shop, bridge, break the bed, fight), The Bridge
+(cross, fight on the span, score in the portal), Duels (burst-rifle fight),
+Parkour (outrun the dragon to the sanctuary) and Rat and Seek (steal cheese, the
+chase, free a caged friend), then a poster wall of the five games and the
+**November 2026** end card with the early-access line. There is no Void Cape
+teaser. Avatars hold items through the same `createAvatarEquipment` path the game
+uses, so the hands in the trailer match what players see.
 
 The capture script validates frame counts, propagates page and console errors,
 and closes its browser/server even when initialization fails. Trailer mastering

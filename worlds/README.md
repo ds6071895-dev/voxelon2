@@ -29,12 +29,12 @@ In the server console you can type `status`, `save` or `stop`.
 
 `trailer.html` is a standalone cinematic stage using the game's real worlds,
 models and title-screen logo. With the dev server running, open
-`http://localhost:5174/trailer.html` to preview its seventeen-shot, 94-second edit.
+`http://localhost:5174/trailer.html` to preview its nineteen-shot, 80-second edit that shows how each of the five games plays.
 It does not need the multiplayer server.
 
 - `npm run trailer:music` composes **Worlds Awaken**, the original epic score.
 - `npm run trailer:check` checks camera positions against the authored scenery.
-- `npm run trailer` captures the trailer, eight screenshots, hero images and
+- `npm run trailer` captures the trailer, fourteen screenshots, hero images and
   a thumbnail. Playwright/Chromium and FFmpeg are required for capture.
 - `npm run trailer:verify` validates the exported files.
 
@@ -185,7 +185,7 @@ node test/e2e.mjs
 node test/bedwars_e2e.mjs
 node test/mobile.mjs  # Node 22+ global WebSocket; all five modes, real touch events
 npm run test:ui      # computed cascade, nested sheets, editor, wardrobe and OS comfort
-npm run test:offline # five cards twice, all seventeen trailer rigs, non-window resize
+npm run test:offline # five cards twice, all nineteen trailer rigs, non-window resize
 ```
 
 Browser artifact defaults are Worlds-local `node_modules/.tmp/browser-check/`;

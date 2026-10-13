@@ -211,53 +211,28 @@ function bed(w: Workshop, parent: THREE.Group, base: BedwarsBase): THREE.Group {
   g.rotation.y = Math.atan2(base.bedFoot.x - base.bed.x, base.bedFoot.z - base.bed.z);
   g.name = `bed-${base.team}`;
   const color = TEAM[base.team], light = TEAM_LIGHT[base.team];
-  // A carved cabinet bed: the lower plinth conceals the entire 1 x .5 x 2
-  // collision proxy, including its sides. No exposed collision slab or z-fight.
-  w.box(g, 1.06, .34, 2.06, C.darkWood, 0, .17, 0);
-  w.box(g, 1.13, .12, 2.14, C.wood, 0, .34, 0);
-  w.box(g, 1.08, .22, 2.08, C.linen, 0, .50, 0);
-  w.box(g, 1.10, .035, 2.10, C.seam, 0, .405, 0);
-  for (const x of [-.54, .54]) {
-    w.box(g, .075, .22, 1.98, C.lightWood, x, .22, 0);
-    w.box(g, .085, .035, 2.03, C.edge, x, .355, 0);
-    for (const z of [-.48, .48]) {
-      w.box(g, .082, .13, .84, C.wood, x, .20, z);
-      w.box(g, .09, .028, .11, C.brass, x, .215, z);
-    }
+  // The bed is a Minecraft-sized 1 x .5625 x 2: its body exactly fills the two
+  // half-height collision slabs under it (grown by a hair, so the marble never
+  // shows or z-fights) and only a thin layer of cloth rises above them. Nothing
+  // is wider or longer than the cells, so blocks packed tight around it hide it
+  // completely and no corner can poke out.
+  const E = .004;
+  w.box(g, 1 + E, .19, 2 + E, C.wood, 0, .095, 0);
+  w.box(g, 1 + E, .03, 2 + E, C.darkWood, 0, .015, 0);
+  w.box(g, 1 + E, .32, 2 + E, C.linen, 0, .35, 0);
+  // Headboard-end and foot-end trim in the same wood as the frame.
+  w.box(g, 1 + E, .035, 2 + E, C.lightWood, 0, .1925, 0);
+  // Blanket over the foot two-thirds, with a folded lighter hem and stitching.
+  w.box(g, .98, .0625, 1.3, color, 0, .5315, .34);
+  w.box(g, .98, .0645, .09, light, 0, .5325, -.3);
+  for (const x of [-.3, 0, .3]) w.box(g, .02, .066, 1.12, light, x, .5335, .45);
+  // Two plump pillows at the head.
+  for (const x of [-.25, .25]) {
+    w.box(g, .44, .075, .5, C.seam, x, .5375, -.68);
+    w.box(g, .40, .08, .46, C.linen, x, .54, -.68);
   }
-  for (const x of [-.54, .54]) for (const z of [-1.01, 1.01]) {
-    w.box(g, .16, .43, .16, C.wood, x, .215, z);
-    w.box(g, .18, .06, .18, C.brass, x, .05, z);
-    w.box(g, .13, .10, .13, C.lightWood, x, .445, z);
-  }
-  // Head and foot boards have inlaid panels, cap rails and brass finials.
-  for (const [z, h] of [[-1.035, 1.07], [1.035, .72]]) {
-    w.box(g, 1.13, h - .28, .12, C.wood, 0, .28 + (h - .28) / 2, z);
-    w.box(g, .86, h - .43, .025, C.lightWood, 0, .31 + (h - .43) / 2, z + Math.sign(z) * .072);
-    w.box(g, 1.24, .075, .19, C.edge, 0, h, z);
-    for (const x of [-.54, .54]) {
-      w.box(g, .14, h, .16, C.wood, x, h / 2, z);
-      w.box(g, .18, .065, .20, C.brass, x, h + .055, z);
-    }
-    for (const x of [-.30, 0, .30]) w.box(g, .024, h - .46, .035, C.brass, x, .33 + (h - .46) / 2, z + Math.sign(z) * .09);
-  }
-  w.box(g, 1.105, .075, 1.39, color, 0, .64, .315);
-  // Quilt drops over the long rails, with ivory piping and visible stitches.
-  for (const x of [-.55, .55]) {
-    w.box(g, .05, .22, 1.41, color, x, .56, .315);
-    w.box(g, .055, .025, 1.43, C.seam, x, .455, .315);
-  }
-  w.box(g, 1.115, .023, .10, light, 0, .687, -.31);
-  w.box(g, 1.115, .018, .025, C.seam, 0, .699, -.36);
-  for (const x of [-.40, .40]) w.box(g, .024, .013, 1.22, C.seam, x, .686, .32);
-  for (let z = -.18; z <= .88; z += .18) for (const x of [-.46, .46])
-    w.box(g, .065, .014, .022, C.seam, x, .69, z);
-  for (let x = -.3; x <= .31; x += .2) for (let z = -.1; z <= .81; z += .3) {
-    const stitch = w.box(g, .055, .009, .055, light, x, .686, z); stitch.rotation.y = Math.PI / 4;
-  }
-  w.box(g, .83, .14, .39, C.seam, 0, .64, -.735);
-  w.box(g, .80, .13, .37, C.linen, 0, .675, -.735);
-  for (const x of [-.34, .34]) w.box(g, .022, .012, .28, C.seam, x, .746, -.735);
+  // Brass studs on the foot end.
+  for (const x of [-.4, .4]) w.box(g, .08, .08, .03, C.brass, x, .24, 1.0 + E);
   return g;
 }
 

@@ -6,7 +6,7 @@ import { DragonView } from '../parkour_dragon';
 import type { Particles } from '../particles';
 import { parkourTheme } from '../parkour_themes';
 import { SHOTS } from './shots';
-import { createTrailerCourse, trailerShotContext, trailerCamera, trailerActorPoses, trailerRatPoses, trailerDragonCue } from './staging';
+import { createTrailerCourse, trailerShotContext, trailerFrame, trailerEdits, trailerDragonCue } from './staging';
 import { warmCaptureDragon } from '../media/dragon';
 import { captureVolumeHit, captureSightHit, type GeometryHit, type GeometryPoint } from '../media/geometry';
 
@@ -26,7 +26,14 @@ export function checkTrailerLocations(): TrailerLocationReport {
   const dragon = new DragonView(new THREE.Scene(), particles);
   const view = new THREE.PerspectiveCamera(58, 16 / 9, .08, 2000);
   for (const s of SHOTS) {
-    const generator = s.set === 'lake' ? lake : worldGenerator({ kind: s.set === 'manor' ? 'ratseek' : s.set, seed });
+    const base = s.set === 'lake' ? lake : worldGenerator({ kind: s.set === 'manor' ? 'ratseek' : s.set, seed: s.set === 'bedwars' ? 0 : seed });
+    // Blocks placed during the shot are part of the scene at the moment they appear.
+    const edits = trailerEdits(s);
+    let clock = 0;
+    const generator = { ...base, bounds: base.bounds, blockAt: (x: number, y: number, z: number): number => {
+      for (const [ex, ey, ez, block, at] of edits) if (ex === x && ey === y && ez === z && at <= clock) return block;
+      return base.blockAt(x, y, z);
+    } } as typeof base;
     const context = trailerShotContext(s, course);
     dragon.clear();
     if (s.set === 'parkour') {
@@ -53,12 +60,14 @@ export function checkTrailerLocations(): TrailerLocationReport {
     };
     for (let frame = 0; frame <= s.duration * 60; frame++) {
       const t = frame / 60;
-      if (s.action === 'run' || s.action === 'dragon') {
+      clock = t;
+      if (s.action === 'pk-run' || s.action === 'pk-dragon') {
         const cue = trailerDragonCue(t, context.firstOrder);
         dragon.sync(cue.front, cue.speed, cue.now);
         dragon.update(frame ? 1 / 60 : 0, cue.now, 0, true);
       }
-      const cam = trailerCamera(s, t, context, dragon.headPosition());
+      const stage = trailerFrame(s, t, { generator, course, context, dragonHead: dragon.headPosition() });
+      const cam = stage.camera;
       const p = cam.position;
       // Near-plane-scale clearance, not a player-sized bubble: these are
       // intentionally close cinematic cameras. Sweep between frames as well.
@@ -70,25 +79,26 @@ export function checkTrailerLocations(): TrailerLocationReport {
       previous = p;
       view.position.copy(p); view.fov = cam.fov; view.lookAt(cam.target);
       view.updateProjectionMatrix(); view.updateMatrixWorld();
-      const actors = trailerActorPoses(s, t, context, course, generator);
-      const rats = trailerRatPoses(s, t);
       const subjects: THREE.Vector3[] = [];
-      for (const actor of actors) {
-        const a = actor.position;
-        const hit = captureVolumeHit(generator, [a.x - .3, a.y + .03, a.z - .3], [a.x + .3, a.y + 1.8, a.z + .3]);
-        if (hit) issue(`actor-${actor.index}-clearance`, frame, hit);
-        subjects.push(a.clone().add(new THREE.Vector3(0, 1.2, 0)));
+      for (const actor of stage.actors) {
+        const [x, y, z] = actor.pos;
+        // A knocked-back or falling body leaves the floor on purpose.
+        if (!actor.tilt) {
+          const hit = captureVolumeHit(generator, [x - .3, y + .03, z - .3], [x + .3, y + 1.8, z + .3]);
+          if (hit) issue(`actor-${actor.slot}-clearance`, frame, hit);
+        }
+        subjects.push(new THREE.Vector3(x, y + 1.2, z));
       }
-      rats.forEach((rat, i) => {
-        const [x, y, z] = rat.position;
+      for (const [i, rat] of stage.rats.entries()) {
+        const [x, y, z] = rat.pos;
         // The captive rat is deliberately inside the real prison cage.
         if (!rat.caged) {
           const hit = captureVolumeHit(generator, [x - .15, y + .03, z - .15], [x + .15, y + .9, z + .15]);
           if (hit) issue(`rat-${i}-clearance`, frame, hit);
           subjects.push(new THREE.Vector3(x, y + .5, z));
         }
-      });
-      if (s.action === 'dragon') subjects.push(dragon.headPosition().clone());
+      }
+      if (s.action === 'pk-dragon') subjects.push(dragon.headPosition().clone());
       // Establishing shots aim into real builds, sometimes deliberately at a
       // roof/floor. Record aim occlusion and bound uninterrupted action occlusion.
       const aimHit = captureSightHit(generator, p.toArray() as GeometryPoint, cam.target.toArray() as GeometryPoint);

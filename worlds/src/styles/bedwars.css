@@ -81,6 +81,12 @@ body.bedwars-active #energybar { display: none; }
 .bw-title small { font-size: 14px; font-weight: 700; color: var(--w-ink-mute); }
 .bw-title[data-tone="danger"] b { color: #c0262d; }
 .bw-title[data-tone="good"] b { color: #0f7a45; }
+.bw-title[data-size="big"] {
+  top: 50%; padding: 0; background: none; box-shadow: none; gap: 10px;
+  text-shadow: 0 3px 0 rgba(0,0,0,.35), 0 0 34px rgba(0,0,0,.45);
+}
+.bw-title[data-size="big"] b { font-size: clamp(46px, 9vw, 112px); letter-spacing: 1px; color: #ff4a50; -webkit-text-stroke: 2px rgba(80,0,8,.55); paint-order: stroke fill; }
+.bw-title[data-size="big"] small { font-size: clamp(18px, 2.6vw, 30px); color: #fff; }
 .bw-title.pop { animation: bw-title-pop .32s cubic-bezier(.2,.9,.3,1.25) both; }
 @keyframes bw-title-pop { from { transform: translate(-50%, -50%) scale(.82); opacity: 0; } }
 

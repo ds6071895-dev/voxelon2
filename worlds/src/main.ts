@@ -235,6 +235,7 @@ const bwClient = new BedwarsClient({
   flushPose: heldId => net.flushXform(player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch, player.sneaking, heldId, heldSwingSeq),
   onPlaced: (x, y, z, block) => audio.place(materialOf(block), new THREE.Vector3(x + .5, y + .5, z + .5)),
   onPickup: () => audio.pickup(),
+  onBedLost: () => audio.bedLost(),
   onReplay: () => net.send({ t: 'play', mode: 'bedwars', setupRevision: myParty?.bedwars?.revision }),
   onEditTeams: () => { net.send({ t: 'leaveMatch' }); openBedwarsSetup(); },
   onLeave: () => net.send({ t: 'leaveMatch' }),

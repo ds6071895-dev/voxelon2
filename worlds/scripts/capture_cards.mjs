@@ -25,7 +25,7 @@ try {
     const page = await browser.newPage({ viewport: { width: 1000, height: 800 } });
     page.setDefaultTimeout(240000);
     observeErrors(page, errors, `${card}: `);
-    await page.goto(`${base}/cardart.html?card=${card}&w=${w}&h=${h}&below=${below}`, { waitUntil: 'domcontentloaded' });
+    await page.goto(`${base}/cardart.html?card=${card}&w=${w}&h=${h}&below=${below}&shaders=1`, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => document.body.dataset.ready === 'true' || document.body.dataset.error);
     const error = await page.evaluate(() => document.body.dataset.error);
     if (error) throw new Error(`${card}: ${error}`);

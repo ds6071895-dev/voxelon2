@@ -259,12 +259,9 @@ export class BedwarsMatch {
         }
       }
     }
-    // All completed bed breaks resolve before any due respawns, regardless of
-    // roster iteration order. A bed lost on this tick cancels that respawn.
-    for (const p of this.players.values()) if (!p.alive && !p.eliminated && p.connected && p.respawnAt > 0 && this.time >= p.respawnAt && this.active()) {
-      if (this.teams[p.team].bed) this.spawn(p);
-      else { p.eliminated = true; p.respawnAt = 0; }
-    }
+    // A respawn granted at death is kept even if the bed falls while you wait:
+    // you come back one more time, and the next death is final.
+    for (const p of this.players.values()) if (!p.alive && !p.eliminated && p.connected && p.respawnAt > 0 && this.time >= p.respawnAt && this.active()) this.spawn(p);
   }
   handle(id: number, action: BwAction): void {
     if (this.disposed || !action || typeof action !== 'object' || typeof action.kind !== 'string') return;
@@ -501,7 +498,7 @@ export class BedwarsMatch {
     const base = this.map.bases[team];
     for (const c of [base.bed, base.bedFoot]) this.host.setBlock(c.x, c.y, c.z, Block.Air);
     if (by) { by.beds++; this.event(`${this.host.name(by.id)} destroyed the ${BW_TEAM_NAMES[team]} bed!`, 'danger'); }
-    for (const p of this.players.values()) if (p.team === team && !p.alive) { p.eliminated = true; p.respawnAt = 0; }
+    // Teammates already waiting to respawn still get that one last life.
     // Defer winner evaluation until both beds are removed during sudden death.
   }
 

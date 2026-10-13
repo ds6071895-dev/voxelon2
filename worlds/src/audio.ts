@@ -636,6 +636,16 @@ export class GameAudio {
       this.tone({ type: 'triangle', from: f, to: f * 0.96, dur: 0.32, gain: 0.07 * g, delay: 0.08 + i * 0.13, pos }));
   }
 
+  /** Your bed is gone: a deep boom, a splintering crack and a dread-filled minor drop. */
+  bedLost(): void {
+    this.tone({ type: 'sine', from: 120, to: 30, dur: 0.9, gain: 0.34 });
+    this.tone({ type: 'sawtooth', from: 220, to: 55, dur: 0.7, gain: 0.1, delay: 0.02 });
+    this.noise({ freq: 2600, dur: 0.45, gain: 0.2, slideTo: 300, type: 'bandpass', q: 0.7 });
+    this.noise({ freq: 900, dur: 0.8, gain: 0.12, slideTo: 120, type: 'lowpass', q: 0.5, delay: 0.05 });
+    [392, 311.1, 233.1].forEach((f, i) =>
+      this.tone({ type: 'triangle', from: f, to: f * 0.97, dur: 0.55, gain: 0.09, delay: 0.25 + i * 0.28 }));
+  }
+
   /** Back in the fight: a rising shimmer that resolves in a bright chime. */
   bridgeRespawn(self: boolean, pos?: THREE.Vector3): void {
     const g = self ? 1 : 0.55;

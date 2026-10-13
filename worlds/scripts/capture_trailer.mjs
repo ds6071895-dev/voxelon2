@@ -51,11 +51,10 @@ try {
   };
   if (!args.has('--video-only')) {
     for (const s of screenshots) await savePNG(s.name, s.shot, s.time);
-    await savePNG('09-worlds-release-hero', 0, 4, true);
-    await savePNG('10-parkour-release-hero', 7, 3, true);
-    await savePNG('11-trailer-thumbnail', 7, 3, true, 1280);
-    await savePNG('12-release-end-card', 15, 4, false, 1920, false);
-    await savePNG('13-void-cape-teaser', 16, 5, false, 1920, false);
+    await savePNG('15-worlds-release-hero', 0, 2.5, true);
+    await savePNG('16-bedwars-release-hero', 4, 2.0, true);
+    await savePNG('17-trailer-thumbnail', 4, 2.0, true, 1280);
+    await savePNG('18-release-end-card', 18, 4.4, false, 1920, false);
   }
   if (!args.has('--stills-only')) {
     const config = { codec: 'vp09.00.40.08', width, height, bitrate: 12_000_000, framerate: fps, latencyMode: 'realtime', hardwareAcceleration: 'prefer-software' };
