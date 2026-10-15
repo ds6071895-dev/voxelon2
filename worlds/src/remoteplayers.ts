@@ -15,7 +15,8 @@ import {
 } from './avatar_equipment';
 
 function drawHealthBar(canvas: HTMLCanvasElement, frac: number): void {
-  const ctx = canvas.getContext('2d')!;
+  // Redrawn on every health change: CPU-backed, so its upload is a plain copy.
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
   const w = canvas.width, h = canvas.height;
   ctx.clearRect(0, 0, w, h);
   ctx.fillStyle = 'rgba(0,0,0,0.65)';
@@ -98,6 +99,9 @@ export interface BodyStyle {
   tag: boolean;
   tagColor?: string;
 }
+
+/** Scratch boxes for rayHit, which runs every frame. */
+const _rayMin = new THREE.Vector3(), _rayMax = new THREE.Vector3();
 
 export class RemotePlayers {
   private readonly avatars = new Map<number, Avatar>();
@@ -329,9 +333,7 @@ export class RemotePlayers {
       const r = this.net.remotes.get(id);
       if (!r || r.dead || !av.group.visible) continue;
       const [hw, h] = this.dims(id);
-      const min = new THREE.Vector3(av.dx - hw, av.dy, av.dz - hw);
-      const max = new THREE.Vector3(av.dx + hw, av.dy + h, av.dz + hw);
-      const tHit = rayBox(origin, dir, min, max);
+      const tHit = rayBox(origin, dir, _rayMin.set(av.dx - hw, av.dy, av.dz - hw), _rayMax.set(av.dx + hw, av.dy + h, av.dz + hw));
       if (tHit !== null && tHit < bestT) { bestT = tHit; best = id; }
     }
     return best;

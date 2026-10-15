@@ -26,6 +26,8 @@ export class TitleBackdrop {
   readonly camera = new THREE.PerspectiveCamera(64, 1, 0.08, 2000);
   private readonly world: World;
   private readonly sky: Sky;
+  private readonly terrain: TitleTerrain;
+  private radius = STREAM_RADIUS;
   private yaw: number;
   private clock = 0;
 
@@ -35,7 +37,8 @@ export class TitleBackdrop {
     this.scene.background = new THREE.Color(0x9cc3ec);
     // Aerial perspective: the peaks across the valley fade into the sky.
     this.scene.fog = new THREE.Fog(0xb7d3ee, 62, STREAM_RADIUS * 16 + 22);
-    this.world = new World(this.scene, atlas, new TitleTerrain(seed));
+    this.terrain = new TitleTerrain(seed);
+    this.world = new World(this.scene, atlas, this.terrain);
     this.world.renderDistance = STREAM_RADIUS;
     this.sky = new Sky(this.scene, TEXTURE_SEED);
     this.sky.snapTo(TIME_OF_DAY);
@@ -43,13 +46,25 @@ export class TitleBackdrop {
     this.resize(aspect);
   }
 
+  /** Cheap presets: the lite sky dome and a nearer horizon (the fog closes
+   *  in to match, so the valley still ends in haze rather than an edge). */
+  setLite(lite: boolean): void {
+    this.sky.setDetail(lite ? 1 : 0);
+    this.radius = lite ? 6 : STREAM_RADIUS;
+    (this.scene.fog as THREE.Fog).far = this.radius * 16 + 22;
+  }
+
+  /** Free the backdrop's meshes while a match runs; it streams back in on
+   *  the next menu frame. For low-memory devices. */
+  suspend(): void { this.world.setGenerator(this.terrain); }
+
   resize(aspect: number): void {
     this.camera.aspect = aspect;
     this.camera.updateProjectionMatrix();
   }
 
   update(dt: number): void {
-    this.world.update(0, 0, 8, STREAM_RADIUS);
+    this.world.update(0, 0, 8, this.radius);
     this.clock += dt;
     this.yaw += dt * 0.03;
     // Circle the shore, gazing across the water at the far side of the

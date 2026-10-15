@@ -15,7 +15,12 @@ html.touch-ui, .touch-ui body { touch-action:auto; }
 .touch-ui .duel-clock { padding:6px 10px; }
 .touch-ui .duel-pill { padding:4px 7px; }
 .touch-ui .duel-pill:not(.me) { display:none; }
-.touch-ui .duel-killfeed { display:none !important; }
+/* The two newest kills, small, under the Scores button: touch players get the
+   same information as the desktop feed without it covering the buttons. */
+.touch-ui .duel-killfeed { display:flex !important; top:calc(64px + var(--safe-top)); left:calc(12px + var(--safe-left));
+  right:auto; align-items:flex-start; max-width:calc(50vw - 24px); }
+.touch-ui .duel-killfeed div { padding:4px 8px; font-size:9.5px; backdrop-filter:none; }
+.touch-ui .duel-killfeed div:nth-last-child(n+3) { display:none; }
 .touch-ui .duel-scores-touch.visible { display:block; top:calc(8px + var(--safe-top)); right:auto;
   left:calc(12px + var(--safe-left)); min-width:48px; min-height:48px; padding:8px; font-size:10px; }
 .touch-ui .duel-scoreboard { padding:12px; }
@@ -27,7 +32,11 @@ html.touch-ui, .touch-ui body { touch-action:auto; }
 .touch-ui .pg-team-you, .touch-ui .pg-team-split { display:none; }
 .touch-ui .pg-scoreline b { font-size:21px; }
 .touch-ui .pg-pips i { width:8px; height:8px; }
-.touch-ui .pg-standings { display:none; }
+.touch-ui .pg-standings { top:calc(64px + var(--safe-top)); left:calc(12px + var(--safe-left)); min-width:0; max-width:46vw;
+  font-size:10px; pointer-events:auto; cursor:pointer; }
+.touch-ui .pg-standings .pg-row { padding:3px 7px; gap:6px; }
+.touch-ui .pg-standings:not(.open) .pg-row:not(:first-child):not(.me) { display:none; }
+.touch-ui .pg-standings.open { max-height:calc(100dvh - 160px); overflow-y:auto; }
 .touch-ui .pg-call { bottom:auto; top:calc(92px + var(--safe-top)); max-width:calc(100vw - 130px);
   width:max-content; font-size:11px; line-height:1.35; }
 .touch-ui .pg-hud[data-mode="parkour"] .pg-call { top:calc(36px + var(--safe-top)); }
@@ -35,7 +44,12 @@ html.touch-ui, .touch-ui body { touch-action:auto; }
 .touch-ui .pg-banner-title { font-size:24px; }
 .touch-ui .pg-card { max-height:calc(100dvh - 24px); overflow-y:auto; touch-action:pan-y; }
 .touch-ui .rs-top { top:calc(8px + var(--safe-top)); max-width:calc(100vw - 132px); gap:4px; }
-.touch-ui .rs-sidebar, .touch-ui .rs-feed { display:none; }
+.touch-ui .rs-feed { display:none; }
+/* Rat and Seek sidebar: just its header under the pause button until tapped. */
+.touch-ui .rs-sidebar { top:calc(64px + var(--safe-top)); right:max(12px, var(--safe-right)); transform:none; width:auto;
+  min-width:120px; max-width:200px; font-size:10.5px; pointer-events:auto; cursor:pointer; backdrop-filter:none; }
+.touch-ui .rs-sidebar:not(.open) > :not(header) { display:none; }
+.touch-ui .rs-sidebar.open { max-height:calc(100dvh - 150px); overflow-y:auto; }
 .touch-ui .rs-clock { padding:6px 10px; }
 .touch-ui .rs-clock strong { font-size:18px; }
 .touch-ui .rs-pill { padding:4px 6px; font-size:10px; }
@@ -62,3 +76,14 @@ html.touch-ui, .touch-ui body { touch-action:auto; }
 .touch-ui .pg-track { top:calc(34px + var(--safe-top)); width:min(60vw, 360px); height:8px; }
 .touch-ui .pg-hud[data-mode="parkour"] .pg-call { top:calc(52px + var(--safe-top)); }
 .touch-ui .pg-done { right:12px; bottom:auto; top:calc(80px + var(--safe-top)); }
+
+.rotate-hint { position:absolute; top:calc(64px + var(--safe-top)); left:50%; transform:translateX(-50%); z-index:45;
+  max-width:calc(100vw - 32px); min-height:44px; padding:8px 14px; border:0; border-radius:12px;
+  background:rgba(6,12,22,.82); color:#fff; font:700 12px/1.3 system-ui,sans-serif; }
+.rotate-hint[hidden] { display:none; }
+/* A blur over the live 3D view is re-rendered every frame, and on a phone GPU
+   that is one of the dearest things on screen. Touch play and the Low preset
+   draw HUD panels on their (already dark, translucent) backgrounds instead. */
+.touch-ui body.in-game *, html[data-gfx="low"] body.in-game * {
+  backdrop-filter: none !important; -webkit-backdrop-filter: none !important;
+}

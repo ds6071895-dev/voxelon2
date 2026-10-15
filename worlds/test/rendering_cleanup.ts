@@ -233,6 +233,7 @@ function worldTests(): void {
     world.setGenerator(generator(Block.Air));
   }
   lightBatchTests(atlas);
+  lightPatchTests(atlas);
   opacityTests(atlas);
   atlas.texture.dispose();
 }
@@ -256,9 +257,59 @@ function opacityTests(atlas: Atlas): void {
   };
   assert.equal(floorLight(), 0);
   world.setBlock(8, 3, 8, Block.Air);
+  assert.equal(floorLight(), 0, 'an interior edit leaves the neighbour for the streamer');
+  world.update(0, 0, 1000, 1);
   assert.ok(floorLight() > 0, 'interior opacity edit opens skylight into the neighboring chunk');
   world.setBlock(8, 3, 8, Block.Stone);
+  world.update(0, 0, 1000, 1);
   assert.equal(floorLight(), 0, 'closing the opening clears neighboring skylight');
+  const centre = world.getChunk(0, 0)!, centreGeo = centre.opaqueMesh!.geometry;
+  const neighbourGeo = neighbor.opaqueMesh!.geometry;
+  world.setBlock(0, 3, 8, Block.Air);
+  assert.notEqual(centre.opaqueMesh!.geometry, centreGeo, 'the edited chunk remeshes at once');
+  assert.notEqual(neighbor.opaqueMesh!.geometry, neighbourGeo, 'a border edit remeshes the face-sharing neighbour at once');
+  // The opening is 16 blocks from chunk (1, 0): no light reaches it, so it
+  // keeps its mesh instead of waiting for a pointless remesh.
+  assert.equal(world.getChunk(1, 0)!.dirty, false, 'neighbours whose light did not change keep their mesh');
+  world.setGenerator(generator(Block.Air));
+}
+
+/** Edits patch each chunk's cached light from one solve around them; after
+ *  any mix of edits that must equal solving every chunk from scratch. */
+function lightPatchTests(atlas: Atlas): void {
+  const hills: WorldGenerator = { ...generator(Block.Stone), maxY: 40, fill(chunk) {
+    for (let x = 0; x < 16; x++) for (let z = 0; z < 16; z++) {
+      const wx = chunk.cx * 16 + x, wz = chunk.cz * 16 + z, h = 10 + ((wx * 3 + wz * 5) & 7);
+      for (let y = 0; y < h; y++) chunk.set(x, y, z, y > 6 && y < 9 && (wx & 3) ? Block.Air : Block.Stone);
+      if (((wx + wz) & 15) === 3) chunk.set(x, h + 4, z, Block.Stone);
+    }
+  } };
+  const world = new World(new THREE.Scene(), atlas, hills);
+  for (let i = 0; i < 4; i++) world.update(8, 8, 1000, 2);
+  let seed = 7;
+  const rnd = (n: number): number => (seed = (seed * 1103515245 + 12345) >>> 0) % n;
+  const ids = [Block.Air, Block.Air, Block.Stone, Block.Leaves, Block.Water, Block.ManorLantern];
+  const field = world as unknown as { solveChunkLight(c: Chunk): void; chunks: Map<string, Chunk> };
+  for (let round = 0; round < 30; round++) {
+    const batch = round % 4 === 3;
+    if (batch) world.beginBatch();
+    for (let k = batch ? 6 : 1; k > 0; k--) world.setBlock(rnd(40) - 12, 4 + rnd(24), rnd(40) - 12, ids[rnd(ids.length)]);
+    if (batch) world.endBatch();
+    if (round % 5 === 4) world.update(8, 8, 1000, 2);
+    for (const chunk of field.chunks.values()) {
+      if (!chunk.meshed || chunk.relight || !chunk.light) continue;
+      const patched = chunk.light.slice(), lo = chunk.lightLo, hi = chunk.lightHi;
+      field.solveChunkLight(chunk);
+      // Compare where both spans overlap: a patched span may have grown.
+      const H0 = hi - lo, H1 = chunk.lightHi - chunk.lightLo;
+      for (let col = 0; col < 18 * 18; col++) {
+        for (let y = Math.max(lo, chunk.lightLo); y < Math.min(hi, chunk.lightHi); y++) {
+          assert.equal(patched[col * H0 + y - lo], chunk.light[col * H1 + y - chunk.lightLo],
+            `patched light matches a full solve (round ${round}, chunk ${chunk.cx},${chunk.cz})`);
+        }
+      }
+    }
+  }
   world.setGenerator(generator(Block.Air));
 }
 
@@ -276,6 +327,9 @@ function lightBatchTests(atlas: Atlas): void {
   world.endBatch();
   assert.equal(neighborDisposals, 0, 'nested batches do not flush early');
   world.endBatch();
+  assert.equal(neighborDisposals, 0, 'an interior batch defers the neighbour to the streamer');
+  assert.equal(neighbor.dirty, true);
+  world.update(0, 0, 1000, 1);
   assert.equal(neighborDisposals, 1, 'each light-footprint consumer remeshes once per batch');
   const light = neighbor.opaqueMesh!.geometry.getAttribute('skyblock');
   let lit = false;
@@ -288,6 +342,7 @@ function lightBatchTests(atlas: Atlas): void {
   world.setBlock(8, 1, 8, Block.Air);
   world.setBlock(9, 1, 8, Block.Air);
   world.endBatch();
+  world.update(0, 0, 1000, 1);
   const unlit = neighbor.opaqueMesh!.geometry.getAttribute('skyblock');
   assert.ok(Array.from({ length: unlit.count }, (_, i) => unlit.getY(i)).every(n => n === 0),
     'removing emitters clears neighboring baked light');

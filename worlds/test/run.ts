@@ -519,11 +519,31 @@ section('mobile aim assistance stays modest and respects visibility');
     return yaw;
   };
   check('assist strength is frame rate independent', Math.abs(simulate(30) - simulate(120)) < 1e-6);
+  // Bedwars swords use the same cone and turn-rate cap, just at sword reach.
+  const swordTarget = { x: -Math.sin(3 * degrees) * 2.5, y: 1, z: -Math.cos(3 * degrees) * 2.5 };
+  const sword = aimAssist(0, 0, eye, [swordTarget], 3.2, 1 / 60, true, () => true);
+  check('sword assist nudges within reach, no faster than the gun cap', sword.yaw > 0 && sword.yaw <= 12 * degrees / 60 + 1e-9);
+  check('sword assist ignores players past sword reach', aimAssist(0, 0, eye, [near], 3.2, 1 / 60, true, () => true).yaw === 0);
   const wrap = aimAssist(Math.PI - .01, 0, eye, [{ x: .1, y: 1, z: 10 }], 40, 1 / 60, true, () => true);
   check('yaw seam takes the short path', wrap.yaw > Math.PI - .01 && wrap.yaw < Math.PI);
   const wall: PhysicsWorld = { getBlock: (_x: number, _y: number, z: number) => z === -4 ? Block.Stone : Block.Air };
   check('voxel line of sight detects a wall', !!raycastBlocks(wall, new Vector3(0, 1, 0), new Vector3(0, 0, -1), 10));
   check('voxel line of sight stops at target range', !raycastBlocks(wall, new Vector3(0, 1, 0), new Vector3(0, 0, -1), 2));
+}
+
+section('touch stick: analog movement is never faster than a key');
+{
+  const floor: PhysicsWorld = { getBlock: (_x: number, y: number) => y === 80 ? Block.Stone : Block.Air, isLoaded: () => true };
+  const run = (input: Partial<typeof FROZEN_INPUT>): number => {
+    const p = new Player({ x: 0.5, y: 81, z: 0.5 });
+    for (let i = 0; i < 40; i++) p.update(0.05, { ...FROZEN_INPUT, ...input }, floor);
+    return Math.hypot(p.vel.x, p.vel.z);
+  };
+  const key = run({ forward: true }), full = run({ forward: true, moveX: 0, moveY: 1 });
+  const half = run({ moveX: 0, moveY: 0.5 }), diagonal = run({ moveX: Math.SQRT1_2, moveY: Math.SQRT1_2 });
+  check('a full push matches the key', Math.abs(full - key) < 1e-6, `${full} vs ${key}`);
+  check('a half push walks at half speed', Math.abs(half - key / 2) < 0.01, `${half}`);
+  check('diagonals are not faster', diagonal <= key + 1e-6, `${diagonal} vs ${key}`);
 }
 
 section('dragon chase: a runner who made it can go back to the menu');

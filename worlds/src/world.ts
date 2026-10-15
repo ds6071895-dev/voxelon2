@@ -7,8 +7,9 @@
 import * as THREE from 'three';
 import { Block, BLOCKS } from './blocks';
 import { Chunk, CHUNK_X, CHUNK_Z } from './chunk';
-import { computeLight } from './light';
-import { buildChunkGeometry, BlockSampler } from './mesher';
+import { lightYRange, solveLight } from './light';
+import type { LightField, LightWindow } from './light';
+import { buildChunkGeometry } from './mesher';
 import { SHADOW_CASTER_LAYER } from './shadows';
 import type { ShadowUniforms } from './shadows';
 import type { Sky } from './sky';
@@ -31,6 +32,11 @@ export const RENDER_DISTANCE = 12; // chunks
  *  the decorative panorama world sits at. Kept at the old ceiling so nothing
  *  that never touches the quality setting suddenly meshes 3x the chunks. */
 export const DEFAULT_RENDER_DISTANCE = 8; // chunks
+
+/** Farthest any light travels, in blocks. */
+const LIGHT_REACH = 15;
+/** Cached light covers a chunk plus a one-cell border: 18 columns a side. */
+const LIGHT_SPAN = CHUNK_X + 2;
 
 /** Everything the injected chunk shader reads that is not already a three.js
  *  built-in. One object so the two materials are wired identically. */
@@ -233,9 +239,9 @@ const ATLAS_SAMPLE = /* glsl */`
  * backdrop.
  */
 function applyLightShader(
-  mat: THREE.Material, u: ChunkShaderUniforms, water: boolean
+  mat: THREE.Material, u: ChunkShaderUniforms, water: boolean, crop = true
 ): void {
-  mat.customProgramCacheKey = () => (water ? 'voxel-water-2' : 'voxel-light-2');
+  mat.customProgramCacheKey = () => `${water ? 'voxel-water-2' : 'voxel-light-2'}${crop ? '' : '-nocrop'}`;
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uAuroraLight = u.aurora;
     shader.uniforms.uArenaBounds = u.arenaBounds;
@@ -305,10 +311,13 @@ function applyLightShader(
       );
 
     // --- fragment
-    const lighting = /* glsl */`
+    // The arena crop is the only discard in the solid shader, so chunks that
+    // sit wholly inside the arena use a build without it (see refreshCrop).
+    const lighting = (crop ? /* glsl */`
       if (uArenaBounds.x < uArenaBounds.z && (vWorldPos.x < uArenaBounds.x
         || vWorldPos.x >= uArenaBounds.z || vWorldPos.z < uArenaBounds.y
         || vWorldPos.z >= uArenaBounds.w)) discard;
+` : '') + /* glsl */`
 
       vec3 faceN = voxFaceNormal();
       float kind = floor(vInfo.x + 0.5);           // 0 solid, 1 plant, 2 leaves, 3 water
@@ -449,6 +458,9 @@ export class World {
   private readonly scene: THREE.Scene;
   private readonly atlas: Atlas;
   private readonly opaqueMat: THREE.Material;
+  private readonly cutoutMat: THREE.Material;
+  /** opaqueMat without the arena-crop discard, for chunks inside the arena. */
+  private readonly opaqueFastMat: THREE.Material;
   private readonly waterMat: THREE.Material;
   /** Chunk offsets sorted by distance, out to data radius. */
   private readonly spiral: [number, number][] = [];
@@ -510,16 +522,25 @@ export class World {
     if (!m) { m = new Map(); this.editOverlay.set(ck, m); }
     m.set(((((wx & 15) << 4) | (wz & 15)) << 8) | (wy & 255), id);
   }
-  /** When set, remeshes are collected and deduplicated until endBatch(). */
-  private batch: Set<Chunk> | null = null;
+  /** Cells edited inside the current batch (x, y, z triples), relit together
+   *  by the outermost endBatch(). */
+  private readonly pendingEdits: number[] = [];
   private batchDepth = 0;
+  private readonly chunkAt = (cx: number, cz: number): Chunk | undefined => this.chunks.get(Chunk.key(cx, cz));
 
   constructor(scene: THREE.Scene, atlas: Atlas, gen: WorldGenerator) {
     this.scene = scene;
     this.atlas = atlas;
     this.gen = gen;
 
+    // Solid terrain has no alpha test at all: a shader that can discard turns
+    // off early depth rejection on tile-based mobile GPUs, and nearly every
+    // terrain pixel is solid. Leaves, glass and plants use cutoutMat.
     this.opaqueMat = new THREE.MeshBasicMaterial({
+      map: atlas.texture,
+      vertexColors: true,
+    });
+    this.cutoutMat = new THREE.MeshBasicMaterial({
       map: atlas.texture,
       vertexColors: true,
       alphaTest: 0.5, // cutout for leaves/glass
@@ -549,6 +570,9 @@ export class World {
       shaderMode: this.shaderModeUniform, shadow: this.shadowUniforms,
     };
     applyLightShader(this.opaqueMat, shaderUniforms, false);
+    this.opaqueFastMat = this.opaqueMat.clone();
+    applyLightShader(this.opaqueFastMat, shaderUniforms, false, false);
+    applyLightShader(this.cutoutMat, shaderUniforms, false);
     applyLightShader(this.waterMat, shaderUniforms, true);
 
     const r = RENDER_DISTANCE + 1;
@@ -564,8 +588,9 @@ export class World {
   setGenerator(gen: WorldGenerator): void {
     for (const chunk of this.chunks.values()) this.disposeMeshes(chunk);
     this.chunks.clear();
+    this.streamSettled = false;
     this.editOverlay.clear();
-    this.batch = null;
+    this.pendingEdits.length = 0;
     this.batchDepth = 0;
     this.gen = gen;
   }
@@ -594,7 +619,9 @@ export class World {
   setSmoothLighting(on: boolean): void {
     if (this.smoothLighting === on) return;
     this.smoothLighting = on;
+    // The light itself is unchanged; only the geometry reads it differently.
     for (const chunk of this.chunks.values()) chunk.dirty = true;
+    this.streamSettled = false;
   }
 
   /** Hide all terrain outside one temporary minigame arena, including geometry
@@ -607,6 +634,19 @@ export class World {
     if (bounds) this.arenaBoundsUniform.value.set(bounds.minX, bounds.minZ, bounds.maxX, bounds.maxZ);
     else this.arenaBoundsUniform.value.set(1, 1, 0, 0);
     this.arenaLightUniform.value = bounds ? ambientFloor : 0;
+    for (const chunk of this.chunks.values()) this.refreshCrop(chunk);
+  }
+
+  /** Pick each chunk's crop handling: wholly inside the arena (or no arena)
+   *  draws without the discard, wholly outside is not drawn at all, and only
+   *  chunks across an arena wall pay for the per-pixel test. */
+  private refreshCrop(chunk: Chunk): void {
+    const b = this.arenaBoundsUniform.value, on = b.x < b.z;
+    const x0 = chunk.cx * CHUNK_X, z0 = chunk.cz * CHUNK_Z, x1 = x0 + CHUNK_X, z1 = z0 + CHUNK_Z;
+    const outside = on && (x1 <= b.x || x0 >= b.z || z1 <= b.y || z0 >= b.w);
+    const inside = !on || (x0 >= b.x && x1 <= b.z && z0 >= b.y && z1 <= b.w);
+    for (const mesh of [chunk.opaqueMesh, chunk.cutoutMesh, chunk.waterMesh]) if (mesh) mesh.visible = !outside;
+    if (chunk.opaqueMesh) chunk.opaqueMesh.material = inside ? this.opaqueFastMat : this.opaqueMat;
   }
 
   private ensureData(cx: number, cz: number): Chunk {
@@ -656,114 +696,196 @@ export class World {
     // Persist the edit first, so it is honoured even if the chunk is not
     // loaded yet (remote edits) and survives a later unload/regen.
     this.recordEdit(wx, wy, wz, id);
-    const cx = wx >> 4, cz = wz >> 4;
-    const chunk = this.chunks.get(Chunk.key(cx, cz));
+    const chunk = this.chunks.get(Chunk.key(wx >> 4, wz >> 4));
     if (!chunk) return;
     const lx = wx & 15, lz = wz & 15;
     // Already that block — typically the server echoing a placement this
-    // client predicted a round trip ago. Remeshing the light footprint again
-    // for no visible change was a frame hitch per block while bridging.
+    // client predicted a round trip ago. Remeshing again for no visible
+    // change was a frame hitch per block while bridging.
     if (chunk.get(lx, wy, lz) === id) return;
     chunk.set(lx, wy, lz, id);
+    this.pendingEdits.push(wx, wy, wz);
 
-    if (id === Block.Air) {
-      // Breaking the support under a plant pops it.
-      if (BLOCKS[chunk.get(lx, wy + 1, lz)]?.shape === 'cross') {
-        this.setBlock(wx, wy + 1, wz, Block.Air);
-      }
+    // Breaking the support under a plant pops it.
+    if (id === Block.Air && BLOCKS[chunk.get(lx, wy + 1, lz)]?.shape === 'cross') {
+      this.editBlock(wx, wy + 1, wz, Block.Air);
     }
-
-    // Light travels across chunk borders even for edits away from a border.
-    // All 3x3 light/AO consumers must see emission and opacity changes. Data-only
-    // chunks stay data-only until the streamer requests their geometry.
-    this.invalidateFootprint(cx, cz, true);
   }
 
-  private invalidateFootprint(cx: number, cz: number, immediate = false): void {
+  private invalidateFootprint(cx: number, cz: number): void {
     for (let dx = -1; dx <= 1; dx++) {
       for (let dz = -1; dz <= 1; dz++) {
         const chunk = this.getChunk(cx + dx, cz + dz);
-        if (!chunk) continue;
-        chunk.dirty = true;
-        if (immediate && chunk.meshed) this.remesh(chunk);
+        if (chunk) { chunk.dirty = true; chunk.relight = true; }
+        this.streamSettled = false;
       }
     }
   }
 
-  private makeSampler(center: Chunk): BlockSampler {
-    const cache: (Chunk | undefined)[] = [];
-    for (let dz = -1; dz <= 1; dz++)
-      for (let dx = -1; dx <= 1; dx++)
-        cache.push(this.getChunk(center.cx + dx, center.cz + dz));
-    return (wx, wy, wz) => {
-      if (wy < 0 || wy >= 256) return Block.Air;
-      const dcx = (wx >> 4) - center.cx + 1;
-      const dcz = (wz >> 4) - center.cz + 1;
-      if (dcx < 0 || dcx > 2 || dcz < 0 || dcz > 2) {
-        return this.getBlock(wx, wy, wz);
-      }
-      const chunk = cache[dcz * 3 + dcx];
-      return chunk ? chunk.get(wx & 15, wy, wz & 15) : Block.Air;
-    };
-  }
-
-  /** Collect remeshes for a bulk edit (e.g. an explosion). */
+  /** Collect the relighting of a bulk edit (e.g. an explosion). */
   beginBatch(): void {
-    if (this.batchDepth++ === 0) this.batch = new Set();
+    this.batchDepth++;
   }
 
   endBatch(): void {
     if (this.batchDepth === 0 || --this.batchDepth > 0) return;
-    const set = this.batch;
-    this.batch = null;
-    if (set) for (const chunk of set) {
-      if (this.getChunk(chunk.cx, chunk.cz) === chunk && chunk.meshed) this.remesh(chunk);
-    }
+    this.flushEdits();
   }
 
-  private remesh(chunk: Chunk): void {
-    if (this.batch) {
-      this.batch.add(chunk);
-      return;
+  /**
+   * Relight and remesh after edits. No light travels more than 15 blocks, so
+   * an edit can change light only within 15 columns of it (C), and one solve
+   * reaching 15 past C is exact over all of C. That solve is written into the
+   * cached light of every meshed chunk it overlaps, and only chunks whose
+   * cached light actually changed, or whose border holds an edited cell,
+   * rebuild their geometry. (Re-solving the whole 3x3 light footprint per
+   * chunk was ~9 full light solves for every placed block.)
+   */
+  private flushEdits(): void {
+    const e = this.pendingEdits;
+    if (e.length === 0) return;
+    const edits = e.slice();
+    e.length = 0;
+    this.streamSettled = false;
+    let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+    for (let i = 0; i < edits.length; i += 3) {
+      x0 = Math.min(x0, edits[i]); x1 = Math.max(x1, edits[i]);
+      z0 = Math.min(z0, edits[i + 2]); z1 = Math.max(z1, edits[i + 2]);
     }
-    this.disposeMeshes(chunk);
-    const sampler = this.makeSampler(chunk);
+    // Chunks whose bordered light region (chunk + 1 cell) can reach C.
+    const cxa = (x0 - LIGHT_REACH - 1) >> 4, cxb = (x1 + LIGHT_REACH + 1) >> 4;
+    const cza = (z0 - LIGHT_REACH - 1) >> 4, czb = (z1 + LIGHT_REACH + 1) >> 4;
+    const touched = (n: Chunk): boolean => {
+      const ox = n.cx * CHUNK_X - 1, oz = n.cz * CHUNK_Z - 1;
+      for (let i = 0; i < edits.length; i += 3) {
+        const x = edits[i] - ox, z = edits[i + 2] - oz;
+        if (x >= 0 && x < LIGHT_SPAN && z >= 0 && z < LIGHT_SPAN) return true;
+      }
+      return false;
+    };
+    const now: Chunk[] = [];
+    // A blast wider than one light window: fall back to full re-solves.
+    const huge = x1 - x0 > 64 || z1 - z0 > 64;
+    let win: LightWindow | null = null;
+    if (!huge) {
+      const minX = x0 - 2 * LIGHT_REACH, minZ = z0 - 2 * LIGHT_REACH;
+      const sizeX = x1 - x0 + 4 * LIGHT_REACH + 1, sizeZ = z1 - z0 + 4 * LIGHT_REACH + 1;
+      const around: (Chunk | undefined)[] = [];
+      for (let cx = minX >> 4; cx <= (minX + sizeX - 1) >> 4; cx++)
+        for (let cz = minZ >> 4; cz <= (minZ + sizeZ - 1) >> 4; cz++) around.push(this.chunkAt(cx, cz));
+      const [y0, y1] = lightYRange(around);
+      win = solveLight(this.chunkAt, minX, minZ, sizeX, sizeZ, y0, y1);
+    }
+    for (let cx = cxa; cx <= cxb; cx++) {
+      for (let cz = cza; cz <= czb; cz++) {
+        const n = this.chunkAt(cx, cz);
+        if (!n || !n.meshed) continue;
+        const hit = touched(n);
+        if (!win || n.relight || !n.light) {
+          n.dirty = true; n.relight = true;
+          if (hit) now.push(n);
+          continue;
+        }
+        const changed = this.patchLight(n, win, edits,
+          x0 - LIGHT_REACH, x1 + LIGHT_REACH, z0 - LIGHT_REACH, z1 + LIGHT_REACH);
+        // An edited cell in the border changes faces and corner shading: now.
+        // A light-only change waits for the streamer, nearest first.
+        if (hit) now.push(n);
+        else if (changed) n.dirty = true;
+      }
+    }
+    for (const n of now) this.remesh(n);
+  }
 
-    // Light is exact when computed over the 3x3 window (max travel = 15).
-    let height = chunk.maxY;
-    const emitters: [number, number, number, number][] = [];
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dz = -1; dz <= 1; dz++) {
-        const n = this.getChunk(chunk.cx + dx, chunk.cz + dz);
-        if (!n) continue;
-        height = Math.max(height, n.maxY);
-        for (const [idx, level] of n.lights) {
-          emitters.push([
-            n.cx * CHUNK_X + ((idx >> 12) & 15),
-            idx & 255,
-            n.cz * CHUNK_Z + ((idx >> 8) & 15),
-            level,
-          ]);
+  /** Copy a solved window into a chunk's cached light over columns
+   *  [xa, xb] x [za, zb]. Returns whether any cached value changed. */
+  private patchLight(n: Chunk, win: LightWindow, edits: number[],
+    xa: number, xb: number, za: number, zb: number): boolean {
+    // A block placed above or below everything the cache spans needs rows
+    // for the cells around it; their old contents were never read.
+    let lo = n.lightLo, hi = n.lightHi;
+    const ox = n.cx * CHUNK_X - 1, oz = n.cz * CHUNK_Z - 1;
+    for (let i = 0; i < edits.length; i += 3) {
+      const x = edits[i] - ox, z = edits[i + 2] - oz, y = edits[i + 1];
+      if (x < -1 || x > LIGHT_SPAN || z < -1 || z > LIGHT_SPAN) continue;
+      if (y - 1 < lo) lo = Math.max(0, y - 5);
+      if (y + 2 > hi) hi = Math.min(256, y + 6);
+    }
+    if (lo !== n.lightLo || hi !== n.lightHi) this.resizeLight(n, lo, hi);
+    const L = n.light!, H = hi - lo;
+    const { sky, blk, PZ, PH } = win;
+    const ya = Math.max(lo, win.y0), yb = Math.min(hi, win.y1);
+    let changed = false;
+    for (let x = Math.max(ox, xa), xe = Math.min(ox + LIGHT_SPAN - 1, xb); x <= xe; x++) {
+      for (let z = Math.max(oz, za), ze = Math.min(oz + LIGHT_SPAN - 1, zb); z <= ze; z++) {
+        const dst = ((x - ox) * LIGHT_SPAN + (z - oz)) * H - lo;
+        const src = ((x - win.minX + 1) * PZ + (z - win.minZ + 1)) * PH + 1 - win.y0;
+        for (let y = ya; y < yb; y++) {
+          const v = (sky[src + y] << 4) | blk[src + y];
+          if (L[dst + y] !== v) { L[dst + y] = v; changed = true; }
         }
       }
     }
-    const light = computeLight({
-      minX: (chunk.cx - 1) * CHUNK_X,
-      minZ: (chunk.cz - 1) * CHUNK_Z,
-      sizeX: CHUNK_X * 3,
-      sizeZ: CHUNK_Z * 3,
-      height: Math.min(256, height + 4),
-      getBlock: sampler,
-      emitters,
-    });
+    return changed;
+  }
 
+  /** Re-span a chunk's cached light; new rows read as open sky. */
+  private resizeLight(n: Chunk, lo: number, hi: number): void {
+    const old = n.light!, oldLo = n.lightLo, oldH = n.lightHi - oldLo, H = hi - lo;
+    const next = new Uint8Array(LIGHT_SPAN * LIGHT_SPAN * H).fill(15 << 4);
+    for (let col = 0; col < LIGHT_SPAN * LIGHT_SPAN; col++) {
+      const a = Math.max(lo, oldLo), b = Math.min(hi, oldLo + oldH);
+      if (b > a) next.set(old.subarray(col * oldH + a - oldLo, col * oldH + b - oldLo), col * H + a - lo);
+    }
+    n.light = next; n.lightLo = lo; n.lightHi = hi;
+  }
+
+  /** Solve the chunk's 3x3 light footprint and cache its bordered region. */
+  private solveChunkLight(chunk: Chunk): void {
+    const around: (Chunk | undefined)[] = [];
+    for (let dx = -1; dx <= 1; dx++)
+      for (let dz = -1; dz <= 1; dz++) around.push(this.chunkAt(chunk.cx + dx, chunk.cz + dz));
+    const [y0, y1] = lightYRange(around);
+    const minX = (chunk.cx - 1) * CHUNK_X, minZ = (chunk.cz - 1) * CHUNK_Z;
+    const win = solveLight(this.chunkAt, minX, minZ, CHUNK_X * 3, CHUNK_Z * 3, y0, y1);
+    const H = win.y1 - win.y0, size = LIGHT_SPAN * LIGHT_SPAN * H;
+    if (!chunk.light || chunk.light.length !== size) chunk.light = new Uint8Array(size);
+    chunk.lightLo = win.y0; chunk.lightHi = win.y1;
+    const L = chunk.light, { sky, blk, PZ, PH } = win;
+    const ox = chunk.cx * CHUNK_X - 1, oz = chunk.cz * CHUNK_Z - 1;
+    for (let x = 0; x < LIGHT_SPAN; x++) {
+      for (let z = 0; z < LIGHT_SPAN; z++) {
+        const dst = (x * LIGHT_SPAN + z) * H;
+        const src = ((ox + x - minX + 1) * PZ + (oz + z - minZ + 1)) * PH + 1;
+        for (let y = 0; y < H; y++) L[dst + y] = (sky[src + y] << 4) | blk[src + y];
+      }
+    }
+    chunk.relight = false;
+  }
+
+  /** The mesher's view of a chunk's cached light. */
+  private lightField(chunk: Chunk): LightField {
+    const L = chunk.light!, lo = chunk.lightLo, hi = chunk.lightHi, H = hi - lo;
+    const ox = chunk.cx * CHUNK_X - 1, oz = chunk.cz * CHUNK_Z - 1;
+    const at = (wx: number, wy: number, wz: number): number => {
+      const x = wx - ox, z = wz - oz;
+      if (wy >= hi || x < 0 || x >= LIGHT_SPAN || z < 0 || z >= LIGHT_SPAN) return 15 << 4;
+      return L[(x * LIGHT_SPAN + z) * H + (wy < lo ? 0 : wy - lo)];
+    };
+    return { sky: (x, y, z) => at(x, y, z) >> 4, block: (x, y, z) => at(x, y, z) & 15 };
+  }
+
+  private remesh(chunk: Chunk): void {
+    if (chunk.relight || !chunk.light) this.solveChunkLight(chunk);
+    this.disposeMeshes(chunk, true);
     const geo = buildChunkGeometry(
-      chunk, sampler, this.atlas,
-      (wx, wz) => this.gen.tints(wx, wz), light, this.smoothLighting
+      chunk, this.chunkAt, this.atlas,
+      (wx, wz) => this.gen.tints(wx, wz), this.lightField(chunk), this.smoothLighting
     );
     const px = chunk.cx * CHUNK_X, pz = chunk.cz * CHUNK_Z;
-    if (geo.opaque) {
-      const mesh = new THREE.Mesh(geo.opaque, this.opaqueMat);
+    for (const [g, mat, slot] of [[geo.opaque, this.opaqueMat, 'opaqueMesh'], [geo.cutout, this.cutoutMat, 'cutoutMesh']] as const) {
+      if (!g) continue;
+      const mesh = new THREE.Mesh(g, mat);
       // The shadow camera renders this layer and nothing else, so terrain casts
       // and the sky, the clouds and the water do not.
       mesh.layers.enable(SHADOW_CASTER_LAYER);
@@ -771,7 +893,7 @@ export class World {
       mesh.matrixAutoUpdate = false;
       mesh.updateMatrix();
       this.scene.add(mesh);
-      chunk.opaqueMesh = mesh;
+      chunk[slot] = mesh;
     }
     if (geo.water) {
       const mesh = new THREE.Mesh(geo.water, this.waterMat);
@@ -781,20 +903,25 @@ export class World {
       this.scene.add(mesh);
       chunk.waterMesh = mesh;
     }
+    this.refreshCrop(chunk);
     chunk.dirty = false;
     chunk.meshed = true;
   }
 
-  private disposeMeshes(chunk: Chunk): void {
-    for (const mesh of [chunk.opaqueMesh, chunk.waterMesh]) {
+  /** Drop a chunk's meshes. Unless it is about to remesh, its cached light
+   *  goes too: edits nearby stop patching it once it has no mesh. */
+  private disposeMeshes(chunk: Chunk, keepLight = false): void {
+    for (const mesh of [chunk.opaqueMesh, chunk.cutoutMesh, chunk.waterMesh]) {
       if (mesh) {
         this.scene.remove(mesh);
         mesh.geometry.dispose();
       }
     }
     chunk.opaqueMesh = null;
+    chunk.cutoutMesh = null;
     chunk.waterMesh = null;
     chunk.meshed = false;
+    if (!keepLight) { chunk.light = null; chunk.relight = true; }
   }
 
   /**
@@ -806,6 +933,11 @@ export class World {
     const start = performance.now();
     const pcx = Math.floor(px) >> 4;
     const pcz = Math.floor(pz) >> 4;
+    // Nothing moved, nothing went dirty, and the last pass meshed everything:
+    // skip walking every chunk and the whole spiral (hundreds of map lookups
+    // and key strings per frame at radius 10).
+    if (this.streamSettled && pcx === this.settledAt[0] && pcz === this.settledAt[1] && maxDist === this.settledAt[2])
+      return true;
     let done = true;
 
     // Cleanup must also run when the meshing budget is exhausted. Drop meshes
@@ -836,8 +968,16 @@ export class World {
       this.remesh(this.ensureData(cx, cz));
     }
 
+    // `done` means this pass found every chunk in range meshed and clean;
+    // anything that dirties or creates a chunk later clears the flag.
+    if (done) {
+      this.streamSettled = true;
+      this.settledAt[0] = pcx; this.settledAt[1] = pcz; this.settledAt[2] = maxDist;
+    }
     return done;
   }
+  private streamSettled = false;
+  private readonly settledAt = [0, 0, -1];
 
   /** Small, disconnected arenas need every island before play: a spawn-only
    * bubble can otherwise show distant furniture before its supporting terrain.

@@ -65,7 +65,7 @@ export class PartyPanel {
         <button class="w-btn primary" type="button" data-act="create">Create a party</button>
         <label class="w-field">Join with a code
           <span class="w-row">
-            <input class="w-input" id="w-party-code" maxlength="${PARTY_CODE_LENGTH + 2}" placeholder="ABC234" autocomplete="off" spellcheck="false" style="text-transform:uppercase;letter-spacing:4px" />
+            <input class="w-input" id="w-party-code" maxlength="${PARTY_CODE_LENGTH + 2}" placeholder="ABC234" autocomplete="off" autocapitalize="characters" autocorrect="off" enterkeyhint="go" spellcheck="false" style="text-transform:uppercase;letter-spacing:4px" />
             <button class="w-btn" type="button" data-act="join">Join</button>
           </span>
         </label>

@@ -1,6 +1,7 @@
 // Neutral avatar body, cosmetics and poses shared by gameplay and previews.
 // No roster, network, DOM labels or mode-specific body substitutions.
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { AvatarSurface, avatarTexture } from './avatartex';
 import {
   Cosmetics, EYE_COLORS, HAIR_COLORS, HAT_COLORS, PANTS_COLORS,
@@ -621,12 +622,37 @@ export function buildAvatarBody(
   }
 
   group.add(ll, rl, la, ra);
+  // Every box above is static relative to its pivot, so each pivot's boxes
+  // become one mesh per material layer: ~40 draw calls per body down to ~14.
+  for (const pivot of [group, headGroup, ll, rl, la, ra]) mergeStaticMeshes(pivot);
 
   const geometries = new Set<THREE.BufferGeometry>();
   group.traverse(o => {
     if ((o as THREE.Mesh).isMesh) geometries.add((o as THREE.Mesh).geometry);
   });
   return { group, head: headGroup, parts: [ll, rl, la, ra], materials, geometries: [...geometries] };
+}
+
+/** Merge a pivot's direct mesh children that share a material into one mesh
+ *  (positions baked in). Children with children of their own are left alone. */
+function mergeStaticMeshes(parent: THREE.Object3D): void {
+  const byMaterial = new Map<THREE.Material, THREE.Mesh[]>();
+  for (const child of parent.children) {
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh || mesh.children.length || Array.isArray(mesh.material)) continue;
+    const list = byMaterial.get(mesh.material) ?? [];
+    list.push(mesh);
+    byMaterial.set(mesh.material, list);
+  }
+  for (const [material, meshes] of byMaterial) {
+    if (meshes.length < 2) continue;
+    const parts = meshes.map(m => { m.updateMatrix(); return m.geometry.clone().applyMatrix4(m.matrix); });
+    const merged = mergeGeometries(parts, false);
+    for (const part of parts) part.dispose();
+    if (!merged) continue;
+    for (const m of meshes) { parent.remove(m); m.geometry.dispose(); }
+    parent.add(new THREE.Mesh(merged, material));
+  }
 }
 
 const disposedBodies = new WeakSet<AvatarBody>();

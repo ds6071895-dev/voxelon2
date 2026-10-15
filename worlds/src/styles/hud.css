@@ -989,7 +989,7 @@
     .duel-result {
       --rank: #43c2f5; --rank-accent: #c4efff; --rank-shade: #0b2836;
       position: absolute; inset: 0; z-index: 30; display: none; align-items: center;
-      justify-content: center; overflow: auto;
+      align-items: safe center; justify-content: center; overflow: auto;
       padding: calc(20px + var(--safe-top)) 20px calc(20px + var(--safe-bottom));
       font-family: ui-sans-serif, -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif;
     }

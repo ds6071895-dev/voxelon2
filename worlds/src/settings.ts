@@ -66,7 +66,18 @@ interface AccessibilitySettings {
   /** Multiplier on raw mouse/touch look deltas. 1 = the historical feel. */
   lookSensitivity: number;
   graphicsQuality: GraphicsQuality;
+  /** True until the player picks a preset by hand: boot uses the device
+   *  guess from device_profile.ts instead of the stored preset. */
+  graphicsAuto: boolean;
+  /** Which controller drives play. `auto` follows the last pointer used. */
+  controlMode: ControlMode;
+  /** Touch look speed, separate from the mouse's. */
+  touchLookSensitivity: number;
+  invertY: boolean;
 }
+
+export type ControlMode = 'auto' | 'touch' | 'mouse';
+const CONTROL_MODES: ControlMode[] = ['auto', 'touch', 'mouse'];
 
 const DEFAULT_ACCESSIBILITY: AccessibilitySettings = {
   effectsVolume: 0.8,
@@ -75,25 +86,36 @@ const DEFAULT_ACCESSIBILITY: AccessibilitySettings = {
   photosensitivitySafe: false,
   lookSensitivity: 1,
   graphicsQuality: 'high',
+  graphicsAuto: true,
+  controlMode: 'auto',
+  touchLookSensitivity: 1,
+  invertY: false,
 };
 
 function sanitizeAccessibility(raw: unknown): AccessibilitySettings {
   const x = raw && typeof raw === 'object' ? raw as Partial<AccessibilitySettings> : {};
   const volume = (v: unknown, d: number): number =>
     typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : d;
+  const sens = (v: unknown, d: number): number => typeof v === 'number' && Number.isFinite(v)
+    ? Math.max(MIN_LOOK_SENSITIVITY, Math.min(MAX_LOOK_SENSITIVITY, v)) : d;
   return {
     effectsVolume: volume(x.effectsVolume, DEFAULT_ACCESSIBILITY.effectsVolume),
     cameraShake: volume(x.cameraShake, DEFAULT_ACCESSIBILITY.cameraShake),
     reducedMotion: x.reducedMotion === true,
     photosensitivitySafe: x.photosensitivitySafe === true,
-    lookSensitivity: typeof x.lookSensitivity === 'number' && Number.isFinite(x.lookSensitivity)
-      ? Math.max(MIN_LOOK_SENSITIVITY, Math.min(MAX_LOOK_SENSITIVITY, x.lookSensitivity))
-      : DEFAULT_ACCESSIBILITY.lookSensitivity,
+    lookSensitivity: sens(x.lookSensitivity, DEFAULT_ACCESSIBILITY.lookSensitivity),
     graphicsQuality:
       typeof x.graphicsQuality === 'string'
         && (GRAPHICS_ORDER as string[]).includes(x.graphicsQuality)
         ? x.graphicsQuality as GraphicsQuality
         : DEFAULT_ACCESSIBILITY.graphicsQuality,
+    // Saves from before auto detection stored the old default ('high') even
+    // when nobody chose it, so only a different stored preset counts as a pick.
+    graphicsAuto: typeof x.graphicsAuto === 'boolean' ? x.graphicsAuto
+      : x.graphicsQuality === undefined || x.graphicsQuality === 'high',
+    controlMode: CONTROL_MODES.includes(x.controlMode as ControlMode) ? x.controlMode as ControlMode : 'auto',
+    touchLookSensitivity: sens(x.touchLookSensitivity, DEFAULT_ACCESSIBILITY.touchLookSensitivity),
+    invertY: x.invertY === true,
   };
 }
 

@@ -15,6 +15,19 @@ const ICON_FOLIAGE = '#71a83d';
 const modelIconCache = new Map<number, HTMLCanvasElement>();
 let modelIconRenderer: THREE.WebGLRenderer | null | undefined;
 const ICON_RES = 128;
+/** Icons are rendered once and cached, so the WebGL context they need is
+ *  handed back a few seconds after the last one: phones cap live contexts and
+ *  every one holds GPU memory. The next uncached icon makes a fresh one. */
+let iconReleaseTimer = 0;
+function releaseIconRendererSoon(): void {
+  window.clearTimeout(iconReleaseTimer);
+  iconReleaseTimer = window.setTimeout(() => {
+    if (!modelIconRenderer) return;
+    modelIconRenderer.dispose();
+    modelIconRenderer.forceContextLoss();
+    modelIconRenderer = undefined;
+  }, 4000);
+}
 
 /** Render a real 3D model once (the Bounce Pad, guns), then
  * reuse the resulting transparent image in every hotbar and inventory slot.
@@ -94,6 +107,7 @@ function drawModelIcon(
   image.width = image.height = ICON_RES;
   image.getContext('2d')!.drawImage(modelIconRenderer.domElement, 0, 0);
   modelIconCache.set(itemId, image);
+  releaseIconRendererSoon();
   blitIcon(ctx, image);
   return true;
 }

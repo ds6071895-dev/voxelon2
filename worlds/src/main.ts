@@ -20,7 +20,8 @@ import { Block, BLOCKS, isReplaceable, isSolid } from './blocks';
 import { HeldItemView } from './held';
 import { HUD } from './hud';
 import { Input, FROZEN_INPUT } from './input';
-import { TouchControls, isTouchDevice } from './touch';
+import { TouchControls, isTouchDevice, prefersTouch } from './touch';
+import { detectDeviceProfile } from './device_profile';
 import './styles/hud_mods.css';
 import './styles/hud_settings.css';
 import './styles/wardrobe.css';
@@ -80,7 +81,7 @@ import { RS } from './ratseek_rules';
 import { BedwarsClient } from './bedwars_client';
 import { BedwarsSetup } from './ui/bedwars_setup';
 import { BW_BOUNDS } from './bedwars_map';
-import { BW_TEAM_COLORS } from './bedwars_rules';
+import { BW, BW_TEAM_COLORS } from './bedwars_rules';
 import { MODE_LABELS, BRIDGE_COLORS } from './ui/presentation';
 import { Screens } from './client/screens';
 import { WorldReadiness } from './client/world_readiness';
@@ -130,6 +131,8 @@ statusEl.style.display = 'none';
 // ── Renderer ───────────────────────────────────────────────────────────────
 
 const accessibility = loadAccessibility();
+const deviceProfile = detectDeviceProfile();
+if (accessibility.graphicsAuto) accessibility.graphicsQuality = deviceProfile.quality;
 const comfort = new Comfort(accessibility);
 function fatalScreen(heading: string, detail: string): void {
   document.body.innerHTML =
@@ -197,13 +200,23 @@ const hudSettings = loadHudSettings();
 applyHudTheme(hudSettings.theme);
 const input = new Input(renderer.domElement);
 input.setBinds(hudSettings.binds);
-const isMobile = isTouchDevice();
-const touch = isMobile ? new TouchControls(input, {
+input.controlMode = accessibility.controlMode;
+const touch = accessibility.controlMode === 'touch' || (accessibility.controlMode === 'auto' && isTouchDevice())
+  ? new TouchControls(input, {
   onPause: () => {
     if (screens.state === 'paused') { resumePlay(); return; }
     if (screens.state === 'playing') screens.enterPause();
   },
 }) : null;
+/** Phone-style layout and on-screen controls follow the live controller. */
+function syncTouchMode(on: boolean): void {
+  document.documentElement.classList.toggle('touch-ui', on);
+  input.lookSensitivity = on ? accessibility.touchLookSensitivity : accessibility.lookSensitivity;
+}
+input.onTouchModeChange = syncTouchMode;
+input.setTouchMode(!!touch && (accessibility.controlMode === 'touch' || prefersTouch()));
+syncTouchMode(input.touchMode);
+const isMobile = prefersTouch();
 const inventory = new Inventory();
 const interaction = new Interaction(scene, world, player, cracks, inventory);
 const sky = new Sky(scene, TEXTURE_SEED);
@@ -273,9 +286,16 @@ window.addEventListener('resize', () => {
 /** Device pixel ratio for the current screen. Bedwars is the largest world, so
  *  its fill rate is capped lower than the preset allows on high-DPI screens. */
 let bedwarsPixelCap = false;
+/** Dynamic resolution for the presets without the shader stack (which has its
+ *  own tiers): steps the render scale down while frames run long, and back up
+ *  after a clean stretch. Never below 0.6 device pixels per CSS pixel. */
+const RES_SCALE = [1, 0.85, 0.72, 0.6] as const;
+const resolutionBudget = new ShaderBudget(RES_SCALE.length - 1);
 function renderPixelRatio(quality: GraphicsQuality = accessibility.graphicsQuality): number {
   const cap = GRAPHICS_PRESETS[quality].pixelRatioCap;
-  return Math.min(window.devicePixelRatio, bedwarsPixelCap ? Math.min(cap, 1.5) : cap);
+  const base = Math.min(window.devicePixelRatio, bedwarsPixelCap ? Math.min(cap, 1.5) : cap);
+  if (GRAPHICS_PRESETS[quality].shaders) return base;
+  return Math.min(base, Math.max(0.6, base * RES_SCALE[resolutionBudget.tier]));
 }
 function syncPixelRatio(inBedwars: boolean): void {
   bedwarsPixelCap = inBedwars;
@@ -295,11 +315,19 @@ function applyGraphicsQuality(quality: GraphicsQuality): void {
   postfx.setSize(window.innerWidth, window.innerHeight);
   sunShadow.setEnabled(preset.shaders);
   shaderBudget.reset();
+  resolutionBudget.reset();
   postfx.setTier(0);
   sunShadow.setTier(0);
   sky.setShaders(preset.shaders);
   sky.setDetail(GRAPHICS_ORDER.indexOf(quality) <= GRAPHICS_ORDER.indexOf('medium') ? 1 : 0);
   world.shaderModeUniform.value = preset.shaders ? 1 : 0;
+  document.documentElement.dataset.gfx = quality;
+  audio.lite = quality === 'low';
+  particles.setLimit(quality === 'low' ? 80 : quality === 'medium' ? 150 : 250);
+  const lite = GRAPHICS_ORDER.indexOf(quality) <= GRAPHICS_ORDER.indexOf('medium');
+  backdrop.setLite(lite);
+  atlas.texture.anisotropy = lite ? Math.min(4, renderer.capabilities.getMaxAnisotropy()) : renderer.capabilities.getMaxAnisotropy();
+  atlas.texture.needsUpdate = true;
 }
 
 // ── Settings (pause menu) ──────────────────────────────────────────────────
@@ -312,7 +340,11 @@ const lookSensInput = document.getElementById('look-sensitivity') as HTMLInputEl
 const lookSensValue = document.getElementById('look-sensitivity-value')!;
 const graphicsInput = document.getElementById('graphics-quality') as HTMLSelectElement;
 lookSensInput.value = String(accessibility.lookSensitivity);
-graphicsInput.value = accessibility.graphicsQuality;
+const autoOption = document.createElement('option');
+autoOption.value = 'auto';
+autoOption.textContent = `Auto (${graphicsInput.querySelector(`option[value="${deviceProfile.quality}"]`)?.textContent?.replace(/ \(.*\)$/, '') ?? deviceProfile.quality})`;
+graphicsInput.prepend(autoOption);
+graphicsInput.value = accessibility.graphicsAuto ? 'auto' : accessibility.graphicsQuality;
 effectsVolumeInput.value = String(accessibility.effectsVolume);
 cameraShakeInput.value = String(accessibility.cameraShake);
 reducedMotionInput.checked = accessibility.reducedMotion;
@@ -324,8 +356,9 @@ function saveAccessUi(): void {
   accessibility.reducedMotion = reducedMotionInput.checked;
   accessibility.photosensitivitySafe = safeEffectsInput.checked;
   accessibility.lookSensitivity = Math.max(MIN_LOOK_SENSITIVITY, Math.min(MAX_LOOK_SENSITIVITY, Number(lookSensInput.value)));
-  const quality = graphicsInput.value as GraphicsQuality;
-  input.lookSensitivity = accessibility.lookSensitivity;
+  accessibility.graphicsAuto = graphicsInput.value === 'auto';
+  const quality = accessibility.graphicsAuto ? deviceProfile.quality : graphicsInput.value as GraphicsQuality;
+  input.lookSensitivity = input.touchMode ? accessibility.touchLookSensitivity : accessibility.lookSensitivity;
   lookSensValue.textContent = `${accessibility.lookSensitivity.toFixed(2)}×`;
   if (quality !== accessibility.graphicsQuality || !graphicsApplied) {
     accessibility.graphicsQuality = quality;
@@ -341,6 +374,34 @@ function saveAccessUi(): void {
     el.style.setProperty('--fill', `${((Number(el.value) - min) / (max - min)) * 100}%`);
   }
 }
+const touchLookInput = document.getElementById('touch-look-sensitivity') as HTMLInputElement;
+const touchLookValue = document.getElementById('touch-look-sensitivity-value')!;
+const invertYInput = document.getElementById('invert-y') as HTMLInputElement;
+const controlModeInput = document.getElementById('control-mode') as HTMLSelectElement;
+const cameraViewInput = document.getElementById('camera-view') as HTMLSelectElement;
+for (const el of document.querySelectorAll<HTMLElement>('[data-touch-only]')) el.hidden = !touch;
+touchLookInput.value = String(accessibility.touchLookSensitivity);
+invertYInput.checked = accessibility.invertY;
+input.invertY = accessibility.invertY;
+controlModeInput.value = accessibility.controlMode;
+cameraViewInput.addEventListener('change', () => setView(Number(cameraViewInput.value) as View));
+function saveControlUi(): void {
+  accessibility.touchLookSensitivity = Math.max(MIN_LOOK_SENSITIVITY, Math.min(MAX_LOOK_SENSITIVITY, Number(touchLookInput.value)));
+  touchLookValue.textContent = `${accessibility.touchLookSensitivity.toFixed(2)}×`;
+  accessibility.invertY = invertYInput.checked;
+  input.invertY = accessibility.invertY;
+  const mode = controlModeInput.value as typeof accessibility.controlMode;
+  if (mode !== accessibility.controlMode) {
+    accessibility.controlMode = mode;
+    input.controlMode = mode;
+    if (mode !== 'auto') input.setTouchMode(mode === 'touch');
+  }
+  syncTouchMode(input.touchMode);
+  touchLookInput.style.setProperty('--fill', `${((Number(touchLookInput.value) - 0.25) / 2.75) * 100}%`);
+  saveAccessibility(accessibility);
+}
+saveControlUi();
+for (const el of [touchLookInput, invertYInput, controlModeInput]) el.addEventListener('input', saveControlUi);
 for (const el of [effectsVolumeInput, cameraShakeInput, reducedMotionInput, safeEffectsInput, lookSensInput, graphicsInput]) {
   el.addEventListener('input', saveAccessUi);
 }
@@ -405,7 +466,7 @@ const hudSettingsPanel = createHudSettingsPanel(app, {
 });
 document.getElementById('hud-settings-btn')!.addEventListener('click', () => screens.showOverlay(() => hudSettingsPanel.show()));
 
-const controlsSheet = new ControlsSheet(app, () => hudSettings.binds, isMobile, () => screens.restorePause());
+const controlsSheet = new ControlsSheet(app, () => hudSettings.binds, () => input.touchMode, () => screens.restorePause());
 screens.register(controlsSheet);
 screens.register(hudSettingsPanel);
 screens.register({ get open() { return hudMods.editing; }, hide: () => hudMods.endEdit() });
@@ -438,7 +499,9 @@ const homeRoot = document.getElementById('w-home')!;
 const titlePreview = (() => {
   const previewRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   previewRenderer.setClearColor(0x000000, 0);
-  previewRenderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+  // A small canvas keeps its MSAA, but follows the preset's resolution cap:
+  // it renders every title frame alongside the backdrop.
+  previewRenderer.setPixelRatio(Math.min(2, window.devicePixelRatio, Math.max(1, GRAPHICS_PRESETS[accessibility.graphicsQuality].pixelRatioCap)));
   previewHost.appendChild(previewRenderer.domElement);
   const previewScene = new THREE.Scene();
   const previewCam = new THREE.PerspectiveCamera(36, 1, 0.1, 30);
@@ -730,6 +793,8 @@ function enterMatchWorld(spec: WorldSpec, kind: MatchKind, mode: GameMode, spawn
     sky.snapTo(kind === 'pg' ? parkourTheme(spec.seed).time : kind === 'rs' ? RS_TIME_OF_DAY : 0.25);
   }
   home.hide();
+  // Low-memory presets drop the title valley's meshes while a match runs.
+  if (GRAPHICS_ORDER.indexOf(accessibility.graphicsQuality) <= GRAPHICS_ORDER.indexOf('medium')) backdrop.suspend();
   accountDialog.close();
   partyPanel.close();
   bwSetup.close();
@@ -1590,10 +1655,15 @@ net.onRsResult = (result) => {
   player.pitch = 0;
 };
 
+let rsSwingReadyAt = 0;
 /** Rat and Seek clicks: a seeker's swing, and right-click item use. */
 function updateRatSeekInput(lookDir: THREE.Vector3, eye: THREE.Vector3): void {
   const stack = inventory.selectedStack;
-  if (input.leftClicked) {
+  // One swing per RS.HIT_COOLDOWN_MS, from a click or from holding the button
+  // (mouse or HIT): a fast clicker and a thumb get the same number of swings.
+  const now = performance.now();
+  if ((input.leftClicked || input.leftDown) && now >= rsSwingReadyAt) {
+    rsSwingReadyAt = now + RS.HIT_COOLDOWN_MS;
     held.swing();
     if (rsClient.role === 'human' && rsClient.phase() === 'hunting') {
       const hit = rsClient.targetUnderCrosshair(eye, lookDir, RS.REACH + 0.3);
@@ -1626,13 +1696,23 @@ function updateMobileAim(dt: number): void {
   const gun = id !== undefined && !!ITEMS[id]?.gun;
   const bridge = pgWeaponsActive() && (id === Item.BridgeBow || id === Item.IronAxe);
   const seeker = match?.kind === 'rs' && rsClient.role === 'human' && rsClient.phase() === 'hunting';
-  if (!(match?.kind === 'duel' && gun) && !bridge && !seeker) return;
-  const active = input.mouseDX !== 0 || input.mouseDY !== 0 || input.leftDown || input.rightClicked;
+  // Bedwars swords get the same nudge, but only mid-swing: never while
+  // bridging or just looking around, where it would drag the camera.
+  const bwMelee = match?.kind === 'bw' && !bwClient.spectating && id !== undefined && ITEMS[id]?.tool?.type === 'sword';
+  if (!(match?.kind === 'duel' && gun) && !bridge && !seeker && !bwMelee) return;
+  const active = bwMelee ? input.leftDown
+    : input.mouseDX !== 0 || input.mouseDY !== 0 || input.leftDown || input.rightClicked;
   if (!active) return;
   const points: AimPoint[] = [];
   const myTeam = pgSnapshot?.participants.find(p => p.id === net.myId)?.team;
+  const bwPlayers = bwMelee ? bwClient.snap?.players : undefined;
+  const bwTeam = bwPlayers?.find(p => p.id === net.myId)?.team;
   for (const [remoteId, r] of net.remotes) {
     if (remoteId === net.myId || r.dead) continue;
+    if (bwPlayers) {
+      const p = bwPlayers.find(p => p.id === remoteId);
+      if (!p?.alive || p.team === bwTeam) continue;
+    }
     if (bridge) {
       const p = pgSnapshot?.participants.find(p => p.id === remoteId);
       if (!p?.connected || p.team === myTeam) continue;
@@ -1646,7 +1726,7 @@ function updateMobileAim(dt: number): void {
   }
   if (seeker) points.push(...rsClient.decoyAimPoints());
   const eye = player.eyePosition;
-  const range = seeker ? RS.REACH : id === Item.IronAxe ? PARTY_MELEE_REACH : 40;
+  const range = seeker ? RS.REACH : bwMelee ? BW.MELEE_REACH : id === Item.IronAxe ? PARTY_MELEE_REACH : 40;
   const adjusted = aimAssist(player.yaw, player.pitch, eye, points, range, dt, active, point => {
     const direction = new THREE.Vector3(point.x, point.y, point.z).sub(eye);
     const distance = direction.length();
@@ -1763,10 +1843,12 @@ function updateViewCamera(): void {
   }
   viewCamera.position.copy(eye).addScaledVector(boomDir, dist);
 }
-function cycleView(): void {
-  view = ((view + 1) % 3) as View;
+function cycleView(): void { setView(((view + 1) % 3) as View); }
+function setView(next: View): void {
+  view = next;
   toast(VIEW_NAMES[view], 1200);
   if (view === View.First) hideSelfAvatar();
+  cameraViewInput.value = String(view);
 }
 
 let selfBody: AvatarBody | null = null;
@@ -1827,22 +1909,77 @@ function updateAtmosphere(activeCamera: THREE.Camera): void {
   (scene.background as THREE.Color).copy(fog.color);
 }
 
+// ── Phones: full screen, landscape, and the on-screen keyboard ────────────
+// The first touch in a match asks for full screen and a landscape lock (both
+// need a user gesture; iOS Safari refuses both, which is fine). Asked once per
+// visit, so a player who leaves full screen is not dragged back into it.
+let fullscreenAsked = false;
+const standalone = window.matchMedia?.('(display-mode: standalone)').matches || window.matchMedia?.('(display-mode: fullscreen)').matches;
+document.addEventListener('pointerdown', e => {
+  if (fullscreenAsked || e.pointerType !== 'touch' || !match || !isMobile || standalone || document.fullscreenElement) return;
+  fullscreenAsked = true;
+  const root = document.documentElement;
+  if (!root.requestFullscreen) return;
+  root.requestFullscreen({ navigationUI: 'hide' }).then(() => {
+    const orientation = screen.orientation as ScreenOrientation & { lock?: (o: string) => Promise<void> };
+    return orientation?.lock?.('landscape');
+  }).catch(() => { /* not offered on this browser */ });
+}, true);
+// Portrait works, but a match reads far better sideways: say so once.
+const rotateHint = document.createElement('button');
+rotateHint.type = 'button';
+rotateHint.className = 'rotate-hint';
+rotateHint.textContent = 'Turn your phone sideways for the best view';
+rotateHint.hidden = true;
+app.appendChild(rotateHint);
+let rotateHintShown = false;
+rotateHint.addEventListener('click', () => { rotateHint.hidden = true; });
+function updateRotateHint(): void {
+  const portrait = window.innerHeight > window.innerWidth;
+  if (!rotateHintShown && isMobile && portrait && match && screens.state === 'playing') {
+    rotateHintShown = true;
+    rotateHint.hidden = false;
+    window.setTimeout(() => { rotateHint.hidden = true; }, 6000);
+  }
+  if (!portrait) rotateHint.hidden = true;
+}
+// Keep a focused text field above the on-screen keyboard.
+window.visualViewport?.addEventListener('resize', () => {
+  const active = document.activeElement;
+  if (active instanceof HTMLInputElement) active.scrollIntoView({ block: 'center' });
+});
+
 // ── The frame loop ─────────────────────────────────────────────────────────
 
 const clock = new THREE.Clock();
+const damageFlashEl = document.getElementById('damage-flash') as HTMLDivElement;
+/** Camera forward, reused every frame. */
+const lookScratch = new THREE.Vector3();
 let fps = 0, frames = 0, fpsTime = 0;
 let stepAccum = 0;
+/** DEV perf probe: raw frame intervals, worst streamer call and draw calls. */
+const perfProbe = { intervals: [] as number[], worldMs: 0, worldMax: 0, calls: 0, triangles: 0, last: 0,
+  reset() { this.intervals.length = 0; this.worldMax = 0; } };
 
 function frame(): void {
   requestAnimationFrame(frame);
   if (contextLost) return;
-  const dt = Math.min(0.05, clock.getDelta());
+  // Up to 0.1 s of game time per frame (player physics substeps at 0.05 s),
+  // so a device running under 20 FPS keeps real-time speed, not slow motion.
+  const dt = Math.min(0.1, clock.getDelta());
+  if (import.meta.env.DEV) {
+    const now = performance.now();
+    if (perfProbe.last) perfProbe.intervals.push(now - perfProbe.last);
+    if (perfProbe.intervals.length > 600) perfProbe.intervals.shift();
+    perfProbe.last = now;
+  }
   comfort.syncBody();
   frames++; fpsTime += dt;
   if (fpsTime >= 1) { fps = Math.round(frames / fpsTime); frames = 0; fpsTime = 0; }
   syncPointerLock();
   clickResumeEl.classList.toggle('visible', input.lockPending && !input.touchMode && shouldHoldPointer());
 
+  if (isMobile) updateRotateHint();
   if (!match) {
     // The menu: the living backdrop and nothing else.
     home.tick();
@@ -1903,14 +2040,15 @@ function frame(): void {
   if (touch) {
     const hs = inventory.selectedStack;
     touch.update({
-      shown: screens.state === 'playing' || screens.state === 'paused', playing: controlling && !duelSpectating,
-      gun: !!(hs && ITEMS[hs.id]?.gun),
+      shown: input.touchMode && (screens.state === 'playing' || screens.state === 'paused'), playing: controlling,
+      spectating: duelSpectating,
+      gun: !duelSpectating && !!(hs && ITEMS[hs.id]?.gun),
       action: match.kind === 'bw' ? 'interact' : match.kind === 'rs' ? (rsClient.role === 'human' ? 'interact' : hs ? 'use' : 'none')
         : !hs ? 'none' : ITEMS[hs.id]?.gun ? 'attack' : ITEMS[hs.id]?.kind === 'block' ? 'build'
         : hs.id === Item.IronAxe ? 'attack' : 'use',
       label: match.kind === 'bw' ? 'USE / SHOP' : match.kind === 'rs' ? 'USE' : hs?.id === Item.BridgeBow ? 'SHOOT' : hs && ITEMS[hs.id]?.heal ? 'HEAL'
         : hs?.id === Item.JumpBoost ? 'BOOST' : undefined,
-      context: `${match.mode}:${inventory.selected}:${hs?.id ?? 0}`,
+      context: `${match.mode}:${inventory.selected}:${hs?.id ?? 0}:${duelSpectating ? 'spec' : 'play'}`,
     });
   }
   const moveInput = controlling ? input : FROZEN_INPUT;
@@ -1925,7 +2063,14 @@ function frame(): void {
     rsClient.reducedMotion = comfort.reducedMotion;
     if (controlling) rsClient.steerDash(dt);
   }
-  player.update(dt, moveInput, world);
+  if (dt > 0.05) {
+    // The look delta belongs to the frame, not to each substep.
+    player.update(dt / 2, moveInput, world);
+    // Input's movement fields are prototype getters, so copy them by name.
+    const m = moveInput;
+    player.update(dt / 2, { mouseDX: 0, mouseDY: 0, moveX: m.moveX, moveY: m.moveY, forward: m.forward, back: m.back, left: m.left, right: m.right,
+      jump: m.jump, sneak: m.sneak, sprintKey: m.sprintKey, sprintHeld: m.sprintHeld }, world);
+  } else player.update(dt, moveInput, world);
   // Parkour throw pads: touching one sets your velocity outright.
   if (match.kind === 'pg' && pgSub?.game === 'parkour' && player.onGround && pgSnapshot?.phase === 'running') {
     const pad = parkourPadUnder(parkourCourse(pgSub.seed), player.pos.x - pgSub.minX, player.pos.y, player.pos.z - pgSub.minZ);
@@ -2013,13 +2158,21 @@ function frame(): void {
 
   const activeCamera: THREE.Camera = view === View.First ? camera : viewCamera;
   updateSelfAvatar(dt);
-  world.update(player.pos.x, player.pos.z, 6, match.kind === 'pg' || match.kind === 'bw' ? 10 : match.kind === 'rs' ? 5 : 3);
+  const worldStart = performance.now();
+  // Terrain past the fog wall is drawn in solid fog colour, so stream only
+  // what the fog can show (+1 chunk for the third-person camera offset).
+  const modeRadius = match.kind === 'pg' || match.kind === 'bw' ? 10 : match.kind === 'rs' ? 5 : 3;
+  world.update(player.pos.x, player.pos.z, 6, Math.min(modeRadius, Math.ceil((scene.fog as THREE.Fog).far / 16) + 1));
+  if (import.meta.env.DEV) {
+    perfProbe.worldMs = performance.now() - worldStart;
+    perfProbe.worldMax = Math.max(perfProbe.worldMax, perfProbe.worldMs);
+  }
   const tod = match.kind === 'pg' && pgSub ? parkourTheme(pgSub.seed).time : match.kind === 'rs' ? RS_TIME_OF_DAY : 0.25;
   sky.update(dt, activeCamera, tod);
   updateAtmosphere(activeCamera);
   particles.update(dt, activeCamera);
   if (controlling) {
-    const lookDir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+    const lookDir = lookScratch.set(0, 0, -1).applyQuaternion(camera.quaternion);
     remotePlayers.setHovered(remotePlayers.rayHit(player.eyePosition, lookDir, 60));
   } else remotePlayers.setHovered(-1);
   remotePlayers.update(dt);
@@ -2076,7 +2229,8 @@ function frame(): void {
     energy: player.energy,
     exhausted: player.exhausted,
   });
-  (document.getElementById('damage-flash') as HTMLDivElement).style.opacity = String(Math.min(0.35, player.damageFlash));
+  const flash = String(Math.min(0.35, player.damageFlash));
+  if (damageFlashEl.style.opacity !== flash) damageFlashEl.style.opacity = flash;
 
   const modsVisible = screens.state === 'playing';
   hudMods.setVisible(modsVisible);
@@ -2106,11 +2260,19 @@ function frame(): void {
   }
   input.endFrame();
   sunShadow.update(sky.lightDir, camera.position, sky.lightHeight, sky.moonlit, dt);
-  if (GRAPHICS_PRESETS[accessibility.graphicsQuality].shaders && !document.hidden && shaderBudget.sample(dt)) {
-    postfx.setTier(shaderBudget.tier);
-    sunShadow.setTier(shaderBudget.tier);
+  if (GRAPHICS_PRESETS[accessibility.graphicsQuality].shaders) {
+    if (!document.hidden && shaderBudget.sample(dt)) {
+      postfx.setTier(shaderBudget.tier);
+      sunShadow.setTier(shaderBudget.tier);
+    }
+  } else if (screens.state === 'playing' && !document.hidden && resolutionBudget.sample(dt)) {
+    renderer.setPixelRatio(renderPixelRatio());
   }
   postfx.render(activeCamera);
+  if (import.meta.env.DEV) {
+    perfProbe.calls = renderer.info.render.calls;
+    perfProbe.triangles = renderer.info.render.triangles;
+  }
 }
 
 applyLook(storedLook() ?? defaultCosmetics(0));
@@ -2119,5 +2281,6 @@ updateCamera();
 frame();
 
 if (import.meta.env.DEV) {
-  (window as unknown as { __worlds: unknown }).__worlds = { sky, player, world, camera, net, input, inventory, dragonView, bwClient, bwSetup, held, particles, interaction, atlas, pg: () => pgSnapshot };
+  (window as unknown as { __worlds: unknown }).__worlds = { sky, player, world, camera, net, input, inventory, dragonView, bwClient, bwSetup, held, particles, interaction, atlas, pg: () => pgSnapshot,
+    renderer, perf: perfProbe };
 }

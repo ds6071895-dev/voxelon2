@@ -214,8 +214,10 @@ export class Player {
     if (input.back) fwd -= 1;
     if (input.left) strafe -= 1;
     if (input.right) strafe += 1;
+    if (input.moveX || input.moveY) { strafe = input.moveX ?? 0; fwd = input.moveY ?? 0; }
+    // Digital diagonals normalise to 1; a partly pushed stick stays below it.
     const len = Math.hypot(fwd, strafe);
-    if (len > 0) { fwd /= len; strafe /= len; }
+    if (len > 1) { fwd /= len; strafe /= len; }
 
     const sin = Math.sin(this.yaw), cos = Math.cos(this.yaw);
     const dirX = -sin * fwd + cos * strafe;

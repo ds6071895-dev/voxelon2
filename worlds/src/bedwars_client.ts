@@ -94,9 +94,13 @@ export class BedwarsClient {
   private placeAt = 0;
   /** Face normal the held place button is building along. */
   private buildLock: [number, number, number] | null = null;
-  private reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  /** OS reduced-motion, kept from change events (read every frame). */
+  private reducedMotion = false;
 
   constructor(private readonly d: Deps) {
+    const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
+    this.reducedMotion = motion.matches;
+    motion.addEventListener?.('change', () => { this.reducedMotion = motion.matches; });
     this.predicted = new BwPredictions({ slots: d.inventory.slots, placed: this.placed,
       getBlock: (x, y, z) => d.world.getBlock(x, y, z), setBlock: (x, y, z, b) => d.world.setBlock(x, y, z, b),
       changed: () => { d.inventory.version++; } });
@@ -255,7 +259,7 @@ export class BedwarsClient {
   update(dt: number): void {
     if (!this.enabled) return;
     this.elapsed += Math.max(0, Math.min(dt, .1));
-    this.models?.update(this.reducedMotion.matches ? 0 : this.elapsed);
+    this.models?.update(this.reducedMotion ? 0 : this.elapsed);
     this.scene3d?.update(Math.min(dt, .1));
     const now = performance.now();
     if (this.shop.open && (this.d.player.health < this.previousHealth || this.frozen

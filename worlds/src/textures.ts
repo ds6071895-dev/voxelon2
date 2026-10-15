@@ -39,6 +39,10 @@ export interface Atlas {
   canvas: HTMLCanvasElement;
   /** uv rect [u0, v0, u1, v1] for a tile (v0 = bottom). */
   uvRect(tile: Tile): [number, number, number, number];
+  /** Does the tile's art have see-through pixels (leaves, glass, plants)?
+   *  Those faces go to the alpha-tested material; everything else is drawn
+   *  without a discard, which lets mobile GPUs reject hidden pixels early. */
+  cutout?(tile: Tile): boolean;
 }
 
 type RGBA = [number, number, number, number];
@@ -238,6 +242,7 @@ export function createAtlas(seed = 1337, maxAnisotropy = 1): Atlas {
   ctx.imageSmoothingEnabled = false;
 
   const painted: number[] = [];
+  const cutout = new Set<number>();
   for (const tile of new Set([...Object.keys(PAINTERS), ...Object.keys(WORLDS_ART), ...Object.keys(MANOR_ART), ...Object.keys(BEDWARS_ART)].map(Number))) {
     const p = new Painter();
     // Worlds' redesigned tiles are painted in their final colours; only the
@@ -245,6 +250,7 @@ export function createAtlas(seed = 1337, maxAnisotropy = 1): Atlas {
     const redesigned = WORLDS_ART[tile as Tile] ?? MANOR_ART[tile as Tile] ?? BEDWARS_ART[tile as Tile];
     if (redesigned) redesigned(p, seed ^ (tile * 7919));
     else { PAINTERS[tile](p, seed ^ (tile * 7919)); vibrance(p); }
+    for (let i = 3; i < p.data.length; i += 4) if (p.data[i] < 255) { cutout.add(tile); break; }
     const img = new ImageData(p.data, TILE_PX, TILE_PX);
     const { x, y } = tileOrigin(tile);
     ctx.putImageData(img, x, y);
@@ -280,6 +286,7 @@ export function createAtlas(seed = 1337, maxAnisotropy = 1): Atlas {
       const v0 = 1 - (y + TILE_PX - inset) / ATLAS_PX;
       return [u0, v0, u1, v1];
     },
+    cutout: (tile: Tile) => cutout.has(tile),
   };
 }
 

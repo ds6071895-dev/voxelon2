@@ -14,7 +14,7 @@ import type { World } from './world';
 
 interface DropView extends BwDropBody { id: number; item: number; count: number; group: THREE.Group; phase: number; shown: number }
 interface Fly { group: THREE.Group; from: THREE.Vector3; to: () => THREE.Vector3 | null; t: number; arc: number }
-interface GenTag { sprite: THREE.Sprite; canvas: HTMLCanvasElement; texture: THREE.CanvasTexture; text: string }
+interface GenTag { sprite: THREE.Sprite; ctx: CanvasRenderingContext2D; texture: THREE.CanvasTexture; text: string }
 interface ProjectileView { object: THREE.Group; target: THREE.Vector3; previous: THREE.Vector3; kind: string; at: number; fuse: number }
 
 const PICKUP_FLIGHT = 0.2;
@@ -115,18 +115,21 @@ export class BedwarsWorld {
       let tag = this.genTags.get(g.id);
       if (!tag) {
         const canvas = document.createElement('canvas'); canvas.width = 256; canvas.height = 112;
+        // Redrawn every second: a CPU-backed canvas uploads as a plain copy,
+        // where a GPU one stalls on a readback each time three.js uploads it.
+        const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
         const texture = new THREE.CanvasTexture(canvas); texture.colorSpace = THREE.SRGBColorSpace;
         const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false }));
         sprite.position.set(def.pos.x, def.pos.y + 2.25, def.pos.z); sprite.scale.set(1.5, 1.5 * 112 / 256, 1);
         this.group.add(sprite);
-        tag = { sprite, canvas, texture, text: '' };
+        tag = { sprite, ctx, texture, text: '' };
         this.genTags.set(g.id, tag);
       }
       const name = `${def.kind === 'diamond' ? 'Diamond' : 'Emerald'} ${'I'.repeat(Math.max(1, Math.min(3, g.tier)))}`;
       const text = `${name}|${Math.ceil(g.next)}`;
       if (text === tag.text) continue;
       tag.text = text;
-      const ctx = tag.canvas.getContext('2d')!;
+      const ctx = tag.ctx;
       ctx.clearRect(0, 0, 256, 112);
       ctx.fillStyle = 'rgba(255,255,255,.94)'; ctx.beginPath(); ctx.roundRect(6, 6, 244, 100, 20); ctx.fill();
       ctx.strokeStyle = def.kind === 'diamond' ? '#3fd3e0' : '#2fc46d'; ctx.lineWidth = 5;

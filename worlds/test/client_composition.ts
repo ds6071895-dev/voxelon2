@@ -37,10 +37,10 @@ export function runClientCompositionTests(): number {
     gate.reset(); assert.equal(callback, null);
   });
   test(() => {
-    const saved = { reducedMotion: false, photosensitivitySafe: false, cameraShake: .4 }, os = { matches: true };
+    const saved = { reducedMotion: false, photosensitivitySafe: false, cameraShake: .4 }, os = Object.assign(new EventTarget(), { matches: true });
     const comfort = new Comfort(saved, os);
     assert.equal(comfort.reducedMotion, true); assert.equal(saved.reducedMotion, false, 'effective OS preference never rewrites storage');
-    os.matches = false; assert.equal(comfort.reducedMotion, false);
+    os.matches = false; os.dispatchEvent(new Event('change')); assert.equal(comfort.reducedMotion, false, 'OS preference follows change events');
     saved.reducedMotion = true; assert.equal(comfort.reducedMotion, true);
     saved.photosensitivitySafe = true; assert.equal(comfort.photosensitivitySafe, true);
   });

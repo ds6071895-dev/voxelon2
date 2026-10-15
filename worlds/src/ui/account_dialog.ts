@@ -103,7 +103,7 @@ export class AccountDialog {
           </label>` : `
           <p class="w-lede">Sign in to the name you kept. Your party stays with you.</p>
           <label class="w-field">Name
-            <input class="w-input" id="w-acct-user" autocomplete="username" placeholder="e.g. SwiftFalcon42" maxlength="20" spellcheck="false" value="${esc(this.typedUser)}" />
+            <input class="w-input" id="w-acct-user" autocomplete="username" autocapitalize="none" autocorrect="off" placeholder="e.g. SwiftFalcon42" maxlength="20" spellcheck="false" value="${esc(this.typedUser)}" />
           </label>
           <label class="w-field">Passphrase
             <input class="w-input" id="w-acct-pass" type="password" autocomplete="current-password" placeholder="Your passphrase" />

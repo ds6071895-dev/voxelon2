@@ -63,7 +63,7 @@ export class HealingPresenter {
       this.label.textContent = `${f.name.toUpperCase()} · ${Math.max(0, f.remaining).toFixed(1)}s`;
     } else if (this.doneT > 0) {
       this.fill.style.width = '100%'; this.label.textContent = 'STIM IN — REGENERATING';
-    } else { this.bar.style.display = 'none'; this.bar.classList.remove('done'); }
+    } else if (this.bar.style.display !== 'none') { this.bar.style.display = 'none'; this.bar.classList.remove('done'); }
     if (this.buff > 0) {
       this.spiralT -= dt;
       if (this.spiralT <= 0) { this.spiralT = .09; this.particles.healSpiral(f.x, f.y + .15, f.z, f.time * 5.5); }
@@ -78,9 +78,12 @@ export class HealingPresenter {
       const breathe = this.comfort.reducedMotion ? .5 : .5 + Math.sin(f.time * 3.2) * .18;
       this.glow = Math.max(this.glow - dt * 1.6, .26 * breathe);
     } else this.glow = Math.max(0, this.glow - dt * 1.8);
-    this.glowEl.style.opacity = String(Math.min(this.comfort.photosensitivitySafe ? .22 : .5, this.glow * .55));
+    // Idle most of the time: skip style writes that would not change anything.
+    const glow = String(Math.min(this.comfort.photosensitivitySafe ? .22 : .5, this.glow * .55));
+    if (this.glowEl.style.opacity !== glow) this.glowEl.style.opacity = glow;
     this.squeeze = Math.max(0, this.squeeze - dt);
-    this.hearts.style.transform = this.squeeze > 0 && !this.comfort.reducedMotion ? 'scale(1.14)' : 'scale(1)';
+    const squeeze = this.squeeze > 0 && !this.comfort.reducedMotion ? 'scale(1.14)' : 'scale(1)';
+    if (this.hearts.style.transform !== squeeze) this.hearts.style.transform = squeeze;
   }
   reset(): void {
     this.glow = this.buff = this.squeeze = this.beatCount = this.tally = this.tallyFade = this.tickStep = this.spiralT = this.pulseT = this.doneT = 0;

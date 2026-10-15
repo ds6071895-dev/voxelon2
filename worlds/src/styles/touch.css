@@ -5,6 +5,8 @@
 #touch * { touch-action:none; user-select:none; -webkit-user-select:none; }
 .t-pads, .t-look { position:absolute; inset:0; }
 .t-look { pointer-events:auto; }
+.t-stick-zone { position:absolute; left:0; top:28%; bottom:0; width:42%; pointer-events:auto; }
+.t-stick.t-float { border-color:#ffffff60; background:#ffffff14; }
 .t-stick { position:absolute; left:var(--edge-l); bottom:calc(var(--edge-b) + 104px); width:112px; height:112px;
   border:2px solid #ffffff38; border-radius:50%; background:#ffffff0d; pointer-events:auto; }
 .t-knob { position:absolute; left:50%; top:50%; width:50px; height:50px; margin:-25px;

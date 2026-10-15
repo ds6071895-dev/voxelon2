@@ -179,3 +179,13 @@
 @media (prefers-reduced-motion: reduce) {
   .vx-ward, .vx-ward-shell, .vx-ward-thumb.pending { animation: none; }
 }
+/* Landscape phone: stage and picker side by side again — stacked, the
+   38vh stage left the item grid a strip a thumb high. */
+@media (max-height: 500px) and (orientation: landscape) {
+  .vx-ward-shell { grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); grid-template-rows: auto minmax(0, 1fr) auto; }
+  .vx-ward-stage { border-bottom: 0; border-right: 1px solid var(--line); }
+  .vx-ward-head { padding: 8px 14px; }
+  .vx-ward-title { font-size: 17px; }
+  .vx-ward-body { padding: 10px; }
+  .vx-ward-foot { padding: 6px 12px; }
+}

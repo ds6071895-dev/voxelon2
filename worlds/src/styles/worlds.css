@@ -340,6 +340,8 @@
   color: var(--w-ink); background: #fff; border: 1.5px solid rgba(18,32,50,.14);
   font-family: 'Lucida Console', Monaco, monospace; font-size: 15px; font-weight: 600; letter-spacing: .6px;
 }
+/* Under 16 px, iOS zooms the page into a focused field. */
+.touch-ui .w-input { font-size: 16px; }
 .w-input:focus { border-color: var(--w-focus); box-shadow: 0 0 0 4px rgba(45,110,224,.14); }
 .w-input[readonly] { background: linear-gradient(180deg, #fbf7ee, #f6efdf); border-color: rgba(227,161,42,.45); }
 .w-input::placeholder { color: #9aa9ba; font-family: ui-sans-serif, system-ui, sans-serif; letter-spacing: 0; font-weight: 500; }
@@ -459,6 +461,25 @@
   .w-card[data-mode="bedwars"] .w-card-sub { display: block; }
   .w-card:not([data-mode="bedwars"]) .w-card-go { align-self: stretch; justify-content: center; margin: 8px 10px 10px; }
   .w-card-go svg { display: none; }
+}
+
+/* ── Landscape phone: two columns again, tiles on the left above the fold,
+   a smaller character on the right (the ≤900 px rule stacked them). ── */
+@media (max-height: 500px) and (orientation: landscape) {
+  .w-top { min-height: 40px; }
+  .w-stage { grid-template-columns: minmax(0, 1fr) minmax(170px, .42fr); align-items: start; gap: 16px; padding: 4px 0; }
+  .w-right { order: 0; }
+  /* Margin: the name floats over the head, clear of the account chip. */
+  .w-stage-box { height: clamp(150px, 52vh, 260px); margin-top: 30px; }
+  .w-eyebrow { margin-bottom: 6px; }
+  .w-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .w-card { height: 104px; border-radius: 14px; }
+  .w-card[data-mode="bedwars"] { height: 124px; }
+  .w-card-sub, .w-card[data-mode="bedwars"] .w-card-sub { display: none; }
+  .w-card-go { margin: 6px 10px 10px; }
+  .w-card-go svg { display: none; }
+  .w-right-actions .w-btn { min-height: 44px; padding: 10px 14px; }
+  .w-card-badge { display: none; }
 }
 
 body.reduced-motion .w-home *, body.photosensitivity-safe .w-home * { animation: none !important; transition: none !important; }

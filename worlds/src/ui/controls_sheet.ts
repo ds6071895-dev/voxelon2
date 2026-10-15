@@ -53,8 +53,9 @@ function groups(k: Keybinds, touch: boolean): Group[] {
 export class ControlsSheet {
   private readonly panel = document.createElement('div');
   private readonly body = document.createElement('div');
+  private readonly eyebrow: HTMLElement;
 
-  constructor(host: HTMLElement, private readonly binds: () => Keybinds, private readonly touch: boolean,
+  constructor(host: HTMLElement, private readonly binds: () => Keybinds, private readonly touch: () => boolean,
     private readonly onClose?: () => void) {
     this.panel.className = 'sheet-scrim';
     const card = document.createElement('div');
@@ -66,7 +67,7 @@ export class ControlsSheet {
     head.className = 'sheet-head';
     const eyebrow = document.createElement('div');
     eyebrow.className = 'sheet-eyebrow';
-    eyebrow.textContent = touch ? 'Touch controls' : 'Keyboard & mouse';
+    this.eyebrow = eyebrow;
     const title = document.createElement('h2');
     title.className = 'sheet-title';
     title.textContent = 'Controls';
@@ -99,7 +100,8 @@ export class ControlsSheet {
 
   private render(): void {
     this.body.textContent = '';
-    for (const group of groups(this.binds(), this.touch)) {
+    this.eyebrow.textContent = this.touch() ? 'Touch controls' : 'Keyboard & mouse';
+    for (const group of groups(this.binds(), this.touch())) {
       const section = document.createElement('section');
       section.className = 'keygroup';
       const label = document.createElement('h3');

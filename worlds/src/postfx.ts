@@ -233,6 +233,8 @@ class LeanBloomPass extends UnrealBloomPass {
  */
 export class ShaderBudget {
   tier = 0;
+  /** Deepest tier: 2 for the shader stack, more for resolution steps. */
+  constructor(private readonly maxTier = 2) {}
   private slow = 0;
   private fast = 0;
   private avg = 1 / 60;
@@ -248,7 +250,7 @@ export class ShaderBudget {
     if (this.avg > 1 / 42) { this.slow += dt; this.fast = 0; }
     else if (this.avg < 1 / 57) { this.fast += dt; this.slow = 0; }
     else { this.slow = Math.max(0, this.slow - dt); this.fast = Math.max(0, this.fast - dt * 0.5); }
-    if (this.slow > 2 && this.tier < 2) {
+    if (this.slow > 2 && this.tier < this.maxTier) {
       // An upgrade that could not hold: wait longer before the next one.
       if (this.clock - this.lastUpAt < 12) this.holdUp = Math.min(120, this.holdUp * 2);
       this.tier++;

@@ -25,7 +25,7 @@ async function client(label, viewport = { width: 1440, height: 900 }) {
   // Keep full CSS viewport coverage while limiting software-GPU fill rate.
   const context = await browser.newContext({ viewport, deviceScaleFactor: .5 });
   await context.addInitScript(graphics => {
-    localStorage.setItem('worlds.accessibility', JSON.stringify({ graphicsQuality: graphics }));
+    localStorage.setItem('worlds.accessibility', JSON.stringify({ graphicsQuality: graphics, graphicsAuto: false }));
     const Native = window.WebSocket;
     window.__messages = []; window.__latest = {}; window.__ws = null;
     window.WebSocket = class extends Native {

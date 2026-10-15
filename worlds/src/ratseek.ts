@@ -245,7 +245,7 @@ export class RatSeekMatch {
     this.resetMotion(id);
     for (const m of [this.points, this.carried, this.tauntReady, this.dashReady, this.rattleReady,
       this.combos, this.comboUntil, this.escapes, this.catchesBy, this.cheeseGrabbed,
-      this.abilityReady, this.compassReady, this.swatReady]) m.delete(id);
+      this.abilityReady, this.compassReady, this.swatReady, this.hitReady]) m.delete(id);
     this.classes.delete(id); this.kits.delete(id); this.clearCompass(id);
     this.fxSent.delete(id); this.kitSent.delete(id);
     this.decoys = this.decoys.filter((d) => d.owner !== id);
@@ -367,7 +367,7 @@ export class RatSeekMatch {
       case Item.SeekerCompass: this.useCompass(id); return;
       case Item.EscapeCard:
         this.bar(id, this.cageOrder.length
-          ? `Banked escape ready — it saves you if caught. Or right-click the Cheese Exchange (${RS.RESCUE_COST} cheese) to free a rat.`
+          ? `Banked escape ready — it saves you if caught. Or use the Cheese Exchange (${RS.RESCUE_COST} cheese) to free a rat.`
           : 'Banked escape ready — it saves you automatically the next time you are caught.', GREEN);
         this.sound('click', undefined, id);
         return;
@@ -379,6 +379,11 @@ export class RatSeekMatch {
   /** A human seeker's left-click on a body (or a decoy). */
   handleHit(id: number, target: number, decoy: boolean): void {
     if (this.phase !== 'hunting' || !this.humans.has(id)) return;
+    // Every swing that reaches the server spends the cooldown, hit or miss
+    // (a little slack for packets that bunch up on the way).
+    const now = this.host.nowMs();
+    if (now < (this.hitReady.get(id) ?? 0)) return;
+    this.hitReady.set(id, now + RS.HIT_COOLDOWN_MS - 60);
     const eye = this.eye(id);
     if (decoy) {
       const d = this.decoys.find((v) => v.id === target);
@@ -389,10 +394,29 @@ export class RatSeekMatch {
     if (this.rats.get(target) !== 'free') return;
     const rat = this.host.body(target);
     if (!rat) return;
-    const mid = { x: rat.x, y: rat.y + 0.45, z: rat.z };
-    if (dist2(eye, mid) > (RS.REACH + 0.75) ** 2) return;
-    if (!this.lineClear(eye, mid) && !this.lineClear(eye, { x: rat.x, y: rat.y + 0.8, z: rat.z }) && !this.lowLineOfSight(id, target)) return;
+    // Where the rat is now, or was within the rewind window (what a seeker on
+    // a slower connection actually saw when they swung).
+    const inReach = (p: { x: number; y: number; z: number }): boolean =>
+      dist2(eye, { x: p.x, y: p.y + 0.45, z: p.z }) <= (RS.REACH + 0.75) ** 2;
+    const seen = [{ t: now, x: rat.x, y: rat.y, z: rat.z }, ...(this.ratTrack.get(target) ?? [])].some(p =>
+      now - p.t <= RS.HIT_REWIND_MS && inReach(p) &&
+      (this.lineClear(eye, { x: p.x, y: p.y + 0.45, z: p.z }) || this.lineClear(eye, { x: p.x, y: p.y + 0.8, z: p.z })));
+    if (!seen && !(inReach(rat) && this.lowLineOfSight(id, target))) return;
     this.cageRat(target, id);
+  }
+  private readonly hitReady = new Map<number, number>();
+  /** Recent free-rat positions, newest last, for the hit rewind. */
+  private readonly ratTrack = new Map<number, { t: number; x: number; y: number; z: number }[]>();
+  private recordRatTrack(): void {
+    const now = this.host.nowMs();
+    for (const id of this.freeRats()) {
+      const b = this.host.body(id);
+      if (!b) continue;
+      let track = this.ratTrack.get(id);
+      if (!track) this.ratTrack.set(id, track = []);
+      track.push({ t: now, x: b.x, y: b.y, z: b.z });
+      while (track.length && now - track[0].t > RS.HIT_REWIND_MS + TICK_MS) track.shift();
+    }
   }
 
   // ── Ticking ───────────────────────────────────────────────────────────────
@@ -425,6 +449,7 @@ export class RatSeekMatch {
 
   private step(): void {
     this.ticks++;
+    if (this.phase === 'hunting') this.recordRatTrack();
     if (this.phase === 'loading') {
       if (this.ticks % 20 === 0) this.tryStart();
       if (this.ticks % 2 === 0) this.broadcastState();
@@ -613,7 +638,8 @@ export class RatSeekMatch {
     for (const id of [...this.people, ...this.botIds]) {
       this.resetMotion(id); this.clearCompass(id);
       this.combos.delete(id); this.comboUntil.delete(id);
-      for (const m of [this.tauntReady, this.dashReady, this.rattleReady, this.abilityReady, this.swatReady, this.compassReady]) m.delete(id);
+      for (const m of [this.tauntReady, this.dashReady, this.rattleReady, this.abilityReady, this.swatReady, this.compassReady, this.hitReady]) m.delete(id);
+      this.ratTrack.delete(id);
       const kit = this.kits.get(id);
       if (kit) kit.lightOn = false;
       if (this.people.has(id)) { this.syncFx(id); this.syncKit(id); }

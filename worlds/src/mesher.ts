@@ -5,7 +5,7 @@
 
 import * as THREE from 'three';
 import type { ColumnTints, Tint } from './tints';
-import { Block, BLOCKS, isOpaque, occludesAO, Tile } from './blocks';
+import { Block, BLOCKS, isOpaque as blockOpaque, occludesAO as blockOccludesAO, Tile } from './blocks';
 import { Chunk, CHUNK_X, CHUNK_Z } from './chunk';
 import type { LightField } from './light';
 import type { Atlas } from './textures';
@@ -86,20 +86,72 @@ const FACES: FaceDef[] = [
 
 const AO_CURVE = [0.45, 0.65, 0.82, 1.0];
 
+// Opacity and corner occlusion by id, looked up a few dozen times per face.
+let opaqueTable: Uint8Array | null = null, aoTable: Uint8Array | null = null;
+function tables(): void {
+  opaqueTable = new Uint8Array(256); aoTable = new Uint8Array(256);
+  for (let id = 0; id < 256; id++) {
+    opaqueTable[id] = blockOpaque(id) ? 1 : 0;
+    aoTable[id] = blockOccludesAO(id) ? 1 : 0;
+  }
+}
+const isOpaque = (id: number): boolean => opaqueTable![id] === 1;
+const occludesAO = (id: number): boolean => aoTable![id] === 1;
+
+/** Block ids of a chunk plus a one-cell border (everything a face, its corner
+ *  occlusion and its smooth light can read), y in [lo, hi). Reused. */
+let volume = new Uint8Array(0);
+const VOL = CHUNK_X + 2;
+
 export type BlockSampler = (wx: number, wy: number, wz: number) => number;
 type TintSampler = (wx: number, wz: number) => ColumnTints;
 
 /** What the chunk shader needs to know about a surface, per vertex. */
 const enum SurfaceKind { Solid = 0, Plant = 1, Leaves = 2, Water = 3 }
 
+/** A growable typed array: chunk geometry is written straight into float32
+ *  storage, reused from mesh to mesh, instead of JS arrays copied afterwards. */
+class Floats {
+  a = new Float32Array(4096);
+  n = 0;
+  private room(k: number): void {
+    if (this.n + k <= this.a.length) return;
+    const b = new Float32Array(Math.max(this.a.length * 2, this.n + k));
+    b.set(this.a);
+    this.a = b;
+  }
+  p2(x: number, y: number): void { this.room(2); const a = this.a; a[this.n++] = x; a[this.n++] = y; }
+  p3(x: number, y: number, z: number): void {
+    this.room(3); const a = this.a; a[this.n++] = x; a[this.n++] = y; a[this.n++] = z;
+  }
+  attribute(itemSize: number): THREE.BufferAttribute {
+    return new THREE.BufferAttribute(this.a.slice(0, this.n), itemSize);
+  }
+}
+
+class Indices {
+  a = new Uint32Array(4096);
+  n = 0;
+  p6(i0: number, i1: number, i2: number, i3: number, i4: number, i5: number): void {
+    if (this.n + 6 > this.a.length) { const b = new Uint32Array(this.a.length * 2); b.set(this.a); this.a = b; }
+    const a = this.a;
+    a[this.n++] = i0; a[this.n++] = i1; a[this.n++] = i2; a[this.n++] = i3; a[this.n++] = i4; a[this.n++] = i5;
+  }
+}
+
 class GeoBuffer {
-  positions: number[] = [];
-  colors: number[] = [];
-  uvs: number[] = [];
-  lights: number[] = []; // (sky, block) per vertex, normalized 0-1
+  positions = new Floats();
+  colors = new Floats();
+  uvs = new Floats();
+  lights = new Floats(); // (sky, block) per vertex, normalized 0-1
   /** (kind, emission 0..1, wind sway 0..1) per vertex — see world.ts. */
-  info: number[] = [];
-  indices: number[] = [];
+  info = new Floats();
+  indices = new Indices();
+
+  reset(): this {
+    this.positions.n = this.colors.n = this.uvs.n = this.lights.n = this.info.n = this.indices.n = 0;
+    return this;
+  }
 
   quad(
     face: FaceDef, bx: number, by: number, bz: number,
@@ -115,23 +167,23 @@ class GeoBuffer {
     cornerSky?: number[], cornerBlock?: number[],
     kind: SurfaceKind = SurfaceKind.Solid, emission = 0
   ): void {
-    const base = this.positions.length / 3;
+    const base = this.positions.n / 3;
     const sway = kind === SurfaceKind.Leaves ? 0.35 : 0;
     const [u0, v0, u1, v1] = uvRect;
     for (let i = 0; i < 4; i++) {
       const c = face.corners[i];
       let y = by + c.pos[1];
       if (topOffset && c.pos[1] === 1) y -= topOffset;
-      this.positions.push(bx + c.pos[0], y, bz + c.pos[2]);
+      this.positions.p3(bx + c.pos[0], y, bz + c.pos[2]);
       const b = face.shade * AO_CURVE[ao[i]];
       const vt = tintBottom && c.pos[1] === 0 ? tintBottom : tint;
-      this.colors.push(b * vt[0], b * vt[1], b * vt[2]);
-      this.uvs.push(u0 + (u1 - u0) * c.uv[0], v0 + (v1 - v0) * c.uv[1]);
-      this.lights.push(
+      this.colors.p3(b * vt[0], b * vt[1], b * vt[2]);
+      this.uvs.p2(u0 + (u1 - u0) * c.uv[0], v0 + (v1 - v0) * c.uv[1]);
+      this.lights.p2(
         (cornerSky ? cornerSky[i] : skyL) / 15,
         (cornerBlock ? cornerBlock[i] : blockL) / 15
       );
-      this.info.push(kind, emission, sway);
+      this.info.p3(kind, emission, sway);
     }
     // Split the quad along the diagonal that interpolates it best. With
     // smooth lighting the corners differ in LIGHT as well as occlusion, and
@@ -145,9 +197,9 @@ class GeoBuffer {
       d03 = lum(0) + lum(3); d12 = lum(1) + lum(2);
     }
     if (d03 > d12) {
-      this.indices.push(base, base + 1, base + 3, base, base + 3, base + 2);
+      this.indices.p6(base, base + 1, base + 3, base, base + 3, base + 2);
     } else {
-      this.indices.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
+      this.indices.p6(base, base + 1, base + 2, base + 2, base + 1, base + 3);
     }
   }
 
@@ -164,26 +216,24 @@ class GeoBuffer {
       [0.15, 0.85, 0.85, 0.15],
     ];
     for (const [x1, z1, x2, z2] of diags) {
-      const base = this.positions.length / 3;
+      const base = this.positions.n / 3;
       // Corner (a, h, b): `h` runs along the sprite's length, (a, b) across.
       const corner = (a: number, h: number, b: number): void => {
-        if (axis === 'x') this.positions.push(bx + h, by + a, bz + b);
-        else if (axis === 'z') this.positions.push(bx + a, by + b, bz + h);
-        else this.positions.push(bx + a, by + h, bz + b);
+        if (axis === 'x') this.positions.p3(bx + h, by + a, bz + b);
+        else if (axis === 'z') this.positions.p3(bx + a, by + b, bz + h);
+        else this.positions.p3(bx + a, by + h, bz + b);
       };
       corner(x1, 0, z1); corner(x2, 0, z2); corner(x1, 1, z1); corner(x2, 1, z2);
       for (let i = 0; i < 4; i++) {
-        this.colors.push(tint[0], tint[1], tint[2]);
-        this.lights.push(skyL / 15, blockL / 15);
+        this.colors.p3(tint[0], tint[1], tint[2]);
+        this.lights.p2(skyL / 15, blockL / 15);
         // Rooted: only the two top corners (i = 2, 3) sway in the wind, and
         // nothing strung sideways sways at all.
-        this.info.push(SurfaceKind.Plant, emission, i >= 2 && !axis ? 1 : 0);
+        this.info.p3(SurfaceKind.Plant, emission, i >= 2 && !axis ? 1 : 0);
       }
-      this.uvs.push(u0, v0, u1, v0, u0, v1, u1, v1);
-      this.indices.push(
-        base, base + 1, base + 2, base + 2, base + 1, base + 3, // front
-        base + 2, base + 1, base, base + 3, base + 1, base + 2  // back
-      );
+      this.uvs.p2(u0, v0); this.uvs.p2(u1, v0); this.uvs.p2(u0, v1); this.uvs.p2(u1, v1);
+      this.indices.p6(base, base + 1, base + 2, base + 2, base + 1, base + 3); // front
+      this.indices.p6(base + 2, base + 1, base, base + 3, base + 1, base + 2); // back
     }
   }
 
@@ -192,45 +242,84 @@ class GeoBuffer {
   boxQuad(
     pos: number[], uv: number[], shade: number, skyL: number, blockL: number, emission: number,
   ): void {
-    const base = this.positions.length / 3;
+    const base = this.positions.n / 3;
     for (let i = 0; i < 4; i++) {
-      this.positions.push(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
-      this.colors.push(shade, shade, shade);
-      this.uvs.push(uv[i * 2], uv[i * 2 + 1]);
-      this.lights.push(skyL / 15, blockL / 15);
-      this.info.push(SurfaceKind.Solid, emission, 0);
+      this.positions.p3(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
+      this.colors.p3(shade, shade, shade);
+      this.uvs.p2(uv[i * 2], uv[i * 2 + 1]);
+      this.lights.p2(skyL / 15, blockL / 15);
+      this.info.p3(SurfaceKind.Solid, emission, 0);
     }
-    this.indices.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
+    this.indices.p6(base, base + 1, base + 2, base + 2, base + 1, base + 3);
   }
 
   build(): THREE.BufferGeometry | null {
-    if (this.indices.length === 0) return null;
+    const n = this.indices.n;
+    if (n === 0) return null;
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(this.positions, 3));
-    geo.setAttribute('color', new THREE.Float32BufferAttribute(this.colors, 3));
-    geo.setAttribute('uv', new THREE.Float32BufferAttribute(this.uvs, 2));
-    geo.setAttribute('skyblock', new THREE.Float32BufferAttribute(this.lights, 2));
-    geo.setAttribute('vxinfo', new THREE.Float32BufferAttribute(this.info, 3));
-    geo.setIndex(this.indices);
+    geo.setAttribute('position', this.positions.attribute(3));
+    geo.setAttribute('color', this.colors.attribute(3));
+    geo.setAttribute('uv', this.uvs.attribute(2));
+    geo.setAttribute('skyblock', this.lights.attribute(2));
+    geo.setAttribute('vxinfo', this.info.attribute(3));
+    // 16-bit indices whenever they fit, as setIndex picks for a plain array.
+    const index = this.indices.a.subarray(0, n);
+    geo.setIndex(new THREE.BufferAttribute(
+      this.positions.n / 3 > 65535 ? index.slice() : Uint16Array.from(index), 1));
     geo.computeBoundingSphere();
     return geo;
   }
 }
 
+const buffers = [new GeoBuffer(), new GeoBuffer(), new GeoBuffer()];
+const uvCache = new WeakMap<Atlas, [number, number, number, number][]>();
+
 interface ChunkGeometry {
+  /** Solid faces: no alpha test, so the GPU can reject hidden pixels early. */
   opaque: THREE.BufferGeometry | null;
+  /** Faces whose art has see-through pixels (leaves, glass, plants). */
+  cutout: THREE.BufferGeometry | null;
   water: THREE.BufferGeometry | null;
 }
 
 export function buildChunkGeometry(
-  chunk: Chunk, sample: BlockSampler, atlas: Atlas, tints: TintSampler,
+  chunk: Chunk, chunkAt: (cx: number, cz: number) => Chunk | undefined, atlas: Atlas, tints: TintSampler,
   light: LightField, smoothLighting = false
 ): ChunkGeometry {
-  const opaque = new GeoBuffer();
-  const water = new GeoBuffer();
+  if (!opaqueTable) tables();
+  // Every cell read below is within one block of one of this chunk's blocks.
+  const lo = Math.max(0, chunk.minY - 1), hi = Math.min(256, chunk.maxY + 1), VH = Math.max(1, hi - lo);
+  if (volume.length < VOL * VOL * VH) volume = new Uint8Array(VOL * VOL * 256);
+  const vol = volume;
+  for (let dcx = -1; dcx <= 1; dcx++) {
+    for (let dcz = -1; dcz <= 1; dcz++) {
+      const n = dcx === 0 && dcz === 0 ? chunk : chunkAt(chunk.cx + dcx, chunk.cz + dcz);
+      const xa = dcx < 0 ? 15 : 0, xb = dcx > 0 ? 0 : 15, za = dcz < 0 ? 15 : 0, zb = dcz > 0 ? 0 : 15;
+      for (let lx = xa; lx <= xb; lx++) {
+        for (let lz = za; lz <= zb; lz++) {
+          const dst = ((lx + dcx * 16 + 1) * VOL + lz + dcz * 16 + 1) * VH;
+          if (!n) { vol.fill(Block.Air, dst, dst + VH); continue; }
+          const src = (((lx << 4) | lz) << 8) + lo;
+          vol.set(n.data.subarray(src, src + VH), dst);
+        }
+      }
+    }
+  }
+  const ox0 = chunk.cx * CHUNK_X - 1, oz0 = chunk.cz * CHUNK_Z - 1;
+  const sample: BlockSampler = (wx, wy, wz) =>
+    wy < lo || wy >= hi ? Block.Air : vol[((wx - ox0) * VOL + wz - oz0) * VH + wy - lo];
+
+  const opaque = buffers[0].reset();
+  const cutout = buffers[1].reset();
+  const water = buffers[2].reset();
+  const seeThrough = (tile: Tile): boolean => atlas.cutout?.(tile) ?? false;
+  // One rectangle per tile per atlas, not a fresh array for every face.
+  let rects = uvCache.get(atlas);
+  if (!rects) uvCache.set(atlas, rects = []);
+  const uvRect = (tile: Tile): [number, number, number, number] => rects![tile] ??= atlas.uvRect(tile);
   const ox = chunk.cx * CHUNK_X;
   const oz = chunk.cz * CHUNK_Z;
-  const maxY = Math.min(chunk.maxY, 256);
+  const maxY = Math.min(chunk.maxY, 256), minY = Math.min(chunk.minY, maxY);
   const ao = [0, 0, 0, 0];
   const cornerSky = [0, 0, 0, 0];
   const cornerBlock = [0, 0, 0, 0];
@@ -244,24 +333,32 @@ export function buildChunkGeometry(
         return columnTints[kind];
       };
 
-      for (let y = 0; y < maxY; y++) {
-        const id = chunk.get(x, y, z);
+      const column = ((x << 4) | z) << 8;
+      for (let y = minY; y < maxY; y++) {
+        const id = chunk.data[column + y];
         if (id === Block.Air || id === Block.Barrier) continue;
         const info = BLOCKS[id];
         // An id with no definition is a block this build no longer knows (a
         // world saved by an older build). Skip it rather than dereferencing
         // undefined and taking the whole chunk mesh down with it.
         if (!info) continue;
+        // Buried: every neighbour is opaque, so no face survives culling.
+        // Most of a solid island is this; skip it before the face loop.
+        const v = ((x + 1) * VOL + z + 1) * VH + y - lo;
+        if (y > lo && y + 1 < hi && opaqueTable![vol[v - 1]] === 1 && opaqueTable![vol[v + 1]] === 1 &&
+            opaqueTable![vol[v - VH]] === 1 && opaqueTable![vol[v + VH]] === 1 &&
+            opaqueTable![vol[v - VOL * VH]] === 1 && opaqueTable![vol[v + VOL * VH]] === 1) continue;
         const isWater = id === Block.Water;
 
         if (info.shape === 'box' && info.boxes) {
-          emitBoxes(opaque, info, x, y, z, wx, wz, sample, atlas, light);
+          emitBoxes(seeThrough(info.side) || seeThrough(info.top) || seeThrough(info.bottom) ? cutout : opaque,
+            info, x, y, z, wx, wz, sample, atlas, light);
           continue;
         }
 
         if (info.shape === 'cross') {
-          opaque.cross(
-            x, y, z, atlas.uvRect(info.side),
+          (seeThrough(info.side) ? cutout : opaque).cross(
+            x, y, z, uvRect(info.side),
             info.tint ? tintFor(info.tint) : WHITE,
             light.sky(wx, y, wz), light.block(wx, y, wz), info.emission / 15, info.axis
           );
@@ -313,8 +410,8 @@ export function buildChunkGeometry(
               face, wx, y, wz, sample, light, skyL, blockL, cornerSky, cornerBlock);
           }
 
-          (isWater ? water : opaque).quad(
-            face, x, y, z, atlas.uvRect(tile), ao, topOffset, tint, skyL, blockL,
+          (isWater ? water : seeThrough(tile) ? cutout : opaque).quad(
+            face, x, y, z, uvRect(tile), ao, topOffset, tint, skyL, blockL,
             grassSide ? WHITE : undefined,
             smoothLighting ? cornerSky : undefined,
             smoothLighting ? cornerBlock : undefined,
@@ -327,7 +424,7 @@ export function buildChunkGeometry(
     }
   }
 
-  return { opaque: opaque.build(), water: water.build() };
+  return { opaque: opaque.build(), cutout: cutout.build(), water: water.build() };
 }
 
 /** Texture coordinate (0..1 across the tile) of a point on a face, matching
@@ -381,21 +478,20 @@ function computeAO(
   const axis = dx !== 0 ? 0 : dy !== 0 ? 1 : 2;
   const t1 = axis === 0 ? 1 : 0;
   const t2 = axis === 2 ? 1 : 2;
-  const pos = [wx, wy, wz];
+  const px = wx + dx, py = wy + dy, pz = wz + dz;
 
   for (let i = 0; i < 4; i++) {
     const c = face.corners[i].pos;
     const s1 = c[t1] === 1 ? 1 : -1;
     const s2 = c[t2] === 1 ? 1 : -1;
+    // Tangent offsets as scalars, not per-corner arrays (this runs for every
+    // visible face of every remesh). t1 is x or y; t2 is y or z.
+    const ox = t1 === 0 ? s1 : 0, oy1 = t1 === 1 ? s1 : 0;
+    const oy2 = t2 === 1 ? s2 : 0, oz = t2 === 2 ? s2 : 0;
 
-    const p = [pos[0] + dx, pos[1] + dy, pos[2] + dz];
-    const q1 = [...p]; q1[t1] += s1;
-    const q2 = [...p]; q2[t2] += s2;
-    const q3 = [...p]; q3[t1] += s1; q3[t2] += s2;
-
-    const side1 = occludesAO(sample(q1[0], q1[1], q1[2])) ? 1 : 0;
-    const side2 = occludesAO(sample(q2[0], q2[1], q2[2])) ? 1 : 0;
-    const corner = occludesAO(sample(q3[0], q3[1], q3[2])) ? 1 : 0;
+    const side1 = occludesAO(sample(px + ox, py + oy1, pz)) ? 1 : 0;
+    const side2 = occludesAO(sample(px, py + oy2, pz + oz)) ? 1 : 0;
+    const corner = occludesAO(sample(px + ox, py + oy1 + oy2, pz + oz)) ? 1 : 0;
 
     out[i] = side1 && side2 ? 0 : 3 - (side1 + side2 + corner);
   }

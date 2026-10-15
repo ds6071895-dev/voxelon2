@@ -14,7 +14,7 @@ import { rayAabb } from '../src/ray_aabb';
 import { Player } from '../src/player';
 import { FROZEN_INPUT } from '../src/input';
 import type { PartyState, ServerMsg } from '../src/net/protocol';
-import type { RsSnapshot } from '../src/ratseek_rules';
+import { RS, type RsSnapshot } from '../src/ratseek_rules';
 
 const body = (x: number, y = 81, z = 0.5): RsBody => ({ x, y, z, yaw: 0, pitch: 0, sneaking: false });
 const key = (x: number, y: number, z: number): string => `${x},${y},${z}`;
@@ -24,9 +24,10 @@ class Fixture {
   readonly messages: { id: number; msg: ServerMsg }[] = [];
   sample: (x: number, y: number, z: number) => number = (_x, y) => y === 80 ? Block.Stone : Block.Air;
   drives = 0;
+  now = 0;
   private nextBot = 90;
   readonly host: RsHost = {
-    nowMs: () => 0, name: (id) => `P${id}`, body: (id) => this.bodies.get(id),
+    nowMs: () => this.now, name: (id) => `P${id}`, body: (id) => this.bodies.get(id),
     send: (id, msg) => { this.messages.push({ id, msg }); },
     teleport: (id, x, y, z, yaw = 0) => { this.bodies.set(id, { ...body(x, y, z), yaw }); },
     drive: (id, pose) => { this.drives++; this.bodies.set(id, { ...pose }); },
@@ -197,12 +198,29 @@ function engineTests(): void {
   bot.tick(); assert.equal(end.drives, 0, 'ended bot remains quiescent');
   assert.equal(end.match.botCatch(90, 1), false, 'already caged rat is not another catch');
 
-  // Baseline cadence: direct hit reports have no extra cooldown; swats keep
-  // their existing 12-tick cooldown. Cleanup must not silently redesign combat.
+  // Hit cadence: one direct hit per RS.HIT_COOLDOWN_MS (hit or miss), so a fast
+  // clicker gets no more swings than a thumb on the HIT button; swats keep
+  // their 12-tick cooldown.
   const hits = new Fixture({ rats: [1, 2, 3] }); hits.bodies.set(9, body(0.5));
   for (const id of [1, 2]) hits.bodies.set(id, body(0.5, 81, -0.5));
   hits.match.handleHit(9, 1, false); hits.match.handleHit(9, 2, false);
-  assert.equal(hits.state().caged, 2, 'direct hit baseline retains same-tick reports');
+  assert.equal(hits.state().caged, 1, 'a second same-instant hit is inside the cooldown');
+  hits.now += RS.HIT_COOLDOWN_MS;
+  hits.match.handleHit(9, 2, false);
+  assert.equal(hits.state().caged, 2, 'the next swing after the cooldown lands');
+
+  // Rewind: a rat that was in reach a moment ago (what a lagging seeker saw)
+  // can still be hit; one that left long ago cannot.
+  const lag = new Fixture({ rats: [1, 2, 3] }); lag.bodies.set(9, body(0.5));
+  const track = lag.match as unknown as { recordRatTrack(): void };
+  lag.bodies.set(1, body(0.5, 81, -0.5)); track.recordRatTrack();
+  lag.now = 150; lag.bodies.set(1, body(0.5, 81, -8)); track.recordRatTrack();
+  lag.match.handleHit(9, 1, false);
+  assert.equal(lag.state().caged, 1, 'a hit lands on where the rat was 150 ms ago');
+  lag.bodies.set(2, body(0.5, 81, -0.5)); track.recordRatTrack();
+  lag.now = 1200; lag.bodies.set(2, body(0.5, 81, -8)); track.recordRatTrack();
+  lag.match.handleHit(9, 2, false);
+  assert.equal(lag.state().caged, 1, 'a position older than the rewind window does not count');
   const swats = new Fixture({ rats: [1, 2, 3] }); swats.bodies.set(9, { ...body(0.5), pitch: -0.8 });
   swats.bodies.set(1, body(0.5, 81, -0.5)); swats.bodies.set(2, body(0.5, 81, -0.5));
   swats.match.handleUse(9, 0); swats.match.handleUse(9, 0);

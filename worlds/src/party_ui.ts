@@ -80,6 +80,8 @@ export class PartyUI {
   constructor(host: HTMLElement) {
     this.count.setAttribute('aria-live', 'assertive');
     this.root.append(this.flash, this.progress, this.score, this.clock, this.track, this.standings, this.card, this.banner, this.count, this.done);
+    // Touch shows the leader and your own row; a tap opens the full table.
+    this.standings.addEventListener('click', () => this.standings.classList.toggle('open'));
     host.append(this.root);
     this.done.hidden = true;
     this.track.hidden = true;

@@ -39,6 +39,9 @@ const MATERIAL_FREQ: Record<Material, number> = {
 
 export class GameAudio {
   private ctx: AudioContext | null = null;
+  /** Low preset: plain stereo panning instead of HRTF per voice, and a
+   *  shorter room. Both run on the audio thread of the weakest phones. */
+  lite = false;
   private master: GainNode | null = null;
   private effectsBus: GainNode | null = null;
   private noiseBuf: AudioBuffer | null = null;
@@ -51,6 +54,8 @@ export class GameAudio {
   private readonly listenerPos = new THREE.Vector3();
   private readonly listenerRotation = new THREE.Quaternion();
   private readonly listenerForward = new THREE.Vector3();
+  /** Listener values last written (position, forward, up-set flag). */
+  private readonly listenerSent = [NaN, NaN, NaN, NaN, NaN, NaN, 0];
   private effectsVolume = GameAudio.savedVolume('effects', 0.8);
 
   private static savedVolume(key: string, fallback: number): number {
@@ -96,10 +101,15 @@ export class GameAudio {
         data[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + w * 0.5362) * 0.11;
         b6 = w * 0.115926;
       }
-      const reverb = new ConvolverNode(this.ctx, { buffer: this.roomImpulse(this.ctx, 1.7) });
-      const wet = new GainNode(this.ctx, { gain: 0.9 });
       this.reverbIn = new GainNode(this.ctx, { gain: 1 });
-      this.reverbIn.connect(reverb).connect(wet).connect(this.effectsBus);
+      // Building the room (a seconds-long stereo impulse, partitioned for the
+      // convolver) is the slowest thing here, and it ran inside the very click
+      // that starts the game. Hang it on the bus a beat later instead.
+      const ctx = this.ctx, reverbIn = this.reverbIn, bus = this.effectsBus;
+      setTimeout(() => {
+        const reverb = new ConvolverNode(ctx, { buffer: this.roomImpulse(ctx, this.lite ? 0.9 : 1.7) });
+        reverbIn.connect(reverb).connect(new GainNode(ctx, { gain: 0.9 })).connect(bus);
+      }, 300);
       this.fxIn = new GainNode(this.ctx, { gain: 1 });
       this.fxIn.connect(this.effectsBus);
       this.fxIn.connect(new GainNode(this.ctx, { gain: 0.1 })).connect(this.reverbIn);
@@ -139,9 +149,18 @@ export class GameAudio {
     camera.getWorldQuaternion(this.listenerRotation);
     const fwd = this.listenerForward.set(0, 0, -1).applyQuaternion(this.listenerRotation);
     if (l.positionX) {
-      l.positionX.value = p.x; l.positionY.value = p.y; l.positionZ.value = p.z;
-      l.forwardX.value = fwd.x; l.forwardY.value = fwd.y; l.forwardZ.value = fwd.z;
-      l.upX.value = 0; l.upY.value = 1; l.upZ.value = 0;
+      // Each AudioParam write crosses into the audio engine; a still camera
+      // (menus, spectating, standing to build) changes nothing.
+      const last = this.listenerSent;
+      if (p.x === last[0] && p.y === last[1] && p.z === last[2] && fwd.x === last[3] && fwd.y === last[4] && fwd.z === last[5]) return;
+      if (p.x !== last[0]) l.positionX.value = p.x;
+      if (p.y !== last[1]) l.positionY.value = p.y;
+      if (p.z !== last[2]) l.positionZ.value = p.z;
+      if (fwd.x !== last[3]) l.forwardX.value = fwd.x;
+      if (fwd.y !== last[4]) l.forwardY.value = fwd.y;
+      if (fwd.z !== last[5]) l.forwardZ.value = fwd.z;
+      if (last[6] !== 1) { l.upX.value = 0; l.upY.value = 1; l.upZ.value = 0; last[6] = 1; }
+      last[0] = p.x; last[1] = p.y; last[2] = p.z; last[3] = fwd.x; last[4] = fwd.y; last[5] = fwd.z;
     }
   }
 
@@ -157,7 +176,7 @@ export class GameAudio {
       frequency: Math.max(700, 16000 * Math.exp(-dist / 16)),
     });
     const panner = new PannerNode(this.ctx, {
-      panningModel: dist < 24 ? 'HRTF' : 'equalpower',
+      panningModel: dist < 24 && !this.lite ? 'HRTF' : 'equalpower',
       distanceModel: 'inverse',
       refDistance: 3,
       rolloffFactor: 1.1,

@@ -7,6 +7,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import type { BedwarsBase, BedwarsMap } from './bedwars_map';
 import { BW_TEAM_COLORS } from './bedwars_rules';
 import { Item } from './items';
+import { shopVerb } from './prompt_verbs';
 import { itemGeometrySolid } from './item_geometry';
 import { buildAvatarBody, disposeAvatarBody, type AvatarBody } from './avatar';
 import type { Cosmetics } from './character';
@@ -301,7 +302,7 @@ function baseProps(w: Workshop, parent: THREE.Group, base: BedwarsBase, active: 
     for (const arm of body.parts.slice(2)) arm.rotation.x = -.35;
     hall.add(body.group);
     people.push(body);
-    w.label(hall, upgrades ? 'TEAM UPGRADES' : 'ITEM SHOP', 'Press E', -8, 2.45, z, upgrades ? '#7cf0c4' : '#7fe3ff');
+    w.label(hall, upgrades ? 'TEAM UPGRADES' : 'ITEM SHOP', shopVerb(), -8, 2.45, z, upgrades ? '#7cf0c4' : '#7fe3ff');
   }
   const storage = w.group(hall, -4.8, 0, 9.3); storage.rotation.y = -Math.PI / 2; chest(w, storage);
   if (active) w.label(hall, 'TEAM CHEST', '', -4.8, 1.55, 9.3, '#ffe08a', 1.2);

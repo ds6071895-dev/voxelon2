@@ -207,6 +207,32 @@ body.bedwars-active #energybar { display: none; }
 
 /* ── Phones ───────────────────────────────────────────────────────────── */
 @media (max-width: 520px) { .bw-teams { grid-template-columns: 1fr; } }
+
+/* Touch: every control is at least a fingertip (44 px). */
+.touch-ui .bw-x { width: 44px; height: 44px; }
+.touch-ui .bw-mini { min-height: 44px; padding: 10px 14px; }
+.touch-ui .bw-move { width: 34px; height: 34px; }
+.touch-ui .bw-moves { gap: 8px; }
+
+/* Touch: the sidebar shrinks to a chip under the pause button (beside it in
+   landscape) and opens on tap; the action buttons own the right edge. */
+.touch-ui .bw-side {
+  top: calc(64px + var(--safe-top, 0px)); right: max(12px, var(--safe-right, 0px)); transform: none;
+  width: auto; min-width: 0; padding: 6px 8px; border-radius: 12px; font-size: 11px; pointer-events: auto; cursor: pointer;
+}
+.touch-ui .bw-side:not(.open) .bw-side-head b,
+.touch-ui .bw-side:not(.open) .bw-side-stats,
+.touch-ui .bw-side:not(.open) .bw-side-team span,
+.touch-ui .bw-side:not(.open) .bw-side-team small { display: none; }
+.touch-ui .bw-side:not(.open) .bw-side-head { justify-content: flex-end; }
+.touch-ui .bw-side:not(.open) .bw-side-next { margin: 4px 0; padding: 4px 6px; font-size: 10.5px; }
+.touch-ui .bw-side:not(.open) .bw-side-teams { display: flex; gap: 6px; padding: 0; border: 0; }
+.touch-ui .bw-side:not(.open) .bw-side-team { grid-template-columns: 18px auto; gap: 3px; min-height: 18px; }
+.touch-ui .bw-side.open { width: 196px; max-height: calc(100dvh - 140px); overflow-y: auto; }
+.touch-ui .bw-feed { max-width: min(300px, calc(100vw - 240px)); }
+@media (orientation: landscape) {
+  .touch-ui .bw-side { top: max(8px, var(--safe-top, 0px)); right: calc(max(12px, var(--safe-right, 0px)) + 60px); }
+}
 @media (max-width: 640px) {
   .bw-feed { max-width: 40vw; }
   .bw-side { width: 150px; font-size: 11px; padding: 8px; }

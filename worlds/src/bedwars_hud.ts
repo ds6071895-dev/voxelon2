@@ -36,6 +36,11 @@ export class BedwarsHud {
     // The sidebar, Hypixel style: what happens next, every team, your score.
     this.side = bwEl('aside', 'bw-side', this.root);
     this.side.setAttribute('aria-label', 'Scoreboard');
+    // On touch the sidebar is a compact chip (clock, beds, next event) so it
+    // never sits over the action buttons; a tap opens the full board.
+    this.side.addEventListener('click', () => {
+      if (document.documentElement.classList.contains('touch-ui')) this.side.classList.toggle('open');
+    });
     const head = bwEl('div', 'bw-side-head', this.side);
     bwEl('b', '', head, 'BED WARS');
     this.sideClock = bwEl('small', '', head, '0:00');

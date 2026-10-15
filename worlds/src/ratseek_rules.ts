@@ -46,6 +46,12 @@ export const RS = {
   CAT_RANGE: 10,
   /** Human attack reach from the eye, in blocks. */
   REACH: 3,
+  /** A seeker's hand swings at most this often, so clicking faster than a
+   *  thumb can tap buys nothing (holding the button swings at this rate). */
+  HIT_COOLDOWN_MS: 300,
+  /** Hits are checked against where a rat was up to this long ago as well as
+   *  now, the same lag allowance the other modes' melee gets. */
+  HIT_REWIND_MS: 280,
   SWAT_REACH: 2.7,
 } as const;
 

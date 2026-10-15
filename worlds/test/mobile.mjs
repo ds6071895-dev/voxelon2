@@ -50,6 +50,15 @@ try {
     });
     peer.send(JSON.stringify({ t: 'play', mode }));
     }
+    if (mode === modes[0]) {
+      // Title on a phone held sideways: the game tiles start above the fold.
+      await page.setViewportSize({ width: 844, height: 390 });
+      const fold = await page.evaluate(() => document.querySelector('.w-card[data-mode="bedwars"]').getBoundingClientRect().top);
+      check('landscape phone title shows the game tiles above the fold', fold < 390 * 0.6, `first tile at ${fold}px`);
+      await page.screenshot({ path: `${artifacts}/title-844.png` });
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.screenshot({ path: `${artifacts}/title-390.png` });
+    }
     await page.locator(`.w-card[data-mode="${mode}"]`).tap();
     await page.waitForFunction(() => document.querySelector('.t-pads')?.hidden === false, null, { timeout: 120000 });
     check('touch control is active', await page.evaluate(() => window.__worlds.input.touchMode));
@@ -64,10 +73,16 @@ try {
           outside: buttons.filter(({ r }) => r.x < 0 || r.y < 0 || r.right > innerWidth || r.bottom > innerHeight),
           overlap: buttons.flatMap((a, i) => buttons.slice(i + 1).filter(b => a.r.x < b.r.right && a.r.right > b.r.x && a.r.y < b.r.bottom && a.r.bottom > b.r.y).map(b => `${a.label}/${b.label}`)),
           covered: buttons.filter(({r}) => r.x < hotbar.right && r.right > hotbar.x && r.y < hotbar.bottom && r.bottom > hotbar.y),
+          // Mode HUD panels must never sit over an on-screen control.
+          hud: [...document.querySelectorAll('.bw-side, .rs-sidebar, .pg-standings, .duel-killfeed, .rs-top, .pg-progress, .duel-match-hud')]
+            .filter(n => n.getClientRects().length && getComputedStyle(n).visibility !== 'hidden')
+            .flatMap(n => { const h = n.getBoundingClientRect(); return h.width && h.height ? buttons
+              .filter(({ r }) => r.x < h.right && r.right > h.x && r.y < h.bottom && r.bottom > h.y)
+              .map(({ label }) => `${n.className}/${label}`) : []; }),
           width: document.documentElement.scrollWidth,
         };
       });
-      check(`${viewport.width}×${viewport.height}: controls ≥44px, in bounds, no overlaps`, !layout.small.length && !layout.outside.length && !layout.overlap.length && !layout.covered.length && layout.width <= viewport.width, JSON.stringify(layout));
+      check(`${viewport.width}×${viewport.height}: controls ≥44px, in bounds, no overlaps`, !layout.small.length && !layout.outside.length && !layout.overlap.length && !layout.covered.length && !layout.hud.length && layout.width <= viewport.width, JSON.stringify(layout));
       await page.screenshot({ path: `${artifacts}/${mode}-${viewport.width}.png` });
     }
     await page.setViewportSize({ width: 844, height: 390 });
@@ -129,6 +144,7 @@ try {
     const { Input } = await import('/src/input.ts');
     const { TouchControls } = await import('/src/touch.ts');
     const input = new Input(document.querySelector('canvas'));
+    input.setTouchMode(true); document.documentElement.classList.add('touch-ui');
     const state = { shown: true, playing: true, gun: false, action: 'interact', context: 'seeker' };
     const controls = new TouchControls(input, { onPause() { controls.update({ ...state, playing: false }); } });
     controls.update(state);
@@ -170,6 +186,29 @@ try {
   await page.evaluate(() => { const f = window.__fixture; f.controls.update({ ...f.state, playing: false }); });
   check('opening a panel releases held actions immediately', await page.evaluate(() => !window.__fixture.input.leftDown && !window.__fixture.input.rightDown));
   await send('touchEnd', []);
+  // Spectating: fly and look, no action buttons.
+  await page.evaluate(() => { const f = window.__fixture; f.controls.update({ ...f.state, playing: true, spectating: true }); });
+  check('a touch spectator keeps the stick but no action buttons', await page.evaluate(() =>
+    !document.querySelector('.t-stick').closest('[hidden]') && document.querySelector('.t-primary').hidden && document.querySelector('.t-secondary').hidden));
+  await send('touchStart', [{ ...stick, y: stick.y - 52, id: 7 }]);
+  check('a touch spectator can move', await page.evaluate(() => window.__fixture.input.forward));
+  await send('touchEnd', []);
+  await page.evaluate(() => { const f = window.__fixture; f.controls.update({ ...f.state, playing: true, spectating: false }); });
+  // Floating stick: a thumb anywhere in the left zone drives it.
+  const zone = await page.locator('.t-stick-zone').boundingBox();
+  const at = { x: zone.x + zone.width * 0.6, y: zone.y + 30 };
+  await send('touchStart', [{ ...at, id: 8 }]);
+  await send('touchMove', [{ ...at, y: at.y - 40, id: 8 }]);
+  check('the stick floats to the thumb and moves analog', await page.evaluate(() => {
+    const i = window.__fixture.input; return i.forward && i.moveY > 0.5 && Math.abs(i.moveX) < 0.2;
+  }));
+  await send('touchEnd', []);
+  check('releasing the stick stops movement', await page.evaluate(() => !window.__fixture.input.forward && window.__fixture.input.moveY === 0));
+  // Hybrid devices: a real mouse takes over, a touch takes back.
+  await page.mouse.move(20, 20); await page.mouse.move(80, 80);
+  check('moving a mouse switches to mouse controls', await page.evaluate(() => !window.__fixture.input.touchMode));
+  await page.touchscreen.tap(160, 200);
+  check('a touch switches back to touch controls', await page.evaluate(() => window.__fixture.input.touchMode));
   await fixture.close();
 } catch (e) {
   failures++; console.error(e);

@@ -28,7 +28,7 @@
 .hm-key.down .cps { color:rgba(11,15,22,.75); }
 
 /* --- Layout editor ------------------------------------------------------- */
-#hud-mods.editing { pointer-events:auto; background:rgba(6,9,15,.45);
+#hud-mods.editing { pointer-events:auto; touch-action:none; background:rgba(6,9,15,.45);
   backdrop-filter:blur(1.5px); z-index:69; }
 #hud-mods.editing .hm { pointer-events:auto; cursor:grab;
   outline:1px dashed rgba(255,255,255,.35); outline-offset:3px; border-radius:3px; }

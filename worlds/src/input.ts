@@ -6,6 +6,9 @@ import { DEFAULT_KEYBINDS, heldBind, matchesBind, type BindAction, type Keybinds
  *  false/0) lets physics keep running with no control while a menu is open. */
 export interface PlayerInput {
   mouseDX: number; mouseDY: number;
+  /** Analog stick, -1..1 (x = strafe right, y = forward). Overrides the four
+   *  digital directions when non-zero; magnitude below 1 walks slower. */
+  moveX?: number; moveY?: number;
   forward: boolean; back: boolean; left: boolean; right: boolean;
   jump: boolean; sneak: boolean; sprintKey: boolean; sprintHeld: boolean;
 }
@@ -28,6 +31,9 @@ export class Input {
    *  without knowing it exists. Touch
    *  scales by this too, on top of its own px->delta calibration. */
   lookSensitivity = 1;
+  /** Settings: moving up looks down. Applied with the sensitivity, so mouse
+   *  and touch both honour it. */
+  invertY = false;
   leftDown = false;
   leftClicked = false;
   rightDown = false;
@@ -46,8 +52,15 @@ export class Input {
   // controls (src/touch.ts) write into the t* fields below, which the getters
   // OR together with the keyboard so gameplay code never special-cases touch.
   touchMode = false;
+  /** 'auto' switches touchMode to whichever pointer was used last, so a
+   *  touchscreen laptop or a tablet with a trackpad keeps both controllers. */
+  controlMode: 'auto' | 'touch' | 'mouse' = 'auto';
+  /** Told after touchMode flips (the overlay and `html.touch-ui` follow it). */
+  onTouchModeChange: ((on: boolean) => void) | null = null;
+  private mouseTravel = 0;
   tForward = false; tBack = false; tLeft = false; tRight = false;
   tJump = false; tSneak = false; tSprint = false;
+  moveX = 0; moveY = 0;
 
   private kbSprint = false; // via double-tapping forward; held until it releases
   get sprintHeld(): boolean { return this.kbSprint || this.tSprint; }
@@ -112,10 +125,24 @@ export class Input {
       if (this.isBind(e.code, 'forward')) this.kbSprint = false;
     });
 
+    // Pointer events tell real mice from touches; the compatibility mouse
+    // events a touch also fires do not. A deliberate mouse move or click takes
+    // control from touch, and any touch takes it back.
+    document.addEventListener('pointerdown', (e) => {
+      if (this.controlMode !== 'auto') return;
+      if (e.pointerType === 'touch') this.setTouchMode(true);
+      else if (e.pointerType === 'mouse') this.setTouchMode(false);
+    }, true);
+    document.addEventListener('pointermove', (e) => {
+      if (this.controlMode !== 'auto' || !this.touchMode || e.pointerType !== 'mouse') return;
+      this.mouseTravel += Math.abs(e.movementX) + Math.abs(e.movementY);
+      if (this.mouseTravel > 24) this.setTouchMode(false);
+    }, true);
+
     document.addEventListener('mousemove', (e) => {
       if (!this.locked || this.touchMode) return;
       this.mouseDX += e.movementX * this.lookSensitivity;
-      this.mouseDY += e.movementY * this.lookSensitivity;
+      this.mouseDY += e.movementY * this.lookSensitivity * (this.invertY ? -1 : 1);
     });
     document.addEventListener('mousedown', (e) => {
       if (!this.locked || this.touchMode) return;
@@ -163,6 +190,34 @@ export class Input {
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) this.retryLock();
     });
+  }
+
+  /** Swap between the on-screen controls and mouse + pointer lock without
+   *  leaving play: a virtual lock becomes a pending real one (the next click
+   *  grants it) and a real lock becomes a virtual one. */
+  setTouchMode(on: boolean): void {
+    this.mouseTravel = 0;
+    if (on === this.touchMode) return;
+    const holding = this.locked || this.wantLock;
+    this.leftDown = this.rightDown = false;
+    this.tForward = this.tBack = this.tLeft = this.tRight = this.tJump = this.tSneak = this.tSprint = false;
+    this.moveX = this.moveY = 0;
+    if (on) {
+      this.touchMode = true;
+      this.wantLock = false;
+      if (document.pointerLockElement === this.canvas) {
+        try { document.exitPointerLock(); } catch { /* already released */ }
+      }
+      if (holding && !this.locked) {
+        this.locked = true;
+        document.dispatchEvent(new Event('pointerlockchange'));
+      }
+    } else {
+      this.touchMode = false;
+      this.locked = false;
+      if (holding) { this.wantLock = true; this.request(); }
+    }
+    this.onTouchModeChange?.(on);
   }
 
   /** True while the game wants the pointer but the browser has not granted it
@@ -248,6 +303,7 @@ export class Input {
     this.leftDown = false; this.leftClicked = false; this.rightDown = false; this.rightClicked = false;
     this.tForward = false; this.tBack = false; this.tLeft = false; this.tRight = false;
     this.tJump = false; this.tSneak = false; this.tSprint = false;
+    this.moveX = 0; this.moveY = 0;
     this.mouseDX = 0; this.mouseDY = 0;
     this.endFrame();
   }

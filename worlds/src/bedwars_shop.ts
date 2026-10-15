@@ -131,6 +131,21 @@ export class BedwarsShop {
     const root = bwButton(this.list, '', () => this.buy(entry), 'bw-row');
     const show = (): void => { this.details.textContent = `${entry.name}: ${row.detail}`; };
     root.addEventListener('pointerenter', show); root.addEventListener('focus', show);
+    // Touch has no hover: a touch shows the description at once, and holding
+    // it (350 ms) reads it without buying. A plain tap still buys straight
+    // away, as quickly as a click does.
+    let held = false, holdTimer = 0;
+    root.addEventListener('pointerdown', e => {
+      if (e.pointerType !== 'touch') return;
+      show(); held = false;
+      window.clearTimeout(holdTimer);
+      holdTimer = window.setTimeout(() => { held = true; }, 350);
+    });
+    for (const type of ['pointerup', 'pointercancel']) root.addEventListener(type, () => window.clearTimeout(holdTimer));
+    root.addEventListener('click', e => {
+      if (!held) return;
+      held = false; e.preventDefault(); e.stopImmediatePropagation();
+    }, true);
     const icon = bwEl('canvas', 'bw-icon', root);
     renderItemIcon(icon, this.d.atlasCanvas, entry.item);
     const text = bwEl('span', 'bw-row-text', root);

@@ -3,9 +3,17 @@ import { Input } from './input';
 import { iconSvg } from './emoji_icons';
 import './styles/touch.css';
 
+/** Any touchscreen, including touch laptops and tablets with a trackpad. */
 export function isTouchDevice(): boolean {
   return typeof window !== 'undefined' &&
     (window.matchMedia?.('(pointer: coarse)').matches || (navigator.maxTouchPoints ?? 0) > 1);
+}
+
+/** Touch is the main way in: a phone or tablet with no mouse or trackpad.
+ *  A touch laptop reports a fine pointer as well and starts on the mouse. */
+export function prefersTouch(): boolean {
+  if (typeof window === 'undefined' || !window.matchMedia) return false;
+  return window.matchMedia('(pointer: coarse)').matches && !window.matchMedia('(any-pointer: fine)').matches;
 }
 
 export interface TouchState {
@@ -17,15 +25,21 @@ export interface TouchState {
   label?: string;
   /** Changing a slot or mode must release actions held for the old item. */
   context?: string;
+  /** Dead or eliminated: fly and look around, with no action buttons. */
+  spectating?: boolean;
 }
 
 const LOOK_SENS = 2.3;
 const TAP_SLOP = 14;
+/** A thumb resting still on the world this long starts a melee swing or a
+ *  block break. Guns and bows never fire this way: they have their own button. */
+const HOLD_ATTACK_MS = 380;
 
 export class TouchControls {
   private root = document.createElement('div');
   private pads = document.createElement('div');
   private knob = document.createElement('div');
+  private stick!: HTMLElement;
   private primary: HTMLButtonElement;
   private secondary: HTMLButtonElement;
   private aim: HTMLButtonElement;
@@ -46,8 +60,6 @@ export class TouchControls {
   private useSources = new Set<string>();
 
   constructor(private input: Input, cb: { onPause(): void }) {
-    input.touchMode = true;
-    document.documentElement.classList.add('touch-ui');
     this.root.id = 'touch';
     this.root.hidden = true;
     document.getElementById('app')!.appendChild(this.root);
@@ -62,10 +74,10 @@ export class TouchControls {
       look.setPointerCapture(e.pointerId);
       this.lookX = e.clientX; this.lookY = e.clientY;
       this.lookDist = 0; this.lookStart = performance.now();
-      this.holdTimer = window.setTimeout(() => {
-        if (this.lookId === e.pointerId && this.lookDist < TAP_SLOP && this.state.playing)
+      if (this.holdAttacks()) this.holdTimer = window.setTimeout(() => {
+        if (this.lookId === e.pointerId && this.lookDist < TAP_SLOP && this.state.playing && this.holdAttacks())
           this.press('look', false, true);
-      }, 320);
+      }, HOLD_ATTACK_MS);
       e.preventDefault();
     });
     look.addEventListener('pointermove', e => {
@@ -77,7 +89,7 @@ export class TouchControls {
     });
     const lookEnd = (e: PointerEvent) => {
       if (e.pointerId !== this.lookId) return;
-      if (e.type === 'pointerup' && !this.attackSources.has('look') &&
+      if (e.type === 'pointerup' && !this.attackSources.has('look') && !this.state.spectating &&
           performance.now() - this.lookStart < 260 && this.lookDist < TAP_SLOP)
         input.rightClicked = true;
       this.lookId = -1;
@@ -86,33 +98,55 @@ export class TouchControls {
     };
     for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) look.addEventListener(type, lookEnd as EventListener);
 
+    // The stick rests bottom-left. A touch on it drags it in place; a touch
+    // anywhere else in the left zone moves the stick under the thumb first, so
+    // nobody has to find a fixed circle without looking.
+    const zone = document.createElement('div');
+    zone.className = 't-stick-zone';
+    this.pads.appendChild(zone);
     const stick = document.createElement('div');
     stick.className = 't-stick';
     stick.setAttribute('aria-label', 'Move; push to the rim to sprint');
     this.knob.className = 't-knob';
     stick.appendChild(this.knob);
     this.pads.appendChild(stick);
+    this.stick = stick;
+    let cx = 0, cy = 0, radius = 1;
     const move = (e: PointerEvent) => {
-      const r = stick.getBoundingClientRect(), radius = r.width / 2;
-      let dx = (e.clientX - r.left - radius) / radius, dy = (e.clientY - r.top - radius) / radius;
+      let dx = (e.clientX - cx) / radius, dy = (e.clientY - cy) / radius;
       const mag = Math.hypot(dx, dy), scale = mag > 1 ? 1 / mag : 1;
       this.knob.style.transform = `translate(${dx * scale * radius * .65}px, ${dy * scale * radius * .65}px)`;
       if (mag < .22) { this.clearMove(); return; }
       dx /= mag; dy /= mag;
+      // Analog: full speed from 75% deflection, easing down to a slow walk.
+      const amount = Math.min(1, .35 + .65 * (Math.min(mag, .75) - .22) / (.75 - .22));
+      input.moveX = dx * amount; input.moveY = -dy * amount;
       input.tForward = dy < -.38; input.tBack = dy > .38;
       input.tLeft = dx < -.38; input.tRight = dx > .38;
       input.tSprint = input.tForward && mag >= .9;
     };
-    stick.addEventListener('pointerdown', e => {
+    const begin = (e: PointerEvent, el: HTMLElement) => {
       if (!this.state.playing || e.pointerType !== 'touch' || this.stickId >= 0) return;
-      this.stickId = e.pointerId; stick.setPointerCapture(e.pointerId); move(e); e.preventDefault();
-    });
-    stick.addEventListener('pointermove', e => { if (e.pointerId === this.stickId) { move(e); e.preventDefault(); } });
-    const stickEnd = (e: PointerEvent) => {
-      if (e.pointerId !== this.stickId) return;
-      this.stickId = -1; this.clearMove(); this.knob.style.transform = '';
+      const r = stick.getBoundingClientRect();
+      radius = r.width / 2;
+      cx = r.left + radius; cy = r.top + radius;
+      if (Math.hypot(e.clientX - cx, e.clientY - cy) > radius * 1.1) {
+        // Float: centre the stick on the thumb, kept fully on screen.
+        const zr = zone.getBoundingClientRect();
+        cx = Math.max(zr.left + radius, Math.min(zr.right - radius, e.clientX));
+        cy = Math.max(zr.top + radius, Math.min(zr.bottom - radius, e.clientY));
+        stick.style.left = `${cx - radius}px`; stick.style.top = `${cy - radius}px`;
+        stick.style.bottom = 'auto';
+        stick.classList.add('t-float');
+      }
+      this.stickId = e.pointerId; el.setPointerCapture(e.pointerId); move(e); e.preventDefault();
     };
-    for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) stick.addEventListener(type, stickEnd as EventListener);
+    for (const el of [zone, stick]) {
+      el.addEventListener('pointerdown', e => begin(e, el));
+      el.addEventListener('pointermove', e => { if (e.pointerId === this.stickId) { move(e); e.preventDefault(); } });
+      for (const type of ['pointerup', 'pointercancel', 'lostpointercapture'])
+        el.addEventListener(type, e => { if ((e as PointerEvent).pointerId === this.stickId) this.releaseStick(); });
+    }
 
     const jump = this.button('t-jump', iconSvg('chevronUp'), 'Jump / swim up');
     this.hold(jump, down => { input.tJump = down; });
@@ -160,18 +194,23 @@ export class TouchControls {
     this.state = s;
     this.root.hidden = !s.shown;
     this.pads.hidden = !s.playing;
-    this.primary.hidden = !s.gun && (!s.action || s.action === 'none');
+    this.primary.hidden = !!s.spectating || (!s.gun && (!s.action || s.action === 'none'));
     this.primary.textContent = s.gun ? 'FIRE' : s.label ?? (s.action === 'build' ? 'PLACE' : s.action === 'use' ? 'USE' : 'HIT');
     this.primary.setAttribute('aria-label', this.primary.textContent);
-    this.secondary.hidden = s.action !== 'build' && s.action !== 'interact';
+    this.secondary.hidden = !!s.spectating || (s.action !== 'build' && s.action !== 'interact');
     this.secondary.textContent = s.action === 'interact' ? 'HIT' : 'BREAK';
     this.secondary.setAttribute('aria-label', s.action === 'interact' ? 'Hit or break target' : 'Break block');
-    this.aim.hidden = this.reload.hidden = !s.gun;
+    this.aim.hidden = this.reload.hidden = !s.gun || !!s.spectating;
+  }
+
+  private holdAttacks(): boolean {
+    const { action, gun, spectating } = this.state;
+    return !gun && !spectating && (action === 'attack' || action === 'interact' || action === 'build');
   }
 
   private dragLook(dx: number, dy: number): void {
     this.input.mouseDX += dx * LOOK_SENS * this.input.lookSensitivity;
-    this.input.mouseDY += dy * LOOK_SENS * this.input.lookSensitivity;
+    this.input.mouseDY += dy * LOOK_SENS * this.input.lookSensitivity * (this.input.invertY ? -1 : 1);
   }
   private press(source: string, use: boolean, down: boolean): void {
     const sources = use ? this.useSources : this.attackSources;
@@ -190,6 +229,12 @@ export class TouchControls {
   }
   private clearMove(): void {
     this.input.tForward = this.input.tBack = this.input.tLeft = this.input.tRight = this.input.tSprint = false;
+    this.input.moveX = this.input.moveY = 0;
+  }
+  private releaseStick(): void {
+    this.stickId = -1; this.clearMove(); this.knob.style.transform = '';
+    this.stick.style.left = this.stick.style.top = this.stick.style.bottom = '';
+    this.stick.classList.remove('t-float');
   }
   private resetActions(): void {
     this.actionResets.forEach(fn => fn());
@@ -207,8 +252,8 @@ export class TouchControls {
     this.input.mouseDX = this.input.mouseDY = 0;
     this.setAim(false);
     this.sneak.classList.remove('t-on'); this.sneak.setAttribute('aria-pressed', 'false');
-    this.stickId = this.lookId = -1;
-    this.knob.style.transform = '';
+    this.releaseStick();
+    this.lookId = -1;
     clearTimeout(this.holdTimer);
   }
   private button(cls: string, text: string, label: string, parent = this.pads): HTMLButtonElement {

@@ -7,6 +7,7 @@
 
 import * as THREE from 'three';
 import { rayAabb } from './ray_aabb';
+import { touchActive } from './prompt_verbs';
 import type { GameAudio } from './audio';
 import { Block } from './blocks';
 import { renderItemIcon } from './icons';
@@ -142,6 +143,8 @@ export class RatSeekClient {
     this.compassArrow.textContent = '▲';
     this.compassText = el('span', '', this.compassEl);
     this.sidebar = el('div', 'rs-sidebar', this.root);
+    // Touch keeps only the header on screen; a tap opens the whole sidebar.
+    this.sidebar.addEventListener('click', () => this.sidebar.classList.toggle('open'));
     this.pocket = el('div', 'rs-pocket', this.root);
     this.titleEl = el('div', 'rs-title', this.root);
     this.titleMain = el('b', '', this.titleEl);
@@ -217,7 +220,7 @@ export class RatSeekClient {
     this.feed.replaceChildren();
     this.root.dataset.role = role;
     this.d.world.setArenaRenderBounds(RS_BOUNDS, MANOR_AMBIENT);
-    this.exchangeLabel = labelSprite(`Cheese Exchange\nRight-click: Free a Rat / Bank Escape · ${RS.RESCUE_COST} Cheese`);
+    this.exchangeLabel = labelSprite(`Cheese Exchange\n${touchActive() ? 'Tap USE' : 'Right-click'}: Free a Rat / Bank Escape · ${RS.RESCUE_COST} Cheese`);
     this.exchangeLabel.position.set(RS_KEEPER.x + 0.5, RS_KEEPER.y + 2.65,RS_KEEPER.z + 0.5);
     this.group.add(this.exchangeLabel);
     for (let i = 0; i < 4; i++) {
@@ -660,7 +663,7 @@ export class RatSeekClient {
     this.compassEl.style.opacity = c ? '' : '0.7';
     this.compassArrow.style.visibility = c ? '' : 'hidden';
     if (!c) {
-      const text = s.me.compassCd > 0 ? `Compass ${Math.ceil(s.me.compassCd / 20)}s` : 'Right-click the compass to track a rat';
+      const text = s.me.compassCd > 0 ? `Compass ${Math.ceil(s.me.compassCd / 20)}s` : touchActive() ? 'Hold the compass and tap USE to track a rat' : 'Right-click the compass to track a rat';
       if (this.compassText.textContent !== text) this.compassText.textContent = text;
       return;
     }
