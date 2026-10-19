@@ -50,7 +50,7 @@ import { RatSeekMatch, type RsHost } from '../ratseek';
 import { isRatClass, type RatClassId } from '../ratseek_rules';
 import { BedwarsMatch, type BwHost } from '../bedwars';
 import { BW_BOUNDS, BW_MAP_COUNT, BW_VOID_Y, bwMap } from '../bedwars_map';
-import { bwMotion, bwAcceptMotion, bwAuthorizeImpulse, bwSupported, bwTickMotion, type BwMotion } from '../bedwars_movement';
+import { bwMotion, bwAcceptMotion, bwAuthorizeImpulse, bwSupported, bwTickMotion, bwClock, bwSentAt, BW_MAX_LAG, type BwClock, type BwMotion } from '../bedwars_movement';
 import { Accounts, type Hasher } from './accounts';
 import { NameRegistry } from './names';
 import { PracticeSkills } from './practice_skill';
@@ -252,6 +252,8 @@ export class GameServer {
   private readonly disconnectedUntil = new Map<number, number>();
   private nextReconnectNonce = 1;
   private readonly bwMoves = new Map<number, BwMotion>();
+  /** Per-player client clock mapping; kept across teleports so it stays converged. */
+  private readonly bwClocks = new Map<number, BwClock>();
   private readonly worlds = new Map<number, MatchWorld>();
   private readonly worldByLobby = new Map<string, number>();
   private readonly duels: Duels;
@@ -427,7 +429,7 @@ export class GameServer {
     this.names.releaseAll(this.holder(id));
     this.pg.forgetPlayer(id);
     this.players.delete(id);
-    this.bwMoves.delete(id);
+    this.bwMoves.delete(id); this.bwClocks.delete(id);
     this.partySpectators.delete(id);
     this.disconnectedUntil.delete(id);
     for (const [token, owner] of this.reconnectTokens) if (owner === id) this.reconnectTokens.delete(token);
@@ -1002,7 +1004,7 @@ export class GameServer {
 
   /** Remove a body from a world's roster and tell the rest. */
   private detach(p: ServerPlayer, w: MatchWorld, out: Outbound[]): void {
-    this.bwMoves.delete(p.id);
+    this.bwMoves.delete(p.id); this.bwClocks.delete(p.id);
     w.members.delete(p.id);
     p.worldId = null;
     p.arenaTrack = [];
@@ -1052,7 +1054,7 @@ export class GameServer {
       }
       w.members.delete(id);
       p.worldId = null;
-      this.bwMoves.delete(id);
+      this.bwMoves.delete(id); this.bwClocks.delete(id);
       p.arenaTrack = [];
       p.duelShotTickets = [];
       p.duelRespawning = false;
@@ -1235,6 +1237,9 @@ export class GameServer {
       if (msg.world !== w.spec.id || this.staleMove(p, msg) || !fin(msg.x, msg.y, msg.z, msg.yaw, msg.pitch)) return [];
       const motion = this.bwMoves.get(p.id) ?? bwMotion(this.worldTime, p);
       this.bwMoves.set(p.id, motion);
+      const clock = this.bwClocks.get(p.id) ?? bwClock();
+      this.bwClocks.set(p.id, clock);
+      const sentAt = Math.max(motion.at, bwSentAt(clock, this.worldTime, msg.ct));
       const bounds = BW_BOUNDS;
       let valid = (bw.canMove(p.id) || p.dead) &&
         msg.x >= bounds.minX - 4 && msg.x <= bounds.maxX + 4 && msg.z >= bounds.minZ - 4 && msg.z <= bounds.maxZ + 4 &&
@@ -1253,10 +1258,10 @@ export class GameServer {
         }
       }
       if (valid) {
-        const verdict = bwAcceptMotion(motion, this.worldTime, p, msg, p.dead, (x, y, z) => w.blocks.getBlock(x, y, z));
+        const verdict = bwAcceptMotion(motion, sentAt, p, msg, p.dead, (x, y, z) => w.blocks.getBlock(x, y, z));
         valid = verdict.ok;
         if (verdict.airViolation) {
-          const fall = bwTickMotion(motion, this.worldTime, p, (x, y, z) => w.blocks.getBlock(x, y, z));
+          const fall = bwTickMotion(motion, sentAt, p, (x, y, z) => w.blocks.getBlock(x, y, z));
           if (fall) p.y = fall.y;
         }
       }
@@ -1266,7 +1271,7 @@ export class GameServer {
       if (Number.isFinite(msg.swing)) p.swing = Number(msg.swing) & 0xffff;
       if (valid) {
         p.x = msg.x; p.y = msg.y; p.z = msg.z;
-        p.rsMoveAt = this.worldTime;
+        p.rsMoveAt = this.worldTime; clock.heardAt = this.worldTime;
       } else if (Math.hypot(msg.x - p.x, msg.y - p.y, msg.z - p.z) > 0.3) {
         w.bwOut.push(this.to(p, { t: 'teleport', x: p.x, y: p.y, z: p.z, seq: this.moved(p) }));
       }
@@ -2380,13 +2385,18 @@ export class GameServer {
       if (!w.bw) continue;
       // An unsupported body must fall even when its client stops sending
       // transforms. Keep its horizontal position and original flight clock;
-      // anti-flight corrections never rescue it back onto the island.
+      // anti-flight corrections never rescue it back onto the island. A
+      // client still talking is judged packet by packet, and one held up by a
+      // short stall is judged when its packets land: only real silence (past
+      // BW_MAX_LAG) gets a forced fall, run on the same lagged clock.
       for (const participant of w.bw.players.values()) {
         const p = this.players.get(participant.id);
         if (!p || p.bot || p.dead || !w.bw.canMove(p.id)) continue;
+        const heardAt = this.bwClocks.get(p.id)?.heardAt ?? -Infinity;
+        if (this.worldTime - heardAt < BW_MAX_LAG) continue;
         const motion = this.bwMoves.get(p.id) ?? bwMotion(this.worldTime, p);
         this.bwMoves.set(p.id, motion);
-        const fall = bwTickMotion(motion, this.worldTime, p, (x, y, z) => w.blocks.getBlock(x, y, z));
+        const fall = bwTickMotion(motion, Math.max(motion.at, this.worldTime - BW_MAX_LAG), p, (x, y, z) => w.blocks.getBlock(x, y, z));
         if (fall) {
           p.y = fall.y;
           w.bwOut.push(this.to(p, { t: 'teleport', x: p.x, y: p.y, z: p.z, seq: this.moved(p) }));

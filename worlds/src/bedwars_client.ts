@@ -2,7 +2,7 @@
 // predicts the two things that must feel instant (placing a block and the crack
 // on one being mined) and keeps the HUD tiny.
 import * as THREE from 'three';
-import { bwMap, type BedwarsMap } from './bedwars_map';
+import { bwMap, BW_BOUNDS, BW_MAX_Y, BW_MIN_Y, type BedwarsMap } from './bedwars_map';
 import { createBedwarsModels, type BedwarsModels } from './bedwars_models';
 import { BedwarsWorld } from './bedwars_world';
 import { BedwarsHud } from './bedwars_hud';
@@ -385,7 +385,10 @@ export class BedwarsClient {
   }
   private placeable(face: Face): boolean {
     const x = face.x + face.nx, y = face.y + face.ny, z = face.z + face.nz;
-    return y >= 0 && y < 256 && !this.predicted.has({ x, y, z }) && isReplaceable(this.d.world.getBlock(x, y, z)) && !this.map.isProtected(x, y, z) && this.map.bedAt(x, y, z) === null;
+    // The server's build box: a block drawn outside it is always refused,
+    // and standing on it until the refusal lands is a lagback.
+    if (y < BW_MIN_Y || y >= BW_MAX_Y || x < BW_BOUNDS.minX || x >= BW_BOUNDS.maxX || z < BW_BOUNDS.minZ || z >= BW_BOUNDS.maxZ) return false;
+    return !this.predicted.has({ x, y, z }) && isReplaceable(this.d.world.getBlock(x, y, z)) && !this.map.isProtected(x, y, z) && this.map.bedAt(x, y, z) === null;
   }
   /** Shows the block at once and asks the server; a refusal takes it back.
    *  `face` is the block that was aimed at and the side that was hit. */

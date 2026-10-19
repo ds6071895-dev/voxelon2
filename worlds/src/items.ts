@@ -166,7 +166,7 @@ export const ITEMS: Record<number, ItemInfo> = {
   /** The Bridge's bow. Deliberately NOT a `gun`: guns fire hitscan rounds the
    *  client reports, and this fires a server-simulated arrow with an arc. The
    *  registry entry exists so it renders, names and stacks like an item. */
-  [Item.BridgeBow]: { name: 'Bridge Bow', kind: 'item', sprite: Tile.BridgeBow, maxStack: 1 },
+  [Item.BridgeBow]: { name: 'Bow', kind: 'item', sprite: Tile.BridgeBow, maxStack: 1 },
   /** Ammunition. The Bridge hands out an unlimited stack, so the count on the
    *  hotbar is decoration — the server never reads it. */
   [Item.BridgeArrow]: { name: 'Arrow', kind: 'item', sprite: Tile.BridgeArrow, maxStack: 64 },

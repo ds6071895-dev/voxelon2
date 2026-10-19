@@ -10,17 +10,45 @@ export interface BwMotion {
   extraSpeed: number; impulseUntil: number; safe: BwPos;
   sampleAt: number; descending: boolean;
 }
-// Half a second of sprinting in credit, so a bunched packet after a lag spike is
+// Half a second of sprinting in credit, so a gap left by dropped packets is
 // accepted instead of rubber-banding the player.
 const HORIZONTAL_CAP = 3.2, HORIZONTAL_RATE = 8.2;
 const GRAVITY = 32, JUMP_V = Math.sqrt(2 * GRAVITY * 1.25), JITTER = .1;
+/** At least the client's 0.3 half-width: a sneak at the very rim keeps
+ * 0.0..0.01 of the block under it, and the client calls that standing. */
+const SUPPORT_R = .31;
 type BlockAt = (x: number, y: number, z: number) => number;
+
+/** How far behind the server clock a packet may be judged, and how long a
+ * client may go quiet before the server starts its fall for it. */
+export const BW_MAX_LAG = 1;
+const CLOCK_DRIFT = .02;
+/** Maps a client's `ct` onto the server clock: the fastest delivery seen sets
+ * the offset, so a packet held up by a Wi-Fi stall is judged at the moment it
+ * was sent, not at its late arrival (a jump's arc checked against the arrival
+ * time looks like flight). Never earlier than BW_MAX_LAG ago, never later than
+ * now; a clock that jumps re-syncs to arrival time. */
+export interface BwClock {
+  offset: number | null; sampledAt: number;
+  /** Last ACCEPTED transform: a stream of refused poses is silence too. */
+  heardAt: number;
+}
+export function bwClock(): BwClock { return { offset: null, sampledAt: -Infinity, heardAt: -Infinity }; }
+export function bwSentAt(c: BwClock, now: number, ctMs: unknown): number {
+  const quiet = Math.max(0, now - c.sampledAt);
+  c.sampledAt = now;
+  if (typeof ctMs !== 'number' || !Number.isFinite(ctMs)) return now;
+  const sample = now - ctMs / 1000;
+  if (c.offset === null || sample > c.offset + quiet * CLOCK_DRIFT + BW_MAX_LAG) c.offset = sample;
+  else c.offset = Math.min(sample, c.offset + quiet * CLOCK_DRIFT);
+  return Math.max(now - BW_MAX_LAG, Math.min(now, ctMs / 1000 + c.offset));
+}
 export function bwMotion(at: number, p: BwPos): BwMotion {
   return { at, horizontal: HORIZONTAL_CAP, upward: 1.4, vertical: 4.5,
     airAt: null, launchY: p.y, launchV: 10, extraSpeed: 0, impulseUntil: 0, safe: { ...p }, sampleAt: at, descending: false };
 }
 export function bwSupported(p: BwPos, blockAt: BlockAt): boolean {
-  const r = .29;
+  const r = SUPPORT_R;
   for (let x = Math.floor(p.x - r); x <= Math.floor(p.x + r); x++)
     for (let z = Math.floor(p.z - r); z <= Math.floor(p.z + r); z++)
       for (let y = Math.floor(p.y - .08); y <= Math.floor(p.y); y++)
@@ -33,7 +61,7 @@ export function bwSupported(p: BwPos, blockAt: BlockAt): boolean {
 /** Highest actual collision-box top crossed by a downward feet sweep. */
 function landingY(p: BwPos, bottom: number, top: number, blockAt: BlockAt): number | null {
   let highest = -Infinity;
-  const r = .29;
+  const r = SUPPORT_R;
   for (let x = Math.floor(p.x - r); x <= Math.floor(p.x + r); x++)
     for (let z = Math.floor(p.z - r); z <= Math.floor(p.z + r); z++)
       for (let y = Math.floor(bottom) - 1; y <= Math.floor(top); y++)
@@ -90,7 +118,7 @@ export function bwAuthorizeImpulse(m: BwMotion, now: number, p: BwPos, x: number
 export function bwAcceptMotion(m: BwMotion, now: number, from: BwPos, to: BwPos,
   spectator: boolean, blockAt: (x: number, y: number, z: number) => number): { ok: boolean; airViolation: boolean } {
   const dt = Math.max(0, Math.min(.5, now - m.at));
-  m.at = now;
+  m.at = Math.max(m.at, now);
   const boosted = now < m.impulseUntil;
   if (!boosted) m.extraSpeed = 0;
   m.horizontal = Math.min(HORIZONTAL_CAP + (boosted ? .8 : 0), m.horizontal + dt * (spectator ? 16 : HORIZONTAL_RATE + m.extraSpeed));

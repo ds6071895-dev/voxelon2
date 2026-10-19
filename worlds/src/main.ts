@@ -1526,7 +1526,7 @@ net.onBwArena = (spec, team, spawn, yaw) => {
   world.setArenaRenderBounds(BW_BOUNDS, 0.88);
   bwClient.enter(team, spec.seed);
   syncPixelRatio(true);
-  bwSelected = -1; bwSwingAt = 0; bwClickAt = 0; bwBowAt = 0; bwFlashAt = 0;
+  bwSelected = -1; bwSwingAt = 0; bwClickAt = 0; bwBowAt = 0; bwBowReadyAt = 0; bwFlashAt = 0;
 };
 net.onBwState = s => {
   if (match?.kind !== 'bw') return;
@@ -1574,6 +1574,8 @@ net.onBwResult = result => {
   if (result.winner !== null) audio.duelCue(result.winner === team ? 'victory' : 'defeat');
 };
 let bwSelected = -1, bwSwingAt = 0, bwClickAt = 0, bwBowAt = 0, bwFlashAt = 0;
+/** Bedwars bow: no draw starts before the server's shot cooldown is over. */
+let bwBowReadyAt = 0;
 window.addEventListener('keydown', e => {
   if (match?.kind !== 'bw' || screens.state !== 'playing' || e.repeat || bwClient.panelOpen) return;
   if (e.code === 'KeyE' && bwClient.interact()) e.preventDefault();
@@ -1603,12 +1605,16 @@ function updateBedwarsInput(look: THREE.Vector3, eye: THREE.Vector3): void {
   bwClient.aimBreak(target, slot, input.leftDown && !hitPlayer);
   if (input.leftDown && target && !hitPlayer && now >= bwSwingAt && bwClient.isBreaking) { held.swing(); bwSwingAt = now + 380; }
   if (stack?.id === Item.BridgeBow) {
-    if (input.rightDown && !bwBowAt) bwBowAt = now;
-    held.setBowDraw(bwBowAt ? Math.min(1, (now - bwBowAt) / 850) : 0);
+    // Hold to draw, let go to shoot; letting go before BOW_MIN_DRAW cancels.
+    if (input.rightDown && !bwBowAt && now >= bwBowReadyAt) bwBowAt = now;
+    held.setBowDraw(bwBowAt ? Math.min(1, (now - bwBowAt) / BW.BOW_DRAW_MS) : 0);
     if (!input.rightDown && bwBowAt) {
-      const power = Math.min(1, (now - bwBowAt) / 850); bwBowAt = 0;
-      net.sendBwAction({ kind: 'shoot', dx: look.x, dy: look.y, dz: look.z, power, slot });
-      held.setBowDraw(0); audio.bowRelease(power);
+      const power = Math.min(1, (now - bwBowAt) / BW.BOW_DRAW_MS); bwBowAt = 0;
+      held.setBowDraw(0);
+      if (power >= BW.BOW_MIN_DRAW) {
+        net.sendBwAction({ kind: 'shoot', dx: look.x, dy: look.y, dz: look.z, power, slot });
+        audio.bowRelease(power); bwBowReadyAt = now + BW.BOW_COOLDOWN * 1000;
+      }
     }
   } else {
     bwBowAt = 0; held.setBowDraw(0);

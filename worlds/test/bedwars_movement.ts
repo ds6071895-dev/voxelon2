@@ -50,7 +50,11 @@ class MovementServer {
   send(id: number, message: ClientMsg): void { this.deliver(this.game.handle(id, message)); }
   tick(seconds: number): void { for (let i = 0; i < Math.round(seconds * 20); i++) this.deliver(this.game.tick(0.05)); }
   place(at: BwPos): void { this.match.host.teleport(this.id, at.x, at.y, at.z, 0, 20); }
-  move(to: BwPos, ct = 0): void { this.send(this.id, { t: 'xform', world: this.world, ...to, yaw: 0, pitch: 0, ct }); }
+  /** A real client's `ct` advances with its clock; the server judges each
+   * transform at its send time, so the default is a perfectly synced clock. */
+  move(to: BwPos, ct = Math.round((this.game as unknown as { worldTime: number }).worldTime * 1000)): void {
+    this.send(this.id, { t: 'xform', world: this.world, ...to, yaw: 0, pitch: 0, ct });
+  }
 }
 
 /** Actual browser physics at rendering FPS, transforms at 30Hz, server ticks
@@ -324,7 +328,7 @@ export function runBedwarsMovementTests(): void {
     h.match.host.setBlock(35, 96, 0, Block.TeamWoolA);
     h.match.host.setBlock(36, 93, 0, Block.ManorMarbleSlab);
     h.place({ x: 35.5, y: 97, z: .5 }); h.move({ x: 36.5, y: 97, z: .5 });
-    h.tick(2);
+    h.tick(3); // includes BW_MAX_LAG of silence grace before the forced fall
     close(h.body.x, 36.5, 'landing preserves horizontal position');
     close(h.body.y, 93.5, 'downward collision sweep lands on the slab, not its empty upper half');
     assert.equal(h.match.players.get(h.id)!.deaths, 0, 'a real landing interrupts the forced fall');

@@ -305,7 +305,8 @@ export function runBedwarsTests(): void {
   test('projectiles stream on their own message while in flight', () => {
     const h = new BwTestHost(); h.start(); h.tick(2.1); const p = h.match.players.get(1)!;
     bwGive(p.slots, bwCatalog('bow')!, 0); bwGive(p.slots, bwCatalog('arrows')!, 0);
-    h.at(1, { x: -61.5, y: 97, z: 4.5 }); h.at(2, { x: 80, y: 97, z: -50 });
+    // z 2.5 is a clear lane: at full draw the arrow reaches z 4.5's lamp post in 0.15 s.
+    h.at(1, { x: -61.5, y: 97, z: 2.5 }); h.at(2, { x: 80, y: 97, z: -50 });
     const slot = p.slots.findIndex((s) => s?.id === Item.BridgeBow);
     h.action(1, { kind: 'shoot', slot, dx: 1, dy: 0.1, dz: 0, power: 1 }); h.tick(0.3);
     const frames = h.got(1, 'bwProj').filter((m) => m.p.length > 0);

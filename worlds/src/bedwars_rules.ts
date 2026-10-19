@@ -69,6 +69,9 @@ export const BW = {
    *  packets that bunch up on the way never cost a block. The client places as
    *  soon as its aim reaches a new spot, but never faster than PLACE_REPEAT_MS. */
   PLACE_COOLDOWN: 0.06, PLACE_BURST: 4, PLACE_REPEAT_MS: 60,
+  /** Bow: a draw under BOW_MIN_DRAW (of a full BOW_DRAW_MS pull) is a cancel,
+   *  not a shot. Arrows fly fast and nearly flat. */
+  BOW_DRAW_MS: 850, BOW_MIN_DRAW: 0.3, BOW_COOLDOWN: 0.9, ARROW_GRAVITY: 6,
   REWIND: 0.3,
   SLOT_COUNT: 9, CHEST_CAP: 4096, PICKUP_RADIUS: 1.3,
 } as const;

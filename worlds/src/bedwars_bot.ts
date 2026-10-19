@@ -4,8 +4,10 @@
 // like anyone else.
 //
 // What makes it a real opponent:
-//  - Skill (0..1) sets reaction time, aim, clicking speed, strafing, W-taps,
-//    jump crits, bridging speed and block clutches. It starts from what the
+//  - Skill (0..1) sets bridging speed, block clutches and planning; fighting
+//    (reaction, aim, clicking, reach, strafing, W-taps, crits, bow) runs on
+//    `pvp`, a much lower share of it, so its sword never outclasses a decent
+//    player even once fully adapted. It starts from what the
 //    bot last learned about this player and keeps adapting during the match:
 //    it climbs fast when the human is winning and eases off when it is far
 //    ahead, so a strong player meets a strong bot.
@@ -136,9 +138,17 @@ export class BedwarsBot {
   }
 
   // ── Skill ────────────────────────────────────────────────────────────────
-  private get reaction(): number { return lerp(0.45, 0.06, this.skill); }
+  /** Fighting skill: a fraction of the overall one, so even a fully adapted
+   *  bot bridges, buys and plans well but fights like an average player. */
+  private get pvp(): number { return this.skill * 0.4; }
+  private get reaction(): number { return lerp(0.55, 0.22, this.pvp / 0.4); }
   private get turnRate(): number { return lerp(5, 24, this.skill); }
-  private get cps(): number { return lerp(4.5, 12.5, this.skill); }
+  /** Turning speed while tracking a foe (building aim keeps turnRate). */
+  private get combatTurnRate(): number { return lerp(3.5, 8, this.pvp / 0.4); }
+  private get cps(): number { return lerp(2.6, 4.2, this.pvp / 0.4); }
+  /** Share of swings that connect: the server's padded hitbox forgives the
+   *  aim error, so misses are rolled to keep its damage well under a player's. */
+  private get hitChance(): number { return lerp(0.2, 0.35, this.pvp / 0.4); }
 
   /** Lean toward whoever is behind: quickly up when the human leads, gently
    *  down when the bot is running away with it. */
@@ -375,11 +385,12 @@ export class BedwarsBot {
     const tx = fb.x + (this.lastFoePos ? (fb.x - this.lastFoePos.x) / 0.05 * lead : 0);
     const tz = fb.z + (this.lastFoePos ? (fb.z - this.lastFoePos.z) / 0.05 * lead : 0);
     this.lastFoePos = { x: fb.x, z: fb.z };
-    this.aimAt({ x: tx, y: fb.y + 1.25, z: tz }, 0.05);
-    const reach = 3.05;
+    this.aimAt({ x: tx, y: fb.y + 1.25, z: tz }, 0.14, this.combatTurnRate);
+    // Shorter than a player's 3.2 reach, so trades at range go to the human.
+    const reach = 2.6;
     if (d > 2.6) {
       // Close the gap; across void, walk the path (it bridges).
-      if (!this.floorBetween(b.pos, fb)) { this.moveTo(p, fb, actions); this.aimAt({ x: tx, y: fb.y + 1.25, z: tz }, 0.05); }
+      if (!this.floorBetween(b.pos, fb)) { this.moveTo(p, fb, actions); this.aimAt({ x: tx, y: fb.y + 1.25, z: tz }, 0.14, this.combatTurnRate); }
       else { this.input.forward = true; this.input.sprintKey = true; }
     } else {
       // In range: keep pressure without walking into them.
@@ -388,27 +399,28 @@ export class BedwarsBot {
       if (d < 1.2) this.input.back = true;
     }
     // Strafing and jump-crits, kept off the edges.
-    if (this.skill > 0.3 && d < 5) {
-      if (m.time >= this.strafeUntil) { this.strafeDir = this.rng() < 0.5 ? -1 : 1; this.strafeUntil = m.time + lerp(1.2, 0.35, this.skill) + this.rng() * 0.5; }
+    if (this.pvp > 0.2 && d < 5) {
+      if (m.time >= this.strafeUntil) { this.strafeDir = this.rng() < 0.5 ? -1 : 1; this.strafeUntil = m.time + lerp(1.6, 0.9, this.pvp / 0.4) + this.rng() * 0.5; }
       const side = this.strafeDir;
       const rx = Math.cos(b.yaw) * side, rz = -Math.sin(b.yaw) * side;
       if (this.floorAt(b.pos.x + rx * 1.1, b.pos.z + rz * 1.1)) { if (side > 0) this.input.right = true; else this.input.left = true; }
       else this.strafeDir = -side;
     }
-    if (this.skill > 0.65 && d > 2.4 && d < 3.6 && b.onGround && this.rng() < this.skill * 0.08) this.input.jump = true;
+    if (this.pvp > 0.3 && d > 2.4 && d < 3.6 && b.onGround && this.rng() < this.pvp * 0.05) this.input.jump = true;
     // Never step forward off an edge chasing someone.
     const fx = -Math.sin(b.yaw), fz = -Math.cos(b.yaw);
     if (this.input.forward && !this.floorAt(b.pos.x + fx * 0.9, b.pos.z + fz * 0.9) && this.floorBetween(b.pos, fb) === false) {
       this.input.forward = false; this.input.sneak = true;
     }
-    if (d <= reach + 0.4 && m.time >= this.nextClickAt) {
+    if (d <= reach + 0.3 && m.time >= this.nextClickAt) {
       this.nextClickAt = m.time + (1 / this.cps) * (0.8 + this.rng() * 0.4);
       this.swing = true;
       const before = foe.health;
+      if (this.rng() >= this.hitChance) return true;
       actions.push(() => {
         m.handle(this.id, { kind: 'melee', target: foe.id, slot });
         // W-tap: let go of forward a moment after a landed hit to re-sprint.
-        if (foe.health < before && this.skill > 0.55) this.wtapUntil = m.time + 0.12;
+        if (foe.health < before && this.pvp > 0.35 && this.rng() < 0.5) this.wtapUntil = m.time + 0.12;
       });
     }
     return true;
@@ -417,7 +429,7 @@ export class BedwarsBot {
   /** Shoot at a foe out of sword range, standing still on solid ground. */
   private bow(p: BwPlayer, foes: BwPlayer[], actions: (() => void)[]): boolean {
     const m = this.match, b = this.body;
-    if (this.skill < 0.45) return false;
+    if (this.pvp < 0.3) return false;
     const bow = p.slots.findIndex((s) => s?.id === Item.BridgeBow);
     if (bow < 0 || bwCount(p.slots, Item.BridgeArrow) <= 0) { this.drawStart = -1; return false; }
     const eye = { x: b.pos.x, y: b.pos.y + 1.62, z: b.pos.z };
@@ -429,13 +441,13 @@ export class BedwarsBot {
     if (this.goal === 'forge' || this.goal === 'shop' || this.goal === 'upgrade') return false;
     this.held = Item.BridgeBow;
     const d = Math.hypot(target.x - eye.x, target.z - eye.z), dy = target.y + 1.1 - eye.y;
-    const speed = 40, g = 12;
+    const speed = 24 + 38, g = BW.ARROW_GRAVITY;
     // Low-arc ballistic pitch for this range.
     const v2 = speed * speed, disc = v2 * v2 - g * (g * d * d + 2 * dy * v2);
     if (disc < 0) return false;
     const pitch = Math.atan((v2 - Math.sqrt(disc)) / (g * d));
     const yaw = Math.atan2(-(target.x - eye.x), -(target.z - eye.z));
-    this.turnTo(yaw, pitch, 0.03);
+    this.turnTo(yaw, pitch, 0.09);
     if (this.drawStart < 0) this.drawStart = m.time;
     if (m.time - this.drawStart >= 0.95) {
       this.drawStart = -1;
@@ -667,19 +679,19 @@ export class BedwarsBot {
   }
 
   // ── Aim ──────────────────────────────────────────────────────────────────
-  private aimAt(t: BwPos, noise: number): void {
+  private aimAt(t: BwPos, noise: number, rate = this.turnRate): void {
     const b = this.body, eye = { x: b.pos.x, y: b.pos.y + 1.62, z: b.pos.z };
     const yaw = Math.atan2(-(t.x - eye.x), -(t.z - eye.z));
     const pitch = Math.atan2(t.y - eye.y, Math.hypot(t.x - eye.x, t.z - eye.z));
-    this.turnTo(yaw, pitch, noise);
+    this.turnTo(yaw, pitch, noise, rate);
   }
   /** Turns toward a look direction at a skill-limited rate, with a drifting
    *  error so aim is never pixel-perfect on a weaker bot. */
-  private turnTo(yaw: number, pitch: number, noise: number): void {
+  private turnTo(yaw: number, pitch: number, noise: number, rate = this.turnRate): void {
     const err = noise * lerp(4.2, 0.35, this.skill);
     this.aimNoiseYaw += ((this.rng() - 0.5) * 2 * err - this.aimNoiseYaw) * 0.15;
     this.aimNoisePitch += ((this.rng() - 0.5) * err - this.aimNoisePitch) * 0.15;
-    const step = this.turnRate * 0.05;
+    const step = rate * 0.05;
     const dy = angleTo(this.body.yaw, yaw + this.aimNoiseYaw);
     this.body.yaw += clamp(dy, -step, step);
     this.pitch += clamp(pitch + this.aimNoisePitch - this.pitch, -step, step);

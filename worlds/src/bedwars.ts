@@ -595,11 +595,12 @@ export class BedwarsMatch {
     const len = Math.hypot(a.dx, a.dy, a.dz), direction = { x: a.dx / len, y: a.dy / len, z: a.dz / len };
     let kind: Projectile['kind'], speed: number, damage = 0;
     if (a.kind === 'shoot') {
-      if (e.type !== 'bow' || !finite(a.power) || a.power < 0.1 || a.power > 1) return;
+      // A hair under the client's minimum, for frame timing.
+      if (e.type !== 'bow' || !finite(a.power) || a.power < BW.BOW_MIN_DRAW - 0.05 || a.power > 1) return;
       const arrows = p.slots.findIndex((v) => v?.id === Item.BridgeArrow);
       if (arrows < 0) return;
-      bwConsume(p.slots, arrows); kind = 'arrow'; speed = 15 + a.power * 25; damage = 3 + a.power * 5;
-      p.useAt = this.time + 0.9;
+      bwConsume(p.slots, arrows); kind = 'arrow'; speed = 24 + a.power * 38; damage = 3 + a.power * 5;
+      p.useAt = this.time + BW.BOW_COOLDOWN;
     } else if (e.type === 'heal') {
       if (p.health >= BW.HEALTH || p.healUntil > this.time) return;
       bwConsume(p.slots, a.slot); p.healUntil = this.time + 4; p.useAt = this.time + 1; this.syncKit(p); return;
@@ -621,7 +622,7 @@ export class BedwarsMatch {
       let remove = false;
       for (let step = 0; step < substeps; step++) {
         const before = { x: shot.x, y: shot.y, z: shot.z };
-        shot.vy -= (shot.kind === 'arrow' ? 12 : 18) * STEP / substeps;
+        shot.vy -= (shot.kind === 'arrow' ? BW.ARROW_GRAVITY : 18) * STEP / substeps;
         shot.x += shot.vx * STEP / substeps; shot.y += shot.vy * STEP / substeps; shot.z += shot.vz * STEP / substeps;
         const hit = this.projectileHit(before, shot);
         if (hit !== null) {
