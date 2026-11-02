@@ -32,6 +32,10 @@ import { runClientCleanupTests } from './client_cleanup';
 import { partyCleanupTests } from './party_cleanup';
 import { runRenderingCleanupTests } from './rendering_cleanup';
 import { runServerCleanupTests } from './server_cleanup';
+import { runVanillaTests } from './vanilla';
+import { runPillarsTests } from './pillars';
+import { runDisasterTests } from './disaster';
+import { runMinigamesTests } from './minigames';
 
 let passed = 0, failed = 0;
 function check(name: string, ok: boolean, detail = ''): void {
@@ -586,6 +590,10 @@ section('Bedwars match rules and economy');
 runBedwarsTests();
 section('Bedwars movement authority');
 runBedwarsMovementTests();
+passed += runVanillaTests();
+passed += runPillarsTests();
+passed += runDisasterTests();
+passed += runMinigamesTests();
 
 async function cleanupSuites(): Promise<void> {
   section('Client storage and input contracts');

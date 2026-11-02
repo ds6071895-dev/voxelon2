@@ -7,12 +7,15 @@ import { INTERP_DELAY, SenderClock, StateTimeline, TransformBuffer, netNow } fro
 import type { ItemStack } from '../items';
 import {
   SERVER_PORT, TRANSFORM_HZ,
-  type ClientMsg, type GameMode, type PartyState, type PlayerInfo, type ServerMsg,
+  type ClientMsg, type EngineMode, type GameMode, type PartyState, type PlayerInfo, type ServerMsg,
 } from './protocol';
 import type { Cosmetics } from '../character';
 import type { DuelArenaBounds, DuelLobbySnapshot, DuelResult } from '../duels';
 import type { PartyArenaBounds, PartyLobbySnapshot, PartyResult, PartySubBounds } from '../partygames';
 import type { WorldSpec } from '../multiverse';
+import type { FillSpec } from '../vanilla/fill';
+import type { MAction, MPayload } from '../vanilla/messages';
+import type { MgPlaylist } from '../minigames_rules';
 import type { RatClassId, RsEffects, RsResult, RsRole, RsSnapshot, RsSound } from '../ratseek_rules';
 import type { BwSnapshot, BwResult, BwAction, BwDropView, BwProjectileView } from '../bedwars_rules';
 
@@ -53,7 +56,10 @@ function serverUrl(): string {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const sameOrigin = location.protocol === 'https:' || location.port === '' ||
     location.port === String(SERVER_PORT);
-  return sameOrigin ? `${proto}//${location.host}` : `ws://${location.hostname || 'localhost'}:${SERVER_PORT}`;
+  // Dev only: `?ws=8091` points the Vite page at a second game server (tests).
+  const devPort = Number(new URLSearchParams(location.search).get('ws'));
+  const port = Number.isInteger(devPort) && devPort > 1024 && devPort < 65536 ? devPort : SERVER_PORT;
+  return sameOrigin ? `${proto}//${location.host}` : `ws://${location.hostname || 'localhost'}:${port}`;
 }
 
 /** Seconds a remote may be absent from snapshots before it is dropped. */
@@ -97,6 +103,7 @@ export class NetClient {
   onSelfHealth?: (health: number) => void;
   onEdit?: (x: number, y: number, z: number, block: number) => void;
   onEditBatch?: (edits: { x: number; y: number; z: number; block: number }[]) => void;
+  onEditFill?: (fill: FillSpec) => void;
   onHurt?: (health: number, k: [number, number, number], by: number) => void;
   onHitConfirm?: (target: number, amount: number, killed: boolean, crit: boolean) => void;
   onShot?: (id: number, item: number, x: number, y: number, z: number, dx: number, dy: number, dz: number) => void;
@@ -131,6 +138,9 @@ export class NetClient {
   onRsImpulse?: (vx: number, vy: number, vz: number, momentum: number) => void;
   onRsResult?: (result: RsResult) => void;
   onBwArena?: (world: WorldSpec, team: number, spawn: { x: number; y: number; z: number }, yaw: number) => void;
+  onMArena?: (world: WorldSpec, mode: EngineMode, spawn: { x: number; y: number; z: number }, yaw: number, health: number) => void;
+  onM?: (d: MPayload) => void;
+  onPlaylists?: (lists: MgPlaylist[]) => void;
   onBwState?: (s: BwSnapshot) => void;
   onBwKit?: (slots: (ItemStack | null)[], selected: number | undefined, placement?: number) => void;
   onBwDrop?: (msg: { reset?: boolean; add?: BwDropView[]; gone?: { id: number; by?: number; into?: number }[]; count?: { id: number; count: number }[] }) => void;
@@ -264,6 +274,8 @@ export class NetClient {
         if (this.onEditBatch) this.onEditBatch(msg.edits);
         else for (const e of msg.edits) this.onEdit?.(e.x, e.y, e.z, e.block);
         break;
+      case 'editFill': this.onEditFill?.(msg.fill);
+        break;
       case 'hurt': this.onHurt?.(msg.health, [msg.kx, msg.ky, msg.kz], msg.by); break;
       case 'hitconfirm': this.onHitConfirm?.(msg.target, msg.amount, msg.killed === true, msg.crit === true); break;
       case 'shot': this.onShot?.(msg.id, msg.item, msg.x, msg.y, msg.z, msg.dx, msg.dy, msg.dz); break;
@@ -310,6 +322,12 @@ export class NetClient {
       case 'rsSound': this.onRsSound?.(msg.kind, msg.x !== undefined ? { x: msg.x, y: msg.y!, z: msg.z! } : null); break;
       case 'rsImpulse': this.onRsImpulse?.(msg.vx, msg.vy, msg.vz, msg.momentum); break;
       case 'rsResult': this.onRsResult?.(msg.result); break;
+      case 'mArena':
+        this.enterWorld(msg.world.id, undefined);
+        this.onMArena?.(msg.world, msg.mode, msg.spawn, msg.yaw, msg.health);
+        break;
+      case 'm': this.onM?.(msg.d); break;
+      case 'mgPlaylists': this.onPlaylists?.(msg.playlists); break;
       case 'bwArena':
         this.enterWorld(msg.world.id, undefined);
         this.onBwArena?.(msg.world, msg.team, msg.spawn, msg.yaw);
@@ -386,6 +404,7 @@ export class NetClient {
     if (this.worldId !== null) this.send({ t: 'worldReady', world: this.worldId, revision: this.revision });
   }
   sendEdit(x: number, y: number, z: number, block: number): void { this.send({ t: 'edit', x, y, z, block }); }
+  sendM(a: MAction): void { if (this.worldId !== null) this.send({ t: 'mAct', world: this.worldId, a }); }
   sendShot(x: number, y: number, z: number, dx: number, dy: number, dz: number, item: number): void {
     this.send({ t: 'shot', x, y, z, dx, dy, dz, item });
   }

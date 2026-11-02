@@ -6,7 +6,7 @@
 // it on every side (no light travels further), which a 3x3-chunk window does
 // for one chunk plus its one-cell border.
 
-import { Block, BLOCKS, isOpaque } from './blocks';
+import { BLOCK_ID_LIMIT, BLOCKS, isOpaque } from './blocks';
 import { Chunk, CHUNK_X, CHUNK_Z } from './chunk';
 
 export interface LightField {
@@ -20,12 +20,9 @@ const OPAQUE = 255;
 let attenuation: Uint8Array | null = null;
 function attenuationTable(): Uint8Array {
   if (attenuation) return attenuation;
-  const t = new Uint8Array(256);
-  for (let id = 0; id < 256; id++) {
-    t[id] = isOpaque(id) ? OPAQUE
-      : id === Block.Water ? 2
-      : id === Block.Leaves || id === Block.BirchLeaves || id === Block.SpruceLeaves ? 1
-      : 0;
+  const t = new Uint8Array(BLOCK_ID_LIMIT);
+  for (let id = 0; id < BLOCK_ID_LIMIT; id++) {
+    t[id] = isOpaque(id) ? OPAQUE : BLOCKS[id]?.lightAtt ?? 0;
   }
   return (attenuation = t);
 }

@@ -14,6 +14,7 @@ import './styles/worlds.css';
 import './styles/ratseek.css';
 import './styles/mobile.css';
 import './styles/bedwars.css';
+import './styles/vanilla.css';
 import * as THREE from 'three';
 import { GameAudio, materialOf } from './audio';
 import { Block, BLOCKS, isReplaceable, isSolid } from './blocks';
@@ -91,6 +92,17 @@ import { CombatPresenter } from './client/combat_presenter';
 import { HealingPresenter } from './client/healing_presenter';
 import { PickerSession } from './client/picker_session';
 import { canDuelAct, canPartyAct } from './modes';
+import { applyFill } from './vanilla/fill';
+import { VanillaClient } from './vanilla/client/vanilla_client';
+import { EngineSetupSheet } from './ui/engine_setup';
+import './pillars_geometry';
+import './pillars_client';
+import './disaster_city';
+import './disaster_client';
+import { setMinigamesHostSheet } from './minigames_client';
+import { MinigamesSetupSheet } from './ui/minigames_setup';
+import { LP_BOUNDS } from './pillars_geometry';
+import type { EngineMode } from './net/protocol';
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -253,6 +265,70 @@ const bwClient = new BedwarsClient({
   onEditTeams: () => { net.send({ t: 'leaveMatch' }); openBedwarsSetup(); },
   onLeave: () => net.send({ t: 'leaveMatch' }),
 });
+/** Lucky Pillars, Disaster City and Party Games: inventory, HUD, entities. */
+const vClient = new VanillaClient({
+  scene, app, player, world, inventory, atlas,
+  send: (a) => net.sendM(a),
+  rayPlayer: (eye, look, reach) => remotePlayers.rayHit(eye, look, reach),
+  target: () => interaction.target,
+  showCrack: (x, y, z, progress) => interaction.showCrack(x, y, z, progress),
+  clearCrack: () => interaction.clear(),
+  swing: () => held.swing(),
+  setBowDraw: (f) => held.setBowDraw(f),
+  sound: (name, at, pitch) => vanillaSound(name, at, pitch),
+  burst: (kind, x, y, z, color, n) => vanillaBurst(kind, x, y, z, color, n),
+  hurtFlash: (id) => remotePlayers.hurtFlash(id, 0.55),
+  onPanel: () => { input.releaseButtons(); syncPointerLock(); },
+  replay: (mode) => net.send({ t: 'play', mode }),
+  leave: () => net.send({ t: 'leaveMatch' }),
+  myId: () => net.myId,
+  setStyle: (f) => { remotePlayers.styleOf = f; },
+  remotePos: (id) => { const r = net.remotes.get(id); if (!r) return null; const b = remotePlayers.renderedPos(id); return b ? { x: b.x, y: b.y, z: b.z } : { x: r.tx, y: r.ty, z: r.tz }; },
+});
+/** Vanilla sound names to Worlds' audio. */
+function vanillaSound(name: string, at?: THREE.Vector3, pitch?: number): void {
+  switch (name) {
+    case 'pickup': audio.pickup(); break;
+    case 'place': audio.place('stone', at); break;
+    case 'explode': case 'firework_blast': if (at) audio.fireballImpact(at, at.distanceTo(player.pos) < 12); break;
+    case 'bow': case 'crossbow_shoot': audio.bowRelease(1); break;
+    case 'hat': case 'pling': audio.bridgeCount(Math.max(1, Math.round(((pitch ?? 1) - .4) * 3))); break;
+    case 'go': case 'levelup': case 'growl': audio.bridgeGo(); break;
+    case 'toast': audio.duelCue('victory'); break;
+    case 'hit': case 'click': case 'bell': case 'chime': audio.bridgeCount(Math.max(1, Math.round(((pitch ?? 1) - .4) * 3))); break;
+    case 'bass': case 'hurt': audio.dig('stone', at); break;
+    case 'wither': case 'thunder': audio.duelCue('sudden'); break;
+    case 'item_break': case 'shield_break': audio.dig('stone', at); break;
+    case 'rumble': case 'wave': if (at) audio.fireballImpact(at, false); else audio.duelCue('sudden'); break;
+    case 'gravel': audio.dig('sand', at); break;
+    case 'creeper_hiss': audio.dragonBreath(at); break;
+    case 'eat': case 'drink': audio.pickup(); break;
+    default: break;
+  }
+}
+/** Vanilla particle kinds to Worlds' particles. */
+function vanillaBurst(kind: string, x: number, y: number, z: number, color?: number, n?: number): void {
+  switch (kind) {
+    case 'break': { const block = n ?? 0; particles.debris(x, y, z, blockDebrisColor(block)); audio.dig(materialOf(block), new THREE.Vector3(x, y, z)); break; }
+    case 'explode': particles.burst(x, y, z, n ?? 35, color ?? 0xe6bc77, 5, .8, { gravity: 6, spread: 1.5, scale: .5 }); break;
+    case 'firework': particles.burst(x, y, z, n ?? 40, color ?? 0xffd060, 7, 1.1, { gravity: 2, spread: .5, scale: .4, additive: true }); break;
+    case 'totem': particles.burst(x, y, z, n ?? 50, 0xf3c653, 4, 1.2, { gravity: -1, spread: 1, scale: .45, additive: true }); break;
+    case 'crit': particles.burst(x, y, z, 14, 0xfff1a8, 3.2, .35, { gravity: 2, spread: .45, scale: .28 }); break;
+    case 'heart': particles.burst(x, y, z, n ?? 3, 0xff6a8a, .8, 1, { gravity: -1, spread: .5, scale: .5 }); break;
+    case 'gold': particles.burst(x, y, z, n ?? 6, 0xffd700, .6, .8, { gravity: -.4, spread: .7, scale: .3, additive: true }); break;
+    case 'spark': particles.burst(x, y, z, n ?? 12, color ?? 0xdde8ff, 2.5, .4, { gravity: 0, spread: 1, scale: .25, additive: true }); break;
+    case 'splash': particles.burst(x, y, z, 24, color ?? 0x5a7ad0, 3, .7, { gravity: 5, spread: .6, scale: .35 }); break;
+    case 'wind': particles.burst(x, y, z, 20, 0xe8f2fa, 4, .5, { gravity: 0, spread: .8, scale: .45 }); break;
+    case 'smoke': case 'dust': particles.burst(x, y, z, n ?? 4, color ?? 0x8a8a8a, 1, .8, { gravity: -.5, spread: .5, scale: .5 }); break;
+    case 'portal': case 'soul': particles.burst(x, y, z, n ?? 12, 0x9a6ad8, 2, .7, { gravity: -1, spread: .6, scale: .3 }); break;
+    case 'acid': particles.burst(x, y, z, n ?? 8, 0x8cf06a, 1.2, .6, { gravity: -.3, spread: .5, scale: .35 }); break;
+    case 'gas': particles.burst(x, y, z, n ?? 10, 0xc78ae0, .8, 1.2, { gravity: -.6, spread: .7, scale: .6 }); break;
+    case 'bubble': particles.burst(x, y, z, n ?? 6, 0xcfe6ff, .8, .6, { gravity: -2, spread: .4, scale: .25 }); break;
+    case 'lava': case 'ring_flame': particles.burst(x, y, z, n ?? 10, kind === 'lava' ? 0xff6a1a : 0xffb347, 2, .6, { gravity: 1, spread: .6, scale: .35, additive: true }); break;
+    case 'snow': case 'egg': case 'poof': particles.burst(x, y, z, 8, kind === 'egg' ? 0xece0c8 : 0xf2f6fa, 2, .4, { gravity: 6, spread: .3, scale: .3 }); break;
+    default: particles.burst(x, y, z, n ?? 8, color ?? 0xffffff, 2, .5, { gravity: 3, spread: .5, scale: .35 });
+  }
+}
 /** Morning over the manor: low sun, bright rooms. */
 const RS_TIME_OF_DAY = 0.1;
 /** Bounce Pad cooldown: earliest `worldTimeLocal` it can fire again. */
@@ -472,6 +548,7 @@ screens.register(hudSettingsPanel);
 screens.register({ get open() { return hudMods.editing; }, hide: () => hudMods.endEdit() });
 screens.register({ get open() { return rsClient.pickerOpen; }, hide: () => rsClient.closePicker() });
 screens.register({ get open() { return bwClient.panelOpen; }, hide: () => {} });
+screens.register({ get open() { return vClient.panelOpen; }, hide: () => {} });
 
 // ── Identity, look and wardrobe ────────────────────────────────────────────
 
@@ -650,6 +727,8 @@ const home = new HomeScreen({
     audio.resume();
     if (mode === 'bedwars' && myParty && myParty.members.length > 1) { openBedwarsSetup(); return; }
     if (mode === 'ratseek') { playRatSeek(); return; }
+    if ((mode === 'pillars' || mode === 'disaster') && myParty && myParty.members.length > 1) { engineSetup.show(mode, myParty, net.myId); return; }
+    if (mode === 'minigames' && myParty && myParty.members.length > 1) { mgSetupSheet.update(myParty, net.myId); mgSetupSheet.show(); return; }
     net.send({ t: 'play', mode });
   },
   onCancel: () => net.send({ t: 'cancelQueue' }),
@@ -661,6 +740,15 @@ const home = new HomeScreen({
   onCapes: () => { audio.resume(); wardrobeUI.show('capes'); },
 });
 
+const engineSetup = new EngineSetupSheet(app, (mode, fill) => net.send({ t: 'play', mode, fill }));
+const mgSetupSheet = new MinigamesSetupSheet(app, {
+  onChange: (setup) => net.send({ t: 'mgSetup', setup }),
+  onPlaylists: (playlists) => net.send({ t: 'mgPlaylists', playlists }),
+  onStart: (fill) => net.send({ t: 'play', mode: 'minigames', fill }),
+});
+// The host's Setup button on the Party Games final card.
+setMinigamesHostSheet(() => { if (myParty && myParty.members.length > 1) { mgSetupSheet.update(myParty, net.myId); mgSetupSheet.show('setup'); } });
+net.onPlaylists = (lists) => mgSetupSheet.setPlaylists(lists);
 const accountDialog = new AccountDialog(app, {
   onLogin: (username, password) => net.send({ t: 'login', username, password }),
   onRegister: (username, password) => net.send({ t: 'register', username, password }),
@@ -674,6 +762,11 @@ const partyPanel = new PartyPanel(app, {
   onKick: (id) => net.send({ t: 'partyKick', id }),
   onPromote: (id) => net.send({ t: 'partyPromote', id }),
   onBedwars: () => openBedwarsSetup(),
+  onEngine: mode => {
+    if (!myParty || myParty.members.length < 2) return;
+    if (mode === 'minigames') { mgSetupSheet.update(myParty, net.myId); mgSetupSheet.show(); }
+    else engineSetup.show(mode, myParty, net.myId);
+  },
 });
 const bwSetup = new BedwarsSetup(app, {
   onChange: (teams, assignments, fill, revision) => net.send({ t: 'bwSetup', teams, assignments, fill, revision }),
@@ -736,6 +829,7 @@ net.onParty = (state) => {
   home.setParty(state);
   partyPanel.update(state, net.myId);
   bwSetup.update(state, net.myId);
+  mgSetupSheet.update(state, net.myId);
   bwClient.setParty(state, net.myId);
   if (newDraft && screens.state === 'title') bwSetup.show();
   if (state && !wasIn && !partyPanel.open) toast(`You're in party ${state.code}.`);
@@ -747,6 +841,7 @@ net.onDisconnect = () => {
   home.setConnected(false, 'Lost the connection — reconnecting…');
   myParty = null; home.setParty(null); partyPanel.update(null, -1);
   bwSetup.update(null, -1); bwSetup.close();
+  mgSetupSheet.update(null, -1); mgSetupSheet.close();
   bwClient.setParty(null, -1);
   if (screens.state !== 'title') exitToMenu();
 };
@@ -754,7 +849,7 @@ home.setConnected(false, '');
 
 // ── Worlds: entering and leaving a match ────────────────────────────────────
 
-type MatchKind = 'duel' | 'pg' | 'rs' | 'bw';
+type MatchKind = 'duel' | 'pg' | 'rs' | 'bw' | 'mg';
 let match: { kind: MatchKind; spec: WorldSpec; mode: GameMode } | null = null;
 const readiness = new WorldReadiness(world, () => net.sendWorldReady(), hideLoading);
 let worldTimeLocal = 0;
@@ -779,10 +874,14 @@ function hideLoading(): void { loadingEl.classList.remove('show'); }
 
 /** Move this client into the match's world. */
 function enterMatchWorld(spec: WorldSpec, kind: MatchKind, mode: GameMode, spawn: { x: number; y: number; z: number }): void {
-  const same = match && match.spec.id === spec.id;
-  screens.prepareTransition();
+  // Party Games swaps arenas inside one match world: same id, new kind/seed.
+  const same = match && match.spec.id === spec.id && match.spec.kind === spec.kind && match.spec.seed === spec.seed;
+  // A Party Games arena swap stays in the same match: keep the pointer and the screen.
+  const swap = kind === 'mg' && match?.kind === 'mg' && match.spec.id === spec.id;
+  if (!swap) screens.prepareTransition();
   if (match?.kind === 'bw') bwClient.exit();
   if (kind !== 'rs') rsClient.exit();
+  if (kind !== 'mg') vClient.exit();
   resetMatchPresentation();
   match = { kind, spec, mode };
   if (!same) {
@@ -798,6 +897,8 @@ function enterMatchWorld(spec: WorldSpec, kind: MatchKind, mode: GameMode, spawn
   accountDialog.close();
   partyPanel.close();
   bwSetup.close();
+  engineSetup.close();
+  mgSetupSheet.close();
   if (wardrobeUI.open) wardrobeUI.hide();
   if (controlsSheet.open) controlsSheet.hide();
   player.pos.set(spawn.x, spawn.y, spawn.z);
@@ -805,10 +906,10 @@ function enterMatchWorld(spec: WorldSpec, kind: MatchKind, mode: GameMode, spawn
   player.vel.set(0, 0, 0);
   player.fallDistance = 0;
   player.flying = false; player.noclip = false; duelSpectating = false; player.dead = false;
-  showLoading(MODE_NAMES[mode], 'Entering the world…');
+  showLoading(MODE_NAMES[mode], swap ? 'Next game…' : 'Entering the world…');
   audio.resume();
   readiness.enter(kind, spawn, worldTimeLocal);
-  screens.enterMatch();
+  if (!swap) screens.enterMatch();
 }
 
 /** Back to the title screen. */
@@ -825,6 +926,7 @@ function exitToMenu(): void {
   world.setArenaRenderBounds(null);
   rsClient.exit();
   bwClient.exit();
+  vClient.exit();
   syncPixelRatio(false);
   duelSpectating = false;
   hideLoading();
@@ -854,6 +956,7 @@ let bwEditSoundAt = 0;
 net.onEdit = (x, y, z, b) => {
   const old = world.getBlock(x, y, z);
   world.setBlock(x, y, z, b);
+  if (match?.kind === 'mg') vClient.noteEdit(x, y, z);
   if (match?.kind === 'bw') {
     bwClient.noteEdit(x, y, z, b);
     if (old !== b && bwClient.map.bedAt(x, y, z) === null && Math.hypot(player.pos.x - x, player.pos.y - y, player.pos.z - z) < 24) {
@@ -870,10 +973,16 @@ net.onEdit = (x, y, z, b) => {
   }
 };
 net.onEditBatch = (edits) => {
+  if (match?.kind === 'mg') for (const e of edits) vClient.noteEdit(e.x, e.y, e.z);
   world.beginBatch();
   for (const e of edits) world.setBlock(e.x, e.y, e.z, e.block);
   world.endBatch();
   if (match?.kind === 'bw') for (const e of edits) bwClient.noteEdit(e.x, e.y, e.z, e.block);
+};
+net.onEditFill = (fill) => {
+  world.beginBatch();
+  applyFill(fill, (x, y, z) => world.getBlock(x, y, z), (x, y, z, b) => world.setBlock(x, y, z, b));
+  world.endBatch();
 };
 /** Average colour of a block's side art, for the chips thrown off when it breaks. */
 const debrisColors = new Map<number, number>();
@@ -987,7 +1096,7 @@ function showPvpHit(targetId: number, amount: number, killed: boolean): void {
 net.onHurt = (health, k, by) => {
   const bite = Math.max(0, player.health - health);
   player.setHealthFromServer(health, false);
-  if (match?.kind === 'bw') player.applyKnockback(k[0], k[1], k[2]);
+  if (match?.kind === 'bw' || match?.kind === 'mg') player.applyKnockback(k[0], k[1], k[2]);
   else { player.vel.x += k[0] * 6; player.vel.y += k[1] * 6; player.vel.z += k[2] * 6; }
   combat.hurt(bite);
   triggerShake(0.13, Math.min(0.05, 0.006 + bite * 0.0016));
@@ -1627,6 +1736,28 @@ function updateBedwarsInput(look: THREE.Vector3, eye: THREE.Vector3): void {
   }
 }
 
+// ── Lucky Pillars, Disaster City, Party Games ──────────────────────────────
+
+net.onMArena = (spec, mode, spawn, yaw, health) => {
+  duelSnapshot = null;
+  pgSnapshot = null; pgSub = null; partyUI.setVisible(false); rsClient.exit();
+  arenaMaxHealth = 20; arenaHpPerHeart = 2; remotePlayers.maxHealth = 20;
+  arenaCanPlaceAt = null; arenaCanEditAt = null; arenaClampPos = null; arenaUnlimited = new Set();
+  player.maxHealth = 20; player.health = health; lastHealth = health;
+  player.yaw = yaw; player.pitch = 0;
+  const keep = vClient.active && vClient.mode === mode;
+  enterMatchWorld(spec, 'mg', mode, spawn);
+  if (!keep) vClient.enter(mode, spec);
+  if (mode === 'pillars') world.setArenaRenderBounds(LP_BOUNDS, 0.9);
+};
+net.onM = (d) => { if (match?.kind === 'mg') vClient.payload(d); };
+window.addEventListener('keydown', e => {
+  if (match?.kind !== 'mg' || screens.state !== 'playing' || e.repeat || vClient.panelOpen) return;
+  if (e.code === 'KeyE') { e.preventDefault(); vClient.openInventory(); }
+  if (e.code === 'KeyF') { e.preventDefault(); net.sendM({ k: 'swapHands' }); }
+});
+void ({} as EngineMode);
+
 // ── Rat and Seek ───────────────────────────────────────────────────────────
 
 net.onRsArena = (spec, role, spawn, yaw) => {
@@ -1813,6 +1944,7 @@ function updatePartyFrame(dt: number): void {
 /** Nothing the keyboard does counts while the match holds everybody still. */
 function controlBlocked(): boolean {
   if (match?.kind === 'bw') return (bwClient.frozen && !bwClient.spectating) || bwClient.panelOpen || screens.state === 'results';
+  if (match?.kind === 'mg') return (vClient.frozen && !vClient.spectating) || vClient.panelOpen;
   if (match?.kind === 'rs') return rsClient.frozen() || screens.state === 'results';
   if (match?.kind === 'pg') return pgSnapshot?.phase !== 'running' || pgCaged();
   if (match?.kind === 'duel') return !duelSnapshot || duelSnapshot.phase === 'countdown' || duelSnapshot.phase === 'results' || screens.state === 'results';
@@ -2123,6 +2255,9 @@ function frame(): void {
     if (match.kind === 'bw') {
       interaction.update(dt, input, camera, true, true);
       updateBedwarsInput(lookDir, eye);
+    } else if (match.kind === 'mg') {
+      interaction.update(dt, input, camera, true, true);
+      vClient.input(dt, input, lookDir, eye);
     } else if (match.kind === 'rs') {
       updateRatSeekInput(lookDir, eye);
       interaction.update(dt, input, camera, true, true);
@@ -2167,13 +2302,14 @@ function frame(): void {
   const worldStart = performance.now();
   // Terrain past the fog wall is drawn in solid fog colour, so stream only
   // what the fog can show (+1 chunk for the third-person camera offset).
-  const modeRadius = match.kind === 'pg' || match.kind === 'bw' ? 10 : match.kind === 'rs' ? 5 : 3;
+  const modeRadius = match.kind === 'pg' || match.kind === 'bw' || match.kind === 'mg' ? 10 : match.kind === 'rs' ? 5 : 3;
   world.update(player.pos.x, player.pos.z, 6, Math.min(modeRadius, Math.ceil((scene.fog as THREE.Fog).far / 16) + 1));
   if (import.meta.env.DEV) {
     perfProbe.worldMs = performance.now() - worldStart;
     perfProbe.worldMax = Math.max(perfProbe.worldMax, perfProbe.worldMs);
   }
-  const tod = match.kind === 'pg' && pgSub ? parkourTheme(pgSub.seed).time : match.kind === 'rs' ? RS_TIME_OF_DAY : 0.25;
+  const tod = match.kind === 'pg' && pgSub ? parkourTheme(pgSub.seed).time : match.kind === 'rs' ? RS_TIME_OF_DAY
+    : match.kind === 'mg' ? vClient.presenter?.timeOfDay?.() ?? 0.25 : 0.25;
   sky.update(dt, activeCamera, tod);
   updateAtmosphere(activeCamera);
   particles.update(dt, activeCamera);
@@ -2183,6 +2319,7 @@ function frame(): void {
   } else remotePlayers.setHovered(-1);
   remotePlayers.update(dt);
   if (match.kind === 'bw') bwClient.update(dt);
+  if (match.kind === 'mg') vClient.update(dt);
   projectiles.update(dt);
   combat.update(dt, { health: player.health, maxHealth: player.maxHealth, spectating: duelSpectating,
     heartbeat: match.kind !== 'bw', x: player.pos.x, z: player.pos.z, yaw: player.yaw, time: worldTimeLocal });
@@ -2287,6 +2424,6 @@ updateCamera();
 frame();
 
 if (import.meta.env.DEV) {
-  (window as unknown as { __worlds: unknown }).__worlds = { sky, player, world, camera, net, input, inventory, dragonView, bwClient, bwSetup, held, particles, interaction, atlas, pg: () => pgSnapshot,
+  (window as unknown as { __worlds: unknown }).__worlds = { sky, player, world, camera, net, input, inventory, dragonView, bwClient, bwSetup, vClient, held, particles, interaction, atlas, pg: () => pgSnapshot,
     renderer, perf: perfProbe };
 }

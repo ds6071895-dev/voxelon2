@@ -6,9 +6,9 @@ export function orderWorldEntry<T extends { msg: ServerMsg }>(out: T[]): T[] {
   const stage = (msg: ServerMsg): number => {
     switch (msg.t) {
       case 'welcome': case 'identity': return 0;
-      case 'duelArena': case 'pgArena': case 'rsArena': case 'bwArena': return 1;
+      case 'duelArena': case 'pgArena': case 'rsArena': case 'bwArena': case 'mArena': return 1;
       case 'join': return 2;
-      case 'teleport': case 'respawned': case 'edit': case 'editBatch': return 3;
+      case 'teleport': case 'respawned': case 'edit': case 'editBatch': case 'editFill': return 3;
       default: return 4;
     }
   };

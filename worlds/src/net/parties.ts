@@ -1,3 +1,4 @@
+import type { MinigamesSetup } from '../minigames_rules';
 // Parties: small friend groups (up to PARTY_MAX) that play together.
 //
 // A party is identified by a short code anybody can read aloud. Codes are
@@ -14,6 +15,8 @@ export interface Party {
   /** Join order; the first entry is not necessarily the leader. */
   members: number[];
   bedwars?: BedwarsSetupState;
+  /** Party Games host setup for the next match (the leader's). */
+  minigames?: MinigamesSetup;
 }
 
 type PartyJoinError = 'invalid' | 'full' | 'already';

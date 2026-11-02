@@ -190,19 +190,17 @@
   font-size: 10px; font-weight: 900; letter-spacing: 1.4px; text-transform: uppercase;
   color: #fff; background: var(--tone); box-shadow: 0 4px 12px rgba(0,0,0,.25);
 }
-/* Bedwars: the island sits right of centre; the words take the left. */
-.w-card[data-mode="bedwars"] { grid-column: 1 / -1; height: clamp(210px, 33vh, 310px); }
+/* The big row: Bedwars and the three vanilla games, four across, taller,
+   with larger titles. The small row keeps the four classic modes. */
+.w-card[hidden] { display: none; }
+.w-card.big { height: clamp(210px, 33vh, 310px); }
+.w-card.big .w-card-title { font-size: clamp(20px, 1.9vw, 28px); letter-spacing: -.5px; }
+.w-card.big .w-card-sub { font-size: 13px; color: rgba(255,255,255,.86); }
+.w-card.big .w-card-go { margin: 13px 15px 17px; padding: 9px 16px 9px 17px; font-size: 12px; }
 .w-card[data-mode="bedwars"] .w-card-art img { object-position: 72% 50%; }
-.w-card[data-mode="bedwars"] .w-card-art::after {
-  background:
-    linear-gradient(90deg, rgba(9,17,31,.86) 0, rgba(9,17,31,.6) 26%, rgba(9,17,31,0) 55%),
-    linear-gradient(0deg, rgba(9,17,31,.45), rgba(9,17,31,0) 45%);
-}
-.w-card[data-mode="bedwars"] .w-card-body { padding: 0 26px; max-width: 420px; }
-.w-card[data-mode="bedwars"] .w-card-title { font-size: clamp(30px, 3.2vw, 46px); letter-spacing: -.8px; }
-.w-card[data-mode="bedwars"] .w-card-sub { font-size: 14.5px; color: rgba(255,255,255,.86); }
-.w-card[data-mode="bedwars"] .w-card-go { margin: 16px 26px 24px; padding: 11px 20px 11px 21px; font-size: 13px; }
-.w-card[data-mode="bedwars"] .w-card-go svg { width: 15px; height: 15px; }
+.w-card[data-mode="pillars"] .w-card-art img { object-position: 50% 40%; }
+.w-card[data-mode="disaster"] .w-card-art img { object-position: 50% 45%; }
+.w-card[data-mode="minigames"] .w-card-art img { object-position: 50% 45%; }
 /* Searching: a pill over the picture with a live clock; the card keeps a ring. */
 .w-card-status {
   position: absolute; left: 10px; top: 10px; z-index: 3; display: none; align-items: center; gap: 8px;
@@ -210,7 +208,6 @@
   box-shadow: 0 6px 16px rgba(18,32,50,.22);
   font-size: 12px; font-weight: 750; color: var(--w-ink); white-space: nowrap;
 }
-.w-card[data-mode="bedwars"] .w-card-status { left: auto; right: 14px; top: 14px; }
 .w-card-status .w-dot {
   width: 9px; height: 9px; border-radius: 50%; background: var(--tone); flex: none;
   box-shadow: 0 0 0 0 color-mix(in srgb, var(--tone) 60%, transparent);
@@ -334,6 +331,7 @@
 .w-tab[aria-selected="true"] { color: var(--w-ink); background: #fff; box-shadow: 0 2px 8px rgba(18,32,50,.12); }
 .w-field { display: grid; gap: 7px; color: var(--w-ink-soft); font-size: 11.5px; font-weight: 750; letter-spacing: .3px; }
 .w-row { display: flex; gap: 8px; }
+.w-row:has(> [data-mode]) { flex-wrap: wrap; }
 .w-row > .w-input { flex: 1; min-width: 0; }
 .w-input {
   width: 100%; min-height: 50px; padding: 12px 15px; border-radius: 13px; outline: none;
@@ -417,7 +415,7 @@
 @media (max-width: 1180px) {
   .w-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .w-card { height: clamp(150px, 22vh, 210px); }
-  .w-card:not([data-mode="bedwars"]) .w-card-sub { -webkit-line-clamp: 1; }
+  .w-card:not(.big) .w-card-sub { -webkit-line-clamp: 1; }
   /* Wider crops need the action higher, above the caption and Play pill. */
   .w-card[data-mode="bridge"] .w-card-art img { object-position: 62% 55%; }
   .w-card[data-mode="ratseek"] .w-card-art img { object-position: 40% 72%; }
@@ -429,8 +427,8 @@
   .w-eyebrow { margin-bottom: 8px; }
   .w-cards { gap: 10px; }
   .w-card { height: clamp(140px, 24vh, 190px); }
-  .w-card[data-mode="bedwars"] { height: clamp(170px, 29vh, 230px); }
-  .w-card:not([data-mode="bedwars"]) .w-card-sub { display: none; }
+  .w-card.big { height: clamp(170px, 29vh, 230px); }
+  .w-card:not(.big) .w-card-sub { display: none; }
   .w-card-go { margin-top: 8px; margin-bottom: 12px; }
   .w-stage-box { height: clamp(260px, 56vh, 440px); }
 }
@@ -453,13 +451,11 @@
   #w-settings-btn > span:not(.w-ico) { display: none; }
   .w-cards { gap: 9px; }
   .w-card { height: 150px; border-radius: 15px; }
-  .w-card[data-mode="bedwars"] { height: 196px; }
-  .w-card[data-mode="bedwars"] .w-card-body { padding: 0 16px; }
-  .w-card[data-mode="bedwars"] .w-card-go { margin: 12px 16px 16px; }
+  .w-card.big { height: 176px; }
   .w-card-body { padding: 0 11px; }
   .w-card-sub { display: none; }
-  .w-card[data-mode="bedwars"] .w-card-sub { display: block; }
-  .w-card:not([data-mode="bedwars"]) .w-card-go { align-self: stretch; justify-content: center; margin: 8px 10px 10px; }
+  .w-card.big .w-card-sub { display: block; }
+  .w-card:not(.big) .w-card-go { align-self: stretch; justify-content: center; margin: 8px 10px 10px; }
   .w-card-go svg { display: none; }
 }
 
@@ -474,8 +470,8 @@
   .w-eyebrow { margin-bottom: 6px; }
   .w-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .w-card { height: 104px; border-radius: 14px; }
-  .w-card[data-mode="bedwars"] { height: 124px; }
-  .w-card-sub, .w-card[data-mode="bedwars"] .w-card-sub { display: none; }
+  .w-card.big { height: 124px; }
+  .w-card-sub, .w-card.big .w-card-sub { display: none; }
   .w-card-go { margin: 6px 10px 10px; }
   .w-card-go svg { display: none; }
   .w-right-actions .w-btn { min-height: 44px; padding: 10px 14px; }

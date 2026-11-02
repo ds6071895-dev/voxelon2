@@ -11,7 +11,7 @@ if (args.some(a => !/^--(only|output)=.+$/.test(a)) || new Set(args.map(a => a.s
 const out = path.resolve(root, args.find(a => a.startsWith('--output='))?.slice(9) ?? 'public/cards');
 /** [width, height, below]: Bedwars is the wide hero tile; the rest are 4:5
  *  portraits whose bottom fifth is extra ground under the title. */
-const SIZE = { bedwars: [1800, 720, 0], duels: [800, 1000, 200], bridge: [800, 1000, 200], parkour: [800, 1000, 200], ratseek: [800, 1000, 200] };
+const SIZE = { bedwars: [1800, 720, 0], duels: [800, 1000, 200], bridge: [800, 1000, 200], parkour: [800, 1000, 200], ratseek: [800, 1000, 200], pillars: [900, 1000, 150], disaster: [900, 1000, 150], minigames: [900, 1000, 150] };
 const onlyArg = args.find(a => a.startsWith('--only='));
 const only = onlyArg ? selection('only', onlyArg.slice(7), Object.keys(SIZE)) : Object.keys(SIZE);
 

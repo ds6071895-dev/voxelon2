@@ -5,7 +5,7 @@
 
 import * as THREE from 'three';
 import type { ColumnTints, Tint } from './tints';
-import { Block, BLOCKS, isOpaque as blockOpaque, occludesAO as blockOccludesAO, Tile } from './blocks';
+import { Block, BLOCK_ID_LIMIT, BLOCKS, isOpaque as blockOpaque, occludesAO as blockOccludesAO, Tile } from './blocks';
 import { Chunk, CHUNK_X, CHUNK_Z } from './chunk';
 import type { LightField } from './light';
 import type { Atlas } from './textures';
@@ -88,11 +88,20 @@ const AO_CURVE = [0.45, 0.65, 0.82, 1.0];
 
 // Opacity and corner occlusion by id, looked up a few dozen times per face.
 let opaqueTable: Uint8Array | null = null, aoTable: Uint8Array | null = null;
+/** Fluid kind by id (0 none, 1 water, 2 lava) and how far its open top sits
+ *  below the cell's top, in eighths of a block (flowing fluid sits lower). */
+let fluidTable: Uint8Array | null = null, fluidDrop: Float32Array | null = null;
 function tables(): void {
-  opaqueTable = new Uint8Array(256); aoTable = new Uint8Array(256);
-  for (let id = 0; id < 256; id++) {
+  opaqueTable = new Uint8Array(BLOCK_ID_LIMIT); aoTable = new Uint8Array(BLOCK_ID_LIMIT);
+  fluidTable = new Uint8Array(BLOCK_ID_LIMIT); fluidDrop = new Float32Array(BLOCK_ID_LIMIT);
+  for (let id = 0; id < BLOCK_ID_LIMIT; id++) {
     opaqueTable[id] = blockOpaque(id) ? 1 : 0;
     aoTable[id] = blockOccludesAO(id) ? 1 : 0;
+    const fluid = BLOCKS[id]?.fluid;
+    if (!fluid) continue;
+    fluidTable[id] = fluid.kind === 'water' ? 1 : 2;
+    // A source or falling column sits 1/8 low like vanilla; flowing levels step down.
+    fluidDrop[id] = fluid.level === 0 || fluid.level >= 8 ? 0.125 : (fluid.level + 1) / 9;
   }
 }
 const isOpaque = (id: number): boolean => opaqueTable![id] === 1;
@@ -100,7 +109,7 @@ const occludesAO = (id: number): boolean => aoTable![id] === 1;
 
 /** Block ids of a chunk plus a one-cell border (everything a face, its corner
  *  occlusion and its smooth light can read), y in [lo, hi). Reused. */
-let volume = new Uint8Array(0);
+let volume = new Uint16Array(0);
 const VOL = CHUNK_X + 2;
 
 export type BlockSampler = (wx: number, wy: number, wz: number) => number;
@@ -289,7 +298,7 @@ export function buildChunkGeometry(
   if (!opaqueTable) tables();
   // Every cell read below is within one block of one of this chunk's blocks.
   const lo = Math.max(0, chunk.minY - 1), hi = Math.min(256, chunk.maxY + 1), VH = Math.max(1, hi - lo);
-  if (volume.length < VOL * VOL * VH) volume = new Uint8Array(VOL * VOL * 256);
+  if (volume.length < VOL * VOL * VH) volume = new Uint16Array(VOL * VOL * 256);
   const vol = volume;
   for (let dcx = -1; dcx <= 1; dcx++) {
     for (let dcz = -1; dcz <= 1; dcz++) {
@@ -348,7 +357,9 @@ export function buildChunkGeometry(
         if (y > lo && y + 1 < hi && opaqueTable![vol[v - 1]] === 1 && opaqueTable![vol[v + 1]] === 1 &&
             opaqueTable![vol[v - VH]] === 1 && opaqueTable![vol[v + VH]] === 1 &&
             opaqueTable![vol[v - VOL * VH]] === 1 && opaqueTable![vol[v + VOL * VH]] === 1) continue;
-        const isWater = id === Block.Water;
+        const fluid = fluidTable![id];
+        // Water draws into its own translucent pass; lava is opaque and glows.
+        const isWater = fluid === 1;
 
         if (info.shape === 'box' && info.boxes) {
           emitBoxes(seeThrough(info.side) || seeThrough(info.top) || seeThrough(info.bottom) ? cutout : opaque,
@@ -365,29 +376,30 @@ export function buildChunkGeometry(
           continue;
         }
 
-        for (const face of FACES) {
+        for (let fi = 0; fi < 6; fi++) {
+          const face = FACES[fi];
           const [dx, dy, dz] = face.dir;
           const ny = y + dy;
           if (ny < 0) continue; // never draw the underside of the world
           const neighbor = sample(wx + dx, ny, wz + dz);
 
-          if (isWater) {
-            if (neighbor === Block.Water || isOpaque(neighbor)) continue;
+          if (fluid !== 0) {
+            if (fluidTable![neighbor] === fluid || isOpaque(neighbor)) continue;
           } else {
             if (isOpaque(neighbor) || neighbor === id) continue;
           }
 
           // Per-vertex AO (skip for water: it has no corner shading).
-          if (isWater) {
+          if (fluid !== 0) {
             ao[0] = ao[1] = ao[2] = ao[3] = 3;
           } else {
             computeAO(face, wx, y, wz, sample, ao);
           }
 
-          const tile: Tile = dy > 0 ? info.top : dy < 0 ? info.bottom : info.side;
+          const tile: Tile = info.faces ? info.faces[fi] : dy > 0 ? info.top : dy < 0 ? info.bottom : info.side;
           // Lower water surface slightly when open to the sky, like vanilla.
           const topOffset =
-            isWater && sample(wx, y + 1, wz) !== Block.Water ? 0.125 : 0;
+            fluid !== 0 && fluidTable![sample(wx, y + 1, wz)] !== fluid ? fluidDrop![id] : 0;
 
           // Biome tint: foliage and water tint every face; grass tints the top
           // face fully and the side face as a top-down gradient over its fringe.
@@ -454,7 +466,7 @@ function emitBoxes(
       const sign = dx + dy + dz;
       const flush = sign > 0 ? mx[axis] >= 1 : mn[axis] <= 0;
       if (flush && isOpaque(sample(wx + dx, y + dy, wz + dz))) return;
-      const tile: Tile = dy > 0 ? info.top : dy < 0 ? info.bottom : info.side;
+      const tile: Tile = info.faces ? info.faces[f] : dy > 0 ? info.top : dy < 0 ? info.bottom : info.side;
       const [u0, v0, u1, v1] = atlas.uvRect(tile);
       for (let i = 0; i < 4; i++) {
         const c = face.corners[i].pos;

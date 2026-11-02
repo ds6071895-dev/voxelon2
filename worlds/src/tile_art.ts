@@ -210,7 +210,7 @@ const paintCobblestone: Paint = (p, seed) => {
 // ── Wood ────────────────────────────────────────────────────────────────────
 
 /** Bark: vertical plates split by dark furrows. */
-function barkSide(pal: RGBA[], furrowEvery: number) {
+export function barkSide(pal: RGBA[], furrowEvery: number) {
   return (p: Canvas16, seed: number): void => {
     p.fill((x, y) => {
       const plate = Math.floor(x / furrowEvery);
@@ -224,7 +224,7 @@ function barkSide(pal: RGBA[], furrowEvery: number) {
   };
 }
 /** Birch / cherry bark: smooth skin with horizontal lenticels. */
-function bandedBark(pal: RGBA[], mark: RGBA, markRate: number) {
+export function bandedBark(pal: RGBA[], mark: RGBA, markRate: number) {
   return (p: Canvas16, seed: number): void => {
     p.fill((x, y) => {
       const t = .55 + (tnoise(seed, x, y, 4) - .5) * .35 + (x === 0 ? -.2 : x === 15 ? -.1 : 0);
@@ -238,7 +238,7 @@ function bandedBark(pal: RGBA[], mark: RGBA, markRate: number) {
   };
 }
 /** End grain: a bark rim and growth rings around a pith. */
-function logTop(bark: RGBA[], wood: RGBA[]) {
+export function logTop(bark: RGBA[], wood: RGBA[]) {
   return (p: Canvas16, seed: number): void => {
     p.fill((x, y) => {
       if (x === 0 || y === 0 || x === 15 || y === 15) return pick(bark, .5 + (rnd(seed, x, y) - .5) * .5, x, y, .5);

@@ -1,3 +1,6 @@
+import type { MAction, MPayload } from '../vanilla/messages';
+import type { MinigamesSetup, MgPlaylist } from '../minigames_rules';
+import type { FillSpec } from '../vanilla/fill';
 // Worlds wire protocol: message shapes + shared constants, plus the username
 // and skin helpers. Imported by BOTH the browser client and the Node server,
 // so it must stay free of DOM and Node APIs.
@@ -30,10 +33,15 @@ export const EDIT_RANGE = 7;       // max distance a player may edit a block
 export const PARTY_MAX = 4;        // most members one party can hold
 
 /** The games on the title screen. */
-export type GameMode = 'duels' | 'bridge' | 'parkour' | 'ratseek' | 'bedwars';
-export const GAME_MODES: readonly GameMode[] = ['duels', 'bridge', 'parkour', 'ratseek', 'bedwars'];
+export type GameMode = 'duels' | 'bridge' | 'parkour' | 'ratseek' | 'bedwars' | 'pillars' | 'disaster' | 'minigames';
+export const GAME_MODES: readonly GameMode[] = ['duels', 'bridge', 'parkour', 'ratseek', 'bedwars', 'pillars', 'disaster', 'minigames'];
 export function isGameMode(v: unknown): v is GameMode {
-  return v === 'duels' || v === 'bridge' || v === 'parkour' || v === 'ratseek' || v === 'bedwars';
+  return typeof v === 'string' && (GAME_MODES as readonly string[]).includes(v);
+}
+/** Modes run by a generic vanilla engine (src/net/mode_engine.ts). */
+export type EngineMode = 'pillars' | 'disaster' | 'minigames';
+export function isEngineMode(v: unknown): v is EngineMode {
+  return v === 'pillars' || v === 'disaster' || v === 'minigames';
 }
 
 /** Public, render-relevant state of one player. */
@@ -79,6 +87,9 @@ export interface PartyState {
   leader: number;
   members: PartyMember[];
   bedwars?: BedwarsSetupState;
+  /** Pillars/Disaster/Party Games: top the party up to 4 with bots. */
+  fill?: boolean;
+  minigames?: MinigamesSetup;
 }
 
 /** A party's Bedwars format: how many teams (2 to 4, one island each) and
@@ -113,7 +124,7 @@ export type ClientMsg =
   // Play: solo -> public queue; a party leader -> a private match for the party.
   // Rat and Seek: `seeker` is the party member the leader picked to hunt
   // (0 = the AI seeker, the default), and `ratClass` the class this player last chose.
-  | { t: 'play'; mode: GameMode; seeker?: number; ratClass?: RatClassId; setupRevision?: number }
+  | { t: 'play'; mode: GameMode; seeker?: number; ratClass?: RatClassId; setupRevision?: number; fill?: boolean }
   | { t: 'cancelQueue' }
   // Back to the menu (from a results screen, or forfeiting a live match).
   | { t: 'leaveMatch' }
@@ -142,7 +153,13 @@ export type ClientMsg =
   | { t: 'rsClass'; cls: RatClassId }
   // The party host's "Who seeks?" pick during the prep time (0 = the AI seeker).
   | { t: 'rsSeeker'; seeker: number }
-  | { t: 'bwAction'; world: number; action: BwAction };
+  | { t: 'bwAction'; world: number; action: BwAction }
+  // Lucky Pillars, Disaster City, Party Games: one action envelope.
+  | { t: 'mAct'; world: number; a: MAction }
+  // Party Games host sheet (the party leader's saved setup for the next match).
+  | { t: 'mgSetup'; setup: MinigamesSetup }
+  // Party Games playlists are per player (kept with the account).
+  | { t: 'mgPlaylists'; playlists: MgPlaylist[] };
 
 // --- server -> client -------------------------------------------------------
 export type ServerMsg =
@@ -170,6 +187,7 @@ export type ServerMsg =
   | { t: 'snapshot'; players: PlayerSnapshot[] }
   | { t: 'edit'; x: number; y: number; z: number; block: number }
   | { t: 'editBatch'; edits: { x: number; y: number; z: number; block: number }[] }
+  | { t: 'editFill'; fill: FillSpec }
   | { t: 'hurt'; health: number; dead: boolean; by: number; kx: number; ky: number; kz: number }
   | { t: 'hitconfirm'; target: number; amount: number; killed: boolean; crit?: boolean }
   | { t: 'shot'; id: number; item: number; x: number; y: number; z: number; dx: number; dy: number; dz: number }
@@ -225,7 +243,11 @@ export type ServerMsg =
   | { t: 'bwNack'; x: number; y: number; z: number; prediction?: number }
   | { t: 'bwEvent'; text: string; tone?: string }
   | { t: 'bwBuyResult'; request: number; ok: boolean; message: string }
-  | { t: 'bwResult'; result: BwResult };
+  | { t: 'bwResult'; result: BwResult }
+  // Vanilla engines: switch into the match world, then engine payloads.
+  | { t: 'mArena'; world: WorldSpec; mode: EngineMode; spawn: { x: number; y: number; z: number }; yaw: number; health: number }
+  | { t: 'm'; d: MPayload }
+  | { t: 'mgPlaylists'; playlists: MgPlaylist[] };
 
 // --- Names ------------------------------------------------------------------
 

@@ -13,6 +13,9 @@
 // against the same generator plus that world's edit log.
 
 import { Block, BLOCKS } from './blocks';
+// Registers the vanilla block states (ids 1024+) before any world is built.
+import './vanilla/blocks';
+import { applyFill, type FillSpec } from './vanilla/fill';
 import type { ColumnTints, Tint } from './tints';
 import { Chunk, CHUNK_X, CHUNK_Z } from './chunk';
 import { DUEL_ARENA_FLOOR_Y, DUEL_ARENA_SIZE, duelArenaBlockAt } from './duel_geometry';
@@ -24,7 +27,7 @@ import { RS_BOUNDS, RS_MAX_Y, RS_MIN_Y, ratseekBlockAt } from './ratseek_house';
 import { BW_BOUNDS, BW_MIN_Y, BW_MAX_Y, bwMap } from './bedwars_map';
 import type { PhysicsWorld } from './physics_world';
 
-export type WorldKind = 'duel' | 'bridge' | 'parkour' | 'ratseek' | 'bedwars';
+export type WorldKind = 'duel' | 'bridge' | 'parkour' | 'ratseek' | 'bedwars' | 'pillars' | 'disaster' | 'minigames';
 
 /** Everything a client needs to build a world: which generator, which seed.
  *  `id` is the server's handle for this world instance. */
@@ -59,7 +62,7 @@ const TEMPERATE: ColumnTints = {
   grass: tintOf(0x7cbd6b), foliage: tintOf(0x59ae30), water: tintOf(0x3f76e4),
 };
 
-class VenueGenerator implements WorldGenerator {
+export class VenueGenerator implements WorldGenerator {
   private readonly columnTints: ColumnTints;
   constructor(
     readonly seed: number,
@@ -104,8 +107,16 @@ class VenueGenerator implements WorldGenerator {
 
 const generators = new Map<string, WorldGenerator>();
 const fixedGenerators = new Map<WorldKind, WorldGenerator>();
+/** Generators the vanilla modes register from their own geometry modules
+ *  (imported by both the server engine and the client presenter). */
+const registered = new Map<WorldKind, { make: (seed: number) => WorldGenerator; fixed: boolean }>();
+export function registerWorldKind(kind: WorldKind, make: (seed: number) => WorldGenerator, fixed = false): void {
+  registered.set(kind, { make, fixed });
+}
 
 function fixedGeometry(kind: WorldKind): boolean {
+  const custom = registered.get(kind);
+  if (custom) return custom.fixed;
   return kind === 'duel' || kind === 'bridge' || kind === 'ratseek';
 }
 
@@ -117,7 +128,12 @@ export function worldGenerator(spec: Pick<WorldSpec, 'kind' | 'seed'>): WorldGen
   const key = `${spec.kind}:${seed}`;
   let gen = fixed ? fixedGenerators.get(spec.kind) : generators.get(key);
   if (gen) return gen;
-  if (spec.kind === 'duel') {
+  const custom = registered.get(spec.kind);
+  if (custom) {
+    gen = custom.make(seed);
+  } else if (spec.kind === 'pillars' || spec.kind === 'disaster' || spec.kind === 'minigames') {
+    throw new Error(`world kind ${spec.kind} used before its geometry module was imported`);
+  } else if (spec.kind === 'duel') {
     gen = new VenueGenerator(seed,
       { minX: 0, maxX: DUEL_ARENA_SIZE, minZ: 0, maxZ: DUEL_ARENA_SIZE },
       // The colosseum's invisible barrier runs to the top of the world, so a
@@ -195,6 +211,12 @@ export class WorldBlocks {
   restore(x: number, y: number, z: number): number {
     this.edits.delete(WorldBlocks.key(x, y, z));
     return this.gen.blockAt(x, y, z);
+  }
+  /** Apply a box fill (see vanilla/fill.ts); returns the changed cells. */
+  fill(f: FillSpec): { x: number; y: number; z: number; block: number }[] {
+    const changed: { x: number; y: number; z: number; block: number }[] = [];
+    applyFill(f, (x, y, z) => this.getBlock(x, y, z), (x, y, z, b) => { this.set(x, y, z, b); changed.push({ x, y, z, block: b }); });
+    return changed;
   }
   isEdited(x: number, y: number, z: number): boolean { return this.edits.has(WorldBlocks.key(x, y, z)); }
   /** The player-placed block at a cell, if any (undefined = authored). */

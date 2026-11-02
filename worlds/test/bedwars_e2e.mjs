@@ -37,7 +37,7 @@ try {
 
   // Title screen: five modes, nothing scrolls at 1280x720.
   await page.waitForTimeout(1500);
-  assert.equal(await page.locator('.w-card').count(), 5, 'five mode cards');
+  assert.equal(await page.locator('.w-card:not([hidden])').count(), 8, 'eight mode cards: four big, four small');
   assert.equal(await page.evaluate(() => document.querySelector('.w-home').scrollHeight <= innerHeight + 2), true, 'title fits without scrolling');
   await shot('01-title');
 

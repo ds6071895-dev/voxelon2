@@ -294,6 +294,10 @@ export type ToolKind = 'pickaxe' | 'axe' | 'shovel' | 'sword';
 
 type BlockShape = 'cube' | 'cross' | 'box';
 
+/** Ids are 16-bit, one id per block state; lookup tables are sized to this. */
+export const BLOCK_ID_LIMIT = 4096;
+export type FluidKind = 'water' | 'lava';
+
 /** Min/max corner of an axis-aligned box in cell-local [0,1] space. */
 export type Box = [[number, number, number], [number, number, number]];
 type TintKind = 'grass' | 'foliage' | 'water' | null;
@@ -332,6 +336,16 @@ export interface BlockInfo {
   top: Tile;
   bottom: Tile;
   side: Tile;
+  /** A fluid cell: level 0 is a source, 1-7 flowing, 8 falling. */
+  fluid?: { kind: FluidKind; level: number };
+  /** Extra skylight opacity on top of the decay of 1 (water 2, leaves 1). */
+  lightAtt?: number;
+  /** Per-face tiles in FACES order (west, east, bottom, top, north, south):
+   *  rotated logs, furnace fronts, crafting tables. Overrides top/bottom/side. */
+  faces?: Tile[];
+  /** Collision differs from what is drawn (fences and walls are 1.5 tall,
+   *  ladders and carpets are thin). Empty = no collision. */
+  collide?: Box[];
 }
 
 interface Partial {
@@ -349,9 +363,13 @@ interface Partial {
   emission?: number;
   boxes?: Box[];
   axis?: 'x' | 'z';
+  fluid?: { kind: FluidKind; level: number };
+  lightAtt?: number;
+  faces?: Tile[];
+  collide?: Box[];
 }
 
-function def(p: Partial): BlockInfo {
+export function def(p: Partial): BlockInfo {
   return {
     emission: p.emission ?? 0,
     tool: null,
@@ -367,6 +385,10 @@ function def(p: Partial): BlockInfo {
     replaceable: p.replaceable ?? false,
     boxes: p.boxes,
     axis: p.axis,
+    fluid: p.fluid,
+    lightAtt: p.lightAtt,
+    faces: p.faces,
+    collide: p.collide,
     top: p.top,
     bottom: p.bottom ?? p.top,
     side: p.side ?? p.top,
@@ -396,12 +418,13 @@ export const BLOCKS: Record<number, BlockInfo> = {
   [Block.OakPlanks]: def({ name: 'Oak Planks', hardness: 2.0, top: Tile.Planks }),
   [Block.Leaves]: def({
     name: 'Oak Leaves', hardness: 0.2, top: Tile.Leaves,
-    opaque: false, tint: 'foliage',
+    opaque: false, tint: 'foliage', lightAtt: 1,
   }),
   [Block.Water]: def({
     // Water takes the world's water tint rather than one flat blue.
     name: 'Water', hardness: -1, top: Tile.Water, tint: 'water',
     solid: false, opaque: false, occludes: false,
+    fluid: { kind: 'water', level: 0 }, lightAtt: 2,
   }),
 
   [Block.Sandstone]: def({
@@ -418,14 +441,14 @@ export const BLOCKS: Record<number, BlockInfo> = {
     top: Tile.BirchLogTop, side: Tile.BirchLogSide,
   }),
   [Block.BirchLeaves]: def({
-    name: 'Birch Leaves', hardness: 0.2, top: Tile.BirchLeaves, opaque: false,
+    name: 'Birch Leaves', hardness: 0.2, top: Tile.BirchLeaves, opaque: false, lightAtt: 1,
   }),
   [Block.SpruceLog]: def({
     name: 'Spruce Log', hardness: 2.0,
     top: Tile.SpruceLogTop, side: Tile.SpruceLogSide,
   }),
   [Block.SpruceLeaves]: def({
-    name: 'Spruce Leaves', hardness: 0.2, top: Tile.SpruceLeaves, opaque: false,
+    name: 'Spruce Leaves', hardness: 0.2, top: Tile.SpruceLeaves, opaque: false, lightAtt: 1,
   }),
   [Block.TallGrass]: plant('Grass', Tile.TallGrass, 'grass', true),
   [Block.Dandelion]: plant('Dandelion', Tile.Dandelion, null, false),
@@ -653,6 +676,7 @@ const FULL_BOX: Box[] = [[[0, 0, 0], [1, 1, 1]]];
 export function collisionBoxes(id: number): Box[] | null {
   const info = BLOCKS[id];
   if (!info || !info.solid || id === Block.Air) return null;
+  if (info.collide) return info.collide.length ? info.collide : null;
   return info.boxes ?? FULL_BOX;
 }
 /** Does the point (world coordinates) lie inside a solid box of its cell? */

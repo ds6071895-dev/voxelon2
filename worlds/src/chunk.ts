@@ -4,11 +4,17 @@ import { BLOCKS } from './blocks';
 export const CHUNK_X = 16;
 const CHUNK_Y = 256;
 export const CHUNK_Z = 16;
+const CHUNK_CELLS = CHUNK_X * CHUNK_Y * CHUNK_Z;
+/** Block ids are 16-bit: one id per block state (see vanilla/ids.ts). */
+export type BlockArray = Uint16Array;
+/** Shared all-air storage: a chunk only allocates its own on the first
+ *  non-air write, so the empty sky around a venue costs nothing. Never written. */
+const EMPTY: BlockArray = new Uint16Array(CHUNK_CELLS);
 
 export class Chunk {
   readonly cx: number;
   readonly cz: number;
-  readonly data: Uint8Array;
+  data: BlockArray = EMPTY;
   /** Light emitters: packed local index -> emission level. */
   readonly lights = new Map<number, number>();
   /** Highest non-air block + 1; lets the mesher skip empty sky. */
@@ -36,7 +42,6 @@ export class Chunk {
   constructor(cx: number, cz: number) {
     this.cx = cx;
     this.cz = cz;
-    this.data = new Uint8Array(CHUNK_X * CHUNK_Y * CHUNK_Z);
   }
 
   static key(cx: number, cz: number): string {
@@ -54,6 +59,7 @@ export class Chunk {
     const idx = (((x << 4) | z) << 8) | y;
     const old = this.data[idx];
     if (old === id) return;
+    if (this.data === EMPTY) this.data = new Uint16Array(CHUNK_CELLS);
     this.data[idx] = id;
     if (old !== 0) this.layerCounts[y]--;
     if (id !== 0) this.layerCounts[y]++;

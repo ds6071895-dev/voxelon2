@@ -98,6 +98,8 @@ export interface BodyStyle {
   hidden: boolean;
   tag: boolean;
   tagColor?: string;
+  /** Body size (Lucky Pillars' Giants and Tiny Town). */
+  scale?: number;
 }
 
 /** Scratch boxes for rayHit, which runs every frame. */
@@ -227,6 +229,8 @@ export class RemotePlayers {
       const style = this.styleOf?.(id) ?? null;
       this.applyStyle(av, style);
       if (style?.hidden) av.group.visible = false;
+      const sc = style?.scale ?? 1;
+      if (av.group.scale.x !== sc) av.group.scale.setScalar(sc);
       if (av.hurtT > 0) {
         av.hurtT = Math.max(0, av.hurtT - dt / (0.12 + av.hurtPeak * 0.16));
         const tint = av.hurtT * av.hurtPeak;

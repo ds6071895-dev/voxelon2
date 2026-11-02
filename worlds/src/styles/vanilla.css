@@ -1,0 +1,159 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   VANILLA MODES (Lucky Pillars, Disaster City, Party Games) — same light
+   Worlds look as Bedwars: bw-hud sidebar/feed/pill/title, .w-dialog panels.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* The survival bars replace the stamina bar and draw their own hearts. */
+body.vanilla-active #status { display: none; }
+
+.v-hud .v-bars {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  bottom: calc(var(--hotbar-slot, 44px) + 30px + var(--safe-bottom, 0px));
+  width: min(444px, calc(100vw - 24px)); height: auto; aspect-ratio: 444 / 64;
+  image-rendering: pixelated; pointer-events: none;
+}
+.v-hud .v-bars[hidden] { display: none; }
+.v-xp {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  bottom: calc(var(--hotbar-slot, 44px) + 18px + var(--safe-bottom, 0px));
+  width: min(420px, calc(100vw - 40px)); height: 7px; border-radius: 99px;
+  background: rgba(18,32,50,.35); box-shadow: 0 0 0 1px rgba(255,255,255,.5);
+}
+.v-xp[hidden] { display: none; }
+.v-xp-fill { height: 100%; width: 0; border-radius: 99px; background: linear-gradient(90deg, #6fd84a, #b6f070); transition: width .12s linear; }
+.v-xp-level {
+  position: absolute; left: 50%; top: -18px; transform: translateX(-50%);
+  font: 900 15px/1 var(--w-font); color: #7ee05a; text-shadow: 0 1px 0 #1d3a12, 0 0 3px rgba(0,0,0,.4);
+}
+
+.v-effects { position: absolute; top: calc(10px + var(--safe-top, 0px)); right: calc(220px + var(--safe-right, 0px)); display: grid; gap: 5px; justify-items: end; }
+.v-effect {
+  display: flex; align-items: baseline; gap: 8px; padding: 5px 10px; border-radius: 10px;
+  background: rgba(255,255,255,.96); box-shadow: 0 6px 18px rgba(18,32,50,.2); border-left: 4px solid var(--c);
+  font-size: 12px; font-weight: 800; color: var(--w-ink);
+}
+.v-effect small { font-variant-numeric: tabular-nums; color: var(--w-ink-mute); font-weight: 750; }
+
+.v-side-rows { display: grid; gap: 3px; }
+.v-side-row { display: flex; justify-content: space-between; gap: 8px; min-height: 20px; align-items: center; }
+.v-side-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--w-ink-soft); }
+.v-side-row b { font-variant-numeric: tabular-nums; }
+.v-side-row.you span { color: var(--w-ink); }
+.v-side-row.you::before { content: ''; width: 4px; height: 14px; border-radius: 2px; background: #2d6ee0; margin-right: -4px; }
+.v-side-row[data-tone="mute"] span, .v-side-row[data-tone="mute"] b { color: var(--w-ink-mute); text-decoration: line-through; }
+.v-side-row[data-tone="gold"] b { color: #b8730c; }
+.v-side-row[data-tone="bad"] b { color: #c0262d; }
+.v-side-row[data-tone="good"] b { color: #1f9d5b; }
+.v-pill { top: auto; bottom: calc(var(--hotbar-slot, 44px) + 96px + var(--safe-bottom, 0px)); }
+
+.v-cooldown { position: absolute; left: 50%; top: calc(50% + 18px); width: 32px; height: 4px; transform: translateX(-50%); border-radius: 2px; background: rgba(18,32,50,.35); }
+.v-cooldown[hidden] { display: none; }
+.v-cooldown i { display: block; height: 100%; width: 0; border-radius: 2px; background: #fff; }
+
+/* Inventory, crafting, furnace, chest */
+.v-inv-scrim, .v-menu-scrim, .v-results-scrim { display: flex; z-index: 45; }
+.v-inv { width: min(520px, 100%); gap: 10px; user-select: none; }
+.v-inv-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.v-inv-head b { font-size: 18px; font-weight: 850; }
+.v-inv-done { min-height: 36px; padding: 6px 16px; }
+.v-inv-top { display: flex; gap: 22px; align-items: center; justify-content: center; padding: 10px; border-radius: 16px; background: #eef3f8; }
+.v-inv-armor { display: grid; gap: 4px; }
+.v-inv-craft { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: center; }
+.v-inv-label { font-size: 10.5px; font-weight: 800; letter-spacing: 1.6px; text-transform: uppercase; color: var(--w-ink-mute); width: 100%; }
+.v-arrow { font-style: normal; font-size: 22px; font-weight: 900; color: var(--w-ink-mute); }
+.v-grid { display: grid; gap: 4px; justify-content: center; }
+.v-grid-2 { grid-template-columns: repeat(2, auto); }
+.v-grid-3 { grid-template-columns: repeat(3, auto); }
+.v-grid-9 { grid-template-columns: repeat(9, auto); }
+.v-hotbar { margin-top: 4px; }
+.v-slot {
+  width: 46px; height: 46px; position: relative; display: grid; place-items: center; cursor: pointer;
+  border-radius: 10px; background: #fff; box-shadow: inset 0 0 0 1px var(--w-line), 0 2px 4px rgba(18,32,50,.06);
+}
+.v-slot:hover { box-shadow: inset 0 0 0 2px #2d6ee0; }
+.v-slot canvas { width: 34px; height: 34px; image-rendering: pixelated; }
+.v-slot.empty[data-role]::after {
+  position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none;
+  font-size: 9px; font-weight: 800; letter-spacing: .6px; text-transform: uppercase; color: rgba(18,32,50,.28);
+}
+.v-slot.empty[data-role="head"]::after { content: 'Head'; }
+.v-slot.empty[data-role="chest"]::after { content: 'Chest'; }
+.v-slot.empty[data-role="legs"]::after { content: 'Legs'; }
+.v-slot.empty[data-role="feet"]::after { content: 'Feet'; }
+.v-slot.empty[data-role="offhand"]::after { content: 'Off'; }
+.v-slot.empty[data-role="fuel"]::after { content: 'Fuel'; }
+.v-slot[data-role="result"] { width: 54px; height: 54px; background: #fff8e6; }
+.v-count { position: absolute; right: 4px; bottom: 1px; font: 800 12px/1 var(--w-font); color: var(--w-ink); text-shadow: 0 0 3px #fff, 0 0 2px #fff; }
+.v-dur { position: absolute; left: 6px; bottom: 4px; height: 3px; border-radius: 2px; }
+.v-dur[hidden] { display: none; }
+.v-slot.glint canvas { filter: drop-shadow(0 0 3px #b57cff) saturate(1.2); }
+.v-inv-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.v-drop { padding: 8px 14px; border-radius: 10px; background: #fdecee; color: #a3202a; font-size: 12px; font-weight: 800; cursor: pointer; }
+.v-inv-hint { font-size: 11px; color: var(--w-ink-mute); }
+.v-touch-mode { min-height: 36px; padding: 6px 14px; }
+.v-inv.touch-pending .v-slot { box-shadow: inset 0 0 0 2px #f2c230; }
+.v-cursor { position: fixed; left: 0; top: 0; z-index: 60; pointer-events: none; width: 40px; height: 40px; }
+.v-cursor[hidden] { display: none; }
+.v-cursor canvas { width: 40px; height: 40px; image-rendering: pixelated; }
+.v-cursor span { position: absolute; right: 0; bottom: 0; font: 900 13px/1 var(--w-font); color: #fff; text-shadow: 0 1px 2px #000; }
+.v-tip {
+  position: fixed; left: 0; top: 0; z-index: 61; pointer-events: none; display: grid; gap: 2px; max-width: 260px;
+  padding: 8px 10px; border-radius: 10px; background: #fff; box-shadow: 0 10px 26px rgba(18,32,50,.28);
+  font: 650 12px/1.35 var(--w-font); color: var(--w-ink);
+}
+.v-tip[hidden] { display: none; }
+.v-tip b { font-size: 13px; font-weight: 850; }
+.v-tip b.ench, .v-tip .ench { color: #7a3fc4; }
+.v-tip .stat { color: #1f6fb8; }
+.v-tip .mute { color: var(--w-ink-mute); }
+.v-furnace { display: flex; align-items: center; gap: 14px; }
+.v-furnace-col { display: grid; gap: 6px; justify-items: center; }
+.v-flame { width: 16px; height: 16px; border-radius: 50% 50% 40% 40%; background: radial-gradient(circle at 50% 70%, #ffd060, #e8620c 60%, transparent 70%); opacity: 0; }
+.v-cook { width: 60px; height: 10px; border-radius: 99px; background: rgba(18,32,50,.12); overflow: hidden; }
+.v-cook-fill { height: 100%; width: 0; background: #e8a020; }
+
+/* Server menus (ghost tricks, survival crafting, host pages) */
+.v-menu { width: min(480px, 100%); gap: 10px; }
+.v-menu-sub { margin: 0; color: var(--w-ink-soft); font-size: 13px; line-height: 1.45; }
+.v-menu-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; }
+.v-menu-item {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 0; border-radius: 14px; cursor: pointer; text-align: left;
+  background: #fff; box-shadow: inset 0 0 0 1px var(--w-line), 0 4px 10px rgba(18,32,50,.08); color: var(--w-ink);
+  font: inherit; position: relative;
+}
+.v-menu-item:hover:not(:disabled) { box-shadow: inset 0 0 0 2px #2d6ee0, 0 6px 14px rgba(18,32,50,.12); }
+.v-menu-item:disabled { opacity: .5; cursor: default; }
+.v-menu-item.active { box-shadow: inset 0 0 0 2px #1f9d5b; background: #effaf3; }
+.v-menu-item[data-tag="boo"] { background: #f6f0ff; }
+.v-menu-item[data-tag="cheer"] { background: #f0fbf2; }
+.v-menu-item canvas { width: 32px; height: 32px; image-rendering: pixelated; flex: none; }
+.v-menu-text { display: grid; gap: 2px; min-width: 0; }
+.v-menu-text b { font-size: 13.5px; font-weight: 850; }
+.v-menu-text small { font-size: 11.5px; color: var(--w-ink-mute); line-height: 1.3; }
+.v-menu-count { position: absolute; right: 10px; top: 8px; font-style: normal; font-weight: 900; font-size: 12px; color: var(--w-ink-mute); }
+.v-menu-empty { margin: 0; color: var(--w-ink-mute); font-size: 13px; }
+
+/* Results */
+.v-results { width: min(460px, 100%); }
+.v-results-kicker { color: #9a6a0f; font-size: 10px; font-weight: 800; letter-spacing: 2.2px; }
+.v-results h2 { margin: 0; font-size: 28px; font-weight: 900; letter-spacing: -.4px; }
+.v-results-sub { margin: 0; color: var(--w-ink-soft); font-size: 13px; }
+.v-results-table { display: grid; gap: 4px; }
+.v-results-row { display: grid; grid-template-columns: 36px 1fr auto; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 12px; background: #f4f7fb; }
+.v-results-row.you { background: #eaf2ff; box-shadow: inset 0 0 0 1px rgba(45,110,224,.35); }
+.v-results-row .place { font-weight: 900; color: #b8730c; }
+.v-results-row .name { font-weight: 800; overflow: hidden; text-overflow: ellipsis; }
+.v-results-row small { color: var(--w-ink-mute); font-weight: 700; font-variant-numeric: tabular-nums; }
+.v-results-actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
+
+.touch-ui .v-slot { width: 40px; height: 40px; }
+.touch-ui .v-effects { right: calc(12px + var(--safe-right, 0px)); top: calc(60px + var(--safe-top, 0px)); }
+@media (max-width: 560px) {
+  .v-slot { width: 34px; height: 34px; }
+  .v-slot canvas { width: 26px; height: 26px; }
+  .v-inv-top { gap: 10px; }
+}
+
+/* Party start sheet */
+.w-check { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 12px; background: #f4f7fb; font-size: 13px; font-weight: 750; cursor: pointer; }
+.w-check input { width: 18px; height: 18px; accent-color: #2d6ee0; }

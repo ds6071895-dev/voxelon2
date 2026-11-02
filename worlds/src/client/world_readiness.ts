@@ -14,7 +14,7 @@ export class WorldReadiness {
   pendingTeleport: (Spawn & { started: number }) | null = null;
   private sent = false;
   private watchdog = 0;
-  private kind: 'duel' | 'pg' | 'rs' | 'bw' | null = null;
+  private kind: 'duel' | 'pg' | 'rs' | 'bw' | 'mg' | null = null;
 
   constructor(private readonly world: LoadingWorld, private readonly sendReady: () => void,
     private readonly hideLoading: () => void, private readonly clock: IntervalClock = window) {}
@@ -26,7 +26,7 @@ export class WorldReadiness {
     const { x, z } = spawn;
     this.watchdog = this.clock.setInterval(() => {
       if (!this.kind || this.sent) { this.stop(); return; }
-      const complete = this.kind === 'bw' ? this.world.updateVenue(30)
+      const complete = this.kind === 'bw' || this.kind === 'mg' ? this.world.updateVenue(30)
         : this.world.update(x, z, 30, this.kind === 'pg' ? 4 : 2);
       if (complete && this.world.isLoaded(x, z)) {
         this.pendingTeleport = null;
@@ -43,7 +43,7 @@ export class WorldReadiness {
   update(now: number): void {
     const tp = this.pendingTeleport;
     if (!tp || !this.kind) return;
-    const complete = this.kind === 'bw' ? this.world.updateVenue(20) : this.world.update(tp.x, tp.z, 20, 2);
+    const complete = this.kind === 'bw' || this.kind === 'mg' ? this.world.updateVenue(20) : this.world.update(tp.x, tp.z, 20, 2);
     if (complete || now - tp.started > 4) {
       this.pendingTeleport = null;
       if (complete) this.ready();

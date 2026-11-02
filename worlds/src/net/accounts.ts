@@ -10,6 +10,7 @@
 
 import { sanitizeCosmetics, type Cosmetics } from '../character';
 import { isGeneratedName, isGameMode, skinSeed, type GameMode } from './protocol';
+import type { MgPlaylist } from '../minigames_rules';
 
 interface Account {
   username: string;
@@ -21,6 +22,8 @@ interface Account {
   /** Hidden: how well this player has been doing against practice opponents,
    *  per mode, 0..1.35. Never shown to anyone. */
   skill?: Partial<Record<GameMode, number>>;
+  /** Party Games playlists (sanitised by the server before storing). */
+  playlists?: MgPlaylist[];
   createdAt?: number;
 }
 
@@ -55,6 +58,7 @@ export class Accounts {
         token: typeof a.token === 'string' ? a.token : undefined,
         cosmetics: a.cosmetics !== undefined ? sanitizeCosmetics(a.cosmetics, skinSeed(a.username)) : undefined,
         skill: sanitizeSkill(a.skill),
+        playlists: Array.isArray(a.playlists) ? a.playlists.filter((l) => l && typeof l.name === 'string' && Array.isArray(l.games)).slice(0, 36) : undefined,
         createdAt: typeof a.createdAt === 'number' ? a.createdAt : undefined,
       });
     }
@@ -109,6 +113,12 @@ export class Accounts {
     const a = this.get(name);
     if (!a || !Number.isFinite(value)) return;
     (a.skill ??= {})[mode] = Math.max(0.1, Math.min(1.35, value));
+  }
+
+  playlistsOf(name: string): MgPlaylist[] { return this.get(name)?.playlists ?? []; }
+  setPlaylists(name: string, lists: MgPlaylist[]): void {
+    const a = this.get(name);
+    if (a) a.playlists = lists;
   }
 
   toJSON(): Account[] { return [...this.byName.values()]; }

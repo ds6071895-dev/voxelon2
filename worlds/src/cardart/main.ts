@@ -27,10 +27,21 @@ import { Block } from '../blocks';
 import { fitHands } from '../media/grips';
 import { chooseCaptureCourse } from '../media/course';
 import { warmCaptureDragon } from '../media/dragon';
+import '../pillars_geometry';
+import '../disaster_city';
+import { worldSeed as mgWorldSeed } from '../minigames/arenas';
+import { holeX, holeZ } from '../minigames/whack';
+import { mgIndex } from '../minigames_rules';
+import { mc } from '../vanilla/mc_materials';
+import { SHOPS } from '../disaster_rules';
+import { lpArenaPillars } from '../pillars_geometry';
+import { lpSeed, LP } from '../pillars_rules';
+import { VB } from '../vanilla/blocks';
+import { VI } from '../vanilla/items';
 import { captureGround, configureCaptureQuality, sizeCapture, loadCaptureChunks, poseCaptureStride } from '../media/offline';
 
-export type CardId = 'bedwars' | 'duels' | 'bridge' | 'parkour' | 'ratseek';
-export const CARDS: readonly CardId[] = ['bedwars', 'duels', 'bridge', 'parkour', 'ratseek'];
+export type CardId = 'bedwars' | 'duels' | 'bridge' | 'parkour' | 'ratseek' | 'pillars' | 'disaster' | 'minigames';
+export const CARDS: readonly CardId[] = ['bedwars', 'duels', 'bridge', 'parkour', 'ratseek', 'pillars', 'disaster', 'minigames'];
 
 const params = new URLSearchParams(location.search);
 const canvas = document.getElementById('output') as HTMLCanvasElement;
@@ -152,6 +163,107 @@ interface Staging {
 const { seed: parkourSeed, course: cardCourse } = chooseCaptureCourse(['rooftops']);
 
 function staging(id: CardId): Staging {
+  if (id === 'minigames') {
+    // Party Games: Whack-a-Mole on the farm lawn. Moles up all over the field,
+    // a gold one getting punched, two players racing for the next.
+    const gen = worldGenerator({ kind: 'minigames', seed: mgWorldSeed(mgIndex('whack')) });
+    const Y = 100;
+    const edits: [number, number, number, number][] = [];
+    const up = (hole: number, kind: 'gold' | 'bomb' | 'brown') => {
+      const x = holeX(hole), z = holeZ(hole);
+      edits.push([x, Y + 1, z, mc(kind === 'gold' ? 'gold_block' : kind === 'bomb' ? 'black_concrete' : 'brown_terracotta')]);
+      edits.push([x, Y + 2, z, mc(kind === 'gold' ? 'raw_gold_block' : kind === 'bomb' ? 'tnt' : 'brown_mushroom_block')]);
+    };
+    up(24, 'gold'); up(17, 'brown'); up(30, 'brown'); up(9, 'bomb'); up(38, 'brown'); up(12, 'brown'); up(33, 'gold');
+    const gx = holeX(24), gz = holeZ(24);
+    return {
+      generator: gen, center: v(0, Y, -4), radius: 4, timeOfDay: .3, ambient: .95,
+      cam: v(5.2, Y + 2.9, 5.4), at: v(-.8, Y + 1.9, -1.2), fov: 56, fog: [120, 240], edits,
+      pose() {
+        const a = actor(3311, TEAM.yellow);
+        place(a, v(gx - 1.0, Y + 1, gz + 1.3), v(gx + .5, Y + 2, gz + .5));
+        stride(a, .3, .6, true);
+        particles.burst(gx + .5, Y + 2.6, gz + .5, 22, 0xfff1a8, 3, .6, { gravity: 2, spread: .5, scale: .35 });
+        const b = actor(908, TEAM.blue);
+        place(b, v(holeX(17) - 3.2, Y + 1, holeZ(17) + 1.6), v(holeX(17) + .5, Y + 1, holeZ(17) + .5));
+        stride(b, 1.3, 4.6, false);
+      },
+    };
+  }
+  if (id === 'disaster') {
+    // The city at the apocalypse's dusk: a meteor's smoking crater in the road
+    // by the skyscraper, one player sprinting away from it, another watching
+    // from a roof.
+    const gen = worldGenerator({ kind: 'disaster', seed: 0 });
+    const g = (x: number, z: number) => ground(gen, x, z, 140, 50);
+    const cx = -16, cz = -8, gy = g(cx + .5, cz + .5);
+    const edits: [number, number, number, number][] = [];
+    for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) {
+      const d = Math.hypot(dx, dz);
+      if (d > 3.2) continue;
+      const depth = d < 1.5 ? 3 : d < 2.5 ? 2 : 1;
+      for (let k = 0; k < depth; k++) edits.push([cx + dx, gy - 1 - k, cz + dz, 0]);
+      edits.push([cx + dx, gy - 1 - depth, cz + dz, d < 1.2 ? VB.magma_block : (dx * 7 + dz * 3) % 3 === 0 ? VB.netherrack : VB.blackstone]);
+    }
+    for (const [dx, dz] of [[-3, 1], [2, -3], [3, 2], [-1, 3]]) edits.push([cx + dx, gy, cz + dz, VB.fire]);
+    // The next meteor, still falling: a glowing magma lump over the skyscraper.
+    const mx = -14, my = gy + 13, mz = -27;
+    for (const [dx, dy, dz] of [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 0], [0, 1, 1], [1, 0, 1], [1, 1, 1]]) edits.push([mx + dx, my + dy, mz + dz, VB.magma_block]);
+    edits.push([mx + 2, my + 2, mz + 1, VB.fire], [mx + 1, my + 2, mz + 2, VB.fire]);
+    const runner = v(-6.5, 0, -4.5); runner.y = g(runner.x, runner.z);
+    const roof = v(SHOPS.x2 - 1.5, 0, -1.5); roof.y = g(roof.x, roof.z);
+    return {
+      generator: gen, center: v(-12, 0, -8), radius: 5, timeOfDay: .465, ambient: .7,
+      cam: v(-1.5, gy + 9, 6.5), at: v(-17, gy + 4.5, -12), fov: 62, fog: [110, 220], edits,
+      pose() {
+        const a = actor(2207, TEAM.yellow);
+        place(a, runner, v(4, runner.y, 6));
+        stride(a, 1.1, 4.8, false);
+        const b = actor(519, TEAM.blue);
+        place(b, roof, v(cx, gy, cz));
+        stride(b, .4, .8, true);
+        hold(b, VI.iron_pickaxe);
+        particles.burst(cx + .5, gy + 1, cz + .5, 60, 0x5a5a5a, 1.2, 3, { gravity: -.8, spread: 1.6, scale: .9 });
+        for (let i = 1; i <= 8; i++) particles.burst(mx + 1 + i * 1.1, my + 1 + i * 1.6, mz + 1 + i * .5, 12, i < 3 ? 0xffa040 : 0x6a6a6a, .3, 3, { gravity: 0, spread: .4 + i * .12, scale: .8 + i * .1, additive: i < 3 });
+      },
+    };
+  }
+  if (id === 'pillars') {
+    // Four bedrock pillars round the golden crown, over the void: one player
+    // bridging across with wool, another waiting on their pillar with a sword.
+    const seed = lpSeed('ring', 4, 96, false);
+    const gen = worldGenerator({ kind: 'pillars', seed });
+    const pillars = lpArenaPillars(seed);
+    const [a, b] = pillars;
+    const y = LP.TOP_Y;
+    const edits: [number, number, number, number][] = [];
+    // A half-finished wool bridge from pillar A toward the crown.
+    const steps = 7;
+    for (let i = 1; i <= steps; i++) {
+      const t = i / 15;
+      edits.push([Math.round(a.x + (0 - a.x) * t), y, Math.round(a.z + (0 - a.z) * t), VB.yellow_wool]);
+    }
+    // Pillar B has a little cobblestone ledge.
+    edits.push([b.x + 1, y, b.z, VB.cobblestone], [b.x, y, b.z + 1, VB.cobblestone]);
+    const bridgeEnd = { x: a.x + (0 - a.x) * (steps / 15), z: a.z + (0 - a.z) * (steps / 15) };
+    const out = v(a.x, 0, a.z).normalize();
+    const side = v(-out.z, 0, out.x);
+    const cam = v(a.x + .5, y + 4.6, a.z + .5).add(out.clone().multiplyScalar(5.5)).add(side.clone().multiplyScalar(2.2));
+    return {
+      generator: gen, center: v(0, 0, 0), radius: 4, timeOfDay: .25, ambient: .9,
+      cam, at: v(bridgeEnd.x * .45 + .5, y + .8, bridgeEnd.z * .45 + .5), fov: 62, fog: [140, 260], edits,
+      pose() {
+        const bridger = actor(4417, TEAM.yellow);
+        place(bridger, v(bridgeEnd.x + .5, y + 1, bridgeEnd.z + .5), v(.5, y + 1, .5));
+        stride(bridger, 1.6, 2.4, true, .35);
+        hold(bridger, VB.yellow_wool);
+        const rival = actor(812, TEAM.blue);
+        place(rival, v(b.x + .5, b.topY + 1, b.z + .5), v(bridgeEnd.x, y + 1, bridgeEnd.z));
+        stride(rival, .6, 1.4, false);
+        hold(rival, VI.diamond_sword);
+      },
+    };
+  }
   if (id === 'bedwars') {
     // Red's island: the bed in front, a defender with a sword, and Blue
     // bridging in with wool across the void.
@@ -308,7 +420,7 @@ async function prepare(id: CardId, w = 1200, h = 900, below = 0): Promise<void> 
   props.clear();
   runners = [];
   dragon.clear();
-  heroSky.visible = id === 'bedwars';
+  heroSky.visible = id === 'bedwars' || id === 'pillars';
   const s = staging(id);
   const num = (k: string) => params.get(k)?.split(',').map(Number);
   const cam = num('cam'), at = num('at'), fov = num('fov');

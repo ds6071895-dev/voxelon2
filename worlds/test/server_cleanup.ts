@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { Duels, DUEL_ROUND_MS, duelArenaBlockAt, type DuelLobbySnapshot } from '../src/duels';
 import { GameServer, type Outbound } from '../src/net/server_core';
 import { NetClient } from '../src/net/client';
@@ -257,7 +259,7 @@ function identityAndShellTests(): void {
   assert.deepEqual(staticClientPath('/fixture/dist', '/bad%ZZ'), { ok: false, status: 400 });
   assert.deepEqual(staticClientPath('/fixture/dist', '/%2e%2e/dist-other/file'), { ok: false, status: 403 });
   assert.deepEqual(staticClientPath('/fixture/dist', '/%00'), { ok: false, status: 400 });
-  const directory = fs.mkdtempSync('/tmp/opencode/server-cleanup-');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'server-cleanup-'));
   const file = `${directory}/fixture.json`;
   try {
     fs.writeFileSync(file, 'last-good-store');

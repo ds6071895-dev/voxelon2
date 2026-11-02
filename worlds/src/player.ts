@@ -3,9 +3,10 @@
 // gravity 32 m/s^2, collision box 0.6 x 1.8, eye height 1.62 (1.27 sneaking).
 
 import * as THREE from 'three';
-import { Block, collisionBoxes, isSolid, type Box } from './blocks';
+import { BLOCKS, Block, collisionBoxes, isSolid, type Box } from './blocks';
 import type { PlayerInput } from './input';
 import type { PhysicsWorld } from './physics_world';
+import { BOAT, stepBoat, type BoatBody } from './vanilla/boat';
 
 const FULL: Box[] = [[[0, 0, 0], [1, 1, 1]]];
 const NONE: Box[] = [];
@@ -101,6 +102,20 @@ export class Player {
   speedMult = 1;
   /** Jump Boost level: each level adds a tenth of a block-per-tick of launch. */
   jumpBoost = 0;
+  /** Vanilla movement (Lucky Pillars, Disaster City, Party Games): gravity
+   *  scale, Slow Falling, Levitation, elytra gliding and the block behaviours
+   *  `moveKindAt` reports (ladders, cobwebs, slime, honey, ice...). */
+  vanilla: { gravity: number; slowFall: boolean; levitation: number; frozen: boolean; canSprint: boolean } | null = null;
+  moveKindAt?: (x: number, y: number, z: number) => string | undefined;
+  /** Elytra flight, and ticks of firework boost left. */
+  gliding = false;
+  /** Riding a boat (vanilla modes): the hull's heading, turn rate and the
+   *  20 Hz sub-step clock. The body's position is the hull's. */
+  boat: (BoatBody & { acc: number }) | null = null;
+  boostTicks = 0;
+  inLava = false;
+  climbing = false;
+  private glideAcc = 0;
   /** Body size (Rat and Seek shrinks rats to half scale). */
   private halfWidth = BASE_HALF_WIDTH;
   private height = BASE_HEIGHT;
@@ -110,7 +125,7 @@ export class Player {
   /** Resize the body: collision box and eye height scale together; walking
    *  speed, jump height and step-up height do not (as in vanilla). */
   setBodyScale(scale: number): void {
-    const s = Math.max(0.2, Math.min(1, scale));
+    const s = Math.max(0.2, Math.min(2, scale));
     this.halfWidth = BASE_HALF_WIDTH * s;
     this.height = BASE_HEIGHT * s;
     this.eyeStanding = BASE_EYE_STANDING * s;
@@ -195,8 +210,9 @@ export class Player {
 
     // Sprint is gated on energy: blocked while sneaking, not moving forward,
     // or exhausted (energy hit 0 and hasn't recovered to the threshold yet).
+    if (this.vanilla?.frozen) input = { ...input, forward: false, back: false, left: false, right: false, jump: false, moveX: 0, moveY: 0 };
     this.sneaking = input.sneak;
-    if (!input.forward || this.sneaking || this.exhausted) {
+    if (!input.forward || this.sneaking || this.exhausted || (this.vanilla && !this.vanilla.canSprint)) {
       this.sprinting = false;
     } else if (input.sprintKey || input.sprintHeld) {
       this.sprinting = true;
@@ -206,8 +222,17 @@ export class Player {
     const feetBlock = world.getBlock(
       Math.floor(this.pos.x), Math.floor(this.pos.y + 0.4), Math.floor(this.pos.z)
     );
-    this.inWater = feetBlock === Block.Water;
-
+    const fluid = BLOCKS[feetBlock]?.fluid;
+    this.inWater = fluid?.kind === 'water';
+    this.inLava = fluid?.kind === 'lava';
+    if (this.inLava) this.inWater = true; // lava swims like very thick water
+    const mk = this.moveKindAt;
+    const cellKind = mk ? (mk(this.pos.x, this.pos.y + .2, this.pos.z) ?? mk(this.pos.x, this.pos.y + 1, this.pos.z)) : undefined;
+    const underKind = mk ? mk(this.pos.x, this.pos.y - .05, this.pos.z) : undefined;
+    this.climbing = cellKind === 'ladder' || cellKind === 'scaffold';
+    if (this.gliding && (this.onGround || this.inWater || this.climbing)) this.gliding = false;
+    if (this.gliding) { this.glide(dt, world); return; }
+    if (this.boat) { this.rideBoat(dt, input, world); return; }
     // Wish direction in the horizontal plane, relative to yaw.
     let fwd = 0, strafe = 0;
     if (input.forward) fwd += 1;
@@ -224,7 +249,10 @@ export class Player {
     const dirZ = -cos * fwd - sin * strafe;
 
     let speed = this.sneaking ? SNEAK_SPEED : this.sprinting ? SPRINT_SPEED : WALK_SPEED;
-    if (this.inWater) speed *= 0.45;
+    if (this.inWater) speed *= this.inLava ? 0.25 : 0.45;
+    if (cellKind === 'cobweb') speed *= 0.25;
+    else if (cellKind === 'powderSnow') speed *= 0.9;
+    if (this.onGround && (underKind === 'honey' || underKind === 'soulSand')) speed *= 0.4;
     speed *= this.speedMult;
     if (this.flying) speed = (this.sprinting ? SPRINT_SPEED : WALK_SPEED) * FLY_SPEED_MULT;
 
@@ -241,7 +269,9 @@ export class Player {
       this.vel.x *= drag;
       this.vel.z *= drag;
     } else {
-      const accel = grounded ? 14 : 3;
+      // Ice keeps you sliding: vanilla slipperiness 0.98 (ice, packed) and 0.989 (blue).
+      const slip = this.onGround ? (underKind === 'blueIce' ? .989 : underKind === 'ice' || underKind === 'packedIce' ? .98 : .6) : .6;
+      const accel = (grounded ? 14 : 3) * (slip > .6 ? (1 - slip) / .4 : 1);
       const t = Math.min(1, accel * dt);
       this.vel.x += (dirX * speed - this.vel.x) * t;
       this.vel.z += (dirZ * speed - this.vel.z) * t;
@@ -270,12 +300,33 @@ export class Player {
       if (input.jump && len > 0 && this.ledgeAhead(world, dirX, dirZ)) {
         this.vel.y = 5.5;
       }
+    } else if (this.climbing && !this.flying) {
+      // Ladders and scaffolding: climb 0.2 b/tick, cling while sneaking, slide down slowly.
+      const v = this.vanilla;
+      if (input.jump || (input.forward && cellKind === 'ladder')) this.vel.y = 4;
+      else if (input.sneak) this.vel.y = cellKind === 'scaffold' ? -3 : 0;
+      else this.vel.y = Math.max(this.vel.y - GRAVITY * (v?.gravity ?? 1) * dt, -3);
+      this.fallDistance = 0;
+    } else if (cellKind === 'cobweb') {
+      if (input.jump && this.onGround) this.vel.y = JUMP_VELOCITY * .05;
+      this.vel.y = Math.max(-1.2, this.vel.y - GRAVITY * dt * .05);
+      this.fallDistance = 0;
     } else {
-      if (input.jump && this.onGround) {
-        this.vel.y = JUMP_VELOCITY * (0.42 + 0.1 * this.jumpBoost) / 0.42;
+      const v = this.vanilla;
+      if (input.jump && this.onGround && !(v && underKind === 'honey' && false)) {
+        this.vel.y = JUMP_VELOCITY * (0.42 + 0.1 * this.jumpBoost) / 0.42 * (underKind === 'honey' ? .5 : 1);
         this.onGround = false;
       }
-      this.vel.y -= GRAVITY * dt;
+      if (v && v.levitation > 0) {
+        // Vanilla: vy += (0.05·level − vy)·0.2 per tick.
+        this.vel.y += (v.levitation - this.vel.y) * Math.min(1, 4 * dt);
+        this.fallDistance = 0;
+      } else {
+        let g = GRAVITY * (v?.gravity ?? 1);
+        if (v?.slowFall && this.vel.y < 0) { g = GRAVITY * .125; this.fallDistance = 0; }
+        if (cellKind === 'powderSnow') { g *= .3; this.vel.y = Math.max(this.vel.y, -1.5); }
+        this.vel.y -= g * dt;
+      }
       if (this.vel.y < -TERMINAL_VELOCITY) this.vel.y = -TERMINAL_VELOCITY;
     }
 
@@ -312,7 +363,12 @@ export class Player {
       this.unstick(world);
       const wasOnGround = this.onGround;
       this.onGround = false;
+      const falling = this.vel.y;
       this.moveAxis(world, 1, this.vel.y * dt);
+      // Slime: land without sneaking and bounce back up at the same speed.
+      if (this.onGround && falling < -2 && !this.sneaking && mk?.(this.pos.x, this.pos.y - .05, this.pos.z) === 'slime') {
+        this.vel.y = -falling * .98; this.onGround = false; this.fallDistance = 0;
+      }
       const yBeforeSteps = this.pos.y;
       this.moveAxisSneakAware(world, 0, this.vel.x * dt, wasOnGround);
       this.moveAxisSneakAware(world, 2, this.vel.z * dt, wasOnGround);
@@ -339,6 +395,84 @@ export class Player {
     // Smooth eye height (sneak transition).
     const targetEye = this.sneaking ? this.eyeSneaking : this.eyeStanding;
     this.eye += (targetEye - this.eye) * Math.min(1, 14 * dt);
+  }
+
+  /** Get into a boat at the given hull position and heading. */
+  mountBoat(x: number, y: number, z: number, yaw: number): void {
+    this.boat = { x, y, z, vx: 0, vy: 0, vz: 0, yaw, spin: 0, acc: 0 };
+    this.pos.set(x, y, z); this.vel.set(0, 0, 0);
+    this.gliding = false; this.sprinting = false;
+  }
+  /** Step out: stand on top of the hull. */
+  leaveBoat(): void {
+    if (!this.boat) return;
+    this.boat = null;
+    this.pos.y += BOAT.H;
+    this.vel.set(0, 0, 0);
+    this.fallDistance = 0;
+  }
+
+  /** Boat controls and buoyancy (vanilla/boat.ts) in 20 Hz sub-steps. The
+   *  rider's body collides for the hull. A/D turn the hull and the camera. */
+  private rideBoat(dt: number, input: PlayerInput, world: PhysicsWorld): void {
+    const b = this.boat!;
+    b.acc = Math.min(b.acc + dt, .25);
+    const get = (x: number, y: number, z: number) => world.getBlock(x, y, z);
+    const stickX = input.moveX ?? 0, stickY = input.moveY ?? 0;
+    const c = {
+      forward: input.forward || stickY > .3, back: input.back || stickY < -.3,
+      left: input.left || stickX < -.3, right: input.right || stickX > .3,
+    };
+    b.x = this.pos.x; b.y = this.pos.y; b.z = this.pos.z;
+    while (b.acc >= .05) {
+      b.acc -= .05;
+      const before = b.yaw;
+      const d = stepBoat(b, c, get);
+      this.yaw += b.yaw - before;
+      this.unstick(world);
+      this.onGround = false;
+      const y0 = this.pos.y, x0 = this.pos.x, z0 = this.pos.z;
+      this.moveAxis(world, 1, d.dy);
+      this.moveHorizontal(world, 0, d.dx, false);
+      this.moveHorizontal(world, 2, d.dz, false);
+      // Blocked axes lose their speed, as in vanilla's collision response.
+      if (Math.abs(this.pos.y - y0 - d.dy) > 1e-4) b.vy = 0;
+      if (Math.abs(this.pos.x - x0 - d.dx) > 1e-4) b.vx = 0;
+      if (Math.abs(this.pos.z - z0 - d.dz) > 1e-4) b.vz = 0;
+      b.x = this.pos.x; b.y = this.pos.y; b.z = this.pos.z;
+    }
+    this.vel.set(b.vx * 20, b.vy * 20, b.vz * 20);
+    this.fallDistance = 0;
+    this.inWater = false;
+  }
+
+  /** Elytra flight: Java's per-tick glide equations, run in 20 Hz sub-steps.
+   *  Velocities are blocks/tick inside, blocks/second outside. */
+  private glide(dt: number, world: PhysicsWorld): void {
+    this.glideAcc = Math.min(this.glideAcc + dt, .25);
+    let vx = this.vel.x / 20, vy = this.vel.y / 20, vz = this.vel.z / 20;
+    while (this.glideAcc >= .05) {
+      this.glideAcc -= .05;
+      const cp = Math.cos(this.pitch), lx = -Math.sin(this.yaw) * cp, ly = Math.sin(this.pitch), lz = -Math.cos(this.yaw) * cp;
+      const hlook = Math.hypot(lx, lz), hvel = Math.hypot(vx, vz), sq = cp * cp;
+      vy += -.08 + sq * .06;
+      if (vy < 0 && hlook > 0) { const a = vy * -.1 * sq; vy += a; vx += lx * a / hlook; vz += lz * a / hlook; }
+      if (this.pitch > 0 && hlook > 0) { const a = hvel * Math.sin(this.pitch) * .04; vy += a * 3.2; vx -= lx * a / hlook; vz -= lz * a / hlook; }
+      if (hlook > 0) { vx += (lx / hlook * hvel - vx) * .1; vz += (lz / hlook * hvel - vz) * .1; }
+      if (this.boostTicks > 0) {
+        this.boostTicks--;
+        vx += lx * .1 + (lx * 1.5 - vx) * .5; vy += ly * .1 + (ly * 1.5 - vy) * .5; vz += lz * .1 + (lz * 1.5 - vz) * .5;
+      }
+      vx *= .99; vy *= .98; vz *= .99;
+    }
+    this.vel.set(vx * 20, vy * 20, vz * 20);
+    this.fallDistance = 0;
+    this.unstick(world);
+    this.onGround = false;
+    this.moveAxis(world, 1, this.vel.y * dt);
+    this.moveHorizontal(world, 0, this.vel.x * dt, false);
+    this.moveHorizontal(world, 2, this.vel.z * dt, false);
+    if (this.onGround) this.gliding = false;
   }
 
   /** Sneaking on the ground refuses moves that would leave you unsupported. */

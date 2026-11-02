@@ -14,7 +14,8 @@
 //     authoritative arena code: movement validation, lag-compensated hits,
 //     arrows, build rules, course hazards.
 
-import { Block, collisionBoxes } from '../blocks';
+import { Block, BLOCKS, collisionBoxes } from '../blocks';
+import { isClimbOrSoft } from '../vanilla/blocks';
 import { ITEMS, Item, type ItemStack } from '../items';
 import { randomCosmetics, sanitizeCosmetics, type Cosmetics } from '../character';
 import {
@@ -57,10 +58,14 @@ import { PracticeSkills } from './practice_skill';
 import { orderWorldEntry } from './world_delivery';
 import { arenaVelocity, recordArenaPosition, DUEL_TRACK_WINDOW, type ArenaTrackSample } from './arena_history';
 import { Parties, type Party } from './parties';
+import { modeDef, type Edit, type ModeEngine, type ModeHost } from './mode_engine';
+import './engine_modes';
+import type { MoveProfile } from '../vanilla/messages';
+import { defaultMinigamesSetup, MG_LENGTHS, MG_MAX_PLAYLISTS, sanitizeMgName, MG_PLAYLIST_GAMES, type MinigamesSetup, type MgPlaylist } from '../minigames_rules';
 import {
   EDIT_RANGE, PARTY_MAX, isGameMode, isGeneratedName, skinSeed,
   type ClientMsg, type GameMode, type PartyState, type PlayerInfo, type PlayerSnapshot,
-  type ServerMsg,
+  type ServerMsg, isEngineMode, type EngineMode,
 } from './protocol';
 
 /** Alone in a queue this long, and a practice opponent takes the other seat.
@@ -122,6 +127,8 @@ interface ServerPlayer {
   bot: boolean;
   /** A name offered by `rollName`, held for this session until used or replaced. */
   nameOffer?: string;
+  /** Party Games playlists (loaded from the account at sign-in). */
+  playlists?: MgPlaylist[];
   /** World this body is in, or null on the menu. */
   worldId: number | null;
   /** Matchmaking: the game being searched for, and since when (ms). */
@@ -224,6 +231,9 @@ interface MatchWorld {
   rsQuiet: boolean;
   bw: BedwarsMatch | null;
   bwOut: Outbound[];
+  /** A vanilla engine (Lucky Pillars, Disaster City, Party Games). */
+  eng: ModeEngine | null;
+  engOut: Outbound[];
 }
 
 interface ServerOptions {
@@ -235,8 +245,8 @@ interface ServerOptions {
   wallNow?: () => number;
 }
 
-const MODE_TO_KIND: Record<GameMode, WorldKind> = { duels: 'duel', bridge: 'bridge', parkour: 'parkour', ratseek: 'ratseek', bedwars: 'bedwars' };
-const MODE_NAMES: Record<GameMode, string> = { duels: 'Duels', bridge: 'The Bridge', parkour: 'Parkour', ratseek: 'Rat and Seek', bedwars: 'Bedwars' };
+const MODE_TO_KIND: Record<GameMode, WorldKind> = { duels: 'duel', bridge: 'bridge', parkour: 'parkour', ratseek: 'ratseek', bedwars: 'bedwars', pillars: 'pillars', disaster: 'disaster', minigames: 'minigames' };
+const MODE_NAMES: Record<GameMode, string> = { duels: 'Duels', bridge: 'The Bridge', parkour: 'Parkour', ratseek: 'Rat and Seek', bedwars: 'Bedwars', pillars: 'Lucky Pillars', disaster: 'Disaster City', minigames: 'Party Games' };
 
 export class GameServer {
   readonly accounts: Accounts;
@@ -252,6 +262,8 @@ export class GameServer {
   private readonly disconnectedUntil = new Map<number, number>();
   private nextReconnectNonce = 1;
   private readonly bwMoves = new Map<number, BwMotion>();
+  /** Vanilla engines' movement modifiers per body (effects, elytra, scale). */
+  private readonly engProfiles = new Map<number, MoveProfile>();
   /** Per-player client clock mapping; kept across teleports so it stays converged. */
   private readonly bwClocks = new Map<number, BwClock>();
   private readonly worlds = new Map<number, MatchWorld>();
@@ -355,6 +367,10 @@ export class GameServer {
     const w = this.worlds.get(worldId);
     if (!w) return null;
     const now = this.nowMs();
+    if (w.eng) {
+      return { mode: w.mode, phase: w.eng.isOver() ? 'over' : 'running', winner: null, winnerTeam: null,
+        participants: [...w.members].map((id) => ({ id, score: 0, progress: 0, kills: 0, falls: 0, team: 0 })) };
+    }
     if (w.bw) {
       const s = w.bw.snapshot();
       return { mode: 'bedwars', phase: s.phase, winner: null, winnerTeam: s.result?.winner ?? null,
@@ -502,9 +518,11 @@ export class GameServer {
       case 'partyKick': return this.partyKick(p, msg.id);
       case 'partyPromote': return this.partyPromote(p, msg.id);
       case 'bwSetup': return this.bedwarsSetup(p, msg);
+      case 'mgSetup': return this.minigamesSetup(p, msg.setup);
+      case 'mgPlaylists': return this.savePlaylists(p, msg.playlists);
       case 'play':
         if (isRatClass(msg.ratClass)) p.rsClass = msg.ratClass;
-        return isGameMode(msg.mode) ? this.play(p, msg.mode, typeof msg.seeker === 'number' ? msg.seeker : undefined, msg.setupRevision) : [];
+        return isGameMode(msg.mode) ? this.play(p, msg.mode, typeof msg.seeker === 'number' ? msg.seeker : undefined, msg.setupRevision, msg.fill !== false) : [];
       case 'cancelQueue': {
         if (!p.queue) return [this.to(p, { t: 'queue', mode: null })];
         this.leaveQueue(p);
@@ -537,6 +555,8 @@ export class GameServer {
         p.cosmetics = a.cosmetics;
         out.push(this.to(p, { t: 'welcome', id: p.id, username: p.username, account: true, cosmetics: p.cosmetics }));
         out.push(this.to(p, { t: 'identity', username: p.username, account: true, token, cosmetics: p.cosmetics }));
+        p.playlists = this.accounts.playlistsOf(a.username);
+        out.push(this.to(p, { t: 'mgPlaylists', playlists: p.playlists }));
         return out;
       }
     }
@@ -584,6 +604,8 @@ export class GameServer {
     this.names.claimAccount(res.account.username, this.holder(p.id));
     p.account = true;
     if (p.cosmetics) this.accounts.setCosmetics(p.username, p.cosmetics);
+    // A guest's Party Games playlists move onto the new account.
+    if (p.playlists?.length) this.accounts.setPlaylists(p.username, p.playlists);
     const token = this.makeToken();
     this.accounts.setToken(p.username, token);
     this.onAccountsChanged?.();
@@ -608,8 +630,9 @@ export class GameServer {
     const token = this.makeToken();
     this.accounts.setToken(a.username, token);
     this.onAccountsChanged?.();
+    p.playlists = this.accounts.playlistsOf(a.username);
     return [this.to(p, { t: 'identity', username: p.username, account: true, token, cosmetics: p.cosmetics }),
-      ...this.partyBroadcast(p.id)];
+      this.to(p, { t: 'mgPlaylists', playlists: p.playlists }), ...this.partyBroadcast(p.id)];
   }
 
   private logout(p: ServerPlayer): Outbound[] {
@@ -623,7 +646,8 @@ export class GameServer {
     p.username = this.names.roll(holder, this.rng);
     p.skin = skinSeed(p.username);
     p.cosmetics = undefined;
-    return [this.to(p, { t: 'identity', username: p.username, account: false }), ...this.partyBroadcast(p.id)];
+    p.playlists = [];
+    return [this.to(p, { t: 'identity', username: p.username, account: false }), this.to(p, { t: 'mgPlaylists', playlists: [] }), ...this.partyBroadcast(p.id)];
   }
 
   private setCosmetics(p: ServerPlayer, raw: unknown): Outbound[] {
@@ -640,7 +664,7 @@ export class GameServer {
 
   private partyState(party: Party): PartyState {
     return {
-      code: party.code, leader: party.leader, bedwars: party.bedwars,
+      code: party.code, leader: party.leader, bedwars: party.bedwars, minigames: party.minigames,
       members: party.members.map((id) => {
         const m = this.players.get(id)!;
         return {
@@ -772,7 +796,7 @@ export class GameServer {
       : w.mode === 'bridge' || w.mode === 'parkour' ? this.pg.phaseFor(p.id) === 'results' : w.closeAt !== null;
   }
 
-  private play(p: ServerPlayer, mode: GameMode, seeker?: number, setupRevision?: number): Outbound[] {
+  private play(p: ServerPlayer, mode: GameMode, seeker?: number, setupRevision?: number, fill?: boolean): Outbound[] {
     const out: Outbound[] = [];
     const draftParty = this.parties.of(p.id);
     if (mode === 'bedwars' && draftParty && draftParty.members.length > 1) {
@@ -809,6 +833,7 @@ export class GameServer {
         if (m.queue) { this.leaveQueue(m); out.push(this.to(m, { t: 'queue', mode: null })); }
       }
       out.push(...(mode === 'bedwars' ? this.launchBedwars(members, party)
+        : isEngineMode(mode) ? this.launchEngine(mode, members, party, fill !== false)
         : mode === 'ratseek' ? this.launchRatSeek(members, seeker ?? 0, p.id) : this.launch(mode, members, true)));
       return out;
     }
@@ -825,6 +850,7 @@ export class GameServer {
   private matchQueue(mode: GameMode): Outbound[] {
     if (mode === 'ratseek') return this.matchRatSeekQueue(false);
     if (mode === 'bedwars') return this.matchBedwarsQueue(false);
+    if (isEngineMode(mode)) return this.matchEngineQueue(mode, false);
     const waiting = [...this.players.values()]
       .filter((v) => !v.bot && v.ready && v.queue === mode && v.worldId === null)
       .sort((a, b) => a.queuedAt - b.queuedAt || a.id - b.id);
@@ -844,6 +870,7 @@ export class GameServer {
       if (p.bot || !p.queue || p.worldId !== null || now - p.queuedAt < BOT_WAIT_MS) continue;
       if (p.queue === 'ratseek') { out.push(...this.matchRatSeekQueue(true)); continue; }
       if (p.queue === 'bedwars') { out.push(...this.matchBedwarsQueue(true)); continue; }
+      if (isEngineMode(p.queue)) { out.push(...this.matchEngineQueue(p.queue, true)); continue; }
       const mode = p.queue;
       this.leaveQueue(p);
       out.push(this.to(p, { t: 'queue', mode: null }));
@@ -863,6 +890,22 @@ export class GameServer {
       const group = waiting.splice(0, 4);
       for (const m of group) { this.leaveQueue(m); out.push(this.to(m, { t: 'queue', mode: null })); }
       out.push(...this.launchBedwars(group));
+      timeUp = false;
+    }
+    return out;
+  }
+
+  /** The vanilla modes' public queue: four people go at once; after the wait,
+   *  whoever is queued goes and bots fill the other seats up to four. */
+  private matchEngineQueue(mode: EngineMode, timeUp: boolean): Outbound[] {
+    const waiting = [...this.players.values()]
+      .filter((v) => !v.bot && v.ready && v.queue === mode && v.worldId === null)
+      .sort((a, b) => a.queuedAt - b.queuedAt || a.id - b.id);
+    const out: Outbound[] = [];
+    while (waiting.length >= PARTY_MAX || (timeUp && waiting.length > 0)) {
+      const group = waiting.splice(0, PARTY_MAX);
+      for (const m of group) { this.leaveQueue(m); out.push(this.to(m, { t: 'queue', mode: null })); }
+      out.push(...this.launchEngine(mode, group, undefined, true));
       timeUp = false;
     }
     return out;
@@ -919,15 +962,15 @@ export class GameServer {
 
   // ── Worlds ───────────────────────────────────────────────────────────────
 
-  private createWorld(mode: GameMode, seed: number, lobby: string): MatchWorld {
-    const spec: WorldSpec = { id: this.nextWorldId++, kind: MODE_TO_KIND[mode], seed };
+  private createWorld(mode: GameMode, seed: number, lobby: string, kind: WorldKind = MODE_TO_KIND[mode]): MatchWorld {
+    const spec: WorldSpec = { id: this.nextWorldId++, kind, seed };
     const w: MatchWorld = {
       spec, blocks: new WorldBlocks(worldGenerator(spec)), mode, lobby, members: new Set(),
       closeAt: null, cagesOpen: false,
       parkour: mode === 'parkour' ? {
         blink: [true, true], crumbles: new Map(), pendingRestore: new Map(), fireballs: [], nextBreathAt: 0, dragonSentAt: -1, statues: new Map(),
       } : null,
-      arrows: [], rs: null, rsOut: [], rsQuiet: false, bw: null, bwOut: [],
+      arrows: [], rs: null, rsOut: [], rsQuiet: false, bw: null, bwOut: [], eng: null, engOut: [],
     };
     this.worlds.set(spec.id, w);
     this.worldByLobby.set(lobby, spec.id);
@@ -971,7 +1014,10 @@ export class GameServer {
       for (const member of w.members) out.push(this.to(member, { t: 'notice', text: 'Bedwars start cancelled because a player left.' }));
       return [...out, ...this.closeWorld(w)];
     }
-    if (w.mode === 'bedwars') {
+    if (w.eng) {
+      w.eng.leave(p.id);
+      out.push(...this.drainEng(w));
+    } else if (w.mode === 'bedwars') {
       w.bw?.leave(p.id);
       out.push(...this.drainBw(w));
     } else if (w.mode === 'ratseek') {
@@ -1033,6 +1079,15 @@ export class GameServer {
       return;
     }
     if (w.mode === 'ratseek') { if (w.rs?.isOver()) w.closeAt = this.worldTime + RS_PODIUM_S; return; }
+    if (w.eng) {
+      if (w.eng.isOver()) {
+        w.closeAt = this.worldTime + w.eng.lingerSeconds();
+        const parties = new Set<Party>();
+        for (const id of w.members) { const party = this.parties.of(id); if (party) parties.add(party); }
+        for (const party of parties) w.engOut.push(...this.partyBroadcast(party.leader));
+      }
+      return;
+    }
     // Duels and PartyGames own their result deadlines. Their transition back
     // to lobby closes the world; only standalone engines use closeAt.
   }
@@ -1045,7 +1100,7 @@ export class GameServer {
     for (const id of [...w.members]) {
       const p = this.players.get(id);
       if (!p) { w.members.delete(id); continue; }
-      if (w.mode === 'duels') this.duels.leave(id, now); else if (w.mode !== 'ratseek' && w.mode !== 'bedwars') this.pg.leave(id, now);
+      if (w.mode === 'duels') this.duels.leave(id, now); else if (w.mode !== 'ratseek' && w.mode !== 'bedwars' && !w.eng) this.pg.leave(id, now);
       if (p.bot) {
         this.settleBot(p, w);
         w.members.delete(id);
@@ -1067,6 +1122,8 @@ export class GameServer {
     }
     w.bw?.dispose();
     w.bwOut = [];
+    w.eng?.dispose();
+    w.engOut = [];
     this.worlds.delete(w.spec.id);
     this.worldByLobby.delete(w.lobby);
     if (w.mode !== 'ratseek') releaseWorldGenerator(w.spec);
@@ -1075,6 +1132,15 @@ export class GameServer {
 
   /** A practice opponent is leaving: remember the level it ended at. */
   private settleBot(bot: ServerPlayer, w: MatchWorld): void {
+    if (w.eng) {
+      const r = w.eng.botRating(bot.id);
+      if (!r) return;
+      for (const id of r.against) {
+        const human = this.players.get(id);
+        if (human && !human.bot) this.rememberSkill(human, w.mode, r.rating);
+      }
+      return;
+    }
     if (w.mode === 'bedwars') {
       const brain = w.bw?.bots.find(b => b.id === bot.id), me = w.bw?.players.get(bot.id);
       if (!brain || !me || !w.bw) return;
@@ -1281,7 +1347,268 @@ export class GameServer {
     return this.drainBw(w);
   }
 
+  // ── Vanilla engines (Lucky Pillars, Disaster City, Party Games) ─────────
+
+  private drainEng(w: MatchWorld): Outbound[] {
+    const out = w.engOut;
+    w.engOut = [];
+    return out;
+  }
+
+  private engHost(w: MatchWorld): ModeHost {
+    const sendRaw = (id: number, msg: ServerMsg): void => {
+      if (this.players.get(id)?.bot === false) w.engOut.push(this.to(id, msg));
+    };
+    const broadcastRaw = (msg: ServerMsg): void => { for (const id of w.members) sendRaw(id, msg); };
+    return {
+      nowMs: () => this.nowMs(),
+      body: (id) => this.players.get(id),
+      name: (id) => this.players.get(id)?.username ?? '',
+      send: (id, d) => sendRaw(id, { t: 'm', d }),
+      broadcast: (d) => { const msg: ServerMsg = { t: 'm', d }; broadcastRaw(msg); },
+      sendRaw,
+      getBlock: (x, y, z) => w.blocks.getBlock(x, y, z),
+      setBlock: (x, y, z, block) => {
+        if (w.blocks.getBlock(x, y, z) === block) return;
+        w.blocks.set(x, y, z, block);
+        broadcastRaw({ t: 'edit', x, y, z, block });
+      },
+      setBlocks: (edits: Edit[]) => {
+        const changed = edits.filter((e) => w.blocks.getBlock(e.x, e.y, e.z) !== e.block);
+        if (!changed.length) return;
+        for (const e of changed) w.blocks.set(e.x, e.y, e.z, e.block);
+        broadcastRaw(changed.length === 1 ? { t: 'edit', ...changed[0] } : { t: 'editBatch', edits: changed });
+      },
+      fill: (f) => {
+        const changed = w.blocks.fill(f);
+        if (changed.length) broadcastRaw({ t: 'editFill', fill: f });
+        return changed;
+      },
+      setHealth: (id, health, dead) => {
+        const p = this.players.get(id);
+        if (p) { p.health = health; p.dead = dead; }
+      },
+      impulse: (id, kx, ky, kz, by, health) => {
+        const p = this.players.get(id);
+        if (!p) return;
+        p.health = health;
+        const motion = this.bwMoves.get(id) ?? bwMotion(this.worldTime, p);
+        bwAuthorizeImpulse(motion, this.worldTime, p, kx, ky, kz);
+        this.bwMoves.set(id, motion);
+        sendRaw(id, { t: 'hurt', health, dead: health <= 0, by, kx, ky, kz });
+      },
+      teleport: (id, x, y, z, yaw, health) => {
+        const p = this.players.get(id);
+        if (!p) return;
+        p.x = x; p.y = y; p.z = z; p.rsMoveAt = this.worldTime;
+        this.bwMoves.set(id, bwMotion(this.worldTime, p));
+        p.arenaTrack = [];
+        if (yaw !== undefined) p.yaw = yaw;
+        if (health !== undefined) {
+          p.health = health; p.dead = health <= 0;
+          sendRaw(id, { t: 'respawned', x, y, z, health, seq: this.moved(p) });
+        } else sendRaw(id, { t: 'teleport', x, y, z, seq: this.moved(p) });
+        w.engOut.push(...this.relayTransform(p, w));
+      },
+      launch: (id, vx, vy, vz, add) => {
+        const p = this.players.get(id);
+        if (!p) return;
+        const motion = this.bwMoves.get(id) ?? bwMotion(this.worldTime, p);
+        bwAuthorizeImpulse(motion, this.worldTime, p, vx, vy, vz);
+        this.bwMoves.set(id, motion);
+        sendRaw(id, { t: 'm', d: { k: 'impulse', vx, vy, vz, set: !add } });
+      },
+      drive: (id, pose) => {
+        const p = this.players.get(id);
+        if (!p) return;
+        p.x = pose.x; p.y = pose.y; p.z = pose.z; p.yaw = pose.yaw; p.pitch = pose.pitch;
+        if (pose.held !== undefined) p.held = pose.held;
+        if (pose.swing) p.swing = (p.swing + 1) & 0xffff;
+        if (pose.sneaking !== undefined) p.sneaking = pose.sneaking;
+        p.ct = this.nowMs();
+      },
+      setMoveProfile: (id, profile) => { this.engProfiles.set(id, profile); },
+      sendBlocks: (id, edits) => {
+        if (edits.length) sendRaw(id, edits.length === 1 ? { t: 'edit', ...edits[0] } : { t: 'editBatch', edits });
+      },
+      switchWorld: (kind, seed, spawns) => {
+        releaseWorldGenerator(w.spec);
+        w.spec = { id: w.spec.id, kind, seed };
+        w.blocks = new WorldBlocks(worldGenerator(w.spec));
+        for (const id of w.members) {
+          const p = this.players.get(id), s = spawns.get(id);
+          if (!p || !s) continue;
+          this.resetBody(p, s, s.yaw, p.health);
+          p.rsMoveAt = this.worldTime;
+          this.bwMoves.set(id, bwMotion(this.worldTime, p));
+          sendRaw(id, { t: 'mArena', world: w.spec, mode: w.mode as EngineMode, spawn: { x: s.x, y: s.y, z: s.z }, yaw: s.yaw, health: p.health });
+        }
+      },
+    };
+  }
+
+  private launchEngine(mode: EngineMode, members: ServerPlayer[], party: Party | undefined, fill: boolean): Outbound[] {
+    const def = modeDef(mode);
+    if (!def) return members.flatMap((m) => this.partyErr(m, `${MODE_NAMES[mode]} is not available.`));
+    const entries = [...members];
+    // Every vanilla mode needs two players; bots make up the rest of the four.
+    if (fill || entries.length < 2) while (entries.length < Math.max(2, fill ? PARTY_MAX : 2)) entries.push(this.makeBot());
+    const known = entries.filter((p) => !p.bot).map((p) => this.learnedSkill(p, mode)).filter((v): v is number => v !== undefined);
+    const skill = known.length ? known.reduce((a, b) => a + b, 0) / known.length : undefined;
+    const setup = {
+      players: entries.map((p) => ({ id: p.id, bot: p.bot, skill: p.bot ? skill : undefined })),
+      leader: party?.leader ?? null,
+      seed: Math.floor(this.rng() * 0x7fffffff),
+      options: mode === 'minigames' ? (party?.minigames ?? defaultMinigamesSetup()) : undefined,
+    };
+    const start = def.world(setup);
+    const w = this.createWorld(mode, start.seed, `m:${this.nextWorldId}`, start.kind);
+    w.eng = def.create(this.engHost(w), setup);
+    const out: Outbound[] = [];
+    for (const p of entries) {
+      const s = w.eng.spawnOf(p.id);
+      this.resetBody(p, s, s.yaw, 20);
+      p.rsMoveAt = this.worldTime;
+      p.held = 0;
+      this.bwMoves.set(p.id, bwMotion(this.worldTime, p));
+      out.push(...this.enterWorld(p, w));
+    }
+    // Arena first: the client switches worlds before any engine payload.
+    for (const p of entries) {
+      if (p.bot) { w.eng.ready(p.id); continue; }
+      const s = w.eng.spawnOf(p.id);
+      out.push(this.to(p, { t: 'mArena', world: w.spec, mode, spawn: { x: s.x, y: s.y, z: s.z }, yaw: s.yaw, health: p.health }));
+    }
+    out.push(...this.drainEng(w));
+    for (const p of members) out.push(...this.partyBroadcast(p.id));
+    return orderWorldEntry(out);
+  }
+
+  /** Transform validation for the vanilla modes: the Bedwars authority, made
+   *  lenient where effects or flight legitimately break its ballistic model. */
+  private handleEngine(p: ServerPlayer, w: MatchWorld, msg: ClientMsg): Outbound[] {
+    const eng = w.eng;
+    if (!eng) return [];
+    if (msg.t === 'worldReady' && msg.world === w.spec.id) eng.ready(p.id);
+    else if (msg.t === 'mAct' && msg.world === w.spec.id && msg.a && typeof msg.a === 'object') eng.handle(p.id, msg.a);
+    else if (msg.t === 'xform') {
+      if (msg.world !== w.spec.id || this.staleMove(p, msg) || !fin(msg.x, msg.y, msg.z, msg.yaw, msg.pitch)) return [];
+      const motion = this.bwMoves.get(p.id) ?? bwMotion(this.worldTime, p);
+      this.bwMoves.set(p.id, motion);
+      const clock = this.bwClocks.get(p.id) ?? bwClock();
+      this.bwClocks.set(p.id, clock);
+      const sentAt = Math.max(motion.at, bwSentAt(clock, this.worldTime, msg.ct));
+      const b = eng.bounds(), prof = this.engProfiles.get(p.id);
+      const free = p.dead || !!prof && (prof.speed > 1.001 || prof.gravity < 1 || prof.slowFall || prof.levitation > 0 || prof.elytra || prof.boat !== undefined || prof.jump > 0 || prof.scale !== 1);
+      let valid = (eng.canMove(p.id) || p.dead) && msg.x >= b.minX - 4 && msg.x <= b.maxX + 4 && msg.z >= b.minZ - 4 && msg.z <= b.maxZ + 4 &&
+        msg.y >= b.minY - 40 && msg.y < b.maxY + 40;
+      if (valid && !p.dead) {
+        valid = this.bwBodyPathClear(w, p, msg);
+        const rise = msg.y - p.y;
+        if (!valid && rise > 0 && rise <= .601) {
+          const get = (x: number, y: number, z: number) => w.blocks.getBlock(x, y, z);
+          const raised = { x: p.x, y: msg.y, z: p.z };
+          valid = bwSupported(p, get) && bwSupported(msg, get) && this.bwBodyPathClear(w, p, raised) && this.bwBodyPathClear(w, raised, msg);
+        }
+        // Climbing, swimming and soft blocks are legitimate unsupported motion.
+        if (!valid && this.engPassable(w, msg)) valid = true;
+      }
+      if (valid) {
+        const verdict = bwAcceptMotion(motion, sentAt, p, msg, free || this.engPassable(w, msg), (x, y, z) => w.blocks.getBlock(x, y, z));
+        valid = verdict.ok;
+        if (verdict.airViolation) {
+          const fall = bwTickMotion(motion, sentAt, p, (x, y, z) => w.blocks.getBlock(x, y, z));
+          if (fall) p.y = fall.y;
+        }
+      }
+      p.yaw = msg.yaw; p.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, msg.pitch));
+      p.sneaking = msg.sneaking === true;
+      if (typeof msg.held === 'number') p.held = msg.held;
+      if (typeof msg.ct === 'number' && Number.isFinite(msg.ct)) p.ct = Math.floor(msg.ct);
+      if (Number.isFinite(msg.swing)) p.swing = Number(msg.swing) & 0xffff;
+      if (valid) {
+        p.x = msg.x; p.y = msg.y; p.z = msg.z;
+        p.rsMoveAt = this.worldTime; clock.heardAt = this.worldTime;
+      } else if (Math.hypot(msg.x - p.x, msg.y - p.y, msg.z - p.z) > 0.3) {
+        w.engOut.push(this.to(p, { t: 'teleport', x: p.x, y: p.y, z: p.z, seq: this.moved(p) }));
+      }
+      w.engOut.push(...this.relayTransform(p, w));
+    }
+    this.markFinishedIfDone(w);
+    return this.drainEng(w);
+  }
+
+  /** Is the body in a fluid, on a climbable, or inside a soft block? */
+  private engPassable(w: MatchWorld, at: { x: number; y: number; z: number }): boolean {
+    for (const dy of [0, 1]) {
+      const id = w.blocks.getBlock(Math.floor(at.x), Math.floor(at.y + dy * .9), Math.floor(at.z));
+      if (BLOCKS[id]?.fluid || isClimbOrSoft(id)) return true;
+    }
+    return false;
+  }
+
+  private tickEngines(dt: number): Outbound[] {
+    const out: Outbound[] = [];
+    for (const w of this.worlds.values()) {
+      if (!w.eng) continue;
+      for (const id of w.members) {
+        const p = this.players.get(id);
+        if (!p || p.bot || p.dead || !w.eng.canMove(id)) continue;
+        const prof = this.engProfiles.get(id);
+        if (prof && (prof.gravity < 1 || prof.slowFall || prof.levitation > 0 || prof.elytra || prof.boat !== undefined)) continue;
+        if (this.engPassable(w, p)) continue;
+        const heardAt = this.bwClocks.get(id)?.heardAt ?? -Infinity;
+        if (this.worldTime - heardAt < BW_MAX_LAG) continue;
+        const motion = this.bwMoves.get(id) ?? bwMotion(this.worldTime, p);
+        this.bwMoves.set(id, motion);
+        const fall = bwTickMotion(motion, Math.max(motion.at, this.worldTime - BW_MAX_LAG), p, (x, y, z) => w.blocks.getBlock(x, y, z));
+        if (fall) {
+          p.y = fall.y;
+          w.engOut.push(this.to(p, { t: 'teleport', x: p.x, y: p.y, z: p.z, seq: this.moved(p) }));
+          w.engOut.push(...this.relayTransform(p, w));
+        }
+      }
+      w.eng.tick(dt);
+      out.push(...this.drainEng(w));
+      this.markFinishedIfDone(w);
+    }
+    return out;
+  }
+
+  /** The party leader saves the Party Games setup for the next match. */
+  private minigamesSetup(p: ServerPlayer, raw: unknown): Outbound[] {
+    const party = this.parties.of(p.id);
+    if (!party) return [];
+    if (party.leader !== p.id) return this.partyErr(p, 'Only the party leader can change the setup.');
+    const r = (raw && typeof raw === 'object' ? raw : {}) as Partial<MinigamesSetup>;
+    const length = (MG_LENGTHS as readonly number[]).includes(Number(r.length)) ? Number(r.length) : 3;
+    const banned = Array.isArray(r.banned) ? r.banned.filter((g): g is string => typeof g === 'string').slice(0, 64) : [];
+    const pl = r.playlist && typeof r.playlist === 'object' && Array.isArray(r.playlist.games)
+      ? { name: sanitizeMgName(r.playlist.name) || 'Playlist', games: r.playlist.games.filter((g): g is string => typeof g === 'string').slice(0, MG_PLAYLIST_GAMES) }
+      : null;
+    party.minigames = { length, banned, playlist: pl && pl.games.length ? pl : null, revision: (party.minigames?.revision ?? 0) + 1 };
+    return this.partyBroadcast(p.id);
+  }
+
+  /** Party Games playlists are the player's own (kept with their account). */
+  private sanitizePlaylists(raw: unknown): MgPlaylist[] {
+    if (!Array.isArray(raw)) return [];
+    return raw.slice(0, MG_MAX_PLAYLISTS).flatMap((l): MgPlaylist[] => {
+      if (!l || typeof l !== 'object' || !Array.isArray((l as MgPlaylist).games)) return [];
+      const games = (l as MgPlaylist).games.filter((g): g is string => typeof g === 'string' && g.length <= 32).slice(0, MG_PLAYLIST_GAMES);
+      return games.length ? [{ name: sanitizeMgName((l as MgPlaylist).name) || 'Playlist', games }] : [];
+    });
+  }
+
+  private savePlaylists(p: ServerPlayer, raw: unknown): Outbound[] {
+    const lists = this.sanitizePlaylists(raw);
+    p.playlists = lists;
+    if (p.account) { this.accounts.setPlaylists(p.username, lists); this.onAccountsChanged?.(); }
+    return [this.to(p, { t: 'mgPlaylists', playlists: lists })];
+  }
+
   private launch(mode: GameMode, members: ServerPlayer[], party: boolean): Outbound[] {
+    if (isEngineMode(mode)) return this.launchEngine(mode, members, undefined, true);
     if (mode === 'bedwars') return this.launchBedwars(members);
     if (mode === 'ratseek') return this.launchRatSeek(members, 0);
     return mode === 'duels' ? this.launchDuel(members) : this.launchPg(mode, members, party);
@@ -1402,6 +1729,7 @@ export class GameServer {
       }
       return out;
     }
+    if (w.eng) return this.handleEngine(p, w, msg);
     if (w.mode === 'bedwars') return this.handleBedwars(p, w, msg);
     if (w.mode === 'ratseek') return this.handleRatSeek(p, w, msg);
     if (msg.t === 'worldReady') {
@@ -2381,6 +2709,7 @@ export class GameServer {
     out.push(...this.tickDuels());
     out.push(...this.tickPg());
     out.push(...this.tickRatSeek(dt));
+    out.push(...this.tickEngines(dt));
     for (const w of this.worlds.values()) {
       if (!w.bw) continue;
       // An unsupported body must fall even when its client stops sending
@@ -2524,7 +2853,7 @@ export class GameServer {
     const dt = this.botClock > 0 ? Math.min(.25, Math.max(0, this.worldTime - this.botClock)) : 0;
     this.botClock = this.worldTime;
     if (dt > 0) {
-      for (const w of this.worlds.values()) if (w.mode !== 'duels') out.push(...this.tickArrows(w, dt));
+      for (const w of this.worlds.values()) if (w.mode !== 'duels' && !w.eng) out.push(...this.tickArrows(w, dt));
       out.push(...this.tickPartyBots(dt, now));
     }
     for (const snap of this.pg.views(now)) {
@@ -2603,7 +2932,7 @@ export class GameServer {
   /** Duels has no passive regeneration; a medkit runs the healing cadence. */
   private tickRegen(dt: number): void {
     for (const p of this.players.values()) {
-      if (p.dead || p.worldId === null) continue;
+      if (p.dead || p.worldId === null || this.worlds.get(p.worldId)?.eng) continue;
       const boosting = p.regenBoostTimer > 0;
       if (!boosting) { p.regenTimer = 0; continue; }
       p.regenBoostTimer = Math.max(0, p.regenBoostTimer - dt);
@@ -2632,6 +2961,7 @@ export class GameServer {
 
   /** A respawn spectator is invisible to everyone else (never to themselves). */
   private hiddenInWorld(p: ServerPlayer, w: MatchWorld): boolean {
+    if (w.eng) return w.eng.hidden(p.id);
     if (w.mode === 'bedwars') return p.dead;
     if (w.mode === 'duels') return this.duels.participantFor(p.id)?.spectating === true;
     const m = this.pg.participantFor(p.id);
