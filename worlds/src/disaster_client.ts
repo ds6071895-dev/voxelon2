@@ -3,7 +3,7 @@
 // rain/acid/snow around the camera, and the results card.
 
 import * as THREE from 'three';
-import { bwButton, bwEl } from './bedwars_ui';
+import { uiButton, uiEl } from './ui/dom';
 import { formatMatchTime } from './ui/presentation';
 import { DR, disaster, type DisasterState } from './disaster_rules';
 import { registerPresenter, type ModePresenter, type VanillaClient } from './vanilla/client/vanilla_client';
@@ -135,33 +135,33 @@ class DisasterPresenter implements ModePresenter {
 
   private showResults(s: DisasterState): void {
     const r = s.result!;
-    const scrim = this.results = bwEl('div', 'w-scrim open v-results-scrim', this.c.d.app);
-    const card = bwEl('div', 'w-dialog v-results', scrim);
+    const scrim = this.results = uiEl('div', 'w-scrim open v-results-scrim', this.c.d.app);
+    const card = uiEl('div', 'w-dialog v-results', scrim);
     const me = this.c.d.myId();
     const mine = r.rows.find((x) => x.id === me);
     const name = (id: number) => r.rows.find((x) => x.id === id)?.name ?? '?';
-    bwEl('small', 'v-results-kicker', card, 'DISASTER CITY');
+    uiEl('small', 'v-results-kicker', card, 'DISASTER CITY');
     const head = r.winners.includes(me) ? (r.winners.length === 1 ? 'You survived' : 'You made it')
       : r.winners.length === 0 ? 'The city won'
         : r.winners.length === 1 ? `${name(r.winners[0])} survived` : `${r.winners.length} survivors`;
-    bwEl('h2', '', card, head);
+    uiEl('h2', '', card, head);
     if (mine) {
       const time = formatMatchTime(mine.seconds * 1000);
-      bwEl('p', 'v-results-sub', card, mine.survived
+      uiEl('p', 'v-results-sub', card, mine.survived
         ? `You lasted the full ${time} · ${mine.disasters} ${mine.disasters === 1 ? 'disaster' : 'disasters'} survived`
         : `You ${mine.cause.replace(/^was /, 'were ')} after ${time} · ${mine.disasters} ${mine.disasters === 1 ? 'disaster' : 'disasters'} survived`);
     }
-    const table = bwEl('div', 'v-results-table', card);
+    const table = uiEl('div', 'v-results-table', card);
     for (const row of r.rows) {
-      const el = bwEl('div', 'v-results-row', table);
+      const el = uiEl('div', 'v-results-row', table);
       if (row.id === me) el.classList.add('you');
-      bwEl('b', 'place', el, `#${row.place}`);
-      bwEl('span', 'name', el, row.name);
-      bwEl('small', '', el, `${row.survived ? 'Survived' : causeLabel(row.cause)} · ${formatMatchTime(row.seconds * 1000)} · ${row.disasters} survived`);
+      uiEl('b', 'place', el, `#${row.place}`);
+      uiEl('span', 'name', el, row.name);
+      uiEl('small', '', el, `${row.survived ? 'Survived' : causeLabel(row.cause)} · ${formatMatchTime(row.seconds * 1000)} · ${row.disasters} survived`);
     }
-    const actions = bwEl('div', 'v-results-actions', card);
-    bwButton(actions, 'Play again', () => this.c.d.replay('disaster'), 'w-btn primary');
-    bwButton(actions, 'Leave', () => this.c.d.leave(), 'w-btn');
+    const actions = uiEl('div', 'v-results-actions', card);
+    uiButton(actions, 'Play again', () => this.c.d.replay('disaster'), 'w-btn primary');
+    uiButton(actions, 'Leave', () => this.c.d.leave(), 'w-btn');
     this.c.d.onPanel();
   }
   panelOpen(): boolean { return !!this.results; }

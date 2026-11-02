@@ -17,8 +17,7 @@ function groups(k: Keybinds, touch: boolean): Group[] {
       ] },
       { title: 'Fighting & building', binds: [
         ['Fire / attack / break', [['FIRE'], ['HIT'], ['BREAK']], 'drag to aim'], ['Place block / use', [['PLACE'], ['USE']]],
-        ['Shoot the bow', [['SHOOT']], 'The Bridge / Bedwars'],
-        ['Shop', [['USE / SHOP']], 'Bedwars: stand near a merchant'],
+       ['Shoot the bow', [['SHOOT']], 'The Bridge'],
         ['Look around', [['drag the world']]], ['Quick use', [['tap the world']]],
         ['Aim down sights', [['AIM']], 'Duels'], ['Reload', [['R']], 'Duels'],
       ] },
@@ -37,8 +36,7 @@ function groups(k: Keybinds, touch: boolean): Group[] {
       ['Attack / break block', [['Left click']]], ['Place block / use item', [['Right click']]],
       ['Aim down sights', [['Right click']], 'hold, with the rifle (Duels)'],
       ['Reload', [[keyLabel(k.reload)]], 'Duels'],
-       ['Shoot the bow', [['Right click']], 'The Bridge: click; Bedwars: hold to draw, release to fire'],
-      ['Open shop / team chest', [['E']], 'Bedwars: stand near a merchant'],
+      ['Shoot the bow', [['Right click']], 'The Bridge: click to shoot'],
     ] },
     { title: 'Items', binds: [['Hotbar slot', [['1'], ['9'], ['scroll']]]] },
     { title: 'Screens', binds: [

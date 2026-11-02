@@ -18,8 +18,6 @@ import { createAvatarEquipment, createAvatarItemMaterial, attachAvatarEquipment,
 import { itemGeometry, itemGeometrySolid } from '../item_geometry';
 import { ITEMS } from '../items';
 import { createRatModel, createCheeseModel, createCatModel, type RatModel, type CatModel } from '../ratseek_models';
-import { createBedwarsModels, type BedwarsModels } from '../bedwars_models';
-import { bwMap, BW_BOUNDS } from '../bedwars_map';
 import { configureCaptureQuality, sizeCapture, loadCaptureChunks } from '../media/offline';
 import { warmCaptureDragon } from '../media/dragon';
 import { createTrailerCourse, trailerShotContext, trailerFrame, trailerEdits, trailerEvents, trailerDragonCue, captureSmooth as smooth, type StageFrame, type StageEdit, type StageEvent } from './staging';
@@ -86,8 +84,6 @@ const arrow = new THREE.Group();
   arrow.add(shaft, tip); arrow.visible = false; scene.add(arrow);
 }
 const dropMeshes: THREE.Mesh[] = [];
-let bedwarsModels: BedwarsModels | null = null;
-const bwTheme = bwMap(0);
 
 // ── logo, reel posters ───────────────────────────────────────────────────
 const logo = new Image();
@@ -105,7 +101,7 @@ async function loadLogo(): Promise<void> {
   URL.revokeObjectURL(logoURL);
 }
 const POSTERS = [
-  { id: 'bedwars', name: 'BEDWARS', accent: '#ff5a5f' }, { id: 'bridge', name: 'THE BRIDGE', accent: '#4da3ff' },
+  { id: 'bridge', name: 'THE BRIDGE', accent: '#4da3ff' },
   { id: 'duels', name: 'DUELS', accent: '#ffb347' }, { id: 'parkour', name: 'PARKOUR', accent: '#46d6a5' },
   { id: 'ratseek', name: 'RAT AND SEEK', accent: '#c58cff' },
 ].map(p => ({ ...p, image: new Image() }));
@@ -113,9 +109,9 @@ async function loadPosters(): Promise<void> {
   await Promise.all(POSTERS.map(async p => { p.image.src = `/cards/${p.id}.webp`; await p.image.decode(); }));
 }
 const ACCENT: Record<string, string> = {
-  bedwars: '#ff5a5f', bridge: '#4da3ff', duel: '#ffb347', parkour: '#46d6a5', manor: '#c58cff', lake: '#ffffff',
+  bridge: '#4da3ff', duel: '#ffb347', parkour: '#46d6a5', manor: '#c58cff', lake: '#ffffff',
 };
-const GAME_NAME: Record<string, string> = { bedwars: 'BEDWARS', bridge: 'THE BRIDGE', duel: 'DUELS', parkour: 'PARKOUR', manor: 'RAT AND SEEK' };
+const GAME_NAME: Record<string, string> = { bridge: 'THE BRIDGE', duel: 'DUELS', parkour: 'PARKOUR', manor: 'RAT AND SEEK' };
 
 // ── clock and state ─────────────────────────────────────────────────────
 let shotIndex = -1;
@@ -143,9 +139,9 @@ function resize(w: number, h: number): void {
 }
 resize(Number(params.get('width')) || 1920, Number(params.get('height')) || 1080);
 
-const todOf = (s: Shot): number => s.set === 'manor' ? .10 : s.set === 'lake' ? (s.action === 'logo' ? .09 : .11) : s.set === 'bedwars' ? .17 : .14;
+const todOf = (s: Shot): number => s.set === 'manor' ? .10 : s.set === 'lake' ? (s.action === 'logo' ? .09 : .11) : .14;
 const generatorFor = (set: Shot['set']): WorldGenerator =>
-  set === 'lake' ? lake : worldGenerator({ kind: set === 'duel' ? 'duel' : set === 'manor' ? 'ratseek' : set, seed: set === 'bedwars' ? 0 : seed });
+  set === 'lake' ? lake : worldGenerator({ kind: set === 'duel' ? 'duel' : set === 'manor' ? 'ratseek' : set, seed: seed });
 
 function env(): Parameters<typeof trailerFrame>[2] {
   return { generator, course, context: { anchor, firstOrder }, dragonHead: dragon.headPosition() };
@@ -174,12 +170,8 @@ async function prepare(index: number): Promise<void> {
     generator = generatorFor(s.set);
     world.setGenerator(generator);
   }
-  if (s.set === 'bedwars') {
-    if (!bedwarsModels) { bedwarsModels = createBedwarsModels(bwTheme, 4, atlas); scene.add(bedwarsModels.group); }
-    bedwarsModels.group.visible = true;
-  } else if (bedwarsModels) bedwarsModels.group.visible = false;
   if (s.set === 'lake') world.setArenaRenderBounds(null);
-  else world.setArenaRenderBounds(s.set === 'bedwars' ? BW_BOUNDS : generator.bounds, s.set === 'manor' ? .55 : .65);
+  else world.setArenaRenderBounds(generator.bounds, s.set === 'manor' ? .55 : .65);
   sky.snapTo(todOf(s));
   if (s.set === 'parkour') {
     ({ firstOrder, anchor } = trailerShotContext(s, course));
@@ -189,11 +181,10 @@ async function prepare(index: number): Promise<void> {
   edits = trailerEdits(s); events = trailerEvents(s);
   const frame = trailerFrame(s, s.duration / 2, env());
   const center = s.set === 'lake' ? new THREE.Vector3(0, 0, 0)
-    : s.set === 'bedwars' ? new THREE.Vector3(-50, 0, 3)
       : s.set === 'bridge' ? new THREE.Vector3(12, 0, 40)
         : s.set === 'duel' ? new THREE.Vector3(22, 0, 22)
           : s.set === 'manor' ? (s.action === 'rs-manor' ? new THREE.Vector3(14, 0, 28) : s.action === 'rs-rescue' ? new THREE.Vector3(22, 0, 2) : new THREE.Vector3(4, 0, 5)) : anchor;
-  const radius = s.set === 'lake' ? 8 : s.set === 'parkour' ? 7 : s.set === 'bedwars' ? 6 : s.set === 'bridge' && s.action === 'br-arena' ? 5 : 4;
+  const radius = s.set === 'lake' ? 8 : s.set === 'parkour' ? 7 : s.set === 'bridge' && s.action === 'br-arena' ? 5 : 4;
   void frame;
   await loadCaptureChunks(world, center.x, center.z, radius, 30, s.id);
   hideAll();
@@ -298,7 +289,6 @@ function drawFrame(f: StageFrame, t: number): void {
     arrow.visible = true; arrow.position.set(...ar.pos);
     arrow.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, -1), new THREE.Vector3(...ar.dir).normalize());
   }
-  if (bedwarsModels) bedwarsModels.beds[0].visible = f.bed;
 }
 
 function stepEffects(t: number, dt: number): void {
@@ -333,7 +323,6 @@ function animate(t: number, dt: number): void {
   stepEffects(t, dt);
   lastFrame = trailerFrame(s, t, env());
   drawFrame(lastFrame, t);
-  bedwarsModels?.update(s.start + t);
 }
 
 function applyCamera(s: Shot, t: number): void {
@@ -405,7 +394,7 @@ function gameTag(s: Shot, t: number): void {
   ctx.restore();
 }
 
-/** The five games as a poster wall, each column rising in on a beat. */
+/** The classic games as a poster wall, each column rising in on a beat. */
 function reel(t: number): void {
   ctx.save();
   ctx.fillStyle = '#060d18'; ctx.fillRect(0, 0, width, height);
@@ -417,9 +406,9 @@ function reel(t: number): void {
     ctx.save();
     ctx.beginPath(); ctx.rect(x + 2, 0, colW - 4, height); ctx.clip();
     ctx.globalAlpha = k;
-    const iw = p.image.naturalWidth, ih = p.image.naturalHeight, ground = p.id === 'bedwars' ? 0 : ih * .2;
+    const iw = p.image.naturalWidth, ih = p.image.naturalHeight, ground = ih * .2;
     const srcH = ih - ground, scale = height / srcH * 1.06;
-    const sw = colW / scale, focus = p.id === 'bedwars' ? .62 : .5, sx = Math.max(0, Math.min(iw - sw, iw * focus - sw / 2));
+    const sw = colW / scale, focus = .5, sx = Math.max(0, Math.min(iw - sw, iw * focus - sw / 2));
     ctx.drawImage(p.image, sx, 0, sw, srcH, x, rise, colW, srcH * scale);
     const g = ctx.createLinearGradient(0, height * .55, 0, height);
     g.addColorStop(0, '#04101800'); g.addColorStop(1, '#041018f0');
@@ -490,8 +479,8 @@ function render(t: number, clean = false, branded = false): void {
   (scene.background as THREE.Color).copy(sky.skyColor);
   (scene.fog as THREE.Fog).color.copy(sky.skyColor);
   const fog = scene.fog as THREE.Fog;
-  fog.near = s.set === 'lake' ? 62 : s.set === 'bedwars' ? 110 : 90;
-  fog.far = s.set === 'lake' ? 150 : s.set === 'bedwars' ? 230 : 185;
+  fog.near = s.set === 'lake' ? 62 : 90;
+  fog.far = s.set === 'lake' ? 150 : 185;
   shadows.update(sky.lightDir, camera.position, sky.lightHeight, sky.moonlit, 1 / 30);
   postfx.setSky(sky, camera);
   postfx.render(camera, s.start + t);

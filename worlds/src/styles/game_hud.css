@@ -1,0 +1,95 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   GAME HUD — light and small.
+   Reuses the Worlds daylight tokens (--w-*) and dialog classes (.w-dialog,
+   .w-btn, .w-scrim). Nothing here uses backdrop-filter: the match is drawn
+   behind it every frame, so panels are plain opaque paper instead of blur.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.game-hud {
+  position: absolute; inset: 0; z-index: 15; pointer-events: none;
+  color: var(--w-ink); font-family: ui-sans-serif, -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif;
+  --paper: rgba(255,255,255,.96);
+  --edge: 0 6px 18px rgba(18,32,50,.2), 0 0 0 1px rgba(18,32,50,.06);
+}
+.game-hud[hidden] { display: none; }
+
+/* Sidebar, Hypixel style: next event, one row per team, your score. */
+.game-side {
+  position: absolute; top: 50%; right: calc(10px + var(--safe-right, 0px)); transform: translateY(-58%);
+  width: 196px; padding: 10px 12px 12px; border-radius: 14px; background: var(--paper); box-shadow: var(--edge);
+  font-size: 12.5px; font-weight: 700;
+}
+.game-side-head { display: flex; align-items: baseline; justify-content: space-between; }
+.game-side-head b { font-size: 14px; font-weight: 900; letter-spacing: 1.6px; color: #c27c0e; }
+.game-side-head small { font-size: 11.5px; font-weight: 800; color: var(--w-ink-mute); font-variant-numeric: tabular-nums; }
+.game-side-next { margin: 6px 0 8px; padding: 6px 8px; border-radius: 9px; background: #f4f7fb; font-weight: 800; font-variant-numeric: tabular-nums; }
+.game-side[data-tone="warn"] .game-side-next { color: #b45309; background: #fff5e3; }
+.game-side[data-tone="danger"] .game-side-next { color: #c0262d; background: #fdecee; }
+/* Feed: a few short lines, top left. */
+.game-feed { position: absolute; top: calc(10px + var(--safe-top, 0px)); left: calc(12px + var(--safe-left, 0px)); display: grid; gap: 6px; justify-items: start; max-width: min(340px, 42vw); }
+.game-toast {
+  padding: 8px 12px; border-radius: 10px; background: var(--paper); box-shadow: var(--edge);
+  font-size: 12.5px; font-weight: 650; line-height: 1.3; border-left: 4px solid #8aa0ba;
+  animation: game-in .18s ease-out both;
+}
+.game-toast[data-tone="good"] { border-left-color: #1f9d5b; }
+.game-toast[data-tone="danger"] { border-left-color: #d4343f; }
+@keyframes game-in { from { transform: translateX(-10px); opacity: 0; } }
+
+/* One status pill. */
+.game-pill {
+  position: absolute; left: 50%; top: 17%; transform: translateX(-50%);
+  padding: 8px 16px; border-radius: 999px; background: var(--paper); box-shadow: var(--edge);
+  font-size: 14px; font-weight: 750; white-space: nowrap;
+}
+.game-pill[hidden] { display: none; }
+.game-pill[data-tone="danger"] { color: #c0262d; }
+/* The big centred headline: death and elimination. */
+.game-title {
+  position: absolute; left: 50%; top: 30%; transform: translate(-50%, -50%); display: grid; justify-items: center; gap: 6px;
+  padding: 14px 28px 16px; border-radius: 18px; background: var(--paper); box-shadow: var(--edge); text-align: center; white-space: nowrap;
+}
+.game-title[hidden] { display: none; }
+.game-title b { font-size: 30px; font-weight: 900; letter-spacing: -.4px; line-height: 1.05; }
+.game-title small { font-size: 14px; font-weight: 700; color: var(--w-ink-mute); }
+.game-title[data-tone="danger"] b { color: #c0262d; }
+.game-title[data-tone="good"] b { color: #0f7a45; }
+.game-title[data-size="big"] {
+  top: 50%; padding: 0; background: none; box-shadow: none; gap: 10px;
+  text-shadow: 0 3px 0 rgba(0,0,0,.35), 0 0 34px rgba(0,0,0,.45);
+}
+.game-title[data-size="big"] b { font-size: clamp(46px, 9vw, 112px); letter-spacing: 1px; color: #ff4a50; -webkit-text-stroke: 2px rgba(80,0,8,.55); paint-order: stroke fill; }
+.game-title[data-size="big"] small { font-size: clamp(18px, 2.6vw, 30px); color: #fff; }
+.game-title.pop { animation: game-title-pop .32s cubic-bezier(.2,.9,.3,1.25) both; }
+@keyframes game-title-pop { from { transform: translate(-50%, -50%) scale(.82); opacity: 0; } }
+
+/* Party setup controls shared by the remaining engine modes. */
+.game-formats { display: flex; gap: 6px; padding: 4px; border-radius: 14px; background: rgba(18,32,50,.06); }
+.game-format { flex: 1; min-height: 38px; border: 0; border-radius: 11px; cursor: pointer; background: transparent; font-family: inherit; font-size: 13px; font-weight: 800; color: var(--w-ink-mute); }
+.game-format[aria-checked="true"] { background: #fff; color: var(--w-ink); box-shadow: 0 2px 8px rgba(18,32,50,.14); }
+.game-format:disabled { cursor: default; }
+.game-fill { display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 650; color: var(--w-ink-soft); }
+.game-fill[hidden] { display: none; }
+.game-setup-foot { display: flex; gap: 8px; justify-content: flex-end; }
+.game-setup-foot .w-btn { min-height: 44px; padding: 10px 18px; }
+
+/* Touch: the sidebar shrinks to a chip under the pause button (beside it in
+   landscape) and opens on tap; the action buttons own the right edge. */
+.touch-ui .game-side {
+  top: calc(64px + var(--safe-top, 0px)); right: max(12px, var(--safe-right, 0px)); transform: none;
+  width: auto; min-width: 0; padding: 6px 8px; border-radius: 12px; font-size: 11px; pointer-events: auto; cursor: pointer;
+}
+.touch-ui .game-side:not(.open) .game-side-head b { display: none; }
+.touch-ui .game-side:not(.open) .game-side-head { justify-content: flex-end; }
+.touch-ui .game-side:not(.open) .game-side-next { margin: 4px 0; padding: 4px 6px; font-size: 10.5px; }
+.touch-ui .game-side.open { width: 196px; max-height: calc(100dvh - 140px); overflow-y: auto; }
+.touch-ui .game-feed { max-width: min(300px, calc(100vw - 240px)); }
+@media (orientation: landscape) {
+  .touch-ui .game-side { top: max(8px, var(--safe-top, 0px)); right: calc(max(12px, var(--safe-right, 0px)) + 60px); }
+}
+@media (max-width: 640px) {
+  .game-feed { max-width: 40vw; }
+  .game-side { width: 150px; font-size: 11px; padding: 8px; }
+}
+body.reduced-motion .game-toast, body.reduced-motion .game-title, body.photosensitivity-safe .game-toast { animation: none; }
+@media (prefers-reduced-motion: reduce) { .game-toast { animation: none; } }

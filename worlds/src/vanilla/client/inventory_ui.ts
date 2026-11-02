@@ -9,7 +9,7 @@
 // the Drop slot. (Q stays sprint.) Touch: tap picks/places; Split, Move and
 // Drop buttons act on the next tapped slot.
 
-import { bwButton, bwEl } from '../../bedwars_ui';
+import { uiButton, uiEl } from '../../ui/dom';
 import { renderItemIcon, clearItemIcon } from '../../icons';
 import { ITEMS } from '../../items';
 import { click, refreshCrafting, emptyInventory, type InvState, type Win } from '../inventory_model';
@@ -83,7 +83,7 @@ export class InventoryUI {
     this.hideDom();
     this.open = true;
     this.d.onOpenChange(true);
-    const scrim = this.scrim = bwEl('div', 'w-scrim open v-inv-scrim', this.d.app);
+    const scrim = this.scrim = uiEl('div', 'w-scrim open v-inv-scrim', this.d.app);
     scrim.addEventListener('mousedown', (e) => {
       if (e.target !== scrim) return;
       // Clicking outside the card drops what you hold.
@@ -91,72 +91,72 @@ export class InventoryUI {
       else this.requestClose();
     });
     scrim.addEventListener('contextmenu', (e) => e.preventDefault());
-    const card = this.card = bwEl('div', 'w-dialog v-inv', scrim);
+    const card = this.card = uiEl('div', 'w-dialog v-inv', scrim);
     card.dataset.kind = kind;
-    const head = bwEl('div', 'v-inv-head', card);
-    bwEl('b', '', head, kind === 'inventory' ? 'Inventory' : kind === 'crafting' ? 'Crafting' : kind === 'furnace' ? 'Furnace' : kind === 'smoker' ? 'Smoker' : kind === 'barrel' ? 'Barrel' : 'Chest');
-    bwButton(head, 'Done', () => this.requestClose(), 'w-btn v-inv-done');
+    const head = uiEl('div', 'v-inv-head', card);
+    uiEl('b', '', head, kind === 'inventory' ? 'Inventory' : kind === 'crafting' ? 'Crafting' : kind === 'furnace' ? 'Furnace' : kind === 'smoker' ? 'Smoker' : kind === 'barrel' ? 'Barrel' : 'Chest');
+    uiButton(head, 'Done', () => this.requestClose(), 'w-btn v-inv-done');
     this.slotEls = [];
-    const top = bwEl('div', 'v-inv-top', card);
+    const top = uiEl('div', 'v-inv-top', card);
     const n = this.win ? this.win.slots.length : 0;
     if (kind === 'inventory') {
-      const armor = bwEl('div', 'v-inv-armor', top);
+      const armor = uiEl('div', 'v-inv-armor', top);
       for (let i = 0; i < 4; i++) this.slot(armor, 36 + i, ['head', 'chest', 'legs', 'feet'][i]);
       this.slot(armor, 40, 'offhand');
-      const craft = bwEl('div', 'v-inv-craft', top);
-      bwEl('small', 'v-inv-label', craft, 'Crafting');
-      const grid = bwEl('div', 'v-grid v-grid-2', craft);
+      const craft = uiEl('div', 'v-inv-craft', top);
+      uiEl('small', 'v-inv-label', craft, 'Crafting');
+      const grid = uiEl('div', 'v-grid v-grid-2', craft);
       for (let i = 0; i < 4; i++) this.slot(grid, 41 + i);
-      bwEl('i', 'v-arrow', craft, '→');
+      uiEl('i', 'v-arrow', craft, '→');
       this.slot(craft, 45, 'result');
     } else if (kind === 'crafting') {
-      const craft = bwEl('div', 'v-inv-craft', top);
-      const grid = bwEl('div', 'v-grid v-grid-3', craft);
+      const craft = uiEl('div', 'v-inv-craft', top);
+      const grid = uiEl('div', 'v-grid v-grid-3', craft);
       for (let i = 0; i < 9; i++) this.slot(grid, i);
-      bwEl('i', 'v-arrow', craft, '→');
+      uiEl('i', 'v-arrow', craft, '→');
       this.slot(craft, 9, 'result');
     } else if (kind === 'furnace' || kind === 'smoker') {
-      const f = bwEl('div', 'v-furnace', top);
-      const col = bwEl('div', 'v-furnace-col', f);
+      const f = uiEl('div', 'v-furnace', top);
+      const col = uiEl('div', 'v-furnace-col', f);
       this.slot(col, 0, 'input');
-      this.flame = bwEl('div', 'v-flame', col);
+      this.flame = uiEl('div', 'v-flame', col);
       this.slot(col, 1, 'fuel');
-      const arrow = bwEl('div', 'v-cook', f);
-      this.progress = bwEl('div', 'v-cook-fill', arrow);
+      const arrow = uiEl('div', 'v-cook', f);
+      this.progress = uiEl('div', 'v-cook-fill', arrow);
       this.slot(f, 2, 'result');
     } else {
-      const grid = bwEl('div', 'v-grid v-grid-9', top);
+      const grid = uiEl('div', 'v-grid v-grid-9', top);
       for (let i = 0; i < n; i++) this.slot(grid, i);
     }
-    bwEl('small', 'v-inv-label', card, 'Inventory');
-    const main = bwEl('div', 'v-grid v-grid-9', card);
+    uiEl('small', 'v-inv-label', card, 'Inventory');
+    const main = uiEl('div', 'v-grid v-grid-9', card);
     const base = kind === 'inventory' ? 0 : n;
     for (let i = 9; i < 36; i++) this.slot(main, kind === 'inventory' ? i : base + (i - 9));
-    const bar = bwEl('div', 'v-grid v-grid-9 v-hotbar', card);
+    const bar = uiEl('div', 'v-grid v-grid-9 v-hotbar', card);
     for (let i = 0; i < 9; i++) this.slot(bar, kind === 'inventory' ? i : base + 27 + i);
-    const tools = bwEl('div', 'v-inv-tools', card);
-    const drop = bwEl('div', 'v-drop', tools, 'Drop');
+    const tools = uiEl('div', 'v-inv-tools', card);
+    const drop = uiEl('div', 'v-drop', tools, 'Drop');
     drop.addEventListener('mousedown', (e) => { e.preventDefault(); if (this.inv.cursor) this.act(-999, e.button === 2 ? 1 : 0, 'drop'); });
     if (document.documentElement.classList.contains('touch-ui')) {
       for (const [label, mode] of [['Split', 'split'], ['Move', 'quick'], ['Drop', 'drop']] as const) {
-        bwButton(tools, label, () => { this.touchMode = this.touchMode === mode ? null : mode; this.render(); }, 'w-btn v-touch-mode');
+        uiButton(tools, label, () => { this.touchMode = this.touchMode === mode ? null : mode; this.render(); }, 'w-btn v-touch-mode');
       }
-    } else bwEl('small', 'v-inv-hint', tools, 'Shift-click moves · Right-click splits · 1-9 / F swap · click outside to drop');
-    this.cursorEl = bwEl('div', 'v-cursor', this.d.app);
+    } else uiEl('small', 'v-inv-hint', tools, 'Shift-click moves · Right-click splits · 1-9 / F swap · click outside to drop');
+    this.cursorEl = uiEl('div', 'v-cursor', this.d.app);
     this.cursorEl.appendChild(document.createElement('canvas'));
-    bwEl('span', '', this.cursorEl);
-    this.tip = bwEl('div', 'v-tip', this.d.app);
+    uiEl('span', '', this.cursorEl);
+    this.tip = uiEl('div', 'v-tip', this.d.app);
     this.tip.hidden = true;
     this.render();
   }
 
   private slot(parent: HTMLElement, index: number, role?: string): void {
-    const el = bwEl('div', 'v-slot', parent);
+    const el = uiEl('div', 'v-slot', parent);
     if (role) el.dataset.role = role;
     const canvas = document.createElement('canvas'); canvas.width = canvas.height = 32;
     el.appendChild(canvas);
-    const count = bwEl('span', 'v-count', el);
-    const dur = bwEl('i', 'v-dur', el);
+    const count = uiEl('span', 'v-count', el);
+    const dur = uiEl('i', 'v-dur', el);
     el.addEventListener('mousedown', (e) => {
       e.preventDefault(); e.stopPropagation();
       const button = e.button === 2 ? 1 : 0;
@@ -228,14 +228,14 @@ export class InventoryUI {
     if (!st) { this.tip.hidden = true; return; }
     this.tip.hidden = false;
     this.tip.replaceChildren();
-    bwEl('b', st.ench?.length ? 'ench' : '', this.tip, st.name ?? itemName(st.id) ?? ITEMS[st.id]?.name ?? 'Item');
-    for (const [e, l] of st.ench ?? []) bwEl('span', 'line ench', this.tip, `${ENCH_LABEL[e] ?? e} ${ROMAN[l] ?? l}`);
-    for (const [e, amp, t] of st.potion?.effects ?? []) bwEl('span', 'line', this.tip, `${EFFECT_LABEL[e as keyof typeof EFFECT_LABEL] ?? e}${amp ? ` ${ROMAN[amp + 1]}` : ''}${t > 1 ? ` (${Math.floor(t / 1200)}:${String(Math.floor(t / 20) % 60).padStart(2, '0')})` : ''}`);
+    uiEl('b', st.ench?.length ? 'ench' : '', this.tip, st.name ?? itemName(st.id) ?? ITEMS[st.id]?.name ?? 'Item');
+    for (const [e, l] of st.ench ?? []) uiEl('span', 'line ench', this.tip, `${ENCH_LABEL[e] ?? e} ${ROMAN[l] ?? l}`);
+    for (const [e, amp, t] of st.potion?.effects ?? []) uiEl('span', 'line', this.tip, `${EFFECT_LABEL[e as keyof typeof EFFECT_LABEL] ?? e}${amp ? ` ${ROMAN[amp + 1]}` : ''}${t > 1 ? ` (${Math.floor(t / 1200)}:${String(Math.floor(t / 20) % 60).padStart(2, '0')})` : ''}`);
     const d = VITEM[st.id];
-    if (d?.attack) bwEl('span', 'line stat', this.tip, `${d.attack.damage} Attack Damage · ${d.attack.speed} Attack Speed`);
-    if (d?.armor && d.armor.points) bwEl('span', 'line stat', this.tip, `+${d.armor.points} Armor${d.armor.toughness ? ` · +${d.armor.toughness} Toughness` : ''}`);
-    if (d?.food) bwEl('span', 'line stat', this.tip, `Restores ${d.food.nutrition / 2} hunger`);
-    if (d?.durability) bwEl('span', 'line mute', this.tip, `Durability ${d.durability - (st.dmg ?? 0)} / ${d.durability}`);
+    if (d?.attack) uiEl('span', 'line stat', this.tip, `${d.attack.damage} Attack Damage · ${d.attack.speed} Attack Speed`);
+    if (d?.armor && d.armor.points) uiEl('span', 'line stat', this.tip, `+${d.armor.points} Armor${d.armor.toughness ? ` · +${d.armor.toughness} Toughness` : ''}`);
+    if (d?.food) uiEl('span', 'line stat', this.tip, `Restores ${d.food.nutrition / 2} hunger`);
+    if (d?.durability) uiEl('span', 'line mute', this.tip, `Durability ${d.durability - (st.dmg ?? 0)} / ${d.durability}`);
   }
 
   requestClose(): void {

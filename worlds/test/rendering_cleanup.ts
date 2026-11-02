@@ -18,7 +18,7 @@ import { createRatModel } from '../src/ratseek_models';
 import { glowOf } from '../src/model_primitives';
 import { WORLDS_ART } from '../src/tile_art';
 import { MANOR_ART } from '../src/tile_art_manor';
-import { BEDWARS_ART } from '../src/tile_art_bedwars';
+import { EQUIPMENT_ART } from '../src/tile_art_equipment';
 import { ATLAS_TILES, CELL_PX, tileOrigin, type Atlas } from '../src/textures';
 import { World } from '../src/world';
 import type { WorldGenerator } from '../src/multiverse';
@@ -106,7 +106,7 @@ function fakeAtlas(pixel = 255, uvOffset = 0): Atlas {
 }
 
 function atlasTests(): void {
-  const cells = [...Object.keys(WORLDS_ART), ...Object.keys(MANOR_ART), ...Object.keys(BEDWARS_ART)];
+  const cells = [...Object.keys(WORLDS_ART), ...Object.keys(MANOR_ART), ...Object.keys(EQUIPMENT_ART)];
   assert.equal(new Set(cells).size, cells.length, 'painter registries have disjoint atlas cells');
   for (const tile of [Tile.TeamWoolC, Tile.TeamWoolD]) {
     assert.ok(tile < Tile.ManorRug0 || tile >= Tile.ManorRug0 + MANOR_RUGS.length);

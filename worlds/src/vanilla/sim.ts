@@ -7,7 +7,7 @@
 
 import { BLOCKS, Block, collisionBoxes } from '../blocks';
 import type { ModeHost, Edit } from '../net/mode_engine';
-import { bwSupported } from '../bedwars_movement';
+import { isSupported } from '../movement_authority';
 import { VB, VMETA, isFluid, lavaAt, waterAt, withState } from './blocks';
 import { VITEM, VI, maxStackOf, type UseKind } from './items';
 import { cloneStack, enchLevel, type VStack } from './stack';
@@ -1358,7 +1358,7 @@ export class Sim {
     const inWater = isFluid(feet, 'water') || isFluid(head, 'water');
     const inLava = isFluid(feet, 'lava') || isFluid(get(Math.floor(b.x), Math.floor(b.y + .9), Math.floor(b.z)), 'lava');
     const soft = VMETA[feet]?.move;
-    const supported = bwSupported(b, get);
+    const supported = isSupported(b, get);
     const wasGround = p.onGround;
     p.onGround = supported;
     if (supported && p.gliding) p.gliding = false;

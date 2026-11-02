@@ -2,13 +2,13 @@
    WORLDS — the front door.
    Daylight, like the valley gliding behind it. The wordmark and the account
    chips share one top row; games sit on the left as picture tiles rendered from
-   the games themselves (Bedwars as the wide hero), and your character stands
+   the games themselves, and your character stands
    on a little floating island on the right, out in the open world rather than
    in a box.
 
      ┌ WORLDS ──────────────────────────────── [Settings] [Party] [You] ┐
      │ CHOOSE A WORLD                                                   │
-     │ ┌──────────── Bedwars hero ──────────────┐        name           │
+     │ ┌──────────── Featured games ──────────────┐        name           │
      │ ├ Duels ┬ Bridge ┬ Parkour ┬ Rat and Seek ┤      (you, 3D)        │
      │ └───────┴────────┴─────────┴──────────────┘   [Wardrobe] [Capes]  │
      │ Controls                                                         │
@@ -128,14 +128,13 @@
 /* ── Game tiles ──────────────────────────────────────────────────────── */
 /* Every tile is a still of the game itself, rendered in-engine from its real
    map (src/cardart, `npm run cards` → public/cards/), full-bleed, with the
-   name and a Play pill in the game's colour over a dark fade. Bedwars is the
-   wide hero across the top, its words on the left. */
-.w-cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+   name and a Play pill in the game's colour over a dark fade. */
+.w-cards { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 12px; }
 .w-card {
   --tone: #e3a12a;
   --tone-ink: color-mix(in srgb, var(--tone) 78%, #0b1626);
   position: relative; isolation: isolate; display: flex; flex-direction: column; justify-content: flex-end;
-  min-width: 0; height: clamp(184px, 28vh, 258px); padding: 0; overflow: hidden;
+  grid-column: span 3; min-width: 0; height: clamp(184px, 28vh, 258px); padding: 0; overflow: hidden;
   border: 0; border-radius: 18px; cursor: pointer; text-align: left;
   color: #fff; background: #20324a;
   box-shadow: 0 14px 30px rgba(18,32,50,.24), 0 0 0 1px rgba(18,32,50,.1);
@@ -172,10 +171,6 @@
   font-size: clamp(16px, 1.4vw, 20px); font-weight: 850; letter-spacing: -.25px; line-height: 1.15;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 2px 12px rgba(0,0,0,.4);
 }
-.w-card-sub {
-  font-size: 12px; font-weight: 600; line-height: 1.3; color: rgba(255,255,255,.8);
-  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-}
 .w-card-go {
   align-self: flex-start; display: inline-flex; align-items: center; gap: 6px; margin: 11px 15px 15px; padding: 7px 13px 7px 14px;
   border-radius: 999px; font-size: 11.5px; font-weight: 850; letter-spacing: .6px; text-transform: uppercase; white-space: nowrap;
@@ -190,14 +185,12 @@
   font-size: 10px; font-weight: 900; letter-spacing: 1.4px; text-transform: uppercase;
   color: #fff; background: var(--tone); box-shadow: 0 4px 12px rgba(0,0,0,.25);
 }
-/* The big row: Bedwars and the three vanilla games, four across, taller,
+/* The big row: the three vanilla games, taller,
    with larger titles. The small row keeps the four classic modes. */
 .w-card[hidden] { display: none; }
-.w-card.big { height: clamp(210px, 33vh, 310px); }
+.w-card.big { grid-column: span 4; height: clamp(210px, 33vh, 310px); }
 .w-card.big .w-card-title { font-size: clamp(20px, 1.9vw, 28px); letter-spacing: -.5px; }
-.w-card.big .w-card-sub { font-size: 13px; color: rgba(255,255,255,.86); }
 .w-card.big .w-card-go { margin: 13px 15px 17px; padding: 9px 16px 9px 17px; font-size: 12px; }
-.w-card[data-mode="bedwars"] .w-card-art img { object-position: 72% 50%; }
 .w-card[data-mode="pillars"] .w-card-art img { object-position: 50% 40%; }
 .w-card[data-mode="disaster"] .w-card-art img { object-position: 50% 45%; }
 .w-card[data-mode="minigames"] .w-card-art img { object-position: 50% 45%; }
@@ -414,8 +407,8 @@
 /* ── Mid widths: the four small tiles go two by two. ─────────────────── */
 @media (max-width: 1180px) {
   .w-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .w-card, .w-card.big { grid-column: auto; }
   .w-card { height: clamp(150px, 22vh, 210px); }
-  .w-card:not(.big) .w-card-sub { -webkit-line-clamp: 1; }
   /* Wider crops need the action higher, above the caption and Play pill. */
   .w-card[data-mode="bridge"] .w-card-art img { object-position: 62% 55%; }
   .w-card[data-mode="ratseek"] .w-card-art img { object-position: 40% 72%; }
@@ -428,7 +421,6 @@
   .w-cards { gap: 10px; }
   .w-card { height: clamp(140px, 24vh, 190px); }
   .w-card.big { height: clamp(170px, 29vh, 230px); }
-  .w-card:not(.big) .w-card-sub { display: none; }
   .w-card-go { margin-top: 8px; margin-bottom: 12px; }
   .w-stage-box { height: clamp(260px, 56vh, 440px); }
 }
@@ -453,8 +445,6 @@
   .w-card { height: 150px; border-radius: 15px; }
   .w-card.big { height: 176px; }
   .w-card-body { padding: 0 11px; }
-  .w-card-sub { display: none; }
-  .w-card.big .w-card-sub { display: block; }
   .w-card:not(.big) .w-card-go { align-self: stretch; justify-content: center; margin: 8px 10px 10px; }
   .w-card-go svg { display: none; }
 }
@@ -471,7 +461,6 @@
   .w-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .w-card { height: 104px; border-radius: 14px; }
   .w-card.big { height: 124px; }
-  .w-card-sub, .w-card.big .w-card-sub { display: none; }
   .w-card-go { margin: 6px 10px 10px; }
   .w-card-go svg { display: none; }
   .w-right-actions .w-btn { min-height: 44px; padding: 10px 14px; }

@@ -10,7 +10,7 @@ html.touch-ui, .touch-ui body { touch-action:auto; }
 .touch-ui #status { width:202px; bottom:calc(76px + var(--safe-bottom)); transform:translateX(-50%); }
 .touch-ui #energybar { bottom:-10px; height:10px; }
 .touch-ui #ammo { bottom:28px; font-size:14px; }
-.touch-ui .item-name { bottom:calc(114px + var(--safe-bottom)) !important; max-width:50vw; text-align:center; font-size:12px !important; }
+.touch-ui .item-name { max-width:50vw; text-align:center; font-size:12px !important; }
 .touch-ui .duel-match-hud { top:calc(8px + var(--safe-top)); width:calc(100% - 132px); gap:4px; }
 .touch-ui .duel-clock { padding:6px 10px; }
 .touch-ui .duel-pill { padding:4px 7px; }

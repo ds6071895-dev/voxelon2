@@ -111,6 +111,10 @@
     body.reduced-motion .slot { transition: none; }
 
     /* Survival HUD */
+    .item-name {
+      bottom: calc(var(--hotbar-slot) + var(--item-name-clearance, 54px) + var(--safe-bottom));
+      max-width: min(70vw, 600px); text-align: center; overflow-wrap: anywhere;
+    }
     #status {
       position: absolute; bottom: calc(var(--hotbar-slot) + 24px + var(--safe-bottom)); left: 50%;
       transform: translateX(-50%);

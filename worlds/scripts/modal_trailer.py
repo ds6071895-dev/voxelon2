@@ -59,7 +59,7 @@ def produce(run: str, proof: bool = False):
         source = Path(f"/media/{run}/part-4")
         command("ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-pattern_type", "glob", "-i", str(source / "screenshots/*.png"), "-vf", "scale=480:270,tile=4x4", "-frames:v", "1", str(source / "review.png"))
         volume.commit()
-        return {"run": run, "proof": True, "files": [str(p.relative_to('/media')) for p in [source / 'review.png', source / 'screenshots/09-duels-gunfight.png', source / 'screenshots/05-bedwars-breaking-the-bed.png', source / 'screenshots/18-release-end-card.png']]}
+        return {"run": run, "proof": True, "files": [str(p.relative_to('/media')) for p in [source / 'review.png', source / 'screenshots/09-duels-gunfight.png', source / 'screenshots/08-the-bridge-portal.png', source / 'screenshots/18-release-end-card.png']]}
 
     calls = [render_partition.spawn(run, p) for p in range(5)]
     for call in calls:

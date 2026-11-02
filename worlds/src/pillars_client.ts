@@ -2,7 +2,7 @@
 // and kills), the world border's glowing wall, and the results card.
 
 import * as THREE from 'three';
-import { bwButton, bwEl } from './bedwars_ui';
+import { uiButton, uiEl } from './ui/dom';
 import { formatMatchTime } from './ui/presentation';
 import { LP, lpTwist, type PillarsState } from './pillars_rules';
 import { registerPresenter, type ModePresenter, type VanillaClient } from './vanilla/client/vanilla_client';
@@ -70,24 +70,24 @@ class PillarsPresenter implements ModePresenter {
 
   private showResults(s: PillarsState): void {
     const r = s.result!;
-    const scrim = this.results = bwEl('div', 'w-scrim open v-results-scrim', this.c.d.app);
-    const card = bwEl('div', 'w-dialog v-results', scrim);
+    const scrim = this.results = uiEl('div', 'w-scrim open v-results-scrim', this.c.d.app);
+    const card = uiEl('div', 'w-dialog v-results', scrim);
     const me = this.c.d.myId();
     const mine = r.rows.find((x) => x.id === me);
-    bwEl('small', 'v-results-kicker', card, 'LUCKY PILLARS');
-    bwEl('h2', '', card, r.winner === me ? 'You win!' : r.winner === null ? 'Nobody won' : `${r.rows.find((x) => x.id === r.winner)?.name ?? '?'} wins`);
-    if (mine) bwEl('p', 'v-results-sub', card, `You placed #${mine.place} · ${mine.kills} ${mine.kills === 1 ? 'kill' : 'kills'} · ${mine.items} items${mine.legendaries ? ` · ${mine.legendaries} legendary` : ''}`);
-    const table = bwEl('div', 'v-results-table', card);
+    uiEl('small', 'v-results-kicker', card, 'LUCKY PILLARS');
+    uiEl('h2', '', card, r.winner === me ? 'You win!' : r.winner === null ? 'Nobody won' : `${r.rows.find((x) => x.id === r.winner)?.name ?? '?'} wins`);
+    if (mine) uiEl('p', 'v-results-sub', card, `You placed #${mine.place} · ${mine.kills} ${mine.kills === 1 ? 'kill' : 'kills'} · ${mine.items} items${mine.legendaries ? ` · ${mine.legendaries} legendary` : ''}`);
+    const table = uiEl('div', 'v-results-table', card);
     for (const row of r.rows) {
-      const el = bwEl('div', 'v-results-row', table);
+      const el = uiEl('div', 'v-results-row', table);
       if (row.id === me) el.classList.add('you');
-      bwEl('b', 'place', el, `#${row.place}`);
-      bwEl('span', 'name', el, row.name);
-      bwEl('small', '', el, `${row.kills} K · ${row.items} items${row.legendaries ? ` · ${row.legendaries}★` : ''}`);
+      uiEl('b', 'place', el, `#${row.place}`);
+      uiEl('span', 'name', el, row.name);
+      uiEl('small', '', el, `${row.kills} K · ${row.items} items${row.legendaries ? ` · ${row.legendaries}★` : ''}`);
     }
-    const actions = bwEl('div', 'v-results-actions', card);
-    bwButton(actions, 'Play again', () => this.c.d.replay('pillars'), 'w-btn primary');
-    bwButton(actions, 'Leave', () => this.c.d.leave(), 'w-btn');
+    const actions = uiEl('div', 'v-results-actions', card);
+    uiButton(actions, 'Play again', () => this.c.d.replay('pillars'), 'w-btn primary');
+    uiButton(actions, 'Leave', () => this.c.d.leave(), 'w-btn');
     this.c.d.onPanel();
   }
   panelOpen(): boolean { return !!this.results; }

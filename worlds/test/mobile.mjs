@@ -1,8 +1,7 @@
 // Real touch events against the dev client and local game server.
 // PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs CHROMIUM_PATH=/path/to/chrome node test/mobile.mjs
 import { artifactDirectory, browserSession, observeErrors, selection } from '../scripts/browser_session.mjs';
-import { mobileBedwars } from './mobile_bedwars.mjs';
-const modes = selection('MODES', process.env.MODES ?? 'duels,bridge,parkour,ratseek,bedwars', ['duels', 'bridge', 'parkour', 'ratseek', 'bedwars']);
+const modes = selection('MODES', process.env.MODES ?? 'duels,bridge,parkour,ratseek', ['duels', 'bridge', 'parkour', 'ratseek']);
 if (typeof WebSocket !== 'function') throw new Error('Mobile tests require Node 22+ with global WebSocket');
 const artifacts = await artifactDirectory('mobile');
 const session = await browserSession();
@@ -32,11 +31,8 @@ try {
     await page.waitForFunction(() => window.__worlds?.net.connected);
     // A stationary peer keeps combat bots from resetting the loadout halfway
     // through a touch gesture while slow software-rendered screenshots run.
-    const matchPeers = [];
-    for (let i = 0; i < (mode === 'bedwars' ? 3 : 1); i++) {
     const peer = new WebSocket(process.env.WS_URL ?? 'ws://localhost:8090');
     peers.push(peer);
-    matchPeers.push(peer);
     await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error(`${mode}: socket peer did not welcome within 30 seconds`)), 30000);
       peer.addEventListener('open', () => peer.send(JSON.stringify({ t: 'hello' })));
@@ -44,16 +40,15 @@ try {
       peer.addEventListener('message', e => {
         const m = JSON.parse(e.data);
         if (m.t === 'welcome') { clearTimeout(timeout); resolve(); }
-        if (['duelArena', 'pgArena', 'rsArena', 'bwArena'].includes(m.t))
+        if (['duelArena', 'pgArena', 'rsArena'].includes(m.t))
           peer.send(JSON.stringify({ t: 'worldReady', world: m.world.id, revision: m.revision }));
       });
     });
     peer.send(JSON.stringify({ t: 'play', mode }));
-    }
     if (mode === modes[0]) {
       // Title on a phone held sideways: the game tiles start above the fold.
       await page.setViewportSize({ width: 844, height: 390 });
-      const fold = await page.evaluate(() => document.querySelector('.w-card[data-mode="bedwars"]').getBoundingClientRect().top);
+      const fold = await page.evaluate(() => document.querySelector('.w-card[data-mode="minigames"]').getBoundingClientRect().top);
       check('landscape phone title shows the game tiles above the fold', fold < 390 * 0.6, `first tile at ${fold}px`);
       await page.screenshot({ path: `${artifacts}/title-844.png` });
       await page.setViewportSize({ width: 390, height: 844 });
@@ -74,7 +69,7 @@ try {
           overlap: buttons.flatMap((a, i) => buttons.slice(i + 1).filter(b => a.r.x < b.r.right && a.r.right > b.r.x && a.r.y < b.r.bottom && a.r.bottom > b.r.y).map(b => `${a.label}/${b.label}`)),
           covered: buttons.filter(({r}) => r.x < hotbar.right && r.right > hotbar.x && r.y < hotbar.bottom && r.bottom > hotbar.y),
           // Mode HUD panels must never sit over an on-screen control.
-          hud: [...document.querySelectorAll('.bw-side, .rs-sidebar, .pg-standings, .duel-killfeed, .rs-top, .pg-progress, .duel-match-hud')]
+          hud: [...document.querySelectorAll('.game-side, .rs-sidebar, .pg-standings, .duel-killfeed, .rs-top, .pg-progress, .duel-match-hud')]
             .filter(n => n.getClientRects().length && getComputedStyle(n).visibility !== 'hidden')
             .flatMap(n => { const h = n.getBoundingClientRect(); return h.width && h.height ? buttons
               .filter(({ r }) => r.x < h.right && r.right > h.x && r.y < h.bottom && r.bottom > h.y)
@@ -123,14 +118,11 @@ try {
       await page.waitForFunction(() => window.__sent.some(m => m.t === 'rsUse') || document.querySelector('.rs-picker.open'));
       check('rat items can be used by touch', true);
     }
-    if (mode === 'bedwars') await mobileBedwars(page, matchPeers, check, artifacts);
-    else {
     await page.locator('.t-pause').tap();
     await page.waitForFunction(() => document.querySelector('.t-pads').hidden);
     check('pause hides gameplay controls and clears inputs', await page.evaluate(() => { const i = window.__worlds.input; return !i.leftDown && !i.rightDown && !i.jump && !i.forward; }));
-    }
     await context.close();
-    for (const peer of matchPeers) peer.close();
+    peer.close();
   }
   console.log('▸ isolated touch input regressions');
   const fixture = await browser.newContext({ viewport: { width: 320, height: 568 }, hasTouch: true, isMobile: true });

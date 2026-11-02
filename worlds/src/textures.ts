@@ -6,11 +6,11 @@ import { Tile } from './blocks';
 import { mulberry32, hash2 } from './noise';
 import { WORLDS_ART } from './tile_art';
 import { MANOR_ART } from './tile_art_manor';
-import { BEDWARS_ART } from './tile_art_bedwars';
+import { EQUIPMENT_ART } from './tile_art_equipment';
 import { VANILLA_ART } from './tile_art_vanilla';
 
 export const TILE_PX = 16;
-// 32x32 grid (1024 cells, a 1024px power-of-two canvas): Bedwars equipment
+// 32x32 grid (1024 cells, a 1024px power-of-two canvas): equipment
 // follows the manor tiles at cell 400; vanilla tiles start at 448.
 // All tile addressing goes through tileOrigin / uvRect.
 export const ATLAS_TILES = 32;
@@ -245,11 +245,11 @@ export function createAtlas(seed = 1337, maxAnisotropy = 1): Atlas {
 
   const painted: number[] = [];
   const cutout = new Set<number>();
-  for (const tile of new Set([...Object.keys(PAINTERS), ...Object.keys(WORLDS_ART), ...Object.keys(MANOR_ART), ...Object.keys(BEDWARS_ART), ...Object.keys(VANILLA_ART)].map(Number))) {
+  for (const tile of new Set([...Object.keys(PAINTERS), ...Object.keys(WORLDS_ART), ...Object.keys(MANOR_ART), ...Object.keys(EQUIPMENT_ART), ...Object.keys(VANILLA_ART)].map(Number))) {
     const p = new Painter();
     // Worlds' redesigned tiles are painted in their final colours; only the
     // inherited VOXELON art still goes through the vibrance pass.
-    const redesigned = WORLDS_ART[tile as Tile] ?? MANOR_ART[tile as Tile] ?? BEDWARS_ART[tile as Tile] ?? VANILLA_ART[tile];
+    const redesigned = WORLDS_ART[tile as Tile] ?? MANOR_ART[tile as Tile] ?? EQUIPMENT_ART[tile as Tile] ?? VANILLA_ART[tile];
     if (redesigned) redesigned(p, seed ^ (tile * 7919));
     else { PAINTERS[tile](p, seed ^ (tile * 7919)); vibrance(p); }
     for (let i = 3; i < p.data.length; i += 4) if (p.data[i] < 255) { cutout.add(tile); break; }

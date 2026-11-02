@@ -3,7 +3,7 @@
 // sidebar (game n of N, time, status, standings), the results card between
 // games, and the podium's awards with Play again. Sky time follows each arena.
 
-import { bwButton, bwEl } from './bedwars_ui';
+import { uiButton, uiEl } from './ui/dom';
 import * as THREE from 'three';
 import { formatMatchTime } from './ui/presentation';
 import { MG, MG_CATEGORIES, mgGame } from './minigames_rules';
@@ -100,31 +100,31 @@ class MinigamesPresenter implements ModePresenter {
     this.brief?.remove(); this.brief = null;
     const g = s.game ? mgGame(s.game) : null;
     if (!this.briefKey || !g) return;
-    const el = this.brief = bwEl('div', 'mg-brief', this.c.d.app);
-    const top = bwEl('div', 'mg-brief-top', el);
-    const chip = bwEl('span', 'mg-chip', top, MG_CATEGORIES[g.category].label);
+    const el = this.brief = uiEl('div', 'mg-brief', this.c.d.app);
+    const top = uiEl('div', 'mg-brief-top', el);
+    const chip = uiEl('span', 'mg-chip', top, MG_CATEGORIES[g.category].label);
     chip.style.background = MG_CATEGORIES[g.category].color;
-    if (s.doubled) bwEl('span', 'mg-chip gold', top, 'Double points');
-    bwEl('span', 'mg-brief-step', top, `${s.total > 1 ? `Game ${s.index + 1} of ${s.total} · ` : ''}${Math.round(g.seconds)} s`);
-    bwEl('h2', '', el, g.name);
-    const ul = bwEl('ul', '', el);
-    for (const line of g.rules) bwEl('li', '', ul, line);
+    if (s.doubled) uiEl('span', 'mg-chip gold', top, 'Double points');
+    uiEl('span', 'mg-brief-step', top, `${s.total > 1 ? `Game ${s.index + 1} of ${s.total} · ` : ''}${Math.round(g.seconds)} s`);
+    uiEl('h2', '', el, g.name);
+    const ul = uiEl('ul', '', el);
+    for (const line of g.rules) uiEl('li', '', ul, line);
   }
 
   private showBoard(s: MinigamesState): void {
     const b = s.board;
     if (!b) { this.board?.remove(); this.board = null; return; }
-    const el = this.board ??= bwEl('div', 'mg-board', this.c.d.app);
+    const el = this.board ??= uiEl('div', 'mg-board', this.c.d.app);
     el.replaceChildren();
-    bwEl('small', '', el, b.sub ?? '');
-    bwEl('b', '', el, b.title);
+    uiEl('small', '', el, b.sub ?? '');
+    uiEl('b', '', el, b.title);
     if (b.options) {
-      const opts = bwEl('div', 'mg-board-opts', el);
+      const opts = uiEl('div', 'mg-board-opts', el);
       for (const o of b.options) {
         const cls = o.right === undefined ? 'mg-opt' : o.right ? 'mg-opt right' : 'mg-opt wrong';
-        const row = bwEl('span', cls, opts);
-        const tag = bwEl('em', '', row, o.label); tag.style.background = o.color;
-        bwEl('span', '', row, o.text);
+        const row = uiEl('span', cls, opts);
+        const tag = uiEl('em', '', row, o.label); tag.style.background = o.color;
+        uiEl('span', '', row, o.text);
       }
     }
   }
@@ -135,23 +135,23 @@ class MinigamesPresenter implements ModePresenter {
     if (!this.resultsKey || !r) return;
     const g = mgGame(r.game);
     const me = this.c.d.myId();
-    const scrim = this.results = bwEl('div', 'w-scrim open mg-results-scrim', this.c.d.app);
-    const card = bwEl('div', 'w-dialog mg-results', scrim);
-    bwEl('small', 'v-results-kicker', card, `${g?.name ?? 'Results'}${s.doubled ? ' · double points' : ''}`.toUpperCase());
+    const scrim = this.results = uiEl('div', 'w-scrim open mg-results-scrim', this.c.d.app);
+    const card = uiEl('div', 'w-dialog mg-results', scrim);
+    uiEl('small', 'v-results-kicker', card, `${g?.name ?? 'Results'}${s.doubled ? ' · double points' : ''}`.toUpperCase());
     const winners = r.rows.filter((row) => row.place === 1);
-    bwEl('h2', '', card, winners.some((w) => w.id === me) ? (winners.length > 1 ? 'You tied for the win' : 'You won') : `${winners.map((w) => w.name).join(' & ')} won`);
-    const table = bwEl('div', 'v-results-table', card);
+    uiEl('h2', '', card, winners.some((w) => w.id === me) ? (winners.length > 1 ? 'You tied for the win' : 'You won') : `${winners.map((w) => w.name).join(' & ')} won`);
+    const table = uiEl('div', 'v-results-table', card);
     for (const row of r.rows) {
-      const el = bwEl('div', 'v-results-row', table);
+      const el = uiEl('div', 'v-results-row', table);
       if (row.id === me) el.classList.add('you');
-      bwEl('b', 'place', el, ordinal(row.place));
-      bwEl('span', 'name', el, row.name);
-      bwEl('small', '', el, row.detail);
-      bwEl('span', 'mg-earned', el, `+${row.earned}`);
+      uiEl('b', 'place', el, ordinal(row.place));
+      uiEl('span', 'name', el, row.name);
+      uiEl('small', '', el, row.detail);
+      uiEl('span', 'mg-earned', el, `+${row.earned}`);
     }
     if (s.total > 1) {
-      const st = bwEl('div', 'mg-standings', card);
-      for (const p of s.standings) bwEl('span', '', st, `${p.name} ${p.points}`);
+      const st = uiEl('div', 'mg-standings', card);
+      for (const p of s.standings) uiEl('span', '', st, `${p.name} ${p.points}`);
     }
   }
 
@@ -159,33 +159,33 @@ class MinigamesPresenter implements ModePresenter {
     const pod = s.podium;
     if (!pod) return;
     const me = this.c.d.myId();
-    const scrim = this.final = bwEl('div', 'w-scrim open v-results-scrim', this.c.d.app);
-    const card = bwEl('div', 'w-dialog v-results', scrim);
-    bwEl('small', 'v-results-kicker', card, 'PARTY GAMES');
+    const scrim = this.final = uiEl('div', 'w-scrim open v-results-scrim', this.c.d.app);
+    const card = uiEl('div', 'w-dialog v-results', scrim);
+    uiEl('small', 'v-results-kicker', card, 'PARTY GAMES');
     const champ = pod.order[0];
-    bwEl('h2', '', card, champ?.id === me ? 'You are the Party Champion' : `${champ?.name ?? '?'} is the Party Champion`);
+    uiEl('h2', '', card, champ?.id === me ? 'You are the Party Champion' : `${champ?.name ?? '?'} is the Party Champion`);
     const mine = pod.order.findIndex((p) => p.id === me);
-    if (mine >= 0) bwEl('p', 'v-results-sub', card, `You finished ${ordinal(mine + 1)} with ${pod.order[mine].points} points and ${pod.order[mine].wins} ${pod.order[mine].wins === 1 ? 'win' : 'wins'}.`);
-    const table = bwEl('div', 'v-results-table', card);
+    if (mine >= 0) uiEl('p', 'v-results-sub', card, `You finished ${ordinal(mine + 1)} with ${pod.order[mine].points} points and ${pod.order[mine].wins} ${pod.order[mine].wins === 1 ? 'win' : 'wins'}.`);
+    const table = uiEl('div', 'v-results-table', card);
     pod.order.forEach((p, i) => {
-      const el = bwEl('div', 'v-results-row', table);
+      const el = uiEl('div', 'v-results-row', table);
       if (p.id === me) el.classList.add('you');
-      bwEl('b', 'place', el, `#${i + 1}`);
-      bwEl('span', 'name', el, p.name);
-      bwEl('small', '', el, `${p.points} pts · ${p.wins} ${p.wins === 1 ? 'win' : 'wins'}`);
+      uiEl('b', 'place', el, `#${i + 1}`);
+      uiEl('span', 'name', el, p.name);
+      uiEl('small', '', el, `${p.points} pts · ${p.wins} ${p.wins === 1 ? 'win' : 'wins'}`);
     });
     if (pod.awards.length) {
-      const aw = bwEl('div', 'mg-awards', card);
+      const aw = uiEl('div', 'mg-awards', card);
       for (const a of pod.awards) {
-        const row = bwEl('div', 'mg-award', aw);
-        bwEl('b', '', row, a.title);
-        bwEl('span', '', row, a.detail ? `${a.name} · ${a.detail}` : a.name);
+        const row = uiEl('div', 'mg-award', aw);
+        uiEl('b', '', row, a.title);
+        uiEl('span', '', row, a.detail ? `${a.name} · ${a.detail}` : a.name);
       }
     }
-    const actions = bwEl('div', 'v-results-actions', card);
-    bwButton(actions, 'Play again', () => this.c.d.replay('minigames'), 'w-btn primary');
-    if (s.host === me && openHostSheet) bwButton(actions, 'Setup', () => openHostSheet?.(), 'w-btn');
-    bwButton(actions, 'Leave', () => this.c.d.leave(), 'w-btn');
+    const actions = uiEl('div', 'v-results-actions', card);
+    uiButton(actions, 'Play again', () => this.c.d.replay('minigames'), 'w-btn primary');
+    if (s.host === me && openHostSheet) uiButton(actions, 'Setup', () => openHostSheet?.(), 'w-btn');
+    uiButton(actions, 'Leave', () => this.c.d.leave(), 'w-btn');
     this.c.d.onPanel();
   }
   panelOpen(): boolean { return !!this.final; }

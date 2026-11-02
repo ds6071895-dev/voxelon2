@@ -2,9 +2,9 @@
 
 > **Historical migration proposal.** The original sections below preserve the
 > initial three-game design and its survey of VOXELON; they are not the current
-> implementation specification. Worlds now has five games (Bedwars, Duels, The
-> Bridge, Parkour/Dragon Chase, Rat and Seek), a ten-second practice-opponent
-> wait, four-island public Bedwars and two/three/four-team private setup. See
+> implementation specification. Worlds now has seven games (Duels, The Bridge, Parkour/Dragon Chase, Rat and
+> Seek, Lucky Pillars, Disaster City and Party Games), with a ten-second
+> practice-opponent wait. See
 > `README.md` for current runtime, tooling, tests and deployment, and
 > `scripts/TRAILER.md` for current capture commands. Historical tuning and
 > marketing statements below remain as provenance.

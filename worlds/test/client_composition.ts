@@ -27,10 +27,10 @@ export function runClientCompositionTests(): number {
   });
   test(() => {
     let ready = 0, venueCalls = 0, callback: (() => void) | null = null, complete = false;
-    const gate = new WorldReadiness({ update: () => { throw new Error('Bedwars must stream the venue'); },
+    const gate = new WorldReadiness({ update: () => { throw new Error('Engine modes must stream the venue'); },
       updateVenue: budget => { venueCalls += budget; return complete; }, isLoaded: () => true,
     }, () => ready++, () => {}, { setInterval: fn => { callback = fn; return 1; }, clearInterval: () => { callback = null; } });
-    gate.enter('bw', { x: 0, y: 97, z: 0 }, 0); gate.update(4.01);
+    gate.enter('mg', { x: 0, y: 97, z: 0 }, 0); gate.update(4.01);
     assert.equal(gate.pendingTeleport, null, 'physics fallback releases a stuck teleport');
     assert.equal(ready, 0, 'timeout is not a ready acknowledgement'); assert.notEqual(callback, null);
     complete = true; callback!(); assert.equal(ready, 1); assert.equal(venueCalls, 50);

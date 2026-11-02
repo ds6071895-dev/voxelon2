@@ -72,7 +72,7 @@ export function runMediaCleanupTests(): void {
   assert.equal(chooseCaptureCourse(['rooftops']).seed, 2026, 'card stage keeps its own required-piece policy');
   assert.throws(() => chooseCaptureCourse(['rooftops'], 2026, 2026), /No capture course/);
   assert.throws(() => chooseCaptureCourse(['rooftops'], 2026, 3026, 0), /Invalid/);
-  assert.equal(SHOTS.length, 19); assert.equal(DURATION, 80);
+  assert.equal(SHOTS.length, 14); assert.equal(DURATION, 60);
   assert.equal(SHOTS.reduce((duration, s) => duration + s.duration, 0), DURATION);
   assert.ok(SHOTS.every((s, i) => i === 0 ? s.start === 0 : Math.abs(s.start - (SHOTS[i - 1].start + SHOTS[i - 1].duration)) < 1e-9), 'shots are contiguous');
   assert.ok(SHOTS.every(s => s.cues.every(([t]) => t >= 0 && t <= s.duration)), 'every sound cue lands inside its shot');
@@ -85,7 +85,7 @@ export function runMediaCleanupTests(): void {
   assert.ok(trailerFrame(shot, 1, { ...dragonEnv, dragonHead: head }).camera.target.x > framed.x, 'dragon framing follows the live flight model');
 
   // Nobody is held in a hand the shot does not mention: items are real item ids.
-  for (const s of SHOTS) for (const f of [0, .5, 1].map(k => trailerFrame(s, s.duration * k, { ...dragonEnv, dragonHead: head, context: trailerShotContext(s, course), generator: worldGenerator({ kind: s.set === 'duel' ? 'duel' : s.set === 'manor' ? 'ratseek' : s.set === 'lake' ? 'duel' : s.set, seed: s.set === 'bedwars' ? 0 : seed }) }))) {
+  for (const s of SHOTS) for (const f of [0, .5, 1].map(k => trailerFrame(s, s.duration * k, { ...dragonEnv, dragonHead: head, context: trailerShotContext(s, course), generator: worldGenerator({ kind: s.set === 'duel' ? 'duel' : s.set === 'manor' ? 'ratseek' : s.set === 'lake' ? 'duel' : s.set, seed: seed }) }))) {
     assert.ok(f.camera.position.toArray().every(Number.isFinite) && f.camera.target.toArray().every(Number.isFinite), `${s.id} camera is finite`);
     assert.ok(f.actors.every(a => a.pos.every(Number.isFinite) && Number.isFinite(a.yaw)), `${s.id} actors are finite`);
   }

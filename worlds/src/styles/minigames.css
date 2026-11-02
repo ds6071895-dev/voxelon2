@@ -47,7 +47,7 @@
 .mg-final { color: #b8730c; font-size: 10.5px; font-weight: 800; }
 .mg-tools { display: flex; gap: 6px; flex-wrap: wrap; }
 .mg-name { font-family: var(--w-font); letter-spacing: 0; }
-.mg-setup .bw-setup-foot { flex-wrap: wrap; }
+.mg-setup .game-setup-foot { flex-wrap: wrap; }
 
 /* ── In match ──────────────────────────────────────────────────────────── */
 

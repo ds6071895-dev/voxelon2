@@ -102,7 +102,7 @@ export class HUD {
     this.nameEl = document.createElement('div');
     this.nameEl.className = 'item-name mc-font hud-themed';
     this.nameEl.style.cssText =
-      'position:absolute;bottom:70px;left:50%;transform:translateX(-50%);' +
+      'position:absolute;left:50%;transform:translateX(-50%);' +
       'font-size:calc(16px * var(--hud-scale));z-index:10;pointer-events:none;' +
       'transition:opacity 0.5s;opacity:0;';
     document.getElementById('app')!.appendChild(this.nameEl);

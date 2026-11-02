@@ -26,7 +26,7 @@ export function checkTrailerLocations(): TrailerLocationReport {
   const dragon = new DragonView(new THREE.Scene(), particles);
   const view = new THREE.PerspectiveCamera(58, 16 / 9, .08, 2000);
   for (const s of SHOTS) {
-    const base = s.set === 'lake' ? lake : worldGenerator({ kind: s.set === 'manor' ? 'ratseek' : s.set, seed: s.set === 'bedwars' ? 0 : seed });
+    const base = s.set === 'lake' ? lake : worldGenerator({ kind: s.set === 'manor' ? 'ratseek' : s.set, seed: seed });
     // Blocks placed during the shot are part of the scene at the moment they appear.
     const edits = trailerEdits(s);
     let clock = 0;

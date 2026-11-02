@@ -2,12 +2,12 @@
 // packets cannot create distance or a second jump. Positions remain client-
 // predicted, with a generous ballistic ceiling for network/frame jitter.
 import { collisionBoxes } from './blocks';
-import type { BwPos } from './bedwars_rules';
+export interface MotionPosition { x: number; y: number; z: number }
 
-export interface BwMotion {
+export interface MotionState {
   at: number; horizontal: number; upward: number; vertical: number;
   airAt: number | null; launchY: number; launchV: number;
-  extraSpeed: number; impulseUntil: number; safe: BwPos;
+  extraSpeed: number; impulseUntil: number; safe: MotionPosition;
   sampleAt: number; descending: boolean;
 }
 // Half a second of sprinting in credit, so a gap left by dropped packets is
@@ -21,33 +21,33 @@ type BlockAt = (x: number, y: number, z: number) => number;
 
 /** How far behind the server clock a packet may be judged, and how long a
  * client may go quiet before the server starts its fall for it. */
-export const BW_MAX_LAG = 1;
+export const MOTION_MAX_LAG = 1;
 const CLOCK_DRIFT = .02;
 /** Maps a client's `ct` onto the server clock: the fastest delivery seen sets
  * the offset, so a packet held up by a Wi-Fi stall is judged at the moment it
  * was sent, not at its late arrival (a jump's arc checked against the arrival
- * time looks like flight). Never earlier than BW_MAX_LAG ago, never later than
+ * time looks like flight). Never earlier than MOTION_MAX_LAG ago, never later than
  * now; a clock that jumps re-syncs to arrival time. */
-export interface BwClock {
+export interface MotionClock {
   offset: number | null; sampledAt: number;
   /** Last ACCEPTED transform: a stream of refused poses is silence too. */
   heardAt: number;
 }
-export function bwClock(): BwClock { return { offset: null, sampledAt: -Infinity, heardAt: -Infinity }; }
-export function bwSentAt(c: BwClock, now: number, ctMs: unknown): number {
+export function motionClock(): MotionClock { return { offset: null, sampledAt: -Infinity, heardAt: -Infinity }; }
+export function motionSentAt(c: MotionClock, now: number, ctMs: unknown): number {
   const quiet = Math.max(0, now - c.sampledAt);
   c.sampledAt = now;
   if (typeof ctMs !== 'number' || !Number.isFinite(ctMs)) return now;
   const sample = now - ctMs / 1000;
-  if (c.offset === null || sample > c.offset + quiet * CLOCK_DRIFT + BW_MAX_LAG) c.offset = sample;
+  if (c.offset === null || sample > c.offset + quiet * CLOCK_DRIFT + MOTION_MAX_LAG) c.offset = sample;
   else c.offset = Math.min(sample, c.offset + quiet * CLOCK_DRIFT);
-  return Math.max(now - BW_MAX_LAG, Math.min(now, ctMs / 1000 + c.offset));
+  return Math.max(now - MOTION_MAX_LAG, Math.min(now, ctMs / 1000 + c.offset));
 }
-export function bwMotion(at: number, p: BwPos): BwMotion {
+export function motionState(at: number, p: MotionPosition): MotionState {
   return { at, horizontal: HORIZONTAL_CAP, upward: 1.4, vertical: 4.5,
     airAt: null, launchY: p.y, launchV: 10, extraSpeed: 0, impulseUntil: 0, safe: { ...p }, sampleAt: at, descending: false };
 }
-export function bwSupported(p: BwPos, blockAt: BlockAt): boolean {
+export function isSupported(p: MotionPosition, blockAt: BlockAt): boolean {
   const r = SUPPORT_R;
   for (let x = Math.floor(p.x - r); x <= Math.floor(p.x + r); x++)
     for (let z = Math.floor(p.z - r); z <= Math.floor(p.z + r); z++)
@@ -59,7 +59,7 @@ export function bwSupported(p: BwPos, blockAt: BlockAt): boolean {
   return false;
 }
 /** Highest actual collision-box top crossed by a downward feet sweep. */
-function landingY(p: BwPos, bottom: number, top: number, blockAt: BlockAt): number | null {
+function landingY(p: MotionPosition, bottom: number, top: number, blockAt: BlockAt): number | null {
   let highest = -Infinity;
   const r = SUPPORT_R;
   for (let x = Math.floor(p.x - r); x <= Math.floor(p.x + r); x++)
@@ -73,7 +73,7 @@ function landingY(p: BwPos, bottom: number, top: number, blockAt: BlockAt): numb
         }
   return highest === -Infinity ? null : highest;
 }
-function grounded(m: BwMotion, p: BwPos): void {
+function grounded(m: MotionState, p: MotionPosition): void {
   m.airAt = null; m.launchY = p.y; m.launchV = 10; m.safe = { x: p.x, y: p.y, z: p.z }; m.descending = false;
 }
 function ballisticHeight(v: number, time: number): number {
@@ -82,7 +82,7 @@ function ballisticHeight(v: number, time: number): number {
 }
 /** Max over the WHOLE jitter interval: its later endpoint on ascent, its
  * earlier endpoint on descent, or the apex when the interval straddles it. */
-function ceiling(m: BwMotion, now: number): number {
+function ceiling(m: MotionState, now: number): number {
   const elapsed = Math.max(0, now - m.airAt!), low = Math.max(0, elapsed - JITTER), high = elapsed + JITTER;
   const peakAt = Math.max(low, Math.min(high, m.launchV / GRAVITY));
   return m.launchY + Math.min(m.launchV * m.launchV / (2 * GRAVITY) + .65, ballisticHeight(m.launchV, peakAt) + .8);
@@ -91,7 +91,7 @@ function ceiling(m: BwMotion, now: number): number {
  * Only infer that contact after descent, close to real geometry, with a new
  * ascent reachable by a normal jump in the intervening sample/jitter window.
  * This never rearms flight over void or for a stationary hovering sample. */
-function interveningLanding(m: BwMotion, now: number, from: BwPos, to: BwPos, blockAt: BlockAt): { at: number; y: number } | null {
+function interveningLanding(m: MotionState, now: number, from: MotionPosition, to: MotionPosition, blockAt: BlockAt): { at: number; y: number } | null {
   if (!m.descending || m.airAt === null || now - m.airAt < .25 || to.y <= from.y + .005 || now <= m.sampleAt) return null;
   const gap = Math.min(.2, now - m.sampleAt);
   for (const ratio of [0, .5, 1]) {
@@ -107,15 +107,15 @@ function interveningLanding(m: BwMotion, now: number, from: BwPos, to: BwPos, bl
   }
   return null;
 }
-export function bwAuthorizeImpulse(m: BwMotion, now: number, p: BwPos, x: number, y: number, z: number): void {
+export function authorizeImpulse(m: MotionState, now: number, p: MotionPosition, x: number, y: number, z: number): void {
   m.extraSpeed = Math.min(24, m.extraSpeed + Math.hypot(x, z)); m.impulseUntil = now + 1.1;
   m.airAt = now; m.launchY = p.y; m.launchV = Math.min(25, Math.max(10, m.launchV + Math.max(0, y)));
   m.descending = false;
 }
 /** Credit accrues with server time, and accepted displacement spends it.
- * `airViolation` rejects the pose; bwTickMotion enforces a downward fall at the
+ * `airViolation` rejects the pose; tickMotion enforces a downward fall at the
  * current location. It must never teleport the player back to safe ground. */
-export function bwAcceptMotion(m: BwMotion, now: number, from: BwPos, to: BwPos,
+export function acceptMotion(m: MotionState, now: number, from: MotionPosition, to: MotionPosition,
   spectator: boolean, blockAt: (x: number, y: number, z: number) => number): { ok: boolean; airViolation: boolean } {
   const dt = Math.max(0, Math.min(.5, now - m.at));
   m.at = Math.max(m.at, now);
@@ -127,7 +127,7 @@ export function bwAcceptMotion(m: BwMotion, now: number, from: BwPos, to: BwPos,
   const horizontal = Math.hypot(to.x - from.x, to.z - from.z), dy = to.y - from.y;
   if (horizontal > m.horizontal + 1e-6 || Math.max(0, dy) > m.upward + 1e-6 || Math.abs(dy) > m.vertical + 1e-6)
     return { ok: false, airViolation: false };
-  const supported = !spectator && bwSupported(to, blockAt);
+  const supported = !spectator && isSupported(to, blockAt);
   let airAt = m.airAt, launchY = m.launchY, launchV = m.launchV;
   if (!spectator && !supported) {
     if (airAt === null) { airAt = now - Math.min(dt, .05); launchY = from.y; }
@@ -149,8 +149,8 @@ export function bwAcceptMotion(m: BwMotion, now: number, from: BwPos, to: BwPos,
 /** Run on server ticks, including when no transform arrives. This only lowers
  * an unsupported body exceeding its allowed trajectory, sweeping for real
  * landing surfaces. Credits/launch time are not reset by a correction. */
-export function bwTickMotion(m: BwMotion, now: number, p: BwPos, blockAt: BlockAt): BwPos | null {
-  if (bwSupported(p, blockAt)) { grounded(m, p); return null; }
+export function tickMotion(m: MotionState, now: number, p: MotionPosition, blockAt: BlockAt): MotionPosition | null {
+  if (isSupported(p, blockAt)) { grounded(m, p); return null; }
   if (m.airAt === null) { m.airAt = now; m.launchY = p.y; }
   const y = ceiling(m, now);
   if (p.y <= y + .001) return null;

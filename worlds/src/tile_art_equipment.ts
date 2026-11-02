@@ -1,4 +1,4 @@
-// Pixel-art equipment and resources for Bedwars.
+// Pixel-art equipment and resources for the game modes.
 //
 // House rules for these 16px sprites: every material gets a four-step ramp with
 // the light from the top left, a one-pixel specular, and an outline that is a
@@ -168,7 +168,7 @@ const gem = (m: Ramp, hexagon: boolean): Paint => sprite(g => {
   g.put(5, 5, m[3]); g.put(4, 6, m[3]);
 });
 
-export const BEDWARS_ART: Partial<Record<Tile, Paint>> = {
+export const EQUIPMENT_ART: Partial<Record<Tile, Paint>> = {
   [Tile.WoodSword]: sword(WOOD, ramp4(0x4a2e18, 0x6b4426, 0x8d6137, 0xb3854f)),
   [Tile.StoneSword]: sword(STONE, WOOD),
   [Tile.IronSword]: sword(IRON, STONE),
@@ -177,7 +177,7 @@ export const BEDWARS_ART: Partial<Record<Tile, Paint>> = {
   [Tile.IronPickaxe]: pickaxe(IRON),
   [Tile.WoodAxe]: axe(PLANK),
   [Tile.Shears]: shears,
-  [Tile.BedwarsTNT]: tnt,
+  [Tile.ArenaTNT]: tnt,
   [Tile.TeleportPearl]: pearl,
   [Tile.HealingApple]: apple,
   [Tile.ChainArmor]: armor(ramp4(0x4d5864, 0x7a8896, 0xa4b2bf, 0xdce6ee), true),

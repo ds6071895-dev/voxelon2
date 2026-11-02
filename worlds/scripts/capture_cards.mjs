@@ -1,17 +1,17 @@
 // Renders the title screen's game-card art (src/cardart) into public/cards/.
 // Requires Playwright/Chromium; they may live outside the project.
 //   PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs CHROMIUM_PATH=/path/to/chrome npm run cards
-// Options: --only=bedwars,duels  (default: every card)
+// Options: --only=minigames,duels  (default: every card)
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { root, browserSession, observeErrors, assertBrowserErrors, selection } from './browser_session.mjs';
 
 const args = process.argv.slice(2);
-if (args.some(a => !/^--(only|output)=.+$/.test(a)) || new Set(args.map(a => a.split('=')[0])).size !== args.length) throw new Error('Options: --only=bedwars,duels --output=<directory>');
+if (args.some(a => !/^--(only|output)=.+$/.test(a)) || new Set(args.map(a => a.split('=')[0])).size !== args.length) throw new Error('Options: --only=minigames,duels --output=<directory>');
 const out = path.resolve(root, args.find(a => a.startsWith('--output='))?.slice(9) ?? 'public/cards');
-/** [width, height, below]: Bedwars is the wide hero tile; the rest are 4:5
+/** [width, height, below]: Cards are portrait images with
  *  portraits whose bottom fifth is extra ground under the title. */
-const SIZE = { bedwars: [1800, 720, 0], duels: [800, 1000, 200], bridge: [800, 1000, 200], parkour: [800, 1000, 200], ratseek: [800, 1000, 200], pillars: [900, 1000, 150], disaster: [900, 1000, 150], minigames: [900, 1000, 150] };
+const SIZE = { duels: [800, 1000, 200], bridge: [800, 1000, 200], parkour: [800, 1000, 200], ratseek: [800, 1000, 200], pillars: [900, 1000, 150], disaster: [900, 1000, 150], minigames: [900, 1000, 150] };
 const onlyArg = args.find(a => a.startsWith('--only='));
 const only = onlyArg ? selection('only', onlyArg.slice(7), Object.keys(SIZE)) : Object.keys(SIZE);
 

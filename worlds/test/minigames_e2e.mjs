@@ -62,7 +62,7 @@ try {
   await page.evaluate(() => document.querySelector('.w-card[data-mode="minigames"]').click());
   await page.locator('.mg-card').waitFor({ state: 'visible' });
   assert.equal(await page.locator('.mg-game').count(), 24, 'all shipped games to toggle');
-  await page.locator('.bw-format', { hasText: /^5$/ }).click();
+  await page.locator('.game-format', { hasText: /^5$/ }).click();
   await page.waitForFunction(() => window.__latest.party.party.minigames?.length === 5).catch(async (e) => {
     await shot('00-fail');
     console.log(await page.evaluate(() => JSON.stringify({ party: window.__latest.party, err: window.__latest.partyErr, html: document.querySelector('.mg-card')?.outerHTML.slice(0, 1500) })));
@@ -73,7 +73,7 @@ try {
   await shot('01-setup');
 
   // Playlists → New → editor: Brain Rush then Whack-a-Mole, Save & play.
-  await page.locator('.bw-setup-foot .w-btn', { hasText: 'Playlists' }).click();
+  await page.locator('.game-setup-foot .w-btn', { hasText: 'Playlists' }).click();
   await page.locator('.w-btn', { hasText: 'New playlist' }).click();
   await page.locator('.mg-name').fill('Quick pair');
   await page.locator('.mg-games .mg-game', { hasText: 'Brain Rush' }).click();

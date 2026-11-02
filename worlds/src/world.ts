@@ -981,7 +981,7 @@ export class World {
 
   /** Small, disconnected arenas need every island before play: a spawn-only
    * bubble can otherwise show distant furniture before its supporting terrain.
-   * Used by Bedwars' loading barrier, with the same per-call work budget. */
+   * Used by the engine modes' loading barrier, with the same per-call work budget. */
   updateVenue(budgetMs: number): boolean {
     const start = performance.now(), b = this.gen.bounds;
     for (let cx = Math.floor(b.minX / CHUNK_X); cx <= Math.floor((b.maxX - 1) / CHUNK_X); cx++) {

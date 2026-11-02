@@ -1,7 +1,7 @@
 // Fixed id ranges. Items and blocks share one number space (a block item's id
 // is its block id, items.ts `blockItem`), so every range is disjoint.
 //
-//   0..255       legacy Worlds blocks (Bedwars, Parkour, Rat and Seek, title)
+//   0..255       legacy Worlds blocks (Parkour, Rat and Seek, title)
 //   119..347     legacy pure items (sparse; they sit in gaps of the block ids)
 //   1024..4095   vanilla block states (block items use their family's default)
 //   8192..12287  vanilla pure items

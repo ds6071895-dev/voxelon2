@@ -1,4 +1,4 @@
-// Worlds Awaken: an original 40-bar score at 120 BPM, A minor -> D minor -> C major.
+// Worlds Awaken: an original 30-bar score at 120 BPM, A minor -> D minor -> C major.
 // Dependency-free subtractive synthesis (band-limited saws, resonant filters,
 // FM bells, synthesized drums), sidechain ducking and a stereo reverb. No
 // recordings, samples or stock music. The sound effects are cued from
@@ -230,7 +230,7 @@ function boom(at, amp = .8, length = 2.4) {
 const bar = n => n * BAR;
 // Section map (bars). Each = [name, firstBar, lastBarExclusive].
 const S = {
-  intro: [0, 2], bedwars: [2, 12], bridge: [12, 18], duels: [18, 23], parkour: [23, 29], rats: [29, 35], reel: [35, 37], logo: [37, 40],
+  intro: [0, 2], bridge: [2, 8], duels: [8, 13], parkour: [13, 19], rats: [19, 25], reel: [25, 27], logo: [27, 30],
 };
 const inSection = b => Object.entries(S).find(([, [a, z]]) => b >= a && b < z)?.[0];
 // Chords as MIDI (root, third, fifth, seventh/extension), voiced mid-register.
@@ -240,7 +240,7 @@ const CH = {
 };
 const ROOT = { Am: 33, F: 29, C: 36, G: 31, Dm: 38, Bb: 34, Em: 28, Gsus: 31 };
 const progression = {
-  bedwars: ['Am', 'F', 'C', 'G'], bridge: ['Am', 'F', 'C', 'G'], duels: ['Am', 'Am', 'F', 'G', 'Am'],
+  bridge: ['Am', 'F', 'C', 'G'], duels: ['Am', 'Am', 'F', 'G', 'Am'],
   parkour: ['Dm', 'Bb', 'F', 'C', 'Dm', 'Bb'], rats: ['C', 'Am', 'F', 'G', 'C', 'Am'], reel: ['F', 'G'], logo: ['C', 'C', 'C'],
 };
 const barChord = b => {
@@ -326,18 +326,10 @@ function drumBar(b, level) {
 }
 
 // ── main loop: per-bar layers by section ────────────────────────────────
-for (let b = 2; b < 40; b++) {
+for (let b = 2; b < 30; b++) {
   const section = inSection(b), [first, end] = S[section], k = b - first, name = barChord(b);
   const last = b === end - 1, firstBar = b === first;
-  if (section === 'bedwars') {
-    const build = smooth(k / 4); // opens up over the first four bars
-    padChord(b, name, { amp: .05 + .02 * build, cutoff: 1300 + 1500 * build });
-    bassLine(b, name, k < 2 ? 'pulse' : 'drive');
-    if (k >= 1) arpBar(b, name, { amp: .04 + .03 * build, step: .25, pattern: [0, 1, 2, 3, 2, 1, 2, 1], bright: 3000 + 2000 * build });
-    drumBar(b, k < 2 ? 1 : 2);
-    if (k >= 2) leadBar(b, THEME[name], { amp: .085, octave: k >= 6 });
-    if (k < 2) for (const [beat, midi, len] of THEME[name]) pluck(bus.lead, midi, bar(b) + beat * BEAT, len, { amp: .07, decay: 1.8, bell: .15, pan: .1 });
-  } else if (section === 'bridge') {
+  if (section === 'bridge') {
     padChord(b, name, { amp: .065, cutoff: 2600 });
     bassLine(b, name, 'drive');
     arpBar(b, name, { amp: .06, step: .25, pattern: [0, 2, 1, 3, 2, 3, 1, 2], bright: 5000, lift: k % 2 === 1 });
@@ -401,7 +393,7 @@ for (let b = 2; b < 40; b++) {
 
 // ── the finale: a huge resolve into C major, then a long, light ring-out ──
 {
-  const at = bar(37);
+  const at = bar(27);
   boom(at, .95, 3.2); crash(at, .5, 4.5);
   kick(at, 1);
   [[48, 0], [55, 0], [60, 0], [64, 0], [67, 0], [72, 0], [76, 0]].forEach(([m], i) => {
@@ -410,11 +402,11 @@ for (let b = 2; b < 40; b++) {
   [60, 64, 67, 72, 76].forEach((m, i) => choir(bus.pad, m, at, BAR * 2.4, { amp: .08, pan: (i - 2) * .35, attack: .25, release: 2, vowel: i % 2 }));
   synth(bus.bass, 36, at, BAR * 1.5, { amp: .3, voices: 2, detune: .05, attack: .01, decay: 1, sustain: .8, release: .8, cutoff: 280, q: .3, sub: 1, busName: 'bass' });
   // Final statement of the theme, majorised, then sparkling bells fall away.
-  leadBar(37, [[0, 84, 1.5], [1.5, 79, .5], [2, 88, 2]], { amp: .1, octave: true, cutoff: 5000 });
-  leadBar(38, [[0, 91, 2], [2, 88, 1], [3, 84, 1]], { amp: .09, octave: true, cutoff: 4400 });
-  [96, 91, 88, 84, 91, 88, 84, 79, 88, 84, 79, 76].forEach((m, i) => pluck(bus.arp, m, bar(38) + BAR * .5 + i * .22, 2.5, { amp: .05 * Math.exp(-i * .09), pan: ((i * 37) % 11 - 5) / 6, decay: 3, bell: .8, bright: .6 }));
-  for (let s = 0; s < 8; s++) hat(bar(38) + s * .5 * BEAT, .05);
-  kick(bar(38), .55); clap(bar(38) + BEAT, .2);
+  leadBar(27, [[0, 84, 1.5], [1.5, 79, .5], [2, 88, 2]], { amp: .1, octave: true, cutoff: 5000 });
+  leadBar(28, [[0, 91, 2], [2, 88, 1], [3, 84, 1]], { amp: .09, octave: true, cutoff: 4400 });
+  [96, 91, 88, 84, 91, 88, 84, 79, 88, 84, 79, 76].forEach((m, i) => pluck(bus.arp, m, bar(28) + BAR * .5 + i * .22, 2.5, { amp: .05 * Math.exp(-i * .09), pan: ((i * 37) % 11 - 5) / 6, decay: 3, bell: .8, bright: .6 }));
+  for (let s = 0; s < 8; s++) hat(bar(28) + s * .5 * BEAT, .05);
+  kick(bar(28), .55); clap(bar(28) + BEAT, .2);
 }
 
 // ── sound effects, placed from the timeline cues ────────────────────────
@@ -526,9 +518,9 @@ const stems = {
 const sum = list => { const out = make(); for (const b of list) for (let c = 0; c < 2; c++) for (let i = 0; i < N; i++) out[c][i] += b[c][i]; return out; };
 const music = sum([bus.pad, bus.lead, bus.arp, bus.bass, bus.drums, bus.fx]);
 // Master dynamics: a gain curve (dB, one point per bar, interpolated) gives the
-// piece a shape: a hushed opening, a drop into Bedwars, a tense Duels, a lighter
+// piece a shape: a hushed opening, a drop into The Bridge, a tense Duels, a lighter
 // manor and a huge finale.
-const CURVE = [-14, -6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, .5, .5, .5, .5, .5, -2.5, -2.5, -2, -2, -1.5, .5, .5, .5, .5, .5, .5, -4.5, -4.5, -4.5, -4.5, -4.5, -3, 0, 1.5, 1.5, 1, -1];
+const CURVE = [-14, -6, 0, 0.5, 0.5, 0.5, 0.5, 0.5, -2.5, -2.5, -2, -2, -1.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, -4.5, -4.5, -4.5, -4.5, -4.5, -3, 0, 1.5, 1.5, 1, -1];
 const curveGain = t => {
   const x = clamp(t / BAR, 0, CURVE.length - 1.001), i = Math.floor(x), f = smooth(x - i);
   return 10 ** ((CURVE[i] * (1 - f) + CURVE[i + 1] * f) / 20);

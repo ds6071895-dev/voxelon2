@@ -1,9 +1,9 @@
-// The vanilla modes' HUD, in the same light Worlds look as Bedwars (it reuses
-// the bw-hud sidebar, feed, pill and title styles): survival bars (hearts with
+// The vanilla modes' HUD, in the light Worlds look (it uses
+// the game-hud sidebar, feed, pill and title styles): survival bars (hearts with
 // absorption, armour, hunger, air), an XP-style progress bar, effect chips, a
 // mode sidebar, the event feed, an action-bar line and big titles.
 
-import { bwEl } from '../../bedwars_ui';
+import { uiEl } from '../../ui/dom';
 import { EFFECT_COLOR, EFFECT_LABEL, type EffectId } from '../effects';
 import type { SelfView } from '../messages';
 
@@ -50,29 +50,29 @@ export class VanillaHud {
   private rowsKey = '';
   private cache = new Map<HTMLElement, string>();
 
-  constructor(app: HTMLElement) {
-    this.root = bwEl('div', 'bw-hud v-hud', app);
+  constructor(private readonly app: HTMLElement) {
+    this.root = uiEl('div', 'game-hud v-hud', app);
     this.root.hidden = true;
-    this.bars = bwEl('canvas', 'v-bars', this.root);
+    this.bars = uiEl('canvas', 'v-bars', this.root);
     this.bars.width = 444; this.bars.height = 64;
-    this.xp = bwEl('div', 'v-xp', this.root);
-    this.xpFill = bwEl('div', 'v-xp-fill', this.xp);
-    this.xpLevel = bwEl('b', 'v-xp-level', this.xp);
-    this.effects = bwEl('div', 'v-effects', this.root);
-    this.side = bwEl('aside', 'bw-side v-side', this.root);
+    this.xp = uiEl('div', 'v-xp', this.root);
+    this.xpFill = uiEl('div', 'v-xp-fill', this.xp);
+    this.xpLevel = uiEl('b', 'v-xp-level', this.xp);
+    this.effects = uiEl('div', 'v-effects', this.root);
+    this.side = uiEl('aside', 'game-side v-side', this.root);
     this.side.addEventListener('click', () => { if (document.documentElement.classList.contains('touch-ui')) this.side.classList.toggle('open'); });
-    const head = bwEl('div', 'bw-side-head', this.side);
-    this.sideTitle = bwEl('b', '', head, '');
-    this.sideClock = bwEl('small', '', head, '');
-    this.sideNext = bwEl('div', 'bw-side-next', this.side);
-    this.sideRows = bwEl('div', 'v-side-rows', this.side);
-    this.feed = bwEl('div', 'bw-feed', this.root);
+    const head = uiEl('div', 'game-side-head', this.side);
+    this.sideTitle = uiEl('b', '', head, '');
+    this.sideClock = uiEl('small', '', head, '');
+    this.sideNext = uiEl('div', 'game-side-next', this.side);
+    this.sideRows = uiEl('div', 'v-side-rows', this.side);
+    this.feed = uiEl('div', 'game-feed', this.root);
     this.feed.setAttribute('role', 'log');
-    this.pill = bwEl('div', 'bw-pill v-pill', this.root);
+    this.pill = uiEl('div', 'game-pill v-pill', this.root);
     this.pill.hidden = true;
-    this.title = bwEl('div', 'bw-title', this.root);
-    this.titleMain = bwEl('b', '', this.title);
-    this.titleSub = bwEl('small', '', this.title);
+    this.title = uiEl('div', 'game-title', this.root);
+    this.titleMain = uiEl('b', '', this.title);
+    this.titleSub = uiEl('small', '', this.title);
     this.title.hidden = true;
   }
 
@@ -105,20 +105,25 @@ export class VanillaHud {
       this.effects.replaceChildren();
       for (const e of s.effects) {
         if (e.ticks > 1e8 && e.id !== 'speed' && e.id !== 'haste') continue;
-        const chip = bwEl('div', 'v-effect', this.effects);
+        const chip = uiEl('div', 'v-effect', this.effects);
         chip.style.setProperty('--c', `#${(EFFECT_COLOR[e.id as EffectId] ?? 0x888888).toString(16).padStart(6, '0')}`);
-        bwEl('b', '', chip, `${EFFECT_LABEL[e.id as EffectId] ?? e.id}${e.amp > 0 ? ` ${['', 'II', 'III', 'IV', 'V'][e.amp] ?? e.amp + 1}` : ''}`);
-        bwEl('small', '', chip, e.ticks > 1e8 ? '∞' : `${Math.floor(e.ticks / 1200)}:${String(Math.floor(e.ticks / 20) % 60).padStart(2, '0')}`);
+        uiEl('b', '', chip, `${EFFECT_LABEL[e.id as EffectId] ?? e.id}${e.amp > 0 ? ` ${['', 'II', 'III', 'IV', 'V'][e.amp] ?? e.amp + 1}` : ''}`);
+        uiEl('small', '', chip, e.ticks > 1e8 ? '∞' : `${Math.floor(e.ticks / 1200)}:${String(Math.floor(e.ticks / 20) % 60).padStart(2, '0')}`);
       }
     }
   }
   private drawBars(s: SelfView): void {
+    const heartRows = Math.ceil(Math.ceil(s.maxHp / 2) / 10);
+    const absorptionRows = Math.ceil(Math.ceil(s.absorption / 2) / 10);
+    const rows = Math.max(2, heartRows + absorptionRows + (s.armor > 0 ? 1 : 0));
+    this.bars.height = rows * 16;
+    this.app.style.setProperty('--survival-bars-height', `${this.bars.height}px`);
     const ctx = this.bars.getContext('2d')!;
-    ctx.clearRect(0, 0, 444, 64);
+    ctx.clearRect(0, 0, this.bars.width, this.bars.height);
     const poison = s.effects.some((e) => e.id === 'poison');
     const frozen = s.freeze >= 140;
     const hearts = Math.ceil(s.maxHp / 2);
-    const rowY = (row: number) => 48 - row * 16;
+    const rowY = (row: number) => this.bars.height - 16 - row * 16;
     // Hearts: rows of 10, upward.
     for (let i = 0; i < hearts; i++) {
       const v = s.hp - i * 2;
@@ -152,10 +157,10 @@ export class VanillaHud {
     this.rowsKey = key;
     this.sideRows.replaceChildren();
     for (const r of rows) {
-      const el = bwEl('div', 'v-side-row', this.sideRows);
+      const el = uiEl('div', 'v-side-row', this.sideRows);
       if (r.tone) el.dataset.tone = r.tone;
-      bwEl('span', '', el, r.label);
-      bwEl('b', '', el, r.value);
+      uiEl('span', '', el, r.label);
+      uiEl('b', '', el, r.value);
       if (r.you) el.classList.add('you');
     }
   }
@@ -176,7 +181,7 @@ export class VanillaHud {
   }
   toast(text: string, tone = 'info'): void {
     if (!text) return;
-    const node = bwEl('div', 'bw-toast', this.feed, text);
+    const node = uiEl('div', 'game-toast', this.feed, text);
     node.dataset.tone = tone === 'death' || tone === 'danger' ? 'danger' : tone === 'legendary' || tone === 'gold' || tone === 'cheer' ? 'good' : 'info';
     this.events.push({ node, until: performance.now() + (tone === 'danger' || tone === 'death' ? 6500 : 4800) });
     while (this.events.length > 5) this.events.shift()!.node.remove();

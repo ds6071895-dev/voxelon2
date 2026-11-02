@@ -1,7 +1,7 @@
 // The generic host the vanilla engines (Lucky Pillars, Disaster City, Party
 // Games) run against. server_core owns one ModeHost per world and routes
 // `mAct` to the engine; engines never touch sockets, the queue or parties.
-// Same shape as Bedwars' BwHost and Rat and Seek's RsHost, plus fills, move
+// Same shape as Rat and Seek's RsHost, plus fills, move
 // profiles, bots joining mid-setup and world switches (Party Games rounds).
 
 import type { EngineMode, ServerMsg } from './protocol';

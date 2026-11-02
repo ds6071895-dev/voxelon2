@@ -25,10 +25,10 @@ try {
     await writeFile(`${artifacts}/${name}.png`, bytes);
   }
 
-  await ready('/cardart.html?card=bedwars&w=360&h=240');
+  await ready('/cardart.html?card=duels&w=360&h=240');
   const cards = await page.evaluate(() => window.__cards.cards);
-  assert.deepEqual(cards, ['bedwars', 'duels', 'bridge', 'parkour', 'ratseek']);
-  // One page prepares all five modes twice, including rat→person/gear rebuilds.
+  assert.deepEqual(cards, ['duels', 'bridge', 'parkour', 'ratseek', 'pillars', 'disaster', 'minigames']);
+  // One page prepares all seven modes twice, including rat→person/gear rebuilds.
   for (const card of [...cards, ...cards]) {
     const png = await page.evaluate(async card => {
       await window.__cards.prepare(card, 360, 240, 0);
@@ -41,8 +41,8 @@ try {
 
   await ready('/trailer.html?capture&width=360&height=240&quality=balanced');
   const shots = await page.evaluate(() => window.__trailer.shots);
-  assert.equal(shots.length, 19);
-  assert.equal(await page.evaluate(() => window.__trailer.duration), 80);
+  assert.equal(shots.length, 14);
+  assert.equal(await page.evaluate(() => window.__trailer.duration), 60);
   for (let index = 0; index < shots.length; index++) {
     const shot = shots[index];
     const capture = await page.evaluate(async ({ index, time }) => {

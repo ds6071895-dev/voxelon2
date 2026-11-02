@@ -1,6 +1,6 @@
 // Directional melee: the swing model shared by The Bridge's axe. Pure (no
 // DOM/THREE/Node) so the server that judges a hit and anything that predicts
-// one agree to the last decimal. Extracted from VOXELON's Bedwars module,
+// one agree to the last decimal. Shared with VOXELON,
 // which Worlds does not ship.
 
 /** One weapon's stats: base damage, cadence and extra knockback. */

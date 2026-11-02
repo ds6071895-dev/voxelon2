@@ -277,7 +277,7 @@ export const enum Tile {
   IronPickaxe = 404,
   WoodAxe = 405,
   Shears = 406,
-  BedwarsTNT = 407,
+  ArenaTNT = 407,
   TeleportPearl = 408,
   HealingApple = 409,
   ChainArmor = 410,

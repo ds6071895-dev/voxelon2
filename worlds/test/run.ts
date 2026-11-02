@@ -20,14 +20,9 @@ import type { PhysicsWorld } from '../src/physics_world';
 import { RatSeekMatch } from '../src/ratseek';
 import { SeekerBot } from '../src/ratseek_bot';
 import { dragonChaseTests } from './dragon_chase';
-import { runBedwarsServerTests } from './bedwars_server';
-import { runBedwarsTests } from './bedwars';
-import { runBedwarsMovementTests } from './bedwars_movement';
 import { runMediaCleanupTests } from './media_cleanup';
 import { runRatseekCleanupTests } from './ratseek_cleanup';
 import { runClientCompositionTests, runClientPickerTests } from './client_composition';
-import { runBedwarsCleanupTests } from './bedwars_cleanup';
-import { runBedwarsModelTests } from './bedwars_models';
 import { runClientCleanupTests } from './client_cleanup';
 import { partyCleanupTests } from './party_cleanup';
 import { runRenderingCleanupTests } from './rendering_cleanup';
@@ -523,7 +518,6 @@ section('mobile aim assistance stays modest and respects visibility');
     return yaw;
   };
   check('assist strength is frame rate independent', Math.abs(simulate(30) - simulate(120)) < 1e-6);
-  // Bedwars swords use the same cone and turn-rate cap, just at sword reach.
   const swordTarget = { x: -Math.sin(3 * degrees) * 2.5, y: 1, z: -Math.cos(3 * degrees) * 2.5 };
   const sword = aimAssist(0, 0, eye, [swordTarget], 3.2, 1 / 60, true, () => true);
   check('sword assist nudges within reach, no faster than the gun cap', sword.yaw > 0 && sword.yaw <= 12 * degrees / 60 + 1e-9);
@@ -584,12 +578,6 @@ section('dragon chase: a runner who made it can go back to the menu');
 }
 
 dragonChaseTests(check, section);
-section('Bedwars server integration');
-runBedwarsServerTests();
-section('Bedwars match rules and economy');
-runBedwarsTests();
-section('Bedwars movement authority');
-runBedwarsMovementTests();
 passed += runVanillaTests();
 passed += runPillarsTests();
 passed += runDisasterTests();
@@ -604,10 +592,6 @@ async function cleanupSuites(): Promise<void> {
   partyCleanupTests(check, section);
   section('Server authority and lifecycle cleanup');
   runServerCleanupTests();
-  section('Bedwars prediction and purchase cleanup');
-  runBedwarsCleanupTests();
-  section('Bedwars model ownership');
-  runBedwarsModelTests();
   section('Shared rendering and avatar ownership');
   runRenderingCleanupTests();
   section('Rendering and media resource ownership');

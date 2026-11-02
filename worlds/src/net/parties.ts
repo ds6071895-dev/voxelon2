@@ -7,14 +7,13 @@ import type { MinigamesSetup } from '../minigames_rules';
 // chat can never drop somebody into a stranger's party. Pure: no sockets, no
 // clocks of its own (every call takes `now`).
 
-import { PARTY_CODE_ALPHABET, PARTY_CODE_LENGTH, PARTY_MAX, normalizePartyCode, type BedwarsSetupState } from './protocol';
+import { PARTY_CODE_ALPHABET, PARTY_CODE_LENGTH, PARTY_MAX, normalizePartyCode } from './protocol';
 
 export interface Party {
   code: string;
   leader: number;
   /** Join order; the first entry is not necessarily the leader. */
   members: number[];
-  bedwars?: BedwarsSetupState;
   /** Party Games host setup for the next match (the leader's). */
   minigames?: MinigamesSetup;
 }
@@ -73,7 +72,6 @@ export class Parties {
     if (this.byMember.has(id)) return { ok: false, error: 'already' };
     if (party.members.length >= PARTY_MAX) return { ok: false, error: 'full' };
     party.members.push(id);
-    if (party.bedwars) party.bedwars.revision++;
     this.byMember.set(id, party);
     return { ok: true, party };
   }
@@ -86,10 +84,7 @@ export class Parties {
     if (!party) return null;
     this.byMember.delete(id);
     party.members = party.members.filter((m) => m !== id);
-    if (party.bedwars) {
-      delete party.bedwars.assignments[String(id)];
-      party.bedwars.revision++;
-    }
+
     if (party.members.length === 0) {
       this.byCode.delete(party.code);
       this.cooling.set(party.code, now + PARTY_CODE_COOLDOWN_MS);
@@ -103,7 +98,6 @@ export class Parties {
     const party = this.byMember.get(leader);
     if (!party || party.leader !== leader || !party.members.includes(target)) return null;
     party.leader = target;
-    if (party.bedwars) party.bedwars.revision++;
     return party;
   }
 

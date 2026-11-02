@@ -1,5 +1,4 @@
 // Seeded, mode-aware capacity/isolation probe; npm run stress, or
-// STRESS_BEDWARS=1 STRESS_WORLDS=600 npm run stress.
 // Tick timings include snapshots/delivery. STRESS_BUDGET_MS is the machine's
 // average-tick budget (50 by default); peak and p95 are reported separately.
 import { GameServer, BOT_WAIT_MS, type Outbound } from '../src/net/server_core';
@@ -19,9 +18,8 @@ const WORLDS = numberOption('STRESS_WORLDS', 300);
 const BUDGET = numberOption('STRESS_BUDGET_MS', 50, false);
 const HUNT_TICKS = numberOption('STRESS_HUNT_TICKS', 100);
 const TICK = .05;
-const modes: GameMode[] = process.env.STRESS_BEDWARS === '1' ? ['bedwars'] : ['duels', 'bridge', 'parkour', 'bedwars', 'ratseek'];
+const modes: GameMode[] = ['duels', 'bridge', 'parkour', 'ratseek'];
 if (WORLDS < modes.length) throw new Error(`STRESS_WORLDS must be at least ${modes.length} to include every selected mode`);
-if (process.env.STRESS_BEDWARS !== undefined && !['0', '1'].includes(process.env.STRESS_BEDWARS)) throw new Error('STRESS_BEDWARS must be 0 or 1');
 const rng = mulberry32(99);
 const server = new GameServer({ accounts: new Accounts(), rng,
   token: () => Array.from({ length: 32 }, () => Math.floor(rng() * 16).toString(16)).join('') });
@@ -52,7 +50,7 @@ const deliver = (out: Outbound[]) => {
 };
 const ready = (id: number) => {
   const world = server.worldOf(id);
-  const arena = [...(inbox.get(id) ?? [])].reverse().find(m => ['duelArena', 'pgArena', 'bwArena', 'rsArena'].includes(m.t));
+  const arena = [...(inbox.get(id) ?? [])].reverse().find(m => ['duelArena', 'pgArena', 'rsArena'].includes(m.t));
   if (world) deliver(server.handle(id, { t: 'worldReady', world: world.id,
     revision: arena && 'revision' in arena ? arena.revision : undefined }));
 };
@@ -63,7 +61,7 @@ const gone = (world: number) => !internals.worlds.has(world) && !server.worldMem
 const closeExhibition = (world: number) => {
   deliver(server.terminateExhibition(world));
 };
-const roster = (mode: GameMode) => mode === 'bedwars' || mode === 'ratseek' ? 4 : 2;
+const roster = (mode: GameMode) => mode === 'ratseek' ? 4 : 2;
 const exhibitionBots = (mode: GameMode) => roster(mode) + (mode === 'ratseek' ? 1 : 0);
 const startExhibition = (mode: GameMode) => {
   const world = server.startExhibition(mode, Array.from({ length: roster(mode) }, (_, i) => ({ skill: .4 + i * .15, adaptive: true })));
@@ -110,7 +108,7 @@ const loners = modes.map(mode => {
   deliver(server.handle(id, { t: 'hello' }));
   deliver(server.handle(id, { t: 'play', mode }));
   humans.push(id);
-  return { mode, ids: [id], world: -1, bots: mode === 'bedwars' ? 3 : 1 };
+  return { mode, ids: [id], world: -1, bots: 1 };
 });
 // Main manor cohort excludes late-filled loners. Each must contribute a minimum
 // number of real hunting ticks; results/idle ticks cannot count toward this.

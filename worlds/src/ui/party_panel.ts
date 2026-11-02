@@ -11,7 +11,6 @@ interface PartyHooks {
   onLeave(): void;
   onKick(id: number): void;
   onPromote(id: number): void;
-  onBedwars?(): void;
   onEngine?(mode: 'pillars' | 'disaster' | 'minigames'): void;
   onClose?(): void;
 }
@@ -73,8 +72,7 @@ export class PartyPanel {
         <div class="w-err" role="alert">${esc(this.error)}</div>
         <ul class="w-rules">
           <li>The leader picks the game and everyone plays together.</li>
-          <li>Duels, Parkour, Rat and Seek, and Bedwars take up to ${PARTY_MAX}; The Bridge needs exactly 2.</li>
-          <li>In Bedwars, the leader chooses the teams — including who plays alone in a 2v1.</li>
+          <li>Duels, Parkour, Rat and Seek take up to ${PARTY_MAX}; The Bridge needs exactly 2.</li>
         </ul>`;
     } else {
       const leader = s.leader === this.myId;
@@ -94,7 +92,6 @@ export class PartyPanel {
         <div class="w-code"><div><small>Party code</small><b>${esc(s.code)}</b></div>
           <button class="w-btn" type="button" data-act="copy">${Date.now() - this.copied < 1600 ? 'Copied' : 'Copy'}</button></div>
         <ul class="w-members">${rows}${empty}</ul>
-        ${s.members.length > 1 ? '<button class="w-btn" type="button" data-act="bedwars">Bedwars · Choose teams</button>' : ''}
         ${s.members.length > 1 ? '<div class="w-row"><button class="w-btn" type="button" data-mode="minigames">Party Games · Setup</button><button class="w-btn" type="button" data-mode="pillars">Lucky Pillars · Setup</button><button class="w-btn" type="button" data-mode="disaster">Disaster City · Setup</button></div>' : ''}
         <p class="w-lede">${leader
           ? 'You lead: pick a game on the title screen and everyone comes with you.'
@@ -112,7 +109,6 @@ export class PartyPanel {
     this.body.querySelector('[data-act="close"]')?.addEventListener('click', () => this.close());
     this.body.querySelector('[data-act="create"]')?.addEventListener('click', () => this.hooks.onCreate());
     this.body.querySelector('[data-act="leave"]')?.addEventListener('click', () => this.hooks.onLeave());
-    this.body.querySelector('[data-act="bedwars"]')?.addEventListener('click', () => { this.close(); this.hooks.onBedwars?.(); });
     for (const button of this.body.querySelectorAll<HTMLButtonElement>('[data-mode]')) button.addEventListener('click', () => {
       this.close(); this.hooks.onEngine?.(button.dataset.mode as 'pillars' | 'disaster' | 'minigames');
     });

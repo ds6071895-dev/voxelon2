@@ -10,7 +10,7 @@ import { PracticeSkills } from '../src/net/practice_skill';
 import { NameRegistry } from '../src/net/names';
 import { LoginThrottle } from '../src/net/login_throttle';
 import { recordArenaPosition, arenaVelocity } from '../src/net/arena_history';
-import { isGeneratedName, type ClientMsg, type ServerMsg, type GameMode } from '../src/net/protocol';
+import { isGameMode, GAME_MODES, isGeneratedName, type ClientMsg, type ServerMsg, type GameMode } from '../src/net/protocol';
 import { worldGenerator, releaseWorldGenerator, WorldBlocks } from '../src/multiverse';
 import { Block } from '../src/blocks';
 import { Item } from '../src/items';
@@ -119,30 +119,28 @@ function domainTests(): void {
 }
 
 function entryAndRosterTests(): void {
-  const wire = new NetClient();
-  const receive = (wire as unknown as { handle(msg: ServerMsg): void }).handle.bind(wire);
-  let placement: number | undefined, prediction: number | undefined;
-  wire.onBwKit = (_slots, _selected, value) => { placement = value; };
-  wire.onBwNack = (_x, _y, _z, value) => { prediction = value; };
-  receive({ t: 'bwKit', slots: [], placement: 17 });
-  receive({ t: 'bwNack', x: 1, y: 2, z: 3, prediction: 16 });
-  assert.equal(placement, 17, 'kit placement watermark reaches client prediction');
-  assert.equal(prediction, 16, 'placement rejection retains its prediction identity');
-  for (const mode of ['duels', 'bridge', 'parkour', 'ratseek', 'bedwars'] as GameMode[]) {
-    const h = new Harness(), ids = Array.from({ length: mode === 'bedwars' ? 4 : 2 }, () => h.join());
+  assert.equal(GAME_MODES.length, 7);
+  assert.equal(isGameMode('bedwars'), false, 'removed mode is rejected by the protocol');
+  const retired = new Harness(), id = retired.join();
+  retired.out.length = 0;
+  retired.send(id, { t: 'play', mode: 'bedwars' } as unknown as ClientMsg);
+  assert.equal(retired.game.worldOf(id), null, 'legacy play requests cannot create a retired world');
+  assert.deepEqual(retired.out, [], 'legacy play requests cannot join a queue');
+  for (const mode of ['duels', 'bridge', 'parkour', 'ratseek'] as GameMode[]) {
+    const h = new Harness(), ids = Array.from({ length: 2 }, () => h.join());
     h.out.length = 0;
     for (const id of ids) h.send(id, { t: 'play', mode });
     if (mode === 'ratseek') h.out.push(...h.game.tick(10.1));
     h.ready(ids);
     for (const id of ids) {
       const messages = h.out.filter((o) => o.to === id).map((o) => o.msg);
-      const arena = messages.findIndex((m) => ['duelArena', 'pgArena', 'rsArena', 'bwArena'].includes(m.t));
+      const arena = messages.findIndex((m) => ['duelArena', 'pgArena', 'rsArena'].includes(m.t));
       assert.ok(arena >= 0, `${mode} sent arena`);
-      const worldMessages = new Set(['join', 'duelLoadout', 'pgLoadout', 'rsKit', 'bwKit', 'edit', 'editBatch',
-        'duelState', 'pgState', 'rsState', 'bwState']);
+      const worldMessages = new Set(['join', 'duelLoadout', 'pgLoadout', 'rsKit', 'edit', 'editBatch',
+        'duelState', 'pgState', 'rsState']);
       assert.ok(messages.every((m, i) => !worldMessages.has(m.t) || i > arena), `${mode}: arena before roster/kit/state`);
       const rosterIndices = messages.flatMap((m, i) => m.t === 'join' ? [i] : []);
-      const kitOrState = messages.findIndex(m => ['duelLoadout', 'pgLoadout', 'rsKit', 'bwKit', 'duelState', 'pgState', 'rsState', 'bwState'].includes(m.t));
+      const kitOrState = messages.findIndex(m => ['duelLoadout', 'pgLoadout', 'rsKit', 'duelState', 'pgState', 'rsState'].includes(m.t));
       assert.ok(rosterIndices.every(i => i < kitOrState), `${mode}: complete roster precedes kit/state for each recipient`);
       const net = new NetClient();
       const receive = (net as unknown as { handle(msg: ServerMsg): void }).handle.bind(net);
@@ -167,29 +165,7 @@ function entryAndRosterTests(): void {
       }
     }
   }
-  {
-    const h = new Harness(), ids = Array.from({ length: 4 }, () => h.join());
-    const token = h.last(ids[0], 'welcome').resumeToken!;
-    for (const id of ids) h.send(id, { t: 'play', mode: 'bedwars' });
-    h.ready(ids);
-    for (let i = 0; i < 110; i++) h.out.push(...h.game.tick(.05));
-    assert.equal(h.last(ids[0], 'bwState').s.phase, 'playing');
-    h.out.push(...h.game.disconnect(ids[0]));
-    const resumed = h.game.resume(h.game.connect(), token)!;
-    assert.ok(resumed, 'active Bedwars session resumes');
-    const messages = resumed.out.filter(o => o.to === ids[0]).map(o => o.msg);
-    assert.equal(messages[0].t, 'welcome', 'resume installs identity before world messages');
-    const arena = messages.findIndex(m => m.t === 'bwArena');
-    const joins = messages.flatMap((m, i) => m.t === 'join' ? [i] : []);
-    const move = messages.findIndex(m => m.t === 'teleport');
-    const kit = messages.findIndex(m => m.t === 'bwKit');
-    assert.ok(arena > 0 && joins.length === 3 && joins.every(i => i > arena && i < move), 'resume installs world and full roster before movement');
-    assert.ok(move < kit, 'resume correction precedes authoritative kit');
-    const net = new NetClient();
-    const receive = (net as unknown as { handle(msg: ServerMsg): void }).handle.bind(net);
-    for (const msg of messages) receive(msg);
-    assert.equal(net.myId, ids[0]); assert.equal(net.remotes.size, 3, 'resume roster survives identity/world setup');
-  }
+
 }
 
 function reconnectTests(): void {
@@ -234,11 +210,11 @@ function reconnectTests(): void {
 function identityAndShellTests(): void {
   const accounts = new Accounts();
   const memory = new PracticeSkills(accounts, () => {});
-  memory.remember({ username: 'BraveYak11', account: false }, 'bedwars', .9);
+  memory.remember({ username: 'BraveYak11', account: false }, 'pillars', .9);
   memory.remember({ username: 'BraveYak11', account: false }, 'duels', .7);
   assert.ok(accounts.register('SwiftWolf12', 'fixture-pass', () => 'fake-hash', 'fake-salt').ok);
   memory.register('BraveYak11', 'SwiftWolf12');
-  assert.equal(accounts.skillOf('SwiftWolf12', 'bedwars'), .9, 'offered-name registration migrates Bedwars skill');
+  assert.equal(accounts.skillOf('SwiftWolf12', 'pillars'), .9, 'offered-name registration migrates Pillars skill');
   assert.equal(accounts.skillOf('SwiftWolf12', 'duels'), .7, 'guest learning follows the identity change');
   const registry = new NameRegistry(() => false);
   const rolled = Array.from({ length: 8 }, (_, i) => registry.roll(`fixture:${i}`, () => 0));

@@ -13,7 +13,7 @@ import './styles/results.css';
 import './styles/worlds.css';
 import './styles/ratseek.css';
 import './styles/mobile.css';
-import './styles/bedwars.css';
+import './styles/game_hud.css';
 import './styles/vanilla.css';
 import * as THREE from 'three';
 import { GameAudio, materialOf } from './audio';
@@ -79,10 +79,6 @@ import { PartyPanel } from './ui/party_panel';
 import { ControlsSheet } from './ui/controls_sheet';
 import { RatSeekClient, isClassBadge, pickSeeker, storedRatClass } from './ratseek_client';
 import { RS } from './ratseek_rules';
-import { BedwarsClient } from './bedwars_client';
-import { BedwarsSetup } from './ui/bedwars_setup';
-import { BW_BOUNDS } from './bedwars_map';
-import { BW, BW_TEAM_COLORS } from './bedwars_rules';
 import { MODE_LABELS, BRIDGE_COLORS } from './ui/presentation';
 import { Screens } from './client/screens';
 import { WorldReadiness } from './client/world_readiness';
@@ -254,18 +250,6 @@ const rsClient = new RatSeekClient({
   scene, app, net, audio, particles, player, world, remotePlayers, atlasCanvas: atlas.canvas,
   onPanel: () => syncPointerLock(),
 });
-const bwClient = new BedwarsClient({
-  scene, app, net, player, world, inventory, remotePlayers, atlas, cracks, interaction,
-  onPanel: () => { input.releaseButtons(); syncPointerLock(); },
-  flushPose: heldId => net.flushXform(player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch, player.sneaking, heldId, heldSwingSeq),
-  onPlaced: (x, y, z, block) => audio.place(materialOf(block), new THREE.Vector3(x + .5, y + .5, z + .5)),
-  onPickup: () => audio.pickup(),
-  onBedLost: () => audio.bedLost(),
-  onReplay: () => net.send({ t: 'play', mode: 'bedwars', setupRevision: myParty?.bedwars?.revision }),
-  onEditTeams: () => { net.send({ t: 'leaveMatch' }); openBedwarsSetup(); },
-  onLeave: () => net.send({ t: 'leaveMatch' }),
-});
-/** Lucky Pillars, Disaster City and Party Games: inventory, HUD, entities. */
 const vClient = new VanillaClient({
   scene, app, player, world, inventory, atlas,
   send: (a) => net.sendM(a),
@@ -359,9 +343,6 @@ window.addEventListener('resize', () => {
   postfx.setSize(window.innerWidth, window.innerHeight);
 });
 
-/** Device pixel ratio for the current screen. Bedwars is the largest world, so
- *  its fill rate is capped lower than the preset allows on high-DPI screens. */
-let bedwarsPixelCap = false;
 /** Dynamic resolution for the presets without the shader stack (which has its
  *  own tiers): steps the render scale down while frames run long, and back up
  *  after a clean stretch. Never below 0.6 device pixels per CSS pixel. */
@@ -369,12 +350,11 @@ const RES_SCALE = [1, 0.85, 0.72, 0.6] as const;
 const resolutionBudget = new ShaderBudget(RES_SCALE.length - 1);
 function renderPixelRatio(quality: GraphicsQuality = accessibility.graphicsQuality): number {
   const cap = GRAPHICS_PRESETS[quality].pixelRatioCap;
-  const base = Math.min(window.devicePixelRatio, bedwarsPixelCap ? Math.min(cap, 1.5) : cap);
+  const base = Math.min(window.devicePixelRatio, cap);
   if (GRAPHICS_PRESETS[quality].shaders) return base;
   return Math.min(base, Math.max(0.6, base * RES_SCALE[resolutionBudget.tier]));
 }
-function syncPixelRatio(inBedwars: boolean): void {
-  bedwarsPixelCap = inBedwars;
+function syncPixelRatio(): void {
   renderer.setPixelRatio(renderPixelRatio());
   renderer.setSize(window.innerWidth, window.innerHeight);
   postfx.setSize(window.innerWidth, window.innerHeight);
@@ -547,7 +527,6 @@ screens.register(controlsSheet);
 screens.register(hudSettingsPanel);
 screens.register({ get open() { return hudMods.editing; }, hide: () => hudMods.endEdit() });
 screens.register({ get open() { return rsClient.pickerOpen; }, hide: () => rsClient.closePicker() });
-screens.register({ get open() { return bwClient.panelOpen; }, hide: () => {} });
 screens.register({ get open() { return vClient.panelOpen; }, hide: () => {} });
 
 // ── Identity, look and wardrobe ────────────────────────────────────────────
@@ -725,7 +704,6 @@ let myParty: PartyState | null = null;
 const home = new HomeScreen({
   onPlay: (mode) => {
     audio.resume();
-    if (mode === 'bedwars' && myParty && myParty.members.length > 1) { openBedwarsSetup(); return; }
     if (mode === 'ratseek') { playRatSeek(); return; }
     if ((mode === 'pillars' || mode === 'disaster') && myParty && myParty.members.length > 1) { engineSetup.show(mode, myParty, net.myId); return; }
     if (mode === 'minigames' && myParty && myParty.members.length > 1) { mgSetupSheet.update(myParty, net.myId); mgSetupSheet.show(); return; }
@@ -761,31 +739,12 @@ const partyPanel = new PartyPanel(app, {
   onLeave: () => net.send({ t: 'partyLeave' }),
   onKick: (id) => net.send({ t: 'partyKick', id }),
   onPromote: (id) => net.send({ t: 'partyPromote', id }),
-  onBedwars: () => openBedwarsSetup(),
   onEngine: mode => {
     if (!myParty || myParty.members.length < 2) return;
     if (mode === 'minigames') { mgSetupSheet.update(myParty, net.myId); mgSetupSheet.show(); }
     else engineSetup.show(mode, myParty, net.myId);
   },
 });
-const bwSetup = new BedwarsSetup(app, {
-  onChange: (teams, assignments, fill, revision) => net.send({ t: 'bwSetup', teams, assignments, fill, revision }),
-  onStart: revision => net.send({ t: 'play', mode: 'bedwars', setupRevision: revision }),
-  onClose: () => {},
-});
-function openBedwarsSetup(): void {
-  if (!myParty || myParty.members.length < 2) return;
-  if (!myParty.bedwars && myParty.leader === net.myId) {
-    // Everyone on their own island to start with: 1v1, 1v1v1 or 1v1v1v1.
-    const assignments: Record<string, number> = {};
-    myParty.members.forEach((m, i) => assignments[String(m.id)] = i);
-    net.send({ t: 'bwSetup', teams: Math.max(2, myParty.members.length), assignments, fill: false, revision: 0 });
-  }
-  partyPanel.close();
-  bwSetup.update(myParty, net.myId);
-  bwSetup.show();
-}
-
 /** Queue or launch Rat and Seek. A party starts with the AI Seeker; the host
  *  can change who seeks in game, with the "Who seeks?" item, until the hunt. */
 function playRatSeek(): void {
@@ -824,32 +783,26 @@ net.onAuthErr = (error) => accountDialog.setError(error);
 net.onNameOffer = (name) => accountDialog.setOffer(name);
 net.onParty = (state) => {
   const wasIn = !!myParty;
-  const newDraft = !!state?.bedwars && !myParty?.bedwars;
   myParty = state;
   home.setParty(state);
   partyPanel.update(state, net.myId);
-  bwSetup.update(state, net.myId);
   mgSetupSheet.update(state, net.myId);
-  bwClient.setParty(state, net.myId);
-  if (newDraft && screens.state === 'title') bwSetup.show();
   if (state && !wasIn && !partyPanel.open) toast(`You're in party ${state.code}.`);
 };
-net.onPartyErr = (message) => { partyPanel.setError(message); bwSetup.setError(message); toast(message); };
+net.onPartyErr = (message) => { partyPanel.setError(message); toast(message); };
 net.onQueue = (mode) => home.setQueue(mode);
 net.onNotice = (text) => toast(text);
 net.onDisconnect = () => {
   home.setConnected(false, 'Lost the connection — reconnecting…');
   myParty = null; home.setParty(null); partyPanel.update(null, -1);
-  bwSetup.update(null, -1); bwSetup.close();
   mgSetupSheet.update(null, -1); mgSetupSheet.close();
-  bwClient.setParty(null, -1);
   if (screens.state !== 'title') exitToMenu();
 };
 home.setConnected(false, '');
 
 // ── Worlds: entering and leaving a match ────────────────────────────────────
 
-type MatchKind = 'duel' | 'pg' | 'rs' | 'bw' | 'mg';
+type MatchKind = 'duel' | 'pg' | 'rs' | 'mg';
 let match: { kind: MatchKind; spec: WorldSpec; mode: GameMode } | null = null;
 const readiness = new WorldReadiness(world, () => net.sendWorldReady(), hideLoading);
 let worldTimeLocal = 0;
@@ -879,7 +832,6 @@ function enterMatchWorld(spec: WorldSpec, kind: MatchKind, mode: GameMode, spawn
   // A Party Games arena swap stays in the same match: keep the pointer and the screen.
   const swap = kind === 'mg' && match?.kind === 'mg' && match.spec.id === spec.id;
   if (!swap) screens.prepareTransition();
-  if (match?.kind === 'bw') bwClient.exit();
   if (kind !== 'rs') rsClient.exit();
   if (kind !== 'mg') vClient.exit();
   resetMatchPresentation();
@@ -896,7 +848,6 @@ function enterMatchWorld(spec: WorldSpec, kind: MatchKind, mode: GameMode, spawn
   if (GRAPHICS_ORDER.indexOf(accessibility.graphicsQuality) <= GRAPHICS_ORDER.indexOf('medium')) backdrop.suspend();
   accountDialog.close();
   partyPanel.close();
-  bwSetup.close();
   engineSetup.close();
   mgSetupSheet.close();
   if (wardrobeUI.open) wardrobeUI.hide();
@@ -925,9 +876,8 @@ function exitToMenu(): void {
   arenaMaxHealth = 20; arenaHpPerHeart = 2;
   world.setArenaRenderBounds(null);
   rsClient.exit();
-  bwClient.exit();
   vClient.exit();
-  syncPixelRatio(false);
+  syncPixelRatio();
   duelSpectating = false;
   hideLoading();
   partyUI.setVisible(false);
@@ -952,32 +902,16 @@ net.onLeftWorld = () => exitToMenu();
 
 // ── Remote edits, hits and movement corrections ────────────────────────────
 
-let bwEditSoundAt = 0;
 net.onEdit = (x, y, z, b) => {
-  const old = world.getBlock(x, y, z);
   world.setBlock(x, y, z, b);
   if (match?.kind === 'mg') vClient.noteEdit(x, y, z);
-  if (match?.kind === 'bw') {
-    bwClient.noteEdit(x, y, z, b);
-    if (old !== b && bwClient.map.bedAt(x, y, z) === null && Math.hypot(player.pos.x - x, player.pos.y - y, player.pos.z - z) < 24) {
-      const at = new THREE.Vector3(x + .5, y + .5, z + .5);
-      // Someone else's building: audible only close by, and a burst (a TNT
-      // blast, a fast bridge) is one sound rather than a rattle.
-      const now = performance.now(), audible = now - bwEditSoundAt > 90 && at.distanceTo(player.pos) < 14;
-      if (audible) bwEditSoundAt = now;
-      if (b === Block.Air) {
-        if (audible) audio.dig(materialOf(old), at);
-        particles.debris(at.x, at.y, at.z, blockDebrisColor(old));
-      } else if (audible) audio.place(materialOf(b), at);
-    }
-  }
+
 };
 net.onEditBatch = (edits) => {
   if (match?.kind === 'mg') for (const e of edits) vClient.noteEdit(e.x, e.y, e.z);
   world.beginBatch();
   for (const e of edits) world.setBlock(e.x, e.y, e.z, e.block);
   world.endBatch();
-  if (match?.kind === 'bw') for (const e of edits) bwClient.noteEdit(e.x, e.y, e.z, e.block);
 };
 net.onEditFill = (fill) => {
   world.beginBatch();
@@ -1014,12 +948,7 @@ net.onSelfHealth = (health) => {
   if (health !== player.health) player.setHealthFromServer(health, false);
 };
 net.onRespawned = (x, y, z, h) => {
-  if (match?.kind === 'bw') {
-    duelSpectating = false; player.flying = false; player.noclip = false;
-    const team = bwClient.snap?.players.find(p => p.id === net.myId)?.team;
-    if (team !== undefined) player.yaw = bwClient.map.bases[team].yaw;
-    player.pitch = 0;
-  }
+
   cancelPendingActions();
   if (match?.kind === 'pg' && pgSub?.game === 'bridge') bridgeRespawnFx(x, y, z);
   player.respawn({ x, y, z });
@@ -1067,13 +996,7 @@ function updateShake(dt: number): void {
 }
 
 function showPvpHit(targetId: number, amount: number, killed: boolean): void {
-  // Bedwars sounds like Minecraft: the hit is a thud on the victim, not a UI blip.
-  if (match?.kind === 'bw') {
-    const r = net.remotes.get(targetId);
-    combat.hit(amount, killed, true);
-    audio.axeContact(false, r ? new THREE.Vector3(r.tx, r.ty + 1, r.tz) : undefined);
-    if (killed) audio.hitmarker(true);
-  } else combat.hit(amount, killed);
+  combat.hit(amount, killed);
   const flavor: HitFlavor = hitFlavor(amount, killed, arenaMaxHealth);
   const remote = net.remotes.get(targetId);
   if (remote) {
@@ -1096,7 +1019,7 @@ function showPvpHit(targetId: number, amount: number, killed: boolean): void {
 net.onHurt = (health, k, by) => {
   const bite = Math.max(0, player.health - health);
   player.setHealthFromServer(health, false);
-  if (match?.kind === 'bw' || match?.kind === 'mg') player.applyKnockback(k[0], k[1], k[2]);
+  if (match?.kind === 'mg') player.applyKnockback(k[0], k[1], k[2]);
   else { player.vel.x += k[0] * 6; player.vel.y += k[1] * 6; player.vel.z += k[2] * 6; }
   combat.hurt(bite);
   triggerShake(0.13, Math.min(0.05, 0.006 + bite * 0.0016));
@@ -1105,11 +1028,7 @@ net.onHurt = (health, k, by) => {
 };
 net.onHitConfirm = (target, amount, killed, crit) => {
   showPvpHit(target, amount, killed);
-  if (match?.kind !== 'bw') return;
-  held.meleeImpact(crit);
-  const r = remotePlayers.renderedPos(target);
-  // A critical hit throws Minecraft's little star sparks off the victim.
-  if (crit && r) particles.burst(r.x, r.y + 1.2, r.z, 14, 0xfff1a8, 3.2, .35, { gravity: 2, spread: .45, scale: .28 });
+
 };
 net.onShot = (id, item, x, y, z, dx, dy, dz) => {
   const gun = ITEMS[item]?.gun;
@@ -1145,7 +1064,6 @@ function cancelPendingActions(): void {
   burstRemaining = 0; burstTimer = 0; burstStack = null; burstGun = null;
   reloadTimer = 0; reloadDuration = 0; reloadingStack = null; aimZoom = 1;
   cancelHealUse();
-  bwBowAt = 0;
   held.setBowDraw(0);
 }
 
@@ -1622,120 +1540,6 @@ net.onPgResult = () => {
   if (match?.kind === 'pg') screens.results();
 };
 
-// ── Bedwars ────────────────────────────────────────────────────────────────
-
-net.onBwArena = (spec, team, spawn, yaw) => {
-  duelSnapshot = null;
-  pgSnapshot = null; pgSub = null; partyUI.setVisible(false); rsClient.exit();
-  arenaMaxHealth = 20; arenaHpPerHeart = 2; remotePlayers.maxHealth = 20;
-  arenaCanPlaceAt = null; arenaCanEditAt = null; arenaClampPos = null; arenaUnlimited = new Set();
-  player.maxHealth = 20; player.health = 20; lastHealth = 20;
-  player.yaw = yaw; player.pitch = 0;
-  enterMatchWorld(spec, 'bw', 'bedwars', spawn);
-  world.setArenaRenderBounds(BW_BOUNDS, 0.88);
-  bwClient.enter(team, spec.seed);
-  syncPixelRatio(true);
-  bwSelected = -1; bwSwingAt = 0; bwClickAt = 0; bwBowAt = 0; bwBowReadyAt = 0; bwFlashAt = 0;
-};
-net.onBwState = s => {
-  if (match?.kind !== 'bw') return;
-  const before = bwClient.snap;
-  if (before) {
-    for (const team of s.teams) {
-      if (!before.teams[team.team]?.bed || team.bed) continue;
-      const bed = bwClient.map.bases[team.team].bed;
-      audio.dig('wood', new THREE.Vector3(bed.x + .5, bed.y + .5, bed.z + 1));
-      particles.burst(bed.x + .5, bed.y + .5, bed.z + 1, 32,
-        parseInt(BW_TEAM_COLORS[team.team].slice(1), 16), 4, 1, { gravity: 9, spread: 1, scale: .5 });
-      audio.duelCue('sudden');
-    }
-    if (s.phase === 'countdown' && Math.ceil(s.countdown) !== Math.ceil(before.countdown)) audio.bridgeCount(Math.ceil(s.countdown));
-    if (before.phase === 'countdown' && s.phase === 'playing') audio.bridgeGo();
-    // Just died: the server lifts you over your base; look down at the map.
-    const was = before.players.find(p => p.id === net.myId), now = s.players.find(p => p.id === net.myId);
-    if (was?.alive && now && !now.alive) { player.yaw = bwClient.map.bases[now.team].yaw; player.pitch = -0.38; }
-  }
-  bwClient.setState(s);
-  duelSpectating = bwClient.spectating;
-  player.dead = false;
-  player.flying = duelSpectating;
-  player.noclip = duelSpectating;
-};
-net.onBwKit = (slots, _selected, placement) => bwClient.setKit(slots, placement);
-net.onBwDrop = msg => bwClient.setDrops(msg);
-net.onBwNack = (x, y, z, prediction?: Parameters<BedwarsClient['nack']>[3]) => bwClient.nack(x, y, z, prediction);
-net.onBwProj = list => {
-  for (const at of bwClient.setProjectiles(list)) {
-    audio.fireballImpact(at, at.distanceTo(player.pos) < 12);
-    particles.burst(at.x, at.y, at.z, 35, 0xe6bc77, 5, .8, { gravity: 6, spread: 1.5, scale: .5 });
-  }
-};
-net.onBwEvent = (text, tone) => bwClient.event(text, tone);
-net.onBwBuyResult = (request, ok, message) => {
-  bwClient.buyResult(request, ok, message);
-  if (ok) audio.place('wood');
-};
-net.onBwResult = result => {
-  if (match?.kind !== 'bw') return;
-  screens.results();
-  bwClient.setResult(result);
-  const team = result.players.find(p => p.id === net.myId)?.team;
-  if (result.winner !== null) audio.duelCue(result.winner === team ? 'victory' : 'defeat');
-};
-let bwSelected = -1, bwSwingAt = 0, bwClickAt = 0, bwBowAt = 0, bwFlashAt = 0;
-/** Bedwars bow: no draw starts before the server's shot cooldown is over. */
-let bwBowReadyAt = 0;
-window.addEventListener('keydown', e => {
-  if (match?.kind !== 'bw' || screens.state !== 'playing' || e.repeat || bwClient.panelOpen) return;
-  if (e.code === 'KeyE' && bwClient.interact()) e.preventDefault();
-});
-function updateBedwarsInput(look: THREE.Vector3, eye: THREE.Vector3): void {
-  const now = performance.now(), slot = inventory.selected, stack = inventory.selectedStack;
-  if (bwSelected !== slot) { bwSelected = slot; net.sendBwAction({ kind: 'select', slot }); }
-  const target = interaction.target;
-  if (input.rightClicked && bwClient.interact()) { bwClient.aimBreak(null, slot, false); return; }
-  // Aim at players with the same reach the server judges (plus a hair for interpolation).
-  const victim = remotePlayers.rayHit(eye, look, bwClient.meleeReach + 0.2);
-  const obstruction = target ? new THREE.Vector3(target.x + .5, target.y + .5, target.z + .5).distanceTo(eye) : Infinity;
-  const other = victim >= 0 ? net.remotes.get(victim) : undefined;
-  const hitPlayer = !!other && Math.hypot(other.tx - eye.x, other.ty + 1 - eye.y, other.tz - eye.z) < obstruction + .4;
-  // Every click swings at once (no attack cooldown, as in Bedrock); holding the
-  // button keeps swinging at a steady four a second.
-  const swingNow = input.leftClicked ? now >= bwClickAt : input.leftDown && hitPlayer && now >= bwSwingAt;
-  if (swingNow && (hitPlayer || !target)) {
-    bwClickAt = now + 50; bwSwingAt = now + 250; held.swing();
-    if (hitPlayer) {
-      net.flushXform(player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch, player.sneaking, stack?.id ?? 0, heldSwingSeq);
-      net.sendBwAction({ kind: 'melee', target: victim, slot });
-      // Show the hit now; the server's confirmation adds the damage number.
-      if (now - bwFlashAt > 450) { bwFlashAt = now; remotePlayers.hurtFlash(victim, 0.5); }
-    }
-  }
-  bwClient.aimBreak(target, slot, input.leftDown && !hitPlayer);
-  if (input.leftDown && target && !hitPlayer && now >= bwSwingAt && bwClient.isBreaking) { held.swing(); bwSwingAt = now + 380; }
-  if (stack?.id === Item.BridgeBow) {
-    // Hold to draw, let go to shoot; letting go before BOW_MIN_DRAW cancels.
-    if (input.rightDown && !bwBowAt && now >= bwBowReadyAt) bwBowAt = now;
-    held.setBowDraw(bwBowAt ? Math.min(1, (now - bwBowAt) / BW.BOW_DRAW_MS) : 0);
-    if (!input.rightDown && bwBowAt) {
-      const power = Math.min(1, (now - bwBowAt) / BW.BOW_DRAW_MS); bwBowAt = 0;
-      held.setBowDraw(0);
-      if (power >= BW.BOW_MIN_DRAW) {
-        net.sendBwAction({ kind: 'shoot', dx: look.x, dy: look.y, dz: look.z, power, slot });
-        audio.bowRelease(power); bwBowReadyAt = now + BW.BOW_COOLDOWN * 1000;
-      }
-    }
-  } else {
-    bwBowAt = 0; held.setBowDraw(0);
-    if (stack && ITEMS[stack.id]?.kind === 'block') {
-      // Every block that goes down swings the hand, as in Bedrock.
-      if (input.rightDown && bwClient.build(target, eye, look, slot, input.rightClicked)) held.swing();
-    } else if (input.rightClicked && stack) {
-      bwClient.use(slot, look.x, look.y, look.z); held.swing();
-    }
-  }
-}
-
 // ── Lucky Pillars, Disaster City, Party Games ──────────────────────────────
 
 net.onMArena = (spec, mode, spawn, yaw, health) => {
@@ -1833,23 +1637,14 @@ function updateMobileAim(dt: number): void {
   const gun = id !== undefined && !!ITEMS[id]?.gun;
   const bridge = pgWeaponsActive() && (id === Item.BridgeBow || id === Item.IronAxe);
   const seeker = match?.kind === 'rs' && rsClient.role === 'human' && rsClient.phase() === 'hunting';
-  // Bedwars swords get the same nudge, but only mid-swing: never while
-  // bridging or just looking around, where it would drag the camera.
-  const bwMelee = match?.kind === 'bw' && !bwClient.spectating && id !== undefined && ITEMS[id]?.tool?.type === 'sword';
-  if (!(match?.kind === 'duel' && gun) && !bridge && !seeker && !bwMelee) return;
-  const active = bwMelee ? input.leftDown
-    : input.mouseDX !== 0 || input.mouseDY !== 0 || input.leftDown || input.rightClicked;
+  if (!(match?.kind === 'duel' && gun) && !bridge && !seeker) return;
+  const active = input.mouseDX !== 0 || input.mouseDY !== 0 || input.leftDown || input.rightClicked;
   if (!active) return;
   const points: AimPoint[] = [];
   const myTeam = pgSnapshot?.participants.find(p => p.id === net.myId)?.team;
-  const bwPlayers = bwMelee ? bwClient.snap?.players : undefined;
-  const bwTeam = bwPlayers?.find(p => p.id === net.myId)?.team;
   for (const [remoteId, r] of net.remotes) {
     if (remoteId === net.myId || r.dead) continue;
-    if (bwPlayers) {
-      const p = bwPlayers.find(p => p.id === remoteId);
-      if (!p?.alive || p.team === bwTeam) continue;
-    }
+
     if (bridge) {
       const p = pgSnapshot?.participants.find(p => p.id === remoteId);
       if (!p?.connected || p.team === myTeam) continue;
@@ -1863,7 +1658,7 @@ function updateMobileAim(dt: number): void {
   }
   if (seeker) points.push(...rsClient.decoyAimPoints());
   const eye = player.eyePosition;
-  const range = seeker ? RS.REACH : bwMelee ? BW.MELEE_REACH : id === Item.IronAxe ? PARTY_MELEE_REACH : 40;
+  const range = seeker ? RS.REACH : id === Item.IronAxe ? PARTY_MELEE_REACH : 40;
   const adjusted = aimAssist(player.yaw, player.pitch, eye, points, range, dt, active, point => {
     const direction = new THREE.Vector3(point.x, point.y, point.z).sub(eye);
     const distance = direction.length();
@@ -1943,7 +1738,6 @@ function updatePartyFrame(dt: number): void {
 
 /** Nothing the keyboard does counts while the match holds everybody still. */
 function controlBlocked(): boolean {
-  if (match?.kind === 'bw') return (bwClient.frozen && !bwClient.spectating) || bwClient.panelOpen || screens.state === 'results';
   if (match?.kind === 'mg') return (vClient.frozen && !vClient.spectating) || vClient.panelOpen;
   if (match?.kind === 'rs') return rsClient.frozen() || screens.state === 'results';
   if (match?.kind === 'pg') return pgSnapshot?.phase !== 'running' || pgCaged();
@@ -2027,7 +1821,7 @@ function updateSelfAvatar(dt: number): void {
     walkPhase: selfWalkPhase, speed: hspeed, sneak: selfSneakT, pitch: player.pitch,
     attackSwing: held.swingAmount(), aim: aimZoom > 1 ? 1 : 0,
     reload: reloadProgress >= 0 ? Math.sin(reloadProgress * Math.PI) : 0, kick: held.recoilAmount(),
-    bowPower: bwBowAt ? Math.min(1, (performance.now() - bwBowAt) / 850) : 0,
+    bowPower: 0,
   });
 }
 
@@ -2041,7 +1835,6 @@ function updateAtmosphere(activeCamera: THREE.Camera): void {
   fog.color.copy(sky.skyColor);
   fog.near = 34;
   fog.far = Math.min(68, FOG_FAR);
-  if (match?.kind === 'bw') { fog.near = 85; fog.far = Math.max(160, FOG_FAR); }
   const rsFog = match?.kind === 'rs' ? rsClient.fog() : null;
   if (rsFog) { fog.near = rsFog.near; fog.far = rsFog.far; fog.color.setRGB(0, 0, 0); }
   (scene.background as THREE.Color).copy(fog.color);
@@ -2181,10 +1974,10 @@ function frame(): void {
       shown: input.touchMode && (screens.state === 'playing' || screens.state === 'paused'), playing: controlling,
       spectating: duelSpectating,
       gun: !duelSpectating && !!(hs && ITEMS[hs.id]?.gun),
-      action: match.kind === 'bw' ? 'interact' : match.kind === 'rs' ? (rsClient.role === 'human' ? 'interact' : hs ? 'use' : 'none')
+      action: match.kind === 'rs' ? (rsClient.role === 'human' ? 'interact' : hs ? 'use' : 'none')
         : !hs ? 'none' : ITEMS[hs.id]?.gun ? 'attack' : ITEMS[hs.id]?.kind === 'block' ? 'build'
         : hs.id === Item.IronAxe ? 'attack' : 'use',
-      label: match.kind === 'bw' ? 'USE / SHOP' : match.kind === 'rs' ? 'USE' : hs?.id === Item.BridgeBow ? 'SHOOT' : hs && ITEMS[hs.id]?.heal ? 'HEAL'
+      label: match.kind === 'rs' ? 'USE' : hs?.id === Item.BridgeBow ? 'SHOOT' : hs && ITEMS[hs.id]?.heal ? 'HEAL'
         : hs?.id === Item.JumpBoost ? 'BOOST' : undefined,
       context: `${match.mode}:${inventory.selected}:${hs?.id ?? 0}:${duelSpectating ? 'spec' : 'play'}`,
     });
@@ -2252,10 +2045,7 @@ function frame(): void {
     const eye = player.eyePosition;
     const heldStack = inventory.selectedStack;
     const heldGun = heldStack ? ITEMS[heldStack.id]?.gun : undefined;
-    if (match.kind === 'bw') {
-      interaction.update(dt, input, camera, true, true);
-      updateBedwarsInput(lookDir, eye);
-    } else if (match.kind === 'mg') {
+    if (match.kind === 'mg') {
       interaction.update(dt, input, camera, true, true);
       vClient.input(dt, input, lookDir, eye);
     } else if (match.kind === 'rs') {
@@ -2290,7 +2080,6 @@ function frame(): void {
     }
   } else {
     interaction.clear();
-    if (match.kind === 'bw') bwClient.aimBreak(null, inventory.selected, false);
   }
 
   net.sendXform(dt, player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch,
@@ -2302,7 +2091,7 @@ function frame(): void {
   const worldStart = performance.now();
   // Terrain past the fog wall is drawn in solid fog colour, so stream only
   // what the fog can show (+1 chunk for the third-person camera offset).
-  const modeRadius = match.kind === 'pg' || match.kind === 'bw' || match.kind === 'mg' ? 10 : match.kind === 'rs' ? 5 : 3;
+  const modeRadius = match.kind === 'pg' || match.kind === 'mg' ? 10 : match.kind === 'rs' ? 5 : 3;
   world.update(player.pos.x, player.pos.z, 6, Math.min(modeRadius, Math.ceil((scene.fog as THREE.Fog).far / 16) + 1));
   if (import.meta.env.DEV) {
     perfProbe.worldMs = performance.now() - worldStart;
@@ -2318,11 +2107,10 @@ function frame(): void {
     remotePlayers.setHovered(remotePlayers.rayHit(player.eyePosition, lookDir, 60));
   } else remotePlayers.setHovered(-1);
   remotePlayers.update(dt);
-  if (match.kind === 'bw') bwClient.update(dt);
   if (match.kind === 'mg') vClient.update(dt);
   projectiles.update(dt);
   combat.update(dt, { health: player.health, maxHealth: player.maxHealth, spectating: duelSpectating,
-    heartbeat: match.kind !== 'bw', x: player.pos.x, z: player.pos.z, yaw: player.yaw, time: worldTimeLocal });
+    heartbeat: true, x: player.pos.x, z: player.pos.z, yaw: player.yaw, time: worldTimeLocal });
   updatePartyFrame(dt);
   if (match.kind === 'rs') {
     const look = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
@@ -2424,6 +2212,6 @@ updateCamera();
 frame();
 
 if (import.meta.env.DEV) {
-  (window as unknown as { __worlds: unknown }).__worlds = { sky, player, world, camera, net, input, inventory, dragonView, bwClient, bwSetup, vClient, held, particles, interaction, atlas, pg: () => pgSnapshot,
+  (window as unknown as { __worlds: unknown }).__worlds = { sky, player, world, camera, net, input, inventory, dragonView, vClient, held, particles, interaction, atlas, pg: () => pgSnapshot,
     renderer, perf: perfProbe };
 }

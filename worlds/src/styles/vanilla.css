@@ -1,15 +1,16 @@
 /* ═══════════════════════════════════════════════════════════════════════════
    VANILLA MODES (Lucky Pillars, Disaster City, Party Games) — same light
-   Worlds look as Bedwars: bw-hud sidebar/feed/pill/title, .w-dialog panels.
+   Worlds look: game-hud sidebar/feed/pill/title, .w-dialog panels.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 /* The survival bars replace the stamina bar and draw their own hearts. */
 body.vanilla-active #status { display: none; }
+body.vanilla-active .item-name { bottom: calc(var(--hotbar-slot) + 38px + var(--survival-bars-height, 64px) + var(--safe-bottom)); }
 
 .v-hud .v-bars {
   position: absolute; left: 50%; transform: translateX(-50%);
   bottom: calc(var(--hotbar-slot, 44px) + 30px + var(--safe-bottom, 0px));
-  width: min(444px, calc(100vw - 24px)); height: auto; aspect-ratio: 444 / 64;
+  width: min(444px, calc(100vw - 24px)); height: auto;
   image-rendering: pixelated; pointer-events: none;
 }
 .v-hud .v-bars[hidden] { display: none; }
@@ -44,7 +45,7 @@ body.vanilla-active #status { display: none; }
 .v-side-row[data-tone="gold"] b { color: #b8730c; }
 .v-side-row[data-tone="bad"] b { color: #c0262d; }
 .v-side-row[data-tone="good"] b { color: #1f9d5b; }
-.v-pill { top: auto; bottom: calc(var(--hotbar-slot, 44px) + 96px + var(--safe-bottom, 0px)); }
+.v-pill { top: auto; bottom: calc(var(--hotbar-slot, 44px) + var(--survival-bars-height, 64px) + 110px + var(--safe-bottom, 0px)); }
 
 .v-cooldown { position: absolute; left: 50%; top: calc(50% + 18px); width: 32px; height: 4px; transform: translateX(-50%); border-radius: 2px; background: rgba(18,32,50,.35); }
 .v-cooldown[hidden] { display: none; }

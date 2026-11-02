@@ -127,7 +127,7 @@ export function solveLight(
   // --- Skylight: vertical fill per column -----------------------------------
   // `clear[col]` = lowest y from which the column is open up to the sky. Above
   // the highest `clear` of a column and its four neighbours nothing can seed
-  // the spread, so the seed scan skips it — over open sky or void (Bedwars)
+  // the spread, so the seed scan skips it — over open sky or void
   // that is most of the window.
   for (let x = 0; x < sizeX; x++) {
     for (let z = 0; z < sizeZ; z++) {

@@ -20,10 +20,7 @@ import { buildAvatarBody, disposeAvatarBody, poseGunHold, type AvatarBody } from
 import { createAvatarEquipment, attachAvatarEquipment } from '../avatar_equipment';
 import { defaultCosmetics } from '../character';
 import { createRatModel, createCheeseModel, createCatModel, disposeRsProp } from '../ratseek_models';
-import { createBedwarsModels } from '../bedwars_models';
-import { bwMap, BW_BOUNDS } from '../bedwars_map';
 import { Item } from '../items';
-import { Block } from '../blocks';
 import { fitHands } from '../media/grips';
 import { chooseCaptureCourse } from '../media/course';
 import { warmCaptureDragon } from '../media/dragon';
@@ -40,8 +37,8 @@ import { VB } from '../vanilla/blocks';
 import { VI } from '../vanilla/items';
 import { captureGround, configureCaptureQuality, sizeCapture, loadCaptureChunks, poseCaptureStride } from '../media/offline';
 
-export type CardId = 'bedwars' | 'duels' | 'bridge' | 'parkour' | 'ratseek' | 'pillars' | 'disaster' | 'minigames';
-export const CARDS: readonly CardId[] = ['bedwars', 'duels', 'bridge', 'parkour', 'ratseek', 'pillars', 'disaster', 'minigames'];
+export type CardId = 'duels' | 'bridge' | 'parkour' | 'ratseek' | 'pillars' | 'disaster' | 'minigames';
+export const CARDS: readonly CardId[] = ['duels', 'bridge', 'parkour', 'ratseek', 'pillars', 'disaster', 'minigames'];
 
 const params = new URLSearchParams(location.search);
 const canvas = document.getElementById('output') as HTMLCanvasElement;
@@ -264,37 +261,6 @@ function staging(id: CardId): Staging {
       },
     };
   }
-  if (id === 'bedwars') {
-    // Red's island: the bed in front, a defender with a sword, and Blue
-    // bridging in with wool across the void.
-    const map = bwMap(0);
-    const gen = worldGenerator({ kind: 'bedwars', seed: 0 });
-    const red = map.bases[0];
-    const bed = v(red.bed.x + .5, red.bed.y, red.bed.z + .5);
-    const y = red.bed.y;
-    const bridge: [number, number, number, number][] = [];
-    if (params.get('wall') === '1') for (const [wx, wz] of [[-57, 0], [-54, 0], [-56, -1], [-55, -1], [-56, 1], [-55, 1]]) bridge.push([wx, y, wz, Block.TeamWoolA]);
-    for (let x = -46; x <= -36; x++) bridge.push([x, y - 1, 2, Block.TeamWoolB]);
-    return {
-      // Framed right of centre: the hero tile's words sit over the left.
-      generator: gen, center: v(-46, 0, 0), radius: 5, timeOfDay: .2, ambient: .88,
-      cam: v(-36.8, y + 3.3, 5.4), at: v(-51, y + 1.4, 1.2), fov: 46, fog: [120, 240], edits: bridge,
-      pose() {
-        const models = createBedwarsModels(map, 2, atlas);
-        propDisposers.push(() => models.dispose());
-        props.add(models.group);
-        models.update(3);
-        const defender = actor(11, TEAM.red);
-        place(defender, v(-51.5, ground(gen, -51.5, 2.5), 2.5), v(-40, y, 2.5));
-        stride(defender, 1.2, 3, true, .55);
-        hold(defender, Item.IronSword);
-        const attacker = actor(905, TEAM.blue);
-        place(attacker, v(-43.5, y, 2.5), v(bed.x, y, bed.z));
-        stride(attacker, 2.4, 4.5, true, .2);
-        hold(attacker, Block.TeamWoolB);
-      },
-    };
-  }
   if (id === 'duels') {
     const gen = worldGenerator({ kind: 'duel', seed: 7 });
     return {
@@ -420,7 +386,7 @@ async function prepare(id: CardId, w = 1200, h = 900, below = 0): Promise<void> 
   props.clear();
   runners = [];
   dragon.clear();
-  heroSky.visible = id === 'bedwars' || id === 'pillars';
+  heroSky.visible = id === 'pillars';
   const s = staging(id);
   const num = (k: string) => params.get(k)?.split(',').map(Number);
   const cam = num('cam'), at = num('at'), fov = num('fov');
@@ -430,7 +396,7 @@ async function prepare(id: CardId, w = 1200, h = 900, below = 0): Promise<void> 
   const tod = num('tod'); if (tod) s.timeOfDay = tod[0];
   current = s;
   world.setGenerator(s.generator);
-  world.setArenaRenderBounds(id === 'bedwars' ? BW_BOUNDS : s.generator.bounds, s.ambient);
+  world.setArenaRenderBounds(s.generator.bounds, s.ambient);
   for (const [x, y, z, b] of s.edits ?? []) world.setBlock(x, y, z, b);
   sky.snapTo(s.timeOfDay);
   await loadCaptureChunks(world, s.center.x, s.center.z, s.radius, 40, id);
@@ -474,7 +440,7 @@ const api = {
 declare global { interface Window { __cards: typeof api } }
 window.__cards = api;
 
-const first = (params.get('card') ?? 'bedwars') as CardId;
+const first = (params.get('card') ?? 'minigames') as CardId;
 void prepare(first, Number(params.get('w')) || 1200, Number(params.get('h')) || 900, Number(params.get('below')) || 0)
   .then(() => { document.body.dataset.ready = 'true'; })
   .catch(error => { document.body.dataset.error = String(error); console.error(error); });

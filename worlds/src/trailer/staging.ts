@@ -45,8 +45,6 @@ export interface StageFrame {
   cat?: CatPose;
   drops: DropPose[];
   projectiles: ProjectilePose[];
-  /** Bedwars: is the red bed standing? */
-  bed: boolean;
   /** Camera shake amplitude (blocks). */
   shake: number;
   /** Duel muzzle flashes: slot numbers firing this frame. */
@@ -74,7 +72,6 @@ export const captureSmooth = (t: number): number => {
 const sm = captureSmooth;
 const lerp = (a: number, b: number, k: number): number => a + (b - a) * k;
 const mix3 = (a: V3, b: V3, k: number): V3 => [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)];
-const add3 = (a: V3, b: V3): V3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 /** Heading that faces `to` from `from` (Worlds' forward is -z). */
 const face = (from: V3, to: V3): number => Math.atan2(-(to[0] - from[0]), -(to[2] - from[2]));
 const vec = (p: V3): THREE.Vector3 => new THREE.Vector3(p[0], p[1], p[2]);
@@ -83,60 +80,13 @@ const clamp01 = (v: number): number => Math.max(0, Math.min(1, v));
 /** Stand-in for an avatar's stride phase: advances with distance walked. */
 const stridePhase = (t: number, speed: number): number => t * (4 + speed * 1.25);
 
-// ── Bedwars: Red's island in the west, the void and the other islands beyond ──
-const BW_Y = 97;
-
-/** Walk through timed stances: eased moves between points, resting at each. */
-function stances(t: number, list: readonly { at: number; pos: V3 }[]): { pos: V3; speed: number } {
-  if (t <= list[0].at) return { pos: list[0].pos, speed: 0 };
-  for (let i = 1; i < list.length; i++) {
-    const a = list[i - 1], b = list[i];
-    if (t <= b.at) {
-      const k = (t - a.at) / (b.at - a.at), e = sm(k);
-      const dist = Math.hypot(b.pos[0] - a.pos[0], b.pos[2] - a.pos[2]);
-      return { pos: mix3(a.pos, b.pos, e), speed: dist / (b.at - a.at) * (k > 0 && k < 1 ? 1.2 * Math.sin(Math.PI * k) : 0) };
-    }
-  }
-  return { pos: list[list.length - 1].pos, speed: 0 };
-}
-
-export function trailerEdits(s: Shot): StageEdit[] {
-  const red = Block.TeamWoolA, blue = Block.TeamWoolB;
-  const edits: StageEdit[] = [];
-  if (s.action === 'bw-island') {
-    // The north side is already walled in; the other four sides and the top go up now.
-    for (const [x, z] of [[-56, -1], [-55, -1]]) edits.push([x, BW_Y, z, red, 0]);
-    const cells: [number, number, number][] = [[-54, BW_Y, 0], [-55, BW_Y, 1], [-56, BW_Y, 1], [-57, BW_Y, 0], [-56, BW_Y + 1, 0]];
-    s.cues.filter(c => c[1] === 'block').forEach((c, i) => edits.push([...cells[i], red, c[0]]));
-  } else if (s.action === 'bw-bridge') {
-    for (let x = -36; x <= -34; x++) edits.push([x, BW_Y - 1, 2, blue, 0]);
-    s.cues.filter(c => c[1] === 'block').forEach((c, i) => edits.push([-37 - i, BW_Y - 1, 2, blue, c[0]]));
-  } else if (s.action === 'bw-bed') {
-    // The server clears the bed's two cells when it breaks.
-    edits.push([-56, BW_Y, 0, Block.Air, 2.5], [-55, BW_Y, 0, Block.Air, 2.5]);
-    for (const [x, y, z] of [[-56, BW_Y, -1], [-55, BW_Y, -1], [-57, BW_Y, 0]]) edits.push([x, y, z, red, 0]);
-  }
-  return edits;
-}
+export function trailerEdits(_s: Shot): StageEdit[] { return []; }
 
 export function trailerEvents(s: Shot): StageEvent[] {
   const events: StageEvent[] = [];
-  const cue = (kind: string): number[] => s.cues.filter(c => c[1] === kind).map(c => c[0]);
-  if (s.action === 'bw-island') for (const [i, at] of cue('block').entries()) {
-    const cells: V3[] = [[-53.5, BW_Y + .5, .5], [-54.5, BW_Y + .5, 1.5], [-55.5, BW_Y + .5, 1.5], [-56.5, BW_Y + .5, .5], [-55.5, BW_Y + 1.5, .5]];
-    events.push({ at, kind: 'debris', pos: cells[i], color: 0xd9393f });
-  }
-  if (s.action === 'bw-bridge') for (const [i, at] of cue('block').entries()) events.push({ at, kind: 'debris', pos: [-36.5 - i, BW_Y - .6, 2.5], color: 0x2f6fe0 });
-  if (s.action === 'bw-bed') {
-    for (const at of cue('pick')) events.push({ at, kind: 'debris', pos: [-54.6, BW_Y + .6, .5], color: 0xe9e1d0 });
-    const at = cue('bedbreak')[0];
-    events.push({ at, kind: 'debris', pos: [-55, BW_Y + .6, .5], color: 0xd9393f }, { at, kind: 'ring', pos: [-55, BW_Y + .7, .5], color: 0xffd48a }, { at, kind: 'poof', pos: [-55, BW_Y + .7, .5], color: 0xffffff });
-  }
-  if (s.action === 'bw-forge') events.push({ at: 2.3, kind: 'ring', pos: [-65.4, BW_Y + 1, -5], color: 0x8fe8ff }, { at: 2.3, kind: 'burst', pos: [-65.4, BW_Y + 1.2, -5], color: 0xbfefff });
   if (s.action === 'br-goal') events.push({ at: 3.0, kind: 'ring', pos: [12.5, 141.2, 7.5], color: 0xffe08a }, { at: 3.0, kind: 'burst', pos: [12.5, 141.6, 7.5], color: 0xfff1b8 });
   if (s.action === 'du-fight') events.push({ at: 5.5, kind: 'death', pos: [24.2, 99.4, 20.6], color: 0x2f6fe0 });
   if (s.action === 'rs-rescue') events.push({ at: 1.0, kind: 'burst', pos: [29.5, 82.3, 0], color: 0xfff1b8 });
-  if (s.action === 'bw-fight') events.push({ at: 2.3, kind: 'burst', pos: [-49.4, BW_Y + 1.4, 2.5], color: 0xffffff });
   if (s.action === 'br-duel') events.push({ at: 1.5, kind: 'burst', pos: [12.5, 142.5, 52.0], color: 0xffffff }, { at: 3.0, kind: 'burst', pos: [12.5, 142.5, 50.2], color: 0xffffff });
   return events;
 }
@@ -152,7 +102,7 @@ const camOf = (from: V3, to: V3, target: V3, fov: number, k: number, extra: Part
   ({ position: vec(mix3(from, to, sm(k))), target: vec(target), fov, ...extra });
 
 const emptyFrame = (camera: TrailerCamera): StageFrame =>
-  ({ camera, actors: [], rats: [], drops: [], projectiles: [], bed: true, shake: 0, flashes: [] });
+  ({ camera, actors: [], rats: [], drops: [], projectiles: [], shake: 0, flashes: [] });
 
 /** The duel arena positions, shared by the camera and the audit. */
 const DUEL_A: V3 = [20.0, 0, 23.5], DUEL_B: V3 = [23.9, 0, 20.5];
@@ -170,82 +120,6 @@ export function trailerFrame(s: Shot, t: number, env: Env): StageFrame {
     }
     case 'reel': {
       return emptyFrame(camOf([-6, TITLE_SEA + 18, 25], [-14, TITLE_SEA + 21, 26], [-48, TITLE_SEA + 25, -42], 62, k));
-    }
-
-    // ── Bedwars ──────────────────────────────────────────────────────────
-    case 'bw-island': {
-      const f = emptyFrame(camOf([-45.4, 100.7, 2.8], [-48.6, 99.4, 2.0], [-55.2, BW_Y + 1.0, .9], 54, k));
-      const st = stances(t, [
-        { at: 0, pos: [-51.4, BW_Y, 5.2] }, { at: 1.35, pos: [-52.4, BW_Y, 1.7] }, { at: 1.5, pos: [-52.4, BW_Y, 1.7] },
-        { at: 1.85, pos: [-54.5, BW_Y, 3.0] }, { at: 2.2, pos: [-56.2, BW_Y, 3.0] }, { at: 2.55, pos: [-58.4, BW_Y, 1.5] }, { at: 2.9, pos: [-57.5, BW_Y, 2.7] }, { at: 4, pos: [-57.5, BW_Y, 2.7] },
-      ]);
-      const target: V3 = t < 1.7 ? [-53.5, BW_Y, .5] : t < 2.0 ? [-55, BW_Y, 1.5] : t < 2.4 ? [-56, BW_Y, 1.5] : t < 2.75 ? [-57, BW_Y, .5] : [-56, BW_Y + 1, .5];
-      const swing = s.cues.filter(c => c[1] === 'block').reduce((m, c) => Math.max(m, Math.exp(-Math.pow((t - c[0] + .05) * 9, 2))), 0);
-      f.actors.push({ slot: 0, pos: st.pos, yaw: face(st.pos, target), item: Block.TeamWoolA, walk: stridePhase(t, st.speed), speed: st.speed, attack: swing * .8, pitch: -.35 });
-      // A second red defender stands guard by the house.
-      f.actors.push({ slot: 3, pos: [-59.2, BW_Y, 6.4], yaw: face([-59.2, BW_Y, 6.4], [-47, BW_Y, 2]), item: Item.IronSword, walk: 0, speed: 0 });
-      return f;
-    }
-    case 'bw-forge': {
-      const f = emptyFrame({ position: vec(mix3([-58.5, 98.8, 5.4], [-62.6, 98.5, 1.6], k)), target: vec(mix3([-67.3, BW_Y + 1, 0.4], [-66.4, BW_Y + 1.1, -5.2], sm((t - 1.7) / 1.1))), fov: 56 });
-      const st = stances(t, [{ at: 0, pos: [-57, BW_Y, 4.5] }, { at: 1.9, pos: [-65.2, BW_Y, .9] }, { at: 2.0, pos: [-65.2, BW_Y, .9] }, { at: 2.6, pos: [-65.3, BW_Y, -4.4] }, { at: 4, pos: [-65.3, BW_Y, -4.4] }]);
-      const toward: V3 = t < 2 ? [-68.5, BW_Y, .5] : [-66.5, BW_Y, -6.5];
-      f.actors.push({ slot: 0, pos: st.pos, yaw: face(st.pos, toward), item: t < 2.2 ? Block.TeamWoolA : Item.DiamondSword, walk: stridePhase(t, st.speed), speed: st.speed, attack: t > 2.2 && t < 2.5 ? Math.sin((t - 2.2) / .3 * Math.PI) * .6 : 0 });
-      // Iron, gold and diamonds fall from the forge, then fly to the player.
-      const spawns: [number, number, number][] = [[Item.IronIngot, .2, 0], [Item.GoldIngot, .8, 1], [Item.IronIngot, 1.3, 2], [Item.DiamondGem, 1.0, 3], [Item.IronIngot, .55, 4], [Item.GoldIngot, 1.5, 5]];
-      for (const [item, at, i] of spawns) {
-        if (t < at) continue;
-        const age = t - at, rest: V3 = [-66.9 - (i % 3) * .55, BW_Y + .42 + Math.max(0, .9 * Math.exp(-age * 3) * Math.abs(Math.cos(age * 7))), -.3 + (i % 2) * 1.1];
-        const grab = 1.9 + i * .04;
-        if (t < grab) f.drops.push({ item, pos: rest, scale: 1 });
-        else if (t < grab + .35) f.drops.push({ item, pos: mix3(rest, add3(st.pos, [0, 1, 0]), sm((t - grab) / .35)), scale: 1 - (t - grab) / .35 * .7 });
-      }
-      return f;
-    }
-    case 'bw-bridge': {
-      const x = t < .2 ? -34.5 : -34.5 - 3.3 * (t - .2), pos: V3 = [x, BW_Y, 2.5];
-      const f = emptyFrame({
-        position: vec(add3(pos, mix3([3.4, 1.9, 9.8], [2.4, 1.7, 9.0], k))),
-        target: vec(add3(pos, [-3.2, -.2, 0])), fov: 50,
-      });
-      const place = s.cues.filter(c => c[1] === 'block').reduce((m, c) => Math.max(m, Math.exp(-Math.pow((t - c[0] - .04) * 11, 2))), 0);
-      f.actors.push({ slot: 1, pos, yaw: Math.PI / 2, item: Block.TeamWoolB, walk: stridePhase(t, 5.2) * 1.3, speed: 5.2, attack: place * .5, pitch: -.5 });
-      return f;
-    }
-    case 'bw-bed': {
-      const f = emptyFrame({
-        position: vec(mix3([-49.6, 98.6, 3.8], [-51.2, 98.4, 3.1], sm(k))), target: vec(mix3([-55.0, BW_Y + .8, .9], [-55.2, BW_Y + .8, .8], sm(k))), fov: 54,
-      });
-      f.bed = t < 2.5;
-      const swings = s.cues.filter(c => c[1] === 'swing').map(c => c[0]);
-      const swing = swings.reduce((m, c) => Math.max(m, t >= c && t < c + .34 ? Math.sin((t - c) / .34 * Math.PI) : 0), 0);
-      const pos: V3 = [-55.3, BW_Y, 2.2];
-      f.actors.push({ slot: 1, pos, yaw: face(pos, [-55.3, BW_Y, .5]), item: Item.IronPickaxe, walk: 0, speed: 0, attack: swing, pitch: -.4 });
-      // The defender arrives a moment too late.
-      const arrive = stances(t, [{ at: 2.5, pos: [-65, BW_Y, 3.8] }, { at: 3.7, pos: [-58.9, BW_Y, 2.4] }, { at: 4, pos: [-58.9, BW_Y, 2.4] }]);
-      if (t >= 2.5) f.actors.push({ slot: 0, pos: arrive.pos, yaw: face(arrive.pos, [-55.5, BW_Y, .5]), item: Item.IronSword, walk: stridePhase(t, arrive.speed) * 1.5, speed: arrive.speed * 1.5 });
-      f.shake = t >= 2.5 && t < 2.9 ? .09 * Math.exp(-(t - 2.5) * 7) : 0;
-      return f;
-    }
-    case 'bw-fight': {
-      const hitK = (c: number): number => t >= c ? Math.exp(-(t - c) * 6) : 0;
-      const A: V3 = [-51.1 - hitK(.7) * .4 - hitK(1.4) * .4, BW_Y, 2.5];
-      const swingOf = (times: number[]): number => times.reduce((m, c) => Math.max(m, t >= c && t < c + .3 ? Math.sin((t - c) / .3 * Math.PI) : 0), 0);
-      let bpos: V3, tilt: V3 | undefined;
-      if (t < 2.3) bpos = [-48.7 + hitK(.7) * .55 + hitK(1.4) * .55, BW_Y, 2.5];
-      else {
-        const u = t - 2.3;
-        bpos = [-48.7 + .5 + 6.5 * u, BW_Y + 4.6 * u - 8 * u * u, 2.5 + u * .4];
-        tilt = [u * 3.4, 0, u * 1.2];
-      }
-      const follow = sm((t - 2.25) / .8) * .7;
-      const f = emptyFrame({
-        position: vec(mix3([-49.4, 101.6, 8.6], [-43.6, 99.4, 8.4], sm(k * 1.1))),
-        target: vec(mix3([-49.9, BW_Y + 1.1, 2.5], [bpos[0], bpos[1] + .6, bpos[2]], follow)), fov: 52,
-      });
-      f.actors.push({ slot: 0, pos: A, yaw: -Math.PI / 2, item: Item.IronSword, walk: stridePhase(t, 2), speed: 1.5, attack: swingOf([.5, 1.2, 2.0]), pitch: 0 });
-      f.actors.push({ slot: 1, pos: bpos, yaw: Math.PI / 2, item: Item.StoneSword, walk: stridePhase(t, 2), speed: t < 2.3 ? 1.5 : 0, attack: swingOf([.9, 1.7]), tilt });
-      return f;
     }
 
     // ── The Bridge ───────────────────────────────────────────────────────

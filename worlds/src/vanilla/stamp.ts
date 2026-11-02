@@ -1,6 +1,5 @@
 // A 16-bit block canvas for authoring the vanilla venues (pillars, the city,
-// party arenas), packed into per-column runs once built. Same model as the
-// Bedwars Mason, with ids up to BLOCK_ID_LIMIT and caller-chosen bounds.
+// party arenas), packed into per-column runs once built. Supports ids up to BLOCK_ID_LIMIT and caller-chosen bounds.
 
 import { Block } from '../blocks';
 

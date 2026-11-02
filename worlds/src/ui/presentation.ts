@@ -2,7 +2,7 @@ import type { GameMode } from '../net/protocol';
 
 /** Menu labels remain distinct from mode-specific in-match titles. */
 export const MODE_LABELS: Readonly<Record<GameMode, string>> = {
-  duels: 'Duels', bridge: 'The Bridge', parkour: 'Parkour', ratseek: 'Rat and Seek', bedwars: 'Bedwars',
+  duels: 'Duels', bridge: 'The Bridge', parkour: 'Parkour', ratseek: 'Rat and Seek',
   pillars: 'Lucky Pillars', disaster: 'Disaster City', minigames: 'Party Games',
 };
 

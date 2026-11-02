@@ -23,7 +23,7 @@ test('capture rejects incompatible/empty/duplicate flags before browser startup'
   assert.throws(() => expectedFrames(timeline, [3]), /selection/);
   assert.throws(() => expectedFrames({ ...timeline, duration: 4 }), /timeline/);
   assert.throws(() => expectedFrames({ ...timeline, shots: [{ start: NaN, duration: 3 }] }), /timeline/);
-  assert.throws(() => selection('MODES', '', ['bedwars']), /Invalid/);
+  assert.throws(() => selection('MODES', '', ['duels']), /Invalid/);
   assert.throws(() => positiveInteger('port', '', 65535), /port/);
   assert.equal(moduleSpecifier(undefined), process.env.PLAYWRIGHT_MODULE ? moduleSpecifier(process.env.PLAYWRIGHT_MODULE) : 'playwright');
 });
