@@ -854,6 +854,7 @@ export class GameServer {
       id: p.id, username: p.username, skin: p.skin, cosmetics: p.cosmetics,
       x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch, health: p.health, dead: p.dead,
       sneaking: p.sneaking, held: p.held, swing: p.swing, aiming: p.aiming, reloading: p.reloading,
+      ...(this.engProfiles.get(p.id)?.gliding ? { gliding: true } : {}),
     };
   }
 
@@ -1192,10 +1193,12 @@ export class GameServer {
       this.motionClocks.set(p.id, clock);
       const sentAt = Math.max(motion.at, motionSentAt(clock, this.worldTime, msg.ct));
       const b = eng.bounds(), prof = this.engProfiles.get(p.id);
-      const free = p.dead || !!prof && (prof.speed > 1.001 || prof.gravity < 1 || prof.slowFall || prof.levitation > 0 || prof.elytra || prof.boat !== undefined || prof.jump > 0 || prof.scale !== 1);
-      let valid = (eng.canMove(p.id) || p.dead) && msg.x >= b.minX - 4 && msg.x <= b.maxX + 4 && msg.z >= b.minZ - 4 && msg.z <= b.maxZ + 4 &&
+      // Spectators fly through walls: Disaster/Pillars mark them dead, Party Games only hides them.
+      const ghost = p.dead || eng.hidden(p.id);
+      const free = ghost || !!prof && (prof.speed > 1.001 || prof.gravity < 1 || prof.slowFall || prof.levitation > 0 || prof.elytra || prof.boat !== undefined || prof.jump > 0 || prof.scale !== 1);
+      let valid = (eng.canMove(p.id) || ghost) && msg.x >= b.minX - 4 && msg.x <= b.maxX + 4 && msg.z >= b.minZ - 4 && msg.z <= b.maxZ + 4 &&
         msg.y >= b.minY - 40 && msg.y < b.maxY + 40;
-      if (valid && !p.dead) {
+      if (valid && !ghost) {
         valid = this.bodyPathClear(w, p, msg);
         const rise = msg.y - p.y;
         if (!valid && rise > 0 && rise <= .601) {
@@ -2615,6 +2618,7 @@ export class GameServer {
       id: p.id, x: round3(p.x), y: round3(p.y), z: round3(p.z), yaw: round4(p.yaw), pitch: round4(p.pitch), ct: p.ct,
       health: p.health, dead: this.hiddenInWorld(p, w), sneaking: p.sneaking, held: p.held, swing: p.swing,
       aiming: p.aiming, reloading: p.reloading,
+      ...(this.engProfiles.get(p.id)?.gliding ? { gliding: true } : {}),
     };
   }
 

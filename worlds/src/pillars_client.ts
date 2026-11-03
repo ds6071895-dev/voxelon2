@@ -83,7 +83,7 @@ class PillarsPresenter implements ModePresenter {
       if (row.id === me) el.classList.add('you');
       uiEl('b', 'place', el, `#${row.place}`);
       uiEl('span', 'name', el, row.name);
-      uiEl('small', '', el, `${row.kills} K · ${row.items} items${row.legendaries ? ` · ${row.legendaries}★` : ''}`);
+      uiEl('small', '', el, `${row.kills} K · ${row.items} items${row.legendaries ? ` · ${row.legendaries} legendary` : ''}`);
     }
     const actions = uiEl('div', 'v-results-actions', card);
     uiButton(actions, 'Play again', () => this.c.d.replay('pillars'), 'w-btn primary');

@@ -19,9 +19,7 @@ import { BoatRush, BOAT_LAPS } from '../src/minigames/boat';
 import { WhackAMole } from '../src/minigames/whack';
 import { CarnivalShootout } from '../src/minigames/shootout';
 import { TreasureCove, HALF, DEPTH } from '../src/minigames/treasure';
-import { MODELS, PLOTS, blockFor, placePoints, plotFor, sameBlock } from '../src/minigames/copycat';
 import { generate } from '../src/minigames/brain';
-import { mc } from '../src/vanilla/mc_materials';
 import '../src/net/engine_modes';
 
 export function runMinigamesTests(): number {
@@ -78,7 +76,7 @@ export function runMinigamesTests(): number {
 
   t('the selection bag (PartyRulesCheck.selection)', () => {
     const pool: MgEntry[] = MG_GAMES.map((g) => ({ id: g.id, category: g.category }));
-    assert.equal(pool.length, 24);
+    assert.equal(pool.length, 23);
     const rng = mulberry32(42);
     for (const length of MG_LENGTHS) {
       const recent: string[] = [];
@@ -101,7 +99,7 @@ export function runMinigamesTests(): number {
     const recent: string[] = [];
     const seen = new Set<string>();
     for (let match = 0; match < 12; match++) { const p = pick(pool, 3, recent, new Set(), rng); p.forEach((e) => seen.add(e.id)); remember(recent, p); }
-    assert.ok(seen.size >= 24, `every game within 12 three-game matches (saw ${seen.size})`);
+    assert.ok(seen.size >= 23, `every game within 12 three-game matches (saw ${seen.size})`);
     const banned = new Set(pool.slice(0, 15).map((e) => e.id));
     const limited = pick(pool, 8, [], banned, rng);
     assert.ok(limited.length === 8 && limited.every((e) => !banned.has(e.id)));
@@ -121,8 +119,8 @@ export function runMinigamesTests(): number {
       assert.ok(g.name.length <= 16, g.name);
       per[g.category]++;
     }
-    assert.deepEqual(per, { SURVIVAL: 6, RACE: 8, SCORE: 7, BRAIN: 3 });
-    assert.equal(mgPool().length,24);
+    assert.deepEqual(per, { SURVIVAL: 6, RACE: 8, SCORE: 7, BRAIN: 2 });
+    assert.equal(mgPool().length,23);
   });
 
   t('batch-A scaling (PartyScalingCheck)', () => {
@@ -133,11 +131,6 @@ export function runMinigamesTests(): number {
       assert.ok(CarnivalShootout.duckEvery(p) <= CarnivalShootout.duckEvery(Math.max(2, p - 1)));
       assert.ok(CarnivalShootout.targetsPerSpawn(p) >= 2 && WhackAMole.molesPerPop(p) >= 1);
       assert.ok(4 * (TreasureCove.findsPerQuarter(p) + 2) <= HALF * 2 * HALF * 2 * DEPTH / 2);
-      const plots = new Set<number>();
-      for (let i = 0; i < p; i++) { const q = plotFor(i, p); assert.ok(q >= 0 && q < PLOTS && !plots.has(q)); plots.add(q); }
-      for (let rank = 2; rank <= p; rank++) assert.ok(placePoints(rank, p) <= placePoints(rank - 1, p));
-      assert.equal(placePoints(1, p), 5);
-      assert.ok(placePoints(p, p) <= 3);
       assert.ok(CarnivalShootout.targetsPerSpawn(p) / scale(p, 18, 7) / p > .6 / 20 * 0 || true);
     }
   });
@@ -155,15 +148,7 @@ export function runMinigamesTests(): number {
     }
   });
 
-  t('Copycat: model blocks compare by facing, half and axis; Brain Rush questions are sound', () => {
-    for (const model of MODELS) for (const layer of model) for (const row of layer) for (const c of row) {
-      const w = blockFor(c);
-      if (w) assert.ok(sameBlock(mc(w), w), w);
-    }
-    assert.ok(!sameBlock(mc('oak_stairs[facing=east,half=bottom]'), 'oak_stairs[facing=north,half=bottom]'));
-    assert.ok(!sameBlock(mc('oak_slab[type=bottom]'), 'oak_slab[type=top]'));
-    assert.ok(!sameBlock(mc('oak_log[axis=x]'), 'oak_log[axis=y]'));
-    assert.ok(sameBlock(0, null) && !sameBlock(mc('white_wool'), null));
+  t('Brain Rush questions are sound', () => {
     const rng = mulberry32(9);
     for (let i = 0; i < 2000; i++) {
       const q = generate(rng, i % 4);

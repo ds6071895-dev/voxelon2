@@ -196,6 +196,8 @@ export class EntityWorld {
   /** Spawned since the last sync. */
   readonly spawned: Entity[] = [];
   readonly removed: number[] = [];
+  /** Mobs killed since the last sync (a subset of `removed`): clients play the death fall. */
+  readonly died: number[] = [];
 
   spawn(kind: EntityKind, x: number, y: number, z: number, init: Partial<Entity> = {}): Entity {
     const k = KINDS[kind];
@@ -204,7 +206,7 @@ export class EntityWorld {
       onGround: false, inWater: false, age: 0, hp: k.hp ?? 1, maxHp: k.hp ?? 1, flags: 0, timer: 0, data: {},
       dead: false, hurtTime: 0, fire: 0, scale: 1, fall: 0, ...init,
     };
-    if (e.baby) { e.w *= .5; e.h *= .5; }
+    if (e.baby) { e.w *= .5; e.h *= .5; e.flags |= 2; /* ENT_FLAG.baby */ }
     this.all.set(e.id, e);
     this.spawned.push(e);
     return e;

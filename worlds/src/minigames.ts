@@ -527,10 +527,8 @@ export class MinigamesMatch implements ModeEngine {
       out: g && this.phase === 'round' ? [...g.participants].filter((id) => !g.alive.has(id)) : [],
       glowing: this.phase === 'round' ? [...this.sim.players.values()].filter(p=>p.effects.has('glowing')).map(p=>p.id) : [],
       rings: g && this.phase === 'round' ? Object.fromEntries(g.players().map(id=>[id,g.guidance(id)]).filter(([,r])=>r)) : {},
-      leashes: this.phase === 'round' ? [...this.sim.ents.all.values()].flatMap(e=>{
-        const b=typeof e.data.leash==='number'?this.host.body(e.data.leash):null;
-        return b?[{from:[e.x,e.y+.8,e.z] as [number,number,number],to:[b.x,b.y+1,b.z] as [number,number,number]}]:[];
-      }) : [],
+      leashes: this.phase === 'round' ? [...this.sim.ents.all.values()].flatMap(e=>
+        typeof e.data.leash==='number'&&this.host.body(e.data.leash)?[{ent:e.id,holder:e.data.leash as number}]:[]) : [],
       podium: this.podium,
       host: this.leader,
       over: this.over,

@@ -130,7 +130,7 @@ export type MPayload =
   | { k: 'self'; v: SelfView }
   | { k: 'inv'; v: InvView }
   | { k: 'win'; v: WindowView | null }
-  | { k: 'ent'; st: number; spawn?: EntityView[]; u?: number[]; gone?: number[]; reset?: boolean }
+  | { k: 'ent'; st: number; spawn?: EntityView[]; u?: number[]; gone?: number[]; dead?: number[]; reset?: boolean }
   | { k: 'fx'; fx: FxEvent[] }
   | { k: 'title'; title: string; sub: string; color: string; ms: number }
   | { k: 'bar'; text: string; color?: string }

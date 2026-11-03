@@ -237,6 +237,7 @@ export class Sim {
     }
     this.setHp(p, p.hp - dmg);
     if (src.by !== undefined) this.rules.onPlayerHurt?.(id, src, dmg + absorbed);
+    if (src.by !== undefined && src.by !== id && !src.byEntity) this.wolvesJoin(id, src.by);
     return dmg + absorbed;
   }
   private tryTotem(p: VPlayer): boolean {
@@ -430,8 +431,8 @@ export class Sim {
     e.vx = e.vx / 2 + dx * s; e.vz = e.vz / 2 + dz * s; if (e.onGround) e.vy = Math.min(.4, e.vy / 2 + .4);
     if (e.kind === 'wolf' && by !== undefined && by !== e.owner) (e.data.brain as { target?: number } | undefined ?? (e.data.brain = {}) as { target?: number }).target = by;
     // Tamed wolves defend: an owner's attack marks the target for its wolves.
-    if (by !== undefined) for (const w of this.ents.all.values()) if (w.kind === 'wolf' && w.owner === by && w !== e) ((w.data.brain ??= {}) as { target?: number }).target = undefined;
-    if (e.hp <= 0) { this.emit({ f: 'burst', kind: 'poof', x: e.x, y: e.y + .5, z: e.z }); this.ents.remove(e); }
+    if (by !== undefined && e.owner !== by) for (const w of this.ents.all.values()) if (w.kind === 'wolf' && w.owner === by && w !== e) ((w.data.brain ??= {}) as { target?: number }).target = e.id;
+    if (e.hp <= 0) { this.emit({ f: 'burst', kind: 'poof', x: e.x, y: e.y + .5, z: e.z }); this.ents.died.push(e.id); this.ents.remove(e); }
   }
 
   /** Right-click. */
@@ -845,6 +846,15 @@ export class Sim {
     this.sound('tnt_fuse', x, y, z);
     return e;
   }
+  /** Tamed wolves join a fight between players: the victim's wolves go for the
+   *  attacker and the attacker's wolves for the victim (vanilla). */
+  private wolvesJoin(victim: number, attacker: number): void {
+    for (const w of this.ents.all.values()) {
+      if (w.kind !== 'wolf' || w.owner === undefined) continue;
+      const foe = w.owner === victim ? attacker : w.owner === attacker ? victim : undefined;
+      if (foe !== undefined && foe !== w.owner) ((w.data.brain ??= {}) as { target?: number }).target = foe;
+    }
+  }
   spawnMob(kind: EntityKind, x: number, y: number, z: number, by?: number, init: Partial<Entity> = {}): Entity {
     const e = this.ents.spawn(kind, x, y, z, init);
     if (kind === 'wolf' && by !== undefined) {
@@ -1070,7 +1080,7 @@ export class Sim {
         return out;
       },
       hit: (mob, t, dmg, extra) => {
-        if (t.ent) return;
+        if (t.ent) { const m = this.ents.all.get(t.id); if (m) this.hurtEntity(m, dmg, mob.owner, mob.x, mob.z); return; }
         this.damage(t.id, { kind: 'melee', amount: dmg, by: mob.owner ?? mob.id, byEntity: mob.owner === undefined, from: { x: mob.x, z: mob.z }, label: mob.kind });
         this.knock(t.id, mob.x, mob.z, 0, mob.owner ?? mob.id);
         if (extra?.hungerTicks) this.addEffect(t.id, 'hunger', 0, extra.hungerTicks);
@@ -1094,6 +1104,7 @@ export class Sim {
       if (k.mob) {
         tickMob(e, mobCtx);
         if (e.fire > 0) { e.fire--; if (e.fire % 20 === 0) this.hurtEntity(e, 1, undefined, e.x, e.z); }
+        if (e.fire > 0) e.flags |= ENT_FLAG.burning; else e.flags &= ~ENT_FLAG.burning;
         if (e.y < -64) this.ents.remove(e);
         continue;
       }
@@ -1537,6 +1548,7 @@ export class Sim {
     // Entities: spawns and removals now, positions every tick for movers.
     const spawn = this.ents.spawned.splice(0).filter((e) => !e.dead).map((e) => this.ents.view(e));
     const gone = this.ents.removed.splice(0);
+    const dead = this.ents.died.splice(0);
     const u: number[] = [];
     for (const e of this.ents.all.values()) {
       const key = `${e.x.toFixed(2)},${e.y.toFixed(2)},${e.z.toFixed(2)},${e.yaw.toFixed(2)},${e.flags},${e.hp}`;
@@ -1545,7 +1557,7 @@ export class Sim {
       u.push(e.id, Math.round(e.x * 100), Math.round(e.y * 100), Math.round(e.z * 100), Math.round(e.yaw * 100), e.flags, KINDS[e.kind].mob ? Math.ceil(e.hp) : -1);
       e.flags &= ~ENT_FLAG.hurt;
     }
-    if (spawn.length || gone.length || u.length) this.host.broadcast({ k: 'ent', st: this.host.nowMs(), spawn: spawn.length ? spawn : undefined, u: u.length ? u : undefined, gone: gone.length ? gone : undefined });
+    if (spawn.length || gone.length || u.length) this.host.broadcast({ k: 'ent', st: this.host.nowMs(), spawn: spawn.length ? spawn : undefined, u: u.length ? u : undefined, gone: gone.length ? gone : undefined, dead: dead.length ? dead : undefined });
     if (this.fx.length) { this.host.broadcast({ k: 'fx', fx: this.fx }); this.fx = []; }
     for (const p of this.players.values()) {
       if (p.bot) { if (p.invDirty) p.invDirty = false; continue; }

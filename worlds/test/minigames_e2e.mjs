@@ -61,7 +61,7 @@ try {
   // The host sheet: setup page with lengths and game toggles.
   await page.evaluate(() => document.querySelector('.w-card[data-mode="minigames"]').click());
   await page.locator('.mg-card').waitFor({ state: 'visible' });
-  assert.equal(await page.locator('.mg-game').count(), 24, 'all shipped games to toggle');
+  assert.equal(await page.locator('.mg-game').count(), 23, 'all shipped games to toggle');
   await page.locator('.game-format', { hasText: /^5$/ }).click();
   await page.waitForFunction(() => window.__latest.party.party.minigames?.length === 5).catch(async (e) => {
     await shot('00-fail');

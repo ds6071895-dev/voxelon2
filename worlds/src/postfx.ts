@@ -159,7 +159,7 @@ const GRADE_SHADER = {
       // Vibrance: lift the muted majority, leave the already-vivid alone.
       float mx = max(g.r, max(g.g, g.b));
       float mn = min(g.r, min(g.g, g.b));
-      g = clamp(mix(vec3(luma(g)), g, 1.0 + 0.55 * (1.0 - (mx - mn))), 0.0, 1.0);
+      g = clamp(mix(vec3(luma(g)), g, 1.12 + 0.6 * (1.0 - (mx - mn))), 0.0, 1.0);
 
       // NIGHT. The dim majority of the frame drains to silver-blue while the
       // few genuinely bright things — fire, lava, the moon — keep their colour
@@ -175,7 +175,7 @@ const GRADE_SHADER = {
       }
 
       // Vignette.
-      g *= 1.0 - (0.14 + 0.10 * uNight) * smoothstep(0.45, 1.3, r);
+      g *= 1.0 - (0.08 + 0.10 * uNight) * smoothstep(0.55, 1.35, r);
 
       gl_FragColor = vec4(max(g, 0.0), 1.0);
     }
@@ -352,7 +352,7 @@ export class PostFX {
       this.gradePass.uniforms.uGolden.value = this.golden;
       // Nights are exposed up a little: the picture should read as night by
       // colour and contrast, not by being too dark to play.
-      this.gradePass.uniforms.uExposure.value = 1.02 + 0.3 * this.night;
+      this.gradePass.uniforms.uExposure.value = 1.2 + 0.3 * this.night;
     }
     if (this.gradePass) {
       const u = this.gradePass.uniforms;

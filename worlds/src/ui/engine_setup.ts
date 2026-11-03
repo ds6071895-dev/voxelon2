@@ -30,7 +30,7 @@ export class EngineSetupSheet {
     for (const m of party.members) {
       const row = uiEl('div', 'v-results-row', list);
       if (m.id === myId) row.classList.add('you');
-      uiEl('b', 'place', row, m.id === party.leader ? '★' : '·');
+      uiEl('b', 'place', row, '·');
       uiEl('span', 'name', row, m.username);
       uiEl('small', '', row, m.id === party.leader ? 'Host' : '');
     }

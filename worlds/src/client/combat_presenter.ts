@@ -51,7 +51,7 @@ export class CombatPresenter {
     if (!silent) this.audio.hitmarker(killed, amount <= 0);
   }
   eliminated(victim: string): void {
-    this.chip.textContent = `✖ ELIMINATED ${victim}`; this.chip.classList.remove('visible');
+    this.chip.textContent = `ELIMINATED ${victim}`; this.chip.classList.remove('visible');
     void this.chip.offsetWidth; this.chip.style.opacity = '1'; this.chip.classList.add('visible'); this.chipT = 2.2;
   }
   hurt(bite: number): void { this.pulse = Math.min(1, Math.max(this.pulse, .34 + bite / 13)); }

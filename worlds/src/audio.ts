@@ -194,6 +194,27 @@ export class GameAudio {
     return air;
   }
 
+  private rush: { gain: GainNode; filter: BiquadFilterNode } | null = null;
+  /** Wind past your ears while flying an elytra: 0 silent … 1 a full dive.
+   *  One looping noise voice, faded and filtered per frame, never restarted. */
+  airRush(level: number): void {
+    if (!this.ctx || !this.noiseBuf || !this.effectsBus) return;
+    const l = Math.max(0, Math.min(1, level));
+    if (!this.rush) {
+      if (l < 0.01) return;
+      const src = this.ctx.createBufferSource();
+      src.buffer = this.noiseBuf; src.loop = true;
+      const filter = new BiquadFilterNode(this.ctx, { type: 'lowpass', frequency: 300, Q: 0.7 });
+      const gain = new GainNode(this.ctx, { gain: 0 });
+      src.connect(filter).connect(gain).connect(this.effectsBus);
+      src.start();
+      this.rush = { gain, filter };
+    }
+    const t = this.ctx.currentTime;
+    this.rush.gain.gain.setTargetAtTime(l * l * 0.42, t, 0.12);
+    this.rush.filter.frequency.setTargetAtTime(260 + 1500 * l, t, 0.15);
+  }
+
   /** Band-filtered noise burst. */
   private noise(opts: {
     freq: number; dur: number; gain: number; pos?: THREE.Vector3;

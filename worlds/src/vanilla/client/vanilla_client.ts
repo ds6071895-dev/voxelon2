@@ -11,7 +11,8 @@ import type { World } from '../../world';
 import type { Atlas } from '../../textures';
 import type { WorldSpec } from '../../multiverse';
 import type { EngineMode } from '../../net/protocol';
-import { BLOCKS } from '../../blocks';
+import { BLOCKS, Block, collisionBoxes } from '../../blocks';
+import { mergeInto, placeBlock, stationOf, useBlock, type PlaceCtx } from '../block_states';
 import { VMETA } from '../blocks';
 import { VITEM, VI } from '../items';
 import { breakTicks } from '../tools';
@@ -82,6 +83,8 @@ export class VanillaClient {
   presenter: ModePresenter | null = null;
   private selected = -1;
   private placeAt = 0;
+  /** Blocks we placed locally ahead of the server, keyed "x,y,z": what was there before. */
+  private predicted = new Map<string, { x: number; y: number; z: number; was: number; until: number }>();
   private digging: { x: number; y: number; z: number; block: number; start: number; ticks: number; heartbeat: number } | null = null;
   private usingSince = -1;
   private attackAt = 0;
@@ -168,6 +171,7 @@ export class VanillaClient {
       }
       case 'win': this.invUI.setWindow(d.v); if (!d.v) this.d.onPanel(); break;
       case 'ent': this.ents?.apply(d); break;
+      case 'nack': this.unpredict(`${d.x},${d.y},${d.z}`); break;
       case 'fx': for (const f of d.fx) this.fx(f); break;
       case 'title': this.hud.flash(d.title, d.sub, d.color, d.ms); break;
       case 'bar': this.hud.bar(d.text, d.color); break;
@@ -262,6 +266,7 @@ export class VanillaClient {
       const hit = target ? this.blockHit(target, eye, look) : undefined;
       const ride = !p.boat && entHit && this.ents?.hitTargets().find((e) => e.id === entHit!.id)?.kind && ['boat','minecart','sheep'].includes(this.ents!.hitTargets().find((e) => e.id === entHit!.id)!.kind) ? entHit.id : undefined;
       this.d.send({ k: 'use', slot: inv.selected, block: ride === undefined ? hit : undefined, ent: ride, yaw: p.yaw, pitch: p.pitch });
+      if (isBlock && hit && ride === undefined && stack) this.predictPlace(stack, hit, now);
       if (isBlock && hit) this.d.swing();
       if (input.rightClicked && (use === 'bow' || use === 'crossbow' || use === 'trident' || use === 'food' || use === 'drink' || use === 'shield')) this.usingSince = now;
       if (use === 'firework' && p.gliding) p.boostTicks = 22 + Math.floor(Math.random() * 8);
@@ -288,6 +293,51 @@ export class VanillaClient {
     return { x: t.x, y: t.y, z: t.z, nx: t.nx, ny: t.ny, nz: t.nz, hitY };
   }
 
+  /** Show a placed block at once instead of after the server round trip.
+   *  Mirrors Sim.use/placeFrom; the server's edit confirms it, and a refusal
+   *  (nack, or silence for 700 ms) puts the old block back. */
+  private predictPlace(stack: VStack, hit: BlockHit, now: number): void {
+    const w = this.d.world, p = this.d.player;
+    const get = (x: number, y: number, z: number) => w.getBlock(x, y, z);
+    const clicked = get(hit.x, hit.y, hit.z);
+    if (!p.sneaking && (stationOf(clicked) || useBlock(get, hit.x, hit.y, hit.z))) return;
+    const block = VITEM[stack.id]?.block ?? stack.id;
+    if (VMETA[block]?.family === 'tnt') return;
+    const ctx: PlaceCtx = { nx: hit.nx, ny: hit.ny, nz: hit.nz, yaw: p.yaw, hitY: Math.max(0, Math.min(1, hit.hitY)) };
+    let tx = hit.x + hit.nx, ty = hit.y + hit.ny, tz = hit.z + hit.nz;
+    let edits: { x: number; y: number; z: number; block: number }[] | null;
+    const merged = mergeInto(block, clicked, ctx);
+    if (merged !== null) edits = [{ x: hit.x, y: hit.y, z: hit.z, block: merged }];
+    else {
+      if (BLOCKS[clicked]?.replaceable && !BLOCKS[clicked]?.fluid) { tx = hit.x; ty = hit.y; tz = hit.z; }
+      const cur = get(tx, ty, tz);
+      const mergeHere = mergeInto(block, cur, { ...ctx, ny: 1, hitY: 1 });
+      if (mergeHere !== null) edits = [{ x: tx, y: ty, z: tz, block: mergeHere }];
+      else if (cur !== Block.Air && !BLOCKS[cur]?.replaceable && !BLOCKS[cur]?.fluid) return;
+      else edits = placeBlock(block, get, tx, ty, tz, ctx);
+    }
+    if (!edits) return;
+    const hw = p.bodyHalfWidth, h = p.bodyHeight;
+    for (const e of edits) {
+      if (e.y < 0 || e.y > 255) return;
+      if (collisionBoxes(e.block) && p.pos.x + hw > e.x && p.pos.x - hw < e.x + 1 && p.pos.y + h > e.y && p.pos.y < e.y + 1 && p.pos.z + hw > e.z && p.pos.z - hw < e.z + 1) return;
+    }
+    w.beginBatch();
+    for (const e of edits) {
+      const key = `${e.x},${e.y},${e.z}`;
+      const was = this.predicted.get(key)?.was ?? get(e.x, e.y, e.z);
+      this.predicted.set(key, { x: e.x, y: e.y, z: e.z, was, until: now + 700 });
+      w.setBlock(e.x, e.y, e.z, e.block);
+    }
+    w.endBatch();
+  }
+  private unpredict(key: string): void {
+    const g = this.predicted.get(key);
+    if (!g) return;
+    this.predicted.delete(key);
+    this.d.world.setBlock(g.x, g.y, g.z, g.was);
+  }
+
   private dig(t: { x: number; y: number; z: number }, now: number): void {
     const block = this.d.world.getBlock(t.x, t.y, t.z);
     const d = this.digging;
@@ -309,6 +359,7 @@ export class VanillaClient {
   }
   /** A block edit from the server: a broken block clears its crack. */
   noteEdit(x: number, y: number, z: number): void {
+    this.predicted.delete(`${x},${y},${z}`);
     const g = this.digging;
     if (g && g.x === x && g.y === y && g.z === z) { this.digging = null; this.d.clearCrack(); }
   }
@@ -331,6 +382,7 @@ export class VanillaClient {
     }
     if (p.boat && this.rideEnt !== null) this.ents?.hold(this.rideEnt, { x: p.pos.x, y: p.pos.y, z: p.pos.z, yaw: p.boat.yaw });
     this.ents?.update(dt);
+    if (this.predicted.size) { const t = performance.now(); for (const [k, g] of this.predicted) if (t > g.until) this.unpredict(k); }
     this.hud.tick(performance.now());
     // Attack cooldown under the crosshair.
     const speed = attackStats(this.heldStack()).speed;

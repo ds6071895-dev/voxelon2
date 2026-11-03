@@ -10,7 +10,8 @@ import { registerPresenter, type ModePresenter, type VanillaClient } from './van
 import type { SidebarRow } from './vanilla/client/vanilla_hud';
 
 /** Sky hour per weather: noon is 0.25, sunset 0.5. Storms read as late, grey afternoon. */
-const HOUR = { clear: .25, storm: .4, acid: .4, thunder: .43, snow: .35 } as const;
+// Storms dim the sky, but never toward dusk: a wave can last minutes.
+const HOUR = { clear: .25, storm: .33, acid: .33, thunder: .35, snow: .3 } as const;
 const DUSK_HOUR = .475;
 
 const DROPS = 900;
@@ -66,7 +67,7 @@ class DisasterPresenter implements ModePresenter {
     const rows: SidebarRow[] = [];
     for (const a of s.active) {
       const d = disaster(a.id);
-      rows.push({ label: `${d.icon} ${d.label}`, value: formatMatchTime(Math.max(0, a.endsAt - now)), tone: 'bad', you: false });
+      rows.push({ label: d.label, value: formatMatchTime(Math.max(0, a.endsAt - now)), tone: 'bad', you: false });
     }
     // Players: disasters survived so far (a short number, so long names fit).
     rows.push({ label: `${s.players.filter((p) => p.alive).length} alive`, value: 'Survived', tone: 'mute', you: false });

@@ -126,6 +126,9 @@ export class Player {
    *  speed, jump height and step-up height do not (as in vanilla). */
   setBodyScale(scale: number): void {
     const s = Math.max(0.2, Math.min(2, scale));
+    // Called every frame by the vanilla modes: only a real change resets the eye,
+    // or a sneak's eased eye height snaps back up each frame (camera jitter).
+    if (this.height === BASE_HEIGHT * s) return;
     this.halfWidth = BASE_HALF_WIDTH * s;
     this.height = BASE_HEIGHT * s;
     this.eyeStanding = BASE_EYE_STANDING * s;

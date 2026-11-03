@@ -98,8 +98,22 @@ export class Interaction {
   showCrack(x: number, y: number, z: number, progress: number): void {
     const stage = Math.max(0, Math.min(9, Math.floor(progress * 10)));
     this.crackMaterial.map = this.crackTextures[stage];
-    this.crackMesh.position.set(x + 0.5, y + 0.5, z + 0.5);
+    this.fitToBlock(this.crackMesh, x, y, z);
     this.crackMesh.visible = true;
+  }
+  /** Shrink an overlay (crack, outline) to the block's shape: a carpet's crack
+   *  hugs the carpet instead of floating as a full cube over it. */
+  private fitToBlock(o: THREE.Object3D, x: number, y: number, z: number): void {
+    const info = BLOCKS[this.world.getBlock(x, y, z)];
+    let mn: readonly number[] = [0, 0, 0], mx: readonly number[] = [1, 1, 1];
+    if (info?.shape === 'cross') { mn = [.15, 0, .15]; mx = [.85, .85, .85]; }
+    else if (info?.boxes?.length) {
+      const a = [1, 1, 1], b = [0, 0, 0];
+      for (const [lo, hi] of info.boxes) for (let i = 0; i < 3; i++) { a[i] = Math.min(a[i], lo[i]); b[i] = Math.max(b[i], hi[i]); }
+      mn = a; mx = b;
+    }
+    o.scale.set(Math.max(.01, mx[0] - mn[0]), Math.max(.01, mx[1] - mn[1]), Math.max(.01, mx[2] - mn[2]));
+    o.position.set(x + (mn[0] + mx[0]) / 2, y + (mn[1] + mx[1]) / 2, z + (mn[2] + mx[2]) / 2);
   }
   hideCrack(): void { this.crackMesh.visible = false; }
 
@@ -119,7 +133,7 @@ export class Interaction {
     this.target = raycastBlocks(this.world, origin, dir, REACH);
     if (this.target && (!suppressMining || this.alwaysHighlight)) {
       this.highlight.visible = true;
-      this.highlight.position.set(this.target.x + 0.5, this.target.y + 0.5, this.target.z + 0.5);
+      this.fitToBlock(this.highlight, this.target.x, this.target.y, this.target.z);
     } else {
       this.highlight.visible = false;
     }
@@ -155,7 +169,7 @@ export class Interaction {
     }
     const stage = Math.min(9, Math.floor((this.breakProgress / Math.max(1e-3, breakTime)) * 10));
     this.crackMaterial.map = this.crackTextures[stage];
-    this.crackMesh.position.set(t.x + 0.5, t.y + 0.5, t.z + 0.5);
+    this.fitToBlock(this.crackMesh, t.x, t.y, t.z);
     this.crackMesh.visible = true;
   }
 

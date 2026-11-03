@@ -14,7 +14,6 @@ import { WhackAMole, WHACK_ARENA } from './whack';
 import { CarnivalShootout, SHOOTOUT_ARENA } from './shootout';
 import { MemoryMosaic, MEMORY_ARENA } from './memory';
 import { BrainRush, BRAIN_ARENA } from './brain';
-import { CopycatBuilder, COPYCAT_ARENA } from './copycat';
 import { TreasureCove, TREASURE_ARENA } from './treasure';
 
 import { GlacierSpleef } from './spleef';
@@ -44,7 +43,7 @@ const ARENAS: Record<string, ArenaDef> = {
   koth:KINGOFTHEHILL_ARENA,sheep:SHEEPHERD_ARENA,
   red_light: REDLIGHT_ARENA,
   whack: WHACK_ARENA, shootout: SHOOTOUT_ARENA, memory: MEMORY_ARENA,
-  brain: BRAIN_ARENA, copycat: COPYCAT_ARENA, treasure: TREASURE_ARENA,
+  brain: BRAIN_ARENA, treasure: TREASURE_ARENA,
 };
 const FACTORIES: Record<string, (course: number) => Minigame> = {
   spleef: () => new GlacierSpleef(), disco: () => new DiscoDash(), anvil: () => new AnvilPanic(), tnt_run: () => new TntRun(), bow_spleef: () => new BowSpleef(), minecarts: () => new MusicalMinecarts(),
@@ -52,7 +51,7 @@ const FACTORIES: Record<string, (course: number) => Minigame> = {
   maze: seed => new HedgeMaze(seed), lava_climb: seed => new LavaClimb(seed),
   red_light: () => new RedLight(), crumble: seed => new CrumblingRuins(seed), blink: seed => new NeonBlink(seed), lunar: seed => new LunarLeap(seed),
   whack: () => new WhackAMole(), shootout: () => new CarnivalShootout(), memory: () => new MemoryMosaic(),
-  brain: () => new BrainRush(), copycat: () => new CopycatBuilder(), treasure: () => new TreasureCove(),
+  brain: () => new BrainRush(), treasure: () => new TreasureCove(),
 };
 export function createGame(id: string, course = 0): Minigame | null { return FACTORIES[id]?.(course) ?? null; }
 export function arenaOf(id: string): ArenaDef | undefined { return ARENAS[id]; }

@@ -30,6 +30,7 @@ export interface Remote {
   health: number;
   dead: boolean;
   sneaking: boolean;
+  gliding: boolean;
   held: number;
   swing: number;
   aiming: boolean;
@@ -37,12 +38,13 @@ export interface Remote {
 }
 
 type RemotePose = Pick<Remote,
-  'sneaking' | 'held' | 'swing' | 'aiming' | 'reloading'>;
+  'sneaking' | 'gliding' | 'held' | 'swing' | 'aiming' | 'reloading'>;
 
-function poseOf(s: { sneaking?: boolean; held?: number; swing?: number; aiming?: boolean; reloading?: boolean },
+function poseOf(s: { sneaking?: boolean; gliding?: boolean; held?: number; swing?: number; aiming?: boolean; reloading?: boolean },
   prev?: RemotePose): RemotePose {
   return {
     sneaking: s.sneaking === true,
+    gliding: s.gliding === true,
     held: typeof s.held === 'number' ? s.held : 0,
     swing: typeof s.swing === 'number' ? s.swing : prev?.swing ?? 0,
     aiming: s.aiming === true, reloading: s.reloading === true,

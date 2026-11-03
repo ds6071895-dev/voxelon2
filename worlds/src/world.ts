@@ -347,7 +347,7 @@ function applyLightShader(
       // Ambient: up-faces see the whole dome, walls about two thirds of it,
       // undersides only what bounces off the ground.
       float up = litN.y * 0.5 + 0.5;
-      vec3 ambient = uSkyTint * (0.40 + 0.60 * up)
+      vec3 ambient = uSkyTint * (0.52 + 0.58 * up)
         + uSunTint * 0.10 * (1.0 - up) * exposure;
       ambient *= skyK;
       // A little of the aurora's colour reaches open ground.
@@ -376,7 +376,7 @@ function applyLightShader(
       // A touch of vibrance: the atlas art is painted muted so the biome tints
       // can do the talking.
       float lum = voxLuma(lit);
-      lit = max(mix(vec3(lum), lit, 1.24), 0.0);
+      lit = max(mix(vec3(lum), lit, 1.38), 0.0);
       diffuseColor.rgb = lit;
     `;
 

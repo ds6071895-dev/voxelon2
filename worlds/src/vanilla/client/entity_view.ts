@@ -1,33 +1,35 @@
 // Draws the vanilla modes' server entities: dropped items, projectiles, primed
 // TNT, falling blocks, end crystals, lingering clouds and mobs. Positions come
 // from the server at 20 Hz and are eased toward, so motion stays smooth at any
-// frame rate. Mob models are built from shaded boxes in Worlds' own palettes.
+// frame rate. Mob models and their animation live in mob_models.ts.
 
 import * as THREE from 'three';
-import { box, joint } from '../../model_primitives';
+import { box } from '../../model_primitives';
 import { blockCubeGeometry, itemGeometry, itemGeometrySolid } from '../../item_geometry';
 import { BLOCKS } from '../../blocks';
 import { ITEMS } from '../../items';
 import type { Atlas } from '../../textures';
 import { ENT_FLAG, type EntityView } from '../messages';
+import { MOB_KINDS, animateMob, buildMob, mobFlags, type MobRig } from './mob_models';
 
-interface View {
-  id: number; kind: string; group: THREE.Group;
-  target: THREE.Vector3; prev: THREE.Vector3; yaw: number; flags: number; hp?: number;
-  legs: THREE.Object3D[]; arms: THREE.Object3D[]; head?: THREE.Object3D; walk: number; spin: number; age: number;
-  fuse?: THREE.Mesh; hurtUntil: number; size?: number;
+interface View extends MobRig {
+  target: THREE.Vector3; prev: THREE.Vector3; hp?: number;
+  spin: number;
+  fuse?: THREE.Mesh; size?: number;
   /** Driven locally (the boat you're sitting in): server moves are ignored. */
   held?: boolean;
 }
 
-const SKIN_ZOMBIE = 0x6aa45a, SHIRT_ZOMBIE = 0x2f8f9a, PANTS = 0x3b3f8f;
-const SKIN_HUSK = 0xb9a072, SHIRT_HUSK = 0x8a7346;
+/** How long a killed mob lies on its side before it vanishes (seconds). */
+const DEATH_S = .9;
 
 export class EntityView3D {
   readonly group = new THREE.Group();
   private readonly views = new Map<number, View>();
   private readonly itemMat: THREE.MeshBasicMaterial;
   private readonly glowMat = new THREE.MeshBasicMaterial({ color: 0xfff1a8, transparent: true, opacity: .5, depthWrite: false });
+  private readonly flameMat = new THREE.MeshBasicMaterial({ color: 0xf2581a, transparent: true, opacity: .85, depthWrite: false });
+  private readonly flameCoreMat = new THREE.MeshBasicMaterial({ color: 0xffd24a, depthWrite: false, transparent: true, opacity: .95 });
 
   constructor(scene: THREE.Scene, private readonly atlas: Atlas) {
     this.group.name = 'vanilla-entities';
@@ -35,7 +37,7 @@ export class EntityView3D {
     scene.add(this.group);
   }
 
-  apply(msg: { spawn?: EntityView[]; u?: number[]; gone?: number[]; reset?: boolean }): void {
+  apply(msg: { spawn?: EntityView[]; u?: number[]; gone?: number[]; dead?: number[]; reset?: boolean }): void {
     if (msg.reset) this.clear();
     for (const e of msg.spawn ?? []) if (!this.views.has(e.id)) this.add(e);
     const u = msg.u ?? [];
@@ -45,11 +47,15 @@ export class EntityView3D {
       v.prev.copy(v.group.position);
       v.target.set(u[i + 1] / 100, u[i + 2] / 100, u[i + 3] / 100);
       v.yaw = u[i + 4] / 100;
-      if ((u[i + 5] & ENT_FLAG.hurt) && !(v.flags & ENT_FLAG.hurt)) v.hurtUntil = performance.now() + 300;
+      const now = performance.now();
+      if ((u[i + 5] & ENT_FLAG.hurt) && !(v.flags & ENT_FLAG.hurt)) v.hurtUntil = now + 350;
+      if ((u[i + 5] & ENT_FLAG.swing) && !(v.flags & ENT_FLAG.swing)) { v.swingAt = now; if (v.kind === 'skeleton') v.aimUntil = now + 1600; }
       v.flags = u[i + 5];
       if (u[i + 6] >= 0) v.hp = u[i + 6];
     }
-    for (const id of msg.gone ?? []) this.remove(id);
+    // Killed mobs fall over first; everything else just goes.
+    for (const id of msg.dead ?? []) { const v = this.views.get(id); if (v && MOB_KINDS.has(v.kind) && v.dying === undefined) v.dying = 0; }
+    for (const id of msg.gone ?? []) if (this.views.get(id)?.dying === undefined) this.remove(id);
   }
 
   /** Pose an entity locally each frame (your own boat), or hand it back to the server (null). */
@@ -63,13 +69,22 @@ export class EntityView3D {
     v.yaw = at.yaw; v.group.rotation.y = at.yaw;
   }
 
+  /** Where a lead ties onto an entity (a sheep's neck), in world space. */
+  tiePoint(id: number, out: THREE.Vector3): THREE.Vector3 | null {
+    const v = this.views.get(id);
+    if (!v) return null;
+    if (v.head) { v.group.updateMatrixWorld(true); return v.head.localToWorld(out.set(0, -.12, .02)); }
+    return out.copy(v.group.position).setY(v.group.position.y + .8);
+  }
+
   /** Body positions for client-side aiming (attack rays). */
   hitTargets(): { id: number; x: number; y: number; z: number; w: number; h: number; kind: string }[] {
     const out: { id: number; x: number; y: number; z: number; w: number; h: number; kind: string }[] = [];
     for (const v of this.views.values()) {
       const dims = DIMS[v.kind];
-      if (!dims) continue;
-      out.push({ id: v.id, x: v.group.position.x, y: v.group.position.y, z: v.group.position.z, w: dims[0], h: dims[1], kind: v.kind });
+      if (!dims || v.dying !== undefined) continue;
+      const s = v.baby ? .5 : 1;
+      out.push({ id: v.id, x: v.group.position.x, y: v.group.position.y, z: v.group.position.z, w: dims[0] * s, h: dims[1] * s, kind: v.kind });
     }
     return out;
   }
@@ -88,14 +103,16 @@ export class EntityView3D {
         v.group.children[0].position.y = .15 + Math.sin(v.age * 2.4) * .06;
         continue;
       }
-      if (v.legs.length || v.arms.length) {
-        v.walk += dt * Math.min(moved, 6) * 2.4;
-        const swing = Math.sin(v.walk) * Math.min(1, moved / 2) * .8;
-        v.legs.forEach((l, i) => { l.rotation.x = i % 2 ? swing : -swing; });
-        const attack = (v.flags & ENT_FLAG.swing) ? -1.2 : 0;
-        v.arms.forEach((a, i) => { a.rotation.x = (v.kind === 'zombie' || v.kind === 'husk' ? -1.4 : 0) + (i % 2 ? -swing : swing) * .5 + attack; });
-        const dy = ((v.yaw - v.group.rotation.y + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
-        v.group.rotation.y += dy * Math.min(1, dt * 10);
+      if (MOB_KINDS.has(v.kind)) {
+        if (v.dying !== undefined) {
+          v.dying += dt;
+          if (v.dying >= DEATH_S) { this.remove(v.id); continue; }
+        }
+        v.vy = (v.group.position.y - before.y) / Math.max(dt, 1e-3);
+        mobFlags(v, this.flameMat, this.flameCoreMat);
+        // Front is -z, so a positive x rotation raises an arm or leg forward.
+        animateMob(v, dt, v.dying !== undefined ? 0 : moved, now);
+        continue;
       } else if (v.kind === 'arrow' || v.kind === 'spectral_arrow' || v.kind === 'trident' || v.kind === 'firework') {
         const dir = v.target.clone().sub(v.prev);
         if (dir.lengthSq() > 1e-5) v.group.lookAt(v.group.position.clone().add(dir));
@@ -109,7 +126,6 @@ export class EntityView3D {
         v.group.scale.set(v.size / 3, 1, v.size / 3);
       }
       if (v.fuse) v.fuse.visible = Math.floor(v.age * 6) % 2 === 0;
-      if (v.kind === 'creeper') { const s = (v.flags & ENT_FLAG.fuse) ? 1 + Math.sin(v.age * 20) * .06 + .05 : 1; v.group.scale.setScalar(s); }
       const hurt = now < v.hurtUntil;
       if (v.group.userData.hurt !== hurt) {
         v.group.userData.hurt = hurt;
@@ -133,6 +149,9 @@ export class EntityView3D {
   private remove(id: number): void {
     const v = this.views.get(id);
     if (!v) return;
+    v.glow?.dispose();
+    for (const m of v.mats?.values() ?? []) m.dispose();
+    v.eyes?.dispose();
     v.group.removeFromParent();
     v.group.traverse((o) => {
       const m = o as THREE.Mesh;
@@ -143,7 +162,7 @@ export class EntityView3D {
     this.views.delete(id);
   }
   clear(): void { for (const id of [...this.views.keys()]) this.remove(id); }
-  dispose(): void { this.clear(); this.itemMat.dispose(); this.glowMat.dispose(); this.group.removeFromParent(); }
+  dispose(): void { this.clear(); this.itemMat.dispose(); this.glowMat.dispose(); this.flameMat.dispose(); this.flameCoreMat.dispose(); this.group.removeFromParent(); }
 
   private build(v: View, e: EntityView): void {
     const g = v.group;
@@ -206,54 +225,9 @@ export class EntityView3D {
         g.add(m);
         return;
       }
-      case 'zombie': case 'husk': case 'skeleton': {
-        const baby = !!(e.flags & ENT_FLAG.baby);
-        const s = baby ? .55 : 1;
-        const skel = e.kind === 'skeleton';
-        const skin = skel ? 0xd8d8d0 : e.kind === 'husk' ? SKIN_HUSK : SKIN_ZOMBIE;
-        const shirt = skel ? 0xc6c6be : e.kind === 'husk' ? SHIRT_HUSK : SHIRT_ZOMBIE;
-        const root = joint(g, 0, 0, 0); root.scale.setScalar(s);
-        const legW = skel ? .14 : .24;
-        for (const x of [-.13, .13]) { const l = joint(root, x, .74, 0); tinted(box(l, legW, .74, legW, skel ? skin : PANTS, 0, -.37, 0)); v.legs.push(l); }
-        tinted(box(root, .5, .74, skel ? .2 : .26, shirt, 0, 1.11, 0));
-        for (const x of [-.37, .37]) { const a = joint(root, x, 1.42, 0); tinted(box(a, legW, .72, legW, skin, 0, -.32, 0)); v.arms.push(a); }
-        const h = joint(root, 0, 1.48, 0); tinted(box(h, .5, .5, .5, skin, 0, .25, 0)); v.head = h;
-        box(h, .12, .06, .02, 0x141414, -.12, .26, -.26); box(h, .12, .06, .02, 0x141414, .12, .26, -.26);
-        if (skel) { const bow = box(v.arms[1], .04, .5, .04, 0x8b6334, 0, -.6, -.1); bow.userData.tint = false; }
+      case 'zombie': case 'husk': case 'skeleton': case 'creeper': case 'silverfish': case 'wolf': case 'sheep': case 'chicken':
+        buildMob(v, e);
         return;
-      }
-      case 'creeper': {
-        for (const [x, z] of [[-.13, -.13], [.13, -.13], [-.13, .13], [.13, .13]]) { const l = joint(g, x, .38, z); tinted(box(l, .24, .38, .24, 0x4f9a3a, 0, -.19, 0)); v.legs.push(l); }
-        tinted(box(g, .5, .76, .3, 0x5fb24a, 0, .76, 0));
-        const h = joint(g, 0, 1.14, 0); tinted(box(h, .5, .5, .5, 0x6cc254, 0, .25, 0));
-        box(h, .12, .12, .02, 0x141414, -.12, .3, -.26); box(h, .12, .12, .02, 0x141414, .12, .3, -.26); box(h, .12, .18, .02, 0x141414, 0, .12, -.26);
-        return;
-      }
-      case 'silverfish': {
-        for (let i = 0; i < 4; i++) tinted(box(g, .3 - i * .04, .22 - i * .03, .22, 0x8e939a, 0, .11, -.2 + i * .14));
-        return;
-      }
-      case 'wolf': {
-        const tamed = !!(e.flags & ENT_FLAG.tamed);
-        for (const [x, z] of [[-.12, -.2], [.12, -.2], [-.12, .25], [.12, .25]]) { const l = joint(g, x, .4, z); tinted(box(l, .12, .4, .12, 0xd4d4d0, 0, -.2, 0)); v.legs.push(l); }
-        tinted(box(g, .36, .3, .7, 0xd8d8d4, 0, .55, 0));
-        const h = joint(g, 0, .7, -.42); tinted(box(h, .36, .3, .3, 0xe0e0dc, 0, 0, 0)); box(h, .16, .12, .16, 0x9a9a96, 0, -.06, -.2);
-        if (tamed) box(g, .38, .08, .1, 0xc23030, 0, .66, -.3);
-        tinted(box(g, .1, .1, .4, 0xd0d0cc, 0, .65, .5));
-        return;
-      }
-      case 'sheep': {
-        for (const [x, z] of [[-.18, -.3], [.18, -.3], [-.18, .3], [.18, .3]]) { const l = joint(g, x, .5, z); tinted(box(l, .14, .5, .14, 0xd8c8b0, 0, -.25, 0)); v.legs.push(l); }
-        tinted(box(g, .7, .55, 1, (e.color ?? 0xf2f2f0), 0, .8, 0));
-        const h = joint(g, 0, .95, -.6); tinted(box(h, .36, .36, .4, 0xd8c8b0, 0, 0, 0));
-        return;
-      }
-      case 'chicken': {
-        for (const x of [-.06, .06]) { const l = joint(g, x, .25, 0); tinted(box(l, .04, .25, .04, 0xd8a030, 0, -.12, 0)); v.legs.push(l); }
-        tinted(box(g, .3, .3, .4, 0xf6f6f2, 0, .4, 0));
-        const h = joint(g, 0, .6, -.2); tinted(box(h, .2, .26, .16, 0xf6f6f2, 0, .1, 0)); box(h, .1, .06, .08, 0xd8a030, 0, .1, -.12); box(h, .06, .08, .04, 0xc23030, 0, .02, -.1);
-        return;
-      }
       case 'boat': {
         // An open oak hull, long along its heading (−z), with a bench and paddles.
         const wood = 0x9c7445, dark = 0x7a5a34;

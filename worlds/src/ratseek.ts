@@ -1825,6 +1825,6 @@ function arrow(yaw: number, dx: number, dz: number): string {
   while (rel > Math.PI) rel -= Math.PI * 2;
   while (rel < -Math.PI) rel += Math.PI * 2;
   // Positive rel turns left (counter-clockwise seen from above).
-  const arrows = ['⬆', '⬉', '⬅', '⬋', '⬇', '⬊', '➡', '⬈'];
+  const arrows = ['↑', '↖', '←', '↙', '↓', '↘', '→', '↗'];
   return arrows[((Math.round(rel / (Math.PI / 4)) % 8) + 8) % 8];
 }

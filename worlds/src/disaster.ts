@@ -162,7 +162,10 @@ export class DisasterMatch implements ModeEngine {
       isTargetable: (id) => this.alive.has(id),
       mobFollowRange: 64,
       mobDamage: 5,
-      mobSpeedMult: () => .3 * Math.min(1.3, this.intensity()) / .23,
+      // The source's 0.3 is a Java speed attribute, not blocks/tick. Adults walk
+      // 3.6 m/s (players walk 4.3) rising to 4.2 in the finale; babies (x1.5)
+      // stay just under a sprint.
+      mobSpeedMult: () => (.18 + .03 * Math.min(1, Math.max(0, (this.intensity() - 1) / (DR.FINALE_INTENSITY - 1)))) / .23,
       damageScale: (id, src) => this.damageScale(id, src),
     };
   }
@@ -253,8 +256,8 @@ export class DisasterMatch implements ModeEngine {
         if (this.matchTicks === at - DR.WARN_TICKS) {
           this.next = pickDisaster(this.rng, this.recent, this.running());
           const d = disaster(this.next);
-          this.host.broadcast({ k: 'title', title: `⚠ ${d.label.toUpperCase()}`, sub: d.tip, color: d.color, ms: 3200 });
-          this.host.broadcast({ k: 'feed', text: `⚠ ${d.label} incoming! ${d.tip}`, tone: 'danger' });
+          this.host.broadcast({ k: 'title', title: d.label.toUpperCase(), sub: d.tip, color: d.color, ms: 3200 });
+          this.host.broadcast({ k: 'feed', text: `${d.label} incoming! ${d.tip}`, tone: 'danger' });
           this.sim.sound('bell');
         }
         if (this.matchTicks === at) {
@@ -264,7 +267,7 @@ export class DisasterMatch implements ModeEngine {
         }
       }
       if (this.matchTicks === DR.FINALE_AT - DR.WARN_TICKS) {
-        this.host.broadcast({ k: 'title', title: '⚠ APOCALYPSE ⚠', sub: 'Everything at once for the last minute!', color: '#c0182a', ms: 4500 });
+        this.host.broadcast({ k: 'title', title: 'APOCALYPSE', sub: 'Everything at once for the last minute!', color: '#c0182a', ms: 4500 });
         this.sim.sound('wither');
       }
       if (this.matchTicks === DR.FINALE_AT) this.beginFinale();
@@ -299,7 +302,7 @@ export class DisasterMatch implements ModeEngine {
     while (this.recent.length > DR.RECENT_MEMORY) this.recent.shift();
     try { d.start(); } catch (e) { console.warn(`Disaster City: ${kind} failed to start`, e); }
     const info = disaster(kind);
-    this.host.broadcast({ k: 'bar', text: `${info.icon} ${info.label}!`, color: info.color });
+    this.host.broadcast({ k: 'bar', text: `${info.label}!`, color: info.color });
     this.sim.sound('thunder');
   }
   /** Duration over: alive players get it counted and 2 hearts back; it winds down. */

@@ -510,7 +510,7 @@ export class RatSeekClient {
       card.classList.toggle('selected', mine);
       card.classList.toggle('full', full);
       card.setAttribute('aria-pressed', mine ? 'true' : 'false');
-      card.querySelector('.rs-class-count')!.textContent = mine ? '✔ Your class' : full ? 'Class is full' : `Picked ${count}/${cap}`;
+      card.querySelector('.rs-class-count')!.textContent = mine ? 'Your class' : full ? 'Class is full' : `Picked ${count}/${cap}`;
     }
   }
 

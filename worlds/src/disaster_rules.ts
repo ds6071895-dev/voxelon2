@@ -5,19 +5,19 @@ export type DisasterKind =
   | 'meteors' | 'tornado' | 'flood' | 'tsunami' | 'acid_rain' | 'earthquake'
   | 'sinkholes' | 'wildfire' | 'zombies' | 'lightning' | 'blizzard' | 'gas_leak';
 
-export const DISASTERS: { id: DisasterKind; label: string; tip: string; color: string; icon: string }[] = [
-  { id: 'meteors', label: 'Meteor Shower', tip: 'Get underground or under a thick roof!', color: '#ffaa00', icon: '☄' },
-  { id: 'tornado', label: 'Tornado', tip: 'Get indoors and stay out of its path!', color: '#aaaaaa', icon: '↺' },
-  { id: 'flood', label: 'Flood', tip: 'The water is rising - get up high!', color: '#5555ff', icon: '≈' },
-  { id: 'tsunami', label: 'Tsunami', tip: 'A giant wave is coming - climb, fast!', color: '#00aaaa', icon: '≋' },
-  { id: 'acid_rain', label: 'Acid Rain', tip: 'Get under any roof!', color: '#55ff55', icon: '☂' },
-  { id: 'earthquake', label: 'Earthquake', tip: 'Get out of the tall buildings!', color: '#ffff55', icon: '≡' },
-  { id: 'sinkholes', label: 'Sinkholes', tip: 'The ground is opening - keep moving!', color: '#555555', icon: '◎' },
-  { id: 'wildfire', label: 'Wildfire', tip: 'Get out of the burning buildings!', color: '#ff5555', icon: '♨' },
-  { id: 'zombies', label: 'Zombie Horde', tip: 'Climb up or fight them off!', color: '#00aa00', icon: '☠' },
-  { id: 'lightning', label: 'Lightning Storm', tip: 'Stay low and stay indoors!', color: '#55ffff', icon: '⚡' },
-  { id: 'blizzard', label: 'Blizzard', tip: 'Get inside before you freeze!', color: '#ffffff', icon: '❄' },
-  { id: 'gas_leak', label: 'Gas Leak', tip: 'Run from the hissing!', color: '#ff55ff', icon: '✹' },
+export const DISASTERS: { id: DisasterKind; label: string; tip: string; color: string }[] = [
+  { id: 'meteors', label: 'Meteor Shower', tip: 'Get underground or under a thick roof!', color: '#ffaa00' },
+  { id: 'tornado', label: 'Tornado', tip: 'Get indoors and stay out of its path!', color: '#aaaaaa' },
+  { id: 'flood', label: 'Flood', tip: 'The water is rising - get up high!', color: '#5555ff' },
+  { id: 'tsunami', label: 'Tsunami', tip: 'A giant wave is coming - climb, fast!', color: '#00aaaa' },
+  { id: 'acid_rain', label: 'Acid Rain', tip: 'Get under any roof!', color: '#55ff55' },
+  { id: 'earthquake', label: 'Earthquake', tip: 'Get out of the tall buildings!', color: '#ffff55' },
+  { id: 'sinkholes', label: 'Sinkholes', tip: 'The ground is opening - keep moving!', color: '#555555' },
+  { id: 'wildfire', label: 'Wildfire', tip: 'Get out of the burning buildings!', color: '#ff5555' },
+  { id: 'zombies', label: 'Zombie Horde', tip: 'Climb up or fight them off!', color: '#00aa00' },
+  { id: 'lightning', label: 'Lightning Storm', tip: 'Stay low and stay indoors!', color: '#55ffff' },
+  { id: 'blizzard', label: 'Blizzard', tip: 'Get inside before you freeze!', color: '#ffffff' },
+  { id: 'gas_leak', label: 'Gas Leak', tip: 'Run from the hissing!', color: '#ff55ff' },
 ];
 export function disaster(id: DisasterKind) { return DISASTERS.find((d) => d.id === id)!; }
 

@@ -37,7 +37,8 @@ export interface MinigamesState {
   out: number[];
   glowing?: number[];
   rings?: Record<number, { x: number; y: number; z: number; nx: number; ny: number; nz: number }>;
-  leashes?: { from: [number,number,number]; to: [number,number,number] }[];
+  /** Led sheep: the entity and the player holding its lead (drawn per frame client-side). */
+  leashes?: { ent: number; holder: number }[];
   podium: { order: MgStanding[]; awards: { title: string; name: string; detail?: string }[] } | null;
   /** The party leader (host); null from the queue. */
   host: number | null;

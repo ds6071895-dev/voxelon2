@@ -17,7 +17,7 @@ function el(tag: string, cls: string, text = ''): HTMLElement {
 const TEAM_CSS = BRIDGE_COLORS.map(color => `#${color.toString(16).padStart(6, '0')}`);
 const ORDINAL = ['1st', '2nd', '3rd', '4th', '5th', '6th'];
 const ordinal = (n: number): string => ORDINAL[n - 1] ?? `${n}th`;
-const hearts = (n: number): string => '♥'.repeat(Math.max(0, n)) + '♡'.repeat(Math.max(0, DRAGON_LIVES - n));
+const hearts = (n: number): string => `${Math.max(0, n)}/${DRAGON_LIVES} lives`;
 const clockOf = (ms: number): string => {
   const secs = Math.max(0, Math.floor(ms / 1000));
   return `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;

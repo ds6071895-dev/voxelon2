@@ -54,6 +54,30 @@ function drawNameTag(canvas: HTMLCanvasElement, name: string, color: string): vo
   ctx.fillStyle = color; ctx.fillText(name, 160, 42);
 }
 
+const GLIDE_PIVOT = new THREE.Vector3();
+/** A pair of membrane wings on the shoulders (pivot at the spine), built on first flight. */
+function buildWings(parent: THREE.Group): THREE.Group {
+  const wings = new THREE.Group();
+  wings.position.set(0, 1.42, 0.16);
+  const membrane = new THREE.MeshBasicMaterial({ color: 0x9a9ab4, side: THREE.DoubleSide });
+  const bone = new THREE.MeshBasicMaterial({ color: 0x5c5a72 });
+  for (const side of [1, -1]) {
+    const pivot = new THREE.Group();
+    // Long edge runs out along ±x from the spine, the membrane hangs down and back.
+    const sheet = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.03, 0.62), membrane);
+    sheet.position.set(side * 0.5, -0.02, 0.26);
+    const spar = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.07, 0.07), bone);
+    spar.position.set(side * 0.5, 0.01, -0.04);
+    const tip = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.04, 0.4), membrane);
+    tip.position.set(side * 1.0, -0.02, 0.42);
+    for (const m of [sheet, spar, tip]) { m.userData.ownGeo = true; pivot.add(m); }
+    wings.add(pivot);
+  }
+  wings.userData.mats = [membrane, bone];
+  parent.add(wings);
+  return wings;
+}
+
 interface Avatar {
   id: number;
   tagColor: string;
@@ -79,6 +103,9 @@ interface Avatar {
   lastSwing: number;
   swingT: number;
   sneakT: number;
+  /** Elytra flight blend (0 standing … 1 lying along the flight), its climb angle and bank. */
+  glideT: number; glideClimb: number; glideRoll: number; lastY: number; lastYaw: number;
+  wings: THREE.Group | null;
   aimT: number;
   reloadT: number;
   flash: THREE.Mesh | null;
@@ -164,6 +191,7 @@ export class RemotePlayers {
       healthCanvas, healthTex, healthSprite, lastHealth: -1,
       dx: remote.tx, dy: remote.ty, dz: remote.tz, dyaw: remote.tyaw, dpitch: remote.tpitch,
       walkPhase: 0, lastX: remote.tx, lastZ: remote.tz,
+      glideT: 0, glideClimb: 0, glideRoll: 0, lastY: remote.ty, lastYaw: remote.tyaw, wings: null,
       strideSpeed: 0, ex: 0, ey: 0, ez: 0, rawSpeed: 0,
       heldId: 0, equipment: null,
       lastSwing: remote.swing | 0, swingT: 1, sneakT: 0, aimT: 0, reloadT: 0,
@@ -250,7 +278,9 @@ export class RemotePlayers {
       av.reloadT = r.reloading ? (av.reloadT + dt / 1.1) % 1 : 0;
       av.sneakT += ((r.sneaking ? 1 : 0) - av.sneakT) * Math.min(1, 12 * dt);
       const hspeed = Math.hypot(av.dx - av.lastX, av.dz - av.lastZ) / Math.max(dt, 1e-4);
-      av.lastX = av.dx; av.lastZ = av.dz;
+      const vspeed = (av.dy - av.lastY) / Math.max(dt, 1e-4);
+      av.lastX = av.dx; av.lastZ = av.dz; av.lastY = av.dy;
+      this.poseGlide(av, r.gliding && !av.rat, hspeed, vspeed, dt);
       av.strideSpeed += (Math.min(hspeed, 9) - av.strideSpeed) * Math.min(1, dt * 9);
       const showHealth = id === this.hovered && av.group.visible;
       av.healthSprite.visible = showHealth;
@@ -261,11 +291,46 @@ export class RemotePlayers {
       av.walkPhase += Math.min(av.strideSpeed, 7) * dt * 2.4;
       if (av.rat) { av.rat.pose(av.strideSpeed, av.walkPhase, performance.now() / 1000); continue; }
       poseAvatar(av.body, av.equipment, {
-        walkPhase: av.walkPhase, speed: av.strideSpeed, sneak: av.sneakT,
+        walkPhase: av.walkPhase, speed: av.strideSpeed * (1 - av.glideT), sneak: av.sneakT * (1 - av.glideT),
         pitch: av.dpitch, attackSwing, aim: av.aimT,
         reload: r.reloading ? Math.sin(av.reloadT * Math.PI) : 0,
       });
     }
+  }
+
+  /** Elytra flight as others see it: the body lies along its flight path (nose
+   *  up in a climb, down in a dive), banks into turns, and the wings fan out
+   *  from the shoulders, beating a little when slow and swept back when fast. */
+  private poseGlide(av: Avatar, gliding: boolean, hspeed: number, vspeed: number, dt: number): void {
+    av.glideT += ((gliding ? 1 : 0) - av.glideT) * Math.min(1, dt * 7);
+    const yawRate = wrap(av.dyaw - av.lastYaw) / Math.max(dt, 1e-4);
+    av.lastYaw = av.dyaw;
+    if (av.glideT < 0.01) {
+      if (av.group.rotation.x !== 0 || av.group.rotation.z !== 0) { av.group.rotation.x = 0; av.group.rotation.z = 0; }
+      if (av.wings) av.wings.visible = false;
+      av.glideRoll = 0;
+      return;
+    }
+    const climb = Math.max(-1.25, Math.min(1.1, Math.atan2(vspeed, Math.max(hspeed, 0.5))));
+    av.glideClimb += (climb - av.glideClimb) * Math.min(1, dt * 6);
+    av.glideRoll += (Math.max(-0.7, Math.min(0.7, -yawRate * 0.22)) - av.glideRoll) * Math.min(1, dt * 5);
+    const g = av.glideT;
+    av.group.rotation.order = 'YXZ';
+    av.group.rotation.x = g * (av.glideClimb - Math.PI / 2);
+    av.group.rotation.z = g * av.glideRoll;
+    // Pivot round the chest instead of the feet, so the body stays on its track.
+    GLIDE_PIVOT.set(0, 0.9, 0).applyEuler(av.group.rotation);
+    av.group.position.set(av.dx - GLIDE_PIVOT.x, av.dy + 0.9 - GLIDE_PIVOT.y, av.dz - GLIDE_PIVOT.z);
+    if (!av.wings) av.wings = buildWings(av.group);
+    av.wings.visible = true;
+    const speed = Math.hypot(hspeed, vspeed);
+    const sweep = Math.min(1, speed / 30);
+    const beat = Math.sin(performance.now() / 1000 * 9 + av.id) * 0.12 * (1 - sweep);
+    const [left, right] = av.wings.children;
+    const spread = g * (1.05 - 0.45 * sweep) + beat;
+    left.rotation.set(-0.15 - 0.35 * sweep, 0.25 + 0.5 * sweep, spread);
+    right.rotation.set(-0.15 - 0.35 * sweep, -0.25 - 0.5 * sweep, -spread);
+    av.wings.scale.setScalar(0.4 + 0.6 * g);
   }
 
   private applyStyle(av: Avatar, st: BodyStyle | null): void {
@@ -355,6 +420,11 @@ export class RemotePlayers {
     av.rat?.dispose();
     av.equipment?.dispose(); av.equipment = null;
     disposeAvatarBody(av.body);
+    if (av.wings) {
+      av.wings.traverse((o) => { if ((o as THREE.Mesh).isMesh) (o as THREE.Mesh).geometry.dispose(); });
+      for (const m of av.wings.userData.mats as THREE.Material[]) m.dispose();
+      av.wings = null;
+    }
     av.nameTex.dispose(); av.sprite.material.dispose();
     av.healthTex.dispose(); av.healthSprite.material.dispose();
   }

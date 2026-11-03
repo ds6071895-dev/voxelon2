@@ -14,7 +14,6 @@ import { FROZEN_INPUT, type PlayerInput } from './input';
 import { findPath } from './vanilla/mobs';
 import { VMETA } from './vanilla/blocks';
 import { VI } from './vanilla/items';
-import { mc } from './vanilla/mc_materials';
 import type { MAction } from './vanilla/messages';
 import type { MinigamesMatch } from './minigames';
 import { BASE_Y } from './minigames/arena';
@@ -22,7 +21,6 @@ import { WhackAMole, holeX, holeZ } from './minigames/whack';
 import { CarnivalShootout, WALL_Z as SHOOT_WALL, DUCK_Z } from './minigames/shootout';
 import { MemoryMosaic, PAD, padX, padZ, SIZES } from './minigames/memory';
 import { BrainRush, CENTRES } from './minigames/brain';
-import { CopycatBuilder, MODELS, SIZE, HEIGHT, blockFor, itemFor, plotX, sameBlock } from './minigames/copycat';
 import { KingOfTheHill } from './minigames/hill';
 import { SheepHerd,penCentre,towardCentre } from './minigames/sheep';
 import { step } from './vanilla/deco';
@@ -48,8 +46,6 @@ import { TreasureCove, HALF, DEPTH } from './minigames/treasure';
 const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
 const lerp = (a: number, b: number, t: number) => a + (b - a) * clamp(t, 0, 1);
 const angleTo = (a: number, b: number) => { let d = b - a; while (d > Math.PI) d -= Math.PI * 2; while (d < -Math.PI) d += Math.PI * 2; return d; };
-/** Worlds yaw for a stair facing (lookFacing inverse). */
-const FACING_YAW: Record<string, number> = { n: 0, w: Math.PI / 2, s: Math.PI, e: -Math.PI / 2 };
 
 export class MgBot {
   skill: number;
@@ -123,7 +119,6 @@ export class MgBot {
       else if (g instanceof CarnivalShootout) this.shootout(g, actions);
       else if (g instanceof MemoryMosaic) this.memory(g, actions);
       else if (g instanceof BrainRush) this.brain(g);
-      else if (g instanceof CopycatBuilder) this.copycat(g, actions);
       else if (g instanceof TreasureCove) this.treasure(g, actions);
       else if (g instanceof KingOfTheHill) this.hill(g,actions);
       else if (g instanceof SheepHerd) this.sheep(g,actions);
@@ -359,107 +354,6 @@ export class MgBot {
     this.walkTo(cx + .5 + this.offset.x, cz + .5 + this.offset.z, .5);
   }
 
-  // ── Copycat Builder ─────────────────────────────────────────────────────
-
-  private copycat(g: CopycatBuilder, actions: (() => void)[]): void {
-    const plot = g.plotOf.get(this.id), stage = g.stageOf.get(this.id) ?? 0;
-    if (plot === undefined || stage >= 3) return;
-    // Stand at the front rim of the plot: every cell within reach.
-    if (!this.walkTo(plotX(plot) + 2, 4.9, .4)) return;
-    if (!this.ready()) return;
-    const model = MODELS[g.picks[stage]];
-    const px = plotX(plot);
-    const helpers = (this.mem.helpers ??= new Set<string>()) as Set<string>;
-    const get = (x: number, y: number, z: number) => this.match.host.getBlock(px + x, BASE_Y + y, z);
-    const inPlot = (x: number, y: number, z: number) => x >= 0 && x < SIZE && z >= 0 && z < SIZE && y >= 1 && y <= HEIGHT;
-    const want = (x: number, y: number, z: number) => blockFor(model[y - 1][z][x]);
-    const k = (x: number, y: number, z: number) => `${x},${y},${z}`;
-    const doWait = () => this.wait(lerp(1.4, .45, this.s) * (.8 + this.rng() * .4));
-    const H = mc('oak_slab[type=top]');
-    let pendingH = false;
-    // 1. Take out anything wrong (helpers stay while a top slab still needs one).
-    for (let y = 1; y <= HEIGHT; y++) for (let z = 0; z < SIZE; z++) for (let x = 0; x < SIZE; x++) {
-      const have = get(x, y, z);
-      if (have !== 0 && !sameBlock(have, want(x, y, z)) && !helpers.has(k(x, y, z))) {
-        if (!this.face(px + x + .5, BASE_Y + y + .5, z + .5, 30)) return;
-        this.click(px + x, BASE_Y + y, z, actions); doWait(); return;
-      }
-    }
-    // 2. Place the next block that has something to be placed against.
-    const side = (x: number, y: number, z: number, slabTop: boolean): [number, number, number, number, number] | null => {
-      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const nx = x + dx, nz = z + dz;
-        if (!inPlot(nx, y, nz)) continue;
-        const n = get(nx, y, nz);
-        if (n === 0) continue;
-        if (VMETA[n]?.family === 'oak_slab' && VMETA[n]!.state.type === 'bottom' && slabTop) continue;
-        if (VMETA[n]?.family === 'oak_slab' && VMETA[n]!.state.type === 'top' && !slabTop) continue;
-        return [nx, nz, -dx, -dz, slabTop ? .75 : .25];
-      }
-      return null;
-    };
-    for (let y = 1; y <= HEIGHT; y++) for (let z = 0; z < SIZE; z++) for (let x = 0; x < SIZE; x++) {
-      const w = want(x, y, z);
-      if (!w || get(x, y, z) !== 0) continue;
-      const isTop = mc(w) === H;
-      const below = y === 1 ? -1 : get(x, y - 1, z);
-      const item = itemFor(model[y - 1][z][x])!;
-      const belowSlab = below > 0 && VMETA[below]?.family === 'oak_slab' && item === 'oak_slab';
-      let hit: [number, number, number, number, number, number, number] | null = null;
-      if (!isTop && below !== 0 && !belowSlab) hit = [x, y - 1, z, 0, 1, 0, 1];
-      else {
-        const s = side(x, y, z, isTop);
-        if (s) hit = [s[0], y, s[1], s[2], 0, s[3], s[4]];
-      }
-      if (!hit) { if (isTop) pendingH = true; continue; }
-      const m = this.prepareItem(item, actions);
-      if (m === 'wait') { doWait(); return; }
-      const fam = VMETA[mc(w)];
-      const facing = fam?.state.facing as string | undefined;
-      const yaw = facing ? FACING_YAW[facing] : this.body.yaw;
-      if (facing && Math.abs(angleTo(this.body.yaw, yaw)) > .2) { this.turn(yaw, .5, 30); return; }
-      this.useOn(px + hit[0], BASE_Y + hit[1], hit[2], hit[3], hit[4], hit[5], hit[6], yaw, actions);
-      doWait();
-      return;
-    }
-    // 3. A top slab with nothing beside it: put a helper block next to it first.
-    if (pendingH) for (let y = 1; y <= HEIGHT; y++) for (let z = 0; z < SIZE; z++) for (let x = 0; x < SIZE; x++) {
-      if (!want(x, y, z) || mc(want(x, y, z)!) !== H || get(x, y, z) !== 0) continue;
-      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const nx = x + dx, nz = z + dz;
-        if (!inPlot(nx, y, nz) || get(nx, y, nz) !== 0) continue;
-        const below = y === 1 ? -1 : get(nx, y - 1, nz);
-        if (below === 0) continue;
-        if (this.prepareItem('birch_planks', actions) === 'wait') { doWait(); return; }
-        helpers.add(k(nx, y, nz));
-        this.useOn(px + nx, BASE_Y + y - 1, nz, 0, 1, 0, 1, this.body.yaw, actions);
-        doWait();
-        return;
-      }
-    }
-    // 4. Helpers whose top slabs are done come out again.
-    for (const h of [...helpers]) {
-      const [x, y, z] = h.split(',').map(Number);
-      if (get(x, y, z) === 0) { helpers.delete(h); continue; }
-      if (!pendingH) {
-        helpers.delete(h);
-        if (!sameBlock(get(x, y, z), want(x, y, z))) { this.click(px + x, BASE_Y + y, z, actions); doWait(); return; }
-      }
-    }
-  }
-  /** Get `item` into the hand: select it, or swap it into the hotbar from the bag. */
-  private prepareItem(item: string, actions: (() => void)[]): 'ok' | 'wait' {
-    const p = this.match.sim.players.get(this.id)!;
-    const id = item === 'birch_planks' ? VI.birch_planks : VI[item];
-    const slot = p.inv.slots.findIndex((s, i) => i < 36 && s?.id === id);
-    if (slot < 0) return 'ok';
-    if (slot < 9) { if (p.selected !== slot) { actions.push(() => this.act({ k: 'select', slot })); return 'wait'; } return 'ok'; }
-    actions.push(() => this.act({ k: 'click', win: 0, slot, button: 0, mode: 'swap', rev: p.rev, hotbar: 8 }));
-    actions.push(() => this.act({ k: 'select', slot: 8 }));
-    return 'wait';
-  }
-
-  // ── Treasure Cove ───────────────────────────────────────────────────────
 
   private treasure(g: TreasureCove, actions: (() => void)[]): void {
     const b = this.body.pos;

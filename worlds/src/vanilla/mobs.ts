@@ -160,14 +160,23 @@ export function tickMob(e: Entity, c: MobCtx): void {
       b.target = best?.id;
     }
     target = c.players().find((p) => p.id === b.target && p.alive);
-  } else if (e.kind === 'wolf' && e.owner !== undefined) {
-    const owner = c.players().find((p) => p.id === e.owner);
-    const foe = b.target !== undefined ? c.players().find((p) => p.id === b.target && p.alive && p.id !== e.owner) : undefined;
-    if (foe) target = foe;
-    else if (owner && owner.alive) {
-      const d = Math.hypot(owner.x - e.x, owner.z - e.z);
-      if (d > 12) { e.x = owner.x; e.y = owner.y; e.z = owner.z; e.vx = e.vz = 0; }
-      else if (d > 2.5) { wantX = owner.x - e.x; wantZ = owner.z - e.z; }
+  } else if (e.kind === 'wolf') {
+    const owner = e.owner === undefined ? undefined : c.players().find((p) => p.id === e.owner);
+    // A foe is whoever hurt the wolf, attacked its owner or was attacked by its owner: a player or a mob.
+    let foe = b.target !== undefined ? c.players().find((p) => p.id === b.target && p.alive && p.id !== e.owner) : undefined;
+    if (!foe && b.target !== undefined) {
+      const m = c.ents.all.get(b.target);
+      if (m && !m.dead && KINDS[m.kind].mob && m !== e && m.owner !== e.owner && Math.hypot(m.x - e.x, m.z - e.z) < 24) foe = { id: m.id, x: m.x, y: m.y, z: m.z, alive: true, ent: true };
+      else b.target = undefined;
+    }
+    if (foe) { target = foe; e.flags |= ENT_FLAG.angry; }
+    else {
+      e.flags &= ~ENT_FLAG.angry;
+      if (owner && owner.alive) {
+        const d = Math.hypot(owner.x - e.x, owner.z - e.z);
+        if (d > 12) { e.x = owner.x; e.y = owner.y; e.z = owner.z; e.vx = e.vz = 0; }
+        else if (d > 2.5) { wantX = owner.x - e.x; wantZ = owner.z - e.z; }
+      }
     }
   }
 
@@ -177,7 +186,7 @@ export function tickMob(e: Entity, c: MobCtx): void {
     if (e.kind === 'skeleton') {
       if (dist > 10) { wantX = dx; wantZ = dz; } else if (dist < 4) { wantX = -dx; wantZ = -dz; }
       else { b.strafe ??= c.rng() < .5 ? 1 : -1; if (c.rng() < .02) b.strafe = -b.strafe; wantX = -dz * b.strafe; wantZ = dx * b.strafe; }
-      if (dist < 15 && c.tick - (b.shotAt ?? -100) >= 40) { b.shotAt = c.tick; c.shoot(e, target.x, target.y + 1.1, target.z); }
+      if (dist < 15 && c.tick - (b.shotAt ?? -100) >= 40) { b.shotAt = b.attackAt = c.tick; e.flags |= ENT_FLAG.swing; c.shoot(e, target.x, target.y + 1.1, target.z); }
     } else if (e.kind === 'creeper') {
       if (dist < 3 && Math.abs(dy) < 2.5) b.fuse = (b.fuse ?? 0) + 1;
       else if (dist > 7) b.fuse = 0;
@@ -206,6 +215,8 @@ export function tickMob(e: Entity, c: MobCtx): void {
       if (nextNode) { wantX = nextNode[0] - e.x; wantZ = nextNode[2] - e.z; if (nextNode[1] > e.y + .5) jump = true; }
     }
   } else if (!wantX && !wantZ) {
+    // Lost its target: a lit creeper calms down instead of hissing forever.
+    if (b.fuse) { b.fuse = Math.max(0, b.fuse - 1); if (!b.fuse) e.flags &= ~ENT_FLAG.fuse; }
     // Wander.
     if (!b.wander || c.rng() < .01) b.wander = c.rng() < .3 ? [e.x + (c.rng() - .5) * 10, e.z + (c.rng() - .5) * 10] : [e.x, e.z];
     wantX = b.wander[0] - e.x; wantZ = b.wander[1] - e.z;
@@ -215,7 +226,8 @@ export function tickMob(e: Entity, c: MobCtx): void {
 
   const len = Math.hypot(wantX, wantZ);
   const s = target || e.kind === 'wolf' ? speed : speed * .5;
-  if (len > .01) { e.yaw = Math.atan2(-wantX, -wantZ); }
+  // Skeletons strafe and back off while keeping their bow on the target.
+  if (len > .01 && !(target && e.kind === 'skeleton')) { e.yaw = Math.atan2(-wantX, -wantZ); }
   const ax = len > .01 ? wantX / len * s : 0, az = len > .01 ? wantZ / len * s : 0;
   // Ground control blends toward the wished velocity; air keeps momentum.
   const ctrl = e.onGround ? .5 : .05;

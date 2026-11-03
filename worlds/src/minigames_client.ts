@@ -31,9 +31,12 @@ class MinigamesPresenter implements ModePresenter {
   private resultsKey = '';
   private finalAt = 0;
   private readonly guides = new THREE.Group();
+  /** Lead ropes, rebuilt each frame between the sheep's neck and the holder's hand. */
+  private readonly leads = new THREE.Group();
+  private ropeMat: THREE.MeshBasicMaterial | null = null;
 
   constructor(private readonly c: VanillaClient) {
-    c.d.scene.add(this.guides);
+    c.d.scene.add(this.guides); c.d.scene.add(this.leads);
     c.d.setStyle((id) => {
       const s = this.s;
       if (!s || !s.standings.some((p) => p.id === id)) return null;
@@ -52,11 +55,6 @@ class MinigamesPresenter implements ModePresenter {
       mesh.position.set(ring.x,ring.y,ring.z);
       mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,1),new THREE.Vector3(ring.nx,ring.ny,ring.nz).normalize());
       this.guides.add(mesh);
-    }
-    for(const leash of s.leashes??[]){
-      const a=new THREE.Vector3(...leash.from),b=new THREE.Vector3(...leash.to),mid=a.clone().lerp(b,.5);mid.y-=.4;
-      const points=new THREE.QuadraticBezierCurve3(a,mid,b).getPoints(12);
-      this.guides.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(points),new THREE.LineBasicMaterial({color:0x80603b})));
     }
     if (prev && prev.phase !== s.phase && s.phase === 'round') this.c.d.sound('go');
     // The briefing: from the moment a game is announced until the whistle.
@@ -79,6 +77,7 @@ class MinigamesPresenter implements ModePresenter {
   frame(): void {
     const s = this.s;
     if (!s) return;
+    this.drawLeads(s);
     if (this.finalAt && !this.final && performance.now() >= this.finalAt) this.showFinal(s);
     const now = this.c.serverNow();
     const left = Math.max(0, s.endsAt - now);
@@ -197,7 +196,51 @@ class MinigamesPresenter implements ModePresenter {
     }
   }
 
+  /** Twisted-hemp rope that hangs in a catenary: slack sags, taut runs straight. */
+  private drawLeads(s: MinigamesState): void {
+    for (const m of this.leads.children as THREE.Mesh[]) m.geometry.dispose();
+    this.leads.clear();
+    const list = s.phase === 'round' ? s.leashes ?? [] : [];
+    if (!list.length) return;
+    if (!this.ropeMat) {
+      const cv = document.createElement('canvas'); cv.width = 4; cv.height = 16;
+      const g = cv.getContext('2d')!;
+      for (let y = 0; y < 16; y++) for (let x = 0; x < 4; x++) {
+        g.fillStyle = ((x + y) % 4 < 2) ? '#9a7446' : '#6e4f2c'; g.fillRect(x, y, 1, 1);
+      }
+      const tex = new THREE.CanvasTexture(cv);
+      tex.magFilter = THREE.NearestFilter; tex.wrapS = tex.wrapT = THREE.RepeatWrapping; tex.colorSpace = THREE.SRGBColorSpace;
+      this.ropeMat = new THREE.MeshBasicMaterial({ map: tex });
+    }
+    const me = this.c.d.myId(), p = this.c.d.player;
+    const a = new THREE.Vector3(), b = new THREE.Vector3();
+    for (const l of list) {
+      if (!this.c.ents?.tiePoint(l.ent, a)) continue;
+      if (l.holder === me) {
+        // Out of the right hand, just below the view.
+        const fx = -Math.sin(p.yaw), fz = -Math.cos(p.yaw);
+        b.set(p.pos.x + fx * .35 - fz * .32, p.eyePosition.y - .55, p.pos.z + fz * .35 + fx * .32);
+      } else {
+        const r = this.c.d.remotePos(l.holder);
+        if (!r) continue;
+        const dx = a.x - r.x, dz = a.z - r.z, d = Math.hypot(dx, dz) || 1;
+        b.set(r.x + dx / d * .32, r.y + 1.0, r.z + dz / d * .32);
+      }
+      const dist = a.distanceTo(b);
+      const sag = Math.max(.06, Math.min(.7, .95 - .16 * dist));
+      const pts: THREE.Vector3[] = [];
+      for (let i = 0; i <= 10; i++) { const t = i / 10; pts.push(a.clone().lerp(b, t).setY(a.y + (b.y - a.y) * t - sag * 4 * t * (1 - t))); }
+      const geo = new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 18, .032, 5, false);
+      const uv = geo.attributes.uv as THREE.BufferAttribute;
+      for (let i = 0; i < uv.count; i++) uv.setX(i, uv.getX(i) * dist * 6);
+      this.leads.add(new THREE.Mesh(geo, this.ropeMat));
+    }
+  }
+
   dispose(): void {
+    for (const m of this.leads.children as THREE.Mesh[]) m.geometry.dispose();
+    this.leads.clear(); this.leads.removeFromParent();
+    if (this.ropeMat) { this.ropeMat.map?.dispose(); this.ropeMat.dispose(); this.ropeMat = null; }
     this.clearGuides();this.guides.removeFromParent();
     this.c.d.setStyle(null);
     this.brief?.remove(); this.brief = null;

@@ -866,6 +866,7 @@ function enterMatchWorld(spec: WorldSpec, kind: MatchKind, mode: GameMode, spawn
 /** Back to the title screen. */
 function exitToMenu(): void {
   screens.menu();
+  audio.airRush(0);
   readiness.reset();
   resetMatchPresentation();
   match = null;
@@ -1055,6 +1056,8 @@ let burstTimer = 0;
 let burstStack: ItemStack | null = null;
 let burstGun: GunInfo | null = null;
 let speedFov = 0;
+let glideBank = 0, glideLastYaw = 0;
+const wrapAngle = (a: number): number => Math.atan2(Math.sin(a), Math.cos(a));
 let zoomTarget = ZOOM_DEFAULT;
 let zoomAmount = 1;
 let fovNoZoom = FOV;
@@ -2034,6 +2037,15 @@ function frame(): void {
   }
   if (controlling && input.touchMode && !duelSpectating) updateMobileAim(dt);
   updateCamera();
+  {
+    // Elytra: bank into turns and hear the air; both fade out on landing.
+    const yawRate = wrapAngle(player.yaw - glideLastYaw) / Math.max(dt, 1e-4);
+    glideLastYaw = player.yaw;
+    const bank = player.gliding && !comfort.reducedMotion ? Math.max(-0.3, Math.min(0.3, -yawRate * 0.06)) : 0;
+    glideBank += (bank - glideBank) * Math.min(1, dt * 5);
+    camera.rotation.z += glideBank;
+    audio.airRush(player.gliding ? (player.vel.length() - 6) / 32 : 0);
+  }
   if (match.kind === 'rs') {
     camera.rotation.z += rsClient.nausea();
     if (rsClient.introCamera(camera)) view = View.First;
